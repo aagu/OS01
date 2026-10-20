@@ -613,11 +613,11 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # ── GUI host tests ───────────────────────────────────────────
 # Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
 # and the GUI-2 input-focus chain.  CASE accepts any registered case
-# (platform, lvgl, devfs-input, input-frame, input-route, input-decode)
-# or all (default: all).
+# (platform, lvgl, devfs-input, input-frame, input-route, input-decode,
+# input-platform) or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-platform
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-platform
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -694,6 +694,25 @@ _test-gui-host-run-input-route:
 _test-gui-host-run-input-decode:
 	@echo "  [test-gui-host] input-decode"
 	$(call os01_submake,hosttests,test-gui-input-decode $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
+# and the platform error convergence.  Runs test_gui_input_platform.elf,
+# which host-compiles the REAL libgui input unit (libgui/src/input.c +
+# libgui/src/input_lvgl.c), the REAL platform and the REAL PS/2 decoder
+# against the recording runtime in
+# hosttests/mock/gui_test_runtime.{c,h} and the REAL LVGL archive, and
+# asserts the spec §5.1 / §5.2 contract: the fixed creation order and
+# its reverse rollback with the first errno, the fd / lease / mapping net
+# counts, the keyboard-only degradation (ENOENT/ENODEV only), the EBUSY
+# second create, the Caps-only decoder seeding, the mouse EIO on a short
+# record, the carried-over keyboard prefix, the EINTR/EAGAIN/legacy-empty
+# reads, the POLLERR/POLLHUP/POLLNVAL error mapping, the 512-item FIFO
+# capacity, the per-device pump budgets, the 256-item delivery budget,
+# the un-merged down/up pair and the owner check that stops the delivery
+# of a static view.
+_test-gui-host-run-input-platform:
+	@echo "  [test-gui-host] input-platform"
+	$(call os01_submake,hosttests,test-gui-input-platform $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2

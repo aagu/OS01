@@ -179,7 +179,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_input_ps2_frame.elf \
     $(TEST_BLD)/test_input_route.elf \
     $(TEST_BLD)/test_gfx_input.elf \
-    $(TEST_BLD)/test_gui_input_decode.elf
+    $(TEST_BLD)/test_gui_input_decode.elf \
+    $(TEST_BLD)/test_gui_input_platform.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -190,7 +191,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-platform
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3460,7 +3461,12 @@ $(GUI_HOST_DIR)/include/uapi/fb.h: $(TESTS_DIR)/kernel/include/uapi/fb.h
 	@mkdir -p $(dir $@)
 	ln -sf $< $@
 
-GUI_HOST_UAPI_HEADERS := $(GUI_HOST_DIR)/include/uapi/gfx.h $(GUI_HOST_DIR)/include/uapi/fb.h
+$(GUI_HOST_DIR)/include/uapi/mouse.h: $(TESTS_DIR)/kernel/include/uapi/mouse.h
+	@mkdir -p $(dir $@)
+	ln -sf $< $@
+
+GUI_HOST_UAPI_HEADERS := $(GUI_HOST_DIR)/include/uapi/gfx.h $(GUI_HOST_DIR)/include/uapi/fb.h \
+                        $(GUI_HOST_DIR)/include/uapi/mouse.h
 
 GUI_HOST_LVGL_CFLAGS := -O2 -g $(filter-out -O0,$(HOST_CFLAGS)) \
     -I$(TESTS_DIR)/thirdpart \
@@ -3503,6 +3509,20 @@ $(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_clien
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
+# The libgui input unit (GUI-2 Task 6).  Every GUI host binary links it,
+# because the platform TU owns the input lifecycle (step / terminal /
+# destroy) and therefore references the input hooks.  The unit itself is
+# device-free until an input is created: a binary that never creates an
+# input keeps the GUI-1 behaviour exactly.
+GUI_INPUT_UNIT_DIR := $(GUI_HOST_DIR)/input_unit
+GUI_INPUT_UNIT_OBJS := $(GUI_INPUT_UNIT_DIR)/input.o \
+                       $(GUI_INPUT_UNIT_DIR)/input_lvgl.o \
+                       $(GUI_INPUT_UNIT_DIR)/input_ps2.o
+
+$(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
 $(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
@@ -3526,6 +3546,9 @@ GUI_PLATFORM_WRAPS := \
     -Wl,--wrap=gfx_release \
     -Wl,--wrap=gfx_close \
     -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=gfx_bind_input \
+    -Wl,--wrap=gfx_unbind_input \
+    -Wl,--wrap=gfx_get_display_state \
     -Wl,--wrap=lv_timer_handler \
     -Wl,--wrap=lv_display_flush_ready \
     -Wl,--wrap=lv_display_create
@@ -3536,6 +3559,7 @@ $(TEST_BLD)/test_gui_platform.elf: \
 		$(GUI_DETERMINISTIC_DIR)/platform.o \
 		$(GUI_DETERMINISTIC_DIR)/tick.o \
 		$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
 		$(GUI_LVGL_ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_PLATFORM_WRAPS) -o $@ $^ -lpthread -lm
@@ -3581,7 +3605,10 @@ GUI_INTEGRATION_WRAPS := \
     -Wl,--wrap=gfx_present \
     -Wl,--wrap=gfx_release \
     -Wl,--wrap=gfx_close \
-    -Wl,--wrap=gfx_sprite_blit
+    -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=gfx_bind_input \
+    -Wl,--wrap=gfx_unbind_input \
+    -Wl,--wrap=gfx_get_display_state
 
 $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o \
@@ -3589,6 +3616,7 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/platform.o \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
 		$(GUI_LVGL_ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
@@ -3789,9 +3817,88 @@ $(TEST_BLD)/test_gui_input_decode.elf: $(TEST_BLD)/test_gui_input_decode.o \
 		$(TEST_BLD)/gui_input_ps2_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
+# GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
+# and the platform error convergence.  The fixture host-compiles the REAL
+# libgui input unit (libgui/src/input.c + libgui/src/input_lvgl.c), the
+# REAL platform (libgui/src/platform.c) and the REAL PS/2 decoder
+# (libgui/src/input_ps2.c) and links them against the recording runtime
+# in hosttests/mock/gui_test_runtime.{c,h} plus the REAL LVGL archive.
+#
+# The assertions observe the production code paths: the creation order
+# and its rollback, the FIFO capacity, the per-device pump budgets, the
+# poll-flag → error mapping and the platform terminal cleanup.  The LVGL
+# adapter hook is wrapped ONLY to inject a create failure; the real hook
+# is linked and used by every other assertion (including the 100
+# create/destroy cycles on the real LVGL release path).
+GUI_INPUT_DIR := $(GUI_HOST_DIR)/input
+
+.PHONY: test-gui-input-platform
+test-gui-input-platform: $(TEST_BLD)/test_gui_input_platform.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(GUI_INPUT_DIR)/test_gui_input_platform.o: $(TEST_CASES)/test_gui_input_platform.c \
+		$(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/tick.o: $(TESTS_DIR)/libgui/src/tick.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+GUI_INPUT_PLATFORM_WRAPS := \
+    -Wl,--wrap=clock_gettime \
+    -Wl,--wrap=calloc \
+    -Wl,--wrap=mmap \
+    -Wl,--wrap=munmap \
+    -Wl,--wrap=open \
+    -Wl,--wrap=read \
+    -Wl,--wrap=close \
+    -Wl,--wrap=gfx_open \
+    -Wl,--wrap=gfx_get_info \
+    -Wl,--wrap=gfx_acquire \
+    -Wl,--wrap=gfx_present \
+    -Wl,--wrap=gfx_release \
+    -Wl,--wrap=gfx_close \
+    -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=gfx_bind_input \
+    -Wl,--wrap=gfx_unbind_input \
+    -Wl,--wrap=gfx_get_display_state \
+    -Wl,--wrap=lv_timer_handler \
+    -Wl,--wrap=lv_display_flush_ready \
+    -Wl,--wrap=lv_display_create \
+    -Wl,--wrap=gui_input_lvgl_create
+
+$(TEST_BLD)/test_gui_input_platform.elf: \
+		$(GUI_INPUT_DIR)/test_gui_input_platform.o \
+		$(GUI_INPUT_DIR)/gui_test_runtime.o \
+		$(GUI_INPUT_DIR)/platform.o \
+		$(GUI_INPUT_DIR)/tick.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_INPUT_DIR)/gfx_client_policy.o \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INPUT_PLATFORM_WRAPS) -o $@ $^ -lpthread -lm
+
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d
 -include $(GUI_INTEGRATION_DIR)/*.d
+-include $(GUI_INPUT_DIR)/*.d
+-include $(GUI_INPUT_UNIT_DIR)/*.d
 
 
 

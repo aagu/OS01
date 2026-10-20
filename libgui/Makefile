@@ -53,7 +53,8 @@ LVGL_C_SOURCES := $(shell find $(LVGL_SRC_DIR) -name '*.c')
 LVGL_OBJS := $(patsubst $(LVGL_SRC_DIR)/%.c,$(BUILD_DIR)/obj/lvgl/%.o,$(LVGL_C_SOURCES))
 
 PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
-                      $(LIBGUI_DIR)/src/input_ps2.c
+                      $(LIBGUI_DIR)/src/input_ps2.c \
+                      $(LIBGUI_DIR)/src/input.c $(LIBGUI_DIR)/src/input_lvgl.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
 
 COMMON_C_SOURCES := $(OS01_ROOT)/user/common/gfx_client_policy.c

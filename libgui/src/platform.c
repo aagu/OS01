@@ -1,5 +1,7 @@
 #include <gui/gui_platform.h>
+#include <gui_input_private.h>
 #include <gui_lvgl_private.h>
+#include <gui_platform_private.h>
 #include <gui_tick.h>
 #include <gfx.h>
 #include "gfx_client_policy.h"
@@ -15,35 +17,84 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-struct gui_platform {
-    gui_mode_t mode;
-    uint32_t width;
-    uint32_t height;
-    uint32_t buffer_lines;
-
-    /* 绘制缓冲（匿名 mmap 分配） */
-    uint32_t *draw_buf;
-    size_t draw_buf_bytes;
-
-    /* 离屏模式影子画幅（匿名 mmap 分配，仅离屏模式有效） */
-    uint32_t *shadow_canvas;
-    size_t shadow_canvas_bytes;
-
-    /* 屏幕模式关联设备 */
-    gfx_handle_t *gfx;
-    bool acquired;
-    bool pending_present;         /* flush 后置位，present 成功后清除 */
-    gui_status_t terminal_status; /* OK 表示仍活跃，其余终止态锁存 */
-    int terminal_errno;
-    int flush_error;              /* flush 无返回值，供 step 收敛错误 */
-    uint64_t retry_deadline_ms;   /* EAGAIN 限频退避截止时间 (CLOCK_MONOTONIC ms) */
-
-    /* 内部关联对象 */
-    lv_display_t *disp;
-    uint32_t flush_count;
-};
+/* struct gui_platform 迁移到 libgui/internal/gui_platform_private.h：
+ * 字段原样保留，只新增 `gui_input_t *input`。 */
 
 static gui_platform_t *g_active_platform = NULL;
+
+/* ── 平台内部辅助（供 libgui/src/input.c 使用） ─────────────────── */
+
+bool gui_platform_alive(const gui_platform_t *platform)
+{
+    if (!platform) {
+        return false;
+    }
+    return platform->terminal_status == GUI_STATUS_OK;
+}
+
+bool gui_platform_input_attached(const gui_platform_t *platform)
+{
+    if (!platform) {
+        return false;
+    }
+    return platform->input != NULL;
+}
+
+void gui_platform_attach_input(gui_platform_t *platform, gui_input_t *input)
+{
+    if (!platform) {
+        return;
+    }
+    platform->input = input;
+}
+
+void gui_platform_detach_input(gui_platform_t *platform, gui_input_t *input)
+{
+    if (!platform) {
+        return;
+    }
+    if (platform->input == input) {
+        platform->input = NULL;
+    }
+}
+
+gfx_handle_t *gui_platform_gfx_handle(gui_platform_t *platform)
+{
+    if (!platform) {
+        return NULL;
+    }
+    return platform->gfx;
+}
+
+int gui_platform_acquire_view(gui_platform_t *platform, bool *acquired_here)
+{
+    if (!platform) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (acquired_here) {
+        *acquired_here = false;
+    }
+    if (!platform->gfx) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (platform->acquired) {
+        /* 平台已经持有显示所有权：本次调用不取得所有权。 */
+        return 0;
+    }
+
+    errno = 0;
+    if (gfx_acquire(platform->gfx) != 0) {
+        errno = errno ? errno : EIO;
+        return -1;
+    }
+    platform->acquired = true;
+    if (acquired_here) {
+        *acquired_here = true;
+    }
+    return 0;
+}
 
 bool gui_platform_checked_mul_size(size_t a, size_t b, size_t *out)
 {
@@ -335,6 +386,11 @@ void gui_platform_destroy(gui_platform_t *platform)
 {
     if (!platform) return;
 
+    /* 仍挂接的输入先销毁：它的 indev 对象还需要活着的 display。 */
+    if (platform->input) {
+        gui_input_destroy(platform->input);   /* 自行解除挂接 */
+    }
+
     if (platform->disp) {
         lv_display_delete(platform->disp);
         platform->disp = NULL;
@@ -419,6 +475,10 @@ uint32_t gui_platform_get_pixel(const gui_platform_t *platform, uint32_t x, uint
 static gui_status_t enter_terminal_state(gui_platform_t *platform, gui_status_t status, int err)
 {
     int saved_errno = err;
+    /* 输入先停止（释放租约与 fd），再释放显示。 */
+    if (platform->input) {
+        gui_input_stop(platform->input, saved_errno);
+    }
     if (platform->gfx) {
         if (platform->acquired) {
             gfx_release(platform->gfx);
@@ -437,7 +497,7 @@ static gui_status_t enter_terminal_state(gui_platform_t *platform, gui_status_t 
 
 static gui_status_t compute_wait_and_return(gui_platform_t *platform, uint32_t lv_delay,
                                             uint64_t t_before_handler, gui_status_t status,
-                                            uint32_t *out_next_delay_ms)
+                                            uint32_t input_delay_ms, uint32_t *out_next_delay_ms)
 {
     uint64_t now = 0;
     if (gui_tick_now_ms(&now) != 0) {
@@ -453,6 +513,11 @@ static gui_status_t compute_wait_and_return(gui_platform_t *platform, uint32_t l
         } else {
             wait_ms = 0;
         }
+    }
+
+    /* 输入的等待上限（FIFO 余项 / 前缀截止）参与取最小值。 */
+    if (input_delay_ms != UINT32_MAX && input_delay_ms < wait_ms) {
+        wait_ms = input_delay_ms;
     }
 
     if (platform->pending_present && platform->retry_deadline_ms != 0) {
@@ -499,6 +564,22 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
         return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
     }
 
+    /*
+     * GUI-2：先检查显示所有权与已锁存的输入错误，再投递 FIFO。
+     * 健康的队列**不会**在 step 里被偷读——设备读取只发生在
+     * gui_input_dispatch() 里。没有输入时本段完全不执行，GUI-1 的
+     * 顺序保持原样。
+     */
+    uint32_t input_delay_ms = UINT32_MAX;
+    if (platform->input) {
+        gui_status_t input_status = gui_input_advance(platform->input, t_before_handler,
+                                                      &input_delay_ms);
+        if (input_status != GUI_STATUS_OK) {
+            int err = errno ? errno : EIO;
+            return enter_terminal_state(platform, input_status, err);
+        }
+    }
+
     uint32_t lv_delay = lv_timer_handler();
 
     if (gui_tick_error() != 0) {
@@ -512,7 +593,8 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
 
     if (platform->mode == GUI_MODE_OFFSCREEN) {
         platform->pending_present = false;
-        return compute_wait_and_return(platform, lv_delay, t_before_handler, GUI_STATUS_OK, out_next_delay_ms);
+        return compute_wait_and_return(platform, lv_delay, t_before_handler, GUI_STATUS_OK,
+                                         input_delay_ms, out_next_delay_ms);
     }
 
     gui_status_t ret_status = GUI_STATUS_OK;
@@ -560,5 +642,6 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
         }
     }
 
-    return compute_wait_and_return(platform, lv_delay, t_before_handler, ret_status, out_next_delay_ms);
+    return compute_wait_and_return(platform, lv_delay, t_before_handler, ret_status,
+                                     input_delay_ms, out_next_delay_ms);
 }
