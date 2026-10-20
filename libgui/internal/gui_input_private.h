@@ -49,6 +49,21 @@ extern "C" {
 #define GUI_INPUT_FOCUS_OUTLINE_WIDTH  2    /* 焦点 outline 宽度（像素） */
 #define GUI_INPUT_FOCUS_OUTLINE_COLOR  0x00FF00u
 
+/* ── 光标与滚轮（spec §7.1） ────────────────────────────────────── */
+
+/*
+ * 程序绘制的箭头光标：固定 12×18，热点在左上角 (0,0)。
+ *
+ * 光标是**程序**画出来的：只画矩形，不引入图片 / 字体资源。
+ */
+#define GUI_INPUT_CURSOR_WIDTH    12
+#define GUI_INPUT_CURSOR_HEIGHT   18
+/* 光标像素颜色（XRGB8888，与离屏画布的读回格式一致）。 */
+#define GUI_INPUT_CURSOR_COLOR    0x00FFFFFFu
+
+/* 垂直滚轮每刻度滚动的像素数（正值 = 内容向下滚，scroll_y 增大）。 */
+#define GUI_INPUT_WHEEL_STEP_PX   32
+
 /*
  * gfx 输入租约 UAPI 的修饰键快照：**bit0 = Caps Lock**，其余位保留为 0
  * （uapi/gfx.h；内核 fb_state 把 route 的 INPUT_ROUTE_MOD_CAPS 折算成
@@ -108,6 +123,9 @@ typedef struct {
     int32_t cursor_x;       /* LVGL 光标的绝对位置 */
     int32_t cursor_y;
     bool    pointer_pressed;/* 左键按下状态 */
+
+    lv_obj_t *cursor;       /* 程序绘制的光标对象（属于 input，不属于 platform） */
+    bool      cursor_shown; /* 光标当前是否可见（没有鼠标源时隐藏） */
 
     uint32_t width;         /* 视口宽（指针位置夹紧用） */
     uint32_t height;        /* 视口高 */
@@ -222,6 +240,14 @@ bool     gui_input_focus_navigate(gui_input_t *input, bool forward);
 bool     gui_input_focus_is_text_input(gui_input_t *input);
 bool     gui_input_focus_refresh(gui_input_t *input);
 
+/*
+ * 控件自身或祖先被隐藏 / 禁用 → 不可用。
+ *
+ * 焦点候选与滚轮目标共用这一条判定：两处的"可用"语义必须一致
+ * （LVGL 的 hit-test 只处理隐藏，禁用只在对象自身上判断）。
+ */
+bool gui_input_focus_object_usable(lv_obj_t *obj);
+
 /* ── input.c ↔ platform.c 的固定 hook ─────────────────────────── */
 
 gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *delay_ms);
@@ -235,6 +261,15 @@ void gui_input_stop(gui_input_t *input, int reason);
  * 接口永远不会进入公共 sysroot。它也只接受合成输入（GUI_INPUT_SYNTHETIC）。
  */
 int gui_input_test_feed_keybytes(gui_input_t *input, const uint8_t *bytes, size_t len);
+
+/*
+ * 私有测试注入：把合成的鼠标事件喂进**同一条** FIFO / 适配层路径。
+ *
+ * 规则与上面的键盘桥接相同：只在宿主构建里存在、只接受合成输入、
+ * 不进入公共 sysroot、不出现在任何公共头文件里。
+ */
+int gui_input_test_feed_mouse(gui_input_t *input, const mouse_event_t *events,
+                              size_t count);
 #endif
 
 #ifdef __cplusplus

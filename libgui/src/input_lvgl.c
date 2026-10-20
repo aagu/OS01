@@ -30,6 +30,12 @@
 #include <gui_lvgl_private.h>
 #include <gui_platform_private.h>
 
+/*
+ * lv_draw_rect() 属于 LVGL 的**公开**绘制头（不是 _private.h）：光标必须
+ * 用程序绘制，不能引入图片 / 字体资源。
+ */
+#include <lvgl/src/draw/lv_draw_rect.h>
+
 #include <errno.h>
 #include <string.h>
 
@@ -153,6 +159,14 @@ static void gui_input_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->point.y = lv->cursor_y;
         data->state = lv->pointer_pressed ? LV_INDEV_STATE_PRESSED
                                           : LV_INDEV_STATE_RELEASED;
+        /*
+         * 本版不用 enc_diff 实现滚轮：LVGL 的 indev_proc_pointer_diff() 只在
+         * last_pressed 存在时处理它，悬停（没有按下）时它什么也不做。因此
+         * 这里恒为 0：没有新样本时只报告当前状态，不会反复返回旧滚轮值。
+         */
+        data->enc_diff = 0;
+        /* 手动排空必须有界：不允许 LVGL 自动继续读取。 */
+        data->continue_reading = 0;
     }
 }
 
@@ -174,6 +188,248 @@ static void lvgl_emit(gui_input_t *input, uint32_t key, lv_indev_state_t state)
     lv->pending_valid = true;
     lv_indev_read(lv->keypad);
     lv->pending_valid = false;
+}
+
+/* ── 光标（程序绘制的箭头） ────────────────────────────────────── */
+
+/*
+ * 画一个 12×18 的箭头。
+ *
+ * 形状：上 8 行是逐行加宽的三角（尖端在左上角 = 热点 (0,0)），下面 10 行是
+ * 2 px 宽的竖杆。整个箭头是**程序**用矩形画出来的：不引入图片 / 字体资源。
+ *
+ * 坐标是**绝对**坐标：lv_draw_rect() 与 LVGL 自己的控件绘制一样使用屏幕
+ * 坐标，因此这里把控件坐标加上局部偏移。
+ */
+static void cursor_draw_cb(lv_event_t *e)
+{
+    lv_obj_t *cursor = lv_event_get_current_target(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_draw_rect_dsc_t dsc;
+    lv_area_t base;
+    int32_t row;
+
+    lv_obj_get_coords(cursor, &base);
+
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.base.layer = layer;
+    dsc.bg_color = lv_color_hex(GUI_INPUT_CURSOR_COLOR);
+    dsc.bg_opa = LV_OPA_COVER;
+    dsc.radius = 0;
+    dsc.border_opa = LV_OPA_TRANSP;
+    dsc.outline_opa = LV_OPA_TRANSP;
+    dsc.shadow_opa = LV_OPA_TRANSP;
+
+    /* 三角头：第 row 行的宽度是 row + 1。 */
+    for (row = 0; row < 8; row++) {
+        lv_area_t area;
+
+        area.x1 = base.x1;
+        area.y1 = base.y1 + row;
+        area.x2 = base.x1 + row;
+        area.y2 = base.y1 + row;
+        lv_draw_rect(layer, &dsc, &area);
+    }
+
+    /* 竖杆。 */
+    {
+        lv_area_t area;
+
+        area.x1 = base.x1;
+        area.y1 = base.y1 + 8;
+        area.x2 = base.x1 + 1;
+        area.y2 = base.y1 + GUI_INPUT_CURSOR_HEIGHT - 1;
+        lv_draw_rect(layer, &dsc, &area);
+    }
+}
+
+/*
+ * 建立光标对象。
+ *
+ * 光标**属于 input**（不是 platform）：platform 只是显示，input 才是输入
+ * 的所有者。光标固定 12×18，热点在左上角 (0,0)，挂在该 display 的 system
+ * layer 上，并且不是 CLICKABLE：它永远不截获 hit-test。
+ */
+static lv_obj_t *cursor_create(lv_display_t *disp, int32_t x, int32_t y)
+{
+    lv_obj_t *cursor;
+
+    if (!disp) {
+        return NULL;
+    }
+    cursor = lv_obj_create(lv_display_get_layer_sys(disp));
+    if (!cursor) {
+        return NULL;
+    }
+
+    /*
+     * 先清样式再设尺寸 / 位置：lv_obj_set_size() / lv_obj_set_pos() 写的是
+     * **样式属性**，先清后设才不会把它们一起清掉。
+     */
+    lv_obj_remove_style_all(cursor);
+    lv_obj_set_style_bg_opa(cursor, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(cursor, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(cursor, 0, LV_PART_MAIN);
+    lv_obj_set_size(cursor, GUI_INPUT_CURSOR_WIDTH, GUI_INPUT_CURSOR_HEIGHT);
+    lv_obj_set_pos(cursor, x, y);
+
+    /* 不参与命中、不参与布局、不参与滚动。 */
+    lv_obj_remove_flag(cursor, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(cursor, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_remove_flag(cursor, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cursor, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_FLOATING);
+
+    lv_obj_add_event_cb(cursor, cursor_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+    return cursor;
+}
+
+/* ── 悬停滚轮 ──────────────────────────────────────────────────── */
+
+/*
+ * 当前指针位置命中的对象。
+ *
+ * 搜索顺序与 LVGL 自己的 pointer_search_obj() 一致：system layer → top
+ * layer → 当前屏幕 → bottom layer。cursor 在 system layer 上，而且不是
+ * CLICKABLE，因此不会截获命中；这里仍然显式排除它（双保险）。
+ */
+static lv_obj_t *wheel_hit_object(gui_input_t *input)
+{
+    lv_display_t *disp = gui_platform_get_lv_display(input->platform);
+    lv_point_t point;
+    lv_obj_t *hit;
+
+    if (!disp) {
+        return NULL;
+    }
+    point.x = input->lvgl.cursor_x;
+    point.y = input->lvgl.cursor_y;
+
+    hit = lv_indev_search_obj(lv_display_get_layer_sys(disp), &point);
+    if (!hit) {
+        hit = lv_indev_search_obj(lv_display_get_layer_top(disp), &point);
+    }
+    if (!hit) {
+        hit = lv_indev_search_obj(lv_display_get_screen_active(disp), &point);
+    }
+    if (!hit) {
+        hit = lv_indev_search_obj(lv_display_get_layer_bottom(disp), &point);
+    }
+    if (!hit) {
+        return NULL;
+    }
+    if (hit == input->lvgl.cursor) {
+        return NULL;   /* cursor 永远不是滚轮目标 */
+    }
+    /* 隐藏 / 禁用（含祖先）不是滚轮目标：与焦点候选共用同一条判定。 */
+    if (!gui_input_focus_object_usable(hit)) {
+        return NULL;
+    }
+    return hit;
+}
+
+/*
+ * 最近的**纵向可滚动**祖先（自身也算）。
+ *
+ * "可滚动" = 有 SCROLLABLE 标志，并且当前确实有纵向余量（内容比视口高，
+ * 或者已经向下滚过一段）。
+ */
+static lv_obj_t *wheel_scroller(lv_obj_t *obj)
+{
+    lv_obj_t *node;
+
+    for (node = obj; node; node = lv_obj_get_parent(node)) {
+        if (!lv_obj_has_flag(node, LV_OBJ_FLAG_SCROLLABLE)) {
+            continue;
+        }
+        /* 余量查询用的是子控件的坐标：布局必须先算出来。 */
+        lv_obj_update_layout(node);
+        if (lv_obj_get_scroll_bottom(node) > 0 || lv_obj_get_scroll_top(node) > 0) {
+            return node;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * 把 obj 纵向滚动 amount 像素，返回真正滚动的像素数（带符号）。
+ *
+ * amount > 0：内容向下滚（scroll_y 增大）；amount < 0：内容向上滚。
+ * 夹紧到当前可用范围：向下用 scroll_bottom，向上用 scroll_top。
+ *
+ * lv_obj_scroll_by() 的 dy 与 scroll_y 方向相反（它写的是内部 scroll.y），
+ * 因此向下滚要传负的 dy。
+ */
+static int32_t wheel_scroll_by(lv_obj_t *obj, int32_t amount)
+{
+    int32_t room;
+    int32_t moved;
+
+    if (amount == 0) {
+        return 0;
+    }
+
+    lv_obj_update_layout(obj);
+
+    if (amount > 0) {
+        room = lv_obj_get_scroll_bottom(obj);
+        if (room < 0) {
+            room = 0;
+        }
+        moved = (amount < room) ? amount : room;
+        if (moved > 0) {
+            lv_obj_scroll_by(obj, 0, -moved, LV_ANIM_OFF);
+        }
+        return moved;
+    }
+
+    room = lv_obj_get_scroll_top(obj);
+    if (room < 0) {
+        room = 0;
+    }
+    moved = (amount < -room) ? -amount : room;
+    if (moved > 0) {
+        lv_obj_scroll_by(obj, 0, moved, LV_ANIM_OFF);
+    }
+    return -moved;
+}
+
+/*
+ * 悬停滚轮：把滚轮刻度换算成像素，滚动命中对象最近的纵向可滚动祖先。
+ *
+ * 本版**不**使用 enc_diff：LVGL 的 indev_proc_pointer_diff() 只在
+ * last_pressed 存在时才处理 enc_diff，悬停（没有按下）时它什么也不做。
+ * 目标选择、范围夹紧与余量传播都在这里自己完成。
+ *
+ * 到了边界，剩余的量交给**父**滚动容器；没有可用目标则完全不动作
+ * （不得改成 slider 的值，也不得改键盘焦点）。
+ */
+static void wheel_scroll(gui_input_t *input, int32_t detents)
+{
+    lv_obj_t *hit;
+    lv_obj_t *scroller;
+    int32_t remaining;
+
+    if (detents == 0) {
+        return;
+    }
+
+    hit = wheel_hit_object(input);
+    if (!hit) {
+        return;   /* 无目标：不动作 */
+    }
+    scroller = wheel_scroller(hit);
+    if (!scroller) {
+        return;   /* 没有可纵向滚动的祖先：不动作 */
+    }
+
+    remaining = detents * GUI_INPUT_WHEEL_STEP_PX;
+    while (scroller && remaining != 0) {
+        int32_t moved = wheel_scroll_by(scroller, remaining);
+
+        remaining -= moved;
+        /* 下一个候选是当前滚动容器的父容器（余量传播）。 */
+        scroller = wheel_scroller(lv_obj_get_parent(scroller));
+    }
 }
 
 /* ── 生命周期 hook ────────────────────────────────────────────── */
@@ -232,6 +488,30 @@ int gui_input_lvgl_create(gui_input_t *input)
     lv_indev_set_read_cb(lv->pointer, gui_input_read_cb);
     lv_indev_set_user_data(lv->pointer, input);
 
+    /*
+     * 光标：属于 input，不属于 platform。
+     *
+     * lv_indev_set_cursor() 负责把它挂到该 display 的 system layer、清掉
+     * CLICKABLE，并在指针移动时自动跟随（热点 (0,0) = 左上角）。
+     */
+    lv->cursor = cursor_create(disp, lv->cursor_x, lv->cursor_y);
+    if (!lv->cursor) {
+        errno = ENOMEM;
+        goto fail;
+    }
+    lv_indev_set_cursor(lv->pointer, lv->cursor);
+    /* lv_indev_set_cursor() 把光标放到 act_point（初始 (0,0)）：重新定位。 */
+    lv_obj_set_pos(lv->cursor, lv->cursor_x, lv->cursor_y);
+
+    /*
+     * 没有鼠标源时隐藏光标（keyboard-only 降级），键盘与焦点仍然可用。
+     * 合成输入的鼠标源是私有注入桥接：它到达时再把光标显示出来。
+     */
+    lv->cursor_shown = gui_input_has_mouse(input);
+    if (!lv->cursor_shown) {
+        lv_obj_add_flag(lv->cursor, LV_OBJ_FLAG_HIDDEN);
+    }
+
     return 0;
 
 fail:
@@ -246,7 +526,7 @@ void gui_input_lvgl_destroy(gui_input_t *input)
     }
 
     gui_input_lvgl_t *lv = &input->lvgl;
-    if (!lv->keypad && !lv->pointer && !lv->group) {
+    if (!lv->keypad && !lv->pointer && !lv->group && !lv->cursor) {
         return;
     }
 
@@ -262,6 +542,11 @@ void gui_input_lvgl_destroy(gui_input_t *input)
         lv_indev_delete(lv->pointer);
         lv->pointer = NULL;
     }
+    /* 光标属于 input：indev 删掉之后单独删除光标对象。 */
+    if (lv->cursor) {
+        lv_obj_delete(lv->cursor);
+        lv->cursor = NULL;
+    }
     gui_input_focus_destroy(input);
     lv->pending_valid = false;
     lv->active_key = 0;
@@ -269,6 +554,7 @@ void gui_input_lvgl_destroy(gui_input_t *input)
     lv->pressed_obj = NULL;
     lv->cancel_pending = false;
     lv->pointer_pressed = false;
+    lv->cursor_shown = false;
 }
 
 void gui_input_lvgl_cancel(gui_input_t *input)
@@ -640,18 +926,31 @@ int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
 
 int gui_input_lvgl_pointer(gui_input_t *input, const mouse_event_t *event)
 {
+    gui_input_lvgl_t *lv = &input->lvgl;
+    int32_t x;
+    int32_t y;
+
     if (!input || !event) {
         return 0;
     }
 
-    gui_input_lvgl_t *lv = &input->lvgl;
+    lv = &input->lvgl;
     if (!lv->pointer) {
         return 0;
     }
 
+    /*
+     * 光标可见性：没有鼠标源时（keyboard-only 降级）光标是隐藏的。收到第一
+     * 个鼠标事件说明存在鼠标源（设备鼠标或合成注入），此时显示光标。
+     */
+    if (!lv->cursor_shown && lv->cursor) {
+        lv->cursor_shown = true;
+        lv_obj_remove_flag(lv->cursor, LV_OBJ_FLAG_HIDDEN);
+    }
+
     /* 绝对位置：相对位移累加后夹到视口内（1 计数 = 1 像素）。 */
-    int32_t x = lv->cursor_x + (int32_t)event->dx;
-    int32_t y = lv->cursor_y + (int32_t)event->dy;
+    x = lv->cursor_x + (int32_t)event->dx;
+    y = lv->cursor_y + (int32_t)event->dy;
     if (x < 0) {
         x = 0;
     }
@@ -667,8 +966,18 @@ int gui_input_lvgl_pointer(gui_input_t *input, const mouse_event_t *event)
     lv->cursor_x = x;
     lv->cursor_y = y;
 
-    /* 左键对应 pointer 的按下 / 释放。 */
+    /* 左键对应 pointer 的按下 / 释放。右 / 中键只报告给原生回调。 */
     lv->pointer_pressed = (event->buttons & 0x01u) != 0;
+
+    /*
+     * 悬停滚轮：左键按住（拖动中）时忽略，避免手势冲突。
+     *
+     * 滚轮值按 mouse_event 原值使用：正值 = 内容向下滚（scroll_y 增大），
+     * 每刻度 32 px。
+     */
+    if (event->wheel != 0 && !lv->pointer_pressed) {
+        wheel_scroll(input, (int32_t)event->wheel);
+    }
 
     lv_indev_read(lv->pointer);
     return 1;

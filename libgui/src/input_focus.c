@@ -49,12 +49,15 @@ bool gui_input_focus_alive(gui_input_t *input, lv_obj_t *obj)
  *
  * LVGL 只在对象自身上检查 DISABLED（禁用父对象不会禁用子对象），隐藏则沿
  * 祖先链判断；这里两条链都查，隐藏 / 禁用的祖先同样排除后代。
+ *
+ * 焦点候选与滚轮目标共用这一条判定（gui_input_focus_object_usable）：两处
+ * 对"可用"的定义必须一致，否则"隐藏 / 禁用的控件不占导航位置"与"滚轮不得
+ * 命中隐藏 / 禁用的控件"就会分叉。
  */
-static bool focus_candidate(gui_input_t *input, lv_obj_t *obj)
+bool gui_input_focus_object_usable(lv_obj_t *obj)
 {
     lv_obj_t *node = obj;
 
-    (void)input;
     while (node) {
         if (lv_obj_has_flag(node, LV_OBJ_FLAG_HIDDEN)) {
             return false;
@@ -65,6 +68,12 @@ static bool focus_candidate(gui_input_t *input, lv_obj_t *obj)
         node = lv_obj_get_parent(node);
     }
     return true;
+}
+
+static bool focus_candidate(gui_input_t *input, lv_obj_t *obj)
+{
+    (void)input;
+    return gui_input_focus_object_usable(obj);
 }
 
 /* ── 焦点视觉 ──────────────────────────────────────────────────── */

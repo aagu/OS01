@@ -1,5 +1,6 @@
 /*
- * test_gui_input_lvgl.c — GUI-2 Task 7：keypad、重复、快捷键与焦点注册
+ * test_gui_input_lvgl.c — GUI-2 Task 7/8：keypad、重复、快捷键、焦点注册，
+ *                         以及指针（光标、拖动、悬停滚轮）
  *
  * 本用例 host-compile **真实**的 libgui 输入单元（libgui/src/input.c +
  * input_lvgl.c + input_focus.c）、真实平台（libgui/src/platform.c）与真实
@@ -35,6 +36,17 @@
  *   快捷键
  *     - 被消费的快捷键不得插入字符；被消费的释放仍然必须释放 LVGL 侧的
  *       活动键，且不得释放别的键。
+ *
+ *   指针（Task 8）
+ *     - 同一步里的左键按下 / 释放只产生一次 click；
+ *     - dx/dy 在 int16 极值下夹边正确（不回绕、不溢出）；
+ *     - slider 拖动释放后继续移动不再改变滑块值；
+ *     - 右 / 中键只报告原生 changed_buttons，不产生 click、不夺焦点；
+ *     - 光标是 12×18 的程序绘制箭头，热点 (0,0)，挂在 system layer 上，
+ *       像素可采样且不拦截 hit-test；
+ *     - 指针静止时长按定时器仍然推进；
+ *     - 悬停滚轮：悬停即滚（每刻度 32 px），内层到边界把余量交给父层，
+ *       无目标不动作，slider 不被改值，拖动中忽略滚轮，移动指针不夺键盘焦点。
  */
 
 #include "test_framework.h"
@@ -262,6 +274,7 @@ typedef struct {
     int released;
     int keys;                    /* 收到 LV_EVENT_KEY 的次数 */
     int cancels;                 /* 收到 LV_EVENT_CANCEL 的次数 */
+    int long_presses;            /* 收到 LV_EVENT_LONG_PRESSED 的次数 */
 } button_probe_t;
 
 static void probe_button_cb(lv_event_t *e)
@@ -283,6 +296,10 @@ static void probe_button_cb(lv_event_t *e)
     }
     if (code == LV_EVENT_KEY) {
         probe->keys++;
+        return;
+    }
+    if (code == LV_EVENT_LONG_PRESSED) {
+        probe->long_presses++;
         return;
     }
     if (code != LV_EVENT_PRESSED) {
@@ -1516,6 +1533,588 @@ TEST_FUNC(test_consumed_release_still_releases_the_lvgl_key)
     fixture_teardown(&fx);
 }
 
+/* ═══════════════════════════════════════════════════════════════
+ *  指针：光标、拖动与悬停滚轮（Task 8）
+ *  ═══════════════════════════════════════════════════════════════ */
+
+/* ── 指针注入 ──────────────────────────────────────────────────── */
+
+/*
+ * 合成鼠标事件进入**同一条** FIFO / 适配层路径。
+ *
+ * 私有注入桥接只在宿主构建（-DOS01_HOST_TEST）里存在，不进入公共 sysroot，
+ * 也不出现在任何公共头文件里。
+ */
+static void feed_mouse(fixture_t *fx, const mouse_event_t *events, size_t count)
+{
+    assert_eq(0, gui_input_test_feed_mouse(fx->input, events, count));
+}
+
+static void feed_mouse_one(fixture_t *fx, uint8_t buttons, int16_t dx, int16_t dy,
+                           int8_t wheel)
+{
+    mouse_event_t ev;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.buttons = buttons;
+    ev.dx = dx;
+    ev.dy = dy;
+    ev.wheel = wheel;
+    feed_mouse(fx, &ev, 1);
+}
+
+/*
+ * 把指针移到控件中心（相对当前绝对位置的位移）。
+ *
+ * 必须先跑一次布局：控件刚建好时坐标还没有算出来（lv_obj_get_coords() 会
+ * 返回无效区域）。
+ */
+static void move_pointer_to(fixture_t *fx, lv_obj_t *obj)
+{
+    lv_area_t area;
+
+    lv_obj_update_layout(obj);
+    lv_obj_get_coords(obj, &area);
+    feed_mouse_one(fx, 0,
+                   (int16_t)((area.x1 + area.x2) / 2 - fx->input->lvgl.cursor_x),
+                   (int16_t)((area.y1 + area.y2) / 2 - fx->input->lvgl.cursor_y),
+                   0);
+}
+
+/* ── 原生指针日志 ──────────────────────────────────────────────── */
+
+#define MAX_POINTER_LOGGED 32
+
+typedef struct {
+    gui_pointer_event_t events[MAX_POINTER_LOGGED];
+    int count;
+} pointer_log_t;
+
+static void log_pointer(const gui_pointer_event_t *event, void *userdata)
+{
+    pointer_log_t *log = (pointer_log_t *)userdata;
+
+    if (log->count < MAX_POINTER_LOGGED) {
+        log->events[log->count] = *event;
+    }
+    log->count++;
+}
+
+/* ── 资源计数 ──────────────────────────────────────────────────── */
+
+static int count_indevs(void)
+{
+    int n = 0;
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+
+    while (indev) {
+        n++;
+        indev = lv_indev_get_next(indev);
+    }
+    return n;
+}
+
+static int count_timers(void)
+{
+    int n = 0;
+    lv_timer_t *timer = lv_timer_get_next(NULL);
+
+    while (timer) {
+        n++;
+        timer = lv_timer_get_next(timer);
+    }
+    return n;
+}
+
+/* ── 控件工厂 ──────────────────────────────────────────────────── */
+
+static lv_obj_t *make_slider(fixture_t *fx, int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    lv_obj_t *slider = lv_slider_create(fx->screen);
+
+    assert_not_null(slider);
+    lv_obj_set_pos(slider, x, y);
+    lv_obj_set_size(slider, w, h);
+    lv_slider_set_range(slider, 0, 100);
+    lv_slider_set_value(slider, 0, LV_ANIM_OFF);
+    return slider;
+}
+
+/* 纯内容块：不可滚动，也没有内边距 / 边框，保证几何可预测。 */
+static lv_obj_t *make_plain_box(lv_obj_t *parent, int32_t x, int32_t y,
+                                int32_t w, int32_t h)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+
+    assert_not_null(box);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(box, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(box, 0, LV_PART_MAIN);
+    lv_obj_set_pos(box, x, y);
+    lv_obj_set_size(box, w, h);
+    return box;
+}
+
+/*
+ * 嵌套滚动容器夹具。
+ *
+ *   outer 200×200，内容高 300 → 向下余量 100 px
+ *   └─ inner 60×60，内容高 92 → 向下余量 32 px（正好一个刻度）
+ *
+ * 几何刻意做成整数：断言可以直接写出期望的 scroll_y。
+ */
+typedef struct {
+    lv_obj_t *outer;
+    lv_obj_t *inner;
+    lv_obj_t *inner_content;
+} scroll_fixture_t;
+
+static void make_scroll_fixture(fixture_t *fx, scroll_fixture_t *sf)
+{
+    sf->outer = lv_obj_create(fx->screen);
+    assert_not_null(sf->outer);
+    lv_obj_set_style_pad_all(sf->outer, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(sf->outer, 0, LV_PART_MAIN);
+    lv_obj_set_scrollbar_mode(sf->outer, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_pos(sf->outer, 0, 0);
+    lv_obj_set_size(sf->outer, 200, 200);
+
+    /* outer 的内容比视口高 100 px。 */
+    (void)make_plain_box(sf->outer, 0, 0, 100, 300);
+
+    sf->inner = lv_obj_create(sf->outer);
+    assert_not_null(sf->inner);
+    lv_obj_set_style_pad_all(sf->inner, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(sf->inner, 0, LV_PART_MAIN);
+    lv_obj_set_scrollbar_mode(sf->inner, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_pos(sf->inner, 20, 20);
+    lv_obj_set_size(sf->inner, 60, 60);
+
+    sf->inner_content = make_plain_box(sf->inner, 0, 0, 40, 92);
+
+    /* 布局必须先算出来：滚动余量查询用的是子控件的坐标。 */
+    lv_obj_update_layout(fx->screen);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  指针：click / 位移 / 拖动 / 按钮
+ *  ═══════════════════════════════════════════════════════════════ */
+
+TEST_FUNC(test_left_down_and_up_in_one_step_make_one_click)
+{
+    fixture_t fx;
+    lv_obj_t *btn;
+    button_probe_t probe;
+
+    fixture_setup(&fx);
+    memset(&probe, 0, sizeof(probe));
+    probe.input = fx.input;
+    btn = make_button(&fx, 20, 20);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_CLICKED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_PRESSED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_RELEASED, &probe);
+
+    /* 先把指针移到按钮上。 */
+    move_pointer_to(&fx, btn);
+    step(&fx);
+
+    /* 同一步里投递按下与释放。 */
+    feed_mouse_one(&fx, 0x01u, 0, 0, 0);
+    feed_mouse_one(&fx, 0x00u, 0, 0, 0);
+    step(&fx);
+
+    assert_eq(1, probe.pressed);
+    assert_eq(1, probe.released);
+    assert_eq(1, probe.clicks);
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_pointer_delta_extremes_clamp_without_wraparound)
+{
+    fixture_t fx;
+
+    fixture_setup(&fx);
+
+    /* int16 最大值：夹到右 / 下边界。 */
+    feed_mouse_one(&fx, 0, INT16_MAX, INT16_MAX, 0);
+    step(&fx);
+    assert_eq((int32_t)SCREEN_W - 1, fx.input->lvgl.cursor_x);
+    assert_eq((int32_t)SCREEN_H - 1, fx.input->lvgl.cursor_y);
+
+    /* int16 最小值：夹回 0，不回绕成大正数。 */
+    feed_mouse_one(&fx, 0, INT16_MIN, INT16_MIN, 0);
+    step(&fx);
+    assert_eq(0, fx.input->lvgl.cursor_x);
+    assert_eq(0, fx.input->lvgl.cursor_y);
+
+    /* 位置始终在视口内。 */
+    assert_true(fx.input->lvgl.cursor_x >= 0);
+    assert_true(fx.input->lvgl.cursor_x < (int32_t)SCREEN_W);
+    assert_true(fx.input->lvgl.cursor_y >= 0);
+    assert_true(fx.input->lvgl.cursor_y < (int32_t)SCREEN_H);
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_slider_stops_dragging_after_the_release)
+{
+    fixture_t fx;
+    lv_obj_t *slider;
+    int32_t value_after_drag;
+
+    fixture_setup(&fx);
+    slider = make_slider(&fx, 20, 20, 200, 20);
+
+    /* 移到滑块上并按下。 */
+    move_pointer_to(&fx, slider);
+    step(&fx);
+    feed_mouse_one(&fx, 0x01u, 0, 0, 0);
+    step(&fx);
+
+    /* 拖动：位移必须超过 LVGL 的 scroll_limit(10) 才会真正开始拖动。 */
+    feed_mouse_one(&fx, 0x01u, 60, 0, 0);
+    step(&fx);
+    value_after_drag = lv_slider_get_value(slider);
+    assert_true(value_after_drag > 0);
+
+    /* 释放。 */
+    feed_mouse_one(&fx, 0x00u, 0, 0, 0);
+    step(&fx);
+
+    /* 释放后继续移动：滑块不再跟随。 */
+    feed_mouse_one(&fx, 0x00u, 60, 0, 0);
+    step(&fx);
+    assert_eq(value_after_drag, lv_slider_get_value(slider));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_right_and_middle_buttons_only_report_native_changes)
+{
+    fixture_t fx;
+    lv_obj_t *btn;
+    button_probe_t probe;
+    pointer_log_t log;
+
+    fixture_setup(&fx);
+    memset(&probe, 0, sizeof(probe));
+    probe.input = fx.input;
+    memset(&log, 0, sizeof(log));
+    gui_input_set_pointer_handler(fx.input, log_pointer, &log);
+
+    btn = make_button(&fx, 20, 20);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_CLICKED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_PRESSED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_RELEASED, &probe);
+
+    /* 移到按钮上（不按左键）。 */
+    move_pointer_to(&fx, btn);
+    step(&fx);
+
+    /* 右键：只报告原生变化，不产生 click / press。 */
+    feed_mouse_one(&fx, 0x02u, 0, 0, 0);
+    step(&fx);
+    assert_eq(0, probe.pressed);
+    assert_eq(0, probe.released);
+    assert_eq(0, probe.clicks);
+    assert_true(log.count >= 1);
+    assert_eq(0x02u, log.events[log.count - 1].buttons);
+    assert_eq(0x02u, log.events[log.count - 1].changed_buttons);
+
+    /* 中键：changed_buttons 只含中键（右键仍然按住）。 */
+    feed_mouse_one(&fx, 0x06u, 0, 0, 0);
+    step(&fx);
+    assert_eq(0, probe.clicks);
+    assert_true(log.count >= 2);
+    assert_eq(0x06u, log.events[log.count - 1].buttons);
+    assert_eq(0x04u, log.events[log.count - 1].changed_buttons);
+
+    /* 全部松开：仍然没有 click。 */
+    feed_mouse_one(&fx, 0x00u, 0, 0, 0);
+    step(&fx);
+    assert_eq(0, probe.pressed);
+    assert_eq(0, probe.released);
+    assert_eq(0, probe.clicks);
+
+    fixture_teardown(&fx);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  光标
+ *  ═══════════════════════════════════════════════════════════════ */
+
+TEST_FUNC(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero)
+{
+    fixture_t fx;
+    lv_obj_t *cursor;
+    lv_area_t area;
+    lv_point_t point;
+    lv_obj_t *hit;
+
+    fixture_setup(&fx);
+
+    /* 光标属于 input，并挂在该 display 的 system layer 上。 */
+    cursor = fx.input->lvgl.cursor;
+    assert_not_null(cursor);
+    if (!cursor) {
+        fixture_teardown(&fx);
+        return;
+    }
+    assert_true(lv_obj_get_parent(cursor) == lv_display_get_layer_sys(fx.disp));
+
+    /*
+     * 没有鼠标源时（keyboard-only 降级）光标是隐藏的：键盘与焦点仍然可用。
+     */
+    assert_true(lv_obj_has_flag(cursor, LV_OBJ_FLAG_HIDDEN));
+
+    /*
+     * 移动指针：这一步同时让布局跑起来（控件的尺寸由布局写进坐标），
+     * 并且第一个鼠标事件证明存在鼠标源 → 光标显示出来。
+     */
+    feed_mouse_one(&fx, 0, 10, 20, 0);
+    step_at(&fx, 50);
+    assert_false(lv_obj_has_flag(cursor, LV_OBJ_FLAG_HIDDEN));
+
+    /* 固定 12×18。 */
+    assert_eq(GUI_INPUT_CURSOR_WIDTH, lv_obj_get_width(cursor));
+    assert_eq(GUI_INPUT_CURSOR_HEIGHT, lv_obj_get_height(cursor));
+
+    /* 热点 (0,0)：对象左上角就是指针位置。 */
+    lv_obj_get_coords(cursor, &area);
+    assert_eq(fx.input->lvgl.cursor_x, area.x1);
+    assert_eq(fx.input->lvgl.cursor_y, area.y1);
+
+    /* 命中透明：光标不拦截 hit-test。 */
+    assert_false(lv_obj_has_flag(cursor, LV_OBJ_FLAG_CLICKABLE));
+    point.x = fx.input->lvgl.cursor_x;
+    point.y = fx.input->lvgl.cursor_y;
+    hit = lv_indev_search_obj(lv_display_get_layer_sys(fx.disp), &point);
+    assert_true(hit != cursor);
+
+    /* 程序绘制的箭头真的画出来了：热点处是光标颜色。 */
+    assert_eq(GUI_INPUT_CURSOR_COLOR,
+              gui_platform_get_pixel(fx.platform, (uint32_t)area.x1, (uint32_t)area.y1));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_stationary_pointer_still_advances_the_long_press_timer)
+{
+    fixture_t fx;
+    lv_obj_t *btn;
+    button_probe_t probe;
+
+    fixture_setup(&fx);
+    memset(&probe, 0, sizeof(probe));
+    probe.input = fx.input;
+    btn = make_button(&fx, 20, 20);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_LONG_PRESSED, &probe);
+
+    /* 移到按钮并按下：之后指针不再移动。 */
+    move_pointer_to(&fx, btn);
+    step(&fx);
+    feed_mouse_one(&fx, 0x01u, 0, 0, 0);
+    step_at(&fx, 0);
+    assert_eq(0, probe.long_presses);
+
+    /* 指针静止，但定时器继续推进：长按仍然触发。 */
+    step_at(&fx, 500);
+    assert_true(probe.long_presses >= 1);
+
+    fixture_teardown(&fx);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  悬停滚轮
+ *  ═══════════════════════════════════════════════════════════════ */
+
+TEST_FUNC(test_hover_wheel_scrolls_the_hovered_container_by_one_detent)
+{
+    fixture_t fx;
+    scroll_fixture_t sf;
+
+    fixture_setup(&fx);
+    make_scroll_fixture(&fx, &sf);
+
+    /* 夹具几何：inner 正好 32 px 余量，outer 有 100 px。 */
+    assert_eq(32, lv_obj_get_scroll_bottom(sf.inner));
+    assert_eq(100, lv_obj_get_scroll_bottom(sf.outer));
+
+    /* 悬停到 inner 上（不点击）。 */
+    move_pointer_to(&fx, sf.inner);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    /* 一个刻度：内容向下滚 32 px。 */
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    /* 反向刻度：滚回来。 */
+    feed_mouse_one(&fx, 0, 0, 0, -1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_hover_wheel_propagates_the_remainder_to_the_parent)
+{
+    fixture_t fx;
+    scroll_fixture_t sf;
+
+    fixture_setup(&fx);
+    make_scroll_fixture(&fx, &sf);
+
+    move_pointer_to(&fx, sf.inner);
+    step(&fx);
+
+    /* 第一刻度：inner 自己滚到底（它的余量正好 32 px）。 */
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    /* 第二刻度：inner 已到边界，剩余的 32 px 交给父滚动容器。 */
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(32, lv_obj_get_scroll_y(sf.outer));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_hover_wheel_without_a_target_does_nothing)
+{
+    fixture_t fx;
+    scroll_fixture_t sf;
+
+    fixture_setup(&fx);
+    make_scroll_fixture(&fx, &sf);
+
+    /* 悬停到 outer 之外的空白：命中的只有屏幕，屏幕没有纵向余量。 */
+    feed_mouse_one(&fx, 0, 140, 80, 0);
+    step(&fx);
+    assert_true(fx.input->lvgl.cursor_x >= 200);
+
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+    assert_eq(0, lv_obj_get_scroll_y(fx.screen));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_hover_wheel_does_not_change_a_slider_value)
+{
+    fixture_t fx;
+    lv_obj_t *slider;
+    int32_t value_before;
+
+    fixture_setup(&fx);
+    slider = make_slider(&fx, 20, 20, 200, 20);
+    value_before = lv_slider_get_value(slider);
+
+    move_pointer_to(&fx, slider);
+    step(&fx);
+
+    /* 悬停滚轮不得变成"修改 slider 值"。 */
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(value_before, lv_slider_get_value(slider));
+    assert_eq(0, lv_obj_get_scroll_y(fx.screen));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_hover_wheel_is_ignored_while_dragging)
+{
+    fixture_t fx;
+    scroll_fixture_t sf;
+
+    fixture_setup(&fx);
+    make_scroll_fixture(&fx, &sf);
+
+    move_pointer_to(&fx, sf.inner);
+    step(&fx);
+
+    /* 左键按住：进入拖动状态。 */
+    feed_mouse_one(&fx, 0x01u, 0, 0, 0);
+    step(&fx);
+
+    /* 拖动中滚轮被忽略，避免手势冲突。 */
+    feed_mouse_one(&fx, 0x01u, 0, 0, 1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.inner));
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    /* 释放后滚轮重新生效。 */
+    feed_mouse_one(&fx, 0x00u, 0, 0, 0);
+    step(&fx);
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.inner));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_moving_the_pointer_does_not_take_the_keyboard_focus)
+{
+    fixture_t fx;
+    lv_obj_t *btn;
+    lv_obj_t *other;
+
+    fixture_setup(&fx);
+    btn = make_button(&fx, 20, 20);
+    other = make_button(&fx, 200, 120);
+
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_true(gui_input_focus_current(fx.input) == btn);
+
+    /* 悬停到另一个按钮上（不点击）：键盘焦点不变。 */
+    move_pointer_to(&fx, other);
+    step(&fx);
+    step_at(&fx, 50);
+    assert_true(gui_input_focus_current(fx.input) == btn);
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_destroy_leaves_no_pointer_resources_behind)
+{
+    fixture_t fx;
+    lv_obj_t *btn;
+    int timers_before;
+
+    fixture_setup(&fx);
+    btn = make_button(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_not_null(fx.input->lvgl.cursor);
+    assert_eq(2, count_indevs());
+    timers_before = count_timers();
+
+    gui_input_destroy(fx.input);
+    fx.input = NULL;
+
+    /* indev 与它们的读定时器都被释放。 */
+    assert_eq(0, count_indevs());
+    assert_eq(timers_before - 2, count_timers());
+
+    /* 光标对象被删除：system layer 上不再有子对象。 */
+    assert_eq(0, lv_obj_get_child_count(lv_display_get_layer_sys(fx.disp)));
+
+    /* 私有焦点组被删除：登记的控件不再属于任何组。 */
+    assert_null(lv_obj_get_group(btn));
+
+    gui_platform_destroy(fx.platform);
+    fx.platform = NULL;
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_focus_add_rejects_foreign_display_and_duplicates),
     TEST_ENTRY(test_tab_cycles_in_registration_order),
@@ -1544,6 +2143,19 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys),
     TEST_ENTRY(test_consumed_shortcut_is_not_inserted),
     TEST_ENTRY(test_consumed_release_still_releases_the_lvgl_key),
+    TEST_ENTRY(test_left_down_and_up_in_one_step_make_one_click),
+    TEST_ENTRY(test_pointer_delta_extremes_clamp_without_wraparound),
+    TEST_ENTRY(test_slider_stops_dragging_after_the_release),
+    TEST_ENTRY(test_right_and_middle_buttons_only_report_native_changes),
+    TEST_ENTRY(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero),
+    TEST_ENTRY(test_stationary_pointer_still_advances_the_long_press_timer),
+    TEST_ENTRY(test_hover_wheel_scrolls_the_hovered_container_by_one_detent),
+    TEST_ENTRY(test_hover_wheel_propagates_the_remainder_to_the_parent),
+    TEST_ENTRY(test_hover_wheel_without_a_target_does_nothing),
+    TEST_ENTRY(test_hover_wheel_does_not_change_a_slider_value),
+    TEST_ENTRY(test_hover_wheel_is_ignored_while_dragging),
+    TEST_ENTRY(test_moving_the_pointer_does_not_take_the_keyboard_focus),
+    TEST_ENTRY(test_destroy_leaves_no_pointer_resources_behind),
 TEST_LIST_END
 
 int main(void)

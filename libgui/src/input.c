@@ -901,4 +901,48 @@ int gui_input_test_feed_keybytes(gui_input_t *input, const uint8_t *bytes, size_
     }
     return 0;
 }
+
+/*
+ * 私有测试注入：把合成的鼠标事件喂进**同一条** FIFO / 适配层路径。
+ *
+ * 规则与键盘桥接相同：只在宿主测试构建（-DOS01_HOST_TEST）里存在，目标
+ * 构建不编译它，因此它永远不会进入公共 sysroot，也不出现在任何公共头
+ * 文件里。只接受合成输入（GUI_INPUT_SYNTHETIC）。
+ */
+int gui_input_test_feed_mouse(gui_input_t *input, const mouse_event_t *events,
+                              size_t count)
+{
+    uint64_t now_ms;
+    size_t i;
+
+    if (!input || (!events && count > 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (input->mode != GUI_INPUT_SYNTHETIC) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (gui_tick_now_ms(&now_ms) != 0) {
+        return -1;
+    }
+
+    for (i = 0; i < count; i++) {
+        gui_input_item_t item;
+
+        memset(&item, 0, sizeof(item));
+        item.kind = GUI_INPUT_ITEM_POINTER;
+        item.time_ms = now_ms;
+        item.raw = events[i];
+        /* 与真实设备读到的路径一致：按钮变化是相对上一次入队状态算出的。 */
+        item.changed_buttons = (uint8_t)(item.raw.buttons ^ input->pointer_buttons);
+        input->pointer_buttons = item.raw.buttons;
+
+        if (!fifo_push(input, &item)) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+    }
+    return 0;
+}
 #endif /* OS01_HOST_TEST */
