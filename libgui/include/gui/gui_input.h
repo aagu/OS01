@@ -19,7 +19,7 @@ typedef struct gui_input gui_input_t;
  */
 typedef enum {
     GUI_INPUT_DEVICES   = 0,  /* 真实设备：独占物理输入租约，读取 /dev/keyboard 与 /dev/mouse */
-    GUI_INPUT_SYNTHETIC = 1   /* 合成输入：不打开设备、不占用 gfx 租约，仅供仓库内部测试注入 */
+    GUI_INPUT_SYNTHETIC = 1   /* 合成输入：不打开输入设备、不占用 gfx 物理输入租约 */
 } gui_input_mode_t;
 
 /**

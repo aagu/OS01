@@ -74,6 +74,14 @@ static inline unsigned gui_ps2_key_slot(uint16_t physical_key)
  * @param initial_modifiers 初始修饰键快照，**使用公共 gui_modifier_t 位序**
  *                          （GUI_MOD_CAPS = 1 << 6），不是内核
  *                          INPUT_ROUTE_MOD_* 的瞬时位；调用方负责换算。
+ *
+ * 只允许植入 **Caps 锁存位**（GUI_MOD_CAPS）：内核租约在 bind 时把
+ * 已经按住的键标记为隔离（kernel/driver/input_route.c），并吞掉它们的
+ * release，因此快照里聚合的 Shift/Ctrl/Alt 位永远等不到对应的释放沿
+ * 沿——植入它们会让消费者把 Shift 永久锁死。
+ *
+ * NULL 状态指针被静默忽略：本函数没有返回值通道（返回 void），
+ * 无法像 gui_ps2_feed() 那样回报 errno。
  */
 void gui_ps2_init(gui_ps2_state_t *st, uint16_t initial_modifiers);
 
@@ -97,6 +105,9 @@ int gui_ps2_feed(gui_ps2_state_t *st, uint8_t byte, uint64_t now_ms,
  *
  * 距前缀起始超过 GUI_PS2_PREFIX_TIMEOUT_MS 时丢弃该前缀：下一个
  * 字节重新开始一个序列，截断的前缀永远不会复活成幽灵修饰键。
+ *
+ * NULL 状态指针被静默忽略：本函数没有返回值通道（返回 void），
+ * 无法像 gui_ps2_feed() 那样回报 errno。
  *
  * @param st     解码器状态
  * @param now_ms 当前时刻（毫秒）

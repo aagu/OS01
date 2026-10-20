@@ -542,6 +542,10 @@ static const identity_only_case_t g_identity_only_cases[] = {
     { "numpad 0",         { 0x52, 0x00 }, 1, 0x052 },
     { "numpad PageUp",    { 0x49, 0x00 }, 1, 0x049 },
     { "numpad PageDown",  { 0x51, 0x00 }, 1, 0x051 },
+    { "NumLock",          { 0x45, 0x00 }, 1, 0x045 },
+    { "keypad asterisk",  { 0x37, 0x00 }, 1, 0x037 },
+    { "keypad minus",     { 0x4A, 0x00 }, 1, 0x04A },
+    { "keypad plus",      { 0x4E, 0x00 }, 1, 0x04E },
     { "PageUp",           { 0xE0, 0x49 }, 2, 0x149 },
     { "PageDown",         { 0xE0, 0x51 }, 2, 0x151 },
     { "Insert",           { 0xE0, 0x52 }, 2, 0x152 },
@@ -552,6 +556,8 @@ static const identity_only_case_t g_identity_only_cases[] = {
     { "down arrow",       { 0xE0, 0x50 }, 2, 0x150 },
     { "left arrow",       { 0xE0, 0x4B }, 2, 0x14B },
     { "right arrow",      { 0xE0, 0x4D }, 2, 0x14D },
+    /* The E0-prefixed 0x37 is a different key than the bare 0x37. */
+    { "E0 0x37",          { 0xE0, 0x37 }, 2, 0x137 },
 };
 
 #define IDENTITY_ONLY_COUNT \
@@ -567,7 +573,7 @@ TEST_FUNC(test_navigation_and_numpad_report_physical_only) {
 
         assert_eq((int)GUI_KEY_DOWN, (int)d.event.action);
         assert_case_eq(c->name, (long)c->physical_key, (long)d.event.physical_key);
-        assert_eq(0, d.event.codepoint);
+        assert_case_eq(c->name, 0, (long)d.event.codepoint);
     }
 }
 
@@ -588,6 +594,49 @@ TEST_FUNC(test_numpad_digits_are_not_text) {
 }
 
 /* ── 8. The decoder contract itself ──────────────────────────── */
+
+/* The state caches the character of every DOWN — Task 7's repeat policy
+ * reads that cache — and clears it again on the matching UP. */
+TEST_FUNC(test_down_caches_the_character) {
+    decoder_t d;
+    unsigned slot;
+
+    dec_init(&d, 0);
+    slot = gui_ps2_key_slot(0x01E);
+
+    assert_true(dec_feed(&d, 0x1E, 100) == 1);   /* 'a' down */
+    assert_eq(97, d.state.cached[slot]);
+
+    /* A modifier key caches no character. */
+    assert_true(dec_feed(&d, 0x2A, 101) == 1);   /* left shift down */
+    assert_eq(0, d.state.cached[gui_ps2_key_slot(0x02A)]);
+
+    /* The matching UP clears the cache again. */
+    assert_true(dec_feed(&d, 0x9E, 102) == 1);   /* 'a' up */
+    assert_eq(0, d.state.cached[slot]);
+}
+
+/* A corrupt sequence is swallowed back to a boundary, and the byte that
+ * broke it is consumed with it: the real key press inside the broken
+ * sequence is lost.  That is the same trade the kernel framer makes
+ * (frame_drop consumes the offending byte) — re-interpreting it could
+ * resurrect a fake modifier. */
+TEST_FUNC(test_corrupt_sequence_consumes_the_offending_byte) {
+    decoder_t d;
+
+    dec_init(&d, 0);
+
+    /* E0 2A expects an E0: the 'a' byte breaks the sequence and is
+     * consumed together with it. */
+    assert_eq(0, dec_feed_seq(&d, (const uint8_t[]){ 0xE0, 0x2A, 0x1E }, 3, 100));
+    assert_eq(0, d.events);
+
+    /* The decoder is back at a sequence boundary: the next 'a' is
+     * decoded normally. */
+    assert_true(dec_feed(&d, 0x1E, 101) == 1);
+    assert_eq(97, d.event.codepoint);
+    assert_eq(0x01E, d.event.physical_key);
+}
 
 /* A NULL state or a NULL output buffer is an argument error. */
 TEST_FUNC(test_feed_rejects_null_arguments) {
@@ -653,6 +702,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_keypad_slash_and_enter_are_supported),
     TEST_ENTRY(test_navigation_and_numpad_report_physical_only),
     TEST_ENTRY(test_numpad_digits_are_not_text),
+    TEST_ENTRY(test_down_caches_the_character),
+    TEST_ENTRY(test_corrupt_sequence_consumes_the_offending_byte),
     TEST_ENTRY(test_feed_rejects_null_arguments),
     TEST_ENTRY(test_init_applies_initial_modifiers),
     TEST_ENTRY(test_decoder_state_is_stack_allocatable),
