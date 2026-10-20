@@ -613,10 +613,10 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # ── GUI host tests ───────────────────────────────────────────
 # Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
 # and the GUI-2 input-focus chain.  CASE accepts any registered case
-# (platform, lvgl, devfs-input) or all (default: all).
+# (platform, lvgl, devfs-input, input-frame) or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -636,6 +636,17 @@ _test-gui-host-run-lvgl:
 _test-gui-host-run-devfs-input:
 	@echo "  [test-gui-host] devfs-input"
 	$(call os01_submake,hosttests,test-gui-devfs-input $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  Runs
+# test_input_ps2_frame.elf, which host-compiles the REAL
+# kernel/driver/input_ps2.c and asserts the spec §4.3/§6.1 framing
+# contract: a complete sequence is the routing unit (the E0 prefix
+# never publishes a half sequence), PrintScreen/Pause frame as ONE
+# special sequence, start_epoch is the epoch of the FIRST byte, and a
+# corrupt sequence recovers to a boundary without emitting a fake Shift.
+_test-gui-host-run-input-frame:
+	@echo "  [test-gui-host] input-frame"
+	$(call os01_submake,hosttests,test-gui-input-frame $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2

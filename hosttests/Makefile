@@ -175,7 +175,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_display_owner.elf \
     $(TEST_BLD)/test_gui_platform.elf \
     $(TEST_BLD)/test_gui_lvgl_integration.elf \
-    $(TEST_BLD)/test_devfs_input_dispatch.elf
+    $(TEST_BLD)/test_devfs_input_dispatch.elf \
+    $(TEST_BLD)/test_input_ps2_frame.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -186,7 +187,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3597,6 +3598,33 @@ $(TEST_BLD)/test_devfs_input_dispatch.o: $(TEST_CASES)/test_devfs_input_dispatch
 
 $(TEST_BLD)/test_devfs_input_dispatch.elf: $(TEST_BLD)/test_devfs_input_dispatch.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  The framer
+# is pure (no locks, no device IO, no TTY, no display), so the test needs
+# no device mock at all: it host-compiles the REAL
+# kernel/driver/input_ps2.c and drives it byte by byte.  The assertions
+# observe the production framer, never a stub's return value.
+# Tested production symbols: input_ps2_frame_reset, input_ps2_frame_feed.
+.PHONY: test-gui-input-frame
+test-gui-input-frame: $(TEST_BLD)/test_input_ps2_frame.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_input_ps2_frame.o: $(TEST_CASES)/test_input_ps2_frame.c \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/input_ps2_production.o: $(TESTS_DIR)/kernel/driver/input_ps2.c \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_input_ps2_frame.elf: $(TEST_BLD)/test_input_ps2_frame.o \
+		$(TEST_BLD)/input_ps2_production.o
+	$(HOST_CC) -o $@ $^
 
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d
