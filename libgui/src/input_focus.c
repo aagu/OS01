@@ -248,16 +248,14 @@ static void focus_sync(gui_input_t *input)
     }
     if (target) {
         /*
-         * 先把记录里的焦点清空再交给 LVGL：组回调只在"焦点真的变了"时
-         * 标记取消（focus_apply 也是这么做的）。否则隐藏 / 禁用引起的焦点
-         * 转移会被当成"没变"，旧键不会被取消（spec §7.2）。
+         * 焦点没变时不动记录：组回调只在"焦点真的变了"时标记取消。
+         * 成员集合的重建（登记新控件、隐藏/显示非焦点控件）本身不是焦点
+         * 变化，不能因此取消按住的键（spec §7.2 只要求焦点控件被隐藏 /
+         * 禁用 / 删除时取消）。
          */
-        input->focus.focus = NULL;
+        input->focus.focus = target;
+        focus_visual_set(target, true);
         lv_group_focus_obj(target);
-        if (lv_group_get_focused(group) != target) {
-            /* 没有生效（例如对象不在组内）：保持无焦点。 */
-            input->focus.focus = NULL;
-        }
     }
 }
 

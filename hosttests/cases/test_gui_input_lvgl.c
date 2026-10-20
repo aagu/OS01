@@ -799,6 +799,104 @@ TEST_FUNC(test_hiding_the_only_focused_widget_cancels_the_held_key)
     fixture_teardown(&fx);
 }
 
+/*
+ * 禁用当前焦点同样必须取消按住的键（spec §7.2：hidden / disabled / 删除）。
+ *
+ * 与隐藏的区别：禁用不改变 LVGL 自己的组焦点，是适配层在 step 检查里发现
+ * 焦点控件不再可用，于是把焦点让给下一个候选并取消旧键。
+ */
+TEST_FUNC(test_disabling_the_focused_widget_cancels_the_held_key)
+{
+    fixture_t fx;
+    lv_obj_t *ta, *btn;
+    button_probe_t probe;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+    const uint8_t a_up[] = { KEY_A_UP };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    btn = make_button(&fx, 200, 120);
+
+    memset(&probe, 0, sizeof(probe));
+    probe.input = fx.input;
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_CLICKED, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_KEY, &probe);
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_RELEASED, &probe);
+
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_set(fx.input, ta));
+
+    /* 按住 'a'。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* 禁用当前焦点：焦点让给下一个可用项，按住的键必须被取消。 */
+    lv_obj_add_state(ta, LV_STATE_DISABLED);
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == btn);
+
+    /* 取消之后：软件重复不再产生（新焦点控件收不到重复的键）。 */
+    gui_test_set_now(1000);
+    step(&fx);
+    assert_eq(0, probe.keys);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* 迟到的真实 UP 不产生 click。 */
+    feed(&fx, a_up, sizeof(a_up));
+    step(&fx);
+    assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 与当前焦点无关的成员变化**不得**取消按住的键。
+ *
+ * 登记一个新控件、隐藏 / 显示一个非焦点控件，都会引起焦点组的成员集合
+ * 重建，但焦点没有变：spec §7.2 只要求焦点控件被隐藏 / 禁用 / 删除时取消
+ * 旧键。误取消会让"按住 a 时登记控件"变成按键丢失。
+ */
+TEST_FUNC(test_unrelated_focus_changes_do_not_cancel_the_held_key)
+{
+    fixture_t fx;
+    lv_obj_t *ta, *other;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    assert_eq(0, gui_input_focus_set(fx.input, ta));
+
+    /* 按住 'a'。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+
+    /* 登记一个与焦点无关的控件：焦点不变，按住的键必须继续有效。 */
+    other = make_button(&fx, 20, 120);
+    assert_eq(0, gui_input_focus_add(fx.input, other));
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == ta);
+
+    /* 隐藏 / 显示一个非焦点控件：同样不得取消。 */
+    lv_obj_add_flag(other, LV_OBJ_FLAG_HIDDEN);
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == ta);
+    lv_obj_remove_flag(other, LV_OBJ_FLAG_HIDDEN);
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == ta);
+
+    /* 按住的键仍然有效：软件重复照常发生。 */
+    gui_test_set_now(500);
+    step(&fx);
+    assert_str_eq("aa", lv_textarea_get_text(ta));
+
+    fixture_teardown(&fx);
+}
+
 
 /*
  * read 被阻塞时不得泄漏旧 Enter，也不得投递新键。
@@ -1430,6 +1528,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_all_hidden_widgets_do_not_drop_the_next_key),
     TEST_ENTRY(test_hiding_the_focused_widget_cancels_the_held_key),
     TEST_ENTRY(test_hiding_the_only_focused_widget_cancels_the_held_key),
+    TEST_ENTRY(test_disabling_the_focused_widget_cancels_the_held_key),
+    TEST_ENTRY(test_unrelated_focus_changes_do_not_cancel_the_held_key),
     TEST_ENTRY(test_blocked_read_does_not_leak_the_old_enter),
     TEST_ENTRY(test_blocked_read_on_the_ctrl_path_does_not_lose_the_next_key),
     TEST_ENTRY(test_repeat_is_400ms_then_40ms),
