@@ -10,6 +10,8 @@
 
 **Spec:** [2026-10-20-gui-2-input-focus-design.md](../specs/2026-10-20-gui-2-input-focus-design.md)，Draft v2，子 agent 两轮评审后 APPROVE。本文以已提交该 spec 的 `8a1bcf9` 为基准；此前产品代码基准为 `d829b36f`。
 
+**Plan状态：** Revision 2，子 agent 两轮评审后 APPROVE（2026-10-20）；尚未实施。
+
 **执行交接：** 用户指定交给 **Luna** 执行。优先在 Luna 会话使用 `superpowers:executing-plans`，按下面的依赖顺序逐任务实施；本次仅编写 plan，不启动执行、不切模型、不创建新 chat。不要因默认 header 的推荐项再次询问模型选择或擅自派发实现子 agent。
 
 ## Global Constraints
@@ -267,13 +269,16 @@ assert_str_eq("aa", lv_textarea_get_text(textarea));
 
 **Files:** Create `user/test_gui_input/{app.mk,test_gui_input.c}`；Modify相关 build audit；rootfs 使用现有自动 discovery，不添加冗余手写程序清单。
 
-**Interfaces:** `app.mk` 复用 test_lvgl 的私有 include 例外，`APP_LDLIBS := -lgui -lgfx`；仅探针允许 private focus/injection-state 查询。命令行 `--nonce <hex> --scenario <interaction|isolation|hold|fatal|overflow|owner>`；非法参数 exit2。真实输入均 DEVICES、require_mouse=true；禁止以 synthetic 或 stdin 文本替代物理键输入。
+**Interfaces:** `app.mk` 复用 test_lvgl 的私有 include 例外，`APP_LDLIBS := -lgui -lgfx`；仅探针允许 private focus/injection-state 查询。命令行 `--nonce <hex> --scenario <interaction|isolation|hold|fatal|overflow|owner>`；非法参数 exit2。真实输入均 DEVICES、require_mouse=true；禁止以 synthetic、控制文件或 stdin 文本替代物理键输入。所有场景均可由 shell 后台启动，探针不读共享 stdin，以便 runner 通过串口 shell 查询状态、写控制文件和 wait。
 
-协议每行以 `[gui-input]` 开头，字段固定 `nonce=<...> seq=<递增值> phase=<...>`；READY 额外带 `pid width height` 与目标坐标；STATE 带 click_count/slider/scroll/focus/textarea 的**十六进制字节串**；EXIT 带场景断言结果。错误输出 ERROR+errno、非零退出。应用输出通过 fd1/2 写 PTY/serial 日志，必须 flush。
+协议每行以 `[gui-input]` 开头，字段固定 `nonce=<...> seq=<递增值> phase=<...>`；READY 额外带 `pid width height` 与目标坐标；STATE 带 click_count/slider/scroll/focus/textarea 的**十六进制字节串**，以及最后一个原生 key 的 physical_key/modifiers/action、`sigint_seen`；EXIT 带场景断言结果。错误输出 ERROR+errno、非零退出。应用输出通过 fd1/2 写 PTY/serial 日志，必须 flush。
+
+测试控制路径固定为 `/tmp/gui-input-<hexnonce>.ctl`。runner 在启动前创建空文件；通过串口 shell 写入 `nonce=<hex> ctl_seq=<递增值> command=<...>`。探针每至多10 ms重新打开并读取完整记录，同一 ctl_seq 只执行一次；命令只允许屏障、状态快照、测试生命周期动作，不生成按键/按钮/文本事件。ACK 必须回显 ctl_seq、probe pid、正常递增的协议 seq。可用命令为 `SNAPSHOT`、`PROGRESS`、`RELEASE_VIEW`、`RESUME_STEP`；未知命令/nonce错误/倒序编号报错。命令覆盖同一文件时 runner 必须先收到上一个ACK，避免截断/写入竞争；探针读到暂时空/不完整文件只等下一轮。全场景有界，退出清理控制文件，不新增FIFO、设备或产品UAPI。
 
 - [ ] **1. 为 protocol parser 添加 unittest fixture RED。** 只由 guest 生成且行首锚定的完整记录有效；错误 nonce、重复 seq、READY 前STATE、缺EXIT、textarea 非法hex均失败。parser 放 `gui_input_test.py`，可先写纯 parser，不拉 QEMU。
 - [ ] **2. 实现固定测试 UI。** button、slider、可滚容器、两个 textarea、disabled button；固定逻辑坐标但按真实屏幕范围布局并输出坐标。private focus_add 注册顺序明确，outline/cursor 颜色固定供截图采样。READY 只能在 acquire/bind、首次 step/present 成功后输出。
-- [ ] **3. 实现场景与观测。** interaction 用状态变化输出 STATE 并在 Ctrl-Q 返回0；isolation 不接受快捷键外的退出输入，记录待核验内容；hold 不读 stdin，以便后台运行；fatal 在READY后等待真实PS/2 F12 DOWN再触发LVGL assertion，runner可先截图确认持有画面与输入；overflow 在输出 READY 后有界暂停 dispatch 但保留 step/错误检查，接收真实 burst 后报告 EOVERFLOW。owner 场景保持静止 UI，等待被抢占。
+- [ ] **3. 实现场景与观测。** interaction 用状态变化输出 STATE 并在 Ctrl-Q 返回0；isolation 不接受快捷键外的退出输入，记录待核验内容；hold不接受控制文件以外的生命周期命令。fatal在READY后等待真实PS/2 F12 DOWN再触发LVGL assertion。overflow从READY开始暂停dispatch，保持step/错误检查和控制文件PROGRESS处理；PROGRESS ACK额外带`raw_pump=0`。owner在静止首帧后接受RELEASE_VIEW：通过仅探针内部的platform私有头调用`gfx_release(platform->gfx)`，保持platform的acquired记录供后续step检测，输出RELEASED ACK并暂停dispatch/step，直到RESUME_STEP ACK后继续。这个测试动作不新增公开release接口，也不修改gfx独占规则。
+- [ ] **3a. 加入SIGINT观测。** 探针在READY前用现有`signal(SIGINT, handler)`安装仅将`static volatile int sigint_seen`置1的处理器；handler不调用日志/分配函数，主循环从该标志输出STATE。不得使用SIG_IGN掩盖TTY信号泄漏，不改变进程组。正常租约期间该值必须始终为0；异常值使场景失败。
 - [ ] **4. 运行** `python3 -m unittest qemutests.test_gui_runner`、`make PROFILE=x86_64-clang disk.img`；检查自动安装 `/bin/test_gui_input`。普通 test_lvgl --smoke 仍不打开输入设备。
 - [ ] **5. 提交** `test(gui): add guest input interaction probe and nonce protocol`。
 
@@ -284,8 +289,11 @@ assert_str_eq("aa", lv_textarea_get_text(textarea));
 **Interfaces:** 在既有 QmpClient 增加 `input_events(self, events: list[dict]) -> None`，包装 `execute("input-send-event", {"events": events})`；`GuiInputScenarios` 消费既有 session、qmp、run_dir、smp，返回现有 case outcome dict。通过当前 `GuiCaseRunner.run_all` 接入；独立 helper 避免继续膨胀 run_all。
 
 - [ ] **1. 写 FakeQMP assertions。** key down/up payload 使用 `type=key,data={down, key:{type:qcode,data:<qcode>}}`；rel x/y 用 `type=rel,data={axis,value}`；left/right/middle/wheel-up/down 用 btn 的 down/up。wheel 不是 abs/rel 第三轴。鼠标起点从已知中心计算，按 READY 坐标移动。
-- [ ] **2. 写 runner RED negatives。** 只有命令回显、无换行prompt、跨块标记、旧 nonce、缺按键up、QMP error、截图不符、重复/乱序phase、silent timeout、一个 SMP 失败均必须最终 FAIL。FakeQMP 仅验证编排，不被描述为真实输入证明。
-- [ ] **3. 实现 interaction。** 按 READY→click→rapid click→drag→hover wheel→Tab/Shift-Tab→textarea `aA!`→编辑/多行→repeat→Ctrl-Q 顺序，逐项等 STATE 并比对精确状态；不能用固定 sleep 代替应用证据。长按用有界时间观察 count 下限、释放后稳定；精确400/40边界由 host fake-clock 负责，避免让宿主负载决定 QEMU 是否通过。
+- [ ] **2. 写 runner RED negatives。** 只有命令回显、无换行prompt、跨块标记、旧 nonce、缺按键up、QMP error、截图不符、重复/乱序phase、silent timeout、一个 SMP 失败均必须最终 FAIL；补齐`sigint_seen=1`、probe PID变化、terminal重启、右修饰键被认成左键、modifier UP后位未清、Caps重复make再次翻转等失败fixture。FakeQMP仅验证编排，不被描述为真实输入证明。
+- [ ] **3. 实现 interaction。** 后台启动probe后按 READY→click→rapid click→drag→hover wheel→Tab/Shift-Tab→textarea `aA!`→编辑/多行→修饰键矩阵→租约期间Ctrl-C→repeat→Ctrl-Q 顺序，逐项等 STATE 并比对精确状态；不能用固定sleep代替应用证据。Ctrl-Q后用shell `wait <pid>`核验0退出。长按用有界时间观察count下限、释放后稳定；精确400/40边界由host fake-clock负责。
+- [ ] **3a. 明确修饰键物理矩阵。** 用QMP左右Shift、Ctrl、Alt分别down→普通a down/up→modifier up，逐事件断言原生physical identity与modifiers的对应单一L/R位。左右Shift时插入`A`；Ctrl/Alt时codepoint=0且textarea不变；UP后modifier位清零。Caps make/break→a为`A`；Caps+Shift→a为`a`；Caps第二次make/break恢复关闭；重复make不再次翻转。每项结束要求所有瞬态modifier位清零，不让前一项污染后一项。
+- [ ] **3b. 明确租约内Ctrl-C证据。** 启动probe前通过串口shell的`echo $$`与`/proc/<shellpid>/status`的PPid找到terminal，记录`/proc/<terminalpid>/status`的Pid/BirthId；使用独立控制文件SNAPSHOT确认probe初始`sigint_seen=0`。在租约ACTIVE时QMP发送Ctrl+C完整down/up，再SNAPSHOT：probe pid必须仍等于READY、协议seq连续递增、sigint_seen仍0、textarea无控制字符。随后必须继续完成点击和文本输入，再核对同一terminal的Pid/BirthId，禁止用退出后的Ctrl-C代替本项。缺失字段、terminal重启或检测到SIGINT均FAIL。
+- [ ] **3c. 设置有界场景预算。** 给新增场景独立截止时间，父session总预算取boot、已注册场景上限和cleanup的有限和，不机械沿用GUI-1总预算；timeout fixture同时覆盖子场景与总预算。预算不得因失败自动放大或无界重试。
 - [ ] **4. 执行** `make PROFILE=x86_64-clang test-harness` 后 `make PROFILE=x86_64-clang test-qemu SUITE=gui`。既有 GUI-1 七场景及新 input 场景均在 SMP1/2 独立运行；保留 QMP transcript、serial、关键PPM与result.json。
 - [ ] **5. 提交** `test(gui): verify physical input interactions through QMP`。
 
@@ -293,13 +301,15 @@ assert_str_eq("aa", lv_textarea_get_text(textarea));
 
 **Files:** Extend guest probe、`gui_input_test.py`、`test_gui_runner.py`；必要时扩展已有 `test_gui_fault` 的命令行场景，不新增产品测试设备或不受限注入 syscall。
 
-**Interfaces:** 与 Task 10 协议一致；后台 probe 用 `--scenario hold/owner/overflow`，不读 shell 的 stdin。shell 使用 serial 启动/kill 后台进程；物理 keyboard 仍经 QMP，不能用串口结果冒充键盘恢复。
+**Interfaces:** 与Task 10协议和控制文件一致；后台probe不读共享stdin。shell使用serial启动/kill后台进程和写控制文件；物理keyboard仍经QMP。owner交接仅在probe自己的循环边界release；overflow使用PROGRESS屏障，ACK只证明guest已执行且未泵raw，不证明QMP事件已全部入队。
 
-- [ ] **1. 写 fake runner RED scenarios。** missing acquired/READY、kill前未持输入、fatal返回0、屏幕恢复但PS2 canary失败、held key从未release、只出现canary命令回显、溢出未观察到EOVERFLOW，全部失败。
+- [ ] **1. 写fake runner RED scenarios。** missing acquired/READY、kill前未持输入、fatal返回0、屏幕恢复但PS2 canary失败、held key从未release、只出现canary命令回显、溢出未观察到EOVERFLOW、错误ctl_seq/ACK、RELEASED前启动第二owner、批次上游丢失而guest未溢出，全部失败。
 - [ ] **2. 实现 TTY 泄漏证明。** UI租约期间由QMP键入 `echo LEAK_<nonce> > /tmp/gui_input_leak_<nonce>` 再Enter；退出后通过串口shell检查该文件不存在，并用PS2再输入独立 `echo RECOVER_<newnonce>`，只接受新cursor后独占一行的实际输出及prompt。不能仅搜索字符串，因为命令回显包含它。每场景删除自己的临时文件，重用镜像用-snapshot。
 - [ ] **3. 实现 crash/held-key。** 正常Ctrl-Q、后台SIGKILL、真实LVGL fatal分别确认屏幕归还terminal；kill时按住Shift/左键，kill完成再发送break，之后PS2 canary大小写正确、无幽灵click。记录后台 `wait <pid>` 的状态；命令超时/进程未退出不能算恢复。先释放本场景所有物理按键，再以真实PS/2 Ctrl-C清理可能残留的未提交shell输入行，观察prompt后发送canary；不通过写TTY状态或清空键盘状态掩盖幽灵修饰键。
-- [ ] **4. 实现静止owner抢占。** 后台owner probe产生READY后不再dirty；另一gfx测试程序acquire，probe应在step检测LOST_OWNERSHIP并退出，后续键不再更改其状态。然后释放新owner并验证terminal与PS2恢复。
-- [ ] **5. 实现确定性真实队列溢出。** probe暂停dispatch有明确有界窗口并输出READY；runner用一个QMP请求发送超容量普通make/break burst（keyboard有效容量255，至少300字节），确保pause期间确实不调用dispatch。guest观测ERROR errno=EOVERFLOW后清理并非零退出；若无法保证pause窗口，改为guest通过stdin控制的有界屏障并等待ACK，不通过增加sleep或弱化错误断言掩盖。mouse 64项溢出及全部边界仍由host精确验证，QEMU无需依赖鼠标硬件包合并规律制造特定项数。
+- [ ] **4. 实现合法的静止owner交接。** 后台owner probe产生READY后不再dirty。先尝试第二gfx客户端acquire并断言EBUSY，保留现有排他协议。写RELEASE_VIEW，等待旧probe输出RELEASED且尚未继续step；再启动第二gfx hold客户端并确认acquired/截图。写RESUME_STEP，让旧probe在无新dirty/present条件下检测LOST_OWNERSHIP并非零退出，不能重新acquire或继续回调。旧probe关闭不应release第二view；确认第二hold仍在，再结束hold并验证terminal与PS2恢复。控制屏障最长5秒，无ACK或未取得新owner证据即FAIL。
+- [ ] **5. 实现真实队列溢出。** overflow probe从READY起不调用dispatch/raw read，仍执行step与每10ms控制文件检查。runner每批发送4组普通a make/break（8个QMP key事件），随后写唯一PROGRESS ctl_seq并等待ACK中的`raw_pump=0`或guest ERROR；最多64批、整个窗口最多40秒。批次间必须让guest运行，不以一个请求堆300字节，也不将QMP返回成功或累计发送字节视为入队数量。只有guest真实ERROR errno=EOVERFLOW、非零退出及恢复canary成功才PASS；没有溢出/没有ACK/超预算均FAIL，不增加生产统计或注入UAPI。mouse64项精确溢出继续由host验证。
+
+  该分批约束依据锁定版本示例[QEMU v10.1.0 ps2.c](https://raw.githubusercontent.com/qemu/qemu/v10.1.0/hw/input/ps2.c)的16字节虚拟设备队列及满时丢弃行为，以及[input.c](https://raw.githubusercontent.com/qemu/qemu/v10.1.0/ui/input.c)的批量事件发送流程。QMP成功与guest ring溢出不是同一证据；执行时记录本机QEMU版本，仍以guest错误与恢复为判据。
 - [ ] **6. GREEN：** `make PROFILE=x86_64-clang test-harness` 与 `make PROFILE=x86_64-clang test-qemu SUITE=gui`。SMP1/2 每种恢复路径都必须有真实PS2 canary；test runner 的串口救援只能标记失败并清理，不能转PASS。
 - [ ] **7. 提交** `test(gui): gate input isolation ownership loss and crash recovery`。
 
@@ -343,3 +353,10 @@ make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall
 | §10–11 三阶段与两轮评审修订 | Task 3序列边界、Task 7无点击取消与Ctrl/Alt重复，最终Task 13 |
 
 本plan只细化已评审spec的实现接线和测试入口，没有产品实现。用户评审本plan后，再由Luna按既定方式执行。
+
+## Plan 子 agent 评审修订记录
+
+| 轮次 | 结论 | 修订 |
+|---|---|---|
+| 第一轮 | REQUEST_CHANGES：2项P1、1项P2 | 使用显式release/双owner屏障验证静止失权；QMP小批次与guest进度ACK替代单请求大burst；补全租约内Ctrl-C、左右修饰键/Caps、terminal身份及runner负契约 |
+| 第二轮 | APPROVE：无新增实质性阻塞 | 完整复审Revision 2，确认首轮三项已解决，新增控制文件协议与任务依赖/生命周期一致，可交给Luna实施；不代表产品实现或运行测试已完成 |
