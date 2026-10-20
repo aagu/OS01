@@ -1077,14 +1077,17 @@ TEST_FUNC(test_lvgl_release_identity_is_guarded)
     assert_eq(1, log.count);
     assert_eq(1, g_gui_test_keypad_reads);   /* DOWN 'a' 送达 */
 
-    /* 2) press 'b'（重叠：'a' 仍然按住） */
+    /* 2) press 'b'（重叠：'a' 仍然按住）
+     *    GUI-2 Task 7 的取消协议：新非修饰键按下前必须先取消旧活动键
+     *    （wait_release + 显式 RELEASED read），之后才投递新键的 PRESSED。
+     *    因此这里是 2 次 keypad 读取：1 次取消 + 1 次新键按下。 */
     g_gui_test_keypad_reads = 0;
     gui_test_device_add_data(&g_gui_test_keyboard, &make_b, 1);
     gui_test_device_add_op(&g_gui_test_keyboard, 0, 1);
     assert_eq(0, gui_input_dispatch(input, NULL, 0));
     assert_eq(GUI_STATUS_OK, gui_platform_step(platform, &delay));
     assert_eq(2, log.count);
-    assert_eq(1, g_gui_test_keypad_reads);   /* DOWN 'b' 送达 */
+    assert_eq(2, g_gui_test_keypad_reads);   /* 取消 'a' 一次 + DOWN 'b' 一次 */
 
     /* 3) release 'a'：与当前活动键（'b'）的物理身份不匹配 ——
      *    适配层必须拒绝这次投递，不能把 'b' 释放掉。 */

@@ -1,10 +1,10 @@
 /*
  * input_lvgl.c — LVGL 控件适配（pointer / keypad / 焦点组）
  *
- * 本文件实现 Task 6 固定的跨文件 hook：
+ * 本文件实现 Task 6 固定的跨文件 hook，并补齐 Task 7 的键盘行为：
  *
  *   gui_input_lvgl_create   建立并绑定本 display 的 keypad / pointer
- *                           indev、read 回调与空的默认焦点组；
+ *                           indev、read 回调与私有默认焦点组；
  *   gui_input_lvgl_destroy  取消未完成手势并删除全部对象；
  *   gui_input_lvgl_cancel   按 spec 的 wait-release 重新就绪协议取消
  *                           当前键（不合成 click）；
@@ -15,8 +15,14 @@
  * continue_reading 自动排空。pointer 保留 TIMER 模式（长按 / 拖动定时器
  * 需要它），新事件通过显式 read 及时送达。
  *
- * 焦点组是**私有**的：keypad 显式绑定它，不使用 LVGL 全局默认组。组内
- * 还没有注册控件时，键盘没有目标是合法的空组行为（Task 7 补焦点注册）。
+ * 焦点组是**私有**的：keypad 显式绑定它，不使用 LVGL 全局默认组。焦点成员
+ * 的登记、Tab 导航与焦点视觉由 input_focus.c 拥有。
+ *
+ * 取消协议（spec §6.2.2）严格按顺序执行：
+ *   停重复 → 清未投递事件 → wait_release → 显式 RELEASED read →
+ *   清旧控件视觉 → 之后才投递新键的 PRESSED。
+ * 协议若发生在 LVGL 回调内部，只标记 pending，真实的 read 放到外层
+ * lv_indev_read() 返回之后（回调里递归读 indev 是不允许的）。
  */
 
 #include <gui/gui_input.h>
@@ -33,6 +39,13 @@
 #define PS2_KEY_BACKSPACE  0x00Eu
 #define PS2_KEY_TAB        0x00Fu
 #define PS2_KEY_ENTER      0x01Cu
+#define PS2_KEY_LSHIFT     0x02Au
+#define PS2_KEY_RSHIFT     0x036u
+#define PS2_KEY_LCTRL      0x01Du
+#define PS2_KEY_RCTRL      0x11Du
+#define PS2_KEY_LALT       0x038u
+#define PS2_KEY_RALT       0x138u
+#define PS2_KEY_CAPS       0x03Au
 #define PS2_KEY_DELETE     0x053u
 #define PS2_KEY_UP         0x148u   /* E0 48 */
 #define PS2_KEY_DOWN       0x150u   /* E0 50 */
@@ -64,6 +77,43 @@ static uint32_t lvgl_special_key(uint16_t physical)
     default:                return 0;
     }
 }
+
+/* 修饰键（Shift / Ctrl / Alt / Caps）永远不成为 keypad 的活动键。 */
+static bool ps2_is_modifier(uint16_t physical)
+{
+    switch (physical) {
+    case PS2_KEY_LSHIFT:
+    case PS2_KEY_RSHIFT:
+    case PS2_KEY_LCTRL:
+    case PS2_KEY_RCTRL:
+    case PS2_KEY_LALT:
+    case PS2_KEY_RALT:
+    case PS2_KEY_CAPS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * 原生按键事件 → LVGL 键值。返回 0 表示没有 LVGL 键义。
+ *
+ * 空格是唯一的上下文相关键：文本输入里它是可打印字符（可以重复），
+ * 其他控件上它是激活键（映射成 Enter，只激活一次）。原生 physical_key
+ * 不受影响：应用看到的始终是真实物理身份。
+ */
+static uint32_t lvgl_map_key(gui_input_t *input, const gui_key_event_t *event)
+{
+    if (event->codepoint != 0) {
+        if (event->codepoint == (uint32_t)' ' && !gui_input_focus_is_text_input(input)) {
+            return LV_KEY_ENTER;
+        }
+        return event->codepoint;   /* ASCII 字符 */
+    }
+    return lvgl_special_key(event->physical_key);
+}
+
+
 
 /* ── read 回调 ────────────────────────────────────────────────── */
 
@@ -106,6 +156,26 @@ static void gui_input_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 }
 
+/* ── 投递一个 LVGL 样本 ───────────────────────────────────────── */
+
+/*
+ * 排入一个 keypad 样本并显式读一次。
+ *
+ * EVENT 模式下每个逻辑边沿都需要一次显式 read：read 回调只会报告显式排入
+ * 的样本（pending_valid），没有待投递样本时报告 RELEASED，避免自动排空
+ * 造成重复边沿。
+ */
+static void lvgl_emit(gui_input_t *input, uint32_t key, lv_indev_state_t state)
+{
+    gui_input_lvgl_t *lv = &input->lvgl;
+
+    lv->pending_key = key;
+    lv->pending_state = state;
+    lv->pending_valid = true;
+    lv_indev_read(lv->keypad);
+    lv->pending_valid = false;
+}
+
 /* ── 生命周期 hook ────────────────────────────────────────────── */
 
 int gui_input_lvgl_create(gui_input_t *input)
@@ -132,11 +202,11 @@ int gui_input_lvgl_create(gui_input_t *input)
     lv->cursor_y = (int32_t)(lv->height / 2u);
 
     /* 私有默认焦点组：keypad 显式绑定它。 */
-    lv->group = lv_group_create();
-    if (!lv->group) {
+    if (gui_input_focus_create(input) != 0) {
         errno = ENOMEM;
         return -1;
     }
+
 
     lv->keypad = lv_indev_create();
     if (!lv->keypad) {
@@ -192,13 +262,12 @@ void gui_input_lvgl_destroy(gui_input_t *input)
         lv_indev_delete(lv->pointer);
         lv->pointer = NULL;
     }
-    if (lv->group) {
-        lv_group_delete(lv->group);
-        lv->group = NULL;
-    }
+    gui_input_focus_destroy(input);
     lv->pending_valid = false;
     lv->active_key = 0;
     lv->active_physical = 0;
+    lv->pressed_obj = NULL;
+    lv->cancel_pending = false;
     lv->pointer_pressed = false;
 }
 
@@ -209,6 +278,9 @@ void gui_input_lvgl_cancel(gui_input_t *input)
     }
 
     gui_input_lvgl_t *lv = &input->lvgl;
+
+    /* 停止旧键的重复。 */
+    input->repeat_armed = false;
 
     /* 尚未投递的键事件被丢弃，当前活动键被清除（迟到的释放会被拒绝）。 */
     lv->pending_valid = false;
@@ -230,6 +302,13 @@ void gui_input_lvgl_cancel(gui_input_t *input)
         lv->pending_valid = false;
     }
 
+    /* 旧控件的视觉按下状态：对象仍存活时清掉。 */
+    if (lv->pressed_obj && gui_input_focus_alive(input, lv->pressed_obj)) {
+        lv_obj_remove_state(lv->pressed_obj, LV_STATE_PRESSED);
+    }
+    lv->pressed_obj = NULL;
+    lv->cancel_pending = false;
+
     if (lv->pointer) {
         /* pointer 用 reset 清理手势状态（不补 click）。 */
         lv_indev_reset(lv->pointer, NULL);
@@ -237,20 +316,281 @@ void gui_input_lvgl_cancel(gui_input_t *input)
     }
 }
 
+/* ── 取消 / 重新就绪协议 ───────────────────────────────────────── */
+
+/*
+ * 取消当前活动键并让 keypad 重新就绪（spec §6.2.2）。
+ *
+ * 顺序：停重复 → 清未投递事件 → wait_release → 显式 RELEASED read →
+ * 清旧控件视觉。调用方必须在这一步完成之后才投递新的 PRESSED。
+ *
+ * 返回 false 表示重新就绪尚未完成：read 被屏幕动画 / indev 暂停阻塞，
+ * 此时旧键已经失效（不会再泄漏），但不允许投递新键，调用方稍后重试。
+ */
+bool gui_input_lvgl_cancel_key(gui_input_t *input)
+{
+    gui_input_lvgl_t *lv;
+
+    if (!input) {
+        return true;
+    }
+    lv = &input->lvgl;
+
+    /* 1. 停止旧键的重复。 */
+    input->repeat_armed = false;
+
+    /* 2. 清空尚未投递的旧键事件。 */
+    lv->pending_valid = false;
+
+    /* 旧活动键立即失效：迟到的释放被拒绝，旧键不会作用到新控件上。 */
+    lv->active_key = 0;
+    lv->active_physical = 0;
+
+    if (!lv->keypad) {
+        lv->cancel_pending = false;
+        return true;
+    }
+
+    /* 3. wait_release：让下一次 read 提供一次 RELEASED。 */
+    lv_indev_wait_release(lv->keypad);
+
+    /* 4. 显式读一次，消费掉那次 RELEASED。
+     *    该合成样本不产生原生 UP 回调，也不合成 click。 */
+    lv->pending_key = 0;
+    lv->pending_state = LV_INDEV_STATE_RELEASED;
+    lv->pending_valid = true;
+    lv_indev_read(lv->keypad);
+    lv->pending_valid = false;
+
+    if (lv_indev_get_state(lv->keypad) != LV_INDEV_STATE_RELEASED) {
+        /* read 没有真正消费取消样本：保留 pending，稍后重试。 */
+        lv->cancel_pending = true;
+        return false;
+    }
+
+    /* 5. 清旧控件的视觉按下状态（对象仍存活时）。 */
+    if (lv->pressed_obj && gui_input_focus_alive(input, lv->pressed_obj)) {
+        lv_obj_remove_state(lv->pressed_obj, LV_STATE_PRESSED);
+    }
+    lv->pressed_obj = NULL;
+    lv->cancel_pending = false;
+    return true;
+}
+
+/*
+ * 该键是否参与软件重复。
+ *
+ * 只有可打印字符、Backspace / Delete、方向键 / Home / End 重复；Tab、
+ * Enter、Esc 与快捷键（Ctrl / Alt 组合）不重复执行动作。空格在文本输入里
+ * 是可打印字符（重复），在按钮上是激活键（不重复）。
+ */
+bool gui_input_lvgl_repeatable(gui_input_t *input, const gui_key_event_t *event)
+{
+    uint32_t key;
+
+    if (!input || !event || event->action != GUI_KEY_DOWN) {
+        return false;
+    }
+
+    /* 快捷键不重复。 */
+    if (event->modifiers & (uint16_t)(GUI_MOD_LCTRL | GUI_MOD_RCTRL |
+                                      GUI_MOD_LALT | GUI_MOD_RALT)) {
+        return false;
+    }
+    /* Tab 由适配层导航，不进入 keypad。 */
+    if (event->physical_key == PS2_KEY_TAB) {
+        return false;
+    }
+
+    key = lvgl_map_key(input, event);
+    if (key == 0) {
+        return false;
+    }
+    if (key == LV_KEY_NEXT || key == LV_KEY_PREV ||
+        key == LV_KEY_ENTER || key == LV_KEY_ESC) {
+        return false;
+    }
+
+    /* 可打印字符。 */
+    if (key >= 0x20u && key < 0x7Fu) {
+        return true;
+    }
+    /* 编辑键与方向键。 */
+    switch (key) {
+    case LV_KEY_BACKSPACE:
+    case LV_KEY_DEL:
+    case LV_KEY_UP:
+    case LV_KEY_DOWN:
+    case LV_KEY_LEFT:
+    case LV_KEY_RIGHT:
+    case LV_KEY_HOME:
+    case LV_KEY_END:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * 新的按键按下：取消旧活动键，并维护软件重复策略。
+ *
+ * 由 input.c 在**报告原生 handler 之前**调用：即使新键随后被应用消费，
+ * 旧键也必须先被取消（spec §6.2.1）。
+ *
+ * 修饰键（Shift / Ctrl / Alt / Caps）既不成为活动键，也不改变已按下键的
+ * 缓存字符：Shift / Caps 的变化不会让正在重复的键换字符。
+ */
+void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event,
+                             uint64_t now_ms)
+{
+    gui_input_lvgl_t *lv;
+
+    if (!input || !event) {
+        return;
+    }
+    lv = &input->lvgl;
+
+    if (ps2_is_modifier(event->physical_key)) {
+        return;
+    }
+
+    /* 新的非修饰键 DOWN：先取消旧活动键。 */
+    if (lv->active_physical != 0) {
+        (void)gui_input_lvgl_cancel_key(input);
+    }
+
+    /*
+     * 武装软件重复：首次 400 ms、之后 40 ms。字符取该键 DOWN 时解码器缓存
+     * 的值（Shift / Caps 的后续变化不改变它）。
+     */
+    if (gui_input_lvgl_repeatable(input, event)) {
+        input->repeat_armed = true;
+        input->repeat_physical = event->physical_key;
+        input->repeat_char = input->ps2.cached[gui_ps2_key_slot(event->physical_key)];
+        input->repeat_deadline_ms = now_ms + GUI_INPUT_REPEAT_FIRST_MS;
+    } else {
+        input->repeat_armed = false;
+    }
+}
+
+
+/*
+ * 被消费的释放仍然必须释放 LVGL 侧的活动键。
+ *
+ * 否则 LVGL 会一直认为那个键处于按下状态（LVGL 的 keypad 是单键模型，
+ * 下一次按下别的键会被当成错配的释放）。这里复用取消协议：LVGL 侧的按键
+ * 状态被复位，但**不**产生原生 UP 回调，也不合成 click。
+ */
+void gui_input_lvgl_force_release(gui_input_t *input, uint16_t physical_key)
+{
+    gui_input_lvgl_t *lv;
+
+    if (!input) {
+        return;
+    }
+    lv = &input->lvgl;
+    if (lv->active_physical != physical_key || lv->active_key == 0) {
+        /* 不是当前活动键：不得释放别的键。 */
+        return;
+    }
+
+    (void)gui_input_lvgl_cancel_key(input);
+}
+
+/*
+ * 标记"需要执行取消协议"。
+ *
+ * 只能在回调之外真正执行：回调里递归读 indev 是不允许的。
+ */
+void gui_input_lvgl_mark_cancel(gui_input_t *input)
+{
+    gui_input_lvgl_t *lv;
+
+    if (!input) {
+        return;
+    }
+    lv = &input->lvgl;
+    if (lv->active_physical == 0) {
+        return;   /* 没有活动键：无需取消 */
+    }
+    lv->cancel_pending = true;
+}
+
+/*
+ * 每步一次的适配层维护：焦点检查 + 重试待处理的取消协议。
+ * 返回 false 表示取消协议尚未完成（read 被阻塞），此时不能投递新键。
+ */
+bool gui_input_lvgl_pump(gui_input_t *input)
+{
+    if (!input) {
+        return true;
+    }
+
+    /* 焦点检查：隐藏 / 禁用 / 删除的控件不再占导航位置。 */
+    (void)gui_input_focus_refresh(input);
+
+    if (input->lvgl.cancel_pending) {
+        return gui_input_lvgl_cancel_key(input);
+    }
+    return true;
+}
+
+/* 焦点对象消失：旧键不能继续作用于自动选中的新控件。 */
+void gui_input_focus_lost(gui_input_t *input, lv_obj_t *obj)
+{
+    gui_input_lvgl_t *lv;
+
+    if (!input) {
+        return;
+    }
+    lv = &input->lvgl;
+
+    if (lv->pressed_obj == obj) {
+        lv->pressed_obj = NULL;   /* 对象已消失：不再去碰它 */
+    }
+    gui_input_lvgl_mark_cancel(input);
+}
+
+
 /* ── 投递 hook ────────────────────────────────────────────────── */
 
 int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
 {
+    gui_input_lvgl_t *lv;
+    uint32_t key;
+
     if (!input || !event) {
         return 0;
     }
 
-    gui_input_lvgl_t *lv = &input->lvgl;
+    lv = &input->lvgl;
     if (!lv->keypad) {
         return 0;
     }
 
-    uint32_t key = 0;
+    /* 待处理的取消协议必须先完成：否则旧键还处于按下状态。 */
+    if (lv->cancel_pending && !gui_input_lvgl_cancel_key(input)) {
+        return 0;
+    }
+
+    if (event->action == GUI_KEY_REPEAT) {
+        /*
+         * 软件重复：注入完整的 RELEASED→PRESSED 对。最后一个 PRESSED 保持
+         * 按下，直到真正的 UP 到达。
+         */
+        if (lv->active_key == 0) {
+            return 0;
+        }
+        key = (event->codepoint != 0) ? event->codepoint
+                                      : lvgl_special_key(event->physical_key);
+        if (key == 0) {
+            return 0;
+        }
+        lvgl_emit(input, key, LV_INDEV_STATE_RELEASED);
+        lvgl_emit(input, key, LV_INDEV_STATE_PRESSED);
+        return 1;
+    }
+
     if (event->action == GUI_KEY_UP) {
         /*
          * UP 沿用对应 DOWN 的键值（UP 的 codepoint 恒为 0），但**必须**
@@ -261,40 +601,54 @@ int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
          * 真正的释放。键被取消（cancel）后 active_physical 为 0，
          * 迟到的释放同样被拒绝。
          */
-        if (event->physical_key == lv->active_physical) {
-            key = lv->active_key;
+        if (event->physical_key != lv->active_physical) {
+            return 0;
         }
-    } else {
-        if (event->codepoint != 0) {
-            key = event->codepoint;   /* ASCII 字符 */
-        } else {
-            key = lvgl_special_key(event->physical_key);
+        key = lv->active_key;
+        if (key == 0) {
+            return 0;
         }
-        if (key != 0) {
-            lv->active_key = key;
-            lv->active_physical = event->physical_key;
-        }
+        lvgl_emit(input, key, LV_INDEV_STATE_RELEASED);
+        lv->active_key = 0;
+        lv->active_physical = 0;
+        lv->pressed_obj = NULL;
+        input->repeat_armed = false;
+        return 1;
     }
 
+    /* DOWN */
+    if (event->physical_key == PS2_KEY_TAB) {
+        /*
+         * Tab 由适配层导航：它不进入 keypad（否则会被 textarea 当字符
+         * 插入）。Shift-Tab 往回走。
+         */
+        bool shift = (event->modifiers &
+                      (uint16_t)(GUI_MOD_LSHIFT | GUI_MOD_RSHIFT)) != 0;
+        (void)gui_input_focus_navigate(input, !shift);
+        return 1;
+    }
+
+    key = lvgl_map_key(input, event);
     if (key == 0) {
-        /* 没有 LVGL 键义（修饰键、功能键、keypad 数字区……），或者这是一次
-         * 与当前活动键不匹配的释放：都不向 LVGL 投递。 */
+        /* 没有 LVGL 键义（修饰键、功能键、keypad 数字区……）。 */
         return 0;
     }
 
-    lv->pending_key = key;
-    lv->pending_state = (event->action == GUI_KEY_UP) ? LV_INDEV_STATE_RELEASED
-                                                      : LV_INDEV_STATE_PRESSED;
-    lv->pending_valid = true;
-    lv_indev_read(lv->keypad);
-    lv->pending_valid = false;
+    lv->active_key = key;
+    lv->active_physical = event->physical_key;
+    lv->pressed_obj = gui_input_focus_current(input);
+    lvgl_emit(input, key, LV_INDEV_STATE_PRESSED);
 
-    if (event->action == GUI_KEY_UP) {
-        lv->active_key = 0;
-        lv->active_physical = 0;
+    /*
+     * 回调里可能发生焦点变化或对象删除：此时执行取消协议（旧键不得继续
+     * 作用到自动选中的新控件上）。
+     */
+    if (lv->cancel_pending) {
+        (void)gui_input_lvgl_cancel_key(input);
     }
     return 1;
 }
+
 
 int gui_input_lvgl_pointer(gui_input_t *input, const mouse_event_t *event)
 {

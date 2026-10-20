@@ -616,8 +616,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # (platform, lvgl, devfs-input, input-frame, input-route, input-decode,
 # input-platform) or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-platform
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-platform
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-platform input-lvgl
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -713,6 +713,17 @@ _test-gui-host-run-input-decode:
 _test-gui-host-run-input-platform:
 	@echo "  [test-gui-host] input-platform"
 	$(call os01_submake,hosttests,test-gui-input-platform $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 7: the keyboard half of the LVGL adapter — keypad indev
+# behaviour, the software repeat policy, native shortcut delivery and the
+# in-process focus group with Tab navigation.  Runs
+# test_gui_input_lvgl.elf, which host-compiles the REAL libgui input unit
+# (input.c + input_lvgl.c + input_focus.c), the REAL platform and the REAL
+# PS/2 decoder, and asserts the spec §6.2 / §7.2 contract against the REAL
+# LVGL keypad indev and focus group (nothing under test is mocked).
+_test-gui-host-run-input-lvgl:
+	@echo "  [test-gui-host] input-lvgl"
+	$(call os01_submake,hosttests,test-gui-input-lvgl $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2

@@ -101,6 +101,31 @@ static void fifo_clear(gui_input_t *input)
 /* ── 设备读取 ─────────────────────────────────────────────────── */
 
 /*
+ * 把一个已解码的按键事件排入 FIFO。
+ *
+ * 设备路径与合成的测试注入共用这一条路径：事件带着**入队时刻**的修饰键
+ * 快照排队，step 投递时不得用解码器的当前状态覆盖它。
+ */
+static int key_event_push(gui_input_t *input, const gui_key_event_t *ev, uint64_t now_ms)
+{
+    gui_input_item_t item;
+
+    memset(&item, 0, sizeof(item));
+    item.kind = GUI_INPUT_ITEM_KEY;
+    item.action = (uint8_t)ev->action;
+    item.physical_key = ev->physical_key;
+    item.modifiers = ev->modifiers;  /* 快照随事件入队 */
+    item.codepoint = ev->codepoint;
+    item.time_ms = now_ms;
+
+    if (!fifo_push(input, &item)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    return 0;
+}
+
+/*
  * 读取一次键盘数据并解码入队。
  *
  * 返回 1 = 读到并处理了数据；0 = 本轮没有更多数据（EAGAIN / 空读）；
@@ -153,17 +178,7 @@ static int keyboard_read_once(gui_input_t *input, uint64_t now_ms, unsigned budg
             continue;   /* 前缀 / 被吞掉的序列 */
         }
 
-        gui_input_item_t item;
-        memset(&item, 0, sizeof(item));
-        item.kind = GUI_INPUT_ITEM_KEY;
-        item.action = (uint8_t)ev.action;
-        item.physical_key = ev.physical_key;
-        item.modifiers = ev.modifiers;  /* 快照随事件入队 */
-        item.codepoint = ev.codepoint;
-        item.time_ms = now_ms;
-
-        if (!fifo_push(input, &item)) {
-            errno = EOVERFLOW;
+        if (key_event_push(input, &ev, now_ms) != 0) {
             return -1;
         }
     }
@@ -665,9 +680,53 @@ int gui_input_dispatch(gui_input_t *input, const struct pollfd *fds, unsigned co
 /*
  * 投递一个键事件。
  *
- * 顺序：更新已投递状态 → 报告原生 handler → Ctrl/Alt 从无到有时取消
- * 当前键 → 未被消费时送入 keypad。
+ * 顺序：更新已投递状态 → Ctrl/Alt 从无到有时取消当前键 → 新的非修饰键
+ * DOWN 取消旧活动键 → 武装 / 解除软件重复 → 报告原生 handler →
+ * 未被消费时送入 keypad。
+ *
+ * 取消动作排在报告原生 handler **之前**：modifier DOWN 到达应用时，旧键
+ * 必须已经被取消（spec §6.2.1）。
  */
+static void deliver_key_event(gui_input_t *input, const gui_key_event_t *ev,
+                              uint64_t now_ms)
+{
+    /* 已投递状态与排队快照分开保存（重复策略使用前者）。 */
+    uint16_t prev = input->delivered_modifiers;
+    uint16_t now = ev->modifiers;
+
+    /* Ctrl/Alt 从无到有：取消当前键与它的重复，排队的 Ctrl 不得泄漏到
+     * 后续按键。 */
+    const uint16_t ctrl_alt = (uint16_t)(GUI_MOD_LCTRL | GUI_MOD_RCTRL |
+                                         GUI_MOD_LALT | GUI_MOD_RALT);
+    if ((now & ctrl_alt) && !(prev & ctrl_alt)) {
+        gui_input_lvgl_cancel(input);
+    }
+    input->delivered_modifiers = now;
+
+    if (ev->action == GUI_KEY_DOWN) {
+        /*
+         * 新的按键按下：先取消旧活动键，并维护软件重复策略。新键即使随后
+         * 被应用消费，旧键也已经失效（LVGL 的 keypad 是单键模型）。
+         */
+        gui_input_lvgl_key_down(input, ev, now_ms);
+    }
+
+    bool consumed = false;
+    if (input->key_handler) {
+        consumed = input->key_handler(ev, input->key_userdata);
+    }
+
+    if (!consumed) {
+        gui_input_lvgl_deliver(input, ev);
+    } else if (ev->action == GUI_KEY_UP) {
+        /*
+         * 被消费的释放仍然必须释放 LVGL 侧的活动键，否则 LVGL 会一直认为
+         * 那个键处于按下状态。
+         */
+        gui_input_lvgl_force_release(input, ev->physical_key);
+    }
+}
+
 static void deliver_key(gui_input_t *input, const gui_input_item_t *item)
 {
     gui_key_event_t ev;
@@ -676,26 +735,7 @@ static void deliver_key(gui_input_t *input, const gui_input_item_t *item)
     ev.codepoint = item->codepoint;
     ev.action = (gui_key_action_t)item->action;
 
-    /* 已投递状态与排队快照分开保存（重复策略使用前者）。 */
-    uint16_t prev = input->delivered_modifiers;
-    uint16_t now = item->modifiers;
-    input->delivered_modifiers = now;
-
-    bool consumed = false;
-    if (input->key_handler) {
-        consumed = input->key_handler(&ev, input->key_userdata);
-    }
-
-    /* Ctrl/Alt 从无到有：取消当前键，排队的 Ctrl 不得泄漏到后续按键。 */
-    const uint16_t ctrl_alt = (uint16_t)(GUI_MOD_LCTRL | GUI_MOD_RCTRL |
-                                         GUI_MOD_LALT | GUI_MOD_RALT);
-    if ((now & ctrl_alt) && !(prev & ctrl_alt)) {
-        gui_input_lvgl_cancel(input);
-    }
-
-    if (!consumed) {
-        gui_input_lvgl_deliver(input, &ev);
-    }
+    deliver_key_event(input, &ev, item->time_ms);
 }
 
 static void deliver_pointer(gui_input_t *input, const gui_input_item_t *item)
@@ -777,6 +817,30 @@ gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *de
         delivered++;
     }
 
+    /*
+     * 适配层维护：焦点检查与待处理的取消协议（重新就绪）。
+     * 取消尚未完成时不投递新键。
+     */
+    bool keypad_ready = gui_input_lvgl_pump(input);
+
+    /*
+     * 软件重复：首次 400 ms、之后 40 ms。
+     *
+     * 只在 FIFO 排空后生成：FIFO 里还有未投递的 UP / Ctrl 时，重复不得
+     * 插到它们前面。每次最多产生一个到期重复（停顿期间不补发）。
+     */
+    if (keypad_ready && input->count == 0 && input->repeat_armed &&
+        now_ms >= input->repeat_deadline_ms) {
+        gui_key_event_t rep;
+        rep.action = GUI_KEY_REPEAT;
+        rep.physical_key = input->repeat_physical;
+        rep.codepoint = input->repeat_char;   /* DOWN 时缓存的字符 */
+        rep.modifiers = input->delivered_modifiers;  /* 当前已投递快照 */
+        /* 下一期限从当前时刻向后计算：停顿期间不补发一串重复。 */
+        input->repeat_deadline_ms = now_ms + GUI_INPUT_REPEAT_INTERVAL_MS;
+        deliver_key_event(input, &rep, now_ms);
+    }
+
     /* 截断的前缀到期后被丢弃。 */
     gui_ps2_expire(&input->ps2, now_ms);
 
@@ -794,3 +858,47 @@ gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *de
 
     return GUI_STATUS_OK;
 }
+
+#ifdef OS01_HOST_TEST
+/*
+ * 私有测试注入：把合成的 Set 1 字节喂进**同一条**解码器 / FIFO 路径。
+ *
+ * 这个接口只在宿主测试构建（-DOS01_HOST_TEST）里存在：目标构建不编译它，
+ * 因此它永远不会进入公共 sysroot，也不出现在任何公共头文件里。
+ * 只接受合成输入（GUI_INPUT_SYNTHETIC）。
+ */
+int gui_input_test_feed_keybytes(gui_input_t *input, const uint8_t *bytes, size_t len)
+{
+    uint64_t now_ms;
+    size_t i;
+
+    if (!input || (!bytes && len > 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (input->mode != GUI_INPUT_SYNTHETIC) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (gui_tick_now_ms(&now_ms) != 0) {
+        return -1;
+    }
+
+    for (i = 0; i < len; i++) {
+        gui_key_event_t ev;
+        int rc = gui_ps2_feed(&input->ps2, bytes[i], now_ms, &ev);
+
+        if (rc < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (rc == 0) {
+            continue;   /* 前缀 / 被吞掉的序列 */
+        }
+        if (key_event_push(input, &ev, now_ms) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+#endif /* OS01_HOST_TEST */

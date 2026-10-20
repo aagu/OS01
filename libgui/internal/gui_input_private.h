@@ -37,6 +37,18 @@ extern "C" {
 #define GUI_INPUT_KEYBOARD_READ_BUDGET 256  /* 每轮最多读取的键盘字节 */
 #define GUI_INPUT_MOUSE_READ_BUDGET    64   /* 每轮最多读取的鼠标事件 */
 
+/* ── 软件重复策略（spec §6.2.4） ────────────────────────────────── */
+
+/* 首次重复延迟 400 ms，之后每次 40 ms；每步最多产生一个到期重复。 */
+#define GUI_INPUT_REPEAT_FIRST_MS      400u
+#define GUI_INPUT_REPEAT_INTERVAL_MS   40u
+
+/* ── 焦点组（私有记录，实现见 input_focus.c） ─────────────────────── */
+
+#define GUI_INPUT_FOCUS_CAPACITY       64   /* 焦点组最多登记的控件数 */
+#define GUI_INPUT_FOCUS_OUTLINE_WIDTH  2    /* 焦点 outline 宽度（像素） */
+#define GUI_INPUT_FOCUS_OUTLINE_COLOR  0x00FF00u
+
 /*
  * gfx 输入租约 UAPI 的修饰键快照：**bit0 = Caps Lock**，其余位保留为 0
  * （uapi/gfx.h；内核 fb_state 把 route 的 INPUT_ROUTE_MOD_CAPS 折算成
@@ -90,6 +102,9 @@ typedef struct {
     uint32_t active_key;    /* 当前按住键的 LVGL 键值（0 = 无键按住，UP 事件复用它） */
     uint16_t active_physical; /* 当前按住键的物理身份（Set 1 扫描码），用于拒绝错键释放 */
 
+    lv_obj_t *pressed_obj;  /* 收到 PRESSED 的控件；可能已失效，使用前必须核验存活 */
+    bool      cancel_pending; /* 需要在回调之外执行取消 / 重新就绪协议 */
+
     int32_t cursor_x;       /* LVGL 光标的绝对位置 */
     int32_t cursor_y;
     bool    pointer_pressed;/* 左键按下状态 */
@@ -97,6 +112,18 @@ typedef struct {
     uint32_t width;         /* 视口宽（指针位置夹紧用） */
     uint32_t height;        /* 视口高 */
 } gui_input_lvgl_t;
+
+/**
+ * @brief 焦点组的私有记录（实现见 input_focus.c）
+ *
+ * 记录本身就是"存活证明"：条目在对象收到 LV_EVENT_DELETE 时被摘掉，因此
+ * 记录里的指针一定是活对象。摘除只比较指针值，从不解引用失效指针。
+ */
+typedef struct {
+    lv_obj_t *entries[GUI_INPUT_FOCUS_CAPACITY]; /* 注册顺序 = Tab 顺序 */
+    unsigned count;                             /* 已登记的控件数 */
+    lv_obj_t *focus;                            /* 当前焦点（可能已失效） */
+} gui_input_focus_t;
 
 /**
  * @brief 输入对象（内部状态）
@@ -122,6 +149,14 @@ struct gui_input {
     uint16_t delivered_modifiers; /* 已投递的修饰键状态（重复策略用） */
     uint8_t  pointer_buttons;     /* 上一次入队的鼠标按钮位图 */
 
+    /* 软件重复策略：首次 400 ms、后续 40 ms，由 libgui 的单调时钟驱动。 */
+    uint64_t repeat_deadline_ms;  /* 下一次重复的期限 */
+    uint16_t repeat_physical;     /* 重复键的物理身份 */
+    uint32_t repeat_char;         /* 重复键缓存的字符（DOWN 时的缓存值） */
+    bool     repeat_armed;        /* 重复策略是否就绪 */
+
+    gui_input_focus_t focus;       /* 私有焦点组记录 */
+
     gui_input_lvgl_t lvgl;
 
     gui_key_handler_t key_handler;
@@ -139,13 +174,68 @@ struct gui_input {
 int  gui_input_lvgl_create(gui_input_t *input);
 void gui_input_lvgl_destroy(gui_input_t *input);
 void gui_input_lvgl_cancel(gui_input_t *input);
+
+/*
+ * 取消 / 重新就绪协议（spec §6.2.2）：
+ *   停重复 → 清未投递事件 → wait_release → 显式 RELEASED read →
+ *   清旧控件视觉 → 之后才允许投递新键。
+ * 返回 false 表示重新就绪尚未完成（read 被屏幕动画 / indev 暂停阻塞），
+ * 此时不允许投递新键，调用方必须稍后重试。
+ */
+bool gui_input_lvgl_cancel_key(gui_input_t *input);
+
+/* 新的按键按下：取消旧活动键并维护软件重复策略。 */
+void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event,
+                             uint64_t now_ms);
+
+/* 该键是否参与软件重复（可打印字符、编辑键、方向键）。 */
+bool gui_input_lvgl_repeatable(gui_input_t *input, const gui_key_event_t *event);
+
 int  gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event);
 int  gui_input_lvgl_pointer(gui_input_t *input, const mouse_event_t *event);
+
+/* 被消费的释放仍然必须释放 LVGL 侧的活动键，否则它会一直保持按下。 */
+void gui_input_lvgl_force_release(gui_input_t *input, uint16_t physical_key);
+
+/*
+ * 标记"需要执行取消协议"：只能在回调之外真正执行（回调里递归读 indev
+ * 是不允许的）。
+ */
+void gui_input_lvgl_mark_cancel(gui_input_t *input);
+
+/* 每步一次的适配层维护：重试待处理的取消协议。 */
+bool gui_input_lvgl_pump(gui_input_t *input);
+
+/* 焦点对象消失（LV_EVENT_DELETE）：适配层需要执行取消协议。 */
+void gui_input_focus_lost(gui_input_t *input, lv_obj_t *obj);
+
+/* ── 焦点组（实现见 input_focus.c） ────────────────────────────── */
+
+int      gui_input_focus_create(gui_input_t *input);
+void     gui_input_focus_destroy(gui_input_t *input);
+int      gui_input_focus_add(gui_input_t *input, lv_obj_t *obj);
+void     gui_input_focus_remove(gui_input_t *input, lv_obj_t *obj);
+int      gui_input_focus_set(gui_input_t *input, lv_obj_t *obj);
+lv_obj_t *gui_input_focus_current(gui_input_t *input);
+bool     gui_input_focus_alive(gui_input_t *input, lv_obj_t *obj);
+bool     gui_input_focus_navigate(gui_input_t *input, bool forward);
+bool     gui_input_focus_is_text_input(gui_input_t *input);
+bool     gui_input_focus_refresh(gui_input_t *input);
 
 /* ── input.c ↔ platform.c 的固定 hook ─────────────────────────── */
 
 gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *delay_ms);
 void gui_input_stop(gui_input_t *input, int reason);
+
+#ifdef OS01_HOST_TEST
+/*
+ * 私有测试注入：把合成的 Set 1 字节喂进**同一条**解码器 / FIFO 路径。
+ *
+ * 只在宿主测试构建（-DOS01_HOST_TEST）里存在：目标构建不编译它，因此这个
+ * 接口永远不会进入公共 sysroot。它也只接受合成输入（GUI_INPUT_SYNTHETIC）。
+ */
+int gui_input_test_feed_keybytes(gui_input_t *input, const uint8_t *bytes, size_t len);
+#endif
 
 #ifdef __cplusplus
 }
