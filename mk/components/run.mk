@@ -613,11 +613,11 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # ── GUI host tests ───────────────────────────────────────────
 # Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
 # and the GUI-2 input-focus chain.  CASE accepts any registered case
-# (platform, lvgl, devfs-input, input-frame, input-route) or all
-# (default: all).
+# (platform, lvgl, devfs-input, input-frame, input-route, input-decode)
+# or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -677,6 +677,23 @@ _test-gui-host-run-input-frame:
 _test-gui-host-run-input-route:
 	@echo "  [test-gui-host] input-route"
 	$(call os01_submake,hosttests,test-gui-input-route $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 5: the native input API surface (libgui/include/gui/
+# gui_input.h) and the pure userspace PS/2 decoder (libgui/src/
+# input_ps2.c).  Runs test_gui_input_decode.elf, which host-compiles
+# the REAL production decoder and asserts the spec §5.1 / §6.1
+# contract: the US ASCII layout (letters use Shift XOR Caps, digits
+# and punctuation use Shift only), the frozen DOWN/UP/REPEAT values and
+# modifier bit layout, the distinct left/right Shift/Ctrl/Alt physical
+# identities, the UP identity with codepoint == 0, the typematic make
+# that produces no event and does not flip Caps again, the swallowed
+# PrintScreen / Pause sequences (no event, no latched Shift or Ctrl),
+# every fragment point of an E0 sequence, the 100 ms truncated-prefix
+# expiry, the unknown scan code without a character, KP slash / KP
+# Enter, and the keys that report their physical identity only.
+_test-gui-host-run-input-decode:
+	@echo "  [test-gui-host] input-decode"
+	$(call os01_submake,hosttests,test-gui-input-decode $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
