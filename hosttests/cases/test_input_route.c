@@ -346,10 +346,13 @@ static void test_boundary_sequences_never_publish_half(void)
         { printscr, sizeof(printscr) },
         { pause, sizeof(pause) },
     };
+    /* Every revoke reason, including the explicit cleanup (0). */
+    static const int reasons[] = { 0, EACCES, ESTALE, EIO };
     size_t c;
 
     for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         size_t split;
+        size_t r;
 
         /* The whole sequence at once is published whole. */
         route_reset();
@@ -362,31 +365,49 @@ static void test_boundary_sequences_never_publish_half(void)
             assert_eq(cases[c].len, drain_bytes(kbd, buf, sizeof(buf)));
         }
 
-        /* At every fragment point: no half sequence, and a lease change
-         * in the middle still never publishes a partial sequence. */
-        for (split = 1; split < cases[c].len; split++) {
-            file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
-            file_t *mouse = route_open(INPUT_DEVICE_MOUSE);
-            uint8_t buf[16];
-            size_t got;
+        /* At every fragment point and with EVERY revoke reason: no half
+         * sequence, on the ACTIVE path and on the NORMAL path. */
+        for (r = 0; r < sizeof(reasons) / sizeof(reasons[0]); r++) {
+            for (split = 1; split < cases[c].len; split++) {
+                file_t *kbd, *mouse;
+                uint8_t buf[16];
+                size_t got, normal;
 
-            route_reset();
-            kbd = route_open(INPUT_DEVICE_KEYBOARD);
-            mouse = route_open(INPUT_DEVICE_MOUSE);
-            assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+                route_reset();
+                kbd = route_open(INPUT_DEVICE_KEYBOARD);
+                mouse = route_open(INPUT_DEVICE_MOUSE);
+                assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
 
-            feed(cases[c].seq, split);
-            assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
+                feed(cases[c].seq, split);
+                assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
 
-            /* A lease change in the middle of the sequence. */
-            input_route_unbind(view(), 0, 0);
-            assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+                /* Revoke in the middle of the sequence. */
+                input_route_unbind(view(), 0, reasons[r]);
 
-            feed(cases[c].seq + split, cases[c].len - split);
-            got = drain_bytes(kbd, buf, sizeof(buf));
-            /* Either the whole sequence crossed the epoch boundary and
-             * was isolated, or it was published whole.  Never half. */
-            assert_true(got == 0 || got == cases[c].len);
+                if (reasons[r] == 0) {
+                    /* An explicit cleanup: the endpoint falls back to the
+                     * NORMAL path and can be leased again. */
+                    assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+                } else {
+                    /* A revoked endpoint is dead: it reports the reason
+                     * and it cannot be leased again. */
+                    assert_eq(-reasons[r],
+                              input_route_read(kbd, 0, sizeof(buf), buf));
+                    assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+                    assert_true(input_route_bind(view(), kbd, mouse, NULL, NULL) < 0);
+                }
+
+                feed(cases[c].seq + split, cases[c].len - split);
+
+                /* The ACTIVE path: either the whole sequence crossed the
+                 * epoch boundary and was isolated, or it was published
+                 * whole.  Never half. */
+                got = drain_bytes(kbd, buf, sizeof(buf));
+                assert_true(got == 0 || got == cases[c].len);
+                /* The NORMAL path is held to the same rule. */
+                normal = input_route_test_normal_kbd_bytes();
+                assert_true(normal == 0 || normal == cases[c].len);
+            }
         }
     }
 }
@@ -399,6 +420,7 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
     uint8_t buf[16];
     uint64_t generation = 0;
     uint32_t modifiers = 0;
+    size_t got;
 
     route_reset();
     kbd = route_open(INPUT_DEVICE_KEYBOARD);
@@ -419,10 +441,16 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
     assert_true((modifiers & INPUT_ROUTE_MOD_CTRL) != 0);
     assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
 
-    /* The break ends the isolation (an E0 key breaks with E0 9D). */
+    /* INVARIANT: the snapshot says "Ctrl is held", so the matching
+     * release MUST reach the consumer — otherwise the consumer waits
+     * for a release that never comes.  The bind cleared the isolation
+     * the epoch boundary installed, so the break is delivered. */
     feed1(0xE0);
     feed1(0x9D);
-    assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
+    got = drain_bytes(kbd, buf, sizeof(buf));
+    assert_eq(2, got);
+    assert_eq(0xE0, buf[0]);
+    assert_eq(0x9D, buf[1]);
 
     /* The next make is published normally. */
     feed1(0xE0);
@@ -430,6 +458,67 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
     assert_eq(2, drain_bytes(kbd, buf, sizeof(buf)));
     assert_eq(0xE0, buf[0]);
     assert_eq(0x1D, buf[1]);
+}
+
+/* ── The cross-epoch make puts the ACTIVE path into DESYNC ──── */
+
+static void test_cross_epoch_make_reports_desync(void)
+{
+    file_t *kbd, *mouse;
+    uint8_t buf[16];
+    uint64_t generation = 0;
+
+    route_reset();
+    kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    mouse = route_open(INPUT_DEVICE_MOUSE);
+
+    /* The sequence starts in the pre-lease epoch, completes in the
+     * lease's epoch. */
+    feed1(0xE0);
+    assert_eq(0, input_route_bind(view(), kbd, mouse, &generation, NULL));
+    feed1(0x1D);
+
+    /* The frame was swallowed, but the consumer is TOLD that its key
+     * state may have diverged: the poll reports POLLERR ... */
+    assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+    /* ... and it stays reported: polling does not consume the flag. */
+    assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+    /* ... and the read tells the consumer which error it is. */
+    assert_eq(-ESTALE, input_route_read(kbd, 0, sizeof(buf), buf));
+
+    /* Told once: the flag is cleared and the poll is clean again. */
+    assert_false((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+
+    /* The byte stream itself is intact: the consumer can keep reading
+     * after it has re-synced its key state. */
+    feed1(0x1E);
+    assert_eq(1, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(0x1E, buf[0]);
+}
+
+/* ── A new lease starts from a known-consistent state ────────── */
+
+static void test_desync_is_cleared_at_bind(void)
+{
+    file_t *kbd, *mouse;
+    uint8_t buf[16];
+    uint64_t generation = 0;
+
+    route_reset();
+    kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    mouse = route_open(INPUT_DEVICE_MOUSE);
+
+    feed1(0xE0);
+    assert_eq(0, input_route_bind(view(), kbd, mouse, &generation, NULL));
+    feed1(0x1D);
+    assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+
+    /* A new lease starts from a known-consistent state: the previous
+     * lease's DESYNC does not follow it. */
+    input_route_unbind(view(), generation, 0);
+    assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+    assert_false((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+    assert_eq(-EAGAIN, input_route_read(kbd, 0, sizeof(buf), buf));
 }
 
 /* ── Binding while a key is held produces no new DOWN ───────── */
@@ -693,6 +782,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_active_queue_survives_drain_and_refill),
     TEST_ENTRY(test_boundary_sequences_never_publish_half),
     TEST_ENTRY(test_cross_epoch_make_is_isolated_until_break),
+    TEST_ENTRY(test_cross_epoch_make_reports_desync),
+    TEST_ENTRY(test_desync_is_cleared_at_bind),
     TEST_ENTRY(test_bind_with_held_key_produces_no_new_down),
     TEST_ENTRY(test_caps_typematic_does_not_flip),
     TEST_ENTRY(test_mouse_button_isolation_keeps_movement),

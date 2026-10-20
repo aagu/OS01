@@ -128,6 +128,11 @@ static struct {
     uint8_t       kbd_queue[ROUTE_KBD_QUEUE_BYTES];
     unsigned      kbd_head, kbd_tail, kbd_count;
     int           kbd_overflow;
+    /* The DESYNC flag: a sequence crossed an epoch boundary, so the
+     * consumer's key state may have diverged from the physical one.
+     * It is per-lease (cleared at bind) and sticky until the consumer
+     * is told. */
+    int           kbd_desync;
     mouse_event_t mouse_queue[ROUTE_MOUSE_QUEUE_SLOTS];
     unsigned      mouse_head, mouse_tail, mouse_count;
     int           mouse_overflow;
@@ -207,6 +212,7 @@ static void route_kbd_queue_reset_locked(void)
 {
     route.kbd_head = route.kbd_tail = route.kbd_count = 0;
     route.kbd_overflow = 0;
+    route.kbd_desync = 0;
 }
 
 static void route_mouse_queue_reset_locked(void)
@@ -272,6 +278,19 @@ static int route_active_read_locked(const struct route_endpoint *ep,
     unsigned n, i;
 
     if (ep->device == INPUT_DEVICE_KEYBOARD) {
+        if (route.kbd_desync) {
+            /* The consumer's key state may have diverged: a sequence was
+             * swallowed at an epoch boundary.  The flag is sticky until
+             * the consumer is told — telling it clears the flag, and the
+             * byte stream itself stays intact, so the consumer can keep
+             * reading after it has re-synced its key state.
+             *
+             * -ESTALE is reported here; a DEAD endpoint (a revoked
+             * lease) reports its recorded reason instead and stays dead
+             * for good, so the two are told apart by the retry. */
+            route.kbd_desync = 0;
+            return -ESTALE;
+        }
         if (route.kbd_overflow) {
             /* The ACTIVE stream is untrustworthy: the error is sticky
              * for the life of the lease, so the read AND the poll keep
@@ -531,16 +550,27 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
 
     /* Every key that is physically held but NOT reported by the
      * snapshot is isolated: its release must never reach the new
-     * consumer as a phantom release.  The held modifier keys ARE
-     * reported by the snapshot, so their release stays visible and the
-     * consumer's key state stays consistent. */
+     * consumer as a phantom release.
+     *
+     * The held MODIFIER keys ARE reported by the snapshot, so their
+     * release must reach the consumer too: any isolation an earlier
+     * epoch boundary installed on them is cleared here.  Without that,
+     * the snapshot could report "Ctrl is held" while the matching
+     * release was swallowed, and the consumer would wait for a release
+     * that never comes. */
     for (i = 0; i < ROUTE_KEY_SLOTS; i++) {
         if (!route.phys_down[i])
             continue;
-        if (route_modifier_bit((uint16_t)i))
+        if (route_modifier_bit((uint16_t)i)) {
+            route.isolated[i] = 0;
             continue;
+        }
         route.isolated[i] = 1;
     }
+
+    /* A new lease starts from a known-consistent state: the DESYNC flag
+     * belongs to the lease that is being replaced. */
+    route.kbd_desync = 0;
 
     /* The mouse buttons that were already held are isolated as well:
      * the consumer never saw their press, so it must never see them
@@ -624,7 +654,7 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
     struct route_endpoint *ep;
     uint64_t flags;
     uint32_t mask = 0;
-    int pending, overflow;
+    int pending, overflow, desync;
 
     if (!f)
         return POLLNVAL;
@@ -640,9 +670,11 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
     if (ep->device == INPUT_DEVICE_KEYBOARD) {
         pending = route.kbd_count;
         overflow = route.kbd_overflow;
+        desync = route.kbd_desync;
     } else {
         pending = route.mouse_count;
         overflow = route.mouse_overflow;
+        desync = 0;
     }
 
     if (ep->revoked && ep->error) {
@@ -650,7 +682,11 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
     } else if (route.lease_active && !route_endpoint_is_owner_locked(ep)) {
         mask = POLLERR;
     } else if (route.lease_active) {
-        if (overflow) {
+        if (overflow || desync) {
+            /* The overflow means the stream lost data, the desync means
+             * the consumer's key state may have diverged: both are
+             * reported the same way, and the read tells the consumer
+             * which one it is (-EOVERFLOW / -ESTALE). */
             mask = POLLERR;
         } else if (pending) {
             mask = POLLIN | POLLRDNORM;
@@ -662,11 +698,13 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
             if (ep->device == INPUT_DEVICE_KEYBOARD) {
                 pending = route.kbd_count;
                 overflow = route.kbd_overflow;
+                desync = route.kbd_desync;
             } else {
                 pending = route.mouse_count;
                 overflow = route.mouse_overflow;
+                desync = 0;
             }
-            if (overflow) {
+            if (overflow || desync) {
                 mask = POLLERR;
             } else if (pending) {
                 mask = POLLIN | POLLRDNORM;
@@ -719,8 +757,16 @@ static void route_publish_frame_locked(const input_ps2_frame_t *frame)
 
     /* 3. A sequence that crosses an epoch boundary started in another
      *    lease's era: it is isolated, so the consumer never sees a
-     *    half-truth.  The key stays isolated until its break. */
+     *    half-truth.  The key stays isolated until its break.
+     *
+     *    The consumer's key state may now have diverged from the
+     *    physical one (it never saw this sequence), so the ACTIVE path
+     *    goes DESYNC and says so OUT OF BAND: the byte stream stays raw
+     *    Set 1 payload, the flag is reported by the read (-ESTALE) and
+     *    by the poll (POLLERR). */
     if (frame->start_epoch != route.epoch) {
+        if (route.lease_active)
+            route.kbd_desync = 1;
         if (ordinary) {
             if (frame->is_make)
                 route.isolated[key] = 1;

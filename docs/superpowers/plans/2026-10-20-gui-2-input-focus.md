@@ -113,6 +113,22 @@
 
 ```c
 typedef enum { INPUT_DEVICE_KEYBOARD, INPUT_DEVICE_MOUSE } input_device_t;
+/* NORMAL 路径 sink：driver 在 init 时向 route 注册，route 持 route_lock 调用。
+ * 注入而非 route 直接调用 driver 的原因：route 必须在自己的临界区内完成
+ * NORMAL 的授权/出队/挂 waiter，直接回调会形成 route↔driver 循环依赖，
+ * 并把 driver 头泄漏给所有消费者。 */
+typedef struct {
+    void     (*publish)(const input_ps2_frame_t *frame, uint32_t modifiers);
+    int      (*read)(uint64_t offset, uint64_t size, void *buf);
+    uint32_t (*poll)(uint32_t requested, struct poll_table *pt);
+} input_route_kbd_sink_t;
+typedef struct {
+    void     (*publish)(const mouse_event_t *event);
+    int      (*read)(uint64_t offset, uint64_t size, void *buf);
+    uint32_t (*poll)(uint32_t requested, struct poll_table *pt);
+} input_route_mouse_sink_t;
+void input_route_set_normal_sinks(const input_route_kbd_sink_t *kbd,
+                                  const input_route_mouse_sink_t *mouse);
 void input_route_init(void);
 int input_route_open(input_device_t device, struct file **out);
 void input_route_release_file(struct file *f);

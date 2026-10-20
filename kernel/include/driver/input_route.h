@@ -125,13 +125,26 @@ void input_route_unbind(const void *view, uint64_t generation, int reason);
 /* Read from a route file.  Before the lease the device is NORMAL and
  * the file drains the NORMAL queue; while the lease is live only the
  * owner's file may read (the ACTIVE queue), every other file gets
- * EBUSY. */
+ * EBUSY.
+ *
+ * Two ACTIVE-path errors are reported out of band, so the byte stream
+ * itself stays raw Set 1 payload:
+ *   -EOVERFLOW  a sequence did not fit the ACTIVE queue: the stream
+ *               lost data.  Sticky for the life of the lease.
+ *   -ESTALE     a sequence crossed an epoch boundary and was swallowed:
+ *               the consumer's KEY STATE may have diverged from the
+ *               physical one.  Sticky until the consumer is told (the
+ *               read tells it and clears the flag); the byte stream
+ *               stays intact, so the consumer can keep reading after it
+ *               has re-synced its key state. */
 int  input_route_read(struct file *f, uint64_t offset, uint64_t size,
                       void *buf);
 
 /* Poll a route file.  The readiness check, the waiter registration
  * and the authorisation all happen in the route's own critical
- * section, so a publish that races the registration cannot be lost. */
+ * section, so a publish that races the registration cannot be lost.
+ * POLLERR reports the two ACTIVE-path errors above (the read tells
+ * the consumer which one it is). */
 uint32_t input_route_poll(struct file *f, uint32_t requested,
                            struct poll_table *pt);
 
