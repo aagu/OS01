@@ -1299,7 +1299,19 @@ def _object_for_source(obj_root: Path, src: Path) -> Path | None:
         for dep in deps.split():
             try:
                 if Path(dep).resolve() == wanted:
-                    return Path(target.strip())
+                    candidate = Path(target.strip())
+                    if not candidate.is_absolute():
+                        # A relative .d target is relative to the directory
+                        # the dependency file lives in (the object's own
+                        # directory).  It must be normalised the same way
+                        # every other path in the pipeline is, or the same
+                        # object would appear in BOTH the under- and the
+                        # over-report set.
+                        candidate = dep_file.parent / candidate
+                    try:
+                        return candidate.resolve()
+                    except OSError:
+                        return candidate
             except OSError:
                 continue
     return None
