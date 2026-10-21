@@ -1189,6 +1189,14 @@ TOTAL_TIMEOUT_SECONDS = (
     + INPUT_CLEANUP_CAP_SECONDS
 )
 
+# The ABSOLUTE ceiling of the per-SMP budget.  The sum above is finite,
+# but "finite" alone is not a bound: a cap that is inflated (or a
+# scenario registered without a cap) still satisfies every identity that
+# only compares the sum with its own parts.  600 s is the ceiling -- the
+# sum is 410 s today, so the ceiling leaves room for the registered
+# scenarios but still refuses an unbounded cap.  A fixture pins it.
+TOTAL_TIMEOUT_SECONDS_MAX = 600.0
+
 # The bounds of a single step inside the interaction scenario.
 STEP_TIMEOUT_SECONDS = 12.0
 SHELL_TIMEOUT_SECONDS = 10.0
@@ -1264,6 +1272,9 @@ class GuiInputScenarios:
         self.records: List[GuiInputRecord] = []
         # The records that were read but not consumed yet.
         self._pending: List[GuiInputRecord] = []
+        # The records a wait skipped (rejected by its predicate).  They are
+        # kept for the diagnostics and asserted, never dropped silently.
+        self._skipped: List[GuiInputRecord] = []
         # The observations the outcome detail carries.
         self.notes: List[str] = []
         self._last_send = 0.0
@@ -1309,8 +1320,15 @@ class GuiInputScenarios:
     def _next_records(self) -> List[GuiInputRecord]:
         """The records that have not been consumed yet.
 
-        The records are KEPT: a record that does not match the caller's
-        predicate must not be lost, or a later wait would miss it.
+        The list is NOT trimmed here: a record that does not match the
+        caller's predicate stays pending, so a later wait can still see
+        it.  ``_wait`` is the place that consumes: when it finds the
+        record it was looking for, it drops that record **and the records
+        before it** (the ones the predicate rejected) and keeps the ones
+        after it.  The dropped records are not lost: ``_wait`` moves them
+        to ``self._skipped`` and asserts that they carry the modifier
+        snapshot the runner expects, so an unexpected intermediate guest
+        record cannot hide in the gap.
         """
         if not self._pending:
             self._pump()
@@ -1318,19 +1336,50 @@ class GuiInputScenarios:
 
     def _wait(self, predicate: Callable[[GuiInputRecord], bool],
               timeout: float, what: str) -> GuiInputRecord:
-        """Wait for a record that satisfies ``predicate``."""
+        """Wait for a record that satisfies ``predicate``.
+
+        The records the predicate rejected are MOVED to ``self._skipped``
+        -- they are not silently discarded -- and each of them is checked
+        against the modifier model, so an unexpected intermediate guest
+        record cannot hide in the gap.
+        """
         limit = min(timeout, self._remaining())
         deadline = time.monotonic() + limit
         while True:
             for index, record in enumerate(self._pending):
                 if predicate(record):
+                    skipped = self._pending[:index]
                     self._pending = self._pending[index + 1:]
+                    self._skipped.extend(skipped)
+                    self._assert_skipped_records(skipped, what)
                     return record
             if time.monotonic() >= deadline:
                 raise GuiInputScenarioError(
                     f"timeout waiting for {what} after {limit:.1f}s"
                 )
             self._pump()
+
+    def _assert_skipped_records(self, skipped: List[GuiInputRecord],
+                                what: str) -> None:
+        """Every record a wait skipped must carry the expected modifiers.
+
+        The runner injects one event at a time and waits for the guest's
+        STATE before it injects the next one, so a skipped record is an
+        intermediate state of the SAME interaction (the first of two
+        rapid clicks, the repeats of a long press).  It must therefore
+        report the modifier snapshot the runner asked for: a record that
+        reports another one is a guest defect, and it must not disappear
+        into the gap between two waits.
+        """
+        for record in skipped:
+            if record.phase != PHASE_STATE:
+                continue
+            got = record.int_field("modifiers")
+            if got != self.mods:
+                raise GuiInputScenarioError(
+                    f"{what}: an intermediate guest record reported "
+                    f"modifiers={got}, expected {self.mods}"
+                )
 
     def _wait_state(self, predicate: Callable[[GuiInputRecord], bool],
                     timeout: float, what: str) -> GuiInputRecord:
@@ -1556,6 +1605,10 @@ class GuiInputScenarios:
     def _textarea(self, record: GuiInputRecord) -> bytes:
         return record.hex_field("textarea")
 
+    def _textarea2(self, record: GuiInputRecord) -> bytes:
+        """The SECOND textarea: the multi-line one."""
+        return record.hex_field("textarea2")
+
     def _focus_of(self, record: GuiInputRecord) -> int:
         return int(record.get("focus") or "0", 16)
 
@@ -1596,15 +1649,21 @@ class GuiInputScenarios:
         return last
 
     def _assert_no_control_char(self, record: GuiInputRecord, what: str) -> None:
-        """The textarea must not contain a control character."""
-        for name in ("textarea", "textarea2"):
-            data = record.hex_field(name)
-            for index, byte in enumerate(data):
-                if byte < 0x20 or byte == 0x7F:
-                    raise GuiInputScenarioError(
-                        f"{what}: the {name} holds the control character "
-                        f"0x{byte:02x} at offset {index}"
-                    )
+        """The ONE-LINE textarea must not contain a control character.
+
+        The check is scoped to the first textarea on purpose: the second
+        textarea is the multi-line one, so the newline the runner asks it
+        to hold (0x0a) is a feature, not a defect.  The first textarea is
+        one-line, so ANY control character in it is a defect and the
+        check stays exact there.
+        """
+        data = record.hex_field("textarea")
+        for index, byte in enumerate(data):
+            if byte < 0x20 or byte == 0x7F:
+                raise GuiInputScenarioError(
+                    f"{what}: the textarea holds the control character "
+                    f"0x{byte:02x} at offset {index}"
+                )
 
     def _expect_state_unchanged(self, before: Dict[str, Any],
                                 after: Dict[str, Any], what: str,
@@ -1646,6 +1705,7 @@ class GuiInputScenarios:
             self._step_modifier_matrix()
             self._step_ctrl_c_during_lease()
             self._step_repeat()
+            self._step_multiline_text()
             self._step_ctrl_q()
         except GuiInputScenarioError as exc:
             reasons.append(f"[{case_name}] {exc}")
@@ -1819,26 +1879,66 @@ class GuiInputScenarios:
         """Hover the scroll container and turn the wheel.
 
         The wheel is a **button** (wheel-up / wheel-down), never a third
-        motion axis.  The assertion is that the wheel buttons do not
-        leak into the click counter, the focus or the textarea: the scroll
-        offset is the one field a working wheel is allowed to change, so
-        it is observed and reported instead of being asserted.
+        motion axis.  The plan pins ONE DETENT = 32 px, so the scroll
+        offset is now ASSERTED, not observed: a wheel-down detent must
+        move the hovered container down by exactly 32 px and a wheel-up
+        detent must move it back up by exactly 32 px.
+
+        The sign follows the guest's convention: a wheel-up lowers the
+        PS/2 wheel delta (the guest reports wheel = -1), so it scrolls
+        the content UP, which DECREASES the scroll offset.  A wheel-up at
+        the top of the container has no room, so the detent that creates
+        the room comes first and the wheel-up is measured on the way
+        back.
+
+        The wheel must not leak into the click counter, the focus or the
+        textareas: those fields are compared exactly.
         """
         x = self.ready.int_field("scroll_x")
         y = self.ready.int_field("scroll_y")
         self._move_to(x, y)
         before = self._state_snapshot(self._last_state)
-        self._btn("wheel-up", True)
-        self._btn("wheel-up", False)
+        start = before["scroll"]
+        seq = self._last_state.seq
+
+        # One wheel-down detent: the content scrolls down by exactly one step.
         self._btn("wheel-down", True)
         self._btn("wheel-down", False)
-        after = self._observe_quiet(self.timing.quiet, "the wheel")
+        down = self._wait_state(
+            lambda r: r.seq > seq and self._scroll(r) != start,
+            self.timing.step,
+            "the scroll offset to move down",
+        )
+        down_delta = self._scroll(down) - start
+        if down_delta != WHEEL_STEP_PX:
+            raise GuiInputScenarioError(
+                f"the wheel-down detent moved the scroll offset by "
+                f"{down_delta} px, expected {WHEEL_STEP_PX} px"
+            )
+
+        # One wheel-up detent: the content scrolls back up by exactly one step.
+        self._btn("wheel-up", True)
+        self._btn("wheel-up", False)
+        up = self._wait_state(
+            lambda r: r.seq > down.seq and self._scroll(r) != self._scroll(down),
+            self.timing.step,
+            "the scroll offset to move back up",
+        )
+        up_delta = self._scroll(up) - self._scroll(down)
+        if up_delta != -WHEEL_STEP_PX:
+            raise GuiInputScenarioError(
+                f"the wheel-up detent moved the scroll offset by "
+                f"{up_delta} px, expected {-WHEEL_STEP_PX} px"
+            )
+
+        # The wheel must not leak into the click counter, the focus or the
+        # textareas.
         self._expect_state_unchanged(
-            before, after, "the wheel",
+            before, self._state_snapshot(up), "the wheel",
             ignore=("scroll",),
         )
         self.notes.append(
-            f"wheel -> scroll {before['scroll']} -> {after['scroll']}"
+            f"wheel -> scroll {start} -> {self._scroll(down)} -> {self._scroll(up)}"
         )
 
     # ── the keyboard steps ──────────────────────────────────────────
@@ -1922,11 +2022,11 @@ class GuiInputScenarios:
 
     def _step_text(self) -> None:
         """Type ``aA!`` into the focused textarea."""
-        self._type_plain("a", "a")
+        self._type_plain("a")
         self._assert_textarea(b"a", "the plain 'a'")
-        self._type_shift("a", "A")
+        self._type_shift("a")
         self._assert_textarea(b"aA", "the Shift+a")
-        self._type_shift("1", "!")
+        self._type_shift("1")
         self._assert_textarea(b"aA!", "the Shift+1")
         self.notes.append(f"textarea={self._textarea(self._last_state)!r}")
 
@@ -1938,13 +2038,15 @@ class GuiInputScenarios:
                 f"{what}: the textarea holds {got!r}, expected {expected!r}"
             )
 
-    def _type_plain(self, qcode: str, expected: str) -> None:
+    def _type_plain(self, qcode: str) -> None:
+        """Type one unmodified key: the down edge and the up edge."""
         self._key(qcode, True)
         self._expect_key_edge(qcode, True, QCODE_PHYSICAL[qcode])
         self._key(qcode, False)
         self._expect_key_edge(qcode, False, QCODE_PHYSICAL[qcode])
 
-    def _type_shift(self, qcode: str, expected: str) -> None:
+    def _type_shift(self, qcode: str) -> None:
+        """Type one key with the left Shift held down."""
         self._key("shift", True)
         self._expect_key_edge("shift", True, QCODE_PHYSICAL["shift"])
         self._key(qcode, True)
@@ -2035,11 +2137,7 @@ class GuiInputScenarios:
         text_before = self._textarea(before)
         self._key("caps_lock", True)
         self._expect_key_edge("caps_lock", True, QCODE_PHYSICAL["caps_lock"])
-        if not self.mods & MOD_CAPS:
-            raise GuiInputScenarioError(
-                "the Caps make did not set the CAPS modifier bit"
-            )
-        self._type_plain("a", "A")
+        self._type_plain("a")
         text_after = self._textarea(self._last_state)
         if text_after != text_before + b"A":
             raise GuiInputScenarioError(
@@ -2049,10 +2147,6 @@ class GuiInputScenarios:
         # The Caps break does not clear the latch.
         self._key("caps_lock", False)
         self._expect_key_edge("caps_lock", False, QCODE_PHYSICAL["caps_lock"])
-        if not self.mods & MOD_CAPS:
-            raise GuiInputScenarioError(
-                "the Caps break cleared the CAPS modifier bit"
-            )
 
         # 2. Caps + Shift: 'a' is 'a' again.
         text_before = self._textarea(self._last_state)
@@ -2074,26 +2168,14 @@ class GuiInputScenarios:
         # 3. A second Caps make restores the latch to off.
         self._key("caps_lock", True)
         self._expect_key_edge("caps_lock", True, QCODE_PHYSICAL["caps_lock"])
-        if self.mods & MOD_CAPS:
-            raise GuiInputScenarioError(
-                "the second Caps make did not clear the CAPS modifier bit"
-            )
         # 4. A repeated make (the key is still held) must NOT flip it.
         self._repeated_make("caps_lock")
-        if self.mods & MOD_CAPS:
-            raise GuiInputScenarioError(
-                "the repeated Caps make flipped the CAPS latch again"
-            )
         # The break keeps the latch off.
         self._key("caps_lock", False)
         self._expect_key_edge("caps_lock", False, QCODE_PHYSICAL["caps_lock"])
-        if self.mods & MOD_CAPS:
-            raise GuiInputScenarioError(
-                "the Caps break set the CAPS modifier bit again"
-            )
         # 5. With the latch off, 'a' is 'a' again.
         text_before = self._textarea(self._last_state)
-        self._type_plain("a", "a")
+        self._type_plain("a")
         text_after = self._textarea(self._last_state)
         if text_after != text_before + b"a":
             raise GuiInputScenarioError(
@@ -2193,7 +2275,7 @@ class GuiInputScenarios:
         # again before the text input.
         self._tab_to(WIDGET_TEXTAREA1)
         text_before = self._textarea(self._last_state)
-        self._type_plain("z", "z")
+        self._type_plain("z")
         self._assert_textarea(text_before + b"z", "the text after the Ctrl+C")
         self._assert_no_control_char(self._last_state, "after the Ctrl+C text input")
 
@@ -2244,6 +2326,44 @@ class GuiInputScenarios:
                         )
             time.sleep(0.02)
         return last
+
+    # ── the multi-line edit ─────────────────────────────────────────
+
+    def _step_multiline_text(self) -> None:
+        """The SECOND textarea is multi-line: Enter must insert a newline.
+
+        The first textarea stays one-line, so the two are directly
+        comparable: the newline (0x0a) must land in the second textarea
+        and the first one must not change at all.  LVGL filters the
+        newline in one-line mode and reports LV_EVENT_READY instead, so
+        this is the only place where a newline may appear.
+        """
+        self._tab_to(WIDGET_TEXTAREA2)
+        ta1_before = self._textarea(self._last_state)
+        ta2_before = self._textarea2(self._last_state)
+        self._type_plain("b")
+        self._key("ret", True)
+        self._expect_key_edge("ret", True, QCODE_PHYSICAL["ret"])
+        self._key("ret", False)
+        self._expect_key_edge("ret", False, QCODE_PHYSICAL["ret"])
+        # The Enter edges carry the state the newline landed in, so the
+        # latest STATE record is the evidence: a wait for a NEW record
+        # would time out, because the edge checks already consumed them.
+        after = self._last_state
+        ta2 = self._textarea2(after)
+        expected = ta2_before + b"b\x0a"
+        if ta2 != expected:
+            raise GuiInputScenarioError(
+                f"the multi-line edit: the second textarea holds {ta2!r}, "
+                f"expected {expected!r}"
+            )
+        ta1 = self._textarea(after)
+        if ta1 != ta1_before:
+            raise GuiInputScenarioError(
+                f"the multi-line edit changed the one-line textarea: it went "
+                f"from {ta1_before!r} to {ta1!r}"
+            )
+        self.notes.append(f"multi-line -> textarea2={ta2!r}")
 
     # ── the exit ────────────────────────────────────────────────────
 

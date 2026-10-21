@@ -9,7 +9,9 @@ for SMP=1 and SMP=2.
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import tempfile
 import time
 import unittest
@@ -30,6 +32,7 @@ try:
         MODIFIER_BITS,
         MOUSE_BUTTONS,
         QCODE_PHYSICAL,
+        WHEEL_STEP_PX,
     )
 except ImportError:  # pragma: no cover - the repo root is on sys.path
     raise
@@ -76,6 +79,9 @@ class FakeQMP:
         self.input_events_sent: List[dict] = []
         # The surface never changes (the screenshot mismatch fixture).
         self.stable_surface = False
+        # The QMP transcript: the same file the real QmpClient writes.
+        self.transcript: Optional[Path] = None
+        self._transcript_fp = None
 
     def connect(self) -> None:
         self.connected = True
@@ -95,8 +101,42 @@ class FakeQMP:
             raise RuntimeError("simulated QMP input-send-event failure")
         for event in events:
             self.input_events_sent.append(event)
+        self._record_transcript(events)
+
+    # ── the QMP transcript (the same contract as the real client) ────
+
+    def set_transcript(self, path: Path) -> None:
+        self.close_transcript()
+        self.transcript = Path(path)
+        try:
+            self.transcript.parent.mkdir(parents=True, exist_ok=True)
+            self._transcript_fp = self.transcript.open("w", encoding="utf-8")
+        except OSError:
+            self._transcript_fp = None
+
+    def _record_transcript(self, events: List[dict]) -> None:
+        if self._transcript_fp is None:
+            if self.transcript is None:
+                return
+            self.set_transcript(self.transcript)
+            if self._transcript_fp is None:
+                return
+        self._transcript_fp.write(
+            json.dumps({"command": "input-send-event", "events": events},
+                       sort_keys=True) + "\n"
+        )
+        self._transcript_fp.flush()
+
+    def close_transcript(self) -> None:
+        if self._transcript_fp is not None:
+            try:
+                self._transcript_fp.close()
+            except OSError:
+                pass
+            self._transcript_fp = None
 
     def close(self) -> None:
+        self.close_transcript()
         self.closed = True
 
 
@@ -138,6 +178,9 @@ class FakeProbe:
         self.last_state = ""
         # The READY record always comes first.
         self.started = False
+        # The scroll room of the scroll container (the guest's content is
+        # taller than the box, so the wheel has somewhere to scroll).
+        self.scroll_room = 222
         # The fault switches.
         self.fault_stale_nonce = False
         self.fault_drop_key_up = False
@@ -150,6 +193,13 @@ class FakeProbe:
         self.fault_no_ready = False
         self.fault_silent = False
         self.fault_no_ack = False
+        # Task 11 fix round 1: the fault switches of the new fixtures.
+        self.fault_wrong_physical_key = False
+        self.fault_textarea_extra = False
+        self.fault_wheel_leak = False
+        self.fault_no_multiline = False
+        self.fault_caps_no_flip = False
+        self.fault_wheel_wrong_step = False
 
     # ── the layout ────────────────────────────────────────────────
 
@@ -311,7 +361,8 @@ class FakeProbe:
         if down:
             self.held[qcode] = QCODE_PHYSICAL.get(qcode, 0)
             if qcode == "caps_lock":
-                self.modifiers ^= MOD_CAPS
+                if not self.fault_caps_no_flip:
+                    self.modifiers ^= MOD_CAPS
             elif bit:
                 self.modifiers |= bit
         else:
@@ -328,6 +379,12 @@ class FakeProbe:
             # The guest's TTY delivered a SIGINT to the lease holder.
             self.sigint_seen = 1
         self.physical_key = QCODE_PHYSICAL.get(qcode, 0)
+        if self.fault_wrong_physical_key and qcode == "z":
+            # The guest reports a physical identity that is not the key the
+            # runner injected: the native physical identity is load-bearing.
+            # Only the LAST typed key is affected, so the fixture is
+            # specific: every other edge is still reported correctly.
+            self.physical_key = 0xEE
         self.action = 0 if down else 1
         self._widget_effect(qcode, down)
         if down:
@@ -373,19 +430,35 @@ class FakeProbe:
                 else:
                     self.textarea2 = target
             return
+        if qcode == "ret" and down:
+            # LVGL maps the Enter key to LV_KEY_ENTER (0x0a).  In one-line
+            # mode it reports LV_EVENT_READY and inserts nothing; in
+            # multi-line mode it inserts the newline.  The second textarea
+            # is the multi-line one.
+            if self.focus == 5 and not self.fault_no_multiline:
+                self.textarea2 += b"\x0a"
+            return
         char = self._codepoint(qcode)
         if char and down:
             if self.focus == 4:
                 self.textarea += char.encode()
+                if self.fault_textarea_extra and qcode == "z":
+                    # The guest keeps a byte the runner never typed: only
+                    # an EXACT comparison can see it.
+                    self.textarea += b"X"
             else:
                 self.textarea2 += char.encode()
 
     def _button(self, data: dict) -> None:
         down = bool(data.get("down"))
         button = data.get("button")
+        if button in ("wheel-up", "wheel-down"):
+            # The wheel is a button; one detent scrolls the container under
+            # the pointer by exactly one step.
+            if down:
+                self._wheel(button)
+            return
         if button != "left":
-            # The wheel buttons do not change the guest's widget state
-            # unless the PS/2 mouse delivers a wheel delta.
             return
         if down and not self.button_down:
             self.button_down = True
@@ -401,6 +474,27 @@ class FakeProbe:
             if self._over("btn"):
                 self.click_count += 1
             self._update_slider()
+
+    def _wheel(self, button: str) -> None:
+        """One wheel detent on the container under the pointer.
+
+        The guest's sign convention: a wheel-down is a POSITIVE detent (the
+        content scrolls down, so the scroll offset grows), a wheel-up is a
+        NEGATIVE one (the content scrolls up, so the offset shrinks).
+        """
+        if not self._over("scroll"):
+            return
+        step = WHEEL_STEP_PX // 2 if self.fault_wheel_wrong_step else WHEEL_STEP_PX
+        if button == "wheel-down":
+            self.scroll = min(self.scroll + step, self.scroll_room)
+        else:
+            self.scroll = max(self.scroll - step, 0)
+        if self.fault_wheel_leak:
+            # The wheel leaks into the click counter.  The click counter is
+            # the right target: every later check compares it RELATIVE to
+            # the value it read before its own click, so only the wheel's
+            # own state comparison can catch this leak.
+            self.click_count += 1
 
     def _update_slider(self) -> None:
         if not self._over("slider"):
@@ -448,6 +542,13 @@ class FakeProcessSession:
         probe_fault_silent: bool = False,
         probe_fault_no_ack: bool = False,
         probe_fault_no_ppid: bool = False,
+        probe_fault_wrong_physical_key: bool = False,
+        probe_fault_textarea_extra: bool = False,
+        probe_fault_wheel_leak: bool = False,
+        probe_fault_no_multiline: bool = False,
+        probe_fault_caps_no_flip: bool = False,
+        probe_fault_wheel_wrong_step: bool = False,
+        hang_after_probe: bool = False,
     ):
         self._argv = list(argv)
         self._run_dir = run_dir
@@ -496,6 +597,17 @@ class FakeProcessSession:
         self.probe_fault_silent = probe_fault_silent
         self.probe_fault_no_ack = probe_fault_no_ack
         self.probe_fault_no_ppid = probe_fault_no_ppid
+        self.probe_fault_wrong_physical_key = probe_fault_wrong_physical_key
+        self.probe_fault_textarea_extra = probe_fault_textarea_extra
+        self.probe_fault_wheel_leak = probe_fault_wheel_leak
+        self.probe_fault_no_multiline = probe_fault_no_multiline
+        self.probe_fault_caps_no_flip = probe_fault_caps_no_flip
+        self.probe_fault_wheel_wrong_step = probe_fault_wheel_wrong_step
+        # The session's hard deadline: the real ProcessSession kills the
+        # child when the budget is spent, and the fake emulates that.
+        self._deadline = time.monotonic() + float(timeout_s)
+        # The guest stops answering once the probe has started.
+        self.hang_after_probe = hang_after_probe
 
         self.qmp: Optional[FakeQMP] = None
 
@@ -732,6 +844,12 @@ class FakeProcessSession:
         self.probe.fault_no_ready = self.probe_fault_no_ready
         self.probe.fault_silent = self.probe_fault_silent
         self.probe.fault_no_ack = self.probe_fault_no_ack
+        self.probe.fault_wrong_physical_key = self.probe_fault_wrong_physical_key
+        self.probe.fault_textarea_extra = self.probe_fault_textarea_extra
+        self.probe.fault_wheel_leak = self.probe_fault_wheel_leak
+        self.probe.fault_no_multiline = self.probe_fault_no_multiline
+        self.probe.fault_caps_no_flip = self.probe_fault_caps_no_flip
+        self.probe.fault_wheel_wrong_step = self.probe_fault_wheel_wrong_step
         # Only the events injected after the probe started belong to this
         # run: the fake QMP object is shared between the SMP runs.
         self._probe_events_consumed = (
@@ -778,6 +896,14 @@ class FakeProcessSession:
     def observe(self, seconds: float) -> str:
         if self._panic_on_observe:
             self._text += "\nKERNEL PANIC: fatal exception in interrupt\n"
+        if time.monotonic() >= self._deadline:
+            # The budget is spent: the real session kills the child here.
+            raise subprocess.TimeoutExpired(
+                " ".join(self.argv), float(self._timeout_s))
+        if (self.hang_after_probe and self.probe is not None
+                and self.probe.started):
+            # The guest stopped answering: only the budget can end the run.
+            return ""
         self._advance_probe()
         old = self._cursor
         self._cursor = len(self._text)
@@ -1431,6 +1557,241 @@ class GuiInputRunnerTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(before, git.INPUT_SCENARIO_CAPS["input_interaction"])
         self.assertEqual(git.TOTAL_TIMEOUT_SECONDS, self.gt.TOTAL_TIMEOUT_SECONDS)
+
+    # ── the absolute budget ceiling ────────────────────────────────
+
+    def test_the_total_budget_has_an_absolute_ceiling(self):
+        """The per-SMP budget is bounded from ABOVE, not only from below.
+
+        The finite sum alone is not a bound: a cap that is inflated (or a
+        scenario registered without a cap) still satisfies every identity
+        that only compares the sum with its own parts.  The ceiling is
+        what catches that.
+        """
+        git = self.git
+        self.assertGreater(git.TOTAL_TIMEOUT_SECONDS_MAX, 0.0)
+        self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS_MAX, 600.0)
+        self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS, git.TOTAL_TIMEOUT_SECONDS_MAX)
+        self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS, 600.0)
+
+    def test_the_total_budget_expires_in_a_bounded_fail(self):
+        """A guest that stops answering must end in a bounded FAIL.
+
+        The total budget is the session's hard deadline.  The step
+        deadlines are deliberately LONGER than it here, so the total
+        budget is the only thing that can end the run: the guest stops
+        answering, and the run must END (it must not hang) with a FAIL
+        (it must not pass).
+        """
+        budget = 6.0
+        timing = self.git.GuiInputTiming(
+            pace=0.0, stability=0.05, quiet=0.02,
+            repeat_first=0.01, repeat_interval=0.005,
+            step=30.0, shell=30.0,
+        )
+        factory, qmp = self._make({"hang_after_probe": True})
+        started = time.monotonic()
+        ok, reasons = self.gt.run_matrix(
+            image=self.image,
+            firmware=self.firmware,
+            build_dir=self.build_dir,
+            cpus=(1,),
+            session_factory=factory,
+            qmp_factory=lambda sock: qmp,
+            input_timing=timing,
+            timeout=budget,
+        )
+        elapsed = time.monotonic() - started
+        self.assertFalse(ok, "a guest that stops answering must not pass")
+        self.assertTrue(reasons.get(1), "the run must report a reason")
+        self.assertIn("timed out", self._reasons(reasons, 1))
+        # Bounded: the run ended when the budget expired, not by hanging.
+        self.assertLess(elapsed, budget + 10.0,
+                        f"the run took {elapsed:.1f}s: it did not stop at the "
+                        f"{budget:.1f}s budget")
+
+    # ── the QMP transcript ─────────────────────────────────────────
+
+    def test_the_qmp_transcript_is_kept_in_the_run_directory(self):
+        """Every injected input event is written to the run directory.
+
+        The brief requires the QMP transcript to be part of the archive:
+        one JSON object per input-send-event payload, and the archive
+        must hold the file.
+        """
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        transcripts = sorted(
+            self.build_dir.glob("logs/tests/gui/*/smp*/qmp-input-events.jsonl")
+        )
+        self.assertTrue(transcripts,
+                        "the run archive must hold the QMP transcript")
+        lines = [line for line in transcripts[0].read_text().splitlines()
+                 if line.strip()]
+        self.assertTrue(lines, "the QMP transcript must not be empty")
+        for line in lines:
+            entry = json.loads(line)
+            self.assertEqual("input-send-event", entry["command"])
+            self.assertTrue(entry["events"],
+                            "every transcript line carries its payload")
+
+    def test_the_real_qmp_client_writes_the_transcript(self):
+        """The REAL QmpClient records every input-send-event payload.
+
+        The archive fixture above exercises the host fake; this one
+        exercises the shipped client, with only the socket replaced.
+        """
+        class _RecordingQmp(self.gt.QmpClient):
+            def __init__(self, path):
+                super().__init__(str(path), timeout=1.0)
+                self.sent = []
+
+            def execute(self, cmd, args=None):
+                self.sent.append((cmd, args))
+                return {}
+
+        transcript = self.build_dir / "smp1" / "qmp-input-events.jsonl"
+        qmp = _RecordingQmp(self.build_dir / "qmp.sock")
+        qmp.set_transcript(transcript)
+        events = [{"type": "btn", "data": {"down": True, "button": "left"}}]
+        qmp.input_events(events)
+        qmp.close_transcript()
+        self.assertTrue(transcript.is_file(),
+                        "the client must create the transcript file")
+        lines = [line for line in transcript.read_text().splitlines()
+                 if line.strip()]
+        self.assertEqual(1, len(lines))
+        entry = json.loads(lines[0])
+        self.assertEqual("input-send-event", entry["command"])
+        self.assertEqual(events, entry["events"])
+
+    # ── the multi-line edit ────────────────────────────────────────
+
+    def test_the_runner_presses_the_enter_key(self):
+        """The multi-line step really presses the Enter key."""
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        rets = [e for e in qmp.input_events_sent
+                if e["type"] == "key" and e["data"]["key"]["data"] == "ret"]
+        self.assertTrue(rets, "the runner must press the Enter key")
+
+    def test_a_textarea_that_does_not_take_the_newline_is_rejected(self):
+        """A one-line textarea must not pass the multi-line step."""
+        factory, qmp = self._make({"probe_fault_no_multiline": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "multi-line edit")
+
+    # ── the load-bearing checks (M-1 / M-3) ────────────────────────
+
+    def test_a_wrong_physical_key_is_rejected(self):
+        """The native physical identity is load-bearing.
+
+        The runner matches the key edge on the reported physical key.  If
+        that check were dropped, a guest that reports the wrong identity
+        would pass the whole matrix.
+        """
+        factory, qmp = self._make({"probe_fault_wrong_physical_key": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "timeout")
+
+    def test_extra_textarea_content_is_rejected(self):
+        """The textarea comparison is EXACT: extra content is a FAIL.
+
+        A prefix comparison would accept the extra byte, so the exact
+        comparison must be the load-bearing one.
+        """
+        factory, qmp = self._make({"probe_fault_textarea_extra": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the textarea holds")
+
+    def test_a_wheel_that_leaks_into_the_click_counter_is_rejected(self):
+        """The wheel must not leak into the click counter.
+
+        The leak check compares every state field except the scroll
+        offset: if the wheel changed the click counter, the comparison
+        must catch it.  The click counter is the right target, because
+        every later check compares it RELATIVE to the value it read
+        before its own click -- so only the wheel's own comparison can
+        catch this leak.
+        """
+        factory, qmp = self._make({"probe_fault_wheel_leak": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(
+            reasons, "the wheel: the state field 'click_count' changed")
+
+    def test_a_wheel_with_the_wrong_step_is_rejected(self):
+        """One detent must move the container by exactly 32 px.
+
+        The plan pins the vertical wheel step to 32 px, so a guest that
+        scrolls by any other distance must fail the run instead of being
+        reported as an observation.
+        """
+        factory, qmp = self._make({"probe_fault_wheel_wrong_step": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the wheel-down detent moved the scroll offset by")
+
+    def test_the_caps_latch_is_checked_against_the_guest(self):
+        """The Caps latch is verified against the GUEST's report.
+
+        The five guards that only compared the runner's own model with
+        itself are gone; this fixture pins the surviving check: the guest
+        must report the CAPS bit the runner asked for.
+        """
+        factory, qmp = self._make({"probe_fault_caps_no_flip": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "reported modifiers")
+
+    def test_the_type_helpers_have_no_dead_parameter(self):
+        """The typing helpers must not carry an unused parameter."""
+        import inspect
+        for name in ("_type_plain", "_type_shift"):
+            params = list(
+                inspect.signature(getattr(self.git.GuiInputScenarios, name))
+                .parameters
+            )
+            self.assertEqual(["self", "qcode"], params,
+                             f"{name} must take only the key code")
+
+    # ── the budget import failure (M-5) ────────────────────────────
+
+    def test_the_budget_import_failure_is_loud(self):
+        """A broken import of the budget module must NOT fall back.
+
+        The silent fallback to GUI-1's total (180 s) is exactly the
+        "mechanically reuse GUI-1's total" that task 11 §3c forbids, and
+        it hides the real import error behind a plausible number.
+        """
+        import importlib
+        import sys
+
+        class _Blocker:
+            def find_spec(self, name, path=None, target=None):
+                if name == "qemutests.gui_input_test":
+                    raise ImportError("simulated broken gui_input_test import")
+                return None
+
+        blocker = _Blocker()
+        saved = sys.modules.pop("qemutests.gui_input_test", None)
+        sys.meta_path.insert(0, blocker)
+        try:
+            with self.assertRaises(ImportError) as ctx:
+                importlib.reload(self.gt)
+            message = str(ctx.exception)
+        finally:
+            sys.meta_path.remove(blocker)
+            if saved is not None:
+                sys.modules["qemutests.gui_input_test"] = saved
+            importlib.reload(self.gt)
+        self.assertIn("gui_input_test", message)
+        self.assertIn("simulated broken gui_input_test import", message)
 
 
 if __name__ == "__main__":

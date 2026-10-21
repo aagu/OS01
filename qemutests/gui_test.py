@@ -45,8 +45,14 @@ CORE_MATRIX = (1, 2)
 # budget never auto-inflates on failure.
 try:
     from qemutests.gui_input_test import TOTAL_TIMEOUT_SECONDS
-except ImportError:  # pragma: no cover - the repo root is on sys.path
-    TOTAL_TIMEOUT_SECONDS = DEFAULT_TIMEOUT
+except ImportError as exc:  # pragma: no cover - the repo root is on sys.path
+    # Fail LOUDLY.  A silent fallback to GUI-1's total (180 s) is exactly
+    # the "mechanically reuse GUI-1's total" that task 11 §3c forbids, and
+    # it would hide the real import error behind a plausible number.
+    raise ImportError(
+        "qemutests.gui_input_test could not be imported, so the Task 11 "
+        f"per-SMP budget is unknown: {exc!r}"
+    ) from exc
 
 
 # ── PPM parsing and Surface ──────────────────────────────────────────
@@ -150,6 +156,11 @@ class QmpClient:
         self.timeout = timeout
         self.sock: Optional[socket.socket] = None
         self._fp = None
+        # The QMP transcript: every input-send-event payload is appended
+        # to this file (one JSON object per line) so the run archive keeps
+        # the exact events that drove the guest.
+        self.transcript: Optional[Path] = None
+        self._transcript_fp = None
 
     def connect(self) -> None:
         deadline = time.time() + self.timeout
@@ -208,9 +219,60 @@ class QmpClient:
         payload (a bogus axis, a bogus button, a bogus qcode) fails the
         run instead of being silently ignored.
         """
+        self._record_transcript(events)
         self.execute("input-send-event", {"events": events})
 
+    # ── the QMP transcript ────────────────────────────────────────────
+
+    def set_transcript(self, path: Path) -> None:
+        """Write every input-send-event payload to ``path`` (JSON lines).
+
+        The file is created (empty) right away so the run archive always
+        contains the transcript, even when the scenario injects nothing.
+        A file that cannot be opened is reported on stderr and disables
+        the transcript: the evidence must never turn a good run into a
+        failed one, and it must never be silently absent either.
+        """
+        self.close_transcript()
+        self.transcript = Path(path)
+        try:
+            self.transcript.parent.mkdir(parents=True, exist_ok=True)
+            self._transcript_fp = self.transcript.open("w", encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"[gui] warning: cannot write the QMP transcript to "
+                f"{self.transcript}: {exc}",
+                file=sys.stderr,
+            )
+            self._transcript_fp = None
+
+    def _record_transcript(self, events: List[dict]) -> None:
+        if self._transcript_fp is None:
+            if self.transcript is None:
+                return
+            self.set_transcript(self.transcript)
+            if self._transcript_fp is None:
+                return
+        line = json.dumps(
+            {"command": "input-send-event", "events": events}, sort_keys=True
+        )
+        try:
+            self._transcript_fp.write(line + "\n")
+            self._transcript_fp.flush()
+        except OSError as exc:
+            print(f"[gui] warning: cannot write the QMP transcript: {exc}",
+                  file=sys.stderr)
+
+    def close_transcript(self) -> None:
+        if self._transcript_fp is not None:
+            try:
+                self._transcript_fp.close()
+            except OSError:
+                pass
+            self._transcript_fp = None
+
     def close(self) -> None:
+        self.close_transcript()
         try:
             if self._fp:
                 self._fp.close()
@@ -405,6 +467,13 @@ class GuiCaseRunner:
         """
         from qemutests.gui_input_test import GuiInputScenarios
 
+        # The QMP transcript: every input-send-event payload is written to
+        # the scenario's run directory (one JSON object per line), so the
+        # run archive keeps the exact events that drove the guest.
+        try:
+            self.qmp.set_transcript(self.run_dir / "qmp-input-events.jsonl")
+        except AttributeError:
+            pass  # a QMP client without a transcript (the host fake)
         helper = GuiInputScenarios(
             session=self.session,
             qmp=self.qmp,

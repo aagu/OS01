@@ -503,12 +503,18 @@ static void build_ui(probe_t *p, uint32_t w, uint32_t h)
 
     /* 5. The second textarea: the secondary, editable one.  Both textareas
      *    are independent: the probe reports the content of each one, so the
-     *    runner can verify which widget the typed text really landed in. */
+     *    runner can verify which widget the typed text really landed in.
+     *
+     *    The second textarea is MULTI-LINE: LVGL filters the newline in
+     *    one-line mode (it reports LV_EVENT_READY instead of inserting it),
+     *    so only a multi-line widget can show what the runner asks it to
+     *    hold.  The first one stays one-line, so the two are directly
+     *    comparable. */
     p->ta2 = lv_textarea_create(scr);
     lv_obj_set_pos(p->ta2, ta2_r.x, ta2_r.y);
     lv_obj_set_size(p->ta2, ta2_r.w, ta2_r.h);
     lv_textarea_set_text(p->ta2, "");
-    lv_textarea_set_one_line(p->ta2, true);
+    lv_textarea_set_one_line(p->ta2, false);
 
     /* 6. The disabled button: it must never become the focus target. */
     p->disabled_btn = lv_button_create(scr);
