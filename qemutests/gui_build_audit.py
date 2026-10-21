@@ -75,6 +75,33 @@ GUI_REQUIRED_ARCHIVE_MEMBERS = (
 # negative control proves the link probe really links.
 GUI_PROBE_NEGATIVE_SYMBOL = "gui_audit_symbol_that_must_not_exist"
 
+# ── GUI-2 guest input probe ─────────────────────────────────────────────
+# The guest input probe (user/test_gui_input) is the evidence producer of
+# the exclusive physical input lease: it runs inside OS01, owns the real
+# /dev/keyboard + /dev/mouse lease and reports a machine-checkable protocol.
+#
+# Two rules are pinned here:
+#
+#   1. The probe keeps its *per-app* private-include exception.  The global
+#      user flags must stay free of LVGL / private-bridge include paths
+#      (audit_user_flag_hygiene), so the exception may only live in the
+#      probe's own app.mk.
+#   2. The probe must be INSTALLED in the published image: an image without
+#      /bin/test_gui_input cannot exercise the protocol at all.
+
+GUI_INPUT_PROBE_APP_MK = "user/test_gui_input/app.mk"
+GUI_INPUT_PROBE_SOURCE = "user/test_gui_input/test_gui_input.c"
+GUI_INPUT_PROBE_BINARY = "/bin/test_gui_input"
+GUI_INPUT_PROBE_APP_MK_REQUIRED = (
+    "APP_SOURCES := test_gui_input.c",
+    "-I$(OS01_ROOT)/libgui/internal",
+    "-I$(OS01_ROOT)/thirdpart",
+    "-I$(OS01_ROOT)/thirdpart/lvgl",
+    "-I$(OS01_ROOT)/config",
+    "-DLV_CONF_INCLUDE_SIMPLE",
+    "APP_LDLIBS := -lgui -lgfx",
+)
+
 
 def run_cmd(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -884,6 +911,55 @@ def audit_host_fixture_contract(
 # ── The main sysroot / build audit ──────────────────────────────────────
 
 
+def audit_gui_input_probe(repo_root: Path, build_dir: Path, errors: list[str]) -> None:
+    """Audit the GUI-2 guest input probe: its per-app private exception and
+    its installation in the published image."""
+    app_mk = repo_root / GUI_INPUT_PROBE_APP_MK
+    source = repo_root / GUI_INPUT_PROBE_SOURCE
+
+    if not app_mk.is_file():
+        errors.append(f"The guest input probe app.mk is missing: {GUI_INPUT_PROBE_APP_MK}")
+    else:
+        content = app_mk.read_text()
+        for required in GUI_INPUT_PROBE_APP_MK_REQUIRED:
+            if required not in content:
+                errors.append(
+                    f"The guest input probe app.mk does not declare {required!r}"
+                )
+
+    if not source.is_file():
+        errors.append(f"The guest input probe source is missing: {GUI_INPUT_PROBE_SOURCE}")
+
+    # The probe must be installed in the published image.  The image may not
+    # have been built yet, so a missing manifest is not an error; a manifest
+    # that exists without the probe IS.
+    manifest = build_dir / "image" / "rootfs.manifest"
+    if not manifest.is_file():
+        return
+
+    entries: dict[str, tuple[str, str]] = {}
+    for line in manifest.read_text().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 4 and parts[0].strip() == "file":
+            entries[parts[1].strip()] = (parts[2].strip(), parts[3].strip())
+
+    if GUI_INPUT_PROBE_BINARY not in entries:
+        errors.append(
+            f"The guest input probe is not installed in the published image: "
+            f"{GUI_INPUT_PROBE_BINARY}"
+        )
+        return
+
+    staged, mode = entries[GUI_INPUT_PROBE_BINARY]
+    if mode != "0755":
+        errors.append(
+            f"The guest input probe must be installed executable: "
+            f"{GUI_INPUT_PROBE_BINARY} has mode {mode}"
+        )
+    if not Path(staged).is_file():
+        errors.append(f"The guest input probe staged file is missing: {staged}")
+
+
 def audit_sysroot_and_build(
     sysroot: Path,
     build_dir: Path,
@@ -954,6 +1030,10 @@ def audit_sysroot_and_build(
     #     bridge header, no PS/2 decoder header, no frame header).
     if gen_dir:
         audit_published_headers(gen_dir, sysroot, errors)
+
+    # 3c. The GUI-2 guest input probe: its per-app private exception and its
+    #     installation in the published image.
+    audit_gui_input_probe(repo_root, build_dir, errors)
 
     # 4. Staging validation: staging/gui must exist and match manifest
     staging_gui = build_dir / "staging" / "gui"
