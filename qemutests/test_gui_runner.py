@@ -67,9 +67,10 @@ class FakeSurface:
 
 class FakeQMP:
     def __init__(self, fail_screendump: bool = False, default_surface: Optional[FakeSurface] = None,
-                 fail_input: bool = False):
+                 fail_input: bool = False, fail_transcript: bool = False):
         self.fail_screendump = fail_screendump
         self.fail_input = fail_input
+        self.fail_transcript = fail_transcript
         self.default_surface = default_surface or FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
         self.screendumps: List[str] = []
         self.current_surface: FakeSurface = self.default_surface
@@ -106,11 +107,19 @@ class FakeQMP:
     # ── the QMP transcript (the same contract as the real client) ────
 
     def set_transcript(self, path: Path) -> None:
+        if self.fail_transcript:
+            # A transcript writer that fails INSIDE: the runner must
+            # report the failure, never swallow it (a swallowed error
+            # would silently disable the evidence).
+            raise AttributeError("simulated transcript writer failure")
         self.close_transcript()
         self.transcript = Path(path)
         try:
             self.transcript.parent.mkdir(parents=True, exist_ok=True)
-            self._transcript_fp = self.transcript.open("w", encoding="utf-8")
+            # APPEND mode: re-opening the transcript must never destroy
+            # the evidence that was already written to it (the same
+            # contract as the real QmpClient).
+            self._transcript_fp = self.transcript.open("a", encoding="utf-8")
         except OSError:
             self._transcript_fp = None
 
@@ -200,6 +209,18 @@ class FakeProbe:
         self.fault_no_multiline = False
         self.fault_caps_no_flip = False
         self.fault_wheel_wrong_step = False
+        # Task 11 fix round 2: the fault switches of the new fixtures.
+        # The stale modifier snapshot (an intermediate STATE record that
+        # still carries the PRE-UP modifier snapshot).
+        self.fault_stale_modifier = False
+        # The modifier whose UP edge emits that stale record.
+        self.stale_modifier_key = "ctrl_r"
+        # A control character in the one-line textarea.
+        self.fault_control_char = False
+        # The newline lands in a later record than the Enter edge.
+        self.fault_deferred_newline = False
+        # The state ticks the deferred newline still waits.
+        self._deferred_newline_ticks = 0
 
     # ── the layout ────────────────────────────────────────────────
 
@@ -373,11 +394,27 @@ class FakeProbe:
                 if self.fault_sticky_modifier:
                     pass
                 else:
+                    if (self.fault_stale_modifier
+                            and qcode == self.stale_modifier_key):
+                        # The guest emits an intermediate STATE record that
+                        # still carries the PRE-UP modifier snapshot: the
+                        # record is produced BEFORE the guest processed the
+                        # UP edge, so it is still pending when the runner's
+                        # next wait runs -- and the runner's model has
+                        # already cleared the bit.
+                        self.emit("STATE", self.state_fields())
                     self.modifiers &= ~bit
         if (down and qcode == "c" and self.fault_sigint
                 and self.modifiers & (MOD_LCTRL | MOD_RCTRL)):
             # The guest's TTY delivered a SIGINT to the lease holder.
             self.sigint_seen = 1
+        if (down and qcode == "c" and self.fault_control_char
+                and self.modifiers & (MOD_LCTRL | MOD_RCTRL)
+                and self.focus == 4):
+            # The guest's TTY wrote a control character into the one-line
+            # textarea: the 3b evidence ("textarea without control
+            # characters") is broken.
+            self.textarea += b"\x01"
         self.physical_key = QCODE_PHYSICAL.get(qcode, 0)
         if self.fault_wrong_physical_key and qcode == "z":
             # The guest reports a physical identity that is not the key the
@@ -436,7 +473,16 @@ class FakeProbe:
             # multi-line mode it inserts the newline.  The second textarea
             # is the multi-line one.
             if self.focus == 5 and not self.fault_no_multiline:
-                self.textarea2 += b"\x0a"
+                if self.fault_deferred_newline:
+                    # The newline lands in a LATER record than the Enter
+                    # edge: the guest reports the Enter DOWN record, then
+                    # the Enter UP record, and only then the record that
+                    # carries the newline.  A step that reads "the latest
+                    # STATE" instead of waiting for the newline would
+                    # miss it.
+                    self._deferred_newline_ticks = 3
+                else:
+                    self.textarea2 += b"\x0a"
             return
         char = self._codepoint(qcode)
         if char and down:
@@ -491,9 +537,13 @@ class FakeProbe:
             self.scroll = max(self.scroll - step, 0)
         if self.fault_wheel_leak:
             # The wheel leaks into the click counter.  The click counter is
-            # the right target: every later check compares it RELATIVE to
-            # the value it read before its own click, so only the wheel's
-            # own state comparison can catch this leak.
+            # the right target: it is the ONLY field the later checks
+            # compare RELATIVE to the value they read before their own
+            # click, so only the wheel's own state comparison can witness
+            # this leak.  (A focus or a textarea leak would be caught by
+            # an EARLIER check -- the click step times out waiting for the
+            # click counter to advance -- so the fixture would not witness
+            # the wheel's own comparison at all.)
             self.click_count += 1
 
     def _update_slider(self) -> None:
@@ -505,6 +555,14 @@ class FakeProbe:
 
     def maybe_repeat(self) -> None:
         """The guest's software repeat (first 400 ms, then every 40 ms)."""
+        if self._deferred_newline_ticks:
+            # The deferred newline: it lands when the tick counter runs
+            # out, so the record that carries it arrives after the Enter
+            # edges.
+            self._deferred_newline_ticks -= 1
+            if self._deferred_newline_ticks == 0:
+                self.textarea2 += b"\x0a"
+                self.emit_state_if_changed()
         now = time.monotonic()
         for qcode, deadline in list(self.repeat_at.items()):
             char = self.repeat_char.get(qcode)
@@ -548,6 +606,9 @@ class FakeProcessSession:
         probe_fault_no_multiline: bool = False,
         probe_fault_caps_no_flip: bool = False,
         probe_fault_wheel_wrong_step: bool = False,
+        probe_fault_stale_modifier: bool = False,
+        probe_fault_control_char: bool = False,
+        probe_fault_deferred_newline: bool = False,
         hang_after_probe: bool = False,
     ):
         self._argv = list(argv)
@@ -603,6 +664,9 @@ class FakeProcessSession:
         self.probe_fault_no_multiline = probe_fault_no_multiline
         self.probe_fault_caps_no_flip = probe_fault_caps_no_flip
         self.probe_fault_wheel_wrong_step = probe_fault_wheel_wrong_step
+        self.probe_fault_stale_modifier = probe_fault_stale_modifier
+        self.probe_fault_control_char = probe_fault_control_char
+        self.probe_fault_deferred_newline = probe_fault_deferred_newline
         # The session's hard deadline: the real ProcessSession kills the
         # child when the budget is spent, and the fake emulates that.
         self._deadline = time.monotonic() + float(timeout_s)
@@ -850,6 +914,9 @@ class FakeProcessSession:
         self.probe.fault_no_multiline = self.probe_fault_no_multiline
         self.probe.fault_caps_no_flip = self.probe_fault_caps_no_flip
         self.probe.fault_wheel_wrong_step = self.probe_fault_wheel_wrong_step
+        self.probe.fault_stale_modifier = self.probe_fault_stale_modifier
+        self.probe.fault_control_char = self.probe_fault_control_char
+        self.probe.fault_deferred_newline = self.probe_fault_deferred_newline
         # Only the events injected after the probe started belong to this
         # run: the fake QMP object is shared between the SMP runs.
         self._probe_events_consumed = (
@@ -1272,6 +1339,16 @@ class GuiInputRunnerTests(unittest.TestCase):
         for smp in (1, 2):
             self.assertIn(needle, self._reasons(reasons, smp))
 
+    def _outcome_details(self, case):
+        """The outcome details the run archive holds for one case."""
+        details = []
+        for path in sorted(self.build_dir.glob("logs/tests/gui/*/result.json")):
+            report = json.loads(path.read_text())
+            for outcome in report.get("outcomes", []):
+                if outcome.get("case") == case:
+                    details.append(outcome.get("reason", ""))
+        return details
+
     # ── the payload contracts ─────────────────────────────────────
 
     def test_key_payload_contract(self):
@@ -1684,6 +1761,131 @@ class GuiInputRunnerTests(unittest.TestCase):
         self.assertFalse(ok)
         self._assert_failed(reasons, "multi-line edit")
 
+    def test_the_multi_line_step_waits_for_the_newline_record(self):
+        """The multi-line evidence is the record that CARRIES the newline.
+
+        The fault makes the guest report the Enter edges first and the
+        newline in a LATER record.  A step that read "the latest STATE
+        record" would miss the newline and fail the run; the step waits
+        for the record that carries it, so the run passes.
+        """
+        factory, qmp = self._make({"probe_fault_deferred_newline": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+
+    # ── the fix round 2 fixtures ─────────────────────────────────────
+
+    def test_an_intermediate_record_with_a_stale_modifier_snapshot_is_rejected(self):
+        """A skipped record with a stale modifier snapshot is a FAIL.
+
+        The waits drop the records their predicate rejected and assert
+        that they carry the modifier snapshot the runner expects.  The
+        fault makes the guest emit an intermediate STATE record BEFORE it
+        processed a modifier's UP edge: that record is still pending when
+        the runner's next wait runs, and the runner's model has already
+        cleared the bit -- so only the skipped-record invariant can see
+        it (the per-edge comparison reads the edge's own record).
+        """
+        factory, qmp = self._make({"probe_fault_stale_modifier": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        # The specific diagnostic of the skipped-record invariant.
+        self._assert_failed(
+            reasons,
+            "the ctrl_r UP edge: an intermediate guest record reported "
+            "modifiers=8, expected 0",
+        )
+        # The control: the SAME runner on the SAME input without the fault
+        # passes, so the fault is the only difference between the two runs.
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+
+    def test_a_control_character_in_the_one_line_textarea_is_rejected(self):
+        """The 3b check: the one-line textarea must hold no control character.
+
+        The fault makes the guest's TTY write a control character into the
+        one-line textarea during the Ctrl+C.  The run must fail AT the 3b
+        check -- not incidentally at some other comparison.
+        """
+        factory, qmp = self._make({"probe_fault_control_char": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        # The specific diagnostic of the 3b check (its own "what" string
+        # and its own message): the second, later check cannot satisfy it.
+        self._assert_failed(
+            reasons,
+            "after the Ctrl+C: the textarea holds the control character "
+            "0x01 at offset",
+        )
+
+    def test_the_outcome_surfaces_the_skipped_records(self):
+        """The dropped records are observable, not only kept.
+
+        The waits move the records their predicate rejected into the
+        runner's skipped list.  The list is surfaced in the outcome's
+        detail, so "the dropped records are not lost" is a fact a reader
+        of the archive can check -- and the summary is BOUNDED, so a long
+        interaction cannot blow the report up.
+        """
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        details = self._outcome_details("input_interaction")
+        self.assertTrue(details, "the archive must hold the outcomes")
+        for detail in details:
+            self.assertIn("skipped records:", detail)
+            # Bounded: the count and the first few records only.
+            self.assertLessEqual(detail.count("seq="),
+                                 self.git.GuiInputScenarios.SKIPPED_SUMMARY_LIMIT)
+
+    def test_a_transcript_writer_that_fails_is_reported(self):
+        """An error INSIDE the transcript writer must not be swallowed.
+
+        The runner tolerates a QMP client that has no transcript at all,
+        but an error inside the writer is a real failure: it must be
+        reported, never swallowed (a swallowed error would silently
+        disable the required evidence).
+        """
+        factory, qmp = self._make(qmp_kwargs={"fail_transcript": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the QMP transcript could not be enabled")
+
+    def test_the_transcript_is_not_truncated_when_it_is_reopened(self):
+        """Re-opening the transcript must not destroy the evidence.
+
+        The lazy re-open path (a close() before a later input event)
+        re-opens the same file: it must APPEND to it, never truncate it.
+        """
+        class _RecordingQmp(self.gt.QmpClient):
+            def __init__(self, path):
+                super().__init__(str(path), timeout=1.0)
+                self.sent = []
+
+            def execute(self, cmd, args=None):
+                self.sent.append((cmd, args))
+                return {}
+
+        transcript = self.build_dir / "smp1" / "qmp-input-events.jsonl"
+        qmp = _RecordingQmp(self.build_dir / "qmp.sock")
+        qmp.set_transcript(transcript)
+        first = [{"type": "btn", "data": {"down": True, "button": "left"}}]
+        qmp.input_events(first)
+        # The transcript is closed, and a later event re-opens it lazily.
+        qmp.close_transcript()
+        second = [{"type": "key",
+                   "data": {"down": True, "key": {"type": "qcode", "data": "a"}}}]
+        qmp.input_events(second)
+        qmp.close_transcript()
+        lines = [line for line in transcript.read_text().splitlines()
+                 if line.strip()]
+        self.assertEqual(2, len(lines),
+                         "re-opening the transcript must not destroy the "
+                         "evidence that was already written")
+        self.assertEqual(first, json.loads(lines[0])["events"])
+        self.assertEqual(second, json.loads(lines[1])["events"])
+
     # ── the load-bearing checks (M-1 / M-3) ────────────────────────
 
     def test_a_wrong_physical_key_is_rejected(self):
@@ -1714,10 +1916,13 @@ class GuiInputRunnerTests(unittest.TestCase):
 
         The leak check compares every state field except the scroll
         offset: if the wheel changed the click counter, the comparison
-        must catch it.  The click counter is the right target, because
-        every later check compares it RELATIVE to the value it read
-        before its own click -- so only the wheel's own comparison can
-        catch this leak.
+        must catch it.  The click counter is the right target, because it
+        is the ONLY field the later checks compare RELATIVE to the value
+        they read before their own click -- so only the wheel's own
+        comparison can witness this leak.  (A focus or a textarea leak
+        would be caught by an EARLIER check instead: the click step
+        times out waiting for the click counter to advance, so the
+        fixture would never reach the wheel's own comparison.)
         """
         factory, qmp = self._make({"probe_fault_wheel_leak": True})
         ok, reasons = self._run(factory, qmp)

@@ -1213,6 +1213,15 @@ class GuiInputScenarioError(Exception):
     """A Task 11 interaction step failed; the message is the FAIL reason."""
 
 
+class GuiInputTimeout(GuiInputScenarioError):
+    """A wait did not see its record before the step's deadline.
+
+    A distinct type, so a step that turns a missing record into its own
+    diagnostic can tell "the record never arrived" from "the record broke
+    the protocol" (the latter stays a protocol error).
+    """
+
+
 @dataclass
 class GuiInputTiming:
     """The interaction scenario's timing knobs.
@@ -1241,6 +1250,11 @@ class GuiInputScenarios:
     the existing ``GuiCaseRunner.run_all`` without changing the outcome
     schema or the SMP matrix.
     """
+
+    # The number of skipped records the outcome's summary carries: the
+    # list grows with the guest's record stream, and the outcome must stay
+    # bounded.
+    SKIPPED_SUMMARY_LIMIT = 8
 
     def __init__(
         self,
@@ -1273,7 +1287,8 @@ class GuiInputScenarios:
         # The records that were read but not consumed yet.
         self._pending: List[GuiInputRecord] = []
         # The records a wait skipped (rejected by its predicate).  They are
-        # kept for the diagnostics and asserted, never dropped silently.
+        # kept for the diagnostics, asserted against the modifier model and
+        # surfaced (bounded) in the outcome -- never dropped silently.
         self._skipped: List[GuiInputRecord] = []
         # The observations the outcome detail carries.
         self.notes: List[str] = []
@@ -1326,8 +1341,9 @@ class GuiInputScenarios:
         record it was looking for, it drops that record **and the records
         before it** (the ones the predicate rejected) and keeps the ones
         after it.  The dropped records are not lost: ``_wait`` moves them
-        to ``self._skipped`` and asserts that they carry the modifier
-        snapshot the runner expects, so an unexpected intermediate guest
+        to ``self._skipped``, asserts that they carry the modifier
+        snapshot the runner expects, and the outcome's detail carries
+        their (bounded) summary, so an unexpected intermediate guest
         record cannot hide in the gap.
         """
         if not self._pending:
@@ -1341,7 +1357,8 @@ class GuiInputScenarios:
         The records the predicate rejected are MOVED to ``self._skipped``
         -- they are not silently discarded -- and each of them is checked
         against the modifier model, so an unexpected intermediate guest
-        record cannot hide in the gap.
+        record cannot hide in the gap.  The outcome's detail carries the
+        bounded summary of the skipped records.
         """
         limit = min(timeout, self._remaining())
         deadline = time.monotonic() + limit
@@ -1354,7 +1371,7 @@ class GuiInputScenarios:
                     self._assert_skipped_records(skipped, what)
                     return record
             if time.monotonic() >= deadline:
-                raise GuiInputScenarioError(
+                raise GuiInputTimeout(
                     f"timeout waiting for {what} after {limit:.1f}s"
                 )
             self._pump()
@@ -1380,6 +1397,27 @@ class GuiInputScenarios:
                     f"{what}: an intermediate guest record reported "
                     f"modifiers={got}, expected {self.mods}"
                 )
+
+    def _skipped_summary(self) -> str:
+        """A bounded summary of the records the waits skipped.
+
+        The waits move the records their predicate rejected into
+        ``self._skipped``.  The list is SURFACED -- the outcome's detail
+        carries the count and the first few records -- but it is bounded:
+        the whole list never reaches the outcome, so a long interaction
+        cannot blow the report up.
+        """
+        if not self._skipped:
+            return "skipped records: 0"
+        head = self._skipped[: self.SKIPPED_SUMMARY_LIMIT]
+        parts = [
+            f"seq={record.seq} {record.phase} "
+            f"modifiers={record.get('modifiers', '-')}"
+            for record in head
+        ]
+        if len(self._skipped) > len(head):
+            parts.append(f"+{len(self._skipped) - len(head)} more")
+        return f"skipped records: {len(self._skipped)} [{'; '.join(parts)}]"
 
     def _wait_state(self, predicate: Callable[[GuiInputRecord], bool],
                     timeout: float, what: str) -> GuiInputRecord:
@@ -1719,6 +1757,10 @@ class GuiInputScenarios:
                              "status": "FAIL", "reason": reasons[-1]})
             return False, reasons, outcomes
 
+        # The records the waits skipped are surfaced here: the outcome's
+        # detail carries their bounded summary, so "the dropped records
+        # are not lost" is observable and not only a claim.
+        self.notes.append(self._skipped_summary())
         detail = "; ".join(self.notes) if self.notes else "ok"
         outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS",
                          "reason": detail})
@@ -2343,15 +2385,19 @@ class GuiInputScenarios:
         ta2_before = self._textarea2(self._last_state)
         self._type_plain("b")
         self._key("ret", True)
-        self._expect_key_edge("ret", True, QCODE_PHYSICAL["ret"])
+        down = self._expect_key_edge("ret", True, QCODE_PHYSICAL["ret"])
         self._key("ret", False)
-        self._expect_key_edge("ret", False, QCODE_PHYSICAL["ret"])
-        # The Enter edges carry the state the newline landed in, so the
-        # latest STATE record is the evidence: a wait for a NEW record
-        # would time out, because the edge checks already consumed them.
-        after = self._last_state
-        ta2 = self._textarea2(after)
+        up = self._expect_key_edge("ret", False, QCODE_PHYSICAL["ret"])
+        # The evidence is the STATE record that ACTUALLY carries the
+        # newline.  The Enter edges are the candidates -- for this guest
+        # the newline lands in the Enter DOWN record -- and if neither of
+        # them carries it, the step WAITS for the record that does, like
+        # every other step in the scenario.  Reading "the latest STATE
+        # record" instead would be timing-dependent: a record that
+        # arrives later would hide the newline.
         expected = ta2_before + b"b\x0a"
+        after = self._newline_record(expected, down, up)
+        ta2 = self._textarea2(after)
         if ta2 != expected:
             raise GuiInputScenarioError(
                 f"the multi-line edit: the second textarea holds {ta2!r}, "
@@ -2364,6 +2410,34 @@ class GuiInputScenarios:
                 f"from {ta1_before!r} to {ta1!r}"
             )
         self.notes.append(f"multi-line -> textarea2={ta2!r}")
+
+    def _newline_record(self, expected: bytes,
+                        *candidates: GuiInputRecord) -> GuiInputRecord:
+        """The STATE record that actually carries the newline.
+
+        The candidate records (the Enter edges) are inspected first: the
+        newline lands in one of them for this guest.  If none of them
+        carries it, the step WAITS for the record that does, so the
+        assertion is never anchored on "whatever record arrived last".
+
+        A newline that never arrives is the multi-line edit that did not
+        happen: the diagnostic is the exact comparison's, so the evidence
+        of the failure does not depend on the timing either.
+        """
+        for record in candidates:
+            if b"\x0a" in self._textarea2(record):
+                return record
+        try:
+            return self._wait_state(
+                lambda r: b"\x0a" in self._textarea2(r),
+                self.timing.step,
+                "the multi-line edit's newline",
+            )
+        except GuiInputTimeout:
+            raise GuiInputScenarioError(
+                f"the multi-line edit: the second textarea holds "
+                f"{self._textarea2(self._last_state)!r}, expected {expected!r}"
+            ) from None
 
     # ── the exit ────────────────────────────────────────────────────
 

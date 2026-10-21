@@ -229,6 +229,12 @@ class QmpClient:
 
         The file is created (empty) right away so the run archive always
         contains the transcript, even when the scenario injects nothing.
+        It is opened in APPEND mode: re-opening a transcript must never
+        destroy the evidence that was already written to it (the lazy
+        re-open path in ``_record_transcript`` re-opens the same path
+        after a ``close()``, and the transcript is required evidence).
+        The run archive gives every run its own directory, so the file
+        starts out empty.
         A file that cannot be opened is reported on stderr and disables
         the transcript: the evidence must never turn a good run into a
         failed one, and it must never be silently absent either.
@@ -237,7 +243,7 @@ class QmpClient:
         self.transcript = Path(path)
         try:
             self.transcript.parent.mkdir(parents=True, exist_ok=True)
-            self._transcript_fp = self.transcript.open("w", encoding="utf-8")
+            self._transcript_fp = self.transcript.open("a", encoding="utf-8")
         except OSError as exc:
             print(
                 f"[gui] warning: cannot write the QMP transcript to "
@@ -470,10 +476,23 @@ class GuiCaseRunner:
         # The QMP transcript: every input-send-event payload is written to
         # the scenario's run directory (one JSON object per line), so the
         # run archive keeps the exact events that drove the guest.
-        try:
-            self.qmp.set_transcript(self.run_dir / "qmp-input-events.jsonl")
-        except AttributeError:
-            pass  # a QMP client without a transcript (the host fake)
+        #
+        # A QMP client WITHOUT a transcript (the host fake) is tolerated,
+        # but an error INSIDE the transcript writer is a real failure: it
+        # is reported as a FAIL, never swallowed.  Swallowing it would
+        # silently disable the required evidence.
+        set_transcript = getattr(self.qmp, "set_transcript", None)
+        if set_transcript is not None:
+            try:
+                set_transcript(self.run_dir / "qmp-input-events.jsonl")
+            except Exception as exc:
+                reason = (f"[input_interaction] the QMP transcript could not "
+                          f"be enabled: {exc}")
+                self.log(f"  [gui smp={self.smp}] {reason}")
+                return False, [reason], [{
+                    "smp": self.smp, "case": "input_interaction",
+                    "status": "FAIL", "reason": reason,
+                }]
         helper = GuiInputScenarios(
             session=self.session,
             qmp=self.qmp,
