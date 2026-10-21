@@ -41,6 +41,26 @@ except ImportError:  # pragma: no cover - the repo root is on sys.path
 FAKE_CHARS = {"a": "a", "b": "b", "c": "c", "q": "q", "z": "z", "1": "1"}
 FAKE_SHIFTED = {"a": "A", "b": "B", "c": "C", "q": "Q", "z": "Z", "1": "!"}
 
+# The deferred-newline mechanism's margin, in serial reads: the newline
+# is emitted this many reads AFTER the Enter UP edge was processed.
+#
+# The margin is anchored to the UP EDGE (an event the runner causes),
+# not to a tick count that happens to fit today's pump sequence: the
+# runner may read the serial stream any number of times before the UP
+# edge, and the newline must not move with it.  One read of margin is
+# the minimum (the runner's own wait for the newline record); two keeps
+# the newline out of reach of ONE extra read between the UP edge and
+# that wait, so the newline can never land in a record the runner had
+# already seen when it looked at the candidates.
+DEFERRED_NEWLINE_OBSERVE_DELAY = 2
+
+# The deferred-newline mechanism's timeline: every probe appends the
+# read in which the Enter UP edge was processed and the read in which
+# the newline was emitted.  A fixture reads it to PIN the mechanism:
+# if the newline could ever land before the UP edge, the fixture has to
+# fail LOUDLY instead of silently ceasing to prove anything.
+DEFERRED_NEWLINE_TIMELINE: List[Tuple[str, int]] = []
+
 # Fake surfaces
 SURFACE_TERMINAL = ("terminal", b"\x00\x00\x00" * (1024 * 768))
 # Pure color for fault hold: 0xFF00AA (255, 0, 170)
@@ -219,8 +239,15 @@ class FakeProbe:
         self.fault_control_char = False
         # The newline lands in a later record than the Enter edge.
         self.fault_deferred_newline = False
-        # The state ticks the deferred newline still waits.
-        self._deferred_newline_ticks = 0
+        # The deferred newline: the Enter DOWN edge ARMS it and the
+        # Enter UP edge SCHEDULES it (see _widget_effect).  The schedule
+        # is expressed in serial reads and anchored to the UP edge, so
+        # the newline's arrival does not depend on how many reads the
+        # runner happened to do before it.
+        self._deferred_newline_armed = False
+        self._newline_due = 0
+        # The serial reads the probe has served.
+        self._observe = 0
 
     # ── the layout ────────────────────────────────────────────────
 
@@ -450,6 +477,16 @@ class FakeProbe:
         return FAKE_SHIFTED.get(qcode, base) if shift else base
 
     def _widget_effect(self, qcode: str, down: bool) -> None:
+        if qcode == "ret" and not down and self._deferred_newline_armed:
+            # The Enter UP edge: the deferred newline is SCHEDULED here.
+            # The schedule is anchored to this edge (and not to a tick
+            # count that would have to be re-tuned for every change in
+            # the runner's read pattern), so the newline always lands in
+            # a record that comes AFTER the Enter edges.
+            self._deferred_newline_armed = False
+            self._newline_due = self._observe + DEFERRED_NEWLINE_OBSERVE_DELAY
+            DEFERRED_NEWLINE_TIMELINE.append(("enter_up", self._observe))
+            return
         if qcode == "tab" and down:
             order = (1, 2, 3, 4, 5)
             back = bool(self.modifiers & (MOD_LSHIFT | MOD_RSHIFT))
@@ -479,8 +516,9 @@ class FakeProbe:
                     # the Enter UP record, and only then the record that
                     # carries the newline.  A step that reads "the latest
                     # STATE" instead of waiting for the newline would
-                    # miss it.
-                    self._deferred_newline_ticks = 3
+                    # miss it.  The DOWN edge only ARMS the mechanism;
+                    # the UP edge schedules it (see _widget_effect).
+                    self._deferred_newline_armed = True
                 else:
                     self.textarea2 += b"\x0a"
             return
@@ -553,16 +591,25 @@ class FakeProbe:
         value = max(0, min(100, (self.pointer[0] - x0) * 100 // w))
         self.slider = value
 
+    def begin_observe(self) -> None:
+        """One serial read: the probe's read counter advances.
+
+        The counter is the fake's clock.  The deferred newline's schedule
+        is expressed in reads, so it does not depend on wall-clock time
+        nor on how many reads the runner happened to do first.
+        """
+        self._observe += 1
+
     def maybe_repeat(self) -> None:
         """The guest's software repeat (first 400 ms, then every 40 ms)."""
-        if self._deferred_newline_ticks:
-            # The deferred newline: it lands when the tick counter runs
-            # out, so the record that carries it arrives after the Enter
-            # edges.
-            self._deferred_newline_ticks -= 1
-            if self._deferred_newline_ticks == 0:
-                self.textarea2 += b"\x0a"
-                self.emit_state_if_changed()
+        if self._newline_due and self._observe >= self._newline_due:
+            # The deferred newline: the schedule that the Enter UP edge
+            # started has run out, so the record that carries the newline
+            # arrives after the Enter edges.
+            self._newline_due = 0
+            self.textarea2 += b"\x0a"
+            DEFERRED_NEWLINE_TIMELINE.append(("newline", self._observe))
+            self.emit_state_if_changed()
         now = time.monotonic()
         for qcode, deadline in list(self.repeat_at.items()):
             char = self.repeat_char.get(qcode)
@@ -950,6 +997,9 @@ class FakeProcessSession:
             return
         if self.qmp is None:
             return
+        # One serial read: the probe's read counter advances before the
+        # events of this read are processed.
+        self.probe.begin_observe()
         events = self.qmp.input_events_sent[self._probe_events_consumed:]
         self._probe_events_consumed = len(self.qmp.input_events_sent)
         for event in events:
@@ -1298,6 +1348,8 @@ class GuiInputRunnerTests(unittest.TestCase):
             repeat_first=0.01, repeat_interval=0.005,
             step=0.6, shell=0.6,
         )
+        # The deferred-newline mechanism's timeline is per test.
+        DEFERRED_NEWLINE_TIMELINE.clear()
 
     def tearDown(self):
         self.tmp_dir.cleanup()
@@ -1768,10 +1820,40 @@ class GuiInputRunnerTests(unittest.TestCase):
         newline in a LATER record.  A step that read "the latest STATE
         record" would miss the newline and fail the run; the step waits
         for the record that carries it, so the run passes.
+
+        The fixture also PINS the mechanism that defers the newline: the
+        newline must be emitted in a serial read that comes AFTER the
+        Enter UP edge.  The pin is what makes the fixture fail LOUDLY
+        if the mechanism ever brings the newline forward again -- the
+        failure mode in which the fixture would keep passing while it
+        no longer proves anything.
         """
         factory, qmp = self._make({"probe_fault_deferred_newline": True})
         ok, reasons = self._run(factory, qmp)
         self.assertTrue(ok, self._reasons(reasons))
+        timeline = list(DEFERRED_NEWLINE_TIMELINE)
+        self.assertTrue(timeline,
+                        "the deferred-newline mechanism must have run")
+        ups = [read for what, read in timeline if what == "enter_up"]
+        newlines = [read for what, read in timeline if what == "newline"]
+        self.assertTrue(ups, "the Enter UP edge must have been recorded")
+        self.assertEqual(len(ups), len(newlines),
+                         "every Enter UP edge must have deferred a newline")
+        for up, newline in zip(ups, newlines):
+            # The newline lands AFTER the Enter UP edge: the runner had
+            # to WAIT for the record that carries it.
+            self.assertGreater(
+                newline, up,
+                "the deferred newline must land after the Enter UP edge",
+            )
+            # The pinned margin: the mechanism is anchored to the UP
+            # edge, so the distance does not depend on the reads that
+            # happened before it.
+            self.assertEqual(
+                newline, up + DEFERRED_NEWLINE_OBSERVE_DELAY,
+                "the deferred newline must keep its margin after the "
+                "Enter UP edge",
+            )
 
     # ── the fix round 2 fixtures ─────────────────────────────────────
 
@@ -1827,17 +1909,71 @@ class GuiInputRunnerTests(unittest.TestCase):
         detail, so "the dropped records are not lost" is a fact a reader
         of the archive can check -- and the summary is BOUNDED, so a long
         interaction cannot blow the report up.
+
+        The summary's CONTENT is pinned as well: the count must be the
+        number of records the waits actually skipped (a summary that
+        says "0" while records were dropped is not evidence), and every
+        skipped record must be named in the summary.
         """
         factory, qmp = self._make()
         ok, reasons = self._run(factory, qmp)
         self.assertTrue(ok, self._reasons(reasons))
         details = self._outcome_details("input_interaction")
         self.assertTrue(details, "the archive must hold the outcomes")
+        limit = self.git.GuiInputScenarios.SKIPPED_SUMMARY_LIMIT
         for detail in details:
             self.assertIn("skipped records:", detail)
-            # Bounded: the count and the first few records only.
-            self.assertLessEqual(detail.count("seq="),
-                                 self.git.GuiInputScenarios.SKIPPED_SUMMARY_LIMIT)
+            summary = detail[detail.index("skipped records:"):]
+            # The count is the number of records the waits skipped.
+            count = int(summary[len("skipped records:"):].split("[", 1)[0])
+            self.assertGreater(
+                count, 0,
+                "the waits must have skipped records: the summary must "
+                "not read 'skipped records: 0'",
+            )
+            # Bounded: the count and the first few records only, and
+            # every skipped record that fits is named.
+            listed = summary.count("seq=")
+            self.assertLessEqual(listed, limit)
+            self.assertEqual(listed, min(count, limit))
+            # Every named record names its sequence number, its phase
+            # and its modifier snapshot.
+            for entry in summary[summary.index("[") + 1:].split(";"):
+                entry = entry.strip()
+                if not entry or entry.endswith(" more"):
+                    continue
+                self.assertRegex(entry, r"^seq=\d+ STATE modifiers=\S+$")
+
+    def test_the_skipped_summary_is_bounded(self):
+        """The skipped-record summary stays BOUNDED: the cap is a real cap.
+
+        The outcome's detail carries a summary of the records the waits
+        skipped, and the summary must never grow with the guest's record
+        stream: a long interaction would blow the report up.  With more
+        skipped records than the limit, the summary carries the total
+        count, the first records and a "+N more" marker.
+
+        The synthetic list is the only way to reach that branch: the
+        fake guest never skips more than a handful of records.
+        """
+        limit = self.git.GuiInputScenarios.SKIPPED_SUMMARY_LIMIT
+        total = limit + 4
+        runner = self.git.GuiInputScenarios(
+            session=None, qmp=None, run_dir=self.build_dir)
+        runner._skipped = [
+            self.git.GuiInputRecord(
+                nonce="synthetic", seq=index + 1, phase=self.git.PHASE_STATE,
+                fields={"modifiers": "0"},
+            )
+            for index in range(total)
+        ]
+        summary = runner._skipped_summary()
+        # The count is the TOTAL, not the count of the listed records.
+        self.assertIn(f"skipped records: {total}", summary)
+        # The truncation is visible.
+        self.assertIn(f"+{total - limit} more", summary)
+        # And the summary is bounded: the cap holds.
+        self.assertLessEqual(summary.count("seq="), limit)
 
     def test_a_transcript_writer_that_fails_is_reported(self):
         """An error INSIDE the transcript writer must not be swallowed.
