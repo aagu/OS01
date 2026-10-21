@@ -1223,7 +1223,7 @@ cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
 echo "[user-canary] audit passed"
 endef
 
-# ── test-static: 5 runtime audits via test-runtime + 4 standalone ──
+# ── test-static: 5 runtime audits via test-runtime + 5 standalone ──
 test-static: test-runtime
 	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) syscall-boundary -- \
@@ -1247,6 +1247,12 @@ test-static: test-runtime
 	  --limit 512
 	$(RUN_STATIC_AUDIT) driver-model-boundary -- \
 	  python3 qemutests/driver_model_boundary_audit.py
+	$(RUN_STATIC_AUDIT) gui-build-audit -- \
+	  python3 qemutests/gui_build_audit.py \
+	    --sysroot "$(SYSROOT)" \
+	    --build-dir "$(BUILD_DIR)" \
+	    --repo-root "$(OS01_ROOT)" \
+	    --profile "$(PROFILE)"
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
@@ -1397,7 +1403,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 11 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, driver-model-boundary, test-user-canary, syscall-boundary, header-object, stack-frame)';
+		 'test-static'         '(rootfs)'     'All 12 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, driver-model-boundary, gui-build, test-user-canary, syscall-boundary, header-object, stack-frame)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \

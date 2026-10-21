@@ -583,6 +583,14 @@ install-headers:
 ifneq ($(FB_RESOLUTION_TEST),1)
 	rm -f $(INSTALL_ROOT)/usr/include/uapi/fb_test.h $(INSTALL_ROOT)/usr/include/driver/fb_test.h
 endif
+	@# The physical input ROUTE and the PS/2 Set 1 framer are kernel-private
+	@# interfaces: the userspace input ABI is uapi/gfx.h + uapi/mouse.h, and
+	@# libgui decodes the raw Set 1 bytes itself (libgui/internal/gui_input_ps2.h
+	@# documents that this kernel header is NOT on the userspace include
+	@# path).  Publishing them would put the kernel's framing state in front
+	@# of every user program, so they are excluded from the staged headers.
+	@# driver/input_route.h is excluded with them: it is the only includer.
+	rm -f $(INSTALL_ROOT)/usr/include/driver/input_ps2.h $(INSTALL_ROOT)/usr/include/driver/input_route.h
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 # ── Clean ───────────────────────────────────────────────────
