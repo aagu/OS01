@@ -150,6 +150,14 @@ jobs:
       - name: Static audits
         run: make PROFILE=x86_64-clang test-static
 
+      # The GUI library's incremental contract: a repeated build must not
+      # recompile, touching the public input header must rebuild the
+      # dependents, install must clear the staging tree, and a new sysroot
+      # generation must be clean while the historical ones are preserved.
+      # It is a plain root entry point and needs the same rootfs capability.
+      - name: GUI incremental contract
+        run: make PROFILE=x86_64-clang test-gui-incremental
+
       - name: Kernel layout
         run: make test-kernel-layout
 

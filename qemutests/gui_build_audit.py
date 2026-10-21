@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 from pathlib import Path
 import re
 import subprocess
@@ -408,6 +409,11 @@ def audit_published_headers(
             # relative path (never by basename), so <gui/sub/x.h> is not
             # accepted because a gui/x.h happens to exist.
             #
+            # Resolution: an include RESOLVES when ANY of its candidate
+            # paths exists.  A quoted include is first looked up next to
+            # the including header, then in the include root; an angle
+            # include is looked up in the include root.
+            #
             # Scope: the GUI publication tree.  A tree-relative include is
             # one that names a directory ("<gui/...>", "<driver/...>"); a
             # bare "<stdio.h>" is a compiler/system header and is not the
@@ -422,19 +428,20 @@ def audit_published_headers(
                     else:
                         # A bare system/compiler header — not ours to publish.
                         continue
+                    inside_candidates = []
                     for candidate in candidates:
                         try:
-                            inside = inc_root in candidate.parents
+                            if inc_root in candidate.parents:
+                                inside_candidates.append(candidate)
                         except (OSError, ValueError):
-                            inside = False
-                        if not inside:
                             continue
-                        if not candidate.is_file():
-                            errors.append(
-                                f"published header {hdr.relative_to(root)} includes the "
-                                f"unpublished header {target}"
-                            )
-                        break
+                    if not inside_candidates:
+                        continue
+                    if not any(candidate.is_file() for candidate in inside_candidates):
+                        errors.append(
+                            f"published header {hdr.relative_to(root)} includes the "
+                            f"unpublished header {target}"
+                        )
 
         # The binding constraint is about the SYSROOT, not only the GUI
         # include tree: no published header may expose an LVGL type.
@@ -1080,11 +1087,15 @@ def audit_sysroot_and_build(
                 errors.append(
                     f"Public header {hdr.name} contains the host-test switch OS01_HOST_TEST"
                 )
-            for hook in GUI_TEST_HOOK_SYMBOLS:
-                if hook in content:
-                    errors.append(
-                        f"Public header {hdr.name} declares the host-only test hook {hook}"
-                    )
+            # The injection hooks are a FAMILY, not two names: the archive
+            # check rejects every gui_input_test_* symbol, so the public
+            # header check must use the same family match — a header
+            # declaring a different gui_input_test_* symbol must not
+            # escape.
+            for hook in sorted(set(re.findall(r"\bgui_input_test_\w+", content))):
+                errors.append(
+                    f"Public header {hdr.name} declares the host-only test hook {hook}"
+                )
 
         with tempfile.TemporaryDirectory(prefix="gui-consumer-") as td:
             temp_dir = Path(td)
@@ -1184,9 +1195,10 @@ def audit_sysroot_and_build(
 
 # ── Incremental build verification (observe-only) ────────────────────────
 #
-# The audit NEVER spawns make.  The make recipe owns every build step
-# (mk/components/run.mk::test-gui-incremental) and the audit only records
-# and compares snapshots:
+# The INCREMENTAL modes never spawn make.  The make recipe owns every
+# build step (mk/components/run.mk::test-gui-incremental) and the audit
+# only records and compares snapshots.  (The --sysroot mode does spawn
+# make once, read-only, to read the profile's build variables.)
 #
 #   --incremental-snapshot FILE --incremental-phase PHASE   record
 #   --incremental-compare  FILE --incremental-phase PHASE   compare
@@ -1263,73 +1275,86 @@ def _dependent_objects(obj_root: Path, header: Path) -> list[Path]:
     return out
 
 
-def _include_closure(
-    path: Path,
-    search_dirs: list[Path],
-    seen: set[Path] | None = None,
-) -> set[Path]:
-    """Every header reachable from `path` through #include directives."""
-    if seen is None:
-        seen = set()
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path
-    if resolved in seen or not path.is_file():
-        return set()
-    seen.add(resolved)
-    out: set[Path] = set()
-    try:
-        content = path.read_text(errors="replace")
-    except OSError:
-        return out
-    for form, target in _include_targets(content):
-        candidate: Path | None = None
-        if form == '"':
-            local = path.parent / target
-            if local.is_file():
-                candidate = local
-        if candidate is None:
-            for directory in search_dirs:
-                probe = directory / target
-                if probe.is_file():
-                    candidate = probe
-                    break
-        if candidate is not None:
-            try:
-                out.add(candidate.resolve())
-            except OSError:
-                pass
-            out |= _include_closure(candidate, search_dirs, seen)
-    return out
+def _object_for_source(obj_root: Path, src: Path) -> Path | None:
+    """The build object of a libgui production source."""
+    preferred = obj_root / "platform" / f"{src.stem}.o"
+    if preferred.is_file():
+        return preferred
+    for candidate in sorted(obj_root.rglob(f"{src.stem}.o")):
+        return candidate
+    return None
 
 
-def _must_rebuild_objects(
+def _compiler_dependency_view(
+    compile_cmd: str,
     repo_root: Path,
     build_dir: Path,
     header: Path,
-) -> list[Path]:
-    """The libgui objects that MUST be rebuilt when the header changes.
+    work_dir: Path,
+) -> tuple[set[Path], list[str]]:
+    """The objects that REALLY depend on the header, per the compiler.
 
-    Derived from the SOURCES (the transitive include closure), not from the
-    dependency files: a broken ``-MMD`` rule or a doctored ``.d`` file
-    cannot hide the fact that these objects include the public header.
+    The dependency data comes from the TARGET compiler's own dependency
+    mode (-MMD) with the compile command the build uses, so the
+    preprocessor decides: an ``#if 0`` include, an include inside a
+    comment and an include under a false ``#ifdef`` are all excluded —
+    exactly as the build sees them.  A raw-text regex cannot do this: it
+    over-counts and makes the incremental gate fail on a healthy tree.
+
+    Returns the set of objects and the errors.
     """
-    libgui = repo_root / "libgui"
-    search = [libgui / "include", libgui / "internal", libgui / "src"]
-    obj_dir = build_dir / "libgui" / "obj" / "platform"
+    errors: list[str] = []
+    if not compile_cmd:
+        return set(), [
+            "the libgui compile command is required for the compiler dependency "
+            "view (pass --libgui-compile)"
+        ]
+    try:
+        cmd = shlex.split(compile_cmd)
+    except ValueError as exc:
+        return set(), [f"cannot parse the libgui compile command {compile_cmd!r}: {exc}"]
+    if not cmd:
+        return set(), ["the libgui compile command is empty"]
+
     try:
         wanted = header.resolve()
     except OSError:
         wanted = header
-    out: list[Path] = []
-    src_dir = libgui / "src"
-    if not src_dir.is_dir():
-        return out
+
+    obj_root = build_dir / "libgui" / "obj"
+    src_dir = repo_root / "libgui" / "src"
+    out: set[Path] = set()
     for src in sorted(src_dir.glob("*.c")):
-        if wanted in _include_closure(src, search):
-            out.append(obj_dir / f"{src.stem}.o")
-    return out
+        dep_file = work_dir / f"{src.stem}.compiler.d"
+        res = run_cmd(
+            [
+                *cmd,
+                "-MMD",
+                "-MF",
+                str(dep_file),
+                "-E",
+                "-o",
+                os.devnull,
+                str(src),
+            ],
+            cwd=repo_root,
+        )
+        if res.returncode != 0 or not dep_file.is_file():
+            errors.append(
+                f"the compiler dependency run for {src.name} failed:\n"
+                f"{res.stderr.strip()}"
+            )
+            continue
+        for dep in _parse_make_deps(dep_file):
+            try:
+                if Path(dep).resolve() == wanted:
+                    obj = _object_for_source(obj_root, src)
+                    if obj is not None:
+                        out.add(obj)
+                    break
+            except OSError:
+                continue
+    return out, errors
 
 
 def _generation_snapshots(
@@ -1459,6 +1484,7 @@ def incremental_compare(
     profile: str,
     phase: str,
     snapshot_file: Path,
+    compile_cmd: str = "",
 ) -> bool:
     """Check the recorded baseline against the current build state."""
     errors: list[str] = []
@@ -1498,29 +1524,40 @@ def incremental_compare(
     elif phase == "touch":
         # Two independent views of the same contract:
         #
-        #   tracked      the objects whose .d file lists the EXACT header
-        #                (the dependency tracking must be intact);
-        #   must_rebuild the objects whose SOURCE includes the header
-        #                (derived from the sources, so a doctored .d file
-        #                or a dropped -MMD cannot hide the dependency).
+        #   compiler_view the objects the TARGET COMPILER records as
+        #                  depending on the header (-MMD with the build's
+        #                  own compile command).  This is the truth: the
+        #                  preprocessor decides, so an #if 0 include, an
+        #                  include in a comment and an include under a
+        #                  false #ifdef are all excluded.
+        #   dotd_view     the objects whose BUILD dependency file lists
+        #                  the exact header.  This is what make uses.
         #
-        # Both must be non-empty, and every object that must be rebuilt
-        # must actually have been rebuilt.
-        tracked = _dependent_objects(paths["obj_root"], header)
-        must_rebuild = _must_rebuild_objects(repo_root, build_dir, header)
-        if not must_rebuild:
+        # A rebuild is required only for the objects BOTH views agree on.
+        # If the .d view misses an object the compiler records, the
+        # dependency tracking is broken and the error is fatal.
+        dotd_view = set(_dependent_objects(paths["obj_root"], header))
+        with tempfile.TemporaryDirectory(prefix="gui-compiler-deps-") as td:
+            compiler_view, cerr = _compiler_dependency_view(
+                compile_cmd, repo_root, build_dir, header, Path(td)
+            )
+        errors.extend(cerr)
+        if not compiler_view and not cerr:
             errors.append(
-                f"incremental: no libgui source includes {header} — the audit "
+                f"incremental: no libgui source depends on {header} — the audit "
                 "cannot establish the rebuild contract"
             )
-        if not tracked:
+        missing_tracking = sorted(
+            obj.name for obj in (compiler_view - dotd_view)
+        )
+        if missing_tracking:
             errors.append(
-                f"incremental: no libgui object depends on {header} — the "
-                "dependency tracking is broken"
+                f"incremental: the dependency tracking is broken — the compiler "
+                f"records {missing_tracking} as depending on {header.name} but "
+                "the build dependency files do not"
             )
-        baseline = data.get("dependent_objects", {})
         objects_before = data.get("objects", {})
-        for obj in must_rebuild:
+        for obj in sorted(compiler_view & dotd_view):
             before = objects_before.get(str(obj))
             if before is None:
                 errors.append(
@@ -1533,12 +1570,6 @@ def incremental_compare(
                 errors.append(
                     f"incremental: touching {header.name} did not rebuild the "
                     f"dependent object {obj.name}"
-                )
-        for obj in tracked:
-            if str(obj) not in {str(o) for o in must_rebuild}:
-                errors.append(
-                    f"incremental: the object {obj.name} tracks {header.name} but "
-                    "its source does not include it"
                 )
         before_archive = (data.get("archive") or {}).get("mtime_ns")
         after_archive = paths["archive"].stat().st_mtime_ns if paths["archive"].is_file() else None
@@ -1670,6 +1701,7 @@ def audit_incremental_state(
     repo_root: Path,
     build_dir: Path,
     errors: list[str],
+    compile_cmd: str = "",
 ) -> bool:
     """The build-free half of the incremental contract.
 
@@ -1685,11 +1717,17 @@ def audit_incremental_state(
         errors.append(f"incremental: the public input header is missing: {header}")
         return False
 
-    deps = _dependent_objects(paths["obj_root"], header)
-    must_rebuild = _must_rebuild_objects(repo_root, build_dir, header)
-    if not must_rebuild:
+    deps = set(_dependent_objects(paths["obj_root"], header))
+    compiler_view: set[Path] = set()
+    if compile_cmd:
+        with tempfile.TemporaryDirectory(prefix="gui-compiler-deps-") as td:
+            compiler_view, cerr = _compiler_dependency_view(
+                compile_cmd, repo_root, build_dir, header, Path(td)
+            )
+        errors.extend(cerr)
+    if compile_cmd and not compiler_view and not cerr:
         errors.append(
-            f"incremental: no libgui source includes {header} — the audit cannot "
+            f"incremental: no libgui source depends on {header} — the audit cannot "
             "establish the rebuild contract"
         )
     if not deps:
@@ -1697,11 +1735,19 @@ def audit_incremental_state(
             f"incremental: no libgui object depends on {header} — the dependency "
             "tracking is broken"
         )
-    else:
-        print(
-            f"gui incremental state: {len(must_rebuild)} libgui object(s) include "
-            f"{header.name} and {len(deps)} track it in their dependency file"
-        )
+    if compile_cmd:
+        missing_tracking = sorted(obj.name for obj in (compiler_view - deps))
+        if missing_tracking:
+            errors.append(
+                f"incremental: the dependency tracking is broken — the compiler "
+                f"records {missing_tracking} as depending on {header.name} but "
+                "the build dependency files do not"
+            )
+    print(
+        f"gui incremental state: {len(compiler_view) or len(deps)} libgui object(s) "
+        f"depend on {header.name} "
+        f"(compiler view: {len(compiler_view)}, dependency-file view: {len(deps)})"
+    )
 
     staging = paths["staging"]
     if staging.is_dir():
@@ -1746,6 +1792,24 @@ def audit_incremental_state(
     return True
 
 
+def _read_compile_command(explicit: str | None, build_dir: Path) -> str:
+    """The libgui compile command the build uses.
+
+    The audit does not spawn make for this: the recipe writes the command
+    out (the build system knows it exactly) and the audit only reads it.
+    """
+    candidate = Path(explicit) if explicit else build_dir / "incr-libgui-compile.txt"
+    if not candidate.is_file():
+        return ""
+    text = candidate.read_text(errors="replace").strip()
+    # The file holds one command line; take the first non-empty one.
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="GUI build and assertion configuration audit")
     parser.add_argument(
@@ -1788,7 +1852,8 @@ def main() -> int:
         type=str,
         default=None,
         help="Record an incremental baseline into the given file "
-             "(the audit never spawns make: the recipe drives the builds)",
+             "(the incremental modes never spawn make: the recipe drives "
+             "the builds)",
     )
     parser.add_argument(
         "--incremental-compare",
@@ -1802,6 +1867,14 @@ def main() -> int:
         default=None,
         choices=list(INCREMENTAL_PHASES),
         help="The incremental phase a snapshot/compare pair belongs to",
+    )
+    parser.add_argument(
+        "--libgui-compile",
+        type=str,
+        default=None,
+        help="File holding the libgui compile command (one line).  The audit "
+             "recomputes the compiler's own dependency view with it.  Defaults "
+             "to <build-dir>/incr-libgui-compile.txt when that file exists.",
     )
 
     args = parser.parse_args()
@@ -1837,7 +1910,10 @@ def main() -> int:
             return 2
         build_dir_path = Path(args.build_dir).resolve()
         incremental_errors: list[str] = []
-        if not audit_incremental_state(repo_root, build_dir_path, incremental_errors):
+        compile_cmd = _read_compile_command(args.libgui_compile, build_dir_path)
+        if not audit_incremental_state(
+            repo_root, build_dir_path, incremental_errors, compile_cmd
+        ):
             sys.stderr.write(
                 "GUI incremental build audit failed with the following errors:\n"
             )
@@ -1849,7 +1925,7 @@ def main() -> int:
     # The snapshot / compare pair needs the build directory only: it never
     # touches the published sysroot, it only records and compares build
     # state.  The make recipe (mk/components/run.mk::test-gui-incremental)
-    # owns every build step — the audit never spawns make.
+    # owns every build step — the incremental modes never spawn make.
     if args.incremental_snapshot or args.incremental_compare:
         ran_any = True
         if not args.build_dir:
@@ -1880,6 +1956,7 @@ def main() -> int:
                 profile,
                 args.incremental_phase,
                 Path(args.incremental_compare),
+                _read_compile_command(args.libgui_compile, build_dir_path),
             ):
                 success = False
 

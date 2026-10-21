@@ -1282,12 +1282,13 @@ test-gui-incremental:
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
 	@echo "  [test-gui-incremental] phase 2/4: touching gui_input.h must rebuild the dependents"
 	@stat -c %y libgui/include/gui/gui_input.h > $(BUILD_DIR)/incr-header-time
-	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch
+	@$(MAKE) --no-print-directory -C libgui OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" print-compile > $(BUILD_DIR)/incr-libgui-compile.txt
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
 	@touch libgui/include/gui/gui_input.h
 	$(call os01_submake,libgui,all)
 	$(MAKE) --no-print-directory test-gui-host CASE=input-decode
 	@touch -d "$$(cat $(BUILD_DIR)/incr-header-time)" libgui/include/gui/gui_input.h
-	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
 	@echo "  [test-gui-incremental] phase 3/4: install must clear orphaned staging files"
 	@mkdir -p $(STAGING_DIR)/gui/usr/include/gui
 	@printf '/* orphaned staging file */\n' > $(STAGING_DIR)/gui/usr/include/gui/gui_input_private.h

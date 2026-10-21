@@ -67,6 +67,14 @@ TARGET_AR ?= $(LLVM_AR)
 
 all: $(ARCHIVE)
 
+# The build audit recomputes the COMPILER's own dependency view to prove
+# the incremental contract (the .d files may be stale or doctored).  It
+# needs the exact compile command of the production sources and must not
+# spawn make itself, so this target prints the command read-only.
+.PHONY: print-compile
+print-compile:
+	@printf '%s\n' "$(EFFECTIVE_CC) $(CFLAGS)"
+
 $(OBJS): | check-version
 
 $(BUILD_DIR)/obj/lvgl/%.o: $(LVGL_SRC_DIR)/%.c
