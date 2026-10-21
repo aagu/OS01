@@ -41,6 +41,8 @@ static int keyboard_ok = 1, irq_ok = 1, irq_registered, irq_unregistered;
 static uint8_t command_byte, original_command_byte;
 static int cmd_writes, aux_writes, fail_aux_at, resend_at, resend_left;
 static int bad_source_at, bad_bat, bad_id, probe_reject, wheel_id = 3;
+static uint8_t aux_log[32];
+static int aux_log_n;
 static int reporting, consumer_active, packet_events;
 static uint8_t packet_bytes[64];
 static int immediate_packet;
@@ -110,6 +112,7 @@ int i8042_write_command_byte(uint8_t b)
 int i8042_write_aux_byte(uint8_t b)
 {
     aux_writes++; now += 100;
+    if (aux_log_n < (int)sizeof(aux_log)) aux_log[aux_log_n++] = b;
     if (b == 0xF5) now += f5_write_cost;
     if (aux_writes == fail_aux_at) return -1;
     pending_n = pending_pos = 0;
@@ -152,6 +155,7 @@ static void reset_case(uint8_t cb)
   original_command_byte = command_byte = cb; cmd_writes = aux_writes = 0;
   fail_aux_at = resend_at = resend_left = bad_source_at = bad_bat = bad_id = probe_reject = 0;
   wheel_id = 3; reporting = consumer_active = packet_events = 0;
+  aux_log_n = 0; memset(aux_log, 0, sizeof(aux_log));
   memset(packet_bytes, 0, sizeof(packet_bytes));
   immediate_packet = 0;
   fail_stale_drain = fail_cmd_write_at = fail_cmd_write_from = force_f4_deadline = 0;
@@ -280,8 +284,41 @@ static void test_command_byte_write_failures(void)
       assert_true(cmd_writes >= write + 1);
   }
 }
+/* The knock the driver sends to negotiate the IntelliMouse (wheel capable)
+ * mode is a protocol constant: F3 200 / F3 100 / F3 80.  The third value is
+ * the load-bearing one -- 80 is the magic value that switches the mouse into
+ * the wheel-capable mode, while 200 and 100 are ordinary sample rates (the
+ * legal sample rates are 10/20/40/60/80/100/200, so 80 is legal as a sample
+ * rate too).  A mouse that is not switched stays in the plain 3-byte mode
+ * and the wheel is dropped without any error being reported anywhere.
+ *
+ * Nothing in this fixture used to observe the bytes the driver actually
+ * wrote: the mock answered 0xFA to every 0xF3 and returned a fixed device
+ * id for 0xF2, so a wrong knock value (for example 50, which is not even a
+ * legal sample rate) could not be caught here.  The recorder below keeps
+ * every AUX byte the driver wrote so the exact sequence is pinned. */
+static void test_knock_sequence_is_the_intellimouse_wheel_knock(void)
+{
+  static const uint8_t expected[] = {
+    0xFF, 0xF6,                            /* reset, then set defaults */
+    0xF3, 200, 0xF3, 100, 0xF3, 80,        /* the IntelliMouse knock */
+    0xF2,                                  /* get device id */
+    0xF4,                                  /* enable reporting */
+  };
+  reset_case(0x41);
+  assert_eq(0, mouse_init());
+  assert_eq((int)sizeof(expected), aux_log_n);
+  assert_mem_eq(expected, aux_log, sizeof(expected));
+  /* The third knock value on its own, so the failure message names it. */
+  assert_eq(80, aux_log[7]);
+  /* Every knock value must be a legal PS/2 sample rate. */
+  assert_eq(200, aux_log[3]);
+  assert_eq(100, aux_log[5]);
+}
+
 int main(void)
 { TEST_SUITE("mouse initialization"); test_event_io_and_poll(); test_success(0x41); test_success(0x63);
+  test_knock_sequence_is_the_intellimouse_wheel_knock();
   test_payload_values_not_filtered();
   test_stale_drain_must_succeed();
   test_f4_timeout_still_sends_f5();

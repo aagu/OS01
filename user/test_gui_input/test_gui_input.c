@@ -469,7 +469,14 @@ static void build_ui(probe_t *p, uint32_t w, uint32_t h)
     lv_slider_set_value(p->slider, 0, LV_ANIM_OFF);
 
     /* 3. The scrollable container: its content is taller than the box, so
-     *    the wheel really has something to scroll. */
+     *    the wheel really has something to scroll.
+     *
+     *    The box is 2 * row_h + gap tall (348 px at 1440x900) and the
+     *    labels are 24 px apart, so the content must reach past the box:
+     *    12 lines ended at 284 px -- inside the box, which left the
+     *    container with NO scroll range at all (lv_obj_get_scroll_bottom()
+     *    was 0) and the wheel could not move anything.  24 lines end at
+     *    570 px, which leaves 222 px of scroll range: several detents. */
     p->scroll_box = lv_obj_create(scr);
     lv_obj_set_pos(p->scroll_box, scroll_r.x, scroll_r.y);
     lv_obj_set_size(p->scroll_box, scroll_r.w, scroll_r.h);
@@ -477,7 +484,7 @@ static void build_ui(probe_t *p, uint32_t w, uint32_t h)
     lv_obj_set_scroll_dir(p->scroll_box, LV_DIR_VER);
     lv_obj_set_style_bg_color(p->scroll_box, lv_color_hex(0x00222233), 0);
     lv_obj_set_style_bg_opa(p->scroll_box, LV_OPA_COVER, 0);
-    for (i = 0; i < 12; i++) {
+    for (i = 0; i < 24; i++) {
         char line[32];
         int n = snprintf(line, sizeof(line), "SCROLL LINE %d", i);
         label = lv_label_create(p->scroll_box);

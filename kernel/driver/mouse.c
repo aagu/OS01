@@ -284,7 +284,18 @@ int mouse_init(void)
     if (send_byte(0xF6))
         goto fail;
 
-    static const uint8_t sequence[] = { 0xF3, 200, 0xF3, 100, 0xF3, 50, 0xF2 };
+    /*
+     * IntelliMouse knock: F3 200 / F3 100 / F3 80.
+     *
+     * The third knock value must be 80: it is the magic value that switches
+     * the mouse into the IntelliMouse (wheel-capable) mode.  200 and 100 are
+     * ordinary sample rates -- the legal set is 10/20/40/60/80/100/200 -- and
+     * 80 is the only one of those that a wheel-capable mouse also accepts as
+     * the mode switch (it is legal as a sample rate too, so the knock does
+     * not fail).  Any other value leaves the mouse in the plain 3-byte mode
+     * and the wheel is dropped by the host without any error.
+     */
+    static const uint8_t sequence[] = { 0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2 };
     for (unsigned i = 0; i < sizeof(sequence); i++) {
         rc = send_byte(sequence[i]);
         if (rc == -2) {
