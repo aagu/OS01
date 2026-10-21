@@ -11,11 +11,32 @@ from __future__ import annotations
 
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from qemutests.gui_input_test import (
+        MOD_CAPS,
+        MOD_LALT,
+        MOD_LCTRL,
+        MOD_LSHIFT,
+        MOD_RALT,
+        MOD_RCTRL,
+        MOD_RSHIFT,
+        MODIFIER_BITS,
+        MOUSE_BUTTONS,
+        QCODE_PHYSICAL,
+    )
+except ImportError:  # pragma: no cover - the repo root is on sys.path
+    raise
+
+# The characters the fake probe translates (the US ASCII layout).
+FAKE_CHARS = {"a": "a", "b": "b", "c": "c", "q": "q", "z": "z", "1": "1"}
+FAKE_SHIFTED = {"a": "A", "b": "B", "c": "C", "q": "Q", "z": "Z", "1": "!"}
 
 # Fake surfaces
 SURFACE_TERMINAL = ("terminal", b"\x00\x00\x00" * (1024 * 768))
@@ -42,13 +63,19 @@ class FakeSurface:
 
 
 class FakeQMP:
-    def __init__(self, fail_screendump: bool = False, default_surface: Optional[FakeSurface] = None):
+    def __init__(self, fail_screendump: bool = False, default_surface: Optional[FakeSurface] = None,
+                 fail_input: bool = False):
         self.fail_screendump = fail_screendump
+        self.fail_input = fail_input
         self.default_surface = default_surface or FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
         self.screendumps: List[str] = []
         self.current_surface: FakeSurface = self.default_surface
         self.connected = False
         self.closed = False
+        # Task 11: every input event that was sent through QMP.
+        self.input_events_sent: List[dict] = []
+        # The surface never changes (the screenshot mismatch fixture).
+        self.stable_surface = False
 
     def connect(self) -> None:
         self.connected = True
@@ -58,12 +85,343 @@ class FakeQMP:
             raise RuntimeError("simulated QMP screendump failure")
         self.screendumps.append(str(path))
         shot = self.current_surface
-        if "_gui" in str(path):
+        if "_gui" in str(path) and not self.stable_surface:
             self.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
         return shot
 
+    def input_events(self, events: List[dict]) -> None:
+        """Record the raw input events (the payload contract)."""
+        if self.fail_input:
+            raise RuntimeError("simulated QMP input-send-event failure")
+        for event in events:
+            self.input_events_sent.append(event)
+
     def close(self) -> None:
         self.closed = True
+
+
+class FakeProbe:
+    """A host-side simulation of the guest input probe.
+
+    It exists so that the runner's ORCHESTRATION can be exercised on the
+    host.  It proves NOTHING about real input: the only proof of real
+    input is the QEMU run driven by ``qemutests/gui_test.py``.
+    """
+
+    # The probe's widget layout (the same formula the guest uses).
+    GAP = 8
+
+    def __init__(self, session: "FakeProcessSession", nonce: str,
+                 width: int = 1440, height: int = 900):
+        self.session = session
+        self.nonce = nonce
+        self.width = width
+        self.height = height
+        self.seq = 0
+        self.pid = 4242
+        self.click_count = 0
+        self.slider = 0
+        self.scroll = 0
+        self.focus = 1
+        self.textarea = b""
+        self.textarea2 = b""
+        self.physical_key = 0
+        self.modifiers = 0
+        self.action = -1
+        self.sigint_seen = 0
+        self.held: Dict[str, int] = {}
+        self.pointer = [width // 2, height // 2]
+        self.button_down = False
+        self.repeat_at: Dict[str, float] = {}
+        self.repeat_char: Dict[str, str] = {}
+        self.exited = False
+        self.last_state = ""
+        # The READY record always comes first.
+        self.started = False
+        # The fault switches.
+        self.fault_stale_nonce = False
+        self.fault_drop_key_up = False
+        self.fault_caps_reflip = False
+        self.fault_right_is_left = False
+        self.fault_sticky_modifier = False
+        self.fault_sigint = False
+        self.fault_pid_change = False
+        self.fault_seq_gap = False
+        self.fault_no_ready = False
+        self.fault_silent = False
+        self.fault_no_ack = False
+
+    # ── the layout ────────────────────────────────────────────────
+
+    def layout(self) -> Dict[str, Tuple[int, int, int, int]]:
+        gap = self.GAP
+        col_w = max(48, (self.width - 3 * gap) // 2)
+        row_h = max(24, (self.height - 6 * gap) // 5)
+        return {
+            "btn": (gap, gap, col_w, row_h),
+            "slider": (gap, gap + row_h + gap, col_w, row_h),
+            "scroll": (gap, gap + 2 * (row_h + gap), col_w, 2 * row_h + gap),
+            "ta1": (gap, gap + 4 * (row_h + gap), col_w, row_h),
+            "ta2": (gap + col_w + gap, gap + 4 * (row_h + gap), col_w, row_h),
+        }
+
+    def centre(self, name: str) -> Tuple[int, int]:
+        x0, y0, w, h = self.layout()[name]
+        return x0 + w // 2, y0 + h // 2
+
+    def _over(self, name: str) -> bool:
+        x0, y0, w, h = self.layout()[name]
+        return x0 <= self.pointer[0] < x0 + w and y0 <= self.pointer[1] < y0 + h
+
+    # ── the protocol ──────────────────────────────────────────────
+
+    def emit(self, phase: str, fields: str = "") -> None:
+        self.seq += 1
+        seq = self.seq
+        if self.fault_seq_gap:
+            seq += 3
+        nonce = self.nonce
+        if self.fault_stale_nonce:
+            nonce = "deadbeef"
+        text = f"\n[gui-input] nonce={nonce} seq={seq} phase={phase}"
+        if fields:
+            text += " " + fields
+        text += "\n"
+        self.session._text += text
+
+    def state_fields(self) -> str:
+        return (
+            f"click_count={self.click_count:08x} "
+            f"slider={self.slider & 0xFFFFFFFF:08x} "
+            f"scroll={self.scroll & 0xFFFFFFFF:08x} "
+            f"focus={self.focus:02x} "
+            f"textarea={self.textarea.hex()} "
+            f"textarea2={self.textarea2.hex()} "
+            f"physical_key={self.physical_key} "
+            f"modifiers={self.modifiers} "
+            f"action={self.action} "
+            f"sigint_seen={self.sigint_seen} "
+            f"text_trunc=0"
+        )
+
+    def emit_state_if_changed(self) -> None:
+        if self.exited or self.fault_silent or not self.started:
+            return
+        fields = self.state_fields()
+        if fields != self.last_state:
+            self.emit("STATE", fields)
+            self.last_state = fields
+
+    def start(self) -> None:
+        if self.fault_no_ready:
+            # The probe printed only its command echo: there is no READY
+            # record, and the echo is not a protocol record either.
+            self.session._text += (
+                f"/bin/test_gui_input --nonce {self.nonce} "
+                f"--scenario interaction\n"
+            )
+            return
+        x0, y0, w, h = self.layout()["btn"]
+        centres = {name: self.centre(name) for name in self.layout()}
+        self.emit(
+            "READY",
+            f"pid={self.pid} width={self.width} height={self.height} "
+            f"btn_x={centres['btn'][0]} btn_y={centres['btn'][1]} "
+            f"slider_x={centres['slider'][0]} slider_y={centres['slider'][1]} "
+            f"scroll_x={centres['scroll'][0]} scroll_y={centres['scroll'][1]} "
+            f"ta1_x={centres['ta1'][0]} ta1_y={centres['ta1'][1]} "
+            f"ta2_x={centres['ta2'][0]} ta2_y={centres['ta2'][1]}",
+        )
+        self.started = True
+        self.emit_state_if_changed()
+
+    def answer_control(self, ctl_seq: int, command: str) -> None:
+        if self.fault_no_ack:
+            # The control channel answers with a state instead of an
+            # acknowledgement: the command is never confirmed.
+            fields = self.state_fields()
+            self.emit("STATE", fields)
+            self.last_state = fields
+            return
+        pid = self.pid + 1 if self.fault_pid_change else self.pid
+        self.emit("ACK", f"ctl_seq={ctl_seq} pid={pid} command={command} raw_pump=1")
+        if command == "SNAPSHOT":
+            # The guest answers a SNAPSHOT with an unconditional STATE.
+            fields = self.state_fields()
+            self.emit("STATE", fields)
+            self.last_state = fields
+
+    def exit(self, result: str = "PASS", exit_code: int = 0,
+             detail: str = "interaction_complete") -> None:
+        self.exited = True
+        self.emit(
+            "EXIT",
+            f"result={result} exit_code={exit_code} detail={detail} "
+            f"textarea={self.textarea.hex()} textarea2={self.textarea2.hex()} "
+            f"click_count={self.click_count:08x} focus={self.focus:02x} "
+            f"sigint_seen={self.sigint_seen} ctl_acks=0 progress_acks=0 "
+            f"recorded_bytes={len(self.textarea)} text_trunc=0",
+        )
+
+    # ── the input handling ────────────────────────────────────────
+
+    def handle(self, event: dict) -> None:
+        if self.exited:
+            return
+        kind = event.get("type")
+        data = event.get("data") or {}
+        if kind == "key":
+            self._key(data)
+        elif kind == "rel":
+            axis = data.get("axis")
+            value = int(data.get("value", 0))
+            if axis == "x":
+                self.pointer[0] = max(0, min(self.width - 1, self.pointer[0] + value))
+            elif axis == "y":
+                self.pointer[1] = max(0, min(self.height - 1, self.pointer[1] + value))
+            else:
+                return
+            if self.button_down:
+                self._update_slider()
+        elif kind == "btn":
+            self._button(data)
+
+    def _key(self, data: dict) -> None:
+        down = bool(data.get("down"))
+        qcode = (data.get("key") or {}).get("data")
+        if qcode is None:
+            return
+        if self.fault_drop_key_up and not down and qcode == "a":
+            # The key-up never reaches the guest.
+            return
+        if down and qcode in self.held:
+            # A repeated make is not a new edge for the guest.
+            if qcode == "caps_lock" and self.fault_caps_reflip:
+                self.modifiers ^= MOD_CAPS
+                self.emit_state_if_changed()
+            return
+        bit = MODIFIER_BITS.get(qcode)
+        if bit is not None and self.fault_right_is_left:
+            if qcode == "shift_r":
+                bit = MOD_LSHIFT
+            elif qcode == "ctrl_r":
+                bit = MOD_LCTRL
+            elif qcode == "alt_r":
+                bit = MOD_LALT
+        if down:
+            self.held[qcode] = QCODE_PHYSICAL.get(qcode, 0)
+            if qcode == "caps_lock":
+                self.modifiers ^= MOD_CAPS
+            elif bit:
+                self.modifiers |= bit
+        else:
+            self.held.pop(qcode, None)
+            self.repeat_at.pop(qcode, None)
+            self.repeat_char.pop(qcode, None)
+            if bit:
+                if self.fault_sticky_modifier:
+                    pass
+                else:
+                    self.modifiers &= ~bit
+        if (down and qcode == "c" and self.fault_sigint
+                and self.modifiers & (MOD_LCTRL | MOD_RCTRL)):
+            # The guest's TTY delivered a SIGINT to the lease holder.
+            self.sigint_seen = 1
+        self.physical_key = QCODE_PHYSICAL.get(qcode, 0)
+        self.action = 0 if down else 1
+        self._widget_effect(qcode, down)
+        if down:
+            char = self._codepoint(qcode)
+            if char:
+                self.repeat_char[qcode] = char
+                self.repeat_at[qcode] = time.monotonic() + self.session.repeat_first
+        if down and qcode == "q" and (self.modifiers & (MOD_LCTRL | MOD_RCTRL)):
+            # The guest reports the state of the exit shortcut and then
+            # the EXIT record.
+            self.emit_state_if_changed()
+            self.exit()
+            return
+        self.emit_state_if_changed()
+
+    def _codepoint(self, qcode: str) -> str:
+        if self.modifiers & (MOD_LCTRL | MOD_RCTRL | MOD_LALT | MOD_RALT):
+            return ""
+        base = FAKE_CHARS.get(qcode)
+        if base is None:
+            return ""
+        shift = bool(self.modifiers & (MOD_LSHIFT | MOD_RSHIFT))
+        caps = bool(self.modifiers & MOD_CAPS)
+        if base.isalpha():
+            return base.upper() if (shift ^ caps) else base
+        return FAKE_SHIFTED.get(qcode, base) if shift else base
+
+    def _widget_effect(self, qcode: str, down: bool) -> None:
+        if qcode == "tab" and down:
+            order = (1, 2, 3, 4, 5)
+            back = bool(self.modifiers & (MOD_LSHIFT | MOD_RSHIFT))
+            index = order.index(self.focus) if self.focus in order else 0
+            self.focus = order[(index - 1) % len(order)] if back else order[(index + 1) % len(order)]
+            return
+        if self.focus not in (4, 5):
+            return
+        if qcode == "backspace" and down:
+            target = self.textarea if self.focus == 4 else self.textarea2
+            if target:
+                target = target[:-1]
+                if self.focus == 4:
+                    self.textarea = target
+                else:
+                    self.textarea2 = target
+            return
+        char = self._codepoint(qcode)
+        if char and down:
+            if self.focus == 4:
+                self.textarea += char.encode()
+            else:
+                self.textarea2 += char.encode()
+
+    def _button(self, data: dict) -> None:
+        down = bool(data.get("down"))
+        button = data.get("button")
+        if button != "left":
+            # The wheel buttons do not change the guest's widget state
+            # unless the PS/2 mouse delivers a wheel delta.
+            return
+        if down and not self.button_down:
+            self.button_down = True
+            # LVGL's click-to-focus: the pressed widget takes the focus.
+            for name, widget in (("btn", 1), ("slider", 2), ("scroll", 3),
+                                 ("ta1", 4), ("ta2", 5)):
+                if self._over(name):
+                    self.focus = widget
+                    break
+            self._update_slider()
+        elif not down and self.button_down:
+            self.button_down = False
+            if self._over("btn"):
+                self.click_count += 1
+            self._update_slider()
+
+    def _update_slider(self) -> None:
+        if not self._over("slider"):
+            return
+        x0, y0, w, h = self.layout()["slider"]
+        value = max(0, min(100, (self.pointer[0] - x0) * 100 // w))
+        self.slider = value
+
+    def maybe_repeat(self) -> None:
+        """The guest's software repeat (first 400 ms, then every 40 ms)."""
+        now = time.monotonic()
+        for qcode, deadline in list(self.repeat_at.items()):
+            char = self.repeat_char.get(qcode)
+            if not char or now < deadline:
+                continue
+            self.repeat_at[qcode] = now + self.session.repeat_interval
+            if self.focus == 4:
+                self.textarea += char.encode()
+            elif self.focus == 5:
+                self.textarea2 += char.encode()
+            self.emit_state_if_changed()
 
 
 class FakeProcessSession:
@@ -78,6 +436,18 @@ class FakeProcessSession:
         initial_text: str = "# ",
         boot_hang: bool = False,
         panic_on_observe: bool = False,
+        probe_fault_stale_nonce: bool = False,
+        probe_fault_drop_key_up: bool = False,
+        probe_fault_caps_reflip: bool = False,
+        probe_fault_right_is_left: bool = False,
+        probe_fault_sticky_modifier: bool = False,
+        probe_fault_sigint: bool = False,
+        probe_fault_pid_change: bool = False,
+        probe_fault_seq_gap: bool = False,
+        probe_fault_no_ready: bool = False,
+        probe_fault_silent: bool = False,
+        probe_fault_no_ack: bool = False,
+        probe_fault_no_ppid: bool = False,
     ):
         self._argv = list(argv)
         self._run_dir = run_dir
@@ -103,6 +473,29 @@ class FakeProcessSession:
         self.hold_fail_acquire = False
         self.fatal_rc = 1
         self.fatal_no_acquire = False
+
+        # Task 11: the guest input probe simulation.
+        self.probe: Optional[FakeProbe] = None
+        self.shell_pid = 30
+        self.terminal_pid = 20
+        self.terminal_birth = "7"
+        self.terminal_restarted = False
+        self.repeat_first = 0.4
+        self.repeat_interval = 0.04
+        self._probe_events_consumed = 0
+        # The fault switches (the negative fixtures).
+        self.probe_fault_stale_nonce = probe_fault_stale_nonce
+        self.probe_fault_drop_key_up = probe_fault_drop_key_up
+        self.probe_fault_caps_reflip = probe_fault_caps_reflip
+        self.probe_fault_right_is_left = probe_fault_right_is_left
+        self.probe_fault_sticky_modifier = probe_fault_sticky_modifier
+        self.probe_fault_sigint = probe_fault_sigint
+        self.probe_fault_pid_change = probe_fault_pid_change
+        self.probe_fault_seq_gap = probe_fault_seq_gap
+        self.probe_fault_no_ready = probe_fault_no_ready
+        self.probe_fault_silent = probe_fault_silent
+        self.probe_fault_no_ack = probe_fault_no_ack
+        self.probe_fault_no_ppid = probe_fault_no_ppid
 
         self.qmp: Optional[FakeQMP] = None
 
@@ -131,6 +524,19 @@ class FakeProcessSession:
         self._handle_command(cmd_str)
 
     def _handle_command(self, cmd_str: str) -> None:
+        # 0a. Task 11: the /proc status block (the terminal identity).
+        if "cat /proc/" in cmd_str:
+            m_proc = re.search(r"cat /proc/(\d+)/status", cmd_str)
+            begin = end = ""
+            for mark in re.findall(r"__(?:TSTART|TEND)_\w+__", cmd_str):
+                if "TSTART" in mark:
+                    begin = mark
+                else:
+                    end = mark
+            self._text += cmd_str + "\n"
+            self._text += f"{begin}\n{self._status_block(int(m_proc.group(1)))}{end}\n"
+            return
+
         # 1. Handshake canary: printf '__SHELL_%s__\n' <nonce>
         m_canary = re.search(r"printf '__SHELL_%s__\\n' (\w+)", cmd_str)
         if m_canary:
@@ -255,6 +661,27 @@ class FakeProcessSession:
                         self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
                     self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} {self.fatal_rc}\n__EXIT_{nonce}_{self.fatal_rc}__\n# "
 
+            elif "/bin/test_gui_input" in body:
+                # Task 11: the guest input probe.
+                m_probe = re.search(r"--nonce ([0-9a-f]+) --scenario (\w+)", body)
+                self._text += f"{body}\n"
+                if m_probe:
+                    self._start_probe(m_probe.group(1))
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
+
+            elif "gui-input-" in body and ".ctl" in body:
+                # Task 11: the control-file channel.
+                self._text += f"{body}\n"
+                m_ctl = re.search(r"nonce=(\w+) ctl_seq=(\d+) command=(\w+)", body)
+                if m_ctl and self.probe is not None:
+                    self.probe.answer_control(int(m_ctl.group(2)), m_ctl.group(3))
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
+
+            elif body.strip() == "echo $$":
+                # Task 11: the shell's own pid.
+                self._text += f"{body}\n{self.shell_pid}\n"
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
+
             elif "kill -9" in body or "kill" in body:
                 m_kill = re.search(r"kill(?: -9)? (\d+)", body)
                 if m_kill:
@@ -290,9 +717,68 @@ class FakeProcessSession:
         self._timed_out = True
         return ""
 
+    # ── Task 11: the probe simulation ────────────────────────────
+
+    def _start_probe(self, nonce: str) -> None:
+        self.probe = FakeProbe(self, nonce)
+        self.probe.fault_stale_nonce = self.probe_fault_stale_nonce
+        self.probe.fault_drop_key_up = self.probe_fault_drop_key_up
+        self.probe.fault_caps_reflip = self.probe_fault_caps_reflip
+        self.probe.fault_right_is_left = self.probe_fault_right_is_left
+        self.probe.fault_sticky_modifier = self.probe_fault_sticky_modifier
+        self.probe.fault_sigint = self.probe_fault_sigint
+        self.probe.fault_pid_change = self.probe_fault_pid_change
+        self.probe.fault_seq_gap = self.probe_fault_seq_gap
+        self.probe.fault_no_ready = self.probe_fault_no_ready
+        self.probe.fault_silent = self.probe_fault_silent
+        self.probe.fault_no_ack = self.probe_fault_no_ack
+        # Only the events injected after the probe started belong to this
+        # run: the fake QMP object is shared between the SMP runs.
+        self._probe_events_consumed = (
+            len(self.qmp.input_events_sent) if self.qmp is not None else 0
+        )
+        self.probe.start()
+
+    def _status_block(self, pid: int) -> str:
+        """A /proc/<pid>/status block."""
+        if pid == self.shell_pid:
+            ppid = "" if self.probe_fault_no_ppid else f"PPid:\t{self.terminal_pid}\n"
+            return (
+                "Name:\tash\n"
+                f"Pid:\t{self.shell_pid}\n"
+                f"{ppid}"
+                "State:\tS\n"
+                "BirthId:\t3\n"
+            )
+        birth = "99" if self.terminal_restarted else self.terminal_birth
+        return (
+            "Name:\tterminal\n"
+            f"Pid:\t{self.terminal_pid}\n"
+            "PPid:\t1\n"
+            "State:\tS\n"
+            f"BirthId:\t{birth}\n"
+        )
+
+    def _advance_probe(self) -> None:
+        """Consume the injected QMP input events and advance the probe."""
+        if self.probe is None or self.probe.exited:
+            return
+        if self.qmp is None:
+            return
+        events = self.qmp.input_events_sent[self._probe_events_consumed:]
+        self._probe_events_consumed = len(self.qmp.input_events_sent)
+        for event in events:
+            self.probe.handle(event)
+            # The guest emits a STATE per state change, so every key edge
+            # produces its own record (the runner waits for it).
+            self.probe.emit_state_if_changed()
+        self.probe.maybe_repeat()
+        self.probe.emit_state_if_changed()
+
     def observe(self, seconds: float) -> str:
         if self._panic_on_observe:
             self._text += "\nKERNEL PANIC: fatal exception in interrupt\n"
+        self._advance_probe()
         old = self._cursor
         self._cursor = len(self._text)
         return self._text[old:self._cursor]
@@ -588,6 +1074,363 @@ class GuiRunnerUnitTests(unittest.TestCase):
         """CLI main() returns 2 on missing firmware and 1 on test failure."""
         rc = self.gt.main(["--firmware", ""])
         self.assertEqual(rc, 2)
+
+
+class GuiInputRunnerTests(unittest.TestCase):
+    """The Task 11 runner contracts.
+
+    The fake probe and the fake QMP verify the runner's ORCHESTRATION
+    only.  They are never proof of real input: the real proof is the
+    QEMU run in ``qemutests/gui_test.py``.
+    """
+
+    def setUp(self):
+        try:
+            import qemutests.gui_test as gt
+            import qemutests.gui_input_test as git
+        except ImportError as e:
+            self.fail(f"qemutests.gui_input_test failed to import: {e}")
+        self.gt = gt
+        self.git = git
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.build_dir = Path(self.tmp_dir.name)
+        self.image = self.build_dir / "disk.img"
+        self.firmware = self.build_dir / "OVMF.fd"
+        self.image.write_bytes(b"FAKE_IMG" * 100)
+        self.firmware.write_bytes(b"FAKE_FW" * 100)
+        # The host fake compresses the scenario's timing: the exact
+        # 400 ms / 40 ms repeat boundaries belong to the fake clock.
+        self.timing = git.GuiInputTiming(
+            pace=0.0, stability=0.05, quiet=0.02,
+            repeat_first=0.01, repeat_interval=0.005,
+            step=0.6, shell=0.6,
+        )
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _make(self, session_kwargs=None, qmp_kwargs=None):
+        """A session factory plus the fake QMP it shares."""
+        qmp = FakeQMP(**(qmp_kwargs or {}))
+        session_kwargs = dict(session_kwargs or {})
+
+        def factory(argv, run_dir, timeout_s, writable_stdin=True):
+            sess = FakeProcessSession(argv, run_dir, timeout_s, writable_stdin,
+                                      **session_kwargs)
+            sess.qmp = qmp
+            sess.repeat_first = self.timing.repeat_first
+            sess.repeat_interval = self.timing.repeat_interval
+            return sess
+
+        return factory, qmp
+
+    def _run(self, factory, qmp, cpus=(1, 2), **kwargs):
+        return self.gt.run_matrix(
+            image=self.image,
+            firmware=self.firmware,
+            build_dir=self.build_dir,
+            cpus=cpus,
+            session_factory=factory,
+            qmp_factory=lambda sock: qmp,
+            input_timing=self.timing,
+            **kwargs,
+        )
+
+    def _reasons(self, reasons, smp=1):
+        return " | ".join(reasons.get(smp, []))
+
+    def _assert_failed(self, reasons, needle):
+        """Every SMP run must fail, and for the expected reason."""
+        self.assertTrue(reasons.get(1), "SMP 1 must report a reason")
+        self.assertTrue(reasons.get(2), "SMP 2 must report a reason")
+        for smp in (1, 2):
+            self.assertIn(needle, self._reasons(reasons, smp))
+
+    # ── the payload contracts ─────────────────────────────────────
+
+    def test_key_payload_contract(self):
+        """The key edges use type=key with the qcode form."""
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        keys = [e for e in qmp.input_events_sent if e["type"] == "key"]
+        self.assertTrue(keys, "the runner must inject keys")
+        for event in keys:
+            self.assertEqual({"down", "key"}, set(event["data"]))
+            self.assertIsInstance(event["data"]["down"], bool)
+            self.assertEqual("qcode", event["data"]["key"]["type"])
+            self.assertIn("data", event["data"]["key"])
+
+    def test_rel_payload_contract(self):
+        """The relative motion uses type=rel with an axis and a value."""
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        rels = [e for e in qmp.input_events_sent if e["type"] == "rel"]
+        self.assertTrue(rels, "the runner must move the pointer")
+        for event in rels:
+            self.assertEqual({"axis", "value"}, set(event["data"]))
+            self.assertIn(event["data"]["axis"], ("x", "y"))
+            self.assertIsInstance(event["data"]["value"], int)
+
+    def test_button_payload_contract(self):
+        """The mouse buttons use the btn down/up form."""
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        btns = [e for e in qmp.input_events_sent if e["type"] == "btn"]
+        self.assertTrue(btns, "the runner must press mouse buttons")
+        for event in btns:
+            self.assertEqual({"down", "button"}, set(event["data"]))
+            self.assertIsInstance(event["data"]["down"], bool)
+            self.assertIn(event["data"]["button"], MOUSE_BUTTONS)
+
+    def test_the_wheel_is_a_button_never_a_third_axis(self):
+        """The wheel must never be injected as an abs/rel third axis."""
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        for event in qmp.input_events_sent:
+            if event["type"] == "rel":
+                self.assertNotIn(event["data"].get("axis"), ("wheel", "z"))
+            if event["type"] == "btn":
+                self.assertNotIn("axis", event["data"])
+        wheels = [e for e in qmp.input_events_sent
+                  if e["type"] == "btn" and "wheel" in e["data"]["button"]]
+        self.assertTrue(wheels, "the runner must turn the wheel")
+
+    def test_the_mouse_starts_from_the_known_centre(self):
+        """The first relative move starts from the screen centre."""
+        factory, qmp = self._make()
+        ok, reasons = self._run(factory, qmp)
+        self.assertTrue(ok, self._reasons(reasons))
+        rels = [e for e in qmp.input_events_sent if e["type"] == "rel"]
+        self.assertTrue(rels)
+        # The READY record reports the screen size; the pointer starts at
+        # (width/2, height/2).  The deltas that precede the first button
+        # press must therefore add up to the distance from the centre to
+        # the button's reported coordinates.
+        session = factory([], self.build_dir, 1.0)
+        probe = FakeProbe(session, "abcd")
+        centre = (probe.width // 2, probe.height // 2)
+        btn = probe.centre("btn")
+        dx = dy = 0
+        for event in qmp.input_events_sent:
+            if event["type"] == "btn":
+                break
+            if event["type"] != "rel":
+                continue
+            if event["data"]["axis"] == "x":
+                dx += event["data"]["value"]
+            else:
+                dy += event["data"]["value"]
+        self.assertEqual(btn[0] - centre[0], dx)
+        self.assertEqual(btn[1] - centre[1], dy)
+
+    # ── the runner negatives ──────────────────────────────────────
+
+    def test_probe_ready_is_only_a_command_echo(self):
+        """A command echo without a newline prompt is not a READY."""
+        factory, qmp = self._make({"probe_fault_no_ready": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "READY")
+
+    def test_marker_in_the_wrong_block(self):
+        """A /proc block without the PPid field is a FAIL."""
+        factory, qmp = self._make({"probe_fault_no_ppid": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "PPid")
+
+    def test_stale_nonce_is_rejected(self):
+        """A record with a foreign nonce is a protocol error."""
+        factory, qmp = self._make({"probe_fault_stale_nonce": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "nonce")
+
+    def test_missing_key_up_is_rejected(self):
+        """A key-up that never reaches the guest is a FAIL."""
+        factory, qmp = self._make({"probe_fault_drop_key_up": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "UP edge")
+
+    def test_qmp_error_is_rejected(self):
+        """A QMP error on input-send-event is a FAIL."""
+        factory, qmp = self._make(qmp_kwargs={"fail_input": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "QMP")
+
+    def test_screenshot_mismatch_is_rejected(self):
+        """A recovery screenshot that does not match is a FAIL."""
+        qmp = FakeQMP()
+        # The surface never changes: the terminal restore looks exactly
+        # like the GUI state, so the recovery check must fail.
+        qmp.stable_surface = True
+
+        def factory(argv, run_dir, timeout_s, writable_stdin=True):
+            sess = FakeProcessSession(argv, run_dir, timeout_s, writable_stdin)
+            sess.qmp = qmp
+            return sess
+
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "screen did not change")
+
+    def test_duplicate_or_out_of_order_phase_is_rejected(self):
+        """A record with a broken sequence is a protocol error."""
+        factory, qmp = self._make({"probe_fault_seq_gap": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "seq")
+
+    def test_silent_timeout_is_rejected(self):
+        """A probe that stops answering is a FAIL, never a silent PASS."""
+        factory, qmp = self._make({"probe_fault_silent": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "timeout")
+
+    def test_one_smp_run_failing_does_not_merge_into_a_pass(self):
+        """SMP 1 and SMP 2 are separate runs: one failure is a FAIL."""
+        qmp = FakeQMP()
+        state = {"runs": 0}
+
+        def factory(argv, run_dir, timeout_s, writable_stdin=True):
+            sess = FakeProcessSession(argv, run_dir, timeout_s, writable_stdin)
+            sess.qmp = qmp
+            state["runs"] += 1
+            if state["runs"] == 2:
+                # The second (SMP 2) run breaks.
+                sess.probe_fault_sigint = True
+            return sess
+
+        ok, reasons = self._run(factory, qmp, cpus=(1, 2))
+        self.assertFalse(ok)
+        self.assertEqual([], reasons.get(1, []))
+        self.assertTrue(reasons.get(2), "SMP 2 must report a reason")
+        self.assertIn("sigint", self._reasons(reasons, 2).lower())
+
+    # ── the additional failure fixtures ──────────────────────────
+
+    def test_sigint_seen_is_rejected(self):
+        """A probe that saw a SIGINT during the lease is a FAIL."""
+        factory, qmp = self._make({"probe_fault_sigint": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        # The specific diagnostic of the check *after* the Ctrl+C: the
+        # pre-check ("sigint_seen=1 before the Ctrl+C") must not be able
+        # to satisfy this fixture.
+        self._assert_failed(reasons, "SIGINT during the lease")
+
+    def test_probe_pid_change_is_rejected(self):
+        """A control answer from another process is a FAIL."""
+        factory, qmp = self._make({"probe_fault_pid_change": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "pid")
+
+    def test_terminal_restart_is_rejected(self):
+        """A terminal that restarted during the lease is a FAIL."""
+        factory, qmp = self._make()
+        original = FakeProcessSession._status_block
+
+        def restarted(self, pid):
+            # The first two reads pin the identity (the shell and then
+            # the terminal); the later ones see a restarted terminal.
+            self._restart_calls = getattr(self, "_restart_calls", 0) + 1
+            if self._restart_calls > 2:
+                self.terminal_restarted = True
+            return original(self, pid)
+
+        FakeProcessSession._status_block = restarted
+        try:
+            ok, reasons = self._run(factory, qmp)
+        finally:
+            FakeProcessSession._status_block = original
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "restarted")
+
+    def test_right_modifier_recognised_as_left_is_rejected(self):
+        """A right Shift that reports the left bit is a FAIL."""
+        factory, qmp = self._make({"probe_fault_right_is_left": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "modifiers")
+
+    def test_modifier_bit_not_cleared_after_up_is_rejected(self):
+        """A modifier bit that survives its UP is a FAIL."""
+        factory, qmp = self._make({"probe_fault_sticky_modifier": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        # The specific diagnostic of the check that rejects it: the UP
+        # edge must report exactly the expected modifier snapshot.
+        self._assert_failed(reasons, "UP edge reported modifiers")
+
+    def test_caps_flipping_again_on_a_repeated_make_is_rejected(self):
+        """A repeated Caps make must not flip the latch again."""
+        factory, qmp = self._make({"probe_fault_caps_reflip": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        # The specific diagnostic of the "the state must not change inside
+        # the settle window" check.
+        self._assert_failed(reasons, "the modifier snapshot changed")
+
+    def test_a_missing_control_answer_is_rejected(self):
+        """A control command that is only echoed is a FAIL."""
+        factory, qmp = self._make({"probe_fault_no_ack": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "control answer")
+
+    # ── the budgets ───────────────────────────────────────────────
+
+    def test_the_total_budget_is_the_finite_sum(self):
+        """The session budget is boot + the scenario caps + cleanup."""
+        git = self.git
+        self.assertEqual(
+            git.BOOT_CAP_SECONDS
+            + sum(git.GUI1_SCENARIO_CAPS)
+            + git.GUI1_CLEANUP_CAP_SECONDS
+            + sum(git.INPUT_SCENARIO_CAPS.values())
+            + git.INPUT_CLEANUP_CAP_SECONDS,
+            git.TOTAL_TIMEOUT_SECONDS,
+        )
+        self.assertNotEqual(self.gt.DEFAULT_TIMEOUT, git.TOTAL_TIMEOUT_SECONDS)
+
+    def test_the_input_scenarios_have_their_own_deadline(self):
+        """The new scenarios carry their own bounded budget."""
+        git = self.git
+        self.assertIn("input_interaction", git.INPUT_SCENARIO_CAPS)
+        self.assertGreater(git.INPUT_SCENARIO_CAPS["input_interaction"], 0.0)
+        self.assertLessEqual(
+            git.TOTAL_TIMEOUT_SECONDS,
+            git.BOOT_CAP_SECONDS + sum(git.GUI1_SCENARIO_CAPS)
+            + git.GUI1_CLEANUP_CAP_SECONDS
+            + sum(git.INPUT_SCENARIO_CAPS.values()) + git.INPUT_CLEANUP_CAP_SECONDS,
+        )
+
+    def test_a_sub_scenario_timeout_is_a_fail(self):
+        """A sub-scenario timeout fails the whole run."""
+        git = self.git
+        self.assertLess(git.STEP_TIMEOUT_SECONDS, git.INPUT_SCENARIO_CAPS["input_interaction"])
+        factory, qmp = self._make({"probe_fault_no_ready": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "timeout")
+
+    def test_the_budget_never_inflates_on_failure(self):
+        """A failing run must not buy itself more time."""
+        git = self.git
+        before = git.INPUT_SCENARIO_CAPS["input_interaction"]
+        factory, qmp = self._make({"probe_fault_no_ready": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self.assertEqual(before, git.INPUT_SCENARIO_CAPS["input_interaction"])
+        self.assertEqual(git.TOTAL_TIMEOUT_SECONDS, self.gt.TOTAL_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":

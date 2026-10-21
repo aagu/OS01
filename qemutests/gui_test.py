@@ -36,8 +36,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-DEFAULT_TIMEOUT = 180  # per-SMP global session budget in seconds
+DEFAULT_TIMEOUT = 180  # the GUI-1 per-SMP global session budget in seconds
 CORE_MATRIX = (1, 2)
+
+# Task 11: the per-SMP session budget is the FINITE SUM of boot + the
+# registered scenario caps + cleanup.  It is deliberately NOT the GUI-1
+# total reused: the new input scenarios carry their own cap, and the
+# budget never auto-inflates on failure.
+try:
+    from qemutests.gui_input_test import TOTAL_TIMEOUT_SECONDS
+except ImportError:  # pragma: no cover - the repo root is on sys.path
+    TOTAL_TIMEOUT_SECONDS = DEFAULT_TIMEOUT
 
 
 # ── PPM parsing and Surface ──────────────────────────────────────────
@@ -192,6 +201,15 @@ class QmpClient:
         data = Path(path).read_bytes()
         return parse_ppm(data)
 
+    def input_events(self, events: List[dict]) -> None:
+        """Send raw input events via QMP input-send-event.
+
+        ``execute`` raises a RuntimeError on a QMP error, so a rejected
+        payload (a bogus axis, a bogus button, a bogus qcode) fails the
+        run instead of being silently ignored.
+        """
+        self.execute("input-send-event", {"events": events})
+
     def close(self) -> None:
         try:
             if self._fp:
@@ -256,7 +274,8 @@ class GuiCaseRunner:
         session_factory: Optional[Callable] = None,
         qmp_factory: Optional[Callable] = None,
         run_dir: Optional[Path] = None,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: Optional[float] = None,
+        input_timing: Optional[Any] = None,
     ):
         self.smp = smp
         self.image = image
@@ -265,13 +284,19 @@ class GuiCaseRunner:
         self.session_factory = session_factory
         self.qmp_factory = qmp_factory
         self.run_dir = run_dir or Path(tempfile.mkdtemp(prefix=f"os01-gui-smp{smp}-"))
-        self.timeout = timeout
+        # The session budget is the finite sum of boot + the registered
+        # scenario caps + cleanup (see TOTAL_TIMEOUT_SECONDS).  An
+        # explicit timeout overrides it (the unit tests use a tiny one).
+        self.timeout = TOTAL_TIMEOUT_SECONDS if timeout is None else timeout
         self.boot_timeout = min(self.timeout, 30.0)
         self.cmd_timeout = min(self.timeout, 10.0)
         self.active_hold_pid: Optional[int] = None
         self.qmp: Optional[Any] = None
         self.session: Optional[Any] = None
         self.last_terminal_surface: Optional[Surface] = None
+        # The Task 11 interaction scenario's timing knobs (the real
+        # values by default; the host fake compresses them).
+        self.input_timing = input_timing
 
     def _wait_shell(self, boot_timeout: Optional[float] = None) -> bool:
         bt = boot_timeout if boot_timeout is not None else self.boot_timeout
@@ -367,6 +392,33 @@ class GuiCaseRunner:
 
         self.last_terminal_surface = shot
         return self._observe_check_panic(f"{label}_recovery", reasons)
+
+    def _run_input_interaction(
+        self,
+    ) -> Tuple[bool, List[str], List[dict]]:
+        """Run the Task 11 real input interaction matrix.
+
+        The scenario logic lives in its own helper (GuiInputScenarios) so
+        that run_all does not keep growing; the helper consumes the
+        existing session, qmp, run_dir and smp objects and returns the
+        existing case outcome dict.
+        """
+        from qemutests.gui_input_test import GuiInputScenarios
+
+        helper = GuiInputScenarios(
+            session=self.session,
+            qmp=self.qmp,
+            run_dir=self.run_dir,
+            smp=self.smp,
+            log=self.log,
+            timing=self.input_timing,
+        )
+        ok, reasons, outcomes = helper.run_interaction()
+        for outcome in outcomes:
+            if outcome.get("status") == "PASS":
+                self.log(f"  [gui smp={self.smp}] {outcome['case']} PASS "
+                         f"({outcome.get('reason', '')})")
+        return ok, reasons, outcomes
 
     def run_all(self) -> Tuple[bool, List[str], List[dict]]:
         reasons: List[str] = []
@@ -730,6 +782,18 @@ class GuiCaseRunner:
                 return False, reasons, outcomes
             outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
 
+            # ── Scenario 8: input_interaction (Task 11) ──
+            # The real physical input matrix: the guest input probe takes
+            # the exclusive input lease and the runner drives it with real
+            # QMP input events.
+            case_name = "input_interaction"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_interaction()
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
             self.log(f"  [gui smp={self.smp}] all scenarios PASSED")
             return True, reasons, outcomes
 
@@ -774,8 +838,9 @@ def run_matrix(
     build_dir: Optional[Path] = None,
     session_factory: Optional[Callable] = None,
     qmp_factory: Optional[Callable] = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: Optional[float] = None,
     cpus: Optional[Tuple[int, ...]] = None,
+    input_timing: Optional[Any] = None,
 ) -> Tuple[bool, Dict[int, List[str]]]:
     """Run the GUI test suite across the SMP matrix; returns (ok, reasons)."""
     target_cpus = list(cpus if cpus is not None else CORE_MATRIX)
@@ -814,6 +879,7 @@ def run_matrix(
             qmp_factory=qmp_factory,
             run_dir=smp_run_dir,
             timeout=timeout,
+            input_timing=input_timing,
         )
         smp_ok, smp_reasons, smp_outcomes = runner.run_all()
         reasons[smp] = smp_reasons
@@ -931,7 +997,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--image", default=os.environ.get("DISK_IMG", "disk.img"))
     ap.add_argument("--firmware", default=os.environ.get("OVMF_FIRMWARE", ""))
     ap.add_argument("--build-dir", default=os.environ.get("OS01_BUILD_DIR"))
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    ap.add_argument("--timeout", type=int, default=int(TOTAL_TIMEOUT_SECONDS))
     ap.add_argument("--cpus", nargs="+", type=int, default=list(CORE_MATRIX))
     args = ap.parse_args(argv)
 

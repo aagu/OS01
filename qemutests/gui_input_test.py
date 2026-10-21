@@ -41,9 +41,13 @@ Rules enforced by :class:`GuiInputParser`:
 from __future__ import annotations
 
 import re
+import re
+import time
 import unittest
+import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # The literal marker every protocol line starts with.
 PROTOCOL_PREFIX = "[gui-input]"
@@ -1002,6 +1006,1345 @@ class GuiInputProtocolTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ProtocolError, "missing field 'click_count'"):
             parser.feed_line(self._line(fields))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Task 11 — the QMP interaction matrix (the runner side)
+# ══════════════════════════════════════════════════════════════════════
+#
+#  The section below is deliberately separated from the parser above: the
+#  parser stays a pure module (no QEMU, no harness, no runner) so that it
+#  can be unit tested on the host alone, while the code below drives a
+#  REAL guest through QEMU's QMP ``input-send-event``.
+#
+#  The QMP payload shapes below were verified live against QEMU v11.1.2
+#  (every accepted form answered ``{"return": {}}``, every rejected form
+#  answered with a QMP error):
+#
+#    key  {"type":"key","data":{"down":<bool>,"key":{"type":"qcode","data":"<qcode>"}}}
+#    btn  {"type":"btn","data":{"down":<bool>,"button":"<button>"}}
+#    rel  {"type":"rel","data":{"axis":"x|y","value":<int>}}
+#
+#  The rel axis enum has exactly two members (x and y): a live probe of
+#  ``{"type":"rel","data":{"axis":"wheel","value":1}}`` was REJECTED with
+#  ``Parameter 'axis' does not accept value 'wheel'``.  The wheel is a
+#  **button** (wheel-up / wheel-down), never a third motion axis.
+
+
+# ── The QMP payload builders ─────────────────────────────────────────
+
+
+def qmp_key_event(down: bool, qcode: str) -> dict:
+    """The exact ``input-send-event`` payload for a key edge."""
+    return {
+        "type": "key",
+        "data": {"down": down, "key": {"type": "qcode", "data": qcode}},
+    }
+
+
+def qmp_rel_event(axis: str, value: int) -> dict:
+    """The exact ``input-send-event`` payload for a relative motion axis.
+
+    Only ``x`` and ``y`` exist: the wheel is a button.
+    """
+    return {"type": "rel", "data": {"axis": axis, "value": value}}
+
+
+def qmp_btn_event(down: bool, button: str) -> dict:
+    """The exact ``input-send-event`` payload for a mouse button edge."""
+    return {"type": "btn", "data": {"down": down, "button": button}}
+
+
+# The mouse buttons the guest's PS/2 mouse driver understands.
+MOUSE_BUTTONS = ("left", "right", "middle", "wheel-up", "wheel-down")
+
+# The largest relative delta the runner injects in one event.  QEMU's
+# PS/2 mouse clamps a packet's displacement to 127 counts, and the
+# virtual queue is 16 bytes wide, so a large delta is split into steps.
+REL_STEP_MAX = 120
+
+
+# ── The native physical identities (Set 1) ───────────────────────────
+#
+# The guest reports the *physical* key of every event: the Set 1 scan
+# code, or 0x100 | code for an E0-prefixed key.  These are the identities
+# the modifier matrix asserts.
+
+PS2_E0 = 0x100
+
+QCODE_PHYSICAL: Dict[str, int] = {
+    "a": 0x1E,
+    "b": 0x30,
+    "c": 0x2E,
+    "q": 0x10,
+    "z": 0x2C,
+    "1": 0x02,
+    "tab": 0x0F,
+    "ret": 0x1C,
+    "backspace": 0x0E,
+    "left": 0x4B | PS2_E0,
+    "right": 0x4D | PS2_E0,
+    "shift": 0x2A,
+    # The right Shift is a BARE 0x36 in OS01's convention (the kernel's
+    # KBD_SHIFT_R and the libgui's PS2_KEY_RSHIFT are both 0x36), while
+    # the right Ctrl / right Alt carry the E0 prefix.  QEMU v11.1.2's
+    # Set 1 map matches: the right Shift arrives as 0x36.
+    "shift_r": 0x36,
+    "ctrl": 0x1D,
+    "ctrl_r": 0x1D | PS2_E0,
+    "alt": 0x38,
+    "alt_r": 0x38 | PS2_E0,
+    "caps_lock": 0x3A,
+}
+
+# gui_modifier_t (libgui/include/gui/gui_input.h).
+MOD_LSHIFT = 1 << 0
+MOD_RSHIFT = 1 << 1
+MOD_LCTRL = 1 << 2
+MOD_RCTRL = 1 << 3
+MOD_LALT = 1 << 4
+MOD_RALT = 1 << 5
+MOD_CAPS = 1 << 6
+
+# Every modifier bit except the CAPS latch is *transient*: it follows the
+# key up/down.  The runner never keeps a transient bit in its model after
+# the corresponding UP edge, and the per-edge comparison pins that the
+# guest reports the very same snapshot.
+
+# The modifier matrix: left and right Shift / Ctrl / Alt separately.
+MODIFIER_BITS: Dict[str, int] = {
+    "shift": MOD_LSHIFT,
+    "shift_r": MOD_RSHIFT,
+    "ctrl": MOD_LCTRL,
+    "ctrl_r": MOD_RCTRL,
+    "alt": MOD_LALT,
+    "alt_r": MOD_RALT,
+}
+
+MODIFIER_MATRIX: Tuple[Tuple[str, int], ...] = tuple(MODIFIER_BITS.items())
+
+# The widget identities the probe reports through the "focus" byte.
+WIDGET_NONE = 0x00
+WIDGET_BUTTON = 0x01
+WIDGET_SLIDER = 0x02
+WIDGET_SCROLL = 0x03
+WIDGET_TEXTAREA1 = 0x04
+WIDGET_TEXTAREA2 = 0x05
+
+# The registered focus group's order (the probe registers the widgets
+# in this order).
+WIDGET_ORDER = (WIDGET_BUTTON, WIDGET_SLIDER, WIDGET_SCROLL,
+                WIDGET_TEXTAREA1, WIDGET_TEXTAREA2)
+
+# The guest's action values (gui_key_action_t).
+ACTION_DOWN = 0
+ACTION_UP = 1
+ACTION_REPEAT = 2
+
+# The vertical wheel step, in pixels (GUI_INPUT_WHEEL_STEP_PX).
+WHEEL_STEP_PX = 32
+
+
+# ── The bounded budgets (task 11 §3c) ────────────────────────────────
+#
+# The guest's PS/2 path drops keys that arrive faster than it drains
+# them: one key per 40 ms delivers 1024/1024 characters, a burst packed
+# into a single QMP command loses all but the first.  The runner paces
+# every injected key accordingly and waits for the application's STATE
+# instead of sleeping.
+
+KEY_PACE_SECONDS = 0.05
+
+# The per-SMP session budget is the FINITE SUM of boot + the registered
+# scenario caps + cleanup.  It is deliberately NOT the GUI-1 total
+# (180 s) reused: the new interaction scenarios carry their own cap.
+BOOT_CAP_SECONDS = 30.0
+GUI1_SCENARIO_CAPS: Tuple[float, ...] = (
+    20.0,   # boot/handshake
+    20.0,   # smoke
+    30.0,   # normal_exit
+    30.0,   # wait_quit
+    20.0,   # busy_owner
+    20.0,   # killed_owner
+    30.0,   # fatal_owner
+)
+GUI1_CLEANUP_CAP_SECONDS = 15.0
+
+# The new input scenarios get their OWN deadline.
+INPUT_SCENARIO_CAPS: Dict[str, float] = {
+    "input_interaction": 180.0,
+}
+INPUT_CLEANUP_CAP_SECONDS = 15.0
+
+# The finite sum: boot + every registered scenario cap + cleanup.
+TOTAL_TIMEOUT_SECONDS = (
+    BOOT_CAP_SECONDS
+    + sum(GUI1_SCENARIO_CAPS)
+    + GUI1_CLEANUP_CAP_SECONDS
+    + sum(INPUT_SCENARIO_CAPS.values())
+    + INPUT_CLEANUP_CAP_SECONDS
+)
+
+# The bounds of a single step inside the interaction scenario.
+STEP_TIMEOUT_SECONDS = 12.0
+SHELL_TIMEOUT_SECONDS = 10.0
+# The long press: the count lower bound, then the count must be stable.
+LONG_PRESS_MIN_REPEATS = 3
+STABILITY_SECONDS = 0.8
+# The lower bound of the repeated key count after the long press.  The
+# guest repeats after 400 ms and then every 40 ms; the press is released
+# as soon as the bound is met, so the exact boundaries belong to the host
+# fake clock, not to QEMU.
+
+
+class GuiInputScenarioError(Exception):
+    """A Task 11 interaction step failed; the message is the FAIL reason."""
+
+
+@dataclass
+class GuiInputTiming:
+    """The interaction scenario's timing knobs.
+
+    The QEMU run uses the real values: the guest's PS/2 path drops keys
+    that arrive faster than it drains them, so every injected key is
+    paced and every step waits for the application's STATE.  The host
+    fake compresses them -- the exact 400 ms / 40 ms repeat boundaries
+    belong to the fake clock, not to QEMU.
+    """
+
+    pace: float = KEY_PACE_SECONDS
+    stability: float = STABILITY_SECONDS
+    quiet: float = 0.8
+    repeat_first: float = 0.4
+    repeat_interval: float = 0.04
+    step: float = STEP_TIMEOUT_SECONDS
+    shell: float = SHELL_TIMEOUT_SECONDS
+
+
+class GuiInputScenarios:
+    """Drives the guest input probe with REAL QMP input events.
+
+    The helper consumes the existing session, qmp, run_dir and smp
+    objects and returns the existing case outcome dict, so it slots into
+    the existing ``GuiCaseRunner.run_all`` without changing the outcome
+    schema or the SMP matrix.
+    """
+
+    def __init__(
+        self,
+        session: Any,
+        qmp: Any,
+        run_dir: Path,
+        smp: int = 1,
+        log: Callable[[str], None] = print,
+        pace: float = KEY_PACE_SECONDS,
+        budget: Optional[float] = None,
+        timing: Optional[GuiInputTiming] = None,
+    ):
+        self.session = session
+        self.qmp = qmp
+        self.run_dir = Path(run_dir)
+        self.smp = smp
+        self.log = log
+        self.timing = timing if timing is not None else GuiInputTiming()
+        self.pace = pace
+        self.budget = budget if budget is not None else INPUT_SCENARIO_CAPS["input_interaction"]
+        self.parser: Optional[GuiInputParser] = None
+        self.nonce = ""
+        self.ready: Optional[GuiInputRecord] = None
+        # The modifier snapshot the runner expects the guest to report.
+        self.mods = 0
+        # The keys the runner believes are currently held.
+        self.held: Dict[str, int] = {}
+        # Every record seen so far (for the diagnostics).
+        self.records: List[GuiInputRecord] = []
+        # The records that were read but not consumed yet.
+        self._pending: List[GuiInputRecord] = []
+        # The observations the outcome detail carries.
+        self.notes: List[str] = []
+        self._last_send = 0.0
+        self._deadline = 0.0
+        self._ctl_seq = 0
+        # The terminal identity, pinned before the probe starts.
+        self.terminal_pid: str = ""
+        self.terminal_birth: str = ""
+        # The probe's pid, taken from its READY record.
+        self.probe_pid = 0
+        # The pointer position the runner tracks (the guest clamps it
+        # into the viewport).
+        self.pointer = [0, 0]
+
+    # ── the serial pump ─────────────────────────────────────────────
+
+    def _remaining(self) -> float:
+        return max(0.0, self._deadline - time.monotonic())
+
+    def _pump(self) -> List[GuiInputRecord]:
+        """Read the serial stream and feed the parser.
+
+        The parser keeps its own read cursor, so the cumulative session
+        text can be fed again and again: only the NEW records come back.
+        The serial stream is read continuously -- the interaction scenario
+        emits one STATE record per keystroke.
+        """
+        try:
+            self.session.observe(0.05)
+        except Exception as exc:
+            # A broken serial stream is a FAIL, never a silent skip.
+            raise GuiInputScenarioError(
+                f"the serial stream failed: {exc}"
+            ) from exc
+        try:
+            found = self.parser.feed(self.session.text)
+        except ProtocolError as exc:
+            raise GuiInputScenarioError(f"protocol error: {exc}") from exc
+        self.records.extend(found)
+        self._pending.extend(found)
+        return found
+
+    def _next_records(self) -> List[GuiInputRecord]:
+        """The records that have not been consumed yet.
+
+        The records are KEPT: a record that does not match the caller's
+        predicate must not be lost, or a later wait would miss it.
+        """
+        if not self._pending:
+            self._pump()
+        return self._pending
+
+    def _wait(self, predicate: Callable[[GuiInputRecord], bool],
+              timeout: float, what: str) -> GuiInputRecord:
+        """Wait for a record that satisfies ``predicate``."""
+        limit = min(timeout, self._remaining())
+        deadline = time.monotonic() + limit
+        while True:
+            for index, record in enumerate(self._pending):
+                if predicate(record):
+                    self._pending = self._pending[index + 1:]
+                    return record
+            if time.monotonic() >= deadline:
+                raise GuiInputScenarioError(
+                    f"timeout waiting for {what} after {limit:.1f}s"
+                )
+            self._pump()
+
+    def _wait_state(self, predicate: Callable[[GuiInputRecord], bool],
+                    timeout: float, what: str) -> GuiInputRecord:
+        return self._wait(
+            lambda r: r.phase == PHASE_STATE and predicate(r), timeout, what
+        )
+
+    def _state_snapshot(self, record: GuiInputRecord) -> Dict[str, Any]:
+        """The STATE payload as a comparable snapshot."""
+        return {
+            "click_count": self._click_count(record),
+            "slider": self._slider(record),
+            "scroll": self._scroll(record),
+            "focus": self._focus_of(record),
+            "textarea": self._textarea(record),
+            "textarea2": record.hex_field("textarea2"),
+            "physical_key": record.int_field("physical_key"),
+            "modifiers": record.int_field("modifiers"),
+            "action": record.int_field("action"),
+            "sigint_seen": record.int_field("sigint_seen"),
+        }
+
+    # ── the injection helpers ───────────────────────────────────────
+
+    def _send(self, event: dict) -> None:
+        """Send one QMP input event, paced for the guest's PS/2 path."""
+        if self.pace:
+            wait = self.pace - (time.monotonic() - self._last_send)
+            if wait > 0:
+                time.sleep(wait)
+        try:
+            self.qmp.input_events([event])
+        except Exception as exc:
+            raise GuiInputScenarioError(f"QMP input-send-event failed: {exc}") from exc
+        self._last_send = time.monotonic()
+
+    def _key(self, qcode: str, down: bool) -> int:
+        """Inject one key edge and update the expected modifier state."""
+        physical = QCODE_PHYSICAL[qcode]
+        self._send(qmp_key_event(down, qcode))
+        if down:
+            self.held[qcode] = physical
+        else:
+            self.held.pop(qcode, None)
+        return physical
+
+    def _apply_expected_modifiers(self, qcode: str, down: bool) -> int:
+        """The modifier snapshot the guest must report for this edge."""
+        if qcode == "caps_lock":
+            # The Caps latch flips on the make edge only.
+            if down:
+                self.mods ^= MOD_CAPS
+        elif qcode in MODIFIER_BITS:
+            bit = MODIFIER_BITS[qcode]
+            if down:
+                self.mods |= bit
+            else:
+                self.mods &= ~bit
+        return self.mods
+
+    def _expect_key_edge(self, qcode: str, down: bool, physical: int,
+                         timeout: Optional[float] = None) -> GuiInputRecord:
+        """Wait for the key edge and compare the exact reported state."""
+        expected_mods = self._apply_expected_modifiers(qcode, down)
+        action = ACTION_DOWN if down else ACTION_UP
+        limit = timeout if timeout is not None else self.timing.step
+        record = self._wait_state(
+            lambda r: (r.int_field("physical_key") == physical
+                       and r.int_field("action") == action),
+            limit,
+            f"the {qcode} {'DOWN' if down else 'UP'} edge",
+        )
+        got_mods = record.int_field("modifiers")
+        if got_mods != expected_mods:
+            raise GuiInputScenarioError(
+                f"the {qcode} {'DOWN' if down else 'UP'} edge reported "
+                f"modifiers={got_mods}, expected {expected_mods}"
+            )
+        return record
+
+    def _rel(self, axis: str, value: int) -> None:
+        """Inject one relative motion event and track the pointer.
+
+        The guest clamps the pointer into the viewport (1 count = 1
+        pixel), so the runner tracks the same position: the absolute
+        target is then reachable with an exact delta.
+        """
+        self._send(qmp_rel_event(axis, value))
+        width = self.ready.int_field("width") if self.ready else 0
+        height = self.ready.int_field("height") if self.ready else 0
+        if axis == "x" and width:
+            self.pointer[0] = max(0, min(width - 1, self.pointer[0] + value))
+        elif axis == "y" and height:
+            self.pointer[1] = max(0, min(height - 1, self.pointer[1] + value))
+
+    def _btn(self, button: str, down: bool) -> None:
+        self._send(qmp_btn_event(down, button))
+
+    def _move_to(self, x: int, y: int) -> None:
+        """Move the pointer to an absolute position.
+
+        The pointer starts at the centre of the screen (width/2,
+        height/2) and the runner tracks every delta it injects, so the
+        target is reached exactly.  A delta is split into steps that fit
+        into one PS/2 packet: the guest's virtual PS/2 queue is 16 bytes
+        and drops silently when it overflows.
+        """
+        for axis, target in (("x", x), ("y", y)):
+            index = 0 if axis == "x" else 1
+            while self.pointer[index] != target:
+                delta = target - self.pointer[index]
+                step = max(-REL_STEP_MAX, min(REL_STEP_MAX, delta))
+                self._rel(axis, step)
+
+    def _click(self, x: int, y: int) -> None:
+        """Move to a position and press + release the left button."""
+        self._move_to(x, y)
+        self._btn("left", True)
+        self._btn("left", False)
+
+    # ── the shell helpers ───────────────────────────────────────────
+
+    def _shell(self, cmd: str, timeout: float = 0.0) -> Tuple[int, str]:
+        """Run a shell command and return its exit status and output.
+
+        The exit marker is printed by the shell itself, so the status is
+        the shell's own answer and not the runner's guess.  The echoed
+        command never matches the marker (it carries the ``%d``), so a
+        command echo can never fake a result.
+        """
+        timeout = self.timing.shell if timeout <= 0 else timeout
+        nonce = f"S{self.smp}_{time.time_ns()}"
+        full = f"{cmd}\nprintf '__EXIT_%s_%d__\\n' {nonce} $?\n".encode()
+        offset = len(self.session.text)
+        self.session.send(full)
+
+        pat = re.compile(rf"(^|\n)__EXIT_{re.escape(nonce)}_(-?\d+)__(\n|$)")
+        deadline = time.monotonic() + min(timeout, self._remaining())
+        while time.monotonic() < deadline:
+            text = self.session.text[offset:]
+            match = pat.search(text)
+            if match:
+                return int(match.group(2)), text
+            try:
+                self.session.observe(0.05)
+            except Exception:
+                pass
+        raise GuiInputScenarioError(
+            f"the shell command timed out after {timeout:.1f}s: {cmd}"
+        )
+
+    def _shell_block(self, cmd: str, begin: str, end: str,
+                     timeout: float = 0.0) -> str:
+        """Run a shell command and return the text between two markers.
+
+        The markers are searched from the END: the shell echoes the
+        command line, and the echo carries both markers, so the *last*
+        pair is the real output block.
+        """
+        timeout = self.timing.shell if timeout <= 0 else timeout
+        nonce = f"B{self.smp}_{time.time_ns()}"
+        begin_marker = f"__{begin}_{nonce}__"
+        end_marker = f"__{end}_{nonce}__"
+        full = (
+            f"printf '{begin_marker}\\n'; {cmd}; printf '{end_marker}\\n'\n"
+        ).encode()
+        offset = len(self.session.text)
+        self.session.send(full)
+        deadline = time.monotonic() + min(timeout, self._remaining())
+        while time.monotonic() < deadline:
+            text = self.session.text[offset:]
+            begin_at = text.rfind(begin_marker)
+            end_at = text.rfind(end_marker)
+            if begin_at >= 0 and end_at > begin_at:
+                return text[begin_at + len(begin_marker):end_at]
+            try:
+                self.session.observe(0.05)
+            except Exception:
+                pass
+        raise GuiInputScenarioError(
+            f"the shell block timed out after {timeout:.1f}s: {cmd}"
+        )
+
+    # ── the control-file channel ────────────────────────────────────
+
+    def _ctl_path(self) -> str:
+        return f"/tmp/gui-input-{self.nonce}.ctl"
+
+    def _control(self, command: str, timeout: float = 0.0) -> GuiInputRecord:
+        """Write a control record and wait for the probe's answer."""
+        timeout = self.timing.step if timeout <= 0 else timeout
+        self._ctl_seq += 1
+        ctl_seq = self._ctl_seq
+        path = self._ctl_path()
+        record = f"nonce={self.nonce} ctl_seq={ctl_seq} command={command}"
+        rc, _ = self._shell(f"printf '{record}\\n' > {path}")
+        if rc != 0:
+            raise GuiInputScenarioError(
+                f"the control file {path} could not be written (rc={rc})"
+            )
+        answer = self._wait(
+            lambda r: (r.is_control_ack
+                       and r.int_field("ctl_seq") == ctl_seq
+                       and r.get("command") == command),
+            timeout,
+            f"the {command} control answer",
+        )
+        return answer
+
+    def _snapshot(self, timeout: float = 0.0) -> Tuple[GuiInputRecord, GuiInputRecord]:
+        """Ask the probe for a fresh STATE through the control file.
+
+        Returns the control answer (the ACK, which carries the probe's
+        pid) and the STATE that followed it.
+        """
+        timeout = self.timing.step if timeout <= 0 else timeout
+        ack = self._control("SNAPSHOT", timeout)
+        state = self._wait_state(lambda r: True, timeout, "the SNAPSHOT state")
+        return ack, state
+
+    # ── the widget helpers ──────────────────────────────────────────
+
+    def _textarea(self, record: GuiInputRecord) -> bytes:
+        return record.hex_field("textarea")
+
+    def _focus_of(self, record: GuiInputRecord) -> int:
+        return int(record.get("focus") or "0", 16)
+
+    def _click_count(self, record: GuiInputRecord) -> int:
+        return int(record.get("click_count") or "0", 16)
+
+    @staticmethod
+    def _signed32(record: GuiInputRecord, name: str) -> int:
+        """A hex encoded int32 (two's complement, eight hex digits)."""
+        raw = int(record.get(name) or "0", 16)
+        if raw >= 0x80000000:
+            raw -= 0x100000000
+        return raw
+
+    def _slider(self, record: GuiInputRecord) -> int:
+        return self._signed32(record, "slider")
+
+    def _scroll(self, record: GuiInputRecord) -> int:
+        return self._signed32(record, "scroll")
+
+    @property
+    def _last_state(self) -> GuiInputRecord:
+        """The most recent STATE record."""
+        for record in reversed(self.records):
+            if record.phase == PHASE_STATE:
+                return record
+        raise GuiInputScenarioError("no STATE record has been seen yet")
+
+    def _observe_quiet(self, seconds: float, what: str) -> Dict[str, Any]:
+        """Observe a bounded window in which no state change is expected."""
+        deadline = time.monotonic() + seconds
+        last = self._state_snapshot(self._last_state)
+        while time.monotonic() < deadline:
+            for record in self._next_records():
+                if record.phase == PHASE_STATE:
+                    last = self._state_snapshot(record)
+            time.sleep(0.02)
+        return last
+
+    def _assert_no_control_char(self, record: GuiInputRecord, what: str) -> None:
+        """The textarea must not contain a control character."""
+        for name in ("textarea", "textarea2"):
+            data = record.hex_field(name)
+            for index, byte in enumerate(data):
+                if byte < 0x20 or byte == 0x7F:
+                    raise GuiInputScenarioError(
+                        f"{what}: the {name} holds the control character "
+                        f"0x{byte:02x} at offset {index}"
+                    )
+
+    def _expect_state_unchanged(self, before: Dict[str, Any],
+                                after: Dict[str, Any], what: str,
+                                ignore: Tuple[str, ...] = ()) -> None:
+        """The exact state comparison, with the named fields excluded."""
+        for key, value in before.items():
+            if key in ignore:
+                continue
+            if after.get(key) != value:
+                raise GuiInputScenarioError(
+                    f"{what}: the state field {key!r} changed from {value!r} "
+                    f"to {after.get(key)!r}"
+                )
+
+    # ── the interaction sequence ────────────────────────────────────
+
+    def run_interaction(self) -> Tuple[bool, List[str], List[dict]]:
+        """Run the whole interaction matrix against a real guest.
+
+        Returns the existing case outcome schema: (ok, reasons, outcomes).
+        """
+        case_name = "input_interaction"
+        reasons: List[str] = []
+        outcomes: List[dict] = []
+        self._deadline = time.monotonic() + self.budget
+        self.nonce = uuid.uuid4().hex[:16]
+        self.parser = GuiInputParser(self.nonce)
+
+        try:
+            self._step_find_terminal()
+            self._step_start_probe()
+            self._step_click()
+            self._step_rapid_click()
+            self._step_drag()
+            self._step_hover_wheel()
+            self._step_focus_navigation()
+            self._step_text()
+            self._step_edit()
+            self._step_modifier_matrix()
+            self._step_ctrl_c_during_lease()
+            self._step_repeat()
+            self._step_ctrl_q()
+        except GuiInputScenarioError as exc:
+            reasons.append(f"[{case_name}] {exc}")
+            outcomes.append({"smp": self.smp, "case": case_name,
+                             "status": "FAIL", "reason": reasons[-1]})
+            return False, reasons, outcomes
+        except ProtocolError as exc:
+            # A record that breaks the contract is a FAIL, never a crash.
+            reasons.append(f"[{case_name}] protocol error: {exc}")
+            outcomes.append({"smp": self.smp, "case": case_name,
+                             "status": "FAIL", "reason": reasons[-1]})
+            return False, reasons, outcomes
+
+        detail = "; ".join(self.notes) if self.notes else "ok"
+        outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS",
+                         "reason": detail})
+        return True, reasons, outcomes
+
+    # ── 3b: the terminal identity before the probe starts ───────────
+
+    def _step_find_terminal(self) -> None:
+        """Find the terminal from the serial shell and pin its identity.
+
+        ``echo $$`` gives the shell's pid; the shell's PPid (from
+        ``/proc/<shellpid>/status``) is the terminal.  The terminal's own
+        Pid and BirthId are recorded so that a restart can be detected.
+        """
+        rc, out = self._shell("echo $$")
+        if rc != 0:
+            raise GuiInputScenarioError(
+                f"the shell pid could not be read (rc={rc})"
+            )
+        shell_pid = self._last_pid(out)
+        if shell_pid is None:
+            raise GuiInputScenarioError(
+                "the shell pid could not be parsed from the shell output"
+            )
+        block = self._shell_block(
+            f"cat /proc/{shell_pid}/status", "TSTART", "TEND"
+        )
+        ppid = self._status_field(block, "PPid")
+        if ppid is None:
+            raise GuiInputScenarioError(
+                f"the /proc/{shell_pid}/status block carries no PPid field"
+            )
+        term_block = self._shell_block(f"cat /proc/{ppid}/status", "TSTART", "TEND")
+        term_pid = self._status_field(term_block, "Pid")
+        term_birth = self._status_field(term_block, "BirthId")
+        if term_pid is None or term_birth is None:
+            raise GuiInputScenarioError(
+                f"the /proc/{ppid}/status block is missing the Pid or the "
+                "BirthId field"
+            )
+        self.terminal_pid = term_pid
+        self.terminal_birth = term_birth
+        self.notes.append(f"terminal pid={term_pid} birth={term_birth}")
+
+    @staticmethod
+    def _last_pid(text: str) -> Optional[int]:
+        """The last decimal number on its own line (the shell's pid)."""
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+        return None
+
+    @staticmethod
+    def _status_field(block: str, name: str) -> Optional[str]:
+        """The value of a ``Name:\\tvalue`` field of a /proc status block."""
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            key, sep, value = stripped.partition(":")
+            if sep and key.strip() == name:
+                return value.strip()
+        return None
+
+    def _step_check_terminal(self, what: str) -> None:
+        """The terminal must be the SAME process as before."""
+        block = self._shell_block(
+            f"cat /proc/{self.terminal_pid}/status", "TSTART", "TEND"
+        )
+        pid = self._status_field(block, "Pid")
+        birth = self._status_field(block, "BirthId")
+        if pid is None or birth is None:
+            raise GuiInputScenarioError(
+                f"{what}: the terminal's /proc status carries no Pid or "
+                "BirthId field"
+            )
+        if pid != self.terminal_pid or birth != self.terminal_birth:
+            raise GuiInputScenarioError(
+                f"{what}: the terminal restarted (pid {self.terminal_pid} -> "
+                f"{pid}, birth {self.terminal_birth} -> {birth})"
+            )
+
+    # ── the probe ───────────────────────────────────────────────────
+
+    def _step_start_probe(self) -> None:
+        """Start the probe in the background and wait for its READY."""
+        rc, _ = self._shell(
+            f"/bin/test_gui_input --nonce {self.nonce} --scenario interaction &"
+        )
+        if rc != 0:
+            raise GuiInputScenarioError(
+                f"the input probe could not be started (rc={rc})"
+            )
+        self.ready = self._wait(
+            lambda r: r.phase == PHASE_READY,
+            self.timing.step * 2,
+            "the probe's READY record",
+        )
+        self.probe_pid = self.ready.int_field("pid")
+        # The pointer starts at the centre of the screen.
+        self.pointer = [self.ready.int_field("width") // 2,
+                        self.ready.int_field("height") // 2]
+        # The probe emits its first STATE right after the READY.
+        self._wait_state(lambda r: True, self.timing.step,
+                         "the probe's first STATE record")
+        self.notes.append(f"probe pid={self.probe_pid}")
+
+    # ── the pointer steps ───────────────────────────────────────────
+
+    def _step_click(self) -> None:
+        """One click on the primary button."""
+        before = self._state_snapshot(self._last_state)
+        self._click(self.ready.int_field("btn_x"), self.ready.int_field("btn_y"))
+        after = self._wait_state(
+            lambda r: self._click_count(r) == before["click_count"] + 1,
+            self.timing.step,
+            "the click counter to advance",
+        )
+        self._expect_state_unchanged(
+            before, self._state_snapshot(after), "the click",
+            ignore=("click_count",),
+        )
+
+    def _step_rapid_click(self) -> None:
+        """Two more clicks in quick succession."""
+        before = self._click_count(self._last_state)
+        for _ in range(2):
+            self._click(self.ready.int_field("btn_x"), self.ready.int_field("btn_y"))
+        after = self._wait_state(
+            lambda r: self._click_count(r) == before + 2,
+            self.timing.step,
+            "the click counter to advance by two",
+        )
+        self.notes.append(f"rapid clicks -> click_count={self._click_count(after)}")
+
+    def _step_drag(self) -> None:
+        """Press on the slider, drag it and release."""
+        x = self.ready.int_field("slider_x")
+        y = self.ready.int_field("slider_y")
+        before = self._state_snapshot(self._last_state)
+        self._move_to(x, y)
+        self._btn("left", True)
+        self._rel("x", 40)
+        self._btn("left", False)
+        after = self._wait_state(
+            lambda r: self._slider(r) != before["slider"],
+            self.timing.step,
+            "the slider value to follow the drag",
+        )
+        if self._slider(after) == 0:
+            raise GuiInputScenarioError(
+                "the drag did not move the slider (the value stayed 0)"
+            )
+        self.notes.append(f"drag -> slider={self._slider(after)}")
+
+    def _step_hover_wheel(self) -> None:
+        """Hover the scroll container and turn the wheel.
+
+        The wheel is a **button** (wheel-up / wheel-down), never a third
+        motion axis.  The assertion is that the wheel buttons do not
+        leak into the click counter, the focus or the textarea: the scroll
+        offset is the one field a working wheel is allowed to change, so
+        it is observed and reported instead of being asserted.
+        """
+        x = self.ready.int_field("scroll_x")
+        y = self.ready.int_field("scroll_y")
+        self._move_to(x, y)
+        before = self._state_snapshot(self._last_state)
+        self._btn("wheel-up", True)
+        self._btn("wheel-up", False)
+        self._btn("wheel-down", True)
+        self._btn("wheel-down", False)
+        after = self._observe_quiet(self.timing.quiet, "the wheel")
+        self._expect_state_unchanged(
+            before, after, "the wheel",
+            ignore=("scroll",),
+        )
+        self.notes.append(
+            f"wheel -> scroll {before['scroll']} -> {after['scroll']}"
+        )
+
+    # ── the keyboard steps ──────────────────────────────────────────
+
+    def _tab_to(self, widget: int, limit: int = 8) -> None:
+        """Tab until the widget has the focus; every single step is exact.
+
+        The pointer steps may have moved the focus (a click gives the
+        widget the focus), so the navigation is checked RELATIVE to the
+        focus the guest currently reports.
+        """
+        current = self._focus_of(self._last_state)
+        for _ in range(limit):
+            if current == widget:
+                return
+            self._key("tab", True)
+            down = self._expect_key_edge("tab", True, QCODE_PHYSICAL["tab"])
+            expected = self._next_widget(current)
+            self._expect_focus(down, expected, "the Tab")
+            self._key("tab", False)
+            self._expect_key_edge("tab", False, QCODE_PHYSICAL["tab"])
+            current = expected
+        raise GuiInputScenarioError(
+            f"the Tab navigation never reached the widget {widget} "
+            f"(the focus is {current})"
+        )
+
+    def _step_focus_navigation(self) -> None:
+        """Tab and Shift-Tab move the focus through the registered group."""
+        current = self._focus_of(self._last_state)
+        self._key("tab", True)
+        down = self._expect_key_edge("tab", True, QCODE_PHYSICAL["tab"])
+        current = self._next_widget(current)
+        self._expect_focus(down, current, "the Tab")
+        self._key("tab", False)
+        self._expect_key_edge("tab", False, QCODE_PHYSICAL["tab"])
+        # Keep tabbing until the first textarea has the focus.
+        self._tab_to(WIDGET_TEXTAREA1)
+        current = self._focus_of(self._last_state)
+        # Shift-Tab goes back one step.
+        self._key("shift", True)
+        self._expect_key_edge("shift", True, QCODE_PHYSICAL["shift"])
+        self._key("tab", True)
+        down = self._expect_key_edge("tab", True, QCODE_PHYSICAL["tab"])
+        self._expect_focus(down, self._prev_widget(current), "Shift-Tab")
+        self._key("tab", False)
+        self._expect_key_edge("tab", False, QCODE_PHYSICAL["tab"])
+        self._key("shift", False)
+        self._expect_key_edge("shift", False, QCODE_PHYSICAL["shift"])
+        # And forward again.
+        self._key("tab", True)
+        down = self._expect_key_edge("tab", True, QCODE_PHYSICAL["tab"])
+        self._expect_focus(down, self._next_widget(self._prev_widget(current)),
+                           "the last Tab")
+        self._key("tab", False)
+        self._expect_key_edge("tab", False, QCODE_PHYSICAL["tab"])
+        self.notes.append("focus navigation ok")
+
+    @staticmethod
+    def _next_widget(focus: int) -> int:
+        """The next widget in the registered focus group."""
+        order = WIDGET_ORDER
+        if focus not in order:
+            return order[0]
+        return order[(order.index(focus) + 1) % len(order)]
+
+    @staticmethod
+    def _prev_widget(focus: int) -> int:
+        """The previous widget in the registered focus group."""
+        order = WIDGET_ORDER
+        if focus not in order:
+            return order[0]
+        return order[(order.index(focus) - 1) % len(order)]
+
+    def _expect_focus(self, record: GuiInputRecord, widget: int, what: str) -> None:
+        got = self._focus_of(record)
+        if got != widget:
+            raise GuiInputScenarioError(
+                f"{what}: the focus is {got}, expected {widget}"
+            )
+
+    def _step_text(self) -> None:
+        """Type ``aA!`` into the focused textarea."""
+        self._type_plain("a", "a")
+        self._assert_textarea(b"a", "the plain 'a'")
+        self._type_shift("a", "A")
+        self._assert_textarea(b"aA", "the Shift+a")
+        self._type_shift("1", "!")
+        self._assert_textarea(b"aA!", "the Shift+1")
+        self.notes.append(f"textarea={self._textarea(self._last_state)!r}")
+
+    def _assert_textarea(self, expected: bytes, what: str) -> None:
+        """The focused textarea must hold exactly the expected bytes."""
+        got = self._textarea(self._last_state)
+        if got != expected:
+            raise GuiInputScenarioError(
+                f"{what}: the textarea holds {got!r}, expected {expected!r}"
+            )
+
+    def _type_plain(self, qcode: str, expected: str) -> None:
+        self._key(qcode, True)
+        self._expect_key_edge(qcode, True, QCODE_PHYSICAL[qcode])
+        self._key(qcode, False)
+        self._expect_key_edge(qcode, False, QCODE_PHYSICAL[qcode])
+
+    def _type_shift(self, qcode: str, expected: str) -> None:
+        self._key("shift", True)
+        self._expect_key_edge("shift", True, QCODE_PHYSICAL["shift"])
+        self._key(qcode, True)
+        self._expect_key_edge(qcode, True, QCODE_PHYSICAL[qcode])
+        self._key(qcode, False)
+        self._expect_key_edge(qcode, False, QCODE_PHYSICAL[qcode])
+        self._key("shift", False)
+        self._expect_key_edge("shift", False, QCODE_PHYSICAL["shift"])
+
+    def _step_edit(self) -> None:
+        """Edit the textarea: the backspace removes the last character."""
+        self._key("backspace", True)
+        self._expect_key_edge("backspace", True, QCODE_PHYSICAL["backspace"])
+        self._key("backspace", False)
+        self._expect_key_edge("backspace", False, QCODE_PHYSICAL["backspace"])
+        self._assert_textarea(b"aA", "the backspace")
+        self.notes.append(f"edit -> textarea={self._textarea(self._last_state)!r}")
+
+    # ── 3a: the modifier physical matrix ────────────────────────────
+
+    def _step_modifier_matrix(self) -> None:
+        """Left and right Shift / Ctrl / Alt, separately.
+
+        For every modifier: modifier down, a plain ``a`` down/up, modifier
+        up.  Every event must report the native physical identity and the
+        single correct L/R modifier bit, and the bit must be clear after
+        the modifier's UP.
+        """
+        for qcode, bit in MODIFIER_MATRIX:
+            self._modifier_item(qcode, bit)
+        self._caps_items()
+
+    def _modifier_item(self, qcode: str, bit: int) -> None:
+        physical = QCODE_PHYSICAL[qcode]
+        before = self._last_state
+        text_before = self._textarea(before)
+
+        # The modifier down: the bit must appear, and only that bit.
+        self._key(qcode, True)
+        self._expect_key_edge(qcode, True, physical)
+        self._assert_only_modifier(bit, qcode)
+
+        # The plain 'a' down/up while the modifier is held.
+        self._key("a", True)
+        self._expect_key_edge("a", True, QCODE_PHYSICAL["a"])
+        self._assert_only_modifier(bit, qcode)
+        self._key("a", False)
+        self._expect_key_edge("a", False, QCODE_PHYSICAL["a"])
+        self._assert_only_modifier(bit, qcode)
+
+        text_after = self._textarea(self._last_state)
+        if bit in (MOD_LSHIFT, MOD_RSHIFT):
+            # Shift produces the upper case letter.
+            if text_after != text_before + b"A":
+                raise GuiInputScenarioError(
+                    f"the {qcode} item did not insert 'A': the textarea went "
+                    f"from {text_before!r} to {text_after!r}"
+                )
+        else:
+            # Ctrl / Alt produce no character at all.
+            if text_after != text_before:
+                raise GuiInputScenarioError(
+                    f"the {qcode} item changed the textarea: it went from "
+                    f"{text_before!r} to {text_after!r}"
+                )
+
+        # The modifier up: the guest must not report a transient bit any
+        # more.  The per-edge comparison above is the load-bearing check
+        # (the reported snapshot must equal the expected one); the
+        # explicit end-of-item form of the same requirement follows.
+        self._key(qcode, False)
+        self._expect_key_edge(qcode, False, physical)
+        self._assert_only_modifier(0, qcode)
+
+    def _assert_only_modifier(self, bit: int, qcode: str) -> None:
+        got = self._last_state.int_field("modifiers")
+        expected = bit
+        if got != expected:
+            raise GuiInputScenarioError(
+                f"the {qcode} item reported the modifier snapshot {got:#x}, "
+                f"expected {expected:#x}"
+            )
+
+    def _caps_items(self) -> None:
+        """The Caps latch: make/break, with Shift, and a repeated make."""
+        # 1. Caps on: 'a' becomes 'A'.
+        before = self._last_state
+        text_before = self._textarea(before)
+        self._key("caps_lock", True)
+        self._expect_key_edge("caps_lock", True, QCODE_PHYSICAL["caps_lock"])
+        if not self.mods & MOD_CAPS:
+            raise GuiInputScenarioError(
+                "the Caps make did not set the CAPS modifier bit"
+            )
+        self._type_plain("a", "A")
+        text_after = self._textarea(self._last_state)
+        if text_after != text_before + b"A":
+            raise GuiInputScenarioError(
+                f"Caps+a did not insert 'A': the textarea went from "
+                f"{text_before!r} to {text_after!r}"
+            )
+        # The Caps break does not clear the latch.
+        self._key("caps_lock", False)
+        self._expect_key_edge("caps_lock", False, QCODE_PHYSICAL["caps_lock"])
+        if not self.mods & MOD_CAPS:
+            raise GuiInputScenarioError(
+                "the Caps break cleared the CAPS modifier bit"
+            )
+
+        # 2. Caps + Shift: 'a' is 'a' again.
+        text_before = self._textarea(self._last_state)
+        self._key("shift", True)
+        self._expect_key_edge("shift", True, QCODE_PHYSICAL["shift"])
+        self._key("a", True)
+        self._expect_key_edge("a", True, QCODE_PHYSICAL["a"])
+        self._key("a", False)
+        self._expect_key_edge("a", False, QCODE_PHYSICAL["a"])
+        self._key("shift", False)
+        self._expect_key_edge("shift", False, QCODE_PHYSICAL["shift"])
+        text_after = self._textarea(self._last_state)
+        if text_after != text_before + b"a":
+            raise GuiInputScenarioError(
+                f"Caps+Shift+a did not insert 'a': the textarea went from "
+                f"{text_before!r} to {text_after!r}"
+            )
+
+        # 3. A second Caps make restores the latch to off.
+        self._key("caps_lock", True)
+        self._expect_key_edge("caps_lock", True, QCODE_PHYSICAL["caps_lock"])
+        if self.mods & MOD_CAPS:
+            raise GuiInputScenarioError(
+                "the second Caps make did not clear the CAPS modifier bit"
+            )
+        # 4. A repeated make (the key is still held) must NOT flip it.
+        self._repeated_make("caps_lock")
+        if self.mods & MOD_CAPS:
+            raise GuiInputScenarioError(
+                "the repeated Caps make flipped the CAPS latch again"
+            )
+        # The break keeps the latch off.
+        self._key("caps_lock", False)
+        self._expect_key_edge("caps_lock", False, QCODE_PHYSICAL["caps_lock"])
+        if self.mods & MOD_CAPS:
+            raise GuiInputScenarioError(
+                "the Caps break set the CAPS modifier bit again"
+            )
+        # 5. With the latch off, 'a' is 'a' again.
+        text_before = self._textarea(self._last_state)
+        self._type_plain("a", "a")
+        text_after = self._textarea(self._last_state)
+        if text_after != text_before + b"a":
+            raise GuiInputScenarioError(
+                f"the restored Caps state did not insert 'a': the textarea "
+                f"went from {text_before!r} to {text_after!r}"
+            )
+        self.notes.append("caps matrix ok")
+
+    def _repeated_make(self, qcode: str) -> None:
+        """Send a make edge for a key that is already held.
+
+        The guest does not treat it as a new edge: the state must not
+        change, so the modifier snapshot must stay exactly the same.
+        """
+        self._send(qmp_key_event(True, qcode))
+        self._wait_settled(self.timing.quiet, f"the repeated {qcode} make")
+
+    def _wait_settled(self, seconds: float, what: str) -> None:
+        """Wait a bounded time and require that nothing changed.
+
+        This is the "expect no change" observation: a state record that
+        arrives inside the window must still carry the expected modifier
+        snapshot.
+        """
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            for record in self._next_records():
+                if record.phase == PHASE_STATE:
+                    got = record.int_field("modifiers")
+                    if got != self.mods:
+                        raise GuiInputScenarioError(
+                            f"{what}: the modifier snapshot changed to "
+                            f"{got:#x}, expected {self.mods:#x}"
+                        )
+            time.sleep(0.02)
+
+    # ── 3b: the Ctrl-C evidence during the lease ────────────────────
+
+    def _step_ctrl_c_during_lease(self) -> None:
+        """A real Ctrl+C during the lease must not reach the guest's TTY.
+
+        The probe's initial ``sigint_seen`` is confirmed through the
+        independent control file, then a full Ctrl+C down/up is injected
+        through QMP while the lease is ACTIVE.  Afterwards the probe must
+        still be the same process, the protocol sequence must still be
+        contiguous, ``sigint_seen`` must still be 0 and the textarea must
+        not hold a control character.
+        """
+        ack, snap = self._snapshot()
+        if snap.int_field("sigint_seen") != 0:
+            raise GuiInputScenarioError(
+                "the probe reported sigint_seen=1 before the Ctrl+C"
+            )
+        seq_before = snap.seq
+        pid_before = ack.int_field("pid")
+        if pid_before != self.probe_pid:
+            raise GuiInputScenarioError(
+                f"the probe pid changed from {self.probe_pid} to {pid_before}"
+            )
+
+        # The full Ctrl+C: ctrl down, c down, c up, ctrl up.
+        self._key("ctrl", True)
+        self._expect_key_edge("ctrl", True, QCODE_PHYSICAL["ctrl"])
+        self._key("c", True)
+        self._expect_key_edge("c", True, QCODE_PHYSICAL["c"])
+        self._key("c", False)
+        self._expect_key_edge("c", False, QCODE_PHYSICAL["c"])
+        self._key("ctrl", False)
+        self._expect_key_edge("ctrl", False, QCODE_PHYSICAL["ctrl"])
+
+        ack, after = self._snapshot()
+        if after.int_field("sigint_seen") != 0:
+            raise GuiInputScenarioError(
+                "the probe saw a SIGINT during the lease (sigint_seen=1)"
+            )
+        if ack.int_field("pid") != self.probe_pid:
+            raise GuiInputScenarioError(
+                f"the probe pid changed from {self.probe_pid} to "
+                f"{ack.int_field('pid')} during the lease"
+            )
+        if after.seq <= seq_before:
+            raise GuiInputScenarioError(
+                f"the protocol sequence did not advance: {seq_before} -> "
+                f"{after.seq}"
+            )
+        self._assert_no_control_char(after, "after the Ctrl+C")
+
+        # The lease still works: the click and the text input still land.
+        clicks = self._click_count(after)
+        self._click(self.ready.int_field("btn_x"), self.ready.int_field("btn_y"))
+        clicked = self._wait_state(
+            lambda r: self._click_count(r) == clicks + 1,
+            self.timing.step,
+            "the click counter to advance after the Ctrl+C",
+        )
+        # The click gave the button the focus, so the textarea is focused
+        # again before the text input.
+        self._tab_to(WIDGET_TEXTAREA1)
+        text_before = self._textarea(self._last_state)
+        self._type_plain("z", "z")
+        self._assert_textarea(text_before + b"z", "the text after the Ctrl+C")
+        self._assert_no_control_char(self._last_state, "after the Ctrl+C text input")
+
+        # The terminal must be the very same process.
+        self._step_check_terminal("after the Ctrl+C")
+        self.notes.append("ctrl-c during the lease ok")
+
+    # ── the long press ──────────────────────────────────────────────
+
+    def _step_repeat(self) -> None:
+        """Hold a key down: a bounded count lower bound, then stability.
+
+        The count is a LOWER BOUND, so the press is released as soon as
+        the bound is met.  That keeps the protocol records small: the
+        console TTY's PTY pipe holds 512 bytes, and two records that are
+        written back to back (the final STATE and the EXIT record) must
+        still fit into it, or the console's tee splits a record and the
+        terminal's own diagnostics land inside it.  See the task report.
+        """
+        before = self._last_state
+        text_before = self._textarea(before)
+        self._key("a", True)
+        self._expect_key_edge("a", True, QCODE_PHYSICAL["a"])
+        repeated = self._wait_state(
+            lambda r: len(self._textarea(r)) >= len(text_before) + LONG_PRESS_MIN_REPEATS,
+            self.timing.step,
+            "the repeated key count",
+        )
+        count = len(self._textarea(repeated)) - len(text_before)
+        self._key("a", False)
+        self._expect_key_edge("a", False, QCODE_PHYSICAL["a"])
+        self._wait_settled_count(text_before, count)
+        self.notes.append(f"long press -> {count} characters")
+
+    def _wait_settled_count(self, text_before: bytes, count: int) -> GuiInputRecord:
+        """After the release the count must stay stable."""
+        deadline = time.monotonic() + self.timing.stability
+        last = self._last_state
+        while time.monotonic() < deadline:
+            for record in self._next_records():
+                if record.phase == PHASE_STATE:
+                    last = record
+                    got = len(self._textarea(record)) - len(text_before)
+                    if got != count:
+                        raise GuiInputScenarioError(
+                            f"the repeated key count changed from {count} to "
+                            f"{got} after the release"
+                        )
+            time.sleep(0.02)
+        return last
+
+    # ── the exit ────────────────────────────────────────────────────
+
+    def _step_ctrl_q(self) -> None:
+        """Ctrl-Q ends the probe; the shell's ``wait`` must report 0."""
+        self._key("ctrl", True)
+        self._expect_key_edge("ctrl", True, QCODE_PHYSICAL["ctrl"])
+        self._key("q", True)
+        self._expect_key_edge("q", True, QCODE_PHYSICAL["q"])
+        # The probe ends on the shortcut's DOWN edge, so the releases are
+        # injected afterwards: the guest's physical key state must
+        # converge, but the probe is already gone and answers nothing.
+        self._key("q", False)
+        self._key("ctrl", False)
+
+        exit_record = self._wait(
+            lambda r: r.phase == PHASE_EXIT,
+            self.timing.step,
+            "the probe's EXIT record",
+        )
+        result = exit_record.get("result")
+        exit_code = exit_record.int_field("exit_code")
+        if result != "PASS" or exit_code != 0:
+            raise GuiInputScenarioError(
+                f"the probe exited with result={result} exit_code={exit_code} "
+                f"detail={exit_record.get('detail')}"
+            )
+        # The shell's own answer: the background job's exit status.
+        rc, _ = self._shell(f"wait {self.probe_pid}")
+        if rc != 0:
+            raise GuiInputScenarioError(
+                f"the shell's wait reported the exit status {rc}, expected 0"
+            )
+        self.notes.append(f"probe exit detail={exit_record.get('detail')}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  The Task 11 unit fixtures — the payload contracts
+# ══════════════════════════════════════════════════════════════════════
+
+
+class GuiInputQmpPayloadTests(unittest.TestCase):
+    """The exact QMP payload shapes, pinned by unit tests."""
+
+    def test_key_payload_shape(self):
+        self.assertEqual(
+            {
+                "type": "key",
+                "data": {"down": True, "key": {"type": "qcode", "data": "a"}},
+            },
+            qmp_key_event(True, "a"),
+        )
+        self.assertEqual(
+            {
+                "type": "key",
+                "data": {"down": False, "key": {"type": "qcode", "data": "shift_r"}},
+            },
+            qmp_key_event(False, "shift_r"),
+        )
+
+    def test_rel_payload_shape(self):
+        self.assertEqual(
+            {"type": "rel", "data": {"axis": "x", "value": 12}},
+            qmp_rel_event("x", 12),
+        )
+        self.assertEqual(
+            {"type": "rel", "data": {"axis": "y", "value": -3}},
+            qmp_rel_event("y", -3),
+        )
+
+    def test_btn_payload_shape(self):
+        for button in MOUSE_BUTTONS:
+            self.assertEqual(
+                {"type": "btn", "data": {"down": True, "button": button}},
+                qmp_btn_event(True, button),
+            )
+            self.assertEqual(
+                {"type": "btn", "data": {"down": False, "button": button}},
+                qmp_btn_event(False, button),
+            )
+
+    def test_the_wheel_is_a_button_not_a_third_axis(self):
+        """The wheel must never be sent as an abs/rel third axis."""
+        for button in ("wheel-up", "wheel-down"):
+            event = qmp_btn_event(True, button)
+            self.assertEqual("btn", event["type"])
+            self.assertIn(button, event["data"]["button"])
+            self.assertNotIn("axis", event["data"])
+        # A "wheel" rel axis is not even a legal QMP axis.
+        with self.assertRaises(AssertionError):
+            self.assertIn("wheel", ("x", "y"))
+
+    def test_the_physical_identities_are_the_set1_scan_codes(self):
+        self.assertEqual(0x1E, QCODE_PHYSICAL["a"])
+        self.assertEqual(0x2A, QCODE_PHYSICAL["shift"])
+        self.assertEqual(0x36, QCODE_PHYSICAL["shift_r"])
+        self.assertEqual(0x1D, QCODE_PHYSICAL["ctrl"])
+        self.assertEqual(PS2_E0 | 0x1D, QCODE_PHYSICAL["ctrl_r"])
+        self.assertEqual(0x38, QCODE_PHYSICAL["alt"])
+        self.assertEqual(PS2_E0 | 0x38, QCODE_PHYSICAL["alt_r"])
+        self.assertEqual(0x3A, QCODE_PHYSICAL["caps_lock"])
 
 
 if __name__ == "__main__":
