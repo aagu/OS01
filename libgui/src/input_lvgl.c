@@ -386,7 +386,16 @@ static int32_t wheel_scroll_by(lv_obj_t *obj, int32_t amount)
     if (room < 0) {
         room = 0;
     }
-    moved = (amount < -room) ? -amount : room;
+    /*
+     * moved = min(-amount, room)：向上滚的请求量与可用余量取小的那个。
+     *
+     * 注意不能写成 (amount < -room) ? -amount : room——那是反向比较：请求量
+     * 比余量**小**时反而返回整个余量（一次刻度把剩余范围全部退光），请求量
+     * 比余量**大**时返回整个请求量（越过上边界，scroll_y 变成负数）。
+     * lv_obj_scroll_by() 本身不夹紧（夹紧在 lv_obj_scroll_by_bounded() 里，
+     * 本实现没有调用它），所以这一行是唯一的保护。
+     */
+    moved = (-amount < room) ? -amount : room;
     if (moved > 0) {
         lv_obj_scroll_by(obj, 0, moved, LV_ANIM_OFF);
     }

@@ -908,6 +908,10 @@ int gui_input_test_feed_keybytes(gui_input_t *input, const uint8_t *bytes, size_
  * 规则与键盘桥接相同：只在宿主测试构建（-DOS01_HOST_TEST）里存在，目标
  * 构建不编译它，因此它永远不会进入公共 sysroot，也不出现在任何公共头
  * 文件里。只接受合成输入（GUI_INPUT_SYNTHETIC）。
+ *
+ * 每次调用 = 一次 dispatch，因此**同样受每轮 64 个鼠标事件的预算约束**
+ * （GUI_INPUT_MOUSE_READ_BUDGET，与产品路径 gui_input_read_mouse() 一致）：
+ * 夹具不能注入产品路径根本送不出来的批量。需要更多事件时多次调用。
  */
 int gui_input_test_feed_mouse(gui_input_t *input, const mouse_event_t *events,
                               size_t count)
@@ -920,6 +924,10 @@ int gui_input_test_feed_mouse(gui_input_t *input, const mouse_event_t *events,
         return -1;
     }
     if (input->mode != GUI_INPUT_SYNTHETIC) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (count > GUI_INPUT_MOUSE_READ_BUDGET) {
         errno = EINVAL;
         return -1;
     }

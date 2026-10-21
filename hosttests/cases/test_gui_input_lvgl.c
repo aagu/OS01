@@ -1655,16 +1655,49 @@ static lv_obj_t *make_plain_box(lv_obj_t *parent, int32_t x, int32_t y,
     return box;
 }
 
+/* 把指针移到绝对位置 (x, y)（用相对位移）。 */
+static void move_pointer_to_abs(fixture_t *fx, int32_t x, int32_t y)
+{
+    feed_mouse_one(fx, 0,
+                   (int16_t)(x - fx->input->lvgl.cursor_x),
+                   (int16_t)(y - fx->input->lvgl.cursor_y),
+                   0);
+}
+
+/*
+ * 一个自带 100 px 纵向余量的滚动容器（内容比视口高 100 px）。
+ *
+ * 用例用它当"如果不被排除就会被滚动"的目标：只有真正可滚动的容器才能
+ * 证明排除规则生效。
+ */
+static lv_obj_t *make_scrollable_box(lv_obj_t *parent, int32_t x, int32_t y,
+                                     int32_t w, int32_t h)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+
+    assert_not_null(box);
+    lv_obj_set_style_pad_all(box, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(box, 0, LV_PART_MAIN);
+    lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_pos(box, x, y);
+    lv_obj_set_size(box, w, h);
+    /* 内容比视口高 100 px → 向下余量 100 px。 */
+    (void)make_plain_box(box, 0, 0, w, h + 100);
+    return box;
+}
+
 /*
  * 嵌套滚动容器夹具。
  *
  *   outer 200×200，内容高 300 → 向下余量 100 px
+ *   ├─ tall 100×300（outer 的滚动内容，命中它会滚 outer）
  *   └─ inner 60×60，内容高 92 → 向下余量 32 px（正好一个刻度）
  *
  * 几何刻意做成整数：断言可以直接写出期望的 scroll_y。
  */
 typedef struct {
     lv_obj_t *outer;
+    lv_obj_t *tall;
     lv_obj_t *inner;
     lv_obj_t *inner_content;
 } scroll_fixture_t;
@@ -1680,7 +1713,7 @@ static void make_scroll_fixture(fixture_t *fx, scroll_fixture_t *sf)
     lv_obj_set_size(sf->outer, 200, 200);
 
     /* outer 的内容比视口高 100 px。 */
-    (void)make_plain_box(sf->outer, 0, 0, 100, 300);
+    sf->tall = make_plain_box(sf->outer, 0, 0, 100, 300);
 
     sf->inner = lv_obj_create(sf->outer);
     assert_not_null(sf->inner);
@@ -1876,9 +1909,15 @@ TEST_FUNC(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero)
     step_at(&fx, 50);
     assert_false(lv_obj_has_flag(cursor, LV_OBJ_FLAG_HIDDEN));
 
-    /* 固定 12×18。 */
-    assert_eq(GUI_INPUT_CURSOR_WIDTH, lv_obj_get_width(cursor));
-    assert_eq(GUI_INPUT_CURSOR_HEIGHT, lv_obj_get_height(cursor));
+    /*
+     * 规格固定 12×18。
+     *
+     * 这里断言**字面量** 12 / 18，而不是 GUI_INPUT_CURSOR_WIDTH /
+     * GUI_INPUT_CURSOR_HEIGHT：后者与实现用的是同一个宏，断言会退化成
+     * "实现和自己比"，把光标改成 16 px 或 40×40 都不会被发现。
+     */
+    assert_eq(12, lv_obj_get_width(cursor));
+    assert_eq(18, lv_obj_get_height(cursor));
 
     /* 热点 (0,0)：对象左上角就是指针位置。 */
     lv_obj_get_coords(cursor, &area);
@@ -1910,6 +1949,16 @@ TEST_FUNC(test_stationary_pointer_still_advances_the_long_press_timer)
     probe.input = fx.input;
     btn = make_button(&fx, 20, 20);
     lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_LONG_PRESSED, &probe);
+
+    /*
+     * pointer indev 必须是 TIMER 模式（brief："pointer 保留 TIMER 模式"）。
+     *
+     * 单靠"长按最终触发"钉不住这一点：LVGL 自己在按下期间会恢复被暂停的
+     * 读定时器（thirdpart/lvgl/src/indev/lv_indev.c 的 indev_proc_press()），
+     * 所以 EVENT 模式下长按同样会触发。这里显式断言模式本身。
+     */
+    assert_not_null(fx.input->lvgl.pointer);
+    assert_eq(LV_INDEV_MODE_TIMER, lv_indev_get_mode(fx.input->lvgl.pointer));
 
     /* 移到按钮并按下：之后指针不再移动。 */
     move_pointer_to(&fx, btn);
@@ -1958,6 +2007,148 @@ TEST_FUNC(test_hover_wheel_scrolls_the_hovered_container_by_one_detent)
     step(&fx);
     assert_eq(0, lv_obj_get_scroll_y(sf.inner));
     assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_hover_wheel_negative_detent_scrolls_back_within_range)
+{
+    fixture_t fx;
+    scroll_fixture_t sf;
+
+    fixture_setup(&fx);
+    make_scroll_fixture(&fx, &sf);
+
+    /* outer 的向下余量是 100 px（> 一个刻度），这样负向才有夹边可言。 */
+    assert_eq(100, lv_obj_get_scroll_bottom(sf.outer));
+
+    /*
+     * 悬停到 outer 的滚动内容上（tall 在 inner 之外，命中 tall 的最近可
+     * 滚动祖先就是 outer，因此滚的是 outer 而不是 inner）。
+     */
+    move_pointer_to(&fx, sf.tall);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    /* 向下两刻度：64 px。 */
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.outer));
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(64, lv_obj_get_scroll_y(sf.outer));
+
+    /*
+     * 负向刻度必须只退**一个**刻度。
+     *
+     * 请求 32 px、余量 64 px → 移动 32 px，剩 32 px。夹紧写反的实现会在
+     * 这里把整个余量（64 px）一次退光，scroll_y 直接变成 0。
+     */
+    feed_mouse_one(&fx, 0, 0, 0, -1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.outer));
+
+    /* 再退一个刻度：正好回到起点。 */
+    feed_mouse_one(&fx, 0, 0, 0, -1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    /*
+     * 已经在上边界：负向刻度必须**完全不动**。
+     *
+     * 夹紧写反的实现在这里会把内容滚到边界之上（scroll_y 变成 -32），那是
+     * 滚动模型不承认的状态。
+     */
+    feed_mouse_one(&fx, 0, 0, 0, -1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(sf.outer));
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_hover_wheel_ignores_disabled_and_hidden_targets)
+{
+    fixture_t fx;
+    scroll_fixture_t sf;
+    lv_obj_t *disabled_box;
+    lv_obj_t *disabled_ancestor;
+    lv_obj_t *disabled_ancestor_child;
+    lv_obj_t *hidden_ancestor;
+
+    fixture_setup(&fx);
+    make_scroll_fixture(&fx, &sf);
+
+    /*
+     * 三个目标都放在屏幕右侧的空白区（x >= 205），避免指针落在 outer 上：
+     * 这样"不动"只能来自排除规则，而不是碰巧没有可滚动的祖先。
+     *
+     * 目标一：滚动容器**自身**被禁用。
+     *
+     * LVGL 的 hit-test 不看 DISABLED（只看隐藏），所以禁用对象照样会被命中：
+     * 排除禁用对象完全靠适配层的判定。
+     */
+    disabled_box = make_scrollable_box(fx.screen, 205, 5, 60, 60);
+    lv_obj_add_state(disabled_box, LV_STATE_DISABLED);
+
+    /* 目标二：滚动容器在一个**被禁用的祖先**下面。 */
+    disabled_ancestor = lv_obj_create(fx.screen);
+    assert_not_null(disabled_ancestor);
+    lv_obj_set_style_pad_all(disabled_ancestor, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(disabled_ancestor, 0, LV_PART_MAIN);
+    lv_obj_set_pos(disabled_ancestor, 205, 70);
+    lv_obj_set_size(disabled_ancestor, 100, 70);
+    disabled_ancestor_child = make_scrollable_box(disabled_ancestor, 0, 0, 80, 70);
+    lv_obj_add_state(disabled_ancestor, LV_STATE_DISABLED);
+
+    /* 目标三：滚动容器在一个**被隐藏的祖先**下面。 */
+    hidden_ancestor = lv_obj_create(fx.screen);
+    assert_not_null(hidden_ancestor);
+    lv_obj_set_style_pad_all(hidden_ancestor, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(hidden_ancestor, 0, LV_PART_MAIN);
+    lv_obj_set_pos(hidden_ancestor, 205, 145);
+    lv_obj_set_size(hidden_ancestor, 100, 50);
+    (void)make_scrollable_box(hidden_ancestor, 0, 0, 80, 50);
+    lv_obj_add_flag(hidden_ancestor, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_update_layout(fx.screen);
+
+    /* 三个目标都不可用：适配层的"可用"判定必须覆盖它们（含祖先链）。 */
+    assert_false(gui_input_focus_object_usable(disabled_box));
+    assert_false(gui_input_focus_object_usable(disabled_ancestor));
+    assert_false(gui_input_focus_object_usable(disabled_ancestor_child));
+    assert_false(gui_input_focus_object_usable(hidden_ancestor));
+
+    /* 悬停到被禁用的容器上：滚轮不得滚动它，也不得滚到它的祖先。 */
+    move_pointer_to_abs(&fx, 235, 35);
+    step(&fx);
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(disabled_box));
+    assert_eq(0, lv_obj_get_scroll_y(fx.screen));
+
+    /* 悬停到被禁用祖先下的容器上：同样不动。 */
+    move_pointer_to_abs(&fx, 255, 105);
+    step(&fx);
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(disabled_ancestor));
+    assert_eq(0, lv_obj_get_scroll_y(disabled_ancestor_child));
+    assert_eq(0, lv_obj_get_scroll_y(fx.screen));
+
+    /* 悬停到被隐藏祖先下的容器上：隐藏的子树根本不参与命中，同样不动。 */
+    move_pointer_to_abs(&fx, 255, 170);
+    step(&fx);
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(0, lv_obj_get_scroll_y(hidden_ancestor));
+    assert_eq(0, lv_obj_get_scroll_y(fx.screen));
+
+    /* 对照：可用的容器仍然照常滚动（证明上面的"不动"来自排除规则）。 */
+    move_pointer_to(&fx, sf.tall);
+    step(&fx);
+    feed_mouse_one(&fx, 0, 0, 0, 1);
+    step(&fx);
+    assert_eq(32, lv_obj_get_scroll_y(sf.outer));
 
     fixture_teardown(&fx);
 }
@@ -2073,7 +2264,15 @@ TEST_FUNC(test_moving_the_pointer_does_not_take_the_keyboard_focus)
     btn = make_button(&fx, 20, 20);
     other = make_button(&fx, 200, 120);
 
+    /*
+     * 被悬停的控件**也**要登记进焦点组。
+     *
+     * 否则这个用例看不见焦点被抢：gui_input_focus_set() 拒绝未登记的对象，
+     * 一个"移动指针就抢焦点"的实现不会改动焦点记录，用例照样通过。登记
+     * 之后，焦点一旦被抢到 other 上就能被观察到。
+     */
     assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_add(fx.input, other));
     assert_true(gui_input_focus_current(fx.input) == btn);
 
     /* 悬停到另一个按钮上（不点击）：键盘焦点不变。 */
@@ -2081,6 +2280,37 @@ TEST_FUNC(test_moving_the_pointer_does_not_take_the_keyboard_focus)
     step(&fx);
     step_at(&fx, 50);
     assert_true(gui_input_focus_current(fx.input) == btn);
+
+    /* 悬停本身不得把焦点移到 other 上。 */
+    assert_true(gui_input_focus_current(fx.input) != other);
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_mouse_injection_bridge_respects_the_dispatch_budget)
+{
+    fixture_t fx;
+    mouse_event_t events[65];
+    size_t i;
+
+    fixture_setup(&fx);
+    for (i = 0; i < sizeof(events) / sizeof(events[0]); i++) {
+        memset(&events[i], 0, sizeof(events[i]));
+    }
+
+    /*
+     * 一次 dispatch 最多 64 个鼠标事件（与产品路径 gui_input_read_mouse()
+     * 同一预算）：夹具不能注入产品根本送不出来的批量。
+     *
+     * 这里用**字面量** 64 / 65，而不是 GUI_INPUT_MOUSE_READ_BUDGET，避免
+     * 断言退化成"实现和自己比"。
+     */
+    errno = 0;
+    assert_eq(-1, gui_input_test_feed_mouse(fx.input, events, 65));
+    assert_eq(EINVAL, errno);
+
+    /* 预算之内可以正常注入。 */
+    assert_eq(0, gui_input_test_feed_mouse(fx.input, events, 64));
 
     fixture_teardown(&fx);
 }
@@ -2150,11 +2380,14 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero),
     TEST_ENTRY(test_stationary_pointer_still_advances_the_long_press_timer),
     TEST_ENTRY(test_hover_wheel_scrolls_the_hovered_container_by_one_detent),
+    TEST_ENTRY(test_hover_wheel_negative_detent_scrolls_back_within_range),
+    TEST_ENTRY(test_hover_wheel_ignores_disabled_and_hidden_targets),
     TEST_ENTRY(test_hover_wheel_propagates_the_remainder_to_the_parent),
     TEST_ENTRY(test_hover_wheel_without_a_target_does_nothing),
     TEST_ENTRY(test_hover_wheel_does_not_change_a_slider_value),
     TEST_ENTRY(test_hover_wheel_is_ignored_while_dragging),
     TEST_ENTRY(test_moving_the_pointer_does_not_take_the_keyboard_focus),
+    TEST_ENTRY(test_mouse_injection_bridge_respects_the_dispatch_budget),
     TEST_ENTRY(test_destroy_leaves_no_pointer_resources_behind),
 TEST_LIST_END
 
