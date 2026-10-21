@@ -1248,6 +1248,22 @@ def _parse_make_deps(dep_file: Path) -> list[str]:
     return [d for d in deps.split() if d]
 
 
+def _normalise_object_path(path: Path) -> Path:
+    """The canonical form of a build-object path.
+
+    Object paths are compared as SETS (the compiler view against the
+    dependency-file view), so every producer must normalise the SAME way.
+
+    The normalisation is ``os.path.normpath``: it collapses ``.``/``..`` and
+    a trailing separator, but it deliberately does NOT follow symlinks.
+    ``Path.resolve()`` must not be used here: the dependency-file view
+    reports the object next to its ``.d`` file (unresolved), so resolving
+    only one side would make a symlinked target land in the under- AND the
+    over-report set at once — a false RED.
+    """
+    return Path(os.path.normpath(path))
+
+
 def _dependent_objects(obj_root: Path, header: Path) -> list[Path]:
     """The objects whose dependency file lists the EXACT header path.
 
@@ -1271,7 +1287,7 @@ def _dependent_objects(obj_root: Path, header: Path) -> list[Path]:
             except OSError:
                 continue
         if hit:
-            out.append(dep_file.with_suffix(".o"))
+            out.append(_normalise_object_path(dep_file.with_suffix(".o")))
     return out
 
 
@@ -1285,7 +1301,7 @@ def _object_for_source(obj_root: Path, src: Path) -> Path | None:
     """
     preferred = obj_root / "platform" / f"{src.stem}.o"
     if preferred.is_file():
-        return preferred
+        return _normalise_object_path(preferred)
     try:
         wanted = src.resolve()
     except OSError:
@@ -1308,10 +1324,11 @@ def _object_for_source(obj_root: Path, src: Path) -> Path | None:
                         # object would appear in BOTH the under- and the
                         # over-report set.
                         candidate = dep_file.parent / candidate
-                    try:
-                        return candidate.resolve()
-                    except OSError:
-                        return candidate
+                    # normpath, NOT resolve: the dependency-file view
+                    # reports the object unresolved, so resolving here
+                    # would split a symlinked target across the under- and
+                    # the over-report set.
+                    return _normalise_object_path(candidate)
             except OSError:
                 continue
     return None
