@@ -843,6 +843,7 @@ class FakeProcessSession:
         probe_fault_owner_close_releases: bool = False,
         probe_fault_owner_still_holds: bool = False,
         probe_fault_leak_after_lease: bool = False,
+        probe_fault_owner_screen_stays_gui: bool = False,
         hang_after_probe: bool = False,
     ):
         self._argv = list(argv)
@@ -918,6 +919,7 @@ class FakeProcessSession:
         self.probe_fault_owner_close_releases = probe_fault_owner_close_releases
         self.probe_fault_owner_still_holds = probe_fault_owner_still_holds
         self.probe_fault_leak_after_lease = probe_fault_leak_after_lease
+        self.probe_fault_owner_screen_stays_gui = probe_fault_owner_screen_stays_gui
         # The console TTY's own state (the PS/2 keyboard path).
         self._tty_line = ""
         self._tty_mods = 0
@@ -1199,7 +1201,7 @@ class FakeProcessSession:
                     kpid = int(m_kill.group(1))
                     if self.active_hold_pid == kpid:
                         self.active_hold_pid = None
-                        if self.qmp:
+                        if self.qmp and not self._screen_stays_gui():
                             self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
                         self._text += f"task {kpid} killed by signal 9\n"
                     if self.probe is not None and self.probe.pid == kpid:
@@ -1315,6 +1317,19 @@ class FakeProcessSession:
 
     def _owner_probe_holds(self) -> bool:
         """Does the background owner probe hold the display?"""
+        return (self.probe is not None
+                and self.probe.scenario == "owner")
+
+    def _screen_stays_gui(self) -> bool:
+        """The fault: the display stays on the GUI's fault colour.
+
+        The killed hold client does not give the display back, so the
+        screen keeps the fault tool's solid colour and the terminal does
+        not come back.  It is scoped to the OWNER scenario: the GUI-1
+        cases have their own restore checks and must not be disturbed.
+        """
+        if not self.probe_fault_owner_screen_stays_gui:
+            return False
         return (self.probe is not None
                 and self.probe.scenario == "owner")
 
@@ -2816,6 +2831,20 @@ class GuiInputRunnerTests(unittest.TestCase):
         ok, reasons = self._run(factory, qmp)
         self.assertFalse(ok)
         self._assert_failed(reasons, "did not overflow")
+
+    def test_an_owner_that_leaves_the_gui_on_the_screen_is_rejected(self):
+        """The terminal must come back, not just "a changed screen".
+
+        The owner scenario's "before" frame is the fault tool's SOLID
+        colour, so a changed screen would not prove that the terminal is
+        back.  The killed hold client does not give the display back
+        here, so the screen keeps the fault colour: the scenario must
+        fail.
+        """
+        factory, qmp = self._make({"probe_fault_owner_screen_stays_gui": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the screen did not change from the GUI state")
 
     # ── the budget import failure (M-5) ────────────────────────────
 

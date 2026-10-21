@@ -1371,7 +1371,7 @@ class GuiInputScenarios:
         pace: float = KEY_PACE_SECONDS,
         budget: Optional[float] = None,
         timing: Optional[GuiInputTiming] = None,
-        screen_probe: Optional[Callable[[str], Optional[bytes]]] = None,
+        screen_probe: Optional[Callable[[str], Optional[Any]]] = None,
     ):
         self.session = session
         self.qmp = qmp
@@ -2635,6 +2635,9 @@ class GuiInputScenarios:
         protocol error.
         """
         self.nonce = uuid.uuid4().hex[:16]
+        # The scenario's own temp file belongs to THIS probe run: a stale
+        # path would point at the previous run's file.
+        self.leak_file = None
         self.parser = GuiInputParser(self.nonce,
                                      start_offset=len(self.session.text))
         self._pending = []
@@ -2826,8 +2829,15 @@ class GuiInputScenarios:
 
     # -- the screen ---------------------------------------------------
 
-    def _screen_pixels(self, label: str) -> Optional[bytes]:
-        """The current screen as raw pixels (None when it cannot be read)."""
+    def _screen_surface(self, label: str) -> Optional[Any]:
+        """The current screen as a surface (None when it cannot be read).
+
+        The surface is duck-typed on purpose: the real guest hands out
+        ``gui_test.Surface`` and the host fake hands out its own
+        ``FakeSurface``.  Both carry the width, the height, the raw
+        pixels and a ``pixel(x, y)`` accessor, which is what the
+        recovery checks need.
+        """
         if self.screen_probe is None:
             return None
         try:
@@ -2836,22 +2846,40 @@ class GuiInputScenarios:
             return None
 
     @staticmethod
-    def _pixels_diff(a: bytes, b: bytes) -> float:
+    def _pixels_diff(a: Any, b: Any) -> float:
         """The fraction of pixels that differ (1.0 when incomparable)."""
-        if not a or not b or len(a) != len(b):
+        pa = a.pixels
+        pb = b.pixels
+        if not pa or not pb or len(pa) != len(pb):
             return 1.0
         step = 3
-        count = len(a) // step
+        count = len(pa) // step
         if count == 0:
             return 1.0
         diff = sum(1 for i in range(0, count * step, step)
-                   if a[i:i + step] != b[i:i + step])
+                   if pa[i:i + step] != pb[i:i + step])
         return diff / count
 
-    def _require_screen_back_to_terminal(self, gui_pixels: Optional[bytes],
+    def _require_screen_back_to_terminal(self, gui_shot: Optional[Any],
                                          what: str) -> None:
-        """The screen must show the terminal again, not the GUI."""
-        if gui_pixels is None:
+        """The screen must show the terminal again, not the GUI.
+
+        TWO rules, both real:
+        * the screen must DIFFER from the GUI frame (the "before" shot),
+          so the GUI state is gone;
+        * the screen must NOT be the fault tool's solid colour, so the
+          display really came back to the terminal.
+
+        The second rule is what the OWNER scenario needs: its "before"
+        frame IS the fault tool's solid colour, so the first rule alone
+        would accept any changed screen (even a corrupted one).
+        """
+        # The GUI-1 helper has ONE definition of the fault's colour: the
+        # import is local because the suite imports this module (not the
+        # other way round).
+        from qemutests.gui_test import is_fault_pure_color
+
+        if gui_shot is None:
             # The "before" screenshot is missing: the diff cannot be made,
             # so the check would degrade into "the after screenshot could
             # be read".  That is a FAIL, never a silent skip.
@@ -2862,12 +2890,13 @@ class GuiInputScenarios:
         # The terminal redraws on its own schedule (its 30 FPS loop and
         # the foreground restore), so the check waits for the redraw --
         # with a bound.  It never skips: a screen that stays on the GUI
-        # is a FAIL.
+        # is a FAIL, and the deadline path raises.
         deadline = time.monotonic() + min(SCREEN_RESTORE_TIMEOUT_SECONDS,
                                           self._remaining())
         diff = 1.0
+        fault_colour = False
         while True:
-            shot = self._screen_pixels(f"{what}_screen")
+            shot = self._screen_surface(f"{what}_screen")
             if shot is None:
                 # Without a screen probe the check cannot be made; that is
                 # a FAIL, never a silent skip.
@@ -2875,12 +2904,19 @@ class GuiInputScenarios:
                     f"{what}: the screen could not be read, so the recovery "
                     "cannot be confirmed"
                 )
-            diff = self._pixels_diff(gui_pixels, shot)
-            if diff >= 0.01:
+            diff = self._pixels_diff(gui_shot, shot)
+            fault_colour = bool(is_fault_pure_color(shot))
+            if diff >= 0.01 and not fault_colour:
                 break
             if time.monotonic() >= deadline:
+                if diff < 0.01:
+                    raise GuiInputScenarioError(
+                        f"{what}: the screen did not change from the GUI "
+                        f"state (diff={diff:.3f}): the terminal did not come "
+                        "back"
+                    )
                 raise GuiInputScenarioError(
-                    f"{what}: the screen did not change from the GUI state "
+                    f"{what}: the screen still shows the fault's pure colour "
                     f"(diff={diff:.3f}): the terminal did not come back"
                 )
             try:
@@ -3002,8 +3038,8 @@ class GuiInputScenarios:
 
     def _step_isolation_recover(self) -> None:
         """End the lease and prove that the keyboard came back."""
-        gui_pixels = self._screen_pixels("isolation_held")
-        if gui_pixels is None:
+        gui_shot = self._screen_surface("isolation_held")
+        if gui_shot is None:
             # The "before" screenshot is the reference of the recovery
             # check: without it the check cannot be made at all.
             raise GuiInputScenarioError(
@@ -3030,7 +3066,7 @@ class GuiInputScenarios:
 
         # The scenario removes its own temp file.
         self._shell(f"rm -f {leak}")
-        self._require_screen_back_to_terminal(gui_pixels,
+        self._require_screen_back_to_terminal(gui_shot,
                                                "after the isolation lease")
 
     # -- the crash recovery --------------------------------------------
@@ -3074,8 +3110,8 @@ class GuiInputScenarios:
         """One way to die: ctrl_q, sigkill or fatal."""
         scenario = "fatal" if kind == "fatal" else "crash"
         self._new_probe_run(scenario)
-        gui_pixels = self._screen_pixels(f"crash_{kind}_held")
-        if gui_pixels is None:
+        gui_shot = self._screen_surface(f"crash_{kind}_held")
+        if gui_shot is None:
             # The "before" screenshot is the reference of the recovery
             # check: without it the check cannot be made at all.
             raise GuiInputScenarioError(
@@ -3169,7 +3205,7 @@ class GuiInputScenarios:
         expected = self._ps2_canary(f"after the {kind} crash")
         self.notes.append(f"{kind}: wait status={status}, canary {expected}")
 
-        self._require_screen_back_to_terminal(gui_pixels,
+        self._require_screen_back_to_terminal(gui_shot,
                                                f"after the {kind} crash")
 
         if hold_mouse:
@@ -3309,7 +3345,7 @@ class GuiInputScenarios:
 
         # The second gfx hold client must acquire and screenshot.
         hold_pid = self._start_gfx_hold()
-        hold_shot = self._screen_pixels("owner_second_hold")
+        hold_shot = self._screen_surface("owner_second_hold")
         if hold_shot is None:
             raise GuiInputScenarioError(
                 "the second gfx hold client produced no screenshot"

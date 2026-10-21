@@ -509,7 +509,7 @@ class GuiCaseRunner:
             # faster than it drains them), and the host fake does not
             # model the drop, so it runs unpaced.
             pace=timing.pace,
-            screen_probe=self._screen_pixels,
+            screen_probe=self._screen_surface,
         )
         method = {
             "input_interaction": "run_interaction",
@@ -525,18 +525,20 @@ class GuiCaseRunner:
                          f"({outcome.get('reason', '')})")
         return ok, reasons, outcomes
 
-    def _screen_pixels(self, label: str) -> Optional[bytes]:
-        """The current screen as raw pixels.
+    def _screen_surface(self, label: str) -> Optional[Surface]:
+        """The current screen as a surface.
 
         The Task 12 scenarios use it as the recovery evidence: the
         terminal's screen (black) and the GUI's screen (the LVGL theme)
         differ in every background pixel, so the comparison is
-        unambiguous.
+        unambiguous.  The SURFACE is returned (not only its pixels), so
+        the runner can ask the GUI-1 helpers -- the fault tool's pure
+        colour -- about it.
         """
         shot = self._screendump(label, None)
         if shot is None:
             return None
-        return shot.pixels
+        return shot
 
     def _run_input_interaction(
         self,
