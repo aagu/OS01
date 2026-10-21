@@ -1257,9 +1257,14 @@ test-static: test-runtime
 
 # ── test-gui-incremental: the GUI library's incremental contract ──
 #
-# The AUDIT never spawns make: this recipe owns every build step and the
-# audit only records and compares snapshots (--incremental-snapshot /
-# --incremental-compare).  The four phases mirror the four assertions:
+# The INCREMENTAL modes of the audit never spawn make: this recipe owns
+# every build step and the audit only records and compares snapshots
+# (--incremental-snapshot / --incremental-compare).  The audit's --sysroot
+# mode does spawn make exactly once, read-only, to read the profile's
+# build variables (make -f …/user_build_probe.mk --no-print-directory
+# gui-audit-profile-vars).
+#
+# The four phases mirror the four assertions:
 #
 #   noop    a repeated build with no source change must not recompile
 #   touch   touching gui_input.h must rebuild the dependents and relink
@@ -1282,7 +1287,7 @@ test-gui-incremental:
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
 	@echo "  [test-gui-incremental] phase 2/4: touching gui_input.h must rebuild the dependents"
 	@stat -c %y libgui/include/gui/gui_input.h > $(BUILD_DIR)/incr-header-time
-	@$(MAKE) --no-print-directory -C libgui OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" print-compile > $(BUILD_DIR)/incr-libgui-compile.txt
+	@$(call os01_submake,libgui,--no-print-directory print-compile) > $(BUILD_DIR)/incr-libgui-compile.txt
 	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
 	@touch libgui/include/gui/gui_input.h
 	$(call os01_submake,libgui,all)

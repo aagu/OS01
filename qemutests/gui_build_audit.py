@@ -1276,12 +1276,32 @@ def _dependent_objects(obj_root: Path, header: Path) -> list[Path]:
 
 
 def _object_for_source(obj_root: Path, src: Path) -> Path | None:
-    """The build object of a libgui production source."""
+    """The build object of a libgui production source.
+
+    The build's own layout is preferred (``obj/platform/<stem>.o``).  The
+    fallback never matches on the stem alone: it looks the source up in
+    the dependency files, so an object that merely shares the stem with
+    another source can never be picked up.
+    """
     preferred = obj_root / "platform" / f"{src.stem}.o"
     if preferred.is_file():
         return preferred
-    for candidate in sorted(obj_root.rglob(f"{src.stem}.o")):
-        return candidate
+    try:
+        wanted = src.resolve()
+    except OSError:
+        wanted = src
+    for dep_file in sorted(obj_root.rglob(f"{src.stem}.d")):
+        try:
+            text = dep_file.read_text(errors="replace").replace("\\\n", " ")
+        except OSError:
+            continue
+        target, _, deps = text.partition(":")
+        for dep in deps.split():
+            try:
+                if Path(dep).resolve() == wanted:
+                    return Path(target.strip())
+            except OSError:
+                continue
     return None
 
 
@@ -1534,8 +1554,11 @@ def incremental_compare(
         #                  the exact header.  This is what make uses.
         #
         # A rebuild is required only for the objects BOTH views agree on.
-        # If the .d view misses an object the compiler records, the
-        # dependency tracking is broken and the error is fatal.
+        # The two views must also AGREE: a dependency file that misses an
+        # object the compiler records (under-reporting) and one that
+        # records an object the compiler does not (over-reporting) are
+        # both dependency-tracking defects.  They are reported as two
+        # distinct classes so a reader can tell them apart.
         dotd_view = set(_dependent_objects(paths["obj_root"], header))
         with tempfile.TemporaryDirectory(prefix="gui-compiler-deps-") as td:
             compiler_view, cerr = _compiler_dependency_view(
@@ -1547,14 +1570,19 @@ def incremental_compare(
                 f"incremental: no libgui source depends on {header} — the audit "
                 "cannot establish the rebuild contract"
             )
-        missing_tracking = sorted(
-            obj.name for obj in (compiler_view - dotd_view)
-        )
-        if missing_tracking:
+        under_reported = sorted(obj.name for obj in (compiler_view - dotd_view))
+        if under_reported:
             errors.append(
-                f"incremental: the dependency tracking is broken — the compiler "
-                f"records {missing_tracking} as depending on {header.name} but "
-                "the build dependency files do not"
+                f"incremental: the dependency tracking UNDER-reports — the compiler "
+                f"records {under_reported} as depending on {header.name} but the "
+                "build dependency files do not"
+            )
+        over_reported = sorted(obj.name for obj in (dotd_view - compiler_view))
+        if over_reported:
+            errors.append(
+                f"incremental: the dependency tracking OVER-reports — the build "
+                f"dependency files record {over_reported} as depending on "
+                f"{header.name} but the compiler does not"
             )
         objects_before = data.get("objects", {})
         for obj in sorted(compiler_view & dotd_view):
@@ -1736,12 +1764,19 @@ def audit_incremental_state(
             "tracking is broken"
         )
     if compile_cmd:
-        missing_tracking = sorted(obj.name for obj in (compiler_view - deps))
-        if missing_tracking:
+        under_reported = sorted(obj.name for obj in (compiler_view - deps))
+        if under_reported:
             errors.append(
-                f"incremental: the dependency tracking is broken — the compiler "
-                f"records {missing_tracking} as depending on {header.name} but "
-                "the build dependency files do not"
+                f"incremental: the dependency tracking UNDER-reports — the compiler "
+                f"records {under_reported} as depending on {header.name} but the "
+                "build dependency files do not"
+            )
+        over_reported = sorted(obj.name for obj in (deps - compiler_view))
+        if over_reported:
+            errors.append(
+                f"incremental: the dependency tracking OVER-reports — the build "
+                f"dependency files record {over_reported} as depending on "
+                f"{header.name} but the compiler does not"
             )
     print(
         f"gui incremental state: {len(compiler_view) or len(deps)} libgui object(s) "
@@ -1802,11 +1837,13 @@ def _read_compile_command(explicit: str | None, build_dir: Path) -> str:
     if not candidate.is_file():
         return ""
     text = candidate.read_text(errors="replace").strip()
-    # The file holds one command line; take the first non-empty one.
+    # The file holds one command line; take the first non-empty one and
+    # skip the make driver's own chatter ("make: Entering directory ...").
     for line in text.splitlines():
         line = line.strip()
-        if line:
-            return line
+        if not line or line.startswith("make:") or line.startswith("make["):
+            continue
+        return line
     return ""
 
 
