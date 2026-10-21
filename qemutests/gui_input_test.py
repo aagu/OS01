@@ -821,6 +821,40 @@ class GuiInputProtocolTests(unittest.TestCase):
         )
         parser.finish()
 
+    def test_after_a_reset_feed_returns_only_the_new_run(self):
+        """A reset must forget the buffer's identity, not just its records.
+
+        ``reset()`` clears the remembered buffer prefix.  If it did not,
+        the parser would keep comparing the *new* buffer against the
+        *old* run's prefix, would mistake every later ``feed()`` for a
+        replaced buffer, would re-parse the whole buffer and would hand
+        back **every** record again -- the union of what was already
+        parsed instead of only the new run's records.
+        """
+        parser = self._parser()
+        run1 = self._ready(seq=1) + "\n" + self._state(seq=2) + "\n" + self._exit(seq=3) + "\n"
+        self.assertEqual(len(parser.feed(run1)), 3)
+
+        parser.reset()
+
+        # A different buffer: it starts with an ERROR record, so its
+        # first 64 characters differ from the first run's.
+        run2 = (
+            f"{PROTOCOL_PREFIX} nonce={self.NONCE} seq=1 phase=ERROR errno=5 detail=io\n"
+            + self._ready(seq=2) + "\n"
+            + self._state(seq=3) + "\n"
+            + self._exit(seq=4) + "\n"
+        )
+        returned = parser.feed(run2)
+        self.assertEqual(
+            [r.phase for r in returned],
+            [PHASE_ERROR, PHASE_READY, PHASE_STATE, PHASE_EXIT],
+        )
+        # The same buffer again carries nothing new: the parser must not
+        # re-parse it and must not hand back the old run's records again.
+        self.assertEqual(parser.feed(run2), [])
+        self.assertEqual(len(parser.records), 4)
+
     def test_a_replaced_buffer_starts_a_new_run(self):
         """A replaced output buffer is a new run: the state is reset.
 
@@ -921,6 +955,52 @@ class GuiInputProtocolTests(unittest.TestCase):
             "sigint_seen": "0",
         }
         with self.assertRaises(ProtocolError):
+            parser.feed_line(self._line(fields))
+
+    def test_state_without_textarea2_fails(self):
+        """REQUIRED_FIELDS[STATE] must pin the second textarea payload.
+
+        The second textarea is a hex byte string like the first one, so
+        an empty payload is legal -- but a *missing* field is not.
+        """
+        parser = self._parser()
+        parser.feed_line(self._ready())
+        fields = {
+            "nonce": self.NONCE,
+            "seq": "2",
+            "phase": PHASE_STATE,
+            "click_count": "00",
+            "slider": "00",
+            "scroll": "00",
+            "focus": "01",
+            "textarea": "",
+            "physical_key": "0",
+            "modifiers": "0",
+            "action": "-1",
+            "sigint_seen": "0",
+        }
+        with self.assertRaisesRegex(ProtocolError, "missing field 'textarea2'"):
+            parser.feed_line(self._line(fields))
+
+    def test_state_without_click_count_fails(self):
+        """REQUIRED_FIELDS[STATE] must pin the click counter payload."""
+        parser = self._parser()
+        parser.feed_line(self._ready())
+        fields = {
+            "nonce": self.NONCE,
+            "seq": "2",
+            "phase": PHASE_STATE,
+            "slider": "00",
+            "scroll": "00",
+            "focus": "01",
+            "textarea": "",
+            "textarea2": "",
+            "physical_key": "0",
+            "modifiers": "0",
+            "action": "-1",
+            "sigint_seen": "0",
+        }
+        with self.assertRaisesRegex(ProtocolError, "missing field 'click_count'"):
             parser.feed_line(self._line(fields))
 
 

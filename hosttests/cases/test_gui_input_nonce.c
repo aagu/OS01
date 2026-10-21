@@ -14,7 +14,9 @@
  *     whitespace, an over-long string — is rejected;
  *   - the control path is exactly /tmp/gui-input-<hex>.ctl and can only
  *     ever live in /tmp;
- *   - a rejected nonce never produces a path (the output stays empty).
+ *   - a rejected nonce never produces a path (the output stays empty);
+ *   - a NULL or a zero-length output buffer is rejected, and nothing is
+ *     written to it.
  */
 #include <test_framework.h>
 #include <stdbool.h>
@@ -136,6 +138,26 @@ static void test_a_too_small_buffer_is_rejected(void)
     assert_str_eq("", path);
 }
 
+static void test_a_null_output_buffer_is_rejected(void)
+{
+    /* The output buffer is mandatory.  Without the guard the builder
+     * would dereference NULL before it could reject anything. */
+    assert_eq(-1, gui_input_nonce_ctl_path(NULL, 128u, "a1b2c3d4"));
+}
+
+static void test_a_zero_length_output_buffer_is_rejected(void)
+{
+    char path[128];
+
+    memset(path, 'X', sizeof(path));
+    assert_eq(-1, gui_input_nonce_ctl_path(path, 0u, "a1b2c3d4"));
+    /* Nothing was written: a zero-length buffer is rejected before the
+     * builder touches the output. */
+    assert_eq('X', path[0]);
+    assert_eq('X', path[1]);
+    assert_eq('X', path[sizeof(path) - 1u]);
+}
+
 static void test_a_path_escape_cannot_be_built(void)
 {
     char path[128];
@@ -159,6 +181,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_the_control_path_is_exactly_the_fixed_shape),
     TEST_ENTRY(test_a_rejected_nonce_never_builds_a_path),
     TEST_ENTRY(test_a_too_small_buffer_is_rejected),
+    TEST_ENTRY(test_a_null_output_buffer_is_rejected),
+    TEST_ENTRY(test_a_zero_length_output_buffer_is_rejected),
     TEST_ENTRY(test_a_path_escape_cannot_be_built),
 TEST_LIST_END
 
