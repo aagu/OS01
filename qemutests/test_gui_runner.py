@@ -41,6 +41,69 @@ except ImportError:  # pragma: no cover - the repo root is on sys.path
 FAKE_CHARS = {"a": "a", "b": "b", "c": "c", "q": "q", "z": "z", "1": "1"}
 FAKE_SHIFTED = {"a": "A", "b": "B", "c": "C", "q": "Q", "z": "Z", "1": "!"}
 
+# Task 12: the WHOLE US layout, so a string can be typed through the
+# PS/2 keyboard.  It mirrors the guest's own table
+# (kernel/driver/keyboard.c, scancode_tbl).
+FAKE_CHARS.update({
+    "spc": " ", "minus": "-", "equal": "=", "bracket_left": "[",
+    "bracket_right": "]", "backslash": "\\", "semicolon": ";",
+    "apostrophe": "'", "grave_accent": "`", "comma": ",", "dot": ".",
+    "slash": "/", "ret": "\n",
+    "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7": "7",
+    "8": "8", "9": "9", "0": "0",
+    "d": "d", "e": "e", "f": "f", "g": "g", "h": "h", "i": "i",
+    "j": "j", "k": "k", "l": "l", "m": "m", "n": "n", "o": "o",
+    "p": "p", "r": "r", "s": "s", "t": "t", "u": "u", "v": "v",
+    "w": "w", "x": "x", "y": "y",
+})
+FAKE_SHIFTED.update({
+    "spc": " ", "minus": "_", "equal": "+", "bracket_left": "{",
+    "bracket_right": "}", "backslash": "|", "semicolon": ":",
+    "apostrophe": '"', "grave_accent": "~", "comma": "<", "dot": ">",
+    "slash": "?", "ret": "\n",
+    "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&",
+    "8": "*", "9": "(", "0": ")",
+    "d": "D", "e": "E", "f": "F", "g": "G", "h": "H", "i": "I",
+    "j": "J", "k": "K", "l": "L", "m": "M", "n": "N", "o": "O",
+    "p": "P", "r": "R", "s": "S", "t": "T", "u": "U", "v": "V",
+    "w": "W", "x": "X", "y": "Y",
+})
+
+def fake_printf(fmt: str, args: List[str]) -> str:
+    """The fake shell's ``printf``.
+
+    Only the conversions the runner uses are supported: ``%s`` (a string)
+    and ``%d`` (an integer).  The escape ``\\n`` becomes a newline: the
+    command is typed through the keyboard, so the backslash and the "n"
+    are two ordinary characters that the shell's printf turns back into a
+    newline.
+    """
+    out: List[str] = []
+    index = 0
+    position = 0
+    while position < len(fmt):
+        char = fmt[position]
+        if char == "\\" and position + 1 < len(fmt) and fmt[position + 1] == "n":
+            out.append("\n")
+            position += 2
+            continue
+        if char == "%" and position + 1 < len(fmt) and fmt[position + 1] in "sd":
+            spec = fmt[position + 1]
+            value = args[index] if index < len(args) else ""
+            index += 1
+            if spec == "d":
+                try:
+                    value = str(int(value))
+                except ValueError:
+                    value = "0"
+            out.append(value)
+            position += 2
+            continue
+        out.append(char)
+        position += 1
+    return "".join(out)
+
+
 # The deferred-newline mechanism's margin, in serial reads: the newline
 # is emitted this many reads AFTER the Enter UP edge was processed.
 #
@@ -181,11 +244,16 @@ class FakeProbe:
     GAP = 8
 
     def __init__(self, session: "FakeProcessSession", nonce: str,
-                 width: int = 1440, height: int = 900):
+                 width: int = 1440, height: int = 900,
+                 scenario: str = "interaction"):
         self.session = session
         self.nonce = nonce
         self.width = width
         self.height = height
+        # Task 12: which scenario the probe simulates.  The scenarios
+        # differ in what ends them: the exit shortcut, the real LVGL
+        # fatal, the queue overflow and the loss of the ownership.
+        self.scenario = scenario
         self.seq = 0
         self.pid = 4242
         self.click_count = 0
@@ -204,6 +272,17 @@ class FakeProbe:
         self.repeat_at: Dict[str, float] = {}
         self.repeat_char: Dict[str, str] = {}
         self.exited = False
+        # The status the shell's `wait` reports for this probe.
+        self.exit_status = 0
+        # The owner scenario: the view was released and the probe stopped
+        # stepping.
+        self.released = False
+        self.step_paused = False
+        # The overflow scenario: the number of key edges the ACTIVE queue
+        # can take before it overflows (255 usable bytes, two bytes per
+        # plain key press).
+        self.overflow_at = 256
+        self.key_edges = 0
         self.last_state = ""
         # The READY record always comes first.
         self.started = False
@@ -239,6 +318,39 @@ class FakeProbe:
         self.fault_control_char = False
         # The newline lands in a later record than the Enter edge.
         self.fault_deferred_newline = False
+        # Task 12: the new fault switches.
+        # The second gfx client acquires the view although the owner
+        # probe holds it.
+        self.fault_owner_no_ebusy = False
+        # The owner probe never answers the RELEASE_VIEW command.
+        self.fault_owner_no_release = False
+        # The owner probe's RELEASED answer carries a wrong ctl_seq.
+        self.fault_owner_wrong_ctl_seq = False
+        # The owner probe never detects the loss of the ownership (it
+        # exits cleanly with the status 0).
+        self.fault_owner_no_loss = False
+        # The queue never overflows: the ACTIVE queue swallows every key.
+        self.fault_overflow_never = False
+        # The upstream lost the key bursts: the guest never sees them.
+        self.fault_overflow_dropped = False
+        # The overflow is reported with the WRONG errno.
+        self.fault_overflow_wrong_errno = False
+        # The lease is NOT held when the process is killed: the keyboard
+        # still reaches the shell.
+        self.fault_no_lease = False
+        # The process that dies with the fatal reports the status 0.
+        self.fault_fatal_zero = False
+        # The screen recovers, but the PS/2 keyboard never reaches the
+        # shell again.
+        self.fault_no_ps2_recovery = False
+        # The canary's output line never appears: only the command echo.
+        self.fault_canary_echo_only = False
+        # A held key is never released.
+        self.fault_key_not_released = False
+        # The second gfx client never reports the acquired marker.
+        self.fault_hold_no_acquired = False
+        # The old probe's close releases the NEW owner's view.
+        self.fault_owner_close_releases = False
         # The deferred newline: the Enter DOWN edge ARMS it and the
         # Enter UP edge SCHEDULES it (see _widget_effect).  The schedule
         # is expressed in serial reads and anchored to the UP edge, so
@@ -342,7 +454,28 @@ class FakeProbe:
             self.last_state = fields
             return
         pid = self.pid + 1 if self.fault_pid_change else self.pid
-        self.emit("ACK", f"ctl_seq={ctl_seq} pid={pid} command={command} raw_pump=1")
+        # The overflow probe never dispatches: its raw pump is off.
+        raw_pump = 0 if self.scenario == "overflow" else 1
+        if self.scenario == "owner" and command == "RELEASE_VIEW":
+            if self.fault_owner_no_release:
+                # The probe never answers: the control barrier expires.
+                return
+            if self.fault_owner_wrong_ctl_seq:
+                ctl_seq = ctl_seq + 1000
+            # The owner releases the view and stops stepping.
+            self.released = True
+            self.step_paused = True
+            self.emit("RELEASED",
+                      f"ctl_seq={ctl_seq} pid={pid} command={command} raw_pump=0")
+            return
+        if self.scenario == "owner" and command == "RESUME_STEP":
+            self.emit("ACK",
+                      f"ctl_seq={ctl_seq} pid={pid} command={command} raw_pump=1")
+            # The step resumes and the ownership loss is detected.
+            self.exit(result="PASS", exit_code=1, detail="owner_loss_detected")
+            return
+        self.emit("ACK",
+                  f"ctl_seq={ctl_seq} pid={pid} command={command} raw_pump={raw_pump}")
         if command == "SNAPSHOT":
             # The guest answers a SNAPSHOT with an unconditional STATE.
             fields = self.state_fields()
@@ -352,6 +485,8 @@ class FakeProbe:
     def exit(self, result: str = "PASS", exit_code: int = 0,
              detail: str = "interaction_complete") -> None:
         self.exited = True
+        self.exit_status = exit_code
+        self.session._probe_died(self)
         self.emit(
             "EXIT",
             f"result={result} exit_code={exit_code} detail={detail} "
@@ -457,11 +592,45 @@ class FakeProbe:
                 self.repeat_char[qcode] = char
                 self.repeat_at[qcode] = time.monotonic() + self.session.repeat_first
         if down and qcode == "q" and (self.modifiers & (MOD_LCTRL | MOD_RCTRL)):
-            # The guest reports the state of the exit shortcut and then
-            # the EXIT record.
+            if self.scenario in ("interaction", "isolation", "crash"):
+                # The guest reports the state of the exit shortcut and
+                # then the EXIT record.
+                self.emit_state_if_changed()
+                detail = {
+                    "interaction": "interaction_complete",
+                    "isolation": "isolation_complete",
+                    "crash": "crash_complete",
+                }[self.scenario]
+                self.exit(detail=detail)
+                return
+            # The other scenarios do not honour the exit shortcut.
             self.emit_state_if_changed()
-            self.exit()
             return
+        if down and qcode == "f12" and self.scenario == "fatal":
+            # The real LVGL assertion: the trigger record comes first (it
+            # is distinguishable from the ordinary STATE records by its
+            # "fatal_trigger=1" field), then the process dies with the
+            # status 1 and emits NO exit record.
+            self.emit("STATE", self.state_fields() + " fatal_trigger=1")
+            self.exited = True
+            self.exit_status = 0 if self.fault_fatal_zero else 1
+            self.session._probe_died(self)
+            return
+        if self.scenario == "overflow":
+            # The overflow probe never dispatches: the ACTIVE queue only
+            # fills up.  When it is full, the guest reports the latched
+            # errno and dies.
+            self.key_edges += 1
+            if not self.fault_overflow_dropped and \
+                    not self.fault_overflow_never and \
+                    self.key_edges >= self.overflow_at:
+                errno = 28 if self.fault_overflow_wrong_errno else 75
+                self.exited = True
+                self.exit_status = 1
+                self.session._probe_died(self)
+                self.emit("ERROR",
+                          f"errno={errno} detail=input_dispatch")
+                return
         self.emit_state_if_changed()
 
     def _codepoint(self, qcode: str) -> str:
@@ -656,6 +825,22 @@ class FakeProcessSession:
         probe_fault_stale_modifier: bool = False,
         probe_fault_control_char: bool = False,
         probe_fault_deferred_newline: bool = False,
+        # Task 12: the new negative fixtures' fault switches.
+        probe_fault_owner_no_ebusy: bool = False,
+        probe_fault_owner_no_release: bool = False,
+        probe_fault_owner_wrong_ctl_seq: bool = False,
+        probe_fault_owner_no_loss: bool = False,
+        probe_fault_overflow_never: bool = False,
+        probe_fault_overflow_dropped: bool = False,
+        probe_fault_overflow_wrong_errno: bool = False,
+        probe_fault_no_lease: bool = False,
+        probe_fault_fatal_zero: bool = False,
+        probe_fault_no_ps2_recovery: bool = False,
+        probe_fault_canary_echo_only: bool = False,
+        probe_fault_key_not_released: bool = False,
+        probe_fault_hold_no_acquired: bool = False,
+        probe_fault_owner_close_releases: bool = False,
+        probe_fault_owner_still_holds: bool = False,
         hang_after_probe: bool = False,
     ):
         self._argv = list(argv)
@@ -714,6 +899,37 @@ class FakeProcessSession:
         self.probe_fault_stale_modifier = probe_fault_stale_modifier
         self.probe_fault_control_char = probe_fault_control_char
         self.probe_fault_deferred_newline = probe_fault_deferred_newline
+        # Task 12: the new fault switches.
+        self.probe_fault_owner_no_ebusy = probe_fault_owner_no_ebusy
+        self.probe_fault_owner_no_release = probe_fault_owner_no_release
+        self.probe_fault_owner_wrong_ctl_seq = probe_fault_owner_wrong_ctl_seq
+        self.probe_fault_owner_no_loss = probe_fault_owner_no_loss
+        self.probe_fault_overflow_never = probe_fault_overflow_never
+        self.probe_fault_overflow_dropped = probe_fault_overflow_dropped
+        self.probe_fault_overflow_wrong_errno = probe_fault_overflow_wrong_errno
+        self.probe_fault_no_lease = probe_fault_no_lease
+        self.probe_fault_fatal_zero = probe_fault_fatal_zero
+        self.probe_fault_no_ps2_recovery = probe_fault_no_ps2_recovery
+        self.probe_fault_canary_echo_only = probe_fault_canary_echo_only
+        self.probe_fault_key_not_released = probe_fault_key_not_released
+        self.probe_fault_hold_no_acquired = probe_fault_hold_no_acquired
+        self.probe_fault_owner_close_releases = probe_fault_owner_close_releases
+        self.probe_fault_owner_still_holds = probe_fault_owner_still_holds
+        # The console TTY's own state (the PS/2 keyboard path).
+        self._tty_line = ""
+        self._tty_mods = 0
+        # The status the shell's `wait` reports for the background probe.
+        self.probe_exit_status = 0
+        # The "a held key is never released" fault is armed by a KILL: a
+        # key that was held when the process died must stay held.  It is
+        # not armed before the kill, so it cannot disturb the other
+        # scenarios.
+        self._key_stuck = False
+        # The modifier bits that were held at the kill: only those stay
+        # held, a modifier that is pressed afterwards behaves normally.
+        self._stuck_mods = 0
+        # The files that exist in the guest's filesystem.
+        self._files: set = set()
         # The session's hard deadline: the real ProcessSession kills the
         # child when the budget is spent, and the fake emulates that.
         self._deadline = time.monotonic() + float(timeout_s)
@@ -837,9 +1053,9 @@ class FakeProcessSession:
                 self._pending_wait_nonce = nonce
 
             elif "/bin/test_lvgl" in body and "--wait" not in body and "--smoke" not in body and "smoke" not in body:
-                if self.active_hold_pid is not None:
+                if self.active_hold_pid is not None or self._owner_probe_holds():
                     # Busy owner case
-                    if self.busy_no_ebusy:
+                    if self.busy_no_ebusy or self.probe_fault_owner_no_ebusy:
                         self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
                     else:
                         self._text += (
@@ -861,6 +1077,21 @@ class FakeProcessSession:
 
             elif "/bin/test_gui_fault --hold" in body:
                 if self.hold_fail_acquire:
+                    self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 1\n__EXIT_{nonce}_1__\n# "
+                elif self.probe_fault_hold_no_acquired and \
+                        self._owner_probe_holds():
+                    # Task 12: the second gfx client never reports the
+                    # acquired marker.
+                    self._text += f"{body}\n"
+                    self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
+                elif self.probe_fault_owner_still_holds and \
+                        self._owner_probe_holds():
+                    # Task 12: the old owner still holds the view: the
+                    # second client is refused with EBUSY.
+                    self._text += f"{body}\n"
+                    self._text += (
+                        "[gui-fault] display busy (another GUI active); exiting\n"
+                    )
                     self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 1\n__EXIT_{nonce}_1__\n# "
                 else:
                     self.active_hold_pid = self.next_pid
@@ -889,7 +1120,7 @@ class FakeProcessSession:
                 m_probe = re.search(r"--nonce ([0-9a-f]+) --scenario (\w+)", body)
                 self._text += f"{body}\n"
                 if m_probe:
-                    self._start_probe(m_probe.group(1))
+                    self._start_probe(m_probe.group(1), m_probe.group(2))
                 self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
 
             elif "gui-input-" in body and ".ctl" in body:
@@ -905,6 +1136,51 @@ class FakeProcessSession:
                 self._text += f"{body}\n{self.shell_pid}\n"
                 self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
 
+            elif body.strip().startswith("echo "):
+                # Task 12: an echo, with or without a redirect.  The
+                # redirect creates the file: that is how the leak probe
+                # would leave its mark.
+                args = body.strip()[5:].split()
+                redirect = None
+                if ">" in args:
+                    index = args.index(">")
+                    redirect = args[index + 1] if index + 1 < len(args) else None
+                    args = args[:index]
+                self._text += f"{body}\n"
+                if redirect:
+                    self._files.add(redirect)
+                else:
+                    self._text += " ".join(args) + "\n"
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
+
+            elif body.strip().startswith("test "):
+                # Task 12: the file and the process checks.
+                rc = self._run_test(body.strip())
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} {rc}\n__EXIT_{nonce}_{rc}__\n# "
+
+            elif body.strip().startswith("rm "):
+                # Task 12: the scenario removes its own temp file.
+                for path in body.strip().split()[1:]:
+                    if path.startswith("-"):
+                        continue
+                    self._files.discard(path)
+                self._text += f"{body}\n"
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
+
+            elif body.strip().startswith("wait "):
+                # Task 12: the background job's own exit status.  The
+                # real shell BLOCKS until the job exits, so the pending
+                # input events are processed first: the F12 that killed
+                # the probe must be seen before the status is read.
+                self._advance_probe()
+                m_wait = re.search(r"wait (\d+)", body)
+                status = 0
+                if m_wait:
+                    pid = int(m_wait.group(1))
+                    if self.probe is not None and self.probe.pid == pid:
+                        status = self.probe_exit_status
+                self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} {status}\n__EXIT_{nonce}_{status}__\n# "
+
             elif "kill -9" in body or "kill" in body:
                 m_kill = re.search(r"kill(?: -9)? (\d+)", body)
                 if m_kill:
@@ -914,6 +1190,20 @@ class FakeProcessSession:
                         if self.qmp:
                             self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
                         self._text += f"task {kpid} killed by signal 9\n"
+                    if self.probe is not None and self.probe.pid == kpid:
+                        # Task 12: the background probe is killed.  It
+                        # dies with the signal's status and it never
+                        # answers again.
+                        self.probe.exited = True
+                        self.probe.exit_status = 137
+                        self._probe_died(self.probe)
+                        # A key that was held when the process died is
+                        # still held: the fault that models it starts
+                        # here.
+                        self._key_stuck = True
+                        self._stuck_mods = (self._tty_mods
+                                           if self.probe_fault_key_not_released
+                                           else 0)
                 self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
 
             else:
@@ -942,8 +1232,8 @@ class FakeProcessSession:
 
     # ── Task 11: the probe simulation ────────────────────────────
 
-    def _start_probe(self, nonce: str) -> None:
-        self.probe = FakeProbe(self, nonce)
+    def _start_probe(self, nonce: str, scenario: str = "interaction") -> None:
+        self.probe = FakeProbe(self, nonce, scenario=scenario)
         self.probe.fault_stale_nonce = self.probe_fault_stale_nonce
         self.probe.fault_drop_key_up = self.probe_fault_drop_key_up
         self.probe.fault_caps_reflip = self.probe_fault_caps_reflip
@@ -964,12 +1254,71 @@ class FakeProcessSession:
         self.probe.fault_stale_modifier = self.probe_fault_stale_modifier
         self.probe.fault_control_char = self.probe_fault_control_char
         self.probe.fault_deferred_newline = self.probe_fault_deferred_newline
+        # Task 12: the new fault switches.
+        self.probe.fault_owner_no_ebusy = self.probe_fault_owner_no_ebusy
+        self.probe.fault_owner_no_release = self.probe_fault_owner_no_release
+        self.probe.fault_owner_wrong_ctl_seq = self.probe_fault_owner_wrong_ctl_seq
+        self.probe.fault_owner_no_loss = self.probe_fault_owner_no_loss
+        self.probe.fault_overflow_never = self.probe_fault_overflow_never
+        self.probe.fault_overflow_dropped = self.probe_fault_overflow_dropped
+        self.probe.fault_overflow_wrong_errno = self.probe_fault_overflow_wrong_errno
+        self.probe.fault_no_lease = self.probe_fault_no_lease
+        self.probe.fault_fatal_zero = self.probe_fault_fatal_zero
+        self.probe.fault_key_not_released = self.probe_fault_key_not_released
         # Only the events injected after the probe started belong to this
         # run: the fake QMP object is shared between the SMP runs.
         self._probe_events_consumed = (
             len(self.qmp.input_events_sent) if self.qmp is not None else 0
         )
+        if self.qmp is not None:
+            # The probe takes the screen: the LVGL theme's surface.
+            self.qmp.current_surface = FakeSurface(
+                1024, 768, SURFACE_LVGL_GUI[1])
         self.probe.start()
+
+    def _probe_died(self, probe: "FakeProbe") -> None:
+        """The probe died: the screen goes back to the terminal."""
+        self.probe_exit_status = probe.exit_status
+        if self.probe_fault_owner_close_releases and \
+                self.active_hold_pid is not None:
+            # The old probe's close releases the NEW owner's view: the
+            # second hold dies with it.
+            self.active_hold_pid = None
+            if self.qmp is not None:
+                self.qmp.current_surface = FakeSurface(
+                    1024, 768, b"\x00\x00\x00" * (1024 * 768))
+            return
+        if self.active_hold_pid is not None:
+            # The old probe's close must NOT release the new owner's view:
+            # the screen still belongs to the new owner.
+            return
+        if self.qmp is not None:
+            self.qmp.current_surface = FakeSurface(
+                1024, 768, b"\x00\x00\x00" * (1024 * 768))
+
+    def _owner_probe_holds(self) -> bool:
+        """Does the background owner probe hold the display?"""
+        return (self.probe is not None
+                and self.probe.scenario == "owner")
+
+    def _run_test(self, body: str) -> int:
+        """The `test` builtin: the files and the processes."""
+        parts = body.split()
+        negate = len(parts) > 1 and parts[1] == "!"
+        args = parts[2:] if negate else parts[1:]
+        result = False
+        if len(args) >= 2 and args[0] == "-e":
+            result = args[1] in self._files
+        elif len(args) >= 2 and args[0] == "-d":
+            match = re.search(r"/proc/(\d+)", args[1])
+            if match:
+                pid = int(match.group(1))
+                result = pid == self.active_hold_pid
+                if not result and self.probe is not None:
+                    result = (pid == self.probe.pid and not self.probe.exited)
+        if negate:
+            result = not result
+        return 0 if result else 1
 
     def _status_block(self, pid: int) -> str:
         """A /proc/<pid>/status block."""
@@ -993,7 +1342,7 @@ class FakeProcessSession:
 
     def _advance_probe(self) -> None:
         """Consume the injected QMP input events and advance the probe."""
-        if self.probe is None or self.probe.exited:
+        if self.probe is None:
             return
         if self.qmp is None:
             return
@@ -1003,12 +1352,151 @@ class FakeProcessSession:
         events = self.qmp.input_events_sent[self._probe_events_consumed:]
         self._probe_events_consumed = len(self.qmp.input_events_sent)
         for event in events:
+            if event.get("type") == "key":
+                # The PHYSICAL modifier state belongs to the keyboard, not
+                # to the lease: a key that is held across the end of a
+                # lease is still held afterwards.  The session tracks it,
+                # so the console TTY sees the same modifier state the
+                # guest's keyboard has.
+                self._track_modifier(event)
+            if self.probe.exited or self._no_lease():
+                # The lease is gone (or was never taken): the keyboard
+                # belongs to the console TTY again.
+                self._tty_event(event)
+                continue
             self.probe.handle(event)
             # The guest emits a STATE per state change, so every key edge
             # produces its own record (the runner waits for it).
             self.probe.emit_state_if_changed()
-        self.probe.maybe_repeat()
-        self.probe.emit_state_if_changed()
+        if not self.probe.exited:
+            self.probe.maybe_repeat()
+            self.probe.emit_state_if_changed()
+
+    def _no_lease(self) -> bool:
+        """Does the guest NOT hold the input?
+
+        The fault is scoped to the CRASH probes: they exist to be killed
+        while they hold the lease, so it is there that a guest that does
+        not hold its input can be told apart from a guest that does.
+        """
+        if not self.probe_fault_no_lease:
+            return False
+        return self.probe is not None and self.probe.scenario in ("crash",
+                                                                  "fatal")
+
+    def _track_modifier(self, event: dict) -> None:
+        """The physical modifier state of the keyboard."""
+        data = event.get("data") or {}
+        qcode = (data.get("key") or {}).get("data")
+        if qcode not in MODIFIER_BITS:
+            return
+        bit = MODIFIER_BITS[qcode]
+        if data.get("down"):
+            self._tty_mods |= bit
+        elif bit & self._stuck_mods:
+            # The modifier that was HELD when the process died is never
+            # released: it stays held, and the letters that follow come
+            # out upper case.
+            self._tty_mods |= bit
+        else:
+            self._tty_mods &= ~bit
+
+    # ── the console TTY (the PS/2 keyboard path) ────────────────────
+    #
+    # The keyboard belongs to the console TTY when no lease holds it.
+    # The characters are echoed by the TTY, and the Enter key runs the
+    # line: the shell prints the output and a new prompt.
+
+    def _tty_event(self, event: dict) -> None:
+        """One input event on the NORMAL path."""
+        kind = event.get("type")
+        data = event.get("data") or {}
+        if kind != "key":
+            return
+        down = bool(data.get("down"))
+        qcode = (data.get("key") or {}).get("data")
+        if qcode is None:
+            return
+        if self.probe_fault_no_ps2_recovery:
+            # The keyboard never reaches the TTY again.
+            return
+        if qcode in MODIFIER_BITS:
+            # The modifier state is tracked by the session (it belongs to
+            # the keyboard, not to the lease).
+            return
+        if not down:
+            return
+        if qcode == "ret":
+            self._text += "\n"
+            self._run_tty_line(self._tty_line)
+            self._tty_line = ""
+            self._text += "# "
+            return
+        if self._tty_mods & (MOD_LCTRL | MOD_RCTRL):
+            if qcode != "c":
+                # Another Ctrl combination produces no character.
+                return
+            # The TTY's ISIG handling: the Ctrl-C clears the pending line
+            # and the shell prints a new prompt.
+            self._text += "^C\n# "
+            self._tty_line = ""
+            return
+        if self.probe_fault_no_ps2_recovery:
+            # The keyboard never reaches the TTY again.
+            return
+        ch = self._tty_char(qcode)
+        if not ch:
+            return
+        self._tty_line += ch
+        self._text += ch
+
+    def _tty_char(self, qcode: str) -> str:
+        base = FAKE_CHARS.get(qcode)
+        if base is None:
+            return ""
+        shift = bool(self._tty_mods & (MOD_LSHIFT | MOD_RSHIFT))
+        if base.isalpha():
+            return base.upper() if shift else base
+        return FAKE_SHIFTED.get(qcode, base) if shift else base
+
+    def _run_tty_line(self, line: str) -> None:
+        """Run one line that was typed through the PS/2 keyboard."""
+        parts = line.split()
+        if not parts:
+            return
+        cmd = parts[0]
+        if cmd == "echo":
+            args = parts[1:]
+            redirect = None
+            if ">" in args:
+                index = args.index(">")
+                redirect = args[index + 1] if index + 1 < len(args) else None
+                args = args[:index]
+            if redirect:
+                # The output goes into the file, not into the terminal:
+                # the file exists afterwards.
+                self._files.add(redirect)
+                return
+            self._text += " ".join(args) + "\n"
+            return
+        if cmd == "printf":
+            # The recovery canary: printf 'RECOVER_%s\n' <nonce>.
+            # The OUTPUT is the evidence, and it is a line of its own:
+            # the command's echo carries the format string and the nonce
+            # separately, so the output cannot be a substring of it.
+            match = re.match(r"^printf\s+'([^']*)'\s*(.*)$", line.strip())
+            if match is None:
+                return
+            fmt = match.group(1)
+            args = match.group(2).split()
+            if self.probe_fault_canary_echo_only and fmt.startswith("RECOVER_"):
+                # The command is echoed, but it never runs: there is no
+                # output line of its own.
+                return
+            self._text += fake_printf(fmt, args)
+            return
+        if cmd in ("wait", "test", "rm"):
+            return
 
     def observe(self, seconds: float) -> str:
         if self._panic_on_observe:
@@ -1696,12 +2184,52 @@ class GuiInputRunnerTests(unittest.TestCase):
         scenario registered without a cap) still satisfies every identity
         that only compares the sum with its own parts.  The ceiling is
         what catches that.
+
+        Task 12 registers four more scenarios, so the sum of the honest
+        caps is 755 s and the ceiling moves from 600 s to 900 s.  The
+        ceiling is still a NUMBER that the sum must fit under, and the
+        gap between the sum and the ceiling is what refuses an inflated
+        cap: a cap that is inflated by more than 145 s does not fit any
+        more.
         """
         git = self.git
         self.assertGreater(git.TOTAL_TIMEOUT_SECONDS_MAX, 0.0)
-        self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS_MAX, 600.0)
+        self.assertEqual(git.TOTAL_TIMEOUT_SECONDS_MAX, 900.0)
         self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS, git.TOTAL_TIMEOUT_SECONDS_MAX)
-        self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS, 600.0)
+        self.assertLessEqual(git.TOTAL_TIMEOUT_SECONDS, 900.0)
+        # The ceiling leaves room for the registered scenarios but still
+        # refuses an unbounded cap.
+        self.assertGreater(git.TOTAL_TIMEOUT_SECONDS_MAX - git.TOTAL_TIMEOUT_SECONDS,
+                           0.0)
+        self.assertLess(git.TOTAL_TIMEOUT_SECONDS_MAX - git.TOTAL_TIMEOUT_SECONDS,
+                        300.0)
+
+    def test_every_registered_input_scenario_has_a_cap(self):
+        """Every registered input scenario contributes its OWN cap.
+
+        The sum is finite only if every scenario has a cap: a scenario
+        registered without one would make the sum a lie (and the ceiling
+        meaningless).
+        """
+        git = self.git
+        for case in ("input_interaction", "input_isolation", "input_crash",
+                     "input_owner", "input_overflow"):
+            self.assertIn(case, git.INPUT_SCENARIO_CAPS)
+            self.assertGreater(git.INPUT_SCENARIO_CAPS[case], 0.0)
+        self.assertEqual(
+            git.TOTAL_TIMEOUT_SECONDS,
+            git.BOOT_CAP_SECONDS
+            + sum(git.GUI1_SCENARIO_CAPS)
+            + git.GUI1_CLEANUP_CAP_SECONDS
+            + sum(git.INPUT_SCENARIO_CAPS.values())
+            + git.INPUT_CLEANUP_CAP_SECONDS,
+        )
+        # The scenario's own deadline is its cap: the budget never grows
+        # on a failure.
+        self.assertEqual(
+            git.INPUT_SCENARIO_CAPS["input_crash"],
+            120.0,
+        )
 
     def test_the_total_budget_expires_in_a_bounded_fail(self):
         """A guest that stops answering must end in a bounded FAIL.
@@ -2100,6 +2628,97 @@ class GuiInputRunnerTests(unittest.TestCase):
             )
             self.assertEqual(["self", "qcode"], params,
                              f"{name} must take only the key code")
+
+    # ── Task 12: the ten negative contracts ──────────────────────────
+    #
+    # Each fixture injects ONE fault into the host simulation and
+    # asserts that the runner REJECTS it with the SPECIFIC diagnostic of
+    # the check that names it.  A fixture that passed (or that failed
+    # for another reason) would prove nothing.
+
+    def test_the_second_gfx_client_must_report_the_acquired_marker(self):
+        """A second gfx client that never says 'acquired' is a FAIL."""
+        factory, qmp = self._make({"probe_fault_hold_no_acquired": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "never reported the acquired marker")
+
+    def test_the_guest_must_hold_the_input_when_it_is_killed(self):
+        """A guest that does not hold the input at the kill is a FAIL.
+
+        The held key's DOWN edge must reach the GUI: if the lease was
+        not held, the key went to the shell instead and the guest never
+        saw it.
+        """
+        factory, qmp = self._make({"probe_fault_no_lease": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "does not hold the input")
+
+    def test_a_fatal_that_returns_zero_is_rejected(self):
+        """A fatal that reports a clean exit is a FAIL."""
+        factory, qmp = self._make({"probe_fault_fatal_zero": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "must not report a clean exit")
+
+    def test_a_ps2_canary_that_never_answers_is_rejected(self):
+        """A screen that recovered but a dead keyboard is a FAIL."""
+        factory, qmp = self._make({"probe_fault_no_ps2_recovery": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "produced no output line of its own")
+
+    def test_a_held_key_that_is_never_released_is_rejected(self):
+        """A modifier that stayed held changes the canary's case."""
+        factory, qmp = self._make({"probe_fault_key_not_released": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "changed the letter case")
+
+    def test_a_canary_that_only_echoes_is_rejected(self):
+        """The command echo is not the canary's output."""
+        factory, qmp = self._make({"probe_fault_canary_echo_only": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "only the command echo")
+
+    def test_an_overflow_that_is_not_an_eoverflow_is_rejected(self):
+        """The overflow must carry the latched EOVERFLOW."""
+        factory, qmp = self._make({"probe_fault_overflow_wrong_errno": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "expected EOVERFLOW")
+
+    def test_a_control_answer_with_a_wrong_ctl_seq_is_rejected(self):
+        """The control answer must carry the ctl_seq of its command."""
+        factory, qmp = self._make({"probe_fault_owner_wrong_ctl_seq": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "carries ctl_seq=")
+
+    def test_a_second_owner_started_before_the_release_is_rejected(self):
+        """The second owner must not be started while the first holds on.
+
+        The old owner answers RELEASED but keeps the view, so the second
+        gfx client is refused with EBUSY: the handover never happened.
+        """
+        factory, qmp = self._make({"probe_fault_owner_still_holds": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "refused (EBUSY)")
+
+    def test_lost_batches_without_an_overflow_are_rejected(self):
+        """A burst that the guest never saw is not an overflow.
+
+        The upstream lost the batches: the guest's queue never filled
+        up, so there is no EOVERFLOW to report.  A successful QMP return
+        and the number of bytes sent are NOT the enqueue count.
+        """
+        factory, qmp = self._make({"probe_fault_overflow_dropped": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "did not overflow")
 
     # ── the budget import failure (M-5) ────────────────────────────
 

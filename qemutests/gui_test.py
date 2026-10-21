@@ -461,17 +461,17 @@ class GuiCaseRunner:
         self.last_terminal_surface = shot
         return self._observe_check_panic(f"{label}_recovery", reasons)
 
-    def _run_input_interaction(
-        self,
+    def _run_input_scenario(
+        self, case_name: str
     ) -> Tuple[bool, List[str], List[dict]]:
-        """Run the Task 11 real input interaction matrix.
+        """Run one of the real input scenarios (Task 11 / Task 12).
 
         The scenario logic lives in its own helper (GuiInputScenarios) so
         that run_all does not keep growing; the helper consumes the
         existing session, qmp, run_dir and smp objects and returns the
         existing case outcome dict.
         """
-        from qemutests.gui_input_test import GuiInputScenarios
+        from qemutests.gui_input_test import GuiInputScenarios, GuiInputTiming
 
         # The QMP transcript: every input-send-event payload is written to
         # the scenario's run directory (one JSON object per line), so the
@@ -486,27 +486,63 @@ class GuiCaseRunner:
             try:
                 set_transcript(self.run_dir / "qmp-input-events.jsonl")
             except Exception as exc:
-                reason = (f"[input_interaction] the QMP transcript could not "
+                reason = (f"[{case_name}] the QMP transcript could not "
                           f"be enabled: {exc}")
                 self.log(f"  [gui smp={self.smp}] {reason}")
                 return False, [reason], [{
-                    "smp": self.smp, "case": "input_interaction",
+                    "smp": self.smp, "case": case_name,
                     "status": "FAIL", "reason": reason,
                 }]
+        # The timing knobs: the real values by default, the host fake's
+        # compressed ones when it supplies them.
+        timing = self.input_timing if self.input_timing is not None \
+            else GuiInputTiming()
         helper = GuiInputScenarios(
             session=self.session,
             qmp=self.qmp,
             run_dir=self.run_dir,
             smp=self.smp,
             log=self.log,
-            timing=self.input_timing,
+            timing=timing,
+            # The pacing comes from the timing: the real run paces every
+            # key edge (the guest's PS/2 path drops the keys that arrive
+            # faster than it drains them), and the host fake does not
+            # model the drop, so it runs unpaced.
+            pace=timing.pace,
+            screen_probe=self._screen_pixels,
         )
-        ok, reasons, outcomes = helper.run_interaction()
+        method = {
+            "input_interaction": "run_interaction",
+            "input_isolation": "run_isolation",
+            "input_crash": "run_crash",
+            "input_owner": "run_owner",
+            "input_overflow": "run_overflow",
+        }[case_name]
+        ok, reasons, outcomes = getattr(helper, method)()
         for outcome in outcomes:
             if outcome.get("status") == "PASS":
                 self.log(f"  [gui smp={self.smp}] {outcome['case']} PASS "
                          f"({outcome.get('reason', '')})")
         return ok, reasons, outcomes
+
+    def _screen_pixels(self, label: str) -> Optional[bytes]:
+        """The current screen as raw pixels.
+
+        The Task 12 scenarios use it as the recovery evidence: the
+        terminal's screen (black) and the GUI's screen (the LVGL theme)
+        differ in every background pixel, so the comparison is
+        unambiguous.
+        """
+        shot = self._screendump(label, None)
+        if shot is None:
+            return None
+        return shot.pixels
+
+    def _run_input_interaction(
+        self,
+    ) -> Tuple[bool, List[str], List[dict]]:
+        """Run the Task 11 real input interaction matrix."""
+        return self._run_input_scenario("input_interaction")
 
     def run_all(self) -> Tuple[bool, List[str], List[dict]]:
         reasons: List[str] = []
@@ -877,6 +913,57 @@ class GuiCaseRunner:
             case_name = "input_interaction"
             self.log(f"  [gui smp={self.smp}] starting {case_name}")
             input_ok, input_reasons, input_outcomes = self._run_input_interaction()
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 9: input_isolation (Task 12) ──
+            # The lease keeps the keyboard away from the console TTY: a
+            # shell command typed during the lease must never reach the
+            # shell, and the keyboard must come back afterwards.
+            case_name = "input_isolation"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 10: input_crash (Task 12) ──
+            # Ctrl-Q, a background SIGKILL and a real LVGL fatal: each of
+            # them must bring the terminal back and the keyboard with it,
+            # even with a key (and a mouse button) held at the kill.
+            case_name = "input_crash"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 11: input_owner (Task 12) ──
+            # The legitimate handover of a static owner: EBUSY for the
+            # second client, the RELEASED answer, the new owner, and the
+            # old probe's non-zero exit under the lost ownership.
+            case_name = "input_owner"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 12: input_overflow (Task 12) ──
+            # The real queue overflow: the guest's own EOVERFLOW error,
+            # a non-zero exit and a working recovery.
+            case_name = "input_overflow"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
             reasons.extend(input_reasons)
             outcomes.extend(input_outcomes)
             if not input_ok:

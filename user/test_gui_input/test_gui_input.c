@@ -82,6 +82,7 @@
 #define LIFE_FATAL         60000u
 #define LIFE_OVERFLOW      10000u
 #define LIFE_OWNER         60000u
+#define LIFE_CRASH          60000u
 
 /* Set 1 scan code of F12 (the fatal scenario waits for a real F12 DOWN). */
 #define PS2_SCANCODE_F12   0x58u
@@ -238,11 +239,13 @@ typedef enum {
     SC_FATAL,
     SC_OVERFLOW,
     SC_OWNER,
+    SC_CRASH,
     SC_COUNT
 } scenario_t;
 
 static const char *const k_scenario_names[SC_COUNT] = {
-    "interaction", "isolation", "hold", "fatal", "overflow", "owner"
+    "interaction", "isolation", "hold", "fatal", "overflow", "owner",
+    "crash"
 };
 
 typedef struct {
@@ -295,6 +298,7 @@ typedef struct {
     bool     owner_released;
     bool     owner_loss_seen;
     bool     fatal_seen;
+    bool     overflow_seen;
     bool     state_emitted;
     char     last_state[PROTO_MAX_EXTRA];
     uint64_t start_ms;
@@ -1048,13 +1052,15 @@ static uint64_t scenario_lifetime(scenario_t scenario)
     case SC_FATAL:       return LIFE_FATAL;
     case SC_OVERFLOW:    return LIFE_OVERFLOW;
     case SC_OWNER:       return LIFE_OWNER;
+    case SC_CRASH:       return LIFE_CRASH;
     default:             return LIFE_INTERACTION;
     }
 }
 
 static bool scenario_honours_ctrl_q(scenario_t scenario)
 {
-    return scenario == SC_INTERACTION || scenario == SC_ISOLATION;
+    return scenario == SC_INTERACTION || scenario == SC_ISOLATION
+        || scenario == SC_CRASH;
 }
 
 /* Emits the EXIT record.  Returns false when the record could not be
@@ -1108,7 +1114,7 @@ static void usage(void)
 {
     fprintf(stderr,
             "[gui-input-probe] usage: test_gui_input --nonce <hex> "
-            "--scenario <interaction|isolation|hold|fatal|overflow|owner>\n");
+            "--scenario <interaction|isolation|hold|fatal|overflow|owner|crash>\n");
 }
 
 static int fail(int code, int err, const char *detail)
@@ -1326,6 +1332,19 @@ int main(int argc, char **argv)
                 rc = fail(1, errno, "get_pollfds");
                 break;
             }
+        } else if (p->scenario == SC_OVERFLOW) {
+            /*
+             * The overflow scenario never dispatches: the ACTIVE keyboard
+             * queue has to REALLY fill up, and every dispatch would drain
+             * it.  It only WATCHES the devices here -- a poll is not a
+             * read, so it never consumes a byte -- so that the POLLERR
+             * the kernel raises when the queue overflowed can be seen.
+             */
+            nfds = gui_input_get_pollfds(p->input, fds);
+            if (nfds < 0) {
+                rc = fail(1, errno, "get_pollfds");
+                break;
+            }
         } else {
             nfds = 0;
         }
@@ -1358,6 +1377,36 @@ int main(int argc, char **argv)
                 rc = fail(1, errno, "poll");
                 break;
             }
+            /*
+             * The overflow scenario: the POLLERR the kernel raises when the
+             * ACTIVE keyboard queue overflowed is the ONLY way to see the
+             * latched reason.  The design mandates exactly ONE non-blocking
+             * read for it (the dispatch performs it), and that read fails
+             * with the latched errno -- EOVERFLOW -- without consuming the
+             * queue.  This is the error observation, not a consumption:
+             * the dispatch stops at the latched error and delivers nothing.
+             */
+            if (p->scenario == SC_OVERFLOW && !p->overflow_seen) {
+                bool poll_err = false;
+                int i;
+
+                for (i = 0; i < nfds; i++) {
+                    if (fds[i].revents & POLLERR) {
+                        poll_err = true;
+                    }
+                }
+                if (poll_err) {
+                    p->overflow_seen = true;
+                    if (gui_input_dispatch(p->input, fds, (unsigned)nfds) != 0) {
+                        /* errno is the latched reason: EOVERFLOW. */
+                        rc = fail(1, errno, "input_dispatch");
+                        break;
+                    }
+                    /* The dispatch did NOT fail: nothing overflowed. */
+                    rc = fail(1, ENOSPC, "overflow_not_observed");
+                    break;
+                }
+            }
         } else {
             poll(NULL, 0, timeout_ms);
         }
@@ -1371,7 +1420,15 @@ int main(int argc, char **argv)
         }
 
         /* The scenario state machines. */
-        if (p->scenario == SC_INTERACTION || p->scenario == SC_ISOLATION) {
+        if (p->scenario == SC_INTERACTION || p->scenario == SC_ISOLATION
+            || p->scenario == SC_CRASH || p->scenario == SC_FATAL) {
+            /*
+             * The fatal scenario reports its state like the other ones:
+             * the runner has to see that the guest holds the input while
+             * it is killed, and that is only visible in the STATE stream.
+             * The trigger record below stays DISTINGUISHABLE: it carries
+             * the "fatal_trigger=1" field.
+             */
             if (!emit_state_if_changed(p)) {
                 rc = fail(1, EOVERFLOW, "state_record"); goto cleanup;
             }
@@ -1436,13 +1493,16 @@ int main(int argc, char **argv)
             result = "FAIL";
             detail = "sigint_seen";
             exit_code = 1;
-        } else if (p->scenario == SC_INTERACTION || p->scenario == SC_ISOLATION) {
+        } else if (p->scenario == SC_INTERACTION || p->scenario == SC_ISOLATION
+                   || p->scenario == SC_CRASH) {
             if (!p->ended_by_shortcut) {
                 result = "FAIL";
                 detail = "no_exit_shortcut";
                 exit_code = 1;
             } else if (p->scenario == SC_ISOLATION) {
                 detail = "isolation_complete";
+            } else if (p->scenario == SC_CRASH) {
+                detail = "crash_complete";
             } else {
                 detail = "interaction_complete";
             }
@@ -1456,16 +1516,25 @@ int main(int argc, char **argv)
                 detail = "no_owner_loss";
                 exit_code = 1;
             } else {
+                /*
+                 * The ownership loss IS the expected detection, so the
+                 * record says PASS.  The PROCESS still exits non-zero: it
+                 * did not end through its normal path (it lost the view
+                 * under its feet), and the runner asserts both.
+                 */
                 detail = "owner_loss_detected";
+                exit_code = 1;
             }
         } else if (p->scenario == SC_OVERFLOW) {
-            if (p->input->count != 0u) {
-                result = "FAIL";
-                detail = "fifo_not_empty";
-                exit_code = 1;
-            } else {
-                detail = "dispatch_paused";
-            }
+            /*
+             * Reaching this point means the scenario ran out of its life
+             * WITHOUT the queue overflowing: that is a FAIL, never a
+             * PASS.  The overflow itself ends the scenario earlier, with
+             * the latched errno (EOVERFLOW) in an ERROR record.
+             */
+            result = "FAIL";
+            detail = p->overflow_seen ? "overflow_not_latched" : "no_overflow";
+            exit_code = 1;
         } else if (p->scenario == SC_HOLD) {
             /* The hold only has to survive: no key may end it, and the
              * SIGINT flag must still be clear. */
