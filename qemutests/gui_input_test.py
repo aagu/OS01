@@ -1280,6 +1280,10 @@ STATE_EMITTING_SCENARIOS = ("interaction", "isolation", "crash", "fatal")
 # The bounds of a single step inside the interaction scenario.
 STEP_TIMEOUT_SECONDS = 12.0
 SHELL_TIMEOUT_SECONDS = 10.0
+# The terminal redraws on its own schedule (its 30 FPS loop and the
+# foreground restore), so the recovery check waits for the redraw -- with
+# this bound.  A screen that stays on the GUI is a FAIL.
+SCREEN_RESTORE_TIMEOUT_SECONDS = 2.0
 # The long press: the count lower bound, then the count must be stable.
 LONG_PRESS_MIN_REPEATS = 3
 STABILITY_SECONDS = 0.8
@@ -1384,6 +1388,10 @@ class GuiInputScenarios:
         self.screen_probe = screen_probe
         self.parser: Optional[GuiInputParser] = None
         self.nonce = ""
+        # The scenario's own temp file (the isolation scenario): it is
+        # computed once, when the probe starts, and every check uses that
+        # same path.
+        self.leak_file: Optional[str] = None
         self.ready: Optional[GuiInputRecord] = None
         # The modifier snapshot the runner expects the guest to report.
         self.mods = 0
@@ -2843,21 +2851,42 @@ class GuiInputScenarios:
     def _require_screen_back_to_terminal(self, gui_pixels: Optional[bytes],
                                          what: str) -> None:
         """The screen must show the terminal again, not the GUI."""
-        shot = self._screen_pixels(f"{what}_screen")
-        if shot is None:
-            # Without a screen probe the check cannot be made; that is a
-            # FAIL, never a silent skip.
+        if gui_pixels is None:
+            # The "before" screenshot is missing: the diff cannot be made,
+            # so the check would degrade into "the after screenshot could
+            # be read".  That is a FAIL, never a silent skip.
             raise GuiInputScenarioError(
-                f"{what}: the screen could not be read, so the recovery "
-                "cannot be confirmed"
+                f"{what}: the GUI screenshot was not captured, so the "
+                "recovery cannot be confirmed"
             )
-        if gui_pixels is not None:
+        # The terminal redraws on its own schedule (its 30 FPS loop and
+        # the foreground restore), so the check waits for the redraw --
+        # with a bound.  It never skips: a screen that stays on the GUI
+        # is a FAIL.
+        deadline = time.monotonic() + min(SCREEN_RESTORE_TIMEOUT_SECONDS,
+                                          self._remaining())
+        diff = 1.0
+        while True:
+            shot = self._screen_pixels(f"{what}_screen")
+            if shot is None:
+                # Without a screen probe the check cannot be made; that is
+                # a FAIL, never a silent skip.
+                raise GuiInputScenarioError(
+                    f"{what}: the screen could not be read, so the recovery "
+                    "cannot be confirmed"
+                )
             diff = self._pixels_diff(gui_pixels, shot)
-            if diff < 0.01:
+            if diff >= 0.01:
+                break
+            if time.monotonic() >= deadline:
                 raise GuiInputScenarioError(
                     f"{what}: the screen did not change from the GUI state "
                     f"(diff={diff:.3f}): the terminal did not come back"
                 )
+            try:
+                self.session.observe(0.05)
+            except Exception:
+                pass
         self.notes.append(f"{what}: the screen is back to the terminal")
 
     # -- the isolation (the TTY leak) ---------------------------------
@@ -2899,13 +2928,34 @@ class GuiInputScenarios:
         return True, reasons, outcomes
 
     def _leak_path(self) -> str:
-        """The scenario's own temp file."""
-        return f"/tmp/gui_input_leak_{self.nonce}"
+        """The scenario's own temp file.
+
+        It is computed ONCE, when the probe starts: the probe's nonce is
+        the one that makes the path unique, and the SAME path must be
+        used by the typed command and by EVERY check.  (Computing it
+        before the probe starts used the PREVIOUS run's nonce, so the
+        post-lease check looked at a path the command never targeted:
+        a vacuous assertion.)
+        """
+        if self.leak_file is None:
+            raise GuiInputScenarioError(
+                "the scenario's temp file path was used before the probe "
+                "started: it would not carry the probe's nonce"
+            )
+        return self.leak_file
 
     def _step_isolation_leak(self) -> None:
         """Type a shell command through the keyboard while the lease is held."""
-        leak = self._leak_path()
-        control = f"/tmp/gui_input_control_{self.nonce}"
+        # The probe takes the exclusive lease FIRST: the scenario's temp
+        # files carry the PROBE's nonce, so the path the typed command
+        # targets and the path every check looks at are the SAME path.
+        self._new_probe_run("isolation")
+        self.leak_file = f"/tmp/gui_input_leak_{self.nonce}"
+        leak = self.leak_file
+        # The negative control has its OWN path: it must not collide with
+        # the probe's control file (the guest builds that one from the same
+        # nonce).
+        control = f"/tmp/gui_input_negative_{self.nonce}"
 
         # The negative control: the serial shell CAN create the file, so
         # its absence later is a fact about the isolation and not about a
@@ -2930,9 +2980,6 @@ class GuiInputScenarios:
             )
         self._shell(f"rm -f {control}")
 
-        # The probe takes the exclusive lease.
-        self._new_probe_run("isolation")
-
         # The command is typed through the PS/2 KEYBOARD, not through the
         # serial shell: the serial path is not what the lease owns.
         self._ps2_type(f"echo LEAK_{self.nonce} > {leak}")
@@ -2956,6 +3003,13 @@ class GuiInputScenarios:
     def _step_isolation_recover(self) -> None:
         """End the lease and prove that the keyboard came back."""
         gui_pixels = self._screen_pixels("isolation_held")
+        if gui_pixels is None:
+            # The "before" screenshot is the reference of the recovery
+            # check: without it the check cannot be made at all.
+            raise GuiInputScenarioError(
+                "the GUI screenshot of the held lease could not be captured, "
+                "so the terminal restore cannot be confirmed"
+            )
 
         # Ctrl-Q ends the probe, and the lease is released with it.
         self._step_ctrl_q()
@@ -3021,6 +3075,13 @@ class GuiInputScenarios:
         scenario = "fatal" if kind == "fatal" else "crash"
         self._new_probe_run(scenario)
         gui_pixels = self._screen_pixels(f"crash_{kind}_held")
+        if gui_pixels is None:
+            # The "before" screenshot is the reference of the recovery
+            # check: without it the check cannot be made at all.
+            raise GuiInputScenarioError(
+                f"the GUI screenshot of the held {kind} lease could not be "
+                "captured, so the terminal restore cannot be confirmed"
+            )
 
         # The key is HELD at the kill time.  Its DOWN edge must reach the
         # GUI: that is the proof that the guest holds the input when it
@@ -3300,8 +3361,14 @@ class GuiInputScenarios:
             )
         self.notes.append(f"the second gfx hold (pid={hold_pid}) survived")
 
-        # End the hold and verify the recovery.
+        # End the hold and verify the recovery: the screen must show the
+        # terminal again (the second hold is gone) and the PS/2 keyboard
+        # must work.  The canary alone only proves the PS/2 path: a
+        # display that stayed on the GUI would still answer it.
         self._shell(f"kill -9 {hold_pid}")
+        self._wait_gfx_hold_gone(hold_pid, "after the ownership handover")
+        self._require_screen_back_to_terminal(hold_shot,
+                                               "after the ownership handover")
         expected = self._ps2_canary("after the ownership handover")
         self.notes.append(f"recovery canary {expected}")
 
@@ -3344,6 +3411,27 @@ class GuiInputScenarios:
         """Is the second gfx hold client still alive?"""
         rc, out = self._shell(f"test -d /proc/{pid}")
         return rc == 0
+
+    def _wait_gfx_hold_gone(self, pid: int, what: str) -> None:
+        """Wait until the background gfx hold client is really gone.
+
+        The kill is asynchronous: the shell returns before the process is
+        reaped, and the terminal can only be read back once the display
+        was really released.
+        """
+        deadline = time.monotonic() + min(self.timing.shell * 2,
+                                          self._remaining())
+        while time.monotonic() < deadline:
+            if not self._gfx_hold_alive(pid):
+                return
+            try:
+                self.session.observe(0.05)
+            except Exception:
+                pass
+        raise GuiInputScenarioError(
+            f"{what}: the background gfx hold client (pid={pid}) is still "
+            f"alive {self.timing.shell * 2:.1f}s after the kill"
+        )
 
     # -- the real queue overflow --------------------------------------
 

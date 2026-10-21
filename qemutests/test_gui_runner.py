@@ -319,15 +319,12 @@ class FakeProbe:
         # The newline lands in a later record than the Enter edge.
         self.fault_deferred_newline = False
         # Task 12: the new fault switches.
-        # The second gfx client acquires the view although the owner
-        # probe holds it.
-        self.fault_owner_no_ebusy = False
         # The owner probe never answers the RELEASE_VIEW command.
         self.fault_owner_no_release = False
         # The owner probe's RELEASED answer carries a wrong ctl_seq.
         self.fault_owner_wrong_ctl_seq = False
-        # The owner probe never detects the loss of the ownership (it
-        # exits cleanly with the status 0).
+        # The owner probe never detects the loss of the ownership: it
+        # keeps running and never ends.
         self.fault_owner_no_loss = False
         # The queue never overflows: the ACTIVE queue swallows every key.
         self.fault_overflow_never = False
@@ -471,6 +468,10 @@ class FakeProbe:
         if self.scenario == "owner" and command == "RESUME_STEP":
             self.emit("ACK",
                       f"ctl_seq={ctl_seq} pid={pid} command={command} raw_pump=1")
+            if self.fault_owner_no_loss:
+                # The owner never notices the loss: the probe keeps
+                # running and never ends.
+                return
             # The step resumes and the ownership loss is detected.
             self.exit(result="PASS", exit_code=1, detail="owner_loss_detected")
             return
@@ -841,6 +842,7 @@ class FakeProcessSession:
         probe_fault_hold_no_acquired: bool = False,
         probe_fault_owner_close_releases: bool = False,
         probe_fault_owner_still_holds: bool = False,
+        probe_fault_leak_after_lease: bool = False,
         hang_after_probe: bool = False,
     ):
         self._argv = list(argv)
@@ -915,9 +917,15 @@ class FakeProcessSession:
         self.probe_fault_hold_no_acquired = probe_fault_hold_no_acquired
         self.probe_fault_owner_close_releases = probe_fault_owner_close_releases
         self.probe_fault_owner_still_holds = probe_fault_owner_still_holds
+        self.probe_fault_leak_after_lease = probe_fault_leak_after_lease
         # The console TTY's own state (the PS/2 keyboard path).
         self._tty_line = ""
         self._tty_mods = 0
+        # The shadow of the TTY's line while the lease owns the keyboard:
+        # the characters are not executed, but the last completed line is
+        # kept so that a fault can replay it after the lease ended.
+        self._shadow_line = ""
+        self._shadow_last = ""
         # The status the shell's `wait` reports for the background probe.
         self.probe_exit_status = 0
         # The "a held key is never released" fault is armed by a KILL: a
@@ -1055,7 +1063,11 @@ class FakeProcessSession:
             elif "/bin/test_lvgl" in body and "--wait" not in body and "--smoke" not in body and "smoke" not in body:
                 if self.active_hold_pid is not None or self._owner_probe_holds():
                     # Busy owner case
-                    if self.busy_no_ebusy or self.probe_fault_owner_no_ebusy:
+                    if self.busy_no_ebusy or (
+                            self.probe_fault_owner_no_ebusy
+                            and self._owner_probe_holds()):
+                        # The fault is scoped to the OWNER PROBE: it models
+                        # the Task 12 handover, not the GUI-1 busy case.
                         self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} 0\n__EXIT_{nonce}_0__\n# "
                     else:
                         self._text += (
@@ -1255,7 +1267,6 @@ class FakeProcessSession:
         self.probe.fault_control_char = self.probe_fault_control_char
         self.probe.fault_deferred_newline = self.probe_fault_deferred_newline
         # Task 12: the new fault switches.
-        self.probe.fault_owner_no_ebusy = self.probe_fault_owner_no_ebusy
         self.probe.fault_owner_no_release = self.probe_fault_owner_no_release
         self.probe.fault_owner_wrong_ctl_seq = self.probe_fault_owner_wrong_ctl_seq
         self.probe.fault_owner_no_loss = self.probe_fault_owner_no_loss
@@ -1279,6 +1290,12 @@ class FakeProcessSession:
     def _probe_died(self, probe: "FakeProbe") -> None:
         """The probe died: the screen goes back to the terminal."""
         self.probe_exit_status = probe.exit_status
+        if self.probe_fault_leak_after_lease and self._shadow_last:
+            # The command that was typed during the lease reached the
+            # shell AFTER the lease ended: the post-lease check must see
+            # the file.
+            self._run_tty_line(self._shadow_last)
+            self._shadow_last = ""
         if self.probe_fault_owner_close_releases and \
                 self.active_hold_pid is not None:
             # The old probe's close releases the NEW owner's view: the
@@ -1364,6 +1381,11 @@ class FakeProcessSession:
                 # belongs to the console TTY again.
                 self._tty_event(event)
                 continue
+            # The lease owns the keyboard: the TTY does NOT see the
+            # characters.  The fake still SHADOWS the line, so a fault can
+            # replay it after the lease ended (the "the command reached
+            # the shell too late" case).
+            self._shadow_event(event)
             self.probe.handle(event)
             # The guest emits a STATE per state change, so every key edge
             # produces its own record (the runner waits for it).
@@ -1371,6 +1393,29 @@ class FakeProcessSession:
         if not self.probe.exited:
             self.probe.maybe_repeat()
             self.probe.emit_state_if_changed()
+
+    def _shadow_event(self, event: dict) -> None:
+        """Mirror the console TTY's line while the lease owns the keyboard.
+
+        The characters are NOT executed (the lease owns the keyboard), but
+        the last completed line is kept: a fault can replay it when the
+        lease ends, which is the "the command typed during the lease
+        reached the shell after the lease ended" case.
+        """
+        data = event.get("data") or {}
+        qcode = (data.get("key") or {}).get("data")
+        down = bool(data.get("down"))
+        if qcode is None or qcode in MODIFIER_BITS or not down:
+            return
+        if qcode == "ret":
+            self._shadow_last = self._shadow_line
+            self._shadow_line = ""
+            return
+        if self._tty_mods & (MOD_LCTRL | MOD_RCTRL):
+            return
+        ch = self._tty_char(qcode)
+        if ch:
+            self._shadow_line += ch
 
     def _no_lease(self) -> bool:
         """Does the guest NOT hold the input?
@@ -1440,9 +1485,6 @@ class FakeProcessSession:
             # and the shell prints a new prompt.
             self._text += "^C\n# "
             self._tty_line = ""
-            return
-        if self.probe_fault_no_ps2_recovery:
-            # The keyboard never reaches the TTY again.
             return
         ch = self._tty_char(qcode)
         if not ch:
@@ -2716,6 +2758,61 @@ class GuiInputRunnerTests(unittest.TestCase):
         and the number of bytes sent are NOT the enqueue count.
         """
         factory, qmp = self._make({"probe_fault_overflow_dropped": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "did not overflow")
+
+    # ── Task 12: the added tripwires ────────────────────────────────
+    #
+    # Each of these faults models a behaviour that the runner's checks
+    # must catch.  Without a fixture, removing the corresponding check
+    # would go unnoticed, so every switch that the fake implements has
+    # one.
+
+    def test_a_leak_that_appears_after_the_lease_is_rejected(self):
+        """The post-lease leak check must have teeth.
+
+        The command typed during the lease reaches the shell AFTER the
+        lease ended, so the file exists when the lease is over.  The
+        in-lease check cannot see it (the file does not exist yet), so
+        only the post-lease check can catch it.
+        """
+        factory, qmp = self._make({"probe_fault_leak_after_lease": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "after the lease ended")
+
+    def test_a_second_client_that_acquires_is_rejected(self):
+        """The exclusivity must hold while the owner holds the view."""
+        factory, qmp = self._make({"probe_fault_owner_no_ebusy": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the exclusivity is broken")
+
+    def test_an_unanswered_release_is_rejected(self):
+        """A RELEASE_VIEW that is never answered is a FAIL."""
+        factory, qmp = self._make({"probe_fault_owner_no_release": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the RELEASE_VIEW control answer")
+
+    def test_an_owner_close_that_releases_the_new_view_is_rejected(self):
+        """The old owner's close must not release the new view."""
+        factory, qmp = self._make({"probe_fault_owner_close_releases": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "died when the old probe closed")
+
+    def test_an_owner_that_never_detects_the_loss_is_rejected(self):
+        """An owner that never notices the loss of the view is a FAIL."""
+        factory, qmp = self._make({"probe_fault_owner_no_loss": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the old probe's EXIT record")
+
+    def test_an_overflow_that_never_happens_is_rejected(self):
+        """A queue that never overflows is a FAIL."""
+        factory, qmp = self._make({"probe_fault_overflow_never": True})
         ok, reasons = self._run(factory, qmp)
         self.assertFalse(ok)
         self._assert_failed(reasons, "did not overflow")
