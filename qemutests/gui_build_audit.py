@@ -91,6 +91,7 @@ GUI_PROBE_NEGATIVE_SYMBOL = "gui_audit_symbol_that_must_not_exist"
 
 GUI_INPUT_PROBE_APP_MK = "user/test_gui_input/app.mk"
 GUI_INPUT_PROBE_SOURCE = "user/test_gui_input/test_gui_input.c"
+GUI_INPUT_PROBE_NONCE_HEADER = "user/test_gui_input/gui_input_nonce.h"
 GUI_INPUT_PROBE_BINARY = "/bin/test_gui_input"
 GUI_INPUT_PROBE_APP_MK_REQUIRED = (
     "APP_SOURCES := test_gui_input.c",
@@ -929,6 +930,27 @@ def audit_gui_input_probe(repo_root: Path, build_dir: Path, errors: list[str]) -
 
     if not source.is_file():
         errors.append(f"The guest input probe source is missing: {GUI_INPUT_PROBE_SOURCE}")
+
+    # The nonce rule lives in its own header because the host test
+    # (hosttests/cases/test_gui_input_nonce.c) compiles the REAL rule.
+    nonce_header = repo_root / GUI_INPUT_PROBE_NONCE_HEADER
+    if not nonce_header.is_file():
+        errors.append(
+            f"The guest input probe nonce header is missing: {GUI_INPUT_PROBE_NONCE_HEADER}"
+        )
+    else:
+        content = nonce_header.read_text()
+        # The nonce must be validated as hex: it is interpolated into the
+        # control file's path, so a path escape must be impossible.
+        for required in (
+            "gui_input_nonce_is_valid",
+            "gui_input_nonce_ctl_path",
+            "GUI_INPUT_NONCE_MAX_CHARS",
+        ):
+            if required not in content:
+                errors.append(
+                    f"The guest input probe nonce header does not declare {required!r}"
+                )
 
     # The probe must be installed in the published image.  The image may not
     # have been built yet, so a missing manifest is not an error; a manifest

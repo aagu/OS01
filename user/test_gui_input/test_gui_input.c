@@ -39,6 +39,9 @@
 #include <gfx.h>
 #include <lvgl/lvgl.h>
 
+/* The probe's nonce rule (shared with the host test). */
+#include "gui_input_nonce.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -57,11 +60,12 @@
  * ══════════════════════════════════════════════════════════════════════ */
 
 #define PROTO_PREFIX       "[gui-input]"
-#define PROTO_MAX_EXTRA    1024
-#define PROTO_MAX_NONCE    64
+#define PROTO_MAX_EXTRA    2048
+#define PROTO_MAX_NONCE    (GUI_INPUT_NONCE_MAX_CHARS + 1)
 
-/* The control channel: a plain file in /tmp, no FIFO and no new device. */
-#define CTL_DIR            "/tmp"
+/* The control channel: a plain file in /tmp, no FIFO and no new device.
+ * The path is built by gui_input_nonce_ctl_path() from the validated hex
+ * nonce, so it can only ever live in GUI_INPUT_CTL_DIR. */
 #define CTL_MAX_RECORD     256
 #define CTL_POLL_MS        10      /* re-open + re-read at most every 10 ms */
 
@@ -130,14 +134,45 @@ static int now_ms(uint64_t *out_ms)
     return 0;
 }
 
+/*
+ * Hex encoding.
+ *
+ * The contract is explicit: a hex byte string is either written COMPLETELY
+ * and NUL-terminated, or the encoder fails and leaves an EMPTY (still
+ * NUL-terminated) string behind.  The buffer is never left uninitialised,
+ * and every caller checks the return value — a payload that does not fit
+ * is a bug, not something to paper over.
+ *
+ * The numeric payloads are fixed width (big-endian), so the runner never
+ * has to guess the endianness.
+ */
+
+/*
+ * The text payloads are bounded so that a STATE or an EXIT record always
+ * fits in PROTO_MAX_EXTRA.  The truncation is deterministic: the FIRST
+ * HEX_TEXT_MAX_CHARS characters are kept and the number of dropped
+ * characters is reported in the "text_trunc" field.
+ */
+#define HEX_TEXT_MAX_CHARS  256
+#define HEX_TEXT_MAX_BYTES  (2u * HEX_TEXT_MAX_CHARS + 1u)
+
+/*
+ * Writes len bytes as a NUL-terminated hex byte string.
+ * Returns the number of hex characters written, or 0 when the payload does
+ * not fit (the output is then set to the empty string).
+ */
 static size_t hex_encode(const unsigned char *data, size_t len, char *out, size_t out_len)
 {
     static const char digits[] = "0123456789abcdef";
     size_t i;
     size_t need = len * 2u;
 
+    if (out == NULL || out_len == 0u) {
+        return 0u;
+    }
     if (out_len < need + 1u) {
-        return 0;
+        out[0] = '\0';       /* never leave the buffer uninitialised */
+        return 0u;
     }
     for (i = 0; i < len; i++) {
         out[i * 2u] = digits[(data[i] >> 4) & 0x0Fu];
@@ -147,9 +182,10 @@ static size_t hex_encode(const unsigned char *data, size_t len, char *out, size_
     return need;
 }
 
-/* Big-endian, fixed width: the numeric state payloads are hex byte
- * strings so the runner never has to guess the endianness. */
-static size_t hex_encode_u32(uint32_t value, char *out, size_t out_len)
+/* Fixed width, big-endian.  Returns true when the full payload was
+ * written; the buffers below are sized so that it always is, but the
+ * result is checked all the same. */
+static bool hex_encode_u32(uint32_t value, char *out, size_t out_len)
 {
     unsigned char raw[4];
 
@@ -157,27 +193,38 @@ static size_t hex_encode_u32(uint32_t value, char *out, size_t out_len)
     raw[1] = (unsigned char)((value >> 16) & 0xFFu);
     raw[2] = (unsigned char)((value >> 8) & 0xFFu);
     raw[3] = (unsigned char)(value & 0xFFu);
-    return hex_encode(raw, sizeof(raw), out, out_len);
+    return hex_encode(raw, sizeof(raw), out, out_len) == (sizeof(raw) * 2u);
 }
 
-static size_t hex_encode_i32(int32_t value, char *out, size_t out_len)
+static bool hex_encode_i32(int32_t value, char *out, size_t out_len)
 {
     return hex_encode_u32((uint32_t)value, out, out_len);
 }
 
-static size_t hex_encode_u8(uint8_t value, char *out, size_t out_len)
+static bool hex_encode_u8(uint8_t value, char *out, size_t out_len)
 {
     unsigned char raw[1];
 
     raw[0] = value;
-    return hex_encode(raw, sizeof(raw), out, out_len);
+    return hex_encode(raw, sizeof(raw), out, out_len) == (sizeof(raw) * 2u);
 }
 
-static size_t hex_encode_str(const char *text, char *out, size_t out_len)
+/*
+ * Encodes at most HEX_TEXT_MAX_CHARS characters of the text.  *out_truncated
+ * receives the number of source characters that were dropped (0 when the
+ * whole text fitted).  Returns true when the payload was written.
+ */
+static bool hex_encode_text(const char *text, char *out, size_t out_len,
+                             size_t *out_truncated)
 {
     size_t len = (text != NULL) ? strlen(text) : 0u;
+    size_t used = (len > (size_t)HEX_TEXT_MAX_CHARS) ? (size_t)HEX_TEXT_MAX_CHARS : len;
 
-    return hex_encode((const unsigned char *)(text != NULL ? text : ""), len, out, out_len);
+    if (out_truncated != NULL) {
+        *out_truncated = len - used;
+    }
+    return hex_encode((const unsigned char *)(text != NULL ? text : ""), used,
+                      out, out_len) == (used * 2u);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -262,14 +309,44 @@ static probe_t g_probe;
  *  Protocol output
  * ══════════════════════════════════════════════════════════════════════ */
 
-static void proto_emit(probe_t *p, const char *phase, const char *fmt, ...)
+/* A diagnostic line: it never starts with the protocol marker, so the
+ * runner's parser can never mistake it for a record. */
+static void diag(const char *fmt, ...)
 {
-    char extra[PROTO_MAX_EXTRA];
+    char buf[PROTO_MAX_EXTRA];
     va_list ap;
 
     va_start(ap, fmt);
-    vsnprintf(extra, sizeof(extra), fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+
+    fprintf(stderr, "[gui-input-probe] %s\n", buf);
+    fflush(stderr);
+}
+
+/*
+ * Emits one protocol record.  Returns false when the record does not fit:
+ * a short ERROR record is emitted INSTEAD, so that the protocol sequence
+ * stays contiguous and the caller can react by ending the scenario.
+ */
+static bool proto_emit(probe_t *p, const char *phase, const char *fmt, ...)
+{
+    char extra[PROTO_MAX_EXTRA];
+    va_list ap;
+    int n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(extra, sizeof(extra), fmt, ap);
+    va_end(ap);
+
+    if (n < 0 || (size_t)n >= sizeof(extra)) {
+        diag("protocol record too long (%d bytes)", n);
+        p->seq++;
+        printf("\n%s nonce=%s seq=%u phase=ERROR errno=%d detail=record_too_long\n",
+               PROTO_PREFIX, p->nonce, p->seq, EOVERFLOW);
+        fflush(stdout);
+        return false;
+    }
 
     p->seq++;
     /*
@@ -284,21 +361,7 @@ static void proto_emit(probe_t *p, const char *phase, const char *fmt, ...)
            PROTO_PREFIX, p->nonce, p->seq, phase,
            (extra[0] != '\0') ? " " : "", extra);
     fflush(stdout);
-}
-
-/* A diagnostic line: it never starts with the protocol marker, so the
- * runner's parser can never mistake it for a record. */
-static void diag(const char *fmt, ...)
-{
-    char buf[PROTO_MAX_EXTRA];
-    va_list ap;
-
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-
-    fprintf(stderr, "[gui-input-probe] %s\n", buf);
-    fflush(stderr);
+    return true;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -514,31 +577,50 @@ static void observe_state(probe_t *p)
     p->focus_id = widget_id_of(p, focus);
 }
 
-static void build_state_fields(probe_t *p, char *out, size_t out_len,
+/*
+ * Builds the STATE payload.  Returns false when a payload could not be
+ * encoded or the record does not fit — the caller MUST react (the record
+ * is not emitted at all in that case, so the protocol sequence stays
+ * contiguous).
+ */
+static bool build_state_fields(probe_t *p, char *out, size_t out_len,
                                const char *extra)
 {
     char click_hex[16];
     char slider_hex[16];
     char scroll_hex[16];
     char focus_hex[8];
-    char ta1_hex[256];
-    char ta2_hex[256];
+    char ta1_hex[HEX_TEXT_MAX_BYTES];
+    char ta2_hex[HEX_TEXT_MAX_BYTES];
+    size_t trunc1 = 0;
+    size_t trunc2 = 0;
+    int n;
 
-    hex_encode_u32(p->click_count, click_hex, sizeof(click_hex));
-    hex_encode_i32(p->slider_value, slider_hex, sizeof(slider_hex));
-    hex_encode_i32(p->scroll_value, scroll_hex, sizeof(scroll_hex));
-    hex_encode_u8(p->focus_id, focus_hex, sizeof(focus_hex));
-    hex_encode_str(lv_textarea_get_text(p->ta1), ta1_hex, sizeof(ta1_hex));
-    hex_encode_str(lv_textarea_get_text(p->ta2), ta2_hex, sizeof(ta2_hex));
+    out[0] = '\0';
 
-    snprintf(out, out_len,
-             "click_count=%s slider=%s scroll=%s focus=%s textarea=%s textarea2=%s "
-             "physical_key=%u modifiers=%u action=%d sigint_seen=%d%s%s",
-             click_hex, slider_hex, scroll_hex, focus_hex, ta1_hex, ta2_hex,
-             (unsigned)p->last_physical_key, (unsigned)p->last_modifiers,
-             p->last_action, sigint_seen ? 1 : 0,
-             (extra != NULL && extra[0] != '\0') ? " " : "",
-             (extra != NULL) ? extra : "");
+    if (!hex_encode_u32(p->click_count, click_hex, sizeof(click_hex)) ||
+        !hex_encode_i32(p->slider_value, slider_hex, sizeof(slider_hex)) ||
+        !hex_encode_i32(p->scroll_value, scroll_hex, sizeof(scroll_hex)) ||
+        !hex_encode_u8(p->focus_id, focus_hex, sizeof(focus_hex)) ||
+        !hex_encode_text(lv_textarea_get_text(p->ta1), ta1_hex, sizeof(ta1_hex), &trunc1) ||
+        !hex_encode_text(lv_textarea_get_text(p->ta2), ta2_hex, sizeof(ta2_hex), &trunc2)) {
+        return false;
+    }
+
+    n = snprintf(out, out_len,
+                 "click_count=%s slider=%s scroll=%s focus=%s textarea=%s textarea2=%s "
+                 "physical_key=%u modifiers=%u action=%d sigint_seen=%d text_trunc=%u%s%s",
+                 click_hex, slider_hex, scroll_hex, focus_hex, ta1_hex, ta2_hex,
+                 (unsigned)p->last_physical_key, (unsigned)p->last_modifiers,
+                 p->last_action, sigint_seen ? 1 : 0,
+                 (unsigned)(trunc1 + trunc2),
+                 (extra != NULL && extra[0] != '\0') ? " " : "",
+                 (extra != NULL) ? extra : "");
+    if (n < 0 || (size_t)n >= out_len) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 /*
@@ -546,17 +628,22 @@ static void build_state_fields(probe_t *p, char *out, size_t out_len,
  * click counter, the slider value, the scroll offset, the focus target, the
  * textarea content, the last native key or the SIGINT flag.
  */
-static void emit_state_if_changed(probe_t *p)
+static bool emit_state_if_changed(probe_t *p)
 {
     char fields[PROTO_MAX_EXTRA];
 
     observe_state(p);
-    build_state_fields(p, fields, sizeof(fields), "");
+    if (!build_state_fields(p, fields, sizeof(fields), "")) {
+        return false;
+    }
     if (!p->state_emitted || strcmp(fields, p->last_state) != 0) {
-        proto_emit(p, "STATE", "%s", fields);
+        if (!proto_emit(p, "STATE", "%s", fields)) {
+            return false;
+        }
         snprintf(p->last_state, sizeof(p->last_state), "%s", fields);
         p->state_emitted = true;
     }
+    return true;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -566,7 +653,8 @@ static void emit_state_if_changed(probe_t *p)
 static bool scenario_honours_ctrl_q(scenario_t scenario);
 
 static bool is_ctrl_q(const gui_key_event_t *ev)
-{    if (ev->action != GUI_KEY_DOWN) {
+{
+    if (ev->action != GUI_KEY_DOWN) {
         return false;
     }
     if (ev->physical_key != PS2_SCANCODE_Q) {
@@ -733,15 +821,30 @@ static int parse_ctl_record(probe_t *p, const char *text, size_t len,
     return CTL_RC_OK;
 }
 
-static void ack_control(probe_t *p, uint32_t ctl_seq, const char *command,
+static bool ack_control(probe_t *p, uint32_t ctl_seq, const char *command,
                         const char *phase, int raw_pump)
 {
     p->ctl_acks++;
     if (strcmp(command, "PROGRESS") == 0) {
         p->progress_acks++;
     }
-    proto_emit(p, phase, "ctl_seq=%u pid=%d command=%s raw_pump=%d",
-               ctl_seq, p->pid, command, raw_pump);
+    return proto_emit(p, phase, "ctl_seq=%u pid=%d command=%s raw_pump=%d",
+                      ctl_seq, p->pid, command, raw_pump);
+}
+
+/*
+ * A known command that does not apply to the running scenario.  It is NOT
+ * a protocol error: the brief makes only three things hard errors (an
+ * unknown command, a nonce error and out-of-order numbering).  The probe
+ * answers with a normal ACK that carries applicable=0, so a runner that
+ * sends RELEASE_VIEW generically does not kill the probe.
+ */
+static bool ack_not_applicable(probe_t *p, uint32_t ctl_seq, const char *command)
+{
+    p->ctl_acks++;
+    return proto_emit(p, "ACK",
+                      "ctl_seq=%u pid=%d command=%s raw_pump=%d applicable=0",
+                      ctl_seq, p->pid, command, p->dispatch_paused ? 0 : 1);
 }
 
 /*
@@ -756,25 +859,37 @@ static int execute_control(probe_t *p, uint32_t ctl_seq, const char *command,
         char fields[PROTO_MAX_EXTRA];
 
         observe_state(p);
-        build_state_fields(p, fields, sizeof(fields), "");
-        ack_control(p, ctl_seq, command, "ACK", p->dispatch_paused ? 0 : 1);
-        proto_emit(p, "STATE", "%s", fields);
+        if (!build_state_fields(p, fields, sizeof(fields), "")) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        if (!ack_control(p, ctl_seq, command, "ACK", p->dispatch_paused ? 0 : 1)) {
+            return -1;
+        }
+        if (!proto_emit(p, "STATE", "%s", fields)) {
+            return -1;
+        }
         snprintf(p->last_state, sizeof(p->last_state), "%s", fields);
         p->state_emitted = true;
         return 0;
     }
 
     if (strcmp(command, "PROGRESS") == 0) {
-        ack_control(p, ctl_seq, command, "ACK", p->dispatch_paused ? 0 : 1);
+        if (!ack_control(p, ctl_seq, command, "ACK", p->dispatch_paused ? 0 : 1)) {
+            return -1;
+        }
         return 0;
     }
 
     if (strcmp(command, "RELEASE_VIEW") == 0) {
         if (p->scenario != SC_OWNER && p->scenario != SC_HOLD) {
             /* Releasing the view would destroy the premise of the other
-             * scenarios, so the command is refused there. */
-            errno = EINVAL;
-            return -1;
+             * scenarios, so the command does not apply there: it is
+             * acknowledged, not refused. */
+            if (!ack_not_applicable(p, ctl_seq, command)) {
+                return -1;
+            }
+            return 0;
         }
         /*
          * The owner scenario releases the view only after a still first
@@ -800,18 +915,25 @@ static int execute_control(probe_t *p, uint32_t ctl_seq, const char *command,
         p->owner_released = true;
         p->dispatch_paused = true;
         p->step_paused = true;
-        ack_control(p, ctl_seq, command, "RELEASED", 0);
+        if (!ack_control(p, ctl_seq, command, "RELEASED", 0)) {
+            return -1;
+        }
         return 0;
     }
 
     if (strcmp(command, "RESUME_STEP") == 0) {
         if (p->scenario != SC_OWNER && p->scenario != SC_HOLD) {
-            errno = EINVAL;
-            return -1;
+            /* Not applicable here: acknowledged, not refused. */
+            if (!ack_not_applicable(p, ctl_seq, command)) {
+                return -1;
+            }
+            return 0;
         }
         p->dispatch_paused = false;
         p->step_paused = false;
-        ack_control(p, ctl_seq, command, "ACK", 1);
+        if (!ack_control(p, ctl_seq, command, "ACK", 1)) {
+            return -1;
+        }
         return 0;
     }
 
@@ -922,26 +1044,47 @@ static bool scenario_honours_ctrl_q(scenario_t scenario)
     return scenario == SC_INTERACTION || scenario == SC_ISOLATION;
 }
 
-static void emit_exit(probe_t *p, const char *result, int exit_code, const char *detail)
+/* Emits the EXIT record.  Returns false when the record could not be
+ * built; the caller MUST react (the EXIT is the last record of the
+ * stream, so a failure ends the scenario with an ERROR instead). */
+static bool emit_exit(probe_t *p, const char *result, int exit_code, const char *detail)
 {
-    char ta1_hex[256];
-    char ta2_hex[256];
+    char ta1_hex[HEX_TEXT_MAX_BYTES];
+    char ta2_hex[HEX_TEXT_MAX_BYTES];
     char click_hex[16];
     char focus_hex[8];
     const char *text = lv_textarea_get_text(p->ta1);
+    size_t trunc1 = 0;
+    size_t trunc2 = 0;
+    int n;
 
-    hex_encode_str(text, ta1_hex, sizeof(ta1_hex));
-    hex_encode_str(lv_textarea_get_text(p->ta2), ta2_hex, sizeof(ta2_hex));
-    hex_encode_u32(p->click_count, click_hex, sizeof(click_hex));
-    hex_encode_u8(p->focus_id, focus_hex, sizeof(focus_hex));
+    if (!hex_encode_u32(p->click_count, click_hex, sizeof(click_hex)) ||
+        !hex_encode_u8(p->focus_id, focus_hex, sizeof(focus_hex)) ||
+        !hex_encode_text(text, ta1_hex, sizeof(ta1_hex), &trunc1) ||
+        !hex_encode_text(lv_textarea_get_text(p->ta2), ta2_hex, sizeof(ta2_hex), &trunc2)) {
+        return false;
+    }
 
-    proto_emit(p, "EXIT",
-               "result=%s exit_code=%d detail=%s textarea=%s textarea2=%s "
-               "click_count=%s focus=%s sigint_seen=%d ctl_acks=%u progress_acks=%u "
-               "recorded_bytes=%u",
-               result, exit_code, detail, ta1_hex, ta2_hex, click_hex, focus_hex,
-               sigint_seen ? 1 : 0, p->ctl_acks, p->progress_acks,
-               (unsigned)((text != NULL) ? strlen(text) : 0u));
+    n = snprintf(NULL, 0,
+                 "result=%s exit_code=%d detail=%s textarea=%s textarea2=%s "
+                 "click_count=%s focus=%s sigint_seen=%d ctl_acks=%u progress_acks=%u "
+                 "recorded_bytes=%u text_trunc=%u",
+                 result, exit_code, detail, ta1_hex, ta2_hex, click_hex, focus_hex,
+                 sigint_seen ? 1 : 0, p->ctl_acks, p->progress_acks,
+                 (unsigned)((text != NULL) ? strlen(text) : 0u),
+                 (unsigned)(trunc1 + trunc2));
+    if (n < 0 || (size_t)n >= (size_t)PROTO_MAX_EXTRA) {
+        return false;
+    }
+
+    return proto_emit(p, "EXIT",
+                       "result=%s exit_code=%d detail=%s textarea=%s textarea2=%s "
+                       "click_count=%s focus=%s sigint_seen=%d ctl_acks=%u progress_acks=%u "
+                       "recorded_bytes=%u text_trunc=%u",
+                       result, exit_code, detail, ta1_hex, ta2_hex, click_hex, focus_hex,
+                       sigint_seen ? 1 : 0, p->ctl_acks, p->progress_acks,
+                       (unsigned)((text != NULL) ? strlen(text) : 0u),
+                       (unsigned)(trunc1 + trunc2));
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -960,12 +1103,9 @@ static int fail(int code, int err, const char *detail)
     char text[PROTO_MAX_EXTRA];
 
     snprintf(text, sizeof(text), "errno=%d detail=%s", err, detail);
-    if (g_probe.nonce[0] != '\0') {
-        proto_emit(&g_probe, "ERROR", "%s", text);
-    } else {
-        fprintf(stderr, "\n%s nonce= seq=0 phase=ERROR %s\n", PROTO_PREFIX, text);
-        fflush(stderr);
-    }
+    /* Every call site runs after the nonce has been validated and copied,
+     * so the record always carries a usable nonce. */
+    proto_emit(&g_probe, "ERROR", "%s", text);
     return code;
 }
 
@@ -999,11 +1139,17 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    if (nonce == NULL || nonce[0] == '\0' || scenario_name == NULL) {
+    if (nonce == NULL || scenario_name == NULL) {
         usage();
         return 2;
     }
-    if (strlen(nonce) >= sizeof(p->nonce)) {
+    /*
+     * The nonce must be hex: it is interpolated into the control file's
+     * path, so a path separator, a whitespace or a shell metacharacter
+     * must be impossible by construction.  An invalid nonce is an invalid
+     * argument, so the probe exits 2 without touching anything.
+     */
+    if (!gui_input_nonce_is_valid(nonce)) {
         usage();
         return 2;
     }
@@ -1020,8 +1166,10 @@ int main(int argc, char **argv)
     memcpy(p->nonce, nonce, strlen(nonce) + 1u);
 
     /* The control path is fixed: /tmp/gui-input-<hexnonce>.ctl */
-    snprintf(p->ctl_path, sizeof(p->ctl_path), "%s/gui-input-%s.ctl",
-             CTL_DIR, p->nonce);
+    if (gui_input_nonce_ctl_path(p->ctl_path, sizeof(p->ctl_path), p->nonce) != 0) {
+        usage();
+        return 2;
+    }
 
     diag("scenario=%s nonce=%s pid=%d ctl=%s", scenario_name, p->nonce, p->pid,
          p->ctl_path);
@@ -1119,14 +1267,16 @@ int main(int argc, char **argv)
     }
 
     /* ---- READY ------------------------------------------------------ */
-    proto_emit(p, "READY",
-               "pid=%d width=%u height=%u "
-               "btn_x=%d btn_y=%d slider_x=%d slider_y=%d "
-               "scroll_x=%d scroll_y=%d ta1_x=%d ta1_y=%d ta2_x=%d ta2_y=%d",
-               p->pid, gui_platform_get_width(p->platform),
-               gui_platform_get_height(p->platform),
-               p->btn_x, p->btn_y, p->slider_x, p->slider_y,
-               p->scroll_x, p->scroll_y, p->ta1_x, p->ta1_y, p->ta2_x, p->ta2_y);
+    if (!proto_emit(p, "READY",
+                    "pid=%d width=%u height=%u "
+                    "btn_x=%d btn_y=%d slider_x=%d slider_y=%d "
+                    "scroll_x=%d scroll_y=%d ta1_x=%d ta1_y=%d ta2_x=%d ta2_y=%d",
+                    p->pid, gui_platform_get_width(p->platform),
+                    gui_platform_get_height(p->platform),
+                    p->btn_x, p->btn_y, p->slider_x, p->slider_y,
+                    p->scroll_x, p->scroll_y, p->ta1_x, p->ta1_y, p->ta2_x, p->ta2_y)) {
+        rc = fail(1, EOVERFLOW, "ready_record"); goto cleanup;
+    }
     ready = true;
 
     /* The overflow scenario pauses the raw device pump from READY on; the
@@ -1209,7 +1359,9 @@ int main(int argc, char **argv)
 
         /* The scenario state machines. */
         if (p->scenario == SC_INTERACTION || p->scenario == SC_ISOLATION) {
-            emit_state_if_changed(p);
+            if (!emit_state_if_changed(p)) {
+                rc = fail(1, EOVERFLOW, "state_record"); goto cleanup;
+            }
         }
 
         if (p->scenario == SC_FATAL && p->fatal_seen) {
@@ -1218,14 +1370,24 @@ int main(int argc, char **argv)
             char fields[PROTO_MAX_EXTRA];
 
             observe_state(p);
-            build_state_fields(p, fields, sizeof(fields), "fatal_trigger=1");
-            proto_emit(p, "STATE", "%s", fields);
+            if (!build_state_fields(p, fields, sizeof(fields), "fatal_trigger=1")) {
+                rc = fail(1, EOVERFLOW, "state_fields"); goto cleanup;
+            }
+            if (!proto_emit(p, "STATE", "%s", fields)) {
+                rc = fail(1, EOVERFLOW, "state_record"); goto cleanup;
+            }
             snprintf(p->last_state, sizeof(p->last_state), "%s", fields);
             p->state_emitted = true;
             fflush(stdout);
+            /*
+             * The control file must not outlive the probe, and
+             * LV_ASSERT_HANDLER is _exit(1): the assertion never returns to
+             * the cleanup block.  Remove the file BEFORE the assertion.
+             */
+            unlink(p->ctl_path);
             LV_ASSERT_MSG(trigger == 0,
                           "gui-input probe: fatal scenario (real PS/2 F12 DOWN)");
-            /* LV_ASSERT_HANDLER is _exit(1): the process must be gone. */
+            /* Unreachable: the assertion handler exits the process. */
             rc = fail(1, EFAULT, "fatal_assert_did_not_exit"); goto cleanup;
         }
 
@@ -1252,7 +1414,9 @@ int main(int argc, char **argv)
         int exit_code = 0;
 
         observe_state(p);
-        emit_state_if_changed(p);
+        if (!emit_state_if_changed(p)) {
+            rc = fail(1, EOVERFLOW, "final_state"); goto cleanup;
+        }
 
         if (sigint_seen) {
             /* A normal lease never sees a SIGINT. */
@@ -1297,7 +1461,9 @@ int main(int argc, char **argv)
             detail = "ok";
         }
 
-        emit_exit(p, result, exit_code, detail);
+        if (!emit_exit(p, result, exit_code, detail)) {
+            rc = fail(1, EOVERFLOW, "exit_record"); goto cleanup;
+        }
         rc = exit_code;
     }
 

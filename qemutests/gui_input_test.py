@@ -24,7 +24,10 @@ Rules enforced by :class:`GuiInputParser`:
   log line quoting the probe) is not a record and is ignored -- that is what
   stops a command echo from faking a success marker.
 * ``nonce`` must equal the nonce the parser was created with.
-* ``seq`` must be a positive integer and must **strictly increase**.
+* ``seq`` must be a positive integer and must be **contiguous**: the first
+  record of a run carries ``seq=1`` and every following record carries
+  ``prev + 1``.  A gap therefore means that a record was lost in the
+  serial log and is rejected.
 * The first record must be ``READY`` (an ``ERROR`` may precede it); any
   other phase before ``READY`` is rejected -- in particular a ``STATE``
   before ``READY``.
@@ -178,6 +181,10 @@ class GuiInputRecord:
 class GuiInputParser:
     """Incremental parser for the guest probe's protocol stream."""
 
+    # The number of leading characters remembered to detect a replaced
+    # output buffer (a new run).
+    _PREFIX_CHARS = 64
+
     def __init__(self, nonce: str):
         if not nonce:
             raise ValueError("the expected nonce must not be empty")
@@ -188,6 +195,33 @@ class GuiInputParser:
         self.saw_ready = False
         self.saw_exit = False
         self._offset = 0
+        self._prefix = ""
+
+    # ── run lifecycle ──────────────────────────────────────────────
+
+    def _clear_state(self) -> None:
+        """Forget the records and the stream state.
+
+        The read cursor is NOT touched: it belongs to the caller's output
+        buffer, not to the protocol stream.
+        """
+        self.records = []
+        self.last_seq = 0
+        self.last_ctl_seq = 0
+        self.saw_ready = False
+        self.saw_exit = False
+
+    def reset(self) -> None:
+        """Start a new run.
+
+        Every record and every bit of stream state is forgotten, and the
+        read cursor is rewound.  A parser that is reused for a second run
+        must be reset, otherwise the second run's ``seq=1`` would be
+        rejected as a non-increasing sequence number.
+        """
+        self._clear_state()
+        self._offset = 0
+        self._prefix = ""
 
     # ── line / stream handling ─────────────────────────────────────
 
@@ -213,11 +247,15 @@ class GuiInputParser:
         This method therefore keeps its own read cursor and only parses the
         complete lines it has not seen yet.
 
+        When the buffer was **replaced** (a new run), the whole parser
+        state is reset first, so a second run fed to the same parser
+        parses.
+
         Returns the records found in this call.
         """
-        if len(text) < self._offset:
+        if self._prefix and not text.startswith(self._prefix):
             # The buffer was replaced (a new run): start over.
-            self._offset = 0
+            self.reset()
         chunk = text[self._offset :]
         end = chunk.rfind("\n")
         if end < 0:
@@ -225,6 +263,8 @@ class GuiInputParser:
             return []
         complete = chunk[: end + 1]
         self._offset += end + 1
+        if not self._prefix:
+            self._prefix = text[: self._PREFIX_CHARS]
         found: List[GuiInputRecord] = []
         for line in complete.splitlines():
             record = self.feed_line(line)
@@ -302,8 +342,6 @@ class GuiInputParser:
         seq = int(raw_seq)
         if seq < 1:
             raise ProtocolError(f"seq must be >= 1: {seq}")
-        if seq <= self.last_seq:
-            raise ProtocolError(f"seq did not increase: {seq} after {self.last_seq}")
 
         phase = fields.get("phase")
         if phase is None:
@@ -311,11 +349,24 @@ class GuiInputParser:
         if phase not in KNOWN_PHASES:
             raise ProtocolError(f"unknown phase {phase!r}")
 
+        # A READY with seq == 1 always starts a new run: the stream state is
+        # reset so that a second run fed to the same parser parses.
+        if phase == PHASE_READY and seq == 1 and self.saw_ready:
+            self._clear_state()
+
         if self.saw_exit:
             raise ProtocolError("a record followed the EXIT record")
 
         if not self.saw_ready and phase not in (PHASE_READY, PHASE_ERROR):
             raise ProtocolError(f"a {phase} record appeared before READY")
+
+        # The sequence must be CONTIGUOUS: the first record of a run carries
+        # seq=1 and every following record carries prev + 1.  A gap means
+        # that a record was lost in the serial log.
+        if seq != self.last_seq + 1:
+            raise ProtocolError(
+                f"seq is not contiguous: {seq} after {self.last_seq}"
+            )
 
         for key in REQUIRED_FIELDS[phase]:
             if key not in fields:
@@ -509,11 +560,17 @@ class GuiInputProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             parser.feed_line(self._state(seq=1))
 
-    def test_non_increasing_seq_fails(self):
+    def test_seq_gap_fails(self):
+        """The sequence must be contiguous: a gap means a lost record."""
         parser = self._parser()
-        parser.feed_line(self._ready(seq=5))
+        parser.feed_line(self._ready(seq=1))
         with self.assertRaises(ProtocolError):
-            parser.feed_line(self._state(seq=4))
+            parser.feed_line(self._state(seq=3))
+
+    def test_first_seq_must_be_one(self):
+        parser = self._parser()
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._ready(seq=2))
 
     def test_state_before_ready_fails(self):
         parser = self._parser()
@@ -567,8 +624,14 @@ class GuiInputProtocolTests(unittest.TestCase):
 
     def test_unknown_phase_fails(self):
         parser = self._parser()
+        parser.feed_line(self._ready(seq=1))
+        fields = {
+            "nonce": self.NONCE,
+            "seq": "2",
+            "phase": "MAYBE",
+        }
         with self.assertRaises(ProtocolError):
-            parser.feed_line(self._ready(phase="MAYBE"))
+            parser.feed_line(self._line(fields))
 
     def test_missing_required_field_fails(self):
         fields = {
@@ -584,28 +647,86 @@ class GuiInputProtocolTests(unittest.TestCase):
             parser.feed_line(self._line(fields))
 
     def test_malformed_field_fails(self):
+        """A token that is not key=value is rejected."""
         parser = self._parser()
         with self.assertRaises(ProtocolError):
-            parser.feed_line(f"{PROTOCOL_PREFIX} nonce={self.NONCE} seq=1 phase=READY bogus")
+            parser.feed_line(self._ready() + " bogus")
+
+    def test_malformed_field_name_fails(self):
+        parser = self._parser()
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._ready() + " 1bad=x")
 
     def test_duplicate_field_fails(self):
+        """A duplicated field is rejected (not just a duplicated seq)."""
         parser = self._parser()
         with self.assertRaises(ProtocolError):
-            parser.feed_line(
-                f"{PROTOCOL_PREFIX} nonce={self.NONCE} seq=1 seq=2 phase=READY"
-            )
+            parser.feed_line(self._ready() + " pid=99")
+
+    def test_empty_record_fails(self):
+        """A record with no fields at all is rejected."""
+        parser = self._parser()
+        with self.assertRaisesRegex(ProtocolError, "empty protocol record"):
+            parser.feed_line(PROTOCOL_PREFIX)
+
+    def test_record_without_a_nonce_fails(self):
+        parser = self._parser()
+        with self.assertRaisesRegex(ProtocolError, "no nonce"):
+            parser.feed_line(f"{PROTOCOL_PREFIX} seq=1 phase=READY")
+
+    def test_record_without_a_seq_fails(self):
+        parser = self._parser()
+        with self.assertRaisesRegex(ProtocolError, "no seq"):
+            parser.feed_line(f"{PROTOCOL_PREFIX} nonce={self.NONCE} phase=READY")
+
+    def test_record_without_a_phase_fails(self):
+        parser = self._parser()
+        with self.assertRaisesRegex(ProtocolError, "no phase"):
+            parser.feed_line(f"{PROTOCOL_PREFIX} nonce={self.NONCE} seq=1")
+
+    def test_seq_must_be_positive(self):
+        """A sequence number below one is rejected."""
+        for seq in (0, -1):
+            with self.subTest(seq=seq):
+                parser = self._parser()
+                with self.assertRaisesRegex(ProtocolError, "seq must be >= 1"):
+                    parser.feed_line(self._ready(seq=seq))
+
+    def test_state_before_ready_with_seq_one_fails(self):
+        """A STATE as the very first record is rejected.
+
+        The sequence number is contiguous here, so only the "before READY"
+        rule can reject it.
+        """
+        parser = self._parser()
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._state(seq=1))
+
+    def test_ready_with_a_non_integer_coordinate_fails(self):
+        parser = self._parser()
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._ready(seq=1, btn_x="abc"))
+
+    def test_exit_with_an_empty_detail_fails(self):
+        parser = self._parser()
+        parser.feed_line(self._ready(seq=1))
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._exit(seq=2, detail=""))
+
+    def test_stream_without_a_ready_fails(self):
+        parser = self._parser()
+        parser.feed_line(
+            f"{PROTOCOL_PREFIX} nonce={self.NONCE} seq=1 phase=ERROR errno=5 detail=io"
+        )
+        with self.assertRaisesRegex(ProtocolError, "without a READY record"):
+            parser.finish()
 
     def test_record_after_exit_fails(self):
         parser = self._parser()
-        parser.feed_line(self._ready())
-        parser.feed_line(self._exit())
+        parser.feed_line(self._ready(seq=1))
+        parser.feed_line(self._exit(seq=2))
         with self.assertRaises(ProtocolError):
-            parser.feed_line(self._state(seq=9))
-
-    def test_empty_record_fails(self):
-        parser = self._parser()
-        with self.assertRaises(ProtocolError):
-            parser.feed_line(PROTOCOL_PREFIX)
+            parser.feed_line(self._state(seq=3))
 
     # -- control-file acknowledgements --------------------------------
 
@@ -680,6 +801,68 @@ class GuiInputProtocolTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].phase, PHASE_READY)
 
+    def test_a_second_run_parses_after_a_reset(self):
+        """A second run fed to the same parser must parse.
+
+        The reset really forgets the stream state -- not just the read
+        cursor -- so the second run's seq=1 is accepted again.
+        """
+        parser = self._parser()
+        run1 = self._ready(seq=1) + "\n" + self._state(seq=2) + "\n" + self._exit(seq=3) + "\n"
+        parser.feed(run1)
+        self.assertEqual(len(parser.records), 3)
+        parser.finish()
+
+        parser.reset()
+        run2 = self._ready(seq=1) + "\n" + self._state(seq=2) + "\n" + self._exit(seq=3) + "\n"
+        parser.feed(run2)
+        self.assertEqual(
+            [r.phase for r in parser.records], [PHASE_READY, PHASE_STATE, PHASE_EXIT]
+        )
+        parser.finish()
+
+    def test_a_replaced_buffer_starts_a_new_run(self):
+        """A replaced output buffer is a new run: the state is reset.
+
+        The second buffer must really differ in its first characters, or
+        the parser would not notice the replacement at all.  It therefore
+        starts with an ERROR record -- exactly what the guest probe emits
+        when it fails before it is ready.
+        """
+        parser = self._parser()
+        run1 = self._ready(seq=1) + "\n" + self._state(seq=2) + "\n" + self._exit(seq=3) + "\n"
+        parser.feed(run1)
+        self.assertEqual(len(parser.records), 3)
+
+        # A different log: the parser notices that the buffer was replaced.
+        run2 = (
+            f"{PROTOCOL_PREFIX} nonce={self.NONCE} seq=1 phase=ERROR errno=5 detail=io\n"
+            + self._ready(seq=2) + "\n"
+            + self._state(seq=3) + "\n"
+            + self._exit(seq=4) + "\n"
+        )
+        self.assertNotEqual(run1[:64], run2[:64])
+        parser.feed(run2)
+        self.assertEqual(
+            [r.phase for r in parser.records],
+            [PHASE_ERROR, PHASE_READY, PHASE_STATE, PHASE_EXIT],
+        )
+        parser.finish()
+
+    def test_a_ready_with_seq_one_starts_a_new_run(self):
+        """Line-at-a-time feeding: a second READY starts a new run."""
+        parser = self._parser()
+        parser.feed_line(self._ready(seq=1))
+        parser.feed_line(self._state(seq=2))
+        parser.feed_line(self._exit(seq=3))
+        parser.feed_line(self._ready(seq=1))
+        parser.feed_line(self._state(seq=2))
+        parser.feed_line(self._exit(seq=3))
+        self.assertEqual(
+            [r.phase for r in parser.records], [PHASE_READY, PHASE_STATE, PHASE_EXIT]
+        )
+        parser.finish()
+
     # -- errors -------------------------------------------------------
     def test_error_record_is_reported(self):
         parser = self._parser()
@@ -690,6 +873,55 @@ class GuiInputProtocolTests(unittest.TestCase):
         self.assertEqual(parser.error_record.int_field("errno"), 5)
         with self.assertRaises(ProtocolError):
             parser.finish()
+
+    # -- the per-phase required field sets ---------------------------
+
+    def test_exit_without_result_fails(self):
+        """REQUIRED_FIELDS[EXIT] is uniquely covered by 'result'."""
+        parser = self._parser()
+        parser.feed_line(self._ready())
+        fields = {
+            "nonce": self.NONCE,
+            "seq": "2",
+            "phase": PHASE_EXIT,
+            "exit_code": "0",
+            "detail": "ok",
+        }
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._line(fields))
+
+    def test_exit_without_detail_fails(self):
+        parser = self._parser()
+        parser.feed_line(self._ready())
+        fields = {
+            "nonce": self.NONCE,
+            "seq": "2",
+            "phase": PHASE_EXIT,
+            "result": "PASS",
+            "exit_code": "0",
+        }
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._line(fields))
+
+    def test_state_without_textarea_fails(self):
+        parser = self._parser()
+        parser.feed_line(self._ready())
+        fields = {
+            "nonce": self.NONCE,
+            "seq": "2",
+            "phase": PHASE_STATE,
+            "click_count": "00",
+            "slider": "00",
+            "scroll": "00",
+            "focus": "01",
+            "textarea2": "",
+            "physical_key": "0",
+            "modifiers": "0",
+            "action": "-1",
+            "sigint_seen": "0",
+        }
+        with self.assertRaises(ProtocolError):
+            parser.feed_line(self._line(fields))
 
 
 if __name__ == "__main__":

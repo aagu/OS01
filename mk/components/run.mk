@@ -616,8 +616,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # (platform, lvgl, devfs-input, input-frame, input-route, input-decode,
 # input-platform) or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-platform input-lvgl
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -694,6 +694,15 @@ _test-gui-host-run-input-route:
 _test-gui-host-run-input-decode:
 	@echo "  [test-gui-host] input-decode"
 	$(call os01_submake,hosttests,test-gui-input-decode $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 10 (fix round 1): the guest input probe's nonce rule.
+# Runs test_gui_input_nonce.elf, which host-compiles the REAL rule
+# (user/test_gui_input/gui_input_nonce.h) and asserts that a nonce is hex,
+# that a path escape is impossible by construction and that the control
+# path is exactly /tmp/gui-input-<hex>.ctl.
+_test-gui-host-run-input-nonce:
+	@echo "  [test-gui-host] input-nonce"
+	$(call os01_submake,hosttests,test-gui-input-nonce $(OS01_SUBMAKE_ARGS))
 
 # GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
 # and the platform error convergence.  Runs test_gui_input_platform.elf,

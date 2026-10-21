@@ -180,6 +180,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_input_route.elf \
     $(TEST_BLD)/test_gfx_input.elf \
     $(TEST_BLD)/test_gui_input_decode.elf \
+    $(TEST_BLD)/test_gui_input_nonce.elf \
     $(TEST_BLD)/test_gui_input_platform.elf \
     $(TEST_BLD)/test_gui_input_lvgl.elf
 
@@ -192,7 +193,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-platform test-gui-input-lvgl
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-nonce test-gui-input-platform test-gui-input-lvgl
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -3817,6 +3818,29 @@ $(TEST_BLD)/gui_input_ps2_production.o: $(TESTS_DIR)/libgui/src/input_ps2.c \
 
 $(TEST_BLD)/test_gui_input_decode.elf: $(TEST_BLD)/test_gui_input_decode.o \
 		$(TEST_BLD)/gui_input_ps2_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 10 (fix round 1): the guest input probe's nonce rule.
+# The nonce is interpolated into the control file's path, so it must be
+# hex: a path escape is then impossible by construction.  The fixture
+# host-compiles the REAL rule (user/test_gui_input/gui_input_nonce.h, the
+# header the guest probe uses) and pins the accept / reject table and the
+# fixed control path shape.
+.PHONY: test-gui-input-nonce
+test-gui-input-nonce: $(TEST_BLD)/test_gui_input_nonce.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_gui_input_nonce.o: $(TEST_CASES)/test_gui_input_nonce.c \
+		$(TESTS_DIR)/user/test_gui_input/gui_input_nonce.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/user/test_gui_input \
+	    -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gui_input_nonce.elf: $(TEST_BLD)/test_gui_input_nonce.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
