@@ -1223,7 +1223,7 @@ cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
 echo "[user-canary] audit passed"
 endef
 
-# ── test-static: 5 runtime audits via test-runtime + 5 standalone ──
+# ── test-static: 5 runtime audits via test-runtime + 7 standalone + user-canary ──
 test-static: test-runtime
 	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) syscall-boundary -- \
@@ -1254,6 +1254,52 @@ test-static: test-runtime
 	    --repo-root "$(OS01_ROOT)" \
 	    --profile "$(PROFILE)"
 	@$(MAKE) --no-print-directory test-user-canary
+
+# ── test-gui-incremental: the GUI library's incremental contract ──
+#
+# The AUDIT never spawns make: this recipe owns every build step and the
+# audit only records and compares snapshots (--incremental-snapshot /
+# --incremental-compare).  The four phases mirror the four assertions:
+#
+#   noop    a repeated build with no source change must not recompile
+#   touch   touching gui_input.h must rebuild the dependents and relink
+#   install install must clear orphaned files under staging/gui
+#   publish a new generation must be clean, the old ones preserved
+#
+# It is deliberately NOT part of test-static: the publish phase allocates a
+# new sysroot generation, so running it inside a static-audit bucket would
+# contend with the publisher's lock.
+GUI_INCREMENTAL_AUDIT = python3 qemutests/gui_build_audit.py \
+	--build-dir "$(BUILD_DIR)" --repo-root "$(OS01_ROOT)" --profile "$(PROFILE)"
+
+.PHONY: test-gui-incremental
+test-gui-incremental:
+	$(call require_capability,rootfs)
+	@echo "  [test-gui-incremental] phase 1/4: a repeated build must not recompile"
+	$(call os01_submake,libgui,all)
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
+	$(call os01_submake,libgui,all)
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
+	@echo "  [test-gui-incremental] phase 2/4: touching gui_input.h must rebuild the dependents"
+	@stat -c %y libgui/include/gui/gui_input.h > $(BUILD_DIR)/incr-header-time
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch
+	@touch libgui/include/gui/gui_input.h
+	$(call os01_submake,libgui,all)
+	$(MAKE) --no-print-directory test-gui-host CASE=input-decode
+	@touch -d "$$(cat $(BUILD_DIR)/incr-header-time)" libgui/include/gui/gui_input.h
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch
+	@echo "  [test-gui-incremental] phase 3/4: install must clear orphaned staging files"
+	@mkdir -p $(STAGING_DIR)/gui/usr/include/gui
+	@printf '/* orphaned staging file */\n' > $(STAGING_DIR)/gui/usr/include/gui/gui_input_private.h
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-install.json" --incremental-phase install
+	$(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui)
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-install.json" --incremental-phase install
+	@echo "  [test-gui-incremental] phase 4/4: a new generation must be clean, the old ones preserved"
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
+	@rm -f $(BUILD_DIR)/stamps/sysroot.stamp
+	$(MAKE) --no-print-directory sysroot
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
+	@echo "  [test-gui-incremental] all four incremental assertions PASS"
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
 test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
@@ -1403,7 +1449,9 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 12 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, driver-model-boundary, gui-build, test-user-canary, syscall-boundary, header-object, stack-frame)';
+		 'test-static'         '(rootfs)'     'All 13 static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, user-canary)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-gui-incremental' '(rootfs)'    'GUI library incremental contract (no-op rebuild, header-touch rebuild, staging orphan, generation publish)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \

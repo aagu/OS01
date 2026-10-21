@@ -143,6 +143,13 @@ jobs:
       - name: Runtime validation
         run: make test-runtime
 
+      # The static-audit bucket: it also runs the GUI build audit
+      # (gui_build_audit.py), which is the ONLY place the published sysroot
+      # contract and the target link probe are enforced.  The job already
+      # satisfies require_capability,rootfs (make test-runtime above).
+      - name: Static audits
+        run: make PROFILE=x86_64-clang test-static
+
       - name: Kernel layout
         run: make test-kernel-layout
 

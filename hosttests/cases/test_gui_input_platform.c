@@ -1268,6 +1268,68 @@ TEST_FUNC(test_create_destroy_cycles_return_to_baseline)
     gui_platform_destroy(platform);
 }
 
+/*
+ * The gfx input wrappers must intercept ONLY the handle the mock issued.
+ *
+ * The open/read/close wrappers already follow that rule (they hand every
+ * other fd back to __real_*).  The gfx half used to ignore the handle
+ * entirely, so an UNREGISTERED handle was bound "successfully" — a false
+ * positive that can mask a real bug.  The delegation path is now
+ * observable: an unregistered handle reaches the real implementation (the
+ * local "no gfx device" model) and fails with ENODEV, while the mock
+ * counters stay untouched.
+ */
+TEST_FUNC(test_gfx_input_wrappers_only_intercept_the_registered_handle)
+{
+    gui_test_reset();
+
+    /* The mock issues exactly ONE gfx handle: that is the registered one. */
+    gfx_handle_t *registered = gfx_open(0, 0, 64, 64);
+    assert_not_null(registered);
+
+    /* Any other non-NULL handle is NOT registered. */
+    static int foreign = 0;
+    gfx_handle_t *foreign_handle = (gfx_handle_t *)&foreign;
+
+    uint32_t binds_before = g_gui_test_counts.bind;
+    uint32_t unbinds_before = g_gui_test_counts.unbind;
+    uint32_t states_before = g_gui_test_counts.display_state;
+
+    gfx_input_state_t state;
+    memset(&state, 0, sizeof(state));
+    gfx_display_state_t dstate;
+    memset(&dstate, 0, sizeof(dstate));
+
+    /* The delegation path: the real implementation answers, and it must
+     * not look like a success. */
+    errno = 0;
+    assert_eq(-1, gfx_bind_input(foreign_handle, 3, 4, &state));
+    assert_eq(ENODEV, errno);
+    errno = 0;
+    assert_eq(-1, gfx_unbind_input(foreign_handle));
+    assert_eq(ENODEV, errno);
+    errno = 0;
+    assert_eq(-1, gfx_get_display_state(foreign_handle, &dstate));
+    assert_eq(ENODEV, errno);
+
+    /* The mock did NOT intercept the unregistered handle. */
+    assert_eq(binds_before, g_gui_test_counts.bind);
+    assert_eq(unbinds_before, g_gui_test_counts.unbind);
+    assert_eq(states_before, g_gui_test_counts.display_state);
+
+    /* The registered path is unchanged: it still succeeds and counts. */
+    errno = 0;
+    assert_eq(0, gfx_bind_input(registered, 3, 4, &state));
+    assert_eq(binds_before + 1, g_gui_test_counts.bind);
+    assert_eq(g_gui_test_bind_generation, state.generation);
+    errno = 0;
+    assert_eq(0, gfx_get_display_state(registered, &dstate));
+    assert_eq(states_before + 1, g_gui_test_counts.display_state);
+    errno = 0;
+    assert_eq(0, gfx_unbind_input(registered));
+    assert_eq(unbinds_before + 1, g_gui_test_counts.unbind);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_lifecycle_create_and_destroy),
     TEST_ENTRY(test_lifecycle_rollback_each_stage),
@@ -1290,6 +1352,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_platform_lost_owner_stops_delivery),
     TEST_ENTRY(test_platform_input_error_enters_terminal_path),
     TEST_ENTRY(test_create_destroy_cycles_return_to_baseline),
+    TEST_ENTRY(test_gfx_input_wrappers_only_intercept_the_registered_handle),
 TEST_LIST_END
 
 int main(void)

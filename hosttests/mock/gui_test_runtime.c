@@ -486,10 +486,61 @@ void __wrap_gfx_sprite_blit(gfx_handle_t *h, int32_t dst_x, int32_t dst_y,
 
 /* ── The physical-input lease (GUI-2 Task 4/6) ─────────────────── */
 
+/*
+ * The host fixtures do NOT link the real libgfx: the mock IS the whole
+ * gfx surface there (the GUI fixture link lines pull in the mock, the
+ * GUI objects and the real LVGL archive — never libgfx.a).
+ *
+ * The __real_* entry points below are therefore LOCAL MODELS of the real
+ * libgfx functions, not the real ones.  They model "there is no gfx
+ * device behind this handle": the call fails with ENODEV.
+ *
+ * They are deliberately NOT permanently-empty weak stubs and they never
+ * succeed: an empty stub would make the delegation path look like a
+ * successful bind, which is exactly the false positive the registered
+ * handle contract exists to prevent.
+ */
+int __real_gfx_bind_input(gfx_handle_t *h, int keyboard_fd, int mouse_fd,
+                          gfx_input_state_t *out_state)
+{
+    (void)h; (void)keyboard_fd; (void)mouse_fd; (void)out_state;
+    errno = ENODEV;
+    return -1;
+}
+
+int __real_gfx_unbind_input(gfx_handle_t *h)
+{
+    (void)h;
+    errno = ENODEV;
+    return -1;
+}
+
+int __real_gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)
+{
+    (void)h; (void)out;
+    errno = ENODEV;
+    return -1;
+}
+
+/*
+ * The ONE handle this mock issued: __wrap_gfx_open hands out exactly
+ * &s_mock_gfx_val.  Only that handle is intercepted; every other handle
+ * is handed back to the real implementation (the local model above).
+ * The libgui input unit only ever binds the handle it obtained from
+ * gfx_open(), so the registered path is the production path.
+ */
+static bool gui_test_gfx_handle_registered(gfx_handle_t *h)
+{
+    return h == (gfx_handle_t *)&s_mock_gfx_val;
+}
+
 int __wrap_gfx_bind_input(gfx_handle_t *h, int keyboard_fd, int mouse_fd,
                           gfx_input_state_t *out_state)
 {
-    (void)h; (void)keyboard_fd; (void)mouse_fd;
+    if (!gui_test_gfx_handle_registered(h)) {
+        /* Not our handle: hand it back to the real implementation. */
+        return __real_gfx_bind_input(h, keyboard_fd, mouse_fd, out_state);
+    }
     if (g_gui_test_fail_bind_errno) {
         errno = g_gui_test_fail_bind_errno;
         return -1;
@@ -508,14 +559,18 @@ int __wrap_gfx_bind_input(gfx_handle_t *h, int keyboard_fd, int mouse_fd,
 
 int __wrap_gfx_unbind_input(gfx_handle_t *h)
 {
-    (void)h;
+    if (!gui_test_gfx_handle_registered(h)) {
+        return __real_gfx_unbind_input(h);
+    }
     g_gui_test_counts.unbind++;
     return 0;
 }
 
 int __wrap_gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)
 {
-    (void)h;
+    if (!gui_test_gfx_handle_registered(h)) {
+        return __real_gfx_get_display_state(h, out);
+    }
     g_gui_test_counts.display_state++;
     if (g_gui_test_fail_display_state_errno) {
         errno = g_gui_test_fail_display_state_errno;

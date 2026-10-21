@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -331,7 +332,10 @@ def audit_user_flag_hygiene(
                 errors.append(
                     f"{label} contain an LVGL include path: {tok} -> {resolved}"
                 )
-            if "lv_conf.h" in resolved:
+            # The LVGL configuration header lives in config/lv_conf.h: the
+            # include DIRECTORY must be resolved to the file, not matched
+            # as a substring of the path.
+            if (path / "lv_conf.h").is_file():
                 errors.append(
                     f"{label} contain the LVGL configuration include path: {tok} -> {resolved}"
                 )
@@ -356,12 +360,24 @@ def _strip_c_comments(content: str) -> str:
     return content
 
 
+def _include_targets(content: str) -> list[tuple[str, str]]:
+    """Every #include target of a C header as (form, target) pairs.
+
+    Both include forms are matched: ``<angle>`` and ``"quoted"``.
+    """
+    out: list[tuple[str, str]] = []
+    for match in re.finditer(r'#\s*include\s*([<"])([^>"]+)[>"]', content):
+        out.append((match.group(1), match.group(2)))
+    return out
+
+
 def audit_published_headers(
     gen_dir: Path,
     sysroot: Path,
     errors: list[str],
 ) -> None:
-    """The published GUI tree must be exactly the public headers."""
+    """The published GUI tree must be exactly the public headers, and the
+    published sysroot must not expose any LVGL type."""
     roots: list[Path] = []
     for candidate in (gen_dir, sysroot):
         if not candidate or not candidate.exists():
@@ -371,6 +387,7 @@ def audit_published_headers(
             roots.append(candidate)
     for root in roots:
         gui_dir = root / "usr" / "include" / "gui"
+        inc_root = root / "usr" / "include"
         if not gui_dir.is_dir():
             errors.append(f"published GUI include directory missing: {gui_dir}")
             continue
@@ -385,17 +402,51 @@ def audit_published_headers(
                 f"published GUI include tree {gui_dir} contains {found}, expected exactly {expected}"
             )
         else:
-            # A published header may not include a gui header that is not
-            # published: the consumer would fail to compile.
+            # A published header may not include a header that is not
+            # published: the consumer would fail to compile.  Both include
+            # forms are matched and the target is resolved by its FULL
+            # relative path (never by basename), so <gui/sub/x.h> is not
+            # accepted because a gui/x.h happens to exist.
+            #
+            # Scope: the GUI publication tree.  A tree-relative include is
+            # one that names a directory ("<gui/...>", "<driver/...>"); a
+            # bare "<stdio.h>" is a compiler/system header and is not the
+            # publication's responsibility.
             for hdr in sorted(gui_dir.rglob("*.h")):
-                for target in re.findall(r"#\s*include\s*<([^>]+)>", hdr.read_text()):
-                    if not target.startswith("gui/"):
+                content = hdr.read_text(errors="replace")
+                for form, target in _include_targets(content):
+                    if form == '"':
+                        candidates = [hdr.parent / target, inc_root / target]
+                    elif "/" in target:
+                        candidates = [inc_root / target]
+                    else:
+                        # A bare system/compiler header — not ours to publish.
                         continue
-                    if not (gui_dir / Path(target).name).is_file():
-                        errors.append(
-                            f"published header {hdr.relative_to(root)} includes the "
-                            f"unpublished header {target}"
-                        )
+                    for candidate in candidates:
+                        try:
+                            inside = inc_root in candidate.parents
+                        except (OSError, ValueError):
+                            inside = False
+                        if not inside:
+                            continue
+                        if not candidate.is_file():
+                            errors.append(
+                                f"published header {hdr.relative_to(root)} includes the "
+                                f"unpublished header {target}"
+                            )
+                        break
+
+        # The binding constraint is about the SYSROOT, not only the GUI
+        # include tree: no published header may expose an LVGL type.
+        if inc_root.is_dir():
+            for hdr in sorted(inc_root.rglob("*.h")):
+                code = _strip_c_comments(hdr.read_text(errors="replace"))
+                match = re.search(r"\blv_\w+", code)
+                if match:
+                    errors.append(
+                        f"published header {hdr.relative_to(root)} exposes the LVGL "
+                        f"symbol {match.group(0)}"
+                    )
 
     # No private libgui header may appear ANYWHERE in the published
     # generation (a private header copied under another directory is still a
@@ -996,15 +1047,15 @@ def audit_sysroot_and_build(
                 if sym not in defined_syms:
                     errors.append(f"libgui.a missing expected defined symbol: {sym}")
 
-            # The host-only injection hooks must NOT be shipped.
-            for sym in GUI_TEST_HOOK_SYMBOLS:
-                if sym in defined_syms:
-                    errors.append(
-                        f"libgui.a exports the host-only test injection hook: {sym}"
-                    )
-            for sym in sorted(s for s in defined_syms if s.startswith("gui_input_test_")):
+            # The host-only injection hooks must NOT be shipped.  The two
+            # lists overlap on purpose (the named hooks are a subset of the
+            # gui_input_test_* family), so the offending set is collected
+            # once and each symbol is reported exactly once.
+            shipped_hooks = {sym for sym in defined_syms if sym.startswith("gui_input_test_")}
+            shipped_hooks.update(sym for sym in GUI_TEST_HOOK_SYMBOLS if sym in defined_syms)
+            for sym in sorted(shipped_hooks):
                 errors.append(
-                    f"libgui.a exports a host-only test injection hook: {sym}"
+                    f"libgui.a exports the host-only test injection hook: {sym}"
                 )
 
     # 6. Public header hygiene and consumer compilation
@@ -1017,11 +1068,13 @@ def audit_sysroot_and_build(
                 continue
             content = hdr.read_text()
             # A prose mention of LVGL in a comment is documentation, not a
-            # dependency; the code itself must not mention LVGL at all.
+            # dependency: the CODE of a public header must not mention LVGL
+            # at all.  Both the word check and the symbol check run on the
+            # comment-stripped text.
             code = _strip_c_comments(content)
             if "lvgl" in code.lower():
                 errors.append(f"Public header {hdr.name} contains reference to 'lvgl'")
-            if re.search(r"\blv_\w+", content):
+            if re.search(r"\blv_\w+", code):
                 errors.append(f"Public header {hdr.name} contains reference to 'lv_' symbols")
             if "OS01_HOST_TEST" in content:
                 errors.append(
@@ -1129,10 +1182,41 @@ def audit_sysroot_and_build(
     return True
 
 
-# ── Incremental build verification ──────────────────────────────────────
+# ── Incremental build verification (observe-only) ────────────────────────
+#
+# The audit NEVER spawns make.  The make recipe owns every build step
+# (mk/components/run.mk::test-gui-incremental) and the audit only records
+# and compares snapshots:
+#
+#   --incremental-snapshot FILE --incremental-phase PHASE   record
+#   --incremental-compare  FILE --incremental-phase PHASE   compare
+#
+# The phases mirror the four assertions of the incremental contract:
+#
+#   noop    a repeated build with no source change must not recompile
+#   touch   touching gui_input.h must rebuild the dependents and relink
+#   install install must clear orphaned files under staging/gui
+#   publish a new generation must be clean and the old ones preserved
+#
+# The `--incremental` mode is the build-free half: it verifies the state
+# invariants that need no build step (the dependency tracking itself, the
+# staging manifest, the published generations).
+
+INCREMENTAL_PHASES = ("noop", "touch", "install", "publish")
+
+# The files libgui's install rule publishes.  The staging tree must contain
+# exactly these (plus its own manifest) after an install.
+GUI_STAGED_FILES = (
+    "usr/include/gui/gui.h",
+    "usr/include/gui/gui_platform.h",
+    "usr/include/gui/gui_input.h",
+    "usr/lib/libgui.a",
+    "usr/share/licenses/libgui/LVGL-LICENCE.txt",
+)
 
 
 def _snapshot(root: Path) -> dict[str, int]:
+    """Every file under root with its mtime (ns)."""
     out: dict[str, int] = {}
     if root.exists():
         for p in sorted(root.rglob("*")):
@@ -1141,243 +1225,524 @@ def _snapshot(root: Path) -> dict[str, int]:
     return out
 
 
-def audit_incremental_build(
+def _parse_make_deps(dep_file: Path) -> list[str]:
+    """The dependency list of a make -MMD dependency file."""
+    try:
+        text = dep_file.read_text(errors="replace")
+    except OSError:
+        return []
+    text = text.replace("\\\n", " ")
+    _, _, deps = text.partition(":")
+    return [d for d in deps.split() if d]
+
+
+def _dependent_objects(obj_root: Path, header: Path) -> list[Path]:
+    """The objects whose dependency file lists the EXACT header path.
+
+    The match is on the resolved path, never on a substring: a decoy
+    dependency such as ``gui_input.h.stub`` does NOT satisfy it.
+    """
+    try:
+        wanted = header.resolve()
+    except OSError:
+        wanted = header
+    out: list[Path] = []
+    if not obj_root.is_dir():
+        return out
+    for dep_file in sorted(obj_root.rglob("*.d")):
+        hit = False
+        for dep in _parse_make_deps(dep_file):
+            try:
+                if Path(dep).resolve() == wanted:
+                    hit = True
+                    break
+            except OSError:
+                continue
+        if hit:
+            out.append(dep_file.with_suffix(".o"))
+    return out
+
+
+def _include_closure(
+    path: Path,
+    search_dirs: list[Path],
+    seen: set[Path] | None = None,
+) -> set[Path]:
+    """Every header reachable from `path` through #include directives."""
+    if seen is None:
+        seen = set()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    if resolved in seen or not path.is_file():
+        return set()
+    seen.add(resolved)
+    out: set[Path] = set()
+    try:
+        content = path.read_text(errors="replace")
+    except OSError:
+        return out
+    for form, target in _include_targets(content):
+        candidate: Path | None = None
+        if form == '"':
+            local = path.parent / target
+            if local.is_file():
+                candidate = local
+        if candidate is None:
+            for directory in search_dirs:
+                probe = directory / target
+                if probe.is_file():
+                    candidate = probe
+                    break
+        if candidate is not None:
+            try:
+                out.add(candidate.resolve())
+            except OSError:
+                pass
+            out |= _include_closure(candidate, search_dirs, seen)
+    return out
+
+
+def _must_rebuild_objects(
+    repo_root: Path,
+    build_dir: Path,
+    header: Path,
+) -> list[Path]:
+    """The libgui objects that MUST be rebuilt when the header changes.
+
+    Derived from the SOURCES (the transitive include closure), not from the
+    dependency files: a broken ``-MMD`` rule or a doctored ``.d`` file
+    cannot hide the fact that these objects include the public header.
+    """
+    libgui = repo_root / "libgui"
+    search = [libgui / "include", libgui / "internal", libgui / "src"]
+    obj_dir = build_dir / "libgui" / "obj" / "platform"
+    try:
+        wanted = header.resolve()
+    except OSError:
+        wanted = header
+    out: list[Path] = []
+    src_dir = libgui / "src"
+    if not src_dir.is_dir():
+        return out
+    for src in sorted(src_dir.glob("*.c")):
+        if wanted in _include_closure(src, search):
+            out.append(obj_dir / f"{src.stem}.o")
+    return out
+
+
+def _generation_snapshots(
+    generations_dir: Path,
+    with_digests: bool = False,
+) -> dict[str, dict[str, object]]:
+    """The published generations with a per-file fingerprint.
+
+    With ``with_digests`` the fingerprint is the file's SHA-256, so the
+    comparison proves the preserved generations are BYTE-identical, not
+    merely that their mtimes did not change.
+    """
+    import hashlib
+
+    if not generations_dir.is_dir():
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    for gen in sorted(p for p in generations_dir.iterdir() if p.is_dir()):
+        files: dict[str, object] = {}
+        for p in sorted(gen.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(gen))
+            if with_digests:
+                digest = hashlib.sha256()
+                with p.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(chunk)
+                files[rel] = digest.hexdigest()
+            else:
+                files[rel] = p.stat().st_mtime_ns
+        out[gen.name] = files
+    return out
+
+
+def _incremental_paths(repo_root: Path, build_dir: Path) -> dict[str, Path]:
+    return {
+        "obj_root": build_dir / "libgui" / "obj",
+        "archive": build_dir / "libgui" / "lib" / "libgui.a",
+        "fixture": build_dir / "host-test" / "test_gui_input_decode.elf",
+        "staging": build_dir / "staging" / "gui",
+        "generations": build_dir / "sysroot-generations",
+        "sysroot": build_dir / "sysroot",
+        "header": repo_root / "libgui" / "include" / "gui" / "gui_input.h",
+    }
+
+
+def incremental_snapshot(
     repo_root: Path,
     build_dir: Path,
     profile: str,
-    errors: list[str],
+    phase: str,
+    out_file: Path,
 ) -> bool:
-    """Verify the incremental / republication contract of the GUI library.
+    """Record the baseline the compare step will check against."""
+    errors: list[str] = []
+    paths = _incremental_paths(repo_root, build_dir)
+    header = paths["header"]
+    if not header.is_file():
+        errors.append(f"incremental: the public input header is missing: {header}")
+    deps = _dependent_objects(paths["obj_root"], header)
 
-    Checks:
-      * a repeated build with no source change does not recompile;
-      * touching gui_input.h rebuilds the library and the consumers that
-        depend on it;
-      * install clears orphaned files under the staging tree;
-      * a new generation contains no private headers;
-      * the preserved historical generations are not broken.
-    """
-    profile_file = repo_root / "mk" / "profiles" / f"{profile}.mk"
-    libgui_dir = repo_root / "libgui"
-    libgui_build = build_dir / "libgui"
-    obj_root = libgui_build / "obj"
-    archive = libgui_build / "lib" / "libgui.a"
-    public_header = repo_root / "libgui" / "include" / "gui" / "gui_input.h"
+    data = {
+        "phase": phase,
+        "profile": profile,
+        "repo_root": str(repo_root),
+        "build_dir": str(build_dir),
+        "header": str(header),
+        "dependent_objects": {str(o): (o.stat().st_mtime_ns if o.is_file() else None) for o in deps},
+        "objects": _snapshot(paths["obj_root"]),
+        "archive": (
+            {"path": str(paths["archive"]), "mtime_ns": paths["archive"].stat().st_mtime_ns}
+            if paths["archive"].is_file()
+            else None
+        ),
+        "fixture": (
+            {"path": str(paths["fixture"]), "mtime_ns": paths["fixture"].stat().st_mtime_ns}
+            if paths["fixture"].is_file()
+            else None
+        ),
+        "staging": {
+            str(p.relative_to(paths["staging"])): p.stat().st_mtime_ns
+            for p in sorted(paths["staging"].rglob("*"))
+            if p.is_file()
+        } if paths["staging"].is_dir() else {},
+        "generations": _generation_snapshots(paths["generations"], with_digests=(phase == "publish")),
+    }
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
-    def libgui_make(*args: str) -> subprocess.CompletedProcess[str]:
-        return run_cmd(
-            [
-                "make",
-                "-C",
-                str(libgui_dir),
-                f"OS01_PROFILE_FILE={profile_file}",
-                f"PROFILE={profile}",
-                *args,
-            ],
-            cwd=repo_root,
-        )
-
-    # 1. Build, then build again: the second build must not recompile.
-    res = libgui_make("all")
-    if res.returncode != 0:
-        errors.append(f"incremental: libgui build failed:\n{res.stderr.strip()}")
+    if errors:
+        for err in errors:
+            sys.stderr.write(f"  - {err}\n")
         return False
-    before = _snapshot(obj_root)
-    archive_before = archive.stat().st_mtime_ns if archive.is_file() else None
+    print(
+        f"gui incremental snapshot ({phase}): PASS "
+        f"({len(deps)} object(s) depend on {header.name})"
+    )
+    return True
 
-    res = libgui_make("all")
-    if res.returncode != 0:
-        errors.append(f"incremental: repeated libgui build failed:\n{res.stderr.strip()}")
-        return False
-    after = _snapshot(obj_root)
-    if before != after:
-        changed = sorted(
-            k for k in set(before) | set(after) if before.get(k) != after.get(k)
-        )
-        errors.append(
-            f"incremental: a repeated build recompiled {len(changed)} object(s): {changed[:8]}"
-        )
-    archive_after = archive.stat().st_mtime_ns if archive.is_file() else None
-    if archive_before != archive_after:
-        errors.append("incremental: a repeated build relinked libgui.a")
 
-    # 2. Which objects depend on the public input header?
-    header_dep_objs: list[Path] = []
-    for dep_file in sorted(obj_root.rglob("*.d")):
-        try:
-            content = dep_file.read_text()
-        except OSError:
-            continue
-        if "gui_input.h" in content:
-            header_dep_objs.append(dep_file.with_suffix(".o"))
-    if not header_dep_objs:
-        errors.append(
-            "incremental: no libgui object depends on gui_input.h — the dependency "
-            "tracking is broken"
-        )
-        return False
-
-    # 3. Touching the public header must rebuild the dependents and relink.
-    stat_before = public_header.stat()
-    try:
-        os.utime(public_header, None)
-        res = libgui_make("all")
-        if res.returncode != 0:
-            errors.append(f"incremental: libgui rebuild after touch failed:\n{res.stderr.strip()}")
-            return False
-        rebuilt = [
-            str(obj) for obj in header_dep_objs if obj.is_file() and obj.stat().st_mtime_ns > stat_before.st_mtime_ns
-        ]
-        if not rebuilt:
+def _compare_mtimes(
+    label: str,
+    before: dict[str, int],
+    after: dict[str, int],
+    errors: list[str],
+    expect_changed: bool,
+) -> None:
+    """Compare two mtime maps; `expect_changed` demands a difference."""
+    changed = sorted(
+        k for k in set(before) | set(after) if before.get(k) != after.get(k)
+    )
+    if expect_changed:
+        if not changed:
+            errors.append(f"incremental: {label} was not rebuilt")
+    else:
+        if changed:
             errors.append(
-                "incremental: touching gui_input.h did not rebuild any dependent object"
+                f"incremental: {label} changed although nothing should have "
+                f"rebuilt it: {changed[:8]}"
             )
-        if archive.is_file() and archive.stat().st_mtime_ns <= stat_before.st_mtime_ns:
-            errors.append("incremental: touching gui_input.h did not relink libgui.a")
-    finally:
-        os.utime(public_header, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
 
-    # 4. install must clear orphaned files under the staging tree.
-    with tempfile.TemporaryDirectory(prefix="gui-staging-") as td:
-        sim_staging = Path(td) / "staging" / "gui"
-        orphan = sim_staging / "usr" / "include" / "gui" / "gui_input_private.h"
-        orphan.parent.mkdir(parents=True, exist_ok=True)
-        orphan.write_text("/* orphaned file */\n")
-        res = libgui_make(f"INSTALL_ROOT={sim_staging}", "install")
-        if res.returncode != 0:
-            errors.append(f"incremental: libgui install failed:\n{res.stderr.strip()}")
-            return False
-        if orphan.exists():
-            errors.append("incremental: install did not clear the orphaned staging file")
-        sim_manifest = sim_staging / "manifest"
-        if not sim_manifest.is_file():
-            errors.append("incremental: install did not produce a staging manifest")
+
+def incremental_compare(
+    repo_root: Path,
+    build_dir: Path,
+    profile: str,
+    phase: str,
+    snapshot_file: Path,
+) -> bool:
+    """Check the recorded baseline against the current build state."""
+    errors: list[str] = []
+    if not snapshot_file.is_file():
+        errors.append(f"incremental: the snapshot file is missing: {snapshot_file}")
+        return _report_incremental(errors)
+    try:
+        data = json.loads(snapshot_file.read_text())
+    except (OSError, ValueError) as exc:
+        errors.append(f"incremental: cannot read the snapshot {snapshot_file}: {exc}")
+        return _report_incremental(errors)
+
+    if data.get("phase") != phase:
+        errors.append(
+            f"incremental: the snapshot was taken for phase '{data.get('phase')}' "
+            f"but the compare runs phase '{phase}'"
+        )
+        return _report_incremental(errors)
+
+    paths = _incremental_paths(repo_root, build_dir)
+    header = paths["header"]
+
+    if phase == "noop":
+        _compare_mtimes(
+            "the libgui objects", data.get("objects", {}), _snapshot(paths["obj_root"]), errors, False
+        )
+        before_archive = (data.get("archive") or {}).get("mtime_ns")
+        after_archive = paths["archive"].stat().st_mtime_ns if paths["archive"].is_file() else None
+        if before_archive != after_archive:
+            errors.append("incremental: a repeated build relinked libgui.a")
+        before_fixture = (data.get("fixture") or {}).get("mtime_ns")
+        after_fixture = paths["fixture"].stat().st_mtime_ns if paths["fixture"].is_file() else None
+        if before_fixture != after_fixture:
+            errors.append("incremental: a repeated build rebuilt the consumer")
+        _compare_generations(data.get("generations", {}), paths["generations"], errors, False)
+
+    elif phase == "touch":
+        # Two independent views of the same contract:
+        #
+        #   tracked      the objects whose .d file lists the EXACT header
+        #                (the dependency tracking must be intact);
+        #   must_rebuild the objects whose SOURCE includes the header
+        #                (derived from the sources, so a doctored .d file
+        #                or a dropped -MMD cannot hide the dependency).
+        #
+        # Both must be non-empty, and every object that must be rebuilt
+        # must actually have been rebuilt.
+        tracked = _dependent_objects(paths["obj_root"], header)
+        must_rebuild = _must_rebuild_objects(repo_root, build_dir, header)
+        if not must_rebuild:
+            errors.append(
+                f"incremental: no libgui source includes {header} — the audit "
+                "cannot establish the rebuild contract"
+            )
+        if not tracked:
+            errors.append(
+                f"incremental: no libgui object depends on {header} — the "
+                "dependency tracking is broken"
+            )
+        baseline = data.get("dependent_objects", {})
+        objects_before = data.get("objects", {})
+        for obj in must_rebuild:
+            before = objects_before.get(str(obj))
+            if before is None:
+                errors.append(
+                    f"incremental: the dependent object {obj.name} did not exist "
+                    "in the baseline"
+                )
+                continue
+            after = obj.stat().st_mtime_ns if obj.is_file() else None
+            if before == after:
+                errors.append(
+                    f"incremental: touching {header.name} did not rebuild the "
+                    f"dependent object {obj.name}"
+                )
+        for obj in tracked:
+            if str(obj) not in {str(o) for o in must_rebuild}:
+                errors.append(
+                    f"incremental: the object {obj.name} tracks {header.name} but "
+                    "its source does not include it"
+                )
+        before_archive = (data.get("archive") or {}).get("mtime_ns")
+        after_archive = paths["archive"].stat().st_mtime_ns if paths["archive"].is_file() else None
+        if before_archive == after_archive:
+            errors.append(
+                f"incremental: touching {header.name} did not relink libgui.a"
+            )
+        before_fixture = (data.get("fixture") or {}).get("mtime_ns")
+        after_fixture = paths["fixture"].stat().st_mtime_ns if paths["fixture"].is_file() else None
+        if before_fixture is not None and before_fixture == after_fixture:
+            errors.append(
+                f"incremental: touching {header.name} did not rebuild the consumer "
+                f"{paths['fixture'].name}"
+            )
+
+    elif phase == "install":
+        staging = paths["staging"]
+        if not staging.is_dir():
+            errors.append(f"incremental: the staging tree is missing: {staging}")
         else:
-            staged = sorted(ln.strip() for ln in sim_manifest.read_text().splitlines() if ln.strip())
-            expected = sorted(
-                [
-                    "usr/include/gui/gui.h",
-                    "usr/include/gui/gui_platform.h",
-                    "usr/include/gui/gui_input.h",
-                    "usr/lib/libgui.a",
-                    "usr/share/licenses/libgui/LVGL-LICENCE.txt",
-                ]
+            staged = sorted(
+                str(p.relative_to(staging))
+                for p in staging.rglob("*")
+                if p.is_file() and p.name != "manifest"
             )
-            if staged != expected:
+            if staged != sorted(GUI_STAGED_FILES):
                 errors.append(
-                    f"incremental: the staged manifest is {staged}, expected {expected}"
+                    f"incremental: install did not clear the orphaned staging file(s); "
+                    f"the staging tree contains {staged}, expected {sorted(GUI_STAGED_FILES)}"
                 )
-        for leaked in sorted(sim_staging.rglob("*.h")):
-            if leaked.name in GUI_PRIVATE_HEADERS:
+            manifest = staging / "manifest"
+            if not manifest.is_file():
+                errors.append("incremental: install did not produce a staging manifest")
+            else:
+                lines = sorted(
+                    ln.strip() for ln in manifest.read_text().splitlines() if ln.strip()
+                )
+                if lines != sorted(GUI_STAGED_FILES):
+                    errors.append(
+                        f"incremental: the staging manifest is {lines}, expected "
+                        f"{sorted(GUI_STAGED_FILES)}"
+                    )
+            for leaked in sorted(staging.rglob("*.h")):
+                if leaked.name in GUI_PRIVATE_HEADERS:
+                    errors.append(
+                        f"incremental: a private header was staged: "
+                        f"{leaked.relative_to(staging)}"
+                    )
+
+    elif phase == "publish":
+        before_gens = data.get("generations", {})
+        after_gens = _generation_snapshots(paths["generations"], with_digests=True)
+        new_gens = sorted(set(after_gens) - set(before_gens))
+        if not new_gens:
+            errors.append("incremental: publishing did not create a new sysroot generation")
+        _compare_generations(
+            before_gens, paths["generations"], errors, False, with_digests=True
+        )
+        for name in new_gens:
+            gen = paths["generations"] / name
+            gui_dir = gen / "usr" / "include" / "gui"
+            if not gui_dir.is_dir():
                 errors.append(
-                    f"incremental: a private header was staged: {leaked.relative_to(sim_staging)}"
+                    f"incremental: the new generation {name} has no published GUI tree"
+                )
+                continue
+            found = sorted(
+                str(p.relative_to(gui_dir)) for p in gui_dir.rglob("*") if p.is_file()
+            )
+            leaked = [f for f in found if f not in GUI_PUBLIC_HEADERS]
+            if leaked:
+                errors.append(
+                    f"incremental: the new generation {name} exposes private headers: {leaked}"
+                )
+        if new_gens and paths["sysroot"].is_symlink():
+            current = os.readlink(paths["sysroot"])
+            if Path(current).name not in new_gens:
+                errors.append(
+                    f"incremental: the published sysroot does not point at the new "
+                    f"generation {new_gens[-1]} (it points at {current})"
                 )
 
-    # 5. The published generations: the NEW one must be clean and the
-    #    preserved historical ones must not be broken.
-    generations_dir = build_dir / "sysroot-generations"
-    if not generations_dir.is_dir():
-        errors.append(f"incremental: no sysroot generations directory: {generations_dir}")
-        return False
+    else:
+        errors.append(f"incremental: unknown phase '{phase}'")
 
-    before_gens = {
-        p.name: _snapshot(p) for p in sorted(generations_dir.iterdir()) if p.is_dir()
-    }
+    return _report_incremental(errors)
 
-    # Publish a fresh generation through the repository root entry point.
-    # The publisher is content-gated (an unchanged staging tree does not
-    # re-publish), so the publish stamp is removed to force the real
-    # republication path to run.  The stamp is recreated by the same
-    # invocation.
-    publish_stamp = build_dir / "stamps" / "sysroot.stamp"
-    stamp_existed = publish_stamp.is_file()
-    if stamp_existed:
-        publish_stamp.unlink()
-    res = run_cmd(["make", f"PROFILE={profile}", "sysroot"], cwd=repo_root)
-    if res.returncode != 0:
-        errors.append(f"incremental: publishing a new sysroot generation failed:\n{res.stderr.strip()}")
-        return False
 
-    after_gens = {
-        p.name: _snapshot(p) for p in sorted(generations_dir.iterdir()) if p.is_dir()
-    }
-    new_gens = sorted(set(after_gens) - set(before_gens))
-    if not new_gens:
-        errors.append("incremental: publishing did not create a new sysroot generation")
+def _compare_generations(
+    before: dict[str, dict[str, object]],
+    generations_dir: Path,
+    errors: list[str],
+    expect_new: bool,
+    with_digests: bool = False,
+) -> None:
+    """The preserved historical generations must not be broken.
 
-    # The historical generations must be preserved untouched.
-    for name, snap in before_gens.items():
-        if name not in after_gens:
+    With ``with_digests`` the comparison is byte-exact (SHA-256 per file);
+    otherwise it compares the mtimes.
+    """
+    after = _generation_snapshots(generations_dir, with_digests=with_digests)
+    for name, snap in before.items():
+        if name not in after:
             errors.append(f"incremental: the preserved generation {name} was removed")
             continue
-        if after_gens[name] != snap:
-            errors.append(f"incremental: the preserved generation {name} was modified")
-
-    # Every published generation (old and new) must expose the public GUI
-    # headers only.
-    for name in sorted(after_gens):
-        gen = generations_dir / name
-        gui_dir = gen / "usr" / "include" / "gui"
-        if not gui_dir.is_dir():
-            continue
-        found = sorted(str(p.relative_to(gui_dir)) for p in gui_dir.rglob("*") if p.is_file())
-        leaked = [f for f in found if f not in GUI_PUBLIC_HEADERS]
-        if leaked:
-            errors.append(
-                f"incremental: the published generation {name} exposes private headers: {leaked}"
+        if after[name] != snap:
+            changed = sorted(
+                k for k in set(snap) | set(after[name]) if snap.get(k) != after[name].get(k)
             )
-        for private in GUI_PRIVATE_HEADERS:
-            if (gen / "usr" / "include" / "gui" / private).exists():
+            errors.append(
+                f"incremental: the preserved generation {name} was modified: {changed[:8]}"
+            )
+    if expect_new and not (set(after) - set(before)):
+        errors.append("incremental: no new sysroot generation was published")
+
+
+def _report_incremental(errors: list[str]) -> bool:
+    if errors:
+        sys.stderr.write("GUI incremental build audit failed with the following errors:\n")
+        for err in errors:
+            sys.stderr.write(f"  - {err}\n")
+        print("gui incremental build audit: FAIL")
+        return False
+    print("gui incremental build audit: PASS")
+    return True
+
+
+def audit_incremental_state(
+    repo_root: Path,
+    build_dir: Path,
+    errors: list[str],
+) -> bool:
+    """The build-free half of the incremental contract.
+
+    Verifies the invariants that need no build step:
+      * the libgui dependency tracking names the EXACT public header (a
+        decoy dependency or a missing dependency fails here);
+      * the staging tree contains exactly the published files;
+      * every published generation exposes only the public GUI headers.
+    """
+    paths = _incremental_paths(repo_root, build_dir)
+    header = paths["header"]
+    if not header.is_file():
+        errors.append(f"incremental: the public input header is missing: {header}")
+        return False
+
+    deps = _dependent_objects(paths["obj_root"], header)
+    must_rebuild = _must_rebuild_objects(repo_root, build_dir, header)
+    if not must_rebuild:
+        errors.append(
+            f"incremental: no libgui source includes {header} — the audit cannot "
+            "establish the rebuild contract"
+        )
+    if not deps:
+        errors.append(
+            f"incremental: no libgui object depends on {header} — the dependency "
+            "tracking is broken"
+        )
+    else:
+        print(
+            f"gui incremental state: {len(must_rebuild)} libgui object(s) include "
+            f"{header.name} and {len(deps)} track it in their dependency file"
+        )
+
+    staging = paths["staging"]
+    if staging.is_dir():
+        staged = sorted(
+            str(p.relative_to(staging))
+            for p in staging.rglob("*")
+            if p.is_file() and p.name != "manifest"
+        )
+        if staged != sorted(GUI_STAGED_FILES):
+            errors.append(
+                f"incremental: the staging tree contains {staged}, expected "
+                f"{sorted(GUI_STAGED_FILES)}"
+            )
+
+    generations = paths["generations"]
+    if not generations.is_dir():
+        errors.append(f"incremental: no sysroot generations directory: {generations}")
+    else:
+        for gen in sorted(p for p in generations.iterdir() if p.is_dir()):
+            gui_dir = gen / "usr" / "include" / "gui"
+            if not gui_dir.is_dir():
+                continue
+            found = sorted(
+                str(p.relative_to(gui_dir)) for p in gui_dir.rglob("*") if p.is_file()
+            )
+            leaked = [f for f in found if f not in GUI_PUBLIC_HEADERS]
+            if leaked:
                 errors.append(
-                    f"incremental: the published generation {name} contains the private header {private}"
+                    f"incremental: the published generation {gen.name} exposes "
+                    f"private headers: {leaked}"
                 )
-
-    # 6. The CONSUMERS: a host fixture that consumes the public input header
-    #    must be rebuilt when that header changes.  The focused host case is
-    #    driven through the repository ROOT entry point — never through a
-    #    direct `make -C hosttests`.
-    fixture = build_dir / "host-test" / "test_gui_input_decode.elf"
-    host_case = "input-decode"
-
-    def build_host_case() -> subprocess.CompletedProcess[str]:
-        return run_cmd(
-            ["make", f"PROFILE={profile}", "test-gui-host", f"CASE={host_case}"],
-            cwd=repo_root,
-        )
-
-    res = build_host_case()
-    if res.returncode != 0:
-        errors.append(
-            f"incremental: the focused host case '{host_case}' failed:\n{res.stdout[-2000:]}"
-        )
-        return False
-    if not fixture.is_file():
-        errors.append(f"incremental: the host fixture was not built: {fixture}")
-        return False
-    fixture_before = fixture.stat().st_mtime_ns
-
-    stat_before = public_header.stat()
-    try:
-        os.utime(public_header, None)
-        res = build_host_case()
-        if res.returncode != 0:
-            errors.append(
-                f"incremental: the focused host case '{host_case}' failed after the "
-                f"header touch:\n{res.stdout[-2000:]}"
-            )
-            return False
-    finally:
-        os.utime(public_header, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
-
-    if fixture.stat().st_mtime_ns <= fixture_before:
-        errors.append(
-            "incremental: touching gui_input.h did not rebuild the consumer "
-            f"({fixture.name})"
-        )
+            for private in GUI_PRIVATE_HEADERS:
+                if (gen / "usr" / "include" / "gui" / private).exists():
+                    errors.append(
+                        f"incremental: the published generation {gen.name} contains "
+                        f"the private header {private}"
+                    )
 
     if errors:
         return False
-    print("gui incremental build audit: PASS")
+    print("gui incremental state audit: PASS")
     return True
 
 
@@ -1415,7 +1780,28 @@ def main() -> int:
     parser.add_argument(
         "--incremental",
         action="store_true",
-        help="Also verify the incremental build / republication contract",
+        help="Verify the build-free half of the incremental contract "
+             "(dependency tracking, staging tree, published generations)",
+    )
+    parser.add_argument(
+        "--incremental-snapshot",
+        type=str,
+        default=None,
+        help="Record an incremental baseline into the given file "
+             "(the audit never spawns make: the recipe drives the builds)",
+    )
+    parser.add_argument(
+        "--incremental-compare",
+        type=str,
+        default=None,
+        help="Compare the current build state against a recorded baseline",
+    )
+    parser.add_argument(
+        "--incremental-phase",
+        type=str,
+        default=None,
+        choices=list(INCREMENTAL_PHASES),
+        help="The incremental phase a snapshot/compare pair belongs to",
     )
 
     args = parser.parse_args()
@@ -1431,11 +1817,8 @@ def main() -> int:
         if not audit_assert_config(repo_root, host_cc):
             success = False
 
-    if args.sysroot or args.build_dir:
+    if args.sysroot and args.build_dir:
         ran_any = True
-        if not args.sysroot or not args.build_dir:
-            sys.stderr.write("Both --sysroot and --build-dir are required for sysroot audit.\n")
-            return 2
         sysroot_path = Path(args.sysroot).resolve()
         build_dir_path = Path(args.build_dir).resolve()
 
@@ -1447,16 +1830,57 @@ def main() -> int:
         if not audit_sysroot_and_build(sysroot_path, build_dir_path, repo_root, host_cc, profile):
             success = False
 
-        if args.incremental:
-            ran_any = True
-            incremental_errors: list[str] = []
-            if not audit_incremental_build(repo_root, build_dir_path, profile, incremental_errors):
-                sys.stderr.write(
-                    "GUI incremental build audit failed with the following errors:\n"
-                )
-                for err in incremental_errors:
-                    sys.stderr.write(f"  - {err}\n")
-                print("gui incremental build audit: FAIL")
+    if args.incremental:
+        ran_any = True
+        if not args.build_dir:
+            sys.stderr.write("--build-dir is required for the incremental state audit.\n")
+            return 2
+        build_dir_path = Path(args.build_dir).resolve()
+        incremental_errors: list[str] = []
+        if not audit_incremental_state(repo_root, build_dir_path, incremental_errors):
+            sys.stderr.write(
+                "GUI incremental build audit failed with the following errors:\n"
+            )
+            for err in incremental_errors:
+                sys.stderr.write(f"  - {err}\n")
+            print("gui incremental build audit: FAIL")
+            success = False
+
+    # The snapshot / compare pair needs the build directory only: it never
+    # touches the published sysroot, it only records and compares build
+    # state.  The make recipe (mk/components/run.mk::test-gui-incremental)
+    # owns every build step — the audit never spawns make.
+    if args.incremental_snapshot or args.incremental_compare:
+        ran_any = True
+        if not args.build_dir:
+            sys.stderr.write("--build-dir is required for the incremental snapshot/compare.\n")
+            return 2
+        if not args.incremental_phase:
+            sys.stderr.write(
+                "--incremental-snapshot/--incremental-compare require --incremental-phase.\n"
+            )
+            return 2
+        build_dir_path = Path(args.build_dir).resolve()
+        profile = args.profile or os.environ.get("PROFILE") or (
+            build_dir_path.parent.name if build_dir_path.parent.name else "x86_64-clang"
+        )
+        if args.incremental_snapshot:
+            if not incremental_snapshot(
+                repo_root,
+                build_dir_path,
+                profile,
+                args.incremental_phase,
+                Path(args.incremental_snapshot),
+            ):
+                success = False
+        if args.incremental_compare:
+            if not incremental_compare(
+                repo_root,
+                build_dir_path,
+                profile,
+                args.incremental_phase,
+                Path(args.incremental_compare),
+            ):
                 success = False
 
     if not ran_any:
