@@ -267,3 +267,144 @@ P3: fb ✅ → 2D API ✅ → 字体 → Window Server；PS/2 鼠标 ✅ 并行
    - `int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)`：查询当前所有权代数及前台/fallback 状态标志。
    - `int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h)`：在分辨率切换等场景下原子换绑 fallback。
 
+---
+
+## GUI-2 输入与焦点（Input & Focus，2026-10-22 闭环）
+
+> 状态：**已完成**。把 `/dev/keyboard` 扫描码与 `/dev/mouse` 事件接入 LVGL indev，实现光标、修饰键、按下/释放、重复、Tab 导航与控件焦点，并用**独占物理输入租约**保证同一时刻只有一个读取者。
+> 设计见 [spec](../superpowers/specs/2026-10-20-gui-2-input-focus-design.md)，实施见 [plan](../superpowers/plans/2026-10-20-gui-2-input-focus.md)，验证证据见 [验证报告](../superpowers/reports/2026-10-22-gui-2-validation.md)。
+
+### 1. 架构：输入路由与独占租约（the input lease）
+
+`kernel/driver/input_route.c` 是 PS/2 驱动与**所有**输入字节读者之间的唯一通道，位于 `/dev/keyboard`、`/dev/mouse` 的读路径之上。它持有三样东西：
+
+| 职责 | 说明 |
+|------|------|
+| **物理键状态** | 「哪些键真的按住了」的唯一权威；Caps Lock 锁存也只在这里翻转一次，NORMAL 路径的翻译器绝不二次翻转 Caps |
+| **租约（lease）** | 同一时刻至多一个活跃租约，绑定一个 display view；租约存活期间所有其他文件被挡在设备外（读返回 `EBUSY`，`poll` 报 `POLLERR`） |
+| **路由决定** | 一个**完整**的扫描序列（绝不半个）被发布到 NORMAL 路径或租约的 ACTIVE 路径之一 |
+
+**两条路径**：
+
+- **NORMAL 路径**：租约之外的普通读者（控制台 TTY 之前的历史行为），驱动把帧发布到注册的 sink。
+- **ACTIVE 路径**：租约持有者的文件；队列、错误与授权全部由 route 裁决。
+
+**锁序**：`route → NORMAL queue/poll`。route 从不取 i8042 锁、显示状态锁或显示互斥锁；NORMAL 的 read/poll 在 route 自己的临界区里完成授权、出队与 waiter 登记，因此与 publish 的竞态不会丢事件。`input_route_lease_live()` 只取 route 锁，可在显示锁下调用（锁序 `display → route`），所以「有没有租约」的两个答案永远不会分叉。
+
+**租约与显示所有权同生共死**：`GFX_BIND_INPUT` 把调用者的 keyboard/mouse fd 绑定到调用者的 **display view**，租约因此随显示所有权一起获得与释放；绑定文件的最终关闭（final close）在内核内部撤销租约。
+
+### 2. UAPI 布局（`kernel/include/uapi/gfx.h`）
+
+```c
+#define GFX_BIND_INPUT   0x470A   /* INOUT：绑定物理输入租约到调用者的 view */
+#define GFX_UNBIND_INPUT 0x470B   /* 释放调用者自己的租约 */
+
+typedef struct {
+    int32_t  keyboard_fd;       /* +0  必需的 /dev/keyboard fd */
+    int32_t  mouse_fd;          /* +4  /dev/mouse fd；-1 = 只租键盘 */
+    uint32_t flags;             /* +8  v1 必须为 0 */
+    uint32_t reserved;          /* +12 必须为 0 */
+    uint64_t generation;        /* +16 in: 0；out: 租约代数（非零、单调递增） */
+    uint32_t initial_modifiers; /* +24 in: 0；out: bit0 = Caps Lock，其余为 0 */
+    uint32_t reserved2;         /* +28 in: 0；out: 0 */
+} gfx_bind_input_t;              /* sizeof == 32，字段偏移由 _Static_assert 固定 */
+```
+
+- 整个结构体必须**可读且可写**，否则 `EFAULT`；结果字段（`generation` / `initial_modifiers`）进入时必须为 0。
+- `mouse_fd` 只有 `-1` 表示「只租键盘」；其他负值一律 `EBADF`。
+- 保留的 ABI 不动：`mouse_event_t` 仍是 **8 字节**（`kernel/include/uapi/mouse.h` 的 `_Static_assert` 固定），键盘仍是 **Set 1 原始扫描码负载**（E0 前缀键在用户态记为 `0x100 | 扫描码`）。
+- 租约不靠 termios 实现：TTY 的 `ISIG` 保持开启，隔离由内核的路由层完成。
+
+### 3. 原生 API（`libgui/include/gui/gui_input.h`）
+
+公开 sysroot 的 GUI 树仍然**只有** `gui.h`、`gui_input.h`、`gui_platform.h` 三个头，不暴露任何 `lv_*` 类型、私有桥接头或测试注入接口。
+
+```c
+gui_input_t *gui_input_create(gui_platform_t *platform, const gui_input_config_t *cfg);
+void         gui_input_destroy(gui_input_t *input);
+int          gui_input_get_pollfds(gui_input_t *input, struct pollfd out[2]);
+bool         gui_input_has_mouse(const gui_input_t *input);
+int          gui_input_dispatch(gui_input_t *input, const struct pollfd *fds, unsigned count);
+void         gui_input_set_key_handler(gui_input_t *input, gui_key_handler_t handler, void *userdata);
+void         gui_input_set_pointer_handler(gui_input_t *input, gui_pointer_handler_t handler, void *userdata);
+```
+
+- `gui_input_config_t.mode`：`GUI_INPUT_DEVICES`（真实设备，**独占物理输入租约**，读 `/dev/keyboard` 与 `/dev/mouse`）或 `GUI_INPUT_SYNTHETIC`（合成输入，不打开设备、不占租约）。真实设备只允许屏幕平台，合成输入只允许离屏平台。
+- `gui_input_get_pollfds()` 顺序固定为 keyboard、mouse；fd 只可借用，不得 read/close。
+- `gui_input_dispatch()` 只读取与入队，不渲染；应用持有主循环。
+- 所有权：输入对象挂接在平台上，`gui_platform_destroy()` 会自动销毁它；要自己掌控生命周期必须**先**销毁输入再销毁平台。
+- 事件类型：`gui_key_event_t`（`physical_key` / `modifiers` / `codepoint` / `action`）与 `gui_pointer_event_t`（`x` / `y` / `buttons` / `changed_buttons` / `wheel`）。`codepoint` 只可能是 ASCII 字符或 0，绝不会是 LVGL 的按键常量。
+- **回调先于控件路径**：`gui_key_handler_t` 返回 false 的事件才会继续送进 LVGL keypad。因此存在一处应用可见 / 控件可见的分歧——当 LVGL 侧的重新就绪协议尚未完成时，控件路径**不会**收到该键，但回调已经看到了它的 DOWN。需要「键一定到达控件」的应用必须等重新就绪后再让用户重新按下。
+- 焦点组（`gui_input_focus_*`）是 **libgui 私有**的：应用不直接登记可聚焦控件，焦点由 libgui 内部的焦点组维护（容量 64，focus outline 宽 2 像素）。
+
+### 4. errno 表面
+
+**内核绑定（`GFX_BIND_INPUT`）**：
+
+| errno | 含义 |
+|-------|------|
+| `EFAULT` | 结构体不可读且可写 |
+| `EBADF` | 描述符越界、未打开，或 `mouse_fd` 是 -1 以外的负值 |
+| `EINVAL` | 描述符不可读 / 不是输入设备，保留字段或结果字段非 0，或 view 未配置 |
+| `EACCES` | 调用者不是显示所有者 |
+| `ESTALE` | view 已失效（显示已易主） |
+| `EBUSY` | 已经存在一个租约 |
+| `EAGAIN` | 显示尚未初始化 |
+| `EIO` | 显示后端失败 |
+| `ENODEV` | 本内核没有输入路由（无 PS/2 链路） |
+
+**ACTIVE 路径的带外错误**（字节流本身保持原始 Set 1 负载）：
+
+| errno | 语义 | 粘性 |
+|-------|------|------|
+| `EOVERFLOW` | 一个序列没能装进 ACTIVE 队列：**数据流有丢失** | 整个租约生命周期内粘住 |
+| `ESTALE` | 一个序列跨越了 epoch 边界被吞掉：消费者的**键状态**可能已与物理状态分叉 | 粘住，直到消费者被告知（read 读出并清标志） |
+
+**libgui 用户态 API**：
+
+| errno | 出现位置 |
+|-------|----------|
+| `EINVAL` | `gui_input_create()`：平台为空 / 平台已死 / 已挂接输入 / mode 非法 / 模式与平台不匹配；`gui_input_dispatch()`：fd 不属于本对象、`count > 2`、`(fds == NULL && count != 0)`；`gui_input_get_pollfds()`：参数为空；`gui_input_set_*_handler()`：input 为 NULL |
+| `EBUSY` | `gui_input_create()`：该平台已挂接一个输入对象 |
+| `EBADF` | 已停止的输入对象上的 `gui_input_dispatch()` / `gui_input_get_pollfds()` |
+| `EOVERFLOW` | libgui 自己的 512 项 FIFO 满时入队 |
+| `EIO` | 鼠标记录长度不是 `sizeof(mouse_event_t)` 的整数倍；绑定失败且内核未给出 errno 时的兜底 |
+| `ESTALE` | dispatch 时设备出现 `POLLHUP` |
+| `EAGAIN` | 内核返回 `EAGAIN`：本轮读完了，不是错误 |
+
+`gui_input_create()` 失败时会**回滚**已做的步骤（关 fd、摘除显示绑定）并把最初失败的 errno 原样带回。
+
+### 5. 恢复路径
+
+| 事件 | 表现 | 恢复 |
+|------|------|------|
+| 显示所有权丢失（非前台） | `gfx_get_display_state()` 报 `EACCES`，`GUI_STATUS_LOST_OWNERSHIP` | 应用应交还租约并退出输入循环 |
+| 租约被内核撤销（owner 进程死亡 / 文件最终关闭） | 内核在 route 内部撤销租约；租约随显示 view 一起释放 | 键盘立刻回到 NORMAL 路径，控制台 TTY 恢复；下一个客户端可以重新绑定 |
+| 租约被抢占（新 owner 绑定） | 旧 owner 的租约代数不再匹配 | 旧 owner 的后续操作得到 `ESTALE` / `EACCES`，非零退出 |
+| 队列溢出 | `EOVERFLOW` | 数据流已丢失，**不可恢复**；消费者必须重新同步键状态 |
+| 跨 epoch 的序列 | `ESTALE` | 字节流完好：消费者重新同步键状态后可以继续读 |
+| owner 崩溃（SIGKILL / LVGL fatal / Ctrl-Q） | 内核 final-close 回收租约 | 终端与键盘一并回到正常状态（不留幽灵点击） |
+
+### 6. 固定容量与限制（明示边界）
+
+- **FIFO 固定 512 项**；每轮 dispatch 最多读 **256 个键盘字节**、**64 个鼠标事件**；每步最多投递 **256 项**。
+- 软件重复：**首次延迟 400 ms、之后 40 ms**；每步最多产生一个到期重复，无补发风暴。
+- Ctrl/Alt 从无到有会**取消旧活动键**，释放后不恢复。
+- 指针 **1 计数 = 1 像素**；光标是程序绘制的固定 **12×18** 箭头，热点 **(0,0)**，不引入图片 / 字体依赖；**垂直滚轮每刻度 32 px**，到边界时余量传播给父滚动容器，无可用目标则完全不动作。
+- **单活动键（single active key）**：LVGL 控件路径一次只跟踪**一个**活动键。新键的 DOWN 会先取消旧活动键（`gui_input_lvgl_cancel_key()`），此后**迟到的不匹配释放被拒绝**，不会误释放别的键。因此同时按住两个普通键时，只有最后一个能作用于控件；这不是丢事件，而是「一个活动键」语义的直接后果。
+- 每进程单 platform、每 platform 至多一个 input；单 UI 线程，应用持有主循环。
+- 合成输入（`GUI_INPUT_SYNTHETIC`）只用于离屏平台，不接触设备、不占租约。
+
+### 7. 构建/测试入口
+
+```sh
+# 聚焦的宿主 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
+make PROFILE=x86_64-clang test-gui-host CASE=input-decode
+make PROFILE=x86_64-clang test-gui-host CASE=all
+
+# QEMU E2E：12 个场景 × SMP 1/2 = 24 个结果
+make PROFILE=x86_64-clang test-qemu SUITE=gui
+```
+
+`CASE` 的合法取值：`platform`、`lvgl`、`devfs-input`、`input-frame`、`input-route`、`input-decode`、`input-nonce`、`input-platform`、`input-lvgl`（全部从仓库根 make 入口运行，不使用 `make -C hosttests`）。
+

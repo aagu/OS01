@@ -476,6 +476,51 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-kernel-canary-contract` | 仅 kernel canary 编译旗标契约 |
 | `test-aarch64-gic-spi` | 仅 PL011 RX 到 GIC SPI 注入 |
 | `test-resolution-host` | 分辨率切换器宿主聚焦测试分发（`RES_CASE=`） |
+| `test-gui-host` | GUI 宿主聚焦测试分发（`CASE=`，见下） |
+
+#### GUI 聚焦 CASE（`test-gui-host CASE=`）
+
+GUI-2 plan（2026-10-20）引入 `make PROFILE=x86_64-clang test-gui-host CASE=<name>`。合法取值由 `mk/components/run.mk` 的**单一列表** `GUI_HOST_REGISTERED_CASES` 定义：
+
+| CASE | 内容 |
+| --- | --- |
+| `platform` | GUI 平台后端（显示、tick、flush、生命周期） |
+| `lvgl` | LVGL 移植层的宿主断言 |
+| `devfs-input` | file-aware devfs read/poll 分派契约（host 编译真实的 `kernel/fs/devfs.c` + `file.c` + `poll.c`） |
+| `input-frame` | PS/2 成帧（Set 1 序列、E0 前缀、帧完整性） |
+| `input-route` | 内核输入路由与租约裁决 |
+| `input-decode` | 扫描码 → 字符解码（修饰键、Caps 锁存） |
+| `input-nonce` | 输入 nonce / 会话隔离 |
+| `input-platform` | 输入与平台的挂接契约（每平台至多一个 input） |
+| `input-lvgl` | LVGL indev 路径（光标、焦点、重复、取消协议） |
+
+`CASE=all`（或不指定 `CASE`）跑全部。**只存在这一个列表**——不维护第二份并行的 CASE 清单。新增宿主二进制必须同时接入 `hosttests/Makefile::TEST_BINS`、`run_hosttests` 协议与本 focused 入口。
+
+所有测试**只**从仓库根的 make 入口运行：`make PROFILE=x86_64-clang test-gui-host CASE=...`。**不要**用 `make -C hosttests`。
+
+#### GUI 头文件的发布规则（single-writer sysroot）
+
+`libgui/Makefile::install` 只把**三个**公开头装进暂存树：
+
+```
+usr/include/gui/gui.h
+usr/include/gui/gui_input.h
+usr/include/gui/gui_platform.h
+```
+
+加上 `usr/lib/libgui.a` 与 `usr/share/licenses/libgui/LVGL-LICENCE.txt`。`install` 目标**拒绝**写到 `$(STAGING_DIR)/gui` 以外的任何位置，并且只产出 manifest；`mk/components/sysroot.mk` 是 sysroot generation 的**唯一写入者**，它消费 manifest 后原子发布 `build/<profile>/sysroot` 符号链接。
+
+因此**发布出去的 GUI 树必须恰好是** `{gui.h, gui_input.h, gui_platform.h}`：
+
+- 不得出现任何 `lv_*` 类型（LVGL 头是编译期依赖，不是发布面）。
+- 不得出现私有桥接头（`libgui/internal/*.h` 只在编译期可见）。
+- 不得出现测试注入接口。
+
+`make PROFILE=x86_64-clang sysroot` 之后可以直接核对发布面：
+
+```sh
+ls build/x86_64-clang/sysroot/usr/include/gui/
+```
 
 ### 4. Alias policy（别名策略）
 
@@ -549,7 +594,8 @@ make test-qemu SUITE=network        # 网络回归
 make test-qemu SUITE=resolution     # 分辨率切换 surface/session 验收
 make test-qemu SUITE=monitor        # 终端 monitor 1/2/8 核矩阵 + 终端生命周期
 make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 稳态字节/ns 性能门控（spec §8）；baseline 通过 TERMINAL_PRESENT_BASELINE_LOG 覆盖
-make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端与故障注入验收（SMP 1/2 矩阵）
+make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
+make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make test-static                    # 8 项静态审计
 make test-kernel-selftest           # 内核 selftest
