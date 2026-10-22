@@ -76,9 +76,10 @@ static inline unsigned gui_ps2_key_slot(uint16_t physical_key)
  *                          INPUT_ROUTE_MOD_* 的瞬时位；调用方负责换算。
  *
  * 只允许植入 **Caps 锁存位**（GUI_MOD_CAPS）：内核租约在 bind 时把已经按住
- * 的**普通键**标记为隔离（kernel/driver/input_route.c），并吞掉它们的
- * release，因此快照里聚合的 Shift/Ctrl/Alt 位描述的是消费者**从未看到**的
- * 按下边沿——据此认为修饰键按住了，就是相信了一个它没有观察到的状态。
+ * 的**所有键**（普通键与修饰键）标记为隔离（kernel/driver/input_route.c），
+ * 并吞掉它们的 release（消费者不会收到孤立的 UP），因此快照里聚合的
+ * Shift/Ctrl/Alt 位描述的是消费者**从未看到**的按下边沿——据此认为修饰键
+ * 按住了，就是相信了一个它没有观察到的状态。
  * 而且内核根本不把这些位交给用户态：租约 UAPI 只发布 Caps 位。Caps 锁存位
  * 不同：它是**状态**而不是边沿，消费者没有别的途径知道它，所以它必须被植入。
  *

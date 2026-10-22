@@ -864,13 +864,14 @@ int fb_input_bind(const void *view, uint64_t expected_mode,
                  * snapshot aggregates the physically held modifiers with the
                  * Caps latch, but the aggregate Shift/Ctrl/Alt bits are
                  * withheld here:
-                 *   - the ORDINARY keys still held at bind time are isolated
-                 *     and their release is swallowed, so those bits would
-                 *     describe presses the consumer never saw;
-                 *   - the held MODIFIER keys are NOT isolated — their
-                 *     release does reach the consumer — but their press
-                 *     predates the lease, so the consumer never saw that
-                 *     press either.
+                 *   - EVERY key still held at bind time is isolated — the
+                 *     ordinary keys AND the modifiers — and it stays
+                 *     isolated until its break.  That break is swallowed,
+                 *     so the new consumer never sees the press and never
+                 *     receives the break as an orphaned UP.  The aggregate
+                 *     Shift/Ctrl/Alt bits would therefore describe presses
+                 *     the consumer never saw, and they never cross the
+                 *     boundary.
                  * The Caps latch is different: it is a STATE, not an edge,
                  * and the consumer has no other way to learn it. */
                 *initial_modifiers = (mods & INPUT_ROUTE_MOD_CAPS) ? 1u : 0u;
