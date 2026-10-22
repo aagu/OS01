@@ -1,6 +1,6 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-22）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-23）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
@@ -9,7 +9,7 @@
 
 - fix(selftest): **`test_tty_vintr` parked 超时根因闭环**：late test 的观察方是 BSP idle；收到信号的 RUNNING 工作线程在等待 release 时反复 `schedule()`，同 CPU 上会饿死 idle。改为受 `task_list_lock` 保护的不可中断睡眠，cleanup 显式唤醒并等待恢复 `PF_KTHREAD`；新增固定同 CPU、跨 CPU、首次睡眠前提前清理覆盖，注入后主动切换稳定检验原死锁时序。修复前固定同 CPU 在 SMP=4 复现 `missing END line`，GDB 确认 worker `vintr_seen=1/release=0` 仍循环调度。修复后完整自测 SMP=4/8 各一次通过；2/4/8 CPU 各 3 次重复的 `tty_vintr` 9/9 PASS（完整套件其中 7 次仍因既有 `fd_refcount rc_-1` 失败）。43 项自测 runner 单测通过。10 月 19 日直接检查 signal/state 的改动仅缩短竞态窗口，旧归因由本次证据修正。roadmap 移除 VINTR 挂起项，保留独立 `kernel_mutex` 负载问题。详见 [根因与回归证据](debug/2026-10-22-tty-vintr-timeout.md)。
 
-- feat(gui): **GUI-2 输入与焦点闭环并合入 `master`**（分支 `feat/gui-2-input-focus`，基线 `6126504a` 之上 41 个 commit，2026-10-22 以 fast-forward 合入 `master`）：把 `/dev/keyboard` 扫描码与 `/dev/mouse` 事件接入 LVGL indev，实现光标、修饰键、按下/释放、重复、Tab 导航与控件焦点，并用**独占物理输入租约**保证同一时刻只有一个读取者。设计 [spec](superpowers/specs/2026-10-20-gui-2-input-focus-design.md)，实施 [plan](superpowers/plans/2026-10-20-gui-2-input-focus.md)，验证 [验证报告](superpowers/reports/2026-10-22-gui-2-validation.md)。
+- feat(gui): **GUI-2 输入与焦点闭环并合入 `master`**（分支 `feat/gui-2-input-focus`，基线 `6126504a` 之上 41 个 commit，2026-10-23 00:01 以 merge commit `90d3caa3` 合入 `master`——`master` 同期另有独立提交 `13000cbe`，故为**合并**而非 fast-forward，唯一的冲突是 `docs/changelog.md`，两侧条目均保留）：把 `/dev/keyboard` 扫描码与 `/dev/mouse` 事件接入 LVGL indev，实现光标、修饰键、按下/释放、重复、Tab 导航与控件焦点，并用**独占物理输入租约**保证同一时刻只有一个读取者。设计 [spec](superpowers/specs/2026-10-20-gui-2-input-focus-design.md)，实施 [plan](superpowers/plans/2026-10-20-gui-2-input-focus.md)，验证 [验证报告](superpowers/reports/2026-10-22-gui-2-validation.md)。
   - **内核侧输入路由**（`kernel/driver/input_route.c`）：PS/2 驱动与所有输入字节读者之间的唯一通道。持有**物理键状态**（Caps Lock 锁存只在这里翻转一次，NORMAL 路径的翻译器只读快照）、**租约**（至多一个活跃租约，绑定一个 display view，随显示所有权获得与释放）与**路由决定**（一个完整扫描序列发布到 NORMAL 或租约的 ACTIVE 路径之一）。锁序 route → NORMAL queue/poll；`input_route_lease_live()` 只取 route 锁，可在显示锁下调用。
   - **file-aware devfs 钩子**：`struct devfs_ops` 追加 `read_file` / `poll_file` 两个可选钩子（追加在最后，不改动既有设备 ABI）。`read_file` 收到具体的 `file_t`，设备因此能分辨**哪一个**读者拥有物理键盘；`poll_file` 返回 0 是合法的「未就绪」，不会被升级成「永远就绪」；`read_file` 的错误是终态。设备的最终关闭（final close）在内核内部撤销租约，进程被 SIGKILL 时租约一定回收。
   - **UAPI**：`GFX_BIND_INPUT` (0x470A) / `GFX_UNBIND_INPUT` (0x470B) 与 32 字节的 `gfx_bind_input_t`（字段偏移由 `_Static_assert` 固定）。errno 表面：`EFAULT`/`EBADF`/`EINVAL`/`EACCES`/`ESTALE`/`EBUSY`/`EAGAIN`/`EIO`/`ENODEV`。ACTIVE 路径的带外错误只有 `EOVERFLOW`（**数据流有丢失**，或**键状态可能已分叉**，即跨 epoch 的序列被吞掉），在整个租约生命周期内粘住——应用必须交还租约并重新绑定才能恢复；字节流本身保持原始 Set 1 负载。

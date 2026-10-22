@@ -107,7 +107,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1 ✅、GUI-2 ✅；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
 | GUI-6 terminal 窗口化 | 保留 PTY/VT100 核心，将渲染输出接入窗口 surface；键盘只投递到焦点终端，验证 Ctrl-C、alt-screen、窗口关闭和 shell 存活；缩放时更新 PTY winsize 并接通 SIGWINCH | GUI-5；terminal/PTY ✅；SIGWINCH（P5 剩余项） |
 
-顺序：GUI-1 ✅ → **GUI-2 ✅（2026-10-22，已合入 `master`）** → GUI-3；GUI-4 可随桌面推进。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
+顺序：GUI-1 ✅ → **GUI-2 ✅（2026-10-22 闭环，2026-10-23 合入 `master`）** → GUI-3；GUI-4 可随桌面推进。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
 
 #### 优化与验证项
 
