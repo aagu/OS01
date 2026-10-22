@@ -333,6 +333,21 @@ gui-incremental rc=0
 第二轮修复期间，QEMU GUI suite 在最终树上一度变红（4 次运行、3 种失败形态）。根因是**既有的**内核缺陷：`kernel/fs/devfs.c` 的 `serial_write()` **逐字节**释放控制台锁，因此另一路控制台写者可以插进一条协议记录中间，把记录劈成两半（实测 `[term-probe]` 的统计行落在 `... pointer_seen=0 fat` 与 `al_trigger=1` 之间）。该缺陷已在 `kernel/fs/devfs.c:109-142` 修复（整条缓冲在一次 `spin_lock_irqsave` 内发出），终端**打印内容不变**，runner 的解析器**未削弱**。详见 fix report 的 R2-4 一节。
 
 
+### 7.5 本轮新增的第二条观察（不是失败）：guest 侧 `test_lvgl` 的用户态 SIGSEGV
+
+第二轮修复期间在最终树上连续跑了 4 次 `SUITE=gui`，其中**第 3 次**的 SMP 1 `smoke` 用例失败：
+
+```
+/bin/test_lvgl smoke alias failed (ok=True, rc=139)
+Killing task 5 (user fault at RIP=000000000049884D, signal=11)
+```
+
+`0x49884D` 解析到 `build/x86_64-clang/user/test_lvgl.elf` 的 `memset`，且崩溃发生在 `[test_lvgl] Rendering and pixel assertions passed.` **之后**。
+
+**这不是这两轮修复引入的**：第二轮在 `libgui` 内的唯一改动是 `gui_input_lvgl_repeat_after_down` 里的一次比较，不可能损坏 `memset`；对 `kernel/driver/fb_state.c` 与 `libgfx/gfx.h` 的改动是**纯注释**。该现象在第 4、5 次运行与 §7.1 的最终干净门禁中**均未复现**。
+
+因此它被记录为一条**独立的、未定位的 guest 侧故障**：**未修**、**未**打包进任何修复，也**未**声称已修。后续需在能复现时抓 guest 侧寄存器/栈再定位。该项已同时登记到 `docs/roadmap.md` 的 Parked 段。
+
 ## 8. `055fd67b` 后的 code review 修复
 
 本节对应 worktree `.worktrees/gui-2-input-focus` 的后续九项评审修复，覆盖 §7 之后的代码变更；旧轮次结果保留作历史记录。

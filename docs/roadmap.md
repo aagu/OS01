@@ -1,7 +1,7 @@
 # OS01 优化路线图
 
-> **基准**: `4bf23983`（2026-10-11）
-> **日期**: 2026-10-11
+> **基准**: `4bf23983`（2026-10-11）；GUI-1/GUI-2 闭环后重整于 2026-10-22
+> **日期**: 2026-10-22
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`。
 
@@ -10,7 +10,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统）
 - **工程与架构治理**：AAGU 全套就绪；2026-10-04 规划 ARCH-1..10 架构治理任务（syscall 解耦、Linux ABI 兼容层独立、Muldefs 消除、调度器/VFS/驱动抽象治理等）
 - **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映已闭环；M2 Slab + M3 内核 VMM 设计就绪（spec v8 / plan v4），M4 用户态 VMA 与统一 kernel_main 待接入
-- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；QEMU 分辨率切换与显示所有权协调器（独占接管/fallback 自动恢复/只读 raw mmap 保护）已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并；**GUI-2 输入与焦点已闭环**（独占物理输入租约、LVGL indev、光标、修饰键、重复、Tab 焦点，QEMU SMP 1/2 共 24/24 通过）；后续推进 Material 风格桌面与窗口系统
+- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；QEMU 分辨率切换与显示所有权协调器（独占接管/fallback 自动恢复/只读 raw mmap 保护）已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并；**GUI-1 LVGL 平台后端已闭环**（`libgui` 公共平台层：显示/tick/flush/生命周期、离屏与屏幕后端分离）；**GUI-2 输入与焦点已闭环并合入 `master`**（独占物理输入租约、LVGL indev、光标、修饰键、重复、Tab 焦点，QEMU SMP 1/2 共 24/24 通过）；后续推进 Material 风格桌面与窗口系统
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
 
 详细背景、commit 记录、经验教训见 `docs/changelog.md` + 各专题 closure 文档（`docs/archive/aarch64/`）+ 主题 docs。
@@ -101,13 +101,13 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 内容 / 完成条件 | 依赖 |
 |----|-----------------|------|
-| GUI-1 LVGL 平台后端 | 从 `test_lvgl` 抽取可复用的显示、tick、flush 与生命周期接口；核对格式、stride、缓冲容量和错误传播。按 `lv_timer_handler()` 返回的等待时间结合 `poll` 驱动，区分离屏与屏幕后端；资源释放和失败回退有明确契约 | LVGL 初步移植 ✅；libgfx ✅ |
-| GUI-3 Material 风格桌面 | 用 LVGL 重构 `desktop.c`，统一颜色角色、字体层级、间距、圆角、elevation 与 hover/pressed/focus/disabled 状态；实现启动器、应用抽屉、状态栏及基本设置。先交付单进程桌面外壳，应用启动/退出及全屏切换明确，不以绘制窗口装饰代替窗口系统 | GUI-1、GUI-2 ✅；现有 desktop 演示 |
-| GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1；GUI-3 的文字/资源需求；文件后端见优化项 |
-| GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1、GUI-2 ✅；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
+| GUI-1 LVGL 平台后端 ✅ | **已完成（2026-10-19/20）**：从 `test_lvgl` 抽出可复用的 `libgui` 平台层——公共 API `gui_platform.h`（`gui_platform_create/destroy/step/get_pixel`；`gui_platform_step` 输出下一次 poll 等待时间，驱动方据此结合 `poll` 推进）、`libgui/src/platform.c`（显示/离屏后端、tick、flush、生命周期）、`libgui/src/tick.c`；格式、stride、缓冲容量与错误传播已核对并由宿主契约测试钉死。计划 7 个任务的 commit `2fb58e71`（fatal 断言审计）→ `622d6734`（公共/私有头）→ `648a23f7`（平台实现）→ `c27b900a`（真实渲染与生命周期）→ `f5a9f7bf`（目标归档与 sysroot）→ `acebb9df`（`test_lvgl` 迁移）→ `d829b36f`（QEMU 门禁）已全部合入 `master`。设计 [spec](superpowers/specs/2026-10-19-gui-1-lvgl-platform-backend-design.md)、实施 [plan](superpowers/plans/2026-10-19-gui-1-lvgl-platform-backend.md) | LVGL 初步移植 ✅；libgfx ✅ |
+| GUI-3 Material 风格桌面 | 用 LVGL 重构 `desktop.c`，统一颜色角色、字体层级、间距、圆角、elevation 与 hover/pressed/focus/disabled 状态；实现启动器、应用抽屉、状态栏及基本设置。先交付单进程桌面外壳，应用启动/退出及全屏切换明确，不以绘制窗口装饰代替窗口系统 | GUI-1 ✅、GUI-2 ✅；现有 desktop 演示 |
+| GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1 ✅；GUI-3 的文字/资源需求；文件后端见优化项 |
+| GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1 ✅、GUI-2 ✅；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
 | GUI-6 terminal 窗口化 | 保留 PTY/VT100 核心，将渲染输出接入窗口 surface；键盘只投递到焦点终端，验证 Ctrl-C、alt-screen、窗口关闭和 shell 存活；缩放时更新 PTY winsize 并接通 SIGWINCH | GUI-5；terminal/PTY ✅；SIGWINCH（P5 剩余项） |
 
-顺序：GUI-1 → **GUI-2 ✅（2026-10-22）** → GUI-3；GUI-4 可随桌面推进。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
+顺序：GUI-1 ✅ → **GUI-2 ✅（2026-10-22，已合入 `master`）** → GUI-3；GUI-4 可随桌面推进。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
 
 #### 优化与验证项
 
@@ -172,6 +172,8 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 - **QEMU 分辨率切换器收尾 follow-up（2026-10-06，`866fd801` FF 合并入 master；2026-10-20 parked #5 #1–#7 闭环于 `cd65b86`，head 可合并）**：主线交付后未闭环的 cosmetic/健壮性项，均不阻塞。Spec §7 头统一仍漏两处 pre-existing 重复定义（`user/test_terminal_screen.c:19`、`user/tetris_dump.c:22` 本地声明 `struct fb_info`，ABI 一致、无害）。`qemutests/test_resolution_switcher.py` 7 项（parked #5 编号 #1–#7）已闭环于 commit `cd65b86`（`test(resolution): robustness fixes for parked #5 items #1-#7`，+231/−24）：① `expect()` 增 `sentinels=` 参数；boot/restore/m{} 三类 surface 强制 `(0,0)=黑` sentinel（来自 `terminal_render.c:356` `gfx_fill_rect(... bg)` 后置约束）由 `_mk_surface_with_sentinel(w,h,fill=(2,2,2),sentinel=(0,0,(0,0,0)))` host 复现；③ `wait_for(r"HOLD ok", ..., start=mark)` 收紧；② `_drain_case` 用 hold-then-setres-assert-EBUSY 串起三步且 release 匹配 start 过滤陈旧；④ `_client_eagain_case` 同 start 化 + hold 8s 余量；⑤ `_mmap_case` 改 `parse_resjson` 过滤 `op=="mmap" and rc==0`；⑥ `run_test_suite` 现跑三启动 `_isolation_case`（spec §8.2 item-1 隔离契约）；⑦ `PROMPT_RE = re.compile(rf"^{re.escape(PROMPT)}", re.MULTILINE)` 行首锚定，3 callsite 替换；⑩ `main()` `parser.error()` 校验 `case` 置于 firmware gate 之前，未知 case 返回 SystemExit(2) 已损坏测试；补充 5 host unit test（`test_round_trip_sentinel_violation`、`test_mmap_helper_filters_partial_success`、`test_prompt_re_matches_at_line_start`/`_rejects_mid_line`/`_matches_after_first_command`、`test_main_unknown_case_exits_2`、`test_main_round_trip_standalone_rejected`）。**仍未闭环（parked #5 #8–#21）**：`HOLD ok`/`RELEASE ok` 匹配无 `start=` 会命中陈旧行（已用 start= 收紧但底层 r 仍可能误命中『nledo panic』或类似串，待审 SPEC §8.2 的副词表）；`_client_eagain_case` hold 8s 余量，慢机仍可能 flake（建议 12s）；客户端策略：`user/desktop.c`/`tetris.c`/`test_lvgl.c` 的重试/退出块三处近似重复（仅 classifier 抽到 `gfx_client_policy`），`user/test_lvgl.c` 永久失败早退 `return 1` 跳过 alt-screen 恢复。`user/terminal.c:301-302` present 门限混淆「限频」与「view 已失效」（瞬时 EAGAIN/get_state 失败会压制 250ms 有效 present），fatal 计数排除 `EBUSY` 而 present 只为 EAGAIN/ESTALE 起 retry（errno 集合不一致）。`fb_test`（仅测试构建）：token 存而不用作判别子、`fb_test_release_file`/`ioctl` 未先 `fb_test_lock_ensure`、`fb_test_arm_terminal` 缺 register-ARM 校验对称性、测试 sysroot 发布 kernel-private `driver/fb_test.h`。其他：`kernel/driver/fb.c` 的 `fb_write_row` 生产已死（仅 host mock 用）；`test_fb_uapi.c` 未用 `CHECK_TRUE`；T6 pty 遗留（`pty.h` 匿名 pgrp 联合体、`TCSETS` 未持 `state_lock` 写 `term`、`TIOCSWINSZ` 用 `pgrp>0` vs spec `pgrp!=0`）。**环境阻塞（非代码 bug，供复现参考）**：`make OS01_SYSTEST=1 test-syscall` 恒 339/340，唯一失败 `sendto user boundaries (UDP socket setup)`——systest 的 QEMU 未注册 NIC，加 NIC 后 341/341；本机 OVMF 无 1280×960 GOP 模式，off-table 初态保证改在 1600×1200 验证（配置字节仍按 `resolution 1280x960\n` 写入并断言）。
 
 - **`SUITE=resolution` 的 `_client_estale_case` 在本环境确定性失败（2026-10-22，GUI-2 总回归发现）**：`make PROFILE=x86_64-clang test-qemu SUITE=resolution` 报 `client_estale_no_diagnostic` + `client_estale_no_exit_status`（`qemutests/test_resolution_switcher.py:1237-1264`）。现象：后台启动的 `/bin/test_lvgl wait` 客户端一进入交互循环就以 0 退出（串口流里 `Interactive mode` 与 `RES_LVGL_EXIT=0` 之间**没有任何输入字节**，说明走的是 `read()==0`/POLLERR 出口而不是 'q'/ESC），于是 `setres 1280x720` 让 view 失效时已经没有活着的客户端。**同环境基线对照**：同一提交之前的基线 `6126504a` 导出到临时目录后跑同一 suite，报出**完全相同**的两条断言 ⇒ 既有故障，**不是** GUI-2 分支的回归。CI 不跑该 suite（只跑 `SUITE=phase-0` 与 `SUITE=systest`），所以该失败对 CI 不可见。GUI-2 总回归**未修**它，也**未**代任何门禁宣布豁免；证据见 [GUI-2 验证报告](superpowers/reports/2026-10-22-gui-2-validation.md)。
+
+- **GUI QEMU suite 中 guest 侧 `test_lvgl` 的用户态 SIGSEGV（2026-10-22，GUI-2 第二轮修复期间观察到一次）**：第二轮修复期间在最终树上连续跑了 4 次 `SUITE=gui`，其中第 3 次的 SMP 1 `smoke` 用例报 `/bin/test_lvgl smoke alias failed (ok=True, rc=139)`，guest 侧打印 `Killing task 5 (user fault at RIP=000000000049884D, signal=11)`；`0x49884D` 解析到 `build/x86_64-clang/user/test_lvgl.elf` 的 `memset`，且崩溃发生在 `[test_lvgl] Rendering and pixel assertions passed.` **之后**。该现象**不是**这两轮修复引入的：第二轮在 `libgui` 内的唯一改动是 `gui_input_lvgl_repeat_after_down` 里的一次比较，不可能损坏 `memset`；对 `kernel/driver/fb_state.c` 与 `libgfx/gfx.h` 的改动是**纯注释**。它在第 4、5 次运行与最终干净门禁中**均未复现**。因此**未修**、**未**打包进任何修复，也**未**声称已修。后续需在能复现时抓 guest 侧寄存器/栈再定位。证据见 [GUI-2 验证报告](superpowers/reports/2026-10-22-gui-2-validation.md) §7.5。
 
 - **`test_display_owner` 读取 libgfx 内部句柄 fd 耦合（2026-10-11，显示独占实施）**：`test_display_owner` 通过 `*(const int *)gh` 直接读取 `libgfx` handle 首字段 fd（布局耦合；设计规范禁止公开 `gfx_get_fd`）。候选修复方案：引入非 sysroot 的内部测试头 `libgfx/gfx_test.h` 配合 `offsetof` static assert 校验，或在测试代码中保留当前读取方式并辅以显式注释。保持现状，无需修改测试代码。
 
