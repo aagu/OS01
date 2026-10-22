@@ -82,6 +82,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_terminal_display.elf \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
+    $(TEST_BLD)/test_mutex_handshake.elf \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
     $(TEST_BLD)/test_bootinfo_abi.elf \
@@ -1197,6 +1198,25 @@ test-page-table-contract-x86: $(TEST_BLD)/test_page_table_contract.elf $(TEST_BL
 	$(TEST_BLD)/test_page_table_vmm.elf
 
 # Sync primitive test — compiles the real rwlock/seqlock implementations.
+MUTEX_HOST_CFLAGS := $(HOST_CFLAGS) -include $(TEST_MOCK)/mutex_runtime.h \
+    -I$(TEST_INC) $(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/mutex_handshake.o: $(TESTS_DIR)/kernel/sync/mutex.c $(TEST_MOCK)/mutex_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MUTEX_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/mutex_wait.o: $(TESTS_DIR)/kernel/sync/wait.c $(TEST_MOCK)/mutex_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MUTEX_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_mutex_handshake.o: $(TEST_CASES)/test_mutex_handshake.c $(TEST_MOCK)/mutex_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(MUTEX_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_mutex_handshake.elf: $(TEST_BLD)/test_mutex_handshake.o \
+        $(TEST_BLD)/mutex_handshake.o $(TEST_BLD)/mutex_wait.o
+	$(HOST_CC) -Wl,--wrap=wait_queue_arm -Wl,--wrap=wait_queue_sleep -o $@ $^
+
 $(TEST_BLD)/test_sync_primitives.o: $(TEST_CASES)/test_sync_primitives.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(SYNC_HOST_CFLAGS) -c $< -o $@

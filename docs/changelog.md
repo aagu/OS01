@@ -1,9 +1,13 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-22）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-23）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-23
+
+- fix(sync): **调查并处理 parked `kernel_mutex` 负载敏感问题**：确定性 host 时序复现生产 mutex 在 CAS 失败后、入队前 unlock 时丢失唤醒（owner=0，等待者仍睡眠）。统一普通/interruptible 获取为关 IRQ 的 arm→CAS 重查→schedule 协议，退出时持 waitqueue 锁 disarm，信号取消转交可能消费的 wake-one。真实 `mutex.c` + `wait.c` host 回归覆盖入队前/后 unlock、信号、取消后的下一位等待者与 IRQ 恢复。内核自测改为 pid 返回值创建、等待两个 worker 在最终 unlock 后发布完成，再读受锁保护计数；使用 500 jiffies 截止替代固定次数循环，并在临界区主动让出 CPU 以覆盖竞争。历史 parked 超时缺少状态快照，不能排他归因于此次发现的丢失唤醒。验证与限制见 [调查记录](debug/2026-10-23-kernel-mutex.md)。
 
 ## 2026-10-22
 
