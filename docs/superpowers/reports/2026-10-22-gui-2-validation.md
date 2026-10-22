@@ -212,7 +212,9 @@ resolution production suite: 2 failure(s)
 - **CI 不跑这个 suite**（`.github/workflows/ci.yml` 只跑 `SUITE=phase-0` 与 `SUITE=systest`），所以分辨率 suite 的失败对 CI 不可见。
 - 同一次运行还有一条环境限制：`ENVIRONMENT BLOCK: OVMF did not provide 1280x960; booted 1280x800 instead` —— 当前 OVMF 构建没有提供 1280x960 模式。
 
-### 5.2 N-4 flake —— **在本次干净回归中未复现**（按 plan：让回归当裁判）
+### 5.2 N-4 flake —— **在 Task 13 干净回归中未复现**（后续修复见 §8）
+
+> **后续更新**：下面保留 Task 13 当时的调查与处置记录。§8 已用确定性的 echo-only 复现测试确认匹配缺陷，并修复 `_shell_block`；下文的“仍在代码里”“没有包含”仅描述当时的树。
 
 - **本次干净回归没有复现**：GUI suite **24/24 PASS**（SMP 1 与 SMP 2 各 12/12，见 §3.1）。因此按 plan Task 13 的仲裁规则，**不在本任务里修改 `_shell_block`**。
 - **历史上失败的是什么**：Task 12 评审者的**第一次** `make PROFILE=x86_64-clang test-qemu SUITE=gui` 在 SMP 1 失败，报 `[input_interaction] after the Ctrl+C: the terminal's /proc status carries no Pid or BirthId field`；**紧接着的重跑 24/24 通过**。
@@ -241,7 +243,7 @@ resolution production suite: 2 failure(s)
 - **Task 9（构建/发布）**：已发布的 mbedtls 树不是自包含的（仍开放）；三个已发布的内核头对使用者来说是坏的（仍开放）；`qemutests/test_ci_workflow.py` 没有断言两个新 CI 步骤（**已修：A4** —— 两个步骤现在都有断言，去掉任一步骤即失败）；`hosttests/Makefile` 里有三份并行的 wrapper 列表（仍开放）；两个 commit body 仍带着已被推翻的「32 false positives」表述（仍开放 —— 属于历史，未被改写）。
 - **Task 10（探针）**：指针位置从不上报，所以 Task 11 必须重新 home 光标（**已修：C10** —— 探针现在上报 `pointer_x` / `pointer_y` / `pointer_seen`，runner 断言位置，位置不对即失败）；`fatal` 的 harness 判据是「没有 EXIT 记录」（**已修：C11** —— 探针在退出前上报 `lvgl_assert=1`，runner 等待并断言这个**正向**事实）；报告里有一个进程隐患（仍开放）。
 - **Task 11（QMP 矩阵）**：CLI `--timeout` 默认值 180→410 同时放宽了 GUI-1 的外层上界（仍开放）；有一次空 amend `2842cffe → d0ffe93f`（**已核实并记录，不是缺陷**：两者的 parent、tree、subject 完全相同，只有提交元数据不同；**没有**改写任何历史 —— 见 §7.3）；多行输入的提前到达残余余量只吸收**一次**额外的串口读（仍开放）；报告的 §3.1/§3.2 仍是第 1 轮的数值（**已澄清**：§3 描述的是 Task 13 那一轮（`093a5fb4`）的树，**最终树**的数字在 §7）。
-- **Task 12（所有权/溢出/崩溃）**：变异活动保存在 `/tmp` 里、**没有**进仓库（fixture 进了）；卡住的 Shift 也会把数字变成符号，所以 canary 的大小写检查是形状级的；`input_overflow` 在真实 guest 里需要 32 批，落在 64 批 / 40 秒窗口内，但在更慢的宿主上余量更小；`_wait_prompt` 屏障可以由串口 shell 自己的提示符满足（真正的 PS/2 证据是 canary）；`SC_OWNER` 探针以非零码退出，而它的 EXIT 记录写着 `result=PASS detail=owner_loss_detected`；以及 §5.2 的 N-4 flake（以上均仍开放）。
+- **Task 12（所有权/溢出/崩溃）**：变异活动保存在 `/tmp` 里、**没有**进仓库（fixture 进了）；卡住的 Shift 也会把数字变成符号，所以 canary 的大小写检查是形状级的；`input_overflow` 在真实 guest 里需要 32 批，落在 64 批 / 40 秒窗口内，但在更慢的宿主上余量更小；`_wait_prompt` 屏障可以由串口 shell 自己的提示符满足（真正的 PS/2 证据是 canary）；`SC_OWNER` 探针以非零码退出，而它的 EXIT 记录写着 `result=PASS detail=owner_loss_detected`；以及 §5.2 的 N-4 flake（marker 匹配缺陷已在 §8 修复，其余仍开放）。
 - **Task 13（分支级回归）**：`docs/build/build.md` 的审计计数过期（**已修：A5** —— 现在是 13 项，并逐项列出审计名）；`SUITE=resolution` 的既有红灯（仍开放，见 §5.1，**不是**本分支的回归，也**没有**门禁豁免）。
 
 **两条已明确告知用户的范围决定**：PS/2 wheel knock 的修复（`af42c90e`）修正了一个**既有内核驱动 bug**（在本功能分支范围内，经独立审计并被 Task 11 复审维持）；鼠标的 IntelliMouse knock 现在是 `{0xF3,200,0xF3,100,0xF3,80,0xF2}`，滚轮恰好 32 px/刻度。
@@ -329,3 +331,42 @@ gui-incremental rc=0
 ### 7.4 本轮新增的一条观察（不是失败）
 
 第二轮修复期间，QEMU GUI suite 在最终树上一度变红（4 次运行、3 种失败形态）。根因是**既有的**内核缺陷：`kernel/fs/devfs.c` 的 `serial_write()` **逐字节**释放控制台锁，因此另一路控制台写者可以插进一条协议记录中间，把记录劈成两半（实测 `[term-probe]` 的统计行落在 `... pointer_seen=0 fat` 与 `al_trigger=1` 之间）。该缺陷已在 `kernel/fs/devfs.c:109-142` 修复（整条缓冲在一次 `spin_lock_irqsave` 内发出），终端**打印内容不变**，runner 的解析器**未削弱**。详见 fix report 的 R2-4 一节。
+
+
+## 8. `055fd67b` 后的 code review 修复
+
+本节对应 worktree `.worktrees/gui-2-input-focus` 的后续九项评审修复，覆盖 §7 之后的代码变更；旧轮次结果保留作历史记录。
+
+### 8.1 修复与回归覆盖
+
+| 评审项 | 修复与测试 |
+|---|---|
+| revoke 后 held input 泄漏 | unbind、final close、owner revoke、替换租约均隔离仍按住的键；已租用鼠标的 held buttons 同样隔离到物理释放。覆盖 typematic、break、fresh press 和 keyboard-only replacement。 |
+| 跨 epoch 修饰键污染 NORMAL | 先判定 epoch 与 isolation，再更新 logical state；覆盖 E0 跨 revoke 后的 Ctrl+C，确认不生成幽灵 Ctrl。bind 时 held modifiers 也隔离，UAPI 仍只带 Caps latch。 |
+| 左右修饰键互相覆盖 | logical state 按物理键分别记录，再聚合 Shift/Ctrl/Alt；覆盖释放一侧仍保持另一侧。 |
+| bind 保留 NORMAL raw backlog | sink reset 在 route 锁内清空所租用设备的 raw queue 并唤醒 poller；不清空已投递的 TTY/PTY 内容。 |
+| Delete 键码错误 | 使用 E0 53（`0x153`）；覆盖真实 Delete 及 keypad decimal 反例。 |
+| 焦点失效后的幽灵点击 | 每个 FIFO key 前、native callback 后和 LVGL callback 后同步焦点有效性；覆盖自身/祖先 hidden、disabled 及同批回调。取消受阻时保留 FIFO head，保存 prepared/consumed，native callback 仅调用一次，避免忙等。 |
+| repeat 延迟遗漏 deadline | next delay 取 repeat 剩余时间的最小值；覆盖 399/400/439/440 ms 边界。 |
+| 删除无关控件取消当前输入 | 仅删除当前 pressed target 才取消；覆盖文字 repeat 和 Enter click。 |
+| shell marker 误匹配命令回显 | 只接受完整独占行且带换行的 begin/end marker；新增 echo-only、延迟分片、嵌入 marker、未完整结束行四项测试。 |
+
+新增回归在修复前失败、修复后通过。全量 host 首次重建发现 `test_gfx_input` 仍断言 unbind 后 held typematic 可立即进入 NORMAL；更新为重复 make 与 break 均吞掉、fresh make 可读后，全量重跑通过。
+
+### 8.2 本轮验证
+
+内部结构变更后先执行 `make clean`，以下 make 均从 worktree 仓库根入口执行。
+
+| 命令 | 退出码 | 结果 / 日志 |
+|---|---|---|
+| `make -j4 PROFILE=x86_64-clang test-host` | 0 | 128 个二进制通过；真实 LVGL 57 cases / 1169 assertions，route 618 assertions。`/tmp/gui2-fix-host-rerun.log` |
+| `make -j4 PROFILE=x86_64-clang test-static` | 0 | 13 项审计通过。`/tmp/gui2-fix-static.log` |
+| `TMPDIR=/tmp make PROFILE=x86_64-clang test-qemu SUITE=gui`（沙箱外） | 0 | SMP=1/2 各 12/12，共 24/24 PASS。归档 `build/x86_64-clang/logs/tests/gui/20261022T152525Z-eea51d82f7474166ad205b56b5a959f7/`，输出 `/tmp/gui2-fix-qemu-final.log`。 |
+| `python3 -m unittest qemutests.test_gui_runner` | 0 | 85 tests，包含四项新 shell marker 回归。`/tmp/gui2-review-fix-runner.log` |
+| `python3 -m unittest qemutests.test_gui_runner.GuiInputShellBlockTests qemutests.gui_input_test.GuiInputProtocolTests qemutests.gui_input_test.GuiInputQmpPayloadTests` | 0 | 56 tests 通过。 |
+
+QEMU 的两次沙箱内尝试均未进入 guest 验证：首次因 `/var/tmp` 只读无法打开 firmware 临时文件；设置 `TMPDIR=/tmp` 后仍无法建立 QMP 连接。随后沙箱外重跑完成上述 24 项，不将启动失败算作产品用例结果。
+
+内核与 libgui/Python 分别经独立子 agent 复审，均 **APPROVE**；全量测试中调整的 gfx held-key 断言也经再次复审 **APPROVE**。
+
+本轮未重跑完整 `test-harness`、resolution 或 syscall suite；§7 的历史结果不能代替这些套件在本轮代码上的验证。复审另记录既有范围外限制：无活动键待取消时直接禁用 LVGL indev，初始 DOWN 仍可能丢失，本轮未修改该通用路径。

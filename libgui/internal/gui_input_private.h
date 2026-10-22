@@ -105,6 +105,9 @@ typedef struct {
     /* 指针项 */
     mouse_event_t raw;      /* 设备原始记录（相对位移 / 按钮 / 滚轮） */
     uint8_t       changed_buttons; /* 本次变化的按钮位图 */
+    /* A blocked cancellation retains this item without replaying app callbacks. */
+    bool key_prepared;
+    bool key_consumed;
 } gui_input_item_t;
 
 /**

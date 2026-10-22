@@ -611,9 +611,13 @@ TEST_FUNC(test_bind_input_grants_an_exclusive_lease)
     /* ... and every other reader is shut out. */
     assert_eq(-EBUSY, input_route_read(g_other_kbd_file, 0, sizeof(buf), buf));
 
-    /* An explicit unbind releases the lease: the device is back on the
-     * NORMAL path and every reader may read again. */
+    /* Unbind returns to NORMAL, but a held key stays isolated until its
+     * physical release. Only the next fresh press may reach readers. */
     assert_eq(0, gfx_ops.ioctl_file(g_view_file, GFX_UNBIND_INPUT, NULL));
+    input_route_keyboard_byte(0x1E);
+    assert_eq(0, input_route_read(g_other_kbd_file, 0, sizeof(buf), buf));
+    input_route_keyboard_byte(0x9E);
+    assert_eq(0, input_route_read(g_other_kbd_file, 0, sizeof(buf), buf));
     input_route_keyboard_byte(0x1E);
     assert_eq(1, input_route_read(g_other_kbd_file, 0, sizeof(buf), buf));
     assert_eq(0x1E, buf[0]);

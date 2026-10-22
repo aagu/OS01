@@ -310,8 +310,17 @@ static uint32_t keyboard_route_poll(uint32_t requested, poll_table_t *pt)
     return keyboard_poll_dev(NULL, requested, pt);
 }
 
+/* Called under route.lock: no NORMAL reader/producer can race this drain.
+ * The poll lock protects waiter lifetime; delivered TTY input stays intact. */
+static void keyboard_reset_normal(void)
+{
+    ring_head = ring_tail = 0;
+    keyboard_wake_pollers();
+}
+
 static const input_route_kbd_sink_t keyboard_route_sink = {
     .publish = keyboard_publish_normal_frame,
+    .reset   = keyboard_reset_normal,
     .read    = keyboard_route_read,
     .poll    = keyboard_route_poll,
 };

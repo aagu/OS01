@@ -251,6 +251,9 @@ static void test_close_any_bound_file_revokes_lease(void)
     route_close(mouse);
     assert_eq(0, input_route_read(kbd, 0, sizeof(buf), buf));
     feed1(0x1E);
+    assert_eq(0, input_route_test_normal_kbd_bytes());
+    feed1(0x9E);
+    feed1(0x1E);
     assert_eq(1, input_route_test_normal_kbd_bytes());
 }
 
@@ -463,16 +466,12 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
      * says EAGAIN. */
     assert_eq(-EAGAIN, drain_bytes(kbd, buf, sizeof(buf)));
 
-    /* INVARIANT: the snapshot says "Ctrl is held", so the matching
-     * release MUST reach the consumer — otherwise the consumer waits
-     * for a release that never comes.  The bind cleared the isolation
-     * the epoch boundary installed, so the break is delivered. */
+    /* The physical snapshot remains internal; the UAPI exposes Caps
+     * alone.  The new consumer saw no Ctrl press, so isolate its break. */
     feed1(0xE0);
     feed1(0x9D);
     got = drain_bytes(kbd, buf, sizeof(buf));
-    assert_eq(2, got);
-    assert_eq(0xE0, buf[0]);
-    assert_eq(0x9D, buf[1]);
+    assert_eq(-EAGAIN, got);
 
     /* The next make is published normally. */
     feed1(0xE0);
@@ -587,12 +586,10 @@ static void test_bind_with_held_key_produces_no_new_down(void)
     /* The snapshot tells the new consumer what is already held. */
     assert_true((modifiers & INPUT_ROUTE_MOD_SHIFT) != 0);
 
-    /* The release is the only thing the new consumer sees: no new DOWN
-     * for the held key. */
+    /* The consumer saw no press: the held key release stays isolated. */
     feed1(0xAA);
     got = drain_bytes(kbd, buf, sizeof(buf));
-    assert_eq(1, got);
-    assert_eq(0xAA, buf[0]);
+    assert_eq(-EAGAIN, got);
 }
 
 /* ── The Caps typematic must not flip the latch ─────────────── */
@@ -972,7 +969,223 @@ static void test_active_queue_survives_drain_and_refill(void)
         assert_eq(100 + i, events[20 + i].dx);
 }
 
+/* Lease teardown must quarantine all held input, including typematic. */
+static void test_revoke_isolates_held_input(void)
+{
+    for (int how = 0; how < 3; how++) {
+        route_reset();
+        file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+        file_t *mouse = route_open(INPUT_DEVICE_MOUSE);
+        file_t *reader = route_open(INPUT_DEVICE_KEYBOARD);
+        assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+        feed1(0x1e);
+        mouse_event_t ev = {.buttons = 1};
+        input_route_mouse_event(&ev);
+        if (how == 0) input_route_unbind(view(), 0, 0);
+        else if (how == 1) route_close(kbd);
+        else input_route_unbind(view(), 0, EACCES);
+        feed1(0x1e);
+        feed1(0x9e);
+        uint8_t bytes[8];
+        assert_eq(0, input_route_read(reader, 0, sizeof(bytes), bytes));
+        ev.dx = 7;
+        input_route_mouse_event(&ev);
+        mouse_event_t out;
+        assert_eq(sizeof(out), input_route_test_normal_read_mouse(&out, sizeof(out)));
+        assert_eq(0, out.buttons);
+        assert_eq(7, out.dx);
+        ev.buttons = 0;
+        input_route_mouse_event(&ev);
+        ev.buttons = 1;
+        input_route_mouse_event(&ev);
+        mouse_event_t events[2];
+        assert_eq(sizeof(events), input_route_test_normal_read_mouse(events, sizeof(events)));
+        assert_eq(1, events[1].buttons);
+        feed1(0x1e);
+        assert_eq(1, input_route_read(reader, 0, sizeof(bytes), bytes));
+    }
+}
+
+static void test_cross_epoch_modifier_never_reaches_normal_snapshot(void)
+{
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
+    feed1(0xe0);
+    input_route_unbind(view(), 0, 0);
+    feed1(0x1d);
+    feed1(0x2e);
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    feed1(0xe0); feed1(0x1d); /* isolated typematic */
+    feed1(0x2e);
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    feed1(0xe0); feed1(0x9d);
+    feed1(0xe0); feed1(0x1d);
+    feed1(0x2e);
+    assert_eq(INPUT_ROUTE_MOD_CTRL, input_route_test_normal_kbd_modifiers());
+}
+
+static void test_left_right_modifiers_are_independent(void)
+{
+    const uint8_t left[] = {0x2a, 0x1d, 0x38};
+    const uint8_t right[] = {0x36, 0x1d, 0x38};
+    const uint32_t want[] = {1, 2, 4};
+    for (int i = 0; i < 3; i++) {
+        for (int reverse = 0; reverse < 2; reverse++) {
+            route_reset();
+            feed1(left[i]);
+            if (i) feed1(0xe0);
+            feed1(right[i]);
+            if (reverse && i) feed1(0xe0);
+            feed1((reverse ? right[i] : left[i]) | 0x80);
+            feed1(0x1e);
+            assert_eq(want[i], input_route_test_normal_kbd_modifiers());
+            if (!reverse && i) feed1(0xe0);
+            feed1((reverse ? left[i] : right[i]) | 0x80);
+            feed1(0x1e);
+            assert_eq(0, input_route_test_normal_kbd_modifiers());
+        }
+    }
+}
+
+static void test_bind_discards_only_leased_normal_backlog(void)
+{
+    for (int with_mouse = 0; with_mouse < 2; with_mouse++) {
+        route_reset();
+        file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+        file_t *mouse = route_open(INPUT_DEVICE_MOUSE);
+        feed1(0x1e); feed1(0x9e);
+        mouse_event_t ev = {.dx = 4};
+        input_route_mouse_event(&ev);
+        input_route_test_trace_reset();
+        assert_eq(0, input_route_bind(view(), kbd, with_mouse ? mouse : NULL, NULL, NULL));
+        input_route_unbind(view(), 0, 0);
+        uint8_t bytes[8];
+        assert_eq(0, input_route_read(kbd, 0, sizeof(bytes), bytes));
+        mouse_event_t out;
+        assert_eq(with_mouse ? 0 : sizeof(out), input_route_read(mouse, 0, sizeof(out), &out));
+        assert_eq(2, input_route_test_trace_first_depth(input_route_test_device_lock()));
+        assert_eq(0, input_route_test_trace_mismatch());
+        assert_eq(0, input_route_test_trace_depth_now());
+    }
+}
+
+static void test_bind_wakes_normal_pollers(void)
+{
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    file_t *mouse = route_open(INPUT_DEVICE_MOUSE);
+    file_t *other = route_open(INPUT_DEVICE_KEYBOARD);
+    poll_table_t kpt, mpt;
+    assert_eq(0, poll_table_setup(&kpt, 1));
+    assert_eq(0, poll_table_setup(&mpt, 1));
+    assert_eq(0, input_route_poll(other, POLLIN, &kpt));
+    assert_eq(0, input_route_poll(mouse, POLLIN, &mpt));
+    assert_eq(1, kpt.nent);
+    assert_eq(1, mpt.nent);
+    input_route_test_wake_reset();
+    assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+    assert_eq(2, input_route_test_wake_count());
+    assert_eq(POLLERR, input_route_poll(other, POLLIN, NULL));
+    poll_table_destroy(&kpt);
+    poll_table_destroy(&mpt);
+}
+
+/* A quarantined right modifier must not keep a newly pressed left
+ * modifier logically held after the left modifier is released. */
+static void test_isolated_modifier_cannot_resurrect_its_other_side(void)
+{
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
+    feed1(0xe0); feed1(0x1d);
+    input_route_unbind(view(), 0, 0);
+    feed1(0x1d); feed1(0x9d); feed1(0x2e);
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    feed1(0xe0); feed1(0x1d); feed1(0x2e);
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    feed1(0xe0); feed1(0x9d);
+    feed1(0xe0); feed1(0x1d); feed1(0x2e);
+    assert_eq(INPUT_ROUTE_MOD_CTRL, input_route_test_normal_kbd_modifiers());
+}
+
+static void test_partial_sequence_across_bind_and_revoke_stays_isolated(void)
+{
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    /* A sequence begun by NORMAL cannot become a GUI-owned press. */
+    feed1(0xe0);
+    assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
+    feed1(0x1d);
+    input_route_unbind(view(), 0, 0);
+    feed1(0xe0); feed1(0x1d); feed1(0x2e);
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    /* Release clears quarantine; a fresh press can take effect. */
+    feed1(0xe0); feed1(0x9d);
+    feed1(0xe0); feed1(0x1d); feed1(0x2e);
+    assert_eq(INPUT_ROUTE_MOD_CTRL, input_route_test_normal_kbd_modifiers());
+}
+
+static void test_keyboard_only_replacement_preserves_mouse_quarantine(void)
+{
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    file_t *mouse = route_open(INPUT_DEVICE_MOUSE);
+    file_t *next_kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+    mouse_event_t ev = {.buttons = 1};
+    input_route_mouse_event(&ev);
+    assert_eq(0, input_route_bind(view(), next_kbd, NULL, NULL, NULL));
+    ev.dx = 5;
+    input_route_mouse_event(&ev);
+    mouse_event_t out;
+    assert_eq(sizeof(out), input_route_test_normal_read_mouse(&out, sizeof(out)));
+    assert_eq(0, out.buttons);
+    assert_eq(5, out.dx);
+    input_route_unbind(view(), 0, 0);
+    ev.dx = 6;
+    input_route_mouse_event(&ev);
+    assert_eq(sizeof(out), input_route_test_normal_read_mouse(&out, sizeof(out)));
+    assert_eq(0, out.buttons);
+}
+
+static void test_bind_isolates_held_modifiers_until_fresh_press(void)
+{
+    const uint8_t codes[] = {0x2a, 0x36, 0x1d, 0x1d, 0x38, 0x38};
+    const uint8_t extended[] = {0, 0, 0, 1, 0, 1};
+    const uint32_t mods[] = {1, 1, 2, 2, 4, 4};
+    for (int i = 0; i < 6; i++) {
+        route_reset();
+        file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+        if (extended[i]) feed1(0xe0);
+        feed1(codes[i]);
+        uint32_t initial;
+        assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, &initial));
+        assert_eq(mods[i], initial);
+        if (extended[i]) feed1(0xe0);
+        feed1(codes[i]); /* held key typematic must not become new DOWN */
+        uint8_t buf[8];
+        assert_eq(-EAGAIN, input_route_read(kbd, 0, sizeof(buf), buf));
+        if (extended[i]) feed1(0xe0);
+        feed1(codes[i] | 0x80);
+        assert_eq(-EAGAIN, input_route_read(kbd, 0, sizeof(buf), buf));
+        if (extended[i]) feed1(0xe0);
+        feed1(codes[i]);
+        assert_eq(extended[i] ? 2 : 1, input_route_read(kbd, 0, sizeof(buf), buf));
+        assert_eq(codes[i], buf[extended[i] ? 1 : 0]);
+    }
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_bind_isolates_held_modifiers_until_fresh_press),
+    TEST_ENTRY(test_isolated_modifier_cannot_resurrect_its_other_side),
+    TEST_ENTRY(test_partial_sequence_across_bind_and_revoke_stays_isolated),
+    TEST_ENTRY(test_keyboard_only_replacement_preserves_mouse_quarantine),
+    TEST_ENTRY(test_bind_wakes_normal_pollers),
+    TEST_ENTRY(test_revoke_isolates_held_input),
+    TEST_ENTRY(test_cross_epoch_modifier_never_reaches_normal_snapshot),
+    TEST_ENTRY(test_left_right_modifiers_are_independent),
+    TEST_ENTRY(test_bind_discards_only_leased_normal_backlog),
     TEST_ENTRY(test_normal_path_before_bind),
     TEST_ENTRY(test_lease_owner_reads_others_busy),
     TEST_ENTRY(test_empty_active_queue_is_eagain),

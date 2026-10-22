@@ -209,8 +209,23 @@ static uint32_t mouse_route_poll(uint32_t requested, poll_table_t *pt)
     return mouse_poll_dev(NULL, requested, pt);
 }
 
+/* route.lock -> event_lock, matching NORMAL publish/read/poll. */
+static void mouse_reset_normal(void)
+{
+    uint64_t flags = spin_lock_irqsave(&event_lock);
+    event_head = event_count = 0;
+    while (!list_is_empty(&event_poll)) {
+        list_t *node = event_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *entry = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(entry->poll_wq);
+    }
+    spin_unlock_irqrestore(&event_lock, flags);
+}
+
 static const input_route_mouse_sink_t mouse_route_sink = {
     .publish = mouse_publish_normal_event,
+    .reset   = mouse_reset_normal,
     .read    = mouse_route_read,
     .poll    = mouse_route_poll,
 };

@@ -64,17 +64,22 @@ struct poll_table;
  * snapshot route computed for it.  The NORMAL translator uses that
  * snapshot and never flips the Caps state a second time — route is
  * the only authority for the Caps latch.
+ * `reset` runs under the route lock at bind, drains only this device's
+ * raw NORMAL queue and wakes its old pollers under the device lock.
+ * It must preserve data already delivered to the TTY/PTY.
  */
 typedef struct {
     void     (*publish)(const input_ps2_frame_t *frame, uint32_t modifiers);
     int      (*read)(uint64_t offset, uint64_t size, void *buf);
     uint32_t (*poll)(uint32_t requested, struct poll_table *pt);
+    void     (*reset)(void); /* drain raw backlog and wake old NORMAL pollers */
 } input_route_kbd_sink_t;
 
 typedef struct {
     void     (*publish)(const mouse_event_t *event);
     int      (*read)(uint64_t offset, uint64_t size, void *buf);
     uint32_t (*poll)(uint32_t requested, struct poll_table *pt);
+    void     (*reset)(void); /* drain raw backlog and wake old NORMAL pollers */
 } input_route_mouse_sink_t;
 
 /* Register the NORMAL-path sinks.  A NULL argument leaves that slot

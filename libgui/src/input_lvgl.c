@@ -52,7 +52,7 @@
 #define PS2_KEY_LALT       0x038u
 #define PS2_KEY_RALT       0x138u
 #define PS2_KEY_CAPS       0x03Au
-#define PS2_KEY_DELETE     0x053u
+#define PS2_KEY_DELETE     0x153u   /* E0 53; 53 alone is keypad decimal */
 #define PS2_KEY_UP         0x148u   /* E0 48 */
 #define PS2_KEY_DOWN       0x150u   /* E0 50 */
 #define PS2_KEY_RIGHT      0x14Du   /* E0 4D */
@@ -863,10 +863,12 @@ void gui_input_focus_lost(gui_input_t *input, lv_obj_t *obj)
     }
     lv = &input->lvgl;
 
+    /* Only deletion of the active key's target invalidates that gesture.
+     * Other registered objects may disappear without interrupting input. */
     if (lv->pressed_obj == obj) {
         lv->pressed_obj = NULL;   /* 对象已消失：不再去碰它 */
+        gui_input_lvgl_mark_cancel(input);
     }
-    gui_input_lvgl_mark_cancel(input);
 }
 
 
@@ -961,9 +963,7 @@ int gui_input_lvgl_deliver(gui_input_t *input, const gui_key_event_t *event)
      * 回调里可能发生焦点变化或对象删除：此时执行取消协议（旧键不得继续
      * 作用到自动选中的新控件上）。
      */
-    if (lv->cancel_pending) {
-        (void)gui_input_lvgl_cancel_key(input);
-    }
+    (void)gui_input_lvgl_pump(input);
     return 1;
 }
 

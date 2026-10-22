@@ -1758,9 +1758,9 @@ class GuiInputScenarios:
                      timeout: float = 0.0) -> str:
         """Run a shell command and return the text between two markers.
 
-        The markers are searched from the END: the shell echoes the
-        command line, and the echo carries both markers, so the *last*
-        pair is the real output block.
+        Only complete marker output lines count.  The command echo
+        contains both marker strings before the command has run, and
+        output can arrive in chunks, including a split CRLF or marker.
         """
         timeout = self.timing.shell if timeout <= 0 else timeout
         nonce = f"B{self.smp}_{time.time_ns()}"
@@ -1771,13 +1771,16 @@ class GuiInputScenarios:
         ).encode()
         offset = len(self.session.text)
         self.session.send(full)
+        begin_line = re.compile(rf"(?m)^{re.escape(begin_marker)}\r?\n")
+        end_line = re.compile(rf"(?m)^{re.escape(end_marker)}\r?\n")
         deadline = time.monotonic() + min(timeout, self._remaining())
         while time.monotonic() < deadline:
             text = self.session.text[offset:]
-            begin_at = text.rfind(begin_marker)
-            end_at = text.rfind(end_marker)
-            if begin_at >= 0 and end_at > begin_at:
-                return text[begin_at + len(begin_marker):end_at]
+            begin_match = begin_line.search(text)
+            if begin_match:
+                end_match = end_line.search(text, begin_match.end())
+                if end_match:
+                    return text[begin_match.end():end_match.start()]
             try:
                 self.session.observe(0.05)
             except Exception:

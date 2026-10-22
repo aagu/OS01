@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <log/log.h>
+#include <kernel.h>
 
 /* ── The recorded lock trace ─────────────────────────────────── */
 
@@ -264,6 +265,7 @@ static struct {
     unsigned      head, tail, count;
     mouse_event_t events[NORMAL_MOUSE_SLOTS];
     unsigned      ehead, etail, ecount;
+    list_t        kbd_poll, mouse_poll;
     unsigned      frames;
     uint32_t      last_mods;     /* the modifier snapshot of the last frame */
 } normal;
@@ -279,6 +281,8 @@ void input_route_test_normal_reset(void)
     memset(normal.events, 0, sizeof(normal.events));
     normal.head = normal.tail = normal.count = 0;
     normal.ehead = normal.etail = normal.ecount = 0;
+    list_init(&normal.kbd_poll);
+    list_init(&normal.mouse_poll);
     normal.frames = 0;
     normal.last_mods = 0;
 }
@@ -289,7 +293,7 @@ void input_route_test_normal_push_bytes(const uint8_t *bytes, size_t len)
     unsigned long flags = spin_lock_irqsave(&normal.lock);
     for (i = 0; i < len; i++) {
         if (normal.count >= NORMAL_KBD_BYTES - 1) break;
-        normal.bytes[(normal.head + normal.count) % NORMAL_KBD_BYTES] = bytes[i];
+        normal.bytes[(normal.tail + normal.count) % NORMAL_KBD_BYTES] = bytes[i];
         normal.count++;
     }
     spin_unlock_irqrestore(&normal.lock, flags);
@@ -299,7 +303,7 @@ void input_route_test_normal_push_event(const mouse_event_t *event)
 {
     unsigned long flags = spin_lock_irqsave(&normal.lock);
     if (normal.ecount < NORMAL_MOUSE_SLOTS) {
-        normal.events[(normal.ehead + normal.ecount) % NORMAL_MOUSE_SLOTS] = *event;
+        normal.events[(normal.etail + normal.ecount) % NORMAL_MOUSE_SLOTS] = *event;
         normal.ecount++;
     }
     spin_unlock_irqrestore(&normal.lock, flags);
@@ -360,9 +364,12 @@ static int test_read_kbd(uint64_t offset, uint64_t size, void *buf)
 
 static uint32_t test_poll_kbd(uint32_t requested, poll_table_t *pt)
 {
-    (void)requested;
-    (void)pt;
-    return normal.count ? (POLLIN | POLLRDNORM) : 0;
+    unsigned long flags = spin_lock_irqsave(&normal.lock);
+    uint32_t mask = normal.count ? (POLLIN | POLLRDNORM) : 0;
+    if (!mask && poll_requested_read(requested) && pt && !pt->triggered)
+        poll_wait(pt, &normal.kbd_poll, &normal.lock);
+    spin_unlock_irqrestore(&normal.lock, flags);
+    return mask;
 }
 
 static void test_publish_mouse(const mouse_event_t *event)
@@ -378,19 +385,50 @@ static int test_read_mouse(uint64_t offset, uint64_t size, void *buf)
 
 static uint32_t test_poll_mouse(uint32_t requested, poll_table_t *pt)
 {
-    (void)requested;
-    (void)pt;
-    return normal.ecount ? (POLLIN | POLLRDNORM) : 0;
+    unsigned long flags = spin_lock_irqsave(&normal.lock);
+    uint32_t mask = normal.ecount ? (POLLIN | POLLRDNORM) : 0;
+    if (!mask && poll_requested_read(requested) && pt && !pt->triggered)
+        poll_wait(pt, &normal.mouse_poll, &normal.lock);
+    spin_unlock_irqrestore(&normal.lock, flags);
+    return mask;
+}
+
+static void test_reset_kbd(void)
+{
+    unsigned long flags = spin_lock_irqsave(&normal.lock);
+    normal.head = normal.tail = normal.count = 0;
+    while (!list_is_empty(&normal.kbd_poll)) {
+        list_t *node = normal.kbd_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *entry = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(entry->poll_wq);
+    }
+    spin_unlock_irqrestore(&normal.lock, flags);
+}
+
+static void test_reset_mouse(void)
+{
+    unsigned long flags = spin_lock_irqsave(&normal.lock);
+    normal.ehead = normal.etail = normal.ecount = 0;
+    while (!list_is_empty(&normal.mouse_poll)) {
+        list_t *node = normal.mouse_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *entry = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(entry->poll_wq);
+    }
+    spin_unlock_irqrestore(&normal.lock, flags);
 }
 
 const input_route_kbd_sink_t input_route_test_kbd_sink = {
     .publish = test_publish_frame,
+    .reset   = test_reset_kbd,
     .read    = test_read_kbd,
     .poll    = test_poll_kbd,
 };
 
 const input_route_mouse_sink_t input_route_test_mouse_sink = {
     .publish = test_publish_mouse,
+    .reset   = test_reset_mouse,
     .read    = test_read_mouse,
     .poll    = test_poll_mouse,
 };

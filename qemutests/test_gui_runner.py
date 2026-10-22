@@ -16,7 +16,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1900,6 +1902,65 @@ class GuiRunnerUnitTests(unittest.TestCase):
         """CLI main() returns 2 on missing firmware and 1 on test failure."""
         rc = self.gt.main(["--firmware", ""])
         self.assertEqual(rc, 2)
+
+
+class GuiInputShellBlockTests(unittest.TestCase):
+    """A command echo and a partial output line cannot complete a block."""
+
+    def _run_block(self, chunks):
+        from qemutests import gui_input_test as git
+
+        class Session:
+            def __init__(self):
+                self.text = "# "
+                self.now = 0.0
+                self.pending = []
+
+            def send(self, data):
+                command = data.decode()
+                self.text += command
+                markers = re.findall(r"__(?:TSTART|TEND)_\w+__", command)
+                self.pending = list(chunks(*markers))
+
+            def observe(self, seconds):
+                self.now += 0.01
+                if self.pending:
+                    self.text += self.pending.pop(0)
+
+        session = Session()
+        runner = git.GuiInputScenarios.__new__(git.GuiInputScenarios)
+        runner.smp = 1
+        runner.session = session
+        runner.timing = SimpleNamespace(shell=0.1)
+        runner._remaining = lambda: 1.0
+        with patch.object(git.time, "monotonic", side_effect=lambda: session.now):
+            return runner._shell_block("cat /proc/7/status", "TSTART", "TEND")
+
+    def test_echo_only_does_not_complete_shell_block(self):
+        from qemutests.gui_input_test import GuiInputScenarioError
+        with self.assertRaises(GuiInputScenarioError):
+            self._run_block(lambda begin, end: [])
+
+    def test_delayed_crlf_output_and_split_end_marker(self):
+        result = self._run_block(lambda begin, end: [
+            f"{begin}\r\nPid:\t7\r\n",
+            end[:-2],
+            "__\r",
+            "\n# ",
+        ])
+        self.assertEqual("Pid:\t7\r\n", result)
+
+    def test_embedded_output_markers_do_not_complete_shell_block(self):
+        from qemutests.gui_input_test import GuiInputScenarioError
+        with self.assertRaises(GuiInputScenarioError):
+            self._run_block(lambda begin, end: [
+                f"prefix {begin}\nPid:\t7\nprefix {end}\n",
+            ])
+
+    def test_incomplete_end_line_does_not_complete_shell_block(self):
+        from qemutests.gui_input_test import GuiInputScenarioError
+        with self.assertRaises(GuiInputScenarioError):
+            self._run_block(lambda begin, end: [f"{begin}\nPid:\t7\n{end}"])
 
 
 class GuiInputRunnerTests(unittest.TestCase):

@@ -693,38 +693,48 @@ int gui_input_dispatch(gui_input_t *input, const struct pollfd *fds, unsigned co
  * 取消动作排在报告原生 handler **之前**：modifier DOWN 到达应用时，旧键
  * 必须已经被取消（spec §6.2.1）。
  */
-static void deliver_key_event(gui_input_t *input, const gui_key_event_t *ev,
-                              uint64_t now_ms)
+static bool deliver_key_event(gui_input_t *input, const gui_key_event_t *ev,
+                              uint64_t now_ms, bool *prepared, bool *consumed)
 {
-    /* 已投递状态与排队快照分开保存（重复策略使用前者）。 */
-    uint16_t prev = input->delivered_modifiers;
-    uint16_t now = ev->modifiers;
+    if (!*prepared) {
+        /* 已投递状态与排队快照分开保存（重复策略使用前者）。 */
+        uint16_t prev = input->delivered_modifiers;
+        uint16_t now = ev->modifiers;
 
-    /* Ctrl/Alt 从无到有：取消当前键与它的重复，排队的 Ctrl 不得泄漏到
-     * 后续按键。 */
-    const uint16_t ctrl_alt = (uint16_t)(GUI_MOD_LCTRL | GUI_MOD_RCTRL |
-                                         GUI_MOD_LALT | GUI_MOD_RALT);
-    if ((now & ctrl_alt) && !(prev & ctrl_alt)) {
-        gui_input_lvgl_cancel(input);
+        /* Ctrl/Alt 从无到有：取消当前键与它的重复，排队的 Ctrl 不得泄漏到
+         * 后续按键。 */
+        const uint16_t ctrl_alt = (uint16_t)(GUI_MOD_LCTRL | GUI_MOD_RCTRL |
+                                             GUI_MOD_LALT | GUI_MOD_RALT);
+        if ((now & ctrl_alt) && !(prev & ctrl_alt)) {
+            gui_input_lvgl_cancel(input);
+        }
+        input->delivered_modifiers = now;
+
+        if (ev->action == GUI_KEY_DOWN) {
+            /*
+             * 新的按键按下：先取消旧活动键。新键即使随后被应用消费，旧键也
+             * 已经失效（LVGL 的 keypad 是单键模型）。
+             *
+             * 软件重复**不在这里**武装：只有真正到达 LVGL 的按键才允许重复。
+             */
+            gui_input_lvgl_key_down(input, ev);
+        }
+
+        *consumed = false;
+        if (input->key_handler) {
+            *consumed = input->key_handler(ev, input->key_userdata);
+        }
+
+        *prepared = true;
     }
-    input->delivered_modifiers = now;
 
-    if (ev->action == GUI_KEY_DOWN) {
-        /*
-         * 新的按键按下：先取消旧活动键。新键即使随后被应用消费，旧键也
-         * 已经失效（LVGL 的 keypad 是单键模型）。
-         *
-         * 软件重复**不在这里**武装：只有真正到达 LVGL 的按键才允许重复。
-         */
-        gui_input_lvgl_key_down(input, ev);
+    /* Application callbacks can hide/disable the focus or its ancestors.
+     * Synchronize before the current edge reaches LVGL, especially an UP. */
+    if (!gui_input_lvgl_pump(input)) {
+        return false;
     }
 
-    bool consumed = false;
-    if (input->key_handler) {
-        consumed = input->key_handler(ev, input->key_userdata);
-    }
-
-    if (!consumed) {
+    if (!*consumed) {
         int delivered = gui_input_lvgl_deliver(input, ev);
         if (ev->action == GUI_KEY_DOWN) {
             /*
@@ -744,9 +754,10 @@ static void deliver_key_event(gui_input_t *input, const gui_key_event_t *ev,
          */
         gui_input_lvgl_force_release(input, ev->physical_key);
     }
+    return true;
 }
 
-static void deliver_key(gui_input_t *input, const gui_input_item_t *item)
+static bool deliver_key(gui_input_t *input, gui_input_item_t *item)
 {
     gui_key_event_t ev;
     ev.physical_key = item->physical_key;
@@ -754,7 +765,8 @@ static void deliver_key(gui_input_t *input, const gui_input_item_t *item)
     ev.codepoint = item->codepoint;
     ev.action = (gui_key_action_t)item->action;
 
-    deliver_key_event(input, &ev, item->time_ms);
+    return deliver_key_event(input, &ev, item->time_ms,
+                             &item->key_prepared, &item->key_consumed);
 }
 
 static void deliver_pointer(gui_input_t *input, const gui_input_item_t *item)
@@ -827,12 +839,19 @@ gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *de
     /* 投递 FIFO：每步至多 256 项。 */
     unsigned delivered = 0;
     gui_input_item_t item;
-    while (delivered < GUI_INPUT_DELIVERY_BUDGET && fifo_pop(input, &item)) {
-        if (item.kind == GUI_INPUT_ITEM_KEY) {
-            deliver_key(input, &item);
+    while (delivered < GUI_INPUT_DELIVERY_BUDGET && input->count > 0) {
+        gui_input_item_t *next = &input->items[input->head];
+        if (next->kind == GUI_INPUT_ITEM_KEY) {
+            /* Validate before the next key, including changes from callbacks.
+             * Keep the FIFO head until cancellation and delivery finish; its
+             * preparation flags prevent replaying native application callbacks. */
+            if (!gui_input_lvgl_pump(input) || !deliver_key(input, next)) {
+                break;
+            }
         } else {
-            deliver_pointer(input, &item);
+            deliver_pointer(input, next);
         }
+        (void)fifo_pop(input, &item);
         delivered++;
     }
 
@@ -857,21 +876,30 @@ gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *de
         rep.modifiers = input->delivered_modifiers;  /* 当前已投递快照 */
         /* 下一期限从当前时刻向后计算：停顿期间不补发一串重复。 */
         input->repeat_deadline_ms = now_ms + GUI_INPUT_REPEAT_INTERVAL_MS;
-        deliver_key_event(input, &rep, now_ms);
+        bool prepared = false;
+        bool consumed = false;
+        (void)deliver_key_event(input, &rep, now_ms, &prepared, &consumed);
     }
 
     /* 截断的前缀到期后被丢弃。 */
     gui_ps2_expire(&input->ps2, now_ms);
 
     if (delay_ms) {
-        if (input->count > 0) {
-            *delay_ms = 0;   /* 还有余项：立即继续 */
+        if (input->count > 0 && keypad_ready) {
+            *delay_ms = 0;   /* 还有可投递余项：立即继续 */
         } else if (input->ps2.prefix != 0) {
             uint64_t elapsed = now_ms >= input->ps2.prefix_ms
                                    ? (now_ms - input->ps2.prefix_ms) : 0;
             uint64_t left = (elapsed >= GUI_PS2_PREFIX_TIMEOUT_MS)
                                 ? 0 : (GUI_PS2_PREFIX_TIMEOUT_MS - elapsed);
             *delay_ms = (uint32_t)left;
+        }
+        if (keypad_ready && input->repeat_armed) {
+            uint64_t left = now_ms < input->repeat_deadline_ms
+                                ? input->repeat_deadline_ms - now_ms : 0;
+            if (left < *delay_ms) {
+                *delay_ms = (uint32_t)left;
+            }
         }
     }
 

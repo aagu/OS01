@@ -1162,14 +1162,15 @@ TEST_FUNC(test_blocked_read_does_not_leak_the_old_enter)
     g_gui_test_keypad_reads = 0;
     lv_indev_enable(keypad, true);
     step(&fx);
-    assert_eq(1, g_gui_test_keypad_reads);   /* pending 的取消协议被补做 */
+    assert_eq(2, g_gui_test_keypad_reads);   /* cancel, then the retained a DOWN */
+    assert_eq(keys_before + 1, probe.keys);
     assert_eq(0, probe.clicks);
     assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
 
-    /* 管线恢复：下一个键正常送达焦点控件（换一个键：'a' 仍被解码器视为按住）。 */
+    /* 管线恢复：保留的 a 已送达，后续 b 也正常送达（a 仍按住）。 */
     feed(&fx, b_down, sizeof(b_down));
     step(&fx);
-    assert_eq(keys_before + 1, probe.keys);
+    assert_eq(keys_before + 2, probe.keys);
 
     fixture_teardown(&fx);
 }
@@ -1626,8 +1627,8 @@ TEST_FUNC(test_editing_keys_repeat_and_route_to_the_textarea)
     const uint8_t end[] = { 0xE0u, 0x4Fu };
     const uint8_t end_up[] = { 0xE0u, 0xCFu };
     const uint8_t backspace[] = { 0x0Eu };
-    const uint8_t del[] = { 0x53u };
-    const uint8_t del_up[] = { 0xD3u };
+    const uint8_t del[] = { 0xE0u, 0x53u };
+    const uint8_t del_up[] = { 0xE0u, 0xD3u };
 
     fixture_setup(&fx);
     ta = make_textarea(&fx, 20, 20);
@@ -2708,7 +2709,259 @@ TEST_FUNC(test_destroy_leaves_no_pointer_resources_behind)
     fx.platform = NULL;
 }
 
+
+/* The non-extended keypad decimal is not the dedicated E0 Delete key. */
+TEST_FUNC(test_keypad_decimal_does_not_delete_text)
+{
+    fixture_t fx;
+    fixture_setup(&fx);
+    lv_obj_t *ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    lv_textarea_set_text(ta, "abc");
+    lv_textarea_set_cursor_pos(ta, 0);
+    const uint8_t decimal[] = { 0x53, 0xD3 };
+    feed(&fx, decimal, sizeof(decimal));
+    step(&fx);
+    assert_str_eq("abc", lv_textarea_get_text(ta));
+    fixture_teardown(&fx);
+}
+
+/* Invalidation between steps must precede the queued Enter release. */
+TEST_FUNC(test_invalid_focus_is_cancelled_before_queued_release)
+{
+    for (unsigned variant = 0; variant < 4; variant++) {
+        fixture_t fx;
+        fixture_setup(&fx);
+        lv_obj_t *btn = make_button(&fx, 20, 20);
+        lv_obj_t *ta = make_textarea(&fx, 20, 90);
+        lv_obj_t *target = btn;
+        if (variant >= 2) {
+            target = lv_obj_create(fx.screen);
+            lv_obj_set_parent(btn, target);
+        }
+        assert_eq(0, gui_input_focus_add(fx.input, btn));
+        assert_eq(0, gui_input_focus_add(fx.input, ta));
+        button_probe_t probe = { .input = fx.input };
+        lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_ALL, &probe);
+        const uint8_t down[] = { KEY_ENTER_DOWN };
+        const uint8_t rest[] = { KEY_ENTER_UP, KEY_A_DOWN, KEY_A_UP };
+        feed(&fx, down, sizeof(down));
+        step(&fx);
+        if (variant & 1) lv_obj_add_state(target, LV_STATE_DISABLED);
+        else lv_obj_add_flag(target, LV_OBJ_FLAG_HIDDEN);
+        feed(&fx, rest, sizeof(rest));
+        step(&fx);
+        assert_eq(0, probe.clicks);
+        assert_eq(0, probe.released);
+        assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
+        assert_str_eq("a", lv_textarea_get_text(ta));
+        fixture_teardown(&fx);
+    }
+}
+
+static void hide_parent_on_press(lv_event_t *event)
+{
+    lv_obj_t *parent = lv_event_get_user_data(event);
+    lv_obj_add_flag(parent, LV_OBJ_FLAG_HIDDEN);
+}
+
+TEST_FUNC(test_callback_invalidates_focus_before_same_batch_release)
+{
+    fixture_t fx;
+    fixture_setup(&fx);
+    lv_obj_t *parent = lv_obj_create(fx.screen);
+    lv_obj_t *btn = make_button(&fx, 20, 20);
+    lv_obj_set_parent(btn, parent);
+    lv_obj_t *ta = make_textarea(&fx, 20, 90);
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    button_probe_t probe = { .input = fx.input };
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_ALL, &probe);
+    lv_obj_add_event_cb(btn, hide_parent_on_press, LV_EVENT_PRESSED, parent);
+    const uint8_t bytes[] = { KEY_ENTER_DOWN, KEY_ENTER_UP, KEY_A_DOWN, KEY_A_UP };
+    feed(&fx, bytes, sizeof(bytes));
+    step(&fx);
+    assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+    assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
+    assert_str_eq("a", lv_textarea_get_text(ta));
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_repeat_deadline_bounds_the_platform_wait)
+{
+    fixture_t fx;
+    fixture_setup(&fx);
+    lv_obj_t *ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    const uint8_t down[] = { KEY_A_DOWN };
+    feed(&fx, down, sizeof(down));
+    step(&fx);
+    gui_test_set_now(399);
+    uint32_t delay;
+    /* Drain LVGL's immediately due refresh before checking the steady wait. */
+    for (unsigned i = 0; i < 3; i++) {
+        assert_eq(GUI_STATUS_OK, gui_platform_step(fx.platform, &delay));
+    }
+    assert_eq(1, delay);
+    step_at(&fx, 400);
+    assert_str_eq("aa", lv_textarea_get_text(ta));
+    step_at(&fx, 439);
+    assert_eq(GUI_STATUS_OK, gui_platform_step(fx.platform, &delay));
+    assert_eq(1, delay);
+    step_at(&fx, 440);
+    assert_str_eq("aaa", lv_textarea_get_text(ta));
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_unrelated_deletion_preserves_repeat_and_enter_click)
+{
+    for (unsigned enter = 0; enter < 2; enter++) {
+        fixture_t fx;
+        fixture_setup(&fx);
+        lv_obj_t *focus = enter ? make_button(&fx, 20, 20) : make_textarea(&fx, 20, 20);
+        lv_obj_t *other = make_button(&fx, 200, 120);
+        assert_eq(0, gui_input_focus_add(fx.input, focus));
+        assert_eq(0, gui_input_focus_add(fx.input, other));
+        button_probe_t probe = { .input = fx.input };
+        lv_obj_add_event_cb(focus, probe_button_cb, LV_EVENT_CLICKED, &probe);
+        uint8_t down[] = { enter ? KEY_ENTER_DOWN : KEY_A_DOWN };
+        uint8_t up[] = { enter ? KEY_ENTER_UP : KEY_A_UP };
+        feed(&fx, down, sizeof(down));
+        step(&fx);
+        lv_obj_delete(other);
+        if (!enter) {
+            step_at(&fx, 400);
+            assert_str_eq("aa", lv_textarea_get_text(focus));
+        }
+        feed(&fx, up, sizeof(up));
+        step(&fx);
+        if (enter) assert_eq(1, probe.clicks);
+        fixture_teardown(&fx);
+    }
+}
+
+
+static bool disable_parent_on_enter_up(const gui_key_event_t *event, void *userdata)
+{
+    if (event->physical_key == 0x1C && event->action == GUI_KEY_UP) {
+        lv_obj_add_state((lv_obj_t *)userdata, LV_STATE_DISABLED);
+    }
+    return false;
+}
+
+TEST_FUNC(test_native_callback_invalidates_focus_before_release)
+{
+    fixture_t fx;
+    fixture_setup(&fx);
+    lv_obj_t *parent = lv_obj_create(fx.screen);
+    lv_obj_t *btn = make_button(&fx, 20, 20);
+    lv_obj_set_parent(btn, parent);
+    lv_obj_t *ta = make_textarea(&fx, 20, 90);
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    button_probe_t probe = { .input = fx.input };
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_ALL, &probe);
+    gui_input_set_key_handler(fx.input, disable_parent_on_enter_up, parent);
+    const uint8_t bytes[] = { KEY_ENTER_DOWN, KEY_ENTER_UP, KEY_A_DOWN, KEY_A_UP };
+    feed(&fx, bytes, sizeof(bytes));
+    step(&fx);
+    assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+    assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
+    assert_str_eq("a", lv_textarea_get_text(ta));
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_blocked_focus_cancellation_retains_the_next_queued_key)
+{
+    fixture_t fx;
+    fixture_setup(&fx);
+    lv_obj_t *btn = make_button(&fx, 20, 20);
+    lv_obj_t *ta = make_textarea(&fx, 20, 90);
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    button_probe_t probe = { .input = fx.input };
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_ALL, &probe);
+    const uint8_t down[] = { KEY_ENTER_DOWN };
+    const uint8_t rest[] = { KEY_ENTER_UP, KEY_A_DOWN, KEY_A_UP };
+    feed(&fx, down, sizeof(down));
+    step(&fx);
+    lv_indev_enable(find_keypad(), false);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
+    feed(&fx, rest, sizeof(rest));
+    step(&fx);
+    assert_str_eq("", lv_textarea_get_text(ta));
+    assert_eq(0, probe.clicks);
+    lv_indev_enable(find_keypad(), true);
+    step(&fx);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+    assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+    assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
+    fixture_teardown(&fx);
+}
+
+
+typedef struct {
+    gui_input_t *input;
+    lv_obj_t *target;
+    int releases;
+} blocked_callback_t;
+
+static bool block_and_move_on_release(const gui_key_event_t *event, void *userdata)
+{
+    blocked_callback_t *ctx = userdata;
+    if (event->physical_key == 0x1C && event->action == GUI_KEY_UP) {
+        ctx->releases++;
+        lv_indev_enable(find_keypad(), false);
+        assert_eq(0, gui_input_focus_set(ctx->input, ctx->target));
+    }
+    return false;
+}
+
+TEST_FUNC(test_blocked_native_callback_resumes_without_replaying_the_handler)
+{
+    fixture_t fx;
+    fixture_setup(&fx);
+    lv_obj_t *btn = make_button(&fx, 20, 20);
+    lv_obj_t *ta = make_textarea(&fx, 20, 90);
+    assert_eq(0, gui_input_focus_add(fx.input, btn));
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+    button_probe_t probe = { .input = fx.input };
+    lv_obj_add_event_cb(btn, probe_button_cb, LV_EVENT_ALL, &probe);
+    blocked_callback_t ctx = { .input = fx.input, .target = ta };
+    gui_input_set_key_handler(fx.input, block_and_move_on_release, &ctx);
+    const uint8_t bytes[] = { KEY_ENTER_DOWN, KEY_ENTER_UP, KEY_A_DOWN, KEY_A_UP };
+    feed(&fx, bytes, sizeof(bytes));
+    step(&fx);
+    uint32_t delay = 0;
+    for (unsigned i = 0; i < 3; i++) {
+        assert_eq(GUI_STATUS_OK, gui_platform_step(fx.platform, &delay));
+    }
+    assert_true(delay > 0); /* blocked cancellation must not busy-poll the FIFO */
+    assert_eq(1, ctx.releases);
+    assert_str_eq("", lv_textarea_get_text(ta));
+    lv_indev_enable(find_keypad(), true);
+    step(&fx);
+    assert_eq(1, ctx.releases);
+    assert_str_eq("a", lv_textarea_get_text(ta));
+    assert_eq(0, probe.clicks);
+    assert_eq(0, probe.released);
+    assert_false(lv_obj_has_state(btn, LV_STATE_PRESSED));
+    fixture_teardown(&fx);
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_blocked_native_callback_resumes_without_replaying_the_handler),
+    TEST_ENTRY(test_native_callback_invalidates_focus_before_release),
+    TEST_ENTRY(test_blocked_focus_cancellation_retains_the_next_queued_key),
+    TEST_ENTRY(test_keypad_decimal_does_not_delete_text),
+    TEST_ENTRY(test_invalid_focus_is_cancelled_before_queued_release),
+    TEST_ENTRY(test_callback_invalidates_focus_before_same_batch_release),
+    TEST_ENTRY(test_repeat_deadline_bounds_the_platform_wait),
+    TEST_ENTRY(test_unrelated_deletion_preserves_repeat_and_enter_click),
+
     TEST_ENTRY(test_focus_add_rejects_foreign_display_and_duplicates),
     TEST_ENTRY(test_tab_cycles_in_registration_order),
     TEST_ENTRY(test_tab_skips_hidden_and_disabled_ancestors_and_restores_order),

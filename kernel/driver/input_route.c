@@ -117,7 +117,7 @@ static struct {
     uint8_t  phys_down[ROUTE_KEY_SLOTS];
     uint8_t  isolated[ROUTE_KEY_SLOTS]; /* the keys whose events are swallowed */
     uint8_t  caps_on;                    /* the Caps Lock latch */
-    uint32_t logical_mods;               /* the transient modifier state */
+    uint8_t  logical_down[ROUTE_KEY_SLOTS]; /* accepted keys in this epoch */
 
     /* The framer.  `frame` is the SEQUENCE ACCUMULATOR: it must keep a
      * stable address for every byte of one sequence. */
@@ -153,23 +153,6 @@ static struct {
 
 /* ── Small helpers ────────────────────────────────────────────── */
 
-static uint32_t route_modifier_bit(uint16_t key)
-{
-    switch (key) {
-    case KBD_SHIFT_L:
-    case KBD_SHIFT_R:
-        return INPUT_ROUTE_MOD_SHIFT;
-    case KBD_CTRL_L:
-    case KBD_CTRL_R:
-        return INPUT_ROUTE_MOD_CTRL;
-    case KBD_ALT_L:
-    case KBD_ALT_R:
-        return INPUT_ROUTE_MOD_ALT;
-    default:
-        return 0;
-    }
-}
-
 /* The modifiers that are physically held right now.  Used for the
  * snapshot a new lease starts from. */
 static uint32_t route_physical_modifiers_locked(void)
@@ -191,7 +174,14 @@ static uint32_t route_physical_modifiers_locked(void)
  * transient modifiers plus the Caps latch. */
 static uint32_t route_logical_snapshot_locked(void)
 {
-    uint32_t mods = route.logical_mods;
+    uint32_t mods = 0;
+
+    if (route.logical_down[KBD_SHIFT_L] || route.logical_down[KBD_SHIFT_R])
+        mods |= INPUT_ROUTE_MOD_SHIFT;
+    if (route.logical_down[KBD_CTRL_L] || route.logical_down[KBD_CTRL_R])
+        mods |= INPUT_ROUTE_MOD_CTRL;
+    if (route.logical_down[KBD_ALT_L] || route.logical_down[KBD_ALT_R])
+        mods |= INPUT_ROUTE_MOD_ALT;
 
     if (route.caps_on)
         mods |= INPUT_ROUTE_MOD_CAPS;
@@ -421,6 +411,14 @@ static void route_revoke_locked(int reason)
         }
     }
 
+    /* A new NORMAL consumer has seen none of the held presses.  Keep
+     * typematic and releases quarantined until each physical release. */
+    for (int i = 0; i < ROUTE_KEY_SLOTS; i++)
+        if (route.phys_down[i])
+            route.isolated[i] = 1;
+    if (route.mouse_ep)
+        route.mouse_isolated |= route.mouse_buttons;
+
     route.lease_active = 0;
     route.view = NULL;          /* never dereference a freed view */
     route.kbd_ep = NULL;
@@ -429,7 +427,7 @@ static void route_revoke_locked(int reason)
     /* The transient modifier state is reset: the shell must not inherit
      * the modifier keys the GUI session held.  The PHYSICAL state is
      * NOT reset: the keys are still held. */
-    route.logical_mods = 0;
+    memset(route.logical_down, 0, sizeof(route.logical_down));
 
     /* The next lease is a new epoch. */
     route.epoch++;
@@ -575,6 +573,14 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
     if (route.lease_active)
         route_revoke_locked(ESTALE);
 
+    /* Drain raw NORMAL backlog and wake its old pollers under the same
+     * route critical section as the ownership change.  TTY/PTY data
+     * already delivered by the NORMAL translator is not touched. */
+    if (route.kbd_sink && route.kbd_sink->reset)
+        route.kbd_sink->reset();
+    if (mouse_ep && route.mouse_sink && route.mouse_sink->reset)
+        route.mouse_sink->reset();
+
     route.lease_active = 1;
     route.view = view;
     route.generation = ++route.next_generation;   /* non-zero, monotonic */
@@ -598,23 +604,13 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
      * never cross the boundary. */
     mods = route_physical_modifiers_locked();
 
-    /* Every key that is physically held but is NOT a modifier is
-     * isolated: its release must never reach the new consumer as a
-     * phantom release.
-     *
-     * The held MODIFIER keys are NOT isolated: any isolation an earlier
-     * epoch boundary installed on them is cleared here, so their
-     * release reaches the consumer, which is waiting for it (this
-     * snapshot reports them as held). */
-    for (i = 0; i < ROUTE_KEY_SLOTS; i++) {
-        if (!route.phys_down[i])
-            continue;
-        if (route_modifier_bit((uint16_t)i)) {
-            route.isolated[i] = 0;
-            continue;
-        }
-        route.isolated[i] = 1;
-    }
+    /* The new consumer has seen none of these presses.  Isolate every
+     * held key, including modifiers, through typematic and release.
+     * Only the Caps latch crosses the UAPI; a held modifier cannot
+     * supply a fresh press or a phantom release to this lease. */
+    for (i = 0; i < ROUTE_KEY_SLOTS; i++)
+        if (route.phys_down[i])
+            route.isolated[i] = 1;
 
     /* A new lease starts from a known-consistent state: the DESYNC flag
      * belongs to the lease that is being replaced. */
@@ -624,10 +620,11 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
      * the consumer never saw their press, so it must never see them
      * held.  The movement is never lost.  A keyboard-only lease does
      * not own the mouse, so its buttons are left alone. */
-    route.mouse_isolated = mouse_ep ? route.mouse_buttons : 0;
+    if (mouse_ep)
+        route.mouse_isolated = route.mouse_buttons;
 
     /* The transient modifier state starts clean. */
-    route.logical_mods = 0;
+    memset(route.logical_down, 0, sizeof(route.logical_down));
 
     if (generation)
         *generation = route.generation;
@@ -812,18 +809,7 @@ static void route_publish_frame_locked(const input_ps2_frame_t *frame)
         }
     }
 
-    /* 2. The transient modifier state follows the events. */
-    if (ordinary) {
-        uint32_t bit = route_modifier_bit(key);
-        if (bit) {
-            if (frame->is_make)
-                route.logical_mods |= bit;
-            else
-                route.logical_mods &= ~bit;
-        }
-    }
-
-    /* 3. A sequence that crosses an epoch boundary started in another
+    /* 2. A sequence that crosses an epoch boundary started in another
      *    lease's era: it is isolated, so the consumer never sees a
      *    half-truth.  The key stays isolated until its break.
      *
@@ -844,14 +830,20 @@ static void route_publish_frame_locked(const input_ps2_frame_t *frame)
         return;
     }
 
-    /* 4. An isolated key is swallowed until its break. */
+    /* 3. An isolated key is swallowed until its break. */
     if (ordinary && route.isolated[key]) {
         if (!frame->is_make)
             route.isolated[key] = 0;
         return;
     }
 
-    /* 5. Publish the whole sequence. */
+    /* Only accepted frames advance the consumer's logical state.  Keep
+     * left/right keys independent, so releasing one side cannot clear
+     * the other side or resurrect an isolated physical modifier. */
+    if (ordinary)
+        route.logical_down[key] = frame->is_make ? 1 : 0;
+
+    /* 4. Publish the whole sequence. */
     if (route.lease_active) {
         route_kbd_push_locked(frame->bytes, frame->length);
     } else if (route.kbd_sink && route.kbd_sink->publish) {
