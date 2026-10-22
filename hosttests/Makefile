@@ -1312,7 +1312,19 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/file_poll_production.o \
     $(TEST_BLD)/tty_poll_production.o \
     $(TEST_BLD)/devfs_poll_production.o \
-    $(TEST_BLD)/poll_clocksource_stub.o
+    $(TEST_BLD)/poll_clocksource_stub.o \
+    $(TEST_BLD)/serial_sink_stub.o
+
+# The host-side console sink for the production serial write path
+# (kernel/fs/devfs.c serial_write).  The production object references
+# serial_lock and write_serial_unlocked: the host build has no UART, so
+# the sink discards the bytes (the host spinlock is a no-op).
+$(TEST_BLD)/serial_sink_stub.o: $(TEST_MOCK)/serial_sink_stub.c \
+		$(TEST_MOCK)/test_platform.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+		-include $(TEST_MOCK)/test_platform.h \
+		$(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -c $< -o $@
 
 $(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
@@ -2169,7 +2181,8 @@ $(TEST_BLD)/test_gfx_file_lifecycle.o: $(TEST_CASES)/test_gfx_file_lifecycle.c \
 $(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
 		$(TEST_BLD)/gfx_gfx_production.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
-		$(TEST_BLD)/gfx_file_production.o
+		$(TEST_BLD)/gfx_file_production.o \
+		$(TEST_BLD)/serial_sink_stub.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
@@ -2195,7 +2208,8 @@ $(TEST_BLD)/test_monitor_file.o: $(TEST_CASES)/test_monitor_file.c \
 
 $(TEST_BLD)/test_monitor_file.elf: $(TEST_BLD)/test_monitor_file.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
-		$(TEST_BLD)/gfx_file_production.o
+		$(TEST_BLD)/gfx_file_production.o \
+		$(TEST_BLD)/serial_sink_stub.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # Monitor plan Task 2: per-CPU tick accounting.  Host-compiles the REAL
@@ -2639,7 +2653,8 @@ $(TEST_BLD)/test_gfx_device.elf: $(TEST_BLD)/test_gfx_device.o \
 		$(TEST_BLD)/gfx_gfx_production.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/gfx_file_production.o \
-		$(TEST_BLD)/gfx_fault_bridge.o
+		$(TEST_BLD)/gfx_fault_bridge.o \
+		$(TEST_BLD)/serial_sink_stub.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-device: $(TEST_BLD)/test_gfx_device.elf

@@ -295,6 +295,35 @@ static bool consume_and_log(const gui_key_event_t *event, void *userdata)
     return false;
 }
 
+/* 记录应用看到的每一个事件（含 REPEAT），但**不消费**：按键仍然进入控件路径。
+ *
+ * 用来钉住"被取消的按键不得产生重复"：应用流与控件流都必须没有 REPEAT。 */
+typedef struct {
+    int downs;
+    int repeats;
+    int ups;
+} app_log_t;
+
+static bool app_log(const gui_key_event_t *event, void *userdata)
+{
+    app_log_t *log = (app_log_t *)userdata;
+
+    switch (event->action) {
+    case GUI_KEY_DOWN:
+        log->downs++;
+        break;
+    case GUI_KEY_REPEAT:
+        log->repeats++;
+        break;
+    case GUI_KEY_UP:
+        log->ups++;
+        break;
+    default:
+        break;
+    }
+    return false;   /* 不消费：事件继续进入控件路径 */
+}
+
 /* ── 按钮探针 ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -346,6 +375,55 @@ static void probe_button_cb(lv_event_t *e)
     if (probe->delete_self) {
         lv_obj_delete(probe->delete_self);
     }
+}
+
+/*
+ * 交付中的按键回调：把焦点移到另一个控件。
+ *
+ * 焦点变化会标记取消协议（focus_group_cb → gui_input_lvgl_mark_cancel），
+ * 取消协议在 deliver() 返回前执行 —— 于是这一次按键在交付途中就被取消。
+ */
+typedef struct {
+    gui_input_t *input;
+    lv_obj_t    *target;
+} focus_move_ctx_t;
+
+static void move_focus_on_key(lv_event_t *e)
+{
+    focus_move_ctx_t *ctx = (focus_move_ctx_t *)lv_event_get_user_data(e);
+
+    if (!ctx || !ctx->input || !ctx->target) {
+        return;
+    }
+    if (lv_event_get_code(e) != LV_EVENT_KEY) {
+        return;
+    }
+    (void)gui_input_focus_set(ctx->input, ctx->target);
+}
+
+/*
+ * 交付中的按键回调：删除焦点控件自己。
+ *
+ * 控件消失 → gui_input_focus_lost() → 标记取消协议 → 取消在 deliver() 内部
+ * 执行（spec §7.2："当前焦点控件被删后，旧按键不能继续作用于自动选中的新
+ * 控件"）。
+ */
+typedef struct {
+    gui_input_t *input;
+    lv_obj_t    *target;
+} delete_ctx_t;
+
+static void delete_self_on_key(lv_event_t *e)
+{
+    delete_ctx_t *ctx = (delete_ctx_t *)lv_event_get_user_data(e);
+
+    if (!ctx || !ctx->target) {
+        return;
+    }
+    if (lv_event_get_code(e) != LV_EVENT_KEY) {
+        return;
+    }
+    lv_obj_delete(ctx->target);
 }
 
 /* ── 控件工厂 ──────────────────────────────────────────────────── */
@@ -1420,6 +1498,112 @@ TEST_FUNC(test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys)
     feed(&fx, a_down, sizeof(a_down));
     step(&fx);
     assert_str_eq("a", lv_textarea_get_text(ta2));
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 交付途中被取消的按键：不得重复。
+ *
+ * 取消协议有两种触发方式：
+ *   - 焦点在**两次重复之间**转移（已有的
+ *     test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys）；
+ *   - 焦点在**交付这一次按键的途中**转移（回调在 LV_EVENT_KEY 里移走焦点），
+ *     取消协议在 deliver() 内部执行。
+ *
+ * 第二种是本用例覆盖的：deliver() 内部的取消清掉了重复的武装，如果武装
+ * 发生在 deliver **之后**，取消就被撤销 —— 旧键于是重复到自动选中的新控件
+ * 上（spec §6.2："按键切换、焦点变化…都取消重复"；spec §7.2："当前焦点控件
+ * 被删后，旧按键不能继续作用于自动选中的新控件"）。
+ */
+TEST_FUNC(test_a_key_cancelled_by_its_own_callback_never_repeats)
+{
+    fixture_t fx;
+    lv_obj_t *ta1, *ta2;
+    app_log_t log;
+    focus_move_ctx_t ctx;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+
+    fixture_setup(&fx);
+    ta1 = make_textarea(&fx, 20, 20);
+    ta2 = make_textarea(&fx, 20, 60);
+    assert_eq(0, gui_input_focus_add(fx.input, ta1));
+    assert_eq(0, gui_input_focus_add(fx.input, ta2));
+
+    /* ta1 收到按键时把焦点移到 ta2：这一次按键在交付途中被取消。 */
+    ctx.input = fx.input;
+    ctx.target = ta2;
+    lv_obj_add_event_cb(ta1, move_focus_on_key, LV_EVENT_KEY, &ctx);
+
+    memset(&log, 0, sizeof(log));
+    gui_input_set_key_handler(fx.input, app_log, &log);
+
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+
+    /* 这一次 DOWN 真的进了控件路径：ta1 收到了字符。 */
+    assert_str_eq("a", lv_textarea_get_text(ta1));
+    assert_eq(1, log.downs);
+    /* 回调把焦点移走了：焦点现在在 ta2。 */
+    assert_eq(ta2, gui_input_focus_current(fx.input));
+
+    /* 被取消的按键不得武装重复，也不得产生 REPEAT。 */
+    assert_eq(0, log.repeats);
+    assert_true(!fx.input->repeat_armed);
+
+    /* 过了重复期限也不得补发：旧键不得作用到新控件上。 */
+    gui_test_set_now(600);
+    step(&fx);
+    assert_eq(0, log.repeats);
+    assert_true(!fx.input->repeat_armed);
+    assert_str_eq("a", lv_textarea_get_text(ta1));
+    assert_str_eq("", lv_textarea_get_text(ta2));
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 焦点控件在交付途中被删除：旧键同样不得重复。
+ *
+ * spec §7.2："当前焦点控件被删后，旧按键不能继续作用于自动选中的新控件"。
+ * 删除同样标记取消协议，取消在 deliver() 内部执行。
+ */
+TEST_FUNC(test_a_key_whose_focus_is_deleted_in_its_callback_never_repeats)
+{
+    fixture_t fx;
+    lv_obj_t *ta1, *ta2;
+    app_log_t log;
+    delete_ctx_t ctx;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+
+    fixture_setup(&fx);
+    ta1 = make_textarea(&fx, 20, 20);
+    ta2 = make_textarea(&fx, 20, 60);
+    assert_eq(0, gui_input_focus_add(fx.input, ta1));
+    assert_eq(0, gui_input_focus_add(fx.input, ta2));
+
+    /* ta1 收到按键时删除自己：焦点控件在交付途中消失。 */
+    ctx.input = fx.input;
+    ctx.target = ta1;
+    lv_obj_add_event_cb(ta1, delete_self_on_key, LV_EVENT_KEY, &ctx);
+
+    memset(&log, 0, sizeof(log));
+    gui_input_set_key_handler(fx.input, app_log, &log);
+
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+
+    assert_eq(1, log.downs);
+    /* 焦点控件被删 → 旧键被取消 → 不得重复。 */
+    assert_eq(0, log.repeats);
+    assert_true(!fx.input->repeat_armed);
+
+    /* 过了重复期限也不得补发到自动选中的新控件上。 */
+    gui_test_set_now(600);
+    step(&fx);
+    assert_eq(0, log.repeats);
+    assert_true(!fx.input->repeat_armed);
+    assert_str_eq("", lv_textarea_get_text(ta2));
 
     fixture_teardown(&fx);
 }
@@ -2554,6 +2738,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_esc_is_delivered_as_cancel_to_the_focused_widget),
     TEST_ENTRY(test_left_click_focuses_a_registered_widget),
     TEST_ENTRY(test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys),
+    TEST_ENTRY(test_a_key_cancelled_by_its_own_callback_never_repeats),
+    TEST_ENTRY(test_a_key_whose_focus_is_deleted_in_its_callback_never_repeats),
     TEST_ENTRY(test_consumed_shortcut_is_not_inserted),
     TEST_ENTRY(test_consumed_release_still_releases_the_lvgl_key),
     TEST_ENTRY(test_left_down_and_up_in_one_step_make_one_click),

@@ -747,6 +747,14 @@ void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event)
  * LVGL 从未见过这次按下，为它产生 REPEAT 只会让应用执行一个自己并没有
  * 交给控件的动作。
  *
+ * **并且它必须仍然是活动键**：投递过程本身可能已经执行了取消协议——
+ * LV_EVENT_KEY 回调里移动焦点或删除焦点控件时，deliver() 在返回前调用
+ * gui_input_lvgl_cancel_key()，它清掉 repeat_armed 并让活动键失效
+ * （spec §6.2："按键切换、焦点变化…都取消重复"；spec §7.2："当前焦点控件
+ * 被删后，旧按键不能继续作用于自动选中的新控件"）。取消之后
+ * active_physical 为 0，所以"它仍然是活动键"正是"投递没有取消它"的判据。
+ * 少了这一条，被取消的旧键会被重新武装，重复到自动选中的新控件上。
+ *
  * 修饰键不参与：它们的 DOWN 不影响活动键的重复（Ctrl / Alt 取消活动键
  * 由投递层的取消协议负责）。
  */
@@ -762,7 +770,9 @@ void gui_input_lvgl_repeat_after_down(gui_input_t *input,
         return;
     }
 
-    if (reached_lvgl && gui_input_lvgl_repeatable(input, event)) {
+    if (reached_lvgl &&
+        input->lvgl.active_physical == event->physical_key &&
+        gui_input_lvgl_repeatable(input, event)) {
         input->repeat_armed = true;
         input->repeat_physical = event->physical_key;
         input->repeat_char = input->ps2.cached[gui_ps2_key_slot(event->physical_key)];

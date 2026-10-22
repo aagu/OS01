@@ -111,8 +111,36 @@ static int serial_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
 
+    /*
+     * The whole buffer must reach the wire CONTIGUOUSLY.
+     *
+     * The console has several writers: the shell's echo, the terminal's
+     * periodic stats line, the GUI-2 probe's protocol records.  A console
+     * write is a line or a record, and the host-side parser requires a
+     * protocol line to be key=value only -- so a byte of another writer
+     * landing in the middle of a record destroys it.
+     *
+     * write_serial() takes and releases serial_lock per BYTE, so a
+     * multi-byte write could be split by any other writer in the middle
+     * (observed: the terminal's "[term-probe] ..." stats line landed
+     * inside a probe record, between "fat" and "al_trigger=1").
+     *
+     * Holding serial_lock across the whole buffer is the kernel's own
+     * convention for a multi-byte console write (kernel/log/log.c,
+     * kernel/core/printk.c, kernel/tty/tty.c): the same bytes are
+     * emitted, they are simply no longer interleavable in the middle.
+     *
+     * Nothing is truncated: write_serial_unlocked() waits for the
+     * transmit FIFO to drain and then writes exactly one byte, so the
+     * loop delivers the whole buffer whatever its size (there is no
+     * device capacity to overrun).  The serial RX path does not take
+     * serial_lock, so the keyboard/serial interrupts are not blocked by
+     * this lock.
+     */
+    uint64_t sf = spin_lock_irqsave(&serial_lock);
     for (uint64_t i = 0; i < size; i++)
-        write_serial(((char *)buffer)[i]);
+        write_serial_unlocked(((char *)buffer)[i]);
+    spin_unlock_irqrestore(&serial_lock, sf);
 
     return (int)size;
 }

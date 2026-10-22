@@ -2,6 +2,8 @@
 
 > **执行日期说明**：plan Task 13 要求把文件名与标题的日期从计划日 `2026-10-20` 调整为**实际执行日**。本报告的实际执行日是 **2026-10-22**（本地时区 UTC+8）。回归运行在 UTC 时间轴上跨越 `2026-10-21T20:26Z – 2026-10-21T20:42Z`，对应本地时间 `2026-10-22 04:26 – 04:42`；归档里的 `utc_started_at` 字段同样是 UTC，因此下文所有 UTC 时间戳都比本地日期早一天。
 
+> **本报告的 §2 / §3 描述的是 Task 13 那一轮回归的树**（HEAD `093a5fb4`）。其后的**整分支修复波**改动了 30 个文件（其中包括 DESYNC 的错误契约），因此**最终树**的门禁结果记录在 **§7**，§5.3 里被这一波关掉的条目也已就地标注。
+
 ---
 
 ## 1. 交付范围与环境
@@ -226,18 +228,21 @@ resolution production suite: 2 failure(s)
 
 ### 5.3 分支累积的既有 Minor（来自各任务评审的 deferred Minor，Task 13 收口时逐条带出）
 
-这些**不是**本次回归新发现的问题，是 Tasks 3–12 评审记录下来的遗留项；本任务未修。
+这些**不是**本次回归新发现的问题，是 Tasks 3–12 评审记录下来的遗留项。
 
-- **Task 3（内核路由）**：route 可以不带锁初始化；`dev_private=NULL` 在锁外读取；溢出路径可能刷屏日志；`drain_bytes` 会把不同的 errno 合并；host mock 绕过 ops 分派；ACTIVE poll 列表是共享的；NORMAL 路径上跨 epoch 的帧可能被吞掉。
-- **Task 4（gfx bind）**：weak-symbol 守卫是 fail-open 的。
-- **Task 5（解码）**：`GUI_INPUT_SYNTHETIC` 的注释没有写明离屏约束；NULL-ignore 契约没有测试。
-- **Task 6（生命周期）**：被应用消费掉的按键仍会被武装重复；mock 在故障分支之前记录 flags；公开头有合并冲突风险。
-- **Task 7（焦点）**：`focus_sync` 取第一个候选而不是当前焦点**之后**的第一个；`lv_group_get_focused` 回落被去掉；报告的 §G.2 变体表缺一行；对焦点组唯一成员调用 `gui_input_focus_remove()` 会发 `LV_EVENT_DEFOCUSED` 而不调用焦点回调，因此没有标记 cancel。
-- **Task 8（指针）**：「拖动进行中」其实是更宽的「左键按住」窗口；`move_pointer_to_abs()` 把 int32 位移截断成 int16；`wheel_scroll_by()` 返回的是它**以为**滚动的像素数。
-- **Task 9（构建/发布）**：已发布的 mbedtls 树不是自包含的；三个已发布的内核头对使用者来说是坏的；`qemutests/test_ci_workflow.py` 没有断言两个新 CI 步骤；`hosttests/Makefile` 里有三份并行的 wrapper 列表；两个 commit body 仍带着已被推翻的「32 false positives」表述。
-- **Task 10（探针）**：指针位置从不上报，所以 Task 11 必须重新 home 光标；`fatal` 的 harness 判据是「没有 EXIT 记录」；报告里有一个进程隐患。
-- **Task 11（QMP 矩阵）**：CLI `--timeout` 默认值 180→410 同时放宽了 GUI-1 的外层上界；有一次空 amend `2842cffe → d0ffe93f`；多行输入的提前到达残余余量只吸收**一次**额外的串口读；报告的 §3.1/§3.2 仍是第 1 轮的数值（它们描述的是第 1 轮的树）。
-- **Task 12（所有权/溢出/崩溃）**：变异活动保存在 `/tmp` 里、**没有**进仓库（fixture 进了）；卡住的 Shift 也会把数字变成符号，所以 canary 的大小写检查是形状级的；`input_overflow` 在真实 guest 里需要 32 批，落在 64 批 / 40 秒窗口内，但在更慢的宿主上余量更小；`_wait_prompt` 屏障可以由串口 shell 自己的提示符满足（真正的 PS/2 证据是 canary）；`SC_OWNER` 探针以非零码退出，而它的 EXIT 记录写着 `result=PASS detail=owner_loss_detected`；以及 §5.2 的 N-4 flake。
+> **2026-10-22 更新**：随后的**整分支修复波**（`fix(gui): close the final whole-branch review findings`，`ac3f3eb6`）关掉了其中若干条。凡是被关掉的条目在下文**标注了对应的修复项**，不再作为"未修"列出；**没有被这一波碰过的条目原样保留**，仍然开放。凡是本节仍列着的条目，都**没有**被这一波关掉。
+
+- **Task 3（内核路由）**：route 可以不带锁初始化（仍开放）；`dev_private=NULL` 在锁外读取（**已修：C2** —— 清理在路由锁内完成）；溢出路径可能刷屏日志（**已修：C3** —— 每个溢出 episode 只记一次，警告本身从不消失）；`drain_bytes` 会把不同的 errno 合并（**已修：C4** —— errno 原样返回，边界矩阵逐个区分）；host mock 绕过 ops 分派（仍开放）；ACTIVE poll 列表是共享的（仍开放）；NORMAL 路径上跨 epoch 的帧可能被吞掉（仍开放 —— 这是**既有观察**，`progress.md:104` 记录；这一波没有碰它）。
+- **Task 4（gfx bind）**：weak-symbol 守卫是 fail-open 的（仍开放）。
+- **Task 5（解码）**：`GUI_INPUT_SYNTHETIC` 的注释没有写明离屏约束（仍开放）；NULL-ignore 契约没有测试（**已修：C6** —— 契约被写进头文件并被用例钉住）。
+- **Task 6（生命周期）**：被应用消费掉的按键仍会被武装重复（**已修：C8** —— 重复只对真正进入控件路径的按键武装）；mock 在故障分支之前记录 flags（仍开放）；公开头有合并冲突风险（仍开放）。
+- **Task 7（焦点）**：`focus_sync` 取第一个候选而不是当前焦点**之后**的第一个（**已修：A3** —— 改为取旧焦点**之后**的第一个可用项，旧的已删除才回落到第一个）；`lv_group_get_focused` 回落被去掉（仍开放）；报告的 §G.2 变体表缺一行（仍开放）；对焦点组唯一成员调用 `gui_input_focus_remove()` 会发 `LV_EVENT_DEFOCUSED` 而不调用焦点回调，因此没有标记 cancel（仍开放）；应用可见 / 控件可见两条流的分歧未记录（**已修：C9** —— 公共头 `gui_input.h` 现在写明应用流是控件流的**超集**以及三种分歧情形）。
+- **Task 8（指针）**：「拖动进行中」其实是更宽的「左键按住」窗口；`move_pointer_to_abs()` 把 int32 位移截断成 int16；`wheel_scroll_by()` 返回的是它**以为**滚动的像素数（这三项均仍开放）。
+- **Task 9（构建/发布）**：已发布的 mbedtls 树不是自包含的（仍开放）；三个已发布的内核头对使用者来说是坏的（仍开放）；`qemutests/test_ci_workflow.py` 没有断言两个新 CI 步骤（**已修：A4** —— 两个步骤现在都有断言，去掉任一步骤即失败）；`hosttests/Makefile` 里有三份并行的 wrapper 列表（仍开放）；两个 commit body 仍带着已被推翻的「32 false positives」表述（仍开放 —— 属于历史，未被改写）。
+- **Task 10（探针）**：指针位置从不上报，所以 Task 11 必须重新 home 光标（**已修：C10** —— 探针现在上报 `pointer_x` / `pointer_y` / `pointer_seen`，runner 断言位置，位置不对即失败）；`fatal` 的 harness 判据是「没有 EXIT 记录」（**已修：C11** —— 探针在退出前上报 `lvgl_assert=1`，runner 等待并断言这个**正向**事实）；报告里有一个进程隐患（仍开放）。
+- **Task 11（QMP 矩阵）**：CLI `--timeout` 默认值 180→410 同时放宽了 GUI-1 的外层上界（仍开放）；有一次空 amend `2842cffe → d0ffe93f`（**已核实并记录，不是缺陷**：两者的 parent、tree、subject 完全相同，只有提交元数据不同；**没有**改写任何历史 —— 见 §7.3）；多行输入的提前到达残余余量只吸收**一次**额外的串口读（仍开放）；报告的 §3.1/§3.2 仍是第 1 轮的数值（**已澄清**：§3 描述的是 Task 13 那一轮（`093a5fb4`）的树，**最终树**的数字在 §7）。
+- **Task 12（所有权/溢出/崩溃）**：变异活动保存在 `/tmp` 里、**没有**进仓库（fixture 进了）；卡住的 Shift 也会把数字变成符号，所以 canary 的大小写检查是形状级的；`input_overflow` 在真实 guest 里需要 32 批，落在 64 批 / 40 秒窗口内，但在更慢的宿主上余量更小；`_wait_prompt` 屏障可以由串口 shell 自己的提示符满足（真正的 PS/2 证据是 canary）；`SC_OWNER` 探针以非零码退出，而它的 EXIT 记录写着 `result=PASS detail=owner_loss_detected`；以及 §5.2 的 N-4 flake（以上均仍开放）。
+- **Task 13（分支级回归）**：`docs/build/build.md` 的审计计数过期（**已修：A5** —— 现在是 13 项，并逐项列出审计名）；`SUITE=resolution` 的既有红灯（仍开放，见 §5.1，**不是**本分支的回归，也**没有**门禁豁免）。
 
 **两条已明确告知用户的范围决定**：PS/2 wheel knock 的修复（`af42c90e`）修正了一个**既有内核驱动 bug**（在本功能分支范围内，经独立审计并被 Task 11 复审维持）；鼠标的 IntelliMouse knock 现在是 `{0xF3,200,0xF3,100,0xF3,80,0xF2}`，滚轮恰好 32 px/刻度。
 
@@ -266,3 +271,61 @@ resolution production suite: 2 failure(s)
 - 回归里唯一红的是 `SUITE=resolution`，其两条失败断言在**基线提交上同样复现**，因此**不是**本分支引入的回归；本报告不修它、也不替它宣布门禁豁免。
 - N-4 flake 在本次干净回归中**未复现**；它被如实记录为一次观察到的 flake，**没有**被声称已修，其残留的匹配歧义也如实列出。
 - 计划、范围与硬约束均未被违反：没有新增产品接口，发布面未变，键盘 raw payload 与 `mouse_event_t` 8 字节 ABI 未动，TTY `ISIG` 未被关闭，所有测试都从仓库根 make 入口运行，`GUI_HOST_REGISTERED_CASES` 仍是唯一列表，LVGL 子模块未被修改，`thirdpart/lvgl/` 未被触碰。
+
+---
+
+## 7. 最终树的门禁结果（本节描述的是**最终树**，不是 §2/§3 那一轮）
+
+> §2 与 §3 记录的是 Task 13 那一轮回归（树 = `093a5fb4`）。其后的**整分支修复波**改动了 30 个文件（`ac3f3eb6`），随后的**第二轮修复波**又改动了 7 个文件（含 R2-1 的 libgui 改动、R2-4 的内核控制台写改动、R2-2 的注释、以及本报告自身）。因此**最终树**的门禁结果记在本节。
+
+### 7.1 六条门禁命令：命令 → 退出码 → 摘要
+
+全部从**仓库根**的 make 入口运行（没有用过 `make -C hosttests`）。脚本 `/tmp/gate3.sh`，完整输出 `/tmp/gate3.log`，退出码 `/tmp/gate3.exit`。
+
+| # | 命令 | 退出码 | 摘要 |
+|---|------|--------|------|
+| 1 | `make PROFILE=x86_64-clang test-gui-host CASE=all` | **0** | 10 个 GUI 宿主二进制全 PASS；`test_gui_input_lvgl` **Total: 967 / Passed: 967 / Failed: 0**（第一轮修复波结束时是 949 个断言点 —— 第二轮新增的两个用例补上了差额） |
+| 2 | `make PROFILE=x86_64-clang test-host` | **0** | `[run_hosttests] 128 binary(ies) run, overall exit 0` —— 与基线 `ed725324` 的 128 一致，**无回归** |
+| 3 | `make PROFILE=x86_64-clang test-static` | **0** | **13** 项静态审计全 PASS：driver-model-boundary、gui-build-audit、header-object-audit、kernel-canary-contract、kernel-layout、kernel-runtime-link、runtime-audit、runtime-link-order、stack-canary-audit、stack-frame-audit、syscall-boundary、user-canary、validate-kernel |
+| 4 | `make PROFILE=x86_64-clang test-harness` | **0** | `Ran 590 tests in 538.508s` — `OK (skipped=1)`（Task 13 基线 582，本分支修复波新增 +8） |
+| 5 | `make PROFILE=x86_64-clang test-qemu SUITE=gui` | **0** | **24/24 PASS**（12 个用例 × SMP 1、SMP 2 各 12）；归档 `build/x86_64-clang/logs/tests/gui/20261022T065127Z-f82d62ce9e214448845fe220be1492d0/`；SMP1 331 条 / SMP2 332 条 `[gui-input]` 协议记录，**0 条**含拼接；`[term-probe]` 行数 85 / 86（终端输出与修复前一致） |
+| 6 | `make PROFILE=x86_64-clang test-gui-incremental` | **0** | 四个增量断言（touch / compile / install / publish）全 PASS |
+
+`/tmp/gate3.exit` 原文：
+
+```
+gui-host-all rc=0
+test-host rc=0
+test-static rc=0
+test-harness rc=0
+qemu-gui rc=0
+gui-incremental rc=0
+```
+
+**发布面复核**（同一棵树）：已发布的 GUI 头树仍**恰好**是 `{gui.h, gui_input.h, gui_platform.h}` 三个文件（`build/x86_64-clang/staging/gui/usr/include/gui/`），没有私有头泄漏。
+
+**已知红、且本报告不声称它是绿的**：`make PROFILE=x86_64-clang test-qemu SUITE=resolution` 在基线 `6126504a` 上以**同样两条**断言失败（见 §5.1）。它**不在**本轮门禁的六条命令里，本轮也**没有**声称它变绿，更**没有**宣布门禁豁免。本轮对分辨率路径**零改动**：`kernel/driver/fb_state.c` 与 `libgfx/gfx.h` 只改了**注释**，没有触碰任何分辨率代码、ioctl 或模式切换路径。
+
+### 7.2 DESYNC 错误契约（最终树）
+
+最终树的 DESYNC 契约是 **`-EOVERFLOW`**，并且**在整个租约生命周期内粘住** —— 依据设计文档 §4.2：
+
+| 场景 | 错误表面 | 粘住范围 |
+|------|----------|----------|
+| ACTIVE 队列溢出，或一个序列跨越 epoch 边界被吞掉 | **`EOVERFLOW`** | read 与 poll 在**整个租约生命周期内**持续报告它，直到应用交还租约并重新绑定（新租约从已知一致状态开始） |
+
+配套的文档已经同步到最终树：`docs/driver/driver.md:489`、`docs/gui/gui.md:360`、`docs/gui/gui.md:384`（"跨 epoch 的序列 → `EOVERFLOW`，与队列溢出同一个 errno"）、`docs/changelog.md:13`。
+
+**这一点与本报告 §2/§3 那一轮（Task 13）不同**：那一轮描述的是**一次性** `-ESTALE` 的旧行为，因此 §2/§3 的数值**不能**当作最终树的契约证据 —— 最终树的契约以本节为准。
+
+### 7.3 §5.3 已就地更正
+
+§5.3 的条目已**逐条**就地标注：被修复波关掉的条目标了对应的修复项（C2 / C3 / C4 / C6 / C8 / A3 / C9 / A4 / C10 / C11 / C12 / A5），**仍然开放**的条目明确写"仍开放"，并保留了既有观察（例如 "NORMAL 路径上跨 epoch 的帧可能被吞掉"，`progress.md:104`）。
+
+**没有任何一条是被"顺手关掉"的** —— 凡是被标为已修的，都确实有对应的改动与 RED→GREEN 证据；凡是没有被这一波碰过的，**仍然开放**，原样保留。
+
+关于 §5.3 里 Task 11 的那条"空 amend `2842cffe → d0ffe93f`"：这是**已核实并记录的事实，不是缺陷** —— 两者的 parent、tree、subject 完全相同，只有提交元数据（committer 时间戳）不同；本轮**没有**改写任何历史。完整的逐项证据见 `.superpowers/sdd/2026-10-20-gui-2-input-focus/final-fix-report.md` 的 D2 与 R2-3 两节。
+
+### 7.4 本轮新增的一条观察（不是失败）
+
+第二轮修复期间，QEMU GUI suite 在最终树上一度变红（4 次运行、3 种失败形态）。根因是**既有的**内核缺陷：`kernel/fs/devfs.c` 的 `serial_write()` **逐字节**释放控制台锁，因此另一路控制台写者可以插进一条协议记录中间，把记录劈成两半（实测 `[term-probe]` 的统计行落在 `... pointer_seen=0 fat` 与 `al_trigger=1` 之间）。该缺陷已在 `kernel/fs/devfs.c:109-142` 修复（整条缓冲在一次 `spin_lock_irqsave` 内发出），终端**打印内容不变**，runner 的解析器**未削弱**。详见 fix report 的 R2-4 一节。

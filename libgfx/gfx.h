@@ -169,11 +169,15 @@ int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h);
  *
  * ONLY CAPS MAY BE SEEDED from this snapshot.  The kernel reduces the
  * route's bind-time snapshot to the Caps latch alone, so the aggregate
- * Shift/Ctrl/Alt bits never cross the UAPI boundary: the keys that are
- * still held at bind time are isolated and their release is swallowed,
- * so those aggregate bits would describe presses the consumer never
- * saw.  The Caps latch is different — it is a STATE, not an edge, and
- * the consumer has no other way to learn it. */
+ * Shift/Ctrl/Alt bits never cross the UAPI boundary:
+ *   - the ORDINARY keys still held at bind time are isolated and their
+ *     release is swallowed, so those aggregate bits would describe presses
+ *     the consumer never saw;
+ *   - the held MODIFIER keys are NOT isolated — their release does reach the
+ *     consumer — but their press predates the lease, so the consumer never
+ *     saw that press either.
+ * The Caps latch is different — it is a STATE, not an edge, and the consumer
+ * has no other way to learn it. */
 typedef struct {
     uint64_t generation;
     uint32_t initial_modifiers;
