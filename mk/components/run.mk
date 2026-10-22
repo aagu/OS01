@@ -611,12 +611,13 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 	  esac
 
 # ── GUI host tests ───────────────────────────────────────────
-# Focused host tests for GUI-1 LVGL platform backend.
-# CASE accepts platform, lvgl, or all (default: all).
-# In Task 3 only platform is registered; Task 4 adds lvgl.
+# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
+# and the GUI-2 input-focus chain.  CASE accepts any registered case
+# (platform, lvgl, devfs-input, input-frame, input-route, input-decode,
+# input-platform) or all (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl
-GUI_HOST_REGISTERED_CASES := platform lvgl
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -626,8 +627,115 @@ _test-gui-host-run-lvgl:
 	@echo "  [test-gui-host] lvgl"
 	$(call os01_submake,hosttests,test-gui-lvgl $(OS01_SUBMAKE_ARGS))
 
+# GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Runs
+# test_devfs_input_dispatch.elf, which host-compiles the REAL
+# kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c and asserts the
+# spec §4.3 devfs contract: the file identity reaches the device, the
+# legacy node read/poll stay the fallback for devices without the new
+# hooks, a read_file error is not downgraded to the node read, and
+# poll_file returning 0 stays "not ready".
+_test-gui-host-run-devfs-input:
+	@echo "  [test-gui-host] devfs-input"
+	$(call os01_submake,hosttests,test-gui-devfs-input $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  Runs
+# test_input_ps2_frame.elf, which host-compiles the REAL
+# kernel/driver/input_ps2.c and asserts the spec §4.3/§6.1 framing
+# contract: a complete sequence is the routing unit (the E0 prefix
+# never publishes a half sequence), PrintScreen/Pause frame as ONE
+# special sequence, start_epoch is the epoch of the FIRST byte, and a
+# corrupt sequence recovers to a boundary without emitting a fake Shift.
+_test-gui-host-run-input-frame:
+	@echo "  [test-gui-host] input-frame"
+	$(call os01_submake,hosttests,test-gui-input-frame $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 3: the exclusive physical-input lease.  Runs
+# test_input_route.elf, which host-compiles the REAL
+# kernel/driver/input_route.c (+ the REAL kernel/driver/input_ps2.c
+# framer) against the recording runtime in
+# hosttests/mock/input_route_test_runtime.{c,h} and asserts the spec
+# §4.3 lease contract: the device is NORMAL before the lease, the
+# owner's file reads the ACTIVE queue while every other file gets
+# EBUSY / POLLERR, an empty ACTIVE queue is EAGAIN, only the FINAL
+# close revokes, closing any bound file revokes the whole lease, a
+# recycled file address does not release a new lease, a sequence that
+# does not fit and the 65th mouse event are EOVERFLOW / POLLERR, a
+# sequence is never published in halves, a make that crosses an epoch
+# is isolated until its break, the Caps typematic does not flip, the
+# mouse button isolation keeps the movement, the lock order is
+# route → NORMAL queue/poll, and a publish injected at the
+# check-empty → register-waiter boundary is not lost.
+#
+# GUI-2 plan Task 4 adds the second binary of this case:
+# test_gfx_input.elf, which host-compiles the REAL kernel/driver/gfx.c
+# (the GFX_BIND_INPUT / GFX_UNBIND_INPUT ioctls), the REAL
+# kernel/driver/fb_state.c (the owner / lease coordinator) and the REAL
+# kernel/driver/input_route.c (the lease), and asserts the spec §4.1
+# contract: the 32-byte INOUT struct, EFAULT / EBADF / EINVAL / EACCES
+# / ESTALE / EBUSY, the exclusive lease, the copy-out rollback that
+# must not revoke a newer generation, and the libgfx wrapper.
+_test-gui-host-run-input-route:
+	@echo "  [test-gui-host] input-route"
+	$(call os01_submake,hosttests,test-gui-input-route $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 5: the native input API surface (libgui/include/gui/
+# gui_input.h) and the pure userspace PS/2 decoder (libgui/src/
+# input_ps2.c).  Runs test_gui_input_decode.elf, which host-compiles
+# the REAL production decoder and asserts the spec §5.1 / §6.1
+# contract: the US ASCII layout (letters use Shift XOR Caps, digits
+# and punctuation use Shift only), the frozen DOWN/UP/REPEAT values and
+# modifier bit layout, the distinct left/right Shift/Ctrl/Alt physical
+# identities, the UP identity with codepoint == 0, the typematic make
+# that produces no event and does not flip Caps again, the swallowed
+# PrintScreen / Pause sequences (no event, no latched Shift or Ctrl),
+# every fragment point of an E0 sequence, the 100 ms truncated-prefix
+# expiry, the unknown scan code without a character, KP slash / KP
+# Enter, and the keys that report their physical identity only.
+_test-gui-host-run-input-decode:
+	@echo "  [test-gui-host] input-decode"
+	$(call os01_submake,hosttests,test-gui-input-decode $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 10 (fix round 1): the guest input probe's nonce rule.
+# Runs test_gui_input_nonce.elf, which host-compiles the REAL rule
+# (user/test_gui_input/gui_input_nonce.h) and asserts that a nonce is hex,
+# that a path escape is impossible by construction and that the control
+# path is exactly /tmp/gui-input-<hex>.ctl.
+_test-gui-host-run-input-nonce:
+	@echo "  [test-gui-host] input-nonce"
+	$(call os01_submake,hosttests,test-gui-input-nonce $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
+# and the platform error convergence.  Runs test_gui_input_platform.elf,
+# which host-compiles the REAL libgui input unit (libgui/src/input.c +
+# libgui/src/input_lvgl.c), the REAL platform and the REAL PS/2 decoder
+# against the recording runtime in
+# hosttests/mock/gui_test_runtime.{c,h} and the REAL LVGL archive, and
+# asserts the spec §5.1 / §5.2 contract: the fixed creation order and
+# its reverse rollback with the first errno, the fd / lease / mapping net
+# counts, the keyboard-only degradation (ENOENT/ENODEV only), the EBUSY
+# second create, the Caps-only decoder seeding, the mouse EIO on a short
+# record, the carried-over keyboard prefix, the EINTR/EAGAIN/legacy-empty
+# reads, the POLLERR/POLLHUP/POLLNVAL error mapping, the 512-item FIFO
+# capacity, the per-device pump budgets, the 256-item delivery budget,
+# the un-merged down/up pair and the owner check that stops the delivery
+# of a static view.
+_test-gui-host-run-input-platform:
+	@echo "  [test-gui-host] input-platform"
+	$(call os01_submake,hosttests,test-gui-input-platform $(OS01_SUBMAKE_ARGS))
+
+# GUI-2 plan Task 7: the keyboard half of the LVGL adapter — keypad indev
+# behaviour, the software repeat policy, native shortcut delivery and the
+# in-process focus group with Tab navigation.  Runs
+# test_gui_input_lvgl.elf, which host-compiles the REAL libgui input unit
+# (input.c + input_lvgl.c + input_focus.c), the REAL platform and the REAL
+# PS/2 decoder, and asserts the spec §6.2 / §7.2 contract against the REAL
+# LVGL keypad indev and focus group (nothing under test is mocked).
+_test-gui-host-run-input-lvgl:
+	@echo "  [test-gui-host] input-lvgl"
+	$(call os01_submake,hosttests,test-gui-input-lvgl $(OS01_SUBMAKE_ARGS))
+
 _test-gui-host-run-%:
-	@echo "ERROR: unknown CASE='$*'; valid: platform, lvgl, all" >&2
+	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
 	@exit 1
 
 GUI_CASE_RAW := $(CASE)
@@ -1124,7 +1232,7 @@ cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
 echo "[user-canary] audit passed"
 endef
 
-# ── test-static: 5 runtime audits via test-runtime + 4 standalone ──
+# ── test-static: 5 runtime audits via test-runtime + 7 standalone + user-canary ──
 test-static: test-runtime
 	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) syscall-boundary -- \
@@ -1148,7 +1256,65 @@ test-static: test-runtime
 	  --limit 512
 	$(RUN_STATIC_AUDIT) driver-model-boundary -- \
 	  python3 qemutests/driver_model_boundary_audit.py
+	$(RUN_STATIC_AUDIT) gui-build-audit -- \
+	  python3 qemutests/gui_build_audit.py \
+	    --sysroot "$(SYSROOT)" \
+	    --build-dir "$(BUILD_DIR)" \
+	    --repo-root "$(OS01_ROOT)" \
+	    --profile "$(PROFILE)"
 	@$(MAKE) --no-print-directory test-user-canary
+
+# ── test-gui-incremental: the GUI library's incremental contract ──
+#
+# The INCREMENTAL modes of the audit never spawn make: this recipe owns
+# every build step and the audit only records and compares snapshots
+# (--incremental-snapshot / --incremental-compare).  The audit's --sysroot
+# mode does spawn make exactly once, read-only, to read the profile's
+# build variables (make -f …/user_build_probe.mk --no-print-directory
+# gui-audit-profile-vars).
+#
+# The four phases mirror the four assertions:
+#
+#   noop    a repeated build with no source change must not recompile
+#   touch   touching gui_input.h must rebuild the dependents and relink
+#   install install must clear orphaned files under staging/gui
+#   publish a new generation must be clean, the old ones preserved
+#
+# It is deliberately NOT part of test-static: the publish phase allocates a
+# new sysroot generation, so running it inside a static-audit bucket would
+# contend with the publisher's lock.
+GUI_INCREMENTAL_AUDIT = python3 qemutests/gui_build_audit.py \
+	--build-dir "$(BUILD_DIR)" --repo-root "$(OS01_ROOT)" --profile "$(PROFILE)"
+
+.PHONY: test-gui-incremental
+test-gui-incremental:
+	$(call require_capability,rootfs)
+	@echo "  [test-gui-incremental] phase 1/4: a repeated build must not recompile"
+	$(call os01_submake,libgui,all)
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
+	$(call os01_submake,libgui,all)
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
+	@echo "  [test-gui-incremental] phase 2/4: touching gui_input.h must rebuild the dependents"
+	@stat -c %y libgui/include/gui/gui_input.h > $(BUILD_DIR)/incr-header-time
+	@$(call os01_submake,libgui,--no-print-directory print-compile) > $(BUILD_DIR)/incr-libgui-compile.txt
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
+	@touch libgui/include/gui/gui_input.h
+	$(call os01_submake,libgui,all)
+	$(MAKE) --no-print-directory test-gui-host CASE=input-decode
+	@touch -d "$$(cat $(BUILD_DIR)/incr-header-time)" libgui/include/gui/gui_input.h
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
+	@echo "  [test-gui-incremental] phase 3/4: install must clear orphaned staging files"
+	@mkdir -p $(STAGING_DIR)/gui/usr/include/gui
+	@printf '/* orphaned staging file */\n' > $(STAGING_DIR)/gui/usr/include/gui/gui_input_private.h
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-install.json" --incremental-phase install
+	$(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui)
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-install.json" --incremental-phase install
+	@echo "  [test-gui-incremental] phase 4/4: a new generation must be clean, the old ones preserved"
+	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
+	@rm -f $(BUILD_DIR)/stamps/sysroot.stamp
+	$(MAKE) --no-print-directory sysroot
+	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
+	@echo "  [test-gui-incremental] all four incremental assertions PASS"
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
 test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))
@@ -1298,7 +1464,9 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 11 static audits (runtime, stack-canary, validate-kernel, link-order, kernel-layout, kernel-canary-contract, driver-model-boundary, test-user-canary, syscall-boundary, header-object, stack-frame)';
+		 'test-static'         '(rootfs)'     'All 13 static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, user-canary)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-gui-incremental' '(rootfs)'    'GUI library incremental contract (no-op rebuild, header-touch rebuild, staging orphan, generation publish)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \

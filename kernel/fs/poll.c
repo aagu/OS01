@@ -28,6 +28,8 @@
 struct vfs_node;
 uint32_t devfs_poll(struct vfs_node *node, uint32_t requested,
                     poll_table_t *pt);
+uint32_t devfs_poll_file(struct file *f, uint32_t requested,
+                         poll_table_t *pt);
 
 // ── poll_table_init — reset for new scan round ─────────────
 // Does NOT re-init wq or entry nodes (one-time setup).
@@ -122,7 +124,7 @@ void poll_table_cleanup(poll_table_t *pt)
 //
 // FD types:
 //   FD_VFS  — plain files: always ready
-//   FD_DEV  — delegate to devfs_poll() (e.g. /dev/tty)
+//   FD_DEV  — delegate to devfs_poll_file() (e.g. /dev/tty)
 //   FD_PIPE — check ring buffer; if empty/full, poll_wait
 
 static inline int pipe_empty(pipe_t *p) { return p->head == p->tail; }
@@ -151,9 +153,9 @@ uint32_t fd_poll(file_t *f, uint32_t requested, poll_table_t *pt)
     }
 
     case FD_DEV:
-        // /dev devices — delegate to devfs_poll()
-        if (!f->node) return POLLNVAL;
-        return devfs_poll(f->node, requested, pt);
+        // /dev devices — delegate to devfs_poll_file() so the device
+        // sees the open file description, not just the node.
+        return devfs_poll_file(f, requested, pt);
 
     case FD_PIPE: {
         pipe_t *p = f->pipe;

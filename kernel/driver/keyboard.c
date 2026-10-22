@@ -2,11 +2,14 @@
 #include <stdbool.h>
 #include <driver/keyboard.h>
 #include <driver/i8042.h>
+#include <driver/input_ps2.h>
+#include <driver/input_route.h>
 #include <intr/interrupt.h>
 #include <core/debug.h>
 #include <tty/tty.h>
 #include <arch/io.h>
 #include <arch/spinlock.h>
+#include <fs/devfs.h>
 #include <fs/vfs.h>
 #include <fs/poll.h>
 #include <percpu/percpu.h>
@@ -29,36 +32,40 @@ static spinlock_T kbd_poll_lock;
 
 static void keyboard_wake_pollers(void);
 
-static inline int ring_full(void)
-{
-    int next = (ring_head + 1) % RING_SIZE;
-    return next == ring_tail;
-}
-
 static inline int ring_empty(void)
 {
     return ring_head == ring_tail;
+}
+
+// The number of bytes the ring can still take.  One slot is reserved to
+// tell "full" from "empty", so the ring holds RING_SIZE-1 usable bytes.
+//
+// The consumer only advances the tail, so the tail is read FIRST: a
+// stale tail can then only make the free space look SMALLER, which
+// drops a frame that would have fitted.  It can never make the free
+// space look larger, so the ring is never overrun.
+static inline int ring_free(void)
+{
+    int tail = ring_tail;
+    int head = ring_head;
+    int used = (head - tail + RING_SIZE) % RING_SIZE;
+
+    return (RING_SIZE - 1) - used;
 }
 
 // ═══════════════════════════════════════════════════════════
 //  Scancode Set 1 → ASCII translation tables
 // ═══════════════════════════════════════════════════════════
 
-// Modifier state — updated inline in the IRQ handler.
-// Global statics are safe here: the keyboard IRQ fires on
-// exactly one CPU (BSP, IRQ1 affinity), and IRQs are
-// disabled while the handler runs (no nesting on the same IRQ).
-
-static bool kbd_lshift;
-static bool kbd_rshift;
-static bool kbd_lctrl;
-static bool kbd_rctrl;
-static bool kbd_lalt;
-static bool kbd_ralt;
-static bool kbd_caps_lock;
-
-static inline bool kbd_shift(void) { return kbd_lshift || kbd_rshift; }
-static inline bool kbd_ctrl(void)  { return kbd_lctrl  || kbd_rctrl;  }
+// ═══════════════════════════════════════════════════════════
+//  Modifier state
+//
+//  The PHYSICAL key state and the Caps Lock latch live in the input
+//  route (kernel/driver/input_route.c): it is the single authority, so
+//  the Caps state can never be flipped twice and the auto-repeat of a
+//  held Caps key never flips it again.  The NORMAL translator below
+//  only READS the snapshot the route hands it.
+// ═══════════════════════════════════════════════════════════
 
 // Special key codes (> 0xFF, to avoid collision with ASCII).
 // These are expanded to multi-byte VT100 escape sequences in
@@ -137,51 +144,61 @@ static void push_vt100_seq(tty_t *tty, char seq)
     tty_push_input(tty, seq);      // final
 }
 
-// Translate one scancode byte and push ASCII to the TTY.
-// `ext` is true when the byte was preceded by an E0 prefix.
-// Returns nothing — the character (if any) is pushed via
-// tty_push_input() which handles buffering and wakeup.
-static void translate_and_push(uint8_t sc, bool ext)
+// Translate one COMPLETE scan sequence and push ASCII to the TTY.
+//
+// The frame carries the physical key identity (the Set 1 code, or
+// 0x100|code for an E0 key) and the direction; `modifiers` is the
+// logical modifier snapshot the route computed for this frame.  The
+// translator never flips the Caps state — the route owns it.
+static void keyboard_translate_frame(const input_ps2_frame_t *frame,
+                                     uint32_t modifiers)
 {
-    bool release = (sc & 0x80) != 0;
-    uint8_t code = sc & 0x7F;
+    bool ext, release, shift, ctrl, caps;
+    uint8_t code;
+    const struct kbd_key *k;
+    int c;
 
-    // ── Modifier key tracking ─────────────────
-    switch (code) {
-    case 0x2A: kbd_lshift = !release; return;
-    case 0x36: kbd_rshift = !release; return;
-    case 0x1D:
-        if (!ext) { kbd_lctrl = !release; return; }
-        break;
-    case 0x3A:
-        if (!release) kbd_caps_lock = !kbd_caps_lock;
+    // PrintScreen / Pause carry no ordinary key identity: they never
+    // produce a character and they are never mistaken for a modifier.
+    if (frame->is_special)
         return;
-    case 0x38:
-        if (!ext) { kbd_lalt = !release; return; }
-        break;
+
+    ext     = (frame->physical_key & INPUT_PS2_KEY_E0) != 0;
+    code    = (uint8_t)(frame->physical_key & 0xFF);
+    release = !frame->is_make;
+
+    // ── Modifier keys produce no character ───────
+    switch (code) {
+    case 0x2A: case 0x36: return;              // left / right shift
+    case 0x1D: if (!ext) return; break;        // left ctrl
+    case 0x38: if (!ext) return; break;        // left alt
+    case 0x3A: return;                         // caps lock
     }
     if (ext) {
         switch (code) {
-        case 0x1D: kbd_rctrl = !release; return;
-        case 0x38: kbd_ralt  = !release; return;
+        case 0x1D: return;                     // right ctrl
+        case 0x38: return;                     // right alt
         }
     }
 
-    // Ignore key-release events for non-modifier keys
+    // Only a make produces a character.
     if (release) return;
 
+    shift = (modifiers & INPUT_ROUTE_MOD_SHIFT) != 0;
+    ctrl  = (modifiers & INPUT_ROUTE_MOD_CTRL) != 0;
+    caps  = (modifiers & INPUT_ROUTE_MOD_CAPS) != 0;
+
     // ── Look up ASCII ─────────────────────────
-    const struct kbd_key *k = ext ? &ext_scancode_tbl[code]
-                                  : &scancode_tbl[code];
-    int c = 0;
+    k = ext ? &ext_scancode_tbl[code]
+            : &scancode_tbl[code];
+    c = 0;
     if (k->base != 0 || k->shift != 0) {
-        bool caps = kbd_caps_lock;
         bool base_is_letter = (k->base >= 'a' && k->base <= 'z') ||
                               (k->base >= 'A' && k->base <= 'Z');
         if (caps && base_is_letter)
-            c = kbd_shift() ? k->base : k->shift;
+            c = shift ? k->base : k->shift;
         else
-            c = kbd_shift() ? k->shift : k->base;
+            c = shift ? k->shift : k->base;
     }
     if (c == 0) return;
 
@@ -200,7 +217,7 @@ static void translate_and_push(uint8_t sc, bool ext)
     }
 
     // ── Ctrl modifier ─────────────────────────
-    if (kbd_ctrl()) {
+    if (ctrl) {
         if (c >= 'a' && c <= 'z')      c = c - 'a' + 1;
         else if (c >= 'A' && c <= 'Z') c = c - 'A' + 1;
         else if (c == '[' || c == '{') c = '\x1b';
@@ -230,33 +247,50 @@ static void translate_and_push(uint8_t sc, bool ext)
 
 // Called by i8042_pump() with the i8042 lock HELD and local IRQs
 // disabled: must not touch the i8042 ports, re-take the i8042 lock,
-// sleep, or copy user memory.  Lock order: i8042 → kbd_poll_lock.
-// This is the single scancode-ingest path for both IRQ1 and task
-// context (keyboard_poll), so the E0-prefix state lives here once —
-// no dual-static racing between handler and poller.
+// sleep, or copy user memory.  Lock order: i8042 → route → NORMAL
+// queue/poll.
+//
+// The byte is handed to the input route and NOTHING else happens here:
+// the route frames it into a COMPLETE sequence, updates the physical
+// key state and publishes the sequence either to the legacy NORMAL
+// path (ring + console TTY) or to the leased ACTIVE path.
 static void kbd_consume(uint8_t sc)
 {
-    // Push raw scancode to ring buffer (for /dev/keyboard)
-    if (!ring_full()) {
-        scancode_ring[ring_head] = sc;
-        __sync_synchronize();
-        ring_head = (ring_head + 1) % RING_SIZE;
+    input_route_keyboard_byte(sc);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  The NORMAL path — the legacy /dev/keyboard ring and the console
+//  TTY.  The route calls these while it holds its own lock, so the
+//  ring / poll lock below is always taken INSIDE the route lock
+//  (lock order route → NORMAL queue/poll).
+// ═══════════════════════════════════════════════════════════
+
+static void keyboard_publish_normal_frame(const input_ps2_frame_t *frame,
+                                           uint32_t modifiers)
+{
+    uint8_t i;
+
+    // Push the raw scancodes of the WHOLE sequence to the ring — or
+    // NOTHING.  A sequence that does not fit is dropped as a WHOLE:
+    // the legacy reader must never see half of a sequence (spec §4.3:
+    // "有效容量不足以容纳整段时，ACTIVE 进入 DESYNC，NORMAL 整段丢弃").
+    // The console TTY below is a different consumer and always
+    // receives the complete frame.
+    if (frame->length <= ring_free()) {
+        for (i = 0; i < frame->length; i++) {
+            scancode_ring[ring_head] = frame->bytes[i];
+            __sync_synchronize();
+            ring_head = (ring_head + 1) % RING_SIZE;
+        }
     }
     keyboard_wake_pollers();
 
-    // Translate and push to TTY
+    // Translate to the TTY.
     if (kbd_tty) {
-        static bool e0_prefix = false;
-
-        if (sc == 0xE0) {
-            e0_prefix = true;
-            return;
-        }
-
-        translate_and_push(sc, e0_prefix);
-        e0_prefix = false;
+        keyboard_translate_frame(frame, modifiers);
     } else {
-        // One-shot: keyboard byte arrived before the TTY was set up.
+        // One-shot: a keyboard byte arrived before the TTY was set up.
         // Write a lock-free debug marker to serial.
         static int warned = 0;
         if (!warned) {
@@ -265,6 +299,53 @@ static void kbd_consume(uint8_t sc)
         }
     }
 }
+
+static int keyboard_route_read(uint64_t offset, uint64_t size, void *buf)
+{
+    return keyboard_devfs_read(NULL, offset, size, buf);
+}
+
+static uint32_t keyboard_route_poll(uint32_t requested, poll_table_t *pt)
+{
+    return keyboard_poll_dev(NULL, requested, pt);
+}
+
+/* Called under route.lock: no NORMAL reader/producer can race this drain.
+ * The poll lock protects waiter lifetime; delivered TTY input stays intact. */
+static void keyboard_reset_normal(void)
+{
+    ring_head = ring_tail = 0;
+    keyboard_wake_pollers();
+}
+
+static const input_route_kbd_sink_t keyboard_route_sink = {
+    .publish = keyboard_publish_normal_frame,
+    .reset   = keyboard_reset_normal,
+    .read    = keyboard_route_read,
+    .poll    = keyboard_route_poll,
+};
+
+// The device open hook: every /dev/keyboard open becomes a route
+// endpoint, so the lease can tell the two open file descriptions
+// apart.
+static int keyboard_open(const char *name, struct file **out_file)
+{
+    (void)name;
+    return input_route_open(INPUT_DEVICE_KEYBOARD, out_file);
+}
+
+// The device operations table.  The file-aware hooks carry the lease:
+// the read/poll hooks honour it and the release hook is the final
+// close that revokes it.  The legacy node callbacks stay as the
+// compatibility bridge for the NORMAL path.
+const struct devfs_ops keyboard_ops = {
+    .open         = keyboard_open,
+    .read         = keyboard_devfs_read,
+    .poll         = keyboard_poll_dev,
+    .release_file = input_route_release_file,
+    .read_file    = input_route_read,
+    .poll_file    = input_route_poll,
+};
 
 // ── IRQ1 handler ──────────────────────────────────────────────
 // The IRQ line is only a wake-up hint: the shared i8042 layer owns
@@ -399,13 +480,13 @@ int keyboard_init(void)
     ring_tail = 0;
     list_init(&kbd_poll);
     spin_init(&kbd_poll_lock);
-    kbd_lshift = false;
-    kbd_rshift = false;
-    kbd_lctrl  = false;
-    kbd_rctrl  = false;
-    kbd_lalt   = false;
-    kbd_ralt   = false;
-    kbd_caps_lock = false;
+
+    // The input route owns the physical key state and the lease.  It
+    // must be initialised BEFORE the byte consumer is installed and
+    // before IRQ1 is enabled, so the very first byte is framed by a
+    // zero-initialised framer.
+    input_route_init();
+    input_route_set_normal_sinks(&keyboard_route_sink, NULL);
 
     // Shared controller layer first, then claim the keyboard bytes.
     i8042_init();

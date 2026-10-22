@@ -58,6 +58,15 @@
 #include <stdint.h>
 #include <stdlib.h>              // free — file_alloc uses calloc, not kmalloc
 
+// ── The input device ops ─────────────────────────────────────
+// The keyboard / mouse device ops live in the x86-only PS/2 drivers
+// (kernel/driver/{keyboard,mouse}.c), while this device is
+// architecture-neutral.  The references are weak so a platform without
+// an input chain still links: there the ops do not exist, no input can
+// be bound, and every bind is refused with EINVAL.
+extern const struct devfs_ops keyboard_ops __attribute__((weak));
+extern const struct devfs_ops mouse_ops __attribute__((weak));
+
 // ── Per-file view state is declared in kernel/include/driver/gfx.h
 //    so the test TU can reference the struct.  Here we only operate
 //    on the slots table.
@@ -679,6 +688,25 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
     return 0;
 }
 
+// ── gfx_input_file_check ─────────────────────────────────────
+// The input descriptor must be READABLE and must belong to the
+// expected input device.  The device identity is checked against the
+// EXACT device ops — never against a path string, a PID or a node
+// name, so a recycled descriptor can never be mistaken for the device.
+static int gfx_input_file_check(file_t *f, const struct devfs_ops *expected)
+{
+    if (!f) return -EBADF;
+    if (f->type != FD_DEV) return -EINVAL;
+    /* The access mode is the low two bits of the open flags: O_RDONLY
+     * 0, O_WRONLY 1, O_RDWR 2 (there is no O_ACCMODE in this tree), so
+     * a write-only descriptor is rejected even when it carries other
+     * flags (O_APPEND, O_TRUNC, ...). */
+    if ((f->flags & 3) == O_WRONLY) return -EINVAL;
+    const struct devfs_ops *ops = devfs_get_file_ops(f);
+    if (!ops || !expected || ops != expected) return -EINVAL;
+    return 0;
+}
+
 // ── gfx_ioctl_file — Task 1 dispatch ────────────────────────
 // This is the ops->ioctl_file callback; devfs_ioctl_file prefers
 // it over the node-only callback.  Every command stages its
@@ -873,6 +901,112 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
         int rrc = fb_owner_replace_fallback(old_v, new_v, new_mode_seq);
         file_put(old_file);
         return rrc;
+    }
+    case GFX_BIND_INPUT: {
+        if (!arg) return -EFAULT;
+        // INOUT: the whole struct must be readable AND writable.
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(gfx_bind_input_t), false))
+            return -EFAULT;
+        if (!syscall_check_user_range((uint64_t)arg,
+                                      sizeof(gfx_bind_input_t), true))
+            return -EFAULT;
+
+        gfx_bind_input_t kreq;
+        if (copy_from_user_ft(&kreq, arg, sizeof(kreq)) < 0)
+            return -EFAULT;
+
+        // v1 has no flags, and every reserved / result field must be 0
+        // on entry: the kernel writes the result fields itself.
+        if (kreq.flags != 0 || kreq.reserved != 0 || kreq.reserved2 != 0 ||
+            kreq.generation != 0 || kreq.initial_modifiers != 0)
+            return -EINVAL;
+
+        gfx_view_t *v = (gfx_view_t *)f->dev_private;
+        if (!v) return -EINVAL;
+
+        uint64_t mode_seq;
+        {
+            uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+            if (!v->configured) {
+                spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+                return -EINVAL;
+            }
+            mode_seq = v->mode_seq;
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+        }
+
+        // The input descriptors are taken as a TEMPORARY reference: the
+        // lease holds no file reference, so the final close of a bound
+        // raw file still fires — and still revokes the lease.
+        if (kreq.keyboard_fd < 0 || kreq.keyboard_fd >= NOFILE)
+            return -EBADF;
+        file_t *kbd_file = files_get_file(current->files, kreq.keyboard_fd);
+        if (!kbd_file) return -EBADF;
+
+        file_t *mouse_file = NULL;
+        if (kreq.mouse_fd >= 0) {
+            if (kreq.mouse_fd >= NOFILE) {
+                file_put(kbd_file);
+                return -EBADF;
+            }
+            mouse_file = files_get_file(current->files, kreq.mouse_fd);
+            if (!mouse_file) {
+                file_put(kbd_file);
+                return -EBADF;
+            }
+        } else if (kreq.mouse_fd < -1) {
+            /* Only -1 means "keyboard only"; every other negative value
+             * is a bad descriptor, exactly like a bad keyboard_fd. */
+            file_put(kbd_file);
+            return -EBADF;
+        }
+
+        int crc = gfx_input_file_check(kbd_file, &keyboard_ops);
+        if (crc == 0 && mouse_file)
+            crc = gfx_input_file_check(mouse_file, &mouse_ops);
+        if (crc < 0) {
+            file_put(kbd_file);
+            if (mouse_file) file_put(mouse_file);
+            return crc;
+        }
+
+        // The bind does NOT acquire the display: the caller must own
+        // the view already.  The owner / mode check and the lease
+        // commit happen inside the display control lock.
+        uint64_t generation = 0;
+        uint32_t modifiers = 0;
+        int brc = fb_input_bind(v, mode_seq, kbd_file, mouse_file,
+                                &generation, &modifiers);
+
+        file_put(kbd_file);
+        if (mouse_file) file_put(mouse_file);
+
+        if (brc < 0) return brc;
+
+        // The result is copied out with EVERY lock dropped — a user
+        // address is never touched while a lock is held.
+        gfx_bind_input_t kout = kreq;
+        kout.generation = generation;
+        kout.initial_modifiers = modifiers;
+        kout.reserved2 = 0;
+        if (copy_to_user_ft(arg, &kout, sizeof(kout)) < 0) {
+            // The caller never learned the generation: roll this
+            // binding back.  The CAPTURED generation is used, so an old
+            // rollback can never revoke a newer lease of the same view.
+            fb_input_unbind(v, generation, 0);
+            return -EFAULT;
+        }
+        return 0;
+    }
+    case GFX_UNBIND_INPUT: {
+        gfx_view_t *v = (gfx_view_t *)f->dev_private;
+        if (!v) return -EINVAL;
+        // Only the CALLER'S OWN view is affected; unbinding when
+        // nothing is bound succeeds, and a revoked record may still be
+        // cleaned up.
+        fb_input_unbind(v, 0, 0);
+        return 0;
     }
     default:
         return -ENOTTY;

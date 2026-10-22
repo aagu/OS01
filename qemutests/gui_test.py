@@ -36,8 +36,23 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-DEFAULT_TIMEOUT = 180  # per-SMP global session budget in seconds
+DEFAULT_TIMEOUT = 180  # the GUI-1 per-SMP global session budget in seconds
 CORE_MATRIX = (1, 2)
+
+# Task 11: the per-SMP session budget is the FINITE SUM of boot + the
+# registered scenario caps + cleanup.  It is deliberately NOT the GUI-1
+# total reused: the new input scenarios carry their own cap, and the
+# budget never auto-inflates on failure.
+try:
+    from qemutests.gui_input_test import TOTAL_TIMEOUT_SECONDS
+except ImportError as exc:  # pragma: no cover - the repo root is on sys.path
+    # Fail LOUDLY.  A silent fallback to GUI-1's total (180 s) is exactly
+    # the "mechanically reuse GUI-1's total" that task 11 §3c forbids, and
+    # it would hide the real import error behind a plausible number.
+    raise ImportError(
+        "qemutests.gui_input_test could not be imported, so the Task 11 "
+        f"per-SMP budget is unknown: {exc!r}"
+    ) from exc
 
 
 # ── PPM parsing and Surface ──────────────────────────────────────────
@@ -98,6 +113,34 @@ def is_pure_color_gone(surface: Surface) -> bool:
     return not is_fault_pure_color(surface)
 
 
+def is_solid_bright_color(surface: Surface) -> bool:
+    """Check if the surface shows ONE solid colour that is not the console's.
+
+    The terminal is a DARK console (the guest's own convention: the LVGL
+    theme's dark background is 15..40 / 15..40 / 25..60, see
+    ``is_lvgl_gui``), so a solid dark screen is a cleared console.  A
+    screen that is ONE solid colour and NOT dark never shows the
+    terminal: it is the fault tool's magenta, a red screen, anything but
+    the console.
+
+    The sampling convention is the one ``is_fault_pure_color`` uses, so
+    the two helpers agree on what a "pure colour" is.
+    """
+    samples = [
+        (surface.width // 2, surface.height // 2),
+        (surface.width // 4, surface.height // 4),
+        (3 * surface.width // 4, 3 * surface.height // 4),
+    ]
+    first = surface.pixel(*samples[0])
+    for x, y in samples[1:]:
+        if surface.pixel(x, y) != first:
+            return False     # not one solid colour at all
+    r, g, b = first
+    # The console's own background is dark: a solid dark screen IS the
+    # terminal (cleared), a solid bright one never is.
+    return not (r <= 40 and g <= 40 and b <= 40)
+
+
 def is_lvgl_gui(surface: Surface) -> bool:
     """Check if the surface displays test_lvgl's GUI."""
     # test_lvgl uses dark background (24, 24, 37) and blue buttons (26, 115, 232)
@@ -141,6 +184,11 @@ class QmpClient:
         self.timeout = timeout
         self.sock: Optional[socket.socket] = None
         self._fp = None
+        # The QMP transcript: every input-send-event payload is appended
+        # to this file (one JSON object per line) so the run archive keeps
+        # the exact events that drove the guest.
+        self.transcript: Optional[Path] = None
+        self._transcript_fp = None
 
     def connect(self) -> None:
         deadline = time.time() + self.timeout
@@ -192,7 +240,73 @@ class QmpClient:
         data = Path(path).read_bytes()
         return parse_ppm(data)
 
+    def input_events(self, events: List[dict]) -> None:
+        """Send raw input events via QMP input-send-event.
+
+        ``execute`` raises a RuntimeError on a QMP error, so a rejected
+        payload (a bogus axis, a bogus button, a bogus qcode) fails the
+        run instead of being silently ignored.
+        """
+        self._record_transcript(events)
+        self.execute("input-send-event", {"events": events})
+
+    # ── the QMP transcript ────────────────────────────────────────────
+
+    def set_transcript(self, path: Path) -> None:
+        """Write every input-send-event payload to ``path`` (JSON lines).
+
+        The file is created (empty) right away so the run archive always
+        contains the transcript, even when the scenario injects nothing.
+        It is opened in APPEND mode: re-opening a transcript must never
+        destroy the evidence that was already written to it (the lazy
+        re-open path in ``_record_transcript`` re-opens the same path
+        after a ``close()``, and the transcript is required evidence).
+        The run archive gives every run its own directory, so the file
+        starts out empty.
+        A file that cannot be opened is reported on stderr and disables
+        the transcript: the evidence must never turn a good run into a
+        failed one, and it must never be silently absent either.
+        """
+        self.close_transcript()
+        self.transcript = Path(path)
+        try:
+            self.transcript.parent.mkdir(parents=True, exist_ok=True)
+            self._transcript_fp = self.transcript.open("a", encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"[gui] warning: cannot write the QMP transcript to "
+                f"{self.transcript}: {exc}",
+                file=sys.stderr,
+            )
+            self._transcript_fp = None
+
+    def _record_transcript(self, events: List[dict]) -> None:
+        if self._transcript_fp is None:
+            if self.transcript is None:
+                return
+            self.set_transcript(self.transcript)
+            if self._transcript_fp is None:
+                return
+        line = json.dumps(
+            {"command": "input-send-event", "events": events}, sort_keys=True
+        )
+        try:
+            self._transcript_fp.write(line + "\n")
+            self._transcript_fp.flush()
+        except OSError as exc:
+            print(f"[gui] warning: cannot write the QMP transcript: {exc}",
+                  file=sys.stderr)
+
+    def close_transcript(self) -> None:
+        if self._transcript_fp is not None:
+            try:
+                self._transcript_fp.close()
+            except OSError:
+                pass
+            self._transcript_fp = None
+
     def close(self) -> None:
+        self.close_transcript()
         try:
             if self._fp:
                 self._fp.close()
@@ -256,7 +370,8 @@ class GuiCaseRunner:
         session_factory: Optional[Callable] = None,
         qmp_factory: Optional[Callable] = None,
         run_dir: Optional[Path] = None,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: Optional[float] = None,
+        input_timing: Optional[Any] = None,
     ):
         self.smp = smp
         self.image = image
@@ -265,13 +380,19 @@ class GuiCaseRunner:
         self.session_factory = session_factory
         self.qmp_factory = qmp_factory
         self.run_dir = run_dir or Path(tempfile.mkdtemp(prefix=f"os01-gui-smp{smp}-"))
-        self.timeout = timeout
+        # The session budget is the finite sum of boot + the registered
+        # scenario caps + cleanup (see TOTAL_TIMEOUT_SECONDS).  An
+        # explicit timeout overrides it (the unit tests use a tiny one).
+        self.timeout = TOTAL_TIMEOUT_SECONDS if timeout is None else timeout
         self.boot_timeout = min(self.timeout, 30.0)
         self.cmd_timeout = min(self.timeout, 10.0)
         self.active_hold_pid: Optional[int] = None
         self.qmp: Optional[Any] = None
         self.session: Optional[Any] = None
         self.last_terminal_surface: Optional[Surface] = None
+        # The Task 11 interaction scenario's timing knobs (the real
+        # values by default; the host fake compresses them).
+        self.input_timing = input_timing
 
     def _wait_shell(self, boot_timeout: Optional[float] = None) -> bool:
         bt = boot_timeout if boot_timeout is not None else self.boot_timeout
@@ -367,6 +488,91 @@ class GuiCaseRunner:
 
         self.last_terminal_surface = shot
         return self._observe_check_panic(f"{label}_recovery", reasons)
+
+    def _run_input_scenario(
+        self, case_name: str
+    ) -> Tuple[bool, List[str], List[dict]]:
+        """Run one of the real input scenarios (Task 11 / Task 12).
+
+        The scenario logic lives in its own helper (GuiInputScenarios) so
+        that run_all does not keep growing; the helper consumes the
+        existing session, qmp, run_dir and smp objects and returns the
+        existing case outcome dict.
+        """
+        from qemutests.gui_input_test import GuiInputScenarios, GuiInputTiming
+
+        # The QMP transcript: every input-send-event payload is written to
+        # the scenario's run directory (one JSON object per line), so the
+        # run archive keeps the exact events that drove the guest.
+        #
+        # A QMP client WITHOUT a transcript (the host fake) is tolerated,
+        # but an error INSIDE the transcript writer is a real failure: it
+        # is reported as a FAIL, never swallowed.  Swallowing it would
+        # silently disable the required evidence.
+        set_transcript = getattr(self.qmp, "set_transcript", None)
+        if set_transcript is not None:
+            try:
+                set_transcript(self.run_dir / "qmp-input-events.jsonl")
+            except Exception as exc:
+                reason = (f"[{case_name}] the QMP transcript could not "
+                          f"be enabled: {exc}")
+                self.log(f"  [gui smp={self.smp}] {reason}")
+                return False, [reason], [{
+                    "smp": self.smp, "case": case_name,
+                    "status": "FAIL", "reason": reason,
+                }]
+        # The timing knobs: the real values by default, the host fake's
+        # compressed ones when it supplies them.
+        timing = self.input_timing if self.input_timing is not None \
+            else GuiInputTiming()
+        helper = GuiInputScenarios(
+            session=self.session,
+            qmp=self.qmp,
+            run_dir=self.run_dir,
+            smp=self.smp,
+            log=self.log,
+            timing=timing,
+            # The pacing comes from the timing: the real run paces every
+            # key edge (the guest's PS/2 path drops the keys that arrive
+            # faster than it drains them), and the host fake does not
+            # model the drop, so it runs unpaced.
+            pace=timing.pace,
+            screen_probe=self._screen_surface,
+        )
+        method = {
+            "input_interaction": "run_interaction",
+            "input_isolation": "run_isolation",
+            "input_crash": "run_crash",
+            "input_owner": "run_owner",
+            "input_overflow": "run_overflow",
+        }[case_name]
+        ok, reasons, outcomes = getattr(helper, method)()
+        for outcome in outcomes:
+            if outcome.get("status") == "PASS":
+                self.log(f"  [gui smp={self.smp}] {outcome['case']} PASS "
+                         f"({outcome.get('reason', '')})")
+        return ok, reasons, outcomes
+
+    def _screen_surface(self, label: str) -> Optional[Surface]:
+        """The current screen as a surface.
+
+        The Task 12 scenarios use it as the recovery evidence: the
+        terminal's screen (black) and the GUI's screen (the LVGL theme)
+        differ in every background pixel, so the comparison is
+        unambiguous.  The SURFACE is returned (not only its pixels), so
+        the runner can ask the GUI-1 helpers -- the fault tool's pure
+        colour -- about it.
+        """
+        shot = self._screendump(label, None)
+        if shot is None:
+            return None
+        return shot
+
+    def _run_input_interaction(
+        self,
+    ) -> Tuple[bool, List[str], List[dict]]:
+        """Run the Task 11 real input interaction matrix."""
+        return self._run_input_scenario("input_interaction")
 
     def run_all(self) -> Tuple[bool, List[str], List[dict]]:
         reasons: List[str] = []
@@ -730,6 +936,69 @@ class GuiCaseRunner:
                 return False, reasons, outcomes
             outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
 
+            # ── Scenario 8: input_interaction (Task 11) ──
+            # The real physical input matrix: the guest input probe takes
+            # the exclusive input lease and the runner drives it with real
+            # QMP input events.
+            case_name = "input_interaction"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_interaction()
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 9: input_isolation (Task 12) ──
+            # The lease keeps the keyboard away from the console TTY: a
+            # shell command typed during the lease must never reach the
+            # shell, and the keyboard must come back afterwards.
+            case_name = "input_isolation"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 10: input_crash (Task 12) ──
+            # Ctrl-Q, a background SIGKILL and a real LVGL fatal: each of
+            # them must bring the terminal back and the keyboard with it,
+            # even with a key (and a mouse button) held at the kill.
+            case_name = "input_crash"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 11: input_owner (Task 12) ──
+            # The legitimate handover of a static owner: EBUSY for the
+            # second client, the RELEASED answer, the new owner, and the
+            # old probe's non-zero exit under the lost ownership.
+            case_name = "input_owner"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
+            # ── Scenario 12: input_overflow (Task 12) ──
+            # The real queue overflow: the guest's own EOVERFLOW error,
+            # a non-zero exit and a working recovery.
+            case_name = "input_overflow"
+            self.log(f"  [gui smp={self.smp}] starting {case_name}")
+            input_ok, input_reasons, input_outcomes = self._run_input_scenario(
+                case_name)
+            reasons.extend(input_reasons)
+            outcomes.extend(input_outcomes)
+            if not input_ok:
+                return False, reasons, outcomes
+
             self.log(f"  [gui smp={self.smp}] all scenarios PASSED")
             return True, reasons, outcomes
 
@@ -774,8 +1043,9 @@ def run_matrix(
     build_dir: Optional[Path] = None,
     session_factory: Optional[Callable] = None,
     qmp_factory: Optional[Callable] = None,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: Optional[float] = None,
     cpus: Optional[Tuple[int, ...]] = None,
+    input_timing: Optional[Any] = None,
 ) -> Tuple[bool, Dict[int, List[str]]]:
     """Run the GUI test suite across the SMP matrix; returns (ok, reasons)."""
     target_cpus = list(cpus if cpus is not None else CORE_MATRIX)
@@ -814,6 +1084,7 @@ def run_matrix(
             qmp_factory=qmp_factory,
             run_dir=smp_run_dir,
             timeout=timeout,
+            input_timing=input_timing,
         )
         smp_ok, smp_reasons, smp_outcomes = runner.run_all()
         reasons[smp] = smp_reasons
@@ -931,7 +1202,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--image", default=os.environ.get("DISK_IMG", "disk.img"))
     ap.add_argument("--firmware", default=os.environ.get("OVMF_FIRMWARE", ""))
     ap.add_argument("--build-dir", default=os.environ.get("OS01_BUILD_DIR"))
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    ap.add_argument("--timeout", type=int, default=int(TOTAL_TIMEOUT_SECONDS))
     ap.add_argument("--cpus", nargs="+", type=int, default=list(CORE_MATRIX))
     args = ap.parse_args(argv)
 

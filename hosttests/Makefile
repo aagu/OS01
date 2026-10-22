@@ -174,7 +174,15 @@ TEST_BINS := \
     $(TEST_BLD)/test_setres.elf \
     $(TEST_BLD)/test_display_owner.elf \
     $(TEST_BLD)/test_gui_platform.elf \
-    $(TEST_BLD)/test_gui_lvgl_integration.elf
+    $(TEST_BLD)/test_gui_lvgl_integration.elf \
+    $(TEST_BLD)/test_devfs_input_dispatch.elf \
+    $(TEST_BLD)/test_input_ps2_frame.elf \
+    $(TEST_BLD)/test_input_route.elf \
+    $(TEST_BLD)/test_gfx_input.elf \
+    $(TEST_BLD)/test_gui_input_decode.elf \
+    $(TEST_BLD)/test_gui_input_nonce.elf \
+    $(TEST_BLD)/test_gui_input_platform.elf \
+    $(TEST_BLD)/test_gui_input_lvgl.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -185,7 +193,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-nonce test-gui-input-platform test-gui-input-lvgl
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -1304,7 +1312,19 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/file_poll_production.o \
     $(TEST_BLD)/tty_poll_production.o \
     $(TEST_BLD)/devfs_poll_production.o \
-    $(TEST_BLD)/poll_clocksource_stub.o
+    $(TEST_BLD)/poll_clocksource_stub.o \
+    $(TEST_BLD)/serial_sink_stub.o
+
+# The host-side console sink for the production serial write path
+# (kernel/fs/devfs.c serial_write).  The production object references
+# serial_lock and write_serial_unlocked: the host build has no UART, so
+# the sink discards the bytes (the host spinlock is a no-op).
+$(TEST_BLD)/serial_sink_stub.o: $(TEST_MOCK)/serial_sink_stub.c \
+		$(TEST_MOCK)/test_platform.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+		-include $(TEST_MOCK)/test_platform.h \
+		$(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -c $< -o $@
 
 $(TEST_BLD)/test_poll_requested.elf: $(TEST_BLD)/test_poll_requested.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
@@ -2084,8 +2104,22 @@ $(TEST_BLD)/test_i8042_demux.o: $(TEST_CASES)/test_i8042_demux.c \
 
 $(TEST_BLD)/test_i8042_demux.elf: $(TEST_BLD)/test_i8042_demux.o \
 		$(TEST_BLD)/i8042_production.o \
-		$(TEST_BLD)/keyboard_production.o
+		$(TEST_BLD)/keyboard_production.o \
+		$(TEST_BLD)/input_route_kbd_production.o \
+		$(TEST_BLD)/input_ps2_production.o
 	$(HOST_CC) -o $@ $^
+
+# The keyboard driver hands every hardware byte to the input route, so
+# the route and its framer are linked into the fixtures that compile
+# the real keyboard / mouse drivers.  The route is compiled with the
+# same kbd shadows as the drivers.
+$(TEST_BLD)/input_route_kbd_production.o: $(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h \
+		$(TEST_MOCK)/kbd_include/fs/file.h \
+		$(TEST_MOCK)/kbd_include/fs/poll.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
 
 test_i8042_demux: $(TEST_BLD)/test_i8042_demux.elf
 	$<
@@ -2099,12 +2133,18 @@ test_mouse_proto: $(TEST_BLD)/test_mouse_proto.elf
 
 # Links the real phase-6 mouse driver against scriptable i8042 and IRQ
 # transactions; the test observes command-byte and consumer state.
+# The mouse driver hands every event to the input route, so the route
+# and its framer are linked in as well.
 $(TEST_BLD)/test_mouse_init.elf: $(TEST_CASES)/test_mouse_init.c \
 		$(TESTS_DIR)/kernel/driver/mouse.c \
+		$(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/driver/input_ps2.c \
 		$(TESTS_DIR)/kernel/include/driver/mouse.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(KBD_HOST_CFLAGS) $< \
-		$(TESTS_DIR)/kernel/driver/mouse.c -o $@
+		$(TESTS_DIR)/kernel/driver/mouse.c \
+		$(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/driver/input_ps2.c -o $@
 
 test_mouse_init: $(TEST_BLD)/test_mouse_init.elf
 	$<
@@ -2141,7 +2181,8 @@ $(TEST_BLD)/test_gfx_file_lifecycle.o: $(TEST_CASES)/test_gfx_file_lifecycle.c \
 $(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
 		$(TEST_BLD)/gfx_gfx_production.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
-		$(TEST_BLD)/gfx_file_production.o
+		$(TEST_BLD)/gfx_file_production.o \
+		$(TEST_BLD)/serial_sink_stub.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
@@ -2167,7 +2208,8 @@ $(TEST_BLD)/test_monitor_file.o: $(TEST_CASES)/test_monitor_file.c \
 
 $(TEST_BLD)/test_monitor_file.elf: $(TEST_BLD)/test_monitor_file.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
-		$(TEST_BLD)/gfx_file_production.o
+		$(TEST_BLD)/gfx_file_production.o \
+		$(TEST_BLD)/serial_sink_stub.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # Monitor plan Task 2: per-CPU tick accounting.  Host-compiles the REAL
@@ -2611,7 +2653,8 @@ $(TEST_BLD)/test_gfx_device.elf: $(TEST_BLD)/test_gfx_device.o \
 		$(TEST_BLD)/gfx_gfx_production.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/gfx_file_production.o \
-		$(TEST_BLD)/gfx_fault_bridge.o
+		$(TEST_BLD)/gfx_fault_bridge.o \
+		$(TEST_BLD)/serial_sink_stub.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-device: $(TEST_BLD)/test_gfx_device.elf
@@ -3435,7 +3478,12 @@ $(GUI_HOST_DIR)/include/uapi/fb.h: $(TESTS_DIR)/kernel/include/uapi/fb.h
 	@mkdir -p $(dir $@)
 	ln -sf $< $@
 
-GUI_HOST_UAPI_HEADERS := $(GUI_HOST_DIR)/include/uapi/gfx.h $(GUI_HOST_DIR)/include/uapi/fb.h
+$(GUI_HOST_DIR)/include/uapi/mouse.h: $(TESTS_DIR)/kernel/include/uapi/mouse.h
+	@mkdir -p $(dir $@)
+	ln -sf $< $@
+
+GUI_HOST_UAPI_HEADERS := $(GUI_HOST_DIR)/include/uapi/gfx.h $(GUI_HOST_DIR)/include/uapi/fb.h \
+                        $(GUI_HOST_DIR)/include/uapi/mouse.h
 
 GUI_HOST_LVGL_CFLAGS := -O2 -g $(filter-out -O0,$(HOST_CFLAGS)) \
     -I$(TESTS_DIR)/thirdpart \
@@ -3478,6 +3526,21 @@ $(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_clien
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
+# The libgui input unit (GUI-2 Task 6).  Every GUI host binary links it,
+# because the platform TU owns the input lifecycle (step / terminal /
+# destroy) and therefore references the input hooks.  The unit itself is
+# device-free until an input is created: a binary that never creates an
+# input keeps the GUI-1 behaviour exactly.
+GUI_INPUT_UNIT_DIR := $(GUI_HOST_DIR)/input_unit
+GUI_INPUT_UNIT_OBJS := $(GUI_INPUT_UNIT_DIR)/input.o \
+                       $(GUI_INPUT_UNIT_DIR)/input_lvgl.o \
+                       $(GUI_INPUT_UNIT_DIR)/input_focus.o \
+                       $(GUI_INPUT_UNIT_DIR)/input_ps2.o
+
+$(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
 $(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
@@ -3501,6 +3564,9 @@ GUI_PLATFORM_WRAPS := \
     -Wl,--wrap=gfx_release \
     -Wl,--wrap=gfx_close \
     -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=gfx_bind_input \
+    -Wl,--wrap=gfx_unbind_input \
+    -Wl,--wrap=gfx_get_display_state \
     -Wl,--wrap=lv_timer_handler \
     -Wl,--wrap=lv_display_flush_ready \
     -Wl,--wrap=lv_display_create
@@ -3511,6 +3577,7 @@ $(TEST_BLD)/test_gui_platform.elf: \
 		$(GUI_DETERMINISTIC_DIR)/platform.o \
 		$(GUI_DETERMINISTIC_DIR)/tick.o \
 		$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
 		$(GUI_LVGL_ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_PLATFORM_WRAPS) -o $@ $^ -lpthread -lm
@@ -3556,7 +3623,10 @@ GUI_INTEGRATION_WRAPS := \
     -Wl,--wrap=gfx_present \
     -Wl,--wrap=gfx_release \
     -Wl,--wrap=gfx_close \
-    -Wl,--wrap=gfx_sprite_blit
+    -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=gfx_bind_input \
+    -Wl,--wrap=gfx_unbind_input \
+    -Wl,--wrap=gfx_get_display_state
 
 $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o \
@@ -3564,6 +3634,7 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/platform.o \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
 		$(GUI_LVGL_ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
@@ -3575,9 +3646,369 @@ test-gui-lvgl: $(TEST_BLD)/test_gui_lvgl_integration.elf
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
 
+# GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Host-compiles
+# the REAL kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
+# (POLL_HOST_CFLAGS / poll_test_runtime.h) and links them against the
+# narrow mocks of the layers below that the fixture provides, so the
+# assertions observe the production dispatch (devfs_register_chrdev →
+# devfs read/poll bridge → fd_read / fd_poll) and not a stub's return
+# value.  Tested production symbols: devfs_register_chrdev,
+# devfs_get_private, devfs_poll_file, fd_read, fd_poll.
+.PHONY: test-gui-devfs-input
+test-gui-devfs-input: $(TEST_BLD)/test_devfs_input_dispatch.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_devfs_input_dispatch.o: $(TEST_CASES)/test_devfs_input_dispatch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_devfs_input_dispatch.elf: $(TEST_BLD)/test_devfs_input_dispatch.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  The framer
+# is pure (no locks, no device IO, no TTY, no display), so the test needs
+# no device mock at all: it host-compiles the REAL
+# kernel/driver/input_ps2.c and drives it byte by byte.  The assertions
+# observe the production framer, never a stub's return value.
+# Tested production symbols: input_ps2_frame_reset, input_ps2_frame_feed.
+.PHONY: test-gui-input-frame
+test-gui-input-frame: $(TEST_BLD)/test_input_ps2_frame.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_input_ps2_frame.o: $(TEST_CASES)/test_input_ps2_frame.c \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/input_ps2_production.o: $(TESTS_DIR)/kernel/driver/input_ps2.c \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_input_ps2_frame.elf: $(TEST_BLD)/test_input_ps2_frame.o \
+		$(TEST_BLD)/input_ps2_production.o
+	$(HOST_CC) -o $@ $^
+
+# GUI-2 plan Task 3: the exclusive physical-input lease.  The route owns
+# the physical key state, the lease and the ACTIVE queues, so the fixture
+# host-compiles the REAL kernel/driver/input_route.c (plus the REAL
+# kernel/driver/input_ps2.c framer) and links them against the recording
+# runtime in hosttests/mock/input_route_test_runtime.{c,h}.
+#
+# The recording runtime is not a convenience: the route's contract is a
+# lock ORDER (route → NORMAL queue/poll) and an ATOMIC "authorize +
+# dequeue + register waiter" window.  A no-op mock spinlock cannot show
+# either, so the runtime records every acquisition with its nesting
+# depth and the assertions look at the recorded order.
+#
+# Tested production symbols: input_route_init, input_route_open,
+# input_route_bind, input_route_unbind, input_route_read,
+# input_route_poll, input_route_keyboard_byte, input_route_mouse_event,
+# input_route_release_file, input_route_set_normal_sinks.
+.PHONY: test-gui-input-route
+test-gui-input-route: $(TEST_BLD)/test_input_route.elf $(TEST_BLD)/test_gfx_input.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $(TEST_BLD)/test_input_route.elf \
+	    $(TEST_BLD)/test_gfx_input.elf
+
+ROUTE_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/input_route_test_runtime.h \
+    -I$(TEST_MOCK) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/test_input_route.o: $(TEST_CASES)/test_input_route.c \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TEST_MOCK)/input_route_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ROUTE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/input_route_production.o: $(TESTS_DIR)/kernel/driver/input_route.c \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TESTS_DIR)/kernel/include/driver/input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ROUTE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/input_route_runtime.o: $(TEST_MOCK)/input_route_test_runtime.c \
+		$(TEST_MOCK)/input_route_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ROUTE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_input_route.elf: $(TEST_BLD)/test_input_route.o \
+		$(TEST_BLD)/input_route_production.o \
+		$(TEST_BLD)/input_route_runtime.o \
+		$(TEST_BLD)/input_ps2_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 4: the gfx input-lease UAPI.  The fixture host-
+# compiles the REAL kernel/driver/gfx.c (the GFX_BIND_INPUT /
+# GFX_UNBIND_INPUT ioctls), the REAL kernel/driver/fb_state.c (the
+# owner / lease coordinator) and the REAL kernel/driver/input_route.c
+# (the lease itself) and asserts the spec §4.1 contract: the 32-byte
+# INOUT struct, EFAULT / EBADF / EINVAL / EACCES / ESTALE / EBUSY, the
+# exclusive lease, the copy-out rollback that must not revoke a newer
+# generation, and the libgfx wrapper.
+#
+# The REAL libgfx/gfx.c is linked through the same --wrap harness the
+# gfx client test uses, so the userspace wrapper is observed exactly as
+# it calls the kernel.
+GFX_INPUT_TEST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK) \
+    -include $(TEST_MOCK)/fb_resolution_runtime.h \
+    $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -I$(TESTS_DIR)/libgfx \
+    -D'errno=(*__errno_location())' -include $(TEST_INC)/gfx_client_errno.h
+
+$(TEST_BLD)/test_gfx_input.o: $(TEST_CASES)/test_gfx_input.c \
+		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
+		$(TESTS_DIR)/kernel/include/driver/fb_state.h \
+		$(TESTS_DIR)/kernel/include/driver/input_route.h \
+		$(TESTS_DIR)/libgfx/gfx.h \
+		$(TEST_MOCK)/fb_resolution_runtime.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GFX_INPUT_TEST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gfx_input.elf: $(TEST_BLD)/test_gfx_input.o \
+		$(TEST_BLD)/gfx_production.o \
+		$(TEST_BLD)/fb_state.o \
+		$(TEST_BLD)/fb_map.o \
+		$(TEST_BLD)/fb_resolution_runtime.o \
+		$(TEST_BLD)/input_route_production.o \
+		$(TEST_BLD)/input_route_runtime.o \
+		$(TEST_BLD)/input_ps2_production.o \
+		$(TEST_BLD)/libgfx_gfx_production.o
+	$(HOST_CC) -lpthread \
+	    -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=malloc,--wrap=calloc,--wrap=free,--wrap=mmap,--wrap=munmap \
+	    -o $@ $^
+
+.PHONY: test-gui-gfx-input
+test-gui-gfx-input: $(TEST_BLD)/test_gfx_input.elf
+	$(TEST_BLD)/test_gfx_input.elf
+
+# GUI-2 plan Task 5: the native input API surface (libgui/include/gui/
+# gui_input.h) and the PURE userspace PS/2 decoder (libgui/src/
+# input_ps2.c).  The decoder has no device access, no locks and no LVGL,
+# so the fixture needs no mock at all: it host-compiles the REAL
+# production decoder and drives it byte by byte, and asserts the spec
+# §5.1 / §6.1 contract (US ASCII, the frozen modifier bit layout, the
+# UP identity, the typematic make, the swallowed PrintScreen / Pause
+# sequences, the 100 ms truncated-prefix expiry, and the keys that
+# report their physical identity only).
+#
+# The decoder TU and the test TU both set errno, so they use the
+# repo's errno ABI shim (the same mechanism as the gfx client test):
+# hosttests/include/errno.h declares a non-TLS `extern int errno;`
+# while host glibc provides a TLS errno, so `errno` is defined as
+# glibc's TLS accessor for this binary only.
+GUI_INPUT_HOST_CFLAGS := $(HOST_CFLAGS) \
+    -I$(TESTS_DIR)/libgui/include -I$(TESTS_DIR)/libgui/internal \
+    -I$(TEST_INC) $(LIBC_INC) \
+    -D'errno=(*__errno_location())' -include $(TEST_INC)/gfx_client_errno.h
+
+.PHONY: test-gui-input-decode
+test-gui-input-decode: $(TEST_BLD)/test_gui_input_decode.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_gui_input_decode.o: $(TEST_CASES)/test_gui_input_decode.c \
+		$(TESTS_DIR)/libgui/include/gui/gui_input.h \
+		$(TESTS_DIR)/libgui/internal/gui_input_ps2.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GUI_INPUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/gui_input_ps2_production.o: $(TESTS_DIR)/libgui/src/input_ps2.c \
+		$(TESTS_DIR)/libgui/include/gui/gui_input.h \
+		$(TESTS_DIR)/libgui/internal/gui_input_ps2.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GUI_INPUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_gui_input_decode.elf: $(TEST_BLD)/test_gui_input_decode.o \
+		$(TEST_BLD)/gui_input_ps2_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 10 (fix round 1): the guest input probe's nonce rule.
+# The nonce is interpolated into the control file's path, so it must be
+# hex: a path escape is then impossible by construction.  The fixture
+# host-compiles the REAL rule (user/test_gui_input/gui_input_nonce.h, the
+# header the guest probe uses) and pins the accept / reject table and the
+# fixed control path shape.
+.PHONY: test-gui-input-nonce
+test-gui-input-nonce: $(TEST_BLD)/test_gui_input_nonce.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(TEST_BLD)/test_gui_input_nonce.o: $(TEST_CASES)/test_gui_input_nonce.c \
+		$(TESTS_DIR)/user/test_gui_input/gui_input_nonce.h \
+		$(TEST_INC)/test_framework.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/user/test_gui_input \
+	    -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_gui_input_nonce.elf: $(TEST_BLD)/test_gui_input_nonce.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
+# and the platform error convergence.  The fixture host-compiles the REAL
+# libgui input unit (libgui/src/input.c + libgui/src/input_lvgl.c), the
+# REAL platform (libgui/src/platform.c) and the REAL PS/2 decoder
+# (libgui/src/input_ps2.c) and links them against the recording runtime
+# in hosttests/mock/gui_test_runtime.{c,h} plus the REAL LVGL archive.
+#
+# The assertions observe the production code paths: the creation order
+# and its rollback, the FIFO capacity, the per-device pump budgets, the
+# poll-flag → error mapping and the platform terminal cleanup.  The LVGL
+# adapter hook is wrapped ONLY to inject a create failure; the real hook
+# is linked and used by every other assertion (including the 100
+# create/destroy cycles on the real LVGL release path).
+GUI_INPUT_DIR := $(GUI_HOST_DIR)/input
+
+.PHONY: test-gui-input-platform
+test-gui-input-platform: $(TEST_BLD)/test_gui_input_platform.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(GUI_INPUT_DIR)/test_gui_input_platform.o: $(TEST_CASES)/test_gui_input_platform.c \
+		$(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/tick.o: $(TESTS_DIR)/libgui/src/tick.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+#
+# GUI-2 输入单元的共享链接包装：记录型 mock（设备 / 时钟 / gfx）与 LVGL 的
+# 观察点。两个 GUI 输入二进制共用这一份清单，避免两份列表各自漂移。
+GUI_INPUT_WRAPS_COMMON := \
+    -Wl,--wrap=clock_gettime \
+    -Wl,--wrap=calloc \
+    -Wl,--wrap=mmap \
+    -Wl,--wrap=munmap \
+    -Wl,--wrap=open \
+    -Wl,--wrap=read \
+    -Wl,--wrap=close \
+    -Wl,--wrap=gfx_open \
+    -Wl,--wrap=gfx_get_info \
+    -Wl,--wrap=gfx_acquire \
+    -Wl,--wrap=gfx_present \
+    -Wl,--wrap=gfx_release \
+    -Wl,--wrap=gfx_close \
+    -Wl,--wrap=gfx_sprite_blit \
+    -Wl,--wrap=gfx_bind_input \
+    -Wl,--wrap=gfx_unbind_input \
+    -Wl,--wrap=gfx_get_display_state \
+    -Wl,--wrap=lv_display_flush_ready \
+    -Wl,--wrap=lv_display_create \
+    -Wl,--wrap=lv_indev_read \
+    -Wl,--wrap=gui_input_lvgl_create
+
+# input-platform 额外把 lv_timer_handler 换成只计数的桩（不渲染）。
+GUI_INPUT_PLATFORM_WRAPS := $(GUI_INPUT_WRAPS_COMMON) \
+    -Wl,--wrap=lv_timer_handler
+
+$(TEST_BLD)/test_gui_input_platform.elf: \
+		$(GUI_INPUT_DIR)/test_gui_input_platform.o \
+		$(GUI_INPUT_DIR)/gui_test_runtime.o \
+		$(GUI_INPUT_DIR)/platform.o \
+		$(GUI_INPUT_DIR)/tick.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_INPUT_DIR)/gfx_client_policy.o \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INPUT_PLATFORM_WRAPS) -o $@ $^ -lpthread -lm
+
+# GUI-2 plan Task 7: the keyboard half of the LVGL adapter — keypad indev
+# behaviour, the software repeat policy, native shortcut delivery and the
+# in-process focus group with Tab navigation.
+#
+# The fixture host-compiles the REAL libgui input unit (libgui/src/input.c
+# + input_lvgl.c + input_focus.c), the REAL platform and the REAL PS/2
+# decoder, and links them against the recording runtime plus the REAL LVGL
+# archive.  Nothing under test is mocked: the keypad indev, the focus group
+# and the event handling are the production ones.
+#
+# Synthetic Set 1 bytes enter through the private injection bridge
+# (gui_input_test_feed_keybytes), which is compiled ONLY for the host build
+# (-DOS01_HOST_TEST) and therefore never reaches the public sysroot.
+GUI_INPUT_LVGL_DIR := $(GUI_HOST_DIR)/input_lvgl
+
+# The input-lvgl binary reuses the shared input wrapper set (the keypad read
+# observation point) but keeps the REAL lv_timer_handler: the focus outline is
+# asserted by sampling rendered pixels, so LVGL must actually refresh the
+# display (the shared mock replaces the timer handler with a counting stub
+# that never renders).
+GUI_INPUT_LVGL_WRAPS := $(GUI_INPUT_WRAPS_COMMON)
+
+.PHONY: test-gui-input-lvgl
+test-gui-input-lvgl: $(TEST_BLD)/test_gui_input_lvgl.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+$(GUI_INPUT_LVGL_DIR)/test_gui_input_lvgl.o: $(TEST_CASES)/test_gui_input_lvgl.c \
+		$(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_LVGL_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_LVGL_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_LVGL_DIR)/tick.o: $(TESTS_DIR)/libgui/src/tick.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_INPUT_LVGL_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_input_lvgl.elf: \
+		$(GUI_INPUT_LVGL_DIR)/test_gui_input_lvgl.o \
+		$(GUI_INPUT_LVGL_DIR)/gui_test_runtime.o \
+		$(GUI_INPUT_LVGL_DIR)/platform.o \
+		$(GUI_INPUT_LVGL_DIR)/tick.o \
+		$(GUI_INPUT_LVGL_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INPUT_LVGL_WRAPS) -o $@ $^ -lpthread -lm
+
 -include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
 -include $(GUI_DETERMINISTIC_DIR)/*.d
 -include $(GUI_INTEGRATION_DIR)/*.d
+-include $(GUI_INPUT_DIR)/*.d
+-include $(GUI_INPUT_LVGL_DIR)/*.d
+-include $(GUI_INPUT_UNIT_DIR)/*.d
 
 
 

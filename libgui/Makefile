@@ -52,7 +52,10 @@ CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
 LVGL_C_SOURCES := $(shell find $(LVGL_SRC_DIR) -name '*.c')
 LVGL_OBJS := $(patsubst $(LVGL_SRC_DIR)/%.c,$(BUILD_DIR)/obj/lvgl/%.o,$(LVGL_C_SOURCES))
 
-PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c
+PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
+                      $(LIBGUI_DIR)/src/input_ps2.c \
+                      $(LIBGUI_DIR)/src/input.c $(LIBGUI_DIR)/src/input_lvgl.c \
+                      $(LIBGUI_DIR)/src/input_focus.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
 
 COMMON_C_SOURCES := $(OS01_ROOT)/user/common/gfx_client_policy.c
@@ -63,6 +66,14 @@ ARCHIVE := $(BUILD_DIR)/lib/libgui.a
 TARGET_AR ?= $(LLVM_AR)
 
 all: $(ARCHIVE)
+
+# The build audit recomputes the COMPILER's own dependency view to prove
+# the incremental contract (the .d files may be stale or doctored).  It
+# needs the exact compile command of the production sources and must not
+# spawn make itself, so this target prints the command read-only.
+.PHONY: print-compile
+print-compile:
+	@printf '%s\n' "$(EFFECTIVE_CC) $(CFLAGS)"
 
 $(OBJS): | check-version
 
@@ -88,7 +99,8 @@ install: $(ARCHIVE)
 	rm -rf $(INSTALL_ROOT)
 	mkdir -p $(INSTALL_ROOT)/usr/include/gui $(INSTALL_ROOT)/usr/lib $(INSTALL_ROOT)/usr/share/licenses/libgui
 	cp $(ARCHIVE) $(INSTALL_ROOT)/usr/lib/libgui.a
-	cp $(LIBGUI_DIR)/include/gui/gui.h $(LIBGUI_DIR)/include/gui/gui_platform.h $(INSTALL_ROOT)/usr/include/gui/
+	cp $(LIBGUI_DIR)/include/gui/gui.h $(LIBGUI_DIR)/include/gui/gui_platform.h \
+	   $(LIBGUI_DIR)/include/gui/gui_input.h $(INSTALL_ROOT)/usr/include/gui/
 	cp $(LVGL_DIR)/LICENCE.txt $(INSTALL_ROOT)/usr/share/licenses/libgui/LVGL-LICENCE.txt
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 

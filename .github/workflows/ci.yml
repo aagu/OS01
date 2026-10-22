@@ -143,6 +143,21 @@ jobs:
       - name: Runtime validation
         run: make test-runtime
 
+      # The static-audit bucket: it also runs the GUI build audit
+      # (gui_build_audit.py), which is the ONLY place the published sysroot
+      # contract and the target link probe are enforced.  The job already
+      # satisfies require_capability,rootfs (make test-runtime above).
+      - name: Static audits
+        run: make PROFILE=x86_64-clang test-static
+
+      # The GUI library's incremental contract: a repeated build must not
+      # recompile, touching the public input header must rebuild the
+      # dependents, install must clear the staging tree, and a new sysroot
+      # generation must be clean while the historical ones are preserved.
+      # It is a plain root entry point and needs the same rootfs capability.
+      - name: GUI incremental contract
+        run: make PROFILE=x86_64-clang test-gui-incremental
+
       - name: Kernel layout
         run: make test-kernel-layout
 

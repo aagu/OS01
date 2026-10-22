@@ -118,7 +118,10 @@ KERNEL_C_SOURCES := \
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only
 # APIC/PIC/PIT/RTC code and the x86-only PS/2 pair (i8042 controller +
 # keyboard, port-I/O based) out of architecture-neutral source discovery.
-KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c,$(KERNEL_C_SOURCES))
+# driver/input_ps2.c (the pure Set 1 framer) and driver/input_route.c (the
+# input lease) are x86-selected for the same reason: only the x86 PS/2
+# driver chain consumes them.
+KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c driver/input_ps2.c driver/input_route.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 # Monitor plan Task 4: arch-neutral thermal facade (weak defaults + the
 # per-CPU sample cache procfs/thermal reads).  Listed EXPLICITLY, never
@@ -580,6 +583,14 @@ install-headers:
 ifneq ($(FB_RESOLUTION_TEST),1)
 	rm -f $(INSTALL_ROOT)/usr/include/uapi/fb_test.h $(INSTALL_ROOT)/usr/include/driver/fb_test.h
 endif
+	@# The physical input ROUTE and the PS/2 Set 1 framer are kernel-private
+	@# interfaces: the userspace input ABI is uapi/gfx.h + uapi/mouse.h, and
+	@# libgui decodes the raw Set 1 bytes itself (libgui/internal/gui_input_ps2.h
+	@# documents that this kernel header is NOT on the userspace include
+	@# path).  Publishing them would put the kernel's framing state in front
+	@# of every user program, so they are excluded from the staged headers.
+	@# driver/input_route.h is excluded with them: it is the only includer.
+	rm -f $(INSTALL_ROOT)/usr/include/driver/input_ps2.h $(INSTALL_ROOT)/usr/include/driver/input_route.h
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 # ── Clean ───────────────────────────────────────────────────

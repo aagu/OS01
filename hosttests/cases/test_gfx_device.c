@@ -420,6 +420,22 @@ int fb_owner_get_state(const void *cookie, gfx_display_state_t *out)
     return 0;
 }
 
+/* The input lease is not part of this fixture: the bind ioctl refuses
+ * the lease and the unbind is a no-op. */
+int fb_input_bind(const void *view, uint64_t expected_mode,
+                  struct file *kbd, struct file *mouse,
+                  uint64_t *generation, uint32_t *initial_modifiers)
+{
+    (void)view; (void)expected_mode; (void)kbd; (void)mouse;
+    (void)generation; (void)initial_modifiers;
+    return -ENODEV;
+}
+
+void fb_input_unbind(const void *view, uint64_t generation, int reason)
+{
+    (void)view; (void)generation; (void)reason;
+}
+
 int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
                  uint32_t row_bytes)
 {

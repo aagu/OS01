@@ -3,10 +3,12 @@
 #include <driver/i8042.h>
 #include <driver/mouse.h>
 #include <driver/mouse_proto.h>
+#include <driver/input_route.h>
 #include <intr/interrupt.h>
 #include <subsys/subsys.h>
 #include <percpu/percpu.h>
 #include <errno.h>
+#include <fs/devfs.h>
 #include <kernel.h>
 /* Raw cycles avoid clocksource_read_ns(), which needs GS before phase 7. */
 extern uint64_t clocksource_cycles(void);
@@ -22,7 +24,15 @@ static uint64_t dropped_events;
 static spinlock_T event_lock;
 static list_t event_poll;
 
-static void publish_event(const mouse_event_t *event)
+/* The NORMAL-path publication: the legacy /dev/mouse event ring.
+ *
+ * The input route calls this while it holds its own lock, so the event
+ * lock below is always taken INSIDE the route lock (lock order route
+ * → NORMAL queue/poll).  The mouse driver itself never takes the event
+ * lock before the route: input_route_mouse_event() is called FIRST,
+ * so the forbidden inversion (event lock → route lock) cannot happen.
+ */
+static void mouse_publish_normal_event(const mouse_event_t *event)
 {
     uint64_t flags = spin_lock_irqsave(&event_lock);
     if (event_count == MOUSE_RING_CAPACITY) {
@@ -128,7 +138,7 @@ static void consume_aux(uint8_t byte)
      * interprets those values as replies. */
     mouse_event_t event;
     if (mouse_proto_feed(&packet, byte, &event) == 1)
-        publish_event(&event);
+        input_route_mouse_event(&event);
 }
 
 static int wait_reply(uint8_t *out, uint64_t deadline)
@@ -188,6 +198,59 @@ static void mouse_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
 
 int mouse_ready(void) { return ready ? 1 : 0; }
 
+/* The NORMAL-path sink the input route publishes into. */
+static int mouse_route_read(uint64_t offset, uint64_t size, void *buf)
+{
+    return mouse_devfs_read(NULL, offset, size, buf);
+}
+
+static uint32_t mouse_route_poll(uint32_t requested, poll_table_t *pt)
+{
+    return mouse_poll_dev(NULL, requested, pt);
+}
+
+/* route.lock -> event_lock, matching NORMAL publish/read/poll. */
+static void mouse_reset_normal(void)
+{
+    uint64_t flags = spin_lock_irqsave(&event_lock);
+    event_head = event_count = 0;
+    while (!list_is_empty(&event_poll)) {
+        list_t *node = event_poll.next;
+        list_del_init(node);
+        poll_wait_entry_t *entry = container_of(node, poll_wait_entry_t, node);
+        wait_queue_wake_all(entry->poll_wq);
+    }
+    spin_unlock_irqrestore(&event_lock, flags);
+}
+
+static const input_route_mouse_sink_t mouse_route_sink = {
+    .publish = mouse_publish_normal_event,
+    .reset   = mouse_reset_normal,
+    .read    = mouse_route_read,
+    .poll    = mouse_route_poll,
+};
+
+/* The device open hook: every /dev/mouse open becomes a route
+ * endpoint, so the lease can tell the two open file descriptions
+ * apart. */
+static int mouse_open(const char *name, struct file **out_file)
+{
+    (void)name;
+    return input_route_open(INPUT_DEVICE_MOUSE, out_file);
+}
+
+/* The device operations table.  The file-aware hooks carry the lease:
+ * the read/poll hooks honour it and the release hook is the final
+ * close that revokes it. */
+const struct devfs_ops mouse_ops = {
+    .open         = mouse_open,
+    .read         = mouse_devfs_read,
+    .poll         = mouse_poll_dev,
+    .release_file = input_route_release_file,
+    .read_file    = input_route_read,
+    .poll_file    = input_route_poll,
+};
+
 int mouse_init(void)
 {
     uint8_t original = 0;
@@ -204,6 +267,9 @@ int mouse_init(void)
     stream_after_ack = false;
     reply_head = reply_tail = 0;
     mouse_proto_reset(&packet, false);
+    /* The input route publishes the mouse events into the NORMAL ring
+     * until a lease takes them over. */
+    input_route_set_normal_sinks(NULL, &mouse_route_sink);
     if (subsys_status("keyboard") != 1)
         goto fail;
     freq_hz = clocksource_freq_hz();
@@ -233,7 +299,18 @@ int mouse_init(void)
     if (send_byte(0xF6))
         goto fail;
 
-    static const uint8_t sequence[] = { 0xF3, 200, 0xF3, 100, 0xF3, 50, 0xF2 };
+    /*
+     * IntelliMouse knock: F3 200 / F3 100 / F3 80.
+     *
+     * The third knock value must be 80: it is the magic value that switches
+     * the mouse into the IntelliMouse (wheel-capable) mode.  200 and 100 are
+     * ordinary sample rates -- the legal set is 10/20/40/60/80/100/200 -- and
+     * 80 is the only one of those that a wheel-capable mouse also accepts as
+     * the mode switch (it is legal as a sample rate too, so the knock does
+     * not fail).  Any other value leaves the mouse in the plain 3-byte mode
+     * and the wheel is dropped by the host without any error.
+     */
+    static const uint8_t sequence[] = { 0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2 };
     for (unsigned i = 0; i < sizeof(sequence); i++) {
         rc = send_byte(sequence[i]);
         if (rc == -2) {

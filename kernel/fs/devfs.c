@@ -111,8 +111,36 @@ static int serial_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
 
+    /*
+     * The whole buffer must reach the wire CONTIGUOUSLY.
+     *
+     * The console has several writers: the shell's echo, the terminal's
+     * periodic stats line, the GUI-2 probe's protocol records.  A console
+     * write is a line or a record, and the host-side parser requires a
+     * protocol line to be key=value only -- so a byte of another writer
+     * landing in the middle of a record destroys it.
+     *
+     * write_serial() takes and releases serial_lock per BYTE, so a
+     * multi-byte write could be split by any other writer in the middle
+     * (observed: the terminal's "[term-probe] ..." stats line landed
+     * inside a probe record, between "fat" and "al_trigger=1").
+     *
+     * Holding serial_lock across the whole buffer is the kernel's own
+     * convention for a multi-byte console write (kernel/log/log.c,
+     * kernel/core/printk.c, kernel/tty/tty.c): the same bytes are
+     * emitted, they are simply no longer interleavable in the middle.
+     *
+     * Nothing is truncated: write_serial_unlocked() waits for the
+     * transmit FIFO to drain and then writes exactly one byte, so the
+     * loop delivers the whole buffer whatever its size (there is no
+     * device capacity to overrun).  The serial RX path does not take
+     * serial_lock, so the keyboard/serial interrupts are not blocked by
+     * this lock.
+     */
+    uint64_t sf = spin_lock_irqsave(&serial_lock);
     for (uint64_t i = 0; i < size; i++)
-        write_serial(((char *)buffer)[i]);
+        write_serial_unlocked(((char *)buffer)[i]);
+    spin_unlock_irqrestore(&serial_lock, sf);
 
     return (int)size;
 }
@@ -185,9 +213,48 @@ static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *bu
     }
 
     // Character device path (existing)
-    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->read)
+    if (
+#ifndef OS01_HOST_TEST
+        devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL &&
+#endif
+        devices[idx].ops && devices[idx].ops->read)
         return devices[idx].ops->read(node, offset, size, buffer);
     return -1;
+}
+
+// ── devfs_read_file — file-aware read dispatch (VFS bridge) ──
+// The vfs_ops.read_file hook of the devfs mount.  fd_read() routes
+// every device read through vfs_file_read(), which calls this bridge,
+// so the DEVICE sees the open file description and not just the node.
+//
+// Contract:
+//   - the device's ops->read_file is preferred and its result is
+//     returned AS-IS.  An error (e.g. -EACCES) is final: devfs never
+//     retries through the legacy node read, because that would let a
+//     refused read slip through the device's own decision;
+//   - only when ops->read_file is ABSENT does devfs fall back to the
+//     legacy node read (ops->read), which keeps every existing device
+//     (tty, pty, random, serial, fb, ...) working unchanged;
+//   - `buffer` is always kernel memory (fd_read bounces through a
+//     kernel buffer and copies to user space itself), so a device hook
+//     can never write into user memory.
+static int64_t devfs_read_file(file_t *f, uint64_t offset, uint64_t size,
+                                void *buffer)
+{
+    if (!f || !f->node) return -1;
+    if (f->node->type != VFS_CHRDEV && f->node->type != VFS_BLKDEV)
+        return -1;
+
+    int idx = (int)(uintptr_t)f->node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return -1;
+
+    const struct devfs_ops *ops = devices[idx].ops;
+    if (ops && ops->read_file)
+        return ops->read_file(f, offset, size, buffer);
+
+    // No file-aware callback: legacy node read.
+    return devfs_read(f->node, offset, size, buffer);
 }
 
 static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
@@ -242,11 +309,50 @@ uint32_t devfs_poll(vfs_node_t *node, uint32_t requested, poll_table_t *pt)
 
     devfs_device_t *dev = &devices[idx];
 
-    if (dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL && dev->ops->poll)
+    if (
+#ifndef OS01_HOST_TEST
+        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+#endif
+        dev->ops && dev->ops->poll)
         return dev->ops->poll(dev->private_data, requested, pt);
 
     // No poll callback: default to always ready
     return POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
+}
+
+// ── devfs_poll_file — file-aware poll dispatch ─────────────
+// The legacy devfs_poll() can only see the NODE, so two open file
+// descriptions on the same device are indistinguishable.  Devices that
+// need the file identity (e.g. the input lease: only the bound reader
+// may consume the physical keyboard) register ops->poll_file.
+//
+// Contract:
+//   - node / device type / ops are validated BEFORE the device is
+//     touched; an invalid node yields POLLNVAL;
+//   - ops->poll_file is preferred and its result is returned AS-IS.
+//     A returned 0 means "not ready" — it is a real answer and is
+//     never upgraded to always-ready;
+//   - only when poll_file is ABSENT does devfs fall back to the
+//     legacy node poll (ops->poll, or always-ready when the device
+//     registers no poll callback at all).
+uint32_t devfs_poll_file(file_t *f, uint32_t requested, poll_table_t *pt)
+{
+    if (!f || !f->node) return POLLNVAL;
+    if (f->type != FD_DEV) return POLLNVAL;
+    if (f->node->type != VFS_CHRDEV && f->node->type != VFS_BLKDEV)
+        return POLLNVAL;
+
+    int idx = (int)(uintptr_t)f->node->fs_data;
+    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+        return POLLNVAL;
+
+    const struct devfs_ops *ops = devices[idx].ops;
+    if (ops && ops->poll_file)
+        return ops->poll_file(f, requested, pt);
+
+    // No file-aware callback: legacy node poll (ops->poll, or
+    // always-ready when the device registers none).
+    return devfs_poll(f->node, requested, pt);
 }
 
 // ── devfs_ioctl_node — dispatch ioctl to a devfs device ─────
@@ -352,6 +458,8 @@ static struct vfs_ops devfs_ops = {
     .write   = devfs_write,
     .readdir = devfs_readdir,
     .mmap    = devfs_mmap,
+    // File-aware read bridge: fd_read() reaches the device through it.
+    .read_file = devfs_read_file,
 };
 
 // ── devfs_open_node — sys_open integration ──────────────────

@@ -135,17 +135,13 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
 
 
 // ── Task-2 helper: chrdev registration through devfs ─────────
-static const struct devfs_ops keyboard_ops = {
-    .read = keyboard_devfs_read,
-    .poll = keyboard_poll_dev,
-};
-
-// /dev/mouse — interrupt-driven PS/2 mouse event ring (gated on
-// subsys_status because the i8042 controller may not have a mouse port)
-static const struct devfs_ops mouse_ops = {
-    .read = mouse_devfs_read,
-    .poll = mouse_poll_dev,
-};
+// The keyboard and mouse operations tables live with their drivers
+// (kernel/driver/keyboard.c and kernel/driver/mouse.c): the file-aware
+// hooks (open / read_file / poll_file / release_file) reach the input
+// route from there, so this boot path only registers them.
+//
+// /dev/mouse is gated on subsys_status because the i8042 controller may
+// not have a mouse port.
 
 void x86_64_boot_device_nodes(void)
 {

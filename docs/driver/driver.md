@@ -138,7 +138,8 @@ GSI 冲突时 NIC 自动 fallback 到 `NIC_POLL`；该路径是 *真实的已被
 
 #### 功能
 
-* 探测 aux 口鼠标并协商滚轮模式（magic knock：`0xF3 200/100/50` + `0xF2` 取 ID）
+* 探测 aux 口鼠标并协商滚轮模式（magic knock：`0xF3 200/100/80` + `0xF2` 取 ID；
+  第三个必须是 `80`——它才是滚轮模式的魔数，`200`/`100` 只是采样率）
 * IRQ12 数据流 → 3/4 字节包解析 → 归一化事件发布
 * `/dev/mouse` 暴露固定 8 字节事件流，支持非阻塞读（`EAGAIN`）与 `poll`
 
@@ -412,24 +413,84 @@ rtc_write_datetime(&new_dt);
 
 ### 键盘 devfs 读处理
 
-键盘驱动在 `kernel/core/main.c` 中注册到 devfs：
+键盘设备在 `kernel/arch/x86_64/platform/boot.c` 中注册到 devfs：
 
 ```c
-devfs_register_chrdev("keyboard", NULL, keyboard_devfs_read, NULL);
+devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
 ```
 
-`keyboard_devfs_read` 允许用户空间程序直接从 `/dev/keyboard` 读取键盘扫描码。
+`keyboard_ops` 的 `open` 钩子把每次 `/dev/keyboard` 打开变成一个**输入路由 endpoint**（这样租约能区分同一节点上的两个打开描述），`read` / `poll` 是 NORMAL 路径的兼容桥，`read_file` / `poll_file` 承载租约，`release_file` 是**最终关闭**——它在内核内部撤销租约。
+
+用户空间程序可直接从 `/dev/keyboard` 读取键盘扫描码。
 
 ### 鼠标 devfs 注册
 
-鼠标驱动同样在 `kernel/core/main.c` 中注册，但仅在探测成功时：
+鼠标设备同样在 `kernel/arch/x86_64/platform/boot.c` 中注册，但仅在探测成功时：
 
 ```c
-if (subsys_status("mouse") == 1)
-    devfs_register_chrdev("mouse", NULL, &mouse_ops);
+if (subsys_status("mouse") == 1 &&
+    devfs_register_chrdev("mouse", NULL, &mouse_ops) != 0)
+    log_err("mouse: failed to register /dev/mouse\n");
 ```
 
-`mouse_ops` 提供 `read`（8 字节事件流）与 `poll`（事件 ring 非空即 `POLLIN`）。
+`mouse_ops` 提供 `read`（8 字节事件流）与 `poll`（事件 ring 非空即 `POLLIN`），以及与键盘同一套 file-aware 钩子（`open` / `read_file` / `poll_file` / `release_file`）。
+
+## 输入路由与独占租约（Input Route，2026-10-22）
+
+> 状态：**已完成**。GUI-2 plan Task 1–4。设计见 [spec](../superpowers/specs/2026-10-20-gui-2-input-focus-design.md)，验证见 [验证报告](../superpowers/reports/2026-10-22-gui-2-validation.md)。
+
+### 位置与职责
+
+`kernel/driver/input_route.c` 插在 **PS/2 驱动** 与 **所有输入字节读者** 之间，是 `/dev/keyboard` 与 `/dev/mouse` 的读路径上唯一的一层。它持有三样东西：
+
+1. **物理键状态**（`kernel/driver/input_ps2.c` 负责成帧）：哪个键真的按住了。**Caps Lock 锁存只在这里翻转一次**——NORMAL 路径的翻译器只*读* route 交给它的修饰键快照，因此 Caps 状态不可能被翻两次。
+2. **租约（lease）**：同一时刻至多一个活跃租约，绑定一个 display view。租约存活期间，持有者读 **ACTIVE 队列**，其他文件一律被挡在设备外（读 `EBUSY`、`poll` 报 `POLLERR`），键盘因此不再漏进控制台 TTY。
+3. **路由决定**：一个**完整**的扫描序列（绝不半个）被发布到 NORMAL 路径或租约的 ACTIVE 路径之一。
+
+### 两条路径
+
+| 路径 | 谁在读 | 行为 |
+|------|--------|------|
+| **NORMAL** | 租约之外的普通读者 | 驱动把帧发布到注册的 sink（`input_route_set_normal_sinks()`），行为与 GUI-2 之前一致 |
+| **ACTIVE** | 租约持有者的文件 | 队列、授权与错误全部由 route 裁决；每个文件有自己的 endpoint 记录 |
+
+### 锁序
+
+**route → NORMAL queue/poll**。route 从不取 i8042 锁、显示状态锁或显示互斥锁；NORMAL 的 read/poll 在 route 自己的临界区里完成**授权、出队与 waiter 登记**，所以与 publish 的竞态不会丢事件。`input_route_lease_live()` 只取 route 锁，可在显示锁下调用（锁序 `display → route`），保证「有没有租约」的两个答案永不分叉。
+
+### devfs 的 file-aware 钩子
+
+租约要区分「同一个节点上的两个打开描述」，所以 `struct devfs_ops` 追加了两个**可选**的 file-aware 钩子（追加在最后，不改动既有设备 ABI）：
+
+```c
+int     (*read_file)(struct file *, uint64_t offset, uint64_t size, void *buffer);
+uint32_t (*poll_file)(struct file *, uint32_t requested, struct poll_table *pt);
+```
+
+- `read_file` 收到具体的 `file_t`，设备因此能知道**哪一个**读者拥有物理键盘。缓冲区永远是内核内存（`fd_read` 自己弹到内核缓冲再拷到用户态）。
+- `poll_file` 为 NULL 时 devfs 回落到旧的节点 poll（`ops->poll`）；**返回 0 是合法的「未就绪」**，绝不会被升级成「永远就绪」。
+- `read_file` 返回的错误是**终态**：devfs 不会改走节点 read 重试。
+- 没有 file-aware 钩子的设备（例如 tty）行为完全不变。
+
+键盘与鼠标因此注册 `input_route_read` / `input_route_poll`；`input_route_open()` 返回的 `file_t` 的 `dev_private` 指向该设备的 endpoint 状态。
+
+### 租约的授予与撤销
+
+- `input_route_bind(view, kbd, mouse, &generation, &initial_modifiers)`：授予租约。`mouse` 为 NULL 时**只租键盘**，鼠标留在 NORMAL 路径。**活租约会被替换**——旧所有者立刻失去它。`generation` 非零且单调递增。
+- `input_route_unbind(view, generation, reason)`：释放。`generation` 必须精确匹配活租约；`reason` 为 0 表示显式清理，非 0 表示被撤销（`EACCES` / `ESTALE` / `EIO`）。**别的 view 或别的代数的清理永远不碰租约**。
+- **最终关闭会撤销租约**：绑定文件的 final close（`input_route_release_file()`）在 route 内部撤销租约——先撤销并摘链，**再**放锁，最后才释放 endpoint。因此进程被 SIGKILL 时租约一定回收，不需要内核外部的清扫线程。
+
+### ACTIVE 路径的带外错误
+
+字节流本身**保持原始 Set 1 负载**，错误只经 `errno` / `poll` 带外报告：
+
+| 错误 | 语义 | 粘性 |
+|------|------|------|
+| `EOVERFLOW` | ACTIVE 流不可信：要么一个序列没能装进 ACTIVE 队列（**数据流有丢失**），要么一个序列跨越 epoch 边界被吞掉（消费者的**键状态**可能已与物理状态分叉） | 整个租约生命周期内粘住：read 与 poll 都持续报告它，直到应用交还租约并重新绑定（新租约从已知一致状态开始） |
+
+### UAPI
+
+`GFX_BIND_INPUT` (0x470A) / `GFX_UNBIND_INPUT` (0x470B) 与 `gfx_bind_input_t`（32 字节，字段偏移由 `_Static_assert` 固定）的完整说明、errno 表见 [docs/gui/gui.md](../gui/gui.md#2-uapi-布局kernelincludeuapigfxh)。`mouse_event_t` 仍是 8 字节的固定 UAPI，键盘仍是 Set 1 原始扫描码负载。
 
 ## 中断控制器
 
