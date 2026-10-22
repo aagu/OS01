@@ -1,9 +1,13 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-20）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-22）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-22
+
+- fix(selftest): **`test_tty_vintr` parked 超时根因闭环**：late test 的观察方是 BSP idle；收到信号的 RUNNING 工作线程在等待 release 时反复 `schedule()`，同 CPU 上会饿死 idle。改为受 `task_list_lock` 保护的不可中断睡眠，cleanup 显式唤醒并等待恢复 `PF_KTHREAD`；新增固定同 CPU、跨 CPU、首次睡眠前提前清理覆盖，注入后主动切换稳定检验原死锁时序。修复前固定同 CPU 在 SMP=4 复现 `missing END line`，GDB 确认 worker `vintr_seen=1/release=0` 仍循环调度。修复后完整自测 SMP=4/8 各一次通过；2/4/8 CPU 各 3 次重复的 `tty_vintr` 9/9 PASS（完整套件其中 7 次仍因既有 `fd_refcount rc_-1` 失败）。43 项自测 runner 单测通过。10 月 19 日直接检查 signal/state 的改动仅缩短竞态窗口，旧归因由本次证据修正。roadmap 移除 VINTR 挂起项，保留独立 `kernel_mutex` 负载问题。详见 [根因与回归证据](debug/2026-10-22-tty-vintr-timeout.md)。
 
 ## 2026-10-20
 
