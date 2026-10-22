@@ -19,6 +19,9 @@
  *     读取而不是制造假溢出。
  *   - 永久读失败被锁存：EACCES → LOST_OWNERSHIP、ESTALE →
  *     DISPLAY_CHANGED、其余（EOVERFLOW/EIO/EBADF/EBUSY）→ ERROR。
+ *     内核的 DESYNC 状态（跨 epoch 的序列被吞掉）与队列溢出一样报
+ *     EOVERFLOW，因此它到达应用时是 ERROR，而不是 DISPLAY_CHANGED：
+ *     那个租约已经不可信，应用必须交还租约并重新绑定。
  */
 
 #include <gui/gui_input.h>
@@ -415,9 +418,12 @@ gui_input_t *gui_input_create(gui_platform_t *platform, const gui_input_config_t
          * GUI_MOD_CAPS，再用 GUI_MOD_CAPS 掩码，保证**只有** Caps 进入
          * 解码器。
          *
-         * 为什么不能转发聚合位：bind 时内核把当时仍按住的键标记为隔离
-         * 并吞掉它们的释放沿，快照里的聚合 Shift/Ctrl/Alt 位描述的是
-         * 永远不会到达的释放——植入它们会把修饰键永久锁死（幽灵修饰键）。
+         * 为什么不能转发聚合位：bind 时内核把当时仍按住的**普通键**标记
+         * 为隔离并吞掉它们的释放沿，快照里的聚合 Shift/Ctrl/Alt 位描述的
+         * 是消费者**从未看到**的按下边沿——据此认为修饰键按住了，就是相信
+         * 了一个它没有观察到的状态。而且内核根本不把这些位交给用户态：
+         * 租约 UAPI 只发布 Caps 位。Caps 锁存位不同：它是**状态**而不是
+         * 边沿，消费者没有别的途径知道它，所以它必须被植入。
          */
         uint16_t seed = 0;
         if (state.initial_modifiers & GUI_INPUT_LEASE_MOD_CAPS) {
@@ -705,10 +711,12 @@ static void deliver_key_event(gui_input_t *input, const gui_key_event_t *ev,
 
     if (ev->action == GUI_KEY_DOWN) {
         /*
-         * 新的按键按下：先取消旧活动键，并维护软件重复策略。新键即使随后
-         * 被应用消费，旧键也已经失效（LVGL 的 keypad 是单键模型）。
+         * 新的按键按下：先取消旧活动键。新键即使随后被应用消费，旧键也
+         * 已经失效（LVGL 的 keypad 是单键模型）。
+         *
+         * 软件重复**不在这里**武装：只有真正到达 LVGL 的按键才允许重复。
          */
-        gui_input_lvgl_key_down(input, ev, now_ms);
+        gui_input_lvgl_key_down(input, ev);
     }
 
     bool consumed = false;
@@ -717,7 +725,18 @@ static void deliver_key_event(gui_input_t *input, const gui_key_event_t *ev,
     }
 
     if (!consumed) {
-        gui_input_lvgl_deliver(input, ev);
+        int delivered = gui_input_lvgl_deliver(input, ev);
+        if (ev->action == GUI_KEY_DOWN) {
+            /*
+             * 只有**真正进入 LVGL** 的按键才武装软件重复：应用消费掉的
+             * 按键从未进入 LVGL，不得为它产生 REPEAT（应用会执行一个自己
+             * 并没有交给控件的动作）。
+             */
+            gui_input_lvgl_repeat_after_down(input, ev, delivered != 0, now_ms);
+        }
+    } else if (ev->action == GUI_KEY_DOWN) {
+        /* 被消费的按下从未进入 LVGL：不得为它产生 REPEAT。 */
+        gui_input_lvgl_repeat_after_down(input, ev, false, now_ms);
     } else if (ev->action == GUI_KEY_UP) {
         /*
          * 被消费的释放仍然必须释放 LVGL 侧的活动键，否则 LVGL 会一直认为

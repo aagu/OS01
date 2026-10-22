@@ -23,6 +23,7 @@
 
 #include "test_framework.h"
 #include <driver/i8042.h>
+#include <driver/input_route.h>
 
 /* ═══════════════════════════════════════════════════════════
  *  Mock port model
@@ -613,6 +614,42 @@ static void test_keyboard_poll_without_tty_drains_aux(void)
     assert_eq(0, kbd_tty_n);
 }
 
+/* The NORMAL path publishes a WHOLE sequence or NOTHING (spec §4.3:
+ * "有效容量不足以容纳整段时 … NORMAL 整段丢弃").  When the raw
+ * scancode ring cannot hold the whole segment, the whole segment is
+ * dropped — a half sequence must never reach the legacy reader.
+ *
+ * The console TTY is a different consumer: it receives the COMPLETE
+ * frame even when the raw ring had to drop it. */
+static void test_normal_ring_drops_a_frame_it_cannot_hold_whole(void)
+{
+    kbd_fixture_reset();          /* re-inits the route and empties the ring */
+    keyboard_set_tty(&kbd_mock_tty);
+
+    /* Fill the ring to ONE byte short of a two-byte frame.  The ring
+     * holds RING_SIZE-1 usable bytes, so 254 bytes leave room for
+     * exactly one more byte — not for the two bytes of an E0 frame.
+     * 0x2A (left shift) is a modifier: it produces no TTY character. */
+    for (int i = 0; i < 254; i++)
+        input_route_keyboard_byte(0x2A);
+
+    /* A two-byte sequence that does NOT fit: it must be dropped WHOLE. */
+    input_route_keyboard_byte(0xE0);
+    input_route_keyboard_byte(0x48);        /* E0 48 = UP arrow */
+
+    uint8_t buf[512];
+    int n = keyboard_read_scancodes(buf, sizeof(buf));
+    assert_eq(254, n);                      /* the whole segment was dropped */
+    for (int i = 0; i < n; i++)
+        assert_eq(0x2A, buf[i]);            /* no half sequence landed */
+
+    /* The console TTY still received the COMPLETE frame. */
+    assert_eq(3, kbd_tty_n);
+    assert_eq(0x1b, kbd_tty_chars[0]);
+    assert_eq('[',  kbd_tty_chars[1]);
+    assert_eq('A',  kbd_tty_chars[2]);
+}
+
 /* Pre-GS wake: with num_cpus == 0 (BSP GS base not yet installed) a
  * scancode still wakes poll(2) waiters, but this_cpu() is NEVER
  * read.  Once num_cpus != 0, need_resched is set again. */
@@ -741,6 +778,7 @@ TEST_ENTRY(test_write_aux_byte_sequence),
 TEST_ENTRY(test_zero_freq_fails_transactions),
 TEST_ENTRY(test_kbd_aux_interleave_no_tty_pollution),
 TEST_ENTRY(test_keyboard_poll_without_tty_drains_aux),
+TEST_ENTRY(test_normal_ring_drops_a_frame_it_cannot_hold_whole),
 TEST_ENTRY(test_kbd_wake_before_gs_installed),
 TEST_ENTRY(test_keyboard_init_fails_on_controller_timeout),
 TEST_ENTRY(test_keyboard_init_fails_on_register_irq),

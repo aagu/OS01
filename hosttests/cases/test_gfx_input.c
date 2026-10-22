@@ -157,6 +157,8 @@ void input_route_test_set_release_hook(void (*hook)(file_t *f));
  * device behaves normally again once the lease is gone. */
 extern const input_route_kbd_sink_t   input_route_test_kbd_sink;
 extern const input_route_mouse_sink_t input_route_test_mouse_sink;
+/* The NORMAL sink's queue reset (the route's reset does not touch it). */
+extern void input_route_test_normal_reset(void);
 
 /* The present path of the gfx device is not under test here, but the
  * production gfx.c references it — the stub keeps the link closed
@@ -315,6 +317,10 @@ static void setup_env(void)
     input_route_test_set_release_hook(test_release_hook);
     input_route_set_normal_sinks(&input_route_test_kbd_sink,
                                  &input_route_test_mouse_sink);
+    /* The NORMAL sink is the route's own queue: resetting the route
+     * without resetting the sink would let a previous test's bytes leak
+     * into the next one. */
+    input_route_test_normal_reset();
 
     memset(g_fds, 0, sizeof(g_fds));
     g_copyout_fail = 0;
@@ -613,6 +619,33 @@ TEST_FUNC(test_bind_input_grants_an_exclusive_lease)
     assert_eq(0x1E, buf[0]);
 }
 
+TEST_FUNC(test_bind_input_snapshot_carries_caps_only)
+{
+    TEST_SUITE("gfx bind UAPI: the modifier snapshot carries Caps only");
+    gfx_bind_input_t out;
+
+    /* Shift and Ctrl are physically HELD when the lease is bound. */
+    setup_env();
+    acquire_ownership();
+    input_route_keyboard_byte(0x2A);        /* the left Shift make */
+    input_route_keyboard_byte(0x1D);        /* the left Ctrl make */
+    assert_eq(0, do_bind(FD_KBD, FD_MOUSE, &out));
+
+    /* The UAPI carries CAPS ONLY (bit0), every other bit 0: the route's
+     * aggregate Shift/Ctrl bits never cross the boundary.  Seeding them
+     * would make the consumer believe in a modifier press it never saw. */
+    assert_eq(0, out.initial_modifiers);
+
+    /* With the Caps latch on, the snapshot carries Caps — and nothing
+     * else.  The latch is a STATE, not an edge: it is the one modifier
+     * bit the consumer cannot observe by itself. */
+    setup_env();
+    acquire_ownership();
+    input_route_keyboard_byte(0x3A);        /* the Caps make: the latch flips */
+    assert_eq(0, do_bind(FD_KBD, FD_MOUSE, &out));
+    assert_eq(1, out.initial_modifiers);
+}
+
 TEST_FUNC(test_bind_input_keyboard_only_lease)
 {
     TEST_SUITE("gfx bind UAPI: the keyboard-only lease");
@@ -871,6 +904,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_bind_input_grants_an_exclusive_lease),
     TEST_ENTRY(test_bind_input_after_the_bound_file_is_closed),
     TEST_ENTRY(test_bind_input_keyboard_only_lease),
+    TEST_ENTRY(test_bind_input_snapshot_carries_caps_only),
     TEST_ENTRY(test_unbind_input_succeeds_without_a_lease),
     TEST_ENTRY(test_bind_input_copyout_failure_rolls_the_lease_back),
     TEST_ENTRY(test_copyout_rollback_does_not_revoke_new_generation),

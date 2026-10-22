@@ -332,6 +332,12 @@ class FakeProbe:
         self.fault_overflow_dropped = False
         # The overflow is reported with the WRONG errno.
         self.fault_overflow_wrong_errno = False
+        # The probe reports a WRONG pointer position.
+        self.fault_pointer_wrong = False
+        # The fatal probe dies WITHOUT reporting the LVGL assertion.
+        self.fault_fatal_no_assert_report = False
+        # The guest has seen a pointer event (the position is reported).
+        self.pointer_seen = False
         # The lease is NOT held when the process is killed: the keyboard
         # still reaches the shell.
         self.fault_no_lease = False
@@ -397,6 +403,11 @@ class FakeProbe:
         self.session._text += text
 
     def state_fields(self) -> str:
+        # The pointer position the guest would report.  A fault makes it
+        # WRONG: the runner must reject it.
+        px, py = self.pointer
+        if self.fault_pointer_wrong:
+            px += 1
         return (
             f"click_count={self.click_count:08x} "
             f"slider={self.slider & 0xFFFFFFFF:08x} "
@@ -408,7 +419,10 @@ class FakeProbe:
             f"modifiers={self.modifiers} "
             f"action={self.action} "
             f"sigint_seen={self.sigint_seen} "
-            f"text_trunc=0"
+            f"text_trunc=0 "
+            f"pointer_x={px & 0xFFFFFFFF:08x} "
+            f"pointer_y={py & 0xFFFFFFFF:08x} "
+            f"pointer_seen={1 if self.pointer_seen else 0}"
         )
 
     def emit_state_if_changed(self) -> None:
@@ -515,9 +529,11 @@ class FakeProbe:
                 self.pointer[1] = max(0, min(self.height - 1, self.pointer[1] + value))
             else:
                 return
+            self.pointer_seen = True
             if self.button_down:
                 self._update_slider()
         elif kind == "btn":
+            self.pointer_seen = True
             self._button(data)
 
     def _key(self, data: dict) -> None:
@@ -613,6 +629,10 @@ class FakeProbe:
             # "fatal_trigger=1" field), then the process dies with the
             # status 1 and emits NO exit record.
             self.emit("STATE", self.state_fields() + " fatal_trigger=1")
+            if not self.fault_fatal_no_assert_report:
+                # The POSITIVE evidence that the LVGL assertion fired: the
+                # probe's own assertion handler reports it before it dies.
+                self.emit("STATE", self.state_fields() + " lvgl_assert=1")
             self.exited = True
             self.exit_status = 0 if self.fault_fatal_zero else 1
             self.session._probe_died(self)
@@ -823,6 +843,9 @@ class FakeProcessSession:
         probe_fault_no_multiline: bool = False,
         probe_fault_caps_no_flip: bool = False,
         probe_fault_wheel_wrong_step: bool = False,
+        probe_fault_pointer_wrong: bool = False,
+        probe_fault_fatal_no_assert_report: bool = False,
+        probe_fault_terminal_red: bool = False,
         probe_fault_stale_modifier: bool = False,
         probe_fault_control_char: bool = False,
         probe_fault_deferred_newline: bool = False,
@@ -899,6 +922,9 @@ class FakeProcessSession:
         self.probe_fault_no_multiline = probe_fault_no_multiline
         self.probe_fault_caps_no_flip = probe_fault_caps_no_flip
         self.probe_fault_wheel_wrong_step = probe_fault_wheel_wrong_step
+        self.probe_fault_pointer_wrong = probe_fault_pointer_wrong
+        self.probe_fault_fatal_no_assert_report = probe_fault_fatal_no_assert_report
+        self.probe_fault_terminal_red = probe_fault_terminal_red
         self.probe_fault_stale_modifier = probe_fault_stale_modifier
         self.probe_fault_control_char = probe_fault_control_char
         self.probe_fault_deferred_newline = probe_fault_deferred_newline
@@ -1014,7 +1040,7 @@ class FakeProcessSession:
                 kpid = int(m_kill.group(1))
                 self.active_hold_pid = None
                 if self.qmp:
-                    self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
+                    self.qmp.current_surface = self._terminal_surface()
                 self._text += f"task {kpid} killed by signal 9\n# "
             return
 
@@ -1126,7 +1152,7 @@ class FakeProcessSession:
                     self._text += f"[gui-fault] acquired pid={oom_pid} mode=oom\n"
                     # Fatal exit
                     if self.qmp:
-                        self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
+                        self.qmp.current_surface = self._terminal_surface()
                     self._text += f"printf '__EXIT_%s_%d__\\n' {nonce} {self.fatal_rc}\n__EXIT_{nonce}_{self.fatal_rc}__\n# "
 
             elif "/bin/test_gui_input" in body:
@@ -1202,7 +1228,7 @@ class FakeProcessSession:
                     if self.active_hold_pid == kpid:
                         self.active_hold_pid = None
                         if self.qmp and not self._screen_stays_gui():
-                            self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
+                            self.qmp.current_surface = self._terminal_surface()
                         self._text += f"task {kpid} killed by signal 9\n"
                     if self.probe is not None and self.probe.pid == kpid:
                         # Task 12: the background probe is killed.  It
@@ -1230,7 +1256,7 @@ class FakeProcessSession:
         # 3. Direct stdin characters like 'q' or 'q\n'
         if "q" in cmd_str:
             if self.qmp:
-                self.qmp.current_surface = FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
+                self.qmp.current_surface = self._terminal_surface()
             if not self.wait_quit_hang:
                 self._last_rc = self.wait_quit_rc
                 self._text += "\n# "
@@ -1265,6 +1291,9 @@ class FakeProcessSession:
         self.probe.fault_no_multiline = self.probe_fault_no_multiline
         self.probe.fault_caps_no_flip = self.probe_fault_caps_no_flip
         self.probe.fault_wheel_wrong_step = self.probe_fault_wheel_wrong_step
+        self.probe.fault_pointer_wrong = self.probe_fault_pointer_wrong
+        self.probe.fault_fatal_no_assert_report = \
+            self.probe_fault_fatal_no_assert_report
         self.probe.fault_stale_modifier = self.probe_fault_stale_modifier
         self.probe.fault_control_char = self.probe_fault_control_char
         self.probe.fault_deferred_newline = self.probe_fault_deferred_newline
@@ -1289,6 +1318,17 @@ class FakeProcessSession:
                 1024, 768, SURFACE_LVGL_GUI[1])
         self.probe.start()
 
+    def _terminal_surface(self) -> "FakeSurface":
+        """The surface the restore shows: the console.
+
+        The fault makes it a solid RED screen.  A different solid colour
+        is NOT the terminal, so the recovery check must reject it — the
+        old rule (only the fault's colour family) would have accepted it.
+        """
+        if self.probe_fault_terminal_red:
+            return FakeSurface(1024, 768, b"\xff\x00\x00" * (1024 * 768))
+        return FakeSurface(1024, 768, b"\x00\x00\x00" * (1024 * 768))
+
     def _probe_died(self, probe: "FakeProbe") -> None:
         """The probe died: the screen goes back to the terminal."""
         self.probe_exit_status = probe.exit_status
@@ -1304,16 +1344,14 @@ class FakeProcessSession:
             # second hold dies with it.
             self.active_hold_pid = None
             if self.qmp is not None:
-                self.qmp.current_surface = FakeSurface(
-                    1024, 768, b"\x00\x00\x00" * (1024 * 768))
+                self.qmp.current_surface = self._terminal_surface()
             return
         if self.active_hold_pid is not None:
             # The old probe's close must NOT release the new owner's view:
             # the screen still belongs to the new owner.
             return
         if self.qmp is not None:
-            self.qmp.current_surface = FakeSurface(
-                1024, 768, b"\x00\x00\x00" * (1024 * 768))
+            self.qmp.current_surface = self._terminal_surface()
 
     def _owner_probe_holds(self) -> bool:
         """Does the background owner probe hold the display?"""
@@ -2027,6 +2065,46 @@ class GuiInputRunnerTests(unittest.TestCase):
         self.assertEqual(btn[0] - centre[0], dx)
         self.assertEqual(btn[1] - centre[1], dy)
 
+    def test_a_solid_colour_that_is_not_the_console_is_rejected(self):
+        """A solid red screen is not the terminal, even if it changed.
+
+        The old rule rejected only the fault's colour family, so a
+        DIFFERENT solid colour passed as the terminal.
+        """
+        factory, qmp = self._make({"probe_fault_terminal_red": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "solid colour")
+
+    def test_a_fatal_without_the_assert_report_is_rejected(self):
+        """A fatal that does not report the LVGL assertion is a FAIL.
+
+        The scenario must assert a POSITIVE fact (the assertion fired),
+        not the mere absence of an exit record: any crash would pass the
+        weaker check.
+        """
+        factory, qmp = self._make({"probe_fault_fatal_no_assert_report": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "lvgl_assert")
+
+    def test_a_wrong_pointer_position_is_rejected(self):
+        """A probe that reports the wrong pointer position is a FAIL.
+
+        The pointer path is otherwise unasserted end to end: the widget
+        state (the click counter) does not say WHERE the pointer was.
+
+        The needle is the POSITION report, not the word "pointer": a
+        "the state field 'pointer_x' changed" message would also match a
+        loose needle, and that failure is a symptom of a different
+        defect.  Only the runner's own position report proves that the
+        wrong position was detected where it must be.
+        """
+        factory, qmp = self._make({"probe_fault_pointer_wrong": True})
+        ok, reasons = self._run(factory, qmp)
+        self.assertFalse(ok)
+        self._assert_failed(reasons, "the probe reported the pointer at")
+
     # ── the runner negatives ──────────────────────────────────────
 
     def test_probe_ready_is_only_a_command_echo(self):
@@ -2525,9 +2603,13 @@ class GuiInputRunnerTests(unittest.TestCase):
             # and its modifier snapshot.
             for entry in summary[summary.index("[") + 1:].split(";"):
                 entry = entry.strip()
-                if not entry or entry.endswith(" more"):
+                # The summary is BRACKETED, so the LAST entry carries the
+                # closing "]": the "+N more" marker ends with "]", not with
+                # " more".  The marker is not a record.
+                bare = entry.rstrip("]").strip()
+                if not bare or bare.endswith(" more"):
                     continue
-                self.assertRegex(entry, r"^seq=\d+ STATE modifiers=\S+$")
+                self.assertRegex(bare, r"^seq=\d+ STATE modifiers=\S+$")
 
     def test_the_skipped_summary_is_bounded(self):
         """The skipped-record summary stays BOUNDED: the cap is a real cap.

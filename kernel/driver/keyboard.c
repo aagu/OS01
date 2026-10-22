@@ -32,15 +32,25 @@ static spinlock_T kbd_poll_lock;
 
 static void keyboard_wake_pollers(void);
 
-static inline int ring_full(void)
-{
-    int next = (ring_head + 1) % RING_SIZE;
-    return next == ring_tail;
-}
-
 static inline int ring_empty(void)
 {
     return ring_head == ring_tail;
+}
+
+// The number of bytes the ring can still take.  One slot is reserved to
+// tell "full" from "empty", so the ring holds RING_SIZE-1 usable bytes.
+//
+// The consumer only advances the tail, so the tail is read FIRST: a
+// stale tail can then only make the free space look SMALLER, which
+// drops a frame that would have fitted.  It can never make the free
+// space look larger, so the ring is never overrun.
+static inline int ring_free(void)
+{
+    int tail = ring_tail;
+    int head = ring_head;
+    int used = (head - tail + RING_SIZE) % RING_SIZE;
+
+    return (RING_SIZE - 1) - used;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -261,12 +271,18 @@ static void keyboard_publish_normal_frame(const input_ps2_frame_t *frame,
 {
     uint8_t i;
 
-    // Push the raw scancodes of the WHOLE sequence to the ring.
-    for (i = 0; i < frame->length; i++) {
-        if (ring_full()) break;
-        scancode_ring[ring_head] = frame->bytes[i];
-        __sync_synchronize();
-        ring_head = (ring_head + 1) % RING_SIZE;
+    // Push the raw scancodes of the WHOLE sequence to the ring — or
+    // NOTHING.  A sequence that does not fit is dropped as a WHOLE:
+    // the legacy reader must never see half of a sequence (spec §4.3:
+    // "有效容量不足以容纳整段时，ACTIVE 进入 DESYNC，NORMAL 整段丢弃").
+    // The console TTY below is a different consumer and always
+    // receives the complete frame.
+    if (frame->length <= ring_free()) {
+        for (i = 0; i < frame->length; i++) {
+            scancode_ring[ring_head] = frame->bytes[i];
+            __sync_synchronize();
+            ring_head = (ring_head + 1) % RING_SIZE;
+        }
     }
     keyboard_wake_pollers();
 

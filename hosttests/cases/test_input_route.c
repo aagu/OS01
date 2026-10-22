@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <log/log.h>
 #include <driver/input_route.h>
 #include <driver/input_ps2.h>
 #include <uapi/mouse.h>
@@ -87,6 +88,7 @@ static void route_reset(void)
     input_route_test_set_release_hook(input_route_release_file);
     input_route_test_set_poll_wait_hook(NULL);
     input_route_test_wake_reset();
+    input_route_test_warn_reset();
 }
 
 static void feed(const uint8_t *bytes, size_t n)
@@ -106,12 +108,17 @@ static void feed_hook_publish(void)
     input_route_keyboard_byte(0x1E);
 }
 
-static size_t drain_bytes(file_t *f, uint8_t *buf, size_t size)
+/* The read result is returned VERBATIM: a positive value is the byte
+ * count, 0 is "no bytes" and a NEGATIVE value is the errno the route
+ * refused with (-EAGAIN "nothing yet", -EBUSY "not the owner",
+ * -EOVERFLOW "the stream was lost").  Collapsing the errno to 0 would
+ * make every "the route refused" assertion vacuous. */
+static int64_t drain_bytes(file_t *f, uint8_t *buf, size_t size)
 {
-    int rc;
+    int64_t rc;
     memset(buf, 0, size);
     rc = input_route_read(f, 0, size, buf);
-    return rc > 0 ? (size_t)rc : 0;
+    return rc;
 }
 
 static size_t drain_events(file_t *f, mouse_event_t *buf, size_t max)
@@ -371,7 +378,8 @@ static void test_boundary_sequences_never_publish_half(void)
             for (split = 1; split < cases[c].len; split++) {
                 file_t *kbd, *mouse;
                 uint8_t buf[16];
-                size_t got, normal;
+                int64_t got;
+                size_t  normal;
 
                 route_reset();
                 kbd = route_open(INPUT_DEVICE_KEYBOARD);
@@ -379,7 +387,10 @@ static void test_boundary_sequences_never_publish_half(void)
                 assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
 
                 feed(cases[c].seq, split);
-                assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
+                /* Nothing is published yet: the ACTIVE queue is empty, so
+                 * the read says EAGAIN ("no bytes") — not "0 bytes", which
+                 * a collapsed errno cannot express. */
+                assert_eq(-EAGAIN, drain_bytes(kbd, buf, sizeof(buf)));
 
                 /* Revoke in the middle of the sequence. */
                 input_route_unbind(view(), 0, reasons[r]);
@@ -399,14 +410,22 @@ static void test_boundary_sequences_never_publish_half(void)
 
                 feed(cases[c].seq + split, cases[c].len - split);
 
-                /* The ACTIVE path: either the whole sequence crossed the
-                 * epoch boundary and was isolated, or it was published
-                 * whole.  Never half. */
+                /* The ACTIVE path: the fragment crossed the epoch boundary,
+                 * so it was ISOLATED — it is never published, whole or
+                 * half.  A live endpoint says so out of band (-EOVERFLOW /
+                 * DESYNC); a dead one keeps reporting its revoke reason.
+                 * The two are DIFFERENT answers, so the assertion has to
+                 * tell them apart instead of accepting any zero. */
                 got = drain_bytes(kbd, buf, sizeof(buf));
-                assert_true(got == 0 || got == cases[c].len);
-                /* The NORMAL path is held to the same rule. */
+                if (reasons[r] == 0) {
+                    assert_eq(-EOVERFLOW, got);
+                } else {
+                    assert_eq(-reasons[r], got);
+                }
+                /* The NORMAL path is held to the same rule: an isolated
+                 * fragment never reaches it either. */
                 normal = input_route_test_normal_kbd_bytes();
-                assert_true(normal == 0 || normal == cases[c].len);
+                assert_eq(0, normal);
             }
         }
     }
@@ -420,7 +439,7 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
     uint8_t buf[16];
     uint64_t generation = 0;
     uint32_t modifiers = 0;
-    size_t got;
+    int64_t got;
 
     route_reset();
     kbd = route_open(INPUT_DEVICE_KEYBOARD);
@@ -431,15 +450,18 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
     assert_eq(0, input_route_bind(view(), kbd, mouse, &generation, &modifiers));
 
     /* The make completes in the new epoch: it is isolated, so the
-     * consumer never sees a half-truth. */
+     * consumer never sees a half-truth — and the ACTIVE stream says so
+     * out of band (-EOVERFLOW / DESYNC). */
     feed1(0x1D);
-    assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
 
     /* The physical state still advanced: the key IS held. */
     input_route_unbind(view(), generation, 0);
     assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, &modifiers));
     assert_true((modifiers & INPUT_ROUTE_MOD_CTRL) != 0);
-    assert_eq(0, drain_bytes(kbd, buf, sizeof(buf)));
+    /* The new lease is consistent again: the queue is empty, so the read
+     * says EAGAIN. */
+    assert_eq(-EAGAIN, drain_bytes(kbd, buf, sizeof(buf)));
 
     /* INVARIANT: the snapshot says "Ctrl is held", so the matching
      * release MUST reach the consumer — otherwise the consumer waits
@@ -464,13 +486,14 @@ static void test_cross_epoch_make_is_isolated_until_break(void)
 
 static void test_cross_epoch_make_reports_desync(void)
 {
-    file_t *kbd, *mouse;
+    file_t *kbd, *mouse, *other;
     uint8_t buf[16];
     uint64_t generation = 0;
 
     route_reset();
     kbd = route_open(INPUT_DEVICE_KEYBOARD);
     mouse = route_open(INPUT_DEVICE_MOUSE);
+    other = route_open(INPUT_DEVICE_KEYBOARD);
 
     /* The sequence starts in the pre-lease epoch, completes in the
      * lease's epoch. */
@@ -483,17 +506,21 @@ static void test_cross_epoch_make_reports_desync(void)
     assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
     /* ... and it stays reported: polling does not consume the flag. */
     assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
-    /* ... and the read tells the consumer which error it is. */
-    assert_eq(-ESTALE, input_route_read(kbd, 0, sizeof(buf), buf));
+    /* ... and the read tells the consumer which error it is.  The spec
+     * §4.2 state table names EOVERFLOW for the DESYNC state. */
+    assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
 
-    /* Told once: the flag is cleared and the poll is clean again. */
-    assert_false((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
+    /* STICKY: the prohibition continues until the app cleans up or the
+     * lease is finally closed.  The read is NOT consumed by the first
+     * read: the second one fails the same way. */
+    assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
+    assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
 
-    /* The byte stream itself is intact: the consumer can keep reading
-     * after it has re-synced its key state. */
-    feed1(0x1E);
-    assert_eq(1, drain_bytes(kbd, buf, sizeof(buf)));
-    assert_eq(0x1E, buf[0]);
+    /* A file that is not the lease owner is shut out with EBUSY: it
+     * never sees the owner's error, and the owner's error never
+     * downgrades the owner's own lease to "busy". */
+    assert_eq(-EBUSY, input_route_read(other, 0, sizeof(buf), buf));
+    assert_true((input_route_poll(other, POLLIN, NULL) & POLLERR) != 0);
 }
 
 /* ── A new lease starts from a known-consistent state ────────── */
@@ -513,10 +540,28 @@ static void test_desync_is_cleared_at_bind(void)
     feed1(0x1D);
     assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
 
-    /* A new lease starts from a known-consistent state: the previous
-     * lease's DESYNC does not follow it. */
+    /* The sticky prohibition lasts for the WHOLE lease: the read keeps
+     * reporting the error, no matter how often it is retried. */
+    assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
+    assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
+
+    /* The app cleans up: the lease is released. */
     input_route_unbind(view(), generation, 0);
+
+    /* The DESYNC flag SURVIVES the release: it belongs to the lease, and
+     * a release is not a bind.  This is what makes the clearing below the
+     * BIND's work — a clear at the release would fail HERE, even though
+     * the release happened before the new lease. */
+    assert_eq(1, input_route__test_desync_active());
+
+    /* A new lease starts from a known-consistent state: the previous
+     * lease's DESYNC does not follow it.
+     *
+     * THE CLEARING HAPPENS AT BIND — not at the release above — so this
+     * assertion fails if the bind-time reset is removed, even though the
+     * release already happened. */
     assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+    assert_eq(0, input_route__test_desync_active());
     assert_false((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
     assert_eq(-EAGAIN, input_route_read(kbd, 0, sizeof(buf), buf));
 }
@@ -528,7 +573,7 @@ static void test_bind_with_held_key_produces_no_new_down(void)
     file_t *kbd, *mouse;
     uint8_t buf[16];
     uint32_t modifiers = 0;
-    size_t got;
+    int64_t got;
 
     route_reset();
     kbd = route_open(INPUT_DEVICE_KEYBOARD);
@@ -724,6 +769,163 @@ static void test_revoked_lease_reports_the_reason(void)
     assert_true((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
 }
 
+/* ── The revoke resets the transient modifier state ───────────── */
+
+/*
+ * The shell must not inherit the modifier keys the GUI session held:
+ * the route resets its transient modifier state when the lease is
+ * revoked, while the PHYSICAL state (the keys are still held) is not.
+ *
+ * The NORMAL sink is the observer: after the lease is gone the next
+ * frame is published there with the route's logical modifier snapshot,
+ * and that snapshot must not carry the modifier the GUI session held.
+ */
+static void test_revoke_resets_the_transient_modifier_state(void)
+{
+    file_t *kbd, *mouse;
+    uint64_t generation = 0;
+
+    route_reset();
+    kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    mouse = route_open(INPUT_DEVICE_MOUSE);
+
+    assert_eq(0, input_route_bind(view(), kbd, mouse, &generation, NULL));
+
+    /* Ctrl goes down inside the lease: the transient modifier state
+     * follows the events, so the route now holds Ctrl. */
+    feed1(0x1D);
+    assert_eq(0, input_route_test_normal_kbd_bytes());
+
+    /* The lease is released. */
+    input_route_unbind(view(), generation, 0);
+
+    /* The next frame goes to the NORMAL path — the shell's — and the
+     * modifier snapshot it carries must NOT contain the modifier the
+     * GUI session held. */
+    feed1(0x1E);
+    assert_eq(1, input_route_test_normal_kbd_bytes());
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+}
+
+/* ── The overflow warning is rate-limited, never silenced ─────── */
+
+/*
+ * Under a sustained overflow the warning fired on EVERY rejected
+ * sequence and flooded the serial console — the one channel the
+ * recovery canary reads.  The FIRST occurrence of each distinct
+ * condition must still be logged (the user has to learn that the
+ * input stream was lost); the repeats are suppressed.
+ */
+static void test_overflow_warning_is_rate_limited_but_not_silent(void)
+{
+    file_t *kbd, *mouse;
+    uint64_t generation = 0;
+    uint8_t buf[8];
+    mouse_event_t events[80];
+    mouse_event_t ev;
+    int i;
+    int saved_level = g_log_level;
+
+    /* The warning is gated on the log level: raise it so the mock's
+     * counter sees the message. */
+    g_log_level = LOG_WARN;
+
+    route_reset();
+    kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    mouse = route_open(INPUT_DEVICE_MOUSE);
+    assert_eq(0, input_route_bind(view(), kbd, mouse, &generation, NULL));
+
+    /* Fill the ACTIVE keyboard queue, then keep pushing sequences that
+     * do not fit: every one of them is rejected. */
+    for (i = 0; i < 254; i++) feed1(0x1E);
+    for (i = 0; i < 20; i++) {
+        feed1(0xE0);
+        feed1(0x1D);
+    }
+
+    /* The first keyboard overflow was logged ... */
+    assert_eq(1, input_route_test_warn_kbd_overflow());
+    /* ... and the repeats were not: the console is not flooded. */
+    assert_eq(1, input_route_test_warn_total());
+
+    /* The mouse queue is a DIFFERENT condition: its first overflow is
+     * logged as well, so no distinct condition is silenced. */
+    memset(&ev, 0, sizeof(ev));
+    ev.dx = 1;
+    for (i = 0; i < 65; i++) input_route_mouse_event(&ev);
+    for (i = 0; i < 20; i++) input_route_mouse_event(&ev);
+    assert_eq(1, input_route_test_warn_mouse_overflow());
+    assert_eq(2, input_route_test_warn_total());
+
+    /* The stream really was lost: the reader is told so. */
+    assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
+    assert_eq(-EOVERFLOW, input_route_read(mouse, 0, sizeof(events), events));
+
+    g_log_level = saved_level;
+}
+
+/* ── The release unlinks the file UNDER the route lock ───────── */
+
+/*
+ * A concurrent reader that observes a NULL dev_private gets -EINVAL
+ * ("bad argument") instead of the revoke reason, so the route file must
+ * be unlinked ATOMICALLY with the revoke: the clear happens while the
+ * route lock is still held.
+ *
+ * The observer runs when a lock is released, so the fixture can look at
+ * the file at the exact moment the route lock is given up: the file must
+ * already be unlinked there.
+ */
+static file_t       *release_watched;
+static const void   *release_route_lock;
+static int          release_saw_route_lock;
+static int          release_saw_unlinked;
+
+static void release_lock_observer(const void *lock)
+{
+    if (lock != release_route_lock)
+        return;
+    release_saw_route_lock = 1;
+    if (release_watched && release_watched->dev_private == NULL)
+        release_saw_unlinked = 1;
+}
+
+static void test_release_unlinks_the_file_under_the_route_lock(void)
+{
+    file_t *kbd, *mouse;
+    uint64_t generation = 0;
+
+    route_reset();
+    kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    mouse = route_open(INPUT_DEVICE_MOUSE);
+    assert_true(kbd != NULL);
+    assert_true(mouse != NULL);
+    assert_eq(0, input_route_bind(view(), kbd, mouse, &generation, NULL));
+    assert_true(kbd->dev_private != NULL);
+
+    /* Learn the route lock: it is the first lock the route takes. */
+    input_route_test_trace_reset();
+    {
+        uint8_t probe[4];
+        (void)input_route_read(kbd, 0, sizeof(probe), probe);
+    }
+    release_route_lock = input_route_test_trace_first_lock();
+    assert_not_null(release_route_lock);
+
+    release_watched = kbd;
+    release_saw_route_lock = 0;
+    release_saw_unlinked = 0;
+    input_route_test_set_lock_release_hook(release_lock_observer);
+    input_route_release_file(kbd);
+    input_route_test_set_lock_release_hook(NULL);
+    release_watched = NULL;
+
+    /* The route lock was given up during the release ... */
+    assert_true(release_saw_route_lock);
+    /* ... and the file was already unlinked at that moment. */
+    assert_true(release_saw_unlinked);
+}
+
 /* ── The ACTIVE queues survive a drain-then-refill ──────────── */
 
 static void test_active_queue_survives_drain_and_refill(void)
@@ -787,6 +989,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_bind_with_held_key_produces_no_new_down),
     TEST_ENTRY(test_caps_typematic_does_not_flip),
     TEST_ENTRY(test_mouse_button_isolation_keeps_movement),
+    TEST_ENTRY(test_revoke_resets_the_transient_modifier_state),
+    TEST_ENTRY(test_release_unlinks_the_file_under_the_route_lock),
+    TEST_ENTRY(test_overflow_warning_is_rate_limited_but_not_silent),
     TEST_ENTRY(test_lock_order_is_route_then_normal_queue),
     TEST_ENTRY(test_no_lost_wakeup_at_register_boundary),
     TEST_ENTRY(test_unbind_generation_rules),

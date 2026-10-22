@@ -357,8 +357,7 @@ void         gui_input_set_pointer_handler(gui_input_t *input, gui_pointer_handl
 
 | errno | 语义 | 粘性 |
 |-------|------|------|
-| `EOVERFLOW` | 一个序列没能装进 ACTIVE 队列：**数据流有丢失** | 整个租约生命周期内粘住 |
-| `ESTALE` | 一个序列跨越了 epoch 边界被吞掉：消费者的**键状态**可能已与物理状态分叉 | 粘住，直到消费者被告知（read 读出并清标志） |
+| `EOVERFLOW` | ACTIVE 流不可信：要么一个序列没能装进 ACTIVE 队列（**数据流有丢失**），要么一个序列跨越了 epoch 边界被吞掉（消费者的**键状态**可能已与物理状态分叉） | 整个租约生命周期内粘住：read 与 poll 都持续报告它，直到应用交还租约并重新绑定（新租约从已知一致状态开始） |
 
 **libgui 用户态 API**：
 
@@ -382,7 +381,7 @@ void         gui_input_set_pointer_handler(gui_input_t *input, gui_pointer_handl
 | 租约被内核撤销（owner 进程死亡 / 文件最终关闭） | 内核在 route 内部撤销租约；租约随显示 view 一起释放 | 键盘立刻回到 NORMAL 路径，控制台 TTY 恢复；下一个客户端可以重新绑定 |
 | 租约被抢占（新 owner 绑定） | 旧 owner 的租约代数不再匹配 | 旧 owner 的后续操作得到 `ESTALE` / `EACCES`，非零退出 |
 | 队列溢出 | `EOVERFLOW` | 数据流已丢失，**不可恢复**；消费者必须重新同步键状态 |
-| 跨 epoch 的序列 | `ESTALE` | 字节流完好：消费者重新同步键状态后可以继续读 |
+| 跨 epoch 的序列 | `EOVERFLOW`（与队列溢出同一个 errno） | **不可恢复**：租约必须交还并重新绑定；新租约从已知一致状态开始 |
 | owner 崩溃（SIGKILL / LVGL fatal / Ctrl-Q） | 内核 final-close 回收租约 | 终端与键盘一并回到正常状态（不留幽灵点击） |
 
 ### 6. 固定容量与限制（明示边界）

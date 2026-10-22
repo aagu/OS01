@@ -146,14 +146,20 @@ int  input_route_lease_live(const void **view, uint64_t *generation);
  *
  * Two ACTIVE-path errors are reported out of band, so the byte stream
  * itself stays raw Set 1 payload:
- *   -EOVERFLOW  a sequence did not fit the ACTIVE queue: the stream
- *               lost data.  Sticky for the life of the lease.
- *   -ESTALE     a sequence crossed an epoch boundary and was swallowed:
- *               the consumer's KEY STATE may have diverged from the
- *               physical one.  Sticky until the consumer is told (the
- *               read tells it and clears the flag); the byte stream
- *               stays intact, so the consumer can keep reading after it
- *               has re-synced its key state. */
+ *   -EOVERFLOW  the ACTIVE stream is not trustworthy: either a sequence
+ *               did not fit the ACTIVE queue (the stream lost data) or a
+ *               sequence crossed an epoch boundary and was swallowed (the
+ *               consumer's KEY STATE may have diverged from the physical
+ *               one).  Sticky: the read AND the poll keep reporting it
+ *               for the whole lease.  The consumer has to give the lease
+ *               up and take a new one; a NEW lease starts from a
+ *               known-consistent state and clears the flag.
+ *
+ * The spec §4.2 state table names EOVERFLOW for the DESYNC state and
+ * says the prohibition continues until the app cleans up or the file is
+ * finally closed.  A DEAD endpoint (a revoked lease) reports its
+ * recorded revoke reason instead (EACCES / ESTALE / EIO) and stays dead
+ * for good, so the two are told apart by the retry. */
 int  input_route_read(struct file *f, uint64_t offset, uint64_t size,
                       void *buf);
 
@@ -174,5 +180,13 @@ void input_route_keyboard_byte(uint8_t byte);
 /* Feed one mouse event.  The route decides NORMAL or ACTIVE; the
  * mouse driver must call this BEFORE it takes its own event lock. */
 void input_route_mouse_event(const mouse_event_t *event);
+
+#ifdef OS01_HOST_TEST
+/* Host-only: the DESYNC flag's value.  The flag has NO other observable
+ * (only the owner of a LIVE lease can see it), so the fixture needs this
+ * to pin WHERE it is cleared: at bind — not at revoke.  The production
+ * build does not compile it. */
+int input_route__test_desync_active(void);
+#endif
 
 #endif /* __INPUT_ROUTE_H__ */

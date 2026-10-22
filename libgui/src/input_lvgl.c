@@ -714,8 +714,7 @@ bool gui_input_lvgl_repeatable(gui_input_t *input, const gui_key_event_t *event)
  * 修饰键（Shift / Ctrl / Alt / Caps）既不成为活动键，也不改变已按下键的
  * 缓存字符：Shift / Caps 的变化不会让正在重复的键换字符。
  */
-void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event,
-                             uint64_t now_ms)
+void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event)
 {
     gui_input_lvgl_t *lv;
 
@@ -734,10 +733,36 @@ void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event,
     }
 
     /*
-     * 武装软件重复：首次 400 ms、之后 40 ms。字符取该键 DOWN 时解码器缓存
-     * 的值（Shift / Caps 的后续变化不改变它）。
+     * 软件重复**不在这里**武装：必须等应用消费与否的结论。只有真正到达
+     * LVGL 的按键才允许重复，见 gui_input_lvgl_arm_repeat()。
      */
-    if (gui_input_lvgl_repeatable(input, event)) {
+}
+
+/*
+ * 一次 DOWN 之后的软件重复维护：首次 400 ms、之后 40 ms。字符取该键
+ * DOWN 时解码器缓存的值（Shift / Caps 的后续变化不改变它）。
+ *
+ * reached_lvgl：这个按键是否真的进入了 LVGL（应用没有消费它，且它有 LVGL
+ * 键义）。只有这样的按键才允许武装重复：应用消费掉的 DOWN 从未进入 LVGL，
+ * LVGL 从未见过这次按下，为它产生 REPEAT 只会让应用执行一个自己并没有
+ * 交给控件的动作。
+ *
+ * 修饰键不参与：它们的 DOWN 不影响活动键的重复（Ctrl / Alt 取消活动键
+ * 由投递层的取消协议负责）。
+ */
+void gui_input_lvgl_repeat_after_down(gui_input_t *input,
+                                      const gui_key_event_t *event,
+                                      bool reached_lvgl, uint64_t now_ms)
+{
+    if (!input || !event) {
+        return;
+    }
+
+    if (ps2_is_modifier(event->physical_key)) {
+        return;
+    }
+
+    if (reached_lvgl && gui_input_lvgl_repeatable(input, event)) {
         input->repeat_armed = true;
         input->repeat_physical = event->physical_key;
         input->repeat_char = input->ps2.cached[gui_ps2_key_slot(event->physical_key)];

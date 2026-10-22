@@ -22,6 +22,12 @@ Task 13 puts in place:
      (``build/*/logs/tests/**``).
   5. Scheduled / manual runs keep the fuller 1/2/4/8 CPU and RAM/fault
      coverage via a ``schedule``/``workflow_dispatch``-guarded job.
+  6. The two steps this branch added are still there: the static-audit
+     bucket (``make PROFILE=x86_64-clang test-static`` — the only place
+     the GUI build audit runs) and the GUI incremental contract
+     (``make PROFILE=x86_64-clang test-gui-incremental``).  Both are
+     pinned to a real job step, so dropping either one from the workflow
+     fails this contract test instead of silently losing the gate.
 
 The x86 QEMU suites read their effective CPU count from the
 ``QEMU_SMP`` environment variable (``qemutests/run_test.py`` records it
@@ -76,6 +82,9 @@ def _make_commands(text: str) -> list[str]:
 _JOBS_KEY = re.compile(r"^jobs:\s*$")
 _JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 _RUN_KEY = re.compile(r"^(\s*)run:\s*(.*)$")
+# A real ``make`` invocation at the start of a shell command (never
+# ``cmake``, never a mention inside a comment).
+_MAKE_RE = re.compile(r"(?:^|[\s;&|(])make\s")
 
 
 def _job_blocks(text: str) -> dict[str, str]:
@@ -244,6 +253,59 @@ class CiWorkflowContractTests(unittest.TestCase):
             _SCHEDULE_GUARD.search(self.text),
             "a job must guard the fuller matrix with "
             "`github.event_name == 'schedule'` (or workflow_dispatch)")
+
+    # ── 6. the steps this branch added ───────────────────────────
+    def _make_step_commands(self) -> list[tuple[str, str]]:
+        """``(job, command)`` for every job step that invokes ``make``."""
+        found: list[tuple[str, str]] = []
+        for job, block in _job_blocks(self.text).items():
+            for cmd in _step_run_commands(block):
+                m = _MAKE_RE.search(cmd)
+                if m:
+                    found.append((job, cmd[m.start():].strip()))
+        return found
+
+    def _step_invocations(self, *tokens: str) -> list[str]:
+        """The jobs whose ``run:`` step runs ``make`` with all *tokens*.
+
+        The tokens must appear **in order** inside one step command, so a
+        mention in a comment or in another step cannot satisfy the check.
+        """
+        hits: list[str] = []
+        for job, cmd in self._make_step_commands():
+            pos = -1
+            for token in tokens:
+                nxt = cmd.find(token, pos + 1)
+                if nxt < 0:
+                    break
+                pos = nxt
+            else:
+                hits.append(job)
+        return hits
+
+    def test_static_audit_step_is_invoked(self) -> None:
+        # `test-static` is the ONLY place the GUI build audit
+        # (gui_build_audit.py) runs: it enforces the published sysroot
+        # contract and the target link probe.  Dropping the step from
+        # ci.yml would silently lose that gate, so the step is pinned.
+        self.assertTrue(
+            self._step_invocations("make", "PROFILE=x86_64-clang",
+                                    "test-static"),
+            "ci.yml must run `make PROFILE=x86_64-clang test-static` from a "
+            "job `run:` step (it is the only place the GUI build audit "
+            "runs; a comment or a non-step mention does not count)")
+
+    def test_gui_incremental_step_is_invoked(self) -> None:
+        # The GUI incremental contract (no needless rebuild, the public
+        # input header rebuilds its dependents, install clears the staging
+        # tree, a new sysroot generation is clean and the historical ones
+        # are preserved) is a CI step of its own.
+        self.assertTrue(
+            self._step_invocations("make", "PROFILE=x86_64-clang",
+                                    "test-gui-incremental"),
+            "ci.yml must run `make PROFILE=x86_64-clang test-gui-incremental` "
+            "from a job `run:` step (a comment or a non-step mention does "
+            "not count)")
 
 
 if __name__ == "__main__":

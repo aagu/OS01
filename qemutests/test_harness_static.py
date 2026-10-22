@@ -351,6 +351,62 @@ class MakefileWiringTests(unittest.TestCase):
 
 
 # ───────────────────────────────────────────────────────────────────
+# The documentation of the test-static bucket must agree with the
+# bucket itself.  ``docs/build/build.md`` states the number of static
+# audits in three places and enumerates them in a fourth; the count
+# drifted (8 / 11 / 8 while the bucket ran 13) because nothing checked
+# the doc against the Makefile.  The expected count and the expected
+# names are DERIVED from the Makefile, never hard-coded, so the check
+# keeps working when an audit is added or renamed.
+# ───────────────────────────────────────────────────────────────────
+
+_AUDIT_SUITE_RE = re.compile(
+    r"\$\(RUN_STATIC_AUDIT(?:_VALIDATE)?\)\s+([A-Za-z0-9_-]+)\s+--")
+_DOC_COUNT_PATTERNS = (r"\((\d+) audits\)", r"(\d+) 项静态审计")
+
+
+class StaticAuditDocTests(unittest.TestCase):
+    """``docs/build/build.md`` must describe the real ``test-static``."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mk = (ROOT / "mk" / "components" / "run.mk").read_text(
+            encoding="utf-8")
+        cls.doc = (ROOT / "docs" / "build" / "build.md").read_text(
+            encoding="utf-8")
+        cls.audits = sorted(set(_AUDIT_SUITE_RE.findall(cls.mk)))
+
+    def test_the_bucket_runs_more_than_one_audit(self) -> None:
+        # Guards the derivation itself: if the Makefile wiring changed so
+        # that no audit is found, the count checks below would be vacuous.
+        self.assertGreaterEqual(len(self.audits), 13, self.audits)
+
+    def test_doc_states_the_real_audit_count_everywhere(self) -> None:
+        for pattern in _DOC_COUNT_PATTERNS:
+            for found in re.findall(pattern, self.doc):
+                self.assertEqual(
+                    int(found), len(self.audits),
+                    f"docs/build/build.md states {found} static audits but the "
+                    f"test-static bucket runs {len(self.audits)} "
+                    f"({', '.join(self.audits)})")
+
+    def test_doc_enumerates_every_audit(self) -> None:
+        # One row of the doc enumerates the audits by name; that row must
+        # name every audit the bucket runs.
+        rows = [ln for ln in self.doc.splitlines()
+                if "项静态审计" in ln and "、" in ln]
+        self.assertTrue(rows, "docs/build/build.md must enumerate the "
+                               "test-static audits by name")
+        named = [row for row in rows
+                 if all(audit in row for audit in self.audits)]
+        self.assertTrue(
+            named,
+            "no docs/build/build.md row names every audit the test-static "
+            f"bucket runs ({', '.join(self.audits)}); the enumerating row "
+            f"is {rows[0]!r}")
+
+
+# ───────────────────────────────────────────────────────────────────
 # Exit-code convention — status ⟺ exit code, for every verdict the
 # adapter can archive.  Pinned so the convention cannot silently drift.
 # ───────────────────────────────────────────────────────────────────

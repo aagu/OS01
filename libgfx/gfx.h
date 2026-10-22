@@ -165,7 +165,15 @@ int gfx_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h);
  *
  * `generation` is the lease generation (non-zero, monotonic) and
  * `initial_modifiers` the modifier snapshot the consumer starts from
- * (bit0 = Caps Lock). */
+ * (bit0 = Caps Lock, every other bit 0).
+ *
+ * ONLY CAPS MAY BE SEEDED from this snapshot.  The kernel reduces the
+ * route's bind-time snapshot to the Caps latch alone, so the aggregate
+ * Shift/Ctrl/Alt bits never cross the UAPI boundary: the keys that are
+ * still held at bind time are isolated and their release is swallowed,
+ * so those aggregate bits would describe presses the consumer never
+ * saw.  The Caps latch is different — it is a STATE, not an edge, and
+ * the consumer has no other way to learn it. */
 typedef struct {
     uint64_t generation;
     uint32_t initial_modifiers;

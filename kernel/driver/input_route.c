@@ -130,8 +130,9 @@ static struct {
     int           kbd_overflow;
     /* The DESYNC flag: a sequence crossed an epoch boundary, so the
      * consumer's key state may have diverged from the physical one.
-     * It is per-lease (cleared at bind) and sticky until the consumer
-     * is told. */
+     * It is per-lease (cleared at bind) and STICKY: the read keeps
+     * reporting it until the consumer gives the lease up and takes a
+     * new one. */
     int           kbd_desync;
     mouse_event_t mouse_queue[ROUTE_MOUSE_QUEUE_SLOTS];
     unsigned      mouse_head, mouse_tail, mouse_count;
@@ -224,7 +225,11 @@ static void route_kbd_queue_reset_locked(void)
 {
     route.kbd_head = route.kbd_tail = route.kbd_count = 0;
     route.kbd_overflow = 0;
-    route.kbd_desync = 0;
+    /* The DESYNC flag is NOT reset here: it describes the LEASE (the
+     * consumer's key state may have diverged), not the byte queue, and
+     * it is cleared when a NEW lease is bound (input_route_bind()).
+     * A released lease's endpoint falls back to the NORMAL path, which
+     * never consults the flag, so nothing observes it in between. */
 }
 
 static void route_mouse_queue_reset_locked(void)
@@ -257,9 +262,20 @@ static void route_kbd_push_locked(const uint8_t *bytes, uint8_t len)
     if (!len)
         return;
     if (route.kbd_count + len > ROUTE_KBD_QUEUE_USABLE) {
-        log_warn("input: ACTIVE keyboard queue overflow (%u bytes, %u needed)\n",
-                 route.kbd_count, (unsigned)len);
-        route.kbd_overflow = 1;
+        /* The FIRST overflow of an episode is always logged: the serial
+         * console is the one channel the recovery canary reads, so the
+         * user must learn that the input stream was lost.  The REPEATS
+         * are suppressed: under a sustained overflow they would flood the
+         * console and break the very conversation the canary needs.
+         *
+         * The overflow flag is sticky until the queue is reset (the lease
+         * ends), so the next episode logs again: no distinct condition is
+         * ever silenced. */
+        if (!route.kbd_overflow) {
+            log_warn("input: ACTIVE keyboard queue overflow (%u bytes, %u needed)\n",
+                     route.kbd_count, (unsigned)len);
+            route.kbd_overflow = 1;
+        }
         return;
     }
     for (i = 0; i < len; i++) {
@@ -273,9 +289,13 @@ static void route_kbd_push_locked(const uint8_t *bytes, uint8_t len)
 static void route_mouse_push_locked(const mouse_event_t *event)
 {
     if (route.mouse_count >= ROUTE_MOUSE_QUEUE_SLOTS) {
-        log_warn("input: ACTIVE mouse queue overflow (%u events)\n",
-                 route.mouse_count);
-        route.mouse_overflow = 1;
+        /* The first overflow of an episode is logged, the repeats are
+         * suppressed — see route_kbd_push_locked() above. */
+        if (!route.mouse_overflow) {
+            log_warn("input: ACTIVE mouse queue overflow (%u events)\n",
+                     route.mouse_count);
+            route.mouse_overflow = 1;
+        }
         return;
     }
     route.mouse_queue[route.mouse_head] = *event;
@@ -292,16 +312,20 @@ static int route_active_read_locked(const struct route_endpoint *ep,
     if (ep->device == INPUT_DEVICE_KEYBOARD) {
         if (route.kbd_desync) {
             /* The consumer's key state may have diverged: a sequence was
-             * swallowed at an epoch boundary.  The flag is sticky until
-             * the consumer is told — telling it clears the flag, and the
-             * byte stream itself stays intact, so the consumer can keep
-             * reading after it has re-synced its key state.
+             * swallowed at an epoch boundary.  The spec §4.2 state table
+             * names EOVERFLOW for the DESYNC state, and the prohibition
+             * is STICKY: "继续禁止，等待应用清理或 final-close".
              *
-             * -ESTALE is reported here; a DEAD endpoint (a revoked
-             * lease) reports its recorded reason instead and stays dead
-             * for good, so the two are told apart by the retry. */
-            route.kbd_desync = 0;
-            return -ESTALE;
+             * The flag is NOT cleared by the read: the consumer may not
+             * keep reading and re-sync its key state on its own.  Only a
+             * NEW lease clears it (input_route_bind()), so the consumer
+             * has to give the lease up (explicit cleanup) and take a new
+             * one, which starts from a known-consistent state.
+             *
+             * A DEAD endpoint (a revoked lease) reports its recorded
+             * reason instead and stays dead for good, so the two are
+             * told apart by the retry. */
+            return -EOVERFLOW;
         }
         if (route.kbd_overflow) {
             /* The ACTIVE stream is untrustworthy: the error is sticky
@@ -508,10 +532,15 @@ void input_route_release_file(struct file *f)
     if (!ep->error)
         ep->error = EIO;
 
+    /* The file is unlinked UNDER the lock: the clear and the revoke are
+     * published atomically, so a reader that observes the clear also
+     * observes the revoke reason — never a bare NULL that it would
+     * have to report as -EINVAL. */
+    f->dev_private = NULL;
+
     spin_unlock_irqrestore(&route.lock, flags);
 
     /* The endpoint is freed only after the lock is dropped. */
-    f->dev_private = NULL;
     kfree(ep);
 }
 
@@ -562,20 +591,21 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
         mouse_ep->revoked = 0;
     }
 
-    /* The snapshot the new consumer starts from: the modifiers that
-     * are physically held plus the Caps latch. */
+    /* The route's OWN snapshot: the modifiers that are physically held
+     * plus the Caps latch.  It is NOT what the consumer receives: the
+     * UAPI publishes the Caps latch alone (kernel/driver/fb_state.c
+     * reduces this value to bit0), so the aggregate Shift/Ctrl/Alt bits
+     * never cross the boundary. */
     mods = route_physical_modifiers_locked();
 
-    /* Every key that is physically held but NOT reported by the
-     * snapshot is isolated: its release must never reach the new
-     * consumer as a phantom release.
+    /* Every key that is physically held but is NOT a modifier is
+     * isolated: its release must never reach the new consumer as a
+     * phantom release.
      *
-     * The held MODIFIER keys ARE reported by the snapshot, so their
-     * release must reach the consumer too: any isolation an earlier
-     * epoch boundary installed on them is cleared here.  Without that,
-     * the snapshot could report "Ctrl is held" while the matching
-     * release was swallowed, and the consumer would wait for a release
-     * that never comes. */
+     * The held MODIFIER keys are NOT isolated: any isolation an earlier
+     * epoch boundary installed on them is cleared here, so their
+     * release reaches the consumer, which is waiting for it (this
+     * snapshot reports them as held). */
     for (i = 0; i < ROUTE_KEY_SLOTS; i++) {
         if (!route.phys_down[i])
             continue;
@@ -724,7 +754,7 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
             /* The overflow means the stream lost data, the desync means
              * the consumer's key state may have diverged: both are
              * reported the same way, and the read tells the consumer
-             * which one it is (-EOVERFLOW / -ESTALE). */
+             * which one it is (-EOVERFLOW for both). */
             mask = POLLERR;
         } else if (pending) {
             mask = POLLIN | POLLRDNORM;
@@ -800,8 +830,8 @@ static void route_publish_frame_locked(const input_ps2_frame_t *frame)
      *    The consumer's key state may now have diverged from the
      *    physical one (it never saw this sequence), so the ACTIVE path
      *    goes DESYNC and says so OUT OF BAND: the byte stream stays raw
-     *    Set 1 payload, the flag is reported by the read (-ESTALE) and
-     *    by the poll (POLLERR). */
+     *    Set 1 payload, the flag is reported by the read (-EOVERFLOW)
+     *    and by the poll (POLLERR). */
     if (frame->start_epoch != route.epoch) {
         if (route.lease_active)
             route.kbd_desync = 1;
@@ -882,3 +912,16 @@ void input_route_mouse_event(const mouse_event_t *event)
 
     spin_unlock_irqrestore(&route.lock, flags);
 }
+
+#ifdef OS01_HOST_TEST
+int input_route__test_desync_active(void)
+{
+    uint64_t flags;
+    int active;
+
+    flags = spin_lock_irqsave(&route.lock);
+    active = route.kbd_desync;
+    spin_unlock_irqrestore(&route.lock, flags);
+    return active;
+}
+#endif

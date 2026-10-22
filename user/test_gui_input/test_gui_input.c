@@ -14,6 +14,7 @@
  *   READY    pid width height + the target coordinates of every widget
  *   STATE    click_count slider scroll focus textarea (hex byte strings)
  *            + physical_key modifiers action (decimal) + sigint_seen
+ *            + pointer_x pointer_y (hex) + pointer_seen
  *   ACK      ctl_seq pid command raw_pump      (control-file answer)
  *   RELEASED ctl_seq pid command raw_pump      (the owner's release answer)
  *   EXIT     result exit_code detail
@@ -282,6 +283,13 @@ typedef struct {
     uint16_t last_physical_key;
     uint16_t last_modifiers;
     int      last_action;      /* -1 = no key yet */
+
+    /* The last pointer position seen through the public pointer handler.
+     * The pointer path is otherwise unobserved: the widget state (the
+     * click counter) does not say WHERE the pointer was. */
+    int32_t  pointer_x;
+    int32_t  pointer_y;
+    bool     pointer_seen;
 
     /* The control channel. */
     char     ctl_path[128];
@@ -607,6 +615,8 @@ static bool build_state_fields(probe_t *p, char *out, size_t out_len,
     char slider_hex[16];
     char scroll_hex[16];
     char focus_hex[8];
+    char pointer_x_hex[16];
+    char pointer_y_hex[16];
     char ta1_hex[HEX_TEXT_MAX_BYTES];
     char ta2_hex[HEX_TEXT_MAX_BYTES];
     size_t trunc1 = 0;
@@ -619,6 +629,8 @@ static bool build_state_fields(probe_t *p, char *out, size_t out_len,
         !hex_encode_i32(p->slider_value, slider_hex, sizeof(slider_hex)) ||
         !hex_encode_i32(p->scroll_value, scroll_hex, sizeof(scroll_hex)) ||
         !hex_encode_u8(p->focus_id, focus_hex, sizeof(focus_hex)) ||
+        !hex_encode_i32(p->pointer_x, pointer_x_hex, sizeof(pointer_x_hex)) ||
+        !hex_encode_i32(p->pointer_y, pointer_y_hex, sizeof(pointer_y_hex)) ||
         !hex_encode_text(lv_textarea_get_text(p->ta1), ta1_hex, sizeof(ta1_hex), &trunc1) ||
         !hex_encode_text(lv_textarea_get_text(p->ta2), ta2_hex, sizeof(ta2_hex), &trunc2)) {
         return false;
@@ -626,11 +638,13 @@ static bool build_state_fields(probe_t *p, char *out, size_t out_len,
 
     n = snprintf(out, out_len,
                  "click_count=%s slider=%s scroll=%s focus=%s textarea=%s textarea2=%s "
-                 "physical_key=%u modifiers=%u action=%d sigint_seen=%d text_trunc=%u%s%s",
+                 "physical_key=%u modifiers=%u action=%d sigint_seen=%d text_trunc=%u "
+                 "pointer_x=%s pointer_y=%s pointer_seen=%d%s%s",
                  click_hex, slider_hex, scroll_hex, focus_hex, ta1_hex, ta2_hex,
                  (unsigned)p->last_physical_key, (unsigned)p->last_modifiers,
                  p->last_action, sigint_seen ? 1 : 0,
                  (unsigned)(trunc1 + trunc2),
+                 pointer_x_hex, pointer_y_hex, p->pointer_seen ? 1 : 0,
                  (extra != NULL && extra[0] != '\0') ? " " : "",
                  (extra != NULL) ? extra : "");
     if (n < 0 || (size_t)n >= out_len) {
@@ -662,6 +676,37 @@ static bool emit_state_if_changed(probe_t *p)
     }
     return true;
 }
+
+/*
+ * The fatal scenario must PROVE that the LVGL assertion really fired.
+ *
+ * The guest's global LV_ASSERT_HANDLER is `_exit(1)`: it reports nothing,
+ * so the only evidence was "the process died" — any crash after the
+ * trigger record would have passed.  This handler REPORTS the assertion
+ * first (a distinct "lvgl_assert=1" field in a STATE record) and only
+ * then exits, so the runner can assert a POSITIVE fact.
+ *
+ * The macro is expanded in THIS translation unit only: the LVGL library
+ * keeps the guest's own handler.
+ */
+static void probe_report_lvgl_assert(void)
+{
+    probe_t *p = &g_probe;
+    char fields[PROTO_MAX_EXTRA];
+
+    /* The control file must not outlive the probe. */
+    if (p->ctl_path[0] != '\0') {
+        unlink(p->ctl_path);
+    }
+    if (build_state_fields(p, fields, sizeof(fields), "lvgl_assert=1")) {
+        (void)proto_emit(p, "STATE", "%s", fields);
+    }
+    fflush(stdout);
+    _exit(1);
+}
+
+#undef LV_ASSERT_HANDLER
+#define LV_ASSERT_HANDLER do { probe_report_lvgl_assert(); } while (0);
 
 /* ══════════════════════════════════════════════════════════════════════
  *  The native key / pointer handlers
@@ -714,10 +759,18 @@ static bool key_handler(const gui_key_event_t *ev, void *userdata)
 
 static void pointer_handler(const gui_pointer_event_t *ev, void *userdata)
 {
-    (void)ev;
-    (void)userdata;
+    probe_t *p = (probe_t *)userdata;
+
+    if (!p || !ev) {
+        return;
+    }
     /* The pointer path is read-only here: the widget state (the click
-     * counter) is the observable, not the raw coordinates. */
+     * counter) is the observable, not the raw coordinates — but the
+     * POSITION is reported too, so the runner can assert that the
+     * pointer really is where it moved it. */
+    p->pointer_x = ev->x;
+    p->pointer_y = ev->y;
+    p->pointer_seen = true;
 }
 
 /* ══════════════════════════════════════════════════════════════════════

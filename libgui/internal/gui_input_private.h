@@ -69,9 +69,14 @@ extern "C" {
  * （uapi/gfx.h；内核 fb_state 把 route 的 INPUT_ROUTE_MOD_CAPS 折算成
  * 1u 交给用户态，聚合位从不越过 UAPI）。
  *
- * 只有 Caps 锁存位可以植入解码器：内核在 bind 时把**当时仍按住**的键
- * 标记为隔离并吞掉它们的释放沿，快照里的聚合 Shift/Ctrl/Alt 位描述的
- * 是永远不会到达的释放——植入它们会让消费者把该修饰键永久锁死。
+ * 只有 Caps 锁存位可以植入解码器：
+ *   - 聚合的 Shift/Ctrl/Alt 位描述的是消费者**从未看到**的按下边沿——内核
+ *     在 bind 时把当时仍按住的**普通键**标记为隔离并吞掉它们的释放沿。
+ *     消费者据此相信"修饰键按住了"，就是相信了一个它没有观察到的状态；
+ *   - 而且内核根本不把这些位交给用户态：租约 UAPI 只发布 Caps 位；
+ *   - Caps 锁存位不同：它是**状态**而不是边沿，消费者没有别的途径知道它，
+ *     所以它必须被植入。
+ *
  * 解码器用的是公开 gui_modifier_t 位序（CAPS = 1 << 6），因此植入前
  * 必须做一次位序折算。
  */
@@ -202,9 +207,16 @@ void gui_input_lvgl_cancel(gui_input_t *input);
  */
 bool gui_input_lvgl_cancel_key(gui_input_t *input);
 
-/* 新的按键按下：取消旧活动键并维护软件重复策略。 */
-void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event,
-                             uint64_t now_ms);
+/* 新的按键按下：取消旧活动键。
+ *
+ * 软件重复**不在这里**武装：必须等应用消费与否的结论，见
+ * gui_input_lvgl_arm_repeat()。 */
+void gui_input_lvgl_key_down(gui_input_t *input, const gui_key_event_t *event);
+
+/* 一次 DOWN 之后的软件重复维护：只有真正进入 LVGL 的按键才武装重复。 */
+void gui_input_lvgl_repeat_after_down(gui_input_t *input,
+                                      const gui_key_event_t *event,
+                                      bool reached_lvgl, uint64_t now_ms);
 
 /* 该键是否参与软件重复（可打印字符、编辑键、方向键）。 */
 bool gui_input_lvgl_repeatable(gui_input_t *input, const gui_key_event_t *event);

@@ -70,7 +70,14 @@ int  fb_owner_get_state(const void *cookie, gfx_display_state_t *out);
  * `expected_mode` is the view's mode sequence; a stale view is
  * refused with -ESTALE.  `generation` receives the lease generation
  * (non-zero, monotonic) and `initial_modifiers` the modifier snapshot
- * the new consumer starts from (bit0 = Caps Lock).
+ * the new consumer starts from (bit0 = Caps Lock, every other bit 0).
+ *
+ * ONLY the Caps latch is published: the route's aggregate
+ * Shift/Ctrl/Alt bits never cross the boundary.  The keys that are
+ * still held at bind time are isolated and their release is swallowed,
+ * so those aggregate bits would describe presses the consumer never
+ * saw; the Caps latch is a STATE, not an edge, and the consumer has no
+ * other way to learn it.
  *
  * fb_input_unbind() releases the lease of ONE view only: a view that
  * does not hold the lease never touches another view's lease.  A

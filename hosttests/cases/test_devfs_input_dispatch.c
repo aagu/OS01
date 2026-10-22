@@ -471,6 +471,58 @@ TEST_FUNC(test_poll_file_zero_is_not_always_ready) {
     assert_eq(0, mock_zero.legacy_poll_calls);
 }
 
+TEST_FUNC(test_invalid_path_never_touches_the_device) {
+    reset_mocks();
+    static int marker;
+    static const struct devfs_ops ops = {
+        .read_file = mock_aware_read_file,
+        .poll_file = mock_aware_poll_file,
+    };
+    int idx = register_mock_device("devfs_input_invalid", &marker, &ops);
+    assert_true(idx >= 0);
+
+    /* Every invalid path is built on the mock device's OWN index, so a
+     * missing check would reach the device: the counters below then go
+     * up and the case fails. */
+    vfs_node_t node = mock_node(idx);
+
+    /* 1. A file that is not a device file: the bridge itself rejects it.
+     *    (fd_poll(FD_VFS) is the plain-file path and never reaches the
+     *    bridge, so the bridge entry point is called directly here.) */
+    file_t f_vfs = mock_dev_file(&node);
+    f_vfs.type = FD_VFS;
+    assert_eq(POLLNVAL, devfs_poll_file(&f_vfs, POLLIN, NULL));
+    assert_eq(0, mock_aware.poll_calls);
+
+    /* 2. A node that is not a devfs device. */
+    vfs_node_t regular = mock_node(idx);
+    regular.type = VFS_FILE;
+    file_t f_regular = mock_dev_file(&regular);
+    assert_eq(POLLNVAL, fd_poll(&f_regular, POLLIN, NULL));
+    assert_eq(0, mock_aware.poll_calls);
+
+    /* 3. The read bridge rejects the same node BEFORE the device runs. */
+    file_t f_read = mock_dev_file(&regular);
+    uint8_t buf[4];
+    memset(buf, 0, sizeof(buf));
+    assert_eq(-1, fd_read(&f_read, buf, sizeof(buf)));
+    assert_eq(0, mock_aware.read_calls);
+
+    /* 4. A device file without a node. */
+    file_t f_none = mock_dev_file(NULL);
+    assert_eq(POLLNVAL, fd_poll(&f_none, POLLIN, NULL));
+    assert_eq(0, mock_aware.poll_calls);
+
+    /* 5. An out-of-range device index. */
+    vfs_node_t bad = mock_node(DEVFS_MAX_DEVICES + 5);
+    file_t f_bad = mock_dev_file(&bad);
+    assert_eq(POLLNVAL, fd_poll(&f_bad, POLLIN, NULL));
+    assert_eq(0, mock_aware.poll_calls);
+
+    /* The generic VFS node read is never used either. */
+    assert_eq(0, vfs_read_calls);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_file_identity_reaches_device),
     TEST_ENTRY(test_legacy_fallback),
@@ -478,6 +530,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_file_read_uses_bounce),
     TEST_ENTRY(test_read_file_error_propagates),
     TEST_ENTRY(test_poll_file_zero_is_not_always_ready),
+    TEST_ENTRY(test_invalid_path_never_touches_the_device),
 TEST_LIST_END
 
 int main(void)

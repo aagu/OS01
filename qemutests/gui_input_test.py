@@ -1560,7 +1560,35 @@ class GuiInputScenarios:
             "modifiers": record.int_field("modifiers"),
             "action": record.int_field("action"),
             "sigint_seen": record.int_field("sigint_seen"),
+            "pointer_x": self._pointer_x(record),
+            "pointer_y": self._pointer_y(record),
         }
+
+    def _pointer_x(self, record: GuiInputRecord) -> int:
+        return self._signed32(record, "pointer_x")
+
+    def _pointer_y(self, record: GuiInputRecord) -> int:
+        return self._signed32(record, "pointer_y")
+
+    def _assert_pointer_position(self, record: GuiInputRecord,
+                                 what: str) -> None:
+        """The probe must report the pointer where the runner put it.
+
+        The pointer path is otherwise unasserted end to end: the widget
+        state (the click counter) does not say WHERE the pointer was, so
+        a guest that never moved it would still pass the click scenario.
+        """
+        if record.int_field("pointer_seen") != 1:
+            raise GuiInputScenarioError(
+                f"{what}: the probe reported no pointer position at all"
+            )
+        got = (self._pointer_x(record), self._pointer_y(record))
+        want = (self.pointer[0], self.pointer[1])
+        if got != want:
+            raise GuiInputScenarioError(
+                f"{what}: the probe reported the pointer at {got}, the "
+                f"runner moved it to {want}"
+            )
 
     # ── the injection helpers ───────────────────────────────────────
 
@@ -1648,13 +1676,46 @@ class GuiInputScenarios:
         target is reached exactly.  A delta is split into steps that fit
         into one PS/2 packet: the guest's virtual PS/2 queue is 16 bytes
         and drops silently when it overflows.
+
+        A move that really moved the pointer must be CONFIRMED by the
+        guest: the probe reports the position it ended up at, and the
+        runner asserts it.  Without that the pointer path is unasserted
+        end to end — the widget state (the click counter) does not say
+        WHERE the pointer was.
         """
+        before = (self.pointer[0], self.pointer[1])
         for axis, target in (("x", x), ("y", y)):
             index = 0 if axis == "x" else 1
             while self.pointer[index] != target:
                 delta = target - self.pointer[index]
                 step = max(-REL_STEP_MAX, min(REL_STEP_MAX, delta))
                 self._rel(axis, step)
+
+        want = (self.pointer[0], self.pointer[1])
+        if want != before:
+            self._expect_pointer_at(want, self.timing.step, "the pointer move")
+
+    def _expect_pointer_at(self, want: Tuple[int, int], timeout: float,
+                            what: str) -> None:
+        """Wait for the probe to report the pointer at ``want``.
+
+        A wrong position is a FAILURE with the position it reported: the
+        wait must not degrade into a bare timeout.
+        """
+        try:
+            record = self._wait_state(
+                lambda r: (self._pointer_x(r), self._pointer_y(r)) == want,
+                timeout,
+                f"the pointer at {want} after {what}",
+            )
+        except GuiInputTimeout as exc:
+            last = self._last_state
+            raise GuiInputScenarioError(
+                f"{what}: the probe reported the pointer at "
+                f"({self._pointer_x(last)}, {self._pointer_y(last)}), the "
+                f"runner moved it to {want}"
+            ) from exc
+        self._assert_pointer_position(record, what)
 
     def _click(self, x: int, y: int) -> None:
         """Move to a position and press + release the left button."""
@@ -2029,7 +2090,9 @@ class GuiInputScenarios:
         )
         self._expect_state_unchanged(
             before, self._state_snapshot(after), "the click",
-            ignore=("click_count",),
+            # The click MOVED the pointer: its position is asserted by the
+            # move itself, not by the "nothing else changed" comparison.
+            ignore=("click_count", "pointer_x", "pointer_y"),
         )
 
     def _step_rapid_click(self) -> None:
@@ -2864,20 +2927,27 @@ class GuiInputScenarios:
                                          what: str) -> None:
         """The screen must show the terminal again, not the GUI.
 
-        TWO rules, both real:
+        THREE rules, all real:
         * the screen must DIFFER from the GUI frame (the "before" shot),
           so the GUI state is gone;
         * the screen must NOT be the fault tool's solid colour, so the
-          display really came back to the terminal.
+          display really came back to the terminal;
+        * the screen must NOT be a solid BRIGHT colour of any other kind,
+          so a corrupted screen (a red one, say) cannot pass as the
+          terminal.  The terminal is a DARK console, so a solid dark
+          screen is a cleared console and stays acceptable.
 
         The second rule is what the OWNER scenario needs: its "before"
         frame IS the fault tool's solid colour, so the first rule alone
-        would accept any changed screen (even a corrupted one).
+        would accept any changed screen (even a corrupted one).  The third
+        rule is what the CRASH scenario needs: its "before" frame is the
+        GUI, so the first two rules alone would accept ANY changed
+        screen — including a solid red one.
         """
-        # The GUI-1 helper has ONE definition of the fault's colour: the
-        # import is local because the suite imports this module (not the
-        # other way round).
-        from qemutests.gui_test import is_fault_pure_color
+        # The GUI-1 helpers have ONE definition of the fault's colour and
+        # of the console's background: the import is local because the
+        # suite imports this module (not the other way round).
+        from qemutests.gui_test import is_fault_pure_color, is_solid_bright_color
 
         if gui_shot is None:
             # The "before" screenshot is missing: the diff cannot be made,
@@ -2895,6 +2965,7 @@ class GuiInputScenarios:
                                           self._remaining())
         diff = 1.0
         fault_colour = False
+        solid_bright = False
         while True:
             shot = self._screen_surface(f"{what}_screen")
             if shot is None:
@@ -2906,7 +2977,8 @@ class GuiInputScenarios:
                 )
             diff = self._pixels_diff(gui_shot, shot)
             fault_colour = bool(is_fault_pure_color(shot))
-            if diff >= 0.01 and not fault_colour:
+            solid_bright = bool(is_solid_bright_color(shot))
+            if diff >= 0.01 and not fault_colour and not solid_bright:
                 break
             if time.monotonic() >= deadline:
                 if diff < 0.01:
@@ -2915,9 +2987,15 @@ class GuiInputScenarios:
                         f"state (diff={diff:.3f}): the terminal did not come "
                         "back"
                     )
+                if fault_colour:
+                    raise GuiInputScenarioError(
+                        f"{what}: the screen still shows the fault's pure colour "
+                        f"(diff={diff:.3f}): the terminal did not come back"
+                    )
                 raise GuiInputScenarioError(
-                    f"{what}: the screen still shows the fault's pure colour "
-                    f"(diff={diff:.3f}): the terminal did not come back"
+                    f"{what}: the screen shows a solid colour that is not "
+                    f"the console (diff={diff:.3f}): the terminal did not come "
+                    "back"
                 )
             try:
                 self.session.observe(0.05)
@@ -3171,6 +3249,14 @@ class GuiInputScenarios:
             self._wait_state(lambda r: r.get("fatal_trigger") == "1",
                              self.timing.step * 2,
                              "the fatal probe's fatal_trigger record")
+            # The POSITIVE evidence that the LVGL assertion really fired:
+            # the probe's own assertion handler reports it before the
+            # process dies (the "lvgl_assert=1" field).  Without this the
+            # scenario would only prove that the process died — any
+            # crash after the trigger record would pass.
+            self._wait_state(lambda r: r.get("lvgl_assert") == "1",
+                             self.timing.step * 2,
+                             "the fatal probe's lvgl_assert record")
 
         # The background job's OWN status: the guest's answer, not the
         # runner's guess.  A timeout here is a FAIL (the process did not

@@ -211,6 +211,9 @@ static void focus_apply(gui_input_t *input, lv_obj_t *obj)
     }
 }
 
+/* 按注册顺序找出 from 之后的下一个候选（循环）。 */
+static lv_obj_t *focus_next_candidate(gui_input_t *input, lv_obj_t *from, bool forward);
+
 /*
  * 让组内成员 = 当前可聚焦项（顺序 = 注册顺序），并保持焦点有效。
  * 成员集合变化时整体重建：被移出组的对象回到原位只需要一次重建。
@@ -247,7 +250,13 @@ static void focus_sync(gui_input_t *input)
 
     if (old_ok) {
         target = old;
+    } else if (old && gui_input_focus_alive(input, old)) {
+        /* 旧焦点仍在册，但已经不是候选（隐藏 / 禁用）：spec §7.2 规定
+         * "select the first available item **after** it"，所以焦点接着它
+         * 往后走，而不是跳回第一个候选。 */
+        target = focus_next_candidate(input, old, true);
     } else {
+        /* 旧焦点已经不在册（被删除）："它之后"无从定义，退回第一个候选。 */
         for (i = 0; i < input->focus.count; i++) {
             if (focus_candidate(input, input->focus.entries[i])) {
                 target = input->focus.entries[i];

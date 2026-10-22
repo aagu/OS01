@@ -93,6 +93,14 @@ int  input_route_test_trace_depth_now(void);
 /* The first lock object acquired since the last trace reset. */
 const void *input_route_test_trace_first_lock(void);
 
+/* ── The lock-release observer ─────────────────────────────────
+ * The hook runs when a lock is RELEASED (before the depth
+ * bookkeeping), with the lock object.  The fixture uses it to observe
+ * the state of a route file at the exact moment the route lock is
+ * given up.
+ */
+void input_route_test_set_lock_release_hook(void (*hook)(const void *lock));
+
 /* ── The host stand-in for the kernel file lifecycle ───────────
  * file_put() reaches file_free() only when the last reference is
  * dropped, and file_free() runs the device release hook exactly once
@@ -118,7 +126,22 @@ int  input_route_test_normal_read_mouse(void *buf, size_t size);
 unsigned input_route_test_normal_kbd_bytes(void);
 unsigned input_route_test_normal_mouse_events(void);
 unsigned input_route_test_normal_frames(void);
+/* The modifier snapshot the NORMAL sink was last handed.  Recording it
+ * is what pins the route's revoke-time transient modifier reset: the
+ * sink used to discard the snapshot, so the reset had no witness. */
+uint32_t input_route_test_normal_kbd_modifiers(void);
 const void *input_route_test_device_lock(void);
+
+/* ── The console traffic ───────────────────────────────────────
+ * The route's warnings are counted, not dropped: the overflow warning
+ * must not flood the serial console (the one channel the recovery
+ * canary reads), but the FIRST occurrence of each distinct condition
+ * must still be logged.
+ */
+unsigned input_route_test_warn_total(void);
+unsigned input_route_test_warn_kbd_overflow(void);
+unsigned input_route_test_warn_mouse_overflow(void);
+void input_route_test_warn_reset(void);
 
 /* ── The poll_wait injection point ─────────────────────────────
  * The hook runs INSIDE poll_wait, before the waiter is registered —

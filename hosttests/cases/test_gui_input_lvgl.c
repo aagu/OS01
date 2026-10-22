@@ -263,6 +263,38 @@ static bool consume_shortcut(const gui_key_event_t *event, void *userdata)
     return false;
 }
 
+/* 消费按下，并记录应用看到的每一个事件（含 REPEAT）。
+ * 用来钉住“重复只对真正到达 LVGL 的按键武装”。 */
+typedef struct {
+    int  downs;
+    int  repeats;
+    int  ups;
+    bool consume_down;
+} consume_log_t;
+
+static bool consume_and_log(const gui_key_event_t *event, void *userdata)
+{
+    consume_log_t *log = (consume_log_t *)userdata;
+
+    switch (event->action) {
+    case GUI_KEY_DOWN:
+        log->downs++;
+        if (log->consume_down) {
+            return true;   /* 消费：按键不进入 LVGL */
+        }
+        break;
+    case GUI_KEY_REPEAT:
+        log->repeats++;
+        break;
+    case GUI_KEY_UP:
+        log->ups++;
+        break;
+    default:
+        break;
+    }
+    return false;
+}
+
 /* ── 按钮探针 ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -458,6 +490,81 @@ TEST_FUNC(test_tab_skips_hidden_and_disabled_ancestors_and_restores_order)
     feed(&fx, tab, sizeof(tab));
     step(&fx);
     assert_true(gui_input_focus_current(fx.input) == btn_hidden);
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 焦点控件被隐藏 / 禁用时，焦点落到**它之后**的第一个可用项，而不是跳回
+ * 第一个候选（spec §7.2："if it is the current focus, select the first
+ * available item **after** it"）。
+ *
+ * 被隐藏 / 禁用的控件仍然登记在册，所以"它之后"是有定义的。
+ *
+ * 隐藏的情形用**祖先**被隐藏来构造：LVGL 只在"被隐藏的对象自己就是组焦点"
+ * 时才把组焦点让给下一个可见项（lv_obj_add_flag → lv_group_focus_next），
+ * 隐藏祖先时组焦点不动，因此这一步真正落在适配层的 focus_sync 上。
+ */
+TEST_FUNC(test_hidden_focus_moves_to_the_next_candidate_not_the_first)
+{
+    fixture_t fx;
+    lv_obj_t *b1, *box, *b2, *b3;
+    const uint8_t tab[] = { KEY_TAB_DOWN, KEY_TAB_UP };
+
+    fixture_setup(&fx);
+    b1 = make_button(&fx, 20, 20);
+    box = lv_obj_create(fx.screen);
+    assert_not_null(box);
+    b2 = lv_button_create(box);
+    assert_not_null(b2);
+    b3 = make_button(&fx, 180, 20);
+
+    assert_eq(0, gui_input_focus_add(fx.input, b1));
+    assert_eq(0, gui_input_focus_add(fx.input, b2));
+    assert_eq(0, gui_input_focus_add(fx.input, b3));
+
+    /* 焦点停在中间那个（b2）。 */
+    assert_true(gui_input_focus_current(fx.input) == b1);
+    feed(&fx, tab, sizeof(tab));
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == b2);
+
+    /* 隐藏它的祖先：b2 不再是候选，但它仍在册。 */
+    lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+    step(&fx);
+    /* 焦点落到它之后的 b3，不是第一个 b1。 */
+    assert_true(gui_input_focus_current(fx.input) != b1);
+    assert_true(gui_input_focus_current(fx.input) == b3);
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_disabled_focus_moves_to_the_next_candidate_not_the_first)
+{
+    fixture_t fx;
+    lv_obj_t *b1, *b2, *b3;
+    const uint8_t tab[] = { KEY_TAB_DOWN, KEY_TAB_UP };
+
+    fixture_setup(&fx);
+    b1 = make_button(&fx, 20, 20);
+    b2 = make_button(&fx, 100, 20);
+    b3 = make_button(&fx, 180, 20);
+
+    assert_eq(0, gui_input_focus_add(fx.input, b1));
+    assert_eq(0, gui_input_focus_add(fx.input, b2));
+    assert_eq(0, gui_input_focus_add(fx.input, b3));
+
+    assert_true(gui_input_focus_current(fx.input) == b1);
+    feed(&fx, tab, sizeof(tab));
+    step(&fx);
+    assert_true(gui_input_focus_current(fx.input) == b2);
+
+    /* 禁用它：它不再是候选，但仍在册。 */
+    lv_obj_add_state(b2, LV_STATE_DISABLED);
+    step(&fx);
+    /* 焦点落到它之后的 b3，不是第一个 b1。 */
+    assert_true(gui_input_focus_current(fx.input) != b1);
+    assert_true(gui_input_focus_current(fx.input) == b3);
 
     fixture_teardown(&fx);
 }
@@ -1026,6 +1133,78 @@ TEST_FUNC(test_repeat_is_400ms_then_40ms)
     gui_test_set_now(1000);
     step(&fx);
     assert_str_eq("aaa", lv_textarea_get_text(ta));
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 重复只对**真正到达 LVGL** 的按键武装。
+ *
+ * 应用消费了 DOWN 时，那个按键从未进入 LVGL：应用不得随后收到它的
+ * REPEAT（否则应用会执行一个自己没有交给控件的动作）。
+ */
+TEST_FUNC(test_a_consumed_down_is_never_repeated)
+{
+    fixture_t fx;
+    consume_log_t log;
+    lv_obj_t *ta;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+
+    memset(&log, 0, sizeof(log));
+    log.consume_down = true;
+    gui_input_set_key_handler(fx.input, consume_and_log, &log);
+
+    /* 应用消费了 DOWN：按键没有进入 LVGL，文本框里没有字符。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    assert_eq(1, log.downs);
+    assert_str_eq("", lv_textarea_get_text(ta));
+
+    /* 400 ms 之后：不得出现这个按键的 REPEAT。 */
+    gui_test_set_now(400);
+    step(&fx);
+    gui_test_set_now(440);
+    step(&fx);
+    gui_test_set_now(1000);
+    step(&fx);
+    assert_eq(1, log.downs);
+    assert_eq(0, log.repeats);
+    assert_false(fx.input->repeat_armed);
+    assert_str_eq("", lv_textarea_get_text(ta));
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 应用可见 / 控件可见的分歧（公共头文件 gui_input.h 有记载）：应用先看到
+ * 事件，控件路径可能永远看不到它——没有 LVGL 键义的键（功能键、keypad
+ * 数字区）只到应用为止。
+ */
+TEST_FUNC(test_a_key_without_an_lvgl_meaning_reaches_only_the_app)
+{
+    fixture_t fx;
+    consume_log_t log;
+    lv_obj_t *ta;
+    const uint8_t f1_down[] = { 0x3B };    /* F1: no LVGL key meaning */
+
+    fixture_setup(&fx);
+    ta = make_textarea(&fx, 20, 20);
+    assert_eq(0, gui_input_focus_add(fx.input, ta));
+
+    memset(&log, 0, sizeof(log));
+    gui_input_set_key_handler(fx.input, consume_and_log, &log);
+
+    feed(&fx, f1_down, sizeof(f1_down));
+    step(&fx);
+
+    /* 应用看到了它 ... */
+    assert_eq(1, log.downs);
+    /* ... 控件路径没有：它没有 LVGL 键义。 */
+    assert_str_eq("", lv_textarea_get_text(ta));
 
     fixture_teardown(&fx);
 }
@@ -2349,6 +2528,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_focus_add_rejects_foreign_display_and_duplicates),
     TEST_ENTRY(test_tab_cycles_in_registration_order),
     TEST_ENTRY(test_tab_skips_hidden_and_disabled_ancestors_and_restores_order),
+    TEST_ENTRY(test_hidden_focus_moves_to_the_next_candidate_not_the_first),
+    TEST_ENTRY(test_disabled_focus_moves_to_the_next_candidate_not_the_first),
     TEST_ENTRY(test_empty_focus_group_survives_tab),
     TEST_ENTRY(test_focus_outline_is_pixel_observable),
     TEST_ENTRY(test_clicking_blank_space_keeps_the_keyboard_focus),
@@ -2362,6 +2543,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_blocked_read_does_not_leak_the_old_enter),
     TEST_ENTRY(test_blocked_read_on_the_ctrl_path_does_not_lose_the_next_key),
     TEST_ENTRY(test_repeat_is_400ms_then_40ms),
+    TEST_ENTRY(test_a_consumed_down_is_never_repeated),
+    TEST_ENTRY(test_a_key_without_an_lvgl_meaning_reaches_only_the_app),
     TEST_ENTRY(test_repeat_does_not_burst_after_a_stall),
     TEST_ENTRY(test_ctrl_down_cancels_and_release_does_not_restore),
     TEST_ENTRY(test_shift_change_keeps_the_cached_char_of_a_repeat),

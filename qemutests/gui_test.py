@@ -113,6 +113,34 @@ def is_pure_color_gone(surface: Surface) -> bool:
     return not is_fault_pure_color(surface)
 
 
+def is_solid_bright_color(surface: Surface) -> bool:
+    """Check if the surface shows ONE solid colour that is not the console's.
+
+    The terminal is a DARK console (the guest's own convention: the LVGL
+    theme's dark background is 15..40 / 15..40 / 25..60, see
+    ``is_lvgl_gui``), so a solid dark screen is a cleared console.  A
+    screen that is ONE solid colour and NOT dark never shows the
+    terminal: it is the fault tool's magenta, a red screen, anything but
+    the console.
+
+    The sampling convention is the one ``is_fault_pure_color`` uses, so
+    the two helpers agree on what a "pure colour" is.
+    """
+    samples = [
+        (surface.width // 2, surface.height // 2),
+        (surface.width // 4, surface.height // 4),
+        (3 * surface.width // 4, 3 * surface.height // 4),
+    ]
+    first = surface.pixel(*samples[0])
+    for x, y in samples[1:]:
+        if surface.pixel(x, y) != first:
+            return False     # not one solid colour at all
+    r, g, b = first
+    # The console's own background is dark: a solid dark screen IS the
+    # terminal (cleared), a solid bright one never is.
+    return not (r <= 40 and g <= 40 and b <= 40)
+
+
 def is_lvgl_gui(surface: Surface) -> bool:
     """Check if the surface displays test_lvgl's GUI."""
     # test_lvgl uses dark background (24, 24, 37) and blue buttons (26, 115, 232)

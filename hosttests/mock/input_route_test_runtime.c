@@ -32,6 +32,20 @@ static int         trace_mismatch;
 static const void *lock_stack[TRACE_MAX];
 static int         lock_depth;
 
+/* ── The lock-release observer ─────────────────────────────────
+ * The hook runs when a lock is RELEASED, with the lock object, so a
+ * fixture can look at the world at that exact moment.  It is how the
+ * "the route file is unlinked UNDER the route lock" contract is
+ * pinned: at the route lock's release the file's dev_private must
+ * already be NULL.
+ */
+static void (*lock_release_hook)(const void *lock);
+
+void input_route_test_set_lock_release_hook(void (*hook)(const void *lock))
+{
+    lock_release_hook = hook;
+}
+
 void input_route_test_lock_acquired(const void *lock)
 {
     int i;
@@ -66,6 +80,10 @@ void input_route_test_lock_acquired(const void *lock)
 
 void input_route_test_lock_released(const void *lock)
 {
+    /* The observer runs BEFORE the depth bookkeeping, so the hook sees
+     * the lock as it is being given up. */
+    if (lock_release_hook)
+        lock_release_hook(lock);
     if (lock_depth <= 0) {
         trace_mismatch = 1;
         return;
@@ -247,6 +265,7 @@ static struct {
     mouse_event_t events[NORMAL_MOUSE_SLOTS];
     unsigned      ehead, etail, ecount;
     unsigned      frames;
+    uint32_t      last_mods;     /* the modifier snapshot of the last frame */
 } normal;
 
 const void *input_route_test_device_lock(void)
@@ -261,6 +280,7 @@ void input_route_test_normal_reset(void)
     normal.head = normal.tail = normal.count = 0;
     normal.ehead = normal.etail = normal.ecount = 0;
     normal.frames = 0;
+    normal.last_mods = 0;
 }
 
 void input_route_test_normal_push_bytes(const uint8_t *bytes, size_t len)
@@ -315,13 +335,19 @@ unsigned input_route_test_normal_kbd_bytes(void) { return normal.count; }
 unsigned input_route_test_normal_mouse_events(void) { return normal.ecount; }
 unsigned input_route_test_normal_frames(void) { return normal.frames; }
 
+/* The modifier snapshot the NORMAL sink was last handed.  The NORMAL
+ * sink USED to discard it, which left the revoke-time transient
+ * modifier reset completely unpinned: deleting the reset in the route
+ * kept the whole host suite green. */
+uint32_t input_route_test_normal_kbd_modifiers(void) { return normal.last_mods; }
+
 /* ── The NORMAL sink handed to the route ────────────────────── */
 
 static void test_publish_frame(const input_ps2_frame_t *frame, uint32_t modifiers)
 {
-    (void)modifiers;
     unsigned long flags = spin_lock_irqsave(&normal.lock);
     normal.frames++;
+    normal.last_mods = modifiers;
     spin_unlock_irqrestore(&normal.lock, flags);
     input_route_test_normal_push_bytes(frame->bytes, frame->length);
 }
@@ -462,5 +488,33 @@ void wait_queue_init(wait_queue_t *wq)
 __attribute__((weak)) int g_log_level = LOG_ERR;
 
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
-void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
+
+/* The warnings are COUNTED, not dropped: the route's console traffic is
+ * part of its contract (the overflow warning must not flood the serial
+ * console, but the FIRST occurrence of each condition must still be
+ * logged), so the fixture needs to see how often each one fires. */
+static unsigned warn_total;
+static unsigned warn_kbd_overflow;
+static unsigned warn_mouse_overflow;
+
+void _log_warn_impl(const char *fmt, ...)
+{
+    warn_total++;
+    if (fmt && strstr(fmt, "keyboard queue overflow"))
+        warn_kbd_overflow++;
+    else if (fmt && strstr(fmt, "mouse queue overflow"))
+        warn_mouse_overflow++;
+}
+
 void _log_info_impl(const char *fmt, ...) { (void)fmt; }
+
+unsigned input_route_test_warn_total(void) { return warn_total; }
+unsigned input_route_test_warn_kbd_overflow(void) { return warn_kbd_overflow; }
+unsigned input_route_test_warn_mouse_overflow(void) { return warn_mouse_overflow; }
+
+void input_route_test_warn_reset(void)
+{
+    warn_total = 0;
+    warn_kbd_overflow = 0;
+    warn_mouse_overflow = 0;
+}

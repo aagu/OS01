@@ -54,7 +54,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
-| `make test-static` | runtime / layout / canary / link-order audits (8 audits) | — |
+| `make test-static` | runtime / layout / canary / link-order audits (13 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
@@ -454,7 +454,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
-| `test-static` | — | — | 11 项静态审计（runtime_audit、stack_canary_audit、validate-kernel、runtime_link_order、kernel_runtime_link、kernel_layout、kernel_canary_contract、driver_model_boundary_audit、header_object、stack_frame、test-user-canary） |
+| `test-static` | — | — | 13 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 | `test-harness` | — | — | Python `unittest` 框架回归（`TEST_HARNESS_MODULES` 列表；不启动 QEMU） |
 
@@ -597,7 +597,7 @@ make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 
 make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
 make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
-make test-static                    # 8 项静态审计
+make test-static                    # 13 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
 make test-contract                  # CI 契约检查

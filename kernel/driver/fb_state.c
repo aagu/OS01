@@ -860,8 +860,13 @@ int fb_input_bind(const void *view, uint64_t expected_mode,
                 *generation = gen;
             }
             if (initial_modifiers) {
-                /* The UAPI reports bit0 = Caps Lock; the route hands
-                 * out its own modifier bits. */
+                /* The UAPI publishes the Caps latch ALONE: the route's
+                 * aggregate Shift/Ctrl/Alt bits never cross the boundary
+                 * (the keys that are still held at bind time are isolated
+                 * and their release is swallowed, so those bits would
+                 * describe presses the consumer never saw).  The Caps
+                 * latch is a STATE, not an edge, and the consumer has no
+                 * other way to learn it. */
                 *initial_modifiers = (mods & INPUT_ROUTE_MOD_CAPS) ? 1u : 0u;
             }
         }

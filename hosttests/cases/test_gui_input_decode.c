@@ -655,6 +655,27 @@ TEST_FUNC(test_feed_rejects_null_arguments) {
     assert_eq(EINVAL, errno);
 }
 
+/* The NULL-state contract is ASYMMETRIC, and the header documents it:
+ * gui_ps2_init() and gui_ps2_expire() have no return channel, so a NULL
+ * state is SILENTLY IGNORED; gui_ps2_feed() has one, so it reports the
+ * error.  This pins both halves of the asymmetry. */
+TEST_FUNC(test_null_state_is_silently_ignored_where_there_is_no_errno) {
+    gui_key_event_t event;
+
+    memset(&event, 0, sizeof(event));
+
+    /* No return channel: no crash, and no error is reported. */
+    errno = 0;
+    gui_ps2_init(NULL, GUI_MOD_CAPS);
+    gui_ps2_expire(NULL, 1000);
+    assert_eq(0, errno);
+
+    /* The errno channel still works: the caller IS told there. */
+    errno = 0;
+    assert_eq(-1, gui_ps2_feed(NULL, 0x1E, 0, &event));
+    assert_eq(EINVAL, errno);
+}
+
 /* The initial modifier snapshot is the state the decoder starts from. */
 TEST_FUNC(test_init_applies_initial_modifiers) {
     decoder_t d;
@@ -705,6 +726,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_down_caches_the_character),
     TEST_ENTRY(test_corrupt_sequence_consumes_the_offending_byte),
     TEST_ENTRY(test_feed_rejects_null_arguments),
+    TEST_ENTRY(test_null_state_is_silently_ignored_where_there_is_no_errno),
     TEST_ENTRY(test_init_applies_initial_modifiers),
     TEST_ENTRY(test_decoder_state_is_stack_allocatable),
 TEST_LIST_END
