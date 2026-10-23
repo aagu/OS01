@@ -139,7 +139,7 @@ def _private_disk_from_argv(argv):
 
 class FakeSession:
     def __init__(self, *, boot=BOOT, script=(), tail=(), returncode=None,
-                 echo=False, start_exc=None, mutate_image=False):
+                 echo=False, start_exc=None, mutate_image=False, fragmented=False):
         self._text = boot
         self._script = list(script)
         self._tail = list(tail)
@@ -151,7 +151,9 @@ class FakeSession:
         self._echo = echo
         self._start_exc = start_exc
         self._mutate_image = mutate_image
+        self._fragmented = fragmented
         self.calls = []
+        self.sent = []
         self.run_dir = None
         self.argv = None
 
@@ -167,10 +169,12 @@ class FakeSession:
 
     def send(self, data):
         self.calls.append("send")
+        self.sent.append(data)
         if self._echo:
             self._pending.append("# " + data.decode("utf-8", "replace"))
         if self._script:
-            self._pending.append(self._script.pop(0))
+            chunk = self._script.pop(0)
+            self._pending.extend(list(chunk) if self._fragmented else [chunk])
 
     def wait_for(self, predicate):
         self.calls.append("wait_for")
@@ -277,6 +281,49 @@ class RepeatCase(unittest.TestCase):
 # ───────────────────────────────────────────────────────────────────
 # Echoed completion marker — the plan's precision requirement.
 # ───────────────────────────────────────────────────────────────────
+
+
+class CowHandshakeTests(RepeatCase):
+    def test_all_five_runs_receive_exact_cow_payloads(self):
+        script = []
+        for stage, (_, runs) in enumerate(repeat.COMMANDS):
+            for run in range(runs):
+                for region in range(4):
+                    # The previous run's RESULT can share the next READY
+                    # read. Keep it when accumulating this stage's output.
+                    prefix = _result(8, 0) + "\n" if run and region == 0 else ""
+                    script.append(prefix + f"[COW TTY READY {region}]\n")
+            script.append(_stage_chunk(stage, _result(8, 0)))
+        session = FakeSession(script=script, echo=True, fragmented=True)
+        self.assertEqual(self._run(session), 0)
+        self.assertEqual(session.sent, [
+            data
+            for stage, (command, runs) in enumerate(repeat.COMMANDS)
+            for data in [repeat.command_line(command, stage)] + [b"COW!"] * (4 * runs)
+        ])
+        self.assertEqual(session.sent.count(b"COW!"), 20)
+        self.assertEqual(_one_archive(self.build, repeat.SUITE)["status"], "PASS")
+
+    def test_ready_in_boot_window_is_not_replayed(self):
+        session = FakeSession(boot=BOOT + "[COW TTY READY 0]\n",
+                              script=VALID_SCRIPT)
+        self.assertEqual(self._run(session), 0)
+        self.assertNotIn(b"COW!", session.sent)
+
+    def test_failed_result_after_handshake_still_fails_stage(self):
+        session = FakeSession(script=[
+            *(f"[COW TTY READY {region}]\n" for region in range(4)),
+            _stage_chunk(0, _result(8, 1)),
+        ])
+        self.assertEqual(self._run(session), 1)
+        self.assertEqual(session.sent.count(b"COW!"), 4)
+        self.assertEqual(_one_archive(self.build, repeat.SUITE)["status"], "FAIL")
+
+    def test_missing_output_after_ready_times_out(self):
+        session = FakeSession(script=["[COW TTY READY 0]\n"])
+        self.assertEqual(self._run(session), 1)
+        self.assertEqual(session.sent.count(b"COW!"), 1)
+        self.assertEqual(_one_archive(self.build, repeat.SUITE)["status"], "TIMEOUT")
 
 
 class EchoedMarkerTests(RepeatCase):

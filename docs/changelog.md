@@ -7,6 +7,8 @@
 
 ## 2026-10-23
 
+- fix(qemutests): **x86 `test-syscall-repeat` stage 0 停滞闭环**：systest 的 COW TTY case 等 `[COW TTY READY 0..3]` 后四字节输入，repeat runner 只等完成标记，从未回复。新增按事件回复精确 `COW!` 的 stage 驱动；累积每次 ProcessSession 消费的输出片段，保留循环内前几轮 RESULT。正常 terminal/ash、1/1/3 轮命令、严格结果门禁、私有镜像、总截止均保留，无内核/TTY/user 改动。旧 runner SMP=2 在 READY 0 后 180 秒超时；新 runner 三次完整五轮通过（含根 make 目标和 SMP=4），另一次正确拦下独立 `54c_user_fault_write_ro` 失败。27 项 repeat runner 单测通过，含逐字节 READY/RESULT、20 次无换行握手、陈旧事件、失败结果与超时覆盖。原 M3 豁免中的 stage0 阻塞解除；54c 偶发另列 parked。详见 [调查与验证](debug/2026-10-23-systest-repeat-handshake.md)。
+
 - fix(sync): **调查并处理 parked `kernel_mutex` 负载敏感问题**：确定性 host 时序复现生产 mutex 在 CAS 失败后、入队前 unlock 时丢失唤醒（owner=0，等待者仍睡眠）。统一普通/interruptible 获取为关 IRQ 的 arm→CAS 重查→schedule 协议，退出时持 waitqueue 锁 disarm，信号取消转交可能消费的 wake-one。真实 `mutex.c` + `wait.c` host 回归覆盖入队前/后 unlock、信号、取消后的下一位等待者与 IRQ 恢复。内核自测改为 pid 返回值创建、等待两个 worker 在最终 unlock 后发布完成，再读受锁保护计数；使用 500 jiffies 截止替代固定次数循环，并在临界区主动让出 CPU 以覆盖竞争。历史 parked 超时缺少状态快照，不能排他归因于此次发现的丢失唤醒。验证与限制见 [调查记录](debug/2026-10-23-kernel-mutex.md)。
 
 ## 2026-10-22
