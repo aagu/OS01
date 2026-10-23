@@ -2212,8 +2212,9 @@ make PROFILE=x86_64-clang test-syscall-repeat  # 用现有 target，自动传 --
 2026-10-23 补验收：hosttest 在 `a4a5b6d` 修复验证时全通过；本次修复
 repeat runner 遗漏的 COW TTY 握手后，原始根目标完成 1/1/3 共五轮，
 每轮 `342 passed, 0 failed`，补齐此前 stage0 停滞豁免的 x86 运行时验证。
-额外重复运行仍发现独立的 `54c_user_fault_write_ro` 偶发失败，已另列
-roadmap parked，不作为已修复结论。详见
+额外重复运行发现的 `54c_user_fault_write_ro` 偶发失败，随后于同日定位为
+异常 helper 提前发布 ZOMBIE 并修复；新一轮真实 terminal 五轮均为
+349 passed / 0 failed（只读页退出回归已扩展为 8 次）。原握手调查详见
 [调查与运行证据](../../debug/2026-10-23-systest-repeat-handshake.md)。
 
 - [ ] **Step 2: aarch64 单核 selftest 全过**

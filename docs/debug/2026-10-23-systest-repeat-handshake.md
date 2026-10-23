@@ -75,3 +75,8 @@ make PROFILE=x86_64-clang test-syscall-repeat
 
 原 M3 x86 五轮门禁现在能走完并在实际错误时失败；旧 stage0/DHCP 豁免原因
 已解除，不表示其他独立失败已经修复。
+
+后续闭环（2026-10-23）：独立 54c 失败已确认是异常 helper 提前发布 ZOMBIE，
+导致父进程在 `do_exit` 完成前回收任务，已修复并通过 1/2/4/8 CPU 回归。
+详见 [退出发布竞态调查](2026-10-23-user-fault-zombie-publication.md)。本文件保留
+当时的失败数据，不将历史失败改写为 PASS。

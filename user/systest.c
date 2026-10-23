@@ -3355,9 +3355,10 @@ static void __attribute__((noinline)) trap_divzero(void)
 
 static void __attribute__((noinline)) trap_write_ro(void)
 {
-    /* mmap 一页 PROT_READ，触发写时 #PF (P=1, W=1) → SIGSEGV。
-     * 故意不调 munmap；child 自身立刻被 kill，资源由 reaper 释放。 */
-    void *p = mmap(NULL, 4096, PROT_READ,
+    /* Keep a large lazy RO VMA: exit must walk its absent leaves. This
+     * exposes timer preemption during teardown without consuming 128 MiB
+     * of physical memory. Only the first page is demand-faulted. */
+    void *p = mmap(NULL, 128UL * 1024 * 1024, PROT_READ,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == (void *)-1) _exit(99);
     *(volatile int *)p = 42;                 /* #PF, write to RO → SIGSEGV */
@@ -3386,14 +3387,18 @@ static void test_user_fault_divzero(void)
 
 static void test_user_fault_write_ro(void)
 {
-    int64_t pid = fork();
-    if (pid < 0) { FAIL("fork_wp", "fork failed"); return; }
-    if (pid == 0) trap_write_ro();
-    int st = 0;
-    waitpid(pid, &st, 0);
-    CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV,
-           "54c_fault_write_ro", "status=%#x",
-           "want WIFSIGNALED&&SIGSEGV(11), status=%#x", st);
+    // Repeat to cover teardown straddling a timer tick on both UP and SMP.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        int64_t pid = fork();
+        if (pid < 0) { FAIL("fork_wp", "fork failed"); return; }
+        if (pid == 0) trap_write_ro();
+        int st = 0;
+        int64_t waited = waitpid(pid, &st, 0);
+        CHECKF(waited == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV,
+               "54c_fault_write_ro", "pid=%ld waited=%ld errno=%d status=%#x",
+               "want waited==pid && WIFSIGNALED&&SIGSEGV(11), pid=%ld waited=%ld errno=%d status=%#x",
+               (long)pid, (long)waited, waited < 0 ? errno : 0, st);
+    }
 }
 
 static void test_user_fault_ud2(void)
