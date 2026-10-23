@@ -46,7 +46,7 @@ char comm[64];
 
 ```text
 取得本 CPU、current 与本 CPU idle 指针
-若 scheduler_ok 或 usage.valid 未成立，返回
+若 scheduler_ok 或 usage.valid 未成立，或本 CPU idle 指针为空，返回
 在本 CPU usage.lock 下：
     current == idle -> idle_ticks++
     否则            -> busy_ticks++

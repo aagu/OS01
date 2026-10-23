@@ -53,8 +53,9 @@ void sched_accounting_cpu_start(unsigned cpu, unsigned hz, bool started);
 /* Hot path: called once per valid local-timer interrupt.  BSP ticks
  * account inside tick_handler(); AP ticks account in lapic_timer_handler()'s
  * AP branch (the BSP LAPIC path must NOT call this a second time).
- * Inert until accounting_ready && scheduler_ok && the CPU's tick
- * source is valid. */
+ * Inert until accounting_ready && scheduler_ok && an idle task is
+ * published && the CPU's tick source is valid. Unclassifiable ticks
+ * leave CPU counters and task runtime unchanged. */
 void sched_account_tick(void);
 
 /* Copy one CPU's counters into *out.  Returns 0 on success, -EINVAL
