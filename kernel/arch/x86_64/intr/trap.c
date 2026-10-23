@@ -74,10 +74,10 @@ static void kill_current_user_task(pt_regs_t *regs, int sig)
     log_err("Killing task %d (user fault at RIP=%p, signal=%d)\n",
             task->pid, regs->rip, sig);
 
-    // Mark the task ZOMBIE now, so a waiter (do_waitpid) can reap it
-    // later. The actual resource cleanup (vmm_free_user_map, kfree)
-    // happens in do_exit() which we call directly.
-    task->state = TASK_ZOMBIE;
+    // do_exit owns the ZOMBIE transition after cleanup and exit_code are
+    // ready. Trap gates leave IRQs enabled: publishing ZOMBIE here lets a
+    // timer switch us out (on_cpu=0) and a waiter reap our live stack with
+    // the default exit_code before do_exit has finished.
 
     // Switch to the task's own kernel stack and call do_exit.
     // We CANNOT use iretq for a ring-0 return here.  When iretq

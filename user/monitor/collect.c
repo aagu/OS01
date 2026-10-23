@@ -315,7 +315,8 @@ int monitor_parse_stat(const char *text, size_t len,
         } else if (line_value(p, le, "TickHz", &vs)) {
             if (seen_field(&have, F_TICKHZ))
                 return -EINVAL;
-            if (span_u32_line(vs, le, &out->tick_hz) != 0)
+            if (span_u32_line(vs, le, &out->tick_hz) != 0 ||
+                out->tick_hz == 0)
                 return -EINVAL;
         } else {
             /* "cpu<idx>:" family — leading whitespace tolerated */

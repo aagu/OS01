@@ -16,7 +16,8 @@
  * Validity contract (spec §6), per file:
  *   - unknown fields are ignored; field order and whitespace count do
  *     not matter;
- *   - Version must be present and equal 1;
+ *   - Version must be present and equal 1; /proc/stat TickHz must be
+ *     positive (the parser does not hardcode the current 100 Hz rate);
  *   - a required field missing, a recognized field duplicated, a
  *     numeric overflow or an illegal value make the WHOLE file invalid
  *     (monitor_parse_* -> -EINVAL).  The single exception is status: a

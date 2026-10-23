@@ -89,6 +89,7 @@ BOOT_MARKERS = ("built-in shell (ash)", "# ")
 CORRUPTION_MARKERS = ("VFS: find_mount: CORRUPT", "PF-KRN:")
 
 _RESULT_RE = re.compile(r"\[SYS TEST\] RESULT: (\d+) passed, (\d+) failed")
+_COW_TTY_READY_RE = re.compile(r"\[COW TTY READY [0-3]\]")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -161,6 +162,29 @@ def stage_result_errors(window: str, expected: int) -> List[str]:
                 f"(want passed>0 and failed=0)"
             )
     return errors
+
+
+def wait_stage(session, stage: int) -> str:
+    """Service each COW tty read, keeping all output for the stage gate.
+
+    ProcessSession advances its cursor on every successful wait. Accumulate
+    those slices so earlier runs' RESULT lines still count in a loop stage.
+    The overall session deadline remains the only timeout budget.
+    """
+    chunks = []
+    while True:
+        window = session.wait_for(
+            lambda candidate: completion_reached(candidate, stage)
+            or _COW_TTY_READY_RE.search(candidate) is not None
+            or corruption_in(candidate) is not None)
+        chunks.append(window)
+        if (session.timed_out or completion_reached(window, stage)
+                or corruption_in(window)):
+            return "".join(chunks)
+        for _ in _COW_TTY_READY_RE.finditer(window):
+            # Four bytes exactly: a newline would remain queued for the
+            # next read. This goes through terminal -> PTY -> systest.
+            session.send(b"COW!")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -384,8 +408,7 @@ def run_repeat(
             # Consume the cursor *before* sending: the marker must be found
             # only in the output this command produces.
             session.send(command_line(command, stage))
-            window = session.wait_for(
-                lambda candidate, stage=stage: completion_reached(candidate, stage))
+            window = wait_stage(session, stage)
             if session.timed_out:
                 stages.append({
                     "stage": stage,

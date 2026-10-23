@@ -32,10 +32,11 @@
  *     ratio; a missing metric pushes an EMPTY point (valid bit clear),
  *     never a stale value copied forward.
  *   - Allocation discipline: both round arrays (sorted display rows
- *     and the new baseline) are allocated BEFORE anything is mutated,
+ *     and the new baseline) are allocated BEFORE data is committed,
  *     and model_compute() runs after them without further allocation —
  *     so -ENOMEM leaves the previous baseline and display rows exactly
- *     as they were.
+ *     as they were. History still advances with empty points for that
+ *     uncommitted sampling round.
  */
 
 #include <monitor/model.h>
@@ -378,16 +379,16 @@ int monitor_model_update(struct monitor_model *m,
     }
 
     /* Allocate BOTH round arrays up front; model_compute() below does
-     * not allocate, so a failure here leaves the model (previous
-     * baseline and display rows) exactly as it was. */
+     * not allocate, so a failure preserves all committed data. Only
+     * the history rings record that a sampling round was lost. */
     if (s->nprocesses > 0) {
         new_rows = malloc(s->nprocesses * sizeof(*new_rows));
         if (!new_rows)
-            return -ENOMEM;
+            goto oom;
         new_base = malloc(s->nprocesses * sizeof(*new_base));
         if (!new_base) {
             free(new_rows);
-            return -ENOMEM;
+            goto oom;
         }
     }
 
@@ -426,4 +427,11 @@ int monitor_model_update(struct monitor_model *m,
                  m->mem_pct.percent_10000);
 
     return 0;
+
+oom:
+    // The caller still counts this round. Keep its place in the time axis
+    // without presenting old percentages as fresh history samples.
+    push_history(&m->total_history, false, 0);
+    push_history(&m->mem_history, false, 0);
+    return -ENOMEM;
 }

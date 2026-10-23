@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-10-23
+
+- fix(monitor): **parked monitor #10：短读覆盖与零频率校验闭环**：真实 collector 的分块累积逻辑正确，但 `/proc/stat` 解析器会接受 `TickHz: 0`，导致非法 CPU 样本进入模型。补充正值校验，其他正频率继续接受；新增 1/2/7/31 字节分块读取、跨 read 的 Name 转义、复用 sample、四类文件 cap−1/cap/cap+1 边界与指标隔离覆盖。超长 fixture 使用可解析文本加空行，确保静默截断无法蒙混通过。旧实现零频率用例两条断言失败，修复后 collect 12 项/1278 断言、完整 monitor/host、用户镜像构建及独立 ASan/UBSan 检查通过。详见 [调查与验证](debug/2026-10-23-monitor-collect-short-reads.md)。
+
+- fix(monitor): **parked monitor #9：OOM 历史时间轴闭环**：采样循环在模型分配失败后仍计入该轮并渲染，但 model 原先直接返回而不追加历史点，压缩 60 槽时间轴。两处分配失败统一追加 CPU/内存无效空点；上一轮已提交的显示快照和差分基线保持原样，第二次失败仍释放首次临时分配。明确更新 model 接口及 spec §7 的 OOM 约定，区分数据回滚与历史记账。新增两个确定性故障注入回归，覆盖 62 次连续失败、环回绕、旧快照/基线字节不变、恢复后按 63 秒差分和分配余额归零。旧实现两项回归失败；最终 model 14 项/1164 断言、完整 monitor/host、用户镜像构建通过，独立 ASan/UBSan 检查通过。详见 [调查与验证](debug/2026-10-23-monitor-oom-history.md)。
+
+- fix(x86): **`54c_user_fault_write_ro` 偶发 status=0 闭环**：异常 helper 在 `do_exit()` 之前提前写 `TASK_ZOMBIE`；#PF trap gate 保留 IF，定时器可将尚未完成清理的任务切出，父进程在 `on_cpu=0` 后提前回收其活动内核栈、读到默认退出码 0。删除 helper 的提前状态发布，由 `do_exit()` 在清理及 exit_code 写入后统一发布。临时主动调度探针红绿验证后移除；持久回归使用大惰性只读 VMA 延长 teardown 并重复 8 次，旧内核复现 6 PASS / 2 FAIL（waited 为目标 PID、errno=0、status=0），修复后通过。官方单 case 在 1/2/4/8 CPU 全通过（32/32 次），真实 terminal 五轮每轮 349 passed / 0 failed；完整 host 与静态检查通过。详见 [退出发布竞态调查](debug/2026-10-23-user-fault-zombie-publication.md)。
+
+- fix(qemutests): **x86 `test-syscall-repeat` stage 0 停滞闭环**：systest 的 COW TTY case 等 `[COW TTY READY 0..3]` 后四字节输入，repeat runner 只等完成标记，从未回复。新增按事件回复精确 `COW!` 的 stage 驱动；累积每次 ProcessSession 消费的输出片段，保留循环内前几轮 RESULT。正常 terminal/ash、1/1/3 轮命令、严格结果门禁、私有镜像、总截止均保留，无内核/TTY/user 改动。旧 runner SMP=2 在 READY 0 后 180 秒超时；新 runner 三次完整五轮通过（含根 make 目标和 SMP=4），另一次正确拦下独立 `54c_user_fault_write_ro` 失败。27 项 repeat runner 单测通过，含逐字节 READY/RESULT、20 次无换行握手、陈旧事件、失败结果与超时覆盖。原 M3 豁免中的 stage0 阻塞解除；54c 偶发另列 parked。详见 [调查与验证](debug/2026-10-23-systest-repeat-handshake.md)。
+
+- fix(sync): **调查并处理 parked `kernel_mutex` 负载敏感问题**：确定性 host 时序复现生产 mutex 在 CAS 失败后、入队前 unlock 时丢失唤醒（owner=0，等待者仍睡眠）。统一普通/interruptible 获取为关 IRQ 的 arm→CAS 重查→schedule 协议，退出时持 waitqueue 锁 disarm，信号取消转交可能消费的 wake-one。真实 `mutex.c` + `wait.c` host 回归覆盖入队前/后 unlock、信号、取消后的下一位等待者与 IRQ 恢复。内核自测改为 pid 返回值创建、等待两个 worker 在最终 unlock 后发布完成，再读受锁保护计数；使用 500 jiffies 截止替代固定次数循环，并在临界区主动让出 CPU 以覆盖竞争。历史 parked 超时缺少状态快照，不能排他归因于此次发现的丢失唤醒。验证与限制见 [调查记录](debug/2026-10-23-kernel-mutex.md)。
+
 ## 2026-10-22
 
 - fix(selftest): **`test_tty_vintr` parked 超时根因闭环**：late test 的观察方是 BSP idle；收到信号的 RUNNING 工作线程在等待 release 时反复 `schedule()`，同 CPU 上会饿死 idle。改为受 `task_list_lock` 保护的不可中断睡眠，cleanup 显式唤醒并等待恢复 `PF_KTHREAD`；新增固定同 CPU、跨 CPU、首次睡眠前提前清理覆盖，注入后主动切换稳定检验原死锁时序。修复前固定同 CPU 在 SMP=4 复现 `missing END line`，GDB 确认 worker `vintr_seen=1/release=0` 仍循环调度。修复后完整自测 SMP=4/8 各一次通过；2/4/8 CPU 各 3 次重复的 `tty_vintr` 9/9 PASS（完整套件其中 7 次仍因既有 `fd_refcount rc_-1` 失败）。43 项自测 runner 单测通过。10 月 19 日直接检查 signal/state 的改动仅缩短竞态窗口，旧归因由本次证据修正。roadmap 移除 VINTR 挂起项，保留独立 `kernel_mutex` 负载问题。详见 [根因与回归证据](debug/2026-10-22-tty-vintr-timeout.md)。

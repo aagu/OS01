@@ -32,7 +32,8 @@
  * rebuilt baseline.  Records not seen in a round are removed together
  * with their history.  An allocation failure (-ENOMEM) must never
  * destroy the existing baseline or display rows: the failed round is
- * simply not committed.
+ * not committed as data, but both history rings advance with EMPTY
+ * points so a lost round does not compress the time axis.
  */
 
 #include <stdbool.h>
@@ -170,8 +171,9 @@ void monitor_model_init(struct monitor_model *m);
  * success, commit it (new baseline, new sorted rows, one history point
  * per metric — an invalid metric pushes an empty point).  Returns 0,
  * -EINVAL for NULL arguments, or -ENOMEM when a round array could not
- * be allocated; -ENOMEM leaves the model EXACTLY as it was (previous
- * baseline and display rows stay authoritative). */
+ * be allocated; -ENOMEM preserves the previous baseline and display
+ * snapshot, but appends one EMPTY point to each history ring. Invalid
+ * arguments return -EINVAL without changing any model state. */
 int monitor_model_update(struct monitor_model *m,
                          const struct monitor_sample *s);
 
