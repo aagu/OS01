@@ -74,15 +74,49 @@ class Frame:
 _CPU_RE = re.compile(r"^CPU(\d+):\s+(\S+)")
 _PROC_RE = re.compile(r"^\s*(\d+)\s+(\S+)\s+(\S)\s+(\S+)\s*$")
 
+# Terminal diagnostic records share the console with the monitor's own
+# output.  The terminal application writes them to the same UART the
+# monitor's PTY output is relayed to, in one piece, but a writer that
+# emits a line in several writes can still be torn in half by one: the
+# monitor header used to arrive as "OS01 mo" plus "nitor", which cost
+# the runner one frame and made the 2-core monitor case time out.
+#
+# The records are stripped together with the line break that ends them,
+# so the fragments around them rejoin into the original line.  The
+# prefix is matched in full ("version=" / "wakes/s=") so that a
+# process whose comm merely contains the literal text "[term-present]"
+# is not mistaken for a record.  A comm that contains the WHOLE record
+# prefix ("[term-present] version=1") would still be stripped -- that
+# is accepted: the alternative is losing the frame to the tearing, and
+# a process name that mimics a terminal diagnostic is not a shape the
+# monitor's own gates depend on.
+#
+# The pattern mirrors the emitters in
+# user/terminal/terminal_display.c ("[term-present] version=1 ...") and
+# user/terminal/terminal.c ("[term-probe] wakes/s=...").  If either
+# emitter changes its shape the strip silently stops matching and the
+# original bug returns with every test still green, so
+# qemutests/test_monitor_runner.py pins the two shapes against the
+# emitter sources.
+_DIAG_RE = re.compile(
+    r"\[term-present\] version=\d+[^\r\n]*\r?\n?"
+    r"|\[term-probe\] wakes/s=\d+[^\r\n]*\r?\n?")
+
+
+def _strip_diagnostics(text: str) -> str:
+    """Remove the terminal's diagnostic records from a console transcript."""
+    return _DIAG_RE.sub("", text)
+
 
 def parse_frames(text: str) -> list[Frame]:
     """Split the plain-text monitor output into frames.
 
     Frames start at every ``OS01 monitor`` line.  Anything before the first
-    such line is ignored."""
+    such line is ignored.  Terminal diagnostic records are stripped
+    first, so a record spliced into a line cannot cost a frame."""
     frames: list[Frame] = []
     cur = None
-    for line in text.splitlines():
+    for line in _strip_diagnostics(text).splitlines():
         if line.strip() == "OS01 monitor":
             cur = Frame()
             frames.append(cur)

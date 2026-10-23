@@ -52,16 +52,72 @@
 
 /* ── Bounded terminal writer ─────────────────────────────────────── */
 
+/* Maximum bytes buffered for one output line.
+ *
+ * The longest line is a process row: a comm of up to 63 bytes is
+ * re-escaped at up to 4 bytes per byte (spec §6), plus the row
+ * prefix, the "(expired)" marker and the ANSI attributes — about 300
+ * bytes.  512 leaves headroom.  A line that would still overflow is
+ * flushed in two writes; that reintroduces a split, but it cannot
+ * happen with the line shapes this renderer produces. */
+#define TW_LINE_MAX 512
+
 struct tw {
     FILE    *out;
     unsigned cols;      /* 0 = plain/unlimited */
     unsigned width;     /* visible columns already emitted this line */
     int      ansi;      /* emit escape sequences */
+    char     line[TW_LINE_MAX];  /* pending line, flushed as ONE write */
+    size_t   line_len;
 };
+
+/* Flush the pending line with a SINGLE write.
+ *
+ * The console is a shared serial line, and the monitor's stdout is the
+ * PTY slave: the terminal application reads the PTY master and relays
+ * what it read to /dev/serial (user/terminal/terminal.c).  Writing a
+ * line in one call keeps the whole line in one PTY commit, so the
+ * relay picks it up as one contiguous chunk and writes it to the UART
+ * in one atomic write.  A line written one byte per call used to be
+ * relayed in byte-sized chunks, and the terminal's own "[term-present]"
+ * / "[term-probe]" record -- a separate write to the same port --
+ * could land between two of them: the monitor header arrived as
+ * "OS01 mo" plus "nitor" and the runner lost that frame.
+ *
+ * Wire-level atomicity is still bounded by the relay's chunk
+ * boundaries: a nearly-full PTY ring can commit a line in two pieces
+ * (kernel/fs/file.c::pipe_write_internal), and the per-byte writers on
+ * the serial line (kernel/driver/fb.c's fb_write, the panic path) can
+ * still split one.  The QEMU runner therefore also strips the
+ * terminal's diagnostic records -- see qemutests/monitor_test.py.
+ *
+ * The buffered bytes never contain a NUL: a comm is re-escaped and the
+ * escape sequences are printable, so "%s" emits exactly the buffered
+ * bytes. */
+static void tw_flush(struct tw *w)
+{
+    if (w->line_len == 0)
+        return;
+    fprintf(w->out, "%s", w->line);
+    w->line_len = 0;
+}
+
+/* Append one raw byte to the pending line. */
+static void tw_put_raw(struct tw *w, char c)
+{
+    if (w->line_len + 1 >= sizeof w->line) {
+        /* Cannot happen with the current line shapes; flush rather than
+         * drop bytes if it ever does. */
+        tw_flush(w);
+    }
+    w->line[w->line_len++] = c;
+    w->line[w->line_len] = '\0';
+}
 
 static void tw_raw(struct tw *w, const char *s)
 {
-    fprintf(w->out, "%s", s);
+    for (; *s; s++)
+        tw_put_raw(w, *s);
 }
 
 /* Escape sequences are written whole and never consume a visible
@@ -76,7 +132,7 @@ static void tw_putc(struct tw *w, char c)
 {
     if (w->cols && w->width >= w->cols)
         return;                 /* clamped: visible text stops here */
-    fprintf(w->out, "%c", c);
+    tw_put_raw(w, c);
     w->width++;
 }
 
@@ -90,7 +146,8 @@ static void tw_newline(struct tw *w)
 {
     tw_ansi(w, C_RESET);        /* always close attributes, whole seq */
     tw_ansi(w, C_ERASE_EOL);
-    fprintf(w->out, "%c", '\n');
+    tw_put_raw(w, '\n');
+    tw_flush(w);                /* one write == one whole line */
     w->width = 0;
 }
 
@@ -245,6 +302,8 @@ int monitor_render(FILE *out, const struct monitor_model *m,
     w.cols = cols;
     w.width = 0;
     w.ansi = cols > 0;
+    w.line[0] = '\0';
+    w.line_len = 0;
     unsigned budget = rows;         /* 0 = unbounded */
     unsigned line = 0;
 
@@ -333,6 +392,10 @@ int monitor_render(FILE *out, const struct monitor_model *m,
         tw_newline(&w);
         line++;
     }
+
+    /* Every section ends with tw_newline(), which flushes; this is the
+     * belt-and-braces flush for a frame cut short by the row budget. */
+    tw_flush(&w);
 
     return 0;
 }
