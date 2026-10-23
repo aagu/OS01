@@ -1,7 +1,7 @@
 # OS01 优化路线图
 
-> **基准**: `4bf23983`（2026-10-11）；GUI-1/GUI-2 闭环后重整于 2026-10-22
-> **日期**: 2026-10-22
+> **基准**: `4ac18f54`（2026-10-23）；GUI-1/GUI-2 闭环后重整于 2026-10-22，aarch64 M2/M3 状态对齐于 2026-10-23
+> **日期**: 2026-10-23
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`。
 
@@ -9,7 +9,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统）
 - **工程与架构治理**：AAGU 全套就绪；2026-10-04 规划 ARCH-1..10 架构治理任务（syscall 解耦、Linux ABI 兼容层独立、Muldefs 消除、调度器/VFS/驱动抽象治理等）
-- **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映已闭环；M2 Slab + M3 内核 VMM 设计就绪（spec v8 / plan v4），M4 用户态 VMA 与统一 kernel_main 待接入
+- **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映 + **M2 Slab 接入 + M3 内核 VMM 已闭环**（merge `2034e5bc`，2026-10-05，spec v9 / plan v4）；M4 用户态 VMA 与统一 kernel_main 尚未启动
 - **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；QEMU 分辨率切换与显示所有权协调器（独占接管/fallback 自动恢复/只读 raw mmap 保护）已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并；**GUI-1 LVGL 平台后端已闭环**（`libgui` 公共平台层：显示/tick/flush/生命周期、离屏与屏幕后端分离）；**GUI-2 输入与焦点已闭环并合入 `master`**（独占物理输入租约、LVGL indev、光标、修饰键、重复、Tab 焦点，QEMU SMP 1/2 共 24/24 通过）；后续推进 Material 风格桌面与窗口系统
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
 
@@ -37,27 +37,27 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### 🏗 P2 aarch64 适配
 
-已完成：v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Phase 2 #1~#5 / GICv2 Phase 1 + GIC probe fix / AAGU-3 subsys_stub convergence / AAGU-29 libk.a link / IPI TPIDR_EL1 fix / EL1 sync 致命诊断 / M0 启动直映契约 / M1 运行期直映严式页表树（详见 `docs/changelog.md` + `docs/archive/aarch64/` 各专题报告）。
+已完成：v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Phase 2 #1~#5 / GICv2 Phase 1 + GIC probe fix / AAGU-3 subsys_stub convergence / AAGU-29 libk.a link / IPI TPIDR_EL1 fix / EL1 sync 致命诊断 / M0 启动直映契约 / M1 运行期直映严式页表树 / **M2 Slab 接入 / M3 内核 VMM（语义层拆分 + aarch64 backend + SMP shootdown + M3.1 audit gate）**（详见 `docs/changelog.md` + `docs/archive/aarch64/` 各专题报告）。
 
 #### 内存管理：共同启动直映接口（2026-10-02）
 
 两种架构现在都在 PMM 初始化后调用 `arch_boot_direct_map_init()`，通过 `arch/boot_memory.h` 查询 readiness 与不可变、合并的 RAM coverage。x86_64 沿用 2 MiB `vmm_init()`，保留 `ZONE_UNMAPPED_INDEX` 非零时的覆盖截止语义，并传播中间页表分配失败。aarch64 的 M0 在 `head.S` 中提供普通/自测一致的 0..2 GiB 启动映射；M1 从低窗口 arena 建立独立 TTBR1，只映射真实 RAM、启动保留 block 和设备窗口，再启动 AP。两者的页表编码、偏移与 TLBI 留在架构实现内。
 
-以下是**实施顺序**，每项单独设计与验收；启动页表修复只解决当前直映缺口，不等于完成运行期 VMM。RAM 范围以 UEFI 归一化结果为准，固定映射到 `0x80000000` 不能代替任意内存容量及稀疏范围的处理。
+以下是**实施顺序**，每项单独设计与验收。启动直映（M0/M1）与运行期 VMM（M3）已分别闭环并合入 `master`：M3 提供 `arch_vmm_*` 架构中立语义接口、4 KiB/2 MiB 原语与跨核 TLB shootdown，不再依赖 x86 页表 flag。RAM 范围以 UEFI 归一化结果为准，固定映射到 `0x80000000` 不能代替任意内存容量及稀疏范围的处理。
 
 | 阶段 | 任务与完成条件 | 前置 |
 |------|----------------|------|
 | M0 启动映射契约 ✅ | `head.S` 在 MMU 打开前建立 0..2 GiB boot map，内核 block 保持 EL1 可执行，其余 RAM PXN/UXN；普通/自测一致，已移除 C 补图差异。 | 现有 boot 页表、PMM ✅ |
 | M1 运行期直映 ✅ | 共同 `arch_boot_direct_map_*` 接口；aarch64 arena 建立独立 TTBR1，收紧非 RAM 映射并覆盖高 RAM/holes；BSP/AP root 与 probe 验证，16 组矩阵和稀疏/耗尽/坏 root 注入通过。 | M0；RAM 归一化、PMM ✅ |
-| M2 Slab 实装与初始化顺序 | aarch64 目前编译 `kernel/arch/aarch64/runtime/slab_stub.c`：`slab_init()` 无操作，`kmalloc()` 返回 `NULL`。移除占位实现并移植/共用真实 Slab；处理 `slab.c` 中 x86 专属 `pushfq`/`cli`/`sti` 锁路径。`pmm_init()` 当前在末尾调用 `slab_init()`，因此先明确早期映射是否足以覆盖 Slab 元数据与预留页；若需等 M1，则拆分初始化顺序为 PMM 元数据 → 运行期直映 → Slab，同时保持 x86_64 的预留语义。验证跨缓存大小的分配/释放和 QEMU 启动。M2+M3 详细设计 spec (v8) 与 plan (v4) 已完成。 | M1；PMM ✅ |
-| M3 内核 VMM 接口 | 以 `arch/aarch64/memory/page_table.c` 的 4 KiB 原语为基础，补运行期内核映射/解除映射、2 MiB block 与 4 KiB table 共存及必要的拆分、权限/属性、页表页生命周期和 SMP TLB 失效；给通用调用方提供架构中立接口。现有 `memory/vmm.c` 使用 x86 页表 flag 和 `kernel_map=Phy_To_Virt(0x101000)`，不能直接列入 aarch64 源清单。为页表原语补 host 边界测试，并用 QEMU 验证真实映射。M2+M3 详细设计 spec (v8) 与 plan (v4) 已完成。 | M1、M2；4 KiB 页表原语 ✅ |
-| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；把 `arch_user_range_accessible()` 的 aarch64 fail-closed 实现替换为真实跨页权限检查，并接通 uaccess 故障恢复。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；EL1 sync 目前只有致命诊断，EL0 sync 入口仍未接入。以隔离、权限、COW、回收和用户态 QEMU 用例验收。 | M3；Slab、调度/上下文切换、EL0 异常路径 |
+| M2 Slab 实装与初始化顺序 ✅ | **已完成（2026-10-05，merge `2034e5bc`）**：删除占位实现 `kernel/arch/aarch64/runtime/slab_stub.c`（`slab_init()` 无操作、`kmalloc()` 返回 `NULL`），aarch64 改编译生产 `memory/slab.c`（`kernel/Makefile` aarch64 白名单）；`slab.c` 中 x86 专属 `pushfq`/`cli`/`sti` 锁路径改为 `arch_local_irq_save/restore`；`slab_init()` 的 j-loop 与 8 页记账**幂等化**，与 boot reservation 不重复计数；新增 `slab_layout_compute()` 纯函数真值源，供 `early_arena.c` preflight 与启动后断言共用，arena 候选扫描计入 slab 段字节（`pmm_init()` 顺序保持 PMM 元数据 → 运行期直映 → Slab，x86_64 预留语义不变）。验收：`test_slab_basic` / `test_slab_layout_compute` / `test_slab_lock_path` / `test_slab_idempotent_reservation` / `test_slab_basic_x86_count` / `test_arena_candidate_slab_bytes` / `test_aarch64_color_printk_abi` 全 PASS；PMM boot/slab reservation 6 组通过。 | M1 ✅；PMM ✅ |
+| M3 内核 VMM 接口 ✅ | **已完成（2026-10-05，merge `2034e5bc`）**：公共 `kernel/include/memory/vmm.h` 拆为**语义层**（仅 `VM_*` + `arch_vmm_*` 语义 API），x86 裸 PTE 位与 `PAGE_*` 迁入私有头 `kernel/include/arch/x86_64/pte.h`，`kernel/memory/vmm.c` 退化为 backend wrapper 并原样保留 free/COW 所有权逻辑（`kernel_map=Phy_To_Virt(0x101000)` 不再泄漏进 aarch64 源清单）；aarch64 侧新增 `kernel/include/arch/aarch64/vmm_backend.h` + `kernel/arch/aarch64/memory/vmm_backend.c`（`arch_vmm_*` 实现，errno 经 `pt_err_to_linux()` 归一化为 Linux errno）；`page_table.c` 补齐 walk_to_l2/l3、4 KiB map/unmap/replace、2 MiB block 与 split（已发布 root 拆分返回 `-EPERM`）、root 发布登记制与软件位编码；SMP TLB 失效走 `kernel/memory/tlb.c` 串行化协议 + 每核 `tlb_ack_gen` 代数 ack + 超时 FATAL，经 `kernel/arch/aarch64/smp/ap_work.c` 工作槽与 SGI 3 广播。验收：**M3.1 audit gate 通过**（`docs/memory/memory.md` §vmm 变更调用链审计清单 + `test_vmm_caller_audit.c` 源码扫描 + `make PROFILE=aarch64-clang test-aarch64-audit` nm 扫描，2026-10-23 复跑 `[audit] OK`）；host 用例 `test_aarch64_backend_4k` / `test_aarch64_pt_2m_block` / `test_aarch64_pt_split` / `test_aarch64_pt_software_bits` / `test_aarch64_pt_root_publish` / `test_aarch64_pt_locks` / `test_vmm_replace_protocol` / `test_vmm_prot_none` / `test_vmm_ack_wraparound` / `test_vmm_semantic_header` / `test_x86_vmm_backend` / `test_aarch64_arch_vmm_init` 全 PASS；QEMU `qemutests/aarch64_m3_probe.py` 产出 `M3-SHOOTDOWN-PROBE: OK`；多核 selftest `kernel/selftest/test_aarch64_page_table_multicore.c` 覆盖 target-set / partial-mask / 锁交错 / 共享 L1。并发 replace phantom `-ENOENT` 已于 2026-10-19 根因钉死并修复（见 Parked 段）。 | M1 ✅、M2 ✅；4 KiB 页表原语 ✅ |
+| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；把 `arch_user_range_accessible()` 的 aarch64 fail-closed 实现替换为真实跨页权限检查，并接通 uaccess 故障恢复。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；EL1 sync 目前只有致命诊断，EL0 sync 入口仍未接入。以隔离、权限、COW、回收和用户态 QEMU 用例验收。**当前状态：尚未开始（仓库内无对应实现代码）** | M3 ✅；Slab ✅、调度/上下文切换、EL0 异常路径 |
 
-**当前已具备的部分**：aarch64 的 RAM 归一化及共用 `PMMngr`/`alloc_pages()`/`alloc_4k_page()`；BSP 启动期 4 KiB map/query/unmap smoke。`aarch64_pt_range_accessible()` 已存在于页表原语，但 `arch/mmu.h::arch_user_range_accessible()` 仍返回 `false`，不能视为 uaccess 已接通。M0、M1 已独立验收；M2–M4 尚未完成（M2+M3 设计 spec v8 / plan v4 已就绪）。M1 的 16 组 RAM/CPU/镜像矩阵与稀疏、容量耗尽、AP 无效 root 注入记录见 `docs/memory/memory.md`。
+**当前已具备的部分**：aarch64 的 RAM 归一化及共用 `PMMngr`/`alloc_pages()`/`alloc_4k_page()`；BSP 启动期 4 KiB map/query/unmap smoke；**生产 Slab**（跨缓存大小分配/释放，`kmalloc()` 不再返回 `NULL`）与 **`arch_vmm_*` 语义接口**（4 KiB/2 MiB 映射、解除、替换、拆分 + 跨核 shootdown）。`aarch64_pt_range_accessible()` 已存在于页表原语，但 `arch/mmu.h::arch_user_range_accessible()` 仍返回 `false`，不能视为 uaccess 已接通。M0、M1、M2、M3 已独立验收并合入 `master`；**M4 尚未开始**。M1 的 16 组 RAM/CPU/镜像矩阵与稀疏、容量耗尽、AP 无效 root 注入记录、以及 M3.1 的 vmm 调用链审计清单见 `docs/memory/memory.md`；M2/M3 的实施交付记录见 [`docs/changelog.md` 2026-10-05 条目](changelog.md#2026-10-05)。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 统一 kernel_main | 单 `kernel_main` 按固定顺序调 `arch_early_init()` / `arch_late_init()` / `scheduler_init()`；aarch64 必须先 dtb 才能用 DTB 信息；内存阶段须满足 M0→PMM→M1→M2/M3 的资源可用顺序。**Spec A 中断 dispatch / Spec B SMP+timer / Spec C kernel_main 单一入口** | M1–M3 的顺序契约；SMP ✅, arch_irq ✅, GIC ✅, Timer ✅, UEFI 链 ✅ | 长项 spec |
+| 统一 kernel_main | 单 `kernel_main` 按固定顺序调 `arch_early_init()` / `arch_late_init()` / `scheduler_init()`；aarch64 必须先 dtb 才能用 DTB 信息；内存阶段须满足 M0→PMM→M1→M2/M3 的资源可用顺序（该顺序已随 M2/M3 落地验证）。**Spec A 中断 dispatch / Spec B SMP+timer / Spec C kernel_main 单一入口** | M1–M3 的顺序契约 ✅（M2/M3 已闭环）；SMP ✅, arch_irq ✅, GIC ✅, Timer ✅, UEFI 链 ✅ | 长项 spec |
 | 中断/异常 dispatch 统一 | `arch_intr_dispatch(vector, pt_regs*)` 单入口抽象；x86_64 IDT vs aarch64 VBAR_EL1 vector tables 各自封装；x86_64 IST stack vs aarch64 SP_EL1 切换。aarch64 EL1h IRQ 已接 GIC，EL1h sync 已有致命诊断；EL0 sync/IRQ、可恢复缺页和通用 dispatch 仍未接入。先明确 M4 所需的 fault/return 契约，再剥离 `x86_64/trap.c` 内的架构寄存器解码 | arch_irq ✅, head.S ✅, GIC ✅；M4 用户态路径 | Linux do_IRQ |
 | SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一 | `arch_task_switch(prev, next)` + `arch_thread_entry()`；aarch64 ret 到 user vs x86_64 sysret/iret | SMP 启动统一 | Tilck |
@@ -82,7 +82,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | ARCH-4 拆分 `sched/task.c`（已完成） | 原 2764 行混合 EEVDF 调度/负载均衡、fork(COW)、exec + 用户栈/auxv、信号/进程组、kthread；原 FS syscall 已随 ARCH-1 迁至 `kernel/syscall/sys_fs.c` | 2026-10-04 完成；交付记录详见 [`docs/changelog.md` 2026-10-04 条目](changelog.md#2026-10-04) | ARCH-1 ✅ |
 | ARCH-5 VFS 抽象补强 | `vfs_ops` 无 `lookup`/`getattr`/`permission`，路径解析靠 `readdir` 线性扫描（O(n)、无 dentry cache）；`vfs_node` 缺 mode/uid/gid/时间戳/nlink；挂载按路径字符串前缀匹配；无 FS 类型注册表（`fat_vfs_ops`/`ext2_vfs_ops` 全局 extern） | 引入 `file_system_type` 注册 + mount by type；`inode_operations`/`file_operations` 分离并新增 `lookup`/`getattr`；`vfs_node` 补元数据；挂载点挂在 node 上；简单 dentry cache。分阶段 spec，每阶段 FS 回归 | 独立；完成后利好 P5 权限/FIFO/openat |
 | ARCH-6 FS 并发与块缓存 | `fat.c`、`tmpfs.c` 0 处加锁（`ext2.c` 19 处），默认 `-smp 2` 下 FAT 表/簇分配/tmpfs 目录存在数据竞争；全内核无 buffer/page cache，每次读直达 AHCI | 短期：每挂载点锁兜底 FAT/tmpfs；中期：blockdev 层按 (dev, blkno) 哈希的块缓存，ext2/FAT 共用，含写回与一致性；SMP 并发读写压力用例 | 独立（正确性优先）；块缓存与 ARCH-9 块层解耦协同 |
-| ARCH-7 移除 `#define mmap uint64_t*` | `memory/vmm.h:80`、`fs/vfs.h:77`、`fs/devfs.h:46` 三处定义类型宏，`vfs_ops` 用 `#undef`/恢复绕行；任何名为 `mmap` 的标识符都会被替换 | 改 `typedef uint64_t *pgd_t;`（或等价名）全仓替换，删除 save/restore 绕行 | 无；宜在 aarch64 M3 VMM 接口前完成 |
+| ARCH-7 移除 `#define mmap uint64_t*` | `kernel/include/memory/vmm.h:73`、`kernel/include/fs/vfs.h:78`、`kernel/include/fs/devfs.h:60`、`kernel/memory/vma.c:713`、`kernel/driver/fb.c:286` 五处定义类型宏（较原记录多出 vma.c / fb.c 两处），`vfs_ops` 用 `#undef`/恢复绕行；任何名为 `mmap` 的标识符都会被替换 | 改 `typedef uint64_t *pgd_t;`（或等价名）全仓替换，删除 save/restore 绕行 | 无；原记「宜在 aarch64 M3 VMM 接口前完成」——M3 已于 2026-10-05 闭环，该前置约束失效，ARCH-7 现为 M4 的独立前置 |
 | ARCH-8 子系统框架补完 | phase 用魔数 3–6，Phase 1–2 / 7–9 仍硬编码于 `kernel_main`；同 phase 内顺序依赖链接顺序（需 link-order 审计兜底）；必需子系统失败只打印 `FAIL` 继续启动；固定表 `MAX_SUBSYS 64`/`MAX_SUBSYS_PERCPU 16`；框架自身用 `serial_printk` 违背日志规范 | 命名 phase 枚举并覆盖全部启动阶段；支持显式依赖（或 phase 内 order 字段）取代链接顺序；非 OPTIONAL 失败 `panic`；表改链接段驱动（容量随注册数）；日志改 `log_*` | 与“统一 kernel_main”协同 |
 | ARCH-9 驱动模型 / 总线抽象（已完成） | 驱动自行 `pci_find_device(class, subclass…)`，无 `pci_driver` + id_table / probe-remove；`net/net.c` 用全局 `is_virtio` 在 e1000/virtio-net 间 `if` 分支，无 `net_device` 抽象；通用 `block/blockdev.c` 内含 `default_ahci_read/write` | 2026-10-05/06 完成（commit `14119cf7..8b29b25`；分支 `arch9-driver-model` 已合并并删除，21 commit + 1 followup fix；84 文件，+16,695/-1,875）。4 阶段 12 任务全部落地；交付记录、测试矩阵与已知遗留详见 [`docs/changelog.md` 2026-10-06 条目](changelog.md#2026-10-06) | ARCH-8 ✅（依赖 phase 1 子系统框架的链接段注册，本计划借 driver 注册段先行）；P4 NVMe/USB 多级 device 表达、ARCH-11/12 的前置 ✅ |
 | ARCH-10 静态容量与工程卫生 | `NR_CPUS 8` 三处重复定义；`MAX_GSI 24` 仅够单 IOAPIC，与 `MAX_IOAPICS 4` 矛盾；`POLL_MAX_FDS 16` 栈数组硬拒；`BLOCKDEV_MAX 8`、`DEVFS_MAX_DEVICES 32` 固定表。`.gitignore` 忽略全部 `*.S`，新增汇编默认不入库，例外路径 `kernel/arch/x86_64/thread_entry.S` 已过时（实为 `cpu/thread_entry.S`）；AGENTS.md 仍称“Makefile 无头文件依赖”但 `kernel/Makefile` 已 `-MD -MP`；源码树残留 `kernel/fs/select.o`、`kernel/kernel.bin` | `NR_CPUS` 单点定义；GSI 上限按 IOAPIC 枚举动态计算；poll 改堆分配 + `RLIMIT_NOFILE` 上限；设备表改动态/链表；`.gitignore` 收窄 `*.S` 规则（只忽略生成物如 `kallsyms.S`）；同步 AGENTS.md 构建依赖描述；清理源码树构建产物 | 独立 |

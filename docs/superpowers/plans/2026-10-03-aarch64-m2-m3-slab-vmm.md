@@ -1,4 +1,12 @@
-# aarch64 M2 Slab 接入 + M3 运行期 VMM 实施计划 (v2)
+# aarch64 M2 Slab 接入 + M3 运行期 VMM 实施计划 (v4)
+
+> **状态：M2 与 M3 均已实施并合入 `master`（2026-10-05，merge `2034e5bc`）。**
+>
+> 本文的 `- [ ]` 复选框在实施过程中**未随代码维护**（110 个 step 仍为未勾选），因此**不代表真实进度**——请勿据其判断任务状态。真实状态以 [`docs/roadmap.md`](../../roadmap.md) 的 M2/M3 里程碑行与 [`docs/changelog.md`](../../changelog.md) 2026-10-05 条目为准；实施设计见 [spec](../specs/2026-10-03-aarch64-m2-m3-slab-vmm-design.md)（v9）。
+>
+> 实施期间后续修正了本文若干设计点，以代码为准：① `arch_atomic_cas()` 补 `"cc"` clobber（`kernel/include/arch/atomic.h`），根因见 `docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`；② `arch_vmm_*`  errno 统一经 `pt_err_to_linux()` 归一化为 Linux errno，取代 Task 19 的两点式映射；③ M3.1 audit gate 的静态扫描收敛到 `hosttests/cases/test_vmm_caller_audit.c` + `make PROFILE=aarch64-clang test-aarch64-audit`；④ 里程碑命名（M0/M1/M3）已从 MM/VMM 源码注释中移除（`045cba3f`）。
+>
+> 下文保留原始计划文本，仅作设计追溯用。
 
 > **For agentic workers:** REQUIRED SUB-KILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >

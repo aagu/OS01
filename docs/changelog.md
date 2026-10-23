@@ -100,6 +100,15 @@
   - **领域语义适配**：在 `compat/proc.c` 中承接 `rt_sigaction`（Linux 13，4 参数 `sigsetsize == 8` 校验）与 `wait4`（Linux 61，参数转发至 `SYS_waitpid`）
   - **ELF 探测与 Linux ABI 激活解耦**：`elf_detect_abi()` 通过 `PT_NOTE` 段（`NT_GNU_ABI_TAG`，OS=Linux）检测外部静态 Linux 二进制并赋予 `PF_LINUX_ABI`；**严格不碰 `PT_INTERP`**，彻底解耦 Linux ABI 激活与未来动态链接机制
   - **全量测试验证**：`test-static` 静态审计（含递归兼容目录扫描）、`test-host` 57/57 单元测试套件、`systest` 341/341 项端到端测试（新增 `54_linux_abi_compat`）、QEMU `phase-0`、`inittab-phase` 与 `network` 套件全量绿灯通过
+- feat(mm): **aarch64 M2 Slab 接入 + M3 内核 VMM 合入** —— merge `2034e5bc`（commits `dabc9f0..2034e5bc`，86 commits）：
+  - **M2 Slab 接入**：删除占位实现 `kernel/arch/aarch64/runtime/slab_stub.c`（`slab_init()` 无操作、`kmalloc()` 返回 `NULL`），aarch64 改编译生产 `memory/slab.c`；`slab.c` 的 x86 专属 `pushfq`/`cli`/`sti` 锁路径改为 `arch_local_irq_save/restore`；`slab_init()` 的 j-loop 与 8 页记账幂等化，与 boot reservation 不重复计数；新增 `slab_layout_compute()` 纯函数真值源，供 `early_arena.c` preflight 与启动后断言共用，arena 候选扫描计入 slab 段字节
+  - **M3 语义层拆分**：公共 `kernel/include/memory/vmm.h` 收敛为语义层（仅 `VM_*` + `arch_vmm_*` 语义 API），x86 裸 PTE 位与 `PAGE_*` 迁入私有头 `kernel/include/arch/x86_64/pte.h`，`kernel/memory/vmm.c` 退化为 backend wrapper 并原样保留 free/COW 所有权逻辑
+  - **M3 aarch64 backend**：新增 `kernel/include/arch/aarch64/vmm_backend.h` + `kernel/arch/aarch64/memory/vmm_backend.c`；`page_table.c` 补齐 walk_to_l2/l3、4 KiB map/unmap/replace、2 MiB block 与 split（已发布 root 拆分返回 `-EPERM`）、root 发布登记制与软件位编码
+  - **M3 SMP shootdown**：`kernel/memory/tlb.c` 串行化协议 + 每核 `tlb_ack_gen` 代数 ack + 超时 FATAL，经 `kernel/arch/aarch64/smp/ap_work.c` 工作槽与 SGI 3 广播（逻辑向量 `IPI_VECTOR_TLB` → GIC SGI 3 + 显式目标列表）
+  - **M3.1 audit gate**：`docs/memory/memory.md` 新增「vmm 变更调用链审计」清单（I1/I2/I3 不变量 + 排序规则 R1），配 `hosttests/cases/test_vmm_caller_audit.c` 源码扫描与 `make PROFILE=aarch64-clang test-aarch64-audit` nm 扫描双重把关
+  - **验收**：host 用例 `test_slab_basic` / `test_slab_layout_compute` / `test_slab_lock_path` / `test_slab_idempotent_reservation` / `test_slab_basic_x86_count` / `test_arena_candidate_slab_bytes` / `test_aarch64_backend_4k` / `test_aarch64_pt_2m_block` / `test_aarch64_pt_split` / `test_aarch64_pt_software_bits` / `test_aarch64_pt_root_publish` / `test_aarch64_pt_locks` / `test_vmm_replace_protocol` / `test_vmm_prot_none` / `test_vmm_ack_wraparound` / `test_vmm_semantic_header` / `test_x86_vmm_backend` / `test_aarch64_arch_vmm_init` 全 PASS；QEMU `qemutests/aarch64_m3_probe.py` 产出 `M3-SHOOTDOWN-PROBE: OK`；多核 selftest `kernel/selftest/test_aarch64_page_table_multicore.c` 覆盖 target-set / partial-mask / 锁交错 / 共享 L1；x86_64 行为不变
+  - **后续**：`kernel/include/arch/atomic.h` 的 AArch64 `arch_atomic_cas()` 缺 `"cc"` clobber 导致的并发 replace phantom `-ENOENT`，于 2026-10-19 根因钉死并修复（`80eed2e9`，详见 2026-10-20 条目与 `docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`）
+  - 设计 [spec](superpowers/specs/2026-10-03-aarch64-m2-m3-slab-vmm-design.md)（v9）、实施 [plan](superpowers/plans/2026-10-03-aarch64-m2-m3-slab-vmm.md)（v4）
 
 ## 2026-10-04
 
@@ -131,7 +140,7 @@
   - aarch64 从低窗口 arena 建立独立 TTBR1，覆盖高 RAM 与 holes，收紧设备与保留 block；严格限制非 RAM 映射
   - BSP/AP root 与 probe 全面验证，覆盖 16 组 RAM/CPU/镜像矩阵（256 MiB..4 GiB，1..4 核），通过稀疏、容量耗尽、AP 坏 root 注入测试
 - docs(spec,plan): **aarch64 M2 Slab + M3 内核 VMM 详细设计闭环** —— commits `93f8ae7f..9edc1cab`：
-  - spec v8 + plan v4：明确 frame 级记账、锁契约（BBM、inactive root 拆分）、SGI/SMP shootdown 协议与初始化顺序契约，就绪待实装
+  - spec v8 + plan v4：明确 frame 级记账、锁契约（BBM、inactive root 拆分）、SGI/SMP shootdown 协议与初始化顺序契约，就绪待实装（**已由下方 2026-10-05 条目闭环**）
 
 ## 2026-10-02
 
