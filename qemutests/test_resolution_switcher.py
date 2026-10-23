@@ -1221,8 +1221,16 @@ def _start_client(sess) -> bool:
     (``RES_LVGL_EXIT=$?``) so the runner never has to guess a host-side PID.
     Returns True once the client has a live view and is in its present loop.
     """
-    sess.send_line("{ /bin/test_lvgl wait; echo RES_LVGL_EXIT=$?; } &")
-    return sess.wait_for(r"LVGL compatibility smoke test succeeded", timeout=25)
+    start = sess.mark()
+    # ash gives background jobs /dev/null stdin. Use the display watcher:
+    # it ignores stdin and periodically presents even while the UI is idle,
+    # so a real layout change can invalidate the live view deterministically.
+    sess.send_line("{ /bin/test_lvgl --watch-display; echo RES_LVGL_EXIT=$?; } &")
+    if not sess.wait_for(r"LVGL compatibility smoke test succeeded", timeout=25,
+                         start=start):
+        return False
+    # A ready line followed by an immediate exit is not a live client.
+    return re.search(r"RES_LVGL_EXIT=-?\d+", sess.output()[len(start):]) is None
 
 
 def _client_estale_case(sess, log) -> list:
@@ -1233,7 +1241,8 @@ def _client_estale_case(sess, log) -> list:
     Runs a *real* app in the guest (not the host stand-in loop) and switches
     the mode for real, so the client observes ESTALE from libgfx.  The client
     exit status is captured from the guest shell itself (background block),
-    not a host-side PID guess.  Runs last among the shared-boot cases because
+    not a host-side PID guess. The watcher forces periodic PRESENT without
+    consuming the shell input. Runs last among the shared-boot cases because
     the client leaves the terminal's alt screen active.
     """
     fail: list = []
@@ -2091,6 +2100,44 @@ class CheckHelpersTest(unittest.TestCase):
         self.assertEqual([p.get("rc") for p in rc0 if p.get("op") == "mmap"], [0])
         # A negative rc -1 must NOT count as success.
         self.assertFalse(any(p.get("rc") == 0 for p in rcneg))
+
+
+class ClientStartupTest(unittest.TestCase):
+    READY = "[TEST PASS] LVGL compatibility smoke test succeeded.\n"
+
+    class Session:
+        def __init__(self, prior="", fresh=""):
+            self.buf = prior
+            self.fresh = fresh
+
+        def mark(self):
+            return self.buf
+
+        def send_line(self, command):
+            self.buf += self.fresh
+
+        def wait_for(self, pattern, timeout=20, start=None):
+            return re.search(pattern, self.buf[len(start or ""):]) is not None
+
+        def output(self):
+            return self.buf
+
+    def test_old_ready_does_not_start_new_client(self):
+        self.assertFalse(_start_client(self.Session(prior=self.READY)))
+
+    def test_early_exit_after_ready_is_not_a_live_client(self):
+        for code in (0, 1, 139):
+            with self.subTest(code=code):
+                sess = self.Session(fresh=self.READY + f"RES_LVGL_EXIT={code}\n")
+                self.assertFalse(_start_client(sess))
+
+    def test_fresh_ready_ignores_old_exit(self):
+        sess = self.Session(prior=self.READY + "RES_LVGL_EXIT=1\n",
+                            fresh=self.READY)
+        self.assertTrue(_start_client(sess))
+
+    def test_exit_without_ready_is_not_started(self):
+        self.assertFalse(_start_client(self.Session(fresh="RES_LVGL_EXIT=1\n")))
 
 
 class ParseHelpersTest(unittest.TestCase):
