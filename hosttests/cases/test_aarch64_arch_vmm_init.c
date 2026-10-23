@@ -147,7 +147,7 @@ void free_4k_page(uint64_t phys) { (void)phys; }
  * process exit status reflects a failing assertion directly — no
  * shadow failure counter needed any more. */
 
-/* Case 1: well-formed TTBR1 → rc = 0, kernel_map == (mmap)(pa + OFFSET). */
+/* Case 1: well-formed TTBR1 → rc = 0, kernel_map == (ptbl_t)(pa + OFFSET). */
 TEST_FUNC(test_valid_ttbr1_pins_kernel_map)
 {
     g_violation_count = 0;
