@@ -762,8 +762,11 @@ static void test_heap_fault_does_not_demand_map(void)
     char *src = slurp_file(kernel_source_path("kernel/arch/x86_64/intr/trap.c"), &len);
     assert_not_null(src);
 
-    /* Locate the P=0 demand-allocation block inside do_page_fault. */
-    char *fn = strstr(src, "void do_page_fault(pt_regs_t *");
+    /* Locate the P=0 demand-allocation block inside the #PF business
+     * handler (intr-dispatch phase 1 moved the original do_page_fault
+     * body into x86_handle_page_fault; the public do_page_fault is now
+     * a thin entry that builds the event and dispatches). */
+    char *fn = strstr(src, "void x86_handle_page_fault(pt_regs_t *");
     assert_not_null(fn);
     char *demand = strstr(fn, "if (!(error_code & 0x01)) {");
     assert_not_null(demand);
@@ -804,8 +807,9 @@ static void test_heap_fault_resolves_cow_for_committed_range(void)
 
     /* The COW resolution path (PAGE_COW check) must still be
      * present — heap VMA faults on an ALREADY-MAPPED COW leaf
-     * must be privately resolved. */
-    char *fn = strstr(src, "void do_page_fault(pt_regs_t *");
+     * must be privately resolved.  The #PF business body lives in
+     * x86_handle_page_fault since intr-dispatch phase 1. */
+    char *fn = strstr(src, "void x86_handle_page_fault(pt_regs_t *");
     assert_not_null(fn);
     char *fn_end = fn + 16 * 1024;
     if (fn_end > src + len) fn_end = src + len;

@@ -93,13 +93,12 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
 # phase 1, Task 3): the strong aarch64 backends live in
 # arch/aarch64/intr/dispatch.c, collected by the wildcard below.
 else
-# Interrupt dispatch phase 1, Task 2: intr/dispatch.c is the new
-# arch-neutral common dispatcher.  It is EXCLUDED from the x86 product
-# build on purpose: it calls arch_intr_handle_sync() / arch_intr_handle_irq(),
-# whose strong per-architecture definitions do not exist yet, and a missing
-# backend MUST fail the link (no weak no-op).  The x86 routing backend
-# lands in Task 4, which removes this filter-out.  The legacy per-vector
-# handler table moved to intr/vector_dispatch.c and is still collected here.
+# intr/dispatch.c is the arch-neutral common dispatcher (intr-dispatch
+# phase 1, Task 4): the strong x86_64 backends live in
+# arch/x86_64/intr/dispatch.c, collected by the ARCHDIR wildcard below,
+# so the common source links into the x86 product build with no
+# exclusion.  The legacy per-vector handler table lives in
+# intr/vector_dispatch.c and is collected here with the rest of intr/.
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
     $(wildcard syscall/*.c) \
@@ -114,7 +113,7 @@ KERNEL_C_SOURCES := \
     $(filter-out driver/fb_test.c,$(wildcard driver/*.c)) \
     $(wildcard ipc/*.c) \
     $(wildcard tty/*.c) \
-    $(filter-out intr/dispatch.c,$(wildcard intr/*.c)) \
+    $(wildcard intr/*.c) \
     $(wildcard block/*.c) \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \

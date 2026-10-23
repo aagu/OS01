@@ -3335,15 +3335,18 @@ static void test_ssp_no_false_trip(void)
            "want WIFEXITED&&42, status=%#x", st);
 }
 
-/* ── 54b/54c/54d: 用户态异常路径 waitpid 信号终止语义 ─────────
- * 三种 user-mode fault 各应被父 waitpid 识别为 WIFSIGNALED && 对应 WTERMSIG：
+/* ── 54b/54c/54d/54e: 用户态异常路径 waitpid 信号终止语义 ─────────
+ * 四种 user-mode fault 各应被父 waitpid 识别为 WIFSIGNALED && 对应 WTERMSIG：
  *   54b. #DE（除零） → SIGFPE (8)
  *   54c. #PF（写只读页） → SIGSEGV (11)
  *   54d. #UD（ud2） → SIGILL (4)
- * 若 fix 未生效，三个 child 都会被 waitpid 看到 status=0（WIFEXITED 假象），
+ *   54e. #GP（用户态执行 cli） → SIGSEGV (11)
+ * 若 fix 未生效，child 会被 waitpid 看到 status=0（WIFEXITED 假象），
  * 整套测试 FAIL，root cause 是 kernel/arch/x86_64/intr/trap.c 之前把
  * do_exit(0) 硬编码成退出码（exit_code 高字节），shell/init/busybox
  * wait/trap 全部失真（roadmap parked 项，2026-10-11）。
+ * 54e 同时是 intr-dispatch phase 1 的用户 #GP 回归：#GP 现在经过
+ * do_general_protection 薄入口 → arch_intr_dispatch() → x86 后端。
  */
 static void __attribute__((noinline)) trap_divzero(void)
 {
@@ -3371,6 +3374,14 @@ static void __attribute__((noinline)) trap_ud2(void)
      * 优化掉（gcc/clang 都不会，但显式标注意图）。 */
     __asm__ __volatile__("ud2");
     _exit(125);                              /* 不可达 */
+}
+
+static void __attribute__((noinline)) trap_gp_cli(void)
+{
+    /* cli 是特权指令：CPL=3 执行触发 #GP(0) → SIGSEGV。volatile 防
+     * 止编译器把这条 asm 当作副作用自由的指令删掉。 */
+    __asm__ __volatile__("cli");
+    _exit(126);                              /* 不可达 */
 }
 
 static void test_user_fault_divzero(void)
@@ -3411,6 +3422,30 @@ static void test_user_fault_ud2(void)
     CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGILL,
            "54d_fault_ud2", "status=%#x",
            "want WIFSIGNALED&&SIGILL(4), status=%#x", st);
+}
+
+static void test_user_fault_gp(void)
+{
+    int64_t pid = fork();
+    if (pid < 0) { FAIL("fork_gp", "fork failed"); return; }
+    if (pid == 0) trap_gp_cli();
+    int st = 0;
+    int64_t waited = waitpid(pid, &st, 0);
+    CHECKF(waited == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV,
+           "54e_fault_gp", "pid=%ld waited=%ld status=%#x",
+           "want waited==pid && WIFSIGNALED&&SIGSEGV(11), pid=%ld waited=%ld status=%#x",
+           (long)pid, (long)waited, st);
+    /* 父进程继续执行：再跑一次受控 fork/wait 往返，证明 #GP 终止
+     * 子任务后调度与 waitpid 依然可用。 */
+    int64_t pid2 = fork();
+    if (pid2 < 0) { FAIL("fork_gp_after", "fork failed"); return; }
+    if (pid2 == 0) _exit(7);
+    int st2 = 0;
+    int64_t waited2 = waitpid(pid2, &st2, 0);
+    CHECKF(waited2 == pid2 && WIFEXITED(st2) && WEXITSTATUS(st2) == 7,
+           "54e_parent_continues", "pid=%ld waited=%ld status=%#x",
+           "want waited==pid && WIFEXITED&&7, pid=%ld waited=%ld status=%#x",
+           (long)pid2, (long)waited2, st2);
 }
 
 /* 扫描 "TAG <16hex>[\n|\0]"（canary_dump 的输出格式 "GUARD %016lx\n"）。
@@ -4268,6 +4303,7 @@ static const test_case_t tests[] = {
     {"54b_user_fault_divzero", "user fault divzero → SIGFPE",  test_user_fault_divzero,    1, 0},
     {"54c_user_fault_write_ro", "user fault write ro → SIGSEGV", test_user_fault_write_ro,  1, 0},
     {"54d_user_fault_ud2",     "user fault ud2 → SIGILL",      test_user_fault_ud2,        1, 0},
+    {"54e_user_fault_gp",      "user fault cli #GP → SIGSEGV", test_user_fault_gp,        1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────
