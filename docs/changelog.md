@@ -7,6 +7,12 @@
 
 ## 2026-10-23
 
+- fix(sched): **parked monitor #1：缺少 idle 身份时跳过记账**：正常 BSP/AP 启动均先设置 idle 再发布 scheduler_ok，尚无正常启动路径复现；注入 idle=NULL 后，原生产函数会将全部样本计 busy，甚至给真实 idle 任务增加 runtime。现在在任何记账前丢弃无法分类的样本，保留原计数、epoch 和 tick rate；idle 恢复后继续原差分基线。新增真实 accounting.c 回归覆盖 busy/idle/NULL current、既有非零计数、恢复后计数与任务 runtime、无锁和无分配快路径；旧实现 7 条断言失败，修复后 84 条全部通过，完整 monitor/host 和独立 ASan/UBSan 验证通过。QEMU 1/8 核通过，2 核因独立串口帧交错超时，另记 parked #14，未将整组标为通过。详见 [调查与验证](debug/2026-10-23-accounting-missing-idle.md)。
+
+- fix(build): **parked monitor #13：宿主测试分发门禁闭环**：`test-monitor-host` 原先在依赖运行后才检查 rootfs 能力，未知 CASE 又先触发缺失依赖，既有报错分支不可达。现在仅为支持 rootfs 且 CASE 合法的调用生成前置任务；无能力 profile 或非法 CASE 在任何递归 make 前失败，并列明合法值。白名单精确匹配单个 CASE，空值/纯空白仍执行完整七组。新增真实根 Make + 记录型 submake 回归，覆盖 `-n`/`-j4`、未知/通配符/多 CASE、七个合法分发及无关目标，接入 `test-harness` CI 路径。旧实现 27 个组合失败，修复后新增回归和真实七组 monitor 测试通过；完整 harness 607 项、0 失败、1 跳过，独立评审通过。详见 [调查与验证](debug/2026-10-23-monitor-host-dispatch.md)。
+
+- fix(resolution): **parked `_client_estale_case` 确定性失败闭环**：后台 `test_lvgl wait` 的 stdin 被无作业控制的 ash 接到 `/dev/null`，客户端在切换分辨率前即 EOF 正常退出；即使保持存活，静态展示页也不会周期性 PRESENT。新增专用 `test_lvgl --watch-display`，不消费 stdin，以 250ms 轮询间隔重绘并走真实 PRESENT/ESTALE 清理路径；交互 wait、smoke 和默认模式保留。runner 改用观察模式，启动窗口过滤旧 ready/exit，并拒绝已观察到的提前退出。34 项 runner 单测、真实 QEMU ESTALE 回归和完整 production/fault resolution 套件及完整 host 回归通过；真实 guest 的原有三种模式均 exit 0。详见 [调查与验证](debug/2026-10-23-resolution-client-estale.md)。
+
 - fix(monitor): **parked monitor #10：短读覆盖与零频率校验闭环**：真实 collector 的分块累积逻辑正确，但 `/proc/stat` 解析器会接受 `TickHz: 0`，导致非法 CPU 样本进入模型。补充正值校验，其他正频率继续接受；新增 1/2/7/31 字节分块读取、跨 read 的 Name 转义、复用 sample、四类文件 cap−1/cap/cap+1 边界与指标隔离覆盖。超长 fixture 使用可解析文本加空行，确保静默截断无法蒙混通过。旧实现零频率用例两条断言失败，修复后 collect 12 项/1278 断言、完整 monitor/host、用户镜像构建及独立 ASan/UBSan 检查通过。详见 [调查与验证](debug/2026-10-23-monitor-collect-short-reads.md)。
 
 - fix(monitor): **parked monitor #9：OOM 历史时间轴闭环**：采样循环在模型分配失败后仍计入该轮并渲染，但 model 原先直接返回而不追加历史点，压缩 60 槽时间轴。两处分配失败统一追加 CPU/内存无效空点；上一轮已提交的显示快照和差分基线保持原样，第二次失败仍释放首次临时分配。明确更新 model 接口及 spec §7 的 OOM 约定，区分数据回滚与历史记账。新增两个确定性故障注入回归，覆盖 62 次连续失败、环回绕、旧快照/基线字节不变、恢复后按 63 秒差分和分配余额归零。旧实现两项回归失败；最终 model 14 项/1164 断言、完整 monitor/host、用户镜像构建通过，独立 ASan/UBSan 检查通过。详见 [调查与验证](debug/2026-10-23-monitor-oom-history.md)。

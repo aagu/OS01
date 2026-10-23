@@ -373,11 +373,14 @@ int main(int argc, char **argv)
     }
 
     bool wait_mode = false;
+    bool watch_display = false;
     bool smoke_mode = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--smoke") == 0 || strcmp(argv[i], "smoke") == 0) {
             smoke_mode = true;
+        } else if (strcmp(argv[i], "--watch-display") == 0) {
+            watch_display = true;
         } else if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "wait") == 0 ||
                    strcmp(argv[i], "--wait") == 0 || strcmp(argv[i], "gui") == 0) {
             wait_mode = true;
@@ -544,9 +547,19 @@ int main(int argc, char **argv)
     printf("[TEST PASS] LVGL compatibility smoke test succeeded.\n");
     fflush(stdout);
 
-    if (wait_mode) {
-        printf("[test_lvgl] Interactive mode: Press 'q' or ESC to exit...\n");
+    if (wait_mode || watch_display) {
+        if (watch_display) {
+            printf("[test_lvgl] Watching display changes (stdin unused)...\n");
+        } else {
+            printf("[test_lvgl] Interactive mode: Press 'q' or ESC to exit...\n");
+        }
         while (1) {
+            /* Resolution E2E needs real PRESENT calls even for this static
+             * showcase. The dedicated watcher never reads background stdin
+             * (ash supplies /dev/null), using a 250 ms polling interval. */
+            if (watch_display) {
+                lv_obj_invalidate(scr);
+            }
             uint32_t delay_ms = 100;
             gui_status_t status = gui_platform_step(platform, &delay_ms);
             if (status == GUI_STATUS_LOST_OWNERSHIP ||
@@ -561,7 +574,8 @@ int main(int argc, char **argv)
             }
 
             struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
-            int pret = poll(&pfd, 1, (int)delay_ms);
+            int pret = watch_display ? poll(NULL, 0, 250)
+                                     : poll(&pfd, 1, (int)delay_ms);
             if (pret < 0) {
                 if (errno == EINTR) {
                     continue;

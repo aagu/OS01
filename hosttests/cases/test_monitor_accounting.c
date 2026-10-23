@@ -24,7 +24,7 @@
  *
  * State note: the production usage[] array is static and persists
  * across sub-tests (there is no reset API), so every test works on its
- * own CPU id and asserts DELTAS around the operations under test.
+ * own CPU id or reuses one with DELTAS around the operations under test.
  * CPU map: 0 = busy/idle counting, 4 = scheduler-not-ready,
  * 5 = BSP PIT-fallback route, 6 = stop/restart epoch, 7 = duplicate
  * publish, 1 = failed-AP unavailable.
@@ -319,6 +319,53 @@ TEST_FUNC(hot_path_locks_and_never_allocates) {
     assert_eq(free_before, test_free_count);
 }
 
+/* Without an idle identity no tick can be classified. Do not fabricate
+ * busy time or runtime, erase old counters, or restart the timer epoch. */
+TEST_FUNC(missing_idle_drops_ticks_and_recovers) {
+    reset_fixture_cpu(0);
+    sched_accounting_init();
+    sched_accounting_cpu_start(0, 100, true);
+    run_ticks(3, &fixture_busy);
+    run_ticks(2, &fixture_idle);
+
+    struct cpu_usage_snapshot before, after;
+    assert_eq(0, sched_accounting_read(0, &before));
+    uint64_t busy_runtime = fixture_busy.runtime_ticks;
+    uint64_t idle_runtime = fixture_idle.runtime_ticks;
+    unsigned long alloc_before = test_alloc_count;
+    unsigned long free_before = test_free_count;
+    unsigned long locks_before = test_lock_acquires;
+    percpu_data[0].idle = NULL;
+
+    /* Cover a non-idle current, the real idle task before its pointer is
+     * published, and an absent current. None has a classifiable sample. */
+    run_ticks(10, &fixture_busy);
+    run_ticks(10, &fixture_idle);
+    run_ticks(10, NULL);
+    assert_eq(locks_before, test_lock_acquires);
+    assert_eq(0, sched_accounting_read(0, &after));
+    assert_eq(before.busy_ticks, after.busy_ticks);
+    assert_eq(before.idle_ticks, after.idle_ticks);
+    assert_eq(before.epoch, after.epoch);
+    assert_eq(before.tick_hz, after.tick_hz);
+    assert_eq(busy_runtime, fixture_busy.runtime_ticks);
+    assert_eq(idle_runtime, fixture_idle.runtime_ticks);
+
+    percpu_data[0].idle = &fixture_idle;
+    run_ticks(1, &fixture_busy);
+    run_ticks(1, &fixture_idle);
+    assert_eq(0, sched_accounting_read(0, &after));
+    assert_eq(before.busy_ticks + 1, after.busy_ticks);
+    assert_eq(before.idle_ticks + 1, after.idle_ticks);
+    assert_eq(before.epoch, after.epoch);
+    assert_eq(before.tick_hz, after.tick_hz);
+    assert_eq(1, after.valid);
+    assert_eq(busy_runtime + 1, fixture_busy.runtime_ticks);
+    assert_eq(idle_runtime, fixture_idle.runtime_ticks);
+    assert_eq(alloc_before, test_alloc_count);
+    assert_eq(free_before, test_free_count);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(busy_idle_and_runtime_accounting),
     TEST_ENTRY(scheduler_not_ready_drops_ticks),
@@ -329,6 +376,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(bsp_pit_fallback_route_keeps_epoch),
     TEST_ENTRY(read_rejects_invalid_cpu),
     TEST_ENTRY(hot_path_locks_and_never_allocates),
+    TEST_ENTRY(missing_idle_drops_ticks_and_recovers),
 TEST_LIST_END
 
 int main(void) {

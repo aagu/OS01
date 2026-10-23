@@ -121,6 +121,10 @@ void sched_account_tick(void)
 
     task_t *cur = current;
     task_t *idle = rq->idle;
+    /* No idle identity means this sample cannot be classified. Keep
+     * both CPU counters and task runtime unchanged until it is ready. */
+    if (!idle)
+        return;
 
     struct cpu_usage_account *u = &usage[cpu];
     uint64_t flags = spin_lock_irqsave(&u->lock);
@@ -128,7 +132,7 @@ void sched_account_tick(void)
         spin_unlock_irqrestore(&u->lock, flags);
         return;
     }
-    if (idle && cur == idle)
+    if (cur == idle)
         u->idle_ticks++;
     else
         u->busy_ticks++;
