@@ -33,7 +33,8 @@
  *     unclamped 128-bit value keeps the raw ratio;
  *   - OOM (shim-injected) returns -ENOMEM, keeps the previous display
  *     rows AND the previous baseline (the next good round deltas from
- *     the pre-OOM sample); destroy frees everything exactly once.
+ *     the pre-OOM sample), and pushes empty history points for both
+ *     allocation failure sites; destroy frees everything exactly once.
  */
 
 #include "test_framework.h"
@@ -657,8 +658,8 @@ static TEST_FUNC(test_oom_preserves_baseline)
     assert_false(find_proc(&m, 5)->cpu.valid);
     model_malloc_fail_after = -1;
 
-    /* the next good round deltas from the PRE-OOM baseline: the failed
-     * round's sample never entered the history (Δt = 2s but ΔR = 0) */
+    /* The next good round deltas from the PRE-OOM baseline: the failed
+     * round never committed its counters (Δt = 2s, ΔR = 100). */
     set_cpu(&c, 0, 1, 100, 1000);
     set_proc(&c, 5, 5, 2000000000ULL, 100, "p5");
     assert_eq(monitor_model_update(&m, &c), 0);
@@ -701,6 +702,103 @@ static TEST_FUNC(test_oom_preserves_baseline)
     free_sample(&b);
     free_sample(&c);
 }
+
+/* Allocation failure must preserve the committed snapshot, but still take
+ * one time slot. Exercise both allocations and wrap a whole history ring. */
+static void check_oom_history(int fail_after)
+{
+    struct monitor_model m = { 0 }, before, expected;
+    struct monitor_sample a = mk_sample(), b = mk_sample();
+    struct monitor_sample failed = mk_sample(), recovered = mk_sample();
+    struct monitor_process_row old_row;
+    struct monitor_proc_base old_base;
+
+    model_malloc_fail_after = -1;
+    monitor_model_init(&m);
+    set_cpu(&a, 0, 1, 0, 0);
+    set_proc(&a, 5, 5, 0, 0, "p5");
+    a.mem_valid = 1;
+    a.mem.total_bytes = 400;
+    a.mem.used_bytes = 100;
+    a.mem.free_bytes = 300;
+    assert_eq(monitor_model_update(&m, &a), 0);
+    set_cpu(&b, 0, 1, 50, 50);
+    set_proc(&b, 5, 5, 1000000000ULL, 50, "p5");
+    b.mem_valid = 1;
+    b.mem = a.mem;
+    assert_eq(monitor_model_update(&m, &b), 0);
+    assert_eq(m.total_cpu.percent_10000, 5000);
+    assert_eq(find_proc(&m, 5)->cpu.percent_10000, 5000);
+    assert_eq(m.mem_pct.percent_10000, 2500);
+    memcpy(&before, &m, sizeof(before));
+    memcpy(&old_row, m.proc_rows, sizeof(old_row));
+    memcpy(&old_base, m.proc_base, sizeof(old_base));
+    assert_eq(model_malloc_balance, 2);
+
+    // A failed round must not publish these different keys/rows/values.
+    failed.stat.tick_hz = 200;
+    set_cpu(&failed, 0, 9, 900, 100);
+    set_proc(&failed, 99, 999, 2000000000ULL, 9000, "not committed");
+    failed.mem_valid = 1;
+    failed.mem.total_bytes = 400;
+    failed.mem.used_bytes = 400;
+    for (unsigned round = 0; round < 62; ++round) {
+        failed.processes[0].sampled_ns = (round + 2ULL) * 1000000000ULL;
+        model_malloc_fail_after = fail_after;
+        assert_eq(monitor_model_update(&m, &failed), -ENOMEM);
+        // In particular, allocation #2 must free the temporary row array.
+        assert_eq(model_malloc_balance, 2);
+        memcpy(&expected, &before, sizeof(expected));
+        memcpy(&expected.total_history, &m.total_history, sizeof(m.total_history));
+        memcpy(&expected.mem_history, &m.mem_history, sizeof(m.mem_history));
+        assert_eq(memcmp(&m, &expected, sizeof(m)), 0);
+        assert_eq(memcmp(m.proc_rows, &old_row, sizeof(old_row)), 0);
+        assert_eq(memcmp(m.proc_base, &old_base, sizeof(old_base)), 0);
+        if (round == 0) {
+            assert_eq(m.total_history.count, 3);
+            assert_eq(m.mem_history.count, 3);
+            assert_false(monitor_history_get(&m.total_history, 0)->valid);
+            assert_false(monitor_history_get(&m.mem_history, 0)->valid);
+            assert_true(monitor_history_get(&m.total_history, 1)->valid);
+            assert_true(monitor_history_get(&m.mem_history, 1)->valid);
+            assert_eq(monitor_history_get(&m.total_history, 1)->percent_10000, 5000);
+            assert_eq(monitor_history_get(&m.mem_history, 1)->percent_10000, 2500);
+        }
+    }
+    assert_eq(m.total_history.count, 60);
+    assert_eq(m.mem_history.count, 60);
+    for (unsigned age = 0; age < 60; ++age) {
+        assert_false(monitor_history_get(&m.total_history, age)->valid);
+        assert_false(monitor_history_get(&m.mem_history, age)->valid);
+    }
+
+    model_malloc_fail_after = -1;
+    set_cpu(&recovered, 0, 1, 3200, 3200);
+    set_proc(&recovered, 5, 5, 64000000000ULL, 3200, "p5");
+    recovered.mem_valid = 1;
+    recovered.mem.total_bytes = 400;
+    recovered.mem.used_bytes = 160;
+    recovered.mem.free_bytes = 240;
+    assert_eq(monitor_model_update(&m, &recovered), 0);
+    // 3150 ticks over 63 seconds since the last committed baseline = 50%.
+    assert_eq(find_proc(&m, 5)->cpu.percent_10000, 5000);
+    assert_true(find_proc(&m, 5)->cpu.valid);
+    assert_true(monitor_history_get(&m.total_history, 0)->valid);
+    assert_eq(monitor_history_get(&m.total_history, 0)->percent_10000, 5000);
+    assert_true(monitor_history_get(&m.mem_history, 0)->valid);
+    assert_eq(monitor_history_get(&m.mem_history, 0)->percent_10000, 4000);
+    assert_false(monitor_history_get(&m.total_history, 1)->valid);
+    assert_false(monitor_history_get(&m.mem_history, 1)->valid);
+    monitor_model_destroy(&m);
+    assert_eq(model_malloc_balance, 0);
+    free_sample(&a);
+    free_sample(&b);
+    free_sample(&failed);
+    free_sample(&recovered);
+}
+
+static TEST_FUNC(test_first_alloc_oom_history) { check_oom_history(0); }
+static TEST_FUNC(test_second_alloc_oom_history) { check_oom_history(1); }
 
 /* ── 10. API contract: NULL safety, invalid stat round, destroy ──── */
 
@@ -762,6 +860,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_forces_128_bit_intermediates),
     TEST_ENTRY(test_history_ring),
     TEST_ENTRY(test_oom_preserves_baseline),
+    TEST_ENTRY(test_first_alloc_oom_history),
+    TEST_ENTRY(test_second_alloc_oom_history),
     TEST_ENTRY(test_api_contract),
 TEST_LIST_END
 
