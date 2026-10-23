@@ -710,14 +710,7 @@ TEST_LIST_END
 
 int main(void)
 {
-    /* mmap the kernel half window so PA + ARCH_PAGE_OFFSET resolves.
-     * <memory/vmm.h> defines `mmap` as a macro (the kernel's typed
-     * page-table-root pointer), which collides with the host libc
-     * mmap(2) call we need to set up the test's backing region.
-     * Undef the macro here so the system mmap is callable; the
-     * kernel type is still available via kernel_map's declaration
-     * elsewhere in the TU. */
-    #undef mmap
+    /* mmap the kernel half window so PA + ARCH_PAGE_OFFSET resolves. */
     void *base = mmap((void *)(uintptr_t)ARCH_PAGE_OFFSET,
                       0x200000ULL,                          /* 2 MiB window */
                       PROT_READ | PROT_WRITE,

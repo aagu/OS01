@@ -5,10 +5,6 @@
 #include <random/random.h>
 #include <memory/vmm.h>
 #include <memory/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
-// kernel/vmm.h defines a legacy `mmap` type macro (uint64_t*) that collides
-// with devfs_ops.mmap / ops->mmap below — undef it here.  devfs.c never uses
-// `mmap` as a type.  (Same pattern as vma.c and fb.c.)
-#undef mmap
 #include <arch/cpu.h>
 #include <memory/slab.h>
 #include <driver/serial.h>

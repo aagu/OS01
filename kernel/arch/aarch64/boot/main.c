@@ -468,7 +468,7 @@ void aarch64_main(const struct boot_context *handoff)
         log_err("M1 FATAL reason=runtime-init\n");
         for (;;) arch_cpu_halt();
     }
-    /* M3.5 Task 24: pin kernel_map = (mmap)(pa + ARCH_PAGE_OFFSET)
+    /* M3.5 Task 24: pin kernel_map = (ptbl_t)(pa + ARCH_PAGE_OFFSET)
      * where pa = aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK.
      * arch_boot_direct_map_init() above configured the runtime page
      * tables and (via aarch64_install_ttbr1()) installed the M1

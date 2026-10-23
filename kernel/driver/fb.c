@@ -275,15 +275,12 @@ static int fb_ioctl(struct vfs_node *node, int cmd, void *arg)
 }
 
 // ── Public devfs_ops table ───────────────────────────────────
-// mmap macro (uint64_t*) conflicts with the .mmap designated initializer
-#undef mmap
 const struct devfs_ops fb_ops = {
     .read  = fb_read,
     .write = fb_write,
     .mmap  = fb_mmap,
     .ioctl = fb_ioctl,
 };
-#define mmap uint64_t*
 
 // ── fb_get_info: snapshot live framebuffer metadata ─────────
 int fb_get_info(struct fb_info *out)

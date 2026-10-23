@@ -49,7 +49,7 @@
  * owns its own definition in kernel/memory/vmm.c.  arch_vmm_init()
  * pins it on first call; before that it is NULL and any
  * arch_vmm_* entry returns -EINVAL (a check_kernel_map helper). */
-mmap kernel_map = NULL;
+ptbl_t kernel_map = NULL;
 
 /* ── Small helpers ──────────────────────────────────────────────── */
 
@@ -287,7 +287,7 @@ int arch_vmm_init(void)
      * aarch64_pt_root_publish calls vmm_gate_violation (default spin)
      * — we don't need to gate against that here. */
     (void)aarch64_pt_root_publish(pa);
-    kernel_map = (mmap)(uintptr_t)(pa + ARCH_PAGE_OFFSET);
+    kernel_map = (ptbl_t)(uintptr_t)(pa + ARCH_PAGE_OFFSET);
     return 0;
 }
 

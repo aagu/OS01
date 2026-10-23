@@ -67,17 +67,7 @@ typedef struct vfs_ops {
     int (*truncate)(struct vfs_node *node, uint64_t new_size);
 
     // Memory-map a device's memory region into user space.
-    // The mmap macro from kernel/vmm.h (mmap = uint64_t*) conflicts with
-    // this field name, so we save/restore the macro around it.
-#ifdef mmap
-#undef mmap
-#define VFS_MMAP_RESTORE
-#endif
     int (*mmap)(struct vfs_node *, struct vma *);
-#ifdef VFS_MMAP_RESTORE
-#define mmap uint64_t*
-#undef VFS_MMAP_RESTORE
-#endif
 
     // Create a symbolic link named `name` in `parent` whose target is
     // `target`.  Returns 0 or -errno.

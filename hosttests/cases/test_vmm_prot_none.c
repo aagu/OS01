@@ -425,9 +425,7 @@ TEST_LIST_END
 
 int main(void)
 {
-    /* mmap the kernel half window. Undef mmap macro (the kernel
-     * type in <memory/vmm.h> clashes with the host libc). */
-    #undef mmap
+    /* mmap the kernel half window. */
     void *base = mmap((void *)(uintptr_t)ARCH_PAGE_OFFSET,
                       0x200000ULL,                          /* 2 MiB window */
                       PROT_READ | PROT_WRITE,

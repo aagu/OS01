@@ -7,7 +7,7 @@
  * This header exposes ONLY:
  *   - the VM_* semantic bits and their composite values,
  *   - the arch_vmm_* semantic API declarations,
- *   - the shared mmap type / kernel_map and TLB helpers.
+ *   - the shared ptbl_t type / kernel_map and TLB helpers.
  *
  * It must NOT define any x86 PAGE_* hardware PTE bits; those live in
  * the x86-private <arch/x86_64/pte.h>, which only x86-only files
@@ -39,7 +39,7 @@
 #define VM_DEVICE       (VM_PRESENT | VM_WRITE | VM_NOCACHE | VM_NO_EXEC)
 
 // ── Arch-neutral semantic API (backends: Task 15 aarch64, Task 16) ──
-// All functions take the address-space root as a raw pointer (mmap).
+// All functions take the address-space root as a raw pointer (uint64_t *).
 // vm_flags are VM_* combinations; invalid combinations return -EINVAL
 // (e.g. VM_NOCACHE without VM_NO_EXEC).  None of these ever free a
 // data page — free/COW ownership stays with the caller-side logic.
@@ -70,9 +70,13 @@ void user_write_range_end(void);
 #define KERNEL_MEM_OFFSET 0xffffffff80000000
 #define PHYS_MEM_OFFSET 0xffff800000000000
 
-#define mmap uint64_t*
+// Pointer to a page-table level (root or intermediate).  Replaces the old
+// `#define mmap uint64_t*` type macro (ARCH-7): that macro poisoned the name
+// `mmap` repo-wide, forcing save/restore blocks around every `ops->mmap`
+// field.  A typedef collides with nothing.
+typedef uint64_t *ptbl_t;
 
-extern mmap kernel_map;
+extern ptbl_t kernel_map;
 
 // Backward-compatible aliases for existing callers
 #define flush_tlb()    arch_flush_tlb_all()
@@ -81,7 +85,7 @@ extern mmap kernel_map;
 void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address,
                   uintptr_t virtual_address, uint64_t flags);
 uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address);
-mmap vmm_alloc_map(void);
+ptbl_t vmm_alloc_map(void);
 
 // 4KB PTE-level map helpers (x86 backend; raw pgdir)
 int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,

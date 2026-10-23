@@ -50,16 +50,7 @@ struct devfs_ops {
     int (*write)(struct vfs_node *, uint64_t, uint64_t, void *);
     uint32_t (*poll)(void *priv, uint32_t requested,
                      struct poll_table *pt);
-    // Guard against mmap macro from kernel/vmm.h (mmap = uint64_t*)
-#ifdef mmap
-#undef mmap
-#define DEVFS_MMAP_RESTORE
-#endif
     int (*mmap)(struct vfs_node *, struct vma *);
-#ifdef DEVFS_MMAP_RESTORE
-#define mmap uint64_t*
-#undef DEVFS_MMAP_RESTORE
-#endif
     int (*ioctl)(struct vfs_node *, int cmd, void *arg);
     int (*ioctl_file)(struct file *, int cmd, void *arg);
     void (*release_file)(struct file *);

@@ -72,7 +72,7 @@
 #include <core/printk.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
-#include <memory/vmm.h>                    /* kernel_map + mmap type (M3.5 Task 24) */
+#include <memory/vmm.h>                    /* kernel_map + ptbl_t type (M3.5 Task 24) */
 
 #ifdef OS01_SELFTEST
 
@@ -422,7 +422,7 @@ static int section_split_2m(uint64_t *root)
 /* ── Section 5: kernel_map pinned to TTBR1's direct-map pointer ──
  *
  * Spec §4.5: arch_vmm_init() pins kernel_map =
- *     (mmap)(uintptr_t)((aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK)
+ *     (ptbl_t)(uintptr_t)((aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK)
  *                       + ARCH_PAGE_OFFSET)
  *
  * This section is the on-target companion to hosttests/cases/

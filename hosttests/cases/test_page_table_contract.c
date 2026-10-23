@@ -69,7 +69,7 @@ size_t slab_init(void) { return 0; }
 
 /* ── Test-controlled vmm_init + kernel_map ──────────────────────
  *
- * vmm.c exports `mmap kernel_map` and `int vmm_init(void)`. We
+ * vmm.c exports `ptbl_t kernel_map` and `int vmm_init(void)`. We
  * don't link vmm.c here. Instead we provide our own kernel_map and
  * our own vmm_init stub so the x86 backend can read both. The stub:
  *

@@ -30,8 +30,6 @@
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>
 
-#undef mmap
-
 /* ── Test Assertions ── */
 static int g_failed = 0;
 

@@ -8,11 +8,11 @@
  * (nonzero, 4 KiB aligned, < 1 TiB), calls aarch64_pt_init_locks()
  * (idempotent static-locks double insurance, Task 17 §5.4), publishes
  * the PA via aarch64_pt_root_publish (idempotent — boot_direct_map.c
- * already published), and pins kernel_map = (mmap)(pa + ARCH_PAGE_OFFSET).
+ * already published), and pins kernel_map = (ptbl_t)(pa + ARCH_PAGE_OFFSET).
  *
  * Cases per the brief:
  *   1. valid ttbr1 (nonzero, 4 KiB aligned, < 1 TiB) → rc = 0,
- *      kernel_map == (mmap)(pa + ARCH_PAGE_OFFSET).
+ *      kernel_map == (ptbl_t)(pa + ARCH_PAGE_OFFSET).
  *   2. pa == 0  (raw == 0) → -EINVAL via the `pa == 0` guard,
  *      kernel_map untouched.
  *   3. pa == 0  via permitted non-base bits only (masked base = 0)
@@ -235,13 +235,7 @@ int main(void)
     /* mmap the kernel half window so PA + ARCH_PAGE_OFFSET resolves
      * through the host's direct-map. The aarch64 test harness's
      * <arch/mmu.h> defines ARCH_PAGE_OFFSET = 0x100000000; the
-     * kernel-half mmap below satisfies that. <memory/vmm.h>
-     * `#define`s `mmap` as a macro (the kernel's typed page-table
-     * root pointer), which collides with the host libc mmap(2) call.
-     * Undef the macro here so the system mmap is callable; the
-     * kernel type is still available via kernel_map's declaration
-     * in vmm_backend.c. */
-    #undef mmap
+     * kernel-half mmap below satisfies that. */
     void *base = mmap((void *)(uintptr_t)ARCH_PAGE_OFFSET,
                       0x200000ULL,                          /* 2 MiB window */
                       PROT_READ | PROT_WRITE,

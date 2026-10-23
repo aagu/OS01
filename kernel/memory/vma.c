@@ -701,16 +701,12 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         file_node = vfs_node_get(file->node);
 
         // Device node with mmap handler → device path.
-        // The mmap macro (uint64_t*) conflicts with ops->mmap field name.
-        // Save the callback pointer before undefining, then restore macro.
-        #undef mmap
         int (*_dev_mmap)(struct vfs_node *, struct vma *) =
             (file_node && file_node->ops &&
              (uint64_t)file_node->ops >= 0xffff800000000000ULL &&
              file_node->ops->mmap &&
              (uint64_t)file_node->ops->mmap >= 0xffff800000000000ULL)
             ? file_node->ops->mmap : NULL;
-        #define mmap uint64_t*
 
         if (_dev_mmap) {
             if (!(flags & MAP_SHARED))

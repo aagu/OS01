@@ -13,7 +13,7 @@
 #include <driver/serial.h>
 
 // kernel map
-mmap kernel_map;
+ptbl_t kernel_map;
 
 /* Allocate a fresh PGD/PUD/PMD table page. Returns 0 on success with
  * *out_pa set to the physical address; returns -ENOMEM if calloc
@@ -34,7 +34,7 @@ int vmm_boot_alloc_table(uint64_t *out_pa)
 }
 
 // get next Level of map
-mmap get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
+ptbl_t get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
     if (!(current_level[entry] & 1))
     {
@@ -182,11 +182,11 @@ int vmm_init()
     return 0;
 }
 
-mmap vmm_alloc_map() {
-    return (mmap)calloc(1, PAGE_4K_SIZE);
+ptbl_t vmm_alloc_map() {
+    return calloc(1, PAGE_4K_SIZE);
 }
 
-void vmm_free_user_map(mmap pgdir)
+void vmm_free_user_map(ptbl_t pgdir)
 {
     if (!pgdir)
         return;
