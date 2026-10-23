@@ -183,7 +183,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_decode.elf \
     $(TEST_BLD)/test_gui_input_nonce.elf \
     $(TEST_BLD)/test_gui_input_platform.elf \
-    $(TEST_BLD)/test_gui_input_lvgl.elf
+    $(TEST_BLD)/test_gui_input_lvgl.elf \
+    $(TEST_BLD)/test_intr_decode_x86.elf \
+    $(TEST_BLD)/test_intr_decode_aarch64.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -879,6 +881,60 @@ $(TEST_BLD)/test_aarch64_sync_fault.o: $(TEST_CASES)/test_aarch64_sync_fault.c \
 
 $(TEST_BLD)/test_aarch64_sync_fault.elf: $(TEST_BLD)/test_aarch64_sync_fault.o
 	$(HOST_CC) -o $@ $<
+
+# ── Interrupt dispatch phase 1, Task 1: normalized event decoders ──
+# The x86_64 decoder is compiled against the production arch/regs.h
+# facade, which selects arch/x86_64/regs.h on an x86_64 host.
+X86_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                          $(LIBC_INC)
+
+# The aarch64 decoder needs the PRODUCTION aarch64 pt_regs_t even
+# though the host is x86_64.  mock/intr_dispatch/aarch64/arch/regs.h
+# shadows the arch/regs.h facade (which would otherwise select the x86
+# layout through __x86_64__) and re-includes arch/aarch64/regs.h; the
+# mock directory therefore has to precede KERNEL_INC on the include
+# path, and the production per-arch header is still resolved from
+# kernel/include because the mock tree has no arch/aarch64/ directory.
+A64_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+                          -I$(TEST_MOCK)/intr_dispatch/aarch64 \
+                          $(KERNEL_INC) $(LIBC_INC)
+
+$(TEST_BLD)/x86_intr_decode_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/intr/intr_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_x86.o: $(TEST_CASES)/test_intr_decode_x86.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_x86.elf: $(TEST_BLD)/test_intr_decode_x86.o \
+		$(TEST_BLD)/x86_intr_decode_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/aarch64_intr_decode_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/intr_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_aarch64.o: \
+		$(TEST_CASES)/test_intr_decode_aarch64.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_aarch64.elf: \
+		$(TEST_BLD)/test_intr_decode_aarch64.o \
+		$(TEST_BLD)/aarch64_intr_decode_production.o
+	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 1: checked PMM metadata layout calculator.
 # Links the REAL kernel/memory/pmm_boot.c against the host TU. The
