@@ -476,7 +476,17 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-kernel-canary-contract` | 仅 kernel canary 编译旗标契约 |
 | `test-aarch64-gic-spi` | 仅 PL011 RX 到 GIC SPI 注入 |
 | `test-resolution-host` | 分辨率切换器宿主聚焦测试分发（`RES_CASE=`） |
+| `test-monitor-host` | monitor 宿主聚焦测试分发（`CASE=`，见下） |
 | `test-gui-host` | GUI 宿主聚焦测试分发（`CASE=`，见下） |
+
+#### monitor 聚焦 CASE（`test-monitor-host CASE=`）
+
+`make PROFILE=x86_64-clang test-monitor-host CASE=collect` 运行单个聚焦组。
+合法 CASE 为 `file accounting pmm procfs collect model render`；省略、空值或
+纯空白执行全部七组。只接受一个精确的 CASE 名称；`CASE=all` 不属于此接口，
+执行完整组应省略 CASE。未知值、通配符及多个 CASE 均报错并列明合法值。
+此入口要求 profile 的 `rootfs` 能力；能力不足或 CASE 非法时，在任何递归
+构建前失败，包括 `-n` 和 `-j` 调用。分发回归接入 `make test-harness`。
 
 #### GUI 聚焦 CASE（`test-gui-host CASE=`）
 

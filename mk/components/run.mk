@@ -419,9 +419,8 @@ test-pmm-boot-reservation:
 # the `build_contract.sh` mode loop.
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
-# Every fixture replaces subprocess.Popen with a fake, so no QEMU process
-# can ever start.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner
+# Fixtures use fakes or host-only contract probes; no QEMU process starts.
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_monitor_host_dispatch
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -856,21 +855,15 @@ _test-monitor-host-run-model:
 _test-monitor-host-run-render:
 	@echo "  [test-monitor-host] render"
 	$(call os01_submake,hosttests,test-monitor-render $(OS01_SUBMAKE_ARGS))
-test-monitor-host: CASE ?=
-test-monitor-host: CASE := $(CASE)
-test-monitor-host: $(if $(CASE),_test-monitor-host-run-$(CASE),$(foreach c,$(MONITOR_CASES),_test-monitor-host-run-$(c)))
+# Prerequisites run before recipes, even before require_capability. Only
+# populate the graph for capable profiles and one exact registered CASE.
+# Keep errors in the recipe so other targets can use their own CASE values.
+MONITOR_CASE := $(strip $(CASE))
+MONITOR_CASE_VALID := $(if $(MONITOR_CASE),$(if $(filter 1,$(words $(MONITOR_CASE))),$(filter $(MONITOR_CASES),$(MONITOR_CASE))),yes)
+test-monitor-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(MONITOR_CASE_VALID)),$(foreach c,$(if $(MONITOR_CASE),$(MONITOR_CASE),$(MONITOR_CASES)),_test-monitor-host-run-$(c)))
 	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    "") echo "  [test-monitor-host] full monitor group: $(MONITOR_CASES)";; \
-	    file) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    accounting) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    pmm) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    procfs) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    collect) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    model) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    render) echo "  [test-monitor-host] CASE=$(CASE)";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(MONITOR_CASES)" >&2; exit 1;; \
-	  esac
+	$(if $(MONITOR_CASE_VALID),,$(error unknown CASE='$(MONITOR_CASE)'; valid: $(MONITOR_CASES)))
+	@echo "  [test-monitor-host] $(if $(MONITOR_CASE),CASE=$(MONITOR_CASE),full monitor group: $(MONITOR_CASES))"
 
 # ── User runtime consumer gate (monitor plan Task 5) ─────────
 # Builds the user runtime consumer (mk/components/runtime.mk: independent
