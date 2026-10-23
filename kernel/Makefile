@@ -73,6 +73,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
+                   intr/dispatch.c \
                    core/stack_chk.c \
                    core/printk.c \
                    subsys/subsys.c \
@@ -88,6 +89,9 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_page_table_multicore.c
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
+# intr/dispatch.c is the arch-neutral common dispatcher (intr-dispatch
+# phase 1, Task 3): the strong aarch64 backends live in
+# arch/aarch64/intr/dispatch.c, collected by the wildcard below.
 else
 # Interrupt dispatch phase 1, Task 2: intr/dispatch.c is the new
 # arch-neutral common dispatcher.  It is EXCLUDED from the x86 product

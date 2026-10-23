@@ -186,7 +186,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_lvgl.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
-    $(TEST_BLD)/test_intr_dispatch.elf
+    $(TEST_BLD)/test_intr_dispatch.elf \
+    $(TEST_BLD)/test_intr_backend_aarch64.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -969,6 +970,61 @@ $(TEST_BLD)/test_intr_dispatch.o: $(TEST_CASES)/test_intr_dispatch.c \
 $(TEST_BLD)/test_intr_dispatch.elf: \
 		$(TEST_BLD)/test_intr_dispatch.o \
 		$(TEST_BLD)/intr_dispatch_production.o
+	$(HOST_CC) -o $@ $^
+
+# ── Interrupt dispatch phase 1, Task 3: aarch64 routing backend ──
+# Links the PRODUCTION ARM decoder (aarch64_intr_decode_production.o,
+# built by the Task 1 rule above), the PRODUCTION aarch64 backend
+# (kernel/arch/aarch64/intr/dispatch.c) and a copy of the PRODUCTION
+# common dispatcher compiled against the aarch64 pt_regs_t (the Task 2
+# intr_dispatch_production.o object was compiled against the x86_64
+# facade; this binary needs every TU to agree on the aarch64 layout, so
+# it gets its own object built with the same mock shim Task 1 used).
+#
+# The terminal ends are spied in the test TU: aarch64_el1_sync_fatal and
+# arch_intr_bad_event escape via longjmp (the real ones park the CPU),
+# gic_dev_dispatch counts calls and gic_dev_current returns a fake device
+# (gic.c has heavy DTB/boot-log deps and is deliberately not linked).
+#
+# Like the Task 2 dispatcher harness, <setjmp.h> must come from the host:
+# libc/include is added with -idirafter so it never wins over the system
+# header while the kernel libc remains reachable for the other TUs.
+A64_BACKEND_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+                          -I$(TEST_MOCK)/intr_dispatch/aarch64 \
+                          $(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/aarch64_intr_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/intr_dispatch_aarch64_production.o: \
+		$(TESTS_DIR)/kernel/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_backend_aarch64.o: \
+		$(TEST_CASES)/test_intr_backend_aarch64.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_backend_aarch64.elf: \
+		$(TEST_BLD)/test_intr_backend_aarch64.o \
+		$(TEST_BLD)/aarch64_intr_backend_production.o \
+		$(TEST_BLD)/aarch64_intr_decode_production.o \
+		$(TEST_BLD)/intr_dispatch_aarch64_production.o
 	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 1: checked PMM metadata layout calculator.
