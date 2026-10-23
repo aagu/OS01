@@ -1017,6 +1017,133 @@ static TEST_FUNC(test_collect_oom_rolls_back_round)
     assert_eq(mon_malloc_balance, 0);
 }
 
+/* Fragment every field (including the escaped Name) across read calls. */
+static TEST_FUNC(test_collect_short_reads)
+{
+    static const size_t chunks[] = { 1, 2, 7, 31 };
+    static const char *names[] = { "42", "7" };
+    for (size_t c = 0; c < sizeof(chunks) / sizeof(chunks[0]); c++) {
+        struct monitor_sample s = { 0 };
+        fixture_reset(5);
+        fixture_add("/proc/stat", stat_text)->chunk = chunks[c];
+        fixture_add("/proc/meminfo", meminfo_text)->chunk = chunks[c];
+        fixture_add("/proc/thermal", thermal_text)->chunk = chunks[c];
+        fixture_add("/proc/42/status", status_text_42)->chunk = chunks[c];
+        fixture_add("/proc/7/status", status_text_7)->chunk = chunks[c];
+        fixture_dir(names, 2);
+        /* Reuse the target to exercise replacement of the previous round. */
+        for (int round = 0; round < 2; round++) {
+            assert_eq(monitor_collect(&s), 0);
+            assert_true(s.stat_valid);
+            assert_eq(s.stat.sampled_ns, 23500000000ULL);
+            assert_eq(s.stat.ncpu, 3);
+            assert_eq(s.stat.cpu[0].busy_ticks, 1200);
+            assert_eq(s.stat.cpu[1].idle_ticks, 2050);
+            assert_true(s.mem_valid);
+            assert_eq(s.mem.total_bytes, 6144ULL * 1024);
+            assert_true(s.thermal_valid);
+            assert_eq(s.thermal.sampled_ns, 23500000000ULL);
+            assert_eq(s.nprocesses, 2);
+            assert_eq(s.processes[0].pid, 42);
+            assert_str_eq(s.processes[0].comm, "mon\nitor");
+            assert_eq(s.processes[0].runtime_ticks, 27);
+            assert_eq(s.processes[1].pid, 7);
+            assert_eq(open_fds, baseline_open_fds);
+            assert_true(max_open_fds <= baseline_open_fds + 2);
+            assert_eq(mon_malloc_balance, 1);
+        }
+        monitor_sample_destroy(&s);
+        assert_eq(mon_malloc_balance, 0);
+    }
+}
+
+/* Use parseable padding: truncating an overlong file would otherwise
+ * produce a valid document, so these cases specifically test the cap. */
+static TEST_FUNC(test_collect_read_cap_boundaries)
+{
+    static const struct {
+        const char *path;
+        const char *text;
+        size_t cap;
+    } files[] = {
+        { "/proc/stat", stat_text, MONITOR_STAT_CAP },
+        { "/proc/meminfo", meminfo_text, MONITOR_MEMINFO_CAP },
+        { "/proc/thermal", thermal_text, MONITOR_THERMAL_CAP },
+        { "/proc/42/status", status_text_42, MONITOR_STATUS_CAP },
+    };
+    static const size_t chunks[] = { 0, 1, 7 };
+    static const char *names[] = { "42", "7" };
+    char padded[MONITOR_STATUS_CAP + 2];
+    for (size_t f = 0; f < sizeof(files) / sizeof(files[0]); f++) {
+        for (size_t c = 0; c < sizeof(chunks) / sizeof(chunks[0]); c++) {
+            for (int delta = -1; delta <= 1; delta++) {
+                size_t len = files[f].cap + delta;
+                size_t prefix = strlen(files[f].text);
+                memcpy(padded, files[f].text, prefix);
+                memset(padded + prefix, '\n', len - prefix);
+                padded[len] = '\0';
+                struct monitor_sample s = { 0 };
+                fixture_reset(5);
+                for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+                    fixture_add(files[i].path, i == f ? padded : files[i].text)
+                        ->chunk = chunks[c];
+                fixture_add("/proc/7/status", status_text_7)->chunk = chunks[c];
+                fixture_dir(names, 2);
+                assert_eq(monitor_collect(&s), 0);
+                assert_eq(s.stat_valid, !(delta == 1 && f == 0));
+                assert_eq(s.mem_valid, !(delta == 1 && f == 1));
+                assert_eq(s.thermal_valid, !(delta == 1 && f == 2));
+                assert_eq(s.nprocesses, delta == 1 && f == 3 ? 1 : 2);
+                assert_eq(s.processes[s.nprocesses - 1].pid, 7);
+                assert_eq(open_fds, baseline_open_fds);
+                assert_true(max_open_fds <= baseline_open_fds + 2);
+                monitor_sample_destroy(&s);
+                assert_eq(mon_malloc_balance, 0);
+            }
+        }
+    }
+}
+
+static TEST_FUNC(test_collect_zero_tick_hz)
+{
+    const char *zero = "Version: 1\nSampleNs: 5\nTickHz: 0\n"
+        "cpu0: online=1 valid=1 epoch=1 busy=2 idle=3\n";
+    struct monitor_stat_sample stat;
+    assert_eq(monitor_parse_stat(zero, strlen(zero), &stat), -EINVAL);
+    /* Positive rates are valid protocol values, not hardcoded to 100. */
+    const char *one = "Version: 1\nSampleNs: 5\nTickHz: 1\n"
+        "cpu0: online=1 valid=1 epoch=1 busy=2 idle=3\n";
+    assert_eq(monitor_parse_stat(one, strlen(one), &stat), 0);
+    assert_eq(stat.cpu[0].tick_hz, 1);
+
+    struct monitor_sample s = { 0 };
+    static const char *names[] = { "42" };
+    fixture_reset(5);
+    struct fake_file *file = fixture_add("/proc/stat", zero);
+    file->chunk = 1;
+    fixture_add("/proc/meminfo", meminfo_text)->chunk = 1;
+    fixture_add("/proc/thermal", thermal_text)->chunk = 1;
+    fixture_add("/proc/42/status", status_text_42)->chunk = 1;
+    fixture_dir(names, 1);
+    assert_eq(monitor_collect(&s), 0);
+    assert_false(s.stat_valid);
+    assert_true(s.mem_valid);
+    assert_true(s.thermal_valid);
+    assert_eq(s.nprocesses, 1);
+    assert_eq(s.processes[0].pid, 42);
+    assert_eq(open_fds, baseline_open_fds);
+    /* A later valid sample recovers normally on the same target. */
+    file->text = stat_text;
+    file->len = strlen(stat_text);
+    assert_eq(monitor_collect(&s), 0);
+    assert_true(s.stat_valid);
+    assert_eq(s.stat.tick_hz, 100);
+    assert_eq(s.nprocesses, 1);
+    assert_eq(open_fds, baseline_open_fds);
+    monitor_sample_destroy(&s);
+    assert_eq(mon_malloc_balance, 0);
+}
+
 static TEST_FUNC(test_collect_null_and_pid_validation)
 {
     struct monitor_sample s = { 0 };
@@ -1054,6 +1181,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_collect_dedup_enoent_invalid_drop),
     TEST_ENTRY(test_collect_overlong_and_metric_isolation),
     TEST_ENTRY(test_collect_oom_rolls_back_round),
+    TEST_ENTRY(test_collect_short_reads),
+    TEST_ENTRY(test_collect_read_cap_boundaries),
+    TEST_ENTRY(test_collect_zero_tick_hz),
     TEST_ENTRY(test_collect_null_and_pid_validation),
 TEST_LIST_END
 

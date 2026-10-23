@@ -7,6 +7,8 @@
 
 ## 2026-10-23
 
+- fix(monitor): **parked monitor #10：短读覆盖与零频率校验闭环**：真实 collector 的分块累积逻辑正确，但 `/proc/stat` 解析器会接受 `TickHz: 0`，导致非法 CPU 样本进入模型。补充正值校验，其他正频率继续接受；新增 1/2/7/31 字节分块读取、跨 read 的 Name 转义、复用 sample、四类文件 cap−1/cap/cap+1 边界与指标隔离覆盖。超长 fixture 使用可解析文本加空行，确保静默截断无法蒙混通过。旧实现零频率用例两条断言失败，修复后 collect 12 项/1278 断言、完整 monitor/host、用户镜像构建及独立 ASan/UBSan 检查通过。详见 [调查与验证](debug/2026-10-23-monitor-collect-short-reads.md)。
+
 - fix(monitor): **parked monitor #9：OOM 历史时间轴闭环**：采样循环在模型分配失败后仍计入该轮并渲染，但 model 原先直接返回而不追加历史点，压缩 60 槽时间轴。两处分配失败统一追加 CPU/内存无效空点；上一轮已提交的显示快照和差分基线保持原样，第二次失败仍释放首次临时分配。明确更新 model 接口及 spec §7 的 OOM 约定，区分数据回滚与历史记账。新增两个确定性故障注入回归，覆盖 62 次连续失败、环回绕、旧快照/基线字节不变、恢复后按 63 秒差分和分配余额归零。旧实现两项回归失败；最终 model 14 项/1164 断言、完整 monitor/host、用户镜像构建通过，独立 ASan/UBSan 检查通过。详见 [调查与验证](debug/2026-10-23-monitor-oom-history.md)。
 
 - fix(x86): **`54c_user_fault_write_ro` 偶发 status=0 闭环**：异常 helper 在 `do_exit()` 之前提前写 `TASK_ZOMBIE`；#PF trap gate 保留 IF，定时器可将尚未完成清理的任务切出，父进程在 `on_cpu=0` 后提前回收其活动内核栈、读到默认退出码 0。删除 helper 的提前状态发布，由 `do_exit()` 在清理及 exit_code 写入后统一发布。临时主动调度探针红绿验证后移除；持久回归使用大惰性只读 VMA 延长 teardown 并重复 8 次，旧内核复现 6 PASS / 2 FAIL（waited 为目标 PID、errno=0、status=0），修复后通过。官方单 case 在 1/2/4/8 CPU 全通过（32/32 次），真实 terminal 五轮每轮 349 passed / 0 failed；完整 host 与静态检查通过。详见 [退出发布竞态调查](debug/2026-10-23-user-fault-zombie-publication.md)。
