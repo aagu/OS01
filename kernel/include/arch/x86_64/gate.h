@@ -144,7 +144,7 @@ inline void __attribute__((always_inline)) set_system_intr_gate(unsigned int n,u
 typedef void (*intr_handler_fn)(uint64_t nr, uint64_t parameter,
                                 pt_regs_t *regs);
 
-// Per-vector handler table.  generic_intr_dispatch (in intr/dispatch.c)
+// Per-vector handler table.  generic_intr_dispatch (in intr/vector_dispatch.c)
 // indexes this table by vector number.
 extern intr_handler_fn intr_handler_table[256];
 extern void *        intr_handler_param[256];

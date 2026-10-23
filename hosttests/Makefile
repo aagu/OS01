@@ -185,7 +185,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_platform.elf \
     $(TEST_BLD)/test_gui_input_lvgl.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
-    $(TEST_BLD)/test_intr_decode_aarch64.elf
+    $(TEST_BLD)/test_intr_decode_aarch64.elf \
+    $(TEST_BLD)/test_intr_dispatch.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -934,6 +935,40 @@ $(TEST_BLD)/test_intr_decode_aarch64.o: \
 $(TEST_BLD)/test_intr_decode_aarch64.elf: \
 		$(TEST_BLD)/test_intr_decode_aarch64.o \
 		$(TEST_BLD)/aarch64_intr_decode_production.o
+	$(HOST_CC) -o $@ $^
+
+# ── Interrupt dispatch phase 1, Task 2: common stateless dispatcher ──
+# The test TU links the PRODUCTION dispatcher (kernel/intr/dispatch.c)
+# and supplies STRONG spy definitions of the three architecture
+# backends (arch_intr_handle_sync / arch_intr_handle_irq /
+# arch_intr_bad_event).  The per-architecture bad_event.c backends are
+# NOT linked here: they mask interrupts and park the CPU forever, which
+# is not host-testable — the spy reproduces the same non-returning
+# contract with longjmp.
+#
+# The production dispatcher includes <arch/intr.h>, which pulls in
+# <intr/dispatch.h> and the arch/regs.h facade.  On an x86_64 HOST that
+# facade selects the x86_64 pt_regs_t, so both TUs below agree on the
+# frame layout.  libc/include is added with -idirafter (like the mutex
+# harness) so the host's <setjmp.h> wins over the kernel libc's.
+INTR_DISPATCH_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                             -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/intr_dispatch_production.o: $(TESTS_DIR)/kernel/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(INTR_DISPATCH_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_dispatch.o: $(TEST_CASES)/test_intr_dispatch.c \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(INTR_DISPATCH_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_dispatch.elf: \
+		$(TEST_BLD)/test_intr_dispatch.o \
+		$(TEST_BLD)/intr_dispatch_production.o
 	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 1: checked PMM metadata layout calculator.

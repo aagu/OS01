@@ -89,6 +89,13 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
 else
+# Interrupt dispatch phase 1, Task 2: intr/dispatch.c is the new
+# arch-neutral common dispatcher.  It is EXCLUDED from the x86 product
+# build on purpose: it calls arch_intr_handle_sync() / arch_intr_handle_irq(),
+# whose strong per-architecture definitions do not exist yet, and a missing
+# backend MUST fail the link (no weak no-op).  The x86 routing backend
+# lands in Task 4, which removes this filter-out.  The legacy per-vector
+# handler table moved to intr/vector_dispatch.c and is still collected here.
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
     $(wildcard syscall/*.c) \
@@ -103,7 +110,7 @@ KERNEL_C_SOURCES := \
     $(filter-out driver/fb_test.c,$(wildcard driver/*.c)) \
     $(wildcard ipc/*.c) \
     $(wildcard tty/*.c) \
-    $(wildcard intr/*.c) \
+    $(filter-out intr/dispatch.c,$(wildcard intr/*.c)) \
     $(wildcard block/*.c) \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
