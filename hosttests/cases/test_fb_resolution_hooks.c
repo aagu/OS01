@@ -8,6 +8,8 @@
  * transport.
  *
  * Contract under test:
+ *   - Cold file ioctl/release entries initialize the test lock once
+ *     before acquiring it, independently of bootstrap/reset ordering.
  *   - fb_test_req / fb_test_snapshot layout + command numbers (spec §8).
  *   - SNAPSHOT is a pure-output exception: it copies no request struct,
  *     samples DISPI index 0..10, restores the saved index, reports
@@ -31,6 +33,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <sys/wait.h>
 #include <test_framework.h>
 
 #include "fb_resolution_runtime.h"
@@ -47,6 +50,27 @@
 #include <bus/pci/pci.h>
 
 static int g_failed = 0;
+/* Use the host process ABI, avoiding OS01's inline fork syscall wrapper. */
+extern int host_fork(void) __asm__("fork");
+extern int host_waitpid(int pid, int *status, int options) __asm__("waitpid");
+extern void _exit(int status) __attribute__((noreturn));
+static bool g_observe_cold_lock;
+static spinlock_T *g_initialized_lock;
+static unsigned g_lock_inits, g_lock_acquires, g_uninitialized_acquires;
+
+void fb_resolution_test_spin_init(spinlock_T *lock)
+{
+    if (!g_observe_cold_lock) return;
+    g_initialized_lock = lock;
+    g_lock_inits++;
+}
+
+void fb_resolution_test_spin_acquire(spinlock_T *lock)
+{
+    if (!g_observe_cold_lock) return;
+    g_lock_acquires++;
+    if (lock != g_initialized_lock) g_uninitialized_acquires++;
+}
 
 #define CHECK_TRUE(cond) do { \
     if (!(cond)) { \
@@ -656,7 +680,45 @@ static void test_fault_clears_pending(void)
     fb_test_ops.release_file(f);
 }
 
+/* Run before setup_env/fb_test_init in the parent. Each child inherits
+ * pristine module statics, so one entry cannot warm up another's lock. */
+static void test_cold_file_callbacks_initialize_lock(void)
+{
+    const int commands[] = {FBIOTEST_ARM_MISMATCH, FBIOTEST_ARM_TERMINAL_ENOMEM, 0};
+    for (unsigned i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        int child = host_fork();
+        CHECK_TRUE(child >= 0);
+        if (child < 0) return;
+        if (child == 0) {
+            mock_current_task.pid = 31;
+            g_observe_cold_lock = true;
+            file_t *f = NULL;
+            if (fb_test_ops.open("fbtest", &f) != 0 || !f) _exit(2);
+            struct fb_test_req req = make_req(31, 7);
+            int rc = 0, repeated = -EBUSY;
+            if (commands[i]) {
+                rc = fb_test_ops.ioctl_file(f, commands[i], &req);
+                repeated = fb_test_ops.ioctl_file(f, commands[i], &req);
+            }
+            fb_test_ops.release_file(f);
+            bool failed = rc != 0 || repeated != -EBUSY || f->dev_private ||
+                          g_lock_inits != 1 || g_uninitialized_acquires != 0 ||
+                          g_lock_acquires != (commands[i] ? 3u : 1u);
+            free(f);
+            /* Encode uninitialized acquisitions without using OS01's
+             * FILE macros with the host libc in the forked child. */
+            _exit(g_uninitialized_acquires ? 10 + g_uninitialized_acquires :
+                  failed ? 1 : 0);
+        }
+        int status = 0;
+        CHECK_EQ(child, host_waitpid(child, &status, 0));
+        CHECK_TRUE(WIFEXITED(status));
+        CHECK_EQ(0, WEXITSTATUS(status));
+    }
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_cold_file_callbacks_initialize_lock),
     TEST_ENTRY(test_hooks_abi),
     TEST_ENTRY(test_hooks_registration_and_validation),
     TEST_ENTRY(test_snapshot_regs_and_index_restore),

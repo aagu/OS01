@@ -3497,11 +3497,13 @@ $(TEST_BLD)/bga_hooks.o: $(TESTS_DIR)/kernel/driver/bga.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/fb_test.o: $(TESTS_DIR)/kernel/driver/fb_test.c
+$(TEST_BLD)/fb_test.o: $(TESTS_DIR)/kernel/driver/fb_test.c \
+		$(TEST_MOCK)/fb_resolution_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_fb_resolution_hooks.o: $(TEST_CASES)/test_fb_resolution_hooks.c
+$(TEST_BLD)/test_fb_resolution_hooks.o: $(TEST_CASES)/test_fb_resolution_hooks.c \
+		$(TEST_MOCK)/fb_resolution_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 

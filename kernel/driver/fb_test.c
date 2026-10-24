@@ -223,6 +223,7 @@ static void fb_test_release_file(file_t *f)
     if (!f || !f->dev_private) {
         return;
     }
+    fb_test_lock_ensure();
     fb_test_file_t *st = (fb_test_file_t *)f->dev_private;
     if (st->hold_held) {
         fb_writer_end(&st->hold_lease);
@@ -339,6 +340,7 @@ static int fb_test_ioctl_file(file_t *f, int cmd, void *arg)
     if (!f || !f->dev_private) {
         return -EINVAL;
     }
+    fb_test_lock_ensure();
     fb_test_file_t *st = (fb_test_file_t *)f->dev_private;
 
     if (cmd == FBIOTEST_SNAPSHOT) {

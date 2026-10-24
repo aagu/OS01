@@ -40,8 +40,12 @@ typedef struct {
     volatile int lock;
 } spinlock_T;
 
+void fb_resolution_test_spin_init(spinlock_T *lock) __attribute__((weak));
+void fb_resolution_test_spin_acquire(spinlock_T *lock) __attribute__((weak));
+
 static inline void spin_init(spinlock_T *l) {
     l->lock = 0;
+    if (fb_resolution_test_spin_init) fb_resolution_test_spin_init(l);
 }
 
 static inline void spin_lock(spinlock_T *l) {
@@ -62,6 +66,7 @@ static inline long spin_trylock(spinlock_T *l) {
 }
 
 static inline uint64_t spin_lock_irqsave(spinlock_T *l) {
+    if (fb_resolution_test_spin_acquire) fb_resolution_test_spin_acquire(l);
     spin_lock(l);
     return 0;
 }

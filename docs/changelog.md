@@ -7,6 +7,8 @@
 
 ## 2026-10-24
 
+- fix(fbtest): **parked 文件 ioctl/release 冷调用锁初始化防护闭环**：正常启动已通过 bootstrap/reset 初始化锁，但两个文件回调缺少独立入口保障。各补一条 `fb_test_lock_ensure()`；新增三个独立子进程从未预热状态执行 register ARM、terminal ARM 和 release，观察真实回调的初始化/取锁顺序与幂等性。旧实现三项失败，修复后 hooks 13 场景/136 断言、完整分辨率宿主九组、`test-host` 及测试配置 QEMU SMP 1/2 共 26 项正常路径协议检查通过。未声称复现正常启动死锁，也未扩大为并发首次初始化协议。详见 [调查与验证](debug/2026-10-24-fbtest-cold-lock.md)。
+
 - test(pty): **parked 并发 resize fixture 初态误报与停止标志同步闭环**：worker 启动前通过真实 ioctl 设置合法 A 模式，新增固定 reader-first 阶段；旧 fixture 在该阶段稳定报 `torn_count=1`。跨线程 stop 改为原子访问，writer 等待 reader 首次有效读取，结果在 join 后检查；补线程/ioctl 返回值、实际读写进度及异常四元组诊断。修复后 11 场景/163 断言、聚焦门禁连续 20/20、完整分辨率宿主九组及 `test-host` 通过；ThreadSanitizer 对照恢复 volatile stop 后报数据竞争，修复版全绿。仅宿主测试修改，不声称解释原始未采集四元组的那次失败。详见 [调查与验证](debug/2026-10-24-pty-resize-fixture.md)。
 
 - fix(fbtest): **parked terminal ARM 校验对称性闭环**：`fb_test_arm_terminal()` 原先接受零 token 并覆盖已有 pending 请求。与 register ARM 对齐：零 token 返回 EINVAL，锁内检测已占用 terminal 槽并返回 EBUSY，保留原请求及累计消费计数；仅测试配置，无 ABI 布局变化。新增两项真实 hooks 回归，旧实现 13 条断言失败，修复后 124/124 通过；完整分辨率宿主九组通过，完整 host 重试通过，测试配置 QEMU SMP 1/2 各 13 项协议验证通过。首轮 host 的 PTY fixture 失败和 guest ash SIGSEGV 均如实保留并独立登记 parked，不声称已修。详见 [调查与验证](debug/2026-10-24-fbtest-terminal-arm-validation.md)。
