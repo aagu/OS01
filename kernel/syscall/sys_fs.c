@@ -311,11 +311,11 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
 
         // O_TRUNC: truncate regular files to size 0 via filesystem op
         if ((flags & O_TRUNC) && node->type == VFS_FILE) {
-            if (node->i_ops && (uint64_t)node->i_ops >= 0xffff800000000000ULL &&
-                node->i_ops->truncate && (uint64_t)node->i_ops->truncate >= 0xffff800000000000ULL)
-                node->i_ops->truncate(node, 0);
-            else
-                node->size = 0;
+            int trunc_rc = vfs_truncate(node, 0);
+            if (trunc_rc < 0) {
+                syscall_result = trunc_rc;
+                goto out_open;
+            }
         }
 
         // devfs_open_node passes path_copy (kernel-side) to device

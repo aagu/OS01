@@ -430,6 +430,163 @@ TEST_FUNC(test_dcache_no_dcache_bypass_devfs_procfs_and_node_flag) {
     dcache_get_stats(&h1, &m1, &e1);
     assert_eq(h0, h1);
     assert_eq(m0, m1);
+
+    /* Test single-node VFS_NODE_NO_DCACHE flag on tmpfs */
+    vfs_node_t *dir = vfs_lookup("/");
+    assert_not_null(dir);
+    dir->node_flags |= VFS_NODE_NO_DCACHE;
+
+    uint64_t gen = 0;
+    vfs_node_t *hit = dcache_lookup_begin(dir, "nodcache_entry", &gen);
+    assert_null(hit);
+    assert_eq(0, gen); // must return 0 token when bypassed
+
+    vfs_node_t *fake_child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    assert_not_null(fake_child);
+    fake_child->mount = dir->mount;
+    fake_child->parent = dir;
+    fake_child->refcount = 1;
+
+    dcache_insert_validated(dir, "nodcache_entry", fake_child, 1);
+
+    hit = dcache_lookup_begin(dir, "nodcache_entry", &gen);
+    assert_null(hit);
+
+    uint64_t h2 = 0, m2 = 0, e2 = 0;
+    dcache_get_stats(&h2, &m2, &e2);
+    assert_eq(h0, h2); // hits did not increase!
+
+    dir->node_flags &= ~VFS_NODE_NO_DCACHE;
+    vfs_node_put(dir);
+    free(fake_child);
+}
+
+TEST_FUNC(test_dcache_stale_parent_pointer_self_healing) {
+    vfs_init();
+    assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
+
+    vfs_node_t *parent1 = vfs_lookup("/");
+    assert_not_null(parent1);
+
+    vfs_node_t *child1 = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    assert_not_null(child1);
+    child1->name = strdup("child");
+    child1->mount = parent1->mount;
+    child1->parent = vfs_node_get(parent1);
+    child1->refcount = 1;
+
+    uint64_t gen1 = 0;
+    vfs_node_t *miss = dcache_lookup_begin(parent1, "child", &gen1);
+    assert_null(miss);
+    assert_true(gen1 > 0);
+
+    dcache_insert_validated(parent1, "child", child1, gen1);
+
+    /* Lookup with parent1 hits */
+    uint64_t gen_hit = 0;
+    vfs_node_t *hit1 = dcache_lookup_begin(parent1, "child", &gen_hit);
+    assert_not_null(hit1);
+    assert_eq(child1, hit1);
+    vfs_node_put(hit1);
+
+    /* Now create parent2 with same (mount, ino) simulating parent rebuild */
+    vfs_node_t *parent2 = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    assert_not_null(parent2);
+    parent2->name = strdup("/");
+    parent2->mount = parent1->mount;
+    parent2->ino = parent1->ino;
+    parent2->type = VFS_DIR;
+    parent2->refcount = 1;
+
+    /* Lookup on parent2 sees entry->node->parent != parent2!
+     * It must self-heal: detach old entry, put child1, and return NULL miss! */
+    uint64_t gen2 = 0;
+    vfs_node_t *hit2 = dcache_lookup_begin(parent2, "child", &gen2);
+    assert_null(hit2);
+    assert_true(gen2 > 0);
+
+    /* Now insert child2 bound to parent2 */
+    vfs_node_t *child2 = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    assert_not_null(child2);
+    child2->name = strdup("child");
+    child2->mount = parent2->mount;
+    child2->parent = vfs_node_get(parent2);
+    child2->refcount = 1;
+
+    dcache_insert_validated(parent2, "child", child2, gen2);
+
+    /* Subsequent lookup with parent2 now hits child2! */
+    uint64_t gen3 = 0;
+    vfs_node_t *hit3 = dcache_lookup_begin(parent2, "child", &gen3);
+    assert_not_null(hit3);
+    assert_eq(child2, hit3);
+    vfs_node_put(hit3);
+
+    dcache_invalidate(parent2, "child");
+    vfs_node_put(parent1);
+    vfs_node_put(parent2);
+    vfs_node_put(child1);
+    vfs_node_put(child2);
+}
+
+TEST_FUNC(test_dcache_mut_gen_overflow_wrap_and_invalidation) {
+    vfs_init();
+    assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
+
+    vfs_node_t *root = vfs_lookup("/");
+    assert_not_null(root);
+
+    /* Insert an entry at initial generation */
+    vfs_node_t *c1 = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    assert_not_null(c1);
+    c1->name = strdup("c1");
+    c1->mount = root->mount;
+    c1->parent = vfs_node_get(root);
+    c1->refcount = 1;
+
+    uint64_t gen_init = 0;
+    assert_null(dcache_lookup_begin(root, "c1", &gen_init));
+    assert_true(gen_init > 0);
+    dcache_insert_validated(root, "c1", c1, gen_init);
+
+    /* Verify c1 is cached */
+    vfs_node_t *h1 = dcache_lookup_begin(root, "c1", NULL);
+    assert_not_null(h1);
+    vfs_node_put(h1);
+
+    /* Start in-flight lookup for c2 to get token before overflow */
+    uint64_t inflight_token = 0;
+    assert_null(dcache_lookup_begin(root, "c2", &inflight_token));
+    assert_true(inflight_token > 0);
+
+    /* In-flight node for c2 */
+    vfs_node_t *c2 = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    assert_not_null(c2);
+    c2->name = strdup("c2");
+    c2->mount = root->mount;
+    c2->parent = vfs_node_get(root);
+    c2->refcount = 1;
+
+    /* Simulate generation overflow right at UINT64_MAX */
+    dcache_test_set_gen(UINT64_MAX);
+
+    /* Trigger mutation which overflows mut_gen:
+     * ++mut_gen wraps to 0 -> epoch bumps -> mut_gen becomes 1 -> cache is flushed! */
+    dcache_mutation_begin();
+    dcache_mutation_end_invalidate(NULL, NULL);
+
+    /* 1) Verify cache was flushed: c1 is no longer in dcache */
+    vfs_node_t *v1 = dcache_lookup_begin(root, "c1", NULL);
+    assert_null(v1);
+
+    /* 2) Verify inflight token issued before overflow CANNOT insert c2 */
+    dcache_insert_validated(root, "c2", c2, inflight_token);
+    vfs_node_t *h2 = dcache_lookup_begin(root, "c2", NULL);
+    assert_null(h2); // rejected!
+
+    vfs_node_put(root);
+    vfs_node_put(c1);
+    vfs_node_put(c2);
 }
 
 TEST_LIST_BEGIN
@@ -439,6 +596,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_dcache_metadata_stat_consistency_across_write_and_truncate),
     TEST_ENTRY(test_dcache_rename_directory_flushes_descendant_parent_chain),
     TEST_ENTRY(test_dcache_no_dcache_bypass_devfs_procfs_and_node_flag),
+    TEST_ENTRY(test_dcache_stale_parent_pointer_self_healing),
+    TEST_ENTRY(test_dcache_mut_gen_overflow_wrap_and_invalidation),
 TEST_LIST_END
 
 int main(void) {

@@ -594,6 +594,80 @@ TEST_FUNC(test_fat32_shared_file_object_and_orphan_reclaim) {
     s_test_fat_fs = NULL;
 }
 
+TEST_FUNC(test_ext2_disk_inode_metadata_stat) {
+    vfs_init();
+    format_mock_ext2_disk();
+    assert_eq(0, vfs_mount_fs("ext2", "/", &s_ram_block_dev, NULL));
+
+    /* Create file /meta.txt */
+    vfs_node_t *node = NULL;
+    assert_eq(0, vfs_create_file("/meta.txt", "/", &node));
+    assert_not_null(node);
+    uint32_t ino = (uint32_t)node->ino;
+    vfs_node_put(node);
+
+    /* Modify on-disk inode metadata directly */
+    ext2_inode_t *d_ino = (ext2_inode_t *)(s_ram_disk + 4 * 4096 + (ino - 1) * 128);
+    d_ino->i_uid   = 1000;
+    d_ino->i_gid   = 2000;
+    d_ino->i_mode  = EXT2_S_IFREG | 0640;
+    d_ino->i_atime = 111;
+    d_ino->i_mtime = 222;
+    d_ino->i_ctime = 333;
+
+    /* Fresh lookup to populate from disk inode */
+    vfs_node_t *target = vfs_lookup("/meta.txt");
+    assert_not_null(target);
+
+    struct stat st;
+    assert_eq(0, vfs_stat(target, &st));
+    assert_eq(1000, st.st_uid);
+    assert_eq(2000, st.st_gid);
+    assert_eq((uint32_t)(S_IFREG | 0640), (uint32_t)st.st_mode);
+    assert_eq(111, st.st_atime);
+    assert_eq(222, st.st_mtime);
+    assert_eq(333, st.st_ctime);
+    assert_eq(4096, st.st_blksize);
+    assert_eq(d_ino->i_blocks, st.st_blocks);
+
+    vfs_node_put(target);
+}
+
+TEST_FUNC(test_fat32_rmdir_open_dir_deferred_reclaim) {
+    vfs_init();
+    format_mock_fat32_disk();
+    assert_eq(0, vfs_mount_fs("vfat", "/", &s_ram_block_dev, NULL));
+
+    vfs_node_t *r = vfs_lookup("/");
+    assert_not_null(r);
+    vfs_mount_t *mp = r->mount;
+    assert_not_null(mp);
+    fat32_fs_t *fs = (fat32_fs_t *)mp->fs_data;
+    assert_not_null(fs);
+    vfs_node_put(r);
+    assert_eq(0, fs->test_reclaim_count);
+
+    /* Create empty directory /sub */
+    assert_eq(0, vfs_mkdir("/sub", "/"));
+
+    /* Lookup and hold reference to /sub */
+    vfs_node_t *sub = vfs_lookup("/sub");
+    assert_not_null(sub);
+    assert_eq(VFS_DIR, sub->type);
+    assert_eq(0, fs->test_reclaim_count);
+
+    /* Call vfs_rmdir on /sub while sub node is open */
+    assert_eq(0, vfs_rmdir("/sub", "/"));
+    /* Deferred: cluster chain NOT yet reclaimed because sub is active */
+    assert_eq(0, fs->test_reclaim_count);
+    assert_true(sub->node_flags & VFS_NODE_ORPHANED);
+    assert_eq(0, sub->nlink);
+
+    /* Dropping sub triggers evict_node which reclaims the cluster chain */
+    vfs_node_put(sub);
+    assert_eq(1, fs->test_reclaim_count);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_lookup_300_entries_tmpfs),
     TEST_ENTRY(test_devfs_and_tmpfs_metadata_and_getattr),
@@ -602,6 +676,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_tmpfs_orphan_lifecycle_and_evict),
     TEST_ENTRY(test_ext2_orphan_deferred_reclaim_and_sole_reclaimer),
     TEST_ENTRY(test_fat32_shared_file_object_and_orphan_reclaim),
+    TEST_ENTRY(test_ext2_disk_inode_metadata_stat),
+    TEST_ENTRY(test_fat32_rmdir_open_dir_deferred_reclaim),
 TEST_LIST_END
 
 int main(void) {

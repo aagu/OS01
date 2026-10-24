@@ -1106,6 +1106,23 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     return node;
 }
 
+static bool __attribute__((noinline)) fat32_dir_is_empty(fat32_fs_t *fs, uint32_t dir_cluster)
+{
+    if (dir_cluster < 2 || dir_cluster >= FAT32_EOC_MIN) return true;
+    char name_buf[64];
+    vfs_dirent_t check_e;
+    check_e.name = name_buf;
+    for (uint64_t i = 0; i < 512; i++) {
+        int r = fat32_read_entry(fs, dir_cluster, i, &check_e);
+        if (r == 0 && check_e.name[0] == '\0') break;
+        if (r == 0 && strcmp(check_e.name, ".") != 0
+            && strcmp(check_e.name, "..") != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // ── Remove an empty directory ────────────────────────────────
 // Verifies the directory contains only "." and "..", then
 // marks it deleted and frees its cluster chain.
@@ -1146,21 +1163,10 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
 
     // Verify the directory is empty (only "." and "..")
     if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
-        vfs_dirent_t check_entry;
-        for (uint64_t i = 0; i < 512; i++) {
-            int ret = fat32_read_entry(fs, target_cl, i, &check_entry);
-            if (ret == 0 && check_entry.name[0] == '\0')
-                break; // end of directory
-            if (ret == 0) {
-                // Skip "." and ".."
-                if (strcmp(check_entry.name, ".") != 0 &&
-                    strcmp(check_entry.name, "..") != 0) {
-                    spin_unlock(&fs->fat_lifecycle_lock);
-                    debug_fs("FAT: rmdir '%s': not empty (found '%s')\n",
-                                   name, check_entry.name);
-                    return -ENOTEMPTY;
-                }
-            }
+        if (!fat32_dir_is_empty(fs, target_cl)) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            debug_fs("FAT: rmdir '%s': not empty\n", name);
+            return -ENOTEMPTY;
         }
     }
 
@@ -1171,9 +1177,22 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
         return ret;
     }
 
-    // Free the cluster chain
-    if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
-        fat32_free_cluster_chain(fs, target_cl);
+    bool has_active = false;
+    if (dir->mount) {
+        spin_lock(&dir->mount->active_lock);
+        vfs_active_nodes_mark_orphaned_locked(dir->mount, target_cl);
+        has_active = vfs_active_nodes_has_ino_locked(dir->mount, target_cl, NULL);
+        spin_unlock(&dir->mount->active_lock);
+    }
+
+    // Free the cluster chain if no active node holds it
+    if (!has_active) {
+        if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
+            fat32_free_cluster_chain(fs, target_cl);
+        }
+#ifdef OS01_HOST_TEST
+        fs->test_reclaim_count++;
+#endif
     }
 
     spin_unlock(&fs->fat_lifecycle_lock);
@@ -1238,25 +1257,29 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
                 return -ENOTDIR;
             }
             if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN) {
-                vfs_dirent_t check_e;
-                int empty = 1;
-                for (uint64_t i = 0; i < 512; i++) {
-                    int r = fat32_read_entry(fs, dst_cl, i, &check_e);
-                    if (r == 0 && check_e.name[0] == '\0') break;
-                    if (r == 0 && strcmp(check_e.name, ".") != 0
-                        && strcmp(check_e.name, "..") != 0) {
-                        empty = 0;
-                        break;
-                    }
-                }
-                if (!empty) {
+                if (!fat32_dir_is_empty(fs, dst_cl)) {
                     spin_unlock(&fs->fat_lifecycle_lock);
                     debug_fs("FAT: rename: target dir '%s' not empty\n", newname);
                     return -ENOTEMPTY;
                 }
-                fat32_free_cluster_chain(fs, dst_cl);
             }
             fat32_mark_entry_deleted(fs, dst_lba, dst_off);
+
+            bool has_active = false;
+            if (olddir->mount) {
+                spin_lock(&olddir->mount->active_lock);
+                vfs_active_nodes_mark_orphaned_locked(olddir->mount, dst_cl);
+                has_active = vfs_active_nodes_has_ino_locked(olddir->mount, dst_cl, NULL);
+                spin_unlock(&olddir->mount->active_lock);
+            }
+            if (!has_active) {
+                if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN) {
+                    fat32_free_cluster_chain(fs, dst_cl);
+                }
+#ifdef OS01_HOST_TEST
+                fs->test_reclaim_count++;
+#endif
+            }
         } else {
             if (dst_ent.attr & FAT_ATTR_DIRECTORY) {
                 spin_unlock(&fs->fat_lifecycle_lock);
@@ -1665,6 +1688,21 @@ static void fat_iop_evict_node(struct vfs_node *node)
         return;
     }
 
+    if (node->type == VFS_DIR && (node->node_flags & VFS_NODE_ORPHANED)) {
+        bool still_active = vfs_active_nodes_has_ino_locked(node->mount, node->ino, NULL);
+        spin_unlock(&node->mount->active_lock);
+        if (!still_active) {
+            if (node->ino >= 2 && node->ino < FAT32_EOC_MIN) {
+                fat32_free_cluster_chain(fs, (uint32_t)node->ino);
+            }
+#ifdef OS01_HOST_TEST
+            fs->test_reclaim_count++;
+#endif
+        }
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return;
+    }
+
     spin_unlock(&node->mount->active_lock);
     spin_unlock(&fs->fat_lifecycle_lock);
 }
@@ -1792,11 +1830,26 @@ static int fat_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     return 0;
 }
 
+static void fat_fs_unmount(struct vfs_mount *mp)
+{
+    if (!mp || !mp->fs_data) return;
+    fat32_fs_t *fs = (fat32_fs_t *)mp->fs_data;
+    fat_file_object_t *cur = fs->file_objects;
+    while (cur) {
+        fat_file_object_t *next = cur->next;
+        kfree(cur);
+        cur = next;
+    }
+    fs->file_objects = NULL;
+    kfree(fs);
+    mp->fs_data = NULL;
+}
+
 static vfs_fs_type_t fat_fs_type = {
     .name     = "vfat",
     .fs_flags = VFS_FS_REQUIRES_DEV | VFS_FS_CASE_INSENSITIVE,
     .mount    = fat_fs_mount,
-    .unmount  = NULL,
+    .unmount  = fat_fs_unmount,
 };
 
 int fat_register_fs(void)

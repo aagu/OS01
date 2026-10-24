@@ -798,15 +798,16 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     uint8_t *block_buf = kmalloc(4096);
     if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
 
+    int write_err = 0;
     while (remaining > 0) {
         uint32_t logical_block = (uint32_t)(file_off / fs->block_size);
         uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
 
         uint32_t phys = ext2_bmap(fs, &inode, logical_block);
-        if (phys == 0) { kfree(block_buf); spin_unlock(&fs->lock); return -EIO; }
+        if (phys == 0) { write_err = -EIO; break; }
 
         if (ext2_read_block(fs, phys, block_buf) != 0) {
-            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
+            write_err = -EIO; break;
         }
 
         uint32_t chunk = fs->block_size - block_off;
@@ -814,7 +815,7 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
 
         memcpy(block_buf + block_off, src, chunk);
         if (ext2_write_block(fs, phys, block_buf) != 0) {
-            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
+            write_err = -EIO; break;
         }
 
         src        += chunk;
@@ -823,6 +824,24 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     }
 
     kfree(block_buf);
+
+    if (write_err != 0) {
+        if (file_off > offset) {
+            if (file_off > inode.i_size)
+                inode.i_size = (uint32_t)file_off;
+            if ((uint64_t)inode.i_size > node->size)
+                node->size = inode.i_size;
+            inode.i_mtime = 0;
+            ext2_write_inode(fs, ino, &inode);
+            if (node->mount) {
+                spin_lock(&node->mount->active_lock);
+                vfs_active_nodes_sync_size_locked(node->mount, ino, inode.i_size, inode.i_mtime);
+                spin_unlock(&node->mount->active_lock);
+            }
+        }
+        spin_unlock(&fs->lock);
+        return write_err;
+    }
 
     // Update i_size if write extended the file
     if (offset + size > inode.i_size)
@@ -932,7 +951,7 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
 // ── VFS create (regular file) ──────────────────────────
 static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_node *dir, const char *name)
 {
-    if (!dir || !dir->mount || !name) return NULL;
+    if (!dir || !dir->mount || !name || (dir->node_flags & VFS_NODE_ORPHANED)) return NULL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
 
     // Pre-allocate vfs_node_t and name outside fs->lock
@@ -1012,6 +1031,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
                              const char *name, const char *target)
 {
     if (!parent || !parent->mount || !name || !target) return -EINVAL;
+    if (parent->node_flags & VFS_NODE_ORPHANED) return -ENOENT;
     ext2_fs_t *fs = (ext2_fs_t *)parent->mount->fs_data;
 
     size_t tlen = strlen(target);
@@ -1183,7 +1203,7 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
 // ── VFS mkdir ──────────────────────────────────────────
 static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node *dir, const char *name)
 {
-    if (!dir || !dir->mount || !name) return NULL;
+    if (!dir || !dir->mount || !name || (dir->node_flags & VFS_NODE_ORPHANED)) return NULL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
 
     // Pre-allocate vfs_node_t and name outside fs->lock
@@ -1951,11 +1971,23 @@ static int ext2_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     return 0;
 }
 
+static void ext2_fs_unmount(struct vfs_mount *mp)
+{
+    if (!mp || !mp->fs_data) return;
+    ext2_fs_t *fs = (ext2_fs_t *)mp->fs_data;
+    if (fs->bgdesc_table) {
+        kfree(fs->bgdesc_table);
+        fs->bgdesc_table = NULL;
+    }
+    kfree(fs);
+    mp->fs_data = NULL;
+}
+
 static vfs_fs_type_t ext2_fs_type = {
     .name     = "ext2",
     .fs_flags = VFS_FS_REQUIRES_DEV,
     .mount    = ext2_fs_mount,
-    .unmount  = NULL,
+    .unmount  = ext2_fs_unmount,
 };
 
 int ext2_register_fs(void)

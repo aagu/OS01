@@ -317,7 +317,8 @@ static struct vfs_node *tmpfs_vfs_create(struct vfs_node *dir,
 
     spin_lock(&tmpfs_lock);
     tmpfs_node_t *d = tmpfs_get_node(dir);
-    if (!d || d->type != VFS_DIR || tmpfs_find_child(d, name) >= 0) {
+    if (!d || d->type != VFS_DIR || d->nlink == 0 ||
+        (dir->node_flags & VFS_NODE_ORPHANED) || tmpfs_find_child(d, name) >= 0) {
         spin_unlock(&tmpfs_lock);
         kfree(new_node);
         free(vn);
@@ -386,7 +387,8 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
 
     spin_lock(&tmpfs_lock);
     tmpfs_node_t *d = tmpfs_get_node(dir);
-    if (!d || d->type != VFS_DIR || tmpfs_find_child(d, name) >= 0) {
+    if (!d || d->type != VFS_DIR || d->nlink == 0 ||
+        (dir->node_flags & VFS_NODE_ORPHANED) || tmpfs_find_child(d, name) >= 0) {
         spin_unlock(&tmpfs_lock);
         kfree(new_node);
         free(vn);
@@ -704,6 +706,30 @@ static const vfs_file_ops_t tmpfs_fops = {
 //  Initialization
 // ═══════════════════════════════════════════════════════════════════
 
+static void tmpfs_free_node(tmpfs_node_t *tn)
+{
+    if (!tn) return;
+    if (tn->children) {
+        for (int i = 0; i < tn->child_count; i++) {
+            if (tn->children[i]) {
+                tmpfs_free_node(tn->children[i]);
+                tn->children[i] = NULL;
+            }
+        }
+    }
+    tmpfs_destroy_node_unlocked(tn);
+}
+
+static void tmpfs_fs_unmount(struct vfs_mount *mp)
+{
+    if (!mp || !mp->fs_data) return;
+    tmpfs_node_t *root = (tmpfs_node_t *)mp->fs_data;
+    spin_lock(&tmpfs_lock);
+    tmpfs_free_node(root);
+    spin_unlock(&tmpfs_lock);
+    mp->fs_data = NULL;
+}
+
 static int tmpfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
 {
     (void)dev;
@@ -713,7 +739,6 @@ static int tmpfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
         debug_fs("tmpfs: root allocation failed\n");
         return -ENOMEM;
     }
-    spin_init(&tmpfs_lock);
     root->type = VFS_DIR;
     root->refcount = 1;
     root->mode = S_IFDIR | 0755;
@@ -743,7 +768,7 @@ static vfs_fs_type_t tmpfs_fs_type = {
     .name     = "tmpfs",
     .fs_flags = 0,
     .mount    = tmpfs_fs_mount,
-    .unmount  = NULL,
+    .unmount  = tmpfs_fs_unmount,
 };
 
 int tmpfs_register_fs(void)

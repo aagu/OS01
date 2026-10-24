@@ -199,21 +199,7 @@ void     vfs_active_nodes_sync_size_locked(struct vfs_mount *mp, uint64_t ino,
 uint64_t vfs_node_live_size(struct vfs_node *node);
 
 // ── Bounded Dentry Cache (Spec §4.5, §5.4) ────────────────
-#define VFS_DCACHE_BUCKETS   64
-#define VFS_DCACHE_CAPACITY  256
-
-void        dcache_init(void);
-vfs_node_t *dcache_lookup_begin(vfs_node_t *parent, const char *name,
-                                uint64_t *out_gen);
-void        dcache_insert_validated(vfs_node_t *parent, const char *name,
-                                    vfs_node_t *child, uint64_t lookup_gen);
-void        dcache_mutation_begin(void);
-void        dcache_invalidate(vfs_node_t *parent, const char *name);
-void        dcache_mutation_end_invalidate(vfs_node_t *parent, const char *name);
-void        dcache_mutation_end_rename(vfs_node_t *olddir, const char *oldname,
-                                       vfs_node_t *newdir, const char *newname);
-void        dcache_flush_mount(vfs_mount_t *mp);
-void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictions);
+#include <fs/dcache.h>
 
 // Resolve a path to a VFS node (call vfs_node_put when done).
 // Absolute path only — no cwd resolution.

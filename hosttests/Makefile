@@ -561,6 +561,13 @@ $(TEST_BLD)/vfs_production.o: $(TESTS_DIR)/kernel/fs/vfs.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/dcache_production.o: $(TESTS_DIR)/kernel/fs/dcache.c \
+		$(TESTS_DIR)/kernel/include/fs/dcache.h \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_vfs_fs_registry.o: $(TEST_CASES)/test_vfs_fs_registry.c \
 		$(TESTS_DIR)/kernel/include/fs/vfs.h \
 		$(TEST_MOCK)/vfs_test_runtime.h
@@ -597,6 +604,7 @@ $(TEST_BLD)/devfs_vfs_production.o: $(TESTS_DIR)/kernel/fs/devfs.c \
 
 $(TEST_BLD)/test_vfs_fs_registry.elf: $(TEST_BLD)/test_vfs_fs_registry.o \
 		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
 		$(TEST_BLD)/ext2_production.o \
 		$(TEST_BLD)/fat_production.o \
 		$(TEST_BLD)/tmpfs_production.o \
@@ -614,6 +622,7 @@ $(TEST_BLD)/test_vfs_iops_fops.o: $(TEST_CASES)/test_vfs_iops_fops.c \
 
 $(TEST_BLD)/test_vfs_iops_fops.elf: $(TEST_BLD)/test_vfs_iops_fops.o \
 		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
 		$(TEST_BLD)/ext2_production.o \
 		$(TEST_BLD)/fat_production.o \
 		$(TEST_BLD)/tmpfs_production.o \
@@ -631,6 +640,7 @@ $(TEST_BLD)/test_vfs_mount_tree.o: $(TEST_CASES)/test_vfs_mount_tree.c \
 
 $(TEST_BLD)/test_vfs_mount_tree.elf: $(TEST_BLD)/test_vfs_mount_tree.o \
 		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
 		$(TEST_BLD)/ext2_production.o \
 		$(TEST_BLD)/fat_production.o \
 		$(TEST_BLD)/tmpfs_production.o \
@@ -648,6 +658,7 @@ $(TEST_BLD)/test_vfs_dcache.o: $(TEST_CASES)/test_vfs_dcache.c \
 
 $(TEST_BLD)/test_vfs_dcache.elf: $(TEST_BLD)/test_vfs_dcache.o \
 		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
 		$(TEST_BLD)/ext2_production.o \
 		$(TEST_BLD)/fat_production.o \
 		$(TEST_BLD)/tmpfs_production.o \
