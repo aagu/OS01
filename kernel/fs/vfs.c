@@ -19,14 +19,18 @@
 void vfs_test_on_active_register(vfs_node_t *node) __attribute__((weak));
 #endif
 
-// ── Mount table ───────────────────────────────────────────
+// ── Global mount list ─────────────────────────────────────
 static vfs_mount_t *mount_list = NULL;
-static int mount_count __attribute__((unused)) = 0;
+static vfs_mount_t *root_mount = NULL;
+static uint64_t next_stub_id = 0;
+static int mount_count = 0;
 static int vfs_initialized = 0;
 static rwlock_t mount_lock;
 
 static mutex_t vfs_namespace_lock;
 static int vfs_bootstrap = 1;
+
+static int normalize_vfs_path(const char *in, char *out);
 
 void vfs_end_bootstrap(void)
 {
@@ -84,6 +88,8 @@ static int vfs_name_cmp(const char *a, const char *b)
 void vfs_init(void)
 {
     mount_list = NULL;
+    root_mount = NULL;
+    next_stub_id = 0;
     mount_count = 0;
     rwlock_init(&mount_lock);
     mutex_init(&vfs_namespace_lock);
@@ -103,34 +109,328 @@ void vfs_init(void)
     procfs_register_fs();
 }
 
+// ── Mount-tree lookup and binding helpers ─────────────────
+
+static bool vfs_mount_name_eq(const vfs_mount_t *parent_mp, const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    if (parent_mp && (parent_mp->mnt_flags & VFS_FS_CASE_INSENSITIVE)) {
+        return vfs_name_cmp(a, b) == 0;
+    }
+    return strcmp(a, b) == 0;
+}
+
+static vfs_mount_t *vfs_find_submount(vfs_node_t *dir, const char *comp)
+{
+    if (!dir || !dir->mount || !comp || comp[0] == '\0') return NULL;
+    uint64_t dir_ino = vfs_node_stable_ino(dir);
+    vfs_mount_t *found = NULL;
+
+    rwlock_read_lock(&mount_lock);
+    int _iter = 0;
+    for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
+        if (!vfs_is_valid_kptr(mp)) {
+            log_err("VFS: find_mount: CORRUPT mp=%p comp=%p iter=%d\n",
+                    (void *)mp, (const void *)comp, _iter);
+            break;
+        }
+        _iter++;
+        if (mp->parent_mount == dir->mount &&
+            mp->parent_dir_ino == dir_ino &&
+            vfs_mount_name_eq(dir->mount, mp->mount_name, comp)) {
+            found = mp;
+            break;
+        }
+    }
+    rwlock_read_unlock(&mount_lock);
+    return found;
+}
+
+static bool vfs_has_duplicate_mount_path(const char *norm_path)
+{
+    if (!norm_path) return false;
+    bool dup = false;
+    rwlock_read_lock(&mount_lock);
+    if (strcmp(norm_path, "/") == 0 && root_mount != NULL) {
+        dup = true;
+    } else {
+        for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
+            if (!vfs_is_valid_kptr(mp)) break;
+            if (mp->path && strcmp(mp->path, norm_path) == 0) {
+                dup = true;
+                break;
+            }
+        }
+    }
+    rwlock_read_unlock(&mount_lock);
+    return dup;
+}
+
+static int vfs_path_depth(const char *norm_path)
+{
+    if (!norm_path || strcmp(norm_path, "/") == 0) return 0;
+    int depth = 0;
+    for (const char *p = norm_path; *p; p++) {
+        if (*p == '/') depth++;
+    }
+    return depth;
+}
+
+static int vfs_bind_submount_locked(vfs_mount_t *mp)
+{
+    if (!mp || !mp->path || strcmp(mp->path, "/") == 0) return -EINVAL;
+
+    char *parent_path = kmalloc(VFS_NAME_MAX);
+    if (!parent_path) return -ENOMEM;
+
+    const char *base_name = vfs_split_parent(mp->path, "/", parent_path);
+    if (!base_name || base_name[0] == '\0') {
+        kfree(parent_path);
+        return -EINVAL;
+    }
+
+    size_t blen = strlen(base_name);
+    if (blen >= VFS_NAME_MAX) {
+        kfree(parent_path);
+        return -ENAMETOOLONG;
+    }
+    memcpy(mp->mount_name, base_name, blen + 1);
+
+    vfs_node_t *parent_dir = vfs_lookup(parent_path);
+    kfree(parent_path);
+    if (!parent_dir) return -ENOENT;
+    if (parent_dir->type != VFS_DIR) {
+        vfs_node_put(parent_dir);
+        return -ENOTDIR;
+    }
+
+    if (vfs_find_submount(parent_dir, mp->mount_name) != NULL) {
+        vfs_node_put(parent_dir);
+        return -EBUSY;
+    }
+
+    vfs_node_t *target_node = NULL;
+    int lrc;
+    if (parent_dir->i_ops && vfs_is_valid_kptr(parent_dir->i_ops) &&
+        parent_dir->i_ops->lookup && vfs_is_valid_kptr(parent_dir->i_ops->lookup)) {
+        lrc = parent_dir->i_ops->lookup(parent_dir, mp->mount_name, &target_node);
+    } else {
+        lrc = vfs_generic_lookup_by_readdir(parent_dir, mp->mount_name, &target_node);
+    }
+
+    vfs_node_t *mp_node = NULL;
+    if (lrc == 0 && target_node != NULL) {
+        if (target_node->type != VFS_DIR) {
+            vfs_node_put(target_node);
+            vfs_node_put(parent_dir);
+            return -ENOTDIR;
+        }
+        if (!target_node->mount) target_node->mount = parent_dir->mount;
+        if (!target_node->parent) {
+            target_node->parent = vfs_node_get(parent_dir);
+        }
+        if (!target_node->i_ops) target_node->i_ops = parent_dir->i_ops;
+        if (!target_node->f_ops) target_node->f_ops = parent_dir->f_ops;
+        vfs_active_node_register(target_node);
+        if (target_node->mounted_here != NULL) {
+            vfs_node_put(target_node);
+            vfs_node_put(parent_dir);
+            return -EBUSY;
+        }
+        mp_node = target_node;
+    } else if (lrc == -ENOENT) {
+        vfs_node_t *stub = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+        if (!stub) {
+            vfs_node_put(parent_dir);
+            return -ENOMEM;
+        }
+        stub->name = strdup(mp->mount_name);
+        if (!stub->name) {
+            free(stub);
+            vfs_node_put(parent_dir);
+            return -ENOMEM;
+        }
+        stub->type = VFS_DIR;
+        stub->node_flags = VFS_NODE_MOUNT_STUB;
+        stub->ino = VFS_MOUNT_STUB_INO_BASE | (__sync_add_and_fetch(&next_stub_id, 1));
+        stub->mode = S_IFDIR | 0755;
+        stub->nlink = 2;
+        stub->mount = parent_dir->mount;
+        stub->parent = vfs_node_get(parent_dir);
+        stub->i_ops = parent_dir->i_ops;
+        stub->f_ops = parent_dir->f_ops;
+        stub->refcount = 1;
+        vfs_active_node_register(stub);
+        mp_node = stub;
+    } else {
+        vfs_node_put(parent_dir);
+        return (lrc < 0) ? lrc : -ENOENT;
+    }
+
+    // mp_node->parent holds a persistent reference to parent_dir.
+    vfs_node_put(parent_dir);
+
+    rwlock_write_lock(&mount_lock);
+    mp->parent_mount = mp_node->mount;
+    mp->parent_dir_ino = vfs_node_stable_ino(mp_node->parent);
+    mp->mountpoint = mp_node;
+    mp_node->mounted_here = mp;
+    rwlock_write_unlock(&mount_lock);
+
+    return 0;
+}
+
+static void vfs_unbind_submount_locked(vfs_mount_t *mp)
+{
+    if (!mp) return;
+    vfs_node_t *mp_node = NULL;
+    rwlock_write_lock(&mount_lock);
+    mp_node = mp->mountpoint;
+    if (mp_node && mp_node->mounted_here == mp) {
+        mp_node->mounted_here = NULL;
+    }
+    mp->mountpoint = NULL;
+    mp->parent_mount = NULL;
+    mp->parent_dir_ino = 0;
+    rwlock_write_unlock(&mount_lock);
+
+    if (mp_node) {
+        vfs_node_put(mp_node);
+    }
+}
+
+static int vfs_publish_mount_locked(vfs_mount_t *mp)
+{
+    if (!mp || !mp->path) return -EINVAL;
+
+    if (strcmp(mp->path, "/") == 0) {
+        if (root_mount != NULL) return -EBUSY;
+
+        rwlock_write_lock(&mount_lock);
+        root_mount = mp;
+        mp->next = mount_list;
+        mount_list = mp;
+        mount_count++;
+        rwlock_write_unlock(&mount_lock);
+
+        // Collect pre-root pending submounts and sort by path depth ascending.
+        vfs_mount_t *pending[32];
+        int pending_cnt = 0;
+        rwlock_read_lock(&mount_lock);
+        for (vfs_mount_t *cur = mount_list; cur && pending_cnt < 32; cur = cur->next) {
+            if (cur == mp || cur->parent_mount != NULL) continue;
+            pending[pending_cnt++] = cur;
+        }
+        rwlock_read_unlock(&mount_lock);
+
+        for (int i = 0; i < pending_cnt - 1; i++) {
+            for (int j = i + 1; j < pending_cnt; j++) {
+                if (vfs_path_depth(pending[j]->path) < vfs_path_depth(pending[i]->path)) {
+                    vfs_mount_t *tmp = pending[i];
+                    pending[i] = pending[j];
+                    pending[j] = tmp;
+                }
+            }
+        }
+
+        for (int i = 0; i < pending_cnt; i++) {
+            int brc = vfs_bind_submount_locked(pending[i]);
+            if (brc < 0) {
+                for (int k = i - 1; k >= 0; k--) {
+                    vfs_unbind_submount_locked(pending[k]);
+                }
+                rwlock_write_lock(&mount_lock);
+                vfs_mount_t **pp = &mount_list;
+                while (*pp) {
+                    if (*pp == mp) {
+                        *pp = mp->next;
+                        mp->next = NULL;
+                        mount_count--;
+                        break;
+                    }
+                    pp = &(*pp)->next;
+                }
+                root_mount = NULL;
+                rwlock_write_unlock(&mount_lock);
+                return brc;
+            }
+        }
+        return 0;
+    }
+
+    if (root_mount == NULL) {
+        char *parent_path = kmalloc(VFS_NAME_MAX);
+        if (!parent_path) return -ENOMEM;
+        const char *base_name = vfs_split_parent(mp->path, "/", parent_path);
+        if (!base_name || base_name[0] == '\0' || strlen(base_name) >= VFS_NAME_MAX) {
+            kfree(parent_path);
+            return -EINVAL;
+        }
+        memcpy(mp->mount_name, base_name, strlen(base_name) + 1);
+        kfree(parent_path);
+
+        mp->parent_mount = NULL;
+        mp->parent_dir_ino = 0;
+        mp->mountpoint = NULL;
+
+        rwlock_write_lock(&mount_lock);
+        mp->next = mount_list;
+        mount_list = mp;
+        mount_count++;
+        rwlock_write_unlock(&mount_lock);
+        return 0;
+    }
+
+    int brc = vfs_bind_submount_locked(mp);
+    if (brc < 0) return brc;
+
+    rwlock_write_lock(&mount_lock);
+    mp->next = mount_list;
+    mount_list = mp;
+    mount_count++;
+    rwlock_write_unlock(&mount_lock);
+    return 0;
+}
+
 // ── Mount ─────────────────────────────────────────────────
 int vfs_mount(const char *path, block_device_t *dev,
               const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
               void *fs_data)
 {
+    if (!path || path[0] != '/') return -EINVAL;
     if (!vfs_initialized) vfs_init();
+
+    char *norm_path = kmalloc(VFS_NAME_MAX);
+    if (!norm_path) return -ENOMEM;
+    normalize_vfs_path(path, norm_path);
+
+    vfs_ns_lock();
+    if (vfs_has_duplicate_mount_path(norm_path)) {
+        vfs_ns_unlock();
+        kfree(norm_path);
+        return -EBUSY;
+    }
 
     vfs_mount_t *mp = (vfs_mount_t *)calloc(1, sizeof(vfs_mount_t));
     if (!mp) {
-        debug_vfs("VFS: mount: out of memory\n");
-        return -1;
+        vfs_ns_unlock();
+        kfree(norm_path);
+        return -ENOMEM;
     }
 
     spin_init(&mp->active_lock);
     mp->active_nodes = NULL;
     mp->dev = dev;
-    mp->path = path;
+    mp->path = norm_path;
     mp->i_ops = i_ops;
     mp->f_ops = f_ops;
     mp->fs_data = fs_data;
-    mp->root = NULL;
-
-    // Allocate a root node — the filesystem fills it via ops
     mp->root = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!mp->root) {
-        debug_vfs("VFS: mount: root node alloc failed\n");
+        vfs_ns_unlock();
+        kfree(norm_path);
         kfree(mp);
-        return -1;
+        return -ENOMEM;
     }
 
     mp->root->mount = mp;
@@ -140,24 +440,28 @@ int vfs_mount(const char *path, block_device_t *dev,
     mp->root->nlink = 2;
     mp->root->i_ops = i_ops;
     mp->root->f_ops = f_ops;
-    // Root node uses fs_data = NULL to tell the filesystem to use its
-    // internal root cluster (e.g., BPB_RootClus for FAT32).
-    // Subdirectory nodes will hold the cluster number here.
     mp->root->fs_data = NULL;
     mp->root->refcount = 1;
     mp->root->name = strdup("/");
     if (!mp->root->name) {
+        vfs_ns_unlock();
         kfree(mp->root);
+        kfree(norm_path);
         kfree(mp);
-        return -1;
+        return -ENOMEM;
     }
 
-    // Publish the fully initialized mount atomically to concurrent lookups.
-    rwlock_write_lock(&mount_lock);
-    mp->next = mount_list;
-    mount_list = mp;
-    mount_count++;
-    rwlock_write_unlock(&mount_lock);
+    int prc = vfs_publish_mount_locked(mp);
+    if (prc < 0) {
+        vfs_ns_unlock();
+        kfree(mp->root->name);
+        kfree(mp->root);
+        kfree(norm_path);
+        kfree(mp);
+        return prc;
+    }
+
+    vfs_ns_unlock();
     debug_vfs("VFS: mounted '%s'\n", path);
     return 0;
 }
@@ -319,14 +623,24 @@ int vfs_mount_fs(const char *type_name, const char *path,
     }
     rwlock_write_unlock(&fs_type_lock);
 
-    char *path_copy = strdup(path);
+    char *path_copy = kmalloc(VFS_NAME_MAX);
     if (!path_copy) {
         vfs_drop_fs_type_usage(fs_type);
         return -ENOMEM;
     }
+    normalize_vfs_path(path, path_copy);
+
+    vfs_ns_lock();
+    if (vfs_has_duplicate_mount_path(path_copy)) {
+        vfs_ns_unlock();
+        kfree(path_copy);
+        vfs_drop_fs_type_usage(fs_type);
+        return -EBUSY;
+    }
 
     vfs_mount_t *mp = (vfs_mount_t *)calloc(1, sizeof(vfs_mount_t));
     if (!mp) {
+        vfs_ns_unlock();
         kfree(path_copy);
         vfs_drop_fs_type_usage(fs_type);
         return -ENOMEM;
@@ -334,6 +648,7 @@ int vfs_mount_fs(const char *type_name, const char *path,
 
     mp->root = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!mp->root) {
+        vfs_ns_unlock();
         kfree(path_copy);
         kfree(mp);
         vfs_drop_fs_type_usage(fs_type);
@@ -342,6 +657,7 @@ int vfs_mount_fs(const char *type_name, const char *path,
 
     mp->root->name = strdup("/");
     if (!mp->root->name) {
+        vfs_ns_unlock();
         kfree(mp->root);
         kfree(path_copy);
         kfree(mp);
@@ -364,6 +680,7 @@ int vfs_mount_fs(const char *type_name, const char *path,
 
     int rc = fs_type->mount(mp, dev, data);
     if (rc < 0 || !mp->root) {
+        vfs_ns_unlock();
         if (mp->root) {
             if (mp->root->name) {
                 kfree(mp->root->name);
@@ -394,11 +711,19 @@ int vfs_mount_fs(const char *type_name, const char *path,
         mp->root->mode = S_IFDIR | 0755;
     }
 
-    rwlock_write_lock(&mount_lock);
-    mp->next = mount_list;
-    mount_list = mp;
-    mount_count++;
-    rwlock_write_unlock(&mount_lock);
+    int prc = vfs_publish_mount_locked(mp);
+    if (prc < 0) {
+        vfs_ns_unlock();
+        if (mp->root) {
+            if (mp->root->name) kfree(mp->root->name);
+            kfree(mp->root);
+        }
+        kfree(path_copy);
+        kfree(mp);
+        vfs_drop_fs_type_usage(fs_type);
+        return prc;
+    }
+    vfs_ns_unlock();
 
     debug_vfs("VFS: mounted '%s' (type %s)\n", path, type_name);
     return 0;
@@ -485,59 +810,26 @@ static int normalize_vfs_path(const char *in, char *out)
     return 0;
 }
 
-// ── Find mount point by prefix match ──────────────────────
-//
-// Walks the mount list and returns the deepest mount whose path is a
-// prefix of `path`.  Used by vfs_lookup_at to choose the root node
-// before walking a path component-by-component.
-//
-// Defensive guard: a known fork/exec-loop corruption (see
-// docs/superpowers/handoff/find-mount-pf-fork-exec-handoff.md) can
-// leave an entry in the mount list pointing into the user address
-// range.  Without the check, the next iteration dereferences
-// mp->path at mp+8 and faults at the next unmapped page.  We
-// refuse to dereference such an entry, dump the chain, and break
-// out — the caller treats the result as "no matching mount" and
-// returns -ENOENT instead of crashing the kernel.
-static vfs_mount_t *find_mount(const char *path)
+// ── Find pending submount during early boot (before "/" is mounted) ──
+static vfs_mount_t *vfs_find_pending_submount_early(const char *norm_path, size_t *prefix_len_out)
 {
-    // Find the deepest matching mount point
     vfs_mount_t *best = NULL;
     size_t best_len = 0;
 
     rwlock_read_lock(&mount_lock);
-    int _iter = 0;
     for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
-        // Diagnostic: detect mount-list corruption (find_mount PF in
-        // fork/exec loop — kernel-heap / PMM bug).  A legitimate mount
-        // entry pointer is a kernel-high-half address (above PAGE_OFFSET);
-        // anything below is user space or zero-page garbage.
-        if (!vfs_is_valid_kptr(mp)) {
-            log_err("VFS: find_mount: CORRUPT mp=%p path=%p "
-                    "iter=%d\n",
-                    (void *)mp, (const void *)path, _iter);
-            // Dump the rest of the chain so we can see how we got here.
-            for (vfs_mount_t *q = mount_list; q && q != mp; q = q->next) {
-                log_err("  [chain] mp=%p path=%p next=%p\n",
-                        (void *)q, (void *)q->path, (void *)q->next);
-            }
-            break;
-        }
-        _iter++;
+        if (!vfs_is_valid_kptr(mp) || !mp->path) break;
         size_t len = strlen(mp->path);
-        if (strncmp(path, mp->path, len) == 0) {
-            // Root mount ("/") matches any path.
-            // Non-root mounts must end at a component boundary.
-            if (len == 1 && mp->path[0] == '/') {
-                if (len > best_len) { best_len = len; best = mp; }
-            } else if (path[len] == '\0' || path[len] == '/') {
-                if (len > best_len) { best_len = len; best = mp; }
+        if (len > 1 && strncmp(norm_path, mp->path, len) == 0 &&
+            (norm_path[len] == '\0' || norm_path[len] == '/')) {
+            if (len > best_len) {
+                best_len = len;
+                best = mp;
             }
         }
     }
     rwlock_read_unlock(&mount_lock);
-    // VFS has no unmount operation: a published mount remains valid after
-    // this short lookup critical section ends.
+    if (prefix_len_out) *prefix_len_out = best_len;
     return best;
 }
 
@@ -665,13 +957,15 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
 
     // Handle root
     if (strcmp(norm_path, "/") == 0) {
-        vfs_mount_t *mp = find_mount("/");
-        if (!mp || !mp->root) {
+        rwlock_read_lock(&mount_lock);
+        vfs_node_t *rnode = (root_mount && root_mount->root)
+                            ? vfs_node_get(root_mount->root) : NULL;
+        rwlock_read_unlock(&mount_lock);
+        if (!rnode) {
             kfree(bufs);
             return -ENOENT;
         }
-        __sync_add_and_fetch(&mp->root->refcount, 1);
-        *out_node = mp->root;
+        *out_node = rnode;
         if (consumed_out && consumed_size >= 2) {
             consumed_out[0] = '/';
             consumed_out[1] = '\0';
@@ -680,78 +974,71 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
         return 0;
     }
 
-    // Find the mount point
-    vfs_mount_t *mp = find_mount(norm_path);
-    if (!mp || !mp->root || (!mp->root->i_ops && !mp->root->f_ops)) {
-        kfree(bufs);
-        return -ENOENT;
-    }
-
-    // Tokenize path — skip mount point prefix for sub-mounts
     memcpy(bufs->path_copy, norm_path, plen + 1);
-
-    char *ptr;
-    size_t mp_len = strlen(mp->path);
-    if (mp_len == 1 && mp->path[0] == '/') {
-        ptr = bufs->path_copy;  // root mount, no prefix to skip
-    } else {
-        ptr = bufs->path_copy + mp_len;
-        while (*ptr == '/') ptr++;  // skip leading slash
-    }
-
-    char *comp;
-
-    // Use `cur` (not `current` — `current` is a kernel-wide macro).
-    vfs_node_t *cur = mp->root;
-    __sync_add_and_fetch(&cur->refcount, 1);
-
+    char *ptr = bufs->path_copy;
+    vfs_node_t *cur = NULL;
     size_t consumed_len = 0;
     if (consumed_out && consumed_size > 0) consumed_out[0] = '\0';
-    if (mp->path && mp->path[0] == '/' && mp->path[1] != '\0') {
-        size_t mp_path_len = strlen(mp->path);
-        if (consumed_out && mp_path_len + 1 > consumed_size) {
-            __sync_sub_and_fetch(&cur->refcount, 1);
+
+    rwlock_read_lock(&mount_lock);
+    vfs_mount_t *rm = root_mount;
+    if (rm && rm->root) {
+        cur = vfs_node_get(rm->root);
+    }
+    rwlock_read_unlock(&mount_lock);
+
+    if (!cur) {
+        size_t mp_len = 0;
+        vfs_mount_t *early_mp = vfs_find_pending_submount_early(norm_path, &mp_len);
+        if (!early_mp || !early_mp->root || (!early_mp->root->i_ops && !early_mp->root->f_ops)) {
+            kfree(bufs);
+            return -ENOENT;
+        }
+        cur = vfs_node_get(early_mp->root);
+        ptr = bufs->path_copy + mp_len;
+        while (*ptr == '/') ptr++;
+        if (consumed_out && mp_len + 1 > consumed_size) {
+            vfs_node_put(cur);
             kfree(bufs);
             return -ENAMETOOLONG;
         }
         if (consumed_out) {
-            memcpy(consumed_out, mp->path, mp_path_len);
-            consumed_out[mp_path_len] = '\0';
+            memcpy(consumed_out, early_mp->path, mp_len);
+            consumed_out[mp_len] = '\0';
         }
-        consumed_len = mp_path_len;
+        consumed_len = mp_len;
     }
 
+    char *comp;
     int ret = 0;
     while ((comp = next_component(&ptr)) != NULL) {
         if (strlen(comp) == 0) continue;
-
-        // "." — stay in current directory
         if (strcmp(comp, ".") == 0) continue;
 
-        // Explicit VFS_DIR check before readdir — walking through a non-dir
-        // would otherwise surface as a confusing readdir failure (v5 fix).
         if (cur->type != VFS_DIR) {
-            __sync_sub_and_fetch(&cur->refcount, 1);
+            vfs_node_put(cur);
             ret = -ENOTDIR;
             goto out;
         }
 
-        // ".." — go to parent, or stay at mount root
+        // ".." — cross submount roots back to mountpoint, then step to parent
         if (strcmp(comp, "..") == 0) {
+            while (cur->mount && cur == cur->mount->root && cur->mount->mountpoint != NULL) {
+                vfs_node_t *mp_node = vfs_node_get(cur->mount->mountpoint);
+                vfs_node_put(cur);
+                cur = mp_node;
+            }
             if (cur->parent) {
-                vfs_node_t *parent = cur->parent;
-                __sync_add_and_fetch(&parent->refcount, 1);
-                __sync_sub_and_fetch(&cur->refcount, 1);
+                vfs_node_t *parent = vfs_node_get(cur->parent);
+                vfs_node_put(cur);
                 cur = parent;
             }
-            // Trim consumed to last "/": "/foo/bar" → "/foo", "/foo" → "/".
             if (consumed_out) {
                 size_t clen = strlen(consumed_out);
                 if (clen > 1) {
                     char *last = consumed_out + clen - 1;
                     while (last > consumed_out && *last != '/') last--;
                     if (last == consumed_out) {
-                        // Stay at root: e.g., "/foo" → "/".
                         last[1] = '\0';
                         consumed_len = 1;
                     } else {
@@ -764,33 +1051,43 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
         }
 
         vfs_node_t *child = NULL;
-        int lrc;
-        if (cur->i_ops && vfs_is_valid_kptr(cur->i_ops) &&
-            cur->i_ops->lookup && vfs_is_valid_kptr(cur->i_ops->lookup)) {
-            lrc = cur->i_ops->lookup(cur, comp, &child);
+        vfs_mount_t *sub_mp = vfs_find_submount(cur, comp);
+        if (sub_mp && sub_mp->root) {
+            child = vfs_node_get(sub_mp->root);
         } else {
-            lrc = vfs_generic_lookup_by_readdir(cur, comp, &child);
+            int lrc;
+            if (cur->i_ops && vfs_is_valid_kptr(cur->i_ops) &&
+                cur->i_ops->lookup && vfs_is_valid_kptr(cur->i_ops->lookup)) {
+                lrc = cur->i_ops->lookup(cur, comp, &child);
+            } else {
+                lrc = vfs_generic_lookup_by_readdir(cur, comp, &child);
+            }
+            if (lrc < 0 || !child) {
+                vfs_node_put(cur);
+                ret = (lrc < 0) ? lrc : -ENOENT;
+                goto out;
+            }
+            if (!child->mount) child->mount = cur->mount;
+            if (!child->parent) {
+                child->parent = vfs_node_get(cur);
+            }
+            if (!child->i_ops) child->i_ops = cur->i_ops;
+            if (!child->f_ops) child->f_ops = cur->f_ops;
+            vfs_active_node_register(child);
+
+            if (child->mounted_here && child->mounted_here->root) {
+                vfs_node_t *sub_root = vfs_node_get(child->mounted_here->root);
+                vfs_node_put(child);
+                child = sub_root;
+            }
         }
-        if (lrc < 0 || !child) {
-            __sync_sub_and_fetch(&cur->refcount, 1);
-            ret = (lrc < 0) ? lrc : -ENOENT;
-            goto out;
-        }
-        if (!child->mount) child->mount = mp;
-        if (!child->parent) {
-            child->parent = cur;
-            __sync_add_and_fetch(&cur->refcount, 1);
-        }
-        if (!child->i_ops) child->i_ops = cur->i_ops;
-        if (!child->f_ops) child->f_ops = cur->f_ops;
-        vfs_active_node_register(child);
 
         // Append "/" + comp to consumed (bounded by VFS_NAME_MAX, same as path).
         if (consumed_out && consumed_size > 0) {
             size_t cl = strlen(comp);
             if (consumed_len + 1 + cl + 1 > consumed_size) {
                 vfs_node_put(child);
-                __sync_sub_and_fetch(&cur->refcount, 1);
+                vfs_node_put(cur);
                 ret = -ENAMETOOLONG;
                 goto out;
             }
@@ -811,7 +1108,7 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
                     // Mid-path: contract requires suffix starts with '/'.
                     if (1 + rem_len + 1 > remaining_size) {
                         vfs_node_put(child);
-                        __sync_sub_and_fetch(&cur->refcount, 1);
+                        vfs_node_put(cur);
                         ret = -ENAMETOOLONG;
                         goto out;
                     }
@@ -820,14 +1117,13 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
                     remaining_out[1 + rem_len] = '\0';
                 }
             }
-            // Drop our walk ref on cur; child keeps its parent ref.
-            __sync_sub_and_fetch(&cur->refcount, 1);
+            vfs_node_put(cur);
             *out_node = child;
             ret = 1;  // symlink hit
             goto out;
         }
 
-        __sync_sub_and_fetch(&cur->refcount, 1);
+        vfs_node_put(cur);
         cur = child;
     }
 
@@ -1357,31 +1653,6 @@ int vfs_stat(vfs_node_t *node, struct stat *buf)
 // stack footprint under 20 KB on a 32 KB kernel stack.
 #define VFS_GETDENTS_SORT_MAX 64
 
-// ── Check if mount_path is a direct child of dir_path ───────
-// Returns 1 if mount_path is exactly one component deeper than dir_path.
-static int vfs_is_child_mount(const char *dir_path, const char *mount_path)
-{
-    if (!dir_path || !mount_path)
-        return 0;
-
-    size_t dlen = strlen(dir_path);
-
-    // Root "/" — resolve to empty; any immediate child is single-component.
-    if (dlen == 1 && dir_path[0] == '/') {
-        if (mount_path[0] != '/' || mount_path[1] == '\0')
-            return 0;
-        // e.g., "/dev" → "dev" (no '/' after position 1)
-        return strchr(mount_path + 1, '/') == NULL;
-    }
-
-    // Non-root: mount_path = dir_path + "/" + one_component
-    if (strncmp(dir_path, mount_path, dlen) != 0)
-        return 0;
-    if (mount_path[dlen] != '/')
-        return 0;
-    return strchr(mount_path + dlen + 1, '/') == NULL;
-}
-
 // ── getdents64 ─────────────────────────────────────────────
 // Collects entries from the underlying filesystem, injects VFS mount
 // points that are direct children of this directory, sorts all entries
@@ -1423,25 +1694,35 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
         total++;
     }
 
-    // ── Phase 2: Inject sub-mount entries ──────────────────────
-    // Only when listing a mount root (e.g., "/" which is FAT32's root).
-    if (dir->mount && dir == dir->mount->root) {
+    // ── Phase 2: Inject direct child sub-mount entries ─────────
+    if (dir->mount) {
+        uint64_t dir_ino = vfs_node_stable_ino(dir);
         rwlock_read_lock(&mount_lock);
         for (vfs_mount_t *mp = mount_list; mp && total < VFS_GETDENTS_SORT_MAX; mp = mp->next) {
-            if (mp == dir->mount) continue;  // skip self
-            if (!vfs_is_child_mount(dir->mount->path, mp->path))
+            if (!vfs_is_valid_kptr(mp)) break;
+            if (mp->parent_mount != dir->mount ||
+                mp->parent_dir_ino != dir_ino ||
+                mp->mount_name[0] == '\0') {
                 continue;
+            }
 
-            // Extract basename (skip leading "/")
-            const char *base = mp->path;
-            if (base[0] == '/') base++;
-            size_t blen = strlen(base);
+            bool exists = false;
+            for (int k = 0; k < total; k++) {
+                if (vfs_mount_name_eq(dir->mount, entries[k].name, mp->mount_name)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (exists) continue;
+
+            size_t blen = strlen(mp->mount_name);
             if (blen >= VFS_NAME_MAX) blen = VFS_NAME_MAX - 1;
-            memcpy(entries[total].name, base, blen);
+            memcpy(entries[total].name, mp->mount_name, blen);
             entries[total].name[blen] = '\0';
             entries[total].size = 0;
             entries[total].type = VFS_DIR;
-            entries[total].ino  = (uint32_t)(0x80000000 | total);
+            entries[total].ino  = mp->root ? vfs_node_stable_ino(mp->root)
+                                           : (VFS_MOUNT_STUB_INO_BASE | (uint64_t)total);
             total++;
         }
         rwlock_read_unlock(&mount_lock);
@@ -1663,6 +1944,29 @@ int vfs_symlink(const char *target, const char *linkpath, const char *cwd)
     return ret;
 }
 
+static bool vfs_is_mount_or_ancestor(vfs_node_t *dir, const char *name)
+{
+    if (!dir || !dir->mount || !name || name[0] == '\0') return false;
+    uint64_t dir_ino = vfs_node_stable_ino(dir);
+    bool hit = false;
+
+    rwlock_read_lock(&mount_lock);
+    for (vfs_mount_t *mp = mount_list; mp; mp = mp->next) {
+        if (!vfs_is_valid_kptr(mp)) break;
+        for (vfs_node_t *anc = mp->mountpoint; anc && anc->parent; anc = anc->parent) {
+            if (anc->parent->mount == dir->mount &&
+                vfs_node_stable_ino(anc->parent) == dir_ino &&
+                vfs_mount_name_eq(dir->mount, anc->name, name)) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) break;
+    }
+    rwlock_read_unlock(&mount_lock);
+    return hit;
+}
+
 // ── Unlink a file ─────────────────────────────────────────────
 int vfs_unlink(const char *path, const char *cwd)
 {
@@ -1740,6 +2044,16 @@ int vfs_rmdir(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) { vfs_ns_unlock(); return -ENOENT; }
     if (parent->type != VFS_DIR) { vfs_node_put(parent); vfs_ns_unlock(); return -ENOTDIR; }
+    if (parent->node_flags & VFS_NODE_ORPHANED) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -ENOENT;
+    }
+    if (vfs_is_mount_or_ancestor(parent, name)) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -EBUSY;
+    }
     if (!parent->i_ops || !vfs_is_valid_kptr(parent->i_ops) || !parent->i_ops->rmdir) {
         vfs_node_put(parent);
         vfs_ns_unlock();
@@ -1800,6 +2114,22 @@ int vfs_rename(const char *oldpath, const char *newpath, const char *cwd)
     }
 
     kfree(parents);
+
+    if ((olddir->node_flags & VFS_NODE_ORPHANED) ||
+        (newdir->node_flags & VFS_NODE_ORPHANED)) {
+        vfs_node_put(olddir);
+        vfs_node_put(newdir);
+        vfs_ns_unlock();
+        return -ENOENT;
+    }
+
+    if (vfs_is_mount_or_ancestor(olddir, oldname) ||
+        vfs_is_mount_or_ancestor(newdir, newname)) {
+        vfs_node_put(olddir);
+        vfs_node_put(newdir);
+        vfs_ns_unlock();
+        return -EBUSY;
+    }
 
     if (olddir->mount != newdir->mount) {
         vfs_node_put(olddir);
@@ -1864,22 +2194,28 @@ int vfs_resolve_path(vfs_node_t *node, char *path, size_t pathsz)
     const char *names[32];
     int depth = 0;
     vfs_node_t *cur = node;
+    vfs_mount_t *top_mount = node->mount;
 
     while (cur) {
+        while (cur->mount && cur == cur->mount->root && cur->mount->mountpoint != NULL) {
+            cur = cur->mount->mountpoint;
+        }
+        if (cur->mount) {
+            top_mount = cur->mount;
+        }
         if (depth >= 32)
             return -1;  // path too deep
         names[depth++] = cur->name;
         if (!cur->parent)
-            break;  // reached mount root
+            break;  // reached root
         cur = cur->parent;
     }
-    // names[0] = leaf, names[depth-1] = mount root ("/")
 
     // The mount root (names[depth-1]) is "/" — skip it.
     // Build: mount->path + "/" + names[depth-2] + "/" + ... + names[0]
 
     size_t written = 0;
-    const char *mpath = node->mount->path;
+    const char *mpath = top_mount ? top_mount->path : node->mount->path;
 
     // Helper: safely write a character — NUL-terminates on overflow
     #define PUT(c) do {                                \
