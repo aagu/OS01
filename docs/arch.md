@@ -110,7 +110,7 @@ x86_64 强覆盖：`kernel/arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0
 
 ~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
-1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地，剩余 `x86_64/trap.c` 3065 行的 x86 register decode 抽到 arch 层；aarch64 `smp.c` 拆分 context switch。预计 2–4 周。
+1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。`x86_64/intr/trap.c` 现为 1189 行（此前此处所称 3065 行已过时）；剩余 x86 异常与 IRQ 入口、EL0/SVC、aarch64 可恢复 abort/uaccess、用户页表/ASID/COW，以及 aarch64 `smp.c` 的 context switch 拆分仍待实施。预计 2–4 周。
 2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`。预计 2–3 周。
 3. **Spec C — 统一 kernel_main**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。预计 2–4 周。
 
