@@ -40,6 +40,8 @@ typedef enum {
     DESKTOP_REGION_STATUS_BAR,    /* 状态栏背景 */
     DESKTOP_REGION_CARD,          /* 欢迎卡片 */
     DESKTOP_REGION_LAUNCHER,      /* 启动器卡片 */
+    DESKTOP_REGION_DRAWER,        /* 抽屉面板 */
+    DESKTOP_REGION_SETTINGS,      /* 设置面板 */
     DESKTOP_REGION_COUNT
 } desktop_region_t;
 
@@ -60,6 +62,19 @@ typedef enum {
     DESKTOP_DENSITY_COMFORTABLE = 0,
     DESKTOP_DENSITY_COMPACT
 } desktop_density_t;
+
+/**
+ * @brief 可在设置表面调整的项
+ *
+ * 设置项的变更同样走「投递 → 主循环执行」：改壁纸 / 密度要重建当前表面，
+ * 而在 LVGL 回调期间销毁控件树是未定义行为。
+ */
+typedef enum {
+    DESKTOP_SETTING_NONE = 0,
+    DESKTOP_SETTING_CLOCK_FORMAT, /* 12 / 24 小时制 */
+    DESKTOP_SETTING_WALLPAPER,   /* 壁纸配色 */
+    DESKTOP_SETTING_DENSITY      /* 卡片密度 */
+} desktop_setting_t;
 
 typedef struct desktop_shell desktop_shell_t;
 
@@ -92,6 +107,13 @@ const char *desktop_shell_current_app(const desktop_shell_t *shell);
  */
 void desktop_shell_request(desktop_shell_t *shell, desktop_intent_t intent,
                             const char *app_id);
+
+/**
+ * @brief 投递一个设置项变更
+ *
+ * 变更在 desktop_shell_apply_pending() 里执行，并立即重建当前表面。
+ */
+void desktop_shell_request_setting(desktop_shell_t *shell, desktop_setting_t setting);
 
 /**
  * @brief 执行挂起的意图（主循环调用）

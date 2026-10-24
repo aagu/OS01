@@ -43,12 +43,15 @@ struct desktop_shell {
     desktop_wallpaper_t wallpaper;
     desktop_density_t   density;
     bool               clock_24h;
+    desktop_setting_t   pending_setting;
 
     lv_obj_t   *root;        /* 当前表面的根对象 */
     lv_obj_t   *clock_label;
     lv_obj_t   *status_bar;
     lv_timer_t *clock_timer;
 };
+
+static void apply_pending_setting(desktop_shell_t *shell, desktop_setting_t setting);
 
 /* ── 令牌化样式辅助 ─────────────────────────────────────────────── */
 
@@ -357,6 +360,280 @@ static void build_home(desktop_shell_t *shell)
     apply_wallpaper(shell);
 }
 
+
+/* ── 应用抽屉 ────────────────────────────────────────────────────── */
+
+static void drawer_row_cb(lv_event_t *event)
+{
+    desktop_shell_t *shell = (desktop_shell_t *)lv_event_get_user_data(event);
+    if (shell == NULL) {
+        return;
+    }
+    const char *app_id = (const char *)lv_obj_get_user_data(lv_event_get_target(event));
+    if (app_id == NULL) {
+        return;
+    }
+    desktop_shell_request(shell, DESKTOP_INTENT_OPEN_APP, app_id);
+}
+
+static void build_drawer(desktop_shell_t *shell)
+{
+    const gui_theme_colors_t *c = gui_theme_colors();
+    int32_t w = lv_display_get_horizontal_resolution(shell->disp);
+    int32_t h = lv_display_get_vertical_resolution(shell->disp);
+
+    lv_obj_t *root = make_surface_root(shell->disp);
+    if (root == NULL) {
+        return;
+    }
+    shell->root = root;
+    shell->clock_label = NULL;
+
+    build_status_bar(shell, root);
+
+    lv_obj_t *title = make_label(root, "应用", GUI_THEME_FONT_HEADLINE, c->on_surface);
+    if (title != NULL) {
+        lv_obj_set_pos(title, 16, STATUS_BAR_HEIGHT + 12);
+    }
+
+    lv_obj_t *count = make_label(root, "", GUI_THEME_FONT_LABEL, c->on_surface_variant);
+    if (count != NULL) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u 个应用", desktop_app_count());
+        lv_label_set_text(count, buf);
+        lv_obj_align(count, LV_ALIGN_TOP_RIGHT, -16, STATUS_BAR_HEIGHT + 16);
+    }
+
+    /* 抽屉面板：elevation 3（浮层）。面板留出内边距，取样点落在面板本身。 */
+    lv_obj_t *panel = lv_obj_create(root);
+    if (panel == NULL) {
+        return;
+    }
+    lv_obj_set_layout(panel, LV_LAYOUT_NONE);
+    lv_obj_set_size(panel, w - 32, h - STATUS_BAR_HEIGHT - 64);
+    lv_obj_set_pos(panel, 16, STATUS_BAR_HEIGHT + 48);
+    style_card(panel, GUI_THEME_ELEVATION_3);
+    lv_obj_set_style_pad_all(panel, (int32_t)tok_space(GUI_THEME_SPACE_MD), 0);
+
+    /* 可滚动列表：flex 纵向排列，行高自然撑开内容高度。 */
+    lv_obj_t *list = lv_obj_create(panel);
+    if (list == NULL) {
+        return;
+    }
+    lv_obj_set_layout(list, LV_LAYOUT_NONE);
+    lv_obj_set_size(list, w - 32 - 2 * (int32_t)tok_space(GUI_THEME_SPACE_MD),
+                    h - STATUS_BAR_HEIGHT - 64 - 2 * (int32_t)tok_space(GUI_THEME_SPACE_MD));
+    lv_obj_set_pos(list, 0, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, (int32_t)tok_space(GUI_THEME_SPACE_SM), 0);
+    lv_obj_set_style_radius(list, 0, 0);
+    lv_obj_set_style_shadow_width(list, 0, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (uint32_t i = 0; i < desktop_app_count(); i++) {
+        desktop_app_id_t id = (desktop_app_id_t)i;
+        const desktop_app_info_t *info = desktop_app_info(id);
+        if (info == NULL) {
+            break;
+        }
+
+        lv_obj_t *row = lv_obj_create(list);
+        if (row == NULL) {
+            continue;
+        }
+        style_card(row, GUI_THEME_ELEVATION_1);
+        lv_obj_set_style_bg_color(row, tok(c->surface_container_low), 0);
+        lv_obj_set_width(row, w - 32);
+        lv_obj_set_height(row, 64);
+        lv_obj_set_flex_grow(row, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+        /* 图标 */
+        lv_obj_t *icon = lv_obj_create(row);
+        if (icon != NULL) {
+            lv_obj_set_size(icon, 40, 40);
+            lv_obj_set_pos(icon, 12, 12);
+            lv_obj_set_style_bg_color(icon, tok(desktop_app_accent_color(id)), 0);
+            lv_obj_set_style_radius(icon, (int32_t)tok_radius(GUI_THEME_RADIUS_FULL), 0);
+            lv_obj_set_style_border_width(icon, 0, 0);
+            lv_obj_set_style_shadow_width(icon, 0, 0);
+            lv_obj_set_style_pad_all(icon, 0, 0);
+            lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_t *glyph = make_label(icon, info->glyph, GUI_THEME_FONT_TITLE, c->on_primary);
+            if (glyph != NULL) {
+                lv_obj_center(glyph);
+            }
+        }
+
+        lv_obj_t *name = make_label(row, info->name, GUI_THEME_FONT_TITLE, c->on_surface);
+        if (name != NULL) {
+            lv_obj_set_pos(name, 64, 10);
+        }
+        lv_obj_t *desc = make_label(row, info->desc, GUI_THEME_FONT_BODY, c->on_surface_variant);
+        if (desc != NULL) {
+            lv_obj_set_pos(desc, 64, 34);
+        }
+
+        lv_obj_set_user_data(row, (void *)desktop_app_id_name(id));
+        lv_obj_add_event_cb(row, drawer_row_cb, LV_EVENT_CLICKED, shell);
+    }
+
+    lv_obj_t *hint = make_label(root, "ESC 返回主屏", GUI_THEME_FONT_LABEL, c->on_surface_variant);
+    if (hint != NULL) {
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 16, -12);
+    }
+
+    apply_wallpaper(shell);
+}
+
+/* ── 基本设置 ────────────────────────────────────────────────────── */
+
+static void setting_row_cb(lv_event_t *event)
+{
+    desktop_shell_t *shell = (desktop_shell_t *)lv_event_get_user_data(event);
+    if (shell == NULL) {
+        return;
+    }
+    /* 设置项标识挂在行对象的 user data 上；回调的 user data 是外壳。 */
+    desktop_setting_t setting =
+        (desktop_setting_t)(intptr_t)lv_obj_get_user_data(lv_event_get_target(event));
+    if (setting == DESKTOP_SETTING_NONE) {
+        return;
+    }
+    desktop_shell_request_setting(shell, setting);
+}
+
+static const char *wallpaper_label(const desktop_shell_t *shell)
+{
+    switch (shell->wallpaper) {
+    case DESKTOP_WALLPAPER_CONTAINER_LOW:     return "浅灰";
+    case DESKTOP_WALLPAPER_CONTAINER_HIGH:    return "深灰";
+    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST: return "最深";
+    case DESKTOP_WALLPAPER_SURFACE:
+    default:                                  return "标准";
+    }
+}
+
+static const char *density_label(const desktop_shell_t *shell)
+{
+    return (shell->density == DESKTOP_DENSITY_COMPACT) ? "紧凑" : "舒适";
+}
+
+static lv_obj_t *make_setting_row(desktop_shell_t *shell, lv_obj_t *list,
+                                   const char *name, const char *value,
+                                   desktop_setting_t setting)
+{
+    const gui_theme_colors_t *c = gui_theme_colors();
+    int32_t w = lv_display_get_horizontal_resolution(shell->disp);
+
+    lv_obj_t *row = lv_obj_create(list);
+    if (row == NULL) {
+        return NULL;
+    }
+    style_card(row, GUI_THEME_ELEVATION_1);
+    lv_obj_set_style_bg_color(row, tok(c->surface_container_low), 0);
+    lv_obj_set_width(row, w - 32);
+    lv_obj_set_height(row, 56);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *label = make_label(row, name, GUI_THEME_FONT_TITLE, c->on_surface);
+    if (label != NULL) {
+        lv_obj_set_pos(label, 16, 18);
+    }
+
+    /* 右侧的当前值：点击整行即切换。 */
+    lv_obj_t *val = make_label(row, value, GUI_THEME_FONT_BODY, c->primary);
+    if (val != NULL) {
+        lv_obj_align(val, LV_ALIGN_RIGHT_MID, -16, 0);
+    }
+
+    lv_obj_set_user_data(row, (void *)(intptr_t)setting);
+    lv_obj_add_event_cb(row, setting_row_cb, LV_EVENT_CLICKED, shell);
+    return row;
+}
+
+static void build_settings(desktop_shell_t *shell)
+{
+    const gui_theme_colors_t *c = gui_theme_colors();
+    int32_t w = lv_display_get_horizontal_resolution(shell->disp);
+    int32_t h = lv_display_get_vertical_resolution(shell->disp);
+
+    lv_obj_t *root = make_surface_root(shell->disp);
+    if (root == NULL) {
+        return;
+    }
+    shell->root = root;
+    shell->clock_label = NULL;
+
+    build_status_bar(shell, root);
+
+    lv_obj_t *title = make_label(root, "设置", GUI_THEME_FONT_HEADLINE, c->on_surface);
+    if (title != NULL) {
+        lv_obj_set_pos(title, 16, STATUS_BAR_HEIGHT + 12);
+    }
+
+    /* 设置面板：elevation 2（卡片层）。 */
+    lv_obj_t *panel = lv_obj_create(root);
+    if (panel == NULL) {
+        return;
+    }
+    lv_obj_set_layout(panel, LV_LAYOUT_NONE);
+    lv_obj_set_size(panel, w - 32, h - STATUS_BAR_HEIGHT - 64);
+    lv_obj_set_pos(panel, 16, STATUS_BAR_HEIGHT + 48);
+    style_card(panel, GUI_THEME_ELEVATION_2);
+    lv_obj_set_style_pad_all(panel, (int32_t)tok_space(GUI_THEME_SPACE_MD), 0);
+
+    lv_obj_t *list = lv_obj_create(panel);
+    if (list == NULL) {
+        return;
+    }
+    lv_obj_set_layout(list, LV_LAYOUT_NONE);
+    lv_obj_set_size(list, w - 32 - 2 * (int32_t)tok_space(GUI_THEME_SPACE_MD),
+                    h - STATUS_BAR_HEIGHT - 64 - 2 * (int32_t)tok_space(GUI_THEME_SPACE_MD));
+    lv_obj_set_pos(list, 0, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, (int32_t)tok_space(GUI_THEME_SPACE_SM), 0);
+    lv_obj_set_style_radius(list, 0, 0);
+    lv_obj_set_style_shadow_width(list, 0, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_setting_row(shell, list, "时钟格式",
+                     shell->clock_24h ? "24 小时制" : "12 小时制",
+                     DESKTOP_SETTING_CLOCK_FORMAT);
+    make_setting_row(shell, list, "壁纸颜色", wallpaper_label(shell),
+                     DESKTOP_SETTING_WALLPAPER);
+    make_setting_row(shell, list, "卡片密度", density_label(shell),
+                     DESKTOP_SETTING_DENSITY);
+
+    /* 「关于」是只读展示，不可点击。 */
+    lv_obj_t *about = lv_obj_create(list);
+    if (about != NULL) {
+        style_card(about, GUI_THEME_ELEVATION_1);
+        lv_obj_set_style_bg_color(about, tok(c->surface_container_low), 0);
+        lv_obj_set_width(about, w - 32);
+        lv_obj_set_height(about, 88);
+        lv_obj_t *name = make_label(about, "关于", GUI_THEME_FONT_TITLE, c->on_surface);
+        if (name != NULL) {
+            lv_obj_set_pos(name, 16, 14);
+        }
+        lv_obj_t *detail = make_label(about,
+                                      "OS01 Material 桌面外壳\n"
+                                      "内核 x86_64 / LVGL 9 / libgui",
+                                      GUI_THEME_FONT_BODY, c->on_surface_variant);
+        if (detail != NULL) {
+            lv_obj_set_pos(detail, 16, 40);
+        }
+    }
+
+    apply_wallpaper(shell);
+}
+
 /* ── 迁移执行 ────────────────────────────────────────────────────── */
 
 static void destroy_surface(desktop_shell_t *shell)
@@ -371,7 +648,19 @@ static void destroy_surface(desktop_shell_t *shell)
 
 void desktop_shell_apply_pending(desktop_shell_t *shell)
 {
-    if (shell == NULL || shell->pending == DESKTOP_INTENT_NONE) {
+    if (shell == NULL) {
+        return;
+    }
+
+    /* 设置项变更先处理：它不改变表面状态，但要重建当前表面。 */
+    if (shell->pending_setting != DESKTOP_SETTING_NONE) {
+        desktop_setting_t setting = shell->pending_setting;
+        shell->pending_setting = DESKTOP_SETTING_NONE;
+        apply_pending_setting(shell, setting);
+        return;
+    }
+
+    if (shell->pending == DESKTOP_INTENT_NONE) {
         return;
     }
 
@@ -400,12 +689,58 @@ void desktop_shell_apply_pending(desktop_shell_t *shell)
         build_home(shell);
         break;
     case DESKTOP_STATE_DRAWER:
+        build_drawer(shell);
+        break;
     case DESKTOP_STATE_SETTINGS:
+        build_settings(shell);
+        break;
     case DESKTOP_STATE_APP:
+        /* 应用表面由 Task 6 补齐。 */
+        break;
     default:
-        /* 抽屉 / 设置 / 应用表面由后续任务补齐（Task 5 / Task 6）。 */
         break;
     }
+}
+
+/* ── 设置项变更 ──────────────────────────────────────────────────── */
+
+static void apply_pending_setting(desktop_shell_t *shell, desktop_setting_t setting)
+{
+    switch (setting) {
+    case DESKTOP_SETTING_CLOCK_FORMAT:
+        shell->clock_24h = !shell->clock_24h;
+        break;
+    case DESKTOP_SETTING_WALLPAPER:
+        shell->wallpaper = (desktop_wallpaper_t)((shell->wallpaper + 1) %
+                          (int)(DESKTOP_WALLPAPER_CONTAINER_HIGHEST + 1));
+        break;
+    case DESKTOP_SETTING_DENSITY:
+        shell->density = (shell->density == DESKTOP_DENSITY_COMFORTABLE)
+                             ? DESKTOP_DENSITY_COMPACT
+                             : DESKTOP_DENSITY_COMFORTABLE;
+        break;
+    case DESKTOP_SETTING_NONE:
+    default:
+        return;
+    }
+
+    /* 设置项的可见效果在当前表面上：重建当前表面。 */
+    desktop_state_t state = shell->state;
+    destroy_surface(shell);
+    switch (state) {
+    case DESKTOP_STATE_HOME:     build_home(shell);     break;
+    case DESKTOP_STATE_DRAWER:   build_drawer(shell);   break;
+    case DESKTOP_STATE_SETTINGS: build_settings(shell); break;
+    default:                     build_home(shell);     break;
+    }
+}
+
+void desktop_shell_request_setting(desktop_shell_t *shell, desktop_setting_t setting)
+{
+    if (shell == NULL || setting == DESKTOP_SETTING_NONE) {
+        return;
+    }
+    shell->pending_setting = setting;
 }
 
 /* ── 生命周期 ────────────────────────────────────────────────────── */
@@ -426,6 +761,7 @@ desktop_shell_t *desktop_shell_create(lv_display_t *disp)
     shell->wallpaper = DESKTOP_WALLPAPER_SURFACE;
     shell->density = DESKTOP_DENSITY_COMFORTABLE;
     shell->clock_24h = true;
+    shell->pending_setting = DESKTOP_SETTING_NONE;
 
     build_home(shell);
 
@@ -528,6 +864,12 @@ bool desktop_shell_probe_point(const desktop_shell_t *shell, desktop_region_t re
         /* 取样点必须避开圆角弧（半径 12）与卡片内的文字。 */
         *x = (uint32_t)(((w - CARD_WIDTH) / 2) + 16);
         *y = (uint32_t)(CARD_TOP + CARD_HEIGHT - 16);
+        return true;
+    case DESKTOP_REGION_DRAWER:
+    case DESKTOP_REGION_SETTINGS:
+        /* 面板自身的表面：左上角内缩 16px，避开圆角弧（半径 12）。 */
+        *x = 16 + 16;
+        *y = (uint32_t)(STATUS_BAR_HEIGHT + 48 + 16);
         return true;
     case DESKTOP_REGION_LAUNCHER: {
         uint32_t count = desktop_app_launcher_count();

@@ -191,6 +191,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_theme_apply.elf \
     $(TEST_BLD)/test_desktop_state.elf \
     $(TEST_BLD)/test_desktop_shell.elf \
+    $(TEST_BLD)/test_desktop_audit.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -4134,6 +4135,27 @@ $(TEST_BLD)/test_desktop_shell.elf: \
 
 .PHONY: test-gui-desktop-shell
 test-gui-desktop-shell: $(TEST_BLD)/test_desktop_shell.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 5: desktop source audit ───────────────────────────
+# The design-system discipline ("colors come from the token table") and
+# the "no window system" promise are constraints on the SHAPE of the
+# code, not on its behaviour, so they are audited statically.  The
+# audit reads the real sources from the repository (the path comes from
+# the build system, never from the runtime cwd).
+$(TEST_BLD)/test_desktop_audit.o: $(TEST_CASES)/test_desktop_audit.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+	    -DGUI_DESKTOP_SRC=\"$(TESTS_DIR)/user/desktop\" -c $< -o $@
+
+$(TEST_BLD)/test_desktop_audit.elf: $(TEST_BLD)/test_desktop_audit.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-gui-desktop-audit
+test-gui-desktop-audit: $(TEST_BLD)/test_desktop_audit.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

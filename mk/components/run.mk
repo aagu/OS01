@@ -629,8 +629,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # input-frame, input-route, input-decode, input-platform, theme) or all
 # (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -783,6 +783,16 @@ _test-gui-host-run-desktop-state:
 _test-gui-host-run-desktop-shell:
 	@echo "  [test-gui-host] desktop-shell"
 	$(call os01_submake,hosttests,test-gui-desktop-shell $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 5: the desktop source audit.  Runs
+# test_desktop_audit.elf, which reads the real user/desktop sources and
+# asserts the design-system discipline (no colour literals, no font
+# sizes), the input discipline (no direct device access, no private
+# libgui headers), and the "no window system" promise (no window
+# decoration identifiers).
+_test-gui-host-run-desktop-audit:
+	@echo "  [test-gui-host] desktop-audit"
+	$(call os01_submake,hosttests,test-gui-desktop-audit $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
