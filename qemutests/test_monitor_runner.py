@@ -18,6 +18,9 @@ from pathlib import Path
 from qemutests import monitor_test as mt
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 # ── transcript builders ───────────────────────────────────────────────
 
 
@@ -79,6 +82,68 @@ class ParseFramesTests(unittest.TestCase):
         self.assertEqual(mt._pct_to_10000("33.3%"), 3330)
         self.assertIsNone(mt._pct_to_10000("--"))
         self.assertIsNone(mt._pct_to_10000("bogus"))
+
+    def test_torn_header_recovers_the_frame(self):
+        """A diagnostic record spliced into the header must not cost a frame.
+
+        The console is a shared serial line.  A writer that emits a line
+        in several writes can be torn in half by a concurrent diagnostic
+        ("[term-present]" / "[term-probe]"), which is how "OS01 monitor"
+        used to arrive as "OS01 mo" + "nitor".  The runner must not lose
+        the frame over a torn line.
+        """
+        text = ("OS01 mo[term-present] version=1 begin_ns=1 end_ns=2 "
+                "rect_calls=6\r\n"
+                "nitor\n"
+                "CPU total: 55.0%\n")
+        frames = mt.parse_frames(text)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0].total_10000, 5500)
+
+    def test_diagnostic_between_lines_keeps_the_frame(self):
+        """A diagnostic record between two lines of a frame is ignored."""
+        text = ("OS01 monitor\n"
+                "[term-present] version=1 begin_ns=1 end_ns=2 "
+                "rect_calls=6\r\n"
+                "CPU total: 55.0%\n")
+        frames = mt.parse_frames(text)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0].total_10000, 5500)
+
+    def test_monitor_spin_lines_are_not_stripped(self):
+        """The monitor's own [MONITOR SPIN] records must survive the strip.
+
+        The strip is scoped to the terminal's diagnostic records; the
+        monitor's spin/epoch lines are parsed separately and count
+        towards the dual-core ownership check.
+        """
+        text = ("OS01 monitor\n"
+                "CPU total: 55.0%\n"
+                "[MONITOR SPIN] cpu=0 epoch=3\n")
+        stripped = mt._strip_diagnostics(text)
+        self.assertIn("[MONITOR SPIN]", stripped)
+        self.assertEqual(stripped, text)
+        frames = mt.parse_frames(text)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(mt.count_epoch_lines(text), 1)
+
+    def test_strip_matches_the_terminal_record_emitters(self):
+        """The strip must keep matching the guest's record formats.
+
+        The strip hardcodes the shape of the two records the terminal
+        application writes to the console.  If an emitter changes its
+        shape, the strip silently stops matching and the original torn
+        frame comes back with every test still green -- so pin the two
+        shapes against the emitter sources.
+        """
+        present = (ROOT / "user/terminal/terminal_display.c").read_text()
+        probe = (ROOT / "user/terminal/terminal.c").read_text()
+        self.assertIn('"[term-present] version=1 ', present)
+        self.assertIn('"[term-probe] wakes/s=', probe)
+        # the strip must actually match the shapes the emitters produce
+        for record in ('[term-present] version=1 begin_ns=1 end_ns=2\r\n',
+                       '[term-probe] wakes/s=7 presents/s=2\r\n'):
+            self.assertEqual(mt._strip_diagnostics(record), "")
 
 
 # ── empty / missing / guest-failure gates ─────────────────────────────

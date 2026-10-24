@@ -68,6 +68,19 @@ static size_t cap_len;
 static int    g_cursor_hidden;
 static int    g_cursor_shown;
 
+/* Write-boundary accounting: how many output calls the renderer made,
+ * and how many of them did NOT carry exactly one complete line.
+ *
+ * The console is a shared serial line.  A line emitted as several
+ * separate writes can be torn in half by a concurrent writer (the
+ * terminal's "[term-present]" / "[term-probe]" diagnostics go to the
+ * same UART), which is how the monitor's "OS01 monitor" header used to
+ * arrive as "OS01 mo" + "nitor" and cost the runner one frame.  A
+ * renderer that emits each line with ONE write makes that impossible
+ * for every writer that holds the serial lock across its buffer. */
+static unsigned cap_calls;        /* total output calls */
+static unsigned cap_split_calls;  /* calls that are not exactly one line */
+
 int mon_test_fprintf(void *f, const char *fmt, ...)
 {
     (void)f;
@@ -85,6 +98,14 @@ int mon_test_fprintf(void *f, const char *fmt, ...)
             cap_len += add;
             cap_buf[cap_len] = '\0';
         }
+        /* One call == one complete line: exactly one '\n', at the end. */
+        cap_calls++;
+        size_t nl = 0;
+        for (size_t i = 0; i < add; i++)
+            if (tmp[i] == '\n')
+                nl++;
+        if (nl != 1 || tmp[add - 1] != '\n')
+            cap_split_calls++;
     }
     if (strstr(tmp, "\x1b[?25l"))
         g_cursor_hidden = 1;
@@ -298,6 +319,8 @@ static void cap_reset(void)
 {
     cap_len = 0;
     cap_buf[0] = '\0';
+    cap_calls = 0;
+    cap_split_calls = 0;
     g_cursor_hidden = 0;
     g_cursor_shown = 0;
 }
@@ -591,6 +614,88 @@ static void test_narrow_truncation_keeps_ansi(void)
     assert_true(max_run(cap(), 'A') == 40);
 }
 
+/* The renderer must emit each output line with exactly ONE write.
+ *
+ * The console is a shared serial line: the terminal's "[term-present]"
+ * / "[term-probe]" diagnostics go to the same UART and hold the serial
+ * lock across their whole buffer, while a per-byte writer (fb.c's
+ * fb_write, the panic path) can land anywhere.  A line split across
+ * several writes can therefore be torn in half -- the monitor header
+ * used to arrive as "OS01 mo" + "nitor", which cost the QEMU runner
+ * one frame and made the 2-core monitor case time out.  One write per
+ * line makes the tear impossible for every lock-holding writer. */
+static void test_output_writes_whole_lines(void)
+{
+    struct monitor_model m;
+    base_model(&m);
+    m.total_cpu.valid = true;
+    m.total_cpu.percent_10000 = 5000;
+    m.ncpu_rows = 1;
+    m.cpu_rows[0].cpu_id = 0;
+    m.cpu_rows[0].online = true;
+    m.cpu_rows[0].pct.valid = true;
+    m.cpu_rows[0].pct.percent_10000 = 5000;
+    m.nproc_rows = 1;
+    memset(&g_rows[0], 0, sizeof g_rows[0]);
+    g_rows[0].pid = 42;
+    g_rows[0].state = 'R';
+    snprintf(g_rows[0].comm, sizeof g_rows[0].comm, "init");
+
+    /* plain layout */
+    cap_reset();
+    assert_eq(monitor_render(stdout, &m, 24, 0), 0);
+    assert_true(cap_calls > 0);
+    assert_eq(cap_split_calls, 0);
+
+    /* ANSI layout: the leading cursor-home escape belongs to the first
+     * line, it must not become a write of its own */
+    cap_reset();
+    assert_eq(monitor_render(stdout, &m, 24, 80), 0);
+    assert_true(cap_calls > 0);
+    assert_eq(cap_split_calls, 0);
+
+    /* one call per line, so the call count equals the newline count */
+    size_t nlines = 0;
+    for (size_t i = 0; i < cap_len; i++)
+        if (cap_buf[i] == '\n')
+            nlines++;
+    assert_eq(cap_calls, nlines);
+}
+
+/* The line buffer must be large enough for the longest line this
+ * renderer can produce.
+ *
+ * A comm is re-escaped at up to 4 bytes per byte (spec §6), so the
+ * worst case is TASK_COMM_LEN-1 control bytes -> 4 bytes each, plus
+ * the row prefix, the "(expired)" marker and the ANSI attributes.  If
+ * the buffer were too small, tw_put_raw() would flush mid-line and
+ * reintroduce exactly the split this change removes -- so pin the
+ * bound here instead of trusting the arithmetic. */
+static void test_longest_line_stays_one_write(void)
+{
+    struct monitor_model m;
+    base_model(&m);
+    m.nproc_rows = 1;
+    memset(&g_rows[0], 0, sizeof g_rows[0]);
+    g_rows[0].pid = 1;
+    g_rows[0].state = 'R';
+    g_rows[0].stale = true;
+    for (int i = 0; i < 63; i++)
+        g_rows[0].comm[i] = 0x01;      /* worst case: 4 escaped bytes each */
+    g_rows[0].comm[63] = '\0';
+
+    /* plain layout */
+    cap_reset();
+    assert_eq(monitor_render(stdout, &m, 24, 0), 0);
+    assert_eq(cap_split_calls, 0);
+
+    /* ANSI layout: the same row plus the attribute markers */
+    cap_reset();
+    assert_eq(monitor_render(stdout, &m, 24, 200), 0);
+    assert_eq(cap_split_calls, 0);
+    assert_true(cap_calls > 0);
+}
+
 static void test_first_round_all_dashes(void)
 {
     struct monitor_model m;
@@ -748,6 +853,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_thermal_stale_and_unsupported),
     TEST_ENTRY(test_proc_name_escaped_plain),
     TEST_ENTRY(test_narrow_truncation_keeps_ansi),
+    TEST_ENTRY(test_output_writes_whole_lines),
+    TEST_ENTRY(test_longest_line_stays_one_write),
     TEST_ENTRY(test_first_round_all_dashes),
     TEST_ENTRY(test_unknown_argument),
     TEST_ENTRY(test_samples_mode_plain_finite),
