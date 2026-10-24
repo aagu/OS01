@@ -82,7 +82,7 @@ TEST_FUNC(test_home_surface_matches_the_token_table)
 
     /* 壁纸区 */
     assert_true(desktop_shell_probe_point(shell, DESKTOP_REGION_WALLPAPER, &x, &y));
-    assert_eq(c->surface, gui_platform_get_pixel(p, x, y));
+    assert_eq(c->surface_dim, gui_platform_get_pixel(p, x, y));
 
     /* 状态栏区 */
     assert_true(desktop_shell_probe_point(shell, DESKTOP_REGION_STATUS_BAR, &x, &y));
@@ -293,21 +293,30 @@ TEST_FUNC(test_setting_change_rebuilds_the_surface)
     assert_not_null(shell);
     render(p);
 
-    desktop_wallpaper_t wallpaper = DESKTOP_WALLPAPER_SURFACE;
+    desktop_wallpaper_t wallpaper = DESKTOP_WALLPAPER_SURFACE_DIM;
     desktop_density_t density = DESKTOP_DENSITY_COMFORTABLE;
     bool clock_24h = false;
 
     desktop_shell_get_settings(shell, &wallpaper, &density, &clock_24h);
-    assert_eq(DESKTOP_WALLPAPER_SURFACE, wallpaper);
+    assert_eq(DESKTOP_WALLPAPER_SURFACE_DIM, wallpaper);
     assert_eq(DESKTOP_DENSITY_COMFORTABLE, density);
     assert_true(clock_24h);
 
     uint32_t x = 0;
     uint32_t y = 0;
     assert_true(desktop_shell_probe_point(shell, DESKTOP_REGION_WALLPAPER, &x, &y));
-    assert_eq(gui_theme_colors()->surface, gui_platform_get_pixel(p, x, y));
+    assert_eq(gui_theme_colors()->surface_dim, gui_platform_get_pixel(p, x, y));
 
     /* 换壁纸：变更在主循环里执行，并立即重建当前表面。 */
+    desktop_shell_request_setting(shell, DESKTOP_SETTING_WALLPAPER);
+    desktop_shell_apply_pending(shell);
+
+    desktop_shell_get_settings(shell, &wallpaper, &density, &clock_24h);
+    assert_eq(DESKTOP_WALLPAPER_SURFACE, wallpaper);
+    render(p);
+    assert_eq(gui_theme_colors()->surface, gui_platform_get_pixel(p, x, y));
+
+    /* 再换一次：走到 container_low。 */
     desktop_shell_request_setting(shell, DESKTOP_SETTING_WALLPAPER);
     desktop_shell_apply_pending(shell);
 

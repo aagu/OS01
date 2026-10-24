@@ -321,11 +321,12 @@ static uint32_t wallpaper_color(const desktop_shell_t *shell)
     const gui_theme_colors_t *c = gui_theme_colors();
 
     switch (shell->wallpaper) {
-    case DESKTOP_WALLPAPER_CONTAINER_LOW:     return c->surface_container_low;
-    case DESKTOP_WALLPAPER_CONTAINER_HIGH:    return c->surface_container_high;
-    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST: return c->surface_container_highest;
-    case DESKTOP_WALLPAPER_SURFACE:
-    default:                                  return c->surface;
+    case DESKTOP_WALLPAPER_SURFACE:            return c->surface;
+    case DESKTOP_WALLPAPER_CONTAINER_LOW:      return c->surface_container_low;
+    case DESKTOP_WALLPAPER_CONTAINER_HIGH:     return c->surface_container_high;
+    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST:  return c->surface_container_highest;
+    case DESKTOP_WALLPAPER_SURFACE_DIM:
+    default:                                   return c->surface_dim;
     }
 }
 
@@ -678,11 +679,12 @@ static void setting_row_cb(lv_event_t *event)
 static const char *wallpaper_label(const desktop_shell_t *shell)
 {
     switch (shell->wallpaper) {
-    case DESKTOP_WALLPAPER_CONTAINER_LOW:     return "Light grey";
-    case DESKTOP_WALLPAPER_CONTAINER_HIGH:    return "Dark grey";
-    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST: return "Darkest";
-    case DESKTOP_WALLPAPER_SURFACE:
-    default:                                  return "Standard";
+    case DESKTOP_WALLPAPER_SURFACE:            return "Standard";
+    case DESKTOP_WALLPAPER_CONTAINER_LOW:      return "Light grey";
+    case DESKTOP_WALLPAPER_CONTAINER_HIGH:     return "Grey";
+    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST:  return "Dark grey";
+    case DESKTOP_WALLPAPER_SURFACE_DIM:
+    default:                                   return "Deepest";
     }
 }
 
@@ -1050,7 +1052,7 @@ desktop_shell_t *desktop_shell_create(gui_platform_t *platform)
     shell->disp = disp;
     shell->state = DESKTOP_STATE_HOME;
     shell->pending = DESKTOP_INTENT_NONE;
-    shell->wallpaper = DESKTOP_WALLPAPER_SURFACE;
+    shell->wallpaper = DESKTOP_WALLPAPER_SURFACE_DIM;
     shell->density = DESKTOP_DENSITY_COMFORTABLE;
     shell->clock_24h = true;
     shell->pending_setting = DESKTOP_SETTING_NONE;
