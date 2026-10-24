@@ -190,8 +190,9 @@ el1_irq_entry:
  * AAPCS64 参数：(x0=sp → &regs, x1=esr, x2=far)。ESR_EL1/FAR_EL1 在
  * 调用 C 前用 caller-saved 通用寄存器暂存，再分别送入 x1/x2。
  *
- * aarch64_el1_sync_fatal 是 noreturn；汇编后置不可返回的 WFI 兜底，
- * 防止编译器/ABI 失误意外 `eret`。
+ * aarch64_el1_sync（dispatch phase 1 适配器）是 noreturn：构造事件并
+ * 进入共同分派后，终点是原 fatal 诊断或 bad-event；汇编后置不可返回
+ * 的 WFI 兜底，防止编译器/ABI 失误意外 `eret`。
  * ────────────────────────────────────────────────────────────── */
 .balign 0x80
 .globl el1_sync_entry
@@ -226,7 +227,7 @@ el1_sync_entry:
     mrs     x1, esr_el1
     mrs     x2, far_el1
     mov     x0, sp                       /* x0 = &regs */
-    bl      aarch64_el1_sync_fatal
+    bl      aarch64_el1_sync
     /* noreturn fallback：禁用中断 + 永久 WFI，杜绝 eret。 */
 0:  msr     daifset, #0xf
     wfi

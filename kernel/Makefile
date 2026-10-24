@@ -73,6 +73,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
+                   intr/dispatch.c \
                    core/stack_chk.c \
                    core/printk.c \
                    subsys/subsys.c \
@@ -88,7 +89,16 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_page_table_multicore.c
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
+# intr/dispatch.c is the arch-neutral common dispatcher (intr-dispatch
+# phase 1, Task 3): the strong aarch64 backends live in
+# arch/aarch64/intr/dispatch.c, collected by the wildcard below.
 else
+# intr/dispatch.c is the arch-neutral common dispatcher (intr-dispatch
+# phase 1, Task 4): the strong x86_64 backends live in
+# arch/x86_64/intr/dispatch.c, collected by the ARCHDIR wildcard below,
+# so the common source links into the x86 product build with no
+# exclusion.  The legacy per-vector handler table lives in
+# intr/vector_dispatch.c and is collected here with the rest of intr/.
 KERNEL_C_SOURCES := \
     $(wildcard core/*.c) \
     $(wildcard syscall/*.c) \

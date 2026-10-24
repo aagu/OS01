@@ -356,7 +356,12 @@ def run_kernel_selftest(
         return 2
 
     # ── semantic gate: protocol v1 only (no legacy fallback) ─────
-    errors = list(v1_failures(log))
+    # The real x86 gate additionally requires the intr-dispatch recovery
+    # evidence: uaccess + msr_safe SELECTed and passing, and the Task 5
+    # longjmp-restore marker exactly once inside the uaccess interval
+    # (spec §9.3 item 5).  The default parse API stays architecture-
+    # neutral, so the aarch64 harness is unaffected.
+    errors = list(v1_failures(log, require_intr_dispatch=True))
     if _panic_in(tail):
         errors.append("kernel panic in 1-second observation window")
     ok = not errors

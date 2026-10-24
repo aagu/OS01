@@ -59,7 +59,9 @@ int  gic_register_handler(uint32_t intid, gic_handler_fn fn, uint64_t param,
 int  gic_unregister_handler(uint32_t intid);       /* 0 / -1 越界 / -3 未注册 */
 gic_handler_fn gic_get_handler(uint32_t intid, uint64_t *param_out);
 
-/* 通用 dispatch（trap.c 的 el1_irq 是它的三行壳） */
+/* 通用 dispatch —— 由 ARM 中断后端 kernel/arch/aarch64/intr/dispatch.c 的
+ * arch_intr_handle_irq() 调用一次（trap.c 的 el1_irq 不再直接调用它：
+ * el1_irq 现在构造事件并走 arch_intr_dispatch）。 */
 void gic_dev_dispatch(struct gic_dev *dev, struct pt_regs *regs);
 
 /* 生产 wrapper（gic.c）—— 基址来自 DTB；gic_init/gic_cpu_init 兼容旧调用点 */

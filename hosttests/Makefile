@@ -185,7 +185,12 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_decode.elf \
     $(TEST_BLD)/test_gui_input_nonce.elf \
     $(TEST_BLD)/test_gui_input_platform.elf \
-    $(TEST_BLD)/test_gui_input_lvgl.elf
+    $(TEST_BLD)/test_gui_input_lvgl.elf \
+    $(TEST_BLD)/test_intr_decode_x86.elf \
+    $(TEST_BLD)/test_intr_decode_aarch64.elf \
+    $(TEST_BLD)/test_intr_dispatch.elf \
+    $(TEST_BLD)/test_intr_backend_aarch64.elf \
+    $(TEST_BLD)/test_intr_backend_x86.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -954,6 +959,231 @@ $(TEST_BLD)/test_aarch64_sync_fault.o: $(TEST_CASES)/test_aarch64_sync_fault.c \
 
 $(TEST_BLD)/test_aarch64_sync_fault.elf: $(TEST_BLD)/test_aarch64_sync_fault.o
 	$(HOST_CC) -o $@ $<
+
+# ── Interrupt dispatch phase 1, Task 1: normalized event decoders ──
+# The intr host-test rules below list EVERY production header their object
+# actually includes (transitively) as an explicit prerequisite.  This file
+# has no header-dependency tracking (no -MMD), so an omitted header means an
+# edit to it silently reuses a stale object — the stale-object false green
+# this list exists to prevent.  The sets below were derived from the real
+# include closure (`clang -M` with each rule's own flags), not guessed.
+#
+# NOTE: <arch/irq.h> is deliberately NOT listed anywhere below — none of the
+# intr host-test objects include it (verified with `clang -M`); it is pulled
+# in by kernel-side TUs (bad_event.c, trap.c, irq.c) that are not compiled
+# here.  <arch/regs.h> IS listed, and the per-arch regs.h it selects
+# (arch/x86_64/regs.h on the x86_64 host, arch/aarch64/regs.h through the
+# aarch64 mock shim) is listed alongside it.
+#
+# The x86_64 decoder is compiled against the production arch/regs.h
+# facade, which selects arch/x86_64/regs.h on an x86_64 host.
+X86_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                          $(LIBC_INC)
+
+# The aarch64 decoder needs the PRODUCTION aarch64 pt_regs_t even
+# though the host is x86_64.  mock/intr_dispatch/aarch64/arch/regs.h
+# shadows the arch/regs.h facade (which would otherwise select the x86
+# layout through __x86_64__) and re-includes arch/aarch64/regs.h; the
+# mock directory therefore has to precede KERNEL_INC on the include
+# path, and the production per-arch header is still resolved from
+# kernel/include because the mock tree has no arch/aarch64/ directory.
+A64_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+                          -I$(TEST_MOCK)/intr_dispatch/aarch64 \
+                          $(KERNEL_INC) $(LIBC_INC)
+
+$(TEST_BLD)/x86_intr_decode_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/intr/intr_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_x86.o: $(TEST_CASES)/test_intr_decode_x86.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_x86.elf: $(TEST_BLD)/test_intr_decode_x86.o \
+		$(TEST_BLD)/x86_intr_decode_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/aarch64_intr_decode_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/intr_decode.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_aarch64.o: \
+		$(TEST_CASES)/test_intr_decode_aarch64.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_DECODE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_decode_aarch64.elf: \
+		$(TEST_BLD)/test_intr_decode_aarch64.o \
+		$(TEST_BLD)/aarch64_intr_decode_production.o
+	$(HOST_CC) -o $@ $^
+
+# ── Interrupt dispatch phase 1, Task 2: common stateless dispatcher ──
+# The test TU links the PRODUCTION dispatcher (kernel/intr/dispatch.c)
+# and supplies STRONG spy definitions of the three architecture
+# backends (arch_intr_handle_sync / arch_intr_handle_irq /
+# arch_intr_bad_event).  The per-architecture bad_event.c backends are
+# NOT linked here: they mask interrupts and park the CPU forever, which
+# is not host-testable — the spy reproduces the same non-returning
+# contract with longjmp.
+#
+# The production dispatcher includes <arch/intr.h>, which pulls in
+# <intr/dispatch.h> and the arch/regs.h facade.  On an x86_64 HOST that
+# facade selects the x86_64 pt_regs_t, so both TUs below agree on the
+# frame layout.  libc/include is added with -idirafter (like the mutex
+# harness) so the host's <setjmp.h> wins over the kernel libc's.
+INTR_DISPATCH_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                             -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/intr_dispatch_production.o: $(TESTS_DIR)/kernel/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(INTR_DISPATCH_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_dispatch.o: $(TEST_CASES)/test_intr_dispatch.c \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(INTR_DISPATCH_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_dispatch.elf: \
+		$(TEST_BLD)/test_intr_dispatch.o \
+		$(TEST_BLD)/intr_dispatch_production.o
+	$(HOST_CC) -o $@ $^
+
+# ── Interrupt dispatch phase 1, Task 3: aarch64 routing backend ──
+# Links the PRODUCTION ARM decoder (aarch64_intr_decode_production.o,
+# built by the Task 1 rule above), the PRODUCTION aarch64 backend
+# (kernel/arch/aarch64/intr/dispatch.c) and a copy of the PRODUCTION
+# common dispatcher compiled against the aarch64 pt_regs_t (the Task 2
+# intr_dispatch_production.o object was compiled against the x86_64
+# facade; this binary needs every TU to agree on the aarch64 layout, so
+# it gets its own object built with the same mock shim Task 1 used).
+#
+# The terminal ends are spied in the test TU: aarch64_el1_sync_fatal and
+# arch_intr_bad_event escape via longjmp (the real ones park the CPU),
+# gic_dev_dispatch counts calls and gic_dev_current returns a fake device
+# (gic.c has heavy DTB/boot-log deps and is deliberately not linked).
+#
+# Like the Task 2 dispatcher harness, <setjmp.h> must come from the host:
+# libc/include is added with -idirafter so it never wins over the system
+# header while the kernel libc remains reachable for the other TUs.
+A64_BACKEND_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
+                          -I$(TEST_MOCK)/intr_dispatch/aarch64 \
+                          $(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/aarch64_intr_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/intr_dispatch_aarch64_production.o: \
+		$(TESTS_DIR)/kernel/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_backend_aarch64.o: \
+		$(TEST_CASES)/test_intr_backend_aarch64.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_backend_aarch64.elf: \
+		$(TEST_BLD)/test_intr_backend_aarch64.o \
+		$(TEST_BLD)/aarch64_intr_backend_production.o \
+		$(TEST_BLD)/aarch64_intr_decode_production.o \
+		$(TEST_BLD)/intr_dispatch_aarch64_production.o
+	$(HOST_CC) -o $@ $^
+
+# ── Interrupt dispatch phase 1, Task 4: x86_64 routing backend ──
+# Links the PRODUCTION x86 decoder (x86_intr_decode_production.o, built
+# by the Task 1 rule above), the PRODUCTION x86 backend
+# (kernel/arch/x86_64/intr/dispatch.c) and the PRODUCTION common
+# dispatcher object built by the Task 2 rule (intr_dispatch_production.o
+# — already compiled against the x86_64 arch/regs.h facade, which the
+# x86_64 host selects natively, so every TU in this binary agrees on
+# the frame layout and no mock shim is needed).
+#
+# The terminal ends are spied in the test TU: the four private business
+# handlers (x86_handle_*) record their arguments and return normally so
+# the routing contract can be asserted, and arch_intr_bad_event escapes
+# via longjmp (the real one parks the CPU forever).
+#
+# Like the Task 2/3 harnesses, <setjmp.h> must come from the host:
+# libc/include is added with -idirafter so it never wins over the
+# system header while the kernel libc remains reachable.
+X86_BACKEND_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                           -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/x86_intr_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/intr/dispatch.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_backend_x86.o: \
+		$(TEST_CASES)/test_intr_backend_x86.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_BACKEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_intr_backend_x86.elf: \
+		$(TEST_BLD)/test_intr_backend_x86.o \
+		$(TEST_BLD)/x86_intr_backend_production.o \
+		$(TEST_BLD)/x86_intr_decode_production.o \
+		$(TEST_BLD)/intr_dispatch_production.o
+	$(HOST_CC) -o $@ $^
 
 # aarch64 M1 plan Task 1: checked PMM metadata layout calculator.
 # Links the REAL kernel/memory/pmm_boot.c against the host TU. The

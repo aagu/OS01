@@ -125,6 +125,11 @@ aarch64-uefi-kernel: $(BUILD_DIR)/artifacts/kernel.elf
 # llvm-ar / llvm-objcopy; the aarch64 profile does not define LLVM_NM,
 # which belongs to the x86 clang toolchain discovery).
 AARCH64_NM     ?= llvm-nm
+# The aarch64 profile defines no x86 toolchain variables (no LLVM_NM /
+# LLVM_OBJDUMP): the intr-dispatch wiring audit needs a disassembler for
+# the aarch64 ELF, so it gets its own overridable host tool here.  No
+# x86 toolchain include is pulled into the aarch64 path.
+AARCH64_OBJDUMP ?= llvm-objdump
 .PHONY: test-aarch64-audit
 test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	$(call require_aarch64_uefi)
@@ -134,7 +139,14 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	  if [ -n "$$bad" ]; then \
 	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
 	  fi
-	@echo "  [audit] OK"
+	@echo "  [audit] OK (vma_*/uaccess_*/fork_* symbol-exclusion gate only)"
+	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
+	  python3 qemutests/intr_dispatch_audit.py \
+	    --profile "$(PROFILE)" \
+	    --elf "$(BUILD_DIR)/artifacts/kernel.elf" \
+	    --llvm-nm "$(AARCH64_NM)" \
+	    --llvm-objdump "$(AARCH64_OBJDUMP)" \
+	    --repo-root "$(OS01_ROOT)"
 # Manual negative control (Fix round 1): the same pipeline run against the
 # x86 kernel.elf must hit symbols (proves the filter works):
 #   make PROFILE=x86_64-clang kernel.bin
@@ -421,7 +433,7 @@ test-pmm-boot-reservation:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_monitor_host_dispatch
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1256,6 +1268,13 @@ test-static: test-runtime
 	    --build-dir "$(BUILD_DIR)" \
 	    --repo-root "$(OS01_ROOT)" \
 	    --profile "$(PROFILE)"
+	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
+	  python3 qemutests/intr_dispatch_audit.py \
+	    --profile "$(PROFILE)" \
+	    --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
+	    --llvm-nm "$(LLVM_NM)" \
+	    --llvm-objdump "$(LLVM_OBJDUMP)" \
+	    --repo-root "$(OS01_ROOT)"
 	@$(MAKE) --no-print-directory test-user-canary
 
 # ── test-gui-incremental: the GUI library's incremental contract ──

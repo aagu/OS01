@@ -27,7 +27,7 @@ static void ipi_tlb_handler(uint64_t nr __attribute__((unused)),
      * handler unconditionally invalidates and bumps this CPU's
      * generation counter (release) so the initiator's equality wait on
      * tlb_ack_gen observes completion.  lapic_eoi() stays here —
-     * generic_intr_dispatch (kernel/intr/dispatch.c) invokes the handler
+     * generic_intr_dispatch (kernel/intr/vector_dispatch.c) invokes the handler
      * only and never EOIs itself. */
     flush_tlb();
     __sync_synchronize();

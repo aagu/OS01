@@ -32,6 +32,10 @@ typedef int pid_t;
 #include <memory/uaccess.h>
 #include <kernel.h>
 #include <memory/vma.h>
+#include <intr/dispatch.h>       // arch_intr_dispatch + struct intr_event (intr-dispatch phase 1)
+#include <arch/intr.h>           // strong backend facade
+#include <arch/x86_64/intr_decode.h>   // production event decoder
+#include <arch/x86_64/intr_dispatch.h> // private business handler handoff
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
 // (RSP masking) returns garbage.
@@ -123,7 +127,20 @@ static inline int handle_user_fault(pt_regs_t *regs, const char *name, int sig)
     return 0;
 }
 
-void do_divide_error(pt_regs_t * regs, uint64_t error_code)
+// ── Migrated exception entries (intr-dispatch phase 1, Task 4) ──────
+// The four representative vectors go through the common dispatcher:
+// the public do_* landing point snapshots the state, builds a fully
+// initialized struct intr_event with the PRODUCTION decoder and calls
+// arch_intr_dispatch(); the x86 backend (arch/x86_64/intr/dispatch.c)
+// re-validates the payload and calls the private x86_handle_* business
+// handlers below, which carry the original bodies verbatim.  Keep the
+// vector numbers in sync with arch/x86_64/intr/intr_decode.c.
+#define X86_TRAP_VEC_DIVIDE_ERROR        0ULL
+#define X86_TRAP_VEC_UNDEFINED_OPCODE    6ULL
+#define X86_TRAP_VEC_GENERAL_PROTECTION  13ULL
+#define X86_TRAP_VEC_PAGE_FAULT          14ULL
+
+void x86_handle_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
         if (handle_user_fault(regs, "do_divide_error", SIGFPE)) return;
     log_err("do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -132,6 +149,13 @@ void do_divide_error(pt_regs_t * regs, uint64_t error_code)
     {
         hlt();
     }
+}
+
+void do_divide_error(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_TRAP_VEC_DIVIDE_ERROR, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
 }
 
 void do_debug(pt_regs_t * regs, uint64_t error_code)
@@ -186,7 +210,7 @@ void do_bounds(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
-void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
+void x86_handle_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_undefined_opcode", SIGILL)) return;
 	log_err("do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -195,6 +219,13 @@ void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
     {
         hlt();
     }
+}
+
+void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_TRAP_VEC_UNDEFINED_OPCODE, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
 }
 
 void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
@@ -343,7 +374,7 @@ void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
-void do_general_protection(pt_regs_t * regs, uint64_t error_code)
+void x86_handle_general_protection(pt_regs_t * regs, uint64_t error_code)
 {
 	// Instruction-scoped safe RDMSR fixup (thermal plan Task 1).
 	// MUST run before any logging / user-mode dispatch: a marked
@@ -408,10 +439,22 @@ void do_general_protection(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
-void do_page_fault(pt_regs_t * regs, uint64_t error_code)
+void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 {
-	uint64_t cr2 = 0;
-	__asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
+    struct intr_event ev;
+    /* A #GP owns no fault address: cr2=0 here so the event decodes with
+     * fault_addr_valid=false and native_address=0 (spec §6.1).  The
+     * kernel fatal diagnostics inside the private handler keep their
+     * own CR2 read purely for the log line. */
+    x86_intr_decode(&ev, regs, X86_TRAP_VEC_GENERAL_PROTECTION, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
+{
+	// CR2 was snapshotted ONCE at the very front of the thin public
+	// entry (do_page_fault); every use below consumes that snapshot —
+	// this body never re-reads CR2 (spec §6.1).
 
 	// Detect kernel-mode PF (IST 0 = task stack)
 	if (!(regs->cs & 3)) {
@@ -807,6 +850,20 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
     {
         hlt();
     }
+}
+
+void do_page_fault(pt_regs_t * regs, uint64_t error_code)
+{
+    /* CR2 is read EXACTLY ONCE, here at the very front — before the
+     * decoder and before any helper that could itself fault (spec
+     * §6.1).  The same snapshot feeds the decoder and the private
+     * business handler. */
+    uint64_t cr2 = 0;
+    __asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
+
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_TRAP_VEC_PAGE_FAULT, error_code, cr2);
+    arch_intr_dispatch(&ev, regs);
 }
 
 void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)

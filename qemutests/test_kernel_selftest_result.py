@@ -52,9 +52,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from qemutests.check_kernel_selftest import failures
+    from qemutests.check_kernel_selftest import failures, v1_failures
 except ImportError:  # pragma: no cover — script-mode fallback
-    from check_kernel_selftest import failures  # type: ignore[no-redef]
+    from check_kernel_selftest import failures, v1_failures  # type: ignore[no-redef]
 
 import qemutests.run_kernel_selftest as rks
 from qemutests.harness.result import parse_v1
@@ -123,21 +123,35 @@ class ReceivedOnlyFakeProcessSession(FakeProcessSession):
 # the marker in ``kernel/sched/core.c``), so the runner has the complete
 # v1 evidence once the completion markers are seen.  ``deep_copy_argv_empty``
 # is the boot-time (early) case; ``mutex_basic`` is the scheduled (late) one.
+# Since the intr-dispatch Task 6 gate the runner additionally requires the
+# ``uaccess`` recovery evidence (SELECT + PASS + the Task 5 marker emitted
+# by the case body, before the coordinator's terminal PASS) and the
+# ``msr_safe`` probe case, so the canonical passing trace carries them.
 GOOD_LOG: List[bytes] = [
     b"percpu: 8 CPU(s) registered\n",
     b"[selftest] running built-in tests...\n",
-    b"[TEST] START v=1 suite=kernel-selftest expected=2\n",
+    b"[TEST] START v=1 suite=kernel-selftest expected=4\n",
     b"[TEST] SELECT deep_copy_argv_empty required=1\n",
     b"[TEST] SELECT mutex_basic required=1\n",
+    b"[TEST] SELECT uaccess required=1\n",
+    b"[TEST] SELECT msr_safe required=1\n",
     b"[TEST] BEGIN deep_copy_argv_empty\n",
     b"[TEST] PASS deep_copy_argv_empty\n",
     b"[selftest] deep_copy_argv_empty... PASS\n",
-    b"[selftest] 1 total: 1 passed, 0 failed\n",
+    b"[selftest] 2 total: 2 passed, 0 failed\n",
     b"[selftest] done\n",
     b"[TEST] BEGIN mutex_basic\n",
     b"[TEST] PASS mutex_basic\n",
     b"[selftest] mutex_basic... PASS\n",
-    b"[TEST] END suite=kernel-selftest total=2 passed=2 failed=0 skipped=0\n",
+    b"[TEST] BEGIN uaccess\n",
+    b"[selftest] uaccess... ",
+    b"[selftest] uaccess: dispatch longjmp restore OK\n",
+    b"PASS\n",
+    b"[TEST] PASS uaccess\n",
+    b"[TEST] BEGIN msr_safe\n",
+    b"[selftest] msr_safe... PASS\n",
+    b"[TEST] PASS msr_safe\n",
+    b"[TEST] END suite=kernel-selftest total=4 passed=4 failed=0 skipped=0\n",
     b"[selftest] task tests done\n",
 ]
 
@@ -416,7 +430,8 @@ class KernelSelftestMakeWiringTests(unittest.TestCase):
 
 
 def _kernel_v1_trace(early, late=(), *, failed=(), end=True,
-                     summary=True, task_marker=True) -> List[bytes]:
+                     summary=True, task_marker=True,
+                     marker_count=1) -> List[bytes]:
     """Build a kernel-selftest transcript as a list of byte chunks.
 
     ``early`` are boot-time cases (BEGIN/PASS before the boot summary);
@@ -425,6 +440,12 @@ def _kernel_v1_trace(early, late=(), *, failed=(), end=True,
     models a run that never reaches ``selftest_end_run()`` (e.g. a
     scheduled case that hangs); ``task_marker=False`` drops the
     ``[selftest] task tests done`` completion marker too.
+
+    When ``uaccess`` is among the cases, the Task 5 recovery marker is
+    emitted inside its BEGIN..PASS interval, exactly as the production
+    case body does (``test_uaccess.c`` prints it after all cleanup, the
+    coordinator's terminal PASS follows).  ``marker_count`` lets the
+    negative fixtures stage a missing (0) or duplicated (2) marker.
     """
     failed = set(failed)
     ids = list(early) + list(late)
@@ -432,19 +453,25 @@ def _kernel_v1_trace(early, late=(), *, failed=(), end=True,
     lines.append(f"[TEST] START v=1 suite={SUITE} expected={len(ids)}")
     for cid in ids:
         lines.append(f"[TEST] SELECT {cid} required=1")
+
+    def case_lines(cid):
+        out = [f"[TEST] BEGIN {cid}"]
+        if cid == "uaccess":
+            out.extend(["[selftest] uaccess: dispatch longjmp restore OK"]
+                       * marker_count)
+        out.append(f"[TEST] FAIL {cid} reason=assertion_failure"
+                   if cid in failed else f"[TEST] PASS {cid}")
+        return out
+
     for cid in early:
-        lines.append(f"[TEST] BEGIN {cid}")
-        lines.append(f"[TEST] FAIL {cid} reason=assertion_failure"
-                     if cid in failed else f"[TEST] PASS {cid}")
+        lines.extend(case_lines(cid))
     if summary:
         p = sum(1 for c in early if c not in failed)
         lines.append(f"[selftest] {len(early)} total: {p} passed, "
                      f"{len(early) - p} failed")
     lines.append("[selftest] done")
     for cid in late:
-        lines.append(f"[TEST] BEGIN {cid}")
-        lines.append(f"[TEST] FAIL {cid} reason=assertion_failure"
-                     if cid in failed else f"[TEST] PASS {cid}")
+        lines.extend(case_lines(cid))
     if end:
         npass = len(ids) - len(failed)
         lines.append(f"[TEST] END suite={SUITE} total={len(ids)} "
@@ -496,14 +523,16 @@ class KernelSelftestRunnerGateTests(unittest.TestCase):
         )
 
     def test_valid_v1_trace_passes(self) -> None:
-        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty"],
+        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                         "msr_safe"],
                                         ["mutex_basic"]))
         self.assertEqual(rc, 0)
 
     def test_v1_trace_without_legacy_summary_passes(self) -> None:
         # The historical `[selftest] N total: ...` boot summary is a
         # diagnostic now, not a gate: a run that emits only v1 must pass.
-        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty"],
+        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                         "msr_safe"],
                                         ["mutex_basic"], summary=False))
         self.assertEqual(rc, 0)
 
@@ -550,9 +579,40 @@ class KernelSelftestRunnerGateTests(unittest.TestCase):
     def test_extra_legacy_fail_word_does_not_fail_a_valid_run(self) -> None:
         # Review Focus: a bare "FAIL" in a diagnostic (not a v1 record)
         # does not fail the run.
-        chunks = _kernel_v1_trace(["deep_copy_argv_empty"], ["mutex_basic"])
+        chunks = _kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                   "msr_safe"], ["mutex_basic"])
         chunks.insert(-1, b"note: this diagnostic says FAIL harmlessly\n")
         self.assertEqual(self._run(chunks), 0)
+
+    # ── Task 6: the runner enforces the intr-dispatch evidence ──
+
+    def test_valid_v1_trace_without_intr_dispatch_evidence_rejected(self) -> None:
+        # A *fully valid* protocol-v1 trace that lacks the uaccess/msr_safe
+        # selection and the recovery marker must fail: the real x86 gate
+        # passes require_intr_dispatch=True (intr-dispatch Task 6).
+        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty"],
+                                        ["mutex_basic"]))
+        self.assertEqual(rc, 1)
+
+    def test_marker_straddling_stream_chunks_is_still_found_once(self) -> None:
+        # The production runner reads the log in streaming chunks; the
+        # marker may be split mid-line across two reads.  The joined log
+        # must still carry the marker exactly once and the run must pass.
+        chunks = _kernel_v1_trace(["uaccess", "msr_safe"], ["mutex_basic"])
+        marker = b"[selftest] uaccess: dispatch longjmp restore OK\n"
+        idx = chunks.index(marker)
+        half = len(marker) // 2
+        chunks[idx:idx + 1] = [marker[:half], marker[half:]]
+        rc = self._run(chunks)
+        self.assertEqual(rc, 0)
+
+    def test_marker_only_in_log_without_selection_is_rejected(self) -> None:
+        # A stray marker line cannot satisfy the gate on its own: without
+        # the v1 SELECT of uaccess/msr_safe the run fails (no legacy or
+        # textual shortcut around the protocol records).
+        chunks = _kernel_v1_trace(["deep_copy_argv_empty"], ["mutex_basic"])
+        chunks.insert(-1, b"[selftest] uaccess: dispatch longjmp restore OK\n")
+        self.assertEqual(self._run(chunks), 1)
 
 
 class KernelSelftestPassArchiveGateTests(unittest.TestCase):
@@ -575,17 +635,19 @@ class KernelSelftestPassArchiveGateTests(unittest.TestCase):
             session_factory=factory)
 
     def test_v1_pass_records_declared_and_observed_ids(self) -> None:
-        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty"],
-                                        ["mutex_basic"]))
+        rc = self._run(_kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                         "msr_safe"], ["mutex_basic"]))
         self.assertEqual(rc, 0)
         reports = list(Path(self.build_dir).rglob("result.json"))
         self.assertEqual(len(reports), 1)
         data = json.loads(reports[0].read_text())
         self.assertEqual(data["status"], "PASS")
         self.assertEqual(set(data["declared_ids"]),
-                         {"deep_copy_argv_empty", "mutex_basic"})
+                         {"deep_copy_argv_empty", "uaccess", "msr_safe",
+                          "mutex_basic"})
         self.assertEqual(set(data["observed_ids"]),
-                         {"deep_copy_argv_empty", "mutex_basic"})
+                         {"deep_copy_argv_empty", "uaccess", "msr_safe",
+                          "mutex_basic"})
 
 
 class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
@@ -730,6 +792,164 @@ class KernelSelftestCoordinatorContractTests(unittest.TestCase):
             max(records), end,
             "selftest_end_run() must follow every selftest_record_late(); "
             "otherwise a hanging late case could still emit END")
+
+
+# ────────────────────────────────────────────────────────────────────
+# intr-dispatch Task 6 — the recovery-marker gate (require_intr_dispatch).
+# ────────────────────────────────────────────────────────────────────
+
+# The exact marker kernel/selftest/test_uaccess.c emits (Task 5), only
+# after every assertion AND every cleanup step succeeded.
+INTR_DISPATCH_MARKER = "[selftest] uaccess: dispatch longjmp restore OK"
+
+
+class KernelSelftestIntrDispatchGateTests(unittest.TestCase):
+    """``v1_failures(..., require_intr_dispatch=True)`` named fixtures.
+
+    The gate layers three additional requirements on a valid protocol-v1
+    trace (spec §9.3 item 5): ``uaccess`` and ``msr_safe`` were SELECTed,
+    both reached terminal PASS, and the Task 5 marker appears exactly
+    once **inside** the uaccess BEGIN..PASS interval.  The default
+    (``require_intr_dispatch=False``) enforces nothing x86-specific, so
+    the aarch64 harness is unaffected.
+    """
+
+    def _gate(self, chunks, *, require=True) -> List[str]:
+        text = b"".join(chunks).decode()
+        return v1_failures(text, require_intr_dispatch=require)
+
+    def _trace(self, *, uaccess_pass=True, marker_count=1,
+               marker_case="uaccess", extra_before_end=(),
+               **kw) -> List[bytes]:
+        """A v1 trace over deep_copy_argv_empty + uaccess + msr_safe.
+
+        ``marker_case`` moves the marker into another case's interval;
+        ``marker_count`` 0 removes it, 2 duplicates it.  The marker is
+        only emitted for a case that is actually present.
+        """
+        ids = ["deep_copy_argv_empty", "uaccess", "msr_safe"]
+        failed = [] if uaccess_pass else ["uaccess"]
+        chunks = _kernel_v1_trace(
+            ids, [], failed=failed, marker_count=0, **kw)
+        if marker_count:
+            marker = (INTR_DISPATCH_MARKER + "\n").encode()
+            anchor = (f"[TEST] BEGIN {marker_case}\n").encode()
+            if marker_case == "uaccess" and not uaccess_pass:
+                anchor = b"[TEST] FAIL uaccess reason=assertion_failure\n"
+            idx = chunks.index(anchor)
+            chunks[idx + 1:idx + 1] = [marker] * marker_count
+        for extra in extra_before_end:
+            chunks.insert(len(chunks) - 1, extra)
+        return chunks
+
+    # ── positive ────────────────────────────────────────────────
+
+    def test_complete_trace_with_single_marker_passes(self):
+        self.assertEqual(self._gate(self._trace()), [])
+
+    def test_default_gate_does_not_require_intr_dispatch(self):
+        # The generic parse API must stay architecture-neutral: with the
+        # option off, a valid trace without uaccess/msr_safe passes.
+        chunks = _kernel_v1_trace(["deep_copy_argv_empty"], ["mutex_basic"],
+                                  marker_count=0)
+        self.assertEqual(self._gate(chunks, require=False), [])
+
+    def test_aarch64_style_trace_is_unaffected(self):
+        # The aarch64 boot-only selection never contains uaccess/msr_safe;
+        # it must still pass the default gate.
+        chunks = _kernel_v1_trace(["slab_alloc_free", "aarch64_pt_vmm"], [],
+                                  marker_count=0)
+        self.assertEqual(self._gate(chunks, require=False), [])
+
+    # ── negative: marker problems ───────────────────────────────
+
+    def test_missing_marker_fails(self):
+        errors = self._gate(self._trace(marker_count=0))
+        self.assertTrue(errors)
+        self.assertTrue(any("marker" in e for e in errors), errors)
+
+    def test_duplicated_marker_fails(self):
+        errors = self._gate(self._trace(marker_count=2))
+        self.assertTrue(any("exactly once" in e for e in errors), errors)
+
+    def test_marker_in_wrong_case_fails(self):
+        # Emitted between msr_safe's BEGIN and PASS — outside the uaccess
+        # interval, so the gate must reject it even though it appears
+        # exactly once in a fully passing trace.
+        errors = self._gate(self._trace(marker_case="msr_safe"))
+        self.assertTrue(any("uaccess" in e for e in errors), errors)
+
+    def test_marker_with_wrong_letter_case_fails(self):
+        # The marker is matched case-sensitively: a mangled letter case
+        # ("... restore ok") is not the recovery evidence and must be
+        # rejected exactly like a missing marker.
+        chunks = self._trace(marker_count=0)
+        mangled = INTR_DISPATCH_MARKER.replace("restore OK", "restore ok")
+        self.assertNotEqual(mangled, INTR_DISPATCH_MARKER)
+        anchor = b"[TEST] BEGIN uaccess\n"
+        idx = chunks.index(anchor)
+        chunks[idx + 1:idx + 1] = [(mangled + "\n").encode()]
+        errors = self._gate(chunks)
+        self.assertTrue(any("marker" in e for e in errors), errors)
+
+    def test_marker_outside_interval_fails(self):
+        # Emitted after the END record — once, but not between the uaccess
+        # BEGIN and its PASS.
+        chunks = _kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                   "msr_safe"], [], marker_count=0)
+        chunks.append((INTR_DISPATCH_MARKER + "\n").encode())
+        errors = self._gate(chunks)
+        self.assertTrue(any("interval" in e for e in errors), errors)
+
+    # ── negative: protocol problems the gate must not forgive ──
+
+    def test_legacy_only_log_is_rejected_even_with_marker(self):
+        # A complete legacy summary plus the marker but NO protocol-v1
+        # records: the gate parses through parse_v1 only — no legacy
+        # fallback — so this must fail.
+        text = (
+            "[selftest] running built-in tests...\n"
+            "[selftest] uaccess... PASS\n"
+            "[selftest] uaccess: dispatch longjmp restore OK\n"
+            "[selftest] msr_safe... PASS\n"
+            "[selftest] 31 total: 31 passed, 0 failed\n"
+            "[selftest] done\n"
+            "[selftest] task tests done\n"
+        )
+        errors = v1_failures(text, require_intr_dispatch=True)
+        self.assertTrue(errors)
+
+    def test_cases_not_selected_fails(self):
+        # BEGIN/PASS for uaccess/msr_safe without their SELECT records:
+        # parse_v1 rejects the unselected BEGIN, and the selection check
+        # fails too.
+        chunks = _kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                   "msr_safe"], [], marker_count=0)
+        chunks = [c for c in chunks
+                  if not c.startswith(b"[TEST] SELECT uaccess")
+                  and not c.startswith(b"[TEST] SELECT msr_safe")
+                  and not c.startswith(b"[TEST] START")]
+        chunks.insert(1, b"[TEST] START v=1 suite=kernel-selftest "
+                         b"expected=1\n")
+        errors = self._gate(chunks)
+        self.assertTrue(any("SELECT" in e or "uaccess" in e
+                            for e in errors), errors)
+
+    def test_uaccess_fail_terminal_fails(self):
+        errors = self._gate(self._trace(uaccess_pass=False, marker_count=0))
+        self.assertTrue(any("uaccess" in e for e in errors), errors)
+
+    def test_missing_end_fails(self):
+        errors = self._gate(self._trace(end=False))
+        self.assertTrue(errors)
+
+    def test_fail_after_marker_still_fails(self):
+        # The gate must not stop at the marker: msr_safe FAILing after
+        # uaccess passed (with its marker) still fails the run.
+        chunks = _kernel_v1_trace(["deep_copy_argv_empty", "uaccess",
+                                   "msr_safe"], [], failed=["msr_safe"])
+        errors = self._gate(chunks)
+        self.assertTrue(any("msr_safe" in e for e in errors), errors)
 
 
 class KernelSelftestScriptModeTests(unittest.TestCase):

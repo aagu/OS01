@@ -1,20 +1,27 @@
 /* aarch64 phase 1: EL1 IRQ dispatch (Task 2.2) + EL1 sync diagnostics
  * (spec 2026-09-30-aarch64-el1-sync-diagnostics-design.md, Task 1).
  *
- * entry.S's `el1_irq_entry` saves the full 31 GPR + sp_el0 + elr + spsr
- * frame into a `struct pt_regs` and calls `el1_irq(regs)` (this function).
- * We delegate to the GIC driver's generic dispatch, which looks up the
- * INTID in the registered handler table and invokes the matching
- * handler with `regs` for inspection.
+ * Interrupt dispatch phase 1 (spec 2026-10-23-intr-dispatch-phase1
+ * §6.2): both EL1h C landing points are now entry adapters.  Each
+ * builds a fully initialized `struct intr_event` ON ITS STACK and hands
+ * it to the common stateless dispatcher `arch_intr_dispatch()`; the
+ * event's lifetime covers only that call.
  *
- * entry.S's `el1_sync_entry` (Task 1, offset 0x200) snapshots ESR_EL1 and
- * FAR_EL1 before calling `aarch64_el1_sync_fatal(regs, esr, far)`. That
- * function is noreturn: it disables IRQs, claims the BSS `first_fault`
- * flag via arch_atomic_cas, prints one fixed-width lowercase diagnostic
- * line if it is the first reporter, and parks the CPU in `wfi`.
+ *   entry.S `el1_irq_entry` (offset 0x280) → `el1_irq(regs)`: decode
+ *   the IRQ event, dispatch, return normally — the assembly restore and
+ *   `eret` are unchanged.  IAR/EOI stay with the GIC backend reached
+ *   through the aarch64 IRQ backend (arch/aarch64/intr/dispatch.c).
  *
- * Sync exceptions / data aborts land in the same vector table (slots 5/8).
- * Slot 5 is wired to el1_sync_entry; the rest remain `b .` placeholders.
+ *   entry.S `el1_sync_entry` (offset 0x200) → `aarch64_el1_sync(regs,
+ *   esr, far)`: decode the sync event from the raw ESR/FAR snapshot,
+ *   dispatch, and NEVER return — the sync backend ends in the original
+ *   fatal diagnostic or bad-event, and an unexpected return of the
+ *   common entry itself goes straight to arch_intr_bad_event().
+ *
+ * `aarch64_el1_sync_fatal` keeps its frozen output contract (spec §8):
+ * it masks IRQ then the full DAIF, claims the BSS `first_fault` flag via
+ * arch_atomic_cas, prints one fixed-width `[aarch64-sync] FATAL …` line
+ * (`far=n/a` when FAR is invalid), and parks the CPU in `wfi`.
  *
  * `arch_install_exception_vectors()` stays no-op: VBAR_EL1 is installed
  * by main.c (msr vbar_el1, ...) immediately after pl011_init, which is
@@ -24,7 +31,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <arch/regs.h>
+#include <arch/intr.h>
 #include <arch/aarch64/sync_fault.h>
+#include <arch/aarch64/intr_decode.h>
+#include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/gic.h>
 #include <arch/mmu.h>
 #include <arch/atomic.h>
@@ -33,10 +43,36 @@
 #include <arch/irq.h>
 #include <percpu/percpu.h>
 
-/* entry.S el1_irq_entry 的 C 落点：全量保存的 pt_regs + driver dispatch。 */
+/* entry.S el1_irq_entry 的 C 落点（IRQ 适配器）：构造 IRQ 事件 → 共同
+ * 分派 → 正常返回，汇编恢复/eret 不变。 */
 void el1_irq(struct pt_regs *regs)
 {
-    gic_dev_dispatch(gic_dev_current(), regs);
+    struct intr_event ev;
+
+    aarch64_intr_decode_irq(&ev, regs);
+    arch_intr_dispatch(&ev, regs);
+}
+
+/* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。
+ *
+ * noreturn：后端终点是原 fatal 诊断或 bad-event；共同入口按整体定义
+ * 可返回，若它意外返回则立即执行 bad-event 停机（spec §6.2），汇编的
+ * DAIF+WFI 兜底保持不可达但保留。
+ *
+ * 早期可达链：no_stack_protector（canary prologue 依赖的 guard reload
+ * 在 per-CPU 初始化前不可用）。 */
+__attribute__((noreturn, no_stack_protector))
+void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
+{
+    struct intr_event ev;
+
+    aarch64_intr_decode_sync(&ev, regs, esr, far);
+    arch_intr_dispatch(&ev, regs);
+
+    /* Unreachable in practice: the sync backend never returns, and a
+     * contract-broken chain already parked in bad-event.  Kept as the
+     * mandated fail-stop if the common entry ever came back. */
+    arch_intr_bad_event(&ev, regs);
 }
 
 /* ──────────────────────────────────────────────────────────────

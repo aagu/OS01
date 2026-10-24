@@ -2,7 +2,9 @@
 // (Tasks 1-2).  This is the make-or-break gate BEFORE any syscall-site
 // wiring: it must deterministically prove (a) the cross-level walker,
 // (b) the _ft longjmp fault-recovery path, (c) cross-page correctness
-// with non-contiguous physical pages, (d) the _ft_res cleanup callback.
+// with non-contiguous physical pages, (d) the _ft_res cleanup callback,
+// and (e) the real guest #PF longjmp through the common intr dispatch
+// chain with full recovery-state restoration (intr-dispatch phase 1).
 //
 // Boot context (init_task, current->mm == &init_mm): init_mm.pgdir is
 // NOT set (task.h:232 only initializes .lock) — syscall_check_user_range
@@ -337,6 +339,158 @@ static void cb_cleanup(void *arg)
     cleanup_ran = 1;
 }
 
+// ── Dispatch longjmp restore sub-case (intr-dispatch phase 1, Task 5) ──
+//
+// Spec §9.3 "真实 guest 非局部恢复是独立硬门槛": prove that a REAL
+// guest #PF travels the migrated chain
+//
+//   memcpy -> #PF -> do_page_fault (thin entry) -> arch_intr_dispatch()
+//          -> x86 private #PF handler -> __builtin_longjmp
+//
+// and comes back with the task's recovery state intact.  The READ
+// primitive copy_from_user_ft_res is mandatory here: unlike
+// copy_to_user_ft_res it has NO prepare_user_write_range pre-check, so
+// an absent source page genuinely executes the faulting read — a
+// -EFAULT from this function can only come from the setjmp recovery
+// branch.
+//
+// Discipline (same as Steps 4-9 above): every observation is recorded
+// into a local FIRST; the live page table, TLB and addr_limit are
+// restored on the single cleanup exit; only then do the asserts run —
+// an assert failure must never leak page-table or addr_limit changes.
+
+#define UACCESS_DISPATCH_TEST_VA 0x602000ULL
+
+static int dispatch_cleanup_count;
+static void cb_dispatch_cleanup(void *arg)
+{
+    (void)arg;
+    dispatch_cleanup_count++;    // observable side effect: exact count
+}
+
+static int test_uaccess_dispatch_longjmp_restore(void)
+{
+    static const uint8_t payload[16] = {
+        0xE1, 0x2B, 0x7C, 0x09, 0x5D, 0xF3, 0x86, 0x1A,
+        0xB4, 0x4E, 0xD0, 0x37, 0x93, 0x6F, 0xC2, 0x18
+    };
+
+    // Test-exclusive low page, managed via ensure_pt on the LIVE page
+    // table (never current->mm->pgdir — init_mm.pgdir is NULL here).
+    // Runs after Step 9's LIFO restore, so the 0x600000 2MB region is
+    // back to its original state and ensure_pt re-splits it for us.
+    uint64_t *pgd_live = (uint64_t *)Phy_To_Virt((uint64_t)arch_get_page_table());
+    if (!pgd_live)
+        SELFTEST_FAIL_AT("arch_get_page_table returned NULL");
+
+    struct test_map_ctx ctx = {0};
+    uint64_t *slot = ensure_pt(pgd_live, UACCESS_DISPATCH_TEST_VA, &ctx);
+    if (!slot) {
+        restore_pt(&ctx);        // ensure_pt may have linked parents first
+        SELFTEST_FAIL_AT("ensure_pt(0x%lx) returned NULL",
+                         (unsigned long)UACCESS_DISPATCH_TEST_VA);
+    }
+    uint64_t saved_leaf = *slot;
+
+    // Fresh physical page for the succeeding read (subpage 0 of a
+    // dedicated 2MB block; freed with free_pages(pg, 1)).
+    struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
+
+    // ── Observations: recorded here, asserted only after cleanup ──
+    int     absent_ok    = 0;   // live walk sees no leaf/huge mapping
+    int     leaf_invalid = 0;   // direct leaf-slot probe
+    ssize_t rc_fault     = 1;   // faulting read return
+    int     cnt_fault    = -1;  // cleanup count after the fault
+    int     fld_fault    = 0;   // 3 recovery fields restored after fault
+    int     dst_intact   = 0;   // faulting read copied zero bytes
+    int     setup_ok     = (pg != NULL);
+    ssize_t rc_ok        = -1;  // succeeding read return
+    int     cnt_ok       = -1;  // cleanup count after succeeding read
+    int     fld_ok       = 0;   // recovery fields still restored
+    int     bytes_ok     = 0;   // succeeding read payload correct
+
+    void **saved_jmp = current->fault_jmp;
+    void (*saved_cb)(void *) = current->fault_cleanup;
+    void *saved_arg = current->fault_cleanup_arg;
+    uint64_t saved_limit = current->addr_limit;
+
+    if (setup_ok) {
+        // 1. Make the source page genuinely absent and PROVE it with a
+        //    live walk of the real page tables — never assume a hole.
+        *slot = 0;
+        arch_flush_tlb_page(UACCESS_DISPATCH_TEST_VA);
+        absent_ok    = !arch_user_range_accessible(pgd_live,
+                                                   UACCESS_DISPATCH_TEST_VA,
+                                                   16, false);
+        leaf_invalid = !(*slot & PAGE_VALID);
+
+        // 2. Faulting read: real absent user source, valid kernel dst,
+        //    non-zero length, production primitive, no lock held.
+        uint8_t kdst[16];
+        memset(kdst, 0x5A, sizeof(kdst));
+        dispatch_cleanup_count = 0;
+        current->addr_limit = 0x00007FFFFFFFFFFFULL;
+        rc_fault = copy_from_user_ft_res(kdst,
+                                         (const void *)UACCESS_DISPATCH_TEST_VA,
+                                         sizeof(kdst),
+                                         cb_dispatch_cleanup, NULL);
+        current->addr_limit = saved_limit;
+        cnt_fault = dispatch_cleanup_count;
+        fld_fault = (current->fault_jmp == saved_jmp) &&
+                    (current->fault_cleanup == saved_cb) &&
+                    (current->fault_cleanup_arg == saved_arg);
+        uint8_t intact = 1;
+        for (size_t i = 0; i < sizeof(kdst); i++)
+            if (kdst[i] != 0x5A) intact = 0;
+        dst_intact = intact;
+
+        // 3. Succeeding read on a validly mapped source of the same
+        //    non-zero length: the task must keep running normally.
+        uint8_t *kpage = (uint8_t *)Phy_To_Virt(pg->phy_address);
+        memcpy(kpage, payload, sizeof(payload));
+        *slot = pg->phy_address | PAGE_USER_PTE;
+        arch_flush_tlb_page(UACCESS_DISPATCH_TEST_VA);
+
+        memset(kdst, 0, sizeof(kdst));
+        current->addr_limit = 0x00007FFFFFFFFFFFULL;
+        rc_ok = copy_from_user_ft_res(kdst,
+                                      (const void *)UACCESS_DISPATCH_TEST_VA,
+                                      sizeof(kdst),
+                                      cb_dispatch_cleanup, NULL);
+        current->addr_limit = saved_limit;
+        cnt_ok = dispatch_cleanup_count;
+        fld_ok = (current->fault_jmp == saved_jmp) &&
+                 (current->fault_cleanup == saved_cb) &&
+                 (current->fault_cleanup_arg == saved_arg);
+        bytes_ok = memcmp(kdst, payload, sizeof(payload)) == 0;
+    }
+
+    // ── Single cleanup exit: leaf, TLB, page-table resources, phys
+    //    page; addr_limit is already restored after each probe above. ──
+    *slot = saved_leaf;
+    arch_flush_tlb_page(UACCESS_DISPATCH_TEST_VA);
+    restore_pt(&ctx);
+    if (pg) free_pages(pg, 1);
+
+    // ── Assert on the recorded observations only now ──
+    SELFTEST_ASSERT(setup_ok);
+    SELFTEST_ASSERT(absent_ok);           // precondition proven, not assumed
+    SELFTEST_ASSERT(leaf_invalid);
+    SELFTEST_ASSERT(rc_fault == -EFAULT); // only reachable via longjmp
+    SELFTEST_ASSERT(cnt_fault == 1);      // cleanup ran exactly once
+    SELFTEST_ASSERT(fld_fault);           // fault_jmp/cleanup/arg restored
+    SELFTEST_ASSERT(dst_intact);          // no partial copy escaped
+    SELFTEST_ASSERT(rc_ok == 16);         // task kept executing
+    SELFTEST_ASSERT(cnt_ok == cnt_fault); // success path fires no cleanup
+    SELFTEST_ASSERT(fld_ok);              // recovery fields still restored
+    SELFTEST_ASSERT(bytes_ok);            // bytes really came from the page
+
+    // Marker only after every assertion AND every cleanup succeeded —
+    // consumed by the Task 6 gate (must appear exactly once).
+    serial_printk("[selftest] uaccess: dispatch longjmp restore OK\n");
+    return 0;
+}
+
 int selftest_uaccess(void)
 {
     serial_printk("[selftest] uaccess: start\n");
@@ -596,6 +750,13 @@ int selftest_uaccess(void)
     free_pages(chain_ro_pmd_page,  1);
     free_pages(chain_ro_pud_page,  1);
     free_pages(g_pgd_page, 1);
+
+    // ── Step 11: real guest dispatch longjmp + recovery-state proof ──
+    // Private sub-case (not a registered id): its result folds into
+    // this case's return value.  All of its cleanup is internal, so an
+    // early return here leaks nothing.
+    if (test_uaccess_dispatch_longjmp_restore() != 0)
+        return -1;
 
     serial_printk("[selftest] uaccess: PASS\n");
     return 0;
