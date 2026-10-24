@@ -1295,7 +1295,7 @@ int main(int argc, char **argv)
     if (GUI_INPUT_FOCUS_OUTLINE_COLOR != PROBE_OUTLINE_COLOR ||
         GUI_INPUT_CURSOR_FILL_COLOR != PROBE_CURSOR_FILL_COLOR ||
         GUI_INPUT_CURSOR_OUTLINE_COLOR != PROBE_CURSOR_OUTLINE_COLOR) {
-        rc = fail(1, EINVAL, "outline_or_cursor_color"); goto cleanup;
+        rc = fail(1, EINVAL, "focus_outline_or_cursor_color"); goto cleanup;
     }
 
     if (now_ms(&p->start_ms) != 0) {

@@ -326,12 +326,32 @@ TEST_FUNC(test_setting_change_rebuilds_the_surface)
     assert_eq(gui_theme_colors()->surface_container_low,
               gui_platform_get_pixel(p, x, y));
 
+    /* 再换一次：走到 container_high。 */
+    desktop_shell_request_setting(shell, DESKTOP_SETTING_WALLPAPER);
+    desktop_shell_apply_pending(shell);
+
+    desktop_shell_get_settings(shell, &wallpaper, &density, &clock_24h);
+    assert_eq(DESKTOP_WALLPAPER_CONTAINER_HIGH, wallpaper);
+    render(p);
+    assert_eq(gui_theme_colors()->surface_container_high,
+              gui_platform_get_pixel(p, x, y));
+
+    /* 再换一次：走到 container_highest —— 五种壁纸走完一圈。 */
+    desktop_shell_request_setting(shell, DESKTOP_SETTING_WALLPAPER);
+    desktop_shell_apply_pending(shell);
+
+    desktop_shell_get_settings(shell, &wallpaper, &density, &clock_24h);
+    assert_eq(DESKTOP_WALLPAPER_CONTAINER_HIGHEST, wallpaper);
+    render(p);
+    assert_eq(gui_theme_colors()->surface_container_highest,
+              gui_platform_get_pixel(p, x, y));
+
     /* 换时钟格式：只改设置，不改壁纸。 */
     desktop_shell_request_setting(shell, DESKTOP_SETTING_CLOCK_FORMAT);
     desktop_shell_apply_pending(shell);
     desktop_shell_get_settings(shell, &wallpaper, &density, &clock_24h);
     assert_false(clock_24h);
-    assert_eq(DESKTOP_WALLPAPER_CONTAINER_LOW, wallpaper);
+    assert_eq(DESKTOP_WALLPAPER_CONTAINER_HIGHEST, wallpaper);
 
     /* 换密度。 */
     desktop_shell_request_setting(shell, DESKTOP_SETTING_DENSITY);

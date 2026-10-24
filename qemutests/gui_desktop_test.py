@@ -433,8 +433,8 @@ class DesktopCaseRunner:
             if fraction < MIN_MATERIAL_FRACTION:
                 return self._fail(
                     reasons, outcomes, case_name,
-                    f"the desktop never took over the screen: the Material "
-                    f"background covers only {fraction:.1%} of it",
+                    f"the desktop never took over the screen: the wallpaper "
+                    f"covers only {fraction:.1%} of it",
                 )
             if not cursor_visible(home):
                 return self._fail(

@@ -18,6 +18,12 @@ and every suite run left a live QEMU behind while still reporting PASS.
 The harness-level backstop is pinned too: ``ProcessSession`` installs
 ``PR_SET_PDEATHSIG`` so a child whose parent dies by an uncatchable
 signal is killed by the kernel instead of surviving as an orphan.
+
+A second, smaller contract is pinned here as well: the gate's
+``cursor_visible()`` predicate is a **pure pixel predicate**, so it can
+be exercised without a QEMU at all.  The legacy pure-white arrow must
+stay invisible to it — that is exactly the regression the gate exists
+to catch.
 """
 
 from __future__ import annotations
@@ -36,8 +42,10 @@ from qemutests.gui_desktop_test import (  # noqa: E402
     DesktopCaseRunner,
     _ACTIVE_RUNNERS,
     _kill_active_runners,
+    cursor_visible,
     run_matrix,
 )
+from qemutests.gui_test import Surface  # noqa: E402
 from qemutests.harness.process import ProcessSession  # noqa: E402
 
 
@@ -97,6 +105,80 @@ class ExplodingSession:
 
     def close(self) -> None:
         self.closed = True
+
+
+class CursorVisibilityTests(unittest.TestCase):
+    """``cursor_visible()`` is a pure pixel predicate — pin it directly.
+
+    The gate looks at the 16x24 window at the centre of the screen and
+    asks for two things at once: a pixel **darker** than the wallpaper
+    (the arrow body) and a pixel **lighter** than the wallpaper (the
+    outline).  The legacy pure-white arrow can only ever produce the
+    latter, so the predicate must stay False for it — that is the
+    regression the gate has to catch.
+    """
+
+    # The wallpaper is the surface_dim role (#D8D2E4).  Pinned as a
+    # literal on purpose: comparing the implementation against its own
+    # constant would hide a wallpaper that drifted to the wrong value.
+    WALLPAPER = (0xD8, 0xD2, 0xE4)
+
+    # The new cursor's two baked-in colours.
+    FILL = (0x1A, 0x1C, 0x1E)
+    OUTLINE = (0xFD, 0xFC, 0xFF)
+
+    # The legacy cursor: one flat pure white.
+    WHITE = (0xFF, 0xFF, 0xFF)
+
+    WIDTH = 64
+    HEIGHT = 48
+
+    # A six-row wedge.  Row r holds the cells (r, 0..r); the diagonal
+    # cell (r, r) is the outline, the rest is the body.  Both cursors
+    # below use this very shape, so only the colours differ.
+    WEDGE_ROWS = 6
+
+    def _surface(self, fill=None, outline=None):
+        """A wallpaper-filled surface with a wedge painted at the centre.
+
+        ``fill`` / ``outline`` default to the wallpaper colour, so
+        passing neither yields a wallpaper-only surface.
+        """
+        body = self.WALLPAPER if fill is None else fill
+        edge = self.WALLPAPER if outline is None else outline
+
+        pixels = bytearray()
+        for _y in range(self.HEIGHT):
+            for _x in range(self.WIDTH):
+                pixels.extend(self.WALLPAPER)
+
+        x0 = self.WIDTH // 2
+        y0 = self.HEIGHT // 2
+        for row in range(self.WEDGE_ROWS):
+            for col in range(row + 1):
+                rgb = edge if col == row else body
+                idx = ((y0 + row) * self.WIDTH + (x0 + col)) * 3
+                pixels[idx:idx + 3] = bytes(rgb)
+        return Surface(self.WIDTH, self.HEIGHT, bytes(pixels))
+
+    def test_wallpaper_only_is_not_a_cursor(self):
+        """A screen that is nothing but the wallpaper shows no cursor."""
+        self.assertFalse(cursor_visible(self._surface()))
+
+    def test_legacy_white_arrow_is_not_a_cursor(self):
+        """The legacy pure-white arrow must not satisfy the predicate.
+
+        A white pixel has r == 255, never below the wallpaper's 216, so
+        the "darker" half of the predicate is unsatisfiable no matter
+        how the arrow is drawn.
+        """
+        surface = self._surface(fill=self.WHITE, outline=self.WHITE)
+        self.assertFalse(cursor_visible(surface))
+
+    def test_dark_arrow_with_a_light_outline_is_a_cursor(self):
+        """The new icon: a dark body plus a light outline is visible."""
+        surface = self._surface(fill=self.FILL, outline=self.OUTLINE)
+        self.assertTrue(cursor_visible(surface))
 
 
 class DesktopRunnerTeardownTests(unittest.TestCase):
