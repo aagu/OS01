@@ -886,6 +886,20 @@ $(TEST_BLD)/test_aarch64_sync_fault.elf: $(TEST_BLD)/test_aarch64_sync_fault.o
 	$(HOST_CC) -o $@ $<
 
 # ── Interrupt dispatch phase 1, Task 1: normalized event decoders ──
+# The intr host-test rules below list EVERY production header their object
+# actually includes (transitively) as an explicit prerequisite.  This file
+# has no header-dependency tracking (no -MMD), so an omitted header means an
+# edit to it silently reuses a stale object — the stale-object false green
+# this list exists to prevent.  The sets below were derived from the real
+# include closure (`clang -M` with each rule's own flags), not guessed.
+#
+# NOTE: <arch/irq.h> is deliberately NOT listed anywhere below — none of the
+# intr host-test objects include it (verified with `clang -M`); it is pulled
+# in by kernel-side TUs (bad_event.c, trap.c, irq.c) that are not compiled
+# here.  <arch/regs.h> IS listed, and the per-arch regs.h it selects
+# (arch/x86_64/regs.h on the x86_64 host, arch/aarch64/regs.h through the
+# aarch64 mock shim) is listed alongside it.
+#
 # The x86_64 decoder is compiled against the production arch/regs.h
 # facade, which selects arch/x86_64/regs.h on an x86_64 host.
 X86_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
@@ -905,13 +919,17 @@ A64_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
 $(TEST_BLD)/x86_intr_decode_production.o: \
 		$(TESTS_DIR)/kernel/arch/x86_64/intr/intr_decode.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(X86_DECODE_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_intr_decode_x86.o: $(TEST_CASES)/test_intr_decode_x86.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(X86_DECODE_HOST_CFLAGS) -c $< -o $@
 
@@ -923,14 +941,18 @@ $(TEST_BLD)/aarch64_intr_decode_production.o: \
 		$(TESTS_DIR)/kernel/arch/aarch64/intr/intr_decode.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
-		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(A64_DECODE_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_intr_decode_aarch64.o: \
 		$(TEST_CASES)/test_intr_decode_aarch64.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(A64_DECODE_HOST_CFLAGS) -c $< -o $@
 
@@ -958,13 +980,17 @@ INTR_DISPATCH_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
 
 $(TEST_BLD)/intr_dispatch_production.o: $(TESTS_DIR)/kernel/intr/dispatch.c \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
-		$(TESTS_DIR)/kernel/include/arch/intr.h
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(INTR_DISPATCH_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_intr_dispatch.o: $(TEST_CASES)/test_intr_dispatch.c \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
-		$(TESTS_DIR)/kernel/include/arch/intr.h
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(INTR_DISPATCH_HOST_CFLAGS) -c $< -o $@
 
@@ -1000,14 +1026,19 @@ $(TEST_BLD)/aarch64_intr_backend_production.o: \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/intr_dispatch_aarch64_production.o: \
 		$(TESTS_DIR)/kernel/intr/dispatch.c \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
-		$(TESTS_DIR)/kernel/include/arch/intr.h
+		$(TESTS_DIR)/kernel/include/arch/intr.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
 
@@ -1017,7 +1048,9 @@ $(TEST_BLD)/test_intr_backend_aarch64.o: \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(A64_BACKEND_HOST_CFLAGS) -c $< -o $@
 
@@ -1053,7 +1086,9 @@ $(TEST_BLD)/x86_intr_backend_production.o: \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(X86_BACKEND_HOST_CFLAGS) -c $< -o $@
 
@@ -1062,7 +1097,9 @@ $(TEST_BLD)/test_intr_backend_x86.o: \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
-		$(TESTS_DIR)/kernel/include/intr/dispatch.h
+		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(X86_BACKEND_HOST_CFLAGS) -c $< -o $@
 

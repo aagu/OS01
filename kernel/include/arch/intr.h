@@ -49,8 +49,19 @@ void arch_intr_handle_irq(const struct intr_event *event, pt_regs_t *regs);
 
 /* Fatal contract violation: the common dispatcher could not
  * produce a usable event (NULL event, NULL regs, or an
- * out-of-range kind).  Never returns. */
-__attribute__((noreturn))
+ * out-of-range kind).  Never returns.
+ *
+ * The attributes are part of the CONTRACT and live here (not
+ * only on the two in-tree definitions): the bad-event path is
+ * early-reachable, before the per-CPU state the stack-canary
+ * guard depends on exists, so it must never carry a canary
+ * prologue.  A third architecture — or a replacement backend —
+ * that includes only this header inherits no_stack_protector and
+ * therefore cannot silently reintroduce the canary dependency.
+ * A definition following this declaration inherits the
+ * attributes; repeating them on the definition is harmless and
+ * matches the two in-tree backends. */
+__attribute__((noreturn, no_stack_protector, cold))
 void arch_intr_bad_event(const struct intr_event *event, pt_regs_t *regs);
 
 #endif /* _KERNEL_ARCH_INTR_H */
