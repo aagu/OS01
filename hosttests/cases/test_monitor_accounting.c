@@ -15,6 +15,8 @@
  *     duplicate per-cpu-callback publish) ends valid=1 with the epoch
  *     unchanged;
  *   - an AP whose lapic_timer_start failed reads valid=0;
+ *   - legal unenumerated CPU slots read online=0; enumerated slots
+ *     follow the percpu online flag without resetting saved accounting;
  *   - the usage locks are really taken (irqsave spin path observed via
  *     poll_test_spinlock_acquire) and the hot path allocates nothing.
  *
@@ -27,7 +29,8 @@
  * own CPU id or reuses one with DELTAS around the operations under test.
  * CPU map: 0 = busy/idle counting, 4 = scheduler-not-ready,
  * 5 = BSP PIT-fallback route, 6 = stop/restart epoch, 7 = duplicate
- * publish, 1 = failed-AP unavailable.
+ * publish, 1 = failed-AP unavailable. Online-boundary tests reuse 7
+ * after an explicit timer stop/start, and read 2 without changing usage.
  */
 
 #include "test_framework.h"
@@ -296,6 +299,72 @@ TEST_FUNC(read_rejects_invalid_cpu) {
     assert_eq(-EINVAL, sched_accounting_read(0, NULL));
 }
 
+/* A legal slot outside the enumerated CPU range is readable but offline,
+ * even if its percpu online flag is stale. Reading must not reset usage. */
+TEST_FUNC(read_unenumerated_cpu_reports_offline) {
+    const unsigned cpu = NR_CPUS - 1;
+    const uint32_t saved_num_cpus = num_cpus;
+    reset_fixture_cpu(cpu);
+    sched_accounting_init();
+    sched_accounting_cpu_start(cpu, 100, false);
+    sched_accounting_cpu_start(cpu, 100, true);
+    run_ticks(3, &fixture_busy);
+    run_ticks(2, &fixture_idle);
+
+    struct cpu_usage_snapshot before;
+    assert_eq(0, sched_accounting_read(cpu, &before));
+    assert_true(before.epoch > 0);
+
+    const struct {
+        uint32_t count;
+        uint32_t want_online;
+    } cases[] = {
+        {1, 0},                 /* strictly above num_cpus */
+        {NR_CPUS - 1, 0},       /* exactly at num_cpus */
+        {NR_CPUS, 1},           /* last slot becomes enumerated */
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        num_cpus = cases[i].count;
+        struct cpu_usage_snapshot out;
+        memset(&out, 0xa5, sizeof(out));
+        assert_eq(0, sched_accounting_read(cpu, &out));
+        assert_eq(cases[i].want_online, out.online);
+        assert_eq((uint64_t)3, out.busy_ticks);
+        assert_eq((uint64_t)2, out.idle_ticks);
+        assert_eq(before.epoch, out.epoch);
+        assert_eq(100, out.tick_hz);
+        assert_eq(1, out.valid);  /* timer validity is independent */
+    }
+    num_cpus = saved_num_cpus;
+}
+
+/* Below num_cpus, online must follow the actual percpu flag rather than
+ * enumeration or the timer's independent valid bit. */
+TEST_FUNC(read_enumerated_cpu_tracks_online_flag) {
+    const unsigned cpu = 2;
+    reset_fixture_cpu(cpu);
+    sched_accounting_init();
+    sched_accounting_cpu_start(cpu, 100, true);
+    struct cpu_usage_snapshot before, out;
+    assert_eq(0, sched_accounting_read(cpu, &before));
+    assert_eq(1, before.online);
+    assert_eq(1, before.valid);
+
+    percpu_data[cpu].online = 0;
+    assert_eq(0, sched_accounting_read(cpu, &out));
+    assert_eq(0, out.online);
+    assert_eq(1, out.valid);
+    assert_eq(before.busy_ticks, out.busy_ticks);
+    assert_eq(before.idle_ticks, out.idle_ticks);
+    assert_eq(before.epoch, out.epoch);
+    assert_eq(before.tick_hz, out.tick_hz);
+
+    percpu_data[cpu].online = 1;
+    assert_eq(0, sched_accounting_read(cpu, &out));
+    assert_eq(1, out.online);
+    assert_eq(before.epoch, out.epoch);
+}
+
 /* The accounting hot path takes the per-CPU usage lock via the irqsave
  * spin path and performs zero allocations. */
 TEST_FUNC(hot_path_locks_and_never_allocates) {
@@ -375,6 +444,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(duplicate_publish_keeps_epoch),
     TEST_ENTRY(bsp_pit_fallback_route_keeps_epoch),
     TEST_ENTRY(read_rejects_invalid_cpu),
+    TEST_ENTRY(read_unenumerated_cpu_reports_offline),
+    TEST_ENTRY(read_enumerated_cpu_tracks_online_flag),
     TEST_ENTRY(hot_path_locks_and_never_allocates),
     TEST_ENTRY(missing_idle_drops_ticks_and_recovers),
 TEST_LIST_END

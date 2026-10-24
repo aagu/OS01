@@ -7,6 +7,8 @@
 
 ## 2026-10-24
 
+- test(monitor): **parked ⑦ CPU online 边界 fixture 闭环**：调查确认 `sched_accounting_read()` 对合法但未枚举 CPU 槽返回 `online=0`，范围内读取实际 per-CPU online 标志，生产实现无需修改。新增范围外、等于 `num_cpus`、最后合法槽及 online 标志切换覆盖，验证计数/epoch/频率不被读取重置；三个临时错误版本均被新增测试拦住。accounting 12 项/120 断言、完整 monitor 七组及 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-accounting-online-boundary.md)。
+
 - fix(test-harness): **parked terminal-present 提前失败异常闭环**：`_run_terminal_present()` 的空闲窗口指标原先在采样后才赋值，baseline log 缺失、manifest 缺失/损坏及 QEMU 启动失败分支却提前引用，导致 `UnboundLocalError` 覆盖原始诊断。入口初始化为空记录与零时长，提前失败正常写出 JSON 并返回失败，不放宽 baseline 或性能门槛。新增真实驱动入口回归覆盖四种错误场景，旧实现四处复现，修复后 terminal-present 28 项通过，完整 `test-harness` 613 项、0 失败、1 跳过；根 Make 入口缺失 baseline 负向验证按预期失败并归档原因。未执行 guest 像素/性能验收。详见 [调查与验证](debug/2026-10-24-terminal-present-early-failure.md)。
 
 ## 2026-10-23
