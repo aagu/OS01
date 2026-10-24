@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - **光标是图像资源**：16×24 ARGB8888，热点在左上角 (0,0)。`lv_image_dsc_t.header.magic` 必须用 `LV_IMAGE_HEADER_MAGIC` 宏（0x19）—— `lv_image_src_get_type()` 靠源指针**首字节**判类型（`>= 0x20` 视为文件路径），填错会把这段内存当文件名去打开（spec §4.5）。
-- **资源是 straight alpha，不是预乘**：LVGL 的 `LV_COLOR_FORMAT_ARGB8888` 与 `LV_COLOR_FORMAT_ARGB8888_PREMULTIPLIED` 是两个独立格式，前者走 `lv_color_32_32_mix()`（alpha ≥ 255 直接返回前景色，alpha == 0 直接返回背景色）。
+- **资源是 straight alpha，不是预乘**：LVGL 的 `LV_COLOR_FORMAT_ARGB8888` 与 `LV_COLOR_FORMAT_ARGB8888_PREMULTIPLIED` 是两个独立格式，前者按 straight alpha 混合；离屏画布是 XRGB8888，实际路径是 `lv_draw_sw_blend_to_rgb888.c` 的 `lv_color_24_24_mix()`（`mix >= LV_OPA_MAX` 直接拷贝源字节，`mix == 0` 原样保留目标像素）。
 - **生成物不得手改**：`libgui/src/cursor_icon.c` 与 `libgui/assets/cursor-arrow-16x24.txt` 由 `tools/gen_cursor_icon.py` 产出；文件头必须写明生成器路径；`--check` 进 `make test-host`。
 - **颜色不进令牌表**：`user/desktop` 与 `libgui` 的令牌体系里都**不得**新增光标颜色角色；光标两色只存在于生成器的调色板与 `gui_input_private.h` 的两个常量里。
 - **令牌唯一来源**：桌面代码里不得出现裸颜色字面量与裸字号；`surface_dim` 只以 `c->surface_dim` 形式出现（静态审计强制）。

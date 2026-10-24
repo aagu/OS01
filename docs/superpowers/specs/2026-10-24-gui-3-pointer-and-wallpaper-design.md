@@ -323,7 +323,7 @@ const lv_image_dsc_t gui_cursor_icon = {
 
 **`magic` 必须精确取 `LV_IMAGE_HEADER_MAGIC`（0x19），不得写字面量**：`lv_image_src_get_type()` 靠源指针的首字节判断类型（`>= 0x20` 视为文件路径，`>= 0x80` 视为符号，否则才是变量）。`lv_image_dsc_t` 的首字节就是 `header.magic`，所以 magic 一旦填错，LVGL 会把这段内存当文件名去打开。
 
-**straight alpha 的依据**：LVGL 的 `LV_COLOR_FORMAT_ARGB8888` 与 `LV_COLOR_FORMAT_ARGB8888_PREMULTIPLIED` 是两个独立格式；前者的混合走 `lv_color_32_32_mix()`，在 `fg.alpha >= 255` 时直接返回前景色，在 `fg.alpha == 0` 时直接返回背景色，中间按 straight alpha 混合。`config/lv_conf.h` 已启用 `LV_DRAW_SW_SUPPORT_ARGB8888 1`。
+**straight alpha 的依据**：LVGL 的 `LV_COLOR_FORMAT_ARGB8888` 与 `LV_COLOR_FORMAT_ARGB8888_PREMULTIPLIED` 是两个独立格式；前者按 straight alpha 混合。离屏画布是 `LV_COLOR_FORMAT_XRGB8888`，因此实际路径是 `thirdpart/lvgl/src/draw/sw/blend/lv_draw_sw_blend_to_rgb888.c` 的 `argb8888_image_blend()` → `lv_color_24_24_mix()`：`mix == 0` 时目标像素原样不动，`mix >= LV_OPA_MAX` 时直接拷贝源字节，中间按 straight alpha 混合。`config/lv_conf.h` 已启用 `LV_DRAW_SW_SUPPORT_ARGB8888 1`。
 
 **字节序**：ARGB8888 以 `uint32_t` 存储，小端机上内存字节序为 B,G,R,A —— 与 LVGL 的 `lv_color32_t { blue, green, red, alpha }` 一致。生成器直接产出 `0xAARRGGBB` 的 `uint32_t` 字面量即可。
 
@@ -447,7 +447,7 @@ typedef enum {
 | 11 | **绘制结果 · 描边**：取一个 alpha == 255 的描边像素，同上，读回的像素**精确等于**描边色 `#FDFCFF` |
 | 12 | **绘制结果 · 透明**：取一个 alpha == 0 的像素，读回的像素等于光标**旁边**的背景像素（两者相等即可，不断言底色具体是什么） |
 
-断言 10/11 只在 **alpha == 255** 的像素上做：LVGL 的 ARGB8888 走 straight alpha，`lv_color_32_32_mix()` 在 `fg.alpha >= 255` 时直接返回前景色，因此这类像素画出来是**精确色值**；半透明像素会被底色混合，不能做等值断言。断言 12 的两个像素取自**同一块画布**，避免把"底色是什么"也写进断言。
+断言 10/11 只在 **alpha == 255** 的像素上做：LVGL 的 ARGB8888 走 straight alpha，离屏画布是 XRGB8888，实际路径是 `lv_draw_sw_blend_to_rgb888.c` 的 `lv_color_24_24_mix()`，在 `mix >= LV_OPA_MAX` 时直接拷贝源字节，因此这类像素画出来是**精确色值**；半透明像素会被底色混合，不能做等值断言。断言 12 的两个像素取自**同一块画布**，避免把"底色是什么"也写进断言。
 
 **读取资源像素时的字节序**：`gui_cursor_icon.data` 是 `const uint8_t *`，内存里每像素 4 字节，顺序为 **B, G, R, A**（小端机上等价于 `uint32` 值 `0xAARRGGBB`）。宿主用例按字节读：`r = data[i*4+2]`、`g = data[i*4+1]`、`b = data[i*4+0]`、`a = data[i*4+3]`。
 

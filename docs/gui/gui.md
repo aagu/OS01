@@ -480,6 +480,7 @@ GUI-3 只启用 Montserrat（12/14/16/20/24），**没有汉字字形**——中
 | 令牌 / 主题 | `hosttests/cases/test_gui_theme.c`、`test_gui_theme_apply.c` | 令牌取值、非法枚举、五类交互状态 |
 | 状态机 | `hosttests/cases/test_desktop_state.c` | 迁移集合穷举 |
 | 外壳与像素 | `hosttests/cases/test_desktop_shell.c` | 表面像素、四个应用逐一启动 / 全屏 / 退出、终端消费字符、退出后焦点仍可导航 |
+| 光标与壁纸 | `tools/tests/test_cursor_icon.py`、`hosttests/cases/test_desktop_shell.c`、`qemutests/gui_desktop_test.py` | 生成物与生成器一致（`--check`）、五种壁纸映射逐一钉住、QEMU 截图里壁纸是 `#D8D2E4` 且屏幕中心能看到深色箭头光标 |
 | 静态审计 | `hosttests/cases/test_desktop_audit.c` | 禁颜色字面量、禁裸字号、禁手绘 primitive、禁直开设备、禁私有头、禁窗口装饰标识 |
 | QEMU 端到端 | `qemutests/gui_desktop_test.py`（`SUITE=gui-desktop`） | 冒烟、桌面接管显示、真实 PS/2 按键启动应用并返回、杀掉桌面后 guest 仍存活；SMP 1/2 |
 | 门禁收尾 | `qemutests/test_gui_desktop_runner.py` | 收尾必须真的杀掉 QEMU；信号路径必须杀掉进程组；子进程随父进程而死（PDEATHSIG） |
@@ -500,3 +501,16 @@ make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop
 3. **内核兜底**：`ProcessSession` 的 `preexec_fn` 装上 `PR_SET_PDEATHSIG`，父进程被 SIGKILL 或崩溃时由内核杀掉 QEMU。
 
 对应回归在 `qemutests/test_gui_desktop_runner.py`，其中一条用的假 session **只有 `close()`、故意没有 `cleanup()`**，把当初那个方法名笔误钉死。
+
+### 7. 指针光标与壁纸
+
+- 光标是一张 16×24 的 ARGB8888 **图像资源**（`libgui/src/cursor_icon.c`），
+  由 `tools/gen_cursor_icon.py` 从 `libgui/assets/cursor-arrow.png` 离线
+  生成；运行时用 `lv_draw_image` 1:1 绘制，不引入图片解码器。
+- 光标颜色（填充 `#1A1C1E` + 描边 `#FDFCFF`）**烘焙在像素里**，不在令牌
+  表里：光标是系统级控件，且「深主体 + 浅描边」是它在任意底色上都可见
+  的前提。将来换主题若要改光标颜色，出路是把资源拆成填充 / 描边两张遮罩
+  分别上色。
+- 壁纸由新增的色彩角色 `surface_dim`（`#D8D2E4`）承载；`surface` 的值不变。
+  壁纸设置项的标签按明度排成 `Standard / Light grey / Grey / Dark grey /
+  Deepest`。

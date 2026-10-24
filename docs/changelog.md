@@ -7,6 +7,14 @@
 
 ## 2026-10-24
 
+- feat(gui): **GUI-3：桌面指针换成图标光标，壁纸改用 `surface_dim`**：鼠标光标从「纯白程序绘制的 12×18 箭头」换成用户提供的箭头图标（16×24，LVGL 图像资源，热点在左上角）。纯白箭头在近白壁纸（`#FDFCFF`）上实际不可见；新光标自带深色主体 + 浅色描边，任意底色上都有对比度。
+
+  **壁纸**：桌面壁纸底色改用新增的色彩角色 `surface_dim`（`#D8D2E4`），`surface` 的值不变（它被 elevation 0 / 卡片 / 列表共用）。
+
+  **资源生成**：光标资源由 `tools/gen_cursor_icon.py` 从 `libgui/assets/cursor-arrow.png` 离线生成，黄金图 `libgui/assets/cursor-arrow-16x24.txt` 是它的可读评审面；`make test-host` 会校验生成物与生成器一致。
+
+  **验证**：`make PROFILE=x86_64-clang test-host`（含 `tools/tests/test_cursor_icon.py` 校验生成物）、`test-static`、`test-qemu SUITE=gui-desktop` 全绿；门禁 SMP 1/2 共 10 个场景 PASS，截图里壁纸占 91.7%、屏幕中心能看到深色箭头光标；磁盘镜像 sha256 跑前跑后一致（`5a360039…`），**零孤儿 QEMU**。**反向验证**：把 `cursor_visible()` 改成恒假，门禁在 SMP 1/2 上双双报红（`the pointer cursor is not visible on the wallpaper`）。
+
 - fix(test-harness): **QEMU 门禁收尾留下孤儿进程、锁死磁盘镜像闭环**：GUI-3 的桌面门禁在收尾时调用了**不存在**的方法 `session.cleanup()`（真实方法名是 `close()`），异常又被 `except: pass` 吃掉 —— 每次门禁跑完都留下一个活着的 QEMU，而门禁照样报 PASS。孤儿 QEMU 持有磁盘镜像的**写锁**，于是后续 `make run` 报 `Failed to get "write" lock / Is another process using the image [...]/disk.img`（即用户看到的「disk.img 被占用」）。实测确认：`-snapshot` 模式的 QEMU 同样会阻塞另一个以读写方式打开同一镜像的 QEMU，因此「门禁跑过」和「`make run` 能跑」之间隔着的正是这个孤儿。
 
   **门禁侧**（`qemutests/gui_desktop_test.py`）：收尾改调真实的 `session.close()`，且**不再吞异常** —— 收尾失败只记录不抛出（`close()` 会在 `finally` 与信号处理里被调用，抛异常会盖掉真正的失败原因），但记录必须显眼，因为收尾失败就意味着可能有孤儿；启动失败（QEMU 已经起来、日志文件才打开失败）的分支也补上收尾，避免半启动的子进程变孤儿；SIGINT / SIGTERM 装上处理器，先**无锁硬杀**在跑的 QEMU 进程组再退出（无锁是必须的：`close()` 要去拿 `Popen` 的内部状态，而主线程可能正持着那把锁，信号处理里等它有死锁风险）。
