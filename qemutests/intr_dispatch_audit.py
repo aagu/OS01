@@ -269,13 +269,96 @@ def x86_edges(instrs: List[Instr], symtab: SymbolTable) -> List[Edge]:
     return edges
 
 
+_X86_CALLER_SAVED = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"}
+_X86_REGISTER_ALIASES = {}
+for _full, _parts in {
+    "rax": ("eax", "ax", "al", "ah"),
+    "rbx": ("ebx", "bx", "bl", "bh"),
+    "rcx": ("ecx", "cx", "cl", "ch"),
+    "rdx": ("edx", "dx", "dl", "dh"),
+    "rsi": ("esi", "si", "sil"), "rdi": ("edi", "di", "dil"),
+    "rbp": ("ebp", "bp", "bpl"), "rsp": ("esp", "sp", "spl"),
+    **{f"r{i}": (f"r{i}d", f"r{i}w", f"r{i}b") for i in range(8, 16)},
+}.items():
+    for _alias in (_full, *_parts):
+        _X86_REGISTER_ALIASES[_alias] = _full
+
+
+def _x86_register_writes(text):
+    """GPR write effects for the audited shapes; None means unknown effects.
+
+    Unknown instructions invalidate all provenance. Recognized instructions
+    include unary, implicit and partial-register writes, not just comma-form
+    destinations. This conservative model never invents a preserved value.
+    """
+    mnemonic, _, operands = text.partition(" ")
+    def register(operand):
+        return _X86_REGISTER_ALIASES.get(operand.strip().removeprefix("%"))
+    def destination():
+        operand = operands.rsplit(",", 1)[-1].strip()
+        reg = register(operand)
+        if reg:
+            return {reg}
+        # Memory/segment/SIMD destinations do not overwrite a GPR.
+        if operand.endswith(")") or re.fullmatch(r"%(?:[cdefgs]s|[xyz]mm\d+)", operand):
+            return set()
+        return None
+    if mnemonic.startswith("call"):
+        return _X86_CALLER_SAVED | {"rsp"}
+    if mnemonic.startswith("pop"):
+        writes = destination()
+        return writes | {"rsp"} if writes is not None else None
+    if mnemonic.startswith("push"):
+        return {"rsp"}
+    if mnemonic in ("leave", "leaveq"):
+        return {"rsp", "rbp"}
+    if re.fullmatch(r"(?:i?div|mul)[bwlq]?", mnemonic) or re.fullmatch(r"imul[bwlq]?", mnemonic) and "," not in operands:
+        return {"rax", "rdx"}
+    if mnemonic in ("cpuid",):
+        return {"rax", "rbx", "rcx", "rdx"}
+    if mnemonic in ("rdmsr", "rdtsc", "rdtscp"):
+        return {"rax", "rdx", "rcx"} if mnemonic == "rdtscp" else {"rax", "rdx"}
+    if mnemonic in ("cqo", "cqto", "cltd", "cdq", "cwd"):
+        return {"rdx"}
+    if mnemonic in ("cbw", "cwde", "cdqe", "cltq", "cwtl", "cbtw", "lodsb", "lodsw", "lodsl", "lodsq"):
+        return {"rax", "rsi"}
+    if mnemonic.startswith(("xchg", "xadd")):
+        # Both explicit operands are outputs. A memory operand may contain
+        # commas, so collect bare register operands at either end only.
+        regs = re.findall(r"(?:^|, )%(\w+)(?=,|$)", operands)
+        writes = {_X86_REGISTER_ALIASES[r] for r in regs if r in _X86_REGISTER_ALIASES}
+        return writes if writes else None
+    if mnemonic.startswith("cmpxchg"):
+        writes = destination()
+        return writes | ({"rax", "rdx"} if mnemonic in ("cmpxchg8b", "cmpxchg16b") else {"rax"}) if writes is not None else None
+    if re.fullmatch(r"(?:mov(?:absq|[bwlq]|[sz][bwl][wlq])|lea[qwl]?|add[bwlq]?|sub[bwlq]?|adc[bwlq]?|sbb[bwlq]?|and[bwlq]?|or[bwlq]?|xor[bwlq]?|sh[lr][bwlq]?|sa[lr][bwlq]?|ro[lr][bwlq]?|inc[bwlq]?|dec[bwlq]?|neg[bwlq]?|not[bwlq]?|bswap[lq]?|imul[bwlq]?|cmov\w+|set\w+)", mnemonic):
+        return destination()
+    if re.fullmatch(r"(?:cmp|test)[bwlq]?", mnemonic) or mnemonic.startswith(("j", "nop")) or mnemonic in (
+            "cld", "std", "cli", "sti", "pause", "hlt", "ud2", "int3",
+            "endbr64", "wrmsr", "lfence", "mfence", "sfence"):
+        return set()
+    return None
+
+
+def _x86_value_survives(instructions, setups, register, transfer):
+    """Require an exact setup and preserve its value until the C transfer."""
+    indices = [i for i, ins in enumerate(instructions[:transfer])
+               if ins.text in setups]
+    if not indices or transfer < 0 or transfer >= len(instructions):
+        return False
+    for ins in instructions[indices[-1]+1:transfer]:
+        writes = _x86_register_writes(ins.text)
+        if writes is None or register in writes:
+            return False
+    return True
+
+
 def _x86_indirect_edges(instrs, symtab):
     if not instrs:
         return []
     by_addr = {ins.addr: i for i, ins in enumerate(instrs)}
     pending = [(0, ())]
     seen, result = set(), []
-    caller_saved = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"}
     while pending:
         index, frozen = pending.pop()
         if index >= len(instrs) or (index, frozen) in seen:
@@ -300,16 +383,11 @@ def _x86_indirect_edges(instrs, symtab):
                     result.append(edge)
                 if kind == "jmp":
                     continue
-            # Invalidate overwritten addresses, including 32-bit writes, and
-            # the SysV caller-saved registers after every C call.
-            if text.startswith("call"):
-                for reg in caller_saved:
-                    state.pop(reg, None)
-            elif not text.startswith(("cmp", "test", "push", "j", "ret")):
-                dest = re.search(r", %(\w+)$", text)
-                if dest:
-                    reg = dest.group(1)
-                    reg = {"eax":"rax", "ecx":"rcx", "edx":"rdx", "esi":"rsi", "edi":"rdi"}.get(reg, reg)
+            writes = _x86_register_writes(text)
+            if writes is None:
+                state.clear()
+            else:
+                for reg in writes:
                     state.pop(reg, None)
         next_state = tuple(sorted(state.items()))
         branch = _X86_BRANCH.match(text)
@@ -589,9 +667,12 @@ def _audit_x86(symtab, blocks, order, repo: Path,
     if ec_instrs is not None:
         texts = [i.text for i in ec_instrs]
         call = next((i for i,t in enumerate(texts) if t == "callq *%rdx"), -1)
-        load = next((i for i,t in enumerate(texts) if t == "movq 0x88(%rsp), %rdx"), -1)
-        if load < 0 or call < load or any(re.search(r", %rdx$", t) for t in texts[load+1:call]):
+        if not _x86_value_survives(ec_instrs, {"movq 0x88(%rsp), %rdx"}, "rdx", call):
             errors.append("error_code: FUNC slot register clobbered before call")
+        if not _x86_value_survives(ec_instrs, {"movq %rsp, %rdi"}, "rdi", call):
+            errors.append("error_code: frame argument clobbered before call")
+        if not _x86_value_survives(ec_instrs, {"movq 0x90(%rsp), %rsi"}, "rsi", call):
+            errors.append("error_code: error argument clobbered before call")
 
     # 3. thin entry → decoder + dispatcher (movabs absolute form).
     for stub, entry in (*_X86_STUBS, ("nmi", "do_nmi")):
@@ -736,8 +817,8 @@ def _audit_x86_installed(symtab, blocks, repo, errors, notes):
             texts = [i.text for i in ins]
             es = require(name, ("do_nmi",))
             call = next((i for i, t in enumerate(texts) if t.startswith("call")), -1)
-            zero = [i for i, t in enumerate(texts) if t in ("movq $0x0, %rsi", "xorl %esi, %esi", "movl $0x0, %esi")]
-            if not zero or not (zero[-1] < call) or any(re.search(r", %(?:rsi|esi)$", t) for t in texts[zero[-1]+1:call]) or "movq %rsp, %rdi" not in texts[:call]:
+            zero_setups = {"movq $0x0, %rsi", "xorl %esi, %esi", "movl $0x0, %esi"}
+            if not _x86_value_survives(ins, zero_setups, "rsi", call) or not _x86_value_survives(ins, {"movq %rsp, %rdi"}, "rdi", call):
                 errors.append("NMI nmi: explicit C error code zero/frame argument unproven")
             if any(e.kind in ("call", "jmp", "branch", "table") and e.target not in ("do_nmi", "RESTORE_ALL", "x86_intr_restore_only") for e in es):
                 errors.append("NMI nmi: unexpected work/return transfer")
@@ -770,9 +851,10 @@ def _audit_x86_installed(symtab, blocks, repo, errors, notes):
             errors.append(f"{name}: wrong vector/frame C arguments")
         es = require(name, (target,))
         transfer = next((i for i,t in enumerate(texts) if t.startswith(("call", "jmp"))), len(texts))
-        arg = next((i for i,t in enumerate(texts) if t == f"movq $0x{vector:x}, %rsi"), -1)
-        if arg < 0 or arg >= transfer or any(re.search(r", %(?:rsi|esi)$", t) for t in texts[arg+1:transfer]):
+        if not _x86_value_survives(ins, {f"movq $0x{vector:x}, %rsi"}, "rsi", transfer):
             errors.append(f"{name}: vector argument clobbered before transfer")
+        if not _x86_value_survives(ins, {"movq %rsp, %rdi"}, "rdi", transfer):
+            errors.append(f"{name}: frame argument clobbered before transfer")
         calls = [e for e in es if e.kind == "call" or
                  (e.kind == "branch" and e.target == target)]
         if len([e for e in calls if e.target == target]) != 1:

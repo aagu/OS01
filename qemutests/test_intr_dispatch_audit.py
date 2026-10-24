@@ -1224,6 +1224,50 @@ class InstalledSurfaceTests(IntrDispatchAuditFixture):
         from qemutests.intr_dispatch_audit import Instr
         self.check_mutation("arch_intr_handle_irq", lambda b: b.append(Instr(0, "callq 0x" + next(line.split()[0] for line in X86_NM.splitlines() if line.endswith(" T lapic_eoi")) + " <lapic_eoi>")), "ACK")
 
+    def test_indirect_target_write_effects(self):
+        from qemutests.intr_dispatch_audit import Instr, SymbolTable, x86_edges
+        table = SymbolTable.parse("100 T target\n")
+        mutations = [("rax", text) for text in ("popq %rax", "negq %rax", "movb $0x0, %al", "movb $0x0, %ah", "mulq %rbx", "xchgq %rax, %rbx", "mystery %rbx")]
+        mutations += [("r8", "movl $0x0, %r8d")]
+        for reg, text in mutations:
+            with self.subTest(instruction=text):
+                code = [Instr(0, f"movabsq $0x100, %{reg}"), Instr(1, text), Instr(2, f"callq *%{reg}")]
+                self.assertIn(None, {e.target for e in x86_edges(code, table) if e.kind == "call"})
+
+    def test_unrelated_register_writes_preserve_target(self):
+        from qemutests.intr_dispatch_audit import Instr, SymbolTable, x86_edges
+        table = SymbolTable.parse("100 T target\n")
+        for text in ("popq %rbx", "negq %rbx", "movb $0x0, %bl", "movl $0x0, %r8d"):
+            with self.subTest(instruction=text):
+                code = [Instr(0, "movabsq $0x100, %rax"), Instr(1, text), Instr(2, "callq *%rax")]
+                self.assertEqual({e.target for e in x86_edges(code, table) if e.kind == "call"}, {"target"})
+
+    def test_func_slot_alias_clobber_fails(self):
+        from qemutests.intr_dispatch_audit import Instr
+        for text in ("xorl %edx, %edx", "movb $0x0, %dl", "popq %rdx", "mulq %rax"):
+            with self.subTest(instruction=text):
+                self.check_mutation("error_code", lambda b: b.insert(-2, Instr(0, text)), "error_code")
+
+    def test_frame_argument_must_survive_to_transfer(self):
+        from qemutests.intr_dispatch_audit import Instr
+        for name in ("IRQ0_interrupt", "lapic_timer_stub", "lapic_spurious_stub", "_intr_stub_tlb", "nmi", "error_code"):
+            for text in ("xorq %rdi, %rdi", "xorl %edi, %edi", "movb $0x0, %dil", "negq %rdi"):
+                with self.subTest(stub=name, instruction=text):
+                    def corrupt(block):
+                        setup = next(i for i, ins in enumerate(block) if ins.text == "movq %rsp, %rdi")
+                        block.insert(setup+1, Instr(0, text))
+                    self.check_mutation(name, corrupt, "NMI" if name == "nmi" else name)
+
+    def test_vector_and_error_argument_alias_clobbers(self):
+        from qemutests.intr_dispatch_audit import Instr
+        for name in ("IRQ0_interrupt", "nmi", "error_code"):
+            for text in ("xorl %esi, %esi", "movb $0x1, %sil", "negq %rsi"):
+                with self.subTest(stub=name, instruction=text):
+                    def corrupt(block):
+                        call = next(i for i, ins in enumerate(block) if ins.text.startswith(("call", "jmp")))
+                        block.insert(call, Instr(0, "movl $0x1, %esi" if name == "nmi" and text == "xorl %esi, %esi" else text))
+                    self.check_mutation(name, corrupt, "NMI" if name == "nmi" else name)
+
     def test_shared_tail_join_resolves_both_routes(self):
         from qemutests.intr_dispatch_audit import Instr, SymbolTable, x86_edges
         table = SymbolTable.parse("100 T alpha\n200 T beta\n")
