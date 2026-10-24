@@ -12,7 +12,7 @@
 
 **Plan 状态：** Revision 2。Revision 1 经独立评审后重构了 4 处架构（公共 API 的 LVGL 隔离、主题生命周期、宿主可测的外壳、应用注册表前置），并补齐了评审指出的全部断言缺口。
 
-**基线与分支：** 分支 `feature/gui-3-material-desktop`，worktree `/home/aagu/OS01/.worktrees/gui-3-material-desktop`，起点 `d0153dc3`（`master`）。Task 1 已完成于 `0040715a`；Task 2 已完成于本计划的 Task 2 提交。
+**基线与分支：** 分支 `feature/gui-3-material-desktop`，worktree `/home/aagu/OS01/.worktrees/gui-3-material-desktop`，起点 `d0153dc3`（`master`）。全部 7 个任务已完成：`0040715a`（Task 1）→ `031d368d`（Task 2）→ `08c75d04`（Task 3）→ `4600d1d8`（Task 4）→ `b955ea85`（Task 5）→ `b19a0c8`（Task 6）→ Task 7 提交。
 
 ## Global Constraints
 
@@ -89,7 +89,7 @@
 
 ---
 
-### Task 2: LVGL 主题落地、字体层级与发布审计同步
+### Task 2: LVGL 主题落地、字体层级与发布审计同步 ✅ 已完成（`031d368d`）
 
 **Files:** Create `libgui/src/theme_apply.c`、`libgui/internal/gui_theme_private.h`、`hosttests/cases/test_gui_theme_apply.c`；Modify `libgui/src/platform.c`、`libgui/internal/gui_platform_private.h`、`libgui/Makefile`、`config/lv_conf.h`、`hosttests/Makefile`、`mk/components/run.mk`、`qemutests/gui_build_audit.py`。
 
@@ -118,7 +118,7 @@
 
 ---
 
-### Task 3: 外壳界面状态机（纯 C，可宿主测试）
+### Task 3: 外壳界面状态机（纯 C，可宿主测试） ✅ 已完成（`08c75d04`）
 
 **Files:** Create `user/desktop/desktop_state.{c,h}`、`hosttests/cases/test_desktop_state.c`；Modify `hosttests/Makefile`、`mk/components/run.mk`。
 
@@ -152,16 +152,16 @@ const char     *desktop_state_name(desktop_state_t st);
 
 **当前应用标识不由状态机携带**：`desktop_state_t` 只有四个表面状态，*哪个* 应用处于 `APP` 由外壳记在 `shell->current_app`。
 
-- [ ] **1. RED fixture。** `hosttests/cases/test_desktop_state.c`：表驱动穷举 (状态 × 意图) 全组合；断言 spec §9.2 的第 1–7 条。宿主测试**编译真实的** `user/desktop/desktop_state.c`（沿用 `user/tetris/tetris_logic.c` / `user/terminal/terminal_core.c` 的接线范式：`-I$(TESTS_DIR)/user/desktop`）。
-- [ ] **2. 跑出 RED。** 链接缺 `desktop_state_*` 符号而失败（记录失败信息）。
-- [ ] **3. 实现状态机。** 纯 C：不读全局状态、不调 libc；`desktop_state_name()` 用静态字符串表；非法枚举返回 `DESKTOP_STATE_INVALID`。
-- [ ] **4. 接线。** `hosttests/Makefile` 新增 `test_desktop_state.elf`（编译 `hosttests/cases/test_desktop_state.c` + `user/desktop/desktop_state.c`）并加入 `TEST_BINS`；`mk/components/run.mk` 注册 `desktop-state` 与 `_test-gui-host-run-desktop-state`。
-- [ ] **5. 验证。** `make PROFILE=x86_64-clang test-gui-host CASE=desktop-state` 与 `make PROFILE=x86_64-clang test-host` 全绿。
-- [ ] **6. 提交** `feat(desktop): add pure surface state machine`。
+- [x] **1. RED fixture。** `hosttests/cases/test_desktop_state.c`：表驱动穷举 (状态 × 意图) 全组合；断言 spec §9.2 的第 1–7 条。宿主测试**编译真实的** `user/desktop/desktop_state.c`（沿用 `user/tetris/tetris_logic.c` / `user/terminal/terminal_core.c` 的接线范式：`-I$(TESTS_DIR)/user/desktop`）。
+- [x] **2. 跑出 RED。** 链接缺 `desktop_state_*` 符号而失败（记录失败信息）。
+- [x] **3. 实现状态机。** 纯 C：不读全局状态、不调 libc；`desktop_state_name()` 用静态字符串表；非法枚举返回 `DESKTOP_STATE_INVALID`。
+- [x] **4. 接线。** `hosttests/Makefile` 新增 `test_desktop_state.elf`（编译 `hosttests/cases/test_desktop_state.c` + `user/desktop/desktop_state.c`）并加入 `TEST_BINS`；`mk/components/run.mk` 注册 `desktop-state` 与 `_test-gui-host-run-desktop-state`。
+- [x] **5. 验证。** `make PROFILE=x86_64-clang test-gui-host CASE=desktop-state` 与 `make PROFILE=x86_64-clang test-host` 全绿。
+- [x] **6. 提交** `feat(desktop): add pure surface state machine`。
 
 ---
 
-### Task 4: 应用注册表、外壳表面与桌面主入口
+### Task 4: 应用注册表、外壳表面与桌面主入口 ✅ 已完成（`4600d1d8`）
 
 **Files:** Create `user/desktop/desktop_registry.{c,h}`、`user/desktop/desktop_shell.{c,h}`、`hosttests/cases/test_desktop_shell.c`；Rewrite `user/desktop/desktop.c`；Delete `user/desktop/font8x16.h`；Modify `user/desktop/app.mk`、`hosttests/Makefile`、`mk/components/run.mk`。
 
@@ -205,48 +205,48 @@ const char     *desktop_state_name(desktop_state_t st);
 
 - `user/desktop/desktop.c` 的 `main()`：`gui_platform_create()`（`GUI_MODE_ONSCREEN`）→ `gui_input_create(..., require_mouse = false, ...)`（允许无鼠标降级）→ `lv_display_get_default()` 取 display → `desktop_shell_create(disp)` → 主循环：`poll(gui_input_get_pollfds(...))` → `gui_input_dispatch()` → `gui_platform_step()` → `desktop_shell_apply_pending()` → `desktop_shell_tick()`。
 
-- [ ] **1. RED fixture（宿主像素契约）。** `hosttests/cases/test_desktop_shell.c`：链接真实 `desktop_shell.c` + `desktop_registry.c` + `desktop_state.c` + 真实 LVGL + 真实离屏 platform（`gui_platform_get_pixel()` 读回像素）。断言 spec §9.2 的第 8–11 条，采样点必须**钉死坐标**：
+- [x] **1. RED fixture（宿主像素契约）。** `hosttests/cases/test_desktop_shell.c`：链接真实 `desktop_shell.c` + `desktop_registry.c` + `desktop_state.c` + 真实 LVGL + 真实离屏 platform（`gui_platform_get_pixel()` 读回像素）。断言 spec §9.2 的第 8–11 条，采样点必须**钉死坐标**：
   - 壁纸区取 `(2, 4)`（状态栏之下、启动器之上）= `surface`；
   - 状态栏区取 `(2, 12)` = `elevation 1` 表面；
   - 启动器卡片取**图标之间**的空隙（例如第 1、2 个图标的中点）= `elevation 2` 表面——不得落在图标色块上；
   - 抽屉表面取 `(2, 4)` = `elevation 3` 表面；设置表面取 `(2, 4)` = `elevation 2` 表面；
   - 应用表面根对象宽高 = display 宽高。
-- [ ] **2. 跑出 RED。** 链接缺 `desktop_shell_*` 符号而失败（记录失败信息）。
-- [ ] **3. 实现注册表。** `desktop_registry.c` 只放静态数据与两个取值函数，**不含 LVGL**、不含裸颜色字面量（accent 一律 `gui_theme_colors()->primary` 等）。
-- [ ] **4. 实现外壳表面构建。** `desktop_shell.c`：状态栏（高 32px，left 时间 / 中系统名 / 右指示区）、主屏（欢迎卡片 + 启动器）、抽屉（可滚动应用列表）、设置（四个设置项）。全部样式取自 `gui_theme_*`；**不得**出现裸颜色字面量或裸字号。启动器图标 = 圆形色块（accent 令牌）+ 首字 + `label` 层级文字标签。
-- [ ] **5. 实现迁移执行。** `desktop_shell_apply_pending()`：取挂起意图 → `desktop_state_next()` → `INVALID` 则忽略并记诊断 → 否则**销毁当前表面的整棵 `lv_obj_t` 树**并重建目标表面 → 更新 `shell->state`。迁移**只**在这里发生；LVGL 控件回调只调用 `desktop_shell_request()` 投递意图。
-- [ ] **6. 实现时钟刷新。** 用**一个** LVGL timer（周期 1000ms）在 `desktop_shell_tick()` 里刷新时间 label；`shell->clock_timer` 非空则不重建（防定时器雪崩）。格式由 `shell->settings.clock_24h` 决定（`strftime` 的 `%H:%M` 或 `%I:%M %p`）。
-- [ ] **7. 实现键盘契约。** 注册原生按键回调 `gui_input_set_key_handler()`：`ESC` → `DESKTOP_INTENT_ESC`；`Tab` 交给 LVGL（**不**消费）；其余键在终端应用激活时由应用消费（Task 6）。
-- [ ] **8. 删除旧资产并重写主入口。** 删 `user/desktop/font8x16.h`；`desktop.c` 全面重写；`user/desktop/app.mk` 的 `APP_CFLAGS` 追加 `-I$(OS01_ROOT)/thirdpart -I$(OS01_ROOT)/thirdpart/lvgl -I$(OS01_ROOT)/config -DLV_CONF_INCLUDE_SIMPLE`（**不**加 `-I$(OS01_ROOT)/libgui/internal`：公共 API 已不需要私有头），`APP_LDLIBS` 改为 `-lgui -lgfx`。
-- [ ] **9. 接线宿主测试。** `hosttests/Makefile` 新增 `test_desktop_shell.elf`（编译 `hosttests/cases/test_desktop_shell.c` + `user/desktop/desktop_shell.c` + `user/desktop/desktop_registry.c` + `user/desktop/desktop_state.c` + `$(GUI_INTEGRATION_DIR)/platform.o` + `$(GUI_THEME_OBJS)` + `$(GUI_LVGL_ARCHIVE)`）并加入 `TEST_BINS`；`mk/components/run.mk` 注册 `desktop-shell`。
-- [ ] **10. 验证。** `make PROFILE=x86_64-clang user` 绿；`CASE=desktop-shell` 绿；`make test-host` 绿；`llvm-nm` 抽查新 `desktop.elf` 不再引用 `gfx_fill_rect` / `gfx_pixel` 等手绘 primitive。
-- [ ] **11. 提交** `feat(desktop): add app registry and LVGL shell surfaces`。
+- [x] **2. 跑出 RED。** 链接缺 `desktop_shell_*` 符号而失败（记录失败信息）。
+- [x] **3. 实现注册表。** `desktop_registry.c` 只放静态数据与两个取值函数，**不含 LVGL**、不含裸颜色字面量（accent 一律 `gui_theme_colors()->primary` 等）。
+- [x] **4. 实现外壳表面构建。** `desktop_shell.c`：状态栏（高 32px，left 时间 / 中系统名 / 右指示区）、主屏（欢迎卡片 + 启动器）、抽屉（可滚动应用列表）、设置（四个设置项）。全部样式取自 `gui_theme_*`；**不得**出现裸颜色字面量或裸字号。启动器图标 = 圆形色块（accent 令牌）+ 首字 + `label` 层级文字标签。
+- [x] **5. 实现迁移执行。** `desktop_shell_apply_pending()`：取挂起意图 → `desktop_state_next()` → `INVALID` 则忽略并记诊断 → 否则**销毁当前表面的整棵 `lv_obj_t` 树**并重建目标表面 → 更新 `shell->state`。迁移**只**在这里发生；LVGL 控件回调只调用 `desktop_shell_request()` 投递意图。
+- [x] **6. 实现时钟刷新。** 用**一个** LVGL timer（周期 1000ms）在 `desktop_shell_tick()` 里刷新时间 label；`shell->clock_timer` 非空则不重建（防定时器雪崩）。格式由 `shell->settings.clock_24h` 决定（`strftime` 的 `%H:%M` 或 `%I:%M %p`）。
+- [x] **7. 实现键盘契约。** 注册原生按键回调 `gui_input_set_key_handler()`：`ESC` → `DESKTOP_INTENT_ESC`；`Tab` 交给 LVGL（**不**消费）；其余键在终端应用激活时由应用消费（Task 6）。
+- [x] **8. 删除旧资产并重写主入口。** 删 `user/desktop/font8x16.h`；`desktop.c` 全面重写；`user/desktop/app.mk` 的 `APP_CFLAGS` 追加 `-I$(OS01_ROOT)/thirdpart -I$(OS01_ROOT)/thirdpart/lvgl -I$(OS01_ROOT)/config -DLV_CONF_INCLUDE_SIMPLE`（**不**加 `-I$(OS01_ROOT)/libgui/internal`：公共 API 已不需要私有头），`APP_LDLIBS` 改为 `-lgui -lgfx`。
+- [x] **9. 接线宿主测试。** `hosttests/Makefile` 新增 `test_desktop_shell.elf`（编译 `hosttests/cases/test_desktop_shell.c` + `user/desktop/desktop_shell.c` + `user/desktop/desktop_registry.c` + `user/desktop/desktop_state.c` + `$(GUI_INTEGRATION_DIR)/platform.o` + `$(GUI_THEME_OBJS)` + `$(GUI_LVGL_ARCHIVE)`）并加入 `TEST_BINS`；`mk/components/run.mk` 注册 `desktop-shell`。
+- [x] **10. 验证。** `make PROFILE=x86_64-clang user` 绿；`CASE=desktop-shell` 绿；`make test-host` 绿；`llvm-nm` 抽查新 `desktop.elf` 不再引用 `gfx_fill_rect` / `gfx_pixel` 等手绘 primitive。
+- [x] **11. 提交** `feat(desktop): add app registry and LVGL shell surfaces`。
 
 ---
 
-### Task 5: 应用抽屉、基本设置与静态审计
+### Task 5: 应用抽屉、基本设置与静态审计 ✅ 已完成（`b955ea85`）
 
 **Files:** Modify `user/desktop/desktop_shell.{c,h}`；Create `hosttests/cases/test_desktop_audit.c`。
 
 **Interfaces:** `desktop_shell_t` 新增设置状态（存外壳自己的 C 变量，不依赖控件存活）：`clock_24h`（bool，默认 true）、`wallpaper`（枚举 surface / container_low / container_high / container_highest，默认 surface）、`density`（枚举 comfortable / compact，默认 comfortable）。
 
-- [ ] **1. RED fixture（表面契约）。** 扩展 `test_desktop_shell.c`：注入 `OPEN_DRAWER` 后断言抽屉标题区采样 = `elevation 3` 表面；注入 `OPEN_SETTINGS` 后断言设置表面采样 = `elevation 2` 表面；`BACK` 后回到 `HOME` 采样。
-- [ ] **2. 跑出 RED。** 采样不匹配（抽屉 / 设置尚未实现）。
-- [ ] **3. 实现应用抽屉。** 全屏列表：标题（`headline` 层级，「应用」+ 总数）+ 可滚动容器 + 每项一条（图标色块 + `title` 层级名称 + `label` 层级说明 + 右侧 `label` 层级类型标签）。抽屉项与启动器**共用同一份注册表**；抽屉是全集、启动器是 `in_launcher` 子集。
-- [ ] **4. 实现基本设置。** 四个设置项（时钟格式 / 壁纸颜色 / 卡片密度 / 关于）用 `switch` 与 `list` 表达；值变化通过 `desktop_shell_request()` 投递的意图回到外壳执行，写入 `shell->settings` 后**重建当前表面**以立即生效。「关于」是只读展示（内核架构、LVGL 版本、构建 profile、显示模式与分辨率）。
-- [ ] **5. 写静态审计 fixture。** `hosttests/cases/test_desktop_audit.c`：读取 `user/desktop/desktop_shell.c`、`user/desktop/desktop_apps.c`、`user/desktop/desktop_registry.c` 源文件文本并断言：
+- [x] **1. RED fixture（表面契约）。** 扩展 `test_desktop_shell.c`：注入 `OPEN_DRAWER` 后断言抽屉标题区采样 = `elevation 3` 表面；注入 `OPEN_SETTINGS` 后断言设置表面采样 = `elevation 2` 表面；`BACK` 后回到 `HOME` 采样。
+- [x] **2. 跑出 RED。** 采样不匹配（抽屉 / 设置尚未实现）。
+- [x] **3. 实现应用抽屉。** 全屏列表：标题（`headline` 层级，「应用」+ 总数）+ 可滚动容器 + 每项一条（图标色块 + `title` 层级名称 + `label` 层级说明 + 右侧 `label` 层级类型标签）。抽屉项与启动器**共用同一份注册表**；抽屉是全集、启动器是 `in_launcher` 子集。
+- [x] **4. 实现基本设置。** 四个设置项（时钟格式 / 壁纸颜色 / 卡片密度 / 关于）用 `switch` 与 `list` 表达；值变化通过 `desktop_shell_request()` 投递的意图回到外壳执行，写入 `shell->settings` 后**重建当前表面**以立即生效。「关于」是只读展示（内核架构、LVGL 版本、构建 profile、显示模式与分辨率）。
+- [x] **5. 写静态审计 fixture。** `hosttests/cases/test_desktop_audit.c`：读取 `user/desktop/desktop_shell.c`、`user/desktop/desktop_apps.c`、`user/desktop/desktop_registry.c` 源文件文本并断言：
   ① 不出现 `0x[0-9A-Fa-f]{6,8}` 形式的颜色字面量；
   ② 不出现 `gfx_fill_rect` / `gfx_pixel` / `gfx_rect` / `gfx_hline` / `gfx_vline` / `gfx_line`；
   ③ 不出现 `open("/dev/keyboard"` / `open("/dev/mouse"`；
   ④ 不出现 `gui_lvgl_private.h`（业务应用不得包含私有头）；
   ⑤ **不出现窗口装饰标识**：`minimize` / `maximize` / `window_decoration` / `title_bar`（大小写不敏感）——这是「不以绘制窗口装饰代替窗口系统」的可核验形式；
   ⑥ 字号只经由 `gui_theme_font_size(...)` 获得（不得出现 `lv_obj_set_style_text_font(..., 12)` 这类字面量字号）。
-- [ ] **6. 接线并验证。** `test_desktop_audit.elf` 加入 `hosttests/Makefile::TEST_BINS` 与 `mk/components/run.mk::GUI_HOST_REGISTERED_CASES`（CASE 名 `desktop-audit`）。执行 `CASE=desktop-audit` / `CASE=desktop-shell` / `CASE=desktop-state` / `CASE=theme` / `CASE=theme-apply` 与 `make test-host`，全绿。
-- [ ] **7. 提交** `feat(desktop): add app drawer and basic settings surfaces`。
+- [x] **6. 接线并验证。** `test_desktop_audit.elf` 加入 `hosttests/Makefile::TEST_BINS` 与 `mk/components/run.mk::GUI_HOST_REGISTERED_CASES`（CASE 名 `desktop-audit`）。执行 `CASE=desktop-audit` / `CASE=desktop-shell` / `CASE=desktop-state` / `CASE=theme` / `CASE=theme-apply` 与 `make test-host`，全绿。
+- [x] **7. 提交** `feat(desktop): add app drawer and basic settings surfaces`。
 
 ---
 
-### Task 6: 四个壳内应用
+### Task 6: 四个壳内应用 ✅ 已完成（`b19a0c8`）
 
 **Files:** Create `user/desktop/desktop_apps.{c,h}`；Modify `user/desktop/desktop_shell.{c,h}`、`user/desktop/desktop.c`。
 
@@ -264,19 +264,19 @@ const char     *desktop_state_name(desktop_state_t st);
   ```
   键事件类型用 libgui 公共的 `gui_key_event_t`（`libgui/include/gui/gui_input.h`），**不**新造类型。
 
-- [ ] **1. RED fixture。** 扩展 `test_desktop_shell.c`：遍历 4 个应用，对每个执行 `OPEN_APP(id)`，断言① 状态变为 `APP`；② 应用表面根对象非空；③ 根对象覆盖整个显示区（宽高 = display 宽高）；④ `BACK` 后状态回到 `HOME` 且主屏采样回到初始值。终端应用额外断言一次 `codepoint = 'a'` 会让输入行增加 1 个字符。
-- [ ] **2. 跑出 RED。** 应用未实现 → 断言失败（记录失败信息）。
-- [ ] **3. 实现文件应用。** `opendir` / `readdir` / `closedir` 浏览，初始 `/`，目录在前、文件在后、各自按名称排序；每行显示名称（`body` 层级）+ 类型标签（`label` 层级）；回车 / 双击进入子目录；顶栏返回键先回父目录，父目录为 `/` 时才回主屏；顶栏副标题注明「只读」。**不得**提供写入 / 删除 / 新建入口。
-- [ ] **4. 实现终端应用。** 多行输出区（`body` 层级）+ 提示符 `OS01 $ ` + 当前输入行；可打印 ASCII（0x20–0x7E）由原生按键回调消费并回显；`Enter` 执行；`Backspace` 退格；`↑` / `↓` 翻历史（最近 32 条）。内建命令：`help`、`ls [path]`、`cat <file>`、`uname`、`date`、`clear`；未知命令回 `command not found`。**不 fork 子进程**。
-- [ ] **5. 实现系统应用。** 只读展示：内核架构（构建期宏）、构建 profile、显示模式与分辨率、像素格式、键盘 / 鼠标是否存在、LVGL 版本、LVGL 内存池总量与占用率（`lv_mem_monitor`）。
-- [ ] **6. 实现设置应用。** 与 Task 5 的设置表面**共用**同一份 `shell->settings`（设置应用是设置表面的**同一份实现**，不是两套）；「关于」项展示与系统应用一致的信息。
-- [ ] **7. 验证终端消费键后的焦点状态。** 终端激活时原生按键回调消费可打印字符并 `return true`；被消费的 `UP` 由 libgui 强制释放 LVGL 侧活动键（GUI-2 既有行为）。断言：终端退出后焦点组仍可 `Tab` 导航到启动器第一个图标（不卡死、不残留已销毁对象）。
-- [ ] **8. 验证。** `make PROFILE=x86_64-clang user` 绿；`CASE=desktop-shell` 绿；`make test-host` 绿；`make test-static` 绿。
-- [ ] **9. 提交** `feat(desktop): add files terminal system and settings apps`。
+- [x] **1. RED fixture。** 扩展 `test_desktop_shell.c`：遍历 4 个应用，对每个执行 `OPEN_APP(id)`，断言① 状态变为 `APP`；② 应用表面根对象非空；③ 根对象覆盖整个显示区（宽高 = display 宽高）；④ `BACK` 后状态回到 `HOME` 且主屏采样回到初始值。终端应用额外断言一次 `codepoint = 'a'` 会让输入行增加 1 个字符。
+- [x] **2. 跑出 RED。** 应用未实现 → 断言失败（记录失败信息）。
+- [x] **3. 实现文件应用。** `opendir` / `readdir` / `closedir` 浏览，初始 `/`，目录在前、文件在后、各自按名称排序；每行显示名称（`body` 层级）+ 类型标签（`label` 层级）；回车 / 双击进入子目录；顶栏返回键先回父目录，父目录为 `/` 时才回主屏；顶栏副标题注明「只读」。**不得**提供写入 / 删除 / 新建入口。
+- [x] **4. 实现终端应用。** 多行输出区（`body` 层级）+ 提示符 `OS01 $ ` + 当前输入行；可打印 ASCII（0x20–0x7E）由原生按键回调消费并回显；`Enter` 执行；`Backspace` 退格；`↑` / `↓` 翻历史（最近 32 条）。内建命令：`help`、`ls [path]`、`cat <file>`、`uname`、`date`、`clear`；未知命令回 `command not found`。**不 fork 子进程**。
+- [x] **5. 实现系统应用。** 只读展示：内核架构（构建期宏）、构建 profile、显示模式与分辨率、像素格式、键盘 / 鼠标是否存在、LVGL 版本、LVGL 内存池总量与占用率（`lv_mem_monitor`）。
+- [x] **6. 实现设置应用。** 与 Task 5 的设置表面**共用**同一份 `shell->settings`（设置应用是设置表面的**同一份实现**，不是两套）；「关于」项展示与系统应用一致的信息。
+- [x] **7. 验证终端消费键后的焦点状态。** 终端激活时原生按键回调消费可打印字符并 `return true`；被消费的 `UP` 由 libgui 强制释放 LVGL 侧活动键（GUI-2 既有行为）。断言：终端退出后焦点组仍可 `Tab` 导航到启动器第一个图标（不卡死、不残留已销毁对象）。
+- [x] **8. 验证。** `make PROFILE=x86_64-clang user` 绿；`CASE=desktop-shell` 绿；`make test-host` 绿；`make test-static` 绿。
+- [x] **9. 提交** `feat(desktop): add files terminal system and settings apps`。
 
 ---
 
-### Task 7: QEMU 端到端门禁与文档收口
+### Task 7: QEMU 端到端门禁与文档收口 ✅ 已完成
 
 **Files:** Create `qemutests/gui_desktop_test.py`；Modify `qemutests/run_test.py`、`qemutests/test_gui_runner.py`、`mk/components/run.mk`、`docs/roadmap.md`、`docs/gui/gui.md`、`docs/changelog.md`。
 
@@ -287,13 +287,13 @@ const char     *desktop_state_name(desktop_state_t st);
 ② `mk/components/run.mk` 的 `SUITE` 分派加 `gui-desktop`；
 ③ 同文件的 `TEST_QEMU_FLAVOR_gui-desktop` / `TEST_QEMU_IMG_gui-desktop` 两个按 suite 命名的变量。
 
-- [ ] **1. RED fixture（runner 契约）。** 在 `qemutests/test_gui_runner.py` 追加新 suite 的**假 runner** 用例：未知 suite 名必须非零失败；`gui-desktop` suite 必须被登记。
-- [ ] **2. 跑出 RED。** suite 未登记而失败（记录失败信息）。
-- [ ] **3. 实现 `qemutests/gui_desktop_test.py`。** 五项检查（spec §9.3）：① 桌面启动后 screendump 有有效像素（主屏壁纸色命中）、进程退出码 0；② 离屏像素断言（状态栏 / 启动器表面色命中）；③ 注入点击启动器图标 → 画面变化（应用表面色命中）；④ 注入 `ESC` → 回到主屏（初始采样命中）；⑤ 桌面退出后终端 fallback 恢复（显示所有权协议回归）。
-- [ ] **4. 接线 suite。** 按上面的三处清单登记。
-- [ ] **5. 执行端到端。** `make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop` 通过；`SUITE=gui` 回归通过；`SUITE=phase-0` 回归通过；`OS01_SYSTEST=1 SUITE=systest` 通过；`make test-static` 通过；`make test-host` 通过。
-- [ ] **6. 文档收口。** `docs/roadmap.md` 的 GUI-3 行改为已完成并写入交付摘要（日期、提交区间、验证入口）；`docs/gui/gui.md` 新增「GUI-3 Material 风格桌面」章节（设计令牌表、表面与状态机、启动 / 退出 / 全屏切换语义、**明确不做窗口系统**的声明、公共 API 的 LVGL 隔离约束与主题生命周期约束）；`docs/changelog.md` 追加当日条目。
-- [ ] **7. 提交** `test(gui): add desktop QEMU gate and close GUI-3 docs`。
+- [x] **1. RED fixture（runner 契约）。** 在 `qemutests/test_gui_runner.py` 追加新 suite 的**假 runner** 用例：未知 suite 名必须非零失败；`gui-desktop` suite 必须被登记。
+- [x] **2. 跑出 RED。** suite 未登记而失败（记录失败信息）。
+- [x] **3. 实现 `qemutests/gui_desktop_test.py`。** 五项检查（spec §9.3）：① 桌面启动后 screendump 有有效像素（主屏壁纸色命中）、进程退出码 0；② 离屏像素断言（状态栏 / 启动器表面色命中）；③ 注入点击启动器图标 → 画面变化（应用表面色命中）；④ 注入 `ESC` → 回到主屏（初始采样命中）；⑤ 桌面退出后终端 fallback 恢复（显示所有权协议回归）。
+- [x] **4. 接线 suite。** 按上面的三处清单登记。
+- [x] **5. 执行端到端。** `make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop` 通过；`SUITE=gui` 回归通过；`SUITE=phase-0` 回归通过；`OS01_SYSTEST=1 SUITE=systest` 通过；`make test-static` 通过；`make test-host` 通过。
+- [x] **6. 文档收口。** `docs/roadmap.md` 的 GUI-3 行改为已完成并写入交付摘要（日期、提交区间、验证入口）；`docs/gui/gui.md` 新增「GUI-3 Material 风格桌面」章节（设计令牌表、表面与状态机、启动 / 退出 / 全屏切换语义、**明确不做窗口系统**的声明、公共 API 的 LVGL 隔离约束与主题生命周期约束）；`docs/changelog.md` 追加当日条目。
+- [x] **7. 提交** `test(gui): add desktop QEMU gate and close GUI-3 docs`。
 
 ---
 
@@ -345,3 +345,18 @@ const char     *desktop_state_name(desktop_state_t st);
 | MINOR 14：像素采样点没钉死 | Task 4 第 1 步逐条给出坐标，并要求避开图标色块 |
 | MINOR 15：`desktop_shell_create()` 误收 `gui_config_t` | Task 4 接口去掉 `cfg`，改用 `lv_display_get_width/height` |
 | MINOR：窗口装饰条款只靠构造保证 | Task 5 第 ⑤ 条静态审计显式禁止装饰标识 |
+
+## 实施修订记录（Task 3 – Task 7 实测）
+
+实施期发现并已处置的偏差（都不是「放宽断言」，而是把**实现事实**回写进文档）：
+
+| # | 现象 | 处置 |
+|---|------|------|
+| 1 | **界面文案原为中文，但 LVGL 只启用 Montserrat（无汉字字形）** —— QEMU 截图里整片方框 | 界面文案一律改 ASCII（`Files` / `Terminal` / `System` / `Settings`）。spec §「非目标」已把中文字体划归 GUI-4；这不是遗漏，是已知边界，已写进 `docs/gui/gui.md` §5 |
+| 2 | **libgui 的焦点组是私有的**（`gui_input_focus_*` 在 `libgui/internal/`），公共 API 没有「登记可聚焦控件」的入口，桌面因此**完全没有键盘焦点** | 外壳自建焦点序列（`desktop_shell_focus_add()` 等），用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义，焦点环由 Material 主题给出。与 spec §6.5 的**用户可见契约**（Tab 前进 / Shift+Tab 后退 / Enter 激活）一致 |
+| 3 | **`smoke` 模式把离屏平台与真实设备输入配在了一起** —— libgui 硬约束「真实设备只允许屏幕平台」，`gui_input_create()` 返 `EINVAL` | 冒烟模式改用 `GUI_INPUT_SYNTHETIC`（合成输入只允许离屏平台），且不碰 `/dev/keyboard`、不占显示租约 |
+| 4 | **`shell` 由 `calloc` 分配，`focus_index` 被清成 0** —— 第一次 Tab 直接落到**第二**个启动器图标 | `desktop_shell_create()` 显式置 `focus_index = -1`（「还没有焦点」）。QEMU 实测：修正后 Tab 落到第一个图标（Files），Enter 打开 Files 应用 |
+| 5 | **焦点清理晚于 `lv_obj_delete()`** —— 往已销毁对象上写 `LV_STATE_FOCUSED`，偶发 SIGSEGV | `destroy_surface()` 先 `focus_clear()` 再删控件树 |
+| 6 | **文件浏览器的行 `user_data` 指向栈上的条目数组** —— 悬垂指针 | 条目数组移进 `desktop_app_state_t`（跨应用存活的稳定内存），行只存「序号 + 1」 |
+| 7 | **启动器应用名被截断**（`Terminal` / `Settings` 比 48px 的图标宽） | 启动器条两侧留出 `LAUNCHER_CAPTION_OVERHANG` 的余量，应用名标签比图标宽并居中 |
+| 8 | **QEMU 门禁用「与终端画面的像素差」判断桌面接管** —— 控制台一直在刷屏（时钟、探针输出），差值被噪声吃掉，误判为「桌面没接管」 | 判据改为「Material 底色（`#FDFCFF`）铺满整屏」；像素差阈值提到 2%（应用顶栏约占 4%，时钟变化约 0.1%） |

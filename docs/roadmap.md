@@ -10,7 +10,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统）
 - **工程与架构治理**：AAGU 全套就绪；2026-10-04 规划 ARCH-1..10 架构治理任务（syscall 解耦、Linux ABI 兼容层独立、Muldefs 消除、调度器/VFS/驱动抽象治理等）
 - **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映 + **M2 Slab 接入 + M3 内核 VMM 已闭环**（merge `2034e5bc`，2026-10-05，spec v9 / plan v4）；M4 用户态 VMA 与统一 kernel_main 尚未启动
-- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；QEMU 分辨率切换与显示所有权协调器（独占接管/fallback 自动恢复/只读 raw mmap 保护）已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并；**GUI-1 LVGL 平台后端已闭环**（`libgui` 公共平台层：显示/tick/flush/生命周期、离屏与屏幕后端分离）；**GUI-2 输入与焦点已闭环并合入 `master`**（独占物理输入租约、LVGL indev、光标、修饰键、重复、Tab 焦点，QEMU SMP 1/2 共 24/24 通过）；后续推进 Material 风格桌面与窗口系统
+- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移已闭环；QEMU 分辨率切换与显示所有权协调器（独占接管/fallback 自动恢复/只读 raw mmap 保护）已闭环；LVGL v9.5.0 初步移植与图形 showcase 已合并；**GUI-1 LVGL 平台后端已闭环**（`libgui` 公共平台层：显示/tick/flush/生命周期、离屏与屏幕后端分离）；**GUI-2 输入与焦点已闭环并合入 `master`**（独占物理输入租约、LVGL indev、光标、修饰键、重复、Tab 焦点，QEMU SMP 1/2 共 24/24 通过）；**GUI-3 Material 风格桌面已闭环**（令牌表 + 主题落地 + 状态栏/启动器/抽屉/设置 + 四个壳内应用，`SUITE=gui-desktop` 端到端门禁）；后续推进窗口系统与 GUI-4 字体资源
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
 
 详细背景、commit 记录、经验教训见 `docs/changelog.md` + 各专题 closure 文档（`docs/archive/aarch64/`）+ 主题 docs。
@@ -102,12 +102,12 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | 项 | 内容 / 完成条件 | 依赖 |
 |----|-----------------|------|
 | GUI-1 LVGL 平台后端 ✅ | **已完成（2026-10-19/20）**：从 `test_lvgl` 抽出可复用的 `libgui` 平台层——公共 API `gui_platform.h`（`gui_platform_create/destroy/step/get_pixel`；`gui_platform_step` 输出下一次 poll 等待时间，驱动方据此结合 `poll` 推进）、`libgui/src/platform.c`（显示/离屏后端、tick、flush、生命周期）、`libgui/src/tick.c`；格式、stride、缓冲容量与错误传播已核对并由宿主契约测试钉死。计划 7 个任务的 commit `2fb58e71`（fatal 断言审计）→ `622d6734`（公共/私有头）→ `648a23f7`（平台实现）→ `c27b900a`（真实渲染与生命周期）→ `f5a9f7bf`（目标归档与 sysroot）→ `acebb9df`（`test_lvgl` 迁移）→ `d829b36f`（QEMU 门禁）已全部合入 `master`。设计 [spec](superpowers/specs/2026-10-19-gui-1-lvgl-platform-backend-design.md)、实施 [plan](superpowers/plans/2026-10-19-gui-1-lvgl-platform-backend.md) | LVGL 初步移植 ✅；libgfx ✅ |
-| GUI-3 Material 风格桌面 | 用 LVGL 重构 `desktop.c`，统一颜色角色、字体层级、间距、圆角、elevation 与 hover/pressed/focus/disabled 状态；实现启动器、应用抽屉、状态栏及基本设置。先交付单进程桌面外壳，应用启动/退出及全屏切换明确，不以绘制窗口装饰代替窗口系统 | GUI-1 ✅、GUI-2 ✅；现有 desktop 演示 |
+| GUI-3 Material 风格桌面 ✅ | **已完成（2026-10-24）**：用 LVGL 重写 `user/desktop`，颜色角色 / 字体层级 / 间距 / 圆角 / elevation 与 hover/pressed/focus/disabled 六类状态全部由**单一令牌表**驱动（令牌表 `libgui/include/gui/gui_theme.h` 公共且 LVGL 无关，主题落地在 libgui 内部）；实现状态栏、启动器、应用抽屉、基本设置与四个**壳内应用**（文件 / 终端 / 系统 / 设置）。应用语义显式：**启动 = 整屏替换 `HOME→APP(id)`、退出 = 销毁应用表面回 `HOME`、全屏切换 = 整屏替换（无窗口化中间态）**；**不绘制任何窗口装饰**（无标题栏边框 / 最小化 / 最大化 / 关闭 / Z-order）。键鼠一律走 GUI-2 输入通道，桌面不再直开设备文件。验证：宿主契约测试（令牌 / 主题 / 状态机 / 像素）+ 静态审计（禁颜色字面量、禁裸字号、禁手绘 primitive、禁私有头、禁窗口装饰标识）+ QEMU 端到端门禁 `SUITE=gui-desktop`（SMP 1/2）。设计 [spec](superpowers/specs/2026-10-24-gui-3-material-desktop-design.md)，实施 [plan](superpowers/plans/2026-10-24-gui-3-material-desktop.md) | GUI-1 ✅、GUI-2 ✅；现有 desktop 演示 |
 | GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1 ✅；GUI-3 的文字/资源需求；文件后端见优化项 |
 | GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1 ✅、GUI-2 ✅；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
 | GUI-6 terminal 窗口化 | 保留 PTY/VT100 核心，将渲染输出接入窗口 surface；键盘只投递到焦点终端，验证 Ctrl-C、alt-screen、窗口关闭和 shell 存活；缩放时更新 PTY winsize 并接通 SIGWINCH | GUI-5；terminal/PTY ✅；SIGWINCH（P5 剩余项） |
 
-顺序：GUI-1 ✅ → **GUI-2 ✅（2026-10-22 闭环，2026-10-23 合入 `master`）** → GUI-3；GUI-4 可随桌面推进。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
+顺序：GUI-1 ✅ → **GUI-2 ✅（2026-10-22 闭环，2026-10-23 合入 `master`）** → **GUI-3 ✅（2026-10-24 闭环）** → GUI-4；GUI-4 可随桌面推进（GUI-3 的界面文案暂用 ASCII，汉字字形归 GUI-4）。GUI-5/6 是独立系统工程，不与首版单进程桌面捆绑；aarch64 GUI 等待用户态与显示设备基础就绪。
 
 #### 优化与验证项
 

@@ -7,6 +7,20 @@
 
 ## 2026-10-24
 
+- feat(desktop): **GUI-3 Material 风格桌面闭环**：分支 `feature/gui-3-material-desktop`，基线 `d0153dc3`（`master`）。用 LVGL 重写 `user/desktop`，把「Material 风格」从画出来的像素变成**可核验的设计系统**。
+
+  **设计系统**：新增公共令牌表 `libgui/include/gui/gui_theme.h` + `libgui/src/theme.c`（32 个色彩角色、5 级字号 12/14/16/20/24、5 档间距、5 档圆角、elevation 0–5），主题落地留在 libgui 内部（`theme_apply.c`），`gui_platform_create()` 自动套用。**公共 API 保持 LVGL 无关** —— sysroot 已发布头禁止出现 LVGL 符号（`qemutests/gui_build_audit.py`），因此「把 `lv_display_t` 提升为公共 API」不可行；令牌表是纯数据可以发布，主题落地整体留在 libgui 内，业务应用用 `lv_display_get_default()` 取 display。
+
+  **外壳**：纯 C 状态机（HOME/DRAWER/SETTINGS/APP）+ 应用注册表 + 四个表面（状态栏 / 启动器 / 抽屉 / 设置）。迁移一律**整屏替换**，只发生在主循环（UI 回调只投递意图）；设置项变更走同一条投递通道。**不绘制任何窗口装饰**。
+
+  **应用模型：仅壳内应用**。四个应用（文件 / 终端 / 系统 / 设置）由外壳创建与销毁，占满显示区，不 fork 子进程、不做显示所有权与输入租约交接。语义显式：**启动 = `HOME→APP(id)` 整屏替换；退出 = 销毁应用表面回 `HOME`；全屏切换 = 整屏替换，不存在窗口化中间态**。应用状态（终端命令行与历史、文件浏览器当前目录）存在外壳持有的 C 变量里，不寄居在会被销毁的控件树中。
+
+  **键盘**：libgui 的焦点组是私有的（公共 API 没有「登记可聚焦控件」的入口），因此外壳自建焦点序列，用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义（Tab / Shift+Tab 移动、Enter 激活、ESC 返回），焦点环由 Material 主题给出。
+
+  **已知边界**：GUI-3 只启用 Montserrat，**没有汉字字形**，因此界面文案一律用 ASCII（`Files` / `Terminal` / `System` / `Settings`）；中文字体按 spec 划归 GUI-4。
+
+  **验证**：宿主契约测试（令牌 / 主题落地 / 状态机 / 外壳像素）、静态审计（禁颜色字面量、禁裸字号、禁手绘 primitive、禁直开设备、禁 libgui 私有头、禁窗口装饰标识）、QEMU 端到端门禁 `qemutests/gui_desktop_test.py`（`SUITE=gui-desktop`：冒烟、桌面接管显示、真实 PS/2 按键启动应用并返回、杀掉桌面后 guest 仍存活；SMP 1/2 全绿）。设计 [spec](superpowers/specs/2026-10-24-gui-3-material-desktop-design.md)，实施 [plan](superpowers/plans/2026-10-24-gui-3-material-desktop.md)。
+
 - fix(build): **parked fbtest 私有头发布边界闭环**：测试 sysroot 原先同时发布内核 `driver/fb_test.h` 和测试 UAPI；私有头改为始终排除，`uapi/fb_test.h` 仍仅在测试配置发布。新增真实安装规则回归，覆盖干净安装、旧头残留、配置切换、manifest 和 UAPI 内容，并接入 `test-host`。旧规则三个 subtest 失败；修复后生产/测试镜像构建与实际 sysroot 检查、完整分辨率宿主九组和 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-fbtest-private-header.md)。
 
 - fix(procfs): **parked monitor ④ legacy 字节缓冲区等长边界闭环**：`procfs_generate_node()` 只复制文本字节，却用 `len >= cap` 拒绝恰好装满的目标；改为 `len > cap` 并明确不补 NUL 的接口约定。四类统计节点新增长度减一/等长/长度加一、canary、失败无写入与分配余额回归；旧实现 8 条断言失败，修复后 procfs 13 场景/544 断言、完整 monitor 七组、`test-host` 和 QEMU phase-0 通过。原条目所述 4096 字节 status 空读在当前 formatter 下不可达，本次未声称 guest 复现。详见 [调查与验证](debug/2026-10-24-procfs-legacy-capacity.md)。
