@@ -431,7 +431,7 @@ def render_golden(rows: List[str]) -> str:
     lines: List[str] = []
     lines.append("# cursor-arrow-16x24.txt — 由 tools/gen_cursor_icon.py 生成，请勿手改。")
     lines.append("#")
-    lines.append("# 16 行 x 16 列，每格一个字符：")
+    lines.append("# %d 行 x %d 列，每格一个字符：" % (ICON_H, ICON_W))
     lines.append("#   .  完全透明（alpha == 0）")
     lines.append("#   F  完全不透明的填充色（#1A1C1E）")
     lines.append("#   O  完全不透明的描边色（#FDFCFF）")
@@ -530,7 +530,7 @@ python3 tools/gen_cursor_icon.py
 cat libgui/assets/cursor-arrow-16x24.txt
 ```
 
-Expected：黄金图 16 行 × 16 列；首行左端是箭尖（非 `.`）；能看到 `F`（黑色主体）与 `O`（白色描边）。**把黄金图贴给用户看**——它是这个图形的评审面。
+Expected：黄金图 24 行 × 16 列；首行左端是箭尖（非 `.`）；能看到 `F`（黑色主体）与 `O`（白色描边）。**把黄金图贴给用户看**——它是这个图形的评审面。
 
 - [ ] **Step 4: 写工具测试 `tools/tests/test_cursor_icon.py`**
 
@@ -542,7 +542,7 @@ Expected：黄金图 16 行 × 16 列；首行左端是箭尖（非 `.`）；能
 
 * 生成物与生成器一致（``--check`` 必须绿）；
 * ``--check`` 真的有判别力（改一个字节就红）；
-* 黄金图的结构契约（16x16、字符集、箭尖在 (0,0)）；
+* 黄金图的结构契约（24x16、字符集、箭尖在 (0,0)）；
 * C 源文件里的像素与黄金图逐格一致；
 * PNG 解码器本身正确（自造最小 PNG 解一遍）。
 """
@@ -1387,7 +1387,7 @@ Expected：`CASE=desktop-shell` 绿；`make test-static` 绿（`user/desktop` �
     if (GUI_INPUT_FOCUS_OUTLINE_COLOR != PROBE_OUTLINE_COLOR ||
         GUI_INPUT_CURSOR_FILL_COLOR != PROBE_CURSOR_FILL_COLOR ||
         GUI_INPUT_CURSOR_OUTLINE_COLOR != PROBE_CURSOR_OUTLINE_COLOR) {
-        rc = fail(1, EINVAL, "outline_or_cursor_color"); goto cleanup;
+        rc = fail(1, EINVAL, "focus_outline_or_cursor_color"); goto cleanup;
     }
 ```
 

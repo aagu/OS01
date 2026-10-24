@@ -103,7 +103,7 @@
 | 文件 | 职责 |
 |------|------|
 | `libgui/assets/cursor-arrow.png` | 用户提供的源图（44×56 RGBA），本次唯一的手工资产 |
-| `libgui/assets/cursor-arrow-16x24.txt` | **黄金图**：16 行 × 16 字符的 ASCII 剪影，人工可读、可 diff，是图形的评审面 |
+| `libgui/assets/cursor-arrow-16x24.txt` | **黄金图**：24 行 × 16 字符的 ASCII 剪影，人工可读、可 diff，是图形的评审面 |
 | `libgui/src/cursor_icon.c` | **生成物**：ARGB8888 像素数组 + `lv_image_dsc_t` |
 | `libgui/internal/gui_cursor_icon.h` | `extern const lv_image_dsc_t gui_cursor_icon;` |
 | `tools/gen_cursor_icon.py` | 离线生成器（自带 PNG 解码，无第三方依赖），带 `--check` |
@@ -359,7 +359,7 @@ static void cursor_draw_cb(lv_event_t *e)
 - `python3 tools/gen_cursor_icon.py` → 重写 `libgui/src/cursor_icon.c` 与 `libgui/assets/cursor-arrow-16x24.txt`
 - `python3 tools/gen_cursor_icon.py --check` → 重新生成到内存，与磁盘上的两个文件逐字节比对；不一致 → 非零退出并打印差异
 
-**黄金图** `libgui/assets/cursor-arrow-16x24.txt`：16 行 × 16 字符，每格一个字符：
+**黄金图** `libgui/assets/cursor-arrow-16x24.txt`：24 行 × 16 字符，每格一个字符：
 
 | 字符 | 含义 |
 |------|------|
