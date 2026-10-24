@@ -2,7 +2,9 @@
 
 > **执行日期说明**：plan Task 7 要求「实际执行跨日时采用当天日期」。plan 与 spec 的文件名保持 `2026-10-23`，本**验证报告**采用实际执行日 **2026-10-24**（本地时区 UTC+8）。全部归档目录的时间戳是 UTC（`20261024T04…Z`），对应本地 `2026-10-24 12:xx`。
 
-> **本报告的验收对象**：分支 `feature/intr-dispatch-phase1` 的 HEAD `f4a2bc04`。所有归档的 `result.json` 都记录 `git_revision=f4a2bc04265435da7ab84d2abd953c3950430016`、`git_dirty=false`，即**验收运行期间工作树干净**。
+> **本报告的验收对象**：分支 `feature/intr-dispatch-phase1` 的 HEAD `f4a2bc04`。**本次验收矩阵**产出的归档（§2、§3、§4 表格里逐条列出的那些目录）的 `result.json` 都记录 `git_revision=f4a2bc04265435da7ab84d2abd953c3950430016`、`git_dirty=false`，即验收运行期间工作树干净。
+>
+> **两类归档不在上面这句的范围内，本报告也**不**引用它们**：(a) §6.1 的**对照实验**归档 `aarch64-m3-probe/20261024T042326Z-…`——那一次运行是**故意**临时改过 `qemutests/aarch64_m3_probe.py` 的期望前缀，因此它的 `git_dirty=true` 是有意的；(b) `build/*/logs/tests/**` 下**更早迭代**的归档（例如 `aarch64-uefi-smp/20261023T183*`、`driver-model-boundary/20261023T1554*` 等）——它们来自 Tasks 1–6 的开发期运行，`git_revision` 是当时的中间提交、`git_dirty=true`，与本次验收矩阵无关，只是恰好同处一个日志目录。
 
 > **本任务不新增任何运行期功能**：它只跑验收矩阵、记录证据、写文档。唯一的例外触发条件（「验收暴露了一个必须修的产品缺陷」）没有被触发——见 §6。
 
@@ -24,7 +26,7 @@
 | Python | 3.14.8（`unittest` 驱动的 host/harness 套件） |
 | 宿主平台 | Linux 7.2.9-arch1-1 x86_64 |
 | Profile | `x86_64-clang` / `aarch64-clang` |
-| Variant | **默认 variant**：`INITTAB_FILE=config/inittab`、`LOG_TARGET=serial`、`ARCH9_FAULT=none`、`FB_RESOLUTION_TEST=0`、**`DEBUG_CHANNELS` 未设置**；x86 侧 `SMP=2`、aarch64 侧由 `MODE` 决定 |
+| Variant | **默认 variant**：`INITTAB_FILE=config/inittab`、`LOG_TARGET=serial`、`ARCH9_FAULT=none`、`FB_RESOLUTION_TEST=0`、**`DEBUG_CHANNELS` 未设置**；构建默认 `SMP=2`（`Makefile:41`），但**每条命令实际使用的 `-smp` 值见 §2 / §3 表格**（构建默认并不等于运行拓扑） |
 | 本地日志目录 | `/tmp/intr-task7-logs/`（本机临时目录，不入库） |
 | 归档目录 | `build/x86_64-clang/logs/tests/**` 与 `build/aarch64-clang/logs/tests/**`（profile build 目录内，不入库） |
 
@@ -50,14 +52,18 @@
 
 ## 2. x86_64 验收矩阵：命令 → 退出码 → 日志路径
 
-| # | 命令 | 退出码 | 日志路径 | 摘要 |
-|---|------|--------|----------|------|
-| 1 | `make PROFILE=x86_64-clang test-host` | **0** | `/tmp/intr-task7-logs/test-host.log` | `[run_hosttests] 134 binary(ies) run, overall exit 0` |
-| 2 | `make PROFILE=x86_64-clang test-static` | **0** | `/tmp/intr-task7-logs/test-static.log` | 13 项静态审计全 PASS（`runtime-audit` / `stack-canary-audit` / `validate-kernel` / `runtime-link-order` / `kernel-runtime-link` / `syscall-boundary` / `kernel-layout` / `kernel-canary-contract` / `header-object-audit` / `stack-frame-audit` / `driver-model-boundary` / `gui-build-audit` / `intr-dispatch-audit`），另加 `PASS: user-canary`（共 14 条 PASS） |
-| 3 | `make PROFILE=x86_64-clang test-qemu SUITE=phase-0` | **0** | `/tmp/intr-task7-logs/test-qemu-phase0.log`；归档 `build/x86_64-clang/logs/tests/phase-0/20261024T040849Z-83cb9755b0174ad196e587fe6b509932/` | `PASS: Kernel booted, boot markers verified, shell prompt appeared` |
-| 4 | `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall` | **0** | `/tmp/intr-task7-logs/test-syscall.log`；归档 `build/x86_64-clang/logs/tests/systest/20261024T040902Z-e1b21e7503974f58b9cc8ecfe744d8eb/` | `PASS: all 99 syscall tests passed`（`total=100 passed=99 failed=0 skipped=1`） |
-| 5 | `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 test-kernel-selftest` | **0** | `/tmp/intr-task7-logs/test-kernel-selftest.log`；归档 `build/x86_64-clang/logs/tests/kernel-selftest/20261024T040956Z-fde7307b67f14866a63496cf78d52a80/` | `[TEST] END suite=kernel-selftest total=39 passed=39 failed=0 skipped=0` |
-| 6 | `make PROFILE=x86_64-clang test-harness` | **0** | `/tmp/intr-task7-logs/test-harness.log` | `Ran 678 tests in 557.470s` → `OK (skipped=1)`（约 9–10 分钟，未中断） |
+`-smp` 取自各归档 `result.json` 的 `argv`（QEMU 实际拓扑，不是构建默认值）。
+
+| # | 命令 | `-smp` | 退出码 | 日志路径 | 摘要 |
+|---|------|--------|--------|----------|------|
+| 1 | `make PROFILE=x86_64-clang test-host` | 无 QEMU | **0** | `/tmp/intr-task7-logs/test-host.log` | `[run_hosttests] 134 binary(ies) run, overall exit 0` |
+| 2 | `make PROFILE=x86_64-clang test-static` | 无 QEMU | **0** | `/tmp/intr-task7-logs/test-static.log` | 13 项静态审计全 PASS（`runtime-audit` / `stack-canary-audit` / `validate-kernel` / `runtime-link-order` / `kernel-runtime-link` / `syscall-boundary` / `kernel-layout` / `kernel-canary-contract` / `header-object-audit` / `stack-frame-audit` / `driver-model-boundary` / `gui-build-audit` / `intr-dispatch-audit`），另加 `PASS: user-canary`（共 14 条 PASS） |
+| 3 | `make PROFILE=x86_64-clang test-qemu SUITE=phase-0` | **1** | **0** | `/tmp/intr-task7-logs/test-qemu-phase0.log`；归档 `build/x86_64-clang/logs/tests/phase-0/20261024T040849Z-83cb9755b0174ad196e587fe6b509932/` | `PASS: Kernel booted, boot markers verified, shell prompt appeared` |
+| 4 | `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall` | **1** | **0** | `/tmp/intr-task7-logs/test-syscall.log`；归档 `build/x86_64-clang/logs/tests/systest/20261024T040902Z-e1b21e7503974f58b9cc8ecfe744d8eb/` | `PASS: all 99 syscall tests passed`（`total=100 passed=99 failed=0 skipped=1`） |
+| 5 | `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 test-kernel-selftest` | **4** | **0** | `/tmp/intr-task7-logs/test-kernel-selftest.log`；归档 `build/x86_64-clang/logs/tests/kernel-selftest/20261024T040956Z-fde7307b67f14866a63496cf78d52a80/` | `[TEST] END suite=kernel-selftest total=39 passed=39 failed=0 skipped=0` |
+| 6 | `make PROFILE=x86_64-clang test-harness` | 各子 suite 自带（见各归档 argv） | **0** | `/tmp/intr-task7-logs/test-harness.log` | `Ran 678 tests in 557.470s` → `OK (skipped=1)`（约 9–10 分钟，未中断） |
+
+> `-smp` 的来源：`phase-0` 与 `test-syscall` 的 harness 固定 `-smp 1`；`test-kernel-selftest` 由 `mk/components/run.mk:400` 的 `KERNEL_SELFTEST_SMP ?= 4` 决定，故为 `-smp 4`。**结论行以各归档 `argv` 为准**。
 
 **#4 与 #5 分开运行**，全程没有同时设置 `OS01_SYSTEST=1` 与 `KERNEL_SELFTEST=1`（AGENTS.md 明确禁止：内核 selftest 会在 boot 时 spawn kthread，破坏 systest 的 fork+exec+waitpid 用例）。
 
@@ -104,13 +110,13 @@
 
 ## 3. aarch64 验收矩阵
 
-| # | 命令 | 退出码 | 日志路径 | 摘要 |
-|---|------|--------|----------|------|
-| 1 | `make PROFILE=aarch64-clang test-aarch64 MODE=sync-fault` | **0** | `/tmp/intr-task7-logs/aarch64-sync-fault.log`；归档 `build/aarch64-clang/logs/tests/aarch64-sync-fault/20261024T041948Z-ec20e1ba3e794950869e1fce673d0380/` | `{"result": "PASS", "fatal_observed": true, "timeout": false}` |
-| 2 | `make PROFILE=aarch64-clang test-aarch64 MODE=smp` | **0** | `/tmp/intr-task7-logs/aarch64-smp.log`；归档 `build/aarch64-clang/logs/tests/aarch64-uefi-smp/` 下 9 个目录（cpus=1：`20261024T041957Z-8703b088…`、`20261024T042002Z-0c6ee0b8…`、`20261024T042007Z-3cbb6337…`；cpus=2：`20261024T042011Z-0fe1fc4d…`、`20261024T042017Z-024dff33…`、`20261024T042021Z-2a49827c…`；cpus=4：`20261024T042027Z-233068205…`、`20261024T042033Z-0bd9c6a8…`、`20261024T042039Z-c4b0da54…`） | **9/9 PASS**（cpus 1/2/4 × 3 次，全部 `"result": "PASS"`） |
-| 3 | `make PROFILE=aarch64-clang test-aarch64 MODE=gic-spi` | **0** | `/tmp/intr-task7-logs/aarch64-gic-spi.log`；归档 `build/aarch64-clang/logs/tests/aarch64-gic-spi/20261024T042049Z-7c3ebd053ef9433984969c66e3156b19/` | `{"result": "PASS", "injected": true, "armed_count": 1, "handled_count": 1}` |
-| 4 | `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe` | **2** | `/tmp/intr-task7-logs/aarch64-m3-probe.log`；归档 `build/aarch64-clang/logs/tests/aarch64-m3-probe/20261024T042053Z-cd2ee22e773f4534874395547a4b240f/` | **FAIL（timeout）** — 详见 §6.1 |
-| 5 | `make PROFILE=aarch64-clang test-aarch64-audit` | **0** | `/tmp/intr-task7-logs/aarch64-audit.log`；归档 `build/aarch64-clang/logs/tests/intr-dispatch-audit/20261024T042334Z-dbe4ce52c5da48f89abfc8e6612bfd5f/` | `[audit] OK (vma_*/uaccess_*/fork_* symbol-exclusion gate only)` + `PASS: intr-dispatch-audit` |
+| # | 命令 | `-smp` | 退出码 | 日志路径 | 摘要 |
+|---|------|--------|--------|----------|------|
+| 1 | `make PROFILE=aarch64-clang test-aarch64 MODE=sync-fault` | **1** | **0** | `/tmp/intr-task7-logs/aarch64-sync-fault.log`；归档 `build/aarch64-clang/logs/tests/aarch64-sync-fault/20261024T041948Z-ec20e1ba3e794950869e1fce673d0380/` | `{"result": "PASS", "fatal_observed": true, "timeout": false}` |
+| 2 | `make PROFILE=aarch64-clang test-aarch64 MODE=smp` | **1 / 2 / 4**（3 次重复） | **0** | `/tmp/intr-task7-logs/aarch64-smp.log`；归档 `build/aarch64-clang/logs/tests/aarch64-uefi-smp/` 下 9 个目录（cpus=1：`20261024T041957Z-8703b088…`、`20261024T042002Z-0c6ee0b8…`、`20261024T042007Z-3cbb6337…`；cpus=2：`20261024T042011Z-0fe1fc4d…`、`20261024T042017Z-024dff33…`、`20261024T042021Z-2a49827c…`；cpus=4：`20261024T042027Z-233068205…`、`20261024T042033Z-0bd9c6a8…`、`20261024T042039Z-c4b0da54…`） | **9/9 PASS**（cpus 1/2/4 × 3 次，全部 `"result": "PASS"`） |
+| 3 | `make PROFILE=aarch64-clang test-aarch64 MODE=gic-spi` | **1** | **0** | `/tmp/intr-task7-logs/aarch64-gic-spi.log`；归档 `build/aarch64-clang/logs/tests/aarch64-gic-spi/20261024T042049Z-7c3ebd053ef9433984969c66e3156b19/` | `{"result": "PASS", "injected": true, "armed_count": 1, "handled_count": 1}` |
+| 4 | `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe` | **2** | **2** | `/tmp/intr-task7-logs/aarch64-m3-probe.log`；归档 `build/aarch64-clang/logs/tests/aarch64-m3-probe/20261024T042053Z-cd2ee22e773f4534874395547a4b240f/` | **FAIL（timeout）** — 详见 §6.1 |
+| 5 | `make PROFILE=aarch64-clang test-aarch64-audit` | 无 QEMU（静态审计） | **0** | `/tmp/intr-task7-logs/aarch64-audit.log`；归档 `build/aarch64-clang/logs/tests/intr-dispatch-audit/20261024T042334Z-dbe4ce52c5da48f89abfc8e6612bfd5f/` | `[audit] OK (vma_*/uaccess_*/fork_* symbol-exclusion gate only)` + `PASS: intr-dispatch-audit` |
 
 ### 3.1 `MODE=sync-fault`：原字段 / 首报 / 无 returned
 
@@ -162,6 +168,8 @@ Task 6 的 `qemutests/intr_dispatch_audit.py` 直接审计**生产目标对象**
 
 ### 4.1 x86_64（`build/x86_64-clang/logs/tests/intr-dispatch-audit/20261024T040836Z-4b945478314541e681caef40d69f689b/stdout.log`）
 
+> 该归档由 **`test-static`**（#2）内的 `run_static_audit.py --suite intr-dispatch-audit` 产生（归档时间戳 12:08:36，`test-static.log:114` 是它的命令行）。`test-harness`（#8）也跑了同一个审计脚本，其**日志内**同样出现 x86 真实 ELF 的判定（`strong def arch_intr_dispatch @ 0xffff80000013cd80 …`、`[intr-dispatch-audit] OK`），但没有另建归档目录——两处判定一致。
+
 | 审计项 | 结果 |
 |--------|------|
 | `arch_intr_dispatch` 强定义 | `T`，唯一，无 weak |
@@ -208,7 +216,7 @@ Task 6 的 `qemutests/intr_dispatch_audit.py` 直接审计**生产目标对象**
 | §9.2 aarch64 QEMU | sync-fault / smp / gic-spi / m3-probe / audit 五条 | Task 3、6–7 | §3（m3-probe 失败，见 §6.1） |
 | §9.3 x86_64 与回归 | phase-0 / systest / kernel-selftest / host / static；真实 guest 非局部恢复硬门槛 | Task 4–7 | §2 全部 |
 | §10 预计变更位置 | 文件职责表 | Tasks 3–4、7 | §8「Files changed」 |
-| §11 实施者选择与后续项目 | 可改私有命名/fixture 组织；不得改入口覆盖、强链接、信号映射、控制流、EOI 归属、验收强度 | Tasks 1–6 | §4 审计 + §2.1 逐 case 核对 |
+| §11 实施者选择与后续项目 | 可改私有命名/fixture 组织；不得改入口覆盖、强链接、信号映射、控制流、EOI 归属、验收强度；后续需单独设计的项目 | Tasks 1–6、7 | §4 审计 + §2.1 逐 case 核对；后续项目清单见 §7.2 |
 
 **结论**：spec §1–11 的每条要求都能映射到具体任务与本报告的具体证据；**没有**任何一条被跳过。
 
