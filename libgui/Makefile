@@ -58,9 +58,10 @@ PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
                       $(LIBGUI_DIR)/src/input_focus.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
 
-# GUI-3 设计系统：Material 令牌表（theme.c，纯 C 无 LVGL 依赖）。
-# LVGL 主题落地（theme_apply.c）由 GUI-3 Task 2 追加。
-THEME_C_SOURCES := $(LIBGUI_DIR)/src/theme.c
+# GUI-3 设计系统：Material 令牌表（theme.c，纯 C 无 LVGL 依赖）与
+# LVGL 主题落地（theme_apply.c）。两者是独立的编译单元，宿主契约测试
+# 可以只链接令牌表，不必拖入 LVGL。
+THEME_C_SOURCES := $(LIBGUI_DIR)/src/theme.c $(LIBGUI_DIR)/src/theme_apply.c
 THEME_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/theme/%.o,$(THEME_C_SOURCES))
 
 COMMON_C_SOURCES := $(OS01_ROOT)/user/common/gfx_client_policy.c

@@ -188,6 +188,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_platform.elf \
     $(TEST_BLD)/test_gui_input_lvgl.elf \
     $(TEST_BLD)/test_gui_theme.elf \
+    $(TEST_BLD)/test_gui_theme_apply.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -3807,6 +3808,12 @@ GUI_LVGL_SOURCES := $(shell find $(TESTS_DIR)/$(LVGL_SOURCE)/src -name '*.c')
 GUI_LVGL_OBJS := $(patsubst $(TESTS_DIR)/$(LVGL_SOURCE)/src/%.c,$(GUI_LVGL_DIR)/obj/%.o,$(GUI_LVGL_SOURCES))
 GUI_LVGL_ARCHIVE := $(GUI_LVGL_DIR)/liblvgl-host.a
 
+# GUI-3: the Material theme unit (token table + LVGL theme).  Every host
+# test that links the REAL libgui platform must also link these two
+# translation units, because gui_platform_create() applies the theme and
+# gui_platform_destroy() releases it.
+GUI_THEME_OBJS := $(GUI_INTEGRATION_DIR)/theme.o $(GUI_INTEGRATION_DIR)/theme_apply.o
+
 $(GUI_HOST_DIR)/lvgl-version.stamp: $(TESTS_DIR)/thirdpart/lvgl.manifest
 	@test -e "$(TESTS_DIR)/$(LVGL_SOURCE)/.git" || { echo "ERROR: $(LVGL_SOURCE) not a git submodule (.git missing)"; exit 1; }
 	@test -f "$(TESTS_DIR)/$(LVGL_SOURCE)/lvgl.h" || { echo "ERROR: $(LVGL_SOURCE) missing lvgl.h"; exit 1; }
@@ -3922,6 +3929,7 @@ $(TEST_BLD)/test_gui_platform.elf: \
 		$(GUI_DETERMINISTIC_DIR)/test_gui_platform.o \
 		$(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o \
 		$(GUI_DETERMINISTIC_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_DETERMINISTIC_DIR)/tick.o \
 		$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o \
 		$(GUI_INPUT_UNIT_OBJS) \
@@ -3979,6 +3987,7 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o \
 		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
 		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
 		$(GUI_INPUT_UNIT_OBJS) \
@@ -4020,6 +4029,46 @@ $(TEST_BLD)/test_gui_theme.elf: \
 
 .PHONY: test-gui-theme
 test-gui-theme: $(TEST_BLD)/test_gui_theme.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 2: Material theme applied to LVGL ──────────────────
+# Links the REAL libgui/src/theme.c (token table) + theme_apply.c (LVGL
+# theme) + the REAL platform and the REAL LVGL archive, so the assertions
+# observe the production theme rather than a stub.  Covers: the theme is
+# attached to the display and re-application is idempotent; container /
+# button / label styles come from the token table; the focus ring is a
+# 2px primary outline; a NULL platform yields NULL + EINVAL.
+$(GUI_INTEGRATION_DIR)/theme.o: $(TESTS_DIR)/libgui/src/theme.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/theme_apply.o: $(TESTS_DIR)/libgui/src/theme_apply.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/test_gui_theme_apply.o: $(TEST_CASES)/test_gui_theme_apply.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_theme_apply.elf: \
+		$(GUI_INTEGRATION_DIR)/test_gui_theme_apply.o \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INTEGRATION_DIR)/theme.o \
+		$(GUI_INTEGRATION_DIR)/theme_apply.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-theme-apply
+test-gui-theme-apply: $(TEST_BLD)/test_gui_theme_apply.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
@@ -4314,6 +4363,7 @@ $(TEST_BLD)/test_gui_input_platform.elf: \
 		$(GUI_INPUT_DIR)/test_gui_input_platform.o \
 		$(GUI_INPUT_DIR)/gui_test_runtime.o \
 		$(GUI_INPUT_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_INPUT_DIR)/tick.o \
 		$(GUI_INPUT_UNIT_OBJS) \
 		$(GUI_INPUT_DIR)/gfx_client_policy.o \
@@ -4375,6 +4425,7 @@ $(TEST_BLD)/test_gui_input_lvgl.elf: \
 		$(GUI_INPUT_LVGL_DIR)/test_gui_input_lvgl.o \
 		$(GUI_INPUT_LVGL_DIR)/gui_test_runtime.o \
 		$(GUI_INPUT_LVGL_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_INPUT_LVGL_DIR)/tick.o \
 		$(GUI_INPUT_LVGL_DIR)/gfx_client_policy.o \
 		$(GUI_INPUT_UNIT_OBJS) \

@@ -38,11 +38,12 @@ GUI-3 用 LVGL 重写 `user/desktop`，交付一个 **Material 风格的单进�
 | 1 | 应用模型 | **仅壳内应用**：每个应用是外壳内的一块全屏 LVGL 界面，由外壳自己创建与销毁 | roadmap 明确「先交付单进程桌面外壳」。外部子进程需要显示所有权交接 + 输入租约交接（GUI-2 的租约是独占的，子进程无法同时读键盘），会引入 fork/exec 与租约暂停/恢复两套新协议，风险与工作量都远超本期目标。应用「启动 / 退出 / 全屏切换」的**语义**已在 §6 完整定义，不依赖子进程。 |
 | 2 | 主题范围 | **仅浅色 Material**：一套完整的 Material 3 浅色色彩角色表 | 深色主题需要成对的色彩角色表 + 设置项切换 + 即时重绘，属于独立增量。本期把色彩**角色**结构做对（而不是把颜色写死），将来加深色只需再加一套角色表。 |
 | 3 | 设计系统归属 | 令牌表与主题实现放在 **libgui**（`gui/gui_theme.h` + `src/theme.c`），桌面消费它 | 令牌表是**跨应用**的 UI 语言，不是某个应用的私有常量；放 libgui 才能被宿主契约测试覆盖（用户态程序不在宿主测试范围内），也让 GUI-5 的窗口客户端能直接复用。 |
-| 4 | LVGL 访问器 | `gui_platform_get_lv_display()` 从私有头**提升为公共 API**，公共头用**前置声明** `typedef struct _lv_display_t lv_display_t;` | GUI-3 是第一个真实业务应用，私有头的「公共业务应用禁止直接使用」约束必须正面解决。前置声明让 libgui 的公共 ABI **不依赖 LVGL 头文件**，sysroot 无需发布 LVGL 头（避免引入 LVGL 头树的发布与去重风险）。已实测：与 LVGL 自身 typedef 重复定义在 `-Wall -Wextra -Werror` 下无告警。 |
+| 4 | LVGL 访问方式 | **公共 API 保持 LVGL 无关**：不发布任何含 `lv_*` 符号的头文件；主题由 libgui 内部落地，业务应用自行包含 LVGL 头并用 `lv_display_get_default()` 取 display | sysroot 的已发布头有一条硬约束（`qemutests/gui_build_audit.py`）：**任何**已发布头不得出现 LVGL 符号。因此「把 display 句柄提升为公共 API」这条路走不通——`typedef struct _lv_display_t lv_display_t;` 本身就是 LVGL 符号。改为：① 令牌表是纯数据，可以发布；② 令牌表 → LVGL 主题的落地整体留在 libgui 内部（`gui_platform_create()` 自动套用）；③ 业务应用本来就必须包含 LVGL 头才能建控件，用 LVGL 自己的 `lv_display_get_default()` 取 display 是惯用做法。 |
 | 5 | 应用集合 | 4 个内置应用：**文件 / 终端 / 系统 / 设置** | 覆盖「浏览真实 VFS」「文本输入」「只读系统信息」「可交互设置」四类形态，足以验证外壳与令牌系统在真实内容下的表现；不引入需要子进程或网络协议栈的应用。 |
 | 6 | 终端实现 | 壳内命令台，**内建命令**（help / ls / cat / uname / date / clear），经**原生按键回调**消费键入字符 | 不引入 PTY、不 fork 子进程。GUI-2 的原生回调是公开 API 且先于控件路径执行，回调消费掉的键不会再进入 LVGL 控件路径（被消费的 UP 仍会强制释放 LVGL 侧活动键），因此壳内终端不会破坏控件焦点。 |
 | 7 | 状态栏时钟 | 每秒刷新一次（LVGL timer），显示 `HH:MM` 或 `hh:mm AM/PM`（设置项决定） | 12/24 小时制是「基本设置」的一项真实内容；秒级刷新对帧率无意义。 |
-| 8 | 壁纸 | 纯色背景（令牌 `surface` 色），不使用图片资源 | GUI-4 才引入图片资源；纯色背景已能验证 elevation 与层次关系。 |
+| 8 | 壁纸 | 纯色背景（令牌 `surface` 色），不使用图片资源 | GUI-4 才引入图片资源；纯色背景已能验证 elevation 与层次关系。壁纸由**屏幕**承载：主题套用时屏幕即取 `surface` 色；设置项改壁纸时直接改屏幕底色。 |
+| 9 | 验证主战场 | 外壳与应用的像素断言放在**宿主测试**（真实 LVGL + 真实离屏 platform），QEMU 只做端到端门禁 | 外壳的绝大部分契约（表面切换、令牌落地、像素结果）都能在宿主上验证：离屏 platform + `gui_platform_get_pixel()` 就能读回像素，不必每改一行就起一次 QEMU。QEMU 保留给「真机端到端」这一层。 |
 
 ---
 
@@ -64,12 +65,14 @@ GUI-3 用 LVGL 重写 `user/desktop`，交付一个 **Material 风格的单进�
 
 ### 2.2 必须补齐的边界
 
-1. **公共 LVGL 访问器**：私有头 `gui_lvgl_private.h` 的注释写明「公共业务应用禁止直接使用」，而 GUI-3 就是第一个公共业务应用 → 必须提升为公共 API（§1.3 取舍 4）。
+1. **公共 API 的 LVGL 隔离**：仓库有一条硬约束——sysroot 的**任何**已发布头文件不得出现 LVGL 符号（`qemutests/gui_build_audit.py` 的发布头卫生检查）。因此 libgui 的公共面只能是纯 C 令牌表；「令牌表 → LVGL 主题」这一步整体留在 libgui 内部。
 2. **字体层级**：现有只启用 Montserrat 14 / 16，无法支撑 5 级字体层级 → 必须在 `config/lv_conf.h` 启用 12 / 20 / 24。
-3. **设计令牌层**：仓库内没有任何跨应用共享的 UI 语言 → 新增 `libgui/include/gui/gui_theme.h` + `libgui/src/theme.c`。
+3. **设计令牌层**：仓库内没有任何跨应用共享的 UI 语言 → 新增 `libgui/include/gui/gui_theme.h` + `libgui/src/theme.c`（令牌表）与 `libgui/src/theme_apply.c`（LVGL 主题落地）。
 4. **外壳状态机**：现有桌面只有 `drawer_open` / `window_open` 两个布尔量，没有可验证的界面状态模型 → 需要显式状态机（§5.1）。
 5. **输入接入**：新桌面必须走 `libgui` 的输入通道（GUI-2），不得自己 `read()` 设备文件，也不得再持有独立的鼠标坐标。
 6. **旧资产清理**：`user/desktop/font8x16.h`（手绘位图字体）与旧 `desktop.c` 全部作废，由 LVGL 字体 + 令牌表取代。
+7. **构建审计同步**：`qemutests/gui_build_audit.py` 钉死了已发布 GUI 头文件清单、staging manifest 与 libgui.a 的导出符号；新增公共头时必须同步更新，否则 `make test-static` 直接失败。
+8. **主题生命周期**：`lv_style_t` 的值缓冲在 LVGL 内存池里，`lv_deinit()` 会整池释放。主题与样式必须与平台同生共死（`gui_platform_create()` 建、`gui_platform_destroy()` 在 `lv_deinit()` **之前**拆），否则第二次创建平台时解析出的颜色是悬垂内存里的垃圾。
 
 ---
 
@@ -79,17 +82,20 @@ GUI-3 用 LVGL 重写 `user/desktop`，交付一个 **Material 风格的单进�
 ┌──────────────────────────────────────────────────────────────┐
 │ user/desktop/            业务层：外壳状态机 + 4 个内置应用      │
 │   desktop.c              主入口：平台/输入装配 + 主循环         │
-│   desktop_shell.{c,h}    外壳：表面、状态机、状态栏/启动器/抽屉   │
-│   desktop_apps.{c,h}     应用注册表 + 4 个内置应用界面          │
+│   desktop_state.{c,h}    界面状态机（纯 C，无 LVGL 依赖）        │
+│   desktop_registry.{c,h} 应用注册表（纯 C 数据）                │
+│   desktop_shell.{c,h}    外壳：表面、状态栏/启动器/抽屉/设置      │
+│   desktop_apps.{c,h}     4 个内置应用界面                       │
 └──────────────────────────────────────────────────────────────┘
-              │  只依赖 libgui 公共 API + LVGL 头
+              │  依赖 libgui 公共 API（LVGL 无关）+ LVGL 头
 ┌──────────────────────────────────────────────────────────────┐
 │ libgui/                  平台层 + 设计系统                     │
 │   include/gui/gui.h      伞头（现有）                          │
 │   include/gui/gui_platform.h / gui_input.h   （现有）        │
-│   include/gui/gui_lvgl.h  ★新：公共 LVGL 显示句柄访问          │
-│   include/gui/gui_theme.h ★新：Material 令牌表（无 LVGL 依赖） │
-│   src/theme.c             ★新：令牌表实现 + LVGL 主题落地      │
+│   include/gui/gui_theme.h ★新：Material 令牌表（纯 C，无 LVGL）│
+│   src/theme.c             ★新：令牌表实现                       │
+│   src/theme_apply.c       ★新：令牌表 → LVGL 主题落地（内部）   │
+│   internal/gui_theme_private.h ★新：内部接缝                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -99,7 +105,8 @@ GUI-3 用 LVGL 重写 `user/desktop`，交付一个 **Material 风格的单进�
 |------|--------|------|
 | `gui_platform_t` | `user/desktop` 主入口 | `main()` 结束前 `gui_platform_destroy()`；输入对象随平台销毁，桌面不得单独 `gui_input_destroy()` |
 | `gui_input_t` | 平台（挂接后） | 桌面只持有指针用于注册回调，不得销毁 |
-| `lv_display_t` | 平台 | 桌面通过 `gui_platform_get_lv_display()` 借用，不得 `lv_display_delete()` |
+| `lv_display_t` | 平台 | 桌面通过 `lv_display_get_default()` 借用，不得 `lv_display_delete()` |
+| LVGL 主题与样式 | 平台 | 由 `gui_platform_create()` 建立、`gui_platform_destroy()` 在 `lv_deinit()` 之前拆除 |
 | `lv_obj_t` 树 | 外壳 | 切换表面时**整体销毁**旧表面并重建新表面（§5.1），不得跨表面保留控件指针 |
 | 令牌表 | `libgui` | 只读全局常量，桌面不得修改 |
 
@@ -107,18 +114,25 @@ GUI-3 用 LVGL 重写 `user/desktop`，交付一个 **Material 风格的单进�
 
 | 文件 | 状态 | 职责 |
 |------|------|------|
-| `libgui/include/gui/gui_lvgl.h` | 新增 | 公共 LVGL 显示句柄访问（前置声明，无 LVGL 头依赖） |
-| `libgui/src/gui_lvgl.c` 或并入 `platform.c` | 新增/修改 | 实现公共访问器 |
-| `libgui/include/gui/gui_theme.h` | 新增 | 令牌表公共 API（色彩角色 / 字体层级 / 间距 / 圆角 / elevation） |
-| `libgui/src/theme.c` | 新增 | 令牌表定义 + `gui_theme_apply()` 落地 LVGL 主题 |
-| `libgui/internal/gui_lvgl_private.h` | 修改 | 私有声明改为「转发到公共头」，保留兼容 |
-| `libgui/Makefile` | 修改 | 编译 `src/theme.c`；install 规则追加 2 个公共头 |
+| `libgui/include/gui/gui_theme.h` | 新增 | 令牌表公共 API（纯 C，无 LVGL 依赖） |
+| `libgui/src/theme.c` | 新增 | 令牌表实现（纯 C，宿主可独立链接） |
+| `libgui/src/theme_apply.c` | 新增 | 令牌表 → LVGL 主题落地；主题与样式随平台生灭 |
+| `libgui/internal/gui_theme_private.h` | 新增 | 内部接缝（`gui_theme_create` / `gui_theme_destroy`） |
+| `libgui/internal/gui_platform_private.h` | 修改 | 平台持有主题指针 |
+| `libgui/src/platform.c` | 修改 | 创建平台时套用主题；销毁平台时先拆主题再 `lv_deinit()` |
+| `libgui/Makefile` | 修改 | 编译两个 theme 单元；install 规则追加 `gui_theme.h` |
 | `config/lv_conf.h` | 修改 | 启用 `LV_FONT_MONTSERRAT_12 / 20 / 24` |
+| `qemutests/gui_build_audit.py` | 修改 | 已发布 GUI 头清单、staging manifest、libgui.a 导出符号同步 |
 | `user/desktop/desktop.c` | 重写 | 主入口 |
+| `user/desktop/desktop_state.{c,h}` | 新增 | 界面状态机（纯 C） |
+| `user/desktop/desktop_registry.{c,h}` | 新增 | 应用注册表（纯 C 数据） |
 | `user/desktop/desktop_shell.{c,h}` | 新增 | 外壳 |
 | `user/desktop/desktop_apps.{c,h}` | 新增 | 应用 |
 | `user/desktop/font8x16.h` | 删除 | 手绘位图字体作废 |
-| `hosttests/cases/test_gui_theme.c` | 新增 | 令牌表与主题契约测试 |
+| `hosttests/cases/test_gui_theme.c` | 新增 | 令牌表契约测试 |
+| `hosttests/cases/test_gui_theme_apply.c` | 新增 | 主题落地与交互状态契约测试 |
+| `hosttests/cases/test_desktop_state.c` | 新增 | 状态机契约测试 |
+| `hosttests/cases/test_desktop_shell.c` | 新增 | 外壳像素与表面切换契约测试 |
 | `qemutests/gui_desktop_test.py` | 新增 | 桌面 E2E 门禁 |
 
 ---
@@ -308,18 +322,23 @@ int      gui_theme_elevation_shadow_opa(gui_theme_elevation_t role);   /* 0..255
 uint32_t gui_theme_elevation_surface(gui_theme_elevation_t role);
 ```
 
-`gui_theme_apply()` 把令牌表落地为 LVGL 主题，其签名只用到前置声明的 `lv_display_t`：
+**令牌表 → LVGL 主题的落地不进入公共 API**。已发布头文件里不能出现 LVGL 符号（§1.3 取舍 4），因此这一步整体留在 libgui 内部：
 
 ```c
-/* libgui/include/gui/gui_lvgl.h */
-typedef struct _lv_display_t lv_display_t;
-lv_display_t *gui_platform_get_lv_display(gui_platform_t *platform);
-void          gui_theme_apply(lv_display_t *display);
+/* libgui/internal/gui_theme_private.h（内部，不发布） */
+lv_theme_t *gui_theme_create(lv_display_t *display);
+void        gui_theme_destroy(lv_theme_t *theme);
 ```
+
+`gui_platform_create()` 建好 display 后自动 `gui_theme_create()`；`gui_platform_destroy()` **先删 display、再拆主题、最后 `lv_deinit()`**（§2.2 边界 8）。
+
+业务应用要操作 LVGL 时，自行包含 LVGL 头并用 `lv_display_get_default()` 取 display；libgui 永远只创建一个 display，它就是 LVGL 的默认 display。
 
 **主题落地方式**：自建 `lv_theme_t`（`lv_theme_create()` + `lv_theme_set_apply_cb()`），`apply_cb` 按控件类套用令牌样式；**不**以 LVGL 默认主题为父主题（默认主题的圆角 / 间距 / 状态色与 Material 令牌不一致，继承会让「统一」落空）。需覆盖的控件类限定为：
 
 `LV_THEME_OBJ` / `LV_THEME_LABEL` / `LV_THEME_BUTTON` / `LV_THEME_SWITCH` / `LV_THEME_CHECKBOX` / `LV_THEME_SLIDER` / `LV_THEME_BAR` / `LV_THEME_LIST` / `LV_THEME_SCROLLBAR` / `LV_THEME_TEXTAREA`
+
+**屏幕必须显式套用主题**：LVGL 的 `lv_display_set_theme()` 只在 display 有 4 个 screen 时才自动重套，而 libgui 的 display 只有一个 screen；不显式 `lv_theme_apply(screen)`，壁纸就不会生效。
 
 ---
 
@@ -351,6 +370,25 @@ APP(id) ──ESC / 应用内"返回"─────────▶ HOME
 
 **状态机由外壳自己持有**，UI 回调只**投递意图**（`desktop_shell_request(shell, DESKTOP_INTENT_OPEN_APP, id)`），由外壳在主循环里串行执行。UI 回调**不得**直接触发迁移（LVGL 回调期间销毁对象是未定义行为）。
 
+迁移规则本身抽成**纯 C 纯函数**，与 LVGL 完全无关，因此可以在宿主上穷举验证：
+
+```c
+/* user/desktop/desktop_state.h —— 不含任何 LVGL 头 */
+typedef enum { DESKTOP_STATE_HOME = 0, DESKTOP_STATE_DRAWER,
+               DESKTOP_STATE_SETTINGS, DESKTOP_STATE_APP,
+               DESKTOP_STATE_INVALID = -1 } desktop_state_t;
+typedef enum { DESKTOP_INTENT_NONE = 0, DESKTOP_INTENT_OPEN_DRAWER,
+               DESKTOP_INTENT_OPEN_SETTINGS, DESKTOP_INTENT_OPEN_APP,
+               DESKTOP_INTENT_BACK, DESKTOP_INTENT_ESC } desktop_intent_t;
+
+desktop_state_t desktop_state_next(desktop_state_t cur, desktop_intent_t intent,
+                                   const char *app_id);
+bool            desktop_state_is_valid(desktop_state_t st);
+const char     *desktop_state_name(desktop_state_t st);
+```
+
+**当前应用标识不由状态机携带**：`desktop_state_t` 只有四个表面状态，*哪个* 应用处于 `APP` 由外壳自己记在 `shell->current_app` 里。这样状态机保持纯函数，应用的存活状态归外壳管。
+
 ### 5.2 状态栏
 
 | 元素 | 位置 | 说明 |
@@ -365,7 +403,7 @@ APP(id) ──ESC / 应用内"返回"─────────▶ HOME
 
 主屏底部的水平应用条，`elevation 2`，圆角 `radius_lg`，内含**固定顺序**的应用图标（图标 = 圆形色块 + 首字，色值取自应用注册表的 `accent` 角色）。
 
-- 启动器是**应用集合的一个子集**（固定的「常用」列表），应用抽屉是**全集**。
+- 启动器是**应用集合的一个子集**：由注册表的 `in_launcher` 标记决定（本期为文件 / 终端 / 设置三个），应用抽屉是**全集**（四个）。
 - 启动器图标必须有文本标签（`label` 层级），保证不依赖颜色即可辨识。
 - 点击图标 → `APP(id)`。
 
@@ -422,6 +460,7 @@ APP(id) ──ESC / 应用内"返回"─────────▶ HOME
 - **切换语义**：`HOME ⇄ APP(id)` 是**整屏替换**，不是「开一个窗口盖在上面」。切换时旧表面的控件树被销毁，新表面从零构建；不存在两个表面同时可见的时刻（因此也不存在「哪个在上面」的问题）。
 - **明确不做**：GUI-3 **不绘制**任何窗口装饰（标题栏边框、最小化 / 最大化 / 关闭按钮、可拖动边框）。旧 `desktop.c` 里的「欢迎窗口 + 三个窗口按钮」属于典型反例，本期**删除**。
 - **归属**：多窗口、Z-order、遮挡、移动 / 缩放由 GUI-5（Window Server + compositor）负责；窗口化 terminal 由 GUI-6 负责。
+- **可核验**：这条不是口头承诺，而是有断言的——静态审计禁止桌面源码出现最小化 / 最大化 / 关闭一类的窗口装饰标识（§9.2 第 10 条），且应用表面根对象必须覆盖整个显示区。
 
 ### 6.5 键鼠契约
 
@@ -504,30 +543,61 @@ APP(id) ──ESC / 应用内"返回"─────────▶ HOME
 
 ## 9. 验证与交付门禁
 
-### 9.1 宿主契约测试（`hosttests/cases/test_gui_theme.c`）
+### 9.1 宿主契约测试
+
+**`hosttests/cases/test_gui_theme.c`** —— 令牌**取值**（纯 C，不链接 LVGL）：
 
 | # | 断言 |
 |---|-------|
-| 1 | 每个色彩角色的值都是合法 `0x00RRGGBB`（低 8 位为 0） |
-| 2 | 色彩角色两两不同（`on_*` 与其基底除外，成对关系必须成立：`on_x` 在 `x` 上可读） |
+| 1 | 每个色彩角色都是 `0xAARRGGBB` 且 A（最高字节）为 0；RGB 不得全 0（scrim / shadow 纯黑为合法例外） |
+| 2 | `on_x` 与 `x` 成对存在且取值不同 |
 | 3 | 字体层级字号严格递减：display > headline > title > body > label |
 | 4 | 间距令牌严格递增：xs < sm < md < lg < xl |
 | 5 | 圆角令牌严格递增：sm < md < lg < xl < full |
-| 6 | elevation 0..5 的阴影宽度 / 偏移 / 不透明度单调不减 |
-| 7 | elevation 表面色随层级单调变深（`surface` → `container_low` → `container` → `container_high` → `container_highest`） |
-| 8 | `gui_theme_apply()` 在离屏 display 上成功，且主题非空 |
+| 6 | elevation 0..5 的阴影宽度 / 偏移 / 不透明度单调不减，且 elevation 0 三项均为 0 |
+| 7 | elevation 表面色严格等于 `surface → container_low → container → container_high → container_highest` 序列 |
+| 8 | 非法枚举一律返回 `-1`（elevation 表面色返回 `0xFFFFFFFFu`），不越界读 |
 
-### 9.2 桌面外壳状态机契约测试（`hosttests/cases/test_desktop_shell.c`）
+**`hosttests/cases/test_gui_theme_apply.c`** —— 令牌**落地**（真实 LVGL + 真实 platform）：
 
-外壳状态机必须能在**不依赖真实显示**的情况下被验证：把外壳的迁移逻辑抽成纯函数 `desktop_shell_next_state(current, intent) -> next`，宿主测试穷举 (状态 × 意图) 组合：
+| # | 断言 |
+|---|-------|
+| 9 | `gui_platform_create()` 之后 display 已挂上主题，且**屏幕已套用主题**（壁纸 = `surface`） |
+| 10 | 容器 / 按钮 / 标签的底色、圆角、边框宽度、边框色、字号全部等于令牌表对应值 |
+| 11 | **hover**：按钮底色 = `secondary` |
+| 12 | **pressed**：按钮底色 = `primary_container`、文字 = `on_primary_container` |
+| 13 | **disabled**：按钮底色 = `surface_variant`、文字 = `on_surface_variant` |
+| 14 | **focus**：2px `primary` 轮廓 |
+| 15 | **checked**：开关底色 = `primary`、旋钮 = `on_primary`；未选中时底色 = `surface_variant`、旋钮 = `outline` |
+| 16 | `gui_platform_get_lv_display(NULL)` 返回 `NULL` 且 `errno == EINVAL` |
+
+颜色比较必须**掩掉最高字节**：LVGL 内部颜色值是 `0xFFRRGGBB`，令牌表是 `0x00RRGGBB`（与 `gui_platform_get_pixel()` 的返回格式一致）。
+
+### 9.2 桌面外壳契约测试（宿主）
+
+**`hosttests/cases/test_desktop_state.c`** —— 状态机（纯 C，不链接 LVGL）：
 
 | # | 断言 |
 |---|----|
-| 1 | 只允许 §5.1 列出的迁移；其余组合返回 `DESKTOP_STATE_INVALID` |
-| 2 | `HOME + OPEN_APP(id)` → `APP(id)` |
-| 3 | `APP(a) + OPEN_APP(b)` → **不允许**（必须先回 HOME） |
-| 4 | `ESC` 在 `HOME` 上不改变状态 |
-| 5 | `BACK` 在 `DRAWER` / `SETTINGS` / `APP` 上一律 → `HOME` |
+| 1 | 表驱动穷举 (状态 × 意图) 全组合，结果只可能是期望集合内的状态或 `DESKTOP_STATE_INVALID` |
+| 2 | `HOME + OPEN_APP("files")` → `DESKTOP_STATE_APP` |
+| 3 | `APP + OPEN_APP(other)` → `DESKTOP_STATE_INVALID`（应用不允许叠加） |
+| 4 | `HOME + ESC` → `HOME`（不改变状态） |
+| 5 | `BACK` / `ESC` 在 `DRAWER` / `SETTINGS` / `APP` 上一律 → `HOME` |
+| 6 | `HOME + OPEN_APP(NULL)` 与 `HOME + OPEN_APP("")` → `DESKTOP_STATE_INVALID` |
+| 7 | `desktop_state_name()` 对每个合法状态返回非空且互不相同的字符串 |
+
+**`hosttests/cases/test_desktop_shell.c`** —— 外壳（真实 LVGL + 真实离屏 platform）：
+
+外壳的绝大部分契约都能在宿主上验证：离屏 platform 的 `gui_platform_get_pixel()` 能读回像素，不必每改一行就起一次 QEMU。
+
+| # | 断言 |
+|---|----|
+| 8 | 主屏：壁纸区采样 = `surface`，状态栏区采样 = `elevation 1` 表面，启动器卡片采样 = `elevation 2` 表面 |
+| 9 | 抽屉表面采样 = `elevation 3` 表面；设置表面采样 = `elevation 2` 表面 |
+| 10 | 每个应用的表面根对象**覆盖整个显示区**（宽高 = display 宽高），且**没有**窗口装饰控件 |
+| 11 | `HOME → APP(id) → HOME` 后，主屏采样回到初始值（旧表面不得残留） |
+| 12 | 退出应用后焦点组仍可导航（终端消费按键不得让焦点卡死） |
 
 ### 9.3 QEMU E2E（`qemutests/gui_desktop_test.py`）
 
@@ -538,6 +608,9 @@ APP(id) ──ESC / 应用内"返回"─────────▶ HOME
 | 3 | 注入点击启动器图标 → 画面切换到应用表面（像素变化） |
 | 4 | 注入 ESC → 回到主屏（像素回到初始采样） |
 | 5 | 桌面退出后终端 fallback 恢复（显示所有权协议回归） |
+
+**套件接线**：新 suite 必须同时登记在三处，否则 `make test-qemu SUITE=gui-desktop` 会落到「未知测试」分支：
+① `qemutests/run_test.py` 的 `args.test_name` 分派链；② `mk/components/run.mk` 的 `SUITE` 分派；③ 同文件的 `TEST_QEMU_FLAVOR_<suite>` / `TEST_QEMU_IMG_<suite>` 两个按 suite 命名的变量。
 
 ### 9.4 回归入口
 
@@ -555,8 +628,8 @@ make PROFILE=x86_64-clang test-static                    # 静态审计
 
 | 阶段 | 内容 | 完成判据 |
 |------|------|----------|
-| **P1 令牌层** | `gui_theme.h` + `theme.c` + 公共 LVGL 访问器 + `lv_conf.h` 字体启用 + libgui 打包 | 宿主令牌测试全绿；`libgui.a` 含 theme 符号；公共头进入 sysroot |
-| **P2 外壳骨架** | 状态机 + 主屏 + 状态栏 + 启动器 + 抽屉 + 设置（空壳） | 状态机契约测试全绿；QEMU 可截到主屏 |
+| **P1 令牌层** | `gui_theme.h` + `theme.c` + `theme_apply.c` + `lv_conf.h` 字体启用 + libgui 打包 + 构建审计同步 | 宿主令牌与主题落地测试全绿；`libgui.a` 含 theme 符号；公共头进入 sysroot；`make test-static` 绿 |
+| **P2 外壳骨架** | 状态机 + 应用注册表 + 主屏 + 状态栏 + 启动器 + 抽屉 + 设置（空壳） | 状态机契约测试与外壳像素契约测试全绿 |
 | **P3 内置应用** | 文件 / 终端 / 系统 / 设置四项 | 四个应用均可进入、可用、可用 ESC 返回 |
 | **P4 收口** | 文档（roadmap / docs/gui/gui.md / changelog）+ 全量回归 | 全量回归绿；文档同步 |
 

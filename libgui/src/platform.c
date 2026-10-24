@@ -2,6 +2,7 @@
 #include <gui_input_private.h>
 #include <gui_lvgl_private.h>
 #include <gui_platform_private.h>
+#include <gui_theme_private.h>
 #include <gui_tick.h>
 #include <gfx.h>
 #include "gfx_client_policy.h"
@@ -336,6 +337,17 @@ gui_platform_t *gui_platform_create(const gui_config_t *cfg)
     lv_display_set_buffers(platform->disp, platform->draw_buf, NULL,
                            (uint32_t)draw_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
+    /* GUI-3：平台一律以 Material 设计系统出场。主题落地是 libgui 的
+     * 内部职责（令牌表 → LVGL 主题），业务应用不需要也不能自己调用，
+     * 因为已发布的公共头不得出现 LVGL 符号。
+     * 主题与平台同生共死：样式缓冲在 LVGL 内存池里，必须在 lv_deinit()
+     * 之前释放。 */
+    platform->theme = gui_theme_create(platform->disp);
+    if (platform->theme == NULL) {
+        saved = ENOMEM;
+        goto rollback;
+    }
+
 #ifdef OS01_HOST_TEST
     extern bool g_gui_test_tamper_header;
     if (g_gui_test_tamper_header && platform->disp->buf_1) {
@@ -399,10 +411,27 @@ void gui_platform_destroy(gui_platform_t *platform)
         gui_input_destroy(platform->input);   /* 自行解除挂接 */
     }
 
+    /*
+     * 销毁顺序有讲究：**先删 display，再拆主题**。
+     *
+     * 主题的样式缓冲在 LVGL 内存池里，而 display 的屏幕对象上还挂着这些
+     * 样式。lv_display_delete() 会删掉屏幕并摘掉它们的样式；若在这之前
+     * 就把主题释放掉，屏幕删除过程会读到已释放的样式（use-after-free），
+     * 且症状是偶发的堆破坏。
+     *
+     * 主题必须在 lv_deinit() 之前释放：lv_deinit() 会把整个 LVGL 内存池
+     * 释放掉，池没了之后再去 free 样式就是 double free。
+     */
     if (platform->disp) {
         lv_display_delete(platform->disp);
         platform->disp = NULL;
     }
+
+    if (platform->theme) {
+        gui_theme_destroy(platform->theme);
+        platform->theme = NULL;
+    }
+
     lv_deinit();
 
     if (platform->gfx) {

@@ -17,6 +17,11 @@
  * 颜色一律以 8 位十六进制的 0xAARRGGBB 表示，且 A（最高字节）恒为 0，
  * 即 0x00RRGGBB 的写法；这与 gui_platform_get_pixel() 的返回值
  * （0x00FFFFFFu 掩码后的结果）可直接比较。
+ *
+ * 令牌表**不含任何 LVGL 类型**：sysroot 的已发布头文件不得出现 LVGL
+ * 符号（见 qemutests/gui_build_audit.py 的发布头卫生检查）。令牌表落到
+ * LVGL 主题上的那一步由 libgui 内部完成（libgui/src/theme_apply.c），
+ * 平台创建时自动套用。
  */
 
 #include <stdint.h>

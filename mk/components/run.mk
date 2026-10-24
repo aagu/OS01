@@ -629,8 +629,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # input-frame, input-route, input-decode, input-platform, theme) or all
 # (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -757,6 +757,15 @@ _test-gui-host-run-input-lvgl:
 _test-gui-host-run-theme:
 	@echo "  [test-gui-host] theme"
 	$(call os01_submake,hosttests,test-gui-theme $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 2: the Material theme applied to LVGL.  Runs
+# test_gui_theme_apply.elf, which links the REAL token table + theme
+# apply + platform + LVGL archive and asserts the spec §9.1 apply
+# contract (theme attached and idempotent, widget styles sourced from
+# the token table, 2px primary focus ring, NULL platform → EINVAL).
+_test-gui-host-run-theme-apply:
+	@echo "  [test-gui-host] theme-apply"
+	$(call os01_submake,hosttests,test-gui-theme-apply $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
