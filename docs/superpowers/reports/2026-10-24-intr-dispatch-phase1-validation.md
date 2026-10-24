@@ -4,7 +4,7 @@
 
 > **本报告的验收对象**：分支 `feature/intr-dispatch-phase1` 的 HEAD `f4a2bc04`。**本次验收矩阵**产出的归档（§2、§3、§4 表格里逐条列出的那些目录）的 `result.json` 都记录 `git_revision=f4a2bc04265435da7ab84d2abd953c3950430016`、`git_dirty=false`，即验收运行期间工作树干净。
 >
-> **两类归档不在上面这句的范围内，本报告也**不**引用它们**：(a) §6.1 的**对照实验**归档 `aarch64-m3-probe/20261024T042326Z-…`——那一次运行是**故意**临时改过 `qemutests/aarch64_m3_probe.py` 的期望前缀，因此它的 `git_dirty=true` 是有意的；(b) `build/*/logs/tests/**` 下**更早迭代**的归档（例如 `aarch64-uefi-smp/20261023T183*`、`driver-model-boundary/20261023T1554*` 等）——它们来自 Tasks 1–6 的开发期运行，`git_revision` 是当时的中间提交、`git_dirty=true`，与本次验收矩阵无关，只是恰好同处一个日志目录。
+> **三类归档不在上面这句的范围内，本报告也**不**引用它们**：(a) §6.1 的**对照实验**归档 `aarch64-m3-probe/20261024T042326Z-…`——那一次运行是**故意**临时改过 `qemutests/aarch64_m3_probe.py` 的期望前缀，因此它的 `git_dirty=true` 是有意的；(b) `build/*/logs/tests/**` 下**更早迭代**的归档（例如 `aarch64-uefi-smp/20261023T183*`、`driver-model-boundary/20261023T1554*` 等）——它们来自 Tasks 1–6 的开发期运行，`git_revision` 是当时的中间提交、`git_dirty=true`，与本次验收矩阵无关，只是恰好同处一个日志目录；(c) **review 修复后重跑** `test-static` / `test-aarch64-audit` 产生的 `20261024T043*` 归档（15 个，`git_revision=01a24293`、`git_dirty=true`——重跑时工作树里有未提交的文档改动）——它们是本任务**后续**轮次的复核记录，不属于第 1 节的验收矩阵。
 
 > **本任务不新增任何运行期功能**：它只跑验收矩阵、记录证据、写文档。唯一的例外触发条件（「验收暴露了一个必须修的产品缺陷」）没有被触发——见 §6。
 
@@ -19,7 +19,7 @@
 | 最终 revision | `f4a2bc04265435da7ab84d2abd953c3950430016` |
 | 提交标题 | `test(intr): give each indirect-form fixture class its own form` |
 | Commit 范围 | 调查基线 `abb89b03` → HEAD，共 10 个 commit（8 个实现：`a20e10ee`/`fed4028b`/`5e085f34`/`4eff2550`/`6592b684`/`935213ca`/`204dfa68`/`f4a2bc04` + spec `7471981e` + plan `c94a4a91`）；`master` 与本分支的 merge-base 是 `c94a4a91`，即 `master` 上已有 spec/plan，本分支在 `master` 之上是这 8 个实现 commit；本任务再加 1 个文档 commit |
-| Dirty 状态 | `git status --porcelain` 空（干净）；各归档 `git_dirty=false` |
+| Dirty 状态 | `git status --porcelain` 空（干净）；**本次验收矩阵的各归档** `git_dirty=false`（归档目录逐条列在 §2/§3/§4 表格里；不在这些表格里的归档——对照实验、更早迭代、review 修复后的重跑——见开头引言的排除说明） |
 | 编译器 | `clang` 23.1.3（`x86_64-pc-linux-gnu`）；链接器 `ld.lld` |
 | 构建 | GNU Make 4.4.1 |
 | 模拟器 | QEMU 11.1.2（`qemu-system-x86_64` 与 `qemu-system-aarch64` 同版本） |
@@ -168,7 +168,7 @@ Task 6 的 `qemutests/intr_dispatch_audit.py` 直接审计**生产目标对象**
 
 ### 4.1 x86_64（`build/x86_64-clang/logs/tests/intr-dispatch-audit/20261024T040836Z-4b945478314541e681caef40d69f689b/stdout.log`）
 
-> 该归档由 **`test-static`**（#2）内的 `run_static_audit.py --suite intr-dispatch-audit` 产生（归档时间戳 12:08:36，`test-static.log:114` 是它的命令行）。`test-harness`（#8）也跑了同一个审计脚本，其**日志内**同样出现 x86 真实 ELF 的判定（`strong def arch_intr_dispatch @ 0xffff80000013cd80 …`、`[intr-dispatch-audit] OK`），但没有另建归档目录——两处判定一致。
+> 该归档由 **`test-static`**（§2 表第 2 行）内的 `run_static_audit.py --suite intr-dispatch-audit` 产生（归档时间戳 12:08:36，`test-static.log:114` 是它的命令行）。`test-harness`（§2 表第 6 行）也跑了同一个审计脚本，其**日志内**同样出现 x86 真实 ELF 的判定（`strong def arch_intr_dispatch @ 0xffff80000013cd80 …`、`[intr-dispatch-audit] OK`），但没有另建归档目录——两处判定一致。
 
 | 审计项 | 结果 |
 |--------|------|
