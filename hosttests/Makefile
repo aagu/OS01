@@ -187,6 +187,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_nonce.elf \
     $(TEST_BLD)/test_gui_input_platform.elf \
     $(TEST_BLD)/test_gui_input_lvgl.elf \
+    $(TEST_BLD)/test_gui_theme.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -3987,6 +3988,38 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 
 .PHONY: test-gui-lvgl
 test-gui-lvgl: $(TEST_BLD)/test_gui_lvgl_integration.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 1: Material design token table ────────────────────
+# The token table (libgui/src/theme.c) is pure C with no LVGL dependency,
+# so this case links ONLY the token table plus the test TU: the design
+# system's values are verified without dragging in the LVGL archive.  The
+# assertions cover the spec §9.1 contract: well-formed color roles,
+# on_*/base pairing, strictly decreasing font scale, strictly increasing
+# space and radius scales, monotonic elevation shadows, the elevation
+# surface sequence, and -1 for every out-of-range enum.
+GUI_THEME_UNIT_DIR := $(GUI_HOST_DIR)/theme_unit
+GUI_THEME_UNIT_OBJS := $(GUI_THEME_UNIT_DIR)/theme.o
+
+$(GUI_THEME_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_THEME_UNIT_DIR)/test_gui_theme.o: $(TEST_CASES)/test_gui_theme.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_theme.elf: \
+		$(GUI_THEME_UNIT_DIR)/test_gui_theme.o \
+		$(GUI_THEME_UNIT_OBJS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-gui-theme
+test-gui-theme: $(TEST_BLD)/test_gui_theme.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

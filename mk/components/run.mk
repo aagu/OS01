@@ -623,13 +623,14 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 	  esac
 
 # ── GUI host tests ───────────────────────────────────────────
-# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
-# and the GUI-2 input-focus chain.  CASE accepts any registered case
-# (platform, lvgl, devfs-input, input-frame, input-route, input-decode,
-# input-platform) or all (default: all).
+# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend,
+# the GUI-2 input-focus chain and the GUI-3 Material design system.
+# CASE accepts any registered case (platform, lvgl, devfs-input,
+# input-frame, input-route, input-decode, input-platform, theme) or all
+# (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -746,10 +747,20 @@ _test-gui-host-run-input-lvgl:
 	@echo "  [test-gui-host] input-lvgl"
 	$(call os01_submake,hosttests,test-gui-input-lvgl $(OS01_SUBMAKE_ARGS))
 
+# GUI-3 plan Task 1: the Material design token table.  Runs
+# test_gui_theme.elf, which host-compiles the REAL libgui/src/theme.c
+# (pure C, no LVGL dependency) and asserts the spec §9.1 contract:
+# well-formed color roles, on_*/base pairing, strictly decreasing font
+# scale, strictly increasing space and radius scales, monotonic
+# elevation shadows, the elevation surface sequence, and -1 for every
+# out-of-range enum.
+_test-gui-host-run-theme:
+	@echo "  [test-gui-host] theme"
+	$(call os01_submake,hosttests,test-gui-theme $(OS01_SUBMAKE_ARGS))
+
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
 	@exit 1
-
 GUI_CASE_RAW := $(CASE)
 GUI_CASE_EFFECTIVE = $(if $(strip $(GUI_CASE_RAW)),$(GUI_CASE_RAW),all)
 test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_REGISTERED_CASES),_test-gui-host-run-$(c)),_test-gui-host-run-$(GUI_CASE_EFFECTIVE))
