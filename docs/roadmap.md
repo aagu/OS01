@@ -158,6 +158,14 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ### Parked（未闭环 follow-on，随时可拾起）
 
+
+- **中断/异常 dispatch 第一期遗留（2026-10-24；主体与最终修复已评审，验收仍有一项既有失败）**：
+  - **优先修复 `m3-probe` wire 前缀漂移**：内核 `kernel/include/arch/aarch64/boot/shootdown_probe.h` 输出 `SHOOTDOWN-PROBE:`，runner `qemutests/aarch64_m3_probe.py` 仍匹配 `M3-SHOOTDOWN-PROBE:`；源于既有提交 `045cba3f`，非本期回归。独立提交对齐协议及 runner 正反例，然后运行 `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe`，要求实际 PASS、无 SKIP/FAIL，才能关闭该验收项。原失败与临时对齐后的对照证据见 [验证报告 §6.1](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md#61-modem3-probe-失败--既有的-test-侧命名漂移不是本阶段的回归)。
+  - **host 测试补强（非阻断）**：decoder 表行名用于失败诊断；增加 x86 CPL0 + U/S=1 仍判 KERNEL、ARM OTHER EC 的无效 FAR 断言；ARM backend 有效 FAR 用例补齐地址/有效位；dispatcher 的 x86 host 现场假设与 `memcmp(pt_regs_t)` 布局假设显式化，注明 longjmp 用例无法观察跳转后的清理；x86 backend 删除 reset 后才断言零计数的空检查；`test_brk_pages.c` 源码扫描缺锚点时应明确 FAIL，避免 NULL 解引用；ARM backend RED 证据可补有意破坏断言的 mutation。
+  - **调用链审计 fixture 补强（非阻断）**：`qemutests/test_intr_dispatch_audit.py` 的 movabs/leaq 无法解析目标用例应分别钉住对应诊断，避免只匹配错误目标也会出现的函数名；梳理 leaq 专属错误分支不可达、重复边诊断，修正 movabs docstring 中 decoder call 与 dispatcher call 地址的混淆，并整理方法间空行。
+  - **维护性收尾（非阻断）**：x86 四个向量常量在 decoder/adapter/backend 三处重复；sync/IRQ backend 的 canary 属性不对称可说明；ARM 私有头统一 `pt_regs_t *` 写法；`test_uaccess.c` 分配注释应与实际 order-1（8 KiB）一致。`hosttests/Makefile` 的 “EVERY production header” 注释应限定为内核头与 ARM shim：libc/framework 的既有手写依赖缺口尚未覆盖，后续单独治理。
+  - **已裁定保留，非待修缺陷**：ARM 非 EL1h frame 仍保留真实入口 slot `0x200`、由 origin 表达不匹配；decoder 先编入镜像再接线是已结束的中间阶段。bad-event 声明属性、intr 内核头依赖、GIC 旧注释和验证报告归档表述均已在 `6f479bd6` 修复，不再列为待办。其余异常/IRQ/EL0 等后续迁移范围见上方「中断/异常 dispatch 统一」行。
+
 此前挂起的 follow-ons（sysroot 头文件级增量重编、idle 正名、CFLAGS 编译参数缓存失效、compat/ 目录裁撤、x86 驱动目录重定位、softirq ifdef 清除、LWIP_RAND 种子等）已全部闭环并归档至 `docs/changelog.md`。当前挂起：
 
 - **aarch64 并发 replace phantom `-ENOENT`（2026-10-05，M3 总回归 Task 26 发现）**：第二个 CPU 仅存活（idle 服务 SGI）时，BSP 在未发布 scratch root 上循环 `map_4k_ext → replace_4k(RW→RO 原子路径) → unmap_4k_ext` 会间歇返回 `-ENOENT` 且观察到 leaf 被 VALID-cleared。所有隔离变体（AP 跑循环 / BSP 独跑 / 不同 L2 slot / 不同 root / RW→RW / PMM 并发分配风暴）200/200 通过；根因最初疑为 page_table.c 原子路径 ordering bug 或 QEMU TCG MTTCG TLBI artifact。**2026-10-19 闭环 @ [`80eed2e9`](../../logs/git/refs/master)**：根因在 `kernel/include/arch/atomic.h` 的 AArch64 `arch_atomic_cas()` 内联汇编缺少 `"cc"` clobber。CAS 内的 `cmp` 改了 NZCV 但未声明，编译器把 PROTNONE 检测的 `tst` NZCV 跨 CAS 跨过去再被 `csel` 消费；首次 CAS 失败（lock busy）时 `cmp 0,1` 把 Z=0，csel 依此清掉描述符 V 位，retry 路径不改 desc 直接 `stlr` 出 V=0/TABLE=1/PA=correct 的畸形 desc，下一次读 V=0 即 phantom。修复：CAS 加 `"cc"`。回归钉死测试 `kernel/selftest/test_aarch64_page_table_multicore.c` §5b（WORK_PT_REPLACE_LOOP，BSP+AP 紧邻 PTE 上 500 次 RW→RO 替换循环）— cpus=4 无修复 100% 复现，有修复 100% PASS；cpus=2/4 实端到端各 5/5 PASS。证据：`docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`（前后 disasm）。**M4 约束撤销**——不再禁止并发 `arch_vmm_*` updater。
