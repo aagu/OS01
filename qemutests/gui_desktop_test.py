@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
 import time
@@ -318,6 +319,11 @@ class DesktopCaseRunner:
             self.session.start()
         except Exception as exc:
             reasons.append(f"QEMU launch failed: {exc}")
+            # The launch may have got as far as spawning QEMU (the log
+            # files are opened AFTER the spawn): close() must still run,
+            # or a half-started child becomes an orphan holding the disk
+            # image lock.
+            self.close()
             return False, reasons, outcomes
 
         try:
@@ -474,16 +480,103 @@ class DesktopCaseRunner:
 
             return True, reasons, outcomes
         finally:
-            if self.qmp is not None:
-                try:
-                    self.qmp.close()
-                except Exception:
-                    pass
-            if self.session is not None:
-                try:
-                    self.session.cleanup()
-                except Exception:
-                    pass
+            self.close()
+
+    @property
+    def child_pid(self) -> Optional[int]:
+        """QEMU 的 pid（没有则 None）。
+
+        信号处理用它做**无锁**的硬杀。``close()`` 要去拿 ``Popen`` 的内部
+        状态，而那把锁在主线程跑 ``poll()`` 时是被占着的 —— 在信号处理里
+        等它有死锁风险。这里只读一个 int。
+        """
+        session = self.session
+        if session is None:
+            return None
+        try:
+            return getattr(session, "child_pid", None)
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        """关闭 QMP 与 QEMU 子进程（幂等）。
+
+        **必须真的杀掉 QEMU**：它持有磁盘镜像的写锁，活着就会让后续的
+        ``make run`` 报「disk.img 被占用」。因此这里**不吞异常**：方法名写错
+        曾经让 QEMU 变成孤儿进程（异常被 ``except: pass`` 吃掉，测试照样
+        报 PASS，但镜像一直被锁着）。
+
+        收尾失败只**记录**不**抛出**：``close()`` 会在 ``finally`` 与信号
+        处理里被调用，抛异常会盖掉真正的失败原因。记录必须显眼 —— 收尾
+        失败就意味着可能有孤儿。
+        """
+        errors: List[str] = []
+        if self.qmp is not None:
+            qmp, self.qmp = self.qmp, None
+            try:
+                qmp.close()
+            except Exception as exc:
+                errors.append(f"QMP close failed: {exc}")
+        if self.session is not None:
+            # ProcessSession 的收尾方法是 close()（不是 cleanup()）。
+            session, self.session = self.session, None
+            try:
+                session.close()
+            except Exception as exc:
+                errors.append(f"QEMU session close failed: {exc}")
+        for err in errors:
+            print(f"  [gui-desktop] WARNING: {err}", file=sys.stderr)
+
+
+# 正在跑的 runner：信号处理要用它收尾。
+#
+# 孤儿 QEMU 会一直占着磁盘镜像的文件锁，让后续的 ``make run`` 报
+# 「disk.img 被占用」——所以 Ctrl-C / timeout 必须先杀掉子进程再退出。
+_ACTIVE_RUNNERS: List["DesktopCaseRunner"] = []
+
+
+def _kill_active_runners() -> List[str]:
+    """硬杀所有在跑的 runner 的 QEMU 进程组。返回错误描述。
+
+    **无锁**：这里只读 ``child_pid`` 并 ``killpg``。``close()`` 会去拿
+    ``Popen`` 的内部状态，而主线程可能正持着那把锁（``poll()`` 期间）——
+    在信号处理里等它有死锁风险。
+
+    ``SIGKILL`` 不可捕获，是这里唯一可靠的保证：QEMU 活着就会占着磁盘
+    镜像的写锁，后续的 ``make run`` 会报「disk.img 被占用」。
+    """
+    errors: List[str] = []
+    for runner in list(_ACTIVE_RUNNERS):
+        pid = runner.child_pid
+        if not pid:
+            continue
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            errors.append(f"could not SIGKILL the QEMU process group {pid}: {exc}")
+    return errors
+
+
+def _install_signal_handlers() -> None:
+    """Ctrl-C / SIGTERM 时先收掉 QEMU 子进程，再退出。
+
+    处理函数只做两件事：**无锁硬杀**在跑的 QEMU，然后抛出去让 finally
+    链跑完（``run_test.py`` 借此写出 run archive）。退出码仍是
+    128 + signum。
+    """
+
+    def _handler(signum, _frame):
+        for err in _kill_active_runners():
+            print(f"  [gui-desktop] WARNING: {err}", file=sys.stderr)
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt()
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            pass
 
 
 def run_matrix(
@@ -497,6 +590,7 @@ def run_matrix(
     cpus: Optional[Tuple[int, ...]] = None,
 ) -> Tuple[bool, Dict[int, List[str]]]:
     """在 SMP 矩阵上跑桌面门禁；返回 (ok, reasons)。"""
+    _install_signal_handlers()
     target_cpus = list(cpus if cpus is not None else CORE_MATRIX)
     reasons: Dict[int, List[str]] = {}
     all_outcomes: List[dict] = []
@@ -534,7 +628,11 @@ def run_matrix(
             run_dir=smp_run_dir,
             timeout=timeout,
         )
-        smp_ok, smp_reasons, smp_outcomes = runner.run_all()
+        _ACTIVE_RUNNERS.append(runner)
+        try:
+            smp_ok, smp_reasons, smp_outcomes = runner.run_all()
+        finally:
+            _ACTIVE_RUNNERS.remove(runner)
         reasons[smp] = smp_reasons
         all_outcomes.extend(smp_outcomes)
         if not smp_ok:
@@ -664,13 +762,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("ERROR: --firmware or OVMF_FIRMWARE required", file=sys.stderr)
         return 2
 
-    ok, reasons = run_matrix(
-        Path(args.image),
-        Path(args.firmware),
-        build_dir=Path(args.build_dir) if args.build_dir else None,
-        timeout=args.timeout,
-        cpus=args.cpus,
-    )
+    try:
+        ok, reasons = run_matrix(
+            Path(args.image),
+            Path(args.firmware),
+            build_dir=Path(args.build_dir) if args.build_dir else None,
+            timeout=args.timeout,
+            cpus=args.cpus,
+        )
+    except KeyboardInterrupt:
+        # 信号处理已经收掉了 QEMU；这里只把退出码对齐成惯例。
+        print("gui-desktop suite: interrupted", file=sys.stderr)
+        return 130
     if not ok:
         for smp in sorted(reasons):
             for r in reasons[smp]:
