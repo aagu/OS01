@@ -11,8 +11,9 @@
  * branch is compiled and no fb_test.c symbol is linked in.
  *
  * The real implementations live in kernel/driver/fb_test.c, which is only
- * added to the kernel source list (and to the sysroot header set) by the
- * FB_RESOLUTION_TEST=1 build profile.
+ * added to the kernel source list by the FB_RESOLUTION_TEST=1 build profile.
+ * This private header is never published to the userspace sysroot; test
+ * clients use the control ABI in <uapi/fb_test.h>.
  */
 
 #include <stdint.h>

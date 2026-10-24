@@ -394,6 +394,7 @@ test-host:
 	python3 qemutests/pmm_boot_reservation_test.py
 	python3 qemutests/test_kernel_selftest_result.py
 	python3 tools/tests/test_user_build.py
+	python3 tools/tests/test_kernel_headers.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 

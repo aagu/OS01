@@ -577,11 +577,11 @@ install-headers:
 	@# ABI). Exclude it from the staged kernel headers so the generation
 	@# assembler never sees a duplicate destination.
 	rm -f $(INSTALL_ROOT)/usr/include/errno.h
-	@# FB_RESOLUTION_TEST is test config only: the production sysroot must
-	@# never publish the fbtest control ABI (uapi/fb_test.h) or its private
-	@# driver header. They are staged only for the resolution-test build.
+	@# The injection hooks are kernel-private even in the test configuration.
+	rm -f $(INSTALL_ROOT)/usr/include/driver/fb_test.h
+	@# Only the resolution-test sysroot publishes the userspace control ABI.
 ifneq ($(FB_RESOLUTION_TEST),1)
-	rm -f $(INSTALL_ROOT)/usr/include/uapi/fb_test.h $(INSTALL_ROOT)/usr/include/driver/fb_test.h
+	rm -f $(INSTALL_ROOT)/usr/include/uapi/fb_test.h
 endif
 	@# The physical input ROUTE and the PS/2 Set 1 framer are kernel-private
 	@# interfaces: the userspace input ABI is uapi/gfx.h + uapi/mouse.h, and

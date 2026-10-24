@@ -7,6 +7,8 @@
 
 ## 2026-10-24
 
+- fix(build): **parked fbtest 私有头发布边界闭环**：测试 sysroot 原先同时发布内核 `driver/fb_test.h` 和测试 UAPI；私有头改为始终排除，`uapi/fb_test.h` 仍仅在测试配置发布。新增真实安装规则回归，覆盖干净安装、旧头残留、配置切换、manifest 和 UAPI 内容，并接入 `test-host`。旧规则三个 subtest 失败；修复后生产/测试镜像构建与实际 sysroot 检查、完整分辨率宿主九组和 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-fbtest-private-header.md)。
+
 - fix(procfs): **parked monitor ④ legacy 字节缓冲区等长边界闭环**：`procfs_generate_node()` 只复制文本字节，却用 `len >= cap` 拒绝恰好装满的目标；改为 `len > cap` 并明确不补 NUL 的接口约定。四类统计节点新增长度减一/等长/长度加一、canary、失败无写入与分配余额回归；旧实现 8 条断言失败，修复后 procfs 13 场景/544 断言、完整 monitor 七组、`test-host` 和 QEMU phase-0 通过。原条目所述 4096 字节 status 空读在当前 formatter 下不可达，本次未声称 guest 复现。详见 [调查与验证](debug/2026-10-24-procfs-legacy-capacity.md)。
 
 - fix(fbtest): **parked 文件 ioctl/release 冷调用锁初始化防护闭环**：正常启动已通过 bootstrap/reset 初始化锁，但两个文件回调缺少独立入口保障。各补一条 `fb_test_lock_ensure()`；新增三个独立子进程从未预热状态执行 register ARM、terminal ARM 和 release，观察真实回调的初始化/取锁顺序与幂等性。旧实现三项失败，修复后 hooks 13 场景/136 断言、完整分辨率宿主九组、`test-host` 及测试配置 QEMU SMP 1/2 共 26 项正常路径协议检查通过。未声称复现正常启动死锁，也未扩大为并发首次初始化协议。详见 [调查与验证](debug/2026-10-24-fbtest-cold-lock.md)。
