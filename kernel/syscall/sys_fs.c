@@ -598,7 +598,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
             new_offset = (int64_t)f->offset + offset;
             break;
         case SEEK_END:
-            new_offset = (int64_t)f->node->size + offset;
+            new_offset = (int64_t)vfs_node_live_size(f->node) + offset;
             break;
         default:
             new_offset = -1;

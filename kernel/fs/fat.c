@@ -723,35 +723,99 @@ static uint32_t fat32_create_entry(fat32_fs_t *fs, uint32_t dir_cluster,
     return 1;
 }
 
-// ── Update an existing directory entry ────────────────────
-// Given a vfs_node, writes back current size and first cluster.
-static int fat32_update_entry(fat32_fs_t *fs, vfs_node_t *node)
+// ── Helpers for shared FAT file object lifecycle ─────────
+static inline uint32_t fat_dir_cluster(fat32_fs_t *fs, vfs_node_t *dir)
 {
-    if (!node || !node->parent) return -1;
+    if (!dir || dir->type != VFS_DIR) return fs->root_cluster;
+    return dir->fs_data ? (uint32_t)(uintptr_t)dir->fs_data : fs->root_cluster;
+}
 
-    // Find the entry by name in the parent directory
-    uint32_t dir_cluster = node->parent->fs_data
-        ? (uint32_t)(uintptr_t)node->parent->fs_data
-        : fs->root_cluster;
+static inline fat_file_object_t *fat_file_obj(vfs_node_t *node)
+{
+    if (!node || node->type != VFS_FILE) return NULL;
+    return (fat_file_object_t *)node->fs_data;
+}
 
-    uint64_t lba;
-    uint32_t off;
-    int64_t idx = fat32_find_by_name(fs, dir_cluster, node->name, &lba, &off);
-    if (idx < 0) {
-        debug_fs("FAT: update_entry: '%s' not found in parent\n", node->name);
-        return -1;
+static fat_file_object_t *fat_find_linked_obj_locked(fat32_fs_t *fs,
+                                                     uint64_t lba,
+                                                     uint32_t off)
+{
+    for (fat_file_object_t *cur = fs->file_objects; cur; cur = cur->next) {
+        if (cur->linked && !cur->orphaned &&
+            cur->dirent_lba == lba && cur->dirent_offset == off) {
+            return cur;
+        }
     }
+    return NULL;
+}
 
+static void fat_unlink_obj_from_list_locked(fat32_fs_t *fs, fat_file_object_t *obj)
+{
+    fat_file_object_t **pp = &fs->file_objects;
+    while (*pp) {
+        if (*pp == obj) {
+            *pp = obj->next;
+            obj->next = NULL;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+// Syncs first_cluster and size back to the on-disk dirent ONLY if obj is still linked & not orphaned
+static int fat32_sync_obj_dirent_locked(fat32_fs_t *fs, fat_file_object_t *obj)
+{
+    if (!fs || !obj || !obj->linked || obj->orphaned) return 0;
     FAT32_DIRENT dirent;
-    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0)
+    if (fat32_read_entry_at(fs, obj->dirent_lba, obj->dirent_offset, &dirent) != 0)
         return -1;
+    dirent.first_cluster_lo = (uint16_t)(obj->first_cluster & 0xFFFF);
+    dirent.first_cluster_hi = (uint16_t)((obj->first_cluster >> 16) & 0xFFFF);
+    dirent.file_size        = obj->size;
+    return fat32_write_entry_at(fs, obj->dirent_lba, obj->dirent_offset, &dirent);
+}
 
-    uint32_t first_cl = (uint32_t)(uintptr_t)node->fs_data;
-    dirent.first_cluster_lo = (uint16_t)(first_cl & 0xFFFF);
-    dirent.first_cluster_hi = (uint16_t)((first_cl >> 16) & 0xFFFF);
-    dirent.file_size = (uint32_t)node->size;
-
-    return fat32_write_entry_at(fs, lba, off, &dirent);
+static void fat_orphan_or_reclaim_file_slot_locked(fat32_fs_t *fs,
+                                                   vfs_mount_t *mp,
+                                                   uint64_t lba,
+                                                   uint32_t off,
+                                                   uint32_t disk_first_cl,
+                                                   fat_file_object_t **out_free_obj)
+{
+    fat_file_object_t *obj = fat_find_linked_obj_locked(fs, lba, off);
+    if (obj) {
+        obj->linked = false;
+        obj->orphaned = true;
+        bool has_active = false;
+        if (mp) {
+            spin_lock(&mp->active_lock);
+            vfs_active_nodes_mark_orphaned_locked(mp, obj->object_id);
+            has_active = vfs_active_nodes_has_ino_locked(mp, obj->object_id, NULL) ||
+                         (obj->handle_count > 0);
+            if (!has_active && !obj->reclaiming) {
+                obj->reclaiming = true;
+            }
+            spin_unlock(&mp->active_lock);
+        }
+        if (!has_active) {
+            if (obj->first_cluster >= 2 && obj->first_cluster < FAT32_EOC_MIN) {
+                fat32_free_cluster_chain(fs, obj->first_cluster);
+                obj->first_cluster = 0;
+            }
+#ifdef OS01_HOST_TEST
+            fs->test_reclaim_count++;
+#endif
+            fat_unlink_obj_from_list_locked(fs, obj);
+            *out_free_obj = obj;
+        }
+    } else {
+        if (disk_first_cl >= 2 && disk_first_cl < FAT32_EOC_MIN) {
+            fat32_free_cluster_chain(fs, disk_first_cl);
+        }
+#ifdef OS01_HOST_TEST
+        fs->test_reclaim_count++;
+#endif
+    }
 }
 
 // ── VFS operations for FAT32 ──────────────────────────────
@@ -759,34 +823,67 @@ static int fat32_update_entry(fat32_fs_t *fs, vfs_node_t *node)
 static int fat_read(struct vfs_node *node, uint64_t offset,
                     uint64_t size, void *buffer)
 {
-    if (!node || !node->fs_data || !node->mount) return -1;
+    if (!node || !node->mount || !buffer) return -1;
+    if (size == 0) return 0;
     fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
-    uint32_t cluster = (uint32_t)(uintptr_t)node->fs_data;
-    return fat32_read_data(fs, cluster, offset, size, buffer);
+
+    spin_lock(&fs->fat_lifecycle_lock);
+    fat_file_object_t *obj = fat_file_obj(node);
+    if (!obj) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return -1;
+    }
+    if (offset >= obj->size) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return 0;
+    }
+    if (size > obj->size - offset) {
+        size = obj->size - offset;
+    }
+    if (obj->first_cluster < 2) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return 0;
+    }
+    int rc = fat32_read_data(fs, obj->first_cluster, offset, size, buffer);
+    spin_unlock(&fs->fat_lifecycle_lock);
+    return rc;
 }
 
 static int fat_write(struct vfs_node *node, uint64_t offset,
                      uint64_t size, void *buffer)
 {
-    if (!node || !node->mount) return -1;
+    if (!node || !node->mount || !buffer) return -1;
+    if (size == 0) return 0;
     fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
 
-    // For newly created empty files (fs_data == 0), allocate first cluster
-    if (node->fs_data == NULL) {
+    spin_lock(&fs->fat_lifecycle_lock);
+    fat_file_object_t *obj = fat_file_obj(node);
+    if (!obj) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return -1;
+    }
+
+    if (obj->first_cluster < 2) {
         uint32_t cl = fat32_alloc_cluster(fs, 0);
-        if (cl == 0) return -1;
-        node->fs_data = (void *)(uintptr_t)cl;
+        if (cl == 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            return -1;
+        }
+        obj->first_cluster = cl;
     }
 
-    uint32_t cluster = (uint32_t)(uintptr_t)node->fs_data;
-    int written = fat32_write_data(fs, cluster, offset, size, buffer);
-
-    // Update file size if we extended it
-    if (written > 0 && offset + (uint64_t)written > node->size) {
-        node->size = offset + (uint64_t)written;
-        fat32_update_entry(fs, node);
+    int written = fat32_write_data(fs, obj->first_cluster, offset, size, buffer);
+    if (written > 0 && offset + (uint64_t)written > obj->size) {
+        obj->size = (uint32_t)(offset + (uint64_t)written);
     }
-
+    fat32_sync_obj_dirent_locked(fs, obj);
+    node->size = obj->size;
+    if (node->mount) {
+        spin_lock(&node->mount->active_lock);
+        vfs_active_nodes_sync_size_locked(node->mount, obj->object_id, obj->size, 0);
+        spin_unlock(&node->mount->active_lock);
+    }
+    spin_unlock(&fs->fat_lifecycle_lock);
     return written;
 }
 
@@ -796,57 +893,66 @@ static int fat_readdir(struct vfs_node *node, uint64_t index,
     if (!node || !node->mount) return -1;
     fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
 
-    uint32_t dir_cluster;
-    if (node->fs_data)
-        dir_cluster = (uint32_t)(uintptr_t)node->fs_data;
-    else
-        dir_cluster = fs->root_cluster;
-
-    return fat32_read_entry(fs, dir_cluster, index, entry);
+    spin_lock(&fs->fat_lifecycle_lock);
+    uint32_t dir_cluster = fat_dir_cluster(fs, node);
+    int rc = fat32_read_entry(fs, dir_cluster, index, entry);
+    spin_unlock(&fs->fat_lifecycle_lock);
+    return rc;
 }
 
 // ── Unlink (delete) a regular file ─────────────────────────
-// Marks the directory entry as deleted (0xE5) and frees the cluster chain.
+// Marks the directory entry as deleted (0xE5) and frees or defers the cluster chain.
 // Returns 0 on success, -ENOENT if not found, -EISDIR if directory.
 int fat_unlink(vfs_node_t *dir, const char *name)
 {
     if (!dir || !dir->mount || !name) return -EINVAL;
     fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
+    fat_file_object_t *free_obj = NULL;
 
-    uint32_t dir_cluster;
-    if (dir->fs_data)
-        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
-    else
-        dir_cluster = fs->root_cluster;
+    spin_lock(&fs->fat_lifecycle_lock);
+
+    uint32_t dir_cluster = fat_dir_cluster(fs, dir);
 
     // Find the entry
     uint64_t lba;
     uint32_t off;
     int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &lba, &off);
     if (idx < 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         debug_fs("FAT: unlink '%s': not found\n", name);
         return -ENOENT;
     }
 
     // Read the entry to get the first cluster
     FAT32_DIRENT dirent;
-    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0)
+    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         return -EIO;
+    }
 
     // Refuse to unlink directories via this path (use rmdir)
-    if (dirent.attr & FAT_ATTR_DIRECTORY)
+    if (dirent.attr & FAT_ATTR_DIRECTORY) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         return -EISDIR;
+    }
 
-    // Free the cluster chain
     uint32_t first_cl = (uint32_t)dirent.first_cluster_lo
                       | ((uint32_t)dirent.first_cluster_hi << 16);
-    if (first_cl >= 2 && first_cl < FAT32_EOC_MIN) {
-        fat32_free_cluster_chain(fs, first_cl);
-    }
 
     // Mark the entry as deleted
     int ret = fat32_mark_entry_deleted(fs, lba, off);
-    if (ret != 0) return ret;
+    if (ret != 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return ret;
+    }
+
+    fat_orphan_or_reclaim_file_slot_locked(fs, dir->mount, lba, off, first_cl, &free_obj);
+
+    spin_unlock(&fs->fat_lifecycle_lock);
+
+    if (free_obj) {
+        kfree(free_obj);
+    }
 
     debug_fs("FAT: unlink '%s' ok\n", name);
     return 0;
@@ -861,25 +967,46 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     if (!dir || !dir->mount || !name) return NULL;
     fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
 
-    uint32_t dir_cluster;
-    if (dir->fs_data)
-        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
-    else
-        dir_cluster = fs->root_cluster;
+    // Pre-allocate vfs_node_t and name outside lifecycle lock
+    vfs_node_t *node = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    size_t nlen = strlen(name);
+    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+    node->name = strndup(name, nlen);
+    if (!node->name) {
+        kfree(node);
+        return NULL;
+    }
+
+    spin_lock(&fs->fat_lifecycle_lock);
+
+    uint32_t dir_cluster = fat_dir_cluster(fs, dir);
 
     // Check if name already exists
     if (fat32_find_by_name(fs, dir_cluster, name, NULL, NULL) >= 0) {
         debug_fs("FAT: mkdir '%s': already exists\n", name);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL; // EEXIST
     }
 
     // Allocate a new cluster for the directory
     uint32_t new_cl = fat32_alloc_cluster(fs, 0);
-    if (new_cl == 0) return NULL; // ENOSPC
+    if (new_cl == 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL; // ENOSPC
+    }
 
     // Zero the new cluster
     if (fat32_zero_cluster(fs, new_cl) != 0) {
         fat32_write_fat_entry(fs, new_cl, FAT32_CLUSTER_FREE);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
@@ -895,6 +1022,9 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     uint64_t new_lba = fat32_cluster_to_sector(fs, new_cl);
     if (fat32_write_entry_at(fs, new_lba, 0, &dot) != 0) {
         fat32_free_cluster_chain(fs, new_cl);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
@@ -904,18 +1034,24 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     memset(dotdot.name, ' ', 11);
     dotdot.name[0] = '.'; dotdot.name[1] = '.';
     dotdot.attr = FAT_ATTR_DIRECTORY;
-    uint32_t parent_cl = dir->fs_data ? (uint32_t)(uintptr_t)dir->fs_data : fs->root_cluster;
+    uint32_t parent_cl = fat_dir_cluster(fs, dir);
     dotdot.first_cluster_lo = (uint16_t)(parent_cl & 0xFFFF);
     dotdot.first_cluster_hi = (uint16_t)((parent_cl >> 16) & 0xFFFF);
 
     if (fat32_write_entry_at(fs, new_lba, 32, &dotdot) != 0) {
         fat32_free_cluster_chain(fs, new_cl);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
     // Create the directory entry in the parent
     if (fat32_create_entry(fs, dir_cluster, name, FAT_ATTR_DIRECTORY) == 0) {
         fat32_free_cluster_chain(fs, new_cl);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
@@ -925,12 +1061,18 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     int64_t ent_idx = fat32_find_by_name(fs, dir_cluster, name, &ent_lba, &ent_off);
     if (ent_idx < 0) {
         fat32_free_cluster_chain(fs, new_cl);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
     FAT32_DIRENT ent;
     if (fat32_read_entry_at(fs, ent_lba, ent_off, &ent) != 0) {
         fat32_free_cluster_chain(fs, new_cl);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
@@ -938,19 +1080,15 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     ent.first_cluster_hi = (uint16_t)((new_cl >> 16) & 0xFFFF);
     if (fat32_write_entry_at(fs, ent_lba, ent_off, &ent) != 0) {
         fat32_free_cluster_chain(fs, new_cl);
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;
     }
 
-    // Allocate a vfs_node
-    vfs_node_t *node = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
-    if (!node) return NULL;
-
-    size_t nlen = strlen(name);
-    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    node->name = strndup(name, nlen);
     node->type = VFS_DIR;
     node->mount = dir->mount;
-    node->parent = dir;
+    node->parent = vfs_node_get(dir);
     node->i_ops = dir->i_ops;
     node->f_ops = dir->f_ops;
     node->mode = S_IFDIR | 0755;
@@ -959,7 +1097,10 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     node->fs_data = (void *)(uintptr_t)new_cl;
     node->size = 0;
     node->refcount = 1;
-    __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
+
+    vfs_active_node_register(node);
+
+    spin_unlock(&fs->fat_lifecycle_lock);
 
     debug_fs("FAT: mkdir '%s' cl=%u ok\n", name, new_cl);
     return node;
@@ -973,27 +1114,29 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
     if (!dir || !dir->mount || !name) return -EINVAL;
     fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
 
-    uint32_t dir_cluster;
-    if (dir->fs_data)
-        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
-    else
-        dir_cluster = fs->root_cluster;
+    spin_lock(&fs->fat_lifecycle_lock);
+
+    uint32_t dir_cluster = fat_dir_cluster(fs, dir);
 
     // Find the entry
     uint64_t ent_lba;
     uint32_t ent_off;
     int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &ent_lba, &ent_off);
     if (idx < 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         debug_fs("FAT: rmdir '%s': not found\n", name);
         return -ENOENT;
     }
 
     // Read the entry
     FAT32_DIRENT ent;
-    if (fat32_read_entry_at(fs, ent_lba, ent_off, &ent) != 0)
+    if (fat32_read_entry_at(fs, ent_lba, ent_off, &ent) != 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         return -EIO;
+    }
 
     if (!(ent.attr & FAT_ATTR_DIRECTORY)) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         debug_fs("FAT: rmdir '%s': not a directory\n", name);
         return -ENOTDIR;
     }
@@ -1012,6 +1155,7 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
                 // Skip "." and ".."
                 if (strcmp(check_entry.name, ".") != 0 &&
                     strcmp(check_entry.name, "..") != 0) {
+                    spin_unlock(&fs->fat_lifecycle_lock);
                     debug_fs("FAT: rmdir '%s': not empty (found '%s')\n",
                                    name, check_entry.name);
                     return -ENOTEMPTY;
@@ -1022,12 +1166,17 @@ int fat_rmdir(vfs_node_t *dir, const char *name)
 
     // Mark the entry as deleted
     int ret = fat32_mark_entry_deleted(fs, ent_lba, ent_off);
-    if (ret != 0) return ret;
+    if (ret != 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return ret;
+    }
 
     // Free the cluster chain
     if (target_cl >= 2 && target_cl < FAT32_EOC_MIN) {
         fat32_free_cluster_chain(fs, target_cl);
     }
+
+    spin_unlock(&fs->fat_lifecycle_lock);
 
     debug_fs("FAT: rmdir '%s' ok\n", name);
     return 0;
@@ -1042,117 +1191,140 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
     if (!olddir->mount || !newdir->mount) return -EINVAL;
 
     fat32_fs_t *fs = (fat32_fs_t *)olddir->mount->fs_data;
+    fat_file_object_t *free_obj = NULL;
 
     // Verify both directories are on the same filesystem
     if (olddir->mount != newdir->mount) return -EXDEV;
 
-    uint32_t src_dir_cl = olddir->fs_data
-        ? (uint32_t)(uintptr_t)olddir->fs_data : fs->root_cluster;
-    uint32_t dst_dir_cl = newdir->fs_data
-        ? (uint32_t)(uintptr_t)newdir->fs_data : fs->root_cluster;
+    spin_lock(&fs->fat_lifecycle_lock);
+
+    uint32_t src_dir_cl = fat_dir_cluster(fs, olddir);
+    uint32_t dst_dir_cl = fat_dir_cluster(fs, newdir);
 
     // Find source entry
     uint64_t src_lba;
     uint32_t src_off;
     int64_t src_idx = fat32_find_by_name(fs, src_dir_cl, oldname, &src_lba, &src_off);
     if (src_idx < 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         debug_fs("FAT: rename '%s': source not found\n", oldname);
         return -ENOENT;
     }
 
     // Read source entry
     FAT32_DIRENT src_ent;
-    if (fat32_read_entry_at(fs, src_lba, src_off, &src_ent) != 0)
+    if (fat32_read_entry_at(fs, src_lba, src_off, &src_ent) != 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
         return -EIO;
+    }
 
     // If target already exists, remove it first
-    int64_t dst_idx = fat32_find_by_name(fs, dst_dir_cl, newname, NULL, NULL);
+    uint64_t dst_lba = 0;
+    uint32_t dst_off = 0;
+    int64_t dst_idx = fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba, &dst_off);
     if (dst_idx >= 0) {
-        // Target exists — must be same type
-        if (src_ent.attr & FAT_ATTR_DIRECTORY) {
-            // If it's a directory, it must be empty
-            // We'll call fat_rmdir conceptually, but for simplicity:
-            // Find the target entry and check/remove it
-            uint64_t dst_lba;
-            uint32_t dst_off;
-            fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba, &dst_off);
-            // Read and verify it's an empty dir
-            FAT32_DIRENT dst_ent;
-            if (fat32_read_entry_at(fs, dst_lba, dst_off, &dst_ent) == 0) {
-                uint32_t dst_cl = (uint32_t)dst_ent.first_cluster_lo
-                                | ((uint32_t)dst_ent.first_cluster_hi << 16);
-                if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN) {
-                    // Check empty
-                    vfs_dirent_t check_e;
-                    int empty = 1;
-                    for (uint64_t i = 0; i < 512; i++) {
-                        int r = fat32_read_entry(fs, dst_cl, i, &check_e);
-                        if (r == 0 && check_e.name[0] == '\0') break;
-                        if (r == 0 && strcmp(check_e.name, ".") != 0
-                            && strcmp(check_e.name, "..") != 0) {
-                            empty = 0;
-                            break;
-                        }
-                    }
-                    if (!empty) {
-                        debug_fs("FAT: rename: target dir '%s' not empty\n", newname);
-                        return -ENOTEMPTY;
-                    }
-                    fat32_free_cluster_chain(fs, dst_cl);
-                }
-            }
-        } else {
-            // Target is a file — remove its entry and free its clusters
-            uint64_t dst_lba;
-            uint32_t dst_off;
-            fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba, &dst_off);
-            FAT32_DIRENT dst_ent;
-            if (fat32_read_entry_at(fs, dst_lba, dst_off, &dst_ent) == 0) {
-                uint32_t dst_cl = (uint32_t)dst_ent.first_cluster_lo
-                                | ((uint32_t)dst_ent.first_cluster_hi << 16);
-                if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN)
-                    fat32_free_cluster_chain(fs, dst_cl);
-            }
+        FAT32_DIRENT dst_ent;
+        if (fat32_read_entry_at(fs, dst_lba, dst_off, &dst_ent) != 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            return -EIO;
         }
 
-        // Mark target entry as deleted
-        uint64_t dst_lba2;
-        uint32_t dst_off2;
-        if (fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba2, &dst_off2) >= 0) {
-            fat32_mark_entry_deleted(fs, dst_lba2, dst_off2);
+        uint32_t dst_cl = (uint32_t)dst_ent.first_cluster_lo
+                        | ((uint32_t)dst_ent.first_cluster_hi << 16);
+
+        if (src_ent.attr & FAT_ATTR_DIRECTORY) {
+            if (!(dst_ent.attr & FAT_ATTR_DIRECTORY)) {
+                spin_unlock(&fs->fat_lifecycle_lock);
+                return -ENOTDIR;
+            }
+            if (dst_cl >= 2 && dst_cl < FAT32_EOC_MIN) {
+                vfs_dirent_t check_e;
+                int empty = 1;
+                for (uint64_t i = 0; i < 512; i++) {
+                    int r = fat32_read_entry(fs, dst_cl, i, &check_e);
+                    if (r == 0 && check_e.name[0] == '\0') break;
+                    if (r == 0 && strcmp(check_e.name, ".") != 0
+                        && strcmp(check_e.name, "..") != 0) {
+                        empty = 0;
+                        break;
+                    }
+                }
+                if (!empty) {
+                    spin_unlock(&fs->fat_lifecycle_lock);
+                    debug_fs("FAT: rename: target dir '%s' not empty\n", newname);
+                    return -ENOTEMPTY;
+                }
+                fat32_free_cluster_chain(fs, dst_cl);
+            }
+            fat32_mark_entry_deleted(fs, dst_lba, dst_off);
+        } else {
+            if (dst_ent.attr & FAT_ATTR_DIRECTORY) {
+                spin_unlock(&fs->fat_lifecycle_lock);
+                return -EISDIR;
+            }
+            fat32_mark_entry_deleted(fs, dst_lba, dst_off);
+            fat_orphan_or_reclaim_file_slot_locked(fs, olddir->mount, dst_lba, dst_off, dst_cl, &free_obj);
         }
     }
 
+    fat_file_object_t *src_obj = (!(src_ent.attr & FAT_ATTR_DIRECTORY))
+        ? fat_find_linked_obj_locked(fs, src_lba, src_off) : NULL;
+
+    uint64_t final_lba = src_lba;
+    uint32_t final_off = src_off;
+
     if (src_dir_cl == dst_dir_cl) {
-        // Same directory: just update the name in place
+        // Same directory: update name in place
         uint8_t new_83[11];
         fat32_make_83_name(newname, new_83);
         memcpy(src_ent.name, new_83, 11);
-        if (fat32_write_entry_at(fs, src_lba, src_off, &src_ent) != 0)
+        if (fat32_write_entry_at(fs, src_lba, src_off, &src_ent) != 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            if (free_obj) kfree(free_obj);
             return -EIO;
+        }
     } else {
-        // Cross-directory: copy entry to newdir, mark source as deleted
-        // Update the name in the source entry copy
+        // Cross-directory: write entry to destination, mark source deleted
         uint8_t new_83[11];
         fat32_make_83_name(newname, new_83);
         memcpy(src_ent.name, new_83, 11);
 
-        // Find a free slot in the destination directory
         int64_t free_idx = fat32_find_free_slot(fs, dst_dir_cl);
-        if (free_idx < 0) return -ENOSPC;
+        if (free_idx < 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            if (free_obj) kfree(free_obj);
+            return -ENOSPC;
+        }
 
-        uint64_t dst_lba;
-        uint32_t dst_off;
-        if (fat32_locate_entry(fs, dst_dir_cl, (uint64_t)free_idx, &dst_lba, &dst_off) != 0)
+        if (fat32_locate_entry(fs, dst_dir_cl, (uint64_t)free_idx, &final_lba, &final_off) != 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            if (free_obj) kfree(free_obj);
             return -EIO;
+        }
 
-        // Write the entry to the destination
-        if (fat32_write_entry_at(fs, dst_lba, dst_off, &src_ent) != 0)
+        if (fat32_write_entry_at(fs, final_lba, final_off, &src_ent) != 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            if (free_obj) kfree(free_obj);
             return -EIO;
+        }
 
-        // Mark source entry as deleted
-        if (fat32_mark_entry_deleted(fs, src_lba, src_off) != 0)
+        if (fat32_mark_entry_deleted(fs, src_lba, src_off) != 0) {
+            spin_unlock(&fs->fat_lifecycle_lock);
+            if (free_obj) kfree(free_obj);
             return -EIO;
+        }
+    }
+
+    if (src_obj) {
+        src_obj->parent_cluster = dst_dir_cl;
+        src_obj->dirent_lba     = final_lba;
+        src_obj->dirent_offset  = final_off;
+    }
+
+    spin_unlock(&fs->fat_lifecycle_lock);
+
+    if (free_obj) {
+        kfree(free_obj);
     }
 
     debug_fs("FAT: rename '%s' → '%s' ok\n", oldname, newname);
@@ -1160,63 +1332,65 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
 }
 
 // ── Truncate a file to a new size ────────────────────────────
-// If new_size is larger, does nothing (file grows on write).
-// If new_size is smaller, frees clusters beyond the new size
-// and updates the directory entry.
 int fat_truncate(vfs_node_t *node, uint64_t new_size)
 {
     if (!node || !node->mount) return -EINVAL;
+    if (node->type != VFS_FILE) return -EISDIR;
     fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
 
-    if (node->type != VFS_FILE) return -EISDIR;
-
-    if (new_size >= node->size) {
-        // Growing (or unchanged): no-op — clusters allocated on write
-        node->size = new_size;
-        fat32_update_entry(fs, node);
-        return 0;
+    spin_lock(&fs->fat_lifecycle_lock);
+    fat_file_object_t *obj = fat_file_obj(node);
+    if (!obj) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        return -EINVAL;
     }
 
-    uint32_t first_cluster = (uint32_t)(uintptr_t)node->fs_data;
-    if (first_cluster < 2) {
-        // No clusters allocated
-        node->size = new_size;
-        return 0;
-    }
-
-    if (new_size == 0) {
-        // Truncate to zero: free entire chain
-        fat32_free_cluster_chain(fs, first_cluster);
-        node->fs_data = NULL;
-        node->size = 0;
+    if (new_size >= obj->size) {
+        obj->size = (uint32_t)new_size;
     } else {
-        // Calculate how many clusters are needed
-        uint32_t cluster_size = fs->sectors_per_cluster * fs->bytes_per_sector;
-        uint64_t clusters_needed = (new_size + cluster_size - 1) / cluster_size;
+        if (obj->first_cluster < 2) {
+            obj->size = (uint32_t)new_size;
+        } else if (new_size == 0) {
+            fat32_free_cluster_chain(fs, obj->first_cluster);
+            obj->first_cluster = 0;
+            obj->size = 0;
+        } else {
+            uint32_t cluster_size = fs->sectors_per_cluster * fs->bytes_per_sector;
+            uint64_t clusters_needed = (new_size + cluster_size - 1) / cluster_size;
 
-        // Walk the chain to find the last needed cluster
-        uint32_t cluster = first_cluster;
-        uint32_t prev = 0;
-        uint64_t count = 0;
+            uint32_t cluster = obj->first_cluster;
+            uint32_t prev = 0;
+            uint64_t count = 0;
 
-        while (cluster >= 2 && cluster < FAT32_EOC_MIN && count < clusters_needed) {
-            prev = cluster;
-            cluster = fat32_read_fat_entry(fs, cluster);
-            count++;
-        }
+            while (cluster >= 2 && cluster < FAT32_EOC_MIN && count < clusters_needed) {
+                prev = cluster;
+                cluster = fat32_read_fat_entry(fs, cluster);
+                count++;
+            }
 
-        if (prev != 0 && count == clusters_needed) {
-            // Terminate the chain at `prev` and free the rest
-            uint32_t rest = fat32_read_fat_entry(fs, prev);
-            if (fat32_write_fat_entry(fs, prev, FAT32_EOC_MIN) != 0)
-                return -EIO;
-            if (rest >= 2 && rest < FAT32_EOC_MIN)
-                fat32_free_cluster_chain(fs, rest);
+            if (prev != 0 && count == clusters_needed) {
+                uint32_t rest = fat32_read_fat_entry(fs, prev);
+                if (fat32_write_fat_entry(fs, prev, FAT32_EOC_MIN) != 0) {
+                    spin_unlock(&fs->fat_lifecycle_lock);
+                    return -EIO;
+                }
+                if (rest >= 2 && rest < FAT32_EOC_MIN)
+                    fat32_free_cluster_chain(fs, rest);
+            }
+            obj->size = (uint32_t)new_size;
         }
     }
 
-    node->size = new_size;
-    fat32_update_entry(fs, node);
+    fat32_sync_obj_dirent_locked(fs, obj);
+    node->size = obj->size;
+
+    if (node->mount) {
+        spin_lock(&node->mount->active_lock);
+        vfs_active_nodes_sync_size_locked(node->mount, obj->object_id, obj->size, 0);
+        spin_unlock(&node->mount->active_lock);
+    }
+
+    spin_unlock(&fs->fat_lifecycle_lock);
     debug_fs("FAT: truncate to %lu bytes ok\n", (unsigned long)new_size);
     return 0;
 }
@@ -1228,35 +1402,83 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
     if (!dir || !dir->mount || !name) return NULL;
     fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
 
-    uint32_t dir_cluster;
-    if (dir->fs_data)
-        dir_cluster = (uint32_t)(uintptr_t)dir->fs_data;
-    else
-        dir_cluster = fs->root_cluster;
-
-    // Create the directory entry
-    if (fat32_create_entry(fs, dir_cluster, name, FAT_ATTR_ARCHIVE) == 0)
-        return NULL;
-
-    // Allocate a vfs_node for the caller (no data cluster yet)
     vfs_node_t *node = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!node) return NULL;
 
     size_t nlen = strlen(name);
     if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
     node->name = strndup(name, nlen);
-    node->type = VFS_FILE;
-    node->mount = dir->mount;
-    node->parent = dir;
-    __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
-    node->i_ops = dir->i_ops;
-    node->f_ops = dir->f_ops;
-    node->mode = S_IFREG | 0755;
-    node->nlink = 1;
-    node->fs_data = NULL;  // no cluster yet — allocated on first write
-    node->size = 0;
+    if (!node->name) {
+        kfree(node);
+        return NULL;
+    }
+
+    fat_file_object_t *obj = (fat_file_object_t *)calloc(1, sizeof(fat_file_object_t));
+    if (!obj) {
+        kfree(node->name);
+        kfree(node);
+        return NULL;
+    }
+
+    spin_lock(&fs->fat_lifecycle_lock);
+
+    uint32_t dir_cluster = fat_dir_cluster(fs, dir);
+
+    if (fat32_find_by_name(fs, dir_cluster, name, NULL, NULL) >= 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(obj);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
+    }
+
+    if (fat32_create_entry(fs, dir_cluster, name, FAT_ATTR_ARCHIVE) == 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(obj);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
+    }
+
+    uint64_t lba = 0;
+    uint32_t off = 0;
+    if (fat32_find_by_name(fs, dir_cluster, name, &lba, &off) < 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(obj);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
+    }
+
+    obj->object_id      = fs->next_object_id++;
+    obj->first_cluster  = 0;
+    obj->size           = 0;
+    obj->parent_cluster = dir_cluster;
+    obj->dirent_lba     = lba;
+    obj->dirent_offset  = off;
+    obj->attr           = FAT_ATTR_ARCHIVE;
+    obj->linked         = true;
+    obj->orphaned       = false;
+    obj->reclaiming     = false;
+    obj->handle_count   = 1;
+    obj->next           = fs->file_objects;
+    fs->file_objects    = obj;
+
+    node->type     = VFS_FILE;
+    node->ino      = obj->object_id;
+    node->fs_data  = obj;
+    node->size     = 0;
+    node->mode     = S_IFREG | 0755;
+    node->nlink    = 1;
+    node->mount    = dir->mount;
+    node->parent   = vfs_node_get(dir);
+    node->i_ops    = dir->i_ops;
+    node->f_ops    = dir->f_ops;
     node->refcount = 1;
 
+    vfs_active_node_register(node);
+
+    spin_unlock(&fs->fat_lifecycle_lock);
     return node;
 }
 
@@ -1272,30 +1494,56 @@ static int fat_iop_lookup(struct vfs_node *dir, const char *name,
     if (dir->type != VFS_DIR) return -ENOTDIR;
 
     fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
-    uint32_t dir_cluster = dir->fs_data
-        ? (uint32_t)(uintptr_t)dir->fs_data
-        : fs->root_cluster;
-
-    uint64_t lba = 0;
-    uint32_t off = 0;
-    int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &lba, &off);
-    if (idx < 0) return -ENOENT;
-
-    FAT32_DIRENT dirent;
-    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0)
-        return -EIO;
-
-    uint32_t first_cl = (uint32_t)dirent.first_cluster_lo
-                      | ((uint32_t)dirent.first_cluster_hi << 16);
 
     vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!child) return -ENOMEM;
 
-    child->name = strndup(name, VFS_NAME_MAX - 1);
-    if (!child->name) {
+    char *child_name = strndup(name, VFS_NAME_MAX - 1);
+    if (!child_name) {
         kfree(child);
         return -ENOMEM;
     }
+
+    fat_file_object_t *cand_obj = (fat_file_object_t *)calloc(1, sizeof(fat_file_object_t));
+    if (!cand_obj) {
+        kfree(child_name);
+        kfree(child);
+        return -ENOMEM;
+    }
+
+    spin_lock(&fs->fat_lifecycle_lock);
+
+    uint32_t dir_cluster = fat_dir_cluster(fs, dir);
+
+    uint64_t lba = 0;
+    uint32_t off = 0;
+    int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &lba, &off);
+    if (idx < 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(cand_obj);
+        kfree(child_name);
+        kfree(child);
+        return -ENOENT;
+    }
+
+    FAT32_DIRENT dirent;
+    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0) {
+        spin_unlock(&fs->fat_lifecycle_lock);
+        kfree(cand_obj);
+        kfree(child_name);
+        kfree(child);
+        return -EIO;
+    }
+
+    uint32_t first_cl = (uint32_t)dirent.first_cluster_lo
+                      | ((uint32_t)dirent.first_cluster_hi << 16);
+
+    child->name   = child_name;
+    child->mount  = dir->mount;
+    child->parent = vfs_node_get(dir);
+    child->i_ops  = &fat_iops;
+    child->f_ops  = &fat_fops;
+    child->refcount = 1;
 
     if (dirent.attr & FAT_ATTR_DIRECTORY) {
         child->type  = VFS_DIR;
@@ -1303,20 +1551,44 @@ static int fat_iop_lookup(struct vfs_node *dir, const char *name,
         child->mode  = S_IFDIR | 0755;
         child->nlink = 2;
         child->ino   = first_cl;
+        child->fs_data = (void *)(uintptr_t)first_cl;
+        kfree(cand_obj);
+        cand_obj = NULL;
     } else {
-        child->type  = VFS_FILE;
-        child->size  = dirent.file_size;
-        child->mode  = (dirent.attr & FAT_ATTR_READ_ONLY) ? (S_IFREG | 0555) : (S_IFREG | 0755);
-        child->nlink = 1;
-        child->ino   = first_cl ? first_cl : ((lba << 16) | (off & 0xFFFF));
+        fat_file_object_t *obj = fat_find_linked_obj_locked(fs, lba, off);
+        if (obj) {
+            obj->handle_count++;
+            kfree(cand_obj);
+            cand_obj = NULL;
+        } else {
+            cand_obj->object_id      = fs->next_object_id++;
+            cand_obj->first_cluster  = first_cl;
+            cand_obj->size           = dirent.file_size;
+            cand_obj->parent_cluster = dir_cluster;
+            cand_obj->dirent_lba     = lba;
+            cand_obj->dirent_offset  = off;
+            cand_obj->attr           = dirent.attr;
+            cand_obj->linked         = true;
+            cand_obj->orphaned       = false;
+            cand_obj->reclaiming     = false;
+            cand_obj->handle_count   = 1;
+            cand_obj->next           = fs->file_objects;
+            fs->file_objects         = cand_obj;
+            obj                      = cand_obj;
+            cand_obj                 = NULL;
+        }
+        child->type    = VFS_FILE;
+        child->size    = obj->size;
+        child->mode    = (obj->attr & FAT_ATTR_READ_ONLY) ? (S_IFREG | 0555) : (S_IFREG | 0755);
+        child->nlink   = obj->orphaned ? 0 : 1;
+        child->ino     = obj->object_id;
+        child->fs_data = obj;
     }
 
-    child->mount    = dir->mount;
-    child->parent   = vfs_node_get(dir);
-    child->fs_data  = (void *)(uintptr_t)first_cl;
-    child->i_ops    = &fat_iops;
-    child->f_ops    = &fat_fops;
-    child->refcount = 1;
+    vfs_active_node_register(child);
+
+    spin_unlock(&fs->fat_lifecycle_lock);
+
     *out = child;
     return 0;
 }
@@ -1324,18 +1596,89 @@ static int fat_iop_lookup(struct vfs_node *dir, const char *name,
 static int fat_iop_getattr(struct vfs_node *node, struct stat *buf)
 {
     if (!node || !buf) return -1;
+    if (node->mount && node->mount->fs_data && node->type == VFS_FILE) {
+        fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
+        spin_lock(&fs->fat_lifecycle_lock);
+        fat_file_object_t *obj = fat_file_obj(node);
+        if (obj) {
+            node->size  = obj->size;
+            node->ino   = obj->object_id;
+            node->nlink = obj->orphaned ? 0 : 1;
+        }
+        spin_unlock(&fs->fat_lifecycle_lock);
+    }
     return vfs_generic_getattr(node, buf);
 }
 
+static void fat_iop_evict_node(struct vfs_node *node)
+{
+    if (!node || !node->mount || !node->mount->fs_data) return;
+    if (node == node->mount->root || (node->node_flags & VFS_NODE_MOUNT_STUB)) {
+        vfs_active_node_unregister(node);
+        return;
+    }
+
+    fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
+    fat_file_object_t *free_obj = NULL;
+
+    spin_lock(&fs->fat_lifecycle_lock);
+    spin_lock(&node->mount->active_lock);
+
+    vfs_active_node_unregister_locked(node->mount, node);
+
+    if (node->type == VFS_FILE && node->fs_data) {
+        fat_file_object_t *obj = (fat_file_object_t *)node->fs_data;
+        if (obj->handle_count > 0) {
+            obj->handle_count--;
+        }
+        bool still_active = vfs_active_nodes_has_ino_locked(node->mount, obj->object_id, NULL) ||
+                            (obj->handle_count > 0);
+        bool should_reclaim = false;
+        if (!still_active) {
+            if (obj->orphaned && !obj->reclaiming) {
+                obj->reclaiming = true;
+                should_reclaim = true;
+                free_obj = obj;
+            } else if (obj->linked && !obj->orphaned) {
+                free_obj = obj;
+            }
+        }
+        spin_unlock(&node->mount->active_lock);
+
+        if (should_reclaim) {
+            if (obj->first_cluster >= 2 && obj->first_cluster < FAT32_EOC_MIN) {
+                fat32_free_cluster_chain(fs, obj->first_cluster);
+                obj->first_cluster = 0;
+            }
+#ifdef OS01_HOST_TEST
+            fs->test_reclaim_count++;
+#endif
+        }
+        if (free_obj) {
+            fat_unlink_obj_from_list_locked(fs, free_obj);
+        }
+        spin_unlock(&fs->fat_lifecycle_lock);
+
+        if (free_obj) {
+            kfree(free_obj);
+        }
+        return;
+    }
+
+    spin_unlock(&node->mount->active_lock);
+    spin_unlock(&fs->fat_lifecycle_lock);
+}
+
 const vfs_inode_ops_t fat_iops = {
-    .lookup   = fat_iop_lookup,
-    .getattr  = fat_iop_getattr,
-    .create   = fat_create,
-    .unlink   = fat_unlink,
-    .mkdir    = fat_mkdir,
-    .rmdir    = fat_rmdir,
-    .rename   = fat_rename,
-    .truncate = fat_truncate,
+    .lookup     = fat_iop_lookup,
+    .getattr    = fat_iop_getattr,
+    .create     = fat_create,
+    .unlink     = fat_unlink,
+    .mkdir      = fat_mkdir,
+    .rmdir      = fat_rmdir,
+    .rename     = fat_rename,
+    .truncate   = fat_truncate,
+    .evict_node = fat_iop_evict_node,
 };
 
 const vfs_file_ops_t fat_fops = {
@@ -1395,30 +1738,35 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
     }
 
     memcpy(&fs->bpb, bpb, sizeof(FAT32_BPB));
-    fat_free_sector(sector);
     fs->dev = dev;
-    fs->bytes_per_sector = bpb->bytes_per_sector;
-    fs->sectors_per_cluster = bpb->sectors_per_cluster;
-    fs->root_cluster = bpb->root_cluster;
+    fs->bytes_per_sector = fs->bpb.bytes_per_sector;
+    fs->sectors_per_cluster = fs->bpb.sectors_per_cluster;
+    fs->root_cluster = fs->bpb.root_cluster;
 
     // Calculate sector offsets (absolute LBAs)
     uint32_t partition_start = 0;  // disk.img is raw FAT32, no partition table
 
-    fs->fat_start_sector = partition_start + bpb->reserved_sectors;
+    fs->fat_start_sector = partition_start + fs->bpb.reserved_sectors;
     fs->first_data_sector = partition_start
-                          + bpb->reserved_sectors
-                          + ((uint32_t)bpb->num_fats * bpb->sectors_per_fat_32);
+                          + fs->bpb.reserved_sectors
+                          + ((uint32_t)fs->bpb.num_fats * fs->bpb.sectors_per_fat_32);
 
     debug_fs("FAT32: mounted (BpS=%u, SpC=%u, FATs=%u, FATsec=%u, rootClus=%u)\n",
                    fs->bytes_per_sector, fs->sectors_per_cluster,
-                   bpb->num_fats, bpb->sectors_per_fat_32, fs->root_cluster);
+                   fs->bpb.num_fats, fs->bpb.sectors_per_fat_32, fs->root_cluster);
     debug_fs("FAT32: FAT start=%u, data start=%u\n",
                    fs->fat_start_sector, fs->first_data_sector);
+
+    fat_free_sector(sector);
 
     // Validate the root cluster
     debug_fs("FAT32: root directory at cluster %u (LBA %lu)\n",
                    fs->root_cluster,
                    fat32_cluster_to_sector(fs, fs->root_cluster));
+
+    spin_init(&fs->fat_lifecycle_lock);
+    fs->next_object_id = FAT_OBJECT_ID_BASE;
+    fs->file_objects = NULL;
 
     *out_fs = fs;
     return 0;
@@ -1440,6 +1788,7 @@ static int fat_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     mp->root->ino = fs->root_cluster;
     mp->root->mode = S_IFDIR | 0755;
     mp->root->nlink = 2;
+    mp->root->fs_data = (void *)(uintptr_t)fs->root_cluster;
     return 0;
 }
 

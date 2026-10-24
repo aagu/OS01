@@ -160,6 +160,11 @@ int vfs_read(vfs_node_t *node, uint64_t offset,
     return (int)size;
 }
 
+uint64_t vfs_node_live_size(vfs_node_t *node)
+{
+    return node ? node->size : 0;
+}
+
 /* ── PTE table walk / map / unmap ────────────────────────── */
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate)

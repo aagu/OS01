@@ -303,6 +303,129 @@ static __attribute__((noinline)) void free_inode(ext2_fs_t *fs, uint32_t ino)
     ext2_write_superblock(fs);
 }
 
+// ── ext2 orphan reclamation helpers (Spec §5.2.2, §5.2.3) ───
+static void ext2_mark_orphan_locked(ext2_fs_t *fs, uint32_t ino)
+{
+    if (!fs || ino == 0) return;
+    for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+        if (fs->orphans[i].ino == ino && fs->orphans[i].state != 0) return;
+    }
+    for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+        if (fs->orphans[i].state == 0) {
+            fs->orphans[i].ino = ino;
+            fs->orphans[i].state = 1; // orphaned_pending
+            return;
+        }
+    }
+}
+
+static bool ext2_is_orphan_locked(ext2_fs_t *fs, uint32_t ino)
+{
+    if (!fs || ino == 0) return false;
+    for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+        if (fs->orphans[i].ino == ino && fs->orphans[i].state == 1) return true;
+    }
+    return false;
+}
+
+static bool ext2_claim_orphan_reclaim_locked(ext2_fs_t *fs, uint32_t ino)
+{
+    if (!fs || ino == 0) return false;
+    for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+        if (fs->orphans[i].ino == ino) {
+            if (fs->orphans[i].state == 1) {
+                fs->orphans[i].state = 2; // reclaiming
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+static void ext2_clear_orphan_locked(ext2_fs_t *fs, uint32_t ino)
+{
+    if (!fs || ino == 0) return;
+    for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+        if (fs->orphans[i].ino == ino) {
+            fs->orphans[i].ino = 0;
+            fs->orphans[i].state = 0;
+            return;
+        }
+    }
+}
+
+static int ext2_reclaim_orphan_inode_locked(ext2_fs_t *fs, uint32_t target_ino)
+{
+    if (!fs || target_ino == 0) return -EINVAL;
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, target_ino, &inode) != 0) {
+        for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+            if (fs->orphans[i].ino == target_ino && fs->orphans[i].state == 2) {
+                fs->orphans[i].state = 1;
+                break;
+            }
+        }
+        return -EIO;
+    }
+
+    if ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
+        if (inode.i_blocks > 0 && inode.i_block[0] != 0) {
+            free_block(fs, inode.i_block[0]);
+            inode.i_block[0] = 0;
+        }
+    } else {
+        for (int i = 0; i < 12; i++) {
+            if (inode.i_block[i] != 0) {
+                free_block(fs, inode.i_block[i]);
+                inode.i_block[i] = 0;
+            }
+        }
+        if (inode.i_block[12] != 0) {
+            uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+            uint32_t *indirect = kmalloc(4096);
+            if (!indirect) {
+                for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+                    if (fs->orphans[i].ino == target_ino && fs->orphans[i].state == 2) {
+                        fs->orphans[i].state = 1;
+                        break;
+                    }
+                }
+                ext2_write_inode(fs, target_ino, &inode);
+                return -ENOMEM;
+            }
+            if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
+                kfree(indirect);
+                for (int i = 0; i < EXT2_MAX_ORPHANS; i++) {
+                    if (fs->orphans[i].ino == target_ino && fs->orphans[i].state == 2) {
+                        fs->orphans[i].state = 1;
+                        break;
+                    }
+                }
+                ext2_write_inode(fs, target_ino, &inode);
+                return -EIO;
+            }
+            for (uint32_t i = 0; i < ptrs_per_block; i++) {
+                if (indirect[i] != 0) free_block(fs, indirect[i]);
+            }
+            kfree(indirect);
+            free_block(fs, inode.i_block[12]);
+            inode.i_block[12] = 0;
+        }
+    }
+
+    inode.i_blocks = 0;
+    inode.i_size = 0;
+    ext2_write_inode(fs, target_ino, &inode);
+    free_inode(fs, target_ino);
+    ext2_clear_orphan_locked(fs, target_ino);
+
+#ifdef OS01_HOST_TEST
+    fs->test_reclaim_count++;
+#endif
+    return 0;
+}
+
 // ── Map logical block → physical (direct + single indirect) ─
 static __attribute__((noinline)) uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
                           uint32_t logical_block)
@@ -709,6 +832,12 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     inode.i_mtime = 0;
     ext2_write_inode(fs, ino, &inode);
 
+    if (node->mount) {
+        spin_lock(&node->mount->active_lock);
+        vfs_active_nodes_sync_size_locked(node->mount, ino, inode.i_size, inode.i_mtime);
+        spin_unlock(&node->mount->active_lock);
+    }
+
     spin_unlock(&fs->lock);
     return (int)size;
 }
@@ -790,6 +919,12 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
     // Sync the VFS node's cached size — fstat() reads node->size
     node->size = new_size;
 
+    if (node->mount) {
+        spin_lock(&node->mount->active_lock);
+        vfs_active_nodes_sync_size_locked(node->mount, ino, new_size, inode.i_mtime);
+        spin_unlock(&node->mount->active_lock);
+    }
+
     spin_unlock(&fs->lock);
     return 0;
 }
@@ -799,6 +934,18 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
 {
     if (!dir || !dir->mount || !name) return NULL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
+
+    // Pre-allocate vfs_node_t and name outside fs->lock
+    vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    size_t nlen = strlen(name);
+    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+    node->name = strndup(name, nlen);
+    if (!node->name) {
+        kfree(node);
+        return NULL;
+    }
 
     spin_lock(&fs->lock);
 
@@ -810,28 +957,27 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     if (ext2_find_dirent(fs, dir_ino, name, &dummy_ino, &dummy_type,
                          &dummy_block, &dummy_off) == 0) {
         spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
         return NULL;  // already exists
     }
 
     uint32_t new_ino = alloc_inode(fs, EXT2_S_IFREG | 0644);
     if (new_ino == 0) {
-        spin_unlock(&fs->lock); return NULL;
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
     }
 
     if (dirent_add(fs, dir_ino, name, new_ino, 1 /* EXT2_FT_REG_FILE */) != 0) {
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock); return NULL;
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
     }
 
-    spin_unlock(&fs->lock);
-
-    // Build vfs_node_t
-    vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
-    if (!node) return NULL;
-
-    size_t nlen = strlen(name);
-    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    node->name = strndup(name, nlen);
     node->type = VFS_FILE;
     node->mount = dir->mount;
     node->i_ops = dir->i_ops;
@@ -839,12 +985,14 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     node->ino = new_ino;
     node->mode = EXT2_S_IFREG | 0644;
     node->nlink = 1;
-    node->parent = dir;
-    __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
+    node->parent = vfs_node_get(dir);
     node->fs_data = (void *)(uintptr_t)new_ino;
     node->size = 0;
     node->refcount = 1;
 
+    vfs_active_node_register(node);
+
+    spin_unlock(&fs->lock);
     return node;
 }
 
@@ -1009,46 +1157,21 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
 
     inode.i_links_count--;
     if (inode.i_links_count == 0) {
-        // v5 fix: type-aware cleanup. Symlinks' i_block[] holds the target
-        // STRING, not block numbers; the generic loop would free random
-        // blocks (bitmap corruption) and double-free long-symlink data
-        // blocks.
-        if ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFLNK) {
-            if (inode.i_blocks > 0) {
-                // Long symlink: i_block[0] is the target data block.
-                // Fast symlink (i_blocks == 0): i_block[] is target bytes;
-                // nothing to free.
-                free_block(fs, inode.i_block[0]);
-            }
-        } else {
-            // Regular file / directory: original 12-direct + single-indirect
-            // loop, unchanged.
-            for (int i = 0; i < 12; i++) {
-                if (inode.i_block[i] != 0) {
-                    free_block(fs, inode.i_block[i]);
-                    inode.i_block[i] = 0;
-                }
-            }
-            if (inode.i_block[12] != 0) {
-                uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-                uint32_t *indirect = kmalloc(4096);
-                if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
-                if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
-                    kfree(indirect);
-                    spin_unlock(&fs->lock); return -EIO;
-                }
-                for (uint32_t i = 0; i < ptrs_per_block; i++) {
-                    if (indirect[i] != 0) free_block(fs, indirect[i]);
-                }
-                kfree(indirect);
-                free_block(fs, inode.i_block[12]);
-                inode.i_block[12] = 0;
-            }
-        }
-        inode.i_blocks = 0;
-        inode.i_size = 0;
         ext2_write_inode(fs, target_ino, &inode);
-        free_inode(fs, target_ino);
+        bool has_active = false;
+        if (dir->mount) {
+            spin_lock(&dir->mount->active_lock);
+            vfs_active_nodes_mark_orphaned_locked(dir->mount, target_ino);
+            has_active = vfs_active_nodes_has_ino_locked(dir->mount, target_ino, NULL);
+            if (has_active) {
+                ext2_mark_orphan_locked(fs, target_ino);
+            }
+            spin_unlock(&dir->mount->active_lock);
+        }
+
+        if (!has_active) {
+            ext2_reclaim_orphan_inode_locked(fs, target_ino);
+        }
     } else {
         ext2_write_inode(fs, target_ino, &inode);
     }
@@ -1063,6 +1186,18 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     if (!dir || !dir->mount || !name) return NULL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
 
+    // Pre-allocate vfs_node_t and name outside fs->lock
+    vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+
+    size_t nlen = strlen(name);
+    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
+    node->name = strndup(name, nlen);
+    if (!node->name) {
+        kfree(node);
+        return NULL;
+    }
+
     spin_lock(&fs->lock);
 
     uint32_t dir_ino = ext2_node_ino(dir);
@@ -1071,24 +1206,39 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     uint8_t dummy_type;
     if (ext2_find_dirent(fs, dir_ino, name, &dummy_ino, &dummy_type,
                          &dummy_block, &dummy_off) == 0) {
-        spin_unlock(&fs->lock); return NULL;
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
     }
 
     uint32_t new_ino = alloc_inode(fs, EXT2_S_IFDIR | 0755);
-    if (new_ino == 0) { spin_unlock(&fs->lock); return NULL; }
+    if (new_ino == 0) {
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
+    }
 
     // Allocate data block for "." and ".."
     uint32_t dir_blk = alloc_block(fs);
     if (dir_blk == 0) {
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock); return NULL;
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
     }
 
     // Read inode to update i_block
     ext2_inode_t new_inode;
     if (ext2_read_inode(fs, new_ino, &new_inode) != 0) {
-        free_block(fs, dir_blk); free_inode(fs, new_ino);
-        spin_unlock(&fs->lock); return NULL;
+        free_block(fs, dir_blk);
+        free_inode(fs, new_ino);
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
     }
     new_inode.i_block[0] = dir_blk;
     new_inode.i_blocks = fs->block_size / 512;
@@ -1098,7 +1248,14 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
 
     // Initialize directory block with "." and ".."
     uint8_t *block_data = kmalloc(4096);
-    if (!block_data) { spin_unlock(&fs->lock); return NULL; }
+    if (!block_data) {
+        free_block(fs, dir_blk);
+        free_inode(fs, new_ino);
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
+    }
     memset(block_data, 0, fs->block_size);
 
     ext2_dirent_t *dot = (ext2_dirent_t *)block_data;
@@ -1136,18 +1293,12 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
         fs->bgdesc_table[parent_group].bg_used_dirs_count--;
         ext2_write_inode(fs, dir_ino, &dir_inode);
         ext2_write_superblock(fs);
-        spin_unlock(&fs->lock); return NULL;
+        spin_unlock(&fs->lock);
+        kfree(node->name);
+        kfree(node);
+        return NULL;
     }
 
-    spin_unlock(&fs->lock);
-
-    // Build vfs_node_t
-    vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
-    if (!node) return NULL;
-
-    size_t nlen = strlen(name);
-    if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-    node->name = strndup(name, nlen);
     node->type = VFS_DIR;
     node->mount = dir->mount;
     node->i_ops = dir->i_ops;
@@ -1155,12 +1306,14 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     node->ino = new_ino;
     node->mode = EXT2_S_IFDIR | 0755;
     node->nlink = 2;
-    node->parent = dir;
-    __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
+    node->parent = vfs_node_get(dir);
     node->fs_data = (void *)(uintptr_t)new_ino;
     node->size = fs->block_size;
     node->refcount = 1;
 
+    vfs_active_node_register(node);
+
+    spin_unlock(&fs->lock);
     return node;
 }
 
@@ -1228,26 +1381,23 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
     fs->bgdesc_table[parent_group].bg_used_dirs_count--;
     ext2_write_superblock(fs);
 
-    // Free all data blocks of target directory
-    for (int i = 0; i < 12; i++) {
-        if (target_inode.i_block[i] != 0) {
-            free_block(fs, target_inode.i_block[i]);
+    target_inode.i_links_count = 0;
+    ext2_write_inode(fs, target_ino, &target_inode);
+
+    bool has_active = false;
+    if (dir->mount) {
+        spin_lock(&dir->mount->active_lock);
+        vfs_active_nodes_mark_orphaned_locked(dir->mount, target_ino);
+        has_active = vfs_active_nodes_has_ino_locked(dir->mount, target_ino, NULL);
+        if (has_active) {
+            ext2_mark_orphan_locked(fs, target_ino);
         }
+        spin_unlock(&dir->mount->active_lock);
     }
-    if (target_inode.i_block[12] != 0) {
-        uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-        uint32_t *indirect = kmalloc(4096);
-        if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
-        if (ext2_read_block(fs, target_inode.i_block[12], indirect) != 0) {
-            kfree(indirect); spin_unlock(&fs->lock); return -EIO;
-        }
-        for (uint32_t i = 0; i < ptrs_per_block; i++) {
-            if (indirect[i] != 0) free_block(fs, indirect[i]);
-        }
-        free_block(fs, target_inode.i_block[12]);
-        kfree(indirect);
+
+    if (!has_active) {
+        ext2_reclaim_orphan_inode_locked(fs, target_ino);
     }
-    free_inode(fs, target_ino);
 
     spin_unlock(&fs->lock);
     return 0;
@@ -1433,24 +1583,24 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
             // Write ordering (spec §6.1): dirent → bitmap → sb → data
             dirent_del(fs, new_ino_dir, newname);
 
-            // Free all data blocks before freeing the inode
             ext2_read_inode(fs, exist_ino, ino_a);
-            for (int i = 0; i < 12; i++) {
-                if (ino_a->i_block[i]) free_block(fs, ino_a->i_block[i]);
-            }
-            if (ino_a->i_block[12]) {
-                uint32_t *indirect = kmalloc(4096);
-                if (!indirect) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
-                uint32_t pps = fs->block_size / sizeof(uint32_t);
-                if (ext2_read_block(fs, ino_a->i_block[12], indirect) != 0) {
-                    kfree(indirect); kfree(inobuf); spin_unlock(&fs->lock); return -EIO;
+            ino_a->i_links_count = 0;
+            ext2_write_inode(fs, exist_ino, ino_a);
+
+            bool has_active = false;
+            if (olddir->mount) {
+                spin_lock(&olddir->mount->active_lock);
+                vfs_active_nodes_mark_orphaned_locked(olddir->mount, exist_ino);
+                has_active = vfs_active_nodes_has_ino_locked(olddir->mount, exist_ino, NULL);
+                if (has_active) {
+                    ext2_mark_orphan_locked(fs, exist_ino);
                 }
-                for (uint32_t k = 0; k < pps; k++)
-                    if (indirect[k]) free_block(fs, indirect[k]);
-                free_block(fs, ino_a->i_block[12]);
-                kfree(indirect);
+                spin_unlock(&olddir->mount->active_lock);
             }
-            free_inode(fs, exist_ino);
+
+            if (!has_active) {
+                ext2_reclaim_orphan_inode_locked(fs, exist_ino);
+            }
         } else {
             // Overwrite file — unlink it first
             // Write ordering (spec §6.1): dirent → inode → bitmap → sb → data
@@ -1460,22 +1610,19 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
             ino_a->i_links_count--;
             if (ino_a->i_links_count == 0) {
                 ext2_write_inode(fs, exist_ino, ino_a);
-                free_inode(fs, exist_ino);
-                // Now free data blocks (after inode is gone from bitmap)
-                for (int i = 0; i < 12; i++) {
-                    if (ino_a->i_block[i]) free_block(fs, ino_a->i_block[i]);
-                }
-                if (ino_a->i_block[12]) {
-                    uint32_t *indirect = kmalloc(4096);
-                    if (!indirect) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
-                    uint32_t pps = fs->block_size / sizeof(uint32_t);
-                    if (ext2_read_block(fs, ino_a->i_block[12], indirect) != 0) {
-                        kfree(indirect); kfree(inobuf); spin_unlock(&fs->lock); return -EIO;
+                bool has_active = false;
+                if (olddir->mount) {
+                    spin_lock(&olddir->mount->active_lock);
+                    vfs_active_nodes_mark_orphaned_locked(olddir->mount, exist_ino);
+                    has_active = vfs_active_nodes_has_ino_locked(olddir->mount, exist_ino, NULL);
+                    if (has_active) {
+                        ext2_mark_orphan_locked(fs, exist_ino);
                     }
-                    for (uint32_t k = 0; k < pps; k++)
-                        if (indirect[k]) free_block(fs, indirect[k]);
-                    free_block(fs, ino_a->i_block[12]);
-                    kfree(indirect);
+                    spin_unlock(&olddir->mount->active_lock);
+                }
+
+                if (!has_active) {
+                    ext2_reclaim_orphan_inode_locked(fs, exist_ino);
                 }
             } else {
                 ext2_write_inode(fs, exist_ino, ino_a);
@@ -1566,24 +1713,7 @@ static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
     uint32_t dir_ino = ext2_node_ino(dir);
 
-    spin_lock(&fs->lock);
-
-    uint32_t child_ino = 0, blk = 0, off = 0;
-    uint8_t ft = 0;
-    int rc = ext2_find_dirent(fs, dir_ino, name, &child_ino, &ft, &blk, &off);
-    if (rc != 0) {
-        spin_unlock(&fs->lock);
-        return rc;
-    }
-
-    ext2_inode_t disk_ino;
-    if (ext2_read_inode(fs, child_ino, &disk_ino) != 0) {
-        spin_unlock(&fs->lock);
-        return -EIO;
-    }
-
-    spin_unlock(&fs->lock);
-
+    // Pre-allocate vfs_node_t and name outside fs->lock
     vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!child) return -ENOMEM;
 
@@ -1591,6 +1721,26 @@ static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
     if (!child->name) {
         kfree(child);
         return -ENOMEM;
+    }
+
+    spin_lock(&fs->lock);
+
+    uint32_t child_ino = 0, blk = 0, off = 0;
+    uint8_t ft = 0;
+    int rc = ext2_find_dirent(fs, dir_ino, name, &child_ino, &ft, &blk, &off);
+    if (rc != 0) {
+        spin_unlock(&fs->lock);
+        kfree(child->name);
+        kfree(child);
+        return rc;
+    }
+
+    ext2_inode_t disk_ino;
+    if (ext2_read_inode(fs, child_ino, &disk_ino) != 0) {
+        spin_unlock(&fs->lock);
+        kfree(child->name);
+        kfree(child);
+        return -EIO;
     }
 
     switch (ft) {
@@ -1615,6 +1765,11 @@ static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
     child->i_ops    = &ext2_iops;
     child->f_ops    = &ext2_fops;
     child->refcount = 1;
+
+    vfs_active_node_register(child);
+
+    spin_unlock(&fs->lock);
+
     *out = child;
     return 0;
 }
@@ -1641,18 +1796,58 @@ static int ext2_iop_getattr(struct vfs_node *node, struct stat *buf)
     return 0;
 }
 
+static void ext2_iop_evict_node(struct vfs_node *node)
+{
+    if (!node || !node->mount) return;
+    if (node == node->mount->root || (node->node_flags & VFS_NODE_MOUNT_STUB)) {
+        vfs_active_node_unregister(node);
+        return;
+    }
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+    if (!fs) return;
+
+    uint32_t ino = (uint32_t)node->ino;
+    bool should_reclaim = false;
+
+    spin_lock(&fs->lock);
+    spin_lock(&node->mount->active_lock);
+
+    vfs_active_node_unregister_locked(node->mount, node);
+
+    bool other_active = vfs_active_nodes_has_ino_locked(node->mount, ino, NULL);
+    if (!other_active &&
+        ((node->node_flags & VFS_NODE_ORPHANED) || ext2_is_orphan_locked(fs, ino))) {
+        if (!ext2_is_orphan_locked(fs, ino)) {
+            ext2_mark_orphan_locked(fs, ino);
+        }
+        if (ext2_claim_orphan_reclaim_locked(fs, ino)) {
+            should_reclaim = true;
+        } else if (!ext2_is_orphan_locked(fs, ino)) {
+            // If orphans table was full and mark failed, reclaim directly as sole reclaimer
+            should_reclaim = true;
+        }
+    }
+    spin_unlock(&node->mount->active_lock);
+
+    if (should_reclaim) {
+        ext2_reclaim_orphan_inode_locked(fs, ino);
+    }
+    spin_unlock(&fs->lock);
+}
+
 // ── VFS operations table ────────────────────────────────
 const vfs_inode_ops_t ext2_iops = {
-    .lookup   = ext2_iop_lookup,
-    .getattr  = ext2_iop_getattr,
-    .readlink = ext2_vfs_readlink,
-    .symlink  = ext2_vfs_symlink,
-    .create   = ext2_vfs_create,
-    .unlink   = ext2_vfs_unlink,
-    .mkdir    = ext2_vfs_mkdir,
-    .rmdir    = ext2_vfs_rmdir,
-    .rename   = ext2_vfs_rename,
-    .truncate = ext2_vfs_truncate,
+    .lookup     = ext2_iop_lookup,
+    .getattr    = ext2_iop_getattr,
+    .readlink   = ext2_vfs_readlink,
+    .symlink    = ext2_vfs_symlink,
+    .create     = ext2_vfs_create,
+    .unlink     = ext2_vfs_unlink,
+    .mkdir      = ext2_vfs_mkdir,
+    .rmdir      = ext2_vfs_rmdir,
+    .rename     = ext2_vfs_rename,
+    .truncate   = ext2_vfs_truncate,
+    .evict_node = ext2_iop_evict_node,
 };
 
 const vfs_file_ops_t ext2_fops = {

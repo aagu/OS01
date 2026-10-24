@@ -2,8 +2,10 @@
 #define _FS_FAT_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
+#include <arch/spinlock.h>
 
 // ── FAT32 BIOS Parameter Block ────────────────────────────
 typedef struct {
@@ -81,15 +83,39 @@ typedef struct {
 #define FAT32_EOC_MAX           0x0FFFFFFF
 #define FAT32_CLUSTER_MASK      0x0FFFFFFF
 
+// ── Shared FAT file object (Spec §5.5, §7.1) ─────────────
+#define FAT_OBJECT_ID_BASE (1ULL << 32)
+
+typedef struct fat_file_object {
+    uint64_t                object_id;
+    uint32_t                first_cluster;
+    uint32_t                size;
+    uint32_t                parent_cluster;
+    uint64_t                dirent_lba;
+    uint32_t                dirent_offset;
+    uint8_t                 attr;
+    bool                    linked;
+    bool                    orphaned;
+    bool                    reclaiming;
+    uint32_t                handle_count;
+    struct fat_file_object *next;
+} fat_file_object_t;
+
 // ── FAT32 filesystem private data ─────────────────────────
 typedef struct {
-    block_device_t *dev;
-    FAT32_BPB       bpb;
-    uint32_t        fat_start_sector;     // absolute LBA of first FAT
-    uint32_t        first_data_sector;    // absolute LBA of cluster 2
-    uint32_t        sectors_per_cluster;
-    uint16_t        bytes_per_sector;
-    uint32_t        root_cluster;
+    block_device_t    *dev;
+    FAT32_BPB          bpb;
+    uint32_t           fat_start_sector;     // absolute LBA of first FAT
+    uint32_t           first_data_sector;    // absolute LBA of cluster 2
+    uint32_t           sectors_per_cluster;
+    uint16_t           bytes_per_sector;
+    uint32_t           root_cluster;
+    spinlock_T         fat_lifecycle_lock;
+    uint64_t           next_object_id;
+    fat_file_object_t *file_objects;
+#ifdef OS01_HOST_TEST
+    uint32_t           test_reclaim_count;
+#endif
 } fat32_fs_t;
 
 // ── FAT32 API ─────────────────────────────────────────────
