@@ -107,19 +107,30 @@ typedef struct __attribute__((packed)) {
 } ext2_dirent_t;
 
 // ── Runtime filesystem context ─────────────────────────
+#define EXT2_MAX_ORPHANS 64
+
 typedef struct {
-    block_device_t   *dev;
-    uint32_t          block_size;
-    uint32_t          sectors_per_block;
-    uint32_t          inodes_per_group;
-    uint32_t          blocks_per_group;
-    uint32_t          num_block_groups;
-    uint32_t          inode_size;
-    ext2_bgdesc_t    *bgdesc_table;
-    spinlock_T        lock;        // ★ spinlock_T (capital T), see spinlock.h:10
-    ext2_superblock_t sb_raw;              // cached superblock for writeback
-    uint32_t          bgdesc_block;         // bgdesc table start block number
-    uint32_t          bgdesc_table_blocks;  // number of blocks in bgdesc table
+    uint32_t ino;
+    uint8_t  state; // 0 = unused, 1 = orphaned_pending, 2 = reclaiming
+} ext2_orphan_slot_t;
+
+typedef struct {
+    block_device_t    *dev;
+    uint32_t           block_size;
+    uint32_t           sectors_per_block;
+    uint32_t           inodes_per_group;
+    uint32_t           blocks_per_group;
+    uint32_t           num_block_groups;
+    uint32_t           inode_size;
+    ext2_bgdesc_t     *bgdesc_table;
+    spinlock_T         lock;        // ★ spinlock_T (capital T), see spinlock.h:10
+    ext2_superblock_t  sb_raw;              // cached superblock for writeback
+    uint32_t           bgdesc_block;         // bgdesc table start block number
+    uint32_t           bgdesc_table_blocks;  // number of blocks in bgdesc table
+    ext2_orphan_slot_t orphans[EXT2_MAX_ORPHANS];
+#ifdef OS01_HOST_TEST
+    uint32_t           test_reclaim_count;
+#endif
 } ext2_fs_t;
 
 // ── API ────────────────────────────────────────────────
