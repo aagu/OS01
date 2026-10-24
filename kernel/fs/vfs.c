@@ -1,4 +1,5 @@
 #include <fs/vfs.h>
+#include <stdbool.h>
 #include <core/debug.h>
 #include <core/printk.h>
 #include <memory/slab.h>
@@ -10,9 +11,27 @@
 
 // ── Mount table ───────────────────────────────────────────
 static vfs_mount_t *mount_list = NULL;
-static int mount_count = 0;
+static int mount_count __attribute__((unused)) = 0;
 static int vfs_initialized = 0;
 static rwlock_t mount_lock;
+
+#define VFS_MAX_FS_TYPES 16
+static vfs_fs_type_t *fs_type_list = NULL;
+static rwlock_t fs_type_lock;
+struct vfs_fs_usage_slot {
+    const vfs_fs_type_t *type;
+    uint32_t             active_count;
+};
+static struct vfs_fs_usage_slot fs_type_usage[VFS_MAX_FS_TYPES];
+
+static inline bool vfs_is_valid_kptr(const void *p)
+{
+#ifdef OS01_HOST_TEST
+    return p != NULL;
+#else
+    return (uintptr_t)p >= 0xffff800000000000ULL;
+#endif
+}
 
 // ── Helpers ────────────────────────────────────────────────
 // Case-insensitive string compare — FAT32 stores 8.3 names in
@@ -35,6 +54,11 @@ void vfs_init(void)
     mount_list = NULL;
     mount_count = 0;
     rwlock_init(&mount_lock);
+
+    fs_type_list = NULL;
+    memset(fs_type_usage, 0, sizeof(fs_type_usage));
+    rwlock_init(&fs_type_lock);
+
     vfs_initialized = 1;
     debug_vfs("VFS: initialized\n");
 }
@@ -87,6 +111,232 @@ int vfs_mount(const char *path, block_device_t *dev,
     mount_count++;
     rwlock_write_unlock(&mount_lock);
     debug_vfs("VFS: mounted '%s'\n", path);
+    return 0;
+}
+
+// ── Filesystem type registry ──────────────────────────────
+
+static void vfs_drop_fs_type_usage(const vfs_fs_type_t *type)
+{
+    rwlock_write_lock(&fs_type_lock);
+    for (int i = 0; i < VFS_MAX_FS_TYPES; i++) {
+        if (fs_type_usage[i].type == type) {
+            if (fs_type_usage[i].active_count > 0) {
+                fs_type_usage[i].active_count--;
+            }
+            break;
+        }
+    }
+    rwlock_write_unlock(&fs_type_lock);
+}
+
+int vfs_register_filesystem(vfs_fs_type_t *fs_type)
+{
+    if (!fs_type || !fs_type->name || fs_type->name[0] == '\0' || !fs_type->mount) {
+        return -EINVAL;
+    }
+
+    rwlock_write_lock(&fs_type_lock);
+
+    for (vfs_fs_type_t *cur = fs_type_list; cur; cur = cur->next) {
+        if (strcmp(cur->name, fs_type->name) == 0) {
+            rwlock_write_unlock(&fs_type_lock);
+            return -EEXIST;
+        }
+    }
+
+    int free_slot = -1;
+    for (int i = 0; i < VFS_MAX_FS_TYPES; i++) {
+        if (fs_type_usage[i].type == NULL) {
+            free_slot = i;
+            break;
+        }
+    }
+    if (free_slot < 0) {
+        rwlock_write_unlock(&fs_type_lock);
+        return -ENOMEM;
+    }
+
+    fs_type_usage[free_slot].type = fs_type;
+    fs_type_usage[free_slot].active_count = 0;
+
+    fs_type->next = fs_type_list;
+    fs_type_list = fs_type;
+
+    rwlock_write_unlock(&fs_type_lock);
+    return 0;
+}
+
+const vfs_fs_type_t *vfs_find_filesystem(const char *name)
+{
+    if (!name || name[0] == '\0') {
+        return NULL;
+    }
+
+    rwlock_read_lock(&fs_type_lock);
+    const vfs_fs_type_t *match = NULL;
+    for (const vfs_fs_type_t *cur = fs_type_list; cur; cur = cur->next) {
+        if (strcmp(cur->name, name) == 0) {
+            match = cur;
+            break;
+        }
+    }
+    rwlock_read_unlock(&fs_type_lock);
+    return match;
+}
+
+int vfs_unregister_filesystem(const char *name)
+{
+    if (!name || name[0] == '\0') {
+        return -EINVAL;
+    }
+
+    rwlock_write_lock(&fs_type_lock);
+
+    vfs_fs_type_t **prev = &fs_type_list;
+    vfs_fs_type_t *target = NULL;
+    while (*prev) {
+        if (strcmp((*prev)->name, name) == 0) {
+            target = *prev;
+            break;
+        }
+        prev = &(*prev)->next;
+    }
+
+    if (!target) {
+        rwlock_write_unlock(&fs_type_lock);
+        return -ENOENT;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < VFS_MAX_FS_TYPES; i++) {
+        if (fs_type_usage[i].type == target) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot >= 0 && fs_type_usage[slot].active_count > 0) {
+        rwlock_write_unlock(&fs_type_lock);
+        return -EBUSY;
+    }
+
+    *prev = target->next;
+    target->next = NULL;
+
+    if (slot >= 0) {
+        fs_type_usage[slot].type = NULL;
+        fs_type_usage[slot].active_count = 0;
+    }
+
+    rwlock_write_unlock(&fs_type_lock);
+    return 0;
+}
+
+int vfs_mount_fs(const char *type_name, const char *path,
+                 block_device_t *dev, void *data)
+{
+    if (!type_name || type_name[0] == '\0' || !path || path[0] != '/') {
+        return -EINVAL;
+    }
+
+    if (!vfs_initialized) {
+        vfs_init();
+    }
+
+    rwlock_write_lock(&fs_type_lock);
+    vfs_fs_type_t *fs_type = NULL;
+    for (vfs_fs_type_t *cur = fs_type_list; cur; cur = cur->next) {
+        if (strcmp(cur->name, type_name) == 0) {
+            fs_type = cur;
+            break;
+        }
+    }
+
+    if (!fs_type) {
+        rwlock_write_unlock(&fs_type_lock);
+        return -ENODEV;
+    }
+
+    if ((fs_type->fs_flags & VFS_FS_REQUIRES_DEV) && !dev) {
+        rwlock_write_unlock(&fs_type_lock);
+        return -EINVAL;
+    }
+
+    for (int i = 0; i < VFS_MAX_FS_TYPES; i++) {
+        if (fs_type_usage[i].type == fs_type) {
+            fs_type_usage[i].active_count++;
+            break;
+        }
+    }
+    rwlock_write_unlock(&fs_type_lock);
+
+    char *path_copy = strdup(path);
+    if (!path_copy) {
+        vfs_drop_fs_type_usage(fs_type);
+        return -ENOMEM;
+    }
+
+    vfs_mount_t *mp = (vfs_mount_t *)calloc(1, sizeof(vfs_mount_t));
+    if (!mp) {
+        kfree(path_copy);
+        vfs_drop_fs_type_usage(fs_type);
+        return -ENOMEM;
+    }
+
+    mp->root = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!mp->root) {
+        kfree(path_copy);
+        kfree(mp);
+        vfs_drop_fs_type_usage(fs_type);
+        return -ENOMEM;
+    }
+
+    mp->root->name = strdup("/");
+    if (!mp->root->name) {
+        kfree(mp->root);
+        kfree(path_copy);
+        kfree(mp);
+        vfs_drop_fs_type_usage(fs_type);
+        return -ENOMEM;
+    }
+
+    mp->dev = dev;
+    mp->fs_type = fs_type;
+    mp->mnt_flags = fs_type->fs_flags;
+    mp->path = path_copy;
+    mp->root->mount = mp;
+    mp->root->type = VFS_DIR;
+    mp->root->refcount = 1;
+
+    int rc = fs_type->mount(mp, dev, data);
+    if (rc < 0 || !mp->root) {
+        if (mp->root) {
+            if (mp->root->name) {
+                kfree(mp->root->name);
+            }
+            kfree(mp->root);
+        }
+        kfree(path_copy);
+        kfree(mp);
+        vfs_drop_fs_type_usage(fs_type);
+        return rc < 0 ? rc : -EIO;
+    }
+
+    mp->root->mount = mp;
+    if (mp->ops && !mp->root->ops) {
+        mp->root->ops = mp->ops;
+    } else if (!mp->ops && mp->root->ops) {
+        mp->ops = mp->root->ops;
+    }
+
+    rwlock_write_lock(&mount_lock);
+    mp->next = mount_list;
+    mount_list = mp;
+    mount_count++;
+    rwlock_write_unlock(&mount_lock);
+
+    debug_vfs("VFS: mounted '%s' (type %s)\n", path, type_name);
     return 0;
 }
 
@@ -198,7 +448,7 @@ static vfs_mount_t *find_mount(const char *path)
         // fork/exec loop — kernel-heap / PMM bug).  A legitimate mount
         // entry pointer is a kernel-high-half address (above PAGE_OFFSET);
         // anything below is user space or zero-page garbage.
-        if ((unsigned long)mp < 0xffff800000000000UL) {
+        if (!vfs_is_valid_kptr(mp)) {
             log_err("VFS: find_mount: CORRUPT mp=%p path=%p "
                     "iter=%d\n",
                     (void *)mp, (const void *)path, _iter);
@@ -390,9 +640,8 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
             }
             if (entry.name[0] == '\0') break;
             int match;
-            if (cur->ops &&
-                (uint64_t)cur->ops >= 0xffff800000000000ULL &&
-                (cur->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+            if ((cur->mount && (cur->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE)) ||
+                (cur->ops && vfs_is_valid_kptr(cur->ops) && (cur->ops->flags & VFS_OPS_CASE_INSENSITIVE)))
                 match = (vfs_name_cmp(entry.name, comp) == 0);
             else
                 match = (strcmp(entry.name, comp) == 0);
@@ -777,11 +1026,11 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
 // ── Read ──────────────────────────────────────────────────
 int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !node->ops || (uint64_t)node->ops < 0xffff800000000000ULL)
+    if (!node || !node->ops || !vfs_is_valid_kptr(node->ops))
         return -1;
     if (!node->ops->read)
         return -1;
-    if ((uint64_t)node->ops->read < 0xffff800000000000ULL)
+    if (!vfs_is_valid_kptr(node->ops->read))
         return -1;
     return node->ops->read(node, offset, size, buffer);
 }
@@ -789,11 +1038,11 @@ int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 // ── Write ─────────────────────────────────────────────────
 int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !node->ops || (uint64_t)node->ops < 0xffff800000000000ULL)
+    if (!node || !node->ops || !vfs_is_valid_kptr(node->ops))
         return -1;
     if (!node->ops->write)
         return -1;
-    if ((uint64_t)node->ops->write < 0xffff800000000000ULL)
+    if (!vfs_is_valid_kptr(node->ops->write))
         return -1;
     return node->ops->write(node, offset, size, buffer);
 }
@@ -801,11 +1050,11 @@ int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 // ── Read directory ────────────────────────────────────────
 int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 {
-    if (!dir || !dir->ops || (uint64_t)dir->ops < 0xffff800000000000ULL)
+    if (!dir || !dir->ops || !vfs_is_valid_kptr(dir->ops))
         return -1;
     if (!dir->ops->readdir)
         return -1;
-    if ((uint64_t)dir->ops->readdir < 0xffff800000000000ULL)
+    if (!vfs_is_valid_kptr(dir->ops->readdir))
         return -1;
     return dir->ops->readdir(dir, index, entry);
 }
@@ -971,8 +1220,8 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
     for (int i = 0; i < total - 1; i++) {
         for (int j = 0; j < total - 1 - i; j++) {
             int cmp;
-            if (dir->ops && (uint64_t)dir->ops >= 0xffff800000000000ULL &&
-                (dir->ops->flags & VFS_OPS_CASE_INSENSITIVE))
+            if ((dir->mount && (dir->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE)) ||
+                (dir->ops && vfs_is_valid_kptr(dir->ops) && (dir->ops->flags & VFS_OPS_CASE_INSENSITIVE)))
                 cmp = vfs_name_cmp(entries[j].name, entries[j + 1].name);
             else
                 cmp = strcmp(entries[j].name, entries[j + 1].name);
@@ -1108,11 +1357,11 @@ int vfs_unlink(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) return -ENOENT;
     if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->unlink) {
+    if (!parent->ops || !vfs_is_valid_kptr(parent->ops) || !parent->ops->unlink) {
         vfs_node_put(parent);
         return -EROFS;
     }
-    if ((uint64_t)parent->ops->unlink < 0xffff800000000000ULL) {
+    if (!vfs_is_valid_kptr(parent->ops->unlink)) {
         vfs_node_put(parent);
         return -1;
     }
@@ -1134,11 +1383,11 @@ int vfs_mkdir(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) return -ENOENT;
     if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->mkdir) {
+    if (!parent->ops || !vfs_is_valid_kptr(parent->ops) || !parent->ops->mkdir) {
         vfs_node_put(parent);
         return -EROFS;
     }
-    if ((uint64_t)parent->ops->mkdir < 0xffff800000000000ULL) {
+    if (!vfs_is_valid_kptr(parent->ops->mkdir)) {
         vfs_node_put(parent);
         return -1;
     }
@@ -1164,11 +1413,11 @@ int vfs_rmdir(const char *path, const char *cwd)
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
     if (!parent) return -ENOENT;
     if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->rmdir) {
+    if (!parent->ops || !vfs_is_valid_kptr(parent->ops) || !parent->ops->rmdir) {
         vfs_node_put(parent);
         return -EROFS;
     }
-    if ((uint64_t)parent->ops->rmdir < 0xffff800000000000ULL) {
+    if (!vfs_is_valid_kptr(parent->ops->rmdir)) {
         vfs_node_put(parent);
         return -1;
     }
@@ -1210,12 +1459,12 @@ int vfs_rename(const char *oldpath, const char *newpath, const char *cwd)
 
     kfree(parents);
 
-    if (!olddir->ops || (uint64_t)olddir->ops < 0xffff800000000000ULL || !olddir->ops->rename) {
+    if (!olddir->ops || !vfs_is_valid_kptr(olddir->ops) || !olddir->ops->rename) {
         vfs_node_put(olddir);
         vfs_node_put(newdir);
         return -EROFS;
     }
-    if ((uint64_t)olddir->ops->rename < 0xffff800000000000ULL) {
+    if (!vfs_is_valid_kptr(olddir->ops->rename)) {
         vfs_node_put(olddir);
         vfs_node_put(newdir);
         return -1;
@@ -1232,8 +1481,8 @@ int vfs_truncate(vfs_node_t *node, uint64_t new_size)
 {
     if (!node) return -EINVAL;
     if (node->type != VFS_FILE) return -EISDIR;
-    if (!node->ops || (uint64_t)node->ops < 0xffff800000000000ULL || !node->ops->truncate) return -EROFS;
-    if ((uint64_t)node->ops->truncate < 0xffff800000000000ULL)
+    if (!node->ops || !vfs_is_valid_kptr(node->ops) || !node->ops->truncate) return -EROFS;
+    if (!vfs_is_valid_kptr(node->ops->truncate))
         return -1;
 
     return node->ops->truncate(node, new_size);

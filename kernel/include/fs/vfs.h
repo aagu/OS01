@@ -32,6 +32,7 @@ typedef enum {
 struct vfs_node;
 struct vfs_mount;
 struct vfs_dirent;
+struct vfs_fs_type;
 struct vma;
 struct file;
 
@@ -107,14 +108,29 @@ typedef struct vfs_ops {
     void (*release_file)(struct file *f);
 } vfs_ops_t;
 
+// ── Filesystem type registration ──────────────────────────
+#define VFS_FS_REQUIRES_DEV      (1u << 0)
+#define VFS_FS_CASE_INSENSITIVE  (1u << 1)
+#define VFS_FS_NO_DCACHE         (1u << 2)
+
+typedef struct vfs_fs_type {
+    const char         *name;
+    uint32_t            fs_flags;
+    int               (*mount)(struct vfs_mount *mp, block_device_t *dev, void *data);
+    void              (*unmount)(struct vfs_mount *mp);
+    struct vfs_fs_type *next;
+} vfs_fs_type_t;
+
 // ── A mounted filesystem instance ─────────────────────────
 typedef struct vfs_mount {
-    block_device_t    *dev;
-    const char        *path;          // mount point path
-    struct vfs_node   *root;          // root node of this filesystem
-    struct vfs_ops    *ops;
-    void              *fs_data;       // filesystem-private data
-    struct vfs_mount  *next;          // linked list (mount order)
+    block_device_t            *dev;
+    const char                *path;          // mount point path
+    struct vfs_node           *root;          // root node of this filesystem
+    struct vfs_ops            *ops;
+    void                      *fs_data;       // filesystem-private data
+    const struct vfs_fs_type  *fs_type;
+    uint32_t                   mnt_flags;
+    struct vfs_mount          *next;          // linked list (mount order)
 } vfs_mount_t;
 
 // ── Directory entry returned by readdir ───────────────────
@@ -143,7 +159,13 @@ typedef struct vfs_node {
 
 void vfs_init(void);
 
-// Mount a filesystem from a block device
+int                 vfs_register_filesystem(vfs_fs_type_t *fs_type);
+int                 vfs_unregister_filesystem(const char *name);
+const vfs_fs_type_t *vfs_find_filesystem(const char *name);
+int                 vfs_mount_fs(const char *type_name, const char *path,
+                                 block_device_t *dev, void *data);
+
+// Mount a filesystem from a block device (transitional compatibility)
 int vfs_mount(const char *path, block_device_t *dev,
               vfs_ops_t *ops, void *fs_data);
 

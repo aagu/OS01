@@ -68,6 +68,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
     $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
+    $(TEST_BLD)/test_vfs_fs_registry.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_pmm_ram_rel_index.elf \
@@ -540,6 +541,29 @@ $(TEST_BLD)/test_libc_getopt.elf: $(TEST_BLD)/test_libc_getopt.o $(LIBC_OBJS)
 
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
+
+VFS_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/vfs_test_runtime.h \
+    -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/vfs_production.o: $(TESTS_DIR)/kernel/fs/vfs.c \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_vfs_fs_registry.o: $(TEST_CASES)/test_vfs_fs_registry.c \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vfs_fs_registry.elf: $(TEST_BLD)/test_vfs_fs_registry.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/rwlock.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 $(TEST_BLD)/test_fat32_basic.elf: $(TEST_BLD)/test_fat32_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
