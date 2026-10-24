@@ -99,17 +99,13 @@
 #define WIDGET_TEXTAREA2   0x05u
 #define WIDGET_DISABLED    0x06u
 
-/* Fixed colours: the focus outline is painted by libgui with this exact
- * value so the runner can sample it from a screenshot.  The probe only
- * asserts that the constants it inherits are the expected ones.
- *
- * The pointer cursor is an **image resource** (16x24 ARGB8888): its colours
- * are baked into the pixels, so there is no single cursor colour constant to
- * compare against here.  The two baked colours are pinned by the host
- * contract test (hosttests/cases/test_gui_input_lvgl.c), which asserts the
- * resource pixels against libgui's own GUI_INPUT_CURSOR_FILL_COLOR /
- * GUI_INPUT_CURSOR_OUTLINE_COLOR. */
+/* Fixed colours: the focus outline and the pointer cursor are painted by
+ * libgui with these exact values so the runner can sample them from a
+ * screenshot.  The probe only asserts that the constants it inherits are
+ * the expected ones. */
 #define PROBE_OUTLINE_COLOR 0x00FF00u
+#define PROBE_CURSOR_FILL_COLOR    0x001A1C1Eu
+#define PROBE_CURSOR_OUTLINE_COLOR 0x00FDFCFFu
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Small helpers
@@ -1295,8 +1291,10 @@ int main(int argc, char **argv)
         rc = fail(1, errno, "focus_add"); goto cleanup;
     }
 
-    /* The fixed outline colour comes from libgui. */
-    if (GUI_INPUT_FOCUS_OUTLINE_COLOR != PROBE_OUTLINE_COLOR) {
+    /* The fixed outline / cursor colours come from libgui. */
+    if (GUI_INPUT_FOCUS_OUTLINE_COLOR != PROBE_OUTLINE_COLOR ||
+        GUI_INPUT_CURSOR_FILL_COLOR != PROBE_CURSOR_FILL_COLOR ||
+        GUI_INPUT_CURSOR_OUTLINE_COLOR != PROBE_CURSOR_OUTLINE_COLOR) {
         rc = fail(1, EINVAL, "outline_or_cursor_color"); goto cleanup;
     }
 

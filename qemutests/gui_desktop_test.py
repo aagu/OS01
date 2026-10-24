@@ -82,12 +82,18 @@ MIN_DISTINCT_COLORS = 5
 # （1440x40 / 1440x900 ≈ 4%），2% 干净地把两者分开。
 MIN_SURFACE_DIFF = 0.02
 
-# Material 的页面底色（令牌表的 surface 角色：#FDFCFF）。桌面接管显示后，
-# 壁纸把整块屏幕刷成这个颜色 —— 这是「桌面真的画出来了」的可判据。
-MATERIAL_SURFACE_RGB = (253, 252, 255)
+# 桌面壁纸底色：令牌表的 surface_dim 角色（#D8D2E4）。桌面接管显示后
+# 会把整块屏幕刷成这个颜色 —— 这就是「桌面真的接管了显示」的判据。
+WALLPAPER_RGB = (216, 210, 228)
 
-# 画面里 Material 底色的占比下限（桌面接管后应接近 1.0）。
+# 画面里壁纸底色的占比下限（桌面接管后应接近 0.918）。
 MIN_MATERIAL_FRACTION = 0.5
+
+# 指针光标是 16x24，热点在左上角。门禁从不移动鼠标（只注入按键），所以
+# 指针恒在屏幕正中 —— 而正中落在空白壁纸区（欢迎卡片在上方、启动器条
+# 在下方）。
+CURSOR_BOX_W = 16
+CURSOR_BOX_H = 24
 
 
 def distinct_colors(surface: Surface, step: int = 4) -> int:
@@ -100,7 +106,7 @@ def distinct_colors(surface: Surface, step: int = 4) -> int:
 
 
 def material_fraction(surface: Surface, step: int = 4) -> float:
-    """画面里 Material 页面底色的占比（抽样统计）。"""
+    """画面里壁纸底色的占比（抽样统计）。"""
     if surface.height == 0 or surface.width == 0:
         return 0.0
     hit = 0
@@ -108,9 +114,31 @@ def material_fraction(surface: Surface, step: int = 4) -> float:
     for y in range(0, surface.height, step):
         for x in range(0, surface.width, step):
             total += 1
-            if surface.pixel(x, y) == MATERIAL_SURFACE_RGB:
+            if surface.pixel(x, y) == WALLPAPER_RGB:
                 hit += 1
     return hit / total if total else 0.0
+
+
+def cursor_visible(surface: Surface) -> bool:
+    """屏幕中心的窗口里既有比壁纸更暗的像素，也有比壁纸更亮的像素。
+
+    光标是深色箭头 + 浅色描边，所以它的窗口里必须两者都有。旧光标是
+    纯白：窗口里没有更暗的像素 —— 这条判据因此能抓到回归。
+    """
+    x0 = surface.width // 2
+    y0 = surface.height // 2
+    darker = False
+    lighter = False
+    for y in range(y0, min(y0 + CURSOR_BOX_H, surface.height)):
+        for x in range(x0, min(x0 + CURSOR_BOX_W, surface.width)):
+            r, _g, b = surface.pixel(x, y)
+            if r < WALLPAPER_RGB[0]:
+                darker = True
+            if b > WALLPAPER_RGB[2]:
+                lighter = True
+            if darker and lighter:
+                return True
+    return False
 
 
 def qmp_key_event(down: bool, qcode: str) -> dict:
@@ -407,6 +435,11 @@ class DesktopCaseRunner:
                     reasons, outcomes, case_name,
                     f"the desktop never took over the screen: the Material "
                     f"background covers only {fraction:.1%} of it",
+                )
+            if not cursor_visible(home):
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    "the pointer cursor is not visible on the wallpaper",
                 )
             if is_fault_pure_color(home):
                 return self._fail(reasons, outcomes, case_name,
