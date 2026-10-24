@@ -71,6 +71,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_vfs_fs_registry.elf \
     $(TEST_BLD)/test_vfs_iops_fops.elf \
     $(TEST_BLD)/test_vfs_mount_tree.elf \
+    $(TEST_BLD)/test_vfs_dcache.elf \
     $(TEST_BLD)/test_fat32_basic.elf \
     $(TEST_BLD)/test_pmm_basic.elf \
     $(TEST_BLD)/test_pmm_ram_rel_index.elf \
@@ -629,6 +630,23 @@ $(TEST_BLD)/test_vfs_mount_tree.o: $(TEST_CASES)/test_vfs_mount_tree.c \
 	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
 $(TEST_BLD)/test_vfs_mount_tree.elf: $(TEST_BLD)/test_vfs_mount_tree.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/fat_production.o \
+		$(TEST_BLD)/tmpfs_production.o \
+		$(TEST_BLD)/devfs_vfs_production.o \
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(TEST_BLD)/rwlock.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+$(TEST_BLD)/test_vfs_dcache.o: $(TEST_CASES)/test_vfs_dcache.c \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vfs_dcache.elf: $(TEST_BLD)/test_vfs_dcache.o \
 		$(TEST_BLD)/vfs_production.o \
 		$(TEST_BLD)/ext2_production.o \
 		$(TEST_BLD)/fat_production.o \
