@@ -91,6 +91,29 @@ int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
  * receives IS the devfs mount's vfs_ops — the table that carries the
  * read_file bridge the production fd_read path dispatches through. */
 static vfs_ops_t *devfs_mount_ops;
+static vfs_fs_type_t *s_registered_devfs_type;
+int vfs_register_filesystem(vfs_fs_type_t *fs_type)
+{
+    s_registered_devfs_type = fs_type;
+    return 0;
+}
+int vfs_mount_fs(const char *type_name, const char *path,
+                 block_device_t *dev, void *data)
+{
+    (void)type_name;
+    vfs_node_t dummy_root;
+    vfs_mount_t dummy_mp;
+    memset(&dummy_root, 0, sizeof(dummy_root));
+    memset(&dummy_mp, 0, sizeof(dummy_mp));
+    dummy_mp.path = path;
+    dummy_mp.root = &dummy_root;
+    if (s_registered_devfs_type && s_registered_devfs_type->mount) {
+        int rc = s_registered_devfs_type->mount(&dummy_mp, dev, data);
+        if (rc < 0) return rc;
+        devfs_mount_ops = dummy_mp.ops;
+    }
+    return 0;
+}
 int vfs_mount(const char *path, block_device_t *dev, vfs_ops_t *ops,
               void *fs_data)
 {

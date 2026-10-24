@@ -17,6 +17,7 @@
 #include <memory/slab.h>      // kmalloc, kfree
 #include <string.h>
 #include <stdlib.h>          // calloc
+#include <errno.h>
 
 #define TMPFS_CHILDREN_INIT_CAP 8
 
@@ -427,26 +428,50 @@ static struct vfs_ops tmpfs_vfs_ops = {
 //  Initialization
 // ═══════════════════════════════════════════════════════════════════
 
-void tmpfs_init(void)
+static int tmpfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
 {
+    (void)dev;
+    (void)data;
     tmpfs_node_t *root = calloc(1, sizeof(tmpfs_node_t));
     if (!root) {
         debug_fs("tmpfs: root allocation failed\n");
-        return;
+        return -ENOMEM;
     }
     root->type = VFS_DIR;
     strcpy(root->name, "/");
-    root->children  = kmalloc(TMPFS_CHILDREN_INIT_CAP * sizeof(tmpfs_node_t *));
+    root->children = kmalloc(TMPFS_CHILDREN_INIT_CAP * sizeof(tmpfs_node_t *));
     if (!root->children) {
         kfree(root);
         debug_fs("tmpfs: children array allocation failed\n");
-        return;
+        return -ENOMEM;
     }
     root->child_cap = TMPFS_CHILDREN_INIT_CAP;
     root->parent    = NULL;
 
-    vfs_mount("/tmp", NULL, &tmpfs_vfs_ops, root);
-    debug_fs("tmpfs: mounted at /tmp\n");
+    mp->ops = &tmpfs_vfs_ops;
+    mp->fs_data = root;
+    mp->root->ops = &tmpfs_vfs_ops;
+    return 0;
+}
+
+static vfs_fs_type_t tmpfs_fs_type = {
+    .name     = "tmpfs",
+    .fs_flags = 0,
+    .mount    = tmpfs_fs_mount,
+    .unmount  = NULL,
+};
+
+int tmpfs_register_fs(void)
+{
+    return vfs_register_filesystem(&tmpfs_fs_type);
+}
+
+void tmpfs_init(void)
+{
+    tmpfs_register_fs();
+    if (vfs_mount_fs("tmpfs", "/tmp", NULL, NULL) == 0) {
+        debug_fs("tmpfs: mounted at /tmp\n");
+    }
 }
 
 #ifdef OS01_SELFTEST

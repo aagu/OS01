@@ -639,13 +639,37 @@ const struct devfs_ops tty_magic_ops = {
     .ioctl = tty_phys_ioctl,
 };
 
+static int devfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
+{
+    (void)dev;
+    (void)data;
+    mp->ops = &devfs_ops;
+    mp->fs_data = NULL;
+    mp->root->ops = &devfs_ops;
+    return 0;
+}
+
+static vfs_fs_type_t devfs_fs_type = {
+    .name     = "devfs",
+    .fs_flags = VFS_FS_NO_DCACHE,
+    .mount    = devfs_fs_mount,
+    .unmount  = NULL,
+};
+
+int devfs_register_fs(void)
+{
+    return vfs_register_filesystem(&devfs_fs_type);
+}
+
 void devfs_init(void)
 {
     memset(devices, 0, sizeof(devices));
     device_count = 0;
 
+    devfs_register_fs();
+
     // Mount devfs at /dev
-    int ret = vfs_mount("/dev", NULL, &devfs_ops, NULL);
+    int ret = vfs_mount_fs("devfs", "/dev", NULL, NULL);
     if (ret == 0) {
         debug_fs("devfs: mounted at /dev\n");
     } else {

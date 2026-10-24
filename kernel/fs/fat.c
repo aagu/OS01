@@ -1345,3 +1345,29 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
     *out_fs = fs;
     return 0;
 }
+
+static int fat_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
+{
+    (void)data;
+    fat32_fs_t *fs = NULL;
+    int rc = fat32_init(dev, &fs);
+    if (rc != 0) {
+        return rc < 0 ? rc : -EIO;
+    }
+    mp->ops = &fat_vfs_ops;
+    mp->fs_data = fs;
+    mp->root->ops = &fat_vfs_ops;
+    return 0;
+}
+
+static vfs_fs_type_t fat_fs_type = {
+    .name     = "vfat",
+    .fs_flags = VFS_FS_REQUIRES_DEV | VFS_FS_CASE_INSENSITIVE,
+    .mount    = fat_fs_mount,
+    .unmount  = NULL,
+};
+
+int fat_register_fs(void)
+{
+    return vfs_register_filesystem(&fat_fs_type);
+}

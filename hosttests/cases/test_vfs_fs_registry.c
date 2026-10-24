@@ -11,11 +11,28 @@ void _log_write(int level, const char *fmt, ...) { (void)level; (void)fmt; }
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
 
+static vfs_ops_t s_dummy_ops = {0};
+
+int block_device_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
+{ (void)dev; (void)lba; (void)count; (void)buf; return -EIO; }
+int block_device_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *buf)
+{ (void)dev; (void)lba; (void)count; (void)buf; return -EIO; }
+uint64_t alloc_4k_page(void) { return (uint64_t)(uintptr_t)calloc(1, 4096); }
+void free_4k_page(uint64_t addr) { free((void *)(uintptr_t)addr); }
+
+static int host_procfs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
+{ (void)dev; (void)data; mp->ops = &s_dummy_ops; mp->root->ops = &s_dummy_ops; return 0; }
+static vfs_fs_type_t s_host_procfs_type = {
+    .name     = "procfs",
+    .fs_flags = VFS_FS_NO_DCACHE,
+    .mount    = host_procfs_mount,
+};
+int procfs_register_fs(void) { return vfs_register_filesystem(&s_host_procfs_type); }
+
 static int s_mock_mount_calls = 0;
 static int s_mock_mount_ret = 0;
 static int s_unreg_inside_mount_rc = 0;
 static bool s_try_unreg_inside_mount = false;
-static vfs_ops_t s_dummy_ops = {0};
 
 static int mock_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
 {
@@ -143,11 +160,44 @@ TEST_FUNC(test_fs_unregister_busy_and_in_progress) {
     vfs_node_put(root);
 }
 
+TEST_FUNC(test_builtin_filesystems_registered_on_init) {
+    /* Call vfs_init() twice to pin idempotent re-registration without cycle */
+    vfs_init();
+    vfs_init();
+
+    const vfs_fs_type_t *devfs_t  = vfs_find_filesystem("devfs");
+    const vfs_fs_type_t *ext2_t   = vfs_find_filesystem("ext2");
+    const vfs_fs_type_t *vfat_t   = vfs_find_filesystem("vfat");
+    const vfs_fs_type_t *tmpfs_t  = vfs_find_filesystem("tmpfs");
+    const vfs_fs_type_t *procfs_t = vfs_find_filesystem("procfs");
+
+    assert_not_null(devfs_t);
+    assert_eq(VFS_FS_NO_DCACHE, devfs_t->fs_flags);
+    assert_not_null(devfs_t->mount);
+
+    assert_not_null(ext2_t);
+    assert_eq(VFS_FS_REQUIRES_DEV, ext2_t->fs_flags);
+    assert_not_null(ext2_t->mount);
+
+    assert_not_null(vfat_t);
+    assert_eq(VFS_FS_REQUIRES_DEV | VFS_FS_CASE_INSENSITIVE, vfat_t->fs_flags);
+    assert_not_null(vfat_t->mount);
+
+    assert_not_null(tmpfs_t);
+    assert_eq(0u, tmpfs_t->fs_flags);
+    assert_not_null(tmpfs_t->mount);
+
+    assert_not_null(procfs_t);
+    assert_eq(VFS_FS_NO_DCACHE, procfs_t->fs_flags);
+    assert_not_null(procfs_t->mount);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_fs_register_and_find),
     TEST_ENTRY(test_fs_register_invalid_and_duplicate),
     TEST_ENTRY(test_fs_mount_validation_and_rollback),
     TEST_ENTRY(test_fs_unregister_busy_and_in_progress),
+    TEST_ENTRY(test_builtin_filesystems_registered_on_init),
 TEST_LIST_END
 
 int main(void)

@@ -69,6 +69,9 @@ int devfs_register_chrdev(const char *name, void *private_data,
 // Register a block device that will appear under /dev/
 int devfs_register_blkdev(const char *name, struct block_device *dev);
 
+// Register devfs with VFS filesystem registry
+int devfs_register_fs(void);
+
 // Initialize devfs and mount at /dev
 void devfs_init(void);
 

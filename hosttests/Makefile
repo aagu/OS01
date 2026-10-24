@@ -559,8 +559,33 @@ $(TEST_BLD)/test_vfs_fs_registry.o: $(TEST_CASES)/test_vfs_fs_registry.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
+$(TEST_BLD)/ext2_production.o: $(TESTS_DIR)/kernel/fs/ext2.c \
+		$(TESTS_DIR)/kernel/include/fs/ext2.h \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fat_production.o: $(TESTS_DIR)/kernel/fs/fat.c \
+		$(TESTS_DIR)/kernel/include/fs/fat.h \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/tmpfs_production.o: $(TESTS_DIR)/kernel/fs/tmpfs.c \
+		$(TESTS_DIR)/kernel/include/fs/tmpfs.h \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_vfs_fs_registry.elf: $(TEST_BLD)/test_vfs_fs_registry.o \
 		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/fat_production.o \
+		$(TEST_BLD)/tmpfs_production.o \
+		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/rwlock.o \
 		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^

@@ -29,6 +29,7 @@
 
 // ── Public API ─────────────────────────────────────────────────
 
+int procfs_register_fs(void);
 void procfs_init(void);
 
 // ── Monitor plan Task 4: per-file snapshot lifecycle (spec §6) ──

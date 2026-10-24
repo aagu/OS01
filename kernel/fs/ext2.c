@@ -1621,6 +1621,32 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
     return 0;
 }
 
+static int ext2_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
+{
+    (void)data;
+    ext2_fs_t *fs = NULL;
+    int rc = ext2_init(dev, &fs);
+    if (rc != 0) {
+        return rc < 0 ? rc : -EIO;
+    }
+    mp->ops = &ext2_vfs_ops;
+    mp->fs_data = fs;
+    mp->root->ops = &ext2_vfs_ops;
+    return 0;
+}
+
+static vfs_fs_type_t ext2_fs_type = {
+    .name     = "ext2",
+    .fs_flags = VFS_FS_REQUIRES_DEV,
+    .mount    = ext2_fs_mount,
+    .unmount  = NULL,
+};
+
+int ext2_register_fs(void)
+{
+    return vfs_register_filesystem(&ext2_fs_type);
+}
+
 #ifdef OS01_SELFTEST
 // Tests registered by selftest_run_all() via forward declarations in selftest.c
 

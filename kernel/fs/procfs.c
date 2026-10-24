@@ -522,10 +522,33 @@ static vfs_ops_t procfs_ops = {
     // create / unlink / mkdir / rmdir / rename / truncate are NULL
 };
 
+static int procfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
+{
+    (void)dev;
+    (void)data;
+    mp->ops = &procfs_ops;
+    mp->fs_data = NULL;
+    mp->root->ops = &procfs_ops;
+    return 0;
+}
+
+static vfs_fs_type_t procfs_fs_type = {
+    .name     = "procfs",
+    .fs_flags = VFS_FS_NO_DCACHE,
+    .mount    = procfs_fs_mount,
+    .unmount  = NULL,
+};
+
+int procfs_register_fs(void)
+{
+    return vfs_register_filesystem(&procfs_fs_type);
+}
+
 // ── Initialise and mount ─────────────────────────────────────
 void procfs_init(void)
 {
-    int ret = vfs_mount("/proc", NULL, &procfs_ops, NULL);
+    procfs_register_fs();
+    int ret = vfs_mount_fs("procfs", "/proc", NULL, NULL);
     if (ret == 0) {
         debug_fs("procfs: mounted at /proc\n");
     } else {

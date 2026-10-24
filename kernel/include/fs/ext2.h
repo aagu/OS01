@@ -123,6 +123,7 @@ typedef struct {
 } ext2_fs_t;
 
 // ── API ────────────────────────────────────────────────
+int ext2_register_fs(void);
 int ext2_init(block_device_t *dev, ext2_fs_t **out_fs);
 extern struct vfs_ops ext2_vfs_ops;
 

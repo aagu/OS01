@@ -94,6 +94,8 @@ typedef struct {
 
 // ── FAT32 API ─────────────────────────────────────────────
 
+int fat_register_fs(void);
+
 // Initialize a FAT32 filesystem from a block device (no vfs_mount).
 // On success returns 0 and sets *out_fs. On error returns -1.
 int fat32_init(block_device_t *dev, fat32_fs_t **out_fs);

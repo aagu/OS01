@@ -1,4 +1,9 @@
 #include <fs/vfs.h>
+#include <fs/devfs.h>
+#include <fs/ext2.h>
+#include <fs/fat.h>
+#include <fs/tmpfs.h>
+#include <fs/procfs.h>
 #include <stdbool.h>
 #include <core/debug.h>
 #include <core/printk.h>
@@ -61,6 +66,12 @@ void vfs_init(void)
 
     vfs_initialized = 1;
     debug_vfs("VFS: initialized\n");
+
+    devfs_register_fs();
+    ext2_register_fs();
+    fat_register_fs();
+    tmpfs_register_fs();
+    procfs_register_fs();
 }
 
 // ── Mount ─────────────────────────────────────────────────
