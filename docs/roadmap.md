@@ -170,6 +170,8 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 - **`test_display_owner` 读取 libgfx 内部句柄 fd 耦合（2026-10-11，显示独占实施）**：`test_display_owner` 通过 `*(const int *)gh` 直接读取 `libgfx` handle 首字段 fd（布局耦合；设计规范禁止公开 `gfx_get_fd`）。候选修复方案：引入非 sysroot 的内部测试头 `libgfx/gfx_test.h` 配合 `offsetof` static assert 校验，或在测试代码中保留当前读取方式并辅以显式注释。保持现状，无需修改测试代码。
 
+- **terminal-present QEMU 套件 `UnboundLocalError`（2026-10-24，monitor parked #14 验证时顺带发现）**：`make PROFILE=x86_64-clang test-qemu SUITE=terminal-present` 直接崩溃：`UnboundLocalError: cannot access local variable 'idle_records' where it is not associated with a value`，抛在 `qemutests/terminal_present_test.py:1010`。原因：`idle_records` / `idle_wallclock_ns` 只在 `:1094` 由 `_run_monitor_window()` 赋值，而 `:1010` 的提前返回分支（acceptance 模式下 baseline log 缺失）先引用了它们——即该套件只有在 baseline log 已存在时才能跑。**pre-existing**，与 monitor #14 无关（该文件本次未改动）。后果：terminal-present 套件目前整体跑不起来，它那部分覆盖在任何本地验证里都缺席。候选修复：在 `_run_terminal_present` 开头（首次使用前）初始化 `idle_records = []` / `idle_wallclock_ns = 0`，并补一条覆盖「baseline log 缺失」分支的回归。**尚未修、未记入任何修复、未声称已修。**
+
 - **内核用户态异常退出状态未编码为信号终止（已闭环）**：`kernel/arch/x86_64/intr/trap.c` 的 `kill_current_user_task`（现签名 `(pt_regs_t *regs, int sig)`）和 `handle_user_fault`（现签名 `(pt_regs_t *regs, const char *name, int sig)`）按 trap 类型映射信号：#DE/#OF/#BR/#NP/#MF/#XM → SIGFPE、#UD → SIGILL、#GP/#PF/#TS → SIGSEGV、#NP/#SS/#AC/#MC/#VE → SIGBUS。do_exit 直接存储信号到 `current->exit_code`，父 waitpid 据此正确得到 `WIFSIGNALED && WTERMSIG`。`user/systest.c` 新增 54b/c/d 三例覆盖 SIGFPE/SIGSEGV/SIGILL，全套 98 syscall 测试通过。
 
 - **monitor 计划遗留 parked 项（2026-10-11，monitor plan 9 任务合并后 triage）**：全程评审约 50 条缓办 Minor 中筛出以下值得跟踪的；其余为注释措辞/不可达边界/host fixture 风格问题（最终评审逐条判定 ship-ok，含一条前提纠正：`PROCFS_STAT_CAP=1024` 的 8 核 worst case 实为 ~869B、余量 ~155B，非 ~2B）。本批全部不阻塞，随相关计划拾起：
