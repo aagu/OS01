@@ -54,7 +54,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
-| `make test-static` | runtime / layout / canary / link-order audits (13 audits) | — |
+| `make test-static` | runtime / layout / canary / link-order audits (14 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
@@ -454,11 +454,11 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
-| `test-static` | — | — | 13 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、user-canary） |
+| `test-static` | — | — | 14 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 | `test-harness` | — | — | Python `unittest` 框架回归（`TEST_HARNESS_MODULES` 列表；不启动 QEMU） |
 
-**`test-harness`** 框架回归入口（上表七个 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，monitor plan（2026-10-11）Task 9 追加 `qemutests.test_monitor_runner` 至 **16 个模块**，terminal-present 追加至 **17 个模块**，GUI-1 plan（2026-10-19）Task 7 追加 `qemutests.test_gui_runner` 至 **18 个模块**，并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它作为兼容入口委托到 `gui_test.py`，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
+**`test-harness`** 框架回归入口（上表七个 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，monitor plan（2026-10-11）Task 9 追加 `qemutests.test_monitor_runner` 至 **16 个模块**，terminal-present 追加至 **17 个模块**，GUI-1 plan（2026-10-19）Task 7 追加 `qemutests.test_gui_runner` 至 **18 个模块**，intr-dispatch plan（2026-10-23）Task 6 追加 `qemutests.test_intr_dispatch_audit`（列表共 20 个模块）；并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它作为兼容入口委托到 `gui_test.py`，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
 
@@ -607,7 +607,7 @@ make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 
 make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
 make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
-make test-static                    # 13 项静态审计
+make test-static                    # 14 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
 make test-contract                  # CI 契约检查
