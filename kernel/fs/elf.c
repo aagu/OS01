@@ -150,7 +150,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
      *    segment fits file_size / heap_limit, entry is inside
      *    an executable PT_LOAD.  The loader only checks its own
      *    per-page invariants below. */
-    uint64_t file_size = node->size;
+    uint64_t file_size = vfs_node_live_size(node);
     elf_layout_t layout;
     ret = elf_layout_validate(&ehdr, phdrs, file_size, &layout);
     if (ret != 0) {

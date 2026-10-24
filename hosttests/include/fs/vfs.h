@@ -2,8 +2,10 @@
 #define _FS_VFS_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <block/blockdev.h>
 #include <uapi/stat.h>
+#include <arch/spinlock.h>
 
 #define VFS_FILE   1
 #define VFS_DIR    2
@@ -67,13 +69,20 @@ typedef struct vfs_fs_type {
 // ── A mounted filesystem instance ─────────────────────────
 typedef struct vfs_mount {
     block_device_t            *dev;
+    const struct vfs_fs_type  *fs_type;
+    uint32_t                   mnt_flags;
     const char                *path;
+    char                       mount_name[VFS_NAME_MAX];
     struct vfs_node           *root;
+    struct vfs_node           *mountpoint;
+    struct vfs_mount          *parent_mount;
+    uint64_t                   parent_dir_ino;
     const vfs_inode_ops_t     *i_ops;
     const vfs_file_ops_t      *f_ops;
     void                      *fs_data;
-    const struct vfs_fs_type  *fs_type;
-    uint32_t                   mnt_flags;
+    spinlock_T                 active_lock;
+    struct vfs_node           *active_nodes;
+    struct vfs_mount          *next;
 } vfs_mount_t;
 
 // ── Directory entry returned by readdir ───────────────────
@@ -85,6 +94,11 @@ typedef struct vfs_dirent {
 } vfs_dirent_t;
 
 // ── VFS node (inode) ──────────────────────────────────────
+#define VFS_NODE_NO_DCACHE   (1u << 0)
+#define VFS_NODE_MOUNT_STUB  (1u << 1)
+#define VFS_NODE_ORPHANED    (1u << 2)
+#define VFS_NODE_STALE       (1u << 3)
+
 typedef struct vfs_node {
     char                  name[VFS_NAME_MAX];
     uint64_t              ino;
@@ -106,7 +120,19 @@ typedef struct vfs_node {
     const vfs_inode_ops_t *i_ops;
     const vfs_file_ops_t  *f_ops;
     uint32_t              refcount;
+    struct vfs_node      *mnt_active_next;
 } vfs_node_t;
+
+#define VFS_SYNTH_ROOT_INO       1ULL
+#define VFS_MOUNT_STUB_INO_BASE  0x8000000000000000ULL
+
+static inline uint64_t vfs_node_stable_ino(const vfs_node_t *node)
+{
+    if (!node) return 0;
+    if (node->ino != 0) return node->ino;
+    if (node->mount && node == node->mount->root) return VFS_SYNTH_ROOT_INO;
+    return (uint64_t)(uintptr_t)node->fs_data;
+}
 
 // ── VFS API ───────────────────────────────────────────────
 
@@ -122,6 +148,23 @@ int                 vfs_mount_fs(const char *type_name, const char *path,
 int vfs_mount(const char *path, block_device_t *dev,
               const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
               void *fs_data);
+
+int vfs_generic_getattr(vfs_node_t *node, struct stat *buf);
+int vfs_generic_lookup_by_readdir(vfs_node_t *dir, const char *name,
+                                  vfs_node_t **out);
+int vfs_create_file(const char *path, const char *cwd, vfs_node_t **out_node);
+int vfs_symlink(const char *target, const char *linkpath, const char *cwd);
+
+// Active node tracking & live metadata helpers (Spec §4.4, §5.2.2, §5.2.3)
+void     vfs_active_node_register(struct vfs_node *node);
+void     vfs_active_node_unregister_locked(struct vfs_mount *mp, struct vfs_node *node);
+void     vfs_active_node_unregister(struct vfs_node *node);
+bool     vfs_active_nodes_has_ino_locked(struct vfs_mount *mp, uint64_t ino,
+                                         const struct vfs_node *exclude);
+void     vfs_active_nodes_mark_orphaned_locked(struct vfs_mount *mp, uint64_t ino);
+void     vfs_active_nodes_sync_size_locked(struct vfs_mount *mp, uint64_t ino,
+                                           uint64_t new_size, uint64_t new_mtime);
+uint64_t vfs_node_live_size(struct vfs_node *node);
 
 // Resolve a path to a VFS node (call vfs_node_put when done).
 // Absolute path only — no cwd resolution.

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>   // size_t
+#include <stdbool.h>
 #include <block/blockdev.h>
 #include <sys/stat.h>
 #include <arch/spinlock.h>
@@ -185,6 +186,17 @@ int vfs_generic_lookup_by_readdir(vfs_node_t *dir, const char *name,
                                   vfs_node_t **out);
 int vfs_create_file(const char *path, const char *cwd, vfs_node_t **out_node);
 int vfs_symlink(const char *target, const char *linkpath, const char *cwd);
+
+// Active node tracking & live metadata helpers (Spec §4.4, §5.2.2, §5.2.3)
+void     vfs_active_node_register(struct vfs_node *node);
+void     vfs_active_node_unregister_locked(struct vfs_mount *mp, struct vfs_node *node);
+void     vfs_active_node_unregister(struct vfs_node *node);
+bool     vfs_active_nodes_has_ino_locked(struct vfs_mount *mp, uint64_t ino,
+                                         const struct vfs_node *exclude);
+void     vfs_active_nodes_mark_orphaned_locked(struct vfs_mount *mp, uint64_t ino);
+void     vfs_active_nodes_sync_size_locked(struct vfs_mount *mp, uint64_t ino,
+                                           uint64_t new_size, uint64_t new_mtime);
+uint64_t vfs_node_live_size(struct vfs_node *node);
 
 // Resolve a path to a VFS node (call vfs_node_put when done).
 // Absolute path only — no cwd resolution.

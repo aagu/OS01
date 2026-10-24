@@ -15,6 +15,10 @@
 #include <stdlib.h>
 #include <errno.h>
 
+#ifdef OS01_HOST_TEST
+void vfs_test_on_active_register(vfs_node_t *node) __attribute__((weak));
+#endif
+
 // ── Mount table ───────────────────────────────────────────
 static vfs_mount_t *mount_list = NULL;
 static int mount_count __attribute__((unused)) = 0;
@@ -609,6 +613,7 @@ int vfs_generic_lookup_by_readdir(vfs_node_t *dir, const char *name,
         return -ENOMEM;
     }
 
+    vfs_active_node_register(child);
     *out = child;
     return 0;
 }
@@ -778,6 +783,7 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
         }
         if (!child->i_ops) child->i_ops = cur->i_ops;
         if (!child->f_ops) child->f_ops = cur->f_ops;
+        vfs_active_node_register(child);
 
         // Append "/" + comp to consumed (bounded by VFS_NAME_MAX, same as path).
         if (consumed_out && consumed_size > 0) {
@@ -1155,6 +1161,103 @@ int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
     return dir->f_ops->readdir(dir, index, entry);
 }
 
+// ── Active node registry (Spec §4.4, §5.2.2, §5.2.3) ─────
+void vfs_active_node_register(vfs_node_t *node)
+{
+    if (!node || !node->mount) return;
+    vfs_mount_t *mp = node->mount;
+    if (node == mp->root) return;
+
+#ifdef OS01_HOST_TEST
+    if (vfs_test_on_active_register) {
+        vfs_test_on_active_register(node);
+    }
+#endif
+
+    spin_lock(&mp->active_lock);
+    // Guard against duplicate registration of the same pointer
+    for (vfs_node_t *cur = mp->active_nodes; cur; cur = cur->mnt_active_next) {
+        if (cur == node) {
+            spin_unlock(&mp->active_lock);
+            return;
+        }
+    }
+    node->mnt_active_next = mp->active_nodes;
+    mp->active_nodes = node;
+    spin_unlock(&mp->active_lock);
+}
+
+void vfs_active_node_unregister_locked(vfs_mount_t *mp, vfs_node_t *node)
+{
+    if (!mp || !node) return;
+    vfs_node_t **pp = &mp->active_nodes;
+    while (*pp) {
+        if (*pp == node) {
+            *pp = node->mnt_active_next;
+            node->mnt_active_next = NULL;
+            return;
+        }
+        pp = &(*pp)->mnt_active_next;
+    }
+}
+
+void vfs_active_node_unregister(vfs_node_t *node)
+{
+    if (!node || !node->mount) return;
+    vfs_mount_t *mp = node->mount;
+    spin_lock(&mp->active_lock);
+    vfs_active_node_unregister_locked(mp, node);
+    spin_unlock(&mp->active_lock);
+}
+
+bool vfs_active_nodes_has_ino_locked(vfs_mount_t *mp, uint64_t ino,
+                                     const vfs_node_t *exclude)
+{
+    if (!mp || ino == 0) return false;
+    for (vfs_node_t *cur = mp->active_nodes; cur; cur = cur->mnt_active_next) {
+        if (cur == exclude) continue;
+        if (vfs_node_stable_ino(cur) == ino) return true;
+    }
+    return false;
+}
+
+void vfs_active_nodes_mark_orphaned_locked(vfs_mount_t *mp, uint64_t ino)
+{
+    if (!mp || ino == 0) return;
+    for (vfs_node_t *cur = mp->active_nodes; cur; cur = cur->mnt_active_next) {
+        if (vfs_node_stable_ino(cur) == ino) {
+            cur->node_flags |= VFS_NODE_ORPHANED;
+            cur->nlink = 0;
+        }
+    }
+}
+
+void vfs_active_nodes_sync_size_locked(vfs_mount_t *mp, uint64_t ino,
+                                       uint64_t new_size, uint64_t new_mtime)
+{
+    if (!mp || ino == 0) return;
+    if (mp->root && vfs_node_stable_ino(mp->root) == ino) {
+        mp->root->size = new_size;
+        if (new_mtime != 0) mp->root->mtime = new_mtime;
+    }
+    for (vfs_node_t *cur = mp->active_nodes; cur; cur = cur->mnt_active_next) {
+        if (vfs_node_stable_ino(cur) == ino) {
+            cur->size = new_size;
+            if (new_mtime != 0) cur->mtime = new_mtime;
+        }
+    }
+}
+
+uint64_t vfs_node_live_size(vfs_node_t *node)
+{
+    if (!node) return 0;
+    struct stat st;
+    if (vfs_stat(node, &st) == 0) {
+        return (uint64_t)st.st_size;
+    }
+    return node->size;
+}
+
 // ── Reference counting ────────────────────────────────────
 vfs_node_t *vfs_node_get(vfs_node_t *node)
 {
@@ -1166,9 +1269,13 @@ void vfs_node_put(vfs_node_t *node)
 {
     if (!node) return;
     if (__sync_sub_and_fetch(&node->refcount, 1) == 0) {
-        if (node->i_ops && vfs_is_valid_kptr(node->i_ops) &&
-            node->i_ops->evict_node && vfs_is_valid_kptr(node->i_ops->evict_node)) {
+        if (node->node_flags & VFS_NODE_MOUNT_STUB) {
+            vfs_active_node_unregister(node);
+        } else if (node->i_ops && vfs_is_valid_kptr(node->i_ops) &&
+                   node->i_ops->evict_node && vfs_is_valid_kptr(node->i_ops->evict_node)) {
             node->i_ops->evict_node(node);
+        } else {
+            vfs_active_node_unregister(node);
         }
         vfs_node_t *parent = node->parent;
         // Poison to catch use-after-free: any stale reference
