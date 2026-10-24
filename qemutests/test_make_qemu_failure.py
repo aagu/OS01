@@ -179,7 +179,7 @@ class TestQemuRecipeShapeTests(unittest.TestCase):
         body = m.group("n")
         for suite in ("phase-0", "systest", "inittab-phase",
                        "network", "gfx", "resolution", "driver-model",
-                       "monitor", "terminal-present", "gui"):
+                       "monitor", "terminal-present", "gui", "gui-desktop"):
             self.assertIn(suite, body,
                           f"SUITE case missing {suite!r}")
 
@@ -478,7 +478,7 @@ class ImageHashGuardTests(unittest.TestCase):
         # body for the test-qemu target.
         recipe = _extract_recipe(self.text, "test-qemu")
         for suite in ("phase-0", "gfx", "resolution", "driver-model",
-                      "monitor", "terminal-present"):
+                      "monitor", "terminal-present", "gui-desktop"):
             count = recipe.count(f'"{suite}"')
             self.assertGreaterEqual(
                 count, 2,

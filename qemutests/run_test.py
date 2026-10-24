@@ -1058,6 +1058,14 @@ def main():
             # across SMP 1 and 2 matrix with QMP screendumps.
             from qemutests.gui_test import test_gui
             result = test_gui(tester)
+        elif args.test_name == "gui-desktop":
+            # Task 7 of GUI-3 plan: the Material desktop suite — offscreen
+            # smoke, the desktop taking over the display, real PS/2 key
+            # events (Tab / Enter / Esc) driving an app open and close,
+            # and a clean kill — across the SMP 1 and 2 matrix with QMP
+            # screendumps.  Imported lazily to mirror the gui dispatch.
+            from qemutests.gui_desktop_test import test_gui_desktop
+            result = test_gui_desktop(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
