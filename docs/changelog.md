@@ -55,6 +55,14 @@
 
 - fix(selftest): **test_tty_vintr 间歇性挂死**（分支 `fix/tty-vintr-timeout`）：VINTR → signal_pgrp 链路本身工作正常（vintr 子线程确实唤起并 `vintr_seen=1`），但测试线程用 `arch_local_irq_disable` 的紧忙等 spin2 在 SMP=4 负载均衡把 vintr 子线程迁到与测试线程同 CPU 时永远等不到该值（runner 75s 超时）。改为直接检查 `t->signal & SIGINT && t->state == RUNNING`，与 `test_pgrp_signal` 同模式。SMP=4 与 SMP=8 各连测多次 tty_vintr 0 失败；fd_refcount 在 SMP=4/8 偶发独立 `rc_-1` 失败与本 fix 无关（roadmap parked item #1）
 
+## 2026-10-14
+
+- fix(kernel): **用户态异常终止编码为信号（`3d56e1d0`）**：`kernel/arch/x86_64/intr/trap.c` 的 `kill_current_user_task()` 原先硬编码 `do_exit(0)`，`current->exit_code` 存 0，父进程 `waitpid()` 看到的是 `WIFEXITED && WEXITSTATUS == 0`——与干净的 `exit(0)` 无法区分。于是任何 POSIX 消费者（shell / init / busybox `wait` / bash trap）都把用户态异常（segfault、FPE、非法指令、对齐故障……）当成正常自愿退出，信号语义被静默破坏。信号被一路打通：`kill_current_user_task(pt_regs_t *regs, int sig)` 与 `handle_user_fault(pt_regs_t *regs, const char *name, int sig)` 各增一个 `sig` 参数（前者内联汇编把 `xorl %edi, %edi` 换成 `movl sig, %edi`），`do_exit()` 原样存入 `current->exit_code`（低字节放信号，与 `kernel/syscall/sys_proc.c` 里正常退出码放高字节的编码不冲突）。14 处 `handle_user_fault` 调用点按 trap 映射信号：DE/OF/BR/NM/CA/MF/XM → SIGFPE、UD → SIGILL、GP/PF/TS → SIGSEGV、NP/SS/AC/MC/VE → SIGBUS；#PF 处理器的 16 处直接 `kill_current_user_task` 调用统一用 SIGSEGV。回归：`user/systest.c` 新增 54b/54c/54d 三例，fork 后分别触发 #DE（volatile 除零）、#PF（写 mmap 的 PROT_READ 页）、#UD（`asm ud2`），父进程 `waitpid()` 校验 `WIFSIGNALED` 与对应 `WTERMSIG`；全套 98 项 syscall 测试通过。
+
+- fix(monitor): **`monitor_term_enter` 后立即 flush ANSI 转义（`9042bd20`）**：`monitor_term_enter()` 用 `fprintf` 排了两条转义序列（清屏、隐藏光标）却从不 flush；两者都不含换行，于是它们滞留在 libc 缓冲里，直到下一次带换行的 `fprintf` 才落地——交互模式下第一帧约 1 秒后才到，用户这段时间看到的是脏屏 + 闪烁光标。在 `user/monitor/render.c::monitor_term_enter` 末尾加 `fflush(out)`，让「终端已进入清屏模式」这个契约同步生效。`monitor_term_leave()` 不动：它执行时 monitor 已打印过大量带换行的帧，缓冲自然排空，无用户可见延迟。roadmap monitor parked ⑤。二进制级验证：`monitor_term_enter` 的反汇编以尾调用 `fflush` 结束（clang 把尾部的 `fflush(out)` 优化成 `jmp fflush`，因 fflush 是 nothrow + 返回 void）。
+
+- test(hosttests): **framework 负契约 binary 接入 CI（`339ffe26`）**：`hosttests/cases/test_framework_contract.c` 自 `2d594ce0` 起就存在，但既没有 Make 目标也没有运行入口，于是 `TEST_RESULTS()` 复位 stats、断言宏双次求值这些契约的回归可以带着全绿的 CI 溜过去。`hosttests/Makefile` 增加 `test-framework-contract` 目标：构建 `.elf` 并断言其退出码**恰好为 1**（契约要求框架「正确地坏掉」），失败时打印 binary 输出与按退出码给的提示——0=断言不再传播、2=宏双次求值、3=`TEST_RESULTS` 复位 stats（即 `2d594ce0` 之前的 bug）。`mk/components/run.mk` 增加包装目标并让 `make test-harness` 依赖它；`.github/workflows/ci.yml` 的 harness job 本就跑 `make test-harness`，回归从此被 CI 拦住。验证：`make test-framework-contract` 通过（binary 退 1、make 退 0）；把 `2d594ce0` 之前的复位行为注入回 `TEST_RESULTS()` 后 binary 退 3，Make 目标退 2 并打出对应提示。
+
 ## 2026-10-11
 
 - feat(monitor): **终端系统监控器（Terminal Monitor）**（分支 `worktree-monitor-impl`，15 commits，Tasks 1–9 全部闭环，spec `docs/superpowers/specs/2026-10-09-monitor-design.md`）：
@@ -74,9 +82,13 @@
     - 分辨率切换器套件兼容：`_drain_case` 与 `_mmap_case` 接入独立 raw inittab 启动，全套 resolution suite 与 `FB_RESOLUTION_TEST=1` 验证通过
     - 全量回归：`test-host`（108 套件）、`test-static`、`test-resolution-host`、`test-qemu SUITE=gfx`、`test_lvgl_runner.py` 全绿通过
   - **设计与实施文档**：`docs/gui/gui.md` 第 4 节、`docs/driver/driver.md`、`docs/superpowers/specs/2026-10-07-display-ownership-design.md`、`docs/superpowers/plans/2026-10-07-display-ownership.md`
+- docs(test): **`test_display_owner` 的 libgfx 句柄 fd 读取保持现状（2026-10-11，显示独占实施）**——该测试通过 `*(const int *)gh` 直接读 `libgfx` handle 首字段的 fd（布局耦合；设计规范禁止公开 `gfx_get_fd`）。候选方案是引入非 sysroot 的内部测试头 `libgfx/gfx_test.h` 配 `offsetof` static assert 校验，或在测试代码里保留当前读法并补上显式注释。**评审决定保持现状、不改测试代码**，记录在案。
+
 - chore(monitor): **/proc/meminfo 移除 legacy `Zones:` 行**（monitor 分支 Task 4）——可观察的格式变更备案：该行无任何消费者（内核内或用户态），monitor spec 亦未约束它，故随 procfs 统一格式化（`kernel/fs/procfs_fmt.h`）一并删除；其余 meminfo 字段与 kB 单位保持不变
 
 ## 2026-10-07
+
+- fix(hosttests): **断言退出码完整性与宏参数单次求值（`2d594ce0`，test-framework plan Task 1）**：host test 的结果此前不可信——`TEST_RESULTS()` 会把 `__test_stats` 清零，`RUN_ALL_TESTS()` 之后失败计数归 0，失败断言到不了进程退出码（Makefile 的 run recipe 只看非零退出），于是「断言失败但 suite 绿」是可能的。`TEST_RESULTS()` 改为只打印快照、不再 reset，另加独立的 `TEST_RESET()` 宏；`assert_eq`/`assert_str_eq`/`assert_mem_eq` 改为宏参数只求值一次（后两者原先在失败打印路径上会二次求值）；新增 `hosttests/cases/test_framework_contract.c` 负契约 binary（**不在 `TEST_BINS`**，故意失败），用三个不同退出码钉死三条契约——1=期望的失败被传播到退出码、2=宏双次求值、3=`TEST_RESULTS` 复位 stats。顺带删除 `test_aarch64_arch_vmm_init.c` 里只因 `TEST_RESULTS` 清零 stats 才存在的影子失败计数机制（`g_test_failed_count` + `ASSERT_*_TRACKED`），`page_table_test_runner.h` 改为在 summary 之后读 `__test_stats.failed`；`TEST_BINS` 去掉重复的 `test_libc_stdio_registry.elf` 条目并加 `check-test-bins-dup` Make 门禁在 run 前拒绝重复。验证：`make test-host` 107/107 suite exit 0；contract binary 退出码 1 且两次 summary 都显示 `Failed: 3`（双次求值那条先以 rc=2 确认过 RED）。
 
 - cleanup(aarch64): **M2/M3 杂项 cosmetic 遗留 7 项全部闭环**（分支 `worktree-m23-cosmetic-cleanup`，7 commits）：
   - **死枚举**：删 `ap_work.h` 的 `WORK_PT_STRESS`/`WORK_PT_ALLOC`（无任何用户；`WORK_PT_MAP` 由 kernel selftest 的 `ap_work_ext_run` override 消费，保留），同步修正 `ap_work.c` 与 selftest 头注释里过时的 WORK_PT_STRESS 叙述
