@@ -314,23 +314,25 @@ static int slt_fault_case(vfs_node_t *root, ext2_fs_t *fs,
                           const char *name, const char *abs_path,
                           const char *target)
 {
+    (void)root;
+    (void)name;
     uint32_t free_inodes = fs->sb_raw.s_free_inodes_count;
     uint32_t free_blocks = fs->sb_raw.s_free_blocks_count;
 
     ext2_symlink_test_set_fault(fault);
-    int rc = root->i_ops->symlink(root, name, target);
+    int rc = vfs_symlink(target, abs_path, "/");
     ext2_symlink_test_set_fault(EXT2_SYMLINK_TEST_NONE);
 
     if (rc != -EIO) {
         serial_printk("[selftest] symlink_ext2_rollback: fault %d -> %d, expected -EIO\n",
                       (int)fault, rc);
-        if (rc == 0) root->i_ops->unlink(root, name);   // don't leak the dirent
+        if (rc == 0) vfs_unlink(abs_path, "/");   // don't leak the dirent
         return -1;
     }
     if (!slt_name_absent(abs_path)) {
         serial_printk("[selftest] symlink_ext2_rollback: fault %d left a dirent\n",
                       (int)fault);
-        root->i_ops->unlink(root, name);
+        vfs_unlink(abs_path, "/");
         return -1;
     }
     if (fs->sb_raw.s_free_inodes_count != free_inodes ||
@@ -351,10 +353,11 @@ static int slt_success_case(vfs_node_t *root, ext2_fs_t *fs,
                             const char *name, const char *abs_path,
                             const char *target, uint32_t want_block_delta)
 {
+    (void)root;
     uint32_t free_inodes = fs->sb_raw.s_free_inodes_count;
     uint32_t free_blocks = fs->sb_raw.s_free_blocks_count;
 
-    int rc = root->i_ops->symlink(root, name, target);
+    int rc = vfs_symlink(target, abs_path, "/");
     if (rc != 0) {
         serial_printk("[selftest] symlink_ext2_rollback: symlink(%s) -> %d\n",
                       name, rc);
@@ -365,17 +368,17 @@ static int slt_success_case(vfs_node_t *root, ext2_fs_t *fs,
     if (used_blocks != want_block_delta) {
         serial_printk("[selftest] symlink_ext2_rollback: %s used %u blocks, expected %u\n",
                       name, used_blocks, want_block_delta);
-        root->i_ops->unlink(root, name);
+        vfs_unlink(abs_path, "/");
         return -1;
     }
     if (slt_name_absent(abs_path)) {
         serial_printk("[selftest] symlink_ext2_rollback: %s not found after create\n",
                       name);
-        root->i_ops->unlink(root, name);
+        vfs_unlink(abs_path, "/");
         return -1;
     }
 
-    rc = root->i_ops->unlink(root, name);
+    rc = vfs_unlink(abs_path, "/");
     if (rc != 0) {
         serial_printk("[selftest] symlink_ext2_rollback: unlink(%s) -> %d\n",
                       name, rc);
