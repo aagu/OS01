@@ -20,7 +20,8 @@
  *   - HOLD_WRITER acquires a real writer lease (a SET drains and times out
  *     with -EBUSY); a repeated HOLD does not double-count; RELEASE_WRITER
  *     and release_file both drop the lease.
- *   - ARM_TERMINAL_ENOMEM is consumed once by the target PID only.
+ *   - ARM_TERMINAL_ENOMEM is consumed once by the target PID only;
+ *     zero tokens and pending-slot replacement are rejected unchanged.
  *   - A hardware fault clears every pending fault.
  */
 
@@ -563,6 +564,70 @@ static void test_terminal_enomem_target_pid_once(void)
     fb_test_ops.release_file(f);
 }
 
+static void test_terminal_arm_rejects_zero_token_without_side_effects(void)
+{
+    printf("\n--- test_terminal_arm_rejects_zero_token_without_side_effects ---\n");
+    setup_env();
+    file_t *f = NULL;
+    CHECK_EQ(0, fb_test_ops.open("fbtest", &f));
+    struct fb_test_req query = make_req(0, 0);
+    struct fb_test_req bad = make_req(100, 0);
+    CHECK_EQ(-EINVAL, fb_test_ops.ioctl_file(f, FBIOTEST_ARM_TERMINAL_ENOMEM, &bad));
+    CHECK_EQ(0, fb_test_ops.ioctl_file(f, FBIOTEST_TERMINAL_STATUS, &query));
+    CHECK_EQ(0, fb_test_consume_terminal_enomem(100));
+
+    struct fb_test_req armed = make_req(100, 0x42);
+    CHECK_EQ(0, fb_test_ops.ioctl_file(f, FBIOTEST_ARM_TERMINAL_ENOMEM, &armed));
+    bad.target_pid = 200;
+    CHECK_EQ(-EINVAL, fb_test_ops.ioctl_file(f, FBIOTEST_ARM_TERMINAL_ENOMEM, &bad));
+    CHECK_EQ(1, fb_test_ops.ioctl_file(f, FBIOTEST_TERMINAL_STATUS, &query));
+    CHECK_EQ(0, fb_test_consume_terminal_enomem(200));
+    CHECK_EQ(1, fb_test_consume_terminal_enomem(100));
+    CHECK_EQ(256, fb_test_ops.ioctl_file(f, FBIOTEST_TERMINAL_STATUS, &query));
+    fb_test_ops.release_file(f);
+    free(f);
+}
+
+static void test_terminal_arm_preserves_pending_and_allows_rearm(void)
+{
+    printf("\n--- test_terminal_arm_preserves_pending_and_allows_rearm ---\n");
+    setup_env();
+    file_t *first = NULL, *second = NULL;
+    CHECK_EQ(0, fb_test_ops.open("fbtest", &first));
+    mock_current_task.pid = 2;
+    CHECK_EQ(0, fb_test_ops.open("fbtest", &second));
+
+    struct fb_test_req query = make_req(0, 0);
+    struct fb_test_req original = make_req(100, 1);
+    struct fb_test_req other = make_req(200, 2);
+    CHECK_EQ(0, fb_test_ops.ioctl_file(first, FBIOTEST_ARM_TERMINAL_ENOMEM, &original));
+    CHECK_EQ(-EBUSY, fb_test_ops.ioctl_file(first, FBIOTEST_ARM_TERMINAL_ENOMEM, &original));
+    CHECK_EQ(-EBUSY, fb_test_ops.ioctl_file(second, FBIOTEST_ARM_TERMINAL_ENOMEM, &other));
+    CHECK_EQ(1, fb_test_ops.ioctl_file(first, FBIOTEST_TERMINAL_STATUS, &query));
+    CHECK_EQ(0, fb_test_consume_terminal_enomem(200));
+    fb_test_ops.release_file(second);
+    free(second);
+    CHECK_EQ(1, fb_test_ops.ioctl_file(first, FBIOTEST_TERMINAL_STATUS, &query));
+    CHECK_EQ(1, fb_test_consume_terminal_enomem(100));
+    CHECK_EQ(0, fb_test_consume_terminal_enomem(100));
+    CHECK_EQ(256, fb_test_ops.ioctl_file(first, FBIOTEST_TERMINAL_STATUS, &query));
+
+    /* Consumed slots can be armed again without losing cumulative status. */
+    CHECK_EQ(0, fb_test_ops.ioctl_file(first, FBIOTEST_ARM_TERMINAL_ENOMEM, &other));
+    CHECK_EQ(257, fb_test_ops.ioctl_file(first, FBIOTEST_TERMINAL_STATUS, &query));
+    CHECK_EQ(1, fb_test_consume_terminal_enomem(200));
+    CHECK_EQ(512, fb_test_ops.ioctl_file(first, FBIOTEST_TERMINAL_STATUS, &query));
+
+    /* target_pid=0 still resolves to the opener's PID, not the caller's. */
+    original.target_pid = 0;
+    CHECK_EQ(0, fb_test_ops.ioctl_file(first, FBIOTEST_ARM_TERMINAL_ENOMEM, &original));
+    CHECK_EQ(0, fb_test_consume_terminal_enomem(2));
+    CHECK_EQ(1, fb_test_consume_terminal_enomem(1));
+    CHECK_EQ(768, fb_test_ops.ioctl_file(first, FBIOTEST_TERMINAL_STATUS, &query));
+    fb_test_ops.release_file(first);
+    free(first);
+}
+
 /* ── Test 10: a hardware fault clears all pending faults ── */
 static void test_fault_clears_pending(void)
 {
@@ -601,6 +666,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_arm_rollback_failure),
     TEST_ENTRY(test_hold_writer_lease),
     TEST_ENTRY(test_terminal_enomem_target_pid_once),
+    TEST_ENTRY(test_terminal_arm_rejects_zero_token_without_side_effects),
+    TEST_ENTRY(test_terminal_arm_preserves_pending_and_allows_rearm),
     TEST_ENTRY(test_fault_clears_pending),
 TEST_LIST_END
 

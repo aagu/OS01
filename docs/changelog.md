@@ -7,6 +7,8 @@
 
 ## 2026-10-24
 
+- fix(fbtest): **parked terminal ARM 校验对称性闭环**：`fb_test_arm_terminal()` 原先接受零 token 并覆盖已有 pending 请求。与 register ARM 对齐：零 token 返回 EINVAL，锁内检测已占用 terminal 槽并返回 EBUSY，保留原请求及累计消费计数；仅测试配置，无 ABI 布局变化。新增两项真实 hooks 回归，旧实现 13 条断言失败，修复后 124/124 通过；完整分辨率宿主九组通过，完整 host 重试通过，测试配置 QEMU SMP 1/2 各 13 项协议验证通过。首轮 host 的 PTY fixture 失败和 guest ash SIGSEGV 均如实保留并独立登记 parked，不声称已修。详见 [调查与验证](debug/2026-10-24-fbtest-terminal-arm-validation.md)。
+
 - docs(roadmap): **parked `test_lvgl` 早退跳过 alt-screen 恢复条目归档**：调查确认这是历史迁移后遗留的旧项。`7cefb01a` 已删除 alt-screen 协议，`acebb9df` 已移除运行期直接早退并统一到 `cleanup → gui_platform_destroy()`；当前唯一直接返回 1 发生在平台创建前。平台错误/生命周期宿主测试及真实 LVGL 渲染、50 轮生命周期、OOM fatal 测试通过。本次不改业务代码，不声称修复另一个独立的 guest SIGSEGV parked 项。详见 [调查记录](debug/2026-10-24-lvgl-early-exit-archive.md)。
 
 - fix(pty): **parked T6 termios 读写同步闭环**：`TCSETS`/`TCSETSW` 原先无锁提交，主/从 `TCGETS` 直接把共享 termios 传给用户拷贝，存在跨代混合读取。写端用户拷贝后持 `state_lock` 提交；读端持锁生成本地快照、解锁后用户拷贝，weak master fallback 同步修复。新增确定性交错、锁范围与用户指针失败回归：旧实现 18 条断言失败，修复后 PTY 11 场景/149 断言全部通过；隔离 weak 路径的旧版本另有 5 条失败，修复后全绿。完整分辨率宿主九组、`test-host` 及 QEMU phase-0 启动检查通过。详见 [调查与验证](debug/2026-10-24-pty-termios-state-lock.md)。

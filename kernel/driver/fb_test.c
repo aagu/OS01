@@ -316,9 +316,16 @@ static int fb_test_arm_register(int cmd, const struct fb_test_req *req,
 
 static int fb_test_arm_terminal(const struct fb_test_req *req, fb_test_file_t *st)
 {
+    if (req->token == 0) {
+        return -EINVAL;
+    }
     int32_t target = req->target_pid ? (int32_t)req->target_pid : st->owner_pid;
 
     uint64_t flags = spin_lock_irqsave(&g_test_lock);
+    if (g_pending_term.valid) {
+        spin_unlock_irqrestore(&g_test_lock, flags);
+        return -EBUSY;
+    }
     g_pending_term.valid = true;
     g_pending_term.kind = 0;
     g_pending_term.target_pid = target;

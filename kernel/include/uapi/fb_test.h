@@ -37,7 +37,8 @@
 
 /* Fixed control request: version must be 1, reserved[] and reserved64
  * must be all zero.  32 bytes.  token identifies an armed register fault
- * and must be non-zero for the ARM commands. */
+ * and must be non-zero for the ARM commands. ARM rejects an occupied
+ * slot of the same fault class with EBUSY, preserving its pending request. */
 struct fb_test_req {
     uint32_t version;
     uint32_t target_pid;
