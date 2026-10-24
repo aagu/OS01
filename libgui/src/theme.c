@@ -37,6 +37,7 @@ static const gui_theme_colors_t g_colors = {
     .success_container        = 0x00C4EED0u,  /* #C4EED0 */
     .on_success_container     = 0x0000210Bu,  /* #00210B */
     .surface                  = 0x00FDFCFFu,  /* #FDFCFF */
+    .surface_dim              = 0x00D8D2E4u,  /* #D8D2E4 */
     .on_surface               = 0x001A1C1Eu,  /* #1A1C1E */
     .surface_variant          = 0x00E0E2ECu,  /* #E0E2EC */
     .on_surface_variant       = 0x0044474Fu,  /* #44474F */

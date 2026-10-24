@@ -53,6 +53,7 @@ TEST_FUNC(test_color_roles_are_wellformed)
     assert_color_role(c->success_container, "success_container");
     assert_color_role(c->on_success_container, "on_success_container");
     assert_color_role(c->surface, "surface");
+    assert_color_role(c->surface_dim, "surface_dim");
     assert_color_role(c->on_surface, "on_surface");
     assert_color_role(c->surface_variant, "surface_variant");
     assert_color_role(c->on_surface_variant, "on_surface_variant");
@@ -217,7 +218,21 @@ TEST_FUNC(test_elevation_surface_sequence)
     assert_true(c->surface_container_highest != c->surface_container_high);
 }
 
-/* ── 断言 8：非法枚举返回 -1 / 0xFFFFFFFF ───────────────────────── */
+/* ── 断言 8：surface_dim 是与页面底色可区分的壁纸角色 ─────────────── */
+
+TEST_FUNC(test_surface_dim_is_a_distinct_wallpaper_role)
+{
+    const gui_theme_colors_t *c = gui_theme_colors();
+    assert_not_null(c);
+
+    /* 壁纸角色必须是确定的取值。 */
+    assert_eq(0x00D8D2E4u, c->surface_dim);
+
+    /* 必须与页面底色可区分，否则壁纸与卡片撞色。 */
+    assert_true(c->surface_dim != c->surface);
+}
+
+/* ── 断言 9：非法枚举返回 -1 / 0xFFFFFFFF ───────────────────────── */
 
 TEST_FUNC(test_invalid_enum_returns_error)
 {
@@ -242,6 +257,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_radius_scale_is_strictly_increasing),
     TEST_ENTRY(test_elevation_shadow_is_monotonic),
     TEST_ENTRY(test_elevation_surface_sequence),
+    TEST_ENTRY(test_surface_dim_is_a_distinct_wallpaper_role),
     TEST_ENTRY(test_invalid_enum_returns_error),
 TEST_LIST_END
 

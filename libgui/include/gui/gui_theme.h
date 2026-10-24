@@ -58,6 +58,7 @@ typedef struct {
     uint32_t success_container;        /* #C4EED0 正常容器 */
     uint32_t on_success_container;     /* #00210B 正常容器之上的文字 */
     uint32_t surface;                  /* #FDFCFF 页面底色 */
+    uint32_t surface_dim;              /* #D8D2E4 桌面壁纸底色 */
     uint32_t on_surface;               /* #1A1C1E 页面底色之上的主要文字 */
     uint32_t surface_variant;          /* #E0E2EC 芯片 / 次级填充 */
     uint32_t on_surface_variant;       /* #44474F 次要文字 */
