@@ -1,5 +1,6 @@
 #include <fs/procfs.h>
 #include <fs/vfs.h>
+#include <errno.h>
 #include <core/debug.h>
 #include <sched/task.h>
 #include <memory/vma.h>
