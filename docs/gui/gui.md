@@ -467,6 +467,8 @@ user/desktop/
 
 **桌面自己维护焦点序列**：libgui 的焦点组是**私有**的（`gui_input_focus_*` 在 `libgui/internal/`），公共 API 没有「登记可聚焦控件」的入口，而业务应用只能用公共 API。因此外壳用 LVGL 的 `LV_STATE_FOCUSED` 状态实现同一语义，焦点环（2px primary 轮廓）由 Material 主题给出。序列随表面重建清空，不会残留已销毁对象。
 
+> **这是临时方案。** roadmap 的 **GUI-2b libgui 公共焦点 API**（见 `docs/roadmap.md` §P3 后续功能任务）完成后，桌面改用那条公共 API，本节的自建序列（`desktop_shell_focus_*`）随之删除——GUI-3 与 libgui 的焦点组之间不应该长期存在两套模型。
+
 ### 5. 界面文案用 ASCII（不是中文）
 
 GUI-3 只启用 Montserrat（12/14/16/20/24），**没有汉字字形**——中文文案会整片渲染成方框。spec 已把「中文字体」划归 **GUI-4 字体与资源**，因此 GUI-3 的界面文案一律用 ASCII（`Files` / `Terminal` / `System` / `Settings`）。这是**已知边界**，不是遗漏。

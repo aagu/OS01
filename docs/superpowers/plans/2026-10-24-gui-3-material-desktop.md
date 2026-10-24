@@ -353,7 +353,7 @@ const char     *desktop_state_name(desktop_state_t st);
 | # | 现象 | 处置 |
 |---|------|------|
 | 1 | **界面文案原为中文，但 LVGL 只启用 Montserrat（无汉字字形）** —— QEMU 截图里整片方框 | 界面文案一律改 ASCII（`Files` / `Terminal` / `System` / `Settings`）。spec §「非目标」已把中文字体划归 GUI-4；这不是遗漏，是已知边界，已写进 `docs/gui/gui.md` §5 |
-| 2 | **libgui 的焦点组是私有的**（`gui_input_focus_*` 在 `libgui/internal/`），公共 API 没有「登记可聚焦控件」的入口，桌面因此**完全没有键盘焦点** | 外壳自建焦点序列（`desktop_shell_focus_add()` 等），用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义，焦点环由 Material 主题给出。与 spec §6.5 的**用户可见契约**（Tab 前进 / Shift+Tab 后退 / Enter 激活）一致 |
+| 2 | **libgui 的焦点组是私有的**（`gui_input_focus_*` 在 `libgui/internal/`），公共 API 没有「登记可聚焦控件」的入口，桌面因此**完全没有键盘焦点** | 外壳自建焦点序列（`desktop_shell_focus_add()` 等），用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义，焦点环由 Material 主题给出。与 spec §6.5 的**用户可见契约**（Tab 前进 / Shift+Tab 后退 / Enter 激活）一致。**这是临时方案**：roadmap 的 **GUI-2b libgui 公共焦点 API** 完成后，桌面改用公共 API，本条的自建序列删除 |
 | 3 | **`smoke` 模式把离屏平台与真实设备输入配在了一起** —— libgui 硬约束「真实设备只允许屏幕平台」，`gui_input_create()` 返 `EINVAL` | 冒烟模式改用 `GUI_INPUT_SYNTHETIC`（合成输入只允许离屏平台），且不碰 `/dev/keyboard`、不占显示租约 |
 | 4 | **`shell` 由 `calloc` 分配，`focus_index` 被清成 0** —— 第一次 Tab 直接落到**第二**个启动器图标 | `desktop_shell_create()` 显式置 `focus_index = -1`（「还没有焦点」）。QEMU 实测：修正后 Tab 落到第一个图标（Files），Enter 打开 Files 应用 |
 | 5 | **焦点清理晚于 `lv_obj_delete()`** —— 往已销毁对象上写 `LV_STATE_FOCUSED`，偶发 SIGSEGV | `destroy_surface()` 先 `focus_clear()` 再删控件树 |

@@ -15,7 +15,7 @@
 
   **应用模型：仅壳内应用**。四个应用（文件 / 终端 / 系统 / 设置）由外壳创建与销毁，占满显示区，不 fork 子进程、不做显示所有权与输入租约交接。语义显式：**启动 = `HOME→APP(id)` 整屏替换；退出 = 销毁应用表面回 `HOME`；全屏切换 = 整屏替换，不存在窗口化中间态**。应用状态（终端命令行与历史、文件浏览器当前目录）存在外壳持有的 C 变量里，不寄居在会被销毁的控件树中。
 
-  **键盘**：libgui 的焦点组是私有的（公共 API 没有「登记可聚焦控件」的入口），因此外壳自建焦点序列，用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义（Tab / Shift+Tab 移动、Enter 激活、ESC 返回），焦点环由 Material 主题给出。
+  **键盘**：libgui 的焦点组是私有的（公共 API 没有「登记可聚焦控件」的入口），因此外壳自建焦点序列，用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义（Tab / Shift+Tab 移动、Enter 激活、ESC 返回），焦点环由 Material 主题给出。这条自建焦点序列是**临时方案**——roadmap 已记 **GUI-2b libgui 公共焦点 API** 任务，落地后桌面改用公共 API。
 
   **已知边界**：GUI-3 只启用 Montserrat，**没有汉字字形**，因此界面文案一律用 ASCII（`Files` / `Terminal` / `System` / `Settings`）；中文字体按 spec 划归 GUI-4。
 
