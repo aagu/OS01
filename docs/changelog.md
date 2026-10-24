@@ -1,9 +1,13 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-23）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-24）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-24
+
+- fix(test-harness): **parked terminal-present 提前失败异常闭环**：`_run_terminal_present()` 的空闲窗口指标原先在采样后才赋值，baseline log 缺失、manifest 缺失/损坏及 QEMU 启动失败分支却提前引用，导致 `UnboundLocalError` 覆盖原始诊断。入口初始化为空记录与零时长，提前失败正常写出 JSON 并返回失败，不放宽 baseline 或性能门槛。新增真实驱动入口回归覆盖四种错误场景，旧实现四处复现，修复后 terminal-present 28 项通过，完整 `test-harness` 613 项、0 失败、1 跳过；根 Make 入口缺失 baseline 负向验证按预期失败并归档原因。未执行 guest 像素/性能验收。详见 [调查与验证](debug/2026-10-24-terminal-present-early-failure.md)。
 
 ## 2026-10-23
 

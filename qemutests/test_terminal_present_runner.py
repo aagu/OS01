@@ -54,11 +54,15 @@ Run: ``python3 -m unittest qemutests.test_terminal_present_runner``
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
+from unittest.mock import patch
 
 # Repo root for ``import qemutests.terminal_present_test`` once it
 # exists.  Idempotent across reloads.
@@ -801,6 +805,67 @@ class FakeQMP:
                    b"\xff\xff\x00" * (1440 * 900))
         self.surfaces.append(surface)
         return surface
+
+
+class DriverEarlyFailureTests(unittest.TestCase):
+    """Real driver failures before sampling must retain their diagnostic."""
+
+    def test_missing_or_invalid_baseline_writes_failure_summary(self):
+        from qemutests import terminal_present_test as tp
+
+        for case, diagnostic in (
+            ("missing_log", "evidence missing: baseline log"),
+            ("missing_manifest", "evidence missing: manifest.json"),
+            ("invalid_manifest", "manifest.json parse error"),
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                baseline = root / "serial.log"
+                if case != "missing_log":
+                    baseline.write_text("baseline\n")
+                if case == "invalid_manifest":
+                    (root / "manifest.json").write_text("{invalid json")
+                rc = tp.main([
+                    "--image", str(root / "disk.img"),
+                    "--firmware", str(root / "OVMF.fd"),
+                    "--build-dir", str(root / "build"),
+                    "--baseline-log", str(baseline),
+                ])
+                self.assertEqual(rc, 1)
+                summaries = list(root.glob(
+                    "build/test-results/terminal-present/*/summary.json"))
+                self.assertEqual(len(summaries), 1)
+                summary = json.loads(summaries[0].read_text())
+                self.assertIn(diagnostic, summary["reasons"][0])
+                self.assertEqual(summary["record_count"], 0)
+                self.assertFalse(summary["gate"]["ok"])
+                self.assertFalse(summary["gate"]["idle_window_ok"])
+
+    def test_qemu_launch_failure_writes_failure_summary(self):
+        from qemutests import terminal_present_test as tp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "capture"
+            with patch.object(tp.subprocess, "check_output",
+                              return_value="QEMU test\n"), \
+                 patch("qemutests.harness.process.ProcessSession.start",
+                       side_effect=OSError("launch denied")), \
+                 patch.object(tp.tempfile, "mkdtemp",
+                              return_value=str(root / "qmp")):
+                rc = tp.main([
+                    "--image", str(root / "disk.img"),
+                    "--firmware", str(root / "OVMF.fd"),
+                    "--build-dir", str(root / "build"),
+                    "--capture-baseline", "--output-dir", str(output),
+                ])
+            self.assertEqual(rc, 1)
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(summary["reasons"],
+                             ["QEMU launch failed: launch denied"])
+            self.assertEqual(summary["record_count"], 0)
+            self.assertFalse(summary["gate"]["ok"])
+            self.assertFalse(summary["gate"]["idle_window_ok"])
 
 
 class DriverRunnerTests(unittest.TestCase):

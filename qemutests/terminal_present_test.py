@@ -997,6 +997,9 @@ def _run_terminal_present(ctx: _RunContext) -> bool:
     """Top-level driver.  Returns True on PASS."""
     reasons: List[str] = []
     soft: List[str] = []
+    # Early failures have no sampled idle window to report.
+    idle_records: List[str] = []
+    idle_wallclock_ns = 0
 
     # Capture mode does not require a baseline log; acceptance mode
     # REQUIRES one.
