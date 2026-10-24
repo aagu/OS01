@@ -1041,6 +1041,7 @@ A64_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
 $(TEST_BLD)/x86_intr_decode_production.o: \
 		$(TESTS_DIR)/kernel/arch/x86_64/intr/intr_decode.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
@@ -1049,6 +1050,7 @@ $(TEST_BLD)/x86_intr_decode_production.o: \
 
 $(TEST_BLD)/test_intr_decode_x86.o: $(TEST_CASES)/test_intr_decode_x86.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
@@ -1207,6 +1209,7 @@ $(TEST_BLD)/x86_intr_backend_production.o: \
 		$(TESTS_DIR)/kernel/arch/x86_64/intr/dispatch.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
@@ -1218,6 +1221,7 @@ $(TEST_BLD)/test_intr_backend_x86.o: \
 		$(TEST_CASES)/test_intr_backend_x86.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \

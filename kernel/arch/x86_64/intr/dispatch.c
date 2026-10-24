@@ -6,11 +6,11 @@
 //  links against:
 //
 //    arch_intr_handle_sync() — deterministic re-validation, then
-//        an EXPLICIT four-case switch on the native vector that
+//        an explicit installed-vector switch on the native vector that
 //        calls the corresponding private business handler in
 //        trap.c EXACTLY once, with the ORIGINAL error code and
-//        (for #PF) the ORIGINAL CR2 snapshot.  Every other
-//        vector is unmigrated in phase one and must FAIL CLOSED
+//        (for #PF) the ORIGINAL CR2 snapshot.  Every uninstalled
+//        vector and must FAIL CLOSED
 //        through arch_intr_bad_event().
 //    arch_intr_handle_irq()  — fail-closed ONLY (spec §5.2):
 //        no production caller exists in phase one, and it must
@@ -45,17 +45,13 @@
 #include <arch/x86_64/intr_decode.h>
 #include <arch/x86_64/intr_dispatch.h>
 
-/* Exception vectors this phase migrates (spec §6.1) — keep in sync
- * with kernel/arch/x86_64/intr/intr_decode.c. */
-#define X86_VECTOR_DIVIDE_ERROR        0ULL
-#define X86_VECTOR_UNDEFINED_OPCODE    6ULL
-#define X86_VECTOR_GENERAL_PROTECTION  13ULL
-#define X86_VECTOR_PAGE_FAULT          14ULL
+#include <arch/x86_64/intr_vectors.h>
 
 /* Member-by-member comparison of two events (spec §9.1: struct
  * intr_event has padding — memcmp is not usable).  Kept static: only
  * this TU re-validates; nothing else may treat it as an event equality
  * operator. */
+__attribute__((no_stack_protector))
 static bool x86_event_matches(const struct intr_event *a,
                               const struct intr_event *b)
 {
@@ -90,11 +86,56 @@ void arch_intr_handle_sync(const struct intr_event *event, pt_regs_t *regs)
         arch_intr_bad_event(event, regs);
     }
 
-    /* 3. Explicit four-case whitelist on the native vector.  The
-     *    ORIGINAL error code (and, for #PF, the ORIGINAL CR2 snapshot)
-     *    is handed to the private business handler; the backend never
-     *    calls back into the public do_* entries. */
+    /* Route only installed exceptions, never back into public adapters. */
     switch (event->native_vector) {
+    case X86_VECTOR_DEBUG:
+        x86_handle_debug(regs, event->native_status);
+        return;
+    case X86_VECTOR_NMI:
+        x86_handle_nmi(regs, event->native_status);
+        return;
+    case X86_VECTOR_INT3:
+        x86_handle_int3(regs, event->native_status);
+        return;
+    case X86_VECTOR_OVERFLOW:
+        x86_handle_overflow(regs, event->native_status);
+        return;
+    case X86_VECTOR_BOUNDS:
+        x86_handle_bounds(regs, event->native_status);
+        return;
+    case X86_VECTOR_DEV_NOT_AVAILABLE:
+        x86_handle_dev_not_available(regs, event->native_status);
+        return;
+    case X86_VECTOR_DOUBLE_FAULT:
+        x86_handle_double_fault(regs, event->native_status);
+        return;
+    case X86_VECTOR_COPROCESSOR_SEGMENT_OVERRUN:
+        x86_handle_coprocessor_segment_overrun(regs, event->native_status);
+        return;
+    case X86_VECTOR_INVALID_TSS:
+        x86_handle_invalid_TSS(regs, event->native_status);
+        return;
+    case X86_VECTOR_SEGMENT_NOT_PRESENT:
+        x86_handle_segment_not_present(regs, event->native_status);
+        return;
+    case X86_VECTOR_STACK_SEGMENT_FAULT:
+        x86_handle_stack_segment_fault(regs, event->native_status);
+        return;
+    case X86_VECTOR_X87_FPU_ERROR:
+        x86_handle_x87_FPU_error(regs, event->native_status);
+        return;
+    case X86_VECTOR_ALIGNMENT_CHECK:
+        x86_handle_alignment_check(regs, event->native_status);
+        return;
+    case X86_VECTOR_MACHINE_CHECK:
+        x86_handle_machine_check(regs, event->native_status);
+        return;
+    case X86_VECTOR_SIMD_EXCEPTION:
+        x86_handle_SIMD_exception(regs, event->native_status);
+        return;
+    case X86_VECTOR_VIRTUALIZATION_EXCEPTION:
+        x86_handle_virtualization_exception(regs, event->native_status);
+        return;
     case X86_VECTOR_DIVIDE_ERROR:
         x86_handle_divide_error(regs, event->native_status);
         return;
@@ -109,7 +150,7 @@ void arch_intr_handle_sync(const struct intr_event *event, pt_regs_t *regs)
                               event->native_address);
         return;
     default:
-        /* Unmigrated vectors fail closed — no default routing. */
+        /* Uninstalled vectors fail closed. */
         arch_intr_bad_event(event, regs);
     }
 }

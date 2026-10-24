@@ -35,7 +35,8 @@ typedef int pid_t;
 #include <intr/dispatch.h>       // arch_intr_dispatch + struct intr_event (intr-dispatch phase 1)
 #include <arch/intr.h>           // strong backend facade
 #include <arch/x86_64/intr_decode.h>   // production event decoder
-#include <arch/x86_64/intr_dispatch.h> // private business handler handoff
+#include <arch/x86_64/intr_dispatch.h>
+#include <arch/x86_64/intr_vectors.h> // private business handler handoff
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
 // (RSP masking) returns garbage.
@@ -127,18 +128,7 @@ static inline int handle_user_fault(pt_regs_t *regs, const char *name, int sig)
     return 0;
 }
 
-// ── Migrated exception entries (intr-dispatch phase 1, Task 4) ──────
-// The four representative vectors go through the common dispatcher:
-// the public do_* landing point snapshots the state, builds a fully
-// initialized struct intr_event with the PRODUCTION decoder and calls
-// arch_intr_dispatch(); the x86 backend (arch/x86_64/intr/dispatch.c)
-// re-validates the payload and calls the private x86_handle_* business
-// handlers below, which carry the original bodies verbatim.  Keep the
-// vector numbers in sync with arch/x86_64/intr/intr_decode.c.
-#define X86_TRAP_VEC_DIVIDE_ERROR        0ULL
-#define X86_TRAP_VEC_UNDEFINED_OPCODE    6ULL
-#define X86_TRAP_VEC_GENERAL_PROTECTION  13ULL
-#define X86_TRAP_VEC_PAGE_FAULT          14ULL
+/* Installed exception adapters preserve the native assembly ABI. */
 
 void x86_handle_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
@@ -151,14 +141,23 @@ void x86_handle_divide_error(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
     struct intr_event ev;
-    x86_intr_decode(&ev, regs, X86_TRAP_VEC_DIVIDE_ERROR, error_code, 0);
+    x86_intr_decode(&ev, regs, X86_VECTOR_DIVIDE_ERROR, error_code, 0);
     arch_intr_dispatch(&ev, regs);
 }
 
+__attribute__((no_stack_protector))
 void do_debug(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_DEBUG, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_debug(pt_regs_t * regs, uint64_t error_code)
 {
 	log_err("do_debug(1),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -168,7 +167,15 @@ void do_debug(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_nmi(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_NMI, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_nmi(pt_regs_t * regs, uint64_t error_code)
 {
 	log_err("do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -178,7 +185,15 @@ void do_nmi(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_int3(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_INT3, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_int3(pt_regs_t * regs, uint64_t error_code)
 {
 	log_err("do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -188,7 +203,15 @@ void do_int3(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_overflow(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_OVERFLOW, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_overflow(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_overflow", SIGFPE)) return;
 	log_err("do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -199,7 +222,15 @@ void do_overflow(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_bounds(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_BOUNDS, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_bounds(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_bounds", SIGFPE)) return;
 	log_err("do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -221,14 +252,23 @@ void x86_handle_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 {
     struct intr_event ev;
-    x86_intr_decode(&ev, regs, X86_TRAP_VEC_UNDEFINED_OPCODE, error_code, 0);
+    x86_intr_decode(&ev, regs, X86_VECTOR_UNDEFINED_OPCODE, error_code, 0);
     arch_intr_dispatch(&ev, regs);
 }
 
+__attribute__((no_stack_protector))
 void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_DEV_NOT_AVAILABLE, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_dev_not_available", SIGFPE)) return;
 	log_err("do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -239,7 +279,15 @@ void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_double_fault(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_DOUBLE_FAULT, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_double_fault(pt_regs_t * regs, uint64_t error_code)
 {
 	log_err("do_double_fault(8),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
 	backtrace(regs);
@@ -249,7 +297,15 @@ void do_double_fault(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_COPROCESSOR_SEGMENT_OVERRUN, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_coprocessor_segment_overrun", SIGFPE)) return;
 	log_err("do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -260,7 +316,15 @@ void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_INVALID_TSS, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_invalid_TSS", SIGSEGV)) return;
 	log_err("do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -298,7 +362,15 @@ void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_SEGMENT_NOT_PRESENT, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_segment_not_present", SIGBUS)) return;
 	log_err("do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -336,7 +408,15 @@ void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_STACK_SEGMENT_FAULT, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_stack_segment_fault", SIGBUS)) return;
 	log_err("do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -439,6 +519,7 @@ void x86_handle_general_protection(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_general_protection(pt_regs_t * regs, uint64_t error_code)
 {
     struct intr_event ev;
@@ -446,7 +527,7 @@ void do_general_protection(pt_regs_t * regs, uint64_t error_code)
      * fault_addr_valid=false and native_address=0 (spec §6.1).  The
      * kernel fatal diagnostics inside the private handler keep their
      * own CR2 read purely for the log line. */
-    x86_intr_decode(&ev, regs, X86_TRAP_VEC_GENERAL_PROTECTION, error_code, 0);
+    x86_intr_decode(&ev, regs, X86_VECTOR_GENERAL_PROTECTION, error_code, 0);
     arch_intr_dispatch(&ev, regs);
 }
 
@@ -852,6 +933,7 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_page_fault(pt_regs_t * regs, uint64_t error_code)
 {
     /* CR2 is read EXACTLY ONCE, here at the very front — before the
@@ -862,11 +944,19 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
     __asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
 
     struct intr_event ev;
-    x86_intr_decode(&ev, regs, X86_TRAP_VEC_PAGE_FAULT, error_code, cr2);
+    x86_intr_decode(&ev, regs, X86_VECTOR_PAGE_FAULT, error_code, cr2);
     arch_intr_dispatch(&ev, regs);
 }
 
+__attribute__((no_stack_protector))
 void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_X87_FPU_ERROR, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_x87_FPU_error", SIGFPE)) return;
 	log_err("do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -877,7 +967,15 @@ void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_ALIGNMENT_CHECK, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_alignment_check(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_alignment_check", SIGBUS)) return;
 	log_err("do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -888,7 +986,15 @@ void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_machine_check(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_MACHINE_CHECK, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_machine_check(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_machine_check", SIGBUS)) return;
 	log_err("do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -899,7 +1005,15 @@ void do_machine_check(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_SIMD_EXCEPTION, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_SIMD_exception", SIGFPE)) return;
 	log_err("do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
@@ -910,7 +1024,15 @@ void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
+__attribute__((no_stack_protector))
 void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
+{
+    struct intr_event ev;
+    x86_intr_decode(&ev, regs, X86_VECTOR_VIRTUALIZATION_EXCEPTION, error_code, 0);
+    arch_intr_dispatch(&ev, regs);
+}
+
+void x86_handle_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_virtualization_exception", SIGBUS)) return;
 	log_err("do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);

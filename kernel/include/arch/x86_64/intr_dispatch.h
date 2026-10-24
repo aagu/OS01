@@ -13,7 +13,7 @@
 //  include it, and it must not include any private header of
 //  the other architecture.
 //
-//  The four x86_handle_* functions are the ORIGINAL do_*
+//  The x86_handle_* functions are the ORIGINAL do_*
 //  bodies, moved verbatim out of the public C landing points.
 //  They are cross-TU (hence not static) but stay private to
 //  the x86_64 exception path; nothing outside this pair of
@@ -28,6 +28,23 @@
 #include <stdint.h>
 
 #include <arch/regs.h>
+
+void x86_handle_debug(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_nmi(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_int3(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_overflow(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_bounds(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_dev_not_available(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_double_fault(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_coprocessor_segment_overrun(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_invalid_TSS(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_segment_not_present(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_stack_segment_fault(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_x87_FPU_error(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_alignment_check(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_machine_check(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_SIMD_exception(pt_regs_t *regs, uint64_t error_code);
+void x86_handle_virtualization_exception(pt_regs_t *regs, uint64_t error_code);
 
 /* #DE (0): user fault → SIGFPE, kernel → original fatal path. */
 void x86_handle_divide_error(pt_regs_t *regs, uint64_t error_code);
