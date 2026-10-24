@@ -110,6 +110,10 @@ typedef struct vfs_inode_ops {
     int              (*symlink)(struct vfs_node *parent, const char *name,
                                 const char *target);
     int              (*readlink)(struct vfs_node *node, char *buf, size_t size);
+
+    // 可选钩子：当 vfs_node_put() 将 node->refcount 减至 0 时（释放 node 内存前）调用，
+    // 用于释放或递减 node->fs_data 关联的底层内存对象引用计数（如 tmpfs_node_t）。
+    void             (*evict_node)(struct vfs_node *node);
 } vfs_inode_ops_t;
 
 typedef struct vfs_file_ops {
@@ -248,9 +252,22 @@ typedef struct vfs_mount {
    - 各后端 `lookup` 实现要点：
      - **`ext2_iop_lookup`**：调 `ext2_find_dirent(fs, dir_ino, name, &child_ino, &ft, &blk, &off)` → 未找到返回 `-ENOENT`；找到后调 `ext2_read_inode(fs, child_ino, &disk_ino)`，分配 `vfs_node_t`，填充 `ino = child_ino`、`size = disk_ino.i_size`、`mode = disk_ino.i_mode`、`uid = disk_ino.i_uid`、`gid = disk_ino.i_gid`、`nlink = disk_ino.i_links_count`、`atime = disk_ino.i_atime`、`mtime = disk_ino.i_mtime`、`ctime = disk_ino.i_ctime`。
      - **`fat_iop_lookup`**：单趟遍历目录簇链，使用大小写不敏感匹配找到目标 8.3 目录项，一步构造 `vfs_node_t`（`ino = start_cluster`，`mode = (is_dir ? S_IFDIR|0755 : S_IFREG|0644)`）。
-     - **`tmpfs_iop_lookup`**：`tmpfs_node_t` 增补 `mode`/`uid`/`gid`/`mtime` 字段，`tmpfs_find_child` 命中后直接构造 `vfs_node_t`（`ino = (uint64_t)(uintptr_t)tn`）。
+     - **`tmpfs_iop_lookup` 与底层节点引用计数生命周期**：
+       - `tmpfs_node_t` 新增原子引用计数 `uint32_t refcount`（以及 `mode`/`uid`/`gid`/`mtime`）：新创建并挂入父目录 `d->children[]` 时初始 `refcount = 1`；
+       - 每次 `tmpfs_vfs_create`、`tmpfs_vfs_mkdir` 或 `tmpfs_iop_lookup` 构造指向 `tmpfs_node_t *tn` 的 `vfs_node_t` 时，必须调用 `tmpfs_node_get(tn)`（`refcount++`），并设置 `i_ops->evict_node = tmpfs_iop_evict_node`；
+       - `tmpfs_vfs_unlink` 与 `tmpfs_vfs_rmdir` 仅从父目录 `d->children[]` 中移除该项并调用 `tmpfs_node_put(child)`（将目录持有的 1 个引用放下），**绝不在 `unlink`/`rmdir` 时无条件 `tmpfs_free_blocks` + `kfree`**；
+       - 当所有关联的 `vfs_node_t`（无论来自打开的 `file_t`、`dcache` 缓存项，还是并发 `lookup` 刚拿到但未入缓存的局部 `child`）均调用 `vfs_node_put()` 触发 `tmpfs_iop_evict_node` 使 `tn->refcount` 归零时，才在 `tmpfs_node_put` 中执行 `tmpfs_free_blocks(tn)` 与 `kfree(tn)`。这彻底消除了 `lookup` 与 `unlink` 并发或先打开后删除时的 `child->fs_data` 悬空 UAF。
      - **`devfs_iop_lookup`**：在 `devices[]` 中按名查找 `registered` 项，构造 `vfs_node_t`（`ino = idx + 1`、`rdev = idx + 1`、`mode = (type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666`）。
-     - **`procfs_iop_lookup`**：将原 `procfs_readdir` 中的三层结构（根 `/proc`、进程目录 `/proc/<pid>`、文件描述符目录 `/proc/<pid>/fd`）提炼为按名精确解析函数，时间复杂度从遍历 toàn 表降为 $O(1)$ PID 定位。
+     - **`procfs_iop_lookup`**：将原 `procfs_readdir` 中的三层结构（根 `/proc`、进程目录 `/proc/<pid>`、文件描述符目录 `/proc/<pid>/fd`）提炼为按名精确解析函数，时间复杂度从遍历全表降为 $O(1)$ PID 定位。
+3. **写入与截断后的元数据（`size`/`mtime`/`blocks`）一致性契约**：
+   - **后端实时 `getattr`**：
+     - `tmpfs_iop_getattr(node, buf)` 直接从底层 `tmpfs_get_node(node)`（`tmpfs_node_t *tn`）读取实时 `tn->size`、`tn->mtime` 并同步回 `node->size = tn->size`，再调用 `vfs_generic_getattr(node, buf)`；
+     - `ext2_iop_getattr(node, buf)` 直接调用 `ext2_read_inode(fs, node->ino, &disk_ino)` 读取最新磁盘 `i_size`、`i_blocks`、`i_links_count`、`i_mtime` 并同步回 `node->size`，再填充 `buf`；
+     - `fat_iop_getattr(node, buf)` 读取最新大小并填充 `buf`。
+   - **VFS 写/截断同步**：
+     - `vfs_write(node, offset, size, buffer)` 在底层 `f_ops->write` 返回写入字节数 `ret > 0` 后，若 `offset + (uint64_t)ret > node->size`，立即更新 `node->size = offset + (uint64_t)ret`，并调用 `dcache_sync_node_size(node, node->size)` 同步更新缓存中同 `(node->mount, vfs_node_stable_ino(node))` 节点的 `size`；
+     - `vfs_truncate(node, new_size)` 在底层 `i_ops->truncate` 返回 `0` 后，立即更新 `node->size = new_size`，并调用 `dcache_sync_node_size(node, new_size)`。
+     - 由此保证：**缓存节点、已打开的独立 `vfs_node_t` 句柄、以及从缓存淘汰后重新查找构造的节点**三者在 `write`/`truncate` 前后执行 `vfs_stat` 始终获得一致的最新文件大小。
 
 ### 5.3 Phase 3：节点级挂载树（稳定父目录身份索引 + 虚拟挂载桩 + 延迟绑定）
 
@@ -278,7 +295,12 @@ typedef struct vfs_mount {
      - 若同一挂载点存在叠挂载（overmount），循环执行挂载跨越直至到达最顶层 `mp->root`。
    - **向上跨越（`".."` 退出子挂载）**：
      - 当遇到分量 `".."` 时，若 `cur == cur->mount->root && cur->mount->mountpoint != NULL`，循环将 `cur` 切换为 `cur->mount->mountpoint`（其 `parent` 链在挂载时已被持久锚定），再跳转到 `cur->parent`（若已在全局根 `"/"` 则原地不动）。
-3. **`vfs_getdents` 子挂载合并与去重（统一稳定父目录身份判定）**：
+3. **挂载点及其祖先目录的 `rename`/`rmdir` 保护契约（`-EBUSY`）**：
+   - 由于 `mp->mountpoint` 持久锚定了挂载时的祖先链 `mp->mountpoint → ... → root`，若允许移动或删除挂载点自身或其任何祖先目录（例如挂载 `/a/d/usb` 后执行 `rename("/a/d", "/b/d")` 或 `rename("/a", "/x")`），会导致 `mp->mountpoint` 的向上 `".."` 链与实际目录树位置脱节。
+   - 因此 VFS 提供 `bool vfs_is_mount_or_ancestor(vfs_node_t *dir, const char *name)`，在 `mount_lock` 读锁下遍历 `mount_list` 中所有 `mp->mountpoint != NULL` 的挂载项，沿 `for (vfs_node_t *anc = mp->mountpoint; anc && anc->parent; anc = anc->parent)` 向上检查：
+     `anc->parent->mount == dir->mount && vfs_node_stable_ino(anc->parent) == vfs_node_stable_ino(dir) && vfs_mount_name_eq(dir->mount, anc->name, name)`；
+   - 在 `vfs_rmdir(path, cwd)` 中若目标 `(parent, name)` 命中，或在 `vfs_rename(oldpath, newpath, cwd)` 中若源 `(olddir, oldname)` 或目标 `(newdir, newname)` 命中，VFS 直接拦截并返回 **`-EBUSY`**，禁止移动或删除任何活跃挂载点及其祖先目录。
+4. **`vfs_getdents` 子挂载合并与去重（统一稳定父目录身份判定）**：
    - 枚举目录 `dir` 时，第一阶段通过 `dir->f_ops->readdir` 收集底层目录项；
    - 第二阶段在 `mount_lock` 读锁下遍历 `mount_list`，仅当子挂载满足**单一精确谓词**：
      `mp->parent_mount == dir->mount && mp->parent_dir_ino == vfs_node_stable_ino(dir)`
@@ -297,6 +319,7 @@ vfs_node_t *dcache_lookup_begin(vfs_node_t *parent, const char *name,
                                 uint64_t *out_gen);
 void        dcache_insert_validated(vfs_node_t *parent, const char *name,
                                     vfs_node_t *child, uint64_t lookup_gen);
+void        dcache_sync_node_size(const vfs_node_t *node, uint64_t new_size);
 void        dcache_mutation_begin(void);
 void        dcache_mutation_end_invalidate(vfs_node_t *parent, const char *name);
 void        dcache_mutation_end_rename(vfs_node_t *olddir, const char *oldname,
@@ -307,20 +330,20 @@ void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictio
 
 1. **键结构与父链一致性（解决 `rename` 后代 `parent` 链陈旧与父节点淘汰重建问题）**：
    - **索引键**：以 `(parent->mount, vfs_node_stable_ino(parent), normalized_name)` 哈希和匹配（若 `parent->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE`，名字统一转大写后计算哈希与比较）。
-   - **命中時の父指针强校验**：`dcache_lookup_begin(parent, name, &out_gen)` 命中缓存条目 `entry` 时，额外检查 `entry->node->parent == parent`：
+   - **命中时的父指针强校验**：`dcache_lookup_begin(parent, name, &out_gen)` 命中缓存条目 `entry` 时，额外检查 `entry->node->parent == parent`：
      - 若相等，移动至 LRU 头部、`vfs_node_get(entry->node)` 并返回命中节点；
      - 若 `entry->node->parent != parent`（说明父目录节点曾被淘汰重建或发生过目录迁移），立即将该陈旧条目从缓存摘除（锁外 `vfs_node_put`）并按未命中处理，由调用方基于当前 `parent` 重新构造子节点。这保证了任何从 `dcache` 返回的节点其 `node->parent` 链自顶向下严格一致，且 `node->parent` 在节点生命周期内保持只读不变，无需对 `vfs_resolve_path` 或 `".."` 加额外锁。
    - **失效键**：`dcache_mutation_end_invalidate(dir, name)` 仅按 `(dir->mount, vfs_node_stable_ino(dir), normalized_name)` 匹配并摘除条目，不要求传入的 `dir` 指针与缓存时的 `parent` 指针相同。
-2. **并发 Lookup 与 Unlink/Rmdir/Rename 竞态防护（代次屏障协议）**：
-   - 为防止「CPU A `dcache` 未命中并完成底层 `lookup` → CPU B 执行 `unlink` 并失效缓存（在 `tmpfs` 中还会立即释放 `tmpfs_node_t`） → CPU A 调用 `insert` 将已删除/悬空节点重新塞回缓存」的 TOCTOU 竞态，`dcache` 内部维护受 `dcache_lock` 保护的：
-     - `uint64_t dcache_mut_gen`：单调递增的名字空间变更代次计数；
-     - `uint32_t dcache_mut_active`：当前正在执行中的目录变更操作计数。
-   - **三阶段协作协议**：
-     1. **查找开始**：`dcache_lookup_begin(parent, name, &lookup_gen)` 未命中时，在 `dcache_lock` 内若 `dcache_mut_active == 0` 则记录 `*lookup_gen = dcache_mut_gen`，否则置 `*lookup_gen = 0`（表示存在并发变更，本次查找结果禁止入缓存）。
-     2. **变更围栏**：`vfs_unlink` / `vfs_rmdir` / `vfs_rename` 在调用底层 `i_ops->unlink/rmdir/rename` **之前**必须调用 `dcache_mutation_begin()`（在 `dcache_lock` 内执行 `dcache_mut_active++; dcache_mut_gen++;`）；在底层操作返回**之后**调用 `dcache_mutation_end_invalidate(...)` 或 `dcache_mutation_end_rename(...)`（在 `dcache_lock` 内完成缓存摘除，并执行 `dcache_mut_gen++; dcache_mut_active--;`）。
-     3. **验证插入**：`dcache_insert_validated(parent, name, child, lookup_gen)` 在 `dcache_lock` 内检查：仅当 `lookup_gen != 0 && dcache_mut_active == 0 && dcache_mut_gen == lookup_gen` 时才允许插入缓存；若代次已变或有活跃变更，直接放弃入缓存（调用者正常用完 `child` 后 `vfs_node_put(child)` 释放）。
+2. **并发 Lookup 与 Unlink/Rmdir/Rename 竞态防护（代次屏障 + 底层节点引用计数双重保护）**：
+   - **第一重保护（防止旧结果回填 `dcache`）**：`dcache` 内部维护受 `dcache_lock` 保护的 `uint64_t dcache_mut_gen`（单调代次）与 `uint32_t dcache_mut_active`（活跃目录变更计数）：
+     1. **查找开始**：`dcache_lookup_begin(parent, name, &lookup_gen)` 未命中时，在 `dcache_lock` 内若 `dcache_mut_active == 0` 则记录 `*lookup_gen = dcache_mut_gen`，否则置 `*lookup_gen = 0`。
+     2. **变更围栏**：`vfs_unlink` / `vfs_rmdir` / `vfs_rename` 在调用底层 `i_ops->unlink/rmdir/rename` **之前**调用 `dcache_mutation_begin()`（`dcache_mut_active++; dcache_mut_gen++;`）；在底层操作返回**之后**调用 `dcache_mutation_end_invalidate(...)` 或 `dcache_mutation_end_rename(...)`（完成缓存摘除并执行 `dcache_mut_gen++; dcache_mut_active--;`）。
+     3. **验证插入**：`dcache_insert_validated(parent, name, child, lookup_gen)` 仅当 `lookup_gen != 0 && dcache_mut_active == 0 && dcache_mut_gen == lookup_gen` 时才允许写入缓存；否则放弃入缓存。
+   - **第二重保护（保证已返回 `child` 的生命周期安全）**：
+     - 如 §5.2 所述，内存文件系统 `tmpfs_node_t` 通过自身的 `refcount` 与 `i_ops->evict_node` 将底层数据生命周期绑定到 `vfs_node_t` 引用计数上；磁盘/设备文件系统（`ext2`/`fat32`/`devfs`/`procfs`）的 `fs_data` 为纯值标识（inode 号/簇号/设备槽号），无悬空指针风险。
+     - 因此即便 CPU A 在 `lookup` 拿到 `child`（或从 `dcache` 命中 `child`）后、CPU B 立即执行了 `unlink`，CPU A 持有的 `child` 在调用 `vfs_node_put(child)` 之前其底层 `tmpfs_node_t` 依然存活可读，释放最后 1 个引用时才回收内存，不会发生 UAF。
 3. **Rename 子树与后代 `parent` 链失效策略**：
-   - 当执行 `vfs_rename(oldpath, newpath, cwd)` 时（例如将 `/a/d` 移动到 `/b/d` 或重命名为 `/a/d2`），被移动目录的所有已缓存后代（如 `/a/d/sub`）其 `parent` 链和祖先 `name` 均已失效；
+   - 当执行 `vfs_rename(oldpath, newpath, cwd)` 时（在通过 §5.3.3 的 `-EBUSY` 挂载点及祖先检查后），被移动目录的所有已缓存后代（如 `/a/d/sub`）其 `parent` 链和祖先 `name` 均已失效；
    - 由于 `VFS_DCACHE_CAPACITY` 固定为 256 项，`dcache_mutation_end_rename` 在 `dcache_lock` 内直接调用 `dcache_flush_mount_locked(olddir->mount)` 清空该挂载下的缓存项（固定 256 槽扫描，耗时 $<1\,\mu\text{s}$），并在解锁后批量 `vfs_node_put` 被摘除的节点，从根源上杜绝任何深度的后代残留旧 `/a/d` 父链。
 4. **锁外释放原则与绕过规则**：
    - 所有淘汰（LRU 满 256 项）、失效（`invalidate` / `flush_mount`）及父指针不匹配摘除操作，均在 `dcache_lock` 内将条目从哈希桶和 LRU 链表摘下放入局部待释放数组，**释放 `dcache_lock` 后再调用 `vfs_node_put`**，严禁在自旋锁内触发 `kfree` 或递归父引用释放。
@@ -338,9 +361,11 @@ void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictio
 | 目录项超过 256 个时查找第 300 个文件 | Phase 2 起通过 `i_ops->lookup` 正常返回 `0`，不再因 `max_iter=256` 误报 `-ENOENT` |
 | 对不支持写/创建的只读 FS（如 `procfs`）调用 `unlink`/`mkdir`/`rmdir`/`rename`/`truncate` | `i_ops` 对应函数指针为 `NULL`，VFS 统一返回 `-EROFS`（`symlink`/`readlink` 保持返回 `-EOPNOTSUPP` 以兼容现有 systest） |
 | 跨挂载点 `rename`（`olddir->mount != newdir->mount`） | VFS 层在调用 `olddir->i_ops->rename` 前拦截并返回 `-EXDEV` |
+| 对活跃挂载点或其祖先目录执行 `rename` / `rmdir`（如挂载 `/a/d/usb` 后移动 `/a/d` 或 `/a`） | `vfs_is_mount_or_ancestor` 命中，VFS 层拦截并返回 `-EBUSY`，保护挂载点锚定的向上 `".."` 链不被破坏 |
 | 多级子挂载 `/mnt/usb` 重新查找父目录 `/mnt` 或缓存淘汰后再查找 | 通过 `(cur->mount, vfs_node_stable_ino(cur), "usb")` 稳定匹配进入 `usb` 挂载根 |
 | 多级子挂载 `/mnt/usb` 下对 `/` 与 `/mnt` 执行 `vfs_getdents` | `/` 的目录列表中**不出现** `usb`；`/mnt` 的目录列表中**精确出现一次** `usb` |
-| 并发 `lookup` 未命中与 `unlink` 交错 | `dcache_mut_gen` 代次变化阻止旧 `lookup` 结果回填 `dcache`，后续查找稳定返回 `-ENOENT` |
+| 并发 `lookup` 与 `unlink` 交错（含 `tmpfs`） | `dcache_mut_gen` 阻止旧结果回填 `dcache`；已返回的 `child` 因 `tmpfs_node_t->refcount` 保护在 `vfs_node_put(child)` 前不释放底层块，无 UAF |
+| 文件写入或截断后对缓存节点、打开句柄、淘汰重建节点执行 `vfs_stat` | 通过 `vfs_write`/`vfs_truncate` 同步 `dcache_sync_node_size` 及 `i_ops->getattr` 实时读取，三者返回一致的最新 `st_size` |
 | 目录 `rename`（`/a/d` → `/b/d`）后解析 `/b/d/sub/../..` 与 `vfs_resolve_path` | 缓存子树随 `dcache_flush_mount` 失效重建，`/b/d/sub/../..` 落到 `/b`，`vfs_resolve_path` 返回 `/b/d/sub` |
 | 跨挂载点 `".."` 解析（如 `/dev/..`、`/boot/..`、`/mnt/usb/..`） | 沿着 `mp->mountpoint->parent` 退回父挂载对应目录（`/` 或 `/mnt`） |
 | 根挂载 `"/"` 上解析 `".."`（如 `/..`、`/../../bin`） | 停留在 `"/"`，不越界 |
@@ -354,17 +379,24 @@ void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictio
 
 1. **宿主单元测试（`make test-host`）**：
    - **Phase 1**：新增 `hosttests/cases/test_vfs_fs_registry.c`，覆盖 `vfs_register_filesystem`、重复注册 `-EEXIST`、非法参数 `-EINVAL`、`vfs_mount_fs` 的 `REQUIRES_DEV` 检查与未知类型 `-ENODEV`。
-   - **Phase 2**：新增 `hosttests/cases/test_vfs_iops_fops.c`，覆盖 `i_ops->lookup`（含 300 项大目录查找无截断）、`i_ops->getattr` 自定义与 `vfs_generic_getattr` 回退、`ext2`/`tmpfs` 元数据字段透出、跨挂载 `rename` 返回 `-EXDEV`。
+   - **Phase 2**：新增 `hosttests/cases/test_vfs_iops_fops.c`，覆盖：
+     - `i_ops->lookup`（含 300 项大目录查找无截断）；
+     - `i_ops->getattr` 自定义与 `vfs_generic_getattr` 回退、`ext2`/`tmpfs` 元数据字段透出；
+     - `tmpfs_node_t` 引用计数与 `i_ops->evict_node`：验证先 `lookup`（持有 `vfs_node_t`）、再 `unlink`、再对该 `vfs_node_t` 执行 `vfs_read`/`vfs_write` 无 UAF，且 `vfs_node_put` 后底层节点计数归零正常回收；
+     - `write`/`truncate` 后对同一打开节点与新查找节点执行 `vfs_stat` 的大小一致性；
+     - 跨挂载 `rename` 返回 `-EXDEV`。
    - **Phase 3**：新增 `hosttests/cases/test_vfs_mount_tree.c`，覆盖：
      - `/dev` 先于 `/` 挂载的延迟绑定；
      - 虚拟挂载桩（Synthetic Stub）透明步进；
      - 多级挂载 `/mnt/usb` 在每次重新分配 `/mnt` 节点（无 dcache）时仍能通过稳定目录身份进入子挂载；
      - `/dev/..` 与 `/mnt/usb/..` 跨挂载回退；
+     - 挂载 `/a/d/usb` 后尝试 `rename("/a/d", "/b/d")`、`rename("/a", "/x")` 或 `rmdir("/a/d")` 均返回 `-EBUSY`，且 `/a/d/usb/../..` 仍正确退回 `/a`；
      - `vfs_getdents` 子挂载注入、同名目录去重，以及多级挂载 `/mnt/usb` 下枚举 `/` **不出现** `usb`、枚举 `/mnt` **只出现一次** `usb`。
    - **Phase 4**：新增 `hosttests/cases/test_vfs_dcache.c`，覆盖：
      - 正缓存命中计数、FAT32 大小写不敏感键命中；
      - 256 项容量上限 LRU 驱逐与 `refcount` 平衡、父目录 `/mnt` 从缓存淘汰后再查找 `/mnt/usb` 仍正确跨越挂载点；
-     - 确定性并发交错用例：`dcache_lookup_begin` 未命中后穿插 `dcache_mutation_begin` / `unlink` / `dcache_mutation_end_invalidate`，验证 `dcache_insert_validated` 拒绝回填旧节点；
+     - 确定性并发交错用例：`dcache_lookup_begin` 未命中并完成底层 `lookup` 后，穿插 `dcache_mutation_begin` / `unlink` / `dcache_mutation_end_invalidate`，验证 `dcache_insert_validated` 拒绝回填旧节点，且调用者手头的 `child` 在 `vfs_node_put` 前后仍可安全读取/释放（`evict_node` 延迟回收）；
+     - 元数据一致性用例：缓存节点先 `vfs_stat`、再通过同一或另一句柄 `vfs_write`/`vfs_truncate`、再对缓存节点/已打开节点/淘汰重建节点分别 `vfs_stat`，均读到最新 `st_size`；
      - 目录 `rename`（`/a/d` → `/b/d`）后先前的缓存后代 `/a/d/sub` 被失效，重新查找 `/b/d/sub` 后其 `../..` 指向 `/b` 且 `vfs_resolve_path` 输出 `/b/d/sub`；
      - `VFS_FS_NO_DCACHE` 绕过。
 2. **静态与构建审计（`make test-static`）**：
