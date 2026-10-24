@@ -482,6 +482,7 @@ GUI-3 只启用 Montserrat（12/14/16/20/24），**没有汉字字形**——中
 | 外壳与像素 | `hosttests/cases/test_desktop_shell.c` | 表面像素、四个应用逐一启动 / 全屏 / 退出、终端消费字符、退出后焦点仍可导航 |
 | 静态审计 | `hosttests/cases/test_desktop_audit.c` | 禁颜色字面量、禁裸字号、禁手绘 primitive、禁直开设备、禁私有头、禁窗口装饰标识 |
 | QEMU 端到端 | `qemutests/gui_desktop_test.py`（`SUITE=gui-desktop`） | 冒烟、桌面接管显示、真实 PS/2 按键启动应用并返回、杀掉桌面后 guest 仍存活；SMP 1/2 |
+| 门禁收尾 | `qemutests/test_gui_desktop_runner.py` | 收尾必须真的杀掉 QEMU；信号路径必须杀掉进程组；子进程随父进程而死（PDEATHSIG） |
 
 ```sh
 make PROFILE=x86_64-clang test-gui-host CASE=theme
@@ -491,3 +492,11 @@ make PROFILE=x86_64-clang test-gui-host CASE=desktop-shell
 make PROFILE=x86_64-clang test-gui-host CASE=desktop-audit
 make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop
 ```
+
+**门禁收尾有防孤儿契约。** QEMU 持有磁盘镜像的**写锁**（`-snapshot` 模式也一样），一个活着的孤儿 QEMU 会让后续的 `make run` 报 `Failed to get "write" lock / Is another process using the image [...]/disk.img`。因此门禁的三层保障缺一不可：
+
+1. **正常收尾**：`DesktopCaseRunner.close()` 调真实的 `ProcessSession.close()`（不是别的方法名），收尾失败只记录不抛出，但记录必须显眼。
+2. **信号路径**：SIGINT / SIGTERM 触发时**无锁硬杀**在跑的 QEMU 进程组（`SIGKILL` 不可捕获），再退出。
+3. **内核兜底**：`ProcessSession` 的 `preexec_fn` 装上 `PR_SET_PDEATHSIG`，父进程被 SIGKILL 或崩溃时由内核杀掉 QEMU。
+
+对应回归在 `qemutests/test_gui_desktop_runner.py`，其中一条用的假 session **只有 `close()`、故意没有 `cleanup()`**，把当初那个方法名笔误钉死。
