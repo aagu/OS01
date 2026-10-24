@@ -150,10 +150,10 @@ void *kmalloc(size_t size) { return malloc(size ? size : 1); }
 size_t kfree(void *ptr) { free(ptr); return 0; }
 struct vfs_node *vfs_node_get(struct vfs_node *n) { if (n) n->refcount++; return n; }
 void vfs_node_put(struct vfs_node *n) { if (!n) return; n->refcount--; if (n->refcount == 0) free(n); }
-int vfs_mount(const char *p, block_device_t *d, vfs_ops_t *o, void *f) { (void)p; (void)d; (void)o; (void)f; return -ENOSYS; }
+int vfs_mount(const char *p, block_device_t *d, const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f) { (void)p; (void)d; (void)io; (void)fo; (void)f; return -ENOSYS; }
 struct vfs_node *vfs_lookup(const char *p) { (void)p; return NULL; }
 struct vfs_node *vfs_lookup_from(const char *p, const char *c) { (void)p; (void)c; return NULL; }
-int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer) { return node->ops->read(node, offset, size, buffer); }
+int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer) { return node->f_ops->read(node, offset, size, buffer); }
 int strnlen_user(const void *p, size_t m) { (void)p; (void)m; return 0; }
 int user_write_range_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
 void user_write_range_end(void) {}

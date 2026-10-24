@@ -951,7 +951,9 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     node->type = VFS_DIR;
     node->mount = dir->mount;
     node->parent = dir;
-    node->ops = dir->ops;
+    node->i_ops = dir->i_ops;
+    node->f_ops = dir->f_ops;
+    node->nlink = 2;
     node->fs_data = (void *)(uintptr_t)new_cl;
     node->size = 0;
     node->refcount = 1;
@@ -1245,7 +1247,9 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
     node->mount = dir->mount;
     node->parent = dir;
     __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
-    node->ops = dir->ops;
+    node->i_ops = dir->i_ops;
+    node->f_ops = dir->f_ops;
+    node->nlink = 1;
     node->fs_data = NULL;  // no cluster yet — allocated on first write
     node->size = 0;
     node->refcount = 1;
@@ -1253,17 +1257,19 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
     return node;
 }
 
-struct vfs_ops fat_vfs_ops = {
-    .flags   = VFS_OPS_CASE_INSENSITIVE,
-    .read     = fat_read,
-    .write    = fat_write,
-    .readdir  = fat_readdir,
+const vfs_inode_ops_t fat_iops = {
     .create   = fat_create,
     .unlink   = fat_unlink,
     .mkdir    = fat_mkdir,
     .rmdir    = fat_rmdir,
     .rename   = fat_rename,
     .truncate = fat_truncate,
+};
+
+const vfs_file_ops_t fat_fops = {
+    .read     = fat_read,
+    .write    = fat_write,
+    .readdir  = fat_readdir,
 };
 
 // ── Initialize a FAT32 volume (no vfs_mount) ───────────────
@@ -1354,9 +1360,14 @@ static int fat_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     if (rc != 0) {
         return rc < 0 ? rc : -EIO;
     }
-    mp->ops = &fat_vfs_ops;
+    mp->i_ops = &fat_iops;
+    mp->f_ops = &fat_fops;
     mp->fs_data = fs;
-    mp->root->ops = &fat_vfs_ops;
+    mp->root->i_ops = &fat_iops;
+    mp->root->f_ops = &fat_fops;
+    mp->root->ino = fs->root_cluster;
+    mp->root->mode = S_IFDIR | 0755;
+    mp->root->nlink = 2;
     return 0;
 }
 

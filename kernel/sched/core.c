@@ -585,6 +585,7 @@ void task_init(void)
     // schedule() picks up the user init (PID 1) naturally.
     current->state = TASK_RUNNING;
     this_cpu()->scheduler_ok = 1;
+    vfs_end_bootstrap();
 
     // Thermal plan Task 3: arch-neutral startup hook for any CPU-pinned
     // service worker (currently: BSP-pinned thermal core-DTS sampler).

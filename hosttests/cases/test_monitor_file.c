@@ -76,14 +76,15 @@ void vfs_node_put(struct vfs_node *n)
     if (n->refcount == 0) free(n);
 }
 
-int vfs_mount(const char *p, block_device_t *d, vfs_ops_t *o, void *f)
-{ (void)p; (void)d; (void)o; (void)f; return -ENOSYS; }
+int vfs_mount(const char *p, block_device_t *d,
+              const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f)
+{ (void)p; (void)d; (void)io; (void)fo; (void)f; return -ENOSYS; }
 struct vfs_node *vfs_lookup(const char *p)
 { (void)p; return NULL; }
 struct vfs_node *vfs_lookup_from(const char *p, const char *c)
 { (void)p; (void)c; return NULL; }
 int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
-{ return node->ops->read(node, offset, size, buffer); }
+{ return node->f_ops->read(node, offset, size, buffer); }
 
 static int injected_copy_error;
 
@@ -206,7 +207,7 @@ static void snap_release(file_t *f)
     snap_release_count++;
 }
 
-static vfs_ops_t snap_ops = {
+static const vfs_file_ops_t snap_fops = {
     .open_file    = snap_open,
     .read_file    = snap_read,
     .release_file = snap_release,
@@ -219,7 +220,7 @@ static struct vfs_node *snap_node_new(void)
 {
     struct vfs_node *n = calloc(1, sizeof(*n));
     n->type = VFS_FILE;
-    n->ops = &snap_ops;
+    n->f_ops = &snap_fops;
     n->refcount = 1;
     return n;
 }

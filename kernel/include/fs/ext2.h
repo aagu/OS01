@@ -125,7 +125,8 @@ typedef struct {
 // ── API ────────────────────────────────────────────────
 int ext2_register_fs(void);
 int ext2_init(block_device_t *dev, ext2_fs_t **out_fs);
-extern struct vfs_ops ext2_vfs_ops;
+extern const vfs_inode_ops_t ext2_iops;
+extern const vfs_file_ops_t  ext2_fops;
 
 // ── Symlink fault injection (selftest only) ────────────
 // Declared unconditionally because kernel/selftest/symlink_selftest.c is

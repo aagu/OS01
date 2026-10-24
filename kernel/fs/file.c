@@ -663,24 +663,24 @@ out_release:
 // double-release one file.
 int vfs_file_open(file_t *f)
 {
-    if (!f || !f->node || !f->node->ops || !f->node->ops->open_file)
+    if (!f || !f->node || !f->node->f_ops || !f->node->f_ops->open_file)
         return 0;
-    return f->node->ops->open_file(f);
+    return f->node->f_ops->open_file(f);
 }
 
 int64_t vfs_file_read(file_t *f, uint64_t offset, uint64_t size, void *buf)
 {
-    if (!f || !f->node || !f->node->ops) return -1;
-    if (f->node->ops->read_file)
-        return f->node->ops->read_file(f, offset, size, buf);
+    if (!f || !f->node || !f->node->f_ops) return -1;
+    if (f->node->f_ops->read_file)
+        return f->node->f_ops->read_file(f, offset, size, buf);
     return vfs_read(f->node, offset, size, buf);
 }
 
 void vfs_file_release(file_t *f)
 {
-    if (!f || !f->node || !f->node->ops || !f->node->ops->release_file)
+    if (!f || !f->node || !f->node->f_ops || !f->node->f_ops->release_file)
         return;
-    f->node->ops->release_file(f);
+    f->node->f_ops->release_file(f);
 }
 
 // ── Read through a file descriptor ──────────────────────────
@@ -711,9 +711,9 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_VFS:
     case FD_DEV: {
 #ifndef OS01_HOST_TEST
-        if (!f->node || !f->node->ops ||
-            (uint64_t)f->node->ops < 0xffff800000000000ULL ||
-            (!f->node->ops->read && !f->node->ops->read_file))
+        if (!f->node || !f->node->f_ops ||
+            (uint64_t)f->node->f_ops < 0xffff800000000000ULL ||
+            (!f->node->f_ops->read && !f->node->f_ops->read_file))
             return -1;
 #else
         /* OS01_HOST_TEST: production's kernel-half ops-pointer guard
@@ -721,8 +721,8 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
          * on Linux x86_64).  The read-pointer check alone is enough for
          * the host harness; the guard is preserved in every non-host
          * build below. */
-        if (!f->node || !f->node->ops ||
-            (!f->node->ops->read && !f->node->ops->read_file))
+        if (!f->node || !f->node->f_ops ||
+            (!f->node->f_ops->read && !f->node->f_ops->read_file))
             return -1;
 #endif
         // Check access mode (low 2 bits) — ignore O_CREAT etc.
@@ -1026,13 +1026,13 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     case FD_VFS:
     case FD_DEV: {
 #ifndef OS01_HOST_TEST
-        if (!f->node || !f->node->ops ||
-            (uint64_t)f->node->ops < 0xffff800000000000ULL ||
-            !f->node->ops->write)
+        if (!f->node || !f->node->f_ops ||
+            (uint64_t)f->node->f_ops < 0xffff800000000000ULL ||
+            !f->node->f_ops->write)
             return -1;
 #else
         /* OS01_HOST_TEST: see fd_read above; same guard-neuter rationale. */
-        if (!f->node || !f->node->ops || !f->node->ops->write)
+        if (!f->node || !f->node->f_ops || !f->node->f_ops->write)
             return -1;
 #endif
         // Check access mode (low 2 bits) — ignore O_CREAT etc.

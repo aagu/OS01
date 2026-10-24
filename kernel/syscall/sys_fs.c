@@ -44,11 +44,10 @@ static inline int64_t copy_user_path(char *kbuf, const char *uptr, size_t max)
 //   - !parent->ops || !parent->ops->symlink -> -EOPNOTSUPP (v2 fix)
 static __attribute__((noinline)) int64_t sys_symlink(const char *target, const char *linkpath)
 {
-    char *paths = kmalloc(3 * VFS_NAME_MAX);
+    char *paths = kmalloc(2 * VFS_NAME_MAX);
     if (!paths) return -ENOMEM;
     char *target_copy = paths;
     char *linkpath_copy = paths + VFS_NAME_MAX;
-    char *parent_path = paths + 2 * VFS_NAME_MAX;
 
     int64_t ret = 0;
     long tlen = copy_user_path(target_copy, target, VFS_NAME_MAX);
@@ -58,37 +57,8 @@ static __attribute__((noinline)) int64_t sys_symlink(const char *target, const c
     long llen = copy_user_path(linkpath_copy, linkpath, VFS_NAME_MAX);
     if (llen < 0) { ret = llen; goto out; }
 
-    // v5 fix: linkpath is exactly "/" → would mean replacing the mount root
-    // with a symlink.  EEXIST is more informative than EINVAL here.
-    if (linkpath_copy[0] == '/' && linkpath_copy[1] == '\0') {
-        ret = -EEXIST;
-        goto out;
-    }
-
     const char *cwd = current->files ? current->files->cwd : "/";
-    const char *name = vfs_split_parent(linkpath_copy, cwd, parent_path);
-    if (!name || *name == '\0') {
-        ret = -EINVAL;
-        goto out;
-    }
-
-    vfs_node_t *parent = NULL;
-    int rc = vfs_lookup_at(AT_FDCWD, parent_path, LOOKUP_FOLLOW, &parent);
-    if (rc < 0) { ret = rc; goto out; }
-    if (parent->type != VFS_DIR) {
-        vfs_node_put(parent);
-        ret = -ENOTDIR;
-        goto out;
-    }
-    // v2 fix: refuse NULL ops deref on FS without .symlink (devfs, tmpfs)
-    if (!parent->ops || !parent->ops->symlink) {
-        vfs_node_put(parent);
-        ret = -EOPNOTSUPP;
-        goto out;
-    }
-
-    ret = parent->ops->symlink(parent, name, target_copy);
-    vfs_node_put(parent);
+    ret = vfs_symlink(target_copy, linkpath_copy, cwd);
 
 out:
     kfree(paths);
@@ -126,13 +96,13 @@ static __attribute__((noinline)) int64_t sys_readlink(const char *path, char *bu
         ret = -EINVAL;
         goto out;
     }
-    if (!node->ops || !node->ops->readlink) {
+    if (!node->i_ops || !node->i_ops->readlink) {
         vfs_node_put(node);
         ret = -EOPNOTSUPP;
         goto out;
     }
 
-    int tlen = node->ops->readlink(node, kbuf, VFS_NAME_MAX - 1);
+    int tlen = node->i_ops->readlink(node, kbuf, VFS_NAME_MAX - 1);
     vfs_node_put(node);
     if (tlen < 0) { ret = tlen; goto out; }
 
@@ -290,8 +260,6 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         const char *path = (const char *)ctx->args[0];
         int flags = (int)ctx->args[1];
         char *path_copy = NULL;
-        char *parent_path = NULL;
-        vfs_node_t *parent = NULL;
         file_t *f = NULL;
         vfs_node_t *node = NULL;
 
@@ -323,59 +291,17 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
         if (lookup_rc < 0 && !(lookup_rc == -ENOENT && (flags & O_CREAT))) {
             syscall_result = lookup_rc;
-            goto out_open;  /* releases path_copy and any owned node/parent ref */
+            goto out_open;  /* releases path_copy and any owned node ref */
         }
 
         // O_CREAT: create file if it doesn't exist
         if (lookup_rc == -ENOENT && (flags & O_CREAT)) {
-            // Find parent directory — parse path_copy to extract parent
-            parent_path = kmalloc(VFS_NAME_MAX);
-            if (!parent_path) { syscall_result = -ENOMEM; goto out_open; }
-            const char *name = NULL;
-
-            // path_copy is the kernel-side copy; plen is its strlen.
-            char *last_slash = NULL;
-            for (char *s = path_copy; *s; s++)
-                if (*s == '/') last_slash = s;
-
-            if (last_slash && last_slash != path_copy) {
-                // e.g., "/dir/file" — parent is "/dir", name is "file"
-                *last_slash = '\0';
-                name = last_slash + 1;
-                strcpy(parent_path, path_copy);
-            } else if (last_slash == path_copy && plen > 1) {
-                // e.g., "/file" — parent is "/", name is "file"
-                parent_path[0] = '/'; parent_path[1] = '\0';
-                name = path_copy + 1;
-            } else {
-                // No slash — relative path, parent is cwd
-                name = path_copy;
-                // Use cwd as parent path
-                size_t cwd_len = strlen(current->files->cwd);
-                if (cwd_len >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; goto out_open; }
-                memcpy(parent_path, current->files->cwd, cwd_len + 1);
-            }
-
-            if (!name || *name == '\0') { syscall_result = -EINVAL; goto out_open; }
-
-            int parent_rc = vfs_lookup_at(AT_FDCWD, parent_path, LOOKUP_FOLLOW, &parent);
-            if (parent_rc < 0) { syscall_result = parent_rc; goto out_open; }
-            if (parent->type != VFS_DIR) { syscall_result = -ENOTDIR; goto out_open; }
-            if (!parent->ops || (uint64_t)parent->ops < 0xffff800000000000ULL || !parent->ops->create) {
-                syscall_result = -EROFS;
+            const char *cwd = current->files ? current->files->cwd : "/";
+            int create_rc = vfs_create_file(path_copy, cwd, &node);
+            if (create_rc < 0) {
+                syscall_result = create_rc;
                 goto out_open;
             }
-            if ((uint64_t)parent->ops->create < 0xffff800000000000ULL) {
-                syscall_result = -1;
-                goto out_open;
-            }
-
-            node = parent->ops->create(parent, name);
-            if (!node) { syscall_result = -EEXIST; goto out_open; }
-            // Successful create: ownership of parent ref transfers
-            // implicitly when we vfs_node_put below.
-            vfs_node_put(parent);
-            parent = NULL;
         }
 
         if (!node) {
@@ -385,13 +311,11 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
 
         // O_TRUNC: truncate regular files to size 0 via filesystem op
         if ((flags & O_TRUNC) && node->type == VFS_FILE) {
-            if (node->ops && (uint64_t)node->ops >= 0xffff800000000000ULL && node->ops->truncate &&
-                (uint64_t)node->ops->truncate >= 0xffff800000000000ULL)
-                node->ops->truncate(node, 0);
-            else {
-                // Fallback: reset size only (fs_data is FS-specific)
+            if (node->i_ops && (uint64_t)node->i_ops >= 0xffff800000000000ULL &&
+                node->i_ops->truncate && (uint64_t)node->i_ops->truncate >= 0xffff800000000000ULL)
+                node->i_ops->truncate(node, 0);
+            else
                 node->size = 0;
-            }
         }
 
         // devfs_open_node passes path_copy (kernel-side) to device
@@ -434,12 +358,10 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         f = NULL;  // fd_alloc took ownership
         syscall_result = newfd;
     out_open:
-        // Cleanup: free path_copy and any node/parent/f refs still
+        // Cleanup: free path_copy and any node/f refs still
         // owned by this code path.
-        if (parent) vfs_node_put(parent);
         if (node) vfs_node_put(node);
         if (f) file_free(f);
-        if (parent_path) kfree(parent_path);
         if (path_copy) kfree(path_copy);
         break;
     }
@@ -863,8 +785,8 @@ case SYS_ioctl: {
             // Check if filesystem is writable (not devfs)
             if (node->type == VFS_CHRDEV || node->type == VFS_BLKDEV) {
                 // Devices: check if write op exists
-                if (!node->ops || (uint64_t)node->ops < 0xffff800000000000ULL ||
-                    !node->ops->write)
+                if (!node->f_ops || (uint64_t)node->f_ops < 0xffff800000000000ULL ||
+                    !node->f_ops->write)
                     ok = 0;
             }
         }

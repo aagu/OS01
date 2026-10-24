@@ -11,7 +11,8 @@ void _log_write(int level, const char *fmt, ...) { (void)level; (void)fmt; }
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
 
-static vfs_ops_t s_dummy_ops = {0};
+static const vfs_inode_ops_t s_dummy_iops = {0};
+static const vfs_file_ops_t  s_dummy_fops = {0};
 
 int block_device_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
 { (void)dev; (void)lba; (void)count; (void)buf; return -EIO; }
@@ -21,7 +22,14 @@ uint64_t alloc_4k_page(void) { return (uint64_t)(uintptr_t)calloc(1, 4096); }
 void free_4k_page(uint64_t addr) { free((void *)(uintptr_t)addr); }
 
 static int host_procfs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
-{ (void)dev; (void)data; mp->ops = &s_dummy_ops; mp->root->ops = &s_dummy_ops; return 0; }
+{
+    (void)dev; (void)data;
+    mp->i_ops = &s_dummy_iops;
+    mp->f_ops = &s_dummy_fops;
+    mp->root->i_ops = &s_dummy_iops;
+    mp->root->f_ops = &s_dummy_fops;
+    return 0;
+}
 static vfs_fs_type_t s_host_procfs_type = {
     .name     = "procfs",
     .fs_flags = VFS_FS_NO_DCACHE,
@@ -44,10 +52,12 @@ static int mock_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     if (s_mock_mount_ret < 0) {
         return s_mock_mount_ret;
     }
-    mp->ops = &s_dummy_ops;
+    mp->i_ops = &s_dummy_iops;
+    mp->f_ops = &s_dummy_fops;
     mp->fs_data = data;
     if (mp->root) {
-        mp->root->ops = &s_dummy_ops;
+        mp->root->i_ops = &s_dummy_iops;
+        mp->root->f_ops = &s_dummy_fops;
     }
     return 0;
 }

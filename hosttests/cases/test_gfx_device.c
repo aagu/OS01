@@ -107,8 +107,9 @@ void vfs_node_put(struct vfs_node *n)
     if (n->refcount == 0) free(n);
 }
 
-int vfs_mount(const char *p, block_device_t *d, vfs_ops_t *o, void *f)
-{ (void)p; (void)d; (void)o; (void)f; return -ENOSYS; }
+int vfs_mount(const char *p, block_device_t *d,
+              const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f)
+{ (void)p; (void)d; (void)io; (void)fo; (void)f; return -ENOSYS; }
 struct vfs_node *vfs_lookup(const char *p) { (void)p; return NULL; }
 struct vfs_node *vfs_lookup_from(const char *p, const char *c)
 { (void)p; (void)c; return NULL; }

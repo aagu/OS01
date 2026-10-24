@@ -16,14 +16,15 @@ typedef struct vfs_node     vfs_node_t;
 typedef struct vfs_dirent   vfs_dirent_t;
 typedef struct vfs_mount    vfs_mount_t;
 
-typedef struct vfs_ops {
-    uint32_t flags;
-    #define VFS_OPS_CASE_INSENSITIVE  (1 << 0)
+typedef struct vfs_inode_ops {
+    vfs_node_t *(*create)(vfs_node_t *, const char *);
+} vfs_inode_ops_t;
+
+typedef struct vfs_file_ops {
     int (*read)(vfs_node_t *, uint64_t, uint64_t, void *);
     int (*write)(vfs_node_t *, uint64_t, uint64_t, void *);
     int (*readdir)(vfs_node_t *, uint64_t, vfs_dirent_t *);
-    vfs_node_t *(*create)(vfs_node_t *, const char *);
-} vfs_ops_t;
+} vfs_file_ops_t;
 
 struct vfs_dirent {
     char     name[VFS_NAME_MAX];
@@ -33,22 +34,24 @@ struct vfs_dirent {
 };
 
 struct vfs_node {
-    char              name[VFS_NAME_MAX];
-    uint64_t          size;
-    uint8_t           type;
-    vfs_mount_t      *mount;
-    void             *fs_data;
-    vfs_node_t       *parent;
-    vfs_ops_t        *ops;
-    uint32_t          refcount;
+    char                  name[VFS_NAME_MAX];
+    uint64_t              size;
+    uint8_t               type;
+    vfs_mount_t          *mount;
+    void                 *fs_data;
+    vfs_node_t           *parent;
+    const vfs_inode_ops_t *i_ops;
+    const vfs_file_ops_t  *f_ops;
+    uint32_t              refcount;
 };
 
 struct vfs_mount {
-    void          *dev;
-    const char    *path;
-    vfs_node_t    *root;
-    vfs_ops_t     *ops;
-    void          *fs_data;
+    void                  *dev;
+    const char            *path;
+    vfs_node_t            *root;
+    const vfs_inode_ops_t *i_ops;
+    const vfs_file_ops_t  *f_ops;
+    void                  *fs_data;
 };
 
 /* ── Fake filesystem (in-memory) ────────────────── */
@@ -118,10 +121,13 @@ static vfs_node_t *fake_create(vfs_node_t *dir, const char *name) {
     return n;
 }
 
-static vfs_ops_t fake_ops = {
+static const vfs_inode_ops_t fake_iops = {
+    .create  = fake_create,
+};
+
+static const vfs_file_ops_t fake_fops = {
     .read    = fake_read,
     .readdir = fake_readdir,
-    .create  = fake_create,
 };
 
 static vfs_mount_t fake_mount;
@@ -169,7 +175,8 @@ TEST_FUNC(test_vfs_readdir_root) {
     fake_mount.root = malloc(sizeof(vfs_node_t)); memset(fake_mount.root, 0, sizeof(vfs_node_t));
     strcpy(fake_mount.root->name, "/");
     fake_mount.root->type = VFS_DIR;
-    fake_mount.root->ops = &fake_ops;
+    fake_mount.root->i_ops = &fake_iops;
+    fake_mount.root->f_ops = &fake_fops;
     fake_mount.path = "/";
 
     vfs_dirent_t entry;

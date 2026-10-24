@@ -151,16 +151,13 @@ static int fake_readlink(struct vfs_node *node, char *buf, size_t size)
     return (int)tlen;
 }
 
-static vfs_ops_t fake_ops = {
-    .readdir  = fake_readdir,
+static const vfs_inode_ops_t fake_iops = {
     .readlink = fake_readlink,
 };
-
-// Same tree, but the ops table has no readlink — case 32 (-EOPNOTSUPP).
-// readlink is per-ops, and children inherit their parent's ops, so a second
-// mount is the only way to present a VFS_SYMLINK node with .readlink == NULL.
-static vfs_ops_t fake_ops_no_readlink = {
+static const vfs_file_ops_t fake_fops = {
     .readdir  = fake_readdir,
+};
+static const vfs_inode_ops_t fake_iops_no_readlink = {
     .readlink = NULL,
 };
 
@@ -172,8 +169,8 @@ static int fake_mounted = 0;
 static int fake_mount_once(void)
 {
     if (fake_mounted) return 0;
-    if (vfs_mount(FAKE_MNT, NULL, &fake_ops, NULL) != 0) return -1;
-    if (vfs_mount(FAKE_MNT_NORL, NULL, &fake_ops_no_readlink, NULL) != 0) return -1;
+    if (vfs_mount(FAKE_MNT, NULL, &fake_iops, &fake_fops, NULL) != 0) return -1;
+    if (vfs_mount(FAKE_MNT_NORL, NULL, &fake_iops_no_readlink, &fake_fops, NULL) != 0) return -1;
     fake_mounted = 1;
     return 0;
 }
@@ -290,7 +287,7 @@ static int slt_ext2_root(vfs_node_t **out_root, ext2_fs_t **out_fs)
 
     vfs_node_t *root = vfs_lookup("/");
     if (!root) return 0;
-    if (root->ops != &ext2_vfs_ops || !root->mount || !root->mount->fs_data) {
+    if (root->i_ops != &ext2_iops || !root->mount || !root->mount->fs_data) {
         vfs_node_put(root);
         return 0;
     }
@@ -321,19 +318,19 @@ static int slt_fault_case(vfs_node_t *root, ext2_fs_t *fs,
     uint32_t free_blocks = fs->sb_raw.s_free_blocks_count;
 
     ext2_symlink_test_set_fault(fault);
-    int rc = root->ops->symlink(root, name, target);
+    int rc = root->i_ops->symlink(root, name, target);
     ext2_symlink_test_set_fault(EXT2_SYMLINK_TEST_NONE);
 
     if (rc != -EIO) {
         serial_printk("[selftest] symlink_ext2_rollback: fault %d -> %d, expected -EIO\n",
                       (int)fault, rc);
-        if (rc == 0) root->ops->unlink(root, name);   // don't leak the dirent
+        if (rc == 0) root->i_ops->unlink(root, name);   // don't leak the dirent
         return -1;
     }
     if (!slt_name_absent(abs_path)) {
         serial_printk("[selftest] symlink_ext2_rollback: fault %d left a dirent\n",
                       (int)fault);
-        root->ops->unlink(root, name);
+        root->i_ops->unlink(root, name);
         return -1;
     }
     if (fs->sb_raw.s_free_inodes_count != free_inodes ||
@@ -357,7 +354,7 @@ static int slt_success_case(vfs_node_t *root, ext2_fs_t *fs,
     uint32_t free_inodes = fs->sb_raw.s_free_inodes_count;
     uint32_t free_blocks = fs->sb_raw.s_free_blocks_count;
 
-    int rc = root->ops->symlink(root, name, target);
+    int rc = root->i_ops->symlink(root, name, target);
     if (rc != 0) {
         serial_printk("[selftest] symlink_ext2_rollback: symlink(%s) -> %d\n",
                       name, rc);
@@ -368,17 +365,17 @@ static int slt_success_case(vfs_node_t *root, ext2_fs_t *fs,
     if (used_blocks != want_block_delta) {
         serial_printk("[selftest] symlink_ext2_rollback: %s used %u blocks, expected %u\n",
                       name, used_blocks, want_block_delta);
-        root->ops->unlink(root, name);
+        root->i_ops->unlink(root, name);
         return -1;
     }
     if (slt_name_absent(abs_path)) {
         serial_printk("[selftest] symlink_ext2_rollback: %s not found after create\n",
                       name);
-        root->ops->unlink(root, name);
+        root->i_ops->unlink(root, name);
         return -1;
     }
 
-    rc = root->ops->unlink(root, name);
+    rc = root->i_ops->unlink(root, name);
     if (rc != 0) {
         serial_printk("[selftest] symlink_ext2_rollback: unlink(%s) -> %d\n",
                       name, rc);
@@ -409,7 +406,7 @@ int symlink_selftest_ext2_rollback(void)
     ext2_fs_t *fs = NULL;
     if (!slt_ext2_root(&root, &fs))
         return 0;   // SKIP — root mount is not ext2 in this image
-    if (!root->ops->symlink || !root->ops->unlink) {
+    if (!root->i_ops->symlink || !root->i_ops->unlink) {
         vfs_node_put(root);
         return -1;
     }

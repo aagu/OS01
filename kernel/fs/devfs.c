@@ -449,11 +449,12 @@ static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
 // above routes to the correct device handler based on the
 // device index stored in node->fs_data during vfs_lookup.
 
-static struct vfs_ops devfs_ops = {
-    .read    = devfs_read,
-    .write   = devfs_write,
-    .readdir = devfs_readdir,
-    .mmap    = devfs_mmap,
+static const vfs_inode_ops_t devfs_iops;
+static const vfs_file_ops_t devfs_fops = {
+    .read      = devfs_read,
+    .write     = devfs_write,
+    .readdir   = devfs_readdir,
+    .mmap      = devfs_mmap,
     // File-aware read bridge: fd_read() reaches the device through it.
     .read_file = devfs_read_file,
 };
@@ -609,7 +610,9 @@ static int tty_magic_open(const char *name, file_t **out_file)
             if (!node) return -ENOMEM;
             node->type = VFS_CHRDEV;
             node->fs_data = (void *)(uintptr_t)i;
-            node->ops = &devfs_ops;
+            node->i_ops = &devfs_iops;
+            node->f_ops = &devfs_fops;
+            node->nlink = 1;
             node->refcount = 1;
             *out_file = file_alloc();
             if (!*out_file) { free(node); return -ENOMEM; }
@@ -643,9 +646,14 @@ static int devfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
 {
     (void)dev;
     (void)data;
-    mp->ops = &devfs_ops;
+    mp->i_ops = &devfs_iops;
+    mp->f_ops = &devfs_fops;
     mp->fs_data = NULL;
-    mp->root->ops = &devfs_ops;
+    mp->root->i_ops = &devfs_iops;
+    mp->root->f_ops = &devfs_fops;
+    mp->root->ino = VFS_SYNTH_ROOT_INO;
+    mp->root->mode = S_IFDIR | 0755;
+    mp->root->nlink = 2;
     return 0;
 }
 

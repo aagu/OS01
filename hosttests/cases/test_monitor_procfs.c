@@ -190,7 +190,7 @@ static void fixture_task_list_reset(void)
 /* ── Snapshot-file plumbing: a bare vfs node + file_t carrying the
  * real procfs hooks, mirroring what SYS_open's FD_VFS branch builds. ── */
 
-static vfs_ops_t procfs_hook_ops = {
+static const vfs_file_ops_t procfs_hook_fops = {
     .open_file    = procfs_open_file,
     .read_file    = procfs_read_file,
     .release_file = procfs_release_file,
@@ -200,7 +200,7 @@ static void test_node_init(struct vfs_node *n, uint32_t type, uint32_t pid)
 {
     memset(n, 0, sizeof(*n));
     n->type = VFS_FILE;
-    n->ops = &procfs_hook_ops;
+    n->f_ops = &procfs_hook_fops;
     n->fs_data = PROCFS_ENCODE(type, pid);
     n->refcount = 1;
 }

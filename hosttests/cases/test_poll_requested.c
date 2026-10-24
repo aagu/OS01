@@ -450,16 +450,16 @@ static int fake_dev_read(struct vfs_node *node, uint64_t offset,
 }
 
 static void make_vfs_file_with_ops(file_t *out, vfs_node_t **out_node,
-                                   vfs_ops_t **out_ops)
+                                   vfs_file_ops_t **out_ops)
 {
-    static vfs_ops_t  ops;
-    static vfs_node_t node;
-    static file_t     f;
+    static vfs_file_ops_t ops;
+    static vfs_node_t     node;
+    static file_t         f;
     memset(&ops, 0, sizeof(ops));
     memset(&node, 0, sizeof(node));
     memset(&f, 0, sizeof(f));
     ops.read = fake_dev_read;
-    node.ops = &ops;
+    node.f_ops = &ops;
     node.type = VFS_CHRDEV;
     f.type = FD_DEV;
     f.flags = O_RDONLY;
@@ -475,7 +475,7 @@ TEST_FUNC(test_fd_read_eagain_propagates_errno)
 {
     reset_runtime();
     reset_fd_read_mocks();
-    file_t f; vfs_node_t *node; vfs_ops_t *ops;
+    file_t f; vfs_node_t *node; vfs_file_ops_t *ops;
     make_vfs_file_with_ops(&f, &node, &ops);
     push_vfs_read(-EAGAIN, 0);
 
@@ -493,7 +493,7 @@ TEST_FUNC(test_fd_read_einval_propagates_errno)
 {
     reset_runtime();
     reset_fd_read_mocks();
-    file_t f; vfs_node_t *node; vfs_ops_t *ops;
+    file_t f; vfs_node_t *node; vfs_file_ops_t *ops;
     make_vfs_file_with_ops(&f, &node, &ops);
     push_vfs_read(-EINVAL, 0);
 
@@ -509,7 +509,7 @@ TEST_FUNC(test_fd_read_eof_returns_zero)
 {
     reset_runtime();
     reset_fd_read_mocks();
-    file_t f; vfs_node_t *node; vfs_ops_t *ops;
+    file_t f; vfs_node_t *node; vfs_file_ops_t *ops;
     make_vfs_file_with_ops(&f, &node, &ops);
     push_vfs_read(0, 0);  // EOF
 
@@ -535,7 +535,7 @@ TEST_FUNC(test_fd_read_success_then_errno_returns_short)
     //      data may follow" — see file.c:697).
     reset_runtime();
     reset_fd_read_mocks();
-    file_t f; vfs_node_t *node; vfs_ops_t *ops;
+    file_t f; vfs_node_t *node; vfs_file_ops_t *ops;
     make_vfs_file_with_ops(&f, &node, &ops);
     push_vfs_read(64 * 1024, 64 * 1024);   // first: fill the 64 KiB chunk
     push_vfs_read(-EAGAIN, 0);             // then EAGAIN
@@ -556,7 +556,7 @@ TEST_FUNC(test_fd_read_success_then_eof_returns_short)
 {
     reset_runtime();
     reset_fd_read_mocks();
-    file_t f; vfs_node_t *node; vfs_ops_t *ops;
+    file_t f; vfs_node_t *node; vfs_file_ops_t *ops;
     make_vfs_file_with_ops(&f, &node, &ops);
     push_vfs_read(64 * 1024, 64 * 1024);   // first: fill the 64 KiB chunk
     push_vfs_read(0, 0);                   // then EOF
@@ -577,12 +577,12 @@ TEST_FUNC(test_fd_read_vfs_path_same_contract)
     // accidental divergence).
     reset_runtime();
     reset_fd_read_mocks();
-    vfs_ops_t ops; vfs_node_t node; file_t f;
+    vfs_file_ops_t ops; vfs_node_t node; file_t f;
     memset(&ops, 0, sizeof(ops));
     memset(&node, 0, sizeof(node));
     memset(&f, 0, sizeof(f));
     ops.read = fake_dev_read;
-    node.ops = &ops;
+    node.f_ops = &ops;
     node.type = VFS_FILE;
     f.type = FD_VFS;
     f.flags = O_RDONLY;

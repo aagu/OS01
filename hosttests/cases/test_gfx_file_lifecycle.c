@@ -82,14 +82,15 @@ void vfs_node_put(struct vfs_node *n)
 }
 
 /* VFS misc — not exercised by the test, but referenced. */
-int vfs_mount(const char *p, block_device_t *d, vfs_ops_t *o, void *f)
-{ (void)p; (void)d; (void)o; (void)f; return -ENOSYS; }
+int vfs_mount(const char *p, block_device_t *d,
+              const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f)
+{ (void)p; (void)d; (void)io; (void)fo; (void)f; return -ENOSYS; }
 struct vfs_node *vfs_lookup(const char *p)
 { (void)p; return NULL; }
 struct vfs_node *vfs_lookup_from(const char *p, const char *c)
 { (void)p; (void)c; return NULL; }
 int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
-{ return node->ops->read(node, offset, size, buffer); }
+{ return node->f_ops->read(node, offset, size, buffer); }
 
 static int injected_copy_error;
 
@@ -531,8 +532,8 @@ static int fake_read(vfs_node_t *node, uint64_t off, uint64_t size, void *buf)
 
 static void test_read_preserves_cow_allocation_error(void)
 {
-    vfs_ops_t ops = {.read = fake_read};
-    vfs_node_t node = {.ops = &ops};
+    vfs_file_ops_t fops = {.read = fake_read};
+    vfs_node_t node = {.f_ops = &fops};
     file_t file = {.type = FD_VFS, .flags = O_RDONLY, .node = &node};
     unsigned char buf = 0x55;
     injected_copy_error = -ENOMEM;

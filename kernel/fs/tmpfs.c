@@ -22,7 +22,8 @@
 #define TMPFS_CHILDREN_INIT_CAP 8
 
 // ── Forward declaration — create/mkdir reference ops table ───────
-static struct vfs_ops tmpfs_vfs_ops;
+static const vfs_inode_ops_t tmpfs_iops;
+static const vfs_file_ops_t tmpfs_fops;
 
 // ── Block metadata (kmalloc'd, singly-linked list) ──────────────
 // Each block represents one 4KB page at a given block index.
@@ -279,7 +280,10 @@ static struct vfs_node *tmpfs_vfs_create(struct vfs_node *dir,
     vn->type    = VFS_FILE;
     vn->size    = 0;
     vn->fs_data = new_node;
-    vn->ops     = &tmpfs_vfs_ops;
+    vn->i_ops   = &tmpfs_iops;
+    vn->f_ops   = &tmpfs_fops;
+    vn->ino     = (uint64_t)(uintptr_t)new_node;
+    vn->nlink   = 1;
     vn->mount   = dir->mount;
     vn->parent  = dir;
     __sync_add_and_fetch(&dir->refcount, 1);
@@ -326,7 +330,10 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
     vn->type    = VFS_DIR;
     vn->size    = 0;
     vn->fs_data = new_node;
-    vn->ops     = &tmpfs_vfs_ops;
+    vn->i_ops   = &tmpfs_iops;
+    vn->f_ops   = &tmpfs_fops;
+    vn->ino     = (uint64_t)(uintptr_t)new_node;
+    vn->nlink   = 2;
     vn->mount   = dir->mount;
     vn->parent  = dir;
     __sync_add_and_fetch(&dir->refcount, 1);
@@ -411,17 +418,19 @@ static int tmpfs_vfs_truncate(struct vfs_node *node, uint64_t new_size)
     return 0;
 }
 
-static struct vfs_ops tmpfs_vfs_ops = {
-    .flags    = 0,  // case-sensitive
-    .read     = tmpfs_vfs_read,
-    .write    = tmpfs_vfs_write,
-    .readdir  = tmpfs_vfs_readdir,
+static const vfs_inode_ops_t tmpfs_iops = {
     .create   = tmpfs_vfs_create,
     .unlink   = tmpfs_vfs_unlink,
     .mkdir    = tmpfs_vfs_mkdir,
     .rmdir    = tmpfs_vfs_rmdir,
     .rename   = tmpfs_vfs_rename,
     .truncate = tmpfs_vfs_truncate,
+};
+
+static const vfs_file_ops_t tmpfs_fops = {
+    .read     = tmpfs_vfs_read,
+    .write    = tmpfs_vfs_write,
+    .readdir  = tmpfs_vfs_readdir,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -448,9 +457,14 @@ static int tmpfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     root->child_cap = TMPFS_CHILDREN_INIT_CAP;
     root->parent    = NULL;
 
-    mp->ops = &tmpfs_vfs_ops;
+    mp->i_ops = &tmpfs_iops;
+    mp->f_ops = &tmpfs_fops;
     mp->fs_data = root;
-    mp->root->ops = &tmpfs_vfs_ops;
+    mp->root->i_ops = &tmpfs_iops;
+    mp->root->f_ops = &tmpfs_fops;
+    mp->root->ino = (uint64_t)(uintptr_t)root;
+    mp->root->mode = S_IFDIR | 0755;
+    mp->root->nlink = 2;
     return 0;
 }
 

@@ -117,7 +117,8 @@ void user_read_range_end(void);
 
 /* ── VFS stubs (declared extern in kernel/include/fs/vfs.h) ── */
 int  vfs_mount(const char *path, block_device_t *dev,
-               vfs_ops_t *ops, void *fs_data);
+               const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
+               void *fs_data);
 struct vfs_node *vfs_lookup(const char *path);
 struct vfs_node *vfs_lookup_from(const char *path, const char *cwd);
 struct vfs_node *vfs_node_get(struct vfs_node *node);

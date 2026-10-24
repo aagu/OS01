@@ -9,6 +9,7 @@
 #include <core/printk.h>
 #include <memory/slab.h>
 #include <sync/rwlock.h>
+#include <sync/mutex.h>
 #include <sched/task.h>      // current->files->cwd for resolve_at
 #include <string.h>
 #include <stdlib.h>
@@ -19,6 +20,28 @@ static vfs_mount_t *mount_list = NULL;
 static int mount_count __attribute__((unused)) = 0;
 static int vfs_initialized = 0;
 static rwlock_t mount_lock;
+
+static mutex_t vfs_namespace_lock;
+static int vfs_bootstrap = 1;
+
+void vfs_end_bootstrap(void)
+{
+    vfs_bootstrap = 0;
+}
+
+static inline void vfs_ns_lock(void)
+{
+    if (!vfs_bootstrap && current && current->pid > 0) {
+        mutex_lock(&vfs_namespace_lock);
+    }
+}
+
+static inline void vfs_ns_unlock(void)
+{
+    if (!vfs_bootstrap && current && current->pid > 0) {
+        mutex_unlock(&vfs_namespace_lock);
+    }
+}
 
 #define VFS_MAX_FS_TYPES 16
 static vfs_fs_type_t *fs_type_list = NULL;
@@ -59,6 +82,8 @@ void vfs_init(void)
     mount_list = NULL;
     mount_count = 0;
     rwlock_init(&mount_lock);
+    mutex_init(&vfs_namespace_lock);
+    vfs_bootstrap = 1;
 
     fs_type_list = NULL;
     memset(fs_type_usage, 0, sizeof(fs_type_usage));
@@ -76,7 +101,8 @@ void vfs_init(void)
 
 // ── Mount ─────────────────────────────────────────────────
 int vfs_mount(const char *path, block_device_t *dev,
-              vfs_ops_t *ops, void *fs_data)
+              const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
+              void *fs_data)
 {
     if (!vfs_initialized) vfs_init();
 
@@ -86,9 +112,12 @@ int vfs_mount(const char *path, block_device_t *dev,
         return -1;
     }
 
+    spin_init(&mp->active_lock);
+    mp->active_nodes = NULL;
     mp->dev = dev;
     mp->path = path;
-    mp->ops = ops;
+    mp->i_ops = i_ops;
+    mp->f_ops = f_ops;
     mp->fs_data = fs_data;
     mp->root = NULL;
 
@@ -102,7 +131,11 @@ int vfs_mount(const char *path, block_device_t *dev,
 
     mp->root->mount = mp;
     mp->root->type = VFS_DIR;
-    mp->root->ops = ops;
+    mp->root->ino = VFS_SYNTH_ROOT_INO;
+    mp->root->mode = S_IFDIR | 0755;
+    mp->root->nlink = 2;
+    mp->root->i_ops = i_ops;
+    mp->root->f_ops = f_ops;
     // Root node uses fs_data = NULL to tell the filesystem to use its
     // internal root cluster (e.g., BPB_RootClus for FAT32).
     // Subdirectory nodes will hold the cluster number here.
@@ -316,8 +349,13 @@ int vfs_mount_fs(const char *type_name, const char *path,
     mp->fs_type = fs_type;
     mp->mnt_flags = fs_type->fs_flags;
     mp->path = path_copy;
+    spin_init(&mp->active_lock);
+    mp->active_nodes = NULL;
     mp->root->mount = mp;
     mp->root->type = VFS_DIR;
+    mp->root->ino = VFS_SYNTH_ROOT_INO;
+    mp->root->mode = S_IFDIR | 0755;
+    mp->root->nlink = 2;
     mp->root->refcount = 1;
 
     int rc = fs_type->mount(mp, dev, data);
@@ -335,10 +373,21 @@ int vfs_mount_fs(const char *type_name, const char *path,
     }
 
     mp->root->mount = mp;
-    if (mp->ops && !mp->root->ops) {
-        mp->root->ops = mp->ops;
-    } else if (!mp->ops && mp->root->ops) {
-        mp->ops = mp->root->ops;
+    if (mp->i_ops && !mp->root->i_ops) {
+        mp->root->i_ops = mp->i_ops;
+    } else if (!mp->i_ops && mp->root->i_ops) {
+        mp->i_ops = mp->root->i_ops;
+    }
+    if (mp->f_ops && !mp->root->f_ops) {
+        mp->root->f_ops = mp->f_ops;
+    } else if (!mp->f_ops && mp->root->f_ops) {
+        mp->f_ops = mp->root->f_ops;
+    }
+    if (mp->root->nlink == 0) {
+        mp->root->nlink = 2;
+    }
+    if (mp->root->mode == 0) {
+        mp->root->mode = S_IFDIR | 0755;
     }
 
     rwlock_write_lock(&mount_lock);
@@ -488,6 +537,82 @@ static vfs_mount_t *find_mount(const char *path)
     return best;
 }
 
+// ── Generic lookup fallback via readdir ───────────────────
+int vfs_generic_lookup_by_readdir(vfs_node_t *dir, const char *name,
+                                  vfs_node_t **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!dir || !name) return -EINVAL;
+    if (dir->type != VFS_DIR) return -ENOTDIR;
+
+    char *entry_name = kmalloc(VFS_NAME_MAX);
+    if (!entry_name) return -ENOMEM;
+
+    vfs_dirent_t entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.name = entry_name;
+
+    int found = 0;
+    uint64_t idx = 0;
+    int max_iter = 65536;
+
+    while (max_iter-- > 0) {
+        entry_name[0] = '\0';
+        int r = vfs_readdir(dir, idx, &entry);
+        if (r != 0) {
+            kfree(entry_name);
+            return -EIO;
+        }
+        if (entry.name[0] == '\0') break;
+
+        int match;
+        if (dir->mount && (dir->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE))
+            match = (vfs_name_cmp(entry.name, name) == 0);
+        else
+            match = (strcmp(entry.name, name) == 0);
+
+        if (match) {
+            found = 1;
+            break;
+        }
+        idx++;
+    }
+
+    if (!found) {
+        kfree(entry_name);
+        return -ENOENT;
+    }
+
+    vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!child) {
+        kfree(entry_name);
+        return -ENOMEM;
+    }
+
+    child->mount = dir->mount;
+    child->parent = dir;
+    __sync_add_and_fetch(&dir->refcount, 1);
+    child->type = entry.type;
+    child->size = entry.size;
+    child->ino = entry.ino;
+    child->nlink = (entry.type == VFS_DIR) ? 2 : 1;
+    child->i_ops = dir->i_ops;
+    child->f_ops = dir->f_ops;
+    child->fs_data = (void *)(uintptr_t)entry.ino;
+    child->refcount = 1;
+    child->name = strndup(entry.name, VFS_NAME_MAX - 1);
+    kfree(entry_name);
+    if (!child->name) {
+        __sync_sub_and_fetch(&dir->refcount, 1);
+        kfree(child);
+        return -ENOMEM;
+    }
+
+    *out = child;
+    return 0;
+}
+
 // ── Lookup (core, raw) ────────────────────────────────────
 // Resolves an absolute path to a VFS node, with mid-path symlink early-return.
 //
@@ -520,7 +645,6 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
     struct vfs_raw_lookup_buffers {
         char path_buf[VFS_NAME_MAX];
         char path_copy[VFS_NAME_MAX];
-        char entry_name[VFS_NAME_MAX];
     };
     struct vfs_raw_lookup_buffers *bufs = kmalloc(sizeof(struct vfs_raw_lookup_buffers));
     if (!bufs) return -ENOMEM;
@@ -553,7 +677,7 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
 
     // Find the mount point
     vfs_mount_t *mp = find_mount(norm_path);
-    if (!mp || !mp->root || !mp->root->ops) {
+    if (!mp || !mp->root || (!mp->root->i_ops && !mp->root->f_ops)) {
         kfree(bufs);
         return -ENOENT;
     }
@@ -634,65 +758,32 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
             continue;
         }
 
-        vfs_dirent_t entry;
-        entry.name = bufs->entry_name;
-        int found = 0;
-        uint64_t idx = 0;
-        int max_iter = 256;  // safety bound for corrupted ops
-
-        while (max_iter-- > 0) {
-            int r = vfs_readdir(cur, idx, &entry);
-            if (r != 0) {
-                // readdir error on a directory we just verified is a DIR.
-                // Treat as I/O failure (v5 fix).
-                __sync_sub_and_fetch(&cur->refcount, 1);
-                ret = -EIO;
-                goto out;
-            }
-            if (entry.name[0] == '\0') break;
-            int match;
-            if ((cur->mount && (cur->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE)) ||
-                (cur->ops && vfs_is_valid_kptr(cur->ops) && (cur->ops->flags & VFS_OPS_CASE_INSENSITIVE)))
-                match = (vfs_name_cmp(entry.name, comp) == 0);
-            else
-                match = (strcmp(entry.name, comp) == 0);
-
-            if (match) {
-                found = 1;
-                break;
-            }
-            idx++;
+        vfs_node_t *child = NULL;
+        int lrc;
+        if (cur->i_ops && vfs_is_valid_kptr(cur->i_ops) &&
+            cur->i_ops->lookup && vfs_is_valid_kptr(cur->i_ops->lookup)) {
+            lrc = cur->i_ops->lookup(cur, comp, &child);
+        } else {
+            lrc = vfs_generic_lookup_by_readdir(cur, comp, &child);
         }
-
-        if (!found) {
+        if (lrc < 0 || !child) {
             __sync_sub_and_fetch(&cur->refcount, 1);
-            ret = -ENOENT;
+            ret = (lrc < 0) ? lrc : -ENOENT;
             goto out;
         }
-
-        vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
-        if (!child) {
-            __sync_sub_and_fetch(&cur->refcount, 1);
-            ret = -ENOMEM;
-            goto out;
+        if (!child->mount) child->mount = mp;
+        if (!child->parent) {
+            child->parent = cur;
+            __sync_add_and_fetch(&cur->refcount, 1);
         }
-
-        child->mount = mp;
-        child->parent = cur;
-        __sync_add_and_fetch(&cur->refcount, 1);  // child holds a ref through parent pointer
-        child->type = entry.type;
-        child->size = entry.size;
-        child->ops = cur->ops;
-        child->fs_data = (void *)(uintptr_t)entry.ino;
-        child->refcount = 1;
-        child->name = strndup(entry.name, VFS_NAME_MAX - 1);
+        if (!child->i_ops) child->i_ops = cur->i_ops;
+        if (!child->f_ops) child->f_ops = cur->f_ops;
 
         // Append "/" + comp to consumed (bounded by VFS_NAME_MAX, same as path).
         if (consumed_out && consumed_size > 0) {
             size_t cl = strlen(comp);
             if (consumed_len + 1 + cl + 1 > consumed_size) {
-                free(child->name);
-                free(child);
+                vfs_node_put(child);
                 __sync_sub_and_fetch(&cur->refcount, 1);
                 ret = -ENAMETOOLONG;
                 goto out;
@@ -713,8 +804,7 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
                 } else {
                     // Mid-path: contract requires suffix starts with '/'.
                     if (1 + rem_len + 1 > remaining_size) {
-                        free(child->name);
-                        free(child);
+                        vfs_node_put(child);
                         __sync_sub_and_fetch(&cur->refcount, 1);
                         ret = -ENAMETOOLONG;
                         goto out;
@@ -916,13 +1006,14 @@ static int vfs_lookup_resolved(const char *absolute,
             goto out;
         }
 
-        if (!node->ops || !node->ops->readlink) {
+        if (!node->i_ops || !vfs_is_valid_kptr(node->i_ops) ||
+            !node->i_ops->readlink || !vfs_is_valid_kptr(node->i_ops->readlink)) {
             vfs_node_put(node);
             ret = -EOPNOTSUPP;
             goto out;
         }
 
-        int tlen = node->ops->readlink(node, ctx->target, VFS_NAME_MAX - 1);
+        int tlen = node->i_ops->readlink(node, ctx->target, VFS_NAME_MAX - 1);
         if (tlen < 0) {
             vfs_node_put(node);
             ret = tlen;
@@ -1037,37 +1128,31 @@ int vfs_lookup_at(int dirfd, const char *path, lookup_flags_t flags,
 // ── Read ──────────────────────────────────────────────────
 int vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !node->ops || !vfs_is_valid_kptr(node->ops))
+    if (!node || !node->f_ops || !vfs_is_valid_kptr(node->f_ops))
         return -1;
-    if (!node->ops->read)
+    if (!node->f_ops->read || !vfs_is_valid_kptr(node->f_ops->read))
         return -1;
-    if (!vfs_is_valid_kptr(node->ops->read))
-        return -1;
-    return node->ops->read(node, offset, size, buffer);
+    return node->f_ops->read(node, offset, size, buffer);
 }
 
 // ── Write ─────────────────────────────────────────────────
 int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !node->ops || !vfs_is_valid_kptr(node->ops))
+    if (!node || !node->f_ops || !vfs_is_valid_kptr(node->f_ops))
         return -1;
-    if (!node->ops->write)
+    if (!node->f_ops->write || !vfs_is_valid_kptr(node->f_ops->write))
         return -1;
-    if (!vfs_is_valid_kptr(node->ops->write))
-        return -1;
-    return node->ops->write(node, offset, size, buffer);
+    return node->f_ops->write(node, offset, size, buffer);
 }
 
 // ── Read directory ────────────────────────────────────────
 int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 {
-    if (!dir || !dir->ops || !vfs_is_valid_kptr(dir->ops))
+    if (!dir || !dir->f_ops || !vfs_is_valid_kptr(dir->f_ops))
         return -1;
-    if (!dir->ops->readdir)
+    if (!dir->f_ops->readdir || !vfs_is_valid_kptr(dir->f_ops->readdir))
         return -1;
-    if (!vfs_is_valid_kptr(dir->ops->readdir))
-        return -1;
-    return dir->ops->readdir(dir, index, entry);
+    return dir->f_ops->readdir(dir, index, entry);
 }
 
 // ── Reference counting ────────────────────────────────────
@@ -1081,13 +1166,18 @@ void vfs_node_put(vfs_node_t *node)
 {
     if (!node) return;
     if (__sync_sub_and_fetch(&node->refcount, 1) == 0) {
+        if (node->i_ops && vfs_is_valid_kptr(node->i_ops) &&
+            node->i_ops->evict_node && vfs_is_valid_kptr(node->i_ops->evict_node)) {
+            node->i_ops->evict_node(node);
+        }
         vfs_node_t *parent = node->parent;
         // Poison to catch use-after-free: any stale reference
         // will hit a null-pointer check (unlike kernel-address
         // guards which the optimizer may elide).
-        node->ops    = NULL;
-        node->parent = NULL;
-        node->mount  = NULL;
+        node->i_ops   = NULL;
+        node->f_ops   = NULL;
+        node->parent  = NULL;
+        node->mount   = NULL;
         node->fs_data = NULL;
         if (node->name) kfree(node->name);
         node->name = NULL;
@@ -1097,39 +1187,61 @@ void vfs_node_put(vfs_node_t *node)
 }
 
 // ── Stat ───────────────────────────────────────────────────
-// Fills a struct stat from a VFS node.  Used by SYS_stat and SYS_fstat.
-int vfs_stat(vfs_node_t *node, struct stat *buf)
+int vfs_generic_getattr(vfs_node_t *node, struct stat *buf)
 {
     if (!node || !buf) return -1;
 
     memset(buf, 0, sizeof(struct stat));
 
-    // st_ino: use fs_data (cluster number) as inode number
-    buf->st_ino = (uint64_t)(uintptr_t)node->fs_data;
-
-    // st_size: file size in bytes
+    buf->st_ino = vfs_node_stable_ino(node);
     buf->st_size = (int64_t)node->size;
 
-    // st_mode: file type + default permissions
-    switch (node->type) {
-    case VFS_FILE:  buf->st_mode = S_IFREG | 0755; break;
-    case VFS_DIR:   buf->st_mode = S_IFDIR | 0755; break;
-    case VFS_CHRDEV: buf->st_mode = S_IFCHR | 0600; break;
-    case VFS_BLKDEV: buf->st_mode = S_IFBLK | 0600; break;
-    case VFS_SYMLINK: buf->st_mode = S_IFLNK | 0777; break;
-    default:        buf->st_mode = 0; break;
+    if (node->mode != 0) {
+        uint32_t m = node->mode;
+        if ((m & S_IFMT) == 0) {
+            switch (node->type) {
+            case VFS_FILE:    m |= S_IFREG; break;
+            case VFS_DIR:     m |= S_IFDIR; break;
+            case VFS_CHRDEV:  m |= S_IFCHR; break;
+            case VFS_BLKDEV:  m |= S_IFBLK; break;
+            case VFS_SYMLINK: m |= S_IFLNK; break;
+            default: break;
+            }
+        }
+        buf->st_mode = m;
+    } else {
+        switch (node->type) {
+        case VFS_FILE:    buf->st_mode = S_IFREG | 0755; break;
+        case VFS_DIR:     buf->st_mode = S_IFDIR | 0755; break;
+        case VFS_CHRDEV:  buf->st_mode = S_IFCHR | 0600; break;
+        case VFS_BLKDEV:  buf->st_mode = S_IFBLK | 0600; break;
+        case VFS_SYMLINK: buf->st_mode = S_IFLNK | 0777; break;
+        default:          buf->st_mode = 0; break;
+        }
     }
 
-    // Default ownership
-    buf->st_uid = 0;
-    buf->st_gid = 0;
-    buf->st_nlink = 1;
-
-    // Block size and count
+    buf->st_uid = node->uid;
+    buf->st_gid = node->gid;
+    buf->st_nlink = node->nlink;
+    buf->st_rdev = node->rdev;
     buf->st_blksize = 512;
     buf->st_blocks = (node->size + 511) / 512;
+    buf->st_atime = node->atime;
+    buf->st_mtime = node->mtime;
+    buf->st_ctime = node->ctime;
 
     return 0;
+}
+
+// Fills a struct stat from a VFS node.  Used by SYS_stat and SYS_fstat.
+int vfs_stat(vfs_node_t *node, struct stat *buf)
+{
+    if (!node || !buf) return -1;
+    if (node->i_ops && vfs_is_valid_kptr(node->i_ops) &&
+        node->i_ops->getattr && vfs_is_valid_kptr(node->i_ops->getattr)) {
+        return node->i_ops->getattr(node, buf);
+    }
+    return vfs_generic_getattr(node, buf);
 }
 
 // ── Sorted getdents entry (internal, for mount-point injection) ──
@@ -1231,8 +1343,7 @@ int vfs_getdents(vfs_node_t *dir, struct linux_dirent64 *buf, unsigned int count
     for (int i = 0; i < total - 1; i++) {
         for (int j = 0; j < total - 1 - i; j++) {
             int cmp;
-            if ((dir->mount && (dir->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE)) ||
-                (dir->ops && vfs_is_valid_kptr(dir->ops) && (dir->ops->flags & VFS_OPS_CASE_INSENSITIVE)))
+            if (dir->mount && (dir->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE))
                 cmp = vfs_name_cmp(entries[j].name, entries[j + 1].name);
             else
                 cmp = strcmp(entries[j].name, entries[j + 1].name);
@@ -1356,6 +1467,94 @@ const char *vfs_split_parent(const char *path, const char *cwd,
     }
 }
 
+// ── Create a regular file ─────────────────────────────────────
+int vfs_create_file(const char *path, const char *cwd, vfs_node_t **out_node)
+{
+    if (!out_node) return -EINVAL;
+    *out_node = NULL;
+    if (!path) return -EINVAL;
+
+    char *parent_path = kmalloc(VFS_NAME_MAX);
+    if (!parent_path) return -ENOMEM;
+
+    const char *name = vfs_split_parent(path, cwd, parent_path);
+    if (!name || *name == '\0') {
+        kfree(parent_path);
+        return -EINVAL;
+    }
+
+    vfs_ns_lock();
+    vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
+    kfree(parent_path);
+    if (!parent) {
+        vfs_ns_unlock();
+        return -ENOENT;
+    }
+    if (parent->type != VFS_DIR) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -ENOTDIR;
+    }
+    if (!parent->i_ops || !vfs_is_valid_kptr(parent->i_ops) || !parent->i_ops->create) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -EROFS;
+    }
+    if (!vfs_is_valid_kptr(parent->i_ops->create)) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -1;
+    }
+
+    vfs_node_t *node = parent->i_ops->create(parent, name);
+    vfs_node_put(parent);
+    vfs_ns_unlock();
+    if (!node) return -EEXIST;
+    *out_node = node;
+    return 0;
+}
+
+// ── Create a symbolic link ────────────────────────────────────
+int vfs_symlink(const char *target, const char *linkpath, const char *cwd)
+{
+    if (!target || !linkpath) return -EINVAL;
+    if (target[0] == '\0') return -ENOENT;
+    if (linkpath[0] == '/' && linkpath[1] == '\0') return -EEXIST;
+
+    char *parent_path = kmalloc(VFS_NAME_MAX);
+    if (!parent_path) return -ENOMEM;
+
+    const char *name = vfs_split_parent(linkpath, cwd, parent_path);
+    if (!name || *name == '\0') {
+        kfree(parent_path);
+        return -EINVAL;
+    }
+
+    vfs_ns_lock();
+    vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
+    kfree(parent_path);
+    if (!parent) {
+        vfs_ns_unlock();
+        return -ENOENT;
+    }
+    if (parent->type != VFS_DIR) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -ENOTDIR;
+    }
+    if (!parent->i_ops || !vfs_is_valid_kptr(parent->i_ops) ||
+        !parent->i_ops->symlink || !vfs_is_valid_kptr(parent->i_ops->symlink)) {
+        vfs_node_put(parent);
+        vfs_ns_unlock();
+        return -EOPNOTSUPP;
+    }
+
+    int ret = parent->i_ops->symlink(parent, name, target);
+    vfs_node_put(parent);
+    vfs_ns_unlock();
+    return ret;
+}
+
 // ── Unlink a file ─────────────────────────────────────────────
 int vfs_unlink(const char *path, const char *cwd)
 {
@@ -1365,20 +1564,24 @@ int vfs_unlink(const char *path, const char *cwd)
     const char *name = vfs_split_parent(path, cwd, parent_path);
     if (!name || *name == '\0') return -EINVAL;
 
+    vfs_ns_lock();
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
-    if (!parent) return -ENOENT;
-    if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || !vfs_is_valid_kptr(parent->ops) || !parent->ops->unlink) {
+    if (!parent) { vfs_ns_unlock(); return -ENOENT; }
+    if (parent->type != VFS_DIR) { vfs_node_put(parent); vfs_ns_unlock(); return -ENOTDIR; }
+    if (!parent->i_ops || !vfs_is_valid_kptr(parent->i_ops) || !parent->i_ops->unlink) {
         vfs_node_put(parent);
+        vfs_ns_unlock();
         return -EROFS;
     }
-    if (!vfs_is_valid_kptr(parent->ops->unlink)) {
+    if (!vfs_is_valid_kptr(parent->i_ops->unlink)) {
         vfs_node_put(parent);
+        vfs_ns_unlock();
         return -1;
     }
 
-    int ret = parent->ops->unlink(parent, name);
+    int ret = parent->i_ops->unlink(parent, name);
     vfs_node_put(parent);
+    vfs_ns_unlock();
     return ret;
 }
 
@@ -1391,24 +1594,28 @@ int vfs_mkdir(const char *path, const char *cwd)
     const char *name = vfs_split_parent(path, cwd, parent_path);
     if (!name || *name == '\0') return -EINVAL;
 
+    vfs_ns_lock();
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
-    if (!parent) return -ENOENT;
-    if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || !vfs_is_valid_kptr(parent->ops) || !parent->ops->mkdir) {
+    if (!parent) { vfs_ns_unlock(); return -ENOENT; }
+    if (parent->type != VFS_DIR) { vfs_node_put(parent); vfs_ns_unlock(); return -ENOTDIR; }
+    if (!parent->i_ops || !vfs_is_valid_kptr(parent->i_ops) || !parent->i_ops->mkdir) {
         vfs_node_put(parent);
+        vfs_ns_unlock();
         return -EROFS;
     }
-    if (!vfs_is_valid_kptr(parent->ops->mkdir)) {
+    if (!vfs_is_valid_kptr(parent->i_ops->mkdir)) {
         vfs_node_put(parent);
+        vfs_ns_unlock();
         return -1;
     }
 
-    vfs_node_t *newdir = parent->ops->mkdir(parent, name);
-    if (!newdir) { vfs_node_put(parent); return -EEXIST; }
+    vfs_node_t *newdir = parent->i_ops->mkdir(parent, name);
+    if (!newdir) { vfs_node_put(parent); vfs_ns_unlock(); return -EEXIST; }
 
     // The directory was created on disk; we don't need the node ref
     vfs_node_put(newdir);
     vfs_node_put(parent);
+    vfs_ns_unlock();
     return 0;
 }
 
@@ -1421,20 +1628,24 @@ int vfs_rmdir(const char *path, const char *cwd)
     const char *name = vfs_split_parent(path, cwd, parent_path);
     if (!name || *name == '\0') return -EINVAL;
 
+    vfs_ns_lock();
     vfs_node_t *parent = vfs_lookup_from(parent_path, cwd);
-    if (!parent) return -ENOENT;
-    if (parent->type != VFS_DIR) { vfs_node_put(parent); return -ENOTDIR; }
-    if (!parent->ops || !vfs_is_valid_kptr(parent->ops) || !parent->ops->rmdir) {
+    if (!parent) { vfs_ns_unlock(); return -ENOENT; }
+    if (parent->type != VFS_DIR) { vfs_node_put(parent); vfs_ns_unlock(); return -ENOTDIR; }
+    if (!parent->i_ops || !vfs_is_valid_kptr(parent->i_ops) || !parent->i_ops->rmdir) {
         vfs_node_put(parent);
+        vfs_ns_unlock();
         return -EROFS;
     }
-    if (!vfs_is_valid_kptr(parent->ops->rmdir)) {
+    if (!vfs_is_valid_kptr(parent->i_ops->rmdir)) {
         vfs_node_put(parent);
+        vfs_ns_unlock();
         return -1;
     }
 
-    int ret = parent->ops->rmdir(parent, name);
+    int ret = parent->i_ops->rmdir(parent, name);
     vfs_node_put(parent);
+    vfs_ns_unlock();
     return ret;
 }
 
@@ -1455,35 +1666,57 @@ int vfs_rename(const char *oldpath, const char *newpath, const char *cwd)
         return -EINVAL;
     }
 
+    vfs_ns_lock();
     vfs_node_t *olddir = vfs_lookup_from(old_parent, cwd);
-    if (!olddir) { kfree(parents); return -ENOENT; }
-    if (olddir->type != VFS_DIR) { vfs_node_put(olddir); kfree(parents); return -ENOTDIR; }
+    if (!olddir) { kfree(parents); vfs_ns_unlock(); return -ENOENT; }
+    if (olddir->type != VFS_DIR) {
+        vfs_node_put(olddir);
+        kfree(parents);
+        vfs_ns_unlock();
+        return -ENOTDIR;
+    }
 
     vfs_node_t *newdir = vfs_lookup_from(new_parent, cwd);
-    if (!newdir) { vfs_node_put(olddir); kfree(parents); return -ENOENT; }
+    if (!newdir) {
+        vfs_node_put(olddir);
+        kfree(parents);
+        vfs_ns_unlock();
+        return -ENOENT;
+    }
     if (newdir->type != VFS_DIR) {
         vfs_node_put(olddir);
         vfs_node_put(newdir);
         kfree(parents);
+        vfs_ns_unlock();
         return -ENOTDIR;
     }
 
     kfree(parents);
 
-    if (!olddir->ops || !vfs_is_valid_kptr(olddir->ops) || !olddir->ops->rename) {
+    if (olddir->mount != newdir->mount) {
         vfs_node_put(olddir);
         vfs_node_put(newdir);
+        vfs_ns_unlock();
+        return -EXDEV;
+    }
+
+    if (!olddir->i_ops || !vfs_is_valid_kptr(olddir->i_ops) || !olddir->i_ops->rename) {
+        vfs_node_put(olddir);
+        vfs_node_put(newdir);
+        vfs_ns_unlock();
         return -EROFS;
     }
-    if (!vfs_is_valid_kptr(olddir->ops->rename)) {
+    if (!vfs_is_valid_kptr(olddir->i_ops->rename)) {
         vfs_node_put(olddir);
         vfs_node_put(newdir);
+        vfs_ns_unlock();
         return -1;
     }
 
-    int ret = olddir->ops->rename(olddir, oldname, newdir, newname);
+    int ret = olddir->i_ops->rename(olddir, oldname, newdir, newname);
     vfs_node_put(olddir);
     vfs_node_put(newdir);
+    vfs_ns_unlock();
     return ret;
 }
 
@@ -1492,11 +1725,12 @@ int vfs_truncate(vfs_node_t *node, uint64_t new_size)
 {
     if (!node) return -EINVAL;
     if (node->type != VFS_FILE) return -EISDIR;
-    if (!node->ops || !vfs_is_valid_kptr(node->ops) || !node->ops->truncate) return -EROFS;
-    if (!vfs_is_valid_kptr(node->ops->truncate))
+    if (!node->i_ops || !vfs_is_valid_kptr(node->i_ops) || !node->i_ops->truncate)
+        return -EROFS;
+    if (!vfs_is_valid_kptr(node->i_ops->truncate))
         return -1;
 
-    return node->ops->truncate(node, new_size);
+    return node->i_ops->truncate(node, new_size);
 }
 
 // ── Resolve full path from a VFS node ─────────────────────────

@@ -702,11 +702,11 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
 
         // Device node with mmap handler → device path.
         int (*_dev_mmap)(struct vfs_node *, struct vma *) =
-            (file_node && file_node->ops &&
-             (uint64_t)file_node->ops >= 0xffff800000000000ULL &&
-             file_node->ops->mmap &&
-             (uint64_t)file_node->ops->mmap >= 0xffff800000000000ULL)
-            ? file_node->ops->mmap : NULL;
+            (file_node && file_node->f_ops &&
+             (uint64_t)file_node->f_ops >= 0xffff800000000000ULL &&
+             file_node->f_ops->mmap &&
+             (uint64_t)file_node->f_ops->mmap >= 0xffff800000000000ULL)
+            ? file_node->f_ops->mmap : NULL;
 
         if (_dev_mmap) {
             if (!(flags & MAP_SHARED))

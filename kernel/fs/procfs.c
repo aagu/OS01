@@ -512,23 +512,28 @@ static int procfs_readdir(vfs_node_t *node, uint64_t index,
 // status) use the Task-1 per-file snapshot lifecycle hooks; every other
 // procfs node keeps the legacy regenerate-per-read behaviour (read_file
 // falls back to vfs_read → procfs_read when no snapshot is attached).
-static vfs_ops_t procfs_ops = {
+static const vfs_inode_ops_t procfs_iops;
+static const vfs_file_ops_t procfs_fops = {
     .read         = procfs_read,
     .write        = NULL,
     .readdir      = procfs_readdir,
     .open_file    = procfs_open_file,
     .read_file    = procfs_read_file,
     .release_file = procfs_release_file,
-    // create / unlink / mkdir / rmdir / rename / truncate are NULL
 };
 
 static int procfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
 {
     (void)dev;
     (void)data;
-    mp->ops = &procfs_ops;
+    mp->i_ops = &procfs_iops;
+    mp->f_ops = &procfs_fops;
     mp->fs_data = NULL;
-    mp->root->ops = &procfs_ops;
+    mp->root->i_ops = &procfs_iops;
+    mp->root->f_ops = &procfs_fops;
+    mp->root->ino = VFS_SYNTH_ROOT_INO;
+    mp->root->mode = S_IFDIR | 0555;
+    mp->root->nlink = 2;
     return 0;
 }
 

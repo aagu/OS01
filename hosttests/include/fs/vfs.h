@@ -16,45 +16,45 @@
 struct vfs_node;
 struct vfs_mount;
 struct vfs_dirent;
+struct vfs_fs_type;
+struct vma;
+struct file;
 
-// ── File operations (filesystem driver provides these) ────
-typedef struct vfs_ops {
-    uint32_t flags;
-    #define VFS_OPS_CASE_INSENSITIVE  (1 << 0)
-    int (*read)(struct vfs_node *node, uint64_t offset,
-                uint64_t size, void *buffer);
-    int (*write)(struct vfs_node *node, uint64_t offset,
-                 uint64_t size, void *buffer);
-    int (*readdir)(struct vfs_node *node, uint64_t index,
-                   struct vfs_dirent *entry);
-    // Create a new regular file in a directory node.  Returns the
-    // new vfs_node, or NULL on error (e.g., already exists).
+typedef struct vfs_inode_ops {
+    int              (*lookup)(struct vfs_node *dir, const char *name,
+                               struct vfs_node **out);
+    int              (*getattr)(struct vfs_node *node, struct stat *buf);
+    void             (*evict_node)(struct vfs_node *node);
     struct vfs_node *(*create)(struct vfs_node *dir, const char *name);
-
-    // Unlink (delete) a file from a directory.  Returns 0 or -errno.
-    int (*unlink)(struct vfs_node *dir, const char *name);
-
-    // Create a new directory.  Returns new vfs_node or NULL on error.
+    int              (*unlink)(struct vfs_node *dir, const char *name);
     struct vfs_node *(*mkdir)(struct vfs_node *dir, const char *name);
+    int              (*rmdir)(struct vfs_node *dir, const char *name);
+    int              (*rename)(struct vfs_node *olddir, const char *oldname,
+                               struct vfs_node *newdir, const char *newname);
+    int              (*truncate)(struct vfs_node *node, uint64_t new_size);
+    int              (*symlink)(struct vfs_node *parent, const char *name,
+                                const char *target);
+    int              (*readlink)(struct vfs_node *node, char *buf, size_t size);
+} vfs_inode_ops_t;
 
-    // Remove an empty directory.  Returns 0 or -errno.
-    int (*rmdir)(struct vfs_node *dir, const char *name);
-
-    // Rename a file/directory.  olddir/oldname → newdir/newname.
-    // Returns 0 or -errno.
-    int (*rename)(struct vfs_node *olddir, const char *oldname,
-                  struct vfs_node *newdir, const char *newname);
-
-    // Truncate a file to a new size.  Returns 0 or -errno.
-    int (*truncate)(struct vfs_node *node, uint64_t new_size);
-} vfs_ops_t;
+typedef struct vfs_file_ops {
+    int     (*read)(struct vfs_node *node, uint64_t offset,
+                    uint64_t size, void *buffer);
+    int     (*write)(struct vfs_node *node, uint64_t offset,
+                     uint64_t size, void *buffer);
+    int     (*readdir)(struct vfs_node *node, uint64_t index,
+                       struct vfs_dirent *entry);
+    int     (*mmap)(struct vfs_node *node, struct vma *vma);
+    int     (*open_file)(struct file *f);
+    int64_t (*read_file)(struct file *f, uint64_t offset,
+                         uint64_t size, void *buffer);
+    void    (*release_file)(struct file *f);
+} vfs_file_ops_t;
 
 // ── Filesystem type registration ──────────────────────────
 #define VFS_FS_REQUIRES_DEV      (1u << 0)
 #define VFS_FS_CASE_INSENSITIVE  (1u << 1)
 #define VFS_FS_NO_DCACHE         (1u << 2)
-
-struct vfs_fs_type;
 
 typedef struct vfs_fs_type {
     const char         *name;
@@ -67,10 +67,11 @@ typedef struct vfs_fs_type {
 // ── A mounted filesystem instance ─────────────────────────
 typedef struct vfs_mount {
     block_device_t            *dev;
-    const char                *path;          // mount point path
-    struct vfs_node           *root;          // root node of this filesystem
-    struct vfs_ops            *ops;
-    void                      *fs_data;       // filesystem-private data
+    const char                *path;
+    struct vfs_node           *root;
+    const vfs_inode_ops_t     *i_ops;
+    const vfs_file_ops_t      *f_ops;
+    void                      *fs_data;
     const struct vfs_fs_type  *fs_type;
     uint32_t                   mnt_flags;
 } vfs_mount_t;
@@ -79,25 +80,38 @@ typedef struct vfs_mount {
 typedef struct vfs_dirent {
     char     name[VFS_NAME_MAX];
     uint64_t size;
-    uint8_t  type;          // VFS_FILE or VFS_DIR
-    uint64_t ino;           // filesystem-specific id (must hold kernel pointer for tmpfs)
+    uint8_t  type;
+    uint64_t ino;
 } vfs_dirent_t;
 
 // ── VFS node (inode) ──────────────────────────────────────
 typedef struct vfs_node {
-    char              name[VFS_NAME_MAX];
-    uint64_t          size;
-    uint8_t           type;           // VFS_FILE or VFS_DIR
-    struct vfs_mount *mount;
-    void             *fs_data;        // filesystem-private (e.g., first cluster)
-    struct vfs_node  *parent;
-    struct vfs_ops   *ops;
-    uint32_t          refcount;
+    char                  name[VFS_NAME_MAX];
+    uint64_t              ino;
+    uint64_t              size;
+    uint32_t              mode;
+    uint32_t              uid;
+    uint32_t              gid;
+    uint32_t              nlink;
+    uint64_t              rdev;
+    uint64_t              atime;
+    uint64_t              mtime;
+    uint64_t              ctime;
+    uint8_t               type;
+    uint8_t               node_flags;
+    struct vfs_mount     *mount;
+    struct vfs_mount     *mounted_here;
+    void                 *fs_data;
+    struct vfs_node      *parent;
+    const vfs_inode_ops_t *i_ops;
+    const vfs_file_ops_t  *f_ops;
+    uint32_t              refcount;
 } vfs_node_t;
 
 // ── VFS API ───────────────────────────────────────────────
 
 void vfs_init(void);
+void vfs_end_bootstrap(void);
 
 int                 vfs_register_filesystem(vfs_fs_type_t *fs_type);
 int                 vfs_unregister_filesystem(const char *name);
@@ -105,9 +119,9 @@ const vfs_fs_type_t *vfs_find_filesystem(const char *name);
 int                 vfs_mount_fs(const char *type_name, const char *path,
                                  block_device_t *dev, void *data);
 
-// Mount a filesystem from a block device
 int vfs_mount(const char *path, block_device_t *dev,
-              vfs_ops_t *ops, void *fs_data);
+              const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
+              void *fs_data);
 
 // Resolve a path to a VFS node (call vfs_node_put when done).
 // Absolute path only — no cwd resolution.

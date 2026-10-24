@@ -834,7 +834,10 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     node->name = strndup(name, nlen);
     node->type = VFS_FILE;
     node->mount = dir->mount;
-    node->ops = dir->ops;
+    node->i_ops = dir->i_ops;
+    node->f_ops = dir->f_ops;
+    node->ino = new_ino;
+    node->nlink = 1;
     node->parent = dir;
     __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
     node->fs_data = (void *)(uintptr_t)new_ino;
@@ -1146,7 +1149,10 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     node->name = strndup(name, nlen);
     node->type = VFS_DIR;
     node->mount = dir->mount;
-    node->ops = dir->ops;
+    node->i_ops = dir->i_ops;
+    node->f_ops = dir->f_ops;
+    node->ino = new_ino;
+    node->nlink = 2;
     node->parent = dir;
     __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
     node->fs_data = (void *)(uintptr_t)new_ino;
@@ -1534,19 +1540,21 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
 }
 
 // ── VFS operations table ────────────────────────────────
-struct vfs_ops ext2_vfs_ops = {
-    .flags   = 0,  // case-sensitive
-    .read    = ext2_vfs_read,
-    .write   = ext2_vfs_write,
-    .readdir = ext2_vfs_readdir,
+const vfs_inode_ops_t ext2_iops = {
     .readlink = ext2_vfs_readlink,
     .symlink  = ext2_vfs_symlink,
-    .create  = ext2_vfs_create,
-    .unlink  = ext2_vfs_unlink,
-    .mkdir   = ext2_vfs_mkdir,
-    .rmdir   = ext2_vfs_rmdir,
-    .rename  = ext2_vfs_rename,
+    .create   = ext2_vfs_create,
+    .unlink   = ext2_vfs_unlink,
+    .mkdir    = ext2_vfs_mkdir,
+    .rmdir    = ext2_vfs_rmdir,
+    .rename   = ext2_vfs_rename,
     .truncate = ext2_vfs_truncate,
+};
+
+const vfs_file_ops_t ext2_fops = {
+    .read     = ext2_vfs_read,
+    .write    = ext2_vfs_write,
+    .readdir  = ext2_vfs_readdir,
 };
 
 // ── ext2_init (mount) ───────────────────────────────────
@@ -1629,9 +1637,13 @@ static int ext2_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     if (rc != 0) {
         return rc < 0 ? rc : -EIO;
     }
-    mp->ops = &ext2_vfs_ops;
+    mp->i_ops = &ext2_iops;
+    mp->f_ops = &ext2_fops;
     mp->fs_data = fs;
-    mp->root->ops = &ext2_vfs_ops;
+    mp->root->i_ops = &ext2_iops;
+    mp->root->f_ops = &ext2_fops;
+    mp->root->ino = EXT2_ROOT_INO;
+    mp->root->nlink = 2;
     return 0;
 }
 
@@ -2068,7 +2080,8 @@ int ext2_selftest_sparse_read(void)
 
     // Synthetic node — ext2_vfs_read only dereferences mount, fs_data.
     vfs_node_t fake = {0};
-    fake.ops = &ext2_vfs_ops;
+    fake.i_ops = &ext2_iops;
+    fake.f_ops = &ext2_fops;
     fake.fs_data = (void *)(uintptr_t)test_ino;
     fake.mount = root_node->mount;
 
@@ -2085,7 +2098,7 @@ int ext2_selftest_sparse_read(void)
     if (wrc != 0) { fail = 1; goto cleanup; }
 
     memset(buf, 0xCC, 8192);   // sentinel — hole must overwrite
-    int rc = ext2_vfs_ops.read(&fake, 0, 8192, buf);
+    int rc = ext2_fops.read(&fake, 0, 8192, buf);
     if (rc != 8192) { fail = 1; goto cleanup; }
     for (int i = 4096; i < 8192; i++) {
         if (buf[i] != 0) { fail = 1; goto cleanup; }
@@ -2101,7 +2114,7 @@ int ext2_selftest_sparse_read(void)
     if (wrc != 0) { fail = 1; goto cleanup; }
 
     memset(buf, 0xCC, 4096);
-    rc = ext2_vfs_ops.read(&fake, 0, 4096, buf);
+    rc = ext2_fops.read(&fake, 0, 4096, buf);
     if (rc != 4096) { fail = 1; goto cleanup; }
     for (int i = 0; i < 4096; i++) {
         if (buf[i] != 0) { fail = 1; goto cleanup; }

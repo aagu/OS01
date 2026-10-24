@@ -88,9 +88,9 @@ int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
 }
 
 /* devfs_init() mounts /dev through this stub.  The ops pointer it
- * receives IS the devfs mount's vfs_ops — the table that carries the
+ * receives IS the devfs mount's vfs_file_ops — the table that carries the
  * read_file bridge the production fd_read path dispatches through. */
-static vfs_ops_t *devfs_mount_ops;
+static const vfs_file_ops_t *devfs_mount_fops;
 static vfs_fs_type_t *s_registered_devfs_type;
 int vfs_register_filesystem(vfs_fs_type_t *fs_type)
 {
@@ -110,15 +110,16 @@ int vfs_mount_fs(const char *type_name, const char *path,
     if (s_registered_devfs_type && s_registered_devfs_type->mount) {
         int rc = s_registered_devfs_type->mount(&dummy_mp, dev, data);
         if (rc < 0) return rc;
-        devfs_mount_ops = dummy_mp.ops;
+        devfs_mount_fops = dummy_mp.f_ops;
     }
     return 0;
 }
-int vfs_mount(const char *path, block_device_t *dev, vfs_ops_t *ops,
+int vfs_mount(const char *path, block_device_t *dev,
+              const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
               void *fs_data)
 {
-    (void)path; (void)dev; (void)fs_data;
-    devfs_mount_ops = ops;
+    (void)path; (void)dev; (void)i_ops; (void)fs_data;
+    devfs_mount_fops = f_ops;
     return 0;
 }
 
@@ -313,7 +314,7 @@ static vfs_node_t mock_node(int idx)
     memset(&n, 0, sizeof(n));
     n.type = VFS_CHRDEV;
     n.fs_data = (void *)(uintptr_t)idx;
-    n.ops = devfs_mount_ops;
+    n.f_ops = devfs_mount_fops;
     n.refcount = 1;
     return n;
 }
@@ -561,7 +562,7 @@ int main(void)
     /* Mount the real devfs so the test drives the production vfs_ops
      * table (the one that carries the read_file bridge). */
     devfs_init();
-    assert_not_null(devfs_mount_ops);
+    assert_not_null(devfs_mount_fops);
 
     printf("=== Test Runner ===\n");
     for (int i = 0; i < __test_table_size; i++) {

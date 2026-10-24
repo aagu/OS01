@@ -106,8 +106,10 @@ int fat32_init(block_device_t *dev, fat32_fs_t **fs)
     return s_mock_fat32_init_ret;
 }
 
-struct vfs_ops ext2_vfs_ops = {0};
-struct vfs_ops fat_vfs_ops = {0};
+const vfs_inode_ops_t ext2_iops = {0};
+const vfs_file_ops_t ext2_fops = {0};
+const vfs_inode_ops_t fat_iops = {0};
+const vfs_file_ops_t fat_fops = {0};
 
 int vfs_mount_fs(const char *type_name, const char *path,
                  block_device_t *dev, void *data)
@@ -132,10 +134,13 @@ int vfs_mount_fs(const char *type_name, const char *path,
     return 0;
 }
 
-int vfs_mount(const char *path, block_device_t *dev, struct vfs_ops *ops, void *data)
+int vfs_mount(const char *path, block_device_t *dev,
+              const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
+              void *data)
 {
     (void)dev;
-    (void)ops;
+    (void)i_ops;
+    (void)f_ops;
     (void)data;
     if (strcmp(path, "/") == 0) {
         s_root_mounted = true;

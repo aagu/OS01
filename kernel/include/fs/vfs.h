@@ -5,6 +5,7 @@
 #include <stddef.h>   // size_t
 #include <block/blockdev.h>
 #include <sys/stat.h>
+#include <arch/spinlock.h>
 
 typedef enum {
     VFS_FILE    = 1,
@@ -36,79 +37,53 @@ struct vfs_fs_type;
 struct vma;
 struct file;
 
-// ── File operations (filesystem driver provides these) ────
-typedef struct vfs_ops {
-    uint32_t flags;
-    #define VFS_OPS_CASE_INSENSITIVE  (1 << 0)
-    int (*read)(struct vfs_node *node, uint64_t offset,
-                uint64_t size, void *buffer);
-    int (*write)(struct vfs_node *node, uint64_t offset,
-                 uint64_t size, void *buffer);
-    int (*readdir)(struct vfs_node *node, uint64_t index,
-                   struct vfs_dirent *entry);
-    // Create a new regular file in a directory node.  Returns the
-    // new vfs_node, or NULL on error (e.g., already exists).
+// ── Inode & File operations tables (Spec §4.2) ────────────
+typedef struct vfs_inode_ops {
+    // Directory lookup: search `dir` for `name`; on hit return 0 and
+    // output a vfs_node_t with refcount >= 1 in *out; on miss return -ENOENT.
+    int              (*lookup)(struct vfs_node *dir, const char *name,
+                               struct vfs_node **out);
+
+    // Custom attribute query: fill struct stat (returns 0 on success).
+    // If NULL, VFS falls back to vfs_generic_getattr().
+    int              (*getattr)(struct vfs_node *node, struct stat *buf);
+
+    // Called from vfs_node_put() when refcount drops to 0 before freeing
+    // the vfs_node_t wrapper.
+    void             (*evict_node)(struct vfs_node *node);
+
+    // Namespace & metadata mutation hooks
     struct vfs_node *(*create)(struct vfs_node *dir, const char *name);
-
-    // Unlink (delete) a file from a directory.  Returns 0 or -errno.
-    int (*unlink)(struct vfs_node *dir, const char *name);
-
-    // Create a new directory.  Returns new vfs_node or NULL on error.
+    int              (*unlink)(struct vfs_node *dir, const char *name);
     struct vfs_node *(*mkdir)(struct vfs_node *dir, const char *name);
+    int              (*rmdir)(struct vfs_node *dir, const char *name);
+    int              (*rename)(struct vfs_node *olddir, const char *oldname,
+                               struct vfs_node *newdir, const char *newname);
+    int              (*truncate)(struct vfs_node *node, uint64_t new_size);
 
-    // Remove an empty directory.  Returns 0 or -errno.
-    int (*rmdir)(struct vfs_node *dir, const char *name);
+    // Symbolic link hooks
+    int              (*symlink)(struct vfs_node *parent, const char *name,
+                                const char *target);
+    int              (*readlink)(struct vfs_node *node, char *buf, size_t size);
+} vfs_inode_ops_t;
 
-    // Rename a file/directory.  olddir/oldname → newdir/newname.
-    // Returns 0 or -errno.
-    int (*rename)(struct vfs_node *olddir, const char *oldname,
-                  struct vfs_node *newdir, const char *newname);
+typedef struct vfs_file_ops {
+    int     (*read)(struct vfs_node *node, uint64_t offset,
+                    uint64_t size, void *buffer);
+    int     (*write)(struct vfs_node *node, uint64_t offset,
+                     uint64_t size, void *buffer);
+    int     (*readdir)(struct vfs_node *node, uint64_t index,
+                       struct vfs_dirent *entry);
+    int     (*mmap)(struct vfs_node *node, struct vma *vma);
 
-    // Truncate a file to a new size.  Returns 0 or -errno.
-    int (*truncate)(struct vfs_node *node, uint64_t new_size);
-
-    // Memory-map a device's memory region into user space.
-    int (*mmap)(struct vfs_node *, struct vma *);
-
-    // Create a symbolic link named `name` in `parent` whose target is
-    // `target`.  Returns 0 or -errno.
-    int (*symlink)(struct vfs_node *parent, const char *name,
-                   const char *target);
-
-    // Read the symlink target into `buf` (up to `size` bytes).
-    // Returns bytes written (excluding NUL) or -errno.
-    int (*readlink)(struct vfs_node *node, char *buf, size_t size);
-
-    // ── Optional per-file snapshot lifecycle hooks (spec §6,
-    // monitor design 2026-10-09) ──
-    // Only filesystems whose files need an open-time snapshot
-    // (procfs statistics) register these; designated initializers
-    // leave them NULL everywhere else, which keeps the legacy
-    // node-read behaviour.  They operate on the file_t, never on the
-    // shared vfs_node — each independent open gets its own snapshot.
-    //
-    // open_file generates the file text once and attaches it to
-    // f->fs_private.  Returns 0 or -errno (-ENOMEM on allocation
-    // failure, -EOVERFLOW when the text exceeds the fixed capacity —
-    // never truncate into plausible-looking data).  On failure the
-    // hook must undo its own partial state: file_free still calls
-    // release_file on the way out, which must treat a NULL
-    // f->fs_private as "nothing attached".
-    int (*open_file)(struct file *f);
-    // read_file returns a slice of the open-time snapshot; EOF is
-    // the stable snapshot length, so split reads never mix two
-    // generations of the source data.
+    // Optional per-file snapshot lifecycle hooks (procfs statistics, etc.)
+    int     (*open_file)(struct file *f);
     int64_t (*read_file)(struct file *f, uint64_t offset,
                          uint64_t size, void *buffer);
-    // release_file frees the snapshot.  Fired from file_free on the
-    // drop-to-zero transition, BEFORE the node ref is dropped (and
-    // never under the file reference lock — file_put's contract).
-    // Device files keep their own devfs release_file protocol
-    // (struct devfs_ops); this hook must not touch it.
-    void (*release_file)(struct file *f);
-} vfs_ops_t;
+    void    (*release_file)(struct file *f);
+} vfs_file_ops_t;
 
-// ── Filesystem type registration ──────────────────────────
+// ── Filesystem type registration (Spec §4.1) ──────────────
 #define VFS_FS_REQUIRES_DEV      (1u << 0)
 #define VFS_FS_CASE_INSENSITIVE  (1u << 1)
 #define VFS_FS_NO_DCACHE         (1u << 2)
@@ -121,21 +96,26 @@ typedef struct vfs_fs_type {
     struct vfs_fs_type *next;
 } vfs_fs_type_t;
 
-// ── A mounted filesystem instance ─────────────────────────
+// ── A mounted filesystem instance (Spec §4.4) ─────────────
 typedef struct vfs_mount {
     block_device_t            *dev;
-    const char                *path;          // mount point path
-    struct vfs_node           *root;          // root node of this filesystem
-    struct vfs_ops            *ops;
-    void                      *fs_data;       // filesystem-private data
     const struct vfs_fs_type  *fs_type;
     uint32_t                   mnt_flags;
-    struct vfs_mount          *next;          // linked list (mount order)
+    const char                *path;
+    char                       mount_name[VFS_NAME_MAX];
+    struct vfs_node           *root;
+    struct vfs_node           *mountpoint;
+    struct vfs_mount          *parent_mount;
+    uint64_t                   parent_dir_ino;
+    const vfs_inode_ops_t     *i_ops;
+    const vfs_file_ops_t      *f_ops;
+    void                      *fs_data;
+    spinlock_T                 active_lock;
+    struct vfs_node           *active_nodes;
+    struct vfs_mount          *next;
 } vfs_mount_t;
 
 // ── Directory entry returned by readdir ───────────────────
-// Caller must set entry->name to a buffer of at least VFS_NAME_MAX bytes
-// before calling ops->readdir.
 typedef struct vfs_dirent {
     char     *name;          // caller-provided buffer (VFS_NAME_MAX bytes)
     uint64_t size;
@@ -143,21 +123,51 @@ typedef struct vfs_dirent {
     uint64_t ino;            // filesystem-specific id (must hold kernel pointer for tmpfs)
 } vfs_dirent_t;
 
-// ── VFS node (inode) ──────────────────────────────────────
+// ── VFS node flags & structure (Spec §4.3) ────────────────
+#define VFS_NODE_NO_DCACHE   (1u << 0)
+#define VFS_NODE_MOUNT_STUB  (1u << 1)
+#define VFS_NODE_ORPHANED    (1u << 2)
+#define VFS_NODE_STALE       (1u << 3)
+
 typedef struct vfs_node {
-    char              *name;  // heap-allocated via strdup/strndup; kfree'd on node free
-    uint64_t          size;
-    uint8_t           type;   // VFS_FILE or VFS_DIR
-    struct vfs_mount *mount;
-    void             *fs_data;
-    struct vfs_node  *parent;
-    struct vfs_ops   *ops;
-    uint32_t          refcount;
+    char                  *name;
+    uint64_t               ino;
+    uint64_t               size;
+    uint32_t               mode;
+    uint32_t               uid;
+    uint32_t               gid;
+    uint32_t               nlink;
+    uint64_t               rdev;
+    uint64_t               atime;
+    uint64_t               mtime;
+    uint64_t               ctime;
+    uint8_t                type;
+    uint8_t                node_flags;
+    struct vfs_mount      *mount;
+    struct vfs_mount      *mounted_here;
+    void                  *fs_data;
+    struct vfs_node       *parent;
+    const vfs_inode_ops_t *i_ops;
+    const vfs_file_ops_t  *f_ops;
+    uint32_t               refcount;
+    struct vfs_node       *mnt_active_next;
 } vfs_node_t;
+
+#define VFS_SYNTH_ROOT_INO       1ULL
+#define VFS_MOUNT_STUB_INO_BASE  0x8000000000000000ULL
+
+static inline uint64_t vfs_node_stable_ino(const vfs_node_t *node)
+{
+    if (!node) return 0;
+    if (node->ino != 0) return node->ino;
+    if (node->mount && node == node->mount->root) return VFS_SYNTH_ROOT_INO;
+    return (uint64_t)(uintptr_t)node->fs_data;
+}
 
 // ── VFS API ───────────────────────────────────────────────
 
 void vfs_init(void);
+void vfs_end_bootstrap(void);
 
 int                 vfs_register_filesystem(vfs_fs_type_t *fs_type);
 int                 vfs_unregister_filesystem(const char *name);
@@ -165,9 +175,16 @@ const vfs_fs_type_t *vfs_find_filesystem(const char *name);
 int                 vfs_mount_fs(const char *type_name, const char *path,
                                  block_device_t *dev, void *data);
 
-// Mount a filesystem from a block device (transitional compatibility)
+// Transitional mount helper using i_ops + f_ops
 int vfs_mount(const char *path, block_device_t *dev,
-              vfs_ops_t *ops, void *fs_data);
+              const vfs_inode_ops_t *i_ops, const vfs_file_ops_t *f_ops,
+              void *fs_data);
+
+int vfs_generic_getattr(vfs_node_t *node, struct stat *buf);
+int vfs_generic_lookup_by_readdir(vfs_node_t *dir, const char *name,
+                                  vfs_node_t **out);
+int vfs_create_file(const char *path, const char *cwd, vfs_node_t **out_node);
+int vfs_symlink(const char *target, const char *linkpath, const char *cwd);
 
 // Resolve a path to a VFS node (call vfs_node_put when done).
 // Absolute path only — no cwd resolution.
