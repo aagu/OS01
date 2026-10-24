@@ -241,7 +241,16 @@ def _parse_imm(operand: str, comment: str) -> Optional[int]:
 
 def x86_edges(instrs: List[Instr], symtab: SymbolTable) -> List[Edge]:
     """Edges of one x86 function: movabs-fed indirect call/jump (the
-    ``-mcmodel=large`` form), direct branches, and RIP-relative lea."""
+    ``-mcmodel=large`` form), direct branches, and RIP-relative lea.
+
+    Assumption (documented, not modelled): the tracked ``movabs``
+    immediate stays valid in its register until the next ``movabs``
+    into that register.  Real ``-mcmodel=large`` output always reloads
+    the absolute address right before the indirect branch, so a stale
+    immediate cannot survive a clobber in the audited chain; the
+    tracker deliberately does not model register clobbering by
+    intervening instructions.
+    """
     imm: Dict[str, Optional[int]] = {}
     edges: List[Edge] = []
     for ins in instrs:

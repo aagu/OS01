@@ -879,6 +879,19 @@ class KernelSelftestIntrDispatchGateTests(unittest.TestCase):
         errors = self._gate(self._trace(marker_case="msr_safe"))
         self.assertTrue(any("uaccess" in e for e in errors), errors)
 
+    def test_marker_with_wrong_letter_case_fails(self):
+        # The marker is matched case-sensitively: a mangled letter case
+        # ("... restore ok") is not the recovery evidence and must be
+        # rejected exactly like a missing marker.
+        chunks = self._trace(marker_count=0)
+        mangled = INTR_DISPATCH_MARKER.replace("restore OK", "restore ok")
+        self.assertNotEqual(mangled, INTR_DISPATCH_MARKER)
+        anchor = b"[TEST] BEGIN uaccess\n"
+        idx = chunks.index(anchor)
+        chunks[idx + 1:idx + 1] = [(mangled + "\n").encode()]
+        errors = self._gate(chunks)
+        self.assertTrue(any("marker" in e for e in errors), errors)
+
     def test_marker_outside_interval_fails(self):
         # Emitted after the END record — once, but not between the uaccess
         # BEGIN and its PASS.

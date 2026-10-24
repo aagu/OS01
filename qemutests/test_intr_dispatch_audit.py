@@ -664,6 +664,37 @@ class IntrDispatchAuditDirectCallFormTests(IntrDispatchAuditFixture):
         self.assertEqual(self.audit(), [])
 
     def test_wrong_target_fails(self):
+        # The adapter's decode call resolves to aarch64_intr_decode_irq
+        # instead of aarch64_intr_decode_sync: a resolvable but WRONG
+        # edge — the sync decode edge is gone.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097CC8,
+            "bl\t0xffff000040097990 <aarch64_intr_decode_sync>",
+            "bl\t0xffff000040097a74 <aarch64_intr_decode_irq>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_intr_decode_sync" in e
+                            for e in errors), errors)
+
+    def test_unresolvable_target_fails(self):
+        # The `bl` target matches no ELF symbol at all: the edge cannot
+        # be proven and the audit must fail.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097CC8,
+            "bl\t0xffff000040097990 <aarch64_intr_decode_sync>",
+            "bl\t0xffff000040099999 <not_a_symbol>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_el1_sync" in e for e in errors),
+                        errors)
+
+
+class IntrDispatchAuditTailBranchFormTests(IntrDispatchAuditFixture):
+    """The dispatcher → backend tail branches (``b`` on aarch64)."""
+
+    def test_expected_target_passes(self):
+        self.stage_a64()
+        self.assertEqual(self.audit(), [])
+
+    def test_wrong_target_fails(self):
         # do_page_fault's second movabs resolves to the decoder again —
         # the arch_intr_dispatch edge is gone (bypass shape).
         self.stage_x86(disasm_text=_mutate(
@@ -674,6 +705,7 @@ class IntrDispatchAuditDirectCallFormTests(IntrDispatchAuditFixture):
         self.assertTrue(any("do_page_fault" in e and
                             "arch_intr_dispatch" in e
                             for e in errors), errors)
+
     def test_unresolvable_target_fails(self):
         # The movabs immediate matches no ELF symbol: the required
         # dispatcher edge cannot be proven.
@@ -683,11 +715,14 @@ class IntrDispatchAuditDirectCallFormTests(IntrDispatchAuditFixture):
             "# imm = 0xFFFF800000199999"))
         errors = self.audit()
         self.assertTrue(any("do_page_fault" in e for e in errors), errors)
-class IntrDispatchAuditTailBranchFormTests(IntrDispatchAuditFixture):
-    """The dispatcher → backend tail branches (``b`` on aarch64)."""
+
+
+class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
+    """x86 ``-mcmodel=large``: ``movabs`` absolute address, then an
+    indirect ``callq``/``jmpq`` through the loaded register."""
 
     def test_expected_target_passes(self):
-        self.stage_a64()
+        self.stage_x86()
         self.assertEqual(self.audit(), [])
 
     def test_wrong_target_fails(self):
@@ -698,6 +733,7 @@ class IntrDispatchAuditTailBranchFormTests(IntrDispatchAuditFixture):
             "# 0xffff80000014bfb0 <do_general_protection>"))
         errors = self.audit()
         self.assertTrue(any("page_fault" in e for e in errors), errors)
+
     def test_unresolvable_target_fails(self):
         self.stage_x86(disasm_text=_mutate(
             X86_DISASM, 0xFFFF8000001049C1,
@@ -705,37 +741,6 @@ class IntrDispatchAuditTailBranchFormTests(IntrDispatchAuditFixture):
             "# 0xffff800000199998 <not_a_symbol>"))
         errors = self.audit()
         self.assertTrue(any("page_fault" in e for e in errors), errors)
-class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
-    """x86 ``-mcmodel=large``: ``movabs`` absolute address, then an
-    indirect ``callq``/``jmpq`` through the loaded register."""
-
-    def test_expected_target_passes(self):
-        self.stage_x86()
-        self.assertEqual(self.audit(), [])
-
-    def test_wrong_target_fails(self):
-        # do_page_fault's second movabs resolves to the decoder again —
-        # the arch_intr_dispatch edge is gone (bypass shape).
-        self.stage_x86(disasm_text=X86_DISASM.replace(
-            "ffff80000014d163: 48 b8 80 cd 13 00 00 80 ff ff"
-            "\tmovabsq\t$-0x7fffffec3280, %rax"
-            " # imm = 0xFFFF80000013CD80",
-            "ffff80000014d163: 48 b8 10 9b 14 00 00 80 ff ff"
-            "\tmovabsq\t$-0x7fffffeb64f0, %rax"
-            " # imm = 0xFFFF800000149B10"))
-        errors = self.audit()
-        self.assertTrue(any("do_page_fault" in e and
-                            "arch_intr_dispatch" in e
-                            for e in errors), errors)
-
-    def test_unresolvable_target_fails(self):
-        # The movabs immediate matches no ELF symbol: the required
-        # dispatcher edge cannot be proven.
-        self.stage_x86(disasm_text=X86_DISASM.replace(
-            " # imm = 0xFFFF80000013CD80\nffff80000014d173",
-            " # imm = 0xFFFF800000199999\nffff80000014d173"))
-        errors = self.audit()
-        self.assertTrue(any("do_page_fault" in e for e in errors), errors)
 
     def test_unknown_indirect_form_is_not_a_pass(self):
         # An indirect call through a register with NO tracked movabs
@@ -745,6 +750,8 @@ class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
             "callq\t*%rax", "callq\t*%r13"))
         errors = self.audit()
         self.assertTrue(any("do_page_fault" in e for e in errors), errors)
+
+
 class IntrDispatchAuditStubLeaqFormTests(IntrDispatchAuditFixture):
     """The four stubs' RIP-relative ``leaq do_*`` + ``xchg`` into the
     FUNC slot (Shape A)."""
@@ -777,6 +784,8 @@ class IntrDispatchAuditStubLeaqFormTests(IntrDispatchAuditFixture):
             "jmp\t0xffff8000001047f3 <ret_from_intr>"))
         errors = self.audit()
         self.assertTrue(any("page_fault" in e for e in errors), errors)
+
+
 class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
     """The common ``error_code`` FUNC slot: loaded into ``%rdx`` from
     the stack slot the stub's ``xchg`` wrote, then ``callq *%rdx``."""
@@ -793,6 +802,7 @@ class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
             "movq\t0x88(%rsp), %rdx", "movq\t0x80(%rsp), %rdx"))
         errors = self.audit()
         self.assertTrue(any("error_code" in e for e in errors), errors)
+
     def test_slot_source_untraceable_fails(self):
         # No FUNC load at all: the indirect call's operand provenance
         # cannot be established.
@@ -801,6 +811,7 @@ class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
             "movq\t0x88(%rsp), %rdx", "xorq\t%rdx, %rdx"))
         errors = self.audit()
         self.assertTrue(any("error_code" in e for e in errors), errors)
+
     def test_return_label_changed_to_ret_from_exception_fails(self):
         self.stage_x86(
             nm_text=X86_NM + "ffff8000001047ff T ret_from_exception\n",
@@ -827,6 +838,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("aarch64_el1_sync" in e for e in errors),
                         errors)
+
     def test_x86_thin_entry_bypassing_dispatcher_fails(self):
         # do_page_fault calls the private business handler directly.
         self.stage_x86(disasm_text=_mutate(
@@ -837,6 +849,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         self.assertTrue(any("do_page_fault" in e and
                             "arch_intr_dispatch" in e
                             for e in errors), errors)
+
     def test_second_cr2_read_in_pf_chain_fails(self):
         self.stage_x86(disasm_text=_mutate(
             X86_DISASM, 0xFFFF80000014C110,
@@ -847,6 +860,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("CR2" in e or "cr2" in e for e in errors),
                         errors)
+
     def test_retained_gp_fatal_cr2_read_does_not_fail_the_audit(self):
         # The #GP fatal diagnostic keeps its own CR2 read (x86_handle_
         # general_protection); it is outside the #PF chain and must not
@@ -867,6 +881,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("__stack_chk_fail" in e for e in errors),
                         errors)
+
     def test_aarch64_early_chain_ordinary_logger_fails(self):
         self.stage_a64(nm_text=A64_NM + "ffff0000400a1004 T printk\n",
                        disasm_text=_mutate(
@@ -875,6 +890,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
                            "bl\t0xffff0000400a1004 <printk>"))
         errors = self.audit()
         self.assertTrue(any("printk" in e for e in errors), errors)
+
     def test_aarch64_early_chain_allocation_fails(self):
         self.stage_a64(nm_text=A64_NM + "ffff0000400a1008 T kmalloc\n",
                        disasm_text=_mutate(
@@ -883,6 +899,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
                            "bl\t0xffff0000400a1008 <kmalloc>"))
         errors = self.audit()
         self.assertTrue(any("kmalloc" in e for e in errors), errors)
+
     def test_aarch64_frame_layout_change_fails(self):
         # 272 bytes (34 slots * 8) is the frozen frame layout.
         self.stage_a64(disasm_text=_mutate(
@@ -890,6 +907,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
             "sub\tsp, sp, #0x110", "sub\tsp, sp, #0x100"))
         errors = self.audit()
         self.assertTrue(any("frame" in e.lower() for e in errors), errors)
+
     def test_aarch64_gate_slot_branches_to_wrong_entry_fails(self):
         # The +0x200 slot no longer targets the sync entry.
         self.stage_a64(disasm_text=_mutate(
@@ -899,6 +917,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("vector" in e.lower() for e in errors),
                         errors)
+
     def test_aarch64_vector_alignment_broken_fails(self):
         self.stage_a64(nm_text=A64_NM.replace(
             "ffff0000400a3000 T exception_vectors",
@@ -917,6 +936,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
                            "bl\t0xffff0000400a100c <x86_intr_decode>"))
         errors = self.audit()
         self.assertTrue(any("cross-ISA" in e for e in errors), errors)
+
     def test_cross_isa_symbol_linked_into_aarch64_kernel_fails(self):
         self.stage_a64(nm_text=A64_NM +
                        "ffff0000400a1010 T x86_intr_decode\n")
@@ -933,6 +953,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("arch_intr_handle_irq" in e for e in errors),
                         errors)
+
     def test_gic_dispatch_called_twice_fails(self):
         self.stage_a64(disasm_text=_mutate(
             A64_DISASM, 0xFFFF0000400971F0,
@@ -943,6 +964,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("gic_dev_dispatch" in e for e in errors),
                         errors)
+
     def test_gic_direct_eoi_in_backend_fails(self):
         # The backend must own neither IAR nor EOI: a direct register
         # poke through a gic_* helper is a boundary violation.
@@ -958,6 +980,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("EOI" in e or "gic_" in e for e in errors),
                         errors)
+
     def test_unknown_disassembly_format_is_not_a_pass(self):
         # Garbage instructions in a required function: nothing may be
         # judged successful by absence of recognizable patterns.  Every

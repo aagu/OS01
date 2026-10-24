@@ -139,7 +139,7 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	  if [ -n "$$bad" ]; then \
 	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
 	  fi
-	@echo "  [audit] OK"
+	@echo "  [audit] OK (vma_*/uaccess_*/fork_* symbol-exclusion gate only)"
 	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
 	  python3 qemutests/intr_dispatch_audit.py \
 	    --profile "$(PROFILE)" \
