@@ -1,6 +1,6 @@
 # cursor-arrow-16x24.txt — 由 tools/gen_cursor_icon.py 生成，请勿手改。
 #
-# 16 行 x 16 列，每格一个字符：
+# 24 行 x 16 列，每格一个字符：
 #   .  完全透明（alpha == 0）
 #   F  完全不透明的填充色（#1A1C1E）
 #   O  完全不透明的描边色（#FDFCFF）

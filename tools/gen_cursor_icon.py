@@ -300,7 +300,7 @@ def render_golden(rows: List[str]) -> str:
     lines: List[str] = []
     lines.append("# cursor-arrow-16x24.txt — 由 tools/gen_cursor_icon.py 生成，请勿手改。")
     lines.append("#")
-    lines.append("# 16 行 x 16 列，每格一个字符：")
+    lines.append("# %d 行 x %d 列，每格一个字符：" % (ICON_H, ICON_W))
     lines.append("#   .  完全透明（alpha == 0）")
     lines.append("#   F  完全不透明的填充色（#1A1C1E）")
     lines.append("#   O  完全不透明的描边色（#FDFCFF）")

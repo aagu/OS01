@@ -1,4 +1,5 @@
 *.txt
+!libgui/assets/cursor-arrow-16x24.txt
 *.bin
 *.lst
 *.elf
