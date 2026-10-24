@@ -7,6 +7,8 @@
 
 ## 2026-10-24
 
+- fix(qemutests): **dispatch 第一期遗留 shootdown-probe 验收闭环**：runner 及 fixture 从旧 `M3-SHOOTDOWN-PROBE:` 对齐到内核实际 `SHOOTDOWN-PROBE:`，删除未使用的旧前缀常量。新增独立正反例及临时编译真实 probe 函数体的生产者协议回归；旧 runner 五次预期失败，修复后聚焦 11 项、完整 AArch64 harness 56 项全通过。正式 `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe` 退出 0、START/OK 各一次、无 probe SKIP/FAIL；不改内核实现，保留原阶段一历史失败。详见 [调查与修复证据](debug/2026-10-24-shootdown-probe-investigation.md#修复与正式验收)。
+
 - fix(build): **parked fbtest 私有头发布边界闭环**：测试 sysroot 原先同时发布内核 `driver/fb_test.h` 和测试 UAPI；私有头改为始终排除，`uapi/fb_test.h` 仍仅在测试配置发布。新增真实安装规则回归，覆盖干净安装、旧头残留、配置切换、manifest 和 UAPI 内容，并接入 `test-host`。旧规则三个 subtest 失败；修复后生产/测试镜像构建与实际 sysroot 检查、完整分辨率宿主九组和 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-fbtest-private-header.md)。
 
 - fix(procfs): **parked monitor ④ legacy 字节缓冲区等长边界闭环**：`procfs_generate_node()` 只复制文本字节，却用 `len >= cap` 拒绝恰好装满的目标；改为 `len > cap` 并明确不补 NUL 的接口约定。四类统计节点新增长度减一/等长/长度加一、canary、失败无写入与分配余额回归；旧实现 8 条断言失败，修复后 procfs 13 场景/544 断言、完整 monitor 七组、`test-host` 和 QEMU phase-0 通过。原条目所述 4096 字节 status 空读在当前 formatter 下不可达，本次未声称 guest 复现。详见 [调查与验证](debug/2026-10-24-procfs-legacy-capacity.md)。

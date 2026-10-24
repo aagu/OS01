@@ -6,13 +6,13 @@ Drives the PRODUCTION (non-selftest) kernel image in QEMU
 probe target is only CPU1) and verifies the serial log shows the
 spec'd probe sequence:
 
-    M3-SHOOTDOWN-PROBE: START
-    M3-SHOOTDOWN-PROBE: OK
+    SHOOTDOWN-PROBE: START
+    SHOOTDOWN-PROBE: OK
 
-exactly once each, in that order, with NO ``M3-SHOOTDOWN-PROBE: FAIL``
+exactly once each, in that order, with NO ``SHOOTDOWN-PROBE: FAIL``
 line anywhere. The probe halts the kernel on any failure, so a FAIL
 line (or a missing OK) is fatal for acceptance. A
-``M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)`` line under `-smp 2`
+``SHOOTDOWN-PROBE: SKIP (single-CPU boot)`` line under `-smp 2`
 means the DTB topology lied about the CPU count and is also a failure.
 
 The parser is the contract surface — it is intentionally host-pure and
@@ -65,40 +65,36 @@ POST_OK_DRAIN = 0.5
 valid_log = """\
 UEFI: booting OS01
 UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
-M3-SHOOTDOWN-PROBE: START
-M3-SHOOTDOWN-PROBE: OK
+SHOOTDOWN-PROBE: START
+SHOOTDOWN-PROBE: OK
 """
 
 valid_log_crlf = valid_log.replace("\n", "\r\n")
 
 # Failure shapes the parser must reject.
 fail_ap_not_ready = """\
-M3-SHOOTDOWN-PROBE: START
-M3-SHOOTDOWN-PROBE: FAIL ap-not-ready
+SHOOTDOWN-PROBE: START
+SHOOTDOWN-PROBE: FAIL ap-not-ready
 """
 fail_requires_one_ap = """\
-M3-SHOOTDOWN-PROBE: FAIL requires-at-least-one-AP
+SHOOTDOWN-PROBE: FAIL requires-at-least-one-AP
 """
 skip_single_cpu = """\
-M3-SHOOTDOWN-PROBE: SKIP (single-CPU boot)
+SHOOTDOWN-PROBE: SKIP (single-CPU boot)
 """
 ok_before_start = """\
-M3-SHOOTDOWN-PROBE: OK
-M3-SHOOTDOWN-PROBE: START
+SHOOTDOWN-PROBE: OK
+SHOOTDOWN-PROBE: START
 """
-duplicated_ok = valid_log + "M3-SHOOTDOWN-PROBE: OK\n"
-missing_ok = "M3-SHOOTDOWN-PROBE: START\n"
+duplicated_ok = valid_log + "SHOOTDOWN-PROBE: OK\n"
+missing_ok = "SHOOTDOWN-PROBE: START\n"
 
-_START_PREFIX = "M3-SHOOTDOWN-PROBE: START"
-_OK_PREFIX = "M3-SHOOTDOWN-PROBE: OK"
-_FAIL_PREFIX = "M3-SHOOTDOWN-PROBE: FAIL"
-_SKIP_PREFIX = "M3-SHOOTDOWN-PROBE: SKIP"
 
 # Line-anchored so e.g. a hypothetical "...: OKK" cannot slip through.
-_START_RE = re.compile(r"^M3-SHOOTDOWN-PROBE: START\r?$", re.MULTILINE)
-_OK_RE = re.compile(r"^M3-SHOOTDOWN-PROBE: OK\r?$", re.MULTILINE)
-_FAIL_RE = re.compile(r"^M3-SHOOTDOWN-PROBE: FAIL.*$", re.MULTILINE)
-_SKIP_RE = re.compile(r"^M3-SHOOTDOWN-PROBE: SKIP.*$", re.MULTILINE)
+_START_RE = re.compile(r"^SHOOTDOWN-PROBE: START\r?$", re.MULTILINE)
+_OK_RE = re.compile(r"^SHOOTDOWN-PROBE: OK\r?$", re.MULTILINE)
+_FAIL_RE = re.compile(r"^SHOOTDOWN-PROBE: FAIL.*$", re.MULTILINE)
+_SKIP_RE = re.compile(r"^SHOOTDOWN-PROBE: SKIP.*$", re.MULTILINE)
 
 
 def probe_evidence(text: str) -> bool:
@@ -141,7 +137,7 @@ def self_test() -> None:
     assert not probe_evidence(missing_ok), \
         "missing OK must fail"
     assert not probe_evidence(valid_log.replace(
-        "M3-SHOOTDOWN-PROBE: OK", "M3-SHOOTDOWN-PROBE: OKK")), \
+        "SHOOTDOWN-PROBE: OK", "SHOOTDOWN-PROBE: OKK")), \
         "non-line-anchored OK match must fail"
 
 

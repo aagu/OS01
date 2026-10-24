@@ -296,7 +296,7 @@ _test-aarch64-run-sync-fault:
 
 # M3.5 Task 25: production shootdown probe (spec §7.3). Builds the
 # PRODUCTION image (no KERNEL_SELFTEST=1) and runs it at -smp 2; the
-# harness greps for the exact `M3-SHOOTDOWN-PROBE: START` → `OK`
+# harness greps for the exact `SHOOTDOWN-PROBE: START` → `OK`
 # sequence and fails on any FAIL / SKIP line or timeout. -smp 1 is
 # intentionally NOT covered here: main.c gates the probe call on
 # dtb_cpu_count() >= 2 so single-CPU boots skip it (the 0-AP FAIL

@@ -562,6 +562,39 @@ class GicSpiLifecycleTests(SuiteUnitAdapterTests):
 
 
 class M3ProbeEvidenceTests(unittest.TestCase):
+    # Independent wire fixtures: do not derive these from the runner's
+    # fixtures, which previously drifted together and hid the mismatch.
+    WIRE_START = "SHOOTDOWN-PROBE: START\n"
+    WIRE_OK = "SHOOTDOWN-PROBE: OK\n"
+
+    def test_current_wire_line_endings(self):
+        for ending in ("\n", "\r\n", "\n\r"):
+            with self.subTest(ending=repr(ending)):
+                text = (self.WIRE_START + self.WIRE_OK).replace("\n", ending)
+                self.assertTrue(m3p.probe_evidence(text))
+
+    def test_current_wire_rejects_invalid_sequences(self):
+        good = self.WIRE_START + self.WIRE_OK
+        cases = {
+            "empty": "",
+            "missing start": self.WIRE_OK,
+            "missing ok": self.WIRE_START,
+            "reversed": self.WIRE_OK + self.WIRE_START,
+            "duplicate start": self.WIRE_START + good,
+            "duplicate ok": good + self.WIRE_OK,
+            "old prefix": good.replace("SHOOTDOWN-PROBE:", "M3-SHOOTDOWN-PROBE:"),
+            "near start": good.replace("START", "STARTED"),
+            "near ok": good.replace(": OK", ": OKK"),
+            "embedded": good.replace("SHOOTDOWN-PROBE:", "noise SHOOTDOWN-PROBE:"),
+        }
+        for marker in ("FAIL ap-read-B", "SKIP (single-CPU boot)"):
+            line = f"SHOOTDOWN-PROBE: {marker}\n"
+            cases[f"{marker} before"] = line + good
+            cases[f"{marker} after"] = good + line
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                self.assertFalse(m3p.probe_evidence(text))
+
     def test_valid_log_accepted(self):
         self.assertTrue(m3p.probe_evidence(m3p.valid_log))
 
@@ -573,6 +606,59 @@ class M3ProbeEvidenceTests(unittest.TestCase):
 
     def test_ok_before_start_rejected(self):
         self.assertFalse(m3p.probe_evidence(m3p.ok_before_start))
+
+
+class M3ProbeProducerTests(unittest.TestCase):
+    """Feed logs from the compiled production probe body to the parser."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="os01-probe-wire-")
+        cls.addClassCleanup(cls.tmp.cleanup)
+        root = Path(cls.tmp.name)
+        wrapper = root / "probe.c"
+        # Reuse the existing MMU/IPI mocks, but execute the real inline
+        # producer rather than copying its marker strings into Python.
+        fixture = ROOT / "hosttests/cases/test_aarch64_scratch_probe_logic.c"
+        wrapper.write_text(
+            '#define main probe_fixture_main\n'
+            f'#include "{fixture}"\n'
+            '#undef main\n'
+            'int main(int argc, char **argv) {\n'
+            '  if (argc > 1) test_ap_read_B_stale_fails();\n'
+            '  else test_happy_path_two_cpus();\n'
+            '  printf("%s", mock_log);\n'
+            '  return __test_stats.failed ? 1 : 0;\n'
+            '}\n'
+        )
+        cls.binary = root / "probe"
+        command = ['clang', '-Wno-macro-redefined',
+                   f'-DOS01_KERNEL_SRC="{ROOT}"',
+                   '-I', str(ROOT / 'hosttests/include'),
+                   '-I', str(ROOT / 'kernel/include'),
+                   '-I', str(ROOT / 'hosttests/mock/page_table_aarch64_include'),
+                   '-I', str(ROOT / 'libc/include'),
+                   str(wrapper), '-o', str(cls.binary)]
+        result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+
+    def log(self, *args):
+        result = subprocess.run([str(self.binary), *args], text=True,
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def test_production_success_log_accepted(self):
+        self.assertTrue(m3p.probe_evidence(self.log()))
+
+    def test_production_failure_invalidates_success(self):
+        # Remove the failing run's START so rejection cannot be caused
+        # merely by two STARTs; it must recognize the producer's FAIL.
+        failure = '\n'.join(line for line in self.log('fail').splitlines()
+                            if not line.endswith(': START'))
+        self.assertIn('SHOOTDOWN-PROBE: FAIL ap-read-B', failure)
+        self.assertFalse(m3p.probe_evidence(self.log() + failure))
 
 
 class M3ProbeLifecycleTests(SuiteUnitAdapterTests):
