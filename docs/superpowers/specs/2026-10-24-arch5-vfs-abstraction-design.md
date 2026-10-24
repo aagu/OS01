@@ -160,10 +160,33 @@ typedef struct vfs_node {
 } vfs_node_t;
 
 int vfs_generic_getattr(vfs_node_t *node, struct stat *buf);
+
+// ── 稳定目录身份（Stable Directory Identity） ─────────────
+// 由于 Phase 3 尚无 dcache、Phase 4 允许 LRU 淘汰，不同次路径查找可能为同一底层
+// 目录分配不同的 vfs_node_t* 实例。所有跨次查找的挂载点匹配、getdents 子挂载注入
+// 与 dcache 失效均以 (node->mount, vfs_node_stable_ino(node)) 作为唯一目录身份，
+// 严禁依赖 vfs_node_t* 指针相等性。
+#define VFS_SYNTH_ROOT_INO       1ULL
+#define VFS_MOUNT_STUB_INO_BASE  0x8000000000000000ULL
+
+static inline uint64_t vfs_node_stable_ino(const vfs_node_t *node)
+{
+    if (!node) return 0;
+    if (node->ino != 0) return node->ino;
+    if (node->mount && node == node->mount->root) return VFS_SYNTH_ROOT_INO;
+    return (uint64_t)(uintptr_t)node->fs_data;
+}
 ```
 
+- **各后端稳定 `ino` 分配契约（保证任意目录 `vfs_node_stable_ino(dir) != 0` 且跨次查找恒定）**：
+  - `ext2`：磁盘 inode 号（根为 `EXT2_ROOT_INO = 2`，子项为 `dirent.inode`）；
+  - `fat32`：起始簇号（根固定为 `fs->root_cluster`，即便 `root->fs_data == NULL` 也在 `mount` 时设置 `root->ino = fs->root_cluster`；子目录为目录项起始簇号）；
+  - `tmpfs`：持久内存节点地址 `(uint64_t)(uintptr_t)tmpfs_node`（含根节点）；
+  - `devfs` / `procfs`：根节点 `ino = VFS_SYNTH_ROOT_INO (1)`；`procfs` 子目录为确定性的 `PROCFS_ENCODE(type, pid)`；
+  - 合成挂载桩（`VFS_NODE_MOUNT_STUB`）：分配单调递增的 `VFS_MOUNT_STUB_INO_BASE | stub_id`。
+
 - **`vfs_generic_getattr(node, buf)` 填充规范**：
-  1. `st_ino = node->ino ? node->ino : (uint64_t)(uintptr_t)node->fs_data`；
+  1. `st_ino = vfs_node_stable_ino(node)`；
   2. `st_size = (int64_t)node->size`；
   3. `st_mode`：若 `node->mode != 0`，直接使用 `node->mode`（若未含 `S_IFMT` 位则按 `node->type` 自动或上对应 `S_IFREG`/`S_IFDIR`/`S_IFCHR`/`S_IFBLK`/`S_IFLNK`）；若 `node->mode == 0`，按现有默认规则回退（`VFS_FILE`→`S_IFREG|0755`，`VFS_DIR`→`S_IFDIR|0755`，`VFS_CHRDEV`→`S_IFCHR|0600`，`VFS_BLKDEV`→`S_IFBLK|0600`，`VFS_SYMLINK`→`S_IFLNK|0777`）；
   4. `st_uid = node->uid`、`st_gid = node->gid`；
@@ -177,17 +200,18 @@ int vfs_generic_getattr(vfs_node_t *node, struct stat *buf);
 ```c
 typedef struct vfs_mount {
     block_device_t        *dev;
-    const vfs_fs_type_t   *fs_type;       // 关联的文件系统类型
-    uint32_t               mnt_flags;     // 继承自 fs_type->fs_flags
-    const char            *path;          // 规范化挂载路径（堆拷贝，供 vfs_resolve_path 诊断与兼容）
-    char                   mount_name[VFS_NAME_MAX]; // 在父目录中的分量名（如 "dev", "proc"）
-    struct vfs_node       *root;          // 本挂载文件系统的根节点
-    struct vfs_node       *mountpoint;    // 被覆盖的父目录节点（根挂载 "/" 为 NULL）
-    struct vfs_mount      *parent_mount;  // 父挂载实例（根挂载 "/" 为 NULL）
-    const vfs_inode_ops_t *i_ops;         // 挂载默认 i_ops
-    const vfs_file_ops_t  *f_ops;         // 挂载默认 f_ops
-    void                  *fs_data;       // FS 私有超块结构
-    struct vfs_mount      *next;          // 全局挂载链表
+    const vfs_fs_type_t   *fs_type;         // 关联的文件系统类型
+    uint32_t               mnt_flags;       // 继承自 fs_type->fs_flags
+    const char            *path;            // 规范化挂载路径（堆拷贝，供 vfs_resolve_path 诊断与兼容）
+    char                   mount_name[VFS_NAME_MAX]; // 在父目录中的分量名（如 "dev", "usb"）
+    struct vfs_node       *root;            // 本挂载文件系统的根节点
+    struct vfs_node       *mountpoint;      // 被覆盖的挂载点目录节点（持有至根的 parent 链供 ".." 回退；根挂载 "/" 为 NULL）
+    struct vfs_mount      *parent_mount;    // 父目录所属的 vfs_mount（根挂载 "/" 为 NULL）
+    uint64_t               parent_dir_ino;  // 父目录的稳定身份 vfs_node_stable_ino(parent_dir)（根挂载 "/" 为 0）
+    const vfs_inode_ops_t *i_ops;           // 挂载默认 i_ops
+    const vfs_file_ops_t  *f_ops;           // 挂载默认 f_ops
+    void                  *fs_data;         // FS 私有超块结构
+    struct vfs_mount      *next;            // 全局挂载链表
 } vfs_mount_t;
 ```
 
@@ -228,31 +252,39 @@ typedef struct vfs_mount {
      - **`devfs_iop_lookup`**：在 `devices[]` 中按名查找 `registered` 项，构造 `vfs_node_t`（`ino = idx + 1`、`rdev = idx + 1`、`mode = (type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666`）。
      - **`procfs_iop_lookup`**：将原 `procfs_readdir` 中的三层结构（根 `/proc`、进程目录 `/proc/<pid>`、文件描述符目录 `/proc/<pid>/fd`）提炼为按名精确解析函数，时间复杂度从遍历 toàn 表降为 $O(1)$ PID 定位。
 
-### 5.3 Phase 3：节点级挂载树（`mounted_here` + 虚拟挂载桩 + 延迟绑定）
+### 5.3 Phase 3：节点级挂载树（稳定父目录身份索引 + 虚拟挂载桩 + 延迟绑定）
 
-1. **挂载点绑定与虚拟桩（Synthetic Stub）算法**：
-   - 当挂载路径为 `"/"` 时：记为全局 `root_mount`，随后遍历 `pending_submounts` 队列，将所有在 `"/"` 之前注册的子挂载（如 `"/dev"`）逐个绑定到 `root_mount`。
+1. **挂载点绑定、稳定父目录身份与虚拟桩（Synthetic Stub）算法**：
+   - 当挂载路径为 `"/"` 时：记为全局 `root_mount`（`parent_mount = NULL`，`parent_dir_ino = 0`），随后遍历 `pending_submounts` 队列，将所有在 `"/"` 之前注册的子挂载（如 `"/dev"`）逐个绑定到 `root_mount`。
    - 当挂载路径为子路径（如 `"/dev"`、 `"/boot"`、 `"/tmp"`、 `"/proc"` 或多级挂载路径 `"/mnt/usb"`）时：
      - 若 `root_mount == NULL`：将 `mp` 加入 `pending_submounts`（此时直接访问 `"/dev/..."` 仍可通过早期预挂载入口定位到 `mp->root`）。
      - 若 `root_mount != NULL`：
        1. 用 `vfs_split_parent(mp->path, "/", parent_path)` 拆出父目录路径 `parent_path` 与挂载点基名 `mp->mount_name`；
-       2. 解析 `parent_path` 得到 `parent_dir` 节点；
+       2. 解析 `parent_path` 得到 `parent_dir` 节点（若 `parent_dir` 不存在或非 `VFS_DIR`，返回 `-ENOENT` / `-ENOTDIR`）；
        3. 在 `parent_dir` 下查找 `mp->mount_name`：
-          - 若底层文件系统存在同名目录节点 `target_node`，则复用该节点（由 `mp->mountpoint` 持久持有 1 个 `refcount`）；
-          - 若底层文件系统返回 `-ENOENT`（如盘面无 `/dev`、`/proc`、`/tmp`、`/boot`），则分配一个内存虚拟目录桩节点 `stub`（`type = VFS_DIR`，`mode = S_IFDIR | 0755`，`node_flags = VFS_NODE_MOUNT_STUB`，`parent = vfs_node_get(parent_dir)`，`mount = parent_dir->mount`）；
-       4. 设置 `mp_node->mounted_here = mp`、`mp->mountpoint = mp_node`、`mp->parent_mount = parent_dir->mount`。
-2. **逐分量步进中的跨挂载转换**：
+          - 若底层文件系统存在同名目录节点 `target_node`，则复用该节点（由 `mp->mountpoint` 持久持有 1 个 `refcount`，从而锚定从该挂载点向上直到 `/` 的完整 `parent` 链）；
+          - 若底层文件系统返回 `-ENOENT`（如盘面无 `/dev`、`/proc`、`/tmp`、`/boot`），则分配一个内存虚拟目录桩节点 `stub`（`type = VFS_DIR`，`ino = VFS_MOUNT_STUB_INO_BASE | next_stub_id`，`mode = S_IFDIR | 0755`，`node_flags = VFS_NODE_MOUNT_STUB`，`parent = vfs_node_get(parent_dir)`，`mount = parent_dir->mount`）；
+       4. 记录**稳定父目录身份**与挂载绑定：
+          - `mp->parent_mount = parent_dir->mount`
+          - `mp->parent_dir_ino = vfs_node_stable_ino(parent_dir)`
+          - `mp->mountpoint = mp_node`
+          - `mp_node->mounted_here = mp`
+2. **逐分量步进中的跨挂载转换（不依赖 `vfs_node_t*` 指针相等）**：
    - **起点**：从 `root_mount->root` 开始（若启动早期 `root_mount == NULL`，则匹配 `pending_submounts` 中的预挂载根）。
    - **向下跨越（进入子挂载）**：
-     - 在目录 `cur` 下查找分量 `comp` 时，先检查 `cur` 是否有绑定的子挂载节点 `mp_node`（其 `mount_name` 与 `comp` 匹配且 `mp_node->mounted_here != NULL`）；
-     - 若匹配，直接令 `child = vfs_node_get(mp_node->mounted_here->root)`，跳过底层磁盘的 `i_ops->lookup`（实现挂载遮蔽与虚拟挂载点透明步进）；
-     - 若通过普通 `lookup` 拿到的 `child` 自身满足 `child->mounted_here != NULL`，同样自动穿透为 `vfs_node_get(child->mounted_here->root)` 并释放原 `child` 引用。
+     - 在目录 `cur` 下查找分量 `comp` 时，先调用 `vfs_find_submount(cur, comp)`，在 `mount_lock` 读锁下按**稳定目录身份**匹配：
+       `mp->parent_mount == cur->mount && mp->parent_dir_ino == vfs_node_stable_ino(cur) && vfs_mount_name_eq(cur->mount, mp->mount_name, comp)`；
+     - 由于匹配只依赖 `(cur->mount, vfs_node_stable_ino(cur), comp)`，无论 `cur`（例如 `/mnt`）是首次查找新分配的节点、Phase 3 无缓存下重新查找分配的新节点、还是 Phase 4 从 `dcache` 淘汰后重建的节点，均能确定性地命中子挂载 `mp`（如 `/mnt/usb`），直接令 `child = vfs_node_get(mp->root)` 并跳过底层磁盘的 `i_ops->lookup`；
+     - 若同一挂载点存在叠挂载（overmount），循环执行挂载跨越直至到达最顶层 `mp->root`。
    - **向上跨越（`".."` 退出子挂载）**：
-     - 当遇到分量 `".."` 时，若 `cur == cur->mount->root` 且 `cur->mount->mountpoint != NULL`，先将 `cur` 切换为 `cur->mount->mountpoint`，再跳转到 `cur->parent`（若已在全局根 `"/"` 则原地不动）。
-3. **`vfs_getdents` 子挂载合并与去重**：
+     - 当遇到分量 `".."` 时，若 `cur == cur->mount->root && cur->mount->mountpoint != NULL`，循环将 `cur` 切换为 `cur->mount->mountpoint`（其 `parent` 链在挂载时已被持久锚定），再跳转到 `cur->parent`（若已在全局根 `"/"` 则原地不动）。
+3. **`vfs_getdents` 子挂载合并与去重（统一稳定父目录身份判定）**：
    - 枚举目录 `dir` 时，第一阶段通过 `dir->f_ops->readdir` 收集底层目录项；
-   - 第二阶段检查所有 `mp->mountpoint != NULL && mp->mountpoint->parent == dir`（或当 `dir == dir->mount->root` 且 `mp->parent_mount == dir->mount` 的单层子挂载），若 `entries[]` 中尚未出现同名项（防止磁盘已有 `/dev` 目录时重复列出），则注入该挂载点目录项。
-   - 彻底移除 `find_mount(path)` 字符串前缀扫描。
+   - 第二阶段在 `mount_lock` 读锁下遍历 `mount_list`，仅当子挂载满足**单一精确谓词**：
+     `mp->parent_mount == dir->mount && mp->parent_dir_ino == vfs_node_stable_ino(dir)`
+     时，才将该子挂载的 `mp->mount_name` 视为 `dir` 的直接子挂载（例如 `/mnt/usb` 的 `parent_dir_ino` 是 `/mnt` 的 `ino` 而非 `/` 的 `ino`，因此 `ls /` 绝不会错误列出 `usb`，而 `ls /mnt` 精确列出一次 `usb`）；
+   - 若 `entries[]` 中尚未出现同名项（防止磁盘已有 `/dev` 目录时重复列出），则注入该挂载点目录项。
+   - 彻底移除 `find_mount(path)` 字符串前缀扫描与 `vfs_is_child_mount` 路径字符串比对。
 
 ### 5.4 Phase 4：简单有界 Dentry Cache（`dcache`）
 
@@ -261,26 +293,38 @@ typedef struct vfs_mount {
 #define VFS_DCACHE_CAPACITY  256
 
 void        dcache_init(void);
-vfs_node_t *dcache_lookup(vfs_node_t *parent, const char *name);
-void        dcache_insert(vfs_node_t *parent, const char *name, vfs_node_t *child);
-void        dcache_invalidate(vfs_node_t *parent, const char *name);
-void        dcache_invalidate_node(vfs_node_t *node);
+vfs_node_t *dcache_lookup_begin(vfs_node_t *parent, const char *name,
+                                uint64_t *out_gen);
+void        dcache_insert_validated(vfs_node_t *parent, const char *name,
+                                    vfs_node_t *child, uint64_t lookup_gen);
+void        dcache_mutation_begin(void);
+void        dcache_mutation_end_invalidate(vfs_node_t *parent, const char *name);
+void        dcache_mutation_end_rename(vfs_node_t *olddir, const char *oldname,
+                                       vfs_node_t *newdir, const char *newname);
 void        dcache_flush_mount(vfs_mount_t *mp);
 void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictions);
 ```
 
-1. **身份与键匹配问题（同一目录的指针等价性）**：
-   - 哈希与相等性判定以 `(parent->mount, parent_ino_or_ptr, normalized_name)` 为键（其中 `parent_ino_or_ptr = parent->ino ? parent->ino : (uint64_t)(uintptr_t)parent`），这样即便两次查找持有的 `parent` 结构体指针不同但代表同一挂载下的同一目录 inode，也能正确命中与失效！
-   - 若 `parent->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE`，哈希计算与名字比较统一转大写后进行。
-2. **生命周期与锁顺序**：
-   - 每个 `dcache_entry_t` 持有 `vfs_node_get(child)` 的 1 个引用计数；
-   - `dcache_lookup` 命中时，在 `dcache_lock` 内将该项移至 LRU 头部并执行 `vfs_node_get(entry->node)`，解锁后返回给调用者；
-   - 当容量达到 `VFS_DCACHE_CAPACITY (256)` 需要淘汰 LRU 尾部项，或调用 `dcache_invalidate*` 移除缓存项时，**先在 `dcache_lock` 内摘除条目并保存待释放的 `vfs_node_t *victim`，解锁后再调用 `vfs_node_put(victim)`**，严禁在持有自旋锁期间触发 `kfree` 或递归父节点释放。
-3. **绕过与失效钩子**：
-   - 若 `parent->node_flags & VFS_NODE_NO_DCACHE` 或 `parent->mount->mnt_flags & VFS_FS_NO_DCACHE`（`procfs`、`devfs`），`dcache_lookup` 直接返回 `NULL`，`dcache_insert` 直接 no-op；
-   - `vfs_unlink(path, cwd)` 与 `vfs_rmdir(path, cwd)` 在底层 `i_ops->unlink/rmdir` 成功后调用 `dcache_invalidate(parent, name)`；
-   - `vfs_rename(oldpath, newpath, cwd)` 在底层 `i_ops->rename` 成功后调用 `dcache_invalidate(olddir, oldname)` 与 `dcache_invalidate(newdir, newname)`；
-   - `vfs_truncate` 或 `vfs_write` 修改文件大小后，若该文件节点在 `dcache` 中存在缓存副本，同步更新缓存节点的 `size`（或由 `vfs_stat` 通过 `i_ops->getattr` 读取最新大小）。
+1. **键结构与父链一致性（解决 `rename` 后代 `parent` 链陈旧与父节点淘汰重建问题）**：
+   - **索引键**：以 `(parent->mount, vfs_node_stable_ino(parent), normalized_name)` 哈希和匹配（若 `parent->mount->mnt_flags & VFS_FS_CASE_INSENSITIVE`，名字统一转大写后计算哈希与比较）。
+   - **命中時の父指针强校验**：`dcache_lookup_begin(parent, name, &out_gen)` 命中缓存条目 `entry` 时，额外检查 `entry->node->parent == parent`：
+     - 若相等，移动至 LRU 头部、`vfs_node_get(entry->node)` 并返回命中节点；
+     - 若 `entry->node->parent != parent`（说明父目录节点曾被淘汰重建或发生过目录迁移），立即将该陈旧条目从缓存摘除（锁外 `vfs_node_put`）并按未命中处理，由调用方基于当前 `parent` 重新构造子节点。这保证了任何从 `dcache` 返回的节点其 `node->parent` 链自顶向下严格一致，且 `node->parent` 在节点生命周期内保持只读不变，无需对 `vfs_resolve_path` 或 `".."` 加额外锁。
+   - **失效键**：`dcache_mutation_end_invalidate(dir, name)` 仅按 `(dir->mount, vfs_node_stable_ino(dir), normalized_name)` 匹配并摘除条目，不要求传入的 `dir` 指针与缓存时的 `parent` 指针相同。
+2. **并发 Lookup 与 Unlink/Rmdir/Rename 竞态防护（代次屏障协议）**：
+   - 为防止「CPU A `dcache` 未命中并完成底层 `lookup` → CPU B 执行 `unlink` 并失效缓存（在 `tmpfs` 中还会立即释放 `tmpfs_node_t`） → CPU A 调用 `insert` 将已删除/悬空节点重新塞回缓存」的 TOCTOU 竞态，`dcache` 内部维护受 `dcache_lock` 保护的：
+     - `uint64_t dcache_mut_gen`：单调递增的名字空间变更代次计数；
+     - `uint32_t dcache_mut_active`：当前正在执行中的目录变更操作计数。
+   - **三阶段协作协议**：
+     1. **查找开始**：`dcache_lookup_begin(parent, name, &lookup_gen)` 未命中时，在 `dcache_lock` 内若 `dcache_mut_active == 0` 则记录 `*lookup_gen = dcache_mut_gen`，否则置 `*lookup_gen = 0`（表示存在并发变更，本次查找结果禁止入缓存）。
+     2. **变更围栏**：`vfs_unlink` / `vfs_rmdir` / `vfs_rename` 在调用底层 `i_ops->unlink/rmdir/rename` **之前**必须调用 `dcache_mutation_begin()`（在 `dcache_lock` 内执行 `dcache_mut_active++; dcache_mut_gen++;`）；在底层操作返回**之后**调用 `dcache_mutation_end_invalidate(...)` 或 `dcache_mutation_end_rename(...)`（在 `dcache_lock` 内完成缓存摘除，并执行 `dcache_mut_gen++; dcache_mut_active--;`）。
+     3. **验证插入**：`dcache_insert_validated(parent, name, child, lookup_gen)` 在 `dcache_lock` 内检查：仅当 `lookup_gen != 0 && dcache_mut_active == 0 && dcache_mut_gen == lookup_gen` 时才允许插入缓存；若代次已变或有活跃变更，直接放弃入缓存（调用者正常用完 `child` 后 `vfs_node_put(child)` 释放）。
+3. **Rename 子树与后代 `parent` 链失效策略**：
+   - 当执行 `vfs_rename(oldpath, newpath, cwd)` 时（例如将 `/a/d` 移动到 `/b/d` 或重命名为 `/a/d2`），被移动目录的所有已缓存后代（如 `/a/d/sub`）其 `parent` 链和祖先 `name` 均已失效；
+   - 由于 `VFS_DCACHE_CAPACITY` 固定为 256 项，`dcache_mutation_end_rename` 在 `dcache_lock` 内直接调用 `dcache_flush_mount_locked(olddir->mount)` 清空该挂载下的缓存项（固定 256 槽扫描，耗时 $<1\,\mu\text{s}$），并在解锁后批量 `vfs_node_put` 被摘除的节点，从根源上杜绝任何深度的后代残留旧 `/a/d` 父链。
+4. **锁外释放原则与绕过规则**：
+   - 所有淘汰（LRU 满 256 项）、失效（`invalidate` / `flush_mount`）及父指针不匹配摘除操作，均在 `dcache_lock` 内将条目从哈希桶和 LRU 链表摘下放入局部待释放数组，**释放 `dcache_lock` 后再调用 `vfs_node_put`**，严禁在自旋锁内触发 `kfree` 或递归父引用释放。
+   - 若 `parent->node_flags & VFS_NODE_NO_DCACHE` 或 `parent->mount->mnt_flags & VFS_FS_NO_DCACHE`（`procfs`、`devfs`），`dcache_lookup_begin` 直接返回 `NULL`（`*out_gen = 0`），`dcache_insert_validated` 直接 no-op。
 
 ---
 
@@ -294,7 +338,11 @@ void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictio
 | 目录项超过 256 个时查找第 300 个文件 | Phase 2 起通过 `i_ops->lookup` 正常返回 `0`，不再因 `max_iter=256` 误报 `-ENOENT` |
 | 对不支持写/创建的只读 FS（如 `procfs`）调用 `unlink`/`mkdir`/`rmdir`/`rename`/`truncate` | `i_ops` 对应函数指针为 `NULL`，VFS 统一返回 `-EROFS`（`symlink`/`readlink` 保持返回 `-EOPNOTSUPP` 以兼容现有 systest） |
 | 跨挂载点 `rename`（`olddir->mount != newdir->mount`） | VFS 层在调用 `olddir->i_ops->rename` 前拦截并返回 `-EXDEV` |
-| 跨挂载点 `".."` 解析（如 `/dev/..`、`/boot/..`、`/tmp/..`） | 沿着 `mp->mountpoint->parent` 退回父挂载目录 `"/"` |
+| 多级子挂载 `/mnt/usb` 重新查找父目录 `/mnt` 或缓存淘汰后再查找 | 通过 `(cur->mount, vfs_node_stable_ino(cur), "usb")` 稳定匹配进入 `usb` 挂载根 |
+| 多级子挂载 `/mnt/usb` 下对 `/` 与 `/mnt` 执行 `vfs_getdents` | `/` 的目录列表中**不出现** `usb`；`/mnt` 的目录列表中**精确出现一次** `usb` |
+| 并发 `lookup` 未命中与 `unlink` 交错 | `dcache_mut_gen` 代次变化阻止旧 `lookup` 结果回填 `dcache`，后续查找稳定返回 `-ENOENT` |
+| 目录 `rename`（`/a/d` → `/b/d`）后解析 `/b/d/sub/../..` 与 `vfs_resolve_path` | 缓存子树随 `dcache_flush_mount` 失效重建，`/b/d/sub/../..` 落到 `/b`，`vfs_resolve_path` 返回 `/b/d/sub` |
+| 跨挂载点 `".."` 解析（如 `/dev/..`、`/boot/..`、`/mnt/usb/..`） | 沿着 `mp->mountpoint->parent` 退回父挂载对应目录（`/` 或 `/mnt`） |
 | 根挂载 `"/"` 上解析 `".."`（如 `/..`、`/../../bin`） | 停留在 `"/"`，不越界 |
 | Symlink 循环与 `LOOKUP_NOFOLLOW` | 保持现有 `MAXSYMLINKS = 8` 返回 `-ELOOP`，尾部分量 `LOOKUP_NOFOLLOW` 返回 symlink 自身节点 |
 
@@ -307,8 +355,18 @@ void        dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictio
 1. **宿主单元测试（`make test-host`）**：
    - **Phase 1**：新增 `hosttests/cases/test_vfs_fs_registry.c`，覆盖 `vfs_register_filesystem`、重复注册 `-EEXIST`、非法参数 `-EINVAL`、`vfs_mount_fs` 的 `REQUIRES_DEV` 检查与未知类型 `-ENODEV`。
    - **Phase 2**：新增 `hosttests/cases/test_vfs_iops_fops.c`，覆盖 `i_ops->lookup`（含 300 项大目录查找无截断）、`i_ops->getattr` 自定义与 `vfs_generic_getattr` 回退、`ext2`/`tmpfs` 元数据字段透出、跨挂载 `rename` 返回 `-EXDEV`。
-   - **Phase 3**：新增 `hosttests/cases/test_vfs_mount_tree.c`，覆盖 `/dev` 先于 `/` 挂载的延迟绑定、虚拟挂载桩（Synthetic Stub）透明步进、`/dev/..` 跨挂载回退、`vfs_getdents` 子挂载注入与同名目录去重。
-   - **Phase 4**：新增 `hosttests/cases/test_vfs_dcache.c`，覆盖正缓存命中计数、FAT32 大小写不敏感键命中、256 项容量上限 LRU 驱逐与 `refcount` 平衡、`unlink`/`rmdir`/`rename` 失效、`VFS_FS_NO_DCACHE` 绕过。
+   - **Phase 3**：新增 `hosttests/cases/test_vfs_mount_tree.c`，覆盖：
+     - `/dev` 先于 `/` 挂载的延迟绑定；
+     - 虚拟挂载桩（Synthetic Stub）透明步进；
+     - 多级挂载 `/mnt/usb` 在每次重新分配 `/mnt` 节点（无 dcache）时仍能通过稳定目录身份进入子挂载；
+     - `/dev/..` 与 `/mnt/usb/..` 跨挂载回退；
+     - `vfs_getdents` 子挂载注入、同名目录去重，以及多级挂载 `/mnt/usb` 下枚举 `/` **不出现** `usb`、枚举 `/mnt` **只出现一次** `usb`。
+   - **Phase 4**：新增 `hosttests/cases/test_vfs_dcache.c`，覆盖：
+     - 正缓存命中计数、FAT32 大小写不敏感键命中；
+     - 256 项容量上限 LRU 驱逐与 `refcount` 平衡、父目录 `/mnt` 从缓存淘汰后再查找 `/mnt/usb` 仍正确跨越挂载点；
+     - 确定性并发交错用例：`dcache_lookup_begin` 未命中后穿插 `dcache_mutation_begin` / `unlink` / `dcache_mutation_end_invalidate`，验证 `dcache_insert_validated` 拒绝回填旧节点；
+     - 目录 `rename`（`/a/d` → `/b/d`）后先前的缓存后代 `/a/d/sub` 被失效，重新查找 `/b/d/sub` 后其 `../..` 指向 `/b` 且 `vfs_resolve_path` 输出 `/b/d/sub`；
+     - `VFS_FS_NO_DCACHE` 绕过。
 2. **静态与构建审计（`make test-static`）**：
    - `x86_64-clang` 与 `aarch64-clang` 构建零警告通过。
 3. **QEMU 集成与系统调用回归**：
