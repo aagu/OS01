@@ -407,3 +407,110 @@ make PROFILE=x86_64-clang test-qemu SUITE=gui
 
 `CASE` 的合法取值：`platform`、`lvgl`、`devfs-input`、`input-frame`、`input-route`、`input-decode`、`input-nonce`、`input-platform`、`input-lvgl`（全部从仓库根 make 入口运行，不使用 `make -C hosttests`）。
 
+
+## GUI-3 Material 风格桌面（2026-10-24 闭环）
+
+### 1. 范围与边界
+
+用 LVGL 重写 `user/desktop`，把「Material 风格」从**画出来的像素**变成**可核验的设计系统**：
+
+| 做 | 不做 |
+|----|------|
+| 单一令牌表驱动颜色 / 字号 / 间距 / 圆角 / elevation / 六类交互状态 | 深色主题、主题切换（色彩**角色**结构已做对，将来加一套角色表即可） |
+| 状态栏、启动器、应用抽屉、基本设置 | 窗口系统：没有最小化 / 最大化 / 关闭，没有标题栏边框，没有 Z-order |
+| 四个**壳内应用**（文件 / 终端 / 系统 / 设置） | fork/exec 子进程应用、显示所有权与输入租约交接 |
+| 键鼠一律走 GUI-2 的输入通道 | 直接 `open("/dev/keyboard")` / `open("/dev/mouse")` |
+
+**应用语义**（§6 明确写入 spec 并由断言钉住）：
+
+- **启动** = `HOME → APP(id)` 的**整屏替换**：旧表面的控件树销毁，新表面从零构建。
+- **退出** = 销毁应用表面，回到 `HOME`。
+- **全屏切换** = 整屏替换，**不存在窗口化中间态**。
+- 应用状态（终端命令行与历史、文件浏览器当前目录）存在**外壳持有的 C 变量**里，不寄居在会被销毁的控件树中。
+
+### 2. 设计系统：令牌表在 libgui，主题落地也在 libgui
+
+| 文件 | 作用 | 对外可见性 |
+|------|------|------------|
+| `libgui/include/gui/gui_theme.h` | 令牌表：32 个色彩角色、5 级字号、5 档间距、5 档圆角、elevation 0–5 | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/src/theme.c` | 令牌表实现 | libgui 内部 |
+| `libgui/src/theme_apply.c` | 令牌表 → LVGL 主题 | libgui 内部 |
+| `libgui/src/platform.c` | `gui_platform_create()` 自动套用主题；屏幕显式 `lv_theme_apply()` | libgui 内部 |
+
+**公共 API 刻意保持 LVGL 无关**：sysroot 的已发布头有一条硬约束（`qemutests/gui_build_audit.py`）——**任何**已发布头不得出现 LVGL 符号。因此「把 `lv_display_t` 提升为公共 API」这条路走不通（`typedef struct _lv_display_t lv_display_t;` 本身就是 LVGL 符号）。改为：① 令牌表是纯数据，可以发布；② 令牌表 → LVGL 主题的落地整体留在 libgui 内部；③ 业务应用自行包含 LVGL 头，用 `lv_display_get_default()` 取 display（惯用做法）。
+
+主题必须与平台**同生共死**：`gui_platform_destroy()` 的顺序固定为「先删 display → 再拆主题 → 最后 `lv_deinit()`」（反序会 use-after-free）。
+
+### 3. 外壳结构
+
+```
+user/desktop/
+  desktop_state.{c,h}    纯 C 状态机（HOME / DRAWER / SETTINGS / APP），与 LVGL 无关
+  desktop_registry.{c,h} 应用注册表（纯 C 数据；accent 用角色，不写死颜色）
+  desktop_shell.{c,h}    外壳：表面、状态栏 / 启动器 / 抽屉 / 设置、焦点模型
+  desktop_apps.{c,h}     四个壳内应用
+  desktop.c              主入口：libgui 平台 + GUI-2 输入 + 主循环
+```
+
+- **迁移只发生在主循环**：UI 回调只**投递意图**（`desktop_shell_request()`），由外壳在主循环里串行执行。LVGL 回调期间销毁控件树是未定义行为，因此设置项变更也走同一条投递通道。
+- **状态机不携带 app id**：四个表面状态是纯函数可穷举的；「哪个应用在跑」由外壳记在 `shell->current_app`。
+- **表面恒为全屏**，应用表面根对象覆盖整个显示区。
+
+### 4. 键盘契约与焦点模型
+
+| 键 | 行为 |
+|----|------|
+| `Tab` / `Shift+Tab` | 在当前表面的焦点项之间前进 / 后退 |
+| `Enter` | 激活当前焦点项 |
+| `ESC` | 返回主屏 |
+| 可打印字符 | 交给当前应用（终端消费并回显） |
+
+**桌面自己维护焦点序列**：libgui 的焦点组是**私有**的（`gui_input_focus_*` 在 `libgui/internal/`），公共 API 没有「登记可聚焦控件」的入口，而业务应用只能用公共 API。因此外壳用 LVGL 的 `LV_STATE_FOCUSED` 状态实现同一语义，焦点环（2px primary 轮廓）由 Material 主题给出。序列随表面重建清空，不会残留已销毁对象。
+
+> **这是临时方案。** roadmap 的 **GUI-2b libgui 公共焦点 API**（见 `docs/roadmap.md` §P3 后续功能任务）完成后，桌面改用那条公共 API，本节的自建序列（`desktop_shell_focus_*`）随之删除——GUI-3 与 libgui 的焦点组之间不应该长期存在两套模型。
+
+### 5. 界面文案用 ASCII（不是中文）
+
+GUI-3 只启用 Montserrat（12/14/16/20/24），**没有汉字字形**——中文文案会整片渲染成方框。spec 已把「中文字体」划归 **GUI-4 字体与资源**，因此 GUI-3 的界面文案一律用 ASCII（`Files` / `Terminal` / `System` / `Settings`）。这是**已知边界**，不是遗漏。
+
+### 6. 验证
+
+| 层次 | 手段 | 覆盖 |
+|------|------|------|
+| 令牌 / 主题 | `hosttests/cases/test_gui_theme.c`、`test_gui_theme_apply.c` | 令牌取值、非法枚举、五类交互状态 |
+| 状态机 | `hosttests/cases/test_desktop_state.c` | 迁移集合穷举 |
+| 外壳与像素 | `hosttests/cases/test_desktop_shell.c` | 表面像素、四个应用逐一启动 / 全屏 / 退出、终端消费字符、退出后焦点仍可导航 |
+| 光标与壁纸 | `tools/tests/test_cursor_icon.py`、`hosttests/cases/test_desktop_shell.c`、`qemutests/gui_desktop_test.py` | 生成物与生成器一致（`--check`）、五种壁纸映射逐一钉住、QEMU 截图里壁纸是 `#D8D2E4` 且屏幕中心能看到深色箭头光标 |
+| 静态审计 | `hosttests/cases/test_desktop_audit.c` | 禁颜色字面量、禁裸字号、禁手绘 primitive、禁直开设备、禁私有头、禁窗口装饰标识 |
+| QEMU 端到端 | `qemutests/gui_desktop_test.py`（`SUITE=gui-desktop`） | 冒烟、桌面接管显示、真实 PS/2 按键启动应用并返回、杀掉桌面后 guest 仍存活；SMP 1/2 |
+| 门禁收尾 | `qemutests/test_gui_desktop_runner.py` | 收尾必须真的杀掉 QEMU；信号路径必须杀掉进程组；子进程随父进程而死（PDEATHSIG） |
+
+```sh
+make PROFILE=x86_64-clang test-gui-host CASE=theme
+make PROFILE=x86_64-clang test-gui-host CASE=theme-apply
+make PROFILE=x86_64-clang test-gui-host CASE=desktop-state
+make PROFILE=x86_64-clang test-gui-host CASE=desktop-shell
+make PROFILE=x86_64-clang test-gui-host CASE=desktop-audit
+make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop
+```
+
+**门禁收尾有防孤儿契约。** QEMU 持有磁盘镜像的**写锁**（`-snapshot` 模式也一样），一个活着的孤儿 QEMU 会让后续的 `make run` 报 `Failed to get "write" lock / Is another process using the image [...]/disk.img`。因此门禁的三层保障缺一不可：
+
+1. **正常收尾**：`DesktopCaseRunner.close()` 调真实的 `ProcessSession.close()`（不是别的方法名），收尾失败只记录不抛出，但记录必须显眼。
+2. **信号路径**：SIGINT / SIGTERM 触发时**无锁硬杀**在跑的 QEMU 进程组（`SIGKILL` 不可捕获），再退出。
+3. **内核兜底**：`ProcessSession` 的 `preexec_fn` 装上 `PR_SET_PDEATHSIG`，父进程被 SIGKILL 或崩溃时由内核杀掉 QEMU。
+
+对应回归在 `qemutests/test_gui_desktop_runner.py`，其中一条用的假 session **只有 `close()`、故意没有 `cleanup()`**，把当初那个方法名笔误钉死。
+
+### 7. 指针光标与壁纸
+
+- 光标是一张 16×24 的 ARGB8888 **图像资源**（`libgui/src/cursor_icon.c`），
+  由 `tools/gen_cursor_icon.py` 从 `libgui/assets/cursor-arrow.png` 离线
+  生成；运行时用 `lv_draw_image` 1:1 绘制，不引入图片解码器。
+- 光标颜色（填充 `#1A1C1E` + 描边 `#FDFCFF`）**烘焙在像素里**，不在令牌
+  表里：光标是系统级控件，且「深主体 + 浅描边」是它在任意底色上都可见
+  的前提。将来换主题若要改光标颜色，出路是把资源拆成填充 / 描边两张遮罩
+  分别上色。
+- 壁纸由新增的色彩角色 `surface_dim`（`#D8D2E4`）承载；`surface` 的值不变。
+  壁纸设置项的标签按明度排成 `Standard / Light grey / Grey / Dark grey /
+  Deepest`。

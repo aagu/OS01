@@ -188,6 +188,11 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_nonce.elf \
     $(TEST_BLD)/test_gui_input_platform.elf \
     $(TEST_BLD)/test_gui_input_lvgl.elf \
+    $(TEST_BLD)/test_gui_theme.elf \
+    $(TEST_BLD)/test_gui_theme_apply.elf \
+    $(TEST_BLD)/test_desktop_state.elf \
+    $(TEST_BLD)/test_desktop_shell.elf \
+    $(TEST_BLD)/test_desktop_audit.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -1676,6 +1681,20 @@ $(TEST_BLD)/test_tetris_logic.o: $(TEST_CASES)/test_tetris_logic.c
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/tetris -c $< -o $@
 
 $(TEST_BLD)/test_tetris_logic.elf: $(TEST_BLD)/test_tetris_logic.o $(TEST_BLD)/tetris_logic.o
+	$(HOST_CC) -o $@ $^
+
+# GUI-3 Task 3: the desktop surface state machine.  Compiles the REAL
+# user/desktop/desktop_state.c (pure C, no LVGL dependency) so the
+# (state x intent) matrix can be exhausted on the host.
+$(TEST_BLD)/desktop_state.o: $(TESTS_DIR)/user/desktop/desktop_state.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/desktop -c $< -o $@
+
+$(TEST_BLD)/test_desktop_state.o: $(TEST_CASES)/test_desktop_state.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/desktop -c $< -o $@
+
+$(TEST_BLD)/test_desktop_state.elf: $(TEST_BLD)/test_desktop_state.o $(TEST_BLD)/desktop_state.o
 	$(HOST_CC) -o $@ $^
 
 POLL_PRODUCTION_OBJS := \
@@ -3835,6 +3854,12 @@ GUI_LVGL_SOURCES := $(shell find $(TESTS_DIR)/$(LVGL_SOURCE)/src -name '*.c')
 GUI_LVGL_OBJS := $(patsubst $(TESTS_DIR)/$(LVGL_SOURCE)/src/%.c,$(GUI_LVGL_DIR)/obj/%.o,$(GUI_LVGL_SOURCES))
 GUI_LVGL_ARCHIVE := $(GUI_LVGL_DIR)/liblvgl-host.a
 
+# GUI-3: the Material theme unit (token table + LVGL theme).  Every host
+# test that links the REAL libgui platform must also link these two
+# translation units, because gui_platform_create() applies the theme and
+# gui_platform_destroy() releases it.
+GUI_THEME_OBJS := $(GUI_INTEGRATION_DIR)/theme.o $(GUI_INTEGRATION_DIR)/theme_apply.o
+
 $(GUI_HOST_DIR)/lvgl-version.stamp: $(TESTS_DIR)/thirdpart/lvgl.manifest
 	@test -e "$(TESTS_DIR)/$(LVGL_SOURCE)/.git" || { echo "ERROR: $(LVGL_SOURCE) not a git submodule (.git missing)"; exit 1; }
 	@test -f "$(TESTS_DIR)/$(LVGL_SOURCE)/lvgl.h" || { echo "ERROR: $(LVGL_SOURCE) missing lvgl.h"; exit 1; }
@@ -3887,7 +3912,8 @@ GUI_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -I$(TESTS_DIR)/config \
     -iquote $(TEST_INC) \
     -iquote $(TEST_MOCK) \
-    -DLV_CONF_INCLUDE_SIMPLE
+    -DLV_CONF_INCLUDE_SIMPLE \
+    -DOS01_BUILD_PROFILE=\"$(PROFILE)\"
 
 $(GUI_DETERMINISTIC_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
@@ -3910,7 +3936,8 @@ GUI_INPUT_UNIT_DIR := $(GUI_HOST_DIR)/input_unit
 GUI_INPUT_UNIT_OBJS := $(GUI_INPUT_UNIT_DIR)/input.o \
                        $(GUI_INPUT_UNIT_DIR)/input_lvgl.o \
                        $(GUI_INPUT_UNIT_DIR)/input_focus.o \
-                       $(GUI_INPUT_UNIT_DIR)/input_ps2.o
+                       $(GUI_INPUT_UNIT_DIR)/input_ps2.o \
+                       $(GUI_INPUT_UNIT_DIR)/cursor_icon.o
 
 $(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
 	@mkdir -p $(dir $@)
@@ -3950,6 +3977,7 @@ $(TEST_BLD)/test_gui_platform.elf: \
 		$(GUI_DETERMINISTIC_DIR)/test_gui_platform.o \
 		$(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o \
 		$(GUI_DETERMINISTIC_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_DETERMINISTIC_DIR)/tick.o \
 		$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o \
 		$(GUI_INPUT_UNIT_OBJS) \
@@ -4007,6 +4035,7 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o \
 		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
 		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
 		$(GUI_INPUT_UNIT_OBJS) \
@@ -4016,6 +4045,149 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 
 .PHONY: test-gui-lvgl
 test-gui-lvgl: $(TEST_BLD)/test_gui_lvgl_integration.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 1: Material design token table ────────────────────
+# The token table (libgui/src/theme.c) is pure C with no LVGL dependency,
+# so this case links ONLY the token table plus the test TU: the design
+# system's values are verified without dragging in the LVGL archive.  The
+# assertions cover the spec §9.1 contract: well-formed color roles,
+# on_*/base pairing, strictly decreasing font scale, strictly increasing
+# space and radius scales, monotonic elevation shadows, the elevation
+# surface sequence, and -1 for every out-of-range enum.
+GUI_THEME_UNIT_DIR := $(GUI_HOST_DIR)/theme_unit
+GUI_THEME_UNIT_OBJS := $(GUI_THEME_UNIT_DIR)/theme.o
+
+$(GUI_THEME_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_THEME_UNIT_DIR)/test_gui_theme.o: $(TEST_CASES)/test_gui_theme.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_theme.elf: \
+		$(GUI_THEME_UNIT_DIR)/test_gui_theme.o \
+		$(GUI_THEME_UNIT_OBJS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-gui-theme
+test-gui-theme: $(TEST_BLD)/test_gui_theme.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 2: Material theme applied to LVGL ──────────────────
+# Links the REAL libgui/src/theme.c (token table) + theme_apply.c (LVGL
+# theme) + the REAL platform and the REAL LVGL archive, so the assertions
+# observe the production theme rather than a stub.  Covers: the theme is
+# attached to the display and re-application is idempotent; container /
+# button / label styles come from the token table; the focus ring is a
+# 2px primary outline; a NULL platform yields NULL + EINVAL.
+$(GUI_INTEGRATION_DIR)/theme.o: $(TESTS_DIR)/libgui/src/theme.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/theme_apply.o: $(TESTS_DIR)/libgui/src/theme_apply.c $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(GUI_INTEGRATION_DIR)/test_gui_theme_apply.o: $(TEST_CASES)/test_gui_theme_apply.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -DGUI_INTEGRATION_TEST -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_theme_apply.elf: \
+		$(GUI_INTEGRATION_DIR)/test_gui_theme_apply.o \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INTEGRATION_DIR)/theme.o \
+		$(GUI_INTEGRATION_DIR)/theme_apply.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-theme-apply
+test-gui-theme-apply: $(TEST_BLD)/test_gui_theme_apply.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 3: desktop surface state machine ───────────────────
+# The state machine is pure C (user/desktop/desktop_state.c), so this case
+# needs neither LVGL nor the platform: only the real state machine plus
+# the test TU.
+.PHONY: test-gui-desktop-state
+test-gui-desktop-state: $(TEST_BLD)/test_desktop_state.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# GUI-3 Task 4: the desktop shell.  Links the REAL desktop shell, registry
+# and state machine against the REAL LVGL and the REAL offscreen platform,
+# so the pixel assertions observe the production surfaces.  The shell needs
+# the LVGL headers and the libgui public headers.
+GUI_DESKTOP_DIR := $(GUI_HOST_DIR)/desktop
+GUI_DESKTOP_OBJS := \
+    $(GUI_DESKTOP_DIR)/desktop_shell.o \
+    $(GUI_DESKTOP_DIR)/desktop_apps.o \
+    $(GUI_DESKTOP_DIR)/desktop_registry.o \
+    $(GUI_DESKTOP_DIR)/desktop_state.o
+
+$(GUI_DESKTOP_DIR)/%.o: $(TESTS_DIR)/user/desktop/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_DESKTOP_DIR)/test_desktop_shell.o: $(TEST_CASES)/test_desktop_shell.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -I$(TESTS_DIR)/user/desktop -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_desktop_shell.elf: \
+		$(GUI_DESKTOP_DIR)/test_desktop_shell.o \
+		$(GUI_DESKTOP_OBJS) \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-desktop-shell
+test-gui-desktop-shell: $(TEST_BLD)/test_desktop_shell.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 5: desktop source audit ───────────────────────────
+# The design-system discipline ("colors come from the token table") and
+# the "no window system" promise are constraints on the SHAPE of the
+# code, not on its behaviour, so they are audited statically.  The
+# audit reads the real sources from the repository (the path comes from
+# the build system, never from the runtime cwd).
+$(TEST_BLD)/test_desktop_audit.o: $(TEST_CASES)/test_desktop_audit.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+	    -DGUI_DESKTOP_SRC=\"$(TESTS_DIR)/user/desktop\" -c $< -o $@
+
+$(TEST_BLD)/test_desktop_audit.elf: $(TEST_BLD)/test_desktop_audit.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-gui-desktop-audit
+test-gui-desktop-audit: $(TEST_BLD)/test_desktop_audit.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
@@ -4310,6 +4482,7 @@ $(TEST_BLD)/test_gui_input_platform.elf: \
 		$(GUI_INPUT_DIR)/test_gui_input_platform.o \
 		$(GUI_INPUT_DIR)/gui_test_runtime.o \
 		$(GUI_INPUT_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_INPUT_DIR)/tick.o \
 		$(GUI_INPUT_UNIT_OBJS) \
 		$(GUI_INPUT_DIR)/gfx_client_policy.o \
@@ -4371,6 +4544,7 @@ $(TEST_BLD)/test_gui_input_lvgl.elf: \
 		$(GUI_INPUT_LVGL_DIR)/test_gui_input_lvgl.o \
 		$(GUI_INPUT_LVGL_DIR)/gui_test_runtime.o \
 		$(GUI_INPUT_LVGL_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
 		$(GUI_INPUT_LVGL_DIR)/tick.o \
 		$(GUI_INPUT_LVGL_DIR)/gfx_client_policy.o \
 		$(GUI_INPUT_UNIT_OBJS) \

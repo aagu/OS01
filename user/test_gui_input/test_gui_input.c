@@ -104,7 +104,8 @@
  * screenshot.  The probe only asserts that the constants it inherits are
  * the expected ones. */
 #define PROBE_OUTLINE_COLOR 0x00FF00u
-#define PROBE_CURSOR_COLOR   0x00FFFFFFu
+#define PROBE_CURSOR_FILL_COLOR    0x001A1C1Eu
+#define PROBE_CURSOR_OUTLINE_COLOR 0x00FDFCFFu
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Small helpers
@@ -1292,8 +1293,9 @@ int main(int argc, char **argv)
 
     /* The fixed outline / cursor colours come from libgui. */
     if (GUI_INPUT_FOCUS_OUTLINE_COLOR != PROBE_OUTLINE_COLOR ||
-        GUI_INPUT_CURSOR_COLOR != PROBE_CURSOR_COLOR) {
-        rc = fail(1, EINVAL, "outline_or_cursor_color"); goto cleanup;
+        GUI_INPUT_CURSOR_FILL_COLOR != PROBE_CURSOR_FILL_COLOR ||
+        GUI_INPUT_CURSOR_OUTLINE_COLOR != PROBE_CURSOR_OUTLINE_COLOR) {
+        rc = fail(1, EINVAL, "focus_outline_or_cursor_color"); goto cleanup;
     }
 
     if (now_ms(&p->start_ms) != 0) {

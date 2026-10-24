@@ -55,13 +55,20 @@ LVGL_OBJS := $(patsubst $(LVGL_SRC_DIR)/%.c,$(BUILD_DIR)/obj/lvgl/%.o,$(LVGL_C_S
 PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
                       $(LIBGUI_DIR)/src/input_ps2.c \
                       $(LIBGUI_DIR)/src/input.c $(LIBGUI_DIR)/src/input_lvgl.c \
-                      $(LIBGUI_DIR)/src/input_focus.c
+                      $(LIBGUI_DIR)/src/input_focus.c \
+                      $(LIBGUI_DIR)/src/cursor_icon.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
+
+# GUI-3 设计系统：Material 令牌表（theme.c，纯 C 无 LVGL 依赖）与
+# LVGL 主题落地（theme_apply.c）。两者是独立的编译单元，宿主契约测试
+# 可以只链接令牌表，不必拖入 LVGL。
+THEME_C_SOURCES := $(LIBGUI_DIR)/src/theme.c $(LIBGUI_DIR)/src/theme_apply.c
+THEME_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/theme/%.o,$(THEME_C_SOURCES))
 
 COMMON_C_SOURCES := $(OS01_ROOT)/user/common/gfx_client_policy.c
 COMMON_OBJS := $(BUILD_DIR)/obj/common/gfx_client_policy.o
 
-OBJS := $(LVGL_OBJS) $(PLATFORM_OBJS) $(COMMON_OBJS)
+OBJS := $(LVGL_OBJS) $(PLATFORM_OBJS) $(THEME_OBJS) $(COMMON_OBJS)
 ARCHIVE := $(BUILD_DIR)/lib/libgui.a
 TARGET_AR ?= $(LLVM_AR)
 
@@ -89,6 +96,10 @@ $(BUILD_DIR)/obj/common/gfx_client_policy.o: $(OS01_ROOT)/user/common/gfx_client
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+$(BUILD_DIR)/obj/theme/%.o: $(LIBGUI_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
 $(ARCHIVE): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(TARGET_AR) rcs $@ $^
@@ -100,7 +111,8 @@ install: $(ARCHIVE)
 	mkdir -p $(INSTALL_ROOT)/usr/include/gui $(INSTALL_ROOT)/usr/lib $(INSTALL_ROOT)/usr/share/licenses/libgui
 	cp $(ARCHIVE) $(INSTALL_ROOT)/usr/lib/libgui.a
 	cp $(LIBGUI_DIR)/include/gui/gui.h $(LIBGUI_DIR)/include/gui/gui_platform.h \
-	   $(LIBGUI_DIR)/include/gui/gui_input.h $(INSTALL_ROOT)/usr/include/gui/
+	   $(LIBGUI_DIR)/include/gui/gui_input.h $(LIBGUI_DIR)/include/gui/gui_theme.h \
+	   $(INSTALL_ROOT)/usr/include/gui/
 	cp $(LVGL_DIR)/LICENCE.txt $(INSTALL_ROOT)/usr/share/licenses/libgui/LVGL-LICENCE.txt
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 

@@ -42,7 +42,7 @@
  *     - dx/dy 在 int16 极值下夹边正确（不回绕、不溢出）；
  *     - slider 拖动释放后继续移动不再改变滑块值；
  *     - 右 / 中键只报告原生 changed_buttons，不产生 click、不夺焦点；
- *     - 光标是 12×18 的程序绘制箭头，热点 (0,0)，挂在 system layer 上，
+ *     - 光标是 16×24 的图像资源（ARGB8888），热点 (0,0)，挂在 system layer 上，
  *       像素可采样且不拦截 hit-test；
  *     - 指针静止时长按定时器仍然推进；
  *     - 悬停滚轮：悬停即滚（每刻度 32 px），内层到边界把余量交给父层，
@@ -52,8 +52,10 @@
 #include "test_framework.h"
 #include <gui/gui_input.h>
 #include <gui/gui_platform.h>
+#include <gui_cursor_icon.h>
 #include <gui_input_private.h>
 #include <gui_lvgl_private.h>
+#include <lvgl/src/draw/lv_image_decoder.h>
 #include "gui_test_runtime.h"
 
 #include <errno.h>
@@ -2241,7 +2243,76 @@ TEST_FUNC(test_right_and_middle_buttons_only_report_native_changes)
  *  光标
  *  ═══════════════════════════════════════════════════════════════ */
 
-TEST_FUNC(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero)
+TEST_FUNC(test_cursor_icon_resource_decodes_into_a_two_colour_image)
+{
+    fixture_t fx;
+    lv_image_header_t header;
+    const uint8_t *data;
+    int fill_px = 0;
+    int outline_px = 0;
+    int clear_px = 0;
+    int i;
+
+    /*
+     * 解码器登记表只在 lv_init() 与 lv_deinit() 之间存在，而这两步由
+     * 夹具的平台持有：没有夹具就没有任何解码器，get_info() 必然失败。
+     */
+    fixture_setup(&fx);
+
+    memset(&header, 0, sizeof(header));
+
+    /* 资源必须能被 LVGL 解码：header 的 magic / cf / w / h / stride 全对。 */
+    assert_eq(LV_RESULT_OK, lv_image_decoder_get_info(&gui_cursor_icon, &header));
+    assert_eq(16, header.w);
+    assert_eq(24, header.h);
+    assert_eq(LV_COLOR_FORMAT_ARGB8888, header.cf);
+    assert_eq(64, header.stride);
+
+    data = gui_cursor_icon.data;
+    assert_not_null(data);
+    if (!data) {
+        fixture_teardown(&fx);
+        return;
+    }
+
+    /*
+     * 资源里只允许两种 RGB（填充 / 描边）。ARGB8888 在内存里的字节序是
+     * B, G, R, A。
+     */
+    for (i = 0; i < 16 * 24; i++) {
+        uint32_t alpha = data[i * 4 + 3];
+        uint32_t rgb = ((uint32_t)data[i * 4 + 2] << 16)
+                     | ((uint32_t)data[i * 4 + 1] << 8)
+                     | (uint32_t)data[i * 4 + 0];
+
+        if (alpha == 0) {
+            clear_px++;
+            continue;
+        }
+        if (alpha != 255) {
+            continue; /* 抗锯齿边缘不算实色 */
+        }
+        if (rgb == GUI_INPUT_CURSOR_FILL_COLOR) {
+            fill_px++;
+        } else if (rgb == GUI_INPUT_CURSOR_OUTLINE_COLOR) {
+            outline_px++;
+        } else {
+            assert_true(0); /* 出现了第三种颜色 */
+        }
+    }
+
+    /* 必须同时存在：实心填充、实心描边、完全透明。 */
+    assert_true(fill_px > 0);
+    assert_true(outline_px > 0);
+    assert_true(clear_px > 0);
+
+    /* 热点 (0,0) 必须有内容：箭尖不能整块透明。 */
+    assert_true(data[3] > 0);
+
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_cursor_is_a_16x24_icon_with_hotspot_at_zero)
 {
     fixture_t fx;
     lv_obj_t *cursor;
@@ -2274,14 +2345,14 @@ TEST_FUNC(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero)
     assert_false(lv_obj_has_flag(cursor, LV_OBJ_FLAG_HIDDEN));
 
     /*
-     * 规格固定 12×18。
+     * 规格固定 16×24。
      *
-     * 这里断言**字面量** 12 / 18，而不是 GUI_INPUT_CURSOR_WIDTH /
+     * 这里断言**字面量** 16 / 24，而不是 GUI_INPUT_CURSOR_WIDTH /
      * GUI_INPUT_CURSOR_HEIGHT：后者与实现用的是同一个宏，断言会退化成
-     * "实现和自己比"，把光标改成 16 px 或 40×40 都不会被发现。
+     * "实现和自己比"，把光标改成 20 px 或 40×40 都不会被发现。
      */
-    assert_eq(12, lv_obj_get_width(cursor));
-    assert_eq(18, lv_obj_get_height(cursor));
+    assert_eq(16, lv_obj_get_width(cursor));
+    assert_eq(24, lv_obj_get_height(cursor));
 
     /* 热点 (0,0)：对象左上角就是指针位置。 */
     lv_obj_get_coords(cursor, &area);
@@ -2295,9 +2366,91 @@ TEST_FUNC(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero)
     hit = lv_indev_search_obj(lv_display_get_layer_sys(fx.disp), &point);
     assert_true(hit != cursor);
 
-    /* 程序绘制的箭头真的画出来了：热点处是光标颜色。 */
-    assert_eq(GUI_INPUT_CURSOR_COLOR,
-              gui_platform_get_pixel(fx.platform, (uint32_t)area.x1, (uint32_t)area.y1));
+    fixture_teardown(&fx);
+}
+
+TEST_FUNC(test_cursor_icon_is_drawn_with_its_own_pixels)
+{
+    fixture_t fx;
+    lv_obj_t *cursor;
+    lv_area_t area;
+    const uint8_t *data;
+    int fill_x = -1;
+    int fill_y = -1;
+    int outline_x = -1;
+    int outline_y = -1;
+    int clear_x = -1;
+    int clear_y = -1;
+    int i;
+    uint32_t background;
+
+    fixture_setup(&fx);
+
+    feed_mouse_one(&fx, 0, 10, 20, 0);
+    step_at(&fx, 50);
+
+    cursor = fx.input->lvgl.cursor;
+    assert_not_null(cursor);
+    if (!cursor) {
+        fixture_teardown(&fx);
+        return;
+    }
+    lv_obj_get_coords(cursor, &area);
+
+    /*
+     * 在资源里挑三个代表像素：完全不透明的填充 / 描边 / 完全透明。
+     * 取样点必须落在**完全不透明**的像素上 —— ARGB8888 走 straight
+     * alpha，半透明像素会被底色混合，不能做等值断言。
+     */
+    data = gui_cursor_icon.data;
+    assert_not_null(data);
+    if (!data) {
+        fixture_teardown(&fx);
+        return;
+    }
+    for (i = 0; i < 16 * 24; i++) {
+        uint32_t alpha = data[i * 4 + 3];
+        uint32_t rgb = ((uint32_t)data[i * 4 + 2] << 16)
+                     | ((uint32_t)data[i * 4 + 1] << 8)
+                     | (uint32_t)data[i * 4 + 0];
+
+        if (alpha == 255 && rgb == GUI_INPUT_CURSOR_FILL_COLOR && fill_x < 0) {
+            fill_x = i % 16;
+            fill_y = i / 16;
+        } else if (alpha == 255 && rgb == GUI_INPUT_CURSOR_OUTLINE_COLOR
+                   && outline_x < 0) {
+            outline_x = i % 16;
+            outline_y = i / 16;
+        } else if (alpha == 0 && clear_x < 0) {
+            clear_x = i % 16;
+            clear_y = i / 16;
+        }
+    }
+    assert_true(fill_x >= 0);
+    assert_true(outline_x >= 0);
+    assert_true(clear_x >= 0);
+
+    /* 画出来的实色像素必须与资源逐位一致（alpha == 255 时不做混合）。 */
+    assert_eq(GUI_INPUT_CURSOR_FILL_COLOR,
+              gui_platform_get_pixel(fx.platform,
+                                     (uint32_t)(area.x1 + fill_x),
+                                     (uint32_t)(area.y1 + fill_y)));
+    assert_eq(GUI_INPUT_CURSOR_OUTLINE_COLOR,
+              gui_platform_get_pixel(fx.platform,
+                                     (uint32_t)(area.x1 + outline_x),
+                                     (uint32_t)(area.y1 + outline_y)));
+
+    /*
+     * 完全透明的像素必须与光标**旁边**的背景一致。不断言底色具体是
+     * 什么 —— 只断言「光标没有在这里画上东西」。
+     */
+    background = gui_platform_get_pixel(fx.platform,
+                                        (uint32_t)(area.x1 + 40),
+                                        (uint32_t)(area.y1 + 40));
+    assert_eq(background,
+              gui_platform_get_pixel(fx.platform,
+                                     (uint32_t)(area.x1 + clear_x),
+                                     (uint32_t)(area.y1 + clear_y)));
 
     fixture_teardown(&fx);
 }
@@ -2999,7 +3152,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pointer_delta_extremes_clamp_without_wraparound),
     TEST_ENTRY(test_slider_stops_dragging_after_the_release),
     TEST_ENTRY(test_right_and_middle_buttons_only_report_native_changes),
-    TEST_ENTRY(test_cursor_is_a_12x18_program_drawn_arrow_with_hotspot_at_zero),
+    TEST_ENTRY(test_cursor_icon_resource_decodes_into_a_two_colour_image),
+    TEST_ENTRY(test_cursor_is_a_16x24_icon_with_hotspot_at_zero),
+    TEST_ENTRY(test_cursor_icon_is_drawn_with_its_own_pixels),
     TEST_ENTRY(test_stationary_pointer_still_advances_the_long_press_timer),
     TEST_ENTRY(test_hover_wheel_scrolls_the_hovered_container_by_one_detent),
     TEST_ENTRY(test_hover_wheel_negative_detent_scrolls_back_within_range),

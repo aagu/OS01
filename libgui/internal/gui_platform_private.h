@@ -52,6 +52,10 @@ struct gui_platform {
     lv_display_t *disp;
     uint32_t flush_count;
 
+    /* GUI-3：Material 主题。与平台同生共死 —— 主题的样式缓冲在 LVGL
+     * 内存池里，必须在 lv_deinit() 之前释放。 */
+    lv_theme_t *theme;
+
     /* GUI-2：每平台至多一个输入对象（NULL 表示未挂接） */
     gui_input_t *input;
 };

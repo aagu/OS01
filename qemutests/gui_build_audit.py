@@ -24,6 +24,10 @@ GUI_PUBLIC_HEADERS = (
     "gui.h",
     "gui_platform.h",
     "gui_input.h",
+    # GUI-3: the Material design token table.  It is pure data (no LVGL
+    # types), so it can be published; the step that turns the token table
+    # into an LVGL theme stays inside libgui (libgui/src/theme_apply.c).
+    "gui_theme.h",
 )
 
 # Private / bridge headers of libgui.  They carry the internal state layout,
@@ -36,6 +40,7 @@ GUI_PRIVATE_HEADERS = (
     "gui_input_ps2.h",
     "gui_lvgl_private.h",
     "gui_tick.h",
+    "gui_cursor_icon.h",
 )
 
 # The public input API (libgui/include/gui/gui_input.h).  These are the
@@ -1009,6 +1014,7 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui.h",
         "usr/include/gui/gui_platform.h",
         "usr/include/gui/gui_input.h",
+        "usr/include/gui/gui_theme.h",
         "usr/share/licenses/libgui/LVGL-LICENCE.txt",
     ]
     for rel_path in required_files:
@@ -1148,6 +1154,15 @@ def audit_sysroot_and_build(
                 "gui_platform_get_mode",
                 "gui_platform_get_pixel",
                 "gui_platform_get_lv_display",
+                # GUI-3: the Material design token table is public API.
+                "gui_theme_colors",
+                "gui_theme_font_size",
+                "gui_theme_space",
+                "gui_theme_radius",
+                "gui_theme_elevation_shadow_width",
+                "gui_theme_elevation_shadow_offset_y",
+                "gui_theme_elevation_shadow_opa",
+                "gui_theme_elevation_surface",
                 "lv_init",
                 "lv_timer_handler",
                 "gfx_client_present_policy",
@@ -1324,6 +1339,7 @@ GUI_STAGED_FILES = (
     "usr/include/gui/gui.h",
     "usr/include/gui/gui_platform.h",
     "usr/include/gui/gui_input.h",
+    "usr/include/gui/gui_theme.h",
     "usr/lib/libgui.a",
     "usr/share/licenses/libgui/LVGL-LICENCE.txt",
 )

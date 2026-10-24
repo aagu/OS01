@@ -407,6 +407,7 @@ test-host:
 	python3 qemutests/test_kernel_selftest_result.py
 	python3 tools/tests/test_user_build.py
 	python3 tools/tests/test_kernel_headers.py
+	python3 tools/tests/test_cursor_icon.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 
@@ -433,7 +434,7 @@ test-pmm-boot-reservation:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -623,13 +624,14 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 	  esac
 
 # ── GUI host tests ───────────────────────────────────────────
-# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend
-# and the GUI-2 input-focus chain.  CASE accepts any registered case
-# (platform, lvgl, devfs-input, input-frame, input-route, input-decode,
-# input-platform) or all (default: all).
+# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend,
+# the GUI-2 input-focus chain and the GUI-3 Material design system.
+# CASE accepts any registered case (platform, lvgl, devfs-input,
+# input-frame, input-route, input-decode, input-platform, theme) or all
+# (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -746,10 +748,56 @@ _test-gui-host-run-input-lvgl:
 	@echo "  [test-gui-host] input-lvgl"
 	$(call os01_submake,hosttests,test-gui-input-lvgl $(OS01_SUBMAKE_ARGS))
 
+# GUI-3 plan Task 1: the Material design token table.  Runs
+# test_gui_theme.elf, which host-compiles the REAL libgui/src/theme.c
+# (pure C, no LVGL dependency) and asserts the spec §9.1 contract:
+# well-formed color roles, on_*/base pairing, strictly decreasing font
+# scale, strictly increasing space and radius scales, monotonic
+# elevation shadows, the elevation surface sequence, and -1 for every
+# out-of-range enum.
+_test-gui-host-run-theme:
+	@echo "  [test-gui-host] theme"
+	$(call os01_submake,hosttests,test-gui-theme $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 2: the Material theme applied to LVGL.  Runs
+# test_gui_theme_apply.elf, which links the REAL token table + theme
+# apply + platform + LVGL archive and asserts the spec §9.1 apply
+# contract (theme attached and idempotent, widget styles sourced from
+# the token table, 2px primary focus ring, NULL platform → EINVAL).
+_test-gui-host-run-theme-apply:
+	@echo "  [test-gui-host] theme-apply"
+	$(call os01_submake,hosttests,test-gui-theme-apply $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 3: the desktop surface state machine.  Runs
+# test_desktop_state.elf, which host-compiles the REAL
+# user/desktop/desktop_state.c (pure C, no LVGL dependency) and
+# exhausts the (state x intent) matrix against the spec §9.2 contract.
+_test-gui-host-run-desktop-state:
+	@echo "  [test-gui-host] desktop-state"
+	$(call os01_submake,hosttests,test-gui-desktop-state $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 4: the desktop shell.  Runs test_desktop_shell.elf,
+# which links the REAL desktop shell + registry + state machine against
+# the REAL LVGL and the REAL offscreen platform, and asserts the pixel
+# contract (wallpaper / status bar / card / launcher each render their
+# token colour, and a surface transition leaves no residue).
+_test-gui-host-run-desktop-shell:
+	@echo "  [test-gui-host] desktop-shell"
+	$(call os01_submake,hosttests,test-gui-desktop-shell $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 5: the desktop source audit.  Runs
+# test_desktop_audit.elf, which reads the real user/desktop sources and
+# asserts the design-system discipline (no colour literals, no font
+# sizes), the input discipline (no direct device access, no private
+# libgui headers), and the "no window system" promise (no window
+# decoration identifiers).
+_test-gui-host-run-desktop-audit:
+	@echo "  [test-gui-host] desktop-audit"
+	$(call os01_submake,hosttests,test-gui-desktop-audit $(OS01_SUBMAKE_ARGS))
+
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
 	@exit 1
-
 GUI_CASE_RAW := $(CASE)
 GUI_CASE_EFFECTIVE = $(if $(strip $(GUI_CASE_RAW)),$(GUI_CASE_RAW),all)
 test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_REGISTERED_CASES),_test-gui-host-run-$(c)),_test-gui-host-run-$(GUI_CASE_EFFECTIVE))
@@ -1005,6 +1053,12 @@ TEST_QEMU_FLAVOR_terminal-present =
 # the shared program discovery, so no variant build is needed. The matrix
 # boots the normal image read-only (-snapshot) at 1/2 cores with QMP.
 TEST_QEMU_FLAVOR_gui            =
+# gui-desktop (GUI-3 plan Task 7) runs the normal image directly:
+# /bin/desktop is installed into the normal rootfs by the shared program
+# discovery, so no variant build is needed.  The suite boots the normal
+# image read-only (-snapshot) at 1/2 cores with QMP, injects real PS/2
+# key events and compares QMP screendumps.
+TEST_QEMU_FLAVOR_gui-desktop    =
 # Default baseline log path for the terminal-present suite; the
 # task-6 brief calls this out explicitly.  Tests pass this through to
 # the dispatcher as TERMINAL_PRESENT_BASELINE_LOG; an explicit
@@ -1020,6 +1074,7 @@ TEST_QEMU_IMG_driver-model     = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_terminal-present = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -1050,8 +1105,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -1067,7 +1122,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# and uses its own QEMU launch via the dispatcher; it does not
 	# modify the normal image, so the hash guard is skipped too.
 	# gui runs against the normal image read-only (-snapshot) across SMP=1/2.
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	# Build step. THIS RECIPE LINE CONTAINS ``$(MAKE)`` AND IS DELIBERATELY
@@ -1096,7 +1151,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  fi; \
 	fi
 	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	fi
@@ -1473,7 +1528,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

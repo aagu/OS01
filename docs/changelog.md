@@ -8,6 +8,37 @@
 ## 2026-10-24
 
 - fix(qemutests): **dispatch 第一期遗留 shootdown-probe 验收闭环**：runner 及 fixture 从旧 `M3-SHOOTDOWN-PROBE:` 对齐到内核实际 `SHOOTDOWN-PROBE:`，删除未使用的旧前缀常量。新增独立正反例及临时编译真实 probe 函数体的生产者协议回归；旧 runner 五次预期失败，修复后聚焦 11 项、完整 AArch64 harness 56 项全通过。正式 `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe` 退出 0、START/OK 各一次、无 probe SKIP/FAIL；不改内核实现，保留原阶段一历史失败。详见 [调查与修复证据](debug/2026-10-24-shootdown-probe-investigation.md#修复与正式验收)。
+- feat(gui): **GUI-3：桌面指针换成图标光标，壁纸改用 `surface_dim`**：鼠标光标从「纯白程序绘制的 12×18 箭头」换成用户提供的箭头图标（16×24，LVGL 图像资源，热点在左上角）。纯白箭头在近白壁纸（`#FDFCFF`）上实际不可见；新光标自带深色主体 + 浅色描边，任意底色上都有对比度。
+
+  **壁纸**：桌面壁纸底色改用新增的色彩角色 `surface_dim`（`#D8D2E4`），`surface` 的值不变（它被 elevation 0 / 卡片 / 列表共用）。
+
+  **资源生成**：光标资源由 `tools/gen_cursor_icon.py` 从 `libgui/assets/cursor-arrow.png` 离线生成，黄金图 `libgui/assets/cursor-arrow-16x24.txt` 是它的可读评审面；`make test-host` 会校验生成物与生成器一致。
+
+  **验证**：`make PROFILE=x86_64-clang test-host`（含 `tools/tests/test_cursor_icon.py` 校验生成物）、`test-static`、`test-qemu SUITE=gui-desktop` 全绿；门禁 SMP 1/2 共 10 个场景 PASS，截图里壁纸占 91.7%、屏幕中心能看到深色箭头光标；磁盘镜像 sha256 跑前跑后一致（`5a360039…`），**零孤儿 QEMU**。**反向验证**：把 `cursor_visible()` 改成恒假，门禁在 SMP 1/2 上双双报红（`the pointer cursor is not visible on the wallpaper`）。
+
+- fix(test-harness): **QEMU 门禁收尾留下孤儿进程、锁死磁盘镜像闭环**：GUI-3 的桌面门禁在收尾时调用了**不存在**的方法 `session.cleanup()`（真实方法名是 `close()`），异常又被 `except: pass` 吃掉 —— 每次门禁跑完都留下一个活着的 QEMU，而门禁照样报 PASS。孤儿 QEMU 持有磁盘镜像的**写锁**，于是后续 `make run` 报 `Failed to get "write" lock / Is another process using the image [...]/disk.img`（即用户看到的「disk.img 被占用」）。实测确认：`-snapshot` 模式的 QEMU 同样会阻塞另一个以读写方式打开同一镜像的 QEMU，因此「门禁跑过」和「`make run` 能跑」之间隔着的正是这个孤儿。
+
+  **门禁侧**（`qemutests/gui_desktop_test.py`）：收尾改调真实的 `session.close()`，且**不再吞异常** —— 收尾失败只记录不抛出（`close()` 会在 `finally` 与信号处理里被调用，抛异常会盖掉真正的失败原因），但记录必须显眼，因为收尾失败就意味着可能有孤儿；启动失败（QEMU 已经起来、日志文件才打开失败）的分支也补上收尾，避免半启动的子进程变孤儿；SIGINT / SIGTERM 装上处理器，先**无锁硬杀**在跑的 QEMU 进程组再退出（无锁是必须的：`close()` 要去拿 `Popen` 的内部状态，而主线程可能正持着那把锁，信号处理里等它有死锁风险）。
+
+  **harness 侧**（`qemutests/harness/process.py`）：`ProcessSession` 的 `preexec_fn` 从 `os.setsid` 换成 `_child_preexec()`，除 `setsid()` 外再用 `prctl(PR_SET_PDEATHSIG, SIGKILL)` —— 父进程被不可捕获的信号（SIGKILL）打死或崩溃时，内核替我们杀掉 QEMU；`prctl` 之后的父进程核对兜住「父进程在 prctl 之前就死了」的竞态（PDEATHSIG 不会补发）。libc 句柄改为**在父进程里加载一次**，子进程不再在 `preexec_fn` 里 dlopen（fork 后分配内存正是 `preexec_fn` 被文档标注为不安全的原因）。`close()` / `_cleanup()` 改为**永不抛异常**：收尾是 finalizer，抛异常会盖掉调用方的原始错误，而更糟的是留下活着的子进程；清理序列本身不变（SIGTERM 进程组 → 等 5s → SIGKILL 进程组），末尾补一道 `_ensure_dead()`。新增公共只读属性 `child_pid`（刻意无锁，供信号处理使用）。
+
+  **回归测试**：新增 `qemutests/test_gui_desktop_runner.py`（10 项）并接入 `test-harness`。其中一条用的假 session **只有 `close()`、故意没有 `cleanup()`**，把当初那个方法名笔误钉死；另有真 `ProcessSession` + 真子进程的「收尾后子进程必须死」、信号路径的「进程组必须被杀」、以及 PDEATHSIG 的端到端用例（子进程由一个独立 python 进程拉起，父进程被 SIGKILL 后子进程必须随之消失）。**反向验证**：把 `close()` 换回旧的 buggy 实现，3 条用例失败，其中一条明确报「child outlived the runner's teardown」。
+
+  **验证**：全量 `test-harness` 694 项全绿（557.7s）；`make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop` SMP 1/2 全绿，**跑前跑后持镜像的 QEMU 进程数 0 → 0**（零孤儿）；`make PROFILE=x86_64-clang run` 退出码 0、**零锁错误**、镜像 sha256 前后一致（`31e40538…`）、guest 启动到 `OS01 Init v1.0` → `BusyBox v1.36.1`；直发 SIGTERM 打断门禁，QEMU 500ms 内随之消失；`make` 路径的 Ctrl-C（信号发给整个前台进程组）同样不留孤儿。
+
+- feat(desktop): **GUI-3 Material 风格桌面闭环**：分支 `feature/gui-3-material-desktop`，基线 `d0153dc3`（`master`）。用 LVGL 重写 `user/desktop`，把「Material 风格」从画出来的像素变成**可核验的设计系统**。
+
+  **设计系统**：新增公共令牌表 `libgui/include/gui/gui_theme.h` + `libgui/src/theme.c`（32 个色彩角色、5 级字号 12/14/16/20/24、5 档间距、5 档圆角、elevation 0–5），主题落地留在 libgui 内部（`theme_apply.c`），`gui_platform_create()` 自动套用。**公共 API 保持 LVGL 无关** —— sysroot 已发布头禁止出现 LVGL 符号（`qemutests/gui_build_audit.py`），因此「把 `lv_display_t` 提升为公共 API」不可行；令牌表是纯数据可以发布，主题落地整体留在 libgui 内，业务应用用 `lv_display_get_default()` 取 display。
+
+  **外壳**：纯 C 状态机（HOME/DRAWER/SETTINGS/APP）+ 应用注册表 + 四个表面（状态栏 / 启动器 / 抽屉 / 设置）。迁移一律**整屏替换**，只发生在主循环（UI 回调只投递意图）；设置项变更走同一条投递通道。**不绘制任何窗口装饰**。
+
+  **应用模型：仅壳内应用**。四个应用（文件 / 终端 / 系统 / 设置）由外壳创建与销毁，占满显示区，不 fork 子进程、不做显示所有权与输入租约交接。语义显式：**启动 = `HOME→APP(id)` 整屏替换；退出 = 销毁应用表面回 `HOME`；全屏切换 = 整屏替换，不存在窗口化中间态**。应用状态（终端命令行与历史、文件浏览器当前目录）存在外壳持有的 C 变量里，不寄居在会被销毁的控件树中。
+
+  **键盘**：libgui 的焦点组是私有的（公共 API 没有「登记可聚焦控件」的入口），因此外壳自建焦点序列，用 LVGL 的 `LV_STATE_FOCUSED` 实现同一语义（Tab / Shift+Tab 移动、Enter 激活、ESC 返回），焦点环由 Material 主题给出。这条自建焦点序列是**临时方案**——roadmap 已记 **GUI-2b libgui 公共焦点 API** 任务，落地后桌面改用公共 API。
+
+  **已知边界**：GUI-3 只启用 Montserrat，**没有汉字字形**，因此界面文案一律用 ASCII（`Files` / `Terminal` / `System` / `Settings`）；中文字体按 spec 划归 GUI-4。
+
+  **验证**：宿主契约测试（令牌 / 主题落地 / 状态机 / 外壳像素）、静态审计（禁颜色字面量、禁裸字号、禁手绘 primitive、禁直开设备、禁 libgui 私有头、禁窗口装饰标识）、QEMU 端到端门禁 `qemutests/gui_desktop_test.py`（`SUITE=gui-desktop`：冒烟、桌面接管显示、真实 PS/2 按键启动应用并返回、杀掉桌面后 guest 仍存活；SMP 1/2 全绿）。设计 [spec](superpowers/specs/2026-10-24-gui-3-material-desktop-design.md)，实施 [plan](superpowers/plans/2026-10-24-gui-3-material-desktop.md)。
 
 - fix(build): **parked fbtest 私有头发布边界闭环**：测试 sysroot 原先同时发布内核 `driver/fb_test.h` 和测试 UAPI；私有头改为始终排除，`uapi/fb_test.h` 仍仅在测试配置发布。新增真实安装规则回归，覆盖干净安装、旧头残留、配置切换、manifest 和 UAPI 内容，并接入 `test-host`。旧规则三个 subtest 失败；修复后生产/测试镜像构建与实际 sysroot 检查、完整分辨率宿主九组和 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-fbtest-private-header.md)。
 
