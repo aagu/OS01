@@ -9,7 +9,8 @@
  *   - signal_pgrp called strictly outside pty->state_lock
  *   - User memory fault safety (-EFAULT on invalid user pointers)
  *   - Regression: PTY master preserves TCGETS and rejects unknown ioctls with -ENOTTY
- *   - Concurrent resize reads consistent four-field states without tearing
+ *   - Reader-first and concurrent resize reads see consistent A/B windows;
+ *     fixture stop/start flags use atomics, with results checked after join
  *   - TCSETS/TCSETSW commit under state_lock; TCGETS on both ends uses
  *     one stable snapshot and all faultable user copies happen unlocked
  */
@@ -543,8 +544,13 @@ TEST_FUNC(test_master_tcgets_regression)
 typedef struct {
     file_t *fm;
     file_t *fs;
-    volatile bool stop;
-    volatile int torn_count;
+    bool stop;                  /* atomic accesses while workers run */
+    bool reader_ready;          /* reader-first handshake */
+    int torn_count;             /* reader-owned; inspected after join */
+    int read_iterations;
+    int read_error, write_error;
+    unsigned read_count, write_count;
+    struct winsize bad_snapshot;
 } resize_thread_arg_t;
 
 static void *resize_writer_thread(void *arg)
@@ -553,9 +559,18 @@ static void *resize_writer_thread(void *arg)
     struct winsize mode_a = { .ws_row = 25, .ws_col = 80, .ws_xpixel = 640, .ws_ypixel = 480 };
     struct winsize mode_b = { .ws_row = 50, .ws_col = 160, .ws_xpixel = 1280, .ws_ypixel = 960 };
 
-    for (int i = 0; i < CONCURRENT_ITERS && !ctx->stop; i++) {
+    while (!__atomic_load_n(&ctx->reader_ready, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&ctx->stop, __ATOMIC_RELAXED)) {}
+    for (int i = 0; i < CONCURRENT_ITERS &&
+         !__atomic_load_n(&ctx->stop, __ATOMIC_RELAXED); i++) {
         struct winsize *ws = (i & 1) ? &mode_a : &mode_b;
-        fd_ioctl(ctx->fm, TIOCSWINSZ, ws);
+        int rc = fd_ioctl(ctx->fm, TIOCSWINSZ, ws);
+        if (rc != 0) {
+            ctx->write_error = rc;
+            __atomic_store_n(&ctx->stop, true, __ATOMIC_RELAXED);
+            break;
+        }
+        ctx->write_count++;
     }
     return NULL;
 }
@@ -563,17 +578,26 @@ static void *resize_writer_thread(void *arg)
 static void *resize_reader_thread(void *arg)
 {
     resize_thread_arg_t *ctx = (resize_thread_arg_t *)arg;
-    for (int i = 0; i < CONCURRENT_ITERS && !ctx->stop; i++) {
+    for (int i = 0; i < ctx->read_iterations &&
+         !__atomic_load_n(&ctx->stop, __ATOMIC_RELAXED); i++) {
         struct winsize ws = {0};
-        fd_ioctl(ctx->fs, TIOCGWINSZ, &ws);
+        int rc = fd_ioctl(ctx->fs, TIOCGWINSZ, &ws);
+        if (rc != 0) {
+            ctx->read_error = rc;
+            __atomic_store_n(&ctx->stop, true, __ATOMIC_RELAXED);
+            break;
+        }
+        ctx->read_count++;
 
         bool is_a = (ws.ws_row == 25 && ws.ws_col == 80 && ws.ws_xpixel == 640 && ws.ws_ypixel == 480);
         bool is_b = (ws.ws_row == 50 && ws.ws_col == 160 && ws.ws_xpixel == 1280 && ws.ws_ypixel == 960);
         if (!is_a && !is_b) {
             ctx->torn_count++;
-            ctx->stop = true;
+            ctx->bad_snapshot = ws;
+            __atomic_store_n(&ctx->stop, true, __ATOMIC_RELAXED);
             break;
         }
+        __atomic_store_n(&ctx->reader_ready, true, __ATOMIC_RELEASE);
     }
     return NULL;
 }
@@ -583,26 +607,69 @@ TEST_FUNC(test_concurrent_resize_consistency)
     reset_test_state();
     pty_t *pty = pty_alloc();
     assert_true(pty != NULL);
+    if (!pty) return;
 
     file_t fm, fs;
     init_test_files(pty, &fm, &fs);
+
+    /* The reader accepts A/B, so publish A before either worker can run. */
+    struct winsize initial = {25, 80, 640, 480};
+    assert_eq(0, fd_ioctl(&fm, TIOCSWINSZ, &initial));
 
     resize_thread_arg_t ctx = {
         .fm = &fm,
         .fs = &fs,
         .stop = false,
         .torn_count = 0,
+        .read_iterations = 1,
     };
 
     host_pthread_t th_writer, th_reader;
-    pthread_create(&th_writer, NULL, resize_writer_thread, &ctx);
-    pthread_create(&th_reader, NULL, resize_reader_thread, &ctx);
-
-    pthread_join(th_writer, NULL);
-    ctx.stop = true;
-    pthread_join(th_reader, NULL);
-
+    /* Force a read before any writer runs; creation order alone cannot
+     * guarantee that the writer has already published an A/B window. */
+    int rc = pthread_create(&th_reader, NULL, resize_reader_thread, &ctx);
+    assert_eq(0, rc);
+    if (rc != 0) return;
+    rc = pthread_join(th_reader, NULL);
+    assert_eq(0, rc);
+    if (rc != 0) return;
+    if (ctx.torn_count)
+        printf("reader-first unexpected winsize: %u,%u,%u,%u\n",
+               ctx.bad_snapshot.ws_row, ctx.bad_snapshot.ws_col,
+               ctx.bad_snapshot.ws_xpixel, ctx.bad_snapshot.ws_ypixel);
     assert_eq(0, ctx.torn_count);
+    assert_eq(0, ctx.read_error);
+    assert_eq(1, ctx.read_count);
+    __atomic_store_n(&ctx.stop, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx.reader_ready, false, __ATOMIC_RELAXED);
+    ctx.torn_count = 0;
+    ctx.read_count = 0;
+    ctx.read_iterations = CONCURRENT_ITERS;
+
+    rc = pthread_create(&th_writer, NULL, resize_writer_thread, &ctx);
+    assert_eq(0, rc);
+    if (rc != 0) return;
+    rc = pthread_create(&th_reader, NULL, resize_reader_thread, &ctx);
+    assert_eq(0, rc);
+    if (rc != 0) {
+        __atomic_store_n(&ctx.stop, true, __ATOMIC_RELAXED);
+        pthread_join(th_writer, NULL);
+        return;
+    }
+
+    assert_eq(0, pthread_join(th_writer, NULL));
+    __atomic_store_n(&ctx.stop, true, __ATOMIC_RELAXED);
+    assert_eq(0, pthread_join(th_reader, NULL));
+
+    if (ctx.torn_count)
+        printf("concurrent unexpected winsize: %u,%u,%u,%u\n",
+               ctx.bad_snapshot.ws_row, ctx.bad_snapshot.ws_col,
+               ctx.bad_snapshot.ws_xpixel, ctx.bad_snapshot.ws_ypixel);
+    assert_eq(0, ctx.torn_count);
+    assert_eq(0, ctx.read_error);
+    assert_eq(0, ctx.write_error);
+    assert_true(ctx.read_count > 0);
+    assert_eq(CONCURRENT_ITERS, ctx.write_count);
 }
 
 static struct termios termios_pattern(unsigned seed)
