@@ -52,6 +52,7 @@ extern volatile uint32_t accounting_test_cpu;
 #define OS01_HOST_SPINLOCK_T_PROVIDED
 typedef struct { unsigned long lock; } spinlock_T;
 void poll_test_spinlock_acquire(spinlock_T *lock) __attribute__((weak));
+void poll_test_spinlock_release(spinlock_T *lock) __attribute__((weak));
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
 static inline void spin_lock(spinlock_T *l) { (void)l; }
 static inline void spin_unlock(spinlock_T *l) { (void)l; }
@@ -61,7 +62,10 @@ static inline uint64_t spin_lock_irqsave(spinlock_T *l)
     return 0;
 }
 static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f)
-{ (void)l; (void)f; }
+{
+    if (poll_test_spinlock_release) poll_test_spinlock_release(l);
+    (void)f;
+}
 #endif /* OS01_HOST_SPINLOCK_T_PROVIDED */
 
 typedef struct {

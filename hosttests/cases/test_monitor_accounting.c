@@ -18,7 +18,9 @@
  *   - legal unenumerated CPU slots read online=0; enumerated slots
  *     follow the percpu online flag without resetting saved accounting;
  *   - the usage locks are really taken (irqsave spin path observed via
- *     poll_test_spinlock_acquire) and the hot path allocates nothing.
+ *     poll_test_spinlock_acquire) and the hot path allocates nothing;
+ *   - read-side counter copies occur between acquisition and release
+ *     of the tick writer's lock, excluding post-release writer ticks.
  *
  * Build: the PRODUCTION kernel/sched/accounting.c is host-compiled via
  * accounting_test_runtime.h (test-controlled cpu_id()/percpu_data[]/
@@ -74,11 +76,18 @@ size_t kfree(void *ptr)
 /* ── irqsave observation: production must take the usage locks ── */
 
 static unsigned long test_lock_acquires;
+static void observe_accounting_acquire(spinlock_T *lock);
+static void observe_accounting_release(spinlock_T *lock);
 
 void poll_test_spinlock_acquire(spinlock_T *lock)
 {
-    (void)lock;
     test_lock_acquires++;
+    observe_accounting_acquire(lock);
+}
+
+void poll_test_spinlock_release(spinlock_T *lock)
+{
+    observe_accounting_release(lock);
 }
 
 /* ── Fixture helpers ── */
@@ -106,6 +115,45 @@ static void run_ticks(unsigned n, task_t *cur)
     accounting_test_current = cur;
     for (unsigned i = 0; i < n; i++)
         sched_account_tick();
+}
+
+/* Mode 1 identifies the real tick writer's lock. Mode 2 injects ticks
+ * at read lock boundaries. Nested writer calls run with tracing off. */
+static int observe_read_mode;
+static spinlock_T *tick_writer_lock;
+static unsigned read_acquires, read_releases, read_depth, read_lock_errors;
+
+static void observe_accounting_acquire(spinlock_T *lock)
+{
+    if (observe_read_mode == 1) {
+        tick_writer_lock = lock;
+        return;
+    }
+    if (observe_read_mode != 2)
+        return;
+    if (lock != tick_writer_lock || read_depth != 0)
+        read_lock_errors++;
+    read_acquires++;
+    read_depth++;
+    observe_read_mode = 0;
+    run_ticks(2, &fixture_busy);
+    run_ticks(1, &fixture_idle);
+    observe_read_mode = 2;
+}
+
+static void observe_accounting_release(spinlock_T *lock)
+{
+    if (observe_read_mode != 2)
+        return;
+    if (lock != tick_writer_lock || read_depth != 1)
+        read_lock_errors++;
+    read_releases++;
+    if (read_depth)
+        read_depth--;
+    observe_read_mode = 0;
+    run_ticks(4, &fixture_busy);
+    run_ticks(6, &fixture_idle);
+    observe_read_mode = 2;
 }
 
 /* ── Tests ──────────────────────────────────────────── */
@@ -435,6 +483,46 @@ TEST_FUNC(missing_idle_drops_ticks_and_recovers) {
     assert_eq(free_before, test_free_count);
 }
 
+/* The result must include pre-acquire writer ticks and exclude
+ * post-release ticks, using the very same lock as the tick writer. */
+TEST_FUNC(read_copies_counters_inside_tick_writer_lock) {
+    reset_fixture_cpu(0);
+    sched_accounting_init();
+    sched_accounting_cpu_start(0, 100, false);
+    sched_accounting_cpu_start(0, 100, true);
+    tick_writer_lock = NULL;
+    observe_read_mode = 1;
+    run_ticks(1, &fixture_busy);
+    observe_read_mode = 0;
+    assert_not_null(tick_writer_lock);
+    run_ticks(2, &fixture_busy);
+    run_ticks(2, &fixture_idle);
+
+    struct cpu_usage_snapshot before, out, after;
+    assert_eq(0, sched_accounting_read(0, &before));
+    read_acquires = read_releases = read_depth = read_lock_errors = 0;
+    observe_read_mode = 2;
+    int rc = sched_accounting_read(0, &out);
+    observe_read_mode = 0;
+    assert_eq(0, rc);
+    assert_eq((uint64_t)5, out.busy_ticks);
+    assert_eq((uint64_t)3, out.idle_ticks);
+    assert_eq(before.epoch, out.epoch);
+    assert_eq(100, out.tick_hz);
+    assert_eq(1, out.online);
+    assert_eq(1, out.valid);
+    assert_eq(1, read_acquires);
+    assert_eq(1, read_releases);
+    assert_eq(0, read_depth);
+    assert_eq(0, read_lock_errors);
+
+    assert_eq(0, sched_accounting_read(0, &after));
+    assert_eq((uint64_t)9, after.busy_ticks);
+    assert_eq((uint64_t)9, after.idle_ticks);
+    assert_eq(before.epoch, after.epoch);
+    assert_eq((uint64_t)9, fixture_busy.runtime_ticks);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(busy_idle_and_runtime_accounting),
     TEST_ENTRY(scheduler_not_ready_drops_ticks),
@@ -448,6 +536,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(read_enumerated_cpu_tracks_online_flag),
     TEST_ENTRY(hot_path_locks_and_never_allocates),
     TEST_ENTRY(missing_idle_drops_ticks_and_recovers),
+    TEST_ENTRY(read_copies_counters_inside_tick_writer_lock),
 TEST_LIST_END
 
 int main(void) {

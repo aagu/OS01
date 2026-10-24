@@ -2277,6 +2277,7 @@ test-monitor-accounting: $(TEST_BLD)/test_monitor_accounting.elf
 # U=2097152 / F=4194304, T==U+F across page alloc/free, in-pool 4KB
 # alloc/free leaving U untouched, T=0 → zero stats, Σzone summing.
 $(TEST_BLD)/test_monitor_pmm.o: $(TEST_CASES)/test_monitor_pmm.c \
+		$(TEST_MOCK)/pmm_include/arch/spinlock.h \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h \
 		$(TESTS_DIR)/kernel/include/memory/memory.h
 	@mkdir -p $(TEST_BLD)

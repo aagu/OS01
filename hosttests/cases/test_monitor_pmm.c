@@ -12,7 +12,8 @@
  *     any slot (including slot 0 metadata) remains allocated;
  *   - a T=0 backend (no zones) reports zero stats — the caller judges
  *     the snapshot unavailable, pmm_get_stats does not invent values;
- *   - multi-zone backends are summed under one snapshot.
+ *   - multi-zone backends are summed under one snapshot, inside the
+ *     allocator's PMM lock, with balanced acquisition and release.
  *
  * Build: the PRODUCTION kernel/memory/pmm.c is host-compiled via the
  * same PMM_SHADOW_INC harness as test_pmm_ram_rel_index (mock
@@ -35,10 +36,54 @@
 #include <memory/memory_map.h>
 #include <memory/pmm_arch.h>
 #include <core/bootinfo.h>
+#include "../mock/pmm_include/arch/spinlock.h"
 
 extern struct Physical_Memory_Manager PMMngr;
 extern uint32_t ZONE_DMA_INDEX;
 extern uint32_t ZONE_NORMAL_INDEX;
+
+/* Optional shadow-lock observers. Armed only around calls under test;
+ * the ordinary allocator establishes which lock protects PMM zones. */
+static int observe_locks;
+static int inject_zone_transition;
+static spinlock_T *allocator_lock;
+static unsigned lock_acquires, lock_releases, lock_depth, lock_errors;
+static struct Zone snapshot_zones[2];
+
+void pmm_test_spinlock_acquire(spinlock_T *lock)
+{
+    if (!observe_locks)
+        return;
+    if (!allocator_lock)
+        allocator_lock = lock;
+    if (lock != allocator_lock || lock_depth != 0)
+        lock_errors++;
+    lock_acquires++;
+    lock_depth++;
+    if (inject_zone_transition) {
+        /* A writer completed just before the snapshot acquired the lock. */
+        PMMngr.zones_size = 2;
+        snapshot_zones[0].page_using_count = 1;
+        snapshot_zones[0].page_free_count = 2;
+    }
+}
+
+void pmm_test_spinlock_release(spinlock_T *lock)
+{
+    if (!observe_locks)
+        return;
+    if (lock != allocator_lock || lock_depth != 1)
+        lock_errors++;
+    lock_releases++;
+    if (lock_depth)
+        lock_depth--;
+    if (inject_zone_transition) {
+        /* Another writer becomes visible immediately after unlock. */
+        PMMngr.zones_size = 1;
+        snapshot_zones[0].page_using_count = 0;
+        snapshot_zones[0].page_free_count = 3;
+    }
+}
 
 /* ── link stubs for externs pmm.o references ──────────────
  * Same set as test_pmm_ram_rel_index.c: g_log_level /
@@ -329,12 +374,62 @@ TEST_FUNC(multi_zone_sums_all_zones)
     assert_eq(stats.managed_bytes, stats.reserved_bytes + stats.free_bytes);
 }
 
+/* Distinct states before acquisition, while held, and after release
+ * make missing, late, or early locking observable in the actual result. */
+TEST_FUNC(snapshot_sums_all_zones_inside_allocator_lock)
+{
+    setup_zone(FIX_PAGES);
+    allocator_lock = NULL;
+    lock_acquires = lock_releases = lock_depth = lock_errors = 0;
+    observe_locks = 1;
+    struct Page *allocated = alloc_pages(ZONE_DMA, 1, 0);
+    observe_locks = 0;
+    assert_not_null(allocated);
+    assert_not_null(allocator_lock);
+    assert_eq(1, lock_acquires);
+    assert_eq(1, lock_releases);
+    assert_eq(0, lock_depth);
+    assert_eq(0, lock_errors);
+
+    snapshot_zones[0] = zone;  /* pre-lock state: T=3, U=1, F=2 pages */
+    memset(&snapshot_zones[1], 0, sizeof(snapshot_zones[1]));
+    snapshot_zones[1].pages_length = 2;
+    snapshot_zones[1].page_using_count = 2;
+    PMMngr.zones_struct = snapshot_zones;
+    PMMngr.zones_size = 1;
+    lock_acquires = lock_releases = lock_depth = lock_errors = 0;
+    inject_zone_transition = observe_locks = 1;
+    struct pmm_stats stats;
+    pmm_get_stats(&stats);
+    observe_locks = inject_zone_transition = 0;
+
+    /* Only the locked state has two zones: T=5, U=3, F=2 pages. */
+    assert_eq((uint64_t)10485760, stats.managed_bytes);
+    assert_eq((uint64_t)6291456, stats.reserved_bytes);
+    assert_eq((uint64_t)4194304, stats.free_bytes);
+    assert_eq(1, lock_acquires);
+    assert_eq(1, lock_releases);
+    assert_eq(0, lock_depth);
+    assert_eq(0, lock_errors);
+    assert_eq((uint64_t)1, PMMngr.zones_size);
+    assert_eq((uint64_t)0, snapshot_zones[0].page_using_count);
+
+    /* A NULL output must return before entering the lock at all. */
+    lock_acquires = lock_releases = 0;
+    observe_locks = 1;
+    pmm_get_stats(NULL);
+    observe_locks = 0;
+    assert_eq(0, lock_acquires);
+    assert_eq(0, lock_releases);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(three_pages_one_in_use_snapshot),
     TEST_ENTRY(page_alloc_free_keeps_identity),
     TEST_ENTRY(pool_4k_alloc_free_does_not_lower_U),
     TEST_ENTRY(zero_backend_reports_zero_stats),
     TEST_ENTRY(multi_zone_sums_all_zones),
+    TEST_ENTRY(snapshot_sums_all_zones_inside_allocator_lock),
 TEST_LIST_END
 
 int main(void)
