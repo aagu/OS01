@@ -45,6 +45,8 @@ Run with::
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -447,6 +449,21 @@ class IntrDispatchAuditFixture(unittest.TestCase):
             repo_root=str(repo_root if repo_root is not None else ROOT),
         )
 
+    def audit_with_notes(self, *, repo_root=None, nm_tool=None,
+                         objdump_tool=None):
+        """Return ``(errors, notes)``.
+
+        ``notes`` are the lines the audit printed while proving the
+        edges: every proven edge is reported by name and by shape, so a
+        positive fixture can pin that a *specific* edge was resolved to
+        its expected target — not merely that no violation was reported.
+        """
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = self.audit(repo_root=repo_root, nm_tool=nm_tool,
+                                objdump_tool=objdump_tool)
+        return errors, buf.getvalue().splitlines()
+
     def stage_x86(self, nm_text=None, disasm_text=None, *,
                   nm_name="fake-nm", objdump_name="fake-objdump"):
         self.stage(profile=self.PROFILE_X86,
@@ -610,7 +627,8 @@ class IntrDispatchAuditToolTests(IntrDispatchAuditFixture):
         self.assertIn(OK_LINE, proc.stdout)
 
     def test_cli_failure_exits_nonzero_with_diagnostic(self):
-        self.stage_x86(disasm_text=X86_DISASM.replace(
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001049C1,
             "# 0xffff80000014d120 <do_page_fault>",
             "# 0xffff800000199999 <mystery>"))
         proc = subprocess.run(
@@ -657,11 +675,28 @@ class IntrDispatchAuditDefinitionTests(IntrDispatchAuditFixture):
 
 
 class IntrDispatchAuditDirectCallFormTests(IntrDispatchAuditFixture):
-    """aarch64 ``bl <sym>`` — the adapter → decoder/dispatcher edges."""
+    """aarch64 ``bl <sym>`` — the adapter → decoder/dispatcher edges.
+
+    This class owns the *direct call* form: the aarch64 ``bl`` at
+    ``0xFFFF000040097CC8`` (the adapter's decode call).  The x86
+    ``movabs`` form lives in ``IntrDispatchAuditMovabsFormTests`` and
+    the x86 stub ``leaq`` form in ``IntrDispatchAuditStubLeaqFormTests``.
+    """
 
     def test_expected_target_passes(self):
         self.stage_a64()
         self.assertEqual(self.audit(), [])
+
+    def test_expected_target_is_resolved_to_the_expected_symbol(self):
+        # The positive side of the triple: the audit must *resolve* the
+        # `bl` to aarch64_intr_decode_sync and report that edge by name
+        # and shape — not merely report no violation.
+        self.stage_a64()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("edge aarch64_el1_sync -> "
+                            "aarch64_intr_decode_sync (bl)" in n
+                            for n in notes), notes)
 
     def test_wrong_target_fails(self):
         # The adapter's decode call resolves to aarch64_intr_decode_irq
@@ -677,22 +712,89 @@ class IntrDispatchAuditDirectCallFormTests(IntrDispatchAuditFixture):
 
     def test_unresolvable_target_fails(self):
         # The `bl` target matches no ELF symbol at all: the edge cannot
-        # be proven and the audit must fail.
+        # be proven and the audit must fail.  The assertion pins the
+        # *unresolvable* diagnosis, not the generic "not proven" one.
         self.stage_a64(disasm_text=_mutate(
             A64_DISASM, 0xFFFF000040097CC8,
             "bl\t0xffff000040097990 <aarch64_intr_decode_sync>",
             "bl\t0xffff000040099999 <not_a_symbol>"))
         errors = self.audit()
-        self.assertTrue(any("aarch64_el1_sync" in e for e in errors),
-                        errors)
+        self.assertTrue(
+            any("unresolvable" in e and "aarch64_el1_sync" in e
+                for e in errors), errors)
 
 
 class IntrDispatchAuditTailBranchFormTests(IntrDispatchAuditFixture):
-    """The dispatcher → backend tail branches (``b`` on aarch64)."""
+    """The dispatcher → backend tail branches (``b`` on aarch64).
+
+    This class owns the *tail branch* form: the dispatcher's ``b`` at
+    ``0xFFFF00004009411C`` (``b <arch_intr_handle_sync>``).  The
+    aarch64 ``bl`` form lives in ``IntrDispatchAuditDirectCallFormTests``.
+    """
 
     def test_expected_target_passes(self):
         self.stage_a64()
         self.assertEqual(self.audit(), [])
+
+    def test_expected_target_is_resolved_to_the_expected_symbol(self):
+        # The positive side of the triple: the audit must *resolve* the
+        # dispatcher's tail branch to arch_intr_handle_sync and report
+        # that edge by name and shape.
+        self.stage_a64()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("edge arch_intr_dispatch -> "
+                            "arch_intr_handle_sync (branch)" in n
+                            for n in notes), notes)
+
+    def test_wrong_target_fails(self):
+        # The sync tail branch points at the IRQ backend: resolvable,
+        # wrong — the sync edge is gone.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF00004009411C,
+            "b\t0xffff000040097004 <arch_intr_handle_sync>",
+            "b\t0xffff000040097108 <arch_intr_handle_irq>"))
+        errors = self.audit()
+        self.assertTrue(any("arch_intr_handle_sync" in e
+                            for e in errors), errors)
+
+    def test_unresolvable_target_fails(self):
+        # The tail branch target matches no ELF symbol: the edge cannot
+        # be proven and the audit must fail.  The assertion pins the
+        # *unresolvable* diagnosis, not the generic "not proven" one.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF00004009411C,
+            "b\t0xffff000040097004 <arch_intr_handle_sync>",
+            "b\t0xffff000040099999 <not_a_symbol>"))
+        errors = self.audit()
+        self.assertTrue(
+            any("unresolvable" in e and "arch_intr_dispatch" in e
+                for e in errors), errors)
+
+
+class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
+    """x86 ``-mcmodel=large``: ``movabs`` absolute address, then an
+    indirect ``callq``/``jmpq`` through the loaded register.
+
+    This class owns the *absolute-address indirect* form: the ``movabs``
+    at ``0xFFFF80000014D163`` (the thin entry's dispatcher call) and
+    the indirect call at ``0xFFFF80000014D161``.
+    """
+
+    def test_expected_target_passes(self):
+        self.stage_x86()
+        self.assertEqual(self.audit(), [])
+
+    def test_expected_target_is_resolved_to_the_expected_symbol(self):
+        # The positive side of the triple: the `movabs` immediate must
+        # resolve through the ELF symbol table to arch_intr_dispatch,
+        # and the audit must report that edge by name and shape.
+        self.stage_x86()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("edge do_page_fault -> arch_intr_dispatch "
+                            "(movabs + indirect call, resolved via nm)" in n
+                            for n in notes), notes)
 
     def test_wrong_target_fails(self):
         # do_page_fault's second movabs resolves to the decoder again —
@@ -716,32 +818,6 @@ class IntrDispatchAuditTailBranchFormTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("do_page_fault" in e for e in errors), errors)
 
-
-class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
-    """x86 ``-mcmodel=large``: ``movabs`` absolute address, then an
-    indirect ``callq``/``jmpq`` through the loaded register."""
-
-    def test_expected_target_passes(self):
-        self.stage_x86()
-        self.assertEqual(self.audit(), [])
-
-    def test_wrong_target_fails(self):
-        # page_fault's leaq resolves to do_general_protection.
-        self.stage_x86(disasm_text=_mutate(
-            X86_DISASM, 0xFFFF8000001049C1,
-            "# 0xffff80000014d120 <do_page_fault>",
-            "# 0xffff80000014bfb0 <do_general_protection>"))
-        errors = self.audit()
-        self.assertTrue(any("page_fault" in e for e in errors), errors)
-
-    def test_unresolvable_target_fails(self):
-        self.stage_x86(disasm_text=_mutate(
-            X86_DISASM, 0xFFFF8000001049C1,
-            "# 0xffff80000014d120 <do_page_fault>",
-            "# 0xffff800000199998 <not_a_symbol>"))
-        errors = self.audit()
-        self.assertTrue(any("page_fault" in e for e in errors), errors)
-
     def test_unknown_indirect_form_is_not_a_pass(self):
         # An indirect call through a register with NO tracked movabs
         # source: the edge is unprovable, and an unprovable edge fails.
@@ -754,22 +830,40 @@ class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
 
 class IntrDispatchAuditStubLeaqFormTests(IntrDispatchAuditFixture):
     """The four stubs' RIP-relative ``leaq do_*`` + ``xchg`` into the
-    FUNC slot (Shape A)."""
+    FUNC slot (Shape A).
+
+    This class owns the *stub* form: the RIP-relative ``leaq`` at
+    ``0xFFFF8000001049C1`` (the page_fault stub) and the stub's jump to
+    the shared ``error_code`` frame at ``0xFFFF8000001049CC``.
+    """
 
     def test_expected_target_passes(self):
         self.stage_x86()
         self.assertEqual(self.audit(), [])
 
+    def test_expected_target_is_resolved_to_the_expected_symbol(self):
+        # The positive side of the triple: the stub's RIP-relative
+        # `leaq` must resolve through the ELF symbol table to
+        # do_page_fault, and the audit must report that edge by name.
+        self.stage_x86()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("edge stub page_fault -> do_page_fault "
+                            "(leaq rip-rel, resolved through nm)" in n
+                            for n in notes), notes)
+
     def test_wrong_target_fails(self):
         # page_fault's leaq resolves to do_general_protection.
-        self.stage_x86(disasm_text=X86_DISASM.replace(
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001049C1,
             "# 0xffff80000014d120 <do_page_fault>",
             "# 0xffff80000014bfb0 <do_general_protection>"))
         errors = self.audit()
         self.assertTrue(any("page_fault" in e for e in errors), errors)
 
     def test_unresolvable_target_fails(self):
-        self.stage_x86(disasm_text=X86_DISASM.replace(
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001049C1,
             "# 0xffff80000014d120 <do_page_fault>",
             "# 0xffff800000199998 <not_a_symbol>"))
         errors = self.audit()
