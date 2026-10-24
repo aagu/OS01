@@ -169,18 +169,26 @@ int pty_ioctl(pty_t *pty, int cmd, void *arg)
 //  pty_master_ioctl — public, called for FD_PTY_MASTER
 // ═══════════════════════════════════════════════════════════════
 
+// Share one locked snapshot path; faultable user copies stay outside the lock.
+static int pty_get_termios(pty_t *pty, void *arg)
+{
+    if (!arg) return -EFAULT;
+    if (!syscall_check_user_range((uint64_t)arg,
+                                  sizeof(struct termios), true))
+        return -EFAULT;
+    struct termios kterm;
+    uint64_t fl = spin_lock_irqsave(&pty->state_lock);
+    memcpy(&kterm, &pty->term, sizeof(kterm));
+    spin_unlock_irqrestore(&pty->state_lock, fl);
+    ssize_t rc = copy_to_user_ft(arg, &kterm, sizeof(kterm));
+    return rc < 0 ? (int)rc : 0;
+}
+
 int pty_master_ioctl(pty_t *pty, int cmd, void *arg)
 {
     if (!pty) return -ENODEV;
-    if (cmd == TCGETS) {
-        if (!arg) return -EFAULT;
-        if (!syscall_check_user_range((uint64_t)arg,
-                                      sizeof(struct termios), true))
-            return -EFAULT;
-        ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
-        if (user_copy_rc < 0) return user_copy_rc;
-        return 0;
-    }
+    if (cmd == TCGETS)
+        return pty_get_termios(pty, arg);
     return pty_ioctl(pty, cmd, arg);
 }
 
@@ -197,17 +205,8 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
     case TIOCGPGRP:
     case TIOCSPGRP:
         return pty_ioctl(pty, cmd, arg);
-    case TCGETS: {
-        if (!arg) return -EFAULT;
-        if (!syscall_check_user_range((uint64_t)arg,
-                                      sizeof(struct termios), true))
-            return -EFAULT;
-        {
-            ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
-            if (user_copy_rc < 0) return user_copy_rc;
-        }
-        return 0;
-    }
+    case TCGETS:
+        return pty_get_termios(pty, arg);
     case TCSETS:
     case TCSETSW: {
         if (!arg) return -EFAULT;
@@ -217,7 +216,9 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
         struct termios kterm;
         if (copy_from_user_ft(&kterm, arg, sizeof(kterm)) < 0)
             return -EFAULT;
+        uint64_t fl = spin_lock_irqsave(&pty->state_lock);
         pty->term = kterm;
+        spin_unlock_irqrestore(&pty->state_lock, fl);
         return 0;
     }
     case TIOCSCTTY:

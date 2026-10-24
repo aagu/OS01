@@ -17,7 +17,7 @@ typedef struct pty_struct {
     pipe_t     *master_to_slave;   // master writes, slave reads
     pipe_t     *slave_to_master;   // slave writes, master reads
     spinlock_T  state_lock;
-    struct termios term;
+    struct termios term;           // state_lock protects published termios
     uint16_t    ws_row, ws_col;
     uint16_t    ws_xpixel, ws_ypixel;
     union {

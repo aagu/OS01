@@ -19,6 +19,9 @@ typedef struct {
     volatile long lock;
 } spinlock_T;
 
+void pty_test_state_acquire(spinlock_T *lock) __attribute__((weak));
+void pty_test_state_release(spinlock_T *lock) __attribute__((weak));
+
 static inline void spin_init(spinlock_T *l) {
     __atomic_store_n(&l->lock, 1L, __ATOMIC_RELEASE);
 }
@@ -46,11 +49,13 @@ static inline long spin_trylock(spinlock_T *l) {
 
 static inline uint64_t spin_lock_irqsave(spinlock_T *l) {
     spin_lock(l);
+    if (pty_test_state_acquire) pty_test_state_acquire(l);
     return 0;
 }
 
 static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) {
     (void)f;
+    if (pty_test_state_release) pty_test_state_release(l);
     spin_unlock(l);
 }
 

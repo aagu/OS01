@@ -1162,7 +1162,11 @@ __attribute__((weak)) int pty_master_ioctl(pty_t *pty, int cmd, void *arg)
                                       sizeof(struct termios), true))
             return -EFAULT;
         {
-            ssize_t user_copy_rc = copy_to_user_ft(arg, &pty->term, sizeof(struct termios));
+            struct termios kterm;
+            uint64_t fl = spin_lock_irqsave(&pty->state_lock);
+            memcpy(&kterm, &pty->term, sizeof(kterm));
+            spin_unlock_irqrestore(&pty->state_lock, fl);
+            ssize_t user_copy_rc = copy_to_user_ft(arg, &kterm, sizeof(kterm));
             if (user_copy_rc < 0) return user_copy_rc;
         }
         return 0;

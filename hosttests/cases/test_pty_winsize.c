@@ -10,6 +10,8 @@
  *   - User memory fault safety (-EFAULT on invalid user pointers)
  *   - Regression: PTY master preserves TCGETS and rejects unknown ioctls with -ENOTTY
  *   - Concurrent resize reads consistent four-field states without tearing
+ *   - TCSETS/TCSETSW commit under state_lock; TCGETS on both ends uses
+ *     one stable snapshot and all faultable user copies happen unlocked
  */
 
 #include "test_framework.h"
@@ -47,6 +49,47 @@ static bool g_user_range_valid = true;
 static bool g_user_writable_ok = true;
 static bool g_inject_copy_from_fault = false;
 static bool g_inject_copy_to_fault = false;
+static bool g_observe_termios = false;
+static unsigned g_state_acquires, g_state_releases, g_copy_while_locked;
+static bool g_term_at_acquire_ok, g_term_at_release_ok;
+static struct termios g_term_before, g_term_after;
+static bool g_update_during_copy;
+static struct termios g_copy_update;
+static int g_copy_update_rc;
+
+static bool termios_equal(const struct termios *a, const struct termios *b)
+{
+    return a->c_iflag == b->c_iflag && a->c_oflag == b->c_oflag &&
+           a->c_cflag == b->c_cflag && a->c_lflag == b->c_lflag &&
+           a->c_line == b->c_line &&
+           memcmp(a->c_cc, b->c_cc, NCCS) == 0 &&
+           a->__c_ispeed == b->__c_ispeed && a->__c_ospeed == b->__c_ospeed;
+}
+
+void pty_test_state_acquire(spinlock_T *lock)
+{
+    if (g_observe_termios && lock == &g_active_pty->state_lock) {
+        g_state_acquires++;
+        g_term_at_acquire_ok = termios_equal(&g_active_pty->term, &g_term_before);
+    }
+}
+
+void pty_test_state_release(spinlock_T *lock)
+{
+    if (g_observe_termios && lock == &g_active_pty->state_lock) {
+        g_state_releases++;
+        g_term_at_release_ok = termios_equal(&g_active_pty->term, &g_term_after);
+    }
+}
+
+static bool termios_copy_is_locked(void)
+{
+    if (g_observe_termios && g_active_pty->state_lock.lock == 0L) {
+        g_copy_while_locked++;
+        return true;
+    }
+    return false;
+}
 
 /* ── signal_pgrp host mock ── */
 int signal_pgrp(pid_t target, int sig)
@@ -79,6 +122,7 @@ ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
                               void (*on_fault)(void *), void *arg)
 {
     (void)on_fault; (void)arg;
+    if (termios_copy_is_locked()) return -EFAULT;
     if (g_inject_copy_from_fault) return -EFAULT;
     memcpy(dst, src, n);
     return (ssize_t)n;
@@ -88,7 +132,15 @@ ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
                             void (*on_fault)(void *), void *arg)
 {
     (void)on_fault; (void)arg;
+    if (termios_copy_is_locked()) return -EFAULT;
     if (g_inject_copy_to_fault) return -EFAULT;
+    if (g_update_during_copy && n == sizeof(struct termios)) {
+        g_update_during_copy = false;
+        memcpy(dst, src, n / 2);
+        g_copy_update_rc = pty_slave_ioctl(g_active_pty, TCSETS, &g_copy_update);
+        memcpy((char *)dst + n / 2, (const char *)src + n / 2, n - n / 2);
+        return (ssize_t)n;
+    }
     memcpy(dst, src, n);
     return (ssize_t)n;
 }
@@ -139,6 +191,10 @@ static void reset_test_state(void)
     g_user_writable_ok = true;
     g_inject_copy_from_fault = false;
     g_inject_copy_to_fault = false;
+    g_observe_termios = false;
+    g_update_during_copy = false;
+    g_state_acquires = g_state_releases = g_copy_while_locked = 0;
+    g_term_at_acquire_ok = g_term_at_release_ok = false;
 }
 
 static void init_test_files(pty_t *pty, file_t *fm, file_t *fs)
@@ -549,6 +605,120 @@ TEST_FUNC(test_concurrent_resize_consistency)
     assert_eq(0, ctx.torn_count);
 }
 
+static struct termios termios_pattern(unsigned seed)
+{
+    struct termios t = {0};
+    t.c_iflag = seed;
+    t.c_oflag = seed + 1;
+    t.c_cflag = seed + 2;
+    t.c_lflag = seed + 3;
+    t.c_line = seed;
+    for (unsigned i = 0; i < NCCS; i++) t.c_cc[i] = seed + i;
+    t.__c_ispeed = seed + 100;
+    t.__c_ospeed = seed + 200;
+    return t;
+}
+
+TEST_FUNC(test_termios_set_commits_inside_state_lock)
+{
+    const int commands[] = {TCSETS, TCSETSW};
+    for (unsigned i = 0; i < 2; i++) {
+        reset_test_state();
+        pty_t pty = {0};
+        spin_init(&pty.state_lock);
+        file_t fm, fs;
+        init_test_files(&pty, &fm, &fs);
+        g_term_before = termios_pattern(10);
+        g_term_after = termios_pattern(70);
+        pty.term = g_term_before;
+        g_observe_termios = true;
+        int rc = fd_ioctl(&fs, commands[i], &g_term_after);
+        g_observe_termios = false;
+        assert_eq(0, rc);
+        assert_true(termios_equal(&pty.term, &g_term_after));
+        assert_eq(1, g_state_acquires);
+        assert_eq(1, g_state_releases);
+        assert_true(g_term_at_acquire_ok);
+        assert_true(g_term_at_release_ok);
+        assert_eq(0, g_copy_while_locked);
+        assert_eq(1, pty.state_lock.lock);
+    }
+}
+
+TEST_FUNC(test_termios_get_uses_stable_snapshot)
+{
+    for (unsigned master = 0; master < 2; master++) {
+        reset_test_state();
+        pty_t pty = {0};
+        spin_init(&pty.state_lock);
+        file_t fm, fs;
+        init_test_files(&pty, &fm, &fs);
+        struct termios original = termios_pattern(10), out = {0};
+        pty.term = original;
+        g_copy_update = termios_pattern(70);
+        g_update_during_copy = true;
+        int rc = fd_ioctl(master ? &fm : &fs, TCGETS, &out);
+        assert_eq(0, rc);
+        assert_eq(0, g_copy_update_rc);
+        assert_false(g_update_during_copy);
+        assert_true(termios_equal(&original, &out));
+        assert_true(termios_equal(&g_copy_update, &pty.term));
+
+        /* Ordinary reads use one lock and copy to user after unlocking. */
+        g_term_before = g_term_after = g_copy_update;
+        g_observe_termios = true;
+        rc = fd_ioctl(master ? &fm : &fs, TCGETS, &out);
+        g_observe_termios = false;
+        assert_eq(0, rc);
+        assert_true(termios_equal(&g_copy_update, &out));
+        assert_eq(1, g_state_acquires);
+        assert_eq(1, g_state_releases);
+        assert_true(g_term_at_acquire_ok);
+        assert_true(g_term_at_release_ok);
+        assert_eq(0, g_copy_while_locked);
+    }
+}
+
+TEST_FUNC(test_termios_faults_preserve_state)
+{
+    reset_test_state();
+    pty_t pty = {0};
+    spin_init(&pty.state_lock);
+    file_t fm, fs;
+    init_test_files(&pty, &fm, &fs);
+    struct termios original = termios_pattern(10);
+    struct termios replacement = termios_pattern(70), out;
+    pty.term = original;
+    const int commands[] = {TCSETS, TCSETSW};
+    g_observe_termios = true;
+    for (unsigned i = 0; i < 2; i++) {
+        assert_eq(-EFAULT, fd_ioctl(&fs, commands[i], NULL));
+        g_user_range_valid = false;
+        assert_eq(-EFAULT, fd_ioctl(&fs, commands[i], &replacement));
+        g_user_range_valid = true;
+        g_inject_copy_from_fault = true;
+        assert_eq(-EFAULT, fd_ioctl(&fs, commands[i], &replacement));
+        g_inject_copy_from_fault = false;
+        assert_true(termios_equal(&original, &pty.term));
+    }
+    assert_eq(0, g_state_acquires);
+    assert_eq(0, g_state_releases);
+    for (unsigned master = 0; master < 2; master++) {
+        file_t *f = master ? &fm : &fs;
+        assert_eq(-EFAULT, fd_ioctl(f, TCGETS, NULL));
+        g_user_writable_ok = false;
+        assert_eq(-EFAULT, fd_ioctl(f, TCGETS, &out));
+        g_user_writable_ok = true;
+        g_inject_copy_to_fault = true;
+        assert_eq(-EFAULT, fd_ioctl(f, TCGETS, &out));
+        g_inject_copy_to_fault = false;
+        assert_eq(1, pty.state_lock.lock);
+        assert_true(termios_equal(&original, &pty.term));
+    }
+    g_observe_termios = false;
+    assert_eq(0, g_copy_while_locked);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_master_slave_winsize),
     TEST_ENTRY(test_winsize_no_signal_when_unchanged),
@@ -558,6 +728,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_master_pgrp_support),
     TEST_ENTRY(test_master_tcgets_regression),
     TEST_ENTRY(test_concurrent_resize_consistency),
+    TEST_ENTRY(test_termios_set_commits_inside_state_lock),
+    TEST_ENTRY(test_termios_get_uses_stable_snapshot),
+    TEST_ENTRY(test_termios_faults_preserve_state),
 TEST_LIST_END
 
 int main(void)

@@ -7,6 +7,8 @@
 
 ## 2026-10-24
 
+- fix(pty): **parked T6 termios 读写同步闭环**：`TCSETS`/`TCSETSW` 原先无锁提交，主/从 `TCGETS` 直接把共享 termios 传给用户拷贝，存在跨代混合读取。写端用户拷贝后持 `state_lock` 提交；读端持锁生成本地快照、解锁后用户拷贝，weak master fallback 同步修复。新增确定性交错、锁范围与用户指针失败回归：旧实现 18 条断言失败，修复后 PTY 11 场景/149 断言全部通过；隔离 weak 路径的旧版本另有 5 条失败，修复后全绿。完整分辨率宿主九组、`test-host` 及 QEMU phase-0 启动检查通过。详见 [调查与验证](debug/2026-10-24-pty-termios-state-lock.md)。
+
 - test(monitor): **parked ⑧ PMM/accounting 锁内快照验证闭环**：调查确认生产实现正确；PMM no-op shadow 新增可选 acquire/release 观察，accounting shadow 补 release 观察。新 fixture 用真实 allocator/tick writer 识别保护锁，在加锁前、持锁时与解锁后注入不同计数，验证快照的锁身份、配对及数据复制范围。两个路径的缺锁/提前解锁/延迟加锁/错锁共八个临时错误版本均被拦住；PMM 6 项/59 断言、accounting 13 项/138 断言、完整 monitor 七组及 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-monitor-snapshot-lock-observation.md)。
 
 - test(monitor): **parked ⑦ CPU online 边界 fixture 闭环**：调查确认 `sched_accounting_read()` 对合法但未枚举 CPU 槽返回 `online=0`，范围内读取实际 per-CPU online 标志，生产实现无需修改。新增范围外、等于 `num_cpus`、最后合法槽及 online 标志切换覆盖，验证计数/epoch/频率不被读取重置；三个临时错误版本均被新增测试拦住。accounting 12 项/120 断言、完整 monitor 七组及 `test-host` 全部通过。详见 [调查与验证](debug/2026-10-24-accounting-online-boundary.md)。
