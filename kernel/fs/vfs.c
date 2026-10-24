@@ -698,6 +698,7 @@ static int vfs_bind_submount_locked(vfs_mount_t *mp)
         return (lrc < 0) ? lrc : -ENOENT;
     }
 
+    dcache_invalidate(parent_dir, mp->mount_name);
     // mp_node->parent holds a persistent reference to parent_dir.
     vfs_node_put(parent_dir);
 
@@ -1486,27 +1487,37 @@ static __attribute__((noinline)) int __vfs_lookup_raw(const char *path,
         if (sub_mp && sub_mp->root) {
             child = vfs_node_get(sub_mp->root);
         } else {
-            int lrc;
-            if (cur->i_ops && vfs_is_valid_kptr(cur->i_ops) &&
-                cur->i_ops->lookup && vfs_is_valid_kptr(cur->i_ops->lookup)) {
-                lrc = cur->i_ops->lookup(cur, comp, &child);
-            } else {
-                lrc = vfs_generic_lookup_by_readdir(cur, comp, &child);
-            }
-            if (lrc < 0 || !child) {
-                vfs_node_put(cur);
-                ret = (lrc < 0) ? lrc : -ENOENT;
-                goto out;
-            }
-            if (!child->mount) child->mount = cur->mount;
-            if (!child->parent) {
-                child->parent = vfs_node_get(cur);
-            }
-            if (!child->i_ops) child->i_ops = cur->i_ops;
-            if (!child->f_ops) child->f_ops = cur->f_ops;
-            vfs_active_node_register(child);
+            uint64_t lookup_gen = 0;
+            child = dcache_lookup_begin(cur, comp, &lookup_gen);
+            if (!child) {
+                int lrc;
+                if (cur->i_ops && vfs_is_valid_kptr(cur->i_ops) &&
+                    cur->i_ops->lookup && vfs_is_valid_kptr(cur->i_ops->lookup)) {
+                    lrc = cur->i_ops->lookup(cur, comp, &child);
+                } else {
+                    lrc = vfs_generic_lookup_by_readdir(cur, comp, &child);
+                }
+                if (lrc < 0 || !child) {
+                    vfs_node_put(cur);
+                    ret = (lrc < 0) ? lrc : -ENOENT;
+                    goto out;
+                }
+                if (!child->mount) child->mount = cur->mount;
+                if (!child->parent) {
+                    child->parent = vfs_node_get(cur);
+                }
+                if (!child->i_ops) child->i_ops = cur->i_ops;
+                if (!child->f_ops) child->f_ops = cur->f_ops;
+                vfs_active_node_register(child);
 
-            if (child->mounted_here && child->mounted_here->root) {
+                if (child->mounted_here && child->mounted_here->root) {
+                    vfs_node_t *sub_root = vfs_node_get(child->mounted_here->root);
+                    vfs_node_put(child);
+                    child = sub_root;
+                } else {
+                    dcache_insert_validated(cur, comp, child, lookup_gen);
+                }
+            } else if (child->mounted_here && child->mounted_here->root) {
                 vfs_node_t *sub_root = vfs_node_get(child->mounted_here->root);
                 vfs_node_put(child);
                 child = sub_root;
@@ -2422,7 +2433,10 @@ int vfs_unlink(const char *path, const char *cwd)
         return -1;
     }
 
+    dcache_mutation_begin();
+    dcache_invalidate(parent, name);
     int ret = parent->i_ops->unlink(parent, name);
+    dcache_mutation_end_invalidate(parent, name);
     vfs_node_put(parent);
     vfs_ns_unlock();
     return ret;
@@ -2496,7 +2510,10 @@ int vfs_rmdir(const char *path, const char *cwd)
         return -1;
     }
 
+    dcache_mutation_begin();
+    dcache_invalidate(parent, name);
     int ret = parent->i_ops->rmdir(parent, name);
+    dcache_mutation_end_invalidate(parent, name);
     vfs_node_put(parent);
     vfs_ns_unlock();
     return ret;
@@ -2582,7 +2599,12 @@ int vfs_rename(const char *oldpath, const char *newpath, const char *cwd)
         return -1;
     }
 
+    dcache_mutation_begin();
+    dcache_invalidate(olddir, oldname);
+    dcache_invalidate(newdir, newname);
+    dcache_flush_mount(olddir->mount);
     int ret = olddir->i_ops->rename(olddir, oldname, newdir, newname);
+    dcache_mutation_end_rename(olddir, oldname, newdir, newname);
     vfs_node_put(olddir);
     vfs_node_put(newdir);
     vfs_ns_unlock();
