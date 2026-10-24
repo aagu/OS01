@@ -512,6 +512,21 @@ static int tmpfs_vfs_rename(struct vfs_node *olddir, const char *oldname,
 
     int dst_idx = tmpfs_find_child(nd, newname);
     tmpfs_node_t *dst_child = (dst_idx >= 0) ? nd->children[dst_idx] : NULL;
+
+    // Ensure capacity in newdir before modifying any node state
+    if (!dst_child && nd->child_count >= nd->child_cap) {
+        int new_cap = nd->child_cap * 2;
+        tmpfs_node_t **new_arr = kmalloc(new_cap * sizeof(tmpfs_node_t *));
+        if (!new_arr) {
+            spin_unlock(&tmpfs_lock);
+            return -1;
+        }
+        memcpy(new_arr, nd->children, nd->child_count * sizeof(tmpfs_node_t *));
+        kfree(nd->children);
+        nd->children  = new_arr;
+        nd->child_cap = new_cap;
+    }
+
     if (dst_child) {
         if (dst_child->type == VFS_DIR && dst_child->child_count > 0) {
             spin_unlock(&tmpfs_lock);
@@ -537,19 +552,6 @@ static int tmpfs_vfs_rename(struct vfs_node *olddir, const char *oldname,
     od->children[idx] = od->children[od->child_count - 1];
     od->child_count--;
 
-    if (nd->child_count >= nd->child_cap) {
-        int new_cap = nd->child_cap * 2;
-        tmpfs_node_t **new_arr = kmalloc(new_cap * sizeof(tmpfs_node_t *));
-        if (!new_arr) {
-            od->children[od->child_count++] = child;
-            spin_unlock(&tmpfs_lock);
-            return -1;
-        }
-        memcpy(new_arr, nd->children, nd->child_count * sizeof(tmpfs_node_t *));
-        kfree(nd->children);
-        nd->children  = new_arr;
-        nd->child_cap = new_cap;
-    }
     nd->children[nd->child_count++] = child;
 
     uint32_t rem_dst = dst_child ? tmpfs_node_put_locked(dst_child) : 1;

@@ -391,6 +391,7 @@ static int ext2_reclaim_orphan_inode_locked(ext2_fs_t *fs, uint32_t target_ino)
                         break;
                     }
                 }
+                ext2_write_inode(fs, target_ino, &inode);
                 return -ENOMEM;
             }
             if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
@@ -401,6 +402,7 @@ static int ext2_reclaim_orphan_inode_locked(ext2_fs_t *fs, uint32_t target_ino)
                         break;
                     }
                 }
+                ext2_write_inode(fs, target_ino, &inode);
                 return -EIO;
             }
             for (uint32_t i = 0; i < ptrs_per_block; i++) {
@@ -1797,6 +1799,10 @@ static int ext2_iop_getattr(struct vfs_node *node, struct stat *buf)
 static void ext2_iop_evict_node(struct vfs_node *node)
 {
     if (!node || !node->mount) return;
+    if (node == node->mount->root || (node->node_flags & VFS_NODE_MOUNT_STUB)) {
+        vfs_active_node_unregister(node);
+        return;
+    }
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
     if (!fs) return;
 
@@ -1809,8 +1815,15 @@ static void ext2_iop_evict_node(struct vfs_node *node)
     vfs_active_node_unregister_locked(node->mount, node);
 
     bool other_active = vfs_active_nodes_has_ino_locked(node->mount, ino, NULL);
-    if (!other_active && ext2_is_orphan_locked(fs, ino)) {
+    if (!other_active &&
+        ((node->node_flags & VFS_NODE_ORPHANED) || ext2_is_orphan_locked(fs, ino))) {
+        if (!ext2_is_orphan_locked(fs, ino)) {
+            ext2_mark_orphan_locked(fs, ino);
+        }
         if (ext2_claim_orphan_reclaim_locked(fs, ino)) {
+            should_reclaim = true;
+        } else if (!ext2_is_orphan_locked(fs, ino)) {
+            // If orphans table was full and mark failed, reclaim directly as sole reclaimer
             should_reclaim = true;
         }
     }
