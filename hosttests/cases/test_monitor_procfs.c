@@ -583,6 +583,65 @@ static TEST_FUNC(test_meminfo_format)
     assert_eq(procfs_fmt_meminfo(&s, buf, 10), -EOVERFLOW);
 }
 
+/* Legacy node reads accept an exact-fit byte buffer. */
+
+static TEST_FUNC(test_legacy_node_capacity_boundary)
+{
+    test_setup();
+    fixture_task_add(77, "legacy boundary", TASK_RUNNING);
+    const uint32_t types[] = {
+        PROCFS_TYPE_STATUS, PROCFS_TYPE_STAT,
+        PROCFS_TYPE_THERMAL, PROCFS_TYPE_MEMINFO,
+    };
+
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        struct vfs_node node;
+        test_node_init(&node, types[i], 77);
+        file_t f;
+        test_file_init(&f, &node);
+        assert_eq(procfs_open_file(&f), 0);
+
+        /* Use the public per-file path as the expected byte stream.
+         * Fixture clocks and data sources remain fixed across reads. */
+        char expected[T_STATUS_CAP];
+        int64_t len = snapshot_read_all(&f, expected, sizeof(expected));
+        assert_true(len > 1 && len < T_STATUS_CAP);
+        if (len <= 1 || len >= T_STATUS_CAP) {
+            procfs_release_file(&f);
+            continue;
+        }
+        procfs_release_file(&f);
+        long balance_before = kmalloc_balance;
+
+        char storage[T_STATUS_CAP + 2];
+        char untouched[sizeof(storage)];
+        memset(storage, 0x5a, sizeof(storage));
+        memcpy(untouched, storage, sizeof(storage));
+        assert_eq(procfs_generate_node(types[i], 77, storage + 1,
+                                       (size_t)len - 1), -EOVERFLOW);
+        assert_mem_eq(storage, untouched, sizeof(storage));
+        assert_eq(kmalloc_balance, balance_before);
+
+        /* The destination is a byte buffer, not a C string: exact fit
+         * succeeds and must leave both adjacent canaries untouched. */
+        assert_eq(procfs_generate_node(types[i], 77, storage + 1,
+                                       (size_t)len), len);
+        assert_mem_eq(storage + 1, expected, (size_t)len);
+        assert_eq(storage[0], 0x5a);
+        assert_eq(storage[len + 1], 0x5a);
+        assert_eq(kmalloc_balance, balance_before);
+
+        memset(storage, 0x5a, sizeof(storage));
+        assert_eq(procfs_generate_node(types[i], 77, storage + 1,
+                                       (size_t)len + 1), len);
+        assert_mem_eq(storage + 1, expected, (size_t)len);
+        assert_eq(storage[0], 0x5a);
+        assert_eq(storage[len + 1], 0x5a); /* spare byte is not a NUL */
+        assert_eq(storage[len + 2], 0x5a);
+        assert_eq(kmalloc_balance, balance_before);
+    }
+}
+
 /* ── 7. snapshot stable across task disappearance ──────────────────── */
 
 static TEST_FUNC(test_snapshot_stable_across_disappearance)
@@ -825,6 +884,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_stat_format),
     TEST_ENTRY(test_thermal_weak_defaults_and_reason_table),
     TEST_ENTRY(test_meminfo_format),
+    TEST_ENTRY(test_legacy_node_capacity_boundary),
     TEST_ENTRY(test_snapshot_stable_across_disappearance),
     TEST_ENTRY(test_open_rollback_oom),
     TEST_ENTRY(test_stat_thermal_meminfo_open_paths),

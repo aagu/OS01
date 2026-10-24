@@ -277,7 +277,8 @@ int procfs_generate_node(uint32_t type, uint32_t pid, char *buf, size_t cap)
     if (rc < 0)
         return rc;
 
-    if (s->len >= cap) {
+    /* Node reads return bytes, without the formatter's trailing NUL. */
+    if (s->len > cap) {
         kfree(s);
         return -EOVERFLOW;
     }

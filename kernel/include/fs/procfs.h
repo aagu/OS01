@@ -63,8 +63,9 @@ int procfs_readdir_tasks(uint64_t index, struct vfs_dirent *entry,
 // uses (one formatting source).  A direct vfs_read on the node — no
 // file_t, no open_file hook — remains a legal path (Task 1 contract),
 // so procfs_read() delegates here for stat/thermal/meminfo/status.
-// Returns bytes written or a negative errno; procfs_read maps failures
-// to an empty read.
+// Copies text bytes without a trailing NUL; cap equal to the text length
+// is sufficient. Returns bytes written or a negative errno (-EOVERFLOW
+// when text length > cap); procfs_read maps failures to an empty read.
 int procfs_generate_node(uint32_t type, uint32_t pid, char *buf, size_t cap);
 
 #endif // _FS_PROCFS_H
