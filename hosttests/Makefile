@@ -189,6 +189,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_input_lvgl.elf \
     $(TEST_BLD)/test_gui_theme.elf \
     $(TEST_BLD)/test_gui_theme_apply.elf \
+    $(TEST_BLD)/test_desktop_state.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -1649,6 +1650,20 @@ $(TEST_BLD)/test_tetris_logic.o: $(TEST_CASES)/test_tetris_logic.c
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/tetris -c $< -o $@
 
 $(TEST_BLD)/test_tetris_logic.elf: $(TEST_BLD)/test_tetris_logic.o $(TEST_BLD)/tetris_logic.o
+	$(HOST_CC) -o $@ $^
+
+# GUI-3 Task 3: the desktop surface state machine.  Compiles the REAL
+# user/desktop/desktop_state.c (pure C, no LVGL dependency) so the
+# (state x intent) matrix can be exhausted on the host.
+$(TEST_BLD)/desktop_state.o: $(TESTS_DIR)/user/desktop/desktop_state.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/desktop -c $< -o $@
+
+$(TEST_BLD)/test_desktop_state.o: $(TEST_CASES)/test_desktop_state.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TESTS_DIR)/user/desktop -c $< -o $@
+
+$(TEST_BLD)/test_desktop_state.elf: $(TEST_BLD)/test_desktop_state.o $(TEST_BLD)/desktop_state.o
 	$(HOST_CC) -o $@ $^
 
 POLL_PRODUCTION_OBJS := \
@@ -4069,6 +4084,17 @@ $(TEST_BLD)/test_gui_theme_apply.elf: \
 
 .PHONY: test-gui-theme-apply
 test-gui-theme-apply: $(TEST_BLD)/test_gui_theme_apply.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── GUI-3 Task 3: desktop surface state machine ───────────────────
+# The state machine is pure C (user/desktop/desktop_state.c), so this case
+# needs neither LVGL nor the platform: only the real state machine plus
+# the test TU.
+.PHONY: test-gui-desktop-state
+test-gui-desktop-state: $(TEST_BLD)/test_desktop_state.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
