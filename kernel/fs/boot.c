@@ -11,8 +11,6 @@
 #include <fs/boot.h>
 #include <fs/vfs.h>
 #include <fs/devfs.h>
-#include <fs/fat.h>
-#include <fs/ext2.h>
 #include <fs/gpt.h>
 #include <fs/tmpfs.h>
 #include <fs/procfs.h>
@@ -76,9 +74,7 @@ static bool mount_partitioned_disk(void)
     gpt_info_t *gpt = gpt_scan(disk);
     if (!gpt) {
         // Fallback: old single-FAT32 layout (whole disk is FAT32).
-        fat32_fs_t *fs = NULL;
-        if (0 == fat32_init(disk, &fs)) {
-            vfs_mount("/", disk, &fat_vfs_ops, fs);
+        if (vfs_mount_fs("vfat", "/", disk, NULL) == 0) {
             return true;
         }
         return false;
@@ -89,21 +85,17 @@ static bool mount_partitioned_disk(void)
     //   gpt->partitions[1] = hda2 (ext2)      → /
     if (gpt->count < 2) return false;
 
-    ext2_fs_t *ext2_fs = NULL;
-    fat32_fs_t *fat_fs = NULL;
     bool root_ok = false;
 
-    if (0 == ext2_init(gpt->partitions[1].dev, &ext2_fs)) {
-        vfs_mount("/", gpt->partitions[1].dev, &ext2_vfs_ops, ext2_fs);
+    if (vfs_mount_fs("ext2", "/", gpt->partitions[1].dev, NULL) == 0) {
         root_ok = true;
     } else {
         log_err("EXT2: mount failed — / not available\n");
     }
 
-    if (0 == fat32_init(gpt->partitions[0].dev, &fat_fs))
-        vfs_mount("/boot", gpt->partitions[0].dev, &fat_vfs_ops, fat_fs);
-    else
+    if (vfs_mount_fs("vfat", "/boot", gpt->partitions[0].dev, NULL) != 0) {
         log_warn("FAT32: /boot mount failed\n");
+    }
 
     return root_ok;
 }

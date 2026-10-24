@@ -81,6 +81,8 @@ static int s_mock_ext2_init_ret = 0;
 static int s_mock_fat32_init_ret = 0;
 static bool s_root_mounted = false;
 static bool s_boot_mounted = false;
+static char s_root_fs_type[16];
+static char s_boot_fs_type[16];
 static bool s_tmpfs_init_called = false;
 static bool s_procfs_init_called = false;
 
@@ -106,6 +108,29 @@ int fat32_init(block_device_t *dev, fat32_fs_t **fs)
 
 struct vfs_ops ext2_vfs_ops = {0};
 struct vfs_ops fat_vfs_ops = {0};
+
+int vfs_mount_fs(const char *type_name, const char *path,
+                 block_device_t *dev, void *data)
+{
+    (void)dev;
+    (void)data;
+    if (!type_name || !path) return -EINVAL;
+    if (strcmp(type_name, "ext2") == 0) {
+        if (s_mock_ext2_init_ret != 0) return s_mock_ext2_init_ret;
+    } else if (strcmp(type_name, "vfat") == 0) {
+        if (s_mock_fat32_init_ret != 0) return s_mock_fat32_init_ret;
+    } else {
+        return -ENODEV;
+    }
+    if (strcmp(path, "/") == 0) {
+        s_root_mounted = true;
+        strncpy(s_root_fs_type, type_name, sizeof(s_root_fs_type) - 1);
+    } else if (strcmp(path, "/boot") == 0) {
+        s_boot_mounted = true;
+        strncpy(s_boot_fs_type, type_name, sizeof(s_boot_fs_type) - 1);
+    }
+    return 0;
+}
 
 int vfs_mount(const char *path, block_device_t *dev, struct vfs_ops *ops, void *data)
 {
@@ -293,6 +318,8 @@ static void reset_test_state(void)
     s_mock_fat32_init_ret = 0;
     s_root_mounted = false;
     s_boot_mounted = false;
+    s_root_fs_type[0] = '\0';
+    s_boot_fs_type[0] = '\0';
     s_tmpfs_init_called = false;
     s_procfs_init_called = false;
 
@@ -566,6 +593,8 @@ static void test_root_requirement(void)
     s_panic_jmp_armed = false;
     assert_true(s_root_mounted);
     assert_true(s_boot_mounted);
+    assert_str_eq("ext2", s_root_fs_type);
+    assert_str_eq("vfat", s_boot_fs_type);
     assert_true(s_tmpfs_init_called);
     assert_true(s_procfs_init_called);
 
@@ -583,6 +612,7 @@ static void test_root_requirement(void)
     }
     s_panic_jmp_armed = false;
     assert_true(s_root_mounted);
+    assert_str_eq("vfat", s_root_fs_type);
 
     /* Subtest D: GPT present but ext2_init fails -> panics with root filesystem unavailable */
     reset_test_state();
@@ -597,6 +627,26 @@ static void test_root_requirement(void)
     }
     s_panic_jmp_armed = false;
     assert_not_null(strstr(s_last_panic_msg, "root filesystem unavailable"));
+
+    /* Subtest E: GPT present, ext2 succeeds, fat32 /boot fails -> fs_boot_mounts does not panic */
+    reset_test_state();
+    assert_eq(0, block_device_register(&disk_desc, &disk_dev));
+    s_mock_gpt = &fake_gpt;
+    s_mock_ext2_init_ret = 0;
+    s_mock_fat32_init_ret = -EIO;
+
+    s_panic_jmp_armed = true;
+    if (setjmp(s_panic_jmp) == 0) {
+        fs_boot_mounts();
+    } else {
+        assert_true(false); /* Should not panic */
+    }
+    s_panic_jmp_armed = false;
+    assert_true(s_root_mounted);
+    assert_false(s_boot_mounted);
+    assert_str_eq("ext2", s_root_fs_type);
+    assert_true(s_tmpfs_init_called);
+    assert_true(s_procfs_init_called);
 }
 
 /* ── 6. test_single_init ─────────────────────────────────────────── */
