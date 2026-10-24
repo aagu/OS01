@@ -120,7 +120,7 @@ desktop_app_state_t *desktop_app_state_create(void)
     state->term_history_cursor = -1;
     snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", "/");
     snprintf(state->term_output, sizeof(state->term_output), "%s",
-             "OS01 壳内终端。输入 help 查看内建命令。\n");
+             "OS01 built-in terminal. Type help for the command list.\n");
     return state;
 }
 
@@ -192,7 +192,7 @@ static lv_obj_t *build_app_bar(lv_obj_t *root, lv_display_t *disp,
         lv_obj_set_style_shadow_width(back, 0, 0);
         lv_obj_set_style_radius(back, gui_theme_radius(GUI_THEME_RADIUS_MD), 0);
         lv_obj_add_event_cb(back, app_back_cb, LV_EVENT_CLICKED, shell);
-        lv_obj_t *label = app_label(back, "< 返回", GUI_THEME_FONT_BODY, c->primary);
+        lv_obj_t *label = app_label(back, "< Back", GUI_THEME_FONT_BODY, c->primary);
         if (label != NULL) {
             lv_obj_center(label);
         }
@@ -278,7 +278,7 @@ static void files_refresh(desktop_shell_t *shell)
 
     DIR *dir = opendir(state->files_cwd);
     if (dir == NULL) {
-        lv_obj_t *err = app_label(list, "无法打开目录", GUI_THEME_FONT_BODY, c->error);
+        lv_obj_t *err = app_label(list, "Cannot open directory", GUI_THEME_FONT_BODY, c->error);
         (void)err;
         return;
     }
@@ -330,7 +330,7 @@ static void files_refresh(desktop_shell_t *shell)
         if (name != NULL) {
             lv_obj_set_pos(name, 48, 12);
         }
-        lv_obj_t *kind = app_label(row, entry->is_dir ? "目录" : "文件",
+        lv_obj_t *kind = app_label(row, entry->is_dir ? "Directory" : "File",
                                    GUI_THEME_FONT_LABEL, c->on_surface_variant);
         if (kind != NULL) {
             lv_obj_align(kind, LV_ALIGN_RIGHT_MID, -12, 0);
@@ -424,7 +424,7 @@ static lv_obj_t *build_files_app(lv_obj_t *root, lv_display_t *disp,
     files_refresh(shell);
 
     /* 边界说明：只读浏览器的限制必须写在界面上。 */
-    lv_obj_t *note = app_label(root, "只读浏览：不支持写入 / 删除 / 新建",
+    lv_obj_t *note = app_label(root, "Read-only: create, rename and delete are unavailable",
                                 GUI_THEME_FONT_LABEL, c->on_surface_variant);
     if (note != NULL) {
         lv_obj_align(note, LV_ALIGN_BOTTOM_LEFT, APP_MARGIN, -10);
@@ -450,9 +450,9 @@ static void term_exec_builtin(desktop_app_state_t *state, const char *cmd,
                               const char *arg)
 {
     if (strcmp(cmd, "help") == 0) {
-        term_append(state, "内建命令: help ls cat uname date clear\n");
+        term_append(state, "Built-in commands: help ls cat uname date clear\n");
     } else if (strcmp(cmd, "uname") == 0) {
-        term_append(state, "OS01 " APP_ARCH " (单进程桌面外壳)\n");
+        term_append(state, "OS01 " APP_ARCH " (single-process desktop shell)\n");
     } else if (strcmp(cmd, "date") == 0) {
         time_t now = time(NULL);
         struct tm tm_buf;
@@ -470,7 +470,7 @@ static void term_exec_builtin(desktop_app_state_t *state, const char *cmd,
         const char *path = (arg != NULL && arg[0] != '\0') ? arg : "/";
         DIR *dir = opendir(path);
         if (dir == NULL) {
-            term_append(state, "ls: 无法打开目录\n");
+            term_append(state, "ls: cannot open directory\n");
             return;
         }
         struct dirent *ent;
@@ -484,12 +484,12 @@ static void term_exec_builtin(desktop_app_state_t *state, const char *cmd,
         closedir(dir);
     } else if (strcmp(cmd, "cat") == 0) {
         if (arg == NULL || arg[0] == '\0') {
-            term_append(state, "cat: 缺少文件名\n");
+            term_append(state, "cat: missing file name\n");
             return;
         }
         FILE *f = fopen(arg, "r");
         if (f == NULL) {
-            term_append(state, "cat: 无法打开文件\n");
+            term_append(state, "cat: cannot open file\n");
             return;
         }
         /* cat 按原始字节输出：用 fread，宿主 libc 与 OS01 libc 都有它。 */
@@ -598,7 +598,7 @@ static const char *color_format_name(lv_color_format_t cf)
     case LV_COLOR_FORMAT_I8:       return "I8";
     case LV_COLOR_FORMAT_L8:       return "L8";
     case LV_COLOR_FORMAT_A8:       return "A8";
-    default:                       return "其它";
+    default:                       return "other";
     }
 }
 
@@ -607,9 +607,9 @@ static const char *input_devices_label(const desktop_shell_t *shell)
 {
     const gui_input_t *input = desktop_shell_input(shell);
     if (input == NULL) {
-        return "未初始化";
+        return "not initialised";
     }
-    return gui_input_has_mouse(input) ? "键盘 + 鼠标" : "仅键盘";
+    return gui_input_has_mouse(input) ? "keyboard + mouse" : "keyboard only";
 }
 
 static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
@@ -622,10 +622,10 @@ static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
     char text[1024];
     size_t used = 0;
 
-    snprintf(text + used, sizeof(text) - used, "内核架构: %s\n", APP_ARCH);
+    snprintf(text + used, sizeof(text) - used, "Kernel: %s\n", APP_ARCH);
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "构建 profile: %s\n",
+    snprintf(text + used, sizeof(text) - used, "Build profile: %s\n",
              OS01_BUILD_PROFILE);
     used = strlen(text);
 
@@ -635,32 +635,32 @@ static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
     char start_text[32];
     if (start != NULL &&
         strftime(start_text, sizeof(start_text), "%Y-%m-%d %H:%M:%S", start) > 0) {
-        snprintf(text + used, sizeof(text) - used, "启动时间: %s\n", start_text);
+        snprintf(text + used, sizeof(text) - used, "Boot time: %s\n", start_text);
     } else {
-        snprintf(text + used, sizeof(text) - used, "启动时间: 未知\n");
+        snprintf(text + used, sizeof(text) - used, "Boot time: unknown\n");
     }
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "显示模式: %s\n",
+    snprintf(text + used, sizeof(text) - used, "Display mode: %s\n",
              (platform != NULL &&
               gui_platform_get_mode(platform) == GUI_MODE_OFFSCREEN)
-                 ? "离屏" : "屏幕");
+                 ? "offscreen" : "screen");
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "分辨率: %ux%u\n",
+    snprintf(text + used, sizeof(text) - used, "Resolution: %ux%u\n",
              (platform != NULL) ? gui_platform_get_width(platform) : 0u,
              (platform != NULL) ? gui_platform_get_height(platform) : 0u);
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "像素格式: %s\n",
+    snprintf(text + used, sizeof(text) - used, "Pixel format: %s\n",
              color_format_name(lv_display_get_color_format(disp)));
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "输入设备: %s\n",
+    snprintf(text + used, sizeof(text) - used, "Input devices: %s\n",
              input_devices_label(shell));
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "焦点组容量: %u\n",
+    snprintf(text + used, sizeof(text) - used, "Focus capacity: %u\n",
              (unsigned)DESKTOP_FOCUS_MAX);
     used = strlen(text);
 
@@ -670,7 +670,7 @@ static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
 
     lv_mem_monitor_t mem;
     lv_mem_monitor(&mem);
-    snprintf(text + used, sizeof(text) - used, "LVGL 内存池: %u KB / %u KB (%u%%)\n",
+    snprintf(text + used, sizeof(text) - used, "LVGL heap: %u KB / %u KB (%u%%)\n",
              (unsigned)(mem.used_cnt / 1024u), (unsigned)(mem.total_size / 1024u),
              (unsigned)mem.used_pct);
     used = strlen(text);

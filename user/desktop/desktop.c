@@ -35,7 +35,7 @@
 static void report_platform_failure(const char *what, int err)
 {
     if (err == EBUSY) {
-        fprintf(stderr, "desktop: %s: 显示正被其它 GUI 占用\n", what);
+        fprintf(stderr, "desktop: %s: the display is owned by another GUI\n", what);
     } else {
         fprintf(stderr, "desktop: %s: %s (errno=%d)\n", what, strerror(err), err);
     }
@@ -75,21 +75,25 @@ int main(int argc, char **argv)
 
     gui_platform_t *platform = gui_platform_create(&pcfg);
     if (platform == NULL) {
-        report_platform_failure("创建显示平台失败", errno);
+        report_platform_failure("cannot create the display platform", errno);
         return 1;
     }
 
     /*
      * 输入：允许无鼠标降级（纯键盘也能跑），但设备缺失之外的原因仍然是
      * 致命错误。
+     *
+     * 输入模式必须与平台模式配对（libgui 的硬约束）：真实设备只允许屏幕
+     * 平台，合成输入只允许离屏平台。冒烟模式跑在离屏平台上，因此用合成
+     * 输入 —— 它不碰 /dev/keyboard，也不占显示租约。
      */
     gui_input_config_t icfg = {
-        .mode = GUI_INPUT_DEVICES,
+        .mode = smoke ? GUI_INPUT_SYNTHETIC : GUI_INPUT_DEVICES,
         .require_mouse = false,
     };
     gui_input_t *input = gui_input_create(platform, &icfg);
     if (input == NULL) {
-        report_platform_failure("创建输入失败", errno);
+        report_platform_failure("cannot create the input", errno);
         gui_platform_destroy(platform);
         return 1;
     }
@@ -100,14 +104,14 @@ int main(int argc, char **argv)
      */
     lv_display_t *display = lv_display_get_default();
     if (display == NULL) {
-        fprintf(stderr, "desktop: 平台没有可用的 LVGL display\n");
+        fprintf(stderr, "desktop: the platform has no LVGL display\n");
         gui_platform_destroy(platform);
         return 1;
     }
 
     desktop_shell_t *shell = desktop_shell_create(platform);
     if (shell == NULL) {
-        fprintf(stderr, "desktop: 创建桌面外壳失败\n");
+        fprintf(stderr, "desktop: cannot create the desktop shell\n");
         gui_platform_destroy(platform);
         return 1;
     }
@@ -130,7 +134,7 @@ int main(int argc, char **argv)
             if (ready > 0) {
                 gui_input_dispatch(input, fds, nfds);
             } else if (ready < 0 && errno != EINTR) {
-                fprintf(stderr, "desktop: poll 失败 (errno=%d)\n", errno);
+                fprintf(stderr, "desktop: poll failed (errno=%d)\n", errno);
                 rc = 1;
                 break;
             }
@@ -142,7 +146,7 @@ int main(int argc, char **argv)
             continue;
         }
         if (status != GUI_STATUS_OK) {
-            fprintf(stderr, "desktop: 显示平台进入终止态 (status=%d, errno=%d)\n",
+            fprintf(stderr, "desktop: the display platform reached a terminal state (status=%d, errno=%d)\n",
                     (int)status, errno);
             rc = 1;
             break;

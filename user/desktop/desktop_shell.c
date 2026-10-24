@@ -28,6 +28,8 @@
 #define LAUNCHER_ICON       48
 #define LAUNCHER_PAD        12
 #define LAUNCHER_GAP        12
+/* 应用名标签向两侧多伸出的像素：让 "Terminal" 这类长名字不被截断。 */
+#define LAUNCHER_CAPTION_OVERHANG 16
 #define PANEL_WIDTH        480
 
 /* ── 外壳状态 ────────────────────────────────────────────────────── */
@@ -397,6 +399,14 @@ static void launcher_icon_cb(lv_event_t *event)
     desktop_shell_request(shell, DESKTOP_INTENT_OPEN_APP, app_id);
 }
 
+/* 启动器条的宽度：两侧留出应用名标签的余量（标签比图标宽）。 */
+static int32_t launcher_bar_width(uint32_t count)
+{
+    return (int32_t)((LAUNCHER_PAD + LAUNCHER_CAPTION_OVERHANG) * 2 +
+                     count * LAUNCHER_ICON +
+                     (count ? (count - 1) * LAUNCHER_GAP : 0));
+}
+
 static lv_obj_t *build_launcher(desktop_shell_t *shell, lv_obj_t *parent)
 {
     const gui_theme_colors_t *c = gui_theme_colors();
@@ -404,8 +414,7 @@ static lv_obj_t *build_launcher(desktop_shell_t *shell, lv_obj_t *parent)
     int32_t w = lv_display_get_horizontal_resolution(shell->disp);
     int32_t h = lv_display_get_vertical_resolution(shell->disp);
 
-    int32_t bar_w = (int32_t)(LAUNCHER_PAD * 2 + count * LAUNCHER_ICON +
-                              (count ? (count - 1) * LAUNCHER_GAP : 0));
+    int32_t bar_w = launcher_bar_width(count);
     int32_t bar_x = (w - bar_w) / 2;
     int32_t bar_y = h - LAUNCHER_HEIGHT;
 
@@ -424,7 +433,8 @@ static lv_obj_t *build_launcher(desktop_shell_t *shell, lv_obj_t *parent)
             break;
         }
 
-        int32_t ix = (int32_t)(LAUNCHER_PAD + i * (LAUNCHER_ICON + LAUNCHER_GAP));
+        int32_t ix = (int32_t)(LAUNCHER_PAD + LAUNCHER_CAPTION_OVERHANG +
+                               i * (LAUNCHER_ICON + LAUNCHER_GAP));
 
         /* 图标：强调色圆块 + 字形 */
         lv_obj_t *icon = lv_obj_create(bar);
@@ -448,12 +458,15 @@ static lv_obj_t *build_launcher(desktop_shell_t *shell, lv_obj_t *parent)
             lv_obj_center(glyph);
         }
 
-        /* 文字标签：图标下方的应用名 */
+        /* 文字标签：图标下方的应用名。标签比图标宽一点并居中：应用名
+         * （"Terminal" / "Settings"）比 48px 的图标还宽，固定成图标宽度
+         * 会被截断。 */
         lv_obj_t *cap = make_label(bar, info->name, GUI_THEME_FONT_LABEL, c->on_surface_variant);
         if (cap != NULL) {
-            lv_obj_set_width(cap, LAUNCHER_ICON);
+            lv_obj_set_width(cap, LAUNCHER_ICON + LAUNCHER_CAPTION_OVERHANG * 2);
             lv_obj_set_style_text_align(cap, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_pos(cap, ix, LAUNCHER_PAD + LAUNCHER_ICON + 4);
+            lv_obj_set_pos(cap, ix - LAUNCHER_CAPTION_OVERHANG,
+                           LAUNCHER_PAD + LAUNCHER_ICON + 4);
         }
 
         /* 点击图标 = 启动应用 */
@@ -494,15 +507,18 @@ static void build_home(desktop_shell_t *shell)
         if (title != NULL) {
             lv_obj_set_pos(title, 16, 14);
         }
-        lv_obj_t *desc = make_label(card, "Material 风格的单进程桌面外壳",
+        lv_obj_t *desc = make_label(card, "Material single-process desktop shell",
                                     GUI_THEME_FONT_BODY, c->on_surface_variant);
         if (desc != NULL) {
             lv_obj_set_pos(desc, 16, 52);
         }
-        lv_obj_t *hint = make_label(card, "点击启动器图标进入应用；ESC 返回主屏",
+        lv_obj_t *hint = make_label(card, "Click a launcher icon to open an app; ESC returns home",
                                     GUI_THEME_FONT_LABEL, c->on_surface_variant);
         if (hint != NULL) {
             lv_obj_set_pos(hint, 16, 80);
+            /* 提示比卡片宽：让它折行，而不是被截断。 */
+            lv_obj_set_width(hint, CARD_WIDTH - 32);
+            lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
         }
     }
 
@@ -541,7 +557,7 @@ static void build_drawer(desktop_shell_t *shell)
 
     build_status_bar(shell, root);
 
-    lv_obj_t *title = make_label(root, "应用", GUI_THEME_FONT_HEADLINE, c->on_surface);
+    lv_obj_t *title = make_label(root, "Apps", GUI_THEME_FONT_HEADLINE, c->on_surface);
     if (title != NULL) {
         lv_obj_set_pos(title, 16, STATUS_BAR_HEIGHT + 12);
     }
@@ -549,7 +565,7 @@ static void build_drawer(desktop_shell_t *shell)
     lv_obj_t *count = make_label(root, "", GUI_THEME_FONT_LABEL, c->on_surface_variant);
     if (count != NULL) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%u 个应用", desktop_app_count());
+        snprintf(buf, sizeof(buf), "%u apps", desktop_app_count());
         lv_label_set_text(count, buf);
         lv_obj_align(count, LV_ALIGN_TOP_RIGHT, -16, STATUS_BAR_HEIGHT + 16);
     }
@@ -634,7 +650,7 @@ static void build_drawer(desktop_shell_t *shell)
         desktop_shell_focus_add(shell, row);
     }
 
-    lv_obj_t *hint = make_label(root, "ESC 返回主屏", GUI_THEME_FONT_LABEL, c->on_surface_variant);
+    lv_obj_t *hint = make_label(root, "ESC returns home", GUI_THEME_FONT_LABEL, c->on_surface_variant);
     if (hint != NULL) {
         lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 16, -12);
     }
@@ -662,17 +678,17 @@ static void setting_row_cb(lv_event_t *event)
 static const char *wallpaper_label(const desktop_shell_t *shell)
 {
     switch (shell->wallpaper) {
-    case DESKTOP_WALLPAPER_CONTAINER_LOW:     return "浅灰";
-    case DESKTOP_WALLPAPER_CONTAINER_HIGH:    return "深灰";
-    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST: return "最深";
+    case DESKTOP_WALLPAPER_CONTAINER_LOW:     return "Light grey";
+    case DESKTOP_WALLPAPER_CONTAINER_HIGH:    return "Dark grey";
+    case DESKTOP_WALLPAPER_CONTAINER_HIGHEST: return "Darkest";
     case DESKTOP_WALLPAPER_SURFACE:
-    default:                                  return "标准";
+    default:                                  return "Standard";
     }
 }
 
 static const char *density_label(const desktop_shell_t *shell)
 {
-    return (shell->density == DESKTOP_DENSITY_COMPACT) ? "紧凑" : "舒适";
+    return (shell->density == DESKTOP_DENSITY_COMPACT) ? "Compact" : "Comfortable";
 }
 
 static lv_obj_t *make_setting_row(desktop_shell_t *shell, lv_obj_t *list,
@@ -726,12 +742,12 @@ static void build_settings_rows(desktop_shell_t *shell, lv_obj_t *list)
         return;
     }
 
-    make_setting_row(shell, list, "时钟格式",
-                     shell->clock_24h ? "24 小时制" : "12 小时制",
+    make_setting_row(shell, list, "Clock format",
+                     shell->clock_24h ? "24-hour" : "12-hour",
                      DESKTOP_SETTING_CLOCK_FORMAT);
-    make_setting_row(shell, list, "壁纸颜色", wallpaper_label(shell),
+    make_setting_row(shell, list, "Wallpaper colour", wallpaper_label(shell),
                      DESKTOP_SETTING_WALLPAPER);
-    make_setting_row(shell, list, "卡片密度", density_label(shell),
+    make_setting_row(shell, list, "Card density", density_label(shell),
                      DESKTOP_SETTING_DENSITY);
 
     /* 「关于」是只读展示，不可点击。 */
@@ -741,13 +757,13 @@ static void build_settings_rows(desktop_shell_t *shell, lv_obj_t *list)
         lv_obj_set_style_bg_color(about, tok(c->surface_container_low), 0);
         lv_obj_set_width(about, w - 32);
         lv_obj_set_height(about, 88);
-        lv_obj_t *name = make_label(about, "关于", GUI_THEME_FONT_TITLE, c->on_surface);
+        lv_obj_t *name = make_label(about, "About", GUI_THEME_FONT_TITLE, c->on_surface);
         if (name != NULL) {
             lv_obj_set_pos(name, 16, 14);
         }
         lv_obj_t *detail = make_label(about,
-                                      "OS01 Material 桌面外壳\n"
-                                      "内核 x86_64 / LVGL 9 / libgui",
+                                      "OS01 Material desktop shell\n"
+                                      "Kernel x86_64 / LVGL 9 / libgui",
                                       GUI_THEME_FONT_BODY, c->on_surface_variant);
         if (detail != NULL) {
             lv_obj_set_pos(detail, 16, 40);
@@ -770,7 +786,7 @@ static void build_settings(desktop_shell_t *shell)
 
     build_status_bar(shell, root);
 
-    lv_obj_t *title = make_label(root, "设置", GUI_THEME_FONT_HEADLINE, c->on_surface);
+    lv_obj_t *title = make_label(root, "Settings", GUI_THEME_FONT_HEADLINE, c->on_surface);
     if (title != NULL) {
         lv_obj_set_pos(title, 16, STATUS_BAR_HEIGHT + 12);
     }
@@ -843,7 +859,7 @@ lv_obj_t *desktop_shell_build_settings_body(desktop_shell_t *shell, lv_obj_t *pa
     build_settings_rows(shell, list);
 
     /* 设置应用里的「关于」额外给出只读的系统信息入口。 */
-    lv_obj_t *hint = make_label(parent, "设置与主屏的「设置」共用同一份配置",
+    lv_obj_t *hint = make_label(parent, "Shares one configuration with the home screen",
                                 GUI_THEME_FONT_LABEL, c->on_surface_variant);
     if (hint != NULL) {
         lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 16, -10);
@@ -1039,6 +1055,9 @@ desktop_shell_t *desktop_shell_create(gui_platform_t *platform)
     shell->clock_24h = true;
     shell->pending_setting = DESKTOP_SETTING_NONE;
     shell->start_time = time(NULL);
+    /* calloc 把 focus_index 清成了 0 —— 那会让第一次 Tab 直接落到第二项。
+     * 「还没有焦点」是 -1。 */
+    shell->focus_index = -1;
 
     shell->app_state = desktop_app_state_create();
     if (shell->app_state == NULL) {
@@ -1172,9 +1191,8 @@ bool desktop_shell_probe_point(const desktop_shell_t *shell, desktop_region_t re
         return true;
     case DESKTOP_REGION_LAUNCHER: {
         uint32_t count = desktop_app_launcher_count();
-        int32_t bar_w = (int32_t)(LAUNCHER_PAD * 2 + count * LAUNCHER_ICON +
-                                  (count ? (count - 1) * LAUNCHER_GAP : 0));
-        /* 取样点必须避开圆角弧（半径 12）与图标。 */
+        int32_t bar_w = launcher_bar_width(count);
+        /* 取样点必须避开圆角弧（半径 12）与图标（图标从 bar_x+28 开始）。 */
         *x = (uint32_t)(((w - bar_w) / 2) + 16);
         *y = (uint32_t)(h - LAUNCHER_HEIGHT + 16);
         return true;
