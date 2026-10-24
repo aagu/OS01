@@ -21,11 +21,18 @@ static void assert_color_role(uint32_t color, const char *name)
 {
     /* 最高字节（A 位）必须为 0：令牌一律是 0x00RRGGBB 的 8 位写法。 */
     assert_true((color >> 24) == 0u);
+    if ((color >> 24) != 0u) {
+        printf("  [role] %s: 0x%08X has a non-zero alpha byte\n",
+               name, (unsigned)color);
+    }
     /* RGB 三通道不得全为 0（scrim / shadow 是纯黑，属于合法例外）。 */
     if (color != 0x00000000u) {
         assert_true((color & 0x00FFFFFFu) != 0u);
+        if ((color & 0x00FFFFFFu) == 0u) {
+            printf("  [role] %s: 0x%08X has all-zero RGB channels\n",
+                   name, (unsigned)color);
+        }
     }
-    (void)name;
 }
 
 TEST_FUNC(test_color_roles_are_wellformed)

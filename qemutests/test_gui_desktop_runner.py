@@ -116,6 +116,10 @@ class CursorVisibilityTests(unittest.TestCase):
     outline).  The legacy pure-white arrow can only ever produce the
     latter, so the predicate must stay False for it — that is the
     regression the gate has to catch.
+
+    The window's size is pinned too: the wedge is painted at the window's
+    **far** corner, so a window that shrank would no longer see it and
+    the "is a cursor" case would fail instead of quietly passing.
     """
 
     # The wallpaper is the surface_dim role (#D8D2E4).  Pinned as a
@@ -133,13 +137,21 @@ class CursorVisibilityTests(unittest.TestCase):
     WIDTH = 64
     HEIGHT = 48
 
+    # The gate's window geometry, pinned here as literals on purpose:
+    # the predicate must keep looking at a 16x24 window at the centre of
+    # the screen.  Importing the implementation's own constants would make
+    # this test follow a shrunken window instead of catching it.
+    WINDOW_W = 16
+    WINDOW_H = 24
+
     # A six-row wedge.  Row r holds the cells (r, 0..r); the diagonal
     # cell (r, r) is the outline, the rest is the body.  Both cursors
     # below use this very shape, so only the colours differ.
     WEDGE_ROWS = 6
 
     def _surface(self, fill=None, outline=None):
-        """A wallpaper-filled surface with a wedge painted at the centre.
+        """A wallpaper-filled surface with a wedge painted at the far
+        corner of the window the gate inspects.
 
         ``fill`` / ``outline`` default to the wallpaper colour, so
         passing neither yields a wallpaper-only surface.
@@ -152,12 +164,20 @@ class CursorVisibilityTests(unittest.TestCase):
             for _x in range(self.WIDTH):
                 pixels.extend(self.WALLPAPER)
 
+        # The wedge is anchored at the window's **last** row and column
+        # (the largest indices the 16x24 window covers), not at its
+        # origin: a window that shrank would then miss these pixels and
+        # the predicate would answer False for a cursor that is really
+        # there.  The offset arithmetic matches Surface.pixel(), which
+        # reads (y * width + x) * 3 on the flat RGB888 buffer.
         x0 = self.WIDTH // 2
         y0 = self.HEIGHT // 2
+        base_x = x0 + self.WINDOW_W - self.WEDGE_ROWS
+        base_y = y0 + self.WINDOW_H - self.WEDGE_ROWS
         for row in range(self.WEDGE_ROWS):
             for col in range(row + 1):
                 rgb = edge if col == row else body
-                idx = ((y0 + row) * self.WIDTH + (x0 + col)) * 3
+                idx = ((base_y + row) * self.WIDTH + (base_x + col)) * 3
                 pixels[idx:idx + 3] = bytes(rgb)
         return Surface(self.WIDTH, self.HEIGHT, bytes(pixels))
 
