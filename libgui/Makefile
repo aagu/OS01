@@ -55,7 +55,8 @@ LVGL_OBJS := $(patsubst $(LVGL_SRC_DIR)/%.c,$(BUILD_DIR)/obj/lvgl/%.o,$(LVGL_C_S
 PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
                       $(LIBGUI_DIR)/src/input_ps2.c \
                       $(LIBGUI_DIR)/src/input.c $(LIBGUI_DIR)/src/input_lvgl.c \
-                      $(LIBGUI_DIR)/src/input_focus.c
+                      $(LIBGUI_DIR)/src/input_focus.c \
+                      $(LIBGUI_DIR)/src/cursor_icon.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
 
 # GUI-3 设计系统：Material 令牌表（theme.c，纯 C 无 LVGL 依赖）与

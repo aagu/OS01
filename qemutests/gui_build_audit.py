@@ -40,6 +40,7 @@ GUI_PRIVATE_HEADERS = (
     "gui_input_ps2.h",
     "gui_lvgl_private.h",
     "gui_tick.h",
+    "gui_cursor_icon.h",
 )
 
 # The public input API (libgui/include/gui/gui_input.h).  These are the

@@ -26,15 +26,16 @@
  */
 
 #include <gui/gui_input.h>
+#include <gui_cursor_icon.h>
 #include <gui_input_private.h>
 #include <gui_lvgl_private.h>
 #include <gui_platform_private.h>
 
 /*
- * lv_draw_rect() 属于 LVGL 的**公开**绘制头（不是 _private.h）：光标必须
- * 用程序绘制，不能引入图片 / 字体资源。
+ * lv_draw_image() 属于 LVGL 的**公开**绘制头（不是 _private.h）：光标是
+ * 一张图像资源，用 LVGL 的图片绘制通道画出来。
  */
-#include <lvgl/src/draw/lv_draw_rect.h>
+#include <lvgl/src/draw/lv_draw_image.h>
 
 #include <errno.h>
 #include <string.h>
@@ -190,64 +191,39 @@ static void lvgl_emit(gui_input_t *input, uint32_t key, lv_indev_state_t state)
     lv->pending_valid = false;
 }
 
-/* ── 光标（程序绘制的箭头） ────────────────────────────────────── */
+/* ── 光标（图像资源） ──────────────────────────────────────────── */
 
 /*
- * 画一个 12×18 的箭头。
+ * 光标的绘制回调。
  *
- * 形状：上 8 行是逐行加宽的三角（尖端在左上角 = 热点 (0,0)），下面 10 行是
- * 2 px 宽的竖杆。整个箭头是**程序**用矩形画出来的：不引入图片 / 字体资源。
+ * 光标是一张**图像资源**（libgui/src/cursor_icon.c），不是程序画出来的
+ * 形状：16×24 的 ARGB8888，热点在左上角。lv_draw_image() 内部会重新取
+ * 一次 header，所以资源 header 填错的后果是「静默不画」——这正是宿主
+ * 契约测试必须证明「资源能被解码并画出来」的原因。
  *
- * 坐标是**绝对**坐标：lv_draw_rect() 与 LVGL 自己的控件绘制一样使用屏幕
- * 坐标，因此这里把控件坐标加上局部偏移。
+ * 坐标是**绝对**坐标：lv_draw_image() 与 LVGL 自己的控件绘制一样使用
+ * 屏幕坐标，因此这里用控件坐标（base）而不是局部偏移。
  */
 static void cursor_draw_cb(lv_event_t *e)
 {
     lv_obj_t *cursor = lv_event_get_current_target(e);
     lv_layer_t *layer = lv_event_get_layer(e);
-    lv_draw_rect_dsc_t dsc;
+    lv_draw_image_dsc_t dsc;
     lv_area_t base;
-    int32_t row;
 
     lv_obj_get_coords(cursor, &base);
 
-    lv_draw_rect_dsc_init(&dsc);
+    lv_draw_image_dsc_init(&dsc);
+    dsc.src = &gui_cursor_icon;
     dsc.base.layer = layer;
-    dsc.bg_color = lv_color_hex(GUI_INPUT_CURSOR_COLOR);
-    dsc.bg_opa = LV_OPA_COVER;
-    dsc.radius = 0;
-    dsc.border_opa = LV_OPA_TRANSP;
-    dsc.outline_opa = LV_OPA_TRANSP;
-    dsc.shadow_opa = LV_OPA_TRANSP;
-
-    /* 三角头：第 row 行的宽度是 row + 1。 */
-    for (row = 0; row < 8; row++) {
-        lv_area_t area;
-
-        area.x1 = base.x1;
-        area.y1 = base.y1 + row;
-        area.x2 = base.x1 + row;
-        area.y2 = base.y1 + row;
-        lv_draw_rect(layer, &dsc, &area);
-    }
-
-    /* 竖杆。 */
-    {
-        lv_area_t area;
-
-        area.x1 = base.x1;
-        area.y1 = base.y1 + 8;
-        area.x2 = base.x1 + 1;
-        area.y2 = base.y1 + GUI_INPUT_CURSOR_HEIGHT - 1;
-        lv_draw_rect(layer, &dsc, &area);
-    }
+    lv_draw_image(layer, &dsc, &base);
 }
 
 /*
  * 建立光标对象。
  *
  * 光标**属于 input**（不是 platform）：platform 只是显示，input 才是输入
- * 的所有者。光标固定 12×18，热点在左上角 (0,0)，挂在该 display 的 system
+ * 的所有者。光标固定 16×24，热点在左上角 (0,0)，挂在该 display 的 system
  * layer 上，并且不是 CLICKABLE：它永远不截获 hit-test。
  */
 static lv_obj_t *cursor_create(lv_display_t *disp, int32_t x, int32_t y)

@@ -52,14 +52,18 @@ extern "C" {
 /* ── 光标与滚轮（spec §7.1） ────────────────────────────────────── */
 
 /*
- * 程序绘制的箭头光标：固定 12×18，热点在左上角 (0,0)。
+ * 箭头光标：一张 16×24 的 ARGB8888 图像资源（libgui/src/cursor_icon.c），
+ * 热点在左上角 (0,0)。
  *
- * 光标是**程序**画出来的：只画矩形，不引入图片 / 字体资源。
+ * 光标是**图像资源**，不是程序画出来的形状：颜色烘焙在像素里（深色
+ * 主体 + 浅色描边），下面这两个常量只是「资源里烘的是什么色」的声明，
+ * 供宿主契约测试与 guest 探针比对。
  */
-#define GUI_INPUT_CURSOR_WIDTH    12
-#define GUI_INPUT_CURSOR_HEIGHT   18
+#define GUI_INPUT_CURSOR_WIDTH         16
+#define GUI_INPUT_CURSOR_HEIGHT        24
 /* 光标像素颜色（XRGB8888，与离屏画布的读回格式一致）。 */
-#define GUI_INPUT_CURSOR_COLOR    0x00FFFFFFu
+#define GUI_INPUT_CURSOR_FILL_COLOR     0x001A1C1Eu
+#define GUI_INPUT_CURSOR_OUTLINE_COLOR  0x00FDFCFFu
 
 /* 垂直滚轮每刻度滚动的像素数（正值 = 内容向下滚，scroll_y 增大）。 */
 #define GUI_INPUT_WHEEL_STEP_PX   32
@@ -133,7 +137,7 @@ typedef struct {
     int32_t cursor_y;
     bool    pointer_pressed;/* 左键按下状态 */
 
-    lv_obj_t *cursor;       /* 程序绘制的光标对象（属于 input，不属于 platform） */
+    lv_obj_t *cursor;       /* 光标对象（属于 input，不属于 platform） */
     bool      cursor_shown; /* 光标当前是否可见（没有鼠标源时隐藏） */
 
     uint32_t width;         /* 视口宽（指针位置夹紧用） */

@@ -3907,7 +3907,8 @@ GUI_INPUT_UNIT_DIR := $(GUI_HOST_DIR)/input_unit
 GUI_INPUT_UNIT_OBJS := $(GUI_INPUT_UNIT_DIR)/input.o \
                        $(GUI_INPUT_UNIT_DIR)/input_lvgl.o \
                        $(GUI_INPUT_UNIT_DIR)/input_focus.o \
-                       $(GUI_INPUT_UNIT_DIR)/input_ps2.o
+                       $(GUI_INPUT_UNIT_DIR)/input_ps2.o \
+                       $(GUI_INPUT_UNIT_DIR)/cursor_icon.o
 
 $(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
 	@mkdir -p $(dir $@)
