@@ -1738,25 +1738,26 @@ int fat32_init(block_device_t *dev, fat32_fs_t **out_fs)
     }
 
     memcpy(&fs->bpb, bpb, sizeof(FAT32_BPB));
-    fat_free_sector(sector);
     fs->dev = dev;
-    fs->bytes_per_sector = bpb->bytes_per_sector;
-    fs->sectors_per_cluster = bpb->sectors_per_cluster;
-    fs->root_cluster = bpb->root_cluster;
+    fs->bytes_per_sector = fs->bpb.bytes_per_sector;
+    fs->sectors_per_cluster = fs->bpb.sectors_per_cluster;
+    fs->root_cluster = fs->bpb.root_cluster;
 
     // Calculate sector offsets (absolute LBAs)
     uint32_t partition_start = 0;  // disk.img is raw FAT32, no partition table
 
-    fs->fat_start_sector = partition_start + bpb->reserved_sectors;
+    fs->fat_start_sector = partition_start + fs->bpb.reserved_sectors;
     fs->first_data_sector = partition_start
-                          + bpb->reserved_sectors
-                          + ((uint32_t)bpb->num_fats * bpb->sectors_per_fat_32);
+                          + fs->bpb.reserved_sectors
+                          + ((uint32_t)fs->bpb.num_fats * fs->bpb.sectors_per_fat_32);
 
     debug_fs("FAT32: mounted (BpS=%u, SpC=%u, FATs=%u, FATsec=%u, rootClus=%u)\n",
                    fs->bytes_per_sector, fs->sectors_per_cluster,
-                   bpb->num_fats, bpb->sectors_per_fat_32, fs->root_cluster);
+                   fs->bpb.num_fats, fs->bpb.sectors_per_fat_32, fs->root_cluster);
     debug_fs("FAT32: FAT start=%u, data start=%u\n",
                    fs->fat_start_sector, fs->first_data_sector);
+
+    fat_free_sector(sector);
 
     // Validate the root cluster
     debug_fs("FAT32: root directory at cluster %u (LBA %lu)\n",

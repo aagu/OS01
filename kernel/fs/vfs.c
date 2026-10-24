@@ -1168,12 +1168,6 @@ void vfs_active_node_register(vfs_node_t *node)
     vfs_mount_t *mp = node->mount;
     if (node == mp->root) return;
 
-#ifdef OS01_HOST_TEST
-    if (vfs_test_on_active_register) {
-        vfs_test_on_active_register(node);
-    }
-#endif
-
     spin_lock(&mp->active_lock);
     // Guard against duplicate registration of the same pointer
     for (vfs_node_t *cur = mp->active_nodes; cur; cur = cur->mnt_active_next) {
@@ -1182,6 +1176,13 @@ void vfs_active_node_register(vfs_node_t *node)
             return;
         }
     }
+
+#ifdef OS01_HOST_TEST
+    if (vfs_test_on_active_register) {
+        vfs_test_on_active_register(node);
+    }
+#endif
+
     node->mnt_active_next = mp->active_nodes;
     mp->active_nodes = node;
     spin_unlock(&mp->active_lock);
