@@ -12,6 +12,7 @@
  */
 
 #include <arch/irq.h>
+#include <arch/x86_64/intr_dispatch.h>
 #include <arch/x86_64/regs.h>     // IA32_EFER, etc. (unused here but kept
                                           //   for consistency with the rest of the
                                           //   x86_64 arch layer)
@@ -62,7 +63,7 @@ uint32_t arch_irq_vector_to_gsi(uint64_t vector)
 // free of dispatch logic. The `nr & 0x80` spurious check is x86_64
 // legacy: master PIC = 0x20-0x27, slave PIC = 0x28-0x2f, IOAPIC
 // vectors continue from 0x30 through 0x7F; 0x80+ never fires.
-void arch_irq_dispatch(pt_regs_t *regs, uint64_t hwirq)
+void x86_handle_device_irq(pt_regs_t *regs, uint64_t hwirq)
 {
     arch_local_irq_disable();
     if ((hwirq & IRQ_VECTOR_HIGH_BIT) != 0) {

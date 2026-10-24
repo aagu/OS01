@@ -99,3 +99,18 @@ void x86_intr_decode(struct intr_event *out, const pt_regs_t *regs,
     out->fault_addr = 0;
     out->native_address = 0;
 }
+
+__attribute__((no_stack_protector))
+void x86_intr_decode_irq(struct intr_event *out, const pt_regs_t *regs,
+                         uint64_t vector)
+{
+    out->kind = INTR_IRQ;
+    out->origin = x86_origin_from_cs(regs->cs);
+    out->reason = INTR_REASON_OTHER;
+    out->access = INTR_ACCESS_UNKNOWN;
+    out->fault_addr_valid = false;
+    out->fault_addr = 0;
+    out->native_vector = vector;
+    out->native_status = 0;
+    out->native_address = 0;
+}

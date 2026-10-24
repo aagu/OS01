@@ -476,6 +476,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-kernel-canary-contract` | 仅 kernel canary 编译旗标契约 |
 | `test-aarch64-gic-spi` | 仅 PL011 RX 到 GIC SPI 注入 |
 | `test-resolution-host` | 分辨率切换器宿主聚焦测试分发（`RES_CASE=`） |
+| `test-intr-irq-x86` | x86 IRQ production-chain host subset；执行 `test_intr_irq_x86`，仍注册于 `test-host`；要求 rootfs 能力 |
 | `test-monitor-host` | monitor 宿主聚焦测试分发（`CASE=`，见下） |
 | `test-gui-host` | GUI 宿主聚焦测试分发（`CASE=`，见下） |
 

@@ -1741,3 +1741,8 @@ _test-aarch64-run-m1-ap-bad-root:
 	  --firmware "$(BUILD_DIR)/image/m1-ap-bad-root/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ap-bad-root"
+
+.PHONY: test-intr-irq-x86
+test-intr-irq-x86:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-intr-irq-x86 $(OS01_SUBMAKE_ARGS))

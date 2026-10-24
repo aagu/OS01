@@ -24,4 +24,8 @@ __attribute__((no_stack_protector))
 void x86_intr_decode(struct intr_event *out, const pt_regs_t *regs,
                      uint64_t vector, uint64_t error_code, uint64_t cr2);
 
+__attribute__((no_stack_protector))
+void x86_intr_decode_irq(struct intr_event *out, const pt_regs_t *regs,
+                         uint64_t vector);
+
 #endif /* _KERNEL_ARCH_X86_64_INTR_DECODE_H */

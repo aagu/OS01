@@ -144,12 +144,14 @@ inline void __attribute__((always_inline)) set_system_intr_gate(unsigned int n,u
 typedef void (*intr_handler_fn)(uint64_t nr, uint64_t parameter,
                                 pt_regs_t *regs);
 
-// Per-vector handler table.  generic_intr_dispatch (in intr/vector_dispatch.c)
+// Per-vector handler table.  generic_intr_dispatch (in arch/x86_64/intr/irq_entry.c)
 // indexes this table by vector number.
 extern intr_handler_fn intr_handler_table[256];
 extern void *        intr_handler_param[256];
 
 void generic_intr_dispatch(pt_regs_t *regs, uint64_t vector);
+/* Assembly restore only: no softirq/schedule/signal work. */
+void x86_intr_restore_only(void);
 
 static inline void _intr_table_set(uint8_t vector, intr_handler_fn handler,
                                    void *param)

@@ -24,9 +24,8 @@
  *     KERNEL-origin event whose #PF error-code U/S bit is set is NOT
  *     rejected: the CS-derived origin and the U/S bit are independent
  *     (spec §6.1 — the kernel legitimately faults on user addresses).
- *   irq_fail_closed — any IRQ event goes straight to bad-event; the
- *     x86 IRQ backend has no production caller in phase one and must
- *     not route to arch_irq_dispatch() (spec §5.2).
+ *   irq_unknown_vector_rejected — vector zero is not an installed IRQ;
+ *     the production IRQ chain is covered in test_intr_irq_x86.
  *   bad_origin_or_payload — an UNKNOWN origin (CPL 1/2), a tampered
  *     origin, a tampered classification, a #GP borrowing the #PF CR2
  *     and an UNMIGRATED vector (21) all reach bad-event and nothing
@@ -432,18 +431,16 @@ TEST_FUNC(sync_pf_routes_once)
     assert_eq(0, g_bad_calls);
 }
 
-/* ── Case: irq_fail_closed ───────────────────────────────────────────── */
+/* ── Case: irq_unknown_vector_rejected ───────────────────────────────────────────── */
 
-TEST_FUNC(irq_fail_closed)
+TEST_FUNC(irq_unknown_vector_rejected)
 {
     static struct intr_event ev;
     static pt_regs_t regs;
 
-    TEST_SUITE("irq_fail_closed");
+    TEST_SUITE("irq_unknown_vector_rejected");
 
-    /* Any IRQ event must go straight to bad-event: the x86 IRQ backend
-     * exists only so the strong-link contract holds (spec §5.2); it
-     * must never pretend to cover the IRQ surface. */
+    /* Vector zero is outside the installed IRQ families. */
     reset_spies();
     fill_regs(&regs, CS_KERNEL_LIT);
     memset(&ev, 0, sizeof(ev));
@@ -597,7 +594,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(sync_ud_routes_once),
     TEST_ENTRY(sync_gp_routes_once),
     TEST_ENTRY(sync_pf_routes_once),
-    TEST_ENTRY(irq_fail_closed),
+    TEST_ENTRY(irq_unknown_vector_rejected),
     TEST_ENTRY(bad_origin_or_payload),
 TEST_LIST_END
 
@@ -606,3 +603,10 @@ int main(void)
     RUN_ALL_TESTS();
     return __test_stats.failed ? 1 : 0;
 }
+
+/* IRQ production business is exercised by test_intr_irq_x86; these boundaries
+ * must stay unreachable for this suite's malformed vector-zero IRQ event. */
+void x86_handle_device_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }
+void x86_handle_registered_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }
+void x86_handle_lapic_timer_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }
+void x86_handle_spurious_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }

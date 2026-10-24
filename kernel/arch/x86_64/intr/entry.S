@@ -25,6 +25,8 @@ RFLAGS	=	0xa8
 OLDRSP	=	0xb0
 OLDSS	=	0xb8
 
+.global x86_intr_restore_only
+x86_intr_restore_only:
 RESTORE_ALL:
 	popq	%r15;		
 	popq	%r14;		

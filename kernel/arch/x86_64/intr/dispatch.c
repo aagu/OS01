@@ -12,11 +12,10 @@
 //        (for #PF) the ORIGINAL CR2 snapshot.  Every uninstalled
 //        vector and must FAIL CLOSED
 //        through arch_intr_bad_event().
-//    arch_intr_handle_irq()  — fail-closed ONLY (spec §5.2):
-//        no production caller exists in phase one, and it must
-//        never route to arch_irq_dispatch() pretending the IRQ
-//        surface is covered.  It exists so the strong-link
-//        contract holds.
+//    arch_intr_handle_irq()  — installed IRQ family routing:
+//        deterministic re-validation followed by private device,
+//        timer, registered IPI, or restore-only spurious business.
+//        ACK/EOI stays in the original business handlers.
 //
 //  Deterministic re-validation (plan "重解码纯载荷并逐成员比较"):
 //  the backend re-decodes the pure payload from the event's OWN
@@ -155,10 +154,34 @@ void arch_intr_handle_sync(const struct intr_event *event, pt_regs_t *regs)
     }
 }
 
+__attribute__((no_stack_protector))
 void arch_intr_handle_irq(const struct intr_event *event, pt_regs_t *regs)
 {
-    /* x86 IRQ backend is fail-closed in phase one (spec §5.2): no
-     * production caller exists and it must never forward to
-     * arch_irq_dispatch().  Calling it at all is a broken contract. */
-    arch_intr_bad_event(event, regs);
+    struct intr_event redecoded;
+    if (!event || !regs)
+        arch_intr_bad_event(event, regs);
+    x86_intr_decode_irq(&redecoded, regs, event->native_vector);
+    if (!x86_event_matches(event, &redecoded) ||
+        event->origin == INTR_ORIGIN_UNKNOWN)
+        arch_intr_bad_event(event, regs);
+
+    uint64_t vector = event->native_vector;
+    if (vector >= X86_VECTOR_DEVICE_FIRST && vector <= X86_VECTOR_DEVICE_LAST) {
+        x86_handle_device_irq(regs, vector);
+        return;
+    }
+    switch (vector) {
+    case X86_VECTOR_LAPIC_TIMER:
+        x86_handle_lapic_timer_irq(regs, vector);
+        return;
+    case X86_VECTOR_TLB:
+    case X86_VECTOR_RESCHED:
+        x86_handle_registered_irq(regs, vector);
+        return;
+    case X86_VECTOR_SPURIOUS:
+        x86_handle_spurious_irq(regs, vector);
+        return;
+    default:
+        arch_intr_bad_event(event, regs);
+    }
 }
