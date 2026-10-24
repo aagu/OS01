@@ -185,22 +185,11 @@ static void dcache_detach_entry_locked(uint32_t bucket, vfs_dcache_entry_t *e,
     if (dcache_count > 0) dcache_count--;
 }
 
-static void dcache_bump_gen_locked(vfs_node_t **overflow_put, int *overflow_cnt)
+static void dcache_bump_gen_locked(void)
 {
     dcache_mut_gen++;
     if (dcache_mut_gen == 0) {
         dcache_mut_gen = 1;
-        for (int i = 0; i < VFS_DCACHE_CAPACITY; i++) {
-            if (!dcache_pool[i].in_use) continue;
-            uint32_t b = dcache_hash(dcache_pool[i].parent_mount,
-                                     dcache_pool[i].parent_ino,
-                                     dcache_pool[i].name);
-            vfs_node_t *n = NULL;
-            dcache_detach_entry_locked(b, &dcache_pool[i], &n);
-            if (n && overflow_put && overflow_cnt && *overflow_cnt < VFS_DCACHE_CAPACITY) {
-                overflow_put[(*overflow_cnt)++] = n;
-            }
-        }
     }
 }
 
@@ -349,20 +338,10 @@ void dcache_insert_validated(vfs_node_t *parent, const char *name,
 
 void dcache_mutation_begin(void)
 {
-    vfs_node_t **overflow_put = kmalloc(sizeof(vfs_node_t *) * VFS_DCACHE_CAPACITY);
-    int overflow_cnt = 0;
-
     spin_lock(&dcache_lock);
     dcache_mut_active++;
-    dcache_bump_gen_locked(overflow_put, &overflow_cnt);
+    dcache_bump_gen_locked();
     spin_unlock(&dcache_lock);
-
-    if (overflow_put) {
-        for (int i = 0; i < overflow_cnt; i++) {
-            vfs_node_put(overflow_put[i]);
-        }
-        kfree(overflow_put);
-    }
 }
 
 void dcache_invalidate(vfs_node_t *parent, const char *name)
@@ -394,8 +373,6 @@ void dcache_invalidate(vfs_node_t *parent, const char *name)
 
 void dcache_mutation_end_invalidate(vfs_node_t *parent, const char *name)
 {
-    vfs_node_t **to_put = kmalloc(sizeof(vfs_node_t *) * (VFS_DCACHE_CAPACITY + 1));
-    int put_cnt = 0;
     vfs_node_t *single_removed = NULL;
 
     char norm_name[VFS_NAME_MAX];
@@ -419,49 +396,35 @@ void dcache_mutation_end_invalidate(vfs_node_t *parent, const char *name)
             }
         }
     }
-    dcache_bump_gen_locked(to_put, &put_cnt);
+    dcache_bump_gen_locked();
     if (dcache_mut_active > 0) dcache_mut_active--;
     spin_unlock(&dcache_lock);
 
     if (single_removed) {
         vfs_node_put(single_removed);
     }
-    if (to_put) {
-        for (int i = 0; i < put_cnt; i++) {
-            vfs_node_put(to_put[i]);
-        }
-        kfree(to_put);
-    }
 }
 
 void dcache_flush_mount(vfs_mount_t *mp)
 {
     if (!mp) return;
-    vfs_node_t **to_put = kmalloc(sizeof(vfs_node_t *) * VFS_DCACHE_CAPACITY);
-    int put_cnt = 0;
-
-    spin_lock(&dcache_lock);
-    for (int i = 0; i < VFS_DCACHE_CAPACITY; i++) {
-        if (!dcache_pool[i].in_use) continue;
-        if (dcache_pool[i].parent_mount == mp ||
-            (dcache_pool[i].node && dcache_pool[i].node->mount == mp)) {
-            uint32_t b = dcache_hash(dcache_pool[i].parent_mount,
-                                     dcache_pool[i].parent_ino,
-                                     dcache_pool[i].name);
-            vfs_node_t *n = NULL;
-            dcache_detach_entry_locked(b, &dcache_pool[i], &n);
-            if (n && to_put && put_cnt < VFS_DCACHE_CAPACITY) {
-                to_put[put_cnt++] = n;
+    while (1) {
+        vfs_node_t *to_put = NULL;
+        spin_lock(&dcache_lock);
+        for (int i = 0; i < VFS_DCACHE_CAPACITY; i++) {
+            if (!dcache_pool[i].in_use) continue;
+            if (dcache_pool[i].parent_mount == mp ||
+                (dcache_pool[i].node && dcache_pool[i].node->mount == mp)) {
+                uint32_t b = dcache_hash(dcache_pool[i].parent_mount,
+                                         dcache_pool[i].parent_ino,
+                                         dcache_pool[i].name);
+                dcache_detach_entry_locked(b, &dcache_pool[i], &to_put);
+                break;
             }
         }
-    }
-    spin_unlock(&dcache_lock);
-
-    if (to_put) {
-        for (int i = 0; i < put_cnt; i++) {
-            vfs_node_put(to_put[i]);
-        }
-        kfree(to_put);
+        spin_unlock(&dcache_lock);
+        if (!to_put) break;
+        vfs_node_put(to_put);
     }
 }
 
@@ -473,36 +436,15 @@ void dcache_mutation_end_rename(vfs_node_t *olddir, const char *oldname,
     vfs_mount_t *m1 = olddir ? olddir->mount : NULL;
     vfs_mount_t *m2 = newdir ? newdir->mount : NULL;
 
-    vfs_node_t **to_put = kmalloc(sizeof(vfs_node_t *) * VFS_DCACHE_CAPACITY);
-    int put_cnt = 0;
+    dcache_flush_mount(m1);
+    if (m2 && m2 != m1) {
+        dcache_flush_mount(m2);
+    }
 
     spin_lock(&dcache_lock);
-    for (int i = 0; i < VFS_DCACHE_CAPACITY; i++) {
-        if (!dcache_pool[i].in_use) continue;
-        vfs_mount_t *pm = dcache_pool[i].parent_mount;
-        vfs_mount_t *nm = dcache_pool[i].node ? dcache_pool[i].node->mount : NULL;
-        if ((m1 && (pm == m1 || nm == m1)) ||
-            (m2 && (pm == m2 || nm == m2))) {
-            uint32_t b = dcache_hash(dcache_pool[i].parent_mount,
-                                     dcache_pool[i].parent_ino,
-                                     dcache_pool[i].name);
-            vfs_node_t *n = NULL;
-            dcache_detach_entry_locked(b, &dcache_pool[i], &n);
-            if (n && to_put && put_cnt < VFS_DCACHE_CAPACITY) {
-                to_put[put_cnt++] = n;
-            }
-        }
-    }
-    dcache_bump_gen_locked(to_put, &put_cnt);
+    dcache_bump_gen_locked();
     if (dcache_mut_active > 0) dcache_mut_active--;
     spin_unlock(&dcache_lock);
-
-    if (to_put) {
-        for (int i = 0; i < put_cnt; i++) {
-            vfs_node_put(to_put[i]);
-        }
-        kfree(to_put);
-    }
 }
 
 void dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *evictions)
