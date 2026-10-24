@@ -190,6 +190,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_gui_theme.elf \
     $(TEST_BLD)/test_gui_theme_apply.elf \
     $(TEST_BLD)/test_desktop_state.elf \
+    $(TEST_BLD)/test_desktop_shell.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -4095,6 +4096,44 @@ test-gui-theme-apply: $(TEST_BLD)/test_gui_theme_apply.elf
 # the test TU.
 .PHONY: test-gui-desktop-state
 test-gui-desktop-state: $(TEST_BLD)/test_desktop_state.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# GUI-3 Task 4: the desktop shell.  Links the REAL desktop shell, registry
+# and state machine against the REAL LVGL and the REAL offscreen platform,
+# so the pixel assertions observe the production surfaces.  The shell needs
+# the LVGL headers and the libgui public headers.
+GUI_DESKTOP_DIR := $(GUI_HOST_DIR)/desktop
+GUI_DESKTOP_OBJS := \
+    $(GUI_DESKTOP_DIR)/desktop_shell.o \
+    $(GUI_DESKTOP_DIR)/desktop_registry.o \
+    $(GUI_DESKTOP_DIR)/desktop_state.o
+
+$(GUI_DESKTOP_DIR)/%.o: $(TESTS_DIR)/user/desktop/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_DESKTOP_DIR)/test_desktop_shell.o: $(TEST_CASES)/test_desktop_shell.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -I$(TESTS_DIR)/user/desktop -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_desktop_shell.elf: \
+		$(GUI_DESKTOP_DIR)/test_desktop_shell.o \
+		$(GUI_DESKTOP_OBJS) \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-desktop-shell
+test-gui-desktop-shell: $(TEST_BLD)/test_desktop_shell.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

@@ -8,6 +8,8 @@
 
 #include "desktop_state.h"
 
+#include <stddef.h>
+
 static bool app_id_is_usable(const char *app_id)
 {
     if (app_id == NULL) {

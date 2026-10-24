@@ -629,8 +629,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # input-frame, input-route, input-decode, input-platform, theme) or all
 # (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -774,6 +774,15 @@ _test-gui-host-run-theme-apply:
 _test-gui-host-run-desktop-state:
 	@echo "  [test-gui-host] desktop-state"
 	$(call os01_submake,hosttests,test-gui-desktop-state $(OS01_SUBMAKE_ARGS))
+
+# GUI-3 plan Task 4: the desktop shell.  Runs test_desktop_shell.elf,
+# which links the REAL desktop shell + registry + state machine against
+# the REAL LVGL and the REAL offscreen platform, and asserts the pixel
+# contract (wallpaper / status bar / card / launcher each render their
+# token colour, and a surface transition leaves no residue).
+_test-gui-host-run-desktop-shell:
+	@echo "  [test-gui-host] desktop-shell"
+	$(call os01_submake,hosttests,test-gui-desktop-shell $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
