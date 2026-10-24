@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fixtures for ``qemutests/intr_dispatch_audit.py`` (intr-dispatch Task 6).
+"""Fixtures for the complete native interrupt wiring audit.
 
 The audit proves, from the **production ELF** symbol table and real
-instruction dataflow, every edge of the phase-one dispatch wiring:
+instruction dataflow, the installed native dispatch wiring:
 
     x86:      stub → thin C entry → arch_intr_dispatch → x86 backend
     aarch64:  vector slot → el1_sync_entry → aarch64_el1_sync
@@ -10,8 +10,8 @@ instruction dataflow, every edge of the phase-one dispatch wiring:
 
 No real kernel build or QEMU is needed: every fixture stages a *fake*
 ``llvm-nm`` / ``llvm-objdump`` pair (executable scripts in a temp dir)
-that replay disassembly/nm text whose format is copied verbatim from the
-production ELFs (ground truth for the parser).  Mutating one line of the
+that replay production phase-one disassembly excerpts and an independent
+explicit phase-two fixture manifest in the same tool format.  Mutating one line of the
 staged text turns a proven edge into a wrong/unresolvable one.
 
 Coverage (plan Step 3):
@@ -412,6 +412,83 @@ ffff0000400a2bbc: 97fff7b2     	bl	0xffff0000400a0a84 <arch_early_puts>
 ffff0000400a2bc4: 97fff7af     	bl	0xffff0000400a0a80 <arch_early_putc>
 ffff0000400a2bc8: d503207f     	wfi
 """
+
+
+# Independent installed-surface fixture manifest (never imports production lists).
+SYNC_NAMES = "divide_error debug nmi int3 overflow bounds undefined_opcode dev_not_available double_fault coprocessor_segment_overrun invalid_TSS segment_not_present stack_segment_fault general_protection page_fault x87_FPU_error alignment_check machine_check SIMD_exception virtualization_exception".split()
+SYNC_VECTORS = list(range(15)) + list(range(16, 21))
+IRQ_VECTORS = list(range(0x20, 0x39)) + [0x40, 0x41, 0xff]
+ERROR_VECTORS = {8, 10, 11, 12, 13, 14, 17}
+SAVE = ["%rax"] * 4 + ["%rbp", "%rdi", "%rsi", "%rdx", "%rcx", "%rbx"] + [f"%r{i}" for i in range(8, 16)]
+
+
+def _phase2_world():
+    nm, dis = X86_NM, X86_DISASM
+    addresses = {line.split()[2]: int(line.split()[0], 16) for line in nm.splitlines()}
+    next_addr = 0xffff800000200000
+    def address(name):
+        nonlocal nm, next_addr
+        if name not in addresses:
+            addresses[name] = next_addr
+            nm += f"{next_addr:x} T {name}\n"
+            next_addr += 0x200
+        return addresses[name]
+    def block(name, instructions):
+        nonlocal dis
+        base = address(name)
+        dis += f"\n{base:x} <{name}>:\n"
+        dis += "".join(_x86_line(base+i, "90", text.replace(" ", "\t", 1)) + "\n" for i, text in enumerate(instructions))
+    def branch(op, target):
+        return f"{op} 0x{address(target):x} <{target}>"
+    for vector, name in zip(SYNC_VECTORS, SYNC_NAMES):
+        if name in ("divide_error", "undefined_opcode", "general_protection", "page_fault"):
+            continue
+        entry = "do_" + name
+        address(entry)
+        if vector == 2:
+            instructions = ["pushq %rax"] + [f"pushq {r}" for r in SAVE] + ["movq $0x0, %rsi", "movq %rsp, %rdi", branch("callq", entry), branch("jmp", "RESTORE_ALL")]
+        else:
+            instructions = ([] if vector in ERROR_VECTORS else ["pushq $0x0"]) + ["pushq %rax", f"leaq 0x0(%rip), %rax # 0x{address(entry):x} <{entry}>", "xchgq %rax, (%rsp)", branch("jmp", "error_code")]
+        block(name, instructions)
+        block(entry, [f"movabsq $0x{address('x86_intr_decode'):x}, %rax", "callq *%rax", f"movabsq $0x{address('arch_intr_dispatch'):x}, %rax", "callq *%rax", "retq"])
+    block("RESTORE_ALL", [f"popq {r}" for r in reversed(SAVE[4:])] + ["popq %rax", "movq %rax, %ds", "popq %rax", "movq %rax, %es", "popq %rax", "addq $0x10, %rsp", "iretq"])
+    # Restore-only is an identical-address alias, not a separate block.
+    nm += f"{address('RESTORE_ALL'):x} T x86_intr_restore_only\n"
+    for vector in IRQ_VECTORS:
+        name = f"IRQ{vector-32}_interrupt" if vector < 0x38 else {0x38:"lapic_timer_stub", 0x40:"_intr_stub_tlb", 0x41:"_intr_stub_resched", 0xff:"lapic_spurious_stub"}[vector]
+        target = "arch_irq_dispatch" if vector < 0x38 else "generic_intr_dispatch" if vector in (0x40, 0x41) else "x86_irq_entry"
+        saved = (["$0x0", "$0x0"] + SAVE[1:]) if vector == 0x38 else (["$0x0"] + SAVE)
+        instructions = [f"pushq {r}" for r in saved] + ["movq %rsp, %rdi", f"movq $0x{vector:x}, %rsi"]
+        if vector == 0xff:
+            instructions += ["movq %rsp, %rbx", "andq $-0x10, %rsp", branch("callq", target), "movq %rbx, %rsp", branch("jmp", "RESTORE_ALL")]
+        elif vector == 0x38:
+            instructions += [branch("callq", target), branch("jmp", "ret_from_intr")]
+        else:
+            instructions += [f"leaq 0x0(%rip), %rax # 0x{address('ret_from_intr'):x} <ret_from_intr>", "pushq %rax", branch("jmp", target)]
+        block(name, instructions)
+    address("lapic_eoi")
+    for name in ("x86_intr_decode_irq", "x86_handle_spurious_irq"):
+        block(name, ["retq"])
+    for name in ("arch_irq_dispatch", "generic_intr_dispatch", "x86_irq_entry"):
+        block(name, [branch("callq", "x86_dispatch_irq"), "retq"])
+    block("x86_dispatch_irq", [branch("callq", "x86_intr_decode_irq"), branch("callq", "arch_intr_dispatch"), "retq"])
+    for name in ("x86_handle_device_irq", "x86_handle_lapic_timer_irq", "x86_handle_registered_irq"):
+        address(name)
+    # Preserve the old bad-event address/anchor for the negative fixture.
+    dis = dis.replace("ffff800000149b0e: ff d0                \tcallq\t*%rax", "ffff800000149b0e: ff d0                \tcallq\t*%rax\n" + "\n".join(_x86_line(0xffff800000149b10+i, "90", branch("callq", name).replace(" ", "\t", 1)) for i, name in enumerate(("x86_intr_decode_irq", "x86_handle_device_irq", "x86_handle_lapic_timer_irq", "x86_handle_registered_irq", "x86_handle_spurious_irq"))))
+    idt = address("IDT_Table")
+    for installer, vectors in (("sys_vector_install", SYNC_VECTORS), ("arch_irq_install", range(32,56)), ("lapic_timer_init", [56]), ("ipi_init", [64,65]), ("lapic_init", [255])):
+        instructions = []
+        for vector in vectors:
+            name = SYNC_NAMES[SYNC_VECTORS.index(vector)] if vector in SYNC_VECTORS else f"IRQ{vector-32}_interrupt" if vector < 56 else {56:"lapic_timer_stub",64:"_intr_stub_tlb",65:"_intr_stub_resched",255:"lapic_spurious_stub"}[vector]
+            ist = 3 if vector == 8 else 0 if vector == 14 or vector >=32 else 1
+            attr = 0x8e if vector == 2 or vector >=32 else 0xef if vector in (3,4,5) else 0x8f
+            instructions += [f"movabsq $0x{address(name):x}, %rdx", f"movabsq $0x{idt+16*vector:x}, %rsi", f"movabsq $0x{idt+16*vector+8:x}, %rdi", "movl $0x80000, %eax", f"movl $0x{ist:x}, %ecx", "movw %dx, %ax", "andq $0x7, %rcx", f"addq $0x{attr<<8:x}, %rcx", "shlq $0x20, %rcx", "addq %rcx, %rax", "xorq %rcx, %rcx", "movl %edx, %ecx", "shrq $0x10, %rcx", "shlq $0x30, %rcx", "addq %rcx, %rax", "movq %rax, (%rsi)", "shrq $0x20, %rdx", "movq %rdx, (%rdi)"]
+        block(installer, instructions + ["retq"])
+    return nm, dis
+
+
+X86_NM, X86_DISASM = _phase2_world()
 
 
 # The exact bad-event DAIF line — shared by the fixture world and the
@@ -1037,7 +1114,7 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("cross-ISA" in e for e in errors), errors)
 
-    def test_x86_irq_backend_not_fail_closed_fails(self):
+    def test_x86_irq_backend_bypassing_common_dispatch_fails(self):
         self.stage_x86(nm_text=X86_NM +
                        "ffff800000105000 T arch_irq_dispatch\n",
                        disasm_text=_mutate(
@@ -1089,5 +1166,129 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("arch_intr_dispatch" in e for e in errors),
                         errors)
+class InstalledSurfaceTests(IntrDispatchAuditFixture):
+    def check_mutation(self, name, transform, fragment):
+        from qemutests.intr_dispatch_audit import SymbolTable, parse_objdump, _audit_x86
+        blocks, order = parse_objdump(X86_DISASM)
+        transform(blocks[name])
+        errors = []
+        _audit_x86(SymbolTable.parse(X86_NM), blocks, order, ROOT, errors, [])
+        self.assertTrue(any(fragment in e for e in errors), errors)
+
+    def test_every_installed_stub_required(self):
+        for name in SYNC_NAMES + [f"IRQ{i}_interrupt" for i in range(24)] + ["lapic_timer_stub", "_intr_stub_tlb", "_intr_stub_resched", "lapic_spurious_stub"]:
+            with self.subTest(name=name):
+                self.check_mutation(name, lambda b: b.clear(), name)
+
+    def test_bad_nmi_zero_argument(self):
+        self.check_mutation("nmi", lambda b: setattr(next(i for i in b if i.text == "movq $0x0, %rsi"), "text", "movq $0x1, %rsi"), "NMI")
+
+    def test_hardware_error_frame_must_not_add_dummy(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("double_fault", lambda b: b.insert(0, Instr(0, "pushq $0x0")), "double_fault")
+
+    def test_wrong_irq_family(self):
+        self.check_mutation("IRQ23_interrupt", lambda b: setattr(b[-1], "text", "jmp 0xffff8000001499b8 <arch_intr_bad_event>"), "IRQ23_interrupt")
+
+    def test_wrong_timer_target(self):
+        self.check_mutation("lapic_timer_stub", lambda b: setattr(b[-2], "text", "callq 0xffff8000001499b8 <arch_intr_bad_event>"), "lapic_timer_stub")
+
+    def test_spurious_incomplete_save(self):
+        self.check_mutation("lapic_spurious_stub", lambda b: b.pop(10), "lapic_spurious_stub")
+
+    def test_spurious_incomplete_restore(self):
+        self.check_mutation("RESTORE_ALL", lambda b: b.pop(5), "restore")
+
+    def test_spurious_ret_from_intr_forbidden(self):
+        self.check_mutation("lapic_spurious_stub", lambda b: setattr(b[-1], "text", "jmp 0xffff8000001047f3 <ret_from_intr>"), "lapic_spurious_stub")
+
+    def test_spurious_eoi_forbidden(self):
+        self.check_mutation("x86_handle_spurious_irq", lambda b: setattr(b[-1], "text", "callq 0xffff8000001499b8 <arch_intr_bad_event>"), "spurious")
+
+    def test_irq_argument_clobber_fails(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("IRQ0_interrupt", lambda b: b.insert(-1, Instr(0, "movq $0x21, %rsi")), "IRQ0_interrupt")
+
+    def test_nmi_zero_clobber_fails(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("nmi", lambda b: b.insert(-2, Instr(0, "movq $0x1, %rsi")), "NMI")
+
+    def test_spurious_wrong_restore_order_fails(self):
+        self.check_mutation("lapic_spurious_stub", lambda b: b.insert(-4, b.pop(-2)), "lapic_spurious_stub")
+
+    def test_func_slot_clobbered_before_call_fails(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("error_code", lambda b: b.insert(-2, Instr(0, "xorq %rdx, %rdx")), "error_code")
+
+    def test_irq_backend_ack_ownership_fails(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("arch_intr_handle_irq", lambda b: b.append(Instr(0, "callq 0x" + next(line.split()[0] for line in X86_NM.splitlines() if line.endswith(" T lapic_eoi")) + " <lapic_eoi>")), "ACK")
+
+    def test_shared_tail_join_resolves_both_routes(self):
+        from qemutests.intr_dispatch_audit import Instr, SymbolTable, x86_edges
+        table = SymbolTable.parse("100 T alpha\n200 T beta\n")
+        code = [Instr(0,"jne 0x4 <route+0x4>"), Instr(1,"movabsq $0x100, %rax"), Instr(2,"jmp 0x5 <route+0x5>"), Instr(4,"movabsq $0x200, %rax"), Instr(5,"jmpq *%rax")]
+        self.assertEqual({e.target for e in x86_edges(code,table) if e.kind == "jmp"}, {"alpha","beta"})
+        code[3].text = "movabsq $0x999, %rax"
+        self.assertIn(None, {e.target for e in x86_edges(code,table) if e.kind == "jmp"})
+
+    def test_real_gate_type_wrong(self):
+        self.check_mutation("sys_vector_install", lambda b: setattr(next(i for i in b if i.text == "addq $0xef00, %rcx"), "text", "addq $0x8f00, %rcx"), "gate ELF")
+
+    def test_real_gate_ist_wrong(self):
+        self.check_mutation("sys_vector_install", lambda b: setattr(next(i for i in b if i.text == "movl $0x3, %ecx"), "text", "movl $0x1, %ecx"), "gate ELF")
+
+    def test_real_gate_target_unresolved(self):
+        self.check_mutation("sys_vector_install", lambda b: setattr(b[0], "text", "movabsq $0x999, %rdx"), "gate ELF")
+
+    def test_real_gate_installer_omitted(self):
+        self.check_mutation("arch_irq_install", lambda b: b.clear(), "gate ELF")
+
+    def test_production_repeated_gate_ist_descriptors(self):
+        # Runs the real header's unprivileged descriptor writer with optimized
+        # code. A missing read/write RCX operand silently drops repeated ISTs.
+        source = '#include <arch/x86_64/gate.h>\nstruct gate_struct IDT_Table[256];\nint main(void) {\n'
+        for vector in SYNC_VECTORS:
+            setter = "set_intr_gate_raw" if vector == 2 else "set_system_gate" if vector in (3,4,5) else "set_trap_gate"
+            ist = 3 if vector == 8 else 0 if vector == 14 else 1
+            source += f'{setter}({vector}, {ist}, (void *)(0x123456789abcdef0UL + {vector}));\n'
+        for vector in SYNC_VECTORS:
+            ist = 3 if vector == 8 else 0 if vector == 14 else 1
+            attr = 0x8e if vector == 2 else 0xef if vector in (3,4,5) else 0x8f
+            source += f'if ((IDT_Table[{vector}].x[4] & 7) != {ist} || IDT_Table[{vector}].x[5] != {attr}) return {vector+1};\n'
+        source += 'return 0; }\n'
+        cfile, binary = self.tmp / "gates.c", self.tmp / "gates"
+        cfile.write_text(source)
+        compiled = subprocess.run(["clang", "-O2", "-I", str(ROOT / "kernel/include"), str(cfile), "-o", str(binary)], capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        result = subprocess.run([str(binary)], capture_output=True)
+        self.assertEqual(result.returncode, 0, f"production descriptor mismatch at vector {result.returncode-1}")
+
+    def test_spurious_restore_segment_write_missing(self):
+        self.check_mutation("RESTORE_ALL", lambda b: b.__setitem__(slice(None), [i for i in b if i.text != "movq %rax, %ds"]), "restore")
+
+    def test_nmi_extra_transfer_forbidden(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("nmi", lambda b: b.insert(-1, Instr(0, "callq 0xffff8000001499b8 <arch_intr_bad_event>")), "NMI")
+
+    def test_sync_extra_transfer_forbidden(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation("debug", lambda b: b.insert(-1, Instr(0, "callq 0xffff8000001499b8 <arch_intr_bad_event>")), "debug")
+
+    def test_gate_dpl_ist_and_type(self):
+        import shutil
+        repo = self.tmp / "repo"
+        shutil.copytree(ROOT / "kernel", repo / "kernel", ignore=shutil.ignore_patterns("*.o"))
+        trap = repo / "kernel/arch/x86_64/intr/trap.c"
+        original = trap.read_text()
+        for before, after in (("set_trap_gate(8,3,double_fault)", "set_trap_gate(8,1,double_fault)"), ("set_system_gate(3,1,int3)", "set_trap_gate(3,1,int3)"), ("set_intr_gate_raw(2, 1, nmi)", "set_trap_gate(2, 1, nmi)")):
+            with self.subTest(after=after):
+                self.assertIn(before, original)
+                trap.write_text(original.replace(before, after))
+                self.stage_x86()
+                self.assertTrue(any("gate" in e for e in self.audit(repo_root=repo)))
+        trap.write_text(original)
+
+
 if __name__ == "__main__":
     unittest.main()
