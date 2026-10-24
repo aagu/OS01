@@ -105,12 +105,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    desktop_shell_t *shell = desktop_shell_create(display);
+    desktop_shell_t *shell = desktop_shell_create(platform);
     if (shell == NULL) {
         fprintf(stderr, "desktop: 创建桌面外壳失败\n");
         gui_platform_destroy(platform);
         return 1;
     }
+
+    /* 系统应用要报告键鼠是否存在：把输入对象借给外壳。 */
+    desktop_shell_attach_input(shell, input);
 
     gui_input_set_key_handler(input, on_native_key, shell);
 

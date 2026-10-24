@@ -32,6 +32,7 @@
 static const char *const g_files[] = {
     "desktop.c",
     "desktop_shell.c",
+    "desktop_apps.c",
     "desktop_registry.c",
     "desktop_state.c",
 };

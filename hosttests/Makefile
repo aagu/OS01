@@ -3883,7 +3883,8 @@ GUI_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -I$(TESTS_DIR)/config \
     -iquote $(TEST_INC) \
     -iquote $(TEST_MOCK) \
-    -DLV_CONF_INCLUDE_SIMPLE
+    -DLV_CONF_INCLUDE_SIMPLE \
+    -DOS01_BUILD_PROFILE=\"$(PROFILE)\"
 
 $(GUI_DETERMINISTIC_DIR)/platform.o: $(TESTS_DIR)/libgui/src/platform.c $(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
@@ -4109,6 +4110,7 @@ test-gui-desktop-state: $(TEST_BLD)/test_desktop_state.elf
 GUI_DESKTOP_DIR := $(GUI_HOST_DIR)/desktop
 GUI_DESKTOP_OBJS := \
     $(GUI_DESKTOP_DIR)/desktop_shell.o \
+    $(GUI_DESKTOP_DIR)/desktop_apps.o \
     $(GUI_DESKTOP_DIR)/desktop_registry.o \
     $(GUI_DESKTOP_DIR)/desktop_state.o
 

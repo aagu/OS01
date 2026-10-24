@@ -33,7 +33,9 @@
 /* ── 外壳状态 ────────────────────────────────────────────────────── */
 
 struct desktop_shell {
-    lv_display_t *disp;
+    gui_platform_t *platform;
+    gui_input_t   *input;   /* 借用：系统应用用它报告键鼠是否存在 */
+    lv_display_t  *disp;
 
     desktop_state_t state;
     desktop_intent_t pending;
@@ -44,14 +46,48 @@ struct desktop_shell {
     desktop_density_t   density;
     bool               clock_24h;
     desktop_setting_t   pending_setting;
+    time_t             start_time;
+
+    desktop_app_state_t *app_state; /* 跨应用存活的应用状态 */
 
     lv_obj_t   *root;        /* 当前表面的根对象 */
     lv_obj_t   *clock_label;
     lv_obj_t   *status_bar;
     lv_timer_t *clock_timer;
+
+    /*
+     * 桌面自己的焦点序列。
+     *
+     * libgui 的焦点组是私有的，公共 API 没有「登记可聚焦控件」的入口，
+     * 而业务应用只能用公共 API —— 因此外壳用 LVGL 的 LV_STATE_FOCUSED
+     * 状态自己实现同一语义：Tab / Shift+Tab 移动，Enter 激活。
+     * 序列随表面重建：destroy_surface() 先清空它，不会残留已销毁对象。
+     */
+    lv_obj_t   *focus_items[DESKTOP_FOCUS_MAX];
+    uint32_t    focus_count;
+    int32_t     focus_index;  /* -1 表示当前没有焦点 */
 };
 
 static void apply_pending_setting(desktop_shell_t *shell, desktop_setting_t setting);
+
+desktop_app_id_t desktop_shell_current_app_id(const desktop_shell_t *shell)
+{
+    desktop_app_id_t id = DESKTOP_APP_COUNT;
+    if (shell == NULL || !desktop_app_id_from_name(shell->current_app, &id)) {
+        return DESKTOP_APP_COUNT;
+    }
+    return id;
+}
+
+lv_obj_t *desktop_shell_surface_root(const desktop_shell_t *shell)
+{
+    return shell ? shell->root : NULL;
+}
+
+time_t desktop_shell_start_time(const desktop_shell_t *shell)
+{
+    return shell ? shell->start_time : (time_t)0;
+}
 
 /* ── 令牌化样式辅助 ─────────────────────────────────────────────── */
 
@@ -133,6 +169,117 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text,
     lv_obj_set_style_text_color(label, tok(color), 0);
     lv_obj_set_style_text_font(label, desktop_shell_font(role), 0);
     return label;
+}
+
+/* ── 焦点模型 ────────────────────────────────────────────────────── */
+
+/* 清空焦点序列：控件随表面一起没了，序列不能留着野指针。 */
+static void focus_clear(desktop_shell_t *shell)
+{
+    for (uint32_t i = 0; i < shell->focus_count; i++) {
+        if (shell->focus_items[i] != NULL) {
+            lv_obj_remove_state(shell->focus_items[i], LV_STATE_FOCUSED);
+        }
+        shell->focus_items[i] = NULL;
+    }
+    shell->focus_count = 0;
+    shell->focus_index = -1;
+}
+
+/* 把焦点环画到当前项上：LV_STATE_FOCUSED 的样式由 Material 主题给出。 */
+static void focus_apply(desktop_shell_t *shell)
+{
+    for (uint32_t i = 0; i < shell->focus_count; i++) {
+        if (shell->focus_items[i] == NULL) {
+            continue;
+        }
+        if ((int32_t)i == shell->focus_index) {
+            lv_obj_add_state(shell->focus_items[i], LV_STATE_FOCUSED);
+        } else {
+            lv_obj_remove_state(shell->focus_items[i], LV_STATE_FOCUSED);
+        }
+    }
+}
+
+bool desktop_shell_focus_add(desktop_shell_t *shell, lv_obj_t *obj)
+{
+    if (shell == NULL || obj == NULL) {
+        return false;
+    }
+    if (shell->focus_count >= DESKTOP_FOCUS_MAX) {
+        return false;
+    }
+    shell->focus_items[shell->focus_count++] = obj;
+    return true;
+}
+
+void desktop_shell_focus_remove_children(desktop_shell_t *shell, lv_obj_t *parent)
+{
+    if (shell == NULL || parent == NULL) {
+        return;
+    }
+
+    /* 保留顺序地剔除：焦点项的父对象即将随容器一起销毁。 */
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < shell->focus_count; i++) {
+        lv_obj_t *obj = shell->focus_items[i];
+        if (obj == NULL || lv_obj_get_parent(obj) == parent) {
+            continue;
+        }
+        shell->focus_items[keep++] = obj;
+    }
+    for (uint32_t i = keep; i < shell->focus_count; i++) {
+        shell->focus_items[i] = NULL;
+    }
+    shell->focus_count = keep;
+
+    if (shell->focus_index >= (int32_t)keep) {
+        shell->focus_index = (int32_t)keep - 1;
+    }
+    focus_apply(shell);
+}
+
+uint32_t desktop_shell_focus_count(const desktop_shell_t *shell)
+{
+    return shell ? shell->focus_count : 0u;
+}
+
+int32_t desktop_shell_focus_index(const desktop_shell_t *shell)
+{
+    return shell ? shell->focus_index : -1;
+}
+
+/* Tab / Shift+Tab：在序列里前进 / 后退。第一次 Tab 落在首项上。 */
+static bool focus_move(desktop_shell_t *shell, bool forward)
+{
+    if (shell == NULL || shell->focus_count == 0) {
+        return false;
+    }
+    if (shell->focus_index < 0) {
+        shell->focus_index = forward ? 0 : (int32_t)shell->focus_count - 1;
+    } else if (forward) {
+        shell->focus_index = (int32_t)((shell->focus_index + 1) % shell->focus_count);
+    } else {
+        shell->focus_index = (int32_t)((shell->focus_index + (int32_t)shell->focus_count - 1) %
+                                       shell->focus_count);
+    }
+    focus_apply(shell);
+    return true;
+}
+
+/* Enter：激活当前焦点控件（复用它自己的点击回调）。 */
+static bool focus_activate(desktop_shell_t *shell)
+{
+    if (shell == NULL || shell->focus_index < 0 ||
+        (uint32_t)shell->focus_index >= shell->focus_count) {
+        return false;
+    }
+    lv_obj_t *obj = shell->focus_items[shell->focus_index];
+    if (obj == NULL) {
+        return false;
+    }
+    lv_obj_send_event(obj, LV_EVENT_CLICKED, NULL);
+    return true;
 }
 
 /* ── 时钟 ────────────────────────────────────────────────────────── */
@@ -312,6 +459,9 @@ static lv_obj_t *build_launcher(desktop_shell_t *shell, lv_obj_t *parent)
         /* 点击图标 = 启动应用 */
         lv_obj_set_user_data(icon, (void *)desktop_app_id_name(info->id));
         lv_obj_add_event_cb(icon, launcher_icon_cb, LV_EVENT_CLICKED, shell);
+
+        /* 启动器图标也是键盘焦点项：Tab 可依次走到它们。 */
+        desktop_shell_focus_add(shell, icon);
     }
 
     return bar;
@@ -479,6 +629,9 @@ static void build_drawer(desktop_shell_t *shell)
 
         lv_obj_set_user_data(row, (void *)desktop_app_id_name(id));
         lv_obj_add_event_cb(row, drawer_row_cb, LV_EVENT_CLICKED, shell);
+
+        /* 抽屉条目也是键盘焦点项：Tab 选中后回车即可启动应用。 */
+        desktop_shell_focus_add(shell, row);
     }
 
     lv_obj_t *hint = make_label(root, "ESC 返回主屏", GUI_THEME_FONT_LABEL, c->on_surface_variant);
@@ -552,7 +705,54 @@ static lv_obj_t *make_setting_row(desktop_shell_t *shell, lv_obj_t *list,
 
     lv_obj_set_user_data(row, (void *)(intptr_t)setting);
     lv_obj_add_event_cb(row, setting_row_cb, LV_EVENT_CLICKED, shell);
+
+    /* 设置项也是键盘焦点项：Tab 选中后回车即可切换。 */
+    desktop_shell_focus_add(shell, row);
     return row;
+}
+
+/*
+ * 设置项的**唯一实现**：设置表面与设置应用都调用它。
+ *
+ * 这样「设置表面」与「设置应用」不是两套界面，而是同一份界面的两个入口：
+ * 读同一份 shell 设置状态，写同一条投递通道。
+ */
+static void build_settings_rows(desktop_shell_t *shell, lv_obj_t *list)
+{
+    const gui_theme_colors_t *c = gui_theme_colors();
+    int32_t w = lv_display_get_horizontal_resolution(shell->disp);
+
+    if (list == NULL) {
+        return;
+    }
+
+    make_setting_row(shell, list, "时钟格式",
+                     shell->clock_24h ? "24 小时制" : "12 小时制",
+                     DESKTOP_SETTING_CLOCK_FORMAT);
+    make_setting_row(shell, list, "壁纸颜色", wallpaper_label(shell),
+                     DESKTOP_SETTING_WALLPAPER);
+    make_setting_row(shell, list, "卡片密度", density_label(shell),
+                     DESKTOP_SETTING_DENSITY);
+
+    /* 「关于」是只读展示，不可点击。 */
+    lv_obj_t *about = lv_obj_create(list);
+    if (about != NULL) {
+        style_card(about, GUI_THEME_ELEVATION_1);
+        lv_obj_set_style_bg_color(about, tok(c->surface_container_low), 0);
+        lv_obj_set_width(about, w - 32);
+        lv_obj_set_height(about, 88);
+        lv_obj_t *name = make_label(about, "关于", GUI_THEME_FONT_TITLE, c->on_surface);
+        if (name != NULL) {
+            lv_obj_set_pos(name, 16, 14);
+        }
+        lv_obj_t *detail = make_label(about,
+                                      "OS01 Material 桌面外壳\n"
+                                      "内核 x86_64 / LVGL 9 / libgui",
+                                      GUI_THEME_FONT_BODY, c->on_surface_variant);
+        if (detail != NULL) {
+            lv_obj_set_pos(detail, 16, 40);
+        }
+    }
 }
 
 static void build_settings(desktop_shell_t *shell)
@@ -603,47 +803,90 @@ static void build_settings(desktop_shell_t *shell)
     lv_obj_set_style_shadow_width(list, 0, 0);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
 
-    make_setting_row(shell, list, "时钟格式",
-                     shell->clock_24h ? "24 小时制" : "12 小时制",
-                     DESKTOP_SETTING_CLOCK_FORMAT);
-    make_setting_row(shell, list, "壁纸颜色", wallpaper_label(shell),
-                     DESKTOP_SETTING_WALLPAPER);
-    make_setting_row(shell, list, "卡片密度", density_label(shell),
-                     DESKTOP_SETTING_DENSITY);
-
-    /* 「关于」是只读展示，不可点击。 */
-    lv_obj_t *about = lv_obj_create(list);
-    if (about != NULL) {
-        style_card(about, GUI_THEME_ELEVATION_1);
-        lv_obj_set_style_bg_color(about, tok(c->surface_container_low), 0);
-        lv_obj_set_width(about, w - 32);
-        lv_obj_set_height(about, 88);
-        lv_obj_t *name = make_label(about, "关于", GUI_THEME_FONT_TITLE, c->on_surface);
-        if (name != NULL) {
-            lv_obj_set_pos(name, 16, 14);
-        }
-        lv_obj_t *detail = make_label(about,
-                                      "OS01 Material 桌面外壳\n"
-                                      "内核 x86_64 / LVGL 9 / libgui",
-                                      GUI_THEME_FONT_BODY, c->on_surface_variant);
-        if (detail != NULL) {
-            lv_obj_set_pos(detail, 16, 40);
-        }
-    }
+    build_settings_rows(shell, list);
 
     apply_wallpaper(shell);
+}
+
+/*
+ * 设置**应用**的设置体：与应用表面共用同一份设置项实现。
+ *
+ * 与设置表面的差别只在承载方式：应用表面自带顶栏（返回 + 标题），
+ * 因此设置体从顶栏之下开始，没有状态栏也没有标题行。
+ */
+lv_obj_t *desktop_shell_build_settings_body(desktop_shell_t *shell, lv_obj_t *parent)
+{
+    const gui_theme_colors_t *c = gui_theme_colors();
+    int32_t w = lv_display_get_horizontal_resolution(shell->disp);
+    int32_t h = lv_display_get_vertical_resolution(shell->disp);
+
+    if (shell == NULL || parent == NULL) {
+        return NULL;
+    }
+
+    lv_obj_t *list = lv_obj_create(parent);
+    if (list == NULL) {
+        return NULL;
+    }
+    lv_obj_set_layout(list, LV_LAYOUT_NONE);
+    lv_obj_set_size(list, w - 32, h - DESKTOP_APP_BAR_HEIGHT - 32);
+    lv_obj_set_pos(list, 16, DESKTOP_APP_BAR_HEIGHT + 16);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, (int32_t)tok_space(GUI_THEME_SPACE_SM), 0);
+    lv_obj_set_style_radius(list, 0, 0);
+    lv_obj_set_style_shadow_width(list, 0, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+
+    build_settings_rows(shell, list);
+
+    /* 设置应用里的「关于」额外给出只读的系统信息入口。 */
+    lv_obj_t *hint = make_label(parent, "设置与主屏的「设置」共用同一份配置",
+                                GUI_THEME_FONT_LABEL, c->on_surface_variant);
+    if (hint != NULL) {
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 16, -10);
+    }
+
+    return list;
 }
 
 /* ── 迁移执行 ────────────────────────────────────────────────────── */
 
 static void destroy_surface(desktop_shell_t *shell)
 {
+    /* 顺序要紧：焦点项随控件树一起没了，必须在删除控件树**之前**
+     * 把它们从序列里摘掉，否则就是往已销毁对象上写状态。 */
+    focus_clear(shell);
+
     if (shell->root != NULL) {
         lv_obj_delete(shell->root);
         shell->root = NULL;
     }
     shell->clock_label = NULL;
     shell->status_bar = NULL;
+
+    /* 界面句柄随控件树一起没了：应用状态里存的指针必须同时失效。 */
+    if (shell->app_state != NULL) {
+        shell->app_state->files_list = NULL;
+        shell->app_state->term_output_label = NULL;
+        shell->app_state->term_input_label = NULL;
+    }
+}
+
+/* 构建当前应用的全屏表面（应用自己构造界面，外壳只持有根对象）。 */
+static void build_app_surface(desktop_shell_t *shell)
+{
+    desktop_app_id_t id = desktop_shell_current_app_id(shell);
+    if (id == DESKTOP_APP_COUNT) {
+        return;
+    }
+    lv_obj_t *root = desktop_app_build(shell->disp, id, shell);
+    if (root != NULL) {
+        shell->root = root;
+        shell->clock_label = NULL;
+    }
 }
 
 void desktop_shell_apply_pending(desktop_shell_t *shell)
@@ -694,9 +937,12 @@ void desktop_shell_apply_pending(desktop_shell_t *shell)
     case DESKTOP_STATE_SETTINGS:
         build_settings(shell);
         break;
-    case DESKTOP_STATE_APP:
-        /* 应用表面由 Task 6 补齐。 */
+    case DESKTOP_STATE_APP: {
+        snprintf(shell->current_app, sizeof(shell->current_app), "%s", app_id);
+        /* 应用表面由应用自己构造：它占满整个显示区。 */
+        build_app_surface(shell);
         break;
+    }
     default:
         break;
     }
@@ -731,8 +977,31 @@ static void apply_pending_setting(desktop_shell_t *shell, desktop_setting_t sett
     case DESKTOP_STATE_HOME:     build_home(shell);     break;
     case DESKTOP_STATE_DRAWER:   build_drawer(shell);   break;
     case DESKTOP_STATE_SETTINGS: build_settings(shell); break;
+    case DESKTOP_STATE_APP:      build_app_surface(shell); break;
     default:                     build_home(shell);     break;
     }
+}
+
+void desktop_shell_attach_input(desktop_shell_t *shell, gui_input_t *input)
+{
+    if (shell != NULL) {
+        shell->input = input;
+    }
+}
+
+gui_input_t *desktop_shell_input(const desktop_shell_t *shell)
+{
+    return shell ? shell->input : NULL;
+}
+
+gui_platform_t *desktop_shell_platform(const desktop_shell_t *shell)
+{
+    return shell ? shell->platform : NULL;
+}
+
+desktop_app_state_t *desktop_shell_app_state(desktop_shell_t *shell)
+{
+    return shell ? shell->app_state : NULL;
 }
 
 void desktop_shell_request_setting(desktop_shell_t *shell, desktop_setting_t setting)
@@ -745,8 +1014,14 @@ void desktop_shell_request_setting(desktop_shell_t *shell, desktop_setting_t set
 
 /* ── 生命周期 ────────────────────────────────────────────────────── */
 
-desktop_shell_t *desktop_shell_create(lv_display_t *disp)
+desktop_shell_t *desktop_shell_create(gui_platform_t *platform)
 {
+    if (platform == NULL) {
+        return NULL;
+    }
+
+    /* display 归平台所有；外壳只借用 LVGL 的默认 display。 */
+    lv_display_t *disp = lv_display_get_default();
     if (disp == NULL) {
         return NULL;
     }
@@ -755,6 +1030,7 @@ desktop_shell_t *desktop_shell_create(lv_display_t *disp)
     if (shell == NULL) {
         return NULL;
     }
+    shell->platform = platform;
     shell->disp = disp;
     shell->state = DESKTOP_STATE_HOME;
     shell->pending = DESKTOP_INTENT_NONE;
@@ -762,6 +1038,13 @@ desktop_shell_t *desktop_shell_create(lv_display_t *disp)
     shell->density = DESKTOP_DENSITY_COMFORTABLE;
     shell->clock_24h = true;
     shell->pending_setting = DESKTOP_SETTING_NONE;
+    shell->start_time = time(NULL);
+
+    shell->app_state = desktop_app_state_create();
+    if (shell->app_state == NULL) {
+        free(shell);
+        return NULL;
+    }
 
     build_home(shell);
 
@@ -784,6 +1067,7 @@ void desktop_shell_destroy(desktop_shell_t *shell)
         shell->clock_timer = NULL;
     }
     destroy_surface(shell);
+    desktop_app_state_destroy(shell->app_state);
     free(shell);
 }
 
@@ -813,12 +1097,16 @@ void desktop_shell_request(desktop_shell_t *shell, desktop_intent_t intent,
 
 void desktop_shell_tick(desktop_shell_t *shell)
 {
-    if (shell == NULL || shell->clock_label == NULL) {
+    if (shell == NULL) {
         return;
     }
-    char buf[16];
-    format_clock(shell, buf, sizeof(buf));
-    lv_label_set_text(shell->clock_label, buf);
+    if (shell->clock_label != NULL) {
+        char buf[16];
+        format_clock(shell, buf, sizeof(buf));
+        lv_label_set_text(shell->clock_label, buf);
+    }
+    /* 应用界面的刷新也在这里：按键回调只改状态。 */
+    desktop_app_refresh(shell);
 }
 
 bool desktop_shell_handle_key(desktop_shell_t *shell, const gui_key_event_t *ev)
@@ -832,10 +1120,21 @@ bool desktop_shell_handle_key(desktop_shell_t *shell, const gui_key_event_t *ev)
         return false;
     }
 
+    /* 应用优先消费（终端的字符键）。 */
+    if (desktop_app_handle_key(shell, ev)) {
+        return true;
+    }
+
     switch (ev->physical_key) {
     case 0x01: /* Esc */
         desktop_shell_request(shell, DESKTOP_INTENT_ESC, NULL);
         return true;
+    case 0x0F: /* Tab */
+        /* Shift+Tab 反向。 */
+        focus_move(shell, (ev->modifiers & GUI_MOD_LSHIFT) == 0u);
+        return true;
+    case 0x1C: /* Enter */
+        return focus_activate(shell);
     default:
         return false;
     }
