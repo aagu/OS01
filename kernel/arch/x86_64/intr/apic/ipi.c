@@ -1,4 +1,7 @@
 #include <intr/ipi.h>
+#ifdef OS01_SELFTEST
+#include <selftest/x86_intr.h>
+#endif
 #include <intr/apic.h>
 #include <percpu/percpu.h>
 #include <core/debug.h>
@@ -30,6 +33,9 @@ static void ipi_tlb_handler(uint64_t nr __attribute__((unused)),
      * generic_intr_dispatch (kernel/intr/vector_dispatch.c) invokes the handler
      * only and never EOIs itself. */
     flush_tlb();
+#ifdef OS01_SELFTEST
+    selftest_x86_intr_tlb(cpu_id());
+#endif
     __sync_synchronize();
     __atomic_fetch_add(&cpu->tlb_ack_gen, 1, __ATOMIC_RELEASE);
     lapic_eoi();
@@ -40,6 +46,9 @@ static void ipi_resched_handler(uint64_t nr __attribute__((unused)),
                                 pt_regs_t *regs __attribute__((unused)))
 {
     this_cpu()->need_resched = 1;
+#ifdef OS01_SELFTEST
+    selftest_x86_intr_resched(cpu_id());
+#endif
     lapic_eoi();
 }
 

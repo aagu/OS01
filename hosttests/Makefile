@@ -193,7 +193,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_intr_dispatch.elf \
     $(TEST_BLD)/test_intr_backend_aarch64.elf \
     $(TEST_BLD)/test_intr_backend_x86.elf \
-    $(TEST_BLD)/test_intr_irq_x86.elf
+    $(TEST_BLD)/test_intr_irq_x86.elf \
+    $(TEST_BLD)/test_x86_intr_probe.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -4429,3 +4430,8 @@ test-intr-irq-x86: $(TEST_BLD)/test_intr_irq_x86.elf
 
 -include $(IRQ_CHAIN_OBJS:.o=.d)
 -include $(TEST_BLD)/test_intr_irq_x86.d
+
+# Pure helpers shared verbatim by the scheduled IRQ probe and host fixtures.
+$(TEST_BLD)/test_x86_intr_probe.elf: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS_DIR)/kernel/include/selftest/x86_intr.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -idirafter $(TESTS_DIR)/kernel/include $< -o $@

@@ -144,11 +144,11 @@ int kernel_main(const struct boot_context *bootctx)
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
     /* Declare the complete protocol-v1 selection before START: the
-     * registered boot-time (early) cases plus the five scheduled cases
+     * registered boot-time (early) cases plus the six scheduled cases
      * task_init() runs later.  selftest_run_all() executes the early
      * subset; task_init() records the late cases and emits the single
      * END via selftest_end_run(). */
-    selftest_begin_run(5);
+    selftest_begin_run(6);
     selftest_run_all();
     serial_printk("[selftest] done\n");
 #endif

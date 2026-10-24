@@ -88,7 +88,7 @@ def v1_failures(log, *, suite=SUITE, require_intr_dispatch=False):
 # line with that legacy prefix), never as a bare substring.
 INTR_DISPATCH_MARKER = "[selftest] uaccess: dispatch longjmp restore OK"
 
-_INTR_DISPATCH_CASES = ("uaccess", "msr_safe")
+_INTR_DISPATCH_CASES = ("uaccess", "msr_safe", "x86_intr")
 
 
 def _intr_dispatch_failures(log, pr) -> list:

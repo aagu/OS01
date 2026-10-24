@@ -220,6 +220,7 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("fd_refcount");
     selftest_register_late("pgrp_signal");
     selftest_register_late("tty_vintr");
+    selftest_register_late("x86_intr");
 #endif /* !__aarch64__ */
 #endif /* OS01_SELFTEST */
 }

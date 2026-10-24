@@ -64,6 +64,12 @@ ret_from_exception:
 	// interrupt return (which runs on the task kernel stack).
 	jmp	RESTORE_ALL
 ENTRY(ret_from_intr)
+#ifdef OS01_SELFTEST
+	# Frame already owns all GPRs. Count return-work entry per CPU.
+	movl	%gs:16,	%eax
+	leaq	selftest_x86_intr_returns(%rip),	%rdx
+	incq	(%rdx,%rax,8)
+#endif
 	movq	$-1,	%rcx
 	testq	softirq_status(%rip),	%rcx
 	jnz	softirq_handler

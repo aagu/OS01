@@ -1,4 +1,7 @@
 #include <intr/apic.h>
+#ifdef OS01_SELFTEST
+#include <selftest/x86_intr.h>
+#endif
 #include <arch/x86_64/intr_dispatch.h>
 #include <percpu/percpu.h>
 #include <core/debug.h>
@@ -158,6 +161,9 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
         sched_account_tick();
     }
     lapic_eoi();
+#ifdef OS01_SELFTEST
+    selftest_x86_intr_tick(cpu_id());
+#endif
 }
 
 void x86_handle_lapic_timer_irq(pt_regs_t *regs, uint64_t vector)
