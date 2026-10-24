@@ -123,6 +123,12 @@ int vfs_mount(const char *path, block_device_t *dev,
     return 0;
 }
 
+struct vfs_node *vfs_node_get(struct vfs_node *node)
+{
+    if (node) __sync_add_and_fetch(&node->refcount, 1);
+    return node;
+}
+
 /* devfs_init() registers the built-in null/zero/random/serial devices.
  * Their handlers must link even though this test never touches them. */
 void get_random_bytes(void *b, size_t n) { (void)b; (void)n; }

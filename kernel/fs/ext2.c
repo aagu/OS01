@@ -837,6 +837,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     node->i_ops = dir->i_ops;
     node->f_ops = dir->f_ops;
     node->ino = new_ino;
+    node->mode = EXT2_S_IFREG | 0644;
     node->nlink = 1;
     node->parent = dir;
     __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
@@ -1152,6 +1153,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     node->i_ops = dir->i_ops;
     node->f_ops = dir->f_ops;
     node->ino = new_ino;
+    node->mode = EXT2_S_IFDIR | 0755;
     node->nlink = 2;
     node->parent = dir;
     __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
@@ -1539,8 +1541,110 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
     return 0;
 }
 
+static void ext2_fill_vfs_node(vfs_node_t *node, uint32_t ino,
+                               const ext2_inode_t *disk_ino)
+{
+    node->ino   = ino;
+    node->size  = disk_ino->i_size;
+    node->mode  = disk_ino->i_mode;
+    node->uid   = disk_ino->i_uid;
+    node->gid   = disk_ino->i_gid;
+    node->nlink = disk_ino->i_links_count;
+    node->atime = disk_ino->i_atime;
+    node->mtime = disk_ino->i_mtime;
+    node->ctime = disk_ino->i_ctime;
+}
+
+static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
+                           struct vfs_node **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!dir || !dir->mount || !name) return -EINVAL;
+    if (dir->type != VFS_DIR) return -ENOTDIR;
+
+    ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
+    uint32_t dir_ino = ext2_node_ino(dir);
+
+    spin_lock(&fs->lock);
+
+    uint32_t child_ino = 0, blk = 0, off = 0;
+    uint8_t ft = 0;
+    int rc = ext2_find_dirent(fs, dir_ino, name, &child_ino, &ft, &blk, &off);
+    if (rc != 0) {
+        spin_unlock(&fs->lock);
+        return rc;
+    }
+
+    ext2_inode_t disk_ino;
+    if (ext2_read_inode(fs, child_ino, &disk_ino) != 0) {
+        spin_unlock(&fs->lock);
+        return -EIO;
+    }
+
+    spin_unlock(&fs->lock);
+
+    vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!child) return -ENOMEM;
+
+    child->name = strndup(name, VFS_NAME_MAX - 1);
+    if (!child->name) {
+        kfree(child);
+        return -ENOMEM;
+    }
+
+    switch (ft) {
+    case EXT2_FT_DIR:     child->type = VFS_DIR;     break;
+    case EXT2_FT_SYMLINK: child->type = VFS_SYMLINK; break;
+    case EXT2_FT_CHRDEV:  child->type = VFS_CHRDEV;  break;
+    case EXT2_FT_BLKDEV:  child->type = VFS_BLKDEV;  break;
+    default:
+        if ((disk_ino.i_mode & 0xF000) == EXT2_S_IFDIR)
+            child->type = VFS_DIR;
+        else if ((disk_ino.i_mode & 0xF000) == EXT2_S_IFLNK)
+            child->type = VFS_SYMLINK;
+        else
+            child->type = VFS_FILE;
+        break;
+    }
+
+    ext2_fill_vfs_node(child, child_ino, &disk_ino);
+    child->mount    = dir->mount;
+    child->parent   = vfs_node_get(dir);
+    child->fs_data  = (void *)(uintptr_t)child_ino;
+    child->i_ops    = &ext2_iops;
+    child->f_ops    = &ext2_fops;
+    child->refcount = 1;
+    *out = child;
+    return 0;
+}
+
+static int ext2_iop_getattr(struct vfs_node *node, struct stat *buf)
+{
+    if (!node || !node->mount || !buf) return -1;
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+    uint32_t ino = ext2_node_ino(node);
+
+    spin_lock(&fs->lock);
+    ext2_inode_t disk_ino;
+    int rc = ext2_read_inode(fs, ino, &disk_ino);
+    if (rc == 0) {
+        ext2_fill_vfs_node(node, ino, &disk_ino);
+    }
+    spin_unlock(&fs->lock);
+
+    if (rc != 0) return -EIO;
+    int grc = vfs_generic_getattr(node, buf);
+    if (grc != 0) return grc;
+    buf->st_blksize = fs->block_size;
+    buf->st_blocks  = disk_ino.i_blocks;
+    return 0;
+}
+
 // ── VFS operations table ────────────────────────────────
 const vfs_inode_ops_t ext2_iops = {
+    .lookup   = ext2_iop_lookup,
+    .getattr  = ext2_iop_getattr,
     .readlink = ext2_vfs_readlink,
     .symlink  = ext2_vfs_symlink,
     .create   = ext2_vfs_create,
@@ -1644,6 +1748,11 @@ static int ext2_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     mp->root->f_ops = &ext2_fops;
     mp->root->ino = EXT2_ROOT_INO;
     mp->root->nlink = 2;
+
+    ext2_inode_t root_ino;
+    if (ext2_read_inode(fs, EXT2_ROOT_INO, &root_ino) == 0) {
+        ext2_fill_vfs_node(mp->root, EXT2_ROOT_INO, &root_ino);
+    }
     return 0;
 }
 

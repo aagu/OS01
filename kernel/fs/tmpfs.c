@@ -38,6 +38,13 @@ typedef struct tmpfs_node {
     char               name[256];
     uint8_t            type;
     uint64_t           size;
+    uint32_t           mode;
+    uint32_t           uid;
+    uint32_t           gid;
+    uint32_t           nlink;
+    uint64_t           atime;
+    uint64_t           mtime;
+    uint64_t           ctime;
     struct tmpfs_node *parent;
 
     // File: block chain
@@ -191,6 +198,7 @@ static int tmpfs_vfs_write(struct vfs_node *node, uint64_t offset,
     uint64_t last_blk = (end_pos > 0) ? ((end_pos - 1) / 4096) : 0;
     if (tmpfs_grow_to(tn, last_blk) != 0) return -1;
     if (end_pos > tn->size) tn->size = end_pos;
+    node->size = tn->size;
 
     uint8_t *in = (uint8_t *)buffer;
     uint64_t remaining = size;
@@ -259,6 +267,8 @@ static struct vfs_node *tmpfs_vfs_create(struct vfs_node *dir,
     if (!new_node) return NULL;
     strcpy(new_node->name, name);
     new_node->type   = VFS_FILE;
+    new_node->mode   = S_IFREG | 0755;
+    new_node->nlink  = 1;
     new_node->parent = d;
 
     // Expand children array: kmalloc+memcpy+kfree (NEVER realloc)
@@ -279,11 +289,12 @@ static struct vfs_node *tmpfs_vfs_create(struct vfs_node *dir,
     if (!vn) { d->children[--d->child_count] = NULL; kfree(new_node); return NULL; }
     vn->type    = VFS_FILE;
     vn->size    = 0;
+    vn->mode    = new_node->mode;
+    vn->nlink   = new_node->nlink;
     vn->fs_data = new_node;
     vn->i_ops   = &tmpfs_iops;
     vn->f_ops   = &tmpfs_fops;
     vn->ino     = (uint64_t)(uintptr_t)new_node;
-    vn->nlink   = 1;
     vn->mount   = dir->mount;
     vn->parent  = dir;
     __sync_add_and_fetch(&dir->refcount, 1);
@@ -312,6 +323,8 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
     if (!new_node) return NULL;
     strcpy(new_node->name, name);
     new_node->type   = VFS_DIR;
+    new_node->mode   = S_IFDIR | 0755;
+    new_node->nlink  = 2;
     new_node->parent = d;
 
     if (d->child_count >= d->child_cap) {
@@ -329,11 +342,12 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
     if (!vn) { d->children[--d->child_count] = NULL; kfree(new_node); return NULL; }
     vn->type    = VFS_DIR;
     vn->size    = 0;
+    vn->mode    = new_node->mode;
+    vn->nlink   = new_node->nlink;
     vn->fs_data = new_node;
     vn->i_ops   = &tmpfs_iops;
     vn->f_ops   = &tmpfs_fops;
     vn->ino     = (uint64_t)(uintptr_t)new_node;
-    vn->nlink   = 2;
     vn->mount   = dir->mount;
     vn->parent  = dir;
     __sync_add_and_fetch(&dir->refcount, 1);
@@ -415,10 +429,71 @@ static int tmpfs_vfs_truncate(struct vfs_node *node, uint64_t new_size)
     if (!tn) return -1;
     tmpfs_truncate_blocks(tn, new_size);
     tn->size = new_size;
+    node->size = new_size;
     return 0;
 }
 
+static int tmpfs_iop_lookup(struct vfs_node *dir, const char *name,
+                            struct vfs_node **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!dir || !name) return -EINVAL;
+    tmpfs_node_t *d = tmpfs_get_node(dir);
+    if (!d || d->type != VFS_DIR) return -ENOTDIR;
+
+    int idx = tmpfs_find_child(d, name);
+    if (idx < 0) return -ENOENT;
+
+    tmpfs_node_t *tn = d->children[idx];
+    struct vfs_node *vn = calloc(1, sizeof(struct vfs_node));
+    if (!vn) return -ENOMEM;
+
+    vn->name = strndup(tn->name, VFS_NAME_MAX - 1);
+    if (!vn->name) {
+        kfree(vn);
+        return -ENOMEM;
+    }
+    vn->type    = tn->type;
+    vn->ino     = (uint64_t)(uintptr_t)tn;
+    vn->size    = tn->size;
+    vn->mode    = tn->mode ? tn->mode : ((tn->type == VFS_DIR) ? (S_IFDIR | 0755) : (S_IFREG | 0755));
+    vn->uid     = tn->uid;
+    vn->gid     = tn->gid;
+    vn->nlink   = tn->nlink;
+    vn->atime   = tn->atime;
+    vn->mtime   = tn->mtime;
+    vn->ctime   = tn->ctime;
+    vn->fs_data = tn;
+    vn->i_ops   = &tmpfs_iops;
+    vn->f_ops   = &tmpfs_fops;
+    vn->mount   = dir->mount;
+    vn->parent  = vfs_node_get(dir);
+    vn->refcount = 1;
+    *out = vn;
+    return 0;
+}
+
+static int tmpfs_iop_getattr(struct vfs_node *node, struct stat *buf)
+{
+    if (!node || !buf) return -1;
+    tmpfs_node_t *tn = tmpfs_get_node(node);
+    if (tn) {
+        node->size  = tn->size;
+        node->mode  = tn->mode ? tn->mode : node->mode;
+        node->uid   = tn->uid;
+        node->gid   = tn->gid;
+        node->nlink = tn->nlink;
+        node->atime = tn->atime;
+        node->mtime = tn->mtime;
+        node->ctime = tn->ctime;
+    }
+    return vfs_generic_getattr(node, buf);
+}
+
 static const vfs_inode_ops_t tmpfs_iops = {
+    .lookup   = tmpfs_iop_lookup,
+    .getattr  = tmpfs_iop_getattr,
     .create   = tmpfs_vfs_create,
     .unlink   = tmpfs_vfs_unlink,
     .mkdir    = tmpfs_vfs_mkdir,
@@ -447,6 +522,8 @@ static int tmpfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
         return -ENOMEM;
     }
     root->type = VFS_DIR;
+    root->mode = S_IFDIR | 0755;
+    root->nlink = 2;
     strcpy(root->name, "/");
     root->children = kmalloc(TMPFS_CHILDREN_INIT_CAP * sizeof(tmpfs_node_t *));
     if (!root->children) {

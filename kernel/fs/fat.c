@@ -953,6 +953,8 @@ struct vfs_node *fat_mkdir(vfs_node_t *dir, const char *name)
     node->parent = dir;
     node->i_ops = dir->i_ops;
     node->f_ops = dir->f_ops;
+    node->mode = S_IFDIR | 0755;
+    node->ino = new_cl;
     node->nlink = 2;
     node->fs_data = (void *)(uintptr_t)new_cl;
     node->size = 0;
@@ -1249,6 +1251,7 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
     __sync_add_and_fetch(&dir->refcount, 1);  // child holds reference to parent
     node->i_ops = dir->i_ops;
     node->f_ops = dir->f_ops;
+    node->mode = S_IFREG | 0755;
     node->nlink = 1;
     node->fs_data = NULL;  // no cluster yet — allocated on first write
     node->size = 0;
@@ -1257,7 +1260,76 @@ struct vfs_node *fat_create(vfs_node_t *dir, const char *name)
     return node;
 }
 
+extern const vfs_inode_ops_t fat_iops;
+extern const vfs_file_ops_t fat_fops;
+
+static int fat_iop_lookup(struct vfs_node *dir, const char *name,
+                          struct vfs_node **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!dir || !dir->mount || !name) return -EINVAL;
+    if (dir->type != VFS_DIR) return -ENOTDIR;
+
+    fat32_fs_t *fs = (fat32_fs_t *)dir->mount->fs_data;
+    uint32_t dir_cluster = dir->fs_data
+        ? (uint32_t)(uintptr_t)dir->fs_data
+        : fs->root_cluster;
+
+    uint64_t lba = 0;
+    uint32_t off = 0;
+    int64_t idx = fat32_find_by_name(fs, dir_cluster, name, &lba, &off);
+    if (idx < 0) return -ENOENT;
+
+    FAT32_DIRENT dirent;
+    if (fat32_read_entry_at(fs, lba, off, &dirent) != 0)
+        return -EIO;
+
+    uint32_t first_cl = (uint32_t)dirent.first_cluster_lo
+                      | ((uint32_t)dirent.first_cluster_hi << 16);
+
+    vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!child) return -ENOMEM;
+
+    child->name = strndup(name, VFS_NAME_MAX - 1);
+    if (!child->name) {
+        kfree(child);
+        return -ENOMEM;
+    }
+
+    if (dirent.attr & FAT_ATTR_DIRECTORY) {
+        child->type  = VFS_DIR;
+        child->size  = 0;
+        child->mode  = S_IFDIR | 0755;
+        child->nlink = 2;
+        child->ino   = first_cl;
+    } else {
+        child->type  = VFS_FILE;
+        child->size  = dirent.file_size;
+        child->mode  = (dirent.attr & FAT_ATTR_READ_ONLY) ? (S_IFREG | 0555) : (S_IFREG | 0755);
+        child->nlink = 1;
+        child->ino   = first_cl ? first_cl : ((lba << 16) | (off & 0xFFFF));
+    }
+
+    child->mount    = dir->mount;
+    child->parent   = vfs_node_get(dir);
+    child->fs_data  = (void *)(uintptr_t)first_cl;
+    child->i_ops    = &fat_iops;
+    child->f_ops    = &fat_fops;
+    child->refcount = 1;
+    *out = child;
+    return 0;
+}
+
+static int fat_iop_getattr(struct vfs_node *node, struct stat *buf)
+{
+    if (!node || !buf) return -1;
+    return vfs_generic_getattr(node, buf);
+}
+
 const vfs_inode_ops_t fat_iops = {
+    .lookup   = fat_iop_lookup,
+    .getattr  = fat_iop_getattr,
     .create   = fat_create,
     .unlink   = fat_unlink,
     .mkdir    = fat_mkdir,

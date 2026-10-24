@@ -450,6 +450,48 @@ static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
 // device index stored in node->fs_data during vfs_lookup.
 
 static const vfs_inode_ops_t devfs_iops;
+static const vfs_file_ops_t devfs_fops;
+
+static int devfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!dir || !name) return -EINVAL;
+    if (dir->type != VFS_DIR) return -ENOTDIR;
+
+    for (int i = 0; i < DEVFS_MAX_DEVICES; i++) {
+        if (!devices[i].registered) continue;
+        if (strcmp(devices[i].name, name) == 0) {
+            vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+            if (!child) return -ENOMEM;
+            child->name = strndup(devices[i].name, VFS_NAME_MAX - 1);
+            if (!child->name) {
+                kfree(child);
+                return -ENOMEM;
+            }
+            child->type = devices[i].type;
+            child->ino = (uint64_t)(i + 1);
+            child->rdev = (uint64_t)(i + 1);
+            child->mode = (devices[i].type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666;
+            child->nlink = 1;
+            child->size = 0;
+            child->mount = dir->mount;
+            child->parent = vfs_node_get(dir);
+            child->fs_data = (void *)(uintptr_t)i;
+            child->i_ops = &devfs_iops;
+            child->f_ops = &devfs_fops;
+            child->refcount = 1;
+            *out = child;
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
+static const vfs_inode_ops_t devfs_iops = {
+    .lookup = devfs_iop_lookup,
+};
+
 static const vfs_file_ops_t devfs_fops = {
     .read      = devfs_read,
     .write     = devfs_write,

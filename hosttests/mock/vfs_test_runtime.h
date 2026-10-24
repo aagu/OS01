@@ -24,6 +24,10 @@ static inline int  mutex_trylock(mutex_t *m) { if (m && m->owner == 0) { m->owne
 static inline void mutex_unlock(mutex_t *m) { if (m) m->owner = 0; }
 static inline int  mutex_lock_interruptible(mutex_t *m) { mutex_lock(m); return 0; }
 
+#define CTTY_NONE          0
+#define CTTY_PHYS          1
+#define CTTY_PTY           2
+
 struct files_struct;
 
 typedef struct task_struct {

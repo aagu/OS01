@@ -513,6 +513,152 @@ static int procfs_readdir(vfs_node_t *node, uint64_t index,
 // procfs node keeps the legacy regenerate-per-read behaviour (read_file
 // falls back to vfs_read → procfs_read when no snapshot is attached).
 static const vfs_inode_ops_t procfs_iops;
+static const vfs_file_ops_t procfs_fops;
+
+static int procfs_parse_uint(const char *s, uint32_t *out_val)
+{
+    if (!s || s[0] == '\0') return -1;
+    if (s[0] == '0' && s[1] != '\0') return -1; // reject leading zeros like "01"
+    uint64_t val = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        val = val * 10 + (uint64_t)(*p - '0');
+        if (val > 0x7FFFFFULL) return -1;
+    }
+    *out_val = (uint32_t)val;
+    return 0;
+}
+
+static int procfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!dir || !name) return -EINVAL;
+    if (dir->type != VFS_DIR) return -ENOTDIR;
+
+    int      dir_type = PROCFS_TYPE(dir->fs_data);
+    uint32_t pid      = PROCFS_PID(dir->fs_data);
+
+    uint8_t  child_type = 0;
+    uint64_t child_size = 0;
+    void    *child_fs_data = NULL;
+
+    switch (dir_type) {
+    case PROCFS_TYPE_ROOT: {
+        if (strcmp(name, "self") == 0) {
+            child_type = VFS_DIR;
+            child_size = 0;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_SELF_DIR, PROCFS_PID_SELF);
+            break;
+        }
+        if (strcmp(name, "meminfo") == 0) {
+            child_type = VFS_FILE;
+            child_size = 4096;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_MEMINFO, 0);
+            break;
+        }
+        if (strcmp(name, "stat") == 0) {
+            child_type = VFS_FILE;
+            child_size = 4096;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_STAT, 0);
+            break;
+        }
+        if (strcmp(name, "thermal") == 0) {
+            child_type = VFS_FILE;
+            child_size = 4096;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_THERMAL, 0);
+            break;
+        }
+        uint32_t target_pid = 0;
+        if (procfs_parse_uint(name, &target_pid) != 0 || target_pid == 0)
+            return -ENOENT;
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        task_t *t = find_task_by_pid((int)target_pid);
+        int valid = (t && t->pid > 0 && !(t->flags & PF_KTHREAD));
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+        if (!valid) return -ENOENT;
+        child_type = VFS_DIR;
+        child_size = 0;
+        child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_PID_DIR, target_pid);
+        break;
+    }
+    case PROCFS_TYPE_SELF_DIR:
+    case PROCFS_TYPE_PID_DIR: {
+        if (dir_type == PROCFS_TYPE_PID_DIR) {
+            uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+            task_t *t = find_task_by_pid((int)pid);
+            int valid = (t && t->pid > 0 && !(t->flags & PF_KTHREAD));
+            spin_unlock_irqrestore(&task_list_lock, tl_flags);
+            if (!valid) return -ENOENT;
+        }
+        uint32_t enc_pid = (dir_type == PROCFS_TYPE_SELF_DIR) ? PROCFS_PID_SELF : pid;
+        if (strcmp(name, "status") == 0) {
+            child_type = VFS_FILE;
+            child_size = 4096;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_STATUS, enc_pid);
+        } else if (strcmp(name, "maps") == 0) {
+            child_type = VFS_FILE;
+            child_size = 4096;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_MAPS, enc_pid);
+        } else if (strcmp(name, "fd") == 0) {
+            child_type = VFS_DIR;
+            child_size = 0;
+            child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_FD_DIR, enc_pid);
+        } else {
+            return -ENOENT;
+        }
+        break;
+    }
+    case PROCFS_TYPE_FD_DIR: {
+        int fd_num = parse_fd(name);
+        if (fd_num < 0) return -ENOENT;
+        uint32_t p = pid;
+        if (p == PROCFS_PID_SELF) {
+            if (!current) return -ENOENT;
+            p = (uint32_t)current->pid;
+        }
+        files_t *fs = task_files_pin_by_pid((int)p);
+        if (!fs) return -ENOENT;
+        uint64_t fl = spin_lock_irqsave(&fs->lock);
+        int open_ok = (fs->fd[fd_num] != NULL);
+        spin_unlock_irqrestore(&fs->lock, fl);
+        files_unpin(fs);
+        if (!open_ok) return -ENOENT;
+        child_type = VFS_FILE;
+        child_size = 4096;
+        child_fs_data = PROCFS_ENCODE(PROCFS_TYPE_FD_ENTRY, pid);
+        break;
+    }
+    default:
+        return -ENOENT;
+    }
+
+    vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!child) return -ENOMEM;
+    child->name = strndup(name, VFS_NAME_MAX - 1);
+    if (!child->name) {
+        kfree(child);
+        return -ENOMEM;
+    }
+    child->type = child_type;
+    child->size = child_size;
+    child->ino = (uint64_t)(uintptr_t)child_fs_data;
+    child->mode = (child_type == VFS_DIR) ? (S_IFDIR | 0555) : (S_IFREG | 0444);
+    child->nlink = (child_type == VFS_DIR) ? 2 : 1;
+    child->mount = dir->mount;
+    child->parent = vfs_node_get(dir);
+    child->fs_data = child_fs_data;
+    child->i_ops = &procfs_iops;
+    child->f_ops = &procfs_fops;
+    child->refcount = 1;
+    *out = child;
+    return 0;
+}
+
+static const vfs_inode_ops_t procfs_iops = {
+    .lookup = procfs_iop_lookup,
+};
+
 static const vfs_file_ops_t procfs_fops = {
     .read         = procfs_read,
     .write        = NULL,
