@@ -131,6 +131,12 @@ static ssize_t gui_test_device_read(gui_test_device_t *dev, void *buf, size_t co
     return -1;
 }
 
+/* GUI-2b Task 3: the native widget fault bridges.  They are defined here
+ * (and not in the widget fixture) because every GUI host binary links the
+ * widget unit and the unit must find these symbols in all of them. */
+bool g_gui_test_fail_widget_registry = false;
+bool g_gui_test_fail_widget_observer = false;
+
 #ifndef GUI_INTEGRATION_TEST
 bool g_gui_test_fail_lv_display_create = false;
 uint32_t g_gui_test_handler_delay = 20;
@@ -205,6 +211,9 @@ void gui_test_reset(void)
     g_gui_test_display_generation = 1;
 
     g_gui_test_fail_lvgl_create_errno = 0;
+
+    g_gui_test_fail_widget_registry = false;
+    g_gui_test_fail_widget_observer = false;
 
     gui_test_device_reset(&g_gui_test_keyboard);
     gui_test_device_reset(&g_gui_test_mouse);

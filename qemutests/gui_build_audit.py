@@ -88,6 +88,14 @@ GUI_TEST_HOOK_SYMBOLS = (
     "gui_input_test_feed_keybytes",
 )
 
+# The host-only hook FAMILIES.  The checks below match on the prefix, not on
+# a fixed name list: a new gui_input_test_* / gui_widget_test_* symbol must
+# not be able to escape the rejection.
+GUI_TEST_HOOK_PREFIXES = (
+    "gui_input_test_",
+    "gui_widget_test_",
+)
+
 # Production objects that must be archive members.  The GUI-2 input units
 # (input.o / input_lvgl.o / input_focus.o / input_ps2.o) are part of the
 # shipped library, not of the host fixtures.
@@ -1219,9 +1227,13 @@ def audit_sysroot_and_build(
 
             # The host-only injection hooks must NOT be shipped.  The two
             # lists overlap on purpose (the named hooks are a subset of the
-            # gui_input_test_* family), so the offending set is collected
-            # once and each symbol is reported exactly once.
-            shipped_hooks = {sym for sym in defined_syms if sym.startswith("gui_input_test_")}
+            # gui_input_test_* / gui_widget_test_* families), so the offending
+            # set is collected once and each symbol is reported exactly once.
+            shipped_hooks = {
+                sym
+                for sym in defined_syms
+                if any(sym.startswith(prefix) for prefix in GUI_TEST_HOOK_PREFIXES)
+            }
             shipped_hooks.update(sym for sym in GUI_TEST_HOOK_SYMBOLS if sym in defined_syms)
             for sym in sorted(shipped_hooks):
                 errors.append(
@@ -1252,12 +1264,18 @@ def audit_sysroot_and_build(
                 errors.append(
                     f"Public header {hdr.name} contains the host-test switch OS01_HOST_TEST"
                 )
-            # The injection hooks are a FAMILY, not two names: the archive
-            # check rejects every gui_input_test_* symbol, so the public
-            # header check must use the same family match — a header
-            # declaring a different gui_input_test_* symbol must not
+            # The injection hooks are a FAMILY, not a fixed name list: the
+            # archive check rejects every gui_input_test_* / gui_widget_test_*
+            # symbol, so the public header check must use the same family
+            # match — a header declaring a different hook symbol must not
             # escape.
-            for hook in sorted(set(re.findall(r"\bgui_input_test_\w+", content))):
+            for hook in sorted(
+                {
+                    match
+                    for prefix in GUI_TEST_HOOK_PREFIXES
+                    for match in re.findall(r"\b" + prefix + r"\w+", content)
+                }
+            ):
                 errors.append(
                     f"Public header {hdr.name} declares the host-only test hook {hook}"
                 )

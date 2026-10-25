@@ -102,6 +102,14 @@ int gui_widget_registry_init(gui_platform_t *platform);
  */
 void gui_widget_registry_fini(gui_platform_t *platform);
 
+/**
+ * @brief 销毁平台上的整棵原生控件树
+ *
+ * 平台关闭时在**删除 display 之前**调用：先让原生树按公共销毁语义消失
+ * （删除回调把身份立即置为失效），再删 display，最后释放注册表。
+ */
+void gui_widget_registry_destroy_tree(gui_platform_t *platform);
+
 #ifdef OS01_HOST_TEST
 /*
  * 宿主私有注入：身份计数的强制设置与读取。
@@ -141,6 +149,16 @@ int gui_widget_test_plant_slot(gui_platform_t *platform, gui_widget_t widget, ui
  * @return 0 成功；-1 失败
  */
 int gui_widget_test_get_counters(gui_platform_t *platform, uint32_t *out_count, uint32_t *out_peak);
+
+/**
+ * @brief 宿主私有后端删除：绕开注册表直接删掉原生对象
+ *
+ * 这模拟"后端在注册表背后自行删除对象"。删除回调照常运行，身份必须立刻
+ * 失效；公开测试只通过**值句柄**判断，不碰后端指针。
+ *
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_widget_test_backend_delete(gui_platform_t *platform, gui_widget_t widget);
 #endif
 
 #ifdef __cplusplus

@@ -151,6 +151,39 @@ int gui_native_fixture_query_registry(gui_platform_t *platform, gui_native_regis
 int gui_native_fixture_plant_slot(gui_platform_t *platform, gui_widget_t widget,
                                   uint32_t stale_flags, const char *stale_text);
 
+/**
+ * @brief 把进程全局的身份计数器推到末值（身份耗尽契约的探针）
+ *
+ * 计数器是进程全局的：它只在**独立子进程**里被推到末值，主进程不受
+ * 影响。
+ */
+void gui_native_fixture_set_identity_last_id(uint64_t last_id);
+
+/**
+ * @brief 读回进程全局的身份计数器
+ */
+uint64_t gui_native_fixture_get_identity_last_id(void);
+
+/**
+ * @brief 后端内存池的空闲字节数（分配/释放配对的探针）
+ *
+ * @return 0 成功；-1 失败
+ */
+int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_bytes);
+
+/**
+ * @brief 后端删除 fixture：绕开注册表直接删掉原生对象
+ *
+ * 这是**内部** fixture：公开测试仍然只通过值句柄判断身份是否还有效，
+ * 不碰任何后端指针。
+ *
+ * @return 0 成功；-1 失败
+ */
+int gui_native_fixture_backend_delete(gui_platform_t *platform, gui_widget_t widget);
+
+/* 固定容量（与 libgui 内部一致；fixture 的 .c 里有静态断言守着）。 */
+#define GUI_NATIVE_CAPACITY 1024u
+
 #ifdef __cplusplus
 }
 #endif

@@ -423,6 +423,13 @@ void gui_platform_destroy(gui_platform_t *platform)
     }
 
     /*
+     * GUI-2b：原生控件树先于 display 消失。删除回调把每个身份立即置为
+     * 失效，而它还要用到注册表——所以树必须在这里删，注册表必须活得比
+     * display 久。
+     */
+    gui_widget_registry_destroy_tree(platform);
+
+    /*
      * 销毁顺序有讲究：**先删 display，再拆主题**。
      *
      * 主题的样式缓冲在 LVGL 内存池里，而 display 的屏幕对象上还挂着这些
@@ -438,9 +445,7 @@ void gui_platform_destroy(gui_platform_t *platform)
         platform->disp = NULL;
     }
 
-    /* GUI-2b：原生控件树随 display 一起消失（原生删除回调把身份立即置为
-     * 失效），注册表随后释放——它必须比 display 活得久，因为删除回调
-     * 还要用它。 */
+    /* GUI-2b：注册表在 display 之后释放（删除回调已经跑完）。 */
     gui_widget_registry_fini(platform);
 
     if (platform->theme) {

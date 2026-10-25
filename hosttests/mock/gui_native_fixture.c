@@ -11,6 +11,7 @@
 #include <gui_input_private.h>
 #include <gui_platform_private.h>
 #include <gui_widget_private.h>
+#include <lvgl/lvgl.h>
 
 #include <errno.h>
 #include <string.h>
@@ -23,6 +24,7 @@ _Static_assert(GUI_NATIVE_SLOT_FREE == GUI_WIDGET_SLOT_FREE, "slot state drift")
 _Static_assert(GUI_NATIVE_SLOT_RESERVED == GUI_WIDGET_SLOT_RESERVED, "slot state drift");
 _Static_assert(GUI_NATIVE_SLOT_LIVE == GUI_WIDGET_SLOT_LIVE, "slot state drift");
 _Static_assert(GUI_NATIVE_SLOT_DESTROYING == GUI_WIDGET_SLOT_DESTROYING, "slot state drift");
+_Static_assert(GUI_NATIVE_CAPACITY == GUI_WIDGET_REGISTRY_CAPACITY, "capacity drift");
 
 int gui_native_fixture_create(gui_native_fixture_t *fx, bool with_input)
 {
@@ -180,4 +182,32 @@ int gui_native_fixture_plant_slot(gui_platform_t *platform, gui_widget_t widget,
                                   uint32_t stale_flags, const char *stale_text)
 {
     return gui_widget_test_plant_slot(platform, widget, stale_flags, stale_text);
+}
+
+void gui_native_fixture_set_identity_last_id(uint64_t last_id)
+{
+    gui_widget_test_set_last_id(last_id);
+}
+
+uint64_t gui_native_fixture_get_identity_last_id(void)
+{
+    return gui_widget_test_get_last_id();
+}
+
+int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_bytes)
+{
+    (void)platform;
+    if (!out_free_bytes) {
+        errno = EINVAL;
+        return -1;
+    }
+    lv_mem_monitor_t monitor;
+    lv_mem_monitor(&monitor);
+    *out_free_bytes = monitor.free_size;
+    return 0;
+}
+
+int gui_native_fixture_backend_delete(gui_platform_t *platform, gui_widget_t widget)
+{
+    return gui_widget_test_backend_delete(platform, widget);
 }

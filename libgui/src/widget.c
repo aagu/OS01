@@ -26,6 +26,9 @@ static uint64_t g_widget_last_id = 0;
 
 /* ── 内部辅助 ─────────────────────────────────────────────────────── */
 
+/* 删除事务：把一棵子树标成 DESTROYING、删原生对象、回收槽位。 */
+static void widget_destroy_subtree(gui_platform_t *platform, gui_widget_slot_t *root_slot);
+
 /**
  * @brief 按身份号查找槽
  *
@@ -100,7 +103,7 @@ static void registry_reap(gui_widget_registry_t *reg)
 {
     for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
         gui_widget_slot_t *slot = &reg->slots[i];
-        if (slot->state == GUI_WIDGET_SLOT_DESTROYING) {
+        if (slot->state == GUI_WIDGET_SLOT_DESTROYING && slot->pending_free) {
             slot_release(reg, slot);
         }
     }
@@ -145,6 +148,15 @@ int gui_widget_registry_init(gui_platform_t *platform)
         return 0;
     }
 
+#ifdef OS01_HOST_TEST
+    /* 宿主私有故障桥：注册表表的分配失败。 */
+    extern bool g_gui_test_fail_widget_registry;
+    if (g_gui_test_fail_widget_registry) {
+        errno = ENOMEM;
+        return -1;
+    }
+#endif
+
     gui_widget_registry_t *reg = (gui_widget_registry_t *)calloc(1, sizeof(gui_widget_registry_t));
     if (!reg) {
         errno = ENOMEM;
@@ -164,6 +176,31 @@ void gui_widget_registry_fini(gui_platform_t *platform)
     }
     free(platform->registry);
     platform->registry = NULL;
+}
+
+void gui_widget_registry_destroy_tree(gui_platform_t *platform)
+{
+    if (!platform || !platform->registry) {
+        return;
+    }
+    gui_widget_registry_t *reg = platform->registry;
+
+    /* 树根先删：根的删除会带走它的整棵子树。 */
+    for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
+        gui_widget_slot_t *slot = &reg->slots[i];
+        if (slot->state != GUI_WIDGET_SLOT_LIVE || slot->parent_id != 0) {
+            continue;
+        }
+        widget_destroy_subtree(platform, slot);
+    }
+    /* 剩下的活控件（父已经不在的孤儿）也要删掉。 */
+    for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
+        gui_widget_slot_t *slot = &reg->slots[i];
+        if (slot->state != GUI_WIDGET_SLOT_LIVE) {
+            continue;
+        }
+        widget_destroy_subtree(platform, slot);
+    }
 }
 
 /* ── 公共查询 ─────────────────────────────────────────────────────── */
@@ -215,7 +252,8 @@ int gui_widget_get_kind(gui_platform_t *platform, gui_widget_t widget, gui_widge
 static void gui_widget_on_native_delete(lv_event_t *event)
 {
     lv_obj_t *obj = lv_event_get_target(event);
-    intptr_t index = (intptr_t)lv_event_get_user_data(event);
+    /* 用户数据存的是"槽下标 + 1"：下标 0 也必须与"没有用户数据"区分开。 */
+    intptr_t index = (intptr_t)lv_event_get_user_data(event) - 1;
 
     if (!obj || index < 0 || index >= (intptr_t)GUI_WIDGET_REGISTRY_CAPACITY) {
         return;
@@ -283,6 +321,29 @@ static lv_obj_t *widget_create_native(gui_widget_kind_t kind, lv_obj_t *parent)
 }
 
 /**
+ * @brief 把一棵子树整棵标成 DESTROYING
+ *
+ * 递归标记：整棵待删子树在原生删除**之前**就全部不可用，公共查询立刻
+ * 看到它们已经没了（不只是根和直接子项）。
+ */
+static void widget_mark_subtree(gui_widget_registry_t *reg, uint32_t index)
+{
+    gui_widget_slot_t *slot = &reg->slots[index];
+    if (slot->state != GUI_WIDGET_SLOT_LIVE) {
+        return;
+    }
+    slot->state = GUI_WIDGET_SLOT_DESTROYING;
+
+    uint64_t id = slot->id;
+    for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
+        gui_widget_slot_t *child = &reg->slots[i];
+        if (child->state == GUI_WIDGET_SLOT_LIVE && child->parent_id == id) {
+            widget_mark_subtree(reg, i);
+        }
+    }
+}
+
+/**
  * @brief 销毁一棵子树
  *
  * 顺序：先把整棵待删子树标成 DESTROYING（公共查询立刻失效），再删原生
@@ -292,19 +353,19 @@ static void widget_destroy_subtree(gui_platform_t *platform, gui_widget_slot_t *
 {
     gui_widget_registry_t *reg = platform->registry;
 
-    for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
-        gui_widget_slot_t *slot = &reg->slots[i];
-        if (slot->state == GUI_WIDGET_SLOT_FREE) {
-            continue;
-        }
-        if (slot->id == root_slot->id || slot->parent_id == root_slot->id) {
-            slot->state = GUI_WIDGET_SLOT_DESTROYING;
-        }
-    }
+    widget_mark_subtree(reg, (uint32_t)(root_slot - reg->slots));
 
     lv_obj_t *obj = root_slot->obj;
     if (obj) {
         lv_obj_delete(obj);
+    } else {
+        /* 对象早已不在：删除回调不会再跑，这些槽直接确认死亡。 */
+        for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
+            gui_widget_slot_t *slot = &reg->slots[i];
+            if (slot->state == GUI_WIDGET_SLOT_DESTROYING) {
+                slot->pending_free = true;
+            }
+        }
     }
 
     /* 回调返回之后，槽才回到空闲表。 */
@@ -331,6 +392,18 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
     }
 
     gui_widget_registry_t *reg = platform->registry;
+
+    /* 业务回调里不允许改树：回调期间树结构必须保持稳定。 */
+    if (reg->callback_depth > 0) {
+        errno = EBUSY;
+        return -1;
+    }
+
+    /* 后端在注册表背后删掉对象时（内部删除 fixture），那些槽停在
+     * DESTROYING：它们的删除回调早就返回了，此刻回收是安全的。 */
+    if (reg->callback_depth == 0) {
+        registry_reap(reg);
+    }
 
     /* 2. 父控件校验：必须是本平台上活着的容器；根只能是容器。 */
     gui_widget_slot_t *parent_slot = NULL;
@@ -393,8 +466,18 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
     }
 
     /* 6. 挂注册表观察者：原生删除事件是身份失效的来源。 */
+#ifdef OS01_HOST_TEST
+    /* 宿主私有故障桥：观察者安装失败。 */
+    extern bool g_gui_test_fail_widget_observer;
+    if (g_gui_test_fail_widget_observer) {
+        lv_obj_delete(obj);
+        slot_release(reg, slot);
+        errno = ENOMEM;
+        return -1;
+    }
+#endif
     lv_event_dsc_t *dsc = lv_obj_add_event_cb(obj, gui_widget_on_native_delete, LV_EVENT_DELETE,
-                                              (void *)(intptr_t)index);
+                                              (void *)(intptr_t)(index + 1));
     if (!dsc) {
         lv_obj_delete(obj);
         slot_release(reg, slot);
@@ -681,6 +764,22 @@ int gui_widget_test_get_counters(gui_platform_t *platform, uint32_t *out_count, 
     }
     *out_count = platform->registry->count;
     *out_peak = platform->registry->peak;
+    return 0;
+}
+
+int gui_widget_test_backend_delete(gui_platform_t *platform, gui_widget_t widget)
+{
+    if (!platform || !platform->registry) {
+        errno = EINVAL;
+        return -1;
+    }
+    gui_widget_slot_t *slot = registry_find(platform->registry, widget.id);
+    if (!slot || slot->state != GUI_WIDGET_SLOT_LIVE || !slot->obj) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* 后端在注册表背后自行删除：删除回调照常运行，身份立刻失效。 */
+    lv_obj_delete(slot->obj);
     return 0;
 }
 

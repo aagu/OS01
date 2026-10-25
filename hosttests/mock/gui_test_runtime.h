@@ -138,6 +138,15 @@ extern uint32_t g_gui_test_handler_delay;
 extern lv_display_t *g_gui_test_last_display;
 #endif
 
+/* ── GUI-2b Task 3: the native widget fault bridges ────────────────────
+ *
+ * They live here (and not in the widget fixture) because every GUI host
+ * binary links the widget unit, and the unit must find these symbols in
+ * all of them.
+ */
+extern bool g_gui_test_fail_widget_registry; /* the registry table allocation fails */
+extern bool g_gui_test_fail_widget_observer;  /* the native observer installation fails */
+
 #ifdef __cplusplus
 }
 #endif
