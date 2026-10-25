@@ -381,3 +381,51 @@ The isolated BP archive records ELF resume address `0xffff80000015ab1f`, accepte
 ## Final independent review and delivery
 
 The controller performs the independent task/whole-branch review after this documentation commit. Targeted acceptance and complete command execution do not erase the two full-suite failures or the baseline attribution limit (`git_revision=unknown` in the baseline archives). No required case was skipped to obtain approval. A docs-only commit follows the tested source revisions; archives pin their actual source/test-fixture revisions, not that future documentation SHA. No merge or push is performed.
+
+## Final review fix wave (2026-10-25)
+
+The independent whole-branch review of `33f69b91..dd239005` returned **ISSUES / NEEDS FIXES**, with I1–I3 blocking approval. Source fix commit `61652f9294d0b6271eec04a84d58a6ddee982b10` addresses those findings and M1–M4. This is covering validation of the fix wave, not a replacement of the earlier matrix. Scoped independent re-review remains pending; no approval, merge, or push is claimed.
+
+- **I1:** Count starts of all 20 production exception diagnostic families, including truncated/malformed records, rather than only the selected BP/NMI family. A later PF/GP/DF or other fatal therefore rejects the run. Backtrace text and interrupted pre-fatal heartbeat remain supported.
+- **I2:** Both streaming detection and final parsing require the newline immediately after exactly 16 RIP hex digits. Unfinished diagnostics and a 17th digit fail. Observation begins only after that complete record.
+- **I3:** The BSP waits on the shared production predicate for BSP/AP ticks, global tick progression, resched receipt, and acquired task-context progress. It retains the bounded wait's result rather than resampling after timeout. Host ordering cases cover early ticks, delayed receipt, delayed progress, missing progress, and completion at the deadline. Worker release, CR3/guard restoration, and permanent-storage quarantine remain intact.
+- **M1:** QMP connection, greeting, capabilities, event/partial-read loops and injection use the session's one absolute deadline. Observation requires the full 1.5 seconds to remain, and a final deadline check prevents late PASS. Stop/reap cleanup retains its separate bounded allowance. Fake-clock cases cover insufficient observation time, exact deadline, observation overrun, shared QMP budget, events, and partial greetings.
+- **M2:** Assembly uses `PERCPU_CPU_ID_OFFSET`; a C `offsetof(percpu_t, cpu_id)` assertion mechanically checks it. No struct layout changed. Both architectures compiled the assertion.
+- **M3:** `wait_event_irqs_enabled` explicitly requires caller-enabled interrupts and never changes IRQ state on either path.
+- **M4:** Removed NMI source EOF blank line and corrected the post-random_init probe comment.
+
+### Fix validation commands and results
+
+All commands ran in `/home/aagu/.codex/worktrees/intr-dispatch-phase2/OS01`. Host/static commands started with HEAD `dd23900535a6a1123b42bb24eb95082993f04a24` plus the complete uncommitted source snapshot subsequently committed as `61652f92`; their archives truthfully retain that dirty base identity. Guest and ARM-build commands ran at `61652f92` with only pre-existing BusyBox submodule dirt. No struct layout changed and no global clean was required. The header-consuming kernel sources actually recompiled (including ARM `percpu/percpu.c`), rather than relying on stale objects.
+
+| Command | Exit | Result / log |
+|---|---:|---|
+| `python3 -m unittest qemutests.test_x86_intr_fault` (new tests before implementation) | 1 | 55 tests, 15 expected failures, including all six reviewer false accepts; `/tmp/intr-final-parser-red.log` |
+| `cc -Ikernel/include hosttests/cases/test_x86_intr_probe.c -o /tmp/intr-final-probe-red` then `/tmp/intr-final-probe-red` | 0 / 134 | Existing production tick-only wait wrongly completes with early ticks; assertion RED, `/tmp/intr-final-probe-red.log` |
+| `cc -Ikernel/include hosttests/cases/test_x86_intr_probe.c -o /tmp/intr-final-probe-green` then `/tmp/intr-final-probe-green` | 0 / 0 | Shared probe decisions PASS; `/tmp/intr-final-probe-green.log` |
+| `python3 -m unittest qemutests.test_x86_intr_fault qemutests.test_kernel_selftest_result qemutests.test_intr_dispatch_audit` | 0 | 201 tests PASS (57 fatal-runner tests); `/tmp/intr-final-runner-green.log` |
+| `make PROFILE=x86_64-clang test-host` | 0 | All 141 binaries plus root follow-up checks PASS; `/tmp/intr-final-host.log` |
+| `make PROFILE=x86_64-clang test-static` | 0 | All static audits PASS including intr-dispatch and header-object audits; `/tmp/intr-final-static.log` |
+| `make PROFILE=x86_64-clang test-qemu SUITE=intr-x86` | 0 | Real BP and QMP NMI PASS; `/tmp/intr-final-guests-fatal.log` |
+| `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=2 test-kernel-selftest` | 2 | Aggregate FAIL: 39 PASS, fd_refcount FAIL; x86_intr/uaccess/msr_safe PASS; `/tmp/intr-final-selftest-smp2.log` |
+| `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=4 test-kernel-selftest` | 0 | Aggregate PASS: all 40 cases including fd_refcount this run; `/tmp/intr-final-selftest-smp4.log` |
+| `make PROFILE=aarch64-clang aarch64-uefi` | 0 | Actual ARM recompile and link, shared header assertion checked; `/tmp/intr-final-arm-build.log` |
+| `git diff --check 33f69b91..61652f92` | 0 | Whole-branch whitespace PASS |
+
+The original SMP2/SMP4 aggregate FAIL results and baseline failure/provenance limits above remain unchanged. This wave's SMP4 PASS does not establish that the unrelated fd_refcount flake is fixed. No repeated full harness, ARM QEMU matrix, production phase-0/network/syscall matrix, or physical MC/DF/NMI reentrancy coverage is claimed. Their earlier exact-revision evidence remains applicable within its stated scope.
+
+### Fresh archives and concrete guest evidence
+
+All paths below are relative to `build/x86_64-clang/logs/tests/`. Each includes original stdout/stderr and result.json. The four guest archives pin `61652f9294d0b6271eec04a84d58a6ddee982b10`.
+
+| Archive | Result |
+|---|---|
+| `intr-x86/20261025T034809Z-dc74253acbb44f14bd6fb9ad070e95c7` | BP PASS, CPU1, timeout=false, evidence_accepted=true, qemu_self_exited=false |
+| `intr-x86/20261025T034820Z-e1de57d222a9417bad8ddbc59cd55513` | QMP NMI PASS, CPU1, timeout=false, evidence_accepted=true, qemu_self_exited=false |
+| `kernel-selftest/20261025T034845Z-6e81b69aa83a478a801e8d7eaa28215e` | SMP2 aggregate FAIL, runner exit1/root make exit2, only fd_refcount fails |
+| `kernel-selftest/20261025T034916Z-24e8ab720b4246b2a8c5e867c015ea1a` | SMP4 aggregate PASS, runner/root exit0, all40 pass |
+| `intr-dispatch-audit/20261025T034738Z-418e4ddf903b4c5ea635e88a70c82ef8` | PASS, dirty dd239005 source snapshot equivalent to 61652f92 |
+
+Both SMP logs show `uaccess: dispatch longjmp restore OK`, IDT `48/48 PASS`, `int ff GPR/RSP/RFLAGS/DS/ES and return-work PASS`, remote CPU1 `flush=2222 gen=2 ack=3`, AP ticks1 and restored1. Task progress was 28025 (SMP2) and 17807 (SMP4). Both required `msr_safe` cases pass in result.json.
+
+Normal-image before/after SHA256 is identical: `87856eef8a7670f95a416c52cb55db7c41d9ad0ba237300ccc82000b069699c3`. `llvm-nm build/x86_64-clang/kernel/kernel.elf` has no `selftest_x86`, `test_x86_intr`, `x86_intr_fault`, or `fault_probe` symbols (`/tmp/intr-final-normal-nm.log`). Selftest entry object disassembly still loads `%gs:0x10` for CPU ID (`/tmp/intr-final-entry-disassembly.log`), now backed by the compile-time contract. `/tmp/intr-final-archive-manifest.json` records fresh archive paths, revisions, status and exits, including all141 host PASS records at dirty dd239005.
