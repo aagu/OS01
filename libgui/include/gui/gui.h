@@ -6,5 +6,6 @@
 #include <gui/gui_widget.h>
 #include <gui/gui_event.h>
 #include <gui/gui_layout.h>
+#include <gui/gui_focus.h>
 
 #endif /* _GUI_H */

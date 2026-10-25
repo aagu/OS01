@@ -37,6 +37,10 @@ GUI_PUBLIC_HEADERS = (
     # layer.  It is backend-free: the caller describes what it wants, the
     # library turns that into backend geometry.
     "gui_layout.h",
+    # GUI-2b Task 7: the single focus engine's public API.  It is
+    # backend-free: the caller names a widget by its value handle and a
+    # policy by an enum.
+    "gui_focus.h",
 )
 
 # Private / bridge headers of libgui.  They carry the internal state layout,
@@ -94,6 +98,17 @@ GUI_PUBLIC_WIDGET_SYMBOLS = (
     "gui_platform_get_stats",
 )
 
+# The public focus API (libgui/include/gui/gui_focus.h).  These are the
+# symbols an application actually calls.
+GUI_PUBLIC_FOCUS_SYMBOLS = (
+    "gui_focus_register",
+    "gui_focus_unregister",
+    "gui_focus_set",
+    "gui_focus_get",
+    "gui_focus_move",
+    "gui_focus_set_initial_policy",
+)
+
 # Host-only injection hooks.  They exist only under #ifdef OS01_HOST_TEST
 # and must be ABSENT from the shipped archive and from the published
 # headers.
@@ -129,6 +144,8 @@ GUI_REQUIRED_ARCHIVE_MEMBERS = (
     "appearance.o",
     # GUI-2b Task 6: the native event bridge unit.
     "event.o",
+    # GUI-2b Task 7: the public focus API unit.
+    "focus.o",
 )
 
 # The probe consumer references a symbol that no archive can define; the
@@ -1090,6 +1107,7 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui_widget.h",
         "usr/include/gui/gui_event.h",
         "usr/include/gui/gui_layout.h",
+        "usr/include/gui/gui_focus.h",
         "usr/share/licenses/libgui/LVGL-LICENCE.txt",
     ]
     for rel_path in required_files:
@@ -1241,7 +1259,8 @@ def audit_sysroot_and_build(
                 "lv_init",
                 "lv_timer_handler",
                 "gfx_client_present_policy",
-            ] + list(GUI_PUBLIC_INPUT_SYMBOLS) + list(GUI_PUBLIC_WIDGET_SYMBOLS)
+            ] + list(GUI_PUBLIC_INPUT_SYMBOLS) + list(GUI_PUBLIC_WIDGET_SYMBOLS) \
+              + list(GUI_PUBLIC_FOCUS_SYMBOLS)
             for sym in required_symbols:
                 if sym not in defined_syms:
                     errors.append(f"libgui.a missing expected defined symbol: {sym}")
@@ -1268,8 +1287,10 @@ def audit_sysroot_and_build(
     gui_widget_h = sysroot / "usr" / "include" / "gui" / "gui_widget.h"
     gui_event_h = sysroot / "usr" / "include" / "gui" / "gui_event.h"
     gui_layout_h = sysroot / "usr" / "include" / "gui" / "gui_layout.h"
+    gui_focus_h = sysroot / "usr" / "include" / "gui" / "gui_focus.h"
     if gui_h.is_file() and gui_platform_h.is_file():
-        for hdr in [gui_h, gui_platform_h, gui_input_h, gui_widget_h, gui_event_h, gui_layout_h]:
+        for hdr in [gui_h, gui_platform_h, gui_input_h, gui_widget_h, gui_event_h, gui_layout_h,
+                    gui_focus_h]:
             if not hdr.is_file():
                 continue
             content = hdr.read_text()
@@ -1469,6 +1490,7 @@ GUI_STAGED_FILES = (
     "usr/include/gui/gui_widget.h",
     "usr/include/gui/gui_event.h",
     "usr/include/gui/gui_layout.h",
+    "usr/include/gui/gui_focus.h",
     "usr/lib/libgui.a",
     "usr/share/licenses/libgui/LVGL-LICENCE.txt",
 )

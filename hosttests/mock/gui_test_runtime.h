@@ -147,6 +147,9 @@ extern lv_display_t *g_gui_test_last_display;
 extern bool g_gui_test_fail_widget_registry; /* the registry table allocation fails */
 extern bool g_gui_test_fail_widget_observer;  /* the native observer installation fails */
 
+/* GUI-2b Task 7: the focus engine's delete-observer installation fails. */
+extern bool g_gui_test_fail_focus_observer;
+
 #ifdef __cplusplus
 }
 #endif

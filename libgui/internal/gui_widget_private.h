@@ -256,6 +256,25 @@ int gui_widget_test_get_counters(gui_platform_t *platform, uint32_t *out_count, 
  * @return 0 成功；-1 失败（errno = EINVAL）
  */
 int gui_widget_test_backend_delete(gui_platform_t *platform, gui_widget_t widget);
+
+/**
+ * @brief 宿主私有：造一个"别的平台 / 别的 display"的控件身份
+ *
+ * 生产平台是单例（第二个平台建不出来）。归属契约因此用宿主私有面构造：
+ *
+ *   mode 0  身份属于**第二个注册表**（外平台）：公共焦点 API 必须在解析层
+ *           拒绝它。
+ *   mode 1  身份在本平台的注册表里，但对象在**第二个 display** 上（外
+ *           display）：公共焦点 API 必须在归属层拒绝它。
+ *
+ * @return 0 成功；-1 失败（errno 已设置）
+ */
+int gui_widget_test_create_foreign(gui_platform_t *platform, int mode, gui_widget_t *out);
+
+/**
+ * @brief 宿主私有：释放上一个"外来身份"占用的资源
+ */
+void gui_widget_test_free_foreign(gui_platform_t *platform);
 #endif
 
 #ifdef __cplusplus

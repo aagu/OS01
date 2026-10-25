@@ -27,6 +27,13 @@ _Static_assert(GUI_NATIVE_SLOT_LIVE == GUI_WIDGET_SLOT_LIVE, "slot state drift")
 _Static_assert(GUI_NATIVE_SLOT_DESTROYING == GUI_WIDGET_SLOT_DESTROYING, "slot state drift");
 _Static_assert(GUI_NATIVE_CAPACITY == GUI_WIDGET_REGISTRY_CAPACITY, "capacity drift");
 
+/*
+ * 诊断(raw)对象的清单：诊断登记没有公共身份，宿主测试靠下标访问它们。
+ */
+#define GUI_NATIVE_RAW_MAX 8
+static lv_obj_t *g_raw_objects[GUI_NATIVE_RAW_MAX];
+static unsigned g_raw_count;
+
 int gui_native_fixture_create(gui_native_fixture_t *fx, bool with_input)
 {
     if (!fx) {
@@ -38,6 +45,10 @@ int gui_native_fixture_create(gui_native_fixture_t *fx, bool with_input)
 
     /* 先复位宿主 mock：假时钟、计数与故障注入都回到基线。 */
     gui_test_reset();
+
+    /* 诊断(raw)对象的清单也回到基线。 */
+    memset(g_raw_objects, 0, sizeof(g_raw_objects));
+    g_raw_count = 0;
 
     gui_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -237,8 +248,292 @@ int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t w
     return 0;
 }
 
-int gui_native_fixture_pool_bytes(gui_native_fixture_t *fx, uint64_t *out_total,
-                                  uint64_t *out_free, uint64_t *out_max_used)
+int gui_native_fixture_query_focus_receiver(gui_native_fixture_t *fx, gui_widget_t *out)
+{
+    if (!fx || !out) {
+        errno = EINVAL;
+        return -1;
+    }
+    out->id = 0;
+
+    if (!fx->input || !fx->platform || !fx->platform->registry) {
+        return 0;
+    }
+
+    lv_obj_t *focused = lv_group_get_focused(fx->input->lvgl.group);
+    if (!focused) {
+        return 0;
+    }
+
+    /* 真实接收者背后是哪一个身份：遍历本平台的注册表。 */
+    gui_widget_registry_t *reg = fx->platform->registry;
+    for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
+        gui_widget_slot_t *slot = &reg->slots[i];
+        if (slot->state == GUI_WIDGET_SLOT_LIVE && slot->obj == focused) {
+            out->id = slot->id;
+            break;
+        }
+    }
+    return 0;
+}
+
+int gui_native_fixture_query_has_focus_receiver(gui_native_fixture_t *fx)
+{
+    if (!fx || !fx->input) {
+        errno = EINVAL;
+        return -1;
+    }
+    return lv_group_get_focused(fx->input->lvgl.group) != NULL ? 1 : 0;
+}
+
+int gui_native_fixture_create_foreign_widget(gui_platform_t *platform, bool own_registry,
+                                            gui_widget_t *out)
+{
+    return gui_widget_test_create_foreign(platform, own_registry ? 1 : 0, out);
+}
+
+void gui_native_fixture_free_foreign_widget(gui_platform_t *platform)
+{
+    gui_widget_test_free_foreign(platform);
+}
+
+int gui_native_fixture_query_click_focusable(gui_platform_t *platform, gui_widget_t widget,
+                                             bool *out_click_focusable)
+{
+    if (!platform || !out_click_focusable) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_click_focusable = false;
+
+    lv_obj_t *obj = gui_widget_test_get_obj(platform, widget);
+    if (!obj) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_click_focusable = lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    return 0;
+}
+
+/* ── 焦点登记表的宿主私有观察 ─────────────────────────────────────── */
+
+int gui_native_fixture_query_focus_order(gui_native_fixture_t *fx, gui_widget_t *out,
+                                         int out_capacity)
+{
+    unsigned i;
+    int count = 0;
+
+    if (!fx || !fx->input || !out || out_capacity < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    for (i = 0; i < fx->input->focus.count; i++) {
+        const gui_input_focus_entry_t *entry = &fx->input->focus.entries[i];
+
+        if (count >= out_capacity) {
+            break;
+        }
+        out[count].id = entry->native_id;
+        count++;
+    }
+    return count;
+}
+
+int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_ever_selected,
+                                           bool *out_explicit_clear)
+{
+    if (!fx || !fx->input) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (out_ever_selected) {
+        *out_ever_selected = fx->input->focus.ever_selected;
+    }
+    if (out_explicit_clear) {
+        *out_explicit_clear = fx->input->focus.explicit_clear;
+    }
+    return 0;
+}
+
+/* ── 诊断(raw)登记的宿主私有入口 ─────────────────────────────────── */
+
+/*
+ * 诊断(raw)登记走的是**内部** hook（gui_input_focus_add）：它没有公共 API，
+ * 也不得变成公共 adopt 入口。fixture 在这里替宿主测试触达它。
+ */
+static lv_obj_t *raw_object(unsigned index)
+{
+    if (index >= g_raw_count) {
+        return NULL;
+    }
+    return g_raw_objects[index];
+}
+
+int gui_native_fixture_raw_is_focused(gui_native_fixture_t *fx, unsigned index)
+{
+    if (!fx || !fx->input) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (raw_object(index) == NULL) {
+        return 0;
+    }
+    return lv_group_get_focused(fx->input->lvgl.group) == raw_object(index) ? 1 : 0;
+}
+
+int gui_native_fixture_raw_focus_add_button(gui_native_fixture_t *fx)
+{
+    lv_obj_t *btn;
+
+    if (!fx || !fx->input || !fx->platform) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (g_raw_count >= GUI_NATIVE_RAW_MAX) {
+        errno = ENOSPC;
+        return -1;
+    }
+    btn = lv_button_create(lv_display_get_screen_active(fx->platform->disp));
+    if (!btn) {
+        errno = ENOMEM;
+        return -1;
+    }
+    lv_obj_set_pos(btn, 20 + (int32_t)g_raw_count * 80, 20);
+    lv_obj_set_size(btn, 60, 30);
+
+    if (gui_input_focus_add(fx->input, btn) != 0) {
+        int saved = errno;
+
+        lv_obj_delete(btn);
+        errno = saved;
+        return -1;
+    }
+    g_raw_objects[g_raw_count++] = btn;
+    return 0;
+}
+
+int gui_native_fixture_raw_focus_add_textarea(gui_native_fixture_t *fx)
+{
+    lv_obj_t *ta;
+
+    if (!fx || !fx->input || !fx->platform) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (g_raw_count >= GUI_NATIVE_RAW_MAX) {
+        errno = ENOSPC;
+        return -1;
+    }
+    ta = lv_textarea_create(lv_display_get_screen_active(fx->platform->disp));
+    if (!ta) {
+        errno = ENOMEM;
+        return -1;
+    }
+    lv_textarea_set_one_line(ta, true);
+    lv_obj_set_pos(ta, 20 + (int32_t)g_raw_count * 80, 80);
+    lv_obj_set_size(ta, 120, 30);
+
+    if (gui_input_focus_add(fx->input, ta) != 0) {
+        int saved = errno;
+
+        lv_obj_delete(ta);
+        errno = saved;
+        return -1;
+    }
+    g_raw_objects[g_raw_count++] = ta;
+    return 0;
+}
+
+const char *gui_native_fixture_raw_textarea_text(gui_native_fixture_t *fx, unsigned index)
+{
+    lv_obj_t *obj = raw_object(index);
+
+    (void)fx;
+    if (!obj || !lv_obj_check_type(obj, &lv_textarea_class)) {
+        return NULL;
+    }
+    return lv_textarea_get_text(obj);
+}
+
+int gui_native_fixture_raw_click(gui_native_fixture_t *fx, unsigned index)
+{
+    lv_obj_t *obj = raw_object(index);
+    lv_area_t area;
+    mouse_event_t ev;
+
+    if (!fx || !fx->input || !obj) {
+        errno = EINVAL;
+        return -1;
+    }
+    lv_obj_get_coords(obj, &area);
+
+    /* 指针的位移是相对的：先归到左上角，再移到目标中心。 */
+    memset(&ev, 0, sizeof(ev));
+    ev.dx = INT16_MIN;
+    ev.dy = INT16_MIN;
+    if (gui_native_fixture_mouse(fx, &ev, 1) != 0) {
+        return -1;
+    }
+    if (gui_native_fixture_step(fx, 50) != 0) {
+        return -1;
+    }
+
+    memset(&ev, 0, sizeof(ev));
+    ev.dx = (int16_t)(area.x1 + (area.x2 - area.x1) / 2);
+    ev.dy = (int16_t)(area.y1 + (area.y2 - area.y1) / 2);
+    if (gui_native_fixture_mouse(fx, &ev, 1) != 0) {
+        return -1;
+    }
+    if (gui_native_fixture_step(fx, 50) != 0) {
+        return -1;
+    }
+
+    memset(&ev, 0, sizeof(ev));
+    ev.buttons = 0x01u;
+    if (gui_native_fixture_mouse(fx, &ev, 1) != 0) {
+        return -1;
+    }
+    if (gui_native_fixture_step(fx, 50) != 0) {
+        return -1;
+    }
+
+    memset(&ev, 0, sizeof(ev));
+    if (gui_native_fixture_mouse(fx, &ev, 1) != 0) {
+        return -1;
+    }
+    if (gui_native_fixture_step(fx, 50) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int gui_native_fixture_raw_delete_focused(gui_native_fixture_t *fx)
+{
+    lv_obj_t *focused;
+    unsigned i;
+
+    if (!fx || !fx->input) {
+        errno = EINVAL;
+        return -1;
+    }
+    focused = lv_group_get_focused(fx->input->lvgl.group);
+    if (!focused) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (i = 0; i < g_raw_count; i++) {
+        if (g_raw_objects[i] == focused) {
+            lv_obj_delete(focused);
+            g_raw_objects[i] = NULL;
+            return 0;
+        }
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+int gui_native_fixture_pool_bytes(gui_native_fixture_t *fx, uint64_t *out_total,                                  uint64_t *out_free, uint64_t *out_max_used)
 {
     if (!fx) {
         errno = EINVAL;

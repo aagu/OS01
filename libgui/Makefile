@@ -3,7 +3,7 @@
 # This Makefile is the build driver for the userland native GUI static
 # library (libgui.a). Its install target stages the library, the public
 # headers (gui.h, gui_platform.h, gui_input.h, gui_theme.h, gui_widget.h,
-# gui_event.h, gui_layout.h) and license into $(STAGING_DIR)/gui,
+# gui_event.h, gui_layout.h, gui_focus.h) and license into $(STAGING_DIR)/gui,
 # NEVER into the final sysroot.
 # mk/components/sysroot.mk is the SINGLE WRITER of the sysroot generation;
 # this Makefile only produces a manifest via find and lets sysroot.mk consume it.
@@ -61,6 +61,7 @@ PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
                       $(LIBGUI_DIR)/src/layout.c \
                       $(LIBGUI_DIR)/src/appearance.c \
                       $(LIBGUI_DIR)/src/event.c \
+                      $(LIBGUI_DIR)/src/focus.c \
                       $(LIBGUI_DIR)/src/cursor_icon.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
 
@@ -118,7 +119,7 @@ install: $(ARCHIVE)
 	cp $(LIBGUI_DIR)/include/gui/gui.h $(LIBGUI_DIR)/include/gui/gui_platform.h \
 	   $(LIBGUI_DIR)/include/gui/gui_input.h $(LIBGUI_DIR)/include/gui/gui_theme.h \
 	   $(LIBGUI_DIR)/include/gui/gui_widget.h $(LIBGUI_DIR)/include/gui/gui_event.h \
-	   $(LIBGUI_DIR)/include/gui/gui_layout.h \
+	   $(LIBGUI_DIR)/include/gui/gui_layout.h $(LIBGUI_DIR)/include/gui/gui_focus.h \
 	   $(INSTALL_ROOT)/usr/include/gui/
 	cp $(LVGL_DIR)/LICENCE.txt $(INSTALL_ROOT)/usr/share/licenses/libgui/LVGL-LICENCE.txt
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest

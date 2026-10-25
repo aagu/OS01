@@ -188,6 +188,123 @@ int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_byte
 int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t widget, bool focused);
 
 /**
+ * @brief 宿主私有：读取焦点组的**真实接收者**
+ *
+ * 公开的 `gui_focus_get()` 说的是"记录里的选择"；这条查询说的是"后端组
+ * 此刻真正把焦点给了谁"。两者必须一致——只看表成员是看不出分歧的。
+ *
+ * @param fx  fixture 上下文
+ * @param out 输出参数：接收者的控件身份（没有接收者时为 NONE）
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_focus_receiver(gui_native_fixture_t *fx, gui_widget_t *out);
+
+/**
+ * @brief 宿主私有：焦点组当前是否有**真实接收者**
+ *
+ * @return 1 有接收者；0 没有；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_has_focus_receiver(gui_native_fixture_t *fx);
+
+/**
+ * @brief 宿主私有：第 index 个诊断(raw)对象是否正持有焦点
+ *
+ * @return 1 是；0 不是；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_raw_is_focused(gui_native_fixture_t *fx, unsigned index);
+
+/**
+ * @brief 宿主私有：造一个"别的平台 / 别的 display"的控件身份
+ *
+ * @param platform     平台上下文句柄
+ * @param own_registry true = 身份在本平台的注册表里但对象在别的 display 上
+ *                     （外 display）；false = 身份属于第二个注册表（外平台）
+ * @param out          输出参数：造出来的身份
+ * @return 0 成功；-1 失败（errno 已设置）
+ */
+int gui_native_fixture_create_foreign_widget(gui_platform_t *platform, bool own_registry,
+                                            gui_widget_t *out);
+
+/**
+ * @brief 宿主私有：释放上一个"外来身份"占用的资源
+ */
+void gui_native_fixture_free_foreign_widget(gui_platform_t *platform);
+
+/**
+ * @brief 宿主私有：读取某个原生控件的指针策略标志
+ *
+ * @return 0 成功（`*out_click_focusable` 给出对象是否带
+ *         LV_OBJ_FLAG_CLICK_FOCUSABLE）；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_click_focusable(gui_platform_t *platform, gui_widget_t widget,
+                                             bool *out_click_focusable);
+
+/**
+ * @brief 宿主私有：读回焦点登记表的**顺序**（登记顺序 = Tab 顺序）
+ *
+ * @param fx           fixture 上下文
+ * @param out          输出数组（每个元素是一个原生身份；诊断登记的身份为 0）
+ * @param out_capacity 数组容量
+ * @return 登记条目数；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_focus_order(gui_native_fixture_t *fx, gui_widget_t *out,
+                                         int out_capacity);
+
+/**
+ * @brief 宿主私有：读回焦点引擎的选择历史标志
+ *
+ * @param fx               fixture 上下文
+ * @param out_ever_selected 输出：是否发生过一次成功的选择
+ * @param out_explicit_clear 输出：当前是否处于"显式清空"状态
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_ever_selected,
+                                           bool *out_explicit_clear);
+
+/* ── 诊断(raw)登记的宿主私有入口 ─────────────────────────────────
+ *
+ * 诊断(raw)登记**没有**公共 API，也不得变成公共 adopt 入口：它只是内部
+ * hook。宿主测试通过下面这些 helper 触达它。
+ */
+
+/**
+ * @brief 宿主私有：诊断(raw)登记一个原生 LVGL 按钮
+ *
+ * @return 0 成功；-1 失败（errno 已设置；errno = EBUSY 表示登记模式冲突）
+ */
+int gui_native_fixture_raw_focus_add_button(gui_native_fixture_t *fx);
+
+/**
+ * @brief 宿主私有：诊断(raw)登记一个原生 LVGL 单行文本框
+ *
+ * @return 0 成功；-1 失败（errno 已设置）
+ */
+int gui_native_fixture_raw_focus_add_textarea(gui_native_fixture_t *fx);
+
+/**
+ * @brief 宿主私有：读回第 index 个诊断(raw)对象的文字
+ *
+ * @return 文字指针（无效下标时返回 NULL）
+ */
+const char *gui_native_fixture_raw_textarea_text(gui_native_fixture_t *fx, unsigned index);
+
+/**
+ * @brief 宿主私有：在第 index 个诊断(raw)对象上**点一下**
+ *
+ * @return 0 成功；-1 失败（errno 已设置）
+ */
+int gui_native_fixture_raw_click(gui_native_fixture_t *fx, unsigned index);
+
+/**
+ * @brief 宿主私有：删掉当前**持有焦点**的诊断(raw)对象
+ *
+ * 它模拟"后端在回调里自行删除当前焦点对象"。
+ *
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_raw_delete_focused(gui_native_fixture_t *fx);
+
+/**
  * @brief 宿主私有：读取渲染内存池的真实字节数
  *
  * 公共统计只报告"已用"，不报告"空闲"；这条观察桥把池的**空闲**字节也

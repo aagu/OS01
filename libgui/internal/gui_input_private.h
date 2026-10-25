@@ -20,6 +20,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <gui/gui_focus.h>
 #include <gui/gui_input.h>
 #include <gui_input_ps2.h>
 #include <gfx.h>
@@ -45,9 +46,36 @@ extern "C" {
 
 /* ── 焦点组（私有记录，实现见 input_focus.c） ─────────────────────── */
 
-#define GUI_INPUT_FOCUS_CAPACITY       64   /* 焦点组最多登记的控件数 */
+/*
+ * 焦点登记上限 128（CLICK 也计入）：登记是一张**共享**的表，原生登记与
+ * 诊断(raw)登记都占用它。
+ */
+#define GUI_INPUT_FOCUS_CAPACITY       128
 #define GUI_INPUT_FOCUS_OUTLINE_WIDTH  2    /* 焦点 outline 宽度（像素） */
 #define GUI_INPUT_FOCUS_OUTLINE_COLOR  0x00FF00u
+
+/*
+ * 登记模式：input 的**第一次成功登记**锁定模式，此后两种登记不许混用。
+ */
+typedef enum {
+    GUI_FOCUS_MODE_UNSET = 0,      /* 还没有任何登记 */
+    GUI_FOCUS_MODE_NATIVE,         /* 原生登记（公共 API） */
+    GUI_FOCUS_MODE_RAW_DIAGNOSTIC  /* 诊断(raw)登记（内部 hook） */
+} gui_input_focus_mode_t;
+
+/**
+ * @brief 焦点登记表的一个条目
+ *
+ * 条目同时承载两套入口的共同事实：登记顺序（= Tab 顺序）、原生身份
+ * （诊断登记为 0）、策略与观察者归属。观察者归属决定显式注销时摘掉的是
+ * 哪一类删除观察者。
+ */
+typedef struct {
+    lv_obj_t *obj;         /* 后端对象：只在它还活着时被解引用 */
+    uint64_t  native_id;   /* 原生身份（诊断(raw)登记为 0） */
+    uint8_t   policy;      /* gui_focus_policy_t */
+    bool      native;      /* true = 原生登记；false = 诊断(raw)登记 */
+} gui_input_focus_entry_t;
 
 /* ── 光标与滚轮（spec §7.1） ────────────────────────────────────── */
 
@@ -149,11 +177,27 @@ typedef struct {
  *
  * 记录本身就是"存活证明"：条目在对象收到 LV_EVENT_DELETE 时被摘掉，因此
  * 记录里的指针一定是活对象。摘除只比较指针值，从不解引用失效指针。
+ *
+ * **唯一选择状态**：当前选择、是否发生过选择、是否被显式清空、修复起点
+ * 全部在这里。原生身份与诊断登记共用同一张表、同一套提交路径。
  */
 typedef struct {
-    lv_obj_t *entries[GUI_INPUT_FOCUS_CAPACITY]; /* 注册顺序 = Tab 顺序 */
-    unsigned count;                             /* 已登记的控件数 */
-    lv_obj_t *focus;                            /* 当前焦点（可能已失效） */
+    gui_input_focus_entry_t entries[GUI_INPUT_FOCUS_CAPACITY]; /* 登记顺序 = Tab 顺序 */
+    unsigned count;                             /* 已登记的条目数 */
+
+    lv_obj_t *focus;                            /* 当前选择（NULL = NONE） */
+    uint64_t  focus_id;                         /* 当前选择的原生身份（0 = 诊断登记或 NONE） */
+    bool      ever_selected;                    /* 是否发生过一次成功的选择 */
+    bool      explicit_clear;                   /* 显式清空：保持 NONE 直到下一次成功选择 */
+    bool      repair_pending;                   /* 焦点失效但暂时找不到候选 */
+    unsigned  repair_index;                     /* 修复起点（表内下标） */
+    bool      dirty;                            /* 后端组与记录不一致：需要重新投影 */
+
+    uint8_t   mode;                             /* gui_input_focus_mode_t */
+    uint8_t   initial;                          /* gui_focus_initial_t */
+
+    unsigned  projection_depth;                 /* 投影深度：>0 时屏蔽组回调的中间选择 */
+    unsigned  delete_depth;                     /* 删除批次深度 */
 } gui_input_focus_t;
 
 /**
@@ -260,6 +304,35 @@ bool     gui_input_focus_alive(gui_input_t *input, lv_obj_t *obj);
 bool     gui_input_focus_navigate(gui_input_t *input, bool forward);
 bool     gui_input_focus_is_text_input(gui_input_t *input);
 bool     gui_input_focus_refresh(gui_input_t *input);
+
+/* ── 唯一焦点引擎的公共入口桥（focus.c 使用） ──────────────────── */
+
+/* 登记模式（UNSET / NATIVE / RAW_DIAGNOSTIC）。 */
+uint8_t  gui_input_focus_mode(gui_input_t *input);
+
+/* 原生登记：登记或更新策略（保留位置）。 */
+int      gui_input_focus_register_native(gui_input_t *input, lv_obj_t *obj,
+                                          uint64_t native_id, gui_focus_policy_t policy);
+
+/* 原生注销：摘条目 + 摘观察者 + 按移除前的位置修复选择。 */
+int      gui_input_focus_unregister_native(gui_input_t *input, uint64_t native_id);
+
+/* 原生显式设置选择；显式清空（native_id == 0）。 */
+int      gui_input_focus_set_native(gui_input_t *input, uint64_t native_id);
+
+/* 读回当前选择的原生身份（0 = NONE 或诊断登记）。 */
+uint64_t gui_input_focus_current_native_id(gui_input_t *input);
+
+/* 首次焦点建立策略。 */
+void     gui_input_focus_set_initial(gui_input_t *input, gui_focus_initial_t initial);
+
+/*
+ * 删除批次：公共 destroy / clear 在删树前把整棵待删子树标成 DESTROYING，
+ * 然后开始批次。批次期间组被整体 detach 到真实 NONE，后端不会转焦；
+ * 批次结束后选一次跳过整棵待删子树的后继，并提交一次最终投影。
+ */
+void     gui_input_focus_delete_batch_begin(gui_input_t *input);
+void     gui_input_focus_delete_batch_end(gui_input_t *input);
 
 /*
  * 控件自身或祖先被隐藏 / 禁用 → 不可用。

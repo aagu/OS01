@@ -137,6 +137,11 @@ static ssize_t gui_test_device_read(gui_test_device_t *dev, void *buf, size_t co
 bool g_gui_test_fail_widget_registry = false;
 bool g_gui_test_fail_widget_observer = false;
 
+/* GUI-2b Task 7: the focus engine's delete-observer fault bridge.  The
+ * focus unit is linked by every GUI host binary, so the symbol lives here
+ * for the same reason as the widget ones above. */
+bool g_gui_test_fail_focus_observer = false;
+
 #ifndef GUI_INTEGRATION_TEST
 bool g_gui_test_fail_lv_display_create = false;
 uint32_t g_gui_test_handler_delay = 20;
@@ -214,6 +219,7 @@ void gui_test_reset(void)
 
     g_gui_test_fail_widget_registry = false;
     g_gui_test_fail_widget_observer = false;
+    g_gui_test_fail_focus_observer = false;
 
     gui_test_device_reset(&g_gui_test_keyboard);
     gui_test_device_reset(&g_gui_test_mouse);

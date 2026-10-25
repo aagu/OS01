@@ -1,5 +1,6 @@
 #include <gui/gui_event.h>
 #include <gui/gui_widget.h>
+#include <gui_input_private.h>
 #include <gui_lvgl_private.h>
 #include <gui_platform_private.h>
 #include <gui_widget_private.h>
@@ -226,6 +227,12 @@ void gui_widget_registry_destroy_tree(gui_platform_t *platform)
     }
     gui_widget_registry_t *reg = platform->registry;
 
+    /* 平台关闭：先停输入、拆其组/观察者，再删 display。整棵树的删除共用
+     * 一个焦点删除批次。 */
+    if (platform->input) {
+        gui_input_focus_delete_batch_begin(platform->input);
+    }
+
     /* 树根先删：根的删除会带走它的整棵子树。 */
     for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
         gui_widget_slot_t *slot = &reg->slots[i];
@@ -241,6 +248,10 @@ void gui_widget_registry_destroy_tree(gui_platform_t *platform)
             continue;
         }
         widget_destroy_subtree(platform, slot);
+    }
+
+    if (platform->input) {
+        gui_input_focus_delete_batch_end(platform->input);
     }
 }
 
@@ -381,6 +392,7 @@ static lv_obj_t *widget_create_native(gui_widget_kind_t kind, lv_obj_t *parent)
     default:
         break;
     }
+
     return obj;
 }
 
@@ -412,10 +424,14 @@ static void widget_mark_subtree(gui_widget_registry_t *reg, uint32_t index)
  *
  * 顺序：先把整棵待删子树标成 DESTROYING（公共查询立刻失效），再删原生
  * 对象（删除回调在此期间运行），最后在回调全部返回之后回收槽位。
+ *
+ * 焦点引擎的删除批次也在此开始与结束：批次期间焦点组被整体 detach 到真实
+ * NONE，后端不会转焦；批次结束后焦点引擎选一次跳过整棵待删子树的后继。
  */
 static void widget_destroy_subtree(gui_platform_t *platform, gui_widget_slot_t *root_slot)
 {
     gui_widget_registry_t *reg = platform->registry;
+    gui_input_t *input = platform->input;
 
     widget_mark_subtree(reg, (uint32_t)(root_slot - reg->slots));
 
@@ -424,7 +440,13 @@ static void widget_destroy_subtree(gui_platform_t *platform, gui_widget_slot_t *
         /* 删除事务进行中：槽不许回到空闲表。删除回调（包括原生事件向
          * 父级冒泡时跑到的回调）里创建的控件必须拿到别的槽。 */
         reg->delete_depth++;
+        if (input) {
+            gui_input_focus_delete_batch_begin(input);
+        }
         lv_obj_delete(obj);
+        if (input) {
+            gui_input_focus_delete_batch_end(input);
+        }
         reg->delete_depth--;
     } else {
         /* 对象早已不在：删除回调不会再跑，这些槽直接确认死亡。 */
@@ -649,6 +671,10 @@ int gui_widget_clear(gui_platform_t *platform, gui_widget_t container)
     }
 
     /* 容器留下，它的直接子项连同子树一起消失。 */
+    /* 整批删除共用一个焦点删除批次：焦点只在批次结束时投影一次。 */
+    if (platform->input) {
+        gui_input_focus_delete_batch_begin(platform->input);
+    }
     for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
         gui_widget_slot_t *child = &reg->slots[i];
         if (child->state != GUI_WIDGET_SLOT_LIVE) {
@@ -658,6 +684,9 @@ int gui_widget_clear(gui_platform_t *platform, gui_widget_t container)
             continue;
         }
         widget_destroy_subtree(platform, child);
+    }
+    if (platform->input) {
+        gui_input_focus_delete_batch_end(platform->input);
     }
     return 0;
 }
@@ -900,6 +929,128 @@ lv_obj_t *gui_widget_test_get_obj(gui_platform_t *platform, gui_widget_t widget)
         return NULL;
     }
     return slot->obj;
+}
+
+/*
+ * 宿主私有：造一个"别的平台 / 别的 display"的控件身份。
+ *
+ * 生产平台是单例，第二个平台根本建不出来（EBUSY）。归属契约因此用宿主
+ * 私有面构造：
+ *
+ *   mode 0  身份属于**第二个注册表**（外平台）：公共焦点 API 必须在解析层
+ *           就拒绝它——本平台的注册表里查不到这个身份。
+ *   mode 1  身份在本平台的注册表里，但对象在**第二个 display** 上（外
+ *           display）：公共焦点 API 必须在归属层拒绝它。
+ *
+ * 它不是公共 adopt 入口：只存在于宿主测试构建，不安装、不导出到目标库。
+ */
+static lv_display_t *g_foreign_display;
+static gui_widget_registry_t *g_foreign_registry;
+static gui_widget_slot_t *g_foreign_own_slot;
+
+static void foreign_release(void)
+{
+    if (g_foreign_own_slot && g_foreign_own_slot->state == GUI_WIDGET_SLOT_LIVE) {
+        lv_obj_t *obj = g_foreign_own_slot->obj;
+        g_foreign_own_slot->state = GUI_WIDGET_SLOT_FREE;
+        g_foreign_own_slot->id = 0;
+        g_foreign_own_slot->obj = NULL;
+        if (obj) {
+            lv_obj_delete(obj);
+        }
+        g_foreign_own_slot = NULL;
+    }
+    if (g_foreign_registry) {
+        free(g_foreign_registry);
+        g_foreign_registry = NULL;
+    }
+    if (g_foreign_display) {
+        lv_display_delete(g_foreign_display);
+        g_foreign_display = NULL;
+    }
+}
+
+int gui_widget_test_create_foreign(gui_platform_t *platform, int mode, gui_widget_t *out)
+{
+    lv_obj_t *btn;
+    uint64_t id;
+
+    if (!platform || !platform->registry || !out) {
+        errno = EINVAL;
+        return -1;
+    }
+    out->id = 0;
+
+    foreign_release();
+
+    g_foreign_display = lv_display_create(64, 64);
+    if (!g_foreign_display) {
+        errno = ENOMEM;
+        return -1;
+    }
+    btn = lv_button_create(lv_display_get_screen_active(g_foreign_display));
+    if (!btn) {
+        foreign_release();
+        errno = ENOMEM;
+        return -1;
+    }
+
+    if (g_widget_last_id == UINT64_MAX) {
+        foreign_release();
+        errno = EOVERFLOW;
+        return -1;
+    }
+    id = g_widget_last_id + 1;
+    g_widget_last_id = id;
+
+    if (mode == 0) {
+        /* 第二个注册表：身份属于"别的平台"。 */
+        gui_widget_registry_t *reg2 = calloc(1, sizeof(*reg2));
+        uint32_t i;
+
+        if (!reg2) {
+            foreign_release();
+            errno = ENOMEM;
+            return -1;
+        }
+        for (i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
+            reg2->slots[i].index = i;
+        }
+        reg2->count = 1;
+        reg2->slots[0].state = GUI_WIDGET_SLOT_LIVE;
+        reg2->slots[0].id = id;
+        reg2->slots[0].obj = btn;
+        reg2->slots[0].kind = GUI_WIDGET_BUTTON;
+        g_foreign_registry = reg2;
+    } else {
+        /* 本平台的注册表 + 别的 display：归属层必须拒绝。 */
+        int index = registry_reserve(platform->registry);
+        gui_widget_slot_t *slot;
+
+        if (index < 0) {
+            foreign_release();
+            return -1;
+        }
+        slot = &platform->registry->slots[index];
+        slot->id = id;
+        slot->obj = btn;
+        slot->kind = GUI_WIDGET_BUTTON;
+        slot->state = GUI_WIDGET_SLOT_LIVE;
+        slot->flags = GUI_WIDGET_FLAG_VISIBLE | GUI_WIDGET_FLAG_ENABLED |
+                      GUI_WIDGET_FLAG_CLICKABLE;
+        platform->stat_widgets_created++;
+        platform->stat_widgets_live++;
+        g_foreign_own_slot = slot;
+    }
+
+    out->id = id;
+    return 0;
+}
+
+void gui_widget_test_free_foreign(gui_platform_t *platform)
+{
+    (void)platform;
+    foreign_release();
 }
 
 #endif /* OS01_HOST_TEST */
