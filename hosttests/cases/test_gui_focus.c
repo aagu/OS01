@@ -10,7 +10,6 @@
  *      登记锁定，失败不锁定，全注销不解锁；容量 128。
  *   2. 选择历史：MANUAL / AUTO_FIRST、显式清空、隐藏禁用后的修复、取消
  *      协议；任何选择变化只经同一条提交路径。
- *   3. 指针策略与主题焦点环：CLICK_FOCUSABLE 立即同步、点击夺焦规则、
  *      主题 primary 焦点环跟着焦点走。
  */
 
@@ -189,6 +188,24 @@ static void activate_handler(const gui_event_t *event, void *userdata)
 }
 
 /* A business callback that tries to delete the tree: the callback guard rejects it. */
+typedef struct {
+    gui_platform_t *platform;
+    gui_widget_t victim;
+    int calls;
+    int destroy_rc;
+    int destroy_errno;
+} destroy_guard_probe_t;
+
+static void destroy_guard_handler(const gui_event_t *event, void *userdata)
+{
+    destroy_guard_probe_t *probe = (destroy_guard_probe_t *)userdata;
+
+    (void)event;
+    probe->calls++;
+    errno = 0;
+    probe->destroy_rc = gui_widget_destroy(probe->platform, probe->victim);
+    probe->destroy_errno = errno;
+}
 
 /* 在 (x, y) 处点一下。 */
 static void click_at(gui_native_fixture_t *fx, int32_t x, int32_t y)
@@ -655,6 +672,471 @@ TEST_FUNC(test_input_destroy_detaches_all_observers)
  * Task 8：选择历史、MANUAL、清空与取消协议
  * ═══════════════════════════════════════════════════════════════════ */
 
+TEST_FUNC(test_manual_first_tab_and_shift_tab)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t c;
+    gui_widget_t got;
+
+    /* ── 正向首次 Tab → 第一个可用 Tab 项 ─────────────────────── */
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+    c = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_set_initial_policy(fx.input, GUI_FOCUS_INITIAL_MANUAL));
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, c, GUI_FOCUS_TAB));
+
+    /* MANUAL：跨 step 仍然是 NONE。 */
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /* 首次正向 Tab → a。 */
+    press_key(&fx, KEY_TAB_DOWN, KEY_TAB_UP);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+
+    /* ── 反向首次 Tab → 最后一个可用 Tab 项 ───────────────────── */
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+    c = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_set_initial_policy(fx.input, GUI_FOCUS_INITIAL_MANUAL));
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, c, GUI_FOCUS_TAB));
+
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /* Shift-Tab 首次 → c（最后一个）。 */
+    {
+        const uint8_t shift_tab[] = { KEY_LSHIFT_DOWN, KEY_TAB_DOWN, KEY_TAB_UP,
+                                      KEY_LSHIFT_UP };
+
+        feed_keys(&fx, shift_tab, sizeof(shift_tab));
+        step(&fx, 20);
+    }
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(c.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_auto_first_and_initial_policy_change)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t got;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+
+    /* AUTO_FIRST：首次可用 Tab 登记建立选择。 */
+    assert_eq(0, gui_focus_set_initial_policy(fx.input, GUI_FOCUS_INITIAL_AUTO_FIRST));
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    /* 改变策略不偷换已有焦点。 */
+    assert_eq(0, gui_focus_set_initial_policy(fx.input, GUI_FOCUS_INITIAL_MANUAL));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    /* 登记新项也不改变已有选择（AUTO_FIRST 只管"首次"）。 */
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+
+    /* MANUAL：登记不建立选择。 */
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+
+    assert_eq(0, gui_focus_set_initial_policy(fx.input, GUI_FOCUS_INITIAL_MANUAL));
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_stable_refresh_keeps_active_key)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t got;
+    activate_probe_t probe;
+    const uint8_t enter_down[] = { KEY_ENTER_DOWN };
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    memset(&probe, 0, sizeof(probe));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, a, activate_handler, &probe));
+
+    /* 真实 DOWN → 跨三次 step → UP。 */
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    step(&fx, 200);
+    step(&fx, 200);
+    step(&fx, 200);
+
+    /* 按住期间没有激活。 */
+    assert_eq(0, probe.calls);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    /* 释放后激活一次。 */
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(1, probe.calls);
+    assert_eq(a.id, probe.last_target.id);
+
+    /* 后台非当前项增删不取消当前键：再按住一次，中途加入一个新按钮。 */
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    assert_eq(1, probe.calls);
+    {
+        gui_widget_t c = make_button(&fx, root, 230, 10);
+
+        assert_eq(0, gui_focus_register(fx.input, c, GUI_FOCUS_TAB));
+    }
+    step(&fx, 200);
+    assert_eq(1, probe.calls);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(2, probe.calls);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_clear_cancels_pressed_and_repeat)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t got;
+    gui_widget_t receiver;
+
+    activate_probe_t probe;
+    const uint8_t enter_down[] = { KEY_ENTER_DOWN };
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    memset(&probe, 0, sizeof(probe));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, a, activate_handler, &probe));
+
+    /* 按住 Enter。 */
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    assert_eq(0, probe.calls);
+
+    /* 显式清空：公开与后端都是 NONE。 */
+    assert_eq(0, gui_focus_set(fx.input, GUI_WIDGET_NONE));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+
+    /* pump 之后旧活动键与它的重复被清除。 */
+    step(&fx, 20);
+    step(&fx, 500);
+
+    /* 迟到的 UP 不激活。 */
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(0, probe.calls);
+
+    /* 重新选对象后，一整轮新键能激活。 */
+    assert_eq(0, gui_focus_set(fx.input, a));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(a.id, got.id);
+
+    press_key(&fx, KEY_ENTER_DOWN, KEY_ENTER_UP);
+    assert_eq(1, probe.calls);
+    assert_eq(a.id, probe.last_target.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_manual_mouse_selection_repairs_when_hidden)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t c;
+    gui_widget_t got;
+    bool ever_selected = false;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+    c = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_set_initial_policy(fx.input, GUI_FOCUS_INITIAL_MANUAL));
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_STRONG));
+    assert_eq(0, gui_focus_register(fx.input, c, GUI_FOCUS_TAB));
+
+    /* MANUAL：还没有选择。 */
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /* 真实鼠标点击 b：这是**选择**，不是调用公共 set。 */
+    click_widget(&fx, b);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(b.id, got.id);
+
+    /* 组回调先执行的鼠标路径也必须记录 ever_selected。 */
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, &ever_selected, NULL));
+    assert_true(ever_selected);
+
+    /* 隐藏 b：焦点修复到它之后的 c。 */
+    assert_eq(0, gui_widget_set_visible(fx.platform, b, false));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(c.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_click_only_focus_survives_step)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t tabbed;
+    gui_widget_t click_only;
+    gui_widget_t got;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    tabbed = make_button(&fx, root, 10, 10);
+    click_only = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, tabbed, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, click_only, GUI_FOCUS_CLICK));
+    assert_eq(0, gui_focus_set(fx.input, tabbed));
+
+    /* 步进不改变选择：CLICK-only 项不参与 Tab 导航。 */
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(tabbed.id, got.id);
+
+    /* 手动 Tab 也不会走到 CLICK-only 项。 */
+    press_key(&fx, KEY_TAB_DOWN, KEY_TAB_UP);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(tabbed.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_hidden_ancestor_and_empty_repair)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t box;
+    gui_widget_t inner;
+    gui_widget_t other;
+    gui_widget_t got;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    box = make_button(&fx, root, 10, 10);
+    inner = make_button(&fx, root, 120, 10);
+    other = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, box, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, inner, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, other, GUI_FOCUS_TAB));
+
+    /* 焦点在 inner；隐藏它的兄弟 box 不影响它。 */
+    assert_eq(0, gui_focus_set(fx.input, inner));
+    assert_eq(0, gui_widget_set_visible(fx.platform, box, false));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(inner.id, got.id);
+
+    /* 隐藏 inner 自己：焦点落到它之后的 other。 */
+    assert_eq(0, gui_widget_set_visible(fx.platform, inner, false));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(other.id, got.id);
+
+    /* 全部不可用：焦点为空。 */
+    assert_eq(0, gui_widget_set_visible(fx.platform, other, false));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /* 候选恢复：修复继续，焦点回到可用项。 */
+    assert_eq(0, gui_widget_set_visible(fx.platform, inner, false));
+    assert_eq(0, gui_widget_set_visible(fx.platform, other, true));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(other.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_failed_set_preserves_explicit_clear)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t unregistered;
+    gui_widget_t hidden;
+    gui_widget_t foreign;
+    gui_widget_t got;
+    bool explicit_clear = false;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    unregistered = make_button(&fx, root, 120, 10);
+    hidden = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, hidden, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    /* 显式清空。 */
+    assert_eq(0, gui_focus_set(fx.input, GUI_WIDGET_NONE));
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, NULL, &explicit_clear));
+    assert_true(explicit_clear);
+
+    /* 有效但未登记：失败，选择与清空标志都不变。 */
+    errno = 0;
+    assert_eq(-1, gui_focus_set(fx.input, unregistered));
+    assert_eq(EINVAL, errno);
+
+    /* 隐藏（在册但不可用）：失败，EACCES。 */
+    assert_eq(0, gui_widget_set_visible(fx.platform, hidden, false));
+    errno = 0;
+    assert_eq(-1, gui_focus_set(fx.input, hidden));
+    assert_eq(EACCES, errno);
+
+    /* 外 display：失败，EINVAL。 */
+    assert_eq(0, gui_native_fixture_create_foreign_widget(fx.platform, true, &foreign));
+    errno = 0;
+    assert_eq(-1, gui_focus_set(fx.input, foreign));
+    assert_eq(EINVAL, errno);
+    gui_native_fixture_free_foreign_widget(fx.platform);
+
+    /* 原选择仍然是 NONE，清空标志仍在。 */
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, NULL, &explicit_clear));
+    assert_true(explicit_clear);
+
+    /* 后续登记与刷新都不复活它。 */
+    {
+        gui_widget_t later = make_button(&fx, root, 340, 10);
+
+        assert_eq(0, gui_focus_register(fx.input, later, GUI_FOCUS_TAB));
+    }
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_destroy_current_during_backend_callback_cancels)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t victim;
+    gui_widget_t other;
+
+    destroy_guard_probe_t probe;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    victim = make_button(&fx, root, 120, 10);
+    other = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, victim, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, victim));
+
+    /* 业务 ACTIVATE 回调里删除树被拒绝：两种回调不得混淆。 */
+    memset(&probe, 0, sizeof(probe));
+    probe.platform = fx.platform;
+    probe.victim = other;
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, victim, destroy_guard_handler, &probe));
+    click_widget(&fx, victim);
+    assert_eq(1, probe.calls);
+    assert_eq(-1, probe.destroy_rc);
+    assert_eq(EBUSY, probe.destroy_errno);
+
+    gui_native_fixture_destroy(&fx);
+
+    /*
+     * 后端在回调里删掉当前焦点对象：观察者不递归 read，也不把释放投给新
+     * 对象。诊断(raw)登记与原生登记**互斥**，所以这里换一个新的夹具。
+     */
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    assert_eq(0, gui_native_fixture_raw_focus_add_button(&fx));
+    assert_eq(0, gui_native_fixture_raw_focus_add_button(&fx));
+
+    /* 首个登记的可用控件建立焦点。 */
+    assert_eq(1, gui_native_fixture_raw_is_focused(&fx, 0));
+
+    /* 后端删掉当前持有焦点的对象。 */
+    assert_eq(0, gui_native_fixture_raw_delete_focused(&fx));
+    step(&fx, 20);
+
+    /* 焦点落到后继上；被释放的对象不会再收到任何东西。 */
+    assert_eq(1, gui_native_fixture_raw_is_focused(&fx, 1));
+    assert_eq(0, gui_native_fixture_raw_is_focused(&fx, 0));
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Task 9：指针策略、激活与主题色迁移
+ * ═══════════════════════════════════════════════════════════════════ */
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_focus_registration_modes),
     TEST_ENTRY(test_callback_focus_mutation_guard),
@@ -663,7 +1145,16 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_unregister_noncurrent_preserves_active_receiver),
     TEST_ENTRY(test_native_unregister_input_destroy_widget_destroy),
     TEST_ENTRY(test_delete_subtree_skips_all_doomed_descendants),
-    TEST_ENTRY(test_input_destroy_detaches_all_observers)
+    TEST_ENTRY(test_input_destroy_detaches_all_observers),
+    TEST_ENTRY(test_manual_first_tab_and_shift_tab),
+    TEST_ENTRY(test_auto_first_and_initial_policy_change),
+    TEST_ENTRY(test_stable_refresh_keeps_active_key),
+    TEST_ENTRY(test_clear_cancels_pressed_and_repeat),
+    TEST_ENTRY(test_manual_mouse_selection_repairs_when_hidden),
+    TEST_ENTRY(test_click_only_focus_survives_step),
+    TEST_ENTRY(test_hidden_ancestor_and_empty_repair),
+    TEST_ENTRY(test_failed_set_preserves_explicit_clear),
+    TEST_ENTRY(test_destroy_current_during_backend_callback_cancels)
 TEST_LIST_END
 
 int main(void)

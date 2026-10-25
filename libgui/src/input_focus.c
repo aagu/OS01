@@ -928,9 +928,10 @@ int gui_input_focus_set_native(gui_input_t *input, uint64_t native_id)
         return -1;
     }
     if (native_id == 0) {
-        /* 显式清空不在本任务内。 */
-        errno = EINVAL;
-        return -1;
+        /* 显式清空：保持 NONE，直到下一次成功选择。 */
+        input->focus.explicit_clear = true;
+        focus_sync(input);
+        return 0;
     }
 
     idx = focus_index_by_id(input, native_id);
