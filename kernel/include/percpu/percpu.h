@@ -20,6 +20,8 @@
  * = 8 × 144 = 1152 bytes on this build).
  */
 #define PERCPU_DATA_SIZE  144
+/* Assembly GS-relative logical CPU index; checked against the C layout. */
+#define PERCPU_CPU_ID_OFFSET 16
 
 #ifndef __ASSEMBLER__
 
@@ -83,6 +85,9 @@ typedef struct percpu {
     uint32_t ipi_ready;         // 一次发布：本核 IPI 通道就绪（Task 16+ 消费）
     uint32_t tlb_ack_gen;       // TLB shootdown 代计数器（Task 16+ 消费）
 } percpu_t;
+
+_Static_assert(offsetof(percpu_t, cpu_id) == PERCPU_CPU_ID_OFFSET,
+               "assembly CPU ID offset must match percpu_t");
 
 /* Pin the M3 tail fields: percpu.c's memset wipes only
  * sizeof(percpu_t) - 8 bytes, so these must be the last 8 bytes. */

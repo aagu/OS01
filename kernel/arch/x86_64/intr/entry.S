@@ -1,4 +1,5 @@
 #include <arch/x86_64/linkage.h>
+#include <percpu/percpu.h>
 
 R15	=	0x00
 R14	=	0x08
@@ -66,7 +67,7 @@ ret_from_exception:
 ENTRY(ret_from_intr)
 #ifdef OS01_SELFTEST
 	# Frame already owns all GPRs. Count return-work entry per CPU.
-	movl	%gs:16,	%eax
+	movl	%gs:PERCPU_CPU_ID_OFFSET,	%eax
 	leaq	selftest_x86_intr_returns(%rip),	%rdx
 	incq	(%rdx,%rax,8)
 #endif

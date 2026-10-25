@@ -55,14 +55,14 @@ void selftest_x86_intr_tlb(unsigned cpu)
     }
 }
 
-static bool wait_event(const int *event)
+/* Caller must enable IRQs before entry; neither path changes IRQ state. */
+static bool wait_event_irqs_enabled(const int *event)
 {
     uint64_t start = arch_cycle_counter();
     int state;
     while (!(state = x86_intr_wait_state(
                 __atomic_load_n(event, __ATOMIC_ACQUIRE),
                 arch_cycle_counter(), start, BUDGET))) {
-        arch_local_irq_enable();
         arch_cpu_pause();
     }
     return state == 1;
@@ -147,7 +147,7 @@ static int live_remote(void)
         goto out;
     }
     arch_local_irq_enable();
-    if (!wait_event(&ready) || ready != 1) {
+    if (!wait_event_irqs_enabled(&ready) || ready != 1) {
         serial_printk("[selftest] x86_intr: worker ready=%d (timeout or "
                       "wrong initial mapping)\n", ready);
         goto cleanup;
@@ -170,17 +170,17 @@ static int live_remote(void)
     __atomic_store_n(&resched_armed, 1, __ATOMIC_RELEASE);
     ipi_send(percpu_data[target].arch_processor_id, 0x41);
     uint64_t start = arch_cycle_counter();
-    while (!x86_intr_wait_state(
+    int wait_state;
+    while (!(wait_state = x86_intr_wait_state(
                x86_intr_progress_done(
                    __atomic_load_n(&ticks[self], __ATOMIC_RELAXED), bsp_tick,
-                   __atomic_load_n(&ticks[target], __ATOMIC_RELAXED), before_tick),
-               arch_cycle_counter(), start, BUDGET))
+                   __atomic_load_n(&ticks[target], __ATOMIC_RELAXED), before_tick,
+                   jiffies, global_tick,
+                   __atomic_load_n(&resched[target], __ATOMIC_ACQUIRE), before_resched,
+                   __atomic_load_n(&progress, __ATOMIC_ACQUIRE)),
+               arch_cycle_counter(), start, BUDGET)))
         arch_cpu_pause();
-    if (x86_intr_live_verdict(
-            __atomic_load_n(&ticks[self], __ATOMIC_RELAXED), bsp_tick,
-            __atomic_load_n(&ticks[target], __ATOMIC_RELAXED), before_tick,
-            jiffies, global_tick,
-            __atomic_load_n(&progress, __ATOMIC_ACQUIRE)))
+    if (wait_state == 1)
         rc = 0;
     else
         serial_printk("[selftest] x86_intr: live verdict FAIL (bsp ticks %lu/%lu "
@@ -198,7 +198,7 @@ cleanup:
      * quarantined (never reused) instead of freed, because the delayed
      * worker may still switch to that CR3. */
     __atomic_store_n(&release_worker, 1, __ATOMIC_RELEASE);
-    if (!wait_event(&restored)) {
+    if (!wait_event_irqs_enabled(&restored)) {
         serial_printk("[selftest] x86_intr: cleanup timeout; scratch quarantined\n");
         rc = -1;
     } else if (!x86_intr_worker_verdict(worker_result, before_tick, after_tick,

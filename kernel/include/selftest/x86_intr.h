@@ -46,7 +46,7 @@ static inline const char *x86_intr_gate_mismatch(const unsigned char gate[16],
 static inline int x86_intr_wait_state(int done, uint64_t now,
                                       uint64_t start, uint64_t budget)
 {
-    return done ? 1 : (now - start >= budget ? -1 : 0);
+    return now - start >= budget ? -1 : (done ? 1 : 0);
 }
 
 /* The two sentinel values written into the scratch pages: the remote
@@ -82,14 +82,6 @@ static inline bool x86_intr_spurious_verdict(bool snapshot_equal,
            schedules_after == schedules_before && need_resched == 1;
 }
 
-/* BSP bounded-wait gate: both the BSP and the targeted AP must have
- * taken at least one real timer interrupt since the bases. */
-static inline bool x86_intr_progress_done(uint64_t bsp_ticks, uint64_t bsp_base,
-                                          uint64_t ap_ticks, uint64_t ap_base)
-{
-    return bsp_ticks > bsp_base && ap_ticks > ap_base;
-}
-
 /* Final live verdict: real ticks on both CPUs, the global clock (BSP
  * tick_handler drives jiffies) advanced, and the remote task made
  * progress after the resched IPI's interrupt return. */
@@ -99,8 +91,22 @@ static inline bool x86_intr_live_verdict(uint64_t bsp_ticks, uint64_t bsp_base,
                                          uint64_t jiffies_base,
                                          uint64_t progress)
 {
-    return x86_intr_progress_done(bsp_ticks, bsp_base, ap_ticks, ap_base) &&
+    return bsp_ticks > bsp_base && ap_ticks > ap_base &&
            jiffies_now > jiffies_base && progress > 0;
+}
+
+/* The bounded wait and final decision share every asynchronous condition.
+ * Receipt alone is insufficient: progress is acquired from task context
+ * after the remote interrupt returns. */
+static inline bool x86_intr_progress_done(uint64_t bsp_ticks, uint64_t bsp_base,
+                                          uint64_t ap_ticks, uint64_t ap_base,
+                                          uint64_t clock, uint64_t clock_base,
+                                          uint64_t receipts, uint64_t receipt_base,
+                                          uint64_t progress)
+{
+    return receipts > receipt_base &&
+           x86_intr_live_verdict(bsp_ticks, bsp_base, ap_ticks, ap_base,
+                                 clock, clock_base, progress);
 }
 
 /* Post-cleanup remote-worker verdict: released cleanly (no timeout, no

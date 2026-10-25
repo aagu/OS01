@@ -23,4 +23,3 @@ void lapic_configure_nmi(void)
         lapic_write(n->lint ? LAPIC_LVT_LINT1 : LAPIC_LVT_LINT0, value);
     }
 }
-

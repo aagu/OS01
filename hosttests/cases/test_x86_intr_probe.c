@@ -100,9 +100,10 @@ static void test_wait_state(void)
     /* Waiting / timed out / completed against a deadline budget. */
     assert(x86_intr_wait_state(0, 109, 100, 10) == 0);
     assert(x86_intr_wait_state(0, 110, 100, 10) == -1);
-    assert(x86_intr_wait_state(1, 110, 100, 10) == 1);
-    /* Completion wins over an expired budget. */
-    assert(x86_intr_wait_state(1, 500, 100, 10) == 1);
+    assert(x86_intr_wait_state(1, 109, 100, 10) == 1);
+    assert(x86_intr_wait_state(1, 110, 100, 10) == -1);
+    /* An expired budget must not become success on a late sample. */
+    assert(x86_intr_wait_state(1, 500, 100, 10) == -1);
     /* Cycle-counter wraparound must still expire. */
     assert(x86_intr_wait_state(0, 3, UINT64_MAX - 5, 9) == -1);
 }
@@ -147,9 +148,9 @@ static void test_spurious_verdict(void)
 static void test_live_verdicts(void)
 {
     /* progress_done gates the BSP's bounded wait loop. */
-    assert(x86_intr_progress_done(11, 10, 4, 3));
-    assert(!x86_intr_progress_done(10, 10, 4, 3));   /* BSP tick stalled */
-    assert(!x86_intr_progress_done(11, 10, 3, 3));   /* AP tick stalled  */
+    assert(x86_intr_progress_done(11, 10, 4, 3, 101, 100, 2, 1, 1));
+    assert(!x86_intr_progress_done(10, 10, 4, 3, 101, 100, 2, 1, 1));   /* BSP tick stalled */
+    assert(!x86_intr_progress_done(11, 10, 3, 3, 101, 100, 2, 1, 1));   /* AP tick stalled  */
 
     /* live_verdict additionally requires the global clock (BSP tick
      * handler) to have advanced and post-IPI task progress. */
@@ -160,6 +161,30 @@ static void test_live_verdicts(void)
     assert(!x86_intr_live_verdict(11, 10, 4, 3, 100, 100, 1));
     /* No task-context progress after the resched IPI return. */
     assert(!x86_intr_live_verdict(11, 10, 4, 3, 101, 100, 0));
+}
+
+/* Reproduce the ordering in I3: ticks already advanced while the
+ * resched IPI is still in flight. The production wait must stay open. */
+static void test_early_ticks_delayed_resched(void)
+{
+    /* Identical predicate and timeout decision to the actual BSP loop. */
+    assert(x86_intr_wait_state(
+        x86_intr_progress_done(11, 10, 4, 3, 101, 100, 1, 1, 0),
+        101, 100, 10) == 0); /* ticks first, IPI still pending */
+    assert(x86_intr_wait_state(
+        x86_intr_progress_done(11, 10, 4, 3, 101, 100, 2, 1, 0),
+        105, 100, 10) == 0); /* receipt, but no task progress yet */
+    assert(x86_intr_wait_state(
+        x86_intr_progress_done(11, 10, 4, 3, 101, 100, 2, 1, 1),
+        109, 100, 10) == 1); /* task progresses before expiry */
+    assert(x86_intr_wait_state(
+        x86_intr_progress_done(11, 10, 4, 3, 101, 100, 2, 1, 0),
+        110, 100, 10) == -1); /* real timeout: no progress */
+    assert(x86_intr_wait_state(
+        x86_intr_progress_done(11, 10, 4, 3, 101, 100, 2, 1, 1),
+        110, 100, 10) == -1); /* late completion cannot undo timeout */
+    assert(!x86_intr_progress_done(11, 10, 4, 3, 100, 100, 2, 1, 1));
+    assert(!x86_intr_progress_done(11, 10, 4, 3, 101, 100, 1, 1, 1));
 }
 
 static void test_worker_verdict(void)
@@ -183,6 +208,7 @@ int main(void)
     test_ack_matches();
     test_spurious_verdict();
     test_live_verdicts();
+    test_early_ticks_delayed_resched();
     test_worker_verdict();
     puts("x86_intr probe decisions: PASS");
     return 0;

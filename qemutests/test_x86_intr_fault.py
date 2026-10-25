@@ -123,6 +123,7 @@ class FakeSession:
     # -- lifecycle ------------------------------------------------
     def start(self):
         self.calls.append("start")
+        self.deadline = xif.time.monotonic() + self.timeout_s
         if self._start_exc is not None:
             raise self._start_exc
 
@@ -204,11 +205,11 @@ class FakeQmp:
         self.commands = []
         self.closed = False
 
-    def connect(self):
+    def connect(self, *, deadline=None):
         if self.connect_error is not None:
             raise RuntimeError(self.connect_error)
 
-    def execute(self, cmd, args=None):
+    def execute(self, cmd, args=None, *, deadline=None):
         self.commands.append(cmd)
         if self.on_execute is not None:
             self.on_execute(cmd)
@@ -224,6 +225,7 @@ class FakeQmp:
 
 def _session_factory(session):
     def make(**kwargs):
+        session.timeout_s = kwargs["timeout_s"]
         session.run_dir = kwargs.get("run_dir")
         session.argv = list(kwargs.get("argv", []))
         return session
@@ -272,6 +274,26 @@ def _args(tmp, case="bp", **kw):
 
 class EvidenceTests(unittest.TestCase):
     """The pure parser contract."""
+
+    def test_final_review_six_false_accepts(self):
+        extra = ("do_page_fault(14),ERROR_CODE:0x0000000000000000,"
+                 "RSP:0xffff800000200000,RIP:0xffff800000100000\n")
+        for case, log, resume in (("bp", BP_LOG, BP_RESUME),
+                                  ("nmi", NMI_LOG, None)):
+            fatal = log.split("\n======================")[0]
+            for kind, text in (("different fatal", log + extra),
+                               ("unfinished", fatal),
+                               ("overlong RIP", fatal + "f\n")):
+                with self.subTest(case=case, kind=kind):
+                    self.assertFalse(xif.fault_evidence(
+                        text, case=case, resume_addr=resume))
+
+    def test_other_malformed_fatal_prefixes_rejected(self):
+        for name in ("page_fault", "general_protection", "double_fault",
+                     "machine_check", "invalid_TSS", "SIMD_exception"):
+            with self.subTest(name=name):
+                self.assertFalse(xif.fault_evidence(
+                    NMI_LOG + "do_" + name + "(", case="nmi"))
 
     def test_valid_bp_log_accepted(self):
         self.assertTrue(xif.fault_evidence(
@@ -469,6 +491,28 @@ class QmpTransportTests(unittest.TestCase):
         for sock in sockets:
             sock.close.assert_called_once()
 
+    def test_shared_deadline_covers_greeting_events_and_partial_reads(self):
+        # Transport returns partial bytes and events while advancing time;
+        # no individual read gets a fresh timeout budget.
+        for payloads in ((b'{"QMP":', b'{}', b'}\n'),
+                         (b'{"event":"STOP"}\n',) * 3):
+            with self.subTest(payloads=payloads):
+                clock = [4.0]
+                sock = mock.Mock()
+                chunks = iter(payloads)
+                def recv(size):
+                    clock[0] += 0.4
+                    return next(chunks)
+                sock.recv.side_effect = recv
+                client = xif.QmpClient("sock", timeout=15)
+                with mock.patch.object(xif.socket, "socket", return_value=sock), \
+                     mock.patch.object(xif.time, "monotonic", side_effect=lambda: clock[0]):
+                    with self.assertRaises(TimeoutError):
+                        client.connect(deadline=5.0)
+                sock.close.assert_called_once()
+                self.assertTrue(all(call.args[0] <= 1.0
+                                    for call in sock.settimeout.call_args_list))
+
     def test_event_stream_cannot_extend_command_deadline(self):
         client = xif.QmpClient("sock", timeout=1)
         client.sock = mock.Mock()
@@ -545,6 +589,52 @@ class LifecycleTests(unittest.TestCase):
         return json.loads(results[0].read_text())
 
     # -- the passing paths ----------------------------------------
+    def test_fatal_newline_must_arrive_before_observation(self):
+        fatal = BP_LOG.split("\n======================")[0]
+        session = FakeSession(chunks=[fatal, "\n"])
+        original = session.observe
+        def observe(seconds):
+            self.assertEqual(session.text, fatal + "\n")
+            return original(seconds)
+        session.observe = observe
+        self.assertEqual(self._run("bp", session), 0)
+
+    def test_qmp_uses_the_same_deadline_for_connect_and_inject(self):
+        clock = [0.0]
+        session = FakeSession(chunks=[NMI_LOG])
+        qmp = FakeQmp("sock")
+        def connect(*, deadline):
+            self.assertEqual(deadline, 5.0)
+            clock[0] = 4.0
+        def execute(cmd, *, deadline):
+            self.assertEqual(deadline, 5.0)
+            clock[0] = 5.1
+        qmp.connect, qmp.execute = connect, execute
+        with mock.patch.object(xif.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(self._run("nmi", session, qmp), 1)
+        self.assertFalse(any(isinstance(call, tuple) and call[0] == "observe"
+                             for call in session.calls))
+        self.assertTrue(qmp.closed)
+
+    def test_overall_deadline_rejects_late_fatal_and_observation(self):
+        for arrival, overrun in ((4.0, 0.0), (3.0, 2.1), (3.5, 0.0)):
+            with self.subTest(arrival=arrival):
+                clock = [0.0]
+                session = FakeSession(chunks=[BP_LOG])
+                wait = session.wait_for
+                def delayed_wait(predicate):
+                    result = wait(predicate)
+                    clock[0] = arrival
+                    return result
+                session.wait_for = delayed_wait
+                observe = session.observe
+                def delayed_observe(seconds):
+                    clock[0] += seconds + overrun
+                    return observe(seconds)
+                session.observe = delayed_observe
+                with mock.patch.object(xif.time, "monotonic", side_effect=lambda: clock[0]):
+                    self.assertEqual(self._run("bp", session), 1)
+
     def test_bp_case_passes(self):
         session = FakeSession(chunks=[BP_LOG])
         self.assertEqual(self._run(xif.CASE_BP, session), 0)

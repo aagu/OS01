@@ -125,10 +125,7 @@ _PRECONDITION_RE = re.compile(r"\[x86-intr-fault\] precondition FAIL")
 _HEARTBEAT_RE = re.compile(
     r"^\[x86-intr-fault\] nmi heartbeat \d+$", re.MULTILINE)
 
-# The isolated-variant marker the probe itself prints (the probe runs
-# before random_init(), so the kernel's own "CSPRNG: kernel build
-# variant=..." boot message is not in the stream yet; the probe prints
-# the same KERNEL_VARIANT_NAME token).
+# The probe prints its isolated KERNEL_VARIANT_NAME after random_init().
 _VARIANT_RE = {
     case: re.compile(
         r"^\[x86-intr-fault\] variant=" + VARIANT_SLUG_FMT % case + r"$",
@@ -181,19 +178,21 @@ _FATAL_RE = {
     CASE_BP: re.compile(
         r"do_int3\(3\),ERROR_CODE:(" + _ZERO_FIELD + r"),"
         r"RSP:(" + _ADDR_FIELD + r"),"
-        r"RIP:(" + _ADDR_FIELD + r")"),
+        r"RIP:(" + _ADDR_FIELD + r")\n"),
     CASE_NMI: re.compile(
         r"do_nmi\(2\),ERROR_CODE:(" + _ZERO_FIELD + r"),"
         r"RSP:(" + _ADDR_FIELD + r"),"
-        r"RIP:(" + _ADDR_FIELD + r")"),
+        r"RIP:(" + _ADDR_FIELD + r")\n"),
 }
 
-# Any line that *starts* a fatal record for the case.  A second
-# (possibly malformed) fatal is still a second fatal and must reject.
-_FATAL_PREFIX_RE = {
-    CASE_BP: re.compile(r"do_int3\(3\),"),
-    CASE_NMI: re.compile(r"do_nmi\(2\),"),
-}
+# Recognize production exception starts even when their fields are truncated.
+# No line anchor: an NMI may interrupt a heartbeat's serial output.
+_FATAL_PREFIX_RE = re.compile(
+    r"do_(?:divide_error|debug|nmi|int3|overflow|bounds|undefined_opcode|"
+    r"dev_not_available|double_fault|coprocessor_segment_overrun|invalid_TSS|"
+    r"segment_not_present|stack_segment_fault|general_protection|page_fault|"
+    r"x87_FPU_error|alignment_check|machine_check|SIMD_exception|"
+    r"virtualization_exception)\(")
 
 
 def fault_evidence(text: str, *, case: str,
@@ -235,7 +234,7 @@ def fault_evidence(text: str, *, case: str,
     fatals = list(_FATAL_RE[case].finditer(text))
     if len(fatals) != 1:
         return False
-    if len(list(_FATAL_PREFIX_RE[case].finditer(text))) != 1:
+    if len(list(_FATAL_PREFIX_RE.finditer(text))) != 1:
         return False
 
     # The armed marker must precede the fatal.
@@ -285,7 +284,7 @@ def fault_evidence(text: str, *, case: str,
         return False
     if _PANIC_RE.search(tail):
         return False
-    if _FATAL_PREFIX_RE[case].search(tail):
+    if _FATAL_PREFIX_RE.search(tail):
         return False
     return True
 
@@ -349,13 +348,14 @@ class QmpClient:
         self.sock = None
         self._buffer = b""
 
-    def connect(self) -> None:
-        deadline = time.monotonic() + self.timeout
+    def connect(self, *, deadline: float | None = None) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + self.timeout
         err = None
         while time.monotonic() < deadline:
             attempt = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                attempt.settimeout(max(0.001, deadline - time.monotonic()))
+                attempt.settimeout(self._remaining(deadline))
                 attempt.connect(self.path)
                 self.sock = attempt
                 break
@@ -613,6 +613,7 @@ def run_case(args, *, session_factory=None, qmp_factory=None,
         session = session_factory(argv=command, run_dir=run_dir,
                                   timeout_s=args.timeout)
         session.start()
+        deadline = session.deadline
         # The session's wait_for() consumes EVERYTHING it has received
         # when its predicate matches, and its predicate only sees the
         # text AFTER the cursor.  A diagnostic that arrives in the same
@@ -643,8 +644,8 @@ def run_case(args, *, session_factory=None, qmp_factory=None,
             if case == CASE_NMI:
                 client = (qmp_factory or QmpClient)(qmp_socket)
                 try:
-                    client.connect()
-                    client.execute("inject-nmi")
+                    client.connect(deadline=deadline)
+                    client.execute("inject-nmi", deadline=deadline)
                 except Exception as exc:  # noqa: BLE001
                     qmp_error = str(exc)
                 finally:
@@ -661,7 +662,14 @@ def run_case(args, *, session_factory=None, qmp_factory=None,
                     errors.append("timeout before the fatal diagnostic")
                 else:
                     # 4. The bounded post-diagnostic observation window.
-                    session.observe(OBSERVE_SECONDS)
+                    if deadline - time.monotonic() < OBSERVE_SECONDS:
+                        errors.append("timeout: insufficient fatal observation budget")
+                    else:
+                        session.observe(OBSERVE_SECONDS)
+            # Include QMP, serial waiting and observation; cleanup has its
+            # own bounded reap allowance and cannot turn timeout into PASS.
+            if time.monotonic() >= deadline:
+                errors.append("overall deadline expired")
     except Exception as exc:  # noqa: BLE001 — launch/OS error is ERROR
         spawn_error = exc
     finally:
