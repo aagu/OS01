@@ -5,6 +5,10 @@
 
 ---
 
+## 2026-10-25
+
+- feat(intr): **x86 当前安装入口第二期闭环**：20 条异常 + 28 条 IRQ 接入共同事件分派，x86 原生适配与中立注册表分离；保留 gate/返回与设备 ACK、timer/IPI EOI 归属。修复连续 gate 的 IST 编码约束、按 MADT type-4 配置 NMI，并在 AP descriptor/IST/TR 就绪后启用 NMI。新增 48-gate 运行时核对、真实 timer/TLB/resched、软件 `int 0xff` 恢复及隔离 `int3`/post-percpu QMP NMI 验收。矩阵、既有 `fd_refcount` 失败与证据边界见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)；ARM 语义、M4、上下文切换与统一 `kernel_main` 不计入本次完成。
+
 ## 2026-10-24
 
 - fix(qemutests): **dispatch 第一期遗留 shootdown-probe 验收闭环**：runner 及 fixture 从旧 `M3-SHOOTDOWN-PROBE:` 对齐到内核实际 `SHOOTDOWN-PROBE:`，删除未使用的旧前缀常量。新增独立正反例及临时编译真实 probe 函数体的生产者协议回归；旧 runner 五次预期失败，修复后聚焦 11 项、完整 AArch64 harness 56 项全通过。正式 `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe` 退出 0、START/OK 各一次、无 probe SKIP/FAIL；不改内核实现，保留原阶段一历史失败。详见 [调查与修复证据](debug/2026-10-24-shootdown-probe-investigation.md#修复与正式验收)。

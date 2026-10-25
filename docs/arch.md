@@ -13,7 +13,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 | Facade 头（arch-neutral） | 弱默认实现 | x86_64 强覆盖 | aarch64 强覆盖 | 用途 |
 |---|---|---|---|---|
 | `arch/include/regs.h` | — | `arch/x86_64/regs.h` | `arch/aarch64/regs.h` | `pt_regs_t` 跨 arch 定义；`arch_cpu_pause()` 共享 helper（替换 rwlock 本地 `#if` switch） |
-| `arch/include/irq.h` | `intr/arch_irq_hooks.c`（FATAL/identity/no-op） | `arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + do_IRQ） | — | 中断 controller selection / gsi↔vector / dispatch 三段 hook；do_IRQ 从 `intr/pic/8259A.c` 移出 |
+| `arch/include/irq.h` | `intr/arch_irq_hooks.c`（FATAL/identity/no-op） | `arch/x86_64/intr/irq_entry.c`（原生入口适配）+ `irq_hooks.c`（controller / 业务） | — | 中断 controller selection / gsi↔vector / dispatch 三段 hook；do_IRQ 从 `intr/pic/8259A.c` 移出 |
 | `arch/include/rtc.h` | `driver/rtc.c` core（走 `arch_rtc_read/write` hook） | `arch/x86_64/platform/rtc_cmos.c` + `rtc_pie.c`（CMOS port I/O + BCD + UIP regA bit7 + BIN regB bit2；PIE/LAPIC/TSC 校准） | — | 实时时钟 + PIE |
 | `arch/include/subsys.h` | — | `arch/x86_64/linker.ld` 收集 `.subsys_init` | — | 10 driver 自注册（apic/pic/pit/lapic-timer/timer/serial/keyboard/ahci/pci/net）；`arch_register_subsys()` 缩到 7 行 loop |
 | `arch/sched/...` `kernel_thread_entry` | `sched/arch_kernel_thread_entry.c`（panic-on-call） | `arch/x86_64/cpu/thread_entry.S` | — | arch-neutral 调度器线程入口；`task.c` 不再 include per-arch 头 |
@@ -88,11 +88,11 @@ OS01 libc-free 无 `.init_array` runtime support，故采用 Linux initcall 同�
 void arch_irq_select_controller(uint32_t gsi);          // 选 controller
 uint8_t arch_irq_gsi_to_vector(uint32_t gsi);            // gsi → vector
 uint32_t arch_irq_vector_to_gsi(uint8_t vector);         // vector → gsi
-void arch_irq_dispatch(pt_regs_t *regs, uint32_t hwirq); // 实际 dispatch
+void arch_irq_dispatch(pt_regs_t *regs, uint64_t vector); // x86 原生 vector 入口
 ```
 
 弱默认：`kernel/intr/arch_irq_hooks.c`（select FATAL-halt；vector↔gsi identity；dispatch silent no-op）
-x86_64 强覆盖：`kernel/arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0x20+gsi 翻译 + 移动过来的 do_IRQ 体 + `nr & 0x80` spurious 检查）
+x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/vector，再经 decoder → `arch_intr_dispatch()` → x86 后端；controller 选择、GSI 翻译与设备 IRQ 业务保留在 `irq_hooks.c`。共同 `kernel/intr/vector_dispatch.c::intr_dispatch_registered_vector()` 只负责中立的注册表查找，不含 x86 路由白名单、ACK 或返回工作。
 
 `unregister_irq(uint64_t nr)` → `unregister_irq(uint32_t gsi)`，跟 `register_irq` 对齐（消除 `2026-08-17-timer-clocksource-clockevent.md:20` 文档的 off-by-vector footgun）。
 
@@ -110,7 +110,7 @@ x86_64 强覆盖：`kernel/arch/x86_64/intr/irq_hooks.c`（APIC→PIC ladder + 0
 
 ~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
-1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。`x86_64/intr/trap.c` 现为 1189 行（此前此处所称 3065 行已过时）；剩余 x86 异常与 IRQ 入口、EL0/SVC、aarch64 可恢复 abort/uaccess、用户页表/ASID/COW、aarch64 `smp.c` 的 context switch 拆分，以及统一 `kernel_main` 仍待实施。预计 2–4 周。
+1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。第二期已将当前安装的全部 48 条 x86 入口接入：异常 `0..14,16..20` 与 IRQ `0x20..0x37,0x38,0x40,0x41,0xff`；syscall `0x80` 及未安装 ISA 异常不在范围。gate 类型/DPL/IST 与返回语义保留，设备 ACK 和 timer/IPI EOI 仍归原业务，`0xff` 不 EOI 且不执行 `ret_from_intr` 工作。MADT type-4 按 processor UID/LINT/flags 配置 NMI，AP 在 GDT/IDT/TSS/TR 就绪后才启用路由。第二期证据见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)。EL0/SVC、aarch64 可恢复 abort/uaccess、用户页表/ASID/COW、aarch64 `smp.c` 的 context switch 拆分，以及统一 `kernel_main` 仍待实施。预计 2–4 周。
 2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`。预计 2–3 周。
 3. **Spec C — 统一 kernel_main**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。预计 2–4 周。
 
