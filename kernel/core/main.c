@@ -83,40 +83,6 @@ int kernel_main(const struct boot_context *bootctx)
     // ═══ 2. Memory subsystem ═════════════════════════════════
     x86_64_boot_memory(bootctx);
 
-#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
-    // ═══ Isolated destructive dispatch probe (Task 5, spec §9.3) ═══
-    // The dedicated `intr-x86-fault-bp` / `intr-x86-fault-nmi`
-    // variants compile this probe in; the normal build does not (the
-    // source is only added to the kernel source list when the
-    // probe-selection macro is present).
-    //
-    // Placement: after the IDT, the serial port and the memory
-    // subsystem are up (x86_64_boot_early / x86_64_boot_memory) and
-    // BEFORE the interrupt-controller bring-up
-    // (x86_64_boot_subsystems), the per-CPU/AP bring-up
-    // (x86_64_boot_percpu / x86_64_boot_aps) and the user-space init.
-    //
-    // Why here and not after x86_64_boot_percpu(): the NMI case needs
-    // the runner to inject a REAL hardware NMI over QMP, and with
-    // QEMU 11.1.x an injected NMI is delivered to this guest only
-    // while it is still in the early-boot window — the same guest
-    // takes the injected NMI before the LAPIC/IOAPIC/PIC bring-up and
-    // never after it (verified on TCG and on KVM, with the guest
-    // spinning and with it halted, with IF set and cleared).  The
-    // early-boot window is the only place where the spec §9.3 NMI
-    // evidence can be produced at all.
-    //
-    // Everything the probe needs is available here: the IDT is
-    // installed (the fault handlers are reachable), the serial port is
-    // initialised, the direct map and the higher-half page tables are
-    // in place (the IST stack the NMI gate selects is mapped), no AP
-    // exists and no task exists, so the guest serial stream is a
-    // single-CPU ordered log the acceptance runner can judge
-    // unambiguously.
-    x86_intr_fault_probe_run();
-    for (;;) arch_cpu_halt();           // the probe never returns
-#endif
-
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
     // arch_register_subsys() + subsys_init_all() dispatches:
     //   Phase 3: interrupt controllers (apic, pic)
@@ -137,6 +103,34 @@ int kernel_main(const struct boot_context *bootctx)
     x86_64_boot_percpu();
 
     random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
+
+#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
+    // ═══ Isolated destructive dispatch probe (Task 5, spec §9.3) ═══
+    // The dedicated `intr-x86-fault-bp` / `intr-x86-fault-nmi`
+    // variants compile this probe in; the normal build does not (the
+    // source is only added to the kernel source list when the
+    // probe-selection macro is present).
+    //
+    // Placement: AFTER x86_64_boot_percpu() — the IDT is installed
+    // (x86_64_boot_early), the serial port is up (x86_64_boot_early),
+    // the interrupt controllers are programmed (x86_64_boot_subsystems:
+    // MADT-described LINT inputs are configured for NMI delivery) and
+    // the BSP's per-CPU area plus num_cpus
+    // are published (x86_64_boot_percpu) — and BEFORE
+    // x86_64_boot_aps(), the FS/TTY bring-up, the network stack and
+    // the user-space init.  The probe halts the CPU, so nothing may
+    // follow it: at this point no AP is online (x86_64_boot_aps() has
+    // not run), no task and no thread exists, and the guest serial
+    // stream is a single-CPU ordered log the acceptance runner can
+    // judge unambiguously.
+    //
+    // random_init() runs first so the boot log carries the isolated
+    // variant marker ("CSPRNG: kernel build variant=intr-x86-fault-*")
+    // that proves the running kernel is the fault variant; the probe
+    // prints the same token itself.
+    x86_intr_fault_probe_run();
+    for (;;) arch_cpu_halt();           // the probe never returns
+#endif
 
     // ── FS bring-up + x86 device node registration (Task 2 split) ──
     // Order matters: devfs must exist before any devfs_register_*() call;

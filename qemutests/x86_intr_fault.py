@@ -136,6 +136,14 @@ _VARIANT_RE = {
     for case in CASES
 }
 
+# The boot stage the probe ran at.  The probe prints this marker only
+# after its own precondition check passed, and the precondition
+# (`num_cpus == 1`) can only hold AFTER x86_64_boot_percpu() published
+# num_cpus.  Requiring the marker therefore CHECKS the placement at
+# run time instead of asserting it in prose.
+_STAGE_RE = re.compile(
+    r"^\[x86-intr-fault\] stage=post-percpu$", re.MULTILINE)
+
 # Boot markers that can only be produced AFTER the probe point (the
 # probe runs after x86_64_boot_percpu() and before the FS/TTY bring-up,
 # the AP bring-up and the user-space init).  Seeing one of them means
@@ -160,9 +168,12 @@ _PANIC_RE = re.compile(r"kernel panic", re.IGNORECASE)
 #   log_err("do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n", ...)
 #   log_err("do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n", ...)
 #
-# ``%#018lx`` renders a ZERO value as 18 bare zeros (the ``0x`` prefix
-# is only added for a NONZERO value), so the error-code field of both
-# entries is 18 zeros while RSP/RIP carry the ``0x`` prefix.
+# ``%#018lx`` is the kernel's own printf rendering of the fields: the
+# archived production output shows the zero error code as
+# ``0x0000000000000000`` (the ``0x`` prefix IS present, 16 hex digits
+# after it) and the non-zero RSP/RIP the same way. The parser also
+# accepts the historical bare-zero spelling; the field VALUE is what
+# the evidence checks, while width and complete addresses stay strict.
 _ZERO_FIELD = r"(?:0{18}|0x0{16})"
 _ADDR_FIELD = r"0x[0-9a-f]{16}"
 
@@ -237,6 +248,11 @@ def fault_evidence(text: str, *, case: str,
     if len(variants) != 1:
         return False
     if variants[0].start() > armed[0].start():
+        return False
+
+    stages = list(_STAGE_RE.finditer(text))
+    if len(stages) != 1 or not (
+            variants[0].end() < stages[0].start() < armed[0].start()):
         return False
 
     # Field semantics: both entries carry an explicit zero error code.
@@ -331,63 +347,81 @@ class QmpClient:
         self.path = path
         self.timeout = timeout
         self.sock = None
-        self._fp = None
+        self._buffer = b""
 
     def connect(self) -> None:
         deadline = time.monotonic() + self.timeout
         err = None
         while time.monotonic() < deadline:
+            attempt = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                s.settimeout(self.timeout)
-                s.connect(self.path)
-                self.sock = s
-                self._fp = s.makefile("rwb")
+                attempt.settimeout(max(0.001, deadline - time.monotonic()))
+                attempt.connect(self.path)
+                self.sock = attempt
                 break
             except OSError as exc:
+                attempt.close()
                 err = exc
-                time.sleep(0.1)
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
         if self.sock is None:
             raise RuntimeError(f"QMP connect failed: {err}")
-        self._read_message()                 # the QMP greeting
-        self.execute("qmp_capabilities")     # the handshake
+        try:
+            greeting = self._read_message(deadline)
+            if "QMP" not in greeting:
+                raise RuntimeError("QMP greeting missing")
+            self.execute("qmp_capabilities", deadline=deadline)
+        except BaseException:
+            self.close()
+            raise
 
-    def _read_message(self) -> dict:
-        if self._fp is None:
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("QMP total deadline expired")
+        return remaining
+
+    def _read_message(self, deadline: float) -> dict:
+        if self.sock is None:
             raise RuntimeError("QMP not connected")
         while True:
-            line = self._fp.readline()
-            if not line:
-                raise RuntimeError("QMP connection closed")
-            msg = json.loads(line)
-            if "event" in msg:
+            self.sock.settimeout(self._remaining(deadline))
+            if b"\n" not in self._buffer:
+                data = self.sock.recv(4096)
+                if not data:
+                    raise RuntimeError("QMP connection closed")
+                self._buffer += data
+                if len(self._buffer) > 1024 * 1024:
+                    raise RuntimeError("QMP message too large")
                 continue
-            return msg
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            msg = json.loads(line)
+            if "event" not in msg:
+                return msg
 
-    def execute(self, cmd: str, args: dict | None = None) -> dict:
-        if self._fp is None:
+    def execute(self, cmd: str, args: dict | None = None, *,
+                deadline: float | None = None) -> dict:
+        if self.sock is None:
             raise RuntimeError("QMP not connected")
+        if deadline is None:
+            deadline = time.monotonic() + self.timeout
         request: dict = {"execute": cmd}
         if args is not None:
             request["arguments"] = args
-        self._fp.write((json.dumps(request) + "\n").encode())
-        self._fp.flush()
-        while True:
-            msg = self._read_message()
-            if "error" in msg:
-                raise RuntimeError(f"QMP error {cmd}: {msg['error']}")
-            return msg.get("return", {})
+        self.sock.settimeout(self._remaining(deadline))
+        self.sock.sendall((json.dumps(request) + "\n").encode())
+        msg = self._read_message(deadline)
+        if "error" in msg:
+            raise RuntimeError(f"QMP error {cmd}: {msg['error']}")
+        if "return" not in msg:
+            raise RuntimeError(f"QMP response missing return: {msg}")
+        return msg["return"]
 
     def close(self) -> None:
-        try:
-            if self._fp is not None:
-                self._fp.close()
-                self._fp = None
-            if self.sock is not None:
+        if self.sock is not None:
+            try:
                 self.sock.close()
+            finally:
                 self.sock = None
-        except OSError:
-            pass
 
 
 # ── QEMU command line ───────────────────────────────────────────
@@ -452,10 +486,10 @@ def _git_revision() -> tuple[str, bool]:
 
 def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
                         status, runner_exit_code, errors, firmware=None,
-                        image=None, extra=None) -> None:
+                        image=None, extra=None) -> bool:
     """Persist a suite-unit RunReport; the suite has no guest v1 cases."""
     if archive is None or RunReport is None:
-        return
+        return True
     try:
         rev, dirty = _git_revision()
         outcomes = [{"errors": list(errors)}]
@@ -482,9 +516,11 @@ def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
             stderr_log=str(archive.run_dir / "stderr.log"),
         )
         archive.write(report)
+        return True
     except Exception as exc:  # noqa: BLE001
-        print(f"[{SUITE}] warning: failed to write RunReport: {exc}",
+        print(f"[{SUITE}] ERROR: failed to write RunReport: {exc}",
               file=sys.stderr)
+        return False
 
 
 # ── The case driver ─────────────────────────────────────────────
@@ -679,7 +715,7 @@ def run_case(args, *, session_factory=None, qmp_factory=None,
                       "(no runner-owned stop)")
     if not accepted and not errors:
         errors.append("dispatch evidence not satisfied")
-    _write_suite_report(
+    report_written = _write_suite_report(
         archive, argv=command, profile=profile, session=session,
         started_monotonic=started, status="PASS" if result else "FAIL",
         runner_exit_code=0 if result else 1, errors=errors,
@@ -689,6 +725,12 @@ def run_case(args, *, session_factory=None, qmp_factory=None,
                "qemu_self_exited": qemu_self_exited,
                "resume_addr": (f"0x{resume_addr:016x}"
                                if resume_addr is not None else None)})
+
+    if not report_written:
+        metadata["result"] = "ERROR"
+        metadata["archive_error"] = "RunReport write failed"
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        return 2
 
     print(json.dumps({
         "event": "case", "case": case, "result": "PASS" if result else "FAIL",

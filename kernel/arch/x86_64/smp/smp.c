@@ -32,7 +32,8 @@ static void ap_init_lapic(void)
     lapic_write(LAPIC_LDR, (id << 24));
     lapic_write(LAPIC_LVT_TIMER,   LVT_MASK);
     lapic_write(LAPIC_LVT_LINT0,   LVT_MASK | LVT_DELIVERY_EXTINT);
-    lapic_write(LAPIC_LVT_LINT1,   LVT_MASK);
+    lapic_write(LAPIC_LVT_LINT1, LVT_MASK);
+    lapic_configure_nmi();
     lapic_write(LAPIC_LVT_ERROR,   LVT_MASK);
     lapic_write(LAPIC_LVT_PERF,    LVT_MASK);
     lapic_write(LAPIC_LVT_THERMAL, LVT_MASK);

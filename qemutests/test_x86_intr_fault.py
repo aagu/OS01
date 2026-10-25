@@ -33,10 +33,12 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,8 +55,8 @@ import qemutests.x86_intr_fault as xif   # noqa: E402
 #   * kernel/arch/x86_64/intr/trap.c prints
 #       do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx
 #       do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx
-#     (``%#018lx`` renders a zero value as 18 bare zeros — the ``0x``
-#     prefix is only added for a NONZERO value).
+#     (the kernel printf renders zero as ``0x0000000000000000``,
+#     as confirmed by the real guest archive).
 #   * kernel/arch/x86_64/intr/fault_probe.c prints the ``[x86-intr-fault]``
 #     markers.
 #   * kernel/random/random.c prints the isolated-variant marker.
@@ -68,8 +70,9 @@ BP_LOG = (
     "EFER: NXE enabled\n"
     "frame buffer remap succeed\n"
     "[x86-intr-fault] variant=intr-x86-fault-bp\n"
+    "[x86-intr-fault] stage=post-percpu\n"
     "[x86-intr-fault] bp armed\n"
-    "do_int3(3),ERROR_CODE:000000000000000000,"
+    "do_int3(3),ERROR_CODE:0x0000000000000000,"
     "RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n"
     "====================== Kernel Stack Backtrace ======================\n"
     "  +---> address:0xffffffff81001234 \t(+) 0000 function:probe\n"
@@ -77,10 +80,11 @@ BP_LOG = (
 
 NMI_LOG = (
     "[x86-intr-fault] variant=intr-x86-fault-nmi\n"
+    "[x86-intr-fault] stage=post-percpu\n"
     "[x86-intr-fault] nmi armed\n"
     "[x86-intr-fault] nmi heartbeat 0\n"
     "[x86-intr-fault] nmi heartbeat 1\n"
-    "do_nmi(2),ERROR_CODE:000000000000000000,"
+    "do_nmi(2),ERROR_CODE:0x0000000000000000,"
     "RSP:0xffffffffffffe000,RIP:0xffffffff8100abcd\n"
     "====================== Kernel Stack Backtrace ======================\n"
 )
@@ -308,9 +312,10 @@ class EvidenceTests(unittest.TestCase):
         # The guest continued (a boot marker) and only then hit the
         # fatal: the diagnostic is too late to be the boundary.
         log = ("[x86-intr-fault] variant=intr-x86-fault-bp\n"
+               "[x86-intr-fault] stage=post-percpu\n"
                "[x86-intr-fault] bp armed\n"
                "tty: console TTY created\n"
-               "do_int3(3),ERROR_CODE:000000000000000000,"
+               "do_int3(3),ERROR_CODE:0x0000000000000000,"
                "RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n")
         self.assertFalse(xif.fault_evidence(
             log, case=xif.CASE_BP, resume_addr=BP_RESUME))
@@ -332,7 +337,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(xif.fault_evidence(log, case=xif.CASE_NMI))
 
     def test_second_fatal_after_diagnostic_rejected(self):
-        log = NMI_LOG + ("do_nmi(2),ERROR_CODE:000000000000000000,"
+        log = NMI_LOG + ("do_nmi(2),ERROR_CODE:0x0000000000000000,"
                          "RSP:0xffffffffffffe000,RIP:0xffffffff8100abcd\n")
         self.assertFalse(xif.fault_evidence(log, case=xif.CASE_NMI))
 
@@ -351,7 +356,7 @@ class EvidenceTests(unittest.TestCase):
             log, case=xif.CASE_BP, resume_addr=BP_RESUME))
 
     def test_armed_after_fatal_rejected(self):
-        log = ("do_int3(3),ERROR_CODE:000000000000000000,"
+        log = ("do_int3(3),ERROR_CODE:0x0000000000000000,"
                "RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n"
                "[x86-intr-fault] variant=intr-x86-fault-bp\n"
                "[x86-intr-fault] bp armed\n")
@@ -372,7 +377,7 @@ class EvidenceTests(unittest.TestCase):
             log, case=xif.CASE_BP, resume_addr=BP_RESUME))
 
     def test_nonzero_error_code_rejected(self):
-        log = BP_LOG.replace("ERROR_CODE:000000000000000000",
+        log = BP_LOG.replace("ERROR_CODE:0x0000000000000000",
                              "ERROR_CODE:0x0000000000000010")
         self.assertFalse(xif.fault_evidence(
             log, case=xif.CASE_BP, resume_addr=BP_RESUME))
@@ -398,9 +403,13 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(xif.fault_evidence(
             NMI_LOG, case=xif.CASE_BP, resume_addr=BP_RESUME))
 
-    def test_buffered_pre_fatal_heartbeat_accepted(self):
-        # A heartbeat buffered BEFORE the injection is not an NMI return.
-        self.assertTrue(xif.fault_evidence(NMI_LOG, case=xif.CASE_NMI))
+    def test_missing_or_late_stage_rejected(self):
+        marker = "[x86-intr-fault] stage=post-percpu\n"
+        for log in (NMI_LOG.replace(marker, ""),
+                    NMI_LOG.replace(marker, "") + marker,
+                    NMI_LOG + marker):
+            with self.subTest(log=log):
+                self.assertFalse(xif.fault_evidence(log, case=xif.CASE_NMI))
 
     def test_partial_heartbeat_before_the_diagnostic_accepted(self):
         # The NMI may land in the middle of a heartbeat write; the
@@ -412,6 +421,40 @@ class EvidenceTests(unittest.TestCase):
 
     def test_empty_log_rejected(self):
         self.assertFalse(xif.fault_evidence("", case=xif.CASE_NMI))
+
+
+class QmpTransportTests(unittest.TestCase):
+    def test_failed_connection_closes_every_attempt(self):
+        sockets = []
+        def create_socket(*args):
+            sock = mock.Mock()
+            sock.connect.side_effect = OSError("not listening")
+            sockets.append(sock)
+            return sock
+        with mock.patch.object(xif.socket, "socket", side_effect=create_socket), \
+             mock.patch.object(xif.time, "sleep"), \
+             mock.patch.object(xif.time, "monotonic", side_effect=(tick / 10 for tick in itertools.count())):
+            with self.assertRaises(RuntimeError):
+                xif.QmpClient("sock", timeout=1).connect()
+        self.assertTrue(sockets)
+        for sock in sockets:
+            sock.close.assert_called_once()
+
+    def test_event_stream_cannot_extend_command_deadline(self):
+        client = xif.QmpClient("sock", timeout=1)
+        client.sock = mock.Mock()
+        # Fail safely on the old loop instead of hanging the unit test.
+        ticks = iter([0, 0.1, 0.5, 1.1])
+        def now():
+            try:
+                return next(ticks)
+            except StopIteration:
+                raise AssertionError("total deadline was never enforced")
+        with mock.patch.object(xif.time, "monotonic", side_effect=now):
+            # Bound old code's event stream to make RED finite.
+            client.sock.recv.side_effect = [b'{"event":"STOP"}\n'] * 4 + [b'']
+            with self.assertRaises(TimeoutError):
+                client.execute("inject-nmi")
 
 
 class SymbolResolutionTests(unittest.TestCase):
@@ -510,8 +553,8 @@ class LifecycleTests(unittest.TestCase):
         # judge the WHOLE stream, not the host's read boundaries.
         head, tail = BP_LOG.split("do_int3(3)")
         session = FakeSession(chunks=[
-            head + "do_int3(3),ERROR_CODE:000000000000",
-            "000000,RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n"
+            head + "do_int3(3),ERROR_CODE:0x00000000",
+            "00000000,RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n"
             "====================== Kernel Stack Backtrace ====\n",
         ])
         self.assertEqual(self._run(xif.CASE_BP, session), 0)
@@ -519,9 +562,24 @@ class LifecycleTests(unittest.TestCase):
     def test_qmp_response_after_the_diagnostic_still_passes(self):
         # The QMP response and the serial bytes have no defined order:
         # a late response must not turn a good run into a failure.
-        session = FakeSession(chunks=[NMI_LOG])
-        qmp = FakeQmp("sock", on_execute=lambda cmd: None)
+        head, diagnostic = NMI_LOG.split("do_nmi(2)")
+        session = FakeSession(chunks=[head])
+        def deliver_before_response(cmd):
+            self.assertNotIn("do_nmi(2)", session.text)
+            session._text += "do_nmi(2)" + diagnostic
+            self.assertIn("do_nmi(2)", session.text)
+        qmp = FakeQmp("sock", on_execute=deliver_before_response)
         self.assertEqual(self._run(xif.CASE_NMI, session, qmp), 0)
+        self.assertTrue(qmp.closed)
+
+    def test_archive_write_failure_is_nonzero_and_process_closed(self):
+        session = FakeSession(chunks=[BP_LOG])
+        with mock.patch.object(xif.RunArchive, "write", side_effect=OSError("disk full")):
+            self.assertNotEqual(self._run(xif.CASE_BP, session), 0)
+        self.assertIn("stop", session.calls)
+        self.assertIn("close", session.calls)
+        metadata = next(self.build.glob("logs/tests/intr-x86/*/metadata.json"))
+        self.assertEqual(json.loads(metadata.read_text())["result"], "ERROR")
 
     # -- the failing paths ----------------------------------------
     def test_timeout_is_not_a_pass(self):
@@ -536,6 +594,7 @@ class LifecycleTests(unittest.TestCase):
     def test_normal_completion_is_not_a_pass(self):
         # The guest booted normally (no fatal diagnostic at all).
         log = ("[x86-intr-fault] variant=intr-x86-fault-bp\n"
+               "[x86-intr-fault] stage=post-percpu\n"
                "[x86-intr-fault] bp armed\n"
                "tty: console TTY created\n")
         session = FakeSession(chunks=[log])
@@ -563,6 +622,32 @@ class LifecycleTests(unittest.TestCase):
         session = FakeSession(chunks=[NMI_LOG])
         qmp = FakeQmp("sock", connect_error="QMP connect failed")
         self.assertEqual(self._run(xif.CASE_NMI, session, qmp), 1)
+
+    def test_exit_during_observation_rejected_and_closed(self):
+        session = FakeSession(chunks=[BP_LOG], exit_in_window=True)
+        self.assertEqual(self._run(xif.CASE_BP, session), 1)
+        self.assertIn("stop", session.calls)
+        self.assertIn("close", session.calls)
+
+    def test_qmp_failure_cleans_private_socket_and_process(self):
+        for kind in ("error", "no_response", "connect_error"):
+            with self.subTest(kind=kind):
+                args = _args(self.tmp, case=xif.CASE_NMI)
+                args.qmp_socket = None
+                private = self.tmp / kind
+                private.mkdir()
+                qmp = FakeQmp("sock", **{kind: True})
+                session = FakeSession(chunks=[NMI_LOG])
+                with mock.patch.object(xif.tempfile, "mkdtemp", return_value=str(private)):
+                    rc = xif.run_case(args,
+                        session_factory=_session_factory(session),
+                        qmp_factory=_qmp_factory(qmp),
+                        build_dir=str(self.build), profile="test")
+                self.assertEqual(rc, 1)
+                self.assertTrue(qmp.closed)
+                self.assertIn("stop", session.calls)
+                self.assertIn("close", session.calls)
+                self.assertFalse(private.exists())
 
     def test_spawn_error_exits_2(self):
         session = FakeSession(chunks=[BP_LOG],

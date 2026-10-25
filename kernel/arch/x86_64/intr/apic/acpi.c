@@ -210,10 +210,15 @@ static void parse_madt(struct MADT_HEADER *madt)
         }
 
         case MADT_TYPE_NMI: {
-            debug_irq("APIC:   NMI acpi_processor=%u lint=%u flags=%#x\n",
-                          ((struct MADT_NMI *)ptr)->acpi_processor_id,
-                          ((struct MADT_NMI *)ptr)->lint,
-                          ((struct MADT_NMI *)ptr)->flags);
+            if ((size_t)(end - ptr) >= sizeof(struct MADT_NMI) &&
+                entry->length >= sizeof(struct MADT_NMI) &&
+                apic_info.nmi_count < MAX_LAPIC_NMIS) {
+                struct MADT_NMI *nmi = (struct MADT_NMI *)ptr;
+                apic_info.nmis[apic_info.nmi_count++] = (lapic_nmi_t){
+                    nmi->acpi_processor_id, nmi->lint, nmi->flags};
+                debug_irq("APIC:   NMI acpi_processor=%u lint=%u flags=%#x\n",
+                          nmi->acpi_processor_id, nmi->lint, nmi->flags);
+            }
             break;
         }
 

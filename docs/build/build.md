@@ -363,7 +363,7 @@ make test-host
 
 - **选择器**：`X86_INTR_FAULT_TEST=bp|nmi`（空 = 普通构建，无任何故障探针）。它经 `KERNEL_EXTRA_CFLAGS`（已在 `OS01_SUBMAKE_ALLOWED` 白名单内）把探针选择宏送进受控 sub-make 边界，再由 `kernel/Makefile` 决定是否把 `kernel/arch/x86_64/intr/fault_probe.c` 加进源文件列表——普通构建里既没有该目标文件，ELF 里也没有任何 `x86_intr_fault*` 符号。
 - **变体**：每个用例一个自己的 kernel/image 目录（`kernel/intr-x86-fault-<case>/`、`image/intr-x86-fault-<case>/`），两个用例互不共享对象与镜像；与 selftest/systest/nettest/canary/weak/resolution/driver-fault 模式的组合在解析期即被拒绝，aarch64 profile 也直接拒绝该选择器。
-- **探针位置**：IDT、串口与内存子系统就绪之后、AP bring-up 与用户态 init 之前（`kernel/core/main.c`）。**为什么不是 `x86_64_boot_percpu()` 之后**：QEMU 11.1.x 只在 early-boot 窗口把注入的 NMI 投递给本 guest（同一镜像在 LAPIC/IOAPIC/PIC bring-up 之前会取走注入的 NMI，之后再也不会），而 spec §9.3 要求的是**真实硬件 NMI** 的证据；该窗口内没有 AP、没有任务，串口流仍是单核有序日志。
+- **探针位置**：`x86_64_boot_percpu()` 之后，AP bring-up、FS/TTY 与任务启动之前。此时 BSP per-CPU、IDT、串口和 APIC 已就绪；探针输出 `stage=post-percpu`，运行器要求该标记先于 armed/fatal。LAPIC 按 MADT type 4 的处理器 UID（或 `0xff` 全体）、LINT0/1 与极性/触发标志配置 NMI。此前 NMI 在 APIC 初始化后丢失的原因是内核屏蔽了 LINT1，不是 QEMU 的 early-boot 限制。
 - **判定**：见 `qemutests/x86_intr_fault.py` 的 `fault_evidence()`——串口流里恰好一个 `armed`、恰好一个完整 fatal 诊断、armed 在 fatal 之前、fatal 之后 ≥1 s 观察窗口内没有新的完整心跳/继续标记/二次 fatal/panic。QMP 响应的到达时刻**不**参与排序（只有 guest 串口顺序算数）。
 
 systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。

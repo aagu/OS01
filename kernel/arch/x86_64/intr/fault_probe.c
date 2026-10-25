@@ -118,13 +118,15 @@ static void probe_delay(void)
 
 // The suite runs single-CPU: a second CPU would be able to interleave
 // output with the fatal diagnostic and would make the guest ordering
-// ambiguous.  The probe runs before the per-CPU bring-up, so num_cpus
-// is still 0 — which IS the single-CPU proof at this point (no AP has
-// been registered and none will be).  A failed precondition halts the
-// CPU with a marker the acceptance runner rejects.
+// ambiguous.  The probe runs AFTER x86_64_boot_percpu(), so num_cpus is
+// published: 1 means "the BSP is the only CPU the kernel knows about"
+// (the APs are still offline — x86_64_boot_aps() has not run), which is
+// exactly the single-CPU property the acceptance runner needs.  A
+// different value means the placement is wrong or a second CPU exists:
+// the probe then halts with a marker the runner rejects.
 static void probe_check_precondition(void)
 {
-    if (num_cpus == 0) {
+    if (num_cpus == 1) {
         return;
     }
     serial_printk("[x86-intr-fault] precondition FAIL: num_cpus=%u\n",
@@ -134,10 +136,16 @@ static void probe_check_precondition(void)
     }
 }
 
+// The boot stage the probe ran at.  The runner REQUIRES this line, so
+// the placement is checked at RUN time and not asserted in prose: the
+// marker can only be printed after x86_64_boot_percpu() published
+// num_cpus (see probe_check_precondition).
+#define X86_INTR_FAULT_STAGE "post-percpu"
+
 // The isolated variant token (KERNEL_VARIANT_NAME, the same macro the
 // CSPRNG boot message uses) — printed by the probe itself so the
 // acceptance runner can prove the running kernel IS the fault variant
-// even though the probe runs before random_init().
+// independently of the boot messages.
 static void probe_print_variant(void)
 {
 #ifdef KERNEL_VARIANT_NAME
@@ -145,6 +153,7 @@ static void probe_print_variant(void)
 #else
     probe_puts("[x86-intr-fault] variant=default\n");
 #endif
+    probe_puts("[x86-intr-fault] stage=" X86_INTR_FAULT_STAGE "\n");
 }
 
 #if defined(X86_INTR_FAULT_TEST_BP)

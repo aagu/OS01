@@ -16,9 +16,19 @@
 // (`intr-x86-fault-bp` / `intr-x86-fault-nmi`); the normal build
 // never compiles it and never links it.
 //
-// The caller must invoke this AFTER the IDT, the serial port and the
-// per-CPU area are usable, and BEFORE the AP bring-up and the
-// user-space init — the probe halts the CPU, so nothing may follow it.
+// The caller must invoke this AFTER the per-CPU bring-up has published
+// `num_cpus` (x86_64_boot_percpu()) and BEFORE the AP bring-up
+// (x86_64_boot_aps()), the FS/TTY bring-up and the user-space init —
+// the probe halts the CPU, so nothing may follow it.
+//
+// The probe checks that precondition itself (`num_cpus == 1`, i.e. the
+// BSP is the only CPU the kernel knows about) and prints a
+// `stage=post-percpu` marker that the acceptance runner REQUIRES, so
+// the placement is verified at RUN time instead of asserted in prose.
+//
+// The NMI case additionally needs firmware-described NMI routing. LAPIC
+// initialization programs MADT type-4 LINT inputs for the matching CPU;
+// unspecified inputs remain masked (see arch/x86_64/intr/apic/nmi.c).
 
 void x86_intr_fault_probe_run(void);
 

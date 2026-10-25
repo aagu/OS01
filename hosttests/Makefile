@@ -60,6 +60,7 @@ LIBC_OBJS := \
 MOCK_OBJS := $(TEST_BLD)/mock_kernel.o
 
 TEST_BINS := \
+    $(TEST_BLD)/test_lapic_nmi.elf \
     $(TEST_BLD)/test_libc_string.elf \
     $(TEST_BLD)/test_libc_list.elf \
     $(TEST_BLD)/test_libc_vsprintf.elf \
@@ -4435,3 +4436,12 @@ test-intr-irq-x86: $(TEST_BLD)/test_intr_irq_x86.elf
 $(TEST_BLD)/test_x86_intr_probe.elf: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS_DIR)/kernel/include/selftest/x86_intr.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -idirafter $(TESTS_DIR)/kernel/include $< -o $@
+
+# Exercise production MADT-to-LVT routing with only MMIO substituted.
+$(TEST_BLD)/test_lapic_nmi.elf: $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c $(TESTS_DIR)/kernel/include/intr/apic.h $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/acpi.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(KERNEL_INC) $(LIBC_INC) $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c -Wl,--gc-sections -o $@
+
+.PHONY: test-lapic-nmi
+test-lapic-nmi: $(TEST_BLD)/test_lapic_nmi.elf
+	$<
