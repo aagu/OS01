@@ -44,12 +44,13 @@ KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT)
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 LIBGFX_BUILD_DIR := $(BUILD_DIR)/libgfx
 LIBGUI_BUILD_DIR := $(BUILD_DIR)/libgui
-# Compile-affecting variant (only OS01_SYSTEST re-keys the user dirs).
+# Compile-affecting variant (OS01_SYSTEST / FB_RESOLUTION_TEST / USER_DEBUG
+# re-key the user dirs).
 # project.mk sets USER_VARIANT before including this profile; the ?= default
 # lets component sub-makes that include ONLY the profile (via
 # OS01_PROFILE_FILE, e.g. user/Makefile) resolve it from OS01_SYSTEST on
 # their own command line (passed through OS01_SUBMAKE_ARGS).
-USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)
+USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 # Variant-scoped user dirs: the compile-affecting variant keys the user object
 # dir and the user artifact dir, so a systest build compiles fresh objects
 # into build/<profile>/user/systest and publishes artifacts into

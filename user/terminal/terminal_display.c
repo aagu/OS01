@@ -12,6 +12,7 @@
 // retry; the old view and the core are left untouched.
 
 #include "terminal_display.h"
+#include "user_log.h"
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -55,13 +56,20 @@ static int real_consume_terminal_enomem(void)
  * now_ns uses CLOCK_MONOTONIC; production terminal.elf always has access
  * to it via the libc syscall layer (terminal.c uses the same function
  * today).  stats_open/write/close open /dev/serial on demand and write
- * the per-second metrics dump without disturbing the caller's errno. */
+ * the per-second metrics dump without disturbing the caller's errno —
+ * they exist only for the USER_DEBUG=1 build (see the emit path below). */
 static uint64_t real_now_ns(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+
+/* The stats hooks and the whole emit path exist only in the
+ * USER_DEBUG=1 build: with the default USER_DEBUG=0 the [term-present]
+ * record is never produced, /dev/serial is never opened for it and the
+ * per-second serial spam disappears. */
+#if USER_DEBUG
 
 static int real_stats_open(void)
 {
@@ -121,6 +129,14 @@ static int real_stats_close(int fd)
 static int emit_present_record(terminal_display_t *d,
                                uint64_t begin_ns, uint64_t end_ns);
 
+/* Debug sink for the user-space log module (user/common/user_log.h):
+ * the [term-present] record travels over the terminal's stats fd, so it
+ * keeps the exact byte format the protocol parsers expect and the
+ * injectable ops stay in control of the wire. */
+static int stats_log_sink(void *ctx, const char *text, size_t len);
+
+#endif /* USER_DEBUG */
+
 static gfx_handle_t *real_open(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     return gfx_open(x, y, w, h);
@@ -159,9 +175,11 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     d->ops.gfx_replace_fallback = real_replace_fallback;
     d->ops.get_state = real_state;
     d->ops.now_ns = real_now_ns;
+#if USER_DEBUG
     d->ops.stats_open = real_stats_open;
     d->ops.stats_write = real_stats_write;
     d->ops.stats_close = real_stats_close;
+#endif
 #ifdef FB_RESOLUTION_TEST
     d->ops.consume_terminal_enomem = real_consume_terminal_enomem;
 #endif
@@ -177,10 +195,43 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     d->present_retry_pending = false;
     d->stats_fd = TERMINAL_STATS_FD_UNOPENED;
     d->metrics_begin_ns = UINT64_MAX; /* "no interval yet" sentinel */
+#if USER_DEBUG
+    /* The user-space debug log writes through the terminal's stats fd,
+     * so the [term-present] record keeps the exact byte format the
+     * protocol parsers expect and the injectable ops stay in control of
+     * the wire. */
+    user_log_set_sink(stats_log_sink, d);
+#endif
     term_render_init(&d->render, gfx, font, core, fg, bg);
 }
 
-/* Lazy open + emit-eligibility check.  Returns true iff the interval has
+/* ── Debug emit path (USER_DEBUG=1 only) ─────────────────────────────
+ *
+ * The `[term-present]` record is a debug-level diagnostic: it is emitted
+ * through log_debug() (user/common/user_log.h), which is compiled out
+ * unless the build sets USER_DEBUG=1.  With the default USER_DEBUG=0
+ * none of the code below exists: no stats fd is opened, no record is
+ * formatted, and the serial port stays free of the per-second records.
+ */
+#if USER_DEBUG
+
+/* Lazy stats-fd open.  Tries once; a failure pins stats_fd to DISABLED
+ * and never retries.  Returns the fd (>= 0) or a negative value. */
+static int stats_ensure_fd(terminal_display_t *d)
+{
+    if (d->stats_fd != TERMINAL_STATS_FD_UNOPENED) return d->stats_fd;
+    if (!d->ops.stats_open) {
+        d->stats_fd = TERMINAL_STATS_FD_DISABLED;
+        return d->stats_fd;
+    }
+    int saved = errno;
+    int f = d->ops.stats_open();
+    errno = saved;
+    d->stats_fd = (f < 0) ? TERMINAL_STATS_FD_DISABLED : f;
+    return d->stats_fd;
+}
+
+/* Emit-eligibility check.  Returns true iff the interval has
  * crossed >= 1 second AND the per-second emit should fire NOW.  Side
  * effect: lazily opens the stats fd on first emit-eligibility transition
  * (after that, an open failure permanently disables the path).
@@ -196,13 +247,7 @@ static bool stats_emit_due(terminal_display_t *d, uint64_t now_ns)
     if (now_ns - d->metrics_begin_ns < 1000000000ull) return false;
     /* Lazy open: try once on the first emit-due tick.  A subsequent
      * failure sets stats_fd to DISABLED and never retries. */
-    if (d->stats_fd == TERMINAL_STATS_FD_UNOPENED && d->ops.stats_open) {
-        d->stats_fd = d->ops.stats_open();
-        if (d->stats_fd < 0) {
-            d->stats_fd = TERMINAL_STATS_FD_DISABLED;
-        }
-    }
-    return d->stats_fd >= 0;
+    return stats_ensure_fd(d) >= 0;
 }
 
 /* Reset counters and seed a new interval anchored at now_ns.  Always
@@ -250,9 +295,27 @@ static int emit_present_record(terminal_display_t *d,
         (unsigned long long)d->metrics.failed_completed_rect_bytes,
         (unsigned long long)d->metrics.rect_calls);
     if (n <= 0 || (size_t)n >= sizeof line) return -1;
-    if (d->ops.stats_write(d->stats_fd, line, (size_t)n) != 0) return -1;
+    /* Debug-gated emission: the record reaches the wire through
+     * log_debug(), i.e. through the sink terminal_display_init()
+     * registered (the terminal's stats fd).  The bytes on the wire are
+     * exactly the canonical record — log_debug() passes the text
+     * verbatim. */
+    if (log_debug("%s", line) != 0) return -1;
     return 0;
 }
+
+/* Debug sink: write one debug line to the terminal's stats fd.  The
+ * fd is opened lazily (same lifecycle as the emit path) so a build that
+ * never emits never touches /dev/serial. */
+static int stats_log_sink(void *ctx, const char *text, size_t len)
+{
+    terminal_display_t *d = (terminal_display_t *)ctx;
+    if (!d || !d->ops.stats_write) return -1;
+    if (stats_ensure_fd(d) < 0) return -1;
+    return d->ops.stats_write(d->stats_fd, text, len);
+}
+
+#endif /* USER_DEBUG */
 
 /* ── Path-selected present (Task 5 spec §7) ─────────────────────
  *
@@ -408,6 +471,7 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
      * the emit helpers cannot clobber the ioctl's errno that we
      * restore below. */
     int saved_emit_errno = errno;
+#if USER_DEBUG
     uint64_t end_ns = d->ops.now_ns ? d->ops.now_ns() : t0_ns;
     if (stats_emit_due(d, end_ns)) {
         uint64_t begin_ns = d->metrics_begin_ns;
@@ -415,6 +479,7 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
             metrics_reset(d, end_ns);
         }
     }
+#endif
 
     /* Restore the ioctl errno for the caller.  On success, the
      * ioctl didn't touch errno; we restore saved_emit_errno in case
@@ -800,17 +865,10 @@ void terminal_display_close(terminal_display_t *d)
     /* Spec §8: a final short interval after the last emit IS emitted
      * with complete begin/end boundaries.  Ensure stats_fd is opened
      * (best effort) and the final interval is drained before close. */
+#if USER_DEBUG
     if (d->metrics_begin_ns != UINT64_MAX) {
         uint64_t now_ns = d->ops.now_ns ? d->ops.now_ns() : 0;
-        if (d->stats_fd == TERMINAL_STATS_FD_UNOPENED && d->ops.stats_open) {
-            int saved = errno;
-            int f = d->ops.stats_open();
-            int err = errno;
-            errno = saved;
-            d->stats_fd = (f < 0) ? TERMINAL_STATS_FD_DISABLED : f;
-            (void)err;
-        }
-        if (d->stats_fd >= 0 && now_ns != 0) {
+        if (stats_ensure_fd(d) >= 0 && now_ns != 0) {
             /* Best-effort final emit; do not retry on failure — the
              * process is exiting.  Mark interval drained regardless
              * so the next close() is idempotent. */
@@ -820,6 +878,7 @@ void terminal_display_close(terminal_display_t *d)
          * caller is about to free `d` anyway. */
         d->metrics_begin_ns = UINT64_MAX;
     }
+#endif
     if (d->stats_fd >= 0 && d->ops.stats_close) {
         int saved = errno;
         d->ops.stats_close(d->stats_fd);

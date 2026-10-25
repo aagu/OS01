@@ -100,6 +100,46 @@ Each macro:
 
 ---
 
+## User-Space Debug Log (ring 3)
+
+The kernel's `log_debug()` lives in kernel context only — ring 3 cannot call it.
+User programs that need a debug-level trace use the facade in
+`user/common/user_log.{c,h}`, which has the same shape and the same kind of
+compile-time gate:
+
+```c
+#include "user_log.h"
+
+log_debug("[term-present] version=1 begin_ns=%llu\r\n", begin_ns);
+```
+
+| `USER_DEBUG` | Behaviour |
+|--------------|-----------|
+| `0` (default) | `log_debug()` expands to nothing: the format string and its arguments are never evaluated, no sink is consulted, `/dev/serial` is never opened for debug output |
+| `1` | `log_debug()` formats one line and hands it to the registered sink verbatim (the caller owns the line terminator) |
+
+Build flag: `make PROFILE=x86_64-clang USER_DEBUG=1 ...`. It is
+**compile-affecting**: the user programs are built into
+`build/<profile>/user/user-debug` and published under
+`build/<profile>/artifacts/user/user-debug`, so switching the flag on or off
+never mixes stale objects.
+
+The sink is registered by the application that owns the wire. The terminal
+registers its `/dev/serial` stats fd, so the `[term-present]` / `[term-probe]`
+records keep the exact byte format the protocol parsers expect:
+
+| User program | Record | Default build |
+|--------------|--------|---------------|
+| `terminal.elf` (`user/terminal/terminal_display.c`) | `[term-present] version=1 …` (per-second present metrics) | not emitted — the whole emit path is compiled out |
+| `terminal.elf` (`user/terminal/terminal.c`) | `[term-probe] wakes/s=… presents/s=…` (per-second CPU probe) | not emitted — the probe instrumentation is compiled out |
+
+`make test-qemu SUITE=terminal-present` needs those records on the serial
+port, so the suite builds its own isolated image variant
+(`TERM_PRESENT_TEST=1` → `USER_DEBUG=1` → `build/<profile>/image/terminal-present/disk.img`)
+and runs against that; the normal image keeps the serial port clean.
+
+---
+
 ## Implementation
 
 | File | Purpose |
@@ -125,6 +165,7 @@ Key details in `kernel/log/log.c`:
 - **禁止直接调用裸输出函数**：严禁在内核子系统、驱动程序、文件系统、内存管理、架构初始化等业务代码中直接调用 `serial_printk(...)` 或 `color_printk(...)` 输出运行日志、错误诊断或调试信息。
 - **必须使用结构化日志宏**：统一通过 `#include <log/log.h>` 并调用 `log_err()` / `log_warn()` / `log_info()` / `log_debug()`（或通过 `#include <core/debug.h>` 调用对应通道宏 `debug_<channel>()`）。
 - **禁止硬编码颜色**：不要使用 `color_printk(RED, ...)` 等手工指定颜色输出日志。当启用 `LOG_TARGET=fb` 或 `LOG_TARGET=both` 时，日志子系统会根据日志级别自动映射 Framebuffer 渲染颜色（ERR 为红、WARN 为橙、INFO 为白、DEBUG 为浅灰）。
+- **用户态代码**：ring 3 无法调用内核的 `log_debug()`；用户程序的调试级输出统一走 `user/common/user_log.h` 的 `log_debug()` 门面（默认 `USER_DEBUG=0`，即编译期消除，不产生任何串口输出）。见上文「User-Space Debug Log (ring 3)」。
 
 ### 2. 日志级别选用指南 (Level Selection)
 

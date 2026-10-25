@@ -353,10 +353,10 @@ make test-host
 | `make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution` | `build/<profile>/image/resolution-test/disk.img` | 隔离故障子集（`/dev/fbtest`） |
 | `make test-qemu SUITE=driver-model` | 普通镜像（matrix harness 另建 fault 变体） | 驱动模型矩阵 |
 | `make test-qemu SUITE=monitor` | 普通镜像（`-snapshot` 只读启动，1/2/8 核各自拉 QEMU） | 终端 monitor 1/2/8 核矩阵 + 终端生命周期（q/SIGINT/SIGTERM/`--samples`/EOF）|
-| `make test-qemu SUITE=terminal-present` | 普通镜像（`-snapshot` 只读启动，TCG q35 512 MiB `-smp 2` 单套件） | Task 6 聚焦 QEMU 套件：GFX_PRESENT_RECT 像素正确性（QMP 截图）+ terminal 内 monitor ≥30 s 稳态字节/ns/窗口门控，对照 Task-3 baseline manifest；可通过 `TERMINAL_PRESENT_BASELINE_LOG` 覆盖 baseline 路径（默认 `/tmp/os01-terminal-present-baseline/serial.log`）|
+| `make test-qemu SUITE=terminal-present` | 隔离变体镜像 `build/<profile>/image/terminal-present/disk.img`（套件自带 `TERM_PRESENT_TEST=1` → `USER_DEBUG=1`，普通镜像串口保持干净） | Task 6 聚焦 QEMU 套件：GFX_PRESENT_RECT 像素正确性（QMP 截图）+ terminal 内 monitor ≥30 s 稳态字节/ns/窗口门控，对照 Task-3 baseline manifest；可通过 `TERMINAL_PRESENT_BASELINE_LOG` 覆盖 baseline 路径（默认 `/tmp/os01-terminal-present-baseline/serial.log`）|
 | `make test-qemu SUITE=gui` | 普通镜像（`-snapshot` 只读启动，1/2 核各自拉 QEMU） | GUI-1 LVGL 平台后端与故障注入验收（SMP 1/2 矩阵；boot、smoke、normal_exit、wait_quit、busy_owner、killed_owner、fatal_owner） |
 
-systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。
+systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。`USER_DEBUG=1` 同样是 compile-affecting 的（`-DUSER_DEBUG=1`），用户程序构建到 `build/<profile>/user/user-debug` 与 `build/<profile>/artifacts/user/user-debug`，因此开启/关闭用户态调试日志不会互相污染对方的对象文件。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。
 
 也可以直接构建 variant 镜像：
 
@@ -633,6 +633,8 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | `OS01_NETTEST=1` | 启用 nettest variant |
 | `INITTAB_FILE=<path>` | 自定义 inittab 模板 |
 | `DEBUG_CHANNELS=<list>` | 启用调试通道（`sched,vfs,mm` 等） |
+| `USER_DEBUG=1` | 启用用户态调试日志（`user/common/user_log.h` 的 `log_debug` 门面）：terminal 的每秒 `[term-present]` / `[term-probe]` 记录才编译进去；默认关闭，串口不再持续刷这两条记录 |
+| `TERM_PRESENT_TEST=1` | terminal-present 套件的内部旗：等价于 `USER_DEBUG=1` + 隔离的 `terminal-present` 镜像变体（由 `make test-qemu SUITE=terminal-present` 自动传入） |
 | `KERNEL_SELFTEST=1` | 启用内核内自测 |
 | `LOG_TARGET=<target>` | 日志输出目标（`serial`、`fb`、`both`） |
 | `NDEBUG=1` | 编译期消除 `log_debug` |

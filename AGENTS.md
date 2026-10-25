@@ -24,6 +24,9 @@ target taxonomy and flag conventions.
 - `OS01_SYSTEST=1` — systest as init (Makefile copies config/inittab.systest template)
 - `LOG_TARGET=both` — log output to serial + framebuffer
 - `NDEBUG=1` — compile-time elimination of log_debug
+- `USER_DEBUG=1` — user-space debug log (user/common/user_log.h): compiles the
+  terminal's per-second `[term-present]` / `[term-probe]` serial records in.
+  Default OFF — the serial port stays free of them.
 
 **Deps**: clang, llvm, lld, make, dosfstools, mtools, qemu-system-x86_64, edk2-ovmf.
 **Toolchain overrides** (`CLANG=clang-N`, `LLVM_NM=`, `UEFI_CLANG=`, etc.): see [`docs/build/toolchain.md`](docs/build/toolchain.md).

@@ -84,6 +84,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_terminal_core.elf \
     $(TEST_BLD)/test_terminal_render.elf \
     $(TEST_BLD)/test_terminal_display.elf \
+    $(TEST_BLD)/test_user_log.elf \
+    $(TEST_BLD)/test_user_log_off.elf \
     $(TEST_BLD)/test_tetris_logic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_mutex_handshake.elf \
@@ -208,7 +210,7 @@ TEST_EXIT_STATUS_BINS := \
     $(TEST_BLD)/test_runtime_udivti3.elf \
     $(TEST_BLD)/test_page_table_runner.elf
 
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-nonce test-gui-input-platform test-gui-input-lvgl
+.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-user-log test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-nonce test-gui-input-platform test-gui-input-lvgl
 
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
@@ -1647,10 +1649,14 @@ test-terminal-render: $(TEST_BLD)/test_terminal_render.elf
 # -DFB_RESOLUTION_TEST compiles the Task-9 fbtest ENOMEM hook so
 # test_terminal_fbtest_enomem_once can drive it; the tests always install a
 # stub op, so the real /dev/fbtest path is never taken on the host.
+# -DUSER_DEBUG=1 compiles the [term-present] emit path in (the production
+# default is USER_DEBUG=0, where the emit path does not exist at all).
 $(TEST_BLD)/terminal_display.o: $(TESTS_DIR)/user/terminal/terminal_display.c \
-		$(TESTS_DIR)/user/terminal/terminal_display.h
+		$(TESTS_DIR)/user/terminal/terminal_display.h \
+		$(TESTS_DIR)/user/common/user_log.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -DFB_RESOLUTION_TEST -I$(TEST_INC) -I$(TESTS_DIR)/user/terminal -c $< -o $@
+	$(HOST_CC) $(GFX_CLIENT_HOST_CFLAGS) -DFB_RESOLUTION_TEST -DUSER_DEBUG=1 \
+		-I$(TEST_INC) -I$(TESTS_DIR)/user/terminal -I$(TESTS_DIR)/user/common -c $< -o $@
 
 $(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c \
 		$(TESTS_DIR)/user/terminal/terminal_display.h
@@ -1659,6 +1665,7 @@ $(TEST_BLD)/test_terminal_display.o: $(TEST_CASES)/test_terminal_display.c \
 
 $(TEST_BLD)/test_terminal_display.elf: $(TEST_BLD)/test_terminal_display.o \
 		$(TEST_BLD)/terminal_display.o \
+		$(TEST_BLD)/user_log.o \
 		$(TEST_BLD)/terminal_render.o \
 		$(TEST_BLD)/terminal_core.o \
 		$(TEST_BLD)/libgfx_gfx_production.o \
@@ -1670,6 +1677,45 @@ test-terminal-display: $(TEST_BLD)/test_terminal_core.elf $(TEST_BLD)/test_termi
 	$(TEST_BLD)/test_terminal_core.elf
 	$(TEST_BLD)/test_terminal_render.elf
 	$(TEST_BLD)/test_terminal_display.elf
+
+# ── User-space debug log facade (user/common/user_log.c) ────────────
+# The log_debug() facade the terminal's [term-present] / [term-probe]
+# records are emitted through.  Two builds of the same case:
+#   * USER_DEBUG=1  — the sink routing / exact-text / error-propagation
+#                     contract of the enabled path.
+#   * USER_DEBUG=0  — the production default: the macro must be compiled
+#                     out, so neither the format string nor its arguments
+#                     are ever evaluated.
+# NOTE: this TU deliberately does NOT get $(TEST_INC):
+# hosttests/include/errno.h declares a non-TLS `extern int errno;` while
+# host glibc provides a TLS errno, and linking the module against libc.so
+# with a non-TLS reference fails with the "TLS definition ... mismatches
+# non-TLS reference" link error.  Without $(TEST_INC) the module picks up
+# glibc's <errno.h> and the two agree on the TLS accessor.
+$(TEST_BLD)/user_log.o: $(TESTS_DIR)/user/common/user_log.c \
+		$(TESTS_DIR)/user/common/user_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DUSER_DEBUG=1 -I$(TESTS_DIR)/user/common -c $< -o $@
+
+$(TEST_BLD)/test_user_log.o: $(TEST_CASES)/test_user_log.c \
+		$(TESTS_DIR)/user/common/user_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) -DUSER_DEBUG=1 -I$(TESTS_DIR)/user/common -c $< -o $@
+
+$(TEST_BLD)/test_user_log.elf: $(TEST_BLD)/test_user_log.o $(TEST_BLD)/user_log.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_user_log_off.o: $(TEST_CASES)/test_user_log.c \
+		$(TESTS_DIR)/user/common/user_log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) -I$(TESTS_DIR)/user/common -c $< -o $@
+
+$(TEST_BLD)/test_user_log_off.elf: $(TEST_BLD)/test_user_log_off.o
+	$(HOST_CC) -o $@ $^
+
+test-user-log: $(TEST_BLD)/test_user_log.elf $(TEST_BLD)/test_user_log_off.elf
+	$(TEST_BLD)/test_user_log.elf
+	$(TEST_BLD)/test_user_log_off.elf
 
 # Tetris logic test — compiles REAL user/tetris/tetris_logic.c (pure C)
 $(TEST_BLD)/tetris_logic.o: $(TESTS_DIR)/user/tetris/tetris_logic.c

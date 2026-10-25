@@ -24,6 +24,7 @@
 #include "terminal_core.h"
 #include "terminal_render.h"
 #include "terminal_display.h"
+#include "user_log.h"
 #include <uapi/fb.h>
 #include <sys/wait.h>
 
@@ -265,7 +266,13 @@ int main(void)
      * kernel's avg_ns/present pairs up with the per-second present
      * rate: avg_ns * presents_sec == terminal CPU on CPU0 (modulo the
      * few µs per idle wakeup).  Removed once we have the numbers.
+     *
+     * The probe is a DEBUG-level diagnostic: the whole instrumentation
+     * is compiled out unless the build sets USER_DEBUG=1 (see
+     * user/common/user_log.h), so the default build keeps the serial
+     * port free of the per-second [term-probe] records.
      */
+#if USER_DEBUG
     uint64_t s_wakeups = 0;
     uint64_t s_presents = 0;
     uint64_t s_iter_begin_ns = 0;
@@ -281,20 +288,24 @@ int main(void)
     uint64_t s_seg_other_sum = 0;
     uint64_t s_seg_other_max = 0;
     uint64_t s_stats_period_start_ms = 0;
+#endif
 
     while (!done) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         uint64_t now_ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+#if USER_DEBUG
         s_wakeups++;
         /* probe: t_iter_begin_ns captured here, sampled again at the
          * poll() entry below to get the per-iteration work cost
          * excluding the poll() blocking wait. */
         s_iter_begin_ns = (uint64_t)now.tv_sec * 1000000000ull + now.tv_nsec;
+#endif
 
         // 0. Display mode recovery (checked every wakeup, independent of dirty state).
         uint64_t gen_before = disp.generation;
         int rr = terminal_display_refresh(&disp, fb_fd, now_ms);
+#if USER_DEBUG
         {
             /* probe: capture post-refresh timestamp. */
             struct timespec tnow;
@@ -304,6 +315,7 @@ int main(void)
             s_seg_refresh_sum += dt;
             if (dt > s_seg_refresh_max) s_seg_refresh_max = dt;
         }
+#endif
         if (rr < 0 && !serial_only_logged) {
             serial_msg(serial_fd, "\r\n[terminal] graphics unavailable, serial only\r\n");
             serial_only_logged = true;
@@ -323,6 +335,7 @@ int main(void)
         if (dirty_pending && elapsed >= FRAME_INTERVAL_MS &&
             !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
             int prc = terminal_display_present(&disp, now_ms);
+#if USER_DEBUG
             {
                 /* probe: capture post-present timestamp for the
                  * present segment measurement. Only a successful
@@ -335,11 +348,14 @@ int main(void)
                 s_seg_present_sum += dt;
                 if (dt > s_seg_present_max) s_seg_present_max = dt;
             }
+#endif
             if (prc == 0) {
                 last_present_ms = now_ms;
                 dirty_pending = false;
                 present_failures = 0;
+#if USER_DEBUG
                 s_presents++;          /* ── probe ─────────────────── */
+#endif
             } else if (prc == TERMINAL_PRESENT_SKIPPED) {
                 // Background pause: keep dirty_pending to flush when restored, reset failure counter
                 last_present_ms = now_ms;
@@ -369,6 +385,7 @@ int main(void)
         }
         int timeout_ms = terminal_display_poll_timeout(&disp, base, now_ms);
 
+#if USER_DEBUG
         /* probe: per-iteration work (excludes the poll() blocking wait). */
         {
             struct timespec tnow;
@@ -378,13 +395,15 @@ int main(void)
             s_iter_sum_ns += dt;
             if (dt > s_iter_max_ns) s_iter_max_ns = dt;
         }
+#endif
         int pr = poll(fds, 2, timeout_ms);
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
 
-        /* ── probe: dump per-second counters via serial ── */
+        /* ── probe: dump per-second counters via serial (debug only) ── */
+#if USER_DEBUG
         if (s_stats_period_start_ms == 0) s_stats_period_start_ms = now_ms;
         if (now_ms - s_stats_period_start_ms >= 1000) {
             uint64_t w = s_wakeups;
@@ -411,7 +430,11 @@ int main(void)
                 (unsigned long long)(avg_rest_ns / 1000),
                 (unsigned long long)(avg_present_ns / 1000),
                 (unsigned long long)(s_seg_present_max / 1000));
-            if (sl > 0) serial_msg(serial_fd, sbuf);
+            /* Debug-gated emission: the record reaches the wire through
+             * log_debug() (user/common/user_log.h), i.e. through the
+             * sink the display registered.  The bytes are exactly the
+             * canonical [term-probe] record. */
+            if (sl > 0) log_debug("%s", sbuf);
             s_wakeups = 0;
             s_presents = 0;
             s_iter_sum_ns = 0;
@@ -422,6 +445,7 @@ int main(void)
             s_seg_present_max = 0;
             s_stats_period_start_ms = now_ms;
         }
+#endif
 
         // 3. Process keyboard input (forwarded even when graphics are down)
         if (fds[0].revents & POLLIN) {

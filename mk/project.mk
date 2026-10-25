@@ -68,9 +68,10 @@ endif
 # OS01_NETTEST to INITTAB_FILE BEFORE including project.mk, so all three
 # sources are resolved here. Each variant gets its own isolated image dir
 # (build/<profile>/image/<variant>/); a variant build NEVER writes the normal
-# image. USER_VARIANT — the compile-affecting variant: only OS01_SYSTEST
-# changes user CFLAGS (-DOS01_SYSTEST), so it is the only variant that
-# re-keys the user build/artifact dirs (build/<profile>/user/<variant> and
+# image. USER_VARIANT — the compile-affecting variant: OS01_SYSTEST changes
+# user CFLAGS (-DOS01_SYSTEST) and USER_DEBUG changes them too
+# (-DUSER_DEBUG=1, the user-space debug log), so those variants re-key the
+# user build/artifact dirs (build/<profile>/user/<variant> and
 # build/<profile>/artifacts/user/<variant>). Both are immediate (:=) so the
 # profile file and every component that consumes them sees the resolved
 # value at parse time — defining them after the profile include would make
@@ -81,8 +82,18 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT)))
-USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)
+
+# TERM_PRESENT_TEST — the terminal-present E2E suite needs the terminal's
+# per-second [term-present] records on the serial port.  Those records are a
+# user-space DEBUG-level diagnostic (user/common/user_log.h), so the suite
+# builds its own image + user variant with USER_DEBUG=1; the normal image
+# keeps the serial port clean.
+ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
+USER_DEBUG := 1
+endif
+
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT)))
+USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 OS01_PROFILE_FILE := $(OS01_ROOT)/mk/profiles/$(PROFILE).mk
@@ -132,7 +143,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT FB_RESOLUTION_TEST
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── Sysroot generation protocol (spec: sysroot single-writer) ──

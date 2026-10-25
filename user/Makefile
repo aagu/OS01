@@ -42,6 +42,15 @@ ifeq ($(FB_RESOLUTION_TEST),1)
 override CFLAGS += -DFB_RESOLUTION_TEST
 endif
 
+# ── USER_DEBUG (user-space debug log) ────────────────────────
+# Default OFF: the user-space log_debug() facade (user/common/user_log.h)
+# is compiled out, so no user program writes debug records to the serial
+# port.  `make USER_DEBUG=1 ...` compiles the debug records in (the
+# terminal's per-second [term-present] / [term-probe] lines).
+ifeq ($(USER_DEBUG),1)
+override CFLAGS += -DUSER_DEBUG=1
+endif
+
 USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
 
 # ── Program discovery and app manifests ─────────────────────

@@ -4,7 +4,7 @@
 This driver is the new ``terminal-present`` SUITE for
 ``make test-qemu``.  It runs ONE QEMU instance (TCG, q35, 512 MiB,
 ``-smp 2``, ``-snapshot``, ``-serial stdio``, ``-display none``)
-under the profile's normal image + firmware, then:
+under the profile's terminal-present image variant + firmware, then:
 
   1. Runs ``/bin/test_gfx --present-rect-surface`` to exercise the
      new GFX_PRESENT_RECT ioctl end-to-end.  The guest publishes a

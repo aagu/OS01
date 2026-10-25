@@ -393,6 +393,12 @@ TEST_SYSTEST_IMAGE  := $(BUILD_DIR)/image/systest/disk.img
 TEST_NETTEST_IMAGE  := $(BUILD_DIR)/image/nettest/disk.img
 TEST_INITTAB_IMAGE  := $(BUILD_DIR)/image/inittab-test/disk.img
 TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
+# The terminal-present suite needs the terminal's per-second
+# [term-present] records on the serial port.  Those records are a
+# user-space debug-level diagnostic (USER_DEBUG=1), so the suite builds
+# its own image + user variant and runs against it — the normal image
+# keeps the serial port clean.
+TEST_TERMINAL_PRESENT_IMAGE := $(BUILD_DIR)/image/terminal-present/disk.img
 # The fd_refcount selftest asserts actual cross-CPU coverage.  Four vCPUs
 # avoid a scheduler-migration false negative seen with the interactive
 # default of two, while keeping this test-only setting independently
@@ -1040,14 +1046,18 @@ TEST_QEMU_FLAVOR_driver-model   =
 # needed.  The matrix boots the normal image read-only (-snapshot) at
 # 1/2/8 cores.
 TEST_QEMU_FLAVOR_monitor        =
-# terminal-present (Task 6 of partial-present plan) runs the normal
-# image directly: /bin/test_gfx --present-rect-surface and /bin/monitor
-# are both installed into the normal rootfs by the shared program
-# discovery, so no variant build is needed.  The single-suite driver
-# launches its own QEMU (TCG, q35, 512 MiB, -smp 2, -snapshot, -serial
-# stdio, -display none) — the parent TestRunner does NOT pre-spawn
-# QEMU for this suite.
-TEST_QEMU_FLAVOR_terminal-present =
+# terminal-present (Task 6 of partial-present plan) runs its OWN variant
+# image: /bin/test_gfx --present-rect-surface and /bin/monitor are both
+# installed into the rootfs by the shared program discovery, but the suite
+# also needs the terminal's per-second [term-present] records on the
+# serial port, and those are a user-space debug-level diagnostic
+# (USER_DEBUG=1).  The suite therefore builds the terminal-present image
+# + user variant (TERM_PRESENT_TEST=1) and runs against it; the normal
+# image keeps the serial port free of the per-second records.  The
+# single-suite driver launches its own QEMU (TCG, q35, 512 MiB, -smp 2,
+# -snapshot, -serial stdio, -display none) — the parent TestRunner does
+# NOT pre-spawn QEMU for this suite.
+TEST_QEMU_FLAVOR_terminal-present = TERM_PRESENT_TEST=1
 # gui (GUI-1 plan Task 7) runs the normal image directly: /bin/test_lvgl
 # and /bin/test_gui_fault are both installed into the normal rootfs by
 # the shared program discovery, so no variant build is needed. The matrix
@@ -1072,7 +1082,7 @@ TEST_QEMU_IMG_gfx              = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_resolution       = $(DISK_IMG)
 TEST_QEMU_IMG_driver-model     = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_terminal-present = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_terminal-present = $(TEST_TERMINAL_PRESENT_IMAGE)
 TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
 
@@ -1118,9 +1128,11 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# driver-model runs against the canonical (no-fault) image so the
 	# normal-image hash guard is skipped too; fault variant builds land
 	# under image/driver-model-<fault>/ (Task 11).
-	# terminal-present runs against the normal image read-only (-snapshot)
-	# and uses its own QEMU launch via the dispatcher; it does not
-	# modify the normal image, so the hash guard is skipped too.
+	# terminal-present builds and runs against its own image variant
+	# (image/terminal-present/, TERM_PRESENT_TEST=1 -> USER_DEBUG=1, the
+	# suite needs the per-second [term-present] records) and uses its own
+	# QEMU launch via the dispatcher; it does not modify the normal image,
+	# so the hash guard is skipped too.
 	# gui runs against the normal image read-only (-snapshot) across SMP=1/2.
 	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
