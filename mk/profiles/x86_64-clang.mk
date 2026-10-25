@@ -24,6 +24,16 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
+# ── Isolated destructive dispatch probe (Task 5, spec §9.3) ──────
+# The probe-selection MACRO arrives through KERNEL_EXTRA_CFLAGS — the
+# channel that already crosses the controlled sub-make boundary
+# (mk/project.mk's OS01_SUBMAKE_ALLOWED).  The variant slug is derived
+# from that SAME macro, so the kernel build dir, the kernel artifact
+# and the image dir can never disagree with the compiled probe.
+#
+# The macro NAME (not the whole flag) is matched, so the spelling stays
+# identical to the C sources' `#if defined(X86_INTR_FAULT_TEST_BP)`.
+X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,))
 ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
 KERNEL_VARIANT := weak-selftest
 else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
@@ -39,6 +49,12 @@ KERNEL_VARIANT :=
 else
 # ARCH9_FAULT != none — kernel/image live under driver-model-<fault>/.
 KERNEL_VARIANT := driver-model-$(ARCH9_FAULT)
+endif
+# The destructive fault variant wins over every other variant: it must
+# never share objects or images with another test mode (mk/project.mk
+# refuses the conflicting combinations at parse time).
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+KERNEL_VARIANT := intr-x86-fault-$(X86_INTR_FAULT_CASE)
 endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc

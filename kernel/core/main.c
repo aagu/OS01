@@ -15,6 +15,9 @@
 #include <tty/pty.h>          // pty_init
 #include <net/net.h>          // net_lwip_init
 #include <random/random.h>    // random_init
+#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
+#include <arch/x86_64/intr_fault_probe.h>   // x86_intr_fault_probe_run
+#endif
 
 // ── Kernel symbols ─────────────────────────────────────────
 
@@ -79,6 +82,40 @@ int kernel_main(const struct boot_context *bootctx)
 
     // ═══ 2. Memory subsystem ═════════════════════════════════
     x86_64_boot_memory(bootctx);
+
+#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
+    // ═══ Isolated destructive dispatch probe (Task 5, spec §9.3) ═══
+    // The dedicated `intr-x86-fault-bp` / `intr-x86-fault-nmi`
+    // variants compile this probe in; the normal build does not (the
+    // source is only added to the kernel source list when the
+    // probe-selection macro is present).
+    //
+    // Placement: after the IDT, the serial port and the memory
+    // subsystem are up (x86_64_boot_early / x86_64_boot_memory) and
+    // BEFORE the interrupt-controller bring-up
+    // (x86_64_boot_subsystems), the per-CPU/AP bring-up
+    // (x86_64_boot_percpu / x86_64_boot_aps) and the user-space init.
+    //
+    // Why here and not after x86_64_boot_percpu(): the NMI case needs
+    // the runner to inject a REAL hardware NMI over QMP, and with
+    // QEMU 11.1.x an injected NMI is delivered to this guest only
+    // while it is still in the early-boot window — the same guest
+    // takes the injected NMI before the LAPIC/IOAPIC/PIC bring-up and
+    // never after it (verified on TCG and on KVM, with the guest
+    // spinning and with it halted, with IF set and cleared).  The
+    // early-boot window is the only place where the spec §9.3 NMI
+    // evidence can be produced at all.
+    //
+    // Everything the probe needs is available here: the IDT is
+    // installed (the fault handlers are reachable), the serial port is
+    // initialised, the direct map and the higher-half page tables are
+    // in place (the IST stack the NMI gate selects is mapped), no AP
+    // exists and no task exists, so the guest serial stream is a
+    // single-CPU ordered log the acceptance runner can judge
+    // unambiguously.
+    x86_intr_fault_probe_run();
+    for (;;) arch_cpu_halt();           // the probe never returns
+#endif
 
     // ═══ 3-6. Subsystem framework ══════════════════════════════════
     // arch_register_subsys() + subsys_init_all() dispatches:

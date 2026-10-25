@@ -146,8 +146,35 @@ ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime
 ifeq ($(ARCH),x86_64)
 ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime
 endif
+# Caller-supplied extra flags (via OS01_SUBMAKE_ALLOWED). Test/debug knob —
+# also the contract-test handle for the CFLAGS-stamp invalidation below.
+# Declared here (not further down) because the isolated destructive
+# probe selection below reads it; the flags themselves are folded into
+# ALL_CFLAGS after that variable is defined (see the block below).
+KERNEL_EXTRA_CFLAGS ?=
+
+# ── Isolated destructive dispatch probe (Task 5, spec §9.3) ──────
+# The probe-selection MACRO arrives through KERNEL_EXTRA_CFLAGS — the
+# channel that already crosses the controlled sub-make boundary
+# (OS01_SUBMAKE_ALLOWED in mk/project.mk).  The probe source is added
+# to the source list ONLY when the macro is present, so the normal
+# build contains no probe object and no probe symbol at all.
+# The macro NAME is matched (not the whole flag), so the spelling stays
+# identical to mk/project.mk, the x86 profile and the C sources'
+# `#if defined(X86_INTR_FAULT_TEST_BP)`.
+ifneq ($(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
+else ifneq ($(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
+else
+KERNEL_X86_INTR_FAULT_C_SOURCES :=
+endif
 ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))
+# The probe is filtered out of the wildcard discovery and re-added
+# above ONLY for the dedicated fault variant.
+ARCH_C_SOURCES := $(filter-out $(ARCHDIR)/intr/fault_probe.c, $(ARCH_C_SOURCES))
+ARCH_C_SOURCES += $(KERNEL_X86_INTR_FAULT_C_SOURCES)
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
@@ -245,6 +272,13 @@ print-canary-contract:
 # defined above (KERNEL_TEST_FAULT_C_SOURCES was already wired into
 # KERNEL_C_SOURCES by the source-discovery block).
 ALL_CFLAGS += $(ARCH9_FAULT_FLAGS)
+
+# ── Caller-supplied extra flags ────────────────────────────
+# Folded into ALL_CFLAGS AFTER the variable is defined (the isolated
+# destructive dispatch probe's selection macro arrives this way — see
+# the probe block above).  This is also the flags-cache contract's
+# invalidation handle.
+ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 
 # ── FB_RESOLUTION_TEST fault surface (Task 9) ──────────────
 # Same pattern: appended after ALL_CFLAGS is defined and after the source
@@ -355,11 +389,6 @@ bool = $(if $1,1,0)
 LOG_TARGET ?= serial
 ALL_CFLAGS += -DLOG_TARGET_SERIAL=$(call bool,$(filter serial both,$(LOG_TARGET)))
 ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
-
-# Caller-supplied extra flags (via OS01_SUBMAKE_ALLOWED). Test/debug knob —
-# also the contract-test handle for the CFLAGS-stamp invalidation below.
-KERNEL_EXTRA_CFLAGS ?=
-ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 
 # ── CFLAGS fingerprint stamp ───────────────────────────────
 # make tracks file timestamps, not compile commands: a CFLAGS-only change

@@ -52,7 +52,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 | Bucket | Purpose | Default |
 | --- | --- | --- |
-| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`) | `phase-0` |
+| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`; `intr-x86` builds its own isolated fault variants) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (14 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
@@ -355,6 +355,16 @@ make test-host
 | `make test-qemu SUITE=monitor` | 普通镜像（`-snapshot` 只读启动，1/2/8 核各自拉 QEMU） | 终端 monitor 1/2/8 核矩阵 + 终端生命周期（q/SIGINT/SIGTERM/`--samples`/EOF）|
 | `make test-qemu SUITE=terminal-present` | 普通镜像（`-snapshot` 只读启动，TCG q35 512 MiB `-smp 2` 单套件） | Task 6 聚焦 QEMU 套件：GFX_PRESENT_RECT 像素正确性（QMP 截图）+ terminal 内 monitor ≥30 s 稳态字节/ns/窗口门控，对照 Task-3 baseline manifest；可通过 `TERMINAL_PRESENT_BASELINE_LOG` 覆盖 baseline 路径（默认 `/tmp/os01-terminal-present-baseline/serial.log`）|
 | `make test-qemu SUITE=gui` | 普通镜像（`-snapshot` 只读启动，1/2 核各自拉 QEMU） | GUI-1 LVGL 平台后端与故障注入验收（SMP 1/2 矩阵；boot、smoke、normal_exit、wait_quit、busy_owner、killed_owner、fatal_owner） |
+| `make test-qemu SUITE=intr-x86` | 隔离故障变体镜像 `build/<profile>/image/intr-x86-fault-{bp,nmi}/disk.img`（套件自建，普通镜像不受影响） | 中断分派第二期的两个**破坏性**入口验收：内核 `#BP`（`int3`）与 QMP `inject-nmi` 注入的**真实硬件 NMI**。每个用例单核启动、各自编译自己的 kernel/image 变体（选择器 `X86_INTR_FAULT_TEST=bp\|nmi`），判定只看 guest 串口里的完整原始 fatal 诊断（`do_int3(3)` / `do_nmi(2)`）+ ≥1 s 观察窗口；`#BP` 的保存 RIP 必须等于从**变体 ELF** 解析出的续执行标签 `x86_intr_fault_bp_resume`（绝不硬编码）。超时/静默/正常完成都不算通过。运行器：`qemutests/x86_intr_fault.py`（归档在 `build/<profile>/logs/tests/intr-x86/`） |
+
+### `intr-x86`：隔离的破坏性中断入口验收（Task 5 / spec §9.3）
+
+`test-qemu SUITE=intr-x86` 不复用普通镜像，也不复用普通 `kernel-selftest` 路径：
+
+- **选择器**：`X86_INTR_FAULT_TEST=bp|nmi`（空 = 普通构建，无任何故障探针）。它经 `KERNEL_EXTRA_CFLAGS`（已在 `OS01_SUBMAKE_ALLOWED` 白名单内）把探针选择宏送进受控 sub-make 边界，再由 `kernel/Makefile` 决定是否把 `kernel/arch/x86_64/intr/fault_probe.c` 加进源文件列表——普通构建里既没有该目标文件，ELF 里也没有任何 `x86_intr_fault*` 符号。
+- **变体**：每个用例一个自己的 kernel/image 目录（`kernel/intr-x86-fault-<case>/`、`image/intr-x86-fault-<case>/`），两个用例互不共享对象与镜像；与 selftest/systest/nettest/canary/weak/resolution/driver-fault 模式的组合在解析期即被拒绝，aarch64 profile 也直接拒绝该选择器。
+- **探针位置**：IDT、串口与内存子系统就绪之后、AP bring-up 与用户态 init 之前（`kernel/core/main.c`）。**为什么不是 `x86_64_boot_percpu()` 之后**：QEMU 11.1.x 只在 early-boot 窗口把注入的 NMI 投递给本 guest（同一镜像在 LAPIC/IOAPIC/PIC bring-up 之前会取走注入的 NMI，之后再也不会），而 spec §9.3 要求的是**真实硬件 NMI** 的证据；该窗口内没有 AP、没有任务，串口流仍是单核有序日志。
+- **判定**：见 `qemutests/x86_intr_fault.py` 的 `fault_evidence()`——串口流里恰好一个 `armed`、恰好一个完整 fatal 诊断、armed 在 fatal 之前、fatal 之后 ≥1 s 观察窗口内没有新的完整心跳/继续标记/二次 fatal/panic。QMP 响应的到达时刻**不**参与排序（只有 guest 串口顺序算数）。
 
 systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。
 
@@ -450,7 +460,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
-| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui` 各自拉私有 QEMU 进程） |
+| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体 |
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
