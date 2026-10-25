@@ -18,6 +18,7 @@
 
 #include <gui/gui_input.h>
 #include <gui/gui_platform.h>
+#include <gui_widget_private.h>
 #include <gfx.h>
 #include <lvgl/lvgl.h>
 
@@ -58,6 +59,11 @@ struct gui_platform {
 
     /* GUI-2：每平台至多一个输入对象（NULL 表示未挂接） */
     gui_input_t *input;
+
+    /* GUI-2b：每平台一张固定容量的原生控件注册表（NULL 表示未建立）。
+     * 注册表由平台 calloc 出来，不依赖后端内存池：池在平台销毁时被整体
+     * 释放，注册表必须活得比它更久（原生删除回调还要用它）。 */
+    gui_widget_registry_t *registry;
 };
 
 /* ── 平台内部辅助（platform.c 实现，input.c 使用） ───────────── */

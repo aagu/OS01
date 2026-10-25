@@ -3,5 +3,7 @@
 
 #include <gui/gui_platform.h>
 #include <gui/gui_input.h>
+#include <gui/gui_widget.h>
+#include <gui/gui_event.h>
 
 #endif /* _GUI_H */

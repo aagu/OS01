@@ -4,6 +4,7 @@
 #include <gui_platform_private.h>
 #include <gui_theme_private.h>
 #include <gui_tick.h>
+#include <gui_widget_private.h>
 #include <gfx.h>
 #include "gfx_client_policy.h"
 #include <uapi/fb.h>
@@ -355,6 +356,14 @@ gui_platform_t *gui_platform_create(const gui_config_t *cfg)
     }
 #endif
 
+    /* GUI-2b：原生控件注册表随平台存在。它由平台 calloc 出来，不依赖
+     * 后端内存池（池在平台销毁时被整体释放，注册表必须活得比它久）。
+     * 控件创建在平台对外可见之后才可能发生，所以这里建立注册表正好。 */
+    if (gui_widget_registry_init(platform) != 0) {
+        saved = errno ? errno : ENOMEM;
+        goto rollback;
+    }
+
     if (!platform->disp->buf_1 ||
         platform->disp->buf_1->header.w != req_w ||
         platform->disp->buf_1->header.h != lines ||
@@ -371,6 +380,8 @@ rollback:
         lv_display_delete(platform->disp);
         platform->disp = NULL;
     }
+    /* GUI-2b：注册表在 display 之后释放（与正常销毁路径同序）。 */
+    gui_widget_registry_fini(platform);
     if (lv_inited) {
         lv_deinit();
     }
@@ -426,6 +437,11 @@ void gui_platform_destroy(gui_platform_t *platform)
         lv_display_delete(platform->disp);
         platform->disp = NULL;
     }
+
+    /* GUI-2b：原生控件树随 display 一起消失（原生删除回调把身份立即置为
+     * 失效），注册表随后释放——它必须比 display 活得久，因为删除回调
+     * 还要用它。 */
+    gui_widget_registry_fini(platform);
 
     if (platform->theme) {
         gui_theme_destroy(platform->theme);

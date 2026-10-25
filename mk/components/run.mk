@@ -636,8 +636,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # input-frame, input-route, input-decode, input-platform, theme) or all
 # (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit _test-gui-host-run-widget
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit widget
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -800,6 +800,19 @@ _test-gui-host-run-desktop-shell:
 _test-gui-host-run-desktop-audit:
 	@echo "  [test-gui-host] desktop-audit"
 	$(call os01_submake,hosttests,test-gui-desktop-audit $(OS01_SUBMAKE_ARGS))
+
+# GUI-2b plan Task 1: the public widget handle types, the private fixed
+# registry and the reusable host fixture.  Runs test_gui_widget.elf, which
+# host-compiles the REAL libgui/src/widget.c against the REAL platform and
+# the REAL LVGL archive, and asserts the public contract: the value handle
+# (never a pointer), the three kinds with their invalid sentinel, the
+# zero-valued NONE, and an empty registry that rejects unknown identities.
+# The case also runs the publication-boundary syntax checks: a pure type
+# consumer must compile as C11 and as C++17, and the negative control (a
+# value handle passed where a void* is expected) must NOT compile.
+_test-gui-host-run-widget:
+	@echo "  [test-gui-host] widget"
+	$(call os01_submake,hosttests,test-gui-widget $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2

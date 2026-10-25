@@ -28,6 +28,11 @@ GUI_PUBLIC_HEADERS = (
     # types), so it can be published; the step that turns the token table
     # into an LVGL theme stays inside libgui (libgui/src/theme_apply.c).
     "gui_theme.h",
+    # GUI-2b: the public widget handle types (a value handle, never a
+    # pointer) and the public event types.  Both are backend-free: the
+    # handle carries a uint64_t identity, the event carries the handle.
+    "gui_widget.h",
+    "gui_event.h",
 )
 
 # Private / bridge headers of libgui.  They carry the internal state layout,
@@ -41,6 +46,10 @@ GUI_PRIVATE_HEADERS = (
     "gui_lvgl_private.h",
     "gui_tick.h",
     "gui_cursor_icon.h",
+    # GUI-2b: the native widget registry bridge (fixed table, slot states,
+    # the identity counter).  It names the backend object, so it must never
+    # be published.
+    "gui_widget_private.h",
 )
 
 # The public input API (libgui/include/gui/gui_input.h).  These are the
@@ -53,6 +62,15 @@ GUI_PUBLIC_INPUT_SYMBOLS = (
     "gui_input_dispatch",
     "gui_input_set_key_handler",
     "gui_input_set_pointer_handler",
+)
+
+# The public widget API (libgui/include/gui/gui_widget.h).  These are the
+# symbols an application actually calls.  The list grows phase by phase:
+# only the symbols the phase really implements may be required, so the
+# archive check never demands an export that does not exist yet.
+GUI_PUBLIC_WIDGET_SYMBOLS = (
+    "gui_widget_is_valid",
+    "gui_widget_get_kind",
 )
 
 # Host-only injection hooks.  They exist only under #ifdef OS01_HOST_TEST
@@ -74,6 +92,8 @@ GUI_REQUIRED_ARCHIVE_MEMBERS = (
     "input_lvgl.o",
     "input_focus.o",
     "input_ps2.o",
+    # GUI-2b: the native widget registry ships with the library.
+    "widget.o",
 )
 
 # The probe consumer references a symbol that no archive can define; the
@@ -532,6 +552,15 @@ int main(void)
     if (input == 0) {
         gui_platform_destroy(platform);
         return 2;
+    }
+
+    /* widget handles (GUI-2b): the value handle and the queries this
+     * phase really implements. */
+    {
+        gui_widget_t widget = GUI_WIDGET_NONE;
+        gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;
+        (void)gui_widget_is_valid(platform, widget);
+        (void)gui_widget_get_kind(platform, widget, &kind);
     }
 
     /* dispatch */
@@ -1015,6 +1044,8 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui_platform.h",
         "usr/include/gui/gui_input.h",
         "usr/include/gui/gui_theme.h",
+        "usr/include/gui/gui_widget.h",
+        "usr/include/gui/gui_event.h",
         "usr/share/licenses/libgui/LVGL-LICENCE.txt",
     ]
     for rel_path in required_files:
@@ -1166,7 +1197,7 @@ def audit_sysroot_and_build(
                 "lv_init",
                 "lv_timer_handler",
                 "gfx_client_present_policy",
-            ] + list(GUI_PUBLIC_INPUT_SYMBOLS)
+            ] + list(GUI_PUBLIC_INPUT_SYMBOLS) + list(GUI_PUBLIC_WIDGET_SYMBOLS)
             for sym in required_symbols:
                 if sym not in defined_syms:
                     errors.append(f"libgui.a missing expected defined symbol: {sym}")
@@ -1186,8 +1217,10 @@ def audit_sysroot_and_build(
     gui_h = sysroot / "usr" / "include" / "gui" / "gui.h"
     gui_platform_h = sysroot / "usr" / "include" / "gui" / "gui_platform.h"
     gui_input_h = sysroot / "usr" / "include" / "gui" / "gui_input.h"
+    gui_widget_h = sysroot / "usr" / "include" / "gui" / "gui_widget.h"
+    gui_event_h = sysroot / "usr" / "include" / "gui" / "gui_event.h"
     if gui_h.is_file() and gui_platform_h.is_file():
-        for hdr in [gui_h, gui_platform_h, gui_input_h]:
+        for hdr in [gui_h, gui_platform_h, gui_input_h, gui_widget_h, gui_event_h]:
             if not hdr.is_file():
                 continue
             content = hdr.read_text()
@@ -1222,9 +1255,14 @@ def audit_sysroot_and_build(
             c_src.write_text(
                 "#include <gui/gui.h>\n"
                 "#include <gui/gui_platform.h>\n"
+                "#include <gui/gui_widget.h>\n"
                 "int test_consumer(void) {\n"
                 "    gui_config_t cfg = {0};\n"
+                "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
+                "    gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;\n"
                 "    (void)cfg;\n"
+                "    (void)widget;\n"
+                "    (void)kind;\n"
                 "    return 0;\n"
                 "}\n"
             )
@@ -1253,9 +1291,14 @@ def audit_sysroot_and_build(
             cpp_src.write_text(
                 "#include <gui/gui.h>\n"
                 "#include <gui/gui_platform.h>\n"
+                "#include <gui/gui_widget.h>\n"
                 "int test_consumer() {\n"
                 "    gui_config_t cfg = {};\n"
+                "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
+                "    gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;\n"
                 "    (void)cfg;\n"
+                "    (void)widget;\n"
+                "    (void)kind;\n"
                 "    return 0;\n"
                 "}\n"
             )
@@ -1340,6 +1383,8 @@ GUI_STAGED_FILES = (
     "usr/include/gui/gui_platform.h",
     "usr/include/gui/gui_input.h",
     "usr/include/gui/gui_theme.h",
+    "usr/include/gui/gui_widget.h",
+    "usr/include/gui/gui_event.h",
     "usr/lib/libgui.a",
     "usr/share/licenses/libgui/LVGL-LICENCE.txt",
 )

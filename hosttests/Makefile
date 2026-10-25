@@ -196,6 +196,7 @@ TEST_BINS := \
     $(TEST_BLD)/test_desktop_state.elf \
     $(TEST_BLD)/test_desktop_shell.elf \
     $(TEST_BLD)/test_desktop_audit.elf \
+    $(TEST_BLD)/test_gui_widget.elf \
     $(TEST_BLD)/test_intr_decode_x86.elf \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
@@ -3996,6 +3997,17 @@ $(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
+# The libgui widget unit (GUI-2b Task 1).  Like the input unit, every GUI
+# host binary that links the REAL platform.o must also link it: platform.c
+# owns the native widget registry lifetime (created with the platform,
+# released after the display is gone).
+GUI_WIDGET_DIR := $(GUI_HOST_DIR)/widget
+GUI_WIDGET_UNIT_OBJS := $(GUI_WIDGET_DIR)/widget.o
+
+$(GUI_WIDGET_DIR)/widget.o: $(TESTS_DIR)/libgui/src/widget.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
 $(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o: $(TEST_MOCK)/gui_test_runtime.c $(TEST_MOCK)/gui_test_runtime.h $(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
@@ -4030,6 +4042,7 @@ $(TEST_BLD)/test_gui_platform.elf: \
 		$(GUI_DETERMINISTIC_DIR)/test_gui_platform.o \
 		$(GUI_DETERMINISTIC_DIR)/gui_test_runtime.o \
 		$(GUI_DETERMINISTIC_DIR)/platform.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_THEME_OBJS) \
 		$(GUI_DETERMINISTIC_DIR)/tick.o \
 		$(GUI_DETERMINISTIC_DIR)/gfx_client_policy.o \
@@ -4088,6 +4101,7 @@ $(TEST_BLD)/test_gui_lvgl_integration.elf: \
 		$(GUI_INTEGRATION_DIR)/test_gui_lvgl_integration.o \
 		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
 		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_THEME_OBJS) \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
@@ -4158,6 +4172,7 @@ $(TEST_BLD)/test_gui_theme_apply.elf: \
 		$(GUI_INTEGRATION_DIR)/test_gui_theme_apply.o \
 		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
 		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_THEME_OBJS) \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
@@ -4210,6 +4225,7 @@ $(TEST_BLD)/test_desktop_shell.elf: \
 		$(GUI_DESKTOP_OBJS) \
 		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
 		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
 		$(GUI_THEME_OBJS) \
@@ -4245,6 +4261,79 @@ test-gui-desktop-audit: $(TEST_BLD)/test_desktop_audit.elf
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
+
+# ── GUI-2b Task 1: the native widget registry ─────────────────────
+# The widget fixture itself: the host-private native fixture plus the
+# public-contract test case.
+$(GUI_WIDGET_DIR)/gui_native_fixture.o: $(TEST_MOCK)/gui_native_fixture.c \
+		$(TEST_MOCK)/gui_native_fixture.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_WIDGET_DIR)/test_gui_widget.o: $(TEST_CASES)/test_gui_widget.c \
+		$(TEST_MOCK)/gui_native_fixture.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_widget.elf: \
+		$(GUI_WIDGET_DIR)/test_gui_widget.o \
+		$(GUI_WIDGET_DIR)/gui_native_fixture.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+# The publication boundary of the widget API: a PURE type consumer (only
+# the published headers) must compile as C11 and as C++17, and the
+# NEGATIVE control — a value handle passed where a void* is expected —
+# must NOT compile.  A handle that converts to void* could be forged.
+.PHONY: gui-widget-public-types
+gui-widget-public-types:
+	@mkdir -p $(GUI_WIDGET_DIR)
+	@echo "  [gui-widget] public type consumer: C11"
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -fsyntax-only \
+	    -I$(TESTS_DIR)/libgui/include \
+	    $(TEST_CASES)/gui_widget_public_consumer.c
+	@echo "  [gui-widget] public type consumer: C++17"
+	$(HOST_CC) -std=c++17 -Wall -Wextra -Werror -fsyntax-only -x c++ \
+	    -I$(TESTS_DIR)/libgui/include \
+	    $(TEST_CASES)/gui_widget_public_consumer.c
+	@echo "  [gui-widget] negative control: the value handle must NOT convert to void*"
+	@if $(HOST_CC) -std=c11 -Wall -Wextra \
+	    -Werror=incompatible-pointer-types -Werror=int-conversion \
+	    -fsyntax-only -I$(TESTS_DIR)/libgui/include \
+	    $(TEST_CASES)/gui_widget_public_negative.c \
+	    >$(GUI_WIDGET_DIR)/negative_c.log 2>&1; then \
+	    echo "ERROR: the value handle was accepted as a void* — the identity is forgeable" >&2; \
+	    exit 1; \
+	fi
+	@grep -q "gui_widget_t" $(GUI_WIDGET_DIR)/negative_c.log || { \
+	    echo "ERROR: the negative control failed for the wrong reason" >&2; \
+	    cat $(GUI_WIDGET_DIR)/negative_c.log >&2; exit 1; }
+	@if $(HOST_CC) -std=c++17 -Wall -Wextra -fsyntax-only -x c++ \
+	    -I$(TESTS_DIR)/libgui/include \
+	    $(TEST_CASES)/gui_widget_public_negative.c \
+	    >$(GUI_WIDGET_DIR)/negative_cpp.log 2>&1; then \
+	    echo "ERROR: the value handle was accepted as a void* (C++) — the identity is forgeable" >&2; \
+	    exit 1; \
+	fi
+	@grep -q "gui_widget_t" $(GUI_WIDGET_DIR)/negative_cpp.log || { \
+	    echo "ERROR: the negative control failed for the wrong reason (C++)" >&2; \
+	    cat $(GUI_WIDGET_DIR)/negative_cpp.log >&2; exit 1; }
+	@echo "  [gui-widget] public type consumer: PASS"
+
+.PHONY: test-gui-widget
+test-gui-widget: gui-widget-public-types $(TEST_BLD)/test_gui_widget.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $(TEST_BLD)/test_gui_widget.elf
 
 # GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Host-compiles
 # the REAL kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
@@ -4535,6 +4624,7 @@ $(TEST_BLD)/test_gui_input_platform.elf: \
 		$(GUI_INPUT_DIR)/test_gui_input_platform.o \
 		$(GUI_INPUT_DIR)/gui_test_runtime.o \
 		$(GUI_INPUT_DIR)/platform.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_THEME_OBJS) \
 		$(GUI_INPUT_DIR)/tick.o \
 		$(GUI_INPUT_UNIT_OBJS) \
@@ -4597,6 +4687,7 @@ $(TEST_BLD)/test_gui_input_lvgl.elf: \
 		$(GUI_INPUT_LVGL_DIR)/test_gui_input_lvgl.o \
 		$(GUI_INPUT_LVGL_DIR)/gui_test_runtime.o \
 		$(GUI_INPUT_LVGL_DIR)/platform.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_THEME_OBJS) \
 		$(GUI_INPUT_LVGL_DIR)/tick.o \
 		$(GUI_INPUT_LVGL_DIR)/gfx_client_policy.o \
