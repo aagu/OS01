@@ -103,6 +103,7 @@ int gui_native_fixture_mouse(gui_native_fixture_t *fx, const mouse_event_t *even
  */
 typedef struct {
     int state;         /* GUI_NATIVE_SLOT_* */
+    uint32_t index;    /* 槽在表中的下标：据此断言"同一个槽被复用" */
     uint64_t id;       /* 槽里的身份 */
     uint64_t parent_id;/* 父身份（0 = 平台根） */
     int kind;          /* gui_widget_kind_t 的值 */
@@ -180,6 +181,45 @@ int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_byte
  * @return 0 成功；-1 失败
  */
 int gui_native_fixture_backend_delete(gui_platform_t *platform, gui_widget_t widget);
+
+/**
+ * @brief 后端状态（宿主私有视图）
+ *
+ * fixture 头允许出现后端类型（既有约定），但这些后端类型**不进入**任何
+ * 公共头，也**不进入**目标 `libgui.a`：这里只是把后端状态抄成宿主可读
+ * 的布尔量。
+ */
+typedef struct {
+    bool clickable;        /* 对象带 LV_OBJ_FLAG_CLICKABLE */
+    bool platform_display; /* 对象所属的 display 是本平台的 display */
+    bool default_display;  /* 对象所属的 display 是 LVGL 的默认 display */
+    bool in_group;         /* 对象属于某个 lv_group */
+} gui_native_backend_info_t;
+
+/**
+ * @brief 查询一个身份背后的后端状态（命中标志 / display / 组）
+ *
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_backend(gui_platform_t *platform, gui_widget_t widget,
+                                     gui_native_backend_info_t *out);
+
+/**
+ * @brief 宿主私有：把 LVGL 的默认 display 清空
+ *
+ * 这样"原生创建没有取 lv_display_get_default()"就变成可观测的事实：默认
+ * display 为空时创建仍然成功，说明实现取的是本平台自己的 display。
+ *
+ * @return 0 成功；-1 失败
+ */
+int gui_native_fixture_set_default_display_none(void);
+
+/**
+ * @brief 宿主私有：把 LVGL 的默认 display 恢复成本平台的 display
+ *
+ * @return 0 成功；-1 失败
+ */
+int gui_native_fixture_restore_default_display(gui_platform_t *platform);
 
 /* 固定容量（与 libgui 内部一致；fixture 的 .c 里有静态断言守着）。 */
 #define GUI_NATIVE_CAPACITY 1024u

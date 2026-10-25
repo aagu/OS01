@@ -289,6 +289,10 @@ TEST_FUNC(test_slot_reuse_resets_metadata)
     assert_eq(0, gui_widget_set_text(fx.platform, stale, "STALE"));
     assert_eq(0, gui_widget_set_visible(fx.platform, stale, false));
     assert_eq(0, gui_widget_set_enabled(fx.platform, stale, false));
+    /* 槽下标必须在它还活着的时候记下来：销毁之后身份就查不到了。 */
+    gui_native_slot_info_t stale_info;
+    assert_eq(0, gui_native_fixture_query_slot(fx.platform, stale, &stale_info));
+    assert_eq(GUI_NATIVE_SLOT_LIVE, stale_info.state);
     assert_eq(0, gui_native_fixture_plant_slot(fx.platform, stale, 0xffff0000u, "STALE"));
     assert_eq(0, gui_widget_destroy(fx.platform, stale));
     assert_false(gui_widget_is_valid(fx.platform, stale));
@@ -319,6 +323,10 @@ TEST_FUNC(test_slot_reuse_resets_metadata)
     assert_eq(0, info.geom_y);
     assert_eq(0, info.geom_width);
     assert_eq(0, info.geom_height);
+
+    /* 槽真的被复用了：新旧身份落在**同一个槽下标**上。否则上面的断言
+     * 只是"新槽是干净的"，根本没有测到复用。 */
+    assert_eq(stale_info.index, info.index);
 
     assert_eq(0, gui_widget_destroy(fx.platform, reused));
 
@@ -405,6 +413,10 @@ TEST_FUNC(test_old_id_never_revives_after_slot_reuse)
     gui_widget_t old_widget;
     assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_LABEL, &old_widget));
     uint64_t old_id = old_widget.id;
+    /* 槽下标必须在它还活着的时候记下来：销毁之后身份就查不到了。 */
+    gui_native_slot_info_t old_info;
+    assert_eq(0, gui_native_fixture_query_slot(fx.platform, old_widget, &old_info));
+    assert_eq(GUI_NATIVE_SLOT_LIVE, old_info.state);
     assert_eq(0, gui_widget_destroy(fx.platform, old_widget));
     assert_false(gui_widget_is_valid(fx.platform, old_widget));
 
@@ -414,9 +426,10 @@ TEST_FUNC(test_old_id_never_revives_after_slot_reuse)
     assert_true(fresh.id != old_id);
     assert_false(gui_widget_is_valid(fx.platform, old_widget));
 
+    /* 新旧身份落在**同一个槽下标**上：槽确实被复用了。 */
     gui_native_slot_info_t info;
     assert_eq(0, gui_native_fixture_query_slot(fx.platform, fresh, &info));
-    assert_eq(fresh.id, info.id);
+    assert_eq(old_info.index, info.index);
 
     gui_native_fixture_destroy(&fx);
 }
@@ -829,6 +842,104 @@ TEST_FUNC(test_platform_destroy_releases_widget_tree)
     gui_native_fixture_destroy(&again);
 }
 
+/* 发现项 1：BUTTON 可以作父，LABEL 是叶子。 */
+TEST_FUNC(test_button_can_parent_label_child)
+{
+    gui_native_fixture_t fx;
+    assert_eq(0, gui_native_fixture_create(&fx, false));
+
+    gui_widget_t root;
+    assert_eq(0, gui_widget_create(fx.platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &root));
+
+    /* BUTTON 可以拥有子项（Task 10 把卡片容器换成 BUTTON，按钮的标题
+     * 必须是 LABEL 子项）。 */
+    gui_widget_t button;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &button));
+
+    gui_widget_t caption;
+    errno = 0;
+    assert_eq(0, gui_widget_create(fx.platform, button, GUI_WIDGET_LABEL, &caption));
+    assert_eq(0, errno);
+
+    /* 标题的文字真的生效（像素可观测）。 */
+    assert_eq(0, gui_native_fixture_step(&fx, 50));
+    gui_rect_t bounds;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, caption, &bounds));
+    capture_region(fx.platform, bounds.x, bounds.y, g_region_a);
+
+    char buffer[16];
+    memcpy(buffer, "BACK", 5);
+    assert_eq(0, gui_widget_set_text(fx.platform, caption, buffer));
+    assert_eq(0, gui_native_fixture_step(&fx, 50));
+    capture_region(fx.platform, bounds.x, bounds.y, g_region_b);
+    assert_true(memcmp(g_region_a, g_region_b, sizeof(g_region_a)) != 0);
+
+    /* BUTTON 也可以拥有 CONTAINER 子项。 */
+    gui_widget_t panel;
+    assert_eq(0, gui_widget_create(fx.platform, button, GUI_WIDGET_CONTAINER, &panel));
+    assert_true(gui_widget_is_valid(fx.platform, panel));
+
+    /* LABEL 是叶子：不能作父。 */
+    gui_widget_t orphan;
+    errno = 0;
+    assert_eq(-1, gui_widget_create(fx.platform, caption, GUI_WIDGET_LABEL, &orphan));
+    assert_eq(EINVAL, errno);
+    assert_true(orphan.id == 0);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/* 发现项 3：命中与显示组的默认行为。 */
+TEST_FUNC(test_native_hit_test_and_display_defaults)
+{
+    gui_native_fixture_t fx;
+    assert_eq(0, gui_native_fixture_create(&fx, false));
+
+    gui_widget_t root;
+    assert_eq(0, gui_widget_create(fx.platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &root));
+    gui_widget_t label;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_LABEL, &label));
+    gui_widget_t button;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &button));
+
+    gui_native_backend_info_t backend;
+
+    /* BUTTON 可点击。 */
+    assert_eq(0, gui_native_fixture_query_backend(fx.platform, button, &backend));
+    assert_true(backend.clickable);
+
+    /* LABEL 不抢命中。 */
+    assert_eq(0, gui_native_fixture_query_backend(fx.platform, label, &backend));
+    assert_false(backend.clickable);
+
+    /* 装饰性 CONTAINER 默认不可点击。 */
+    assert_eq(0, gui_native_fixture_query_backend(fx.platform, root, &backend));
+    assert_false(backend.clickable);
+
+    /* 每个对象都在本平台的 display 上，且不属于任何 lv_group。 */
+    assert_true(backend.platform_display);
+    assert_false(backend.in_group);
+    assert_eq(0, gui_native_fixture_query_backend(fx.platform, label, &backend));
+    assert_true(backend.platform_display);
+    assert_false(backend.in_group);
+    assert_eq(0, gui_native_fixture_query_backend(fx.platform, button, &backend));
+    assert_true(backend.platform_display);
+    assert_false(backend.in_group);
+
+    /* 原生创建不走 lv_display_get_default()：把 LVGL 的默认 display 清掉
+     * 之后，创建出来的对象仍然落在本平台的 display 上。若实现取了默认
+     * display，这里会拿到空指针而直接失败。 */
+    assert_eq(0, gui_native_fixture_set_default_display_none());
+    gui_widget_t button2;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &button2));
+    assert_eq(0, gui_native_fixture_query_backend(fx.platform, button2, &backend));
+    assert_true(backend.platform_display);
+    assert_false(backend.default_display);
+    assert_eq(0, gui_native_fixture_restore_default_display(fx.platform));
+
+    gui_native_fixture_destroy(&fx);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_public_widget_types_compile),
     TEST_ENTRY(test_empty_registry_rejects_unknown),
@@ -848,6 +959,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_delete_invalidates_identity),
     TEST_ENTRY(test_backend_fatal_oom_exits_in_subprocess),
     TEST_ENTRY(test_platform_destroy_releases_widget_tree),
+    TEST_ENTRY(test_button_can_parent_label_child),
+    TEST_ENTRY(test_native_hit_test_and_display_defaults),
 TEST_LIST_END
 
 int main(void)

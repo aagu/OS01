@@ -50,10 +50,17 @@ static gui_widget_slot_t *registry_find(gui_widget_registry_t *reg, uint64_t id)
 }
 
 /**
- * @brief 复位一个槽的全部字段
+ * @brief 复位一个槽的全部**残留元数据**
  *
  * 槽复用时必须走这里：旧身份、旧 handler、旧 userdata、旧文字、旧几何
  * 缓存与旧标志一个都不许残留。
+ *
+ * 清零的字段清单（14 个）：state、id、obj、parent_id、kind、handler、
+ * userdata、text、geom_x、geom_y、geom_width、geom_height、flags、
+ * pending_free。
+ *
+ * 唯一**不清**的是 `index`：它是槽在表中的位置，不是上一任留下的元数据，
+ * 只在注册表建立时写一次；清掉它等于毁掉槽自己的身份。
  */
 static void slot_reset(gui_widget_slot_t *slot)
 {
@@ -164,6 +171,8 @@ int gui_widget_registry_init(gui_platform_t *platform)
     }
     for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
         slot_reset(&reg->slots[i]);
+        /* 槽的位置只写一次：它是槽自己的身份，不是可被复用的残留元数据。 */
+        reg->slots[i].index = i;
     }
     platform->registry = reg;
     return 0;
@@ -405,7 +414,9 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
         registry_reap(reg);
     }
 
-    /* 2. 父控件校验：必须是本平台上活着的容器；根只能是容器。 */
+    /* 2. 父控件校验：必须是本平台上活着的控件，且种类可以拥有子项。
+     *    CONTAINER 与 BUTTON 都可以拥有子项（Task 10 的卡片容器换成
+     *    BUTTON，按钮的标题必须是 LABEL 子项）；LABEL 是叶子，不能作父。 */
     gui_widget_slot_t *parent_slot = NULL;
     if (parent.id != 0) {
         parent_slot = registry_find(reg, parent.id);
@@ -413,7 +424,8 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
             errno = EINVAL;
             return -1;
         }
-        if (parent_slot->kind != GUI_WIDGET_CONTAINER) {
+        if (parent_slot->kind != GUI_WIDGET_CONTAINER &&
+            parent_slot->kind != GUI_WIDGET_BUTTON) {
             errno = EINVAL;
             return -1;
         }
@@ -781,6 +793,20 @@ int gui_widget_test_backend_delete(gui_platform_t *platform, gui_widget_t widget
     /* 后端在注册表背后自行删除：删除回调照常运行，身份立刻失效。 */
     lv_obj_delete(slot->obj);
     return 0;
+}
+
+lv_obj_t *gui_widget_test_get_obj(gui_platform_t *platform, gui_widget_t widget)
+{
+    if (!platform || !platform->registry) {
+        errno = EINVAL;
+        return NULL;
+    }
+    gui_widget_slot_t *slot = registry_find(platform->registry, widget.id);
+    if (!slot || slot->state != GUI_WIDGET_SLOT_LIVE) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return slot->obj;
 }
 
 #endif /* OS01_HOST_TEST */

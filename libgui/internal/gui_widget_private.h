@@ -57,11 +57,15 @@ typedef enum {
 /**
  * @brief 注册表的一个槽
  *
- * 槽复用时**所有**字段都必须被重新初始化：旧身份、旧 handler、旧
- * userdata、旧几何缓存与旧标志一个都不许残留。
+ * 槽复用时**所有残留元数据**都必须被重新初始化：旧身份、旧 handler、旧
+ * userdata、旧文字、旧几何缓存与旧标志一个都不许残留。
+ *
+ * 唯一的例外是 `index`：它是槽在表中的**位置**，不是上一任留下的元数据，
+ * 只在注册表建立时写一次；清掉它等于毁掉槽自己的身份。
  */
 typedef struct {
     gui_widget_slot_state_t state;   /* 槽状态 */
+    uint32_t index;                  /* 槽在表中的下标（位置属性，不是残留元数据） */
     uint64_t id;                      /* 身份号（0 = 无身份） */
     lv_obj_t *obj;                    /* 后端对象（不进入公共 API） */
     uint64_t parent_id;               /* 父控件身份（0 = 平台根） */
@@ -126,11 +130,23 @@ uint64_t gui_widget_test_get_last_id(void);
  *
  * 公共 API 只暴露"身份是否有效"和"种类"；槽里的 handler/userdata/几何
  * 缓存/标志这些**复用契约**必须能被宿主测试看见，否则"槽复用要全字段
- * 初始化"这条规则无法被验证。
+ * 初始化"这条规则无法被验证。复制出来的槽带有它的**槽下标**（`index`），
+ * 宿主测试据此断言"同一个槽真的被复用了"。
  *
  * @return 0 成功（身份不存在时 `*out` 是全零的槽）；-1 失败
  */
 int gui_widget_test_query_slot(gui_platform_t *platform, gui_widget_t widget, gui_widget_slot_t *out);
+
+/**
+ * @brief 宿主私有观察桥：把身份解析成后端对象
+ *
+ * 它让宿主测试能观察后端状态（命中标志、对象所属的 display、对象所属的
+ * 组）。它只存在于宿主测试构建：目标构建不编译它，因此它既不进公共头，
+ * 也不进目标 `libgui.a`。
+ *
+ * @return 后端对象；NULL 表示身份无效（errno = EINVAL）
+ */
+lv_obj_t *gui_widget_test_get_obj(gui_platform_t *platform, gui_widget_t widget);
 
 /**
  * @brief 宿主私有故障桥：往某个身份的槽里塞入"陈旧"元数据

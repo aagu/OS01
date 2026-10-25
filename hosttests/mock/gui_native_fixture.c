@@ -9,6 +9,7 @@
 
 #include "gui_test_runtime.h"
 #include <gui_input_private.h>
+#include <gui_lvgl_private.h>
 #include <gui_platform_private.h>
 #include <gui_widget_private.h>
 #include <lvgl/lvgl.h>
@@ -145,6 +146,7 @@ int gui_native_fixture_query_slot(gui_platform_t *platform, gui_widget_t widget,
     }
 
     out->state = (int)slot.state;
+    out->index = slot.index;
     out->id = slot.id;
     out->parent_id = slot.parent_id;
     out->kind = (int)slot.kind;
@@ -210,4 +212,47 @@ int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_byte
 int gui_native_fixture_backend_delete(gui_platform_t *platform, gui_widget_t widget)
 {
     return gui_widget_test_backend_delete(platform, widget);
+}
+
+int gui_native_fixture_query_backend(gui_platform_t *platform, gui_widget_t widget,
+                                     gui_native_backend_info_t *out)
+{
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    lv_obj_t *obj = gui_widget_test_get_obj(platform, widget);
+    if (!obj) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    out->clickable = lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_display_t *disp = lv_obj_get_display(obj);
+    lv_display_t *platform_disp = gui_platform_get_lv_display(platform);
+    out->platform_display = (disp != NULL && disp == platform_disp);
+    out->default_display = (disp != NULL && disp == lv_display_get_default());
+
+    out->in_group = (lv_obj_get_group(obj) != NULL);
+    return 0;
+}
+
+int gui_native_fixture_set_default_display_none(void)
+{
+    lv_display_set_default(NULL);
+    return 0;
+}
+
+int gui_native_fixture_restore_default_display(gui_platform_t *platform)
+{
+    lv_display_t *platform_disp = gui_platform_get_lv_display(platform);
+    if (!platform_disp) {
+        errno = EINVAL;
+        return -1;
+    }
+    lv_display_set_default(platform_disp);
+    return 0;
 }
