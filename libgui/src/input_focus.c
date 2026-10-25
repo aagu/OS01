@@ -156,12 +156,8 @@ static void focus_visual_set(lv_obj_t *obj, bool on)
     }
     if (on) {
         lv_obj_add_state(obj, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_outline_width(obj, GUI_INPUT_FOCUS_OUTLINE_WIDTH, 0);
-        lv_obj_set_style_outline_color(obj, lv_color_hex(GUI_INPUT_FOCUS_OUTLINE_COLOR), 0);
-        lv_obj_set_style_outline_opa(obj, LV_OPA_COVER, 0);
     } else {
         lv_obj_remove_state(obj, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_outline_width(obj, 0, 0);
     }
 }
 
@@ -518,6 +514,18 @@ static lv_obj_t *focus_next_candidate(gui_input_t *input, lv_obj_t *from, bool f
  * TAB 关闭（点击不夺焦），CLICK / STRONG 开启（点击夺焦）。诊断(raw)登记
  * 保留既有 flag，不重写。
  */
+static void focus_sync_click_flag(const gui_input_focus_entry_t *entry)
+{
+    if (!entry || !entry->obj || !entry->native) {
+        return;
+    }
+    if (entry->policy == (uint8_t)GUI_FOCUS_CLICK || entry->policy == (uint8_t)GUI_FOCUS_STRONG) {
+        lv_obj_add_flag(entry->obj, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    } else {
+        lv_obj_remove_flag(entry->obj, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    }
+}
+
 /* ── 组的建立与拆除 ────────────────────────────────────────────── */
 
 /*
@@ -697,8 +705,10 @@ static void focus_remove_controlled(gui_input_t *input, unsigned index)
     if (obj) {
         lv_obj_remove_event_cb(obj, focus_obj_event_cb);
     }
-    /* 未登记的原生对象：指针策略关闭（Task 9 落地）。 */
-    (void)was_native;
+    /* 未登记的原生对象：指针策略关闭。 */
+    if (was_native && obj) {
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    }
 
     if (was_current) {
         input->focus.repair_index = repair_index;
@@ -858,6 +868,7 @@ int gui_input_focus_register_native(gui_input_t *input, lv_obj_t *obj, uint64_t 
     idx = focus_index_by_id(input, native_id);
     if (idx >= 0) {
         input->focus.entries[idx].policy = (uint8_t)policy;
+        focus_sync_click_flag(&input->focus.entries[idx]);
         return 0;
     }
 
@@ -887,6 +898,9 @@ int gui_input_focus_register_native(gui_input_t *input, lv_obj_t *obj, uint64_t 
 
     /* 第一次成功的登记锁定模式。 */
     input->focus.mode = (uint8_t)GUI_FOCUS_MODE_NATIVE;
+
+    /* 指针策略立即同步。 */
+    focus_sync_click_flag(&input->focus.entries[input->focus.count - 1u]);
 
     focus_sync(input);
     return 0;

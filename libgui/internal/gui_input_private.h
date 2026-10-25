@@ -51,8 +51,6 @@ extern "C" {
  * 诊断(raw)登记都占用它。
  */
 #define GUI_INPUT_FOCUS_CAPACITY       128
-#define GUI_INPUT_FOCUS_OUTLINE_WIDTH  2    /* 焦点 outline 宽度（像素） */
-#define GUI_INPUT_FOCUS_OUTLINE_COLOR  0x00FF00u
 
 /*
  * 登记模式：input 的**第一次成功登记**锁定模式，此后两种登记不许混用。

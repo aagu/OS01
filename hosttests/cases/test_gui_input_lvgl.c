@@ -19,7 +19,8 @@
  *     - 登记顺序就是 Tab 顺序；Tab / Shift-Tab 在可聚焦项之间前进 / 后退
  *       并循环；隐藏 / 禁用（含祖先）的控件不占导航位置，恢复后回到原位；
  *     - 首个登记的可用控件建立初始焦点；空焦点组不崩溃；
- *     - 焦点轮廓（LV_STATE_FOCUS_KEY 下的 outline）可以被像素断言采样；
+ *     - 焦点环（主题在 FOCUSED / FOCUS_KEY 状态下画的 primary 环）可以被
+ *       像素断言采样；
  *     - 点击空白保持既有键盘焦点。
  *
  *   取消协议
@@ -52,6 +53,7 @@
 #include "test_framework.h"
 #include <gui/gui_input.h>
 #include <gui/gui_platform.h>
+#include <gui/gui_theme.h>
 #include <gui_cursor_icon.h>
 #include <gui_input_private.h>
 #include <gui_lvgl_private.h>
@@ -675,23 +677,30 @@ TEST_FUNC(test_empty_focus_group_survives_tab)
 }
 
 /*
- * 统计控件矩形外侧一圈里的“焦点轮廓色”像素数量。
+ * 统计控件矩形外侧一圈里的"焦点环色"像素数量。
  *
- * 轮廓环的确切几何（离控件多远、多宽）属于 LVGL 的实现细节，不作为契约；
- * 契约只要求：聚焦之后，控件附近必须出现可被像素断言采样的轮廓。
+ * 焦点环的确切几何（离控件多远、多宽）属于 LVGL 的实现细节，不作为契约；
+ * 契约只要求：聚焦之后，控件附近必须出现可被像素断言采样的环。
+ *
+ * 颜色来自**主题**：Material 是焦点视觉的唯一来源，输入层不再覆盖宽度与
+ * 颜色（GUI-2b Task 9 删掉了输入层那条绿色的局部覆盖）。
  */
-#define FOCUS_OUTLINE_COLOR 0x0000FF00u
+static uint32_t focus_ring_color(void)
+{
+    return gui_theme_colors()->primary;
+}
 
 static uint32_t count_outline_pixels(gui_platform_t *platform, const lv_area_t *area)
 {
     uint32_t count = 0;
+    uint32_t color = focus_ring_color();
     int32_t y;
 
     for (y = area->y1 - 8; y <= area->y2 + 8; y++) {
         int32_t x;
 
         for (x = area->x1 - 8; x <= area->x2 + 8; x++) {
-            if (gui_platform_get_pixel(platform, (uint32_t)x, (uint32_t)y) == FOCUS_OUTLINE_COLOR) {
+            if (gui_platform_get_pixel(platform, (uint32_t)x, (uint32_t)y) == color) {
                 count++;
             }
         }
@@ -711,6 +720,13 @@ TEST_FUNC(test_focus_outline_is_pixel_observable)
     btn1 = make_button(&fx, 20, 20);
     btn2 = make_button(&fx, 200, 120);
 
+    /*
+     * 按钮的底色必须**不是** primary：主题的焦点环就是 primary 色，底色
+     * 同色时环与填充无法区分（不允许用填充色冒充环）。
+     */
+    lv_obj_set_style_bg_color(btn1, lv_color_hex(0x00202020u), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn2, lv_color_hex(0x00202020u), LV_PART_MAIN);
+
     /* 首个登记的可用控件建立初始焦点。 */
     assert_eq(0, gui_input_focus_add(fx.input, btn1));
     assert_eq(0, gui_input_focus_add(fx.input, btn2));
@@ -720,12 +736,12 @@ TEST_FUNC(test_focus_outline_is_pixel_observable)
     lv_obj_get_coords(btn1, &area1);
     lv_obj_get_coords(btn2, &area2);
 
-    /* 有焦点的控件：轮廓可以被像素断言采样。 */
+    /* 有焦点的控件：环可以被像素断言采样。 */
     assert_true(count_outline_pixels(fx.platform, &area1) > 0);
-    /* 没有焦点的控件：没有轮廓。 */
+    /* 没有焦点的控件：没有环。 */
     assert_eq(0, count_outline_pixels(fx.platform, &area2));
 
-    /* 焦点转移：轮廓跟着走。 */
+    /* 焦点转移：环跟着走。 */
     assert_eq(0, gui_input_focus_set(fx.input, btn2));
     step_at(&fx, 50);
     assert_eq(0, count_outline_pixels(fx.platform, &area1));
@@ -1763,6 +1779,59 @@ TEST_FUNC(test_left_click_focuses_a_registered_widget)
     gui_input_lvgl_pointer(fx.input, &release);
     step(&fx);
     assert_true(gui_input_focus_current(fx.input) == btn2);
+
+    fixture_teardown(&fx);
+}
+
+/*
+ * 诊断(raw)登记的点击夺焦能力不变。
+ *
+ * 原生登记的指针策略（TAB 关闭 CLICK_FOCUSABLE、CLICK/STRONG 开启）**只**
+ * 作用于原生对象：诊断(raw)登记保留 LVGL 的既有 flag，点击仍然夺焦，文本
+ * 输入仍然只进新的接收者。
+ */
+TEST_FUNC(test_raw_textarea_click_focus_is_unchanged)
+{
+    fixture_t fx;
+    lv_obj_t *ta1, *ta2;
+    mouse_event_t move;
+    mouse_event_t press;
+    mouse_event_t release;
+    const uint8_t a_down[] = { KEY_A_DOWN };
+    const uint8_t a_up[] = { KEY_A_UP };
+
+    fixture_setup(&fx);
+    ta1 = make_textarea(&fx, 20, 20);
+    ta2 = make_textarea(&fx, 200, 120);
+    assert_eq(0, gui_input_focus_add(fx.input, ta1));
+    assert_eq(0, gui_input_focus_add(fx.input, ta2));
+    assert_true(gui_input_focus_current(fx.input) == ta1);
+
+    /* 诊断登记保留既有 flag：点击仍然夺焦。 */
+    assert_true(lv_obj_has_flag(ta2, LV_OBJ_FLAG_CLICK_FOCUSABLE));
+
+    /* 光标初始在视口中心：移动到第二个文本框上再点击。 */
+    memset(&move, 0, sizeof(move));
+    memset(&press, 0, sizeof(press));
+    memset(&release, 0, sizeof(release));
+    move.dx = 90;
+    move.dy = 32;
+    press.buttons = 0x01u;
+    gui_input_lvgl_pointer(fx.input, &move);
+    gui_input_lvgl_pointer(fx.input, &press);
+    step(&fx);
+    gui_input_lvgl_pointer(fx.input, &release);
+    step(&fx);
+
+    assert_true(gui_input_focus_current(fx.input) == ta2);
+
+    /* 输入只进新的接收者：旧文本框保持为空。 */
+    feed(&fx, a_down, sizeof(a_down));
+    step(&fx);
+    feed(&fx, a_up, sizeof(a_up));
+    step(&fx);
+    assert_str_eq("", lv_textarea_get_text(ta1));
+    assert_str_eq("a", lv_textarea_get_text(ta2));
 
     fixture_teardown(&fx);
 }
@@ -3143,6 +3212,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_editing_keys_repeat_and_route_to_the_textarea),
     TEST_ENTRY(test_esc_is_delivered_as_cancel_to_the_focused_widget),
     TEST_ENTRY(test_left_click_focuses_a_registered_widget),
+    TEST_ENTRY(test_raw_textarea_click_focus_is_unchanged),
     TEST_ENTRY(test_focus_change_mid_repeat_stops_the_repeat_without_dropping_keys),
     TEST_ENTRY(test_a_key_cancelled_by_its_own_callback_never_repeats),
     TEST_ENTRY(test_a_key_whose_focus_is_deleted_in_its_callback_never_repeats),

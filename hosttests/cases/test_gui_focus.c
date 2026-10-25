@@ -10,6 +10,7 @@
  *      登记锁定，失败不锁定，全注销不解锁；容量 128。
  *   2. 选择历史：MANUAL / AUTO_FIRST、显式清空、隐藏禁用后的修复、取消
  *      协议；任何选择变化只经同一条提交路径。
+ *   3. 指针策略与主题焦点环：CLICK_FOCUSABLE 立即同步、点击夺焦规则、
  *      主题 primary 焦点环跟着焦点走。
  */
 
@@ -243,6 +244,24 @@ static void click_widget(gui_native_fixture_t *fx, gui_widget_t widget)
 }
 
 /* 统计控件矩形内的"主题 primary 焦点环"像素数量。 */
+static uint32_t count_primary_pixels(gui_platform_t *platform, const gui_rect_t *area)
+{
+    uint32_t count = 0;
+    uint32_t color = gui_theme_colors()->primary;
+    int32_t y;
+
+    for (y = area->y; y < area->y + area->height; y++) {
+        int32_t x;
+
+        for (x = area->x; x < area->x + area->width; x++) {
+            if (gui_platform_get_pixel(platform, (uint32_t)x, (uint32_t)y) == color) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Task 7：登记模式、策略与生命周期事务
  * ═══════════════════════════════════════════════════════════════════ */
@@ -324,6 +343,7 @@ TEST_FUNC(test_callback_focus_mutation_guard)
     gui_widget_t other;
     gui_widget_t got;
     guard_probe_t probe;
+    bool click_focusable = true;
 
     assert_eq(0, gui_native_fixture_create(&fx, true));
     root = make_root(&fx);
@@ -371,6 +391,10 @@ TEST_FUNC(test_callback_focus_mutation_guard)
     assert_eq(-1, gui_focus_set(fx.input, other));
     assert_eq(EINVAL, errno);
 
+    /* 策略没变：TAB 策略的按钮不带 CLICK_FOCUSABLE。 */
+    assert_eq(0, gui_native_fixture_query_click_focusable(fx.platform, button, &click_focusable));
+    assert_false(click_focusable);
+
     gui_native_fixture_destroy(&fx);
 }
 
@@ -382,6 +406,7 @@ TEST_FUNC(test_register_duplicate_updates_policy_at_capacity)
     gui_widget_t order[8];
     gui_widget_t label;
     gui_widget_t foreign;
+    bool click_focusable = false;
     int count;
     int i;
 
@@ -411,6 +436,11 @@ TEST_FUNC(test_register_duplicate_updates_policy_at_capacity)
     assert_eq(8, count);
     assert_eq(buttons[0].id, order[0].id);
     assert_eq(buttons[1].id, order[1].id);
+
+    /* 策略确实被更新了：CLICK 策略立即同步 CLICK_FOCUSABLE。 */
+    assert_eq(0, gui_native_fixture_query_click_focusable(fx.platform, buttons[0],
+                                                          &click_focusable));
+    assert_true(click_focusable);
 
     /* 非按钮：EOPNOTSUPP。 */
     label = make_label(&fx, root, 10, 200);
@@ -1137,6 +1167,238 @@ TEST_FUNC(test_destroy_current_during_backend_callback_cancels)
  * Task 9：指针策略、激活与主题色迁移
  * ═══════════════════════════════════════════════════════════════════ */
 
+TEST_FUNC(test_tab_only_click_activates_without_focus_steal)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t tab_only;
+    gui_widget_t keyboard_focus;
+    gui_widget_t got;
+    activate_probe_t tab_probe;
+    activate_probe_t focus_probe;
+    bool click_focusable = true;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    tab_only = make_button(&fx, root, 10, 10);
+    keyboard_focus = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, tab_only, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, keyboard_focus, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, keyboard_focus));
+
+    memset(&tab_probe, 0, sizeof(tab_probe));
+    memset(&focus_probe, 0, sizeof(focus_probe));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, tab_only, activate_handler, &tab_probe));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, keyboard_focus, activate_handler,
+                                              &focus_probe));
+
+    /* TAB-only 的按钮不带 CLICK_FOCUSABLE：点击不夺焦。 */
+    assert_eq(0, gui_native_fixture_query_click_focusable(fx.platform, tab_only,
+                                                          &click_focusable));
+    assert_false(click_focusable);
+
+    /* 点击它：激活一次。 */
+    click_widget(&fx, tab_only);
+    assert_eq(1, tab_probe.calls);
+    assert_eq(tab_only.id, tab_probe.last_target.id);
+
+    /* 键盘焦点没有被夺走。 */
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(keyboard_focus.id, got.id);
+
+    /* 随后按键仍然进入原来的焦点控件。 */
+    press_key(&fx, KEY_ENTER_DOWN, KEY_ENTER_UP);
+    assert_eq(1, focus_probe.calls);
+    assert_eq(keyboard_focus.id, focus_probe.last_target.id);
+    assert_eq(1, tab_probe.calls);
+
+    /* 更新策略为 CLICK：flag 立即同步，点击夺焦。 */
+    assert_eq(0, gui_focus_register(fx.input, tab_only, GUI_FOCUS_CLICK));
+    assert_eq(0, gui_native_fixture_query_click_focusable(fx.platform, tab_only,
+                                                          &click_focusable));
+    assert_true(click_focusable);
+
+    click_widget(&fx, tab_only);
+    assert_eq(2, tab_probe.calls);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(tab_only.id, got.id);
+
+    /* STRONG 同样开启点击夺焦。 */
+    assert_eq(0, gui_focus_register(fx.input, tab_only, GUI_FOCUS_STRONG));
+    assert_eq(0, gui_native_fixture_query_click_focusable(fx.platform, tab_only,
+                                                          &click_focusable));
+    assert_true(click_focusable);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_enter_space_activate_on_release_once)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    activate_probe_t probe;
+    const uint8_t enter_down[] = { KEY_ENTER_DOWN };
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    memset(&probe, 0, sizeof(probe));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, a, activate_handler, &probe));
+
+    /* DOWN 不激活；重复也不激活。 */
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    step(&fx, 500);
+    step(&fx, 500);
+    assert_eq(0, probe.calls);
+
+    /* UP 激活一次。 */
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(1, probe.calls);
+    assert_eq(a.id, probe.last_target.id);
+
+    /* 空格同理。 */
+    feed_keys(&fx, (const uint8_t[]){ KEY_SPACE_DOWN }, 1);
+    step(&fx, 20);
+    step(&fx, 500);
+    assert_eq(1, probe.calls);
+    press_key(&fx, KEY_SPACE_UP, KEY_SPACE_UP);
+    assert_eq(2, probe.calls);
+    assert_eq(a.id, probe.last_target.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_late_up_after_clear_move_delete_is_ignored)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t got;
+    activate_probe_t probe_a;
+    activate_probe_t probe_b;
+    const uint8_t enter_down[] = { KEY_ENTER_DOWN };
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    memset(&probe_a, 0, sizeof(probe_a));
+    memset(&probe_b, 0, sizeof(probe_b));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, a, activate_handler, &probe_a));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, b, activate_handler, &probe_b));
+
+    /* ── 清空后的迟到 UP ─────────────────────────────────────── */
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_set(fx.input, GUI_WIDGET_NONE));
+    step(&fx, 20);
+    /* 真实发送 0x9c。 */
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(0, probe_a.calls);
+    assert_eq(0, probe_b.calls);
+
+    /* ── 移动焦点后的迟到 UP ─────────────────────────────────── */
+    assert_eq(0, gui_focus_set(fx.input, a));
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_set(fx.input, b));
+    step(&fx, 20);
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(0, probe_a.calls);
+    assert_eq(0, probe_b.calls);
+
+    /* ── 删除当前项后的迟到 UP ───────────────────────────────── */
+    assert_eq(0, gui_focus_set(fx.input, a));
+    feed_keys(&fx, enter_down, sizeof(enter_down));
+    step(&fx, 20);
+    assert_eq(0, gui_widget_destroy(fx.platform, a));
+    step(&fx, 20);
+    press_key(&fx, KEY_ENTER_UP, KEY_ENTER_UP);
+    assert_eq(0, probe_a.calls);
+    assert_eq(0, probe_b.calls);
+
+    /* 随后新的 DOWN/UP 仍然正常。 */
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(b.id, got.id);
+    press_key(&fx, KEY_ENTER_DOWN, KEY_ENTER_UP);
+    assert_eq(1, probe_b.calls);
+    assert_eq(b.id, probe_b.last_target.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_material_ring_tracks_focus)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t got;
+    gui_appearance_t appearance;
+    gui_rect_t ra;
+    gui_rect_t rb;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 200, 200);
+
+    /*
+     * 底色必须**不是** primary：焦点环就是 primary 色，底色同色时环与
+     * 填充无法区分（不允许用填充色冒充环）。
+     */
+    appearance = GUI_APPEARANCE_DEFAULT;
+    appearance.variant = GUI_VARIANT_ACTION;
+    appearance.bg_role = GUI_COLOR_SURFACE;
+    appearance.text_role = GUI_COLOR_ON_SURFACE;
+    appearance.border_role = GUI_COLOR_OUTLINE_VARIANT;
+    appearance.bordered = true;
+    assert_eq(0, gui_widget_set_appearance(fx.platform, a, &appearance));
+    assert_eq(0, gui_widget_set_appearance(fx.platform, b, &appearance));
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    /* 真实渲染一次：像素断言必须看到**渲染后**的画面。 */
+    step(&fx, 50);
+    step(&fx, 50);
+
+    assert_eq(0, gui_widget_get_bounds(fx.platform, a, &ra));
+    assert_eq(0, gui_widget_get_bounds(fx.platform, b, &rb));
+
+    /* 有焦点的控件：primary 边框可采样。 */
+    assert_true(count_primary_pixels(fx.platform, &ra) > 0);
+    /* 没有焦点的控件：没有 primary 边框。 */
+    assert_eq(0, count_primary_pixels(fx.platform, &rb));
+
+    /* 焦点迁移：环跟着走。 */
+    assert_eq(0, gui_focus_set(fx.input, b));
+    step(&fx, 50);
+    step(&fx, 50);
+
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(b.id, got.id);
+    assert_eq(0, count_primary_pixels(fx.platform, &ra));
+    assert_true(count_primary_pixels(fx.platform, &rb) > 0);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/* ═══════════════════════════════════════════════════════════════════ */
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_focus_registration_modes),
     TEST_ENTRY(test_callback_focus_mutation_guard),
@@ -1154,8 +1416,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_click_only_focus_survives_step),
     TEST_ENTRY(test_hidden_ancestor_and_empty_repair),
     TEST_ENTRY(test_failed_set_preserves_explicit_clear),
-    TEST_ENTRY(test_destroy_current_during_backend_callback_cancels)
-TEST_LIST_END
+    TEST_ENTRY(test_destroy_current_during_backend_callback_cancels),
+    TEST_ENTRY(test_tab_only_click_activates_without_focus_steal),
+    TEST_ENTRY(test_enter_space_activate_on_release_once),
+    TEST_ENTRY(test_late_up_after_clear_move_delete_is_ignored),
+    TEST_ENTRY(test_material_ring_tracks_focus)TEST_LIST_END
 
 int main(void)
 {

@@ -31,6 +31,7 @@
  */
 
 #include <gui/gui.h>
+#include <gui/gui_theme.h>
 
 /* ── private bridge (probe-only exception; never published) ─────────── */
 #include <gui_input_private.h>
@@ -99,11 +100,12 @@
 #define WIDGET_TEXTAREA2   0x05u
 #define WIDGET_DISABLED    0x06u
 
-/* Fixed colours: the focus outline and the pointer cursor are painted by
- * libgui with these exact values so the runner can sample them from a
- * screenshot.  The probe only asserts that the constants it inherits are
- * the expected ones. */
-#define PROBE_OUTLINE_COLOR 0x00FF00u
+/* Fixed colours: the focus ring and the pointer cursor are painted by libgui
+ * so the runner can sample them from a screenshot.  The focus ring comes from
+ * the **theme** (Material is the only source of focus visuals); the cursor
+ * colours are fixed by libgui.  The probe only asserts that the colours it
+ * inherits are the expected ones. */
+#define PROBE_OUTLINE_COLOR 0x000B57D0u    /* theme primary */
 #define PROBE_CURSOR_FILL_COLOR    0x001A1C1Eu
 #define PROBE_CURSOR_OUTLINE_COLOR 0x00FDFCFFu
 
@@ -1291,8 +1293,9 @@ int main(int argc, char **argv)
         rc = fail(1, errno, "focus_add"); goto cleanup;
     }
 
-    /* The fixed outline / cursor colours come from libgui. */
-    if (GUI_INPUT_FOCUS_OUTLINE_COLOR != PROBE_OUTLINE_COLOR ||
+    /* The focus ring colour comes from the theme; the cursor colours are
+     * fixed by libgui. */
+    if (gui_theme_colors()->primary != PROBE_OUTLINE_COLOR ||
         GUI_INPUT_CURSOR_FILL_COLOR != PROBE_CURSOR_FILL_COLOR ||
         GUI_INPUT_CURSOR_OUTLINE_COLOR != PROBE_CURSOR_OUTLINE_COLOR) {
         rc = fail(1, EINVAL, "focus_outline_or_cursor_color"); goto cleanup;

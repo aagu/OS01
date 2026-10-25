@@ -393,6 +393,13 @@ static lv_obj_t *widget_create_native(gui_widget_kind_t kind, lv_obj_t *parent)
         break;
     }
 
+    /*
+     * 指针策略由焦点引擎管：未登记的原生对象**不**参与点击夺焦。
+     *
+     * LVGL 默认给所有对象 CLICK_FOCUSABLE；原生对象默认不带它，登记
+     * （或更新策略）时由焦点引擎立即同步。
+     */
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     return obj;
 }
 
