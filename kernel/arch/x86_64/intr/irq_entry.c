@@ -38,6 +38,7 @@ void x86_irq_entry(pt_regs_t *regs, uint64_t vector)
     x86_dispatch_irq(regs, vector);
 }
 
+__attribute__((no_stack_protector))
 void x86_handle_registered_irq(pt_regs_t *regs, uint64_t vector)
 {
     intr_dispatch_registered_vector(regs, vector);

@@ -65,6 +65,7 @@ void x86_handle_page_fault(pt_regs_t *regs, uint64_t error_code,
 __attribute__((no_stack_protector))
 void x86_irq_entry(pt_regs_t *regs, uint64_t vector);
 void x86_handle_device_irq(pt_regs_t *regs, uint64_t vector);
+__attribute__((no_stack_protector))
 void x86_handle_registered_irq(pt_regs_t *regs, uint64_t vector);
 void x86_handle_lapic_timer_irq(pt_regs_t *regs, uint64_t vector);
 void x86_handle_spurious_irq(pt_regs_t *regs, uint64_t vector);
