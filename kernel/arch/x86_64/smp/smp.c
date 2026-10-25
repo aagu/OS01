@@ -33,7 +33,6 @@ static void ap_init_lapic(void)
     lapic_write(LAPIC_LVT_TIMER,   LVT_MASK);
     lapic_write(LAPIC_LVT_LINT0,   LVT_MASK | LVT_DELIVERY_EXTINT);
     lapic_write(LAPIC_LVT_LINT1, LVT_MASK);
-    lapic_configure_nmi();
     lapic_write(LAPIC_LVT_ERROR,   LVT_MASK);
     lapic_write(LAPIC_LVT_PERF,    LVT_MASK);
     lapic_write(LAPIC_LVT_THERMAL, LVT_MASK);
@@ -122,6 +121,11 @@ void ap_entry(void)
     // and corrupt the BSP's ring-0 stack pointer on every context
     // switch.
     load_TR((8 + cpu->cpu_id * 2));
+
+    // NMI ignores IF. Keep LINT inputs masked until the kernel GDT/IDT,
+    // selectors and per-CPU TSS/IST are usable (GS was set by trampoline).
+    // Publish online readiness only after firmware NMI routing is active.
+    lapic_configure_nmi();
 
     // Start per-CPU scheduling tick.  Monitor plan Task 2: the AP's
     // accounting lifecycle is published HERE, exactly once, from the

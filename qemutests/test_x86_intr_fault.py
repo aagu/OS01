@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -421,6 +422,34 @@ class EvidenceTests(unittest.TestCase):
 
     def test_empty_log_rejected(self):
         self.assertFalse(xif.fault_evidence("", case=xif.CASE_NMI))
+
+
+class ApNmiOrderingTests(unittest.TestCase):
+    """NMI ignores IF: enabling its LVT route requires usable IDT and IST."""
+
+    def test_ap_unmasks_nmi_only_after_descriptor_and_ist_setup(self):
+        source = (ROOT / "kernel/arch/x86_64/smp/smp.c").read_text()
+        # Ignore comments so documentation cannot satisfy an ordering check.
+        source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
+        early = source.split("static void ap_init_lapic(void)", 1)[1].split(
+            "void ap_entry(void)", 1)[0]
+        self.assertIn("lapic_write(LAPIC_LVT_LINT0,   LVT_MASK | LVT_DELIVERY_EXTINT)", early)
+        self.assertIn("lapic_write(LAPIC_LVT_LINT1, LVT_MASK)", early)
+        self.assertNotIn("lapic_configure_nmi()", early)
+        entry = source.split("void ap_entry(void)", 1)[1].split(
+            "static task_t *create_idle_task", 1)[0]
+        ordered = ["ap_init_lapic();", "lgdt %0", "lidt %0", "lretq",
+                   "set_tss64(", "load_TR(", "lapic_configure_nmi();",
+                   "cpu->online = 1", "ipi_ready_publish_ap("]
+        positions = [entry.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(entry.count("lapic_configure_nmi();"), 1)
+        # GS is established by the trampoline before its entry call.
+        trampoline = (ROOT / "kernel/arch/x86_64/trampoline.S").read_text()
+        gs = trampoline.index("$IA32_GS_BASE")
+        self.assertLess(gs, trampoline.index("wrmsr", gs))
+        self.assertLess(trampoline.index("wrmsr", gs),
+                        trampoline.index("call", gs))
 
 
 class QmpTransportTests(unittest.TestCase):
