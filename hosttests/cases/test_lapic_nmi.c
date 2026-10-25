@@ -1,5 +1,6 @@
 /* Exercise the production MADT parser and routing; substitute MMIO only. */
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include "../../kernel/arch/x86_64/intr/apic/acpi.c"
 
@@ -82,5 +83,6 @@ int main(void)
     table.nmi.length = 2;
     parse_madt(&table.header);
     assert(apic_info.nmi_count == 0);
+    puts("LAPIC MADT NMI parser and routing: PASS");
     return 0;
 }
