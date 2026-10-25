@@ -29,6 +29,9 @@ config/busybox.config
 .superpowers/
 .worktrees/
 tools/mkdisk
+# 宿主侧指针取证工具的构建产物（tools/qemu-mouse/，不参与 OS01 构建）
+tools/qemu-mouse/gdk_probe
+tools/qemu-mouse/xdrive
 
 # Build products (added 2026-09-12 per directory-restructure design §4.3)
 test-results/
