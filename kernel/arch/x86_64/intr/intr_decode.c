@@ -8,8 +8,7 @@
 //    * origin comes from the SAVED CS privilege level (CPL 0 →
 //      KERNEL, CPL 3 → USER, CPL 1 / CPL 2 → UNKNOWN).  The #PF
 //      error code U/S bit never replaces the CS.
-//    * reason: #DE 0 → ARITHMETIC, #UD 6 → ILLEGAL, #GP 13 →
-//      PROTECTION, #PF 14 → MEMORY, everything else → OTHER.
+//    * reason follows the installed exception classifications (phase2 §5).
 //    * access: only #PF carries one.  I/D = 1 → EXEC, else W/R = 1
 //      → WRITE, else READ.
 //    * the address: only #PF owns one.  The CR2 snapshot handed in
@@ -23,11 +22,7 @@
 
 #include <arch/x86_64/intr_decode.h>
 
-/* Exception vectors this phase migrates (spec §6.1). */
-#define X86_VECTOR_DIVIDE_ERROR        0ULL
-#define X86_VECTOR_UNDEFINED_OPCODE    6ULL
-#define X86_VECTOR_GENERAL_PROTECTION  13ULL
-#define X86_VECTOR_PAGE_FAULT          14ULL
+#include <arch/x86_64/intr_vectors.h>
 
 /* #PF error code bits (Intel SDM Vol. 3A, "Page-Fault Exception
  * Error Code"): bit 0 = P, bit 1 = W/R, bit 2 = U/S, bit 4 = I/D. */
@@ -36,6 +31,7 @@
 
 /* Origin from the saved CS selector: the low two bits are the RPL,
  * i.e. the privilege level the exception was taken at. */
+__attribute__((no_stack_protector))
 static enum intr_origin x86_origin_from_cs(uint64_t cs)
 {
     switch (cs & 3ULL) {
@@ -74,12 +70,23 @@ void x86_intr_decode(struct intr_event *out, const pt_regs_t *regs,
 
     switch (vector) {
     case X86_VECTOR_DIVIDE_ERROR:
+    case X86_VECTOR_OVERFLOW:
+    case X86_VECTOR_BOUNDS:
+    case X86_VECTOR_DEV_NOT_AVAILABLE:
+    case X86_VECTOR_COPROCESSOR_SEGMENT_OVERRUN:
+    case X86_VECTOR_X87_FPU_ERROR:
+    case X86_VECTOR_SIMD_EXCEPTION:
         out->reason = INTR_REASON_ARITHMETIC;
         break;
     case X86_VECTOR_UNDEFINED_OPCODE:
         out->reason = INTR_REASON_ILLEGAL;
         break;
+    case X86_VECTOR_INVALID_TSS:
+    case X86_VECTOR_SEGMENT_NOT_PRESENT:
+    case X86_VECTOR_STACK_SEGMENT_FAULT:
     case X86_VECTOR_GENERAL_PROTECTION:
+    case X86_VECTOR_ALIGNMENT_CHECK:
+    case X86_VECTOR_VIRTUALIZATION_EXCEPTION:
         out->reason = INTR_REASON_PROTECTION;
         break;
     default:
@@ -90,5 +97,20 @@ void x86_intr_decode(struct intr_event *out, const pt_regs_t *regs,
     out->access = INTR_ACCESS_UNKNOWN;
     out->fault_addr_valid = false;
     out->fault_addr = 0;
+    out->native_address = 0;
+}
+
+__attribute__((no_stack_protector))
+void x86_intr_decode_irq(struct intr_event *out, const pt_regs_t *regs,
+                         uint64_t vector)
+{
+    out->kind = INTR_IRQ;
+    out->origin = x86_origin_from_cs(regs->cs);
+    out->reason = INTR_REASON_OTHER;
+    out->access = INTR_ACCESS_UNKNOWN;
+    out->fault_addr_valid = false;
+    out->fault_addr = 0;
+    out->native_vector = vector;
+    out->native_status = 0;
     out->native_address = 0;
 }

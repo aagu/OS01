@@ -62,7 +62,18 @@ extern void lapic_spurious_stub(void);
 __asm__(
     ".globl lapic_spurious_stub\n\t"
     "lapic_spurious_stub:\n\t"
-    "iretq\n\t"
+    "pushq $0\n\t"
+    INTR_SAVE_ALL
+    "movq %rsp, %rdi\n\t"
+    "movq $0xff, %rsi\n\t"
+    /* Align the C call independently of the interrupted RSP. Keep the
+     * saved frame pointer in a callee-saved register; RESTORE_ALL will
+     * restore its interrupted value from that frame. */
+    "movq %rsp, %rbx\n\t"
+    "andq $-16, %rsp\n\t"
+    "call x86_irq_entry\n\t"
+    "movq %rbx, %rsp\n\t"
+    "jmp x86_intr_restore_only\n\t"
 );
 
 // ──────────────────────────────────────────────
@@ -128,7 +139,8 @@ int lapic_init(void)
     // 8. Mask all LVT entries initially
     lapic_write(LAPIC_LVT_TIMER,   LVT_MASK);
     lapic_write(LAPIC_LVT_LINT0,   LVT_MASK | LVT_DELIVERY_EXTINT);  // LINT0 = ExtINT for PIC compatibility
-    lapic_write(LAPIC_LVT_LINT1,   LVT_MASK);
+    lapic_write(LAPIC_LVT_LINT1, LVT_MASK);
+    lapic_configure_nmi();
     lapic_write(LAPIC_LVT_ERROR,   LVT_MASK);
     lapic_write(LAPIC_LVT_PERF,    LVT_MASK);
     lapic_write(LAPIC_LVT_THERMAL, LVT_MASK);

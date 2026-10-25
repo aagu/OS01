@@ -1,6 +1,6 @@
 /* hosttests/cases/test_intr_backend_x86.c
  *
- * x86_64 routing backend (dispatch phase 1, Task 4).
+ * x86_64 routing backend (phase2 installed exception coverage).
  *
  * Links three PRODUCTION objects:
  *   • kernel/arch/x86_64/intr/intr_decode.c  (pure x86 decoder)
@@ -24,9 +24,8 @@
  *     KERNEL-origin event whose #PF error-code U/S bit is set is NOT
  *     rejected: the CS-derived origin and the U/S bit are independent
  *     (spec §6.1 — the kernel legitimately faults on user addresses).
- *   irq_fail_closed — any IRQ event goes straight to bad-event; the
- *     x86 IRQ backend has no production caller in phase one and must
- *     not route to arch_irq_dispatch() (spec §5.2).
+ *   irq_unknown_vector_rejected — vector zero is not an installed IRQ;
+ *     the production IRQ chain is covered in test_intr_irq_x86.
  *   bad_origin_or_payload — an UNKNOWN origin (CPL 1/2), a tampered
  *     origin, a tampered classification, a #GP borrowing the #PF CR2
  *     and an UNMIGRATED vector (21) all reach bad-event and nothing
@@ -130,6 +129,127 @@ void arch_intr_bad_event(const struct intr_event *event, pt_regs_t *regs)
     g_bad_event = event;
     g_bad_regs  = regs;
     longjmp(g_bad_jb, 1);
+}
+
+static int extra_calls[21];
+static uint64_t extra_err;
+static pt_regs_t *extra_regs;
+static jmp_buf fatal_jb;
+void x86_handle_debug(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[1]++;
+    extra_err = err;
+    extra_regs = regs;
+    longjmp(fatal_jb, 1);
+}
+
+void x86_handle_nmi(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[2]++;
+    extra_err = err;
+    extra_regs = regs;
+    longjmp(fatal_jb, 1);
+}
+
+void x86_handle_int3(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[3]++;
+    extra_err = err;
+    extra_regs = regs;
+    longjmp(fatal_jb, 1);
+}
+
+void x86_handle_overflow(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[4]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_bounds(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[5]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_dev_not_available(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[7]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_double_fault(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[8]++;
+    extra_err = err;
+    extra_regs = regs;
+    longjmp(fatal_jb, 1);
+}
+
+void x86_handle_coprocessor_segment_overrun(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[9]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_invalid_TSS(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[10]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_segment_not_present(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[11]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_stack_segment_fault(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[12]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_x87_FPU_error(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[16]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_alignment_check(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[17]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_machine_check(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[18]++;
+    extra_err = err;
+    extra_regs = regs;
+    longjmp(fatal_jb, 1);
+}
+
+void x86_handle_SIMD_exception(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[19]++;
+    extra_err = err;
+    extra_regs = regs;
+}
+
+void x86_handle_virtualization_exception(pt_regs_t *regs, uint64_t err)
+{
+    extra_calls[20]++;
+    extra_err = err;
+    extra_regs = regs;
 }
 
 /* ── Fixtures ────────────────────────────────────────────────────────── */
@@ -311,18 +431,16 @@ TEST_FUNC(sync_pf_routes_once)
     assert_eq(0, g_bad_calls);
 }
 
-/* ── Case: irq_fail_closed ───────────────────────────────────────────── */
+/* ── Case: irq_unknown_vector_rejected ───────────────────────────────────────────── */
 
-TEST_FUNC(irq_fail_closed)
+TEST_FUNC(irq_unknown_vector_rejected)
 {
     static struct intr_event ev;
     static pt_regs_t regs;
 
-    TEST_SUITE("irq_fail_closed");
+    TEST_SUITE("irq_unknown_vector_rejected");
 
-    /* Any IRQ event must go straight to bad-event: the x86 IRQ backend
-     * exists only so the strong-link contract holds (spec §5.2); it
-     * must never pretend to cover the IRQ surface. */
+    /* Vector zero is outside the installed IRQ families. */
     reset_spies();
     fill_regs(&regs, CS_KERNEL_LIT);
     memset(&ev, 0, sizeof(ev));
@@ -422,12 +540,61 @@ TEST_FUNC(bad_origin_or_payload)
     assert_no_handlers_fired();
 }
 
+TEST_FUNC(all_installed_routes)
+{
+    static const unsigned vectors[] = {
+        1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20
+    };
+    static pt_regs_t regs;
+    static struct intr_event ev;
+    TEST_SUITE("all_installed_routes");
+    for (unsigned cpl = 0; cpl < 2; cpl++) {
+      for (unsigned i = 0; i < sizeof(vectors)/sizeof(vectors[0]); i++) {
+        unsigned v = vectors[i];
+        memset(extra_calls, 0, sizeof(extra_calls));
+        reset_spies();
+        fill_regs(&regs, cpl ? CS_USER_LIT : CS_KERNEL_LIT);
+        regs.errcode = 0xdead; /* The saved pseudo-error slot is not the C payload. */
+        x86_intr_decode(&ev, &regs, v, 0x123400+v, CR2_LIT);
+        if (setjmp(g_bad_jb) == 0) {
+            if (setjmp(fatal_jb) == 0) {
+                arch_intr_dispatch(&ev,&regs);
+                assert_true(v!=1 && v!=2 && v!=3 && v!=8 && v!=18);
+            }
+        }
+        assert_eq(0,g_bad_calls);
+        for (unsigned j=0;j<21;j++) assert_eq(j==v ? 1 : 0,extra_calls[j]);
+        assert_eq(0x123400+v,extra_err); assert_true(extra_regs==&regs);
+        assert_eq(0, g_de_calls+g_ud_calls+g_gp_calls+g_pf_calls);
+      }
+    }
+    /* Every installed vector rejects CPL1/2 and malformed normalized fields. */
+    static const unsigned installed[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,16,17,18,19,20};
+    for (unsigned i = 0; i < sizeof(installed)/sizeof(installed[0]); i++) {
+        for (unsigned cpl = 1; cpl <= 2; cpl++) {
+            reset_spies(); fill_regs(&regs, 0x08+cpl);
+            x86_intr_decode(&ev, &regs, installed[i], 0, 0);
+            expect_bad_event(&ev, &regs);
+        }
+        reset_spies(); fill_regs(&regs, CS_KERNEL_LIT);
+        x86_intr_decode(&ev, &regs, installed[i], 0, 0);
+        ev.access = INTR_ACCESS_EXEC;
+        expect_bad_event(&ev, &regs);
+    }
+    static const unsigned unsupported[] = {15, 21, 0x80};
+    for (unsigned i = 0; i < 3; i++) {
+        reset_spies(); fill_regs(&regs,CS_KERNEL_LIT);
+        x86_intr_decode(&ev,&regs,unsupported[i],0,0); expect_bad_event(&ev,&regs);
+    }
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(all_installed_routes),
     TEST_ENTRY(sync_de_routes_once),
     TEST_ENTRY(sync_ud_routes_once),
     TEST_ENTRY(sync_gp_routes_once),
     TEST_ENTRY(sync_pf_routes_once),
-    TEST_ENTRY(irq_fail_closed),
+    TEST_ENTRY(irq_unknown_vector_rejected),
     TEST_ENTRY(bad_origin_or_payload),
 TEST_LIST_END
 
@@ -436,3 +603,10 @@ int main(void)
     RUN_ALL_TESTS();
     return __test_stats.failed ? 1 : 0;
 }
+
+/* IRQ production business is exercised by test_intr_irq_x86; these boundaries
+ * must stay unreachable for this suite's malformed vector-zero IRQ event. */
+void x86_handle_device_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }
+void x86_handle_registered_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }
+void x86_handle_lapic_timer_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }
+void x86_handle_spurious_irq(pt_regs_t *r, uint64_t v) { __builtin_trap(); }

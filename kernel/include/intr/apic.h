@@ -139,6 +139,7 @@
 #define MAX_LAPICS        NR_CPUS
 #define MAX_IOAPICS       4
 #define MAX_ISO_OVERRIDES 16
+#define MAX_LAPIC_NMIS (2 * MAX_LAPICS + 2)
 
 typedef struct {
     uint32_t apic_id;          // APIC ID (8-bit for LAPIC, 32-bit for x2APIC)
@@ -161,6 +162,12 @@ typedef struct {
 } iso_override_t;
 
 typedef struct {
+    uint8_t acpi_id;
+    uint8_t lint;
+    uint16_t flags;
+} lapic_nmi_t;
+
+typedef struct {
     uint64_t lapic_base;          // local APIC MMIO physical base (from MADT or default)
     uint32_t lapic_count;
     lapic_entry_t lapics[MAX_LAPICS];
@@ -168,6 +175,8 @@ typedef struct {
     ioapic_entry_t ioapics[MAX_IOAPICS];
     uint32_t iso_count;
     iso_override_t isos[MAX_ISO_OVERRIDES];
+    uint32_t nmi_count;
+    lapic_nmi_t nmis[MAX_LAPIC_NMIS];
     uint16_t pm1a_port;           // ACPI PM1a Control port (0 = not found)
 } apic_info_t;
 
@@ -189,6 +198,7 @@ int acpi_parse(uint64_t rsdp_phys);
 // LAPIC: init / EOI
 int  lapic_init(void);
 void lapic_eoi(void);
+void lapic_configure_nmi(void);
 
 // LAPIC: read/write a 32-bit MMIO register
 uint32_t lapic_read(uint32_t offset);

@@ -440,7 +440,7 @@ test-pmm-boot-reservation:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1023,6 +1023,61 @@ _test-driver-model-run:
 test-qemu-driver-model: _test-driver-model-prep _test-driver-model-run
 	@true
 
+# ── intr-x86: isolated destructive #BP / NMI acceptance ─────────
+# Task 5 (spec §9.3): the two fatal entries that cannot be exercised
+# through the ordinary boot or the kernel-selftest image get their OWN
+# kernel/image variant and their OWN single-CPU boot:
+#
+#   bp  — the kernel #BP trap (int3); the saved RIP must equal the
+#         resume label resolved from the VARIANT ELF;
+#   nmi — a REAL hardware NMI injected over QMP `inject-nmi`.
+#
+# The suite never uses the normal image and never uses the ordinary
+# kernel-selftest path.  Each case is built through the controlled
+# sub-make boundary — the probe-selection macro travels in
+# KERNEL_EXTRA_CFLAGS, an OS01_SUBMAKE_ALLOWED channel — and is judged
+# by qemutests/x86_intr_fault.py, whose parser is the only success
+# criterion (a timeout is never a pass).
+#
+# The pre-build and the run each sit on their OWN recipe line: a
+# recipe line that contains $(MAKE) is executed even under `make -n`,
+# so the python invocation must NOT share a line with it (see the
+# fix/ci-test-qemu-dryrun note in the test-qemu recipe below).
+INTR_X86_TIMEOUT ?= 120
+# The isolated variant paths.  The slug must match the one the profile
+# builds (mk/profiles/x86_64-clang.mk) — the build-contract bucket
+# pins the spellings together.
+TEST_INTR_X86_IMAGE_bp := $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
+TEST_INTR_X86_IMAGE_nmi := $(BUILD_DIR)/image/intr-x86-fault-nmi/disk.img
+TEST_INTR_X86_ELF_bp   := $(BUILD_DIR)/kernel/intr-x86-fault-bp/kernel.elf
+TEST_INTR_X86_ELF_nmi   := $(BUILD_DIR)/kernel/intr-x86-fault-nmi/kernel.elf
+.PHONY: test-qemu-intr-x86
+test-qemu-intr-x86:
+	@echo "  [test-qemu] SUITE=intr-x86: building the isolated #BP variant"
+	$(MAKE) --no-print-directory X86_INTR_FAULT_TEST=bp image
+	@echo "  [test-qemu] SUITE=intr-x86: running the #BP case"
+	python3 qemutests/x86_intr_fault.py --case bp \
+	  --timeout $(INTR_X86_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_INTR_X86_IMAGE_bp)" \
+	  --elf "$(TEST_INTR_X86_ELF_bp)" \
+	  --nm "$(LLVM_NM)" \
+	  --qemu "$(QEMU_BIN)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
+	  --log-dir "$(abspath $(BUILD_DIR))/test-results/intr-x86/bp-$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	@echo "  [test-qemu] SUITE=intr-x86: building the isolated NMI variant"
+	$(MAKE) --no-print-directory X86_INTR_FAULT_TEST=nmi image
+	@echo "  [test-qemu] SUITE=intr-x86: running the NMI case"
+	python3 qemutests/x86_intr_fault.py --case nmi \
+	  --timeout $(INTR_X86_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_INTR_X86_IMAGE_nmi)" \
+	  --elf "$(TEST_INTR_X86_ELF_nmi)" \
+	  --nm "$(LLVM_NM)" \
+	  --qemu "$(QEMU_BIN)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
+	  --log-dir "$(abspath $(BUILD_DIR))/test-results/intr-x86/nmi-$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
 # Per-SUITE lookups, used by test-qemu to pick the right variant build
 # flavor and the right image path. These are Make variables so they
 # resolve at parse time and survive across recipe lines.
@@ -1058,6 +1113,12 @@ TEST_QEMU_FLAVOR_monitor        =
 # -snapshot, -serial stdio, -display none) — the parent TestRunner does
 # NOT pre-spawn QEMU for this suite.
 TEST_QEMU_FLAVOR_terminal-present = TERM_PRESENT_TEST=1
+# intr-x86 (Task 5, spec §9.3) runs the two ISOLATED destructive
+# dispatch cases (kernel #BP and a QMP-injected hardware NMI).  Each
+# case builds its own kernel/image variant (intr-x86-fault-bp /
+# intr-x86-fault-nmi) inside the suite target, so no variant build is
+# requested here.
+TEST_QEMU_FLAVOR_intr-x86      =
 # gui (GUI-1 plan Task 7) runs the normal image directly: /bin/test_lvgl
 # and /bin/test_gui_fault are both installed into the normal rootfs by
 # the shared program discovery, so no variant build is needed. The matrix
@@ -1085,6 +1146,9 @@ TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_terminal-present = $(TEST_TERMINAL_PRESENT_IMAGE)
 TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
+# intr-x86 runs one image per destructive case; the suite target owns
+# the per-case paths (the value below is the informational echo only).
+TEST_QEMU_IMG_intr-x86         = $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -1115,8 +1179,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -1134,6 +1198,9 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# QEMU launch via the dispatcher; it does not modify the normal image,
 	# so the hash guard is skipped too.
 	# gui runs against the normal image read-only (-snapshot) across SMP=1/2.
+	# intr-x86 is NOT in the skip list: the suite builds its own isolated
+	# fault variants (image/intr-x86-fault-<case>/) and never writes the
+	# normal image, so the hash guard must run and prove exactly that.
 	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
@@ -1152,6 +1219,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
 	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
 	  $(MAKE) --no-print-directory test-qemu-driver-model || exit 1; \
+	elif [ "$(SUITE)" = "intr-x86" ]; then \
+	  $(MAKE) --no-print-directory test-qemu-intr-x86 || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
 	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
@@ -1172,8 +1241,9 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# ``build_contract.sh targets`` dry-run when it was inlined into the
 	# same ``if/else/fi`` block as ``$(MAKE)``). driver-model runs the
 	# python harness inside ``test-qemu-driver-model`` and must NOT
-	# launch it again here.
-	@if [ "$(SUITE)" != "driver-model" ]; then \
+	# launch it again here; intr-x86 runs its own per-case harness
+	# inside ``test-qemu-intr-x86`` for the same reason.
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	  NETWORK_NIC="$(NETWORK_NIC)" \
@@ -1540,7 +1610,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
@@ -1808,3 +1878,8 @@ _test-aarch64-run-m1-ap-bad-root:
 	  --firmware "$(BUILD_DIR)/image/m1-ap-bad-root/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ap-bad-root"
+
+.PHONY: test-intr-irq-x86
+test-intr-irq-x86:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-intr-irq-x86 $(OS01_SUBMAKE_ARGS))

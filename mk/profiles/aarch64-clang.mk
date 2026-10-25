@@ -34,6 +34,16 @@ else
 $(error ARCH9_FAULT=$(ARCH9_FAULT) is x86-only; aarch64 profile must keep ARCH9_FAULT=none)
 endif
 #
+# X86_INTR_FAULT_TEST is x86-only as well: the destructive #BP / NMI
+# probes target the x86 exception entries (int3 and the NMI gate).  The
+# probe-selection macro travels through KERNEL_EXTRA_CFLAGS, so reject a
+# non-empty selection here — this profile is also included directly by
+# the aarch64 kernel sub-make, which never sees mk/project.mk.
+X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,))
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+$(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is x86-only; the aarch64 profile must not select a destructive fault variant)
+endif
+#
 # Order matters: sync-fault wins over weak-selftest when both
 # KERNEL_TEST_FORCE_NO_RNDRRS=1 and AARCH64_SYNC_FAULT_TEST=1 are set,
 # so the dedicated image/firmware paths (`image/sync-fault/`) match the

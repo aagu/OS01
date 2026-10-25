@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""intr-dispatch wiring audit — intr-dispatch phase 1, Task 6 (spec §9.1).
+"""intr-dispatch wiring audit — complete native x86 installed surface (spec §9.1).
 
 CLI contract::
 
@@ -19,33 +19,18 @@ What it proves, per architecture, from the **production ELF** symbol
 table (``llvm-nm``) plus real instruction dataflow (``llvm-objdump``)
 plus source invariants (``--repo-root``):
 
-x86 (``-mcmodel=large`` — absolute-address indirect calls):
+x86 (``-mcmodel=large``):
 
-  1. each of the four stubs (#DE/#UD/#GP/#PF) transfers to its public
-     thin C entry through the FUNC slot: ``leaq do_*(%rip)`` →
-     ``xchgq %rax,(%rsp)`` → ``error_code`` (explicit ``jmp`` or direct
-     fall-through), never ``ret_from_exception``;
-  2. the shared ``error_code`` block loads the FUNC slot (17 pushes
-     below the frame top, displacement checked against the push count)
-     into ``%rdx`` and ``callq *%rdx``, then jumps ``ret_from_intr``;
-  3. each thin entry calls ``x86_intr_decode`` AND
-     ``arch_intr_dispatch`` through a ``movabs`` immediate resolved via
-     the ELF symbol table — an unresolvable or wrong immediate fails
-     the edge; a thin entry bypassing the dispatcher fails;
-  4. ``arch_intr_dispatch`` tail-jumps to ``arch_intr_handle_sync`` and
-     ``arch_intr_handle_irq`` and calls ``arch_intr_bad_event``;
-  5. ``arch_intr_handle_irq`` stays fail-closed (bad-event only, never
-     ``arch_irq_dispatch``);
-  6. the #PF chain reads CR2 exactly once (in ``do_page_fault``); the
-     retained #GP fatal diagnostic CR2 read is outside the #PF chain
-     and deliberately not counted;
-  7. strong definition uniqueness of the four backend symbols, no weak
-     definitions; the early-reachable chain references no
-     ``__stack_chk_fail``, no ordinary logger, no allocation; no
-     cross-ISA dependency;
-  8. source invariants: the retained #GP CR2 diagnostic, the real
-     copy-failure branch (``copy_from_user_ft_res``), and Task 5's
-     probe path + marker in ``test_uaccess.c``.
+  * all 20 installed exceptions and 28 installed IRQ stubs, native error
+    frames, FUNC slots, C argument provenance, and original return paths;
+  * NMI direct call with explicit zero error and independent restoration;
+    spurious full save/aligned call/restore-only return, without EOI;
+  * thin adapters through production decoders and common dispatch;
+    control-flow-resolved absolute indirect calls and shared tail sites;
+  * actual ELF gate writer dataflow plus installation source evidence for
+    vector, target, selector, DPL/type and IST (runtime snapshots separate);
+  * unique strong backends, early dependencies before business endpoints,
+    PF-only CR2 count and retained GP/uaccess/longjmp source invariants.
 
 aarch64:
 
@@ -243,39 +228,13 @@ def x86_edges(instrs: List[Instr], symtab: SymbolTable) -> List[Edge]:
     """Edges of one x86 function: movabs-fed indirect call/jump (the
     ``-mcmodel=large`` form), direct branches, and RIP-relative lea.
 
-    Assumption (documented, not modelled): the tracked ``movabs``
-    immediate stays valid in its register until the next ``movabs``
-    into that register.  Real ``-mcmodel=large`` output always reloads
-    the absolute address right before the indirect branch, so a stale
-    immediate cannot survive a clobber in the audited chain; the
-    tracker deliberately does not model register clobbering by
-    intervening instructions.
+    Register-indirect transfers use a bounded control-flow walk, retaining
+    path-specific movabs values through local joins and invalidating writes
+    and SysV caller-saved registers after C calls.
     """
-    imm: Dict[str, Optional[int]] = {}
     edges: List[Edge] = []
     for ins in instrs:
         t = ins.text
-        m = re.match(r"^movabsq \$([^,]+), %(r?\w+)$", t)
-        if m:
-            imm[m.group(2)] = _parse_imm(m.group(1), ins.comment)
-            continue
-        m = re.match(r"^(callq|jmpq) \*%(r?\w+)$", t)
-        if m:
-            kind = "call" if m.group(1) == "callq" else "jmp"
-            reg = m.group(2)
-            if reg not in imm:
-                edges.append(Edge(
-                    kind, None,
-                    f"indirect {m.group(1)} through %{reg} with no "
-                    "tracked movabs source (edge unprovable)"))
-            elif imm[reg] is None:
-                edges.append(Edge(kind, None,
-                                  "movabs immediate unparsable"))
-            else:
-                addr = imm[reg]
-                edges.append(Edge(kind, symtab.resolve(addr),
-                                  f"movabs 0x{addr:x}"))
-            continue
         if re.match(r"^(callq|jmpq) \*\(", t):
             edges.append(Edge("table", None,
                               "indexed table dispatch (not a provable "
@@ -303,7 +262,145 @@ def x86_edges(instrs: List[Instr], symtab: SymbolTable) -> List[Edge]:
                 edges.append(Edge("lea", None,
                                   "rip-relative leaq without a resolved "
                                   "target in the comment"))
+    # Resolve register transfers over actual local control flow. Clang shares
+    # one indirect tail site among several movabs-loaded business endpoints.
+    # A linear last-write scan loses all but the last route at that join.
+    edges.extend(_x86_indirect_edges(instrs, symtab))
     return edges
+
+
+_X86_CALLER_SAVED = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"}
+_X86_REGISTER_ALIASES = {}
+for _full, _parts in {
+    "rax": ("eax", "ax", "al", "ah"),
+    "rbx": ("ebx", "bx", "bl", "bh"),
+    "rcx": ("ecx", "cx", "cl", "ch"),
+    "rdx": ("edx", "dx", "dl", "dh"),
+    "rsi": ("esi", "si", "sil"), "rdi": ("edi", "di", "dil"),
+    "rbp": ("ebp", "bp", "bpl"), "rsp": ("esp", "sp", "spl"),
+    **{f"r{i}": (f"r{i}d", f"r{i}w", f"r{i}b") for i in range(8, 16)},
+}.items():
+    for _alias in (_full, *_parts):
+        _X86_REGISTER_ALIASES[_alias] = _full
+
+
+def _x86_register_writes(text):
+    """GPR write effects for the audited shapes; None means unknown effects.
+
+    Unknown instructions invalidate all provenance. Recognized instructions
+    include unary, implicit and partial-register writes, not just comma-form
+    destinations. This conservative model never invents a preserved value.
+    """
+    mnemonic, _, operands = text.partition(" ")
+    def register(operand):
+        return _X86_REGISTER_ALIASES.get(operand.strip().removeprefix("%"))
+    def destination():
+        operand = operands.rsplit(",", 1)[-1].strip()
+        reg = register(operand)
+        if reg:
+            return {reg}
+        # Memory/segment/SIMD destinations do not overwrite a GPR.
+        if operand.endswith(")") or re.fullmatch(r"%(?:[cdefgs]s|[xyz]mm\d+)", operand):
+            return set()
+        return None
+    if mnemonic.startswith("call"):
+        return _X86_CALLER_SAVED | {"rsp"}
+    if mnemonic.startswith("pop"):
+        writes = destination()
+        return writes | {"rsp"} if writes is not None else None
+    if mnemonic.startswith("push"):
+        return {"rsp"}
+    if mnemonic in ("leave", "leaveq"):
+        return {"rsp", "rbp"}
+    if re.fullmatch(r"(?:i?div|mul)[bwlq]?", mnemonic) or re.fullmatch(r"imul[bwlq]?", mnemonic) and "," not in operands:
+        return {"rax", "rdx"}
+    if mnemonic in ("cpuid",):
+        return {"rax", "rbx", "rcx", "rdx"}
+    if mnemonic in ("rdmsr", "rdtsc", "rdtscp"):
+        return {"rax", "rdx", "rcx"} if mnemonic == "rdtscp" else {"rax", "rdx"}
+    if mnemonic in ("cqo", "cqto", "cltd", "cdq", "cwd"):
+        return {"rdx"}
+    if mnemonic in ("cbw", "cwde", "cdqe", "cltq", "cwtl", "cbtw", "lodsb", "lodsw", "lodsl", "lodsq"):
+        return {"rax", "rsi"}
+    if mnemonic.startswith(("xchg", "xadd")):
+        # Both explicit operands are outputs. A memory operand may contain
+        # commas, so collect bare register operands at either end only.
+        regs = re.findall(r"(?:^|, )%(\w+)(?=,|$)", operands)
+        writes = {_X86_REGISTER_ALIASES[r] for r in regs if r in _X86_REGISTER_ALIASES}
+        return writes if writes else None
+    if mnemonic.startswith("cmpxchg"):
+        writes = destination()
+        return writes | ({"rax", "rdx"} if mnemonic in ("cmpxchg8b", "cmpxchg16b") else {"rax"}) if writes is not None else None
+    if re.fullmatch(r"(?:mov(?:absq|[bwlq]|[sz][bwl][wlq])|lea[qwl]?|add[bwlq]?|sub[bwlq]?|adc[bwlq]?|sbb[bwlq]?|and[bwlq]?|or[bwlq]?|xor[bwlq]?|sh[lr][bwlq]?|sa[lr][bwlq]?|ro[lr][bwlq]?|inc[bwlq]?|dec[bwlq]?|neg[bwlq]?|not[bwlq]?|bswap[lq]?|imul[bwlq]?|cmov\w+|set\w+)", mnemonic):
+        return destination()
+    if re.fullmatch(r"(?:cmp|test)[bwlq]?", mnemonic) or mnemonic.startswith(("j", "nop")) or mnemonic in (
+            "cld", "std", "cli", "sti", "pause", "hlt", "ud2", "int3",
+            "endbr64", "wrmsr", "lfence", "mfence", "sfence"):
+        return set()
+    return None
+
+
+def _x86_value_survives(instructions, setups, register, transfer):
+    """Require an exact setup and preserve its value until the C transfer."""
+    indices = [i for i, ins in enumerate(instructions[:transfer])
+               if ins.text in setups]
+    if not indices or transfer < 0 or transfer >= len(instructions):
+        return False
+    for ins in instructions[indices[-1]+1:transfer]:
+        writes = _x86_register_writes(ins.text)
+        if writes is None or register in writes:
+            return False
+    return True
+
+
+def _x86_indirect_edges(instrs, symtab):
+    if not instrs:
+        return []
+    by_addr = {ins.addr: i for i, ins in enumerate(instrs)}
+    pending = [(0, ())]
+    seen, result = set(), []
+    while pending:
+        index, frozen = pending.pop()
+        if index >= len(instrs) or (index, frozen) in seen:
+            continue
+        seen.add((index, frozen))
+        if len(seen) > 20000:
+            return [Edge("jmp", None, "control-flow state limit exceeded")]
+        state = dict(frozen)
+        ins = instrs[index]
+        text = ins.text
+        m = re.match(r"^movabsq \$([^,]+), %(\w+)$", text)
+        if m:
+            state[m.group(2)] = _parse_imm(m.group(1), ins.comment)
+        else:
+            indirect = re.match(r"^(callq?|jmpq?) \*%(\w+)$", text)
+            if indirect:
+                kind = "call" if indirect.group(1).startswith("call") else "jmp"
+                addr = state.get(indirect.group(2))
+                edge = Edge(kind, symtab.resolve(addr) if addr is not None else None,
+                            f"control-flow movabs 0x{addr:x}" if addr is not None else "no tracked movabs source")
+                if edge not in result:
+                    result.append(edge)
+                if kind == "jmp":
+                    continue
+            writes = _x86_register_writes(text)
+            if writes is None:
+                state.clear()
+            else:
+                for reg in writes:
+                    state.pop(reg, None)
+        next_state = tuple(sorted(state.items()))
+        branch = _X86_BRANCH.match(text)
+        if branch and not text.startswith("call"):
+            target = by_addr.get(int(branch.group(2),16))
+            if target is not None:
+                pending.append((target, next_state))
+            if text.startswith("jmp"):
+                continue
+        if text.startswith(("ret", "iret", "hlt", "ud2")):
+            continue
+        pending.append((index + 1, next_state))
+    return result
 
 
 # AArch64 direct branches.  The conditional forms carry one or two
@@ -349,7 +446,8 @@ FORBIDDEN_EXACT = {
     "schedule",
     "kmalloc", "kzalloc", "kfree", "alloc_4k_page", "free_4k_page",
 }
-FORBIDDEN_PREFIXES = ("log_", "slab_alloc", "slab_free")
+FORBIDDEN_PREFIXES = ("log_", "slab_alloc", "slab_free", "spin_lock", "spin_unlock",
+                      "mutex_", "percpu_", "get_current")
 
 
 def _forbidden_target(name: str) -> Optional[str]:
@@ -369,26 +467,42 @@ def _forbidden_target(name: str) -> Optional[str]:
 _BACKEND_SYMS = ("arch_intr_dispatch", "arch_intr_handle_sync",
                  "arch_intr_handle_irq", "arch_intr_bad_event")
 
-_X86_STUBS = (
-    ("divide_error", "do_divide_error"),
-    ("undefined_opcode", "do_undefined_opcode"),
-    ("general_protection", "do_general_protection"),
-    ("page_fault", "do_page_fault"),
+# Frozen native installation manifest; deliberately independent of intr_vectors.h.
+_X86_SYNC_NAMES = (
+    "divide_error", "debug", "nmi", "int3", "overflow", "bounds",
+    "undefined_opcode", "dev_not_available", "double_fault",
+    "coprocessor_segment_overrun", "invalid_TSS", "segment_not_present",
+    "stack_segment_fault", "general_protection", "page_fault",
+    "x87_FPU_error", "alignment_check", "machine_check", "SIMD_exception",
+    "virtualization_exception",
 )
-
-_X86_DISASM_SYMS = (
-    [s for s, _ in _X86_STUBS]
-    + ["error_code"]
-    + [e for _, e in _X86_STUBS]
-    + ["arch_intr_dispatch", "arch_intr_handle_sync",
-       "arch_intr_handle_irq", "arch_intr_bad_event",
-       "x86_intr_decode", "x86_handle_page_fault",
-       "x86_handle_general_protection"]
-)
-
+_X86_SYNC = dict(zip((*range(15), *range(16, 21)), _X86_SYNC_NAMES))
+_X86_ERROR_VECTORS = {8, 10, 11, 12, 13, 14, 17}
+_X86_STUBS = tuple((name, "do_" + name) for name in _X86_SYNC_NAMES
+                   if name != "nmi")
+_X86_IRQ = {
+    **{v: (f"IRQ{v - 32}_interrupt", "arch_irq_dispatch")
+       for v in range(0x20, 0x38)},
+    0x38: ("lapic_timer_stub", "x86_irq_entry"),
+    0x40: ("_intr_stub_tlb", "generic_intr_dispatch"),
+    0x41: ("_intr_stub_resched", "generic_intr_dispatch"),
+    0xff: ("lapic_spurious_stub", "x86_irq_entry"),
+}
+_X86_IRQ_BUSINESS = ("x86_handle_device_irq", "x86_handle_lapic_timer_irq",
+                     "x86_handle_registered_irq", "x86_handle_spurious_irq")
 _X86_EARLY_CHAIN = ("arch_intr_dispatch", "arch_intr_handle_sync",
                     "arch_intr_handle_irq", "x86_intr_decode",
-                    "arch_intr_bad_event")
+                    "x86_intr_decode_irq", "arch_intr_bad_event",
+                    "arch_irq_dispatch", "generic_intr_dispatch", "x86_irq_entry")
+_X86_DISASM_SYMS = (
+    list(_X86_SYNC_NAMES) + ["do_" + n for n in _X86_SYNC_NAMES]
+    + ["error_code", "RESTORE_ALL", "x86_intr_restore_only"]
+    + [name for name, _ in _X86_IRQ.values()]
+    + list(_X86_EARLY_CHAIN) + list(_X86_IRQ_BUSINESS)
+    + ["sys_vector_install", "arch_irq_install", "lapic_timer_init", "ipi_init", "lapic_init"]
+    + ["x86_dispatch_irq", "x86_event_matches", "x86_handle_page_fault",
+       "x86_handle_general_protection"]
+)
 
 _X86_PF_CHAIN = ("arch_intr_dispatch", "arch_intr_handle_sync",
                  "x86_intr_decode", "arch_intr_bad_event",
@@ -511,7 +625,7 @@ def _audit_x86(symtab, blocks, order, repo: Path,
                 f"{[e.detail for e in tails] or 'no direct jmp'})")
         if any(e.target == "ret_from_exception" for e in tails):
             errors.append("error_code: jumps to ret_from_exception — "
-                          "the four migrated stubs must keep the "
+                          "the installed exception stubs must keep the "
                           "ret_from_intr return path")
 
     for stub, entry in _X86_STUBS:
@@ -550,8 +664,18 @@ def _audit_x86(symtab, blocks, order, repo: Path,
                           "ret_from_exception — the migrated stubs must "
                           "not change the shared return path")
 
+    if ec_instrs is not None:
+        texts = [i.text for i in ec_instrs]
+        call = next((i for i,t in enumerate(texts) if t == "callq *%rdx"), -1)
+        if not _x86_value_survives(ec_instrs, {"movq 0x88(%rsp), %rdx"}, "rdx", call):
+            errors.append("error_code: FUNC slot register clobbered before call")
+        if not _x86_value_survives(ec_instrs, {"movq %rsp, %rdi"}, "rdi", call):
+            errors.append("error_code: frame argument clobbered before call")
+        if not _x86_value_survives(ec_instrs, {"movq 0x90(%rsp), %rsi"}, "rsi", call):
+            errors.append("error_code: error argument clobbered before call")
+
     # 3. thin entry → decoder + dispatcher (movabs absolute form).
-    for stub, entry in _X86_STUBS:
+    for stub, entry in (*_X86_STUBS, ("nmi", "do_nmi")):
         instrs = _block(blocks, entry, errors, "thin C entry")
         if instrs is None:
             continue
@@ -596,19 +720,8 @@ def _audit_x86(symtab, blocks, order, repo: Path,
                 notes.append(f"edge arch_intr_dispatch -> {required} "
                              f"({kind})")
 
-    # 5. x86 IRQ backend stays fail-closed.
-    irq = _block(blocks, "arch_intr_handle_irq", errors, "x86 IRQ backend")
-    if irq is not None:
-        edges = x86_edges(irq, symtab)
-        calls = {e.target for e in edges if e.kind == "call"}
-        if "arch_irq_dispatch" in calls or not calls <= {"arch_intr_bad_event"}:
-            errors.append(
-                "x86 arch_intr_handle_irq is not fail-closed (calls "
-                f"{sorted(c for c in calls if c)}) — phase one must not "
-                "forward to arch_irq_dispatch")
-        else:
-            notes.append("x86 arch_intr_handle_irq fail-closed "
-                         "(arch_intr_bad_event only)")
+    # 5. Installed IRQ families, frame shapes, gate evidence, ACK boundary.
+    _audit_x86_installed(symtab, blocks, repo, errors, notes)
 
     # 6. CR2 read exactly once in the #PF chain.
     pf_entry = blocks.get("do_page_fault") or []
@@ -633,7 +746,11 @@ def _audit_x86(symtab, blocks, order, repo: Path,
     def edges_of(fn):
         instrs = blocks.get(fn)
         return x86_edges(instrs, symtab) if instrs is not None else []
-    _check_chain(_X86_EARLY_CHAIN, edges_of, errors, notes, "aarch64")
+    early = list(_X86_EARLY_CHAIN) + ["do_" + n for n in _X86_SYNC_NAMES]
+    for helper in ("x86_dispatch_irq", "x86_event_matches"):
+        if helper in blocks:
+            early.append(helper)
+    _check_chain(early, edges_of, errors, notes, "aarch64")
 
     # 8. source invariants through --repo-root.
     trap = _read(repo / "kernel/arch/x86_64/intr/trap.c")
@@ -662,6 +779,265 @@ def _audit_x86(symtab, blocks, order, repo: Path,
         notes.append("source: #GP retained CR2 diagnostic, "
                      "copy_from_user_ft_res failure branch and the "
                      "Task 5 probe path all present")
+
+
+
+def _audit_x86_installed(symtab, blocks, repo, errors, notes):
+    """Prove native entry dataflow; leave runtime function tables to host tests.
+
+    Gate source is complementary evidence, not a runtime IDT snapshot (Task 4).
+    Original business endpoints are the dependency-check boundary.
+    """
+    def block(name):
+        return _block(blocks, name, errors, "installed native surface") or []
+
+    def edges(name):
+        return x86_edges(block(name), symtab)
+
+    def require(name, targets):
+        es = edges(name)
+        got = {e.target for e in es if e.kind in ("call", "jmp", "branch")}
+        for target in targets:
+            if target not in got:
+                errors.append(f"{name}: required edge to {target} not proven")
+        if any(e.target is None and e.kind in ("call", "jmp", "branch") for e in es):
+            errors.append(f"{name}: unresolved transfer target")
+        return es
+
+    def pushes(instructions):
+        return [i.text.split(" ", 1)[1] for i in instructions
+                if i.text.startswith("pushq ")]
+
+    tail = ["%rbp", "%rdi", "%rsi", "%rdx", "%rcx", "%rbx"] + [f"%r{i}" for i in range(8, 16)]
+    for vector, name in _X86_SYNC.items():
+        ins = block(name)
+        if vector == 2:
+            if pushes(ins) != ["%rax"] * 5 + tail:
+                errors.append("NMI nmi: malformed full saved frame")
+            texts = [i.text for i in ins]
+            es = require(name, ("do_nmi",))
+            call = next((i for i, t in enumerate(texts) if t.startswith("call")), -1)
+            zero_setups = {"movq $0x0, %rsi", "xorl %esi, %esi", "movl $0x0, %esi"}
+            if not _x86_value_survives(ins, zero_setups, "rsi", call) or not _x86_value_survives(ins, {"movq %rsp, %rdi"}, "rdi", call):
+                errors.append("NMI nmi: explicit C error code zero/frame argument unproven")
+            if any(e.kind in ("call", "jmp", "branch", "table") and e.target not in ("do_nmi", "RESTORE_ALL", "x86_intr_restore_only") for e in es):
+                errors.append("NMI nmi: unexpected work/return transfer")
+            if not _restore_edge(es, symtab):
+                errors.append("NMI nmi: independent restore-only return missing")
+        else:
+            if any(e.kind in ("call", "jmp", "branch", "table") and e.target != "error_code" for e in x86_edges(ins,symtab)):
+                errors.append(f"{name}: unexpected exception stub transfer")
+            expected = ["%rax"] if vector in _X86_ERROR_VECTORS else ["$0x0", "%rax"]
+            if pushes(ins) != expected:
+                errors.append(f"{name}: wrong native error-code frame: {pushes(ins)}")
+
+    ec = block("error_code")
+    if pushes(ec) != ["%rax"] * 3 + tail:
+        errors.append("error_code: saved register order/frame changed")
+    if "movq 0x90(%rsp), %rsi" not in [i.text for i in ec]:
+        errors.append("error_code: native error-code slot must be 0x90(%rsp)")
+
+    for vector, (name, target) in _X86_IRQ.items():
+        ins = block(name)
+        texts = [i.text for i in ins]
+        expected = ["$0x0"] + ["%rax"] * 4 + tail
+        if vector == 0x38:
+            expected = ["$0x0", "$0x0"] + ["%rax"] * 3 + tail
+        if vector not in (0x38, 0xff):
+            expected += ["%rax"]  # synthesized C return address
+        if pushes(ins) != expected:
+            errors.append(f"{name}: incomplete or malformed saved IRQ frame")
+        if f"movq $0x{vector:x}, %rsi" not in texts or "movq %rsp, %rdi" not in texts:
+            errors.append(f"{name}: wrong vector/frame C arguments")
+        es = require(name, (target,))
+        transfer = next((i for i,t in enumerate(texts) if t.startswith(("call", "jmp"))), len(texts))
+        if not _x86_value_survives(ins, {f"movq $0x{vector:x}, %rsi"}, "rsi", transfer):
+            errors.append(f"{name}: vector argument clobbered before transfer")
+        if not _x86_value_survives(ins, {"movq %rsp, %rdi"}, "rdi", transfer):
+            errors.append(f"{name}: frame argument clobbered before transfer")
+        calls = [e for e in es if e.kind == "call" or
+                 (e.kind == "branch" and e.target == target)]
+        if len([e for e in calls if e.target == target]) != 1:
+            errors.append(f"{name}: expected exactly one transfer to {target}")
+        allowed = {target, "ret_from_intr"}
+        if vector == 0xff:
+            allowed = {target, "RESTORE_ALL", "x86_intr_restore_only"}
+            if not _restore_edge(es, symtab):
+                errors.append(f"{name}: spurious must use restore-only return")
+            sequence = ["movq %rsp, %rbx", "andq $-0x10, %rsp"]
+            start = texts.index(sequence[0]) if sequence[0] in texts else -1
+            call = next((i for i,t in enumerate(texts) if t.startswith("call")), -1)
+            if start < 0 or texts[start:start+2] != sequence or call <= start + 1 or "movq %rbx, %rsp" not in texts[call+1:]:
+                errors.append(f"{name}: spurious aligned call/frame RSP restoration unproven")
+        elif vector == 0x38:
+            if not any(e.target == "ret_from_intr" and e.kind == "branch" for e in es):
+                errors.append(f"{name}: timer return must jump ret_from_intr")
+        else:
+            leas = [e for e in es if e.kind == "lea"]
+            if not any(e.target == "ret_from_intr" for e in leas) or not any(
+                    texts[i].startswith("leaq ") and i+1 < len(texts) and texts[i+1] == "pushq %rax"
+                    for i in range(len(texts))):
+                errors.append(f"{name}: synthesized ret_from_intr return not proven")
+        for e in es:
+            if e.kind in ("call", "jmp", "branch") and e.target not in allowed:
+                errors.append(f"{name}: wrong family/ACK/return transfer {e.target}")
+
+    restore = blocks.get("x86_intr_restore_only") or blocks.get("RESTORE_ALL") or []
+    expected_pops = list(reversed(tail)) + ["%rax"] * 3
+    pops = [i.text.split(" ", 1)[1] for i in restore if i.text.startswith("popq ")]
+    if pops != expected_pops or "addq $0x10, %rsp" not in [i.text for i in restore] or not any(i.text == "iretq" for i in restore):
+        errors.append("restore-only: incomplete register/slot/iretq restore")
+    restore_texts = [i.text for i in restore]
+    expected_restore = [f"popq {r}" for r in reversed(tail)] + ["popq %rax", "movq %rax, %ds", "popq %rax", "movq %rax, %es", "popq %rax", "addq $0x10, %rsp", "iretq"]
+    if restore_texts[:len(expected_restore)] != expected_restore:
+        errors.append("restore-only: complete GPR/segment restoration sequence changed")
+    if any(e.kind in ("call", "jmp", "branch", "table") for e in x86_edges(restore, symtab)):
+        errors.append("restore-only: unexpected work/EOI/ret_from_intr transfer")
+
+    # An empty spurious business function is the explicit zero-EOI endpoint.
+    spurious = block("x86_handle_spurious_irq")
+    if any(e.kind in ("call", "jmp", "branch", "table") for e in x86_edges(spurious, symtab)) or not any(i.text == "retq" for i in spurious):
+        errors.append("spurious business: must return without EOI or other calls")
+
+    backend_edges = require("arch_intr_handle_irq", ("x86_intr_decode_irq", "arch_intr_bad_event", *_X86_IRQ_BUSINESS))
+    for edge in backend_edges:
+        if edge.target and ("eoi" in edge.target.lower() or "ack" in edge.target.lower()):
+            errors.append(f"arch_intr_handle_irq: ACK ownership violation: {edge.target}")
+    for name in ("arch_irq_dispatch", "generic_intr_dispatch", "x86_irq_entry"):
+        es = edges(name)
+        if any(e.target == "x86_dispatch_irq" for e in es):
+            require("x86_dispatch_irq", ("x86_intr_decode_irq", "arch_intr_dispatch"))
+        else:
+            require(name, ("x86_intr_decode_irq", "arch_intr_dispatch"))
+        for e in es:
+            if e.target in _X86_IRQ_BUSINESS or e.target and ("eoi" in e.target.lower() or "ack" in e.target.lower()):
+                errors.append(f"{name}: adapter bypasses common dispatch/owns ACK: {e.target}")
+
+    _audit_x86_gate_elf(symtab, blocks, errors)
+    _audit_x86_gate_sources(repo, errors)
+    notes.append("installed surface: 20 exceptions + 28 IRQs, gate source evidence; runtime IDT snapshots and dynamic controller tables require runtime/host tests")
+
+
+def _restore_edge(edges, symtab):
+    aliases = {name for name in ("RESTORE_ALL", "x86_intr_restore_only")
+               if symtab.strong_defs(name)}
+    if len(aliases) == 2 and symtab.strong_defs("RESTORE_ALL")[0][0] != symtab.strong_defs("x86_intr_restore_only")[0][0]:
+        return False
+    return any(e.kind == "branch" and e.target in aliases for e in edges)
+
+
+def _audit_x86_gate_elf(symtab, blocks, errors):
+    """Recognize the actual inline _set_gate descriptor writer.
+
+    Track concrete stub/slot/selector/IST values across repeated writers,
+    including RCX's real output rather than the compiler's input assumption.
+    Reject unknown encodings; this is intentionally a small shape audit,
+    not a general x86 emulator. Runtime execution is checked separately.
+    """
+    idt_defs = symtab.strong_defs("IDT_Table")
+    if len(idt_defs) != 1:
+        errors.append("gate ELF: IDT_Table must have one strong definition")
+        return
+    idt = idt_defs[0][0]
+    groups = {"sys_vector_install": list(_X86_SYNC),
+              "arch_irq_install": list(range(32,56)),
+              "lapic_timer_init": [56], "ipi_init": [64,65],
+              "lapic_init": [255]}
+    aliases = {"eax":"rax", "ecx":"rcx", "edx":"rdx", "esi":"rsi", "edi":"rdi", "cl":"rcx"}
+    fixed = {0:"movw %dx, %ax", 1:"andq $0x7, %rcx", 3:"shlq $0x20, %rcx", 4:"addq %rcx, %rax", 5:"xorq %rcx, %rcx", 6:"movl %edx, %ecx", 7:"shrq $0x10, %rcx", 8:"shlq $0x30, %rcx", 9:"addq %rcx, %rax", 11:"shrq $0x20, %rdx"}
+    for installer, vectors in groups.items():
+        instructions = blocks.get(installer) or []
+        state, actual = {}, {}
+        i = 0
+        while i < len(instructions):
+            ins = instructions[i]
+            text = ins.text
+            if text == "movw %dx, %ax":
+                chunk = [x.text for x in instructions[i:i+13]]
+                attr = re.match(r"addq \$(0x[0-9a-f]+), %rcx$", chunk[2]) if len(chunk)>2 else None
+                low = re.match(r"movq %rax, \(%(\w+)\)$", chunk[10]) if len(chunk)>10 else None
+                high = re.match(r"movq %rdx, \(%(\w+)\)$", chunk[12]) if len(chunk)>12 else None
+                if len(chunk) != 13 or any(chunk[j] != want for j,want in fixed.items()) or not all((attr,low,high)):
+                    errors.append(f"gate ELF {installer}: unknown descriptor writer shape")
+                    i += 1
+                    continue
+                slot = state.get(low.group(1))
+                high_slot = state.get(high.group(1))
+                vector = (slot-idt)//16 if slot is not None and (slot-idt)%16 == 0 else None
+                target = symtab.resolve(state.get("rdx"))
+                descriptor = (target, state.get("rcx", -1)&7, int(attr.group(1),16)>>8, state.get("rax"), high_slot == (slot+8 if slot is not None else None))
+                if vector in actual:
+                    errors.append(f"gate ELF {installer}: duplicate vector {vector}")
+                actual[vector] = descriptor
+                address = state.get("rdx")
+                if address is not None:
+                    state["rcx"] = ((address & 0xffffffff)>>16)<<48
+                    state["rdx"] = address>>32
+                else:
+                    state.pop("rcx",None)
+                    state.pop("rdx",None)
+                state.pop("rax",None)
+                i += 13
+                continue
+            m = re.match(r"^mov(?:absq|q|l|b) \$([^,]+), %(\w+)$", text)
+            if m:
+                value = _parse_imm(m.group(1), ins.comment)
+                reg = aliases.get(m.group(2), m.group(2))
+                if value is not None:
+                    state[reg] = value
+                else:
+                    state.pop(reg,None)
+            elif re.match(r"xor[ql] %(\w+), %\1$", text):
+                reg = text.rsplit("%",1)[1]
+                state[aliases.get(reg,reg)] = 0
+            elif text.startswith("call"):
+                for reg in ("rax","rcx","rdx","rsi","rdi","r8","r9","r10","r11"):
+                    state.pop(reg,None)
+            elif not text.startswith(("cmp", "test", "push", "j")):
+                dest = re.search(r", %(\w+)$",text)
+                if dest:
+                    state.pop(aliases.get(dest.group(1),dest.group(1)),None)
+            i += 1
+        expected = {}
+        for vector in vectors:
+            target = _X86_SYNC[vector] if vector in _X86_SYNC else _X86_IRQ[vector][0]
+            ist = 3 if vector == 8 else 0 if vector == 14 or vector >=32 else 1
+            attr = 0x8e if vector == 2 or vector >=32 else 0xef if vector in (3,4,5) else 0x8f
+            expected[vector] = (target, ist, attr, 0x80000, True)
+        actual.pop(0x80,None)  # syscall installation is outside this migration
+        if actual != expected:
+            differences = {v: (expected.get(v), actual.get(v)) for v in expected.keys() | actual.keys() if expected.get(v) != actual.get(v)}
+            errors.append(f"gate ELF {installer}: vector/target/IST/DPL/type/selector/store mismatch {differences}")
+
+
+def _audit_x86_gate_sources(repo, errors):
+    def source(relative):
+        return re.sub(r"/\*.*?\*/|//[^\n]*", "", _read(repo / relative), flags=re.S)
+    trap = source("kernel/arch/x86_64/intr/trap.c")
+    installs = re.findall(r"(set_\w+_gate(?:_raw)?)\(\s*(0x[0-9a-f]+|\d+)\s*,\s*(\d+)\s*,\s*(\w+)\s*\)", trap)
+    actual = {int(v, 0): (setter, int(ist), name) for setter, v, ist, name in installs if int(v,0) != 0x80}
+    expected = {v: ("set_intr_gate_raw" if v == 2 else "set_system_gate" if v in (3,4,5) else "set_trap_gate", 3 if v == 8 else 0 if v == 14 else 1, n) for v,n in _X86_SYNC.items()}
+    if actual != expected or len([x for x in installs if int(x[1],0) != 0x80]) != 20:
+        errors.append("gate source: installed sync vector/type/DPL/IST/target manifest differs")
+    gate = source("kernel/include/arch/x86_64/gate.h")
+    for setter, attr in (("set_intr_gate_raw", "0x8E"), ("set_trap_gate", "0x8F"), ("set_system_gate", "0xEF")):
+        body = _function_body(gate, " " + setter + "(")
+        if not re.search(r"_set_gate\(IDT_Table\s*\+\s*n\s*,\s*" + attr + r"\s*,\s*ist\s*,\s*addr\)", body):
+            errors.append(f"gate source: {setter} type/DPL encoding changed")
+    irq = source("kernel/arch/x86_64/intr/irq.c")
+    pairs = [(int(n), int(v,0)) for n,v in re.findall(r"Build_IRQ\(\s*(\d+)\s*,\s*(0x[0-9a-f]+)\s*\)", irq)]
+    if pairs != [(n, n+32) for n in range(24)] or not re.search(r"set_intr_gate_raw\(vector,\s*0,", irq):
+        errors.append("gate source: Build_IRQ installed vector/type/IST manifest differs")
+    if set(map(int,re.findall(r"_irq_install_(\d+)\(\)", _function_body(irq,"void arch_irq_install")))) != set(range(24)):
+        errors.append("gate source: arch_irq_install omits an installed vector")
+    for relative, text in (("kernel/arch/x86_64/intr/apic/lapic.c", r"set_intr_gate_raw\(SPURIOUS_VECTOR,\s*0,\s*lapic_spurious_stub\)"), ("kernel/arch/x86_64/intr/apic/lapic_timer.c", r"set_intr_gate_raw\(LAPIC_TIMER_VECTOR,\s*0,\s*lapic_timer_stub\)")):
+        if not re.search(text,source(relative)):
+            errors.append(f"gate source: wrong installed IRQ gate in {relative}")
+    ipi = source("kernel/arch/x86_64/intr/apic/ipi.c")
+    for name, vector, handler in (("tlb",0x40,"ipi_tlb_handler"),("resched",0x41,"ipi_resched_handler")):
+        for macro, suffix in (("DEFINE_INTR_STUB", ""), ("REGISTER_INTR_HANDLER", r",\s*"+handler)):
+            if not re.search(macro + r"\(\s*"+name+r",\s*0x"+f"{vector:x}"+suffix+r"\s*\)", ipi):
+                errors.append(f"gate source: wrong IPI {name} installed target/vector")
 
 
 _PT_REGS_RE = re.compile(
@@ -896,7 +1272,7 @@ def run_audit(*, profile: str, elf: str, llvm_nm: str, llvm_objdump: str,
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Prove the intr-dispatch phase-1 wiring from the "
+        description="Prove the intr-dispatch installed wiring from the "
                     "production ELF (stub → thin entry → common "
                     "dispatcher → architecture backend).")
     parser.add_argument("--profile", required=True,

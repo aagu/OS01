@@ -62,6 +62,60 @@ $(error FB_RESOLUTION_TEST=1 cannot be combined with ARCH9_FAULT=$(ARCH9_FAULT))
 endif
 endif
 
+# ── X86_INTR_FAULT_TEST — isolated destructive dispatch probe ────
+# The intr-dispatch phase-2 work needs ISOLATED evidence for the two
+# fatal entries that cannot be exercised through the ordinary boot or
+# the kernel-selftest image: the kernel #BP (int3) trap and a real
+# hardware NMI injected over QMP.  Each case gets its OWN kernel and
+# image variant (intr-x86-fault-bp / intr-x86-fault-nmi), so the two
+# cases never share objects or images and the normal build never
+# carries the probe.
+#
+# The probe-selection MACRO travels through KERNEL_EXTRA_CFLAGS — the
+# channel that already crosses the controlled sub-make boundary
+# (OS01_SUBMAKE_ALLOWED below).  The variant slug is derived from that
+# SAME macro, so the compiled probe and the artifact paths can never
+# disagree.  The selector below is the user-facing knob; it only
+# contributes the macro.
+#
+# The selector is x86-only (the aarch64 profile rejects it) and is
+# refused in combination with every other destructive / test variant.
+X86_INTR_FAULT_TEST ?=
+X86_INTR_FAULT_TESTS_VALID := none bp nmi
+ifneq ($(strip $(X86_INTR_FAULT_TEST)),)
+ifeq ($(filter $(X86_INTR_FAULT_TEST),$(X86_INTR_FAULT_TESTS_VALID)),)
+$(error X86_INTR_FAULT_TEST='$(X86_INTR_FAULT_TEST)' is not one of: $(X86_INTR_FAULT_TESTS_VALID))
+endif
+endif
+ifeq ($(X86_INTR_FAULT_TEST),bp)
+X86_INTR_FAULT_CFLAGS := -DX86_INTR_FAULT_TEST_BP=1
+else ifeq ($(X86_INTR_FAULT_TEST),nmi)
+X86_INTR_FAULT_CFLAGS := -DX86_INTR_FAULT_TEST_NMI=1
+else
+X86_INTR_FAULT_CFLAGS :=
+endif
+ifneq ($(strip $(X86_INTR_FAULT_CFLAGS)),)
+ifeq ($(findstring $(X86_INTR_FAULT_CFLAGS),$(KERNEL_EXTRA_CFLAGS)),)
+# `override` so a command-line KERNEL_EXTRA_CFLAGS keeps its own flags
+# and still gains the probe selection.
+override KERNEL_EXTRA_CFLAGS := $(strip $(KERNEL_EXTRA_CFLAGS) $(X86_INTR_FAULT_CFLAGS))
+endif
+endif
+# The effective case — derived from the macro, which is the single
+# source of truth (the selector above only contributes to it).
+X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,))
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST)),)
+$(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is an x86-only destructive probe and cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST)
+endif
+ifneq ($(filter none,$(ARCH9_FAULT)),)
+# ARCH9_FAULT=none is the canonical build; the destructive probe and
+# the driver-model fault fixture must never share a build.
+else
+$(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) cannot be combined with ARCH9_FAULT=$(ARCH9_FAULT))
+endif
+endif
+
 # ── Variant slugs (BEFORE the profile include!) ───────────────
 # IMAGE_VARIANT — the image/manifest dirs' variant suffix, derived from the
 # explicit switch variables. The root Makefile applies OS01_SYSTEST /
@@ -82,7 +136,6 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
-
 # TERM_PRESENT_TEST — the terminal-present E2E suite needs the terminal's
 # per-second [term-present] records on the serial port.  Those records are a
 # user-space DEBUG-level diagnostic (user/common/user_log.h), so the suite
@@ -92,7 +145,7 @@ ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
 USER_DEBUG := 1
 endif
 
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT)))
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE)))
 USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)

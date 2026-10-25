@@ -1,4 +1,8 @@
 #include <intr/apic.h>
+#ifdef OS01_SELFTEST
+#include <selftest/x86_intr.h>
+#endif
+#include <arch/x86_64/intr_dispatch.h>
 #include <percpu/percpu.h>
 #include <core/debug.h>
 #include <arch/irq.h>
@@ -157,6 +161,15 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
         sched_account_tick();
     }
     lapic_eoi();
+#ifdef OS01_SELFTEST
+    selftest_x86_intr_tick(cpu_id());
+#endif
+}
+
+void x86_handle_lapic_timer_irq(pt_regs_t *regs, uint64_t vector)
+{
+    (void)vector;
+    lapic_timer_handler(regs, 0);
 }
 
 // ── Assembly stub — bridges the CPU interrupt entry to C ──
@@ -198,8 +211,8 @@ __asm__(
     "movq %rdi, %ds\n\t"
     "movq %rdi, %es\n\t"
     "movq %rsp, %rdi\n\t" // 1st arg → pt_regs *
-    "xorq %rsi, %rsi\n\t" // 2nd arg → error_code = 0
-    "call lapic_timer_handler\n\t"
+    "movq $0x38, %rsi\n\t" // actual native timer vector
+    "call x86_irq_entry\n\t"
     "jmp ret_from_intr\n\t"
 );
 

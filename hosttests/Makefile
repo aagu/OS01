@@ -60,6 +60,7 @@ LIBC_OBJS := \
 MOCK_OBJS := $(TEST_BLD)/mock_kernel.o
 
 TEST_BINS := \
+    $(TEST_BLD)/test_lapic_nmi.elf \
     $(TEST_BLD)/test_libc_string.elf \
     $(TEST_BLD)/test_libc_list.elf \
     $(TEST_BLD)/test_libc_vsprintf.elf \
@@ -199,7 +200,9 @@ TEST_BINS := \
     $(TEST_BLD)/test_intr_decode_aarch64.elf \
     $(TEST_BLD)/test_intr_dispatch.elf \
     $(TEST_BLD)/test_intr_backend_aarch64.elf \
-    $(TEST_BLD)/test_intr_backend_x86.elf
+    $(TEST_BLD)/test_intr_backend_x86.elf \
+    $(TEST_BLD)/test_intr_irq_x86.elf \
+    $(TEST_BLD)/test_x86_intr_probe.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -1048,6 +1051,7 @@ A64_DECODE_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
 $(TEST_BLD)/x86_intr_decode_production.o: \
 		$(TESTS_DIR)/kernel/arch/x86_64/intr/intr_decode.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
@@ -1056,6 +1060,7 @@ $(TEST_BLD)/x86_intr_decode_production.o: \
 
 $(TEST_BLD)/test_intr_decode_x86.o: $(TEST_CASES)/test_intr_decode_x86.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
@@ -1214,6 +1219,7 @@ $(TEST_BLD)/x86_intr_backend_production.o: \
 		$(TESTS_DIR)/kernel/arch/x86_64/intr/dispatch.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
@@ -1225,6 +1231,7 @@ $(TEST_BLD)/test_intr_backend_x86.o: \
 		$(TEST_CASES)/test_intr_backend_x86.c \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/intr_vectors.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
@@ -4605,5 +4612,56 @@ $(TEST_BLD)/test_gui_input_lvgl.elf: \
 -include $(GUI_INPUT_LVGL_DIR)/*.d
 -include $(GUI_INPUT_UNIT_DIR)/*.d
 
+# Phase2: production decoder/backend/adapters, device/PIC, neutral lookup,
+# timer and IPI bodies. Only hardware/context and timer service boundaries
+# are spied; the production percpu structure remains in runtime.c.
+IRQ_CHAIN_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -I$(TEST_MOCK)/intr_irq -I$(TEST_INC) $(KERNEL_INC)
+IRQ_CHAIN_SOURCES := arch/x86_64/intr/irq_entry.c \
+    arch/x86_64/intr/irq_hooks.c intr/vector_dispatch.c \
+    arch/x86_64/intr/pic_8259a.c arch/x86_64/intr/apic/lapic_timer.c \
+    arch/x86_64/intr/apic/ipi.c
+IRQ_CHAIN_OBJS := $(TEST_BLD)/irq-chain/runtime.o \
+    $(addprefix $(TEST_BLD)/irq-chain/,$(IRQ_CHAIN_SOURCES:.c=.o))
 
+$(TEST_BLD)/irq-chain/%.o: $(TESTS_DIR)/kernel/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
 
+$(TEST_BLD)/irq-chain/runtime.o: $(TEST_MOCK)/intr_irq/runtime.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_intr_irq_x86.o: $(TEST_CASES)/test_intr_irq_x86.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) -idirafter $(TESTS_DIR)/libc/include -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_intr_irq_x86.elf: $(IRQ_CHAIN_OBJS) \
+        $(TEST_BLD)/test_intr_irq_x86.o \
+        $(TEST_BLD)/x86_intr_backend_production.o \
+        $(TEST_BLD)/x86_intr_decode_production.o \
+        $(TEST_BLD)/intr_dispatch_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-intr-irq-x86
+test-intr-irq-x86: $(TEST_BLD)/test_intr_irq_x86.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) $<
+
+-include $(IRQ_CHAIN_OBJS:.o=.d)
+-include $(TEST_BLD)/test_intr_irq_x86.d
+
+# Pure helpers shared verbatim by the scheduled IRQ probe and host fixtures.
+$(TEST_BLD)/test_x86_intr_probe.elf: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS_DIR)/kernel/include/selftest/x86_intr.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -idirafter $(TESTS_DIR)/kernel/include $< -o $@
+
+# Exercise production MADT-to-LVT routing with only MMIO substituted.
+$(TEST_BLD)/test_lapic_nmi.elf: $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c $(TESTS_DIR)/kernel/include/intr/apic.h $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/acpi.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(KERNEL_INC) $(LIBC_INC) $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c -Wl,--gc-sections -o $@
+
+.PHONY: test-lapic-nmi
+test-lapic-nmi: $(TEST_BLD)/test_lapic_nmi.elf
+	$<

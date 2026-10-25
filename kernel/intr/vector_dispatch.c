@@ -1,4 +1,5 @@
 #include <arch/irq.h>
+#include <intr/vector_dispatch.h>
 #include <core/debug.h>
 #include <stddef.h>
 
@@ -10,14 +11,14 @@ arch_intr_handler_fn intr_handler_table[256];
 void *          intr_handler_param[256];
 
 // ── Generic dispatch ────────────────────────────────────────
-// Called from auto-generated assembly stubs with:
+// Called by an architecture business bridge with:
 //   rdi = pt_regs*  (pointer to saved register frame)
 //   rsi = vector    (interrupt vector number)
 //
 // Looks up the handler in intr_handler_table[vector] and calls
-// it.  Returns → ret_from_intr → RESTORE_ALL → iretq.
+// it. No architecture vector whitelist, ACK, or return work lives here.
 
-void generic_intr_dispatch(pt_regs_t *regs, uint64_t vector)
+void intr_dispatch_registered_vector(pt_regs_t *regs, uint64_t vector)
 {
     if (vector < 256 && intr_handler_table[vector]) {
         intr_handler_table[vector](vector,

@@ -357,6 +357,61 @@ EOF
              # Normal smp mode must not include the fault injection flag.
              drain_smp=$(make -n PROFILE=aarch64-clang test-aarch64 MODE=smp)
              ! echo "$drain_smp" | grep -q AARCH64_SYNC_FAULT_TEST=1
+             # ── x86 intr-x86 isolated destructive dispatch (Task 5) ──
+             # The suite must be accepted by the parse-time SUITE case
+             # statement and must drive BOTH destructive cases (#BP and
+             # the QMP-injected NMI) through their OWN isolated
+             # kernel/image variants.
+             dry_intr=$(make -n PROFILE=x86_64-clang test-qemu SUITE=intr-x86 2>&1 || true)
+             echo "$dry_intr" | grep -qF "X86_INTR_FAULT_TEST=bp " \
+               || { echo "targets: intr-x86 dry-run did not select the #BP variant" >&2; exit 1; }
+             echo "$dry_intr" | grep -qF "X86_INTR_FAULT_TEST=nmi " \
+               || { echo "targets: intr-x86 dry-run did not select the NMI variant" >&2; exit 1; }
+             echo "$dry_intr" | grep -qF "python3 qemutests/x86_intr_fault.py --case bp" \
+               || { echo "targets: intr-x86 dry-run did not run the #BP case" >&2; exit 1; }
+             echo "$dry_intr" | grep -qF "python3 qemutests/x86_intr_fault.py --case nmi" \
+               || { echo "targets: intr-x86 dry-run did not run the NMI case" >&2; exit 1; }
+             # The probe-selection macro must cross the CONTROLLED
+             # sub-make boundary (KERNEL_EXTRA_CFLAGS is an
+             # OS01_SUBMAKE_ALLOWED channel) into the kernel sub-make.
+             echo "$dry_intr" | grep -qF "KERNEL_EXTRA_CFLAGS=-DX86_INTR_FAULT_TEST_BP=1" \
+               || { echo "targets: the probe macro did not cross the controlled sub-make boundary" >&2; exit 1; }
+             echo "$dry_intr" | grep -qF "KERNEL_EXTRA_CFLAGS=-DX86_INTR_FAULT_TEST_NMI=1" \
+               || { echo "targets: the NMI probe macro did not cross the controlled sub-make boundary" >&2; exit 1; }
+             # Each case must own its image dir; the normal build must
+             # stay on the normal image.
+             for v in bp nmi; do
+               paths=$(make -n PROFILE=x86_64-clang X86_INTR_FAULT_TEST=$v print-run-paths)
+               echo "$paths" | grep -qF "image/intr-x86-fault-$v/" \
+                 || { echo "targets: X86_INTR_FAULT_TEST=$v did not isolate the image dir" >&2; exit 1; }
+             done
+             normal_paths=$(make -n PROFILE=x86_64-clang print-run-paths)
+             ! echo "$normal_paths" | grep -q "image/intr-x86-fault-" \
+               || { echo "targets: the normal build must not select a fault variant" >&2; exit 1; }
+             # The selector is x86-only and is refused in every
+             # conflicting test/driver-fault mode.
+             ! make -n PROFILE=aarch64-clang X86_INTR_FAULT_TEST=bp print-run-paths
+             ! make -n PROFILE=x86_64-clang X86_INTR_FAULT_TEST=invalid print-run-paths
+             for conflict in KERNEL_SELFTEST=1 OS01_SYSTEST=1 OS01_NETTEST=1 \
+                            KERNEL_CANARY_SELFTEST=1 KERNEL_TEST_FORCE_NO_RNDRRS=1 \
+                            FB_RESOLUTION_TEST=1 ARCH9_FAULT=observe; do
+               ! make -n PROFILE=x86_64-clang X86_INTR_FAULT_TEST=bp $conflict print-run-paths \
+                 || { echo "targets: X86_INTR_FAULT_TEST=bp + $conflict must be rejected" >&2; exit 1; }
+             done
+             # The normal kernel must carry NO fault probe at all, and
+             # the dedicated #BP variant must carry the resume label the
+             # acceptance runner resolves the saved RIP against.
+             nm_bin=$(command -v llvm-nm || command -v nm)
+             ! "$nm_bin" "$base/kernel/kernel.elf" | grep -q "x86_intr_fault" \
+               || { echo "targets: the normal kernel carries the fault probe" >&2; exit 1; }
+             test ! -e "$base/kernel/arch/x86_64/intr/fault_probe.o" \
+               || { echo "targets: the normal build compiled the fault probe" >&2; exit 1; }
+             make PROFILE=x86_64-clang X86_INTR_FAULT_TEST=bp kernel.bin >/dev/null
+             "$nm_bin" "$base/kernel/intr-x86-fault-bp/kernel.elf" \
+               | grep -q "x86_intr_fault_bp_resume" \
+               || { echo "targets: the #BP variant does not carry the resume label" >&2; exit 1; }
+             grep -q -- "-DX86_INTR_FAULT_TEST_BP=1" "$base/kernel/intr-x86-fault-bp/.cflags" \
+               || { echo "targets: the probe macro did not reach the kernel compile flags" >&2; exit 1; }
              ;;
     *) exit 64 ;;
     esac

@@ -15,6 +15,9 @@
 #include <tty/pty.h>          // pty_init
 #include <net/net.h>          // net_lwip_init
 #include <random/random.h>    // random_init
+#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
+#include <arch/x86_64/intr_fault_probe.h>   // x86_intr_fault_probe_run
+#endif
 
 // ── Kernel symbols ─────────────────────────────────────────
 
@@ -101,6 +104,34 @@ int kernel_main(const struct boot_context *bootctx)
 
     random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
 
+#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
+    // ═══ Isolated destructive dispatch probe (Task 5, spec §9.3) ═══
+    // The dedicated `intr-x86-fault-bp` / `intr-x86-fault-nmi`
+    // variants compile this probe in; the normal build does not (the
+    // source is only added to the kernel source list when the
+    // probe-selection macro is present).
+    //
+    // Placement: AFTER x86_64_boot_percpu() — the IDT is installed
+    // (x86_64_boot_early), the serial port is up (x86_64_boot_early),
+    // the interrupt controllers are programmed (x86_64_boot_subsystems:
+    // MADT-described LINT inputs are configured for NMI delivery) and
+    // the BSP's per-CPU area plus num_cpus
+    // are published (x86_64_boot_percpu) — and BEFORE
+    // x86_64_boot_aps(), the FS/TTY bring-up, the network stack and
+    // the user-space init.  The probe halts the CPU, so nothing may
+    // follow it: at this point no AP is online (x86_64_boot_aps() has
+    // not run), no task and no thread exists, and the guest serial
+    // stream is a single-CPU ordered log the acceptance runner can
+    // judge unambiguously.
+    //
+    // random_init() runs first so the boot log carries the isolated
+    // variant marker ("CSPRNG: kernel build variant=intr-x86-fault-*")
+    // that proves the running kernel is the fault variant; the probe
+    // prints the same token itself.
+    x86_intr_fault_probe_run();
+    for (;;) arch_cpu_halt();           // the probe never returns
+#endif
+
     // ── FS bring-up + x86 device node registration (Task 2 split) ──
     // Order matters: devfs must exist before any devfs_register_*() call;
     // PTY must exist before keyboard_set_tty() (later in tty_boot_init())
@@ -144,11 +175,11 @@ int kernel_main(const struct boot_context *bootctx)
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
     /* Declare the complete protocol-v1 selection before START: the
-     * registered boot-time (early) cases plus the five scheduled cases
+     * registered boot-time (early) cases plus the six scheduled cases
      * task_init() runs later.  selftest_run_all() executes the early
      * subset; task_init() records the late cases and emits the single
      * END via selftest_end_run(). */
-    selftest_begin_run(5);
+    selftest_begin_run(6);
     selftest_run_all();
     serial_printk("[selftest] done\n");
 #endif

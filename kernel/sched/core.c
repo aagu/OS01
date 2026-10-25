@@ -650,6 +650,14 @@ void task_init(void)
         extern int test_tty_vintr(void);
         selftest_record_late("tty_vintr", test_tty_vintr());
     }
+    // ── live x86 IRQ dispatch selftest ───────────────────────
+    // Needs a second online CPU with ipi_ready (remote worker), the
+    // running LAPIC timer on both CPUs and the installed IDT: runs
+    // last so every earlier case has finished touching interrupts.
+    {
+        extern int test_x86_intr(void);
+        selftest_record_late("x86_intr", test_x86_intr());
+    }
     // All scheduled cases reported: emit the single END record.  A late
     // case that never ran is turned into a FAIL by selftest_end_run().
     selftest_end_run();

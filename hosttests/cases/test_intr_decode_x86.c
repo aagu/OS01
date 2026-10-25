@@ -30,10 +30,26 @@ struct x86_vector_expect {
 };
 
 static const struct x86_vector_expect k_x86_vector_table[] = {
-    {  0, INTR_REASON_ARITHMETIC, "#DE divide error"       },
-    {  6, INTR_REASON_ILLEGAL,    "#UD undefined opcode"   },
-    { 13, INTR_REASON_PROTECTION, "#GP general protection" },
-    { 14, INTR_REASON_MEMORY,     "#PF page fault"         },
+    { 0, INTR_REASON_ARITHMETIC, "vector 0" },
+    { 1, INTR_REASON_OTHER, "vector 1" },
+    { 2, INTR_REASON_OTHER, "vector 2" },
+    { 3, INTR_REASON_OTHER, "vector 3" },
+    { 4, INTR_REASON_ARITHMETIC, "vector 4" },
+    { 5, INTR_REASON_ARITHMETIC, "vector 5" },
+    { 6, INTR_REASON_ILLEGAL, "vector 6" },
+    { 7, INTR_REASON_ARITHMETIC, "vector 7" },
+    { 8, INTR_REASON_OTHER, "vector 8" },
+    { 9, INTR_REASON_ARITHMETIC, "vector 9" },
+    { 10, INTR_REASON_PROTECTION, "vector 10" },
+    { 11, INTR_REASON_PROTECTION, "vector 11" },
+    { 12, INTR_REASON_PROTECTION, "vector 12" },
+    { 13, INTR_REASON_PROTECTION, "vector 13" },
+    { 14, INTR_REASON_MEMORY, "vector 14" },
+    { 16, INTR_REASON_ARITHMETIC, "vector 16" },
+    { 17, INTR_REASON_PROTECTION, "vector 17" },
+    { 18, INTR_REASON_OTHER, "vector 18" },
+    { 19, INTR_REASON_ARITHMETIC, "vector 19" },
+    { 20, INTR_REASON_PROTECTION, "vector 20" },
 };
 
 /* spec §6.1: saved CS privilege level → origin.  The RPL bits are
@@ -122,27 +138,21 @@ static void case_x86_vectors_and_cpl(void)
 
     TEST_SUITE("x86_vectors_and_cpl");
 
-    /* Every migrated vector maps to its own reason; the non-#PF
-     * vectors carry no address at all. */
-    for (unsigned i = 0; i < sizeof(k_x86_vector_table) /
-                            sizeof(k_x86_vector_table[0]); i++) {
-        const struct x86_vector_expect *e = &k_x86_vector_table[i];
-        struct intr_event ev;
-
-        fill_regs(&regs, X86_CS_KERNEL);
-        x86_intr_decode(&ev, &regs, e->vector, X86_ERRCODE_ZERO,
-                        X86_CR2_SOME);
-
-        if (e->vector == X86_VEC_PF) {
-            /* #PF is the only vector that owns an address. */
-            check_event(&ev, INTR_SYNC, INTR_ORIGIN_KERNEL,
-                        INTR_REASON_MEMORY, INTR_ACCESS_READ, true,
-                        X86_CR2_SOME, X86_VEC_PF, X86_ERRCODE_ZERO,
-                        X86_CR2_SOME);
-        } else {
-            check_event(&ev, INTR_SYNC, INTR_ORIGIN_KERNEL, e->reason,
-                        INTR_ACCESS_UNKNOWN, false, 0, e->vector,
-                        X86_ERRCODE_ZERO, 0);
+    /* Every installed vector, CPL and raw error payload is independent. */
+    for (unsigned c = 0; c < sizeof(k_x86_cpl_table) / sizeof(k_x86_cpl_table[0]); c++) {
+        for (unsigned i = 0; i < sizeof(k_x86_vector_table) / sizeof(k_x86_vector_table[0]); i++) {
+            const struct x86_vector_expect *e = &k_x86_vector_table[i];
+            struct intr_event ev;
+            uint64_t error = 0x12340000ULL + e->vector;
+            fill_regs(&regs, k_x86_cpl_table[c].cs);
+            x86_intr_decode(&ev, &regs, e->vector, error, X86_CR2_SOME);
+            enum intr_access access = INTR_ACCESS_UNKNOWN;
+            if (e->vector == 14)
+                access = INTR_ACCESS_WRITE; /* literal error low bits = 14 */
+            check_event(&ev, INTR_SYNC, k_x86_cpl_table[c].origin, e->reason,
+                        access, e->vector == 14,
+                        e->vector == 14 ? X86_CR2_SOME : 0, e->vector, error,
+                        e->vector == 14 ? X86_CR2_SOME : 0);
         }
     }
 

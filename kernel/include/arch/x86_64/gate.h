@@ -21,12 +21,14 @@ extern unsigned int TSS64_Table[26];
 /*
 */
 
+/* RCX is scratch as well as the IST input. Its early write must not
+ * alias a descriptor memory address or survive into the next gate. */
 #define _set_gate(gate_selector_addr,attr,ist,code_addr)	\
 do								\
-{	unsigned long __d0,__d1;				\
+{	unsigned long __d0,__d1,__d2 = (ist);				\
 	__asm__ __volatile__	(	"movw	%%dx,	%%ax	\n\t"	\
 					"andq	$0x7,	%%rcx	\n\t"	\
-					"addq	%4,	%%rcx	\n\t"	\
+					"addq	%5,	%%rcx	\n\t"	\
 					"shlq	$32,	%%rcx	\n\t"	\
 					"addq	%%rcx,	%%rax	\n\t"	\
 					"xorq	%%rcx,	%%rcx	\n\t"	\
@@ -38,10 +40,10 @@ do								\
 					"shrq	$32,	%%rdx	\n\t"	\
 					"movq	%%rdx,	%1	\n\t"	\
 					:"=m"(*((unsigned long *)(gate_selector_addr)))	,					\
-					 "=m"(*(1 + (unsigned long *)(gate_selector_addr))),"=&a"(__d0),"=&d"(__d1)		\
+					 "=m"(*(1 + (unsigned long *)(gate_selector_addr))),"=&a"(__d0),"=&d"(__d1),"+&c"(__d2)		\
 					:"i"(attr << 8),									\
-					 "3"((unsigned long *)(code_addr)),"2"(0x8 << 16),"c"(ist)				\
-					:"memory"		\
+					 "3"((unsigned long *)(code_addr)),"2"(0x8 << 16)				\
+					:"memory", "cc"		\
 				);				\
 }while(0)
 
@@ -144,12 +146,14 @@ inline void __attribute__((always_inline)) set_system_intr_gate(unsigned int n,u
 typedef void (*intr_handler_fn)(uint64_t nr, uint64_t parameter,
                                 pt_regs_t *regs);
 
-// Per-vector handler table.  generic_intr_dispatch (in intr/vector_dispatch.c)
+// Per-vector handler table.  generic_intr_dispatch (in arch/x86_64/intr/irq_entry.c)
 // indexes this table by vector number.
 extern intr_handler_fn intr_handler_table[256];
 extern void *        intr_handler_param[256];
 
 void generic_intr_dispatch(pt_regs_t *regs, uint64_t vector);
+/* Assembly restore only: no softirq/schedule/signal work. */
+void x86_intr_restore_only(void);
 
 static inline void _intr_table_set(uint8_t vector, intr_handler_fn handler,
                                    void *param)
