@@ -89,6 +89,95 @@ bool gui_widget_is_valid(gui_platform_t *platform, gui_widget_t widget);
  */
 int gui_widget_get_kind(gui_platform_t *platform, gui_widget_t widget, gui_widget_kind_t *out);
 
+/**
+ * @brief 创建一个原生控件
+ *
+ * 归属规则：父控件拥有子控件。只有**容器**可以是根（`GUI_WIDGET_NONE`
+ * 父控件表示"本平台活动屏幕上的全屏根"），其他种类的父控件必须是**同一个
+ * 平台**上的活着的容器。
+ *
+ * 失败时不发生部分修改：参数（平台、父控件、种类、输出指针）全部先被校验，
+ * 再占用槽位、建原生对象、挂注册表观察者，最后才发布身份。
+ *
+ * @param platform 平台上下文句柄
+ * @param parent   父控件（`GUI_WIDGET_NONE` 表示根容器）
+ * @param kind     控件种类
+ * @param out      输出参数：新控件的身份，不可为 NULL
+ * @return 0 成功；-1 失败（errno：EINVAL 参数/身份非法，ENOSPC 超出容量，
+ *         ENOMEM 原生分配失败，EOVERFLOW 身份号耗尽）
+ */
+int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_kind_t kind,
+                      gui_widget_t *out);
+
+/**
+ * @brief 销毁一个控件（递归销毁它的子树）
+ *
+ * 销毁先让身份对公共查询失效，再真正删除原生对象。父控件被销毁时，它的
+ * 整棵子树一起消失，所有旧身份立即失效。
+ *
+ * @param platform 平台上下文句柄
+ * @param widget   控件句柄
+ * @return 0 成功；-1 失败（errno：EINVAL 身份无效，EBUSY 正在业务回调中）
+ */
+int gui_widget_destroy(gui_platform_t *platform, gui_widget_t widget);
+
+/**
+ * @brief 清空一个容器（删掉它的子项，容器本身留下）
+ *
+ * @param platform 平台上下文句柄
+ * @param container 容器句柄
+ * @return 0 成功；-1 失败（errno：EINVAL 身份无效，EOPNOTSUPP 不是容器，
+ *         EBUSY 正在业务回调中）
+ */
+int gui_widget_clear(gui_platform_t *platform, gui_widget_t container);
+
+/**
+ * @brief 设置标签文字
+ *
+ * 文字被**复制**进库：调用方的缓冲可以在返回后立刻改掉或释放。`text` 为
+ * NULL 时按空串处理。
+ *
+ * @param platform 平台上下文句柄
+ * @param label    标签句柄
+ * @param text     文字（可为 NULL）
+ * @return 0 成功；-1 失败（errno：EINVAL 身份无效，EOPNOTSUPP 不是标签，
+ *         ENOMEM 分配失败）
+ */
+int gui_widget_set_text(gui_platform_t *platform, gui_widget_t label, const char *text);
+
+/**
+ * @brief 设置控件可见性
+ *
+ * @param platform 平台上下文句柄
+ * @param widget   控件句柄
+ * @param visible  true 可见
+ * @return 0 成功；-1 失败（errno：EINVAL 身份无效）
+ */
+int gui_widget_set_visible(gui_platform_t *platform, gui_widget_t widget, bool visible);
+
+/**
+ * @brief 设置控件使能状态
+ *
+ * @param platform 平台上下文句柄
+ * @param widget   控件句柄
+ * @param enabled  true 可用
+ * @return 0 成功；-1 失败（errno：EINVAL 身份无效）
+ */
+int gui_widget_set_enabled(gui_platform_t *platform, gui_widget_t widget, bool enabled);
+
+/**
+ * @brief 查询控件在视口中的像素矩形
+ *
+ * 查询会先让当前布局完成，因此返回的是**布局之后**的矩形。失败时 `*out`
+ * 被清零，不发生部分修改。
+ *
+ * @param platform 平台上下文句柄
+ * @param widget   控件句柄
+ * @param out      输出参数：像素矩形，不可为 NULL
+ * @return 0 成功；-1 失败（errno：EINVAL 身份无效或输出指针为空）
+ */
+int gui_widget_get_bounds(gui_platform_t *platform, gui_widget_t widget, gui_rect_t *out);
+
 #ifdef __cplusplus
 }
 #endif

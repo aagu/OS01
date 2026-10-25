@@ -112,6 +112,35 @@ void gui_widget_registry_fini(gui_platform_t *platform);
  */
 void gui_widget_test_set_last_id(uint64_t last_id);
 uint64_t gui_widget_test_get_last_id(void);
+
+/**
+ * @brief 宿主私有表查询：把某个身份背后的槽复制出来
+ *
+ * 公共 API 只暴露"身份是否有效"和"种类"；槽里的 handler/userdata/几何
+ * 缓存/标志这些**复用契约**必须能被宿主测试看见，否则"槽复用要全字段
+ * 初始化"这条规则无法被验证。
+ *
+ * @return 0 成功（身份不存在时 `*out` 是全零的槽）；-1 失败
+ */
+int gui_widget_test_query_slot(gui_platform_t *platform, gui_widget_t widget, gui_widget_slot_t *out);
+
+/**
+ * @brief 宿主私有故障桥：往某个身份的槽里塞入"陈旧"元数据
+ *
+ * 复用契约测试用它证明：槽被回收再占用时，陈旧的 handler、userdata、
+ * 文字、几何缓存与标志一个都不许残留。
+ *
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_widget_test_plant_slot(gui_platform_t *platform, gui_widget_t widget, uint32_t stale_flags,
+                               const char *stale_text);
+
+/**
+ * @brief 宿主私有表查询：注册表的占用计数与峰值
+ *
+ * @return 0 成功；-1 失败
+ */
+int gui_widget_test_get_counters(gui_platform_t *platform, uint32_t *out_count, uint32_t *out_peak);
 #endif
 
 #ifdef __cplusplus

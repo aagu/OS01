@@ -80,6 +80,77 @@ int gui_native_fixture_keys(gui_native_fixture_t *fx, const uint8_t *bytes, size
  */
 int gui_native_fixture_mouse(gui_native_fixture_t *fx, const mouse_event_t *events, size_t count);
 
+/* ── 宿主私有表查询 ─────────────────────────────────────────────────
+ *
+ * 公共 API 只暴露"身份是否有效"和"种类"；槽里的 handler/userdata/几何
+ * 缓存/标志这些**复用契约**必须能被看见，否则"槽复用要全字段初始化"
+ * 这条规则无法被验证。下面这些查询走的是真实注册表，不是模拟。
+ */
+
+/* 槽的四态（与 libgui 内部状态一一对应）。 */
+#define GUI_NATIVE_SLOT_FREE       0
+#define GUI_NATIVE_SLOT_RESERVED   1
+#define GUI_NATIVE_SLOT_LIVE       2
+#define GUI_NATIVE_SLOT_DESTROYING 3
+
+/* 槽标志（与 libgui 内部标志一一对应）。 */
+#define GUI_NATIVE_FLAG_VISIBLE   (1u << 0)
+#define GUI_NATIVE_FLAG_ENABLED   (1u << 1)
+#define GUI_NATIVE_FLAG_CLICKABLE (1u << 2)
+
+/**
+ * @brief 一个身份背后的槽（宿主私有视图）
+ */
+typedef struct {
+    int state;         /* GUI_NATIVE_SLOT_* */
+    uint64_t id;       /* 槽里的身份 */
+    uint64_t parent_id;/* 父身份（0 = 平台根） */
+    int kind;          /* gui_widget_kind_t 的值 */
+    bool has_handler;  /* 槽里是否还挂着业务回调 */
+    bool has_userdata; /* 槽里是否还挂着回调上下文 */
+    bool has_text;     /* 槽里是否还留着文字副本 */
+    uint32_t flags;    /* 槽标志 */
+    int32_t geom_x;    /* 几何缓存 */
+    int32_t geom_y;
+    int32_t geom_width;
+    int32_t geom_height;
+} gui_native_slot_info_t;
+
+/**
+ * @brief 注册表的占用计数（宿主私有视图）
+ */
+typedef struct {
+    uint32_t count;    /* 当前占用的槽 */
+    uint32_t peak;     /* 占用峰值 */
+    uint32_t capacity; /* 固定容量 */
+} gui_native_registry_info_t;
+
+/**
+ * @brief 查询一个身份背后的槽
+ *
+ * @return 0 成功（身份不存在时 `*out` 全零）；-1 失败
+ */
+int gui_native_fixture_query_slot(gui_platform_t *platform, gui_widget_t widget,
+                                  gui_native_slot_info_t *out);
+
+/**
+ * @brief 查询注册表的占用计数与峰值
+ *
+ * @return 0 成功；-1 失败
+ */
+int gui_native_fixture_query_registry(gui_platform_t *platform, gui_native_registry_info_t *out);
+
+/**
+ * @brief 往某个身份的槽里塞入"陈旧"元数据（复用契约的探针）
+ *
+ * 宿主私有故障桥：它模拟"槽曾经装过别的东西"的残留状态，用来证明槽被
+ * 回收再占用时这些字段全部被清干净。
+ *
+ * @return 0 成功；-1 失败（errno 已设置）
+ */
+int gui_native_fixture_plant_slot(gui_platform_t *platform, gui_widget_t widget,
+                                  uint32_t stale_flags, const char *stale_text);
+
 #ifdef __cplusplus
 }
 #endif

@@ -71,6 +71,13 @@ GUI_PUBLIC_INPUT_SYMBOLS = (
 GUI_PUBLIC_WIDGET_SYMBOLS = (
     "gui_widget_is_valid",
     "gui_widget_get_kind",
+    "gui_widget_create",
+    "gui_widget_destroy",
+    "gui_widget_clear",
+    "gui_widget_set_text",
+    "gui_widget_set_visible",
+    "gui_widget_set_enabled",
+    "gui_widget_get_bounds",
 )
 
 # Host-only injection hooks.  They exist only under #ifdef OS01_HOST_TEST
@@ -559,8 +566,16 @@ int main(void)
     {
         gui_widget_t widget = GUI_WIDGET_NONE;
         gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;
+        gui_rect_t rect;
         (void)gui_widget_is_valid(platform, widget);
         (void)gui_widget_get_kind(platform, widget, &kind);
+        (void)gui_widget_create(platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &widget);
+        (void)gui_widget_set_text(platform, widget, "x");
+        (void)gui_widget_set_visible(platform, widget, 1);
+        (void)gui_widget_set_enabled(platform, widget, 1);
+        (void)gui_widget_get_bounds(platform, widget, &rect);
+        (void)gui_widget_clear(platform, widget);
+        (void)gui_widget_destroy(platform, widget);
     }
 
     /* dispatch */

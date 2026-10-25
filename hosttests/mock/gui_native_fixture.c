@@ -9,9 +9,20 @@
 
 #include "gui_test_runtime.h"
 #include <gui_input_private.h>
+#include <gui_platform_private.h>
+#include <gui_widget_private.h>
 
 #include <errno.h>
 #include <string.h>
+
+/* 宿主视图与 libgui 内部常量必须一一对应：漂了就说明 fixture 说谎了。 */
+_Static_assert(GUI_NATIVE_FLAG_VISIBLE == GUI_WIDGET_FLAG_VISIBLE, "visible flag drift");
+_Static_assert(GUI_NATIVE_FLAG_ENABLED == GUI_WIDGET_FLAG_ENABLED, "enabled flag drift");
+_Static_assert(GUI_NATIVE_FLAG_CLICKABLE == GUI_WIDGET_FLAG_CLICKABLE, "clickable flag drift");
+_Static_assert(GUI_NATIVE_SLOT_FREE == GUI_WIDGET_SLOT_FREE, "slot state drift");
+_Static_assert(GUI_NATIVE_SLOT_RESERVED == GUI_WIDGET_SLOT_RESERVED, "slot state drift");
+_Static_assert(GUI_NATIVE_SLOT_LIVE == GUI_WIDGET_SLOT_LIVE, "slot state drift");
+_Static_assert(GUI_NATIVE_SLOT_DESTROYING == GUI_WIDGET_SLOT_DESTROYING, "slot state drift");
 
 int gui_native_fixture_create(gui_native_fixture_t *fx, bool with_input)
 {
@@ -110,4 +121,63 @@ int gui_native_fixture_mouse(gui_native_fixture_t *fx, const mouse_event_t *even
         return -1;
     }
     return gui_input_test_feed_mouse(fx->input, events, count);
+}
+
+/* ── 宿主私有表查询 ───────────────────────────────────────────────── */
+
+int gui_native_fixture_query_slot(gui_platform_t *platform, gui_widget_t widget,
+                                  gui_native_slot_info_t *out)
+{
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    gui_widget_slot_t slot;
+    if (gui_widget_test_query_slot(platform, widget, &slot) != 0) {
+        return -1;
+    }
+    if (slot.id == 0 && slot.state == GUI_WIDGET_SLOT_FREE) {
+        return 0; /* 身份不存在 */
+    }
+
+    out->state = (int)slot.state;
+    out->id = slot.id;
+    out->parent_id = slot.parent_id;
+    out->kind = (int)slot.kind;
+    out->has_handler = slot.handler != NULL;
+    out->has_userdata = slot.userdata != NULL;
+    out->has_text = slot.text != NULL;
+    out->flags = slot.flags;
+    out->geom_x = slot.geom_x;
+    out->geom_y = slot.geom_y;
+    out->geom_width = slot.geom_width;
+    out->geom_height = slot.geom_height;
+    return 0;
+}
+
+int gui_native_fixture_query_registry(gui_platform_t *platform, gui_native_registry_info_t *out)
+{
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    uint32_t count = 0;
+    uint32_t peak = 0;
+    if (gui_widget_test_get_counters(platform, &count, &peak) != 0) {
+        return -1;
+    }
+    out->count = count;
+    out->peak = peak;
+    out->capacity = GUI_WIDGET_REGISTRY_CAPACITY;
+    return 0;
+}
+
+int gui_native_fixture_plant_slot(gui_platform_t *platform, gui_widget_t widget,
+                                  uint32_t stale_flags, const char *stale_text)
+{
+    return gui_widget_test_plant_slot(platform, widget, stale_flags, stale_text);
 }
