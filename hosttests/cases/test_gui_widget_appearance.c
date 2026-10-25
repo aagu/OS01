@@ -595,7 +595,6 @@ TEST_FUNC(test_appearance_preserves_layout_padding)
     child_geo.y = 0;
     child_geo.width = GUI_SIZE_PX(40);
     child_geo.height = GUI_SIZE_PX(20);
-    assert_eq(0, gui_widget_set_geometry(fx.platform, panel, &child_geo));
     assert_eq(0, gui_widget_set_geometry(fx.platform, child, &child_geo));
 
     /* 面板留 20px 内边距。 */
@@ -615,6 +614,18 @@ TEST_FUNC(test_appearance_preserves_layout_padding)
     gui_rect_t child_rect;
     assert_eq(0, gui_widget_get_bounds(fx.platform, panel, &panel_rect));
     assert_eq(0, gui_widget_get_bounds(fx.platform, child, &child_rect));
+
+    /* 面板是正常尺寸：内容区没有退化（扣掉四向 20px 内边距后仍然是正的）。
+     *
+     * 这一条是本测试的前提：pad 偏移必须发生在**正常内容区**上，
+     * 而不是退化成一个宽 0、高 −20 的内容区。 */
+    assert_eq(200, panel_rect.width);
+    assert_eq(120, panel_rect.height);
+    assert_true(panel_rect.width - 40 > 0);
+    assert_true(panel_rect.height - 40 > 0);
+    /* 子项自己的尺寸也没被面板的几何改掉。 */
+    assert_eq(40, child_rect.width);
+    assert_eq(20, child_rect.height);
 
     /* 内边距把子项顶开了。 */
     int32_t offset_x = child_rect.x - panel_rect.x;

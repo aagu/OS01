@@ -146,9 +146,21 @@ typedef struct {
  *
  * 失败时输出结构被**清零**（不留半份数据）。
  *
+ * **清零之后 `format` 字段读作 0**，也就是 `GUI_PIXEL_FORMAT_XRGB8888`
+ * （枚举的零值是 XRGB8888，不是 UNKNOWN）。因此一次失败后的输出与一次
+ * 成功的真实 XRGB8888 读数**在 `format` 上不可区分**。
+ *
+ * 调用方**必须**检查返回值。判定"这次没有数据"请用别的字段，不要拿清零
+ * 后的 `format` 当真实格式：
+ *
+ *   - `pool_total == 0`（成功时渲染池一定非空）；
+ *   - `renderer_name[0] == '\0'`（成功时渲染器名一定非空）。
+ *
+ * 换句话说：`format` 只有在**成功**返回时才有意义。
+ *
  * @param platform 平台上下文句柄
  * @param out      输出参数：统计快照，不可为 NULL
- * @return 0 成功；-1 失败（errno = EINVAL）
+ * @return 0 成功；-1 失败（errno = EINVAL）。失败时 `out` 被清零。
  */
 int gui_platform_get_stats(gui_platform_t *platform, gui_platform_stats_t *out);
 

@@ -372,7 +372,22 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     row_layout.pad_left = 0;
     row_layout.pad_right = 0;
 
-    /* ── 1. 交换设置顺序等价 ───────────────────────────────────────
+    /*
+     * 父的几何：300×200。
+     *
+     * 父的内边距是 0（见 row_layout），因此父的**内容区**就是 300×200
+     * ——这正是 brief:22 点名的那个内容区。内容区与父的总尺寸在这里
+     * 恰好相等，是有意为之：FILL 的语义是"父内容区的全长"，没有内边距
+     * 时它就等于父的总尺寸，数字才读得出来。
+     */
+    gui_geometry_t box;
+    box.x = 0;
+    box.y = 0;
+    box.width = GUI_SIZE_PX(300);
+    box.height = GUI_SIZE_PX(200);
+
+    /* ── 1 & 2. 内容区 300×200：FILL 宽=300 / 固定高=20；交换设置顺序等价
+     * ──────────────────────────────────────────────────────────────
      *
      * "先设几何后设布局"与"先设布局后设几何"必须落到同一个结果：尺寸
      * 来源与排布是**两套**独立的描述，谁先谁后都不改变结论。 */
@@ -380,12 +395,6 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     gui_widget_t r2;
     assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &r1));
     assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &r2));
-
-    gui_geometry_t box;
-    box.x = 0;
-    box.y = 0;
-    box.width = GUI_SIZE_PX(200);
-    box.height = GUI_SIZE_PX(100);
 
     /* r1：先几何后布局。r2：先布局后几何。 */
     assert_eq(0, gui_widget_set_geometry(fx.platform, r1, &box));
@@ -397,6 +406,8 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     int32_t cw = 0;
     int32_t ch = 0;
     measure_content_box(fx.platform, r1, NULL, NULL, &cw, &ch);
+    assert_eq(300, cw);
+    assert_eq(200, ch);
 
     gui_widget_t d1;
     gui_widget_t d2;
@@ -407,7 +418,7 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     fill_w.x = 0;
     fill_w.y = 0;
     fill_w.width = GUI_SIZE_FILL;
-    fill_w.height = GUI_SIZE_PX(30);
+    fill_w.height = GUI_SIZE_PX(20);
     assert_eq(0, gui_widget_set_geometry(fx.platform, d1, &fill_w));
     assert_eq(0, gui_widget_set_geometry(fx.platform, d2, &fill_w));
 
@@ -415,19 +426,26 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     gui_rect_t b2;
     assert_eq(0, gui_widget_get_bounds(fx.platform, d1, &b1));
     assert_eq(0, gui_widget_get_bounds(fx.platform, d2, &b2));
+
+    /* 内容区 300×200：FILL 宽=300、固定高=20。 */
+    assert_eq(300, b1.width);
+    assert_eq(20, b1.height);
+    assert_eq(300, b2.width);
+    assert_eq(20, b2.height);
+
     /* 交换设置顺序不改变结论。 */
     assert_eq(b1.width, b2.width);
     assert_eq(b1.height, b2.height);
     assert_eq(b1.x, b2.x);
     assert_eq(b1.y, b2.y);
 
-    /* ── 2. ROW / COLUMN 的主轴与交叉轴 ────────────────────────────
+    /* ── 4. ROW / COLUMN 的主轴与交叉轴 ────────────────────────────
      *
      * ROW 的主轴是横向、交叉轴是纵向；COLUMN 反过来。FILL 逐轴生效。 */
 
     /* 主轴（横向）FILL：宽度就是父内容区的全长。 */
     assert_eq(cw, b1.width);
-    assert_eq(30, b1.height);
+    assert_eq(20, b1.height);
 
     /* 交叉轴（纵向）FILL：高度就是父内容区的全长，宽度不受影响。 */
     gui_geometry_t fill_h;
@@ -462,7 +480,7 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     assert_eq(30, b4.width);
     assert_eq(ch, b4.height);
 
-    /* ── 3. FILL → PX50：另一轴不变 ──────────────────────────────── */
+    /* FILL → PX50：另一轴不变。 */
     gui_geometry_t fixed;
     fixed.x = 0;
     fixed.y = 0;
@@ -473,6 +491,70 @@ TEST_FUNC(test_fill_per_axis_and_update_order)
     assert_eq(0, gui_widget_get_bounds(fx.platform, d1, &b5));
     assert_eq(50, b5.width);
     assert_eq(b3.height, b5.height);
+
+    /* ── 3. 父改宽到 400：FILL 子项跟着变宽 ──────────────────────────
+     *
+     * 这是产品契约「父尺寸变化重新布局」在 FILL 语义下的覆盖：FILL 是
+     * **父内容区的全长**，父一改宽，子项必须立刻重新读回新的宽度。
+     *
+     * 这里用一个**不排布**的父（FLOW_NONE）：子项各自定位，探针落在内容
+     * 区原点，量出来的内容区不会被子项挤偏（排布父里探针会被排到后面）。 */
+    gui_layout_t none_layout = row_layout;
+    none_layout.flow = GUI_FLOW_NONE;
+
+    gui_widget_t p_fill;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &p_fill));
+    assert_eq(0, gui_widget_set_layout(fx.platform, p_fill, &none_layout));
+    assert_eq(0, gui_widget_set_geometry(fx.platform, p_fill, &box));
+
+    gui_widget_t c_fill;
+    assert_eq(0, gui_widget_create(fx.platform, p_fill, GUI_WIDGET_CONTAINER, &c_fill));
+    assert_eq(0, gui_widget_set_geometry(fx.platform, c_fill, &fill_w));
+
+    /* 父内容区 300×200（此时 FILL 子项已经在里面）。 */
+    int32_t pw = 0;
+    int32_t ph = 0;
+    measure_content_box(fx.platform, p_fill, NULL, NULL, &pw, &ph);
+    assert_eq(300, pw);
+    assert_eq(200, ph);
+
+    gui_rect_t f1;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, c_fill, &f1));
+    assert_eq(300, f1.width);
+    assert_eq(20, f1.height);
+
+    /* 父改宽到 400：内容区变 400，FILL 子项宽 == 400。 */
+    gui_geometry_t wide = box;
+    wide.width = GUI_SIZE_PX(400);
+    assert_eq(0, gui_widget_set_geometry(fx.platform, p_fill, &wide));
+
+    int32_t pw2 = 0;
+    measure_content_box(fx.platform, p_fill, NULL, NULL, &pw2, NULL);
+    assert_eq(400, pw2);
+
+    gui_rect_t f2;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, c_fill, &f2));
+    assert_eq(400, f2.width);
+    assert_eq(20, f2.height);
+    assert_true(f2.width > f1.width);
+
+    /* ── 5. 改父内边距：FILL 子项跟着变窄 ────────────────────────────
+     *
+     * 内容区扣掉父的内边距，FILL 子项跟着变窄——这与"父改尺寸"是同一
+     * 条契约的另一半：FILL 跟的是**内容区**，不是父的总尺寸。 */
+    gui_layout_t padded = none_layout;
+    padded.pad_left = 40;
+    padded.pad_right = 40;
+    assert_eq(0, gui_widget_set_layout(fx.platform, p_fill, &padded));
+
+    int32_t pw3 = 0;
+    measure_content_box(fx.platform, p_fill, NULL, NULL, &pw3, NULL);
+    assert_eq(320, pw3);
+
+    gui_rect_t f3;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, c_fill, &f3));
+    assert_eq(320, f3.width);
+    assert_true(f3.width < f2.width);
 
     gui_native_fixture_destroy(&fx);
 }
@@ -1143,6 +1225,31 @@ TEST_FUNC(test_geometry_range_and_enum_validation)
     container_scroll.text_align = GUI_TEXT_ALIGN_LEFT;
     errno = 0;
     assert_eq(-1, gui_widget_set_scroll(fx.platform, root, &container_scroll));
+    assert_eq(EOPNOTSUPP, errno);
+
+    /* ── 正向路径：容器（与按钮）接受滚动描述 ───────────────────────
+     *
+     * 拒绝方向被测到了，正向方向也必须有断言：文本字段保持默认时，容器
+     * 可以设滚动方向——这是公共契约，不是"碰巧没报错"。 */
+    gui_scroll_t ok_scroll;
+    ok_scroll.horizontal = false;
+    ok_scroll.vertical = true;
+    ok_scroll.text_mode = GUI_TEXT_MODE_WRAP;
+    ok_scroll.text_align = GUI_TEXT_ALIGN_LEFT;
+    assert_eq(0, gui_widget_set_scroll(fx.platform, root, &ok_scroll));
+
+    gui_widget_t button;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &button));
+    assert_eq(0, gui_widget_set_scroll(fx.platform, button, &ok_scroll));
+
+    /* 标签不滚动：不带滚动标志时仍然接受（只表达文本模式）。 */
+    ok_scroll.vertical = false;
+    assert_eq(0, gui_widget_set_scroll(fx.platform, label, &ok_scroll));
+
+    /* 标签带滚动标志仍然是 EOPNOTSUPP（与上面那条不是同一件事）。 */
+    ok_scroll.vertical = true;
+    errno = 0;
+    assert_eq(-1, gui_widget_set_scroll(fx.platform, label, &ok_scroll));
     assert_eq(EOPNOTSUPP, errno);
 
     /* ── 负尺寸与整数边界 ──────────────────────────────────────────
