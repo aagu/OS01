@@ -125,10 +125,48 @@ static bool variant_allowed(gui_widget_kind_t kind, gui_variant_t variant, bool 
 
 /* ── 落地 ──────────────────────────────────────────────────────────── */
 
+/*
+ * 聚焦态的填充与文字色。
+ *
+ * 主题只提供**所有控件共用**的焦点环（primary 2px），不提供聚焦填充：
+ * 共用的聚焦填充会盖掉外观层显式表达的 bg_role（LVGL 的状态权重恒高于
+ * 局部样式），自定义底色的控件获焦时就会丢掉自己的颜色。
+ *
+ * 因此聚焦填充由**外观层**按变体决定：
+ *   - 默认 ACTION（变体 ACTION 且底色就是默认 primary）：聚焦时换成同一
+ *     主题的 primary_container / on_primary_container——普通态底色与环都是
+ *     primary，同色时环画出来也看不见，填充必须与环可区分；
+ *   - 其余外观（自定义 bg_role、CARD、PLAIN……）：聚焦时**保留自己的填充
+ *     色与文字色**，环照常显示。
+ *
+ * 这个状态样式**只**写 bg_color / text_color：环的 border 属性仍然只来自
+ * 主题，外观层不得用更高优先级的局部样式覆盖 FOCUSED/FOCUS_KEY 的主题环
+ * （brief:221 的像素合同）。
+ *
+ * 每次应用外观都重写这两个样式：外观变了，聚焦态不能留旧值。
+ */
+static void appearance_apply_focus_fill(lv_obj_t *obj, const gui_appearance_t *ap)
+{
+    uint32_t bg = color_role_rgb(ap->bg_role);
+    uint32_t text = color_role_rgb(ap->text_role);
+
+    if (ap->variant == GUI_VARIANT_ACTION && ap->bg_role == GUI_COLOR_PRIMARY) {
+        bg = color_role_rgb(GUI_COLOR_PRIMARY_CONTAINER);
+        text = color_role_rgb(GUI_COLOR_ON_PRIMARY_CONTAINER);
+    }
+
+    lv_obj_set_style_bg_color(obj, lv_color_hex(bg), LV_STATE_FOCUSED);
+    lv_obj_set_style_text_color(obj, lv_color_hex(text), LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(bg), LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_text_color(obj, lv_color_hex(text), LV_STATE_FOCUS_KEY);
+}
+
 /**
  * @brief 把外观写进后端对象
  *
- * 全部写在普通状态（selector 0）上：主题的各状态样式因此原样生效。
+ * 普通状态（selector 0）写外观合同本身：主题的各状态样式因此原样生效。
+ * 聚焦态只带填充与文字色（见 appearance_apply_focus_fill）：环仍然只来自
+ * 主题。
  */
 static void appearance_apply(lv_obj_t *obj, const gui_appearance_t *ap)
 {
@@ -163,6 +201,8 @@ static void appearance_apply(lv_obj_t *obj, const gui_appearance_t *ap)
         lv_obj_set_style_pad_left(obj, 0, 0);
         lv_obj_set_style_pad_right(obj, 0, 0);
     }
+
+    appearance_apply_focus_fill(obj, ap);
 }
 
 /* ── 公共设置器 ───────────────────────────────────────────────────── */

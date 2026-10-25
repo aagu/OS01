@@ -52,7 +52,6 @@ typedef struct {
     lv_style_t btn_hover;
     lv_style_t btn_pressed;
     lv_style_t btn_disabled;
-    lv_style_t btn_focused;
     lv_style_t focus_ring;
     lv_style_t sw;
     lv_style_t sw_knob;
@@ -165,30 +164,22 @@ static void style_init(theme_styles_t *s)
     lv_style_set_text_color(&s->btn_disabled, tok_color(c->on_surface_variant));
 
     /*
-     * 按钮聚焦态：选中容器语义（primary_container 底 + on_primary_container
-     * 文字）。
-     *
-     * 默认 ACTION 按钮的普通态底色**就是** primary：焦点环也是 primary，
-     * 同色时环画出来也看不见。聚焦态因此换用同一主题里的
-     * primary_container，环（primary 2px）与填充（primary_container）才
-     * 互相可区分。普通态不变——像素保真依赖它。
-     */
-    lv_style_init(&s->btn_focused);
-    lv_style_set_bg_color(&s->btn_focused, tok_color(c->primary_container));
-    lv_style_set_text_color(&s->btn_focused, tok_color(c->on_primary_container));
-
-    /*
      * 焦点环：2px primary 轮廓。
      *
      * 环**自带**透明度（LV_OPA_COVER）：外观层在 bordered=false 时只把
      * border_width 置 0（零宽边框即"零普通边框"），不会把 border_opa 换成
      * 透明——否则这里的环会被普通态的透明度吃掉，整个环不可见。
+     *
+     * 环**不**设置 radius：环的圆角必须跟随控件自身的圆角（外观层的
+     * rounded）。主题状态样式不得改写外观层显式表达的形态属性。
+     *
+     * 环也**不**设置填充色：所有控件共用的环不能覆盖外观层显式表达的
+     * bg_role。聚焦态的填充由外观层按变体决定（appearance.c）。
      */
     lv_style_init(&s->focus_ring);
     lv_style_set_border_color(&s->focus_ring, tok_color(c->primary));
     lv_style_set_border_width(&s->focus_ring, 2);
     lv_style_set_border_opa(&s->focus_ring, LV_OPA_COVER);
-    lv_style_set_radius(&s->focus_ring, gui_theme_radius(GUI_THEME_RADIUS_MD));
 
     /* 开关。 */
     lv_style_init(&s->sw);
@@ -288,7 +279,6 @@ static void style_release(theme_styles_t *s)
     lv_style_reset(&s->btn_hover);
     lv_style_reset(&s->btn_pressed);
     lv_style_reset(&s->btn_disabled);
-    lv_style_reset(&s->btn_focused);
     lv_style_reset(&s->focus_ring);
     lv_style_reset(&s->sw);
     lv_style_reset(&s->sw_knob);
@@ -328,8 +318,6 @@ static void theme_apply(lv_theme_t *th, lv_obj_t *obj)
         lv_obj_add_style(obj, &s->btn_hover, LV_STATE_HOVERED);
         lv_obj_add_style(obj, &s->btn_pressed, LV_STATE_PRESSED);
         lv_obj_add_style(obj, &s->btn_disabled, LV_STATE_DISABLED);
-        lv_obj_add_style(obj, &s->btn_focused, LV_STATE_FOCUSED);
-        lv_obj_add_style(obj, &s->btn_focused, LV_STATE_FOCUS_KEY);
         lv_obj_add_style(obj, &s->focus_ring, LV_STATE_FOCUSED);
         lv_obj_add_style(obj, &s->focus_ring, LV_STATE_FOCUS_KEY);
         return;

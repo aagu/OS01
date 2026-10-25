@@ -171,21 +171,26 @@ TEST_FUNC(test_button_interaction_states)
               style_color_u32(lv_obj_get_style_text_color(btn, LV_PART_MAIN)));
     lv_obj_remove_state(btn, LV_STATE_DISABLED);
 
-    /* focused：选中容器语义（primary_container 底 + on_primary_container 文字）。
-     * 默认态的底色就是 primary，焦点环也是 primary——聚焦态换用
-     * primary_container，环与填充才互相可区分。 */
+    /*
+     * focused：主题**不**提供聚焦填充。
+     *
+     * 所有控件共用的聚焦填充会盖掉外观层显式表达的 bg_role（LVGL 的状态
+     * 权重恒高于局部样式），因此主题只保留**所有控件共用**的焦点环：普通
+     * 态的填充与文字在聚焦时原样保留。聚焦填充由外观层按变体决定
+     * （默认 ACTION → primary_container；自定义底色 → 保留自己的颜色）。
+     */
     lv_obj_add_state(btn, LV_STATE_FOCUSED);
-    assert_eq(c->primary_container,
+    assert_eq(c->primary,
               style_color_u32(lv_obj_get_style_bg_color(btn, LV_PART_MAIN)));
-    assert_eq(c->on_primary_container,
+    assert_eq(c->on_primary,
               style_color_u32(lv_obj_get_style_text_color(btn, LV_PART_MAIN)));
     lv_obj_remove_state(btn, LV_STATE_FOCUSED);
 
     /* FOCUS_KEY 与 FOCUSED 同义：键盘导航的焦点反馈必须一样。 */
     lv_obj_add_state(btn, LV_STATE_FOCUS_KEY);
-    assert_eq(c->primary_container,
+    assert_eq(c->primary,
               style_color_u32(lv_obj_get_style_bg_color(btn, LV_PART_MAIN)));
-    assert_eq(c->on_primary_container,
+    assert_eq(c->on_primary,
               style_color_u32(lv_obj_get_style_text_color(btn, LV_PART_MAIN)));
     lv_obj_remove_state(btn, LV_STATE_FOCUS_KEY);
 
@@ -229,6 +234,19 @@ TEST_FUNC(test_focus_ring_uses_primary_outline)
      * 主题必须自己声明"环是不透明的"。
      */
     assert_eq(LV_OPA_COVER, lv_obj_get_style_border_opa(btn, LV_PART_MAIN));
+
+    /*
+     * 环**不**改写圆角：环的圆角跟随控件自身的圆角（外观层的 rounded）。
+     * 主题状态样式不得改写外观层显式表达的形态属性。
+     */
+    {
+        int32_t radius_normal;
+
+        lv_obj_remove_state(btn, LV_STATE_FOCUSED);
+        radius_normal = (int32_t)lv_obj_get_style_radius(btn, LV_PART_MAIN);
+        lv_obj_add_state(btn, LV_STATE_FOCUSED);
+        assert_eq(radius_normal, (int32_t)lv_obj_get_style_radius(btn, LV_PART_MAIN));
+    }
 
     gui_platform_destroy(p);
 }

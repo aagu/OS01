@@ -245,6 +245,9 @@ static void focus_group_cb(lv_group_t *group)
     }
 }
 
+/* 进入"待修复"：记住修复起点与**路径**。 */
+static void focus_repair_arm(gui_input_t *input, unsigned start, bool bounded);
+
 /*
  * 控件被删除：从记录里摘掉（只比较指针值），并通知适配层。
  */
@@ -279,13 +282,18 @@ static void focus_obj_event_cb(lv_event_t *e)
         /*
          * 移除前的位置：后继从同一个下标开始（移除后同下标即原后继）。
          * 选择此刻失效：清掉，之后不再解引用它；旧键必须取消。
-         *
-         * 这是**后端自删**路径：修复搜索绕回（保既有 raw 契约），找不到
-         * 候选时保留修复位置，之后候选恢复可继续修复。
          */
         input->focus.repair_index = (unsigned)idx;
-        input->focus.repair_pending = true;
-        input->focus.repair_bounded = false;
+        if (input->focus.delete_depth == 0u) {
+            /*
+             * 后端自删（不在受控删除批次内）：修复搜索绕回（保既有 raw
+             * 契约），找不到候选时保留修复位置，之后候选恢复可继续修复。
+             *
+             * 受控删除批次内**不**在这里置待修复标志：批次收尾按受控路径
+             * （有界）决定修复规则，在这里置标志会盖掉它。
+             */
+            focus_repair_arm(input, (unsigned)idx, false);
+        }
         focus_commit(input, NULL);
     }
 
@@ -376,11 +384,8 @@ static lv_obj_t *focus_tab_candidate_bounded(gui_input_t *input, unsigned start)
     return NULL;
 }
 
-/* 计算修复目标：找不到候选时保留修复起点，之后候选恢复可继续修复。 */
-static lv_obj_t *focus_repair_target(gui_input_t *input, unsigned start);
-
-/* 同上，但搜索**有界**（受控路径专用）。 */
-static lv_obj_t *focus_repair_target_bounded(gui_input_t *input, unsigned start);
+/* 修复搜索：bounded = true 有界（受控），false 绕回（后端）。 */
+static lv_obj_t *focus_repair_search(gui_input_t *input, unsigned start, bool bounded);
 
 /* 按失效时记录的路径修复：受控=有界，后端=绕回。 */
 static lv_obj_t *focus_repair_by_mode(gui_input_t *input, unsigned start);
@@ -520,7 +525,7 @@ static void focus_sync(gui_input_t *input)
         /*
          * 焦点对象还在册但不可用（隐藏/禁用）：后端路径，修复搜索**绕回**。
          */
-        target = focus_repair_target(input, (unsigned)old_idx);
+        target = focus_repair_search(input, (unsigned)old_idx, false);
     } else {
         /*
          * 焦点已失效：按失效时记录的路径搜索。受控路径（有界）与后端路径
@@ -720,53 +725,66 @@ static void focus_drop_entry(gui_input_t *input, unsigned index)
     input->focus.count--;
 }
 
-/* 计算修复目标：找不到候选时保留修复起点，之后候选恢复可继续修复。 */
-static lv_obj_t *focus_repair_target(gui_input_t *input, unsigned start)
+/*
+ * 进入"待修复"：记住修复起点与**路径**。
+ *
+ * 路径属性（repair_bounded）是**粘性**的：已经在待修复状态时，后来的一次
+ * 修复尝试**不得**改写它——候选恢复后必须按**同一条**规则继续修复
+ * （plan:167："焦点失效后的自动修复找不到候选时保留修复位置，之后候选恢复
+ * 可继续修复"）。只有进入**新的**一次待修复时，路径才由这次的失效来源
+ * 决定（受控路径 = 有界，后端路径 = 绕回）。
+ */
+static void focus_repair_arm(gui_input_t *input, unsigned start, bool bounded)
 {
-    lv_obj_t *target = focus_tab_candidate(input, start, true);
-
-    if (target) {
-        input->focus.repair_pending = false;
-    } else {
-        input->focus.repair_pending = true;
-        input->focus.repair_index = start;
+    if (!input->focus.repair_pending) {
+        input->focus.repair_bounded = bounded;
     }
-    input->focus.repair_bounded = false;
-    return target;
+    input->focus.repair_pending = true;
+    input->focus.repair_index = start;
 }
 
 /*
- * 同上，但搜索**有界**（受控路径专用）。
+ * 修复搜索：找不到候选时保留修复起点，之后候选恢复可继续修复。
  *
- * 找不到候选时同样是 NONE + 保留修复位置——但搜索不回绕，修复位置之后的
- * 候选恢复之前，选择保持 NONE。
+ * bounded = true → **有界**搜索（受控路径：自起点到表尾，不回绕）；表尾
+ * 之后没有候选就是没有候选，不许绕回表头抢一个计划没有授权的选择。
+ * bounded = false → **绕回**搜索（后端路径：保既有 raw 契约）。
+ *
+ * 路径属性在待修复期间保持粘性：已经在待修复状态时，本次搜索按**已记下
+ * 的那条路径**走（候选恢复后按同一条规则继续修复）。
  */
-static lv_obj_t *focus_repair_target_bounded(gui_input_t *input, unsigned start)
+static lv_obj_t *focus_repair_search(gui_input_t *input, unsigned start, bool bounded)
 {
-    lv_obj_t *target = focus_tab_candidate_bounded(input, start);
+    bool use_bounded = input->focus.repair_pending ? input->focus.repair_bounded : bounded;
+    lv_obj_t *target;
+
+    if (use_bounded) {
+        target = focus_tab_candidate_bounded(input, start);
+    } else {
+        target = focus_tab_candidate(input, start, true);
+    }
 
     if (target) {
+        /* 修复完成：待修复标志与路径属性都复位。 */
         input->focus.repair_pending = false;
-    } else {
-        input->focus.repair_pending = true;
-        input->focus.repair_index = start;
+        input->focus.repair_bounded = false;
+        return target;
     }
-    input->focus.repair_bounded = true;
-    return target;
+
+    focus_repair_arm(input, start, use_bounded);
+    return NULL;
 }
 
 /*
  * 按失效时记录的路径修复：受控路径有界，后端路径绕回。
  *
- * 修复位置在失效的那一刻就记下了它属于哪条路径，之后的每一次修复尝试
- * （包括别的路径顺手触发的那些）都按同一条规则走。
+ * 路径属性在待修复期间是**粘性**的：这里按记下的那条路径继续修复，
+ * 候选恢复后仍按**同一条**规则走。
  */
 static lv_obj_t *focus_repair_by_mode(gui_input_t *input, unsigned start)
 {
-    if (input->focus.repair_bounded) {
-        return focus_repair_target_bounded(input, start);
-    }
-    return focus_repair_target(input, start);
+    /* 待修复期间路径属性粘性：按已记下的那条路径继续修复。 */
+    return focus_repair_search(input, start, input->focus.repair_bounded);
 }
 
 /*
@@ -816,9 +834,7 @@ static void focus_remove_controlled(gui_input_t *input, unsigned index)
         target = NULL;
     } else if (was_current) {
         /* 受控移除自己的后继：有界搜索。 */
-        input->focus.repair_pending = true;
-        input->focus.repair_bounded = true;
-        target = focus_repair_target_bounded(input, repair_index);
+        target = focus_repair_search(input, repair_index, true);
     } else if (input->focus.focus != NULL) {
         if (focus_obj_usable(input, input->focus.focus)) {
             target = input->focus.focus;
@@ -1124,7 +1140,7 @@ void gui_input_focus_delete_batch_end(gui_input_t *input)
      * 没有候选 → 选择 NONE + 保留修复位置。
      */
     if (!input->focus.explicit_clear) {
-        target = focus_repair_target_bounded(input, input->focus.repair_index);
+        target = focus_repair_search(input, input->focus.repair_index, true);
     }
     focus_rebuild(input, target);
 }

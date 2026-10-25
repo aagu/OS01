@@ -407,12 +407,15 @@ TEST_FUNC(test_material_focus_style_overrides_base_border)
     assert_false(gui_platform_get_pixel(fx.platform, (uint32_t)r.x, (uint32_t)(r.y + 30)) ==
                  c->surface_dim);
     /*
-     * 聚焦态的填充来自**同一主题**（primary_container / on_primary_container）：
-     * 环是 primary，填充是 primary_container，两者互相可区分——环才不会被
-     * 同色填充吃掉。
+     * 聚焦态的填充**仍是局部外观自己的角色色**（surface_container）。
+     *
+     * 主题只提供所有控件共用的焦点环，不提供共用的聚焦填充：共用的聚焦
+     * 填充会盖掉外观层显式表达的 bg_role（LVGL 的状态权重恒高于局部样式）。
+     * 聚焦填充由外观层按变体决定（默认 ACTION 才换成 primary_container）。
      */
-    assert_eq(c->primary_container, gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + 60),
+    assert_eq(c->surface_container, gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + 60),
                                                            (uint32_t)(r.y + 30)));
+    /* 环与填充互相可区分（primary ≠ surface_container）。 */
     assert_true(gui_platform_get_pixel(fx.platform, (uint32_t)r.x, (uint32_t)(r.y + 30)) !=
                 gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + 60), (uint32_t)(r.y + 30)));
 

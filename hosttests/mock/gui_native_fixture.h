@@ -273,6 +273,35 @@ int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_e
  */
 int gui_native_fixture_query_focus_rebuild_count(gui_native_fixture_t *fx, uint32_t *out);
 
+/**
+ * @brief 宿主私有：修复待办的状态
+ *
+ * 观察"修复位置 + 路径属性"。路径属性（受控=有界 / 后端=绕回）在待修复
+ * 期间必须**保持粘性**：候选恢复后按同一条规则继续修复。
+ *
+ * @param fx           fixture 上下文
+ * @param out_pending  输出参数：是否处于"待修复"状态（可为空）
+ * @param out_bounded  输出参数：路径属性是否为"有界"（受控路径）（可为空）
+ * @param out_index    输出参数：修复起点（表内下标）（可为空）
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_focus_repair_state(gui_native_fixture_t *fx, bool *out_pending,
+                                                bool *out_bounded, unsigned *out_index);
+
+/**
+ * @brief 宿主私有：控件当前状态解析出的圆角
+ *
+ * 用于证明"主题焦点环不得改写外观层显式表达的圆角"：`rounded=false` 的
+ * 控件聚焦后仍然是零圆角。
+ *
+ * @param fx      fixture 上下文
+ * @param widget  控件身份
+ * @param out     输出参数：解析出的 radius（像素）
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_focus_radius(gui_native_fixture_t *fx, gui_widget_t widget,
+                                          int32_t *out);
+
 /* ── 诊断(raw)登记的宿主私有入口 ─────────────────────────────────
  *
  * 诊断(raw)登记**没有**公共 API，也不得变成公共 adopt 入口：它只是内部

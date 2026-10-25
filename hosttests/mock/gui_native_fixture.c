@@ -366,6 +366,44 @@ int gui_native_fixture_query_focus_rebuild_count(gui_native_fixture_t *fx, uint3
     return 0;
 }
 
+int gui_native_fixture_query_focus_repair_state(gui_native_fixture_t *fx, bool *out_pending,
+                                                bool *out_bounded, unsigned *out_index)
+{
+    if (!fx || !fx->input) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (out_pending) {
+        *out_pending = fx->input->focus.repair_pending;
+    }
+    if (out_bounded) {
+        *out_bounded = fx->input->focus.repair_bounded;
+    }
+    if (out_index) {
+        *out_index = fx->input->focus.repair_index;
+    }
+    return 0;
+}
+
+int gui_native_fixture_query_focus_radius(gui_native_fixture_t *fx, gui_widget_t widget,
+                                          int32_t *out)
+{
+    lv_obj_t *obj;
+
+    if (!fx || !fx->platform || !out) {
+        errno = EINVAL;
+        return -1;
+    }
+    obj = gui_widget_test_get_obj(fx->platform, widget);
+    if (!obj) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* 解析值：按控件**当前**的状态（含 FOCUSED / FOCUS_KEY）求值。 */
+    *out = (int32_t)lv_obj_get_style_radius(obj, LV_PART_MAIN);
+    return 0;
+}
+
 /* ── 诊断(raw)登记的宿主私有入口 ─────────────────────────────────── */
 
 /*
