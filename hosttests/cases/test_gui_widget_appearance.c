@@ -468,69 +468,183 @@ TEST_FUNC(test_material_focus_style_overrides_base_border)
 
 /* ── 参数校验 ────────────────────────────────────────────────────── */
 
-TEST_FUNC(test_appearance_rejects_invalid_arguments)
+TEST_FUNC(test_bad_appearance_is_atomic)
 {
     gui_native_fixture_t fx;
     assert_eq(0, gui_native_fixture_create(&fx, false));
 
     gui_widget_t root;
     assert_eq(0, gui_widget_create(fx.platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &root));
+    gui_widget_t card;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &card));
 
-    gui_appearance_t ap = GUI_APPEARANCE_DEFAULT;
+    gui_geometry_t g;
+    g.x = 0;
+    g.y = 0;
+    g.width = GUI_SIZE_PX(120);
+    g.height = GUI_SIZE_PX(60);
+    assert_eq(0, gui_widget_set_geometry(fx.platform, card, &g));
+
+    const gui_theme_colors_t *c = gui_theme_colors();
+
+    /* 先落一个合法外观：卡片表面底。 */
+    gui_appearance_t good = GUI_APPEARANCE_DEFAULT;
+    good.variant = GUI_VARIANT_CARD;
+    good.bg_role = GUI_COLOR_SURFACE_CONTAINER;
+    good.filled = true;
+    good.rounded = false;
+    good.bordered = false;
+    assert_eq(0, gui_widget_set_appearance(fx.platform, card, &good));
+    assert_eq(0, gui_native_fixture_step(&fx, 50));
+
+    gui_rect_t r;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, card, &r));
+    uint32_t center_x = (uint32_t)(r.x + 60);
+    uint32_t center_y = (uint32_t)(r.y + 30);
+    assert_eq(c->surface_container, gui_platform_get_pixel(fx.platform, center_x, center_y));
 
     /* 空指针与无效身份。 */
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, NULL));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, NULL));
     assert_eq(EINVAL, errno);
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(NULL, root, &ap));
+    assert_eq(-1, gui_widget_set_appearance(NULL, card, &good));
     assert_eq(EINVAL, errno);
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, GUI_WIDGET_NONE, &ap));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, GUI_WIDGET_NONE, &good));
     assert_eq(EINVAL, errno);
 
     /* 越界的角色、形态与令牌层级。 */
-    gui_appearance_t bad = ap;
+    gui_appearance_t bad = good;
     bad.bg_role = GUI_COLOR_COUNT;
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
 
-    bad = ap;
+    bad = good;
     bad.text_role = GUI_COLOR_COUNT;
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
 
-    bad = ap;
+    bad = good;
     bad.border_role = GUI_COLOR_COUNT;
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
 
-    bad = ap;
+    bad = good;
     bad.variant = GUI_VARIANT_COUNT;
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
 
-    bad = ap;
+    bad = good;
     bad.font = (gui_theme_font_t)(GUI_THEME_FONT_LABEL + 1);
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
 
-    bad = ap;
+    bad = good;
     bad.radius = (gui_theme_radius_t)(GUI_THEME_RADIUS_FULL + 1);
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
 
-    bad = ap;
+    bad = good;
     bad.elevation = (gui_theme_elevation_t)(GUI_THEME_ELEVATION_5 + 1);
     errno = 0;
-    assert_eq(-1, gui_widget_set_appearance(fx.platform, root, &bad));
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
     assert_eq(EINVAL, errno);
+
+    /* 形态与种类不相容。 */
+    bad = good;
+    bad.variant = GUI_VARIANT_ACTION;
+    errno = 0;
+    assert_eq(-1, gui_widget_set_appearance(fx.platform, card, &bad));
+    assert_eq(EINVAL, errno);
+
+    /* 无部分修改：被拒绝的调用一个像素都没改。 */
+    assert_eq(0, gui_native_fixture_step(&fx, 50));
+    assert_eq(c->surface_container, gui_platform_get_pixel(fx.platform, center_x, center_y));
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_appearance_preserves_layout_padding)
+{
+    gui_native_fixture_t fx;
+    assert_eq(0, gui_native_fixture_create(&fx, false));
+
+    gui_widget_t root;
+    assert_eq(0, gui_widget_create(fx.platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &root));
+    gui_widget_t panel;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &panel));
+    gui_widget_t child;
+    assert_eq(0, gui_widget_create(fx.platform, panel, GUI_WIDGET_CONTAINER, &child));
+
+    gui_geometry_t panel_geo;
+    panel_geo.x = 0;
+    panel_geo.y = 0;
+    panel_geo.width = GUI_SIZE_PX(200);
+    panel_geo.height = GUI_SIZE_PX(120);
+    assert_eq(0, gui_widget_set_geometry(fx.platform, panel, &panel_geo));
+
+    gui_geometry_t child_geo;
+    child_geo.x = 0;
+    child_geo.y = 0;
+    child_geo.width = GUI_SIZE_PX(40);
+    child_geo.height = GUI_SIZE_PX(20);
+    assert_eq(0, gui_widget_set_geometry(fx.platform, panel, &child_geo));
+    assert_eq(0, gui_widget_set_geometry(fx.platform, child, &child_geo));
+
+    /* 面板留 20px 内边距。 */
+    gui_layout_t layout;
+    layout.flow = GUI_FLOW_NONE;
+    layout.main_align = GUI_FLOW_ALIGN_START;
+    layout.cross_align = GUI_FLOW_ALIGN_START;
+    layout.grow = 0;
+    layout.gap = 0;
+    layout.pad_top = 20;
+    layout.pad_bottom = 20;
+    layout.pad_left = 20;
+    layout.pad_right = 20;
+    assert_eq(0, gui_widget_set_layout(fx.platform, panel, &layout));
+
+    gui_rect_t panel_rect;
+    gui_rect_t child_rect;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, panel, &panel_rect));
+    assert_eq(0, gui_widget_get_bounds(fx.platform, child, &child_rect));
+
+    /* 内边距把子项顶开了。 */
+    int32_t offset_x = child_rect.x - panel_rect.x;
+    int32_t offset_y = child_rect.y - panel_rect.y;
+    assert_true(offset_x >= 20);
+    assert_true(offset_y >= 20);
+
+    /* 换外观：外观**不改布局**，内边距仍在。 */
+    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;
+    appearance.variant = GUI_VARIANT_CARD;
+    appearance.bg_role = GUI_COLOR_SURFACE_CONTAINER;
+    appearance.filled = true;
+    appearance.rounded = true;
+    /* 边框宽度保持与面板原样：普通边框会让内容区缩进 1px，那是边框的
+     * 语义，不是"外观改了布局"。 */
+    appearance.bordered = false;
+    assert_eq(0, gui_widget_set_appearance(fx.platform, panel, &appearance));
+    assert_eq(0, gui_native_fixture_step(&fx, 50));
+
+    gui_rect_t panel_after;
+    gui_rect_t child_after;
+    assert_eq(0, gui_widget_get_bounds(fx.platform, panel, &panel_after));
+    assert_eq(0, gui_widget_get_bounds(fx.platform, child, &child_after));
+    assert_eq(panel_rect.width, panel_after.width);
+    assert_eq(panel_rect.height, panel_after.height);
+    assert_eq(child_rect.x, child_after.x);
+    assert_eq(child_rect.y, child_after.y);
+    /* 内边距仍然在：子项依旧被顶开。 */
+    assert_true(child_after.x - panel_after.x >= 20);
+    assert_true(child_after.y - panel_after.y >= 20);
 
     gui_native_fixture_destroy(&fx);
 }
@@ -542,7 +656,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_card_plain_root_and_action_pixels),
     TEST_ENTRY(test_appearance_variant_kind_rules),
     TEST_ENTRY(test_material_focus_style_overrides_base_border),
-    TEST_ENTRY(test_appearance_rejects_invalid_arguments),
+    TEST_ENTRY(test_bad_appearance_is_atomic),
+    TEST_ENTRY(test_appearance_preserves_layout_padding),
 TEST_LIST_END
 
 int main(void)

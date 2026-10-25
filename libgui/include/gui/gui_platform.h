@@ -95,24 +95,56 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
 uint32_t gui_platform_get_pixel(const gui_platform_t *platform, uint32_t x, uint32_t y);
 
 /**
- * @brief 平台的运行统计
+ * @brief 原生像素格式
  *
- * 统计的是**真的**发生过的事：步进次数、提交过的帧、投递过的输入事件与
- * 公共事件、控件的创建与销毁。不存在"合成"的统计口径。
+ * 公共层只认这五种。平台的原生格式由平台层**回读**后映射过来；映射不
+ * 上时报告 UNKNOWN——那是一个**事实**，不是失败。
+ */
+typedef enum {
+    GUI_PIXEL_FORMAT_XRGB8888 = 0, /* 32 位，每像素 4 字节 */
+    GUI_PIXEL_FORMAT_RGB565,        /* 16 位 */
+    GUI_PIXEL_FORMAT_ARGB8888,      /* 32 位，带 alpha */
+    GUI_PIXEL_FORMAT_I8,            /* 8 位灰度 */
+    GUI_PIXEL_FORMAT_UNKNOWN        /* 原生格式映射不上 */
+} gui_pixel_format_t;
+
+/**
+ * @brief 平台的渲染统计
+ *
+ * 统计的是**真的**发生过的事，没有合成口径：
+ *
+ *   - `format` 是平台**回读**的原生像素格式（不是创建时写死的那个值）。
+ *   - `width` / `height` 是视口尺寸。
+ *   - `widget_count` 是当前**存活**的控件数（已发布且未失效）。
+ *   - `pool_total` / `pool_used` / `pool_max_used` 是渲染内存池的字节数：
+ *     `pool_used == pool_total - 空闲字节`，峰值是池的**历史**最高占用。
+ *   - `registry_bytes` 是**控件注册表自己的**字节预算（1024 槽表的占用）。
+ *     它与上面的渲染池是**两笔账**，必须分开看。
+ *   - `renderer_name` 是渲染器的标识：平台层在创建时按**实际绑定的后端**
+ *     定下的名字（屏幕模式是 OS01 的 2D 图形设备，离屏模式是内存画布），
+ *     不是每次调用现编的字符串。
+ *   - `renderer_version_*` 是渲染器的版本（major/minor/patch），来自被锁定
+ *     的光栅化库版本。
  */
 typedef struct {
-    uint64_t steps;           /* gui_platform_step() 的调用次数 */
-    uint64_t frames;          /* 已提交到后端的帧数 */
-    uint64_t input_events;    /* 已投递的输入事件数 */
-    uint64_t events_delivered;/* 已交给业务回调的公共事件数 */
-    uint64_t widgets_created; /* 已发布的控件数（累计） */
-    uint64_t widgets_destroyed;/* 已失效的控件数（累计） */
-    uint64_t widgets_live;    /* 当前有效的控件数 */
-    uint32_t last_delay_ms;   /* 最近一次步进给出的建议等待时间 */
+    gui_pixel_format_t format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t widget_count;
+    uint64_t pool_used;
+    uint64_t pool_total;
+    uint64_t pool_max_used;
+    uint64_t registry_bytes;
+    char renderer_name[16];
+    uint16_t renderer_version_major;
+    uint16_t renderer_version_minor;
+    uint16_t renderer_version_patch;
 } gui_platform_stats_t;
 
 /**
- * @brief 读取平台的运行统计
+ * @brief 读取平台的渲染统计
+ *
+ * 失败时输出结构被**清零**（不留半份数据）。
  *
  * @param platform 平台上下文句柄
  * @param out      输出参数：统计快照，不可为 NULL

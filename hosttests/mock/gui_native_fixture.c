@@ -237,6 +237,28 @@ int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t w
     return 0;
 }
 
+int gui_native_fixture_pool_bytes(gui_native_fixture_t *fx, uint64_t *out_total,
+                                  uint64_t *out_free, uint64_t *out_max_used)
+{
+    if (!fx) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    if (out_total) {
+        *out_total = (uint64_t)mon.total_size;
+    }
+    if (out_free) {
+        *out_free = (uint64_t)mon.free_size;
+    }
+    if (out_max_used) {
+        *out_max_used = (uint64_t)mon.max_used;
+    }
+    return 0;
+}
+
 /* ── 删除期间的创建探针 ──────────────────────────────────────────────
  *
  * 探针挂在 victim **自己**身上：原生删除事件在删除事务内部送达它，

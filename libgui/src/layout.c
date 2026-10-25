@@ -81,6 +81,22 @@ static lv_flex_align_t flow_align_to_lvgl(gui_flow_align_t align)
 /* ── 尺寸循环判定 ──────────────────────────────────────────────────── */
 
 /**
+ * @brief 后端坐标的上限
+ *
+ * 后端的坐标是有界的（29 位带符号）。超过这个上限的像素值**无法被后端
+ * 表达**：公共 API 必须拒绝它，而不是先截断成一个不同的值再接受。
+ */
+#define GUI_SIZE_VALUE_MAX 0x1FFFFFFFu
+
+/**
+ * @brief 一个像素尺寸能不能被后端表达
+ */
+static bool px_value_expressible(int32_t value)
+{
+    return value >= 0 && (uint32_t)value <= GUI_SIZE_VALUE_MAX;
+}
+
+/**
  * @brief 父控件在某一轴上是不是"按内容"
  *
  * 没有父控件（控件是根）时返回 false：根的默认尺寸来源是视口的固定
@@ -173,6 +189,20 @@ int gui_widget_set_geometry(gui_platform_t *platform, gui_widget_t widget,
         errno = EINVAL;
         return -1;
     }
+    /*
+     * 像素尺寸必须能被后端表达：负值与超出坐标范围的值都被拒绝。
+     * 校验**在改动任何状态之前**完成——不先截断再验证。
+     */
+    if (geometry->width.mode == GUI_SIZE_MODE_PX &&
+        !px_value_expressible(geometry->width.value)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (geometry->height.mode == GUI_SIZE_MODE_PX &&
+        !px_value_expressible(geometry->height.value)) {
+        errno = EINVAL;
+        return -1;
+    }
 
     /* 尺寸循环必须在改动任何状态之前被拒绝。 */
     if (would_create_size_cycle(platform, slot, geometry->width.mode, geometry->height.mode)) {
@@ -246,11 +276,6 @@ int gui_widget_set_layout(gui_platform_t *platform, gui_widget_t widget, const g
         errno = EBUSY;
         return -1;
     }
-    /* 标签是叶子：排布对它没有意义。 */
-    if (slot->kind == GUI_WIDGET_LABEL) {
-        errno = EOPNOTSUPP;
-        return -1;
-    }
     if ((unsigned int)layout->flow >= (unsigned int)GUI_FLOW_COUNT ||
         (unsigned int)layout->main_align >= (unsigned int)GUI_FLOW_ALIGN_COUNT ||
         (unsigned int)layout->cross_align >= (unsigned int)GUI_FLOW_ALIGN_COUNT) {
@@ -260,6 +285,22 @@ int gui_widget_set_layout(gui_platform_t *platform, gui_widget_t widget, const g
     if (layout->grow > 255u) {
         errno = EINVAL;
         return -1;
+    }
+
+    /* 标签是叶子：排布对它没有意义。
+     *
+     * 但它可以在流式父里靠**伸展权重**去适配宽度——那一支只应用
+     * flex grow，其余容器字段必须都是默认值。 */
+    if (slot->kind == GUI_WIDGET_LABEL) {
+        if (layout->flow != GUI_FLOW_NONE || layout->gap != 0 ||
+            layout->pad_top != 0 || layout->pad_bottom != 0 ||
+            layout->pad_left != 0 || layout->pad_right != 0) {
+            errno = EOPNOTSUPP;
+            return -1;
+        }
+        lv_obj_set_flex_grow(slot->obj, (uint8_t)layout->grow);
+        slot->grow = layout->grow;
+        return 0;
     }
 
     switch (layout->flow) {
@@ -330,14 +371,14 @@ int gui_widget_set_scroll(gui_platform_t *platform, gui_widget_t widget, const g
     if (slot->kind == GUI_WIDGET_LABEL) {
         /* 标签不滚动：滚动标志必须都是 false。 */
         if (scroll->horizontal || scroll->vertical) {
-            errno = EINVAL;
+            errno = EOPNOTSUPP;
             return -1;
         }
     } else {
         /* 容器与按钮不承载长文本：文本字段必须是默认值。 */
         if (scroll->text_mode != GUI_TEXT_MODE_WRAP ||
             scroll->text_align != GUI_TEXT_ALIGN_LEFT) {
-            errno = EINVAL;
+            errno = EOPNOTSUPP;
             return -1;
         }
     }

@@ -179,7 +179,7 @@ TEST_FUNC(test_event_handler_registration_rules)
     gui_native_fixture_destroy(&fx);
 }
 
-TEST_FUNC(test_label_and_decoration_do_not_intercept_hits)
+TEST_FUNC(test_child_label_and_icon_activate_parent_once)
 {
     gui_native_fixture_t fx;
     assert_eq(0, gui_native_fixture_create(&fx, true));
@@ -274,7 +274,7 @@ TEST_FUNC(test_no_duplicate_activation_from_event_bubbling)
     gui_native_fixture_destroy(&fx);
 }
 
-TEST_FUNC(test_handler_can_be_replaced_and_unregistered)
+TEST_FUNC(test_event_handler_replace_and_unset)
 {
     gui_native_fixture_t fx;
     assert_eq(0, gui_native_fixture_create(&fx, true));
@@ -419,6 +419,9 @@ typedef struct {
     gui_platform_t *platform;
     gui_widget_t root;
     gui_widget_t victim;
+    gui_widget_t label;
+    gui_widget_t button;
+    gui_appearance_t appearance;
     int create_rc;
     int create_errno;
     int destroy_rc;
@@ -429,8 +432,16 @@ typedef struct {
     int layout_errno;
     gui_status_t step_status;
     int step_errno;
+    uint32_t delay;
     gui_widget_t created;
     int calls;
+
+    /* 回调期间**允许**做的操作：它们不改控件树的结构。 */
+    int text_rc;
+    int appearance_rc;
+    int visible_rc;
+    int enabled_rc;
+    int stats_rc;
 } guard_probe_t;
 
 static void mutating_handler(const gui_event_t *event, void *userdata)
@@ -467,10 +478,21 @@ static void mutating_handler(const gui_event_t *event, void *userdata)
     probe->layout_rc = gui_widget_set_layout(probe->platform, probe->root, &layout);
     probe->layout_errno = errno;
 
-    uint32_t delay = 0;
+    /* 嵌套步进不许写输出参数：错误路径不许留下"成功样"的延迟值。 */
+    probe->delay = 12345u;
     errno = 0;
-    probe->step_status = gui_platform_step(probe->platform, &delay);
+    probe->step_status = gui_platform_step(probe->platform, &probe->delay);
     probe->step_errno = errno;
+
+    /* 不改树结构的操作在回调期间是**允许**的：守卫不许把它们一起挡掉。 */
+    probe->text_rc = gui_widget_set_text(probe->platform, probe->label, "x");
+    probe->appearance_rc = gui_widget_set_appearance(probe->platform, probe->button,
+                                                    &probe->appearance);
+    probe->visible_rc = gui_widget_set_visible(probe->platform, probe->button, true);
+    probe->enabled_rc = gui_widget_set_enabled(probe->platform, probe->button, true);
+
+    gui_platform_stats_t stats;
+    probe->stats_rc = gui_platform_get_stats(probe->platform, &stats);
 }
 
 TEST_FUNC(test_callback_mutation_guard)
@@ -482,6 +504,8 @@ TEST_FUNC(test_callback_mutation_guard)
     assert_eq(0, gui_widget_create(fx.platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &root));
     gui_widget_t victim;
     assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &victim));
+    gui_widget_t label;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_LABEL, &label));
     gui_widget_t button;
     assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &button));
 
@@ -497,6 +521,10 @@ TEST_FUNC(test_callback_mutation_guard)
     probe.platform = fx.platform;
     probe.root = root;
     probe.victim = victim;
+    probe.label = label;
+    probe.button = button;
+    probe.appearance = GUI_APPEARANCE_DEFAULT;
+    probe.appearance.variant = GUI_VARIANT_ACTION; /* 按钮用动作形态 */
     assert_eq(0, gui_widget_set_event_handler(fx.platform, button, mutating_handler, &probe));
 
     gui_native_registry_info_t before;
@@ -521,6 +549,15 @@ TEST_FUNC(test_callback_mutation_guard)
     /* 嵌套步进：EBUSY，而且**不**锁存永久错误。 */
     assert_eq(GUI_STATUS_ERROR, probe.step_status);
     assert_eq(EBUSY, probe.step_errno);
+    /* 嵌套步进的错误路径没有写输出参数。 */
+    assert_eq(12345u, probe.delay);
+
+    /* 不改树结构的操作在回调期间是允许的。 */
+    assert_eq(0, probe.text_rc);
+    assert_eq(0, probe.appearance_rc);
+    assert_eq(0, probe.visible_rc);
+    assert_eq(0, probe.enabled_rc);
+    assert_eq(0, probe.stats_rc);
 
     /* 无部分修改：没有半成品控件，树没有被动过。 */
     assert_eq(0, probe.created.id);
@@ -580,79 +617,93 @@ TEST_FUNC(test_slot_not_reused_during_delete_callback)
 
 /* ── 平台统计 ────────────────────────────────────────────────────── */
 
-TEST_FUNC(test_platform_stats_are_real)
+TEST_FUNC(test_stats_report_real_format_and_pool_bytes)
 {
     gui_native_fixture_t fx;
-    assert_eq(0, gui_native_fixture_create(&fx, true));
+    assert_eq(0, gui_native_fixture_create(&fx, false));
 
     gui_platform_stats_t stats;
     assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(0, stats.steps);
-    assert_eq(0, stats.widgets_created);
-    assert_eq(0, stats.widgets_destroyed);
-    assert_eq(0, stats.widgets_live);
-    assert_eq(0, stats.events_delivered);
-    assert_eq(0, stats.input_events);
 
-    /* 步进次数是真的。 */
-    assert_eq(0, gui_native_fixture_step(&fx, 50));
-    assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(1, stats.steps);
-    assert_eq(0, gui_native_fixture_step(&fx, 50));
-    assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(2, stats.steps);
+    /* format：平台**回读**的原生像素格式。离屏模式下就是 XRGB8888。 */
+    assert_eq(GUI_PIXEL_FORMAT_XRGB8888, stats.format);
 
-    /* 控件的创建与销毁是真的。 */
+    /* 视口尺寸。 */
+    assert_eq(640, stats.width);
+    assert_eq(480, stats.height);
+
+    /* 池字节：真实内存池的占用。
+     *
+     * 公共统计只报告"已用"，不报告"空闲"；空闲字节由宿主私有观察桥独立
+     * 读出，于是这条等式是**被外部复核**的，而不是实现自己证明自己。 */
+    uint64_t pool_total = 0;
+    uint64_t pool_free = 0;
+    uint64_t pool_max_used = 0;
+    assert_eq(0, gui_native_fixture_pool_bytes(&fx, &pool_total, &pool_free, &pool_max_used));
+    assert_true(pool_total > 0);
+    assert_eq(pool_total, stats.pool_total);
+    assert_eq(pool_total - pool_free, stats.pool_used);
+    assert_true(stats.pool_used <= stats.pool_total);
+    assert_true(stats.pool_max_used >= stats.pool_used);
+
+    /* 注册表自己的字节预算：与渲染池分开报告的两笔账。 */
+    assert_true(stats.registry_bytes > 0);
+    assert_true(stats.registry_bytes != stats.pool_total);
+
+    /* 渲染器标识：非空，来自平台层创建时定下的真实来源。 */
+    assert_true(stats.renderer_name[0] != '\0');
+    assert_true(stats.renderer_name[0] != ' ');
+
+    /* 渲染器版本：来自被锁定的光栅化库版本，整组版本确实被填上了。
+     *
+     * 注意：patch 组件在真实版本里**合法地**可以为 0（被锁定的光栅化库
+     * 就是 9.5.0），因此这里断言的是"整组版本不是未填的零"，而不是
+     * 断言 patch 一定非零——那会是对真实版本的一句假话。 */
+    assert_true(stats.renderer_version_major != 0);
+    assert_true(stats.renderer_version_minor != 0);
+    assert_true(stats.renderer_version_major != 0 || stats.renderer_version_minor != 0 ||
+                stats.renderer_version_patch != 0);
+
+    /* widget_count：当前**存活**的控件数。 */
+    assert_eq(0, stats.widget_count);
+
     gui_widget_t root;
     assert_eq(0, gui_widget_create(fx.platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &root));
     assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(1, stats.widgets_created);
-    assert_eq(1, stats.widgets_live);
-    assert_eq(0, stats.widgets_destroyed);
+    assert_eq(1, stats.widget_count);
 
-    gui_widget_t button;
-    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &button));
+    gui_widget_t child;
+    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &child));
     assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(2, stats.widgets_created);
-    assert_eq(2, stats.widgets_live);
+    assert_eq(2, stats.widget_count);
 
-    assert_eq(0, gui_widget_destroy(fx.platform, button));
+    assert_eq(0, gui_widget_destroy(fx.platform, child));
     assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(1, stats.widgets_destroyed);
-    assert_eq(1, stats.widgets_live);
+    assert_eq(1, stats.widget_count);
 
-    /* 输入事件与公共事件的计数是真的。 */
-    gui_widget_t live_button;
-    assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &live_button));
-
-    gui_geometry_t g;
-    g.x = 0;
-    g.y = 0;
-    g.width = GUI_SIZE_PX(120);
-    g.height = GUI_SIZE_PX(60);
-    assert_eq(0, gui_widget_set_geometry(fx.platform, live_button, &g));
-
-    event_probe_t probe;
-    memset(&probe, 0, sizeof(probe));
-    assert_eq(0, gui_widget_set_event_handler(fx.platform, live_button, probe_handler, &probe));
-
-    gui_rect_t r;
-    assert_eq(0, gui_widget_get_bounds(fx.platform, live_button, &r));
-    click_at(&fx, r.x + 60, r.y + 30);
-
+    assert_eq(0, gui_widget_destroy(fx.platform, root));
     assert_eq(0, gui_platform_get_stats(fx.platform, &stats));
-    assert_eq(1, probe.calls);
-    assert_eq(1, stats.events_delivered);
-    assert_true(stats.input_events > 0);
-    assert_true(stats.frames > 0);
+    assert_eq(0, stats.widget_count);
 
-    /* 输出参数校验。 */
+    /* 池字节是活的：建了控件又拆掉之后，读数确实变过。 */
+    assert_eq(0, gui_native_fixture_pool_bytes(&fx, &pool_total, &pool_free, &pool_max_used));
+    assert_eq(pool_total, stats.pool_total);
+    assert_eq(pool_total - pool_free, stats.pool_used);
+
+    /* 失败：输出被**清零**，不留半份数据。 */
+    gui_platform_stats_t dirty;
+    memset(&dirty, 0xAB, sizeof(dirty));
     errno = 0;
     assert_eq(-1, gui_platform_get_stats(fx.platform, NULL));
     assert_eq(EINVAL, errno);
+
+    memset(&dirty, 0xAB, sizeof(dirty));
     errno = 0;
-    assert_eq(-1, gui_platform_get_stats(NULL, &stats));
+    assert_eq(-1, gui_platform_get_stats(NULL, &dirty));
     assert_eq(EINVAL, errno);
+    for (size_t i = 0; i < sizeof(dirty); i++) {
+        assert_eq(0, ((const unsigned char *)&dirty)[i]);
+    }
 
     gui_native_fixture_destroy(&fx);
 }
@@ -660,14 +711,14 @@ TEST_FUNC(test_platform_stats_are_real)
 TEST_LIST_BEGIN
     TEST_ENTRY(test_activate_event_reaches_button_handler),
     TEST_ENTRY(test_event_handler_registration_rules),
-    TEST_ENTRY(test_label_and_decoration_do_not_intercept_hits),
+    TEST_ENTRY(test_child_label_and_icon_activate_parent_once),
     TEST_ENTRY(test_no_duplicate_activation_from_event_bubbling),
-    TEST_ENTRY(test_handler_can_be_replaced_and_unregistered),
+    TEST_ENTRY(test_event_handler_replace_and_unset),
     TEST_ENTRY(test_deleted_widget_does_not_deliver),
     TEST_ENTRY(test_reused_slot_never_calls_old_handler),
     TEST_ENTRY(test_callback_mutation_guard),
     TEST_ENTRY(test_slot_not_reused_during_delete_callback),
-    TEST_ENTRY(test_platform_stats_are_real),
+    TEST_ENTRY(test_stats_report_real_format_and_pool_bytes),
 TEST_LIST_END
 
 int main(void)

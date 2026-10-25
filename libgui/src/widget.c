@@ -320,12 +320,20 @@ static void gui_widget_on_native_delete(lv_event_t *event)
     if (slot->state == GUI_WIDGET_SLOT_FREE) {
         return;
     }
-    /* 统计：控件在这里失效（每个控件只算一次）。 */
+    /*
+     * 统计只统计**已发布**的控件。
+     *
+     * 槽在发布之前就带着身份号（id != 0）；被回滚删除的 RESERVED 槽
+     * 身份号还是 0：它从来没有对外可见过，因此**不得**触碰任何存活
+     * 计数。已发布的控件只算一次（pending_free 负责去重）。
+     */
     if (!slot->pending_free) {
         slot->pending_free = true;
-        platform->stat_widgets_destroyed++;
-        if (platform->stat_widgets_live > 0) {
-            platform->stat_widgets_live--;
+        if (slot->id != 0) {
+            platform->stat_widgets_destroyed++;
+            if (platform->stat_widgets_live > 0) {
+                platform->stat_widgets_live--;
+            }
         }
     }
     slot->state = GUI_WIDGET_SLOT_DESTROYING;

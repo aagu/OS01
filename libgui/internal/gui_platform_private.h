@@ -68,6 +68,13 @@ struct gui_platform {
     /* GUI-2b：步进深度。>0 表示这一步还没走完（嵌套步进）。 */
     uint32_t step_depth;
 
+    /* GUI-2b：渲染器标识与版本。创建时按**实际绑定的后端**定下来，之后
+     * 只是被读出来——绝不每次调用现编一个字符串。 */
+    char renderer_name[16];
+    uint16_t renderer_version_major;
+    uint16_t renderer_version_minor;
+    uint16_t renderer_version_patch;
+
     /* GUI-2b：真实运行统计。统计的都是真的发生过的事。 */
     uint64_t stat_steps;            /* gui_platform_step() 调用次数 */
     uint64_t stat_events_delivered; /* 已交给业务回调的公共事件数 */

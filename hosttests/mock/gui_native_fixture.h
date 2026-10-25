@@ -188,6 +188,22 @@ int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_byte
 int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t widget, bool focused);
 
 /**
+ * @brief 宿主私有：读取渲染内存池的真实字节数
+ *
+ * 公共统计只报告"已用"，不报告"空闲"；这条观察桥把池的**空闲**字节也
+ * 露出来，测试才能独立复核 `pool_used == pool_total - pool_free` 这条
+ * 等式（而不是让实现自己证明自己）。
+ *
+ * @param fx         fixture 上下文
+ * @param out_total  输出参数：池总字节（可为 NULL）
+ * @param out_free   输出参数：池空闲字节（可为 NULL）
+ * @param out_max    输出参数：池历史最高占用字节（可为 NULL）
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_pool_bytes(gui_native_fixture_t *fx, uint64_t *out_total,
+                                  uint64_t *out_free, uint64_t *out_max_used);
+
+/**
  * @brief 宿主私有：在**删除回调期间**创建一个控件
  *
  * 删除事务进行时，槽不许回到空闲表：删除回调期间创建的控件必须拿到

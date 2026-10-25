@@ -282,6 +282,30 @@ gui_platform_t *gui_platform_create(const gui_config_t *cfg)
     platform->draw_buf = (uint32_t *)MAP_FAILED;
     platform->shadow_canvas = (uint32_t *)MAP_FAILED;
 
+    /*
+     * 渲染器标识与版本：**创建时**按实际绑定的后端定下来，之后只是被
+     * 读出来。名字不是每次调用现编的字符串。
+     *
+     *   - 屏幕模式：平台绑定的是 OS01 的 2D 图形设备（libgfx 打开的
+     *     那一个 gfx 设备），因此标识是 "os01-gfx0"。
+     *   - 离屏模式：渲染落在进程内的内存画布上，标识是 "os01-offscreen"。
+     *
+     * 版本是被锁定的光栅化库（LVGL）的版本。
+     */
+    {
+        static const char *const renderer_names[2] = { "os01-gfx0", "os01-offscreen" };
+        const char *name = renderer_names[mode == GUI_MODE_OFFSCREEN ? 1 : 0];
+        size_t n = strlen(name);
+        if (n >= sizeof(platform->renderer_name)) {
+            n = sizeof(platform->renderer_name) - 1;
+        }
+        memcpy(platform->renderer_name, name, n);
+        platform->renderer_name[n] = '\0';
+        platform->renderer_version_major = LVGL_VERSION_MAJOR;
+        platform->renderer_version_minor = LVGL_VERSION_MINOR;
+        platform->renderer_version_patch = LVGL_VERSION_PATCH;
+    }
+
     int saved = 0;
     bool lv_inited = false;
 
@@ -530,29 +554,58 @@ uint32_t gui_platform_get_pixel(const gui_platform_t *platform, uint32_t x, uint
     return platform->shadow_canvas[offset] & 0x00FFFFFFu;
 }
 
+/**
+ * @brief 原生颜色格式 → 公共像素格式
+ *
+ * 映射不上就是 UNKNOWN：那是一个**事实**，不是失败。
+ */
+static gui_pixel_format_t map_color_format(lv_color_format_t native)
+{
+    switch (native) {
+    case LV_COLOR_FORMAT_XRGB8888: return GUI_PIXEL_FORMAT_XRGB8888;
+    case LV_COLOR_FORMAT_RGB565:   return GUI_PIXEL_FORMAT_RGB565;
+    case LV_COLOR_FORMAT_ARGB8888: return GUI_PIXEL_FORMAT_ARGB8888;
+    case LV_COLOR_FORMAT_I8:       return GUI_PIXEL_FORMAT_I8;
+    default:                       return GUI_PIXEL_FORMAT_UNKNOWN;
+    }
+}
+
 int gui_platform_get_stats(gui_platform_t *platform, gui_platform_stats_t *out)
 {
     if (!out) {
         errno = EINVAL;
         return -1;
     }
+    /* 失败清输出：不留半份数据。 */
     memset(out, 0, sizeof(*out));
 
-    if (!platform) {
+    if (!platform || !platform->disp) {
         errno = EINVAL;
         return -1;
     }
 
-    out->steps = platform->stat_steps;
-    out->frames = platform->flush_count;
-    out->events_delivered = platform->stat_events_delivered;
-    out->widgets_created = platform->stat_widgets_created;
-    out->widgets_destroyed = platform->stat_widgets_destroyed;
-    out->widgets_live = platform->stat_widgets_live;
-    out->last_delay_ms = platform->stat_last_delay_ms;
-    if (platform->input) {
-        out->input_events = platform->input->delivered_events;
-    }
+    /* format：从**真实** display 回读，不是抄创建时写死的那个值。 */
+    out->format = map_color_format(lv_display_get_color_format(platform->disp));
+    out->width = platform->width;
+    out->height = platform->height;
+    out->widget_count = (uint32_t)platform->stat_widgets_live;
+
+    /* 池字节：渲染内存池的真实占用。 */
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    out->pool_total = (uint64_t)mon.total_size;
+    out->pool_used = out->pool_total - (uint64_t)mon.free_size;
+    out->pool_max_used = (uint64_t)mon.max_used;
+
+    /* 注册表自己的字节预算：与渲染池分开报告的两笔账。 */
+    out->registry_bytes = (uint64_t)sizeof(gui_widget_registry_t);
+
+    /* 渲染器标识与版本：创建时定下的真实来源。 */
+    memcpy(out->renderer_name, platform->renderer_name, sizeof(out->renderer_name));
+    out->renderer_name[sizeof(out->renderer_name) - 1] = '\0';
+    out->renderer_version_major = platform->renderer_version_major;
+    out->renderer_version_minor = platform->renderer_version_minor;
+    out->renderer_version_patch = platform->renderer_version_patch;
     return 0;
 }
 
@@ -628,11 +681,15 @@ static gui_status_t compute_wait_and_return(gui_platform_t *platform, uint32_t l
 static gui_status_t platform_step_body(gui_platform_t *platform, uint32_t *out_next_delay_ms);
 
 gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_delay_ms)
-{    if (out_next_delay_ms) {
-        *out_next_delay_ms = 100;
-    }
-
+{
     if (!platform) {
+        /*
+         * 平台句柄非法：输出参数仍给出一个**确定**的值（GUI-2 的既有
+         * 契约：调用方拿到的延迟永远是可用的默认值）。
+         */
+        if (out_next_delay_ms) {
+            *out_next_delay_ms = 100;
+        }
         errno = EINVAL;
         return GUI_STATUS_ERROR;
     }
@@ -642,19 +699,33 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
      *
      * 它返回错误，但**不**锁存终止态：外层那一步走完之后平台照常可用。
      * 锁存会让一次回调里的误用变成永久死亡，代价太大。
+     *
+     * 它也**不写输出参数**：错误路径不许留下一个"成功样"的延迟值。
      */
     if (platform->step_depth > 0) {
         errno = EBUSY;
         return GUI_STATUS_ERROR;
     }
 
+    /* 已经终止的平台同样直接返回：错误路径**不**写输出参数。 */
+    if (platform->terminal_status != GUI_STATUS_OK) {
+        errno = platform->terminal_errno;
+        return platform->terminal_status;
+    }
+
+    /*
+     * 输出参数只在**成功**路径上被写：成功时 compute_wait_and_return()
+     * 给出真实的建议等待时间；任何失败都让调用方的缓冲区保持原样。
+     */
     platform->step_depth++;
     gui_status_t status = platform_step_body(platform, out_next_delay_ms);
     platform->step_depth--;
 
     /* 真实统计：步进次数与最近一次的建议等待时间。 */
     platform->stat_steps++;
-    platform->stat_last_delay_ms = out_next_delay_ms ? *out_next_delay_ms : 0;
+    if (status == GUI_STATUS_OK && out_next_delay_ms) {
+        platform->stat_last_delay_ms = *out_next_delay_ms;
+    }
     return status;
 }
 

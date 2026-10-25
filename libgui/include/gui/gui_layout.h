@@ -337,8 +337,11 @@ int gui_widget_set_appearance(gui_platform_t *platform, gui_widget_t widget,
  * @param platform 平台上下文句柄
  * @param widget   控件句柄
  * @param geometry 几何描述，不可为 NULL
- * @return 0 成功；-1 失败（errno：EINVAL 参数/身份非法或尺寸循环，
- *         EOPNOTSUPP 该控件种类不接受几何）
+ * 像素尺寸必须能被后端表达：负值与超出后端坐标范围的值都以 EINVAL
+ * 拒绝（不先截断成一个不同的值再接受）。
+ *
+ * @return 0 成功；-1 失败（errno：EINVAL 参数/身份非法、尺寸不可表达或
+ *         构成尺寸循环）
  */
 int gui_widget_set_geometry(gui_platform_t *platform, gui_widget_t widget,
                             const gui_geometry_t *geometry);
@@ -364,7 +367,12 @@ int gui_widget_set_alignment(gui_platform_t *platform, gui_widget_t widget,
  * @param platform 平台上下文句柄
  * @param widget   控件句柄
  * @param layout   布局描述，不可为 NULL
- * @return 0 成功；-1 失败（errno：EINVAL 参数/身份非法，EOPNOTSUPP 不是容器）
+ * 标签是叶子：它不接受排布，但可以在流式父里用**伸展权重**去适配宽度
+ * （那一支要求 flow 为 NONE、gap 与四向 padding 均为 0，只应用伸展
+ * 权重）；其余情况以 EOPNOTSUPP 拒绝。
+ *
+ * @return 0 成功；-1 失败（errno：EINVAL 参数/身份非法，
+ *         EOPNOTSUPP 该控件种类不接受这组布局字段）
  */
 int gui_widget_set_layout(gui_platform_t *platform, gui_widget_t widget, const gui_layout_t *layout);
 
@@ -374,8 +382,12 @@ int gui_widget_set_layout(gui_platform_t *platform, gui_widget_t widget, const g
  * @param platform 平台上下文句柄
  * @param widget   控件句柄
  * @param scroll   滚动描述，不可为 NULL
- * @return 0 成功；-1 失败（errno：EINVAL 参数/身份非法或该种类不接受这个
- *         滚动/文本组合，EOPNOTSUPP 该控件种类不接受滚动）
+ * 标签不滚动：它的滚动标志必须都是 false。容器与按钮不承载长文本：
+ * 它们的文本字段必须是默认值。这两类**类型不匹配**以 EOPNOTSUPP 拒绝；
+ * 角色/枚举越界等参数问题以 EINVAL 拒绝。
+ *
+ * @return 0 成功；-1 失败（errno：EINVAL 参数/身份/枚举非法，
+ *         EOPNOTSUPP 该控件种类不接受这组滚动/文本字段）
  */
 int gui_widget_set_scroll(gui_platform_t *platform, gui_widget_t widget, const gui_scroll_t *scroll);
 
