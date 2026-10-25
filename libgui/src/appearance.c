@@ -140,9 +140,16 @@ static void appearance_apply(lv_obj_t *obj, const gui_appearance_t *ap)
 
     lv_obj_set_style_radius(obj, ap->rounded ? gui_theme_radius(ap->radius) : 0, 0);
 
+    /*
+     * 边框：bordered=false 时**只**把宽度置 0 —— 零宽边框就是"零普通边框"。
+     *
+     * 透明度保持 LV_OPA_COVER，**不**改成透明：主题的焦点环（2px primary）
+     * 与普通态共用同一条边框属性链，把普通态的透明度改成透明会让整个环
+     * 不可见。环自己带透明度（theme_apply.c 的 focus_ring）。
+     */
     lv_obj_set_style_border_width(obj, ap->bordered ? 1 : 0, 0);
     lv_obj_set_style_border_color(obj, lv_color_hex(color_role_rgb(ap->border_role)), 0);
-    lv_obj_set_style_border_opa(obj, ap->bordered ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
 
     lv_obj_set_style_shadow_color(obj, lv_color_hex(color_role_rgb(GUI_COLOR_SHADOW)), 0);
     lv_obj_set_style_shadow_width(obj, gui_theme_elevation_shadow_width(ap->elevation), 0);

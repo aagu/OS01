@@ -243,25 +243,6 @@ static void click_widget(gui_native_fixture_t *fx, gui_widget_t widget)
     click_at(fx, r.x + r.width / 2, r.y + r.height / 2);
 }
 
-/* 统计控件矩形内的"主题 primary 焦点环"像素数量。 */
-static uint32_t count_primary_pixels(gui_platform_t *platform, const gui_rect_t *area)
-{
-    uint32_t count = 0;
-    uint32_t color = gui_theme_colors()->primary;
-    int32_t y;
-
-    for (y = area->y; y < area->y + area->height; y++) {
-        int32_t x;
-
-        for (x = area->x; x < area->x + area->width; x++) {
-            if (gui_platform_get_pixel(platform, (uint32_t)x, (uint32_t)y) == color) {
-                count++;
-            }
-        }
-    }
-    return count;
-}
-
 /* ═══════════════════════════════════════════════════════════════════
  * Task 7：登记模式、策略与生命周期事务
  * ═══════════════════════════════════════════════════════════════════ */
@@ -1346,9 +1327,12 @@ TEST_FUNC(test_material_ring_tracks_focus)
     gui_widget_t a;
     gui_widget_t b;
     gui_widget_t got;
-    gui_appearance_t appearance;
     gui_rect_t ra;
     gui_rect_t rb;
+    uint32_t primary;
+    uint32_t primary_container;
+    uint32_t edge;
+    uint32_t center;
 
     assert_eq(0, gui_native_fixture_create(&fx, true));
     root = make_root(&fx);
@@ -1356,17 +1340,17 @@ TEST_FUNC(test_material_ring_tracks_focus)
     b = make_button(&fx, root, 200, 200);
 
     /*
-     * 底色必须**不是** primary：焦点环就是 primary 色，底色同色时环与
-     * 填充无法区分（不允许用填充色冒充环）。
+     * **默认外观**（bordered = false）：普通态没有边框，主题焦点环必须仍然
+     * 看得见。
+     *
+     * 默认 ACTION 按钮的普通态底色**就是** primary，环也是 primary——所以
+     * "有没有 primary 像素"分不出环。只能比较**边带**与**中心**：
+     *   - 聚焦：边带是环（primary）、中心是填充（primary_container），
+     *     两者必须不同 → 环存在且与填充可区分；
+     *   - 非聚焦：普通边框为零，边带与中心同色 → 没有环像素。
      */
-    appearance = GUI_APPEARANCE_DEFAULT;
-    appearance.variant = GUI_VARIANT_ACTION;
-    appearance.bg_role = GUI_COLOR_SURFACE;
-    appearance.text_role = GUI_COLOR_ON_SURFACE;
-    appearance.border_role = GUI_COLOR_OUTLINE_VARIANT;
-    appearance.bordered = true;
-    assert_eq(0, gui_widget_set_appearance(fx.platform, a, &appearance));
-    assert_eq(0, gui_widget_set_appearance(fx.platform, b, &appearance));
+    primary = gui_theme_colors()->primary;
+    primary_container = gui_theme_colors()->primary_container;
 
     assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
     assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
@@ -1379,10 +1363,20 @@ TEST_FUNC(test_material_ring_tracks_focus)
     assert_eq(0, gui_widget_get_bounds(fx.platform, a, &ra));
     assert_eq(0, gui_widget_get_bounds(fx.platform, b, &rb));
 
-    /* 有焦点的控件：primary 边框可采样。 */
-    assert_true(count_primary_pixels(fx.platform, &ra) > 0);
-    /* 没有焦点的控件：没有 primary 边框。 */
-    assert_eq(0, count_primary_pixels(fx.platform, &rb));
+    /* 聚焦的控件：环存在，且与填充色不同。 */
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)ra.x, (uint32_t)(ra.y + ra.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(ra.x + ra.width / 2),
+                                    (uint32_t)(ra.y + ra.height / 2));
+    assert_eq(primary, edge);
+    assert_eq(primary_container, center);
+    assert_true(edge != center);
+
+    /* 没有焦点的控件：普通边框为零（边带与中心同色 → 没有环像素）。 */
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)rb.x, (uint32_t)(rb.y + rb.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(rb.x + rb.width / 2),
+                                    (uint32_t)(rb.y + rb.height / 2));
+    assert_eq(primary, center);
+    assert_eq(edge, center);
 
     /* 焦点迁移：环跟着走。 */
     assert_eq(0, gui_focus_set(fx.input, b));
@@ -1391,8 +1385,282 @@ TEST_FUNC(test_material_ring_tracks_focus)
 
     assert_eq(0, gui_focus_get(fx.input, &got));
     assert_eq(b.id, got.id);
-    assert_eq(0, count_primary_pixels(fx.platform, &ra));
-    assert_true(count_primary_pixels(fx.platform, &rb) > 0);
+
+    /* 旧处：环消失（边带回到普通态底色，与中心同色）。 */
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)ra.x, (uint32_t)(ra.y + ra.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(ra.x + ra.width / 2),
+                                    (uint32_t)(ra.y + ra.height / 2));
+    assert_eq(primary, center);
+    assert_eq(edge, center);
+
+    /* 新处：环出现，且与填充色不同。 */
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)rb.x, (uint32_t)(rb.y + rb.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(rb.x + rb.width / 2),
+                                    (uint32_t)(rb.y + rb.height / 2));
+    assert_eq(primary, edge);
+    assert_eq(primary_container, center);
+    assert_true(edge != center);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/* ── 受控路径的后继：有界前向搜索（不回绕） ─────────────────────── */
+
+TEST_FUNC(test_unregister_last_item_leaves_no_focus)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t got;
+    gui_widget_t receiver;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, b));
+
+    /*
+     * 两项表删掉焦点**末项**：移除后的同下标就是原后继，而原后继是表尾。
+     * 受控路径的后继搜索**有界**：表尾之后没有候选 → NONE，不许绕回表头
+     * 抢一个计划没有授权的选择。
+     */
+    assert_eq(0, gui_focus_unregister(fx.input, b));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+
+    /* 刷新也不复活：a 在修复位置**之前**，有界搜索不会绕回它。 */
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_unregister_without_tab_successor_leaves_no_focus)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t click_only;
+    gui_widget_t disabled;
+    gui_widget_t got;
+    gui_widget_t receiver;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    click_only = make_button(&fx, root, 120, 10);
+    disabled = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, click_only, GUI_FOCUS_CLICK));
+    assert_eq(0, gui_focus_register(fx.input, disabled, GUI_FOCUS_TAB));
+    assert_eq(0, gui_widget_set_enabled(fx.platform, disabled, false));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    /*
+     * 焦点项的后继全是 CLICK-only / 禁用项 → 没有 Tab 候选 → NONE。
+     * 受控路径不回绕，禁用项与 CLICK-only 项都不是 Tab 候选。
+     */
+    assert_eq(0, gui_focus_unregister(fx.input, a));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/* ── 显式清空与修复待办是两件事 ─────────────────────────────────── */
+
+TEST_FUNC(test_explicit_clear_is_stable_and_never_revived)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t got;
+    gui_widget_t receiver;
+    bool explicit_clear = false;
+    uint32_t rebuilds_before = 0;
+    uint32_t rebuilds_after = 0;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, a));
+
+    /* 显式清空：公开与后端都是 NONE。 */
+    assert_eq(0, gui_focus_set(fx.input, GUI_WIDGET_NONE));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, NULL, &explicit_clear));
+    assert_true(explicit_clear);
+
+    /*
+     * 显式清空是**稳定态**：它不是"焦点失效待修复"，所以连续刷新**不再
+     * 重建组**（组重建 = remove_all + 重新加入全部成员，每步一次就是 O(n)
+     * 抖动）。
+     */
+    assert_eq(0, gui_native_fixture_query_focus_rebuild_count(&fx, &rebuilds_before));
+    step(&fx, 20);
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_native_fixture_query_focus_rebuild_count(&fx, &rebuilds_after));
+    assert_eq(rebuilds_before, rebuilds_after);
+
+    /* 清空标志仍在，焦点仍然是 NONE。 */
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, NULL, &explicit_clear));
+    assert_true(explicit_clear);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /* 新登记 + 刷新：焦点仍然不复活（显式 NONE 保持到下一次成功选择）。 */
+    {
+        gui_widget_t c = make_button(&fx, root, 230, 10);
+
+        assert_eq(0, gui_focus_register(fx.input, c, GUI_FOCUS_TAB));
+    }
+    assert_eq(0, gui_native_fixture_query_focus_rebuild_count(&fx, &rebuilds_before));
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_native_fixture_query_focus_rebuild_count(&fx, &rebuilds_after));
+    assert_eq(rebuilds_before, rebuilds_after);
+
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, NULL, &explicit_clear));
+    assert_true(explicit_clear);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+TEST_FUNC(test_deleted_focus_keeps_repair_position_until_candidate_returns)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t a;
+    gui_widget_t b;
+    gui_widget_t c;
+    gui_widget_t got;
+    bool ever_selected = false;
+    bool explicit_clear = true;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    a = make_button(&fx, root, 10, 10);
+    b = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, a, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, b, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, b));
+
+    /* 焦点对象被删：表尾之后没有候选 → NONE，保留修复位置。 */
+    assert_eq(0, gui_widget_destroy(fx.platform, b));
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /*
+     * 这是"焦点失效待修复"，**不是**显式清空：清空标志不得被顺手置起。
+     */
+    assert_eq(0, gui_native_fixture_query_focus_history(&fx, &ever_selected, &explicit_clear));
+    assert_true(ever_selected);
+    assert_false(explicit_clear);
+
+    /* a 在修复位置**之前**：有界搜索不绕回，焦点仍然 NONE。 */
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+
+    /*
+     * 候选恢复：修复位置（= 移除前的下标）被保留，新登记落在那个下标上 →
+     * 修复继续，焦点回到可用项。
+     */
+    {
+        c = make_button(&fx, root, 230, 10);
+
+        assert_eq(0, gui_focus_register(fx.input, c, GUI_FOCUS_TAB));
+    }
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(c.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/* ── 槽复用：焦点状态不得随槽残留 ──────────────────────────────── */
+
+TEST_FUNC(test_reused_slot_carries_no_focus_state)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t old_button;
+    gui_widget_t new_button;
+    gui_widget_t got;
+    gui_widget_t receiver;
+    gui_native_slot_info_t old_info;
+    gui_native_slot_info_t new_info;
+    activate_probe_t probe;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    old_button = make_button(&fx, root, 10, 10);
+
+    memset(&probe, 0, sizeof(probe));
+    assert_eq(0, gui_widget_set_event_handler(fx.platform, old_button, activate_handler, &probe));
+
+    assert_eq(0, gui_focus_register(fx.input, old_button, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, old_button));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(old_button.id, got.id);
+
+    /* 槽下标必须在它还活着的时候记下来。 */
+    assert_eq(0, gui_native_fixture_query_slot(fx.platform, old_button, &old_info));
+    assert_eq(GUI_NATIVE_SLOT_LIVE, old_info.state);
+    assert_true(old_info.has_handler);
+
+    assert_eq(0, gui_widget_destroy(fx.platform, old_button));
+
+    /* 复用的槽：同一个槽下标。 */
+    new_button = make_button(&fx, root, 10, 10);
+    assert_eq(0, gui_native_fixture_query_slot(fx.platform, new_button, &new_info));
+    assert_eq(old_info.index, new_info.index);
+    assert_true(new_button.id != old_button.id);
+
+    /* 复用槽上的新身份**没有焦点登记**。 */
+    errno = 0;
+    assert_eq(-1, gui_focus_set(fx.input, new_button));
+    assert_eq(EINVAL, errno);
+
+    /* 它也不是真实接收者。 */
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_true(receiver.id != new_button.id);
+
+    /* 旧 handler 不会被调用。 */
+    click_widget(&fx, new_button);
+    assert_eq(0, probe.calls);
 
     gui_native_fixture_destroy(&fx);
 }
@@ -1420,7 +1688,13 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_tab_only_click_activates_without_focus_steal),
     TEST_ENTRY(test_enter_space_activate_on_release_once),
     TEST_ENTRY(test_late_up_after_clear_move_delete_is_ignored),
-    TEST_ENTRY(test_material_ring_tracks_focus)TEST_LIST_END
+    TEST_ENTRY(test_material_ring_tracks_focus),
+    TEST_ENTRY(test_unregister_last_item_leaves_no_focus),
+    TEST_ENTRY(test_unregister_without_tab_successor_leaves_no_focus),
+    TEST_ENTRY(test_explicit_clear_is_stable_and_never_revived),
+    TEST_ENTRY(test_deleted_focus_keeps_repair_position_until_candidate_returns),
+    TEST_ENTRY(test_reused_slot_carries_no_focus_state)
+TEST_LIST_END
 
 int main(void)
 {

@@ -188,6 +188,7 @@ typedef struct {
     bool      ever_selected;                    /* 是否发生过一次成功的选择 */
     bool      explicit_clear;                   /* 显式清空：保持 NONE 直到下一次成功选择 */
     bool      repair_pending;                   /* 焦点失效但暂时找不到候选 */
+    bool      repair_bounded;                   /* 修复搜索有界（受控路径）；false = 后端路径绕回 */
     unsigned  repair_index;                     /* 修复起点（表内下标） */
     bool      dirty;                            /* 后端组与记录不一致：需要重新投影 */
 

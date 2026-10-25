@@ -142,6 +142,9 @@ bool g_gui_test_fail_widget_observer = false;
  * for the same reason as the widget ones above. */
 bool g_gui_test_fail_focus_observer = false;
 
+/* GUI-2b Task 7 fix round 1: the focus group's rebuild counter. */
+uint32_t g_gui_test_focus_rebuild_count = 0;
+
 #ifndef GUI_INTEGRATION_TEST
 bool g_gui_test_fail_lv_display_create = false;
 uint32_t g_gui_test_handler_delay = 20;
@@ -220,6 +223,7 @@ void gui_test_reset(void)
     g_gui_test_fail_widget_registry = false;
     g_gui_test_fail_widget_observer = false;
     g_gui_test_fail_focus_observer = false;
+    g_gui_test_focus_rebuild_count = 0;
 
     gui_test_device_reset(&g_gui_test_keyboard);
     gui_test_device_reset(&g_gui_test_mouse);

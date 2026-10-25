@@ -171,6 +171,24 @@ TEST_FUNC(test_button_interaction_states)
               style_color_u32(lv_obj_get_style_text_color(btn, LV_PART_MAIN)));
     lv_obj_remove_state(btn, LV_STATE_DISABLED);
 
+    /* focused：选中容器语义（primary_container 底 + on_primary_container 文字）。
+     * 默认态的底色就是 primary，焦点环也是 primary——聚焦态换用
+     * primary_container，环与填充才互相可区分。 */
+    lv_obj_add_state(btn, LV_STATE_FOCUSED);
+    assert_eq(c->primary_container,
+              style_color_u32(lv_obj_get_style_bg_color(btn, LV_PART_MAIN)));
+    assert_eq(c->on_primary_container,
+              style_color_u32(lv_obj_get_style_text_color(btn, LV_PART_MAIN)));
+    lv_obj_remove_state(btn, LV_STATE_FOCUSED);
+
+    /* FOCUS_KEY 与 FOCUSED 同义：键盘导航的焦点反馈必须一样。 */
+    lv_obj_add_state(btn, LV_STATE_FOCUS_KEY);
+    assert_eq(c->primary_container,
+              style_color_u32(lv_obj_get_style_bg_color(btn, LV_PART_MAIN)));
+    assert_eq(c->on_primary_container,
+              style_color_u32(lv_obj_get_style_text_color(btn, LV_PART_MAIN)));
+    lv_obj_remove_state(btn, LV_STATE_FOCUS_KEY);
+
     gui_platform_destroy(p);
 }
 
@@ -205,6 +223,12 @@ TEST_FUNC(test_focus_ring_uses_primary_outline)
     assert_eq(c->primary,
               style_color_u32(lv_obj_get_style_border_color(btn, LV_PART_MAIN)));
     assert_eq(2, lv_obj_get_style_border_width(btn, LV_PART_MAIN));
+
+    /*
+     * 环**自带**透明度：普通态把 border_opa 改成透明会让整个环不可见，
+     * 主题必须自己声明"环是不透明的"。
+     */
+    assert_eq(LV_OPA_COVER, lv_obj_get_style_border_opa(btn, LV_PART_MAIN));
 
     gui_platform_destroy(p);
 }

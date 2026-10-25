@@ -356,6 +356,16 @@ int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_e
     return 0;
 }
 
+int gui_native_fixture_query_focus_rebuild_count(gui_native_fixture_t *fx, uint32_t *out)
+{
+    if (!fx || !out) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out = g_gui_test_focus_rebuild_count;
+    return 0;
+}
+
 /* ── 诊断(raw)登记的宿主私有入口 ─────────────────────────────────── */
 
 /*

@@ -261,6 +261,18 @@ int gui_native_fixture_query_focus_order(gui_native_fixture_t *fx, gui_widget_t 
 int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_ever_selected,
                                            bool *out_explicit_clear);
 
+/**
+ * @brief 宿主私有：焦点组被重建过多少次
+ *
+ * 重建 = remove_all + 重新加入全部成员。稳定态（显式清空）必须**不再**
+ * 重建组，否则每步刷新都是 O(n) 抖动。
+ *
+ * @param fx  fixture 上下文
+ * @param out 输出参数：自上次复位以来的重建次数
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_focus_rebuild_count(gui_native_fixture_t *fx, uint32_t *out);
+
 /* ── 诊断(raw)登记的宿主私有入口 ─────────────────────────────────
  *
  * 诊断(raw)登记**没有**公共 API，也不得变成公共 adopt 入口：它只是内部

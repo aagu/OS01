@@ -406,12 +406,69 @@ TEST_FUNC(test_material_focus_style_overrides_base_border)
     /* 局部边框没有渗进来。 */
     assert_false(gui_platform_get_pixel(fx.platform, (uint32_t)r.x, (uint32_t)(r.y + 30)) ==
                  c->surface_dim);
+    /*
+     * 聚焦态的填充来自**同一主题**（primary_container / on_primary_container）：
+     * 环是 primary，填充是 primary_container，两者互相可区分——环才不会被
+     * 同色填充吃掉。
+     */
+    assert_eq(c->primary_container, gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + 60),
+                                                           (uint32_t)(r.y + 30)));
+    assert_true(gui_platform_get_pixel(fx.platform, (uint32_t)r.x, (uint32_t)(r.y + 30)) !=
+                gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + 60), (uint32_t)(r.y + 30)));
 
     /* 失焦：焦点环消失，普通局部边框回来。 */
     assert_eq(0, gui_native_fixture_set_focus_visual(&fx, button, false));
     assert_eq(0, gui_native_fixture_step(&fx, 50));
     assert_eq(c->surface_dim, gui_platform_get_pixel(fx.platform, (uint32_t)r.x,
                                                       (uint32_t)(r.y + 30)));
+
+    /*
+     * bordered=false（默认外观）也必须看得见焦点环。
+     *
+     * bordered=false 的合同是"**零普通边框**"，不是"关闭主题焦点环"：
+     * 普通态的边框宽度是 0（边带与填充同色），聚焦态的 2px primary 环照旧
+     * 被画出来，且与聚焦填充（primary_container）不同。
+     */
+    {
+        gui_widget_t plain;
+        gui_geometry_t pg;
+        gui_rect_t pr;
+
+        assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_BUTTON, &plain));
+        pg.x = 0;
+        pg.y = 100;
+        pg.width = GUI_SIZE_PX(120);
+        pg.height = GUI_SIZE_PX(60);
+        assert_eq(0, gui_widget_set_geometry(fx.platform, plain, &pg));
+        assert_eq(0, gui_widget_get_bounds(fx.platform, plain, &pr));
+        assert_eq(0, gui_native_fixture_step(&fx, 50));
+
+        /* 普通态：没有普通边框（边带与中心同色，都是 primary 填充）。 */
+        assert_eq(c->primary, gui_platform_get_pixel(fx.platform, (uint32_t)pr.x,
+                                                     (uint32_t)(pr.y + 30)));
+        assert_eq(c->primary, gui_platform_get_pixel(fx.platform, (uint32_t)(pr.x + 60),
+                                                     (uint32_t)(pr.y + 30)));
+
+        /* 聚焦：环被画出来，且与聚焦填充不同。 */
+        assert_eq(0, gui_native_fixture_set_focus_visual(&fx, plain, true));
+        assert_eq(0, gui_native_fixture_step(&fx, 50));
+        assert_eq(c->primary, gui_platform_get_pixel(fx.platform, (uint32_t)pr.x,
+                                                     (uint32_t)(pr.y + 30)));
+        assert_eq(c->primary_container, gui_platform_get_pixel(fx.platform, (uint32_t)(pr.x + 60),
+                                                               (uint32_t)(pr.y + 30)));
+        assert_true(gui_platform_get_pixel(fx.platform, (uint32_t)pr.x,
+                                           (uint32_t)(pr.y + 30)) !=
+                    gui_platform_get_pixel(fx.platform, (uint32_t)(pr.x + 60),
+                                           (uint32_t)(pr.y + 30)));
+
+        /* 失焦：环消失，普通态仍然没有普通边框。 */
+        assert_eq(0, gui_native_fixture_set_focus_visual(&fx, plain, false));
+        assert_eq(0, gui_native_fixture_step(&fx, 50));
+        assert_eq(c->primary, gui_platform_get_pixel(fx.platform, (uint32_t)pr.x,
+                                                     (uint32_t)(pr.y + 30)));
+        assert_eq(c->primary, gui_platform_get_pixel(fx.platform, (uint32_t)(pr.x + 60),
+                                                     (uint32_t)(pr.y + 30)));
+    }
 
     /* 指针的位移是相对的：先把它归到视口左上角，再移到按钮上。 */
     mouse_event_t home;

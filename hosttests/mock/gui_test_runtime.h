@@ -150,6 +150,14 @@ extern bool g_gui_test_fail_widget_observer;  /* the native observer installatio
 /* GUI-2b Task 7: the focus engine's delete-observer installation fails. */
 extern bool g_gui_test_fail_focus_observer;
 
+/*
+ * GUI-2b Task 7 fix round 1: how many times the focus engine rebuilt the
+ * focus group (remove_all + re-add).  The counter lets the host tests
+ * observe "a stable state does not rebuild the group" instead of inferring
+ * it from the visible selection.
+ */
+extern uint32_t g_gui_test_focus_rebuild_count;
+
 #ifdef __cplusplus
 }
 #endif

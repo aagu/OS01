@@ -169,6 +169,10 @@ static void focus_visual_set(lv_obj_t *obj, bool on)
  * 旧/新身份比较、选择记录更新、历史状态更新与后端投影都在这里。任何一次
  * 焦点变化（包含 → NONE）都会显式标记取消协议：旧键不得继续作用到新的
  * 接收者上。
+ *
+ * **提交本身不碰修复待办**：目标为 NULL 只说明"此刻没有选择"，它可能是
+ * 显式清空（稳定态），也可能是焦点失效（待修复）。这两种状态由各自的
+ * 路径分别记录，不在这里合并。
  */
 static void focus_commit(gui_input_t *input, lv_obj_t *target)
 {
@@ -192,8 +196,6 @@ static void focus_commit(gui_input_t *input, lv_obj_t *target)
             input->focus.focus_id = input->focus.entries[idx].native_id;
         }
         focus_visual_set(target, true);
-    } else {
-        input->focus.repair_pending = true;
     }
 
     /* 焦点真的变了 → 取消当前键与它的重复。 */
@@ -277,8 +279,13 @@ static void focus_obj_event_cb(lv_event_t *e)
         /*
          * 移除前的位置：后继从同一个下标开始（移除后同下标即原后继）。
          * 选择此刻失效：清掉，之后不再解引用它；旧键必须取消。
+         *
+         * 这是**后端自删**路径：修复搜索绕回（保既有 raw 契约），找不到
+         * 候选时保留修复位置，之后候选恢复可继续修复。
          */
         input->focus.repair_index = (unsigned)idx;
+        input->focus.repair_pending = true;
+        input->focus.repair_bounded = false;
         focus_commit(input, NULL);
     }
 
@@ -310,6 +317,12 @@ static bool focus_members_match(gui_input_t *input)
 
 /*
  * 选择是否与后端一致：真实接收者必须就是记录里的选择。
+ *
+ * 「显式清空」与「修复待办」是两个**独立**状态：
+ *   - 显式清空（explicit_clear）是**稳定态**：没有待修复的事，选择一致，
+ *     提前返回因此可命中（每步不重建组）。
+ *   - 修复待办（repair_pending）表示"焦点失效后还没找到后继"：此时一致
+ *     性不成立，维护路径要继续找后继。
  */
 static bool focus_selection_consistent(gui_input_t *input, lv_obj_t *target)
 {
@@ -343,8 +356,34 @@ static lv_obj_t *focus_tab_candidate(gui_input_t *input, unsigned start, bool fo
     return NULL;
 }
 
+/*
+ * 从 start 开始（含）向后扫到**表尾**找第一个可用 Tab 候选；**不回绕**。
+ *
+ * 受控路径（公共注销、原生删除批次）用它选后继：移除前的位置决定后继，
+ * 移除后同下标即原后继；表尾之后没有候选就是没有候选——不许绕回表头
+ * 抢一个计划没有授权的选择。
+ */
+static lv_obj_t *focus_tab_candidate_bounded(gui_input_t *input, unsigned start)
+{
+    unsigned n = input->focus.count;
+    unsigned i;
+
+    for (i = start; i < n; i++) {
+        if (focus_tab_ok(input, &input->focus.entries[i])) {
+            return input->focus.entries[i].obj;
+        }
+    }
+    return NULL;
+}
+
 /* 计算修复目标：找不到候选时保留修复起点，之后候选恢复可继续修复。 */
 static lv_obj_t *focus_repair_target(gui_input_t *input, unsigned start);
+
+/* 同上，但搜索**有界**（受控路径专用）。 */
+static lv_obj_t *focus_repair_target_bounded(gui_input_t *input, unsigned start);
+
+/* 按失效时记录的路径修复：受控=有界，后端=绕回。 */
+static lv_obj_t *focus_repair_by_mode(gui_input_t *input, unsigned start);
 
 /*
  * 把组整体 detach 到真实 NONE。
@@ -381,6 +420,12 @@ static void focus_rebuild(gui_input_t *input, lv_obj_t *target)
         return;
     }
 
+#ifdef OS01_HOST_TEST
+    /* 宿主私有观察：组重建次数（"稳定态不重建组"的断言用）。 */
+    extern uint32_t g_gui_test_focus_rebuild_count;
+    g_gui_test_focus_rebuild_count++;
+#endif
+
     input->focus.projection_depth++;
     lv_group_focus_freeze(group, true);
     lv_group_remove_all_objs(group);
@@ -414,6 +459,10 @@ static void focus_apply(gui_input_t *input, lv_obj_t *obj)
     }
     if (!obj) {
         /* 清空：组必须真的没有焦点（真实 NONE）。 */
+        if (lv_group_get_focused(group) == NULL && input->focus.focus == NULL) {
+            /* 已经是真实 NONE：重建组没有意义（每步重建是 O(n) 抖动）。 */
+            return;
+        }
         focus_rebuild(input, NULL);
         return;
     }
@@ -467,11 +516,18 @@ static void focus_sync(gui_input_t *input)
     } else if (old == NULL && !input->focus.repair_pending) {
         /* 从未选择过：AUTO_FIRST 建立首次选择，MANUAL 保持 NONE。 */
         target = focus_should_establish_initial(input) ? focus_tab_candidate(input, 0, true) : NULL;
+    } else if (old_idx >= 0) {
+        /*
+         * 焦点对象还在册但不可用（隐藏/禁用）：后端路径，修复搜索**绕回**。
+         */
+        target = focus_repair_target(input, (unsigned)old_idx);
     } else {
-        /* 选择失效：从修复起点找后继（移除前位置 / 隐藏禁用之后）。 */
-        unsigned start = (old_idx >= 0) ? (unsigned)old_idx : input->focus.repair_index;
-
-        target = focus_repair_target(input, start);
+        /*
+         * 焦点已失效：按失效时记录的路径搜索。受控路径（有界）与后端路径
+         * （绕回）的分工在这里保持——修复位置保留，恢复后按同一条规则
+         * 继续修复。
+         */
+        target = focus_repair_by_mode(input, input->focus.repair_index);
     }
 
     /* 2. 应用。提前返回要同时满足四个条件。 */
@@ -675,13 +731,52 @@ static lv_obj_t *focus_repair_target(gui_input_t *input, unsigned start)
         input->focus.repair_pending = true;
         input->focus.repair_index = start;
     }
+    input->focus.repair_bounded = false;
     return target;
+}
+
+/*
+ * 同上，但搜索**有界**（受控路径专用）。
+ *
+ * 找不到候选时同样是 NONE + 保留修复位置——但搜索不回绕，修复位置之后的
+ * 候选恢复之前，选择保持 NONE。
+ */
+static lv_obj_t *focus_repair_target_bounded(gui_input_t *input, unsigned start)
+{
+    lv_obj_t *target = focus_tab_candidate_bounded(input, start);
+
+    if (target) {
+        input->focus.repair_pending = false;
+    } else {
+        input->focus.repair_pending = true;
+        input->focus.repair_index = start;
+    }
+    input->focus.repair_bounded = true;
+    return target;
+}
+
+/*
+ * 按失效时记录的路径修复：受控路径有界，后端路径绕回。
+ *
+ * 修复位置在失效的那一刻就记下了它属于哪条路径，之后的每一次修复尝试
+ * （包括别的路径顺手触发的那些）都按同一条规则走。
+ */
+static lv_obj_t *focus_repair_by_mode(gui_input_t *input, unsigned start)
+{
+    if (input->focus.repair_bounded) {
+        return focus_repair_target_bounded(input, start);
+    }
+    return focus_repair_target(input, start);
 }
 
 /*
  * 受控移除一个条目：先 detach 组，再改表，再重建并提交一次选择。
  *
  * 移除前的位置决定后继：移除后同下标即原后继。
+ *
+ * 受控路径的后继搜索是**有界**的（自移除下标到表尾，不回绕）：表尾之后
+ * 没有候选就是没有候选——不许绕回表头抢一个计划没有授权的选择。没有候选
+ * 时选择保持 NONE，并保留修复位置。
  */
 static void focus_remove_controlled(gui_input_t *input, unsigned index)
 {
@@ -715,21 +810,28 @@ static void focus_remove_controlled(gui_input_t *input, unsigned index)
         focus_commit(input, NULL);
     }
 
-    if (!input->focus.explicit_clear) {
-        if (was_current) {
-            target = focus_repair_target(input, repair_index);
-        } else if (input->focus.focus != NULL) {
-            if (focus_obj_usable(input, input->focus.focus)) {
-                target = input->focus.focus;
-            } else {
-                target = focus_repair_target(input, input->focus.repair_index);
-            }
-        } else if (input->focus.repair_pending) {
-            target = focus_repair_target(input, input->focus.repair_index);
+    if (input->focus.explicit_clear) {
+        /* 显式清空是稳定态：没有待修复的事。 */
+        input->focus.repair_pending = false;
+        target = NULL;
+    } else if (was_current) {
+        /* 受控移除自己的后继：有界搜索。 */
+        input->focus.repair_pending = true;
+        input->focus.repair_bounded = true;
+        target = focus_repair_target_bounded(input, repair_index);
+    } else if (input->focus.focus != NULL) {
+        if (focus_obj_usable(input, input->focus.focus)) {
+            target = input->focus.focus;
         } else {
-            /* 从未选择过：注销不建立新的选择（MANUAL 语义）。 */
-            target = NULL;
+            /* 当前选择失效：按失效时记录的路径修复。 */
+            target = focus_repair_by_mode(input, input->focus.repair_index);
         }
+    } else if (input->focus.repair_pending) {
+        /* 已在待修复状态：按失效时记录的路径继续修复。 */
+        target = focus_repair_by_mode(input, input->focus.repair_index);
+    } else {
+        /* 从未选择过：注销不建立新的选择（MANUAL 语义）。 */
+        target = NULL;
     }
 
     focus_rebuild(input, target);
@@ -942,8 +1044,15 @@ int gui_input_focus_set_native(gui_input_t *input, uint64_t native_id)
         return -1;
     }
     if (native_id == 0) {
-        /* 显式清空：保持 NONE，直到下一次成功选择。 */
+        /*
+         * 显式清空：保持 NONE，直到下一次成功选择。
+         *
+         * 显式清空**不是**修复待办：它不置 repair_pending，反而把它清掉
+         * （此前的修复待办作废：用户明确说了"不要焦点"）。清空是稳定态，
+         * 后续刷新可以提前返回，不必每步重建组。
+         */
         input->focus.explicit_clear = true;
+        input->focus.repair_pending = false;
         focus_sync(input);
         return 0;
     }
@@ -1008,14 +1117,14 @@ void gui_input_focus_delete_batch_end(gui_input_t *input)
         return;
     }
 
-    /* 批次结束：选跳过整棵待删子树的后继，提交一次最终投影。 */
+    /*
+     * 批次结束：选跳过整棵待删子树的后继，提交一次最终投影。
+     *
+     * 原生删除批次是**受控路径**：后继搜索有界（自修复位置到表尾，不回绕）。
+     * 没有候选 → 选择 NONE + 保留修复位置。
+     */
     if (!input->focus.explicit_clear) {
-        target = focus_tab_candidate(input, input->focus.repair_index, true);
-        if (target) {
-            input->focus.repair_pending = false;
-        } else {
-            input->focus.repair_pending = true;
-        }
+        target = focus_repair_target_bounded(input, input->focus.repair_index);
     }
     focus_rebuild(input, target);
 }
