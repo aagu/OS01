@@ -60,6 +60,7 @@ PLATFORM_C_SOURCES := $(LIBGUI_DIR)/src/platform.c $(LIBGUI_DIR)/src/tick.c \
                       $(LIBGUI_DIR)/src/widget.c \
                       $(LIBGUI_DIR)/src/layout.c \
                       $(LIBGUI_DIR)/src/appearance.c \
+                      $(LIBGUI_DIR)/src/event.c \
                       $(LIBGUI_DIR)/src/cursor_icon.c
 PLATFORM_OBJS := $(patsubst $(LIBGUI_DIR)/src/%.c,$(BUILD_DIR)/obj/platform/%.o,$(PLATFORM_C_SOURCES))
 

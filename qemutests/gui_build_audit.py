@@ -89,6 +89,9 @@ GUI_PUBLIC_WIDGET_SYMBOLS = (
     "gui_widget_set_scroll",
     # GUI-2b Task 5: the Material appearance setter.
     "gui_widget_set_appearance",
+    # GUI-2b Task 6: the event bridge setter and the platform statistics.
+    "gui_widget_set_event_handler",
+    "gui_platform_get_stats",
 )
 
 # Host-only injection hooks.  They exist only under #ifdef OS01_HOST_TEST
@@ -124,6 +127,8 @@ GUI_REQUIRED_ARCHIVE_MEMBERS = (
     "layout.o",
     # GUI-2b Task 5: the Material appearance unit.
     "appearance.o",
+    # GUI-2b Task 6: the native event bridge unit.
+    "event.o",
 )
 
 # The probe consumer references a symbol that no archive can define; the
@@ -1314,12 +1319,14 @@ def audit_sysroot_and_build(
                 "    gui_size_t size = GUI_SIZE_CONTENT;\n"
                 "    gui_geometry_t geometry = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};\n"
                 "    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;\n"
+                "    gui_platform_stats_t stats = {0};\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
                 "    (void)kind;\n"
                 "    (void)size;\n"
                 "    (void)geometry;\n"
                 "    (void)appearance;\n"
+                "    (void)stats;\n"
                 "    return 0;\n"
                 "}\n"
             )
@@ -1357,12 +1364,14 @@ def audit_sysroot_and_build(
                 "    gui_size_t size = GUI_SIZE_CONTENT;\n"
                 "    gui_geometry_t geometry = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};\n"
                 "    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;\n"
+                "    gui_platform_stats_t stats = {};\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
                 "    (void)kind;\n"
                 "    (void)size;\n"
                 "    (void)geometry;\n"
                 "    (void)appearance;\n"
+                "    (void)stats;\n"
                 "    return 0;\n"
                 "}\n"
             )

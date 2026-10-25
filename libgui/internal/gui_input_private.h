@@ -179,6 +179,7 @@ struct gui_input {
 
     uint16_t delivered_modifiers; /* 已投递的修饰键状态（重复策略用） */
     uint8_t  pointer_buttons;     /* 上一次入队的鼠标按钮位图 */
+    uint64_t delivered_events;    /* 已投递的输入事件总数（真实统计） */
 
     /* 软件重复策略：首次 400 ms、后续 40 ms，由 libgui 的单调时钟驱动。 */
     uint64_t repeat_deadline_ms;  /* 下一次重复的期限 */

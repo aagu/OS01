@@ -188,6 +188,24 @@ int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_byte
 int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t widget, bool focused);
 
 /**
+ * @brief 宿主私有：在**删除回调期间**创建一个控件
+ *
+ * 删除事务进行时，槽不许回到空闲表：删除回调期间创建的控件必须拿到
+ * **别的**槽。这个探针把"在删除回调期间创建控件"变成可观测的事实。
+ *
+ * 它在 `victim` 自己身上装一个删除期回调：原生删除事件送达 victim 时
+ * 回调跑起来（那仍在删除事务内部），在那里通过公共 API 创建一个控件。
+ *
+ * @param platform 平台上下文句柄
+ * @param victim   将要被删除的控件身份
+ * @param parent   victim 的父控件身份
+ * @param out      输出参数：删除期间创建出来的控件身份（回调发生时写入）
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_create_during_delete(gui_platform_t *platform, gui_widget_t victim,
+                                            gui_widget_t parent, gui_widget_t *out);
+
+/**
  * @brief 后端删除 fixture：绕开注册表直接删掉原生对象
  *
  * 这是**内部** fixture：公开测试仍然只通过值句柄判断身份是否还有效，

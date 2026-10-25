@@ -237,6 +237,65 @@ int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t w
     return 0;
 }
 
+/* ── 删除期间的创建探针 ──────────────────────────────────────────────
+ *
+ * 探针挂在 victim **自己**身上：原生删除事件在删除事务内部送达它，
+ * 那正是"删除回调期间创建控件"的真实场景。
+ */
+static gui_platform_t *g_delete_probe_platform;
+static gui_widget_t g_delete_probe_parent;
+static lv_obj_t *g_delete_probe_victim_obj;
+static gui_widget_t *g_delete_probe_out;
+static bool g_delete_probe_armed;
+
+static void gui_native_delete_probe_cb(lv_event_t *event)
+{
+    if (!g_delete_probe_armed) {
+        return;
+    }
+    /* 只对 victim 自己的删除事件反应。 */
+    if (lv_event_get_target(event) != g_delete_probe_victim_obj) {
+        return;
+    }
+    g_delete_probe_armed = false;
+
+    gui_widget_t created;
+    created.id = 0;
+    if (gui_widget_create(g_delete_probe_platform, g_delete_probe_parent, GUI_WIDGET_CONTAINER,
+                          &created) == 0 && g_delete_probe_out) {
+        *g_delete_probe_out = created;
+    }
+}
+
+int gui_native_fixture_create_during_delete(gui_platform_t *platform, gui_widget_t victim,
+                                            gui_widget_t parent, gui_widget_t *out)
+{
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
+    out->id = 0;
+
+    lv_obj_t *victim_obj = gui_widget_test_get_obj(platform, victim);
+    if (!victim_obj) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    g_delete_probe_platform = platform;
+    g_delete_probe_parent = parent;
+    g_delete_probe_victim_obj = victim_obj;
+    g_delete_probe_out = out;
+    g_delete_probe_armed = true;
+
+    if (!lv_obj_add_event_cb(victim_obj, gui_native_delete_probe_cb, LV_EVENT_DELETE, NULL)) {
+        g_delete_probe_armed = false;
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
+}
+
 int gui_native_fixture_query_backend(gui_platform_t *platform, gui_widget_t widget,
                                      gui_native_backend_info_t *out)
 {

@@ -530,6 +530,32 @@ uint32_t gui_platform_get_pixel(const gui_platform_t *platform, uint32_t x, uint
     return platform->shadow_canvas[offset] & 0x00FFFFFFu;
 }
 
+int gui_platform_get_stats(gui_platform_t *platform, gui_platform_stats_t *out)
+{
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (!platform) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    out->steps = platform->stat_steps;
+    out->frames = platform->flush_count;
+    out->events_delivered = platform->stat_events_delivered;
+    out->widgets_created = platform->stat_widgets_created;
+    out->widgets_destroyed = platform->stat_widgets_destroyed;
+    out->widgets_live = platform->stat_widgets_live;
+    out->last_delay_ms = platform->stat_last_delay_ms;
+    if (platform->input) {
+        out->input_events = platform->input->delivered_events;
+    }
+    return 0;
+}
+
 static gui_status_t enter_terminal_state(gui_platform_t *platform, gui_status_t status, int err)
 {
     int saved_errno = err;
@@ -557,8 +583,7 @@ static gui_status_t compute_wait_and_return(gui_platform_t *platform, uint32_t l
                                             uint64_t t_before_handler, gui_status_t status,
                                             uint32_t input_delay_ms, uint32_t *out_next_delay_ms)
 {
-    uint64_t now = 0;
-    if (gui_tick_now_ms(&now) != 0) {
+    uint64_t now = 0;    if (gui_tick_now_ms(&now) != 0) {
         return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
     }
 
@@ -596,9 +621,14 @@ static gui_status_t compute_wait_and_return(gui_platform_t *platform, uint32_t l
     return status;
 }
 
+/*
+ * 步进的真正身体。它与外层的区别只有一处：外层负责**嵌套**防护与统计，
+ * 身体只管跑一步。
+ */
+static gui_status_t platform_step_body(gui_platform_t *platform, uint32_t *out_next_delay_ms);
+
 gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_delay_ms)
-{
-    if (out_next_delay_ms) {
+{    if (out_next_delay_ms) {
         *out_next_delay_ms = 100;
     }
 
@@ -607,6 +637,33 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
         return GUI_STATUS_ERROR;
     }
 
+    /*
+     * 嵌套步进：一步还没走完就再走一步（例如业务回调里调了步进）。
+     *
+     * 它返回错误，但**不**锁存终止态：外层那一步走完之后平台照常可用。
+     * 锁存会让一次回调里的误用变成永久死亡，代价太大。
+     */
+    if (platform->step_depth > 0) {
+        errno = EBUSY;
+        return GUI_STATUS_ERROR;
+    }
+
+    platform->step_depth++;
+    gui_status_t status = platform_step_body(platform, out_next_delay_ms);
+    platform->step_depth--;
+
+    /* 真实统计：步进次数与最近一次的建议等待时间。 */
+    platform->stat_steps++;
+    platform->stat_last_delay_ms = out_next_delay_ms ? *out_next_delay_ms : 0;
+    return status;
+}
+
+/*
+ * 步进的真正身体。它与外层的区别只有一处：外层负责**嵌套**防护与统计，
+ * 身体只管跑一步。
+ */
+static gui_status_t platform_step_body(gui_platform_t *platform, uint32_t *out_next_delay_ms)
+{
     if (platform->terminal_status != GUI_STATUS_OK) {
         errno = platform->terminal_errno;
         return platform->terminal_status;

@@ -64,6 +64,17 @@ struct gui_platform {
      * 注册表由平台 calloc 出来，不依赖后端内存池：池在平台销毁时被整体
      * 释放，注册表必须活得比它更久（原生删除回调还要用它）。 */
     gui_widget_registry_t *registry;
+
+    /* GUI-2b：步进深度。>0 表示这一步还没走完（嵌套步进）。 */
+    uint32_t step_depth;
+
+    /* GUI-2b：真实运行统计。统计的都是真的发生过的事。 */
+    uint64_t stat_steps;            /* gui_platform_step() 调用次数 */
+    uint64_t stat_events_delivered; /* 已交给业务回调的公共事件数 */
+    uint64_t stat_widgets_created;  /* 已发布的控件数（累计） */
+    uint64_t stat_widgets_destroyed;/* 已失效的控件数（累计） */
+    uint64_t stat_widgets_live;     /* 当前有效的控件数 */
+    uint32_t stat_last_delay_ms;    /* 最近一次步进的建议等待时间 */
 };
 
 /* ── 平台内部辅助（platform.c 实现，input.c 使用） ───────────── */

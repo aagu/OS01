@@ -856,6 +856,8 @@ gui_status_t gui_input_advance(gui_input_t *input, uint64_t now_ms, uint32_t *de
         (void)fifo_pop(input, &item);
         delivered++;
     }
+    /* 真实统计：已经投递出去的事件数。 */
+    input->delivered_events += delivered;
 
     /*
      * 适配层维护：焦点检查与待处理的取消协议（重新就绪）。

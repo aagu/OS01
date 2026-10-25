@@ -241,6 +241,11 @@ int gui_widget_set_layout(gui_platform_t *platform, gui_widget_t widget, const g
         errno = EINVAL;
         return -1;
     }
+    /* 业务回调里不允许改布局：回调期间树结构必须保持稳定。 */
+    if (platform->registry->callback_depth > 0) {
+        errno = EBUSY;
+        return -1;
+    }
     /* 标签是叶子：排布对它没有意义。 */
     if (slot->kind == GUI_WIDGET_LABEL) {
         errno = EOPNOTSUPP;

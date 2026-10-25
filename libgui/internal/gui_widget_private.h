@@ -127,9 +127,20 @@ typedef struct {
     uint32_t peak;          /* 占用峰值 */
     uint32_t cursor;        /* 私有分配游标（不计入容量） */
     uint32_t callback_depth; /* 业务回调深度：>0 时禁止销毁/清空 */
+    uint32_t delete_depth;  /* 删除事务深度：>0 时槽不许回到空闲表 */
 } gui_widget_registry_t;
 
 /* ── 注册表生命周期（platform.c ↔ widget.c） ─────────────────────── */
+
+/**
+ * @brief 事件桥接：给一个新控件装上原生点击的桥接
+ *
+ * 每个新对象**发布前**装一次。桥接的槽下标放在事件回调自己的 user data
+ * 里：后端对象的 user data 不被占用。
+ *
+ * @return 0 成功；-1 失败（errno = ENOMEM）
+ */
+int gui_widget_bridge_install(lv_obj_t *obj, uint32_t slot_index);
 
 /**
  * @brief 外观：按控件种类给出创建时的默认外观

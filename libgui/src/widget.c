@@ -130,9 +130,16 @@ static void slot_release(gui_widget_registry_t *reg, gui_widget_slot_t *slot)
  * @brief 回收所有处于 DESTROYING 的槽
  *
  * 只在删除事务结束（原生删除回调全部返回）之后调用。
+ *
+ * 删除事务还在栈上时**一个槽都不许回收**：删除回调期间创建的控件必须
+ * 拿到别的槽——旧槽此刻还站在删除回调的栈上，把它交给新控件会让旧身份
+ * 指向新对象。
  */
 static void registry_reap(gui_widget_registry_t *reg)
 {
+    if (reg->delete_depth > 0) {
+        return;
+    }
     for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
         gui_widget_slot_t *slot = &reg->slots[i];
         if (slot->state == GUI_WIDGET_SLOT_DESTROYING && slot->pending_free) {
@@ -313,8 +320,15 @@ static void gui_widget_on_native_delete(lv_event_t *event)
     if (slot->state == GUI_WIDGET_SLOT_FREE) {
         return;
     }
+    /* 统计：控件在这里失效（每个控件只算一次）。 */
+    if (!slot->pending_free) {
+        slot->pending_free = true;
+        platform->stat_widgets_destroyed++;
+        if (platform->stat_widgets_live > 0) {
+            platform->stat_widgets_live--;
+        }
+    }
     slot->state = GUI_WIDGET_SLOT_DESTROYING;
-    slot->pending_free = true;
 }
 
 /**
@@ -399,7 +413,11 @@ static void widget_destroy_subtree(gui_platform_t *platform, gui_widget_slot_t *
 
     lv_obj_t *obj = root_slot->obj;
     if (obj) {
+        /* 删除事务进行中：槽不许回到空闲表。删除回调（包括原生事件向
+         * 父级冒泡时跑到的回调）里创建的控件必须拿到别的槽。 */
+        reg->delete_depth++;
         lv_obj_delete(obj);
+        reg->delete_depth--;
     } else {
         /* 对象早已不在：删除回调不会再跑，这些槽直接确认死亡。 */
         for (uint32_t i = 0; i < GUI_WIDGET_REGISTRY_CAPACITY; i++) {
@@ -531,7 +549,15 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
         return -1;
     }
 
-    /* 7. 发布：身份此刻才对公共查询可见。 */
+    /* 7. 事件桥接：每个新对象发布前装一次。装不上就当创建失败回滚。 */
+    if (gui_widget_bridge_install(obj, (uint32_t)index) != 0) {
+        lv_obj_delete(obj);
+        slot_release(reg, slot);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    /* 8. 发布：身份此刻才对公共查询可见。 */
     slot->id = id;
     slot->obj = obj;
     slot->parent_id = parent_slot ? parent_slot->id : 0;
@@ -541,6 +567,10 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
         slot->flags |= GUI_WIDGET_FLAG_CLICKABLE;
     }
     slot->state = GUI_WIDGET_SLOT_LIVE;
+
+    /* 统计：控件已经发布。 */
+    platform->stat_widgets_created++;
+    platform->stat_widgets_live++;
 
     /* 尺寸来源：根是视口（固定像素），子项默认由内容决定。 */
     if (!parent_slot) {
@@ -841,8 +871,12 @@ int gui_widget_test_backend_delete(gui_platform_t *platform, gui_widget_t widget
         errno = EINVAL;
         return -1;
     }
-    /* 后端在注册表背后自行删除：删除回调照常运行，身份立刻失效。 */
+    /* 后端在注册表背后自行删除：删除回调照常运行，身份立刻失效。
+     * 删除事务深度照样护住：删除回调期间创建的控件必须拿到别的槽。 */
+    gui_widget_registry_t *reg = platform->registry;
+    reg->delete_depth++;
     lv_obj_delete(slot->obj);
+    reg->delete_depth--;
     return 0;
 }
 

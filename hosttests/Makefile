@@ -4003,7 +4003,7 @@ $(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
 # released after the display is gone).
 GUI_WIDGET_DIR := $(GUI_HOST_DIR)/widget
 GUI_WIDGET_UNIT_OBJS := $(GUI_WIDGET_DIR)/widget.o $(GUI_WIDGET_DIR)/layout.o \
-                       $(GUI_WIDGET_DIR)/appearance.o
+                       $(GUI_WIDGET_DIR)/appearance.o $(GUI_WIDGET_DIR)/event.o
 
 $(GUI_WIDGET_DIR)/widget.o: $(TESTS_DIR)/libgui/src/widget.c
 	@mkdir -p $(dir $@)
@@ -4014,6 +4014,10 @@ $(GUI_WIDGET_DIR)/layout.o: $(TESTS_DIR)/libgui/src/layout.c
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
 $(GUI_WIDGET_DIR)/appearance.o: $(TESTS_DIR)/libgui/src/appearance.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_WIDGET_DIR)/event.o: $(TESTS_DIR)/libgui/src/event.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -4340,6 +4344,33 @@ $(TEST_BLD)/test_gui_widget_appearance.elf: \
 
 .PHONY: test-gui-widget-appearance
 test-gui-widget-appearance: $(TEST_BLD)/test_gui_widget_appearance.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# GUI-2b Task 6: the native event bridge and the platform statistics.
+$(GUI_WIDGET_DIR)/test_gui_widget_event.o: $(TEST_CASES)/test_gui_widget_event.c \
+		$(TEST_MOCK)/gui_native_fixture.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_widget_event.elf: \
+		$(GUI_WIDGET_DIR)/test_gui_widget_event.o \
+		$(GUI_WIDGET_DIR)/gui_native_fixture.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-widget-event
+test-gui-widget-event: $(TEST_BLD)/test_gui_widget_event.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

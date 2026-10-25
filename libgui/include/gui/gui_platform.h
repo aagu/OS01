@@ -94,6 +94,32 @@ gui_status_t gui_platform_step(gui_platform_t *platform, uint32_t *out_next_dela
  */
 uint32_t gui_platform_get_pixel(const gui_platform_t *platform, uint32_t x, uint32_t y);
 
+/**
+ * @brief 平台的运行统计
+ *
+ * 统计的是**真的**发生过的事：步进次数、提交过的帧、投递过的输入事件与
+ * 公共事件、控件的创建与销毁。不存在"合成"的统计口径。
+ */
+typedef struct {
+    uint64_t steps;           /* gui_platform_step() 的调用次数 */
+    uint64_t frames;          /* 已提交到后端的帧数 */
+    uint64_t input_events;    /* 已投递的输入事件数 */
+    uint64_t events_delivered;/* 已交给业务回调的公共事件数 */
+    uint64_t widgets_created; /* 已发布的控件数（累计） */
+    uint64_t widgets_destroyed;/* 已失效的控件数（累计） */
+    uint64_t widgets_live;    /* 当前有效的控件数 */
+    uint32_t last_delay_ms;   /* 最近一次步进给出的建议等待时间 */
+} gui_platform_stats_t;
+
+/**
+ * @brief 读取平台的运行统计
+ *
+ * @param platform 平台上下文句柄
+ * @param out      输出参数：统计快照，不可为 NULL
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_platform_get_stats(gui_platform_t *platform, gui_platform_stats_t *out);
+
 #ifdef __cplusplus
 }
 #endif
