@@ -111,6 +111,9 @@ typedef struct {
     gui_text_mode_t text_mode;
     gui_text_align_t text_align;
 
+    /* 外观缓存（Task 5）：形态 + 色彩角色 + 令牌层级 + 三个开关。 */
+    gui_appearance_t appearance;
+
     uint32_t flags;                   /* 标志位 */
     bool pending_free;                /* 删除回调已发生，等待回收 */
 } gui_widget_slot_t;
@@ -127,6 +130,25 @@ typedef struct {
 } gui_widget_registry_t;
 
 /* ── 注册表生命周期（platform.c ↔ widget.c） ─────────────────────── */
+
+/**
+ * @brief 外观：按控件种类给出创建时的默认外观
+ *
+ * 根容器是透明的全屏底板，标签是素面，按钮取主题里按钮的现有默认。
+ *
+ * @param kind   控件种类
+ * @param is_root 该控件是不是平台根容器
+ * @param out    输出参数：默认外观，不可为 NULL
+ */
+void gui_widget_appearance_init(gui_widget_kind_t kind, bool is_root, gui_appearance_t *out);
+
+/**
+ * @brief 外观：把一份外观写进后端对象（普通状态）
+ *
+ * 只写普通状态：主题的 hover / pressed / focused / disabled 样式因此
+ * 原样生效，焦点环不会被普通局部边框遮掉。
+ */
+void gui_widget_appearance_apply(lv_obj_t *obj, const gui_appearance_t *appearance);
 
 /**
  * @brief 按身份号查找**已发布**的槽

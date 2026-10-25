@@ -173,6 +173,21 @@ uint64_t gui_native_fixture_get_identity_last_id(void);
 int gui_native_fixture_pool_free(gui_platform_t *platform, size_t *out_free_bytes);
 
 /**
+ * @brief 宿主私有：设置/清除一个控件的**焦点视觉状态**
+ *
+ * 它只在 fixture 内解析真实对象并改后端的焦点状态位：**不**创建输入
+ * 登记、**不**调用公共焦点 API（那一层要到 Phase 3 的唯一焦点引擎才有）。
+ *
+ * 这个 helper 只存在于宿主测试构建：它不安装，也不编译进目标库。
+ *
+ * @param fx      fixture 上下文
+ * @param widget  控件身份
+ * @param focused true 置上焦点视觉状态；false 清除
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t widget, bool focused);
+
+/**
  * @brief 后端删除 fixture：绕开注册表直接删掉原生对象
  *
  * 这是**内部** fixture：公开测试仍然只通过值句柄判断身份是否还有效，

@@ -214,6 +214,29 @@ int gui_native_fixture_backend_delete(gui_platform_t *platform, gui_widget_t wid
     return gui_widget_test_backend_delete(platform, widget);
 }
 
+int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t widget, bool focused)
+{
+    if (!fx || !fx->platform) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    lv_obj_t *obj = gui_widget_test_get_obj(fx->platform, widget);
+    if (!obj) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* 只改后端的焦点视觉状态位：输入登记与公共焦点 API 都不在这里。 */
+    if (focused) {
+        lv_obj_add_state(obj, LV_STATE_FOCUSED);
+    } else {
+        lv_obj_remove_state(obj, LV_STATE_FOCUSED);
+    }
+    lv_obj_invalidate(obj);
+    return 0;
+}
+
 int gui_native_fixture_query_backend(gui_platform_t *platform, gui_widget_t widget,
                                      gui_native_backend_info_t *out)
 {

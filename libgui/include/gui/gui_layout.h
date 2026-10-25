@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <gui/gui_theme.h>
 #include <gui/gui_widget.h>
 
 #ifdef __cplusplus
@@ -188,7 +189,140 @@ typedef struct {
     gui_text_align_t text_align;
 } gui_scroll_t;
 
+/* ── 外观 ──────────────────────────────────────────────────────────── */
+
+/**
+ * @brief 表面形态
+ *
+ * 形态是"这个表面是什么"的语义分类，它决定**哪些控件种类**可以使用它：
+ *
+ *   - ROOT    只给平台的根容器（全屏底板）；
+ *   - PANEL   普通面板；
+ *   - CARD    卡片；
+ *   - ACTION  动作控件（按钮）；
+ *   - PLAIN   素面（标签、透明顶栏、返回按钮）。
+ *
+ * `GUI_VARIANT_COUNT` 是非法哨兵（形态数量），不得省略。
+ */
+typedef enum {
+    GUI_VARIANT_ROOT = 0,
+    GUI_VARIANT_PANEL,
+    GUI_VARIANT_CARD,
+    GUI_VARIANT_ACTION,
+    GUI_VARIANT_PLAIN,
+    GUI_VARIANT_COUNT /* 非法哨兵 */
+} gui_variant_t;
+
+/**
+ * @brief 色彩角色
+ *
+ * 角色与设计令牌表的字段一一对应：每个角色都指向令牌表里的一个颜色，
+ * 界面代码因此不必出现裸颜色字面量。
+ *
+ * `GUI_COLOR_COUNT` 是非法哨兵（角色数量），不得省略。
+ */
+typedef enum {
+    GUI_COLOR_PRIMARY = 0,
+    GUI_COLOR_ON_PRIMARY,
+    GUI_COLOR_PRIMARY_CONTAINER,
+    GUI_COLOR_ON_PRIMARY_CONTAINER,
+    GUI_COLOR_SECONDARY,
+    GUI_COLOR_ON_SECONDARY,
+    GUI_COLOR_SECONDARY_CONTAINER,
+    GUI_COLOR_ON_SECONDARY_CONTAINER,
+    GUI_COLOR_TERTIARY,
+    GUI_COLOR_ON_TERTIARY,
+    GUI_COLOR_TERTIARY_CONTAINER,
+    GUI_COLOR_ON_TERTIARY_CONTAINER,
+    GUI_COLOR_ERROR,
+    GUI_COLOR_ON_ERROR,
+    GUI_COLOR_ERROR_CONTAINER,
+    GUI_COLOR_ON_ERROR_CONTAINER,
+    GUI_COLOR_SUCCESS,
+    GUI_COLOR_ON_SUCCESS,
+    GUI_COLOR_SUCCESS_CONTAINER,
+    GUI_COLOR_ON_SUCCESS_CONTAINER,
+    GUI_COLOR_SURFACE,
+    GUI_COLOR_SURFACE_DIM,
+    GUI_COLOR_ON_SURFACE,
+    GUI_COLOR_SURFACE_VARIANT,
+    GUI_COLOR_ON_SURFACE_VARIANT,
+    GUI_COLOR_SURFACE_CONTAINER_LOW,
+    GUI_COLOR_SURFACE_CONTAINER,
+    GUI_COLOR_SURFACE_CONTAINER_HIGH,
+    GUI_COLOR_SURFACE_CONTAINER_HIGHEST,
+    GUI_COLOR_OUTLINE,
+    GUI_COLOR_OUTLINE_VARIANT,
+    GUI_COLOR_INVERSE_SURFACE,
+    GUI_COLOR_INVERSE_ON_SURFACE,
+    GUI_COLOR_SCRIM,
+    GUI_COLOR_SHADOW,
+    GUI_COLOR_COUNT /* 非法哨兵 */
+} gui_color_role_t;
+
+/**
+ * @brief 控件的外观
+ *
+ * 三个色彩角色分别是底色、文字色与普通边框色；字号、圆角与 elevation
+ * 都是令牌表的层级；三个布尔量分别表示"底色是否填充"、"是否圆角"与
+ * "是否画普通边框"。
+ *
+ * 普通边框与主题的**焦点环**是两回事：焦点环由主题的 FOCUSED 状态负责，
+ * 外观永远不关闭它。
+ */
+typedef struct {
+    gui_variant_t variant;
+    gui_color_role_t bg_role;
+    gui_color_role_t text_role;
+    gui_color_role_t border_role;
+    gui_theme_font_t font;
+    gui_theme_radius_t radius;
+    gui_theme_elevation_t elevation;
+    bool filled;
+    bool rounded;
+    bool bordered;
+} gui_appearance_t;
+
+/*
+ * 默认外观：面板形态 + 卡片表面 / 主要文字 / 细分割线 + 正文 / 中圆角 /
+ * 无 elevation，填充、圆角，不画普通边框。
+ */
+#ifdef __cplusplus
+#define GUI_APPEARANCE_DEFAULT                                                     \
+    (gui_appearance_t{ GUI_VARIANT_PANEL, GUI_COLOR_SURFACE_CONTAINER,              \
+                       GUI_COLOR_ON_SURFACE, GUI_COLOR_OUTLINE_VARIANT,            \
+                       GUI_THEME_FONT_BODY, GUI_THEME_RADIUS_MD,                    \
+                       GUI_THEME_ELEVATION_0, true, true, false })
+#else
+#define GUI_APPEARANCE_DEFAULT                                                     \
+    ((gui_appearance_t){ GUI_VARIANT_PANEL, GUI_COLOR_SURFACE_CONTAINER,           \
+                         GUI_COLOR_ON_SURFACE, GUI_COLOR_OUTLINE_VARIANT,          \
+                         GUI_THEME_FONT_BODY, GUI_THEME_RADIUS_MD,                  \
+                         GUI_THEME_ELEVATION_0, true, true, false })
+#endif
+
 /* ── 设置器 ────────────────────────────────────────────────────────── */
+
+/**
+ * @brief 设置控件的外观
+ *
+ * 外观只改**普通状态**的样式：主题的 hover / pressed / focused / disabled
+ * 状态样式原样保留，因此焦点环不会被普通局部边框遮掉。
+ *
+ * 形态与控件种类必须相容，否则被拒绝：标签只能用 PLAIN，容器只能用
+ * PANEL / CARD / PLAIN（根容器还可以用 ROOT），按钮只能用 ACTION / CARD /
+ * PLAIN。ROOT 形态还必须是透明、无边框、无圆角、无 elevation 的底板。
+ *
+ * 失败时不发生部分修改：所有校验都在改动任何状态之前完成。
+ *
+ * @param platform  平台上下文句柄
+ * @param widget    控件句柄
+ * @param appearance 外观描述，不可为 NULL
+ * @return 0 成功；-1 失败（errno：EINVAL 参数/身份/角色非法或形态与控件
+ *         种类不相容）
+ */
+int gui_widget_set_appearance(gui_platform_t *platform, gui_widget_t widget,
+                              const gui_appearance_t *appearance);
 
 /**
  * @brief 设置控件的几何（绝对位置 + 两轴尺寸）

@@ -100,6 +100,7 @@ static void slot_reset(gui_widget_slot_t *slot)
     slot->scroll_v = false;
     slot->text_mode = GUI_TEXT_MODE_WRAP;
     slot->text_align = GUI_TEXT_ALIGN_LEFT;
+    memset(&slot->appearance, 0, sizeof(slot->appearance));
     slot->flags = 0;
     slot->pending_free = false;
 }
@@ -553,6 +554,10 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
         slot->size_value_w = 0;
         slot->size_value_h = 0;
     }
+
+    /* 外观：按种类给默认外观并落到后端对象上。 */
+    gui_widget_appearance_init(kind, parent_slot == NULL, &slot->appearance);
+    gui_widget_appearance_apply(obj, &slot->appearance);
 
     out->id = id;
     return 0;

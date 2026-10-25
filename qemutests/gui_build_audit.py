@@ -87,6 +87,8 @@ GUI_PUBLIC_WIDGET_SYMBOLS = (
     "gui_widget_set_alignment",
     "gui_widget_set_layout",
     "gui_widget_set_scroll",
+    # GUI-2b Task 5: the Material appearance setter.
+    "gui_widget_set_appearance",
 )
 
 # Host-only injection hooks.  They exist only under #ifdef OS01_HOST_TEST
@@ -120,6 +122,8 @@ GUI_REQUIRED_ARCHIVE_MEMBERS = (
     "widget.o",
     # GUI-2b Task 4: the typed geometry / layout / text-mode unit.
     "layout.o",
+    # GUI-2b Task 5: the Material appearance unit.
+    "appearance.o",
 )
 
 # The probe consumer references a symbol that no archive can define; the
@@ -1309,11 +1313,13 @@ def audit_sysroot_and_build(
                 "    gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;\n"
                 "    gui_size_t size = GUI_SIZE_CONTENT;\n"
                 "    gui_geometry_t geometry = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};\n"
+                "    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
                 "    (void)kind;\n"
                 "    (void)size;\n"
                 "    (void)geometry;\n"
+                "    (void)appearance;\n"
                 "    return 0;\n"
                 "}\n"
             )
@@ -1350,11 +1356,13 @@ def audit_sysroot_and_build(
                 "    gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;\n"
                 "    gui_size_t size = GUI_SIZE_CONTENT;\n"
                 "    gui_geometry_t geometry = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};\n"
+                "    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
                 "    (void)kind;\n"
                 "    (void)size;\n"
                 "    (void)geometry;\n"
+                "    (void)appearance;\n"
                 "    return 0;\n"
                 "}\n"
             )

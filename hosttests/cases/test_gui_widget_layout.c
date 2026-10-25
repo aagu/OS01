@@ -313,6 +313,20 @@ TEST_FUNC(test_fill_tracks_parent_content_length)
     gui_widget_t child;
     assert_eq(0, gui_widget_create(fx.platform, root, GUI_WIDGET_CONTAINER, &child));
 
+    /* 给根留一点内边距：这样"父内容区"与"父总尺寸"才是两件事，FILL 到底
+     * 填的是哪一个才能被区分出来。 */
+    gui_layout_t root_layout;
+    root_layout.flow = GUI_FLOW_NONE;
+    root_layout.main_align = GUI_FLOW_ALIGN_START;
+    root_layout.cross_align = GUI_FLOW_ALIGN_START;
+    root_layout.grow = 0;
+    root_layout.gap = 0;
+    root_layout.pad_top = 20;
+    root_layout.pad_bottom = 20;
+    root_layout.pad_left = 20;
+    root_layout.pad_right = 20;
+    assert_eq(0, gui_widget_set_layout(fx.platform, root, &root_layout));
+
     gui_geometry_t g;
     g.x = 0;
     g.y = 0;
@@ -354,8 +368,8 @@ TEST_FUNC(test_fill_tracks_parent_content_length)
     lay.gap = 0;
     lay.pad_top = 0;
     lay.pad_bottom = 0;
-    lay.pad_left = 20;
-    lay.pad_right = 20;
+    lay.pad_left = 40;
+    lay.pad_right = 40;
     assert_eq(0, gui_widget_set_layout(fx.platform, root, &lay));
 
     int32_t ow3 = 0;
