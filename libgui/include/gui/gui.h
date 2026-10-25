@@ -5,5 +5,6 @@
 #include <gui/gui_input.h>
 #include <gui/gui_widget.h>
 #include <gui/gui_event.h>
+#include <gui/gui_layout.h>
 
 #endif /* _GUI_H */

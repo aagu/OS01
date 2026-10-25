@@ -636,8 +636,8 @@ test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RES
 # input-frame, input-route, input-decode, input-platform, theme) or all
 # (default: all).
 # Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit _test-gui-host-run-widget
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit widget
+.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit _test-gui-host-run-widget _test-gui-host-run-widget-layout
+GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit widget widget-layout
 
 _test-gui-host-run-platform:
 	@echo "  [test-gui-host] platform"
@@ -813,6 +813,14 @@ _test-gui-host-run-desktop-audit:
 _test-gui-host-run-widget:
 	@echo "  [test-gui-host] widget"
 	$(call os01_submake,hosttests,test-gui-widget $(OS01_SUBMAKE_ARGS))
+
+# GUI-2b Task 4: the typed geometry / layout / text-mode contract.  Runs
+# test_gui_widget_layout.elf, which links the REAL platform + widget
+# registry + layout unit and asserts the public contract through the
+# public API only.
+_test-gui-host-run-widget-layout:
+	@echo "  [test-gui-host] widget-layout"
+	$(call os01_submake,hosttests,test-gui-widget-layout $(OS01_SUBMAKE_ARGS))
 
 _test-gui-host-run-%:
 	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2

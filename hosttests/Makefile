@@ -4002,9 +4002,13 @@ $(GUI_INPUT_UNIT_DIR)/%.o: $(TESTS_DIR)/libgui/src/%.c
 # owns the native widget registry lifetime (created with the platform,
 # released after the display is gone).
 GUI_WIDGET_DIR := $(GUI_HOST_DIR)/widget
-GUI_WIDGET_UNIT_OBJS := $(GUI_WIDGET_DIR)/widget.o
+GUI_WIDGET_UNIT_OBJS := $(GUI_WIDGET_DIR)/widget.o $(GUI_WIDGET_DIR)/layout.o
 
 $(GUI_WIDGET_DIR)/widget.o: $(TESTS_DIR)/libgui/src/widget.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(GUI_WIDGET_DIR)/layout.o: $(TESTS_DIR)/libgui/src/layout.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -4266,7 +4270,12 @@ test-gui-desktop-audit: $(TEST_BLD)/test_desktop_audit.elf
 # The widget fixture itself: the host-private native fixture plus the
 # public-contract test case.
 $(GUI_WIDGET_DIR)/gui_native_fixture.o: $(TEST_MOCK)/gui_native_fixture.c \
-		$(TEST_MOCK)/gui_native_fixture.h
+		$(TEST_MOCK)/gui_native_fixture.h \
+		$(TESTS_DIR)/libgui/internal/gui_widget_private.h \
+		$(TESTS_DIR)/libgui/internal/gui_platform_private.h \
+		$(TESTS_DIR)/libgui/internal/gui_input_private.h \
+		$(TESTS_DIR)/libgui/internal/gui_lvgl_private.h \
+		$(TESTS_DIR)/libgui/include/gui/gui_layout.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -4274,6 +4283,33 @@ $(GUI_WIDGET_DIR)/test_gui_widget.o: $(TEST_CASES)/test_gui_widget.c \
 		$(TEST_MOCK)/gui_native_fixture.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+# GUI-2b Task 4: the typed geometry / layout / text-mode contract.
+$(GUI_WIDGET_DIR)/test_gui_widget_layout.o: $(TEST_CASES)/test_gui_widget_layout.c \
+		$(TEST_MOCK)/gui_native_fixture.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_gui_widget_layout.elf: \
+		$(GUI_WIDGET_DIR)/test_gui_widget_layout.o \
+		$(GUI_WIDGET_DIR)/gui_native_fixture.o \
+		$(GUI_WIDGET_UNIT_OBJS) \
+		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
+		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_THEME_OBJS) \
+		$(GUI_INTEGRATION_DIR)/tick.o \
+		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \
+		$(GUI_INPUT_UNIT_OBJS) \
+		$(GUI_LVGL_ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(GUI_INTEGRATION_WRAPS) -o $@ $^ -lpthread -lm
+
+.PHONY: test-gui-widget-layout
+test-gui-widget-layout: $(TEST_BLD)/test_gui_widget_layout.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
 
 $(TEST_BLD)/test_gui_widget.elf: \
 		$(GUI_WIDGET_DIR)/test_gui_widget.o \
@@ -4702,6 +4738,11 @@ $(TEST_BLD)/test_gui_input_lvgl.elf: \
 -include $(GUI_INPUT_DIR)/*.d
 -include $(GUI_INPUT_LVGL_DIR)/*.d
 -include $(GUI_INPUT_UNIT_DIR)/*.d
+# The widget unit's objects carry the private bridge headers (the slot
+# layout lives there): without this the header changes would NOT trigger a
+# rebuild and the fixture would disagree with the library about the slot
+# size.
+-include $(GUI_WIDGET_DIR)/*.d
 
 # Phase2: production decoder/backend/adapters, device/PIC, neutral lookup,
 # timer and IPI bodies. Only hardware/context and timer service boundaries

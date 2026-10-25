@@ -55,9 +55,12 @@ static gui_widget_slot_t *registry_find(gui_widget_registry_t *reg, uint64_t id)
  * 槽复用时必须走这里：旧身份、旧 handler、旧 userdata、旧文字、旧几何
  * 缓存与旧标志一个都不许残留。
  *
- * 清零的字段清单（14 个）：state、id、obj、parent_id、kind、handler、
- * userdata、text、geom_x、geom_y、geom_width、geom_height、flags、
- * pending_free。
+ * 清零的字段清单（32 个）：state、id、obj、parent_id、kind、handler、
+ * userdata、text、geom_x、geom_y、geom_width、geom_height、
+ * size_mode_w、size_value_w、size_mode_h、size_value_h、anchor、align_x、
+ * align_y、absolute_pos、flow、main_align、cross_align、grow、gap、
+ * pad_top、pad_bottom、pad_left、pad_right、scroll_h、scroll_v、text_mode、
+ * text_align、flags、pending_free。
  *
  * 唯一**不清**的是 `index`：它是槽在表中的位置，不是上一任留下的元数据，
  * 只在注册表建立时写一次；清掉它等于毁掉槽自己的身份。
@@ -76,6 +79,27 @@ static void slot_reset(gui_widget_slot_t *slot)
     slot->geom_y = 0;
     slot->geom_width = 0;
     slot->geom_height = 0;
+    slot->size_mode_w = GUI_SIZE_MODE_CONTENT;
+    slot->size_mode_h = GUI_SIZE_MODE_CONTENT;
+    slot->size_value_w = 0;
+    slot->size_value_h = 0;
+    slot->anchor = GUI_ALIGN_TOP_LEFT;
+    slot->align_x = 0;
+    slot->align_y = 0;
+    slot->absolute_pos = false;
+    slot->flow = GUI_FLOW_NONE;
+    slot->main_align = GUI_FLOW_ALIGN_START;
+    slot->cross_align = GUI_FLOW_ALIGN_START;
+    slot->grow = 0;
+    slot->gap = 0;
+    slot->pad_top = 0;
+    slot->pad_bottom = 0;
+    slot->pad_left = 0;
+    slot->pad_right = 0;
+    slot->scroll_h = false;
+    slot->scroll_v = false;
+    slot->text_mode = GUI_TEXT_MODE_WRAP;
+    slot->text_align = GUI_TEXT_ALIGN_LEFT;
     slot->flags = 0;
     slot->pending_free = false;
 }
@@ -213,6 +237,14 @@ void gui_widget_registry_destroy_tree(gui_platform_t *platform)
 }
 
 /* ── 公共查询 ─────────────────────────────────────────────────────── */
+
+gui_widget_slot_t *gui_widget_slot_find(gui_platform_t *platform, uint64_t id)
+{
+    if (!platform || !platform->registry) {
+        return NULL;
+    }
+    return registry_find(platform->registry, id);
+}
 
 bool gui_widget_is_valid(gui_platform_t *platform, gui_widget_t widget)
 {
@@ -472,7 +504,8 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
     }
 
     if (!parent_slot) {
-        /* 根铺满平台屏幕。 */
+        /* 根铺满平台屏幕：它的尺寸来源是**固定像素**的视口，不是内容，
+         * 因此它不会和任何 FILL 子项构成尺寸循环。 */
         lv_obj_set_size(obj, (int32_t)platform->width, (int32_t)platform->height);
         lv_obj_align(obj, LV_ALIGN_TOP_LEFT, 0, 0);
     }
@@ -507,6 +540,19 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
         slot->flags |= GUI_WIDGET_FLAG_CLICKABLE;
     }
     slot->state = GUI_WIDGET_SLOT_LIVE;
+
+    /* 尺寸来源：根是视口（固定像素），子项默认由内容决定。 */
+    if (!parent_slot) {
+        slot->size_mode_w = GUI_SIZE_MODE_PX;
+        slot->size_mode_h = GUI_SIZE_MODE_PX;
+        slot->size_value_w = (int32_t)platform->width;
+        slot->size_value_h = (int32_t)platform->height;
+    } else {
+        slot->size_mode_w = GUI_SIZE_MODE_CONTENT;
+        slot->size_mode_h = GUI_SIZE_MODE_CONTENT;
+        slot->size_value_w = 0;
+        slot->size_value_h = 0;
+    }
 
     out->id = id;
     return 0;

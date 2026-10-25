@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include <gui/gui_event.h>
+#include <gui/gui_layout.h>
 #include <gui/gui_widget.h>
 #include <lvgl/lvgl.h>
 
@@ -77,6 +78,39 @@ typedef struct {
     int32_t geom_y;                   /* 几何缓存：上 */
     int32_t geom_width;               /* 几何缓存：宽 */
     int32_t geom_height;              /* 几何缓存：高 */
+
+    /* GUI-2b Task 4：尺寸来源缓存。两轴各有一个模式（PX/CONTENT/FILL），
+     * 模式决定 `size_value_*` 是否被使用。CONTENT 父 + 同轴 FILL 子构成
+     * 尺寸循环，这两组字段就是判定它的事实依据。 */
+    gui_size_mode_t size_mode_w;
+    gui_size_mode_t size_mode_h;
+    int32_t size_value_w;
+    int32_t size_value_h;
+
+    /* 定位方式：absolute_pos 为真表示绝对坐标（set_geometry），为假表示
+     * 锚点定位（set_alignment）。两套定位互不覆盖尺寸来源。 */
+    gui_align_t anchor;
+    int32_t align_x;
+    int32_t align_y;
+    bool absolute_pos;
+
+    /* 布局缓存（Task 4）。 */
+    gui_flow_t flow;
+    gui_flow_align_t main_align;
+    gui_flow_align_t cross_align;
+    uint32_t grow;
+    int32_t gap;
+    int32_t pad_top;
+    int32_t pad_bottom;
+    int32_t pad_left;
+    int32_t pad_right;
+
+    /* 滚动与文本模式缓存（Task 4）。 */
+    bool scroll_h;
+    bool scroll_v;
+    gui_text_mode_t text_mode;
+    gui_text_align_t text_align;
+
     uint32_t flags;                   /* 标志位 */
     bool pending_free;                /* 删除回调已发生，等待回收 */
 } gui_widget_slot_t;
@@ -93,6 +127,20 @@ typedef struct {
 } gui_widget_registry_t;
 
 /* ── 注册表生命周期（platform.c ↔ widget.c） ─────────────────────── */
+
+/**
+ * @brief 按身份号查找**已发布**的槽
+ *
+ * 布局、外观与事件这三个模块都要按身份找到槽，但注册表的查找逻辑只有
+ * 一份：它住在 widget.c 里，这里只把入口暴露给同库的其它编译单元。
+ *
+ * 查找只比较身份号，从不解引用槽里的后端指针。
+ *
+ * @param platform 平台上下文句柄
+ * @param id       控件身份号（0 = 无身份）
+ * @return 槽指针；身份不存在或未发布时返回 NULL
+ */
+gui_widget_slot_t *gui_widget_slot_find(gui_platform_t *platform, uint64_t id);
 
 /**
  * @brief 建立平台的控件注册表

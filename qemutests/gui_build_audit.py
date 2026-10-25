@@ -33,6 +33,10 @@ GUI_PUBLIC_HEADERS = (
     # handle carries a uint64_t identity, the event carries the handle.
     "gui_widget.h",
     "gui_event.h",
+    # GUI-2b Task 4: the typed geometry / layout / text-mode description
+    # layer.  It is backend-free: the caller describes what it wants, the
+    # library turns that into backend geometry.
+    "gui_layout.h",
 )
 
 # Private / bridge headers of libgui.  They carry the internal state layout,
@@ -78,6 +82,11 @@ GUI_PUBLIC_WIDGET_SYMBOLS = (
     "gui_widget_set_visible",
     "gui_widget_set_enabled",
     "gui_widget_get_bounds",
+    # GUI-2b Task 4: the typed geometry / layout / text-mode setters.
+    "gui_widget_set_geometry",
+    "gui_widget_set_alignment",
+    "gui_widget_set_layout",
+    "gui_widget_set_scroll",
 )
 
 # Host-only injection hooks.  They exist only under #ifdef OS01_HOST_TEST
@@ -109,6 +118,8 @@ GUI_REQUIRED_ARCHIVE_MEMBERS = (
     "input_ps2.o",
     # GUI-2b: the native widget registry ships with the library.
     "widget.o",
+    # GUI-2b Task 4: the typed geometry / layout / text-mode unit.
+    "layout.o",
 )
 
 # The probe consumer references a symbol that no archive can define; the
@@ -1069,6 +1080,7 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui_theme.h",
         "usr/include/gui/gui_widget.h",
         "usr/include/gui/gui_event.h",
+        "usr/include/gui/gui_layout.h",
         "usr/share/licenses/libgui/LVGL-LICENCE.txt",
     ]
     for rel_path in required_files:
@@ -1246,8 +1258,9 @@ def audit_sysroot_and_build(
     gui_input_h = sysroot / "usr" / "include" / "gui" / "gui_input.h"
     gui_widget_h = sysroot / "usr" / "include" / "gui" / "gui_widget.h"
     gui_event_h = sysroot / "usr" / "include" / "gui" / "gui_event.h"
+    gui_layout_h = sysroot / "usr" / "include" / "gui" / "gui_layout.h"
     if gui_h.is_file() and gui_platform_h.is_file():
-        for hdr in [gui_h, gui_platform_h, gui_input_h, gui_widget_h, gui_event_h]:
+        for hdr in [gui_h, gui_platform_h, gui_input_h, gui_widget_h, gui_event_h, gui_layout_h]:
             if not hdr.is_file():
                 continue
             content = hdr.read_text()
@@ -1289,13 +1302,18 @@ def audit_sysroot_and_build(
                 "#include <gui/gui.h>\n"
                 "#include <gui/gui_platform.h>\n"
                 "#include <gui/gui_widget.h>\n"
+                "#include <gui/gui_layout.h>\n"
                 "int test_consumer(void) {\n"
                 "    gui_config_t cfg = {0};\n"
                 "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
                 "    gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;\n"
+                "    gui_size_t size = GUI_SIZE_CONTENT;\n"
+                "    gui_geometry_t geometry = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
                 "    (void)kind;\n"
+                "    (void)size;\n"
+                "    (void)geometry;\n"
                 "    return 0;\n"
                 "}\n"
             )
@@ -1325,13 +1343,18 @@ def audit_sysroot_and_build(
                 "#include <gui/gui.h>\n"
                 "#include <gui/gui_platform.h>\n"
                 "#include <gui/gui_widget.h>\n"
+                "#include <gui/gui_layout.h>\n"
                 "int test_consumer() {\n"
                 "    gui_config_t cfg = {};\n"
                 "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
                 "    gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;\n"
+                "    gui_size_t size = GUI_SIZE_CONTENT;\n"
+                "    gui_geometry_t geometry = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
                 "    (void)kind;\n"
+                "    (void)size;\n"
+                "    (void)geometry;\n"
                 "    return 0;\n"
                 "}\n"
             )
@@ -1418,6 +1441,7 @@ GUI_STAGED_FILES = (
     "usr/include/gui/gui_theme.h",
     "usr/include/gui/gui_widget.h",
     "usr/include/gui/gui_event.h",
+    "usr/include/gui/gui_layout.h",
     "usr/lib/libgui.a",
     "usr/share/licenses/libgui/LVGL-LICENCE.txt",
 )
