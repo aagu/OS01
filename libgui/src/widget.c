@@ -515,9 +515,7 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
 
     /* 后端在注册表背后删掉对象时（内部删除 fixture），那些槽停在
      * DESTROYING：它们的删除回调早就返回了，此刻回收是安全的。 */
-    if (reg->callback_depth == 0) {
-        registry_reap(reg);
-    }
+    registry_reap(reg);
 
     /* 2. 父控件校验：必须是本平台上活着的控件，且种类可以拥有子项。
      *    CONTAINER 与 BUTTON 都可以拥有子项（Task 10 的卡片容器换成

@@ -2145,6 +2145,49 @@ TEST_FUNC(test_reused_slot_carries_no_focus_state)
     gui_native_fixture_destroy(&fx);
 }
 
+TEST_FUNC(test_delete_batch_preserves_active_focus_on_live_sibling)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t sibling_box;
+    gui_widget_t sibling_child;
+    gui_widget_t focused_button;
+    gui_widget_t got;
+    gui_widget_t receiver;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    sibling_box = make_button(&fx, root, 10, 10);
+    sibling_child = make_button(&fx, sibling_box, 20, 60);
+    focused_button = make_button(&fx, root, 300, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, sibling_child, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, focused_button, GUI_FOCUS_TAB));
+
+    /* 将焦点设置到 focused_button 上。 */
+    assert_eq(0, gui_focus_set(fx.input, focused_button));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(focused_button.id, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(focused_button.id, receiver.id);
+
+    /*
+     * 删除未聚焦的兄弟子树（触发 delete_batch）：
+     * 批次结束时，存活且未受损的 focused_button 必须保持当前焦点，
+     * 不得被修复搜索错误抢走。
+     */
+    assert_eq(0, gui_widget_destroy(fx.platform, sibling_box));
+    assert_false(gui_widget_is_valid(fx.platform, sibling_box));
+    assert_false(gui_widget_is_valid(fx.platform, sibling_child));
+
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(focused_button.id, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(focused_button.id, receiver.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
 /* ═══════════════════════════════════════════════════════════════════ */
 
 TEST_LIST_BEGIN
@@ -2179,7 +2222,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_unregister_without_tab_successor_leaves_no_focus),
     TEST_ENTRY(test_explicit_clear_is_stable_and_never_revived),
     TEST_ENTRY(test_deleted_focus_keeps_repair_position_until_candidate_returns),
-    TEST_ENTRY(test_reused_slot_carries_no_focus_state)
+    TEST_ENTRY(test_reused_slot_carries_no_focus_state),
+    TEST_ENTRY(test_delete_batch_preserves_active_focus_on_live_sibling)
 TEST_LIST_END
 
 int main(void)

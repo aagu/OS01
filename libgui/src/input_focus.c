@@ -1152,12 +1152,12 @@ void gui_input_focus_delete_batch_end(gui_input_t *input)
     }
 
     /*
-     * 批次结束：选跳过整棵待删子树的后继，提交一次最终投影。
-     *
-     * 原生删除批次是**受控路径**：后继搜索**有界**（自修复位置到表尾，不回绕），
-     * 且不继承待修复状态里记下的规则。没有候选 → 选择 NONE + 保留修复位置。
+     * 批次结束：若当前焦点对象依然存活且可用，予以保留；
+     * 仅当当前焦点对象已销毁/不可用且未显式清空时，才执行修复搜索。
      */
-    if (!input->focus.explicit_clear) {
+    if (input->focus.focus != NULL && focus_obj_usable(input, input->focus.focus)) {
+        target = input->focus.focus;
+    } else if (!input->focus.explicit_clear) {
         target = focus_repair_search(input, input->focus.repair_index, true);
     }
     focus_rebuild(input, target);

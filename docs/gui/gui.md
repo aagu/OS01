@@ -440,7 +440,7 @@ make PROFILE=x86_64-clang test-qemu SUITE=gui
 | `libgui/include/gui/gui_theme.h` | 设计系统令牌表（32 色彩角色、5 级字号、5 档间距/圆角、elevation） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/include/gui/gui_widget.h` | 原生控件句柄与种类声明（容器、标签、按钮） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/include/gui/gui_layout.h` | 盒模型与流式布局声明（横向/纵向/无排布，尺寸模式，内边距与间距） | **公共**（纯 C，无 LVGL 符号） |
-| `libgui/include/gui/gui_event.h` | 事件派发模型（点击、获得/失去焦点、激活、键鼠输入） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_event.h` | 业务事件回调模型（处理 `GUI_EVENT_ACTIVATE` 按钮激活） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/include/gui/gui_focus.h` | 统一焦点引擎 API（焦点登记、注销、移动、设置、查询、初始策略） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/internal/gui_widget_private.h` | 控件树私有结构、LVGL 对接绑定及生命周期管理 | libgui 内部 |
 | `libgui/internal/gui_platform_private.h` | 平台私有状态、显示驱动与定时器链表 | libgui 内部 |
@@ -495,7 +495,7 @@ user/desktop/
 在 GUI-2b 之前，桌面外壳曾临时自建过一套第二焦点模型（`desktop_shell_focus_*`）。随着 GUI-2b 原生控件与统一焦点引擎闭环，该重复模型已**彻底删除**：
 1. **单一事实来源**：所有界面焦点（状态栏快捷项、启动器网格按钮、应用抽屉按钮、设置选项、壳内应用操作按钮）均通过 `gui_focus_register(input, widget, policy)` 注册到 `libgui` 的统一焦点引擎中。
 2. **生命周期与防悬挂**：当表面切换或应用退出时，旧表面的控件树整体销毁；`gui_widget_destroy()` 会自动安全地注销其所有子控件的焦点登记，并在当前焦点项被销毁时按后继规则重新建立有效焦点或置空，绝无野指针残留。
-3. **视觉一致性**：获得焦点的原生控件触发 `GUI_EVENT_FOCUS_GAINED` 并进入 focus 交互状态，由 Material 风格引擎统一绘制 2px primary 轮廓焦点环；失焦触发 `GUI_EVENT_FOCUS_LOST` 恢复默认外观。桌面外壳与应用业务无需手绘焦点环。
+3. **视觉一致性**：获得焦点的原生控件进入 focus 交互状态，由 Material 风格引擎统一绘制 2px primary 轮廓焦点环；失焦恢复默认外观。桌面外壳与应用业务无需手绘焦点环。
 
 ### 5. 界面文案用 ASCII（不是中文）
 

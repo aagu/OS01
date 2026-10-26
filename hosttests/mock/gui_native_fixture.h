@@ -366,10 +366,11 @@ int gui_native_fixture_raw_delete_focused(gui_native_fixture_t *fx);
  * 露出来，测试才能独立复核 `pool_used == pool_total - pool_free` 这条
  * 等式（而不是让实现自己证明自己）。
  *
- * @param fx         fixture 上下文
- * @param out_total  输出参数：池总字节（可为 NULL）
- * @param out_free   输出参数：池空闲字节（可为 NULL）
- * @param out_max    输出参数：池历史最高占用字节（可为 NULL）
+ * @param fx           fixture 上下文
+ * @param out_total    输出参数：池总字节（可为 NULL）
+ * @param out_free     输出参数：池空闲字节（可为 NULL）
+ * @param out_max_used 输出参数：池历史最高占用字节（可为 NULL）
+ * @param out_count    兼容别名（对应 out_max_used 统计）
  * @return 0 成功；-1 失败（errno = EINVAL）
  */
 int gui_native_fixture_pool_bytes(gui_native_fixture_t *fx, uint64_t *out_total,
