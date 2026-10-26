@@ -306,12 +306,16 @@ typedef struct {
 /**
  * @brief 设置控件的外观
  *
- * 外观只改**普通状态**的样式：主题的 hover / pressed / focused / disabled
- * 状态样式原样保留，因此焦点环不会被普通局部边框遮掉。
- *
  * 形态与控件种类必须相容，否则被拒绝：标签只能用 PLAIN，容器只能用
  * PANEL / CARD / PLAIN（根容器还可以用 ROOT），按钮只能用 ACTION / CARD /
  * PLAIN。ROOT 形态还必须是透明、无边框、无圆角、无 elevation 的底板。
+ *
+ * 外观写的样式：普通状态（填充、文字、字体、圆角、边框、阴影、内边距）
+ * 全部由这里决定；主题的 hover / pressed / disabled 状态样式原样保留。
+ * 聚焦状态只额外写**填充色与文字色**：填充**就是 primary** 的控件聚焦时
+ * 换成主题的 primary_container / on_primary_container（否则 primary 的焦点
+ * 环会被同色填充吞掉）；其余填充色聚焦时保留自己的颜色。主题的焦点环
+ * （primary 2px 环）不被外观层触碰，因此不会被普通局部边框遮掉。
  *
  * 失败时不发生部分修改：所有校验都在改动任何状态之前完成。
  *

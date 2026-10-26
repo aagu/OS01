@@ -1584,6 +1584,306 @@ TEST_FUNC(test_repair_path_stays_sticky_while_pending)
     gui_native_fixture_destroy(&fx);
 }
 
+/*
+ * 受控路径**恒**有界：一次新的受控移除不得继承待修复状态里记下的"绕回"
+ * 规则。
+ *
+ * 触发条件（修复轮次 2 引入的新行为）：已存在"后端自删留下的待修复（绕回
+ * 规则）"，随后发生受控注销——受控路径当时会改用绕回搜索，可能选中修复
+ * 位置**之前**的项（抢焦点）。
+ */
+TEST_FUNC(test_controlled_removal_never_wraps_before_repair_position)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t x;
+    gui_widget_t y;
+    gui_widget_t z;
+    gui_widget_t got;
+    gui_widget_t receiver;
+    bool pending = false;
+    bool bounded = false;
+    unsigned index = 0;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    x = make_button(&fx, root, 10, 10);
+    y = make_button(&fx, root, 120, 10);
+    z = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, x, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, y, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, z, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, z));
+
+    /*
+     * x 与 y 先禁用：后端自删之后端自己的转焦（后端只跳过禁用/隐藏项）
+     * 找不到候选，"待修复"状态因此得以保留。
+     */
+    assert_eq(0, gui_widget_set_enabled(fx.platform, x, false));
+    assert_eq(0, gui_widget_set_enabled(fx.platform, y, false));
+
+    /*
+     * 后端自删（批次外）留下"待修复"：规则 = 绕回，修复起点 = 删除前的下标
+     * （z 在表里的下标 2）。
+     */
+    assert_eq(0, gui_native_fixture_backend_delete(fx.platform, z));
+    assert_eq(0, gui_native_fixture_query_focus_repair_state(&fx, &pending, &bounded, &index));
+    assert_true(pending);
+    assert_false(bounded);
+    assert_eq(2, index);
+
+    /* x 恢复可用：它在修复位置**之前**——绕回规则会抢走它。 */
+    assert_eq(0, gui_widget_set_enabled(fx.platform, x, true));
+
+    /*
+     * 现在做一次**受控注销**：受控路径按**自己的**规则走（有界前向搜索），
+     * 不得继承待修复状态里的"绕回"规则。
+     */
+    assert_eq(0, gui_focus_unregister(fx.input, y));
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+
+    /* 刷新也不抢：受控路径记下的规则是有界，续修同样不回绕。 */
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    assert_eq(0, gui_native_fixture_query_focus_receiver(&fx, &receiver));
+    assert_eq(0, receiver.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/*
+ * 自动修复续修按**它自己**记下的规则走：受控来源 → 有界；后端自删来源
+ * → 绕回。
+ */
+TEST_FUNC(test_auto_repair_continuation_uses_recorded_rule)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t x;
+    gui_widget_t y;
+    gui_widget_t z;
+    gui_widget_t got;
+    bool pending = false;
+    bool bounded = false;
+    unsigned index = 0;
+
+    /* (a) 受控来源：注销当前项 → 记下"有界"。 */
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    x = make_button(&fx, root, 10, 10);
+    y = make_button(&fx, root, 120, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, x, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, y, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_set(fx.input, y));
+    assert_eq(0, gui_focus_unregister(fx.input, y));
+
+    assert_eq(0, gui_native_fixture_query_focus_repair_state(&fx, &pending, &bounded, &index));
+    assert_true(pending);
+    assert_true(bounded);
+
+    /* 续修：有界 —— x 在修复位置之前，绕回规则会抢走它。 */
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(0, got.id);
+    gui_native_fixture_destroy(&fx);
+
+    /* (b) 后端自删来源：记下"绕回"。 */
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    x = make_button(&fx, root, 10, 10);
+    y = make_button(&fx, root, 120, 10);
+    z = make_button(&fx, root, 230, 10);
+
+    assert_eq(0, gui_focus_register(fx.input, x, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, y, GUI_FOCUS_TAB));
+    assert_eq(0, gui_focus_register(fx.input, z, GUI_FOCUS_TAB));
+    /*
+     * x 与 y 都禁用：后端自删之后端自己的转焦找不到候选，待修复状态得以
+     * 保留（不被后端的自动转焦顶掉）。
+     */
+    assert_eq(0, gui_widget_set_enabled(fx.platform, x, false));
+    assert_eq(0, gui_widget_set_enabled(fx.platform, y, false));
+    assert_eq(0, gui_focus_set(fx.input, z));
+
+    assert_eq(0, gui_native_fixture_backend_delete(fx.platform, z));
+    assert_eq(0, gui_native_fixture_query_focus_repair_state(&fx, &pending, &bounded, &index));
+    assert_true(pending);
+    assert_false(bounded);
+    assert_eq(2, index);
+
+    /*
+     * 候选恢复：续修按**它自己**记下的规则（绕回）走 → 落到 x。有界规则会
+     * 停在 NONE（x 在修复位置之前）。
+     */
+    assert_eq(0, gui_widget_set_enabled(fx.platform, x, true));
+    step(&fx, 20);
+    step(&fx, 20);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(x.id, got.id);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/*
+ * 键盘焦点状态（FOCUS_KEY）与指针那条（FOCUSED）必须一样被覆盖：主题对
+ * 两者的处理是对称的，外观层也是。
+ */
+TEST_FUNC(test_focus_key_state_keeps_ring_and_custom_fill)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t square;
+    gui_widget_t rounded;
+    gui_widget_t plain;
+    gui_appearance_t ap = GUI_APPEARANCE_DEFAULT;
+    gui_rect_t rs;
+    gui_rect_t rr;
+    gui_rect_t rp;
+    int32_t radius = -1;
+    int32_t md;
+    uint32_t edge;
+    uint32_t center;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    square = make_button(&fx, root, 10, 10);
+    rounded = make_button(&fx, root, 120, 10);
+    plain = make_button(&fx, root, 230, 10);
+
+    md = gui_theme_radius(GUI_THEME_RADIUS_MD);
+
+    /* 自定义底色（surface_container）：聚焦时必须保留自己的填充色。 */
+    ap.variant = GUI_VARIANT_ACTION;
+    ap.bg_role = GUI_COLOR_SURFACE_CONTAINER;
+    ap.text_role = GUI_COLOR_ON_SURFACE;
+    ap.rounded = false;
+    assert_eq(0, gui_widget_set_appearance(fx.platform, square, &ap));
+
+    ap.rounded = true;
+    assert_eq(0, gui_widget_set_appearance(fx.platform, rounded, &ap));
+
+    assert_eq(0, gui_widget_get_bounds(fx.platform, square, &rs));
+    assert_eq(0, gui_widget_get_bounds(fx.platform, rounded, &rr));
+    assert_eq(0, gui_widget_get_bounds(fx.platform, plain, &rp));
+
+    /* 键盘焦点状态：环可见，且不改写圆角。 */
+    assert_eq(0, gui_native_fixture_set_focus_key_visual(&fx, square, true));
+    assert_eq(0, gui_native_fixture_set_focus_key_visual(&fx, rounded, true));
+    assert_eq(0, gui_native_fixture_set_focus_key_visual(&fx, plain, true));
+    step(&fx, 50);
+    step(&fx, 50);
+
+    /* 环不改写圆角：直角仍是直角，圆角仍是圆角。 */
+    assert_eq(0, gui_native_fixture_query_focus_radius(&fx, square, &radius));
+    assert_eq(0, radius);
+    assert_eq(0, gui_native_fixture_query_focus_radius(&fx, rounded, &radius));
+    assert_eq(md, radius);
+
+    /* 自定义底色在 FOCUS_KEY 下仍保留自己的填充色，环照常可见。 */
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)rs.x,
+                                  (uint32_t)(rs.y + rs.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(rs.x + rs.width / 2),
+                                    (uint32_t)(rs.y + rs.height / 2));
+    assert_eq(gui_theme_colors()->surface_container, center);
+    assert_eq(gui_theme_colors()->primary, edge);
+    assert_true(edge != center);
+
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)rr.x,
+                                  (uint32_t)(rr.y + rr.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(rr.x + rr.width / 2),
+                                    (uint32_t)(rr.y + rr.height / 2));
+    assert_eq(gui_theme_colors()->surface_container, center);
+    assert_eq(gui_theme_colors()->primary, edge);
+    assert_true(edge != center);
+
+    /*
+     * 默认 ACTION（填充是 primary）在 FOCUS_KEY 下同样换成 primary_container：
+     * 键盘导航的焦点反馈与指针那条必须一致，否则 primary 的环会被同色吞掉。
+     */
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)rp.x,
+                                  (uint32_t)(rp.y + rp.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(rp.x + rp.width / 2),
+                                    (uint32_t)(rp.y + rp.height / 2));
+    assert_eq(gui_theme_colors()->primary_container, center);
+    assert_eq(gui_theme_colors()->primary, edge);
+    assert_true(edge != center);
+
+    /* 撤掉键盘焦点状态：环消失，填充不变。 */
+    assert_eq(0, gui_native_fixture_set_focus_key_visual(&fx, square, false));
+    assert_eq(0, gui_native_fixture_set_focus_key_visual(&fx, rounded, false));
+    assert_eq(0, gui_native_fixture_set_focus_key_visual(&fx, plain, false));
+    step(&fx, 50);
+    step(&fx, 50);
+
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)rs.x,
+                                  (uint32_t)(rs.y + rs.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(rs.x + rs.width / 2),
+                                    (uint32_t)(rs.y + rs.height / 2));
+    assert_eq(gui_theme_colors()->surface_container, center);
+    assert_eq(edge, center);
+
+    gui_native_fixture_destroy(&fx);
+}
+
+/*
+ * 判据只看**填充色**：任何填充是 primary 的控件，聚焦时都必须换成与环
+ * 可区分的填充（否则 primary 的环会被同色填充吞掉）——与变体无关。
+ */
+TEST_FUNC(test_primary_fill_variant_card_keeps_ring_visible)
+{
+    gui_native_fixture_t fx;
+    gui_widget_t root;
+    gui_widget_t card;
+    gui_appearance_t ap = GUI_APPEARANCE_DEFAULT;
+    gui_rect_t r;
+    uint32_t edge;
+    uint32_t center;
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    root = make_root(&fx);
+    card = make_button(&fx, root, 10, 10);
+
+    /* 变体是 CARD，填充是 primary。 */
+    ap.variant = GUI_VARIANT_CARD;
+    ap.bg_role = GUI_COLOR_PRIMARY;
+    ap.text_role = GUI_COLOR_ON_PRIMARY;
+    ap.rounded = true;
+    ap.bordered = false;
+    assert_eq(0, gui_widget_set_appearance(fx.platform, card, &ap));
+
+    assert_eq(0, gui_widget_get_bounds(fx.platform, card, &r));
+    step(&fx, 50);
+    step(&fx, 50);
+
+    /* 普通态：填充就是 primary。 */
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + r.width / 2),
+                                    (uint32_t)(r.y + r.height / 2));
+    assert_eq(gui_theme_colors()->primary, center);
+
+    /* 聚焦：填充不再与环同色，环可见。 */
+    assert_eq(0, gui_native_fixture_set_focus_visual(&fx, card, true));
+    step(&fx, 50);
+    step(&fx, 50);
+
+    edge = gui_platform_get_pixel(fx.platform, (uint32_t)r.x,
+                                  (uint32_t)(r.y + r.height / 2));
+    center = gui_platform_get_pixel(fx.platform, (uint32_t)(r.x + r.width / 2),
+                                    (uint32_t)(r.y + r.height / 2));
+    assert_eq(gui_theme_colors()->primary_container, center);
+    assert_eq(gui_theme_colors()->primary, edge);
+    assert_true(edge != center);
+
+    gui_native_fixture_destroy(&fx);
+}
+
 /* ── 受控路径的后继：有界前向搜索（不回绕） ─────────────────────── */
 
 TEST_FUNC(test_unregister_last_item_leaves_no_focus)
@@ -1871,6 +2171,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_material_ring_tracks_focus),
     TEST_ENTRY(test_focus_ring_follows_widget_corner_radius),
     TEST_ENTRY(test_repair_path_stays_sticky_while_pending),
+    TEST_ENTRY(test_controlled_removal_never_wraps_before_repair_position),
+    TEST_ENTRY(test_auto_repair_continuation_uses_recorded_rule),
+    TEST_ENTRY(test_focus_key_state_keeps_ring_and_custom_fill),
+    TEST_ENTRY(test_primary_fill_variant_card_keeps_ring_visible),
     TEST_ENTRY(test_unregister_last_item_leaves_no_focus),
     TEST_ENTRY(test_unregister_without_tab_successor_leaves_no_focus),
     TEST_ENTRY(test_explicit_clear_is_stable_and_never_revived),

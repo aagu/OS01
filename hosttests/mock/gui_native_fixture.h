@@ -274,6 +274,21 @@ int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_e
 int gui_native_fixture_query_focus_rebuild_count(gui_native_fixture_t *fx, uint32_t *out);
 
 /**
+ * @brief 宿主私有：把控件置为键盘焦点状态（FOCUS_KEY）
+ *
+ * 与 gui_native_fixture_set_focus_visual() 对称，但走的是**键盘**那条状态
+ * 位：键盘导航的焦点反馈（FOCUS_KEY）必须与指针那条（FOCUSED）一样被
+ * 单独覆盖——主题与外观层对两者的处理必须对称。
+ *
+ * @param fx      fixture 上下文
+ * @param widget  控件身份
+ * @param focused true = 置上 FOCUS_KEY；false = 撤掉
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_set_focus_key_visual(gui_native_fixture_t *fx, gui_widget_t widget,
+                                            bool focused);
+
+/**
  * @brief 宿主私有：修复待办的状态
  *
  * 观察"修复位置 + 路径属性"。路径属性（受控=有界 / 后端=绕回）在待修复

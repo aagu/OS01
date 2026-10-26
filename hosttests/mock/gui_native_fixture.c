@@ -248,6 +248,30 @@ int gui_native_fixture_set_focus_visual(gui_native_fixture_t *fx, gui_widget_t w
     return 0;
 }
 
+int gui_native_fixture_set_focus_key_visual(gui_native_fixture_t *fx, gui_widget_t widget,
+                                            bool focused)
+{
+    if (!fx || !fx->platform) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    lv_obj_t *obj = gui_widget_test_get_obj(fx->platform, widget);
+    if (!obj) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* 键盘焦点状态位：与 FOCUSED 同样只改后端状态，不碰输入登记。 */
+    if (focused) {
+        lv_obj_add_state(obj, LV_STATE_FOCUS_KEY);
+    } else {
+        lv_obj_remove_state(obj, LV_STATE_FOCUS_KEY);
+    }
+    lv_obj_invalidate(obj);
+    return 0;
+}
+
 int gui_native_fixture_query_focus_receiver(gui_native_fixture_t *fx, gui_widget_t *out)
 {
     if (!fx || !out) {

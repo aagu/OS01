@@ -132,12 +132,13 @@ static bool variant_allowed(gui_widget_kind_t kind, gui_variant_t variant, bool 
  * 共用的聚焦填充会盖掉外观层显式表达的 bg_role（LVGL 的状态权重恒高于
  * 局部样式），自定义底色的控件获焦时就会丢掉自己的颜色。
  *
- * 因此聚焦填充由**外观层**按变体决定：
- *   - 默认 ACTION（变体 ACTION 且底色就是默认 primary）：聚焦时换成同一
- *     主题的 primary_container / on_primary_container——普通态底色与环都是
- *     primary，同色时环画出来也看不见，填充必须与环可区分；
- *   - 其余外观（自定义 bg_role、CARD、PLAIN……）：聚焦时**保留自己的填充
- *     色与文字色**，环照常显示。
+ * 因此聚焦填充由**外观层**按填充色决定：
+ *   - 填充**就是 primary** 的控件（无论变体是 ACTION 还是 CARD / PLAIN）：
+ *     聚焦时换成同一主题的 primary_container / on_primary_container —— 环
+ *     是 primary，填充也是 primary 时同色，环会被吞掉；填充必须与环可区分。
+ *     判据只看填充色，不看变体：变体与填充是两个独立维度。
+ *   - 其余填充色（自定义 bg_role、surface_container……）：聚焦时**保留自己的
+ *     填充色与文字色**，环照常显示。
  *
  * 这个状态样式**只**写 bg_color / text_color：环的 border 属性仍然只来自
  * 主题，外观层不得用更高优先级的局部样式覆盖 FOCUSED/FOCUS_KEY 的主题环
@@ -150,7 +151,7 @@ static void appearance_apply_focus_fill(lv_obj_t *obj, const gui_appearance_t *a
     uint32_t bg = color_role_rgb(ap->bg_role);
     uint32_t text = color_role_rgb(ap->text_role);
 
-    if (ap->variant == GUI_VARIANT_ACTION && ap->bg_role == GUI_COLOR_PRIMARY) {
+    if (ap->bg_role == GUI_COLOR_PRIMARY) {
         bg = color_role_rgb(GUI_COLOR_PRIMARY_CONTAINER);
         text = color_role_rgb(GUI_COLOR_ON_PRIMARY_CONTAINER);
     }
