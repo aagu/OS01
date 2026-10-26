@@ -394,13 +394,14 @@ QEMU 的两次沙箱内尝试均未进入 guest 验证：首次因 `/var/tmp` �
 
 ### 9.1 交付范围与提交历史
 
-GUI-2b 在 `libgui` 中实现了纯 C 原生控件系统（容器、标签、按钮、输入框、列表）与盒模型布局（flex / grid），引入了统一焦点引擎（`gui_focus.h`），并彻底废除了桌面外壳在 GUI-3 中临时维护的第二套焦点序列（`desktop_shell_focus_*`），使 `libgui` 成为系统内唯一的焦点权威。
+GUI-2b 在 `libgui` 中实现了纯 C 原生控件系统（容器、标签、按钮）与盒模型流式布局（横向/纵向/无排布），引入了统一焦点引擎（`gui_focus.h`），并彻底废除了桌面外壳在 GUI-3 中临时维护的第二套焦点序列（`desktop_shell_focus_*`），使 `libgui` 成为系统内唯一的焦点权威。
 
 关键提交历史：
 - `21ce6aae`: `refactor(desktop): use native widgets and the shared focus engine`
 - `adb67ae8`: `fix(desktop): defer file navigation with versioned contexts`
 - `3ec0343f`: `test(gui): audit native API publication and incremental dependencies`
-- 随本报告提交: `docs(gui): record native widget focus validation and roadmap completion`
+- `f6d48829`: `docs(gui): record native widget focus validation and roadmap completion`
+- 随本报告提交: `docs(gui): align widget and focus documentation with actual public C API`
 
 ### 9.2 验证结果汇总
 
@@ -420,13 +421,14 @@ GUI-2b 在 `libgui` 中实现了纯 C 原生控件系统（容器、标签、按
 1. **容量上限**：
    - 最大原生控件数量：1024（`GUI_WIDGET_MAX_COUNT = 1024`）
    - 最大可聚焦项数量：128（`GUI_FOCUS_MAX_ITEMS = 128`）
-   - 越界安全防护：达到上限时接口优雅报错返回 `ENOMEM`，不产生溢出写或异常崩溃。
+   - 越界安全防护：达到上限时接口优雅报错返回 `ENOSPC`，不产生溢出写或异常崩溃。
 2. **生命周期与焦点防悬挂**：
    - 统一对象树层级：`Platform -> Root Widget -> Child Widgets`。
    - 销毁父控件自动级联清理子控件。
-   - 控件销毁时自动调用 `gui_focus_target_destroy` 摘除焦点项，保证焦点链表绝无悬挂指针。
+   - 控件销毁（`gui_widget_destroy()`）时自动安全摘除焦点登记项并更新当前焦点，保证焦点链表绝无悬挂指针。
 3. **已发布头与 ABI 洁净度**：
    - sysroot 已发布的公共头（`gui_widget.h`、`gui_layout.h`、`gui_event.h`、`gui_focus.h`）经过 `gui_build_audit.py` 严格扫描，未暴露任何 LVGL 内部符号。
+   - 原生控件句柄采用值类型结构体 `gui_widget_t`（只含 uint64_t 身份号），焦点登记直接使用 `gui_focus_register(input, widget, policy)`，无外部不透明指针或间接类型。
 4. **底层与内核健壮性强化**：
    - VFS `VFS_GETDENTS_SORT_MAX` 由 64 扩至 256，消除大目录条目截断问题。
    - 修复 tmpfs 目录初始子节点数组分配漏洞，彻底消除扩容时的内存破坏隐患。

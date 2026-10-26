@@ -438,18 +438,19 @@ make PROFILE=x86_64-clang test-qemu SUITE=gui
 | `libgui/include/gui/gui_platform.h` | 平台生命周期与主循环（创建/销毁/tick/step/像素读取） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/include/gui/gui_input.h` | 物理输入与合成事件分发 | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/include/gui/gui_theme.h` | 设计系统令牌表（32 色彩角色、5 级字号、5 档间距/圆角、elevation） | **公共**（纯 C，无 LVGL 符号） |
-| `libgui/include/gui/gui_widget.h` | 原生控件声明与树形层级（容器、标签、按钮、输入框、列表） | **公共**（纯 C，无 LVGL 符号） |
-| `libgui/include/gui/gui_layout.h` | 盒模型布局声明（flex 弹性盒子、网格布局、内边距与外边距） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_widget.h` | 原生控件句柄与种类声明（容器、标签、按钮） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_layout.h` | 盒模型与流式布局声明（横向/纵向/无排布，尺寸模式，内边距与间距） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/include/gui/gui_event.h` | 事件派发模型（点击、获得/失去焦点、激活、键鼠输入） | **公共**（纯 C，无 LVGL 符号） |
-| `libgui/include/gui/gui_focus.h` | 统一焦点引擎 API（焦点项登记、前后导航、方向移动、激活、销毁摘除） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_focus.h` | 统一焦点引擎 API（焦点登记、注销、移动、设置、查询、初始策略） | **公共**（纯 C，无 LVGL 符号） |
 | `libgui/internal/gui_widget_private.h` | 控件树私有结构、LVGL 对接绑定及生命周期管理 | libgui 内部 |
 | `libgui/internal/gui_platform_private.h` | 平台私有状态、显示驱动与定时器链表 | libgui 内部 |
 | `libgui/internal/gui_input_private.h` | 输入设备私有状态与 PS/2 队列 | libgui 内部 |
 | `libgui/src/widget.c` | 原生控件创建、生命周期与父子关系维护 | libgui 内部 |
-| `libgui/src/layout.c` | flex 与 grid 布局算法及尺寸计算 | libgui 内部 |
+| `libgui/src/layout.c` | 流式排布与尺寸对齐算法及计算 | libgui 内部 |
 | `libgui/src/appearance.c` | 主题令牌向原生控件样式的映射与应用 | libgui 内部 |
 | `libgui/src/event.c` | 事件队列与回调分发 | libgui 内部 |
-| `libgui/src/focus.c` | 统一焦点引擎实现（Tab / Shift+Tab 循环链表、激活、自动摘除） | libgui 内部 |
+| `libgui/src/focus.c` | 统一焦点公共接口包装与模式锁定校验 | libgui 内部 |
+| `libgui/src/input_focus.c` | 统一焦点引擎实现（单一登记表、选择提交、双向移动、自动摘除） | libgui 内部 |
 | `libgui/src/platform.c` | 平台初始化/销毁、主题装载与帧呈现 | libgui 内部 |
 | `libgui/src/tick.c` | 高精度时间戳与 tick 推进 | libgui 内部 |
 | `libgui/src/input.c` / `input_*.c` | 输入路由驱动、按键状态与 LVGL 输入桥接 | libgui 内部 |
@@ -457,11 +458,11 @@ make PROFILE=x86_64-clang test-qemu SUITE=gui
 | `libgui/src/cursor_icon.c` | 硬件/软件光标像素图标渲染 | libgui 内部 |
 
 **容量与对象所有权约束**：
-- **容量上限**：单一平台实例最大支持 **1024 个活动控件**（`GUI_WIDGET_MAX_COUNT = 1024`）与 **128 个可聚焦项**（`GUI_FOCUS_MAX_ITEMS = 128`）。超出时返回错误并设置 `ENOMEM`，不触发内核 panic 或越界写。
+- **容量上限**：单一平台实例最大支持 **1024 个活动控件**（`GUI_WIDGET_MAX_COUNT = 1024`）与 **128 个可聚焦项**（`GUI_FOCUS_MAX_ITEMS = 128`）。超出时返回错误并设置 `ENOSPC`，不触发内核 panic 或越界写。
 - **对象所有权**：采用严格树形层级 `Platform -> Root Widget Tree -> Child Widgets`。父控件销毁时自动级联销毁所有子控件。
-- **自动摘除**：控件销毁时若注册了焦点项，统一焦点引擎会自动将其从焦点循环链表中安全摘除，绝不残留野指针。
+- **自动摘除**：控件销毁（`gui_widget_destroy()`）时若已登记焦点，统一焦点引擎会自动将其从焦点登记表中安全摘除并更新活跃焦点，绝不残留野指针。
 
-**公共 API 刻意保持 LVGL 无关**：sysroot 的已发布头有一条硬约束（`qemutests/gui_build_audit.py`）——**任何**已发布头不得出现 LVGL 符号。因此控件与焦点句柄均使用不透明指针封装（`gui_widget_t *`、`gui_focus_target_t *`），底层通过 `gui_widget_private.h` 与 LVGL 对象关联。
+**公共 API 刻意保持 LVGL 无关**：sysroot 的已发布头有一条硬约束（`qemutests/gui_build_audit.py`）——**任何**已发布头不得出现 LVGL 符号。控件句柄采用**值类型结构体**（`typedef struct { uint64_t id; } gui_widget_t;`，仅封装一个 64 位进程全局单调递增的身份号），非指针，调用方无法伪造或强转底层指针；焦点管理直接针对 `gui_widget_t` 原生控件句柄进行登记（不存在 `gui_focus_target_t` 间接类型）。原生控件仅支持三种基础种类（`GUI_WIDGET_CONTAINER`、`GUI_WIDGET_LABEL`、`GUI_WIDGET_BUTTON`），布局仅支持三种流式排布（`GUI_FLOW_NONE`、`GUI_FLOW_ROW`、`GUI_FLOW_COLUMN`）。
 
 主题必须与平台**同生共死**：`gui_platform_destroy()` 的顺序固定为「先清空控件树与焦点表 → 再删 display → 拆主题 → 最后 `lv_deinit()`」（反序会 use-after-free）。
 
@@ -484,7 +485,7 @@ user/desktop/
 
 | 键 | 行为 |
 |----|------|
-| `Tab` / `Shift+Tab` | 在当前表面的原生焦点项之间循环前进 / 后退（由 `gui_focus_next()` / `gui_focus_prev()` 统一驱动） |
+| `Tab` / `Shift+Tab` | 在当前表面的原生焦点项之间循环前进 / 后退（由 `gui_focus_move(input, GUI_FOCUS_FORWARD / BACKWARD)` 统一驱动） |
 | `Enter` | 激活当前焦点项（派发 `GUI_EVENT_ACTIVATE`） |
 | `ESC` | 返回上一级目录（Files 应用）或退出应用返回主屏 |
 | 方向键 / 快捷键 | 交由当前获得焦点的控件或当前应用分发处理 |
@@ -492,8 +493,8 @@ user/desktop/
 
 **统一由 libgui 公共焦点引擎承载**：
 在 GUI-2b 之前，桌面外壳曾临时自建过一套第二焦点模型（`desktop_shell_focus_*`）。随着 GUI-2b 原生控件与统一焦点引擎闭环，该重复模型已**彻底删除**：
-1. **单一事实来源**：所有界面焦点（状态栏快捷项、启动器网格、应用抽屉项、设置选项、壳内应用操作目标）均通过 `gui_focus_target_create()` 注册到 `libgui` 的平台焦点链表。
-2. **生命周期与防悬挂**：当表面切换或应用退出时，旧表面的控件树整体销毁；`gui_widget_destroy()` 或 `gui_focus_target_destroy()` 会自动且安全地将焦点项从链表中摘除，重置活跃焦点，绝无野指针残留。
+1. **单一事实来源**：所有界面焦点（状态栏快捷项、启动器网格按钮、应用抽屉按钮、设置选项、壳内应用操作按钮）均通过 `gui_focus_register(input, widget, policy)` 注册到 `libgui` 的统一焦点引擎中。
+2. **生命周期与防悬挂**：当表面切换或应用退出时，旧表面的控件树整体销毁；`gui_widget_destroy()` 会自动安全地注销其所有子控件的焦点登记，并在当前焦点项被销毁时按后继规则重新建立有效焦点或置空，绝无野指针残留。
 3. **视觉一致性**：获得焦点的原生控件触发 `GUI_EVENT_FOCUS_GAINED` 并进入 focus 交互状态，由 Material 风格引擎统一绘制 2px primary 轮廓焦点环；失焦触发 `GUI_EVENT_FOCUS_LOST` 恢复默认外观。桌面外壳与应用业务无需手绘焦点环。
 
 ### 5. 界面文案用 ASCII（不是中文）
