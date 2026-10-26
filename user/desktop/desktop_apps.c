@@ -22,6 +22,7 @@
 #include "desktop_state.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -323,6 +324,43 @@ void desktop_app_request_back(desktop_shell_t *shell)
  * 顶栏上的「返回」是**应用界面的一部分**，不是窗口装饰：GUI-3 不实现
  * 窗口系统，因此这里没有最小化 / 最大化 / 关闭按钮，也没有窗口边框。
  */
+/* 从当前 cwd 算出父目录；根目录（"/"）没有父目录，返回 false。 */
+static bool parent_path(const char *cwd, char *out, size_t out_len)
+{
+    size_t len;
+
+    if (cwd == NULL || out == NULL || out_len == 0) {
+        return false;
+    }
+    if (cwd[0] == '\0' || strcmp(cwd, "/") == 0) {
+        return false;   /* 根：没有父目录 */
+    }
+
+    len = strlen(cwd);
+    while (len > 1 && cwd[len - 1] != '/') {
+        len--;
+    }
+    if (len <= 1) {
+        if (out_len < 2) {
+            return false;
+        }
+        snprintf(out, out_len, "%s", "/");
+        return true;
+    }
+    if (len > out_len) {
+        return false;   /* 截断即拒绝 */
+    }
+    memcpy(out, cwd, len - 1);
+    out[len - 1] = '\0';
+    return true;
+}
+
+/*
+ * 返回：只借外壳。
+ *
+ * 文件应用的返回**从当前 cwd 与版本**算出父路径并投递导航意图；只有在
+ * 根目录（"/"）才投递既有的「返回主屏」意图。
+ */
 static void on_back_activate(const gui_event_t *event, void *userdata)
 {
     desktop_back_ctx_t *ctx = (desktop_back_ctx_t *)userdata;
@@ -335,8 +373,23 @@ static void on_back_activate(const gui_event_t *event, void *userdata)
     /* 当前应用标识由外壳持有：顶栏属于当前表面，标识自然也是当前应用。 */
     desktop_app_id_t id = desktop_shell_current_app_id(ctx->shell);
 
-    /* 文件应用的返回先回父目录，父目录是根才回主屏。 */
-    if (id == DESKTOP_APP_FILES && desktop_files_go_up(ctx->shell)) {
+    if (id == DESKTOP_APP_FILES) {
+        char cwd[DESKTOP_FILES_PATH_MAX];
+        char parent[DESKTOP_FILES_PATH_MAX];
+
+        if (desktop_shell_files_cwd(ctx->shell, cwd, sizeof(cwd)) != 0) {
+            return;
+        }
+        /* 根目录：直接投递既有的返回主屏意图。 */
+        if (cwd[0] == '\0' || strcmp(cwd, "/") == 0) {
+            desktop_app_request_back(ctx->shell);
+            return;
+        }
+        if (!parent_path(cwd, parent, sizeof(parent))) {
+            return;
+        }
+        (void)desktop_shell_request_file_nav(ctx->shell, parent,
+                                              desktop_shell_dir_version(ctx->shell));
         return;
     }
 
@@ -432,6 +485,10 @@ static bool build_app_bar(gui_platform_t *platform, gui_widget_t root,
         if (!set_alignment(platform, sub, GUI_ALIGN_TOP_RIGHT, -APP_MARGIN, 13)) {
             return false;
         }
+        /* 副标题句柄由应用状态持有：导航提交后要同步当前目录。 */
+        if (desktop_shell_app_state(shell) != NULL) {
+            desktop_shell_app_state(shell)->app_subtitle = sub;
+        }
     }
 
     return true;
@@ -450,6 +507,13 @@ static int files_entry_cmp(const void *a, const void *b)
     return strcmp(ea->name, eb->name);
 }
 
+/*
+ * 行激活：**只投递意图**。
+ *
+ * 回调里不做导航：导航要销毁旧列表子树、重建新行并重新登记焦点 —— 在
+ * 回调期间改树结构是未定义行为。意图按值复制，携带**创建时**的目录
+ * 版本：外层据此拒绝陈旧的行（旧行不能引用新的条目索引）。
+ */
 static void on_files_row_activate(const gui_event_t *event, void *userdata)
 {
     desktop_files_ctx_t *ctx = (desktop_files_ctx_t *)userdata;
@@ -458,10 +522,10 @@ static void on_files_row_activate(const gui_event_t *event, void *userdata)
     if (ctx == NULL || ctx->shell == NULL) {
         return;
     }
-    if (ctx->path[0] == '\0') {
-        return;
+    if (!ctx->is_dir || ctx->path[0] == '\0') {
+        return;   /* 只有目录可导航 */
     }
-    desktop_files_enter_path(ctx->shell, ctx->path);
+    (void)desktop_shell_request_file_nav(ctx->shell, ctx->path, ctx->version);
 }
 
 /* 把 cwd 与名字拼成绝对路径；截断即拒绝。 */
@@ -486,55 +550,90 @@ static bool join_path(const char *cwd, const char *name, char *out, size_t out_l
     return true;
 }
 
-/* 重新读取当前目录并重建条目列表。 */
-static bool files_refresh(desktop_shell_t *shell)
+/*
+ * 读取目录条目到**快照**（纯 C，不碰任何控件）。
+ *
+ * 目录优先、同目录内按名字排序；最多 DESKTOP_FILES_MAX_ENTRIES 条。
+ * 打不开或路径非法时返回 -1，调用方据此完整保留旧视图。
+ */
+int desktop_files_read_entries(const char *path, desktop_files_snapshot_t *out)
+{
+    DIR *dir;
+    struct dirent *ent;
+    uint32_t count = 0;
+
+    if (path == NULL || out == NULL || path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    if (strlen(path) + 1 > sizeof(out->path)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    dir = opendir(path);
+    if (dir == NULL) {
+        return -1;
+    }
+    while ((ent = readdir(dir)) != NULL && count < DESKTOP_FILES_MAX_ENTRIES) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        snprintf(out->entries[count].name, sizeof(out->entries[count].name),
+                 "%s", ent->d_name);
+        out->entries[count].is_dir = (ent->d_type == DT_DIR);
+        count++;
+    }
+    closedir(dir);
+
+    qsort(out->entries, count, sizeof(out->entries[0]), files_entry_cmp);
+    out->count = count;
+    snprintf(out->path, sizeof(out->path), "%s", path);
+    return 0;
+}
+
+/*
+ * 提交一次新的文件列表（**不可逆**阶段）。
+ *
+ * 顺序是硬性的：先注销 / 销毁旧列表子树（旧行随之从焦点表摘除），旧行
+ * 上下文这时才可以释放与复用；随后按 new_version 创建新行并登记。旧行
+ * 与新行**不会**同时在册。
+ *
+ * 创建或登记失败时按契约清理未完成的树并返回错误：旧树已经被删除，
+ * 因此不假装回滚到旧视图。
+ */
+int desktop_files_replace_list(desktop_shell_t *shell,
+                               const desktop_files_snapshot_t *snapshot,
+                               uint64_t new_version)
 {
     gui_platform_t *platform = desktop_shell_platform(shell);
     desktop_app_state_t *state = desktop_shell_app_state(shell);
     gui_widget_t list;
     int32_t w;
+    uint32_t i;
 
-    if (platform == NULL || state == NULL || state->files_list.id == 0) {
-        return false;
+    if (platform == NULL || state == NULL || snapshot == NULL) {
+        errno = EINVAL;
+        return -1;
     }
-    list = state->files_list;
     w = (int32_t)gui_platform_get_width(platform);
-
-    /*
-     * 旧的行对象即将被删除：清空容器把整批行一次带走，焦点引擎的删除
-     * 批次因此只在结束时投影一次。
-     */
-    if (gui_widget_clear(platform, list) != 0) {
-        return false;
+    list = state->files_list;
+    if (list.id == 0) {
+        errno = EINVAL;
+        return -1;
     }
+
+    /* 不可逆阶段的第一步：旧列表子树整体销毁（焦点随之摘除）。 */
+    if (gui_widget_clear(platform, list) != 0) {
+        return -1;
+    }
+    /* 旧行上下文现在才可以复用：控件与回调都已销毁。 */
+    memset(state->files_ctx, 0, sizeof(state->files_ctx));
     state->files_entry_count = 0;
 
-    DIR *dir = opendir(state->files_cwd);
-    if (dir == NULL) {
-        gui_widget_t err = make_label(platform, list, "Cannot open directory",
-                                      GUI_THEME_FONT_BODY, GUI_COLOR_ERROR);
-        return err.id != 0;
-    }
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL &&
-           state->files_entry_count < DESKTOP_FILES_MAX_ENTRIES) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
-            continue;
-        }
-        desktop_files_entry_t *slot =
-            &state->files_entries[state->files_entry_count];
-        snprintf(slot->name, sizeof(slot->name), "%s", ent->d_name);
-        slot->is_dir = (ent->d_type == DT_DIR);
-        state->files_entry_count++;
-    }
-    closedir(dir);
-
-    qsort(state->files_entries, state->files_entry_count,
-          sizeof(state->files_entries[0]), files_entry_cmp);
-
-    for (uint32_t i = 0; i < state->files_entry_count; i++) {
-        const desktop_files_entry_t *entry = &state->files_entries[i];
+    for (i = 0; i < snapshot->count; i++) {
+        const desktop_files_entry_t *entry = &snapshot->entries[i];
         desktop_files_ctx_t *ctx = &state->files_ctx[i];
         gui_widget_t row;
         gui_widget_t icon;
@@ -544,30 +643,30 @@ static bool files_refresh(desktop_shell_t *shell)
 
         row = make_widget(platform, list, GUI_WIDGET_BUTTON);
         if (row.id == 0) {
-            return false;
+            goto fail;
         }
         appearance = card_appearance(GUI_THEME_ELEVATION_1,
                                      GUI_COLOR_SURFACE_CONTAINER_LOW);
         if (!apply_appearance(platform, row, &appearance)) {
-            return false;
+            goto fail;
         }
         if (!set_layout_none(platform, row,
                              (int32_t)gui_theme_space(GUI_THEME_SPACE_MD),
                              (int32_t)gui_theme_space(GUI_THEME_SPACE_MD),
                              (int32_t)gui_theme_space(GUI_THEME_SPACE_MD),
                              (int32_t)gui_theme_space(GUI_THEME_SPACE_MD))) {
-            return false;
+            goto fail;
         }
         if (!set_scroll_none(platform, row)) {
-            return false;
+            goto fail;
         }
         if (!set_geometry(platform, row, 0, 0, w - 2 * APP_MARGIN, 44)) {
-            return false;
+            goto fail;
         }
 
         icon = make_widget(platform, row, GUI_WIDGET_CONTAINER);
         if (icon.id == 0) {
-            return false;
+            goto fail;
         }
         appearance = make_appearance(GUI_VARIANT_PLAIN,
                                      entry->is_dir ? GUI_COLOR_PRIMARY
@@ -576,123 +675,76 @@ static bool files_refresh(desktop_shell_t *shell)
                                      GUI_THEME_RADIUS_FULL, GUI_THEME_ELEVATION_0,
                                      true, true, false);
         if (!apply_appearance(platform, icon, &appearance)) {
-            return false;
+            goto fail;
         }
         if (!set_layout_none(platform, icon, 0, 0, 0, 0)) {
-            return false;
+            goto fail;
         }
         if (!set_scroll_none(platform, icon)) {
-            return false;
+            goto fail;
         }
         if (!set_geometry(platform, icon, 10, 8, 28, 28)) {
-            return false;
+            goto fail;
         }
 
         name = make_label(platform, row, entry->name, GUI_THEME_FONT_BODY,
                           GUI_COLOR_ON_SURFACE);
         if (name.id == 0) {
-            return false;
+            goto fail;
         }
         if (!set_position(platform, name, 48, 12)) {
-            return false;
+            goto fail;
         }
 
         kind = make_label(platform, row, entry->is_dir ? "Directory" : "File",
                           GUI_THEME_FONT_LABEL, GUI_COLOR_ON_SURFACE_VARIANT);
         if (kind.id == 0) {
-            return false;
+            goto fail;
         }
         if (!set_alignment(platform, kind, GUI_ALIGN_MID_RIGHT, -12, 0)) {
-            return false;
+            goto fail;
         }
 
-        /* 行的上下文：外壳 + 目标路径副本。 */
+        /* 行的上下文：外壳 + 创建时的目录版本 + 目标路径副本。 */
         ctx->shell = shell;
-        ctx->version = 0u;
-        if (!join_path(state->files_cwd, entry->name, ctx->path,
+        ctx->version = new_version;
+        ctx->is_dir = entry->is_dir;
+        ctx->path[0] = '\0';
+        if (entry->is_dir &&
+            !join_path(snapshot->path, entry->name, ctx->path,
                        sizeof(ctx->path))) {
-            ctx->path[0] = '\0';
+            ctx->path[0] = '\0';   /* 截断即拒绝：不可导航 */
         }
         if (gui_widget_set_event_handler(platform, row, on_files_row_activate,
                                          ctx) != 0) {
-            return false;
+            goto fail;
         }
 
         /* 目录行也是键盘焦点项：Tab 选中后回车即可进入。 */
-        if (gui_focus_register(desktop_shell_input(shell), row, GUI_FOCUS_STRONG) != 0) {
-            return false;
+        if (gui_focus_register(desktop_shell_input(shell), row,
+                               GUI_FOCUS_STRONG) != 0) {
+            goto fail;
         }
     }
 
-    return true;
-}
-
-void desktop_files_enter_path(desktop_shell_t *shell, const char *absolute_path)
-{
-    desktop_app_state_t *state = desktop_shell_app_state(shell);
-
-    if (state == NULL || absolute_path == NULL || absolute_path[0] == '\0') {
-        return;
+    /* 发布：条目、cwd、目录版本与顶栏副标题。 */
+    memcpy(state->files_entries, snapshot->entries,
+           sizeof(state->files_entries[0]) * snapshot->count);
+    state->files_entry_count = snapshot->count;
+    snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", snapshot->path);
+    state->dir_version = new_version;
+    if (state->app_subtitle.id != 0) {
+        (void)gui_widget_set_text(platform, state->app_subtitle,
+                                  state->files_cwd);
     }
-    if (strlen(absolute_path) + 1 > sizeof(state->files_cwd)) {
-        return;
-    }
+    return 0;
 
-    /* 只读浏览：只允许进入目录。 */
-    DIR *dir = opendir(absolute_path);
-    if (dir == NULL) {
-        return;
-    }
-    closedir(dir);
-
-    snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", absolute_path);
-    (void)files_refresh(shell);
-}
-
-void desktop_files_enter(desktop_shell_t *shell, const char *name)
-{
-    desktop_app_state_t *state = desktop_shell_app_state(shell);
-    char path[DESKTOP_FILES_PATH_MAX];
-
-    if (state == NULL || name == NULL || name[0] == '\0') {
-        return;
-    }
-    if (!join_path(state->files_cwd, name, path, sizeof(path))) {
-        return;
-    }
-    desktop_files_enter_path(shell, path);
-}
-
-bool desktop_files_go_up(desktop_shell_t *shell)
-{
-    desktop_app_state_t *state = desktop_shell_app_state(shell);
-    const char *cwd;
-    size_t len;
-    char parent[DESKTOP_FILES_PATH_MAX];
-
-    if (state == NULL) {
-        return false;
-    }
-    cwd = state->files_cwd;
-    if (cwd[0] == '\0' || strcmp(cwd, "/") == 0) {
-        return false;
-    }
-
-    /* 去掉最后一段路径分量。 */
-    len = strlen(cwd);
-    while (len > 1 && cwd[len - 1] != '/') {
-        len--;
-    }
-    if (len <= 1) {
-        snprintf(parent, sizeof(parent), "%s", "/");
-    } else {
-        memcpy(parent, cwd, len - 1);
-        parent[len - 1] = '\0';
-    }
-
-    snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", parent);
-    (void)files_refresh(shell);
-    return true;
+fail:
+    /* 清理未完成的树：旧树已经没了，不假装回滚。 */
+    (void)gui_widget_clear(platform, list);
+    memset(state->files_ctx, 0, sizeof(state->files_ctx));
+    state->files_entry_count = 0;
+    return -1;
 }
 
 static bool build_files_app(gui_platform_t *platform, gui_widget_t root,
@@ -725,8 +777,24 @@ static bool build_files_app(gui_platform_t *platform, gui_widget_t root,
     }
 
     state->files_list = list;
-    if (!files_refresh(shell)) {
-        return false;
+
+    /*
+     * 初始列表走与导航**同一条**分期路径：先读快照，再提交。
+     * 版本从 1 起（0 表示「还没有提交过任何目录」）。
+     */
+    {
+        desktop_files_snapshot_t snapshot;
+
+        if (desktop_files_read_entries(state->files_cwd, &snapshot) != 0) {
+            /* 打不开初始目录：给出提示，列表保持为空。 */
+            gui_widget_t err = make_label(platform, list, "Cannot open directory",
+                                          GUI_THEME_FONT_BODY, GUI_COLOR_ERROR);
+            return err.id != 0;
+        }
+        if (desktop_files_replace_list(shell, &snapshot,
+                                       desktop_shell_dir_version(shell) + 1u) != 0) {
+            return false;
+        }
     }
 
     /* 边界说明：只读浏览器的限制必须写在界面上。 */
@@ -1055,6 +1123,7 @@ gui_widget_t desktop_app_build(gui_platform_t *platform, desktop_app_id_t id,
         state->files_list = GUI_WIDGET_NONE;
         state->term_output_label = GUI_WIDGET_NONE;
         state->term_input_label = GUI_WIDGET_NONE;
+        state->app_subtitle = GUI_WIDGET_NONE;
     }
 
     if (id == DESKTOP_APP_FILES && state != NULL) {

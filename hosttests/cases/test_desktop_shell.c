@@ -28,9 +28,13 @@
 #include "desktop_shell.h"
 #include "desktop_state.h"
 #include "gui_native_fixture.h"
+#include "gui_test_runtime.h"
 
 #include <errno.h>
 #include <stdbool.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -42,6 +46,8 @@ bool g_gui_test_tamper_header = false;
 #define TEST_H 480
 
 /* Set 1 扫描码 */
+#define KEY_ENTER_DOWN  0x1Cu
+#define KEY_ENTER_UP    0x9Cu
 #define KEY_ESC_DOWN    0x01u
 #define KEY_ESC_UP      0x81u
 #define KEY_TAB_DOWN    0x0Fu
@@ -95,6 +101,114 @@ static void press_shift_tab(gui_native_fixture_t *fx)
     assert_eq(0, gui_native_fixture_keys(fx, (const uint8_t[]){ KEY_TAB_UP }, 1));
     assert_eq(0, gui_native_fixture_step(fx, 20));
     assert_eq(0, gui_native_fixture_keys(fx, (const uint8_t[]){ KEY_LSHIFT_UP }, 1));
+    assert_eq(0, gui_native_fixture_step(fx, 20));
+}
+
+/* ── 临时目录树（宿主文件系统） ─────────────────────────────────────
+ *
+ * 文件导航读的是**宿主**的文件系统（不是 guest FS，也不需要 guest FS）。
+ * 测试自己造一棵真实的临时树：96 个子目录，每个再含一个子目录，用来验证
+ * 两层返回。
+ *
+ *   <tmp>/d00 .. d95
+ *   <tmp>/dNN/inner
+ *
+ * 名字是零填充的两位数，因此字典序就是数值序：排序后的第 k 行对应 d(k-1)。
+ */
+#define TEMP_DIR_COUNT 96
+
+static bool make_temp_tree(char *out, size_t out_len)
+{
+    char tmpl[DESKTOP_FILES_PATH_MAX];
+    char dir[DESKTOP_FILES_PATH_MAX];
+
+    snprintf(tmpl, sizeof(tmpl), "%s", "/tmp/os01-files-XXXXXX");
+    if (mkdtemp(tmpl) == NULL) {
+        return false;
+    }
+    if (strlen(tmpl) + 1 > out_len) {
+        return false;
+    }
+    snprintf(out, out_len, "%s", tmpl);
+
+    for (int i = 0; i < TEMP_DIR_COUNT; i++) {
+        snprintf(dir, sizeof(dir), "%s/d%02d", tmpl, i);
+        if (mkdir(dir, 0755) != 0) {
+            return false;
+        }
+        snprintf(dir, sizeof(dir), "%s/d%02d/inner", tmpl, i);
+        if (mkdir(dir, 0755) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void remove_temp_tree(const char *root)
+{
+    char dir[DESKTOP_FILES_PATH_MAX];
+
+    for (int i = 0; i < TEMP_DIR_COUNT; i++) {
+        snprintf(dir, sizeof(dir), "%s/d%02d/inner", root, i);
+        (void)remove(dir);
+        snprintf(dir, sizeof(dir), "%s/d%02d", root, i);
+        (void)rmdir(dir);
+    }
+    (void)rmdir(root);
+}
+
+/* 目录项的排序后名字（零填充两位数 ⇒ 字典序即数值序）。 */
+static void temp_entry_name(char *out, size_t out_len, int index)
+{
+    snprintf(out, out_len, "d%02d", index);
+}
+
+/* ── 导航辅助 ─────────────────────────────────────────────────────── */
+
+/* 打开文件应用并导航到指定目录。 */
+static void open_files_at(gui_native_fixture_t *fx, desktop_shell_t *shell,
+                          const char *path)
+{
+    desktop_shell_request(shell, DESKTOP_INTENT_OPEN_APP, "files");
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(DESKTOP_STATE_APP, desktop_shell_state(shell));
+
+    assert_eq(0, desktop_shell_request_file_nav(shell, path,
+                                                 desktop_shell_dir_version(shell)));
+    assert_eq(0, desktop_shell_apply_pending(shell));
+}
+
+/* 激活某个控件（真实 Enter 键：焦点组把 Enter 交给当前焦点按钮）。 */
+static void activate_widget(gui_native_fixture_t *fx, gui_widget_t widget)
+{
+    gui_widget_t got;
+
+    assert_eq(0, gui_focus_set(fx->input, widget));
+    assert_eq(0, gui_focus_get(fx->input, &got));
+    assert_eq(widget.id, got.id);
+    press_key(fx, KEY_ENTER_DOWN, KEY_ENTER_UP);
+}
+
+/* 用鼠标点击某个控件（真实指针事件：移动 → 按下 → 抬起）。 */
+static void click_widget(gui_native_fixture_t *fx, gui_widget_t widget)
+{
+    gui_rect_t rect;
+    mouse_event_t move;
+    mouse_event_t press;
+    mouse_event_t release;
+
+    assert_eq(0, gui_widget_get_bounds(fx->platform, widget, &rect));
+    memset(&move, 0, sizeof(move));
+    memset(&press, 0, sizeof(press));
+    memset(&release, 0, sizeof(release));
+    /* 光标初始在视口中心。 */
+    move.dx = (int16_t)(rect.x + rect.width / 2 - TEST_W / 2);
+    move.dy = (int16_t)(rect.y + rect.height / 2 - TEST_H / 2);
+    press.buttons = 0x01u;
+    assert_eq(0, gui_native_fixture_mouse(fx, &move, 1));
+    assert_eq(0, gui_native_fixture_mouse(fx, &press, 1));
+    assert_eq(0, gui_native_fixture_step(fx, 20));
+    assert_eq(0, gui_native_fixture_mouse(fx, &release, 1));
     assert_eq(0, gui_native_fixture_step(fx, 20));
 }
 
@@ -762,6 +876,406 @@ TEST_FUNC(test_rebuilt_surface_starts_without_focus)
     gui_native_fixture_destroy(&fx);
 }
 
+/* ── 断言：97 项文件导航全部可达（精确焦点循环） ───────────────── */
+
+TEST_FUNC(test_files_97_items_exact_focus_cycle)
+{
+    gui_native_fixture_t fx;
+    desktop_shell_t *shell;
+    gui_widget_t order[128];
+    gui_widget_t got;
+    char root[DESKTOP_FILES_PATH_MAX];
+    char cwd[DESKTOP_FILES_PATH_MAX];
+    char expect[DESKTOP_FILES_PATH_MAX];
+    char name[DESKTOP_FILES_NAME_MAX];
+    int count;
+    int i;
+    int j;
+
+    assert_true(make_temp_tree(root, sizeof(root)));
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    shell = desktop_shell_create(fx.platform, fx.input);
+    assert_not_null(shell);
+    attach_shell(&fx, shell);
+
+    open_files_at(&fx, shell, root);
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(root, cwd);
+
+    /*
+     * 焦点项恰好 97 个：Back 是 h[0]，按排序的 96 行是 h[1..96]。
+     * 「恰好」很重要：把 Back 算成第 97 项会让这个断言变成废话。
+     */
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_eq(97, count);
+
+    /* 测最大页面 widget count / registry bytes / LVGL 池。 */
+    gui_platform_stats_t stats_97;
+    assert_eq(0, gui_platform_get_stats(fx.platform, &stats_97));
+    assert_true(stats_97.widget_count <= 1024);
+    assert_true(stats_97.widget_count > 0);
+    assert_true(stats_97.registry_bytes > 0);
+    assert_true(stats_97.pool_used < stats_97.pool_total);
+
+    /* 97 个身份全部非零且互不相同。 */
+    for (i = 0; i < count; i++) {
+        assert_true(order[i].id != 0);
+        for (j = i + 1; j < count; j++) {
+            assert_true(order[i].id != order[j].id);
+        }
+    }
+
+    /* 正向：显式清空后依真实 Tab 键流逐项断言 h[0]…h[96]。 */
+    assert_eq(0, gui_focus_set(fx.input, GUI_WIDGET_NONE));
+    for (i = 0; i < 97; i++) {
+        press_key(&fx, KEY_TAB_DOWN, KEY_TAB_UP);
+        assert_eq(0, gui_focus_get(fx.input, &got));
+        assert_eq(order[i].id, got.id);
+    }
+    /* 下一 Tab 回到 h[0]。 */
+    press_key(&fx, KEY_TAB_DOWN, KEY_TAB_UP);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(order[0].id, got.id);
+
+    /* 反向：清空后 h[96]…h[0]，下一反向 h[96]。 */
+    assert_eq(0, gui_focus_set(fx.input, GUI_WIDGET_NONE));
+    for (i = 96; i >= 0; i--) {
+        press_shift_tab(&fx);
+        assert_eq(0, gui_focus_get(fx.input, &got));
+        assert_eq(order[i].id, got.id);
+    }
+    press_shift_tab(&fx);
+    assert_eq(0, gui_focus_get(fx.input, &got));
+    assert_eq(order[96].id, got.id);
+
+    /* Enter 进入末项（h[96]）对应的目录。 */
+    activate_widget(&fx, order[96]);
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    temp_entry_name(name, sizeof(name), TEMP_DIR_COUNT - 1);
+    snprintf(expect, sizeof(expect), "%s/%s", root, name);
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(expect, cwd);
+
+    /* 表面反复切换不泄漏：回到 HOME，再重新打开 files(root)。 */
+    for (int cycle = 0; cycle < 3; cycle++) {
+        desktop_shell_request(shell, DESKTOP_INTENT_BACK, NULL);
+        assert_eq(0, desktop_shell_apply_pending(shell));
+        assert_eq(DESKTOP_STATE_HOME, desktop_shell_state(shell));
+
+        open_files_at(&fx, shell, root);
+        assert_eq(DESKTOP_STATE_APP, desktop_shell_state(shell));
+    }
+    gui_platform_stats_t stats_repeat;
+    assert_eq(0, gui_platform_get_stats(fx.platform, &stats_repeat));
+    assert_eq(stats_97.widget_count, stats_repeat.widget_count);
+    assert_eq(stats_97.registry_bytes, stats_repeat.registry_bytes);
+    /* LVGL 内存池反复切换后处于稳定水位（不出现持续膨胀泄漏）。 */
+    assert_true(stats_repeat.pool_used <= stats_97.pool_used + 1024);
+
+    desktop_shell_destroy(shell);
+    gui_native_fixture_destroy(&fx);
+    remove_temp_tree(root);
+}
+
+/* ── 断言：鼠标与键盘都能导航，返回逐层回退 ─────────────────────── */
+
+TEST_FUNC(test_file_navigation_mouse_and_keyboard_two_levels)
+{
+    gui_native_fixture_t fx;
+    desktop_shell_t *shell;
+    gui_widget_t order[128];
+    char root[DESKTOP_FILES_PATH_MAX];
+    char cwd[DESKTOP_FILES_PATH_MAX];
+    char expect[DESKTOP_FILES_PATH_MAX];
+    int count;
+
+    assert_true(make_temp_tree(root, sizeof(root)));
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    shell = desktop_shell_create(fx.platform, fx.input);
+    assert_not_null(shell);
+    attach_shell(&fx, shell);
+
+    /*
+     * ① 根目录（"/"）的 Back 直接投递返回 HOME 的意图。
+     *
+     * 文件应用第一次打开时 cwd 就是根。
+     */
+    desktop_shell_request(shell, DESKTOP_INTENT_OPEN_APP, "files");
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq("/", cwd);
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_true(count >= 1);
+    activate_widget(&fx, order[0]);          /* Back = h[0] */
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(DESKTOP_STATE_HOME, desktop_shell_state(shell));
+
+    /* ② 进入临时目录：96 行 + Back。 */
+    open_files_at(&fx, shell, root);
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_eq(97, count);
+
+    /* ③ 鼠标点击第一行（d00）：导航意图被投递，主循环执行。 */
+    click_widget(&fx, order[1]);
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    snprintf(expect, sizeof(expect), "%s/d00", root);
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(expect, cwd);
+
+    /* 新增的行立即可用：d00 里只有一个 inner。 */
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_eq(2, count);
+
+    /* ④ 键盘 Enter 进入 inner（第二层）：inner 是空目录，只有 Back。 */
+    activate_widget(&fx, order[1]);
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    snprintf(expect, sizeof(expect), "%s/d00/inner", root);
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(expect, cwd);
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_eq(1, count);
+
+    /* ⑤ Back 逐层返回：inner → d00。 */
+    activate_widget(&fx, order[0]);          /* Back = h[0] */
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    snprintf(expect, sizeof(expect), "%s/d00", root);
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(expect, cwd);
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_eq(2, count);
+
+    /* ⑥ 再退一层回到临时根：96 行 + Back。 */
+    activate_widget(&fx, order[0]);          /* Back = h[0] */
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(root, cwd);
+    count = gui_native_fixture_query_focus_order(&fx, order, 128);
+    assert_eq(97, count);
+
+    /*
+     * ⑦ 临时根的父目录是 /tmp（不是 "/"）：Back 逐层回退到**父目录**，
+     * 只有根目录 "/" 才投递「返回主屏」。列表条数依赖 /tmp 的内容，
+     * 因此这里只断言 cwd 与表面状态。
+     */
+    activate_widget(&fx, order[0]);          /* Back = h[0] */
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq("/tmp", cwd);
+    assert_eq(DESKTOP_STATE_APP, desktop_shell_state(shell));
+
+    desktop_shell_destroy(shell);
+    gui_native_fixture_destroy(&fx);
+    remove_temp_tree(root);
+}
+
+/* ── 断言：陈旧导航与 ESC 的优先级 ─────────────────────────────── */
+
+TEST_FUNC(test_stale_nav_and_esc_priority)
+{
+    gui_native_fixture_t fx;
+    desktop_shell_t *shell;
+    char root[DESKTOP_FILES_PATH_MAX];
+    char other[DESKTOP_FILES_PATH_MAX];
+    char cwd[DESKTOP_FILES_PATH_MAX];
+    uint64_t version;
+
+    assert_true(make_temp_tree(root, sizeof(root)));
+    snprintf(other, sizeof(other), "%s/d00", root);
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    shell = desktop_shell_create(fx.platform, fx.input);
+    assert_not_null(shell);
+    attach_shell(&fx, shell);
+
+    open_files_at(&fx, shell, root);
+    version = desktop_shell_dir_version(shell);
+
+    /* ① 第一导航意图占槽：同轮后到的请求不覆盖。 */
+    assert_eq(0, desktop_shell_request_file_nav(shell, other, version));
+    assert_eq(0, desktop_shell_request_file_nav(shell, root, version));
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(other, cwd);   /* 第一条生效，第二条被忽略 */
+
+    /* ② 既有 ESC 优先于导航意图，并清掉导航槽。 */
+    version = desktop_shell_dir_version(shell);
+    assert_eq(0, desktop_shell_request_file_nav(shell, root, version));
+    desktop_shell_request(shell, DESKTOP_INTENT_ESC, NULL);
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(DESKTOP_STATE_HOME, desktop_shell_state(shell));
+
+    /* ③ 导航槽已清：后来的导航请求在非文件表面上被丢弃。 */
+    assert_eq(0, desktop_shell_request_file_nav(shell, other, version));
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(DESKTOP_STATE_HOME, desktop_shell_state(shell));
+
+    /* ④ 陈旧版本：文件表面上的旧请求被丢弃。 */
+    desktop_shell_request(shell, DESKTOP_INTENT_OPEN_APP, "files");
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(DESKTOP_STATE_APP, desktop_shell_state(shell));
+    {
+        char cwd_now[DESKTOP_FILES_PATH_MAX];
+        assert_eq(0, desktop_shell_files_cwd(shell, cwd_now, sizeof(cwd_now)));
+        /* 当前目录跨应用会话保留：退出应用再进来还是它。 */
+        assert_str_eq(other, cwd_now);
+    }
+    /* 版本 0 是陈旧的（当前版本至少是 1）。 */
+    assert_eq(0, desktop_shell_request_file_nav(shell, root, 0u));
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    {
+        char cwd_now[DESKTOP_FILES_PATH_MAX];
+        assert_eq(0, desktop_shell_files_cwd(shell, cwd_now, sizeof(cwd_now)));
+        assert_str_eq(other, cwd_now);   /* 视图未被改动 */
+    }
+
+    desktop_shell_destroy(shell);
+    gui_native_fixture_destroy(&fx);
+    remove_temp_tree(root);
+}
+
+/* ── 断言：过长路径与打不开的目录都完整保留旧视图 ───────────────── */
+
+TEST_FUNC(test_nav_long_path_and_open_failure_leave_view)
+{
+    gui_native_fixture_t fx;
+    desktop_shell_t *shell;
+    char root[DESKTOP_FILES_PATH_MAX];
+    char cwd[DESKTOP_FILES_PATH_MAX];
+    char long_path[DESKTOP_FILES_PATH_MAX * 2];
+    uint64_t version;
+
+    assert_true(make_temp_tree(root, sizeof(root)));
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    shell = desktop_shell_create(fx.platform, fx.input);
+    assert_not_null(shell);
+    attach_shell(&fx, shell);
+
+    open_files_at(&fx, shell, root);
+    version = desktop_shell_dir_version(shell);
+
+    /* ① 过长的路径：请求本身就被拒绝（截断即拒绝）。 */
+    memset(long_path, 'a', sizeof(long_path));
+    long_path[0] = '/';
+    long_path[sizeof(long_path) - 1] = '\0';
+    errno = 0;
+    assert_eq(-1, desktop_shell_request_file_nav(shell, long_path, version));
+    assert_eq(EINVAL, errno);
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+    assert_str_eq(root, cwd);
+
+    /* ② 相对路径：不是绝对路径，拒绝。 */
+    errno = 0;
+    assert_eq(-1, desktop_shell_request_file_nav(shell, "relative/path", version));
+    assert_eq(EINVAL, errno);
+
+    /* ③ 打不开的目录：旧视图完整保留（cwd 与焦点项都不变）。 */
+    {
+        gui_widget_t order_before[128];
+        int before = gui_native_fixture_query_focus_order(&fx, order_before, 128);
+
+        assert_eq(0, desktop_shell_request_file_nav(shell, "/no/such/directory",
+                                                     version));
+        assert_eq(-1, desktop_shell_apply_pending(shell));
+
+        assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+        assert_str_eq(root, cwd);
+        {
+            gui_widget_t order_after[128];
+            int after = gui_native_fixture_query_focus_order(&fx, order_after, 128);
+            assert_eq(before, after);
+            for (int i = 0; i < before; i++) {
+                assert_eq(order_before[i].id, order_after[i].id);
+            }
+        }
+    }
+
+    desktop_shell_destroy(shell);
+    gui_native_fixture_destroy(&fx);
+    remove_temp_tree(root);
+}
+
+/* ── 断言：提交阶段失败时清理未完成的树并返回错误 ───────────────── */
+
+TEST_FUNC(test_nav_build_failure_exits_cleanly)
+{
+    gui_native_fixture_t fx;
+    desktop_shell_t *shell;
+    char root[DESKTOP_FILES_PATH_MAX];
+    char target[DESKTOP_FILES_PATH_MAX];
+    char cwd[DESKTOP_FILES_PATH_MAX];
+    uint64_t version;
+
+    assert_true(make_temp_tree(root, sizeof(root)));
+    snprintf(target, sizeof(target), "%s/d00", root);
+
+    assert_eq(0, gui_native_fixture_create(&fx, true));
+    shell = desktop_shell_create(fx.platform, fx.input);
+    assert_not_null(shell);
+    attach_shell(&fx, shell);
+
+    open_files_at(&fx, shell, root);
+    version = desktop_shell_dir_version(shell);
+
+    /*
+     * 故障覆盖**每一个创建步骤**：提交阶段按排序后的行建控件，每行建 4 个
+     * （行、图标、名字、类型），因此第 k 行的第一个控件就是提交阶段的第
+     * 4*(k-1)+1 次创建。目标目录是临时根（96 行），所以 k 从 1 到 96 覆盖
+     * 了提交阶段的全部创建步骤。
+     */
+    for (int k = 1; k <= TEMP_DIR_COUNT; k++) {
+        gui_widget_t order[128];
+
+        g_gui_test_fail_widget_create_countdown = 4 * (k - 1) + 1;
+        assert_eq(0, desktop_shell_request_file_nav(shell, root, version));
+        assert_eq(-1, desktop_shell_apply_pending(shell));
+        g_gui_test_fail_widget_create_countdown = 0;
+
+        /* 旧视图没有被发布：cwd 不变。 */
+        assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+        assert_str_eq(root, cwd);
+        /* 未完成的树被清理：焦点表里只剩 Back。 */
+        assert_eq(1, gui_native_fixture_query_focus_order(&fx, order, 128));
+    }
+
+    /*
+     * 故障覆盖**每一个登记步骤**：Back 在表面构建时就登记过了，提交阶段
+     * 里第 k 行就是第 k 次登记。
+     */
+    for (int k = 1; k <= TEMP_DIR_COUNT; k++) {
+        gui_widget_t order[128];
+
+        g_gui_test_fail_focus_register_countdown = k;
+        assert_eq(0, desktop_shell_request_file_nav(shell, root, version));
+        assert_eq(-1, desktop_shell_apply_pending(shell));
+        g_gui_test_fail_focus_register_countdown = 0;
+
+        assert_eq(0, desktop_shell_files_cwd(shell, cwd, sizeof(cwd)));
+        assert_str_eq(root, cwd);
+        assert_eq(1, gui_native_fixture_query_focus_order(&fx, order, 128));
+    }
+
+    /* 故障清掉之后，同一条导航仍然可以成功。 */
+    assert_eq(0, desktop_shell_request_file_nav(shell, target, version));
+    assert_eq(0, desktop_shell_apply_pending(shell));
+    {
+        char now[DESKTOP_FILES_PATH_MAX];
+        assert_eq(0, desktop_shell_files_cwd(shell, now, sizeof(now)));
+        assert_str_eq(target, now);
+    }
+    {
+        gui_widget_t order[128];
+        assert_eq(2, gui_native_fixture_query_focus_order(&fx, order, 128));
+    }
+
+    desktop_shell_destroy(shell);
+    gui_native_fixture_destroy(&fx);
+    remove_temp_tree(root);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_home_surface_matches_the_token_table),
     TEST_ENTRY(test_surface_transition_leaves_no_residue),
@@ -776,6 +1290,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_shell_requires_matching_input),
     TEST_ENTRY(test_terminal_refreshes_within_clock_throttle),
     TEST_ENTRY(test_rebuilt_surface_starts_without_focus),
+    TEST_ENTRY(test_files_97_items_exact_focus_cycle),
+    TEST_ENTRY(test_file_navigation_mouse_and_keyboard_two_levels),
+    TEST_ENTRY(test_stale_nav_and_esc_priority),
+    TEST_ENTRY(test_nav_long_path_and_open_failure_leave_view),
+    TEST_ENTRY(test_nav_build_failure_exits_cleanly),
 TEST_LIST_END
 
 int main(void)

@@ -70,6 +70,19 @@ typedef struct {
     desktop_setting_t setting;
 } desktop_setting_ctx_t;
 
+/*
+ * 文件导航意图。
+ *
+ * 只**按值复制**意图：路径是完整副本，调用方的缓冲不被借用；意图本身也
+ * 不延长任何控件或行上下文的寿命（行上下文在旧控件销毁之后才可复用）。
+ */
+typedef struct {
+    bool     pending;                        /* 导航槽是否被占用 */
+    char     path[DESKTOP_FILES_PATH_MAX];   /* 完整绝对路径副本 */
+    uint64_t version;                        /* 发起方看到的目录版本 */
+    uint64_t surface_version;                /* 请求时的表面版本 */
+} desktop_nav_t;
+
 /* ── 外壳状态 ────────────────────────────────────────────────────── */
 
 struct desktop_shell {
@@ -98,6 +111,10 @@ struct desktop_shell {
 
     /* 时钟节流：时钟每秒更新一次，终端刷新不受它影响。 */
     time_t last_clock;
+
+    /* 文件导航：意图槽与表面版本。目录版本由文件应用的状态持有。 */
+    desktop_nav_t nav;
+    uint64_t surface_version;
 };
 
 /* ── 令牌化外观辅助 ───────────────────────────────────────────────── */
@@ -684,6 +701,7 @@ static bool build_home(desktop_shell_t *shell)
     if (root.id == 0) {
         return false;
     }
+    shell->surface_version++;
     shell->root = root;
     shell->clock_label = GUI_WIDGET_NONE;
 
@@ -775,6 +793,7 @@ static bool build_drawer(desktop_shell_t *shell)
     if (root.id == 0) {
         return false;
     }
+    shell->surface_version++;
     shell->root = root;
     shell->clock_label = GUI_WIDGET_NONE;
 
@@ -1156,6 +1175,7 @@ static bool build_settings(desktop_shell_t *shell)
     if (root.id == 0) {
         return false;
     }
+    shell->surface_version++;
     shell->root = root;
     shell->clock_label = GUI_WIDGET_NONE;
 
@@ -1324,6 +1344,7 @@ static bool build_app_surface(desktop_shell_t *shell)
     if (root.id == 0) {
         return false;
     }
+    shell->surface_version++;
     shell->root = root;
     shell->clock_label = GUI_WIDGET_NONE;
 
@@ -1355,22 +1376,74 @@ static bool rebuild_surface(desktop_shell_t *shell)
     return ok;
 }
 
-void desktop_shell_apply_pending(desktop_shell_t *shell)
+/*
+ * 执行一次文件导航意图（分期导航的外层）。
+ *
+ *   第一步：读快照（纯 C，不改变 cwd / 控件 / context / 焦点）。
+ *   第二步：确定新版本（单调增加）。
+ *   第三步：不可逆提交（销毁旧列表子树、释放旧行 context、建新行并登记）。
+ *
+ * 打不开或路径错误时**完整保留旧视图**：旧树还在原位，焦点不动。
+ */
+static int apply_file_nav(desktop_shell_t *shell)
+{
+    desktop_app_state_t *state = desktop_shell_app_state(shell);
+    desktop_files_snapshot_t snapshot;
+    uint64_t new_version;
+
+    /* 外层验证：仍是同一个文件表面、且版本未变。 */
+    if (shell->state != DESKTOP_STATE_APP ||
+        desktop_shell_current_app_id(shell) != DESKTOP_APP_FILES) {
+        return 0;
+    }
+    if (state == NULL) {
+        return 0;
+    }
+    if (shell->nav.surface_version != shell->surface_version) {
+        return 0;   /* 表面已经换过：丢弃 */
+    }
+    if (shell->nav.version != state->dir_version) {
+        return 0;   /* 陈旧请求：旧行不能引用新的条目索引 */
+    }
+
+    /* 第一步：读快照。 */
+    if (desktop_files_read_entries(shell->nav.path, &snapshot) != 0) {
+        return -1;  /* 旧视图完整保留 */
+    }
+
+    /* 第二步：确定新版本。 */
+    new_version = state->dir_version + 1u;
+
+    /* 第三步：不可逆提交。 */
+    if (desktop_files_replace_list(shell, &snapshot, new_version) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int desktop_shell_apply_pending(desktop_shell_t *shell)
 {
     if (shell == NULL) {
-        return;
+        errno = EINVAL;
+        return -1;
     }
 
     /* 设置项变更先处理：它不改变表面状态，但要重建当前表面。 */
     if (shell->pending_setting != DESKTOP_SETTING_NONE) {
         desktop_setting_t setting = shell->pending_setting;
         shell->pending_setting = DESKTOP_SETTING_NONE;
+        shell->nav.pending = false;   /* 表面重建：导航槽清掉 */
         apply_pending_setting(shell, setting);
-        return;
+        return 0;
     }
 
     if (shell->pending == DESKTOP_INTENT_NONE) {
-        return;
+        /* 没有表面切换：处理导航意图。 */
+        if (shell->nav.pending) {
+            shell->nav.pending = false;
+            return apply_file_nav(shell);
+        }
+        return 0;
     }
 
     desktop_intent_t intent = shell->pending;
@@ -1383,10 +1456,13 @@ void desktop_shell_apply_pending(desktop_shell_t *shell)
     desktop_state_t next = desktop_state_next(shell->state, intent, app_id);
     if (next == DESKTOP_STATE_INVALID) {
         /* 非法迁移被忽略：状态机已经把它判为「不允许」。 */
-        return;
+        return 0;
     }
+    /* 表面切换优先：导航槽清掉。 */
+    shell->nav.pending = false;
+
     if (next == shell->state) {
-        return;
+        return 0;
     }
 
     /*
@@ -1396,7 +1472,7 @@ void desktop_shell_apply_pending(desktop_shell_t *shell)
      * 不会让 MANUAL 在重建后的主屏上自动聚焦。
      */
     if (!focus_clear(shell)) {
-        return;
+        return 0;
     }
     destroy_surface(shell);
     shell->state = next;
@@ -1421,6 +1497,7 @@ void desktop_shell_apply_pending(desktop_shell_t *shell)
     default:
         break;
     }
+    return 0;
 }
 
 /* ── 设置项变更 ────────────────────────────────────────────────────── */
@@ -1466,6 +1543,67 @@ gui_platform_t *desktop_shell_platform(const desktop_shell_t *shell)
 desktop_app_state_t *desktop_shell_app_state(desktop_shell_t *shell)
 {
     return shell ? shell->app_state : NULL;
+}
+
+int desktop_shell_request_file_nav(desktop_shell_t *shell,
+                                   const char *absolute_path, uint64_t version)
+{
+    if (shell == NULL || absolute_path == NULL || absolute_path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    /* 只接受绝对路径。 */
+    if (absolute_path[0] != '/') {
+        errno = EINVAL;
+        return -1;
+    }
+    /* 路径副本必须放得下：截断即拒绝。 */
+    if (strlen(absolute_path) + 1 > sizeof(shell->nav.path)) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* 同一轮里第一个导航意图占槽：后到的请求被忽略，不覆盖。 */
+    if (shell->nav.pending) {
+        return 0;
+    }
+
+    snprintf(shell->nav.path, sizeof(shell->nav.path), "%s", absolute_path);
+    shell->nav.version = version;
+    shell->nav.surface_version = shell->surface_version;
+    shell->nav.pending = true;
+    return 0;
+}
+
+uint64_t desktop_shell_dir_version(const desktop_shell_t *shell)
+{
+    desktop_app_state_t *state;
+
+    if (shell == NULL) {
+        return 0u;
+    }
+    state = desktop_shell_app_state((desktop_shell_t *)shell);
+    return state ? state->dir_version : 0u;
+}
+
+int desktop_shell_files_cwd(const desktop_shell_t *shell, char *buf, size_t len)
+{
+    desktop_app_state_t *state;
+
+    if (shell == NULL || buf == NULL || len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    state = desktop_shell_app_state((desktop_shell_t *)shell);
+    if (state == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (strlen(state->files_cwd) + 1 > len) {
+        errno = EINVAL;
+        return -1;
+    }
+    snprintf(buf, len, "%s", state->files_cwd);
+    return 0;
 }
 
 void desktop_shell_request_setting(desktop_shell_t *shell, desktop_setting_t setting)

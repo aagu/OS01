@@ -490,6 +490,23 @@ int gui_widget_create(gui_platform_t *platform, gui_widget_t parent, gui_widget_
 
     gui_widget_registry_t *reg = platform->registry;
 
+#ifdef OS01_HOST_TEST
+    /*
+     * 宿主私有故障桥：第 N 次创建失败（倒计数）。
+     *
+     * 它让宿主测试能覆盖「提交的每一个创建步骤」：把倒计数设成第几步，
+     * 就能让那一步失败，而前面的步骤照常成功。
+     */
+    extern int g_gui_test_fail_widget_create_countdown;
+    if (g_gui_test_fail_widget_create_countdown > 0) {
+        g_gui_test_fail_widget_create_countdown--;
+        if (g_gui_test_fail_widget_create_countdown == 0) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+#endif
+
     /* 业务回调里不允许改树：回调期间树结构必须保持稳定。 */
     if (reg->callback_depth > 0) {
         errno = EBUSY;

@@ -158,6 +158,14 @@ extern bool g_gui_test_fail_focus_observer;
  */
 extern uint32_t g_gui_test_focus_rebuild_count;
 
+/*
+ * GUI-2b Task 11: the per-step fault bridges for the file navigation
+ * commit phase.  A positive countdown makes **that** step fail (the Nth
+ * call fails, the earlier ones succeed).  Zero disables the bridge.
+ */
+extern int g_gui_test_fail_widget_create_countdown;
+extern int g_gui_test_fail_focus_register_countdown;
+
 #ifdef __cplusplus
 }
 #endif

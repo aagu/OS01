@@ -145,6 +145,11 @@ bool g_gui_test_fail_focus_observer = false;
 /* GUI-2b Task 7 fix round 1: the focus group's rebuild counter. */
 uint32_t g_gui_test_focus_rebuild_count = 0;
 
+/* GUI-2b Task 11: the per-step fault bridges for the file navigation
+ * commit.  A positive countdown fails that step (the Nth call fails). */
+int g_gui_test_fail_widget_create_countdown = 0;
+int g_gui_test_fail_focus_register_countdown = 0;
+
 #ifndef GUI_INTEGRATION_TEST
 bool g_gui_test_fail_lv_display_create = false;
 uint32_t g_gui_test_handler_delay = 20;
@@ -224,6 +229,8 @@ void gui_test_reset(void)
     g_gui_test_fail_widget_observer = false;
     g_gui_test_fail_focus_observer = false;
     g_gui_test_focus_rebuild_count = 0;
+    g_gui_test_fail_widget_create_countdown = 0;
+    g_gui_test_fail_focus_register_countdown = 0;
 
     gui_test_device_reset(&g_gui_test_keyboard);
     gui_test_device_reset(&g_gui_test_mouse);

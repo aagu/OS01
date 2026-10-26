@@ -998,6 +998,22 @@ int gui_input_focus_register_native(gui_input_t *input, lv_obj_t *obj, uint64_t 
     }
 
 #ifdef OS01_HOST_TEST
+    /*
+     * 宿主私有故障桥：第 N 次原生登记失败（倒计数）。
+     *
+     * 它让宿主测试能覆盖「提交的每一个登记步骤」。
+     */
+    extern int g_gui_test_fail_focus_register_countdown;
+    if (g_gui_test_fail_focus_register_countdown > 0) {
+        g_gui_test_fail_focus_register_countdown--;
+        if (g_gui_test_fail_focus_register_countdown == 0) {
+            errno = ENOSPC;
+            return -1;
+        }
+    }
+#endif
+
+#ifdef OS01_HOST_TEST
     /* 宿主私有故障桥：删除观察者安装失败。 */
     extern bool g_gui_test_fail_focus_observer;
     if (g_gui_test_fail_focus_observer) {

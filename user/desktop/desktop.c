@@ -144,8 +144,20 @@ int main(int argc, char **argv)
             break;
         }
 
-        /* 迁移只在这里发生：LVGL 回调期间不得销毁控件树。 */
-        desktop_shell_apply_pending(shell);
+        /*
+         * 迁移只在这里发生：LVGL 回调期间不得销毁控件树。
+         *
+         * 导航的提交阶段失败（控件创建或焦点登记失败）时，旧树已经被
+         * 删除，无法回滚：主循环在这里清理并退出，不假装一切正常。
+         */
+        if (desktop_shell_apply_pending(shell) != 0) {
+            fprintf(stderr, "desktop: the desktop shell failed to rebuild (errno=%d)\n",
+                    errno);
+            desktop_shell_destroy(shell);
+            gui_input_destroy(input);
+            gui_platform_destroy(platform);
+            return 1;
+        }
         desktop_shell_tick(shell);
 
         if (smoke) {

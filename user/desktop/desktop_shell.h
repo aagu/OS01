@@ -28,6 +28,7 @@
 #include <gui/gui_theme.h>
 #include <gui/gui_widget.h>
 
+#include <stdint.h>
 #include <time.h>
 
 #include "desktop_apps.h"
@@ -173,8 +174,49 @@ void desktop_shell_request_setting(desktop_shell_t *shell, desktop_setting_t set
  * @brief 执行挂起的意图（主循环调用）
  *
  * 非法迁移被忽略并记诊断；合法迁移销毁旧表面并重建新表面。
+ *
+ * 导航是分期的：先读快照，再做不可逆的提交。提交阶段失败（控件创建或
+ * 焦点登记失败）时返回 -1：旧树已经被删除，桌面**不**假装回滚，主入口
+ * 应当清理并退出。
+ *
+ * @return 0 成功；-1 失败（errno 已设置）
  */
-void desktop_shell_apply_pending(desktop_shell_t *shell);
+int desktop_shell_apply_pending(desktop_shell_t *shell);
+
+/**
+ * @brief 投递一次文件导航意图（只复制意图）
+ *
+ * 意图按**值**复制：不借用调用方的路径缓冲，也不延长任何控件或上下文的
+ * 寿命。同一轮里第一个导航意图占槽，后到的请求被忽略（不覆盖）。
+ *
+ * 既有或后来的表面切换（ESC / 返回）**优先**于导航意图，并清掉导航槽。
+ * 真正执行前，外层还要验证「仍是同一个文件表面、且版本未变」。
+ *
+ * @param shell         外壳
+ * @param absolute_path 目标目录的绝对路径
+ * @param version       发起方看到的目录版本
+ * @return 0 接受（或忽略后到的请求）；-1 校验失败（errno = EINVAL）
+ */
+int desktop_shell_request_file_nav(desktop_shell_t *shell,
+                                   const char *absolute_path, uint64_t version);
+
+/**
+ * @brief 当前的目录版本
+ *
+ * 每提交一次新的目录列表就单调增加一。导航请求必须携带发起方看到的
+ * 版本，外层据此拒绝**陈旧**的行。
+ */
+uint64_t desktop_shell_dir_version(const desktop_shell_t *shell);
+
+/**
+ * @brief 当前的目录路径（文件浏览器的 cwd）
+ *
+ * @param shell 外壳
+ * @param buf   输出缓冲
+ * @param len   缓冲长度
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int desktop_shell_files_cwd(const desktop_shell_t *shell, char *buf, size_t len);
 
 /**
  * @brief 刷新时钟（主循环调用）

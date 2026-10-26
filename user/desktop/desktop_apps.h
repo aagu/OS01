@@ -15,6 +15,8 @@
  * 不出现任何后端类型。
  */
 
+#include <stdint.h>
+
 #include <gui/gui_input.h>
 #include <gui/gui_layout.h>
 #include <gui/gui_platform.h>
@@ -61,6 +63,18 @@ typedef struct {
 } desktop_back_ctx_t;
 
 /**
+ * @brief 文件列表的**快照**：目标目录的条目，纯 C 的暂存
+ *
+ * 导航是**分期**的：先把目标目录读进快照（不碰控件、上下文与焦点），
+ * 打不开就完整保留旧视图；只有快照到手之后才进入不可逆的提交阶段。
+ */
+typedef struct {
+    char path[DESKTOP_FILES_PATH_MAX];                 /* 目标目录的绝对路径 */
+    uint32_t count;                                    /* 条目数 */
+    desktop_files_entry_t entries[DESKTOP_FILES_MAX_ENTRIES];
+} desktop_files_snapshot_t;
+
+/**
  * @brief 文件列表一行的业务上下文
  *
  * 行的回调只拿业务数据：外壳、**创建时**的目录版本与目标路径副本。
@@ -72,6 +86,7 @@ typedef struct {
     desktop_shell_t *shell;                  /* 外壳 */
     uint64_t version;                        /* 创建时的目录版本 */
     char path[DESKTOP_FILES_PATH_MAX];       /* 目标路径副本 */
+    bool is_dir;                            /* 只有目录可导航 */
 } desktop_files_ctx_t;
 
 /**
@@ -94,6 +109,8 @@ typedef struct {
     desktop_files_entry_t files_entries[DESKTOP_FILES_MAX_ENTRIES];
     uint32_t files_entry_count;
     desktop_files_ctx_t files_ctx[DESKTOP_FILES_MAX_ENTRIES];
+    /* 目录版本：每提交一次新的目录列表就单调增加一。 */
+    uint64_t dir_version;
 
     /* 界面句柄：随表面创建与销毁，状态本身跨应用存活。 */
     gui_widget_t files_list;
@@ -102,6 +119,8 @@ typedef struct {
 
     /* 应用顶栏返回按钮的上下文（只借外壳）。 */
     desktop_back_ctx_t back_ctx;
+    /* 应用顶栏的副标题（文件应用显示当前目录）。 */
+    gui_widget_t app_subtitle;
 } desktop_app_state_t;
 
 /**
@@ -133,25 +152,34 @@ gui_widget_t desktop_app_build(gui_platform_t *platform, desktop_app_id_t id,
                                desktop_shell_t *shell, gui_widget_t root);
 
 /**
- * @brief 文件浏览器：进入一个子目录
+ * @brief 读取一个目录的条目到**快照**（纯 C，不碰任何控件）
  *
- * 只读：只进入目录，不提供写入 / 删除 / 新建。
+ * 只读：只进入目录，不提供写入 / 删除 / 新建。目录优先、同目录内按名字
+ * 排序，最多 {@link DESKTOP_FILES_MAX_ENTRIES} 条。
  *
- * @param shell 外壳
- * @param name  子目录名（相对当前目录）
+ * @param path 目标目录的绝对路径
+ * @param out  输出快照
+ * @return 0 成功；-1 失败（errno 已设置：路径非法或打不开）
  */
-void desktop_files_enter(desktop_shell_t *shell, const char *name);
+int desktop_files_read_entries(const char *path, desktop_files_snapshot_t *out);
 
 /**
- * @brief 文件浏览器：进入一个**绝对路径**的目录
+ * @brief 提交一次新的文件列表（**不可逆**阶段）
+ *
+ * 旧列表子树先被注销 / 销毁，旧行上下文随之释放；随后按 new_version
+ * 创建新行并登记焦点。旧行**不会**与新行同时在册。
+ *
+ * 创建或登记失败时按契约清理未完成的树并返回错误：旧树已经被删除，
+ * 因此不假装回滚。
+ *
+ * @param shell      外壳
+ * @param snapshot   目标目录的快照
+ * @param new_version 新目录的版本（单调增加）
+ * @return 0 成功；-1 失败
  */
-void desktop_files_enter_path(desktop_shell_t *shell, const char *absolute_path);
-
-/**
- * @brief 文件浏览器：回到父目录
- * @return true 表示已经回到父目录；false 表示已在根目录
- */
-bool desktop_files_go_up(desktop_shell_t *shell);
+int desktop_files_replace_list(desktop_shell_t *shell,
+                               const desktop_files_snapshot_t *snapshot,
+                               uint64_t new_version);
 
 /**
  * @brief 刷新当前应用的界面（主循环调用）
