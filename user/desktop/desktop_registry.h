@@ -12,6 +12,8 @@
  * 启动器是注册表的**子集**（in_launcher 为真的那些），应用抽屉是全集。
  */
 
+#include <gui/gui_layout.h>
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -74,6 +76,18 @@ uint32_t desktop_app_count(void);
  * @return 0x00RRGGBB 颜色；越界返回 0
  */
 uint32_t desktop_app_accent_color(desktop_app_id_t id);
+
+/**
+ * @brief 取得应用的强调色**角色**
+ *
+ * GUI-2b：桌面只用公共 API 表达外观，公共 API 接受的是**色彩角色**而不是
+ * 颜色值，因此注册表直接给出角色。角色与强调色一一对应，颜色仍只来自
+ * 令牌表。
+ *
+ * @param id 应用标识
+ * @return 色彩角色；越界返回 GUI_COLOR_COUNT（非法哨兵）
+ */
+gui_color_role_t desktop_app_accent_role(desktop_app_id_t id);
 
 /**
  * @brief 取得应用的稳定标识串（用于状态机迁移的 app_id 参数）

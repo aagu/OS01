@@ -4243,6 +4243,7 @@ $(TEST_BLD)/test_desktop_shell.elf: \
 		$(GUI_DESKTOP_OBJS) \
 		$(GUI_INTEGRATION_DIR)/gui_test_runtime.o \
 		$(GUI_INTEGRATION_DIR)/platform.o \
+		$(GUI_WIDGET_DIR)/gui_native_fixture.o \
 		$(GUI_WIDGET_UNIT_OBJS) \
 		$(GUI_INTEGRATION_DIR)/tick.o \
 		$(GUI_INTEGRATION_DIR)/gfx_client_policy.o \

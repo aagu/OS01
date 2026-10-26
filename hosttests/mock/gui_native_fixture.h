@@ -257,8 +257,7 @@ int gui_native_fixture_query_focus_order(gui_native_fixture_t *fx, gui_widget_t 
  * @param out_ever_selected 输出：是否发生过一次成功的选择
  * @param out_explicit_clear 输出：当前是否处于"显式清空"状态
  * @return 0 成功；-1 失败（errno = EINVAL）
- */
-int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_ever_selected,
+ */int gui_native_fixture_query_focus_history(gui_native_fixture_t *fx, bool *out_ever_selected,
                                            bool *out_explicit_clear);
 
 /**
@@ -442,6 +441,39 @@ int gui_native_fixture_set_default_display_none(void);
  * @return 0 成功；-1 失败
  */
 int gui_native_fixture_restore_default_display(gui_platform_t *platform);
+
+/**
+ * @brief 宿主私有：读回某个控件当前生效的字体行高（像素）
+ *
+ * 它读的是**真实后端对象**上落地的字体：公共 API 只接受主题的字号层级，
+ * 层级到字体的映射住在 libgui 内部，因此只有宿主私有 fixture 能看见它。
+ *
+ * @param fx             fixture 上下文
+ * @param widget        控件身份
+ * @param out_line_height 输出：生效字体的行高
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int gui_native_fixture_query_font_line_height(gui_native_fixture_t *fx,
+                                              gui_widget_t widget,
+                                              int *out_line_height);
+
+/**
+ * @brief 宿主私有：造一个「不属于本平台」的输入对象
+ *
+ * 公共 API 造不出这种输入：平台是单例，每平台至多一个输入，而且输入的
+ * 生命周期不能跨过平台。因此「输入与平台不匹配」这条拒绝路径只能用宿主
+ * 私有对象构造：它的 platform 指向一个**没有注册表**的假平台，任何针对
+ * 本平台控件的焦点登记都会被判成 EINVAL。
+ *
+ * @param out 输出参数：造出来的输入对象
+ * @return 0 成功；-1 失败（errno 已设置）
+ */
+int gui_native_fixture_create_foreign_input(gui_input_t **out);
+
+/**
+ * @brief 宿主私有：释放上一个「外来输入」
+ */
+void gui_native_fixture_destroy_foreign_input(gui_input_t *input);
 
 /* 固定容量（与 libgui 内部一致；fixture 的 .c 里有静态断言守着）。 */
 #define GUI_NATIVE_CAPACITY 1024u

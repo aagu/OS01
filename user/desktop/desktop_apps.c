@@ -1,5 +1,5 @@
 /*
- * desktop_apps.c — 桌面内置应用实现（GUI-3）
+ * desktop_apps.c — 桌面内置应用实现（GUI-3 / GUI-2b Task 10）
  *
  * 四个应用都是**壳内应用**：界面由外壳创建与销毁，占满整个显示区；
  * 不 fork 子进程、不接管显示所有权。
@@ -10,6 +10,9 @@
  *   设置   —— 与设置表面共用同一份实现
  *
  * 样式一律取自 gui_theme_*，本文件不出现颜色字面量与字号字面量。
+ *
+ * GUI-2b：只用 libgui 的公共 API —— 控件身份是 gui_widget_t，不出现任何
+ * 后端类型；可聚焦项由 libgui 的唯一焦点引擎登记。
  */
 
 #include "desktop_apps.h"
@@ -56,56 +59,234 @@
 
 /* ── 令牌化样式辅助 ─────────────────────────────────────────────── */
 
-static lv_color_t tok(uint32_t rgb)
+static gui_appearance_t make_appearance(gui_variant_t variant,
+                                        gui_color_role_t bg,
+                                        gui_color_role_t text,
+                                        gui_theme_font_t font,
+                                        gui_theme_radius_t radius,
+                                        gui_theme_elevation_t elevation,
+                                        bool filled, bool rounded, bool bordered)
 {
-    return lv_color_hex(rgb);
+    gui_appearance_t ap;
+
+    ap.variant = variant;
+    ap.bg_role = bg;
+    ap.text_role = text;
+    ap.border_role = GUI_COLOR_OUTLINE_VARIANT;
+    ap.font = font;
+    ap.radius = radius;
+    ap.elevation = elevation;
+    ap.filled = filled;
+    ap.rounded = rounded;
+    ap.bordered = bordered;
+    return ap;
 }
 
-static lv_obj_t *app_label(lv_obj_t *parent, const char *text,
-                           gui_theme_font_t role, uint32_t color)
+static gui_color_role_t elevation_role(gui_theme_elevation_t elevation)
 {
-    lv_obj_t *label = lv_label_create(parent);
-    if (label == NULL) {
-        return NULL;
+    switch (elevation) {
+    case GUI_THEME_ELEVATION_0: return GUI_COLOR_SURFACE;
+    case GUI_THEME_ELEVATION_1: return GUI_COLOR_SURFACE_CONTAINER_LOW;
+    case GUI_THEME_ELEVATION_2: return GUI_COLOR_SURFACE_CONTAINER;
+    case GUI_THEME_ELEVATION_3: return GUI_COLOR_SURFACE_CONTAINER_HIGH;
+    case GUI_THEME_ELEVATION_4:
+    case GUI_THEME_ELEVATION_5:
+    default:                    return GUI_COLOR_SURFACE_CONTAINER_HIGHEST;
     }
-    lv_label_set_text(label, text);
-    lv_obj_set_style_text_color(label, tok(color), 0);
-    lv_obj_set_style_text_font(label, desktop_shell_font(role), 0);
+}
+
+static gui_appearance_t card_appearance(gui_theme_elevation_t elevation,
+                                        gui_color_role_t bg_role)
+{
+    return make_appearance(GUI_VARIANT_CARD, bg_role, GUI_COLOR_ON_SURFACE,
+                           GUI_THEME_FONT_BODY, GUI_THEME_RADIUS_LG, elevation,
+                           true, true, true);
+}
+
+/* ── 控件构建辅助 ───────────────────────────────────────────────── */
+
+static gui_widget_t make_widget(gui_platform_t *platform, gui_widget_t parent,
+                                gui_widget_kind_t kind)
+{
+    gui_widget_t widget = GUI_WIDGET_NONE;
+
+    if (gui_widget_create(platform, parent, kind, &widget) != 0) {
+        return GUI_WIDGET_NONE;
+    }
+    return widget;
+}
+
+static bool apply_appearance(gui_platform_t *platform, gui_widget_t widget,
+                             const gui_appearance_t *appearance)
+{
+    return gui_widget_set_appearance(platform, widget, appearance) == 0;
+}
+
+static bool set_geometry(gui_platform_t *platform, gui_widget_t widget,
+                         int32_t x, int32_t y, int32_t width, int32_t height)
+{
+    gui_geometry_t geometry;
+
+    geometry.x = x;
+    geometry.y = y;
+    geometry.width = GUI_SIZE_PX(width);
+    geometry.height = GUI_SIZE_PX(height);
+    return gui_widget_set_geometry(platform, widget, &geometry) == 0;
+}
+
+static bool set_position(gui_platform_t *platform, gui_widget_t widget,
+                         int32_t x, int32_t y)
+{
+    gui_geometry_t geometry;
+
+    geometry.x = x;
+    geometry.y = y;
+    geometry.width = GUI_SIZE_CONTENT;
+    geometry.height = GUI_SIZE_CONTENT;
+    return gui_widget_set_geometry(platform, widget, &geometry) == 0;
+}
+
+static bool set_geometry_width(gui_platform_t *platform, gui_widget_t widget,
+                               int32_t x, int32_t y, int32_t width)
+{
+    gui_geometry_t geometry;
+
+    geometry.x = x;
+    geometry.y = y;
+    geometry.width = GUI_SIZE_PX(width);
+    geometry.height = GUI_SIZE_CONTENT;
+    return gui_widget_set_geometry(platform, widget, &geometry) == 0;
+}
+
+static bool set_alignment(gui_platform_t *platform, gui_widget_t widget,
+                          gui_align_t anchor, int32_t x_offset, int32_t y_offset)
+{
+    gui_alignment_t alignment;
+
+    alignment.anchor = anchor;
+    alignment.x_offset = x_offset;
+    alignment.y_offset = y_offset;
+    return gui_widget_set_alignment(platform, widget, &alignment) == 0;
+}
+
+static bool set_layout_none(gui_platform_t *platform, gui_widget_t widget,
+                            int32_t pad_top, int32_t pad_bottom,
+                            int32_t pad_left, int32_t pad_right)
+{
+    gui_layout_t layout;
+
+    layout.flow = GUI_FLOW_NONE;
+    layout.main_align = GUI_FLOW_ALIGN_START;
+    layout.cross_align = GUI_FLOW_ALIGN_START;
+    layout.grow = 0u;
+    layout.gap = 0;
+    layout.pad_top = pad_top;
+    layout.pad_bottom = pad_bottom;
+    layout.pad_left = pad_left;
+    layout.pad_right = pad_right;
+    return gui_widget_set_layout(platform, widget, &layout) == 0;
+}
+
+static bool set_layout_column(gui_platform_t *platform, gui_widget_t widget,
+                              int32_t gap, int32_t pad_top, int32_t pad_bottom,
+                              int32_t pad_left, int32_t pad_right)
+{
+    gui_layout_t layout;
+
+    layout.flow = GUI_FLOW_COLUMN;
+    layout.main_align = GUI_FLOW_ALIGN_START;
+    layout.cross_align = GUI_FLOW_ALIGN_START;
+    layout.grow = 0u;
+    layout.gap = gap;
+    layout.pad_top = pad_top;
+    layout.pad_bottom = pad_bottom;
+    layout.pad_left = pad_left;
+    layout.pad_right = pad_right;
+    return gui_widget_set_layout(platform, widget, &layout) == 0;
+}
+
+static bool set_scroll_both(gui_platform_t *platform, gui_widget_t widget)
+{
+    gui_scroll_t scroll;
+
+    scroll.horizontal = true;
+    scroll.vertical = true;
+    scroll.text_mode = GUI_TEXT_MODE_WRAP;
+    scroll.text_align = GUI_TEXT_ALIGN_LEFT;
+    return gui_widget_set_scroll(platform, widget, &scroll) == 0;
+}
+
+static bool set_scroll_none(gui_platform_t *platform, gui_widget_t widget)
+{
+    gui_scroll_t scroll;
+
+    scroll.horizontal = false;
+    scroll.vertical = false;
+    scroll.text_mode = GUI_TEXT_MODE_WRAP;
+    scroll.text_align = GUI_TEXT_ALIGN_LEFT;
+    return gui_widget_set_scroll(platform, widget, &scroll) == 0;
+}
+
+static bool set_label_scroll(gui_platform_t *platform, gui_widget_t widget,
+                             gui_text_mode_t mode, gui_text_align_t align)
+{
+    gui_scroll_t scroll;
+
+    scroll.horizontal = false;
+    scroll.vertical = false;
+    scroll.text_mode = mode;
+    scroll.text_align = align;
+    return gui_widget_set_scroll(platform, widget, &scroll) == 0;
+}
+
+static gui_widget_t make_label(gui_platform_t *platform, gui_widget_t parent,
+                               const char *text, gui_theme_font_t font,
+                               gui_color_role_t color)
+{
+    gui_widget_t label = make_widget(platform, parent, GUI_WIDGET_LABEL);
+    gui_appearance_t appearance;
+
+    if (label.id == 0) {
+        return GUI_WIDGET_NONE;
+    }
+    appearance = make_appearance(GUI_VARIANT_PLAIN, GUI_COLOR_SURFACE, color,
+                                 font, GUI_THEME_RADIUS_MD, GUI_THEME_ELEVATION_0,
+                                 false, false, false);
+    if (!apply_appearance(platform, label, &appearance)) {
+        return GUI_WIDGET_NONE;
+    }
+    if (!set_scroll_none(platform, label)) {
+        return GUI_WIDGET_NONE;
+    }
+    if (text != NULL && gui_widget_set_text(platform, label, text) != 0) {
+        return GUI_WIDGET_NONE;
+    }
     return label;
 }
 
 /* 透明容器：应用内容区的滚动容器都长这样。 */
-static lv_obj_t *app_pane(lv_obj_t *parent)
+static gui_widget_t make_pane(gui_platform_t *platform, gui_widget_t parent)
 {
-    lv_obj_t *pane = lv_obj_create(parent);
-    if (pane == NULL) {
-        return NULL;
+    gui_widget_t pane = make_widget(platform, parent, GUI_WIDGET_CONTAINER);
+    gui_appearance_t appearance;
+
+    if (pane.id == 0) {
+        return GUI_WIDGET_NONE;
     }
-    lv_obj_set_layout(pane, LV_LAYOUT_NONE);
-    lv_obj_set_style_bg_opa(pane, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(pane, 0, 0);
-    lv_obj_set_style_pad_all(pane, 0, 0);
-    lv_obj_set_style_radius(pane, 0, 0);
-    lv_obj_set_style_shadow_width(pane, 0, 0);
-    lv_obj_add_flag(pane, LV_OBJ_FLAG_SCROLLABLE);
+    appearance = make_appearance(GUI_VARIANT_PLAIN, GUI_COLOR_SURFACE,
+                                 GUI_COLOR_ON_SURFACE, GUI_THEME_FONT_BODY,
+                                 GUI_THEME_RADIUS_MD, GUI_THEME_ELEVATION_0,
+                                 false, false, false);
+    if (!apply_appearance(platform, pane, &appearance)) {
+        return GUI_WIDGET_NONE;
+    }
+    if (!set_layout_none(platform, pane, 0, 0, 0, 0)) {
+        return GUI_WIDGET_NONE;
+    }
+    if (!set_scroll_both(platform, pane)) {
+        return GUI_WIDGET_NONE;
+    }
     return pane;
-}
-
-static void app_card(lv_obj_t *obj, gui_theme_elevation_t elevation)
-{
-    const gui_theme_colors_t *c = gui_theme_colors();
-
-    lv_obj_set_style_bg_color(obj, tok(gui_theme_elevation_surface(elevation)), 0);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(obj, gui_theme_radius(GUI_THEME_RADIUS_LG), 0);
-    lv_obj_set_style_border_color(obj, tok(c->outline_variant), 0);
-    lv_obj_set_style_border_width(obj, 1, 0);
-    lv_obj_set_style_pad_all(obj, gui_theme_space(GUI_THEME_SPACE_MD), 0);
-    lv_obj_set_style_shadow_color(obj, tok(c->shadow), 0);
-    lv_obj_set_style_shadow_width(obj, gui_theme_elevation_shadow_width(elevation), 0);
-    lv_obj_set_style_shadow_offset_y(obj, gui_theme_elevation_shadow_offset_y(elevation), 0);
-    lv_obj_set_style_shadow_opa(obj, gui_theme_elevation_shadow_opa(elevation), 0);
-    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 /* ── 应用状态 ────────────────────────────────────────────────────── */
@@ -142,77 +323,118 @@ void desktop_app_request_back(desktop_shell_t *shell)
  * 顶栏上的「返回」是**应用界面的一部分**，不是窗口装饰：GUI-3 不实现
  * 窗口系统，因此这里没有最小化 / 最大化 / 关闭按钮，也没有窗口边框。
  */
-static void app_back_cb(lv_event_t *event)
+static void on_back_activate(const gui_event_t *event, void *userdata)
 {
-    desktop_shell_t *shell = (desktop_shell_t *)lv_event_get_user_data(event);
-    if (shell == NULL) {
+    desktop_back_ctx_t *ctx = (desktop_back_ctx_t *)userdata;
+
+    (void)event;
+    if (ctx == NULL || ctx->shell == NULL) {
         return;
     }
 
     /* 当前应用标识由外壳持有：顶栏属于当前表面，标识自然也是当前应用。 */
-    desktop_app_id_t id = desktop_shell_current_app_id(shell);
+    desktop_app_id_t id = desktop_shell_current_app_id(ctx->shell);
 
     /* 文件应用的返回先回父目录，父目录是根才回主屏。 */
-    if (id == DESKTOP_APP_FILES && desktop_files_go_up(shell)) {
+    if (id == DESKTOP_APP_FILES && desktop_files_go_up(ctx->shell)) {
         return;
     }
 
-    desktop_app_request_back(shell);
+    desktop_app_request_back(ctx->shell);
 }
 
-static lv_obj_t *build_app_bar(lv_obj_t *root, lv_display_t *disp,
-                               desktop_shell_t *shell, const char *title,
-                               const char *subtitle)
+static bool build_app_bar(gui_platform_t *platform, gui_widget_t root,
+                          desktop_shell_t *shell, const char *title,
+                          const char *subtitle)
 {
-    const gui_theme_colors_t *c = gui_theme_colors();
-    int32_t w = lv_display_get_horizontal_resolution(disp);
+    int32_t w = (int32_t)gui_platform_get_width(platform);
+    gui_widget_t bar = make_widget(platform, root, GUI_WIDGET_CONTAINER);
+    gui_widget_t back;
+    gui_widget_t label;
+    gui_widget_t name;
+    gui_appearance_t appearance;
 
-    lv_obj_t *bar = lv_obj_create(root);
-    if (bar == NULL) {
-        return NULL;
+    if (bar.id == 0) {
+        return false;
     }
-    lv_obj_set_layout(bar, LV_LAYOUT_NONE);
-    lv_obj_set_size(bar, w, DESKTOP_APP_BAR_HEIGHT);
-    lv_obj_set_pos(bar, 0, 0);
-    lv_obj_set_style_bg_color(bar, tok(gui_theme_elevation_surface(GUI_THEME_ELEVATION_1)), 0);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(bar, 0, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_set_style_shadow_width(bar, 0, 0);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    /* 返回 */
-    lv_obj_t *back = lv_button_create(bar);
-    if (back != NULL) {
-        lv_obj_set_size(back, 88, 28);
-        lv_obj_set_pos(back, APP_MARGIN, 6);
-        lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(back, 0, 0);
-        lv_obj_set_style_shadow_width(back, 0, 0);
-        lv_obj_set_style_radius(back, gui_theme_radius(GUI_THEME_RADIUS_MD), 0);
-        lv_obj_add_event_cb(back, app_back_cb, LV_EVENT_CLICKED, shell);
-        lv_obj_t *label = app_label(back, "< Back", GUI_THEME_FONT_BODY, c->primary);
-        if (label != NULL) {
-            lv_obj_center(label);
-        }
-        /* 返回按钮是应用表面的第一个焦点项。 */
-        desktop_shell_focus_add(shell, back);
+    appearance = make_appearance(GUI_VARIANT_PLAIN,
+                                 elevation_role(GUI_THEME_ELEVATION_1),
+                                 GUI_COLOR_ON_SURFACE, GUI_THEME_FONT_BODY,
+                                 GUI_THEME_RADIUS_MD, GUI_THEME_ELEVATION_0,
+                                 true, false, false);
+    if (!apply_appearance(platform, bar, &appearance)) {
+        return false;
+    }
+    if (!set_layout_none(platform, bar, 0, 0, 0, 0)) {
+        return false;
+    }
+    if (!set_scroll_none(platform, bar)) {
+        return false;
+    }
+    if (!set_geometry(platform, bar, 0, 0, w, DESKTOP_APP_BAR_HEIGHT)) {
+        return false;
     }
 
-    lv_obj_t *name = app_label(bar, title, GUI_THEME_FONT_TITLE, c->on_surface);
-    if (name != NULL) {
-        lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 10);
+    /* 返回：应用表面的第一个焦点项。 */
+    back = make_widget(platform, bar, GUI_WIDGET_BUTTON);
+    if (back.id == 0) {
+        return false;
+    }
+    appearance = make_appearance(GUI_VARIANT_PLAIN, GUI_COLOR_SURFACE,
+                                 GUI_COLOR_PRIMARY, GUI_THEME_FONT_BODY,
+                                 GUI_THEME_RADIUS_MD, GUI_THEME_ELEVATION_0,
+                                 false, true, false);
+    if (!apply_appearance(platform, back, &appearance)) {
+        return false;
+    }
+    if (!set_layout_none(platform, back, 0, 0, 0, 0)) {
+        return false;
+    }
+    if (!set_scroll_none(platform, back)) {
+        return false;
+    }
+    if (!set_geometry(platform, back, APP_MARGIN, 6, 88, 28)) {
+        return false;
+    }
+
+    label = make_label(platform, back, "< Back", GUI_THEME_FONT_BODY,
+                       GUI_COLOR_PRIMARY);
+    if (label.id == 0) {
+        return false;
+    }
+    if (!set_alignment(platform, label, GUI_ALIGN_MID, 0, 0)) {
+        return false;
+    }
+
+    if (gui_widget_set_event_handler(platform, back, on_back_activate,
+                                     &desktop_shell_app_state(shell)->back_ctx) != 0) {
+        return false;
+    }
+    if (gui_focus_register(desktop_shell_input(shell), back, GUI_FOCUS_STRONG) != 0) {
+        return false;
+    }
+
+    name = make_label(platform, bar, title, GUI_THEME_FONT_TITLE,
+                      GUI_COLOR_ON_SURFACE);
+    if (name.id == 0) {
+        return false;
+    }
+    if (!set_alignment(platform, name, GUI_ALIGN_TOP_MID, 0, 10)) {
+        return false;
     }
 
     if (subtitle != NULL) {
-        lv_obj_t *sub = app_label(bar, subtitle, GUI_THEME_FONT_LABEL, c->on_surface_variant);
-        if (sub != NULL) {
-            lv_obj_align(sub, LV_ALIGN_TOP_RIGHT, -APP_MARGIN, 13);
+        gui_widget_t sub = make_label(platform, bar, subtitle, GUI_THEME_FONT_LABEL,
+                                      GUI_COLOR_ON_SURFACE_VARIANT);
+        if (sub.id == 0) {
+            return false;
+        }
+        if (!set_alignment(platform, sub, GUI_ALIGN_TOP_RIGHT, -APP_MARGIN, 13)) {
+            return false;
         }
     }
 
-    return bar;
+    return true;
 }
 
 /* ── 文件应用 ────────────────────────────────────────────────────── */
@@ -228,59 +450,70 @@ static int files_entry_cmp(const void *a, const void *b)
     return strcmp(ea->name, eb->name);
 }
 
-/* 行的 user data 存「序号 + 1」：0 留给「没有 user data」。 */
-static void set_row_index(lv_obj_t *obj, uint32_t index)
+static void on_files_row_activate(const gui_event_t *event, void *userdata)
 {
-    lv_obj_set_user_data(obj, (void *)(intptr_t)(index + 1));
+    desktop_files_ctx_t *ctx = (desktop_files_ctx_t *)userdata;
+
+    (void)event;
+    if (ctx == NULL || ctx->shell == NULL) {
+        return;
+    }
+    if (ctx->path[0] == '\0') {
+        return;
+    }
+    desktop_files_enter_path(ctx->shell, ctx->path);
 }
 
-static int row_index(lv_obj_t *obj)
+/* 把 cwd 与名字拼成绝对路径；截断即拒绝。 */
+static bool join_path(const char *cwd, const char *name, char *out, size_t out_len)
 {
-    intptr_t tag = (intptr_t)lv_obj_get_user_data(obj);
-    return tag > 0 ? (int)(tag - 1) : -1;
-}
+    size_t cwd_len;
+    size_t name_len;
+    int written;
 
-static void files_row_cb(lv_event_t *event)
-{
-    desktop_shell_t *shell = (desktop_shell_t *)lv_event_get_user_data(event);
-    if (shell == NULL) {
-        return;
+    if (cwd == NULL || name == NULL || out == NULL) {
+        return false;
     }
-    desktop_app_state_t *state = desktop_shell_app_state(shell);
-    if (state == NULL) {
-        return;
+    cwd_len = strlen(cwd);
+    name_len = strlen(name);
+    if (cwd_len + 1 + name_len + 1 > out_len) {
+        return false;
     }
-    int index = row_index(lv_event_get_target(event));
-    if (index < 0 || (uint32_t)index >= state->files_entry_count) {
-        return;
+    written = snprintf(out, out_len, "%s/%s", cwd, name);
+    if (written < 0 || (size_t)written >= out_len) {
+        return false;
     }
-    desktop_files_enter(shell, state->files_entries[index].name);
+    return true;
 }
 
 /* 重新读取当前目录并重建条目列表。 */
-static void files_refresh(desktop_shell_t *shell)
+static bool files_refresh(desktop_shell_t *shell)
 {
-    const gui_theme_colors_t *c = gui_theme_colors();
+    gui_platform_t *platform = desktop_shell_platform(shell);
     desktop_app_state_t *state = desktop_shell_app_state(shell);
-    if (state == NULL || state->files_list == NULL) {
-        return;
+    gui_widget_t list;
+    int32_t w;
+
+    if (platform == NULL || state == NULL || state->files_list.id == 0) {
+        return false;
     }
+    list = state->files_list;
+    w = (int32_t)gui_platform_get_width(platform);
 
-    lv_obj_t *list = state->files_list;
-    int32_t w = lv_display_get_horizontal_resolution(lv_display_get_default());
-
-    /* 旧的行对象即将被删除：先从焦点序列里摘掉，避免留下野指针。 */
-    desktop_shell_focus_remove_children(shell, list);
-
-    /* 清空旧条目。 */
-    lv_obj_clean(list);
+    /*
+     * 旧的行对象即将被删除：清空容器把整批行一次带走，焦点引擎的删除
+     * 批次因此只在结束时投影一次。
+     */
+    if (gui_widget_clear(platform, list) != 0) {
+        return false;
+    }
     state->files_entry_count = 0;
 
     DIR *dir = opendir(state->files_cwd);
     if (dir == NULL) {
-        lv_obj_t *err = app_label(list, "Cannot open directory", GUI_THEME_FONT_BODY, c->error);
-        (void)err;
-        return;
+        gui_widget_t err = make_label(platform, list, "Cannot open directory",
+                                      GUI_THEME_FONT_BODY, GUI_COLOR_ERROR);
+        return err.id != 0;
     }
 
     struct dirent *ent;
@@ -302,90 +535,154 @@ static void files_refresh(desktop_shell_t *shell)
 
     for (uint32_t i = 0; i < state->files_entry_count; i++) {
         const desktop_files_entry_t *entry = &state->files_entries[i];
+        desktop_files_ctx_t *ctx = &state->files_ctx[i];
+        gui_widget_t row;
+        gui_widget_t icon;
+        gui_widget_t name;
+        gui_widget_t kind;
+        gui_appearance_t appearance;
 
-        lv_obj_t *row = lv_obj_create(list);
-        if (row == NULL) {
-            break;
+        row = make_widget(platform, list, GUI_WIDGET_BUTTON);
+        if (row.id == 0) {
+            return false;
         }
-        app_card(row, GUI_THEME_ELEVATION_1);
-        lv_obj_set_style_bg_color(row, tok(c->surface_container_low), 0);
-        lv_obj_set_width(row, w - 2 * APP_MARGIN);
-        lv_obj_set_height(row, 44);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-
-        lv_obj_t *icon = lv_obj_create(row);
-        if (icon != NULL) {
-            lv_obj_set_size(icon, 28, 28);
-            lv_obj_set_pos(icon, 10, 8);
-            lv_obj_set_style_bg_color(icon,
-                                     tok(entry->is_dir ? c->primary : c->outline), 0);
-            lv_obj_set_style_radius(icon, gui_theme_radius(GUI_THEME_RADIUS_FULL), 0);
-            lv_obj_set_style_border_width(icon, 0, 0);
-            lv_obj_set_style_shadow_width(icon, 0, 0);
-            lv_obj_set_style_pad_all(icon, 0, 0);
-            lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+        appearance = card_appearance(GUI_THEME_ELEVATION_1,
+                                     GUI_COLOR_SURFACE_CONTAINER_LOW);
+        if (!apply_appearance(platform, row, &appearance)) {
+            return false;
         }
-
-        lv_obj_t *name = app_label(row, entry->name, GUI_THEME_FONT_BODY, c->on_surface);
-        if (name != NULL) {
-            lv_obj_set_pos(name, 48, 12);
+        if (!set_layout_none(platform, row,
+                             (int32_t)gui_theme_space(GUI_THEME_SPACE_MD),
+                             (int32_t)gui_theme_space(GUI_THEME_SPACE_MD),
+                             (int32_t)gui_theme_space(GUI_THEME_SPACE_MD),
+                             (int32_t)gui_theme_space(GUI_THEME_SPACE_MD))) {
+            return false;
         }
-        lv_obj_t *kind = app_label(row, entry->is_dir ? "Directory" : "File",
-                                   GUI_THEME_FONT_LABEL, c->on_surface_variant);
-        if (kind != NULL) {
-            lv_obj_align(kind, LV_ALIGN_RIGHT_MID, -12, 0);
+        if (!set_scroll_none(platform, row)) {
+            return false;
+        }
+        if (!set_geometry(platform, row, 0, 0, w - 2 * APP_MARGIN, 44)) {
+            return false;
         }
 
-        set_row_index(row, i);
-        lv_obj_add_event_cb(row, files_row_cb, LV_EVENT_CLICKED, shell);
+        icon = make_widget(platform, row, GUI_WIDGET_CONTAINER);
+        if (icon.id == 0) {
+            return false;
+        }
+        appearance = make_appearance(GUI_VARIANT_PLAIN,
+                                     entry->is_dir ? GUI_COLOR_PRIMARY
+                                                   : GUI_COLOR_OUTLINE,
+                                     GUI_COLOR_ON_PRIMARY, GUI_THEME_FONT_TITLE,
+                                     GUI_THEME_RADIUS_FULL, GUI_THEME_ELEVATION_0,
+                                     true, true, false);
+        if (!apply_appearance(platform, icon, &appearance)) {
+            return false;
+        }
+        if (!set_layout_none(platform, icon, 0, 0, 0, 0)) {
+            return false;
+        }
+        if (!set_scroll_none(platform, icon)) {
+            return false;
+        }
+        if (!set_geometry(platform, icon, 10, 8, 28, 28)) {
+            return false;
+        }
+
+        name = make_label(platform, row, entry->name, GUI_THEME_FONT_BODY,
+                          GUI_COLOR_ON_SURFACE);
+        if (name.id == 0) {
+            return false;
+        }
+        if (!set_position(platform, name, 48, 12)) {
+            return false;
+        }
+
+        kind = make_label(platform, row, entry->is_dir ? "Directory" : "File",
+                          GUI_THEME_FONT_LABEL, GUI_COLOR_ON_SURFACE_VARIANT);
+        if (kind.id == 0) {
+            return false;
+        }
+        if (!set_alignment(platform, kind, GUI_ALIGN_MID_RIGHT, -12, 0)) {
+            return false;
+        }
+
+        /* 行的上下文：外壳 + 目标路径副本。 */
+        ctx->shell = shell;
+        ctx->version = 0u;
+        if (!join_path(state->files_cwd, entry->name, ctx->path,
+                       sizeof(ctx->path))) {
+            ctx->path[0] = '\0';
+        }
+        if (gui_widget_set_event_handler(platform, row, on_files_row_activate,
+                                         ctx) != 0) {
+            return false;
+        }
 
         /* 目录行也是键盘焦点项：Tab 选中后回车即可进入。 */
-        desktop_shell_focus_add(shell, row);
+        if (gui_focus_register(desktop_shell_input(shell), row, GUI_FOCUS_STRONG) != 0) {
+            return false;
+        }
     }
+
+    return true;
 }
 
-void desktop_files_enter(desktop_shell_t *shell, const char *name)
+void desktop_files_enter_path(desktop_shell_t *shell, const char *absolute_path)
 {
     desktop_app_state_t *state = desktop_shell_app_state(shell);
-    if (state == NULL || name == NULL || name[0] == '\0') {
+
+    if (state == NULL || absolute_path == NULL || absolute_path[0] == '\0') {
+        return;
+    }
+    if (strlen(absolute_path) + 1 > sizeof(state->files_cwd)) {
         return;
     }
 
-    char path[DESKTOP_FILES_PATH_MAX];
-    if (strcmp(state->files_cwd, "/") == 0) {
-        snprintf(path, sizeof(path), "/%s", name);
-    } else {
-        snprintf(path, sizeof(path), "%s/%s", state->files_cwd, name);
-    }
-
     /* 只读浏览：只允许进入目录。 */
-    DIR *dir = opendir(path);
+    DIR *dir = opendir(absolute_path);
     if (dir == NULL) {
         return;
     }
     closedir(dir);
 
-    snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", path);
-    files_refresh(shell);
+    snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", absolute_path);
+    (void)files_refresh(shell);
+}
+
+void desktop_files_enter(desktop_shell_t *shell, const char *name)
+{
+    desktop_app_state_t *state = desktop_shell_app_state(shell);
+    char path[DESKTOP_FILES_PATH_MAX];
+
+    if (state == NULL || name == NULL || name[0] == '\0') {
+        return;
+    }
+    if (!join_path(state->files_cwd, name, path, sizeof(path))) {
+        return;
+    }
+    desktop_files_enter_path(shell, path);
 }
 
 bool desktop_files_go_up(desktop_shell_t *shell)
 {
     desktop_app_state_t *state = desktop_shell_app_state(shell);
+    const char *cwd;
+    size_t len;
+    char parent[DESKTOP_FILES_PATH_MAX];
+
     if (state == NULL) {
         return false;
     }
-    const char *cwd = state->files_cwd;
+    cwd = state->files_cwd;
     if (cwd[0] == '\0' || strcmp(cwd, "/") == 0) {
         return false;
     }
 
     /* 去掉最后一段路径分量。 */
-    size_t len = strlen(cwd);
+    len = strlen(cwd);
     while (len > 1 && cwd[len - 1] != '/') {
         len--;
     }
-    char parent[DESKTOP_FILES_PATH_MAX];
     if (len <= 1) {
         snprintf(parent, sizeof(parent), "%s", "/");
     } else {
@@ -394,43 +691,55 @@ bool desktop_files_go_up(desktop_shell_t *shell)
     }
 
     snprintf(state->files_cwd, sizeof(state->files_cwd), "%s", parent);
-    files_refresh(shell);
+    (void)files_refresh(shell);
     return true;
 }
 
-static lv_obj_t *build_files_app(lv_obj_t *root, lv_display_t *disp,
-                                 desktop_shell_t *shell)
+static bool build_files_app(gui_platform_t *platform, gui_widget_t root,
+                            desktop_shell_t *shell)
 {
-    const gui_theme_colors_t *c = gui_theme_colors();
     desktop_app_state_t *state = desktop_shell_app_state(shell);
-    int32_t w = lv_display_get_horizontal_resolution(disp);
-    int32_t h = lv_display_get_vertical_resolution(disp);
+    int32_t w = (int32_t)gui_platform_get_width(platform);
+    int32_t h = (int32_t)gui_platform_get_height(platform);
+    gui_widget_t list;
+    gui_widget_t note;
 
     if (state == NULL) {
-        return NULL;
+        return false;
     }
 
-    lv_obj_t *list = app_pane(root);
-    if (list == NULL) {
-        return NULL;
+    list = make_pane(platform, root);
+    if (list.id == 0) {
+        return false;
     }
-    lv_obj_set_size(list, w - 2 * APP_MARGIN,
-                    h - DESKTOP_APP_BAR_HEIGHT - 3 * APP_MARGIN);
-    lv_obj_set_pos(list, APP_MARGIN, DESKTOP_APP_BAR_HEIGHT + APP_MARGIN);
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(list, gui_theme_space(GUI_THEME_SPACE_SM), 0);
+    if (!set_layout_column(platform, list,
+                           (int32_t)gui_theme_space(GUI_THEME_SPACE_SM),
+                           0, 0, 0, 0)) {
+        return false;
+    }
+    if (!set_geometry(platform, list, APP_MARGIN,
+                      DESKTOP_APP_BAR_HEIGHT + APP_MARGIN,
+                      w - 2 * APP_MARGIN,
+                      h - DESKTOP_APP_BAR_HEIGHT - 3 * APP_MARGIN)) {
+        return false;
+    }
 
     state->files_list = list;
-    files_refresh(shell);
-
-    /* 边界说明：只读浏览器的限制必须写在界面上。 */
-    lv_obj_t *note = app_label(root, "Read-only: create, rename and delete are unavailable",
-                                GUI_THEME_FONT_LABEL, c->on_surface_variant);
-    if (note != NULL) {
-        lv_obj_align(note, LV_ALIGN_BOTTOM_LEFT, APP_MARGIN, -10);
+    if (!files_refresh(shell)) {
+        return false;
     }
 
-    return list;
+    /* 边界说明：只读浏览器的限制必须写在界面上。 */
+    note = make_label(platform, root, "Read-only: create, rename and delete are unavailable",
+                      GUI_THEME_FONT_LABEL, GUI_COLOR_ON_SURFACE_VARIANT);
+    if (note.id == 0) {
+        return false;
+    }
+    if (!set_alignment(platform, note, GUI_ALIGN_BOTTOM_LEFT, APP_MARGIN, -10)) {
+        return false;
+    }
+
+    return true;
 }
 
 /* ── 终端应用 ────────────────────────────────────────────────────── */
@@ -546,59 +855,79 @@ static void term_push_history(desktop_app_state_t *state, const char *cmd)
     state->term_history_browsing = false;
 }
 
-static lv_obj_t *build_terminal_app(lv_obj_t *root, lv_display_t *disp,
-                                    desktop_shell_t *shell)
+static bool build_terminal_app(gui_platform_t *platform, gui_widget_t root,
+                               desktop_shell_t *shell)
 {
-    const gui_theme_colors_t *c = gui_theme_colors();
     desktop_app_state_t *state = desktop_shell_app_state(shell);
-    int32_t w = lv_display_get_horizontal_resolution(disp);
-    int32_t h = lv_display_get_vertical_resolution(disp);
+    int32_t w = (int32_t)gui_platform_get_width(platform);
+    int32_t h = (int32_t)gui_platform_get_height(platform);
+    gui_widget_t box;
+    gui_widget_t out;
+    gui_widget_t in;
 
     if (state == NULL) {
-        return NULL;
+        return false;
     }
 
     /* 输出区：可滚动的透明容器。 */
-    lv_obj_t *box = app_pane(root);
-    if (box == NULL) {
-        return NULL;
+    box = make_pane(platform, root);
+    if (box.id == 0) {
+        return false;
     }
-    lv_obj_set_size(box, w - 2 * APP_MARGIN,
-                    h - DESKTOP_APP_BAR_HEIGHT - 3 * APP_MARGIN);
-    lv_obj_set_pos(box, APP_MARGIN, DESKTOP_APP_BAR_HEIGHT + APP_MARGIN);
+    if (!set_geometry(platform, box, APP_MARGIN,
+                      DESKTOP_APP_BAR_HEIGHT + APP_MARGIN,
+                      w - 2 * APP_MARGIN,
+                      h - DESKTOP_APP_BAR_HEIGHT - 3 * APP_MARGIN)) {
+        return false;
+    }
 
-    lv_obj_t *out = app_label(box, state->term_output, GUI_THEME_FONT_BODY, c->on_surface);
-    if (out != NULL) {
-        lv_obj_set_width(out, w - 2 * APP_MARGIN);
-        lv_label_set_long_mode(out, LV_LABEL_LONG_WRAP);
+    out = make_label(platform, box, state->term_output, GUI_THEME_FONT_BODY,
+                     GUI_COLOR_ON_SURFACE);
+    if (out.id == 0) {
+        return false;
+    }
+    if (!set_label_scroll(platform, out, GUI_TEXT_MODE_WRAP, GUI_TEXT_ALIGN_LEFT)) {
+        return false;
+    }
+    if (!set_geometry_width(platform, out, 0, 0, w - 2 * APP_MARGIN)) {
+        return false;
     }
 
     /* 输入行：提示符 + 当前命令行。 */
-    lv_obj_t *in = app_label(root, TERM_PROMPT, GUI_THEME_FONT_BODY, c->primary);
-    if (in != NULL) {
-        lv_obj_set_pos(in, APP_MARGIN, h - 2 * APP_MARGIN);
-        lv_obj_set_width(in, w - 2 * APP_MARGIN);
+    in = make_label(platform, root, TERM_PROMPT, GUI_THEME_FONT_BODY,
+                    GUI_COLOR_PRIMARY);
+    if (in.id == 0) {
+        return false;
+    }
+    if (!set_label_scroll(platform, in, GUI_TEXT_MODE_WRAP, GUI_TEXT_ALIGN_LEFT)) {
+        return false;
+    }
+    if (!set_geometry_width(platform, in, APP_MARGIN, h - 2 * APP_MARGIN,
+                            w - 2 * APP_MARGIN)) {
+        return false;
     }
 
     state->term_output_label = out;
     state->term_input_label = in;
-    return out;
+    /* 最近一次提交的文本：第一次刷新之前它与控件里的内容一致。 */
+    snprintf(state->term_output_shown, sizeof(state->term_output_shown), "%s",
+             state->term_output);
+    snprintf(state->term_input_shown, sizeof(state->term_input_shown), "%s",
+             TERM_PROMPT);
+    return true;
 }
 
 /* ── 系统应用 ────────────────────────────────────────────────────── */
 
-static const char *color_format_name(lv_color_format_t cf)
+static const char *color_format_name(gui_pixel_format_t cf)
 {
     switch (cf) {
-    case LV_COLOR_FORMAT_RGB565:   return "RGB565";
-    case LV_COLOR_FORMAT_RGB888:   return "RGB888";
-    case LV_COLOR_FORMAT_ARGB8888: return "ARGB8888";
-    case LV_COLOR_FORMAT_XRGB8888: return "XRGB8888";
-    case LV_COLOR_FORMAT_I1:       return "I1";
-    case LV_COLOR_FORMAT_I8:       return "I8";
-    case LV_COLOR_FORMAT_L8:       return "L8";
-    case LV_COLOR_FORMAT_A8:       return "A8";
-    default:                       return "other";
+    case GUI_PIXEL_FORMAT_RGB565:   return "RGB565";
+    case GUI_PIXEL_FORMAT_XRGB8888: return "XRGB8888";
+    case GUI_PIXEL_FORMAT_ARGB8888: return "ARGB8888";
+    case GUI_PIXEL_FORMAT_I8:       return "I8";
+    case GUI_PIXEL_FORMAT_UNKNOWN:
+    default:                        return "unknown";
     }
 }
 
@@ -612,15 +941,19 @@ static const char *input_devices_label(const desktop_shell_t *shell)
     return gui_input_has_mouse(input) ? "keyboard + mouse" : "keyboard only";
 }
 
-static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
-                                   desktop_shell_t *shell)
+static bool build_system_app(gui_platform_t *platform, gui_widget_t root,
+                              desktop_shell_t *shell)
 {
-    const gui_theme_colors_t *c = gui_theme_colors();
-    gui_platform_t *platform = desktop_shell_platform(shell);
-    int32_t w = lv_display_get_horizontal_resolution(disp);
-
+    int32_t w = (int32_t)gui_platform_get_width(platform);
+    gui_platform_stats_t stats;
+    gui_widget_t label;
     char text[1024];
     size_t used = 0;
+
+    memset(&stats, 0, sizeof(stats));
+    if (gui_platform_get_stats(platform, &stats) != 0) {
+        memset(&stats, 0, sizeof(stats));
+    }
 
     snprintf(text + used, sizeof(text) - used, "Kernel: %s\n", APP_ARCH);
     used = strlen(text);
@@ -642,18 +975,19 @@ static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
     used = strlen(text);
 
     snprintf(text + used, sizeof(text) - used, "Display mode: %s\n",
-             (platform != NULL &&
-              gui_platform_get_mode(platform) == GUI_MODE_OFFSCREEN)
+             (gui_platform_get_mode(platform) == GUI_MODE_OFFSCREEN)
                  ? "offscreen" : "screen");
     used = strlen(text);
 
     snprintf(text + used, sizeof(text) - used, "Resolution: %ux%u\n",
-             (platform != NULL) ? gui_platform_get_width(platform) : 0u,
-             (platform != NULL) ? gui_platform_get_height(platform) : 0u);
+             stats.width, stats.height);
     used = strlen(text);
 
     snprintf(text + used, sizeof(text) - used, "Pixel format: %s\n",
-             color_format_name(lv_display_get_color_format(disp)));
+             color_format_name(stats.format));
+    used = strlen(text);
+
+    snprintf(text + used, sizeof(text) - used, "Widgets: %u\n", stats.widget_count);
     used = strlen(text);
 
     snprintf(text + used, sizeof(text) - used, "Input devices: %s\n",
@@ -664,82 +998,93 @@ static lv_obj_t *build_system_app(lv_obj_t *root, lv_display_t *disp,
              (unsigned)DESKTOP_FOCUS_MAX);
     used = strlen(text);
 
-    snprintf(text + used, sizeof(text) - used, "LVGL: %d.%d.%d\n",
-             LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
+    snprintf(text + used, sizeof(text) - used, "Renderer: %s %u.%u.%u\n",
+             stats.renderer_name,
+             (unsigned)stats.renderer_version_major,
+             (unsigned)stats.renderer_version_minor,
+             (unsigned)stats.renderer_version_patch);
     used = strlen(text);
 
-    lv_mem_monitor_t mem;
-    lv_mem_monitor(&mem);
-    snprintf(text + used, sizeof(text) - used, "LVGL heap: %u KB / %u KB (%u%%)\n",
-             (unsigned)(mem.used_cnt / 1024u), (unsigned)(mem.total_size / 1024u),
-             (unsigned)mem.used_pct);
+    snprintf(text + used, sizeof(text) - used, "Render pool: %llu KB / %llu KB (peak %llu KB)\n",
+             (unsigned long long)(stats.pool_used / 1024u),
+             (unsigned long long)(stats.pool_total / 1024u),
+             (unsigned long long)(stats.pool_max_used / 1024u));
     used = strlen(text);
 
-    lv_obj_t *label = app_label(root, text, GUI_THEME_FONT_BODY, c->on_surface);
-    if (label != NULL) {
-        lv_obj_set_pos(label, APP_MARGIN, DESKTOP_APP_BAR_HEIGHT + APP_MARGIN);
-        lv_obj_set_width(label, w - 2 * APP_MARGIN);
+    snprintf(text + used, sizeof(text) - used, "Widget registry: %llu bytes\n",
+             (unsigned long long)stats.registry_bytes);
+    used = strlen(text);
+
+    label = make_label(platform, root, text, GUI_THEME_FONT_BODY,
+                       GUI_COLOR_ON_SURFACE);
+    if (label.id == 0) {
+        return false;
+    }
+    if (!set_label_scroll(platform, label, GUI_TEXT_MODE_WRAP, GUI_TEXT_ALIGN_LEFT)) {
+        return false;
+    }
+    if (!set_geometry_width(platform, label, APP_MARGIN,
+                            DESKTOP_APP_BAR_HEIGHT + APP_MARGIN,
+                            w - 2 * APP_MARGIN)) {
+        return false;
     }
 
-    return label;
+    return true;
 }
 
 /* ── 应用构造入口 ────────────────────────────────────────────────── */
 
-lv_obj_t *desktop_app_build(lv_display_t *disp, desktop_app_id_t id,
-                            desktop_shell_t *shell)
+gui_widget_t desktop_app_build(gui_platform_t *platform, desktop_app_id_t id,
+                               desktop_shell_t *shell, gui_widget_t root)
 {
-    if (disp == NULL || shell == NULL) {
-        return NULL;
-    }
-
-    const desktop_app_info_t *info = desktop_app_info(id);
-    if (info == NULL) {
-        return NULL;
-    }
-
-    desktop_app_state_t *state = desktop_shell_app_state(shell);
-    if (state != NULL) {
-        state->files_list = NULL;
-        state->term_output_label = NULL;
-        state->term_input_label = NULL;
-    }
-
-    /* 表面根对象：透明全屏容器，壁纸由屏幕承载。 */
-    lv_obj_t *root = lv_obj_create(lv_display_get_screen_active(disp));
-    if (root == NULL) {
-        return NULL;
-    }
-    lv_obj_set_layout(root, LV_LAYOUT_NONE);
-    lv_obj_set_size(root, lv_display_get_horizontal_resolution(disp),
-                    lv_display_get_vertical_resolution(disp));
-    lv_obj_set_pos(root, 0, 0);
-    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(root, 0, 0);
-    lv_obj_set_style_radius(root, 0, 0);
-    lv_obj_set_style_pad_all(root, 0, 0);
-    lv_obj_set_style_shadow_width(root, 0, 0);
-    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
-
+    const desktop_app_info_t *info;
+    desktop_app_state_t *state;
     const char *subtitle = NULL;
+
+    if (platform == NULL || shell == NULL || root.id == 0) {
+        return GUI_WIDGET_NONE;
+    }
+
+    info = desktop_app_info(id);
+    if (info == NULL) {
+        return GUI_WIDGET_NONE;
+    }
+
+    state = desktop_shell_app_state(shell);
+    if (state != NULL) {
+        state->files_list = GUI_WIDGET_NONE;
+        state->term_output_label = GUI_WIDGET_NONE;
+        state->term_input_label = GUI_WIDGET_NONE;
+    }
+
     if (id == DESKTOP_APP_FILES && state != NULL) {
         subtitle = state->files_cwd;
     }
 
-    build_app_bar(root, disp, shell, info->name, subtitle);
+    if (!build_app_bar(platform, root, shell, info->name, subtitle)) {
+        return GUI_WIDGET_NONE;
+    }
 
     switch (id) {
     case DESKTOP_APP_FILES:
-        build_files_app(root, disp, shell);
+        if (!build_files_app(platform, root, shell)) {
+            return GUI_WIDGET_NONE;
+        }
         break;
     case DESKTOP_APP_TERMINAL:
-        build_terminal_app(root, disp, shell);
+        if (!build_terminal_app(platform, root, shell)) {
+            return GUI_WIDGET_NONE;
+        }
         break;
     case DESKTOP_APP_SYSTEM:
-        build_system_app(root, disp, shell);
+        if (!build_system_app(platform, root, shell)) {
+            return GUI_WIDGET_NONE;
+        }
         break;
     case DESKTOP_APP_SETTINGS:
-        desktop_shell_build_settings_body(shell, root);
+        if (desktop_shell_build_settings_body(shell, root).id == 0) {
+            return GUI_WIDGET_NONE;
+        }
         break;
     default:
         break;
@@ -844,19 +1189,28 @@ void desktop_app_refresh(desktop_shell_t *shell)
         return;
     }
 
-    /* 只在文本真的变了才重设 label：tick() 每帧都会进来。 */
-    if (state->term_output_label != NULL) {
-        const char *shown = lv_label_get_text(state->term_output_label);
-        if (shown == NULL || strcmp(shown, state->term_output) != 0) {
-            lv_label_set_text(state->term_output_label, state->term_output);
+    /* 只在文本真的变了才重设控件：tick() 每帧都会进来。
+     * 去重靠**最近一次提交的文本副本**，不回读控件。 */
+    if (state->term_output_label.id != 0) {
+        if (strcmp(state->term_output_shown, state->term_output) != 0) {
+            if (gui_widget_set_text(desktop_shell_platform(shell),
+                                    state->term_output_label,
+                                    state->term_output) == 0) {
+                snprintf(state->term_output_shown,
+                         sizeof(state->term_output_shown), "%s",
+                         state->term_output);
+            }
         }
     }
-    if (state->term_input_label != NULL) {
+    if (state->term_input_label.id != 0) {
         char buf[DESKTOP_TERM_LINE_MAX + 32];
         snprintf(buf, sizeof(buf), "%s%s", TERM_PROMPT, state->term_input);
-        const char *shown = lv_label_get_text(state->term_input_label);
-        if (shown == NULL || strcmp(shown, buf) != 0) {
-            lv_label_set_text(state->term_input_label, buf);
+        if (strcmp(state->term_input_shown, buf) != 0) {
+            if (gui_widget_set_text(desktop_shell_platform(shell),
+                                    state->term_input_label, buf) == 0) {
+                snprintf(state->term_input_shown,
+                         sizeof(state->term_input_shown), "%s", buf);
+            }
         }
     }
 }

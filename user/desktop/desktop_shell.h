@@ -2,7 +2,7 @@
 #define _DESKTOP_SHELL_H
 
 /*
- * desktop_shell.h — 桌面外壳（GUI-3）
+ * desktop_shell.h — 桌面外壳（GUI-3 / GUI-2b Task 10）
  *
  * 外壳同时只有一个可见表面，所有表面都占满整个显示区（全屏），彼此互斥。
  * 迁移一律是**整屏替换**：旧表面的控件树被销毁，新表面从零构建。
@@ -12,14 +12,21 @@
  *     因此外壳**不绘制任何窗口装饰**（应用顶栏上的「返回」是应用界面
  *     的一部分，不是窗口标题栏）。
  *   - UI 回调只**投递意图**（desktop_shell_request），迁移由主循环调用
- *     desktop_shell_apply_pending 串行执行 —— LVGL 回调期间销毁控件树
+ *     desktop_shell_apply_pending 串行执行 —— 回调期间销毁控件树
  *     是未定义行为。
+ *
+ * GUI-2b：桌面**只依赖 libgui 的公共 API**（原生控件注册表 + 唯一焦点
+ * 引擎）。本文件不再包含任何后端（LVGL）头：控件身份是 gui_widget_t，
+ * 焦点由 libgui 的焦点引擎持有，桌面不再维护第二套焦点序列。
  */
 
+#include <gui/gui_event.h>
+#include <gui/gui_focus.h>
 #include <gui/gui_input.h>
+#include <gui/gui_layout.h>
 #include <gui/gui_platform.h>
 #include <gui/gui_theme.h>
-#include <lvgl/lvgl.h>
+#include <gui/gui_widget.h>
 
 #include <time.h>
 
@@ -44,8 +51,12 @@ extern "C" {
 
 /**
  * @brief 单个表面的可聚焦项容量上限
+ *
+ * libgui 的焦点登记容量是 128（原生登记与诊断登记共用一张表）。桌面把
+ * 整个容量当作自己的上限：文件应用的 96 行加返回按钮共 97 项必须全部
+ * 可达。
  */
-#define DESKTOP_FOCUS_MAX 32
+#define DESKTOP_FOCUS_MAX 128
 
 /**
  * @brief 布局区域
@@ -85,7 +96,7 @@ typedef enum {
  * @brief 可在设置表面调整的项
  *
  * 设置项的变更同样走「投递 → 主循环执行」：改壁纸 / 密度要重建当前表面，
- * 而在 LVGL 回调期间销毁控件树是未定义行为。
+ * 而在回调期间销毁控件树是未定义行为。
  */
 typedef enum {
     DESKTOP_SETTING_NONE = 0,
@@ -97,16 +108,20 @@ typedef enum {
 /**
  * @brief 创建外壳并构建主屏
  *
- * 平台拥有 LVGL display；外壳通过 lv_display_get_default() 借用它
- * （libgui 的公共 API 刻意不暴露 LVGL 类型）。
+ * 平台与输入都必须有效且**关联**（输入属于同一个平台）：焦点引擎是
+ * 输入对象的一部分，输入与平台不匹配时桌面无法登记任何可聚焦控件。
+ *
+ * 外壳在创建时把焦点引擎的初始策略设为 MANUAL：主屏建好之后**没有**
+ * 焦点，第一次按 Tab 才落到第一个可聚焦项。
  *
  * @param platform 平台句柄（外壳只借用，不销毁）
- * @return 外壳；分配失败返回 NULL
+ * @param input    输入句柄（外壳只借用，不销毁）
+ * @return 外壳；参数无效或不匹配时返回 NULL
  */
-desktop_shell_t *desktop_shell_create(gui_platform_t *platform);
+desktop_shell_t *desktop_shell_create(gui_platform_t *platform, gui_input_t *input);
 
 /**
- * @brief 销毁外壳（销毁当前表面与时钟定时器）
+ * @brief 销毁外壳（销毁当前表面）
  */
 void desktop_shell_destroy(desktop_shell_t *shell);
 
@@ -121,11 +136,11 @@ desktop_state_t desktop_shell_state(const desktop_shell_t *shell);
 const char *desktop_shell_current_app(const desktop_shell_t *shell);
 
 /**
- * @brief 取得当前表面的根对象
+ * @brief 取得当前表面的根控件
  *
- * 应用表面恒为全屏：根对象覆盖整个显示区。
+ * 应用表面恒为全屏：根控件覆盖整个显示区。
  */
-lv_obj_t *desktop_shell_surface_root(const desktop_shell_t *shell);
+gui_widget_t desktop_shell_surface_root(const desktop_shell_t *shell);
 
 /**
  * @brief 取得外壳创建时刻（系统应用用来显示启动时间）
@@ -168,7 +183,7 @@ void desktop_shell_tick(desktop_shell_t *shell);
 
 /**
  * @brief 处理原生按键
- * @return true 表示已消费（不再进入 LVGL 控件路径）
+ * @return true 表示已消费（不再进入控件路径）
  */
 bool desktop_shell_handle_key(desktop_shell_t *shell, const gui_key_event_t *ev);
 
@@ -183,27 +198,12 @@ bool desktop_shell_probe_point(const desktop_shell_t *shell, desktop_region_t re
                                 uint32_t *x, uint32_t *y);
 
 /**
- * @brief 取得某个字号层级对应的 LVGL 字体
- *
- * 与 libgui 内部的令牌→字体映射保持一致；宿主测试会比对两者一致。
- */
-const lv_font_t *desktop_shell_font(gui_theme_font_t role);
-
-/**
  * @brief 取得平台句柄（外壳只借用）
  */
 gui_platform_t *desktop_shell_platform(const desktop_shell_t *shell);
 
 /**
- * @brief 挂接输入对象（外壳只借用）
- *
- * 系统应用用它报告键鼠是否存在；输入对象的生命周期归调用方（通常是
- * 桌面主入口），外壳既不创建也不销毁它。
- */
-void desktop_shell_attach_input(desktop_shell_t *shell, gui_input_t *input);
-
-/**
- * @brief 取得输入对象（未挂接时返回 NULL）
+ * @brief 取得输入句柄（外壳只借用）
  */
 gui_input_t *desktop_shell_input(const desktop_shell_t *shell);
 
@@ -215,9 +215,10 @@ gui_input_t *desktop_shell_input(const desktop_shell_t *shell);
  *
  * @param shell 外壳
  * @param parent 承载设置的容器（应用表面用）
- * @return 填充好的容器；失败返回 NULL
+ * @return 填充好的容器；失败返回 GUI_WIDGET_NONE
  */
-lv_obj_t *desktop_shell_build_settings_body(desktop_shell_t *shell, lv_obj_t *parent);
+gui_widget_t desktop_shell_build_settings_body(desktop_shell_t *shell,
+                                                gui_widget_t parent);
 
 /**
  * @brief 取得跨应用存活的应用状态
@@ -226,38 +227,6 @@ lv_obj_t *desktop_shell_build_settings_body(desktop_shell_t *shell, lv_obj_t *pa
  * 状态要保留，因此它们不能寄居在会被销毁的控件树里。
  */
 desktop_app_state_t *desktop_shell_app_state(desktop_shell_t *shell);
-
-/**
- * @brief 把一个控件登记为当前表面的可聚焦项
- *
- * 桌面**自己**维护焦点序列：libgui 的焦点组是私有的，公共 API 不暴露
- * 「登记可聚焦控件」的入口（业务应用只能用公共 API），因此外壳用
- * LVGL 的 LV_STATE_FOCUSED 状态实现同一语义：Tab / Shift+Tab 在序列里
- * 前进 / 后退，Enter 激活当前项，焦点环由 Material 主题给出。
- *
- * 登记的控件随当前表面一起销毁：外壳在重建表面时先清空序列，因此不会
- * 残留已销毁对象。
- *
- * @return 登记成功返回 true；超出容量返回 false
- */
-bool desktop_shell_focus_add(desktop_shell_t *shell, lv_obj_t *obj);
-
-/**
- * @brief 把某个容器下的所有焦点项移出序列
- *
- * 容器即将被销毁时必须先调用它：序列里不能留下已销毁对象的指针。
- */
-void desktop_shell_focus_remove_children(desktop_shell_t *shell, lv_obj_t *parent);
-
-/**
- * @brief 当前表面的可聚焦项数量
- */
-uint32_t desktop_shell_focus_count(const desktop_shell_t *shell);
-
-/**
- * @brief 当前焦点所在的可聚焦项序号；没有焦点时返回 -1
- */
-int32_t desktop_shell_focus_index(const desktop_shell_t *shell);
 
 /**
  * @brief 取得当前设置（供设置表面与宿主测试读取）

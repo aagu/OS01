@@ -84,6 +84,23 @@ uint32_t desktop_app_accent_color(desktop_app_id_t id)
     }
 }
 
+gui_color_role_t desktop_app_accent_role(desktop_app_id_t id)
+{
+    const desktop_app_info_t *info = desktop_app_info(id);
+    if (info == NULL) {
+        return GUI_COLOR_COUNT;
+    }
+
+    switch (info->accent) {
+    case DESKTOP_ACCENT_PRIMARY:   return GUI_COLOR_PRIMARY;
+    case DESKTOP_ACCENT_SECONDARY: return GUI_COLOR_SECONDARY;
+    case DESKTOP_ACCENT_TERTIARY:  return GUI_COLOR_TERTIARY;
+    case DESKTOP_ACCENT_SUCCESS:   return GUI_COLOR_SUCCESS;
+    case DESKTOP_ACCENT_ERROR:     return GUI_COLOR_ERROR;
+    default:                       return GUI_COLOR_PRIMARY;
+    }
+}
+
 const char *desktop_app_id_name(desktop_app_id_t id)
 {
     if ((int)id < 0 || (int)id >= (int)DESKTOP_APP_COUNT) {

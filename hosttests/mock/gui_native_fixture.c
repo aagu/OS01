@@ -15,6 +15,7 @@
 #include <lvgl/lvgl.h>
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* 宿主视图与 libgui 内部常量必须一一对应：漂了就说明 fixture 说谎了。 */
@@ -726,4 +727,89 @@ int gui_native_fixture_restore_default_display(gui_platform_t *platform)
     }
     lv_display_set_default(platform_disp);
     return 0;
+}
+
+/* ── 宿主私有的字体与外来输入探针 ─────────────────────────────────── */
+
+int gui_native_fixture_query_font_line_height(gui_native_fixture_t *fx,
+                                              gui_widget_t widget,
+                                              int *out_line_height)
+{
+    lv_obj_t *obj;
+
+    if (!fx || !fx->platform || !out_line_height) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_line_height = 0;
+
+    obj = gui_widget_test_get_obj(fx->platform, widget);
+    if (!obj) {
+        errno = EINVAL;
+        return -1;
+    }
+    {
+        const lv_font_t *font = lv_obj_get_style_text_font(obj, LV_PART_MAIN);
+        if (!font) {
+            errno = EINVAL;
+            return -1;
+        }
+        *out_line_height = (int)font->line_height;
+    }
+    return 0;
+}
+
+/*
+ * 「外来输入」：它的 platform 指向一个没有注册表的假平台。
+ *
+ * 公共 API 造不出这种输入（平台是单例，输入不能跨平台），所以「输入与
+ * 平台必须关联」这条拒绝路径只能靠宿主私有对象构造。
+ */
+static gui_platform_t *g_foreign_platform;
+
+int gui_native_fixture_create_foreign_input(gui_input_t **out)
+{
+    gui_input_t *input;
+    gui_platform_t *fake;
+
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out = NULL;
+
+    gui_native_fixture_destroy_foreign_input(NULL);
+    g_foreign_platform = NULL;
+
+    fake = (gui_platform_t *)calloc(1, sizeof(*fake));
+    if (!fake) {
+        errno = ENOMEM;
+        return -1;
+    }
+    input = (gui_input_t *)calloc(1, sizeof(*input));
+    if (!input) {
+        free(fake);
+        errno = ENOMEM;
+        return -1;
+    }
+    /* fake->registry 保持 NULL：焦点解析会直接判 EINVAL。 */
+    input->platform = fake;
+    input->mode = GUI_INPUT_SYNTHETIC;
+
+    g_foreign_platform = fake;
+    *out = input;
+    return 0;
+}
+
+void gui_native_fixture_destroy_foreign_input(gui_input_t *input)
+{
+    if (!input) {
+        /* 没有外来输入：把上一次留下的假平台也清掉。 */
+        free(g_foreign_platform);
+        g_foreign_platform = NULL;
+        return;
+    }
+    free(input->platform);
+    free(input);
+    g_foreign_platform = NULL;
 }

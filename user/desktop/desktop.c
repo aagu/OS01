@@ -99,25 +99,17 @@ int main(int argc, char **argv)
     }
 
     /*
-     * LVGL display 由平台拥有；桌面只借用。libgui 只创建一个 display，
-     * 它就是 LVGL 的默认 display（公共 API 刻意不暴露 LVGL 类型）。
+     * 外壳需要平台与输入**两个**有效且关联的句柄：焦点引擎住在输入对象
+     * 里，外壳登记的每一个可聚焦控件都必须属于同一个平台。
      */
-    lv_display_t *display = lv_display_get_default();
-    if (display == NULL) {
-        fprintf(stderr, "desktop: the platform has no LVGL display\n");
-        gui_platform_destroy(platform);
-        return 1;
-    }
-
-    desktop_shell_t *shell = desktop_shell_create(platform);
+    desktop_shell_t *shell = desktop_shell_create(platform, input);
     if (shell == NULL) {
-        fprintf(stderr, "desktop: cannot create the desktop shell\n");
+        fprintf(stderr, "desktop: cannot create the desktop shell (errno=%d)\n",
+                errno);
+        gui_input_destroy(input);
         gui_platform_destroy(platform);
         return 1;
     }
-
-    /* 系统应用要报告键鼠是否存在：把输入对象借给外壳。 */
-    desktop_shell_attach_input(shell, input);
 
     gui_input_set_key_handler(input, on_native_key, shell);
 
