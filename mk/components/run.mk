@@ -440,7 +440,7 @@ test-pmm-boot-reservation:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -854,6 +854,15 @@ test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_R
 	    all) echo "  [test-gui-host] full registered group: $(GUI_HOST_REGISTERED_CASES)";; \
 	    *) echo "  [test-gui-host] CASE=$(GUI_CASE_EFFECTIVE)";; \
 	  esac
+
+.PHONY: test-gui-widget test-gui-focus
+test-gui-widget:
+	$(call require_capability,rootfs)
+	@$(MAKE) --no-print-directory test-gui-host CASE=widget
+
+test-gui-focus:
+	$(call require_capability,rootfs)
+	@$(MAKE) --no-print-directory test-gui-host CASE=focus
 
 
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
@@ -1478,6 +1487,17 @@ test-static: test-runtime
 GUI_INCREMENTAL_AUDIT = python3 qemutests/gui_build_audit.py \
 	--build-dir "$(BUILD_DIR)" --repo-root "$(OS01_ROOT)" --profile "$(PROFILE)"
 
+define _touch_check_hdr
+	@echo "    [incr-touch] testing $(1) (consumer: $(2))"
+	@stat -c %y libgui/include/gui/$(1) > $(BUILD_DIR)/incr-header-time
+	$(GUI_INCREMENTAL_AUDIT) --header $(1) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
+	@touch libgui/include/gui/$(1)
+	$(call os01_submake,libgui,all)
+	$(MAKE) --no-print-directory test-gui-host CASE=$(2)
+	@touch -d "$$(cat $(BUILD_DIR)/incr-header-time)" libgui/include/gui/$(1)
+	$(GUI_INCREMENTAL_AUDIT) --header $(1) --incremental-compare "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
+endef
+
 .PHONY: test-gui-incremental
 test-gui-incremental:
 	$(call require_capability,rootfs)
@@ -1486,18 +1506,17 @@ test-gui-incremental:
 	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
 	$(call os01_submake,libgui,all)
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-noop.json" --incremental-phase noop
-	@echo "  [test-gui-incremental] phase 2/4: touching gui_input.h must rebuild the dependents"
-	@stat -c %y libgui/include/gui/gui_input.h > $(BUILD_DIR)/incr-header-time
+	@echo "  [test-gui-incremental] phase 2/4: touching public headers must rebuild their dependents"
 	@$(call os01_submake,libgui,--no-print-directory print-compile) > $(BUILD_DIR)/incr-libgui-compile.txt
-	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
-	@touch libgui/include/gui/gui_input.h
-	$(call os01_submake,libgui,all)
-	$(MAKE) --no-print-directory test-gui-host CASE=input-decode
-	@touch -d "$$(cat $(BUILD_DIR)/incr-header-time)" libgui/include/gui/gui_input.h
-	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-touch.json" --incremental-phase touch --libgui-compile "$(BUILD_DIR)/incr-libgui-compile.txt"
+	$(call _touch_check_hdr,gui_input.h,input-decode)
+	$(call _touch_check_hdr,gui_widget.h,widget)
+	$(call _touch_check_hdr,gui_layout.h,widget-layout)
+	$(call _touch_check_hdr,gui_event.h,widget-event)
+	$(call _touch_check_hdr,gui_focus.h,focus)
 	@echo "  [test-gui-incremental] phase 3/4: install must clear orphaned staging files"
 	@mkdir -p $(STAGING_DIR)/gui/usr/include/gui
 	@printf '/* orphaned staging file */\n' > $(STAGING_DIR)/gui/usr/include/gui/gui_input_private.h
+	@printf '/* orphaned staging file */\n' > $(STAGING_DIR)/gui/usr/include/gui/gui_widget_private.h
 	$(GUI_INCREMENTAL_AUDIT) --incremental-snapshot "$(BUILD_DIR)/incr-install.json" --incremental-phase install
 	$(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui)
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-install.json" --incremental-phase install

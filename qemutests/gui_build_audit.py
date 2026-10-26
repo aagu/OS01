@@ -123,6 +123,8 @@ GUI_TEST_HOOK_SYMBOLS = (
 GUI_TEST_HOOK_PREFIXES = (
     "gui_input_test_",
     "gui_widget_test_",
+    "gui_focus_test_",
+    "g_gui_test_",
 )
 
 # Production objects that must be archive members.  The GUI-2 input units
@@ -606,12 +608,18 @@ int main(void)
         return 2;
     }
 
-    /* widget handles (GUI-2b): the value handle and the queries this
-     * phase really implements. */
+    /* widget handles & layout & appearance & events (GUI-2b) */
     {
         gui_widget_t widget = GUI_WIDGET_NONE;
         gui_widget_kind_t kind = GUI_WIDGET_KIND_COUNT;
         gui_rect_t rect;
+        gui_geometry_t geom = {0, 0, GUI_SIZE_PX(10), GUI_SIZE_FILL};
+        gui_alignment_t align = {GUI_ALIGN_MID, 0, 0};
+        gui_layout_t layout = {0};
+        gui_scroll_t scroll = {0};
+        gui_appearance_t app = GUI_APPEARANCE_DEFAULT;
+        gui_platform_stats_t stats;
+
         (void)gui_widget_is_valid(platform, widget);
         (void)gui_widget_get_kind(platform, widget, &kind);
         (void)gui_widget_create(platform, GUI_WIDGET_NONE, GUI_WIDGET_CONTAINER, &widget);
@@ -619,6 +627,22 @@ int main(void)
         (void)gui_widget_set_visible(platform, widget, 1);
         (void)gui_widget_set_enabled(platform, widget, 1);
         (void)gui_widget_get_bounds(platform, widget, &rect);
+        (void)gui_widget_set_geometry(platform, widget, &geom);
+        (void)gui_widget_set_alignment(platform, widget, &align);
+        (void)gui_widget_set_layout(platform, widget, &layout);
+        (void)gui_widget_set_scroll(platform, widget, &scroll);
+        (void)gui_widget_set_appearance(platform, widget, &app);
+        (void)gui_widget_set_event_handler(platform, widget, (gui_event_handler_t)0, (void *)0);
+        (void)gui_platform_get_stats(platform, &stats);
+
+        /* focus engine (GUI-2b) */
+        (void)gui_focus_set_initial_policy(input, GUI_FOCUS_INITIAL_MANUAL);
+        (void)gui_focus_register(input, widget, GUI_FOCUS_TAB);
+        (void)gui_focus_set(input, widget);
+        (void)gui_focus_get(input, &widget);
+        (void)gui_focus_move(input, GUI_FOCUS_FORWARD);
+        (void)gui_focus_unregister(input, widget);
+
         (void)gui_widget_clear(platform, widget);
         (void)gui_widget_destroy(platform, widget);
     }
@@ -801,7 +825,13 @@ def audit_link_probe(
         parts = line.split()
         if parts:
             linked.add(parts[-1])
-    for sym in ("gui_platform_create", "gui_input_create", "gui_input_dispatch"):
+    for sym in (
+        "gui_platform_create",
+        "gui_input_create",
+        "gui_input_dispatch",
+        *GUI_PUBLIC_WIDGET_SYMBOLS,
+        *GUI_PUBLIC_FOCUS_SYMBOLS,
+    ):
         if sym not in linked:
             errors.append(f"link probe: the linked ELF does not define {sym}")
 
@@ -1126,6 +1156,8 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui_platform_private.h",
         "usr/include/gui/gui_input_ps2.h",
         "usr/include/gui/gui_tick.h",
+        "usr/include/gui/gui_cursor_icon.h",
+        "usr/include/gui/gui_widget_private.h",
         # The kernel's PS/2 Set 1 framer and the physical input route are
         # kernel-private interfaces: the userspace input ABI is
         # uapi/gfx.h + uapi/mouse.h and libgui decodes the raw Set 1 bytes
@@ -1331,8 +1363,12 @@ def audit_sysroot_and_build(
             c_src.write_text(
                 "#include <gui/gui.h>\n"
                 "#include <gui/gui_platform.h>\n"
+                "#include <gui/gui_input.h>\n"
+                "#include <gui/gui_theme.h>\n"
                 "#include <gui/gui_widget.h>\n"
+                "#include <gui/gui_event.h>\n"
                 "#include <gui/gui_layout.h>\n"
+                "#include <gui/gui_focus.h>\n"
                 "int test_consumer(void) {\n"
                 "    gui_config_t cfg = {0};\n"
                 "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
@@ -1342,9 +1378,13 @@ def audit_sysroot_and_build(
                 "    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;\n"
                 "    gui_platform_stats_t stats = {0};\n"
                 "    gui_platform_t *platform = (gui_platform_t *)0;\n"
+                "    gui_input_t *input = (gui_input_t *)0;\n"
                 "    int rc = gui_platform_get_stats(platform, &stats);\n"
                 "    rc += gui_widget_set_event_handler(platform, widget, (gui_event_handler_t)0,\n"
                 "                                    (void *)0);\n"
+                "    rc += gui_focus_set_initial_policy(input, GUI_FOCUS_INITIAL_MANUAL);\n"
+                "    rc += gui_focus_register(input, widget, GUI_FOCUS_TAB);\n"
+                "    rc += gui_focus_move(input, GUI_FOCUS_FORWARD);\n"
                 "    (void)rc;\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
@@ -1381,8 +1421,12 @@ def audit_sysroot_and_build(
             cpp_src.write_text(
                 "#include <gui/gui.h>\n"
                 "#include <gui/gui_platform.h>\n"
+                "#include <gui/gui_input.h>\n"
+                "#include <gui/gui_theme.h>\n"
                 "#include <gui/gui_widget.h>\n"
+                "#include <gui/gui_event.h>\n"
                 "#include <gui/gui_layout.h>\n"
+                "#include <gui/gui_focus.h>\n"
                 "int test_consumer() {\n"
                 "    gui_config_t cfg = {};\n"
                 "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
@@ -1392,9 +1436,13 @@ def audit_sysroot_and_build(
                 "    gui_appearance_t appearance = GUI_APPEARANCE_DEFAULT;\n"
                 "    gui_platform_stats_t stats = {};\n"
                 "    gui_platform_t *platform = (gui_platform_t *)0;\n"
+                "    gui_input_t *input = (gui_input_t *)0;\n"
                 "    int rc = gui_platform_get_stats(platform, &stats);\n"
                 "    rc += gui_widget_set_event_handler(platform, widget, (gui_event_handler_t)0,\n"
                 "                                    (void *)0);\n"
+                "    rc += gui_focus_set_initial_policy(input, GUI_FOCUS_INITIAL_MANUAL);\n"
+                "    rc += gui_focus_register(input, widget, GUI_FOCUS_TAB);\n"
+                "    rc += gui_focus_move(input, GUI_FOCUS_FORWARD);\n"
                 "    (void)rc;\n"
                 "    (void)cfg;\n"
                 "    (void)widget;\n"
@@ -1708,15 +1756,25 @@ def _generation_snapshots(
     return out
 
 
-def _incremental_paths(repo_root: Path, build_dir: Path) -> dict[str, Path]:
+def _incremental_paths(
+    repo_root: Path, build_dir: Path, header_name: str = "gui_input.h"
+) -> dict[str, Path]:
+    consumer_fixtures = {
+        "gui_input.h": "test_gui_input_decode.elf",
+        "gui_widget.h": "test_gui_widget.elf",
+        "gui_layout.h": "test_gui_widget_layout.elf",
+        "gui_event.h": "test_gui_widget_event.elf",
+        "gui_focus.h": "test_gui_focus.elf",
+    }
+    fixture_name = consumer_fixtures.get(header_name, "test_gui_input_decode.elf")
     return {
         "obj_root": build_dir / "libgui" / "obj",
         "archive": build_dir / "libgui" / "lib" / "libgui.a",
-        "fixture": build_dir / "host-test" / "test_gui_input_decode.elf",
+        "fixture": build_dir / "host-test" / fixture_name,
         "staging": build_dir / "staging" / "gui",
         "generations": build_dir / "sysroot-generations",
         "sysroot": build_dir / "sysroot",
-        "header": repo_root / "libgui" / "include" / "gui" / "gui_input.h",
+        "header": repo_root / "libgui" / "include" / "gui" / header_name,
     }
 
 
@@ -1726,13 +1784,14 @@ def incremental_snapshot(
     profile: str,
     phase: str,
     out_file: Path,
+    header_name: str = "gui_input.h",
 ) -> bool:
     """Record the baseline the compare step will check against."""
     errors: list[str] = []
-    paths = _incremental_paths(repo_root, build_dir)
+    paths = _incremental_paths(repo_root, build_dir, header_name=header_name)
     header = paths["header"]
     if not header.is_file():
-        errors.append(f"incremental: the public input header is missing: {header}")
+        errors.append(f"incremental: the public header is missing: {header}")
     deps = _dependent_objects(paths["obj_root"], header)
 
     data = {
@@ -1741,6 +1800,7 @@ def incremental_snapshot(
         "repo_root": str(repo_root),
         "build_dir": str(build_dir),
         "header": str(header),
+        "header_name": header.name,
         "dependent_objects": {str(o): (o.stat().st_mtime_ns if o.is_file() else None) for o in deps},
         "objects": _snapshot(paths["obj_root"]),
         "archive": (
@@ -1803,6 +1863,7 @@ def incremental_compare(
     phase: str,
     snapshot_file: Path,
     compile_cmd: str = "",
+    header_name: str = "",
 ) -> bool:
     """Check the recorded baseline against the current build state."""
     errors: list[str] = []
@@ -1822,7 +1883,9 @@ def incremental_compare(
         )
         return _report_incremental(errors)
 
-    paths = _incremental_paths(repo_root, build_dir)
+    if not header_name:
+        header_name = data.get("header_name", "gui_input.h")
+    paths = _incremental_paths(repo_root, build_dir, header_name=header_name)
     header = paths["header"]
 
     if phase == "noop":
@@ -2032,55 +2095,65 @@ def audit_incremental_state(
     """The build-free half of the incremental contract.
 
     Verifies the invariants that need no build step:
-      * the libgui dependency tracking names the EXACT public header (a
-        decoy dependency or a missing dependency fails here);
+      * the libgui dependency tracking names the EXACT public headers (a
+        decoy dependency or a missing dependency fails here) across all
+        public headers with library dependents;
       * the staging tree contains exactly the published files;
       * every published generation exposes only the public GUI headers.
     """
     paths = _incremental_paths(repo_root, build_dir)
-    header = paths["header"]
-    if not header.is_file():
-        errors.append(f"incremental: the public input header is missing: {header}")
-        return False
-
-    deps = set(_dependent_objects(paths["obj_root"], header))
-    compiler_view: set[Path] = set()
-    if compile_cmd:
-        with tempfile.TemporaryDirectory(prefix="gui-compiler-deps-") as td:
-            compiler_view, cerr = _compiler_dependency_view(
-                compile_cmd, repo_root, build_dir, header, Path(td)
-            )
-        errors.extend(cerr)
-    if compile_cmd and not compiler_view and not cerr:
-        errors.append(
-            f"incremental: no libgui source depends on {header} — the audit cannot "
-            "establish the rebuild contract"
-        )
-    if not deps:
-        errors.append(
-            f"incremental: no libgui object depends on {header} — the dependency "
-            "tracking is broken"
-        )
-    if compile_cmd:
-        under_reported = sorted(obj.name for obj in (compiler_view - deps))
-        if under_reported:
-            errors.append(
-                f"incremental: the dependency tracking UNDER-reports — the compiler "
-                f"records {under_reported} as depending on {header.name} but the "
-                "build dependency files do not"
-            )
-        over_reported = sorted(obj.name for obj in (deps - compiler_view))
-        if over_reported:
-            errors.append(
-                f"incremental: the dependency tracking OVER-reports — the build "
-                f"dependency files record {over_reported} as depending on "
-                f"{header.name} but the compiler does not"
-            )
-    print(
-        f"gui incremental state: {len(compiler_view) or len(deps)} libgui object(s) "
-        f"depend on {header.name} "
-        f"(compiler view: {len(compiler_view)}, dependency-file view: {len(deps)})"
+    incremental_headers = (
+        "gui_input.h",
+        "gui_widget.h",
+        "gui_layout.h",
+        "gui_event.h",
+        "gui_focus.h",
     )
+    for hdr_name in incremental_headers:
+        header = repo_root / "libgui" / "include" / "gui" / hdr_name
+        if not header.is_file():
+            errors.append(f"incremental: the public header is missing: {header}")
+            continue
+
+        deps = set(_dependent_objects(paths["obj_root"], header))
+        compiler_view: set[Path] = set()
+        cerr: list[str] = []
+        if compile_cmd:
+            with tempfile.TemporaryDirectory(prefix="gui-compiler-deps-") as td:
+                compiler_view, cerr = _compiler_dependency_view(
+                    compile_cmd, repo_root, build_dir, header, Path(td)
+                )
+            errors.extend(cerr)
+        if compile_cmd and not compiler_view and not cerr:
+            errors.append(
+                f"incremental: no libgui source depends on {header} — the audit cannot "
+                "establish the rebuild contract"
+            )
+        if not deps:
+            errors.append(
+                f"incremental: no libgui object depends on {header} — the dependency "
+                "tracking is broken"
+            )
+        if compile_cmd:
+            under_reported = sorted(obj.name for obj in (compiler_view - deps))
+            if under_reported:
+                errors.append(
+                    f"incremental: the dependency tracking UNDER-reports — the compiler "
+                    f"records {under_reported} as depending on {header.name} but the "
+                    "build dependency files do not"
+                )
+            over_reported = sorted(obj.name for obj in (deps - compiler_view))
+            if over_reported:
+                errors.append(
+                    f"incremental: the dependency tracking OVER-reports — the build "
+                    f"dependency files record {over_reported} as depending on "
+                    f"{header.name} but the compiler does not"
+                )
+        print(
+            f"gui incremental state: {len(compiler_view) or len(deps)} libgui object(s) "
+            f"depend on {header.name} "
+            f"(compiler view: {len(compiler_view)}, dependency-file view: {len(deps)})"
+        )
 
     staging = paths["staging"]
     if staging.is_dir():
@@ -2204,6 +2277,12 @@ def main() -> int:
         help="The incremental phase a snapshot/compare pair belongs to",
     )
     parser.add_argument(
+        "--header",
+        type=str,
+        default="gui_input.h",
+        help="Header to audit in incremental touch phase (default: gui_input.h)",
+    )
+    parser.add_argument(
         "--libgui-compile",
         type=str,
         default=None,
@@ -2282,6 +2361,7 @@ def main() -> int:
                 profile,
                 args.incremental_phase,
                 Path(args.incremental_snapshot),
+                header_name=args.header,
             ):
                 success = False
         if args.incremental_compare:
@@ -2292,6 +2372,7 @@ def main() -> int:
                 args.incremental_phase,
                 Path(args.incremental_compare),
                 _read_compile_command(args.libgui_compile, build_dir_path),
+                header_name=args.header,
             ):
                 success = False
 
