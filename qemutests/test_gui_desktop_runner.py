@@ -28,6 +28,8 @@ to catch.
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,6 +40,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from qemutests import gui_desktop_test
 from qemutests.gui_desktop_test import (  # noqa: E402
     DesktopCaseRunner,
     _ACTIVE_RUNNERS,
@@ -369,6 +372,383 @@ class ProcessSessionPdeathTests(unittest.TestCase):
             for stream in (proc.stdout, proc.stderr):
                 if stream is not None:
                     stream.close()
+
+
+class MockDesktopQMP:
+    """Mock QMP client for desktop runner unit tests."""
+
+    def __init__(self, session: MockDesktopSession, run_dir: Path) -> None:
+        self.session = session
+        self.run_dir = run_dir
+        self.connected = True
+        self.events_log: list = []
+
+    def connect(self) -> None:
+        self.connected = True
+
+    def set_transcript(self, path: Path) -> None:
+        pass
+
+    def input_events(self, events: list) -> None:
+        self.events_log.extend(events)
+        for ev in events:
+            if ev.get("type") == "key":
+                down = ev.get("data", {}).get("down", False)
+                qcode = ev.get("data", {}).get("key", {}).get("data", "")
+                if down:
+                    self.session.handle_key_down(qcode)
+                else:
+                    self.session.handle_key_up(qcode)
+
+    def screendump(self, path: Path) -> Surface:
+        return self.session.get_surface()
+
+    def close(self) -> None:
+        self.connected = False
+
+
+class MockDesktopSession:
+    """Mock ProcessSession simulating guest shell and desktop probe state."""
+
+    WALLPAPER = (0xD8, 0xD2, 0xE4)
+    CURSOR_DARK = (0x1A, 0x1C, 0x1E)
+    CURSOR_LIGHT = (0xFD, 0xFC, 0xFF)
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.child_pid = 4242
+        self.closed = False
+        self.text = "# "
+        self.nonce = ""
+        self.seq = 1
+        self.surface = "home"
+        self.cwd = "/"
+        self.focus_tag = "none"
+        self.item_count = 3
+        self.fixture_dir = "/tmp/fixture96"
+        self.items_in_fixture = [f"/tmp/fixture96/d{i:02d}" for i in range(96)]
+        self.held_keys: set = set()
+        self.desktop_running = False
+
+        # Fault switches
+        self.fault_bad_combo_key = False
+        self.fault_focus_never_moves = False
+        self.fault_skip_intermediate_item = False
+        self.fault_always_same_app = False
+        self.fault_stale_nonce_seq = False
+        self.fault_wrong_cwd = False
+        self.fault_no_render_or_exit = False
+
+    def start(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def observe(self, timeout: float = 0.1) -> None:
+        pass
+
+    def handle_key_up(self, qcode: str) -> None:
+        if qcode == "shift":
+            self.held_keys.discard("shift")
+
+    def handle_key_down(self, qcode: str) -> None:
+        if qcode == "shift":
+            self.held_keys.add("shift")
+            return
+
+        is_shift = "shift" in self.held_keys
+        if qcode == "tab":
+            if is_shift:
+                # Combo Shift+Tab
+                self.seq += 1
+                if self.fault_bad_combo_key:
+                    self.focus_tag = "files"
+                elif self.surface == "home":
+                    self.focus_tag = "settings"
+                elif self.surface == "files" and self.cwd == self.fixture_dir:
+                    items = ["back"] + self.items_in_fixture
+                    if self.focus_tag not in items:
+                        self.focus_tag = "back"
+                    else:
+                        idx = (items.index(self.focus_tag) - 1) % len(items)
+                        self.focus_tag = items[idx]
+            else:
+                # Normal Tab
+                if self.fault_focus_never_moves:
+                    return
+                self.seq += 1
+                if self.surface == "home":
+                    launchers = ["files", "terminal", "settings"]
+                    if self.focus_tag not in launchers:
+                        self.focus_tag = launchers[0]
+                    else:
+                        idx = (launchers.index(self.focus_tag) + 1) % len(launchers)
+                        self.focus_tag = launchers[idx]
+                elif self.surface == "files":
+                    if self.cwd == "/":
+                        root_entries = ["/bin", "/dev", "/tmp"]
+                        if self.focus_tag not in root_entries:
+                            self.focus_tag = root_entries[0]
+                        else:
+                            idx = (root_entries.index(self.focus_tag) + 1) % len(root_entries)
+                            self.focus_tag = root_entries[idx]
+                    elif self.cwd == "/tmp":
+                        self.focus_tag = self.fixture_dir
+                    elif self.cwd == self.fixture_dir:
+                        items = ["back"] + self.items_in_fixture
+                        if self.focus_tag not in items:
+                            self.focus_tag = "back"
+                        else:
+                            idx = (items.index(self.focus_tag) + 1) % len(items)
+                            if self.fault_skip_intermediate_item and idx == 42:
+                                idx = 43
+                            self.focus_tag = items[idx]
+                    elif self.cwd == f"{self.fixture_dir}/d00":
+                        self.focus_tag = f"{self.fixture_dir}/d00/sublevel"
+        elif qcode == "ret":
+            self.seq += 1
+            if self.surface == "home":
+                if self.focus_tag == "settings":
+                    self.surface = "files" if self.fault_always_same_app else "settings"
+                elif self.focus_tag == "files":
+                    self.surface = "files"
+                    self.cwd = "/"
+                elif self.focus_tag == "terminal":
+                    self.surface = "terminal"
+            elif self.surface == "files":
+                if self.focus_tag == "/tmp":
+                    self.cwd = "/tmp"
+                elif self.focus_tag == self.fixture_dir:
+                    self.cwd = self.fixture_dir
+                    self.item_count = 96
+                elif self.focus_tag == f"{self.fixture_dir}/d00":
+                    self.cwd = f"{self.fixture_dir}/d00"
+                    self.item_count = 1
+                elif self.focus_tag == f"{self.fixture_dir}/d00/sublevel":
+                    self.cwd = f"{self.fixture_dir}/d00/sublevel"
+                    self.item_count = 0
+        elif qcode == "esc":
+            self.seq += 1
+            if self.surface == "files":
+                if self.cwd == f"{self.fixture_dir}/d00/sublevel":
+                    self.cwd = f"{self.fixture_dir}/d00"
+                elif self.cwd == f"{self.fixture_dir}/d00":
+                    self.cwd = self.fixture_dir
+                elif self.cwd == self.fixture_dir:
+                    self.cwd = "/tmp"
+                elif self.cwd == "/tmp":
+                    self.cwd = "/"
+                elif self.cwd == "/":
+                    self.surface = "home"
+                    self.focus_tag = "none"
+            elif self.surface in ("terminal", "settings"):
+                self.surface = "home"
+                self.focus_tag = "none"
+
+    def send(self, data: bytes) -> None:
+        cmd_str = data.decode("utf-8", errors="replace")
+        if "/bin/desktop probe " in cmd_str:
+            parts = cmd_str.split("/bin/desktop probe ")[1].split()
+            if parts:
+                self.nonce = parts[0]
+                self.seq = 1
+                self.surface = "home"
+                self.cwd = "/"
+                self.focus_tag = "none"
+                self.item_count = 3
+                self.desktop_running = True
+        elif "/bin/desktop &" in cmd_str:
+            self.desktop_running = True
+
+        m_canary = re.search(r"(CANARY_\S+)", cmd_str)
+        if m_canary:
+            nonce = m_canary.group(1)
+            self.text += f"\n__SHELL_{nonce}__\n# "
+
+        m_exit = re.search(r"(CMD_\S+)", cmd_str)
+        if m_exit:
+            exit_nonce = m_exit.group(1)
+            if "cat /tmp/gui-desktop-" in cmd_str:
+                if self.fault_stale_nonce_seq:
+                    st_json = json.dumps({
+                        "nonce": "stale_nonce_000",
+                        "seq": 0,
+                        "surface": "home",
+                        "app_id": "home",
+                        "cwd": "",
+                        "subtitle": "",
+                        "focus_tag": "none",
+                        "item_count": 3,
+                    })
+                else:
+                    st_json = json.dumps({
+                        "nonce": self.nonce,
+                        "seq": self.seq,
+                        "surface": self.surface,
+                        "app_id": self.surface,
+                        "cwd": "/tmp/wrong_path" if self.fault_wrong_cwd else self.cwd,
+                        "subtitle": "/tmp/wrong_path" if self.fault_wrong_cwd else self.cwd,
+                        "focus_tag": self.focus_tag,
+                        "item_count": self.item_count,
+                    })
+                self.text += f"\n{st_json}\n__EXIT_{exit_nonce}_0__\n# "
+            else:
+                self.text += f"\nok\n__EXIT_{exit_nonce}_0__\n# "
+
+    def get_surface(self) -> Surface:
+        w, h = 64, 48
+        pixels = bytearray()
+        if self.fault_no_render_or_exit:
+            # Solid color (diff = 0)
+            return Surface(w, h, bytes([0x10, 0x10, 0x10] * (w * h)))
+
+        if not self.desktop_running:
+            # Console terminal (black background, white cursor)
+            for _ in range(w * h):
+                pixels.extend((0x00, 0x00, 0x00))
+            pixels[0:6] = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+            return Surface(w, h, bytes(pixels))
+
+        # Desktop screen: mostly wallpaper (216, 210, 228) + cursor at center + accent colors
+        for _ in range(w * h):
+            pixels.extend(self.WALLPAPER)
+
+        # Paint cursor at center
+        cx, cy = w // 2, h // 2
+        for r in range(4):
+            for c in range(r + 1):
+                col = self.CURSOR_LIGHT if c == r else self.CURSOR_DARK
+                idx = ((cy + r) * w + (cx + c)) * 3
+                pixels[idx:idx + 3] = bytes(col)
+
+        # Surface specific colors to give distinct colors and diff > 0.02
+        if self.surface == "home":
+            # Status bar and cards (sampled with step=4)
+            for i, c in enumerate([(0x11, 0x22, 0x33), (0x44, 0x55, 0x66), (0x77, 0x88, 0x99),
+                                   (0xAA, 0xBB, 0xCC), (0x12, 0x34, 0x56), (0xEE, 0xDD, 0xCC)]):
+                idx = (0 * w + (i * 4)) * 3
+                pixels[idx:idx + 3] = bytes(c)
+            for x in range(10, 20):
+                for y in range(30, 40):
+                    idx = (y * w + x) * 3
+                    pixels[idx:idx + 3] = bytes((0x50, 0x60, 0x70))
+        elif self.surface == "settings":
+            for x in range(w):
+                for y in range(8):
+                    idx = (y * w + x) * 3
+                    pixels[idx:idx + 3] = bytes((0x10, 0x40, 0xC0))
+        elif self.surface == "files":
+            for x in range(w):
+                for y in range(8):
+                    idx = (y * w + x) * 3
+                    pixels[idx:idx + 3] = bytes((0x20, 0x90, 0x30))
+        elif self.surface == "terminal":
+            for x in range(w):
+                for y in range(8):
+                    idx = (y * w + x) * 3
+                    pixels[idx:idx + 3] = bytes((0x80, 0x20, 0x80))
+
+        return Surface(w, h, bytes(pixels))
+
+
+class DesktopProbeRunnerTests(unittest.TestCase):
+    """Positive and negative unit tests for probe scenarios in DesktopCaseRunner."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="os01-gd-probe-test-")
+        self.addCleanup(tmp.cleanup)
+        self._run_dir = Path(tmp.name)
+        orig_sleep = time.sleep
+        time.sleep = lambda *a: None
+        self.addCleanup(setattr, time, "sleep", orig_sleep)
+        orig_tt = gui_desktop_test.TAKEOVER_TIMEOUT_SECONDS
+        gui_desktop_test.TAKEOVER_TIMEOUT_SECONDS = 0.5
+        self.addCleanup(setattr, gui_desktop_test, "TAKEOVER_TIMEOUT_SECONDS", orig_tt)
+
+    def _make_runner(self) -> Tuple[DesktopCaseRunner, MockDesktopSession]:
+        session = MockDesktopSession()
+        runner = DesktopCaseRunner(
+            smp=1,
+            image=self._run_dir / "disk.img",
+            firmware=self._run_dir / "OVMF.fd",
+            run_dir=self._run_dir,
+            session_factory=lambda *a, **kw: session,
+            qmp_factory=lambda sock: MockDesktopQMP(session, self._run_dir),
+            timeout=2.0,
+        )
+        runner.boot_timeout = 1.0
+        runner.cmd_timeout = 1.0
+        return runner, session
+
+    def test_full_probe_matrix_pass(self) -> None:
+        """Positive model: all normal and probe scenarios succeed cleanly."""
+        runner, session = self._make_runner()
+        ok, reasons, outcomes = runner.run_all()
+        self.assertTrue(ok, f"run_all failed with reasons: {reasons}")
+        self.assertEqual(reasons, [])
+        case_names = [o["case"] for o in outcomes]
+        self.assertIn("desktop_keyboard_reverse", case_names)
+        self.assertIn("desktop_files_97_focus_items", case_names)
+        self.assertIn("desktop_files_two_levels", case_names)
+        self.assertIn("desktop_terminal_enter", case_names)
+        for o in outcomes:
+            self.assertEqual(o["status"], "PASS")
+
+    def test_probe_bad_combo_key_rejected(self) -> None:
+        """Negative model: bad combo key fails the reverse navigation scenario."""
+        runner, session = self._make_runner()
+        session.fault_bad_combo_key = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(any("desktop_keyboard_reverse" in r for r in reasons))
+
+    def test_probe_focus_never_moves_rejected(self) -> None:
+        """Negative model: focus never moves across Tab fails the gate."""
+        runner, session = self._make_runner()
+        session.fault_focus_never_moves = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(any("Tab" in r or "focus" in r for r in reasons))
+
+    def test_probe_skip_intermediate_item_rejected(self) -> None:
+        """Negative model: skipping an intermediate item in 96 items fails."""
+        runner, session = self._make_runner()
+        session.fault_skip_intermediate_item = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(any("desktop_files_97_focus_items" in r for r in reasons))
+
+    def test_probe_always_same_app_rejected(self) -> None:
+        """Negative model: opening settings yields files fails."""
+        runner, session = self._make_runner()
+        session.fault_always_same_app = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(any("settings" in r for r in reasons))
+
+    def test_probe_stale_nonce_seq_rejected(self) -> None:
+        """Negative model: stale nonce or non-advancing seq fails."""
+        runner, session = self._make_runner()
+        session.fault_stale_nonce_seq = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(any("probe" in r or "timeout" in r for r in reasons))
+
+    def test_probe_wrong_cwd_rejected(self) -> None:
+        """Negative model: wrong cwd during directory navigation fails."""
+        runner, session = self._make_runner()
+        session.fault_wrong_cwd = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(any("cwd" in r or "fixture" in r for r in reasons))
+
+    def test_probe_no_render_or_exit_rejected(self) -> None:
+        """Negative model: no screen render / diff fails takeover."""
+        runner, session = self._make_runner()
+        session.fault_no_render_or_exit = True
+        ok, reasons, outcomes = runner.run_all()
+        self.assertFalse(ok)
+        self.assertTrue(reasons)
 
 
 class ProcessSessionCleanupTests(unittest.TestCase):

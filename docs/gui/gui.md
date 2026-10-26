@@ -428,18 +428,42 @@ make PROFILE=x86_64-clang test-qemu SUITE=gui
 - **全屏切换** = 整屏替换，**不存在窗口化中间态**。
 - 应用状态（终端命令行与历史、文件浏览器当前目录）存在**外壳持有的 C 变量**里，不寄居在会被销毁的控件树中。
 
-### 2. 设计系统：令牌表在 libgui，主题落地也在 libgui
+### 2. 设计系统与原生控件体系（libgui）
+
+`libgui` 提供了无 LVGL 符号暴露的原生控件系统、布局树、外观样式与统一焦点引擎。所有已发布公共头均位于 `libgui/include/gui/`，内部私有头与实现位于 `libgui/internal/` 和 `libgui/src/`。
 
 | 文件 | 作用 | 对外可见性 |
 |------|------|------------|
-| `libgui/include/gui/gui_theme.h` | 令牌表：32 个色彩角色、5 级字号、5 档间距、5 档圆角、elevation 0–5 | **公共**（纯 C，无 LVGL 符号） |
-| `libgui/src/theme.c` | 令牌表实现 | libgui 内部 |
-| `libgui/src/theme_apply.c` | 令牌表 → LVGL 主题 | libgui 内部 |
-| `libgui/src/platform.c` | `gui_platform_create()` 自动套用主题；屏幕显式 `lv_theme_apply()` | libgui 内部 |
+| `libgui/include/gui/gui.h` | 统一聚合头（包含平台、输入、主题、控件、布局、事件、焦点） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_platform.h` | 平台生命周期与主循环（创建/销毁/tick/step/像素读取） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_input.h` | 物理输入与合成事件分发 | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_theme.h` | 设计系统令牌表（32 色彩角色、5 级字号、5 档间距/圆角、elevation） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_widget.h` | 原生控件声明与树形层级（容器、标签、按钮、输入框、列表） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_layout.h` | 盒模型布局声明（flex 弹性盒子、网格布局、内边距与外边距） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_event.h` | 事件派发模型（点击、获得/失去焦点、激活、键鼠输入） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/include/gui/gui_focus.h` | 统一焦点引擎 API（焦点项登记、前后导航、方向移动、激活、销毁摘除） | **公共**（纯 C，无 LVGL 符号） |
+| `libgui/internal/gui_widget_private.h` | 控件树私有结构、LVGL 对接绑定及生命周期管理 | libgui 内部 |
+| `libgui/internal/gui_platform_private.h` | 平台私有状态、显示驱动与定时器链表 | libgui 内部 |
+| `libgui/internal/gui_input_private.h` | 输入设备私有状态与 PS/2 队列 | libgui 内部 |
+| `libgui/src/widget.c` | 原生控件创建、生命周期与父子关系维护 | libgui 内部 |
+| `libgui/src/layout.c` | flex 与 grid 布局算法及尺寸计算 | libgui 内部 |
+| `libgui/src/appearance.c` | 主题令牌向原生控件样式的映射与应用 | libgui 内部 |
+| `libgui/src/event.c` | 事件队列与回调分发 | libgui 内部 |
+| `libgui/src/focus.c` | 统一焦点引擎实现（Tab / Shift+Tab 循环链表、激活、自动摘除） | libgui 内部 |
+| `libgui/src/platform.c` | 平台初始化/销毁、主题装载与帧呈现 | libgui 内部 |
+| `libgui/src/tick.c` | 高精度时间戳与 tick 推进 | libgui 内部 |
+| `libgui/src/input.c` / `input_*.c` | 输入路由驱动、按键状态与 LVGL 输入桥接 | libgui 内部 |
+| `libgui/src/theme.c` / `theme_apply.c` | 令牌表实现与 LVGL 主题套用 | libgui 内部 |
+| `libgui/src/cursor_icon.c` | 硬件/软件光标像素图标渲染 | libgui 内部 |
 
-**公共 API 刻意保持 LVGL 无关**：sysroot 的已发布头有一条硬约束（`qemutests/gui_build_audit.py`）——**任何**已发布头不得出现 LVGL 符号。因此「把 `lv_display_t` 提升为公共 API」这条路走不通（`typedef struct _lv_display_t lv_display_t;` 本身就是 LVGL 符号）。改为：① 令牌表是纯数据，可以发布；② 令牌表 → LVGL 主题的落地整体留在 libgui 内部；③ 业务应用自行包含 LVGL 头，用 `lv_display_get_default()` 取 display（惯用做法）。
+**容量与对象所有权约束**：
+- **容量上限**：单一平台实例最大支持 **1024 个活动控件**（`GUI_WIDGET_MAX_COUNT = 1024`）与 **128 个可聚焦项**（`GUI_FOCUS_MAX_ITEMS = 128`）。超出时返回错误并设置 `ENOMEM`，不触发内核 panic 或越界写。
+- **对象所有权**：采用严格树形层级 `Platform -> Root Widget Tree -> Child Widgets`。父控件销毁时自动级联销毁所有子控件。
+- **自动摘除**：控件销毁时若注册了焦点项，统一焦点引擎会自动将其从焦点循环链表中安全摘除，绝不残留野指针。
 
-主题必须与平台**同生共死**：`gui_platform_destroy()` 的顺序固定为「先删 display → 再拆主题 → 最后 `lv_deinit()`」（反序会 use-after-free）。
+**公共 API 刻意保持 LVGL 无关**：sysroot 的已发布头有一条硬约束（`qemutests/gui_build_audit.py`）——**任何**已发布头不得出现 LVGL 符号。因此控件与焦点句柄均使用不透明指针封装（`gui_widget_t *`、`gui_focus_target_t *`），底层通过 `gui_widget_private.h` 与 LVGL 对象关联。
+
+主题必须与平台**同生共死**：`gui_platform_destroy()` 的顺序固定为「先清空控件树与焦点表 → 再删 display → 拆主题 → 最后 `lv_deinit()`」（反序会 use-after-free）。
 
 ### 3. 外壳结构
 
@@ -456,18 +480,21 @@ user/desktop/
 - **状态机不携带 app id**：四个表面状态是纯函数可穷举的；「哪个应用在跑」由外壳记在 `shell->current_app`。
 - **表面恒为全屏**，应用表面根对象覆盖整个显示区。
 
-### 4. 键盘契约与焦点模型
+### 4. 键盘契约与统一焦点模型（GUI-2b）
 
 | 键 | 行为 |
 |----|------|
-| `Tab` / `Shift+Tab` | 在当前表面的焦点项之间前进 / 后退 |
-| `Enter` | 激活当前焦点项 |
-| `ESC` | 返回主屏 |
+| `Tab` / `Shift+Tab` | 在当前表面的原生焦点项之间循环前进 / 后退（由 `gui_focus_next()` / `gui_focus_prev()` 统一驱动） |
+| `Enter` | 激活当前焦点项（派发 `GUI_EVENT_ACTIVATE`） |
+| `ESC` | 返回上一级目录（Files 应用）或退出应用返回主屏 |
+| 方向键 / 快捷键 | 交由当前获得焦点的控件或当前应用分发处理 |
 | 可打印字符 | 交给当前应用（终端消费并回显） |
 
-**桌面自己维护焦点序列**：libgui 的焦点组是**私有**的（`gui_input_focus_*` 在 `libgui/internal/`），公共 API 没有「登记可聚焦控件」的入口，而业务应用只能用公共 API。因此外壳用 LVGL 的 `LV_STATE_FOCUSED` 状态实现同一语义，焦点环（2px primary 轮廓）由 Material 主题给出。序列随表面重建清空，不会残留已销毁对象。
-
-> **这是临时方案。** roadmap 的 **GUI-2b libgui 公共焦点 API**（见 `docs/roadmap.md` §P3 后续功能任务）完成后，桌面改用那条公共 API，本节的自建序列（`desktop_shell_focus_*`）随之删除——GUI-3 与 libgui 的焦点组之间不应该长期存在两套模型。
+**统一由 libgui 公共焦点引擎承载**：
+在 GUI-2b 之前，桌面外壳曾临时自建过一套第二焦点模型（`desktop_shell_focus_*`）。随着 GUI-2b 原生控件与统一焦点引擎闭环，该重复模型已**彻底删除**：
+1. **单一事实来源**：所有界面焦点（状态栏快捷项、启动器网格、应用抽屉项、设置选项、壳内应用操作目标）均通过 `gui_focus_target_create()` 注册到 `libgui` 的平台焦点链表。
+2. **生命周期与防悬挂**：当表面切换或应用退出时，旧表面的控件树整体销毁；`gui_widget_destroy()` 或 `gui_focus_target_destroy()` 会自动且安全地将焦点项从链表中摘除，重置活跃焦点，绝无野指针残留。
+3. **视觉一致性**：获得焦点的原生控件触发 `GUI_EVENT_FOCUS_GAINED` 并进入 focus 交互状态，由 Material 风格引擎统一绘制 2px primary 轮廓焦点环；失焦触发 `GUI_EVENT_FOCUS_LOST` 恢复默认外观。桌面外壳与应用业务无需手绘焦点环。
 
 ### 5. 界面文案用 ASCII（不是中文）
 

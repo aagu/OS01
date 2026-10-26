@@ -62,6 +62,7 @@
 typedef struct {
     desktop_shell_t *shell;
     desktop_app_id_t app_id;
+    gui_widget_t     widget;
 } desktop_app_ctx_t;
 
 /* 设置行：切换某个设置项。 */
@@ -672,6 +673,7 @@ static bool build_launcher(desktop_shell_t *shell, gui_widget_t parent)
         /* 点击图标 = 启动应用 */
         shell->app_ctx[info->id].shell = shell;
         shell->app_ctx[info->id].app_id = info->id;
+        shell->app_ctx[info->id].widget = icon;
         if (gui_widget_set_event_handler(shell->platform, icon, on_app_activate,
                                          &shell->app_ctx[info->id]) != 0) {
             return false;
@@ -1863,4 +1865,90 @@ void desktop_shell_get_settings(const desktop_shell_t *shell,
     if (clock_24h != NULL) {
         *clock_24h = shell->clock_24h;
     }
+}
+
+int desktop_shell_probe_get_state(desktop_shell_t *shell, desktop_probe_state_t *out)
+{
+    if (shell == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    /* 表面与 app id */
+    switch (shell->state) {
+    case DESKTOP_STATE_HOME:
+        snprintf(out->surface, sizeof(out->surface), "home");
+        snprintf(out->app_id, sizeof(out->app_id), "home");
+        out->item_count = desktop_app_launcher_count();
+        break;
+    case DESKTOP_STATE_DRAWER:
+        snprintf(out->surface, sizeof(out->surface), "drawer");
+        snprintf(out->app_id, sizeof(out->app_id), "drawer");
+        out->item_count = desktop_app_count();
+        break;
+    case DESKTOP_STATE_SETTINGS:
+        snprintf(out->surface, sizeof(out->surface), "settings");
+        snprintf(out->app_id, sizeof(out->app_id), "settings");
+        out->item_count = 3;
+        break;
+    case DESKTOP_STATE_APP:
+        snprintf(out->surface, sizeof(out->surface), "%s", shell->current_app);
+        snprintf(out->app_id, sizeof(out->app_id), "%s", shell->current_app);
+        if (strcmp(shell->current_app, "files") == 0 && shell->app_state != NULL) {
+            snprintf(out->cwd, sizeof(out->cwd), "%s", shell->app_state->files_cwd);
+            snprintf(out->subtitle, sizeof(out->subtitle), "%s", shell->app_state->files_cwd);
+            out->item_count = shell->app_state->files_entry_count;
+        } else {
+            out->item_count = 1;
+        }
+        break;
+    default:
+        snprintf(out->surface, sizeof(out->surface), "unknown");
+        snprintf(out->app_id, sizeof(out->app_id), "unknown");
+        out->item_count = 0;
+        break;
+    }
+
+    /* 匹配焦点 tag：只调用公共接口 gui_focus_get */
+    gui_widget_t focused = GUI_WIDGET_NONE;
+    if (gui_focus_get(shell->input, &focused) != 0) {
+        focused = GUI_WIDGET_NONE;
+    }
+    if (focused.id == 0) {
+        snprintf(out->focus_tag, sizeof(out->focus_tag), "none");
+    } else if (shell->app_state != NULL && focused.id == shell->app_state->back_button.id) {
+        snprintf(out->focus_tag, sizeof(out->focus_tag), "back");
+    } else if (shell->state == DESKTOP_STATE_APP && strcmp(shell->current_app, "files") == 0 &&
+               shell->app_state != NULL) {
+        bool matched = false;
+        for (uint32_t i = 0; i < shell->app_state->files_entry_count; i++) {
+            if (shell->app_state->files_ctx[i].row_widget.id == focused.id) {
+                snprintf(out->focus_tag, sizeof(out->focus_tag), "%s",
+                         shell->app_state->files_ctx[i].path);
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            snprintf(out->focus_tag, sizeof(out->focus_tag), "unknown");
+        }
+    } else if (shell->state == DESKTOP_STATE_HOME) {
+        bool matched = false;
+        for (int i = 0; i < (int)DESKTOP_APP_COUNT; i++) {
+            if (shell->app_ctx[i].widget.id == focused.id) {
+                snprintf(out->focus_tag, sizeof(out->focus_tag), "%s",
+                         desktop_app_id_name(shell->app_ctx[i].app_id));
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            snprintf(out->focus_tag, sizeof(out->focus_tag), "unknown");
+        }
+    } else {
+        snprintf(out->focus_tag, sizeof(out->focus_tag), "unknown");
+    }
+
+    return 0;
 }

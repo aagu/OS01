@@ -87,6 +87,7 @@ typedef struct {
     uint64_t version;                        /* 创建时的目录版本 */
     char path[DESKTOP_FILES_PATH_MAX];       /* 目标路径副本 */
     bool is_dir;                            /* 只有目录可导航 */
+    gui_widget_t row_widget;                 /* 对应控件句柄（供只读探针匹配业务 tag） */
 } desktop_files_ctx_t;
 
 /**
@@ -119,6 +120,7 @@ typedef struct {
 
     /* 应用顶栏返回按钮的上下文（只借外壳）。 */
     desktop_back_ctx_t back_ctx;
+    gui_widget_t back_button;
     /* 应用顶栏的副标题（文件应用显示当前目录）。 */
     gui_widget_t app_subtitle;
 } desktop_app_state_t;

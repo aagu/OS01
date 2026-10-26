@@ -21,16 +21,74 @@
 #include "desktop_shell.h"
 #include "desktop_state.h"
 
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* 离屏冒烟模式的分辨率（仅供自动化测试取像素）。 */
 #define SMOKE_WIDTH  640
 #define SMOKE_HEIGHT 480
+
+static int write_probe_state(const char *nonce, uint64_t seq, desktop_shell_t *shell)
+{
+    desktop_probe_state_t st;
+    if (desktop_shell_probe_get_state(shell, &st) != 0) {
+        return -1;
+    }
+    char tmp_path[128];
+    char target_path[128];
+    char buf[1024];
+    snprintf(tmp_path, sizeof(tmp_path), "/tmp/gui-desktop-%s.state.tmp", nonce);
+    snprintf(target_path, sizeof(target_path), "/tmp/gui-desktop-%s.state", nonce);
+
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        return -1;
+    }
+    int len = snprintf(buf, sizeof(buf),
+                       "{\n"
+                       "  \"nonce\": \"%s\",\n"
+                       "  \"seq\": %llu,\n"
+                       "  \"surface\": \"%s\",\n"
+                       "  \"app_id\": \"%s\",\n"
+                       "  \"cwd\": \"%s\",\n"
+                       "  \"subtitle\": \"%s\",\n"
+                       "  \"focus_tag\": \"%s\",\n"
+                       "  \"item_count\": %u\n"
+                       "}\n",
+                       nonce,
+                       (unsigned long long)seq,
+                       st.surface,
+                       st.app_id,
+                       st.cwd,
+                       st.subtitle,
+                       st.focus_tag,
+                       st.item_count);
+    if (len > 0) {
+        (void)write(fd, buf, (size_t)len);
+    }
+    close(fd);
+
+    return rename(tmp_path, target_path);
+}
+
+static bool probe_state_equal(const desktop_probe_state_t *a,
+                              const desktop_probe_state_t *b)
+{
+    if (a->item_count != b->item_count) return false;
+    if (strcmp(a->surface, b->surface) != 0) return false;
+    if (strcmp(a->app_id, b->app_id) != 0) return false;
+    if (strcmp(a->cwd, b->cwd) != 0) return false;
+    if (strcmp(a->subtitle, b->subtitle) != 0) return false;
+    if (strcmp(a->focus_tag, b->focus_tag) != 0) return false;
+    return true;
+}
 
 static void report_platform_failure(const char *what, int err)
 {
@@ -60,6 +118,28 @@ static bool on_native_key(const gui_key_event_t *event, void *userdata)
 int main(int argc, char **argv)
 {
     bool smoke = (argc > 1 && argv[1] != NULL && strcmp(argv[1], "smoke") == 0);
+    bool probe = false;
+    const char *probe_nonce = NULL;
+    if (argc >= 2 && argv[1] != NULL && strcmp(argv[1], "probe") == 0) {
+        if (argc < 3 || argv[2] == NULL) {
+            fprintf(stderr, "desktop: probe requires a hex nonce argument\n");
+            return 1;
+        }
+        probe_nonce = argv[2];
+        size_t nlen = strlen(probe_nonce);
+        if (nlen == 0 || nlen > 64) {
+            fprintf(stderr, "desktop: invalid probe nonce length\n");
+            return 1;
+        }
+        for (size_t i = 0; i < nlen; i++) {
+            char c = probe_nonce[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                fprintf(stderr, "desktop: invalid probe nonce (hex required)\n");
+                return 1;
+            }
+        }
+        probe = true;
+    }
 
     gui_config_t pcfg = {
         .mode = GUI_MODE_ONSCREEN,
@@ -113,6 +193,14 @@ int main(int argc, char **argv)
 
     gui_input_set_key_handler(input, on_native_key, shell);
 
+    uint64_t probe_seq = 1;
+    desktop_probe_state_t last_probe_st;
+    memset(&last_probe_st, 0, sizeof(last_probe_st));
+    if (probe) {
+        desktop_shell_probe_get_state(shell, &last_probe_st);
+        write_probe_state(probe_nonce, probe_seq, shell);
+    }
+
     struct pollfd fds[2];
     unsigned nfds = 0;
     int rc = 0;
@@ -160,6 +248,17 @@ int main(int argc, char **argv)
         }
         desktop_shell_tick(shell);
 
+        if (probe) {
+            desktop_probe_state_t cur_probe_st;
+            if (desktop_shell_probe_get_state(shell, &cur_probe_st) == 0) {
+                if (!probe_state_equal(&cur_probe_st, &last_probe_st)) {
+                    probe_seq++;
+                    last_probe_st = cur_probe_st;
+                    write_probe_state(probe_nonce, probe_seq, shell);
+                }
+            }
+        }
+
         if (smoke) {
             /* 冒烟模式：渲染一帧后退出，供自动化测试取像素。 */
             break;
@@ -167,6 +266,7 @@ int main(int argc, char **argv)
     }
 
     desktop_shell_destroy(shell);
+    gui_input_destroy(input);
     gui_platform_destroy(platform);
     return rc;
 }

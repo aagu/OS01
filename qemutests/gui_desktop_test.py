@@ -258,6 +258,66 @@ class DesktopCaseRunner:
         self.qmp.input_events([qmp_key_event(False, qcode)])
         time.sleep(KEY_PACE_SECONDS)
 
+    def _tap_combo_key(self, modifier: str, qcode: str) -> None:
+        """注入组合键（按下 modifier -> 按下目标 -> 释放目标 -> 释放 modifier），每边沿限速。
+
+        异常时必须确保所有已按下的键都被释放。
+        """
+        try:
+            self.qmp.input_events([qmp_key_event(True, modifier)])
+            time.sleep(KEY_PACE_SECONDS)
+            try:
+                self.qmp.input_events([qmp_key_event(True, qcode)])
+                time.sleep(KEY_PACE_SECONDS)
+            finally:
+                self.qmp.input_events([qmp_key_event(False, qcode)])
+                time.sleep(KEY_PACE_SECONDS)
+        finally:
+            self.qmp.input_events([qmp_key_event(False, modifier)])
+            time.sleep(KEY_PACE_SECONDS)
+
+    def _read_probe_state(self, nonce: str, timeout: float = 3.0) -> Optional[dict]:
+        """读取 guest 中 /tmp/gui-desktop-<nonce>.state 的只读快照。"""
+        state_path = f"/tmp/gui-desktop-{nonce}.state"
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ok, rc, out = self._run_cmd_with_rc(
+                f"cat {state_path} 2>/dev/null", timeout=min(timeout, 2.0)
+            )
+            if ok and rc == 0:
+                m = re.search(
+                    rf'\{{\s*"nonce":\s*"{re.escape(nonce)}".*?\}}',
+                    out,
+                    re.DOTALL,
+                )
+                if m:
+                    try:
+                        return json.loads(m.group(0))
+                    except Exception:
+                        pass
+            time.sleep(0.05)
+        return None
+
+    def _wait_for_probe_seq(
+        self,
+        nonce: str,
+        min_seq: int,
+        timeout: float = 5.0,
+        predicate: Optional[Callable[[dict], bool]] = None,
+    ) -> Optional[dict]:
+        """等待 probe 状态推进到 seq >= min_seq (且满足 predicate，若指定)。"""
+        deadline = time.monotonic() + timeout
+        last_st = None
+        while time.monotonic() < deadline:
+            st = self._read_probe_state(nonce, timeout=1.0)
+            if st is not None:
+                last_st = st
+                if st.get("seq", 0) >= min_seq:
+                    if predicate is None or predicate(st):
+                        return st
+            time.sleep(0.05)
+        return last_st
+
     def _wait_for_desktop_surface(self, label: str, timeout: float) -> Optional[Surface]:
         """等到桌面接管显示为止（画面被 Material 底色铺满）。
 
@@ -514,6 +574,504 @@ class DesktopCaseRunner:
             if not self._observe_check_panic(case_name, reasons):
                 return self._fail(reasons, outcomes, case_name,
                                   reasons[-1] if reasons else "panic")
+            outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
+
+            # ── 启动诊断模式桌面：/bin/desktop probe <nonce> ──
+            probe_nonce = f"{self.smp:x}{time.time_ns():x}"[:16]
+            fixture_dir = "/tmp/fixture96"
+            ok, rc, _ = self._run_cmd_with_rc(
+                "cd /tmp && rm -rf fixture96 && mkdir fixture96",
+                timeout=min(self.cmd_timeout, 10.0),
+            )
+            if not ok or rc != 0:
+                reasons.append("failed to create 96 fixture directories")
+                return False, reasons, outcomes
+
+            for start in range(0, 96, 12):
+                chunk = " ".join(f"d{i:02d}" for i in range(start, min(start + 12, 96)))
+                ok, rc, _ = self._run_cmd_with_rc(
+                    f"cd /tmp/fixture96 && mkdir {chunk}",
+                    timeout=min(self.cmd_timeout, 10.0),
+                )
+                if not ok or rc != 0:
+                    reasons.append("failed to create 96 fixture directories")
+                    return False, reasons, outcomes
+
+            ok, rc, _ = self._run_cmd_with_rc(
+                "cd /tmp/fixture96/d00 && mkdir sublevel",
+                timeout=min(self.cmd_timeout, 10.0),
+            )
+            if not ok or rc != 0:
+                reasons.append("failed to create 96 fixture directories")
+                return False, reasons, outcomes
+
+            self.session.send(
+                f"/bin/desktop probe {probe_nonce} & printf '%s\\n' \"$!\" > /tmp/gd_probe.pid\n".encode()
+            )
+
+            st = self._wait_for_probe_seq(probe_nonce, 1, timeout=TAKEOVER_TIMEOUT_SECONDS)
+            if st is None or st.get("nonce") != probe_nonce or st.get("surface") != "home":
+                return self._fail(
+                    reasons, outcomes, "desktop_probe_start",
+                    "the probe desktop never took over or published initial home state",
+                )
+
+            home_probe = self._screendump("05_desktop_probe_home", reasons)
+            if home_probe is None:
+                return self._fail(
+                    reasons, outcomes, "desktop_probe_start",
+                    "screendump failed at desktop probe home",
+                )
+
+            # ── 场景 6：反向键盘导航 ──
+            case_name = "desktop_keyboard_reverse"
+            self.log(f"  [gui-desktop smp={self.smp}] starting {case_name}")
+            if st.get("focus_tag") != "none":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"expected initial focus none, got {st.get('focus_tag')}",
+                )
+
+            # Shift+Tab：从 NONE 反向移动，应落到最后一个 launcher 卡片（settings）
+            seq_before = st["seq"]
+            self._tap_combo_key("shift", "tab")
+            st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+            if st is None or st.get("focus_tag") != "settings":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"Shift+Tab did not focus settings launcher card (got {st.get('focus_tag') if st else None})",
+                )
+
+            # Enter：激活当前项 -> 打开 settings 应用
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "settings",
+            )
+            if st is None or st.get("surface") != "settings":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"Enter on settings did not enter settings surface (got {st.get('surface') if st else None})",
+                )
+            settings_shot = self._wait_for_surface_change(home_probe, "06_desktop_settings", 10.0)
+            if settings_shot is None or surface_diff(home_probe, settings_shot) < MIN_SURFACE_DIFF:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    "screen did not change after launching settings",
+                )
+
+            # Esc：回到主屏
+            seq_before = st["seq"]
+            self._tap_key("esc")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "home",
+            )
+            if st is None or st.get("surface") != "home":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    "Esc did not return to home",
+                )
+            home_probe = self._wait_for_surface_change(settings_shot, "06b_desktop_home_back", 10.0)
+            if home_probe is None:
+                home_probe = self._screendump("06b_desktop_home_back", reasons)
+
+            # 重建 HOME 后 Tab -> 首 tag / 首 app id (files)
+            seq_before = st["seq"]
+            self._tap_key("tab")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=5.0,
+                predicate=lambda s: s.get("focus_tag") == "files",
+            )
+            if st is None or st.get("focus_tag") != "files":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"Tab after returning home did not focus files (got {st.get('focus_tag') if st else None})",
+                )
+
+            # Enter 进入 files
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "files",
+            )
+            if st is None or st.get("surface") != "files":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    "Enter did not launch files",
+                )
+
+            files_shot = self._wait_for_surface_change(home_probe, "07_desktop_files_root", 10.0)
+            if files_shot is None or surface_diff(home_probe, files_shot) < MIN_SURFACE_DIFF:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    "screen did not change after entering files",
+                )
+
+            if not self._observe_check_panic(case_name, reasons):
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    reasons[-1] if reasons else "panic",
+                )
+            outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
+
+            # ── 场景 7：97项焦点循环（Back + 96 子目录），Tab 正向 97 步 + Shift+Tab 反向 97 步 ──
+            case_name = "desktop_files_97_focus_items"
+            self.log(f"  [gui-desktop smp={self.smp}] starting {case_name}")
+
+            # 沿真实 Tab/Enter 走根 -> tmp -> fixture（按 tag 搜索，最多当前项数 + 2 步）
+            max_steps = (st.get("item_count", 32) or 32) + 2
+            steps = 0
+            while st.get("focus_tag") != "/tmp" and steps < max_steps:
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+                if st is None:
+                    return self._fail(
+                        reasons, outcomes, case_name,
+                        "timeout waiting for probe state during tab search for /tmp",
+                    )
+                steps += 1
+            if st.get("focus_tag") != "/tmp":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"could not locate /tmp entry in root (tag={st.get('focus_tag')})",
+                )
+
+            # Enter 进入 /tmp
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("cwd") == "/tmp",
+            )
+            if st is None or st.get("cwd") != "/tmp":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"failed to enter /tmp (cwd={st.get('cwd') if st else None})",
+                )
+
+            # 在 /tmp 中定位 fixture_dir (/tmp/fixture96)
+            max_steps = (st.get("item_count", 32) or 32) + 2
+            steps = 0
+            while st.get("focus_tag") != fixture_dir and steps < max_steps:
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+                if st is None:
+                    return self._fail(
+                        reasons, outcomes, case_name,
+                        "timeout waiting for probe state during tab search for fixture",
+                    )
+                steps += 1
+            if st.get("focus_tag") != fixture_dir:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"could not locate fixture entry in /tmp (tag={st.get('focus_tag')})",
+                )
+
+            # Enter 进入 fixture_dir
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("cwd") == fixture_dir,
+            )
+            if st is None or st.get("cwd") != fixture_dir:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"failed to enter fixture dir (cwd={st.get('cwd') if st else None})",
+                )
+            if st.get("item_count") != 96:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"fixture entry count expected 96, got {st.get('item_count')}",
+                )
+
+            # 先复位到可确认的起点 Back：导航进入后若非 Back，用 Tab 有界找到 Back
+            steps = 0
+            while st.get("focus_tag") != "back" and steps < 98:
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+                if st is None:
+                    return self._fail(
+                        reasons, outcomes, case_name,
+                        "timeout waiting for probe state searching for Back",
+                    )
+                steps += 1
+            if st.get("focus_tag") != "back":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"could not reach Back starting point (tag={st.get('focus_tag')})",
+                )
+
+            # 从 Back 起连续 96 次 Tab，每次比对排序行路径
+            for i in range(96):
+                expected_path = f"{fixture_dir}/d{i:02d}"
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(
+                    probe_nonce, seq_before + 1, timeout=5.0,
+                    predicate=lambda s, exp=expected_path: s.get("focus_tag") == exp,
+                )
+                if st is None or st.get("focus_tag") != expected_path:
+                    return self._fail(
+                        reasons, outcomes, case_name,
+                        f"step {i}: expected focus {expected_path}, got {st.get('focus_tag') if st else None} (seq={st.get('seq') if st else None})",
+                    )
+
+            # 下一次 Tab 回到 Back（第 97 步）
+            seq_before = st["seq"]
+            self._tap_key("tab")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=5.0,
+                predicate=lambda s: s.get("focus_tag") == "back",
+            )
+            if st is None or st.get("focus_tag") != "back":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"97th Tab did not return to Back (got {st.get('focus_tag') if st else None})",
+                )
+
+            # 97 次 Shift+Tab 应回原起点 Back
+            for i in range(97):
+                seq_before = st["seq"]
+                self._tap_combo_key("shift", "tab")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+                if st is None:
+                    return self._fail(
+                        reasons, outcomes, case_name,
+                        f"Shift+Tab step {i} timeout",
+                    )
+            if st.get("focus_tag") != "back":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"97 Shift+Tab steps did not return to Back (got {st.get('focus_tag')})",
+                )
+
+            self._screendump("08_desktop_files_97_items", reasons)
+            if not self._observe_check_panic(case_name, reasons):
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    reasons[-1] if reasons else "panic",
+                )
+            outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
+
+            # ── 场景 8：两级目录导航与 ESC 返回 ──
+            case_name = "desktop_files_two_levels"
+            self.log(f"  [gui-desktop smp={self.smp}] starting {case_name}")
+            # 从 Back Tab 一步到 d00
+            seq_before = st["seq"]
+            self._tap_key("tab")
+            st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+            if st is None or st.get("focus_tag") != f"{fixture_dir}/d00":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"expected focus {fixture_dir}/d00, got {st.get('focus_tag') if st else None}",
+                )
+
+            # Enter 进入 d00
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("cwd") == f"{fixture_dir}/d00",
+            )
+            if st is None or st.get("cwd") != f"{fixture_dir}/d00" or st.get("subtitle") != f"{fixture_dir}/d00":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"failed to enter d00 (cwd={st.get('cwd') if st else None})",
+                )
+
+            # Tab 到 sublevel
+            steps = 0
+            while st.get("focus_tag") != f"{fixture_dir}/d00/sublevel" and steps < 10:
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+                if st is None:
+                    return self._fail(reasons, outcomes, case_name, "timeout waiting for probe state in d00")
+                steps += 1
+            if st.get("focus_tag") != f"{fixture_dir}/d00/sublevel":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"could not locate sublevel in d00 (tag={st.get('focus_tag')})",
+                )
+
+            # Enter 进入 sublevel
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("cwd") == f"{fixture_dir}/d00/sublevel",
+            )
+            if st is None or st.get("cwd") != f"{fixture_dir}/d00/sublevel":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"failed to enter sublevel (cwd={st.get('cwd') if st else None})",
+                )
+
+            # ESC 返回到 d00
+            seq_before = st["seq"]
+            self._tap_key("esc")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("cwd") == f"{fixture_dir}/d00",
+            )
+            if st is None or st.get("cwd") != f"{fixture_dir}/d00":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"ESC did not return to d00 (cwd={st.get('cwd') if st else None})",
+                )
+
+            # ESC 返回到 fixture_dir
+            seq_before = st["seq"]
+            self._tap_key("esc")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("cwd") == fixture_dir,
+            )
+            if st is None or st.get("cwd") != fixture_dir:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"ESC did not return to fixture dir (cwd={st.get('cwd') if st else None})",
+                )
+
+            # 连续 ESC 回到 HOME
+            for _ in range(5):
+                if st.get("surface") == "home":
+                    break
+                seq_before = st["seq"]
+                self._tap_key("esc")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=10.0)
+                if st is None:
+                    break
+
+            if st is None or st.get("surface") != "home":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"ESC chain did not return to home (surface={st.get('surface') if st else None})",
+                )
+
+            if not self._observe_check_panic(case_name, reasons):
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    reasons[-1] if reasons else "panic",
+                )
+            outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
+
+            # ── 场景 9：终端真实键输入及 Enter 执行，ESC 回 HOME 后状态保留 ──
+            case_name = "desktop_terminal_enter"
+            self.log(f"  [gui-desktop smp={self.smp}] starting {case_name}")
+
+            # Tab 找到 terminal
+            steps = 0
+            while st.get("focus_tag") != "terminal" and steps < 10:
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(probe_nonce, seq_before + 1, timeout=5.0)
+                if st is None:
+                    return self._fail(reasons, outcomes, case_name, "timeout waiting for probe state in home")
+                steps += 1
+            if st.get("focus_tag") != "terminal":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"could not focus terminal (tag={st.get('focus_tag')})",
+                )
+
+            # Enter 进入 terminal
+            seq_before = st["seq"]
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "terminal",
+            )
+            if st is None or st.get("surface") != "terminal":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"failed to enter terminal (surface={st.get('surface') if st else None})",
+                )
+
+            # 输入真实键：echo 42 + Enter
+            for k in ("e", "c", "h", "o", "spc", "4", "2", "ret"):
+                self._tap_key(k)
+            time.sleep(SETTLE_SECONDS)
+            term_shot = self._wait_for_surface_change(home_probe, "09_desktop_terminal", 10.0)
+            if term_shot is None or surface_diff(home_probe, term_shot) < MIN_SURFACE_DIFF:
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    "screen did not change after typing in terminal",
+                )
+
+            # ESC 回到 HOME
+            seq_before = st["seq"]
+            self._tap_key("esc")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "home",
+            )
+            if st is None or st.get("surface") != "home":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"ESC did not return to home from terminal (surface={st.get('surface') if st else None})",
+                )
+
+            # 再次进入 terminal，验证状态保留
+            steps = 0
+            while st.get("focus_tag") != "terminal" and steps < 10:
+                seq_before = st["seq"]
+                self._tap_key("tab")
+                st = self._wait_for_probe_seq(
+                    probe_nonce, seq_before + 1, timeout=5.0,
+                    predicate=lambda s: s.get("focus_tag") == "terminal",
+                )
+                if st is None:
+                    break
+                steps += 1
+
+            seq_before = st["seq"] if st else 0
+            self._tap_key("ret")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "terminal",
+            )
+            if st is None or st.get("surface") != "terminal":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"failed to re-enter terminal (surface={st.get('surface') if st else None})",
+                )
+
+            # ESC 回到 HOME
+            seq_before = st["seq"]
+            self._tap_key("esc")
+            st = self._wait_for_probe_seq(
+                probe_nonce, seq_before + 1, timeout=10.0,
+                predicate=lambda s: s.get("surface") == "home",
+            )
+            if st is None or st.get("surface") != "home":
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    f"ESC did not return to home after re-entering terminal (surface={st.get('surface') if st else None})",
+                )
+
+            # 杀掉 probe 桌面并验证 guest shell 仍然存活
+            ok, rc, _ = self._run_cmd_with_rc(
+                "kill $(cat /tmp/gd_probe.pid 2>/dev/null) 2>/dev/null; sleep 1; printf ok",
+                timeout=min(self.cmd_timeout, 10.0),
+            )
+            if not ok:
+                return self._fail(reasons, outcomes, case_name, "could not kill probe desktop")
+            if not self._send_canary(timeout=self.cmd_timeout):
+                return self._fail(reasons, outcomes, case_name, "the guest stopped answering after probe kill")
+
+            if not self._observe_check_panic(case_name, reasons):
+                return self._fail(
+                    reasons, outcomes, case_name,
+                    reasons[-1] if reasons else "panic",
+                )
             outcomes.append({"smp": self.smp, "case": case_name, "status": "PASS"})
 
             return True, reasons, outcomes

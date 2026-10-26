@@ -1671,7 +1671,7 @@ int vfs_stat(vfs_node_t *node, struct stat *buf)
 // ── Sorted getdents entry (internal, for mount-point injection) ──
 // We use vfs_dirent_t (from vfs.h) directly. max 64 entries keeps the
 // stack footprint under 20 KB on a 32 KB kernel stack.
-#define VFS_GETDENTS_SORT_MAX 64
+#define VFS_GETDENTS_SORT_MAX 256
 
 // ── getdents64 ─────────────────────────────────────────────
 // Collects entries from the underlying filesystem, injects VFS mount

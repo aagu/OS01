@@ -278,6 +278,27 @@ void desktop_shell_get_settings(const desktop_shell_t *shell,
                                 desktop_density_t *density,
                                 bool *clock_24h);
 
+/**
+ * @brief 诊断模式：只读业务状态快照（供 /bin/desktop probe 发布）
+ */
+typedef struct {
+    char surface[DESKTOP_APP_ID_MAX];
+    char app_id[DESKTOP_APP_ID_MAX];
+    char cwd[DESKTOP_FILES_PATH_MAX];
+    char subtitle[DESKTOP_FILES_PATH_MAX];
+    char focus_tag[DESKTOP_FILES_PATH_MAX];
+    uint32_t item_count;
+} desktop_probe_state_t;
+
+/**
+ * @brief 取得当前只读业务状态快照（外层 step 结束时调用）
+ *
+ * @param shell 外壳
+ * @param out   输出结构体指针
+ * @return 0 成功；-1 失败（errno = EINVAL）
+ */
+int desktop_shell_probe_get_state(desktop_shell_t *shell, desktop_probe_state_t *out);
+
 #ifdef __cplusplus
 }
 #endif

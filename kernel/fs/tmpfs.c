@@ -335,19 +335,21 @@ static struct vfs_node *tmpfs_vfs_create(struct vfs_node *dir,
 
     // Expand children array: kmalloc+memcpy+kfree (NEVER realloc)
     if (d->child_count >= d->child_cap) {
-        int new_cap = d->child_cap * 2;
+        int new_cap = d->child_cap > 0 ? d->child_cap * 2 : TMPFS_CHILDREN_INIT_CAP;
         tmpfs_node_t **new_arr = kmalloc(new_cap * sizeof(tmpfs_node_t *));
         if (!new_arr) {
             spin_unlock(&tmpfs_lock);
             kfree(new_node);
-            free(vn);
-            free(vn_name);
+            kfree(vn);
+            kfree(vn_name);
             return NULL;
         }
-        memcpy(new_arr, d->children, d->child_count * sizeof(tmpfs_node_t *));
+        if (d->children && d->child_count > 0)
+            memcpy(new_arr, d->children, d->child_count * sizeof(tmpfs_node_t *));
         memset(new_arr + d->child_count, 0,
                (new_cap - d->child_count) * sizeof(tmpfs_node_t *));
-        kfree(d->children);
+        if (d->children)
+            kfree(d->children);
         d->children  = new_arr;
         d->child_cap = new_cap;
     }
@@ -380,19 +382,30 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
     char *vn_name = strdup(name);
     if (!new_node || !vn || !vn_name) {
         if (new_node) kfree(new_node);
-        if (vn) free(vn);
-        if (vn_name) free(vn_name);
+        if (vn) kfree(vn);
+        if (vn_name) kfree(vn_name);
         return NULL;
     }
+
+    new_node->children = kmalloc(TMPFS_CHILDREN_INIT_CAP * sizeof(tmpfs_node_t *));
+    if (!new_node->children) {
+        kfree(new_node);
+        kfree(vn);
+        kfree(vn_name);
+        return NULL;
+    }
+    memset(new_node->children, 0, TMPFS_CHILDREN_INIT_CAP * sizeof(tmpfs_node_t *));
+    new_node->child_cap = TMPFS_CHILDREN_INIT_CAP;
 
     spin_lock(&tmpfs_lock);
     tmpfs_node_t *d = tmpfs_get_node(dir);
     if (!d || d->type != VFS_DIR || d->nlink == 0 ||
         (dir->node_flags & VFS_NODE_ORPHANED) || tmpfs_find_child(d, name) >= 0) {
         spin_unlock(&tmpfs_lock);
+        kfree(new_node->children);
         kfree(new_node);
-        free(vn);
-        free(vn_name);
+        kfree(vn);
+        kfree(vn_name);
         return NULL;
     }
 
@@ -404,19 +417,22 @@ static struct vfs_node *tmpfs_vfs_mkdir(struct vfs_node *dir,
     new_node->parent   = d;
 
     if (d->child_count >= d->child_cap) {
-        int new_cap = d->child_cap * 2;
+        int new_cap = d->child_cap > 0 ? d->child_cap * 2 : TMPFS_CHILDREN_INIT_CAP;
         tmpfs_node_t **new_arr = kmalloc(new_cap * sizeof(tmpfs_node_t *));
         if (!new_arr) {
             spin_unlock(&tmpfs_lock);
+            kfree(new_node->children);
             kfree(new_node);
-            free(vn);
-            free(vn_name);
+            kfree(vn);
+            kfree(vn_name);
             return NULL;
         }
-        memcpy(new_arr, d->children, d->child_count * sizeof(tmpfs_node_t *));
+        if (d->children && d->child_count > 0)
+            memcpy(new_arr, d->children, d->child_count * sizeof(tmpfs_node_t *));
         memset(new_arr + d->child_count, 0,
                (new_cap - d->child_count) * sizeof(tmpfs_node_t *));
-        kfree(d->children);
+        if (d->children)
+            kfree(d->children);
         d->children  = new_arr;
         d->child_cap = new_cap;
     }
@@ -517,14 +533,18 @@ static int tmpfs_vfs_rename(struct vfs_node *olddir, const char *oldname,
 
     // Ensure capacity in newdir before modifying any node state
     if (!dst_child && nd->child_count >= nd->child_cap) {
-        int new_cap = nd->child_cap * 2;
+        int new_cap = nd->child_cap > 0 ? nd->child_cap * 2 : TMPFS_CHILDREN_INIT_CAP;
         tmpfs_node_t **new_arr = kmalloc(new_cap * sizeof(tmpfs_node_t *));
         if (!new_arr) {
             spin_unlock(&tmpfs_lock);
             return -1;
         }
-        memcpy(new_arr, nd->children, nd->child_count * sizeof(tmpfs_node_t *));
-        kfree(nd->children);
+        if (nd->children && nd->child_count > 0)
+            memcpy(new_arr, nd->children, nd->child_count * sizeof(tmpfs_node_t *));
+        memset(new_arr + nd->child_count, 0,
+               (new_cap - nd->child_count) * sizeof(tmpfs_node_t *));
+        if (nd->children)
+            kfree(nd->children);
         nd->children  = new_arr;
         nd->child_cap = new_cap;
     }

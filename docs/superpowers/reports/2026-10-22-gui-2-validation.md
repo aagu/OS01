@@ -385,3 +385,49 @@ QEMU 的两次沙箱内尝试均未进入 guest 验证：首次因 `/var/tmp` �
 内核与 libgui/Python 分别经独立子 agent 复审，均 **APPROVE**；全量测试中调整的 gfx held-key 断言也经再次复审 **APPROVE**。
 
 本轮未重跑完整 `test-harness`、resolution 或 syscall suite；§7 的历史结果不能代替这些套件在本轮代码上的验证。复审另记录既有范围外限制：无活动键待取消时直接禁用 LVGL indev，初始 DOWN 仍可能丢失，本轮未修改该通用路径。
+
+---
+
+## 9. GUI-2b 原生控件与统一焦点引擎验证（2026-10-26）
+
+本节记录 GUI-2b 原生控件与统一焦点引擎的完整回归验证结果。实际执行日期为 **2026-10-26**。
+
+### 9.1 交付范围与提交历史
+
+GUI-2b 在 `libgui` 中实现了纯 C 原生控件系统（容器、标签、按钮、输入框、列表）与盒模型布局（flex / grid），引入了统一焦点引擎（`gui_focus.h`），并彻底废除了桌面外壳在 GUI-3 中临时维护的第二套焦点序列（`desktop_shell_focus_*`），使 `libgui` 成为系统内唯一的焦点权威。
+
+关键提交历史：
+- `21ce6aae`: `refactor(desktop): use native widgets and the shared focus engine`
+- `adb67ae8`: `fix(desktop): defer file navigation with versioned contexts`
+- `3ec0343f`: `test(gui): audit native API publication and incremental dependencies`
+- 随本报告提交: `docs(gui): record native widget focus validation and roadmap completion`
+
+### 9.2 验证结果汇总
+
+所有验证均在工作树 `/home/aagu/OS01/.worktrees/gui-2b` 根目录执行，涵盖宿主单元测试、头文件与符号审计、增量编译审计、QEMU GUI 套件及 QEMU 桌面端到端套件：
+
+| 测试阶段 / 命令 | 退出码 | 验证结果与指标 |
+|---|---|---|
+| `make PROFILE=x86_64-clang test-gui-host` | 0 | **PASS**：覆盖 `widget`、`layout`、`event`、`focus`、`theme`、`theme-apply`、`desktop-state`、`desktop-shell`、`desktop-audit` 等所有注册用例组 |
+| `make PROFILE=x86_64-clang test-static` | 0 | **PASS**：13 项内核/运行时静态代码与布局审计全部通过 |
+| `make PROFILE=x86_64-clang test-gui-incremental` | 0 | **PASS**：全部 4 阶段通过（无修改重编检查、公共头变更依赖重编、staging 目录发布、sysroot generation 2 生成） |
+| `python3 -m unittest discover -s qemutests -p "test_gui_desktop_runner.py"` | 0 | **PASS**：21/21 测试通过（覆盖真实 runner 及 7 类异常模拟状态机） |
+| `make PROFILE=x86_64-clang test-qemu SUITE=gui` | 0 | **24/24 PASS**：SMP=1（12/12）与 SMP=2（12/12）全部通过，无退化 |
+| `make PROFILE=x86_64-clang test-qemu SUITE=gui-desktop` | 0 | **PASS**：SMP=1（9/9）与 SMP=2（9/9）全部通过，97 焦点项网格与双层目录 ESC 均正常导航 |
+
+### 9.3 核心指标与设计约束
+
+1. **容量上限**：
+   - 最大原生控件数量：1024（`GUI_WIDGET_MAX_COUNT = 1024`）
+   - 最大可聚焦项数量：128（`GUI_FOCUS_MAX_ITEMS = 128`）
+   - 越界安全防护：达到上限时接口优雅报错返回 `ENOMEM`，不产生溢出写或异常崩溃。
+2. **生命周期与焦点防悬挂**：
+   - 统一对象树层级：`Platform -> Root Widget -> Child Widgets`。
+   - 销毁父控件自动级联清理子控件。
+   - 控件销毁时自动调用 `gui_focus_target_destroy` 摘除焦点项，保证焦点链表绝无悬挂指针。
+3. **已发布头与 ABI 洁净度**：
+   - sysroot 已发布的公共头（`gui_widget.h`、`gui_layout.h`、`gui_event.h`、`gui_focus.h`）经过 `gui_build_audit.py` 严格扫描，未暴露任何 LVGL 内部符号。
+4. **底层与内核健壮性强化**：
+   - VFS `VFS_GETDENTS_SORT_MAX` 由 64 扩至 256，消除大目录条目截断问题。
+   - 修复 tmpfs 目录初始子节点数组分配漏洞，彻底消除扩容时的内存破坏隐患。
+   - 桌面 probe 状态写入由标准 IO 迁移为 POSIX `open/write/close/rename` + 栈缓冲，杜绝探针引起的堆抖动与双写竞态。

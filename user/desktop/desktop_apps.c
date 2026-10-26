@@ -463,6 +463,7 @@ static bool build_app_bar(gui_platform_t *platform, gui_widget_t root,
                                      &desktop_shell_app_state(shell)->back_ctx) != 0) {
         return false;
     }
+    desktop_shell_app_state(shell)->back_button = back;
     if (gui_focus_register(desktop_shell_input(shell), back, GUI_FOCUS_STRONG) != 0) {
         return false;
     }
@@ -540,10 +541,17 @@ static bool join_path(const char *cwd, const char *name, char *out, size_t out_l
     }
     cwd_len = strlen(cwd);
     name_len = strlen(name);
-    if (cwd_len + 1 + name_len + 1 > out_len) {
-        return false;
+    if (strcmp(cwd, "/") == 0) {
+        if (1 + name_len + 1 > out_len) {
+            return false;
+        }
+        written = snprintf(out, out_len, "/%s", name);
+    } else {
+        if (cwd_len + 1 + name_len + 1 > out_len) {
+            return false;
+        }
+        written = snprintf(out, out_len, "%s/%s", cwd, name);
     }
-    written = snprintf(out, out_len, "%s/%s", cwd, name);
     if (written < 0 || (size_t)written >= out_len) {
         return false;
     }
@@ -719,6 +727,7 @@ int desktop_files_replace_list(desktop_shell_t *shell,
                                          ctx) != 0) {
             goto fail;
         }
+        ctx->row_widget = row;
 
         /* 目录行也是键盘焦点项：Tab 选中后回车即可进入。 */
         if (gui_focus_register(desktop_shell_input(shell), row,
@@ -1172,6 +1181,25 @@ bool desktop_app_handle_key(desktop_shell_t *shell, const gui_key_event_t *ev)
     if (desktop_shell_state(shell) != DESKTOP_STATE_APP) {
         return false;
     }
+
+    if (desktop_shell_current_app_id(shell) == DESKTOP_APP_FILES) {
+        if (ev->physical_key == KEY_ESC) {
+            char cwd[DESKTOP_FILES_PATH_MAX];
+            char parent[DESKTOP_FILES_PATH_MAX];
+            if (desktop_shell_files_cwd(shell, cwd, sizeof(cwd)) == 0) {
+                if (cwd[0] != '\0' && strcmp(cwd, "/") != 0) {
+                    if (parent_path(cwd, parent, sizeof(parent))) {
+                        (void)desktop_shell_request_file_nav(
+                            shell, parent, desktop_shell_dir_version(shell));
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
     /* 只有终端消费字符键；ESC 不消费：它要回到主屏。 */
     if (desktop_shell_current_app_id(shell) != DESKTOP_APP_TERMINAL) {
         return false;
