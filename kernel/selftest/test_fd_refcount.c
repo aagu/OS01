@@ -1,95 +1,116 @@
-// kernel/selftest/test_fd_refcount.c
-// ── fd reference-protocol SMP race tests ──────────────────
-// Two scenarios, run from task_init() AFTER scheduler_ok=1
-// (kernel_thread + schedule() work).  files_unpin is now a
-// synchronous drop-to-zero → files_free.
-//
-// Synchronisation uses __atomic acquire/release flags, NOT volatile:
-// volatile gives no cross-CPU happens-before.  The harness runs as the
-// idle task and cannot wait_queue_sleep (wait.c adds current->io_wait_node
-// and schedule()s), so it spins on flags via schedule(); workers are
-// kthreads and use the same spin, keeping one uniform protocol.
-//
-// Ownership: harness holds the initial files_t ref; each SUCCESSFULLY
-// created worker files_pin()s its own ref and unpins BEFORE signaling done.
-// An abort flag + start flag let a partially-created worker set exit cleanly
-// instead of spinning forever.  A scenario PASSes only when it provably ran
-// cross-CPU and (for R2) provably observed a detach inside the reader's
-// active window.  A use-after-free otherwise manifests as a crash (#PF).
-
+// fd reference-protocol SMP tests, called from task_init's BSP idle task.
+// Workers are pinned BEFORE publication. A held reference spans a remote
+// detach; stress readers stay active until the writer finishes. CPU masks
+// alone are not evidence of overlapping lifetimes (migration/serial runs).
 #if defined(OS01_SELFTEST)
 
 #include <core/printk.h>
 #include <sched/task.h>
 #include <fs/file.h>
 #include <percpu/percpu.h>
+#include <arch/irq.h>
+#include <time/timer.h>
 
-#define FD_RACE_ITERS  10000
-#define SPIN_LIMIT     10000000
+#define FD_RACE_ITERS 10000
+#define FD_WAIT_TICKS 500  // 5 seconds at the kernel's 100 Hz tick
 
-static void wait_flag(const int *flag)
+// Peer workers have distinct CPUs, so polling cannot starve the producer.
+// Keep IRQs enabled for timer deadlines and other runnable tasks. In
+// particular, schedule() returns with IRQs OFF, not the caller's old state.
+static int worker_wait_progress(const int *flag, int expected, int *abort)
 {
-    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE))
-        schedule();
+    uint64_t start = jiffies;
+    arch_local_irq_enable();
+    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) < expected) {
+        if (__atomic_load_n(abort, __ATOMIC_ACQUIRE))
+            return 0;
+        if (jiffies - start >= FD_WAIT_TICKS) {
+            __atomic_store_n(abort, 1, __ATOMIC_RELEASE);
+            return 0;
+        }
+        arch_cpu_pause();
+    }
+    return !__atomic_load_n(abort, __ATOMIC_ACQUIRE);
 }
 
-// Returns 1 if flag observed set within SPIN_LIMIT, else 0 (timeout).
-static int wait_flag_timeout(const int *flag)
+static int worker_wait(const int *flag, int *abort)
 {
-    int spins = 0;
-    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE) && spins < SPIN_LIMIT) {
+    return worker_wait_progress(flag, 1, abort);
+}
+
+// Only the idle harness yields: it cannot sleep on a wait queue. A worker
+// never waits for a new harness action after start, so it can finish even
+// when the harness shares its CPU and is not runnable until workers exit.
+static int wait_done(const int *flag)
+{
+    uint64_t start = jiffies;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE) &&
+           jiffies - start < FD_WAIT_TICKS) {
+        arch_local_irq_enable();
         schedule();
-        spins++;
+        arch_local_irq_enable();
     }
     return __atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0;
 }
 
-// ── Scenario 1: get-vs-detach (R3) ────────────────────────
+// Scenario 1: files_get_file vs fd_close, including last slot-ref removal.
 static files_t *race_fs;
-static int      r3_start;
-static int      r3_abort;
-static int      r3_reader_done;
-static int      r3_writer_done;
-static int      r3_reader_cpu_mask;   // bitmask of CPUs the reader ran on
-static int      r3_writer_cpu_mask;   // bitmask of CPUs the writer ran on
-static int      r3_writer_err;
-static int      r3_saw_present;       // reader got a non-NULL file ref
-static int      r3_first_published;
-static int      r3_reader_sampled;
-static int      r3_first_detached;
-static int      r3_reader_detached_sampled;
-static int      r3_saw_absent;        // reader saw slot empty (writer detached)
+static int r3_start, r3_abort;
+static int r3_reader_done, r3_writer_done;
+static unsigned r3_reader_cpu_mask, r3_writer_cpu_mask;
+static int r3_writer_err, r3_saw_present, r3_saw_absent;
+static int r3_first_published, r3_reader_sampled, r3_first_detached;
+static int r3_reader_detached_sampled, r3_held_across_detach;
+static int r3_reader_active, r3_writer_progress, r3_reader_progress;
+static int r3_stress_done;
 
 static uint64_t race_reader(uint64_t arg)
 {
     (void)arg;
-    wait_flag(&r3_start);
-    if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
-        goto out;                       // partial-create: exit without racing
-    // Prove both slot states before the stress loop. Neither observation
-    // depends on the scheduler choosing a particular interleaving.
-    wait_flag(&r3_first_published);
+    file_t *held = NULL;
+    if (!worker_wait(&r3_start, &r3_abort) ||
+        !worker_wait(&r3_first_published, &r3_abort))
+        goto out;
     __atomic_fetch_or(&r3_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
-    file_t *first = files_get_file(race_fs, 0);
-    if (first) { r3_saw_present = 1; files_put_file(first); }
+    held = files_get_file(race_fs, 0);
+    r3_saw_present = held != NULL;
     __atomic_store_n(&r3_reader_sampled, 1, __ATOMIC_RELEASE);
-    wait_flag(&r3_first_detached);
-    first = files_get_file(race_fs, 0);
-    if (!first) r3_saw_absent = 1;
-    else files_put_file(first);
+    if (!worker_wait(&r3_first_detached, &r3_abort))
+        goto out;
+
+    // The slot ref is gone; our get must keep the file alive on this CPU.
+    if (held && __atomic_load_n(&held->refcount, __ATOMIC_ACQUIRE) == 1)
+        r3_held_across_detach = 1;
+    file_t *f = files_get_file(race_fs, 0);
+    r3_saw_absent = f == NULL;
+    files_put_file(f);
+    files_put_file(held);
+    held = NULL;
     __atomic_store_n(&r3_reader_detached_sampled, 1, __ATOMIC_RELEASE);
-    for (int i = 0; i < FD_RACE_ITERS; i++) {
-        __atomic_fetch_or(&r3_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
-        file_t *g = files_get_file(race_fs, 0);
-        if (g) {
-            r3_saw_present = 1;         // we DID grab a live file ref
-            files_put_file(g);
-        } else {
-            r3_saw_absent = 1;          // slot empty (writer detached it)
+    __atomic_store_n(&r3_reader_active, 1, __ATOMIC_RELEASE);
+
+    uint64_t start = jiffies;
+    while (!__atomic_load_n(&r3_stress_done, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
+            break;
+        if (jiffies - start >= FD_WAIT_TICKS) {
+            __atomic_store_n(&r3_abort, 1, __ATOMIC_RELEASE);
+            break;
         }
+        __atomic_fetch_or(&r3_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
+        // Acquire progress BEFORE getting a file: the acknowledged sample
+        // must occur after an actual writer close inside our active window.
+        int progress = __atomic_load_n(&r3_writer_progress, __ATOMIC_ACQUIRE);
+        f = files_get_file(race_fs, 0);
+        if (f) r3_saw_present = 1;
+        else r3_saw_absent = 1;
+        files_put_file(f);
+        if (progress)
+            __atomic_store_n(&r3_reader_progress, progress, __ATOMIC_RELEASE);
     }
 out:
-    files_unpin(race_fs);               // drop reader's own ref BEFORE signaling
+    files_put_file(held);
+    files_unpin(race_fs);
     __atomic_store_n(&r3_reader_done, 1, __ATOMIC_RELEASE);
     return 0;
 }
@@ -97,218 +118,241 @@ out:
 static uint64_t race_writer(uint64_t arg)
 {
     (void)arg;
-    wait_flag(&r3_start);
-    if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
+    if (!worker_wait(&r3_start, &r3_abort))
         goto out;
     __atomic_fetch_or(&r3_writer_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
     file_t *first = file_alloc();
     int first_fd = first ? fd_alloc(race_fs, first) : -1;
     if (first_fd < 0) {
-        if (first) file_put(first);
+        file_put(first);
         r3_writer_err++;
+        __atomic_store_n(&r3_abort, 1, __ATOMIC_RELEASE);
+        goto out;
     }
     __atomic_store_n(&r3_first_published, 1, __ATOMIC_RELEASE);
-    wait_flag(&r3_reader_sampled);
-    if (first_fd >= 0) fd_close(race_fs, first_fd);
+    int sampled = worker_wait(&r3_reader_sampled, &r3_abort);
+    fd_close(race_fs, first_fd);  // also close on abort/timeout
+    if (!sampled)
+        goto out;
     __atomic_store_n(&r3_first_detached, 1, __ATOMIC_RELEASE);
-    wait_flag(&r3_reader_detached_sampled);
+    if (!worker_wait(&r3_reader_detached_sampled, &r3_abort) ||
+        !worker_wait(&r3_reader_active, &r3_abort))
+        goto out;
+
     for (int i = 0; i < FD_RACE_ITERS; i++) {
+        if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE))
+            break;
         __atomic_fetch_or(&r3_writer_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         file_t *f = file_alloc();
-        if (!f) { r3_writer_err++; continue; }
-        int fd = fd_alloc(race_fs, f);
-        if (fd < 0) { file_put(f); r3_writer_err++; continue; }
-        // Widen the window where the slot is non-NULL so the reader can
-        // actually grab a live ref (not just see NULL after we detach).
-        if ((i & 15) == 0)
-            schedule();
+        int fd = f ? fd_alloc(race_fs, f) : -1;
+        if (fd < 0) {
+            file_put(f);
+            r3_writer_err++;
+            __atomic_store_n(&r3_abort, 1, __ATOMIC_RELEASE);
+            break;
+        }
         fd_close(race_fs, fd);
+        __atomic_store_n(&r3_writer_progress, i + 1, __ATOMIC_RELEASE);
+        // Require a reader operation after each batch, including the last.
+        // Neither a serial reader nor one that quits after the first close
+        // can satisfy all 625 acknowledgements. The batch itself races.
+        if (((i & 15) == 15 || i + 1 == FD_RACE_ITERS) &&
+            !worker_wait_progress(&r3_reader_progress, i + 1, &r3_abort))
+            break;
     }
 out:
+    __atomic_store_n(&r3_stress_done, 1, __ATOMIC_RELEASE);
     files_unpin(race_fs);
     __atomic_store_n(&r3_writer_done, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
-static int run_get_detach_race(void)
+static int run_get_detach_race(unsigned reader_cpu, unsigned writer_cpu)
 {
-    race_fs = files_alloc();            // harness ref: refcount == 1
+    race_fs = files_alloc();  // harness owns the initial ref
     if (!race_fs) { serial_printk("FAIL (files_alloc)\n"); return -1; }
+    r3_start = r3_abort = r3_reader_done = r3_writer_done = 0;
+    r3_reader_cpu_mask = r3_writer_cpu_mask = r3_writer_err = 0;
+    r3_saw_present = r3_saw_absent = r3_held_across_detach = 0;
+    r3_first_published = r3_reader_sampled = r3_first_detached = 0;
+    r3_reader_detached_sampled = r3_reader_active = 0;
+    r3_writer_progress = r3_reader_progress = r3_stress_done = 0;
 
-    r3_start = 0; r3_abort = 0; r3_reader_done = 0; r3_writer_done = 0;
-    r3_reader_cpu_mask = 0; r3_writer_cpu_mask = 0;
-    r3_writer_err = 0; r3_saw_present = 0; r3_saw_absent = 0;
-    r3_first_published = 0; r3_reader_sampled = 0; r3_first_detached = 0; r3_reader_detached_sampled = 0;
-
-    // Pin a worker ref ONLY when kernel_thread() returns a pid >= 0
-    // (authoritative: pid < 0 means the task was NOT created).
-    int reader_ok = 0, writer_ok = 0;
-    int rpid = kernel_thread(race_reader, 0, PF_KTHREAD);
-    if (rpid >= 0) { files_pin(race_fs); reader_ok = 1; }
-    int wpid = kernel_thread(race_writer, 0, PF_KTHREAD);
-    if (wpid >= 0) { files_pin(race_fs); writer_ok = 1; }
-
-    if (!reader_ok || !writer_ok) {
-        // Release any created worker with abort set so it exits (not spin
-        // forever on r3_start); wait for it to drop its ref, then drop ours.
+    // Reserve before publication: even a worker that times out before
+    // start owns a ref. Failed creates return their unused reservation.
+    files_pin(race_fs);
+    int rpid = kernel_thread_on_cpu(race_reader, 0, reader_cpu);
+    if (rpid < 0) files_unpin(race_fs);
+    files_pin(race_fs);
+    int wpid = kernel_thread_on_cpu(race_writer, 0, writer_cpu);
+    if (wpid < 0) files_unpin(race_fs);
+    int created = rpid >= 0 && wpid >= 0;
+    if (!created)
         __atomic_store_n(&r3_abort, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&r3_start, 1, __ATOMIC_RELEASE);
-        if (reader_ok) wait_flag_timeout(&r3_reader_done);
-        if (writer_ok) wait_flag_timeout(&r3_writer_done);
-        files_unpin(race_fs);
-        serial_printk("FAIL (kthread create)\n");
-        return -1;
-    }
+    __atomic_store_n(&r3_start, 1, __ATOMIC_RELEASE);
 
-    __atomic_store_n(&r3_start, 1, __ATOMIC_RELEASE);   // release both workers
-
-    int rd = wait_flag_timeout(&r3_reader_done);
-    int wd = wait_flag_timeout(&r3_writer_done);
-
+    int rd = rpid < 0 || wait_done(&r3_reader_done);
+    int wd = wpid < 0 || wait_done(&r3_writer_done);
     if (!rd || !wd) {
-        // Timeout: a worker may still be running (finite loop → will exit on
-        // its own and drop its ref).  Deliberately LEAK the harness ref rather
-        // than free a table a live worker may touch.
-        serial_printk("FAIL (timeout reader=%d writer=%d)\n", rd, wd);
+        __atomic_store_n(&r3_abort, 1, __ATOMIC_RELEASE);
+        rd = rpid < 0 || wait_done(&r3_reader_done);
+        wd = wpid < 0 || wait_done(&r3_writer_done);
+    }
+    if (!rd || !wd) {
+        // Retain the harness ref if any worker is still using the table.
+        serial_printk("FAIL (cleanup timeout reader=%d writer=%d)\n", rd, wd);
         return -1;
     }
 
-    int cross_cpu = (r3_reader_cpu_mask & r3_writer_cpu_mask) == 0
-                    && r3_reader_cpu_mask != 0 && r3_writer_cpu_mask != 0;
-
-    int rc = 0;
-    if (r3_writer_err) {
-        serial_printk("FAIL (writer_err=%d)\n", r3_writer_err);
-        rc = -1;
-    } else if (!(r3_saw_present && r3_saw_absent)) {
-        serial_printk("FAIL (no slot interaction present=%d absent=%d)\n",
-                      r3_saw_present, r3_saw_absent);
-        rc = -1;
-    } else if (!cross_cpu) {
-        serial_printk("FAIL (no cross-CPU overlap reader=%x writer=%x)\n",
+    int rc = -1;
+    if (!created) {
+        serial_printk("FAIL (kthread create reader=%d writer=%d)\n", rpid, wpid);
+    } else if (__atomic_load_n(&r3_abort, __ATOMIC_ACQUIRE) || r3_writer_err) {
+        serial_printk("FAIL (abort=%d writer_err=%d progress=%d)\n",
+                      r3_abort, r3_writer_err, r3_writer_progress);
+    } else if (!(r3_saw_present && r3_saw_absent && r3_held_across_detach &&
+                 r3_reader_progress == FD_RACE_ITERS && r3_writer_progress == FD_RACE_ITERS)) {
+        serial_printk("FAIL (present=%d absent=%d held=%d overlap=%d progress=%d)\n",
+                      r3_saw_present, r3_saw_absent, r3_held_across_detach,
+                      r3_reader_progress, r3_writer_progress);
+    } else if (r3_reader_cpu_mask != (1U << reader_cpu) ||
+               r3_writer_cpu_mask != (1U << writer_cpu)) {
+        serial_printk("FAIL (CPU placement reader=%x writer=%x)\n",
                       r3_reader_cpu_mask, r3_writer_cpu_mask);
-        rc = -1;
     } else {
-        serial_printk("PASS (cross-CPU reader=%x writer=%x)\n",
-                      r3_reader_cpu_mask, r3_writer_cpu_mask);
+        serial_printk("PASS (cross-CPU reader=%x writer=%x held=1 overlap=1 closes=%d batches=625)\n",
+                      r3_reader_cpu_mask, r3_writer_cpu_mask, r3_writer_progress);
+        rc = 0;
     }
-
-    files_unpin(race_fs);               // harness ref → refcount 0 → synchronous files_free
+    files_unpin(race_fs);
     return rc;
 }
 
-// ── Scenario 2: pin-vs-detach (R2) ────────────────────────
-// holder inherits its files_t via kernel_thread (do_fork files_dup's init's
-// table); we never create or override a table, so there is no leaked ref.
-// Orchestration forces the detach to happen INSIDE the reader's active
-// window: reader pins successfully (present), signals reader_started; holder
-// waits for that, records its CPU, signals holder_entered, then do_exit().
-// reader keeps looping until it sees a NULL pin (absent).  PASS requires
-// present && absent && holder_entered && cross-CPU.
-static int r2_reader_go;       // harness → reader: start
-static int r2_reader_started;  // reader → holder: "I pinned at least once"
-static int r2_holder_entered;  // holder → harness: "about to do_exit"
-static int r2_reader_done;
-static int r2_reader_cpu_mask; // bitmask of CPUs the reader ran on
-static int r2_holder_cpu = -1; // holder runs do_exit() exactly once → single CPU
-static int r2_saw_present;
-static int r2_saw_absent;
+// Scenario 2: task_files_pin_by_pid vs do_exit's table detach. The reader
+// retains its first successful pin until a later lookup sees NULL. Thus
+// table lifetime, not just two slot states, spans the remote task's exit.
+static int r2_reader_go, r2_abort, r2_reader_started;
+static int r2_holder_entered, r2_reader_done;
+static unsigned r2_reader_cpu_mask;
+static int r2_holder_cpu;
+static int r2_saw_present, r2_saw_absent, r2_held_across_detach;
 
 static uint64_t race_holder(uint64_t arg)
 {
     (void)arg;
-    wait_flag(&r2_reader_started);      // wait until reader has pinned once
+    worker_wait(&r2_reader_started, &r2_abort);
     r2_holder_cpu = (int)cpu_id();
+    // No fixture accesses after this release, including the abort path.
     __atomic_store_n(&r2_holder_entered, 1, __ATOMIC_RELEASE);
-    do_exit(0);   // detaches inherited files under task_list_lock; no return
+    do_exit(0);
     return 0;
 }
 
 static uint64_t pin_reader(uint64_t arg)
 {
     int pid = (int)arg;
-    wait_flag(&r2_reader_go);
-    for (int i = 0; i < FD_RACE_ITERS && !(r2_saw_present && r2_saw_absent); i++) {
+    files_t *held = NULL;
+    if (!worker_wait(&r2_reader_go, &r2_abort))
+        goto out;
+    __atomic_fetch_or(&r2_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
+    held = task_files_pin_by_pid(pid);
+    if (!held) {
+        __atomic_store_n(&r2_abort, 1, __ATOMIC_RELEASE);
+        goto out;
+    }
+    r2_saw_present = 1;
+    __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
+
+    uint64_t start = jiffies;
+    while (!__atomic_load_n(&r2_abort, __ATOMIC_ACQUIRE)) {
         __atomic_fetch_or(&r2_reader_cpu_mask, 1U << cpu_id(), __ATOMIC_RELAXED);
         files_t *fs = task_files_pin_by_pid(pid);
-        if (fs) {
-            r2_saw_present = 1;
-            files_unpin(fs);
-            // Signal holder on the FIRST successful pin (may fire repeatedly;
-            // holder's wait_flag absorbs it harmlessly).
-            __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
-        } else {
-            r2_saw_absent = 1;          // holder detached while we were active
+        if (!fs) {
+            r2_saw_absent = 1;
+            r2_held_across_detach =
+                __atomic_load_n(&held->refcount, __ATOMIC_ACQUIRE) >= 1;
+            break;
         }
+        files_unpin(fs);
+        if (jiffies - start >= FD_WAIT_TICKS) {
+            __atomic_store_n(&r2_abort, 1, __ATOMIC_RELEASE);
+            break;
+        }
+        arch_cpu_pause();
     }
+out:
+    files_unpin(held);
     __atomic_store_n(&r2_reader_done, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
-static int run_pin_detach_race(void)
+static int run_pin_detach_race(unsigned reader_cpu, unsigned holder_cpu)
 {
-    r2_reader_go = 0; r2_reader_started = 0; r2_holder_entered = 0;
-    r2_reader_done = 0;
-    r2_reader_cpu_mask = 0; r2_holder_cpu = -1;
-    r2_saw_present = 0; r2_saw_absent = 0;
+    r2_reader_go = r2_abort = r2_reader_started = 0;
+    r2_holder_entered = r2_reader_done = r2_reader_cpu_mask = 0;
+    r2_holder_cpu = -1;
+    r2_saw_present = r2_saw_absent = r2_held_across_detach = 0;
 
-    int holder_pid = kernel_thread(race_holder, 0, PF_KTHREAD);
-    if (holder_pid < 0) { serial_printk("FAIL (holder create)\n"); return -1; }
+    int hpid = kernel_thread_on_cpu(race_holder, 0, holder_cpu);
+    if (hpid < 0) { serial_printk("FAIL (holder create)\n"); return -1; }
+    int rpid = kernel_thread_on_cpu(pin_reader, (uint64_t)hpid, reader_cpu);
+    if (rpid < 0)
+        __atomic_store_n(&r2_abort, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&r2_reader_go, 1, __ATOMIC_RELEASE);
 
-    int reader_pid = kernel_thread(pin_reader, (uint64_t)holder_pid, PF_KTHREAD);
-    if (reader_pid < 0) {
-        // Let holder proceed to exit (its inherited table frees on do_exit).
-        // We never touch holder task_t* again.
-        __atomic_store_n(&r2_reader_started, 1, __ATOMIC_RELEASE);
+    int rd = rpid < 0 || wait_done(&r2_reader_done);
+    int hd = wait_done(&r2_holder_entered);
+    if (!rd || !hd) {
+        __atomic_store_n(&r2_abort, 1, __ATOMIC_RELEASE);
+        rd = rpid < 0 || wait_done(&r2_reader_done);
+        hd = wait_done(&r2_holder_entered);
+    }
+    if (!rd || !hd) {
+        serial_printk("FAIL (cleanup timeout reader=%d holder=%d)\n", rd, hd);
+        return -1;
+    }
+    if (rpid < 0) {
         serial_printk("FAIL (reader create)\n");
         return -1;
     }
-
-    __atomic_store_n(&r2_reader_go, 1, __ATOMIC_RELEASE);   // release reader
-
-    if (!wait_flag_timeout(&r2_reader_done)) {
-        serial_printk("FAIL (timeout)\n");
+    if (__atomic_load_n(&r2_abort, __ATOMIC_ACQUIRE) ||
+        !(r2_saw_present && r2_saw_absent && r2_held_across_detach)) {
+        serial_printk("FAIL (abort=%d present=%d absent=%d held=%d)\n",
+                      r2_abort, r2_saw_present, r2_saw_absent, r2_held_across_detach);
         return -1;
     }
-
-    int holder_entered = __atomic_load_n(&r2_holder_entered, __ATOMIC_ACQUIRE);
-    int cross_cpu = 0;
-    if (holder_entered) {
-        // Read r2_holder_cpu only after acquiring holder_entered (release/
-        // acquire pairing gives the happens-before for the holder's write).
-        int holder_cpu = r2_holder_cpu;
-        cross_cpu = (holder_cpu >= 0) &&
-                    (r2_reader_cpu_mask & (1U << holder_cpu)) == 0;
-    }
-
-    if (!(r2_saw_present && r2_saw_absent)) {
-        serial_printk("FAIL (no detach observed present=%d absent=%d)\n",
-                      r2_saw_present, r2_saw_absent);
-        return -1;
-    } else if (!holder_entered) {
-        serial_printk("FAIL (holder never entered)\n");
-        return -1;
-    } else if (!cross_cpu) {
-        serial_printk("FAIL (no cross-CPU reader=%x holder=%d)\n",
+    if (r2_reader_cpu_mask != (1U << reader_cpu) ||
+        r2_holder_cpu != (int)holder_cpu) {
+        serial_printk("FAIL (CPU placement reader=%x holder=%d)\n",
                       r2_reader_cpu_mask, r2_holder_cpu);
         return -1;
     }
-    serial_printk("PASS (cross-CPU reader=%x holder=%d)\n",
+    serial_printk("PASS (cross-CPU reader=%x holder=%d held=1)\n",
                   r2_reader_cpu_mask, r2_holder_cpu);
     return 0;
 }
 
 int test_fd_refcount(void)
 {
-    int rc = 0;
-    serial_printk("[selftest] fd_refcount get-vs-detach... ");
-    if (run_get_detach_race() != 0)
-        rc = -1;
+    arch_irq_state_t flags = arch_local_irq_save();
+    unsigned reader_cpu = cpu_id(), peer;
+    for (peer = 0; peer < num_cpus && peer < NR_CPUS; peer++) {
+        if (peer != reader_cpu && percpu_data[peer].online &&
+            percpu_data[peer].scheduler_ok)
+            break;
+    }
+    if (peer >= num_cpus || peer >= NR_CPUS) {
+        serial_printk("[selftest] fd_refcount FAIL (requires two scheduler-ready CPUs)\n");
+        arch_local_irq_restore(flags);
+        return -1;  // never claim SMP coverage on one CPU
+    }
 
+    serial_printk("[selftest] fd_refcount get-vs-detach... ");
+    int r3 = run_get_detach_race(reader_cpu, peer);
     serial_printk("[selftest] fd_refcount pin-vs-detach... ");
-    if (run_pin_detach_race() != 0)
-        rc = -1;
-    return rc;
+    int r2 = run_pin_detach_race(reader_cpu, peer);
+    arch_local_irq_restore(flags);
+    return r3 || r2 ? -1 : 0;
 }
 
 #endif // OS01_SELFTEST
