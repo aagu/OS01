@@ -33,14 +33,32 @@ from qemutests.gui_build_audit import (
 class GuiBuildAuditNegativeTests(unittest.TestCase):
     def setUp(self):
         self.repo_root = Path(__file__).resolve().parent.parent
-        self.build_dir = self.repo_root / "build" / "x86_64-clang"
-        self.sysroot = self.build_dir / "sysroot"
+        # The published GUI headers live in the source tree; libgui's
+        # install rule copies exactly these files into the sysroot.
+        self.public_src = self.repo_root / "libgui" / "include" / "gui"
+
+    def _published_tree(self, root: Path) -> Path:
+        """Materialise a published GUI include tree under `root`.
+
+        The fixture is built from the SOURCE public headers, not from the
+        built sysroot: `make test-harness` runs with no build
+        prerequisites (see .github/workflows/ci.yml), so build/
+        x86_64-clang/sysroot does not exist in the framework-regression
+        job.  The real sysroot contract is enforced separately by
+        `make test-static` (gui_build_audit.py against the built tree).
+        """
+        gui_dir = root / "usr" / "include" / "gui"
+        gui_dir.mkdir(parents=True)
+        for header in GUI_PUBLIC_HEADERS:
+            src = self.public_src / header
+            self.assertTrue(src.is_file(), f"missing public header source: {src}")
+            shutil.copyfile(src, gui_dir / header)
+        return root
 
     def test_missing_new_header_rejected(self):
         """A missing new public header (e.g. gui_widget.h) in sysroot must fail the audit."""
         with tempfile.TemporaryDirectory(prefix="gui-audit-neg-") as td:
-            fake_sysroot = Path(td) / "sysroot"
-            shutil.copytree(self.sysroot, fake_sysroot, symlinks=True)
+            fake_sysroot = self._published_tree(Path(td) / "sysroot")
 
             target = fake_sysroot / "usr" / "include" / "gui" / "gui_widget.h"
             if target.is_file():
@@ -54,8 +72,7 @@ class GuiBuildAuditNegativeTests(unittest.TestCase):
     def test_leaking_private_header_rejected(self):
         """Leaking gui_widget_private.h into sysroot must fail the audit."""
         with tempfile.TemporaryDirectory(prefix="gui-audit-neg-") as td:
-            fake_sysroot = Path(td) / "sysroot"
-            shutil.copytree(self.sysroot, fake_sysroot, symlinks=True)
+            fake_sysroot = self._published_tree(Path(td) / "sysroot")
 
             leak = fake_sysroot / "usr" / "include" / "gui" / "gui_widget_private.h"
             leak.write_text("/* leaked private header */\n")
