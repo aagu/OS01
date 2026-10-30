@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <sys/types.h>      // pid_t (task_struct.pgrp/session, signal_pgrp)
 #include <arch/cpu.h>
+#include <arch/context.h>   // facade: per-arch thread_t + current/switch ops
+                            // (also defines STACK_SIZE)
 #include <arch/thread.h>
 #include <arch/segment.h>
 #include <fs/file.h>
@@ -43,7 +45,8 @@ void blocker_wake(struct task_struct *task);
 #define CLONE_FILES (1 << 1)
 #define CLONE_SIGNAL (1 << 2)
 
-#define STACK_SIZE (32 * 1024) // 32KB — heap migration + -O2 makes this safe
+// STACK_SIZE (32 KiB) now lives in <arch/context.h> — same value on both
+// architectures (spec §6); task.h keeps it available transitively.
 
 extern char _text;
 extern char _etext;
@@ -97,31 +100,11 @@ typedef struct mm_struct
     spinlock_T lock;      // guards munmap/MAP_FIXED/mprotect vs getrandom write
 } mm_t;
 
-typedef struct thread_struct
-{
-    uint64_t rsp0; // in tss, points to the base of stack
-    
-    uint64_t rip;
-    uint64_t rsp; // current stack pointer, points to the top of stack
-
-    uint64_t fs;
-    uint64_t gs;
-
-    uint64_t cr3; // page table base (physical address for CR3)
-
-    uint64_t cr2;
-    uint64_t trap_nr;
-    uint64_t error_code;
-
-    // IRQ state saved by schedule() when this task entered it.
-    // Per-TASK (not per-CPU): a per-CPU global gets overwritten by
-    // the next task that calls schedule() on the same CPU, so the
-    // resumed task would restore another task's flags (e.g. IRQ
-    // opened in ret_from_intr -> nested tick frame -> #PF with
-    // RFLAGS-as-RIP).  Saved in thread so each task restores its
-    // own state when switched back in.
-    uint64_t sched_flags;
-} thread_t;
+// thread_t is architecture-specific and lives in the per-arch context
+// header selected by <arch/context.h> (x86_64 keeps the exact pre-facade
+// field order; aarch64 has its own saved set).  It is complete by the
+// time task_struct below is defined because the facade is included first.
+typedef struct thread_struct thread_t;
 
 typedef struct task_struct
 {
@@ -279,54 +262,15 @@ extern task_t *init_task[NR_CPUS];
 }
 
 
-inline task_t* __attribute__((always_inline)) get_current_task(void)
-{
-    uint64_t sp;
-    __asm__ __volatile__("movq %%rsp, %0" : "=r"(sp));
-    return (task_t *)(sp & ~(STACK_SIZE - 1));
-}
-
-#define current get_current_task()
-
-#define GET_CURRENT \
-    "movq %rsp, %rbx \n\t" \
-    "andq $-32768, %rbx \n\t"
-
-#define switch_to(prev, next) \
-    do { \
-        task_t *__switch_prev = (prev); \
-        task_t *__switch_next = (next); \
-        __asm__ __volatile__(                \
-            "pushq %%rbp \n\t"       \
-            "pushq %%rbx \n\t"       \
-            "pushq %%r12 \n\t"       \
-            "pushq %%r13 \n\t"       \
-            "pushq %%r14 \n\t"       \
-            "pushq %%r15 \n\t"       \
-            "cli \n\t"               /* disable IRQs during stack switch */ \
-            "movq %%rsp, %0 \n\t"    /* save prev->rsp */ \
-            "leaq 1f(%%rip), %%rax \n\t" \
-            "movq %%rax, %1 \n\t"    /* save prev->rip = resume label */ \
-            "movq %4, %%rdi \n\t"    /* 1st arg: prev (SysV) */ \
-            "movq %5, %%rsi \n\t"    /* 2nd arg: next (SysV) */ \
-            "movq %2, %%rsp \n\t"    /* load next->rsp */ \
-            "pushq %3 \n\t"          /* push next->rip */ \
-            "jmp __switch_to \n\t"   \
-            "1: \n\t"                \
-            /* IRQ state restored by schedule() after switch */ \
-            "popq %%r15 \n\t"        \
-            "popq %%r14 \n\t"        \
-            "popq %%r13 \n\t"        \
-            "popq %%r12 \n\t"        \
-            "popq %%rbx \n\t"        \
-            "popq %%rbp \n\t"        \
-            : "=m"(__switch_prev->thread->rsp), "=m"(__switch_prev->thread->rip) \
-            : "m"(__switch_next->thread->rsp), "m"(__switch_next->thread->rip), \
-              "m"(__switch_prev), "m"(__switch_next) \
-            : "memory", "rax", "rcx", "rdx", "rdi", "rsi", \
-              "r8", "r9", "r10", "r11", "cc" \
-        ); \
-    } while (0)
+/* ── Compatibility aliases (facade-backed) ─────────────────────
+ * The implementations moved to <arch/context.h>: arch_current_task()
+ * (per-arch static inline) and arch_task_switch() (x86: inline-asm
+ * macro; aarch64: extern until Phase 3).  These aliases keep every
+ * pre-facade caller — including arch/x86_64/intr/trap.c's deliberate
+ * non-`current` use on IST stacks — source-compatible. */
+#define switch_to(prev, next) arch_task_switch(prev, next)
+#define get_current_task() arch_current_task()
+#define current arch_current_task()
 
 
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size);
