@@ -77,12 +77,10 @@ void hang_dump_all(void)
         serial_printk("  task %d: pid=%d cpu=%d state=%s counter=%ld flags=%#lx\n",
                       task_idx++, t->pid, t->cpu, state_str,
                       (long)t->counter, (unsigned long)t->flags);
-        if (t->thread) {
-            serial_printk("    rip=%#lx rsp=%#lx cr3=%#lx\n",
-                          (unsigned long)t->thread->rip,
-                          (unsigned long)t->thread->rsp,
-                          (unsigned long)t->thread->cr3);
-        }
+        /* Architecture-specific saved context (x86: rip/rsp/cr3) —
+         * behind the arch facade; common code must not read
+         * thread->rip / thread->rsp / thread->cr3 directly. */
+        arch_dump_task_context(t);
     }
     serial_printk("  (%d tasks total at jiffies=%lu)\n",
                   task_idx, (unsigned long)jif);

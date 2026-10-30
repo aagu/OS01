@@ -445,41 +445,22 @@ void schedule(void)
 
     rq->need_resched = 0;
 
-    // Idle task thread->rip is 0 until its first switch_to.
-    // Fix it unconditionally — when schedule() runs from the idle
-    // loop with an empty rbtree, next==current==idle and the
-    // preemption guard may not skip us (idle vruntime==deadline==0).
-    if (next == rq->idle && next->thread->rip == 0)
-        next->thread->rip = (uint64_t)idle_task_resume;
+    // Idle task thread->rip is 0 until its first switch_to.  Arm the
+    // first continuation through the arch hook (x86 writes the common C
+    // idle_task_resume, and only while rip is still 0 — never the
+    // different assembly idle_resume in entry.S).  When schedule() runs
+    // from the idle loop with an empty rbtree, next==current==idle and
+    // the preemption guard already returned; the FIRST real switch-in
+    // is what needs the continuation.
+    if (next == rq->idle)
+        arch_task_prepare_first_switch(next, idle_task_resume);
 
-    // [DIAG-5] before saving prev state, verify current->thread is a
-    // sane kernel-heap pointer: switch_to's asm stores
-    // (movq %rsp, prev->thread->rsp / rip) would write through a
-    // garbage thread pointer and corrupt memory BEFORE any crash.
-    if ((uint64_t)current->thread < 0xffff800000000000ULL ||
-        (uint64_t)current->thread >= 0xffff800020000000ULL) {
-        serial_printk("SCHED-PREV-BAD: pid=%ld thread=%p cpu=%d "
-                      "state=%ld on_rq=%d on_cpu=%d\n",
-                      current->pid, (void *)current->thread, cpu_id(),
-                      (long)current->state, (int)current->on_rq,
-                      (int)current->on_cpu);
-        for (;;) arch_cpu_halt();
-    }
-    // [DIAG-5b] hardened: our SAVED thread->rsp must lie inside our
-    // OWN task_union stack.  If it points elsewhere (e.g. a freed
-    // 64-byte thread_t slab object), the thread struct was already
-    // corrupted — and switch_to's store (movq %rsp,
-    // prev->thread->rsp) would write through garbage.  Catch it
-    // before the corruption spreads.
-    if (current->thread->rsp < (uint64_t)current ||
-        current->thread->rsp > (uint64_t)current + STACK_SIZE) {
-        serial_printk("SCHED-PREV-BAD2: pid=%ld saved_rsp=%lx cpu=%d "
-                      "state=%ld cur=%p rsp0=%lx rip=%lx\n",
-                      current->pid, current->thread->rsp, cpu_id(),
-                      (long)current->state, (void *)current,
-                      current->thread->rsp0, current->thread->rip);
-        for (;;) arch_cpu_halt();
-    }
+    // [DIAG-5]/[DIAG-5b]: verify our own previous context before
+    // switch_to's asm writes through it.  The two x86 checks (sane
+    // kernel-heap thread pointer; saved rsp inside our task_union) are
+    // arch-owned — see arch_task_check_prev(); common core no longer
+    // reads thread->rip / thread->rsp / thread->rsp0 directly.
+    arch_task_check_prev(current);
     switch_to(current, next);
     // Resumed here when this task is switched back: we are running
     // again — stack in use, so on_cpu = 1.
