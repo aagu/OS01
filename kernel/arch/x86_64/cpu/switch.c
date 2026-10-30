@@ -1,4 +1,5 @@
 #include <sched/task.h>
+#include <sched/internal.h>  // task_switch_complete — common switch tail
 #include <percpu/percpu.h>
 #include <arch/spinlock.h>
 #include <arch/x86_64/gate.h>
@@ -6,7 +7,6 @@
 #include <arch/x86_64/tss.h>
 #include <core/printk.h>
 #include <log/log.h>
-#include <memory/slab.h>   // kfree — for PF_SELF_REAP epilogue
 
 /**
  * __switch_to — architecture-specific context switch
@@ -94,23 +94,12 @@ void __switch_to(task_t *prev, task_t *next)
         );
     }
 
-    /* Capture this before publishing on_cpu=0: a normal zombie may be
-     * freed by its parent immediately afterwards. Detached self-reaping
-     * kthreads have no competing waiter. */
-    int self_reap = prev->flags & PF_SELF_REAP;
-    if (prev != next)
-        task_finish_switch(prev);
-
-    // kthread self-reap: a PF_SELF_REAP task removed itself from the
-    // global list and set ZOMBIE atomically in do_exit.  It has no
-    // waitpid consumer, so reclaim its slab objects here.  We run on
-    // NEXT's stack (switch_to already switched rsp), so freeing prev's
-    // stack is safe.  This MUST stay the last code that touches prev:
-    // kfree(prev->stack_alloc_base) frees the task_union containing prev
-    // itself — do not dereference prev past this point.
-    if (self_reap) {
-        if (prev->thread)           kfree(prev->thread);
-        if (prev->fpu_save)         kfree(prev->fpu_save);
-        if (prev->stack_alloc_base) kfree(prev->stack_alloc_base);
-    }
+    /* Common switch tail: task_finish_switch(prev) publishes on_cpu=0
+     * and, for a PF_SELF_REAP kthread, reclaims prev's slab objects.
+     * The tail captures everything it needs from prev BEFORE the
+     * publish — after on_cpu clears, a waiter may free prev — and never
+     * reads prev afterwards. We already run on NEXT's stack (switch_to
+     * switched rsp), so freeing prev's stack is safe. Self-switch
+     * (actual_prev == current) is a no-op inside the tail. */
+    task_switch_complete(prev);
 }

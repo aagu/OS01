@@ -35,4 +35,14 @@ void sched_notify_remote(task_t *tsk);
 /* ── Internal helper (exec.c / fork.c shared) ── */
 void *fpu_area_alloc(void);
 
+/* ── Common switch tail (kthread.c; aarch64 EL1 scheduler spec §8.3) ── */
+/* Runs on the *next* task's stack, after the architecture has installed
+ * next's context. Captures the self-reap decision and the objects to
+ * release BEFORE task_finish_switch() clears on_cpu, because after that
+ * a waiter may free prev. Never reads prev after task_finish_switch()
+ * returns. The single-argument signature is frozen in the series index:
+ * on next's stack `current` identifies next, so the self-switch case
+ * (actual_prev == current) returns without finish or free. */
+void task_switch_complete(task_t *actual_prev);
+
 #endif /* KERNEL_SCHED_INTERNAL_H */

@@ -203,7 +203,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_intr_backend_aarch64.elf \
     $(TEST_BLD)/test_intr_backend_x86.elf \
     $(TEST_BLD)/test_intr_irq_x86.elf \
-    $(TEST_BLD)/test_x86_intr_probe.elf
+    $(TEST_BLD)/test_x86_intr_probe.elf \
+    $(TEST_BLD)/test_switch_complete.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -2688,6 +2689,38 @@ $(TEST_BLD)/test_monitor_accounting.elf: $(TEST_BLD)/test_monitor_accounting.o \
 
 .PHONY: test-monitor-accounting
 test-monitor-accounting: $(TEST_BLD)/test_monitor_accounting.elf
+	$<
+
+# aarch64 EL1 scheduler plan Phase 1, Task 2: common switch tail.
+# Host-compiles the REAL kernel/sched/kthread.c against
+# mock/switch_complete_test_runtime.h, which short-circuits sched/task.h +
+# sched/internal.h + memory/slab.h and provides a test-controlled current
+# plus spy task_finish_switch / kfree (defined in the test TU).  The spy
+# finish POISONS prev's members, so the case proves the tail captures the
+# objects to release BEFORE the on_cpu publish (spec §8.3: a waiter may
+# free prev the moment task_finish_switch clears on_cpu) and never reads
+# prev after it.
+SWITCH_TAIL_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC)
+SWITCH_TAIL_PROD_CFLAGS := $(SWITCH_TAIL_HOST_CFLAGS) \
+                           -include $(TEST_MOCK)/switch_complete_test_runtime.h
+
+$(TEST_BLD)/switch_complete_production.o: $(TESTS_DIR)/kernel/sched/kthread.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_switch_complete.o: $(TEST_CASES)/test_switch_complete.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_switch_complete.elf: $(TEST_BLD)/test_switch_complete.o \
+		$(TEST_BLD)/switch_complete_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-switch-complete
+test-switch-complete: $(TEST_BLD)/test_switch_complete.elf
 	$<
 
 # Monitor plan Task 3: locked PMM usage snapshot.  Links the REAL

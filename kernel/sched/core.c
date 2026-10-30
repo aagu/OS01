@@ -425,11 +425,14 @@ void schedule(void)
         }
     }
 
-    // ── 6. Preemption guard: if the best candidate is still
-    //        current and it hasn't exhausted its time slice,
-    //        skip the context switch.  Always skip idle→idle.
-    if (next == current &&
-        (next == rq->idle || current->vruntime < current->deadline)) {
+    // ── 6. Preemption guard: a real switch needs a DIFFERENT task.
+    //        Every next == current takes this no-switch IRQ-restore /
+    //        guard-clear path, irrespective of vruntime — a self
+    //        switch_to would only round-trip our own context, and the
+    //        architecture tail must never finish/free the running task
+    //        (spec §5.1: the scheduler skips every self-switch). Always
+    //        skip idle→idle.
+    if (next == current) {
         rq->need_resched = 0;
         arch_local_irq_restore(current->thread->sched_flags);
         current->in_schedule = 0;
