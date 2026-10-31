@@ -256,6 +256,7 @@ _test-aarch64-run-smp:
 	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 1 2 4 --repeat 3 --timeout 90 --expect-selftest --expect-gic --expect-clk \
 	  --expect-slab-selftest --expect-m3-selftest --expect-m3mc-selftest \
+	  --expect-scheduler-selftest \
 	  $(TEST_AARCH64_EXTRA_smp) \
 	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \

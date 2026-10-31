@@ -8,9 +8,9 @@ process/output/archive code onto ``ProcessSession`` (Task 3) and
 diagnostic-DTB mechanism) are unchanged — only the process boundary and
 the per-invocation evidence archive were replaced.
 
-The suite does **not** publish the v1 ``[TEST]`` protocol, so each
-invocation is archived as a ``suite``-unit result (spec §6.2) — there are
-no fabricated guest case records.
+The normal SMP image does not publish the v1 ``[TEST]`` protocol. When the
+explicit scheduler-selftest gate is enabled, the same runner also requires
+the complete kernel-selftest protocol through its single END.
 """
 
 import argparse
@@ -329,6 +329,27 @@ def self_test() -> None:
     assert passed(current_log_for_2_cpus, cpus=2), \
         "expect_m3mc_selftest default-off preserves legacy behavior"
 
+    early_ids = ["slab_alloc_free", "slab_many_sizes", "slab_16_caches",
+                 "aarch64_pt_vmm", "spinlock_basic"]
+    protocol_lines = ["[TEST] START v=1 suite=kernel-selftest expected=14"]
+    protocol_lines += [f"[TEST] SELECT {case} required=1" for case in
+                       early_ids + list(SCHEDULER_LATE_IDS)]
+    protocol_lines += [f"[TEST] BEGIN {case}" for case in
+                       early_ids + list(SCHEDULER_LATE_IDS)]
+    protocol_lines += [f"[TEST] PASS {case}" for case in
+                       early_ids + list(SCHEDULER_LATE_IDS)]
+    protocol_lines += ["[TEST] END suite=kernel-selftest total=14 passed=14 "
+                       "failed=0 skipped=0"]
+    scheduler_protocol = "\n".join(protocol_lines) + "\n"
+    assert scheduler_selftest_evidence_ok(scheduler_protocol)
+    assert not scheduler_selftest_evidence_ok(
+        scheduler_protocol.replace("SELECT aarch64_sched_ap required=1\n", ""))
+    assert not scheduler_selftest_evidence_ok(
+        scheduler_protocol.replace("[TEST] PASS aarch64_sched_ap\n", ""))
+    assert not scheduler_selftest_evidence_ok(
+        scheduler_protocol + "[TEST] END suite=kernel-selftest total=14 "
+        "passed=14 failed=0 skipped=0\n")
+
     # --expect-gic 断言（Task 2.1 + 3.1）：只用合成 log 测 gic_evidence_ok 解析
     # 行为。不再组合 GIC+IPI marker 调 passed(), 因为 kernel 现状不发 IPI marker
     # (Task 3.2 GREEN 才会发); 组合调用恒失败。每条 assertion 单独构造独立合成
@@ -555,11 +576,52 @@ def gic_evidence_ok(text: str, cpus: int) -> bool:
     return True
 
 
+SCHEDULER_LATE_IDS = (
+    "aarch64_sched_yield", "aarch64_sched_regs", "aarch64_sched_entry",
+    "aarch64_sched_irq", "aarch64_sched_blocker", "aarch64_sched_reclaim",
+    "aarch64_sched_idle", "aarch64_sched_timer", "aarch64_sched_ap",
+)
+
+
+def scheduler_selftest_evidence_ok(text: str) -> bool:
+    """Require the full 14-case P4 kernel protocol and unique END."""
+    text = text.replace("\r", "")
+    starts = re.findall(r"^\[TEST\] START v=1 suite=kernel-selftest expected=(\d+)$",
+                        text, re.MULTILINE)
+    ends = re.findall(r"^\[TEST\] END suite=kernel-selftest total=(\d+) "
+                      r"passed=(\d+) failed=(\d+) skipped=(\d+)$",
+                      text, re.MULTILINE)
+    if len(starts) != 1 or starts[0] != "14" or len(ends) != 1:
+        print("FAIL: scheduler selftest requires one START(expected=14) and one END")
+        return False
+    selects = re.findall(r"^\[TEST\] SELECT ([^ ]+) required=1$", text,
+                         re.MULTILINE)
+    if len(selects) != 14 or selects[-9:] != list(SCHEDULER_LATE_IDS) or \
+            len(set(selects)) != 14:
+        print("FAIL: scheduler selftest SELECT set/order is incomplete or duplicated")
+        return False
+    begins = re.findall(r"^\[TEST\] BEGIN ([^ ]+)$", text, re.MULTILINE)
+    passes = re.findall(r"^\[TEST\] PASS ([^ ]+)$", text, re.MULTILINE)
+    failures = re.findall(r"^\[TEST\] FAIL ([^ ]+) reason=", text, re.MULTILINE)
+    if begins != selects or passes != selects or failures:
+        print("FAIL: scheduler selftest cases did not each BEGIN/PASS exactly once")
+        return False
+    if tuple(map(int, ends[0])) != (14, 14, 0, 0):
+        print(f"FAIL: scheduler selftest END totals are invalid: {ends[0]}")
+        return False
+    end_at = re.search(r"^\[TEST\] END suite=kernel-selftest", text, re.MULTILINE)
+    if not end_at or max(text.find(f"[TEST] PASS {case}") for case in SCHEDULER_LATE_IDS) >= end_at.start():
+        print("FAIL: scheduler selftest END precedes late PASS records")
+        return False
+    return True
+
+
 def passed(text: str, cpus: int, expect_selftest: bool = False,
            expect_gic: bool = False, expect_clk: bool = False,
            expect_slab: bool = False,
            expect_m3_selftest: bool = False,
-           expect_m3mc_selftest: bool = False) -> bool:
+           expect_m3mc_selftest: bool = False,
+           expect_scheduler_selftest: bool = False) -> bool:
     """Recognize a complete normal-mode SMP run without QEMU dependencies."""
     # PL011 currently emits LF+CR. Match lines consistently for saved logs
     # and live serial drains, while retaining the original fixture format.
@@ -567,6 +629,8 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
     if not ram_summary_ok(text):
         return False
     if kernel_failure(text):
+        return False
+    if expect_scheduler_selftest and not scheduler_selftest_evidence_ok(text):
         return False
     if expect_gic and not gic_evidence_ok(text, cpus):
         return False
@@ -764,7 +828,8 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
                   expect_gic=expect_gic, expect_clk=expect_clk,
                   expect_slab=getattr(args, "expect_slab_selftest", False),
                   expect_m3_selftest=getattr(args, "expect_m3_selftest", False),
-                  expect_m3mc_selftest=getattr(args, "expect_m3mc_selftest", False))
+                  expect_m3mc_selftest=getattr(args, "expect_m3mc_selftest", False),
+                  expect_scheduler_selftest=getattr(args, "expect_scheduler_selftest", False))
 
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None) -> list[str]:
@@ -1075,6 +1140,10 @@ def main() -> int:
                              "aarch64 multi-core M3 selftest (M3.6 Task 26): "
                              "exactly one SKIP line at -smp 1, exactly one "
                              "N/N PASS marker at -smp >= 2")
+    parser.add_argument("--expect-scheduler-selftest", action="store_true",
+                        help="Require all 14 protocol-v1 kernel selftest cases, "
+                             "including the nine ordered AArch64 scheduler late "
+                             "cases, to PASS before exactly one END")
     parser.add_argument("--expect-gic", action="store_true",
                         help="Require GICv2 framework markers: driver init, "
                              "dispatch ready, save-restore probe OK, "

@@ -23,6 +23,9 @@
 #include <memory/slab.h>
 #include <string.h>
 #include <errno.h>
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+#include <selftest/aarch64_scheduler.h>
+#endif
 
 /* The task struct lives at the base of the task_union stack region,
  * so the stack reserve above it must still fit the task struct plus a
@@ -106,6 +109,9 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     void *raw = kmalloc(sizeof(union task_union) + STACK_SIZE);
     if (!raw)
         return -ENOMEM;
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    aarch64_sched_observe_resource(raw, 1, true);
+#endif
     task_t *tsk = (task_t *)(((uint64_t)raw + STACK_SIZE - 1) &
                              ~(uint64_t)(STACK_SIZE - 1));
     /* Keep the task metadata and diagnostic reserve below the usable
@@ -114,13 +120,22 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     if (sizeof(task_t) > STACK_SIZE ||
         (size_t)256 > STACK_SIZE - sizeof(task_t)) {
         kfree(raw);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+        aarch64_sched_observe_resource(raw, 1, false);
+#endif
         return -EINVAL;
     }
     thread_t *thd = kmalloc(sizeof(thread_t));
     if (!thd) {
         kfree(raw);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+        aarch64_sched_observe_resource(raw, 1, false);
+#endif
         return -ENOMEM;
     }
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    aarch64_sched_observe_resource(thd, 2, true);
+#endif
 
     /* 3. Zero the new task and its thread context. */
     memset(tsk, 0, sizeof(task_t));
@@ -184,6 +199,10 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     if (rc) {
         kfree(thd);
         kfree(raw);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+        aarch64_sched_observe_resource(thd, 2, false);
+        aarch64_sched_observe_resource(raw, 1, false);
+#endif
         return rc;
     }
 
@@ -204,6 +223,10 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
         arch_kthread_drop_files(tsk);
         kfree(thd);
         kfree(raw);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+        aarch64_sched_observe_resource(thd, 2, false);
+        aarch64_sched_observe_resource(raw, 1, false);
+#endif
         return -EINVAL;
     }
 
@@ -382,11 +405,34 @@ void task_switch_complete(task_t *actual_prev)
     void      *fpu  = actual_prev->fpu_save;
     void      *stk  = actual_prev->stack_alloc_base;
 
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    uintptr_t live_sp;
+    __asm__ __volatile__("mov %0, sp" : "=r"(live_sp));
+    bool next_stack = live_sp < (uintptr_t)actual_prev ||
+                      live_sp >= (uintptr_t)actual_prev + STACK_SIZE;
+    aarch64_sched_observe_reap(actual_prev, next_stack);
+#endif
+
     task_finish_switch(actual_prev);
 
     if (self_reap) {
-        if (thd) kfree(thd);
-        if (fpu) kfree(fpu);
-        if (stk) kfree(stk);
+        if (thd) {
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_resource(thd, 2, false);
+#endif
+            kfree(thd);
+        }
+        if (fpu) {
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_resource(fpu, 3, false);
+#endif
+            kfree(fpu);
+        }
+        if (stk) {
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_resource(stk, 1, false);
+#endif
+            kfree(stk);
+        }
     }
 }

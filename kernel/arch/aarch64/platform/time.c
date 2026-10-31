@@ -36,6 +36,9 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
 #include <time/clockevent.h>   /* tick_handler() */
+#ifdef OS01_SELFTEST
+#include <selftest/aarch64_scheduler.h>
+#endif
 
 /* Forward from pl011.c. */
 void kputs(const char *s);
@@ -72,7 +75,12 @@ static uint64_t g_period;
  * round-trip is behaviorally equivalent to the in-handler EOI. */
 static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
 {
-    (void)intid; (void)param; (void)regs;
+    (void)intid; (void)param;
+#ifdef OS01_SELFTEST
+    aarch64_sched_observe_timer_irq(regs, true);
+#else
+    (void)regs;
+#endif
     cntp_tval_el0_write(g_period);  /* TVAL rewrite FIRST (phase1 spec §2.3) */
     tick_handler();                   /* unified tick semantic */
     /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
@@ -84,6 +92,9 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
         kputu(t / TICKS_PER_SECOND);
         kputs("\n");
     }
+#ifdef OS01_SELFTEST
+    aarch64_sched_observe_timer_irq(regs, false);
+#endif
 }
 
 bool arch_tick_start(void)

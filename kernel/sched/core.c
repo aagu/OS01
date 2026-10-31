@@ -13,6 +13,9 @@
 #include <string.h>
 #include <errno.h>
 #include <core/assert.h>
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+#include <selftest/aarch64_scheduler.h>
+#endif
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
@@ -226,6 +229,9 @@ void sched_unblock_blocked(void)
         // verifies the condition before setting RUNNING.
         if (t->blocker.check && t->blocker.check(t)) {
             blocker_wake(t);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_scan_wake(t);
+#endif
             continue;
         }
 
@@ -287,6 +293,9 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     // Step 5: Give up CPU. schedule() will run sched_unblock_blocked()
     // which finds us and wakes us when the condition is met.
     // We may also be woken explicitly by blocker_wake() from do_exit().
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    aarch64_sched_before_block_switch(self);
+#endif
     schedule();
     arch_local_irq_enable();
     // Woke up — clear blocker and check why
@@ -319,7 +328,14 @@ void schedule(void)
     // With the flag set, the nested call returns immediately: the
     // outer call has already chosen next and will finish switching.
     if (current->in_schedule)
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    {
+        aarch64_sched_observe_nested_schedule();
         return;
+    }
+#else
+        return;
+#endif
     current->in_schedule = 1;
     // On-CPU: our kernel stack is in use.  A waiter must not free us
     // even after do_exit sets ZOMBIE (final schedule is still
@@ -359,6 +375,9 @@ void schedule(void)
             enqueue_task(current, rq);
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    aarch64_sched_observe_block_enqueue(current);
+#endif
 
     // ── 3. Wake blocked tasks whose condition is now met ──
     // (was inside the old zombie-reaper critical section; now
@@ -463,6 +482,10 @@ void schedule(void)
     // arch-owned — see arch_task_check_prev(); common core no longer
     // reads thread->rip / thread->rsp / thread->rsp0 directly.
     arch_task_check_prev(current);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    if (next != current)
+        aarch64_sched_observe_switch_tasks(current, next);
+#endif
     switch_to(current, next);
     // Resumed here when this task is switched back: we are running
     // again — stack in use, so on_cpu = 1.

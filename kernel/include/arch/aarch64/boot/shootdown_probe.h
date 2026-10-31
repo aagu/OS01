@@ -352,5 +352,9 @@ const struct aarch64_shootdown_probe_ops *aarch64_shootdown_probe_default_ops(vo
  * ordering). Gating on dtb_cpu_count() >= 2 is the caller's job;
  * the body itself still owns the FAIL paths. */
 void aarch64_shootdown_probe(void);
+/* Scheduler selftest replay: same production mapping/TLBI/AP-work body,
+ * with separate markers and per-AP completion observations. */
+uint64_t aarch64_shootdown_probe_run_late(void);
+uint64_t aarch64_shootdown_probe_late_ap_ok(uint32_t cpu);
 
 #endif /* OS01_AARCH64_SHOOTDOWN_PROBE_H */

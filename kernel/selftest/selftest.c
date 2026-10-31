@@ -10,6 +10,9 @@
 #include <fs/file.h>
 #include <string.h>
 #include <stdlib.h>
+#ifdef OS01_SELFTEST
+#include <selftest/aarch64_scheduler.h>
+#endif
 
 // ── Built-in tests ────────────────────────────────────────
 
@@ -177,6 +180,17 @@ void selftest_register_builtin_tests(void)
 #endif /* !__aarch64__ */
 
 #ifdef OS01_SELFTEST
+#if defined(__aarch64__)
+    selftest_register_late("aarch64_sched_yield");
+    selftest_register_late("aarch64_sched_regs");
+    selftest_register_late("aarch64_sched_entry");
+    selftest_register_late("aarch64_sched_irq");
+    selftest_register_late("aarch64_sched_blocker");
+    selftest_register_late("aarch64_sched_reclaim");
+    selftest_register_late("aarch64_sched_idle");
+    selftest_register_late("aarch64_sched_timer");
+    selftest_register_late("aarch64_sched_ap");
+#endif
 #if !defined(__aarch64__)
     selftest_register("ext2_magic",        ext2_selftest_magic);
     selftest_register("ext2_struct_sizes", ext2_selftest_struct_sizes);

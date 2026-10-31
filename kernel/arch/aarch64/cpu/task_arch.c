@@ -8,8 +8,13 @@
 #include <arch/irq.h>
 #include <core/panic.h>
 #include <log/log.h>
+#include <core/printk.h>
 #include <errno.h>
 #include <string.h>
+#ifdef OS01_SELFTEST
+#include <selftest/aarch64_scheduler.h>
+#include <selftest/result.h>
+#endif
 
 extern char _text_start, _text_end;
 
@@ -260,6 +265,12 @@ void arch_aarch64_bsp_handoff(void)
     sched_boot_start();
     arch_local_irq_enable();
     log_info("[sched] idle-ready cpu=0 scheduler_ok=1 irq=on\n");
+#ifdef OS01_SELFTEST
+    test_aarch64_scheduler_run();
+    int selftest_failed = selftest_end_run();
+    serial_printk("[selftest] done (failed=%u)\n",
+                  (unsigned)selftest_failed);
+#endif
     idle_resume();
     __builtin_unreachable();
 }

@@ -524,13 +524,10 @@ void aarch64_main(const struct boot_context *handoff)
      * so the sync-fault probe block below stays the last pre-SMP
      * activity. */
     {
-        /* AArch64 runs only the boot (early) cases — no scheduler-side
-         * tests — so it declares an empty late selection and emits its
-         * single END right after the boot tests. */
-        selftest_begin_run(0);
-        int failed = selftest_run_all();
-        selftest_end_run();
-        serial_printk("[selftest] done (failed=%d)\n", failed);
+        /* Declare all scheduler late IDs before START; END is emitted
+         * by the post-handoff driver after the late records. */
+        selftest_begin_run(9);
+        (void)selftest_run_all();
     }
 #endif
 

@@ -683,21 +683,29 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
         ).decode()
         self.assertFalse(parse_v1(text, suite=SUITE).ok)
 
-    def test_aarch64_ends_run_after_boot_tests(self) -> None:
-        src = _read_kernel_source("kernel/arch/aarch64/boot/main.c")
-        # Scope to the real call sites: the nearest begin/run calls that
-        # precede the (unique) selftest_end_run() call — the file also
-        # mentions selftest_run_all() in a comment above the block.
-        end = src.find("selftest_end_run(")
-        self.assertNotEqual(
-            end, -1,
-            "aarch64 must call selftest_end_run() after its boot tests")
-        begin = src.rfind("selftest_begin_run(", 0, end)
-        run = src.rfind("selftest_run_all(", 0, end)
-        self.assertNotEqual(begin, -1, "aarch64 must call selftest_begin_run")
-        self.assertNotEqual(run, -1, "aarch64 must call selftest_run_all")
-        self.assertLess(begin, run, "begin_run must precede run_all")
-        self.assertLess(run, end, "selftest_end_run must follow run_all")
+    def test_aarch64_runs_late_cases_before_the_single_end(self) -> None:
+        boot = _read_kernel_source("kernel/arch/aarch64/boot/main.c")
+        handoff = _read_kernel_source("kernel/arch/aarch64/cpu/task_arch.c")
+        self.assertIn("selftest_begin_run(9);", boot)
+        run = boot.find("selftest_run_all();")
+        begin = boot.find("selftest_begin_run(9);")
+        self.assertLess(begin, run, "begin_run must precede early run_all")
+        self.assertNotIn("selftest_end_run();", boot,
+                         "END belongs after the scheduler late cases")
+        self.assertEqual(handoff.count("selftest_end_run();"), 1,
+                         "the handoff must emit exactly one END")
+        late = handoff.find("test_aarch64_scheduler_run();")
+        end = handoff.find("selftest_end_run();")
+        self.assertNotEqual(late, -1, "handoff must execute late cases")
+        self.assertLess(late, end, "late cases must precede END")
+        registry = _read_kernel_source("kernel/selftest/selftest.c")
+        ids = re.findall(r'selftest_register_late\("(aarch64_sched_[a-z]+)"\)',
+                         registry)
+        self.assertEqual(ids, [
+            "aarch64_sched_yield", "aarch64_sched_regs", "aarch64_sched_entry",
+            "aarch64_sched_irq", "aarch64_sched_blocker", "aarch64_sched_reclaim",
+            "aarch64_sched_idle", "aarch64_sched_timer", "aarch64_sched_ap",
+        ])
 
 
 class KernelSelftestPipePlaceholderTests(unittest.TestCase):

@@ -90,6 +90,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_rndr_encoding.c \
                    selftest/test_aarch64_page_table_selftest.c \
                    selftest/test_aarch64_page_table_multicore.c \
+                   selftest/test_aarch64_scheduler.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.

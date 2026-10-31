@@ -10,6 +10,7 @@ void aarch64_switch_context(task_t *actual_prev, thread_t *prev_ctx,
 void aarch64_bsp_stack_enter(uint64_t idle_sp) __attribute__((noreturn));
 void arch_aarch64_kthread_entry(void) __attribute__((noreturn));
 void arch_aarch64_entry_prepare(void);
+void arch_aarch64_idle_step(void);
 void arch_aarch64_prepare_bsp_handoff(void);
 void arch_aarch64_bsp_handoff(void) __attribute__((noreturn));
 void aarch64_context_fatal(uint64_t code, uint64_t sp, uint64_t base,

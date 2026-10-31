@@ -23,6 +23,21 @@ arch_aarch64_kthread_entry:
     cmp x7, x5
     b.lo .Lentry_bad
 
+#ifdef OS01_SELFTEST
+    /* Preserve the real pre-C stack observation from the first-entry
+     * assembly boundary; the C test reads this record after fn starts. */
+    adrp x9, aarch64_sched_entry_pre_c_sp
+    add x9, x9, :lo12:aarch64_sched_entry_pre_c_sp
+    str x8, [x9]
+    adrp x9, aarch64_sched_entry_pre_c_base
+    add x9, x9, :lo12:aarch64_sched_entry_pre_c_base
+    str x3, [x9]
+    adrp x9, aarch64_sched_entry_pre_c_ok
+    add x9, x9, :lo12:aarch64_sched_entry_pre_c_ok
+    mov x10, #1
+    str x10, [x9]
+#endif
+
     bl arch_aarch64_entry_prepare
     mov x0, x20
     msr daifclr, #2
