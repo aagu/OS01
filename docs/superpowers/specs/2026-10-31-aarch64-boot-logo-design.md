@@ -71,8 +71,10 @@ RGB(59,214,198); muted `0x00687886` → RGB(104,120,134).
    `x86_64  /  KERNEL`).
 3. The logo is the FIRST thing on the screen; the existing
    `[fb] aarch64 color_printk active` banner renders directly beneath it.
-4. Zero regression on the x86_64 boot path: same pixels, same order, same
-   serial output.
+4. Zero regression on the x86_64 boot path: the same geometry code, the same
+   call order, the same framebuffer lease semantics, and a byte-identical
+   serial stream. (Pixel equivalence follows from the geometry code and the
+   view values being untouched — see V5 for what is actually asserted.)
 5. Automatic, reproducible verification: a QMP `screendump` pixel assertion
    plus a serial marker, both runnable headless in CI.
 
