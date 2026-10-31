@@ -187,6 +187,13 @@ void monitor_model_init(struct monitor_model *m)
 {
     if (!m)
         return;
+    memset(m, 0, sizeof(*m));
+}
+
+void monitor_model_reset(struct monitor_model *m)
+{
+    if (!m)
+        return;
     model_free_arrays(m);
     memset(m, 0, sizeof(*m));
 }

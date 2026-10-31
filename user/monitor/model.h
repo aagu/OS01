@@ -163,9 +163,17 @@ struct monitor_model {
     uint32_t nproc_base;
 };
 
-/* Reset *m to the freshly-initialized state.  Safe on a previously
- * used model (owned arrays are released) and on a zeroed struct. */
+/* Initialize a freshly-allocated or stack struct monitor_model.
+ * Safe on an uninitialized (garbage) struct: zero-first, performs
+ * no frees. To reset an already-initialized model that may own
+ * heap arrays, use monitor_model_reset() instead. */
 void monitor_model_init(struct monitor_model *m);
+
+/* Reset an already-initialized model back to the freshly-initialized
+ * state, releasing any owned heap arrays and zeroing *m.
+ * [PRECONDITION] *m must have been initialized (via monitor_model_init,
+ * {0}, or prior update). Safe on a previously used model or a zeroed struct. */
+void monitor_model_reset(struct monitor_model *m);
 
 /* Difference one collected round against the model's baseline and, on
  * success, commit it (new baseline, new sorted rows, one history point
@@ -177,8 +185,9 @@ void monitor_model_init(struct monitor_model *m);
 int monitor_model_update(struct monitor_model *m,
                          const struct monitor_sample *s);
 
-/* Release the owned arrays and zero *m.  NULL and already-destroyed
- * models are safe no-ops. */
+/* Release the owned arrays and zero *m.
+ * [PRECONDITION] *m must have been initialized (via monitor_model_init,
+ * {0}, or prior update). NULL and already-destroyed models are safe no-ops. */
 void monitor_model_destroy(struct monitor_model *m);
 
 #ifdef __cplusplus

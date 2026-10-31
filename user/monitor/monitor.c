@@ -109,9 +109,8 @@ int main(int argc, char **argv)
 
     struct monitor_model model;
     struct monitor_sample sample;
-    memset(&model, 0, sizeof model);       /* init requires a zeroed model */
-    memset(&sample, 0, sizeof sample);
     monitor_model_init(&model);
+    monitor_sample_init(&sample);
 
     /* ── terminal setup ────────────────────────────────────────── */
     interactive = (samples < 0) &&

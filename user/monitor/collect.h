@@ -26,6 +26,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -158,16 +159,28 @@ struct monitor_sample {
     uint32_t process_cap;    /* internal: allocated slots */
 };
 
+/* Initialize a freshly-allocated or stack struct monitor_sample.
+ * Safe on an uninitialized (garbage) struct: zero-first, performs
+ * no frees. */
+static inline void monitor_sample_init(struct monitor_sample *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+}
+
 /* Collect one round.  Each primary metric (stat/mem/thermal) that
  * fails to read or parse is merely marked invalid in *out; the round
  * still succeeds.  Per-PID status problems drop only that process.
  * Returns 0, or -ENOMEM when the round's process array could not be
  * provided (the partial array is freed and *out is left empty/valid to
- * destroy).  *out may be a fresh, zeroed or previously collected
- * struct; any previous round is released first. */
+ * destroy).
+ * [PRECONDITION] *out must be initialized (via monitor_sample_init, {0},
+ * or a prior monitor_collect call); any previous round is released first. */
 int monitor_collect(struct monitor_sample *out);
 
 /* Release the owned process array and reset *out to the zeroed state.
+ * [PRECONDITION] *out must have been initialized via monitor_sample_init(),
+ * {0}, or a previous successful monitor_collect() call.
  * NULL and already-destroyed structs are safe no-ops. */
 void monitor_sample_destroy(struct monitor_sample *out);
 

@@ -164,7 +164,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 **2026-10-24 清理**：本段原先列着若干已闭环项，现已移出并归档至 `docs/changelog.md`——aarch64 并发 replace phantom `-ENOENT`（`80eed2e9`）、hosttests `__test_stats` 复位 bug（`2d594ce0` + CI 接线 `339ffe26`）、内核用户态异常退出状态未编码为信号终止（`3d56e1d0`）、`test_display_owner` 的 libgfx 句柄 fd 耦合（评审决定保持现状，备案归档）、monitor 计划遗留 ⑤ `monitor_term_enter` 的 `fflush`（`9042bd20`）与 ⑭ monitor 帧被诊断输出撕裂（`c6e1c340`）。原编号保留在归档条目与下方 monitor 子项里，便于交叉引用。
 
-**2026-10-31 局部闭环**：dispatch 第一期 host 补强中的 `test_brk_pages.c` 源码扫描缺锚点保护已完成；缺文件/缺锚点现在明确 FAIL 并完成协议，回归覆盖与验证记录见 [`docs/changelog.md` 2026-10-31 条目](changelog.md#2026-10-31)。其余子项继续挂起。
+**2026-10-31 局部闭环**：dispatch 第一期 host 补强中的 `test_brk_pages.c` 源码扫描缺锚点保护已完成；monitor 计划遗留 ③ `monitor_model_init`/`monitor_sample_destroy` 防御性初始化与析构安全防护已闭环（`monitor_model_init` 改为 zero-first 纯初始化，引入 `monitor_model_reset`，新增 `monitor_sample_init`，加固头文件契约并补充 hosttests）；回归覆盖与验证记录见 [`docs/changelog.md` 2026-10-31 条目](changelog.md#2026-10-31)。其余子项继续挂起。
 
 当前挂起：
 
@@ -181,7 +181,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 - **测试配置 QEMU 中 ash 用户态 SIGSEGV（2026-10-24）**：验证 terminal ARM 时，SMP 1 的重复 ARM 已打印 EBUSY，随后 ash（task 3）在 `RIP=0x40DE24`、signal 11 终止，terminal 被 init respawn。该轮失败；后续放慢命令发送，SMP 1/2 各 13 项协议验证通过。尚未定位或修复，不能确认与本次变更或 GUI `test_lvgl` SIGSEGV 是否有关。失败日志与验证边界见 [terminal ARM 调查](debug/2026-10-24-fbtest-terminal-arm-validation.md)。
 
 - **monitor 计划遗留 parked 项（2026-10-11，monitor plan 9 任务合并后 triage）**：全程评审约 50 条缓办 Minor 中筛出以下值得跟踪的；其余为注释措辞/不可达边界/host fixture 风格问题（最终评审逐条判定 ship-ok，含一条前提纠正：`PROCFS_STAT_CAP=1024` 的 8 核 worst case 实为 ~869B、余量 ~155B，非 ~2B）。本批全部不阻塞，随相关计划拾起（编号沿用评审时的原始编号，已闭环项移出本段、归档至 `docs/changelog.md`）：
-  - **正确性防护（当前不可达，但失败方向错误）**：② `file_free` 仅在 `f->node` 非空时调 `vfs_file_release`，`fs_private` 有值而无 node 的理论状态会泄漏快照（open 契约保证不可达）；③ `monitor_model_init`/`monitor_sample_destroy` 先 free 后清零，调用栈垃圾结构体 = 任意指针 free（头文件已文档化"须先清零或复用已初始化结构"，现有调用方均 `memset` 前置；建议改 zero-first 或改名标注前置条件）。
+  - **正确性防护（当前不可达，但失败方向错误）**：② `file_free` 仅在 `f->node` 非空时调 `vfs_file_release`，`fs_private` 有值而无 node 的理论状态会泄漏快照（open 契约保证不可达）。③ `monitor_model_init`/`monitor_sample_destroy` 先 free 后清零垃圾内存防护已于 2026-10-31 闭环，见 changelog。
   - **验证强度缺口**：⑥ monitor QEMU 双核绑核验证弱：spin 归属采样粒度实为 ~0.2s（`test_monitor.c` 注释称 ~50ms），亚 0.2s 迁移漏检可被 epoch 探测错过；双核重试最坏 ~53s/70s 预算余量薄；严格绑核覆盖仍缺（内核无 sched_setaffinity，需按 monitor plan §Self-Review 在 thermal Task2 后补受限内核 spin 自测，不能以观察到的稳定归属替代）。
   - **语义/契约选择备案（有意为之，记录在案）**：⑪ `monitor_collect` 在 `opendir("/proc")` 失败时返回 0 + 空进程列表，与"无进程"不可区分（无 list-valid 位）；⑫ thermal `stale`（>3s 未更新）标记与进程 `stale` 字段 v1 恒不触发——渲染端已就绪，等独立 thermal 计划的 BSP 周期采集 worker 激活；"QEMU 温度不得报数值"的专项泄漏断言同样推迟（当前管线 State=unsupported 时无任何数值路径，collect 只在 State=ok 填 temp）。
 

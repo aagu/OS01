@@ -841,12 +841,12 @@ static TEST_FUNC(test_api_contract)
     assert_false(m.total_history.slot[0].valid);
     assert_eq(m.mem_history.count, 1);
 
-    /* re-init on a live model must not leak the owned arrays */
+    /* reset on a live model must not leak the owned arrays */
     set_proc(&s, 3, 3, 0, 0, "x");
     assert_eq(monitor_model_update(&m, &s), 0);
     assert_eq(m.nproc_rows, 1);
     assert_not_null(m.proc_rows);
-    monitor_model_init(&m);
+    monitor_model_reset(&m);
     assert_eq(model_malloc_balance, 0);
     assert_null(m.proc_rows);
 
@@ -890,6 +890,54 @@ static TEST_FUNC(test_offline_cpu_skipped)
     free_sample(&b);
 }
 
+/* ── 12. Garbage memory and reset safety ──────────────────────────── */
+
+static TEST_FUNC(test_model_init_on_garbage_memory)
+{
+    struct monitor_model m;
+    /* Poison all bytes to simulate uninitialized stack memory */
+    memset(&m, 0xAA, sizeof(m));
+
+    model_malloc_balance = 0;
+    model_malloc_fail_after = -1;
+
+    /* Calling monitor_model_init on garbage MUST NOT free garbage pointers */
+    monitor_model_init(&m);
+
+    assert_eq(model_malloc_balance, 0);
+    assert_null(m.proc_rows);
+    assert_null(m.proc_base);
+    assert_eq(m.nproc_rows, 0);
+    assert_eq(m.nproc_base, 0);
+    assert_eq(m.total_history.count, 0);
+}
+
+static TEST_FUNC(test_model_reset)
+{
+    struct monitor_model m;
+    struct monitor_sample s = mk_sample();
+
+    monitor_model_init(&m);
+    model_malloc_balance = 0;
+    model_malloc_fail_after = -1;
+
+    set_proc(&s, 42, 42, 0, 0, "worker");
+    assert_eq(monitor_model_update(&m, &s), 0);
+    assert_eq(m.nproc_rows, 1);
+    assert_not_null(m.proc_rows);
+    assert_true(model_malloc_balance > 0);
+
+    /* monitor_model_reset frees the owned arrays and zeroes m */
+    monitor_model_reset(&m);
+    assert_eq(model_malloc_balance, 0);
+    assert_null(m.proc_rows);
+    assert_null(m.proc_base);
+    assert_eq(m.nproc_rows, 0);
+    assert_eq(m.total_history.count, 0);
+
+    free_sample(&s);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_dual_core_deltas),
     TEST_ENTRY(test_rounding),
@@ -906,6 +954,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_second_alloc_oom_history),
     TEST_ENTRY(test_api_contract),
     TEST_ENTRY(test_offline_cpu_skipped),
+    TEST_ENTRY(test_model_init_on_garbage_memory),
+    TEST_ENTRY(test_model_reset),
 TEST_LIST_END
 
 int main(void)

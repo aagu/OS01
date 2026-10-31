@@ -1172,6 +1172,27 @@ static TEST_FUNC(test_collect_null_and_pid_validation)
     monitor_sample_destroy(&s);
 }
 
+static TEST_FUNC(test_sample_init_on_garbage_memory)
+{
+    struct monitor_sample s;
+    /* Poison all bytes to simulate uninitialized stack memory */
+    memset(&s, 0x55, sizeof(s));
+
+    mon_malloc_balance = 0;
+    mon_malloc_fail_after = -1;
+
+    /* Calling monitor_sample_init on garbage MUST NOT free garbage pointers */
+    monitor_sample_init(&s);
+
+    assert_eq(mon_malloc_balance, 0);
+    assert_null(s.processes);
+    assert_eq(s.nprocesses, 0);
+    assert_eq(s.process_cap, 0);
+    assert_eq(s.stat_valid, 0);
+    assert_eq(s.mem_valid, 0);
+    assert_eq(s.thermal_valid, 0);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_stat_parse),
     TEST_ENTRY(test_meminfo_parse),
@@ -1185,6 +1206,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_collect_read_cap_boundaries),
     TEST_ENTRY(test_collect_zero_tick_hz),
     TEST_ENTRY(test_collect_null_and_pid_validation),
+    TEST_ENTRY(test_sample_init_on_garbage_memory),
 TEST_LIST_END
 
 int main(void)
