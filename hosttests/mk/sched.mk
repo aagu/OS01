@@ -28,22 +28,48 @@ TEST_BINS += \
     $(TEST_BLD)/test_smp_starting_gate.elf
 
 # Focused boundary test links the production dispatcher.
-$(TEST_BLD)/test_syscall_dispatch.elf: $(TEST_CASES)/test_syscall_dispatch.c $(TESTS_DIR)/kernel/syscall/dispatch.c
+$(TEST_BLD)/syscall_dispatch_production.o: $(TESTS_DIR)/kernel/syscall/dispatch.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $^ -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_syscall_dispatch.o: $(TEST_CASES)/test_syscall_dispatch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_syscall_dispatch.elf: $(TEST_BLD)/test_syscall_dispatch.o $(TEST_BLD)/syscall_dispatch_production.o
+	$(HOST_CC) -o $@ $^
 
 .PHONY: test-syscall-dispatch
 test-syscall-dispatch: $(TEST_BLD)/test_syscall_dispatch.elf
 	$<
 
-$(TEST_BLD)/test_compat_linux.elf: $(TEST_CASES)/test_compat_linux.c \
-    $(TESTS_DIR)/kernel/syscall/dispatch.c \
-    $(TESTS_DIR)/kernel/syscall/compat/dispatch.c \
-    $(TESTS_DIR)/kernel/syscall/compat/table_x86_64.c \
-    $(TESTS_DIR)/kernel/syscall/compat/proc.c \
-    $(TESTS_DIR)/kernel/syscall/compat/fs.c
+$(TEST_BLD)/compat_dispatch_production.o: $(TESTS_DIR)/kernel/syscall/compat/dispatch.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $^ -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/compat_table_x86_64_production.o: $(TESTS_DIR)/kernel/syscall/compat/table_x86_64.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/compat_proc_production.o: $(TESTS_DIR)/kernel/syscall/compat/proc.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/compat_fs_production.o: $(TESTS_DIR)/kernel/syscall/compat/fs.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_compat_linux.o: $(TEST_CASES)/test_compat_linux.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_compat_linux.elf: $(TEST_BLD)/test_compat_linux.o \
+    $(TEST_BLD)/syscall_dispatch_production.o \
+    $(TEST_BLD)/compat_dispatch_production.o \
+    $(TEST_BLD)/compat_table_x86_64_production.o \
+    $(TEST_BLD)/compat_proc_production.o \
+    $(TEST_BLD)/compat_fs_production.o
+	$(HOST_CC) -o $@ $^
 
 .PHONY: test-compat-linux
 test-compat-linux: $(TEST_BLD)/test_compat_linux.elf

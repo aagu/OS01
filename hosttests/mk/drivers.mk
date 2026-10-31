@@ -85,24 +85,42 @@ $(TEST_BLD)/test_i8042_demux.elf: $(TEST_BLD)/test_i8042_demux.o \
 test_i8042_demux: $(TEST_BLD)/test_i8042_demux.elf
 	$<
 
-$(TEST_BLD)/test_mouse_proto.elf: $(TEST_CASES)/test_mouse_proto.c $(TESTS_DIR)/kernel/driver/mouse_proto.c $(TESTS_DIR)/kernel/include/driver/mouse_proto.h
+$(TEST_BLD)/mouse_proto_production.o: $(TESTS_DIR)/kernel/driver/mouse_proto.c $(TESTS_DIR)/kernel/include/driver/mouse_proto.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) $< $(TESTS_DIR)/kernel/driver/mouse_proto.c -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/test_mouse_proto.o: $(TEST_CASES)/test_mouse_proto.c $(TESTS_DIR)/kernel/include/driver/mouse_proto.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_mouse_proto.elf: $(TEST_BLD)/test_mouse_proto.o $(TEST_BLD)/mouse_proto_production.o
+	$(HOST_CC) -o $@ $^
 
 .PHONY: test_mouse_proto
 test_mouse_proto: $(TEST_BLD)/test_mouse_proto.elf
 	$<
 
-$(TEST_BLD)/test_mouse_init.elf: $(TEST_CASES)/test_mouse_init.c \
-		$(TESTS_DIR)/kernel/driver/mouse.c \
-		$(TESTS_DIR)/kernel/driver/input_route.c \
-		$(TESTS_DIR)/kernel/driver/input_ps2.c \
-		$(TESTS_DIR)/kernel/include/driver/mouse.h
+$(TEST_BLD)/mouse_init_mouse_production.o: $(TESTS_DIR)/kernel/driver/mouse.c $(TESTS_DIR)/kernel/include/driver/mouse.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(KBD_HOST_CFLAGS) $< \
-		$(TESTS_DIR)/kernel/driver/mouse.c \
-		$(TESTS_DIR)/kernel/driver/input_route.c \
-		$(TESTS_DIR)/kernel/driver/input_ps2.c -o $@
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/mouse_init_route_production.o: $(TESTS_DIR)/kernel/driver/input_route.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/mouse_init_ps2_production.o: $(TESTS_DIR)/kernel/driver/input_ps2.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_mouse_init.o: $(TEST_CASES)/test_mouse_init.c $(TESTS_DIR)/kernel/include/driver/mouse.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_mouse_init.elf: $(TEST_BLD)/test_mouse_init.o \
+		$(TEST_BLD)/mouse_init_mouse_production.o \
+		$(TEST_BLD)/mouse_init_route_production.o \
+		$(TEST_BLD)/mouse_init_ps2_production.o
+	$(HOST_CC) -o $@ $^
 
 .PHONY: test_mouse_init
 test_mouse_init: $(TEST_BLD)/test_mouse_init.elf

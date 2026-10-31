@@ -40,3 +40,8 @@ clean:
 	rm -rf $(TEST_BLD)
 
 include mk/runner.mk
+
+# Header dependency tracking (Task A4)
+-include $(wildcard $(TEST_BLD)/*.d)
+-include $(wildcard $(TEST_BLD)/*/*.d)
+-include $(wildcard $(TEST_BLD)/*/*/*.d)

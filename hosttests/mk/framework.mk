@@ -61,9 +61,12 @@ test-runtime-udivti3: $(TEST_BLD)/test_runtime_udivti3.elf
 	$<
 
 # page_table_runner meta-test
-$(TEST_BLD)/test_page_table_runner.elf: $(TEST_CASES)/test_page_table_runner.c $(TEST_INC)/page_table_test_runner.h $(TEST_INC)/test_framework.h
+$(TEST_BLD)/test_page_table_runner.o: $(TEST_CASES)/test_page_table_runner.c $(TEST_INC)/page_table_test_runner.h $(TEST_INC)/test_framework.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_page_table_runner.elf: $(TEST_BLD)/test_page_table_runner.o
+	$(HOST_CC) -o $@ $^
 
 # bootinfo ABI
 $(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c \

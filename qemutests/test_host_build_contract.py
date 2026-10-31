@@ -149,9 +149,9 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, "Duplicate test ID was not rejected")
         self.assertIn("duplicate", result.stdout.lower(), result.stdout)
 
-    def test_different_macro_different_objects(self):
-        """Sources built under different macros must produce distinct object files."""
-        # test_user_log vs test_user_log_off
+    def test_different_mock_flags_do_not_share_object(self):
+        """Sources built under different macros or mocks must produce distinct object files."""
+        # test_user_log.o vs test_user_log_off.o
         cmd = ["make", "-n", "-B", "-C", "hosttests",
                "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
                "PROFILE=x86_64-clang",
@@ -160,6 +160,57 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("test_user_log.o", result.stdout)
         self.assertIn("test_user_log_off.o", result.stdout)
+
+        # mouse_init_route_production.o vs input_route_production.o
+        cmd = ["make", "-n", "-B", "-C", "hosttests",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               "test_mouse_init"]
+        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("mouse_init_route_production.o", result.stdout)
+
+    def test_private_header_change_recompiles_host_object(self):
+        """Depfiles track private header changes for host objects."""
+        # Compile a target that generates depfile
+        bld_dir = ROOT / "build" / "x86_64-clang" / "host-test"
+        cmd = ["make", "-C", "hosttests",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               str(bld_dir / "test_mouse_proto.o")]
+        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+        dep_file = bld_dir / "test_mouse_proto.d"
+        self.assertTrue(dep_file.exists(), "test_mouse_proto.d must exist")
+        dep_content = dep_file.read_text()
+        self.assertIn("mouse_proto.h", dep_content, "Private header mouse_proto.h must be tracked in depfile")
+
+    def test_shared_header_rebuilds_all_consumers(self):
+        """Depfiles track shared headers for all consumers."""
+        bld_dir = ROOT / "build" / "x86_64-clang" / "host-test"
+        cmd = ["make", "-B", "-C", "hosttests",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               str(bld_dir / "test_bootinfo_abi.o")]
+        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+        dep_file = bld_dir / "test_bootinfo_abi.d"
+        self.assertTrue(dep_file.exists(), "test_bootinfo_abi.d must exist")
+        dep_content = dep_file.read_text()
+        self.assertIn("bootinfo.h", dep_content, "Shared header bootinfo.h must be tracked in depfile")
+
+    def test_removed_header_cannot_reuse_stale_host_binary(self):
+        """-MP ensures phony targets for headers in depfiles so header moves don't crash make."""
+        bld_dir = ROOT / "build" / "x86_64-clang" / "host-test"
+        dep_file = bld_dir / "test_bootinfo_abi.d"
+        self.assertTrue(dep_file.exists())
+        dep_content = dep_file.read_text()
+        # -MP generates empty targets like:
+        # /path/to/bootinfo.h:
+        self.assertTrue(any(line.strip().endswith("bootinfo.h:") for line in dep_content.splitlines()),
+                        "-MP phony target for bootinfo.h must exist in depfile")
 
 
 if __name__ == "__main__":

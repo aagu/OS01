@@ -375,14 +375,24 @@ test-intr-irq-x86: $(TEST_BLD)/test_intr_irq_x86.elf
 -include $(TEST_BLD)/test_intr_irq_x86.d
 
 # x86 intr probe
-$(TEST_BLD)/test_x86_intr_probe.elf: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS_DIR)/kernel/include/selftest/x86_intr.h
+$(TEST_BLD)/test_x86_intr_probe.o: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS_DIR)/kernel/include/selftest/x86_intr.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -idirafter $(TESTS_DIR)/kernel/include $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -idirafter $(TESTS_DIR)/kernel/include -c $< -o $@
+
+$(TEST_BLD)/test_x86_intr_probe.elf: $(TEST_BLD)/test_x86_intr_probe.o
+	$(HOST_CC) -o $@ $^
 
 # LAPIC NMI
-$(TEST_BLD)/test_lapic_nmi.elf: $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c $(TESTS_DIR)/kernel/include/intr/apic.h $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/acpi.c
+$(TEST_BLD)/lapic_nmi_production.o: $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c $(TESTS_DIR)/kernel/include/intr/apic.h $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/acpi.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(KERNEL_INC) $(LIBC_INC) $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c -Wl,--gc-sections -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_lapic_nmi.o: $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/include/intr/apic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_lapic_nmi.elf: $(TEST_BLD)/test_lapic_nmi.o $(TEST_BLD)/lapic_nmi_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 .PHONY: test-lapic-nmi
 test-lapic-nmi: $(TEST_BLD)/test_lapic_nmi.elf
