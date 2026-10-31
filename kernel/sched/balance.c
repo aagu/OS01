@@ -91,14 +91,17 @@ void sched_notify_remote(task_t *tsk)
     if ((int)tsk->cpu == (int)cpu_id())
         return;
     percpu_t *dst = &percpu_data[tsk->cpu];
+#if ARCH_HAS_REMOTE_RESCHED
     dst->need_resched = 1;
     __sync_synchronize();
-#if ARCH_HAS_REMOTE_RESCHED
     ipi_send(dst->arch_processor_id, IPI_VECTOR_RESCHED);
 #else
+    /* Do not publish a partial remote notification on an architecture
+     * whose admission policy must keep every runnable task on CPU0. */
     log_err("[sched] sched_notify_remote: remote target cpu=%u without "
             "remote-resched capability — invariant violated\n",
             tsk->cpu);
+    (void)dst;
 #endif
 }
 
