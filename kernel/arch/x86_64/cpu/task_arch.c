@@ -34,6 +34,21 @@ extern void arch_kernel_thread_entry(void);
 
 struct tss_struct init_tss[NR_CPUS] = { [0 ... NR_CPUS - 1] = INIT_TSS };
 
+/* The idle task's saved context — architecture-shaped initialiser
+ * (names rsp/rip/fs), moved out of kernel/sched/core.c in Phase 2 so
+ * the common scheduler TUs never name thread fields directly.
+ * idle_resume is the x86 entry.S assembly continuation. */
+thread_t init_thread = {
+    .rsp0 = (uint64_t)(init_task_union.stack + STACK_SIZE),  // idle task kernel stack
+    .rip = (uint64_t)idle_resume,
+    .rsp = (uint64_t)(init_task_union.stack + STACK_SIZE),
+    .fs = KERNEL_DS,
+    .gs = KERNEL_DS,
+    .cr2 = 0,
+    .trap_nr = 0,
+    .error_code = 0,
+};
+
 void arch_task_init_early(void)
 {
     // AP idle tasks and boot-time kthreads inherit this before task_init().

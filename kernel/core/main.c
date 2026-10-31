@@ -3,6 +3,7 @@
 #include <memory/memory.h>
 #include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
 #include <sched/task.h>       // task_init
+#include <sched/boot.h>       // sched_boot_creation_begin (Phase 2, Ruling P2-2)
 #include <driver/serial.h>    // write_serial
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
 #include <tty/boot.h>         // tty_boot_init
@@ -184,7 +185,19 @@ int kernel_main(const struct boot_context *bootctx)
     serial_printk("[selftest] done\n");
 #endif
 
-    // ═══ Network stack init (post-SMP, pre-scheduler) ═══
+    // ═══ Network stack init (post-SMP, pre-scheduler) ═══════
+    // Open the BSP boot creation window FIRST (spec §8.1 / Ruling
+    // P2-2): x86_64_boot_percpu() (above) has established percpu, the
+    // current task stack and the CPU0 runqueue, and BSP scheduler_ok is
+    // not yet published.  While the window is open, an unpinned
+    // boot-service kernel_thread/create_kthread whose placement finds
+    // no eligible CPU (none is scheduler_ok yet) falls back to CPU0 and
+    // queues there; sched_boot_start() (from task_init) closes it
+    // permanently BEFORE publishing scheduler_ok.  net_lwip_init()
+    // creates the lwIP tcpip_thread via create_kthread — exactly the
+    // boot-phase creation the window exists for.
+    sched_boot_creation_begin();
+
     // lwIP creates kernel threads (tcpip_thread) — must happen
     // after SMP is up and before the scheduler starts.  The task
     // list is no longer reset by task_init() (INIT_TASK pre-initializes
