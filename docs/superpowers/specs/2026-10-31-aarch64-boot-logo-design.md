@@ -106,6 +106,7 @@ Following the repo's documented **weak-default + strong-override** pattern
 ```c
 /* kernel/include/arch/fb_write.h */
 #include <driver/fb_state.h>   /* fb_lease_t — TYPE ONLY, no link dependency */
+#include <arch/identity.h>     /* ARCH_NAME, ARCH_BOOT_LOGO_LABEL */
 
 struct fb_write_view {
     /* Arch-private storage OWNED BY THE VIEW.
@@ -385,7 +386,7 @@ Same launch without `-device ramfb`: assert the serial log contains
 
 ### V5 — x86_64 no-regression
 
-The x86_64 logo path must be unchanged. Three acceptance criteria, all
+The x86_64 logo path must be unchanged. Four acceptance criteria, all
 required:
 
 1. **Serial stream unchanged** — the x86_64 boot log contains no new `[logo]`
@@ -431,9 +432,7 @@ non-zero on failure.
 
 | File | Change |
 |---|---|
-| `kernel/include/arch/fb_write.h` | NEW — facade: `struct fb_write_view`, `arch_fb_write_begin/end` |
-| `kernel/include/arch/x86_64/fb_write.h` | NEW — `ARCH_NAME`, `ARCH_BOOT_LOGO_LABEL` |
-| `kernel/include/arch/aarch64/fb_write.h` | NEW — `ARCH_NAME`, `ARCH_BOOT_LOGO_LABEL` |
+| `kernel/include/arch/fb_write.h` | NEW — facade: `struct fb_write_view`, `arch_fb_write_begin/end`; includes `arch/identity.h` so consumers get the arch macros |
 | `kernel/include/arch/identity.h` | NEW — facade selecting the per-arch identity macros |
 | `kernel/include/arch/x86_64/identity.h` | NEW — `ARCH_NAME`, `ARCH_BOOT_LOGO_LABEL` |
 | `kernel/include/arch/aarch64/identity.h` | NEW — `ARCH_NAME`, `ARCH_BOOT_LOGO_LABEL` |
