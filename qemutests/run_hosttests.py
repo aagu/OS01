@@ -524,6 +524,25 @@ def run_one(
     return code
 
 
+def _worker_execute(
+    item: Tuple[str, str, str, float, bool],
+) -> Tuple[str, int, str, str]:
+    path, build_dir, profile, timeout_s, allow_empty = item
+    import io
+    import contextlib
+    buf_out = io.StringIO()
+    buf_err = io.StringIO()
+    with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+        rc = run_one(
+            path,
+            build_dir=build_dir,
+            profile=profile,
+            timeout_s=timeout_s,
+            allow_empty=allow_empty,
+        )
+    return path, rc, buf_out.getvalue(), buf_err.getvalue()
+
+
 def run_hosttests(
     binaries: Sequence[str],
     *,
@@ -532,6 +551,7 @@ def run_hosttests(
     timeout_s: float = 60.0,
     session_factory: Optional[Callable] = None,
     exit_status_ids: Optional[Sequence[str]] = None,
+    jobs: int = 1,
 ) -> int:
     """Run every binary in turn; continue after failures.
 
@@ -544,16 +564,47 @@ def run_hosttests(
     """
     allow = set(exit_status_ids or ())
     worst = 0
-    for path in binaries:
-        contrib = run_one(
-            path, build_dir=build_dir, profile=profile,
-            timeout_s=timeout_s, session_factory=session_factory,
-            allow_empty=binary_id(path) in allow,
-        )
-        worst = max(worst, contrib)
 
-    print(f"[run_hosttests] {len(binaries)} binary(ies) run, "
-          f"overall exit {worst}")
+    if jobs <= 1 or len(binaries) <= 1 or session_factory is not None:
+        for path in binaries:
+            contrib = run_one(
+                path,
+                build_dir=build_dir,
+                profile=profile,
+                timeout_s=timeout_s,
+                session_factory=session_factory,
+                allow_empty=binary_id(path) in allow,
+            )
+            worst = max(worst, contrib)
+    else:
+        import concurrent.futures
+
+        items = [
+            (path, build_dir, profile, timeout_s, binary_id(path) in allow)
+            for path in binaries
+        ]
+        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
+            futures = [executor.submit(_worker_execute, item) for item in items]
+            try:
+                for fut in futures:
+                    path, rc, out_str, err_str = fut.result()
+                    if out_str:
+                        sys.stdout.write(out_str)
+                        sys.stdout.flush()
+                    if err_str:
+                        sys.stderr.write(err_str)
+                        sys.stderr.flush()
+                    worst = max(worst, rc)
+            except KeyboardInterrupt:
+                for f in futures:
+                    f.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+
+    print(
+        f"[run_hosttests] {len(binaries)} binary(ies) run, "
+        f"overall exit {worst}"
+    )
     return worst
 
 
@@ -599,6 +650,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="id allowed to pass on exit status alone (empty stdout ok); "
              "repeatable; every other binary still requires suite evidence",
     )
+    parser.add_argument(
+        "--jobs", "-j", type=int, default=1,
+        help="maximum concurrent test worker processes (default: 1)",
+    )
     parser.add_argument("binaries", nargs="*", help="binary paths to run")
     args = parser.parse_args(argv)
 
@@ -622,7 +677,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         return run_hosttests(
             chosen, build_dir=args.build_dir, profile=args.profile,
-            timeout_s=args.timeout, exit_status_ids=exit_ids,
+            timeout_s=args.timeout, exit_status_ids=exit_ids, jobs=args.jobs,
         )
     except KeyboardInterrupt:
         print("interrupted (Ctrl-C)", file=sys.stderr)

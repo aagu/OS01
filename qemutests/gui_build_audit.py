@@ -919,7 +919,11 @@ def audit_host_fixture_contract(
     if not host_mk.is_file():
         errors.append(f"host fixture contract: {host_mk} not found")
         return
-    text = host_mk.read_text()
+    gui_mk = repo_root / "hosttests" / "mk" / "gui.mk"
+    if gui_mk.is_file():
+        text = gui_mk.read_text()
+    else:
+        text = host_mk.read_text()
 
     # (a) exactly one host LVGL archive definition
     archive_defs = re.findall(r"^\s*GUI_LVGL_ARCHIVE\s*:?=\s*(\S+)", text, re.M)

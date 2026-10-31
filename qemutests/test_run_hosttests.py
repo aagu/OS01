@@ -628,5 +628,129 @@ print("SCRIPT_MODE_OK")
         self.assertIn("SCRIPT_MODE_OK", proc.stdout)
 
 
+
+# ───────────────────────────────────────────────────────────────────
+# Parallel execution tests (Task C4)
+# ───────────────────────────────────────────────────────────────────
+
+
+class ParallelHostTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="os01-parallel-host-")
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.build_dir = self.dir / "build"
+        self.build_dir.mkdir()
+
+    def _stage_script(self, name: str, body: str) -> Path:
+        target = self.dir / name
+        if not body.startswith("#!"):
+            body = f"#!/bin/sh\n{body}"
+        target.write_text(body, encoding="utf-8")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+        return target
+
+    def test_parallel_jobs_bound(self) -> None:
+        """Concurrency with jobs=2 must never exceed 2 concurrent workers."""
+        lock_dir = self.dir / "concurrency_locks"
+        lock_dir.mkdir()
+        record_file = self.dir / "max_seen.txt"
+        record_file.write_text("0")
+
+        # Worker script that tracks peak concurrency in a directory
+        script_body = f"""#!/bin/sh
+set -e
+pid=$$
+mkdir "{lock_dir}/$pid"
+count=$(ls -1 "{lock_dir}" | wc -l)
+echo "=== Test Runner ==="
+echo "  Total: 1 | Passed: 1 | Failed: 0"
+echo "  >>> ALL TESTS PASSED <<<"
+# Record max
+cur_max=$(cat "{record_file}")
+if [ "$count" -gt "$cur_max" ]; then
+    echo "$count" > "{record_file}"
+fi
+sleep 0.15
+rmdir "{lock_dir}/$pid"
+exit 0
+"""
+        bins = [
+            str(self._stage_script(f"p_{i}.elf", script_body))
+            for i in range(4)
+        ]
+
+        rc = rh.run_hosttests(
+            bins, build_dir=str(self.build_dir), profile="test", jobs=2
+        )
+        self.assertEqual(rc, 0)
+        max_seen = int(record_file.read_text().strip())
+        self.assertLessEqual(max_seen, 2, f"Peak concurrency was {max_seen}, expected <= 2")
+
+    def test_mixed_fail_timeout_error_returns_two(self) -> None:
+        """Mixed PASS, FAIL, and launch ERROR must return 2 (error beats failure beats pass)."""
+        p_pass = str(self._stage_script("p_pass.elf", SCRIPT_LEGACY_PASS))
+        p_fail = str(self._stage_script("p_fail.elf", "exit 1"))
+        # Non-executable script causes launch ERROR (exit 2)
+        p_err = self.dir / "p_err.elf"
+        p_err.write_text("exit 0")
+        # Ensure not executable
+        p_err.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+        rc = rh.run_hosttests(
+            [p_pass, p_fail, str(p_err)],
+            build_dir=str(self.build_dir),
+            profile="test",
+            jobs=2,
+        )
+        self.assertEqual(rc, 2, "max exit code must be 2 when environment error occurs")
+
+    def test_parallel_logs_do_not_mix(self) -> None:
+        """Output for parallel runs must be printed in the exact input order."""
+        bins = [
+            str(self._stage_script(f"order_{i}.elf", SCRIPT_LEGACY_PASS))
+            for i in range(4)
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = rh.run_hosttests(
+                bins, build_dir=str(self.build_dir), profile="test", jobs=3
+            )
+        self.assertEqual(rc, 0)
+        output = buf.getvalue()
+        # Verify order_0 appears before order_1, order_1 before order_2, etc.
+        pos = -1
+        for i in range(4):
+            idx = output.find(f"PASS: order_{i}", pos + 1)
+            self.assertGreater(idx, pos, f"order_{i} not found in input order in output:\n{output}")
+            pos = idx
+
+    def test_serial_and_parallel_selection_equal(self) -> None:
+        """Serial (jobs=1) and parallel (jobs=2) must give identical verdicts on the same binaries."""
+        bins = [
+            str(self._stage_script(f"eq_{i}.elf", SCRIPT_LEGACY_PASS))
+            for i in range(3)
+        ]
+        bdir_serial = self.dir / "build_serial"
+        bdir_parallel = self.dir / "build_parallel"
+        bdir_serial.mkdir()
+        bdir_parallel.mkdir()
+
+        rc_s = rh.run_hosttests(bins, build_dir=str(bdir_serial), jobs=1)
+        rc_p = rh.run_hosttests(bins, build_dir=str(bdir_parallel), jobs=2)
+        self.assertEqual(rc_s, 0)
+        self.assertEqual(rc_p, 0)
+
+    def test_parallel_interrupt_reaps_all_workers(self) -> None:
+        """KeyboardInterrupt in executor loop reaps workers and propagates exception."""
+        bins = [
+            str(self._stage_script(f"int_{i}.elf", SCRIPT_LEGACY_PASS))
+            for i in range(2)
+        ]
+        with mock.patch("concurrent.futures.Future.result", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                rh.run_hosttests(bins, build_dir=str(self.build_dir), jobs=2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

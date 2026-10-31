@@ -1,6 +1,7 @@
 # ── Host Test Runner & Execution (spec §5) ────────────────────
 
 HOST_TEST_TIMEOUT ?= 60
+HOST_TEST_JOBS ?= 1
 
 # One `--exit-status <id>` per exempted binary (id = basename without .elf).
 EXIT_STATUS_FLAGS := $(foreach b,$(TEST_EXIT_STATUS_BINS),--exit-status $(basename $(notdir $(b))))
@@ -13,7 +14,7 @@ run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup check-registry-un
 	@echo "=============================================="
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
-	    --timeout $(HOST_TEST_TIMEOUT) $(EXIT_STATUS_FLAGS) \
+	    --timeout $(HOST_TEST_TIMEOUT) --jobs $(HOST_TEST_JOBS) $(EXIT_STATUS_FLAGS) \
 	    $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 	@echo "  [hosttests] all host test binaries passed"
 

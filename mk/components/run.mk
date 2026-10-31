@@ -404,11 +404,12 @@ TEST_TERMINAL_PRESENT_IMAGE := $(BUILD_DIR)/image/terminal-present/disk.img
 # default of two, while keeping this test-only setting independently
 # overridable.
 KERNEL_SELFTEST_SMP ?= 4
+HOST_TEST_JOBS ?= 1
 
 .PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-fault-bridge test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host test-gui-host
 test-host:
 	$(call require_capability,rootfs)
-	@$(call os01_submake,hosttests,run $(OS01_SUBMAKE_ARGS))
+	@$(call os01_submake,hosttests,run HOST_TEST_JOBS=$(HOST_TEST_JOBS) $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
 	python3 qemutests/test_kernel_selftest_result.py
 	python3 tools/tests/test_user_build.py
@@ -1431,15 +1432,31 @@ echo "[user-canary] audit passed"
 endef
 
 # ── test-static: 5 runtime audits via test-runtime + 7 standalone + user-canary ──
-test-static: test-runtime
+STATIC_AUDIT_TARGETS = \
+  test-runtime \
+  test-syscall-boundary \
+  test-kernel-layout \
+  test-kernel-canary-contract \
+  test-header-object-audit \
+  test-stack-frame-audit \
+  test-driver-model-boundary \
+  test-gui-build-audit \
+  test-intr-dispatch-audit \
+  test-user-canary
+
+.PHONY: $(STATIC_AUDIT_TARGETS) test-static test-static-prereqs
+
+test-static-prereqs:
+	$(call require_capability,rootfs)
+	$(MAKE) --no-print-directory $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT)) $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf $(ROOTFS_MANIFEST))
+
+test-syscall-boundary:
 	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) syscall-boundary -- \
 	  python3 qemutests/syscall_boundary_audit.py
-	$(RUN_STATIC_AUDIT) kernel-layout -- \
-	  python3 qemutests/x86_64_kernel_layout_test.py "$(KERNEL_BUILD_DIR)/kernel.elf" \
-	  --llvm-nm "$(LLVM_NM)" --llvm-readelf "$(LLVM_READELF)"
-	$(RUN_STATIC_AUDIT) kernel-canary-contract -- \
-	  python3 qemutests/kernel_canary_contract_test.py
+
+test-header-object-audit:
+	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) header-object-audit -- \
 	  python3 qemutests/header_object_audit.py \
 	  --include-dir "kernel/include" \
@@ -1447,19 +1464,31 @@ test-static: test-runtime
 	  --runtime-inc "runtime/include" \
 	  --llvm-nm "$(LLVM_NM)" \
 	  --clang "$(CLANG)"
+
+test-stack-frame-audit:
+	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) stack-frame-audit -- \
 	  python3 qemutests/stack_frame_audit.py \
 	  --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	  --llvm-objdump "$(LLVM_OBJDUMP)" \
 	  --limit 512
+
+test-driver-model-boundary:
+	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) driver-model-boundary -- \
 	  python3 qemutests/driver_model_boundary_audit.py
+
+test-gui-build-audit:
+	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) gui-build-audit -- \
 	  python3 qemutests/gui_build_audit.py \
 	    --sysroot "$(SYSROOT)" \
 	    --build-dir "$(BUILD_DIR)" \
 	    --repo-root "$(OS01_ROOT)" \
 	    --profile "$(PROFILE)"
+
+test-intr-dispatch-audit:
+	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
 	  python3 qemutests/intr_dispatch_audit.py \
 	    --profile "$(PROFILE)" \
@@ -1467,7 +1496,9 @@ test-static: test-runtime
 	    --llvm-nm "$(LLVM_NM)" \
 	    --llvm-objdump "$(LLVM_OBJDUMP)" \
 	    --repo-root "$(OS01_ROOT)"
-	@$(MAKE) --no-print-directory test-user-canary
+
+test-static: test-static-prereqs
+	+$(MAKE) --no-print-directory $(STATIC_AUDIT_TARGETS)
 
 # ── test-gui-incremental: the GUI library's incremental contract ──
 #
