@@ -55,10 +55,14 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`; `intr-x86` builds its own isolated fault variants) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (14 audits) | — |
-| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|m1-*` | AArch64 PSCI / GIC / sync-fault harness | `smp` |
+| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|sched\|m1-*` | AArch64 PSCI / GIC / sync-fault / scheduler acceptance harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
 | `make test-harness` | Python unittest framework regression (no QEMU, never discovers QEMU scripts) | — |
+
+AArch64 EL1 调度器验收（`MODE=sched`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched [SCHED_CASE=<v>]`。该 MODE 通过受控子构建产出隔离的 `KERNEL_SELFTEST` 调度器镜像变体：`SCHED_CASE=positive`（默认组成部分）构建 `kernel/sched` + `image/sched`（正例：严格 14 用例协议 + 全部冻结 `[sched-evidence]` 字段证据矩阵），四个故障值 `sp-top`/`sp-low`/`pc-low`/`pc-data` 各构建 `kernel/sched-fault-<v>` + `image/sched-fault-<v>`（编译期选中的 `aarch64_sched_fault_inject` 注入钩子损坏保存 SP/PC，验收要求 fatal 发生在**切栈前**且受害者零提交切换）。`SCHED_CASE` 省略时为 `all`（正例矩阵 + 全部四个负例）。选择器 `AARCH64_SCHED_TEST` 与 `SCHED_CASE` 在解析期拒绝非法值；`MODE=sched`（即使未带选择器）与 `AARCH64_SYNC_FAULT_TEST`/`AARCH64_M1_TEST`/`KERNEL_TEST_FORCE_NO_RNDRRS`/`KERNEL_CANARY_SELFTEST`/`OS01_SYSTEST`/非零 `AARCH64_SMP_TEST_NO_ACK_CPU` 的任意组合均解析期报错。runner（`qemutests/aarch64_scheduler.py`）只消费 make 传入的显式镜像/固件/ELF 路径，绝不隐式重建；每次 QEMU 有 120 s 绝对期限（tick 不延长），完成后 1 s 排空窗口，崩溃/超时永远 FAIL；`llvm-nm` 符号审计要求普通 normal/selftest/positive ELF 不含注入符号而每个 fault ELF 含有。普通镜像 BSP idle 冒烟仍是同一 runner 的 `--idle-smoke` 模式（`--cpus 1 2 4 8`）。
+
+环境注意（2026-10-31 记录）：宿主 QEMU 11.1.3 + 当日 edk2-nightly 固件下，默认 FDT EFI-config-table 交付路径在 `[dtb] FATAL: UEFI handoff has no DTB` 处确定性失败（复现证据与评估见 `docs/superpowers/reports/2026-10-30-aarch64-el1-sched-validation.md`）。仓库全部 aarch64 QEMU 验收面已统一走诊断 DTB 机制（`smp`/`no-ack` 默认 `--diagnostic-dtb=auto`，`gic-spi`/`m3-probe`/M1/`sched`/idle-smoke 显式传入或自行生成 QEMU DTB 并配 `acpi=off`）；`AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0` 可强制要求生产固件路径。这是固件/宿主侧行为变化，不是仓库回归；未在本期改写固件管线。
 
 AArch64 M1：`MODE=m1-ram` 分别构建 normal/selftest 独立镜像并跑 16 组 RAM/CPU 矩阵。其余 `m1-*` MODE 构建 `AARCH64_M1_TEST=sparse|arena-exhaust|table-exhaust|ap-bad-root` 对应的隔离 `image/m1-<case>/` / `kernel/m1-<case>/` 变体；该旗要求 `KERNEL_SELFTEST=1`，拒绝与 sync-fault、weak-selftest 或 canary 混用。稀疏 map 仅由编译旗改写，不从环境变量注入。`make PROFILE=x86_64-clang test-m1-host [CASE=m1-layout|m1-reservation|m1-arena|m1-tree|m1-contract-x86|m1-install|m1-publish]` 为原生 focused 测试入口，省略 CASE 跑整组。
 
@@ -461,7 +465,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
 | `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体 |
-| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
+| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | 14 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、user-canary） |
@@ -621,6 +625,7 @@ make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make test-static                    # 14 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
+make PROFILE=aarch64-clang test-aarch64 MODE=sched  # EL1 调度器验收（正例矩阵 + 四个故障注入变体）
 make test-contract                  # CI 契约检查
 make test-harness                   # Python unittest 框架回归（TEST_HARNESS_MODULES 列表；不启动 QEMU）
 
@@ -639,7 +644,8 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
 | `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`） |
-| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`） |
+| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-*`） |
+| `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |
 | `OS01_NETTEST=1` | 启用 nettest variant |
 | `INITTAB_FILE=<path>` | 自定义 inittab 模板 |
