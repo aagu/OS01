@@ -302,8 +302,12 @@ def parse_ppm(data: bytes) -> tuple[int, int, bytes]:
     expected = width * height * 3
     payload = data[idx:idx + expected]
     if len(payload) != expected:
-        # A truncated dump must not reach count_rgb(): an IndexError there
-        # would be mis-classified as an environment error.
+        # A truncated dump must not reach count_rgb(): a short buffer makes
+        # it raise an IndexError from deep inside the helper.  This guard
+        # only replaces that IndexError with a message naming the expected
+        # and the actual size — it does NOT reclassify the failure: the
+        # RuntimeError below is caught by the same except Exception, so a
+        # truncated dump is still an environment error (exit 2).
         raise RuntimeError(
             f"truncated PPM payload: expected {expected} bytes "
             f"({width}x{height}x3), got {len(payload)}")

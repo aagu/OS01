@@ -379,7 +379,7 @@ New test `qemutests/aarch64_boot_logo.py`:
    |---|---|---|
    | ink `RGB(232,240,247)` | glyphs "O" (20 set bits) + "S" (17) = 37 × scale² | **7252** |
    | accent `RGB(59,214,198)` | glyphs "0" (23) + "1" (10) = 33 × scale² + underline `3*scale*2` | **6552** |
-   | muted `RGB(104,120,134)` | the `aarch64  /  KERNEL` label glyphs (the set-bit sum of their PSF2 glyphs) | **470** |
+   | muted `RGB(104,120,134)` | the `aarch64  /  KERNEL` label glyphs (the set-bit sum of their PSF2 glyphs); the 8x16 PSF2 cell is UNSCALED, so this count is the SAME at every GOP resolution | **470** (resolution-independent) |
 
    The per-glyph bit counts come from the bitmap table in `kernel/driver/logo.c`
    (`O`=20, `S`=17, `0`=23, `1`=10 set bits) and are re-derived by the test, not
@@ -400,7 +400,8 @@ New test `qemutests/aarch64_boot_logo.py`:
    `y ∈ [label_row*16, label_row*16 + 16)` = `y ∈ [160, 176)` at 800x600,
    within `x ∈ [left, left + 18*8)` — the `aarch64  /  KERNEL` text was
    rendered, character for character.  The expected count is the set-bit sum
-   of the label's glyphs in `kernel/driver/font.psf` (470 at 800x600); a
+   of the label's glyphs in `kernel/driver/font.psf` (470 — the same at every
+   resolution, because the 8x16 PSF2 cell is unscaled); a
    truncated or misspelled caption paints a different number of pixels and
    fails.  The same count is asserted for the WHOLE caption row, so a caption
    LONGER than the expected label also fails.
