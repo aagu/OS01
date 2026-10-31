@@ -149,12 +149,100 @@ void arch_task_check_prev(task_t *t)
         fatal_context(5, live_sp, base, top);
 }
 
+/* ── Compile-gated fault injection (P5 Task 3 / spec §10.2) ────────
+ * Exactly ONE numeric define selects the corruption (Ruling P5-1):
+ *   AARCH64_SCHED_FAULT_SP_TOP  — saved SP == stack top
+ *   AARCH64_SCHED_FAULT_SP_LOW  — saved SP below usable_low (-16)
+ *   AARCH64_SCHED_FAULT_PC_LOW  — continuation = aligned unmapped low addr
+ *   AARCH64_SCHED_FAULT_PC_DATA — continuation = non-executable data object
+ * Without a define (normal / ordinary selftest / sched positive builds)
+ * the hook is a no-op inline and NONE of these symbols exist — the
+ * harness nm audit asserts `aarch64_sched_fault_inject` is present in
+ * every sched-fault-<value> ELF and absent from the other three.
+ *
+ * The dedicated victim is the FIRST kernel thread the published idle
+ * task (the selftest driver on init_task_union) switches to: that is
+ * the driver's first kthread_yield() in case_yield.  The corruption is
+ * written immediately BEFORE the production pre-switch validator, so
+ * the rejection and the production fatal reason fire BEFORE the stack
+ * switch; the observation counters (victim first-entry via
+ * arch_aarch64_entry_prepare + committed switches to the victim) are
+ * printed from the rejection path, so a build that printed the marker
+ * and then transferred shows switches_to_target != 0 and fails. */
+#if defined(AARCH64_SCHED_FAULT_SP_TOP) || defined(AARCH64_SCHED_FAULT_SP_LOW) \
+    || defined(AARCH64_SCHED_FAULT_PC_LOW) || defined(AARCH64_SCHED_FAULT_PC_DATA)
+#define AARCH64_SCHED_FAULT_ACTIVE 1
+static task_t *aarch64_sched_fault_target;
+static unsigned aarch64_sched_fault_target_entries;
+static unsigned aarch64_sched_fault_target_switches;
+static int aarch64_sched_fault_injected;
+
+static const char *aarch64_sched_fault_case(void)
+{
+#if defined(AARCH64_SCHED_FAULT_SP_TOP)
+    return "sp-top";
+#elif defined(AARCH64_SCHED_FAULT_SP_LOW)
+    return "sp-low";
+#elif defined(AARCH64_SCHED_FAULT_PC_LOW)
+    return "pc-low";
+#else
+    return "pc-data";
+#endif
+}
+
+__attribute__((noinline, used))
+static void aarch64_sched_fault_inject(task_t *prev, task_t *next)
+{
+    if (aarch64_sched_fault_injected)
+        return;
+    if (prev != &init_task_union.task || next == prev)
+        return;
+    aarch64_sched_fault_injected = 1;
+    aarch64_sched_fault_target = next;
+    thread_t *ctx = next->thread;
+#if defined(AARCH64_SCHED_FAULT_SP_TOP)
+    ctx->sp = ctx->stack_top;
+#elif defined(AARCH64_SCHED_FAULT_SP_LOW)
+    ctx->sp = ctx->usable_low - 16;
+#elif defined(AARCH64_SCHED_FAULT_PC_LOW)
+    ctx->x30 = 0x2000;      /* 16-aligned, unmapped, arbitrary low address */
+#else
+    /* A real kernel data object in .bss: mapped, readable, NOT executable
+     * (only the higher-half .text range is executable). */
+    ctx->x30 = (uintptr_t)&aarch64_context_fatal_stack;
+#endif
+}
+#else
+#define AARCH64_SCHED_FAULT_ACTIVE 0
+static inline void aarch64_sched_fault_inject(task_t *prev, task_t *next)
+{
+    (void)prev;
+    (void)next;
+}
+#endif
+
 void arch_task_switch(task_t *prev, task_t *next)
 {
     if (prev == next)
         return;
+    aarch64_sched_fault_inject(prev, next);
     const char *reason = 0;
     if (!arch_task_context_valid(next, &reason)) {
+#if AARCH64_SCHED_FAULT_ACTIVE
+        /* Rejection path ONLY (a marker printed before attempting the
+         * switch proves nothing): the victim's live observation counters
+         * are printed here, so a build that printed the marker and then
+         * committed the transfer shows switches_to_target != 0 and the
+         * harness rejects it. */
+        if (next == aarch64_sched_fault_target) {
+            serial_printk("[sched-fault] case=%s phase=pre-switch "
+                          "target=%lu switches_to_target=%u\n",
+                          aarch64_sched_fault_case(),
+                          (unsigned long)next->pid,
+                          aarch64_sched_fault_target_entries +
+                          aarch64_sched_fault_target_switches);
+        }
+#endif
         bool safe = task_pointer_plausible(next) &&
                     thread_pointer_plausible(next->thread);
         uint64_t sp = safe ? next->thread->sp : 0;
@@ -166,6 +254,12 @@ void arch_task_switch(task_t *prev, task_t *next)
     if (next->thread->sp < next->thread->usable_low + 16)
         fatal_context(7, next->thread->sp, next->thread->stack_base,
                       next->thread->stack_top);
+#if AARCH64_SCHED_FAULT_ACTIVE
+    /* Switch-commit observer: reaching the assembly call with the
+     * victim as `next` means a transfer to it is committing. */
+    if (next == aarch64_sched_fault_target)
+        aarch64_sched_fault_target_switches++;
+#endif
     arch_task_check_prev(prev);
     aarch64_switch_context(prev, prev->thread, next->thread);
 }
@@ -225,6 +319,12 @@ void arch_kthread_drop_files(task_t *t)
 void arch_aarch64_entry_prepare(void)
 {
     task_t *t = arch_current_task();
+#if AARCH64_SCHED_FAULT_ACTIVE
+    /* Target-entry observer: first C instruction on the victim's own
+     * stack — reachable only through a committed switch. */
+    if (t == aarch64_sched_fault_target)
+        aarch64_sched_fault_target_entries++;
+#endif
     t->on_cpu = 1;
     t->in_schedule = 0;
 }
