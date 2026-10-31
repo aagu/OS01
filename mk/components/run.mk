@@ -275,6 +275,7 @@ _test-aarch64-run-no-ack:
 _test-aarch64-run-gic-spi:
 	python3 qemutests/aarch64_gic_spi.py \
 	  --diagnostic-dtb=auto \
+	  --expect-scheduler-selftest \
 	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \

@@ -43,6 +43,17 @@ except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
 
+try:  # noqa: E402
+    # The gic-spi mode builds its image with KERNEL_SELFTEST=1, so the
+    # guest now runs the nine aarch64 scheduler late cases before its
+    # single protocol END.  The acceptance gate is shared verbatim with
+    # the SMP runner (aarch64_uefi_smp.scheduler_selftest_evidence_ok)
+    # so both scheduler-enabled modes require the same complete
+    # 14-case protocol and unique END — omission itself fails.
+    from qemutests.aarch64_uefi_smp import scheduler_selftest_evidence_ok
+except ImportError:  # pragma: no cover
+    scheduler_selftest_evidence_ok = None  # type: ignore[assignment]
+
 # Suite id for the archive path and the RunReport.
 SUITE = "aarch64-gic-spi"
 
@@ -130,6 +141,34 @@ def self_test() -> None:
     crlf = ARMED_HANDLED.replace("\n", "\n\r")
     assert spi_verdict(crlf, injected=True)[0] == "pass", \
         "CR/LF line endings must not affect verdict"
+
+    # --expect-scheduler-selftest: the shared protocol gate must reject a
+    # missing late SELECT, a missing late PASS and a second END, and must
+    # accept the full 14-case trace (mirrors the SMP runner fixtures).
+    assert scheduler_selftest_evidence_ok is not None, \
+        "scheduler_selftest_evidence_ok import must not be silent"
+    early_ids = ["slab_alloc_free", "slab_many_sizes", "slab_16_caches",
+                 "aarch64_pt_vmm", "spinlock_basic"]
+    late_ids = ["aarch64_sched_yield", "aarch64_sched_regs",
+                "aarch64_sched_entry", "aarch64_sched_irq",
+                "aarch64_sched_blocker", "aarch64_sched_reclaim",
+                "aarch64_sched_idle", "aarch64_sched_timer",
+                "aarch64_sched_ap"]
+    lines = ["[TEST] START v=1 suite=kernel-selftest expected=14"]
+    lines += [f"[TEST] SELECT {c} required=1" for c in early_ids + late_ids]
+    lines += [f"[TEST] BEGIN {c}" for c in early_ids + late_ids]
+    lines += [f"[TEST] PASS {c}" for c in early_ids + late_ids]
+    lines += ["[TEST] END suite=kernel-selftest total=14 passed=14 "
+              "failed=0 skipped=0"]
+    protocol = "\n".join(lines) + "\n"
+    assert scheduler_selftest_evidence_ok(protocol)
+    assert not scheduler_selftest_evidence_ok(
+        protocol.replace("SELECT aarch64_sched_ap required=1\n", ""))
+    assert not scheduler_selftest_evidence_ok(
+        protocol.replace("[TEST] PASS aarch64_sched_ap\n", ""))
+    assert not scheduler_selftest_evidence_ok(
+        protocol + "[TEST] END suite=kernel-selftest total=14 passed=14 "
+        "failed=0 skipped=0\n")
 
 
 def qemu_command(args, dtb: str, sock: str) -> list:
@@ -249,6 +288,8 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
     died_before_bind = False
     injected = False
     spawn_error = None
+    expect_scheduler = bool(getattr(args, "expect_scheduler_selftest", False))
+    scheduler_ok = not expect_scheduler
     try:
         if session_factory is None:
             raise RuntimeError("ProcessSession is unavailable")
@@ -265,7 +306,7 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
                 except OSError:
                     try:
                         client.close()
-                    except OSError:
+                    except Exception:
                         pass
                     client = None
                     # Liveness gate (base loop: ``proc.poll() is None``).
@@ -293,8 +334,8 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
                 # 远端关闭 (QEMU 退出); 跳出等 verdict 收敛.
                 break
             log.extend(chunk)
-            verdict, inject_now = spi_verdict(log.decode("utf-8", "replace"),
-                                              injected)
+            text = log.decode("utf-8", "replace")
+            verdict, inject_now = spi_verdict(text, injected)
             if inject_now and not injected:
                 # 注入 1 字节 -> PL011 RX IRQ. 现状 kernel 没 handler,
                 # IRQn 不变 handled, harness 继续等 handled marker,
@@ -305,10 +346,26 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
                 except OSError:
                     pass
             if verdict is not None:
-                break
+                if not expect_scheduler:
+                    break
+                # Scheduler-enabled image: the nine late cases and the
+                # single END arrive AFTER the spi markers (post-handoff
+                # driver).  Keep draining until the complete protocol is
+                # observable; the cheap END pre-check only avoids
+                # re-validating a still-incomplete trace every poll —
+                # final acceptance always runs the full shared gate.
+                if re.search(r"^\[TEST\] END suite=kernel-selftest",
+                             text.replace("\r", ""), re.MULTILINE):
+                    if scheduler_selftest_evidence_ok(text):
+                        scheduler_ok = True
+                        break
         # 跳出 while 时若还没出 verdict, 且不是检测到 QEMU 提前退出,
         # 就是 deadline 到了.
         if (verdict is None and not died_before_bind
+                and time.monotonic() >= deadline):
+            timed_out = True
+        if (expect_scheduler and verdict is not None
+                and not scheduler_ok and not died_before_bind
                 and time.monotonic() >= deadline):
             timed_out = True
     except Exception as error:  # noqa: BLE001
@@ -348,6 +405,11 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
     armed_count = len(ARMED_RE.findall(log_text.replace("\r", "")))
     handled_count = len(HANDLED_RE.findall(log_text.replace("\r", "")))
     accepted = verdict == "pass"
+    if accepted and expect_scheduler:
+        # Re-run the full shared gate on the complete log: the loop's
+        # incremental check may have broken out on the first END sighting.
+        scheduler_ok = scheduler_selftest_evidence_ok(log_text)
+        accepted = accepted and scheduler_ok
     # Exit-code / archive-status classification (plan global constraint:
     # 0=PASS, 1=FAIL/TIMEOUT, 2=configuration/environment ERROR).  A
     # timeout is in the exit-1 slot, and a QEMU that died before binding
@@ -360,12 +422,16 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
         status, rc = "FAIL", 1
     errors = []
     if not accepted:
-        if timed_out:
-            errors.append("timeout waiting for armed+handled markers")
-        elif died_before_bind:
-            errors.append("QEMU exited before binding the serial socket")
+        if verdict != "pass":
+            if timed_out:
+                errors.append("timeout waiting for armed+handled markers")
+            elif died_before_bind:
+                errors.append("QEMU exited before binding the serial socket")
+            else:
+                errors.append("armed+handled verdict not satisfied")
         else:
-            errors.append("armed+handled verdict not satisfied")
+            errors.append("scheduler selftest protocol not satisfied "
+                          "(complete 14-case protocol + single END required)")
     _write_suite_report(
         archive, argv=command, profile=profile, cpu=args.cpus, memory_mib=512,
         firmware=args.firmware, image=args.image, started_monotonic=started,
@@ -381,6 +447,9 @@ def run_case(args, diagnostic_dtb, *, session_factory=None, build_dir=None,
         "armed_count": armed_count,
         "handled_count": handled_count,
         "died_before_bind": died_before_bind,
+        "expect_scheduler_selftest": expect_scheduler,
+        "scheduler_selftest_ok": (bool(scheduler_ok) if expect_scheduler
+                                  else None),
         "serial": str(serial_path),
     }
     print(json.dumps(summary))
@@ -410,6 +479,13 @@ def main() -> int:
                              "an explicit PATH to a prebuilt DTB. R2-1: "
                              "required (firmwares without EFI handoff DTB "
                              "will otherwise FATAL at boot)")
+    parser.add_argument("--expect-scheduler-selftest", action="store_true",
+                        help="The gic-spi image is built with "
+                             "KERNEL_SELFTEST=1, so the guest runs the nine "
+                             "aarch64 scheduler late cases after the spi "
+                             "markers; require the complete 14-case "
+                             "protocol-v1 trace and exactly one END before "
+                             "accepting (shared gate with the SMP runner)")
     parser.add_argument("--build-dir", default=None,
                         help="build dir for the run archive, supplied by Make")
     parser.add_argument("--profile", default=os.environ.get("OS01_PROFILE",
