@@ -7,6 +7,16 @@
 
 ## 2026-10-31
 
+- feat(sched,net): **x86_64 init PID 1 闭环：延迟启动 lwIP tcpip 内核线程与引导探针**：将 `net_lwip_init()`（及 `KERNEL_SELFTEST` 变体下的 `sched_boot_probe_create()`）从 `kernel_main` 移入 `task_init()`（`kernel/arch/x86_64/cpu/sched_boot.c`），在 `spawn_user_task("/bin/init", NULL)` 之后、`sched_boot_start()` 之前调用。使得用户态 `/bin/init` 在所有构建变体下均为首个 `alloc_pid()` 消费者并恒为 PID 1，修复了此前因 PID 1 为 `tcpip_thread` 内核线程导致 `/bin/poweroff`、`halt`、`reboot` 向 PID 1 发送信号失败（`-EPERM`）而无法优雅关机的缺陷。同时保持引导创建窗口不变量：UP 下 BSP `scheduler_ok == 0` 保留非抢占串行执行与 CPU0 放置回退；SMP 下 post-AP / pre-BSP 放置语义不变；NIC IRQ 早到 RX 不依赖栈已启动。新增 `init_pid` late selftest 验证 `user_init_task->pid == 1`；phase-0 门禁追加 `init: running as PID 1` 顺序正则断言；更新相关架构与子系统文档及注释。
+
+  **验证**：
+  1. `make KERNEL_SELFTEST=1 test-kernel-selftest`：42/42 全部用例 PASS（耗时 3.70s），含 `sched_boot_probe` 与新增 late case `init_pid` PASS，串口日志包含 `init: running as PID 1`。
+  2. `make test-qemu SUITE=phase-0`：PASS，正常构建下串口按序出现 `init: running as PID 1`、SYSINIT/WAIT/ONCE 阶段标记与终端/ash shell 启动。
+  3. `make test-qemu SUITE=network`：PASS，DHCP/UDP/DNS/TCP/wget/socket_exit 6 项网络测试全 PASS，`wait_for_dhcp` 无感自适应就绪。
+  4. 优雅关机 E2E（headless 注入 `/bin/poweroff`）：PASS，`kill(1, SIGUSR2)` 成功送达 PID 1 用户态 init，串口出现 `init: received signal 12, shutting down...`，init 优雅终止 terminal 子进程后调用 `reboot(LINUX_REBOOT_CMD_POWER_OFF)`，内核经 ACPI 干净关机。
+  5. `make OS01_SYSTEST=1 test-syscall`：PASS，全量系统调用套件 99/99 用例（351 项断言）全部通过，systest 作为 PID 2 子进程正常退出。
+
+
 - refactor(pty,fb): **Parked 分辨率切换器收尾：裁撤 `pty.h` 匿名 union 并规范 `test_fb_uapi.c` 断言宏**：`pty_t` 结构体历史遗留的 `union { pid_t pgrp; pid_t fg_pgrp; };` 裁撤为单一 `pid_t pgrp;`（`fg_pgrp` 仅物理 TTY 使用，PTY 统一为 `pgrp`）；在 `kernel/tty/pty.c` 的 `TIOCSWINSZ` 信号判定处添加注释，明确 `pgrp > 0`（0 代表未关联前台组，不发送 SIGWINCH）；清理 `hosttests/cases/test_fb_uapi.c` 中全文件未用的 `CHECK_TRUE` 与自制 `CHECK_EQ` 宏，统一采用框架标准 `assert_eq`；在 `hosttests/cases/test_pty_winsize.c` 新增结构体字段与访问测试 `test_pty_struct_pgrp_field`。验证：`test_fb_uapi`（27/27 PASS）、`test_pty_winsize`（12/12 PASS）、`make test-host`（134 个二进制全 PASS）、`make test-static`（14 项审计全 PASS）。
 
 - fix(monitor): **Parked monitor ③：加固 `monitor_model_init` / `monitor_sample_destroy` 防御性初始化与析构**：原 `monitor_model_init` 入口直接调用 `model_free_arrays` 释放内部指针，在未初始化栈变量上调用会触发非法指针 free 破坏堆，且 `monitor_sample` 缺少显式初始化原语导致 `monitor_collect` 依赖外部提前 memset。现将 `monitor_model_init` 调整为 zero-first 纯初始化（对包含垃圾内存的结构体安全），新增 `monitor_model_reset` 用于显式重置/释放既有 live model；新增 `monitor_sample_init`（zero-first）初始化原语；在 `model.h`/`collect.h` 中强化 `[PRECONDITION]` 前置契约与文档；消除 `user/monitor/monitor.c` 对手工 memset 前置的依赖。宿主测试新增 `test_model_init_on_garbage_memory`、`test_model_reset` 与 `test_sample_init_on_garbage_memory`，验证在 `0xAA`/`0x55` 脏内存下不触发非法 free。验证：`test_monitor_model`（17 项）、`test_monitor_collect`（13 项）、`test_monitor_render`（19 项）、`make test-host`（134 个二进制）以及 `make test-static` 全 PASS。
