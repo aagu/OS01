@@ -229,16 +229,30 @@ if (!BOOT_CONTEXT_HAS_FRAMEBUFFER)  -> kputs("[fb] no framebuffer in handoff; ..
 else:
     fill Pos from handoff->graphics
     frame_buffer_init()             -> maps ramfb MMIO as Device, sets Pos.FB_addr
-    if (Pos.FB_addr) kputs("[fb] frame buffer remap succeed ...")
-    else             kputs("[fb] mapping failed; color_printk disabled")
+    if (!Pos.FB_addr) kputs("[fb] mapping failed; color_printk disabled")
 
-boot_logo_show()                     -> NEW: draws the wordmark, or is a no-op
-log_info("[logo] boot logo drawn (%s, %ux%u)\n", ARCH_NAME, xres, yres)   -> NEW
-color_printk(WHITE, BLUE, "[fb] aarch64 color_printk active (%ux%u)\n", ...)
+if (boot_logo_show() == 0)          -> NEW: draws the wordmark
+    log_info("[logo] boot logo drawn (%s, %ux%u)\n", ARCH_NAME, xres, yres)   -> NEW
+else
+    log_info("[logo] skipped: no framebuffer\n")                              -> NEW
+
+if (Pos.FB_addr):
+    color_printk(WHITE, BLUE, "[fb] aarch64 color_printk active (%ux%u)\n", ...)
+    kputs("[fb] frame buffer remap succeed (banner on screen)\n")
 ```
 
 The logo is drawn BEFORE the existing banner, so the banner lands under it
 (the logo advances `Pos.YPosition` to `label_row + 2`).
+
+Note the ORDER of the two serial records: the `[fb] frame buffer remap
+succeed` line is emitted AFTER the logo call — inside the `if (Pos.FB_addr)`
+block that also emits the `color_printk` banner — so the aarch64 serial
+stream reads `[logo] boot logo drawn` → `[fb] frame buffer remap succeed`.
+(The `[fb] aarch64 color_printk active` banner is written to the
+FRAMEBUFFER by `color_printk`; on aarch64 `PRINTK_FB_WRITER_LEASE` is 0, so
+`color_printk` never falls back to the serial port and that banner does not
+appear in the serial stream.) The drawn marker is logged only when
+`boot_logo_show()` returns 0; otherwise the skip marker is logged instead.
 
 Marker strings (new, aarch64 only):
 
@@ -335,7 +349,14 @@ New test `qemutests/aarch64_boot_logo.py`:
 1. Launch QEMU exactly like `qemutests/aarch64_uefi_smp.py` PLUS
    `-device ramfb` and `-qmp unix:<sock>,server,nowait`, keeping
    `-display none` (headless; verified to work with ramfb).
-2. Wait for the serial marker `[logo] boot logo drawn`.
+2. Wait FIRST for the serial marker `[fb] frame buffer remap succeed` — the
+   marker the kernel ALWAYS prints — and only then do a BOUNDED secondary
+   wait (5 s) for `[logo] boot logo drawn`. The primary wait deliberately
+   targets an always-present marker, so a missing logo is reported as a
+   FAILED ASSERTION with the screenshot still captured, never as a timeout
+   with no evidence; the bounded secondary wait only gives the kernel a
+   moment to finish the draw before the screendump, and a logo marker that
+   never arrives stays a failed assertion too — not a timeout.
 3. QMP `screendump` → PPM (`P6`, 800x600).
 4. Derive the expected geometry from the screendump dimensions using the SAME
    scale rule the kernel uses (`xres >= 800 → 14`, `>= 480 → 11`, else `8`;
@@ -369,7 +390,7 @@ New test `qemutests/aarch64_boot_logo.py`:
 
 7. Assert muted pixels exist in the label CHARACTER CELL BAND
    `y ∈ [label_row*16, label_row*16 + 16)` = `y ∈ [160, 176)` at 800x600,
-   within `x ∈ [left, left + 17*8)` — the `aarch64  /  KERNEL` text was
+   within `x ∈ [left, left + 18*8)` — the `aarch64  /  KERNEL` text was
    rendered.
 
    The band, not a single scanline: in the shipped PSF2 font EVERY glyph used

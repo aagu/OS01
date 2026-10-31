@@ -941,10 +941,11 @@ class ScriptModeTests(unittest.TestCase):
 
     _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
                           "aarch64_sync_fault.py", "aarch64_m3_probe.py",
-                          "aarch64_scheduler.py")
+                          "aarch64_scheduler.py", "aarch64_boot_logo.py")
     _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
                     "aarch64_sync_fault.py", "aarch64_m3_probe.py",
-                    "aarch64_m1_matrix.py", "aarch64_scheduler.py")
+                    "aarch64_m1_matrix.py", "aarch64_scheduler.py",
+                    "aarch64_boot_logo.py")
 
     _PROBE = r"""
 import importlib.util, os, sys

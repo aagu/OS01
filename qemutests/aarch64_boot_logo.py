@@ -17,6 +17,10 @@ no-fb      : without ramfb the kernel skips the logo instead of crashing,
               and still reaches its idle loop.
 
 Exit codes: 0 = PASS, 1 = FAIL, 2 = configuration/environment ERROR.
+
+``--self-test`` runs a QEMU-free self-test of the suite's own pure
+helpers (geometry, PPM parsing, RGB counting) against synthetic data and
+exits 0.  It needs neither ``--firmware`` nor ``--image``.
 """
 
 from __future__ import annotations
@@ -610,12 +614,107 @@ CHECKS = {
 }
 
 
-def main() -> int:
+def _synthetic_ppm(width: int, height: int, body: bytes) -> bytes:
+    """Build a binary P6 PPM (header + payload) for synthetic pixel data."""
+    return f"P6\n{width} {height}\n255\n".encode() + body
+
+
+def self_test() -> None:
+    """QEMU-free self-test of the suite's own pure helpers.
+
+    The geometry derivation, the PPM parser and the RGB counter are the
+    parts of this suite that decide whether a PASS is honest, so the
+    harness exercises them against synthetic data — no firmware, no
+    image, no guest.
+    """
+    # -- geometry -----------------------------------------------------
+    # The caption is ARCH_BOOT_LOGO_LABEL = "aarch64  /  KERNEL", 18
+    # characters; a hard-coded 17 would drop the last character cell.
+    assert LABEL_LEN == 18, LABEL_LEN
+    assert LABEL_LEN == len(LOGO_LABEL)
+    assert LOGO_LABEL == "aarch64  /  KERNEL"
+
+    assert logo_scale(800, 600) == 14
+    assert logo_scale(480, 600) == 11
+    assert logo_scale(479, 600) == 8
+    assert logo_scale(800, 299) == 7      # a short screen shrinks the scale
+    assert logo_scale(320, 240) == 7
+
+    geo = logo_geometry(800, 600)
+    assert geo["scale"] == 14
+    assert geo["left"] == 32
+    assert geo["top"] == 24
+    assert geo["advance"] == 7 * 14
+    assert geo["width"] == 3 * geo["advance"] + 5 * 14
+    assert geo["line_y"] == 24 + 7 * 14 + 14
+    assert geo["label_row"] == 10
+    assert geo["label_x0"] == 32
+    assert geo["label_y0"] == 160
+    assert geo["label_y1"] == 176
+    assert geo["ink_x1"] == geo["left"] + 2 * geo["advance"]
+    assert geo["wordmark_y1"] == geo["top"] + 7 * geo["scale"]
+    # The glyph set-bit counts (O=20, S=17, 0=23, 1=10) times scale^2.
+    assert geo["ink_px"] == (20 + 17) * 14 * 14
+    assert geo["accent_glyph_px"] == (23 + 10) * 14 * 14
+    assert geo["accent_underline_px"] == 3 * 14 * 2
+    # The caption band spans LABEL_LEN character cells (18 cells, not 17).
+    assert geo["label_x0"] + LABEL_LEN * FONT_W == 32 + 18 * 8
+
+    # A small framebuffer uses the smaller scale and the smaller left.
+    small = logo_geometry(320, 240)
+    assert small["scale"] == 7
+    assert small["left"] == 16
+    assert small["advance"] == 7 * 7
+
+    # -- PPM parsing --------------------------------------------------
+    red = (255, 0, 0)
+    blue = (0, 0, 255)
+    body = bytes(red) + bytes(blue) + bytes(red) + bytes(blue)
+    width, height, payload = parse_ppm(_synthetic_ppm(2, 2, body))
+    assert (width, height) == (2, 2)
+    assert payload == body
+
+    # A comment line in the header is legal PPM and must be skipped.
+    width, height, payload = parse_ppm(b"P6\n# a comment\n2 2\n255\n" + body)
+    assert (width, height) == (2, 2)
+    assert payload == body
+
+    for bad, why in (
+        (b"P3\n2 2\n255\n" + body, "not a P6 PPM"),
+        (b"P6\n2 2\n255\n" + body[:-1], "truncated payload"),
+        (b"P6\n2 2\n65535\n" + body, "unsupported maxval"),
+    ):
+        try:
+            parse_ppm(bad)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"parse_ppm accepted {why}")
+
+    # -- RGB counting -------------------------------------------------
+    # 2x3 image, row-major: red, blue / red, blue / blue, blue
+    pixels = (bytes(red) + bytes(blue) +
+              bytes(red) + bytes(blue) +
+              bytes(blue) + bytes(blue))
+    assert count_rgb(pixels, 2, 3, red) == 2
+    assert count_rgb(pixels, 2, 3, blue) == 4
+    assert count_rgb(pixels, 2, 3, (1, 2, 3)) == 0
+    # The box is inclusive-exclusive.
+    assert count_rgb(pixels, 2, 3, red, (0, 0, 1, 3)) == 2
+    assert count_rgb(pixels, 2, 3, red, (0, 0, 1, 1)) == 1
+    assert count_rgb(pixels, 2, 3, red, (1, 0, 2, 3)) == 0
+    # The box is clipped to the framebuffer.
+    assert count_rgb(pixels, 2, 3, red, (-5, -5, 99, 99)) == 2
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true",
+                        help="run the QEMU-free self-test and exit")
     parser.add_argument("--check", choices=("fb-visible", "logo", "no-fb", "all"),
                         default="all")
-    parser.add_argument("--firmware", required=True)
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--firmware")
+    parser.add_argument("--image")
     parser.add_argument("--qemu", default="qemu-system-aarch64")
     parser.add_argument("--log-dir", default="test-results/aarch64-boot-logo")
     parser.add_argument("--build-dir", default=None)
@@ -624,7 +723,18 @@ def main() -> int:
     parser.add_argument("--cpus", type=int, default=1)
     parser.add_argument("--ram-mib", type=int, default=512)
     parser.add_argument("--diagnostic-dtb", default="auto")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        self_test()
+        print("aarch64_boot_logo: self-test passed")
+        return 0
+
+    # --firmware/--image are required in normal mode, but NOT for the
+    # QEMU-free --self-test above: argparse would otherwise exit 2 on a
+    # bare ``--self-test`` invocation.
+    if not (args.firmware and args.image):
+        parser.error("--firmware and --image are required outside --self-test")
 
     if ProcessSession is None:
         print("ERROR: qemutests.harness.process is unavailable", file=sys.stderr)

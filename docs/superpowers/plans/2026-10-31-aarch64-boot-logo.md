@@ -122,7 +122,12 @@ INK_GLYPHS = 2
 ACCENT_GLYPHS = 2
 
 FONT_W, FONT_H = 8, 16              # PSF2 metrics of kernel/driver/font.psf
-LABEL_LEN = 17                     # len("aarch64  /  KERNEL")
+# The caption the kernel draws under the wordmark (the aarch64 kernel's
+# ARCH_BOOT_LOGO_LABEL): "aarch64" + 2 spaces + "/" + 2 spaces + "KERNEL"
+# is 18 characters — a hard-coded 17 would drop the last character cell
+# and let a truncated caption pass.
+LOGO_LABEL = "aarch64  /  KERNEL"
+LABEL_LEN = len(LOGO_LABEL)
 
 LOGO_DRAWN_MARKER = "[logo] boot logo drawn"
 LOGO_SKIPPED_MARKER = "[logo] skipped: no framebuffer"
