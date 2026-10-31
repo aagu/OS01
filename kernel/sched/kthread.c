@@ -300,6 +300,17 @@ struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
     return tsk;
 }
 
+/* Cooperative yield API. schedule() intentionally returns with IRQs
+ * masked after a real switch, so preserve and restore the caller's
+ * state here.  Distinct from libc sched_yield(), which is not linked
+ * as this implementation. */
+void kthread_yield(void)
+{
+    arch_irq_state_t flags = arch_local_irq_save();
+    schedule();
+    arch_local_irq_restore(flags);
+}
+
 /* ── Kernel-thread exit ───────────────────────────────────────
  * Terminates a kernel thread.  Only kernel threads may call this;
  * the idle task and user tasks are rejected.

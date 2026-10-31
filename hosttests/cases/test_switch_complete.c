@@ -131,12 +131,37 @@ static void suite_self_reap_null_thread(void)
     assert_true(spy_kfreed[1] == (void *)stk_buf);
 }
 
+static void suite_kthread_yield_irq_restore(void)
+{
+    TEST_SUITE("kthread_yield restores caller IRQ state");
+    mock_irq_state = 0;
+    mock_schedule_calls = 0;
+    mock_irq_restore_calls = 0;
+    mock_restore_after_schedule = 0;
+    kthread_yield();
+    assert_eq(1, mock_schedule_calls);
+    assert_eq(1, mock_irq_restore_calls);
+    assert_eq(1, mock_restore_after_schedule);
+    assert_eq(0, mock_irq_state);
+
+    mock_irq_state = 1;
+    mock_schedule_calls = 0;
+    mock_irq_restore_calls = 0;
+    mock_restore_after_schedule = 0;
+    kthread_yield();
+    assert_eq(1, mock_schedule_calls);
+    assert_eq(1, mock_irq_restore_calls);
+    assert_eq(1, mock_restore_after_schedule);
+    assert_eq(1, mock_irq_state);
+}
+
 int main(void)
 {
     suite_self_reap_capture();
     suite_non_self_reap();
     suite_self_switch_noop();
     suite_self_reap_null_thread();
+    suite_kthread_yield_irq_restore();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_switch_complete",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

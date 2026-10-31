@@ -287,6 +287,9 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options);
 // Returns the new task_t or NULL on failure.
 struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
                                    const char *name);
+/* Cooperatively hand the CPU to another runnable task. The caller's IRQ
+ * state is restored when this task resumes. */
+void kthread_yield(void);
 
 // Create a PF_KTHREAD task that runs fn(arg), then do_exit(0).
 // Returns the new pid (>= 0), or a negative errno on failure.

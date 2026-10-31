@@ -37,6 +37,16 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* IRQ/scheduler spies for the production kthread_yield() wrapper. */
+#ifndef _ARCH_IRQ_H
+#define _ARCH_IRQ_H
+typedef uint64_t arch_irq_state_t;
+arch_irq_state_t arch_local_irq_save(void);
+void arch_local_irq_restore(arch_irq_state_t state);
+#endif
+void schedule(void);
+void kthread_yield(void);
+
 /* The real <sched/boot.h> is host-safe (stdbool only) and is needed by
  * both modes: the production TUs include it themselves (guard-protected)
  * and the test TU drives the REAL window state machine through it. */
@@ -465,7 +475,25 @@ void arch_kthread_drop_files(task_t *t)
 
 /* kthread_exit() references schedule(); the exit path itself is a
  * Phase 4 QEMU case, so this is an inert stub. */
-void schedule(void) { }
+int mock_schedule_calls;
+int mock_irq_restore_calls;
+int mock_restore_after_schedule;
+void schedule(void) { mock_schedule_calls++; }
+
+arch_irq_state_t mock_irq_state;
+arch_irq_state_t arch_local_irq_save(void)
+{
+    arch_irq_state_t old = mock_irq_state;
+    mock_irq_state = 1;
+    return old;
+}
+void arch_local_irq_restore(arch_irq_state_t state)
+{
+    mock_irq_state = state;
+    mock_irq_restore_calls++;
+    if (mock_schedule_calls)
+        mock_restore_after_schedule = 1;
+}
 
 void switch_tail_reset(void)
 {
