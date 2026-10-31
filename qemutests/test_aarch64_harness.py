@@ -59,6 +59,7 @@ import qemutests.aarch64_sync_fault as sflt     # noqa: E402
 import qemutests.aarch64_m3_probe as m3p        # noqa: E402
 import qemutests.aarch64_m1_matrix as m1m       # noqa: E402
 import qemutests.aarch64_m1_evidence as m1ev    # noqa: E402
+import qemutests.aarch64_scheduler as asched    # noqa: E402
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -936,10 +937,11 @@ class ScriptModeTests(unittest.TestCase):
     the real script entry and rebuild ``sys.path`` to script-mode shape."""
 
     _SELF_TEST_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
-                          "aarch64_sync_fault.py", "aarch64_m3_probe.py")
+                          "aarch64_sync_fault.py", "aarch64_m3_probe.py",
+                          "aarch64_scheduler.py")
     _ALL_SCRIPTS = ("aarch64_uefi_smp.py", "aarch64_gic_spi.py",
                     "aarch64_sync_fault.py", "aarch64_m3_probe.py",
-                    "aarch64_m1_matrix.py")
+                    "aarch64_m1_matrix.py", "aarch64_scheduler.py")
 
     _PROBE = r"""
 import importlib.util, os, sys
@@ -985,6 +987,532 @@ print("SCRIPT_MODE_OK", os.path.basename(target))
                     proc.returncode, 0,
                     f"{script} script-mode probe failed\n{proc.stdout}\n{proc.stderr}")
                 self.assertIn("SCRIPT_MODE_OK", proc.stdout)
+
+
+# ───────────────────────────────────────────────────────────────────
+# MODE=sched strict evidence parser (aarch64 EL1 scheduler plan,
+# Phase 5 Task 2).  The fixtures below are synthetic protocol-v1 traces
+# in the same style as ``valid_log`` / ``valid_log_alt_regs`` in the
+# sync-fault module: the wire shape mirrors the kernel exactly (the
+# case body prints its ``[sched-evidence]`` record, THEN
+# ``selftest_record_late`` prints BEGIN and the terminal).
+# ───────────────────────────────────────────────────────────────────
+
+
+def _sched_wire_log(cpus: int = 1) -> str:
+    """A complete, correct 14-case scheduler trace at ``cpus`` CPUs."""
+    ids = list(asched.EXPECTED_IDS)
+    evidence = {
+        "aarch64_sched_yield":
+            "a_yields=10000 b_yields=10000 switches=20003",
+        "aarch64_sched_regs":
+            "reg_fail=0 stack_fail=0 sp_fail=0",
+        "aarch64_sched_entry":
+            "entries=1 arg_ok=1 pre_c_sp_ok=1 irq_enabled=1 current_ok=1",
+        "aarch64_sched_irq":
+            "on_switch=1 off_switch=1 on_noswitch=1 off_noswitch=1",
+        "aarch64_sched_blocker":
+            "already=1 explicit=1 pre_switch=1 scan=1 duplicate_enqueue=0",
+        "aarch64_sched_reclaim":
+            "created=1000 stack_live=0 thread_live=0 fpu_live=0 "
+            "next_stack=1 list_delta=0 rq_delta=0",
+        "aarch64_sched_idle":
+            "idle_in_tree=0 idle_observed=1 wake_ticks=0",
+        "aarch64_sched_timer":
+            "tick_delta=4 irq_frame_ok=1 nested_schedule=0 irq_switches=0",
+    }
+    lines = ["[smp] topology source=uefi-dtb cpus=%d" % cpus]
+    lines.append("[TEST] START v=1 suite=kernel-selftest expected=14")
+    lines += [f"[TEST] SELECT {cid} required=1" for cid in ids]
+    for cid in ids:
+        lines.append("[selftest] %s... " % cid)
+        if cid.startswith("aarch64_sched_"):
+            if cid == "aarch64_sched_ap":
+                for cpu in range(1, cpus):
+                    lines.append(
+                        "[sched-evidence] id=aarch64_sched_ap cpu=%d "
+                        "scheduler_ok=0 nr_running=0 work_ok=1" % cpu)
+                lines.append("[sched-evidence] id=aarch64_sched_ap "
+                             "cpu_count=%d cpu0_only=1" % cpus)
+            else:
+                lines.append("[sched-evidence] id=%s %s"
+                             % (cid, evidence[cid]))
+        lines.append(f"[TEST] BEGIN {cid}")
+        lines.append(f"[TEST] PASS {cid}")
+    lines.append("[TEST] END suite=kernel-selftest total=14 passed=14 "
+                 "failed=0 skipped=0")
+    return "\n".join(lines) + "\n"
+
+
+class SchedulerEvidenceParserTests(unittest.TestCase):
+    """Spec §10.1 item 5 / §10.2: the strict per-case evidence parser."""
+
+    def setUp(self):
+        self.log = _sched_wire_log(cpus=2)
+
+    def _ok(self, text, cpus=2):
+        ok, errors = asched.parse_sched_evidence(text, cpus=cpus)
+        return ok, errors
+
+    def test_complete_trace_accepted_at_each_cpu_count(self):
+        for cpus in (1, 2, 4, 8):
+            with self.subTest(cpus=cpus):
+                ok, errors = self._ok(_sched_wire_log(cpus=cpus), cpus=cpus)
+                self.assertTrue(ok, errors)
+
+    def test_missing_expected_case_rejected(self):
+        text = self.log.replace(
+            "[sched-evidence] id=aarch64_sched_regs reg_fail=0 "
+            "stack_fail=0 sp_fail=0\n[TEST] BEGIN aarch64_sched_regs\n"
+            "[TEST] PASS aarch64_sched_regs\n", "")
+        text = text.replace("[TEST] SELECT aarch64_sched_regs required=1\n",
+                            "").replace("expected=14", "expected=13")
+        text = text.replace("total=14 passed=14", "total=13 passed=13")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "a missing case must fail")
+
+    def test_duplicated_case_rejected(self):
+        ok, errors = self._ok(
+            self.log + "[TEST] PASS aarch64_sched_yield\n")
+        self.assertFalse(ok, "a duplicated terminal must fail")
+
+    def test_duplicate_evidence_record_rejected(self):
+        dup = ("[sched-evidence] id=aarch64_sched_yield "
+               "a_yields=10000 b_yields=10000 switches=1\n")
+        ok, errors = self._ok(
+            self.log.replace("[TEST] BEGIN aarch64_sched_yield\n",
+                             dup + "[TEST] BEGIN aarch64_sched_yield\n"))
+        self.assertFalse(ok, "a duplicated evidence record must fail")
+
+    def test_reordered_select_rejected(self):
+        ids = list(asched.EXPECTED_IDS)
+        a, b = ids[5], ids[6]
+        text = self.log.replace(f"[TEST] SELECT {a} required=1\n", "@@A@@") \
+                       .replace(f"[TEST] SELECT {b} required=1\n",
+                                f"[TEST] SELECT {a} required=1\n") \
+                       .replace("@@A@@", f"[TEST] SELECT {b} required=1\n")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "SELECT order must match the manifest")
+
+    def test_swapped_complete_case_blocks_rejected(self):
+        ids = list(asched.EXPECTED_IDS)
+        a, b = ids[5 + 1], ids[5 + 2]   # regs <-> entry (late cases)
+        block_a = ("[sched-evidence] id=%s %s\n[TEST] BEGIN %s\n"
+                   "[TEST] PASS %s\n")
+        ev = {a: "reg_fail=0 stack_fail=0 sp_fail=0",
+              b: "entries=1 arg_ok=1 pre_c_sp_ok=1 irq_enabled=1 current_ok=1"}
+        ta = block_a % (a, ev[a], a, a)
+        tb = block_a % (b, ev[b], b, b)
+        self.assertIn(ta, self.log)
+        self.assertIn(tb, self.log)
+        text = self.log.replace(ta, "@@A@@").replace(tb, ta).replace("@@A@@", tb)
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "swapped complete case blocks must fail")
+
+    def test_reduced_self_consistent_manifest_rejected(self):
+        """13/13 with a coherent END is still wrong: the manifest is 14."""
+        ids = list(asched.EXPECTED_IDS)
+        dropped = ids[-1]
+        text = self.log.replace(f"[TEST] SELECT {dropped} required=1\n", "")
+        for line in list(text.splitlines()):
+            if dropped in line and "[TEST]" in line:
+                text = text.replace(line + "\n", "")
+        text = text.replace(
+            "[sched-evidence] id=aarch64_sched_ap cpu_count=2 cpu0_only=1\n",
+            "").replace(
+            "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=0 "
+            "nr_running=0 work_ok=1\n", "")
+        text = text.replace("expected=14", "expected=13")
+        text = text.replace("total=14 passed=14", "total=13 passed=13")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, errors or "a reduced manifest must fail")
+
+    def test_fail_record_rejected(self):
+        text = self.log.replace(
+            "[TEST] PASS aarch64_sched_blocker\n",
+            "[TEST] FAIL aarch64_sched_blocker reason=rc_-1\n")
+        text = text.replace("total=14 passed=14", "total=14 passed=13")
+        text = text.replace("failed=0 skipped=0", "failed=1 skipped=0")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "a FAIL record must fail")
+
+    def test_structurally_valid_early_fail_rejected(self):
+        """Even a self-consistent early-case FAIL is a failure (§10.2)."""
+        text = self.log.replace(
+            "[TEST] PASS slab_alloc_free\n",
+            "[TEST] FAIL slab_alloc_free reason=rc_-1\n")
+        text = text.replace("total=14 passed=14", "total=14 passed=13")
+        text = text.replace("failed=0 skipped=0", "failed=1 skipped=0")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok)
+
+    def test_skip_record_rejected(self):
+        text = self.log.replace(
+            "[TEST] PASS aarch64_sched_timer\n",
+            "[TEST] SKIP aarch64_sched_timer reason=1-cpu-shootdown\n")
+        text = text.replace("total=14 passed=14", "total=14 passed=13")
+        text = text.replace("failed=0 skipped=0", "failed=0 skipped=1")
+        ok, errors = self._ok(text, cpus=2)
+        self.assertFalse(ok, "a scheduler-case SKIP must fail")
+
+    def test_trace_without_end_rejected(self):
+        text = self.log.replace(
+            "[TEST] END suite=kernel-selftest total=14 passed=14 "
+            "failed=0 skipped=0\n", "")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "a crashed/truncated trace must fail")
+
+    def test_partial_pass_totals_rejected(self):
+        text = self.log.replace("total=14 passed=14", "total=14 passed=13")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "END totals fewer than expected must fail")
+
+    def test_extra_end_rejected(self):
+        ok, errors = self._ok(self.log + self.log.splitlines()[-1] + "\n")
+        self.assertFalse(ok, "a second END must fail")
+
+    def test_empty_trace_rejected(self):
+        ok, errors = self._ok("")
+        self.assertFalse(ok, "timeout with no evidence must fail")
+
+    def test_coordinator_error_rejected(self):
+        ok, errors = self._ok(
+            self.log.replace("[TEST] END",
+                             "[selftest] ERROR: duplicate late record\n"
+                             "[TEST] END"))
+        self.assertFalse(ok, "coordinator ERROR diagnostics must fail")
+
+    def test_fatal_after_end_rejected(self):
+        ok, errors = self._ok(
+            self.log + "[aarch64] context fatal code=9 sp=0x1 base=0x2 "
+                       "top=0x3\n")
+        self.assertFalse(ok, "a fatal arriving after END must fail")
+
+    def test_fatal_anywhere_rejected(self):
+        ok, errors = self._ok(
+            self.log.replace("[TEST] END", "PANIC: kernel bug\n[TEST] END"))
+        self.assertFalse(ok)
+
+    def test_unknown_late_record_rejected(self):
+        ok, errors = self._ok(self.log.replace(
+            "[TEST] BEGIN aarch64_sched_ap\n",
+            "[sched-evidence] id=aarch64_sched_bogus x=1\n"
+            "[TEST] BEGIN aarch64_sched_ap\n"))
+        self.assertFalse(ok)
+
+    def test_missing_evidence_field_rejected(self):
+        # reclaim without next_stack=1 (spec: observation must be present)
+        text = self.log.replace(
+            "[sched-evidence] id=aarch64_sched_reclaim created=1000 "
+            "stack_live=0 thread_live=0 fpu_live=0 next_stack=1 "
+            "list_delta=0 rq_delta=0",
+            "[sched-evidence] id=aarch64_sched_reclaim created=1000 "
+            "stack_live=0 thread_live=0 fpu_live=0 list_delta=0 rq_delta=0")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "a missing frozen field must fail")
+
+    def test_missing_whole_timer_record_rejected(self):
+        text = self.log.replace(
+            "[sched-evidence] id=aarch64_sched_timer tick_delta=4 "
+            "irq_frame_ok=1 nested_schedule=0 irq_switches=0\n", "")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "a missing per-case record must fail")
+
+    def test_duplicate_field_in_record_rejected(self):
+        text = self.log.replace(
+            "switches=20003", "switches=20003 switches=1")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "duplicate fields in one record must fail")
+
+    def test_predicate_violations_rejected(self):
+        mutations = (
+            ("a_yields=10000", "a_yields=9999"),
+            ("b_yields=10000", "b_yields=0"),
+            ("switches=20003", "switches=0"),
+            ("reg_fail=0", "reg_fail=1"),
+            ("entries=1", "entries=2"),
+            ("arg_ok=1", "arg_ok=0"),
+            ("pre_c_sp_ok=1", "pre_c_sp_ok=0"),
+            ("irq_enabled=1", "irq_enabled=0"),
+            ("current_ok=1", "current_ok=0"),
+            ("on_switch=1", "on_switch=0"),
+            ("off_noswitch=1", "off_noswitch=0"),
+            ("already=1", "already=0"),
+            ("scan=1", "scan=0"),
+            ("duplicate_enqueue=0", "duplicate_enqueue=1"),
+            ("created=1000", "created=999"),
+            ("stack_live=0", "stack_live=1"),
+            ("thread_live=0", "thread_live=2"),
+            ("fpu_live=0", "fpu_live=7"),
+            ("next_stack=1", "next_stack=0"),
+            ("list_delta=0", "list_delta=3"),
+            ("rq_delta=0", "rq_delta=1"),
+            ("idle_in_tree=0", "idle_in_tree=1"),
+            ("idle_observed=1", "idle_observed=0"),
+            ("wake_ticks=0", "wake_ticks=11"),
+            ("tick_delta=4", "tick_delta=2"),
+            ("irq_frame_ok=1", "irq_frame_ok=0"),
+            ("nested_schedule=0", "nested_schedule=1"),
+            ("irq_switches=0", "irq_switches=2"),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=new):
+                self.assertIn(old, self.log)
+                ok, errors = self._ok(self.log.replace(old, new))
+                self.assertFalse(ok, errors or f"{new} must fail")
+
+    def test_ap_cpu_count_mismatch_rejected(self):
+        text = self.log.replace("cpu_count=2", "cpu_count=4")
+        ok, errors = self._ok(text, cpus=2)
+        self.assertFalse(ok, "cpu_count must match the QEMU -smp value")
+
+    def test_ap_observation_count_mismatch_rejected(self):
+        text = self.log.replace(
+            "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=0 "
+            "nr_running=0 work_ok=1\n", "")
+        ok, errors = self._ok(text, cpus=2)
+        self.assertFalse(ok, "cpus=2 requires exactly one AP observation")
+
+    def test_ap_duplicate_cpu_rejected(self):
+        text = self.log.replace(
+            "cpu=1 scheduler_ok=0",
+            "cpu=1 scheduler_ok=0")  # anchor only
+        text = text.replace(
+            "cpu_count=2",
+            "cpu_count=2")  # anchor only
+        dup = ("[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=0 "
+               "nr_running=0 work_ok=1\n")
+        text = self.log.replace("cpu_count=2", dup + "cpu_count=2")
+        ok, errors = self._ok(text, cpus=2)
+        self.assertFalse(ok, "duplicate AP cpu ids must fail")
+
+    def test_ap_zero_cpu_count_rejected(self):
+        text = self.log.replace("cpu_count=2", "cpu_count=0")
+        ok, errors = self._ok(text, cpus=2)
+        self.assertFalse(ok)
+
+    def test_single_cpu_has_zero_ap_lines(self):
+        ok, errors = self._ok(_sched_wire_log(cpus=1), cpus=1)
+        self.assertTrue(ok, errors)
+        bad = _sched_wire_log(cpus=1).replace(
+            "cpu_count=1",
+            "cpu=3 scheduler_ok=0 nr_running=0 work_ok=1\n"
+            "[sched-evidence] id=aarch64_sched_ap cpu_count=1")
+        ok, errors = self._ok(bad, cpus=1)
+        self.assertFalse(ok, "an AP line at one CPU must fail")
+
+    def test_evidence_after_terminal_rejected(self):
+        text = self.log.replace(
+            "[TEST] PASS aarch64_sched_yield\n",
+            "[TEST] PASS aarch64_sched_yield\n")  # anchor
+        late = ("[sched-evidence] id=aarch64_sched_yield a_yields=10000 "
+                "b_yields=10000 switches=1\n")
+        text = text.replace(
+            "[TEST] BEGIN aarch64_sched_regs\n",
+            late + "[TEST] BEGIN aarch64_sched_regs\n")
+        ok, errors = self._ok(text)
+        self.assertFalse(ok, "an evidence record after its terminal must fail")
+
+
+class SchedulerFaultEvidenceTests(unittest.TestCase):
+    """Phase 5 Task 3: the fault-injection negative evidence parser."""
+
+    def _fault_log(self, case, *, extra_after=b"", switches="0"):
+        pid = "3"
+        reason = asched.FAULT_REASONS[case]
+        lines = [
+            "[smp] topology source=uefi-dtb cpus=2",
+            "[sched] idle-ready cpu=0 scheduler_ok=1 irq=on",
+            "[sched-evidence] id=aarch64_sched_yield a_yields=0 "
+            "b_yields=0 switches=0",  # never reached: no record is emitted
+        ]
+        # The fault fires at the FIRST switch to the victim kthread, so
+        # nothing below the handoff marker appears except the fault pair.
+        lines = lines[:2]
+        lines.append(f"[sched-fault] case={case} phase=pre-switch "
+                     f"target={pid} switches_to_target={switches}")
+        lines.append(f"[aarch64] context reject code=6 reason={reason} "
+                     "sp=0x10000 pc=0x10000 range=0x0..0x10000")
+        text = "\n".join(lines) + "\n"
+        if extra_after:
+            text += extra_after if isinstance(extra_after, str) \
+                else extra_after.decode()
+        return text
+
+    def test_each_fault_accepted(self):
+        for case in asched.SCHED_FAULT_CASES:
+            with self.subTest(case=case):
+                ok, errors = asched.parse_sched_fault(
+                    self._fault_log(case), case=case, cpus=2)
+                self.assertTrue(ok, errors)
+
+    def test_expected_rejection_is_negative_case_pass(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("sp-top"), case="sp-top", cpus=1)
+        self.assertTrue(ok, errors)
+
+    def test_wrong_reason_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("sp-top").replace(
+                asched.FAULT_REASONS["sp-top"], "valid"),
+            case="sp-top", cpus=2)
+        self.assertFalse(ok, "the production fatal reason must match")
+
+    def test_missing_fault_record_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            "UEFI: booting OS01\nnothing here\n", case="pc-low", cpus=2)
+        self.assertFalse(ok, "timeout/no evidence must fail")
+
+    def test_wrong_case_in_record_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("pc-low").replace("case=pc-low", "case=sp-top"),
+            case="pc-low", cpus=2)
+        self.assertFalse(ok)
+
+    def test_nonzero_switch_counter_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("sp-low", switches="2"), case="sp-low", cpus=2)
+        self.assertFalse(ok, "a committed switch to the victim must fail")
+
+    def test_continuation_after_fatal_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("pc-data",
+                            extra_after="[TEST] END suite=kernel-selftest "
+                                        "total=14 passed=14 failed=0 "
+                                        "skipped=0\n"),
+            case="pc-data", cpus=2)
+        self.assertFalse(ok, "records after the expected fatal must fail")
+
+    def test_victim_entry_after_fatal_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("pc-data",
+                            extra_after="[sched-evidence] "
+                                        "id=aarch64_sched_entry entries=1 "
+                                        "arg_ok=1 pre_c_sp_ok=1 "
+                                        "irq_enabled=1 current_ok=1\n"),
+            case="pc-data", cpus=2)
+        self.assertFalse(ok)
+
+    def test_unrelated_exception_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("sp-top").replace(
+                "[aarch64] context reject code=6",
+                "[aarch64] context fatal code=4"),
+            case="sp-top", cpus=2)
+        self.assertFalse(ok, "an unrelated fatal must fail")
+
+    def test_duplicate_fault_record_rejected(self):
+        ok, errors = asched.parse_sched_fault(
+            self._fault_log("sp-top") + self._fault_log("sp-top"),
+            case="sp-top", cpus=2)
+        self.assertFalse(ok)
+
+    def test_duplicate_fatal_rejected(self):
+        log = self._fault_log("sp-top")
+        fatal = [ln for ln in log.splitlines() if "context reject" in ln][0]
+        ok, errors = asched.parse_sched_fault(log + fatal + "\n",
+                                              case="sp-top", cpus=2)
+        self.assertFalse(ok)
+
+
+class SchedMakeContractTests(unittest.TestCase):
+    """Phase 5 Task 1: the MODE=sched build contract, driven through
+    real ``make`` subprocesses with checkable exit codes (never a
+    text-only fixture).  Every invocation is a dry run or a parse-time
+    error — nothing is built."""
+
+    TIMEOUT = 120
+
+    def _make(self, *args, expect_rc=0):
+        proc = subprocess.run(
+            ["make", "PROFILE=aarch64-clang", *args],
+            cwd=str(ROOT), capture_output=True, text=True,
+            timeout=self.TIMEOUT)
+        self.assertEqual(
+            proc.returncode, expect_rc,
+            f"make {' '.join(args)}: rc={proc.returncode}\n"
+            f"stdout:\n{proc.stdout[-2000:]}\nstderr:\n{proc.stderr[-2000:]}")
+        return proc
+
+    def test_mode_sched_conflicts_rejected_at_parse_time(self):
+        cases = (
+            ("AARCH64_SYNC_FAULT_TEST=1", "KERNEL_SELFTEST=1"),
+            ("AARCH64_M1_TEST=sparse", "KERNEL_SELFTEST=1"),
+            ("KERNEL_TEST_FORCE_NO_RNDRRS=1",),
+            ("KERNEL_CANARY_SELFTEST=1",),
+            ("OS01_SYSTEST=1",),
+            ("AARCH64_SMP_TEST_NO_ACK_CPU=1",),
+        )
+        for conflict in cases:
+            with self.subTest(conflict=" ".join(conflict)):
+                self._make("test-aarch64", "MODE=sched", "-n", *conflict,
+                           expect_rc=2)
+
+    def test_mode_sched_without_selector_still_rejects_conflicts(self):
+        self._make("test-aarch64", "MODE=sched", "AARCH64_SYNC_FAULT_TEST=1",
+                   "-n", expect_rc=2)
+
+    def test_invalid_selector_values_rejected(self):
+        for value in ("bogus", "Positive", "sp_top"):
+            with self.subTest(value=value):
+                self._make("test-aarch64", "MODE=sched", "-n",
+                           f"AARCH64_SCHED_TEST={value}", expect_rc=2)
+
+    def test_invalid_sched_case_rejected(self):
+        self._make("test-aarch64", "MODE=sched", "-n", "SCHED_CASE=bogus",
+                   expect_rc=2)
+
+    def test_selector_requires_kernel_selftest_in_direct_build(self):
+        for value in asched.SCHED_FAULT_CASES:
+            with self.subTest(value=value):
+                self._make("aarch64-uefi", "-n",
+                           f"AARCH64_SCHED_TEST={value}", expect_rc=2)
+
+    def test_valid_direct_variant_builds_dry_run(self):
+        self._make("aarch64-uefi", "-n", "KERNEL_SELFTEST=1",
+                   "AARCH64_SCHED_TEST=sp-top")
+        self._make("aarch64-uefi", "-n", "KERNEL_SELFTEST=1",
+                   "AARCH64_SCHED_TEST=positive")
+
+    def test_mode_sched_all_dry_run(self):
+        proc = self._make("test-aarch64", "MODE=sched", "-n")
+        out = proc.stdout
+        for value in ("positive", "sp-top", "sp-low", "pc-low", "pc-data"):
+            self.assertIn(f"AARCH64_SCHED_TEST={value} aarch64-uefi", out)
+            self.assertIn(f"image/sched-fault-{value}/aarch64-uefi.img"
+                          if value != "positive"
+                          else "image/sched/aarch64-uefi.img", out)
+            self.assertIn(f"kernel/sched-fault-{value}/kernel.elf"
+                          if value != "positive"
+                          else "kernel/sched/kernel.elf", out)
+        # The runner consumes explicit paths and never rebuilds.
+        self.assertIn("qemutests/aarch64_scheduler.py", out)
+        self.assertIn("--case all", out)
+        # The five sequential controlled submakes are visible.
+        prep_count = sum(out.count(f"AARCH64_SCHED_TEST={v} aarch64-uefi")
+                         for v in ("positive", "sp-top", "sp-low",
+                                   "pc-low", "pc-data"))
+        self.assertEqual(prep_count, 5)
+
+    def test_mode_sched_single_case_dry_run(self):
+        proc = self._make("test-aarch64", "MODE=sched", "-n",
+                          "SCHED_CASE=positive")
+        self.assertIn("AARCH64_SCHED_TEST=positive aarch64-uefi",
+                      proc.stdout)
+        self.assertNotIn("AARCH64_SCHED_TEST=sp-top", proc.stdout)
+        self.assertIn("--case positive", proc.stdout)
+
+    def test_submake_propagation_visible(self):
+        proc = self._make("test-aarch64", "MODE=sched", "-n",
+                          "SCHED_CASE=sp-low")
+        self.assertIn("AARCH64_SCHED_TEST=sp-low", proc.stdout)
+        self.assertIn("-DAARCH64_SCHED_FAULT_SP_LOW=1", proc.stdout)
+        self.assertIn("kernel/sched-fault-sp-low/kernel.elf", proc.stdout)
+
+    def test_normal_selftest_build_has_no_sched_selector(self):
+        proc = self._make("test-aarch64", "MODE=smp", "-n")
+        self.assertNotIn("AARCH64_SCHED_TEST", proc.stdout)
+        self.assertNotIn("image/sched/", proc.stdout)
 
 
 if __name__ == "__main__":
