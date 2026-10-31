@@ -16,9 +16,11 @@ BUILD_DIR := $(USER_BUILD_DIR)
 # Consumes the immutable generation the root artifact rule
 # (mk/components/user.mk) leased and passed as SYSROOT_GENERATION_DIR — never
 # the $(SYSROOT) symlink.
-SYSROOT_DIR   := $(SYSROOT_GENERATION_DIR)
-TARGET_INCDIR := $(SYSROOT_GENERATION_DIR)/usr/include
-TARGET_LIBDIR_LOCAL := $(SYSROOT_GENERATION_DIR)/usr/lib
+SYSROOT_DIR   := $(if $(SYSROOT_DIR),$(SYSROOT_DIR),$(if $(SYSROOT_GENERATION_DIR),$(SYSROOT_GENERATION_DIR),$(SYSROOT)))
+TARGET_INCDIR := $(SYSROOT_DIR)/usr/include
+TARGET_LIBDIR_LOCAL := $(SYSROOT_DIR)/usr/lib
+TARGET_LIBC   := $(TARGET_LIBDIR_LOCAL)/libc.a
+user_lib_dep   = $(patsubst -l%,$(TARGET_LIBDIR_LOCAL)/lib%.a,$(filter -l%,$(1))) $(filter %.a,$(1))
 
 OBJ_DIR   := $(BUILD_DIR)/obj
 
@@ -96,10 +98,10 @@ $(RUNTIME_PROBE_OBJ): $(OS01_ROOT)/runtime/selftest/$(RUNTIME_PROBE_NAME).c \
                       $(OS01_ROOT)/runtime/selftest/udivti3_vectors.h $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -I$(OS01_ROOT)/runtime/selftest \
-		-MMD -MP -c $< -o $@
+		-MD -MP -c $< -o $@
 
 $(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld \
-                      $(USER_RUNTIME_ARCHIVE)
+                      $(USER_RUNTIME_ARCHIVE) $(TARGET_LIBC)
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) \
 		$(RUNTIME_PROBE_OBJ) $(USER_RUNTIME_ARCHIVE) -lc
@@ -112,18 +114,18 @@ all: $(PROGRAMS) $(RUNTIME_PROBE_ELF)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(CFLAGS) -MD -MP -c $< -o $@
 
 $(OBJ_DIR)/%.o: %.S $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(CFLAGS) -MD -MP -c $< -o $@
 
 # Compile shared sources once with global flags. App flags affect local sources.
 user_objects = $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(basename $(1))))
 USER_OBJECTS := $(call user_objects,$(USER_FLAT_SOURCES)) $(CRT0_OBJ) $(SIGRETURN_OBJ)
 
 define flat_program
-$(BUILD_DIR)/$(1).elf: $(OBJ_DIR)/$(1).o $(COMMON_LINK_DEPS)
+$(BUILD_DIR)/$(1).elf: $(OBJ_DIR)/$(1).o $(COMMON_LINK_DEPS) $(TARGET_LIBC)
 	@mkdir -p $$(dir $$@)
 	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $(OBJ_DIR)/$(1).o -lc
 	$$(OBJ_CPY) --strip-debug $$@
@@ -139,7 +141,7 @@ $$(OBJ_DIR)/$(1)/.app_key: USER_COMPILE_KEY_FORCE
 	@cmp -s $$@.new $$@ || mv -f $$@.new $$@
 $(call user_objects,$(filter $(1)/%,$(USER_APP_$(1)_SOURCES))): override CFLAGS += $(USER_APP_$(1)_CFLAGS)
 $(call user_objects,$(USER_APP_$(1)_SOURCES)): $(1)/app.mk $$(OBJ_DIR)/$(1)/.app_key
-$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk $$(filter %.a,$$(USER_APP_$(1)_LDLIBS)) $$(OBJ_DIR)/$(1)/.app_key
+$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk $$(call user_lib_dep,$$(USER_APP_$(1)_LDLIBS)) $$(OBJ_DIR)/$(1)/.app_key $(TARGET_LIBC)
 	@mkdir -p $$(dir $$@)
 	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) $(USER_APP_$(1)_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $$(USER_APP_$(1)_OBJECTS) $(USER_APP_$(1)_LDLIBS) -lc
 	$$(OBJ_CPY) --strip-debug $$@

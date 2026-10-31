@@ -40,7 +40,7 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	      MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
 	      -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
 	      USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
-	      all SYSROOT_GENERATION_DIR="$(BUILD_DIR)/sysroot" $(OS01_SUBMAKE_ARGS); \
+	      all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS); \
 	    exit 0; \
 	  fi; \
 	  mkdir -p "$(dir $(LOCK_DIR))"; \
@@ -59,27 +59,24 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	  gen=$$(readlink "$(SYSROOT)" 2>/dev/null) || gen=""; \
 	  if [ -z "$$gen" ]; then echo "ERROR: sysroot symlink is missing ($(SYSROOT)) — cannot resolve an immutable generation"; exit 1; fi; \
 	  genid=$${gen#sysroot-generations/}; \
-	  genabs="$(BUILD_DIR)/$$gen"; \
 	  lease="$(LEASES_DIR)/$${genid}.$$$$.user"; \
 	  mkdir -p "$(LEASES_DIR)"; \
 	  mkdir "$$lease"; \
 	  rm -f "$(LOCK_DIR)/owner"; \
 	  rmdir "$(LOCK_DIR)" 2>/dev/null || true; \
 	  trap "rmdir \"$$lease\" 2>/dev/null || true" EXIT; \
-	  prev=""; \
-	  if [ -f "$(USER_BUILD_DIR)/.sysroot-generation" ]; then prev=$$(cat "$(USER_BUILD_DIR)/.sysroot-generation"); fi; \
-	  if [ "$$prev" != "$$genid" ]; then force="-B"; else force=""; fi; \
 	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
 	    -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
 	    USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
-	    all $$force SYSROOT_GENERATION_DIR="$$genabs" $(OS01_SUBMAKE_ARGS); \
-	  if [ -z "$(DRY_RUN)" ]; then printf "%s\n" "$$genid" > "$(USER_BUILD_DIR)/.sysroot-generation"; fi; \
+	    all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS); \
+	  for p in $(USER_PROGRAMS); do \
+	    cmp -s "$(USER_BUILD_DIR)/$$p.elf" "$(USER_ARTIFACT_DIR)/$$p.elf" || cp "$(USER_BUILD_DIR)/$$p.elf" "$(USER_ARTIFACT_DIR)/$$p.elf"; \
+	    test -f "$(USER_ARTIFACT_DIR)/$$p.elf" || { echo "ERROR: missing user artifact $$p.elf"; exit 1; }; \
+	  done; \
+	  cmp -s "$(USER_BUILD_DIR)/user_udivti3_link_probe.elf" "$(USER_RUNTIME_PROBE)" || cp "$(USER_BUILD_DIR)/user_udivti3_link_probe.elf" "$(USER_RUNTIME_PROBE)"; \
+	  test -f "$(USER_RUNTIME_PROBE)" || { echo "ERROR: missing user runtime probe artifact $(USER_RUNTIME_PROBE)"; exit 1; }; \
 	'
-	@for p in $(USER_PROGRAMS); do cmp -s $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf || cp $(USER_BUILD_DIR)/$$p.elf $(USER_ARTIFACT_DIR)/$$p.elf; done
-	@cmp -s $(USER_BUILD_DIR)/user_udivti3_link_probe.elf $(USER_RUNTIME_PROBE) || cp $(USER_BUILD_DIR)/user_udivti3_link_probe.elf $(USER_RUNTIME_PROBE)
-	@for p in $(USER_PROGRAMS); do test -f $(USER_ARTIFACT_DIR)/$$p.elf || { echo "ERROR: missing user artifact $$p.elf"; exit 1; }; done
-	@test -f $(USER_RUNTIME_PROBE) || { echo "ERROR: missing user runtime probe artifact $(USER_RUNTIME_PROBE)"; exit 1; }
 
 # ── BusyBox adapter ───────────────────────────────────────────
 # Never writes thirdpart/busybox-1.36.1/. The manifest records the source

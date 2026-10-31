@@ -321,5 +321,173 @@ class CommandKeyContractTests(unittest.TestCase):
         )
 
 
+class UserContractTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="user-contract-")
+        self.addCleanup(self.tmp.cleanup)
+        self.work_dir = Path(self.tmp.name)
+
+        # Ensure base user programs are built
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "user"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(res.returncode, 0, f"Setup user build failed: {res.stderr}")
+
+    def test_publish_waits_for_compile_and_link_lease(self):
+        """Sysroot publisher must wait for active leases to drain before swapping symlink."""
+        sysroot_link = ROOT / "build" / "x86_64-clang" / "sysroot"
+        leases_dir = ROOT / "build" / "x86_64-clang" / "leases"
+        leases_dir.mkdir(parents=True, exist_ok=True)
+
+        gen_target_before = sysroot_link.readlink()
+        gen_id = gen_target_before.name
+
+        # Hold a simulated active lease
+        lease_path = leases_dir / f"{gen_id}.999999.test_barrier"
+        lease_path.mkdir()
+
+        # Start make sysroot in background with a touched component to trigger publish
+        try:
+            # Touch a staging receipt to induce republish
+            gui_receipt = ROOT / "build" / "x86_64-clang" / "stamps" / "gui-install.stamp.receipt"
+            gui_receipt_old = gui_receipt.read_text() if gui_receipt.exists() else ""
+            gui_receipt.write_text("forced-republish-digest")
+
+            proc = subprocess.Popen(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            # Wait a brief moment; process must still be running because lease is held
+            import time
+            time.sleep(1.0)
+            self.assertIsNone(proc.poll(), "make sysroot did not wait for lease to drain!")
+            self.assertEqual(sysroot_link.readlink(), gen_target_before)
+
+            # Release lease
+            lease_path.rmdir()
+
+            # Now proc should finish successfully
+            stdout, stderr = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, f"make sysroot failed after lease release:\n{stdout}\n{stderr}")
+        finally:
+            if lease_path.exists():
+                lease_path.rmdir()
+            # Restore normal sysroot state
+            subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=60,
+            )
+
+    def test_archive_only_relinks(self):
+        """Updating libc.a must relink user programs without recompiling user object files."""
+        init_o = ROOT / "build" / "x86_64-clang" / "user" / "obj" / "init.o"
+        init_elf = ROOT / "build" / "x86_64-clang" / "user" / "init.elf"
+        libc_a = ROOT / "build" / "x86_64-clang" / "sysroot" / "usr" / "lib" / "libc.a"
+        self.assertTrue(init_o.exists())
+        self.assertTrue(init_elf.exists())
+        self.assertTrue(libc_a.exists())
+
+        init_o_mtime_before = init_o.stat().st_mtime_ns
+        init_elf_mtime_before = init_elf.stat().st_mtime_ns
+
+        # Invalidate/touch libc.a
+        import time
+        time.sleep(0.01)
+        os.utime(libc_a, None)
+
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "user"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0, f"make user failed: {res.stderr}")
+
+        init_elf_mtime_after = init_elf.stat().st_mtime_ns
+        init_o_mtime_after = init_o.stat().st_mtime_ns
+
+        self.assertGreater(init_elf_mtime_after, init_elf_mtime_before, "init.elf was not relinked")
+        self.assertEqual(init_o_mtime_after, init_o_mtime_before, "init.o was recompiled on archive-only update")
+
+    def test_unrelated_generation_does_not_recompile_user(self):
+        """Creating a new sysroot generation for an unrelated library must not recompile unrelated user objects."""
+        init_o = ROOT / "build" / "x86_64-clang" / "user" / "obj" / "init.o"
+        self.assertTrue(init_o.exists())
+        init_o_mtime_before = init_o.stat().st_mtime_ns
+
+        # Induce a new generation via staging receipt invalidation of gui
+        gui_receipt = ROOT / "build" / "x86_64-clang" / "stamps" / "gui-install.stamp.receipt"
+        self.assertTrue(gui_receipt.exists())
+        gui_receipt_old = gui_receipt.read_text()
+        gui_receipt.write_text("forced-gui-generation-advance")
+
+        try:
+            res = subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot", "user"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(res.returncode, 0, f"make failed:\n{res.stdout}\n{res.stderr}")
+            init_o_mtime_after = init_o.stat().st_mtime_ns
+            self.assertEqual(
+                init_o_mtime_after, init_o_mtime_before, "init.o was recompiled despite being unrelated to gui change"
+            )
+        finally:
+            gui_receipt.write_text(gui_receipt_old)
+            subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=60,
+            )
+
+    def test_consumed_header_rebuilds_dependents(self):
+        """Modifying content of a consumed header (<stdlib.h>) must recompile dependent user objects."""
+        init_o = ROOT / "build" / "x86_64-clang" / "user" / "obj" / "init.o"
+        self.assertTrue(init_o.exists())
+        init_o_mtime_before = init_o.stat().st_mtime_ns
+
+        stdlib_h = ROOT / "libc" / "include" / "stdlib.h"
+        self.assertTrue(stdlib_h.exists())
+        orig_content = stdlib_h.read_text()
+
+        try:
+            # Modify header content to change staging digest
+            stdlib_h.write_text(orig_content + "\n/* test incremental rebuild probe */\n")
+
+            res = subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot", "user"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(res.returncode, 0, f"make failed:\n{res.stdout}\n{res.stderr}")
+
+            init_o_mtime_after = init_o.stat().st_mtime_ns
+            self.assertGreater(init_o_mtime_after, init_o_mtime_before, "init.o did not recompile after stdlib.h modified")
+        finally:
+            stdlib_h.write_text(orig_content)
+            subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot", "user"],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=120,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
