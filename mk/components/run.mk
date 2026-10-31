@@ -449,6 +449,26 @@ test-aarch64:
 test-aarch64-m3-probe:
 	$(MAKE) --no-print-directory test-aarch64 MODE=m3-probe
 
+# ── aarch64 boot logo (framebuffer wordmark) ─────────────────
+# Boots the aarch64 image with `-device ramfb` (edk2's RamfbDxe turns it into
+# a GOP framebuffer), lets the kernel draw the OS01 wordmark and asserts the
+# result on a QMP screendump: exact ink/accent pixel counts, the arch caption
+# band, and the no-framebuffer negative case.  Headless: `-display none`.
+.PHONY: test-aarch64-boot-logo
+test-aarch64-boot-logo:
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
+	$(MAKE) --no-print-directory aarch64-uefi
+	python3 qemutests/aarch64_boot_logo.py \
+	  --check all \
+	  --diagnostic-dtb=auto \
+	  --timeout 120 \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-boot-logo/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
 # undefined symbols / INTERP / DYNAMIC, is EM_X86_64, exports _start /
