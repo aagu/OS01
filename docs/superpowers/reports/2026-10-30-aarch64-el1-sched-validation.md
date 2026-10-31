@@ -2,10 +2,11 @@
 
 Feature series: aarch64 EL1 kernel-thread scheduler (P1–P5), spec
 [2026-10-30-aarch64-el1-kthread-scheduler-design.md](../specs/2026-10-30-aarch64-el1-kthread-scheduler-design.md)
-(§9/§10/§11 acceptance). Branch `feature/aarch64-el1-sched`, final HEAD
-`8e78717d47a8f2a5301a4954dce88dee87b348df` (dirty tree: docs only at
-gate time — implementation commits `711c4b19`, `d249b0b3`, `df16f183`,
-`8e78717d` carry all code under test). All commands below ran on
+(§9/§10/§11 acceptance). Branch `feature/aarch64-el1-sched`; the historical acceptance source
+revision was `8e78717d47a8f2a5301a4954dce88dee87b348df` (initial P1–P5
+implementation commits `711c4b19`, `d249b0b3`, `df16f183`, `8e78717d`).
+See the [post-review fix-wave addendum](#post-review-fix-wave-2026-10-31)
+for current source revision and corrected CPU-count evidence. All commands below ran on
 2026-10-31 from the worktree root
 `/home/aagu/OS01/.worktrees/aarch64-el1-sched`; per-step transcripts live
 under `/tmp/p5-matrix/<step>.log` with the harness archives under each
@@ -199,3 +200,73 @@ module count unchanged, list is append-only).
 None. Every §10.3 gate command listed above was executed at the recorded
 HEAD. (Historical note only: P4 had skipped `MODE=m3-probe`/`gic-spi`
 re-runs; both are green here.)
+
+
+## Post-review fix-wave addendum (2026-10-31)
+
+Current reviewed source is commit `a6e7c3212e4be4c49c2d975381559a94d6be99ae`.
+The focused validation gates below were run against the same source contents
+while the worktree still had those changes unstaged/uncommitted at baseline
+`58cdd0638f85bc5f71a74b9b755e6bdd24b520d2`; the subsequent commit contains
+exactly that source/test diff. `git diff --check` passed before commit.
+
+### Review fixes and focused evidence
+
+- F1: the runner now requires the full observation drain with the child still
+  alive and runner-controlled termination. Runner-level fixtures cover natural
+  exit during drain for positive/fault traces and exit codes 0/1, pre-evidence
+  exit, controlled stop, late fatal, and timeout. RED reproduced a false PASS
+  when exit-in-window was paired with a valid trace; GREEN focused harness run:
+  `python3 -m unittest qemutests.test_aarch64_harness.SchedulerRunnerLifecycleTests qemutests.test_aarch64_harness.SchedulerEvidenceParserTests qemutests.test_aarch64_harness.SchedulerFaultEvidenceTests`
+  — 43 tests passed.
+- F2/F3: post-publication notification uses the captured CPU value after unlock;
+  the existing task-pointer wrapper remains for fork/exec. Revalidation rollback
+  releases and nulls acquired FPU state before files/thread/raw allocations.
+  Host RED using the original `58cdd063` kthread implementation reproduced
+  four assertions: poison CPU was read as `0xfe`, destination was incorrect,
+  FPU remained live, and allocation bytes remained. GREEN focused
+  `test-kthread-ctor`: 161/161 passed, including immediate-reap poisoning,
+  exact rollback residue assertions, and successful retry.
+- F4: ARM admission rejects nonzero target CPU and freezes affinity to mask 1;
+  live worker evidence checks that every observed worker has that mask. The
+  direct backend negative case calls real `arch_kthread_prepare()` on a valid
+  unpublished task targeting CPU1; it does not rely on the common constructor's
+  earlier `scheduler_ok` rejection. Old-policy live 2-CPU evidence had
+  `cpu0_only=0`; fixed positive matrix reports `cpu0_only=1`.
+
+### Current gate results
+
+All listed commands completed against the current source. Logs under `/tmp`
+are session-local; durable runner records remain in `build/.../logs/tests/`.
+
+| Gate | Result / actual CPUs | Evidence |
+|---|---:|---|
+| `make PROFILE=x86_64-clang test-host` | PASS, 152 host binaries | run completed in this session |
+| `make PROFILE=x86_64-clang test-static kernel.bin` | PASS | run completed in this session |
+| `make PROFILE=aarch64-clang KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=positive aarch64-uefi` | PASS, compile | run completed in this session |
+| `make PROFILE=aarch64-clang test-aarch64 MODE=sched` | PASS, 16/16 boots; positive 1/2/4/8, four fault variants at 1/2; 7/7 symbol audits | `/tmp/os01-p5-fix-sched.log` |
+| ordinary aarch64 idle smoke | PASS at 1/2/4/8 CPUs | `/tmp/os01-p5-fix-idle.log`; `build/aarch64-clang/logs/tests/aarch64-idle-review/cpus-{1,2,4,8}/serial.log` |
+| `make PROFILE=aarch64-clang test-aarch64-audit` | PASS | `/tmp/os01-p5-fix-audit.log` |
+| `make PROFILE=x86_64-clang test-harness` | PASS, exit 0 | `/tmp/os01-p5-fix-harness.log` |
+| `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=1 test-kernel-selftest` | known baseline: 39/41, only `fd_refcount` and `x86_intr` fail; `sched_boot_probe` PASS | `/tmp/os01-p5-fix-kernel-selftest-cpu1.log`; run `20261031T093932Z-acb855a8bc444104b78ea3618cf46435` |
+| same target with `KERNEL_SELFTEST_SMP=2` | PASS, 41/41; `sched_boot_probe` PASS | `/tmp/os01-p5-fix-kernel-selftest-cpu2.log`; run `20261031T093939Z-3f535efd9a0a4b44ab2d4a92864e5c6e` |
+| same target with `KERNEL_SELFTEST_SMP=8` | PASS, 41/41; `sched_boot_probe` PASS | `/tmp/os01-p5-fix-kernel-selftest-cpu8.log`; run `20261031T093947Z-b04b1bec5c6f4b9cbac45fe039eb9c48` |
+| `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall` | PASS, 99/99, actual 1 CPU | `/tmp/os01-p5-fix-syscall-smp1.log`; run `20261031T093818Z-c7fb69b901124c56ab38ceacc60d9e45` |
+| `QEMU_SMP=2 make PROFILE=x86_64-clang SMP=2 test-qemu SUITE=phase-0` | PASS, actual 2 CPUs | `/tmp/os01-p5-fix-phase0-qemusmp2.log`; run `20261031T094003Z-e5355482e9934092ae7f9569baa1a1b1` |
+| `QEMU_SMP=2 make PROFILE=x86_64-clang SMP=2 OS01_SYSTEST=1 test-syscall` | PASS, 99/99, actual 2 CPUs | `/tmp/os01-p5-fix-syscall-qemusmp2.log`; run `20261031T094010Z-f42a1c333f9e411d9e3e43043d4173fd` |
+
+**CPU-count correction to the initial P5 table above:** this repository's
+phase-0/systest runner reads `QEMU_SMP`, not make's `SMP` variable. Therefore
+initial commands that specified only `SMP=2` actually ran with one CPU; the
+historical matrix rows remain preserved but their claimed 2-CPU counts are
+not valid. Fresh two-CPU reruns above explicitly set `QEMU_SMP=2`, and their
+runner `result.json` records `cpu_count: 2`. The initial `SMP=1` phase-0 and
+systest results are valid 1-CPU runs. Likewise, kernel-selftest CPU count is
+controlled by `KERNEL_SELFTEST_SMP`; the three initial `SMP=1/2/8` invocations
+actually used its default 4 CPUs and are only redundant SMP4 evidence. The
+corrected 1/2/8 runs above use the documented variable and runner records.
+
+The UP failures remain separate baseline failures, not fixed or suppressed.
+This run independently confirms the same exact failure set and passing
+`sched_boot_probe`; SMP 2/8 are fully green. Do not interpret the earlier
+“23/24” acceptance summary as a fully green matrix.
