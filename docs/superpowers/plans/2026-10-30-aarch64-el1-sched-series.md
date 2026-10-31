@@ -10,7 +10,9 @@ See the [final review](../reports/2026-10-31-aarch64-el1-sched-final-review.md)
 and [validation report](../reports/2026-10-30-aarch64-el1-sched-validation.md).
 The x86 UP kernel-selftest retains its two documented pre-existing
 failures; CPU2/8 pass. The phase plans below remain the implementation
-record. No merge or push has been performed.
+record. Local master integration and its regression results are recorded
+in the [merge validation](../reports/2026-10-31-aarch64-el1-sched-merge-validation.md).
+No remote was updated.
 
 **Goal:** Land the aarch64 EL1 kernel-thread scheduler as five independently reviewable, independently testable phases — from arch-context extraction through to strict QEMU acceptance — without ever asking a reviewer to hold the whole feature in their head.
 

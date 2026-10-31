@@ -96,6 +96,7 @@ class TestSuiteCatalogContract(unittest.TestCase):
 
         expected_aarch64 = {
             "aarch64-smp",
+            "aarch64-sched",
             "aarch64-no-ack",
             "aarch64-gic-spi",
             "aarch64-sync-fault",

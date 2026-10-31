@@ -3782,6 +3782,79 @@
         "action": "unique",
         "reason": "Primary E2E integration verification for In-kernel boot self-test suite"
       }
+    },
+    {
+      "id": "sched.switch.reclaim_ownership",
+      "component": "sched",
+      "behavior": "switch completion and reclamation",
+      "trigger": "host runner invokes test_switch_complete.elf",
+      "assertions": [
+        "self-switch neither finishes nor frees the current task",
+        "reclamation ownership is captured before the previous task may disappear"
+      ],
+      "failure_modes": [
+        "freeing the active stack",
+        "reading task fields after finish publishes on_cpu=0"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_switch_complete.c",
+        "selector": "test_switch_complete",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Exercises the real switch tail with poisoned previous-task fields."
+      }
+    },
+    {
+      "id": "sched.kthread.constructor_rollback",
+      "component": "sched",
+      "behavior": "kernel-thread construction and publication",
+      "trigger": "host runner invokes test_kthread_ctor.elf",
+      "assertions": [
+        "allocation or placement failure leaves no files/FPU/list/runqueue residue and permits retry",
+        "publication captures PID and destination CPU before the child can self-reap"
+      ],
+      "failure_modes": [
+        "resource leak after placement revalidation",
+        "post-publication task dereference or invalid CPU admission"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_kthread_ctor.c",
+        "selector": "test_kthread_ctor",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Injects constructor allocation and placement failures against the real common constructor."
+      }
+    },
+    {
+      "id": "sched.context.x86_layout",
+      "component": "sched",
+      "behavior": "architecture context ABI layout",
+      "trigger": "host runner invokes test_sched_layout_offsets.elf",
+      "assertions": [
+        "real x86 thread context offsets and size match the recorded assembly ABI"
+      ],
+      "failure_modes": [
+        "context field drift corrupts a saved or restored register"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_sched_layout_offsets.c",
+        "selector": "test_sched_layout_offsets",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Pins recorded x86 offsets independently of the production static assertions."
+      }
     }
   ]
 }

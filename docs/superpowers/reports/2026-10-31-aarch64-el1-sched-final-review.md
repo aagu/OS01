@@ -71,3 +71,10 @@ is deferred by this approval.
 
 The feature branch and worktree are preserved for integration. The
 master checkout was not changed; no merge or push was performed.
+
+## Local integration follow-up
+
+The approved implementation was integrated with local master
+`1612dd23` in merge commit `fa7d51ac`. See [merge validation](2026-10-31-aarch64-el1-sched-merge-validation.md)
+for conflict resolutions, fresh two-architecture regression results, and
+the test catalog corrections required by the newer build infrastructure.

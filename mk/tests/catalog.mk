@@ -28,6 +28,7 @@ aarch64-m1-sparse	aarch64-clang	uefi	m1-sparse	2	512	90	isolated	shared	nightly	
 aarch64-m1-arena-exhaust	aarch64-clang	uefi	m1-arena-exhaust	2	512	90	isolated	shared	nightly	test-aarch64 MODE=m1-arena-exhaust	-	-
 aarch64-m1-table-exhaust	aarch64-clang	uefi	m1-table-exhaust	2	512	90	isolated	shared	nightly	test-aarch64 MODE=m1-table-exhaust	-	-
 aarch64-m1-ap-bad-root	aarch64-clang	uefi	m1-ap-bad-root	2	512	90	isolated	shared	nightly	test-aarch64 MODE=m1-ap-bad-root	-	-
+aarch64-sched	aarch64-clang	uefi	sched	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched	-	-
 endef
 
 export TEST_SUITE_CATALOG_DATA

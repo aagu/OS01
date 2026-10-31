@@ -101,8 +101,10 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertIn("test_runtime_udivti3", exit_status_ids)
         self.assertIn("test_page_table_runner", exit_status_ids)
 
-        # Full set check (all 150 binaries)
-        self.assertEqual(len(ids), 150, f"Expected 150 unique test binaries, got {len(ids)}")
+        # Full set check: 150 existing binaries plus three scheduler tests.
+        self.assertEqual(len(ids), 153, f"Expected 153 unique test binaries, got {len(ids)}")
+        self.assertTrue({"test_switch_complete", "test_kthread_ctor",
+                         "test_sched_layout_offsets"}.issubset(protocol_ids))
 
         # Stable sorted order
         sorted_ids = sorted(ids)
