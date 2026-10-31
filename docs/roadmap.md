@@ -164,10 +164,12 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 **2026-10-24 清理**：本段原先列着若干已闭环项，现已移出并归档至 `docs/changelog.md`——aarch64 并发 replace phantom `-ENOENT`（`80eed2e9`）、hosttests `__test_stats` 复位 bug（`2d594ce0` + CI 接线 `339ffe26`）、内核用户态异常退出状态未编码为信号终止（`3d56e1d0`）、`test_display_owner` 的 libgfx 句柄 fd 耦合（评审决定保持现状，备案归档）、monitor 计划遗留 ⑤ `monitor_term_enter` 的 `fflush`（`9042bd20`）与 ⑭ monitor 帧被诊断输出撕裂（`c6e1c340`）。原编号保留在归档条目与下方 monitor 子项里，便于交叉引用。
 
+**2026-10-31 局部闭环**：dispatch 第一期 host 补强中的 `test_brk_pages.c` 源码扫描缺锚点保护已完成；缺文件/缺锚点现在明确 FAIL 并完成协议，回归覆盖与验证记录见 [`docs/changelog.md` 2026-10-31 条目](changelog.md#2026-10-31)。其余子项继续挂起。
+
 当前挂起：
 
 - **中断/异常 dispatch 第一期遗留（2026-10-24；主体与最终修复已评审，原 m3-probe 验收失败已闭环）**：
-  - **host 测试补强（非阻断）**：decoder 表行名用于失败诊断；增加 x86 CPL0 + U/S=1 仍判 KERNEL、ARM OTHER EC 的无效 FAR 断言；ARM backend 有效 FAR 用例补齐地址/有效位；dispatcher 的 x86 host 现场假设与 `memcmp(pt_regs_t)` 布局假设显式化，注明 longjmp 用例无法观察跳转后的清理；x86 backend 删除 reset 后才断言零计数的空检查；`test_brk_pages.c` 源码扫描缺锚点时应明确 FAIL，避免 NULL 解引用；ARM backend RED 证据可补有意破坏断言的 mutation。
+  - **host 测试补强（非阻断）**：decoder 表行名用于失败诊断；增加 x86 CPL0 + U/S=1 仍判 KERNEL、ARM OTHER EC 的无效 FAR 断言；ARM backend 有效 FAR 用例补齐地址/有效位；dispatcher 的 x86 host 现场假设与 `memcmp(pt_regs_t)` 布局假设显式化，注明 longjmp 用例无法观察跳转后的清理；x86 backend 删除 reset 后才断言零计数的空检查；ARM backend RED 证据可补有意破坏断言的 mutation。
   - **调用链审计 fixture 补强（非阻断）**：`qemutests/test_intr_dispatch_audit.py` 的 movabs/leaq 无法解析目标用例应分别钉住对应诊断，避免只匹配错误目标也会出现的函数名；梳理 leaq 专属错误分支不可达、重复边诊断，修正 movabs docstring 中 decoder call 与 dispatcher call 地址的混淆，并整理方法间空行。
   - **维护性收尾（非阻断）**：x86 四个向量常量在 decoder/adapter/backend 三处重复；sync/IRQ backend 的 canary 属性不对称可说明；ARM 私有头统一 `pt_regs_t *` 写法；`test_uaccess.c` 分配注释应与实际 order-1（8 KiB）一致。`hosttests/Makefile` 的 “EVERY production header” 注释应限定为内核头与 ARM shim：libc/framework 的既有手写依赖缺口尚未覆盖，后续单独治理。
   - **已裁定保留，非待修缺陷**：ARM 非 EL1h frame 仍保留真实入口 slot `0x200`、由 origin 表达不匹配；decoder 先编入镜像再接线是已结束的中间阶段。bad-event 声明属性、intr 内核头依赖、GIC 旧注释和验证报告归档表述均已在 `6f479bd6` 修复，不再列为待办。其余异常/IRQ/EL0 等后续迁移范围见上方「中断/异常 dispatch 统一」行。

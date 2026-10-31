@@ -1,9 +1,13 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-28）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-31）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-10-31
+
+- fix(hosttests): **Parked：brk 源码扫描缺锚点保护闭环**：`hosttests/cases/test_brk_pages.c` 的断言只累计失败，原先缺少源码文件或扫描锚点时仍继续调用 `strstr`/指针运算，导致宿主 SIGSEGV。四个扫描用例现在记录 FAIL 后跳到统一释放路径，保留其余用例与最终 protocol-v1 END；有界扫描先按剩余长度裁剪再使用。新增 `qemutests/test_brk_source_scan.py`，在临时目录编译实际扫描函数，覆盖正常源码、两个缺文件场景与八种缺锚点场景，并接入 `test-harness`。修复前十个负例均 SIGSEGV，修复后均退出 1 且有 FAIL/END；正常源码通过。验证：聚焦 3 项 unittest PASS，`make PROFILE=x86_64-clang test-host HOST_TEST_JOBS=4` PASS。只闭环该子项，dispatch 其他 host 补强仍留在 roadmap。
 
 ## 2026-10-28
 

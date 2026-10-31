@@ -669,9 +669,9 @@ static int source_contains_in_case(char *haystack, size_t haystack_len,
 {
     char *p = strstr(haystack, case_label);
     if (!p) return 0;
-    char *scan_limit = p + TRAP_C_BUDGET;
-    if (scan_limit > haystack + haystack_len) scan_limit = haystack + haystack_len;
-    return source_contains(p, (size_t)(scan_limit - p), needle);
+    size_t span = haystack_len - (size_t)(p - haystack);
+    if (span > TRAP_C_BUDGET) span = TRAP_C_BUDGET;
+    return source_contains(p, span, needle);
 }
 
 /* Bounded forward search: first occurrence of `needle` at or after
@@ -707,13 +707,16 @@ static void test_sys_brk_calls_mm_set_brk(void)
     size_t len;
     char *src = slurp_file(kernel_source_path("kernel/syscall/sys_mm.c"), &len);
     assert_not_null(src);
+    if (!src) goto out;
 
     /* Bound the case body by the next case label so the checks cannot
      * be satisfied by code elsewhere in the dispatcher. */
     char *brk_case = strstr(src, "case SYS_brk: {");
     assert_not_null(brk_case);
+    if (!brk_case) goto out;
     char *brk_end = strstr(brk_case, "case SYS_mmap");
     assert_not_null(brk_end);
+    if (!brk_end) goto out;
     size_t body_len = (size_t)(brk_end - brk_case);
 
     /* The SYS_brk case body must call mm_set_brk(mm, addr, &result). */
@@ -730,6 +733,7 @@ static void test_sys_brk_calls_mm_set_brk(void)
     /* Must include <memory/vma.h> so the prototype is visible. */
     assert_true(source_contains(src, len, "#include <memory/vma.h>"));
 
+out:
     free(src);
 }
 
@@ -740,6 +744,7 @@ static void test_sys_brk_returns_result_on_success(void)
     size_t len;
     char *src = slurp_file(kernel_source_path("kernel/syscall/sys_mm.c"), &len);
     assert_not_null(src);
+    if (!src) goto out;
 
     /* SYS_brk must store the result value (not raw end_brk) so
      * that the mm_set_brk contract — "on failure *result unchanged" —
@@ -751,6 +756,7 @@ static void test_sys_brk_returns_result_on_success(void)
         "syscall_result = result;");
     assert_true(has_pattern);
 
+out:
     free(src);
 }
 
@@ -761,6 +767,7 @@ static void test_heap_fault_does_not_demand_map(void)
     size_t len;
     char *src = slurp_file(kernel_source_path("kernel/arch/x86_64/intr/trap.c"), &len);
     assert_not_null(src);
+    if (!src) goto out;
 
     /* Locate the P=0 demand-allocation block inside the #PF business
      * handler (intr-dispatch phase 1 moved the original do_page_fault
@@ -768,17 +775,21 @@ static void test_heap_fault_does_not_demand_map(void)
      * a thin entry that builds the event and dispatches). */
     char *fn = strstr(src, "void x86_handle_page_fault(pt_regs_t *");
     assert_not_null(fn);
+    if (!fn) goto out;
     char *demand = strstr(fn, "if (!(error_code & 0x01)) {");
     assert_not_null(demand);
+    if (!demand) goto out;
 
     size_t tail = (size_t)(src + len - demand);
     char *first_map = find_within(demand, tail, "alloc_4k_page");
     assert_not_null(first_map);   /* the demand block does map pages */
+    if (!first_map) goto out;
 
     /* Contract 1: an explicit VMA_HEAP guard sits between the start of
      * the demand block and the first demand-mapping attempt. */
     char *guard = find_within(demand, (size_t)(first_map - demand), "VMA_HEAP");
     assert_not_null(guard);
+    if (!guard) goto out;
 
     /* Contract 2: the guard is ACTIVE code — the in-flight regression
      * was `#if 0`-disabling this exact block, whose text still
@@ -791,9 +802,12 @@ static void test_heap_fault_does_not_demand_map(void)
     char *kill = find_within(guard, (size_t)(first_map - guard),
                              "kill_current_user_task");
     assert_not_null(kill);
+    if (!kill) goto out;
     char *ret = find_within(kill, (size_t)(first_map - kill), "return");
     assert_not_null(ret);
+    if (!ret) goto out;
 
+out:
     free(src);
 }
 
@@ -804,6 +818,7 @@ static void test_heap_fault_resolves_cow_for_committed_range(void)
     size_t len;
     char *src = slurp_file(kernel_source_path("kernel/arch/x86_64/intr/trap.c"), &len);
     assert_not_null(src);
+    if (!src) goto out;
 
     /* The COW resolution path (PAGE_COW check) must still be
      * present — heap VMA faults on an ALREADY-MAPPED COW leaf
@@ -811,9 +826,9 @@ static void test_heap_fault_resolves_cow_for_committed_range(void)
      * x86_handle_page_fault since intr-dispatch phase 1. */
     char *fn = strstr(src, "void x86_handle_page_fault(pt_regs_t *");
     assert_not_null(fn);
-    char *fn_end = fn + 16 * 1024;
-    if (fn_end > src + len) fn_end = src + len;
-    size_t span = (size_t)(fn_end - fn);
+    if (!fn) goto out;
+    size_t span = len - (size_t)(fn - src);
+    if (span > 16 * 1024) span = 16 * 1024;
 
     int has_cow_branch = 0;
     for (size_t i = 0; i + strlen("PAGE_COW") <= span; i++) {
@@ -824,6 +839,7 @@ static void test_heap_fault_resolves_cow_for_committed_range(void)
     }
     assert_true(has_cow_branch);
 
+out:
     free(src);
 }
 
