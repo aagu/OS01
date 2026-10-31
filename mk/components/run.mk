@@ -454,6 +454,11 @@ test-aarch64-m3-probe:
 # a GOP framebuffer), lets the kernel draw the OS01 wordmark and asserts the
 # result on a QMP screendump: exact ink/accent pixel counts, the arch caption
 # band, and the no-framebuffer negative case.  Headless: `-display none`.
+#
+# NO --log-dir: the suite archives through RunArchive whenever --build-dir
+# is given, so a --log-dir next to it would be inert.  The evidence (the
+# screendump, the serial log and result.json) lands in
+# $(BUILD_DIR)/logs/tests/aarch64-boot-logo-<check>/<UTC>-<uuid>/.
 .PHONY: test-aarch64-boot-logo
 test-aarch64-boot-logo:
 	$(call require_aarch64_uefi)
@@ -466,8 +471,7 @@ test-aarch64-boot-logo:
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(BUILD_DIR)/logs/aarch64-boot-logo"
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)"
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no

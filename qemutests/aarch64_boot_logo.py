@@ -11,10 +11,15 @@ fb-visible : the framebuffer is observable at all — the existing
               "[fb] aarch64 color_printk active" banner is on screen.
 logo       : the OS01 wordmark is drawn with the EXACT expected pixel
               counts (the glyph bitmaps are deterministic), the arch
-              caption band carries muted pixels, and the ink pixels stay
-              inside the two ink glyph cells.
+              caption paints the EXACT number of pixels its glyphs
+              imply, and the ink pixels stay inside the two ink glyph
+              cells.
 no-fb      : without ramfb the kernel skips the logo instead of crashing,
               and still reaches its idle loop.
+
+Every expected pixel count is DERIVED from the repo at test time — the
+wordmark bitmaps from kernel/driver/logo.c, the caption glyphs from
+kernel/driver/font.psf — so a changed or misspelled caption cannot pass.
 
 Exit codes: 0 = PASS, 1 = FAIL, 2 = configuration/environment ERROR.
 
@@ -29,13 +34,16 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -63,9 +71,11 @@ LOGO_ACCENT = (0x3B, 0xD6, 0xC6)    # 0x003bd6c6
 LOGO_MUTED = (0x68, 0x78, 0x86)     # 0x00687886
 BANNER_BLUE = (0x00, 0x00, 0xFF)    # color_printk(WHITE, BLUE, ...) background
 
-# Set bits per glyph row of the wordmark bitmaps in kernel/driver/logo.c:
-# O, S, 0, 1.  The first two are ink, the last two accent.
-GLYPH_BITS = (20, 17, 23, 10)
+# The wordmark is drawn from the driver's OWN 5x7 bitmaps in
+# kernel/driver/logo.c — NOT from the PSF2 font ("drawn as solid geometry,
+# without font assets").  The per-glyph set-bit counts are parsed from
+# that source at test time (see ``logo_glyph_bits``), so the expected ink
+# and accent pixel counts cannot drift away from the drawing.
 INK_GLYPHS = 2
 ACCENT_GLYPHS = 2
 
@@ -77,17 +87,143 @@ FONT_W, FONT_H = 8, 16              # PSF2 metrics of kernel/driver/font.psf
 LOGO_LABEL = "aarch64  /  KERNEL"
 LABEL_LEN = len(LOGO_LABEL)
 
+# The repo files the expectations are derived from.
+FONT_PATH = _ROOT / "kernel" / "driver" / "font.psf"
+LOGO_SOURCE_PATH = _ROOT / "kernel" / "driver" / "logo.c"
+
 LOGO_DRAWN_MARKER = "[logo] boot logo drawn"
 LOGO_SKIPPED_MARKER = "[logo] skipped: no framebuffer"
 FB_READY_MARKER = "[fb] frame buffer remap succeed"
 FB_ABSENT_MARKER = "[fb] no framebuffer in handoff"
 IDLE_MARKER = "[sched] idle-ready"
 
-# Bound of the optional SECONDARY wait (see ``_await_marker``): after the
-# primary marker, the kernel may need a moment more before it draws the
-# wordmark.  The wait is bounded, and a missing marker stays a checker
-# failure — never a timeout.
+# Bound of the optional SECONDARY wait (see ``_await_marker``).  The kernel
+# prints the logo marker BEFORE the [fb] banner marker
+# (kernel/arch/aarch64/boot/main.c:389-399), so the logo marker is already
+# buffered when the primary wait returns: this wait is a no-op today and
+# only guards against a future reordering of the two markers.  The wait is
+# bounded, and a missing marker stays a checker failure — never a timeout.
 SECONDARY_WAIT_BOUND_S = 5.0
+
+
+class Psf2Font:
+    """The PSF2 font the kernel draws captions with (kernel/driver/font.psf).
+
+    The layout mirrors the kernel's own ``psf2_t``
+    (kernel/include/driver/font.h): eight little-endian u32 header fields,
+    then the glyph table.  The kernel renders one glyph as ``height`` bytes
+    starting at ``headersize + index * bytesperglyph`` and tests the top
+    ``width`` bits of every byte, so the number of pixels a character cell
+    paints is the popcount of those bytes.
+
+    The magic is deliberately NOT checked: this repo stores the PSF2 magic
+    big-endian (0x864ab572), so a "PSF2" prefix test would reject the real
+    file.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        if len(data) < 32:
+            raise RuntimeError(
+                f"font.psf is shorter than its 32-byte header ({len(data)} "
+                "bytes)")
+        (self.magic, self.version, self.headersize, self.flags,
+         self.numglyph, self.bytesperglyph, self.height,
+         self.width) = struct.unpack_from("<8I", data, 0)
+        table_size = self.numglyph * self.bytesperglyph
+        table = data[self.headersize:self.headersize + table_size]
+        if len(table) != table_size:
+            raise RuntimeError(
+                f"font.psf glyph table is truncated: expected {table_size} "
+                f"bytes, got {len(table)}")
+        self._table = table
+        # The kernel tests the top ``width`` bits of every row byte.
+        self._mask = 0xFF if self.width >= 8 else (0xFF << (8 - self.width)) & 0xFF
+
+    def glyph_bytes(self, index: int) -> bytes:
+        """The raw bytes of one glyph entry."""
+        start = index * self.bytesperglyph
+        return self._table[start:start + self.bytesperglyph]
+
+    def glyph_index(self, char: str) -> int:
+        """The glyph the kernel picks for ``char``.
+
+        putchar_at_snap() indexes the table with the character code itself
+        (0 < code < numglyph) and falls back to glyph 0.
+        """
+        code = ord(char)
+        return code if 0 < code < self.numglyph else 0
+
+    def glyph_pixels(self, char: str) -> int:
+        """The pixels one character cell of ``char`` paints."""
+        entry = self.glyph_bytes(self.glyph_index(char))[:self.height]
+        return sum(bin(byte & self._mask).count("1") for byte in entry)
+
+    def caption_pixels(self, label: str) -> int:
+        """The pixels the whole caption ``label`` paints."""
+        return sum(self.glyph_pixels(char) for char in label)
+
+
+@lru_cache(maxsize=1)
+def load_font() -> Psf2Font:
+    """The kernel's caption font, parsed from the repo (never hard-coded)."""
+    try:
+        data = FONT_PATH.read_bytes()
+    except OSError as error:
+        raise RuntimeError(f"cannot read {FONT_PATH}: {error}") from error
+    return Psf2Font(data)
+
+
+def _logo_define(source: str, name: str) -> int:
+    """The value of a ``#define`` in kernel/driver/logo.c."""
+    match = re.search(rf"#define\s+{name}\s+(\d+)\b", source)
+    if match is None:
+        raise RuntimeError(f"{name} is not defined in kernel/driver/logo.c")
+    return int(match.group(1))
+
+
+@lru_cache(maxsize=1)
+def logo_glyph_bits() -> tuple[int, ...]:
+    """The set-bit count of every wordmark glyph, parsed from the driver.
+
+    The wordmark is drawn from the driver's own 5x7 bitmaps (NOT from the
+    PSF2 font), so the expected ink/accent pixel counts are derived from
+    kernel/driver/logo.c instead of being hard-coded in this suite.
+    """
+    try:
+        source = LOGO_SOURCE_PATH.read_text()
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot read {LOGO_SOURCE_PATH}: {error}") from error
+
+    glyphs = _logo_define(source, "LOGO_GLYPHS")
+    rows = _logo_define(source, "GLYPH_ROWS")
+    cols = _logo_define(source, "GLYPH_COLS")
+
+    match = re.search(
+        r"static\s+const\s+unsigned\s+char\s+glyphs\s*\[[^\]]*\]\s*"
+        r"\[[^\]]*\]\s*=\s*\{(.*?)\n\};", source, re.S)
+    if match is None:
+        raise RuntimeError(
+            "the glyphs[] table is not found in kernel/driver/logo.c")
+
+    groups = re.findall(r"\{([^{}]*)\}", match.group(1))
+    if len(groups) != glyphs:
+        raise RuntimeError(
+            f"expected {glyphs} glyph bitmaps in kernel/driver/logo.c, "
+            f"found {len(groups)}")
+
+    # The kernel draws bits GLYPH_COLS-1 .. 0 of every row byte.
+    mask = (1 << cols) - 1
+    counts = []
+    for group in groups:
+        values = re.findall(r"0x([0-9a-fA-F]+)", group)
+        if len(values) != rows:
+            raise RuntimeError(
+                f"expected {rows} rows per glyph bitmap in "
+                f"kernel/driver/logo.c, found {len(values)}")
+        counts.append(
+            sum(bin(int(value, 16) & mask).count("1") for value in values))
+    return tuple(counts)
 
 
 def logo_scale(xres: int, yres: int) -> int:
@@ -108,8 +244,9 @@ def logo_geometry(xres: int, yres: int) -> dict:
     line_y = top + 7 * scale + 14
     label_row = (line_y + 12 + FONT_H - 1) // FONT_H
     label_col = left // FONT_W
-    ink_bits = sum(GLYPH_BITS[:INK_GLYPHS])
-    accent_bits = sum(GLYPH_BITS[INK_GLYPHS:INK_GLYPHS + ACCENT_GLYPHS])
+    glyph_bits = logo_glyph_bits()
+    ink_bits = sum(glyph_bits[:INK_GLYPHS])
+    accent_bits = sum(glyph_bits[INK_GLYPHS:INK_GLYPHS + ACCENT_GLYPHS])
     return {
         "scale": scale,
         "left": left,
@@ -129,6 +266,12 @@ def logo_geometry(xres: int, yres: int) -> dict:
         "ink_px": ink_bits * scale * scale,
         "accent_glyph_px": accent_bits * scale * scale,
         "accent_underline_px": 3 * scale * 2,
+        # logo_draw() leaves the console cursor two character rows BELOW the
+        # caption (Pos.YPosition = label_row + 2), so the [fb] banner that
+        # follows lands on that row — the blue banner band.
+        "banner_row": label_row + 2,
+        "banner_y0": (label_row + 2) * FONT_H,
+        "banner_y1": (label_row + 3) * FONT_H,
     }
 
 
@@ -332,17 +475,22 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
     as a timeout with no evidence.
 
     ``secondary_marker`` (the logo check only) is a BOUNDED extra wait for
-    a marker the kernel may print a moment after the primary one, so the
-    screendump cannot race the draw.  If it does not arrive in time the
-    capture continues and the checker reports the missing marker as a failed
-    assertion — never as a timeout.
+    a marker the kernel may print after the primary one, so the screendump
+    cannot race the draw.  Today it is a no-op: the kernel prints the logo
+    marker BEFORE the [fb] banner marker the primary wait targets, so the
+    marker is already buffered when the primary wait returns; the wait
+    only guards against a future reordering of the two markers.  If the
+    marker does not arrive in time the capture continues and the checker
+    reports the missing marker as a failed assertion — never as a timeout.
 
     Every preparation or launch failure (no QEMU, DTB generation failed,
     QMP refused) is reported as an ENVIRONMENT error: the caller archives it
     as ERROR and exits 2 — never as a FAIL.  A guest that never reaches the
     marker is NOT an environment error: ``wait_for()``'s timeout is a FAIL
     (exit 1), reported by main() together with the serial log captured
-    before the deadline.
+    before the deadline.  A guest that DIED is also a FAIL (exit 1): the
+    QMP socket of a dead QEMU is gone, and connecting to it would spin and
+    then be mis-classified as an environment error.
     """
     result = {"text": "", "shot": None, "width": 0, "height": 0,
               "pixels": b"", "timed_out": False, "error": None,
@@ -393,25 +541,36 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
             pass
         else:
             if secondary_marker:
-                # BOUNDED secondary wait: the kernel may draw the wordmark a
-                # moment after the framebuffer banner.  Waiting a bounded
-                # while keeps the screendump from racing the draw (which
-                # would look like a kernel bug).  If the marker does not
-                # arrive we CONTINUE: the checker reports the missing marker
-                # as a failed assertion, never a timeout.
+                # BOUNDED secondary wait.  Today this is a NO-OP: the
+                # kernel prints the logo marker BEFORE the [fb] banner
+                # marker, so the primary wait has already buffered it.
+                # The wait only guards against a future reordering of the
+                # two markers.  If the marker does not arrive we
+                # CONTINUE: the checker reports the missing marker as a
+                # failed assertion, never a timeout.
                 _await_marker(session, secondary_marker,
                               SECONDARY_WAIT_BOUND_S)
             session.observe(2)
             result["text"] = session.text
             if ramfb and qmp_sock is not None:
-                qmp = Qmp(qmp_sock)
-                try:
-                    qmp.connect()
-                    result["shot"] = shot_path
-                    (result["width"], result["height"], result["pixels"]) = parse_ppm(
-                        qmp.screendump(shot_path))
-                finally:
-                    qmp.close()
+                if session.returncode is not None:
+                    # The guest is GONE (a panic under -no-reboot kills
+                    # QEMU): its QMP socket is gone too.  Connecting would
+                    # spin for the full 20 s and then be mis-classified as
+                    # an ENVIRONMENT error (exit 2); a dead guest is a
+                    # FAIL (exit 1).
+                    result["error"] = (
+                        f"the guest exited (rc={session.returncode}) before "
+                        "the screendump")
+                else:
+                    qmp = Qmp(qmp_sock)
+                    try:
+                        qmp.connect()
+                        result["shot"] = shot_path
+                        (result["width"], result["height"], result["pixels"]) = parse_ppm(
+                            qmp.screendump(shot_path))
+                    finally:
+                        qmp.close()
     except Exception as error:  # noqa: BLE001 — an environment failure
         result["error"] = f"{type(error).__name__}: {error}"
         result["environment_error"] = True
@@ -434,12 +593,21 @@ def check_fb_visible(capture: dict) -> list[str]:
     if capture["width"] == 0:
         failures.append("no screendump captured")
         return failures
-    blue = count_rgb(capture["pixels"], capture["width"], capture["height"],
-                     BANNER_BLUE)
+    width, height = capture["width"], capture["height"]
+    geo = logo_geometry(width, height)
+    # The blue background is counted in the BANNER ROW BAND only: the
+    # banner is printed by color_printk on the row the logo left the
+    # cursor on (logo_draw sets Pos.YPosition = label_row + 2).  Pure
+    # blue is part of the edk2 firmware banner's palette (spec §V3), so
+    # an unrestricted screen-wide count could be satisfied by a blue
+    # firmware banner; the edk2 banner sits above this band.
+    blue = count_rgb(capture["pixels"], width, height, BANNER_BLUE,
+                     (0, geo["banner_y0"], width, geo["banner_y1"]))
     if blue < 100:
         failures.append(
             f"expected the [fb] banner background (rgb{BANNER_BLUE}) on screen, "
-            f"found {blue} px")
+            f"found {blue} px in the banner band "
+            f"y=[{geo['banner_y0']},{geo['banner_y1']})")
     return failures
 
 
@@ -451,6 +619,12 @@ def check_logo(capture: dict) -> list[str]:
     underline its own 3*scale x 2 strip.  Every colour is counted both
     inside its own region and across the WHOLE screen, so a wordmark drawn
     in the wrong cells cannot pass.
+
+    The caption is checked by EXACT PIXEL COUNT: the expected number is
+    derived from the repo (the caption's glyph set bits in
+    kernel/driver/font.psf), never hard-coded.  A caption that is
+    truncated, misspelled or drawn from a different label produces a
+    different count and fails.
     """
     failures = []
     if capture.get("error"):
@@ -479,6 +653,11 @@ def check_logo(capture: dict) -> list[str]:
     muted = count_rgb(pixels, width, height, LOGO_MUTED,
                       (geo["label_x0"], geo["label_y0"],
                        geo["label_x0"] + LABEL_LEN * FONT_W, geo["label_y1"]))
+    # The same caption row across the FULL width: a caption LONGER than
+    # the expected label paints muted pixels outside the expected cells.
+    muted_row = count_rgb(pixels, width, height, LOGO_MUTED,
+                           (0, geo["label_y0"], width, geo["label_y1"]))
+    expected_caption = load_font().caption_pixels(LOGO_LABEL)
 
     if ink != geo["ink_px"]:
         failures.append(
@@ -499,10 +678,18 @@ def check_logo(capture: dict) -> list[str]:
         failures.append(
             f"accent pixels outside the wordmark: "
             f"{accent_total - accent - accent_underline}")
-    if muted == 0:
+    if muted != expected_caption:
         failures.append(
-            f"no caption pixels (rgb{LOGO_MUTED}) in the label band "
+            f"caption pixels: expected {expected_caption} for "
+            f"{LOGO_LABEL!r} (derived from kernel/driver/font.psf), found "
+            f"{muted} in the caption band "
+            f"x=[{geo['label_x0']},{geo['label_x0'] + LABEL_LEN * FONT_W}), "
             f"y=[{geo['label_y0']},{geo['label_y1']})")
+    if muted_row != expected_caption:
+        failures.append(
+            f"caption row pixels: expected {expected_caption} for "
+            f"{LOGO_LABEL!r} across the whole caption row, found "
+            f"{muted_row} (a longer caption or stray muted pixels)")
     return failures
 
 
@@ -605,8 +792,8 @@ def _write_suite_report(archive, *, argv, profile, cpu, memory_mib, firmware,
 # evidence.  The optional secondary marker is a BOUNDED extra wait (see
 # ``_await_marker``): it only gives the kernel a few more seconds to emit
 # it, and its absence stays a checker failure — never a timeout.  Only the
-# logo check needs it: the no-fb check already waits for the idle marker,
-# which the kernel prints after the skip marker.
+# logo check uses it, and today it is a no-op: the kernel prints the logo
+# marker before the [fb] banner marker the primary wait targets.
 CHECKS = {
     "fb-visible": (True, (FB_READY_MARKER,), "check_fb_visible", None),
     "logo": (True, (FB_READY_MARKER,), "check_logo", LOGO_DRAWN_MARKER),
@@ -653,18 +840,61 @@ def self_test() -> None:
     assert geo["label_y1"] == 176
     assert geo["ink_x1"] == geo["left"] + 2 * geo["advance"]
     assert geo["wordmark_y1"] == geo["top"] + 7 * geo["scale"]
-    # The glyph set-bit counts (O=20, S=17, 0=23, 1=10) times scale^2.
-    assert geo["ink_px"] == (20 + 17) * 14 * 14
-    assert geo["accent_glyph_px"] == (23 + 10) * 14 * 14
+    # The glyph set-bit counts come from the driver's own bitmaps
+    # (kernel/driver/logo.c), not from a hard-coded tuple.
+    bits = logo_glyph_bits()
+    assert len(bits) == 4
+    assert all(count > 0 for count in bits)
+    assert geo["ink_px"] == sum(bits[:INK_GLYPHS]) * 14 * 14
+    assert geo["accent_glyph_px"] == sum(
+        bits[INK_GLYPHS:INK_GLYPHS + ACCENT_GLYPHS]) * 14 * 14
     assert geo["accent_underline_px"] == 3 * 14 * 2
     # The caption band spans LABEL_LEN character cells (18 cells, not 17).
     assert geo["label_x0"] + LABEL_LEN * FONT_W == 32 + 18 * 8
+    # The [fb] banner lands on the row the logo left the cursor on.
+    assert geo["banner_row"] == geo["label_row"] + 2
+    assert geo["banner_y0"] == 192 and geo["banner_y1"] == 208
 
     # A small framebuffer uses the smaller scale and the smaller left.
     small = logo_geometry(320, 240)
     assert small["scale"] == 7
     assert small["left"] == 16
     assert small["advance"] == 7 * 7
+
+    # -- caption font (parsed from the repo) -------------------------
+    font = load_font()
+    assert font.width == FONT_W and font.height == FONT_H
+    assert font.numglyph == 128 and font.bytesperglyph == 16
+    # The kernel indexes the glyph table with the character code itself.
+    assert font.glyph_index("a") == ord("a")
+    assert font.glyph_index(" ") == ord(" ")
+    # The expected caption count is DERIVED: a truncated or different
+    # label must produce a different number of pixels.
+    caption = font.caption_pixels(LOGO_LABEL)
+    assert caption > 0
+    assert font.caption_pixels(LOGO_LABEL[:-1]) < caption
+    assert font.caption_pixels("x86_64  /  KERNEL") != caption
+    assert font.caption_pixels("aarch64 ") != caption
+
+    # A synthetic font proves the PARSER itself (the repo file only
+    # proves that the real file parses): two 2-byte glyphs, 2 rows each.
+    synthetic = struct.pack("<8I", 0x864AB572, 0, 32, 0, 2, 2, 2, 8) + \
+        bytes([0x0F, 0x00, 0x03, 0x00])
+    tiny = Psf2Font(synthetic)
+    assert tiny.numglyph == 2 and tiny.bytesperglyph == 2
+    assert tiny.glyph_pixels("\x01") == 2      # 0x03 -> two set bits
+    assert tiny.glyph_pixels("\x02") == 4      # out of range -> glyph 0 (0x0F)
+    for bad, why in (
+        (b"", "a short header"),
+        (struct.pack("<8I", 0x864AB572, 0, 32, 0, 4, 2, 2, 8) + bytes(4),
+         "a truncated glyph table"),
+    ):
+        try:
+            Psf2Font(bad)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Psf2Font accepted {why}")
 
     # -- PPM parsing --------------------------------------------------
     red = (255, 0, 0)
@@ -716,7 +946,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--firmware")
     parser.add_argument("--image")
     parser.add_argument("--qemu", default="qemu-system-aarch64")
-    parser.add_argument("--log-dir", default="test-results/aarch64-boot-logo")
+    parser.add_argument("--log-dir", default="test-results/aarch64-boot-logo",
+                        help="evidence directory used ONLY without --build-dir; "
+                             "with --build-dir the suite archives under "
+                             "<build-dir>/logs/tests/<suite>-<check>/")
     parser.add_argument("--build-dir", default=None)
     parser.add_argument("--profile", default=os.environ.get("OS01_PROFILE", "default"))
     parser.add_argument("--timeout", type=float, default=120)
@@ -764,7 +997,13 @@ def main(argv: list[str] | None = None) -> int:
             args, ramfb=ramfb, wait_markers=wait_markers,
             cpus=args.cpus, run_dir=run_dir,
             secondary_marker=secondary_marker)
-        problems = checkers[checker_name](capture)
+        try:
+            problems = checkers[checker_name](capture)
+        except Exception as error:  # noqa: BLE001 — a broken expectation is a FAIL
+            # The expectations are derived from the repo (the caption font,
+            # the wordmark bitmaps); a parse failure is a FAIL of the
+            # SUITE, never an environment error and never a traceback.
+            problems = [f"{type(error).__name__}: {error}"]
         if capture["timed_out"]:
             problems.append(
                 f"timed out waiting for {list(wait_markers)} in the serial log")
