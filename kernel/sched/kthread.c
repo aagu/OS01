@@ -231,6 +231,16 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
          !(target_cpu == 0 && !pinned && sched_boot_creation_open()))) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
+        /* arch_kthread_prepare acquired FPU after the copied file table;
+         * unwind in reverse order when the locked eligibility recheck
+         * rejects publication. */
+        if (tsk->fpu_save) {
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_resource(tsk->fpu_save, 3, false);
+#endif
+            kfree(tsk->fpu_save);
+            tsk->fpu_save = NULL;
+        }
         arch_kthread_drop_files(tsk);
         kfree(thd);
         kfree(raw);
@@ -264,7 +274,9 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     spin_unlock_irqrestore(&task_list_lock, tl_flags);
 
-    sched_notify_remote(tsk);
+    /* target_cpu is a value captured before publication. A newly visible
+     * self-reaping task may be reclaimed as soon as the locks drop. */
+    sched_notify_remote_cpu(target_cpu);
     return 0;
 }
 

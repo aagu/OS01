@@ -652,6 +652,7 @@ def run_sched_boot(args, variant, cpus, repetition, paths, session_factory=None)
         return 2
 
     session = None
+    child_exited_before_runner_stop = False
     try:
         # Absolute deadline: the evidence window ends 1 s before the boot
         # budget so the drain stays inside BOOT_DEADLINE_SECONDS; ticks
@@ -666,7 +667,12 @@ def run_sched_boot(args, variant, cpus, repetition, paths, session_factory=None)
             predicate = lambda text: parse_sched_evidence(text, cpus)[0]
         session.wait_for(predicate)
         session.observe(DRAIN_SECONDS)
+        # A complete trace is only evidence if QEMU remains alive through
+        # the full drain. observe() returns early on natural child exit;
+        # stop() also leaves stopped_by_runner false in that case.
+        child_exited_before_runner_stop = session.returncode is not None
         session.stop()
+        child_exited_before_runner_stop |= not session.stopped_by_runner
         session.close()
     except Exception as error:  # launch / OS error → ERROR, never PASS
         if session is not None:
@@ -689,11 +695,13 @@ def run_sched_boot(args, variant, cpus, repetition, paths, session_factory=None)
         accepted, why = parse_sched_fault(text, variant, cpus)
     else:
         accepted, why = parse_sched_evidence(text, cpus)
-    result = accepted and not timed_out
+    result = accepted and not timed_out and not child_exited_before_runner_stop
 
     errors = []
     if timed_out:
         errors.append("absolute boot deadline exceeded before evidence")
+    if child_exited_before_runner_stop:
+        errors.append("QEMU exited before the runner completed the observation drain")
     errors.extend(why)
     metadata.update({
         "elapsed_seconds": time.monotonic() - started,

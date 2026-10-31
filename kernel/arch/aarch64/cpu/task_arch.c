@@ -283,6 +283,12 @@ int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
 {
     if (!t || !t->thread || !fn)
         return -EINVAL;
+    /* This phase publishes runnable work only to the BSP. Reject direct
+     * attempts to target an AP, and freeze task affinity before it becomes
+     * visible even when num_cpus reports a larger topology. */
+    if (t->cpu != 0)
+        return -EINVAL;
+    t->allowed_cpus = 1;
     thread_t *ctx = t->thread;
     uintptr_t base = (uintptr_t)t;
     uintptr_t top = base + STACK_SIZE;

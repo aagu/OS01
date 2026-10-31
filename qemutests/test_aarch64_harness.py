@@ -46,6 +46,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -84,12 +85,13 @@ class FakeSession:
 
     def __init__(self, *, text="", matched=True, timed_out=False,
                  self_exited=False, returncode=0, exit_in_window=False,
-                 start_exc=None):
+                 append_in_window="", start_exc=None):
         self._text = text
         self._matched = matched
         self._timed_out = timed_out
         self._self_exited = self_exited
         self._exit_in_window = exit_in_window
+        self._append_in_window = append_in_window
         self._rc = returncode
         self._returncode = returncode if self_exited else None
         self._stopped_by_runner = False
@@ -111,6 +113,7 @@ class FakeSession:
 
     def observe(self, seconds):
         self.calls.append(("observe", seconds))
+        self._text += self._append_in_window
         if self._exit_in_window:
             self._returncode = self._rc
         return ""
@@ -1060,6 +1063,7 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
                 ok, errors = self._ok(_sched_wire_log(cpus=cpus), cpus=cpus)
                 self.assertTrue(ok, errors)
 
+
     def test_missing_expected_case_rejected(self):
         text = self.log.replace(
             "[sched-evidence] id=aarch64_sched_regs reg_fail=0 "
@@ -1312,6 +1316,68 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
             late + "[TEST] BEGIN aarch64_sched_regs\n")
         ok, errors = self._ok(text)
         self.assertFalse(ok, "an evidence record after its terminal must fail")
+
+
+class SchedulerRunnerLifecycleTests(unittest.TestCase):
+    """A valid trace is insufficient if QEMU exits before the drain ends."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="os01-sched-life-"))
+        fw, img = _stage_inputs(self.tmp)
+        elf = self.tmp / "kernel.elf"
+        elf.write_bytes(b"ELF")
+        self.args = argparse.Namespace(
+            qemu="qemu-system-aarch64", build_dir=None,
+            log_dir=str(self.tmp / "logs"), profile="test")
+        self.paths = {"firmware": str(fw), "image": str(img),
+                      "elf": str(elf)}
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, variant, text, *, self_exited=False, exit_in_window=False,
+             returncode=0, timed_out=False, append_in_window=""):
+        session = FakeSession(text=text, self_exited=self_exited,
+                              exit_in_window=exit_in_window,
+                              returncode=returncode, timed_out=timed_out,
+                              append_in_window=append_in_window)
+        with mock.patch.object(
+                asched, "generate_diagnostic_dtb", return_value="/tmp/test.dtb"):
+            rc = asched.run_sched_boot(
+                self.args, variant, 1, 1, self.paths,
+                session_factory=_factory(session))
+        return rc, session
+
+    def test_natural_exit_during_drain_rejected_for_positive_and_fault(self):
+        cases = (("positive", _sched_wire_log(1)),
+                 ("sp-top", SchedulerFaultEvidenceTests()._fault_log("sp-top")))
+        for variant, trace in cases:
+            for code in (0, 1):
+                with self.subTest(variant=variant, code=code):
+                    rc, session = self._run(
+                        variant, trace, exit_in_window=True, returncode=code)
+                    self.assertEqual(rc, 1)
+                    self.assertFalse(session.stopped_by_runner)
+
+    def test_live_child_stopped_by_runner_after_drain_passes(self):
+        rc, session = self._run("positive", _sched_wire_log(1))
+        self.assertEqual(rc, 0)
+        self.assertTrue(session.stopped_by_runner)
+
+    def test_incomplete_evidence_and_timeout_fail(self):
+        for code in (0, 1):
+            with self.subTest(code=code):
+                rc, _ = self._run("positive", "UEFI: booting OS01\n",
+                                  self_exited=True, returncode=code)
+                self.assertEqual(rc, 1)
+        rc, _ = self._run("positive", "", timed_out=True)
+        self.assertEqual(rc, 1)
+
+    def test_late_fatal_during_drain_fails(self):
+        rc, _ = self._run("positive", _sched_wire_log(1),
+                          append_in_window="PANIC: late fatal\n")
+        self.assertEqual(rc, 1)
 
 
 class SchedulerFaultEvidenceTests(unittest.TestCase):

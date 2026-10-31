@@ -18,8 +18,10 @@
 #include <selftest/aarch64_scheduler.h>
 #include <selftest/result.h>
 #include <time/timer.h>
+#include <memory/slab.h>
 #include <log/log.h>
 #include <core/printk.h>
+#include <errno.h>
 #include <string.h>
 #include <kernel.h>
 
@@ -40,6 +42,7 @@ static volatile uint64_t irq_peer_done;
 static volatile uint64_t irq_case_done;
 static volatile uint64_t ap_worker_finished;
 static volatile uint64_t ap_worker_bad_cpu;
+static volatile uint64_t ap_worker_bad_affinity;
 static volatile uint64_t ap_workers_on_cpu0;
 static volatile uint64_t blocker_duplicate_enqueue;
 static volatile uint64_t blocker_preswitch_observed;
@@ -263,6 +266,8 @@ static uint64_t irq_peer(uint64_t unused)
 static uint64_t ap_cpu_probe_worker(uint64_t unused)
 {
     (void)unused;
+    if (current->allowed_cpus != 1)
+        ap_worker_bad_affinity++;
     if (cpu_id() != 0 || current->cpu != 0)
         ap_worker_bad_cpu++;
     else
@@ -732,12 +737,38 @@ static int case_timer(void)
 static int case_ap(void)
 {
     uint32_t count = num_cpus;
-    ap_worker_finished = ap_worker_bad_cpu = ap_workers_on_cpu0 = 0;
+    ap_worker_finished = ap_worker_bad_cpu = ap_worker_bad_affinity = 0;
+    ap_workers_on_cpu0 = 0;
     if (!create_kthread(ap_cpu_probe_worker, 0, "sched-ap-cpu-proof")) return -1;
     uint64_t deadline = jiffies + 100;
     while (!ap_worker_finished && jiffies < deadline) kthread_yield();
-    uint64_t cpu0_only = ap_worker_finished && !ap_worker_bad_cpu &&
-                         ap_workers_on_cpu0;
+    uint64_t ap_target_rejected = 1;
+    if (count >= 2) {
+        /* Build a valid, unpublished task context and call the actual ARM
+         * backend. The common constructor's scheduler_ok check would reject
+         * CPU1 before reaching this frozen backend guard. */
+        void *raw = kmalloc(sizeof(union task_union) + STACK_SIZE);
+        thread_t *probe_thread = kmalloc(sizeof(thread_t));
+        if (!raw || !probe_thread) {
+            if (probe_thread) kfree(probe_thread);
+            if (raw) kfree(raw);
+            ap_target_rejected = 0;
+        } else {
+            task_t *probe = (task_t *)(((uintptr_t)raw + STACK_SIZE - 1) &
+                                       ~(uintptr_t)(STACK_SIZE - 1));
+            memset(probe, 0, sizeof(*probe));
+            memset(probe_thread, 0, sizeof(*probe_thread));
+            probe->thread = probe_thread;
+            probe->cpu = 1;
+            int rc = arch_kthread_prepare(probe, ap_cpu_probe_worker, 0);
+            ap_target_rejected = rc == -EINVAL && probe->allowed_cpus == 0;
+            kfree(probe_thread);
+            kfree(raw);
+        }
+    }
+    uint64_t cpu0_only = ap_target_rejected && ap_worker_finished &&
+                         !ap_worker_bad_cpu &&
+                         !ap_worker_bad_affinity && ap_workers_on_cpu0;
     if (count >= 2)
         aarch64_shootdown_probe_run_late();
     for (uint32_t cpu = 0; cpu < count; ++cpu) {

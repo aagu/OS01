@@ -242,6 +242,36 @@ static void suite_rollback(void)
     assert_eq((int)baseline_bytes, (int)mock_kmalloc_live_bytes);
 }
 
+static void suite_rollback_after_prepare_eligibility_revoked(void)
+{
+    TEST_SUITE("rollback after prepare when placement is revoked");
+    switch_tail_reset();
+    num_cpus = 1;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    mock_revoke_cpu_after_prepare = 1;
+    task_t *tsk = (task_t *)1;
+    int pid = 7;
+    int rc = kthread_alloc_and_publish(ctor_fn, 1, NULL, 0, false,
+                                       &tsk, &pid);
+    assert_eq(-EINVAL, rc);
+    assert_true(tsk == NULL);
+    assert_eq(0, pid);
+    assert_eq(0, task_list_len());
+    assert_eq(0, (int)percpu_data[0].nr_running);
+    assert_eq(0, mock_arch_files_live);
+    assert_eq(0, mock_arch_fpu_live);
+    assert_true((size_t)0 == mock_kmalloc_live_bytes);
+
+    /* Restoring eligibility permits an ordinary create after rollback. */
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    int retry = kernel_thread(ctor_fn, 2, PF_KTHREAD);
+    assert_true(retry > 0);
+    assert_eq(1, task_list_len());
+    assert_eq(1, (int)percpu_data[0].nr_running);
+}
+
 /* ── 3b. Publication lock order + enqueue handoff (P5 Task 4) ─── */
 static void suite_publication_order(void)
 {
@@ -361,6 +391,7 @@ static void suite_runtime_create(void)
     assert_true(pid >= 1);
     assert_eq(1, (int)percpu_data[0].nr_running);
     assert_eq(0, (int)percpu_data[1].nr_running);
+    assert_eq(3ULL, first_created_task()->allowed_cpus); /* x86 reach unchanged */
 
     /* named create_kthread publishes the supplied name before
      * publication (not the creator's comm) */
@@ -392,16 +423,37 @@ static void suite_runtime_create(void)
     assert_true((size_t)0 != mock_kmalloc_live_bytes); /* they live until reset */
 }
 
+/* Publication drops both locks before notifying. Simulate an immediate
+ * remote self-reap at the final unlock by poisoning task->cpu; the
+ * post-unlock notifier must use its captured CPU value and PID return. */
+static void suite_notify_uses_captured_cpu_after_publication(void)
+{
+    TEST_SUITE("post-publication notify does not dereference task");
+    switch_tail_reset();
+    num_cpus = 1;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    mock_poison_task_after_publish = 1;
+    int pid = kernel_thread(ctor_fn, 99, PF_KTHREAD);
+    assert_true(pid > 0);
+    assert_eq(0xfe, (int)mock_arch_prepared_task->cpu);
+    assert_eq(1, mock_notify_remote_calls);
+    assert_eq(0, mock_notify_remote_task_reads);
+    assert_eq(0, (int)mock_notified_cpu);
+}
+
 int main(void)
 {
     suite_window_initially_closed();
     suite_boot_fallback();
     suite_rollback();
+    suite_rollback_after_prepare_eligibility_revoked();
     suite_publication_order();
     suite_pinned_api();
     suite_empty_affinity();
     suite_window_close_permanent();
     suite_runtime_create();
+    suite_notify_uses_captured_cpu_after_publication();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_kthread_ctor",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

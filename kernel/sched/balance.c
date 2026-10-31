@@ -86,11 +86,15 @@ uint32_t sched_pick_cpu(void)
  * publication — this must never be a late substitute for that
  * admission validation), never a silent success.
  */
-void sched_notify_remote(task_t *tsk)
+void sched_notify_remote_cpu(unsigned cpu)
 {
-    if ((int)tsk->cpu == (int)cpu_id())
+    if (cpu >= NR_CPUS) {
+        log_err("[sched] sched_notify_remote: invalid target cpu=%u\n", cpu);
         return;
-    percpu_t *dst = &percpu_data[tsk->cpu];
+    }
+    if ((int)cpu == (int)cpu_id())
+        return;
+    percpu_t *dst = &percpu_data[cpu];
 #if ARCH_HAS_REMOTE_RESCHED
     dst->need_resched = 1;
     __sync_synchronize();
@@ -100,9 +104,17 @@ void sched_notify_remote(task_t *tsk)
      * whose admission policy must keep every runnable task on CPU0. */
     log_err("[sched] sched_notify_remote: remote target cpu=%u without "
             "remote-resched capability — invariant violated\n",
-            tsk->cpu);
+            cpu);
     (void)dst;
 #endif
+}
+
+/* Back-compatible task wrapper for fork/exec publication callers.
+ * The kernel-thread constructor uses the value form above because a
+ * self-reaping child may outlive its task object immediately at unlock. */
+void sched_notify_remote(task_t *tsk)
+{
+    sched_notify_remote_cpu((unsigned)tsk->cpu);
 }
 
 /* ── sched_balance: pull work from busiest CPU ─────────────

@@ -238,6 +238,7 @@ void task_comm_inherit(task_t *child, const task_t *parent);
 void enqueue_task(task_t *task, percpu_t *rq);
 unsigned sched_pick_cpu_mask(uint64_t allowed);
 void sched_notify_remote(task_t *tsk);
+void sched_notify_remote_cpu(unsigned cpu);
 int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg);
 void arch_kthread_drop_files(task_t *t);
 
@@ -298,6 +299,11 @@ int mock_enqueue_calls;
 int mock_enqueue_refused;    /* enqueues refused by the affinity mask */
 int mock_pick_calls;
 int mock_notify_remote_calls;
+int mock_notify_remote_task_reads;
+unsigned mock_notified_cpu;
+int mock_poison_task_after_publish;
+int mock_revoke_cpu_after_prepare;
+task_t *mock_arch_prepared_task;
 int64_t mock_alloc_pid_next = 1;
 
 /* Lock-order recorder state (filled from the PRODUCTION spin surface). */
@@ -312,6 +318,13 @@ void mock_record_lock_op(spinlock_T *l, int is_lock)
         mock_lock_log_is_lock[mock_lock_log_count] = is_lock;
     }
     mock_lock_log_count++;
+    if (!is_lock && mock_poison_task_after_publish &&
+        l == &task_list_lock && mock_arch_prepared_task) {
+        /* Model an immediate remote self-reap after the final publication
+         * unlock: poison the field a post-unlock task-based notifier reads. */
+        mock_poison_task_after_publish = 0;
+        mock_arch_prepared_task->cpu = 0xfe;
+    }
 }
 
 /* Creator fixture: `current` while the constructor runs. */
@@ -448,13 +461,21 @@ unsigned sched_pick_cpu_mask(uint64_t allowed)
 
 void sched_notify_remote(task_t *tsk)
 {
-    (void)tsk;
+    mock_notify_remote_task_reads++;
+    mock_notified_cpu = tsk->cpu;
+    mock_notify_remote_calls++;
+}
+
+void sched_notify_remote_cpu(unsigned cpu)
+{
+    mock_notified_cpu = cpu;
     mock_notify_remote_calls++;
 }
 
 int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
 {
     mock_arch_prepare_calls++;
+    mock_arch_prepared_task = t;
     /* Success: acquire the hook-owned file-table resource and build the
      * first-entry context (x86's real hook writes the same fields). */
     mock_arch_files_live++;
@@ -467,6 +488,10 @@ int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
     }
     mock_arch_fpu_token = t->fpu_save;
     mock_arch_fpu_live++;
+    if (mock_revoke_cpu_after_prepare) {
+        mock_revoke_cpu_after_prepare = 0;
+        percpu_data[0].online = 0;
+    }
     if (mock_arch_prepare_rc != 0) {
         /* Model a later preparation failure after acquiring both hook
          * resources; the hook owns cleanup on this path. */
@@ -566,6 +591,11 @@ void switch_tail_reset(void)
     mock_enqueue_refused = 0;
     mock_pick_calls = 0;
     mock_notify_remote_calls = 0;
+    mock_notify_remote_task_reads = 0;
+    mock_notified_cpu = UINT32_MAX;
+    mock_poison_task_after_publish = 0;
+    mock_revoke_cpu_after_prepare = 0;
+    mock_arch_prepared_task = NULL;
 
     mock_lock_log_count = 0;
     memset(mock_lock_log_addr, 0, sizeof(mock_lock_log_addr));

@@ -45,6 +45,10 @@ void *fpu_area_alloc(void);
  * (actual_prev == current) returns without finish or free. */
 void task_switch_complete(task_t *actual_prev);
 
+/* Notify a destination CPU without retaining a task pointer across
+ * publication unlock/reclamation. */
+void sched_notify_remote_cpu(unsigned cpu);
+
 /* ── Common kernel-thread constructor (kthread.c) ───────────────────
  * Allocates, initialises and publishes a PF_KTHREAD task.
  *
