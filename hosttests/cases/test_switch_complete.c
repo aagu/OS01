@@ -31,61 +31,15 @@
 static thread_t thd_obj;
 static char fpu_buf[64] __attribute__((aligned(16)));
 static char stk_buf[4096];
-static task_t prev_task, next_task;
+static task_t prev_task;
 
-/* ── Control + spy state (see the runtime header) ── */
-task_t *switch_tail_current = &next_task;
-
-int spy_finish_calls;
-task_t *spy_finish_last;
-int spy_seq_finish;
-int spy_kfree_calls;
-void *spy_kfreed[8];
-int spy_seq_kfree[8];
-static int op_counter;
-
-void task_finish_switch(task_t *prev)
-{
-    spy_finish_calls++;
-    spy_finish_last = prev;
-    spy_seq_finish = ++op_counter;
-    /* Release: after on_cpu clears, a waiter may free prev and the slab
-     * may hand the memory to anyone.  Anything the tail reads from prev
-     * past this point is a use-after-free — poison the fields so a late
-     * read is detectable in the freed-pointer log. */
-    prev->flags = 0;
-    prev->thread = SWITCH_TAIL_POISON_THREAD;
-    prev->fpu_save = SWITCH_TAIL_POISON_FPU;
-    prev->stack_alloc_base = SWITCH_TAIL_POISON_STACK;
-}
-
-size_t kfree(void *address)
-{
-    if (spy_kfree_calls < 8) {
-        spy_kfreed[spy_kfree_calls] = address;
-        spy_seq_kfree[spy_kfree_calls] = ++op_counter;
-    }
-    spy_kfree_calls++;
-    return 0;
-}
-
-void switch_tail_reset(void)
-{
-    spy_finish_calls = 0;
-    spy_finish_last = NULL;
-    spy_seq_finish = 0;
-    spy_kfree_calls = 0;
-    op_counter = 0;
-    for (int i = 0; i < 8; i++) {
-        spy_kfreed[i] = NULL;
-        spy_seq_kfree[i] = 0;
-    }
-    prev_task.flags = 0;
-    prev_task.thread = NULL;
-    prev_task.fpu_save = NULL;
-    prev_task.stack_alloc_base = NULL;
-    switch_tail_current = &next_task;
-}
+/* Control + spy state, task_finish_switch / kmalloc / kfree and
+ * switch_tail_reset() moved into ../mock/switch_complete_test_runtime.h
+ * (Phase 2, Task 1): the REAL kernel/sched/kthread.c now also carries the
+ * kthread_alloc_and_publish() constructor, so the mock must provide the
+ * whole constructor surface in every test TU that links the production
+ * object — this file keeps only its local fixtures.
+ */
 
 /* ── Case 1: self-reap captures before finish, frees after ── */
 static void suite_self_reap_capture(void)

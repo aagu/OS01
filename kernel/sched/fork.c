@@ -21,15 +21,9 @@
 #include <errno.h>
 #include <kernel.h>
 
-extern void arch_kernel_thread_entry(void);
-
-/* Thermal plan Task 2 — pre-publication pin channel.  Defined later
- * in this file; forward-declared here so the do_fork() body (line 405,
- * inside the mask block) sees the static linkage and C99 does not
- * promote it to a non-static implicit declaration that the later
- * static definition would then conflict with. */
-static void fork_pin_apply(task_t *tsk);
-static inline void fork_pin_consume(void);
+// The pinned-kernel-service pre-publication channel moved to
+// kernel_thread_on_cpu() in kernel/sched/kthread.c: the common
+// kthread_alloc_and_publish() constructor takes the pin directly.
 
 // ── fork_mm_copy — create private address space for fork child ─
 // Builds a new PGD with private copies of all user pages.
@@ -397,20 +391,20 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
         tsk->vruntime = current->vruntime < fair_start ? current->vruntime : fair_start;
     }
 
-    // Thermal plan Task 2: allowed_cpus precedes cpu publication.  When the
-    // caller asked for a pinned service thread (kernel_thread_on_cpu), the
-    // pre-publication channel overrides cpu + mask; otherwise the default
-    // mask covers every currently-online CPU (online + scheduler_ok)
-    // expanded to num_cpus so a freshly-spawned task can be picked up by a
-    // later AP that joined after the spawn.  Idle tasks seed only their
-    // own bit in their per-CPU init path; this is the spawn path.
+    // Thermal plan Task 2: allowed_cpus precedes cpu publication.  The
+    // default mask covers every currently-online CPU (online +
+    // scheduler_ok) expanded to num_cpus so a freshly-spawned task can
+    // be picked up by a later AP that joined after the spawn.  Idle
+    // tasks seed only their own bit in their per-CPU init path; this is
+    // the spawn path.  (The pinned-kernel-service channel moved to
+    // kernel_thread_on_cpu() in kernel/sched/kthread.c — the common
+    // kthread_alloc_and_publish() constructor takes the pin directly.)
     {
         uint64_t default_mask = num_cpus >= NR_CPUS
                                   ? ~0ULL
                                   : ((1ULL << num_cpus) - 1);
         tsk->allowed_cpus = default_mask;
         tsk->cpu          = target_cpu;
-        fork_pin_apply(tsk);   /* no-op unless kernel_thread_on_cpu set the channel */
     }
 
     // Inherit signal handlers (shallow copy of sighand array — values, not pointers)
@@ -423,7 +417,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     tsk->state       = TASK_UNINTERRUPTIBLE;
     tsk->priority    = 3;
     /* cpu + allowed_cpus are set in the mask block above; do NOT
-     * re-overwrite them here.  fork_pin_apply() runs there too. */
+     * re-overwrite them here. */
     tsk->pid         = alloc_pid();
     tsk->thread      = thd;
     tsk->parent      = current;
@@ -558,125 +552,12 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     return tsk->pid;   // parent sees child PID
 }
 
-int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags)
-{
-    pt_regs_t regs;
-    memset(&regs, 0, sizeof(pt_regs_t));
-
-    regs.rbx = (uint64_t)fn;
-    regs.rdx = (uint64_t)arg;
-
-    regs.ds = KERNEL_DS;
-    regs.es = KERNEL_DS;
-    regs.cs = KERNEL_CS;
-    regs.ss = KERNEL_DS;
-    regs.rflags = (1 << 9);
-    regs.rip = (uint64_t)arch_kernel_thread_entry;
-
-    return do_fork(&regs, flags, 0, 0);
-}
-
-/* Thermal plan Task 2 — kernel_thread_on_cpu.
- *
- * Spawn a PF_KTHREAD task pinned to a single CPU.  Allowed CPU
- * set is set BEFORE the task is published to the task list /
- * runqueue (a per-fork pre-publication channel; see fork_pin
- * below), so the picker cannot place the task on a CPU that is
- * not in the mask.
- *
- * Validation order (matches the plan's documented contract):
- *   1. cpu < NR_CPUS                (else -EINVAL)
- *   2. percpu_data[cpu].online      (else -EINVAL)
- *   3. percpu_data[cpu].scheduler_ok (else -EINVAL: the target
- *      CPU has not finished per-CPU init; pinning now would
- *      leak the task into a half-initialised rq).
- * Then kernel_thread() runs the same do_fork machinery; the
- * override is consumed by do_fork under task_list_lock, so
- * concurrent procfs readers see either the default or the
- * pinned state — never a half-pinned one.
- */
-
-/* Pre-publication pin channel.  Active only across the single
- * fork call that kernel_thread_on_cpu() makes.  do_fork() reads
- * it after the task identity is set up but before it inserts
- * into the task list (both inside the task_list_lock critical
- * section). */
-static struct {
-    uint32_t cpu;
-    uint64_t allowed;
-    bool     active;
-} fork_pin = { (uint32_t)-1, 0, false };
-
-static void fork_pin_apply(task_t *tsk)
-{
-    if (!fork_pin.active)
-        return;
-    tsk->cpu          = fork_pin.cpu;
-    tsk->allowed_cpus = fork_pin.allowed;
-}
-
-static inline void fork_pin_consume(void) { fork_pin.active = false; }
-
-int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu)
-{
-    if (cpu >= NR_CPUS)
-        return -EINVAL;
-    if (cpu >= num_cpus)
-        return -EINVAL;
-    if (!percpu_data[cpu].online)
-        return -EINVAL;
-    if (!percpu_data[cpu].scheduler_ok)
-        return -EINVAL;
-    fork_pin.cpu          = (uint32_t)cpu;
-    fork_pin.allowed      = 1ULL << cpu;
-    fork_pin.active       = true;
-    int pid = kernel_thread(fn, arg, PF_KTHREAD);
-    /* kernel_thread completed; whether it succeeded or returned
-     * a negative pid, the channel is logically consumed.  Without
-     * this consume, the active pin leaks into the next do_fork()
-     * — observed failure mode: thermal_affinity's negative
-     * kernel_thread_on_cpu calls (validation rejects, returns -EINVAL
-     * with pin untouched because validations run BEFORE the pin set)
-     * pass cleanly, but fd_refcount scenario 1's two successful
-     * kernel_thread_on_cpu calls leave the channel active with the
-     * SECOND pin (cpu=other, mask=1<<other).  Scenario 2 then
-     * creates race_holder / pin_reader via plain kernel_thread();
-     * fork_pin_apply steals their cpu + allowed_cpus from the
-     * stale pin, pinning them to a CPU the harness can't reach
-     * (and the test mask-check flips) instead of the natural
-     * least-loaded placement.  fork_pin_consume is a static inline
-     * defined above — call it. */
-    fork_pin_consume();
-    return pid;
-}
-
-struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,
-                                   const char *name)
-{
-    int64_t pid = kernel_thread(fn, arg, PF_KTHREAD);
-    if (pid < 0)
-        return NULL;
-
-    // Monitor plan Task 4 (spec §5.1): kernel threads are named too.
-    // The lookup + rename run under task_list_lock, so a concurrent
-    // procfs reader never observes a half-written comm.  (kernel_thread
-    // has no name parameter — do_fork inherited `current`'s comm, which
-    // the spawner's name overrides here.)
-    struct task_struct *found = NULL;
-    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-    list_t *pos = init_task_union.task.list.next;
-    while (pos != &init_task_union.task.list) {
-        task_t *t = container_of(pos, task_t, list);
-        if (t->pid == pid) {
-            task_comm_set(t, name ? name : "kthread");
-            found = t;
-            break;
-        }
-        pos = task_list_next(pos);
-    }
-    spin_unlock_irqrestore(&task_list_lock, tl_flags);
-    return found;
-}
+// ── Kernel-thread API ───────────────────────────────────────
+// kernel_thread / kernel_thread_on_cpu / create_kthread moved to
+// kernel/sched/kthread.c (aarch64 EL1 scheduler plan Phase 2, Task 1):
+// they now route through the arch-neutral kthread_alloc_and_publish()
+// constructor instead of building an x86 pt_regs frame here.  do_fork()
+// below this point serves ONLY the user-process fork path.
 
 // ── task_send_signal ────────────────────────────────────────
 // SMP-safe signal delivery: find task by pid under

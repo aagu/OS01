@@ -45,4 +45,34 @@ void *fpu_area_alloc(void);
  * (actual_prev == current) returns without finish or free. */
 void task_switch_complete(task_t *actual_prev);
 
+/* ── Common kernel-thread constructor (kthread.c) ───────────────────
+ * Allocates, initialises and publishes a PF_KTHREAD task.
+ *
+ * Publication ordering is part of the contract: every fallible step
+ * happens BEFORE the task becomes visible to another CPU, and the
+ * publication order is task_list_lock then rq_lock.
+ *
+ * target_cpu: the CPU the task is published on.
+ * pinned:     true  -> the task is pinned to target_cpu and its
+ *                       allowed_cpus mask is exactly that CPU.
+ *             false -> the task may use the default affinity mask.
+ *
+ * out_task receives the non-owning task pointer, out_pid the PID.
+ * Both are captured BEFORE publication; a caller must not dereference
+ * out_task after the task has self-reaped. */
+int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
+                               const char *name, unsigned target_cpu,
+                               bool pinned, task_t **out_task, int *out_pid);
+
+/* ── Kernel-thread exit path (kthread.c) ──────────────────────────
+ * Terminates a kernel thread: releases the thread's copied file-table
+ * reference, removes it from the global task list, marks it
+ * PF_SELF_REAP + TASK_ZOMBIE, and switches away permanently.  The
+ * shared init_mm is NOT touched: no VMA is freed and no page table is
+ * destroyed (spec §8.3).
+ *
+ * Only kernel threads may call this; the idle task and user tasks are
+ * rejected. */
+void kthread_exit(uint64_t code);
+
 #endif /* KERNEL_SCHED_INTERNAL_H */

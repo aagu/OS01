@@ -204,7 +204,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_intr_backend_x86.elf \
     $(TEST_BLD)/test_intr_irq_x86.elf \
     $(TEST_BLD)/test_x86_intr_probe.elf \
-    $(TEST_BLD)/test_switch_complete.elf
+    $(TEST_BLD)/test_switch_complete.elf \
+    $(TEST_BLD)/test_kthread_ctor.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -2715,12 +2716,45 @@ $(TEST_BLD)/test_switch_complete.o: $(TEST_CASES)/test_switch_complete.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -c $< -o $@
 
+# Phase 2: the production kthread.o now also carries the constructor,
+# which references the boot window — boot.o rides along (its window
+# simply stays closed through the tail cases).
 $(TEST_BLD)/test_switch_complete.elf: $(TEST_BLD)/test_switch_complete.o \
-		$(TEST_BLD)/switch_complete_production.o
+		$(TEST_BLD)/switch_complete_production.o \
+		$(TEST_BLD)/sched_boot_production.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-switch-complete
 test-switch-complete: $(TEST_BLD)/test_switch_complete.elf
+	$<
+
+# aarch64 EL1 scheduler plan Phase 2, Task 1: the arch-neutral kthread
+# constructor + boot creation window.  Reuses the SAME production object
+# as test_switch_complete (the REAL kernel/sched/kthread.c host-compiled
+# against mock/switch_complete_test_runtime.h — now also carrying
+# kthread_alloc_and_publish) and adds the REAL kernel/sched/boot.c (the
+# window state machine) as a second production object.  The extended mock
+# provides the fail-index slab, the mock percpu and the spy surface; the
+# test drives the production constructor and the production window latch,
+# never a copy of either.
+$(TEST_BLD)/sched_boot_production.o: $(TESTS_DIR)/kernel/sched/boot.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/boot.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_kthread_ctor.o: $(TEST_CASES)/test_kthread_ctor.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_kthread_ctor.elf: $(TEST_BLD)/test_kthread_ctor.o \
+		$(TEST_BLD)/switch_complete_production.o \
+		$(TEST_BLD)/sched_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-kthread-ctor
+test-kthread-ctor: $(TEST_BLD)/test_kthread_ctor.elf
 	$<
 
 # Monitor plan Task 3: locked PMM usage snapshot.  Links the REAL

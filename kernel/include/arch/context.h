@@ -45,6 +45,40 @@ bool arch_task_context_valid(task_t *t, const char **reason);
 void arch_dump_task_context(task_t *t);
 void arch_task_check_prev(task_t *t);
 void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void));
+
+/* ── Kernel-thread constructor hooks (spec §8.1) ─────────────
+ * The common constructor in kernel/sched/kthread.c owns allocation,
+ * identity, metadata and publication.  The architecture owns the
+ * resources that differ per architecture:
+ *
+ *   arch_kthread_prepare()  real arch context + resources.  Returns
+ *                           0, or a negative errno.  On failure it
+ *                           must clean up and NULL whatever it
+ *                           acquired (files, FPU area) so the common
+ *                           rollback only has to free the thread
+ *                           struct and the raw stack.
+ *   arch_kthread_drop_files() detach and unpin the task's file-table
+ *                           reference only.  The thread struct, the
+ *                           FPU area and the raw stack stay owned by
+ *                           the common rollback / switch tail.
+ *
+ * aarch64 supplies its own implementations in Phase 3 (shared init_mm,
+ * no file table, no FPU area); x86 supplies them in
+ * kernel/arch/x86_64/cpu/task_arch.c. */
+int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg);
+void arch_kthread_drop_files(task_t *t);
+
+/* ── Architecture capability: remote reschedule notification ────
+ * x86 can wake a remote CPU with an IPI; aarch64 has no remote
+ * reschedule IPI in this phase (spec §7).  A runtime bool does not
+ * remove the linker dependency, so this is a compile-time constant and
+ * BOTH the <intr/ipi.h> include and the ipi_send() call are gated on
+ * it.  1 = the architecture can notify a remote CPU; 0 = local only. */
+#ifdef __x86_64__
+#define ARCH_HAS_REMOTE_RESCHED 1
+#else
+#define ARCH_HAS_REMOTE_RESCHED 0
+#endif
 #endif
 
 #endif /* KERNEL_ARCH_CONTEXT_H */
