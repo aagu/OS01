@@ -382,7 +382,7 @@ $(TEST_BLD)/test_x86_intr_probe.elf: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS
 # LAPIC NMI
 $(TEST_BLD)/test_lapic_nmi.elf: $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c $(TESTS_DIR)/kernel/include/intr/apic.h $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/acpi.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) -I$(TESTS_DIR)/kernel/include/arch/x86_64 $^ -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -Wno-unused-function -ffunction-sections -fdata-sections $(KERNEL_INC) $(LIBC_INC) $(TEST_CASES)/test_lapic_nmi.c $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/nmi.c -Wl,--gc-sections -o $@
 
 .PHONY: test-lapic-nmi
 test-lapic-nmi: $(TEST_BLD)/test_lapic_nmi.elf
