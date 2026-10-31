@@ -97,7 +97,7 @@ static void logo_draw(const struct fb_write_view *view, const char *label)
 
 int boot_logo_show(void)
 {
-    struct fb_write_view view;
+    struct fb_write_view view = {0};
     uint64_t flags = spin_lock_irqsave(&Pos.lock);
 
     int rc = arch_fb_write_begin(&view);
