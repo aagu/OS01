@@ -446,6 +446,7 @@ class Phase0SuiteTests(unittest.TestCase):
         b"tty: console TTY created\n",
         b"devfs: /dev/null read=0 write=4\n",
         b"OS01 Init v1.0\n",
+        b"init: running as PID 1\n",
         b"login: root\n",
         b"# ",  # shell prompt
     ]
@@ -471,6 +472,7 @@ class Phase0SuiteTests(unittest.TestCase):
         b"tty: console TTY created\n",
         b"devfs: /dev/null read=0 write=4\n",
         b"OS01 Init v1.0\n",
+        b"init: running as PID 1\n",
         b"# ",
         # A late kernel panic arrives after the prompt within the
         # observe(1) window.

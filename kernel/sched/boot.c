@@ -52,8 +52,8 @@ bool sched_boot_creation_open(void)
  * Publish the idle task metadata WITHOUT reading `current`: the BSP
  * may be on the boot stack, where `current` is not a task.
  *
- * Never resets an existing task list or runqueue: x86 boot services
- * (the lwIP tcpip thread) may already be queued by the time this
+ * Never resets an existing task list or runqueue: AP idle tasks
+ * from smp_boot_aps() are already on the task list by the time this
  * runs. */
 void sched_boot_publish_idle(void)
 {

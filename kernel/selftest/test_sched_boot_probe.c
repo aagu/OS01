@@ -1,11 +1,12 @@
 /* test_sched_boot_probe.c — x86 UP boot-window probe, late selftest half
  * (aarch64 EL1 scheduler plan, Phase 5 Task 4 / spec §10.1 item 4).
  *
- * The boot half (sched_boot_probe_create) runs from kernel_main inside
- * the legal pre-publication window; this file owns the marker function,
- * the shared state and the late case that proves the thread ACTUALLY ran
- * under the scheduler after scheduler_ok=1 (never a host mock or a
- * source scan), plus the runtime negative API calls.
+ * The boot half (sched_boot_probe_create) runs from task_init() (after
+ * spawn_user_task and before sched_boot_start()) inside the legal
+ * pre-publication window; this file owns the marker function, the shared
+ * state and the late case that proves the thread ACTUALLY ran under the
+ * scheduler after scheduler_ok=1 (never a host mock or a source scan),
+ * plus the runtime negative API calls.
  *
  * x86-only (picked up by the x86 selftest wildcard; NOT in the aarch64
  * source list).  Compiles in production builds too, but both entry
@@ -13,6 +14,7 @@
  */
 
 #include <sched/task.h>
+#include <sched/internal.h>
 #include <percpu/percpu.h>
 #include <time/timer.h>
 #include <errno.h>
@@ -66,5 +68,16 @@ int test_sched_boot_probe(void)
         return 4;
     if (kernel_thread(sched_boot_probe_fn, 0, ~0ULL) != -EINVAL)
         return 5;
+    return 0;
+}
+
+int test_init_pid(void)
+{
+    if (!user_init_task)
+        return 1;
+    if (user_init_task->pid != 1)
+        return 2;
+    if (user_init_pid != 1)
+        return 3;
     return 0;
 }

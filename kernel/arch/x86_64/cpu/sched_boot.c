@@ -13,6 +13,8 @@
  *      and the user-init spawn)
  *   4. fd 0/1/2 on /dev/tty for the idle task
  *   5. spawn_user_task("/bin/init", NULL)
+ *   5b. sched_boot_probe_create() (under OS01_SELFTEST) and net_lwip_init()
+ *      run while the boot creation window is still open and BSP scheduler_ok == 0
  *   6. state = TASK_RUNNING, then sched_boot_start() (close the boot
  *      creation window, publish scheduler_ok — the window is cleared
  *      BEFORE scheduler_ok so no instant has both true)
@@ -44,6 +46,7 @@
 #include <selftest/result.h> // selftest_record_late / selftest_end_run
 #include <kernel.h>
 #include <fcntl.h>
+#include <net/net.h>
 
 void task_init(void)
 {
@@ -63,9 +66,9 @@ void task_init(void)
     init_mm.mmap_base = 0;
 
     // init_task_union.task.list is pre-initialized as self-referencing
-    // in INIT_TASK, so any tasks added before task_init() (e.g. tcpip_thread
-    // from net_lwip_init(), AP idle tasks from smp_boot_aps()) remain on the
-    // scheduler's list.  Do NOT call list_init() here — it would orphan them.
+    // in INIT_TASK, so any tasks added before task_init() (e.g. AP idle tasks
+    // from smp_boot_aps()) remain on the scheduler's list.  Do NOT call
+    // list_init() here — it would orphan them.
 
     // BSP idle task pointer + cpu 0 publication (spec §6): the common
     // boot module publishes the scheduling-visible idle metadata.  It
@@ -97,15 +100,32 @@ void task_init(void)
         }
     }
 
-    // pid_counter starts at 1.  With lwIP networking, tcpip_thread (PID 1)
-    // is created before task_init(), so user init becomes PID 2.
-    // user_init_task pointer is set on the first spawn_user_task call,
-    // so reparenting works regardless of init's PID.
+    // pid_counter starts at 1.  spawn_user_task("/bin/init", NULL) is the
+    // first alloc_pid() consumer on the system (R1), so user init is
+    // always PID 1 across all build variants.  user_init_task /
+    // user_init_pid are also recorded on this first call.
     init_task_union.task.pgrp = 1;
     init_task_union.task.session = 1;
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
     (void)init_pid;
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
+
+#ifdef OS01_SELFTEST
+    // ── x86 UP boot-window probe (P5 Task 4 / spec §10.1 item 4) ──
+    // Inside the legal pre-publication window (after spawn_user_task so
+    // init gets PID 1, before sched_boot_start() closes the window and
+    // publishes BSP scheduler_ok = 1).
+    {
+        extern void sched_boot_probe_create(void);
+        sched_boot_probe_create();
+    }
+#endif
+
+    // Bring up lwIP and create tcpip_thread after user init has claimed
+    // PID 1, while the boot creation window is still open and BSP
+    // scheduler_ok == 0 (R2: preserves UP CPU0 boot fallback and keeps
+    // net_lwip_start()'s netif_add/dhcp_start loop non-preemptible on UP).
+    net_lwip_init();
 
     // Activate the scheduler and enter the idle loop.
     // schedule() picks up the user init (PID 1) naturally.
@@ -154,16 +174,26 @@ void task_init(void)
 
 #ifdef OS01_SELFTEST
     // ── boot-window probe selftest (P5 Task 4) ───────────────
-    // The probe thread was created in kernel_main inside the legal
-    // pre-publication window (CPU0 online, scheduler_ok == 0).  This
-    // case waits (bounded, production schedule()) until its marker has
-    // ACTUALLY executed under the scheduler, then verifies the runtime
-    // negative placement calls are rejected now that the window is
-    // closed.  Execution order matches the registration order in
-    // selftest.c.
+    // The probe thread was created in task_init() (after spawn_user_task
+    // and before sched_boot_start()) inside the legal pre-publication
+    // window (CPU0 online, scheduler_ok == 0).  This case waits
+    // (bounded, production schedule()) until its marker has ACTUALLY
+    // executed under the scheduler, then verifies the runtime negative
+    // placement calls are rejected now that the window is closed.
+    // Execution order matches the registration order in selftest.c.
     {
         extern int test_sched_boot_probe(void);
         selftest_record_late("sched_boot_probe", test_sched_boot_probe());
+    }
+#endif
+
+#ifdef OS01_SELFTEST
+    // ── user init PID 1 invariant selftest ───────────────────
+    // Verifies that /bin/init claimed PID 1 even with OS01_SELFTEST
+    // boot-window probe and lwIP tcpip_thread enabled.
+    {
+        extern int test_init_pid(void);
+        selftest_record_late("init_pid", test_init_pid());
     }
 #endif
 

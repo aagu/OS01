@@ -801,15 +801,15 @@ class KernelSelftestCoordinatorContractTests(unittest.TestCase):
         # startup out of kernel/sched/core.c into the x86-only
         # kernel/arch/x86_64/cpu/sched_boot.c (the arch-neutral core must
         # not name the x86 late selftests).  The contract is unchanged —
-        # only the file that holds the calls moved.  P5 Task 4 added the
-        # sched_boot_probe case (seven late cases now); this count moves
+        # only the file that holds the calls moved.  The init PID 1 design
+        # added the init_pid case (eight late cases now); this count moves
         # WITH the real registrations, never as a standalone constant.
         src = _read_kernel_source(X86_SCHED_BOOT_SRC)
         records = [m.start() for m in
                    re.finditer(r"selftest_record_late\(", src)]
         self.assertEqual(
-            len(records), 7,
-            f"{X86_SCHED_BOOT_SRC} must record all seven scheduled (late) "
+            len(records), 8,
+            f"{X86_SCHED_BOOT_SRC} must record all eight scheduled (late) "
             "cases")
         # Scope to the real CALL site: the file also mentions
         # selftest_end_run() in its header comment and in a comment above

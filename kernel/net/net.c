@@ -15,7 +15,7 @@
 // unified lwIP adapter publishes ONLINE state via net_service_ready().
 //
 // This file now exists as a translation-unit shim so existing call
-// sites (kernel/core/main.c) keep their original symbol names.  The
+// sites (kernel/arch/x86_64/cpu/sched_boot.c) keep their original symbol names.  The
 // bodies are one-liners that forward to the new core APIs.
 
 #include <net/net.h>

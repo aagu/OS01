@@ -2,7 +2,7 @@
 #ifndef _NET_NET_H
 #define _NET_NET_H
 
-// Stage B: Post-SMP, pre-task_init — lwIP stack init + tcpip_thread creation
+// Stage B: Post-SMP, inside task_init() after user init spawn and before sched_boot_start()
 void net_lwip_init(void);
 void net_poll_rx(void);
 

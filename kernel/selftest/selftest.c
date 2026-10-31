@@ -222,20 +222,21 @@ void selftest_register_builtin_tests(void)
 #endif /* !__aarch64__ */
 
     /* ── Scheduled (late) cases ─────────────────────────────────
-     * Executed from task_init() in kernel/sched/core.c once the
-     * scheduler is live and reported with selftest_record_late().
+     * Executed from task_init() in kernel/arch/x86_64/cpu/sched_boot.c once
+     * the scheduler is live and reported with selftest_record_late().
      * These ids are the two-sided contract with the record calls in
-     * sched/core.c: a declared late case that never runs is a failure,
+     * sched_boot.c: a declared late case that never runs is a failure,
      * so a drifting id cannot silently drop a scheduled test.  AArch64
      * has no scheduler-side tests, so it declares none. */
 #if !defined(__aarch64__)
     selftest_register_late("kernel_mutex");
     selftest_register_late("kthread_self_reap");
     /* P5 Task 4 (spec §10.1 item 4): the boot-window probe — creation
-     * happened in kernel_main while CPU0 scheduler_ok was still 0; this
+     * happened in task_init() while CPU0 scheduler_ok was still 0; this
      * case proves the marker thread actually ran under the scheduler
      * and that the runtime negative calls are rejected. */
     selftest_register_late("sched_boot_probe");
+    selftest_register_late("init_pid");
     selftest_register_late("fd_refcount");
     selftest_register_late("pgrp_signal");
     selftest_register_late("tty_vintr");

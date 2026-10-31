@@ -22,7 +22,7 @@
 #   1. CSPRNG boot log 含 "pool seeded" 行（不允许 silent）
 #   2. quality 等级与 spec 期望一致
 #   3. AT_RANDOM STRONG-only 契约：
-#        STRONG 路径 → init (PID 2) 必须 spawn 出 "OS01 Init v1.0"
+#        STRONG 路径 → init (PID 1) 必须 spawn 出 "OS01 Init v1.0"
 #        WEAK/NONE 路径 → init 不应 spawn（kernel_random_get_strong 返 false）
 #   4. /dev/random 用户态读契约（AAGU-5 reviewer 反馈 §1）：
 #        STRONG 路径 → `dd if=/dev/random` 必须返回非空数据（HEX 字节 ≠ 00）

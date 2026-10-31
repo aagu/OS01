@@ -530,7 +530,7 @@ def test_boot(tester):
     # Wait for evidence of boot — init banner. read_until() returns the
     # whole buffer, so the ordered boot-marker assertion below runs on
     # everything printed up to (and including) the banner.
-    booted = tester.read_until("OS01 Init v1.0", timeout=25)
+    booted = tester.read_until("init: running as PID 1", timeout=25)
     if not booted:
         print("FAIL: Kernel did not boot")
         return False
@@ -550,6 +550,7 @@ def test_boot(tester):
             r".*tty: console TTY created"
             r".*devfs: /dev/null read=0 write=4"
             r".*OS01 Init v1\.0"
+            r".*init: running as PID 1"
         )
     else:
         markers = (
@@ -557,6 +558,7 @@ def test_boot(tester):
             r".*tty: console TTY created"
             r".*devfs: /dev/null read=0 write=4"
             r".*OS01 Init v1\.0"
+            r".*init: running as PID 1"
         )
     if not re.search(markers, booted, re.DOTALL):
         print("FAIL: boot-log markers missing or out of order "

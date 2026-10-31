@@ -197,11 +197,13 @@ x86_64_boot_aps();              // tick_start + smp_boot_aps +
 selftest_run_all();
 #endif
 
-net_lwip_init();                // post-SMP, pre-scheduler
+sched_boot_creation_begin();    // open boot creation window
 futex_init();
 console_init();
 
 // Phase 9: scheduler + user-space
+// task_init() spawns /bin/init (PID 1), then calls net_lwip_init()
+// to create tcpip_thread before sched_boot_start() closes the window.
 task_init();
 ```
 
