@@ -103,7 +103,17 @@ Following the repo's documented **weak-default + strong-override** pattern
 
 ```c
 /* kernel/include/arch/fb_write.h */
+#include <driver/fb_state.h>   /* fb_lease_t — TYPE ONLY, no link dependency */
+
 struct fb_write_view {
+    /* Arch-private storage OWNED BY THE VIEW.
+     * The x86_64 override keeps the display-coordinator lease here; the
+     * aarch64 weak default leaves it untouched. Embedding the lease instead
+     * of returning a pointer to it is what keeps `snap` valid for the whole
+     * begin→draw→end sequence — a lease held in the implementation's stack
+     * frame would dangle the moment begin() returned. */
+    fb_lease_t lease;
+
     const struct fb_snapshot *snap;  /* NULL when the arch has no display coordinator */
     uint32_t *addr;                  /* framebuffer base to draw into          */
     uint32_t xres;                   /* pixels                                  */
@@ -113,6 +123,24 @@ struct fb_write_view {
 int  arch_fb_write_begin(struct fb_write_view *view);  /* <0 = no exclusive access */
 void arch_fb_write_end(struct fb_write_view *view);
 ```
+
+**Lease lifetime contract (binding on every implementation):**
+
+1. The view is caller-owned. It MUST outlive the whole `begin → draw → end`
+   sequence.
+2. `arch_fb_write_begin()` MUST NOT hand back a pointer to storage whose
+   lifetime ends when it returns. The x86_64 override sets
+   `view->snap = &view->lease.snapshot` — the lease lives inside the view, so
+   the pointer is valid until `arch_fb_write_end()`.
+3. `begin` and `end` are strictly paired: one `begin` → at most one `end`, in
+   the same scope, no nesting, no `end` without `begin`.
+4. The caller serialises the pair (the logo holds `Pos.lock` across it), so no
+   implementation may rely on being re-entered concurrently.
+
+`driver/fb_state.h` is already included by `kernel/core/printk.c`, which is
+compiled for BOTH arches — so embedding `fb_lease_t` adds no new include
+burden and no new link dependency on the aarch64 side (the coordinator
+functions are never called there).
 
 The facade header itself holds no arch knowledge. The arch identity macros live in
 a second, compile-time-only facade, `kernel/include/arch/identity.h`, which
@@ -132,12 +160,13 @@ constant, so there is no `.c` and no new link-time symbol.
 
 - **Weak default — `kernel/driver/arch_fb_write.c`** (arch-neutral driver set,
   `__attribute__((weak))`): no coordinator, no lease. Fills the view from
-  `Pos.FB_addr` / `Pos.XResolution` / `Pos.YResolution` and sets
-  `snap = NULL`. **This is what aarch64 links.** It touches no x86-only
-  header, so the aarch64 build stays minimal.
+  `Pos.FB_addr` / `Pos.XResolution` / `Pos.YResolution`, sets `snap = NULL`,
+  and leaves `view->lease` untouched. **This is what aarch64 links.** It
+  touches no x86-only header, so the aarch64 build stays minimal.
 - **Strong override — `kernel/arch/x86_64/platform/fb_write.c`**: calls
-  `fb_writer_begin()` / `fb_writer_end()` and fills the view from the lease
-  snapshot (`lease.snapshot.addr`, `.state.info.width/height`). The linker
+  `fb_writer_begin(&view->lease, 0)` / `fb_writer_end(&view->lease)` on the
+  lease EMBEDDED IN THE VIEW, then sets `view->snap = &view->lease.snapshot`
+  and fills `view->addr` / `view->xres` / `view->yres` from it. The linker
   resolves the strong symbol over the weak one.
 
 ### 2. `kernel/driver/logo.c` refactor
@@ -319,9 +348,13 @@ New test `qemutests/aarch64_boot_logo.py`:
 
    | Colour | Derivation | Expected at 800x600 (scale 14) |
    |---|---|---|
-   | ink `RGB(232,240,247)` | glyphs "O","S" = 20 set bits × scale² | **392** |
-   | accent `RGB(59,214,198)` | glyphs "0","1" = 33 set bits × scale² + underline `3*scale*2` | **6552** |
+   | ink `RGB(232,240,247)` | glyphs "O" (20 set bits) + "S" (17) = 37 × scale² | **7252** |
+   | accent `RGB(59,214,198)` | glyphs "0" (23) + "1" (10) = 33 × scale² + underline `3*scale*2` | **6552** |
    | muted `RGB(104,120,134)` | the `aarch64  /  KERNEL` label glyphs | > 0 |
+
+   The per-glyph bit counts come from the bitmap table in `kernel/driver/logo.c`
+   (`O`=20, `S`=17, `0`=23, `1`=10 set bits) and are re-derived by the test, not
+   hard-coded.
 
    These colours are unique to the logo — the measured edk2 banner uses
    (255,255,255), (152,152,152), (0,0,255), (190,195,208), (126,135,161),
@@ -331,9 +364,16 @@ New test `qemutests/aarch64_boot_logo.py`:
    (`x ∈ [left, left + 2*advance)`, `y ∈ [top, top + 7*scale)`) — the wordmark
    is not smeared over the screen.
 
-7. Assert muted pixels exist in the label row (pixel row
-   `label_row * font->height`, i.e. 160 at 800x600, within
-   `x ∈ [left, left + 17*8)`) — the `aarch64  /  KERNEL` text was rendered.
+7. Assert muted pixels exist in the label CHARACTER CELL BAND
+   `y ∈ [label_row*16, label_row*16 + 16)` = `y ∈ [160, 176)` at 800x600,
+   within `x ∈ [left, left + 17*8)` — the `aarch64  /  KERNEL` text was
+   rendered.
+
+   The band, not a single scanline: in the shipped PSF2 font EVERY glyph used
+   by the label has a zero first row (`row0 == 0x00` for `a a r c h 6 4 / K E R
+   N E L` and the spaces), so the scanline at `y == 160` is legitimately all
+   black. The first non-zero glyph row is 2 (uppercase) / 4 (`/`) / 5
+   (lowercase), i.e. muted pixels start at `y == 162`.
 
 ### V4 — Negative case (aarch64, no framebuffer)
 
@@ -343,16 +383,35 @@ Same launch without `-device ramfb`: assert the serial log contains
 
 ### V5 — x86_64 no-regression
 
-The x86_64 logo path must be unchanged. Two acceptance criteria, both
+The x86_64 logo path must be unchanged. Three acceptance criteria, all
 required:
 
 1. **Serial stream unchanged** — the x86_64 boot log contains no new `[logo]`
    line (the driver is silent on x86_64 by design) and still contains
    `frame buffer remap succeed`.
-2. **Symbol resolution** — `nm` on the x86_64 ELF shows `arch_fb_write_begin`
-   resolving to the strong override in `arch/x86_64/platform/fb_write.c`
-   (not the weak default), and the x86_64 kernel still links exactly one
-   `fb_writer_begin` user.
+
+2. **Weak/strong resolution on x86_64** — `nm` on the x86_64 ELF shows
+   `arch_fb_write_begin` defined EXACTLY ONCE and as a STRONG symbol (`T`),
+   never as a weak one (`W`): the strong override in
+   `kernel/arch/x86_64/platform/fb_write.c` won over the weak default.
+
+3. **Override really delegates to the coordinator** — a source-level check
+   (grep, not `nm`): `kernel/arch/x86_64/platform/fb_write.c` contains a call
+   to `fb_writer_begin(`. The x86_64 ELF must still contain the
+   `fb_writer_begin` symbol (defined once, in `kernel/driver/fb_state.c`).
+
+   The NUMBER of `fb_writer_begin` callers is deliberately NOT a criterion:
+   `nm` lists symbols, not call sites, so no link-time check can count them.
+   The pre-existing call sites are `kernel/driver/fb.c:364`,
+   `kernel/driver/fb_test.c:374`, `kernel/tty/console.c:58` and
+   `kernel/core/printk.c:161`; this change adds one more (the override) and
+   REMOVES one (`kernel/driver/logo.c:54`, whose lease use moves into the
+   override), so the set is expected to stay the same size.
+
+4. **aarch64 stays coordinator-free** — `nm` on the aarch64 ELF shows
+   `arch_fb_write_begin` as a weak symbol (`W`, the default) and shows NO
+   `fb_writer_begin`, `fb_bootstrap_state` or `fb_publish_initial_mapping`
+   symbol at all.
 
 The pixel-level x86_64 comparison is explicitly NOT part of this change: the
 geometry code is untouched and the x86_64 view values are the same lease
