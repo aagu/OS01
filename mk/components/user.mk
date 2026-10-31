@@ -35,6 +35,14 @@ USER_RUNTIME_PROBE := $(USER_ARTIFACT_DIR)/user_udivti3_link_probe.elf
 $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ) FORCE
 	@mkdir -p $(dir $(firstword $(USER_ARTIFACTS))) $(USER_BUILD_DIR)
 	@+$(SHELL) -ec '\
+	  if [ -n "$(DRY_RUN)" ]; then \
+	    env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	      MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	      -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	      USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
+	      all SYSROOT_GENERATION_DIR="$(BUILD_DIR)/sysroot" $(OS01_SUBMAKE_ARGS); \
+	    exit 0; \
+	  fi; \
 	  mkdir -p "$(dir $(LOCK_DIR))"; \
 	  i=0; \
 	  while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
@@ -106,6 +114,10 @@ BUSYBOX_OVERLAY   := $(OS01_ROOT)/config/busybox.overlay
 $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	@mkdir -p $(dir $@) $(BUILD_DIR)/receipts
 	@+$(SHELL) -ec '\
+	  if [ -n "$(DRY_RUN)" ]; then \
+	    echo "  [busybox] dry-run: not rebuilding"; \
+	    exit 0; \
+	  fi; \
 	  mkdir -p "$(dir $(LOCK_DIR))"; \
 	  i=0; \
 	  while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \

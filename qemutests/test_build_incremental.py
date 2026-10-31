@@ -98,5 +98,228 @@ class MbedTLSContractTests(unittest.TestCase):
         self.assertIn("sha256.o", members)
 
 
+class CommandKeyContractTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="cmdkey-contract-")
+        self.addCleanup(self.tmp.cleanup)
+        self.work_dir = Path(self.tmp.name)
+
+        # Ensure base kernel.bin is built
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "kernel.bin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0, f"Setup build failed: {res.stderr}")
+
+    def test_compile_flags_a_b_a(self):
+        """Changing CFLAGS must invalidate .cflags and recompile objects; reverting must recompile again."""
+        cflags_file = ROOT / "build" / "x86_64-clang" / "kernel" / ".cflags"
+        main_o = ROOT / "build" / "x86_64-clang" / "kernel" / "core" / "main.o"
+        self.assertTrue(cflags_file.exists())
+        self.assertTrue(main_o.exists())
+
+        cflags_a = cflags_file.read_text()
+        main_o_mtime_a = main_o.stat().st_mtime_ns
+
+        # Identical build: .cflags and objects must not be touched
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "kernel.bin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(cflags_file.read_text(), cflags_a)
+        self.assertEqual(main_o.stat().st_mtime_ns, main_o_mtime_a)
+
+        # Flag B
+        res = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "PROFILE=x86_64-clang",
+                "KERNEL_EXTRA_CFLAGS=-DOS01_TEST_CMD_KEY_B",
+                "kernel.bin",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0)
+        cflags_b = cflags_file.read_text()
+        self.assertNotEqual(cflags_b, cflags_a)
+        main_o_mtime_b = main_o.stat().st_mtime_ns
+        self.assertGreater(main_o_mtime_b, main_o_mtime_a)
+
+        # Revert to Flag A
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "kernel.bin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0)
+        cflags_reverted = cflags_file.read_text()
+        self.assertEqual(cflags_reverted, cflags_a)
+        main_o_mtime_c = main_o.stat().st_mtime_ns
+        self.assertGreater(main_o_mtime_c, main_o_mtime_b)
+
+    def test_link_flags_relink_only(self):
+        """Changing LDFLAGS must update .link_key and relink ELF without recompiling .o files."""
+        link_key_file = ROOT / "build" / "x86_64-clang" / "kernel" / ".link_key"
+        elf_file = ROOT / "build" / "x86_64-clang" / "kernel" / "kernel.elf"
+        main_o = ROOT / "build" / "x86_64-clang" / "kernel" / "core" / "main.o"
+        self.assertTrue(link_key_file.exists())
+        self.assertTrue(elf_file.exists())
+        self.assertTrue(main_o.exists())
+
+        key_a = link_key_file.read_text()
+        elf_mtime_a = elf_file.stat().st_mtime_ns
+        main_o_mtime_a = main_o.stat().st_mtime_ns
+
+        # Change LDFLAGS
+        res = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "PROFILE=x86_64-clang",
+                "KERNEL_EXTRA_LDFLAGS=--build-id=sha1",
+                "kernel.bin",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0, f"make failed: {res.stderr}")
+        key_b = link_key_file.read_text()
+        self.assertNotEqual(key_b, key_a)
+        self.assertIn("--build-id=sha1", key_b)
+        elf_mtime_b = elf_file.stat().st_mtime_ns
+        self.assertGreater(elf_mtime_b, elf_mtime_a, "kernel.elf was not relinked")
+        self.assertEqual(
+            main_o.stat().st_mtime_ns, main_o_mtime_a, "Kernel object unexpectedly recompiled on LDFLAGS-only change"
+        )
+
+        # Revert LDFLAGS
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "kernel.bin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(link_key_file.read_text(), key_a)
+        elf_mtime_c = elf_file.stat().st_mtime_ns
+        self.assertGreater(elf_mtime_c, elf_mtime_b, "kernel.elf was not relinked on revert")
+        self.assertEqual(
+            main_o.stat().st_mtime_ns, main_o_mtime_a, "Kernel object unexpectedly recompiled on LDFLAGS revert"
+        )
+
+    def test_compiler_switch_recompiles(self):
+        """Switching TARGET_CC / CLANG compiler wrapper must invalidate compile key and recompile objects."""
+        wrapper = self.work_dir / "clang-wrapper"
+        wrapper.write_text("#!/bin/sh\nexec clang \"$@\"\n")
+        wrapper.chmod(0o755)
+
+        cflags_file = ROOT / "build" / "x86_64-clang" / "kernel" / ".cflags"
+        main_o = ROOT / "build" / "x86_64-clang" / "kernel" / "core" / "main.o"
+        cflags_a = cflags_file.read_text()
+        main_o_mtime_a = main_o.stat().st_mtime_ns
+
+        res = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "PROFILE=x86_64-clang",
+                f"CLANG={wrapper}",
+                "kernel.bin",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0, f"make failed: {res.stderr}")
+        cflags_b = cflags_file.read_text()
+        self.assertNotEqual(cflags_b, cflags_a)
+        self.assertIn(str(wrapper), cflags_b)
+        main_o_mtime_b = main_o.stat().st_mtime_ns
+        self.assertGreater(main_o_mtime_b, main_o_mtime_a, "Kernel object did not recompile when compiler changed")
+
+        # Revert compiler
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "kernel.bin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(cflags_file.read_text(), cflags_a)
+        main_o_mtime_c = main_o.stat().st_mtime_ns
+        self.assertGreater(main_o_mtime_c, main_o_mtime_b, "Kernel object did not recompile when compiler reverted")
+
+    def test_linker_switch_relinks(self):
+        """Switching TARGET_LD linker wrapper must invalidate link key and relink without recompiling objects."""
+        wrapper = self.work_dir / "ld-wrapper"
+        wrapper.write_text("#!/bin/sh\nexec /usr/bin/ld.lld \"$@\"\n")
+        wrapper.chmod(0o755)
+
+        link_key_file = ROOT / "build" / "x86_64-clang" / "kernel" / ".link_key"
+        elf_file = ROOT / "build" / "x86_64-clang" / "kernel" / "kernel.elf"
+        main_o = ROOT / "build" / "x86_64-clang" / "kernel" / "core" / "main.o"
+
+        key_a = link_key_file.read_text()
+        elf_mtime_a = elf_file.stat().st_mtime_ns
+        main_o_mtime_a = main_o.stat().st_mtime_ns
+
+        res = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "PROFILE=x86_64-clang",
+                f"TARGET_LD={wrapper}",
+                "kernel.bin",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0, f"make failed: {res.stderr}")
+        key_b = link_key_file.read_text()
+        self.assertNotEqual(key_b, key_a)
+        self.assertIn(str(wrapper), key_b)
+        elf_mtime_b = elf_file.stat().st_mtime_ns
+        self.assertGreater(elf_mtime_b, elf_mtime_a, "kernel.elf was not relinked when linker changed")
+        self.assertEqual(
+            main_o.stat().st_mtime_ns, main_o_mtime_a, "Kernel object unexpectedly recompiled when linker changed"
+        )
+
+        # Revert linker
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "kernel.bin"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(link_key_file.read_text(), key_a)
+        elf_mtime_c = elf_file.stat().st_mtime_ns
+        self.assertGreater(elf_mtime_c, elf_mtime_b, "kernel.elf was not relinked when linker reverted")
+        self.assertEqual(
+            main_o.stat().st_mtime_ns, main_o_mtime_a, "Kernel object unexpectedly recompiled when linker reverted"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

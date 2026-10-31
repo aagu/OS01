@@ -130,12 +130,30 @@ $(LIBK_ARCHIVE): $(LIBK_ALL_OBJS)
 	@mkdir -p $(dir $@)
 	$(TARGET_AR) rcs $@ $^
 
+# ── Compile keys ───────────────────────────────────────────
+LIBC_COMPILE_KEY := $(BUILD_DIR)/.libc_compile.key
+LIBK_COMPILE_KEY := $(BUILD_DIR)/.libk_compile.key
+
+.PHONY: LIBC_KEY_FORCE LIBK_KEY_FORCE
+LIBC_KEY_FORCE:
+LIBK_KEY_FORCE:
+
+$(LIBC_COMPILE_KEY): LIBC_KEY_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'compiler=$(EFFECTIVE_CC) toolchain=$(shell $(EFFECTIVE_CC) --version 2>/dev/null | head -1) cflags=$(strip $(CFLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
+$(LIBK_COMPILE_KEY): LIBK_KEY_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'compiler=$(EFFECTIVE_CC) toolchain=$(shell $(EFFECTIVE_CC) --version 2>/dev/null | head -1) cflags=$(strip $(LIBK_CFLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
 # ── Compile rules ──────────────────────────────────────────
-$(BUILD_DIR)/%.o: %.c
+$(BUILD_DIR)/%.o: %.c $(LIBC_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD_DIR)/%.libk.o: %.c
+$(BUILD_DIR)/%.libk.o: %.c $(LIBK_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 

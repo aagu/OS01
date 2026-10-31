@@ -51,6 +51,24 @@ ifeq ($(USER_DEBUG),1)
 override CFLAGS += -DUSER_DEBUG=1
 endif
 
+# ── Compile & link keys ──────────────────────────────────────
+USER_COMPILE_KEY := $(OBJ_DIR)/.user_compile.key
+USER_LINK_KEY    := $(BUILD_DIR)/.user_link.key
+
+.PHONY: USER_COMPILE_KEY_FORCE USER_LINK_KEY_FORCE
+USER_COMPILE_KEY_FORCE:
+USER_LINK_KEY_FORCE:
+
+$(USER_COMPILE_KEY): USER_COMPILE_KEY_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'compiler=$(EFFECTIVE_CC) toolchain=$(shell $(EFFECTIVE_CC) --version 2>/dev/null | head -1) cflags=$(strip $(CFLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
+$(USER_LINK_KEY): USER_LINK_KEY_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'linker=$(TARGET_LD) ldflags=$(strip $(USER_RAW_LDFLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
 USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
 
 # ── Program discovery and app manifests ─────────────────────
@@ -60,7 +78,7 @@ include $(OS01_ROOT)/user/apps.mk
 PROGRAMS := $(addprefix $(BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 CRT0_OBJ := $(OBJ_DIR)/crt0.o
 SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
-COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld Makefile apps.mk
+COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld Makefile apps.mk $(USER_LINK_KEY)
 
 # ── User runtime consumer link probe (monitor plan Task 5) ────
 # The root user component passes the consumer=user builtins archive as
@@ -75,7 +93,7 @@ RUNTIME_PROBE_ELF  := $(BUILD_DIR)/$(RUNTIME_PROBE_NAME).elf
 RUNTIME_PROBE_OBJ  := $(OBJ_DIR)/$(RUNTIME_PROBE_NAME).o
 
 $(RUNTIME_PROBE_OBJ): $(OS01_ROOT)/runtime/selftest/$(RUNTIME_PROBE_NAME).c \
-                      $(OS01_ROOT)/runtime/selftest/udivti3_vectors.h
+                      $(OS01_ROOT)/runtime/selftest/udivti3_vectors.h $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -I$(OS01_ROOT)/runtime/selftest \
 		-MMD -MP -c $< -o $@
@@ -92,11 +110,11 @@ $(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.l
 .PHONY: all clean
 all: $(PROGRAMS) $(RUNTIME_PROBE_ELF)
 
-$(OBJ_DIR)/%.o: %.c
+$(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(OBJ_DIR)/%.o: %.S
+$(OBJ_DIR)/%.o: %.S $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
@@ -115,9 +133,13 @@ $(foreach app,$(USER_FLAT_PROGRAMS),$(eval $(call flat_program,$(app))))
 define directory_program
 USER_APP_$(1)_OBJECTS := $(call user_objects,$(USER_APP_$(1)_SOURCES)) $(USER_APP_$(1)_EXTRA_OBJS)
 USER_OBJECTS += $$(USER_APP_$(1)_OBJECTS)
+$$(OBJ_DIR)/$(1)/.app_key: USER_COMPILE_KEY_FORCE
+	@mkdir -p $$(dir $$@)
+	@printf '%s\n' 'cflags=$(strip $$(USER_APP_$(1)_CFLAGS)) ldflags=$(strip $$(USER_APP_$(1)_LDFLAGS))' > $$@.new
+	@cmp -s $$@.new $$@ || mv -f $$@.new $$@
 $(call user_objects,$(filter $(1)/%,$(USER_APP_$(1)_SOURCES))): override CFLAGS += $(USER_APP_$(1)_CFLAGS)
-$(call user_objects,$(USER_APP_$(1)_SOURCES)): $(1)/app.mk
-$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk $$(filter %.a,$$(USER_APP_$(1)_LDLIBS))
+$(call user_objects,$(USER_APP_$(1)_SOURCES)): $(1)/app.mk $$(OBJ_DIR)/$(1)/.app_key
+$(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk $$(filter %.a,$$(USER_APP_$(1)_LDLIBS)) $$(OBJ_DIR)/$(1)/.app_key
 	@mkdir -p $$(dir $$@)
 	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) $(USER_APP_$(1)_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $$(USER_APP_$(1)_OBJECTS) $(USER_APP_$(1)_LDLIBS) -lc
 	$$(OBJ_CPY) --strip-debug $$@

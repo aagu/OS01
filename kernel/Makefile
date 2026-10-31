@@ -240,6 +240,12 @@ ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 else
 ALL_LDFLAGS  := $(LDFLAGS) $(ARCH_LDFLAGS) -L$(SYSROOT)/usr/lib
 endif
+KERNEL_EXTRA_LDFLAGS ?=
+comma := ,
+STAGE1_EXTRA_LDFLAGS := $(foreach f,$(KERNEL_EXTRA_LDFLAGS),$(if $(filter -Wl%,$(f)),$(f),-Wl$(comma)$(f)))
+FINAL_EXTRA_LDFLAGS  := $(foreach f,$(KERNEL_EXTRA_LDFLAGS),$(patsubst -Wl$(comma)%,%,$(f)))
+ALL_LDFLAGS        += $(STAGE1_EXTRA_LDFLAGS)
+KERNEL_RAW_LDFLAGS += $(FINAL_EXTRA_LDFLAGS)
 LIBS         := $(ARCH_LIBS)
 
 # ── DEBUG / NDEBUG (align with busybox convention) ────────
@@ -409,7 +415,15 @@ FLAGS_STAMP := $(BUILD_DIR)/.cflags
 FLAGS_STAMP_FORCE:
 $(FLAGS_STAMP): FLAGS_STAMP_FORCE
 	@mkdir -p $(dir $@)
-	@printf '%s\n' 'deps=system-headers $(strip $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS))' > $@.new
+	@printf '%s\n' 'compiler=$(EFFECTIVE_CC) toolchain=$(shell $(EFFECTIVE_CC) --version 2>/dev/null | head -1) deps=system-headers flags=$(strip $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
+LINK_KEY_STAMP := $(BUILD_DIR)/.link_key
+.PHONY: LINK_KEY_STAMP_FORCE
+LINK_KEY_STAMP_FORCE:
+$(LINK_KEY_STAMP): LINK_KEY_STAMP_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'linker=$(TARGET_LD) ldflags=$(strip $(ALL_LDFLAGS) $(LIBS) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR))' > $@.new
 	@cmp -s $@.new $@ || mv -f $@.new $@
 
 # ── Targets ────────────────────────────────────────────────
@@ -510,7 +524,7 @@ endif
 # (e.g., editing libc/stdio/vsprintf.c) triggers a relink without an
 # explicit kernel-clean.  Without this, make cannot know that -lk has
 # new content; the link only re-runs when KERNEL_OBJECTS changes.
-$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(ARCHDIR)/$(ARCH_LINKER) $(LINK_KEY_STAMP) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
 	complete="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
@@ -552,7 +566,7 @@ $(BUILD_DIR)/kernel/kallsyms.o: core/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
-$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(LINK_KEY_STAMP) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 ifeq ($(ARCH),x86_64)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \

@@ -23,6 +23,18 @@ ifdef KERNEL_ARTIFACT
 $(KERNEL_ARTIFACT): $(SYSROOT_STAMP) $(KERNEL_RUNTIME_PREREQ) FORCE
 	@mkdir -p $(dir $@)
 	@+$(SHELL) -ec '\
+	  if [ -n "$(DRY_RUN)" ]; then \
+	    env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	      MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	      -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	      ARCH=x86_64 \
+	      kernel.bin \
+	      KERNEL_RUNTIME_INPUTS="$(KERNEL_RUNTIME_INPUTS)" \
+	      KERNEL_RUNTIME_PREREQ="$(KERNEL_RUNTIME_PREREQ)" \
+	      KERNEL_RUNTIME_LINK_RECEIPT="$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	      $(OS01_SUBMAKE_ARGS); \
+	    exit 0; \
+	  fi; \
 	  mkdir -p "$(dir $(LOCK_DIR))"; \
 	  i=0; \
 	  while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
