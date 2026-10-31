@@ -327,6 +327,38 @@ class CiWorkflowContractTests(unittest.TestCase):
                     f"x86-checks has duplicate step running '{redundant}' (already inside test-static)",
                 )
 
+    def test_ci_artifact_manifest_creation(self) -> None:
+        """x86-checks and aarch64-checks must create manifests and upload verified artifacts."""
+        blocks = _job_blocks(self.text)
+        x86_block = blocks.get("x86-checks", "")
+        self.assertIn("ci_artifact.py create", x86_block)
+        self.assertIn("name: x86_64-disk-image", x86_block)
+
+        aarch64_block = blocks.get("aarch64-checks", "")
+        self.assertIn("ci_artifact.py create", aarch64_block)
+        self.assertIn("name: aarch64-uefi-image", aarch64_block)
+
+    def test_master_images_reuses_and_verifies_artifacts(self) -> None:
+        """master-images must download artifacts, verify manifests, and not rebuild from scratch."""
+        blocks = _job_blocks(self.text)
+        master_block = blocks.get("master-images", "")
+        self.assertIn("download-artifact", master_block)
+        self.assertIn("name: x86_64-disk-image", master_block)
+        self.assertIn("name: aarch64-uefi-image", master_block)
+        self.assertIn("ci_artifact.py verify", master_block)
+
+        # Must not redundantly rebuild either image
+        cmds = _step_run_commands(master_block)
+        for cmd in cmds:
+            self.assertFalse(
+                re.search(r"make\s+.*disk\.img", cmd),
+                f"master-images should not rebuild disk.img, found: {cmd}",
+            )
+            self.assertFalse(
+                re.search(r"make\s+.*aarch64-uefi", cmd),
+                f"master-images should not rebuild aarch64-uefi, found: {cmd}",
+            )
+
     def test_all_catalog_suites_covered_in_ci(self) -> None:
         """Every suite in the catalog must be covered by PR or nightly jobs."""
         from qemutests.test_catalog import load_catalog

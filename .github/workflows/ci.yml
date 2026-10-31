@@ -143,6 +143,25 @@ jobs:
       - name: Build disk.img
         run: make -j"$(nproc)" disk.img
 
+      - name: Generate x86_64 disk.img manifest
+        run: |
+          python3 qemutests/ci_artifact.py create \
+            --image disk.img \
+            --profile x86_64-clang \
+            --variant normal \
+            --output build/x86_64-clang/image/disk.img.manifest.json \
+            --commit "${{ github.sha }}"
+
+      - name: Upload verified x86_64 disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-disk-image
+          path: |
+            disk.img
+            build/x86_64-clang/image/disk.img.manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Host unit tests
         run: make test-host
 
@@ -230,6 +249,25 @@ jobs:
 
       - name: Build aarch64 UEFI image
         run: make -j"$(nproc)" CC="clang -target aarch64-none-elf" LD="ld.lld -m aarch64elf" AR=llvm-ar PROFILE=aarch64-clang aarch64-uefi
+
+      - name: Generate aarch64 UEFI image manifest
+        run: |
+          python3 qemutests/ci_artifact.py create \
+            --image build/aarch64-clang/image/aarch64-uefi.img \
+            --profile aarch64-clang \
+            --variant normal \
+            --output build/aarch64-clang/image/aarch64-uefi.img.manifest.json \
+            --commit "${{ github.sha }}"
+
+      - name: Upload verified aarch64 UEFI image
+        uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-uefi-image
+          path: |
+            build/aarch64-clang/image/aarch64-uefi.img
+            build/aarch64-clang/image/aarch64-uefi.img.manifest.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: AArch64 SMP smoke (includes 2 CPUs)
         run: make PROFILE=aarch64-clang test-aarch64 MODE=smp
@@ -372,8 +410,8 @@ jobs:
 
   # ── Master artifact publication (push to master only) ─────────
   # Runs only after the check jobs have all passed on master.
-  # Rebuilds both images fresh because the contract job ends with
-  # `make clean` and the uploaded disk.img must come from a green run.
+  # Reuses verified disk images produced and validated by check jobs,
+  # verifying commit SHA, profile, variant, and sha256 checksums.
   master-images:
     name: master images
     needs: [harness, x86-checks, aarch64-checks, contract]
@@ -400,18 +438,32 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
-      - name: Build x86_64 disk.img
-        run: make -j"$(nproc)" disk.img
+      - name: Download verified x86_64 disk image
+        uses: actions/download-artifact@v4
+        with:
+          name: x86_64-disk-image
+          path: .
 
-      - name: Build aarch64 UEFI image
-        run: make -j"$(nproc)" CC="clang -target aarch64-none-elf" LD="ld.lld -m aarch64elf" AR=llvm-ar PROFILE=aarch64-clang aarch64-uefi
+      - name: Download verified aarch64 UEFI image
+        uses: actions/download-artifact@v4
+        with:
+          name: aarch64-uefi-image
+          path: .
 
-      - name: Verify images exist
+      - name: Verify reused CI image artifacts
         run: |
-          test -f disk.img
-          test -f build/aarch64-clang/image/aarch64-uefi.img
-          sha256sum disk.img
-          sha256sum build/aarch64-clang/image/aarch64-uefi.img
+          python3 qemutests/ci_artifact.py verify \
+            --manifest build/x86_64-clang/image/disk.img.manifest.json \
+            --image disk.img \
+            --expected-commit "${{ github.sha }}" \
+            --expected-profile x86_64-clang \
+            --expected-variant normal
+          python3 qemutests/ci_artifact.py verify \
+            --manifest build/aarch64-clang/image/aarch64-uefi.img.manifest.json \
+            --image build/aarch64-clang/image/aarch64-uefi.img \
+            --expected-commit "${{ github.sha }}" \
+            --expected-profile aarch64-clang \
+            --expected-variant normal
 
       - name: Upload disk images
         uses: actions/upload-artifact@v4
@@ -419,6 +471,8 @@ jobs:
           name: os01-disk-images
           path: |
             disk.img
+            build/x86_64-clang/image/disk.img.manifest.json
             build/aarch64-clang/image/aarch64-uefi.img
+            build/aarch64-clang/image/aarch64-uefi.img.manifest.json
           if-no-files-found: error
           retention-days: 30
