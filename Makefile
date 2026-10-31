@@ -47,6 +47,7 @@ KERNEL_SELFTEST ?=
 export KERNEL_SELFTEST
 
 include $(base)/mk/components/run.mk
+include $(base)/mk/tests/catalog.mk
 
 # ── Default goal ──────────────────────────────────────────
 # Bare `make` builds the default profile's disk image (the project-root

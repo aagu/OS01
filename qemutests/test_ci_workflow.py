@@ -308,5 +308,58 @@ class CiWorkflowContractTests(unittest.TestCase):
             "not count)")
 
 
+    def test_aarch64_contract_step_is_invoked(self) -> None:
+        """ci.yml must invoke aarch64 build contract in contract job."""
+        self.assertTrue(
+            self._step_invocations("make", "PROFILE=aarch64-clang", "test-contract"),
+            "ci.yml must run `make PROFILE=aarch64-clang test-contract` in contract job",
+        )
+
+    def test_no_duplicate_audits_in_pr(self) -> None:
+        """x86-checks must not redundantly invoke audits already covered by test-static."""
+        x86_block = _job_blocks(self.text).get("x86-checks", "")
+        cmds = _step_run_commands(x86_block)
+        for cmd in cmds:
+            for redundant in ("test-runtime", "test-kernel-layout", "test-user-canary"):
+                self.assertNotIn(
+                    redundant,
+                    cmd,
+                    f"x86-checks has duplicate step running '{redundant}' (already inside test-static)",
+                )
+
+    def test_all_catalog_suites_covered_in_ci(self) -> None:
+        """Every suite in the catalog must be covered by PR or nightly jobs."""
+        from qemutests.test_catalog import load_catalog
+
+        records, errors = load_catalog()
+        self.assertEqual(errors, [])
+
+        workflow_cmds = " ".join(_make_commands(self.text))
+
+        for r in records:
+            # Check key identifier appears in workflow text
+            if "SUITE=" in r.entrypoint:
+                suite_name = r.entrypoint.split("SUITE=")[1].split()[0]
+                self.assertIn(
+                    f"SUITE={suite_name}",
+                    self.text,
+                    f"Catalog suite '{r.id}' (SUITE={suite_name}) missing from CI workflow",
+                )
+            elif "MODE=" in r.entrypoint:
+                mode_name = r.entrypoint.split("MODE=")[1].split()[0]
+                self.assertIn(
+                    mode_name,
+                    self.text,
+                    f"Catalog suite '{r.id}' (MODE={mode_name}) missing from CI workflow",
+                )
+            else:
+                target = r.entrypoint.strip().split()[0]
+                self.assertIn(
+                    target,
+                    self.text,
+                    f"Catalog suite '{r.id}' ({target}) missing from CI workflow",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

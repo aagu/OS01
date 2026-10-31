@@ -134,35 +134,23 @@ jobs:
           qemu-system-x86_64 --version | head -1
           python3 --version
 
+      # GUI incremental probe exercises generation advancing and staging cleanup.
+      # Run before final disk image build so test-altered sysroot state does not
+      # leak into subsequent guest E2E validation.
+      - name: GUI incremental contract
+        run: make PROFILE=x86_64-clang test-gui-incremental
+
       - name: Build disk.img
         run: make -j"$(nproc)" disk.img
 
       - name: Host unit tests
         run: make test-host
 
-      - name: Runtime validation
-        run: make test-runtime
-
-      # The static-audit bucket: it also runs the GUI build audit
-      # (gui_build_audit.py), which is the ONLY place the published sysroot
-      # contract and the target link probe are enforced.  The job already
-      # satisfies require_capability,rootfs (make test-runtime above).
+      # The static-audit bucket: runs all 14 static audits (runtime, stack-canary,
+      # validate-kernel, kernel-layout, user-canary, syscall-boundary, gui-build, etc.)
+      # in one shot without redundant individual step invocations.
       - name: Static audits
         run: make PROFILE=x86_64-clang test-static
-
-      # The GUI library's incremental contract: a repeated build must not
-      # recompile, touching the public input header must rebuild the
-      # dependents, install must clear the staging tree, and a new sysroot
-      # generation must be clean while the historical ones are preserved.
-      # It is a plain root entry point and needs the same rootfs capability.
-      - name: GUI incremental contract
-        run: make PROFILE=x86_64-clang test-gui-incremental
-
-      - name: Kernel layout
-        run: make test-kernel-layout
-
-      - name: User canary
-        run: make test-user-canary
 
       - name: x86 phase-0 E2E (1 CPU)
         run: QEMU_SMP=1 make test-qemu SUITE=phase-0
@@ -287,10 +275,17 @@ jobs:
       - name: x86_64 build contract
         run: make test-contract
 
-      # aarch64 build contract: skipped — its 'targets' mode triggers a
-      # destructive rm -rf build/x86_64-clang/ via the '+'-prefixed
-      # shell recipe in mk/components/kernel.mk, which fails the contract
-      # even with make -n. Pre-existing project bug, tracked separately.
+      - name: aarch64 build contract
+        run: make PROFILE=aarch64-clang test-contract
+
+      - name: Upload run logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-test-logs
+          path: build/*/logs/tests/**
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── Full CPU / RAM / fault matrix (schedule + manual only) ────
   # The plan keeps the slow 1/2/4/8 CPU sweep and the RAM-exhaustion /
@@ -337,16 +332,31 @@ jobs:
             QEMU_SMP="${cpus}" make OS01_SYSTEST=1 test-qemu SUITE=systest || exit 1
           done
 
+      - name: x86 guest nightly suites
+        run: |
+          make test-qemu SUITE=inittab-phase || exit 1
+          make test-qemu SUITE=network || exit 1
+          make test-qemu SUITE=gfx || exit 1
+          make test-qemu SUITE=resolution || exit 1
+          make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution || exit 1
+          make test-qemu SUITE=driver-model || exit 1
+          make test-qemu SUITE=monitor || exit 1
+          make test-qemu SUITE=terminal-present || exit 1
+          make test-qemu SUITE=intr-x86 || exit 1
+          make test-qemu SUITE=gui || exit 1
+          make test-qemu SUITE=gui-desktop || exit 1
+          make test-syscall-repeat || exit 1
+
       - name: AArch64 fault / SMP MODEs
         run: |
-          for mode in smp gic-spi sync-fault; do
+          for mode in smp no-ack gic-spi sync-fault m3-probe; do
             echo "== aarch64 MODE=${mode} =="
             make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
           done
 
       - name: AArch64 M1 RAM-exhaustion MODEs
         run: |
-          for mode in m1-ram m1-sparse m1-arena-exhaust m1-table-exhaust; do
+          for mode in m1-ram m1-sparse m1-arena-exhaust m1-table-exhaust m1-ap-bad-root; do
             echo "== aarch64 MODE=${mode} =="
             make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
           done
