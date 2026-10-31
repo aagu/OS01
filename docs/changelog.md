@@ -25,15 +25,45 @@
 
 - fix(hosttests): **Parked：brk 源码扫描缺锚点保护闭环**：`hosttests/cases/test_brk_pages.c` 的断言只累计失败，原先缺少源码文件或扫描锚点时仍继续调用 `strstr`/指针运算，导致宿主 SIGSEGV。四个扫描用例现在记录 FAIL 后跳到统一释放路径，保留其余用例与最终 protocol-v1 END；有界扫描先按剩余长度裁剪再使用。新增 `qemutests/test_brk_source_scan.py`，在临时目录编译实际扫描函数，覆盖正常源码、两个缺文件场景与八种缺锚点场景，并接入 `test-harness`。修复前十个负例均 SIGSEGV，修复后均退出 1 且有 FAIL/END；正常源码通过。验证：聚焦 3 项 unittest PASS，`make PROFILE=x86_64-clang test-host HOST_TEST_JOBS=4` PASS。只闭环该子项，dispatch 其他 host 补强仍留在 roadmap。
 
+- feat(sched, aarch64): **aarch64 EL1 BSP 协作式内核线程调度全阶段（P1–P5）闭环**（分支 `feature/aarch64-el1-sched`，merge `fa7d51ac`，commit `ac47c3d5..58cdd063`）：
+  - **P1 架构上下文门面**：新增 `kernel/include/arch/context.h` 抽象上下文 API，提取每架构 `thread_t` 布局与偏移断言（x86 偏移零漂移，`test_sched_layout_offsets` 运行时钉住）；
+  - **P2 公共调度器拆分**：从单体中解耦 `sched/boot.c`、`sched/kthread.c` 与私有头 `sched/internal.h`，x86 行为经 phase-0、systest、kernel-selftest 严格回归锁死；
+  - **P3 aarch64 EL1 切换与 BSP 栈交接**：编写 aarch64 EL1 上下文切换机器码（`switch.S` / `thread_entry.S` / `task_arch.c` 预切栈上下文校验，确保坏 SP/PC 在切栈前 fatal）与 BSP 栈交接逻辑（仅 CPU0 发布 `scheduler_ok=1`，AP 保持工作槽隔离）；
+  - **P4 协作式调度原语与协议自测**：落地 `kthread_yield()`（恢复 IRQ 状态）、blocker 四时序、`kthread_exit()` 自回收与 9 用例 protocol-v1 late selftest（单 END，total=passed=14）；
+  - **P5 端到端验收面**：新增 `MODE=sched` 严格证据 runner（冻结 `[sched-evidence]` 字段/顺序/谓词，120s 绝对期限），构建 4 个编译期故障注入变体（`sched-fault-sp-top`/`sp-low`/`pc-low`/`pc-data`）证明坏上下文在**切栈前**触发致命停机且无受害者提交；宿主分配/放置/布局审计与 x86 UP 引导窗口真机探针全绿；双架构回归矩阵退出码全 0。设计 [spec](superpowers/specs/2026-10-30-aarch64-el1-kthread-scheduler-design.md)，分步 plan 详见 `docs/superpowers/plans/2026-10-30-aarch64-el1-sched-*`，验证证据见 [验证报告](superpowers/reports/2026-10-30-aarch64-el1-sched-validation.md)。
+
+- feat(aarch64): **aarch64 引导字标（boot logo）经 `fb_write` facade 绘制与端到端验证闭环**（commits `0b025985..2273f07b`）：
+  - **架构门面**：新增 `arch/include/fb_write.h`，定义 `arch_fb_write_begin/end` 独占 framebuffer 写入视图，弱默认 `driver/arch_fb_write.c`（直绘 `Pos.FB_addr`，无 coordinator），x86_64 强覆盖 `arch/x86_64/platform/fb_write.c`（内嵌 display coordinator writer lease）；
+  - **字标驱动**：重构 `kernel/driver/logo.c` 为架构中立驱动，经 `arch/fb_write.h` 获取受保护帧缓冲视图并绘制 OS01 启动字标；
+  - **aarch64 引导接入**：`aarch64_boot_fb_init()` 在帧缓冲映射完成后立即调用 `boot_logo_show()` 绘制字标，原有 `[fb]` banner 排在字标下方；
+  - **端到端验证**：新增 `make PROFILE=aarch64-clang test-aarch64 MODE=boot-logo` 验收套件，通过 PPM 图像比对与像素统计严格断言字标颜色与位置；双架构无回归。设计 [spec](superpowers/specs/2026-10-31-aarch64-boot-logo-design.md)，实施 [plan](superpowers/plans/2026-10-31-aarch64-boot-logo.md)。
+
 ## 2026-10-28
 
 - fix(selftest): **`fd_refcount rc_-1` 间歇失败闭环**：原 fixture 仅要求累计 CPU mask 不相交，既受迁移影响，也没有保证两个压力循环重叠。两类 worker 改为发布前绑定不同 CPU；reader 持有文件/表引用跨越远端 close/exit，验证 detach 后仍可安全使用。get-vs-detach 的 10000 次 close 每 16 次要求一次实际 reader 操作确认，共 625 批，避免 reader 提前完成。增加有界 abort/清理等待、创建前引用预留，并按 `schedule()` 返回 IRQ 关闭的契约恢复 IRQ 与 timer 进度。修复前真实双核自测 39/40 FAIL；最终 SMP2/4/8 各三轮完整 40/40 PASS，四种创建失败与两种缺失确认注入均正确 FAIL 且完整套件继续结束。宿主门禁、静态门禁和 60 项 runner 测试通过；独立评审无阻断问题。单核明确拒绝跨核覆盖。只改 fixture，不修改 fd 协议、调度器或 ABI。原失败、执行中作废的并行构建结果及有效重跑证据均保留于 [调查与修复记录](debug/2026-10-28-fd-refcount.md)。
+
+## 2026-10-26
+
+- feat(gui): **GUI-2b 原生控件体系与统一焦点引擎闭环**（commit `badfdfce..f6d48829`）：
+  - **公共无 LVGL 符号暴露的原生控件体系**：新增 `gui_widget.h`、`gui_layout.h`、`gui_event.h`，提供类型化几何布局（flex/grid）、层级树管理与事件派发，已发布头纯净无 `lv_*` 泄漏；
+  - **统一焦点引擎**：新增 `gui_focus.h`，统一管理键盘导航序列（Tab / Shift+Tab 移动、Enter 激活、Esc 返回），彻底废除 `user/desktop` 临时自建的第二套焦点模型（`desktop_shell_focus_*`）；
+  - **容量与生命周期安全**：单平台上限 1024 控件与 128 焦点项；控件销毁时自动摘除注册的焦点项，杜绝野指针挂死；
+  - **桌面全面重构**：桌面状态栏、抽屉、启动器、设置及壳内四个应用（Files/Terminal/Sysinfo/Settings）全面切为原生控件与统一焦点驱动；
+  - **全量验证**：`test-gui-incremental` 4 阶段增量构建契约全 PASS；`test-gui-host` 全 PASS；`qemutests/gui_build_audit.py` 严格审计无 LVGL 符号泄漏；QEMU 端到端回归 `SUITE=gui` 24/24 PASS，`SUITE=gui-desktop` SMP=1/2 9 场景全 PASS。设计 [spec](superpowers/specs/2026-10-25-gui-2b-public-widget-focus-design.md)，实施 [plan](superpowers/plans/2026-10-25-gui-2b-public-widget-focus.md)。
 
 ## 2026-10-25
 
 - feat(intr): **x86 当前安装入口第二期闭环**：20 条异常 + 28 条 IRQ 接入共同事件分派，x86 原生适配与中立注册表分离；保留 gate/返回与设备 ACK、timer/IPI EOI 归属。修复连续 gate 的 IST 编码约束、按 MADT type-4 配置 NMI，并在 AP descriptor/IST/TR 就绪后启用 NMI。新增 48-gate 运行时核对、真实 timer/TLB/resched、软件 `int 0xff` 恢复及隔离 `int3`/post-percpu QMP NMI 验收。矩阵、既有 `fd_refcount` 失败与证据边界见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)；ARM 语义、M4、上下文切换与统一 `kernel_main` 不计入本次完成。
 
 ## 2026-10-24
+
+- refactor(vfs): **ARCH-5 VFS 抽象补强全阶段（Phase 1–4）闭环**（merge `c01d7969`，commits `3d95e973..61a5d15d`）：
+  - **Phase 1（文件系统类型注册表）**：引入 `vfs_fs_type_t` 注册表与 `vfs_mount_fs` 统一挂载入口，devfs/ext2/vfat/tmpfs/procfs 统一注册；引导文件系统挂载切至 `vfs_mount_fs`；
+  - **Phase 2A（ops 拆分与元数据补全）**：`vfs_ops_t` 拆分为 `vfs_inode_ops_t` 与 `vfs_file_ops_t`，新增 `lookup` 与 `getattr` 方法；`vfs_node` 补齐 mode/uid/gid/atime/mtime/ctime/nlink 等 POSIX 属性；
+  - **Phase 2B（活跃节点生命周期与延迟孤儿回收）**：引入 `active_nodes` 注册表与 `evict_node` 生命周期分派；tmpfs 引用计数生命周期；ext2/FAT 延迟孤儿节点回收（deferred orphan reclamation）与共享 `fat_file_object` 生命周期；
+  - **Phase 3（层级节点挂载树）**：挂载点直接挂在 `vfs_node` 上，以层级节点挂载树（hierarchical node-attached mount tree）彻底废除旧的路径字符串前缀匹配；
+  - **Phase 4（有界 LRU dcache 引擎）**：实现有界 256 项 LRU dcache 引擎，无缝接入路径解析与命名空间变动，变动与冲刷路径零堆分配（zero heap allocation）；
+  - **全量测试与回归**：新增 host 单元测试 `test_vfs_fs_registry`、`test_vfs_iops_fops`、`test_vfs_active_nodes`、`test_vfs_mount_tree`、`test_vfs_dcache` 全 PASS；`test-host`、`test-static`、QEMU `phase-0`、`systest`（99/99 全部通过）回归。设计 [spec](superpowers/specs/2026-10-24-arch5-vfs-abstraction-design.md)，分步计划详见 `docs/superpowers/plans/2026-10-24-arch5-*`。
 
 - fix(qemutests): **dispatch 第一期遗留 shootdown-probe 验收闭环**：runner 及 fixture 从旧 `M3-SHOOTDOWN-PROBE:` 对齐到内核实际 `SHOOTDOWN-PROBE:`，删除未使用的旧前缀常量。新增独立正反例及临时编译真实 probe 函数体的生产者协议回归；旧 runner 五次预期失败，修复后聚焦 11 项、完整 AArch64 harness 56 项全通过。正式 `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe` 退出 0、START/OK 各一次、无 probe SKIP/FAIL；不改内核实现，保留原阶段一历史失败。详见 [调查与修复证据](debug/2026-10-24-shootdown-probe-investigation.md#修复与正式验收)。
 - feat(gui): **GUI-3：桌面指针换成图标光标，壁纸改用 `surface_dim`**：鼠标光标从「纯白程序绘制的 12×18 箭头」换成用户提供的箭头图标（16×24，LVGL 图像资源，热点在左上角）。纯白箭头在近白壁纸（`#FDFCFF`）上实际不可见；新光标自带深色主体 + 浅色描边，任意底色上都有对比度。
