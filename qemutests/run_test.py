@@ -407,7 +407,9 @@ class TestRunner:
         # File-serial mode: legacy file-polling loop.
         if timeout is None:
             timeout = self.timeout
-        deadline = time.time() + timeout
+        elif self.timeout is not None:
+            timeout = min(timeout, self.timeout)
+        deadline = time.time() + (timeout if timeout is not None else 0)
         buf = ""
         last_size = 0
 

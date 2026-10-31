@@ -353,6 +353,9 @@ class ProcessSessionPdeathTests(unittest.TestCase):
         )
         try:
             assert proc.stdout is not None
+            import select
+            rlist, _, _ = select.select([proc.stdout], [], [], 10.0)
+            self.assertTrue(rlist, "timeout waiting for helper child pid")
             line = proc.stdout.readline().strip()
             self.assertTrue(line.isdigit(), f"no child pid from {line!r}")
             child = int(line)
