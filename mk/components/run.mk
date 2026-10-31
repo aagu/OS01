@@ -467,7 +467,7 @@ test-aarch64-boot-logo:
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-boot-logo/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  --log-dir "$(BUILD_DIR)/logs/aarch64-boot-logo"
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no

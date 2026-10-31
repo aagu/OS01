@@ -53,10 +53,6 @@ except ImportError:  # pragma: no cover — archiving is optional evidence
 
 SUITE = "aarch64-boot-logo"
 
-
-class SuiteEnvironmentError(RuntimeError):
-    """A preparation or launch failure — ERROR (exit 2), never a FAIL."""
-
 # ── Logo constants mirrored from kernel/driver/logo.c ──────────
 LOGO_INK = (0xE8, 0xF0, 0xF7)       # 0x00e8f0f7
 LOGO_ACCENT = (0x3B, 0xD6, 0xC6)    # 0x003bd6c6
@@ -70,13 +66,24 @@ INK_GLYPHS = 2
 ACCENT_GLYPHS = 2
 
 FONT_W, FONT_H = 8, 16              # PSF2 metrics of kernel/driver/font.psf
-LABEL_LEN = 17                     # len("aarch64  /  KERNEL")
+# The caption the kernel draws under the wordmark (the aarch64 kernel's
+# ARCH_BOOT_LOGO_LABEL): "aarch64" + 2 spaces + "/" + 2 spaces + "KERNEL"
+# is 18 characters — a hard-coded 17 would drop the last character cell
+# and let a truncated caption pass.
+LOGO_LABEL = "aarch64  /  KERNEL"
+LABEL_LEN = len(LOGO_LABEL)
 
 LOGO_DRAWN_MARKER = "[logo] boot logo drawn"
 LOGO_SKIPPED_MARKER = "[logo] skipped: no framebuffer"
 FB_READY_MARKER = "[fb] frame buffer remap succeed"
 FB_ABSENT_MARKER = "[fb] no framebuffer in handoff"
 IDLE_MARKER = "[sched] idle-ready"
+
+# Bound of the optional SECONDARY wait (see ``_await_marker``): after the
+# primary marker, the kernel may need a moment more before it draws the
+# wordmark.  The wait is bounded, and a missing marker stays a checker
+# failure — never a timeout.
+SECONDARY_WAIT_BOUND_S = 5.0
 
 
 def logo_scale(xres: int, yres: int) -> int:
@@ -98,7 +105,7 @@ def logo_geometry(xres: int, yres: int) -> dict:
     label_row = (line_y + 12 + FONT_H - 1) // FONT_H
     label_col = left // FONT_W
     ink_bits = sum(GLYPH_BITS[:INK_GLYPHS])
-    accent_bits = sum(GLYPH_BITS[INK_GLYPHS:])
+    accent_bits = sum(GLYPH_BITS[INK_GLYPHS:INK_GLYPHS + ACCENT_GLYPHS])
     return {
         "scale": scale,
         "left": left,
@@ -141,8 +148,19 @@ def parse_ppm(data: bytes) -> tuple[int, int, bytes]:
             raise RuntimeError("malformed PPM header")
         fields.append(int(data[start:idx]))
     idx += 1
-    width, height, _maxval = fields
-    return width, height, data[idx:idx + width * height * 3]
+    width, height, maxval = fields
+    if maxval != 255:
+        raise RuntimeError(
+            f"unsupported PPM maxval {maxval} (only 255 is supported)")
+    expected = width * height * 3
+    payload = data[idx:idx + expected]
+    if len(payload) != expected:
+        # A truncated dump must not reach count_rgb(): an IndexError there
+        # would be mis-classified as an environment error.
+        raise RuntimeError(
+            f"truncated PPM payload: expected {expected} bytes "
+            f"({width}x{height}x3), got {len(payload)}")
+    return width, height, payload
 
 
 def count_rgb(pixels: bytes, width: int, height: int,
@@ -244,6 +262,18 @@ class Qmp:
 
 def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None,
                  ramfb: bool, qmp_sock: str | None) -> list[str]:
+    """Build the QEMU argv for one boot.
+
+    NOTE: this is a near-copy of ``qemu_command`` in
+    qemutests/aarch64_uefi_smp.py (whose signature takes no QMP socket
+    path) plus the ``-device ramfb`` / ``-qmp`` flags — a change to the
+    shared flags must be made in BOTH places.
+
+    ``diagnostic_dtb`` is the ALREADY RESOLVED path (or None): the caller
+    materializes it.  The ``--diagnostic-dtb`` option itself accepts a
+    path but never uses it as one — any non-empty value means "generate a
+    diagnostic DTB" — which matches the sibling's behaviour.
+    """
     command = [
         args.qemu, "-M", "virt,gic-version=2" + (",acpi=off" if diagnostic_dtb else ""),
         "-cpu", "cortex-a53", "-smp", str(cpus),
@@ -262,9 +292,31 @@ def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None
     return command
 
 
+def _await_marker(session, marker: str, bound_s: float) -> bool:
+    """Poll the serial text for ``marker`` for at most ``bound_s`` seconds.
+
+    Returns True as soon as the marker shows up, False when the bound (or
+    the guest's exit) is reached first.  A missing marker is NOT an error
+    here: the caller continues and the checker reports it as a failed
+    assertion, so a missing feature never turns into a timeout.
+    """
+    deadline = time.monotonic() + bound_s
+    while True:
+        if marker in session.text:
+            return True
+        if session.returncode is not None:
+            # The guest is gone: no further serial output can arrive.
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        session.observe(min(0.25, remaining))
+
+
 def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
                        wait_markers: tuple[str, ...], cpus: int,
-                       run_dir: Path) -> tuple[dict, list[str]]:
+                       run_dir: Path,
+                       secondary_marker: str | None = None) -> tuple[dict, list[str]]:
     """Boot QEMU, wait for every marker in ``wait_markers``, then screendump.
 
     The QMP screendump MUST be taken while QEMU is still alive: the
@@ -275,9 +327,18 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
     missing feature shows up as a FAILED ASSERTION with a screenshot, never
     as a timeout with no evidence.
 
-    Every preparation or launch failure (no QEMU, DTB generation failed, the
-    guest never came up, QMP refused) is reported as an ENVIRONMENT error:
-    the caller archives it as ERROR and exits 2 — never as a FAIL.
+    ``secondary_marker`` (the logo check only) is a BOUNDED extra wait for
+    a marker the kernel may print a moment after the primary one, so the
+    screendump cannot race the draw.  If it does not arrive in time the
+    capture continues and the checker reports the missing marker as a failed
+    assertion — never as a timeout.
+
+    Every preparation or launch failure (no QEMU, DTB generation failed,
+    QMP refused) is reported as an ENVIRONMENT error: the caller archives it
+    as ERROR and exits 2 — never as a FAIL.  A guest that never reaches the
+    marker is NOT an environment error: ``wait_for()``'s timeout is a FAIL
+    (exit 1), reported by main() together with the serial log captured
+    before the deadline.
     """
     result = {"text": "", "shot": None, "width": 0, "height": 0,
               "pixels": b"", "timed_out": False, "error": None,
@@ -327,6 +388,15 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
             # the serial log that was captured before the deadline.
             pass
         else:
+            if secondary_marker:
+                # BOUNDED secondary wait: the kernel may draw the wordmark a
+                # moment after the framebuffer banner.  Waiting a bounded
+                # while keeps the screendump from racing the draw (which
+                # would look like a kernel bug).  If the marker does not
+                # arrive we CONTINUE: the checker reports the missing marker
+                # as a failed assertion, never a timeout.
+                _await_marker(session, secondary_marker,
+                              SECONDARY_WAIT_BOUND_S)
             session.observe(2)
             result["text"] = session.text
             if ramfb and qmp_sock is not None:
@@ -438,6 +508,8 @@ def check_no_fb(capture: dict) -> list[str]:
     if capture.get("error"):
         failures.append(capture["error"])
     text = capture["text"]
+    if FB_ABSENT_MARKER not in text:
+        failures.append(f"missing serial marker {FB_ABSENT_MARKER!r}")
     if LOGO_SKIPPED_MARKER not in text:
         failures.append(f"missing serial marker {LOGO_SKIPPED_MARKER!r}")
     if LOGO_DRAWN_MARKER in text:
@@ -523,13 +595,18 @@ def _write_suite_report(archive, *, argv, profile, cpu, memory_mib, firmware,
               file=sys.stderr)
 
 
-# check -> (ramfb, wait markers, checker).  The wait markers are ones the
-# CURRENT kernel already prints, so a missing feature fails an ASSERTION
-# (with a screenshot) instead of timing out with no evidence.
+# check -> (ramfb, wait markers, checker, secondary marker).  The wait
+# markers are ones the CURRENT kernel already prints, so a missing feature
+# fails an ASSERTION (with a screenshot) instead of timing out with no
+# evidence.  The optional secondary marker is a BOUNDED extra wait (see
+# ``_await_marker``): it only gives the kernel a few more seconds to emit
+# it, and its absence stays a checker failure — never a timeout.  Only the
+# logo check needs it: the no-fb check already waits for the idle marker,
+# which the kernel prints after the skip marker.
 CHECKS = {
-    "fb-visible": (True, (FB_READY_MARKER,), "check_fb_visible"),
-    "logo": (True, (FB_READY_MARKER,), "check_logo"),
-    "no-fb": (False, (IDLE_MARKER,), "check_no_fb"),
+    "fb-visible": (True, (FB_READY_MARKER,), "check_fb_visible", None),
+    "logo": (True, (FB_READY_MARKER,), "check_logo", LOGO_DRAWN_MARKER),
+    "no-fb": (False, (IDLE_MARKER,), "check_no_fb", None),
 }
 
 
@@ -562,7 +639,7 @@ def main() -> int:
     failures: list[str] = []
     environment_errors: list[str] = []
     for check in checks:
-        ramfb, wait_markers, checker_name = CHECKS[check]
+        ramfb, wait_markers, checker_name, secondary_marker = CHECKS[check]
         started = time.monotonic()
 
         archive = None
@@ -575,7 +652,8 @@ def main() -> int:
 
         capture, command = _boot_and_capture(
             args, ramfb=ramfb, wait_markers=wait_markers,
-            cpus=args.cpus, run_dir=run_dir)
+            cpus=args.cpus, run_dir=run_dir,
+            secondary_marker=secondary_marker)
         problems = checkers[checker_name](capture)
         if capture["timed_out"]:
             problems.append(
@@ -589,7 +667,8 @@ def main() -> int:
 
         print(json.dumps({"check": check, "failures": problems,
                           "environment_error": is_environment,
-                          "run_dir": str(run_dir)}))
+                          "run_dir": str(run_dir),
+                          "shot": capture.get("shot")}))
 
         _write_suite_report(
             archive, argv=command, profile=args.profile, cpu=args.cpus,
@@ -608,6 +687,14 @@ def main() -> int:
               file=sys.stderr)
         for error in environment_errors:
             print(f"  - {error}", file=sys.stderr)
+        if failures:
+            # The sibling checks' assertion failures must reach stderr too:
+            # an environment error must not swallow the evidence of the
+            # checks that DID run (the exit code stays 2).
+            print("  (assertion failures of the other checks:)",
+                  file=sys.stderr)
+            for failure in failures:
+                print(f"  - {failure}", file=sys.stderr)
         return 2
     if failures:
         print("FAIL: aarch64 boot logo suite", file=sys.stderr)
