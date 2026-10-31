@@ -542,5 +542,121 @@ class BusyboxContractTests(unittest.TestCase):
             config_in.write_text(orig_config)
 
 
+
+class StagingFastPathContractTests(unittest.TestCase):
+    def test_noop_preserves_publish_stamp(self):
+        """Repeated make sysroot with unchanged inputs must preserve sysroot publish stamp."""
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(res.returncode, 0, f"Initial sysroot build failed: {res.stderr}")
+
+        sysroot_stamp = ROOT / "build" / "x86_64-clang" / "stamps" / "sysroot.stamp"
+        self.assertTrue(sysroot_stamp.exists())
+        stamp_mtime_1 = sysroot_stamp.stat().st_mtime_ns
+
+        # Second make sysroot (no-op)
+        res = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(res.returncode, 0, f"No-op sysroot build failed: {res.stderr}")
+        stamp_mtime_2 = sysroot_stamp.stat().st_mtime_ns
+        self.assertEqual(stamp_mtime_2, stamp_mtime_1, "sysroot.stamp mtime changed on no-op build")
+
+    def test_same_mtime_changed_content_invalidates(self):
+        """Changing file content while preserving mtime must invalidate staging input key."""
+        target_h = ROOT / "kernel" / "include" / "core" / "bootinfo.h"
+        self.assertTrue(target_h.exists())
+        orig_content = target_h.read_text()
+        orig_stat = target_h.stat()
+
+        sysroot_stamp = ROOT / "build" / "x86_64-clang" / "stamps" / "sysroot.stamp"
+        stamp_mtime_before = sysroot_stamp.stat().st_mtime_ns if sysroot_stamp.exists() else 0
+
+        try:
+            # Change content and reset mtime back to original
+            target_h.write_text(orig_content + "\n/* content change same mtime probe */\n")
+            os.utime(target_h, (orig_stat.st_atime, orig_stat.st_mtime))
+
+            res = subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(res.returncode, 0, f"make sysroot failed: {res.stderr}")
+            stamp_mtime_after = sysroot_stamp.stat().st_mtime_ns
+            self.assertGreater(
+                stamp_mtime_after, stamp_mtime_before, "sysroot.stamp did not update after content change"
+            )
+        finally:
+            target_h.write_text(orig_content)
+            os.utime(target_h, (orig_stat.st_atime, orig_stat.st_mtime))
+            subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=120,
+            )
+
+    def test_staging_removed_input_disappears(self):
+        """Removing an input header must invalidate input key and remove it from staging tree."""
+        probe_header = ROOT / "kernel" / "include" / "core" / "_staging_del_probe.h"
+        staged_probe = (
+            ROOT
+            / "build"
+            / "x86_64-clang"
+            / "staging"
+            / "kernel-headers"
+            / "usr"
+            / "include"
+            / "core"
+            / "_staging_del_probe.h"
+        )
+
+        try:
+            # Add probe header
+            probe_header.write_text("#define _STAGING_DEL_PROBE 1\n")
+            res = subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(res.returncode, 0, f"make sysroot failed: {res.stderr}")
+            self.assertTrue(staged_probe.exists(), "probe header not staged")
+
+            # Remove probe header
+            probe_header.unlink()
+            res = subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(res.returncode, 0, f"make sysroot after deletion failed: {res.stderr}")
+            self.assertFalse(staged_probe.exists(), "deleted header still present in staging tree")
+        finally:
+            if probe_header.exists():
+                probe_header.unlink()
+            subprocess.run(
+                ["make", "--no-print-directory", "PROFILE=x86_64-clang", "sysroot"],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=120,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,13 +44,37 @@ define stamp_check
 endef
 
 $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
-	@mkdir -p $(dir $@)
-	$(call os01_submake,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS))
+	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
+	@in_key=$$( { find $(OS01_ROOT)/kernel/include -type f -exec sha256sum {} + 2>/dev/null | sort; printf 'arch: %s\n' "x86_64"; } | sha256sum | cut -d' ' -f1 ); \
+	old_key=""; \
+	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
+	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/kernel-headers/manifest" ]; then \
+	  echo "  [staging] kernel-headers input unchanged, skipping staging sub-make"; \
+	else \
+	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	    -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	    install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS); \
+	  printf '%s\n' "$$in_key" > "$@.input_key"; \
+	fi
 	$(call stamp_check,$(STAGING_DIR)/kernel-headers)
 
 $(STAMPS_DIR)/libc-install.stamp: FORCE
-	@mkdir -p $(dir $@)
-	$(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS))
+	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
+	@in_key=$$( { \
+	  find $(OS01_ROOT)/libc/include $(OS01_ROOT)/libc/src $(OS01_ROOT)/libc/arch $(OS01_ROOT)/libc/network -type f -exec sha256sum {} + 2>/dev/null | sort; \
+	  sha256sum $(OS01_ROOT)/libc/Makefile 2>/dev/null; \
+	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
+	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
+	} | sha256sum | cut -d' ' -f1 ); \
+	old_key=""; \
+	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
+	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libc/manifest" ]; then \
+	  echo "  [staging] libc input unchanged, skipping staging sub-make"; \
+	else \
+	  $(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS)); \
+	  printf '%s\n' "$$in_key" > "$@.input_key"; \
+	fi
 	$(call stamp_check,$(STAGING_DIR)/libc)
 
 # ── libgfx staging (Task 3) ─────────────────────────────────────
@@ -65,16 +89,44 @@ $(STAMPS_DIR)/libc-install.stamp: FORCE
 # duplicate destinations and aborts the publish).
 $(STAMPS_DIR)/libgfx-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
                                     $(STAMPS_DIR)/libc-install.stamp FORCE
-	@mkdir -p $(dir $@)
-	$(call os01_submake,libgfx,install INSTALL_ROOT=$(STAGING_DIR)/libgfx $(OS01_SUBMAKE_ARGS))
+	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
+	@in_key=$$( { \
+	  find $(OS01_ROOT)/libgfx -type f -exec sha256sum {} + 2>/dev/null | sort; \
+	  if [ -f "$(STAMPS_DIR)/libc-install.stamp.receipt" ]; then cat "$(STAMPS_DIR)/libc-install.stamp.receipt"; fi; \
+	  if [ -f "$(STAMPS_DIR)/kernel-headers-install.stamp.receipt" ]; then cat "$(STAMPS_DIR)/kernel-headers-install.stamp.receipt"; fi; \
+	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
+	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
+	} | sha256sum | cut -d' ' -f1 ); \
+	old_key=""; \
+	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
+	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libgfx/manifest" ]; then \
+	  echo "  [staging] libgfx input unchanged, skipping staging sub-make"; \
+	else \
+	  $(call os01_submake,libgfx,install INSTALL_ROOT=$(STAGING_DIR)/libgfx $(OS01_SUBMAKE_ARGS)); \
+	  printf '%s\n' "$$in_key" > "$@.input_key"; \
+	fi
 	$(call stamp_check,$(STAGING_DIR)/libgfx)
 
 # ── libgui staging ───────────────────────────────────────────────
 $(STAMPS_DIR)/gui-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
                                  $(STAMPS_DIR)/libc-install.stamp \
                                  $(STAMPS_DIR)/libgfx-install.stamp FORCE
-	@mkdir -p $(dir $@)
-	$(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui $(OS01_SUBMAKE_ARGS))
+	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
+	@in_key=$$( { \
+	  find $(OS01_ROOT)/libgui -type f -exec sha256sum {} + 2>/dev/null | sort; \
+	  if [ -f "$(STAMPS_DIR)/libc-install.stamp.receipt" ]; then cat "$(STAMPS_DIR)/libc-install.stamp.receipt"; fi; \
+	  if [ -f "$(STAMPS_DIR)/libgfx-install.stamp.receipt" ]; then cat "$(STAMPS_DIR)/libgfx-install.stamp.receipt"; fi; \
+	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
+	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
+	} | sha256sum | cut -d' ' -f1 ); \
+	old_key=""; \
+	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
+	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/gui/manifest" ]; then \
+	  echo "  [staging] gui input unchanged, skipping staging sub-make"; \
+	else \
+	  $(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui $(OS01_SUBMAKE_ARGS)); \
+	  printf '%s\n' "$$in_key" > "$@.input_key"; \
+	fi
 	$(call stamp_check,$(STAGING_DIR)/gui)
 
 # ── mbedTLS adapter (R7, Task B1) ──────────────────────────────────
