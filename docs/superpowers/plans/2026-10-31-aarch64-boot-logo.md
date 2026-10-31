@@ -34,13 +34,15 @@
 - Modify: `mk/components/run.mk` (add the `test-aarch64-boot-logo` target)
 
 **Interfaces:**
-- Consumes: `qemutests/harness/process.py` → `ProcessSession(argv, run_dir, timeout_s)` with `.start()`, `.wait_for(predicate)`, `.observe(seconds)`, `.stop()`, `.close()`, `.text`, `.timed_out`; `qemutests/aarch64_uefi_smp.py` → `generate_diagnostic_dtb(qemu, log_dir, cpus, ram_mib)`.
+- Consumes: `qemutests/harness/process.py` → `ProcessSession(argv, run_dir, timeout_s)` with `.start()`, `.wait_for(predicate)`, `.observe(seconds)`, `.stop()`, `.close()`, `.text`, `.timed_out`; `qemutests/harness/result.py` → `RunArchive.create(build_dir, suite)` (unique dir per call) and `RunReport`; `qemutests/aarch64_uefi_smp.py` → `generate_diagnostic_dtb(qemu, log_dir, cpus, ram_mib)`.
 - Produces (used by every later task and by the make target):
   - `logo_scale(xres: int, yres: int) -> int`
-  - `logo_geometry(xres: int, yres: int) -> dict`
+  - `logo_geometry(xres: int, yres: int) -> dict` — keys: `scale`, `left`, `top`, `advance`, `width`, `line_y`, `label_row`, `label_x0`, `label_y0`, `label_y1`, `ink_x1`, `wordmark_y1`, `ink_px`, `accent_glyph_px`, `accent_underline_px`.
   - `parse_ppm(data: bytes) -> tuple[int, int, bytes]`
-  - `count_rgb(pixels: bytes, width: int, height: int, rgb: tuple[int, int, int], box: tuple[int, int, int, int] | None = None) -> int`
+  - `count_rgb(pixels, width, height, rgb, box=None) -> int`
   - `qemu_command(args, cpus, diagnostic_dtb, ramfb: bool, qmp_sock: str | None) -> list[str]`
+  - `_boot_and_capture(args, *, ramfb, wait_markers, cpus, run_dir) -> tuple[dict, list[str]]` — the screendump is taken INSIDE the live QEMU window.
+  - `check_fb_visible(capture) / check_logo(capture) / check_no_fb(capture) -> list[str]`
   - CLI: `--check {fb-visible,logo,no-fb,all}` (default `all`), `--firmware`, `--image`, `--qemu`, `--log-dir`, `--build-dir`, `--profile`, `--timeout`, `--cpus`, `--ram-mib`, `--diagnostic-dtb`.
 
 - [ ] **Step 1: Write the suite**
@@ -72,12 +74,14 @@ Exit codes: 0 = PASS, 1 = FAIL, 2 = configuration/environment ERROR.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +94,14 @@ try:
     from qemutests.harness.process import ProcessSession
 except ImportError:  # pragma: no cover — environment ERROR, not a FAIL
     ProcessSession = None  # type: ignore[assignment]
+
+try:
+    from qemutests.harness.result import RunArchive, RunReport
+except ImportError:  # pragma: no cover — archiving is optional evidence
+    RunArchive = None  # type: ignore[assignment]
+    RunReport = None  # type: ignore[assignment]
+
+SUITE = "aarch64-boot-logo"
 
 # ── Logo constants mirrored from kernel/driver/logo.c ──────────
 LOGO_INK = (0xE8, 0xF0, 0xF7)       # 0x00e8f0f7
@@ -144,10 +156,14 @@ def logo_geometry(xres: int, yres: int) -> dict:
         "label_x0": label_col * FONT_W,
         "label_y0": label_row * FONT_H,
         "label_y1": (label_row + 1) * FONT_H,
-        "wordmark_x1": left + INK_GLYPHS * advance,
+        # The ink glyphs ("O", "S") occupy the first two cells; the accent
+        # glyphs ("0", "1") the last two.  Each glyph cell is 5*scale wide,
+        # so the cell boundary sits exactly at left + 2*advance.
+        "ink_x1": left + INK_GLYPHS * advance,
         "wordmark_y1": top + 7 * scale,
         "ink_px": ink_bits * scale * scale,
-        "accent_px": accent_bits * scale * scale + 3 * scale * 2,
+        "accent_glyph_px": accent_bits * scale * scale,
+        "accent_underline_px": 3 * scale * 2,
     }
 
 
@@ -293,11 +309,20 @@ def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None
 
 
 def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
-                       wait_marker: str, cpus: int) -> dict:
-    """Boot QEMU, wait for ``wait_marker`` in the serial log, screendump."""
+                       wait_markers: tuple[str, ...], cpus: int,
+                       run_dir: Path) -> tuple[dict, list[str]]:
+    """Boot QEMU, wait for every marker in ``wait_markers``, then screendump.
+
+    The QMP screendump MUST be taken while QEMU is still alive: the
+    ProcessSession owns the child and ``stop()`` terminates it, so the dump
+    happens inside the live window, before the cleanup in the ``finally``.
+
+    The wait markers are ones the CURRENT kernel already prints, so a
+    missing feature shows up as a FAILED ASSERTION with a screenshot, never
+    as a timeout with no evidence.
+    """
     from aarch64_uefi_smp import generate_diagnostic_dtb
 
-    run_dir = Path(args.log_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     diagnostic_dtb = None
     if getattr(args, "diagnostic_dtb", None):
@@ -312,34 +337,43 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
     command = qemu_command(args, cpus, diagnostic_dtb, ramfb, qmp_sock)
     (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n")
 
+    result = {"text": "", "shot": None, "width": 0, "height": 0,
+              "pixels": b"", "timed_out": False, "error": None}
     session = ProcessSession(argv=command, run_dir=run_dir, timeout_s=args.timeout)
-    session.start()
     try:
-        session.wait_for(lambda text: wait_marker in text)
+        session.start()
+        session.wait_for(
+            lambda text: all(marker in text for marker in wait_markers))
         session.observe(2)
-        text = session.text
+        result["text"] = session.text
+        result["timed_out"] = bool(session.timed_out)
+        if ramfb and qmp_sock is not None:
+            qmp = Qmp(qmp_sock)
+            try:
+                qmp.connect()
+                result["shot"] = shot_path
+                (result["width"], result["height"], result["pixels"]) = parse_ppm(
+                    qmp.screendump(shot_path))
+            finally:
+                qmp.close()
+    except Exception as error:  # noqa: BLE001 — reported as a check failure
+        result["error"] = f"{type(error).__name__}: {error}"
     finally:
-        session.stop()
-        session.close()
-
-    result = {"text": text, "shot": None, "width": 0, "height": 0, "pixels": b""}
-    if ramfb and qmp_sock is not None:
-        qmp = Qmp(qmp_sock)
         try:
-            qmp.connect()
-            result["shot"] = shot_path
-            result["width"], result["height"], result["pixels"] = parse_ppm(
-                qmp.screendump(shot_path))
+            session.stop()
         finally:
-            qmp.close()
-    return result
+            session.close()
+    return result, command
 
 
 def check_fb_visible(capture: dict) -> list[str]:
     """The framebuffer is observable: the existing white-on-blue banner is there."""
     failures = []
+    if capture.get("error"):
+        failures.append(capture["error"])
     if capture["width"] == 0:
-        return ["no screendump captured"]
+        failures.append("no screendump captured")
+        return failures
     blue = count_rgb(capture["pixels"], capture["width"], capture["height"],
                      BANNER_BLUE)
     if blue < 100:
@@ -350,37 +384,61 @@ def check_fb_visible(capture: dict) -> list[str]:
 
 
 def check_logo(capture: dict) -> list[str]:
-    """The OS01 wordmark is drawn with the exact expected pixels."""
+    """The OS01 wordmark is drawn with the EXACT expected pixels.
+
+    The ink glyphs ("O", "S") must occupy the FIRST TWO glyph cells and
+    nowhere else; the accent glyphs ("0", "1") the last two; the accent
+    underline its own 3*scale x 2 strip.  Every colour is counted both
+    inside its own region and across the WHOLE screen, so a wordmark drawn
+    in the wrong cells cannot pass.
+    """
     failures = []
+    if capture.get("error"):
+        failures.append(capture["error"])
+    if LOGO_DRAWN_MARKER not in capture["text"]:
+        failures.append(f"missing serial marker {LOGO_DRAWN_MARKER!r}")
+    if capture["width"] == 0:
+        failures.append("no screendump captured")
+        return failures
+
     width, height = capture["width"], capture["height"]
-    if width == 0:
-        return ["no screendump captured"]
     pixels = capture["pixels"]
     geo = logo_geometry(width, height)
-    box = (geo["left"], geo["top"],
-           geo["left"] + geo["width"], geo["wordmark_y1"])
-    underline = (geo["left"], geo["line_y"],
-                 geo["left"] + geo["width"], geo["line_y"] + 2)
 
-    ink = count_rgb(pixels, width, height, LOGO_INK, box)
+    ink_cells = (geo["left"], geo["top"], geo["ink_x1"], geo["wordmark_y1"])
+    accent_cells = (geo["ink_x1"], geo["top"],
+                    geo["left"] + geo["width"], geo["wordmark_y1"])
+    underline = (geo["left"], geo["line_y"],
+                 geo["left"] + 3 * geo["scale"], geo["line_y"] + 2)
+
+    ink = count_rgb(pixels, width, height, LOGO_INK, ink_cells)
     ink_total = count_rgb(pixels, width, height, LOGO_INK)
-    accent = count_rgb(pixels, width, height, LOGO_ACCENT, box)
-    accent += count_rgb(pixels, width, height, LOGO_ACCENT, underline)
+    accent = count_rgb(pixels, width, height, LOGO_ACCENT, accent_cells)
+    accent_underline = count_rgb(pixels, width, height, LOGO_ACCENT, underline)
+    accent_total = count_rgb(pixels, width, height, LOGO_ACCENT)
+    muted = count_rgb(pixels, width, height, LOGO_MUTED,
+                      (geo["label_x0"], geo["label_y0"],
+                       geo["label_x0"] + LABEL_LEN * FONT_W, geo["label_y1"]))
 
     if ink != geo["ink_px"]:
         failures.append(
             f"ink pixels: expected {geo['ink_px']}, found {ink} "
             f"(scale={geo['scale']})")
-    if accent != geo["accent_px"]:
-        failures.append(
-            f"accent pixels: expected {geo['accent_px']}, found {accent} "
-            f"(scale={geo['scale']})")
     if ink_total != ink:
         failures.append(
-            f"ink pixels outside the wordmark: {ink_total - ink} (logo is smeared)")
-    muted = count_rgb(pixels, width, height, LOGO_MUTED,
-                      (geo["label_x0"], geo["label_y0"],
-                       geo["label_x0"] + LABEL_LEN * FONT_W, geo["label_y1"]))
+            f"ink pixels outside the two ink glyph cells: {ink_total - ink}")
+    if accent != geo["accent_glyph_px"]:
+        failures.append(
+            f"accent glyph pixels: expected {geo['accent_glyph_px']}, "
+            f"found {accent} (scale={geo['scale']})")
+    if accent_underline != geo["accent_underline_px"]:
+        failures.append(
+            f"accent underline pixels: expected {geo['accent_underline_px']}, "
+            f"found {accent_underline}")
+    if accent_total != accent + accent_underline:
+        failures.append(
+            f"accent pixels outside the wordmark: "
+            f"{accent_total - accent - accent_underline}")
     if muted == 0:
         failures.append(
             f"no caption pixels (rgb{LOGO_MUTED}) in the label band "
@@ -389,8 +447,10 @@ def check_logo(capture: dict) -> list[str]:
 
 
 def check_no_fb(capture: dict) -> list[str]:
-    """Without ramfb the kernel skips the logo and still boots."""
+    """Without ramfb the kernel skips the logo instead of crashing."""
     failures = []
+    if capture.get("error"):
+        failures.append(capture["error"])
     text = capture["text"]
     if LOGO_SKIPPED_MARKER not in text:
         failures.append(f"missing serial marker {LOGO_SKIPPED_MARKER!r}")
@@ -399,6 +459,92 @@ def check_no_fb(capture: dict) -> list[str]:
     if IDLE_MARKER not in text:
         failures.append(f"kernel never reached {IDLE_MARKER!r}")
     return failures
+
+
+def _sha256_path(path: str | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def _git_revision() -> tuple[str, bool]:
+    try:
+        revision = subprocess.run(["git", "rev-parse", "HEAD"],
+                                  capture_output=True, text=True,
+                                  check=False).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain"],
+                                capture_output=True, text=True,
+                                check=False).stdout.strip()
+        return revision, bool(status)
+    except OSError:
+        return "", False
+
+
+def _write_suite_report(archive, *, argv, profile, cpu, memory_mib, firmware,
+                        image, started_monotonic, status, runner_exit_code,
+                        errors, extra=None) -> None:
+    """Persist a suite-unit RunReport; best-effort (never raises).
+
+    One archive per check, so the three boots never share a directory —
+    ProcessSession opens ``stdout.log`` with "w" and would truncate the
+    previous boot's evidence.
+    """
+    if archive is None or RunReport is None:
+        return
+    try:
+        revision, dirty = _git_revision()
+        outcomes = [{"errors": list(errors)}]
+        if extra:
+            outcomes[0].update(extra)
+        report = RunReport(
+            schema_version=1,
+            run_id=archive.run_dir.name,
+            git_revision=revision,
+            git_dirty=dirty,
+            profile=profile,
+            suite=SUITE,
+            request=None,
+            declared_ids=None,
+            observed_ids=None,
+            argv=list(argv),
+            cpu_count=int(cpu),
+            memory_mib=int(memory_mib or 0),
+            tool_versions={},
+            firmware_path=firmware or None,
+            firmware_sha256_before=None,
+            firmware_sha256_after=_sha256_path(firmware),
+            image_path=image or None,
+            image_sha256_before=None,
+            image_sha256_after=_sha256_path(image),
+            utc_started_at=datetime.now(timezone.utc).isoformat(),
+            duration_s=max(0.0, time.monotonic() - started_monotonic),
+            runner_exit_code=runner_exit_code,
+            child_exit_code=None,
+            stopped_by_runner=True,
+            status=status,
+            count_unit="suite",
+            outcomes=outcomes,
+            stdout_log=str(archive.run_dir / "stdout.log"),
+            stderr_log=str(archive.run_dir / "stderr.log"),
+        )
+        archive.write(report)
+    except Exception as exc:  # noqa: BLE001 — evidence must not mask the run
+        print(f"[{SUITE}] warning: failed to write RunReport: {exc}",
+              file=sys.stderr)
+
+
+# check -> (ramfb, wait markers, checker).  The wait markers are ones the
+# CURRENT kernel already prints, so a missing feature fails an ASSERTION
+# (with a screenshot) instead of timing out with no evidence.
+CHECKS = {
+    "fb-visible": (True, (FB_READY_MARKER,), "check_fb_visible"),
+    "logo": (True, (FB_READY_MARKER,), "check_logo"),
+    "no-fb": (False, (IDLE_MARKER,), "check_no_fb"),
+}
 
 
 def main() -> int:
@@ -421,20 +567,45 @@ def main() -> int:
         print("ERROR: qemutests.harness.process is unavailable", file=sys.stderr)
         return 2
 
+    checkers = {
+        "check_fb_visible": check_fb_visible,
+        "check_logo": check_logo,
+        "check_no_fb": check_no_fb,
+    }
     checks = ("fb-visible", "logo", "no-fb") if args.check == "all" else (args.check,)
     failures: list[str] = []
     for check in checks:
-        if check == "no-fb":
-            capture = _boot_and_capture(
-                args, ramfb=False, wait_marker=LOGO_SKIPPED_MARKER, cpus=args.cpus)
-            problems = check_no_fb(capture)
+        ramfb, wait_markers, checker_name = CHECKS[check]
+        started = time.monotonic()
+
+        archive = None
+        if RunArchive is not None and args.build_dir:
+            archive = RunArchive.create(Path(args.build_dir), f"{SUITE}-{check}")
+            run_dir = archive.run_dir
         else:
-            capture = _boot_and_capture(
-                args, ramfb=True, wait_marker=LOGO_DRAWN_MARKER
-                if check == "logo" else FB_READY_MARKER, cpus=args.cpus)
-            problems = check_fb_visible(capture) if check == "fb-visible" else check_logo(capture)
-        print(json.dumps({"check": check, "failures": problems}))
+            run_dir = Path(args.log_dir) / check
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+        capture, command = _boot_and_capture(
+            args, ramfb=ramfb, wait_markers=wait_markers,
+            cpus=args.cpus, run_dir=run_dir)
+        problems = checkers[checker_name](capture)
+        if capture["timed_out"]:
+            problems.append(
+                f"timed out waiting for {list(wait_markers)} in the serial log")
+
+        print(json.dumps({"check": check, "failures": problems,
+                          "run_dir": str(run_dir)}))
         failures.extend(f"{check}: {problem}" for problem in problems)
+
+        _write_suite_report(
+            archive, argv=command, profile=args.profile, cpu=args.cpus,
+            memory_mib=args.ram_mib, firmware=args.firmware, image=args.image,
+            started_monotonic=started,
+            status="PASS" if not problems else "FAIL",
+            runner_exit_code=0 if not problems else 1,
+            errors=problems,
+            extra={"check": check, "timed_out": capture["timed_out"]})
 
     if failures:
         print("FAIL: aarch64 boot logo suite", file=sys.stderr)
@@ -498,9 +669,11 @@ python3 qemutests/aarch64_boot_logo.py \
   --log-dir /tmp/a64-logo-fbvisible
 ```
 
-Expected: `{"check": "fb-visible", "failures": []}` and `PASS: aarch64 boot logo suite`.
+Expected: `{"check": "fb-visible", "failures": [], ...}` and
+`PASS: aarch64 boot logo suite`.
 This proves the whole headless path works: ramfb → GOP handoff → kernel framebuffer
-mapping → QMP screendump → PPM parse.
+mapping → QMP screendump → PPM parse. The run directory also holds
+`stdout.log`, `command.json` and (with `--build-dir`) a `result.json`.
 
 - [ ] **Step 5: Run the logo check — it must FAIL (this is the RED phase)**
 
@@ -515,10 +688,20 @@ python3 qemutests/aarch64_boot_logo.py \
   --log-dir /tmp/a64-logo-red
 ```
 
-Expected: exit 1. The failure names the missing pixels, e.g.
-`logo: ink pixels: expected 7252, found 0 (scale=14)` and
-`logo: no caption pixels (rgb(104, 120, 134)) in the label band y=[160,176)`.
-The serial log in `/tmp/a64-logo-red` must NOT contain `[logo] boot logo drawn`.
+Expected: exit 1, and the failures name BOTH the missing serial marker and
+the missing pixels:
+
+```
+  - logo: missing serial marker '[logo] boot logo drawn'
+  - logo: ink pixels: expected 7252, found 0 (scale=14)
+  - logo: accent glyph pixels: expected 6468, found 0 (scale=14)
+  - logo: no caption pixels (rgb(104, 120, 134)) in the label band y=[160,176)
+```
+
+The check does NOT time out: it waits for "[fb] frame buffer remap succeed",
+which the current kernel already prints, so the screenshot is taken and the
+missing logo is reported as a failed ASSERTION. The serial log in
+`/tmp/a64-logo-red/logo` must NOT contain `[logo] boot logo drawn`.
 
 - [ ] **Step 6: Commit**
 
@@ -1178,9 +1361,12 @@ python3 qemutests/aarch64_boot_logo.py \
   --log-dir /tmp/a64-logo-green
 ```
 
-Expected: exit 0, `{"check": "logo", "failures": []}` and
-`PASS: aarch64 boot logo suite`. The serial log in `/tmp/a64-logo-green` must
-contain `[logo] boot logo drawn (aarch64, 800x600)`.
+Expected: exit 0, `{"check": "logo", "failures": [], ...}` and
+`PASS: aarch64 boot logo suite`. The serial log in
+`/tmp/a64-logo-green/logo/stdout.log` must contain
+`[logo] boot logo drawn (aarch64, 800x600)`, and the screendump in
+`/tmp/a64-logo-green/logo/logo.ppm` must carry exactly 7252 ink pixels and
+6552 accent pixels.
 
 - [ ] **Step 4: Run the negative case — it must PASS now**
 
@@ -1195,9 +1381,12 @@ python3 qemutests/aarch64_boot_logo.py \
   --log-dir /tmp/a64-logo-nofb
 ```
 
-Expected: exit 0, `{"check": "no-fb", "failures": []}`. The serial log must
-contain `[logo] skipped: no framebuffer` and `[sched] idle-ready`, and must
-NOT contain `[logo] boot logo drawn`.
+Expected: exit 0, `{"check": "no-fb", "failures": [], ...}`. The serial log in
+`/tmp/a64-logo-nofb/no-fb/stdout.log` must contain
+`[logo] skipped: no framebuffer` and `[sched] idle-ready`, and must NOT
+contain `[logo] boot logo drawn`. The check waits for `[sched] idle-ready`
+(a marker the CURRENT kernel already prints), so it never times out on the
+missing skip marker — it reports the missing marker as a failed ASSERTION.
 
 - [ ] **Step 5: Commit**
 
@@ -1277,7 +1466,37 @@ make PROFILE=aarch64-clang test-aarch64-audit
 
 Expected: exit 0.
 
-- [ ] **Step 6: Confirm the x86_64 serial stream gained no `[logo]` line**
+- [ ] **Step 6: Boot x86_64 for real and assert its serial stream is unchanged**
+
+The source grep below cannot prove the kernel actually boots; this step runs
+a real x86_64 boot (OVMF + the normal disk image) and asserts on the serial
+stream, which is what spec V5 criterion 1 asks for.
+
+```bash
+cd /home/aagu/OS01/.worktrees/aarch64-boot-logo
+make PROFILE=x86_64-clang disk.img
+FW=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^firmware=//p')
+IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
+timeout 120 qemu-system-x86_64 -M q35 \
+  -drive if=pflash,format=raw,readonly=on,file="$FW" \
+  -drive file="$IMG",format=raw,if=none,id=disk -device ahci,id=ahci \
+  -device ide-hd,drive=disk,bus=ahci.0 -m 512 -smp 1 -serial stdio \
+  -display none -no-reboot -no-shutdown > /tmp/x86-logo.log 2>&1 || true
+grep -q "frame buffer remap succeed" /tmp/x86-logo.log \
+  && echo "OK: x86_64 framebuffer line present"
+! grep -q "\[logo\]" /tmp/x86-logo.log \
+  && echo "OK: x86_64 serial stream gained no [logo] marker"
+```
+
+Expected: BOTH `OK:` lines, and NO `[logo]` line anywhere in
+`/tmp/x86-logo.log`. The `timeout` ends the run after the kernel has booted;
+the assertions only need the early boot lines.
+
+Note: `make PROFILE=x86_64-clang disk.img` builds BusyBox and the rootfs and
+takes several minutes — the same artifacts `make PROFILE=x86_64-clang
+test-qemu SUITE=phase-0` uses. Run it once per worktree.
+
+- [ ] **Step 7: Confirm no x86_64 source prints a `[logo]` marker**
 
 ```bash
 cd /home/aagu/OS01/.worktrees/aarch64-boot-logo
@@ -1285,9 +1504,10 @@ grep -rn "\[logo\]" kernel/arch/x86_64/ kernel/driver/ kernel/core/ || echo "no 
 ```
 
 Expected: `no x86_64 [logo] marker` — the driver prints nothing, so the x86_64
-serial stream is byte-identical to before this change.
+serial stream is byte-identical to before this change. This is the auxiliary
+source-level check that complements Step 6's runtime assertion.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 cd /home/aagu/OS01/.worktrees/aarch64-boot-logo
@@ -1337,3 +1557,14 @@ expression as `kernel/driver/logo.c`.
 is a hand-mirrored copy of the C bitmap's set-bit counts. If the C bitmaps
 ever change, the test must be updated in the same commit; the plan states the
 counts' source in both files so a reviewer can check them.
+
+**Plan review findings addressed** (review of `ce5a3b72`):
+
+| Finding | Fix |
+|---|---|
+| [P1] the screendump was taken AFTER `session.stop()`, so QEMU was already dead and every ramfb check would fail | `_boot_and_capture()` now connects QMP, dumps and parses INSIDE the live window; `stop()`/`close()` happen in the `finally` afterwards |
+| [P2] the `logo` check waited for a marker the kernel did not have yet, so the RED phase timed out instead of reporting missing pixels | all three checks now wait for markers the CURRENT kernel already prints (`[fb] frame buffer remap succeed`, `[sched] idle-ready`); the missing logo is a failed ASSERTION with a screenshot |
+| [P2] the negative case stopped two seconds after the skip marker | it now waits for `[sched] idle-ready` and asserts BOTH the skip marker and the absence of the drawn marker |
+| [P2] the ink assertion accepted ink anywhere in the 4-glyph wordmark | `check_logo()` counts ink inside the first TWO glyph cells (`x < left + 2*advance`) and compares against the whole-screen ink count, so ink drawn in the accent cells fails |
+| [P2] the three boots shared one log dir (`stdout.log` is opened with "w") and nothing was archived | each check gets its own `RunArchive.create()` directory and a `result.json` RunReport |
+| [P2] the x86_64 serial acceptance was a source grep, not a boot | Task 6 Step 6 boots x86_64 for real (OVMF + disk.img) and asserts on the serial stream; the source grep remains as an auxiliary check in Step 7 |
