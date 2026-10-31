@@ -205,6 +205,17 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
 #endif
         return rc;
     }
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    /* FPU ledger leg, alloc side.  The arch layer owns whether a save
+     * area exists (x86 allocates one in arch_kthread_prepare; aarch64
+     * currently produces NULL).  Observing whatever it produced HERE
+     * keeps fpu_live a real allocation observation — a future aarch64
+     * FPU allocation flows through the same ledger as stack/thread,
+     * paired with the free-side observation in task_switch_complete.
+     * observe_resource() ignores NULL, so today's NULL is recorded as
+     * "no allocation", not as a hardcoded zero. */
+    aarch64_sched_observe_resource(tsk->fpu_save, 3, true);
+#endif
 
     /* 7. Publish atomically.  task_list_lock is taken first and the
      *    destination runqueue lock second; both are released in reverse
