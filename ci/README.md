@@ -21,7 +21,8 @@ regardless of which Ubuntu release the github-hosted runner is on.
   `dosfstools` (mkfs.fat), `mtools` (mmd / mcopy — mkdisk needs both),
   `e2fsprogs` (mkfs.ext2 + debugfs), `device-tree-compiler` (dtc —
   the aarch64 SMP harness packs DTBs), `ripgrep` (build_contract.sh
-  legacy-component scan), `git`, `wget`, `python3`.
+  legacy-component scan), `git`, `wget`, `python3`, `ccache` (for optional
+  `COMPILER_LAUNCHER=ccache` builds).
 - The build deps (glib/pixman/fdt/zlib/aio headers, ninja) are pulled
   in only for the QEMU build layer, then auto-removed in the same
   layer so the final image doesn't carry them.

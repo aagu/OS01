@@ -51,10 +51,7 @@ $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/kernel-headers/manifest" ]; then \
 	  echo "  [staging] kernel-headers input unchanged, skipping staging sub-make"; \
 	else \
-	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
-	    -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
-	    install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS); \
+	  $(call os01_submake_cmd,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS)); \
 	  printf '%s\n' "$$in_key" > "$@.input_key"; \
 	fi
 	$(call stamp_check,$(STAGING_DIR)/kernel-headers)
@@ -62,8 +59,7 @@ $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 $(STAMPS_DIR)/libc-install.stamp: FORCE
 	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
 	@in_key=$$( { \
-	  find $(OS01_ROOT)/libc/include $(OS01_ROOT)/libc/src $(OS01_ROOT)/libc/arch $(OS01_ROOT)/libc/network -type f -exec sha256sum {} + 2>/dev/null | sort; \
-	  sha256sum $(OS01_ROOT)/libc/Makefile 2>/dev/null; \
+	  find $(OS01_ROOT)/libc -type f -exec sha256sum {} + | sort; \
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
@@ -72,7 +68,7 @@ $(STAMPS_DIR)/libc-install.stamp: FORCE
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libc/manifest" ]; then \
 	  echo "  [staging] libc input unchanged, skipping staging sub-make"; \
 	else \
-	  $(call os01_submake,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS)); \
+	  $(call os01_submake_cmd,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS)); \
 	  printf '%s\n' "$$in_key" > "$@.input_key"; \
 	fi
 	$(call stamp_check,$(STAGING_DIR)/libc)
@@ -102,7 +98,7 @@ $(STAMPS_DIR)/libgfx-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libgfx/manifest" ]; then \
 	  echo "  [staging] libgfx input unchanged, skipping staging sub-make"; \
 	else \
-	  $(call os01_submake,libgfx,install INSTALL_ROOT=$(STAGING_DIR)/libgfx $(OS01_SUBMAKE_ARGS)); \
+	  $(call os01_submake_cmd,libgfx,install INSTALL_ROOT=$(STAGING_DIR)/libgfx $(OS01_SUBMAKE_ARGS)); \
 	  printf '%s\n' "$$in_key" > "$@.input_key"; \
 	fi
 	$(call stamp_check,$(STAGING_DIR)/libgfx)
@@ -124,7 +120,7 @@ $(STAMPS_DIR)/gui-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/gui/manifest" ]; then \
 	  echo "  [staging] gui input unchanged, skipping staging sub-make"; \
 	else \
-	  $(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui $(OS01_SUBMAKE_ARGS)); \
+	  $(call os01_submake_cmd,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui $(OS01_SUBMAKE_ARGS)); \
 	  printf '%s\n' "$$in_key" > "$@.input_key"; \
 	fi
 	$(call stamp_check,$(STAGING_DIR)/gui)

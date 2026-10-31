@@ -24,8 +24,8 @@ ENV LC_ALL=C.UTF-8
 # git: actions/checkout uses it; ninja/ccmake/pkg-config: only needed
 # to build qemu from source (see QEMU_BUILD step). wget/curl:
 # download the prebuilt LLVM tarball + qemu source tarball.
-# ccache: not installed (we don't pre-prime the cache; OS01's make
-# drops the build dir between runs by design).
+# ccache: installed for optional COMPILER_LAUNCHER support; cache
+# key uses runner OS, toolchain version and build profile.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential libxml2 \
@@ -126,6 +126,7 @@ RUN apt-get update && \
         ripgrep \
         gnu-efi \
         libc6-dev \
+        ccache \
     && \
     rm -rf /var/lib/apt/lists/*
 

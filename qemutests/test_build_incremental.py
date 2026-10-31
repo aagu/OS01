@@ -658,5 +658,44 @@ class StagingFastPathContractTests(unittest.TestCase):
             )
 
 
+
+class CompilerLauncherContractTests(unittest.TestCase):
+    def test_launcher_empty_keeps_original_toolchain(self):
+        """When COMPILER_LAUNCHER is empty, toolchain commands must not have leading spaces or launcher prefixes."""
+        res = subprocess.run(
+            [
+                "make",
+                "-n",
+                "PROFILE=x86_64-clang",
+                "kernel",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(res.returncode, 0, f"make -n kernel failed: {res.stderr}")
+        # Commands should invoke clang directly, not ' ccache clang' or similar
+        self.assertNotIn("COMPILER_LAUNCHER", res.stdout)
+
+    def test_launcher_survives_sanitized_submake(self):
+        """COMPILER_LAUNCHER must be propagated across sanitized os01_submake boundaries."""
+        res = subprocess.run(
+            [
+                "make",
+                "-n",
+                "PROFILE=x86_64-clang",
+                "COMPILER_LAUNCHER=test-ccache-probe",
+                "user",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(res.returncode, 0, f"make -n user failed: {res.stderr}")
+        self.assertIn("COMPILER_LAUNCHER=test-ccache-probe", res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

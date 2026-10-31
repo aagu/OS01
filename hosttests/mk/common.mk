@@ -7,7 +7,9 @@ TEST_MOCK := $(TEST_SRC)/mock
 TEST_INC  := $(TEST_SRC)/include
 TEST_CASES := $(TEST_SRC)/cases
 
-HOST_CC   ?= clang
+COMPILER_LAUNCHER ?=
+HOST_CC_BASE ?= clang
+HOST_CC      := $(if $(strip $(COMPILER_LAUNCHER)),$(strip $(COMPILER_LAUNCHER)) )$(HOST_CC_BASE)
 
 KERNEL_INC := -I$(TESTS_DIR)/kernel/include
 LIBC_INC := -I$(TESTS_DIR)/libc/include

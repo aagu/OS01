@@ -20,8 +20,10 @@ ifeq ($(strip $(CLANG_RESOURCE_DIR)),)
 $(error CLANG='$(CLANG)' is unavailable or lacks -print-resource-dir)
 endif
 TARGET_TRIPLE ?= x86_64-unknown-none
-TARGET_CC := $(CLANG) --target=$(TARGET_TRIPLE) -ffreestanding -fno-builtin
-TARGET_CCLD := $(TARGET_CC)
+COMPILER_LAUNCHER ?=
+TARGET_CC_BASE := $(CLANG) --target=$(TARGET_TRIPLE) -ffreestanding -fno-builtin
+TARGET_CC := $(if $(strip $(COMPILER_LAUNCHER)),$(strip $(COMPILER_LAUNCHER)) )$(TARGET_CC_BASE)
+TARGET_CCLD := $(TARGET_CC_BASE)
 
 CC_ORIGIN := $(origin CC)
 ifeq ($(CC_ORIGIN),default)
@@ -36,7 +38,7 @@ CC_ID := $(shell $(CC) --version 2>/dev/null | head -1)
 ifeq ($(findstring clang,$(CC_ID)),)
 $(error CC='$(CC)' (origin $(CC_ORIGIN)) is not Clang; use CLANG=clang-N or a Clang wrapper)
 endif
-EFFECTIVE_CC := $(CC) --target=$(TARGET_TRIPLE) -ffreestanding -fno-builtin
+EFFECTIVE_CC := $(if $(strip $(COMPILER_LAUNCHER)),$(strip $(COMPILER_LAUNCHER)) )$(CC) --target=$(TARGET_TRIPLE) -ffreestanding -fno-builtin
 endif
 
 # Conditional defaults and PATH-safe validation
