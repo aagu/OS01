@@ -77,9 +77,11 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +104,10 @@ except ImportError:  # pragma: no cover — archiving is optional evidence
     RunReport = None  # type: ignore[assignment]
 
 SUITE = "aarch64-boot-logo"
+
+
+class SuiteEnvironmentError(RuntimeError):
+    """A preparation or launch failure — ERROR (exit 2), never a FAIL."""
 
 # ── Logo constants mirrored from kernel/driver/logo.c ──────────
 LOGO_INK = (0xE8, 0xF0, 0xF7)       # 0x00e8f0f7
@@ -320,27 +326,45 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
     The wait markers are ones the CURRENT kernel already prints, so a
     missing feature shows up as a FAILED ASSERTION with a screenshot, never
     as a timeout with no evidence.
+
+    Every preparation or launch failure (no QEMU, DTB generation failed, the
+    guest never came up, QMP refused) is reported as an ENVIRONMENT error:
+    the caller archives it as ERROR and exits 2 — never as a FAIL.
     """
-    from aarch64_uefi_smp import generate_diagnostic_dtb
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-    diagnostic_dtb = None
-    if getattr(args, "diagnostic_dtb", None):
-        diagnostic_dtb = generate_diagnostic_dtb(
-            args.qemu, str(run_dir), cpus, getattr(args, "ram_mib", 512))
-
-    qmp_sock = str(run_dir / "qmp.sock") if ramfb else None
-    if qmp_sock and os.path.exists(qmp_sock):
-        os.unlink(qmp_sock)
-    shot_path = str(run_dir / "logo.ppm")
-
-    command = qemu_command(args, cpus, diagnostic_dtb, ramfb, qmp_sock)
-    (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n")
-
     result = {"text": "", "shot": None, "width": 0, "height": 0,
-              "pixels": b"", "timed_out": False, "error": None}
-    session = ProcessSession(argv=command, run_dir=run_dir, timeout_s=args.timeout)
+              "pixels": b"", "timed_out": False, "error": None,
+              "environment_error": False}
+    session = None
+    socket_dir = None
+    command = []
     try:
+        # Imported INSIDE the guarded region: a missing helper module is an
+        # environment error (exit 2), never an unhandled crash.
+        from aarch64_uefi_smp import generate_diagnostic_dtb
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_dtb = None
+        if getattr(args, "diagnostic_dtb", None):
+            diagnostic_dtb = generate_diagnostic_dtb(
+                args.qemu, str(run_dir), cpus, getattr(args, "ram_mib", 512))
+
+        # The QMP socket MUST live on a SHORT path.  A Unix socket path is
+        # capped at ~108 bytes (sun_path), while the archive directory
+        # (build dir + suite + UTC timestamp + uuid) is ~150 bytes — QEMU
+        # would fail with "AF_UNIX path too long".  The screenshot and the
+        # logs stay in the archive; only the socket is short-lived.
+        if ramfb:
+            socket_dir = tempfile.mkdtemp(prefix="os01-a64-")
+            qmp_sock = os.path.join(socket_dir, "qmp.sock")
+        else:
+            qmp_sock = None
+
+        shot_path = str(run_dir / "logo.ppm")
+        command = qemu_command(args, cpus, diagnostic_dtb, ramfb, qmp_sock)
+        (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+
+        session = ProcessSession(argv=command, run_dir=run_dir,
+                                  timeout_s=args.timeout)
         session.start()
         session.wait_for(
             lambda text: all(marker in text for marker in wait_markers))
@@ -356,13 +380,17 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
                     qmp.screendump(shot_path))
             finally:
                 qmp.close()
-    except Exception as error:  # noqa: BLE001 — reported as a check failure
+    except Exception as error:  # noqa: BLE001 — an environment failure
         result["error"] = f"{type(error).__name__}: {error}"
+        result["environment_error"] = True
     finally:
-        try:
-            session.stop()
-        finally:
-            session.close()
+        if session is not None:
+            try:
+                session.stop()
+            finally:
+                session.close()
+        if socket_dir is not None:
+            shutil.rmtree(socket_dir, ignore_errors=True)
     return result, command
 
 
@@ -574,6 +602,7 @@ def main() -> int:
     }
     checks = ("fb-visible", "logo", "no-fb") if args.check == "all" else (args.check,)
     failures: list[str] = []
+    environment_errors: list[str] = []
     for check in checks:
         ramfb, wait_markers, checker_name = CHECKS[check]
         started = time.monotonic()
@@ -594,19 +623,34 @@ def main() -> int:
             problems.append(
                 f"timed out waiting for {list(wait_markers)} in the serial log")
 
+        is_environment = bool(capture.get("environment_error"))
+        if is_environment:
+            environment_errors.extend(f"{check}: {problem}" for problem in problems)
+        else:
+            failures.extend(f"{check}: {problem}" for problem in problems)
+
         print(json.dumps({"check": check, "failures": problems,
+                          "environment_error": is_environment,
                           "run_dir": str(run_dir)}))
-        failures.extend(f"{check}: {problem}" for problem in problems)
 
         _write_suite_report(
             archive, argv=command, profile=args.profile, cpu=args.cpus,
             memory_mib=args.ram_mib, firmware=args.firmware, image=args.image,
             started_monotonic=started,
-            status="PASS" if not problems else "FAIL",
-            runner_exit_code=0 if not problems else 1,
+            status=("ERROR" if is_environment
+                    else ("PASS" if not problems else "FAIL")),
+            runner_exit_code=(2 if is_environment
+                              else (0 if not problems else 1)),
             errors=problems,
-            extra={"check": check, "timed_out": capture["timed_out"]})
+            extra={"check": check, "timed_out": capture["timed_out"],
+                   "environment_error": is_environment})
 
+    if environment_errors:
+        print("ERROR: aarch64 boot logo suite (environment failure)",
+              file=sys.stderr)
+        for error in environment_errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 2
     if failures:
         print("FAIL: aarch64 boot logo suite", file=sys.stderr)
         for failure in failures:
@@ -1474,23 +1518,43 @@ stream, which is what spec V5 criterion 1 asks for.
 
 ```bash
 cd /home/aagu/OS01/.worktrees/aarch64-boot-logo
+# 1. The firmware is NOT produced by disk.img — build it explicitly.  The
+#    rule downloads RELEASEX64_OVMF.fd; offline, fall back to the copy the
+#    main workspace already fetched.
+mkdir -p build/x86_64-clang/firmware
+make PROFILE=x86_64-clang build/x86_64-clang/firmware/OVMF.fd \
+  || cp /home/aagu/OS01/build/x86_64-clang/firmware/OVMF.fd \
+       build/x86_64-clang/firmware/OVMF.fd
 make PROFILE=x86_64-clang disk.img
 FW=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^firmware=//p')
 IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
+test -f "$FW" || { echo "ERROR: firmware missing: $FW" >&2; exit 1; }
+test -f "$IMG" || { echo "ERROR: image missing: $IMG" >&2; exit 1; }
+
+# 2. Boot.  The kernel idles forever, so `timeout` ends the run on purpose;
+#    124 (timeout) and 137 (killed) are the ONLY accepted exit codes.
 timeout 120 qemu-system-x86_64 -M q35 \
   -drive if=pflash,format=raw,readonly=on,file="$FW" \
   -drive file="$IMG",format=raw,if=none,id=disk -device ahci,id=ahci \
   -device ide-hd,drive=disk,bus=ahci.0 -m 512 -smp 1 -serial stdio \
-  -display none -no-reboot -no-shutdown > /tmp/x86-logo.log 2>&1 || true
+  -display none -no-reboot -no-shutdown > /tmp/x86-logo.log 2>&1; rc=$$?; \
+  if [ "$$rc" -ne 124 ] && [ "$$rc" -ne 137 ]; then \
+    echo "ERROR: qemu exited $$rc" >&2; tail -20 /tmp/x86-logo.log >&2; exit 1; \
+  fi
+
+# 3. Assertions — EVERY one must hold, and any failure exits non-zero.
 grep -q "frame buffer remap succeed" /tmp/x86-logo.log \
-  && echo "OK: x86_64 framebuffer line present"
-! grep -q "\[logo\]" /tmp/x86-logo.log \
-  && echo "OK: x86_64 serial stream gained no [logo] marker"
+  || { echo "ERROR: x86_64 never reported the framebuffer remap" >&2; exit 1; }
+if grep -q "\[logo\]" /tmp/x86-logo.log; then \
+  echo "ERROR: x86_64 serial stream gained a [logo] marker" >&2; exit 1; \
+fi
+echo "OK: x86_64 serial stream unchanged (fb line present, no [logo] marker)"
 ```
 
-Expected: BOTH `OK:` lines, and NO `[logo]` line anywhere in
-`/tmp/x86-logo.log`. The `timeout` ends the run after the kernel has booted;
-the assertions only need the early boot lines.
+Expected: `OK: x86_64 serial stream unchanged (fb line present, no [logo] marker)`,
+and the recipe's exit status 0. Any missing line, any unexpected `[logo]`
+marker, a missing firmware/image, or an unexpected QEMU exit code aborts the
+step with a non-zero status — a failed acceptance can never end green.
 
 Note: `make PROFILE=x86_64-clang disk.img` builds BusyBox and the rootfs and
 takes several minutes — the same artifacts `make PROFILE=x86_64-clang
@@ -1568,3 +1632,11 @@ counts' source in both files so a reviewer can check them.
 | [P2] the ink assertion accepted ink anywhere in the 4-glyph wordmark | `check_logo()` counts ink inside the first TWO glyph cells (`x < left + 2*advance`) and compares against the whole-screen ink count, so ink drawn in the accent cells fails |
 | [P2] the three boots shared one log dir (`stdout.log` is opened with "w") and nothing was archived | each check gets its own `RunArchive.create()` directory and a `result.json` RunReport |
 | [P2] the x86_64 serial acceptance was a source grep, not a boot | Task 6 Step 6 boots x86_64 for real (OVMF + disk.img) and asserts on the serial stream; the source grep remains as an auxiliary check in Step 7 |
+
+**Second review (`bb14ec67`) — three further findings, all fixed:**
+
+| Finding | Fix |
+|---|---|
+| [P1] the QMP socket lived inside the archive directory; that path is ~157 bytes and exceeds the ~108-byte `sun_path` limit, so QEMU failed with "AF_UNIX path too long" | the socket is created in a short `tempfile.mkdtemp(prefix="os01-a64-")` directory and removed afterwards; the screenshot and the logs stay in the archive |
+| [P2] the x86_64 step did not build the firmware and could end green on a failed acceptance | the firmware is built explicitly (with an offline fallback copy), `test -f` guards both artifacts, only QEMU exit codes 124/137 are accepted, and every assertion aborts the step with a non-zero status |
+| [P2] environment failures were archived as FAIL / exit 1, and the DTB generation sat outside the `try`, so it skipped `result.json` | every preparation or launch failure is now flagged `environment_error`, archived with status `ERROR` and runner exit code 2, and the whole run exits 2; the DTB generation moved inside the guarded region |
