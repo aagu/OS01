@@ -7,7 +7,10 @@ void arch_aarch64_idle_step(void)
 {
     percpu_t *cpu = this_cpu();
     arch_irq_state_t flags = arch_local_irq_save();
-    if (cpu->need_resched || !rbtree_empty(&cpu->run_queue)) {
+    /* P1 polling contract: acquire-loads pair with the remote
+     * release-store publishers (notify / task_wake / tick). */
+    if (__atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE) ||
+        !rbtree_empty(&cpu->run_queue)) {
         schedule();
         arch_local_irq_restore(flags);
         return;

@@ -151,7 +151,7 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
         tick_handler();
     } else {
         // AP 只做 need_resched + watchdog（BSP 的 tick_handler 已覆盖全局 jiffies）。
-        this_cpu()->need_resched = 1;
+        __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
         this_cpu()->watchdog_counter++;
         set_softirq_status(TIMER_SIRQ);
         // Monitor plan Task 2: AP ticks are accounted HERE, exactly once

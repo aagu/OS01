@@ -171,8 +171,9 @@ int test_thermal_affinity(void)
 {
     int ok = 0, fail = 0;
     serial_printk("[selftest] thermal_affinity... ");
-    uint32_t saved_ok = this_cpu()->scheduler_ok;
-    this_cpu()->scheduler_ok = 1;
+    uint32_t saved_ok = __atomic_load_n(&this_cpu()->scheduler_ok,
+                                        __ATOMIC_ACQUIRE);
+    __atomic_store_n(&this_cpu()->scheduler_ok, 1, __ATOMIC_RELEASE);
     struct { const char *name; int (*fn)(void); } cases[] = {
         { "pick_cpu_mask_empty",        test_msr_safe_pick_cpu_mask_empty         },
         { "pick_cpu_mask_bsp",           test_msr_safe_pick_cpu_mask_bsp           },
@@ -187,7 +188,7 @@ int test_thermal_affinity(void)
             serial_printk("[selftest] thermal_affinity.%s FAIL\n", cases[i].name);
         }
     }
-    this_cpu()->scheduler_ok = saved_ok;
+    __atomic_store_n(&this_cpu()->scheduler_ok, saved_ok, __ATOMIC_RELEASE);
     serial_printk("[selftest] thermal_affinity: %d passed, %d failed\n", ok, fail);
     return fail;
 }

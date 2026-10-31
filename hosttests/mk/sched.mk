@@ -376,3 +376,83 @@ $(TEST_BLD)/test_kthread_ctor.elf: $(TEST_BLD)/test_kthread_ctor.o \
 .PHONY: test-kthread-ctor
 test-kthread-ctor: $(TEST_BLD)/test_kthread_ctor.elf
 	$<
+
+# ── P1 Task 1: AP cooperative scheduling contracts ──────────────
+# The common binary links the REAL core.c + balance.c with controllable
+# arch-hook spies; two backend binaries link the REAL per-arch
+# sched_notify.c objects (plain freestanding C, host-compilable).
+$(eval $(call register_host_test,test_sched_notify,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_sched_notify_x86_backend,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_sched_notify_aarch64_backend,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_sched_notify.elf \
+    $(TEST_BLD)/test_sched_notify_x86_backend.elf \
+    $(TEST_BLD)/test_sched_notify_aarch64_backend.elf
+
+SCHED_NOTIFY_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+SCHED_NOTIFY_PROD_CFLAGS := $(SCHED_NOTIFY_CFLAGS) \
+    -include $(TEST_MOCK)/sched_notify_test_runtime.h
+
+$(TEST_BLD)/sched_notify_core_production.o: $(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/sched_notify_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify.o: $(TEST_CASES)/test_sched_notify.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_NOTIFY_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify.elf: $(TEST_BLD)/test_sched_notify.o \
+		$(TEST_BLD)/sched_notify_core_production.o \
+		$(TEST_BLD)/sched_notify_balance_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/sched_notify_x86_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/cpu/sched_notify.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_x86_backend.o: \
+		$(TEST_CASES)/test_sched_notify_x86_backend.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_NOTIFY_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_x86_backend.elf: \
+		$(TEST_BLD)/test_sched_notify_x86_backend.o \
+		$(TEST_BLD)/sched_notify_x86_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/sched_notify_aarch64_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/cpu/sched_notify.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_aarch64_backend.o: \
+		$(TEST_CASES)/test_sched_notify_aarch64_backend.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_NOTIFY_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_aarch64_backend.elf: \
+		$(TEST_BLD)/test_sched_notify_aarch64_backend.o \
+		$(TEST_BLD)/sched_notify_aarch64_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-sched-notify
+test-sched-notify: $(TEST_BLD)/test_sched_notify.elf \
+                   $(TEST_BLD)/test_sched_notify_x86_backend.elf \
+                   $(TEST_BLD)/test_sched_notify_aarch64_backend.elf
+	$(TEST_BLD)/test_sched_notify.elf
+	$(TEST_BLD)/test_sched_notify_x86_backend.elf
+	$(TEST_BLD)/test_sched_notify_aarch64_backend.elf

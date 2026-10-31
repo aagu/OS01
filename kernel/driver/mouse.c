@@ -52,7 +52,7 @@ static void mouse_publish_normal_event(const mouse_event_t *event)
     }
     spin_unlock_irqrestore(&event_lock, flags);
     if (num_cpus != 0)
-        this_cpu()->need_resched = 1;
+        __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
 }
 
 int mouse_devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)

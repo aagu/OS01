@@ -17,6 +17,7 @@
 #include <sched/task.h>
 #include <sched/internal.h>
 #include <sched/boot.h>
+#include <arch/sched.h>
 #include <percpu/percpu.h>
 #include <arch/spinlock.h>
 #include <arch/irq.h>
@@ -35,14 +36,9 @@ _Static_assert(sizeof(task_t) + 256 <= STACK_SIZE,
                "task_t does not fit in the task_union stack reserve");
 
 /* ── Placement ────────────────────────────────────────────────
- * The default affinity mask: every CPU the system could reasonably
- * run a task on right now.  Mirrors the historical do_fork() rule (all
- * CPUs up to num_cpus, not just the eligible ones) so an unpinned
- * kernel thread keeps the same reach it had before. */
-static uint64_t kthread_default_mask(void)
-{
-    return (num_cpus >= NR_CPUS) ? ~0ULL : ((1ULL << num_cpus) - 1);
-}
+ * The default affinity mask is the architecture policy
+ * (<arch/sched.h>): x86 keeps the historical num_cpus reach, aarch64
+ * pins ordinary kernel threads to CPU0 (P1 spec §4). */
 
 /* Choose the CPU an unpinned kernel thread runs on.
  *
@@ -56,7 +52,7 @@ static uint64_t kthread_default_mask(void)
  *     "no eligible target" is NOT a boot-phase case. */
 static int kthread_place_unpinned(unsigned *out_cpu)
 {
-    unsigned c = sched_pick_cpu_mask(kthread_default_mask());
+    unsigned c = sched_pick_cpu_mask(arch_kthread_default_mask());
     if (c == NR_CPUS) {
         if (!sched_boot_creation_open())
             return -EINVAL;
@@ -91,7 +87,8 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
         return -EINVAL;
     if (!percpu_data[target_cpu].online)
         return -EINVAL;
-    if (!percpu_data[target_cpu].scheduler_ok) {
+    if (!__atomic_load_n(&percpu_data[target_cpu].scheduler_ok,
+                         __ATOMIC_ACQUIRE)) {
         /* The boot-phase exception: an unpinned task may land on CPU0
          * while the BSP boot window is open (CPU0 is online but has
          * not published scheduler_ok yet).  A pinned task never gets
@@ -182,8 +179,9 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     tsk->deadline = tsk->vruntime + EEVDF_MIN_SLICE;
 
     /* Affinity: a pinned kernel thread owns exactly one CPU; an
-     * unpinned one keeps the default reach. */
-    tsk->allowed_cpus = pinned ? (1ULL << target_cpu) : kthread_default_mask();
+     * unpinned one keeps the arch default reach. */
+    tsk->allowed_cpus = pinned ? (1ULL << target_cpu)
+                               : arch_kthread_default_mask();
 
     /* 5. Flags: a kernel thread, and ONLY a kernel thread.  PF_SELF_REAP
      *    and the on-CPU / on-runqueue / in-schedule flags are never
@@ -227,7 +225,7 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     /* Re-validate the placement under the same protected snapshot that
      * publishes the task: the target CPU must still be usable. */
     if (!rq->online ||
-        (!rq->scheduler_ok &&
+        (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE) &&
          !(target_cpu == 0 && !pinned && sched_boot_creation_open()))) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
@@ -317,7 +315,8 @@ int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu)
 {
     if (cpu >= NR_CPUS || cpu >= num_cpus)
         return -EINVAL;
-    if (!percpu_data[cpu].online || !percpu_data[cpu].scheduler_ok)
+    if (!percpu_data[cpu].online ||
+        !__atomic_load_n(&percpu_data[cpu].scheduler_ok, __ATOMIC_ACQUIRE))
         return -EINVAL;
 
     task_t *tsk = NULL;

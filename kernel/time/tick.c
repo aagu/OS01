@@ -34,7 +34,7 @@ void tick_handler(void)
 
     poll_timeout_tick();
 
-    this_cpu()->need_resched = 1;
+    __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
     this_cpu()->watchdog_counter++;
 
     if ((container_of(list_next(&timer_list_head.list), timer_t, list)->expire_jiffies <= jiffies))

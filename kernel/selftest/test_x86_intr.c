@@ -307,17 +307,18 @@ static int spurious(void)
     unsigned cpu = cpu_id();
     uint64_t returns = selftest_x86_intr_returns[cpu];
     uint64_t schedules = this_cpu()->schedule_count;
-    uint64_t need = this_cpu()->need_resched;
+    uint64_t need = __atomic_load_n(&this_cpu()->need_resched,
+                                    __ATOMIC_ACQUIRE);
     /* A wrongly routed ret_from_intr would consume this and increment
      * the return-work counter, even if schedule selects this task. */
-    this_cpu()->need_resched = 1;
+    __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
     selftest_x86_sentinel();
     bool ok = x86_intr_spurious_verdict(
         x86_intr_snapshot_equal(&selftest_x86_before, &selftest_x86_after),
         returns, selftest_x86_intr_returns[cpu],
         schedules, this_cpu()->schedule_count,
-        this_cpu()->need_resched);
-    this_cpu()->need_resched = need;
+        __atomic_load_n(&this_cpu()->need_resched, __ATOMIC_ACQUIRE));
+    __atomic_store_n(&this_cpu()->need_resched, need, __ATOMIC_RELEASE);
     arch_local_irq_restore(flags);
     serial_printk("[selftest] x86_intr: int ff GPR/RSP/RFLAGS/DS/ES and return-work %s\n",
                   ok ? "PASS" : "FAIL");

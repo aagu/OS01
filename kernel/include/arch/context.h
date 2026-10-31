@@ -68,17 +68,11 @@ void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void));
 int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg);
 void arch_kthread_drop_files(task_t *t);
 
-/* ── Architecture capability: remote reschedule notification ────
- * x86 can wake a remote CPU with an IPI; aarch64 has no remote
- * reschedule IPI in this phase (spec §7).  A runtime bool does not
- * remove the linker dependency, so this is a compile-time constant and
- * BOTH the <intr/ipi.h> include and the ipi_send() call are gated on
- * it.  1 = the architecture can notify a remote CPU; 0 = local only. */
-#ifdef __x86_64__
-#define ARCH_HAS_REMOTE_RESCHED 1
-#else
-#define ARCH_HAS_REMOTE_RESCHED 0
-#endif
+/* Remote reschedule notification and the other scheduling-policy
+ * hooks live in the dedicated facade <arch/sched.h> (P1 spec §4):
+ * the per-arch backends are strong symbols in
+ * kernel/arch/<arch>/cpu/sched_notify.c, so common code no longer
+ * branches on a capability macro. */
 #endif
 
 #endif /* KERNEL_ARCH_CONTEXT_H */

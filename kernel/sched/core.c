@@ -1,6 +1,7 @@
 #include <sched/task.h>
 #include <sched/internal.h>
 #include <sched/diag.h>
+#include <arch/sched.h>
 #include <percpu/percpu.h>
 #include <kernel.h>
 #include <arch/spinlock.h>
@@ -83,11 +84,15 @@ __attribute__((noreturn)) static void idle_task_resume(void);
  * a waiter may immediately reap a zombie once on_cpu becomes zero. */
 void task_finish_switch(task_t *prev)
 {
-    percpu_t *rq = &percpu_data[prev->cpu];
+    /* prev->cpu is stable here (prev is on-CPU until on_cpu clears
+     * below); acquire pairs with the rq_lock-protected release stores
+     * for the lockless path shape. */
+    percpu_t *rq = &percpu_data[__atomic_load_n(&prev->cpu,
+                                                __ATOMIC_ACQUIRE)];
     uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
     if (prev->state == TASK_RUNNING && !prev->on_rq && prev != rq->idle) {
         enqueue_task(prev, rq);
-        rq->need_resched = 1;
+        __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&rq->rq_lock, flags);
@@ -100,21 +105,22 @@ void task_wake(task_t *t)
      * Never enqueue the idle task — it is always RUNNING on its
      * CPU and must never appear on a runqueue.
      */
-    if (t == percpu_data[t->cpu].idle)
+    if (t == percpu_data[__atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE)].idle)
         return;
 
 retry:
     ;
     /*
-     * Read t->cpu locklessly — sched_balance may change it concurrently.
-     * We re-check both t->cpu and t->on_rq under the acquired rq_lock
-     * to close the race window.
+     * Read t->cpu locklessly (acquire, paired with the rq_lock-
+     * protected release stores) — sched_balance may change it
+     * concurrently.  We re-check both t->cpu and t->on_rq under the
+     * acquired rq_lock to close the race window.
      */
-    percpu_t *rq = &percpu_data[*(volatile uint32_t *)&t->cpu];
+    percpu_t *rq = &percpu_data[__atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE)];
     uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
 
     /* Serialize the state transition with the final switch-out check. */
-    if (rq != &percpu_data[*(volatile uint32_t *)&t->cpu]) {
+    if (rq != &percpu_data[__atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE)]) {
         spin_unlock_irqrestore(&rq->rq_lock, flags);
         goto retry;
     }
@@ -146,12 +152,15 @@ retry:
         t->vruntime = wake_vruntime;
 
     enqueue_task(t, rq);
-    t->cpu = rq->cpu_id;  // keep t->cpu in sync with actual rq
+    /* Keep t->cpu in sync with the actual rq.  Release store under the
+     * rq_lock: lockless readers (notify target capture, the ARM
+     * scanner skip) pair with it. */
+    __atomic_store_n(&t->cpu, rq->cpu_id, __ATOMIC_RELEASE);
 
     spin_unlock_irqrestore(&rq->rq_lock, flags);
 
-    if ((int)t->cpu != (int)cpu_id())
-        rq->need_resched = 1;
+    if ((int)rq->cpu_id != (int)cpu_id())
+        __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
 }
 
 // Global PID counter — atomic because spawn/fork/exec may
@@ -220,6 +229,18 @@ void sched_unblock_blocked(void)
         task_t *t = container_of(pos, task_t, list);
         pos = task_list_next(pos);
 
+        /* P1 policy (spec §4): on an architecture whose scan admission
+         * is CPU0-only (aarch64), skip tasks pinned to other CPUs
+         * BEFORE reading their state/blocker — this CPU is not a
+         * legitimate scanner for them, and a cross-CPU t->cpu read
+         * must not touch a task whose owning CPU may concurrently
+         * reclaim it.  x86 (admission always true) keeps scanning
+         * every task.  The t->cpu load is lockless against rq_lock-
+         * protected writers: acquire-paired. */
+        if (!arch_sched_scan_blockers() &&
+            __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE) != 0)
+            continue;
+
         if (t->state != TASK_INTERRUPTIBLE)
             continue;
         if (t->blocker.type == BLOCKER_NONE)
@@ -265,6 +286,13 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     // or with a NULL check callback.
     if (!check)
         return -EINVAL;
+
+    // P1 admission policy (spec §4): a CPU whose scheduler cannot scan
+    // the global blocker list (an aarch64 AP) must never install a
+    // blocker — the single BSP scanner would never discover it.  The
+    // callback is not consulted on this path.
+    if (!arch_sched_scan_blockers())
+        return -EOPNOTSUPP;
 
     // Step 1: Check condition first — if already met, don't block at all.
     // This is the critical part that prevents lost-wakeup: even if the
@@ -317,7 +345,7 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
 void schedule(void)
 {
     percpu_t *rq = this_cpu();
-    if (!rq || !rq->scheduler_ok)
+    if (!rq || !__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE))
         return;
 
     // [FIX] Nested-schedule guard (Linux preempt_count idea):
@@ -382,7 +410,10 @@ void schedule(void)
     // ── 3. Wake blocked tasks whose condition is now met ──
     // (was inside the old zombie-reaper critical section; now
     // standalone — this is the blocker-wakeup backstop, NOT a reaper.)
-    {
+    // P1 policy (spec §4): the scan runs only where the architecture
+    // admits it (x86 everywhere; aarch64 BSP only) — a closed gate
+    // does not even take task_list_lock.
+    if (arch_sched_scan_blockers()) {
         uint64_t ub_flags = spin_lock_irqsave(&task_list_lock);
         sched_unblock_blocked();
         spin_unlock_irqrestore(&task_list_lock, ub_flags);
@@ -392,6 +423,12 @@ void schedule(void)
     sched_balance(rq);
 
     // ── 4. Pick next task (rbtree O(log n)) ─────────────────
+    // The pending reschedule request is consumed HERE, inside the
+    // rq_lock-protected pick decision (relaxed store: the lock orders
+    // it against the remote release-store publishers).  A notification
+    // that raced this section either published its task before the
+    // lock (seen by pick_eevdf) or publishes need_resched after the
+    // unlock — it can never be erased by this clear.
     task_t *next;
     {
         uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
@@ -417,8 +454,11 @@ void schedule(void)
             // and both CPUs run it.  Syncing cpu under the same lock
             // makes task_wake's lock == this lock -> on_rq/on_cpu
             // re-checks actually serialize.
-            next->cpu = rq->cpu_id;
+            // RELEASE store: lockless readers (notify target capture,
+            // the ARM scanner skip) pair with it.
+            __atomic_store_n(&next->cpu, rq->cpu_id, __ATOMIC_RELEASE);
         }
+        __atomic_store_n(&rq->need_resched, 0, __ATOMIC_RELAXED);
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
 
@@ -454,7 +494,10 @@ void schedule(void)
             next->vruntime > rq->min_vruntime)
             rq->min_vruntime = next->vruntime;
 
-        rq->need_resched = 0;
+        // need_resched was already consumed inside the pick decision
+        // (the rq_lock-protected clear); nothing to clear here — a
+        // post-unlock clear could erase a notification that arrived
+        // after the decision.
         arch_local_irq_restore(current->thread->sched_flags);
         current->in_schedule = 0;
         return;
@@ -463,8 +506,6 @@ void schedule(void)
     // ── 6. Update min_vruntime ──────────────────────────────
     if (next != rq->idle && next->vruntime > rq->min_vruntime)
         rq->min_vruntime = next->vruntime;
-
-    rq->need_resched = 0;
 
     // Idle task thread->rip is 0 until its first switch_to.  Arm the
     // first continuation through the arch hook (x86 writes the common C
@@ -521,7 +562,7 @@ __attribute__((noreturn)) static void idle_task_resume(void)
 
     while (1) {
         arch_cpu_halt();
-        if (cpu->need_resched) {
+        if (__atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE)) {
             schedule();
             // schedule() returns with IRQs disabled; hlt() needs
             // IF=1 to be woken by the tick.

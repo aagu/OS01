@@ -77,7 +77,7 @@ static void tty_wake_waiters(tty_t *tty)
 
     // Notify the scheduler that a task was woken — otherwise the
     // current CPU may sit in hlt (idle) until the next timer tick.
-    this_cpu()->need_resched = 1;
+    __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
 }
 
 // ═══════════════════════════════════════════════════════

@@ -116,7 +116,7 @@ void sched_account_tick(void)
         return;
 
     percpu_t *rq = &percpu_data[cpu];
-    if (!rq->scheduler_ok)
+    if (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE))
         return;
 
     task_t *cur = current;
@@ -179,6 +179,8 @@ int sched_accounting_read(unsigned cpu, struct cpu_usage_snapshot *out)
 
     /* valid requires the global publish, this CPU's scheduler being
      * up, and a really-started tick source on this CPU. */
-    out->valid = (src_valid && percpu_data[cpu].scheduler_ok) ? 1 : 0;
+    out->valid = (src_valid &&
+                  __atomic_load_n(&percpu_data[cpu].scheduler_ok,
+                                  __ATOMIC_ACQUIRE)) ? 1 : 0;
     return 0;
 }

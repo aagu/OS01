@@ -417,7 +417,7 @@ static void keyboard_wake_pollers(void)
     // on the BSP, and APs install GS before enabling local IRQs, so
     // num_cpus != 0 implies this CPU's GS base is loaded.
     if (num_cpus != 0)
-        this_cpu()->need_resched = 1;
+        __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
 }
 
 uint32_t keyboard_poll_dev(void *priv, uint32_t requested, poll_table_t *pt)
