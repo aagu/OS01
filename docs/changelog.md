@@ -7,6 +7,8 @@
 
 ## 2026-10-31
 
+- fix(audit): **Parked：movabs/leaq 无法解析目标诊断补强**：调用链审计 fixture 不再只检查函数名，分别要求 movabs 的 `call edge cannot be resolved` 与 leaq 的 `unresolvable leaq target` 诊断。leaq 审计先判断无法解析，再判断已解析但目标错误，避免单条坏 leaq 被泛化的“缺少预期入口”诊断遮盖；新增目标注释缺失、正确入口与无法解析 leaq 并存的负例，并确认错误目标不会被误报为无法解析。修正 movabs 注释：`0xFFFF80000014D161` 是 decoder call，dispatcher call 在 `0xFFFF80000014D173`。收紧断言后原 leaq 用例明确报红，修复后完整 audit suite 86/86 PASS；分别滤掉两类专用诊断的 mutation 均被断言捕获；生产 x86 ELF 的 `make PROFILE=x86_64-clang test-intr-dispatch-audit` PASS。完整 `make PROFILE=x86_64-clang test-harness` 全部模块 PASS（485.67 s），独立评审无待修问题。重复边诊断的梳理仍留在 roadmap。
+
 - fix(hosttests): **Parked：brk 源码扫描缺锚点保护闭环**：`hosttests/cases/test_brk_pages.c` 的断言只累计失败，原先缺少源码文件或扫描锚点时仍继续调用 `strstr`/指针运算，导致宿主 SIGSEGV。四个扫描用例现在记录 FAIL 后跳到统一释放路径，保留其余用例与最终 protocol-v1 END；有界扫描先按剩余长度裁剪再使用。新增 `qemutests/test_brk_source_scan.py`，在临时目录编译实际扫描函数，覆盖正常源码、两个缺文件场景与八种缺锚点场景，并接入 `test-harness`。修复前十个负例均 SIGSEGV，修复后均退出 1 且有 FAIL/END；正常源码通过。验证：聚焦 3 项 unittest PASS，`make PROFILE=x86_64-clang test-host HOST_TEST_JOBS=4` PASS。只闭环该子项，dispatch 其他 host 补强仍留在 roadmap。
 
 ## 2026-10-28

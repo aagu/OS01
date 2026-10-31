@@ -634,15 +634,19 @@ def _audit_x86(symtab, blocks, order, repo: Path,
             continue
         edges = x86_edges(instrs, symtab)
         leas = [e for e in edges if e.kind == "lea"]
-        if not any(e.target == entry for e in leas):
+        # Report unresolved addresses separately from known but wrong targets.
+        # Check these first: the usual single-leaq stub has no expected edge
+        # when its target cannot be resolved, so an elif after that check
+        # would hide the useful diagnosis behind "expected entry missing".
+        if any(e.target is None for e in leas):
+            errors.append(f"edge stub {stub}: an unresolvable leaq "
+                          "target is present")
+        elif not any(e.target == entry for e in leas):
             found = [e.detail + f" -> {e.target}" for e in leas]
             errors.append(
                 f"edge stub {stub} -> {entry}: no RIP-relative "
                 "leaq resolving (via the ELF symbol table) to the "
                 f"expected entry (found {found or 'none'})")
-        elif any(e.target is None for e in leas):
-            errors.append(f"edge stub {stub}: an unresolvable leaq "
-                          "target is present")
         else:
             notes.append(f"edge stub {stub} -> {entry} (leaq rip-rel, "
                          "resolved through nm)")

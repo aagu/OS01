@@ -855,7 +855,8 @@ class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
 
     This class owns the *absolute-address indirect* form: the ``movabs``
     at ``0xFFFF80000014D163`` (the thin entry's dispatcher call) and
-    the indirect call at ``0xFFFF80000014D161``.
+    the dispatcher call at ``0xFFFF80000014D173``; the call at
+    ``0xFFFF80000014D161`` invokes the decoder.
     """
 
     def test_expected_target_passes(self):
@@ -893,7 +894,9 @@ class IntrDispatchAuditMovabsFormTests(IntrDispatchAuditFixture):
             "# imm = 0xFFFF80000013CD80",
             "# imm = 0xFFFF800000199999"))
         errors = self.audit()
-        self.assertTrue(any("do_page_fault" in e for e in errors), errors)
+        self.assertTrue(any(
+            "edge do_page_fault: call edge cannot be resolved" in e
+            for e in errors), errors)
 
     def test_unknown_indirect_form_is_not_a_pass(self):
         # An indirect call through a register with NO tracked movabs
@@ -937,6 +940,7 @@ class IntrDispatchAuditStubLeaqFormTests(IntrDispatchAuditFixture):
             "# 0xffff80000014bfb0 <do_general_protection>"))
         errors = self.audit()
         self.assertTrue(any("page_fault" in e for e in errors), errors)
+        self.assertFalse(any("unresolvable leaq" in e for e in errors), errors)
 
     def test_unresolvable_target_fails(self):
         self.stage_x86(disasm_text=_mutate(
@@ -944,7 +948,32 @@ class IntrDispatchAuditStubLeaqFormTests(IntrDispatchAuditFixture):
             "# 0xffff80000014d120 <do_page_fault>",
             "# 0xffff800000199998 <not_a_symbol>"))
         errors = self.audit()
-        self.assertTrue(any("page_fault" in e for e in errors), errors)
+        self.assertTrue(any(
+            "edge stub page_fault: an unresolvable leaq target" in e
+            for e in errors), errors)
+
+    def test_leaq_without_target_annotation_fails(self):
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001049C1,
+            "# 0xffff80000014d120 <do_page_fault>", ""))
+        errors = self.audit()
+        self.assertTrue(any(
+            "edge stub page_fault: an unresolvable leaq target" in e
+            for e in errors), errors)
+
+    def test_resolved_entry_does_not_hide_an_unresolvable_leaq(self):
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001049C1,
+            "# 0xffff80000014d120 <do_page_fault>",
+            "# 0xffff80000014d120 <do_page_fault>\n" + _x86_line(
+                0xFFFF8000001049C7, "48 8d 05 00 00 00 00",
+                "leaq\t0x0(%rip), %r11 # 0xffff800000199998 <not_a_symbol>")))
+        errors, notes = self.audit_with_notes()
+        self.assertTrue(any(
+            "edge stub page_fault: an unresolvable leaq target" in e
+            for e in errors), errors)
+        self.assertFalse(any("edge stub page_fault -> do_page_fault (" in n
+                             for n in notes), notes)
 
     def test_stub_without_error_code_transfer_fails(self):
         # The stub jumps elsewhere (e.g. ret_from_exception): the
@@ -992,6 +1021,8 @@ class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
                 "jmp\t0xffff8000001047ff <ret_from_exception>"))
         errors = self.audit()
         self.assertTrue(any("ret_from_intr" in e for e in errors), errors)
+
+
 # ────────────────────────────────────────────────────────────────────
 # Scenario fixtures (plan Step 3).
 # ────────────────────────────────────────────────────────────────────
