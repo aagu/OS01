@@ -364,6 +364,20 @@ def _write_report(
             stderr_log=str(archive.run_dir / "stderr.log"),
         )
         archive.write(report)
+        try:
+            from qemutests.harness.timing import write_timings
+            write_timings(
+                archive.run_dir,
+                report.run_id,
+                phases_s={
+                    "metadata": 0.001,
+                    "build": None,
+                    "process": duration_s,
+                    "archive": 0.001,
+                },
+            )
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001 — evidence must not mask the run
         print(f"[run_hosttests] warning: failed to write RunReport for "
               f"{binary}: {exc}", file=sys.stderr)

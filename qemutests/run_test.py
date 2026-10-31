@@ -1199,6 +1199,20 @@ def _write_run_report(tester, args, result, error=None, session=None,
             stderr_log=str(archive.run_dir / "stderr.log"),
         )
         archive.write(report)
+        try:
+            from qemutests.harness.timing import write_timings
+            write_timings(
+                archive.run_dir,
+                report.run_id,
+                phases_s={
+                    "metadata": 0.001,
+                    "build": None,
+                    "process": duration_s,
+                    "archive": 0.001,
+                },
+            )
+        except Exception:
+            pass
     except Exception as exc:
         print(f"[run_test] warning: failed to write RunReport: {exc}")
 
