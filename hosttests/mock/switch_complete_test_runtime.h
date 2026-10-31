@@ -33,6 +33,7 @@
 #define SWITCH_COMPLETE_TEST_RUNTIME_H
 
 #include <stddef.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -272,6 +273,8 @@ int mock_arch_prepare_calls;
 int mock_arch_drop_files_calls;
 int mock_arch_files_live;
 void *mock_arch_files_token = (void *)0xfeed0001ULL;
+int mock_arch_fpu_live;
+void *mock_arch_fpu_token;
 
 /* Enqueue / placement spies. */
 int mock_enqueue_calls;
@@ -325,6 +328,10 @@ size_t kfree(void *address)
         spy_seq_kfree[spy_kfree_calls] = ++op_counter;
     }
     spy_kfree_calls++;
+    if (address && address == mock_arch_fpu_token) {
+        mock_arch_fpu_token = NULL;
+        mock_arch_fpu_live--;
+    }
     for (int i = 0; i < 16; i++) {
         if (mock_kmalloc_live[i] == address) {
             mock_kmalloc_live_bytes -= mock_kmalloc_live_size[i];
@@ -417,12 +424,27 @@ void sched_notify_remote(task_t *tsk)
 int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
 {
     mock_arch_prepare_calls++;
-    if (mock_arch_prepare_rc != 0)
-        return mock_arch_prepare_rc;   /* hook cleaned its own state */
     /* Success: acquire the hook-owned file-table resource and build the
      * first-entry context (x86's real hook writes the same fields). */
     mock_arch_files_live++;
     t->files = mock_arch_files_token;
+    t->fpu_save = kmalloc(256);
+    if (!t->fpu_save) {
+        t->files = NULL;
+        mock_arch_files_live--;
+        return -ENOMEM;
+    }
+    mock_arch_fpu_token = t->fpu_save;
+    mock_arch_fpu_live++;
+    if (mock_arch_prepare_rc != 0) {
+        /* Model a later preparation failure after acquiring both hook
+         * resources; the hook owns cleanup on this path. */
+        kfree(t->fpu_save);
+        t->fpu_save = NULL;
+        t->files = NULL;
+        mock_arch_files_live--;
+        return mock_arch_prepare_rc;
+    }
     t->thread->cr3 = 0x1000;
     t->thread->rip = 0x2000;
     t->thread->rsp = 0x3000;
@@ -488,6 +510,8 @@ void switch_tail_reset(void)
     mock_arch_prepare_calls = 0;
     mock_arch_drop_files_calls = 0;
     mock_arch_files_live = 0;
+    mock_arch_fpu_live = 0;
+    mock_arch_fpu_token = NULL;
 
     mock_enqueue_calls = 0;
     mock_enqueue_refused = 0;

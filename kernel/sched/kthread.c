@@ -108,6 +108,14 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
         return -ENOMEM;
     task_t *tsk = (task_t *)(((uint64_t)raw + STACK_SIZE - 1) &
                              ~(uint64_t)(STACK_SIZE - 1));
+    /* Keep the task metadata and diagnostic reserve below the usable
+     * stack.  Retain this runtime guard alongside the static assertion:
+     * it checks the geometry used by this allocation path itself. */
+    if (sizeof(task_t) > STACK_SIZE ||
+        (size_t)256 > STACK_SIZE - sizeof(task_t)) {
+        kfree(raw);
+        return -EINVAL;
+    }
     thread_t *thd = kmalloc(sizeof(thread_t));
     if (!thd) {
         kfree(raw);

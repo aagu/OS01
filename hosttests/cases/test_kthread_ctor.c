@@ -168,6 +168,21 @@ static void suite_rollback(void)
     assert_eq(0, pid);
     assert_true(spy_kfree_calls >= 1);     /* the raw stack was released */
 
+    TEST_SUITE("rollback: FPU allocation");
+    switch_tail_reset();
+    boot_phase_cpu0_up();
+    mock_kmalloc_fail_at = 3;              /* task + thread + FPU area */
+    tsk = (task_t *)1;
+    pid = 5;
+    rc = kthread_alloc_and_publish(ctor_fn, 0, NULL, 0, false, &tsk, &pid);
+    assert_clean_rollback("FPU alloc", rc);
+    assert_true(rc == -ENOMEM);
+    assert_eq(0, mock_arch_files_live);
+    assert_eq(0, mock_arch_fpu_live);
+    assert_true(tsk == NULL);
+    assert_eq(0, pid);
+    assert_true(spy_kfree_calls >= 2);      /* thread + raw stack released */
+
     TEST_SUITE("rollback: arch resource prepare");
     switch_tail_reset();
     boot_phase_cpu0_up();
@@ -181,6 +196,27 @@ static void suite_rollback(void)
     assert_true(tsk == NULL);
     assert_eq(0, pid);
     assert_true(spy_kfree_calls >= 2);     /* thread + raw stack released */
+    assert_eq(0, mock_arch_fpu_live);       /* hook-owned FPU rollback */
+
+    /* A later successful constructor owns a real mock FPU allocation;
+     * exercise the actual common switch tail and verify it returns all
+     * slab bytes and objects to the pre-attempt baseline. */
+    mock_arch_prepare_rc = 0;
+    size_t baseline_bytes = mock_kmalloc_live_bytes;
+    task_t *retry = NULL;
+    int retry_pid = 0;
+    rc = kthread_alloc_and_publish(ctor_fn, 1, NULL, 0, false,
+                                   &retry, &retry_pid);
+    assert_eq(0, rc);
+    assert_true(retry != NULL);
+    assert_true(retry_pid > 0);
+    assert_eq(1, mock_arch_fpu_live);
+    list_del(&retry->list);
+    retry->flags |= PF_SELF_REAP;
+    arch_kthread_drop_files(retry);
+    task_switch_complete(retry);
+    assert_eq(0, mock_arch_fpu_live);
+    assert_eq((int)baseline_bytes, (int)mock_kmalloc_live_bytes);
 }
 
 /* ── 4. Pinned API never gets the exception ──────────────────── */

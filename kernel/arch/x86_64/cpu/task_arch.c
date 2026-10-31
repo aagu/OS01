@@ -125,7 +125,15 @@ int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
     regs.rflags = (1 << 9);              /* interrupt enable */
     regs.rip    = (uint64_t)arch_kernel_thread_entry;
 
-    void *frame = (void *)((uint64_t)t + STACK_SIZE - sizeof(pt_regs_t));
+    uintptr_t task_end = (uintptr_t)t + sizeof(*t);
+    uintptr_t frame_addr = (uintptr_t)t + STACK_SIZE - sizeof(pt_regs_t);
+    if (task_end > frame_addr || frame_addr - task_end < 256) {
+        kfree(t->fpu_save);
+        t->fpu_save = NULL;
+        arch_kthread_drop_files(t);
+        return -EINVAL;
+    }
+    void *frame = (void *)frame_addr;
     memcpy(frame, &regs, sizeof(regs));
 
     t->thread->rsp0 = (uint64_t)t + STACK_SIZE;
