@@ -24,6 +24,7 @@
 #define AARCH64_THREAD_STACK_TOP_OFF   (15 * 8)
 #define AARCH64_THREAD_USABLE_LOW_OFF  (16 * 8)
 #define AARCH64_THREAD_SIZE           (17 * 8)
+#define AARCH64_STACK_SIZE            (32 * 1024)
 
 #ifndef __ASSEMBLER__
 
@@ -59,6 +60,7 @@ _Static_assert(offsetof(thread_t, stack_base)  == AARCH64_THREAD_STACK_BASE_OFF,
 _Static_assert(offsetof(thread_t, stack_top)   == AARCH64_THREAD_STACK_TOP_OFF,   "aarch64 thread_t stack_top offset drift");
 _Static_assert(offsetof(thread_t, usable_low)  == AARCH64_THREAD_USABLE_LOW_OFF,  "aarch64 thread_t usable_low offset drift");
 _Static_assert(sizeof(thread_t) == AARCH64_THREAD_SIZE, "aarch64 thread_t size drift");
+_Static_assert(STACK_SIZE == AARCH64_STACK_SIZE, "aarch64 assembly stack size drift");
 
 /* ── Current task ──────────────────────────────────────────────
  * Same task_union stack-mask convention as x86 (spec §6): task_t sits at

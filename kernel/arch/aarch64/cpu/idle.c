@@ -1,25 +1,23 @@
-// ── kernel/arch/aarch64/cpu/idle.c ──────────────────────────────
-//
-// aarch64 idle loop. <sched/task.h> file-scope declares
-//   thread_t init_thread = { ..., .rip = (uint64_t)idle_resume, ... };
-// unconditionally — no #ifdef __aarch64__ guard — so the aarch64 kernel
-// must provide the symbol at link time. On x86_64,
-// kernel/arch/x86_64/intr/entry.S provides `idle_resume` as the entry
-// point that returns from idle.
-//
-// Until the scheduler port lands (roadmap §P2 上下文切换统一), aarch64
-// has no runnable queue to re-check and nothing schedules init_thread,
-// so `wfi`-forever is the *correct* idle behavior, not a placeholder:
-// each CPU sleeps in the wait-for-interrupt state and wakes for its
-// CNTP tick / GIC interrupts. When the port brings need_resched-aware
-// idle, this loop grows the re-entry into the scheduler exactly where
-// the x86_64 `idle_resume` resumes it.
-
-#include <stdint.h>
+#include <sched/task.h>
+#include <percpu/percpu.h>
+#include <arch/irq.h>
+#include <arch/cpu.h>
 
 void idle_resume(void)
 {
+    percpu_t *cpu = this_cpu();
     for (;;) {
+        arch_irq_state_t flags = arch_local_irq_save();
+        if (cpu->need_resched || !rbtree_empty(&cpu->run_queue)) {
+            schedule();
+            arch_local_irq_restore(flags);
+            continue;
+        }
+
+        /* The periodic BSP CNTP tick bounds the check-to-WFI race.  IRQ
+         * is enabled before sleeping, then the loop rechecks the queue
+         * and need_resched immediately after every wake. */
+        arch_local_irq_enable();
         __asm__ __volatile__("wfi" ::: "memory");
     }
 }

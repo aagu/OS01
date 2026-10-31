@@ -21,8 +21,10 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
+#include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/vmm_gate.h> /* smp_starting_enter / ipi_ready_publish_and_count (M3 Task 11) */
 #include <percpu/percpu.h>        /* percpu_data / num_cpus (M3 Task 11) */
+#include <sched/task.h>           /* init_task_union / STACK_SIZE */
 #include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
@@ -784,5 +786,9 @@ void aarch64_main(const struct boot_context *handoff)
     gic_unexpected_probe();
     gic_ipi_test(dtb_cpu_count());
 #endif
-    for (;;) arch_cpu_halt();
+    /* All boot-stack probes retain their original order above. Prepare
+     * metadata only, then make the one-way transition to the idle stack. */
+    arch_local_irq_disable();
+    arch_aarch64_prepare_bsp_handoff();
+    aarch64_bsp_stack_enter((uint64_t)&init_task_union + STACK_SIZE - 16);
 }
