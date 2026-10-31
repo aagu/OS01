@@ -214,6 +214,42 @@ $(error AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and build the injected imag
 endif
 endif
 endif
+# MODE=sched (spec §10.2, P5 Task 1): parse-time conflict rejection. The
+# sched acceptance mode builds its own KERNEL_SELFTEST sched variants
+# through the controlled sub-make boundary, so it cannot share an
+# invocation with any other compile-affecting test variant. This applies
+# even when the outer invocation has no AARCH64_SCHED_TEST selector yet;
+# a nonempty selector additionally gets the same rejection inside the
+# aarch64 profile (which direct variant sub-makes also parse).
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
+ifeq ($(MODE),sched)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error MODE=sched cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
+endif
+ifneq ($(strip $(AARCH64_M1_TEST)),)
+$(error MODE=sched cannot be combined with AARCH64_M1_TEST='$(AARCH64_M1_TEST)')
+endif
+ifneq ($(strip $(AARCH64_SMP_TEST_NO_ACK_CPU)),)
+ifeq ($(filter 0,$(strip $(AARCH64_SMP_TEST_NO_ACK_CPU))),)
+$(error MODE=sched cannot be combined with AARCH64_SMP_TEST_NO_ACK_CPU=$(AARCH64_SMP_TEST_NO_ACK_CPU))
+endif
+endif
+endif
+endif
+# SCHED_CASE selector (MODE=sched prep/run only): the positive strict
+# evidence matrix, one fault variant, or all of them. Default all. The
+# resolution must also fire inside the per-case helper sub-makes the
+# MODE=sched dispatch invokes (their MAKECMDGOALS are the helper
+# targets, not test-aarch64), so the guard covers both spellings.
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS))$(findstring _test-aarch64-prep-sched,$(MAKECMDGOALS))$(findstring _test-aarch64-run-sched,$(MAKECMDGOALS)),)
+SCHED_CASES_VALID := positive sp-top sp-low pc-low pc-data all
+ifeq ($(SCHED_CASE),)
+SCHED_CASE := all
+endif
+ifeq ($(filter $(SCHED_CASE),$(SCHED_CASES_VALID)),)
+$(error invalid SCHED_CASE='$(SCHED_CASE)'; valid: $(SCHED_CASES_VALID))
+endif
+endif
 # Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
 # variable) so it survives across recipe lines — a shell variable set
 # in one `@`-prefixed recipe line is empty in the next (each `@` line is
@@ -296,6 +332,78 @@ _test-aarch64-run-sync-fault:
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
+# MODE=sched (spec §10.2, P5 Tasks 1-3): the strict scheduler acceptance
+# runner. Prep builds the exact KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=<v>
+# variants through SEQUENTIAL controlled recursive makes (each on its own
+# recipe line, mirroring prep-smp's dry-run contract); `all` prepares the
+# positive plus the four fault images. The run helper then consumes ONLY
+# the explicit per-variant paths from mk/targets/aarch64.mk — the python
+# runner never rebuilds and never guesses a variant. Every sched boot
+# uses the per-CPU diagnostic DTB (the prebuilt edk2 firmware does not
+# expose FDT through the EFI configuration table on current QEMU; see
+# docs/build/build.md "MODE=sched").
+.PHONY: _test-aarch64-prep-sched _test-aarch64-prep-sched-positive _test-aarch64-prep-sched-sp-top _test-aarch64-prep-sched-sp-low _test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data _test-aarch64-prep-sched-all
+_test-aarch64-prep-sched: _test-aarch64-prep-sched-$(SCHED_CASE)
+_test-aarch64-prep-sched-positive:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=positive aarch64-uefi
+_test-aarch64-prep-sched-sp-top:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=sp-top aarch64-uefi
+_test-aarch64-prep-sched-sp-low:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=sp-low aarch64-uefi
+_test-aarch64-prep-sched-pc-low:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-low aarch64-uefi
+_test-aarch64-prep-sched-pc-data:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-data aarch64-uefi
+_test-aarch64-prep-sched-all: _test-aarch64-prep-sched-positive \
+	_test-aarch64-prep-sched-sp-top _test-aarch64-prep-sched-sp-low \
+	_test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data
+
+# Per-SCHED_CASE explicit path maps for one runner invocation. The
+# runner's --variant schema is fixed: variant name + image + firmware +
+# ELF. `all` passes all five maps (positive matrix + every fault case).
+AARCH64_SCHED_RUN_ARGS_positive = --case positive \
+  --variant positive --image "$(AARCH64_UEFI_SCHED_DISK)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FIRMWARE)" --elf "$(AARCH64_KERNEL_SCHED_ELF)"
+AARCH64_SCHED_RUN_ARGS_sp-top = --case sp-top \
+  --variant sp-top --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-top)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-top)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-top)"
+AARCH64_SCHED_RUN_ARGS_sp-low = --case sp-low \
+  --variant sp-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-low)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-low)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-low)"
+AARCH64_SCHED_RUN_ARGS_pc-low = --case pc-low \
+  --variant pc-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-low)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-low)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-low)"
+AARCH64_SCHED_RUN_ARGS_pc-data = --case pc-data \
+  --variant pc-data --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-data)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data)"
+AARCH64_SCHED_RUN_ARGS_all = --case all \
+  --variant positive --image "$(AARCH64_UEFI_SCHED_DISK)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FIRMWARE)" --elf "$(AARCH64_KERNEL_SCHED_ELF)" \
+  --variant sp-top --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-top)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-top)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-top)" \
+  --variant sp-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-low)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-low)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-low)" \
+  --variant pc-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-low)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-low)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-low)" \
+  --variant pc-data --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-data)" \
+  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data)" \
+  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data)"
+.PHONY: _test-aarch64-run-sched
+_test-aarch64-run-sched:
+	python3 qemutests/aarch64_scheduler.py \
+	  $(AARCH64_SCHED_RUN_ARGS_$(SCHED_CASE)) \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
 # M3.5 Task 25: production shootdown probe (spec §7.3). Builds the
 # PRODUCTION image (no KERNEL_SELFTEST=1) and runs it at -smp 2; the
 # harness greps for the exact `SHOOTDOWN-PROBE: START` → `OK`
@@ -328,8 +436,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
@@ -1724,7 +1832,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|m1-*>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-*>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''

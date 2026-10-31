@@ -44,16 +44,40 @@ ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
 $(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is x86-only; the aarch64 profile must not select a destructive fault variant)
 endif
 #
-# Order matters: sync-fault wins over weak-selftest when both
-# KERNEL_TEST_FORCE_NO_RNDRRS=1 and AARCH64_SYNC_FAULT_TEST=1 are set,
-# so the dedicated image/firmware paths (`image/sync-fault/`) match the
-# harness's hardcoded AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}. A
-# weak-selftest build would otherwise drop the image under
-# `image/weak-selftest/` while the harness reads the empty/stale
-# `image/sync-fault/` paths and run the wrong (or no) image.
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ifeq ($(filter 1,$(KERNEL_SELFTEST)),)
 $(error AARCH64_SYNC_FAULT_TEST=1 requires KERNEL_SELFTEST=1)
+endif
+endif
+#
+# AARCH64_SCHED_TEST — the MODE=sched acceptance selector (spec §10.2,
+# P5 Task 1). `positive` selects KERNEL_VARIANT=sched (the strict
+# evidence image); the four fault values select sched-fault-<value>
+# and each maps to exactly ONE numeric compile define in kernel/Makefile
+# (AARCH64_SCHED_FAULT_<TOKEN>=1 — no collision with ARCH9_FAULT /
+# FB_RESOLUTION_TEST / AARCH64_M1_TEST / AARCH64_SYNC_FAULT_TEST).
+# Nonempty requires KERNEL_SELFTEST=1 (the sched variants are selftest
+# images) and rejects every other compile-affecting test variant so the
+# dedicated kernel/image/firmware trees never collide. mk/project.mk
+# whitelists the variable across the controlled sub-make boundary.
+AARCH64_SCHED_TESTS_VALID := positive sp-top sp-low pc-low pc-data
+ifneq ($(strip $(AARCH64_SCHED_TEST)),)
+ifeq ($(filter $(AARCH64_SCHED_TEST),$(AARCH64_SCHED_TESTS_VALID)),)
+$(error invalid AARCH64_SCHED_TEST='$(AARCH64_SCHED_TEST)'; valid: $(AARCH64_SCHED_TESTS_VALID))
+endif
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_SCHED_TEST='$(AARCH64_SCHED_TEST)' requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error AARCH64_SCHED_TEST='$(AARCH64_SCHED_TEST)' cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
+endif
+ifneq ($(strip $(AARCH64_M1_TEST)),)
+$(error AARCH64_SCHED_TEST='$(AARCH64_SCHED_TEST)' cannot be combined with AARCH64_M1_TEST='$(AARCH64_M1_TEST)')
+endif
+ifneq ($(strip $(AARCH64_SMP_TEST_NO_ACK_CPU)),)
+ifeq ($(filter 0,$(strip $(AARCH64_SMP_TEST_NO_ACK_CPU))),)
+$(error AARCH64_SCHED_TEST='$(AARCH64_SCHED_TEST)' cannot be combined with AARCH64_SMP_TEST_NO_ACK_CPU=$(AARCH64_SMP_TEST_NO_ACK_CPU))
+endif
 endif
 endif
 ifneq ($(strip $(AARCH64_M1_TEST)),)
@@ -67,6 +91,16 @@ ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KE
 $(error AARCH64_M1_TEST cannot be combined with sync-fault/weak-selftest/canary)
 endif
 KERNEL_VARIANT := m1-$(AARCH64_M1_TEST)
+else ifneq ($(strip $(AARCH64_SCHED_TEST)),)
+# Order matters: the sched acceptance variants win over every other
+# selftest flavor (all combinations were rejected above, so the branch
+# is only reached alone). `positive` owns kernel/sched + image/sched;
+# each fault owns kernel/sched-fault-<value> + image/sched-fault-<value>.
+# Further down, sync-fault likewise wins over weak-selftest when both
+# KERNEL_TEST_FORCE_NO_RNDRRS=1 and AARCH64_SYNC_FAULT_TEST=1 are set,
+# so the dedicated image/firmware paths (`image/sync-fault/`) match the
+# harness's hardcoded AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}.
+KERNEL_VARIANT := $(if $(filter positive,$(AARCH64_SCHED_TEST)),sched,sched-fault-$(AARCH64_SCHED_TEST))
 else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)

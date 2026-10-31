@@ -369,6 +369,23 @@ ALL_CFLAGS += $(if $(filter ap-bad-root,$(AARCH64_M1_TEST)),-DAARCH64_M1_AP_BAD_
 endif
 endif
 
+# aarch64 EL1 scheduler acceptance (P5 Task 3 / Ruling P5-1): each fault
+# selector maps to exactly ONE numeric compile define consumed by the
+# compile-gated injection hook in arch/aarch64/cpu/task_arch.c
+# (aarch64_sched_fault_inject). `positive` — and every non-fault build
+# (normal / ordinary selftest) — contributes no define, so those ELFs
+# carry no injection symbol at all (asserted by the harness nm audit).
+# The names deliberately do not collide with ARCH9_FAULT /
+# FB_RESOLUTION_TEST / AARCH64_M1_TEST / AARCH64_SYNC_FAULT_TEST.
+ifneq ($(strip $(AARCH64_SCHED_TEST)),)
+ifeq ($(ARCH),aarch64)
+ALL_CFLAGS += $(if $(filter sp-top,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_SP_TOP=1)
+ALL_CFLAGS += $(if $(filter sp-low,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_SP_LOW=1)
+ALL_CFLAGS += $(if $(filter pc-low,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_PC_LOW=1)
+ALL_CFLAGS += $(if $(filter pc-data,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_PC_DATA=1)
+endif
+endif
+
 # AAGU-5.6: test-only entropy facade override — force RNDRRS detection
 # off so the WEAK-only (RNDR) path is exercised end-to-end on
 # QEMU -cpu max (which exposes both RNDR and RNDRRS). Only routes

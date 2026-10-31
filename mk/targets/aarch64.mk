@@ -23,5 +23,27 @@ AARCH64_UEFI_SELFTEST_FIRMWARE := $(BUILD_DIR)/image/selftest/QEMU_EFI.fd
 # outer KERNEL_VARIANT is empty.
 AARCH64_UEFI_SYNC_FAULT_DISK     := $(BUILD_DIR)/image/sync-fault/aarch64-uefi.img
 AARCH64_UEFI_SYNC_FAULT_FIRMWARE := $(BUILD_DIR)/image/sync-fault/QEMU_EFI.fd
+# MODE=sched (spec §10.2, P5 Task 1): the sched acceptance variants own
+# their own kernel/image/firmware trees exactly like sync-fault. The
+# outer MODE=sched recipes cannot infer a recursive make's KERNEL_VARIANT,
+# so the five (positive + four fault) triples are spelled here once and
+# consumed explicitly by _test-aarch64-{prep,run}-sched — never a symlink
+# or reuse of another variant's artifacts. Keep in sync with the profile's
+# KERNEL_VARIANT block (positive → sched, fault → sched-fault-<value>).
+AARCH64_UEFI_SCHED_DISK      := $(BUILD_DIR)/image/sched/aarch64-uefi.img
+AARCH64_UEFI_SCHED_FIRMWARE  := $(BUILD_DIR)/image/sched/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_ELF     := $(BUILD_DIR)/kernel/sched/kernel.elf
+AARCH64_UEFI_SCHED_FAULT_DISK_sp-top     := $(BUILD_DIR)/image/sched-fault-sp-top/aarch64-uefi.img
+AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-top := $(BUILD_DIR)/image/sched-fault-sp-top/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_FAULT_ELF_sp-top     := $(BUILD_DIR)/kernel/sched-fault-sp-top/kernel.elf
+AARCH64_UEFI_SCHED_FAULT_DISK_sp-low     := $(BUILD_DIR)/image/sched-fault-sp-low/aarch64-uefi.img
+AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-low := $(BUILD_DIR)/image/sched-fault-sp-low/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_FAULT_ELF_sp-low     := $(BUILD_DIR)/kernel/sched-fault-sp-low/kernel.elf
+AARCH64_UEFI_SCHED_FAULT_DISK_pc-low     := $(BUILD_DIR)/image/sched-fault-pc-low/aarch64-uefi.img
+AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-low := $(BUILD_DIR)/image/sched-fault-pc-low/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_FAULT_ELF_pc-low     := $(BUILD_DIR)/kernel/sched-fault-pc-low/kernel.elf
+AARCH64_UEFI_SCHED_FAULT_DISK_pc-data     := $(BUILD_DIR)/image/sched-fault-pc-data/aarch64-uefi.img
+AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data := $(BUILD_DIR)/image/sched-fault-pc-data/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data     := $(BUILD_DIR)/kernel/sched-fault-pc-data/kernel.elf
 AARCH64_KERNEL_ELF    := $(KERNEL_BUILD_DIR)/kernel.elf
 AARCH64_HEAD_OBJECT   := $(KERNEL_BUILD_DIR)/arch/aarch64/head.o
