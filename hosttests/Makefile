@@ -14,6 +14,9 @@ $(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the
 endif
 include $(OS01_PROFILE_FILE)
 
+include mk/registry.mk
+include mk/initial_registrations.mk
+
 TESTS_DIR := $(realpath ..)
 TEST_SRC  := $(TESTS_DIR)/hosttests
 TEST_BLD := $(HOST_TEST_BUILD_DIR)
