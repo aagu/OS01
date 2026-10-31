@@ -14,63 +14,16 @@ $(error OS01_PROFILE_FILE='$(OS01_PROFILE_FILE)' does not exist; invoke from the
 endif
 include $(OS01_PROFILE_FILE)
 
+.DEFAULT_GOAL := all
+
+include mk/common.mk
 include mk/registry.mk
+include mk/framework.mk
+include mk/libc.mk
 include mk/initial_registrations.mk
 
-TESTS_DIR := $(realpath ..)
-TEST_SRC  := $(TESTS_DIR)/hosttests
-TEST_BLD := $(HOST_TEST_BUILD_DIR)
-TEST_MOCK := $(TEST_SRC)/mock
-TEST_INC  := $(TEST_SRC)/include
-TEST_CASES := $(TEST_SRC)/cases
-
-HOST_CC   ?= clang
-
-KERNEL_INC := -I$(TESTS_DIR)/kernel/include
-LIBC_INC := -I$(TESTS_DIR)/libc/include
-FRAMEWORK_INC := -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
-
-HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter \
-               -Wno-address-of-packed-member -Wno-gnu-statement-expression \
-               -Wno-macro-redefined -Wno-dangling-else \
-               -Wno-non-literal-null-conversion -Wno-incompatible-library-redeclaration
-
-POLL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
-    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
-    -include $(TEST_MOCK)/poll_test_runtime.h \
-    -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
-
-SYNC_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC)
-
-LIBC_SRC := $(TESTS_DIR)/libc
-
-LIBC_OBJS := \
-    $(TEST_BLD)/libc_memset.o \
-    $(TEST_BLD)/libc_memcpy.o \
-    $(TEST_BLD)/libc_memmove.o \
-    $(TEST_BLD)/libc_strlen.o \
-    $(TEST_BLD)/libc_strcmp.o \
-    $(TEST_BLD)/libc_strncmp.o \
-    $(TEST_BLD)/libc_strcpy.o \
-    $(TEST_BLD)/libc_strdup.o \
-    $(TEST_BLD)/libc_vsprintf.o \
-    $(TEST_BLD)/libc_vsnprintf.o \
-    $(TEST_BLD)/libc_sprintf.o \
-    $(TEST_BLD)/libc_getopt.o \
-    $(TEST_BLD)/libc_list.o \
-    $(TEST_BLD)/libc_floatconv.o
-
-MOCK_OBJS := $(TEST_BLD)/mock_kernel.o
-
-TEST_BINS := \
+TEST_BINS += \
     $(TEST_BLD)/test_lapic_nmi.elf \
-    $(TEST_BLD)/test_libc_string.elf \
-    $(TEST_BLD)/test_libc_list.elf \
-    $(TEST_BLD)/test_libc_vsprintf.elf \
-    $(TEST_BLD)/test_libc_fflush.elf \
-    $(TEST_BLD)/test_libc_stdio_registry.elf \
-    $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
-    $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_vfs_fs_registry.elf \
     $(TEST_BLD)/test_vfs_iops_fops.elf \
@@ -95,7 +48,6 @@ TEST_BINS := \
     $(TEST_BLD)/test_mutex_handshake.elf \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
-    $(TEST_BLD)/test_bootinfo_abi.elf \
     $(TEST_BLD)/test_lwip_rand.elf \
     $(TEST_BLD)/test_gic_driver.elf \
     $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
@@ -138,7 +90,6 @@ TEST_BINS := \
     $(TEST_BLD)/test_arena_2gib_boundary.elf \
     $(TEST_BLD)/test_arena_candidate_slab_bytes.elf \
     $(TEST_BLD)/test_arena_table_base_shift.elf \
-    $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
     $(TEST_BLD)/test_page_table_tree.elf \
     $(TEST_BLD)/test_page_table_contract.elf $(TEST_BLD)/test_page_table_vmm.elf \
     $(TEST_BLD)/test_page_table_install.elf $(TEST_BLD)/test_page_table_cleanup.elf \
@@ -213,118 +164,10 @@ TEST_BINS := \
 # next to `run`, because `all` below lists them as prerequisites and Make
 # expands an explicit rule's prerequisite list where it is parsed — a
 # definition further down would be empty at that point.
-TEST_EXIT_STATUS_BINS := \
-    $(TEST_BLD)/test_runtime_udivti3.elf \
-    $(TEST_BLD)/test_page_table_runner.elf
-
-.PHONY: all clean check-test-bins-dup run test-runtime-udivti3 runtime-udivti3-link-probe test_lwip_rand test_gic_driver test_gic_marker_lines test_gic_probe test_clocksource test-libc-fread-fwrite-validate test-libc-stdio-registry test-gfx-client test-gfx-primitives test_vmm_replace_protocol test_vmm_prot_none test_vmm_ack_wraparound test_aarch64_pt_root_publish test_aarch64_pt_split test_aarch64_arch_vmm_init test-block test-pci test-backend test-ahci test-device-boot test-net test-lwip test-e1000 test-virtio test-fb-uapi test-fb-state test-fb-writers test-bga test-fb-ioctl test-fb-hooks test-pty-winsize test-terminal-display test-user-log test-clients test-display-owner test-framework-contract test-gui-platform test-gui-lvgl test-gui-devfs-input test-gui-input-frame test-gui-input-route test-gui-gfx-input test-gui-input-decode test-gui-input-nonce test-gui-input-platform test-gui-input-lvgl
-
+.PHONY: all clean
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
 
-check-test-bins-dup:
-	@if [ "$$(echo $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) | tr ' ' '\n' | sort | uniq -d)" != "" ]; then \
-	    echo "ERROR: duplicate entries in TEST_BINS/TEST_EXIT_STATUS_BINS"; exit 1; \
-	fi
-
-# ── Host suite execution (test-framework plan, Task 7) ─────────────
-# `run` no longer greps a binary's stdout: it hands the authoritative
-# TEST_BINS list to qemutests/run_hosttests.py, which runs each binary with
-# its own timeout and archive and validates the evidence (legacy adapter
-# plus protocol v1 for migrated binaries).
-#
-# Two binaries report solely through their exit code and print NOTHING on
-# success, so they cannot satisfy the legacy adapter's "nonempty suite
-# evidence" rule — spec §6.2: an empty log cannot pass.  They are listed in
-# TEST_EXIT_STATUS_BINS and named to the runner via `--exit-status`, which
-# runs them through the SAME ProcessSession/archive path as everything else
-# (per-binary timeout; stdout.log / stderr.log / result.json still written)
-# and accepts "exit 0 with empty stdout" for these ids ALONE.  Every other
-# binary keeps the strict rule: an empty log is a FAIL.  Both groups run in
-# one runner invocation, so a failure in either never hides the other.
-#
-#   * test_page_table_runner — a framework meta-test: it forks a child that
-#     fails on purpose and passes only when the failure propagates
-#     (WEXITSTATUS(child) == 1); the child's buffered output is discarded.
-#   * test_runtime_udivti3 — an ordinary __udivti3 correctness fixture
-#     (runtime/selftest/test_udivti3.c) that prints only on a vector
-#     mismatch.  It is NOT a framework meta-test; rc=0 with no output is
-#     its pass signal.
-HOST_TEST_TIMEOUT ?= 60
-
-# One `--exit-status <id>` per exempted binary (id = basename without .elf).
-EXIT_STATUS_FLAGS := $(foreach b,$(TEST_EXIT_STATUS_BINS),--exit-status $(basename $(notdir $(b))))
-
-run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup
-	@echo ""
-	@echo "=============================================="
-	@echo "  OS01 Host-Based Test Suite"
-	@echo "=============================================="
-	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
-	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
-	    --timeout $(HOST_TEST_TIMEOUT) $(EXIT_STATUS_FLAGS) \
-	    $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
-	@echo "  [hosttests] all host test binaries passed"
-
-# ── Negative-contract binary: framework exit-code integrity ─────────
-# test_framework_contract.c is deliberately NOT in TEST_BINS or
-# TEST_EXIT_STATUS_BINS — both runners expect exit 0.  This binary
-# pins three test-framework contracts by being expected to FAIL:
-#
-#   1. A failing assertion propagates to the process exit status
-#      (TEST_RESULTS() must NOT reset __test_stats; see commit
-#      2d594ce0 for the original fix).
-#   2. Assertion macros evaluate their arguments exactly once
-#      (assert_eq / assert_str_eq / assert_mem_eq single-evaluation).
-#   3. TEST_RESULTS() is a pure snapshot — it must not mutate the
-#      stats, so a second consecutive summary reports the same totals.
-#
-# The Make target asserts the binary exits with code 1 (the contract
-# for the framework).  Any future regression that breaks the contract
-# flips the exit to 0 (or another code) and this target fails.
-$(TEST_BLD)/test_framework_contract.elf: $(TEST_CASES)/test_framework_contract.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_framework_contract.o
-	$(HOST_CC) -o $@ $(TEST_BLD)/test_framework_contract.o
-
-test-framework-contract: $(TEST_BLD)/test_framework_contract.elf
-	@echo "  [framework-contract] running $< (must exit EXACTLY 1: negative contract)"
-	@out=`$<`; rc=$$?; \
-	 if [ $$rc -eq 1 ]; then \
-	     echo "  [framework-contract] PASS: exit 1 (assertion exit-code contract holds)"; \
-	 else \
-	     echo "  [framework-contract] FAIL: expected exit 1, got $$rc"; \
-	     echo "$$out" | sed 's/^/    /'; \
-	     case $$rc in \
-	         0) echo "    hint: assertions no longer propagate (TEST_RESULTS may be resetting __test_stats)";; \
-	         2) echo "    hint: assertion macro evaluated its argument more than once";; \
-	         3) echo "    hint: TEST_RESULTS() reset __test_stats (the pre-2d594ce0 bug)";; \
-	         *) echo "    hint: unexpected exit code; see test_framework_contract.c header for the contract";; \
-	     esac; \
-	     exit 1; \
-	 fi
-
-# Runtime fixtures.
-$(TEST_BLD)/runtime_udivti3_link_probe.o: $(TEST_SRC)/../runtime/selftest/udivti3_link_probe.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) -ffreestanding -fno-builtin -c $< -o $@
-
-runtime-udivti3-link-probe: $(TEST_BLD)/runtime_udivti3_link_probe.o
-	$(HOST_CC) -nostdlib -Wl,-e,_start -o $(TEST_BLD)/runtime_udivti3-link-probe.elf $<
-
-$(TEST_BLD)/test_runtime_udivti3.o: $(TEST_SRC)/../runtime/selftest/test_udivti3.c \
-	$(TEST_SRC)/../runtime/selftest/udivti3_vectors.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/runtime/include -I$(TESTS_DIR)/runtime/selftest -c $< -o $@
-
-$(TEST_BLD)/runtime_udivti3_host.o: $(TESTS_DIR)/runtime/builtins/udivti3.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -fno-stack-protector -I$(TESTS_DIR)/runtime/include -c $< -o $@
-
-$(TEST_BLD)/test_runtime_udivti3.elf: $(TEST_BLD)/test_runtime_udivti3.o $(TEST_BLD)/runtime_udivti3_host.o
-	$(HOST_CC) -o $@ $^
-
-test-runtime-udivti3: $(TEST_BLD)/test_runtime_udivti3.elf
-	$<
+include mk/runner.mk
 
 # Focused boundary test links the production dispatcher.
 $(TEST_BLD)/test_syscall_dispatch.elf: $(TEST_CASES)/test_syscall_dispatch.c $(TESTS_DIR)/kernel/syscall/dispatch.c
@@ -345,139 +188,6 @@ $(TEST_BLD)/test_compat_linux.elf: $(TEST_CASES)/test_compat_linux.c \
 
 test-compat-linux: $(TEST_BLD)/test_compat_linux.elf
 	$<
-
-# libc compilation
-$(TEST_BLD)/libc_memset.o: $(LIBC_SRC)/string/memset.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_memcpy.o: $(LIBC_SRC)/string/memcpy.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_memmove.o: $(LIBC_SRC)/string/memmove.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_strlen.o: $(LIBC_SRC)/string/strlen.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_strcmp.o: $(LIBC_SRC)/string/strcmp.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_strncmp.o: $(LIBC_SRC)/string/strncmp.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_strcpy.o: $(LIBC_SRC)/string/strcpy.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_strdup.o: $(LIBC_SRC)/string/strdup.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# NOTE: this TU is the *userland* libc formatter, not the kernel-side
-# libk subset.  FRAMEWORK_INC force-includes test_platform.h, which
-# defines __is_libk; since c85172c5/7ebc9d0a libc/stdio/vsprintf.c gates
-# its float (%f/%e/%g) rendering behind `#ifndef __is_libk` (aarch64 libk
-# builds with -mgeneral-regs-only and cannot use `double`).  Compiling the
-# host test's copy in libk mode would silently strip float support and
-# make test_libc_vsprintf assert the wrong thing.  Build it WITHOUT
-# __is_libk so the harness exercises the real, full formatter (floatconv
-# is linked via $(LIBC_OBJS)).
-$(TEST_BLD)/libc_vsprintf.o: $(LIBC_SRC)/stdio/vsprintf.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_vsnprintf.o: $(LIBC_SRC)/stdio/vsnprintf.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_sprintf.o: $(LIBC_SRC)/stdio/sprintf.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_getopt.o: $(LIBC_SRC)/unistd/getopt.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_list.o: $(LIBC_SRC)/list/list.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -fgnu89-inline -c $< -o $@
-
-$(TEST_BLD)/libc_floatconv.o: $(LIBC_SRC)/stdio/floatconv.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_vasprintf.o: $(LIBC_SRC)/stdio/vasprintf.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_printf.o: $(LIBC_SRC)/stdio/printf.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-$(TEST_BLD)/libc_stdio_file.o: $(LIBC_SRC)/stdio/stdio_file.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# P1-5 review round 2: stdio_extras.c is the second half of the FILE
-# registry's truth source — fileno_unlocked / getc_unlocked /
-# putc_unlocked / fgets_unlocked live here. The hosttest must link
-# this object so the OS01 implementations (routed through file_to_fd())
-# are exercised, NOT the host glibc's. Without this, the linker
-# silently resolves the symbols to glibc and the test passes even if
-# the OS01 implementations regress to the pre-fix bare-cast behaviour.
-$(TEST_BLD)/libc_stdio_extras.o: $(LIBC_SRC)/stdio/stdio_extras.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# printf/vasprintf/write_all test shim — overrides host write() with a scriptable,
-# capturing, real-stdout-forwarding stub.
-$(TEST_BLD)/stdio_test_shims.o: $(TEST_MOCK)/stdio_test_shims.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK)/include -I$(TEST_INC) -c $< -o $@
-
-# Mock stubs — compiled as HOST binary (no custom headers)
-$(TEST_BLD)/mock_kernel.o: $(TEST_MOCK)/mock_kernel.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) -g -O0 -c $< -o $@
-
-# Test case compilation — all self-contained (no KERNEL_INC needed)
-$(TEST_BLD)/%.o: $(TEST_CASES)/%.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# getopt test links against libc_getopt.o whose globals (optarg/optind/...) are
-# also declared (as tentative defs) by <getopt.h>; build with -fcommon so they merge.
-$(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -fcommon $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# vsprintf test exercises printf/vasprintf/write_all with the scripted write shim.
-$(TEST_BLD)/test_libc_vsprintf.o: $(TEST_CASES)/test_libc_vsprintf.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# fflush test exercises printf + fflush + fopen/fclose + write-shim capture.
-$(TEST_BLD)/test_libc_fflush.o: $(TEST_CASES)/test_libc_fflush.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# P2-8: stdio-registry cap / fdopen / slot-reuse tests — needs the mock
-# shim header for shim_write_count() (currently unused but kept for
-# symmetry with test_libc_fflush, which exercises the same code paths).
-$(TEST_BLD)/test_libc_stdio_registry.o: $(TEST_CASES)/test_libc_stdio_registry.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
-
-# fread/fwrite stream-validation test — pipe-based fake mini_file_t, no shims.
-$(TEST_BLD)/test_libc_fread_fwrite_validate.o: $(TEST_CASES)/test_libc_fread_fwrite_validate.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 # Focused poll test compiles and links the real production paths.
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
@@ -508,58 +218,6 @@ $(TEST_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
 $(TEST_BLD)/poll_clocksource_stub.o: $(TEST_MOCK)/poll_clocksource_stub.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
-
-# Link rules
-$(TEST_BLD)/test_libc_string.elf: $(TEST_BLD)/test_libc_string.o $(LIBC_OBJS)
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c \
-		$(TESTS_DIR)/kernel/include/core/bootinfo.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include -c $< -o $@
-
-$(TEST_BLD)/test_libc_list.elf: $(TEST_BLD)/test_libc_list.o $(LIBC_OBJS)
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_libc_vsprintf.elf: $(TEST_BLD)/test_libc_vsprintf.o $(LIBC_OBJS) \
-		$(TEST_BLD)/libc_vasprintf.o $(TEST_BLD)/libc_printf.o \
-		$(TEST_BLD)/libc_stdio_file.o $(TEST_BLD)/stdio_test_shims.o
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_libc_fflush.elf: $(TEST_BLD)/test_libc_fflush.o $(LIBC_OBJS) \
-		$(TEST_BLD)/libc_vasprintf.o $(TEST_BLD)/libc_printf.o \
-		$(TEST_BLD)/libc_stdio_file.o $(TEST_BLD)/stdio_test_shims.o
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_libc_fread_fwrite_validate.elf: \
-		$(TEST_BLD)/test_libc_fread_fwrite_validate.o \
-		$(TEST_BLD)/libc_stdio_file.o \
-		$(TEST_BLD)/libc_vsprintf.o \
-		$(TEST_BLD)/libc_printf.o \
-		$(TEST_BLD)/libc_floatconv.o \
-		$(TEST_BLD)/stdio_test_shims.o
-	$(HOST_CC) -o $@ $^
-
-test-libc-fread-fwrite-validate: $(TEST_BLD)/test_libc_fread_fwrite_validate.elf
-	$<
-
-# P2-8: registry-cap / fdopen / slot-reuse / unregistered-stream
-# contract tests for the libc FILE layer (AAGU-6 batch).
-$(TEST_BLD)/test_libc_stdio_registry.elf: \
-		$(TEST_BLD)/test_libc_stdio_registry.o \
-		$(TEST_BLD)/libc_stdio_file.o \
-		$(TEST_BLD)/libc_stdio_extras.o \
-		$(TEST_BLD)/libc_vsprintf.o \
-		$(TEST_BLD)/libc_printf.o \
-		$(TEST_BLD)/libc_floatconv.o \
-		$(TEST_BLD)/stdio_test_shims.o
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_libc_getopt.elf: $(TEST_BLD)/test_libc_getopt.o $(LIBC_OBJS)
-	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
@@ -1368,49 +1026,6 @@ test-early-arena: $(TEST_BLD)/test_early_arena.elf $(TEST_BLD)/test_early_arena_
 	$(TEST_BLD)/test_arena_2gib_boundary.elf
 	$(TEST_BLD)/test_arena_candidate_slab_bytes.elf
 	$(TEST_BLD)/test_arena_table_base_shift.elf
-
-.PHONY: test-aarch64-color-printk-abi
-test-aarch64-color-printk-abi: $(TEST_BLD)/test_aarch64_color_printk_abi.elf
-	$(TEST_BLD)/test_aarch64_color_printk_abi.elf
-
-# color_printk / serial_printk ABI + behaviour. Links the REAL shared
-# kernel/core/printk.c — the arch-only printk_stub.c was deleted in
-# 42aef0fc and the console is now shared by x86_64 and aarch64
-# (kernel/Makefile's aarch64 KERNEL_C_SOURCES lists `core/printk.c`).
-# The test TU includes the public <core/printk.h> so a signature mismatch
-# is a compile error; the production TU is compiled against the same
-# header. The serial sink + framebuffer-absent stubs live in
-# $(TEST_MOCK)/aarch64_color_printk/printk_capture.c, whose shadow
-# <driver/serial.h> comes BEFORE $(KERNEL_INC).
-PRINTK_ABI_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) \
-	-I$(TEST_MOCK)/aarch64_color_printk $(KERNEL_INC)
-
-$(TEST_BLD)/test_aarch64_color_printk_abi.o: $(TEST_CASES)/test_aarch64_color_printk_abi.c \
-		$(TESTS_DIR)/kernel/include/core/printk.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(PRINTK_ABI_HOST_CFLAGS) -c $< -o $@
-
-$(TEST_BLD)/printk_production.o: \
-		$(TESTS_DIR)/kernel/core/printk.c \
-		$(TESTS_DIR)/kernel/include/core/printk.h \
-		$(TESTS_DIR)/kernel/include/driver/serial.h \
-		$(TESTS_DIR)/kernel/include/driver/fb_state.h \
-		$(TESTS_DIR)/kernel/include/driver/font.h \
-		$(TEST_MOCK)/aarch64_color_printk/driver/serial.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(PRINTK_ABI_HOST_CFLAGS) -c $< -o $@
-
-$(TEST_BLD)/printk_capture.o: $(TEST_MOCK)/aarch64_color_printk/printk_capture.c \
-		$(TEST_MOCK)/aarch64_color_printk/driver/serial.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) \
-		-I$(TEST_MOCK)/aarch64_color_printk $(KERNEL_INC) -c $< -o $@
-
-$(TEST_BLD)/test_aarch64_color_printk_abi.elf: \
-		$(TEST_BLD)/test_aarch64_color_printk_abi.o \
-		$(TEST_BLD)/printk_production.o \
-		$(TEST_BLD)/printk_capture.o
-	$(HOST_CC) -o $@ $^
 
 # aarch64 M2/M3 plan Task 3: arena layout-chain / 2 GiB boundary /
 # candidate-scan-includes-slab-bytes. Each new TU reuses the production
@@ -3386,9 +3001,6 @@ test-page-table-publish: $(TEST_BLD)/test_page_table_publish.elf
 # Every M1 test uses the failure-preserving runner.
 $(patsubst %.elf,%.o,$(filter $(TEST_BLD)/test_page_table_%.elf,$(TEST_BINS))): $(TEST_INC)/page_table_test_runner.h
 
-$(TEST_BLD)/test_page_table_runner.elf: $(TEST_CASES)/test_page_table_runner.c $(TEST_INC)/page_table_test_runner.h $(TEST_INC)/test_framework.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $< -o $@
 
 $(TEST_BLD)/early_arena_exhaust_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c
 	@mkdir -p $(TEST_BLD)

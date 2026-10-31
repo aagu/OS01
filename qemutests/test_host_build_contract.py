@@ -138,6 +138,29 @@ class HostBuildContractTests(unittest.TestCase):
         # Expected-failure must NOT be built by default goal
         self.assertNotIn("test_framework_contract.elf", result.stdout)
 
+    def test_duplicate_id_rejected(self):
+        """Duplicate test IDs must be rejected by the registry / check-test-bins-dup."""
+        cmd = ["make", "-n", "-C", "hosttests",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               "HOST_TEST_INVENTORY=test_dup:framework:protocol-or-legacy test_dup:framework:protocol-or-legacy",
+               "check-registry-unique"]
+        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+        self.assertNotEqual(result.returncode, 0, "Duplicate test ID was not rejected")
+        self.assertIn("duplicate", result.stdout.lower(), result.stdout)
+
+    def test_different_macro_different_objects(self):
+        """Sources built under different macros must produce distinct object files."""
+        # test_user_log vs test_user_log_off
+        cmd = ["make", "-n", "-C", "hosttests",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               "test-user-log"]
+        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("test_user_log.o", result.stdout)
+        self.assertIn("test_user_log_off.o", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

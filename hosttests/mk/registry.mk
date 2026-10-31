@@ -11,8 +11,15 @@ define register_host_test
 HOST_TEST_INVENTORY += $(strip $(1)):$(strip $(2)):$(strip $(3))
 endef
 
-.PHONY: print-inventory
+.PHONY: print-inventory check-registry-unique
 print-inventory:
 	@for item in $(HOST_TEST_INVENTORY); do \
 	    echo "$$item" | tr ':' '\t'; \
 	done | sort
+
+check-registry-unique:
+	+@dup=$$(for item in $(HOST_TEST_INVENTORY); do echo "$${item%%:*}"; done | sort | uniq -d); \
+	if [ -n "$$dup" ]; then \
+	    echo "ERROR: duplicate test ID in registry: $$dup" >&2; \
+	    exit 1; \
+	fi
