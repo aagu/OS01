@@ -95,12 +95,23 @@ SECTIONS
         _rodata_end = .;
     } :text
 
+    /* Consume this exact input before the .data.* wildcard; no other data
+     * subsection is filtered out.  _data_start/_data_end bracket the full
+     * writable-data span, including this aligned task union and initcalls. */
+    . = ALIGN(32768);
+    _data_start = .;
+    .data.init_task : AT(ADDR(.data.init_task) - _kernel_page_offset) {
+        KEEP(*(.data.init_task))
+    } :data
+    ASSERT((ADDR(.data.init_task) & 32767) == 0,
+           "aarch64 init_task_union must be STACK_SIZE aligned")
+    ASSERT(SIZEOF(.data.init_task) >= 32768,
+           "aarch64 init_task_union must reserve at least STACK_SIZE")
+
     . = ALIGN(0x1000);
     .data ALIGN(0x1000) : AT(ADDR(.data) - _kernel_page_offset) {
-        _data_start = .;
         *(.data)
         *(.data.*)
-        _data_end = .;
     } :data
 
     /* KEEP-wrapped: drivers register a function pointer here via
@@ -117,6 +128,7 @@ SECTIONS
         KEEP(*(.subsys_init))
         PROVIDE(__subsys_init_end = .);
     } :data
+    _data_end = .;
 
     . = ALIGN(0x1000);
     /* The loader reserves/zeros physical LOAD addresses. Keep page-aligned

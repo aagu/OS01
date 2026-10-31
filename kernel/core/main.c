@@ -3,6 +3,7 @@
 #include <memory/memory.h>
 #include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
 #include <sched/task.h>       // task_init
+#include <sched/boot.h>       // sched_boot_creation_begin (Phase 2, Ruling P2-2)
 #include <driver/serial.h>    // write_serial
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
 #include <tty/boot.h>         // tty_boot_init
@@ -175,16 +176,43 @@ int kernel_main(const struct boot_context *bootctx)
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
     /* Declare the complete protocol-v1 selection before START: the
-     * registered boot-time (early) cases plus the six scheduled cases
+     * registered boot-time (early) cases plus the seven scheduled cases
      * task_init() runs later.  selftest_run_all() executes the early
      * subset; task_init() records the late cases and emits the single
      * END via selftest_end_run(). */
-    selftest_begin_run(6);
+    selftest_begin_run(7);
     selftest_run_all();
     serial_printk("[selftest] done\n");
 #endif
 
-    // ═══ Network stack init (post-SMP, pre-scheduler) ═══
+    // ═══ Network stack init (post-SMP, pre-scheduler) ═══════
+    // Open the BSP boot creation window FIRST (spec §8.1 / Ruling
+    // P2-2): x86_64_boot_percpu() (above) has established percpu, the
+    // current task stack and the CPU0 runqueue, and BSP scheduler_ok is
+    // not yet published.  While the window is open, an unpinned
+    // boot-service kernel_thread/create_kthread whose placement finds
+    // no eligible CPU (none is scheduler_ok yet) falls back to CPU0 and
+    // queues there; sched_boot_start() (from task_init) closes it
+    // permanently BEFORE publishing scheduler_ok.  net_lwip_init()
+    // creates the lwIP tcpip_thread via create_kthread — exactly the
+    // boot-phase creation the window exists for.
+    sched_boot_creation_begin();
+
+#ifdef OS01_SELFTEST
+    // ── x86 UP boot-window probe (P5 Task 4 / spec §10.1 item 4) ──
+    // Inside the legal pre-publication window: CPU0 is online but
+    // scheduler_ok == 0, so this kernel_thread() has NO scheduler_ok
+    // target and must succeed through the boot fallback.  The late
+    // selftest case test_sched_boot_probe (task_init) then proves the
+    // marker function ACTUALLY executed under the scheduler after
+    // sched_boot_start() published scheduler_ok — and that the runtime
+    // negative calls are rejected once the window closed.
+    {
+        extern void sched_boot_probe_create(void);
+        sched_boot_probe_create();
+    }
+#endif
+
     // lwIP creates kernel threads (tcpip_thread) — must happen
     // after SMP is up and before the scheduler starts.  The task
     // list is no longer reset by task_init() (INIT_TASK pre-initializes

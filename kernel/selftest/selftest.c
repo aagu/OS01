@@ -10,6 +10,9 @@
 #include <fs/file.h>
 #include <string.h>
 #include <stdlib.h>
+#ifdef OS01_SELFTEST
+#include <selftest/aarch64_scheduler.h>
+#endif
 
 // ── Built-in tests ────────────────────────────────────────
 
@@ -177,6 +180,17 @@ void selftest_register_builtin_tests(void)
 #endif /* !__aarch64__ */
 
 #ifdef OS01_SELFTEST
+#if defined(__aarch64__)
+    selftest_register_late("aarch64_sched_yield");
+    selftest_register_late("aarch64_sched_regs");
+    selftest_register_late("aarch64_sched_entry");
+    selftest_register_late("aarch64_sched_irq");
+    selftest_register_late("aarch64_sched_blocker");
+    selftest_register_late("aarch64_sched_reclaim");
+    selftest_register_late("aarch64_sched_idle");
+    selftest_register_late("aarch64_sched_timer");
+    selftest_register_late("aarch64_sched_ap");
+#endif
 #if !defined(__aarch64__)
     selftest_register("ext2_magic",        ext2_selftest_magic);
     selftest_register("ext2_struct_sizes", ext2_selftest_struct_sizes);
@@ -217,6 +231,11 @@ void selftest_register_builtin_tests(void)
 #if !defined(__aarch64__)
     selftest_register_late("kernel_mutex");
     selftest_register_late("kthread_self_reap");
+    /* P5 Task 4 (spec §10.1 item 4): the boot-window probe — creation
+     * happened in kernel_main while CPU0 scheduler_ok was still 0; this
+     * case proves the marker thread actually ran under the scheduler
+     * and that the runtime negative calls are rejected. */
+    selftest_register_late("sched_boot_probe");
     selftest_register_late("fd_refcount");
     selftest_register_late("pgrp_signal");
     selftest_register_late("tty_vintr");

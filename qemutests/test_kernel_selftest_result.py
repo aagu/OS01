@@ -120,7 +120,7 @@ class ReceivedOnlyFakeProcessSession(FakeProcessSession):
 # `[selftest] ...` diagnostics; this trace carries both, exactly as the
 # migrated kernel does.  In particular the END record precedes the final
 # `[selftest] task tests done` marker (``selftest_end_run()`` runs before
-# the marker in ``kernel/sched/core.c``), so the runner has the complete
+# the marker in ``kernel/arch/x86_64/cpu/sched_boot.c``), so the runner has the complete
 # v1 evidence once the completion markers are seen.  ``deep_copy_argv_empty``
 # is the boot-time (early) case; ``mutex_basic`` is the scheduled (late) one.
 # Since the intr-dispatch Task 6 gate the runner additionally requires the
@@ -495,6 +495,12 @@ def _read_kernel_source(relpath: str) -> str:
 _REGISTER_RE = re.compile(r'selftest_register\(\s*"([^"]+)"')
 _REGISTER_LATE_RE = re.compile(r'selftest_register_late\(\s*"([^"]+)"')
 
+# The x86 system startup TU.  Phase 2 of the aarch64 EL1 scheduler plan
+# moved the x86 late-selftest calls and the coordinator's END out of the
+# arch-neutral kernel/sched/core.c into this x86-only file; the
+# contract itself ("END follows every late record") is unchanged.
+X86_SCHED_BOOT_SRC = "kernel/arch/x86_64/cpu/sched_boot.c"
+
 
 def _registered_case_ids(relpath: str) -> List[str]:
     """Early case ids declared by ``selftest_register("id", fn)`` in source."""
@@ -677,21 +683,29 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
         ).decode()
         self.assertFalse(parse_v1(text, suite=SUITE).ok)
 
-    def test_aarch64_ends_run_after_boot_tests(self) -> None:
-        src = _read_kernel_source("kernel/arch/aarch64/boot/main.c")
-        # Scope to the real call sites: the nearest begin/run calls that
-        # precede the (unique) selftest_end_run() call — the file also
-        # mentions selftest_run_all() in a comment above the block.
-        end = src.find("selftest_end_run(")
-        self.assertNotEqual(
-            end, -1,
-            "aarch64 must call selftest_end_run() after its boot tests")
-        begin = src.rfind("selftest_begin_run(", 0, end)
-        run = src.rfind("selftest_run_all(", 0, end)
-        self.assertNotEqual(begin, -1, "aarch64 must call selftest_begin_run")
-        self.assertNotEqual(run, -1, "aarch64 must call selftest_run_all")
-        self.assertLess(begin, run, "begin_run must precede run_all")
-        self.assertLess(run, end, "selftest_end_run must follow run_all")
+    def test_aarch64_runs_late_cases_before_the_single_end(self) -> None:
+        boot = _read_kernel_source("kernel/arch/aarch64/boot/main.c")
+        handoff = _read_kernel_source("kernel/arch/aarch64/cpu/task_arch.c")
+        self.assertIn("selftest_begin_run(9);", boot)
+        run = boot.find("selftest_run_all();")
+        begin = boot.find("selftest_begin_run(9);")
+        self.assertLess(begin, run, "begin_run must precede early run_all")
+        self.assertNotIn("selftest_end_run();", boot,
+                         "END belongs after the scheduler late cases")
+        self.assertEqual(handoff.count("selftest_end_run();"), 1,
+                         "the handoff must emit exactly one END")
+        late = handoff.find("test_aarch64_scheduler_run();")
+        end = handoff.find("selftest_end_run();")
+        self.assertNotEqual(late, -1, "handoff must execute late cases")
+        self.assertLess(late, end, "late cases must precede END")
+        registry = _read_kernel_source("kernel/selftest/selftest.c")
+        ids = re.findall(r'selftest_register_late\("(aarch64_sched_[a-z]+)"\)',
+                         registry)
+        self.assertEqual(ids, [
+            "aarch64_sched_yield", "aarch64_sched_regs", "aarch64_sched_entry",
+            "aarch64_sched_irq", "aarch64_sched_blocker", "aarch64_sched_reclaim",
+            "aarch64_sched_idle", "aarch64_sched_timer", "aarch64_sched_ap",
+        ])
 
 
 class KernelSelftestPipePlaceholderTests(unittest.TestCase):
@@ -779,18 +793,33 @@ class KernelSelftestCoordinatorContractTests(unittest.TestCase):
 
     def test_end_run_follows_every_late_record(self) -> None:
         # A hanging scheduled case must not be able to emit END: the
-        # single END is issued only after ALL six selftest_record_late()
-        # calls in task_init(), so a late case that never returns never
-        # reaches selftest_end_run().
-        src = _read_kernel_source("kernel/sched/core.c")
+        # single END is issued only after ALL selftest_record_late()
+        # calls, so a late case that never returns never reaches
+        # selftest_end_run().
+        #
+        # Phase 2 of the aarch64 EL1 scheduler plan moved the x86 system
+        # startup out of kernel/sched/core.c into the x86-only
+        # kernel/arch/x86_64/cpu/sched_boot.c (the arch-neutral core must
+        # not name the x86 late selftests).  The contract is unchanged —
+        # only the file that holds the calls moved.  P5 Task 4 added the
+        # sched_boot_probe case (seven late cases now); this count moves
+        # WITH the real registrations, never as a standalone constant.
+        src = _read_kernel_source(X86_SCHED_BOOT_SRC)
         records = [m.start() for m in
                    re.finditer(r"selftest_record_late\(", src)]
         self.assertEqual(
-            len(records), 6,
-            "task_init must record all six scheduled (late) cases")
-        end = src.find("selftest_end_run(")
-        self.assertNotEqual(
-            end, -1, "sched/core.c must call selftest_end_run()")
+            len(records), 7,
+            f"{X86_SCHED_BOOT_SRC} must record all seven scheduled (late) "
+            "cases")
+        # Scope to the real CALL site: the file also mentions
+        # selftest_end_run() in its header comment and in a comment above
+        # the call, so match the statement form `selftest_end_run();`.
+        ends = [m.start() for m in re.finditer(r"selftest_end_run\(\);", src)]
+        self.assertEqual(
+            len(ends), 1,
+            f"{X86_SCHED_BOOT_SRC} must issue exactly one selftest_end_run() "
+            "call")
+        end = ends[0]
         self.assertLess(
             max(records), end,
             "selftest_end_run() must follow every selftest_record_late(); "

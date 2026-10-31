@@ -285,3 +285,94 @@ $(TEST_BLD)/test_smp_starting_gate.elf: $(TEST_BLD)/test_smp_starting_gate.o \
 .PHONY: test_smp_starting_gate
 test_smp_starting_gate: $(TEST_BLD)/test_smp_starting_gate.elf
 	$<
+
+# EL1 scheduler context, constructor and layout regression tests.
+$(eval $(call register_host_test,test_switch_complete,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_kthread_ctor,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_sched_layout_offsets,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_switch_complete.elf \
+    $(TEST_BLD)/test_kthread_ctor.elf \
+    $(TEST_BLD)/test_sched_layout_offsets.elf
+
+# aarch64 EL1 scheduler plan Phase 5 Task 4 (spec §10.1 items 1-2):
+# host-compiles the REAL <arch/context.h> facade so the kernel's own
+# compile-time layout asserts run in a host build too, then checks the
+# x86 thread_t offsets against their RECORDED values (independent of the
+# header's asserts — editing those alone cannot hide a drift).
+$(TEST_BLD)/test_sched_layout_offsets.elf: $(TEST_CASES)/test_sched_layout_offsets.c \
+		$(TESTS_DIR)/kernel/include/arch/context.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/context.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_sched_layout_offsets.o
+	$(HOST_CC) -o $@ $(TEST_BLD)/test_sched_layout_offsets.o
+
+.PHONY: test-sched-layout-offsets
+test-sched-layout-offsets: $(TEST_BLD)/test_sched_layout_offsets.elf
+	$<
+
+# aarch64 EL1 scheduler plan Phase 1, Task 2: common switch tail.
+# Host-compiles the REAL kernel/sched/kthread.c against
+# mock/switch_complete_test_runtime.h, which short-circuits sched/task.h +
+# sched/internal.h + memory/slab.h and provides a test-controlled current
+# plus spy task_finish_switch / kfree (defined in the test TU).  The spy
+# finish POISONS prev's members, so the case proves the tail captures the
+# objects to release BEFORE the on_cpu publish (spec §8.3: a waiter may
+# free prev the moment task_finish_switch clears on_cpu) and never reads
+# prev after it.
+SWITCH_TAIL_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC)
+SWITCH_TAIL_PROD_CFLAGS := $(SWITCH_TAIL_HOST_CFLAGS) \
+                           -include $(TEST_MOCK)/switch_complete_test_runtime.h
+
+$(TEST_BLD)/switch_complete_production.o: $(TESTS_DIR)/kernel/sched/kthread.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_switch_complete.o: $(TEST_CASES)/test_switch_complete.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -c $< -o $@
+
+# Phase 2: the production kthread.o now also carries the constructor,
+# which references the boot window — boot.o rides along (its window
+# simply stays closed through the tail cases).
+$(TEST_BLD)/test_switch_complete.elf: $(TEST_BLD)/test_switch_complete.o \
+		$(TEST_BLD)/switch_complete_production.o \
+		$(TEST_BLD)/sched_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-switch-complete
+test-switch-complete: $(TEST_BLD)/test_switch_complete.elf
+	$<
+
+# aarch64 EL1 scheduler plan Phase 2, Task 1: the arch-neutral kthread
+# constructor + boot creation window.  Reuses the SAME production object
+# as test_switch_complete (the REAL kernel/sched/kthread.c host-compiled
+# against mock/switch_complete_test_runtime.h — now also carrying
+# kthread_alloc_and_publish) and adds the REAL kernel/sched/boot.c (the
+# window state machine) as a second production object.  The extended mock
+# provides the fail-index slab, the mock percpu and the spy surface; the
+# test drives the production constructor and the production window latch,
+# never a copy of either.
+$(TEST_BLD)/sched_boot_production.o: $(TESTS_DIR)/kernel/sched/boot.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/boot.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_kthread_ctor.o: $(TEST_CASES)/test_kthread_ctor.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_kthread_ctor.elf: $(TEST_BLD)/test_kthread_ctor.o \
+		$(TEST_BLD)/switch_complete_production.o \
+		$(TEST_BLD)/sched_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-kthread-ctor
+test-kthread-ctor: $(TEST_BLD)/test_kthread_ctor.elf
+	$<

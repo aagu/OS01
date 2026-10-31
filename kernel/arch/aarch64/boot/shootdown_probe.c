@@ -31,6 +31,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include <arch/aarch64/boot/shootdown_probe.h>
 #include <arch/aarch64/boot_log.h>      /* kputs */
@@ -41,6 +42,7 @@
 #include <memory/pmm.h>                 /* alloc_4k_page / free_4k_page */
 #include <memory/vmm.h>                 /* arch_vmm_* + kernel_map + tlb_shootdown */
 #include <percpu/percpu.h>              /* percpu_data[].ipi_ready */
+#include <log/log.h>
 
 /* ── Thin production ops adapters ────────────────────────────────
  * The ops struct types are explicit (uint32_t / int / bool / etc.)
@@ -154,4 +156,47 @@ const struct aarch64_shootdown_probe_ops *aarch64_shootdown_probe_default_ops(vo
 void aarch64_shootdown_probe(void)
 {
     aarch64_shootdown_probe_body(aarch64_shootdown_probe_default_ops());
+}
+
+static uint8_t late_ap_ok[NR_CPUS];
+static const struct aarch64_shootdown_probe_ops *late_base_ops;
+
+static bool late_ap_work_wait(uint32_t cpu, uint32_t seq, uint64_t *out,
+                              uint64_t deadline)
+{
+    bool ok = late_base_ops->ap_work_wait(cpu, seq, out, deadline);
+    if (cpu < NR_CPUS)
+        late_ap_ok[cpu] = ok;
+    return ok;
+}
+
+static void late_probe_kputs(const char *s)
+{
+    if (!s) return;
+    if (!strcmp(s, "SHOOTDOWN-PROBE: START\n")) {
+        log_info("[sched] late AP work probe start\n");
+    } else if (!strcmp(s, "SHOOTDOWN-PROBE: OK\n")) {
+        log_info("[sched] late AP work probe complete\n");
+    } else {
+        kputs(s);
+    }
+}
+
+uint64_t aarch64_shootdown_probe_run_late(void)
+{
+    struct aarch64_shootdown_probe_ops ops = g_real_ops;
+    memset(late_ap_ok, 0, sizeof(late_ap_ok));
+    late_base_ops = &g_real_ops;
+    ops.ap_work_wait = late_ap_work_wait;
+    ops.kputs = late_probe_kputs;
+    aarch64_shootdown_probe_body(&ops);
+    uint64_t ok = 1;
+    for (uint32_t cpu = 1; cpu < dtb_cpu_count(); ++cpu)
+        ok &= late_ap_ok[cpu] != 0;
+    return ok;
+}
+
+uint64_t aarch64_shootdown_probe_late_ap_ok(uint32_t cpu)
+{
+    return cpu < NR_CPUS && late_ap_ok[cpu] != 0;
 }

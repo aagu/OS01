@@ -89,7 +89,9 @@ SUITE = "kernel-selftest"
 # tests and its scheduled (kthread-context) tests.  ``[selftest] done``
 # is emitted by ``kernel/core/main.c`` right after the boot-test
 # summary; ``[selftest] task tests done`` is emitted by
-# ``kernel/sched/core.c`` after the last scheduled test.  Waiting for
+# ``kernel/arch/x86_64/cpu/sched_boot.c`` after the last scheduled test
+# (Phase 2 of the aarch64 EL1 scheduler plan moved the x86 system
+# startup out of ``kernel/sched/core.c``).  Waiting for
 # BOTH is what lets the runner stop QEMU controlled instead of burning
 # the external timeout.
 COMPLETION_MARKERS = (

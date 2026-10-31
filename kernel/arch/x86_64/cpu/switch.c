@@ -1,4 +1,5 @@
 #include <sched/task.h>
+#include <sched/internal.h>  // task_switch_complete — common switch tail
 #include <percpu/percpu.h>
 #include <arch/spinlock.h>
 #include <arch/x86_64/gate.h>
@@ -6,12 +7,125 @@
 #include <arch/x86_64/tss.h>
 #include <core/printk.h>
 #include <log/log.h>
-#include <memory/slab.h>   // kfree — for PF_SELF_REAP epilogue
+
+/* ── x86 kernel-heap window ─────────────────────────────────────
+ * Direct-map region covers ALL kernel heap: kmalloc slabs are
+ * allocated from alloc_pages -> phys 0..512MB mapped at
+ * 0xffff800000000000..0xffff800020000000.  The old 16MB bound
+ * mis-flagged every task whose stack landed above phys 16MB. */
+#define X86_KHEAP_LOW  0xffff800000000000ULL
+#define X86_KHEAP_HIGH 0xffff800020000000ULL
+
+/**
+ * arch_task_context_valid — validate a task's saved context before it is
+ * used (facade contract; condition moved verbatim from the old inline
+ * SWITCH-BAD check below).  Checks, in the same order and with the same
+ * bounds as before:
+ *   1. t is within the x86 kernel-heap window;
+ *   2. t->thread is non-NULL and within the same window;
+ *   3. t->thread->rsp lies within [t, t + STACK_SIZE] (the task's own
+ *      task_union stack — a reaped task has thd_rsp pointing into poison
+ *      or another task's slab-reused stack, caught here).
+ * Returns true when usable; on false *reason names the violated
+ * condition.  The caller logs and decides the fatal response.
+ */
+bool arch_task_context_valid(task_t *t, const char **reason)
+{
+    if ((uint64_t)t < X86_KHEAP_LOW || (uint64_t)t >= X86_KHEAP_HIGH) {
+        *reason = "task pointer outside x86 kernel heap window";
+        return false;
+    }
+    if (t->thread == NULL) {
+        *reason = "thread pointer NULL";
+        return false;
+    }
+    if ((uint64_t)t->thread < X86_KHEAP_LOW ||
+        (uint64_t)t->thread >= X86_KHEAP_HIGH) {
+        *reason = "thread pointer outside x86 kernel heap window";
+        return false;
+    }
+    if ((uint64_t)t->thread->rsp < (uint64_t)t ||
+        (uint64_t)t->thread->rsp > (uint64_t)t + STACK_SIZE) {
+        *reason = "saved rsp outside task_union stack";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * arch_task_check_prev — the two x86 PREVIOUS-context fatal checks
+ * ([DIAG-5] / [DIAG-5b]), moved verbatim from schedule() in
+ * kernel/sched/core.c: payload fields and the halt response are the
+ * architecture's; common core calls this without reading arch fields.
+ * Diagnostics use log_err (marker names and field order preserved; only
+ * the serial_printk -> logger prefix changed).
+ */
+void arch_task_check_prev(task_t *t)
+{
+    // [DIAG-5] before saving prev state, verify current->thread is a
+    // sane kernel-heap pointer: switch_to's asm stores
+    // (movq %rsp, prev->thread->rsp / rip) would write through a
+    // garbage thread pointer and corrupt memory BEFORE any crash.
+    if ((uint64_t)t->thread < X86_KHEAP_LOW ||
+        (uint64_t)t->thread >= X86_KHEAP_HIGH) {
+        log_err("SCHED-PREV-BAD: pid=%ld thread=%p cpu=%d "
+                "state=%ld on_rq=%d on_cpu=%d\n",
+                t->pid, (void *)t->thread, cpu_id(),
+                (long)t->state, (int)t->on_rq, (int)t->on_cpu);
+        for (;;) arch_cpu_halt();
+    }
+    // [DIAG-5b] hardened: our SAVED thread->rsp must lie inside our
+    // OWN task_union stack.  If it points elsewhere (e.g. a freed
+    // 64-byte thread_t slab object), the thread struct was already
+    // corrupted — and switch_to's store (movq %rsp,
+    // prev->thread->rsp) would write through garbage.  Catch it
+    // before the corruption spreads.
+    if (t->thread->rsp < (uint64_t)t ||
+        t->thread->rsp > (uint64_t)t + STACK_SIZE) {
+        log_err("SCHED-PREV-BAD2: pid=%ld saved_rsp=%lx cpu=%d "
+                "state=%ld cur=%p rsp0=%lx rip=%lx\n",
+                t->pid, t->thread->rsp, cpu_id(),
+                (long)t->state, (void *)t,
+                t->thread->rsp0, t->thread->rip);
+        for (;;) arch_cpu_halt();
+    }
+}
+
+/**
+ * arch_dump_task_context — the per-task architecture part of the
+ * hang/watchdog dump, moved verbatim from hang_dump_all()
+ * (kernel/core/panic.c).  Field order and format are unchanged; raw
+ * serial_printk stays because this IS the whitelisted panic/scheduler
+ * fatal dump (log policy, docs/log/log.md).
+ */
+void arch_dump_task_context(task_t *t)
+{
+    if (t->thread) {
+        serial_printk("    rip=%#lx rsp=%#lx cr3=%#lx\n",
+                      (unsigned long)t->thread->rip,
+                      (unsigned long)t->thread->rsp,
+                      (unsigned long)t->thread->cr3);
+    }
+}
+
+/**
+ * arch_task_prepare_first_switch — arm a never-switched idle task's
+ * first continuation.  schedule() calls this ONLY for next == rq->idle.
+ * x86 writes the common C idle continuation (idle_task_resume) and only
+ * while rip is still 0; it must NOT substitute the different assembly
+ * idle_resume in arch/x86_64/intr/entry.S.
+ */
+void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void))
+{
+    if (t->thread->rip == 0)
+        t->thread->rip = (uint64_t)idle_entry;
+}
 
 /**
  * __switch_to — architecture-specific context switch
  *
- * Called by the switch_to() macro (in task.h) via inline asm jmp.
+ * Called by the switch_to() macro (in <arch/x86_64/context.h>) via
+ * inline asm jmp.
  * Performs:
  *   1. Update per-CPU TSS rsp0 for ring-0 stack on next interrupt.
  *   2. Save/restore FS base selector.
@@ -22,22 +136,11 @@ void __switch_to(task_t *prev, task_t *next)
 {
     // ── DEBUG VALIDATION: catch the UAF victim before jumping ──
     // next must be a kernel-heap task pointer, next->thread valid,
-    // next->thread->rsp/rip inside the kernel image or heap.
-    // Direct-map region covers ALL kernel heap: kmalloc slabs are
-    // allocated from alloc_pages -> phys 0..512MB mapped at
-    // 0xffff800000000000..0xffff800020000000.  The old 16MB bound
-    // mis-flagged every task whose stack landed above phys 16MB.
-    if ((uint64_t)next < 0xffff800000000000ULL ||
-        (uint64_t)next >= 0xffff800020000000ULL ||
-        next->thread == NULL ||
-        (uint64_t)next->thread < 0xffff800000000000ULL ||
-        (uint64_t)next->thread >= 0xffff800020000000ULL ||
-        // Real UAF check: the task's saved kernel-stack pointer must
-        // live inside its own task_union stack.  A reaped task has
-        // thd_rsp pointing into poison (0xffffffffffffffff) or another
-        // task's stack (slab reuse) -> caught here.
-        (uint64_t)next->thread->rsp < (uint64_t)next ||
-        (uint64_t)next->thread->rsp > (uint64_t)next + STACK_SIZE) {
+    // next->thread->rsp/rip inside the kernel image or heap (the exact
+    // condition lives in arch_task_context_valid).  Log format is
+    // unchanged from the pre-facade inline check.
+    const char *switch_bad_reason = NULL;
+    if (!arch_task_context_valid(next, &switch_bad_reason)) {
         log_err("SWITCH-BAD: next=%p pid=%ld state=%ld cpu=%d "
                 "on_rq=%d on_cpu=%d thread=%p\n",
                 (void *)next, next ? next->pid : -1,
@@ -94,23 +197,12 @@ void __switch_to(task_t *prev, task_t *next)
         );
     }
 
-    /* Capture this before publishing on_cpu=0: a normal zombie may be
-     * freed by its parent immediately afterwards. Detached self-reaping
-     * kthreads have no competing waiter. */
-    int self_reap = prev->flags & PF_SELF_REAP;
-    if (prev != next)
-        task_finish_switch(prev);
-
-    // kthread self-reap: a PF_SELF_REAP task removed itself from the
-    // global list and set ZOMBIE atomically in do_exit.  It has no
-    // waitpid consumer, so reclaim its slab objects here.  We run on
-    // NEXT's stack (switch_to already switched rsp), so freeing prev's
-    // stack is safe.  This MUST stay the last code that touches prev:
-    // kfree(prev->stack_alloc_base) frees the task_union containing prev
-    // itself — do not dereference prev past this point.
-    if (self_reap) {
-        if (prev->thread)           kfree(prev->thread);
-        if (prev->fpu_save)         kfree(prev->fpu_save);
-        if (prev->stack_alloc_base) kfree(prev->stack_alloc_base);
-    }
+    /* Common switch tail: task_finish_switch(prev) publishes on_cpu=0
+     * and, for a PF_SELF_REAP kthread, reclaims prev's slab objects.
+     * The tail captures everything it needs from prev BEFORE the
+     * publish — after on_cpu clears, a waiter may free prev — and never
+     * reads prev afterwards. We already run on NEXT's stack (switch_to
+     * switched rsp), so freeing prev's stack is safe. Self-switch
+     * (actual_prev == current) is a no-op inside the tail. */
+    task_switch_complete(prev);
 }

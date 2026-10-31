@@ -1,5 +1,8 @@
 #include <sched/internal.h>
-#include <intr/ipi.h>
+#include <sched/task.h>      // ARCH_HAS_REMOTE_RESCHED (arch facade)
+#if ARCH_HAS_REMOTE_RESCHED
+#include <intr/ipi.h>        // x86 resched IPI encoding
+#endif
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <arch/spinlock.h>
@@ -74,16 +77,44 @@ uint32_t sched_pick_cpu(void)
  * dropped.  need_resched=1 is the fallback: the remote CPU
  * picks it up on the next LAPIC timer tick (≤10 ms).
  *
- * Called from do_fork() and spawn_user_task() after enqueue.
+ * Called from do_fork()/spawn_user_task() and the common kthread
+ * constructor after enqueue.
+ *
+ * aarch64 (spec §7) has no remote-resched IPI this phase: the local
+ * path just returns, and an unexpected remote target is an INVARIANT
+ * DIAGNOSTIC (the constructor rejects unplaceable targets before
+ * publication — this must never be a late substitute for that
+ * admission validation), never a silent success.
  */
-void sched_notify_remote(task_t *tsk)
+void sched_notify_remote_cpu(unsigned cpu)
 {
-    if ((int)tsk->cpu == (int)cpu_id())
+    if (cpu >= NR_CPUS) {
+        log_err("[sched] sched_notify_remote: invalid target cpu=%u\n", cpu);
         return;
-    percpu_t *dst = &percpu_data[tsk->cpu];
+    }
+    if ((int)cpu == (int)cpu_id())
+        return;
+    percpu_t *dst = &percpu_data[cpu];
+#if ARCH_HAS_REMOTE_RESCHED
     dst->need_resched = 1;
     __sync_synchronize();
     ipi_send(dst->arch_processor_id, IPI_VECTOR_RESCHED);
+#else
+    /* Do not publish a partial remote notification on an architecture
+     * whose admission policy must keep every runnable task on CPU0. */
+    log_err("[sched] sched_notify_remote: remote target cpu=%u without "
+            "remote-resched capability — invariant violated\n",
+            cpu);
+    (void)dst;
+#endif
+}
+
+/* Back-compatible task wrapper for fork/exec publication callers.
+ * The kernel-thread constructor uses the value form above because a
+ * self-reaping child may outlive its task object immediately at unlock. */
+void sched_notify_remote(task_t *tsk)
+{
+    sched_notify_remote_cpu((unsigned)tsk->cpu);
 }
 
 /* ── sched_balance: pull work from busiest CPU ─────────────
@@ -104,13 +135,17 @@ void sched_notify_remote(task_t *tsk)
  */
 void sched_balance(percpu_t *rq)
 {
-    /* 1. Find busiest online CPU */
+    /* 1. Find busiest online CPU.  Spec §7: a candidate must be online
+     * AND scheduler_ok — an online-but-not-scheduling AP must never be
+     * stolen from or balanced against (aarch64 APs stay scheduler_ok=0
+     * this phase; x86 APs publish scheduler_ok in their init path). */
     int src_idx = -1;
     uint32_t max_nr = 0;
     uint64_t max_vr = 0;
 
     for (uint32_t i = 0; i < num_cpus; i++) {
-        if (i == rq->cpu_id || !percpu_data[i].online)
+        if (i == rq->cpu_id || !percpu_data[i].online ||
+            !percpu_data[i].scheduler_ok)
             continue;
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
         if (nr == 0)

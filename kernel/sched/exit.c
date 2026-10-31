@@ -27,6 +27,18 @@
 //
 uint64_t do_exit(uint64_t exit_code)
 {
+    // ── Kernel-thread fast path ─────────────────────────────
+    // A PF_KTHREAD task has NO user resources: no VMAs, no private page
+    // tables, no waitpid consumer.  It delegates to kthread_exit()
+    // (kernel/sched/kthread.c) IMMEDIATELY — before init-protection,
+    // reparenting/SIGCHLD, VMA/MM and files cleanup — which releases
+    // its copied file-table reference, removes it from the global list
+    // and switches out permanently (spec §8.3).  The x86 first-entry
+    // trampoline calls do_exit() when fn returns, so a kernel thread
+    // ends up here too.
+    if (current->flags & PF_KTHREAD)
+        kthread_exit(exit_code);   // noreturn
+
     debug_task("task %d exiting with code %#018lx\n", current->pid, exit_code);
 
     // ── Init process protection ──────────────────────────
@@ -133,40 +145,9 @@ uint64_t do_exit(uint64_t exit_code)
 
     current->exit_code = exit_code;
 
-    // ── kthread self-reap ──────────────────────────────────
-    // Kernel threads have no waitpid consumer. Reclaim them here by
-    // removing them from the global list and marking PF_SELF_REAP so
-    // __switch_to's epilogue frees thread/fpu_save/stack after the
-    // final switch. The list_del + PF_SELF_REAP + ZOMBIE transition is
-    // atomic under task_list_lock (IRQs off): a tick firing between any
-    // two steps could schedule() and either re-enqueue a still-RUNNING
-    // task whose stack __switch_to is about to free (UAF) or switch
-    // away without freeing (leak).
-    //
-    // Note: this branch runs AFTER do_exit's earlier vma_free_all(mm)
-    // and files_unpin(fs). A kthread's mm is shared (do_fork: tsk->mm =
-    // current->mm), so vma_free_all here is a no-op on the shared
-    // (empty-vma) init_mm — pre-existing behavior, not introduced by
-    // this change. The self-reap epilogue below still only kfree's the
-    // three standalone slabs (thread/fpu_save/stack); files/mm were
-    // already handled above.
-    if (current->flags & PF_KTHREAD) {
-        uint64_t fl = spin_lock_irqsave(&task_list_lock);
-        list_del(&current->list);
-        current->list.next = NULL;
-        current->list.prev = NULL;
-        current->flags |= PF_SELF_REAP;
-        current->state = TASK_ZOMBIE;
-        spin_unlock_irqrestore(&task_list_lock, fl);
-        schedule();   // switch_to → __switch_to epilogue frees this task
-        // Defensive: a ZOMBIE task is never re-enqueued, so schedule()
-        // always switches away. But if a future early-return path
-        // (scheduler_ok==0, or in_schedule) ever let us fall through, we
-        // are off-list + ZOMBIE + PF_SELF_REAP — halt rather than return
-        // into arch_kernel_thread_entry's epilogue, which would do_exit() again
-        // and double-list_del our already-NULL'd list node.
-        for (;;) __asm__ __volatile__("hlt");
-    }
+    // (The old PF_KTHREAD self-reap branch lived here; it moved to
+    // kthread_exit() in kernel/sched/kthread.c and is reached via the
+    // delegation at the top of do_exit, so it cannot double-clean.)
 
     // NOTE: we stay TASK_RUNNING through the cleanup below and only
     // become TASK_ZOMBIE immediately before the final schedule().
