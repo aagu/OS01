@@ -7,6 +7,8 @@
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <core/printk.h>  /* for serial_printk (selftest markers) */
+#include <arch/fb_write.h>            /* ARCH_NAME */
+#include <driver/logo.h>              /* boot_logo_show */
 #include <core/selftest.h> /* for selftest_run_all (OS01_SELFTEST builds) */
 #include <selftest/result.h> /* protocol-v1 coordinator (OS01_SELFTEST builds) */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
@@ -368,24 +370,33 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
 
     if (!(handoff->flags & BOOT_CONTEXT_HAS_FRAMEBUFFER)) {
         kputs("[fb] no framebuffer in handoff; color_printk disabled\n");
-        return;
+    } else {
+        Pos.Phy_addr    = (uint32_t *)handoff->graphics.FrameBufferBase;
+        Pos.FB_length   = handoff->graphics.FrameBufferSize;
+        Pos.XResolution = handoff->graphics.HorizontalResolution;
+        Pos.YResolution = handoff->graphics.VerticalResolution;
+        Pos.XPosition   = 0;
+        Pos.YPosition   = 0;
+
+        frame_buffer_init();
+        if (!Pos.FB_addr)
+            kputs("[fb] mapping failed; color_printk disabled\n");
     }
 
-    Pos.Phy_addr    = (uint32_t *)handoff->graphics.FrameBufferBase;
-    Pos.FB_length   = handoff->graphics.FrameBufferSize;
-    Pos.XResolution = handoff->graphics.HorizontalResolution;
-    Pos.YResolution = handoff->graphics.VerticalResolution;
-    Pos.XPosition   = 0;
-    Pos.YPosition   = 0;
+    /* OS01 boot logo.  Drawn FIRST so the [fb] banner below lands under
+     * it (the logo advances Pos.YPosition past the wordmark).  The driver
+     * is silent; the boot path reports the outcome. */
+    if (boot_logo_show() == 0)
+        log_info("[logo] boot logo drawn (%s, %ux%u)\n", ARCH_NAME,
+                 (unsigned)Pos.XResolution, (unsigned)Pos.YResolution);
+    else
+        log_info("[logo] skipped: no framebuffer\n");
 
-    frame_buffer_init();
     if (Pos.FB_addr) {
         color_printk(WHITE, BLUE,
                      "[fb] aarch64 color_printk active (%ux%u)\n",
                      Pos.XResolution, Pos.YResolution);
-        kputs("[fb] frame buffer remap succeed (banner above on screen)\n");
-    } else {
-        kputs("[fb] mapping failed; color_printk disabled\n");
+        kputs("[fb] frame buffer remap succeed (banner on screen)\n");
     }
 }
 
