@@ -752,16 +752,18 @@ static void pty_interactive(int master, int slave, const struct termios *base,
     int termios_ok = (tcgetattr(slave, &after) == 0) &&
                      termios_equal(base, &after);
     int cursor_ok = contains(out, "\x1b[?25h");
-    int enter_ok = !expect_ansi || contains(out, "\x1b[?25l");
+    int enter_ok = !expect_ansi || (contains(out, "\x1b[?25l") &&
+                                    contains(out, "\x1b[?1049h"));
+    int leave_ok = !expect_ansi || contains(out, "\x1b[?1049l");
     int clean_exit = WIFEXITED(st) && WEXITSTATUS(st) == 0;
     int fd_ok = (count_fds() == baseline_fds);
 
     char why[160];
     snprintf(why, sizeof why,
-             "reaped=%d exit=%d termios=%d cursor=%d enter=%d fd=%d",
-             reaped, clean_exit, termios_ok, cursor_ok, enter_ok, fd_ok);
+             "reaped=%d exit=%d termios=%d cursor=%d enter=%d leave=%d fd=%d",
+             reaped, clean_exit, termios_ok, cursor_ok, enter_ok, leave_ok, fd_ok);
     check(name, reaped && clean_exit && termios_ok && cursor_ok &&
-                enter_ok && fd_ok, why);
+                enter_ok && leave_ok && fd_ok, why);
 }
 
 /* --samples: finite non-interactive run — no ANSI, termios untouched. */

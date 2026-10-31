@@ -67,6 +67,8 @@ static char   cap_buf[1 << 16];
 static size_t cap_len;
 static int    g_cursor_hidden;
 static int    g_cursor_shown;
+static int    g_alt_screen_entered;
+static int    g_alt_screen_left;
 
 /* Write-boundary accounting: how many output calls the renderer made,
  * and how many of them did NOT carry exactly one complete line.
@@ -111,6 +113,10 @@ int mon_test_fprintf(void *f, const char *fmt, ...)
         g_cursor_hidden = 1;
     if (strstr(tmp, "\x1b[?25h"))
         g_cursor_shown = 1;
+    if (strstr(tmp, "\x1b[?1049h"))
+        g_alt_screen_entered = 1;
+    if (strstr(tmp, "\x1b[?1049l"))
+        g_alt_screen_left = 1;
     return n;
 }
 
@@ -323,6 +329,8 @@ static void cap_reset(void)
     cap_split_calls = 0;
     g_cursor_hidden = 0;
     g_cursor_shown = 0;
+    g_alt_screen_entered = 0;
+    g_alt_screen_left = 0;
 }
 
 static const char *cap(void) { return cap_buf; }
@@ -703,7 +711,9 @@ static void test_first_round_all_dashes(void)
     memset(&m, 0, sizeof m);        /* zeroed model, nothing valid */
     m.ncpu_rows = 2;
     m.cpu_rows[0].cpu_id = 0;
+    m.cpu_rows[0].online = true;
     m.cpu_rows[1].cpu_id = 1;
+    m.cpu_rows[1].online = true;
     cap_reset();
     assert_eq(monitor_render(stdout, &m, 24, 0), 0);
     assert_not_null(strstr(cap(), "CPU0: --"));
@@ -757,6 +767,25 @@ static void test_stdin_eof_exits(void)
     assert_false(tcsetattr_raw_seen);
 }
 
+static void test_offline_cpu_not_rendered(void)
+{
+    struct monitor_model m;
+    base_model(&m);
+    m.ncpu_rows = 2;
+    m.cpu_rows[0].cpu_id = 0;
+    m.cpu_rows[0].online = true;
+    m.cpu_rows[0].pct.valid = true;
+    m.cpu_rows[0].pct.percent_10000 = 5000;
+    m.cpu_rows[1].cpu_id = 1;
+    m.cpu_rows[1].online = false;
+    m.cpu_rows[1].pct.valid = false;
+    cap_reset();
+    assert_eq(monitor_render(stdout, &m, 24, 0), 0);
+    assert_not_null(strstr(cap(), "CPU0: 50.0%"));
+    assert_true(strstr(cap(), "CPU1") == NULL);
+    assert_true(strstr(cap(), "offline") == NULL);
+}
+
 static void test_q_restores_terminal(void)
 {
     fixture_reset();
@@ -772,6 +801,8 @@ static void test_q_restores_terminal(void)
     assert_eq(rc, 0);
     assert_true(tcsetattr_raw_seen);                 /* entered raw mode */
     assert_true(termios_restored && cursor_restored);/* KEY assertion */
+    assert_true(g_alt_screen_entered);               /* entered alt screen */
+    assert_true(g_alt_screen_left);                  /* restored main screen */
     assert_true(strstr(cap(), "50.0%") != NULL);     /* KEY assertion */
     assert_true(g_cursor_hidden);                    /* cursor was hidden */
     /* the first round rendered an invalid (dim) percentage: "--" */
@@ -789,6 +820,7 @@ static void test_sigint_restores_terminal(void)
     bool cursor_restored = g_cursor_shown;
     assert_eq(rc, 0);
     assert_true(termios_restored && cursor_restored);
+    assert_true(g_alt_screen_left);
 }
 
 static void test_sigterm_restores_terminal(void)
@@ -802,6 +834,7 @@ static void test_sigterm_restores_terminal(void)
     bool cursor_restored = g_cursor_shown;
     assert_eq(rc, 0);
     assert_true(termios_restored && cursor_restored);
+    assert_true(g_alt_screen_left);
 }
 
 static void test_init_failure_after_terminal_setup(void)
@@ -856,6 +889,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_output_writes_whole_lines),
     TEST_ENTRY(test_longest_line_stays_one_write),
     TEST_ENTRY(test_first_round_all_dashes),
+    TEST_ENTRY(test_offline_cpu_not_rendered),
     TEST_ENTRY(test_unknown_argument),
     TEST_ENTRY(test_samples_mode_plain_finite),
     TEST_ENTRY(test_stdin_eof_exits),

@@ -102,6 +102,17 @@ static void set_cpu(struct monitor_sample *s, uint32_t id, uint64_t epoch,
     c->tick_hz = s->stat.tick_hz;
 }
 
+static void set_cpu_offline(struct monitor_sample *s, uint32_t id, uint64_t epoch)
+{
+    struct monitor_cpu_sample *c = &s->stat.cpu[s->stat.ncpu++];
+    memset(c, 0, sizeof(*c));
+    c->cpu_id = id;
+    c->online = 0;
+    c->valid = 0;
+    c->epoch = epoch;
+    c->tick_hz = s->stat.tick_hz;
+}
+
 static void set_proc(struct monitor_sample *s, uint64_t pid, uint64_t birth,
                      uint64_t ns, uint64_t rt, const char *comm)
 {
@@ -848,6 +859,37 @@ static TEST_FUNC(test_api_contract)
     free_sample(&s);
 }
 
+static TEST_FUNC(test_offline_cpu_skipped)
+{
+    struct monitor_model m = { 0 };
+    struct monitor_sample a = mk_sample();
+    struct monitor_sample b = mk_sample();
+
+    model_malloc_fail_after = -1;
+    monitor_model_init(&m);
+
+    set_cpu(&a, 0, 1, 1000, 1000);
+    set_cpu_offline(&a, 1, 1);
+    set_cpu(&a, 2, 1, 1000, 1000);
+    assert_eq(monitor_model_update(&m, &a), 0);
+    assert_eq(m.ncpu_rows, 2);
+    assert_eq(m.cpu_rows[0].cpu_id, 0);
+    assert_eq(m.cpu_rows[1].cpu_id, 2);
+
+    set_cpu(&b, 0, 1, 1100, 1000);
+    set_cpu_offline(&b, 1, 1);
+    set_cpu(&b, 2, 1, 1200, 1000);
+    assert_eq(monitor_model_update(&m, &b), 0);
+    assert_eq(m.ncpu_rows, 2);
+    assert_true(find_cpu(&m, 0) != NULL);
+    assert_true(find_cpu(&m, 1) == NULL);
+    assert_true(find_cpu(&m, 2) != NULL);
+
+    monitor_model_destroy(&m);
+    free_sample(&a);
+    free_sample(&b);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_dual_core_deltas),
     TEST_ENTRY(test_rounding),
@@ -863,6 +905,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_first_alloc_oom_history),
     TEST_ENTRY(test_second_alloc_oom_history),
     TEST_ENTRY(test_api_contract),
+    TEST_ENTRY(test_offline_cpu_skipped),
 TEST_LIST_END
 
 int main(void)

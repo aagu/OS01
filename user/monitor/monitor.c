@@ -18,14 +18,15 @@
  *     overflow (the remaining span is bounded by one period).
  *
  * Terminal lifecycle:
- *   - TTY mode: clear + home, hide the cursor, save the original
- *     termios and strip ICANON/ECHO keeping ISIG; signal handlers only
- *     set an exit flag;
+ *   - TTY mode: switch to alternate screen (?1049h), clear + home,
+ *     hide the cursor, save the original termios and strip ICANON/ECHO
+ *     keeping ISIG; signal handlers only set an exit flag;
  *   - non-TTY or --samples: plain text, no escape bytes;
  *   - ALL exit paths converge on one cleanup block that restores the
- *     terminal exactly once and releases the collection and model.  If
- *     the original termios was never obtained it is never written back
- *     (no uninitialized copy is pushed to the driver).
+ *     terminal (show cursor, restore main screen ?1049l) exactly once
+ *     and releases the collection and model.  If the original termios
+ *     was never obtained it is never written back (no uninitialized
+ *     copy is pushed to the driver).
  */
 
 #include <errno.h>

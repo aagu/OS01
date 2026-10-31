@@ -47,6 +47,8 @@
 #define C_CLEAR_SCREEN "\x1b[2J\x1b[H"
 #define C_HIDE_CURSOR  "\x1b[?25l"
 #define C_SHOW_CURSOR  "\x1b[?25h"
+#define C_ENTER_ALT    "\x1b[?1049h"
+#define C_LEAVE_ALT    "\x1b[?1049l"
 #define C_HOME         "\x1b[H"
 #define C_ERASE_EOL    "\x1b[K"
 
@@ -323,14 +325,14 @@ int monitor_render(FILE *out, const struct monitor_model *m,
     line++;
 
     for (uint32_t i = 0; i < m->ncpu_rows; i++) {
+        if (!m->cpu_rows[i].online)
+            continue;
         if (budget && line >= budget)
             break;
         char name[16];
         snprintf(name, sizeof name, "CPU%u: ", m->cpu_rows[i].cpu_id);
         tw_str(&w, name);
         tw_pct(&w, &m->cpu_rows[i].pct);
-        if (!m->cpu_rows[i].online)
-            tw_str(&w, " (offline)");
         tw_newline(&w);
         line++;
     }
@@ -404,6 +406,7 @@ int monitor_render(FILE *out, const struct monitor_model *m,
 
 void monitor_term_enter(FILE *out)
 {
+    fprintf(out, "%s", C_ENTER_ALT);      /* enter alternate screen buffer */
     fprintf(out, "%s", C_CLEAR_SCREEN);   /* clear + home */
     fprintf(out, "%s", C_HIDE_CURSOR);
     /* Force the escape sequences to the terminal now: stdout is
@@ -420,7 +423,8 @@ void monitor_term_leave(FILE *out)
 {
     fprintf(out, "%s", C_RESET);          /* drop any attribute */
     fprintf(out, "%s", C_SHOW_CURSOR);    /* cursor restored */
-    fprintf(out, "%s", C_HOME);
+    fprintf(out, "%s", C_LEAVE_ALT);      /* restore main screen buffer and cursor */
+    fflush(out);
 }
 
 void monitor_puts(FILE *out, const char *s)

@@ -251,32 +251,34 @@ static void model_compute(struct monitor_model *m,
             const struct monitor_cpu_sample *c = &s->stat.cpu[i];
             const struct monitor_cpu_base *old =
                 cpu_base_slot(m, c->cpu_id, false);
-            struct monitor_cpu_row *row = &m->cpu_rows[ncpu_rows];
             bool continuous = old && old->valid_seen && c->valid &&
                               old->epoch == c->epoch &&
                               old->tick_hz == c->tick_hz;
             struct monitor_cpu_base *slot;
 
-            memset(row, 0, sizeof(*row));
-            row->cpu_id = c->cpu_id;
-            row->online = c->online != 0;
-            ncpu_rows++;
+            if (c->online) {
+                struct monitor_cpu_row *row = &m->cpu_rows[ncpu_rows];
+                memset(row, 0, sizeof(*row));
+                row->cpu_id = c->cpu_id;
+                row->online = true;
+                ncpu_rows++;
 
-            if (continuous) {
-                /* compare first, subtract afterwards: a counter that
-                 * went backwards is a reset, never a negative delta */
-                if (c->busy_ticks >= old->busy_ticks &&
-                    c->idle_ticks >= old->idle_ticks) {
-                    uint64_t db = c->busy_ticks - old->busy_ticks;
-                    uint64_t di = c->idle_ticks - old->idle_ticks;
-                    __uint128_t den = (__uint128_t)db + di;
+                if (continuous) {
+                    /* compare first, subtract afterwards: a counter that
+                     * went backwards is a reset, never a negative delta */
+                    if (c->busy_ticks >= old->busy_ticks &&
+                        c->idle_ticks >= old->idle_ticks) {
+                        uint64_t db = c->busy_ticks - old->busy_ticks;
+                        uint64_t di = c->idle_ticks - old->idle_ticks;
+                        __uint128_t den = (__uint128_t)db + di;
 
-                    if (den != 0) {     /* zero denominator -> -- */
-                        row->pct.valid = true;
-                        row->pct.percent_10000 =
-                            cpu_pct_10000(db, den, &row->pct.raw_10000);
-                        sum_dbusy += db;
-                        sum_den += den;
+                        if (den != 0) {     /* zero denominator -> -- */
+                            row->pct.valid = true;
+                            row->pct.percent_10000 =
+                                cpu_pct_10000(db, den, &row->pct.raw_10000);
+                            sum_dbusy += db;
+                            sum_den += den;
+                        }
                     }
                 }
             }
