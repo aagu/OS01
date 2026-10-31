@@ -7,7 +7,7 @@
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
 #include <core/printk.h>  /* for serial_printk (selftest markers) */
-#include <arch/fb_write.h>            /* ARCH_NAME */
+#include <arch/fb_write.h>            /* ARCH_NAME (via <arch/identity.h>) */
 #include <driver/logo.h>              /* boot_logo_show */
 #include <core/selftest.h> /* for selftest_run_all (OS01_SELFTEST builds) */
 #include <selftest/result.h> /* protocol-v1 coordinator (OS01_SELFTEST builds) */

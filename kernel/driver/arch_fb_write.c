@@ -41,5 +41,16 @@ int arch_fb_write_begin(struct fb_write_view *view)
 __attribute__((weak))
 void arch_fb_write_end(struct fb_write_view *view)
 {
-    (void)view;
+    if (!view)
+        return;
+
+    /* The view is INVALID after end(): clear every field, so "the view is
+     * no longer live" is observable uniformly across the facade (the
+     * x86_64 override clears the same set).  ``snap`` cannot serve as a
+     * portable "live" flag — it is NULL on aarch64 even during a
+     * SUCCESSFUL begin(). */
+    view->snap = NULL;
+    view->addr = NULL;
+    view->xres = 0;
+    view->yres = 0;
 }

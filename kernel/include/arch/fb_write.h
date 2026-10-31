@@ -40,7 +40,16 @@ struct fb_write_view {
  * negative on failure (no framebuffer, or no exclusive access). */
 int arch_fb_write_begin(struct fb_write_view *view);
 
-/* Release what begin() acquired.  Safe to call after a failed begin(). */
+/* Release what begin() acquired.  Safe to call after a failed begin().
+ *
+ * end() INVALIDATES the view: it clears snap/addr/xres/yres.  BOTH
+ * implementations clear exactly that set, so "the view is no longer live"
+ * is observable uniformly across the facade.  ``snap`` is NOT a portable
+ * "the view is live" flag: it is NULL on aarch64 even during a SUCCESSFUL
+ * begin() (aarch64 has no display coordinator and no snapshot).
+ *
+ * The view is caller-owned and discarded right after end(), so invalidating
+ * it changes no pixel and no serial byte. */
 void arch_fb_write_end(struct fb_write_view *view);
 
 #endif /* _ARCH_FB_WRITE_H */
