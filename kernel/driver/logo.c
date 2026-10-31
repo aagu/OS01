@@ -1,7 +1,7 @@
 #include <driver/logo.h>
+#include <arch/fb_write.h>
 #include <core/printk.h>
 #include <driver/font.h>
-#include <driver/fb_state.h>
 
 extern psf2_t *font;
 
@@ -22,11 +22,14 @@ static const unsigned char glyphs[LOGO_GLYPHS][GLYPH_ROWS] = {
     { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e }, // 1
 };
 
-static void fill_rect(const fb_snapshot_t *snap, int x, int y, int width, int height, unsigned int color)
+// Fill a rectangle in the framebuffer described by `view`.  The geometry is
+// clipped to the framebuffer bounds; nothing is drawn outside it.
+static void fill_rect(const struct fb_write_view *view, int x, int y,
+                      int width, int height, unsigned int color)
 {
-    uint32_t xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
-    uint32_t yres = (snap && snap->state.info.height) ? snap->state.info.height : Pos.YResolution;
-    uint32_t *fb_base = (snap && snap->addr) ? (uint32_t *)snap->addr : Pos.FB_addr;
+    uint32_t xres = view->xres;
+    uint32_t yres = view->yres;
+    uint32_t *fb_base = view->addr;
     if (!fb_base) return;
 
     int right = x + width;
@@ -47,17 +50,13 @@ static void fill_rect(const fb_snapshot_t *snap, int x, int y, int width, int he
     }
 }
 
-void boot_logo_show(void)
+// Draw the wordmark and its caption into the framebuffer described by
+// `view`.  The geometry is unchanged from the original x86_64-only
+// implementation; only the framebuffer source differs per arch.
+static void logo_draw(const struct fb_write_view *view, const char *label)
 {
-    uint64_t flags = spin_lock_irqsave(&Pos.lock);
-    fb_lease_t lease;
-    if (fb_writer_begin(&lease, 0) < 0) {
-        spin_unlock_irqrestore(&Pos.lock, flags);
-        return;
-    }
-
-    uint32_t xres = lease.snapshot.state.info.width ? lease.snapshot.state.info.width : Pos.XResolution;
-    uint32_t yres = lease.snapshot.state.info.height ? lease.snapshot.state.info.height : Pos.YResolution;
+    uint32_t xres = view->xres;
+    uint32_t yres = view->yres;
 
     int scale = xres >= 800 ? 14 :
                 xres >= 480 ? 11 : 8;
@@ -74,28 +73,42 @@ void boot_logo_show(void)
         for (int row = 0; row < GLYPH_ROWS; row++) {
             for (int col = 0; col < GLYPH_COLS; col++) {
                 if (glyphs[letter][row] & (1u << (GLYPH_COLS - col - 1)))
-                    fill_rect(&lease.snapshot, left + letter * advance + col * scale,
+                    fill_rect(view, left + letter * advance + col * scale,
                               top + row * scale, scale, scale, color);
             }
         }
     }
 
     int line_y = top + GLYPH_ROWS * scale + 14;
-    fill_rect(&lease.snapshot, left, line_y, 3 * scale, 2, LOGO_ACCENT);
-    fill_rect(&lease.snapshot, left + 3 * scale + 8, line_y,
+    fill_rect(view, left, line_y, 3 * scale, 2, LOGO_ACCENT);
+    fill_rect(view, left + 3 * scale + 8, line_y,
               width - 3 * scale - 8, 1, LOGO_MUTED);
 
-    const char *label = "x86_64  /  KERNEL";
     int label_row = (line_y + 12 + (int)font->height - 1) / (int)font->height;
     int label_col = left / (int)font->width;
     for (int i = 0; label[i]; i++)
-        putchar_at_snap((const struct fb_snapshot *)&lease.snapshot, label_col + i, label_row, LOGO_MUTED, BLACK,
+        putchar_at_snap(view->snap, label_col + i, label_row, LOGO_MUTED, BLACK,
                         (unsigned char)label[i]);
 
     // Leave a blank character row between the wordmark and boot messages.
     Pos.YPosition = label_row + 2;
     Pos.XPosition = 0;
+}
 
-    fb_writer_end(&lease);
+int boot_logo_show(void)
+{
+    struct fb_write_view view;
+    uint64_t flags = spin_lock_irqsave(&Pos.lock);
+
+    int rc = arch_fb_write_begin(&view);
+    if (rc < 0) {
+        spin_unlock_irqrestore(&Pos.lock, flags);
+        return rc;
+    }
+
+    logo_draw(&view, ARCH_BOOT_LOGO_LABEL);
+
+    arch_fb_write_end(&view);
     spin_unlock_irqrestore(&Pos.lock, flags);
+    return 0;
 }
