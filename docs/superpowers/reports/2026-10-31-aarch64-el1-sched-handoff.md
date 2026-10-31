@@ -1,5 +1,12 @@
 # Handoff — aarch64 EL1 Kernel-Thread Scheduler (Phases 1–2 landed)
 
+> **Superseded status — 2026-10-31:** P1–P5 are now implemented and
+> reviewed APPROVE through source `a6e7c321` on the same feature branch.
+> See the [final review](2026-10-31-aarch64-el1-sched-final-review.md) and
+> [validation report](2026-10-30-aarch64-el1-sched-validation.md).
+> The Phase-1/2 status and stop instruction below are historical and have
+> been superseded by the later implementation request. Do not restart P3.
+
 > **For the next engineer/agent:** this document is the map. It records what is DONE and VERIFIED,
 > what is NOT DONE, the decisions that were made on the human partner's behalf, and the exact
 > next actions. Read this first, then the per-phase ledgers it points to.

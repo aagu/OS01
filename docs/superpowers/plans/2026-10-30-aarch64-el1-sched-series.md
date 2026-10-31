@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Implementation status — 2026-10-31
+
+P1–P5 are implemented and reviewed **APPROVE** on
+`feature/aarch64-el1-sched`; implementation source is `a6e7c321`.
+See the [final review](../reports/2026-10-31-aarch64-el1-sched-final-review.md)
+and [validation report](../reports/2026-10-30-aarch64-el1-sched-validation.md).
+The x86 UP kernel-selftest retains its two documented pre-existing
+failures; CPU2/8 pass. The phase plans below remain the implementation
+record. No merge or push has been performed.
+
 **Goal:** Land the aarch64 EL1 kernel-thread scheduler as five independently reviewable, independently testable phases — from arch-context extraction through to strict QEMU acceptance — without ever asking a reviewer to hold the whole feature in their head.
 
 **Architecture:** The series follows the spec's own dependency order. Each phase produces a working, gated artifact: Phase 1 preserves x86 behavior while adding the specified self-switch safety guard, Phase 2 splits the scheduler into arch-neutral core plus x86 system startup, Phase 3 gives aarch64 a real EL1 context switch and a BSP handoff, Phase 4 adds cooperative yield/blocker/reclaim plus the late selftest, Phase 5 adds the `MODE=sched` QEMU harness and runs the full regression gate. The interface contract between phases is frozen here (see "Frozen Interface Contract") so a phase can be implemented without reading the other phase plans.
@@ -209,6 +219,9 @@ Scope: plan review and local corrections only. The five phase files retain their
 Corrections cover context/header compatibility (including direct `get_current_task()` callers), self-switch and reclaim ownership, constructor publication, boot-window/start ordering, P2 compile-only versus P3 product integration, AArch64 stack/LR/IRQ entry, explicit late execution, evidence/variant contracts and staged acceptance commands. These verdicts assess the plans; build/QEMU/host gates remain implementation work and have not been run for this documentation review.
 
 ## Execution Handoff
+
+Implementation is complete; the following execution order is retained for
+historical reference, not a request to restart Phase 1.
 
 This index is a map, not an executable plan. Execute **Phase 1** first:
 

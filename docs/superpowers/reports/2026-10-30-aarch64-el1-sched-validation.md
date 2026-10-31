@@ -3,9 +3,9 @@
 Feature series: aarch64 EL1 kernel-thread scheduler (P1–P5), spec
 [2026-10-30-aarch64-el1-kthread-scheduler-design.md](../specs/2026-10-30-aarch64-el1-kthread-scheduler-design.md)
 (§9/§10/§11 acceptance). Branch `feature/aarch64-el1-sched`; the historical acceptance source
-revision was `8e78717d47a8f2a5301a4954dce88dee87b348df` (initial P1–P5
+revision was `8e78717d47a8f2a5301a4954dce88dee87b348df` (initial P5
 implementation commits `711c4b19`, `d249b0b3`, `df16f183`, `8e78717d`).
-See the [post-review fix-wave addendum](#post-review-fix-wave-2026-10-31)
+See the [post-review fix-wave addendum](#post-review-fix-wave-addendum-2026-10-31)
 for current source revision and corrected CPU-count evidence. All commands below ran on
 2026-10-31 from the worktree root
 `/home/aagu/OS01/.worktrees/aarch64-el1-sched`; per-step transcripts live
@@ -133,9 +133,9 @@ sched-fault-sp-top artifact (`8ff4c3aef770…`). Transcripts:
 | `make PROFILE=x86_64-clang test-host` | 0 | host | /tmp/p5-matrix/x86-host.log |
 | `make PROFILE=x86_64-clang test-static` | 0 | host | /tmp/p5-matrix/x86-static.log |
 | `make PROFILE=x86_64-clang SMP=1 test-qemu SUITE=phase-0` | 0 | 1 | /tmp/p5-matrix/x86-phase0-smp1.log |
-| `make PROFILE=x86_64-clang SMP=2 test-qemu SUITE=phase-0` | 0 | 2 | /tmp/p5-matrix/x86-phase0-smp2.log |
+| `make PROFILE=x86_64-clang SMP=2 test-qemu SUITE=phase-0` | 0 | **actual 1; corrected below** | /tmp/p5-matrix/x86-phase0-smp2.log |
 | `make PROFILE=x86_64-clang SMP=1 OS01_SYSTEST=1 test-qemu SUITE=systest` | 0 | 1 | /tmp/p5-matrix/x86-systest-smp1.log |
-| `make PROFILE=x86_64-clang SMP=2 OS01_SYSTEST=1 test-qemu SUITE=systest` | 0 | 2 | /tmp/p5-matrix/x86-systest-smp2.log |
+| `make PROFILE=x86_64-clang SMP=2 OS01_SYSTEST=1 test-qemu SUITE=systest` | 0 | **actual 1; corrected below** | /tmp/p5-matrix/x86-systest-smp2.log |
 | `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=1 test-kernel-selftest` | **2 (baseline failure, see below)** | 1 | /tmp/p5-matrix/x86-kself-smp1.log |
 | `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=2 test-kernel-selftest` | 0 | 2 | /tmp/p5-matrix/x86-kself-smp2.log |
 | `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=8 test-kernel-selftest` | 0 | 8 | /tmp/p5-matrix/x86-kself-smp8.log |
@@ -241,9 +241,9 @@ are session-local; durable runner records remain in `build/.../logs/tests/`.
 
 | Gate | Result / actual CPUs | Evidence |
 |---|---:|---|
-| `make PROFILE=x86_64-clang test-host` | PASS, 152 host binaries | run completed in this session |
-| `make PROFILE=x86_64-clang test-static kernel.bin` | PASS | run completed in this session |
-| `make PROFILE=aarch64-clang KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=positive aarch64-uefi` | PASS, compile | run completed in this session |
+| `make PROFILE=x86_64-clang test-host` | PASS, 152 distinct host binaries | `build/x86_64-clang/logs/tests/hosttests/20261031T092316Z-*` through `20261031T092356Z-*` (controller checked all 152 records) |
+| `make PROFILE=x86_64-clang test-static kernel.bin` | PASS | original console output not separately captured; controller repeated `test-static`, exit 0, `/tmp/os01-p5-final-static.log` |
+| `make PROFILE=aarch64-clang KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=positive aarch64-uefi` | PASS, compile | original console output not separately captured; subsequent sched matrix transcript includes the controlled variant builds |
 | `make PROFILE=aarch64-clang test-aarch64 MODE=sched` | PASS, 16/16 boots; positive 1/2/4/8, four fault variants at 1/2; 7/7 symbol audits | `/tmp/os01-p5-fix-sched.log` |
 | ordinary aarch64 idle smoke | PASS at 1/2/4/8 CPUs | `/tmp/os01-p5-fix-idle.log`; `build/aarch64-clang/logs/tests/aarch64-idle-review/cpus-{1,2,4,8}/serial.log` |
 | `make PROFILE=aarch64-clang test-aarch64-audit` | PASS | `/tmp/os01-p5-fix-audit.log` |
@@ -251,6 +251,7 @@ are session-local; durable runner records remain in `build/.../logs/tests/`.
 | `make PROFILE=x86_64-clang KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=1 test-kernel-selftest` | known baseline: 39/41, only `fd_refcount` and `x86_intr` fail; `sched_boot_probe` PASS | `/tmp/os01-p5-fix-kernel-selftest-cpu1.log`; run `20261031T093932Z-acb855a8bc444104b78ea3618cf46435` |
 | same target with `KERNEL_SELFTEST_SMP=2` | PASS, 41/41; `sched_boot_probe` PASS | `/tmp/os01-p5-fix-kernel-selftest-cpu2.log`; run `20261031T093939Z-3f535efd9a0a4b44ab2d4a92864e5c6e` |
 | same target with `KERNEL_SELFTEST_SMP=8` | PASS, 41/41; `sched_boot_probe` PASS | `/tmp/os01-p5-fix-kernel-selftest-cpu8.log`; run `20261031T093947Z-b04b1bec5c6f4b9cbac45fe039eb9c48` |
+| `make PROFILE=x86_64-clang SMP=1 test-qemu SUITE=phase-0` | PASS, actual 1 CPU | `/tmp/os01-p5-fix-phase0-smp1.log`; run `20261031T093759Z-e5c9e864b1a84e71ad5d09809f541342` |
 | `make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall` | PASS, 99/99, actual 1 CPU | `/tmp/os01-p5-fix-syscall-smp1.log`; run `20261031T093818Z-c7fb69b901124c56ab38ceacc60d9e45` |
 | `QEMU_SMP=2 make PROFILE=x86_64-clang SMP=2 test-qemu SUITE=phase-0` | PASS, actual 2 CPUs | `/tmp/os01-p5-fix-phase0-qemusmp2.log`; run `20261031T094003Z-e5355482e9934092ae7f9569baa1a1b1` |
 | `QEMU_SMP=2 make PROFILE=x86_64-clang SMP=2 OS01_SYSTEST=1 test-syscall` | PASS, 99/99, actual 2 CPUs | `/tmp/os01-p5-fix-syscall-qemusmp2.log`; run `20261031T094010Z-f42a1c333f9e411d9e3e43043d4173fd` |
@@ -262,11 +263,43 @@ historical matrix rows remain preserved but their claimed 2-CPU counts are
 not valid. Fresh two-CPU reruns above explicitly set `QEMU_SMP=2`, and their
 runner `result.json` records `cpu_count: 2`. The initial `SMP=1` phase-0 and
 systest results are valid 1-CPU runs. Likewise, kernel-selftest CPU count is
-controlled by `KERNEL_SELFTEST_SMP`; the three initial `SMP=1/2/8` invocations
-actually used its default 4 CPUs and are only redundant SMP4 evidence. The
+controlled by `KERNEL_SELFTEST_SMP`; the first three **fix-wave**
+`SMP=1/2/8` invocations (`/tmp/os01-p5-fix-kself-smp{1,2,8}.log`)
+actually used its default 4 CPUs and are only redundant SMP4 evidence.
+The historical `/tmp/p5-matrix/x86-kself-smp{1,2,8}.log` runs already
+used `KERNEL_SELFTEST_SMP` correctly and are unaffected by this correction. The
 corrected 1/2/8 runs above use the documented variable and runner records.
 
 The UP failures remain separate baseline failures, not fixed or suppressed.
 This run independently confirms the same exact failure set and passing
 `sched_boot_probe`; SMP 2/8 are fully green. Do not interpret the earlier
 “23/24” acceptance summary as a fully green matrix.
+
+### Controller artifact verification
+
+The fix-wave matrix audited an older ordinary-selftest ELF. After review,
+`make PROFILE=aarch64-clang KERNEL_SELFTEST=1 aarch64-uefi` rebuilt this
+variant from source `a6e7c321` (exit 0;
+`/tmp/os01-p5-final-ordinary-selftest-build.log`). The controller then
+called `audit_fault_symbol("llvm-nm", elf, expected)` on all seven exact
+paths again: **7/7 PASS**, recorded in
+`/tmp/os01-p5-final-symbol-audit.json`. Current SHA-256 prefixes are below;
+the earlier table is historical. No additional live-boot matrix was needed:
+the current positive/fault images had already completed 16/16 boots.
+
+| ELF under `build/aarch64-clang/kernel/` | injection symbol | SHA-256 prefix |
+|---|---|---|
+| `kernel.elf` | absent | `4586fc74d9cc4cb4` |
+| `selftest/kernel.elf` | absent | `22473182af4b7581` |
+| `sched/kernel.elf` | absent | `5ab6773595c5c87c` |
+| `sched-fault-sp-top/kernel.elf` | present | `e5c5dc592522c821` |
+| `sched-fault-sp-low/kernel.elf` | present | `522fdaee1e5b24d1` |
+| `sched-fault-pc-low/kernel.elf` | present | `5495713d9ffedb49` |
+| `sched-fault-pc-data/kernel.elf` | present | `05a9d47924ee8a17` |
+
+Controller independently checked the latest 16 aarch64 scheduler archives
+for PASS, runner-controlled termination, and CPU-count/`-smp` agreement;
+checked x86 CPU1/2/8 selftest cases and the corrected CPU2 phase-0/systest
+archives; reran the four runner lifecycle tests (exit 0); and found no
+whitespace errors across `05620330..edd031cf`. Final review disposition is
+recorded in [the final review](2026-10-31-aarch64-el1-sched-final-review.md).
