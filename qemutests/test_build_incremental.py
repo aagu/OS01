@@ -489,5 +489,58 @@ class UserContractTests(unittest.TestCase):
             )
 
 
+class BusyboxContractTests(unittest.TestCase):
+    def test_busybox_config_a_b_a(self):
+        """Modifying config/busybox.config.in must change receipt and rebuild; reverting must revert receipt."""
+        config_in = ROOT / "config" / "busybox.config.in"
+        receipt_file = ROOT / "build" / "x86_64-clang" / "receipts" / "busybox.stamp.receipt"
+        busybox_elf = ROOT / "build" / "x86_64-clang" / "artifacts" / "user" / "busybox.elf"
+        self.assertTrue(config_in.exists())
+        self.assertTrue(receipt_file.exists())
+
+        receipt_a = receipt_file.read_text().strip()
+        orig_config = config_in.read_text()
+
+        try:
+            # Modify config with a comment
+            config_in.write_text(orig_config + "\n# test busybox config aba probe\n")
+
+            res = subprocess.run(
+                [
+                    "make",
+                    "--no-print-directory",
+                    "PROFILE=x86_64-clang",
+                    str(busybox_elf),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            self.assertEqual(res.returncode, 0, f"make busybox failed: {res.stderr}")
+            receipt_b = receipt_file.read_text().strip()
+            self.assertNotEqual(receipt_b, receipt_a)
+
+            # Revert config
+            config_in.write_text(orig_config)
+            res = subprocess.run(
+                [
+                    "make",
+                    "--no-print-directory",
+                    "PROFILE=x86_64-clang",
+                    str(busybox_elf),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            self.assertEqual(res.returncode, 0, f"make busybox revert failed: {res.stderr}")
+            receipt_c = receipt_file.read_text().strip()
+            self.assertEqual(receipt_c, receipt_a)
+        finally:
+            config_in.write_text(orig_config)
+
+
 if __name__ == "__main__":
     unittest.main()

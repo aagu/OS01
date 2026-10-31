@@ -150,14 +150,19 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      find config/busybox.overlay -type f -exec sha256sum {} + 2>/dev/null | sort; \
 	      sha256sum user/crt0.S user/sigreturn_trampoline.S user/linker.ld; \
 	      printf "toolchain: %s\n" "$$($(CLANG) --version 2>/dev/null | head -1)"; \
-	      printf "generation: %s\n" "$$genid"; \
 	    } | sha256sum | cut -d" " -f1 ); \
 	    old=""; \
 	    if [ -f "$(BUSYBOX_RECEIPT)" ]; then old=$$(cat "$(BUSYBOX_RECEIPT)"); fi; \
 	    if [ "$$digest" = "$$old" ] && [ -f "$(BUSYBOX_PRIVATE)/busybox" ]; then \
-	      echo "  [busybox] input unchanged, reusing private copy"; \
+	      echo "  [busybox] config unchanged, checking incremental build"; \
+	      if [ -f "$(SYSROOT)/usr/lib/libc.a" ] && [ "$(SYSROOT)/usr/lib/libc.a" -nt "$(BUSYBOX_PRIVATE)/busybox" ]; then \
+	        rm -f "$(BUSYBOX_PRIVATE)/busybox_unstripped" "$(BUSYBOX_PRIVATE)/busybox"; \
+	      fi; \
+	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
+	        -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
 	    else \
-	      echo "  [busybox] input changed, rebuilding in $(BUSYBOX_PRIVATE)"; \
+	      echo "  [busybox] config changed or unbuilt, rebuilding in $(BUSYBOX_PRIVATE)"; \
 	      cmp -s "$(OS01_ROOT)/user/crt0.S" "$(BUSYBOX_OVERLAY)/applets/crt0.S" || { echo "ERROR: $(BUSYBOX_OVERLAY)/applets/crt0.S has drifted from user/crt0.S — the overlay is the file actually compiled; regenerate the overlay copy"; exit 1; }; \
 	      cmp -s "$(OS01_ROOT)/user/sigreturn_trampoline.S" "$(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S" || { echo "ERROR: $(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S has drifted from user/sigreturn_trampoline.S — regenerate the overlay copy"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_INPUT_DG)"; \
@@ -167,8 +172,8 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      cp "$(BUSYBOX_OVERLAY)/applets/crt0.S" "$(BUSYBOX_PRIVATE)/applets/crt0.S"; \
 	      cp "$(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S" "$(BUSYBOX_PRIVATE)/applets/sigreturn_trampoline.S"; \
 	      cp "$(BUSYBOX_OVERLAY)/applets/Kbuild.src" "$(BUSYBOX_PRIVATE)/applets/Kbuild.src"; \
-	      sed -e "s|@TARGET_INCLUDEDIR@|$$genabs/usr/include|g" \
-	          -e "s|@TARGET_LIBDIR@|$$genabs/usr/lib|g" \
+	      sed -e "s|@TARGET_INCLUDEDIR@|$(SYSROOT)/usr/include|g" \
+	          -e "s|@TARGET_LIBDIR@|$(SYSROOT)/usr/lib|g" \
 	          -e "s|@CLANG_RESOURCE_DIR@|$(CLANG_RESOURCE_DIR)|g" \
 	          -e "s|-I../../libc/include -I../../kernel/include ||" \
 	          -e "s|-Wl,-T,../../user/linker.ld|-Wl,-T,$(OS01_ROOT)/user/linker.ld|" \
