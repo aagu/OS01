@@ -18,6 +18,15 @@ The branch is in a state where:
 
 The merge has been reverted; `master` is back at `918b6a2e`. The branch's tip `978d21e` is ready to merge again after the failure below is understood.
 
+> **Update (2026-10-31, `feature/aarch64-boot-logo`):** the aarch64 banner
+> marker quoted in this record — `[fb] frame buffer remap succeed (banner
+> above on screen)` — was the string of the `aarch64-color-printk` branch.
+> The boot-logo branch changed it to
+> `[fb] frame buffer remap succeed (banner on screen)`, because the banner
+> now sits BELOW the OS01 wordmark the kernel draws during boot. The
+> historical output quoted below is left untouched on purpose: it is a
+> dated incident record, not current documentation.
+
 ---
 
 ## Branch state

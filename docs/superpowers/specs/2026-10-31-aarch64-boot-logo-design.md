@@ -174,8 +174,10 @@ constant, so there is no `.c` and no new link-time symbol.
 
 ### 2. `kernel/driver/logo.c` refactor
 
-The drawing becomes a pure function of the view; the arch-specific access
-lives behind the facade.
+The drawing depends only on the view (plus the console cursor it leaves
+behind: `logo_draw()` also sets `Pos.YPosition` / `Pos.XPosition` so the
+`[fb]` banner lands below the wordmark); the arch-specific access lives
+behind the facade.
 
 ```c
 /* kernel/include/driver/logo.h */
@@ -350,13 +352,16 @@ New test `qemutests/aarch64_boot_logo.py`:
    `-device ramfb` and `-qmp unix:<sock>,server,nowait`, keeping
    `-display none` (headless; verified to work with ramfb).
 2. Wait FIRST for the serial marker `[fb] frame buffer remap succeed` — the
-   marker the kernel ALWAYS prints — and only then do a BOUNDED secondary
-   wait (5 s) for `[logo] boot logo drawn`. The primary wait deliberately
-   targets an always-present marker, so a missing logo is reported as a
+   marker the kernel prints in every boot that HAS a framebuffer (the
+   no-framebuffer boot prints none, so that check waits for `[sched]
+   idle-ready` instead) — and only then do a BOUNDED secondary wait (5 s)
+   for `[logo] boot logo drawn`. The primary wait deliberately targets a
+   marker that is present in this boot, so a missing logo is reported as a
    FAILED ASSERTION with the screenshot still captured, never as a timeout
-   with no evidence; the bounded secondary wait only gives the kernel a
-   moment to finish the draw before the screendump, and a logo marker that
-   never arrives stays a failed assertion too — not a timeout.
+   with no evidence; the bounded secondary wait is a safety net (the kernel
+   prints the logo marker BEFORE the `[fb]` banner marker, so it is already
+   buffered when the primary wait returns), and a logo marker that never
+   arrives stays a failed assertion too — not a timeout.
 3. QMP `screendump` → PPM (`P6`, 800x600).
 4. Derive the expected geometry from the screendump dimensions using the SAME
    scale rule the kernel uses (`xres >= 800 → 14`, `>= 480 → 11`, else `8`;
@@ -374,11 +379,14 @@ New test `qemutests/aarch64_boot_logo.py`:
    |---|---|---|
    | ink `RGB(232,240,247)` | glyphs "O" (20 set bits) + "S" (17) = 37 × scale² | **7252** |
    | accent `RGB(59,214,198)` | glyphs "0" (23) + "1" (10) = 33 × scale² + underline `3*scale*2` | **6552** |
-   | muted `RGB(104,120,134)` | the `aarch64  /  KERNEL` label glyphs | > 0 |
+   | muted `RGB(104,120,134)` | the `aarch64  /  KERNEL` label glyphs (the set-bit sum of their PSF2 glyphs) | **470** |
 
    The per-glyph bit counts come from the bitmap table in `kernel/driver/logo.c`
    (`O`=20, `S`=17, `0`=23, `1`=10 set bits) and are re-derived by the test, not
-   hard-coded.
+   hard-coded.  The caption count comes from the PSF2 font the kernel draws it
+   with (`kernel/driver/font.psf`, the same font `color_printk` uses); the test
+   parses that file at run time and sums the set bits of the label's glyphs,
+   so the expected number is derived, never hard-coded either.
 
    These colours are unique to the logo — the measured edk2 banner uses
    (255,255,255), (152,152,152), (0,0,255), (190,195,208), (126,135,161),
@@ -388,10 +396,14 @@ New test `qemutests/aarch64_boot_logo.py`:
    (`x ∈ [left, left + 2*advance)`, `y ∈ [top, top + 7*scale)`) — the wordmark
    is not smeared over the screen.
 
-7. Assert muted pixels exist in the label CHARACTER CELL BAND
+7. Assert the EXACT muted pixel count in the label CHARACTER CELL BAND
    `y ∈ [label_row*16, label_row*16 + 16)` = `y ∈ [160, 176)` at 800x600,
    within `x ∈ [left, left + 18*8)` — the `aarch64  /  KERNEL` text was
-   rendered.
+   rendered, character for character.  The expected count is the set-bit sum
+   of the label's glyphs in `kernel/driver/font.psf` (470 at 800x600); a
+   truncated or misspelled caption paints a different number of pixels and
+   fails.  The same count is asserted for the WHOLE caption row, so a caption
+   LONGER than the expected label also fails.
 
    The band, not a single scanline: in the shipped PSF2 font EVERY glyph used
    by the label has a zero first row (`row0 == 0x00` for `a a r c h 6 4 / K E R
@@ -459,7 +471,7 @@ non-zero on failure.
 | `kernel/include/arch/aarch64/identity.h` | NEW — `ARCH_NAME`, `ARCH_BOOT_LOGO_LABEL` |
 | `kernel/driver/arch_fb_write.c` | NEW — weak default: direct `Pos` draw, `snap = NULL` |
 | `kernel/arch/x86_64/platform/fb_write.c` | NEW — strong override: display-coordinator lease |
-| `kernel/driver/logo.c` | REFACTOR — `logo_draw()` pure drawing; `boot_logo_show()` uses the facade; arch label |
+| `kernel/driver/logo.c` | REFACTOR — `logo_draw()` draws through the view (and leaves the console cursor below the wordmark); `boot_logo_show()` uses the facade; arch label |
 | `kernel/include/driver/logo.h` | UPDATE — `int boot_logo_show(void)` |
 | `kernel/arch/aarch64/boot/main.c` | UPDATE — call `boot_logo_show()`, emit the `[logo]` markers, reword the `[fb]` message |
 | `kernel/Makefile` | UPDATE — aarch64 `KERNEL_C_SOURCES` += `driver/logo.c`, `driver/arch_fb_write.c` |

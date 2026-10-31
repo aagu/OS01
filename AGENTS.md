@@ -42,7 +42,7 @@ Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
 Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline + pick_eevdf + sched_balance SMP 负载均衡
 Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
-Logo:    aarch64_boot_fb_init() → frame_buffer_init() → boot_logo_show() → [fb] banner
+Logo:    aarch64 only: aarch64_boot_fb_init() → frame_buffer_init() → boot_logo_show() → [fb] banner
 ```
 
 ## Directory organization (2026-09-12)
