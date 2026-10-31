@@ -176,11 +176,11 @@ int kernel_main(const struct boot_context *bootctx)
 #ifdef OS01_SELFTEST
     serial_printk("[selftest] running built-in tests...\n");
     /* Declare the complete protocol-v1 selection before START: the
-     * registered boot-time (early) cases plus the six scheduled cases
+     * registered boot-time (early) cases plus the seven scheduled cases
      * task_init() runs later.  selftest_run_all() executes the early
      * subset; task_init() records the late cases and emits the single
      * END via selftest_end_run(). */
-    selftest_begin_run(6);
+    selftest_begin_run(7);
     selftest_run_all();
     serial_printk("[selftest] done\n");
 #endif
@@ -197,6 +197,21 @@ int kernel_main(const struct boot_context *bootctx)
     // creates the lwIP tcpip_thread via create_kthread — exactly the
     // boot-phase creation the window exists for.
     sched_boot_creation_begin();
+
+#ifdef OS01_SELFTEST
+    // ── x86 UP boot-window probe (P5 Task 4 / spec §10.1 item 4) ──
+    // Inside the legal pre-publication window: CPU0 is online but
+    // scheduler_ok == 0, so this kernel_thread() has NO scheduler_ok
+    // target and must succeed through the boot fallback.  The late
+    // selftest case test_sched_boot_probe (task_init) then proves the
+    // marker function ACTUALLY executed under the scheduler after
+    // sched_boot_start() published scheduler_ok — and that the runtime
+    // negative calls are rejected once the window closed.
+    {
+        extern void sched_boot_probe_create(void);
+        sched_boot_probe_create();
+    }
+#endif
 
     // lwIP creates kernel threads (tcpip_thread) — must happen
     // after SMP is up and before the scheduler starts.  The task

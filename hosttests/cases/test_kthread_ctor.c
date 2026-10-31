@@ -141,6 +141,26 @@ static void assert_clean_rollback(const char *what, int rc)
     (void)what;
 }
 
+/* P5 Task 4 (spec §10.1 item 3): after EACH failure point, a subsequent
+ * NORMAL creation must succeed and publish a live task — the rollback
+ * leaves no residue that poisons the next attempt. */
+static void assert_retry_succeeds(const char *what)
+{
+    mock_kmalloc_fail_at = 0;              /* the NEXT creation is normal */
+    mock_arch_prepare_rc = 0;
+    task_t *retry = (task_t *)1;
+    int retry_pid = 0;
+    int rc = kthread_alloc_and_publish(ctor_fn, 7, NULL, 0, false,
+                                       &retry, &retry_pid);
+    assert_eq(0, rc);
+    assert_true(retry != NULL);
+    assert_true(retry_pid > 0);
+    assert_eq(1, task_list_len());
+    assert_eq(1, (int)percpu_data[0].nr_running);
+    assert_true((size_t)0 != mock_kmalloc_live_bytes);
+    (void)what;
+}
+
 static void suite_rollback(void)
 {
     TEST_SUITE("rollback: raw task-union allocation");
@@ -154,6 +174,7 @@ static void suite_rollback(void)
     assert_true(rc == -ENOMEM);
     assert_true(tsk == NULL);              /* failure leaves outputs empty */
     assert_eq(0, pid);
+    assert_retry_succeeds("retry after raw alloc");
 
     TEST_SUITE("rollback: thread-struct allocation");
     switch_tail_reset();
@@ -167,6 +188,7 @@ static void suite_rollback(void)
     assert_true(tsk == NULL);
     assert_eq(0, pid);
     assert_true(spy_kfree_calls >= 1);     /* the raw stack was released */
+    assert_retry_succeeds("retry after thread alloc");
 
     TEST_SUITE("rollback: FPU allocation");
     switch_tail_reset();
@@ -182,6 +204,7 @@ static void suite_rollback(void)
     assert_true(tsk == NULL);
     assert_eq(0, pid);
     assert_true(spy_kfree_calls >= 2);      /* thread + raw stack released */
+    assert_retry_succeeds("retry after FPU alloc");
 
     TEST_SUITE("rollback: arch resource prepare");
     switch_tail_reset();
@@ -217,6 +240,43 @@ static void suite_rollback(void)
     task_switch_complete(retry);
     assert_eq(0, mock_arch_fpu_live);
     assert_eq((int)baseline_bytes, (int)mock_kmalloc_live_bytes);
+}
+
+/* ── 3b. Publication lock order + enqueue handoff (P5 Task 4) ─── */
+static void suite_publication_order(void)
+{
+    TEST_SUITE("publication takes task_list_lock then rq_lock, releases reverse");
+    switch_tail_reset();
+    boot_phase_cpu0_up();
+    sched_boot_creation_begin();
+    task_t *tsk = NULL;
+    int pid = 0;
+    assert_eq(0, kthread_alloc_and_publish(ctor_fn, 9, NULL, 0, false,
+                                           &tsk, &pid));
+    /* Exactly four lock operations: lock list, lock rq, unlock rq,
+     * unlock list — the frozen publication order. */
+    assert_eq(4, mock_lock_log_count);
+    assert_true(mock_lock_log_addr[0] == &task_list_lock);
+    assert_eq(1, mock_lock_log_is_lock[0]);
+    assert_true(mock_lock_log_addr[1] == &percpu_data[0].rq_lock);
+    assert_eq(1, mock_lock_log_is_lock[1]);
+    assert_true(mock_lock_log_addr[2] == &percpu_data[0].rq_lock);
+    assert_eq(0, mock_lock_log_is_lock[2]);
+    assert_true(mock_lock_log_addr[3] == &task_list_lock);
+    assert_eq(0, mock_lock_log_is_lock[3]);
+
+    TEST_SUITE("publication hands the task to the runqueue exactly once");
+    /* The on_cpu/on_rq handoff the host can see: exactly one enqueue
+     * under the rq lock (no double enqueue, no refusal), TASK_RUNNING
+     * at publication, and the remote-notification issued after the
+     * locks drop.  (The full on_cpu/on_rq WAKE re-check logic lives in
+     * sched/core.c and is proven live by the aarch64 blocker case's
+     * duplicate_enqueue=0 evidence.) */
+    assert_eq(1, mock_enqueue_calls);
+    assert_eq(0, mock_enqueue_refused);
+    assert_eq(1, mock_notify_remote_calls);
+    assert_true(tsk->state == TASK_RUNNING);
+    assert_true(tsk->on_rq);
 }
 
 /* ── 4. Pinned API never gets the exception ──────────────────── */
@@ -337,6 +397,7 @@ int main(void)
     suite_window_initially_closed();
     suite_boot_fallback();
     suite_rollback();
+    suite_publication_order();
     suite_pinned_api();
     suite_empty_affinity();
     suite_window_close_permanent();

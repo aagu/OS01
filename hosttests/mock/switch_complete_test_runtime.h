@@ -173,9 +173,16 @@ union task_union {
 #ifndef OS01_HOST_SPINLOCK_T_PROVIDED
 #define OS01_HOST_SPINLOCK_T_PROVIDED
 typedef struct { unsigned long lock; } spinlock_T;
+/* Lock-order recorder (P5 Task 4 / spec §10.1 item 4): the production
+ * constructor takes task_list_lock FIRST and the destination rq_lock
+ * second; the recorder (defined in the TEST TU section below) lets the
+ * cases assert the observed acquisition/release order.  Only the
+ * production spin surface records — the TEST TU's spin functions come
+ * from test_platform.h under this same include guard. */
+void mock_record_lock_op(spinlock_T *l, int is_lock);
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
-static inline uint64_t spin_lock_irqsave(spinlock_T *l) { (void)l; return 0; }
-static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)l; (void)f; }
+static inline uint64_t spin_lock_irqsave(spinlock_T *l) { mock_record_lock_op(l, 1); return 0; }
+static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; mock_record_lock_op(l, 0); }
 #endif /* OS01_HOST_SPINLOCK_T_PROVIDED */
 
 /* ── Mock percpu ──────────────────────────────────────────────── */
@@ -292,6 +299,20 @@ int mock_enqueue_refused;    /* enqueues refused by the affinity mask */
 int mock_pick_calls;
 int mock_notify_remote_calls;
 int64_t mock_alloc_pid_next = 1;
+
+/* Lock-order recorder state (filled from the PRODUCTION spin surface). */
+spinlock_T *mock_lock_log_addr[16];
+int mock_lock_log_is_lock[16];
+int mock_lock_log_count;
+
+void mock_record_lock_op(spinlock_T *l, int is_lock)
+{
+    if (mock_lock_log_count < 16) {
+        mock_lock_log_addr[mock_lock_log_count] = l;
+        mock_lock_log_is_lock[mock_lock_log_count] = is_lock;
+    }
+    mock_lock_log_count++;
+}
 
 /* Creator fixture: `current` while the constructor runs. */
 static task_t creator_task;
@@ -545,6 +566,10 @@ void switch_tail_reset(void)
     mock_enqueue_refused = 0;
     mock_pick_calls = 0;
     mock_notify_remote_calls = 0;
+
+    mock_lock_log_count = 0;
+    memset(mock_lock_log_addr, 0, sizeof(mock_lock_log_addr));
+    memset(mock_lock_log_is_lock, 0, sizeof(mock_lock_log_is_lock));
 
     /* creator fixture: a plain running task on CPU0. */
     memset(&creator_task, 0, sizeof(creator_task));

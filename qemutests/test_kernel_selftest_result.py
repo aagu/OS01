@@ -793,7 +793,7 @@ class KernelSelftestCoordinatorContractTests(unittest.TestCase):
 
     def test_end_run_follows_every_late_record(self) -> None:
         # A hanging scheduled case must not be able to emit END: the
-        # single END is issued only after ALL six selftest_record_late()
+        # single END is issued only after ALL selftest_record_late()
         # calls, so a late case that never returns never reaches
         # selftest_end_run().
         #
@@ -801,13 +801,16 @@ class KernelSelftestCoordinatorContractTests(unittest.TestCase):
         # startup out of kernel/sched/core.c into the x86-only
         # kernel/arch/x86_64/cpu/sched_boot.c (the arch-neutral core must
         # not name the x86 late selftests).  The contract is unchanged —
-        # only the file that holds the calls moved.
+        # only the file that holds the calls moved.  P5 Task 4 added the
+        # sched_boot_probe case (seven late cases now); this count moves
+        # WITH the real registrations, never as a standalone constant.
         src = _read_kernel_source(X86_SCHED_BOOT_SRC)
         records = [m.start() for m in
                    re.finditer(r"selftest_record_late\(", src)]
         self.assertEqual(
-            len(records), 6,
-            f"{X86_SCHED_BOOT_SRC} must record all six scheduled (late) cases")
+            len(records), 7,
+            f"{X86_SCHED_BOOT_SRC} must record all seven scheduled (late) "
+            "cases")
         # Scope to the real CALL site: the file also mentions
         # selftest_end_run() in its header comment and in a comment above
         # the call, so match the statement form `selftest_end_run();`.

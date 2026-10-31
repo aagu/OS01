@@ -205,7 +205,8 @@ TEST_BINS := \
     $(TEST_BLD)/test_intr_irq_x86.elf \
     $(TEST_BLD)/test_x86_intr_probe.elf \
     $(TEST_BLD)/test_switch_complete.elf \
-    $(TEST_BLD)/test_kthread_ctor.elf
+    $(TEST_BLD)/test_kthread_ctor.elf \
+    $(TEST_BLD)/test_sched_layout_offsets.elf
 
 # Binaries that report solely through their exit code and print nothing on
 # success (see the `run` section for the full rationale).  Defined here, NOT
@@ -284,6 +285,22 @@ $(TEST_BLD)/test_framework_contract.elf: $(TEST_CASES)/test_framework_contract.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_framework_contract.o
 	$(HOST_CC) -o $@ $(TEST_BLD)/test_framework_contract.o
+
+# aarch64 EL1 scheduler plan Phase 5 Task 4 (spec §10.1 items 1-2):
+# host-compiles the REAL <arch/context.h> facade so the kernel's own
+# compile-time layout asserts run in a host build too, then checks the
+# x86 thread_t offsets against their RECORDED values (independent of the
+# header's asserts — editing those alone cannot hide a drift).
+$(TEST_BLD)/test_sched_layout_offsets.elf: $(TEST_CASES)/test_sched_layout_offsets.c \
+		$(TESTS_DIR)/kernel/include/arch/context.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/context.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_sched_layout_offsets.o
+	$(HOST_CC) -o $@ $(TEST_BLD)/test_sched_layout_offsets.o
+
+.PHONY: test-sched-layout-offsets
+test-sched-layout-offsets: $(TEST_BLD)/test_sched_layout_offsets.elf
+	$<
 
 test-framework-contract: $(TEST_BLD)/test_framework_contract.elf
 	@echo "  [framework-contract] running $< (must exit EXACTLY 1: negative contract)"

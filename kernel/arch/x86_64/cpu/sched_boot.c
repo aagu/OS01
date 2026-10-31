@@ -153,6 +153,21 @@ void task_init(void)
 #endif
 
 #ifdef OS01_SELFTEST
+    // ── boot-window probe selftest (P5 Task 4) ───────────────
+    // The probe thread was created in kernel_main inside the legal
+    // pre-publication window (CPU0 online, scheduler_ok == 0).  This
+    // case waits (bounded, production schedule()) until its marker has
+    // ACTUALLY executed under the scheduler, then verifies the runtime
+    // negative placement calls are rejected now that the window is
+    // closed.  Execution order matches the registration order in
+    // selftest.c.
+    {
+        extern int test_sched_boot_probe(void);
+        selftest_record_late("sched_boot_probe", test_sched_boot_probe());
+    }
+#endif
+
+#ifdef OS01_SELFTEST
     // ── fd reference-protocol race test ─────────────────────
     // After scheduler_ok=1 (kernel_thread + schedule() work).
     // files_unpin is now a synchronous drop-to-zero → files_free.
