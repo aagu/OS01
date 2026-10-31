@@ -20,10 +20,7 @@ typedef struct pty_struct {
     struct termios term;           // state_lock protects published termios
     uint16_t    ws_row, ws_col;
     uint16_t    ws_xpixel, ws_ypixel;
-    union {
-        pid_t   pgrp;              // foreground process group
-        pid_t   fg_pgrp;
-    };
+    pid_t       pgrp;              // foreground process group
 } pty_t;
 
 extern pty_t pty_table[PTY_MAX];

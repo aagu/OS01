@@ -786,6 +786,14 @@ TEST_FUNC(test_termios_faults_preserve_state)
     assert_eq(0, g_copy_while_locked);
 }
 
+TEST_FUNC(test_pty_struct_pgrp_field)
+{
+    pty_t pty;
+    memset(&pty, 0, sizeof(pty));
+    pty.pgrp = 42;
+    assert_eq(42, pty.pgrp);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_master_slave_winsize),
     TEST_ENTRY(test_winsize_no_signal_when_unchanged),
@@ -798,6 +806,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_termios_set_commits_inside_state_lock),
     TEST_ENTRY(test_termios_get_uses_stable_snapshot),
     TEST_ENTRY(test_termios_faults_preserve_state),
+    TEST_ENTRY(test_pty_struct_pgrp_field),
 TEST_LIST_END
 
 int main(void)

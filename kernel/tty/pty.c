@@ -129,6 +129,8 @@ int pty_ioctl(pty_t *pty, int cmd, void *arg)
         pgrp = pty->pgrp;
         spin_unlock_irqrestore(&pty->state_lock, fl);
 
+        // Notify foreground process group if dimensions changed and pgrp is valid
+        // (pgrp > 0; pgrp == 0 indicates unassigned foreground group, no signal sent).
         if (changed && pgrp > 0) {
             signal_pgrp(pgrp, SIGWINCH);
         }

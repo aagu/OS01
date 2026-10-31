@@ -9,71 +9,47 @@
 #include <test_framework.h>
 #include <uapi/fb.h>
 
-static int g_failed = 0;
-
-#define CHECK_TRUE(cond) do { \
-    if (!(cond)) { \
-        g_failed++; \
-        printf("  [FAIL] %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-    } else { \
-        __test_stats.passed++; \
-        __test_stats.total++; \
-    } \
-} while (0)
-
-#define CHECK_EQ(exp, act) do { \
-    long _e = (long)(exp); \
-    long _a = (long)(act); \
-    if (_e != _a) { \
-        g_failed++; \
-        printf("  [FAIL] %s:%d: %s (expected %ld, got %ld)\n", __FILE__, __LINE__, #act, _e, _a); \
-    } else { \
-        __test_stats.passed++; \
-        __test_stats.total++; \
-    } \
-} while (0)
-
 TEST_FUNC(test_fb_uapi_layout) {
     /* 1. struct sizes & alignments */
-    CHECK_EQ(20, sizeof(struct fb_info));
-    CHECK_EQ(332, sizeof(struct fb_modes_req));
-    CHECK_EQ(4, _Alignof(struct fb_modes_req));
-    CHECK_EQ(12, sizeof(struct fb_set_mode_req));
-    CHECK_EQ(32, sizeof(struct fb_state));
+    assert_eq(20, sizeof(struct fb_info));
+    assert_eq(332, sizeof(struct fb_modes_req));
+    assert_eq(4, _Alignof(struct fb_modes_req));
+    assert_eq(12, sizeof(struct fb_set_mode_req));
+    assert_eq(32, sizeof(struct fb_state));
 
     /* 2. struct fb_state member offsets */
-    CHECK_EQ(0, offsetof(struct fb_state, info));
-    CHECK_EQ(20, offsetof(struct fb_state, reserved));
-    CHECK_EQ(24, offsetof(struct fb_state, generation));
+    assert_eq(0, offsetof(struct fb_state, info));
+    assert_eq(20, offsetof(struct fb_state, reserved));
+    assert_eq(24, offsetof(struct fb_state, generation));
 
     /* 3. Original fb_info field order and offsets */
-    CHECK_EQ(0, offsetof(struct fb_info, width));
-    CHECK_EQ(4, offsetof(struct fb_info, height));
-    CHECK_EQ(8, offsetof(struct fb_info, stride));
-    CHECK_EQ(12, offsetof(struct fb_info, bpp));
-    CHECK_EQ(16, offsetof(struct fb_info, format));
+    assert_eq(0, offsetof(struct fb_info, width));
+    assert_eq(4, offsetof(struct fb_info, height));
+    assert_eq(8, offsetof(struct fb_info, stride));
+    assert_eq(12, offsetof(struct fb_info, bpp));
+    assert_eq(16, offsetof(struct fb_info, format));
 
     /* 4. struct fb_modes_req member offsets */
-    CHECK_EQ(0, offsetof(struct fb_modes_req, capacity));
-    CHECK_EQ(4, offsetof(struct fb_modes_req, count));
-    CHECK_EQ(8, offsetof(struct fb_modes_req, total));
-    CHECK_EQ(12, offsetof(struct fb_modes_req, modes));
+    assert_eq(0, offsetof(struct fb_modes_req, capacity));
+    assert_eq(4, offsetof(struct fb_modes_req, count));
+    assert_eq(8, offsetof(struct fb_modes_req, total));
+    assert_eq(12, offsetof(struct fb_modes_req, modes));
 
     /* 5. struct fb_set_mode_req member offsets */
-    CHECK_EQ(0, offsetof(struct fb_set_mode_req, width));
-    CHECK_EQ(4, offsetof(struct fb_set_mode_req, height));
-    CHECK_EQ(8, offsetof(struct fb_set_mode_req, bpp));
+    assert_eq(0, offsetof(struct fb_set_mode_req, width));
+    assert_eq(4, offsetof(struct fb_set_mode_req, height));
+    assert_eq(8, offsetof(struct fb_set_mode_req, bpp));
 
     /* 6. Five ioctl command numbers */
-    CHECK_EQ(0x00004601, FBIOSURRENDER);
-    CHECK_EQ(0x00004602, FBIOGET_MODES);
-    CHECK_EQ(0x00004603, FBIOSET_MODE);
-    CHECK_EQ(0x00004604, FBIOGET_CURR_MODE);
-    CHECK_EQ(0x00004605, FBIOGET_STATE);
+    assert_eq(0x00004601, FBIOSURRENDER);
+    assert_eq(0x00004602, FBIOGET_MODES);
+    assert_eq(0x00004603, FBIOSET_MODE);
+    assert_eq(0x00004604, FBIOGET_CURR_MODE);
+    assert_eq(0x00004605, FBIOGET_STATE);
 
     /* 7. Constants */
-    CHECK_EQ(16, FB_MAX_MODES);
-    CHECK_EQ(0, FB_FORMAT_RGB32);
+    assert_eq(16, FB_MAX_MODES);
+    assert_eq(0, FB_FORMAT_RGB32);
 }
 
 TEST_LIST_BEGIN
@@ -82,9 +58,5 @@ TEST_LIST_END
 
 int main(void) {
     RUN_ALL_TESTS();
-    if (g_failed > 0) {
-        printf("test_fb_uapi: %d failures\n", g_failed);
-        return 1;
-    }
-    return 0;
+    return __test_stats.failed > 0 ? 1 : 0;
 }
