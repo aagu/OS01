@@ -18,7 +18,8 @@
  *   3. begin() and end() are strictly paired, in the same scope, never
  *      nested, and never end() without begin();
  *   4. the caller serialises the pair (the boot logo holds Pos.lock across
- *      it), so no implementation may assume re-entrancy.
+ *      it), so no implementation may assume re-entrancy;
+ *   5. the view is INVALID unless begin() returned 0; zero-initialise it first.
  */
 struct fb_write_view {
     /* Arch-private storage owned by the view.  The x86_64 override keeps
