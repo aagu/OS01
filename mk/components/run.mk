@@ -445,7 +445,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_timing
+TEST_HARNESS_MODULES := qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_timing
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1357,6 +1357,35 @@ endif
 test-syscall:
 	$(call require_capability,rootfs)
 	$(MAKE) OS01_SYSTEST=1 test-qemu SUITE=systest
+
+# ── Matrix Parallel Preparation & Isolated Execution (Task C5) ────────
+.PHONY: _test-suite-prepare _test-suite-run
+
+_test-suite-prepare:
+	$(call require_capability,rootfs)
+	@if [ -z "$(SUITE_ID)" ] || [ -z "$(PREPARED_MANIFEST)" ]; then \
+	  echo "ERROR: _test-suite-prepare requires SUITE_ID=<id> and PREPARED_MANIFEST=<path>" >&2; exit 2; \
+	fi
+	@$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE_ID)) image
+	python3 qemutests/run_suite_matrix.py prepare \
+	  --suite-id "$(SUITE_ID)" \
+	  --manifest "$(PREPARED_MANIFEST)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" \
+	  --profile "$(PROFILE)" \
+	  --image "$(TEST_QEMU_IMG_$(SUITE_ID))" \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --variant "$(if $(TEST_QEMU_FLAVOR_$(SUITE_ID)),$(SUITE_ID),none)"
+
+# _test-suite-run has NO build prerequisites (no compiler, no image, no sysroot)
+_test-suite-run:
+	@if [ -z "$(PREPARED_MANIFEST)" ] || [ -z "$(RUN_CONFIG)" ]; then \
+	  echo "ERROR: _test-suite-run requires PREPARED_MANIFEST=<path> and RUN_CONFIG=<id>" >&2; exit 2; \
+	fi
+	python3 qemutests/run_suite_matrix.py run \
+	  --manifest "$(PREPARED_MANIFEST)" \
+	  --config "$(RUN_CONFIG)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" \
+	  --profile "$(PROFILE)"
 
 # test-static = the umbrella: runs every static audit in one shot.
 # Delegates the 4 runtime-audit checks + validate-kernel to test-runtime
