@@ -1,0 +1,3787 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "memory.aarch64.arch_vmm_init",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_arch_vmm_init.elf",
+      "assertions": [
+        "test_aarch64_arch_vmm_init passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_arch_vmm_init"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_arch_vmm_init.c",
+        "selector": "test_aarch64_arch_vmm_init",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module arch_vmm_init behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.backend_4k",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_backend_4k.elf",
+      "assertions": [
+        "test_aarch64_backend_4k passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_backend_4k"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_backend_4k.c",
+        "selector": "test_aarch64_backend_4k",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module backend_4k behavior"
+      }
+    },
+    {
+      "id": "libc.aarch64.color_printk_abi",
+      "component": "libc",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_color_printk_abi.elf",
+      "assertions": [
+        "test_aarch64_color_printk_abi passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_color_printk_abi"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_color_printk_abi.c",
+        "selector": "test_aarch64_color_printk_abi",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module color_printk_abi behavior"
+      }
+    },
+    {
+      "id": "intr.aarch64.gic_target_probe",
+      "component": "intr",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_gic_target_probe.elf",
+      "assertions": [
+        "test_aarch64_gic_target_probe passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_gic_target_probe"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_gic_target_probe.c",
+        "selector": "test_aarch64_gic_target_probe",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module gic_target_probe behavior"
+      }
+    },
+    {
+      "id": "intr.aarch64.ipi_broadcast",
+      "component": "intr",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_ipi_broadcast.elf",
+      "assertions": [
+        "test_aarch64_ipi_broadcast passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_ipi_broadcast"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_ipi_broadcast.c",
+        "selector": "test_aarch64_ipi_broadcast",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module ipi_broadcast behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.pt_2m_block",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_pt_2m_block.elf",
+      "assertions": [
+        "test_aarch64_pt_2m_block passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_pt_2m_block"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_pt_2m_block.c",
+        "selector": "test_aarch64_pt_2m_block",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module pt_2m_block behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.pt_locks",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_pt_locks.elf",
+      "assertions": [
+        "test_aarch64_pt_locks passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_pt_locks"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_pt_locks.c",
+        "selector": "test_aarch64_pt_locks",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module pt_locks behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.pt_root_publish",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_pt_root_publish.elf",
+      "assertions": [
+        "test_aarch64_pt_root_publish passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_pt_root_publish"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_pt_root_publish.c",
+        "selector": "test_aarch64_pt_root_publish",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module pt_root_publish behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.pt_software_bits",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_pt_software_bits.elf",
+      "assertions": [
+        "test_aarch64_pt_software_bits passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_pt_software_bits"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_pt_software_bits.c",
+        "selector": "test_aarch64_pt_software_bits",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module pt_software_bits behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.pt_split",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_pt_split.elf",
+      "assertions": [
+        "test_aarch64_pt_split passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_pt_split"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_pt_split.c",
+        "selector": "test_aarch64_pt_split",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module pt_split behavior"
+      }
+    },
+    {
+      "id": "memory.aarch64.scratch_probe_logic",
+      "component": "memory",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_scratch_probe_logic.elf",
+      "assertions": [
+        "test_aarch64_scratch_probe_logic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_scratch_probe_logic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_scratch_probe_logic.c",
+        "selector": "test_aarch64_scratch_probe_logic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module scratch_probe_logic behavior"
+      }
+    },
+    {
+      "id": "intr.aarch64.sync_fault",
+      "component": "intr",
+      "behavior": "aarch64",
+      "trigger": "host runner invokes test_aarch64_sync_fault.elf",
+      "assertions": [
+        "test_aarch64_sync_fault passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_aarch64_sync_fault"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_sync_fault.c",
+        "selector": "test_aarch64_sync_fault",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module sync_fault behavior"
+      }
+    },
+    {
+      "id": "drivers.ahci.lifecycle",
+      "component": "drivers",
+      "behavior": "ahci",
+      "trigger": "host runner invokes test_ahci_lifecycle.elf",
+      "assertions": [
+        "test_ahci_lifecycle passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_ahci_lifecycle"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_ahci_lifecycle.c",
+        "selector": "test_ahci_lifecycle",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module lifecycle behavior"
+      }
+    },
+    {
+      "id": "sched.ap.work_protocol",
+      "component": "sched",
+      "behavior": "ap",
+      "trigger": "host runner invokes test_ap_work_protocol.elf",
+      "assertions": [
+        "test_ap_work_protocol passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_ap_work_protocol"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_ap_work_protocol.c",
+        "selector": "test_ap_work_protocol",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module work_protocol behavior"
+      }
+    },
+    {
+      "id": "memory.arena.2gib_boundary",
+      "component": "memory",
+      "behavior": "arena",
+      "trigger": "host runner invokes test_arena_2gib_boundary.elf",
+      "assertions": [
+        "test_arena_2gib_boundary passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_arena_2gib_boundary"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_arena_2gib_boundary.c",
+        "selector": "test_arena_2gib_boundary",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module 2gib_boundary behavior"
+      }
+    },
+    {
+      "id": "memory.arena.candidate_slab_bytes",
+      "component": "memory",
+      "behavior": "arena",
+      "trigger": "host runner invokes test_arena_candidate_slab_bytes.elf",
+      "assertions": [
+        "test_arena_candidate_slab_bytes passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_arena_candidate_slab_bytes"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_arena_candidate_slab_bytes.c",
+        "selector": "test_arena_candidate_slab_bytes",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module candidate_slab_bytes behavior"
+      }
+    },
+    {
+      "id": "memory.arena.layout_chain",
+      "component": "memory",
+      "behavior": "arena",
+      "trigger": "host runner invokes test_arena_layout_chain.elf",
+      "assertions": [
+        "test_arena_layout_chain passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_arena_layout_chain"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_arena_layout_chain.c",
+        "selector": "test_arena_layout_chain",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module layout_chain behavior"
+      }
+    },
+    {
+      "id": "memory.arena.table_base_shift",
+      "component": "memory",
+      "behavior": "arena",
+      "trigger": "host runner invokes test_arena_table_base_shift.elf",
+      "assertions": [
+        "test_arena_table_base_shift passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_arena_table_base_shift"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_arena_table_base_shift.c",
+        "selector": "test_arena_table_base_shift",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_base_shift behavior"
+      }
+    },
+    {
+      "id": "display.bga.non_x86",
+      "component": "display",
+      "behavior": "bga",
+      "trigger": "host runner invokes test_bga_non_x86.elf",
+      "assertions": [
+        "test_bga_non_x86 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_bga_non_x86"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_bga_non_x86.c",
+        "selector": "test_bga_non_x86",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module non_x86 behavior"
+      }
+    },
+    {
+      "id": "display.bga.resolution",
+      "component": "display",
+      "behavior": "bga",
+      "trigger": "host runner invokes test_bga_resolution.elf",
+      "assertions": [
+        "test_bga_resolution passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_bga_resolution"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_bga_resolution.c",
+        "selector": "test_bga_resolution",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module resolution behavior"
+      }
+    },
+    {
+      "id": "drivers.block.device_ops",
+      "component": "drivers",
+      "behavior": "block",
+      "trigger": "host runner invokes test_block_device_ops.elf",
+      "assertions": [
+        "test_block_device_ops passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_block_device_ops"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_block_device_ops.c",
+        "selector": "test_block_device_ops",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module device_ops behavior"
+      }
+    },
+    {
+      "id": "framework.bootinfo.abi",
+      "component": "framework",
+      "behavior": "bootinfo",
+      "trigger": "host runner invokes test_bootinfo_abi.elf",
+      "assertions": [
+        "test_bootinfo_abi passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_bootinfo_abi"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_bootinfo_abi.c",
+        "selector": "test_bootinfo_abi",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying framework module abi behavior"
+      }
+    },
+    {
+      "id": "memory.brk.pages",
+      "component": "memory",
+      "behavior": "brk",
+      "trigger": "host runner invokes test_brk_pages.elf",
+      "assertions": [
+        "test_brk_pages passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_brk_pages"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_brk_pages.c",
+        "selector": "test_brk_pages",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module pages behavior"
+      }
+    },
+    {
+      "id": "fs.canon.contract",
+      "component": "fs",
+      "behavior": "canon",
+      "trigger": "host runner invokes test_canon.elf",
+      "assertions": [
+        "test_canon passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_canon"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_canon.c",
+        "selector": "test_canon",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module contract behavior"
+      }
+    },
+    {
+      "id": "sched.clocksource.contract",
+      "component": "sched",
+      "behavior": "clocksource",
+      "trigger": "host runner invokes test_clocksource.elf",
+      "assertions": [
+        "test_clocksource passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_clocksource"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_clocksource.c",
+        "selector": "test_clocksource",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module contract behavior"
+      }
+    },
+    {
+      "id": "sched.compat.linux",
+      "component": "sched",
+      "behavior": "compat",
+      "trigger": "host runner invokes test_compat_linux.elf",
+      "assertions": [
+        "test_compat_linux passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_compat_linux"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_compat_linux.c",
+        "selector": "test_compat_linux",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module linux behavior"
+      }
+    },
+    {
+      "id": "gui.desktop.audit",
+      "component": "gui",
+      "behavior": "desktop",
+      "trigger": "host runner invokes test_desktop_audit.elf",
+      "assertions": [
+        "test_desktop_audit passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_desktop_audit"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_desktop_audit.c",
+        "selector": "test_desktop_audit",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module audit behavior"
+      }
+    },
+    {
+      "id": "gui.desktop.shell",
+      "component": "gui",
+      "behavior": "desktop",
+      "trigger": "host runner invokes test_desktop_shell.elf",
+      "assertions": [
+        "test_desktop_shell passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_desktop_shell"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_desktop_shell.c",
+        "selector": "test_desktop_shell",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module shell behavior"
+      }
+    },
+    {
+      "id": "gui.desktop.state",
+      "component": "gui",
+      "behavior": "desktop",
+      "trigger": "host runner invokes test_desktop_state.elf",
+      "assertions": [
+        "test_desktop_state passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_desktop_state"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_desktop_state.c",
+        "selector": "test_desktop_state",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module state behavior"
+      }
+    },
+    {
+      "id": "fs.devfs.input_dispatch",
+      "component": "fs",
+      "behavior": "devfs",
+      "trigger": "host runner invokes test_devfs_input_dispatch.elf",
+      "assertions": [
+        "test_devfs_input_dispatch passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_devfs_input_dispatch"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_devfs_input_dispatch.c",
+        "selector": "test_devfs_input_dispatch",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module input_dispatch behavior"
+      }
+    },
+    {
+      "id": "drivers.device.boot",
+      "component": "drivers",
+      "behavior": "device",
+      "trigger": "host runner invokes test_device_boot.elf",
+      "assertions": [
+        "test_device_boot passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_device_boot"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_device_boot.c",
+        "selector": "test_device_boot",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module boot behavior"
+      }
+    },
+    {
+      "id": "display.display.owner",
+      "component": "display",
+      "behavior": "display",
+      "trigger": "host runner invokes test_display_owner.elf",
+      "assertions": [
+        "test_display_owner passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_display_owner"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_display_owner.c",
+        "selector": "test_display_owner",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module owner behavior"
+      }
+    },
+    {
+      "id": "sched.double.state_publish",
+      "component": "sched",
+      "behavior": "double",
+      "trigger": "host runner invokes test_double_state_publish.elf",
+      "assertions": [
+        "test_double_state_publish passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_double_state_publish"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_double_state_publish.c",
+        "selector": "test_double_state_publish",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module state_publish behavior"
+      }
+    },
+    {
+      "id": "net.e1000.instances",
+      "component": "net",
+      "behavior": "e1000",
+      "trigger": "host runner invokes test_e1000_instances.elf",
+      "assertions": [
+        "test_e1000_instances passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_e1000_instances"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_e1000_instances.c",
+        "selector": "test_e1000_instances",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying net module instances behavior"
+      }
+    },
+    {
+      "id": "memory.early.arena",
+      "component": "memory",
+      "behavior": "early",
+      "trigger": "host runner invokes test_early_arena.elf",
+      "assertions": [
+        "test_early_arena passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_early_arena"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_early_arena.c",
+        "selector": "test_early_arena",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module arena behavior"
+      }
+    },
+    {
+      "id": "memory.early.arena_exhaust",
+      "component": "memory",
+      "behavior": "early",
+      "trigger": "host runner invokes test_early_arena_exhaust.elf",
+      "assertions": [
+        "test_early_arena_exhaust passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_early_arena_exhaust"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_early_arena_exhaust.c",
+        "selector": "test_early_arena_exhaust",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module arena_exhaust behavior"
+      }
+    },
+    {
+      "id": "fs.elf.layout",
+      "component": "fs",
+      "behavior": "elf",
+      "trigger": "host runner invokes test_elf_layout.elf",
+      "assertions": [
+        "test_elf_layout passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_elf_layout"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_elf_layout.c",
+        "selector": "test_elf_layout",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module layout behavior"
+      }
+    },
+    {
+      "id": "fs.elf.load_4k",
+      "component": "fs",
+      "behavior": "elf",
+      "trigger": "host runner invokes test_elf_load_4k.elf",
+      "assertions": [
+        "test_elf_load_4k passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_elf_load_4k"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_elf_load_4k.c",
+        "selector": "test_elf_load_4k",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module load_4k behavior"
+      }
+    },
+    {
+      "id": "fs.elf.validate",
+      "component": "fs",
+      "behavior": "elf",
+      "trigger": "host runner invokes test_elf_validate.elf",
+      "assertions": [
+        "test_elf_validate passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_elf_validate"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_elf_validate.c",
+        "selector": "test_elf_validate",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module validate behavior"
+      }
+    },
+    {
+      "id": "fs.fat32.basic",
+      "component": "fs",
+      "behavior": "fat32",
+      "trigger": "host runner invokes test_fat32_basic.elf",
+      "assertions": [
+        "test_fat32_basic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fat32_basic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fat32_basic.c",
+        "selector": "test_fat32_basic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module basic behavior"
+      }
+    },
+    {
+      "id": "display.fb.resolution_hooks",
+      "component": "display",
+      "behavior": "fb",
+      "trigger": "host runner invokes test_fb_resolution_hooks.elf",
+      "assertions": [
+        "test_fb_resolution_hooks passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fb_resolution_hooks"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fb_resolution_hooks.c",
+        "selector": "test_fb_resolution_hooks",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module resolution_hooks behavior"
+      }
+    },
+    {
+      "id": "display.fb.resolution_ioctl",
+      "component": "display",
+      "behavior": "fb",
+      "trigger": "host runner invokes test_fb_resolution_ioctl.elf",
+      "assertions": [
+        "test_fb_resolution_ioctl passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fb_resolution_ioctl"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fb_resolution_ioctl.c",
+        "selector": "test_fb_resolution_ioctl",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module resolution_ioctl behavior"
+      }
+    },
+    {
+      "id": "display.fb.state",
+      "component": "display",
+      "behavior": "fb",
+      "trigger": "host runner invokes test_fb_state.elf",
+      "assertions": [
+        "test_fb_state passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fb_state"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fb_state.c",
+        "selector": "test_fb_state",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module state behavior"
+      }
+    },
+    {
+      "id": "display.fb.uapi",
+      "component": "display",
+      "behavior": "fb",
+      "trigger": "host runner invokes test_fb_uapi.elf",
+      "assertions": [
+        "test_fb_uapi passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fb_uapi"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fb_uapi.c",
+        "selector": "test_fb_uapi",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module uapi behavior"
+      }
+    },
+    {
+      "id": "display.fb.writers",
+      "component": "display",
+      "behavior": "fb",
+      "trigger": "host runner invokes test_fb_writers.elf",
+      "assertions": [
+        "test_fb_writers passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fb_writers"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fb_writers.c",
+        "selector": "test_fb_writers",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module writers behavior"
+      }
+    },
+    {
+      "id": "sched.fork.user_map",
+      "component": "sched",
+      "behavior": "fork",
+      "trigger": "host runner invokes test_fork_user_map.elf",
+      "assertions": [
+        "test_fork_user_map passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_fork_user_map"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_fork_user_map.c",
+        "selector": "test_fork_user_map",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module user_map behavior"
+      }
+    },
+    {
+      "id": "memory.foundational.primitives",
+      "component": "memory",
+      "behavior": "foundational",
+      "trigger": "host runner invokes test_foundational_primitives.elf",
+      "assertions": [
+        "test_foundational_primitives passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_foundational_primitives"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_foundational_primitives.c",
+        "selector": "test_foundational_primitives",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module primitives behavior"
+      }
+    },
+    {
+      "id": "framework.framework.contract",
+      "component": "framework",
+      "behavior": "framework",
+      "trigger": "host runner invokes test_framework_contract.elf",
+      "assertions": [
+        "test_framework_contract passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_framework_contract"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_framework_contract.c",
+        "selector": "test_framework_contract",
+        "evidence": "EXIT_1"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying framework module contract behavior"
+      }
+    },
+    {
+      "id": "display.gfx.client",
+      "component": "display",
+      "behavior": "gfx",
+      "trigger": "host runner invokes test_gfx_client.elf",
+      "assertions": [
+        "test_gfx_client passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gfx_client"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gfx_client.c",
+        "selector": "test_gfx_client",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module client behavior"
+      }
+    },
+    {
+      "id": "display.gfx.device",
+      "component": "display",
+      "behavior": "gfx",
+      "trigger": "host runner invokes test_gfx_device.elf",
+      "assertions": [
+        "test_gfx_device passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gfx_device"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gfx_device.c",
+        "selector": "test_gfx_device",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module device behavior"
+      }
+    },
+    {
+      "id": "display.gfx.fault_bridge",
+      "component": "display",
+      "behavior": "gfx",
+      "trigger": "host runner invokes test_gfx_fault_bridge.elf",
+      "assertions": [
+        "test_gfx_fault_bridge passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gfx_fault_bridge"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gfx_fault_bridge.c",
+        "selector": "test_gfx_fault_bridge",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module fault_bridge behavior"
+      }
+    },
+    {
+      "id": "display.gfx.file_lifecycle",
+      "component": "display",
+      "behavior": "gfx",
+      "trigger": "host runner invokes test_gfx_file_lifecycle.elf",
+      "assertions": [
+        "test_gfx_file_lifecycle passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gfx_file_lifecycle"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gfx_file_lifecycle.c",
+        "selector": "test_gfx_file_lifecycle",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module file_lifecycle behavior"
+      }
+    },
+    {
+      "id": "gui.gfx.input",
+      "component": "gui",
+      "behavior": "gfx",
+      "trigger": "host runner invokes test_gfx_input.elf",
+      "assertions": [
+        "test_gfx_input passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gfx_input"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gfx_input.c",
+        "selector": "test_gfx_input",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module input behavior"
+      }
+    },
+    {
+      "id": "display.gfx.primitives",
+      "component": "display",
+      "behavior": "gfx",
+      "trigger": "host runner invokes test_gfx_primitives.elf",
+      "assertions": [
+        "test_gfx_primitives passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gfx_primitives"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gfx_primitives.c",
+        "selector": "test_gfx_primitives",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module primitives behavior"
+      }
+    },
+    {
+      "id": "intr.gic.driver",
+      "component": "intr",
+      "behavior": "gic",
+      "trigger": "host runner invokes test_gic_driver.elf",
+      "assertions": [
+        "test_gic_driver passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gic_driver"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gic_driver.c",
+        "selector": "test_gic_driver",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module driver behavior"
+      }
+    },
+    {
+      "id": "intr.gic.marker_lines",
+      "component": "intr",
+      "behavior": "gic",
+      "trigger": "host runner invokes test_gic_marker_lines.elf",
+      "assertions": [
+        "test_gic_marker_lines passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gic_marker_lines"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gic_marker_lines.c",
+        "selector": "test_gic_marker_lines",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module marker_lines behavior"
+      }
+    },
+    {
+      "id": "intr.gic.probe",
+      "component": "intr",
+      "behavior": "gic",
+      "trigger": "host runner invokes test_gic_probe.elf",
+      "assertions": [
+        "test_gic_probe passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gic_probe"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gic_probe.c",
+        "selector": "test_gic_probe",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module probe behavior"
+      }
+    },
+    {
+      "id": "gui.gui.input_decode",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_input_decode.elf",
+      "assertions": [
+        "test_gui_input_decode passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_input_decode"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_input_decode.c",
+        "selector": "test_gui_input_decode",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module input_decode behavior"
+      }
+    },
+    {
+      "id": "gui.gui.input_lvgl",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_input_lvgl.elf",
+      "assertions": [
+        "test_gui_input_lvgl passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_input_lvgl"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_input_lvgl.c",
+        "selector": "test_gui_input_lvgl",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module input_lvgl behavior"
+      }
+    },
+    {
+      "id": "gui.gui.input_nonce",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_input_nonce.elf",
+      "assertions": [
+        "test_gui_input_nonce passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_input_nonce"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_input_nonce.c",
+        "selector": "test_gui_input_nonce",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module input_nonce behavior"
+      }
+    },
+    {
+      "id": "gui.gui.input_platform",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_input_platform.elf",
+      "assertions": [
+        "test_gui_input_platform passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_input_platform"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_input_platform.c",
+        "selector": "test_gui_input_platform",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module input_platform behavior"
+      }
+    },
+    {
+      "id": "gui.gui.lvgl_integration",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_lvgl_integration.elf",
+      "assertions": [
+        "test_gui_lvgl_integration passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_lvgl_integration"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_lvgl_integration.c",
+        "selector": "test_gui_lvgl_integration",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module lvgl_integration behavior"
+      }
+    },
+    {
+      "id": "gui.gui.platform",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_platform.elf",
+      "assertions": [
+        "test_gui_platform passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_platform"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_platform.c",
+        "selector": "test_gui_platform",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module platform behavior"
+      }
+    },
+    {
+      "id": "gui.gui.theme",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_theme.elf",
+      "assertions": [
+        "test_gui_theme passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_theme"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_theme.c",
+        "selector": "test_gui_theme",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module theme behavior"
+      }
+    },
+    {
+      "id": "gui.gui.theme_apply",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_theme_apply.elf",
+      "assertions": [
+        "test_gui_theme_apply passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_theme_apply"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_theme_apply.c",
+        "selector": "test_gui_theme_apply",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module theme_apply behavior"
+      }
+    },
+    {
+      "id": "gui.gui.widget",
+      "component": "gui",
+      "behavior": "gui",
+      "trigger": "host runner invokes test_gui_widget.elf",
+      "assertions": [
+        "test_gui_widget passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_gui_widget"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_gui_widget.c",
+        "selector": "test_gui_widget",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module widget behavior"
+      }
+    },
+    {
+      "id": "drivers.i8042.demux",
+      "component": "drivers",
+      "behavior": "i8042",
+      "trigger": "host runner invokes test_i8042_demux.elf",
+      "assertions": [
+        "test_i8042_demux passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_i8042_demux"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_i8042_demux.c",
+        "selector": "test_i8042_demux",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module demux behavior"
+      }
+    },
+    {
+      "id": "gui.input.ps2_frame",
+      "component": "gui",
+      "behavior": "input",
+      "trigger": "host runner invokes test_input_ps2_frame.elf",
+      "assertions": [
+        "test_input_ps2_frame passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_input_ps2_frame"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_input_ps2_frame.c",
+        "selector": "test_input_ps2_frame",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module ps2_frame behavior"
+      }
+    },
+    {
+      "id": "gui.input.route",
+      "component": "gui",
+      "behavior": "input",
+      "trigger": "host runner invokes test_input_route.elf",
+      "assertions": [
+        "test_input_route passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_input_route"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_input_route.c",
+        "selector": "test_input_route",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module route behavior"
+      }
+    },
+    {
+      "id": "intr.intr.backend_aarch64",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_intr_backend_aarch64.elf",
+      "assertions": [
+        "test_intr_backend_aarch64 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_intr_backend_aarch64"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_intr_backend_aarch64.c",
+        "selector": "test_intr_backend_aarch64",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module backend_aarch64 behavior"
+      }
+    },
+    {
+      "id": "intr.intr.backend_x86",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_intr_backend_x86.elf",
+      "assertions": [
+        "test_intr_backend_x86 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_intr_backend_x86"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_intr_backend_x86.c",
+        "selector": "test_intr_backend_x86",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module backend_x86 behavior"
+      }
+    },
+    {
+      "id": "intr.intr.decode_aarch64",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_intr_decode_aarch64.elf",
+      "assertions": [
+        "test_intr_decode_aarch64 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_intr_decode_aarch64"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_intr_decode_aarch64.c",
+        "selector": "test_intr_decode_aarch64",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module decode_aarch64 behavior"
+      }
+    },
+    {
+      "id": "intr.intr.decode_x86",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_intr_decode_x86.elf",
+      "assertions": [
+        "test_intr_decode_x86 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_intr_decode_x86"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_intr_decode_x86.c",
+        "selector": "test_intr_decode_x86",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module decode_x86 behavior"
+      }
+    },
+    {
+      "id": "intr.intr.dispatch",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_intr_dispatch.elf",
+      "assertions": [
+        "test_intr_dispatch passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_intr_dispatch"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_intr_dispatch.c",
+        "selector": "test_intr_dispatch",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module dispatch behavior"
+      }
+    },
+    {
+      "id": "intr.intr.irq_x86",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_intr_irq_x86.elf",
+      "assertions": [
+        "test_intr_irq_x86 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_intr_irq_x86"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_intr_irq_x86.c",
+        "selector": "test_intr_irq_x86",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module irq_x86 behavior"
+      }
+    },
+    {
+      "id": "intr.lapic.nmi",
+      "component": "intr",
+      "behavior": "lapic",
+      "trigger": "host runner invokes test_lapic_nmi.elf",
+      "assertions": [
+        "test_lapic_nmi passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_lapic_nmi"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_lapic_nmi.c",
+        "selector": "test_lapic_nmi",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module nmi behavior"
+      }
+    },
+    {
+      "id": "libc.libc.fflush",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_fflush.elf",
+      "assertions": [
+        "test_libc_fflush passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_fflush"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_fflush.c",
+        "selector": "test_libc_fflush",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module fflush behavior"
+      }
+    },
+    {
+      "id": "libc.libc.fread_fwrite_validate",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_fread_fwrite_validate.elf",
+      "assertions": [
+        "test_libc_fread_fwrite_validate passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_fread_fwrite_validate"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_fread_fwrite_validate.c",
+        "selector": "test_libc_fread_fwrite_validate",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module fread_fwrite_validate behavior"
+      }
+    },
+    {
+      "id": "libc.libc.getopt",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_getopt.elf",
+      "assertions": [
+        "test_libc_getopt passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_getopt"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_getopt.c",
+        "selector": "test_libc_getopt",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module getopt behavior"
+      }
+    },
+    {
+      "id": "libc.libc.list",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_list.elf",
+      "assertions": [
+        "test_libc_list passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_list"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_list.c",
+        "selector": "test_libc_list",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module list behavior"
+      }
+    },
+    {
+      "id": "libc.libc.stdio_registry",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_stdio_registry.elf",
+      "assertions": [
+        "test_libc_stdio_registry passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_stdio_registry"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_stdio_registry.c",
+        "selector": "test_libc_stdio_registry",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module stdio_registry behavior"
+      }
+    },
+    {
+      "id": "libc.libc.string",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_string.elf",
+      "assertions": [
+        "test_libc_string passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_string"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_string.c",
+        "selector": "test_libc_string",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module string behavior"
+      }
+    },
+    {
+      "id": "libc.libc.vsprintf",
+      "component": "libc",
+      "behavior": "libc",
+      "trigger": "host runner invokes test_libc_vsprintf.elf",
+      "assertions": [
+        "test_libc_vsprintf passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_libc_vsprintf"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_libc_vsprintf.c",
+        "selector": "test_libc_vsprintf",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying libc module vsprintf behavior"
+      }
+    },
+    {
+      "id": "net.lwip.rand",
+      "component": "net",
+      "behavior": "lwip",
+      "trigger": "host runner invokes test_lwip_rand.elf",
+      "assertions": [
+        "test_lwip_rand passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_lwip_rand"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_lwip_rand.c",
+        "selector": "test_lwip_rand",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying net module rand behavior"
+      }
+    },
+    {
+      "id": "monitor.monitor.accounting",
+      "component": "monitor",
+      "behavior": "monitor",
+      "trigger": "host runner invokes test_monitor_accounting.elf",
+      "assertions": [
+        "test_monitor_accounting passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_monitor_accounting"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_monitor_accounting.c",
+        "selector": "test_monitor_accounting",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module accounting behavior"
+      }
+    },
+    {
+      "id": "monitor.monitor.collect",
+      "component": "monitor",
+      "behavior": "monitor",
+      "trigger": "host runner invokes test_monitor_collect.elf",
+      "assertions": [
+        "test_monitor_collect passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_monitor_collect"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_monitor_collect.c",
+        "selector": "test_monitor_collect",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module collect behavior"
+      }
+    },
+    {
+      "id": "monitor.monitor.file",
+      "component": "monitor",
+      "behavior": "monitor",
+      "trigger": "host runner invokes test_monitor_file.elf",
+      "assertions": [
+        "test_monitor_file passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_monitor_file"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_monitor_file.c",
+        "selector": "test_monitor_file",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module file behavior"
+      }
+    },
+    {
+      "id": "monitor.monitor.model",
+      "component": "monitor",
+      "behavior": "monitor",
+      "trigger": "host runner invokes test_monitor_model.elf",
+      "assertions": [
+        "test_monitor_model passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_monitor_model"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_monitor_model.c",
+        "selector": "test_monitor_model",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module model behavior"
+      }
+    },
+    {
+      "id": "monitor.monitor.pmm",
+      "component": "monitor",
+      "behavior": "monitor",
+      "trigger": "host runner invokes test_monitor_pmm.elf",
+      "assertions": [
+        "test_monitor_pmm passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_monitor_pmm"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_monitor_pmm.c",
+        "selector": "test_monitor_pmm",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module pmm behavior"
+      }
+    },
+    {
+      "id": "monitor.monitor.render",
+      "component": "monitor",
+      "behavior": "monitor",
+      "trigger": "host runner invokes test_monitor_render.elf",
+      "assertions": [
+        "test_monitor_render passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_monitor_render"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_monitor_render.c",
+        "selector": "test_monitor_render",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module render behavior"
+      }
+    },
+    {
+      "id": "drivers.mouse.init",
+      "component": "drivers",
+      "behavior": "mouse",
+      "trigger": "host runner invokes test_mouse_init.elf",
+      "assertions": [
+        "test_mouse_init passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_mouse_init"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_mouse_init.c",
+        "selector": "test_mouse_init",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module init behavior"
+      }
+    },
+    {
+      "id": "drivers.mouse.proto",
+      "component": "drivers",
+      "behavior": "mouse",
+      "trigger": "host runner invokes test_mouse_proto.elf",
+      "assertions": [
+        "test_mouse_proto passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_mouse_proto"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_mouse_proto.c",
+        "selector": "test_mouse_proto",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module proto behavior"
+      }
+    },
+    {
+      "id": "sched.mutex.handshake",
+      "component": "sched",
+      "behavior": "mutex",
+      "trigger": "host runner invokes test_mutex_handshake.elf",
+      "assertions": [
+        "test_mutex_handshake passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_mutex_handshake"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_mutex_handshake.c",
+        "selector": "test_mutex_handshake",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module handshake behavior"
+      }
+    },
+    {
+      "id": "net.net.device",
+      "component": "net",
+      "behavior": "net",
+      "trigger": "host runner invokes test_net_device.elf",
+      "assertions": [
+        "test_net_device passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_net_device"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_net_device.c",
+        "selector": "test_net_device",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying net module device behavior"
+      }
+    },
+    {
+      "id": "net.net.lwip",
+      "component": "net",
+      "behavior": "net",
+      "trigger": "host runner invokes test_net_lwip.elf",
+      "assertions": [
+        "test_net_lwip passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_net_lwip"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_net_lwip.c",
+        "selector": "test_net_lwip",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying net module lwip behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_cleanup",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_cleanup.elf",
+      "assertions": [
+        "test_page_table_cleanup passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_cleanup"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_cleanup.c",
+        "selector": "test_page_table_cleanup",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_cleanup behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_contract",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_contract.elf",
+      "assertions": [
+        "test_page_table_contract passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_contract"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_contract.c",
+        "selector": "test_page_table_contract",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_contract behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_install",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_install.elf",
+      "assertions": [
+        "test_page_table_install passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_install"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_install.c",
+        "selector": "test_page_table_install",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_install behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_layout",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_layout.elf",
+      "assertions": [
+        "test_page_table_layout passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_layout"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_layout.c",
+        "selector": "test_page_table_layout",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_layout behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_publish",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_publish.elf",
+      "assertions": [
+        "test_page_table_publish passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_publish"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_publish.c",
+        "selector": "test_page_table_publish",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_publish behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_reservation",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_reservation.elf",
+      "assertions": [
+        "test_page_table_reservation passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_reservation"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_reservation.c",
+        "selector": "test_page_table_reservation",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_reservation behavior"
+      }
+    },
+    {
+      "id": "framework.page.table_runner",
+      "component": "framework",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_runner.elf",
+      "assertions": [
+        "test_page_table_runner passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_runner"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_runner.c",
+        "selector": "test_page_table_runner",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying framework module table_runner behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_tree",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_tree.elf",
+      "assertions": [
+        "test_page_table_tree passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_tree"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_tree.c",
+        "selector": "test_page_table_tree",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_tree behavior"
+      }
+    },
+    {
+      "id": "memory.page.table_vmm",
+      "component": "memory",
+      "behavior": "page",
+      "trigger": "host runner invokes test_page_table_vmm.elf",
+      "assertions": [
+        "test_page_table_vmm passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_page_table_vmm"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_page_table_vmm.c",
+        "selector": "test_page_table_vmm",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module table_vmm behavior"
+      }
+    },
+    {
+      "id": "drivers.pci.backend_irq",
+      "component": "drivers",
+      "behavior": "pci",
+      "trigger": "host runner invokes test_pci_backend_irq.elf",
+      "assertions": [
+        "test_pci_backend_irq passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_pci_backend_irq"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_pci_backend_irq.c",
+        "selector": "test_pci_backend_irq",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module backend_irq behavior"
+      }
+    },
+    {
+      "id": "drivers.pci.driver_model",
+      "component": "drivers",
+      "behavior": "pci",
+      "trigger": "host runner invokes test_pci_driver_model.elf",
+      "assertions": [
+        "test_pci_driver_model passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_pci_driver_model"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_pci_driver_model.c",
+        "selector": "test_pci_driver_model",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying drivers module driver_model behavior"
+      }
+    },
+    {
+      "id": "sched.percpu.layout",
+      "component": "sched",
+      "behavior": "percpu",
+      "trigger": "host runner invokes test_percpu_layout.elf",
+      "assertions": [
+        "test_percpu_layout passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_percpu_layout"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_percpu_layout.c",
+        "selector": "test_percpu_layout",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module layout behavior"
+      }
+    },
+    {
+      "id": "memory.pmm.basic",
+      "component": "memory",
+      "behavior": "pmm",
+      "trigger": "host runner invokes test_pmm_basic.elf",
+      "assertions": [
+        "test_pmm_basic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_pmm_basic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_pmm_basic.c",
+        "selector": "test_pmm_basic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module basic behavior"
+      }
+    },
+    {
+      "id": "memory.pmm.ram_rel_index",
+      "component": "memory",
+      "behavior": "pmm",
+      "trigger": "host runner invokes test_pmm_ram_rel_index.elf",
+      "assertions": [
+        "test_pmm_ram_rel_index passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_pmm_ram_rel_index"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_pmm_ram_rel_index.c",
+        "selector": "test_pmm_ram_rel_index",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module ram_rel_index behavior"
+      }
+    },
+    {
+      "id": "fs.poll.requested",
+      "component": "fs",
+      "behavior": "poll",
+      "trigger": "host runner invokes test_poll_requested.elf",
+      "assertions": [
+        "test_poll_requested passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_poll_requested"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_poll_requested.c",
+        "selector": "test_poll_requested",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module requested behavior"
+      }
+    },
+    {
+      "id": "fs.poll.waitqueue_handshake",
+      "component": "fs",
+      "behavior": "poll",
+      "trigger": "host runner invokes test_poll_waitqueue_handshake.elf",
+      "assertions": [
+        "test_poll_waitqueue_handshake passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_poll_waitqueue_handshake"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_poll_waitqueue_handshake.c",
+        "selector": "test_poll_waitqueue_handshake",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module waitqueue_handshake behavior"
+      }
+    },
+    {
+      "id": "sched.process.image_lifecycle",
+      "component": "sched",
+      "behavior": "process",
+      "trigger": "host runner invokes test_process_image_lifecycle.elf",
+      "assertions": [
+        "test_process_image_lifecycle passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_process_image_lifecycle"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_process_image_lifecycle.c",
+        "selector": "test_process_image_lifecycle",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module image_lifecycle behavior"
+      }
+    },
+    {
+      "id": "fs.pty.winsize",
+      "component": "fs",
+      "behavior": "pty",
+      "trigger": "host runner invokes test_pty_winsize.elf",
+      "assertions": [
+        "test_pty_winsize passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_pty_winsize"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_pty_winsize.c",
+        "selector": "test_pty_winsize",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module winsize behavior"
+      }
+    },
+    {
+      "id": "framework.runtime.udivti3",
+      "component": "framework",
+      "behavior": "runtime",
+      "trigger": "host runner invokes test_runtime_udivti3.elf",
+      "assertions": [
+        "test_runtime_udivti3 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_runtime_udivti3"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "runtime/selftest/test_udivti3.c",
+        "selector": "test_runtime_udivti3",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying framework module udivti3 behavior"
+      }
+    },
+    {
+      "id": "display.setres.contract",
+      "component": "display",
+      "behavior": "setres",
+      "trigger": "host runner invokes test_setres.elf",
+      "assertions": [
+        "test_setres passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_setres"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_setres.c",
+        "selector": "test_setres",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying display module contract behavior"
+      }
+    },
+    {
+      "id": "memory.slab.basic",
+      "component": "memory",
+      "behavior": "slab",
+      "trigger": "host runner invokes test_slab_basic.elf",
+      "assertions": [
+        "test_slab_basic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_slab_basic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_slab_basic.c",
+        "selector": "test_slab_basic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module basic behavior"
+      }
+    },
+    {
+      "id": "memory.slab.basic_x86_count",
+      "component": "memory",
+      "behavior": "slab",
+      "trigger": "host runner invokes test_slab_basic_x86_count.elf",
+      "assertions": [
+        "test_slab_basic_x86_count passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_slab_basic_x86_count"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_slab_basic_x86_count.c",
+        "selector": "test_slab_basic_x86_count",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module basic_x86_count behavior"
+      }
+    },
+    {
+      "id": "memory.slab.idempotent_reservation",
+      "component": "memory",
+      "behavior": "slab",
+      "trigger": "host runner invokes test_slab_idempotent_reservation.elf",
+      "assertions": [
+        "test_slab_idempotent_reservation passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_slab_idempotent_reservation"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_slab_idempotent_reservation.c",
+        "selector": "test_slab_idempotent_reservation",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module idempotent_reservation behavior"
+      }
+    },
+    {
+      "id": "memory.slab.layout_compute",
+      "component": "memory",
+      "behavior": "slab",
+      "trigger": "host runner invokes test_slab_layout_compute.elf",
+      "assertions": [
+        "test_slab_layout_compute passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_slab_layout_compute"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_slab_layout_compute.c",
+        "selector": "test_slab_layout_compute",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module layout_compute behavior"
+      }
+    },
+    {
+      "id": "memory.slab.lock_path",
+      "component": "memory",
+      "behavior": "slab",
+      "trigger": "host runner invokes test_slab_lock_path.elf",
+      "assertions": [
+        "test_slab_lock_path passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_slab_lock_path"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_slab_lock_path.c",
+        "selector": "test_slab_lock_path",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module lock_path behavior"
+      }
+    },
+    {
+      "id": "sched.smp.starting_gate",
+      "component": "sched",
+      "behavior": "smp",
+      "trigger": "host runner invokes test_smp_starting_gate.elf",
+      "assertions": [
+        "test_smp_starting_gate passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_smp_starting_gate"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_smp_starting_gate.c",
+        "selector": "test_smp_starting_gate",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module starting_gate behavior"
+      }
+    },
+    {
+      "id": "sched.sync.primitives",
+      "component": "sched",
+      "behavior": "sync",
+      "trigger": "host runner invokes test_sync_primitives.elf",
+      "assertions": [
+        "test_sync_primitives passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_sync_primitives"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_sync_primitives.c",
+        "selector": "test_sync_primitives",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module primitives behavior"
+      }
+    },
+    {
+      "id": "sched.syscall.dispatch",
+      "component": "sched",
+      "behavior": "syscall",
+      "trigger": "host runner invokes test_syscall_dispatch.elf",
+      "assertions": [
+        "test_syscall_dispatch passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_syscall_dispatch"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_syscall_dispatch.c",
+        "selector": "test_syscall_dispatch",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "user/systest.c",
+          "selector": "test_syscall_boundary",
+          "evidence": "SYSTEST_PASS",
+          "distinct_risk": "Catches CPU ring3->ring0 SYSCALL/SYSRET context switch register corruption"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module dispatch behavior"
+      }
+    },
+    {
+      "id": "terminal.terminal.core",
+      "component": "terminal",
+      "behavior": "terminal",
+      "trigger": "host runner invokes test_terminal_core.elf",
+      "assertions": [
+        "test_terminal_core passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_terminal_core"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_terminal_core.c",
+        "selector": "test_terminal_core",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "qemutests/run_test.py",
+          "selector": "test_terminal_launch",
+          "evidence": "PASS_MARKER",
+          "distinct_risk": "Verifies VT100 terminal escape sequences rendered to real framebuffer device in guest QEMU"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying terminal module core behavior"
+      }
+    },
+    {
+      "id": "terminal.terminal.display",
+      "component": "terminal",
+      "behavior": "terminal",
+      "trigger": "host runner invokes test_terminal_display.elf",
+      "assertions": [
+        "test_terminal_display passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_terminal_display"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_terminal_display.c",
+        "selector": "test_terminal_display",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "qemutests/run_test.py",
+          "selector": "test_terminal_launch",
+          "evidence": "PASS_MARKER",
+          "distinct_risk": "Verifies VT100 terminal escape sequences rendered to real framebuffer device in guest QEMU"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying terminal module display behavior"
+      }
+    },
+    {
+      "id": "terminal.terminal.render",
+      "component": "terminal",
+      "behavior": "terminal",
+      "trigger": "host runner invokes test_terminal_render.elf",
+      "assertions": [
+        "test_terminal_render passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_terminal_render"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_terminal_render.c",
+        "selector": "test_terminal_render",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "qemutests/run_test.py",
+          "selector": "test_terminal_launch",
+          "evidence": "PASS_MARKER",
+          "distinct_risk": "Verifies VT100 terminal escape sequences rendered to real framebuffer device in guest QEMU"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying terminal module render behavior"
+      }
+    },
+    {
+      "id": "gui.tetris.logic",
+      "component": "gui",
+      "behavior": "tetris",
+      "trigger": "host runner invokes test_tetris_logic.elf",
+      "assertions": [
+        "test_tetris_logic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_tetris_logic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_tetris_logic.c",
+        "selector": "test_tetris_logic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying gui module logic behavior"
+      }
+    },
+    {
+      "id": "monitor.thermal.affinity",
+      "component": "monitor",
+      "behavior": "thermal",
+      "trigger": "host runner invokes test_thermal_affinity.elf",
+      "assertions": [
+        "test_thermal_affinity passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_thermal_affinity"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_thermal_affinity.c",
+        "selector": "test_thermal_affinity",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module affinity behavior"
+      }
+    },
+    {
+      "id": "monitor.thermal.decode",
+      "component": "monitor",
+      "behavior": "thermal",
+      "trigger": "host runner invokes test_thermal_decode.elf",
+      "assertions": [
+        "test_thermal_decode passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_thermal_decode"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_thermal_decode.c",
+        "selector": "test_thermal_decode",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module decode behavior"
+      }
+    },
+    {
+      "id": "monitor.thermal.fixup",
+      "component": "monitor",
+      "behavior": "thermal",
+      "trigger": "host runner invokes test_thermal_fixup.elf",
+      "assertions": [
+        "test_thermal_fixup passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_thermal_fixup"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_thermal_fixup.c",
+        "selector": "test_thermal_fixup",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying monitor module fixup behavior"
+      }
+    },
+    {
+      "id": "intr.tlb.serial_protocol",
+      "component": "intr",
+      "behavior": "tlb",
+      "trigger": "host runner invokes test_tlb_serial_protocol.elf",
+      "assertions": [
+        "test_tlb_serial_protocol passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_tlb_serial_protocol"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_tlb_serial_protocol.c",
+        "selector": "test_tlb_serial_protocol",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module serial_protocol behavior"
+      }
+    },
+    {
+      "id": "terminal.user.log",
+      "component": "terminal",
+      "behavior": "user",
+      "trigger": "host runner invokes test_user_log.elf",
+      "assertions": [
+        "test_user_log passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_user_log"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_user_log.c",
+        "selector": "test_user_log",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "qemutests/run_test.py",
+          "selector": "test_terminal_launch",
+          "evidence": "PASS_MARKER",
+          "distinct_risk": "Verifies VT100 terminal escape sequences rendered to real framebuffer device in guest QEMU"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying terminal module log behavior"
+      }
+    },
+    {
+      "id": "terminal.user.log_off",
+      "component": "terminal",
+      "behavior": "user",
+      "trigger": "host runner invokes test_user_log_off.elf",
+      "assertions": [
+        "test_user_log_off passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_user_log_off"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_user_log.c",
+        "selector": "test_user_log_off",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "qemutests/run_test.py",
+          "selector": "test_terminal_launch",
+          "evidence": "PASS_MARKER",
+          "distinct_risk": "Verifies VT100 terminal escape sequences rendered to real framebuffer device in guest QEMU"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying terminal module log_off behavior"
+      }
+    },
+    {
+      "id": "memory.user.protected_ranges",
+      "component": "memory",
+      "behavior": "user",
+      "trigger": "host runner invokes test_user_protected_ranges.elf",
+      "assertions": [
+        "test_user_protected_ranges passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_user_protected_ranges"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_user_protected_ranges.c",
+        "selector": "test_user_protected_ranges",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module protected_ranges behavior"
+      }
+    },
+    {
+      "id": "memory.user.write_cow",
+      "component": "memory",
+      "behavior": "user",
+      "trigger": "host runner invokes test_user_write_cow.elf",
+      "assertions": [
+        "test_user_write_cow passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_user_write_cow"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_user_write_cow.c",
+        "selector": "test_user_write_cow",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [
+        {
+          "layer": "qemu_e2e",
+          "source": "user/systest.c",
+          "selector": "test_fork_cow",
+          "evidence": "PASS_MARKER",
+          "distinct_risk": "Catches real hardware MMIO page fault delivery and CR3 reload timing not simulated in host memory mocks"
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module write_cow behavior"
+      }
+    },
+    {
+      "id": "fs.vfs.basic",
+      "component": "fs",
+      "behavior": "vfs",
+      "trigger": "host runner invokes test_vfs_basic.elf",
+      "assertions": [
+        "test_vfs_basic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vfs_basic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vfs_basic.c",
+        "selector": "test_vfs_basic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module basic behavior"
+      }
+    },
+    {
+      "id": "fs.vfs.dcache",
+      "component": "fs",
+      "behavior": "vfs",
+      "trigger": "host runner invokes test_vfs_dcache.elf",
+      "assertions": [
+        "test_vfs_dcache passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vfs_dcache"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vfs_dcache.c",
+        "selector": "test_vfs_dcache",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module dcache behavior"
+      }
+    },
+    {
+      "id": "fs.vfs.fs_registry",
+      "component": "fs",
+      "behavior": "vfs",
+      "trigger": "host runner invokes test_vfs_fs_registry.elf",
+      "assertions": [
+        "test_vfs_fs_registry passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vfs_fs_registry"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vfs_fs_registry.c",
+        "selector": "test_vfs_fs_registry",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module fs_registry behavior"
+      }
+    },
+    {
+      "id": "fs.vfs.iops_fops",
+      "component": "fs",
+      "behavior": "vfs",
+      "trigger": "host runner invokes test_vfs_iops_fops.elf",
+      "assertions": [
+        "test_vfs_iops_fops passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vfs_iops_fops"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vfs_iops_fops.c",
+        "selector": "test_vfs_iops_fops",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module iops_fops behavior"
+      }
+    },
+    {
+      "id": "fs.vfs.mount_tree",
+      "component": "fs",
+      "behavior": "vfs",
+      "trigger": "host runner invokes test_vfs_mount_tree.elf",
+      "assertions": [
+        "test_vfs_mount_tree passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vfs_mount_tree"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vfs_mount_tree.c",
+        "selector": "test_vfs_mount_tree",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module mount_tree behavior"
+      }
+    },
+    {
+      "id": "net.virtio.net_instances",
+      "component": "net",
+      "behavior": "virtio",
+      "trigger": "host runner invokes test_virtio_net_instances.elf",
+      "assertions": [
+        "test_virtio_net_instances passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_virtio_net_instances"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_virtio_net_instances.c",
+        "selector": "test_virtio_net_instances",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying net module net_instances behavior"
+      }
+    },
+    {
+      "id": "memory.vmm.ack_wraparound",
+      "component": "memory",
+      "behavior": "vmm",
+      "trigger": "host runner invokes test_vmm_ack_wraparound.elf",
+      "assertions": [
+        "test_vmm_ack_wraparound passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vmm_ack_wraparound"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vmm_ack_wraparound.c",
+        "selector": "test_vmm_ack_wraparound",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module ack_wraparound behavior"
+      }
+    },
+    {
+      "id": "memory.vmm.caller_audit",
+      "component": "memory",
+      "behavior": "vmm",
+      "trigger": "host runner invokes test_vmm_caller_audit.elf",
+      "assertions": [
+        "test_vmm_caller_audit passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vmm_caller_audit"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vmm_caller_audit.c",
+        "selector": "test_vmm_caller_audit",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module caller_audit behavior"
+      }
+    },
+    {
+      "id": "memory.vmm.prot_none",
+      "component": "memory",
+      "behavior": "vmm",
+      "trigger": "host runner invokes test_vmm_prot_none.elf",
+      "assertions": [
+        "test_vmm_prot_none passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vmm_prot_none"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vmm_prot_none.c",
+        "selector": "test_vmm_prot_none",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module prot_none behavior"
+      }
+    },
+    {
+      "id": "memory.vmm.replace_protocol",
+      "component": "memory",
+      "behavior": "vmm",
+      "trigger": "host runner invokes test_vmm_replace_protocol.elf",
+      "assertions": [
+        "test_vmm_replace_protocol passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vmm_replace_protocol"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vmm_replace_protocol.c",
+        "selector": "test_vmm_replace_protocol",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module replace_protocol behavior"
+      }
+    },
+    {
+      "id": "memory.vmm.semantic_header",
+      "component": "memory",
+      "behavior": "vmm",
+      "trigger": "host runner invokes test_vmm_semantic_header.elf",
+      "assertions": [
+        "test_vmm_semantic_header passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_vmm_semantic_header"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_vmm_semantic_header.c",
+        "selector": "test_vmm_semantic_header",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module semantic_header behavior"
+      }
+    },
+    {
+      "id": "sched.wait.basic",
+      "component": "sched",
+      "behavior": "wait",
+      "trigger": "host runner invokes test_wait_basic.elf",
+      "assertions": [
+        "test_wait_basic passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_wait_basic"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_wait_basic.c",
+        "selector": "test_wait_basic",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying sched module basic behavior"
+      }
+    },
+    {
+      "id": "intr.x86.intr_probe",
+      "component": "intr",
+      "behavior": "x86",
+      "trigger": "host runner invokes test_x86_intr_probe.elf",
+      "assertions": [
+        "test_x86_intr_probe passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_x86_intr_probe"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_x86_intr_probe.c",
+        "selector": "test_x86_intr_probe",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module intr_probe behavior"
+      }
+    },
+    {
+      "id": "intr.x86.ipi_ready_publish",
+      "component": "intr",
+      "behavior": "x86",
+      "trigger": "host runner invokes test_x86_ipi_ready_publish.elf",
+      "assertions": [
+        "test_x86_ipi_ready_publish passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_x86_ipi_ready_publish"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_x86_ipi_ready_publish.c",
+        "selector": "test_x86_ipi_ready_publish",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module ipi_ready_publish behavior"
+      }
+    },
+    {
+      "id": "memory.x86.vmm_backend",
+      "component": "memory",
+      "behavior": "x86",
+      "trigger": "host runner invokes test_x86_vmm_backend.elf",
+      "assertions": [
+        "test_x86_vmm_backend passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_x86_vmm_backend"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_x86_vmm_backend.c",
+        "selector": "test_x86_vmm_backend",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying memory module vmm_backend behavior"
+      }
+    },
+    {
+      "id": "audit.kernel.layout",
+      "component": "audit",
+      "behavior": "kernel_layout",
+      "trigger": "python3 qemutests/x86_64_kernel_layout_test.py",
+      "assertions": [
+        "Audit kernel section layout and address boundaries"
+      ],
+      "failure_modes": [
+        "Symbol mismatch or misplaced ELF section"
+      ],
+      "primary": {
+        "layer": "static",
+        "source": "qemutests/x86_64_kernel_layout_test.py",
+        "selector": "x86_64_kernel_layout_test",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Sole static audit verifying Audit kernel section layout and address boundaries"
+      }
+    },
+    {
+      "id": "audit.canary.contract",
+      "component": "audit",
+      "behavior": "canary_contract",
+      "trigger": "python3 qemutests/kernel_canary_contract_test.py",
+      "assertions": [
+        "Audit kernel stack canary compile and runtime contract"
+      ],
+      "failure_modes": [
+        "Symbol mismatch or misplaced ELF section"
+      ],
+      "primary": {
+        "layer": "static",
+        "source": "qemutests/kernel_canary_contract_test.py",
+        "selector": "kernel_canary_contract_test",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Sole static audit verifying Audit kernel stack canary compile and runtime contract"
+      }
+    },
+    {
+      "id": "audit.syscall.boundary",
+      "component": "audit",
+      "behavior": "syscall_boundary",
+      "trigger": "python3 qemutests/syscall_boundary_audit.py",
+      "assertions": [
+        "Audit syscall register clobber and ABI conventions"
+      ],
+      "failure_modes": [
+        "Symbol mismatch or misplaced ELF section"
+      ],
+      "primary": {
+        "layer": "static",
+        "source": "qemutests/syscall_boundary_audit.py",
+        "selector": "syscall_boundary_audit",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Sole static audit verifying Audit syscall register clobber and ABI conventions"
+      }
+    },
+    {
+      "id": "audit.header.objects",
+      "component": "audit",
+      "behavior": "header_objects",
+      "trigger": "python3 qemutests/header_object_audit.py",
+      "assertions": [
+        "Audit header includes and object dependencies"
+      ],
+      "failure_modes": [
+        "Symbol mismatch or misplaced ELF section"
+      ],
+      "primary": {
+        "layer": "static",
+        "source": "qemutests/header_object_audit.py",
+        "selector": "header_object_audit",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Sole static audit verifying Audit header includes and object dependencies"
+      }
+    },
+    {
+      "id": "audit.canary.stack",
+      "component": "audit",
+      "behavior": "canary_stack",
+      "trigger": "python3 qemutests/stack_canary_audit.py",
+      "assertions": [
+        "Audit userspace stack canary enforcement"
+      ],
+      "failure_modes": [
+        "Symbol mismatch or misplaced ELF section"
+      ],
+      "primary": {
+        "layer": "static",
+        "source": "qemutests/stack_canary_audit.py",
+        "selector": "stack_canary_audit",
+        "evidence": "EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Sole static audit verifying Audit userspace stack canary enforcement"
+      }
+    },
+    {
+      "id": "harness.supervisor.process_cleanup",
+      "component": "harness",
+      "behavior": "supervisor",
+      "trigger": "python3 -m unittest qemutests.run_framework_tests",
+      "assertions": [
+        "Process group kill on timeout"
+      ],
+      "failure_modes": [
+        "Harness runner hang, false pass, or unhandled exception"
+      ],
+      "primary": {
+        "layer": "harness",
+        "source": "qemutests/run_framework_tests.py",
+        "selector": "run_framework_tests",
+        "evidence": "UNITTEST_OK"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary framework test for Process group kill on timeout"
+      }
+    },
+    {
+      "id": "harness.runner.framework_timeout",
+      "component": "harness",
+      "behavior": "runner",
+      "trigger": "python3 -m unittest qemutests.test_framework_runner",
+      "assertions": [
+        "Per-module and total timeout enforcement"
+      ],
+      "failure_modes": [
+        "Harness runner hang, false pass, or unhandled exception"
+      ],
+      "primary": {
+        "layer": "harness",
+        "source": "qemutests/test_framework_runner.py",
+        "selector": "test_framework_runner",
+        "evidence": "UNITTEST_OK"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary framework test for Per-module and total timeout enforcement"
+      }
+    },
+    {
+      "id": "harness.inventory.uniqueness",
+      "component": "harness",
+      "behavior": "inventory",
+      "trigger": "python3 -m unittest qemutests.test_host_build_contract",
+      "assertions": [
+        "Host test inventory uniqueness and acceptance exclusivity"
+      ],
+      "failure_modes": [
+        "Harness runner hang, false pass, or unhandled exception"
+      ],
+      "primary": {
+        "layer": "harness",
+        "source": "qemutests/test_host_build_contract.py",
+        "selector": "test_host_build_contract",
+        "evidence": "UNITTEST_OK"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary framework test for Host test inventory uniqueness and acceptance exclusivity"
+      }
+    },
+    {
+      "id": "harness.catalog.validation",
+      "component": "harness",
+      "behavior": "catalog",
+      "trigger": "python3 -m unittest qemutests.test_scenario_catalog",
+      "assertions": [
+        "Test scenario catalog schema validation and cycle rejection"
+      ],
+      "failure_modes": [
+        "Harness runner hang, false pass, or unhandled exception"
+      ],
+      "primary": {
+        "layer": "harness",
+        "source": "qemutests/test_scenario_catalog.py",
+        "selector": "test_scenario_catalog",
+        "evidence": "UNITTEST_OK"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary framework test for Test scenario catalog schema validation and cycle rejection"
+      }
+    },
+    {
+      "id": "qemu.boot.phase0",
+      "component": "qemu",
+      "behavior": "boot",
+      "trigger": "make test-qemu SUITE=boot",
+      "assertions": [
+        "UEFI cold boot to shell prompt"
+      ],
+      "failure_modes": [
+        "QEMU guest kernel panic or unobserved completion marker"
+      ],
+      "primary": {
+        "layer": "qemu_e2e",
+        "source": "qemutests/run_test.py",
+        "selector": "run_test",
+        "evidence": "PASS_MARKER"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary E2E integration verification for UEFI cold boot to shell prompt"
+      }
+    },
+    {
+      "id": "qemu.syscall.systest",
+      "component": "qemu",
+      "behavior": "syscall",
+      "trigger": "make test-qemu SUITE=syscall",
+      "assertions": [
+        "228 syscall end-to-end regression suite"
+      ],
+      "failure_modes": [
+        "QEMU guest kernel panic or unobserved completion marker"
+      ],
+      "primary": {
+        "layer": "qemu_e2e",
+        "source": "user/systest.c",
+        "selector": "systest",
+        "evidence": "PASS_MARKER"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary E2E integration verification for 228 syscall end-to-end regression suite"
+      }
+    },
+    {
+      "id": "kernel.selftest.core",
+      "component": "kernel",
+      "behavior": "selftest",
+      "trigger": "make test-qemu SUITE=selftest",
+      "assertions": [
+        "In-kernel boot self-test suite"
+      ],
+      "failure_modes": [
+        "QEMU guest kernel panic or unobserved completion marker"
+      ],
+      "primary": {
+        "layer": "kernel_selftest",
+        "source": "kernel/selftest/selftest.c",
+        "selector": "selftest",
+        "evidence": "PASS_MARKER"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary E2E integration verification for In-kernel boot self-test suite"
+      }
+    }
+  ]
+}
