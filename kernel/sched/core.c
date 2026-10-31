@@ -157,7 +157,10 @@ static volatile uint64_t pid_counter = 1;
 
 pid_t alloc_pid(void)
 {
-    return (pid_t)atomic_fetch_add((volatile uint64_t *)&pid_counter, 1);
+    /* __atomic_fetch_add builtin: the old atomic_fetch_add wrapper is
+     * not declared in any header the arch-neutral core includes
+     * (aarch64 compile check, Phase 2 Task 3). */
+    return (pid_t)__atomic_fetch_add(&pid_counter, 1, __ATOMIC_SEQ_CST);
 }
 
 // ── User-space init task pointer ─────────────────────────

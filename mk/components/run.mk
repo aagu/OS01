@@ -134,12 +134,12 @@ AARCH64_OBJDUMP ?= llvm-objdump
 test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
-	@echo "  [audit] aarch64 kernel.elf: no vma_*/uaccess_*/fork_* T/t symbols"
-	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_)')"; \
+	@echo "  [audit] aarch64 kernel.elf: no vma_*/uaccess_*/fork_* or sched-split x86-subsystem T/t symbols"
+	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_|spawn_user_task|files_(alloc|dup|unpin)|vfs_lookup|vmm_free_user_map|do_fork)')"; \
 	  if [ -n "$$bad" ]; then \
 	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
 	  fi
-	@echo "  [audit] OK (vma_*/uaccess_*/fork_* symbol-exclusion gate only)"
+	@echo "  [audit] OK (vma_*/uaccess_*/fork_* + spawn_user_task/files_*/vfs_lookup/vmm_free_user_map/do_fork symbol-exclusion gate)"
 	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
 	  python3 qemutests/intr_dispatch_audit.py \
 	    --profile "$(PROFILE)" \
@@ -1426,7 +1426,20 @@ cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
 echo "[user-canary] audit passed"
 endef
 
-# ── test-static: 5 runtime audits via test-runtime + 7 standalone + user-canary ──
+# ── test-static ───────────────────────────────────────────────
+# Two shapes:
+#   1. No CASE (the historical gate, byte-identical): 5 runtime audits
+#      via the test-runtime prerequisite + 7 standalone audits +
+#      user-canary, all behind the rootfs capability.
+#   2. CASE=<selector> (aarch64 EL1 scheduler plan Phase 2, Ruling
+#      P2-4): a focused COMPILE-ONLY check.  It must NOT inherit
+#      test-static's rootfs gate or the test-runtime prerequisite — the
+#      aarch64 profile declares only `kernel uefi` capabilities, so the
+#      historical gates abort at parse time there.  The selector runs
+#      only the matching audit; the un-gated x86 behaviour is
+#      unchanged.
+ifeq ($(strip $(CASE)),)
+
 test-static: test-runtime
 	$(call require_capability,rootfs)
 	$(RUN_STATIC_AUDIT) syscall-boundary -- \
@@ -1464,6 +1477,34 @@ test-static: test-runtime
 	    --llvm-objdump "$(LLVM_OBJDUMP)" \
 	    --repo-root "$(OS01_ROOT)"
 	@$(MAKE) --no-print-directory test-user-canary
+
+else
+
+# Focused compile-only selectors.  sched-common-compile (frozen command:
+# `make PROFILE=aarch64-clang test-static CASE=sched-common-compile`)
+# compiles the arch-neutral scheduler TUs with the real aarch64
+# compiler, production defines and freestanding include paths into
+# $(KERNEL_BUILD_DIR)/sched-compile-check/, stopping at .o — no test
+# macro removes production code, and unresolved real arch externs are
+# legal in unlinked objects.  The aarch64 product whitelist is unchanged
+# until Phase 3.
+SCHED_STATIC_CASES := sched-common-compile
+
+# Per-case runner targets (pattern of _test-m1-host-run-*): each owns a
+# full recipe line so os01_submake's leading '+' stays a make prefix,
+# not a shell token.
+.PHONY: _test-static-case-sched-common-compile
+_test-static-case-sched-common-compile:
+	@echo "  [test-static] CASE=sched-common-compile: aarch64 common scheduler TU compile check"
+	$(call os01_submake,kernel,sched-compile-check ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
+
+test-static: _test-static-case-$(CASE)
+	@case "$(CASE)" in \
+	  sched-common-compile) echo "  [test-static] CASE=$(CASE) done" ;; \
+	  *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(SCHED_STATIC_CASES)" >&2; exit 1 ;; \
+	esac
+
+endif # CASE
 
 # ── test-gui-incremental: the GUI library's incremental contract ──
 #

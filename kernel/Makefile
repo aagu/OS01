@@ -434,6 +434,47 @@ $(BUILD_DIR)/%.o: %.S $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
 
+# ── Common scheduler TU compile-only check ────────────────────
+# aarch64 EL1 scheduler plan Phase 2, Task 3: compile the arch-neutral
+# scheduler TUs with the REAL $(ARCH) compiler, production defines and
+# freestanding include paths — stopping at .o, into a dedicated
+# directory the product link never sees.  The generic %.o rule above
+# already covers these paths ($(BUILD_DIR)/sched-compile-check/...), so
+# the objects get exactly the production flags for the selected arch.
+#
+# On aarch64 this is the Phase-2 gate: the TUs are NOT in the aarch64
+# product whitelist yet (Phase 3 adds them together with the real
+# backends), so unresolved real arch externs in these objects are
+# expected and legal — no stub, no code-eliding test macro.  Invoked
+# from the root as:
+#   make PROFILE=aarch64-clang test-static CASE=sched-common-compile
+# (run.mk routes that selector here with ARCH=aarch64; running
+# `make -C kernel ... sched-compile-check` under the x86 profile
+# compile-checks the same TUs for x86, which the product build already
+# covers via the sched/*.c wildcard).
+SCHED_COMMON_COMPILE_TUS := \
+    sched/core.c \
+    sched/boot.c \
+    sched/kthread.c \
+    sched/fair.c \
+    sched/balance.c \
+    sched/identity.c \
+    sched/diag.c
+# Objects are flat (core.o, boot.o, ...) so the pattern rule's stem maps
+# 1:1 back onto sched/<name>.c.
+SCHED_COMPILE_CHECK_OBJS := $(foreach t,$(SCHED_COMMON_COMPILE_TUS),$(BUILD_DIR)/sched-compile-check/$(notdir $(t:.c=.o)))
+
+# Compile-only twin of the generic rule (same production flags): the
+# generic $(BUILD_DIR)/%.o stem would rewrite the source path, so this
+# explicit pattern owns the sched-compile-check/ directory.
+$(BUILD_DIR)/sched-compile-check/%.o: sched/%.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
+
+.PHONY: sched-compile-check
+sched-compile-check: $(SCHED_COMPILE_CHECK_OBJS)
+	@echo "  [sched-compile-check] $(ARCH): $(words $(SCHED_COMPILE_CHECK_OBJS)) common scheduler TUs -> $(BUILD_DIR)/sched-compile-check/"
+
 # ── lwIP compilation ──────────────────────────────────────────
 # lwIP sources live outside kernel/ under thirdpart/lwip/src
 $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)
