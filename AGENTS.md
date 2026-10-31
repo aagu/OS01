@@ -42,6 +42,7 @@ Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
 Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline + pick_eevdf + sched_balance SMP 负载均衡
 Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
+Logo:    aarch64_boot_fb_init() → frame_buffer_init() → boot_logo_show() → [fb] banner
 ```
 
 ## Directory organization (2026-09-12)
@@ -125,6 +126,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/arch/x86_64/intr/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
 | `kernel/arch/x86_64/intr/trap.c` | Exception handlers + do_system_call + do_signal_delivery |
 | `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
+| `kernel/driver/logo.c` | OS01 启动字标（arch-neutral，经 `arch/fb_write.h` 取帧缓冲） |
 | `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
 | `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
 | `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
