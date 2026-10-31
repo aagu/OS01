@@ -368,18 +368,28 @@ def _boot_and_capture(args: argparse.Namespace, *, ramfb: bool,
         session.start()
         session.wait_for(
             lambda text: all(marker in text for marker in wait_markers))
-        session.observe(2)
-        result["text"] = session.text
         result["timed_out"] = bool(session.timed_out)
-        if ramfb and qmp_sock is not None:
-            qmp = Qmp(qmp_sock)
-            try:
-                qmp.connect()
-                result["shot"] = shot_path
-                (result["width"], result["height"], result["pixels"]) = parse_ppm(
-                    qmp.screendump(shot_path))
-            finally:
-                qmp.close()
+        result["text"] = session.text
+        if result["timed_out"]:
+            # ProcessSession.wait_for() REAPS the child when its deadline
+            # trips, so there is no live QEMU to screendump.  Connecting QMP
+            # here would raise and be classified as an environment error,
+            # masking the real problem: the guest never reached the marker.
+            # A timeout is a FAIL (exit 1), reported by main() together with
+            # the serial log that was captured before the deadline.
+            pass
+        else:
+            session.observe(2)
+            result["text"] = session.text
+            if ramfb and qmp_sock is not None:
+                qmp = Qmp(qmp_sock)
+                try:
+                    qmp.connect()
+                    result["shot"] = shot_path
+                    (result["width"], result["height"], result["pixels"]) = parse_ppm(
+                        qmp.screendump(shot_path))
+                finally:
+                    qmp.close()
     except Exception as error:  # noqa: BLE001 — an environment failure
         result["error"] = f"{type(error).__name__}: {error}"
         result["environment_error"] = True
@@ -1516,6 +1526,9 @@ The source grep below cannot prove the kernel actually boots; this step runs
 a real x86_64 boot (OVMF + the normal disk image) and asserts on the serial
 stream, which is what spec V5 criterion 1 asks for.
 
+Run this block as a plain **bash script** (not as a make recipe — hence the
+single `$`):
+
 ```bash
 cd /home/aagu/OS01/.worktrees/aarch64-boot-logo
 # 1. The firmware is NOT produced by disk.img — build it explicitly.  The
@@ -1537,16 +1550,16 @@ timeout 120 qemu-system-x86_64 -M q35 \
   -drive if=pflash,format=raw,readonly=on,file="$FW" \
   -drive file="$IMG",format=raw,if=none,id=disk -device ahci,id=ahci \
   -device ide-hd,drive=disk,bus=ahci.0 -m 512 -smp 1 -serial stdio \
-  -display none -no-reboot -no-shutdown > /tmp/x86-logo.log 2>&1; rc=$$?; \
-  if [ "$$rc" -ne 124 ] && [ "$$rc" -ne 137 ]; then \
-    echo "ERROR: qemu exited $$rc" >&2; tail -20 /tmp/x86-logo.log >&2; exit 1; \
-  fi
+  -display none -no-reboot -no-shutdown > /tmp/x86-logo.log 2>&1; rc=$?
+if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ]; then
+  echo "ERROR: qemu exited $rc" >&2; tail -20 /tmp/x86-logo.log >&2; exit 1
+fi
 
 # 3. Assertions — EVERY one must hold, and any failure exits non-zero.
 grep -q "frame buffer remap succeed" /tmp/x86-logo.log \
   || { echo "ERROR: x86_64 never reported the framebuffer remap" >&2; exit 1; }
-if grep -q "\[logo\]" /tmp/x86-logo.log; then \
-  echo "ERROR: x86_64 serial stream gained a [logo] marker" >&2; exit 1; \
+if grep -q "\[logo\]" /tmp/x86-logo.log; then
+  echo "ERROR: x86_64 serial stream gained a [logo] marker" >&2; exit 1
 fi
 echo "OK: x86_64 serial stream unchanged (fb line present, no [logo] marker)"
 ```
@@ -1640,3 +1653,15 @@ counts' source in both files so a reviewer can check them.
 | [P1] the QMP socket lived inside the archive directory; that path is ~157 bytes and exceeds the ~108-byte `sun_path` limit, so QEMU failed with "AF_UNIX path too long" | the socket is created in a short `tempfile.mkdtemp(prefix="os01-a64-")` directory and removed afterwards; the screenshot and the logs stay in the archive |
 | [P2] the x86_64 step did not build the firmware and could end green on a failed acceptance | the firmware is built explicitly (with an offline fallback copy), `test -f` guards both artifacts, only QEMU exit codes 124/137 are accepted, and every assertion aborts the step with a non-zero status |
 | [P2] environment failures were archived as FAIL / exit 1, and the DTB generation sat outside the `try`, so it skipped `result.json` | every preparation or launch failure is now flagged `environment_error`, archived with status `ERROR` and runner exit code 2, and the whole run exits 2; the DTB generation moved inside the guarded region |
+
+**Third review (`3ec959d2`) — two further findings, both fixed:**
+
+| Finding | Fix |
+|---|---|
+| [P2] the x86_64 bash block used the Makefile `$$` escape, so `$?` became the shell PID and the exit-code guard never rejected a failed QEMU | the block is now plain bash (`rc=$?`, `"$rc"`) and the plan states explicitly that it is NOT a make recipe |
+| [P2] after a `wait_for()` timeout the child is reaped, so the QMP connect raised and the timeout was misreported as an environment error (exit 2) instead of a FAIL (exit 1) | `_boot_and_capture()` skips the QMP block when `session.timed_out` is set; the serial log is kept and the run is reported as FAIL / TIMEOUT (exit 1) |
+
+Both were verified by executing the plan's module and the bash logic directly:
+a simulated timeout now yields `exit=1, status=FAIL, environment_error=false` for
+both the `logo` and the `no-fb` check, and the bash guard rejects a failing
+command with `REJECTED (rc=1)`.
