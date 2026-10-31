@@ -77,14 +77,16 @@ $(STAMPS_DIR)/gui-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	$(call os01_submake,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui $(OS01_SUBMAKE_ARGS))
 	$(call stamp_check,$(STAGING_DIR)/gui)
 
-# ── mbedTLS adapter (R7) ──────────────────────────────────────────
+# ── mbedTLS adapter (R7, Task B1) ──────────────────────────────────
 # No shared /tmp, no writes into the submodule, no final-sysroot writes.
-# The FORCE-checked recipe computes the input digest (the mbedtls tree, the
-# config overlay and the optional OS01 entropy source), and only re-copies /
-# re-compiles when it differs from the receipt beside the stamp. The private
-# copy lives in $(BUILD_DIR)/thirdparty/mbedtls, objects only in
+# The FORCE-checked recipe computes the input digest (the mbedtls sources, the
+# config overlay, staging libc headers, compiler identity and flags), and
+# only re-copies / re-compiles when it differs from the receipt beside the stamp.
+# The private copy lives in $(BUILD_DIR)/thirdparty/mbedtls, objects only in
 # $(BUILD_DIR)/thirdparty/mbedtls-build, and the result stages into
 # staging/mbedtls/ with a manifest and receipt.
+include $(OS01_ROOT)/config/mbedtls-sources.mk
+
 MBEDTLS_PRIVATE   := $(BUILD_DIR)/thirdparty/mbedtls
 MBEDTLS_BUILD_DIR := $(BUILD_DIR)/thirdparty/mbedtls-build
 MBEDTLS_STAGING   := $(STAGING_DIR)/mbedtls
@@ -99,46 +101,53 @@ MBEDTLS_CC_FLAGS  := --sysroot=$(STAGING_DIR)/libc -isystem $(STAGING_DIR)/libc/
 $(STAMPS_DIR)/mbedtls-install.stamp: $(STAMPS_DIR)/libc-install.stamp FORCE
 	@mkdir -p $(STAMPS_DIR) $(RECEIPTS_DIR)
 	@digest=$$( { cd $(OS01_ROOT) && \
-	  find thirdpart/mbedtls -type f -exec sha256sum {} + 2>/dev/null | sort; \
+	  for s in $(MBEDTLS_SOURCES); do \
+	    sha256sum "thirdpart/mbedtls/library/$$s"; \
+	  done; \
 	  sha256sum config/mbedtls_config.h; \
 	  if [ -f libc/network/entropy.c ]; then sha256sum libc/network/entropy.c; fi; \
-	  printf 'toolchain: %s\n' "$(shell $(CLANG) --version 2>/dev/null | head -1)"; \
+	  if [ -d $(STAGING_DIR)/libc/usr/include ]; then \
+	    find $(STAGING_DIR)/libc/usr/include -type f -exec sha256sum {} + 2>/dev/null | sort; \
+	  fi; \
+	  printf 'compiler: %s\n' "$(TARGET_CC)"; \
+	  printf 'toolchain: %s\n' "$$($(TARGET_CC) --version 2>/dev/null | head -1)"; \
+	  printf 'flags: %s\n' "$(MBEDTLS_CC_FLAGS)"; \
+	  printf 'ar: %s\n' "$$($(LLVM_AR) --version 2>/dev/null | head -1)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
 	old=""; \
 	if [ -f "$@.receipt" ]; then old=$$(cat "$@.receipt"); fi; \
-	if [ "$$digest" != "$$old" ]; then \
+	if [ "$$digest" != "$$old" ] || [ ! -d "$(MBEDTLS_STAGING)" ]; then \
 	  echo "  [mbedtls] input changed, rebuilding staging"; \
 	  printf '%s\n' "$$digest" > "$(RECEIPTS_DIR)/mbedtls.input.digest"; \
-	  rm -rf $(MBEDTLS_PRIVATE) $(MBEDTLS_BUILD_DIR) $(MBEDTLS_STAGING); \
-	  mkdir -p $(MBEDTLS_PRIVATE) $(MBEDTLS_BUILD_DIR); \
+	  rm -rf $(MBEDTLS_PRIVATE) $(MBEDTLS_BUILD_DIR) $(MBEDTLS_STAGING).tmp; \
+	  mkdir -p $(MBEDTLS_PRIVATE) $(MBEDTLS_BUILD_DIR) $(MBEDTLS_STAGING).tmp/usr/lib $(MBEDTLS_STAGING).tmp/usr/include; \
 	  cp -a $(OS01_ROOT)/thirdpart/mbedtls/. $(MBEDTLS_PRIVATE)/; \
 	  [ -d "$(MBEDTLS_PRIVATE)/library" ] || { echo "ERROR: private mbedtls copy incomplete"; exit 1; }; \
 	  mkdir -p $(MBEDTLS_PRIVATE)/include/mbedtls; \
 	  cp $(OS01_ROOT)/config/mbedtls_config.h $(MBEDTLS_PRIVATE)/include/mbedtls/os01_mbedtls_config.h; \
-	  ok=0; fail=0; \
-	  for src in $(MBEDTLS_PRIVATE)/library/*.c; do \
-	    name=$$(basename "$$src" .c); \
-	    if $(TARGET_CC) $(MBEDTLS_CC_FLAGS) -c "$$src" -o $(MBEDTLS_BUILD_DIR)/$$name.o 2>/dev/null; then \
-	      ok=$$((ok+1)); \
-	    else \
-	      fail=$$((fail+1)); \
-	      if [ $$fail -le 3 ]; then \
-	        echo "  [mbedtls] FAIL: $$name"; \
-	        $(TARGET_CC) $(MBEDTLS_CC_FLAGS) -c "$$src" -o $(MBEDTLS_BUILD_DIR)/$$name.o 2>&1 | grep "error:" | head -1; \
-	      fi; \
+	  set -e; \
+	  for src_file in $(MBEDTLS_SOURCES); do \
+	    src="$(MBEDTLS_PRIVATE)/library/$$src_file"; \
+	    name=$$(basename "$$src_file" .c); \
+	    if ! $(TARGET_CC) $(MBEDTLS_CC_FLAGS) -c "$$src" -o $(MBEDTLS_BUILD_DIR)/$$name.o; then \
+	      echo "  [mbedtls] ERROR: failed to compile $$src_file" >&2; \
+	      rm -rf $(MBEDTLS_STAGING).tmp; \
+	      exit 1; \
 	    fi; \
 	  done; \
 	  if [ -f $(OS01_ROOT)/libc/network/entropy.c ]; then \
-	    if $(TARGET_CC) $(MBEDTLS_CC_FLAGS) -c $(OS01_ROOT)/libc/network/entropy.c \
-	        -o $(MBEDTLS_BUILD_DIR)/os01_entropy.o 2>/dev/null; then \
-	      ok=$$((ok+1)); \
+	    if ! $(TARGET_CC) $(MBEDTLS_CC_FLAGS) -c $(OS01_ROOT)/libc/network/entropy.c \
+	        -o $(MBEDTLS_BUILD_DIR)/os01_entropy.o; then \
+	      echo "  [mbedtls] ERROR: failed to compile entropy.c" >&2; \
+	      rm -rf $(MBEDTLS_STAGING).tmp; \
+	      exit 1; \
 	    fi; \
 	  fi; \
-	  echo "  [mbedtls] $$ok compiled, $$fail failed"; \
-	  mkdir -p $(MBEDTLS_STAGING)/usr/lib $(MBEDTLS_STAGING)/usr/include; \
-	  $(LLVM_AR) rcs $(MBEDTLS_STAGING)/usr/lib/libmbedtls.a $(MBEDTLS_BUILD_DIR)/*.o; \
-	  cp -R --preserve=timestamps $(MBEDTLS_PRIVATE)/include/mbedtls $(MBEDTLS_STAGING)/usr/include/; \
-	  find $(MBEDTLS_STAGING) -type f ! -name manifest | sed 's|^$(MBEDTLS_STAGING)/||' | sort > $(MBEDTLS_STAGING)/manifest; \
+	  $(LLVM_AR) rcs $(MBEDTLS_STAGING).tmp/usr/lib/libmbedtls.a $(MBEDTLS_BUILD_DIR)/*.o; \
+	  cp -R --preserve=timestamps $(MBEDTLS_PRIVATE)/include/mbedtls $(MBEDTLS_STAGING).tmp/usr/include/; \
+	  find $(MBEDTLS_STAGING).tmp -type f ! -name manifest | sed 's|^$(MBEDTLS_STAGING).tmp/||' | sort > $(MBEDTLS_STAGING).tmp/manifest; \
+	  rm -rf $(MBEDTLS_STAGING); \
+	  mv $(MBEDTLS_STAGING).tmp $(MBEDTLS_STAGING); \
 	  printf '%s\n' "$$digest" > "$@.receipt"; \
 	  touch "$@"; \
 	else \

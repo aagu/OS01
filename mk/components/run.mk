@@ -1779,6 +1779,8 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	if [ "$(PROFILE)" = "x86_64-clang" ]; then \
 	  echo "  [test-contract] $(PROFILE)/arch9-build-contract"; \
 	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_arch9_build_contract; \
+	  echo "  [test-contract] $(PROFILE)/build-incremental"; \
+	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_build_incremental; \
 	fi; \
 	@set -e; \
 	case "$(PROFILE)" in \
