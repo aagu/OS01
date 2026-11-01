@@ -275,6 +275,8 @@ def parse_ap_fatal_line(line):
 
 
 def extract_ap_fatal_lines(text):
+    """Line filter used by the unittests; the LIVE gate feeds full
+    lines so the FATAL_SUCCESS_END rejection can actually fire."""
     return [ln for ln in text.splitlines() if "[ap-fatal]" in ln]
 
 
@@ -420,8 +422,7 @@ def run_fatal_boot(args, paths, session_factory=None, archive_factory=None):
             timeout_s=BOOT_DEADLINE_SECONDS - DRAIN_SECONDS)
         session.start()
         session.wait_for(
-            lambda text: check_fatal_evidence(
-                extract_ap_fatal_lines(text))[0] == 0)
+            lambda text: check_fatal_evidence(text.splitlines())[0] == 0)
         # Both CPUs are parked the moment the owner printed its line:
         # stop QEMU immediately (the contract stops ON evidence).
         session.stop()
@@ -438,7 +439,7 @@ def run_fatal_boot(args, paths, session_factory=None, archive_factory=None):
 
     text = session.text
     timed_out = session.timed_out
-    accepted, why = check_fatal_evidence(extract_ap_fatal_lines(text))
+    accepted, why = check_fatal_evidence(text.splitlines())
     result = accepted == 0 and not timed_out
 
     errors = []
