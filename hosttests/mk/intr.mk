@@ -397,3 +397,24 @@ $(TEST_BLD)/test_lapic_nmi.elf: $(TEST_BLD)/test_lapic_nmi.o $(TEST_BLD)/lapic_n
 .PHONY: test-lapic-nmi
 test-lapic-nmi: $(TEST_BLD)/test_lapic_nmi.elf
 	$<
+
+# ── P2 Task 1: resched SGI4 transport ───────────────────────────
+# Compiles the REAL ipi.c + gic_driver.c with mock MMIO; the handler's
+# need_resched slot resolves through the host seam.
+$(eval $(call register_host_test,test_aarch64_resched_sgi,intr,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_aarch64_resched_sgi.elf
+
+$(TEST_BLD)/test_aarch64_resched_sgi.o: $(TEST_CASES)/test_aarch64_resched_sgi.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
+		$(TESTS_DIR)/kernel/include/intr/ipi.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_resched_sgi.elf: $(TEST_BLD)/test_aarch64_resched_sgi.o \
+		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/gic_driver_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-resched-sgi
+test-aarch64-resched-sgi: $(TEST_BLD)/test_aarch64_resched_sgi.elf
+	$<

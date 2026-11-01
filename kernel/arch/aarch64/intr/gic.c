@@ -5,6 +5,7 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/ipi.h>    /* aarch64_resched_sgi_handler (P2) */
 #include <percpu/percpu.h>
 
 static struct gic_dev g_gic;
@@ -34,7 +35,10 @@ void gic_cpu_init(void)                                /* 每核各跑一次（b
     (void)gic_irq_config(&g_gic, 1, true, 0x00, 0x00);
     (void)gic_irq_config(&g_gic, 2, true, 0x00, 0x00);
     (void)gic_irq_config(&g_gic, 3, true, 0x00, 0x00);
+    /* P2 Task 1 (spec §5.1): SGI 4 = resched.  Same priority as the
+     * other SGIs; the handler is registered in gic_init (below). */
     uint32_t cntp = dtb_cntp_ppi();
+    (void)gic_irq_config(&g_gic, 4, true, 0x00, 0x00);
     (void)gic_irq_config(&g_gic, cntp, true, 0x00, 0x00);
     __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");   /* 屏障在 wrapper (hw 层零依赖) */
 }
@@ -55,6 +59,14 @@ void gic_init(void)
     if (gic_register_handler(3, aarch64_tlb_sgi_handler, 0,
                              "tlb-shootdown") != 0) {
         log_err("[gic] FATAL: register SGI 3 (tlb-shootdown)\n");
+        for (;;) __asm__ __volatile__("wfi" ::: "memory");
+    }
+    /* P2 Task 1 (spec §5.1): the resched handler registers with the
+     * TLB handler here — gic_init runs BEFORE any AP starts, so no
+     * SGI 4 can arrive into an empty slot. */
+    if (gic_register_handler(4, aarch64_resched_sgi_handler, 0,
+                             "resched") != 0) {
+        log_err("[gic] FATAL: register SGI 4 (resched)\n");
         for (;;) __asm__ __volatile__("wfi" ::: "memory");
     }
     /* R2-3: intids marker 独占一行（harness 的 --expect-gic 全行 regex

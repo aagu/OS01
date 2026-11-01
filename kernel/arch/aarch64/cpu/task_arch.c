@@ -6,6 +6,7 @@
 #include <arch/aarch64/ap_sched.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/ipi.h>   /* P2: need-slot offset cross-check */
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
 #include <arch/irq.h>
@@ -39,6 +40,11 @@ __asm__(".global aarch64_context_fatal_stack_top\n"
 
 _Static_assert(sizeof(task_t) + 256 + 16 < STACK_SIZE,
                "aarch64 task union has no usable context stack");
+/* P2 (spec §5.1): the resched SGI handler locates this CPU's
+ * need_resched through TPIDR_EL1 + the ipi.h literal — pin the two
+ * together here, where the real percpu_t is visible. */
+_Static_assert(offsetof(percpu_t, need_resched) == PERCPU_NEED_RESCHED_OFFSET,
+               "ipi.c need-slot literal drifted from percpu_t.need_resched");
 _Static_assert((STACK_SIZE & (STACK_SIZE - 1)) == 0,
                "stack mask requires a power-of-two stack size");
 
