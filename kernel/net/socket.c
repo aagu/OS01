@@ -136,10 +136,12 @@ int64_t do_socket(int domain, int type, int protocol)
 
     int fd = fd_alloc(current->files, f);
     if (fd < 0) {
+        // Install refused: the caller keeps its file reference and
+        // releases it here (fd_alloc took nothing).
         f->sock = NULL;
         file_free(f);
         socket_free(s);
-        return -ENFILE;
+        return fd;   // real errno (-EMFILE)
     }
     return fd;
 }
@@ -383,8 +385,11 @@ int64_t do_accept(int fd, uint32_t *out_ip, uint16_t *out_port)
 
     int new_fd = fd_alloc(current->files, new_f);
     if (new_fd < 0) {
+        // Install refused: the caller keeps its file reference and
+        // releases it here (fd_alloc took nothing).  file_free()
+        // releases the accepted socket with it.
         file_free(new_f);
-        return -ENFILE;
+        return new_fd;   // real errno (-EMFILE)
     }
     return new_fd;
 }

@@ -28,6 +28,7 @@
  */
 
 #include <sched/task.h>
+#include <sched/resource.h>
 #include <sched/internal.h>
 #include <sched/boot.h>
 #include <percpu/percpu.h>
@@ -83,19 +84,35 @@ void task_init(void)
         if (files) {
             current->files = files;  // attach to idle task
 
+            // The install targets the BSP idle task, NOT necessarily
+            // the task get_current_task() resolves to on the boot
+            // stack — so the target's own NOFILE soft limit is passed
+            // explicitly instead of relying on the current-task
+            // snapshot inside fd_alloc().
+            uint32_t soft = (uint32_t)task_nofile_soft(&init_task_union.task);
+
             // All three fds go through /dev/tty:
             //   read  → keyboard (ASCII-translated scancodes)
             //   write → framebuffer (GTK window) + serial (terminal)
             vfs_node_t *tty = vfs_lookup("/dev/tty");
             if (tty) {
                 file_t *f0 = file_alloc();
-                if (f0) { f0->type = FD_DEV; f0->node = tty; f0->flags = O_RDWR;  fd_alloc(files, f0); }
+                if (f0) {
+                    f0->type = FD_DEV; f0->node = vfs_node_get(tty); f0->flags = O_RDWR;
+                    if (fd_alloc_limit(files, f0, 0, soft) < 0) file_put(f0);
+                }
 
                 file_t *f1 = file_alloc();
-                if (f1) { f1->type = FD_DEV; f1->node = tty; f1->flags = O_WRONLY; fd_alloc(files, f1); }
+                if (f1) {
+                    f1->type = FD_DEV; f1->node = vfs_node_get(tty); f1->flags = O_WRONLY;
+                    if (fd_alloc_limit(files, f1, 0, soft) < 0) file_put(f1);
+                }
 
                 file_t *f2 = file_alloc();
-                if (f2) { f2->type = FD_DEV; f2->node = tty; f2->flags = O_WRONLY; fd_alloc(files, f2); }
+                if (f2) {
+                    f2->type = FD_DEV; f2->node = vfs_node_get(tty); f2->flags = O_WRONLY;
+                    if (fd_alloc_limit(files, f2, 0, soft) < 0) file_put(f2);
+                }
             }
         }
     }

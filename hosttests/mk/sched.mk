@@ -12,12 +12,9 @@ $(eval $(call register_host_test,test_process_image_lifecycle,sched,protocol-or-
 $(eval $(call register_host_test,test_fork_user_map,sched,protocol-or-legacy))
 $(eval $(call register_host_test,test_percpu_layout,sched,protocol-or-legacy))
 $(eval $(call register_host_test,test_smp_starting_gate,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_nofile_limits,sched,protocol-or-legacy))
-
 TEST_BINS += \
     $(TEST_BLD)/test_syscall_dispatch.elf \
     $(TEST_BLD)/test_compat_linux.elf \
-    $(TEST_BLD)/test_nofile_limits.elf \
     $(TEST_BLD)/test_wait_basic.elf \
     $(TEST_BLD)/test_sync_primitives.elf \
     $(TEST_BLD)/test_mutex_handshake.elf \
@@ -90,24 +87,9 @@ $(TEST_BLD)/libc_resource_production.o: $(TESTS_DIR)/libc/resource/resource.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -D'errno=(*__errno_location())' -include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
 
-$(TEST_BLD)/test_nofile_limits.o: $(TEST_CASES)/test_nofile_limits.c
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) $(LIBC_INC) -D'errno=(*__errno_location())' -include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
-
-$(TEST_BLD)/test_nofile_limits.elf: $(TEST_BLD)/test_nofile_limits.o \
-    $(TEST_BLD)/sched_resource_production.o \
-    $(TEST_BLD)/sys_resource_production.o \
-    $(TEST_BLD)/libc_resource_production.o \
-    $(TEST_BLD)/syscall_dispatch_production.o \
-    $(TEST_BLD)/compat_dispatch_production.o \
-    $(TEST_BLD)/compat_table_x86_64_production.o \
-    $(TEST_BLD)/compat_proc_production.o \
-    $(TEST_BLD)/compat_fs_production.o
-	$(HOST_CC) -o $@ $^
-
-.PHONY: test-nofile-limits
-test-nofile-limits: $(TEST_BLD)/test_nofile_limits.elf
-	$<
+# The test_nofile_limits case (ARCH-10 Task 5 resource limits + Task 6
+# descriptor installation) is built by hosttests/mk/fs.mk — it links the
+# production descriptor-installation objects.
 
 # Standalone wait test
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o

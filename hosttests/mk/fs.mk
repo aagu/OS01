@@ -14,6 +14,7 @@ $(eval $(call register_host_test,test_poll_requested,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_poll_waitqueue_handshake,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_pty_winsize,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_devfs_input_dispatch,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_vfs_basic.elf \
@@ -29,7 +30,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_elf_layout.elf \
     $(TEST_BLD)/test_elf_load_4k.elf \
     $(TEST_BLD)/test_pty_winsize.elf \
-    $(TEST_BLD)/test_devfs_input_dispatch.elf
+    $(TEST_BLD)/test_devfs_input_dispatch.elf \
+    $(TEST_BLD)/test_nofile_limits.elf
 
 # Basic VFS & FAT32 tests
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
@@ -321,3 +323,72 @@ $(TEST_BLD)/test_devfs_input_dispatch.o: $(TEST_CASES)/test_devfs_input_dispatch
 
 $(TEST_BLD)/test_devfs_input_dispatch.elf: $(TEST_BLD)/test_devfs_input_dispatch.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── ARCH-10 Task 6: NOFILE soft limit at descriptor installation ──
+#
+# The case drives the PRODUCTION descriptor-installation code:
+#   kernel/fs/file.c      fd_alloc_limit / fd_dup / fd_dup2 / do_pipe
+#   kernel/net/socket.c   socket() / accept() install paths
+#   kernel/tty/pty.c      PTMX install path
+#   kernel/sync/wait.c    the pipe wait queues
+#
+# Those TUs use the REAL kernel headers (the production task_t and the
+# production spinlock), so the mock runtime only supplies the lwIP
+# surface kernel/net/socket.c needs (its real lwIP headers are
+# compiled out under OS01_HOST_TEST) and the observation counters.
+FD_INSTALL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/fd_install_test_runtime.h \
+    $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -I$(TEST_MOCK) \
+    -I$(TEST_MOCK)/fd_install_include -I$(TEST_MOCK)/include
+
+$(TEST_BLD)/fd_install_file_production.o: $(TESTS_DIR)/kernel/fs/file.c \
+		$(TESTS_DIR)/kernel/include/fs/file.h \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_socket_production.o: $(TESTS_DIR)/kernel/net/socket.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_pty_production.o: $(TESTS_DIR)/kernel/tty/pty.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_wait_production.o: $(TESTS_DIR)/kernel/sync/wait.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_stubs.o: $(TEST_MOCK)/fd_install_stubs.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_nofile_limits.o: $(TEST_CASES)/test_nofile_limits.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -D'errno=(*__errno_location())' \
+		-include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
+
+$(TEST_BLD)/test_nofile_limits.elf: $(TEST_BLD)/test_nofile_limits.o \
+    $(TEST_BLD)/fd_install_file_production.o \
+    $(TEST_BLD)/fd_install_socket_production.o \
+    $(TEST_BLD)/fd_install_pty_production.o \
+    $(TEST_BLD)/fd_install_wait_production.o \
+    $(TEST_BLD)/fd_install_stubs.o \
+    $(TEST_BLD)/sched_resource_production.o \
+    $(TEST_BLD)/sys_resource_production.o \
+    $(TEST_BLD)/libc_resource_production.o \
+    $(TEST_BLD)/syscall_dispatch_production.o \
+    $(TEST_BLD)/compat_dispatch_production.o \
+    $(TEST_BLD)/compat_table_x86_64_production.o \
+    $(TEST_BLD)/compat_proc_production.o \
+    $(TEST_BLD)/compat_fs_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-nofile-limits
+test-nofile-limits: $(TEST_BLD)/test_nofile_limits.elf
+	$<

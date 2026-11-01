@@ -268,7 +268,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
             break;
         }
         if (!current->files) {
-            syscall_result = -ENFILE;
+            syscall_result = -EMFILE;
             break;
         }
 
@@ -350,9 +350,11 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
 
         int newfd = fd_alloc(current->files, f);
         if (newfd < 0) {
+            // The install was refused: the caller keeps its file
+            // reference and releases it here (fd_alloc took nothing).
             file_free(f);
             f = NULL;          // already freed
-            syscall_result = -ENFILE;
+            syscall_result = newfd;   // real errno (-EMFILE)
             goto out_open;
         }
         f = NULL;  // fd_alloc took ownership

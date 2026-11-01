@@ -290,6 +290,12 @@ static int ptsN_open(const char *name, file_t **out_file)
     // Find matching PTY slot by checking name suffix "pts{N}"
     pty_t *pty = NULL;
     int name_len = (int)strlen(name);
+
+    // The scan and the "slave opened" marking happen under pty_lock:
+    // a master released in parallel must not reclaim the pty (and its
+    // pipes) between the two steps — the reclaim only fires while the
+    // slave was never opened.
+    uint64_t fl = spin_lock_irqsave(&pty_lock);
     for (int i = 0; i < PTY_MAX; i++) {
         if (!pty_table[i].allocated) continue;
         // Build expected suffix "pts0" … "pts7"
@@ -304,6 +310,11 @@ static int ptsN_open(const char *name, file_t **out_file)
             break;
         }
     }
+    // Mark the slave end as opened: a master released without a slave
+    // reclaims the pty slot (see the PTY branch of file_free()).
+    if (pty) pty->slave_opened = true;
+    spin_unlock_irqrestore(&pty_lock, fl);
+
     if (!pty) return -ENOENT;
 
     // Set controlling terminal

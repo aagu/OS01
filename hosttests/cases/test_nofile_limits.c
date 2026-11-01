@@ -2,6 +2,7 @@
  * hosttests/cases/test_nofile_limits.c
  *
  * ARCH-10 Task 5: RLIMIT_NOFILE kernel state, native ABI, compat entry and libc wrappers.
+ * ARCH-10 Task 6: every descriptor installation honours the per-task NOFILE soft limit.
  */
 
 #include "test_framework.h"
@@ -17,6 +18,11 @@
 
 #include <sched/task.h>
 #include <sched/resource.h>
+#include <fs/file.h>
+#include <fs/devfs.h>
+#include <net/socket.h>
+#include <uapi/sockaddr.h>
+#include <tty/pty.h>
 #include <syscall/dispatch.h>
 #include <syscall/resource.h>
 #include <syscall/compat.h>
@@ -495,6 +501,330 @@ TEST_FUNC(test_libc_wrappers)
     assert_eq(8, rl.rlim_max);
 }
 
+/* ── 6. ARCH-10 Task 6: descriptor installation honours the soft limit ──
+ *
+ * These cases drive the PRODUCTION installation code linked into this
+ * binary (kernel/fs/file.c, kernel/net/socket.c, kernel/tty/pty.c):
+ * every descriptor installation must be judged against the current
+ * task's RLIMIT_NOFILE soft limit, and a refused installation must
+ * not leak the object it was given.
+ */
+
+/* Fresh fd table owned by the mock current task, with the soft limit
+ * set to `soft`.  The mock task IS the production task_t, so the
+ * production task_nofile_soft() snapshot is the one under test. */
+static files_t *install_table_new(uint64_t soft)
+{
+    files_t *fs = files_alloc();
+    assert_not_null(fs);
+
+    task_nofile_init(&g_current_task);
+    struct os01_rlimit64 lim = { .cur = soft, .max = OS01_NOFILE_CAPACITY };
+    assert_eq(0, task_nofile_update(&g_current_task, &lim, NULL));
+    assert_eq(soft, task_nofile_soft(&g_current_task));
+
+    g_current_task.files = fs;
+    return fs;
+}
+
+/* Lower (or raise) the soft limit of the mock current task. */
+static void install_set_soft(uint64_t soft)
+{
+    struct os01_rlimit64 lim = { .cur = soft, .max = OS01_NOFILE_CAPACITY };
+    assert_eq(0, task_nofile_update(&g_current_task, &lim, NULL));
+    assert_eq(soft, task_nofile_soft(&g_current_task));
+}
+
+/* Install a placeholder descriptor and return its fd. */
+static int install_placeholder(files_t *fs)
+{
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    f->type = FD_DEV;
+    f->flags = O_RDONLY;
+    int fd = fd_alloc(fs, f);
+    if (fd < 0) file_put(f);   // refused: the caller still owns it
+    return fd;
+}
+
+TEST_FUNC(test_install_fd_alloc_respects_soft_limit)
+{
+    files_t *fs = install_table_new(4);
+
+    for (int i = 0; i < 4; i++)
+        assert_eq(i, install_placeholder(fs));
+
+    /* The next descriptor does not fit below the soft limit. */
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    int rc = fd_alloc(fs, f);
+    assert_eq(-EMFILE, rc);
+    /* The refused install took no reference: the caller still owns it. */
+    assert_eq(1, f->refcount);
+    file_put(f);
+
+    /* Nothing was installed above the limit. */
+    assert_null(fs->fd[4]);
+    for (int i = 0; i < 4; i++)
+        assert_not_null(fs->fd[i]);
+}
+
+TEST_FUNC(test_install_pipe_needs_two_slots)
+{
+    files_t *fs = install_table_new(4);
+
+    /* 0..2 occupied: exactly one slot (3) is left below the limit. */
+    for (int i = 0; i < 3; i++)
+        assert_eq(i, install_placeholder(fs));
+
+    int kmalloc_before = fake_kmalloc_calls;
+    int kfree_before = fake_kfree_calls;
+
+    int fds[2] = { -1, -1 };
+    int64_t rc = do_pipe(fds);
+    assert_eq(-EMFILE, rc);
+
+    /* The slot the reader end briefly took is released again. */
+    assert_null(fs->fd[3]);
+    for (int i = 0; i < 3; i++)
+        assert_not_null(fs->fd[i]);
+
+    /* The pipe object itself is released: its buffer is freed only when
+     * BOTH file references are dropped (the pipe is freed when the last
+     * reader AND the last writer are gone).  A leaked writer file would
+     * leave the pipe allocated. */
+    assert_eq(kmalloc_before + 1, fake_kmalloc_calls);
+    assert_eq(kfree_before + 1, fake_kfree_calls);
+}
+
+TEST_FUNC(test_install_socket_failure_releases_socket)
+{
+    files_t *fs = install_table_new(4);
+
+    for (int i = 0; i < 4; i++)
+        assert_eq(i, install_placeholder(fs));
+
+    int new_before = fake_netconn_new_calls;
+    int delete_before = fake_netconn_delete_calls;
+
+    int64_t rc = do_socket(AF_INET, SOCK_STREAM, 6);
+    assert_eq(-EMFILE, rc);
+
+    /* The socket that could not be installed is released. */
+    assert_eq(new_before + 1, fake_netconn_new_calls);
+    assert_eq(delete_before + 1, fake_netconn_delete_calls);
+    for (int i = 0; i < 4; i++)
+        assert_not_null(fs->fd[i]);
+}
+
+TEST_FUNC(test_install_accept_failure_releases_socket)
+{
+    install_table_new(OS01_NOFILE_CAPACITY);
+
+    int64_t listen_fd = do_socket(AF_INET, SOCK_STREAM, 6);
+    assert_true(listen_fd >= 0);
+    assert_eq(0, do_bind((int)listen_fd, 0x0a000001, 1234));
+    assert_eq(0, do_listen((int)listen_fd, 4));
+
+    /* Lower the limit so the accepted descriptor does not fit.  The
+     * already-open listening socket stays usable. */
+    install_set_soft(1);
+
+    int delete_before = fake_netconn_delete_calls;
+    uint32_t peer_ip = 0;
+    uint16_t peer_port = 0;
+    int64_t rc = do_accept((int)listen_fd, &peer_ip, &peer_port);
+    assert_eq(-EMFILE, rc);
+
+    /* The accepted socket is released with the refused install. */
+    assert_eq(delete_before + 1, fake_netconn_delete_calls);
+}
+
+TEST_FUNC(test_install_ptmx_failure_releases_pty)
+{
+    files_t *fs = install_table_new(4);
+
+    for (int i = 0; i < 4; i++)
+        assert_eq(i, install_placeholder(fs));
+
+    /* Production PTMX open path (pty.c), reached through the ops table
+     * it registers with devfs. */
+    pty_init();
+    assert_not_null(fake_fd_install_ptmx_ops);
+
+    file_t *f = NULL;
+    int rc = fake_fd_install_ptmx_ops->open("/dev/ptmx", &f);
+    assert_eq(0, rc);
+    assert_not_null(f);
+    assert_eq(FD_PTY_MASTER, f->type);
+    assert_true(pty_table[0].allocated);
+
+    /* The descriptor install is refused. */
+    int fd = fd_alloc(fs, f);
+    assert_eq(-EMFILE, fd);
+    if (fd >= 0) {
+        fd_close(fs, fd);   // install wrongly accepted: close the slot
+    } else {
+        file_put(f);        // refused: the caller still owns the reference
+    }
+
+    /* The PTY is reclaimed: a master that never had a slave must not
+     * keep the pty slot and its two pipes alive. */
+    assert_false(pty_table[0].allocated);
+    assert_null(pty_table[0].master_to_slave);
+    assert_null(pty_table[0].slave_to_master);
+}
+
+TEST_FUNC(test_install_open_fd_survives_limit_lowering)
+{
+    files_t *fs = install_table_new(OS01_NOFILE_CAPACITY);
+
+    /* 0..11 occupied, so the pipe lands on 12 (read) and 13 (write). */
+    for (int i = 0; i < 12; i++)
+        assert_eq(i, install_placeholder(fs));
+
+    int fds[2] = { -1, -1 };
+    assert_eq(0, do_pipe(fds));
+    assert_eq(12, fds[0]);
+    assert_eq(13, fds[1]);
+
+    char payload = 'x';
+    assert_eq(1, fd_write(fs->fd[13], &payload, 1));
+
+    /* Lower the soft limit below the open descriptor numbers. */
+    install_set_soft(4);
+
+    /* The already-open descriptor stays installed and readable. */
+    assert_not_null(fs->fd[12]);
+    char got = 0;
+    assert_eq(1, fd_read(fs->fd[12], &got, 1));
+    assert_eq('x', got);
+
+    /* ... and stays closable. */
+    fd_close(fs, 12);
+    assert_null(fs->fd[12]);
+}
+
+TEST_FUNC(test_install_dup2_rejects_target_above_limit)
+{
+    files_t *fs = install_table_new(OS01_NOFILE_CAPACITY);
+
+    for (int i = 0; i < 12; i++)
+        assert_eq(i, install_placeholder(fs));
+
+    /* The descriptor that lives at 12 — the target of the dup2 below. */
+    file_t *target = file_alloc();
+    assert_not_null(target);
+    target->type = FD_DEV;
+    target->flags = O_RDONLY;
+    int tfd = fd_alloc(fs, target);
+    assert_eq(12, tfd);
+
+    install_set_soft(4);
+
+    /* The target is above the soft limit: refused. */
+    assert_eq(-EBADF, fd_dup2(fs, 0, 12));
+
+    /* The refusal must not close the descriptor that lives there. */
+    assert_not_null(fs->fd[12]);
+    assert_true(fs->fd[12] == target);
+    assert_eq(1, target->refcount);
+}
+
+TEST_FUNC(test_install_dup2_same_fd_installs_nothing)
+{
+    files_t *fs = install_table_new(4);
+
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    f->type = FD_DEV;
+    f->flags = O_RDONLY;
+    assert_eq(0, fd_alloc(fs, f));
+
+    /* oldfd == newfd on an open descriptor: no new installation. */
+    assert_eq(0, fd_dup2(fs, 0, 0));
+    assert_true(fs->fd[0] == f);
+    assert_eq(1, f->refcount);
+
+    /* oldfd == newfd on a closed descriptor: -EBADF. */
+    assert_eq(-EBADF, fd_dup2(fs, 3, 3));
+
+    /* oldfd is not open: -EBADF. */
+    assert_eq(-EBADF, fd_dup2(fs, 3, 1));
+}
+
+TEST_FUNC(test_install_dupfd_errno_split)
+{
+    files_t *fs = install_table_new(4);
+
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    f->type = FD_DEV;
+    f->flags = O_RDONLY;
+    assert_eq(0, fd_alloc(fs, f));
+
+    /* F_DUPFD with a minimum at the soft limit: unreachable. */
+    assert_eq(-EINVAL, fd_dup(fs, 0, 4));
+    assert_eq(-EINVAL, fd_dup(fs, 0, 9));
+
+    /* A valid minimum with no free slot below the limit. */
+    assert_eq(1, install_placeholder(fs));
+    assert_eq(2, install_placeholder(fs));
+    assert_eq(3, install_placeholder(fs));
+    assert_eq(-EMFILE, fd_dup(fs, 0, 1));
+
+    /* Plain dup with the table exhausted below the limit. */
+    assert_eq(-EMFILE, fd_dup(fs, 0, 0));
+
+    /* A valid minimum with a free slot below the limit still works. */
+    fd_close(fs, 3);
+    assert_eq(3, fd_dup(fs, 0, 3));
+}
+
+TEST_FUNC(test_install_fd_alloc_limit_range)
+{
+    files_t *fs = install_table_new(OS01_NOFILE_CAPACITY);
+
+    /* The explicit range decides: [0, 2) admits only slots 0 and 1. */
+    file_t *f0 = file_alloc();
+    assert_not_null(f0);
+    assert_eq(0, fd_alloc_limit(fs, f0, 0, 2));
+
+    file_t *f1 = file_alloc();
+    assert_not_null(f1);
+    assert_eq(1, fd_alloc_limit(fs, f1, 0, 2));
+
+    /* The next free slot is above the explicit bound. */
+    file_t *f2 = file_alloc();
+    assert_not_null(f2);
+    assert_eq(-EMFILE, fd_alloc_limit(fs, f2, 0, 2));
+    assert_eq(1, f2->refcount);   // the refused install took no reference
+    file_put(f2);
+
+    /* An empty range installs nothing. */
+    file_t *f3 = file_alloc();
+    assert_not_null(f3);
+    assert_eq(-EMFILE, fd_alloc_limit(fs, f3, 2, 2));
+    file_put(f3);
+
+    /* An exclusive bound of 0 forbids every installation. */
+    file_t *f4 = file_alloc();
+    assert_not_null(f4);
+    assert_eq(-EMFILE, fd_alloc_limit(fs, f4, 0, 0));
+    file_put(f4);
+
+    /* A minimum above the bound is refused as well. */
+    file_t *f5 = file_alloc();
+    assert_not_null(f5);
+    assert_eq(-EMFILE, fd_alloc_limit(fs, f5, 3, 2));
+    file_put(f5);
+
+    /* Nothing was installed above the bound. */
+    assert_null(fs->fd[2]);
+    assert_not_null(fs->fd[0]);
+    assert_not_null(fs->fd[1]);
+}
+
 /* ── Test Suite Registration ────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -505,6 +835,16 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_sys_resource_dispatch),
     TEST_ENTRY(test_compat_resource_dispatch),
     TEST_ENTRY(test_libc_wrappers),
+    TEST_ENTRY(test_install_fd_alloc_respects_soft_limit),
+    TEST_ENTRY(test_install_fd_alloc_limit_range),
+    TEST_ENTRY(test_install_pipe_needs_two_slots),
+    TEST_ENTRY(test_install_socket_failure_releases_socket),
+    TEST_ENTRY(test_install_accept_failure_releases_socket),
+    TEST_ENTRY(test_install_ptmx_failure_releases_pty),
+    TEST_ENTRY(test_install_open_fd_survives_limit_lowering),
+    TEST_ENTRY(test_install_dup2_rejects_target_above_limit),
+    TEST_ENTRY(test_install_dup2_same_fd_installs_nothing),
+    TEST_ENTRY(test_install_dupfd_errno_split),
 TEST_LIST_END
 
 int main(void)
