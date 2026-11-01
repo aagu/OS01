@@ -332,7 +332,10 @@ static void reset_test_state(void)
 
     device_boot_reset_for_test();
     pci_core_reset_for_test();
-    block_device_init();
+    // ARCH-10: block_device_init() is idempotent and never resets the
+    // registry, so the host harness uses the explicit reset hook to
+    // start every case from an empty registry.
+    block_device_reset_for_test();
     device_core_init();
 
     set_test_pci_drivers(NULL, 0);

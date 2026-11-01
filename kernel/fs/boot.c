@@ -40,11 +40,16 @@ void fs_boot_prepare(void)
 
 // Register every block device enumerated by the storage subsystem
 // (AHCI, virtio-blk, etc.) under /dev as a block device.
+//
+// The enumeration is snapshot based: block_device_count() and
+// block_device_get() take the registry lock separately, so a device
+// that is rolled back in between simply drops out of the walk.
 static void register_block_devices(void)
 {
     int n = block_device_count();
     for (int i = 0; i < n; i++) {
         block_device_t *dev = block_device_get(i);
+        if (!dev) continue;
         devfs_register_blkdev(dev->name, dev);
     }
 }

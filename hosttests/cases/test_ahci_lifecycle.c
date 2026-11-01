@@ -261,7 +261,10 @@ static void reset_test_state(void)
     s_simulate_identify_fail = false;
 
     device_core_init();
-    block_device_init();
+    // ARCH-10: block_device_init() is idempotent and never resets the
+    // registry, so the host harness uses the explicit reset hook to
+    // start every case from an empty registry.
+    block_device_reset_for_test();
 }
 
 /* Configure a fake port with a healthy drive */
