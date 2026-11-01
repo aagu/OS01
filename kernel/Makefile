@@ -607,6 +607,16 @@ endif
 endif
 endif
 
+# A dry-run sub-make (OS01_KERNEL_SUBMAKE_DRY, set by the root makefile's
+# '+'-prefixed recipes when make -n forces them to execute) only parses this
+# makefile. Root-owned prerequisites such as libk.a may legitimately not
+# exist yet — the root makefile owns building them for real — so give the
+# dry parse an empty rule instead of dying on "No rule to make target".
+# Never active in a real build: only the dry-run channel defines it.
+ifneq ($(OS01_KERNEL_SUBMAKE_DRY),)
+$(LIBC_BUILD_DIR)/lib/libk.a:
+endif
+
 # Stage 1: link without kallsyms, just to get symbol table.
 # $(LIBC_BUILD_DIR)/lib/libk.a is listed so that a libc-only change
 # (e.g., editing libc/stdio/vsprintf.c) triggers a relink without an

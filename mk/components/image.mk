@@ -130,7 +130,8 @@ $(LIBC_BUILD_DIR)/lib/libk.a: $(wildcard libc/stdio/*.c libc/string/*.c libc/cty
 # so the kernel link resolves -lk against $(LIBC_BUILD_DIR)/lib/libk.a.
 $(BUILD_DIR)/artifacts/kernel.elf: $(LIBC_BUILD_DIR)/lib/libk.a FORCE
 	@mkdir -p $(dir $@)
-	@$(call os01_submake,kernel,all ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
+	@$(call os01_submake,kernel,all ARCH=aarch64 \
+	  $(if $(DRY_RUN),OS01_KERNEL_SUBMAKE_DRY=1) $(OS01_SUBMAKE_ARGS))
 	@cmp -s $(KERNEL_BUILD_DIR)/kernel.elf $@ || cp $(KERNEL_BUILD_DIR)/kernel.elf $@
 
 # ── aarch64 UEFI firmware (profile build dir) ───────────────

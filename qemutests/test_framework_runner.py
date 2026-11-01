@@ -88,10 +88,15 @@ class FrameworkRunnerTests(unittest.TestCase):
 
         # Verify grandchild process is no longer running
         time.sleep(0.5)
+        # Zombie-aware probe: in the CI job container PID 1 never reaps
+        # reparented zombies, so a bare os.kill(pid, 0) reports phantom
+        # leaks for a grandchild that has already exited (see the same
+        # distinction in test_harness_process._alive).
         try:
-            os.kill(grandchild_pid, 0)
-            alive = True
-        except OSError:
+            with open(f"/proc/{grandchild_pid}/stat", "rb") as f:
+                state = f.read().rsplit(b")", 1)[-1].split()[0]
+            alive = state != b"Z"
+        except (FileNotFoundError, ProcessLookupError, IndexError):
             alive = False
         self.assertFalse(alive, f"Grandchild PID {grandchild_pid} is still alive after supervisor timeout")
 
