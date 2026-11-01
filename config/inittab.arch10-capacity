@@ -1,0 +1,2 @@
+# OS01 /etc/inittab (arch10-capacity test mode)
+tty1:once:/bin/test_arch10_capacity

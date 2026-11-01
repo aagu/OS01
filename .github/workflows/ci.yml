@@ -377,6 +377,7 @@ jobs:
           make test-qemu SUITE=gfx || exit 1
           make test-qemu SUITE=resolution || exit 1
           make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution || exit 1
+          make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity || exit 1
           make test-qemu SUITE=driver-model || exit 1
           make test-qemu SUITE=monitor || exit 1
           make test-qemu SUITE=terminal-present || exit 1

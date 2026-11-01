@@ -581,7 +581,15 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         // A wake firing here (post-ARM, pre-schedule) has
         // already set state=RUNNING and dequeued us, so
         // schedule() does not actually sleep us.
+#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+        void arch10_capacity_poll_arm_hook(uint64_t nfds);
+        arch10_capacity_poll_arm_hook(nfds);
+#endif
         schedule();
+#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+        void arch10_capacity_poll_wake_hook(int ready_count);
+        arch10_capacity_poll_wake_hook(0);
+#endif
 
         // ── DISARM after wake ──────────────────────────────────
         // Woken up — remove the task wait and the fd entries.

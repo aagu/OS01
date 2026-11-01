@@ -360,6 +360,15 @@ make test-host
 | `make test-qemu SUITE=terminal-present` | 隔离变体镜像 `build/<profile>/image/terminal-present/disk.img`（套件自带 `TERM_PRESENT_TEST=1` → `USER_DEBUG=1`，普通镜像串口保持干净） | Task 6 聚焦 QEMU 套件：GFX_PRESENT_RECT 像素正确性（QMP 截图）+ terminal 内 monitor ≥30 s 稳态字节/ns/窗口门控，对照 Task-3 baseline manifest；可通过 `TERMINAL_PRESENT_BASELINE_LOG` 覆盖 baseline 路径（默认 `/tmp/os01-terminal-present-baseline/serial.log`）|
 | `make test-qemu SUITE=gui` | 普通镜像（`-snapshot` 只读启动，1/2 核各自拉 QEMU） | GUI-1 LVGL 平台后端与故障注入验收（SMP 1/2 矩阵；boot、smoke、normal_exit、wait_quit、busy_owner、killed_owner、fatal_owner） |
 | `make test-qemu SUITE=intr-x86` | 隔离故障变体镜像 `build/<profile>/image/intr-x86-fault-{bp,nmi}/disk.img`（套件自建，普通镜像不受影响） | 中断分派第二期的两个**破坏性**入口验收：内核 `#BP`（`int3`）与 QMP `inject-nmi` 注入的**真实硬件 NMI**。每个用例单核启动、各自编译自己的 kernel/image 变体（选择器 `X86_INTR_FAULT_TEST=bp\|nmi`），判定只看 guest 串口里的完整原始 fatal 诊断（`do_int3(3)` / `do_nmi(2)`）+ ≥1 s 观察窗口；`#BP` 的保存 RIP 必须等于从**变体 ELF** 解析出的续执行标签 `x86_intr_fault_bp_resume`（绝不硬编码）。超时/静默/正常完成都不算通过。运行器：`qemutests/x86_intr_fault.py`（归档在 `build/<profile>/logs/tests/intr-x86/`） |
+| `make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity` | `build/<profile>/image/arch10-capacity/disk.img` | 隔离容量验收变体（`ARCH10_CAPACITY_TEST=1`）：12 假块设备 + 40 devfs 节点 + poll32/64 入睡/唤醒 + RLIMIT_NOFILE (64) |
+
+### `arch10-capacity`：隔离容量与工程完整性验收（ARCH-10 / Task 10）
+
+`test-qemu SUITE=arch10-capacity` 运行在完全隔离的容量变体构建下：
+
+- **选择器**：`ARCH10_CAPACITY_TEST=1`（仅支持 x86_64）。给 kernel 和 user 注入 `-DOS01_NOFILE_CAPACITY=64 -DARCH10_CAPACITY_TEST=1`，使用独立的变体输出目录 `kernel/arch10-capacity/`、`user/arch10-capacity/` 与 `image/arch10-capacity/disk.img`。普通构建绝不包含测试夹具与测试二进制。
+- **内核夹具**：`kernel/selftest/arch10_capacity_fixture.c` 仅在变体编译时参与链接，注册 12 个假块设备（`fakeblk0`..`fakeblk11`）与 40 个 devfs 字符节点（`arch10-node-00`..`arch10-node-39`），并挂载握手与入睡/唤醒跟踪钩子。
+- **用户态套件**：`/bin/test_arch10_capacity` 由 `config/inittab.arch10-capacity` 启动，验证 32 项与 64 项 poll 真正入睡再被子进程管道写入唤醒、NOFILE 软硬限制约束与越界拒绝、高位描述符保持访问，以及读取全部 12 个块设备与 40 个 devfs 节点的唯一负载数据。
 
 ### `intr-x86`：隔离的破坏性中断入口验收（Task 5 / spec §9.3）
 
@@ -378,6 +387,7 @@ systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS
 make OS01_SYSTEST=1 image          # → build/x86_64-clang/image/systest/disk.img
 make OS01_NETTEST=1 image          # → build/x86_64-clang/image/nettest/disk.img
 make INITTAB_FILE=config/inittab.test image   # → .../image/inittab-test/disk.img
+make ARCH10_CAPACITY_TEST=1 image  # → .../image/arch10-capacity/disk.img
 ```
 
 #### 测试框架（runner、归档、退出码与观察窗口）
@@ -624,6 +634,7 @@ make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 
 make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
 make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
+make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity # ARCH-10 隔离容量与工程完整性验收
 make test-static                    # 15 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP

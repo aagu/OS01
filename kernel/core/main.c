@@ -146,6 +146,11 @@ int kernel_main(const struct boot_context *bootctx)
     if (fs_boot_prepare() != 0)
         kpanic("fs_boot_prepare failed\n");
 
+#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+    void arch10_capacity_fixture_init(void);
+    arch10_capacity_fixture_init();
+#endif
+
     if (pty_init() != 0)
         log_err("pty_init failed\n");
 

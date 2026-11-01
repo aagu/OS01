@@ -102,11 +102,12 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertIn("test_page_table_runner", exit_status_ids)
 
         # Full set check: the pinned count of registered host-test binaries.
-        # 153 at the ARCH-10 branch base (8bf0b9cd) plus the four binaries
-        # this branch added: test_irq_capacity (Task 2), test_nofile_limits
-        # (Task 5/6), test_poll_capacity and test_poll_nofile64 (Task 7).
+        # 153 at the ARCH-10 branch base (8bf0b9cd) plus the five binaries
+        # this branch added: test_irq_capacity (Task 2), test_intr_irq_x86
+        # (Task 3), test_nofile_limits (Task 5/6), test_poll_capacity and
+        # test_poll_nofile64 (Task 7).
         # The pin stays a pin — it catches accidental additions/removals.
-        self.assertEqual(len(ids), 157, f"Expected 157 unique test binaries, got {len(ids)}")
+        self.assertEqual(len(ids), 158, f"Expected 158 unique test binaries, got {len(ids)}")
         self.assertTrue({"test_switch_complete", "test_kthread_ctor",
                          "test_sched_layout_offsets"}.issubset(protocol_ids))
 
@@ -211,6 +212,12 @@ class HostBuildContractTests(unittest.TestCase):
         """-MP ensures phony targets for headers in depfiles so header moves don't crash make."""
         bld_dir = ROOT / "build" / "x86_64-clang" / "host-test"
         dep_file = bld_dir / "test_bootinfo_abi.d"
+        if not dep_file.exists():
+            cmd = ["make", "-B", "-C", "hosttests",
+                   "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+                   "PROFILE=x86_64-clang",
+                   str(bld_dir / "test_bootinfo_abi.o")]
+            subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         self.assertTrue(dep_file.exists())
         dep_content = dep_file.read_text()
         # -MP generates empty targets like:

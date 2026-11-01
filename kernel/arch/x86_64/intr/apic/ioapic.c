@@ -233,16 +233,24 @@ int ioapic_init(void)
 
     // 2. Prepare descriptor registry and x86 routing table
     struct irq_gsi_range ranges[MAX_IOAPICS];
+    size_t range_count = apic_info.ioapic_count;
     for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
         ranges[i].base = apic_info.ioapics[i].gsi_base;
         ranges[i].count = apic_info.ioapics[i].max_redir + 1;
     }
+#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+    if (range_count < MAX_IOAPICS) {
+        ranges[range_count].base = 32;
+        ranges[range_count].count = 24;
+        range_count++;
+    }
+#endif
 
-    int rc = irq_registry_init_ranges(ranges, apic_info.ioapic_count);
+    int rc = irq_registry_init_ranges(ranges, range_count);
     if (rc < 0)
         return rc;
 
-    rc = x86_irq_routes_init(ranges, apic_info.ioapic_count);
+    rc = x86_irq_routes_init(ranges, range_count);
     if (rc < 0)
         return rc;
 

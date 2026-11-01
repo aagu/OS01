@@ -124,7 +124,7 @@ KERNEL_C_SOURCES := \
     $(wildcard block/*.c) \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
-    $(wildcard selftest/*.c) \
+    $(filter-out selftest/arch10_capacity_fixture.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \
@@ -146,6 +146,9 @@ KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 # below (it only matches arch/x86_64/...).  The source compiles on any
 # arch (no x86 headers); aarch64 can adopt it when it gains a consumer.
 KERNEL_C_SOURCES += arch/thermal.c
+ifeq ($(ARCH10_CAPACITY_TEST),1)
+KERNEL_C_SOURCES += selftest/arch10_capacity_fixture.c
+endif
 endif
 
 # Architecture C and asm sources: explicit, one-level responsibility groups.
@@ -297,6 +300,10 @@ ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 # Same pattern: appended after ALL_CFLAGS is defined and after the source
 # list was assembled.  Empty for the production (0) build.
 ALL_CFLAGS += $(FB_RESOLUTION_TEST_FLAGS)
+
+ifeq ($(ARCH10_CAPACITY_TEST),1)
+ALL_CFLAGS += -DOS01_NOFILE_CAPACITY=64 -DARCH10_CAPACITY_TEST=1
+endif
 
 # ── lwIP networking stack ────────────────────────────────────
 LWIP_SRC_DIR  := ../thirdpart/lwip/src

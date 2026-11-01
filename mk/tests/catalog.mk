@@ -14,6 +14,7 @@ driver-model	x86_64-clang	rootfs	driver-model	1,2,4	512	180	isolated	shared	nigh
 monitor	x86_64-clang	rootfs	none	1,2,8	512	90	read-only	shared	nightly	test-qemu SUITE=monitor	_test-suite-prepare	_test-suite-run
 terminal-present	x86_64-clang	rootfs	terminal-present	1	512	60	isolated	exclusive	nightly	test-qemu SUITE=terminal-present	_test-suite-prepare	_test-suite-run
 intr-x86	x86_64-clang	rootfs	intr-x86	1	512	120	isolated	shared	nightly	test-qemu SUITE=intr-x86	_test-suite-prepare	_test-suite-run
+arch10-capacity	x86_64-clang	rootfs	arch10-capacity	1,2	512	120	isolated	shared	nightly	make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity	_test-suite-prepare	_test-suite-run
 gui	x86_64-clang	rootfs	none	1,2	512	60	read-only	shared	nightly	test-qemu SUITE=gui	_test-suite-prepare	_test-suite-run
 gui-desktop	x86_64-clang	rootfs	none	1	512	60	read-only	shared	nightly	test-qemu SUITE=gui-desktop	_test-suite-prepare	_test-suite-run
 kernel-selftest	x86_64-clang	rootfs	selftest	8	512	75	isolated	shared	pr	test-kernel-selftest	-	-
