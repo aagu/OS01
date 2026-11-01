@@ -15,6 +15,7 @@
  */
 
 #include <sched/task.h>
+#include <sched/resource.h>
 #include <sched/internal.h>
 #include <sched/boot.h>
 #include <percpu/percpu.h>
@@ -145,6 +146,7 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
 
     /* 4. Identity, metadata and affinity. */
     task_identity_init(tsk, name);
+    task_nofile_init(tsk);
     tsk->pid        = alloc_pid();
     tsk->parent     = current;
     tsk->pgrp       = current->pgrp;

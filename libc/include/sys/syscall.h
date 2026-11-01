@@ -83,18 +83,31 @@
 #define SYS_readlink      72   // readlink(path, buf, bufsz)
 #define SYS_lstat         73   // lstat(path, buf)
 #define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
+#define SYS_getrlimit     75   // getrlimit(resource, rlim)
+#define SYS_setrlimit     76   // setrlimit(resource, rlim)
 
 // Compile-time cross-check: libc SYS_* values must mirror kernel/include/uapi/syscall.h.
 // If the kernel side changes these numbers, update this assertion or libc will
 // dispatch the wrong syscall. test/cases/test_bootinfo_abi.c documents the same
 // pattern (see also the explicit _Static_assert block below).
-_Static_assert(SYS_symlink  == 71, "SYS_symlink drift vs kernel/include/uapi/syscall.h");
-_Static_assert(SYS_readlink == 72, "SYS_readlink drift vs kernel/include/uapi/syscall.h");
-_Static_assert(SYS_lstat    == 73, "SYS_lstat drift vs kernel/include/uapi/syscall.h");
-_Static_assert(SYS_fstatat  == 74, "SYS_fstatat drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_symlink   == 71, "SYS_symlink drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_readlink  == 72, "SYS_readlink drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_lstat     == 73, "SYS_lstat drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_fstatat   == 74, "SYS_fstatat drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_getrlimit == 75, "SYS_getrlimit drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_setrlimit == 76, "SYS_setrlimit drift vs kernel/include/uapi/syscall.h");
 
 // ── Generic syscall helper ─────────────────────────────────
 
+#ifdef OS01_HOST_TEST
+int64_t host_test_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3) __attribute__((weak));
+static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+{
+    if (host_test_syscall)
+        return host_test_syscall(nr, arg1, arg2, arg3);
+    return -38; /* -ENOSYS */
+}
+#else
 static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     int64_t ret;
@@ -103,6 +116,12 @@ static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
         : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3)
         : "memory");
     return ret;
+}
+#endif
+
+// 2-arg alias for clarity at call sites
+static inline int64_t syscall2(uint64_t nr, uint64_t arg1, uint64_t arg2) {
+    return syscall(nr, arg1, arg2, 0);
 }
 
 // 3-arg alias for clarity at call sites (same as syscall(nr, a1, a2, a3))

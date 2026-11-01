@@ -66,8 +66,16 @@ _Static_assert(sizeof(thread_t) == 80, "x86 thread_t size drift");
  * IST exception stack use the TSS.rsp0 route instead (see
  * kernel/arch/x86_64/intr/trap.c); on the boot/AP stacks there is no
  * task at all (facade contract). */
+#ifdef OS01_HOST_TEST
+extern task_t *host_test_current;
+#endif
+
 static inline task_t *arch_current_task(void)
 {
+#ifdef OS01_HOST_TEST
+    if (host_test_current)
+        return host_test_current;
+#endif
     uint64_t sp;
     __asm__ __volatile__("movq %%rsp, %0" : "=r"(sp));
     return (task_t *)(sp & ~(STACK_SIZE - 1));

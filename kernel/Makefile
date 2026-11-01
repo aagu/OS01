@@ -74,7 +74,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
                    sched/core.c sched/boot.c sched/kthread.c sched/diag.c \
-                   sched/identity.c \
+                   sched/identity.c sched/resource.c \
                    sched/fair.c sched/balance.c \
                    intr/dispatch.c \
                    core/stack_chk.c \

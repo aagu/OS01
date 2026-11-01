@@ -8,7 +8,9 @@
 
 // ── Constants ──────────────────────────────────────────────
 
-#define NOFILE    16       // max open files per process
+#include <config/limits.h>
+
+#define NOFILE    OS01_NOFILE_CAPACITY // max open files per process
 #define PIPE_SIZE  512     // pipe ring buffer size (bytes)
 
 // open() flags

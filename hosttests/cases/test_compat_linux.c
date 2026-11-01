@@ -3,7 +3,29 @@
 #include <string.h>
 #include <syscall/compat.h>
 #include <syscall/dispatch.h>
+#include <syscall/resource.h>
 #include <uapi/syscall.h>
+#include <uapi/resource.h>
+#include <config/limits.h>
+#include <sched/task.h>
+#include <sched/resource.h>
+
+static task_t compat_fake_task;
+task_t *host_test_current = &compat_fake_task;
+
+bool syscall_check_user_range(uint64_t addr, uint64_t size, bool writable) {
+    (void)addr; (void)size; (void)writable; return true;
+}
+ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
+                              void (*on_fault)(void *), void *arg) {
+    (void)on_fault; (void)arg;
+    if (src) memcpy(dst, src, n); return (ssize_t)n;
+}
+ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
+                            void (*on_fault)(void *), void *arg) {
+    (void)on_fault; (void)arg;
+    if (dst) memcpy(dst, src, n); return (ssize_t)n;
+}
 
 /* Mock families to intercept dispatch calls from production compatibility layer */
 static syscall_ctx_t *last_dispatched_ctx;
@@ -15,6 +37,7 @@ int64_t sys_time_dispatch(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; retur
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
 int64_t sys_net_dispatch(syscall_ctx_t *ctx)  { last_dispatched_ctx = ctx; return mock_dispatch_return; }
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
+int64_t sys_resource_dispatch(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
 
 int main(void)
 {
@@ -110,7 +133,9 @@ int main(void)
         { 87,  SYS_unlink },
         { 88,  SYS_symlink },
         { 89,  SYS_readlink },
+        { 97,  SYS_getrlimit },
         { 110, SYS_getppid },
+        { 160, SYS_setrlimit },
         { 162, SYS_nanosleep },
         { 164, SYS_getifaddr },
         { 201, SYS_times },
@@ -179,6 +204,38 @@ int main(void)
     last_dispatched_ctx = NULL;
     if (compat_linux_dispatch(&ctx) != 12345 || ctx.nr != SYS_waitpid) {
         fprintf(stderr, "FAIL: wait4 must remap to SYS_waitpid\n");
+        return 1;
+    }
+
+    /* 7. Test domain adapter: prlimit64 (nr 302) */
+    task_nofile_init(&compat_fake_task);
+    compat_fake_task.pid = 42;
+    if (!compat_linux_has_syscall(302)) {
+        fprintf(stderr, "FAIL: compat_linux_has_syscall(302) returned false\n");
+        return 1;
+    }
+    ctx = (syscall_ctx_t){
+        .nr = 302,
+        .args = { 999, OS01_RLIMIT_NOFILE, 0, 0 }, // pid=999 (other) -> ESRCH
+    };
+    if (compat_linux_dispatch(&ctx) != -ESRCH) {
+        fprintf(stderr, "FAIL: prlimit64 with other pid must fail with -ESRCH\n");
+        return 1;
+    }
+    ctx = (syscall_ctx_t){
+        .nr = 302,
+        .args = { 0, 999, 0, 0 }, // invalid resource -> EINVAL
+    };
+    if (compat_linux_dispatch(&ctx) != -EINVAL) {
+        fprintf(stderr, "FAIL: prlimit64 with bad resource must fail with -EINVAL\n");
+        return 1;
+    }
+    ctx = (syscall_ctx_t){
+        .nr = 302,
+        .args = { 0, OS01_RLIMIT_NOFILE, 0, 0 }, // self query -> 0
+    };
+    if (compat_linux_dispatch(&ctx) != 0) {
+        fprintf(stderr, "FAIL: prlimit64 query must succeed with 0\n");
         return 1;
     }
 

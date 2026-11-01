@@ -25,4 +25,86 @@
 #define SYS_chdir   14
 #define SYS_getcwd  15
 
+// ── Phase 4: filesystem metadata ─────────────────────────────
+#define SYS_stat         16   // stat(path, buf)
+#define SYS_fstat        17   // fstat(fd, buf)
+#define SYS_lseek        18   // lseek(fd, offset, whence)
+#define SYS_fcntl        19   // fcntl(fd, cmd, arg)
+#define SYS_ioctl        20   // ioctl(fd, request, arg)
+#define SYS_getdents64   21   // getdents64(fd, buf, count)
+#define SYS_access       22   // access(path, mode)
+
+// ── Phase 5: filesystem write operations ─────────────────────
+#define SYS_unlink      23
+#define SYS_mkdir       24
+#define SYS_rmdir       25
+#define SYS_rename      26
+#define SYS_truncate    27
+#define SYS_ftruncate   28
+
+// ── Phase 6: remaining syscalls ──────────────────────────────
+#define SYS_time            29
+#define SYS_gettimeofday    30
+#define SYS_nanosleep       31
+#define SYS_chmod           32
+#define SYS_fchmod          33
+#define SYS_times           34
+#define SYS_uname           35
+#define SYS_getppid         36
+#define SYS_umask           37
+#define SYS_kill            38
+#define SYS_signal          39
+#define SYS_sigprocmask 42
+#define SYS_sigreturn  43
+#define SYS_sync            40
+#define SYS_reboot          41
+
+// ── Phase 7: mmap / mprotect / munmap ──────────────────────────
+#define SYS_mmap         44
+#define SYS_mprotect     45
+#define SYS_munmap       46
+
+// ── Phase 8: futex
+#define SYS_futex        47
+
+// ── Phase 9: poll / select
+#define SYS_poll         48
+#define SYS_ppoll        49
+#define SYS_select       50
+#define SYS_pselect6     51
+
+// ── Phase 10: socket networking ────────────────────────────────
+#define SYS_socket        52
+#define SYS_bind          53
+#define SYS_connect       54
+#define SYS_listen        55
+#define SYS_accept        56
+#define SYS_sendto        57
+#define SYS_recvfrom      58
+#define SYS_setsockopt    59
+#define SYS_getsockopt    60
+#define SYS_getsockname   61
+#define SYS_getpeername   62
+#define SYS_getifaddr     63
+#define SYS_shutdown      64
+#define SYS_clock_gettime 65
+#define SYS_getrandom     66
+#define SYS_setpgid       67
+#define SYS_getpgid       68
+#define SYS_setsid        69
+#define SYS_getsid        70
+
+// ── Symlink support ───────────────────────────────────────
+#define SYS_symlink       71   // symlink(target, linkpath)
+#define SYS_readlink      72   // readlink(path, buf, bufsz)
+#define SYS_lstat         73   // lstat(path, buf)
+#define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
+#define SYS_getrlimit     75   // getrlimit(resource, rlim)
+#define SYS_setrlimit     76   // setrlimit(resource, rlim)
+
+// ── reboot(2) commands ──────────────────────────────────────
+#define RB_AUTOBOOT    0x01234567
+#define RB_POWER_OFF   0x4321FEDC
+#define RB_HALT_SYSTEM 0xCDEF0123
+
 #endif

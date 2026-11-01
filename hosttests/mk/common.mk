@@ -19,6 +19,7 @@ HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter \
                -Wno-address-of-packed-member -Wno-gnu-statement-expression \
                -Wno-macro-redefined -Wno-dangling-else \
                -Wno-non-literal-null-conversion -Wno-incompatible-library-redeclaration \
+               -DOS01_HOST_TEST \
                -MMD -MP
 
 POLL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
