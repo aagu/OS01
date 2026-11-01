@@ -466,9 +466,14 @@ jobs:
             --expected-commit "${{ github.sha }}" \
             --expected-profile x86_64-clang \
             --expected-variant normal
+          # upload-artifact sets the artifact root to the least common
+          # ancestor of the paths: both aarch64 files live under
+          # build/aarch64-clang/image/, so download-artifact extracts them
+          # FLAT into the workspace root (unlike the x86_64 artifact,
+          # whose root-level disk.img keeps the deep manifest path).
           python3 qemutests/ci_artifact.py verify \
-            --manifest build/aarch64-clang/image/aarch64-uefi.img.manifest.json \
-            --image build/aarch64-clang/image/aarch64-uefi.img \
+            --manifest aarch64-uefi.img.manifest.json \
+            --image aarch64-uefi.img \
             --expected-commit "${{ github.sha }}" \
             --expected-profile aarch64-clang \
             --expected-variant normal
@@ -480,7 +485,7 @@ jobs:
           path: |
             disk.img
             build/x86_64-clang/image/disk.img.manifest.json
-            build/aarch64-clang/image/aarch64-uefi.img
-            build/aarch64-clang/image/aarch64-uefi.img.manifest.json
+            aarch64-uefi.img
+            aarch64-uefi.img.manifest.json
           if-no-files-found: error
           retention-days: 30
