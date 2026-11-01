@@ -269,17 +269,13 @@ static uint64_t ap_cpu_probe_worker(uint64_t target)
         ap_worker_on_target++;
     else
         ap_worker_bad_cpu++;
-    /* P1 (spec §4): an AP-pinned worker must be refused by
-     * blocker_wait with -EOPNOTSUPP and NO state change; the BSP
-     * worker sees the already-true condition return 0 immediately. */
+    /* P2 (spec §5.2a): the AP blocker_wait refusal is gone — the
+     * worker sees the already-true condition return 0 immediately,
+     * without ever blocking and with no blocker installed. */
     int rc = blocker_wait(blocker_condition, BLOCKER_NANOSLEEP, false);
-    if (rc == -EOPNOTSUPP) {
-        if (current->state != TASK_RUNNING ||
-            current->blocker.type != BLOCKER_NONE)
-            ap_worker_bad_blocker++;
-    } else if (rc != 0) {
+    if (rc != 0 || current->state != TASK_RUNNING ||
+        current->blocker.type != BLOCKER_NONE)
         ap_worker_bad_blocker++;
-    }
     ap_worker_finished++;
     return 0;
 }

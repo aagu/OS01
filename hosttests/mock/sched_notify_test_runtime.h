@@ -238,6 +238,7 @@ typedef struct mock_percpu {
     uint32_t arch_processor_id;
     uint32_t online;
     uint32_t scheduler_ok;
+    uint32_t ipi_ready;      /* P2: the kick backend's admission gate */
     uint64_t need_resched;
     rbtree_root_t run_queue;
     task_t *idle;
@@ -279,8 +280,22 @@ arch_irq_state_t arch_local_irq_save(void);
 void arch_local_irq_restore(arch_irq_state_t state);
 void arch_local_irq_enable(void);
 
-/* idle_task_resume's halt (skipped <arch/cpu.h>); inert on the host. */
-static inline void arch_cpu_halt(void) { }
+/* idle_task_resume's halt (skipped <arch/cpu.h>); the P2 kick backend
+ * fail-stops through it and NEVER RETURNS in production.  On the host
+ * an armed halt longjmps back to the test point (the production loop
+ * would otherwise park the runner). */
+extern int mock_halt_armed;
+extern void (*mock_halt_escape)(void);
+static inline void arch_cpu_halt(void)
+{
+    if (mock_halt_armed) {
+        mock_halt_armed = -1;   /* observed stop */
+        if (mock_halt_escape)
+            mock_halt_escape();
+    }
+    for (;;)
+        ;   /* production semantics: the CPU never resumes */
+}
 
 /* ── Production interfaces under test ─────────────────────────── */
 void schedule(void);
@@ -319,6 +334,10 @@ bool arch_sched_scan_blockers(void);
 
 /* x86 IPI surface (spy in the test TU). */
 void ipi_send(uint32_t dest_apic_id, uint8_t vector);
+
+/* aarch64 broadcast surface (spy in the test TU; the REAL ipi.c is
+ * exercised by the resched-sgi transport test). */
+void ipi_broadcast(uint32_t vector, uint64_t target_mask);
 
 /* ── Log surface (counting spies in the test TU) ──────────────── */
 void mock_log_err_impl(const char *fmt, ...);
@@ -383,6 +402,8 @@ void arch_local_irq_enable(void) { mock_irq_enable_calls++; mock_irq_state = 0; 
 
 /* ── Log counters ── */
 int mock_log_err_calls, mock_log_warn_calls, mock_log_info_calls;
+int mock_halt_armed;
+void (*mock_halt_escape)(void);
 void mock_log_err_impl(const char *fmt, ...)  { (void)fmt; mock_log_err_calls++; }
 void mock_log_warn_impl(const char *fmt, ...) { (void)fmt; mock_log_warn_calls++; }
 void mock_log_info_impl(const char *fmt, ...) { (void)fmt; mock_log_info_calls++; }
@@ -446,6 +467,23 @@ void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node)
     (void)node;
 }
 
+/* ── aarch64 broadcast spy (P2 kick contract) ── */
+int mock_ipi_broadcast_calls;
+uint32_t mock_broadcast_vector;
+uint64_t mock_broadcast_mask;
+uint64_t mock_broadcast_need_at_call;   /* dst need_resched snapshot */
+void ipi_broadcast(uint32_t vector, uint64_t target_mask)
+{
+    mock_ipi_broadcast_calls++;
+    mock_broadcast_vector = vector;
+    mock_broadcast_mask = target_mask;
+    if (target_mask && (target_mask & (target_mask - 1)) == 0) {
+        unsigned c = __builtin_ctzll(target_mask);
+        if (c < NR_CPUS)
+            mock_broadcast_need_at_call = percpu_data[c].need_resched;
+    }
+}
+
 /* ── x86 IPI spy ── */
 int mock_ipi_send_calls;
 uint32_t mock_ipi_dest_apic_id;
@@ -501,6 +539,8 @@ void sched_notify_reset(void)
     mock_irq_save_calls = mock_irq_restore_calls = mock_irq_enable_calls = 0;
     mock_irq_state = 0;
     mock_log_err_calls = mock_log_warn_calls = mock_log_info_calls = 0;
+    mock_halt_armed = 0;
+    mock_halt_escape = NULL;
     mock_switch_calls = 0;
     mock_switch_prev = mock_switch_next = NULL;
     mock_update_curr_calls = 0;
@@ -514,6 +554,10 @@ void sched_notify_reset(void)
     mock_ipi_dest_apic_id = 0;
     mock_ipi_vector = 0;
     mock_ipi_need_resched_at_send = 0;
+    mock_ipi_broadcast_calls = 0;
+    mock_broadcast_vector = 0;
+    mock_broadcast_mask = 0;
+    mock_broadcast_need_at_call = 0;
 #ifdef SCHED_NOTIFY_TEST_COMMON_SPIES
     mock_arch_notify_calls = 0;
     mock_arch_notified_cpu = 0;

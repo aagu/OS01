@@ -493,3 +493,43 @@ $(TEST_BLD)/test_aarch64_sched_observer.elf: \
 .PHONY: test-aarch64-sched-observer
 test-aarch64-sched-observer: $(TEST_BLD)/test_aarch64_sched_observer.elf
 	$<
+
+# ── P2 Task 2: blocker protocol + wake producers ────────────────
+# Compiles the REAL core.c against the blocker mock; every case drives
+# the production blocker_wait / blocker_wake / task_wake /
+# task_finish_switch — never a reimplementation.
+$(eval $(call register_host_test,test_blocker_remote_wake,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_blocker_remote_wake.elf
+
+BLOCKER_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+BLOCKER_PROD_CFLAGS := $(BLOCKER_CFLAGS) \
+    -include $(TEST_MOCK)/blocker_runtime.h
+
+$(TEST_BLD)/blocker_core_production.o: $(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/blocker_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCKER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_blocker_remote_wake.o: $(TEST_CASES)/test_blocker_remote_wake.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(BLOCKER_CFLAGS) -c $< -o $@
+
+# --wrap=schedule: the spy counts calls while the production core.o
+# keeps calling (the cases that need the REAL schedule() call
+# __real_schedule through the wrapper).
+$(TEST_BLD)/blocker_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCKER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_blocker_remote_wake.elf: $(TEST_BLD)/test_blocker_remote_wake.o \
+		$(TEST_BLD)/blocker_core_production.o \
+		$(TEST_BLD)/blocker_balance_production.o
+	$(HOST_CC) -Wl,--wrap=schedule -o $@ $^
+
+.PHONY: test-blocker-remote-wake
+test-blocker-remote-wake: $(TEST_BLD)/test_blocker_remote_wake.elf
+	$<

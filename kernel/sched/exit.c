@@ -98,8 +98,11 @@ uint64_t do_exit(uint64_t exit_code)
         // Use blocker_wake which checks condition callback before waking.
         // This is the explicit fast path; sched_unblock_blocked() in
         // schedule() is the reliable fallback.
-        if (current->parent->blocker.type != BLOCKER_NONE)
-            blocker_wake(current->parent);
+        /* P2: the blocker.type pre-check moved into
+         * blocker_wake_locked (a lock-free pre-check could read a
+         * stale field); the parent link guarantees the task is
+         * alive across the call. */
+        blocker_wake(current->parent);
     }
 
     // Stop using this address space before any of its pages can be reused.

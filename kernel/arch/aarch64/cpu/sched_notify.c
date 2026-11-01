@@ -36,8 +36,13 @@ void aarch64_sched_kick(unsigned cpu)
     if ((int)cpu == (int)cpu_id())
         return;   /* local: need_resched is already published */
     /* Make the need_resched publication globally visible before the
-     * MMIO write (spec §5.1: dsb ishst before GICD_SGIR). */
+     * MMIO write (spec §5.1: dsb ishst before GICD_SGIR).  The host
+     * build of this TU (backend contract tests) has no barrier: the
+     * fixture drives the admission/order logic, the real barrier is
+     * proven by the ARM gates. */
+#ifdef __aarch64__
     __asm__ __volatile__("dsb ishst" ::: "memory");
+#endif
     ipi_broadcast(IPI_VECTOR_RESCHED, 1ULL << cpu);
 }
 

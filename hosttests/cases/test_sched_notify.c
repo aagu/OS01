@@ -136,14 +136,14 @@ static void suite_notify_not_ready(void)
     assert_true(mock_log_err_calls >= 3);
 }
 
-/* ── 5. blocker_wait refuses when this CPU cannot scan ─────────── */
+/* ── 5. blocker_wait ignores the scan policy since P2 ──────────── */
 static void suite_blocker_wait_policy_closed(void)
 {
-    TEST_SUITE("blocker_wait without scan admission returns -EOPNOTSUPP");
+    TEST_SUITE("blocker_wait works even with the scan policy closed (P2)");
     sched_notify_reset();
-    mock_arch_scan_blockers = 0;    /* policy closed (aarch64 AP) */
+    mock_arch_scan_blockers = 0;    /* policy closed (a former AP) */
     cb_calls = 0;
-    cb_return = true;
+    cb_return = true;               /* already-true condition */
     task_t sleeper;
     memset(&sleeper, 0, sizeof(sleeper));
     sleeper.state = TASK_RUNNING;
@@ -151,9 +151,12 @@ static void suite_blocker_wait_policy_closed(void)
     sleeper.cpu = 1;
     mock_sched_current = &sleeper;
 
+    /* P2 (spec §5.2a): the SGI wakeup delivered the notification
+     * cross-CPU, so the P1 refusal is gone — an already-true
+     * condition returns 0 through the normal path. */
     int rc = blocker_wait(check_cb, BLOCKER_WAITPID, false);
-    assert_eq(-EOPNOTSUPP, rc);
-    assert_eq(0, cb_calls);                    /* callback never read */
+    assert_eq(0, rc);
+    assert_eq(1, cb_calls);                    /* callback consulted */
     assert_eq(TASK_RUNNING, sleeper.state);    /* state untouched */
     assert_eq(BLOCKER_NONE, sleeper.blocker.type);
     assert_true(sleeper.blocker.check == NULL);

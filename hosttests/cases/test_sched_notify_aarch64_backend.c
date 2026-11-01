@@ -13,23 +13,73 @@
 #include "test_framework.h"
 #include "../mock/sched_notify_test_runtime.h"
 #include <errno.h>
+#include <setjmp.h>
+
+/* The kick fail-stop: the production loop never returns, so the test
+ * escapes through a longjmp from the mock halt. */
+extern int mock_halt_armed;
+extern void (*mock_halt_escape)(void);
+static jmp_buf halt_jb;
+static void halt_escape(void) { longjmp(halt_jb, 1); }
 
 int main(void)
 {
-    TEST_SUITE("aarch64 notify backend is the documented polling no-op");
+    TEST_SUITE("aarch64 kick delivers SGI4 to an IPI-ready remote target");
     memset(percpu_data, 0, sizeof(percpu_data));
     for (uint32_t i = 0; i < NR_CPUS; i++)
         percpu_data[i].cpu_id = i;
     num_cpus = 4;
     mock_sched_this_cpu = &percpu_data[0];
+    percpu_data[2].ipi_ready = 1;
+    percpu_data[2].need_resched = 1;   /* published by the common layer */
 
-    /* The hook must return without touching any fixture state: a
-     * caller-side canary proves the P1 polling contract (the common
-     * layer owns the need_resched publication). */
-    percpu_data[2].need_resched = 0x5A;
     arch_sched_notify_remote(2);
-    assert_eq(0x5A, (int)percpu_data[2].need_resched);
-    assert_eq(0, mock_ipi_send_calls);
+    assert_eq(1, mock_ipi_broadcast_calls);
+    assert_eq(IPI_VECTOR_RESCHED, mock_broadcast_vector);
+    assert_eq(0x41, (int)mock_broadcast_vector);
+    assert_eq(1ULL << 2, mock_broadcast_mask);
+    /* the common layer's need_resched publication precedes the send */
+    assert_eq(1, (int)mock_broadcast_need_at_call);
+    assert_eq(0, mock_ipi_send_calls);   /* the x86 backend is untouched */
+
+    TEST_SUITE("kick requires ipi_ready, NOT scheduler_ok");
+    memset(percpu_data, 0, sizeof(percpu_data));
+    for (uint32_t i = 0; i < NR_CPUS; i++)
+        percpu_data[i].cpu_id = i;
+    num_cpus = 4;
+    percpu_data[1].ipi_ready = 1;
+    percpu_data[1].scheduler_ok = 0;   /* old work loop, takes SGIs */
+    mock_ipi_broadcast_calls = 0;
+    arch_sched_notify_remote(1);
+    assert_eq(1, mock_ipi_broadcast_calls);
+    assert_eq(1ULL << 1, mock_broadcast_mask);
+
+    TEST_SUITE("kick to a not-IPI-ready target fail-stops without sending");
+    memset(percpu_data, 0, sizeof(percpu_data));
+    for (uint32_t i = 0; i < NR_CPUS; i++)
+        percpu_data[i].cpu_id = i;
+    num_cpus = 4;
+    percpu_data[3].ipi_ready = 0;
+    mock_ipi_broadcast_calls = 0;
+    mock_halt_armed = 1;
+    mock_halt_escape = halt_escape;
+    if (setjmp(halt_jb) == 0) {
+        arch_sched_notify_remote(3);
+        assert_true(0);                   /* must not return */
+    }
+    mock_halt_escape = NULL;
+    assert_eq(-1, mock_halt_armed);       /* the stop was reached */
+    assert_eq(0, mock_ipi_broadcast_calls);
+
+    TEST_SUITE("local kick returns without an SGI");
+    memset(percpu_data, 0, sizeof(percpu_data));
+    for (uint32_t i = 0; i < NR_CPUS; i++)
+        percpu_data[i].cpu_id = i;
+    num_cpus = 4;
+    percpu_data[0].ipi_ready = 1;
+    mock_ipi_broadcast_calls = 0;
+    arch_sched_notify_remote(0);
+    assert_eq(0, mock_ipi_broadcast_calls);
 
     TEST_SUITE("aarch64 default mask is the constant 1");
     assert_eq(1ULL, arch_kthread_default_mask());

@@ -84,18 +84,28 @@ __attribute__((noreturn)) static void idle_task_resume(void);
  * a waiter may immediately reap a zombie once on_cpu becomes zero. */
 void task_finish_switch(task_t *prev)
 {
-    /* prev->cpu is stable here (prev is on-CPU until on_cpu clears
-     * below); acquire pairs with the rq_lock-protected release stores
-     * for the lockless path shape. */
+    /* prev is VALID until on_cpu clears below; everything the notify
+     * needs is captured while the rq_lock is held, and after the
+     * unlock ONLY captured values are used — a waiter may reclaim a
+     * zombie prev the instant on_cpu drops. */
     percpu_t *rq = &percpu_data[__atomic_load_n(&prev->cpu,
                                                 __ATOMIC_ACQUIRE)];
+    unsigned notify_target = rq->cpu_id;
+    bool reenqueued = false;
     uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
     if (prev->state == TASK_RUNNING && !prev->on_rq && prev != rq->idle) {
         enqueue_task(prev, rq);
         __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
+        reenqueued = true;
     }
     __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&rq->rq_lock, flags);
+
+    /* P2 wake producer: the wake-during-switch re-enqueue is a wake —
+     * notify the (possibly remote) target through the same delivery
+     * path as every other producer. */
+    if (reenqueued && (int)notify_target != (int)cpu_id())
+        sched_notify_remote_cpu(notify_target);
 }
 
 /* ── task_wake: mark RUNNING + enqueue (exported) ─── */
@@ -153,13 +163,15 @@ retry:
 
     enqueue_task(t, rq);
     /* Keep t->cpu in sync with the actual rq.  Release store under the
-     * rq_lock: lockless readers (notify target capture, the ARM
-     * scanner skip) pair with it. */
+     * rq_lock: lockless readers pair with it.  The notify target is
+     * CAPTURED here — after the unlock, t may be reclaimed by its own
+     * CPU (a woken self-reaper), so t->cpu must never be read again. */
     __atomic_store_n(&t->cpu, rq->cpu_id, __ATOMIC_RELEASE);
+    unsigned notify_target = rq->cpu_id;
 
     spin_unlock_irqrestore(&rq->rq_lock, flags);
 
-    if ((int)rq->cpu_id != (int)cpu_id())
+    if ((int)notify_target != (int)cpu_id())
         __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
 }
 
@@ -186,26 +198,54 @@ int64_t  user_init_pid = 0;
 // the scheduler is set up are harmless no-ops).
 
 /*
- * Wake a blocked task if its condition is met.
- *
- * Called by do_exit() (explicit wakeup for fast path) and
- * by sched_unblock_blocked() (scan-based fallback).
- * Only wakes if the condition callback returns true.
+ * Wake a blocked task if its condition is met (P2 protocol, spec
+ * §5.2a).  The state snapshot is taken under the target rq_lock, the
+ * condition runs while task_list_lock is held, the blocker is cleared
+ * under task_list_lock, and only then is the wake published.  After
+ * the outer unlock the task is NEVER read again: the waking thread
+ * may complete its blocker cleanup and exit as soon as the blocker is
+ * gone, so a caller must not touch @task past this function.
  */
-void blocker_wake(task_t *task)
+static void blocker_wake_locked(task_t *task)
 {
-    // Only wake blocked tasks whose condition is actually met
+    // Only wake blocked tasks whose condition is actually met, or
+    // whose blocker asked to be interrupted by a pending signal (the
+    // scanner's signal branch routes through here too — spec §5.2a:
+    // both paths clear the blocker before the wake is published).
+    // The type pre-check lives here (not at the call sites): the
+    // public entry's lock-free pre-check could read a stale field.
     if (task->state != TASK_INTERRUPTIBLE && task->state != TASK_UNINTERRUPTIBLE)
         return;
     if (task->blocker.type == BLOCKER_NONE)
         return;
-    if (task->blocker.check && !task->blocker.check(task))
+    bool cond = task->blocker.check && task->blocker.check(task);
+    bool signal_wake = !cond && task->blocker.signal_can_wake &&
+                       (task->signal & ~task->blocked) != 0;
+    if (!cond && !signal_wake)
         return;
 
-    // Condition met — wake up
-    task_wake(task);
+    // Wake: clear the blocker FIRST (under task_list_lock, which the
+    // caller holds) so a resumed waiter cannot observe (or
+    // double-clear) it, then publish the wake.
     task->blocker.type = BLOCKER_NONE;
     task->blocker.check = NULL;
+    task_wake(task);
+}
+
+/*
+ * Public wakeup entry (explicit wakeups, e.g. do_exit's SIGCHLD fast
+ * path and the legacy selftest hook).  Callers must guarantee the
+ * task is alive (a parent link, a join object or a test barrier) —
+ * this function takes task_list_lock and MUST NOT be called with it
+ * already held (the scanner uses blocker_wake_locked).
+ */
+void blocker_wake(task_t *task)
+{
+    if (!task)
+        return;
+    uint64_t flags = spin_lock_irqsave(&task_list_lock);
+    blocker_wake_locked(task);
+    spin_unlock_irqrestore(&task_list_lock, flags);
 }
 
 /*
@@ -229,43 +269,27 @@ void sched_unblock_blocked(void)
         task_t *t = container_of(pos, task_t, list);
         pos = task_list_next(pos);
 
-        /* P1 policy (spec §4): on an architecture whose scan admission
-         * is CPU0-only (aarch64), skip tasks pinned to other CPUs
-         * BEFORE reading their state/blocker — this CPU is not a
-         * legitimate scanner for them, and a cross-CPU t->cpu read
-         * must not touch a task whose owning CPU may concurrently
-         * reclaim it.  x86 (admission always true) keeps scanning
-         * every task.  The t->cpu load is lockless against rq_lock-
-         * protected writers: acquire-paired. */
-        if (!arch_sched_scan_blockers() &&
-            __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE) != 0)
-            continue;
-
+        /* P2 (spec §5.2a): the scan may target ANY CPU's task — the
+         * SGI wakeup delivered the notification cross-CPU, so the P1
+         * skip-non-CPU0 restriction is gone.  The state snapshot is
+         * taken under the target rq_lock (inside the helper); the
+         * condition/signal handling both clear the blocker BEFORE the
+         * wake is published. */
         if (t->state != TASK_INTERRUPTIBLE)
             continue;
         if (t->blocker.type == BLOCKER_NONE)
             continue;
 
-        // Check condition callback — use blocker_wake which
-        // verifies the condition before setting RUNNING.
-        if (t->blocker.check && t->blocker.check(t)) {
-            blocker_wake(t);
+        bool was_scan_woken = t->blocker.check && t->blocker.check(t);
+        bool signal_wake = t->blocker.signal_can_wake &&
+                           (t->signal & ~t->blocked) != 0;
+        if (was_scan_woken || signal_wake) {
+            blocker_wake_locked(t);
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
             aarch64_sched_observe_scan_wake(t);
 #endif
-            continue;
         }
-
-        // Check signal wakeup (bypass condition check — the
-        // callback returned false, so we're waking for a signal).
-        // Mask-aware: a blocked signal must NOT wake an interruptible
-        // sleeper (POSIX).  do_waitpid still wakes via the condition
-        // path above (child ZOMBIE), so this change doesn't affect it.
-        if (t->blocker.signal_can_wake && (t->signal & ~t->blocked)) {
-            task_wake(t);
-            t->blocker.type = BLOCKER_NONE;
-            t->blocker.check = NULL;
-        }
+        /* (both branches clear-then-wake inside blocker_wake_locked) */
     }
 }
 
@@ -287,36 +311,57 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     if (!check)
         return -EINVAL;
 
-    // P1 admission policy (spec §4): a CPU whose scheduler cannot scan
-    // the global blocker list (an aarch64 AP) must never install a
-    // blocker — the single BSP scanner would never discover it.  The
-    // callback is not consulted on this path.
-    if (!arch_sched_scan_blockers())
-        return -EOPNOTSUPP;
+    // P2 protocol (spec §5.2a): the callback, the blocker install, the
+    // double-check, the immediate-return cleanup and the resume
+    // cleanup all run UNDER task_list_lock; state changes nest the
+    // target rq_lock (task_list_lock -> rq_lock, the frozen order).
+    // schedule() and the test before-switch hook run with BOTH locks
+    // released — a waker holding task_list_lock can then complete the
+    // whole cleanup (clear blocker -> wake) before we sleep, and the
+    // double-check below closes the lost-wakeup window.
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
 
     // Step 1: Check condition first — if already met, don't block at all.
     // This is the critical part that prevents lost-wakeup: even if the
     // caller already checked, we re-check here atomically before sleeping.
-    if (check(self))
+    if (check(self)) {
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
         return 0;
+    }
 
     // Step 2: Install blocker
     self->blocker.type = type;
     self->blocker.check = check;
     self->blocker.signal_can_wake = signal_can_wake;
 
-    // Step 3: Set interruptible state
-    self->state = TASK_INTERRUPTIBLE;
+    // Step 3: Set interruptible state (nested rq_lock under the
+    // task_list_lock we already hold).
+    {
+        percpu_t *rq = &percpu_data[__atomic_load_n(&self->cpu,
+                                                    __ATOMIC_ACQUIRE)];
+        uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
+        self->state = TASK_INTERRUPTIBLE;
+        spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
+    }
 
     // Step 4: Double-check condition (our state change is visible now;
-    // a concurrent do_exit() might have already checked our state and
-    // set us back to RUNNING — if so, don't call schedule())
+    // a concurrent waker might have already run its cleanup — if so,
+    // don't call schedule()).
     if (check(self)) {
         self->blocker.type = BLOCKER_NONE;
         self->blocker.check = NULL;
-        self->state = TASK_RUNNING;
+        {
+            percpu_t *rq = &percpu_data[__atomic_load_n(&self->cpu,
+                                                        __ATOMIC_ACQUIRE)];
+            uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
+            self->state = TASK_RUNNING;
+            spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
+        }
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
         return 0;
     }
+
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
 
     // Step 5: Give up CPU. schedule() will run sched_unblock_blocked()
     // which finds us and wakes us when the condition is met.
@@ -326,10 +371,19 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
 #endif
     schedule();
     arch_local_irq_enable();
-    // Woke up — clear blocker and check why
+    // Woke up — clear blocker and check why (back under
+    // task_list_lock: the waker cleared it under the same lock).
+    tl_flags = spin_lock_irqsave(&task_list_lock);
     self->blocker.type = BLOCKER_NONE;
     self->blocker.check = NULL;
-    self->state = TASK_RUNNING;
+    {
+        percpu_t *rq = &percpu_data[__atomic_load_n(&self->cpu,
+                                                    __ATOMIC_ACQUIRE)];
+        uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
+        self->state = TASK_RUNNING;
+        spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
+    }
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
 
     // Step 6: Check if woken by signal.
     // Re-check the condition first: if it's now met (e.g. child
