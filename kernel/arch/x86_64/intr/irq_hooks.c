@@ -71,12 +71,12 @@ void x86_handle_device_irq(pt_regs_t *regs, uint64_t hwirq)
         return;
     }
     uint32_t gsi = arch_irq_vector_to_gsi(hwirq);
-    if (gsi >= MAX_GSI) {
-        debug_irq("do_IRQ: hwirq %#lx → gsi %u out of range (max %u)\n",
-                  hwirq, (unsigned)gsi, (unsigned)MAX_GSI);
+    irq_desc_t *irq = irq_desc_for_gsi(gsi);
+    if (irq == NULL) {
+        debug_irq("do_IRQ: hwirq %#lx → gsi %u has no descriptor\n",
+                  hwirq, (unsigned)gsi);
         return;
     }
-    irq_desc_t *irq = &irq_table[gsi];
     if (irq->handler != NULL) {
         irq->handler(hwirq, irq->parameter, regs);
     }

@@ -38,6 +38,10 @@ hw_int_controller_t *arch_irq_select_controller(uint32_t gsi);
 uint64_t arch_irq_gsi_to_vector(uint32_t gsi);
 uint32_t arch_irq_vector_to_gsi(uint64_t vector);
 
+// Prepare architecture routing for a GSI and allocate or resolve its vector.
+// Returns 0 on success, or a negative errno on failure.
+int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector);
+
 // Hardware-IRQ dispatch entry point. Called from each arch's
 // exception-vector stub with the raw hwirq value read from the
 // interrupt controller. Looks up the GSI, invokes the registered
@@ -46,7 +50,19 @@ uint32_t arch_irq_vector_to_gsi(uint64_t vector);
 // it with the GIC INTID.
 void arch_irq_dispatch(pt_regs_t *regs, uint64_t hwirq);
 
-#ifdef __x86_64__
+#if defined(OS01_HOST_TEST)
+static inline void arch_local_irq_enable(void)  {}
+static inline void arch_local_irq_disable(void) {}
+static inline arch_irq_state_t arch_local_irq_save(void) { return 0; }
+static inline void arch_local_irq_restore(arch_irq_state_t flags) { (void)flags; }
+
+typedef void (*arch_intr_handler_fn)(uint64_t nr, uint64_t param, pt_regs_t *regs);
+extern arch_intr_handler_fn intr_handler_table[256];
+extern void *intr_handler_param[256];
+void arch_install_intr_gate(uint8_t vector, void *stub, uint8_t ist);
+void arch_irq_install(void);
+
+#elif defined(__x86_64__)
 #include <arch/x86_64/asm.h>
 
 static inline void arch_local_irq_enable(void)  { sti(); }

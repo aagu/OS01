@@ -142,10 +142,10 @@ static void ioapic_enable(uint64_t nr)
         use_level = 0;
     else {
         // ISO says "conforms to bus" or not present — check device flags
-        irq_desc_t *desc = &irq_table[nr - 32];
-        if (desc->flags & IRQF_TRIGGER_LEVEL)
+        irq_desc_t *desc = irq_desc_for_gsi(nr - 32);
+        if (desc && (desc->flags & IRQF_TRIGGER_LEVEL))
             use_level = 1;
-        else if (desc->flags & IRQF_TRIGGER_EDGE)
+        else if (desc && (desc->flags & IRQF_TRIGGER_EDGE))
             use_level = 0;
         else
             // No hint from device either — use GSI-range defaults
@@ -263,6 +263,14 @@ int ioapic_init(void)
         }
 
         debug_irq("IOAPIC: %u redirection entries masked\n", ioapic->max_redir + 1);
+    }
+
+    if (apic_info.ioapic_count > 0) {
+        struct irq_gsi_range r = {
+            .base = 0,
+            .count = apic_info.ioapics[0].max_redir + 1,
+        };
+        irq_registry_init_ranges(&r, 1);
     }
 
     // ── Switch from PIC to APIC mode via IMCR ──────────────

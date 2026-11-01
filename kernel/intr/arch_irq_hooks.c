@@ -43,6 +43,15 @@ uint32_t arch_irq_vector_to_gsi(uint64_t vector)
 }
 
 __attribute__((weak))
+int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
+{
+    if (!vector)
+        return -22; /* -EINVAL */
+    *vector = arch_irq_gsi_to_vector(gsi);
+    return 0;
+}
+
+__attribute__((weak))
 void arch_irq_dispatch(pt_regs_t *regs, uint64_t hwirq)
 {
     /* No override: just drop the interrupt. The kernel will continue

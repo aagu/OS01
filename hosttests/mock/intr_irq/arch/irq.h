@@ -38,6 +38,8 @@ hw_int_controller_t *arch_irq_select_controller(uint32_t gsi);
 uint64_t arch_irq_gsi_to_vector(uint32_t gsi);
 uint32_t arch_irq_vector_to_gsi(uint64_t vector);
 
+int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector);
+
 // Hardware-IRQ dispatch entry point. Called from each arch's
 // exception-vector stub with the raw hwirq value read from the
 // interrupt controller. Looks up the GSI, invokes the registered
@@ -48,6 +50,17 @@ void arch_irq_dispatch(pt_regs_t *regs, uint64_t hwirq);
 
 void arch_local_irq_enable(void);
 void arch_local_irq_disable(void);
+void arch_irq_install(void);
+
+static inline arch_irq_state_t arch_local_irq_save(void)
+{
+    return 0;
+}
+
+static inline void arch_local_irq_restore(arch_irq_state_t flags)
+{
+    (void)flags;
+}
 typedef void (*arch_intr_handler_fn)(uint64_t, uint64_t, pt_regs_t *);
 extern arch_intr_handler_fn intr_handler_table[256];
 extern void *intr_handler_param[256];
