@@ -12,6 +12,8 @@ $(eval $(call register_host_test,test_elf_load_4k,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_canon,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_poll_requested,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_poll_waitqueue_handshake,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_poll_capacity,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_poll_nofile64,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_pty_winsize,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_devfs_input_dispatch,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
@@ -27,6 +29,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_canon.elf \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
+    $(TEST_BLD)/test_poll_capacity.elf \
+    $(TEST_BLD)/nofile64/test_poll_nofile64.elf \
     $(TEST_BLD)/test_elf_layout.elf \
     $(TEST_BLD)/test_elf_load_4k.elf \
     $(TEST_BLD)/test_pty_winsize.elf \
@@ -278,6 +282,88 @@ $(TEST_BLD)/test_poll_waitqueue_handshake.o: $(TEST_CASES)/test_poll_waitqueue_h
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_poll_waitqueue_handshake.elf: $(TEST_BLD)/test_poll_waitqueue_handshake.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── ARCH-10 Task 7: the poll capacity contract ───────────────
+#
+# test_poll_capacity.c drives the REAL production poll/select code
+# and asserts the per-call capacity contract (the descriptor count is
+# bounded by the task's RLIMIT_NOFILE soft limit; both buffers are
+# heap-allocated; a wait chain that cannot be fully registered fails
+# with -ENOMEM instead of sleeping forever).
+$(TEST_BLD)/test_poll_capacity.o: $(TEST_CASES)/test_poll_capacity.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_poll_capacity.elf: $(TEST_BLD)/test_poll_capacity.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── ARCH-10 Task 7: the NOFILE=64 build of the SAME poll code ──
+#
+# The default build caps a poll() call at the compile-time descriptor
+# capacity (16); a task with a raised soft limit must still be able to
+# poll more descriptors.  This is a REAL SECOND BUILD of the same
+# production sources with -DOS01_NOFILE_CAPACITY=64: every layout
+# consumer (the production objects, the case TU and the NOFILE
+# soft-limit stub) is compiled into a SEPARATE object directory, so the
+# 16-layout objects are never mixed with the 64-layout ones.  The stub
+# reports the capacity of ITS OWN build, so the 64 build's soft limit
+# really is 64.
+POLL64_BLD := $(TEST_BLD)/nofile64
+POLL64_HOST_CFLAGS := $(POLL_HOST_CFLAGS) -DOS01_NOFILE_CAPACITY=64
+
+$(POLL64_BLD)/poll_production.o: $(TESTS_DIR)/kernel/fs/poll.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/select_production.o: $(TESTS_DIR)/kernel/fs/select.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/file_poll_production.o: $(TESTS_DIR)/kernel/fs/file.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/tty_poll_production.o: $(TESTS_DIR)/kernel/tty/tty.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/poll_clocksource_stub.o: $(TEST_MOCK)/poll_clocksource_stub.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/serial_sink_stub.o: $(TEST_MOCK)/serial_sink_stub.c \
+		$(TEST_MOCK)/test_platform.h
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+		-DOS01_NOFILE_CAPACITY=64 \
+		-include $(TEST_MOCK)/test_platform.h \
+		$(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -c $< -o $@
+
+# The soft-limit snapshot stub must report THIS build's capacity.
+$(POLL64_BLD)/nofile_soft_stub.o: $(TEST_MOCK)/nofile_soft_stub.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_NOFILE_CAPACITY=64 $(KERNEL_INC) -c $< -o $@
+
+POLL64_PRODUCTION_OBJS := \
+    $(POLL64_BLD)/poll_production.o \
+    $(POLL64_BLD)/select_production.o \
+    $(POLL64_BLD)/file_poll_production.o \
+    $(POLL64_BLD)/tty_poll_production.o \
+    $(POLL64_BLD)/devfs_poll_production.o \
+    $(POLL64_BLD)/poll_clocksource_stub.o \
+    $(POLL64_BLD)/serial_sink_stub.o \
+    $(POLL64_BLD)/nofile_soft_stub.o
+
+$(POLL64_BLD)/test_poll_capacity.o: $(TEST_CASES)/test_poll_capacity.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/test_poll_nofile64.elf: $(POLL64_BLD)/test_poll_capacity.o $(POLL64_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # PTY window resize notifications

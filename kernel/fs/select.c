@@ -28,7 +28,11 @@
 static int64_t do_select_nofds(int64_t ms)
 {
     poll_table_t pt;
-    if (poll_table_setup(&pt, 1) != 0)
+    /* A zero-descriptor select still needs one internal wait slot. */
+    int max_entries = 0;
+    if (poll_wait_capacity(0, &max_entries) != 0)
+        return -ENOMEM;
+    if (poll_table_setup(&pt, max_entries) != 0)
         return -ENOMEM;
     int64_t ret = do_poll_core(NULL, 0, ms, &pt);
     poll_table_destroy(&pt);
@@ -200,8 +204,18 @@ static __attribute__((noinline)) int64_t do_select_fds(int nfds,
             pfds[i].events |= POLLPRI;
     }
 
+    // ── Wait capacity for the descriptors actually scanned ──
+    // select keeps its fixed FD_SETSIZE ABI: the wait capacity is
+    // derived from the number of descriptors it really scans (the
+    // ones below NOFILE), through the same helper poll() uses.  The
+    // helper maps a zero-descriptor scan onto one internal wait slot,
+    // so poll_table_setup() never sees an illegal size.
     int pollable_fds = nfds < NOFILE ? nfds : NOFILE;
-    int max_entries = pollable_fds * POLL_WAIT_SLOTS_PER_FD;
+    int max_entries = 0;
+    if (poll_wait_capacity((uint64_t)pollable_fds, &max_entries) != 0) {
+        kfree(pfds);
+        return -ENOMEM;
+    }
     if (poll_table_setup(pt, max_entries) != 0) {
         kfree(pfds);
         return -ENOMEM;

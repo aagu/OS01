@@ -13,6 +13,7 @@
 #include <fs/poll.h>
 #include <fs/file.h>
 #include <sched/task.h>
+#include <sched/resource.h>
 #include <memory/slab.h>
 #include <fs/vfs.h>
 #include <percpu/percpu.h>
@@ -38,10 +39,43 @@ void poll_table_init(poll_table_t *pt)
 {
     pt->nent = 0;
     pt->triggered = false;
+    pt->error = 0;
+}
+
+// ── poll_wait_capacity — wait-entry capacity of one call ────
+//
+//   nfds == 0  →  1 entry (one internal wait slot)
+//   nfds  > 0  →  POLL_WAIT_SLOTS_PER_FD * nfds entries
+//
+// Returns 0 on success, -EINVAL for a malformed request, -EOVERFLOW
+// when the capacity cannot be represented (int range) or the entry
+// array byte size would overflow size_t.
+
+int poll_wait_capacity(uint64_t nfds, int *entries)
+{
+    if (!entries)
+        return -EINVAL;
+
+    uint64_t slots;
+    if (nfds == 0) {
+        slots = 1;
+    } else {
+        if (nfds > (uint64_t)INT_MAX / POLL_WAIT_SLOTS_PER_FD)
+            return -EOVERFLOW;
+        slots = nfds * POLL_WAIT_SLOTS_PER_FD;
+    }
+
+    if (slots > (uint64_t)INT_MAX)
+        return -EOVERFLOW;
+    if (slots > (uint64_t)(SIZE_MAX / sizeof(poll_wait_entry_t)))
+        return -EOVERFLOW;
+
+    *entries = (int)slots;
+    return 0;
 }
 
 // ── poll_table_setup — validate/allocate entries + init wq + nodes ──
-// Returns 0, -EINVAL for an invalid/capacity-exceeding size, or -ENOMEM.
+// Returns 0, -EINVAL for an invalid size, or -ENOMEM.
 
 int poll_table_setup(poll_table_t *pt, int max_entries)
 {
@@ -52,9 +86,10 @@ int poll_table_setup(poll_table_t *pt, int max_entries)
     pt->max_entries = 0;
     pt->nent = 0;
     pt->triggered = false;
+    pt->error = 0;
 
     /* Every descriptor can register independent read and write queues. */
-    if (max_entries <= 0 || max_entries > POLL_MAX_WAIT_ENTRIES ||
+    if (max_entries <= 0 ||
         (size_t)max_entries > SIZE_MAX / sizeof(poll_wait_entry_t))
         return -EINVAL;
 
@@ -84,12 +119,23 @@ void poll_table_destroy(poll_table_t *pt)
 // ── poll_wait — register on an fd's poll list ─────────────
 // Called by fd_poll() when the fd is NOT ready.
 // The entry will later be cascade-woken by the fd's wake path.
+//
+// If the entries array is FULL the registration cannot be made.  It is
+// NOT dropped silently: a dropped registration would leave the poller
+// sleeping on a descriptor that can never wake it.  Instead the table
+// records the failure (pt->error = -ENOMEM) and the core aborts the
+// call before it sleeps.
 
 void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock)
 {
     if (!pt || !pt->entries || !poll_list || !fd_lock ||
-        pt->nent < 0 || pt->nent >= pt->max_entries || pt->triggered)
+        pt->nent < 0 || pt->triggered)
         return;
+
+    if (pt->nent >= pt->max_entries) {
+        pt->error = -ENOMEM;
+        return;
+    }
 
     poll_wait_entry_t *e = &pt->entries[pt->nent++];
     e->poll_wq = &pt->wq;
@@ -405,6 +451,27 @@ static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
     return ready_count;
 }
 
+// ── poll_core_release — uniform exit path ────────────────
+//
+// Every return path of do_poll_core releases the wait chain in the
+// same order:
+//   1. the timeout registration (the LAPIC tick stops waking us),
+//   2. the task wait (our io_wait_node on pt.wq),
+//   3. the fd entries (unlinked under their own fd_lock).
+//
+// `armed` is false on the paths that never enqueued the task.
+// `drop_tmo` is false only on the post-sleep continuation, where the
+// deadline has to keep firing for the next loop iteration.
+
+static void poll_core_release(poll_table_t *pt, bool armed, bool drop_tmo)
+{
+    if (drop_tmo)
+        poll_tmo_unregister(pt);
+    if (armed)
+        wait_queue_disarm();
+    poll_table_cleanup(pt);
+}
+
 // ── do_poll_core — core polling loop (no user memory access) ──
 //
 // Caller provides kfds and pt (already setup via poll_table_setup).
@@ -431,7 +498,7 @@ static int poll_scan(struct pollfd *kfds, uint64_t nfds, poll_table_t *pt)
 // including the post-ARM re-scan that returns ready before
 // scheduling.
 //
-// Returns: ready count (>=0), 0 (timeout), -EINTR.
+// Returns: ready count (>=0), 0 (timeout), -EINTR, -ENOMEM.
 
 int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt)
 {
@@ -450,22 +517,30 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
     int64_t ready_count = 0;
 
     for (;;) {
-        poll_table_init(pt);  // reset nent=0, triggered=false
+        poll_table_init(pt);  // reset nent=0, triggered=false, error=0
 
         // ── Scan 1: register fd chains + check ready ─────────
         ready_count = poll_scan(kfds, nfds, pt);
 
         // ── Immediate ready: return ────────────────────────────
         if (ready_count > 0) {
-            poll_table_cleanup(pt);
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, false, timed);
             break;
+        }
+
+        // ── Wait chain could not be fully registered ──────────
+        // poll_wait() ran out of capacity: some descriptors were
+        // never registered, so their wakeups would be missed and
+        // the poller would sleep forever.  Fail explicitly — and
+        // without sleeping — instead.
+        if (pt->error) {
+            poll_core_release(pt, false, timed);
+            return pt->error;
         }
 
         // ── Non-blocking ───────────────────────────────────────
         if (timeout_val == 0) {
-            poll_table_cleanup(pt);
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, false, timed);
             break;
         }
 
@@ -486,25 +561,19 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
 
         // ── Ready after re-check: disarm + cleanup + return ───
         if (ready_count > 0) {
-            wait_queue_disarm();
-            poll_table_cleanup(pt);
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, true, timed);
             return ready_count;
         }
 
         // ── Signal pending before sleep: disarm + EINTR ─────
         if (current->signal & ~current->blocked) {
-            wait_queue_disarm();
-            poll_table_cleanup(pt);
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, true, timed);
             return -EINTR;
         }
 
         // ── Deadline already reached before sleep: 0 ─────────
         if (timed && clocksource_read_ns() >= deadline) {
-            wait_queue_disarm();
-            poll_table_cleanup(pt);
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, true, timed);
             return 0;
         }
 
@@ -515,16 +584,14 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         schedule();
 
         // ── DISARM after wake ──────────────────────────────────
-        wait_queue_disarm();
-
-        // Woken up — remove entries from fd poll lists.
+        // Woken up — remove the task wait and the fd entries.
         // The timeout node STAYS registered (only removed on return)
         // so the LAPIC tick keeps waking us on subsequent ticks.
-        poll_table_cleanup(pt);
+        poll_core_release(pt, true, false);
 
         // ── Timeout check (post-sleep) ──────────────────────────
         if (timed && clocksource_read_ns() >= deadline) {
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, false, timed);
             return poll_scan(kfds, nfds, NULL);
         }
 
@@ -536,7 +603,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         // and the data must not be lost to a spurious EINTR).
         if (current->signal & ~current->blocked) {
             int rc = poll_scan(kfds, nfds, NULL);
-            if (timed) poll_tmo_unregister(pt);
+            poll_core_release(pt, false, timed);
             if (rc > 0)
                 return rc;
             return -EINTR;
@@ -557,14 +624,39 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
 
 int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
 {
-    // ── Validate user pointer ──────────────────────────────
+    // ── Validate the user pointer ──────────────────────────
+    // A NULL array with descriptors to report is a bad pointer, not a
+    // bad count — the pointer is rejected first (Linux do_poll order,
+    // and the locked hostile-pointer regression expects -EFAULT).
+    if (user_fds == NULL && nfds > 0)
+        return -EFAULT;
+
+    // ── Snapshot the task's NOFILE soft limit ────────────────
+    // ONE snapshot per call, taken at entry before any allocation and
+    // before files_t.lock is taken.  The decision for this call uses
+    // that value: a later lowering of the limit never invalidates the
+    // in-flight call.
+    uint64_t soft = task_nofile_soft_current();
+
+    // ── The descriptor count is bounded by the soft limit ───
+    // (Linux semantics for nfds beyond RLIMIT_NOFILE)
+    if (nfds > soft)
+        return -EINVAL;
+
+    // ── Wait-entry capacity for this call ──────────────────
+    // nfds == 0 → one internal wait slot; otherwise two per entry.
+    int max_entries = 0;
+    if (poll_wait_capacity(nfds, &max_entries) != 0)
+        return -ENOMEM;
+
+    // ── pollfd copy size ───────────────────────────────────
+    if (nfds > (uint64_t)(SIZE_MAX / sizeof(struct pollfd)))
+        return -ENOMEM;
+
+    // ── Validate the user range ────────────────────────────
     // Fast reject: the entire pollfd array must be mapped RW (the
     // entries are both read [fd/events] and written [revents]).
     // The actual per-field _ft copy is the authority.
-    if (user_fds == NULL && nfds > 0)
-        return -EFAULT;
-    if (nfds > POLL_MAX_FDS)
-        return -EINVAL;
     if (nfds > 0 &&
         !syscall_check_user_range((uint64_t)user_fds,
                                   nfds * sizeof(struct pollfd), true)) {
@@ -577,12 +669,19 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
         return 0;
 
     // ── Copy pollfd from user space (Cat B: _ft per entry) ───
-    struct pollfd kfds[POLL_MAX_FDS];
+    // The kernel copy is heap-allocated for exactly nfds entries —
+    // nothing of the caller's array stays on the kernel stack.
+    struct pollfd *kfds = NULL;
     if (nfds > 0) {
-        for (uint32_t i = 0; i < nfds; i++) {
+        kfds = kmalloc((size_t)nfds * sizeof(struct pollfd));
+        if (!kfds)
+            return -ENOMEM;
+        for (uint64_t i = 0; i < nfds; i++) {
             struct pollfd k;
-            if (copy_from_user_ft(&k, &user_fds[i], sizeof(k)) < 0)
+            if (copy_from_user_ft(&k, &user_fds[i], sizeof(k)) < 0) {
+                kfree(kfds);
                 return -EFAULT;
+            }
             kfds[i].fd      = k.fd;
             kfds[i].events  = k.events;
             kfds[i].revents = 0;
@@ -590,16 +689,17 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
     }
 
     // ── Signal check: any unblocked pending signal → EINTR ─
-    if (current->signal & ~current->blocked)
+    if (current->signal & ~current->blocked) {
+        kfree(kfds);
         return -EINTR;
+    }
 
     // ── Setup poll table (dynamic entries allocation) ─────────
     poll_table_t pt;
-    int max_entries = (nfds == 0)
-        ? 1
-        : (int)(nfds * POLL_WAIT_SLOTS_PER_FD);
-    if (poll_table_setup(&pt, max_entries) != 0)
+    if (poll_table_setup(&pt, max_entries) != 0) {
+        kfree(kfds);
         return -ENOMEM;
+    }
 
     int64_t ret = do_poll_core(kfds, nfds, timeout_val, &pt);
 
@@ -608,7 +708,7 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
     // never sees partial state).  ret >= 0 still wins if at least
     // some entries copied; the caller's retry will pick them up.
     if (ret >= 0 && nfds > 0) {
-        for (uint32_t i = 0; i < nfds; i++) {
+        for (uint64_t i = 0; i < nfds; i++) {
             {
                 ssize_t user_copy_rc = copy_to_user_ft(&user_fds[i].revents,
                                 &kfds[i].revents,
@@ -621,5 +721,6 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
         }
     }
     poll_table_destroy(&pt);
+    kfree(kfds);
     return ret;
 }
