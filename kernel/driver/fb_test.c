@@ -55,6 +55,7 @@ typedef struct {
     int32_t  target_pid;
     uint64_t token;
     uint32_t consumed;   /* times a consume matched this slot (test assertion) */
+    uint64_t consumed_token; /* token of the LAST consume that matched this slot */
 } fb_test_pending_t;
 
 static spinlock_T g_test_lock;
@@ -126,6 +127,11 @@ void fb_test_set_begin(int32_t pid)
     if (g_pending_reg.valid && g_pending_reg.target_pid == pid) {
         g_txn.apply_fault = true;
         g_txn.rollback_fault = (g_pending_reg.kind == FB_TEST_REG_ROLLBACK_FAILURE);
+        /* Record WHICH armed fault fired: the token is the discriminator
+         * that tells "the fault I armed was taken" from "a leftover fault
+         * from an earlier case was taken". */
+        g_pending_reg.consumed++;
+        g_pending_reg.consumed_token = g_pending_reg.token;
         g_pending_reg.valid = false;
     }
     spin_unlock_irqrestore(&g_test_lock, flags);
@@ -172,10 +178,32 @@ int fb_test_consume_terminal_enomem(int32_t pid)
     if (g_pending_term.valid && g_pending_term.target_pid == pid) {
         g_pending_term.valid = false;
         g_pending_term.consumed++;
+        /* Record WHICH armed fault fired (see fb_test_set_begin). */
+        g_pending_term.consumed_token = g_pending_term.token;
         rc = 1;
     }
     spin_unlock_irqrestore(&g_test_lock, flags);
     return rc;
+}
+
+/* ── Consumed-token identity (kernel-private; not part of the UAPI) ──── */
+uint64_t fb_test_last_consumed_token(enum fb_test_fault_class cls)
+{
+    fb_test_lock_ensure();
+    uint64_t flags = spin_lock_irqsave(&g_test_lock);
+    uint64_t tok = 0;
+    switch (cls) {
+    case FB_TEST_FAULT_REGISTER:
+        tok = g_pending_reg.consumed_token;
+        break;
+    case FB_TEST_FAULT_TERMINAL:
+        tok = g_pending_term.consumed_token;
+        break;
+    default:
+        break;
+    }
+    spin_unlock_irqrestore(&g_test_lock, flags);
+    return tok;
 }
 
 /* ── Terminal-ENOMEM status query (FBIOTEST_TERMINAL_STATUS) ──

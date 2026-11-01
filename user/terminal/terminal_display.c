@@ -341,7 +341,7 @@ static int stats_log_sink(void *ctx, const char *text, size_t len)
  *   - `*submitted` is set true ONLY when at least one ioctl was issued
  *     AND ALL issued ioctls returned 0 (spec §7 ack rule).
  *   - On full success: term_render_ack_damage clears pending damage,
- *     present_retry_pending clears, retry_deadline_ms clears.
+ *     present_retry_pending clears, present_retry_deadline_ms clears.
  *   - On failure: pending damage is preserved; emit-helpers preserve
  *     errno; the ioctl's errno is restored at the end so terminal_display_present
  *     can classify it.
@@ -406,7 +406,7 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
                 d->metrics.success_max_ns = dt;
             term_render_ack_damage(&d->render);
             d->present_retry_pending = false;
-            d->retry_deadline_ms = 0;
+            d->present_retry_deadline_ms = 0;
             if (submitted) *submitted = true;
         }
     } else if (damage.count == 0) {
@@ -449,7 +449,7 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
                 d->metrics.success_max_ns = total_dt;
             term_render_ack_damage(&d->render);
             d->present_retry_pending = false;
-            d->retry_deadline_ms = 0;
+            d->present_retry_deadline_ms = 0;
             if (submitted) *submitted = true;
             rc = 0;
         } else {
@@ -516,7 +516,29 @@ static bool errno_is_permanent(int e)
     return e == EIO || e == ENODEV || e == ENXIO || e == EBADF || e == ENOTTY;
 }
 
+// The single classification of a failed gfx present.  See
+// terminal_display.h for why the present path and terminal.c's failure
+// counter must both derive their behaviour from this one function.
+terminal_present_errno_class_t terminal_present_errno_classify(int err)
+{
+    switch (err) {
+    case EAGAIN: /* the writer drain timed out: the view is still valid */
+    case ESTALE: /* the view went stale: the refresh rebinds it */
+        return TERMINAL_PRESENT_ERRNO_RECOVERABLE;
+    default:
+        /* Everything else — including EBUSY — is left to the caller's
+         * failure counter.  It is NOT silently ignored: the counter
+         * counts it, so the terminal escalates instead of spinning. */
+        return TERMINAL_PRESENT_ERRNO_FATAL;
+    }
+}
+
 // Arm the retry window, or go serial_only on a permanent error.
+//
+// REFRESH-side only: this arms d->retry_deadline_ms, which gates the
+// refresh body (state query + mode rebind).  It must NOT be used for a
+// present-side failure — that would delay the pending rebind by the
+// present's rate-limit window (the two backoffs are independent).
 static int fail(terminal_display_t *d, int e, uint64_t now_ms)
 {
     if (errno_is_permanent(e)) {
@@ -551,8 +573,10 @@ int terminal_display_present(terminal_display_t *d, uint64_t now_ms)
     int rc = display_submit(d, now_ms, &submitted);
     if (rc == 0) {
         /* Ack: clear pending damage state and any retry deadline. */
-        d->retry_deadline_ms = 0;
+        d->present_retry_deadline_ms = 0;
         d->present_retry_pending = false;
+        /* The view demonstrably works again. */
+        d->view_stale = false;
         return 0;
     }
 
@@ -564,9 +588,24 @@ int terminal_display_present(terminal_display_t *d, uint64_t now_ms)
         return TERMINAL_PRESENT_SKIPPED;
     }
     // errno belongs to the failing present; only arm the retry (no syscalls).
-    if (e == EAGAIN || e == ESTALE) {
-        d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+    //
+    // A RECOVERABLE failure (EAGAIN/ESTALE) arms the PRESENT-side rate
+    // limit and asks the refresh to re-submit the preserved damage.  The
+    // refresh-side backoff (d->retry_deadline_ms) is deliberately NOT
+    // touched: arming it here would defer the pending mode rebind by the
+    // present's rate-limit window.
+    //
+    // A non-recoverable failure is NOT counted here either — terminal.c's
+    // failure counter owns that decision, and it derives it from the very
+    // same terminal_present_errno_classify().
+    if (terminal_present_errno_classify(e) == TERMINAL_PRESENT_ERRNO_RECOVERABLE) {
+        d->present_retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
         d->present_retry_pending = true;
+        if (e == ESTALE) {
+            /* The view is dead: the main loop must not present on it
+             * until the refresh rebinds it. */
+            d->view_stale = true;
+        }
     }
     errno = e;
     return -1;
@@ -589,6 +628,12 @@ int terminal_display_present(terminal_display_t *d, uint64_t now_ms)
 // re-trigger this path.
 static int redraw(terminal_display_t *d, uint64_t now_ms)
 {
+    /* The PRESENT-side rate limit applies to the redraw too: a failed
+     * present must not be re-issued before its deadline, whichever entry
+     * path issued it. */
+    if (d->present_retry_deadline_ms && now_ms < d->present_retry_deadline_ms) {
+        return 1;
+    }
     term_render_clear(&d->render);
     term_core_mark_all_dirty(d->core);
     /* Arm redraw_pending; the success branch clears it below.
@@ -597,11 +642,11 @@ static int redraw(terminal_display_t *d, uint64_t now_ms)
     int rc = terminal_display_present(d, now_ms);
     if (rc == 0) {
         d->redraw_pending = false;
-        /* terminal_display_present already cleared retry_deadline_ms +
-         * present_retry_pending on a SUCCESSFUL present (display_submit
-         * did the actual ack), but be defensive in case someone
-         * short-circuits the path later. */
-        d->retry_deadline_ms = 0;
+        /* terminal_display_present already cleared the present-side
+         * deadline + retry flag on a SUCCESSFUL present (display_submit
+         * did the actual ack); be defensive in case someone short-circuits
+         * the path later. */
+        d->present_retry_deadline_ms = 0;
         d->present_retry_pending = false;
         d->refresh_presented = true;
         return 0;
@@ -612,7 +657,21 @@ static int redraw(terminal_display_t *d, uint64_t now_ms)
          * them when the foreground was lost). */
         return 0;
     }
-    return fail(d, errno, now_ms);
+    /* The present path already armed the PRESENT-side rate limit and
+     * classified the errno.  Only the permanent-errno escalation belongs
+     * here: the REFRESH-side backoff must NOT be armed, or a present-side
+     * failure would delay the pending mode rebind by a full rate-limit
+     * window. */
+    int e = errno;
+    if (errno_is_permanent(e)) {
+        d->serial_only = true;
+        d->retry_deadline_ms = 0;
+        d->present_retry_deadline_ms = 0;
+        d->present_retry_pending = false;
+        errno = e;
+        return -1;
+    }
+    return 1;
 }
 
 // Refresh-time submit helper (spec §7 row 4-5).  Pre-condition: the
@@ -632,7 +691,7 @@ static int redraw(terminal_display_t *d, uint64_t now_ms)
 //   - permanent errnos (EIO/ENODEV/ENXIO/EBADF/ENOTTY) → serial_only,
 //     clear retry flags, return -1 (spec row 9).
 //   - other errnos (ENOMEM/EFAULT/EINVAL/EBUSY) → keep retry flags,
-//     fail() sets deadline, return 1 (spec row 10).
+//     arm the present-side deadline, return 1 (spec row 10).
 //
 // In all cases the caller's errno (the ioctl errno) is preserved.
 static int refresh_submit_attempt(terminal_display_t *d, uint64_t now_ms)
@@ -651,15 +710,21 @@ static int refresh_submit_attempt(terminal_display_t *d, uint64_t now_ms)
          * Clear the stale retry flag so the refresh path won't
          * submit again on every tick; do NOT set refresh_presented. */
         d->present_retry_pending = false;
-        d->retry_deadline_ms = 0;
+        d->present_retry_deadline_ms = 0;
         return 0;
     }
 
-    /* Failure classification per spec §7. */
+    /* Failure classification per spec §7.  Every failure below came from
+     * a present ioctl, so the 250ms window it arms is the PRESENT-side
+     * one: it rate-limits presents without deferring the pending mode
+     * rebind (the two backoffs are independent). */
     int e = errno;
     if (e == EAGAIN || e == ESTALE) {
         d->present_retry_pending = true;
-        d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+        d->present_retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+        if (e == ESTALE) {
+            d->view_stale = true;
+        }
         errno = e;
         return 1;
     }
@@ -667,20 +732,22 @@ static int refresh_submit_attempt(terminal_display_t *d, uint64_t now_ms)
         d->foreground = false;
         d->redraw_pending = true;
         d->present_retry_pending = false;
+        d->present_retry_deadline_ms = 0;
         d->retry_deadline_ms = 0;
         return 0;
     }
     if (errno_is_permanent(e)) {
         d->serial_only = true;
         d->present_retry_pending = false;
+        d->present_retry_deadline_ms = 0;
         d->retry_deadline_ms = 0;
         errno = e;
         return -1;
     }
-    /* ENOMEM / EFAULT / EINVAL / EBUSY: keep retry flag, fail() arms
-     * 250ms deadline. */
+    /* ENOMEM / EFAULT / EINVAL / EBUSY: keep the retry flag and arm the
+     * 250ms window (spec row 10). */
     d->present_retry_pending = true;
-    d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
+    d->present_retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
     errno = e;
     return 1;
 }
@@ -695,7 +762,11 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
     if (d->serial_only) return -1;
 
     /* Spec §7 row "deadline 未到": rate-limit.  No submit, no state
-     * change, no refresh_presented. */
+     * change, no refresh_presented.  This is the REFRESH-side deadline
+     * (armed by fail(): a state query or a resource prepare failed), so it
+     * gates the refresh body only — the present path is gated by its own
+     * deadline (d->present_retry_deadline_ms) and is NOT suppressed by a
+     * transient query failure. */
     if (d->retry_deadline_ms && now_ms < d->retry_deadline_ms) return 1;
 
     /* Check ownership state.  get_display_state failure goes through
@@ -736,8 +807,14 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
             return redraw(d, now_ms);
         }
         /* Retry-at-deadline: only when present_retry_pending is set
-         * AND foreground AND we passed the deadline guard above. */
+         * AND foreground.  The present-side deadline gates the re-submit
+         * (it is a present rate limit); the refresh-side deadline was
+         * already checked at the top of this function. */
         if (d->present_retry_pending && d->foreground) {
+            if (d->present_retry_deadline_ms &&
+                now_ms < d->present_retry_deadline_ms) {
+                return 1;
+            }
             return refresh_submit_attempt(d, now_ms);
         }
         /* Spec §7 row 1: no submit, return 0.  Pending damage must
@@ -778,6 +855,11 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
     if (st2.generation != st.generation ||
         st2.info.width != w || st2.info.height != h) {
         d->ops.gfx_close(nh);
+        /* The mode moved again while the view was being prepared: the
+         * still-bound OLD view is stale, so the main loop must not
+         * present on it.  The rebind is deferred by the refresh-side
+         * deadline (this is a refresh-side failure, not a present one). */
+        d->view_stale = true;
         d->retry_deadline_ms = now_ms + TERMINAL_RETRY_MS;
         errno = ESTALE;
         return 1;
@@ -815,9 +897,13 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
     d->pending_winsize = true;
     /* Mode rebind invalidates the OLD geometry: drop any in-flight
      * partial retry that targeted the old view.  The new view will
-     * get a full redraw. */
+     * get a full redraw.  Both backoffs are cleared (the rebind IS the
+     * recovery) and the stale-view mark is lifted — the new view is
+     * valid, so the main loop may present on it again. */
     d->present_retry_pending = false;
+    d->present_retry_deadline_ms = 0;
     d->retry_deadline_ms = 0;
+    d->view_stale = false;
     if (old) d->ops.gfx_close(old);
 
     return redraw(d, now_ms);
@@ -826,10 +912,24 @@ int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms)
 int terminal_display_poll_timeout(const terminal_display_t *d,
                                   int base_timeout_ms, uint64_t now_ms)
 {
-    if (!d->serial_only && d->retry_deadline_ms && d->retry_deadline_ms > now_ms) {
-        int w = (int)(d->retry_deadline_ms - now_ms);
-        if (w > (int)TERMINAL_RETRY_MS) w = (int)TERMINAL_RETRY_MS;
-        if (w <= 0) w = 1;
+    /* The NEAREST pending backoff wins: the present-side rate limit and
+     * the refresh-side backoff are independent deadlines, and the main
+     * loop must wake up for whichever expires first. */
+    int w = 0;
+    if (!d->serial_only) {
+        if (d->present_retry_deadline_ms &&
+            d->present_retry_deadline_ms > now_ms) {
+            int p = (int)(d->present_retry_deadline_ms - now_ms);
+            if (p > (int)TERMINAL_RETRY_MS) p = (int)TERMINAL_RETRY_MS;
+            w = p;
+        }
+        if (d->retry_deadline_ms && d->retry_deadline_ms > now_ms) {
+            int r = (int)(d->retry_deadline_ms - now_ms);
+            if (r > (int)TERMINAL_RETRY_MS) r = (int)TERMINAL_RETRY_MS;
+            if (w == 0 || r < w) w = r;
+        }
+    }
+    if (w > 0) {
         if (base_timeout_ms <= 0) {
             return w;
         }

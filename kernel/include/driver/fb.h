@@ -15,11 +15,11 @@ int fb_get_info(struct fb_info *out);
 int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                         const void *pixels, uint32_t bytes);
 
-// Write `row_bytes` of pixel data from `pixels` (a kernel buffer)
-// into the framebuffer at column `x`, row `y`.
-// Acquires a single lease and wraps fb_write_row_leased.
-int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
-                 uint32_t row_bytes);
+// NOTE: there is deliberately no lease-less `fb_write_row()` wrapper any
+// more.  Every production writer goes through fb_write_row_leased() under
+// an explicit lease (gfx.c holds one for the whole frame); the old
+// single-lease wrapper had zero callers and was only ever mocked by the
+// host tests.  Roadmap parked item "QEMU 分辨率切换器收尾 follow-up" #5.
 
 void fb_set_surrendered_locked(bool surrendered);
 bool fb_is_surrendered_locked(void);

@@ -159,6 +159,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 - **2026-10-24 闭环归档**：aarch64 并发 replace phantom `-ENOENT`（`80eed2e9`）、hosttests `__test_stats` 复位 bug（`2d594ce0` + CI 接线 `339ffe26`）、内核用户态异常退出状态未编码为信号终止（`3d56e1d0`）、`test_display_owner` 的 libgfx 句柄 fd 耦合（备案归档）、monitor 计划遗留 ⑤ `monitor_term_enter` 的 `fflush`（`9042bd20`）、⑭ monitor 帧被诊断输出撕裂（`c6e1c340`）、`test_lvgl` 早退跳过 alt-screen 恢复条目归档。
 - **2026-10-28 闭环归档**：`fd_refcount` 跨核 fixture 的迁移/压力循环时序问题修复（详见 [修复记录](debug/2026-10-28-fd-refcount.md)）。
 - **2026-10-31 闭环归档**：dispatch 第一期 host 补强中的 `test_brk_pages.c` 源码扫描缺锚点保护；monitor 计划遗留 ③ `monitor_model_init`/`monitor_sample_destroy` 防御性初始化与析构安全防护；分辨率切换器收尾 follow-up 中 `test_fb_uapi.c` 断言宏规范化与 T6 pty 遗留（`pty.h` 匿名 union 裁撤、`TIOCSWINSZ` 契约注释对齐）；调用链审计 movabs/leaq 无法解析目标的专用断言补强（详见 `docs/changelog.md` 2026-10-31 条目）。
+- **2026-11-01 闭环归档**：**QEMU 分辨率切换器收尾 follow-up 全部子项闭环**（2026-10-06 建档的 5 条子项 + 原始清单遗留的 Spec §7 头统一）。① runner 契约：`_drain_case`/`_client_eagain_case` 的 `HOLD ok` 观察窗口由 8s 放宽到 12s（`HOLD_ACK_TIMEOUT = HOLD_SECS + 4s`，窗口必须大于 guest 持有时长，否则租约比 runner 的耐心活得久）；新增 SPEC §8.2.1「runner 串口匹配与超时契约」表（锚定 `start=`、提示符行首锚定、JSON 须同过滤操作与结果码、保持/释放窗口推导）。② 客户端策略：`user/common/gfx_client_policy` 升为**判定与文案的唯一来源**（新增 `gfx_client_verdict_t` + `gfx_client_classify()` + `gfx_client_verdict_reason()`），libgui 新增公共 `gui_platform_status_reason()`；`user/test_lvgl.c` 三份逐字重复的 status→文案块折叠为一个 helper，`user/tetris.c`/`libgui/src/platform.c`/`user/desktop/desktop.c` 改走同一判定（desktop/test_lvgl 早已迁到 libgui 平台层，原「三处重复」的实际形态是「一处 classifier + 三处文案/判定链」）。③ `user/terminal.c` present 门限：`terminal_display_t` 拆分 **present 侧限频**（`present_retry_deadline_ms`）/ **refresh 侧退避**（`retry_deadline_ms`）/ **view 失效标志**（`view_stale`）三个独立状态，消除「瞬时 get_state 失败压制 250ms 有效 present」与「present 失败延迟 mode rebind」两向混淆；errno 集合统一为单一分类器 `terminal_present_errno_classify()`（`RECOVERABLE = {EAGAIN, ESTALE}`），`EBUSY` 不再被 fatal 计数排除（原为「既不计失败、又不重试」的悬空区间，终端空转）。④ `fb_test` token 变为真判别子：消费时记录被消费 fault 的 token，经**内核私有**入口 `fb_test_last_consumed_token()` 供 host test 断言（`/dev/fbtest` UAPI 不变）。⑤ 删除 `kernel/driver/fb.c` 的 `fb_write_row` 生产死码（零调用者，host test 自带 mock）。⑥ Spec §7 头统一：`user/test_terminal_screen.c`/`user/tetris_dump.c` 改 `#include <uapi/fb.h>`，不再本地重复定义 `struct fb_info`。附带修订 `docs/superpowers/specs/2026-10-12-terminal-partial-present-design.md` §7.1（deadline 归属与 errno 集合统一，并如实记录本次对 terminal.c 失败计数的改动例外）。详见 `docs/changelog.md` 2026-11-01 条目。
 
 当前仍挂起项（均不阻塞主线）：
 
@@ -166,13 +167,6 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
   - **host 测试补强（非阻断）**：decoder 表行名用于失败诊断；增加 x86 CPL0 + U/S=1 仍判 KERNEL、ARM OTHER EC 的无效 FAR 断言；ARM backend 有效 FAR 用例补齐地址/有效位；dispatcher 的 x86 host 现场假设与 `memcmp(pt_regs_t)` 布局假设显式化，注明 longjmp 用例无法观察跳转后的清理；x86 backend 删除 reset 后才断言零计数的空检查；ARM backend RED 证据可补有意破坏断言的 mutation。
   - **调用链审计 fixture 补强（非阻断）**：继续梳理重复边诊断。
   - **维护性收尾（非阻断）**：x86 四个向量常量在 decoder/adapter/backend 三处重复；sync/IRQ backend 的 canary 属性不对称可说明；ARM 私有头统一 `pt_regs_t *` 写法；`test_uaccess.c` 分配注释应与实际 order-1（8 KiB）一致。`hosttests/Makefile` 的 “EVERY production header” 注释应限定为内核头与 ARM shim：libc/framework 的既有手写依赖缺口尚未覆盖，后续单独治理。
-
-- **QEMU 分辨率切换器收尾 follow-up（2026-10-06；parked #5 #8–#21）**：
-  - `HOLD ok`/`RELEASE ok` 匹配无 `start=` 会命中陈旧行（待审 SPEC §8.2 的副词表）；`_client_eagain_case` hold 8s 余量建议放宽至 12s。
-  - 客户端策略：`user/desktop.c`/`tetris.c`/`test_lvgl.c` 的重试/退出块三处近似重复（仅 classifier 抽到 `gfx_client_policy`）。
-  - `user/terminal.c:301-302` present 门限混淆「限频」与「view 已失效」（瞬时 EAGAIN/get_state 失败会压制 250ms 有效 present），fatal 计数排除 `EBUSY` 而 present 只为 EAGAIN/ESTALE 起 retry。
-  - `fb_test`（仅测试构建）：token 存而不用作判别子。
-  - `kernel/driver/fb.c` 的 `fb_write_row` 生产已死（仅 host mock 用）。
 
 - **GUI QEMU suite 中 guest 侧 `test_lvgl` 的用户态 SIGSEGV（2026-10-22 偶发）**：
   - 第二轮修复期间观察到一次（SMP 1 `smoke` 报 `rc=139`，`0x49884D` memset），后续运行与最终干净门禁均未复现。未修、未声称已修。后续需在能复现时抓寄存器/栈再定位。详见 [GUI-2 验证报告](superpowers/reports/2026-10-22-gui-2-validation.md) §7.5。

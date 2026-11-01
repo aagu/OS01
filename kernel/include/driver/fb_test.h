@@ -26,6 +26,12 @@ enum {
     FB_TEST_STEP_ROLLBACK = 1, /* rollback readback verification */
 };
 
+/* The fault classes that carry a token. */
+enum fb_test_fault_class {
+    FB_TEST_FAULT_REGISTER = 0, /* ARM_MISMATCH / ARM_ROLLBACK_FAILURE */
+    FB_TEST_FAULT_TERMINAL = 1, /* ARM_TERMINAL_ENOMEM */
+};
+
 #ifdef FB_RESOLUTION_TEST
 
 /* Register /dev/fbtest.  Idempotent; returns 0 once registered. */
@@ -50,6 +56,21 @@ uint16_t fb_test_filter_readback(int step, uint16_t index, uint16_t value);
  * prepare fault is armed for `pid`, else 0. */
 int fb_test_consume_terminal_enomem(int32_t pid);
 
+/* The token of the most recently CONSUMED fault of the given class, or 0
+ * when no fault of that class has been consumed yet.
+ *
+ * The token is the DISCRIMINATOR that proves WHICH armed fault fired.
+ * Without it a test can only count consumptions and cannot tell "the
+ * fault I armed was taken" from "a leftover fault from an earlier case
+ * was taken" — the token was stored but never read, so it discriminated
+ * nothing.  Roadmap parked item "QEMU 分辨率切换器收尾 follow-up" #4.
+ *
+ * It is deliberately NOT part of the test-only UAPI: the /dev/fbtest
+ * ioctl contract stays frozen, and the token is only needed by the host
+ * test, which links this kernel-private entry point directly.  The
+ * production sysroot never installs this header. */
+uint64_t fb_test_last_consumed_token(enum fb_test_fault_class cls);
+
 extern const struct devfs_ops fb_test_ops;
 
 #else /* !FB_RESOLUTION_TEST */
@@ -61,6 +82,7 @@ extern const struct devfs_ops fb_test_ops;
 #define fb_test_set_end()                           ((void)0)
 #define fb_test_filter_readback(step, index, value) (value)
 #define fb_test_consume_terminal_enomem(pid)        (0)
+#define fb_test_last_consumed_token(cls)            (0ull)
 
 #endif /* FB_RESOLUTION_TEST */
 

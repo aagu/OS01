@@ -352,6 +352,43 @@ TEST_FUNC(test_policy_classification)
     assert_eq(-1, gfx_client_present_policy(EINVAL));
 }
 
+/* The verdict API is the single decision point of the client policy: the
+ * verdict, its reason wording and the coarse policy projection must all
+ * agree, and the wording must not drift (a QEMU runner greps for it). */
+TEST_FUNC(test_policy_verdicts)
+{
+    TEST_SUITE("gfx_client_classify: verdict + reason wording");
+
+    assert_eq(GFX_CLIENT_OK, gfx_client_classify(0));
+    assert_eq(GFX_CLIENT_RETRY, gfx_client_classify(EAGAIN));
+    assert_eq(GFX_CLIENT_LOST_OWNERSHIP, gfx_client_classify(EACCES));
+    assert_eq(GFX_CLIENT_DISPLAY_CHANGED, gfx_client_classify(ESTALE));
+    assert_eq(GFX_CLIENT_FATAL, gfx_client_classify(EIO));
+    assert_eq(GFX_CLIENT_FATAL, gfx_client_classify(EBUSY));
+    assert_eq(GFX_CLIENT_FATAL, gfx_client_classify(EINVAL));
+    assert_eq(GFX_CLIENT_FATAL, gfx_client_classify(ENOMEM));
+
+    assert_str_eq("ok", gfx_client_verdict_reason(GFX_CLIENT_OK));
+    assert_str_eq("display busy, retrying",
+                  gfx_client_verdict_reason(GFX_CLIENT_RETRY));
+    assert_str_eq("lost display foreground ownership",
+                  gfx_client_verdict_reason(GFX_CLIENT_LOST_OWNERSHIP));
+    assert_str_eq("display mode changed, restart the app",
+                  gfx_client_verdict_reason(GFX_CLIENT_DISPLAY_CHANGED));
+    assert_str_eq("display device failure",
+                  gfx_client_verdict_reason(GFX_CLIENT_FATAL));
+
+    /* The coarse projection keeps its original mapping. */
+    assert_eq(0,  gfx_client_present_policy(0));
+    assert_eq(1,  gfx_client_present_policy(EAGAIN));
+    assert_eq(-1, gfx_client_present_policy(EACCES));
+    assert_eq(-1, gfx_client_present_policy(ESTALE));
+    assert_eq(-1, gfx_client_present_policy(EIO));
+    assert_eq(-1, gfx_client_present_policy(EBUSY));
+    assert_eq(-1, gfx_client_present_policy(EINVAL));
+    assert_eq(-1, gfx_client_present_policy(ENOMEM));
+}
+
 /* Scripted mock gfx_present + canonical client loop (the shape the
  * three long-running clients use: classify via gfx_client_present_policy,
  * throttle EAGAIN retries to >= GFX_CLIENT_RETRY_MS, release + exit on
@@ -463,6 +500,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_set_ebusy_mentions_restart),
     TEST_ENTRY(test_no_device_reports_error),
     TEST_ENTRY(test_policy_classification),
+    TEST_ENTRY(test_policy_verdicts),
     TEST_ENTRY(test_loop_eagain_retries_and_succeeds),
     TEST_ENTRY(test_loop_estale_exits_preserving_errno),
     TEST_ENTRY(test_loop_eio_exits_preserving_errno),

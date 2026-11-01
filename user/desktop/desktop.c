@@ -226,8 +226,8 @@ int main(int argc, char **argv)
             continue;
         }
         if (status != GUI_STATUS_OK) {
-            fprintf(stderr, "desktop: the display platform reached a terminal state (status=%d, errno=%d)\n",
-                    (int)status, errno);
+            fprintf(stderr, "desktop: the display platform reached a terminal state (status=%d, reason=%s, errno=%d)\n",
+                    (int)status, gui_platform_status_reason(status), errno);
             rc = 1;
             break;
         }

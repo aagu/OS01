@@ -58,6 +58,26 @@ DEFAULT_TIMEOUT = 180
 PROMPT = "# "
 BOOT_TIMEOUT = 120
 
+# ── Writer-lease hold window (spec §8.2 runner contract) ────────────────
+#
+# The guest helper (/bin/test_resolution hold N) acquires the real writer
+# lease, prints "HOLD ok" immediately afterwards, then keeps the lease for
+# N seconds and prints "RELEASE ok" when it lets go.
+#
+# The observation window for "HOLD ok" must exceed BOTH the guest's
+# start-up + acquire latency AND the hold duration itself.  With a window
+# equal to the hold duration a slow machine times out on a lease that is
+# still valid — the hold then outlives the runner's patience and the case
+# flakes for a reason that has nothing to do with the behaviour under
+# test.  HOLD_ACK_TIMEOUT = HOLD_SECS + 4 s of margin.
+#
+# The "RELEASE ok" window must cover the remaining hold plus the drain the
+# SET observes (the SET blocks until the 1 s drain timeout), so
+# RELEASE_ACK_TIMEOUT = HOLD_SECS + drain + margin.
+HOLD_SECS = 8
+HOLD_ACK_TIMEOUT = 12
+RELEASE_ACK_TIMEOUT = 14
+
 # ── Fixed plan values ────────────────────────────────────────
 BOOT_MODE = "800x600"              # production round-trip start mode
 ROUND_TRIP_MODES = ("1280x720", "640x480")
@@ -1394,15 +1414,16 @@ def _drain_case(firmware: Path, image: Path, results_dir: Path, log) -> list:
         return ["drain_boot_failed"]
     try:
         mark = sess.mark()
-        sess.send_line("/bin/test_resolution hold 8 &")
-        if not sess.wait_for(r"HOLD ok", timeout=8, start=mark):
+        sess.send_line(f"/bin/test_resolution hold {HOLD_SECS} &")
+        if not sess.wait_for(r"HOLD ok", timeout=HOLD_ACK_TIMEOUT, start=mark):
             return ["drain_hold_not_acquired"]
         mark = sess.mark()
         out = _guest(sess, f"setres 1280x720")
         if "EBUSY" not in out:
             fail.append(f"drain_no_ebusy: {out.strip()[-120:]}")
-        # Release window: 8s lease on a drained SET that may take ~1s.
-        if not sess.wait_for(r"RELEASE ok", timeout=12, start=mark):
+        # Release window: the 8s lease plus the ~1s the drained SET blocks.
+        if not sess.wait_for(r"RELEASE ok", timeout=RELEASE_ACK_TIMEOUT,
+                             start=mark):
             fail.append("drain_release_missing")
         if sess.mode() != (800, 600):
             fail.append(f"drain_mode_changed {sess.mode()}")
@@ -1486,8 +1507,8 @@ def _client_eagain_case(sess, log) -> list:
     """
     fail: list = []
     pre_hold = sess.mark()
-    sess.send_line("/bin/test_resolution hold 8 &")
-    if not sess.wait_for(r"HOLD ok", timeout=8, start=pre_hold):
+    sess.send_line(f"/bin/test_resolution hold {HOLD_SECS} &")
+    if not sess.wait_for(r"HOLD ok", timeout=HOLD_ACK_TIMEOUT, start=pre_hold):
         return ["eagain_hold_not_acquired"]
 
     if not _start_client(sess):
@@ -1511,12 +1532,13 @@ def _client_eagain_case(sess, log) -> list:
     if "display mode changed, restart the app" in seen:
         fail.append("eagain_client_estale_during_transient")
 
-    # The lease releases after hold expires.  A *real* switch now must yield
-    # ESTALE: only possible while the client still holds its (unchanged,
-    # no-longer-stale) view, so this proves it re-presented after the EAGAIN.
-    # 8s lease on the 4s hold we used before left a ~3s slack window; with the
-    # hold bumped to 8s and a settled drain of ~1s we have ~6s of margin.
-    if not sess.wait_for(r"RELEASE ok", timeout=14, start=post_client):
+    # The lease releases after the hold expires.  A *real* switch now must
+    # yield ESTALE: only possible while the client still holds its
+    # (unchanged, no-longer-stale) view, so this proves it re-presented
+    # after the EAGAIN.  The window covers the remaining hold plus the
+    # ~1s the drained SET blocks, plus margin.
+    if not sess.wait_for(r"RELEASE ok", timeout=RELEASE_ACK_TIMEOUT,
+                         start=post_client):
         fail.append("eagain_release_missing")
     before = sess.mark()
     _guest(sess, "setres 1280x720")

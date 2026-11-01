@@ -143,6 +143,28 @@ refresh 每次进入首先清 `refresh_presented`，状态检查/重绑定继续
 
 全部修改在 `terminal_display.c` 内完成，不改 terminal.c 的调度与失败计数逻辑。main 只负责普通提交失败计数；refresh 内错误由既有 fail() 负责，两者不重复计数。
 
+#### 7.1 修订：deadline 拆分与 errno 集合统一（2026-11-01）
+
+roadmap parked 项「QEMU 分辨率切换器收尾 follow-up」#3 指出，本节的单一 deadline 同时承担了三件事——present 限频、资源准备/状态查询失败的退避、以及「view 已失效」。两向后果都被观察到：一次瞬时状态查询失败会压制一个**有效**的 present 达 250ms（因为退避挡住了 present 门限）；一次 present 失败又会延迟本应立即进行的 mode rebind（因为限频挡住了 refresh）。此外 terminal.c 的失败计数排除 `EBUSY`，而 present 只为 `EAGAIN`/`ESTALE` 起 retry——`EBUSY` 落在「既不计失败、又不重试」的悬空区间，终端会一直空转。
+
+修订如下（`terminal_display_t` 新增两个字段，语义独立）：
+
+| 字段 | 语义 | 武装者 | 门限作用范围 |
+|---|---|---|---|
+| `retry_deadline_ms` | **refresh 侧**退避：状态查询或资源准备失败 | `fail()` | 只挡 refresh 主体（状态查询 + mode rebind） |
+| `present_retry_deadline_ms` | **present 侧**限频：present 真的失败了 | `terminal_display_present()` / `refresh_submit_attempt()` | 只挡 present（普通入口与 refresh 的重提交通道） |
+| `view_stale`（bool） | 绑定的 view 已失效（present 收到 `ESTALE`） | present 失败为 `ESTALE` 时置位；成功 rebind 或成功 present 时清除 | present 门限：在 rebind 前不得再对失效 view 提交 |
+
+由此：
+
+- 「deadline 未到」一行只约束 refresh 主体；refresh 的重提交通道另受 present 侧 deadline 约束（两者各自到期才动作）。
+- 上表「其他 refresh 提交错误（含 ENOMEM/EFAULT/EINVAL/EBUSY）」一行的 deadline 归 present 侧：这些失败来自 present ioctl，应限频 present 而不应推迟 pending 的 rebind。原表写的「由 fail() 设置」据此修订。
+- `redraw()` 同样受 present 侧 deadline 约束（它也是一个 present 通道），且其失败**不**武装 refresh 侧 deadline。
+
+errno 集合统一：新增 `terminal_present_errno_classify(err)` 作为**唯一**分类源，普通入口的「是否起 retry」与 main 的「是否计入失败计数」都从它派生（`RECOVERABLE = {EAGAIN, ESTALE}`，其余为 fatal 类）。这修正了上一节的漂移：`EBUSY` 不再被 main 的计数排除——它原本既不计失败也不重试，只会空转。
+
+**对「不改 terminal.c 的调度与失败计数逻辑」的例外**：本次修订**确实**改动了 terminal.c 的失败计数条件（改为调用共享分类器，语义上等价于把 `EBUSY` 移出排除集合）以及 present 门限（新增 `view_stale` 条件、改用 present 侧 deadline）。理由是本节的漂移缺陷正位于这两个集合之间，单靠 `terminal_display.c` 内部无法消除；而「不重复计数」的原则仍然成立：refresh 内的错误仍只由 `fail()` 处理，main 仍只统计普通提交失败。
+
 一轮多 ioctl 可以遇到 owner/mode 在矩形之间改变；这是允许的部分提交失败，靠保留 damage 和后续 full 恢复收敛，不把整轮矩形扩大为一个持锁事务。
 
 ## 8. 观测与性能验收

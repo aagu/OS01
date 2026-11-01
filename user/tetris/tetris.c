@@ -97,17 +97,19 @@ static bool present(void)
         return true;
     }
     int saved = errno;
-    if (gfx_client_present_policy(saved) == 1) {     // EAGAIN: keep view
+    /* The verdict (and its wording) is the shared client policy's single
+     * decision: this client never classifies the errno on its own. */
+    gfx_client_verdict_t verdict = gfx_client_classify(saved);
+    if (verdict == GFX_CLIENT_RETRY) {              /* EAGAIN: keep view */
         gfx_retry_deadline_ms = now + GFX_CLIENT_RETRY_MS;
         return true;
     }
-    const char *why;
-    if (saved == EACCES)
-        why = "lost display foreground ownership";
-    else if (saved == ESTALE)
-        why = "display mode changed, restart the app";
-    else
-        why = "display device failure";
+    if (verdict == GFX_CLIENT_OK) {
+        /* A failed present is never a success: a stray errno==0 must still
+         * be reported as a device failure. */
+        verdict = GFX_CLIENT_FATAL;
+    }
+    const char *why = gfx_client_verdict_reason(verdict);
     char msg[128];
     int n = snprintf(msg, sizeof(msg), "tetris: %s (errno=%d); exiting\n",
                      why, saved);

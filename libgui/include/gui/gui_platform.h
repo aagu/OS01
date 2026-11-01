@@ -164,6 +164,11 @@ typedef struct {
  */
 int gui_platform_get_stats(gui_platform_t *platform, gui_platform_stats_t *out);
 
+/* Human-readable reason for a terminal gui_status_t.  The wording comes
+ * from the shared client policy (user/common/gfx_client_policy.h), so every
+ * libgui consumer reports the same cause. */
+const char *gui_platform_status_reason(gui_status_t status);
+
 #ifdef __cplusplus
 }
 #endif

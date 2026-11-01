@@ -16,9 +16,9 @@
 #include <poll.h>
 #include <unistd.h>
 
-struct fb_info {
-    uint32_t width, height, stride, bpp, format;
-} __attribute__((packed));
+/* The production framebuffer ABI comes from <uapi/fb.h> — this program
+ * never redefines it (spec §7: 所有重复定义处统一引用). */
+#include <uapi/fb.h>
 
 #define FAIL(...) do {                                       \
     printf("\r\n[TERM SCREEN TEST] FAIL: ");                 \

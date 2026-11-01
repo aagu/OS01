@@ -331,9 +331,21 @@ int main(void)
 
         uint64_t elapsed = now_ms - last_present_ms;
 
-        // 1. Present immediately if interval elapsed and not waiting on retry
+        // 1. Present immediately if the frame interval elapsed, the
+        //    present-side rate limit has expired, and the bound view is
+        //    still valid.
+        //
+        //    The three conditions are independent on purpose (roadmap
+        //    parked "QEMU 分辨率切换器收尾 follow-up" item 3): the rate
+        //    limit belongs to a FAILED PRESENT, the refresh-side backoff
+        //    to a failed state query / resource prepare, and view_stale
+        //    marks a view the mode switch invalidated.  Sharing one
+        //    deadline for all three made a transient query failure
+        //    suppress a valid present for a full 250 ms.
         if (dirty_pending && elapsed >= FRAME_INTERVAL_MS &&
-            !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
+            !disp.view_stale &&
+            !(disp.present_retry_deadline_ms &&
+              now_ms < disp.present_retry_deadline_ms)) {
             int prc = terminal_display_present(&disp, now_ms);
 #if USER_DEBUG
             {
@@ -364,8 +376,14 @@ int main(void)
                 int e = errno;
                 last_present_ms = now_ms;
                 // Mode-related failures are recovered via refresh and never
-                // count toward the fatal limit. EACCES is already handled as skipped.
-                if (e != EAGAIN && e != ESTALE && e != EBUSY &&
+                // count toward the fatal limit. EACCES is already handled as
+                // skipped.  The recoverable set is taken from the SAME
+                // classifier the present path uses, so the two can never
+                // drift apart again: EBUSY used to sit in a limbo — excluded
+                // from this counter, yet never given a retry either, so the
+                // terminal spun on it without ever escalating.
+                if (terminal_present_errno_classify(e) ==
+                        TERMINAL_PRESENT_ERRNO_FATAL &&
                     ++present_failures >= MAX_PRESENT_FAILURES) {
                     serial_msg(serial_fd, "\r\n[terminal] FATAL: graphics present failed repeatedly, aborting\r\n");
                     fatal_exit = true;
@@ -376,9 +394,16 @@ int main(void)
         }
 
         // 2. Compute poll timeout
+        //
+        //    The base interval is only meaningful when a present can
+        //    actually happen: not rate-limited by the present-side
+        //    deadline, and the bound view is not stale.  (The refresh-side
+        //    deadline does NOT gate presents — it only defers the mode
+        //    rebind — so it must not suppress the frame interval here.)
         int base = -1;
-        if (dirty_pending && disp.foreground &&
-            !(disp.retry_deadline_ms && now_ms < disp.retry_deadline_ms)) {
+        if (dirty_pending && disp.foreground && !disp.view_stale &&
+            !(disp.present_retry_deadline_ms &&
+              now_ms < disp.present_retry_deadline_ms)) {
             uint64_t cur_elapsed = now_ms - last_present_ms;
             base = (cur_elapsed < FRAME_INTERVAL_MS) ?
                    (int)(FRAME_INTERVAL_MS - cur_elapsed) : 0;

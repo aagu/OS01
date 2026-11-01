@@ -356,16 +356,11 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
     return 0;
 }
 
-// ── fb_write_row: single-lease wrapper for legacy callers ───
-int fb_write_row(uint32_t x, uint32_t y, const void *pixels,
-                 uint32_t row_bytes)
-{
-    fb_lease_t lease;
-    int rc = fb_writer_begin(&lease, 0);
-    if (rc < 0) return rc;
-
-    rc = fb_write_row_leased(&lease, x, y, pixels, row_bytes);
-    fb_writer_end(&lease);
-    return rc;
-}
+// ── fb_write_row was removed ────────────────────────────────
+//
+// The single-lease wrapper had ZERO production callers: every writer
+// (gfx.c's per-row present, the console glyph path, the logo) holds an
+// explicit lease and calls fb_write_row_leased() directly.  Only the host
+// tests ever referenced it, and they mock it themselves.  Roadmap parked
+// item "QEMU 分辨率切换器收尾 follow-up" #5.
 

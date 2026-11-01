@@ -37,6 +37,22 @@ static int get_monotonic_ms(uint64_t *out_ms)
     } \
 } while (0)
 
+/* One shared mapping from a terminal platform status to the exit reason.
+ * The wording lives in libgui so every GUI client reports the same cause.
+ * Returns 1 when the status is terminal (the caller must exit). */
+static int handle_terminal_status(gui_status_t status, int *ret)
+{
+    if (status != GUI_STATUS_LOST_OWNERSHIP &&
+        status != GUI_STATUS_DISPLAY_CHANGED &&
+        status != GUI_STATUS_ERROR) {
+        return 0;
+    }
+    fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n",
+            gui_platform_status_reason(status), errno);
+    *ret = 1;
+    return 1;
+}
+
 
 static void build_rich_ui(lv_obj_t *scr, uint32_t w, uint32_t h)
 {
@@ -517,16 +533,7 @@ int main(int argc, char **argv)
     for (int frame = 0; frame < 5; frame++) {
         uint32_t delay_ms = 20;
         gui_status_t status = gui_platform_step(platform, &delay_ms);
-        if (status == GUI_STATUS_LOST_OWNERSHIP ||
-            status == GUI_STATUS_DISPLAY_CHANGED ||
-            status == GUI_STATUS_ERROR) {
-            const char *why = (status == GUI_STATUS_LOST_OWNERSHIP) ? "lost display foreground ownership" :
-                              (status == GUI_STATUS_DISPLAY_CHANGED) ? "display mode changed, restart the app" :
-                              "display device failure";
-            fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, errno);
-            ret = 1;
-            goto cleanup;
-        }
+        if (handle_terminal_status(status, &ret)) goto cleanup;
         int pret = poll(NULL, 0, (int)delay_ms);
         if (pret < 0 && errno != EINTR) {
             fprintf(stderr, "[test_lvgl] poll failed (errno=%d)\n", errno);
@@ -562,16 +569,7 @@ int main(int argc, char **argv)
             }
             uint32_t delay_ms = 100;
             gui_status_t status = gui_platform_step(platform, &delay_ms);
-            if (status == GUI_STATUS_LOST_OWNERSHIP ||
-                status == GUI_STATUS_DISPLAY_CHANGED ||
-                status == GUI_STATUS_ERROR) {
-                const char *why = (status == GUI_STATUS_LOST_OWNERSHIP) ? "lost display foreground ownership" :
-                                  (status == GUI_STATUS_DISPLAY_CHANGED) ? "display mode changed, restart the app" :
-                                  "display device failure";
-                fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, errno);
-                ret = 1;
-                goto cleanup;
-            }
+            if (handle_terminal_status(status, &ret)) goto cleanup;
 
             struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
             int pret = watch_display ? poll(NULL, 0, 250)
@@ -621,16 +619,7 @@ int main(int argc, char **argv)
             }
             uint32_t delay_ms = 100;
             gui_status_t status = gui_platform_step(platform, &delay_ms);
-            if (status == GUI_STATUS_LOST_OWNERSHIP ||
-                status == GUI_STATUS_DISPLAY_CHANGED ||
-                status == GUI_STATUS_ERROR) {
-                const char *why = (status == GUI_STATUS_LOST_OWNERSHIP) ? "lost display foreground ownership" :
-                                  (status == GUI_STATUS_DISPLAY_CHANGED) ? "display mode changed, restart the app" :
-                                  "display device failure";
-                fprintf(stderr, "[test_lvgl] %s (errno=%d); exiting\n", why, errno);
-                ret = 1;
-                goto cleanup;
-            }
+            if (handle_terminal_status(status, &ret)) goto cleanup;
             uint64_t elapsed = hold_now_ms - hold_start_ms;
             uint64_t rem = (elapsed < 1000ULL) ? (1000ULL - elapsed) : 0;
             if (delay_ms > rem) delay_ms = (uint32_t)rem;

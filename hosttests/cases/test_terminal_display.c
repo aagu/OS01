@@ -488,7 +488,10 @@ TEST_FUNC(test_terminal_present_errno_and_redraw_retry) {
     errno = 0;
     assert_eq(-1, terminal_display_present(&D, 100));
     assert_eq(EAGAIN, errno);
-    assert_eq(350, (int)D.retry_deadline_ms);
+    assert_eq(350, (int)D.present_retry_deadline_ms);
+    /* The REFRESH-side deadline is untouched by a present failure: a
+     * failed present must not defer the pending mode rebind. */
+    assert_eq(0, (int)D.retry_deadline_ms);
     assert_eq(0, terminal_display_present(&D, 400));
 
     /* present fails right after a successful swap: retried without reopen */
@@ -834,7 +837,7 @@ TEST_FUNC(test_terminal_foreground_restore_reports_presented_and_causes_exactly_
     uint64_t elapsed = now_ms - last_present_ms;
     /* Step 1 in terminal.c: must NOT present a second time */
     if (dirty_pending && elapsed >= 33 &&
-        !(D.retry_deadline_ms && now_ms < D.retry_deadline_ms)) {
+        !(D.present_retry_deadline_ms && now_ms < D.present_retry_deadline_ms)) {
         terminal_display_present(&D, now_ms);
     }
 
@@ -1181,7 +1184,7 @@ TEST_FUNC(test_display_partial_rect_round_and_ack) {
     assert_eq(2u, D.render.pending_damage.count);
     /* ordinary present armed retry pending + 250ms deadline. */
     assert_true(D.present_retry_pending);
-    assert_eq(1250ull, D.retry_deadline_ms);
+    assert_eq(1250ull, D.present_retry_deadline_ms);
     /* Round 2 (would be triggered by refresh at deadline or by an
      * external main loop after deadline): the SAME two rects must be
      * re-issued.  Feed the same dirty cells, mark flushable again,
@@ -1198,7 +1201,7 @@ TEST_FUNC(test_display_partial_rect_round_and_ack) {
      * pending damage survives and is re-submitted. */
     /* Drop the deadline so the next present can proceed; reset
      * retry flag for clarity. */
-    D.retry_deadline_ms = 0;
+    D.present_retry_deadline_ms = 0;
     D.present_retry_pending = false;
     /* g_rect_errno_per_call[1] was consumed during round 1 so the
      * retry round's 2nd rect succeeds.  This makes the retry a
@@ -1212,7 +1215,7 @@ TEST_FUNC(test_display_partial_rect_round_and_ack) {
     assert_eq(0u, D.render.pending_damage.count);
     /* Retry flags cleared on success. */
     assert_false(D.present_retry_pending);
-    assert_eq(0ull, D.retry_deadline_ms);
+    assert_eq(0ull, D.present_retry_deadline_ms);
     /* failed_completed_rect_bytes stays at 512 because the 2nd round
      * succeeded (it is only incremented on a failed round's
      * pre-failure rect bytes). */
@@ -1264,6 +1267,9 @@ TEST_FUNC(test_display_partial_rect_round_and_ack) {
     assert_false(D.serial_only);
     assert_false(D.present_retry_pending);
     assert_eq(0ull, D.retry_deadline_ms);
+    /* ENOTTY is not recoverable: the present path arms NEITHER
+     * deadline (main's counter owns it). */
+    assert_eq(0ull, D.present_retry_deadline_ms);
     terminal_display_close(&D);
 
     /* Subtest E: no damage = no ioctl + noop_calls++. */
@@ -1307,7 +1313,7 @@ TEST_FUNC(test_display_partial_retry_deadline) {
     assert_eq(EAGAIN, errno);
     /* retry_deadline = 100 + 250 = 350, pending set. */
     assert_true(D.present_retry_pending);
-    assert_eq(350ull, D.retry_deadline_ms);
+    assert_eq(350ull, D.present_retry_deadline_ms);
     /* Damage preserved (2 rects). */
     assert_eq(2u, D.render.pending_damage.count);
     /* Refresh before deadline returns 1 without ANY ioctl. */
@@ -1323,7 +1329,7 @@ TEST_FUNC(test_display_partial_retry_deadline) {
     assert_eq(rect_calls_before + 2, g_rect_log_count);
     /* Success cleared retry + deadline, set refresh_presented=true. */
     assert_false(D.present_retry_pending);
-    assert_eq(0ull, D.retry_deadline_ms);
+    assert_eq(0ull, D.present_retry_deadline_ms);
     assert_true(D.refresh_presented);
     /* Damage ACK'd. */
     assert_eq(0u, D.render.pending_damage.count);
@@ -1342,7 +1348,7 @@ TEST_FUNC(test_display_partial_retry_deadline) {
     uint64_t elapsed = now_ms - last_present_ms;
     int rect_calls_before_step = g_rect_log_count;
     if (dirty_pending && elapsed >= 33 &&
-        !(D.retry_deadline_ms && now_ms < D.retry_deadline_ms)) {
+        !(D.present_retry_deadline_ms && now_ms < D.present_retry_deadline_ms)) {
         terminal_display_present(&D, now_ms);
     }
     /* Main loop's "if dirty_present" branch did NOT fire because
@@ -1388,7 +1394,7 @@ TEST_FUNC(test_display_partial_retry_deadline) {
     errno = 0;
     assert_eq(-1, terminal_display_present(&D, 350));
     assert_eq(EAGAIN, errno);
-    assert_eq(600ull, D.retry_deadline_ms);
+    assert_eq(600ull, D.present_retry_deadline_ms);
     assert_true(D.present_retry_pending);
     /* Damage preserved. */
     assert_eq(1u, D.render.pending_damage.count);
@@ -1407,7 +1413,7 @@ TEST_FUNC(test_display_partial_retry_deadline) {
     assert_eq(0u, D.render.pending_damage.count);
     assert_false(D.render.pending_damage.full);
     assert_false(D.present_retry_pending);
-    assert_eq(0ull, D.retry_deadline_ms);
+    assert_eq(0ull, D.present_retry_deadline_ms);
     terminal_display_close(&D);
 }
 
@@ -1433,7 +1439,11 @@ TEST_FUNC(test_display_state_table_parametric) {
         assert_eq(-1, terminal_display_present(&D, 1000));
         assert_eq(EAGAIN, errno);
         assert_true(D.present_retry_pending);
-        assert_eq(1250ull, D.retry_deadline_ms);
+        assert_eq(1250ull, D.present_retry_deadline_ms);
+        /* A present failure never arms the REFRESH-side deadline. */
+        assert_eq(0ull, D.retry_deadline_ms);
+        /* EAGAIN leaves the view valid: not stale. */
+        assert_false(D.view_stale);
         assert_eq(1ull, D.metrics.failed_attempts);
         assert_eq(0ull, D.metrics.partial_frames);
         assert_eq(1u, D.render.pending_damage.count);
@@ -1451,7 +1461,11 @@ TEST_FUNC(test_display_state_table_parametric) {
         assert_eq(-1, terminal_display_present(&D, 2000));
         assert_eq(ESTALE, errno);
         assert_true(D.present_retry_pending);
-        assert_eq(2250ull, D.retry_deadline_ms);
+        assert_eq(2250ull, D.present_retry_deadline_ms);
+        /* ESTALE invalidates the view: the main loop must not present on
+         * it until the refresh rebinds. */
+        assert_true(D.view_stale);
+        assert_eq(0ull, D.retry_deadline_ms);
         terminal_display_close(&D);
     }
 
@@ -1633,9 +1647,13 @@ TEST_FUNC(test_display_state_table_parametric) {
             D.ops.gfx_present_rect = m_present_rect;
             hide_cursor_and_flush();
             mark_one_cell(0, 0, 'A');
-            /* Pre-arm retry so refresh takes the submit path. */
+            /* Pre-arm retry so refresh takes the submit path.  The
+             * PRESENT-side deadline is what gates the re-submit; the
+             * refresh-side deadline must be clear so the refresh body
+             * actually runs. */
             D.present_retry_pending = true;
-            D.retry_deadline_ms = 100; /* already past */
+            D.present_retry_deadline_ms = 100; /* already past */
+            D.retry_deadline_ms = 0;
             g_rect_always_errno = e;
             errno = 0;
             int rrc = terminal_display_refresh(&D, 3, 1000);
@@ -1653,10 +1671,13 @@ TEST_FUNC(test_display_state_table_parametric) {
                 assert_eq(e, errno);
                 assert_false(D.serial_only);
             }
-            /* EAGAIN/ESTALE: retry_pending and deadline RE-armed. */
+            /* EAGAIN/ESTALE: retry_pending and the PRESENT-side deadline
+             * RE-armed; the REFRESH-side deadline stays clear (a present
+             * failure must not defer the pending rebind). */
             if (e == EAGAIN || e == ESTALE) {
                 assert_true(D.present_retry_pending);
-                assert_eq(1250ull, D.retry_deadline_ms);
+                assert_eq(1250ull, D.present_retry_deadline_ms);
+                assert_eq(0ull, D.retry_deadline_ms);
             } else {
                 /* Other errnos: deadline reset by fail() to 1250 too
                  * (spec row 10), but present_retry_pending cleared
@@ -1665,13 +1686,15 @@ TEST_FUNC(test_display_state_table_parametric) {
                     e == EBADF || e == ENOTTY) {
                     assert_false(D.present_retry_pending);
                     assert_eq(0ull, D.retry_deadline_ms);
+                    assert_eq(0ull, D.present_retry_deadline_ms);
                 } else {
-                    /* Non-permanent non-retry errno: fail() arms 250ms
-                     * deadline; present_retry_pending stays cleared
-                     * (spec: refresh-time retry-pending is only armed
-                     * by EAGAIN/ESTALE from refresh; the deadline here
-                     * is a refresh recovery window). */
-                    assert_eq(1250ull, D.retry_deadline_ms);
+                    /* Non-permanent, non-EAGAIN/ESTALE errno: the present
+                     * side keeps the retry flag and arms the PRESENT-side
+                     * 250ms window (spec row 10).  The refresh-side
+                     * deadline stays clear. */
+                    assert_true(D.present_retry_pending);
+                    assert_eq(1250ull, D.present_retry_deadline_ms);
+                    assert_eq(0ull, D.retry_deadline_ms);
                 }
             }
             terminal_display_close(&D);
@@ -1755,7 +1778,9 @@ TEST_FUNC(test_display_state_table_parametric) {
         assert_true(D.redraw_pending); /* MUST stay true */
         /* EAGAIN arms retry. */
         assert_true(D.present_retry_pending);
-        assert_eq(1250ull, D.retry_deadline_ms);
+        assert_eq(1250ull, D.present_retry_deadline_ms);
+        /* A redraw's present failure arms the PRESENT-side window only. */
+        assert_eq(0ull, D.retry_deadline_ms);
         terminal_display_close(&D);
     }
 
@@ -1926,6 +1951,99 @@ TEST_FUNC(test_display_partial_metrics_anti_dilution) {
     }
 }
 
+/* ── Test 5: present-side vs refresh-side backoff split ────────────────
+ *
+ * Roadmap parked item "QEMU 分辨率切换器收尾 follow-up" #3: the present
+ * gate used ONE deadline for three different things — the present rate
+ * limit, the refresh/resource-prepare backoff, and "the view is stale".
+ * Conflating them made a transient state-query failure suppress a VALID
+ * present for a full 250 ms, and made a failed present defer the pending
+ * mode rebind.  It also left EBUSY in a limbo: excluded from terminal.c's
+ * fatal counter, yet never given a retry either.
+ *
+ * This test pins the split:
+ *   - a state-query failure arms ONLY the refresh-side deadline;
+ *   - a failed present arms ONLY the present-side deadline;
+ *   - view_stale marks a view the mode switch invalidated;
+ *   - the recoverable errno set is ONE classifier, so the present path
+ *     and terminal.c's counter can never drift apart again.
+ */
+TEST_FUNC(test_terminal_present_backoff_split) {
+    /* ── The classifier is the single source of truth ── */
+    assert_eq((int)TERMINAL_PRESENT_ERRNO_RECOVERABLE,
+              (int)terminal_present_errno_classify(EAGAIN));
+    assert_eq((int)TERMINAL_PRESENT_ERRNO_RECOVERABLE,
+              (int)terminal_present_errno_classify(ESTALE));
+    /* EBUSY is NOT recoverable: it is counted by terminal.c's counter,
+     * which is what removes the old "spin forever" limbo. */
+    assert_eq((int)TERMINAL_PRESENT_ERRNO_FATAL,
+              (int)terminal_present_errno_classify(EBUSY));
+    assert_eq((int)TERMINAL_PRESENT_ERRNO_FATAL,
+              (int)terminal_present_errno_classify(EIO));
+    assert_eq((int)TERMINAL_PRESENT_ERRNO_FATAL,
+              (int)terminal_present_errno_classify(ENOMEM));
+    assert_eq((int)TERMINAL_PRESENT_ERRNO_FATAL,
+              (int)terminal_present_errno_classify(EINVAL));
+
+    /* ── A transient state-query failure must NOT suppress a present ── */
+    {
+        setup(640, 480, 1);
+        g_state_errno = EAGAIN;
+        assert_eq(1, terminal_display_refresh(&D, 3, 1000));
+        /* Refresh-side backoff armed... */
+        assert_eq(1250, (int)D.retry_deadline_ms);
+        /* ...present-side deadline NOT armed: the present is not
+         * suppressed by a failed query. */
+        assert_eq(0, (int)D.present_retry_deadline_ms);
+        int before = g_present_calls;
+        assert_eq(0, terminal_display_present(&D, 1100));
+        assert_eq(before + 1, g_present_calls);
+        terminal_display_close(&D);
+    }
+
+    /* ── A failed present must NOT defer the pending mode rebind ── */
+    {
+        setup(640, 480, 1);
+        gfx_handle_t *old = D.gfx;
+        g_present_errno = EAGAIN;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(EAGAIN, errno);
+        /* Present-side rate limit armed... */
+        assert_eq(1250, (int)D.present_retry_deadline_ms);
+        /* ...refresh-side deadline clear: the rebind is not deferred. */
+        assert_eq(0, (int)D.retry_deadline_ms);
+        /* The mode changed: the rebind runs immediately even though the
+         * present-side window is still open. */
+        g_state.generation = 2;
+        g_state.info.width = 800; g_state.info.height = 600;
+        g_state.info.stride = 3200;
+        assert_eq(0, terminal_display_refresh(&D, 3, 1100));
+        assert_true(D.gfx != old);
+        assert_eq(1, g_open_calls);
+        assert_false(D.view_stale);
+        terminal_display_close(&D);
+    }
+
+    /* ── view_stale marks an invalidated view until the rebind ── */
+    {
+        setup(640, 480, 1);
+        g_present_errno = ESTALE;
+        errno = 0;
+        assert_eq(-1, terminal_display_present(&D, 1000));
+        assert_eq(ESTALE, errno);
+        assert_true(D.view_stale);
+        /* The rebind lifts the mark and binds a fresh view. */
+        g_present_errno = 0;
+        g_state.generation = 2;
+        g_state.info.width = 800; g_state.info.height = 600;
+        g_state.info.stride = 3200;
+        assert_eq(0, terminal_display_refresh(&D, 3, 1100));
+        assert_false(D.view_stale);
+        terminal_display_close(&D);
+    }
+}
+
 /* ── end Task 5 tests ───────────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -1956,6 +2074,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_display_partial_retry_deadline),
     TEST_ENTRY(test_display_state_table_parametric),
     TEST_ENTRY(test_display_partial_metrics_anti_dilution),
+    /* Roadmap parked "QEMU 分辨率切换器收尾 follow-up" #3: the present
+     * rate limit, the refresh backoff and the stale-view mark are three
+     * independent states, and the recoverable errno set has ONE
+     * classifier. */
+    TEST_ENTRY(test_terminal_present_backoff_split),
 TEST_LIST_END
 
 int main(void) {

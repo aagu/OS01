@@ -717,6 +717,64 @@ static void test_cold_file_callbacks_initialize_lock(void)
     }
 }
 
+/* ── Test 11: the token identifies WHICH armed fault fired ──────────────
+ *
+ * The token was stored in the pending slot but never read, so it
+ * discriminated nothing: a test could count consumptions but could not
+ * tell "the fault I armed was taken" from "a leftover fault from an
+ * earlier case was taken".  The consumed token is now reported per fault
+ * class through a kernel-private entry point (the /dev/fbtest UAPI is
+ * unchanged).  Roadmap parked item "QEMU 分辨率切换器收尾 follow-up" #4.
+ */
+static void test_consumed_token_identifies_the_armed_fault(void)
+{
+    printf("\n--- test_consumed_token_identifies_the_armed_fault ---\n");
+    setup_env();
+    probe_bga();
+
+    file_t *f = NULL;
+    CHECK_EQ(0, fb_test_ops.open("fbtest", &f));
+
+    /* Nothing consumed yet. */
+    CHECK_EQ((uint64_t)0, fb_test_last_consumed_token(FB_TEST_FAULT_REGISTER));
+    CHECK_EQ((uint64_t)0, fb_test_last_consumed_token(FB_TEST_FAULT_TERMINAL));
+
+    /* Arm a register fault for PID 100 with token 0x1234 and a terminal
+     * fault for PID 100 with token 0xBEEF. */
+    struct fb_test_req reg = make_req(100, 0x1234);
+    CHECK_EQ(0, fb_test_ops.ioctl_file(f, FBIOTEST_ARM_MISMATCH, &reg));
+    struct fb_test_req term = make_req(100, 0xBEEF);
+    CHECK_EQ(0, fb_test_ops.ioctl_file(f, FBIOTEST_ARM_TERMINAL_ENOMEM, &term));
+
+    /* Another PID's SET neither consumes nor faults the register slot. */
+    mock_current_task.pid = 200;
+    CHECK_EQ(0, do_set(1280, 720));
+    CHECK_EQ((uint64_t)0, fb_test_last_consumed_token(FB_TEST_FAULT_REGISTER));
+
+    /* The target PID's SET consumes it: the reported token is exactly the
+     * one that was armed. */
+    mock_current_task.pid = 100;
+    CHECK_EQ(-EIO, do_set(640, 480));
+    CHECK_EQ((uint64_t)0x1234, fb_test_last_consumed_token(FB_TEST_FAULT_REGISTER));
+
+    /* The terminal fault keeps its own identity, and consuming it does
+     * not disturb the register class. */
+    CHECK_EQ((uint64_t)0, fb_test_last_consumed_token(FB_TEST_FAULT_TERMINAL));
+    CHECK_EQ(1, fb_test_consume_terminal_enomem(100));
+    CHECK_EQ((uint64_t)0xBEEF, fb_test_last_consumed_token(FB_TEST_FAULT_TERMINAL));
+    CHECK_EQ((uint64_t)0x1234, fb_test_last_consumed_token(FB_TEST_FAULT_REGISTER));
+
+    /* Re-arming with a DIFFERENT token updates the identity: the token
+     * discriminates between successive faults, not only the first one. */
+    struct fb_test_req reg2 = make_req(100, 0x5678);
+    CHECK_EQ(0, fb_test_ops.ioctl_file(f, FBIOTEST_ARM_MISMATCH, &reg2));
+    mock_current_task.pid = 100;
+    CHECK_EQ(-EIO, do_set(640, 480));
+    CHECK_EQ((uint64_t)0x5678, fb_test_last_consumed_token(FB_TEST_FAULT_REGISTER));
+
+    fb_test_ops.release_file(f);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_cold_file_callbacks_initialize_lock),
     TEST_ENTRY(test_hooks_abi),
@@ -731,6 +789,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_arm_rejects_zero_token_without_side_effects),
     TEST_ENTRY(test_terminal_arm_preserves_pending_and_allows_rearm),
     TEST_ENTRY(test_fault_clears_pending),
+    /* Roadmap parked "QEMU 分辨率切换器收尾 follow-up" #4: the token is
+     * a real discriminator of the consumed fault. */
+    TEST_ENTRY(test_consumed_token_identifies_the_armed_fault),
 TEST_LIST_END
 
 int main(void)

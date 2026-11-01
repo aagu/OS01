@@ -645,6 +645,22 @@ TEST_FUNC(test_clock_failures)
     gui_platform_destroy(p);
 }
 
+TEST_FUNC(test_status_reason)
+{
+    /* The reason wording comes from the shared client policy, so it is
+     * pinned here: a QEMU runner greps for the stale-view sentence. */
+    gui_test_reset();
+    assert_str_eq("ok", gui_platform_status_reason(GUI_STATUS_OK));
+    assert_str_eq("display busy, retrying",
+                  gui_platform_status_reason(GUI_STATUS_EAGAIN));
+    assert_str_eq("lost display foreground ownership",
+                  gui_platform_status_reason(GUI_STATUS_LOST_OWNERSHIP));
+    assert_str_eq("display mode changed, restart the app",
+                  gui_platform_status_reason(GUI_STATUS_DISPLAY_CHANGED));
+    assert_str_eq("display device failure",
+                  gui_platform_status_reason(GUI_STATUS_ERROR));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_config_validation),
     TEST_ENTRY(test_capacity_and_header),
@@ -655,6 +671,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_frame_submission),
     TEST_ENTRY(test_wait_and_null_out),
     TEST_ENTRY(test_clock_failures),
+    TEST_ENTRY(test_status_reason),
 TEST_LIST_END
 
 int main(void)

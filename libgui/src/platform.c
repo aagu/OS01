@@ -609,6 +609,21 @@ int gui_platform_get_stats(gui_platform_t *platform, gui_platform_stats_t *out)
     return 0;
 }
 
+/* The human-readable cause of a platform status.  The wording comes from
+ * the shared client policy (user/common/gfx_client_policy.h), so every
+ * libgui consumer reports the same cause. */
+const char *gui_platform_status_reason(gui_status_t status)
+{
+    switch (status) {
+    case GUI_STATUS_OK:              return gfx_client_verdict_reason(GFX_CLIENT_OK);
+    case GUI_STATUS_EAGAIN:          return gfx_client_verdict_reason(GFX_CLIENT_RETRY);
+    case GUI_STATUS_LOST_OWNERSHIP:  return gfx_client_verdict_reason(GFX_CLIENT_LOST_OWNERSHIP);
+    case GUI_STATUS_DISPLAY_CHANGED: return gfx_client_verdict_reason(GFX_CLIENT_DISPLAY_CHANGED);
+    case GUI_STATUS_ERROR:           return gfx_client_verdict_reason(GFX_CLIENT_FATAL);
+    }
+    return gfx_client_verdict_reason(GFX_CLIENT_FATAL);
+}
+
 static gui_status_t enter_terminal_state(gui_platform_t *platform, gui_status_t status, int err)
 {
     int saved_errno = err;
@@ -810,16 +825,19 @@ static gui_status_t platform_step_body(gui_platform_t *platform, uint32_t *out_n
                 ret_status = GUI_STATUS_OK;
             } else {
                 int err = errno ? errno : EIO;
-                if (gfx_client_present_policy(err) == 1) { /* EAGAIN */
+                /* The verdict (and its wording) is the shared client policy's
+                 * single decision: no client re-classifies the errno. */
+                gfx_client_verdict_t verdict = gfx_client_classify(err);
+                if (verdict == GFX_CLIENT_RETRY) { /* EAGAIN */
                     uint64_t now_after = 0;
                     if (gui_tick_now_ms(&now_after) != 0) {
                         return enter_terminal_state(platform, GUI_STATUS_ERROR, errno);
                     }
                     platform->retry_deadline_ms = now_after + GFX_CLIENT_RETRY_MS;
                     ret_status = GUI_STATUS_EAGAIN;
-                } else if (err == EACCES) {
+                } else if (verdict == GFX_CLIENT_LOST_OWNERSHIP) {
                     return enter_terminal_state(platform, GUI_STATUS_LOST_OWNERSHIP, EACCES);
-                } else if (err == ESTALE) {
+                } else if (verdict == GFX_CLIENT_DISPLAY_CHANGED) {
                     return enter_terminal_state(platform, GUI_STATUS_DISPLAY_CHANGED, ESTALE);
                 } else {
                     return enter_terminal_state(platform, GUI_STATUS_ERROR, err);

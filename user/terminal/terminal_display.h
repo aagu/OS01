@@ -15,6 +15,35 @@
 #define TERMINAL_RETRY_MS     250u   /* retry / idle-poll upper bound */
 #define TERMINAL_PRESENT_SKIPPED 1   /* normal pause in background: 0=committed, -1=error, 1=skipped */
 
+/* ── Errno classification for a failed gfx present ──────────────────────
+ *
+ * ONE classifier, TWO consumers:
+ *   - the present path: decides whether the failure arms the PRESENT-side
+ *     250 ms rate limit and the present_retry_pending flag, and
+ *   - terminal.c's failure counter: decides whether the failure counts
+ *     toward the terminal's fatal limit.
+ *
+ * They MUST agree.  Before this classifier existed the two sets had
+ * drifted apart (the counter excluded EBUSY while the present path only
+ * armed a retry for EAGAIN/ESTALE), which left EBUSY in a limbo: never
+ * counted as a failure, never retried either — the terminal spun on it
+ * forever.  Deriving both from this single function makes that class of
+ * bug unrepresentable.
+ *
+ * RECOVERABLE = the mode machinery owns the recovery:
+ *   EAGAIN  the writer drain timed out; the view is still valid.
+ *   ESTALE  the view went stale after a mode switch; the refresh rebinds.
+ * Everything else (EIO, ENOMEM, EFAULT, EINVAL, EBUSY, ...) is left to
+ * the caller's failure counter, per spec §7 ("普通入口仅在 EAGAIN/ESTALE
+ * 时设置它并设置 now_ms+250 deadline；其他普通错误仍交 main 计数").
+ */
+typedef enum {
+    TERMINAL_PRESENT_ERRNO_RECOVERABLE = 0, /* EAGAIN / ESTALE */
+    TERMINAL_PRESENT_ERRNO_FATAL = 1,       /* every other errno */
+} terminal_present_errno_class_t;
+
+terminal_present_errno_class_t terminal_present_errno_classify(int err);
+
 /* Per-call metrics (Task 3 spec §8).  All counters are uint64_t.
  *
  * success_* fields accumulate the SUCCESSFUL logical frames:
@@ -100,7 +129,32 @@ typedef struct terminal_display {
     uint64_t owner_generation;   /* display ownership generation from GFX_GET_DISPLAY_STATE */
     bool foreground;             /* true if this view currently holds screen foreground */
     uint32_t fg, bg;
-    uint64_t retry_deadline_ms;   /* 0 = none */
+    /* ── Two INDEPENDENT backoff deadlines ──────────────────────────
+     *
+     * They used to be one field (retry_deadline_ms), which conflated two
+     * unrelated concepts and made them suppress each other:
+     *
+     *   retry_deadline_ms          REFRESH-side backoff.  Armed by fail()
+     *                              (state query / resource-prepare failure).
+     *                              It gates the refresh body — the mode
+     *                              rebind and the owner/state re-query.
+     *
+     *   present_retry_deadline_ms  PRESENT-side rate limit.  Armed when a
+     *                              gfx present actually failed.  It gates
+     *                              presents only (both the ordinary main
+     *                              loop entry and the refresh retry-submit).
+     *
+     * Splitting them removes both directions of the old confusion:
+     *   - a transient state-query failure no longer suppresses a VALID
+     *     present for 250 ms (it only defers the rebind), and
+     *   - a failed present no longer delays the pending mode rebind.
+     */
+    uint64_t retry_deadline_ms;        /* 0 = none; REFRESH-side backoff */
+    uint64_t present_retry_deadline_ms;/* 0 = none; PRESENT-side rate limit */
+    bool view_stale;                   /* the bound view is known invalid
+                                        * (a present returned ESTALE): the
+                                        * main loop must not present on it
+                                        * until the refresh rebinds. */
     bool serial_only;             /* permanent device failure: no graphics */
     bool redraw_pending;          /* new view bound or foreground restored, full redraw not yet presented */
     bool pending_winsize;         /* PTY master TIOCSWINSZ not yet delivered */
@@ -133,12 +187,15 @@ int terminal_display_sync_owner(terminal_display_t *d);
 int terminal_display_refresh(terminal_display_t *d, int fb_fd, uint64_t now_ms);
 
 /* Flush dirty cells + gfx_present.  0 / -1; errno from the failing present is
- * preserved (this helper makes no syscall after it).  EAGAIN/ESTALE arm the
- * 250ms retry deadline.  In serial_only mode returns 0 without drawing. */
+ * preserved (this helper makes no syscall after it).  A RECOVERABLE failure
+ * (EAGAIN/ESTALE — see terminal_present_errno_classify) arms the PRESENT-side
+ * 250ms rate limit (d->present_retry_deadline_ms) and sets present_retry_pending;
+ * an ESTALE additionally marks the view stale (d->view_stale) until the
+ * refresh rebinds it.  In serial_only mode returns 0 without drawing. */
 int terminal_display_present(terminal_display_t *d, uint64_t now_ms);
 
 /* poll() timeout: base_timeout_ms (-1 = infinite) clamped to <=250 and to the
- * pending retry deadline. */
+ * nearest pending backoff deadline (present-side or refresh-side). */
 int terminal_display_poll_timeout(const terminal_display_t *d,
                                   int base_timeout_ms, uint64_t now_ms);
 
