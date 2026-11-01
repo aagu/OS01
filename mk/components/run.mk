@@ -436,13 +436,26 @@ _test-aarch64-run-sched:
 # AARCH64_AP_SCHED_TEST=$(AP_SCHED_CASE); run invokes the dedicated
 # runner with the explicit per-case artifact paths.
 .PHONY: _test-aarch64-prep-sched-ap _test-aarch64-run-sched-ap
+# AP_SCHED_CASE (positive|fatal-owner) maps onto the compile selector
+# AARCH64_AP_SCHED_TEST (ap|fatal-owner): the positive case set is the
+# `ap` variant; the fatal-owner case owns its own fault variant.
+AP_SCHED_SELECTOR_positive = ap
+AP_SCHED_SELECTOR_fatal-owner = fatal-owner
 _test-aarch64-prep-sched-ap:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=$(AP_SCHED_CASE) aarch64-uefi
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=$(AP_SCHED_SELECTOR_$(AP_SCHED_CASE)) aarch64-uefi
 _test-aarch64-run-sched-ap:
 ifeq ($(AP_SCHED_CASE),fatal-owner)
 	python3 qemutests/aarch64_ap_scheduler.py 	  --phase ap --case fatal-owner 	  --image "$(AARCH64_UEFI_SCHED_AP_FATAL_DISK)" 	  --firmware "$(AARCH64_UEFI_SCHED_AP_FATAL_FIRMWARE)" 	  --elf "$(AARCH64_KERNEL_SCHED_AP_FATAL_ELF)" 	  --normal-elf "$(AARCH64_KERNEL_SCHED_AP_ELF)" 	  --qemu "$(AARCH64_QEMU)" 	  --llvm-nm "$(AARCH64_NM)" 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 else
-	@echo "  [sched-ap] AP_SCHED_CASE=positive arrives with P1 Task 4" >&2; exit 2
+	python3 qemutests/aarch64_ap_scheduler.py \
+	  --phase ap --case positive \
+	  --image "$(AARCH64_UEFI_SCHED_AP_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SCHED_AP_FIRMWARE)" \
+	  --elf "$(AARCH64_KERNEL_SCHED_AP_ELF)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 endif
 
 # M3.5 Task 25: production shootdown probe (spec §7.3). Builds the

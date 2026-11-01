@@ -538,7 +538,13 @@ void aarch64_main(const struct boot_context *handoff)
     {
         /* Declare all scheduler late IDs before START; END is emitted
          * by the post-handoff driver after the late records. */
+        /* The AP production-path variant declares EXACTLY its seven
+         * case IDs; every other aarch64 selftest shape declares nine. */
+#ifdef AARCH64_AP_SCHED_TEST_AP
+        selftest_begin_run(7);
+#else
         selftest_begin_run(9);
+#endif
         (void)selftest_run_all();
     }
 #endif

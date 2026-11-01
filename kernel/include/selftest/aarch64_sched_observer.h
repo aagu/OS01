@@ -68,6 +68,11 @@ void aarch64_sched_observe_free_complete(uint64_t token);
 /* Cumulative counters since boot (for the evidence lines). */
 uint64_t aarch64_sched_observer_created(void);
 uint64_t aarch64_sched_observer_released(unsigned kind);
+
+/* Batch failure flags (T4 evidence fields): bit0 overflow, bit1
+ * legacy-false-alloc, bit2 unknown token, bit3 duplicate completion,
+ * bit4 begin-while-active.  Snapshot of the CURRENT batch. */
+uint32_t aarch64_sched_observer_failure_flags(void);
 #endif
 
 #endif /* KERNEL_SELFTEST_AARCH64_SCHED_OBSERVER_H */

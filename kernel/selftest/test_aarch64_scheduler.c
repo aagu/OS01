@@ -80,7 +80,7 @@ static volatile uint64_t irq_nested_seen[NR_CPUS];
 static volatile uint64_t irq_frame_seen[NR_CPUS];
 static volatile uint64_t irq_frame_bad[NR_CPUS];
 static volatile uint64_t timer_irq_active[NR_CPUS];
-static volatile uint64_t irq_switch_counts[NR_CPUS];
+volatile uint64_t irq_switch_counts[NR_CPUS];
 static volatile uint64_t frame_checksums[NR_CPUS];
 static volatile uint64_t reg_done;
 static volatile uint64_t reg_fail_mask;
@@ -93,7 +93,7 @@ static volatile uint64_t timer_probe_status;
 static volatile uint64_t timer_peer_done;
 static volatile uint64_t timer_switch_baseline;
 static volatile uint64_t reclaim_batch_active;
-static uint64_t reclaim_bad_stack;
+uint64_t reclaim_bad_stack;
 /* Per-CPU first-entry records written by thread_entry.S (asm site
  * uses TPIDR_EL1 + PERCPU_CPU_ID_OFFSET to locate its slot). */
 volatile struct aarch64_sched_entry_record

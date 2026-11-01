@@ -209,4 +209,16 @@ uint64_t aarch64_sched_observer_released(unsigned kind)
     return v;
 }
 
+uint32_t aarch64_sched_observer_failure_flags(void)
+{
+    uint64_t flags = spin_lock_irqsave(&obs_lock);
+    uint32_t v = (obs_overflow ? 1u : 0) |
+                 (obs_bad_false_alloc ? 2u : 0) |
+                 (obs_unknown_token ? 4u : 0) |
+                 (obs_duplicate_complete ? 8u : 0) |
+                 (obs_begin_while_active ? 16u : 0);
+    spin_unlock_irqrestore(&obs_lock, flags);
+    return v;
+}
+
 #endif /* OS01_SELFTEST && (aarch64 || host observer) */

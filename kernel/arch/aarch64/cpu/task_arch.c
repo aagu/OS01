@@ -16,6 +16,7 @@
 #include <string.h>
 #ifdef OS01_SELFTEST
 #include <selftest/aarch64_scheduler.h>
+#include <selftest/aarch64_ap_scheduler.h>
 #include <selftest/result.h>
 #endif
 
@@ -446,8 +447,13 @@ void arch_aarch64_bsp_handoff(void)
                       (uintptr_t)&init_task_union, (uintptr_t)&init_task_union + STACK_SIZE);
     sched_boot_publish_idle();
     /* Publish BSP scheduler_ok FIRST, then open the AP release gate and
-     * wait for every accepted AP's scheduler_ok (P1 spec §3.2). */
+     * wait for every accepted AP's scheduler_ok (P1 spec §3.2).  The AP
+     * variant's runtime-admission check runs in the window where the
+     * accepted APs are IPI-ready but not yet schedulable. */
     sched_boot_start();
+#ifdef AARCH64_AP_SCHED_TEST_AP
+    test_aarch64_ap_scheduler_before_release();
+#endif
     aarch64_ap_sched_release();
     arch_local_irq_enable();
     log_info("[sched] idle-ready cpu=0 scheduler_ok=1 irq=on\n");
@@ -456,7 +462,11 @@ void arch_aarch64_bsp_handoff(void)
      * the cross-CPU barrier and park; the boot never completes. */
     test_aarch64_ap_fatal_owner_drive();
 #endif
-#ifdef OS01_SELFTEST
+#if defined(AARCH64_AP_SCHED_TEST_AP)
+    /* The AP production-path variant runs ONLY the seven frozen
+     * ap-sched cases (the old suite's late probe is not run here). */
+    test_aarch64_ap_scheduler_run();
+#elif defined(OS01_SELFTEST)
     test_aarch64_scheduler_run();
     int selftest_failed = selftest_end_run();
     serial_printk("[selftest] done (failed=%u)\n",
