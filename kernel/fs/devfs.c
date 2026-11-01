@@ -3,6 +3,7 @@
 #include <fs/vfs.h>
 #include <block/blockdev.h>
 #include <core/debug.h>
+#include <log/log.h>
 #include <random/random.h>
 #include <memory/vmm.h>
 #include <memory/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
@@ -713,28 +714,47 @@ int devfs_register_fs(void)
     return ret;
 }
 
-void devfs_init(void)
+int devfs_init(void)
 {
-    devfs_register_fs();
-
-    // Mount devfs at /dev
-    int ret = vfs_mount_fs("devfs", "/dev", NULL, NULL);
-    if (ret == 0) {
-        debug_fs("devfs: mounted at /dev\n");
-    } else {
-        debug_fs("devfs: mount FAILED\n");
-        return;
+    int ret = devfs_register_fs();
+    if (ret != 0 && ret != -EEXIST) {
+        log_err("devfs: register fs failed (%d)\n", ret);
+        return ret;
     }
 
-    // Register built-in character devices (duplicate registrations safely ignored)
-    devfs_register_chrdev("null",    NULL, &null_ops);
-    devfs_register_chrdev("zero",    NULL, &zero_ops);
-    devfs_register_chrdev("random",  NULL, &random_ops);
-    devfs_register_chrdev("urandom", NULL, &random_ops);
-    devfs_register_chrdev("serial",  NULL, &serial_ops);
-    // NOTE: /dev/tty and /dev/tty0 are registered in main.c
+    // Mount devfs at /dev
+    ret = vfs_mount_fs("devfs", "/dev", NULL, NULL);
+    if (ret != 0) {
+        log_err("devfs: mount at /dev failed (%d)\n", ret);
+        return ret;
+    }
+    debug_fs("devfs: mounted at /dev\n");
+
+    // Register built-in character devices (essential devices: failure aborts boot)
+    static const struct {
+        const char *name;
+        const struct devfs_ops *ops;
+    } builtins[] = {
+        { "null",    &null_ops },
+        { "zero",    &zero_ops },
+        { "random",  &random_ops },
+        { "urandom", &random_ops },
+        { "serial",  &serial_ops },
+    };
+
+    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
+        ret = devfs_register_chrdev(builtins[i].name, NULL, builtins[i].ops);
+        if (ret != 0 && ret != -EEXIST) {
+            log_err("devfs: failed to register essential device '%s' (%d)\n",
+                    builtins[i].name, ret);
+            return ret;
+        }
+    }
+
+    // NOTE: /dev/tty and /dev/tty0 are registered in tty_boot_init()
     // after keyboard_set_tty() so keyboard_get_tty() returns
     // the correct pointer.
+    return 0;
 }
 
 // ── Public API ──────────────────────────────────────────────

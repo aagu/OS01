@@ -28,7 +28,7 @@ extern pty_t pty_table[PTY_MAX];
 extern spinlock_T pty_lock;
 
 // API
-void pty_init(void);
+int pty_init(void);
 pty_t *pty_alloc(void);
 
 // Called by fd_ioctl (weak stub in file.c overridden by real impl in pty.c)

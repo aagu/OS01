@@ -22,7 +22,7 @@ struct boot_context;
 //                             tty_boot_init(); fs_boot_probe_devfs();
 // TTY wiring + /dev probe + devfs smoke test live in tty_boot_init()
 // + fs_boot_probe_devfs() (Task 3).
-void x86_64_boot_device_nodes(void);
+int x86_64_boot_device_nodes(void);
 
 // ── Boot-stage helpers (Task 4) ────────────────────────────────
 // The original kernel_main() carried three ordered boot blocks inline:

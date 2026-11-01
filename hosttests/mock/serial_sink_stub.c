@@ -19,3 +19,6 @@
 spinlock_T serial_lock = { 1 };
 
 void write_serial_unlocked(char c) { (void)c; }
+
+__attribute__((weak)) void _log_err_impl(const char *fmt, ...) { (void)fmt; }
+__attribute__((weak)) void _log_warn_impl(const char *fmt, ...) { (void)fmt; }

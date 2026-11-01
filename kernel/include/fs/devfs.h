@@ -72,7 +72,7 @@ int devfs_register_blkdev(const char *name, struct block_device *dev);
 int devfs_register_fs(void);
 
 // Initialize devfs and mount at /dev
-void devfs_init(void);
+int devfs_init(void);
 
 // TTY device ops tables — defined in devfs.c, registered in main.c
 // after keyboard_set_tty() so keyboard_get_tty() returns the correct pointer.

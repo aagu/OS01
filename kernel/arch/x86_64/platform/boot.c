@@ -68,6 +68,7 @@
 #include <driver/gfx.h>
 #include <fs/devfs.h>
 #include <log/log.h>
+#include <errno.h>
 
 // ── Stage 1 of 3: early CPU + interrupt infrastructure ───────
 // Mirrors the legacy lines 90-108 of kernel_main(): record the firmware
@@ -146,27 +147,37 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
 // /dev/mouse is gated on subsys_status because the i8042 controller may
 // not have a mouse port.
 
-void x86_64_boot_device_nodes(void)
+int x86_64_boot_device_nodes(void)
 {
-    devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
+    int ret = devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
+    if (ret != 0 && ret != -EEXIST) {
+        log_err("keyboard: failed to register /dev/keyboard (%d)\n", ret);
+        return ret;
+    }
 
-    if (subsys_status("mouse") == 1 &&
-        devfs_register_chrdev("mouse", NULL, &mouse_ops) != 0)
-        log_err("mouse: failed to register /dev/mouse\n");
+    if (subsys_status("mouse") == 1) {
+        ret = devfs_register_chrdev("mouse", NULL, &mouse_ops);
+        if (ret != 0 && ret != -EEXIST)
+            log_err("mouse: failed to register /dev/mouse (%d)\n", ret);
+    }
 
     // fb_ops is defined in kernel/driver/fb.c; no header declares it
     // (it's only consumed from this boot path).
     extern const struct devfs_ops fb_ops;
-    devfs_register_chrdev("fb", NULL, &fb_ops);
+    ret = devfs_register_chrdev("fb", NULL, &fb_ops);
+    if (ret != 0 && ret != -EEXIST) {
+        log_err("fb: failed to register /dev/fb (%d)\n", ret);
+        return ret;
+    }
 
     // /dev/gfx0 — bounded 2D present device (gfx 2D API plan, Task 2).
-    // gfx_init spins up the 16-entry view table; gfx_ops provides
-    // the open/ioctl_file/release_file callbacks.  Registered LAST
-    // so the gfx0 slot index never shifts the other devices'
-    // indices (subsys-gated mouse, fb, keyboard).
-    gfx_init();
-    if (devfs_register_chrdev("gfx0", NULL, &gfx_ops) != 0)
-        log_err("gfx0: failed to register /dev/gfx0\n");
+    // Gate gfx_init() consumer startup on successful devfs registration.
+    ret = devfs_register_chrdev("gfx0", NULL, &gfx_ops);
+    if (ret == 0 || ret == -EEXIST) {
+        gfx_init();
+    } else {
+        log_err("gfx0: failed to register /dev/gfx0 (%d)\n", ret);
+    }
 
 #ifdef FB_RESOLUTION_TEST
     // /dev/fbtest — controlled fault-injection surface (QEMU resolution
@@ -177,4 +188,6 @@ void x86_64_boot_device_nodes(void)
     if (fb_test_init() != 0)
         log_err("fbtest: failed to register /dev/fbtest\n");
 #endif
+
+    return 0;
 }

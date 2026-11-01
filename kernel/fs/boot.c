@@ -18,6 +18,7 @@
 #include <log/log.h>          // log_* for GPT/ext2/FAT32 fallback logs
 #include <core/panic.h>
 #include <stdbool.h>
+#include <errno.h>
 
 // ── fs_boot_prepare ───────────────────────────────────────────
 // Init the VFS mount table, then mount devfs at /dev.  devfs_init()
@@ -26,10 +27,15 @@
 // devfs_register_blkdev() calls are valid.
 //
 // MUST run before any vfs_mount() and before any devfs_register_*() call.
-void fs_boot_prepare(void)
+int fs_boot_prepare(void)
 {
     vfs_init();
-    devfs_init();
+    int ret = devfs_init();
+    if (ret != 0) {
+        log_err("fs_boot_prepare: devfs_init failed (%d)\n", ret);
+        return ret;
+    }
+    return 0;
 }
 
 // ── Static helpers for fs_boot_mounts ─────────────────────────
@@ -50,7 +56,11 @@ static void register_block_devices(void)
     for (int i = 0; i < n; i++) {
         block_device_t *dev = block_device_get(i);
         if (!dev) continue;
-        devfs_register_blkdev(dev->name, dev);
+        int ret = devfs_register_blkdev(dev->name, dev);
+        if (ret != 0 && ret != -EEXIST) {
+            log_err("boot: failed to register blkdev '%s' in devfs (%d)\n",
+                    dev->name, ret);
+        }
     }
 }
 

@@ -13,6 +13,7 @@
 #include <tty/pty.h>
 #include <fs/file.h>
 #include <fs/devfs.h>
+#include <log/log.h>
 #include <memory/uaccess.h>
 #include <string.h>
 #include <stdlib.h>
@@ -344,8 +345,13 @@ static const struct devfs_ops ptmx_ops = {
 //  pty_init: initialise table, register /dev/ptmx
 // ═══════════════════════════════════════════════════════════════
 
-void pty_init(void)
+int pty_init(void)
 {
     memset(pty_table, 0, sizeof(pty_table));
-    devfs_register_chrdev("ptmx", NULL, &ptmx_ops);
+    int rc = devfs_register_chrdev("ptmx", NULL, &ptmx_ops);
+    if (rc != 0 && rc != -EEXIST) {
+        log_err("pty: failed to register /dev/ptmx (%d)\n", rc);
+        return rc;
+    }
+    return 0;
 }

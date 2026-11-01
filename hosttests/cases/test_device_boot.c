@@ -168,7 +168,7 @@ int devfs_register_blkdev(const char *name, block_device_t *dev)
 }
 
 void vfs_init(void) {}
-void devfs_init(void) {}
+int devfs_init(void) { return 0; }
 void vfs_debug_list(const char *path) { (void)path; }
 struct vfs_node *vfs_lookup(const char *path) { (void)path; return NULL; }
 int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size, void *buf) { (void)node; (void)offset; (void)size; (void)buf; return 0; }
