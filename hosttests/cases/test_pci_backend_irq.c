@@ -92,6 +92,14 @@ uint64_t arch_irq_gsi_to_vector(uint32_t gsi)
     return 0x20 + gsi;
 }
 
+int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
+{
+    if (!vector)
+        return -EINVAL;
+    *vector = arch_irq_gsi_to_vector(gsi);
+    return 0;
+}
+
 void arch_irq_install(void) {}
 void softirq_init(void) {}
 

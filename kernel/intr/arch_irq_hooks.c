@@ -19,6 +19,7 @@
 #include <arch/irq.h>
 #include <log/log.h>
 #include <arch/cpu.h>   /* arch_cpu_halt for the FATAL path */
+#include <errno.h>
 
 __attribute__((weak))
 hw_int_controller_t *arch_irq_select_controller(uint32_t gsi)
@@ -46,7 +47,7 @@ __attribute__((weak))
 int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
 {
     if (!vector)
-        return -22; /* -EINVAL */
+        return -EINVAL;
     *vector = arch_irq_gsi_to_vector(gsi);
     return 0;
 }

@@ -200,6 +200,14 @@ uint64_t arch_irq_gsi_to_vector(uint32_t gsi)
     return 0x20 + gsi;
 }
 
+int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
+{
+    if (!vector)
+        return -EINVAL;
+    *vector = arch_irq_gsi_to_vector(gsi);
+    return 0;
+}
+
 /* ── Mock PCI backend & MSI-X mapping ────────────────────────────── */
 static uint32_t s_fake_msix_table[16];
 

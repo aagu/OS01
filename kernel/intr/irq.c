@@ -32,15 +32,6 @@ struct irq_range_bucket {
 static struct irq_range_bucket *s_ranges = NULL;
 static size_t s_range_count = 0;
 
-__attribute__((weak))
-int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
-{
-    if (vector == NULL)
-        return -EINVAL;
-    *vector = arch_irq_gsi_to_vector(gsi);
-    return 0;
-}
-
 void irq_registry_init_pic(void)
 {
     /* If an active handler exists in PIC storage or dynamic ranges, refuse reset */
@@ -58,27 +49,34 @@ void irq_registry_init_pic(void)
         }
     }
 
-    if (s_ranges != NULL) {
-        for (size_t i = 0; i < s_range_count; i++) {
-            kfree(s_ranges[i].descs);
-        }
-        kfree(s_ranges);
-        s_ranges = NULL;
-        s_range_count = 0;
-    }
+    arch_irq_state_t flags = arch_local_irq_save();
+    struct irq_range_bucket *old_buckets = s_ranges;
+    size_t old_count = s_range_count;
 
+    __atomic_store_n(&s_ranges, NULL, __ATOMIC_RELEASE);
+    s_range_count = 0;
     memset(s_pic_descs, 0, sizeof(s_pic_descs));
     s_pic_mode = true;
+    arch_local_irq_restore(flags);
+
+    if (old_buckets != NULL) {
+        for (size_t i = 0; i < old_count; i++) {
+            kfree(old_buckets[i].descs);
+        }
+        kfree(old_buckets);
+    }
 }
 
 irq_desc_t *irq_desc_for_gsi(uint32_t gsi)
 {
-    if (s_ranges != NULL) {
-        for (size_t i = 0; i < s_range_count; i++) {
-            uint32_t base = s_ranges[i].base;
-            uint32_t count = s_ranges[i].count;
+    struct irq_range_bucket *ranges = __atomic_load_n(&s_ranges, __ATOMIC_ACQUIRE);
+    if (ranges != NULL) {
+        size_t range_count = s_range_count;
+        for (size_t i = 0; i < range_count; i++) {
+            uint32_t base = ranges[i].base;
+            uint32_t count = ranges[i].count;
             if (gsi >= base && (uint64_t)gsi < (uint64_t)base + count) {
-                return &s_ranges[i].descs[gsi - base];
+                return &ranges[i].descs[gsi - base];
             }
         }
         return NULL;
@@ -170,8 +168,8 @@ int irq_registry_init_ranges(const struct irq_gsi_range *ranges, size_t count)
     struct irq_range_bucket *old_buckets = s_ranges;
     size_t old_count = s_range_count;
 
-    s_ranges = new_buckets;
     s_range_count = count;
+    __atomic_store_n(&s_ranges, new_buckets, __ATOMIC_RELEASE);
     s_pic_mode = false;
     arch_local_irq_restore(flags);
 
@@ -237,7 +235,18 @@ int32_t register_irq(uint32_t gsi, void *arg,
 
     /* Invoke controller outside the registry lock */
     if (controller->install != NULL) {
-        controller->install(vector, arg);
+        uint64_t install_rc = controller->install(vector, arg);
+        if (install_rc != 0) {
+            arch_irq_state_t rollback_flags = arch_local_irq_save();
+            p->handler = NULL;
+            p->controller = NULL;
+            p->irq_name[0] = '\0';
+            p->parameter = 0;
+            p->flags = 0;
+            arch_local_irq_restore(rollback_flags);
+            debug_irq("IRQ: controller install failed for GSI %u: %lu\n", gsi, install_rc);
+            return 0;
+        }
     }
     if (controller->enable != NULL) {
         controller->enable(vector);
@@ -261,10 +270,8 @@ uint32_t unregister_irq(uint32_t gsi)
     }
 
     hw_int_controller_t *ctrl = p->controller;
-    p->controller = NULL;
-    p->irq_name[0] = '\0';
-    p->parameter = 0;
-    p->flags = 0;
+    /* Clear handler under lock so no new invocations begin, while keeping
+     * p->controller intact so in-flight interrupts can still ACK. */
     p->handler = NULL;
     arch_local_irq_restore(irq_flags);
 
@@ -275,6 +282,14 @@ uint32_t unregister_irq(uint32_t gsi)
         if (ctrl->uninstall != NULL)
             ctrl->uninstall(vector);
     }
+
+    /* Clear controller and metadata under lock once controller disable/uninstall finishes */
+    irq_flags = arch_local_irq_save();
+    p->controller = NULL;
+    p->irq_name[0] = '\0';
+    p->parameter = 0;
+    p->flags = 0;
+    arch_local_irq_restore(irq_flags);
 
     return 1;
 }

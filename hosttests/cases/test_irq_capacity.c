@@ -40,11 +40,12 @@ static int g_ctrl_uninstall_calls = 0;
 static int g_ctrl_enable_calls = 0;
 static int g_ctrl_disable_calls = 0;
 static uint64_t g_last_vector = 0;
+static uint64_t g_mock_install_ret = 0;
 
 static uint64_t mock_install(uint64_t irq, void *arg) {
     g_ctrl_install_calls++;
     g_last_vector = irq;
-    return 0;
+    return g_mock_install_ret;
 }
 static void mock_uninstall(uint64_t irq) {
     g_ctrl_uninstall_calls++;
@@ -116,6 +117,7 @@ static void reset_test_state(void)
     g_ctrl_enable_calls = 0;
     g_ctrl_disable_calls = 0;
     g_last_vector = 0;
+    g_mock_install_ret = 0;
     g_select_controller_avail = true;
     g_route_prep_fail = 0;
 }
@@ -353,6 +355,45 @@ TEST_FUNC(registration_validation_and_lifecycle)
     assert_eq(0, unregister_irq(2));
 }
 
+/* 7. Controller install failure rolls back descriptor reservation */
+TEST_FUNC(controller_install_failure_rolls_back)
+{
+    reset_test_state();
+
+    struct irq_gsi_range base_range = { .base = 0, .count = 16 };
+    assert_eq(0, irq_registry_init_ranges(&base_range, 1));
+
+    /* Simulate controller install failure */
+    g_mock_install_ret = 1;
+
+    int rc = register_irq(5, NULL, dummy_handler, 0x1234, IRQF_TRIGGER_EDGE, "fail_irq");
+    assert_eq(0, rc);
+    assert_eq(1, g_ctrl_install_calls);
+    assert_eq(0, g_ctrl_enable_calls);
+
+    /* Verify descriptor reservation has been rolled back cleanly */
+    irq_desc_t *p = irq_desc_for_gsi(5);
+    assert_not_null(p);
+    assert_null(p->handler);
+    assert_null(p->controller);
+    assert_eq('\0', p->irq_name[0]);
+    assert_eq(0, p->parameter);
+    assert_eq(0, p->flags);
+
+    /* Subsequent registration on same GSI succeeds when install returns 0 */
+    g_mock_install_ret = 0;
+    rc = register_irq(5, NULL, dummy_handler, 0x5678, IRQF_TRIGGER_LEVEL, "succeed_irq");
+    assert_eq(1, rc);
+    assert_eq(2, g_ctrl_install_calls);
+    assert_eq(1, g_ctrl_enable_calls);
+    assert_not_null(p->handler);
+    assert_not_null(p->controller);
+    assert_eq(0, strcmp(p->irq_name, "succeed_irq"));
+
+    /* Clean up */
+    assert_eq(1, unregister_irq(5));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(sparse_ranges_are_bounded),
     TEST_ENTRY(range_validation_rejections),
@@ -360,6 +401,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(pic_static_early_storage),
     TEST_ENTRY(active_handler_refuses_reset),
     TEST_ENTRY(registration_validation_and_lifecycle),
+    TEST_ENTRY(controller_install_failure_rolls_back),
 TEST_LIST_END
 
 int main(void)
