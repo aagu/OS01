@@ -290,7 +290,11 @@ files_t *files_dup(files_t *fs)
 // reference is NOT taken — the caller keeps it and must release it.
 int fd_alloc_limit(files_t *fs, file_t *f, uint32_t min_fd, uint32_t exclusive_limit)
 {
-    if (!fs || !f) return -EINVAL;
+    // A missing descriptor table is a per-process limit condition, not
+    // a malformed request: every installation path reports it as
+    // -EMFILE (do_pipe, open(), socket(), accept()).
+    if (!fs) return -EMFILE;
+    if (!f) return -EINVAL;
 
     // The fd array is the hard bound; a limit above it cannot widen it.
     if (exclusive_limit > NOFILE) exclusive_limit = NOFILE;
@@ -318,8 +322,6 @@ int fd_alloc_limit(files_t *fs, file_t *f, uint32_t min_fd, uint32_t exclusive_l
 // RLIMIT_NOFILE soft limit.
 int fd_alloc(files_t *fs, file_t *f)
 {
-    if (!fs || !f) return -EINVAL;
-
     // Snapshot the soft limit under the task's resource lock and
     // release it BEFORE taking files_t.lock (lock order contract).
     uint64_t soft = task_nofile_soft_current();
@@ -376,35 +378,16 @@ void files_put_file(file_t *f)
 }
 
 // ── Centralized dup (slot writers must hold fs->lock) ──────
-// Install a second descriptor for oldfd at the lowest free slot
-// >= minfd, bounded by the current task's RLIMIT_NOFILE soft limit.
-//
-//   -EBADF  oldfd is not an open descriptor
-//   -EINVAL minfd is a positive minimum at or above the soft limit
-//           (POSIX F_DUPFD: the requested minimum is unreachable)
-//   -EMFILE no free slot in [minfd, soft)
-//
-// A minimum of 0 is the plain dup() case and reports -EMFILE like
-// every other exhausted range.
-int fd_dup(files_t *fs, int oldfd, int minfd)
+// Shared install helper: the lowest free slot in [min_fd, limit).
+// The caller holds no lock — files_t.lock is taken and released here.
+static int fd_dup_install(files_t *fs, int oldfd, uint32_t min_fd, uint32_t limit)
 {
-    if (!fs || oldfd < 0 || oldfd >= NOFILE || minfd < 0)
-        return -EBADF;
-
-    // Snapshot the soft limit under the task's resource lock and
-    // release it BEFORE taking files_t.lock (lock order contract).
-    uint64_t soft = task_nofile_soft_current();
-    uint32_t limit = (soft > NOFILE) ? NOFILE : (uint32_t)soft;
-
-    if ((uint32_t)minfd >= limit)
-        return (minfd > 0) ? -EINVAL : -EMFILE;
-
     uint64_t fl = spin_lock_irqsave(&fs->lock);
     file_t *f = fs->fd[oldfd];
     if (!f) { spin_unlock_irqrestore(&fs->lock, fl); return -EBADF; }
 
     int newfd = -1;
-    for (uint32_t i = (uint32_t)minfd; i < limit; i++) {
+    for (uint32_t i = min_fd; i < limit; i++) {
         if (fs->fd[i] == NULL) { newfd = (int)i; break; }
     }
     if (newfd < 0) { spin_unlock_irqrestore(&fs->lock, fl); return -EMFILE; }
@@ -413,6 +396,59 @@ int fd_dup(files_t *fs, int oldfd, int minfd)
     fs->fd[newfd] = f;
     spin_unlock_irqrestore(&fs->lock, fl);
     return newfd;
+}
+
+// dup(): install a second descriptor for oldfd at the lowest free
+// slot below the task's RLIMIT_NOFILE soft limit.
+//
+//   -EBADF  oldfd is not an open descriptor
+//   -EMFILE no free slot below the soft limit
+//
+// The source descriptor is checked FIRST: an invalid or closed oldfd
+// is -EBADF whatever the limit says.
+int fd_dup(files_t *fs, int oldfd)
+{
+    if (!fs || oldfd < 0 || oldfd >= NOFILE)
+        return -EBADF;
+
+    // Snapshot the soft limit under the task's resource lock and
+    // release it BEFORE taking files_t.lock (lock order contract).
+    uint64_t soft = task_nofile_soft_current();
+    uint32_t limit = (soft > NOFILE) ? NOFILE : (uint32_t)soft;
+
+    return fd_dup_install(fs, oldfd, 0, limit);
+}
+
+// F_DUPFD / F_DUPFD_CLOEXEC: install a second descriptor for oldfd at
+// the lowest free slot >= min_fd, bounded by the soft limit.
+//
+//   -EINVAL min_fd is not below the soft limit — the unreachable
+//           minimum is reported BEFORE the source descriptor, as
+//           POSIX/Linux do
+//   -EBADF  oldfd is not an open descriptor
+//   -EMFILE no free slot in [min_fd, soft)
+//
+// The errno is decided HERE, by the entry point that knows which
+// syscall it serves: plain dup() and F_DUPFD differ exactly there.
+int fd_dupfd(files_t *fs, int oldfd, int min_fd)
+{
+    if (min_fd < 0)
+        return -EINVAL;
+
+    // Snapshot the soft limit under the task's resource lock and
+    // release it BEFORE taking files_t.lock (lock order contract).
+    uint64_t soft = task_nofile_soft_current();
+    uint32_t limit = (soft > NOFILE) ? NOFILE : (uint32_t)soft;
+
+    // The requested minimum is validated FIRST: POSIX/Linux report
+    // EINVAL for an unreachable minimum even when the source
+    // descriptor is invalid.
+    if ((uint32_t)min_fd >= limit)
+        return -EINVAL;
+    if (!fs || oldfd < 0 || oldfd >= NOFILE)
+        return -EBADF;
+
+    return fd_dup_install(fs, oldfd, (uint32_t)min_fd, limit);
 }
 
 // dup2(oldfd, newfd): install oldfd's file at newfd and release the

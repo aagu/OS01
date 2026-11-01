@@ -264,7 +264,8 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/tty_poll_production.o \
     $(TEST_BLD)/devfs_poll_production.o \
     $(TEST_BLD)/poll_clocksource_stub.o \
-    $(TEST_BLD)/serial_sink_stub.o
+    $(TEST_BLD)/serial_sink_stub.o \
+    $(NOFILE_SOFT_STUB_OBJ)
 
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
@@ -302,7 +303,8 @@ $(TEST_BLD)/test_pty_winsize.o: $(TEST_CASES)/test_pty_winsize.c \
 
 $(TEST_BLD)/test_pty_winsize.elf: $(TEST_BLD)/test_pty_winsize.o \
 		$(TEST_BLD)/pty_production.o \
-		$(TEST_BLD)/pty_file_production.o
+		$(TEST_BLD)/pty_file_production.o \
+		$(NOFILE_SOFT_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -lpthread -o $@ $^
 
 .PHONY: test-pty-winsize

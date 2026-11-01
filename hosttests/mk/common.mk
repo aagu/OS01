@@ -131,6 +131,19 @@ $(TEST_BLD)/mock_kernel.o: $(TEST_MOCK)/mock_kernel.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) -g -O0 -c $< -o $@
 
+# ARCH-10 Task 6: the RLIMIT_NOFILE soft-limit snapshot stub for the
+# host harnesses that compile kernel/fs/file.c against a reduced mock
+# task_t (poll_test_runtime.h / gfx_test_runtime.h).  The production
+# kernel/sched/resource.c cannot be compiled against those mocks, so
+# every binary that links such a file.o MUST link this stub — the
+# link must not depend on --gc-sections dropping the install
+# functions.  See hosttests/mock/nofile_soft_stub.c.
+$(TEST_BLD)/nofile_soft_stub.o: $(TEST_MOCK)/nofile_soft_stub.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+NOFILE_SOFT_STUB_OBJ := $(TEST_BLD)/nofile_soft_stub.o
+
 # Default test case compilation
 $(TEST_BLD)/%.o: $(TEST_CASES)/%.c
 	@mkdir -p $(TEST_BLD)

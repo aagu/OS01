@@ -144,7 +144,10 @@ files_t     *files_dup(files_t *fs);
 
 // ── Descriptor installation (ARCH-10 Task 6) ─────────────────
 //
-// Every descriptor installation goes through fd_alloc_limit().
+// Every descriptor INSTALLATION goes through fd_alloc_limit() — the
+// paths that copy an already-open descriptor into a fresh table
+// (files_dup(), the fork copy) write the slots directly, because
+// they install nothing new.
 //
 // Limit: the install range is [min_fd, exclusive_limit).  The upper
 // bound is EXCLUSIVE — a descriptor number equal to exclusive_limit
@@ -161,14 +164,16 @@ files_t     *files_dup(files_t *fs);
 // the reference is NOT taken: the caller keeps it and must release
 // it.
 //
-// Errors: a negative errno (-EMFILE when the range holds no free
-// slot, -EINVAL for a malformed request).  The ambiguous -1 of the
-// pre-ARCH-10 fd_alloc() is gone.
+// Errors: a negative errno — -EMFILE when the range holds no free
+// slot (or when there is no descriptor table at all), -EINVAL for a
+// malformed request.
 int          fd_alloc_limit(files_t *fs, file_t *f, uint32_t min_fd,
                             uint32_t exclusive_limit);
 
 // Assign a file to the lowest free slot below the current task's
-// RLIMIT_NOFILE soft limit (0 on failure — see fd_alloc_limit()).
+// RLIMIT_NOFILE soft limit.
+//   -EMFILE no free slot below the limit, or no descriptor table
+//   -EINVAL a malformed request (NULL file)
 int          fd_alloc(files_t *fs, file_t *f);
 
 // Close one fd (release reference)
@@ -187,13 +192,19 @@ void    files_put_file(file_t *f);
 void    file_get(file_t *f);                   // safe under any lock
 void    file_put(file_t *f);
 
-// Install a second descriptor for oldfd at the lowest free slot
-// >= minfd, bounded by the current task's RLIMIT_NOFILE soft limit.
+// dup(): install a second descriptor for oldfd at the lowest free
+// slot below the task's RLIMIT_NOFILE soft limit.
 //   -EBADF  oldfd is not an open descriptor
-//   -EINVAL minfd is a positive minimum at or above the soft limit
-//           (POSIX F_DUPFD: the requested minimum is unreachable)
-//   -EMFILE no free slot in [minfd, soft)
-int     fd_dup(files_t *fs, int oldfd, int minfd);   // locks fs->lock internally
+//   -EMFILE no free slot below the soft limit
+int     fd_dup(files_t *fs, int oldfd);   // locks fs->lock internally
+
+// F_DUPFD / F_DUPFD_CLOEXEC: install a second descriptor for oldfd at
+// the lowest free slot >= min_fd, bounded by the soft limit.
+//   -EINVAL min_fd is not below the soft limit (checked BEFORE the
+//           source descriptor, as POSIX/Linux do)
+//   -EBADF  oldfd is not an open descriptor
+//   -EMFILE no free slot in [min_fd, soft)
+int     fd_dupfd(files_t *fs, int oldfd, int min_fd);   // locks fs->lock internally
 
 // dup2(oldfd, newfd): install oldfd's file at newfd, closing the
 // descriptor previously installed there.

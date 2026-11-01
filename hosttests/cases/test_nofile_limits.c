@@ -764,21 +764,119 @@ TEST_FUNC(test_install_dupfd_errno_split)
     assert_eq(0, fd_alloc(fs, f));
 
     /* F_DUPFD with a minimum at the soft limit: unreachable. */
-    assert_eq(-EINVAL, fd_dup(fs, 0, 4));
-    assert_eq(-EINVAL, fd_dup(fs, 0, 9));
+    assert_eq(-EINVAL, fd_dupfd(fs, 0, 4));
+    assert_eq(-EINVAL, fd_dupfd(fs, 0, 9));
 
     /* A valid minimum with no free slot below the limit. */
     assert_eq(1, install_placeholder(fs));
     assert_eq(2, install_placeholder(fs));
     assert_eq(3, install_placeholder(fs));
-    assert_eq(-EMFILE, fd_dup(fs, 0, 1));
+    assert_eq(-EMFILE, fd_dupfd(fs, 0, 1));
 
     /* Plain dup with the table exhausted below the limit. */
-    assert_eq(-EMFILE, fd_dup(fs, 0, 0));
+    assert_eq(-EMFILE, fd_dup(fs, 0));
 
     /* A valid minimum with a free slot below the limit still works. */
     fd_close(fs, 3);
-    assert_eq(3, fd_dup(fs, 0, 3));
+    assert_eq(3, fd_dupfd(fs, 0, 3));
+}
+
+TEST_FUNC(test_install_dup_errno_order)
+{
+    files_t *fs = install_table_new(4);
+
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    f->type = FD_DEV;
+    f->flags = O_RDONLY;
+    assert_eq(0, fd_alloc(fs, f));
+
+    /* Plain dup: the SOURCE descriptor is checked first, so an
+     * invalid or closed oldfd is -EBADF whatever the limit says. */
+    assert_eq(-EBADF, fd_dup(fs, 7));
+    assert_eq(-EBADF, fd_dup(fs, -1));
+
+    /* F_DUPFD: the requested MINIMUM is checked first, so an
+     * unreachable minimum is -EINVAL even for an invalid source. */
+    assert_eq(-EINVAL, fd_dupfd(fs, 7, 4));
+
+    /* A reachable minimum hands the decision to the source. */
+    assert_eq(-EBADF, fd_dupfd(fs, 7, 0));
+    assert_eq(-EBADF, fd_dupfd(fs, 7, 1));
+    assert_eq(-EBADF, fd_dupfd(fs, -1, 1));
+
+    /* A closed source descriptor is -EBADF as well. */
+    assert_eq(1, install_placeholder(fs));
+    fd_close(fs, 1);
+    assert_eq(-EBADF, fd_dup(fs, 1));
+    assert_eq(-EBADF, fd_dupfd(fs, 1, 0));
+}
+
+TEST_FUNC(test_install_zero_limit_errno_split)
+{
+    files_t *fs = install_table_new(4);
+
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    f->type = FD_DEV;
+    f->flags = O_RDONLY;
+    assert_eq(0, fd_alloc(fs, f));
+
+    /* Lower the soft limit to zero: no descriptor may be installed. */
+    install_set_soft(0);
+
+    file_t *g = file_alloc();
+    assert_not_null(g);
+    g->type = FD_DEV;
+    g->flags = O_RDONLY;
+
+    /* Nothing can be installed. */
+    assert_eq(-EMFILE, fd_alloc(fs, g));
+    assert_eq(1, g->refcount);   // the refused install took no reference
+    file_put(g);
+
+    /* F_DUPFD reports the unreachable minimum (-EINVAL) even with
+     * soft == 0 — the minimum is checked before the source. */
+    assert_eq(-EINVAL, fd_dupfd(fs, 0, 0));
+
+    /* Plain dup checks the source first: -EBADF for an invalid or
+     * closed source, -EMFILE when the source is valid but no slot
+     * fits below the limit. */
+    assert_eq(-EBADF, fd_dup(fs, 7));
+    assert_eq(-EBADF, fd_dup(fs, -1));
+    assert_eq(-EMFILE, fd_dup(fs, 0));   // fd 0 is open, but no slot fits
+}
+
+TEST_FUNC(test_install_missing_table_is_emfile)
+{
+    /* No descriptor table: every installation path reports the
+     * per-process limit condition -EMFILE (not -EINVAL). */
+    file_t *f = file_alloc();
+    assert_not_null(f);
+    f->type = FD_DEV;
+    f->flags = O_RDONLY;
+
+    assert_eq(-EMFILE, fd_alloc(NULL, f));
+    assert_eq(-EMFILE, fd_alloc_limit(NULL, f, 0, 4));
+    assert_eq(1, f->refcount);   // no reference was taken
+    file_put(f);
+
+    /* A malformed request (NULL file) is still -EINVAL. */
+    files_t *empty = files_alloc();
+    assert_not_null(empty);
+    assert_eq(-EINVAL, fd_alloc_limit(empty, NULL, 0, 4));
+
+    /* socket() / accept() report the same condition. */
+    install_table_new(OS01_NOFILE_CAPACITY);
+    g_current_task.files = NULL;
+
+    int new_before = fake_netconn_new_calls;
+    int delete_before = fake_netconn_delete_calls;
+    int64_t rc = do_socket(AF_INET, SOCK_STREAM, 6);
+    assert_eq(-EMFILE, rc);
+    /* The socket that could not be installed is released. */
+    assert_eq(new_before + 1, fake_netconn_new_calls);
+    assert_eq(delete_before + 1, fake_netconn_delete_calls);
 }
 
 TEST_FUNC(test_install_fd_alloc_limit_range)
@@ -845,6 +943,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_install_dup2_rejects_target_above_limit),
     TEST_ENTRY(test_install_dup2_same_fd_installs_nothing),
     TEST_ENTRY(test_install_dupfd_errno_split),
+    TEST_ENTRY(test_install_dup_errno_order),
+    TEST_ENTRY(test_install_zero_limit_errno_split),
+    TEST_ENTRY(test_install_missing_table_is_emfile),
 TEST_LIST_END
 
 int main(void)
