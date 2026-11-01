@@ -26,6 +26,22 @@
 #include <errno.h>
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
 #include <selftest/aarch64_scheduler.h>
+#include <selftest/aarch64_sched_observer.h>
+/* Observer release protocol (P1 Task 2): capture the release token,
+ * kfree the object, then record the completion by token alone — the
+ * observer never sees a dereference after the real free, and a
+ * leftover alloc=false call can no longer fake a completion. */
+static inline void kthread_observe_free(void *ptr, unsigned kind)
+{
+    uint64_t token = aarch64_sched_observe_free_begin(ptr, kind);
+    kfree(ptr);
+    aarch64_sched_observe_free_complete(token);
+}
+#else
+static inline void kthread_observe_free(void *ptr, unsigned kind)
+{
+    kfree(ptr);
+}
 #endif
 
 /* The task struct lives at the base of the task_union stack region,
@@ -116,18 +132,12 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
      * it checks the geometry used by this allocation path itself. */
     if (sizeof(task_t) > STACK_SIZE ||
         (size_t)256 > STACK_SIZE - sizeof(task_t)) {
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(raw, 1);
         return -EINVAL;
     }
     thread_t *thd = kmalloc(sizeof(thread_t));
     if (!thd) {
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(raw, 1);
         return -ENOMEM;
     }
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
@@ -195,12 +205,8 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
      *    raw stack. */
     int rc = arch_kthread_prepare(tsk, fn, arg);
     if (rc) {
-        kfree(thd);
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(thd, 2, false);
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(thd, 2);
+        kthread_observe_free(raw, 1);
         return rc;
     }
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
@@ -233,19 +239,12 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
          * unwind in reverse order when the locked eligibility recheck
          * rejects publication. */
         if (tsk->fpu_save) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(tsk->fpu_save, 3, false);
-#endif
-            kfree(tsk->fpu_save);
+            kthread_observe_free(tsk->fpu_save, 3);
             tsk->fpu_save = NULL;
         }
         arch_kthread_drop_files(tsk);
-        kfree(thd);
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(thd, 2, false);
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(thd, 2);
+        kthread_observe_free(raw, 1);
         return -EINVAL;
     }
 
@@ -423,6 +422,11 @@ void task_switch_complete(task_t *actual_prev)
     if (actual_prev == current) return; /* never finish/free our own stack */
     bool self_reap = (actual_prev->flags & PF_SELF_REAP) != 0;
 
+    /* Everything prev-owned is captured BEFORE task_finish_switch()
+     * clears on_cpu: after that a waiter may free prev and reading it
+     * is a use-after-free.  The observer release tokens are captured
+     * here too (P1 Task 2) — free_complete() after the real kfree
+     * uses only the token, never the (freed) object. */
     thread_t *thd  = actual_prev->thread;
     void      *fpu  = actual_prev->fpu_save;
     void      *stk  = actual_prev->stack_alloc_base;
@@ -433,28 +437,34 @@ void task_switch_complete(task_t *actual_prev)
     bool next_stack = live_sp < (uintptr_t)actual_prev ||
                       live_sp >= (uintptr_t)actual_prev + STACK_SIZE;
     aarch64_sched_observe_reap(actual_prev, next_stack);
+    uint64_t thd_tok = (self_reap && thd)
+        ? aarch64_sched_observe_free_begin(thd, 2) : 0;
+    uint64_t fpu_tok = (self_reap && fpu)
+        ? aarch64_sched_observe_free_begin(fpu, 3) : 0;
+    uint64_t stk_tok = (self_reap && stk)
+        ? aarch64_sched_observe_free_begin(stk, 1) : 0;
 #endif
 
     task_finish_switch(actual_prev);
 
     if (self_reap) {
         if (thd) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(thd, 2, false);
-#endif
             kfree(thd);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_free_complete(thd_tok);
+#endif
         }
         if (fpu) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(fpu, 3, false);
-#endif
             kfree(fpu);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_free_complete(fpu_tok);
+#endif
         }
         if (stk) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(stk, 1, false);
-#endif
             kfree(stk);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_free_complete(stk_tok);
+#endif
         }
     }
 }

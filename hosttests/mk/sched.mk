@@ -456,3 +456,40 @@ test-sched-notify: $(TEST_BLD)/test_sched_notify.elf \
 	$(TEST_BLD)/test_sched_notify.elf
 	$(TEST_BLD)/test_sched_notify_x86_backend.elf
 	$(TEST_BLD)/test_sched_notify_aarch64_backend.elf
+
+# ── P1 Task 2: concurrency-safe scheduler observer ──────────────
+# Compiles the REAL kernel/selftest/aarch64_sched_observer.c against a
+# pthread-backed spin surface and drives it from real host threads.
+$(eval $(call register_host_test,test_aarch64_sched_observer,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_aarch64_sched_observer.elf
+
+# No LIBC_INC: the OS01 libc ships a pthread.h stub that would shadow
+# the host glibc header (same reason test_sync_primitives omits it).
+OBSERVER_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) \
+    -DOS01_SELFTEST=1
+OBSERVER_PROD_CFLAGS := $(OBSERVER_CFLAGS) -pthread \
+    -DOS01_HOST_SCHED_OBSERVER=1 \
+    -include $(TEST_MOCK)/aarch64_sched_observer_runtime.h
+
+$(TEST_BLD)/sched_observer_production.o: \
+		$(TESTS_DIR)/kernel/selftest/aarch64_sched_observer.c \
+		$(TESTS_DIR)/kernel/include/selftest/aarch64_sched_observer.h \
+		$(TEST_MOCK)/aarch64_sched_observer_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(OBSERVER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_observer.o: \
+		$(TEST_CASES)/test_aarch64_sched_observer.c \
+		$(TEST_MOCK)/aarch64_sched_observer_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(OBSERVER_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_observer.elf: \
+		$(TEST_BLD)/test_aarch64_sched_observer.o \
+		$(TEST_BLD)/sched_observer_production.o
+	$(HOST_CC) -pthread -o $@ $^
+
+.PHONY: test-aarch64-sched-observer
+test-aarch64-sched-observer: $(TEST_BLD)/test_aarch64_sched_observer.elf
+	$<

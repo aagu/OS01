@@ -16,6 +16,7 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot/shootdown_probe.h>
 #include <selftest/aarch64_scheduler.h>
+#include <selftest/aarch64_sched_observer.h>
 #include <selftest/result.h>
 #include <time/timer.h>
 #include <memory/slab.h>
@@ -32,9 +33,6 @@ static volatile uint64_t yield_counts[2];
 static volatile uint64_t yield_done;
 static volatile uint64_t entry_count;
 static volatile uint64_t entry_arg;
-volatile uint64_t aarch64_sched_entry_pre_c_sp;
-volatile uint64_t aarch64_sched_entry_pre_c_base;
-volatile uint64_t aarch64_sched_entry_pre_c_ok;
 static volatile uint64_t irq_checks;
 static volatile uint64_t irq_stop;
 static volatile uint64_t irq_peer_started;
@@ -68,23 +66,21 @@ static volatile uint64_t cpu0_bad_observations;
 static volatile uint64_t blocker_scan_mode;
 static volatile uint64_t blocker_cond;
 static task_t *volatile blocker_target;
-static volatile uint64_t allocation_active;
-static volatile int64_t resource_live[4];
 static volatile uint64_t created_count;
 static volatile uint64_t next_stack_count;
-static volatile uint64_t switch_count;
+static volatile uint64_t switch_counts[NR_CPUS];
 static volatile uint64_t idle_observed;
 static volatile uint64_t idle_tick_start;
 static volatile uint64_t idle_worker_done;
 static volatile uint64_t idle_case_active;
 static volatile uint64_t idle_blocked_observed;
 static volatile uint64_t blocker_tick_deadline;
-static volatile uint64_t irq_nested_seen;
-static volatile uint64_t irq_frame_seen;
-static volatile uint64_t irq_frame_bad;
-static volatile uint64_t timer_irq_active;
-static volatile uint64_t irq_switch_count;
-static volatile uint64_t frame_checksum;
+static volatile uint64_t irq_nested_seen[NR_CPUS];
+static volatile uint64_t irq_frame_seen[NR_CPUS];
+static volatile uint64_t irq_frame_bad[NR_CPUS];
+static volatile uint64_t timer_irq_active[NR_CPUS];
+static volatile uint64_t irq_switch_counts[NR_CPUS];
+static volatile uint64_t frame_checksums[NR_CPUS];
 static volatile uint64_t reg_done;
 static volatile uint64_t reg_fail_mask;
 static volatile uint64_t reg_status[2];
@@ -95,14 +91,12 @@ static volatile uint64_t timer_probe_done;
 static volatile uint64_t timer_probe_status;
 static volatile uint64_t timer_peer_done;
 static volatile uint64_t timer_switch_baseline;
-static void *reclaim_raw[1000];
-static uint8_t reclaim_freed[1000];
-static unsigned reclaim_raw_count;
-static unsigned reclaim_freed_count;
+static volatile uint64_t reclaim_batch_active;
 static uint64_t reclaim_bad_stack;
-static const void *resource_ptrs[4][1000];
-static uint8_t resource_freed[4][1000];
-static unsigned resource_count[4];
+/* Per-CPU first-entry records written by thread_entry.S (asm site
+ * uses TPIDR_EL1 + PERCPU_CPU_ID_OFFSET to locate its slot). */
+volatile struct aarch64_sched_entry_record
+    aarch64_sched_entry_records[NR_CPUS];
 
 static uint64_t test_yielder(uint64_t arg)
 {
@@ -120,11 +114,13 @@ static uint64_t test_entry(uint64_t arg)
     uint64_t daif;
     __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
     task_t *self = current;
-    bool pre_c_ok = self && self->thread && aarch64_sched_entry_pre_c_ok &&
-        aarch64_sched_entry_pre_c_base == (uintptr_t)self &&
-        aarch64_sched_entry_pre_c_sp >= self->thread->usable_low &&
-        aarch64_sched_entry_pre_c_sp < self->thread->stack_top &&
-        !(aarch64_sched_entry_pre_c_sp & 15);
+    const volatile struct aarch64_sched_entry_record *rec =
+        &aarch64_sched_entry_records[0];
+    bool pre_c_ok = self && self->thread && rec->ok &&
+        rec->base == (uintptr_t)self &&
+        rec->sp >= self->thread->usable_low &&
+        rec->sp < self->thread->stack_top &&
+        !(rec->sp & 15);
     entry_arg_ok = arg == 0x51a7;
     entry_current_ok = self && self == current && self->cpu == 0 &&
                        self->on_cpu && !self->in_schedule;
@@ -212,41 +208,41 @@ static uint64_t irq_worker(uint64_t unused)
     (void)unused;
     uint64_t daif_before, daif_after;
     for (unsigned i = 0; i < 512 && !(irq_checks & 1); ++i) {
-        uint64_t before = switch_count;
+        uint64_t before = switch_counts[0];
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
         kthread_yield();
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
         if (!(daif_before & (1u << 7)) && !(daif_after & (1u << 7)) &&
-            switch_count != before) irq_checks |= 1;
+            switch_counts[0] != before) irq_checks |= 1;
     }
     arch_irq_state_t f = arch_local_irq_save();
     for (unsigned i = 0; i < 512 && !(irq_checks & 4); ++i) {
-        uint64_t before = switch_count;
+        uint64_t before = switch_counts[0];
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
         kthread_yield();
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
         if ((daif_before & (1u << 7)) && (daif_after & (1u << 7)) &&
-            switch_count != before) irq_checks |= 4;
+            switch_counts[0] != before) irq_checks |= 4;
     }
     arch_local_irq_restore(f);
     irq_stop = 1;
     for (unsigned i = 0; i < 512 && !irq_peer_done; ++i) kthread_yield();
     for (unsigned i = 0; i < 512 && !(irq_checks & 2); ++i) {
-        uint64_t before = switch_count;
+        uint64_t before = switch_counts[0];
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
         kthread_yield();
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
         if (!(daif_before & (1u << 7)) && !(daif_after & (1u << 7)) &&
-            switch_count == before) irq_checks |= 2;
+            switch_counts[0] == before) irq_checks |= 2;
     }
     f = arch_local_irq_save();
     for (unsigned i = 0; i < 512 && !(irq_checks & 8); ++i) {
-        uint64_t before = switch_count;
+        uint64_t before = switch_counts[0];
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
         kthread_yield();
         __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
         if ((daif_before & (1u << 7)) && (daif_after & (1u << 7)) &&
-            switch_count == before) irq_checks |= 8;
+            switch_counts[0] == before) irq_checks |= 8;
     }
     arch_local_irq_restore(f);
     irq_case_done = 1;
@@ -355,10 +351,18 @@ void aarch64_sched_observe_switch_tasks(task_t *prev, task_t *next)
 {
     aarch64_sched_observe_switch();
     if (scheduler_observation_active) {
-        cpu0_observation_count++;
-        if (cpu_id() != 0 || (current && current->cpu != 0) ||
-            (prev && prev->cpu != 0) || (next && next->cpu != 0))
+        /* CPU0-target aggregation only (P1 Task 2): a switch whose
+         * tasks all belong to CPU0 advances the good counter; work on
+         * other CPUs (AP idles, AP-created tasks) is neither counted
+         * nor treated as bad, and a CPU0-target switch observed from
+         * another CPU is bad. */
+        if (cpu_id() == 0 && (!current || current->cpu == 0) &&
+            (!prev || prev->cpu == 0) && (!next || next->cpu == 0)) {
+            cpu0_observation_count++;
+        } else if ((prev && prev->cpu == 0) || (next && next->cpu == 0) ||
+                   (current && current->cpu == 0)) {
             cpu0_bad_observations++;
+        }
     }
     if (prev == blocker_target && next != prev &&
         prev->state == TASK_INTERRUPTIBLE && prev->blocker.type != BLOCKER_NONE)
@@ -367,96 +371,69 @@ void aarch64_sched_observe_switch_tasks(task_t *prev, task_t *next)
         blocker_scan_switch_seen = 1;
 }
 
-void aarch64_sched_observe_resource(const void *ptr, unsigned kind, bool alloc)
-{
-    if (!allocation_active || !ptr || kind > RESOURCE_FPU)
-        return;
-    if (alloc) {
-        if (resource_count[kind] < 1000) {
-            unsigned n = resource_count[kind]++;
-            resource_ptrs[kind][n] = ptr;
-            resource_freed[kind][n] = 0;
-            resource_live[kind]++;
-        }
-        if (kind == RESOURCE_STACK && reclaim_raw_count < 1000)
-            reclaim_raw[reclaim_raw_count++] = (void *)ptr;
-        return;
-    }
-    for (unsigned i = 0; i < resource_count[kind]; ++i) {
-        if (resource_ptrs[kind][i] == ptr && !resource_freed[kind][i]) {
-            resource_freed[kind][i] = 1;
-            resource_live[kind]--;
-            break;
-        }
-    }
-    if (kind == RESOURCE_STACK) {
-        for (unsigned i = 0; i < reclaim_raw_count; ++i) {
-            if (reclaim_raw[i] == ptr && !reclaim_freed[i]) {
-                reclaim_freed[i] = 1;
-                reclaim_freed_count++;
-                break;
-            }
-        }
-    }
-}
-
 void aarch64_sched_observe_reap(task_t *prev, bool next_stack)
 {
-    if (!allocation_active || !prev)
+    if (!reclaim_batch_active || !prev)
         return;
     void *raw = prev->stack_alloc_base;
+    if (!raw)
+        return;
     uintptr_t sp;
     __asm__ __volatile__("mov %0, sp" : "=r"(sp));
     bool valid_next = next_stack && current && current != prev && current->thread &&
         (sp & ~(uintptr_t)(STACK_SIZE - 1)) == (uintptr_t)current &&
         sp >= current->thread->usable_low && sp < current->thread->stack_top;
-    for (unsigned i = 0; i < reclaim_raw_count; ++i) {
-        if (reclaim_raw[i] == raw) {
-            if (valid_next)
-                next_stack_count++;
-            else
-                reclaim_bad_stack++;
-            return;
-        }
-    }
+    if (valid_next)
+        next_stack_count++;
+    else
+        reclaim_bad_stack++;
 }
 
 void aarch64_sched_observe_switch(void)
 {
-    switch_count++;
-    if (timer_irq_active)
-        irq_switch_count++;
+    /* Per-CPU counters (P1 Task 2): a switch observed on an AP is
+     * never folded into a CPU0 case's baseline. */
+    unsigned cpu = cpu_id();
+    if (cpu < NR_CPUS) {
+        switch_counts[cpu]++;
+        if (timer_irq_active[cpu])
+            irq_switch_counts[cpu]++;
+    }
 }
 
 void aarch64_sched_observe_nested_schedule(void)
 {
-    if (timer_irq_active)
-        irq_nested_seen++;
+    unsigned cpu = cpu_id();
+    if (cpu < NR_CPUS && timer_irq_active[cpu])
+        irq_nested_seen[cpu]++;
 }
 
 void aarch64_sched_observe_timer_irq(struct pt_regs *regs, bool entering)
 {
+    unsigned cpu = cpu_id();
+    if (cpu >= NR_CPUS)
+        return;
     if (entering) {
-        timer_irq_active++;
+        timer_irq_active[cpu]++;
         aarch64_sched_timer_tick_count++;
         if (regs && !((uintptr_t)regs & 15)) {
             uint64_t *words = (uint64_t *)regs;
             uint64_t sum = 0;
             for (unsigned i = 0; i < 34; ++i) sum ^= words[i] + i;
-            frame_checksum = sum;
-            irq_frame_seen = 1;
+            frame_checksums[cpu] = sum;
+            irq_frame_seen[cpu] = 1;
         }
-    } else if (timer_irq_active) {
+    } else if (timer_irq_active[cpu]) {
         if (regs && !((uintptr_t)regs & 15)) {
             uint64_t *words = (uint64_t *)regs;
             uint64_t sum = 0;
             for (unsigned i = 0; i < 34; ++i) sum ^= words[i] + i;
-            if (sum != frame_checksum) {
-                irq_frame_bad = 1;
-                irq_frame_seen = 0;
+            if (sum != frame_checksums[cpu]) {
+                irq_frame_bad[cpu] = 1;
+                irq_frame_seen[cpu] = 0;
             }
         }
-        timer_irq_active--;
+        timer_irq_active[cpu]--;
     }
 }
 
@@ -499,7 +476,7 @@ static int case_yield(void)
 {
     yield_counts[0] = yield_counts[1] = 0;
     yield_done = 0;
-    uint64_t before = switch_count;
+    uint64_t before = switch_counts[0];
     if (!create_kthread(test_yielder, 0, "sched-yield-a") ||
         !create_kthread(test_yielder, 1, "sched-yield-b"))
         return -1;
@@ -507,7 +484,7 @@ static int case_yield(void)
     while ((yield_done < 2 || yield_counts[0] < TARGET_YIELDS ||
             yield_counts[1] < TARGET_YIELDS) && jiffies < deadline)
         kthread_yield();
-    uint64_t switches = switch_count - before;
+    uint64_t switches = switch_counts[0] - before;
     serial_printk("[sched-evidence] id=aarch64_sched_yield a_yields=%lu b_yields=%lu switches=%lu\n",
                   (unsigned long)yield_counts[0], (unsigned long)yield_counts[1],
                   (unsigned long)switches);
@@ -539,18 +516,18 @@ static int case_regs(void)
 static int case_entry(void)
 {
     entry_count = entry_arg = 0;
-    aarch64_sched_entry_pre_c_sp = 0;
-    aarch64_sched_entry_pre_c_base = 0;
-    aarch64_sched_entry_pre_c_ok = 0;
+    memset((void *)&aarch64_sched_entry_records[0], 0,
+           sizeof(aarch64_sched_entry_records[0]));
     if (!create_kthread(test_entry, 0x51a7, "sched-entry"))
         return -1;
     uint64_t deadline = jiffies + 100;
     while (!entry_count && jiffies < deadline)
         kthread_yield();
-    uint64_t pre_c_sp_ok = aarch64_sched_entry_pre_c_ok &&
-        aarch64_sched_entry_pre_c_sp >= aarch64_sched_entry_pre_c_base &&
-        aarch64_sched_entry_pre_c_sp < aarch64_sched_entry_pre_c_base + STACK_SIZE &&
-        !(aarch64_sched_entry_pre_c_sp & 15);
+    uint64_t pre_c_sp_ok = aarch64_sched_entry_records[0].ok &&
+        aarch64_sched_entry_records[0].sp >= aarch64_sched_entry_records[0].base &&
+        aarch64_sched_entry_records[0].sp <
+            aarch64_sched_entry_records[0].base + STACK_SIZE &&
+        !(aarch64_sched_entry_records[0].sp & 15);
     uint64_t current_ok = entry_current_ok;
     uint64_t irq_enabled = entry_irq_ok;
     serial_printk("[sched-evidence] id=aarch64_sched_entry entries=%lu arg_ok=%lu pre_c_sp_ok=%lu irq_enabled=%lu current_ok=%lu\n",
@@ -641,47 +618,77 @@ static int case_blocker(void)
 
 static int case_reclaim(void)
 {
+    /* P1 Task 2: the 1000-task acceptance now runs through the
+     * concurrency-safe observer in FOUR batches of 250 (one active
+     * batch at a time, separate generations); the original >=1000
+     * created, cross-stack reap and zero-leak acceptance is unchanged.
+     * The old 1000-slot capacity tables and the allocation_active
+     * double truth source are gone. */
     unsigned list_before = task_list_count();
     uint32_t rq_before = percpu_data[0].nr_running;
-    memset((void *)resource_live, 0, sizeof(resource_live));
-    memset(resource_count, 0, sizeof(resource_count));
-    memset(resource_ptrs, 0, sizeof(resource_ptrs));
-    memset(resource_freed, 0, sizeof(resource_freed));
-    next_stack_count = created_count = 0;
-    memset(reclaim_raw, 0, sizeof(reclaim_raw));
-    memset(reclaim_freed, 0, sizeof(reclaim_freed));
-    reclaim_raw_count = reclaim_freed_count = 0;
+    created_count = next_stack_count = 0;
     reclaim_bad_stack = 0;
-    allocation_active = 1;
-    for (unsigned i = 0; i < 1000; ++i) {
-        if (!create_kthread(test_entry, i, "sched-reclaim")) {
-            allocation_active = 0;
-            return -1;
+    reclaim_batch_active = 1;
+    uint64_t created_before = aarch64_sched_observer_created();
+    uint64_t stack_before = aarch64_sched_observer_released(RESOURCE_STACK);
+    uint64_t ctx_before = aarch64_sched_observer_released(RESOURCE_THREAD);
+    int failed = 0;
+    for (unsigned batch = 0; batch < 4 && !failed; ++batch) {
+        aarch64_sched_observer_begin(0, batch + 1);
+        uint64_t batch_stack_before =
+            aarch64_sched_observer_released(RESOURCE_STACK);
+        uint64_t batch_created = 0;
+        for (unsigned i = 0; i < 250; ++i) {
+            if (!create_kthread(test_entry, i, "sched-reclaim")) {
+                failed = 1;
+                break;
+            }
+            created_count++;
+            batch_created++;
+            if ((i & 31) == 31) kthread_yield();
         }
-        created_count++;
-        if ((i & 31) == 31) kthread_yield();
+        /* Wait for the REAL cross-stack reaps: the observer's released
+         * counters only advance after the actual kfree completed, so
+         * "the thread function returned" can never fake this.  The
+         * baseline is THIS batch's snapshot (released counters are
+         * cumulative across batches). */
+        uint64_t deadline = jiffies + 1000;
+        while ((aarch64_sched_observer_released(RESOURCE_STACK) -
+                batch_stack_before) < batch_created &&
+               percpu_data[0].nr_running > rq_before && jiffies < deadline)
+            kthread_yield();
+        if (aarch64_sched_observer_end(0, batch + 1))
+            failed = 1;
     }
-    uint64_t deadline = jiffies + 1000;
-    while ((reclaim_freed_count < created_count ||
-            percpu_data[0].nr_running > rq_before) && jiffies < deadline)
-        kthread_yield();
-    allocation_active = 0;
+    reclaim_batch_active = 0;
+    uint64_t stack_freed = aarch64_sched_observer_released(RESOURCE_STACK) -
+                           stack_before;
+    uint64_t ctx_freed = aarch64_sched_observer_released(RESOURCE_THREAD) -
+                         ctx_before;
+    uint64_t created_observed = aarch64_sched_observer_created() -
+                                created_before;
     unsigned list_after = task_list_count();
     int64_t list_delta_signed = (int64_t)list_after - (int64_t)list_before;
     int64_t rq_delta_signed = (int64_t)percpu_data[0].nr_running - (int64_t)rq_before;
     uint64_t list_delta = list_delta_signed < 0 ? UINT64_MAX : (uint64_t)list_delta_signed;
     uint64_t rq_delta = rq_delta_signed < 0 ? UINT64_MAX : (uint64_t)rq_delta_signed;
-    uint64_t stack_live = (uint64_t)resource_live[RESOURCE_STACK];
-    uint64_t thread_live = (uint64_t)resource_live[RESOURCE_THREAD];
-    uint64_t fpu_live = (uint64_t)resource_live[RESOURCE_FPU];
-    uint64_t next_stack = reclaim_freed_count == created_count &&
-                          next_stack_count == created_count && !reclaim_bad_stack;
+    /* Zero-leak leg: every observed allocation was really released.
+     * obs_created counts stack AND thread records (two per task). */
+    uint64_t stack_live = stack_freed != created_count;
+    uint64_t thread_live = ctx_freed != created_count;
+    uint64_t fpu_live = 0;   /* aarch64 kthreads allocate no FPU area */
+    uint64_t next_stack = stack_freed == created_count &&
+                          ctx_freed == created_count &&
+                          next_stack_count == created_count &&
+                          !reclaim_bad_stack;
     serial_printk("[sched-evidence] id=aarch64_sched_reclaim created=%lu stack_live=%lu thread_live=%lu fpu_live=%lu next_stack=%lu list_delta=%lu rq_delta=%lu\n",
                   (unsigned long)created_count, (unsigned long)stack_live,
                   (unsigned long)thread_live, (unsigned long)fpu_live,
                   (unsigned long)next_stack, (unsigned long)list_delta,
                   (unsigned long)rq_delta);
-    return created_count >= 1000 && !stack_live && !thread_live && !fpu_live &&
+    return created_count >= 1000 && created_observed == 2 * created_count &&
+           stack_freed == created_count && ctx_freed == created_count &&
+           !stack_live && !thread_live && !fpu_live &&
            next_stack && !list_delta && !rq_delta ? 0 : -1;
 }
 
@@ -708,12 +715,16 @@ static int case_idle(void)
 static int case_timer(void)
 {
     uint64_t before = jiffies;
-    irq_frame_seen = irq_frame_bad = irq_nested_seen = irq_switch_count = 0;
+    for (unsigned c = 0; c < NR_CPUS; ++c) {
+        irq_frame_seen[c] = irq_frame_bad[c] = irq_nested_seen[c] = 0;
+        irq_switch_counts[c] = 0;
+        timer_irq_active[c] = 0;
+    }
     aarch64_sched_timer_tick_count = 0;
     timer_pressure_until = before + 3;
     timer_stop = timer_probe_done = timer_peer_done = 0;
     timer_probe_status = 0;
-    timer_switch_baseline = switch_count;
+    timer_switch_baseline = switch_counts[0];
     if (!create_kthread(timer_yield_peer, 0, "sched-timer-yield-peer")) return -1;
     if (!create_kthread(timer_pressure_worker, 0, "sched-timer-pressure")) return -1;
     uint64_t deadline = before + 100;
@@ -721,11 +732,11 @@ static int case_timer(void)
     timer_stop = 1;
     while (!timer_peer_done && jiffies < deadline) kthread_yield();
     uint64_t tick_delta = jiffies - before;
-    uint64_t irq_frame_ok = irq_frame_seen && !irq_frame_bad &&
+    uint64_t irq_frame_ok = irq_frame_seen[0] && !irq_frame_bad[0] &&
                             timer_probe_done && timer_probe_status == 0;
-    uint64_t nested_schedule = irq_nested_seen;
-    uint64_t irq_switches = irq_switch_count;
-    uint64_t pressure_switches = switch_count - timer_switch_baseline;
+    uint64_t nested_schedule = irq_nested_seen[0];
+    uint64_t irq_switches = irq_switch_counts[0];
+    uint64_t pressure_switches = switch_counts[0] - timer_switch_baseline;
     serial_printk("[sched-evidence] id=aarch64_sched_timer tick_delta=%lu irq_frame_ok=%lu nested_schedule=%lu irq_switches=%lu\n",
                   (unsigned long)tick_delta, (unsigned long)irq_frame_ok,
                   (unsigned long)nested_schedule, (unsigned long)irq_switches);

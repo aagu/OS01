@@ -1,4 +1,8 @@
 #include <arch/aarch64/context.h>
+#ifdef OS01_SELFTEST
+#include <selftest/aarch64_scheduler.h>
+#include <arch/aarch64/boot_offsets.h>
+#endif
 
 .text
 .align 2
@@ -25,17 +29,21 @@ arch_aarch64_kthread_entry:
 
 #ifdef OS01_SELFTEST
     /* Preserve the real pre-C stack observation from the first-entry
-     * assembly boundary; the C test reads this record after fn starts. */
-    adrp x9, aarch64_sched_entry_pre_c_sp
-    add x9, x9, :lo12:aarch64_sched_entry_pre_c_sp
-    str x8, [x9]
-    adrp x9, aarch64_sched_entry_pre_c_base
-    add x9, x9, :lo12:aarch64_sched_entry_pre_c_base
-    str x3, [x9]
-    adrp x9, aarch64_sched_entry_pre_c_ok
-    add x9, x9, :lo12:aarch64_sched_entry_pre_c_ok
+     * assembly boundary in THIS CPU's record slot.  The CPU index is
+     * read through TPIDR_EL1 + PERCPU_CPU_ID_OFFSET — never through
+     * `current`, which is not valid until arch_aarch64_entry_prepare.
+     * Only scratch registers (x9-x13) are used: x19/x20/x21 carry the
+     * first-entry parameters and must survive untouched. */
+    mrs x11, tpidr_el1
+    ldr w12, [x11, #PERCPU_CPU_ID_OFFSET]
+    adrp x9, aarch64_sched_entry_records
+    add x9, x9, :lo12:aarch64_sched_entry_records
+    mov x13, #AARCH64_SCHED_ENTRY_RECORD_SIZE
+    madd x9, x12, x13, x9
+    str x8, [x9, #AARCH64_SCHED_ENTRY_RECORD_SP_OFF]
+    str x3, [x9, #AARCH64_SCHED_ENTRY_RECORD_BASE_OFF]
     mov x10, #1
-    str x10, [x9]
+    str x10, [x9, #AARCH64_SCHED_ENTRY_RECORD_OK_OFF]
 #endif
 
     bl arch_aarch64_entry_prepare
