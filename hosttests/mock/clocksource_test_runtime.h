@@ -67,7 +67,7 @@
 #define PAGE_PGD_SHIFT 39
 #define PAGE_1G_SHIFT 30
 
-#define NR_CPUS 8
+#include <config/limits.h>
 
 /* Short-circuit heavy kernel headers so clocksource.c pulls host stubs. */
 #define _ARCH_CPU_H

@@ -30,9 +30,7 @@
 #define _KERNEL_SLAB_H
 #define _ARCH_CLOCKSOURCE_H   /* mock declares arch_clocksource_read_ns below */
 
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 
 #ifdef TEST_PLATFORM_H
 /* ── Test TU mode: test_platform.h (FRAMEWORK_INC preinclude) already

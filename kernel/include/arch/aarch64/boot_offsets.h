@@ -2,6 +2,7 @@
 #define OS01_AARCH64_BOOT_OFFSETS_H
 
 /* Integer-only shared C/assembly ABI. */
+#include <config/limits.h>
 #include <percpu/percpu.h>  /* pulls in PERCPU_DATA_SIZE for asm context */
 
 #define AARCH64_BOOT_PERCPU_SIZE       48
@@ -14,7 +15,7 @@
 #define AARCH64_BOOT_RESERVED_OFFSET  40
 #define AARCH64_BOOT_STACK_SHIFT     12
 #define AARCH64_BOOT_STACK_SIZE      0x1000
-#define AARCH64_BOOT_CAPACITY         8
+#define AARCH64_BOOT_CAPACITY         NR_CPUS
 #define AARCH64_BOOT_AFFINITY_MASK   0x000000ff00ffffff
 #define AARCH64_BOOT_GO_WAIT          0
 #define AARCH64_BOOT_GO_TEST          1

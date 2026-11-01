@@ -468,7 +468,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
-| `test-static` | — | — | 14 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、user-canary） |
+| `test-static` | — | — | 15 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、arch10-capacity-audit、user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 | `test-harness` | — | — | Python `unittest` 框架回归（`TEST_HARNESS_MODULES` 列表；不启动 QEMU，含场景与契约校验） |
 

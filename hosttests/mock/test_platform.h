@@ -53,7 +53,11 @@ extern char *strstr(const char *haystack, const char *needle);
 #define PAGE_PGD_SHIFT 39
 #define PAGE_1G_SHIFT 30
 
-#define NR_CPUS 8
+#if __has_include(<config/limits.h>)
+#include <config/limits.h>
+#else
+#include "../../kernel/include/config/limits.h"
+#endif
 
 /* percpu stub — compile surface only.  This is NOT the production
  * layout: kernel/include/percpu/percpu.h is authoritative (its size is

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <config/limits.h>
 
 #ifdef __x86_64__
 #include <arch/x86_64/asm.h>
@@ -20,13 +21,6 @@ uint64_t arch_cycle_freq(void);
 // 启动 arch tick 源（x86: LAPIC 周期模式）。实现见 kernel/arch/x86_64/time.c。
 // 返回是否启动成功；失败由 clockevent 层回退 PIT。
 bool arch_tick_start(void);
-
-// NR_CPUS — architecture-specific max CPU count.
-// Defined here (as well as in arch/x86_64/cpu.h for backward compat)
-// so generic headers like task.h and percpu.h can find it.
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
 
 // Enable No-eXecute: set EFER.NXE (bit 11)
 static inline void arch_cpu_enable_nx(void) {
@@ -48,10 +42,6 @@ static inline void arch_set_percpu_base(void *ptr) {
 #elif defined(__aarch64__)
 
 #include <stdint.h>
-
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
 
 static inline void arch_cpu_halt(void)
 {

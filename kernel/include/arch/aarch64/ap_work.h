@@ -24,10 +24,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 
 enum ap_work_state { AP_WORK_IDLE = 0, AP_WORK_READY, AP_WORK_DONE };
 enum ap_work_cmd { WORK_READ64 = 1, WORK_BARRIER = 2 };

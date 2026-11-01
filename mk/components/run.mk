@@ -579,7 +579,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_timing
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_timing qemutests.test_arch10_capacity_audit
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1608,6 +1608,7 @@ STATIC_AUDIT_TARGETS = \
   test-driver-model-boundary \
   test-gui-build-audit \
   test-intr-dispatch-audit \
+  test-arch10-capacity-audit \
   test-user-canary
 
 .PHONY: $(STATIC_AUDIT_TARGETS) test-static test-static-prereqs
@@ -1661,6 +1662,12 @@ test-intr-dispatch-audit:
 	    --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	    --llvm-nm "$(LLVM_NM)" \
 	    --llvm-objdump "$(LLVM_OBJDUMP)" \
+	    --repo-root "$(OS01_ROOT)"
+
+test-arch10-capacity-audit:
+	$(call require_capability,rootfs)
+	$(RUN_STATIC_AUDIT) arch10-capacity-audit -- \
+	  python3 qemutests/arch10_capacity_audit.py \
 	    --repo-root "$(OS01_ROOT)"
 
 test-static: test-static-prereqs
@@ -1904,7 +1911,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 13 static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, user-canary)';
+		 'test-static'         '(rootfs)'     'All static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, intr-dispatch, arch10-capacity, user-canary)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-gui-incremental' '(rootfs)'    'GUI library incremental contract (no-op rebuild, header-touch rebuild, staging orphan, generation publish)';
 	@printf '  %-22s %-13s %s\n' \

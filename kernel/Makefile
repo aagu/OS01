@@ -716,5 +716,8 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 # ── Auto-dependency tracking ───────────────────────────────
-ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS))
+ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS) $(ASM_OBJECTS))
+ifeq ($(ARCH),x86_64)
+ALL_DEPS += $(BUILD_DIR)/$(ARCHDIR)/trampoline.d
+endif
 -include $(ALL_DEPS)

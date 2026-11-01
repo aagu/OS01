@@ -3,8 +3,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <config/limits.h>
 
-#define AARCH64_BOOT_MAX_CPUS 8
+#define AARCH64_BOOT_MAX_CPUS NR_CPUS
 #define AARCH64_MPIDR_AFFINITY_MASK UINT64_C(0x000000ff00ffffff)
 enum psci_conduit { PSCI_CONDUIT_NONE, PSCI_CONDUIT_SMC, PSCI_CONDUIT_HVC };
 struct aarch64_topology {

@@ -26,8 +26,7 @@
 #define _KERNEL_PERCPU_H
 
 #include <stdint.h>
-
-#define NR_CPUS 8
+#include <config/limits.h>
 
 /* Mirrors the production percpu_t field order at offset 8..28
  * (self, need_resched, cpu_id, online, ...) so any asm-style access

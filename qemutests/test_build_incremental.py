@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -695,6 +696,153 @@ class CompilerLauncherContractTests(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0, f"make -n user failed: {res.stderr}")
         self.assertIn("COMPILER_LAUNCHER=test-ccache-probe", res.stdout)
+
+
+class AssemblyAndHeaderDepContractTests(unittest.TestCase):
+    """Verifies C and ASM header dependency tracking and trampoline depfile consumption in an isolated fixture."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="dep-fixture-")
+        self.addCleanup(self.tmp.cleanup)
+        self.fixture_dir = Path(self.tmp.name)
+
+        # Setup source structure
+        inc_dir = self.fixture_dir / "include"
+        src_dir = self.fixture_dir / "src"
+        inc_dir.mkdir(parents=True, exist_ok=True)
+        src_dir.mkdir(parents=True, exist_ok=True)
+
+        (inc_dir / "common.h").write_text("#define COMMON_VAL 1\n")
+        (inc_dir / "asm_header.h").write_text("#define ASM_VAL 2\n")
+        (inc_dir / "trampoline_header.h").write_text("#define TRAMPOLINE_VAL 3\n")
+        (inc_dir / "unrelated.h").write_text("#define UNRELATED_VAL 4\n")
+
+        (src_dir / "main.c").write_text(
+            '#include "common.h"\n#include "unrelated.h"\nint main_c(void) { return COMMON_VAL + UNRELATED_VAL; }\n'
+        )
+        (src_dir / "other.c").write_text(
+            '#include "unrelated.h"\nint other_c(void) { return UNRELATED_VAL; }\n'
+        )
+        (src_dir / "entry.S").write_text(
+            '#include "asm_header.h"\n.globl entry_fn\nentry_fn:\n  mov $ASM_VAL, %eax\n  ret\n'
+        )
+        (src_dir / "trampoline.S").write_text(
+            '#include "trampoline_header.h"\n.globl tramp_fn\ntramp_fn:\n  mov $TRAMPOLINE_VAL, %eax\n  ret\n'
+        )
+
+        # Mirror kernel/Makefile compilation and depfile tracking pattern
+        makefile_content = (
+            "CC := clang\n"
+            "CFLAGS := -Iinclude -target x86_64-unknown-none\n"
+            "BUILD_DIR := build\n"
+            "C_OBJECTS := $(BUILD_DIR)/main.o $(BUILD_DIR)/other.o\n"
+            "ASM_OBJECTS := $(BUILD_DIR)/entry.o\n"
+            "TRAMPOLINE_OBJ := $(BUILD_DIR)/trampoline.o\n"
+            "ALL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(TRAMPOLINE_OBJ)\n"
+            "\n"
+            "all: $(ALL_OBJECTS)\n"
+            "\n"
+            "$(BUILD_DIR)/%.o: src/%.c\n"
+            "\t@mkdir -p $(dir $@)\n"
+            "\t$(CC) $(CFLAGS) -MD -MP -c $< -o $@\n"
+            "\n"
+            "$(BUILD_DIR)/%.o: src/%.S\n"
+            "\t@mkdir -p $(dir $@)\n"
+            "\t$(CC) $(CFLAGS) -MD -MP -c $< -o $@\n"
+            "\n"
+            "$(BUILD_DIR)/trampoline.o: src/trampoline.S\n"
+            "\t@mkdir -p $(dir $@)\n"
+            "\t$(CC) $(CFLAGS) -MD -MP -c $< -o $@\n"
+            "\n"
+            "ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS) $(ASM_OBJECTS)) $(BUILD_DIR)/trampoline.d\n"
+            "-include $(ALL_DEPS)\n"
+        )
+        (self.fixture_dir / "Makefile").write_text(makefile_content)
+
+    def _build_fixture(self):
+        res = subprocess.run(
+            ["make", "--no-print-directory"],
+            cwd=self.fixture_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(res.returncode, 0, f"Fixture build failed:\n{res.stdout}\n{res.stderr}")
+
+    def test_fixture_header_rebuild_isolation(self):
+        """Modifying a header must recompile only dependent C or ASM objects without touching unrelated ones."""
+        import time
+
+        self._build_fixture()
+
+        main_o = self.fixture_dir / "build" / "main.o"
+        other_o = self.fixture_dir / "build" / "other.o"
+        entry_o = self.fixture_dir / "build" / "entry.o"
+        tramp_o = self.fixture_dir / "build" / "trampoline.o"
+
+        mtimes_0 = {
+            "main": main_o.stat().st_mtime_ns,
+            "other": other_o.stat().st_mtime_ns,
+            "entry": entry_o.stat().st_mtime_ns,
+            "tramp": tramp_o.stat().st_mtime_ns,
+        }
+
+        # 1. Modify common.h (consumed only by main.c)
+        time.sleep(0.02)
+        (self.fixture_dir / "include" / "common.h").write_text("#define COMMON_VAL 100\n")
+        self._build_fixture()
+
+        mtimes_1 = {
+            "main": main_o.stat().st_mtime_ns,
+            "other": other_o.stat().st_mtime_ns,
+            "entry": entry_o.stat().st_mtime_ns,
+            "tramp": tramp_o.stat().st_mtime_ns,
+        }
+        self.assertGreater(mtimes_1["main"], mtimes_0["main"], "main.o did not recompile after common.h changed")
+        self.assertEqual(mtimes_1["other"], mtimes_0["other"], "other.o unexpectedly recompiled")
+        self.assertEqual(mtimes_1["entry"], mtimes_0["entry"], "entry.o unexpectedly recompiled")
+        self.assertEqual(mtimes_1["tramp"], mtimes_0["tramp"], "trampoline.o unexpectedly recompiled")
+
+        # 2. Modify asm_header.h (consumed by entry.S)
+        time.sleep(0.02)
+        (self.fixture_dir / "include" / "asm_header.h").write_text("#define ASM_VAL 200\n")
+        self._build_fixture()
+
+        mtimes_2 = {
+            "main": main_o.stat().st_mtime_ns,
+            "other": other_o.stat().st_mtime_ns,
+            "entry": entry_o.stat().st_mtime_ns,
+            "tramp": tramp_o.stat().st_mtime_ns,
+        }
+        self.assertGreater(mtimes_2["entry"], mtimes_1["entry"], "entry.o did not recompile after asm_header.h changed")
+        self.assertEqual(mtimes_2["main"], mtimes_1["main"], "main.o unexpectedly recompiled")
+        self.assertEqual(mtimes_2["other"], mtimes_1["other"], "other.o unexpectedly recompiled")
+        self.assertEqual(mtimes_2["tramp"], mtimes_1["tramp"], "trampoline.o unexpectedly recompiled")
+
+        # 3. Modify trampoline_header.h (consumed by dedicated trampoline rule)
+        time.sleep(0.02)
+        (self.fixture_dir / "include" / "trampoline_header.h").write_text("#define TRAMPOLINE_VAL 300\n")
+        self._build_fixture()
+
+        mtimes_3 = {
+            "main": main_o.stat().st_mtime_ns,
+            "other": other_o.stat().st_mtime_ns,
+            "entry": entry_o.stat().st_mtime_ns,
+            "tramp": tramp_o.stat().st_mtime_ns,
+        }
+        self.assertGreater(mtimes_3["tramp"], mtimes_2["tramp"], "trampoline.o did not recompile after trampoline_header.h changed")
+        self.assertEqual(mtimes_3["main"], mtimes_2["main"], "main.o unexpectedly recompiled")
+        self.assertEqual(mtimes_3["other"], mtimes_2["other"], "other.o unexpectedly recompiled")
+        self.assertEqual(mtimes_3["entry"], mtimes_2["entry"], "entry.o unexpectedly recompiled")
+
+    def test_production_kernel_makefile_tracks_assembly_and_trampoline_deps(self):
+        """kernel/Makefile ALL_DEPS must track ASM_OBJECTS and trampoline.d depfiles."""
+        content = (ROOT / "kernel" / "Makefile").read_text()
+        all_deps_match = re.search(r"ALL_DEPS\s*[:+]?=(.*?)(?=\n[A-Z0-9_]|\n-include|\Z)", content, re.DOTALL)
+        self.assertIsNotNone(all_deps_match, "kernel/Makefile missing ALL_DEPS definition")
+        all_deps_val = all_deps_match.group(0)
+        self.assertIn("ASM_OBJECTS", all_deps_val, "kernel/Makefile ALL_DEPS must consume $(ASM_OBJECTS)")
+        self.assertIn("trampoline.d", content[all_deps_match.start():], "kernel/Makefile ALL_DEPS must consume trampoline.d")
 
 
 if __name__ == "__main__":
