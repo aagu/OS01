@@ -127,3 +127,16 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 - 实施 plan：`docs/superpowers/plans/2026-09-09-pmm-arch-neutral.md`（3 轮 subagent review + 16 task + final fix）
 - v25 arch-cleanup 系列 10 commits `67132e2..3ab4ef1`：roadmap v24 doc；bootinfo(arch) E820 → `bootinfo_x86.h`；arch(neutral) `arch/regs.h` pt_regs_t facade + `rwlock_relax()` 走 `arch_cpu_pause()`；intr(arch) `arch_irq` hooks 拆分；rtc(arch) core + per-arch impl 拆分；mm(arch) PGD/PUD/PMD/PTE 层级统一 + bit-constant rename；arch(subsys) `SUBSYS_INITCALL()` + `.subsys_init` section；arch(sched) `arch_kernel_thread_entry`；build(uefi) digest + staged copy 排除 `*.o/*.a/*.lib`；merge
 - x86_64 启动细节：见 `docs/architecture.md` + `docs/boot/boot.md`
+## aarch64 AP 协作调度 P2
+
+AP沿用已录用CPU的单向task-stack交接。`arch_sched_notify_remote()`在
+need_resched发表后通过GICv2 SGI4通知远端；SGI3仍归TLB shootdown。
+SGI handler只设置标志，公共GIC dispatch写回完整raw IAR作一次EOI。
+`task_wake()`在rq锁内捕获目标，解锁后通知；blocker元数据由task-list锁
+保护，state快照另外取得rq锁，callback不持rq锁，清理blocker后才发表唤醒。
+
+idle在IRQ开启时消费ap_work，屏蔽IRQ并检查rq/READY；无工作时释放锁，
+保持IRQ屏蔽执行`dsb sy; wfi`，返回后才开启IRQ并重检。ap_work的READY发表后
+无条件kick，只依赖ipi_ready，避免scheduler_ok交接时省略通知。BSP仍独占
+全局timer和blocker scan；AP没有周期timer。默认线程留BSP，显式pinned线程
+可在AP运行；尚无IRQ返回抢占、迁移、EL0或用户MM。

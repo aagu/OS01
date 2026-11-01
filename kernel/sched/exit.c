@@ -88,19 +88,9 @@ uint64_t do_exit(uint64_t exit_code)
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
     }
 
-    // ── Send SIGCHLD to parent ───────────────────────────
-    // NOTE: we write-protect parent->state here because we are
-    // about to become ZOMBIE.  After this point, the parent may
-    // run and reap us via do_waitpid (wait-driven).  A kthread's
-    // ZOMBIE is freed by __switch_to's PF_SELF_REAP epilogue.
-    if (current->parent && !(current->parent->flags & PF_KTHREAD)) {
-        __sync_fetch_and_or(&current->parent->signal, (1ULL << SIGCHLD));
-        // Use blocker_wake which checks condition callback before waking.
-        // This is the explicit fast path; sched_unblock_blocked() in
-        // schedule() is the reliable fallback.
-        if (current->parent->blocker.type != BLOCKER_NONE)
-            blocker_wake(current->parent);
-    }
+    /* Reparenting and reaping may replace/free the old parent concurrently.
+     * Resolve and notify it inside one task-list lifetime transaction. */
+    task_signal_parent(current, 1ULL << SIGCHLD);
 
     // Stop using this address space before any of its pages can be reused.
     // Keep the saved CR3 in sync with hardware while preemption is disabled:
@@ -116,13 +106,16 @@ uint64_t do_exit(uint64_t exit_code)
     vma_free_all(current->mm);
 
     if (!(current->flags & PF_KTHREAD) && current->mm) {
-        uint64_t *pgd_virt = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
-        bool mm_is_shared = (current->parent != NULL &&
-                             current->parent->mm == current->mm);
-        if (!mm_is_shared && current->mm->pgdir)
+        uint64_t flags = spin_lock_irqsave(&task_list_lock);
+        mm_t *dead_mm = current->mm;
+        task_t *parent = current->parent;
+        bool mm_is_shared = parent && parent->mm == dead_mm;
+        current->mm = NULL; /* Publish detachment before freeing, under the same lock. */
+        spin_unlock_irqrestore(&task_list_lock, flags);
+        uint64_t *pgd_virt = (uint64_t *)Phy_To_Virt((uint64_t)dead_mm->pgdir);
+        if (!mm_is_shared && dead_mm->pgdir)
             vmm_free_user_map(pgd_virt);
-        kfree(current->mm);
-        current->mm = NULL;
+        kfree(dead_mm);
     }
 
     // Detach our fd-table under task_list_lock (serializes against
@@ -155,47 +148,10 @@ uint64_t do_exit(uint64_t exit_code)
     // kernel stack while do_exit is still running on it — the
     // SMP-only intermittent #PF.
 
-    // ── Direct switch to parent ─────────────────────────────
-    // By the time we reach ZOMBIE the parent is either already
-    // RUNNING (SIGCHLD woke it) or still INTERRUPTIBLE in
-    // do_waitpid.  In either case we want to switch directly to
-    // avoid schedule()'s round-robin scan which may pick the
-    // idle task instead (task list order changes after zombie
-    // reaping inside schedule() can cause this).
-    task_t *parent = current->parent;
-    int parent_woken = 0;
-
-    if (parent) {
-        uint64_t ps = parent->state;
-        if (ps == TASK_INTERRUPTIBLE) {
-            // EEVDF: don't set RUNNING here — task_wake handles it at end of do_exit
-            parent_woken = 1;
-        } else if (ps == TASK_RUNNING) {
-            // SIGCHLD already woke the parent.
-            parent_woken = 1;
-        } else if (ps == TASK_UNINTERRUPTIBLE) {
-            // Parent is in an unkillable sleep — unlikely for
-            // waitpid but handle gracefully: leave it; when the
-            // parent finally wakes, do_waitpid reaps us.
-            debug_task("exit: p%d parent p%d UNINTERRUPTIBLE (%ld), "
-                          "skipping direct switch\n",
-                          current->pid, parent->pid, ps);
-        }
-    }
-
-    debug_task("task %d now ZOMBIE (parent=%d w=%d ps=%ld)\n",
-                  current->pid,
-                  parent ? (int)parent->pid : -1,
-                  parent_woken,
-                  parent ? (long)parent->state : -1);
-
-    // Transfer directly to the woken parent to avoid scheduler
-    // scan races.  parent_woken is always 1 for normal exit
-    // (parent in waitpid = INTERRUPTIBLE or RUNNING).
-    if (parent_woken) {
-        task_wake(parent);
-    }
-    current->state = TASK_ZOMBIE;   // now reaped-able: do_exit is done
+    /* No parent pointer survives its lifetime lock, even for diagnostics. */
+    task_wake_parent(current);
+    task_exit_zombie();
+    debug_task("task %d now ZOMBIE\n", current->pid);
     schedule();
     return 0;  // unreachable
 }

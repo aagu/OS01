@@ -1035,9 +1035,10 @@ def _sched_wire_log(cpus: int = 1) -> str:
                 for cpu in range(1, cpus):
                     lines.append(
                         "[sched-evidence] id=aarch64_sched_ap cpu=%d "
-                        "scheduler_ok=0 nr_running=0 work_ok=1" % cpu)
+                        "scheduler_ok=1 nr_running=0 work_ok=1" % cpu)
                 lines.append("[sched-evidence] id=aarch64_sched_ap "
-                             "cpu_count=%d cpu0_only=1" % cpus)
+                             "cpu_count=%d cpu0_only=1 default_cpu0=1 "
+                             "pinned_ap_ok=1" % cpus)
             else:
                 lines.append("[sched-evidence] id=%s %s"
                              % (cid, evidence[cid]))
@@ -1123,9 +1124,10 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
             if dropped in line and "[TEST]" in line:
                 text = text.replace(line + "\n", "")
         text = text.replace(
-            "[sched-evidence] id=aarch64_sched_ap cpu_count=2 cpu0_only=1\n",
+            "[sched-evidence] id=aarch64_sched_ap cpu_count=2 cpu0_only=1 "
+            "default_cpu0=1 pinned_ap_ok=1\n",
             "").replace(
-            "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=0 "
+            "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=1 "
             "nr_running=0 work_ok=1\n", "")
         text = text.replace("expected=14", "expected=13")
         text = text.replace("total=14 passed=14", "total=13 passed=13")
@@ -1273,7 +1275,7 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
 
     def test_ap_observation_count_mismatch_rejected(self):
         text = self.log.replace(
-            "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=0 "
+            "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=1 "
             "nr_running=0 work_ok=1\n", "")
         ok, errors = self._ok(text, cpus=2)
         self.assertFalse(ok, "cpus=2 requires exactly one AP observation")
@@ -1285,7 +1287,7 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
         text = text.replace(
             "cpu_count=2",
             "cpu_count=2")  # anchor only
-        dup = ("[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=0 "
+        dup = ("[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=1 "
                "nr_running=0 work_ok=1\n")
         text = self.log.replace("cpu_count=2", dup + "cpu_count=2")
         ok, errors = self._ok(text, cpus=2)

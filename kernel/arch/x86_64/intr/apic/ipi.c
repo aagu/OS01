@@ -45,7 +45,7 @@ static void ipi_resched_handler(uint64_t nr __attribute__((unused)),
                                 uint64_t param __attribute__((unused)),
                                 pt_regs_t *regs __attribute__((unused)))
 {
-    this_cpu()->need_resched = 1;
+    __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
 #ifdef OS01_SELFTEST
     selftest_x86_intr_resched(cpu_id());
 #endif

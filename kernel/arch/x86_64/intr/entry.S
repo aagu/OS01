@@ -155,7 +155,15 @@ error_code:
 
 	callq 	*%rdx
 
-	jmp	ret_from_intr
+	# Only #PF and syscall enter this frame on a task stack. IST faults
+	# (including recoverable MSR #GP) must defer all task return work.
+	leaq	do_page_fault(%rip), %rax
+	cmpq	%rax, FUNC(%rsp)
+	je	ret_from_intr
+	leaq	do_system_call(%rip), %rax
+	cmpq	%rax, FUNC(%rsp)
+	je	ret_from_intr
+	jmp	ret_from_exception
 
 ENTRY(debug)
 	pushq	$0

@@ -376,3 +376,160 @@ $(TEST_BLD)/test_kthread_ctor.elf: $(TEST_BLD)/test_kthread_ctor.o \
 .PHONY: test-kthread-ctor
 test-kthread-ctor: $(TEST_BLD)/test_kthread_ctor.elf
 	$<
+
+# ── P1 Task 1: AP cooperative scheduling contracts ──────────────
+# The common binary links the REAL core.c + balance.c with controllable
+# arch-hook spies; two backend binaries link the REAL per-arch
+# sched_notify.c objects (plain freestanding C, host-compilable).
+$(eval $(call register_host_test,test_sched_notify,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_sched_notify_x86_backend,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_sched_notify_aarch64_backend,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_sched_notify.elf \
+    $(TEST_BLD)/test_sched_notify_x86_backend.elf \
+    $(TEST_BLD)/test_sched_notify_aarch64_backend.elf
+
+SCHED_NOTIFY_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+SCHED_NOTIFY_PROD_CFLAGS := $(SCHED_NOTIFY_CFLAGS) \
+    -include $(TEST_MOCK)/sched_notify_test_runtime.h
+
+$(TEST_BLD)/sched_notify_core_production.o: $(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/sched_notify_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify.o: $(TEST_CASES)/test_sched_notify.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_NOTIFY_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify.elf: $(TEST_BLD)/test_sched_notify.o \
+		$(TEST_BLD)/sched_notify_core_production.o \
+		$(TEST_BLD)/sched_notify_balance_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/sched_notify_x86_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/cpu/sched_notify.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_x86_backend.o: \
+		$(TEST_CASES)/test_sched_notify_x86_backend.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_NOTIFY_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_x86_backend.elf: \
+		$(TEST_BLD)/test_sched_notify_x86_backend.o \
+		$(TEST_BLD)/sched_notify_x86_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/sched_notify_aarch64_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/cpu/sched_notify.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_NOTIFY_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_aarch64_backend.o: \
+		$(TEST_CASES)/test_sched_notify_aarch64_backend.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_NOTIFY_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_sched_notify_aarch64_backend.elf: \
+		$(TEST_BLD)/test_sched_notify_aarch64_backend.o \
+		$(TEST_BLD)/sched_notify_aarch64_backend_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-sched-notify
+test-sched-notify: $(TEST_BLD)/test_sched_notify.elf \
+                   $(TEST_BLD)/test_sched_notify_x86_backend.elf \
+                   $(TEST_BLD)/test_sched_notify_aarch64_backend.elf
+	$(TEST_BLD)/test_sched_notify.elf
+	$(TEST_BLD)/test_sched_notify_x86_backend.elf
+	$(TEST_BLD)/test_sched_notify_aarch64_backend.elf
+
+# ── P1 Task 2: concurrency-safe scheduler observer ──────────────
+# Compiles the REAL kernel/selftest/aarch64_sched_observer.c against a
+# pthread-backed spin surface and drives it from real host threads.
+$(eval $(call register_host_test,test_aarch64_sched_observer,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_aarch64_sched_observer.elf
+
+# No LIBC_INC: the OS01 libc ships a pthread.h stub that would shadow
+# the host glibc header (same reason test_sync_primitives omits it).
+OBSERVER_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) \
+    -DOS01_SELFTEST=1
+OBSERVER_PROD_CFLAGS := $(OBSERVER_CFLAGS) -pthread \
+    -DOS01_HOST_SCHED_OBSERVER=1 \
+    -include $(TEST_MOCK)/aarch64_sched_observer_runtime.h
+
+$(TEST_BLD)/sched_observer_production.o: \
+		$(TESTS_DIR)/kernel/selftest/aarch64_sched_observer.c \
+		$(TESTS_DIR)/kernel/include/selftest/aarch64_sched_observer.h \
+		$(TEST_MOCK)/aarch64_sched_observer_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(OBSERVER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_observer.o: \
+		$(TEST_CASES)/test_aarch64_sched_observer.c \
+		$(TEST_MOCK)/aarch64_sched_observer_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(OBSERVER_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_observer.elf: \
+		$(TEST_BLD)/test_aarch64_sched_observer.o \
+		$(TEST_BLD)/sched_observer_production.o
+	$(HOST_CC) -pthread -o $@ $^
+
+.PHONY: test-aarch64-sched-observer
+test-aarch64-sched-observer: $(TEST_BLD)/test_aarch64_sched_observer.elf
+	$<
+
+# ── P2 Task 2: blocker protocol + wake producers ────────────────
+# Compiles the REAL core.c against the blocker mock; every case drives
+# the production blocker_wait / blocker_wake / task_wake /
+# task_finish_switch — never a reimplementation.
+$(eval $(call register_host_test,test_blocker_remote_wake,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_blocker_remote_wake.elf
+
+BLOCKER_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+BLOCKER_PROD_CFLAGS := $(BLOCKER_CFLAGS) \
+    -include $(TEST_MOCK)/blocker_runtime.h
+
+$(TEST_BLD)/blocker_core_production.o: $(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/blocker_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCKER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_blocker_remote_wake.o: $(TEST_CASES)/test_blocker_remote_wake.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(BLOCKER_CFLAGS) -c $< -o $@
+
+# --wrap=schedule: the spy counts calls while the production core.o
+# keeps calling (the cases that need the REAL schedule() call
+# __real_schedule through the wrapper).
+$(TEST_BLD)/blocker_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BLOCKER_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_blocker_remote_wake.elf: $(TEST_BLD)/test_blocker_remote_wake.o \
+		$(TEST_BLD)/blocker_core_production.o \
+		$(TEST_BLD)/blocker_balance_production.o
+	$(HOST_CC) -Wl,--wrap=schedule -o $@ $^
+
+.PHONY: test-blocker-remote-wake
+test-blocker-remote-wake: $(TEST_BLD)/test_blocker_remote_wake.elf
+	$<

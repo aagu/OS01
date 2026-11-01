@@ -157,11 +157,13 @@ void ap_entry(void)
     debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
                   cpu->cpu_id, cpu->idle->pid);
 
-    cpu->scheduler_ok = 1;
+    /* RELEASE: paired with the acquire loads in the constructor /
+     * placement / balance / schedule readers (P1 spec §6). */
+    __atomic_store_n(&cpu->scheduler_ok, 1, __ATOMIC_RELEASE);
 
     while (1) {
         arch_cpu_halt();
-        if (cpu->need_resched) {
+        if (__atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE)) {
             schedule();
             // schedule() returns with IRQs disabled; hlt() needs IF=1.
             arch_local_irq_enable();

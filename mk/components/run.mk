@@ -221,6 +221,30 @@ endif
 # even when the outer invocation has no AARCH64_SCHED_TEST selector yet;
 # a nonempty selector additionally gets the same rejection inside the
 # aarch64 profile (which direct variant sub-makes also parse).
+# MODE=sched-ap (P1 spec §7): the AP cooperative-scheduler acceptance
+# mode owns its sched-ap variant trees through the controlled sub-make
+# boundary and refuses every other compile-affecting selector — the
+# outer make rejects, never just the profile's sub-make parse.
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
+ifeq ($(MODE),sched-wake)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error MODE=sched-wake cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
+endif
+ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
+$(error MODE=sched-wake cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
+endif
+endif
+endif
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
+ifeq ($(MODE),sched-ap)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error MODE=sched-ap cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
+endif
+ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
+$(error MODE=sched-ap cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
+endif
+endif
+endif
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),sched)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
@@ -241,6 +265,19 @@ endif
 # resolution must also fire inside the per-case helper sub-makes the
 # MODE=sched dispatch invokes (their MAKECMDGOALS are the helper
 # targets, not test-aarch64), so the guard covers both spellings.
+# AP_SCHED_CASE selector (MODE=sched-ap prep/run only): the AP
+# production case set (`positive`, P1 Task 4) or the fatal-owner fault
+# boot. Default positive. The resolution must also fire inside the
+# helper sub-makes, so the guard covers the helper target spellings.
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS))$(findstring _test-aarch64-prep-sched-ap,$(MAKECMDGOALS))$(findstring _test-aarch64-run-sched-ap,$(MAKECMDGOALS)),)
+AP_SCHED_CASES_VALID := positive fatal-owner
+ifeq ($(AP_SCHED_CASE),)
+AP_SCHED_CASE := positive
+endif
+ifeq ($(filter $(AP_SCHED_CASE),$(AP_SCHED_CASES_VALID)),)
+$(error invalid AP_SCHED_CASE='$(AP_SCHED_CASE)'; valid: $(AP_SCHED_CASES_VALID))
+endif
+endif
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS))$(findstring _test-aarch64-prep-sched,$(MAKECMDGOALS))$(findstring _test-aarch64-run-sched,$(MAKECMDGOALS)),)
 SCHED_CASES_VALID := positive sp-top sp-low pc-low pc-data all
 ifeq ($(SCHED_CASE),)
@@ -250,6 +287,24 @@ ifeq ($(filter $(SCHED_CASE),$(SCHED_CASES_VALID)),)
 $(error invalid SCHED_CASE='$(SCHED_CASE)'; valid: $(SCHED_CASES_VALID))
 endif
 endif
+# MODE=sched-wake: the P2 cross-CPU wakeup acceptance — the wake
+# variant owns kernel/image sched-wake trees via the controlled
+# sub-make (AARCH64_AP_SCHED_TEST=wake); no per-case selector (the
+# phase carries the whole envelope).
+.PHONY: _test-aarch64-prep-sched-wake _test-aarch64-run-sched-wake
+_test-aarch64-prep-sched-wake:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=wake aarch64-uefi
+_test-aarch64-run-sched-wake:
+	python3 qemutests/aarch64_ap_scheduler.py \
+	  --phase wake --case positive \
+	  --image "$(AARCH64_UEFI_SCHED_WAKE_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SCHED_WAKE_FIRMWARE)" \
+	  --elf "$(AARCH64_KERNEL_SCHED_WAKE_ELF)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-wake/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
 # Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
 # variable) so it survives across recipe lines — a shell variable set
 # in one `@`-prefixed recipe line is empty in the next (each `@` line is
@@ -354,9 +409,19 @@ _test-aarch64-prep-sched-pc-low:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-low aarch64-uefi
 _test-aarch64-prep-sched-pc-data:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-data aarch64-uefi
+# The `all` runner also audits the ordinary normal + ordinary selftest
+# ELFs (`label=ordinary-*`), so `SCHED_CASE=all` must build them too —
+# a clean tree otherwise fails the audit with "ELF not found".
 _test-aarch64-prep-sched-all: _test-aarch64-prep-sched-positive \
 	_test-aarch64-prep-sched-sp-top _test-aarch64-prep-sched-sp-low \
-	_test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data
+	_test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data \
+	_test-aarch64-prep-sched-ordinary
+.PHONY: _test-aarch64-prep-sched-ordinary
+_test-aarch64-prep-sched-ordinary:
+	$(MAKE) AARCH64_SCHED_TEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= \
+	  AARCH64_SMP_TEST_NO_ACK_CPU=0 KERNEL_SELFTEST= aarch64-uefi
+	$(MAKE) AARCH64_SCHED_TEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= \
+	  AARCH64_SMP_TEST_NO_ACK_CPU=0 KERNEL_SELFTEST=1 aarch64-uefi
 
 # Per-SCHED_CASE explicit path maps for one runner invocation. The
 # runner's --variant schema is fixed: variant name + image + firmware +
@@ -404,6 +469,33 @@ _test-aarch64-run-sched:
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
+# P1 MODE=sched-ap: the AP cooperative-scheduler acceptance variants.
+# prep drives the controlled sub-make with KERNEL_SELFTEST=1 and
+# AARCH64_AP_SCHED_TEST=$(AP_SCHED_CASE); run invokes the dedicated
+# runner with the explicit per-case artifact paths.
+.PHONY: _test-aarch64-prep-sched-ap _test-aarch64-run-sched-ap
+# AP_SCHED_CASE (positive|fatal-owner) maps onto the compile selector
+# AARCH64_AP_SCHED_TEST (ap|fatal-owner): the positive case set is the
+# `ap` variant; the fatal-owner case owns its own fault variant.
+AP_SCHED_SELECTOR_positive = ap
+AP_SCHED_SELECTOR_fatal-owner = fatal-owner
+_test-aarch64-prep-sched-ap:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=$(AP_SCHED_SELECTOR_$(AP_SCHED_CASE)) aarch64-uefi
+_test-aarch64-run-sched-ap:
+ifeq ($(AP_SCHED_CASE),fatal-owner)
+	python3 qemutests/aarch64_ap_scheduler.py 	  --phase ap --case fatal-owner 	  --image "$(AARCH64_UEFI_SCHED_AP_FATAL_DISK)" 	  --firmware "$(AARCH64_UEFI_SCHED_AP_FATAL_FIRMWARE)" 	  --elf "$(AARCH64_KERNEL_SCHED_AP_FATAL_ELF)" 	  --normal-elf "$(AARCH64_KERNEL_SCHED_AP_ELF)" 	  --qemu "$(AARCH64_QEMU)" 	  --llvm-nm "$(AARCH64_NM)" 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+else
+	python3 qemutests/aarch64_ap_scheduler.py \
+	  --phase ap --case positive \
+	  --image "$(AARCH64_UEFI_SCHED_AP_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SCHED_AP_FIRMWARE)" \
+	  --elf "$(AARCH64_KERNEL_SCHED_AP_ELF)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+endif
+
 # M3.5 Task 25: production shootdown probe (spec §7.3). Builds the
 # PRODUCTION image (no KERNEL_SELFTEST=1) and runs it at -smp 2; the
 # harness greps for the exact `SHOOTDOWN-PROBE: START` → `OK`
@@ -436,8 +528,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
@@ -579,7 +671,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_timing
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1910,7 +2002,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-*>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-*>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''

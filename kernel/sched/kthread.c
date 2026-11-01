@@ -17,6 +17,7 @@
 #include <sched/task.h>
 #include <sched/internal.h>
 #include <sched/boot.h>
+#include <arch/sched.h>
 #include <percpu/percpu.h>
 #include <arch/spinlock.h>
 #include <arch/irq.h>
@@ -25,6 +26,22 @@
 #include <errno.h>
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
 #include <selftest/aarch64_scheduler.h>
+#include <selftest/aarch64_sched_observer.h>
+/* Observer release protocol (P1 Task 2): capture the release token,
+ * kfree the object, then record the completion by token alone — the
+ * observer never sees a dereference after the real free, and a
+ * leftover alloc=false call can no longer fake a completion. */
+static inline void kthread_observe_free(void *ptr, unsigned kind)
+{
+    uint64_t token = aarch64_sched_observe_free_begin(ptr, kind);
+    kfree(ptr);
+    aarch64_sched_observe_free_complete(token);
+}
+#else
+static inline void kthread_observe_free(void *ptr, unsigned kind)
+{
+    kfree(ptr);
+}
 #endif
 
 /* The task struct lives at the base of the task_union stack region,
@@ -35,14 +52,9 @@ _Static_assert(sizeof(task_t) + 256 <= STACK_SIZE,
                "task_t does not fit in the task_union stack reserve");
 
 /* ── Placement ────────────────────────────────────────────────
- * The default affinity mask: every CPU the system could reasonably
- * run a task on right now.  Mirrors the historical do_fork() rule (all
- * CPUs up to num_cpus, not just the eligible ones) so an unpinned
- * kernel thread keeps the same reach it had before. */
-static uint64_t kthread_default_mask(void)
-{
-    return (num_cpus >= NR_CPUS) ? ~0ULL : ((1ULL << num_cpus) - 1);
-}
+ * The default affinity mask is the architecture policy
+ * (<arch/sched.h>): x86 keeps the historical num_cpus reach, aarch64
+ * pins ordinary kernel threads to CPU0 (P1 spec §4). */
 
 /* Choose the CPU an unpinned kernel thread runs on.
  *
@@ -56,7 +68,7 @@ static uint64_t kthread_default_mask(void)
  *     "no eligible target" is NOT a boot-phase case. */
 static int kthread_place_unpinned(unsigned *out_cpu)
 {
-    unsigned c = sched_pick_cpu_mask(kthread_default_mask());
+    unsigned c = sched_pick_cpu_mask(arch_kthread_default_mask());
     if (c == NR_CPUS) {
         if (!sched_boot_creation_open())
             return -EINVAL;
@@ -91,7 +103,8 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
         return -EINVAL;
     if (!percpu_data[target_cpu].online)
         return -EINVAL;
-    if (!percpu_data[target_cpu].scheduler_ok) {
+    if (!__atomic_load_n(&percpu_data[target_cpu].scheduler_ok,
+                         __ATOMIC_ACQUIRE)) {
         /* The boot-phase exception: an unpinned task may land on CPU0
          * while the BSP boot window is open (CPU0 is online but has
          * not published scheduler_ok yet).  A pinned task never gets
@@ -119,18 +132,12 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
      * it checks the geometry used by this allocation path itself. */
     if (sizeof(task_t) > STACK_SIZE ||
         (size_t)256 > STACK_SIZE - sizeof(task_t)) {
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(raw, 1);
         return -EINVAL;
     }
     thread_t *thd = kmalloc(sizeof(thread_t));
     if (!thd) {
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(raw, 1);
         return -ENOMEM;
     }
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
@@ -182,8 +189,9 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     tsk->deadline = tsk->vruntime + EEVDF_MIN_SLICE;
 
     /* Affinity: a pinned kernel thread owns exactly one CPU; an
-     * unpinned one keeps the default reach. */
-    tsk->allowed_cpus = pinned ? (1ULL << target_cpu) : kthread_default_mask();
+     * unpinned one keeps the arch default reach. */
+    tsk->allowed_cpus = pinned ? (1ULL << target_cpu)
+                               : arch_kthread_default_mask();
 
     /* 5. Flags: a kernel thread, and ONLY a kernel thread.  PF_SELF_REAP
      *    and the on-CPU / on-runqueue / in-schedule flags are never
@@ -197,12 +205,8 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
      *    raw stack. */
     int rc = arch_kthread_prepare(tsk, fn, arg);
     if (rc) {
-        kfree(thd);
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(thd, 2, false);
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(thd, 2);
+        kthread_observe_free(raw, 1);
         return rc;
     }
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
@@ -227,7 +231,7 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     /* Re-validate the placement under the same protected snapshot that
      * publishes the task: the target CPU must still be usable. */
     if (!rq->online ||
-        (!rq->scheduler_ok &&
+        (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE) &&
          !(target_cpu == 0 && !pinned && sched_boot_creation_open()))) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
@@ -235,19 +239,12 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
          * unwind in reverse order when the locked eligibility recheck
          * rejects publication. */
         if (tsk->fpu_save) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(tsk->fpu_save, 3, false);
-#endif
-            kfree(tsk->fpu_save);
+            kthread_observe_free(tsk->fpu_save, 3);
             tsk->fpu_save = NULL;
         }
         arch_kthread_drop_files(tsk);
-        kfree(thd);
-        kfree(raw);
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-        aarch64_sched_observe_resource(thd, 2, false);
-        aarch64_sched_observe_resource(raw, 1, false);
-#endif
+        kthread_observe_free(thd, 2);
+        kthread_observe_free(raw, 1);
         return -EINVAL;
     }
 
@@ -317,7 +314,8 @@ int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu)
 {
     if (cpu >= NR_CPUS || cpu >= num_cpus)
         return -EINVAL;
-    if (!percpu_data[cpu].online || !percpu_data[cpu].scheduler_ok)
+    if (!percpu_data[cpu].online ||
+        !__atomic_load_n(&percpu_data[cpu].scheduler_ok, __ATOMIC_ACQUIRE))
         return -EINVAL;
 
     task_t *tsk = NULL;
@@ -424,6 +422,11 @@ void task_switch_complete(task_t *actual_prev)
     if (actual_prev == current) return; /* never finish/free our own stack */
     bool self_reap = (actual_prev->flags & PF_SELF_REAP) != 0;
 
+    /* Everything prev-owned is captured BEFORE task_finish_switch()
+     * clears on_cpu: after that a waiter may free prev and reading it
+     * is a use-after-free.  The observer release tokens are captured
+     * here too (P1 Task 2) — free_complete() after the real kfree
+     * uses only the token, never the (freed) object. */
     thread_t *thd  = actual_prev->thread;
     void      *fpu  = actual_prev->fpu_save;
     void      *stk  = actual_prev->stack_alloc_base;
@@ -434,28 +437,34 @@ void task_switch_complete(task_t *actual_prev)
     bool next_stack = live_sp < (uintptr_t)actual_prev ||
                       live_sp >= (uintptr_t)actual_prev + STACK_SIZE;
     aarch64_sched_observe_reap(actual_prev, next_stack);
+    uint64_t thd_tok = (self_reap && thd)
+        ? aarch64_sched_observe_free_begin(thd, 2) : 0;
+    uint64_t fpu_tok = (self_reap && fpu)
+        ? aarch64_sched_observe_free_begin(fpu, 3) : 0;
+    uint64_t stk_tok = (self_reap && stk)
+        ? aarch64_sched_observe_free_begin(stk, 1) : 0;
 #endif
 
     task_finish_switch(actual_prev);
 
     if (self_reap) {
         if (thd) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(thd, 2, false);
-#endif
             kfree(thd);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_free_complete(thd_tok);
+#endif
         }
         if (fpu) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(fpu, 3, false);
-#endif
             kfree(fpu);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_free_complete(fpu_tok);
+#endif
         }
         if (stk) {
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-            aarch64_sched_observe_resource(stk, 1, false);
-#endif
             kfree(stk);
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+            aarch64_sched_observe_free_complete(stk_tok);
+#endif
         }
     }
 }

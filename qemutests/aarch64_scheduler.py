@@ -175,9 +175,13 @@ EVIDENCE_FIELDS = {
         "tick_delta": _rng(3, None), "irq_frame_ok": _rng(1, 1),
         "nested_schedule": _rng(0, 0), "irq_switches": _rng(0, 0)},
 }
-AP_SUMMARY_FIELDS = {"cpu0_only": _rng(1, 1)}
+# P1 Task 3: accepted APs now run the cooperative scheduler, so every
+# admitted AP publishes scheduler_ok=1 with a quiet runqueue, and the
+# summary carries the default-CPU0 and explicit-ready-AP pin evidence.
+AP_SUMMARY_FIELDS = {"cpu0_only": _rng(1, 1), "default_cpu0": _rng(1, 1),
+                     "pinned_ap_ok": _rng(1, 1)}
 AP_OBSERVATION_FIELDS = {
-    "scheduler_ok": _rng(0, 0), "nr_running": _rng(0, 0),
+    "scheduler_ok": _rng(1, 1), "nr_running": _rng(0, 0),
     "work_ok": _rng(1, 1)}
 
 TEST_LINE = re.compile(r"^\[TEST\] (START|SELECT|BEGIN|PASS|FAIL|SKIP|END)\b(.*)$")
@@ -836,10 +840,11 @@ def _selftest_fixture(cpus=2):
             if cid == "aarch64_sched_ap":
                 for cpu in range(1, cpus):
                     lines.append("[sched-evidence] id=aarch64_sched_ap "
-                                 f"cpu={cpu} scheduler_ok=0 nr_running=0 "
+                                 f"cpu={cpu} scheduler_ok=1 nr_running=0 "
                                  "work_ok=1")
                 lines.append("[sched-evidence] id=aarch64_sched_ap "
-                             f"cpu_count={cpus} cpu0_only=1")
+                             f"cpu_count={cpus} cpu0_only=1 "
+                             "default_cpu0=1 pinned_ap_ok=1")
             else:
                 lines.append(f"[sched-evidence] id={cid} {evidence[cid]}")
         lines.append(f"[TEST] BEGIN {cid}")
@@ -912,6 +917,7 @@ def self_test():
                      ("wake_ticks=3", "wake_ticks=11"),
                      ("tick_delta=3", "tick_delta=2"),
                      ("cpu0_only=1", "cpu0_only=0"),
+                     ("pinned_ap_ok=1", "pinned_ap_ok=0"),
                      ("work_ok=1", "work_ok=0")):
         bad(base.replace(old, new), cpus=2)
     # missing whole record / missing field / duplicate field
@@ -920,10 +926,10 @@ def self_test():
     bad(base.replace("sp_fail=0\n", "\n"))
     bad(base.replace("switches=99", "switches=99 switches=1"))
     # AP count mismatch at cpus=2
-    bad(base.replace("cpu=1 scheduler_ok=0 nr_running=0 work_ok=1\n", ""))
+    bad(base.replace("cpu=1 scheduler_ok=1 nr_running=0 work_ok=1\n", ""))
     bad(base.replace("cpu_count=2", "cpu_count=4"))
     bad(base.replace("cpu_count=2",
-                     "cpu=1 scheduler_ok=0 nr_running=0 work_ok=1\n"
+                     "cpu=1 scheduler_ok=1 nr_running=0 work_ok=1\n"
                      "cpu_count=2"))
 
     # Fault evidence.

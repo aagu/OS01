@@ -12,7 +12,8 @@
  *   2. target_mask=0b10 + vector=IPI_VECTOR_TLB + inject(1,0x02)
  *      → GICD_SGIR = (sgi=3) | (0x02 << 16) | (FILTER_LIST=0 << 24)；
  *   3. target_mask=0 → 不写 SGIR；
- *   4. vector=0x41 (IPI_VECTOR_RESCHED, M3 暂不支持) → fatal hook（weak 覆盖）。
+ *   4. vector=IPI_VECTOR_RESCHED (0x41, P2) → SGI 4；0x40 仍映射 SGI 3；
+ *   5. vector=0x42 未映射 → fatal hook（weak 覆盖）。
  */
 #include <test_framework.h>
 #include <stdint.h>
@@ -93,16 +94,32 @@ static void suite_empty_mask(void)
     assert_eq((uint32_t)0, rd(gicd_mock, M_GICD_SGIR));
 }
 
+static void suite_resched_vector(void)
+{
+    TEST_SUITE("ipi_broadcast RESCHED -> SGI 4 (P2)");
+    /* mask=0b10 + inject(1,0x02) → SGIR = (sgi=4) | (0x02 << 16) */
+    mock_reset();
+    gic_target_bit_inject(1, 0x02);
+    ipi_broadcast(IPI_VECTOR_RESCHED, 0x2);
+    assert_eq((uint32_t)((4u << 0) | (0x02u << 16) | (0u << 24)),
+              rd(gicd_mock, M_GICD_SGIR));
+    /* TLB mapping unchanged: 0x40 still maps to SGI 3. */
+    mock_reset();
+    gic_target_bit_inject(1, 0x02);
+    ipi_broadcast(IPI_VECTOR_TLB, 0x2);
+    assert_eq((uint32_t)((3u << 0) | (0x02u << 16)), rd(gicd_mock, M_GICD_SGIR));
+}
+
 static void suite_unsupported_vector(void)
 {
-    TEST_SUITE("ipi_broadcast unsupported vector panics");
+    TEST_SUITE("ipi_broadcast unsupported vector panics (0x42, P2)");
     mock_reset();
     gic_target_bit_inject(1, 0x02);
     if (setjmp(panic_jb) == 0) {
         panic_armed = 1;
-        ipi_broadcast(IPI_VECTOR_RESCHED, 0x2);   /* 期望 kpanic → longjmp */
+        ipi_broadcast(0x42, 0x2);   /* 期望 kpanic → longjmp (0x41 已映射) */
         panic_armed = 0;
-        assert_true(0);                           /* 未 panic = 失败 */
+        assert_true(0);             /* 未 panic = 失败 */
     } else {
         assert_true(1);
         assert_eq((uint32_t)0, rd(gicd_mock, M_GICD_SGIR));
@@ -111,7 +128,8 @@ static void suite_unsupported_vector(void)
 
 int main(void)
 {
-    suite_sgi_mapping(); suite_empty_mask(); suite_unsupported_vector();
+    suite_sgi_mapping(); suite_empty_mask(); suite_resched_vector();
+    suite_unsupported_vector();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_aarch64_ipi_broadcast",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

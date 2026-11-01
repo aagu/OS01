@@ -239,6 +239,11 @@ void enqueue_task(task_t *task, percpu_t *rq);
 unsigned sched_pick_cpu_mask(uint64_t allowed);
 void sched_notify_remote(task_t *tsk);
 void sched_notify_remote_cpu(unsigned cpu);
+/* AP cooperative scheduler P1 facade hook (spec §4): the common
+ * constructor's default affinity mask source.  Declared for BOTH modes;
+ * the test TU defines a controllable spy, the kernel defines the real
+ * <arch/sched.h> backend. */
+uint64_t arch_kthread_default_mask(void);
 int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg);
 void arch_kthread_drop_files(task_t *t);
 
@@ -305,6 +310,18 @@ int mock_poison_task_after_publish;
 int mock_revoke_cpu_after_prepare;
 task_t *mock_arch_prepared_task;
 int64_t mock_alloc_pid_next = 1;
+
+/* Arch default-mask spy control (P1 Task 1): 0 selects the legacy
+ * num_cpus algorithm so the pre-existing suites keep their recorded
+ * masks; a non-zero value is returned verbatim (the aarch64 policy
+ * is exactly the constant 1). */
+uint64_t mock_arch_default_mask;
+uint64_t arch_kthread_default_mask(void)
+{
+    if (mock_arch_default_mask)
+        return mock_arch_default_mask;
+    return (num_cpus >= NR_CPUS) ? ~0ULL : ((1ULL << num_cpus) - 1);
+}
 
 /* Lock-order recorder state (filled from the PRODUCTION spin surface). */
 spinlock_T *mock_lock_log_addr[16];
@@ -596,6 +613,7 @@ void switch_tail_reset(void)
     mock_poison_task_after_publish = 0;
     mock_revoke_cpu_after_prepare = 0;
     mock_arch_prepared_task = NULL;
+    mock_arch_default_mask = 0;
 
     mock_lock_log_count = 0;
     memset(mock_lock_log_addr, 0, sizeof(mock_lock_log_addr));

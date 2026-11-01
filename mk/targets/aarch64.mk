@@ -47,3 +47,16 @@ AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data := $(BUILD_DIR)/image/sched-fault-pc-d
 AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data     := $(BUILD_DIR)/kernel/sched-fault-pc-data/kernel.elf
 AARCH64_KERNEL_ELF    := $(KERNEL_BUILD_DIR)/kernel.elf
 AARCH64_HEAD_OBJECT   := $(KERNEL_BUILD_DIR)/arch/aarch64/head.o
+# P1 AP cooperative scheduler acceptance (spec §7): MODE=sched-ap owns
+# its kernel/image/firmware trees — `ap` → sched-ap (P1 Task 4), the
+# fatal-owner fault variant → sched-ap-fatal-owner.  Spelled explicitly
+# like the MODE=sched triplets; never a symlink into another variant.
+AARCH64_UEFI_SCHED_AP_DISK      := $(BUILD_DIR)/image/sched-ap/aarch64-uefi.img
+AARCH64_UEFI_SCHED_AP_FIRMWARE  := $(BUILD_DIR)/image/sched-ap/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_AP_ELF     := $(BUILD_DIR)/kernel/sched-ap/kernel.elf
+AARCH64_UEFI_SCHED_AP_FATAL_DISK      := $(BUILD_DIR)/image/sched-ap-fatal-owner/aarch64-uefi.img
+AARCH64_UEFI_SCHED_AP_FATAL_FIRMWARE  := $(BUILD_DIR)/image/sched-ap-fatal-owner/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_AP_FATAL_ELF     := $(BUILD_DIR)/kernel/sched-ap-fatal-owner/kernel.elf
+AARCH64_UEFI_SCHED_WAKE_DISK      := $(BUILD_DIR)/image/sched-wake/aarch64-uefi.img
+AARCH64_UEFI_SCHED_WAKE_FIRMWARE  := $(BUILD_DIR)/image/sched-wake/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_WAKE_ELF     := $(BUILD_DIR)/kernel/sched-wake/kernel.elf

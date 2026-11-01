@@ -61,6 +61,16 @@ static task_t *first_created_task(void)
     return (task_t *)((char *)p - __builtin_offsetof(task_t, list));
 }
 
+/* The MOST RECENTLY published task: publication inserts before the
+ * init head, i.e. at head->prev (list_add_to_before semantics). */
+static task_t *last_created_task(void)
+{
+    if (task_list_len() == 0)
+        return NULL;
+    list_t *p = init_task_union.task.list.prev;
+    return (task_t *)((char *)p - __builtin_offsetof(task_t, list));
+}
+
 /* The shared boot-phase precondition: CPU0 up, scheduler NOT started. */
 static void boot_phase_cpu0_up(void)
 {
@@ -442,6 +452,78 @@ static void suite_notify_uses_captured_cpu_after_publication(void)
     assert_eq(0, (int)mock_notified_cpu);
 }
 
+/* ── 8. P1 arch default-mask policy (aarch64 AP cooperative scheduler
+ *       P1 Task 1): the arch hook owns the unpinned default mask. ── */
+static void suite_arch_default_mask(void)
+{
+    TEST_SUITE("arch default mask=1 keeps unpinned creates on CPU0");
+    switch_tail_reset();
+    num_cpus = 2;
+    /* CPU1 is eligible AND strictly emptier: the legacy num_cpus picker
+     * would place the task there.  The aarch64 policy (mask == 1) must
+     * still place every unpinned create on CPU0. */
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[0].nr_running = 5;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 1;
+    percpu_data[1].nr_running = 0;
+    mock_arch_default_mask = 1;
+
+    int pid = kernel_thread(ctor_fn, 7, PF_KTHREAD);
+    assert_true(pid >= 1);
+    assert_eq(0, (int)last_created_task()->cpu);
+    assert_eq(1ULL, last_created_task()->allowed_cpus);
+    assert_eq(6, (int)percpu_data[0].nr_running);   /* 5 fixture + 1 */
+    assert_eq(0, (int)percpu_data[1].nr_running);
+
+    TEST_SUITE("explicit pinned cpu1 succeeds and owns only bit 1");
+    int pinned = kernel_thread_on_cpu(ctor_fn, 0, 1);
+    assert_true(pinned >= 1);
+    /* The pinned task is the most recently published one. */
+    task_t *pinned_task = last_created_task();
+    assert_eq(1, (int)pinned_task->cpu);
+    assert_eq(2ULL, pinned_task->allowed_cpus);
+    assert_eq(1, (int)percpu_data[1].nr_running);
+    assert_eq(6, (int)percpu_data[0].nr_running);   /* unchanged */
+
+    TEST_SUITE("invalid and unready pinned targets rejected without publication");
+    switch_tail_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 0;       /* online-only, not ready */
+    mock_arch_default_mask = 1;
+    assert_true(kernel_thread_on_cpu(ctor_fn, 0, 1) == -EINVAL);
+    assert_true(kernel_thread_on_cpu(ctor_fn, 0, NR_CPUS) == -EINVAL);
+    assert_true(kernel_thread_on_cpu(ctor_fn, 0, NR_CPUS + 3) == -EINVAL);
+    assert_eq(0, task_list_len());
+    assert_eq(0, (int)percpu_data[1].nr_running);
+    assert_eq(0, (int)percpu_data[0].nr_running);
+    assert_true((size_t)0 == mock_kmalloc_live_bytes);
+    assert_eq(0, mock_arch_files_live);
+    assert_eq(0, mock_arch_fpu_live);
+    assert_eq(0, mock_notify_remote_calls);
+    assert_eq(0, mock_enqueue_calls);
+
+    TEST_SUITE("post-unlock invalidation: captured CPU used for a cpu1 target");
+    switch_tail_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 1;
+    mock_arch_default_mask = 1;
+    mock_poison_task_after_publish = 1;
+    pid = kernel_thread_on_cpu(ctor_fn, 99, 1);
+    assert_true(pid > 0);
+    assert_eq(0xfe, (int)mock_arch_prepared_task->cpu);
+    assert_eq(1, mock_notify_remote_calls);
+    assert_eq(0, mock_notify_remote_task_reads);
+    assert_eq(1, (int)mock_notified_cpu);
+}
+
 int main(void)
 {
     suite_window_initially_closed();
@@ -454,6 +536,7 @@ int main(void)
     suite_window_close_permanent();
     suite_runtime_create();
     suite_notify_uses_captured_cpu_after_publication();
+    suite_arch_default_mask();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_kthread_ctor",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

@@ -60,6 +60,25 @@ endif
 # images) and rejects every other compile-affecting test variant so the
 # dedicated kernel/image/firmware trees never collide. mk/project.mk
 # whitelists the variable across the controlled sub-make boundary.
+# ── P1 AP cooperative scheduler selector (AARCH64_AP_SCHED_TEST) ──
+# `ap` (P1 Task 4) and `fatal-owner` (P1 Task 3) select the dedicated
+# sched-ap / sched-ap-fatal-owner kernel+image trees.  The selector is
+# the MODE=sched-ap surface: it must be a selftest build and it refuses
+# every other compile-affecting variant (old sched / M1 / sync-fault /
+# no-ack / canary / systest) exactly like AARCH64_SCHED_TEST does.
+AARCH64_AP_SCHED_TESTS_VALID := ap wake fatal-owner
+ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
+ifeq ($(filter $(AARCH64_AP_SCHED_TEST),$(AARCH64_AP_SCHED_TESTS_VALID)),)
+$(error invalid AARCH64_AP_SCHED_TEST='$(AARCH64_AP_SCHED_TEST)'; valid: $(AARCH64_AP_SCHED_TESTS_VALID))
+endif
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_AP_SCHED_TEST='$(AARCH64_AP_SCHED_TEST)' requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(strip $(AARCH64_SCHED_TEST) $(AARCH64_M1_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error AARCH64_AP_SCHED_TEST='$(AARCH64_AP_SCHED_TEST)' cannot be combined with other compile-affecting test variants)
+endif
+endif
+
 AARCH64_SCHED_TESTS_VALID := positive sp-top sp-low pc-low pc-data
 ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 ifeq ($(filter $(AARCH64_SCHED_TEST),$(AARCH64_SCHED_TESTS_VALID)),)
@@ -101,6 +120,12 @@ else ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 # so the dedicated image/firmware paths (`image/sync-fault/`) match the
 # harness's hardcoded AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}.
 KERNEL_VARIANT := $(if $(filter positive,$(AARCH64_SCHED_TEST)),sched,sched-fault-$(AARCH64_SCHED_TEST))
+else ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
+ifeq ($(filter wake,$(AARCH64_AP_SCHED_TEST)),wake)
+KERNEL_VARIANT := sched-wake
+else
+KERNEL_VARIANT := sched-ap$(if $(filter fatal-owner,$(AARCH64_AP_SCHED_TEST)),-fatal-owner)
+endif
 else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)

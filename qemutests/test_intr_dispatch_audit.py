@@ -157,6 +157,8 @@ def _garble(world: str, addr: int) -> str:
 # ────────────────────────────────────────────────────────────────────
 
 X86_NM = """\
+ffff8000001047f0 t ret_from_exception
+ffff80000015a000 T do_system_call
 ffff8000001047f3 T ret_from_intr
 ffff80000010484b t divide_error
 ffff800000104859 t error_code
@@ -211,7 +213,13 @@ ffff800000104893: 48 8e df             	movq	%rdi, %ds
 ffff800000104896: 48 8e c7             	movq	%rdi, %es
 ffff800000104899: 48 89 e7             	movq	%rsp, %rdi
 ffff80000010489c: ff d2                	callq	*%rdx
-ffff80000010489e: e9 50 ff ff ff       	jmp	0xffff8000001047f3 <ret_from_intr>
+ffff80000010489e: 90                   	leaq	0x0(%rip), %rax # 0xffff80000014d120 <do_page_fault>
+ffff8000001048a5: 90                   	cmpq	%rax, 0x88(%rsp)
+ffff8000001048ad: 90                   	je	0xffff8000001047f3 <ret_from_intr>
+ffff8000001048b3: 90                   	leaq	0x0(%rip), %rax # 0xffff80000015a000 <do_system_call>
+ffff8000001048ba: 90                   	cmpq	%rax, 0x88(%rsp)
+ffff8000001048c2: 90                   	je	0xffff8000001047f3 <ret_from_intr>
+ffff8000001048c8: 90                   	jmp	0xffff8000001047f0 <ret_from_exception>
 """
 
 X86_DISASM = """\
@@ -482,7 +490,7 @@ def _phase2_world():
         for vector in vectors:
             name = SYNC_NAMES[SYNC_VECTORS.index(vector)] if vector in SYNC_VECTORS else f"IRQ{vector-32}_interrupt" if vector < 56 else {56:"lapic_timer_stub",64:"_intr_stub_tlb",65:"_intr_stub_resched",255:"lapic_spurious_stub"}[vector]
             ist = 3 if vector == 8 else 0 if vector == 14 or vector >=32 else 1
-            attr = 0x8e if vector == 2 or vector >=32 else 0xef if vector in (3,4,5) else 0x8f
+            attr = 0x8f if vector == 14 else 0xee if vector in (3,4,5) else 0x8e
             instructions += [f"movabsq $0x{address(name):x}, %rdx", f"movabsq $0x{idt+16*vector:x}, %rsi", f"movabsq $0x{idt+16*vector+8:x}, %rdi", "movl $0x80000, %eax", f"movl $0x{ist:x}, %ecx", "movw %dx, %ax", "andq $0x7, %rcx", f"addq $0x{attr<<8:x}, %rcx", "shlq $0x20, %rcx", "addq %rcx, %rax", "xorq %rcx, %rcx", "movl %edx, %ecx", "shrq $0x10, %rcx", "shlq $0x30, %rcx", "addq %rcx, %rax", "movq %rax, (%rsi)", "shrq $0x20, %rdx", "movq %rdx, (%rdi)"]
         block(installer, instructions + ["retq"])
     return nm, dis
@@ -1012,15 +1020,24 @@ class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("error_code" in e for e in errors), errors)
 
-    def test_return_label_changed_to_ret_from_exception_fails(self):
-        self.stage_x86(
-            nm_text=X86_NM + "ffff8000001047ff T ret_from_exception\n",
-            disasm_text=_mutate(
-                X86_DISASM, 0xFFFF80000010489E,
-                "jmp\t0xffff8000001047f3 <ret_from_intr>",
-                "jmp\t0xffff8000001047ff <ret_from_exception>"))
-        errors = self.audit()
-        self.assertTrue(any("ret_from_intr" in e for e in errors), errors)
+    def test_ist_return_cannot_run_pending_work(self):
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001048C8,
+            "jmp\t0xffff8000001047f0 <ret_from_exception>",
+            "jmp\t0xffff8000001047f3 <ret_from_intr>"))
+        self.assertTrue(any("selector" in e for e in self.audit()))
+
+    def test_each_task_stack_path_requires_exact_function_and_branch(self):
+        for addr, before, after in (
+            (0xFFFF80000010489E, "leaq\t0x0(%rip), %rax # 0xffff80000014d120 <do_page_fault>", "leaq\t0x0(%rip), %rax # 0xffff80000015a000 <do_system_call>"),
+            (0xFFFF8000001048B3, "leaq\t0x0(%rip), %rax # 0xffff80000015a000 <do_system_call>", "leaq\t0x0(%rip), %rax # 0xffff80000014d120 <do_page_fault>"),
+            (0xFFFF8000001048A5, "cmpq\t%rax, 0x88(%rsp)", "cmpq\t%rax, 0x80(%rsp)"),
+            (0xFFFF8000001048AD, "je\t0xffff8000001047f3 <ret_from_intr>", "jne\t0xffff8000001047f3 <ret_from_intr>"),
+            (0xFFFF8000001048C2, "je\t0xffff8000001047f3 <ret_from_intr>", "je\t0xffff8000001047f0 <ret_from_exception>"),
+        ):
+            with self.subTest(addr=hex(addr)):
+                self.stage_x86(disasm_text=_mutate(X86_DISASM, addr, before, after))
+                self.assertTrue(any("selector" in e for e in self.audit()))
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1308,7 +1325,7 @@ class InstalledSurfaceTests(IntrDispatchAuditFixture):
         self.assertIn(None, {e.target for e in x86_edges(code,table) if e.kind == "jmp"})
 
     def test_real_gate_type_wrong(self):
-        self.check_mutation("sys_vector_install", lambda b: setattr(next(i for i in b if i.text == "addq $0xef00, %rcx"), "text", "addq $0x8f00, %rcx"), "gate ELF")
+        self.check_mutation("sys_vector_install", lambda b: setattr(next(i for i in b if i.text == "addq $0xee00, %rcx"), "text", "addq $0x8f00, %rcx"), "gate ELF")
 
     def test_real_gate_ist_wrong(self):
         self.check_mutation("sys_vector_install", lambda b: setattr(next(i for i in b if i.text == "movl $0x3, %ecx"), "text", "movl $0x1, %ecx"), "gate ELF")
@@ -1324,12 +1341,12 @@ class InstalledSurfaceTests(IntrDispatchAuditFixture):
         # code. A missing read/write RCX operand silently drops repeated ISTs.
         source = '#include <arch/x86_64/gate.h>\nstruct gate_struct IDT_Table[256];\nint main(void) {\n'
         for vector in SYNC_VECTORS:
-            setter = "set_intr_gate_raw" if vector == 2 else "set_system_gate" if vector in (3,4,5) else "set_trap_gate"
+            setter = "set_trap_gate" if vector == 14 else "set_system_intr_gate" if vector in (3,4,5) else "set_intr_gate_raw"
             ist = 3 if vector == 8 else 0 if vector == 14 else 1
             source += f'{setter}({vector}, {ist}, (void *)(0x123456789abcdef0UL + {vector}));\n'
         for vector in SYNC_VECTORS:
             ist = 3 if vector == 8 else 0 if vector == 14 else 1
-            attr = 0x8e if vector == 2 else 0xef if vector in (3,4,5) else 0x8f
+            attr = 0x8f if vector == 14 else 0xee if vector in (3,4,5) else 0x8e
             source += f'if ((IDT_Table[{vector}].x[4] & 7) != {ist} || IDT_Table[{vector}].x[5] != {attr}) return {vector+1};\n'
         source += 'return 0; }\n'
         cfile, binary = self.tmp / "gates.c", self.tmp / "gates"
@@ -1356,7 +1373,7 @@ class InstalledSurfaceTests(IntrDispatchAuditFixture):
         shutil.copytree(ROOT / "kernel", repo / "kernel", ignore=shutil.ignore_patterns("*.o"))
         trap = repo / "kernel/arch/x86_64/intr/trap.c"
         original = trap.read_text()
-        for before, after in (("set_trap_gate(8,3,double_fault)", "set_trap_gate(8,1,double_fault)"), ("set_system_gate(3,1,int3)", "set_trap_gate(3,1,int3)"), ("set_intr_gate_raw(2, 1, nmi)", "set_trap_gate(2, 1, nmi)")):
+        for before, after in (("set_intr_gate_raw(8,3,double_fault)", "set_intr_gate_raw(8,1,double_fault)"), ("set_system_intr_gate(3,1,int3)", "set_intr_gate_raw(3,1,int3)"), ("set_intr_gate_raw(2, 1, nmi)", "set_trap_gate(2, 1, nmi)")):
             with self.subTest(after=after):
                 self.assertIn(before, original)
                 trap.write_text(original.replace(before, after))

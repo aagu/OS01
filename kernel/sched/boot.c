@@ -79,5 +79,7 @@ void sched_boot_publish_idle(void)
 void sched_boot_start(void)
 {
     boot_creation_state = 2;        /* closed, permanently */
-    percpu_data[0].scheduler_ok = 1;
+    /* RELEASE: the constructor/placement/balance/schedule readers
+     * acquire-load scheduler_ok (P1 spec §6). */
+    __atomic_store_n(&percpu_data[0].scheduler_ok, 1, __ATOMIC_RELEASE);
 }

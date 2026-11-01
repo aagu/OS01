@@ -616,17 +616,26 @@ def _audit_x86(symtab, blocks, order, repo: Path,
                 notes.append(f"error_code: FUNC slot traced at "
                              f"0x{func_disp:x}(%rsp) after {func_pushes} "
                              "pushes -> callq *%rdx")
-        branches = x86_edges(ec_instrs, symtab)
-        tails = [e for e in branches if e.kind == "branch"]
-        if not any(e.target == "ret_from_intr" for e in tails):
-            errors.append(
-                "error_code: post-call transfer is not "
-                "jmp <ret_from_intr> (found "
-                f"{[e.detail for e in tails] or 'no direct jmp'})")
-        if any(e.target == "ret_from_exception" for e in tails):
-            errors.append("error_code: jumps to ret_from_exception — "
-                          "the installed exception stubs must keep the "
-                          "ret_from_intr return path")
+        # Only #PF and syscall use task stacks. Prove the exact post-call
+        # selector; all IST frames must preserve pending work and restore.
+        call_index = next((i for i, ins in enumerate(ec_instrs)
+                           if ins.text == "callq *%rdx"), -1)
+        tail = ec_instrs[call_index + 1:]
+        valid = len(tail) == 7
+        if valid:
+            for index, target in ((0, "do_page_fault"), (3, "do_system_call")):
+                ins = tail[index]
+                valid &= bool(re.fullmatch(r"leaq .+\(%rip\), %rax", ins.text))
+                valid &= symtab.resolve(_parse_imm("", ins.comment)) == target
+                valid &= tail[index + 1].text == "cmpq %rax, 0x88(%rsp)"
+                valid &= bool(re.fullmatch(r"je 0x[0-9a-f]+ <ret_from_intr>", tail[index + 2].text))
+                match = re.search(r"0x[0-9a-f]+", tail[index + 2].text)
+                valid &= bool(match and symtab.resolve(int(match.group(), 16)) == "ret_from_intr")
+            valid &= bool(re.fullmatch(r"jmp 0x[0-9a-f]+ <ret_from_exception>", tail[6].text))
+            match = re.search(r"0x[0-9a-f]+", tail[6].text)
+            valid &= bool(match and symtab.resolve(int(match.group(), 16)) == "ret_from_exception")
+        if not valid:
+            errors.append("error_code: task-stack ret_from_intr / IST restore-only selector unproven")
 
     for stub, entry in _X86_STUBS:
         instrs = _block(blocks, stub, errors, f"stub for {entry}")
@@ -1006,7 +1015,7 @@ def _audit_x86_gate_elf(symtab, blocks, errors):
         for vector in vectors:
             target = _X86_SYNC[vector] if vector in _X86_SYNC else _X86_IRQ[vector][0]
             ist = 3 if vector == 8 else 0 if vector == 14 or vector >=32 else 1
-            attr = 0x8e if vector == 2 or vector >=32 else 0xef if vector in (3,4,5) else 0x8f
+            attr = 0x8f if vector == 14 else 0xee if vector in (3,4,5) else 0x8e
             expected[vector] = (target, ist, attr, 0x80000, True)
         actual.pop(0x80,None)  # syscall installation is outside this migration
         if actual != expected:
@@ -1020,11 +1029,11 @@ def _audit_x86_gate_sources(repo, errors):
     trap = source("kernel/arch/x86_64/intr/trap.c")
     installs = re.findall(r"(set_\w+_gate(?:_raw)?)\(\s*(0x[0-9a-f]+|\d+)\s*,\s*(\d+)\s*,\s*(\w+)\s*\)", trap)
     actual = {int(v, 0): (setter, int(ist), name) for setter, v, ist, name in installs if int(v,0) != 0x80}
-    expected = {v: ("set_intr_gate_raw" if v == 2 else "set_system_gate" if v in (3,4,5) else "set_trap_gate", 3 if v == 8 else 0 if v == 14 else 1, n) for v,n in _X86_SYNC.items()}
+    expected = {v: ("set_trap_gate" if v == 14 else "set_system_intr_gate" if v in (3,4,5) else "set_intr_gate_raw", 3 if v == 8 else 0 if v == 14 else 1, n) for v,n in _X86_SYNC.items()}
     if actual != expected or len([x for x in installs if int(x[1],0) != 0x80]) != 20:
         errors.append("gate source: installed sync vector/type/DPL/IST/target manifest differs")
     gate = source("kernel/include/arch/x86_64/gate.h")
-    for setter, attr in (("set_intr_gate_raw", "0x8E"), ("set_trap_gate", "0x8F"), ("set_system_gate", "0xEF")):
+    for setter, attr in (("set_intr_gate_raw", "0x8E"), ("set_trap_gate", "0x8F"), ("set_system_gate", "0xEF"), ("set_system_intr_gate", "0xEE")):
         body = _function_body(gate, " " + setter + "(")
         if not re.search(r"_set_gate\(IDT_Table\s*\+\s*n\s*,\s*" + attr + r"\s*,\s*ist\s*,\s*addr\)", body):
             errors.append(f"gate source: {setter} type/DPL encoding changed")

@@ -80,8 +80,8 @@ static void kill_current_user_task(pt_regs_t *regs, int sig)
             task->pid, regs->rip, sig);
 
     // do_exit owns the ZOMBIE transition after cleanup and exit_code are
-    // ready. Trap gates leave IRQs enabled: publishing ZOMBIE here lets a
-    // timer switch us out (on_cpu=0) and a waiter reap our live stack with
+    // ready. Once back on the task stack IRQs may be restored: publishing
+    // ZOMBIE here would let a timer switch us out and a waiter reap it with
     // the default exit_code before do_exit has finished.
 
     // Switch to the task's own kernel stack and call do_exit.
@@ -104,11 +104,17 @@ static void kill_current_user_task(pt_regs_t *regs, int sig)
     __asm__ __volatile__(
         "movq %[stack_top], %%rsp\n\t"
         "movl %[sig], %%edi\n\t"        // rdi = sig (low byte = signal)
-        "call do_exit\n\t"
+        /* Never enable IRQs on IST. Restore only saved IF after the pivot;
+         * user exit cleanup may block while dropping file references. */
+        "testq $0x200, %[saved_flags]\n\t"
+        "jz 1f\n\t"
+        "sti\n\t"
+        "1: call do_exit\n\t"
         :
         : [stack_top] "r"((uint64_t)task + STACK_SIZE - 8),
-          [sig]      "r"(sig)
-        : "edi", "memory"
+          [sig]      "r"(sig),
+          [saved_flags] "r"(regs->rflags)
+        : "edi", "cc", "memory"
     );
     __builtin_unreachable();
 }
@@ -1281,30 +1287,34 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
 
 void sys_vector_install()
 {
-    set_trap_gate(0,1,divide_error);
-    set_trap_gate(1,1,debug);
+    /* IST stacks are not task stacks: ordinary IRQ accounting/return work
+     * cannot use current there. Interrupt gates mask IRQs before the first
+     * instruction; saved RFLAGS still preserves the interrupted IF state.
+     * Keep user-callable DPL=3, and leave task-stack #PF/syscall unchanged. */
+    set_intr_gate_raw(0,1,divide_error);
+    set_intr_gate_raw(1,1,debug);
 	set_intr_gate_raw(2, 1, nmi);
-	set_system_gate(3,1,int3);
-	set_system_gate(4,1,overflow);
-	set_system_gate(5,1,bounds);
-	set_trap_gate(6,1,undefined_opcode);
-	set_trap_gate(7,1,dev_not_available);
-	set_trap_gate(8,3,double_fault);  // IST 3 = dedicated double fault stack
-	set_trap_gate(9,1,coprocessor_segment_overrun);
-	set_trap_gate(10,1,invalid_TSS);
-	set_trap_gate(11,1,segment_not_present);
-	set_trap_gate(12,1,stack_segment_fault);
-	set_trap_gate(13,1,general_protection);
+	set_system_intr_gate(3,1,int3);
+	set_system_intr_gate(4,1,overflow);
+	set_system_intr_gate(5,1,bounds);
+	set_intr_gate_raw(6,1,undefined_opcode);
+	set_intr_gate_raw(7,1,dev_not_available);
+	set_intr_gate_raw(8,3,double_fault);  // IST 3 = dedicated double fault stack
+	set_intr_gate_raw(9,1,coprocessor_segment_overrun);
+	set_intr_gate_raw(10,1,invalid_TSS);
+	set_intr_gate_raw(11,1,segment_not_present);
+	set_intr_gate_raw(12,1,stack_segment_fault);
+	set_intr_gate_raw(13,1,general_protection);
 	set_trap_gate(14,0,page_fault);   // IST 0: run on task's kernel stack.
 	                                     // COW handler can trigger a reschedule via
 	                                     // ret_from_intr, and schedule()'s get_current_task()
 	                                     // (RSP & ~0x7FFF) breaks on IST stacks.
 	//15 Intel reserved. Do not use.
-	set_trap_gate(16,1,x87_FPU_error);
-	set_trap_gate(17,1,alignment_check);
-	set_trap_gate(18,1,machine_check);
-	set_trap_gate(19,1,SIMD_exception);
-	set_trap_gate(20,1,virtualization_exception);
+	set_intr_gate_raw(16,1,x87_FPU_error);
+	set_intr_gate_raw(17,1,alignment_check);
+	set_intr_gate_raw(18,1,machine_check);
+	set_intr_gate_raw(19,1,SIMD_exception);
+	set_intr_gate_raw(20,1,virtualization_exception);
 
 	// int 0x80 syscall gate — DPL=3 so user code can call it
 	set_system_gate(0x80, 0, system_call);

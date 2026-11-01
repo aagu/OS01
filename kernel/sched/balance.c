@@ -1,8 +1,5 @@
 #include <sched/internal.h>
-#include <sched/task.h>      // ARCH_HAS_REMOTE_RESCHED (arch facade)
-#if ARCH_HAS_REMOTE_RESCHED
-#include <intr/ipi.h>        // x86 resched IPI encoding
-#endif
+#include <arch/sched.h>      // AP cooperative scheduling facade (P1)
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <arch/spinlock.h>
@@ -33,7 +30,8 @@ unsigned sched_pick_cpu_mask(uint64_t allowed)
             continue;
         if (i >= num_cpus)
             break;  /* mask bit beyond live set — nothing else can match */
-        if (!percpu_data[i].online || !percpu_data[i].scheduler_ok)
+        if (!percpu_data[i].online ||
+            !__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE))
             continue;
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
         /* Tiebreak: lower nr wins; equal nr prefers the caller's CPU
@@ -70,51 +68,54 @@ uint32_t sched_pick_cpu(void)
 }
 
 /* ── sched_notify_remote: wake remote CPU after enqueue ──
- * Sets need_resched and sends reschedule IPI so the remote
- * CPU discovers the task immediately, not up to 10 ms later.
+ * Admission-validates the target, publishes need_resched=1 with a
+ * release store (readers acquire-load it), then hands off to the arch
+ * notification backend (<arch/sched.h>): x86 sends the resched IPI,
+ * aarch64 is the P1 polling no-op.
  *
- * If ipi_send() times out (10K ICR poll), the IPI is silently
- * dropped.  need_resched=1 is the fallback: the remote CPU
- * picks it up on the next LAPIC timer tick (≤10 ms).
+ * An out-of-topology or not-ready target is refused with a logged
+ * diagnostic and NOTHING is published: callers (the constructor,
+ * fork/exec) admission-validate before publication, so a refused
+ * notification is either a bug or a target that will poll/see the
+ * work when it becomes ready.
  *
- * Called from do_fork()/spawn_user_task() and the common kthread
- * constructor after enqueue.
- *
- * aarch64 (spec §7) has no remote-resched IPI this phase: the local
- * path just returns, and an unexpected remote target is an INVARIANT
- * DIAGNOSTIC (the constructor rejects unplaceable targets before
- * publication — this must never be a late substitute for that
- * admission validation), never a silent success.
+ * If the x86 ipi_send() times out (10K ICR poll), the IPI is silently
+ * dropped; need_resched=1 remains the fallback the remote CPU picks
+ * up on its next timer tick (≤10 ms) or idle poll.
  */
 void sched_notify_remote_cpu(unsigned cpu)
 {
-    if (cpu >= NR_CPUS) {
+    if (cpu >= NR_CPUS || cpu >= num_cpus) {
         log_err("[sched] sched_notify_remote: invalid target cpu=%u\n", cpu);
         return;
     }
     if ((int)cpu == (int)cpu_id())
         return;
     percpu_t *dst = &percpu_data[cpu];
-#if ARCH_HAS_REMOTE_RESCHED
-    dst->need_resched = 1;
-    __sync_synchronize();
-    ipi_send(dst->arch_processor_id, IPI_VECTOR_RESCHED);
-#else
-    /* Do not publish a partial remote notification on an architecture
-     * whose admission policy must keep every runnable task on CPU0. */
-    log_err("[sched] sched_notify_remote: remote target cpu=%u without "
-            "remote-resched capability — invariant violated\n",
-            cpu);
-    (void)dst;
-#endif
+    if (!dst->online ||
+        !__atomic_load_n(&dst->scheduler_ok, __ATOMIC_ACQUIRE)) {
+        log_err("[sched] sched_notify_remote: target cpu=%u not ready "
+                "(online=%u scheduler_ok=%u)\n",
+                cpu, dst->online,
+                __atomic_load_n(&dst->scheduler_ok, __ATOMIC_ACQUIRE));
+        return;
+    }
+    /* Publish BEFORE the backend fires: the remote reader acquire-loads
+     * need_resched, so the release store orders it ahead of the IPI /
+     * polling discovery. */
+    __atomic_store_n(&dst->need_resched, 1, __ATOMIC_RELEASE);
+    arch_sched_notify_remote(cpu);
 }
 
 /* Back-compatible task wrapper for fork/exec publication callers.
  * The kernel-thread constructor uses the value form above because a
- * self-reaping child may outlive its task object immediately at unlock. */
+ * self-reaping child may outlive its task object immediately at unlock.
+ * The lockless cpu read pairs with the rq_lock-protected release
+ * stores (task_wake / schedule pick / balance migration). */
 void sched_notify_remote(task_t *tsk)
 {
-    sched_notify_remote_cpu((unsigned)tsk->cpu);
+    sched_notify_remote_cpu((unsigned)__atomic_load_n(&tsk->cpu,
+                                                      __ATOMIC_ACQUIRE));
 }
 
 /* ── sched_balance: pull work from busiest CPU ─────────────
@@ -145,7 +146,7 @@ void sched_balance(percpu_t *rq)
 
     for (uint32_t i = 0; i < num_cpus; i++) {
         if (i == rq->cpu_id || !percpu_data[i].online ||
-            !percpu_data[i].scheduler_ok)
+            !__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE))
             continue;
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
         if (nr == 0)
@@ -216,7 +217,9 @@ void sched_balance(percpu_t *rq)
                 !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) &&
                 ((t->allowed_cpus >> rq->cpu_id) & 1ULL)) {
                 dequeue_task(t, src_rq);
-                t->cpu = rq->cpu_id;
+                /* Release store: lockless readers (task_wake's target
+                 * capture, sched_notify_remote) pair with it. */
+                __atomic_store_n(&t->cpu, rq->cpu_id, __ATOMIC_RELEASE);
 
                 /* Normalize vruntime to target CPU's timeline */
                 if (t->vruntime < rq->min_vruntime)

@@ -27,9 +27,15 @@ __attribute__((weak)) void ipi_panic_unsupported_vector(uint32_t vector)
         ;
 }
 
-/* Logical vector → SGI INTID map (M3: only the TLB shootdown vector is
- * wired; further vectors get entries here as their consumers land). */
-#define AARCH64_IPI_SGI_TLB 3u
+/* Logical vector → SGI INTID map (M3: TLB shootdown → 3; P2 Task 1:
+ * resched → 4, spec §5.1; further vectors get entries here as their
+ * consumers land). */
+#define AARCH64_IPI_SGI_TLB     3u
+#define AARCH64_IPI_SGI_RESCHED 4u
+
+#ifdef __aarch64__
+#include <percpu/percpu.h>
+#endif
 
 /* Per-CPU GIC target byte cache. Static zero-init: before SMP bring-up
  * populates it (from GICD_ITARGETSR, Task 8) every entry is 0, which
@@ -115,7 +121,8 @@ uint8_t gic_target_bit_get(uint32_t cpu)
 static uint32_t ipi_vector_to_sgi(uint32_t vector)
 {
     switch (vector) {
-    case IPI_VECTOR_TLB: return AARCH64_IPI_SGI_TLB;
+    case IPI_VECTOR_TLB:     return AARCH64_IPI_SGI_TLB;
+    case IPI_VECTOR_RESCHED: return AARCH64_IPI_SGI_RESCHED;
     default:
         ipi_panic_unsupported_vector(vector);
         return 0; /* unreachable (hook does not return) */
@@ -146,4 +153,32 @@ void ipi_broadcast(uint32_t vector, uint64_t target_mask)
     if (targets == 0)
         return; /* empty/unmapped mask: nothing to send */
     gic_send_sgi(gic_dev_current(), sgi, targets, GICD_SGIR_FILTER_LIST);
+}
+
+/* ── P2 Task 1: resched SGI4 (spec §5.1) ─────────────────────────── */
+
+#if defined(__aarch64__)
+static uint64_t *aarch64_resched_need_slot(void)
+{
+    return &this_cpu()->need_resched;
+}
+#else
+/* Host seam: the hosttest overrides this weak default to inject a
+ * mock slot (the host cannot run TPIDR_EL1). */
+__attribute__((weak)) uint64_t *aarch64_resched_need_slot(void)
+{
+    return 0;
+}
+#endif
+
+void aarch64_resched_sgi_handler(uint32_t intid, uint64_t param,
+                                 struct pt_regs *regs)
+{
+    (void)intid;
+    (void)param;
+    (void)regs;
+    /* IRQ context, possibly on the boot stack: no current, no locks,
+     * no schedule, no EOI (gic_dev_dispatch owns the single raw-IAR
+     * EOI).  Release store: the waking CPU's idle poll acquires. */
+    __atomic_store_n(aarch64_resched_need_slot(), 1, __ATOMIC_RELEASE);
 }

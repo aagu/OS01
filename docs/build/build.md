@@ -62,6 +62,8 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 AArch64 EL1 调度器验收（`MODE=sched`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched [SCHED_CASE=<v>]`。该 MODE 通过受控子构建产出隔离的 `KERNEL_SELFTEST` 调度器镜像变体：`SCHED_CASE=positive`（默认组成部分）构建 `kernel/sched` + `image/sched`（正例：严格 14 用例协议 + 全部冻结 `[sched-evidence]` 字段证据矩阵），四个故障值 `sp-top`/`sp-low`/`pc-low`/`pc-data` 各构建 `kernel/sched-fault-<v>` + `image/sched-fault-<v>`（编译期选中的 `aarch64_sched_fault_inject` 注入钩子损坏保存 SP/PC，验收要求 fatal 发生在**切栈前**且受害者零提交切换）。`SCHED_CASE` 省略时为 `all`（正例矩阵 + 全部四个负例）。选择器 `AARCH64_SCHED_TEST` 与 `SCHED_CASE` 在解析期拒绝非法值；`MODE=sched`（即使未带选择器）与 `AARCH64_SYNC_FAULT_TEST`/`AARCH64_M1_TEST`/`KERNEL_TEST_FORCE_NO_RNDRRS`/`KERNEL_CANARY_SELFTEST`/`OS01_SYSTEST`/非零 `AARCH64_SMP_TEST_NO_ACK_CPU` 的任意组合均解析期报错。runner（`qemutests/aarch64_scheduler.py`）只消费 make 传入的显式镜像/固件/ELF 路径，绝不隐式重建；每次 QEMU 有 120 s 绝对期限（tick 不延长），完成后 1 s 排空窗口，崩溃/超时永远 FAIL；`llvm-nm` 符号审计要求普通 normal/selftest/positive ELF 不含注入符号而每个 fault ELF 含有。普通镜像 BSP idle 冒烟仍是同一 runner 的 `--idle-smoke` 模式（`--cpus 1 2 4 8`）。
 
+AArch64 AP 协作式调度验收 P1（`MODE=sched-ap`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap [AP_SCHED_CASE=<c>]`。`AP_SCHED_CASE=positive`（默认）构建 `kernel/sched-ap` + `image/sched-ap`（编译选择器 `AARCH64_AP_SCHED_TEST=ap`），在 accepted AP 全部进入协作调度后运行七个冻结生产 case（ready/entry/yield/reap/work/admission/default-mask），每个录用 CPU 一行、BSP 聚合行 cpu=0，包络 `[ap-sched] START phase=ap cpus=N accepted_mask=M`（要求 `M=(1<<N)-1`，缺失 AP 不得降级）与 `[ap-sched] END phase=ap failed=0`；runner（`qemutests/aarch64_ap_scheduler.py`）按冻结字段与数值严格解析，1/2/4/8 核各 2 次 boot。`AP_SCHED_CASE=fatal-owner` 构建 `kernel/sched-ap-fatal-owner` + `image/sched-ap-fatal-owner`（`AARCH64_AP_SCHED_TEST=fatal-owner`），独立 2 核 boot 经真实 `ap_work` 项让双 CPU 同时进入非法 SP 路径，无栈 ldaxr/stxr 仲裁单 owner 后输出恰一行 `[ap-fatal] owner=<0|1> arrivals_mask=3 entrants=1 losers=1`（缺失/重复/值错/成功 END 均失败）；`llvm-nm` 审计要求 fatal 变体含 `aarch64_ap_fatal_owner_enter` 而普通 `sched-ap` ELF 不含任何注入符号。`MODE=sched-ap` 与旧 sched/M1/sync-fault/no-ack/canary/OS01_SYSTEST 的组合在外层 make 解析期拒绝。源码级合同与 runner 负向合同见 `qemutests/test_aarch64_ap_boot_contract.py` 与 `qemutests/test_aarch64_ap_scheduler.py`（注册于 `make test-harness`）。
+
 环境注意（2026-10-31 记录）：宿主 QEMU 11.1.3 + 当日 edk2-nightly 固件下，默认 FDT EFI-config-table 交付路径在 `[dtb] FATAL: UEFI handoff has no DTB` 处确定性失败（复现证据与评估见 `docs/superpowers/reports/2026-10-30-aarch64-el1-sched-validation.md`）。仓库全部 aarch64 QEMU 验收面已统一走诊断 DTB 机制（`smp`/`no-ack` 默认 `--diagnostic-dtb=auto`，`gic-spi`/`m3-probe`/M1/`sched`/idle-smoke 显式传入或自行生成 QEMU DTB 并配 `acpi=off`）；`AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0` 可强制要求生产固件路径。这是固件/宿主侧行为变化，不是仓库回归；未在本期改写固件管线。
 
 AArch64 M1：`MODE=m1-ram` 分别构建 normal/selftest 独立镜像并跑 16 组 RAM/CPU 矩阵。其余 `m1-*` MODE 构建 `AARCH64_M1_TEST=sparse|arena-exhaust|table-exhaust|ap-bad-root` 对应的隔离 `image/m1-<case>/` / `kernel/m1-<case>/` 变体；该旗要求 `KERNEL_SELFTEST=1`，拒绝与 sync-fault、weak-selftest 或 canary 混用。稀疏 map 仅由编译旗改写，不从环境变量注入。`make PROFILE=x86_64-clang test-m1-host [CASE=m1-layout|m1-reservation|m1-arena|m1-tree|m1-contract-x86|m1-install|m1-publish]` 为原生 focused 测试入口，省略 CASE 跑整组。
@@ -628,6 +630,8 @@ make test-static                    # 14 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
 make PROFILE=aarch64-clang test-aarch64 MODE=sched  # EL1 调度器验收（正例矩阵 + 四个故障注入变体）
+make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap  # AP 协作调度验收（7 case 生产矩阵）
+make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner  # fatal 单 owner 故障 boot
 make test-contract                  # CI 契约检查
 make test-harness                   # Python unittest 框架回归（TEST_HARNESS_MODULES 列表；不启动 QEMU）
 
@@ -646,7 +650,8 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
 | `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`） |
-| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-*`） |
+| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`m1-*`） |
+| `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |
 | `OS01_NETTEST=1` | 启用 nettest variant |
@@ -723,3 +728,19 @@ BusyBox applet 的链接会让位于发现的原生程序。
 ```bash
 python3 tools/tests/test_user_build.py
 ```
+
+### aarch64 跨核唤醒验收（P2）
+
+`make PROFILE=aarch64-clang test-aarch64 MODE=sched-wake` 构建独立
+`sched-wake` kernel/image，运行1/2/4/8核各两次。选择器
+`AARCH64_AP_SCHED_TEST=wake`要求KERNEL_SELFTEST=1，由mode自动设置，
+并拒绝与旧sched/M1/sync-fault/no-ack/canary/systest组合。
+
+wake包络继承P1全部七项，加remote-wake、wake-switch、idle-race、sgi、
+work-sleep、scan-fallback六项。每AP分别给出100轮显式唤醒、100轮切出窗口
+唤醒、三种idle时序各100轮、1次真实ready交接及200次work唤醒、100轮scan
+fallback。UP只对跨核项给出全零NA行，仍运行本地scan和硬件self-SGI。
+严格runner验证phase、每CPU完整字段、恰一次START/END及全在线mask；准备阶段
+审计真实ELF的wake hook隔离和`dsb sy; wfi; ret`指令。归档含镜像、固件、
+ELF摘要、revision/dirty、命令、日志与退出状态。WFI计数证明经过等待路径，
+不表示QEMU物理省电；SGI不抢占不合作的线程。

@@ -93,6 +93,9 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_page_table_selftest.c \
                    selftest/test_aarch64_page_table_multicore.c \
                    selftest/test_aarch64_scheduler.c \
+                   selftest/aarch64_sched_observer.c \
+                   selftest/test_aarch64_ap_scheduler.c \
+                   selftest/test_aarch64_ap_wake.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
@@ -391,6 +394,19 @@ ALL_CFLAGS += $(if $(filter sp-top,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_
 ALL_CFLAGS += $(if $(filter sp-low,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_SP_LOW=1)
 ALL_CFLAGS += $(if $(filter pc-low,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_PC_LOW=1)
 ALL_CFLAGS += $(if $(filter pc-data,$(AARCH64_SCHED_TEST)),-DAARCH64_SCHED_FAULT_PC_DATA=1)
+endif
+endif
+
+# P1 AP cooperative scheduler variants (spec §7): `fatal-owner` injects
+# the two-CPU no-stack arbitration instrumentation into the fatal
+# assembly path; `ap` (P1 Task 4) will select the AP production-test
+# driver.  The NORMAL ELF never sees either define (asserted by the
+# sched-ap runner's nm audit).
+ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
+ifeq ($(ARCH),aarch64)
+ALL_CFLAGS += $(if $(filter fatal-owner,$(AARCH64_AP_SCHED_TEST)),-DAARCH64_AP_SCHED_TEST_FATAL_OWNER=1)
+ALL_CFLAGS += $(if $(filter ap,$(AARCH64_AP_SCHED_TEST)),-DAARCH64_AP_SCHED_TEST_AP=1)
+ALL_CFLAGS += $(if $(filter wake,$(AARCH64_AP_SCHED_TEST)),-DAARCH64_AP_SCHED_WAKE_TEST=1)
 endif
 endif
 

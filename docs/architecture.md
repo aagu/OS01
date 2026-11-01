@@ -112,7 +112,7 @@ GDT layout:
 ## Interrupt system
 
 ### Exception entry (`kernel/arch/x86_64/intr/entry.S`)
-`error_code`: saves all regs including DS/ES. Exceptions return via `ret_from_exception` (no softirq/resched check — IST stacks).
+`error_code` saves all registers including DS/ES. Synchronous exceptions using IST enter through interrupt gates, which mask ordinary IRQs before any handler runs; DPL and IST assignments are preserved. On return, the saved FUNC slot allows only task-stack `do_page_fault` and `do_system_call` through `ret_from_intr`. IST exceptions (including recoverable MSR #GP) use `ret_from_exception` and defer softirq/reschedule/signal work. Fatal user faults pivot to the task stack before conditionally restoring saved IF and calling `do_exit()`.
 
 ### `ret_from_intr`
 Checks softirq_status, then per-CPU `need_resched` via `%gs:8`. Calls `do_softirq()`/`schedule()` before `RESTORE_ALL` → `iretq`.

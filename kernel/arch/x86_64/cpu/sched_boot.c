@@ -249,7 +249,7 @@ void task_init(void)
     // still has a fallback even if IOAPIC routing fails.
     while (1) {
         __asm__ __volatile__("hlt");
-        if (this_cpu()->need_resched) {
+        if (__atomic_load_n(&this_cpu()->need_resched, __ATOMIC_ACQUIRE)) {
             schedule();
             arch_local_irq_enable();
         }

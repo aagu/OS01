@@ -308,7 +308,10 @@ static uint32_t mc_gen_of(uint32_t cpu)
                            __ATOMIC_ACQUIRE);
 }
 
-/* ── AP-side extension commands (strong override of the weak hook) ── */
+/* ── AP-side extension commands (strong override of the weak hook) ──
+ * The fatal-owner AP-scheduler variant supplies its own override and
+ * never runs this probe, so this TU stays out of its way. */
+#ifndef AARCH64_AP_SCHED_TEST_FATAL_OWNER
 bool ap_work_ext_run(uint32_t cmd, uint64_t arg0, uint64_t arg1,
                      uint64_t *out)
 {
@@ -351,6 +354,8 @@ bool ap_work_ext_run(uint32_t cmd, uint64_t arg0, uint64_t arg1,
     }
     return false;
 }
+#endif /* !AARCH64_AP_SCHED_TEST_FATAL_OWNER */
+
 
 /* ── Section ①: AP1 in target set, gen increments ON the AP ─────── */
 struct gen_ctx { uint32_t cpu; uint32_t want; };

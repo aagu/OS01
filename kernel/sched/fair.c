@@ -9,7 +9,7 @@ void update_curr(task_t *task)
         return;
     task->vruntime += 1;
     if (task->vruntime >= task->deadline)
-        this_cpu()->need_resched = 1;
+        __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
 }
 
 /* ── rbtree comparator: order by deadline ─────────── */

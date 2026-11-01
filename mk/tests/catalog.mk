@@ -29,6 +29,9 @@ aarch64-m1-arena-exhaust	aarch64-clang	uefi	m1-arena-exhaust	2	512	90	isolated	s
 aarch64-m1-table-exhaust	aarch64-clang	uefi	m1-table-exhaust	2	512	90	isolated	shared	nightly	test-aarch64 MODE=m1-table-exhaust	-	-
 aarch64-m1-ap-bad-root	aarch64-clang	uefi	m1-ap-bad-root	2	512	90	isolated	shared	nightly	test-aarch64 MODE=m1-ap-bad-root	-	-
 aarch64-sched	aarch64-clang	uefi	sched	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched	-	-
+aarch64-sched-ap	aarch64-clang	uefi	sched-ap	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-ap	-	-
+aarch64-sched-ap-fatal	aarch64-clang	uefi	sched-ap-fatal-owner	2	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner	-	-
+aarch64-sched-wake	aarch64-clang	uefi	sched-wake	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-wake	-	-
 endef
 
 export TEST_SUITE_CATALOG_DATA

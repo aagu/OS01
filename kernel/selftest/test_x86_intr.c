@@ -307,17 +307,18 @@ static int spurious(void)
     unsigned cpu = cpu_id();
     uint64_t returns = selftest_x86_intr_returns[cpu];
     uint64_t schedules = this_cpu()->schedule_count;
-    uint64_t need = this_cpu()->need_resched;
+    uint64_t need = __atomic_load_n(&this_cpu()->need_resched,
+                                    __ATOMIC_ACQUIRE);
     /* A wrongly routed ret_from_intr would consume this and increment
      * the return-work counter, even if schedule selects this task. */
-    this_cpu()->need_resched = 1;
+    __atomic_store_n(&this_cpu()->need_resched, 1, __ATOMIC_RELEASE);
     selftest_x86_sentinel();
     bool ok = x86_intr_spurious_verdict(
         x86_intr_snapshot_equal(&selftest_x86_before, &selftest_x86_after),
         returns, selftest_x86_intr_returns[cpu],
         schedules, this_cpu()->schedule_count,
-        this_cpu()->need_resched);
-    this_cpu()->need_resched = need;
+        __atomic_load_n(&this_cpu()->need_resched, __ATOMIC_ACQUIRE));
+    __atomic_store_n(&this_cpu()->need_resched, need, __ATOMIC_RELEASE);
     arch_local_irq_restore(flags);
     serial_printk("[selftest] x86_intr: int ff GPR/RSP/RFLAGS/DS/ES and return-work %s\n",
                   ok ? "PASS" : "FAIL");
@@ -375,26 +376,26 @@ extern void _intr_stub_tlb(void);
 extern void _intr_stub_resched(void);
 extern void lapic_spurious_stub(void);
 static const struct expected_gate gates[] = {
-    {0, 0x8f, 1, divide_error},
-    {1, 0x8f, 1, debug},
+    {0, 0x8e, 1, divide_error},
+    {1, 0x8e, 1, debug},
     {2, 0x8e, 1, nmi},
-    {3, 0xef, 1, int3},
-    {4, 0xef, 1, overflow},
-    {5, 0xef, 1, bounds},
-    {6, 0x8f, 1, undefined_opcode},
-    {7, 0x8f, 1, dev_not_available},
-    {8, 0x8f, 3, double_fault},
-    {9, 0x8f, 1, coprocessor_segment_overrun},
-    {10, 0x8f, 1, invalid_TSS},
-    {11, 0x8f, 1, segment_not_present},
-    {12, 0x8f, 1, stack_segment_fault},
-    {13, 0x8f, 1, general_protection},
+    {3, 0xee, 1, int3},
+    {4, 0xee, 1, overflow},
+    {5, 0xee, 1, bounds},
+    {6, 0x8e, 1, undefined_opcode},
+    {7, 0x8e, 1, dev_not_available},
+    {8, 0x8e, 3, double_fault},
+    {9, 0x8e, 1, coprocessor_segment_overrun},
+    {10, 0x8e, 1, invalid_TSS},
+    {11, 0x8e, 1, segment_not_present},
+    {12, 0x8e, 1, stack_segment_fault},
+    {13, 0x8e, 1, general_protection},
     {14, 0x8f, 0, page_fault},
-    {16, 0x8f, 1, x87_FPU_error},
-    {17, 0x8f, 1, alignment_check},
-    {18, 0x8f, 1, machine_check},
-    {19, 0x8f, 1, SIMD_exception},
-    {20, 0x8f, 1, virtualization_exception},
+    {16, 0x8e, 1, x87_FPU_error},
+    {17, 0x8e, 1, alignment_check},
+    {18, 0x8e, 1, machine_check},
+    {19, 0x8e, 1, SIMD_exception},
+    {20, 0x8e, 1, virtualization_exception},
     {0x20, 0x8e, 0, IRQ0_interrupt},
     {0x21, 0x8e, 0, IRQ1_interrupt},
     {0x22, 0x8e, 0, IRQ2_interrupt},

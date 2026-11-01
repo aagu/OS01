@@ -3,6 +3,10 @@
 #include <sched/internal.h>
 #include <sched/boot.h>
 #include <arch/aarch64/task_arch.h>
+#include <arch/aarch64/ap_sched.h>
+#include <arch/aarch64/smp.h>
+#include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/ipi.h>   /* P2: need-slot offset cross-check */
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
 #include <arch/irq.h>
@@ -13,10 +17,21 @@
 #include <string.h>
 #ifdef OS01_SELFTEST
 #include <selftest/aarch64_scheduler.h>
+#include <selftest/aarch64_ap_scheduler.h>
 #include <selftest/result.h>
 #endif
 
 extern char _text_start, _text_end;
+
+/* Fatal-path ownership arbitration (P1 spec §6): the assembly fatal
+ * entry claims this word with ldaxr/stxr BEFORE any stack exists; the
+ * winning CPU installs the shared emergency stack, losers park
+ * stackless.  Defined here so both C diagnostics and the .S site link
+ * against one storage.  The arrivals word records which CPUs reached
+ * the fatal entry — only the fatal-owner test build writes it. */
+uint32_t aarch64_fatal_owner_word;
+uint32_t aarch64_fatal_losers_word;
+uint32_t aarch64_fatal_arrivals_word;
 
 static uint8_t aarch64_context_fatal_stack[4096]
     __attribute__((aligned(16), used));
@@ -25,6 +40,10 @@ __asm__(".global aarch64_context_fatal_stack_top\n"
 
 _Static_assert(sizeof(task_t) + 256 + 16 < STACK_SIZE,
                "aarch64 task union has no usable context stack");
+/* Pin the shared assembly-visible per-CPU layout; the SGI handler uses
+ * the real C field accessor, never a private copy of this offset. */
+_Static_assert(offsetof(percpu_t, need_resched) == PERCPU_NEED_RESCHED_OFFSET,
+               "per-CPU assembly offset drifted from percpu_t.need_resched");
 _Static_assert((STACK_SIZE & (STACK_SIZE - 1)) == 0,
                "stack mask requires a power-of-two stack size");
 
@@ -221,6 +240,69 @@ static inline void aarch64_sched_fault_inject(task_t *prev, task_t *next)
 }
 #endif
 
+/* ── fatal-owner fault variant (P1 Task 3, AARCH64_AP_SCHED_TEST=
+ *    fatal-owner build ONLY — the normal ELF carries none of this) ──
+ * BSP and CPU1 meet at the no-stack fatal arbitration through a real
+ * ap_work item: the BSP submits a test command to CPU1 (whose work
+ * loop consumes it and drives straight into the fatal path), then
+ * follows it itself.  The asm records arrivals and arbitrates; the
+ * winning CPU (on the shared emergency stack) waits until
+ * arrivals_mask==3 && losers==1 (2-second cycle deadline), then writes
+ * the single evidence line and parks.  A successful END is impossible:
+ * both CPUs park forever and the owner never releases. */
+#ifdef AARCH64_AP_SCHED_TEST_FATAL_OWNER
+#define AARCH64_AP_FATAL_OWNER_CMD 0x57u
+
+extern void aarch64_context_fatal_asm(void) __attribute__((noreturn));
+
+void aarch64_ap_fatal_owner_enter(void)
+{
+    uint64_t freq = arch_cycle_freq();
+    uint64_t deadline = arch_cycle_counter() +
+                        (freq ? 2 * freq : 100000000ULL);
+    uint32_t arrivals = 0, losers = 0;
+    for (;;) {
+        arrivals = __atomic_load_n(&aarch64_fatal_arrivals_word,
+                                   __ATOMIC_ACQUIRE);
+        losers = __atomic_load_n(&aarch64_fatal_losers_word,
+                                 __ATOMIC_ACQUIRE);
+        if (arrivals == 3 && losers == 1)
+            break;
+        if (arch_cycle_counter() > deadline)
+            break;   /* timeout: park without evidence — runner fails */
+        arch_cpu_pause();
+    }
+    if (arrivals == 3 && losers == 1)
+        serial_printk("[ap-fatal] owner=%u arrivals_mask=%u "
+                      "entrants=1 losers=%u\n",
+                      (unsigned)cpu_id(), (unsigned)arrivals,
+                      (unsigned)losers);
+    for (;;)
+        arch_cpu_halt();   /* owner never releases; no successful END */
+}
+
+/* Strong override of the weak <arch/aarch64/ap_work.h> ext hook: the
+ * test command drives CPU1 into the fatal path.  Every other command
+ * keeps the legacy unknown-cmd semantics. */
+bool ap_work_ext_run(uint32_t cmd, uint64_t arg0, uint64_t arg1,
+                     uint64_t *out)
+{
+    (void)arg0;
+    (void)arg1;
+    (void)out;
+    if (cmd != AARCH64_AP_FATAL_OWNER_CMD)
+        return false;
+    aarch64_context_fatal_asm();
+}
+
+static void test_aarch64_ap_fatal_owner_drive(void)
+{
+    /* seq 1: the first submission this boot makes to CPU1. */
+    ap_work_submit(1, 1, AARCH64_AP_FATAL_OWNER_CMD, 0, 0);
+    aarch64_context_fatal_asm();
+}
+#endif
+
 void arch_task_switch(task_t *prev, task_t *next)
 {
     if (prev == next)
@@ -283,12 +365,13 @@ int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
 {
     if (!t || !t->thread || !fn)
         return -EINVAL;
-    /* This phase publishes runnable work only to the BSP. Reject direct
-     * attempts to target an AP, and freeze task affinity before it becomes
-     * visible even when num_cpus reports a larger topology. */
-    if (t->cpu != 0)
+    /* P1 Task 3: the common constructor already validated the target
+     * (bounds, online, scheduler_ok).  The arch hook freezes the
+     * single-bit affinity for the verified target — every aarch64
+     * kernel thread stays unmigratable. */
+    if (t->cpu >= NR_CPUS)
         return -EINVAL;
-    t->allowed_cpus = 1;
+    t->allowed_cpus = 1ULL << t->cpu;
     thread_t *ctx = t->thread;
     uintptr_t base = (uintptr_t)t;
     uintptr_t top = base + STACK_SIZE;
@@ -368,10 +451,31 @@ void arch_aarch64_bsp_handoff(void)
         fatal_context(11, (uintptr_t)__builtin_frame_address(0),
                       (uintptr_t)&init_task_union, (uintptr_t)&init_task_union + STACK_SIZE);
     sched_boot_publish_idle();
+    /* Publish BSP scheduler_ok FIRST, then open the AP release gate and
+     * wait for every accepted AP's scheduler_ok (P1 spec §3.2).  The AP
+     * variant's runtime-admission check runs in the window where the
+     * accepted APs are IPI-ready but not yet schedulable. */
     sched_boot_start();
+#if defined(AARCH64_AP_SCHED_TEST_AP) || defined(AARCH64_AP_SCHED_WAKE_TEST)
+    test_aarch64_ap_scheduler_before_release();
+#endif
+    aarch64_ap_sched_release();
     arch_local_irq_enable();
     log_info("[sched] idle-ready cpu=0 scheduler_ok=1 irq=on\n");
-#ifdef OS01_SELFTEST
+#ifdef AARCH64_AP_SCHED_TEST_FATAL_OWNER
+    /* fatal-owner variant: both CPUs drive into the illegal-SP path at
+     * the cross-CPU barrier and park; the boot never completes. */
+    test_aarch64_ap_fatal_owner_drive();
+#endif
+#if defined(AARCH64_AP_SCHED_WAKE_TEST)
+    /* The wake variant runs the P1-ready + six wake cases with the
+     * phase=wake envelope. */
+    test_aarch64_ap_scheduler_wake_run();
+#elif defined(AARCH64_AP_SCHED_TEST_AP)
+    /* The AP production-path variant runs ONLY the seven frozen
+     * ap-sched cases (the old suite's late probe is not run here). */
+    test_aarch64_ap_scheduler_run();
+#elif defined(OS01_SELFTEST)
     test_aarch64_scheduler_run();
     int selftest_failed = selftest_end_run();
     serial_printk("[selftest] done (failed=%u)\n",
