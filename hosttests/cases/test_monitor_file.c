@@ -76,6 +76,19 @@ void vfs_node_put(struct vfs_node *n)
     if (n->refcount == 0) free(n);
 }
 
+/* Block device stubs */
+int block_device_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
+int block_device_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
 int vfs_mount(const char *p, block_device_t *d,
               const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f)
 { (void)p; (void)d; (void)io; (void)fo; (void)f; return -ENOSYS; }
@@ -263,25 +276,20 @@ static void fake_gfx_release(file_t *f)
 
 static int registered_count;
 
-static int register_fake_gfx(void)
+static struct vfs_node *register_fake_gfx_node(void)
 {
     static const struct devfs_ops ops = {
         .open         = fake_gfx_open,
         .release_file = fake_gfx_release,
     };
     int idx = registered_count++;
-    int rc = devfs_register_chrdev("monitor_gfx", NULL, &ops);
-    if (rc < 0) { registered_count--; return rc; }
-    return idx;
-}
-
-static struct vfs_node *gfx_node_with_idx(int idx)
-{
-    struct vfs_node *n = calloc(1, sizeof(*n));
-    n->type = VFS_CHRDEV;
-    n->fs_data = (void *)(uintptr_t)idx;
-    n->refcount = 1;
-    return n;
+    char name[32];
+    snprintf(name, sizeof(name), "monitor_gfx_%d", idx);
+    int rc = devfs_register_chrdev(name, NULL, &ops);
+    if (rc < 0) { registered_count--; return NULL; }
+    struct vfs_node *node = NULL;
+    if (devfs_lookup_node(name, &node) != 0) return NULL;
+    return node;
 }
 
 static void reset_test_state(void)
@@ -380,13 +388,12 @@ TEST_FUNC(duplicate_release_once) {
  * and the devfs/gfx release protocol is untouched. */
 TEST_FUNC(failed_open_cleanup) {
     reset_test_state();
-    int gfx_idx = register_fake_gfx();
-    assert_true(gfx_idx >= 0);
+    struct vfs_node *gfx_node = register_fake_gfx_node();
+    assert_not_null(gfx_node);
 
     /* Keep a live device file open so the "unchanged" claims are
      * meaningful (the gfx release must NOT fire for snapshot
      * failures). */
-    struct vfs_node *gfx_node = gfx_node_with_idx(gfx_idx);
     file_t *gfx_f = NULL;
     assert_eq(0, devfs_open_node(gfx_node, "/dev/monitor_gfx", O_RDWR, &gfx_f));
     assert_not_null(gfx_f);

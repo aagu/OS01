@@ -107,6 +107,18 @@ void vfs_node_put(struct vfs_node *n)
     if (n->refcount == 0) free(n);
 }
 
+int block_device_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
+int block_device_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
 int vfs_mount(const char *p, block_device_t *d,
               const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f)
 { (void)p; (void)d; (void)io; (void)fo; (void)f; return -ENOSYS; }
@@ -607,18 +619,13 @@ static file_t *open_gfx0(void)
 {
     if (gfx_register_once() < 0) return NULL;
 
-    struct vfs_node *node = calloc(1, sizeof(*node));
-    if (!node) return NULL;
-    node->type = VFS_CHRDEV;
-    node->fs_data = (void *)(uintptr_t)gfx_device_index;
-    node->refcount = 0;            /* devfs_open_node will get() it */
+    struct vfs_node *node = NULL;
+    if (devfs_lookup_node("gfx0", &node) != 0 || !node) return NULL;
 
     file_t *f = NULL;
     int rc = devfs_open_node(node, "/dev/gfx0", O_RDWR, &f);
+    vfs_node_put(node);
     if (rc != 0) {
-        /* devfs_open_node didn't attach (or attached + errored) —
-         * free the node ourselves so we don't leak. */
-        free(node);
         return NULL;
     }
     return f;

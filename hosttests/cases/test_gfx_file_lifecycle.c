@@ -81,6 +81,19 @@ void vfs_node_put(struct vfs_node *n)
     if (n->refcount == 0) free(n);
 }
 
+/* Block device stubs */
+int block_device_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
+int block_device_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
 /* VFS misc — not exercised by the test, but referenced. */
 int vfs_mount(const char *p, block_device_t *d,
               const vfs_inode_ops_t *io, const vfs_file_ops_t *fo, void *f)
@@ -216,7 +229,7 @@ struct test_device_state {
     int   legacy_ioctl_count;
 };
 
-#define TEST_MAX_DEVICES DEVFS_MAX_DEVICES
+#define TEST_MAX_DEVICES 32
 static struct test_device_state test_devices[TEST_MAX_DEVICES];
 
 /* Mirror of "node refcount outstanding".  Every test-driven
@@ -225,15 +238,6 @@ static struct test_device_state test_devices[TEST_MAX_DEVICES];
  * linked file.c.  We track the balance here to assert it returns
  * to zero after every release path. */
 static int node_ref_balance;
-
-static struct vfs_node *test_node_with_idx(int idx)
-{
-    struct vfs_node *n = calloc(1, sizeof(*n));
-    n->type = VFS_CHRDEV;
-    n->fs_data = (void *)(uintptr_t)idx;
-    n->refcount = 1;
-    return n;
-}
 
 /* ── Custom open callback — returns a file WITHOUT a node ── */
 /* This is the critical contract: devfs_open_node must attach
@@ -255,12 +259,13 @@ static int fake_gfx_open(const char *name, file_t **out_file)
 
 static int fake_gfx_ioctl_file(file_t *f, int cmd, void *arg)
 {
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    test_devices[idx].ioctl_file_count++;
-    test_devices[idx].last_cmd = cmd;
-    test_devices[idx].last_arg = arg;
-    test_devices[idx].last_priv_seen = f->dev_private;
-    test_devices[idx].last_file_seen = f;
+    struct test_device_state *st = (struct test_device_state *)devfs_get_private(f->node);
+    if (!st) return -ENODEV;
+    st->ioctl_file_count++;
+    st->last_cmd = cmd;
+    st->last_arg = arg;
+    st->last_priv_seen = f->dev_private;
+    st->last_file_seen = f;
     if (cmd == 0xDEAD) return -ENOTTY;   /* explicit fall-through */
     if (cmd == 0xBEEF) return -EINVAL;
     return 0;
@@ -268,25 +273,20 @@ static int fake_gfx_ioctl_file(file_t *f, int cmd, void *arg)
 
 static void fake_gfx_release(file_t *f)
 {
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    test_devices[idx].release_count++;
+    struct test_device_state *st = (struct test_device_state *)devfs_get_private(f->node);
+    if (st) st->release_count++;
     free(f->dev_private);
     f->dev_private = NULL;
 }
 
 static int fake_gfx_legacy_ioctl(struct vfs_node *node, int cmd, void *arg)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    test_devices[idx].legacy_ioctl_count++;
+    struct test_device_state *st = (struct test_device_state *)devfs_get_private(node);
+    if (st) st->legacy_ioctl_count++;
     (void)cmd; (void)arg;
     return 0;
 }
 
-/* Each devfs_register_chrdev call appends one entry to the
- * production devices[] table.  The production index is whatever
- * device_count was BEFORE the call (then incremented inside the
- * production function).  We mirror that here by tracking our own
- * counter that starts at 0 and increments per registration. */
 static int registered_count;
 
 static int register_fake_gfx(struct vfs_node **out_node)
@@ -298,11 +298,12 @@ static int register_fake_gfx(struct vfs_node **out_node)
         .release_file = fake_gfx_release,
     };
     int idx = registered_count++;
-    int rc = devfs_register_chrdev("gfx_test", NULL, &ops);
+    char name[32];
+    snprintf(name, sizeof(name), "gfx_test_%d", idx);
+    int rc = devfs_register_chrdev(name, &test_devices[idx], &ops);
     if (rc < 0) { registered_count--; return rc; }
     memset(&test_devices[idx], 0, sizeof(test_devices[idx]));
-    *out_node = test_node_with_idx(idx);
-    return idx;
+    return devfs_lookup_node(name, out_node) == 0 ? idx : -1;
 }
 
 static int register_legacy_gfx(struct vfs_node **out_node)
@@ -312,11 +313,12 @@ static int register_legacy_gfx(struct vfs_node **out_node)
         /* ioctl_file/release_file deliberately NULL */
     };
     int idx = registered_count++;
-    int rc = devfs_register_chrdev("gfx_legacy", NULL, &legacy_ops);
+    char name[32];
+    snprintf(name, sizeof(name), "gfx_legacy_%d", idx);
+    int rc = devfs_register_chrdev(name, &test_devices[idx], &legacy_ops);
     if (rc < 0) { registered_count--; return rc; }
     memset(&test_devices[idx], 0, sizeof(test_devices[idx]));
-    *out_node = test_node_with_idx(idx);
-    return idx;
+    return devfs_lookup_node(name, out_node) == 0 ? idx : -1;
 }
 
 /* Reset bookkeeping (does NOT reset production devices[] — that
@@ -490,13 +492,16 @@ TEST_FUNC(test_ioctl_reaches_file_via_fdioctl) {
 
 TEST_FUNC(test_regular_file_cannot_dispatch_device_callbacks) {
     reset_test_state();
-    struct vfs_node *registered_node;
+    struct vfs_node *registered_node = NULL;
     int idx = register_fake_gfx(&registered_node);
     assert_true(idx >= 0);
+    assert_not_null(registered_node);
     /* A filesystem node may use a small integer as its own fs_data.
      * This must not be interpreted as a devfs registration index. */
-    struct vfs_node *regular_node = test_node_with_idx(idx);
+    struct vfs_node *regular_node = calloc(1, sizeof(*regular_node));
     regular_node->type = VFS_FILE;
+    regular_node->fs_data = (void *)(uintptr_t)idx;
+    regular_node->refcount = 1;
     file_t *f = file_alloc();
     assert_not_null(f);
     vfs_node_get(regular_node);
@@ -508,7 +513,8 @@ TEST_FUNC(test_regular_file_cannot_dispatch_device_callbacks) {
     file_put(f);
     assert_eq(0, test_devices[idx].release_count);
     assert_eq(0, node_ref_balance);
-    free(registered_node);
+    vfs_node_put(regular_node);
+    vfs_node_put(registered_node);
 }
 
 TEST_FUNC(test_abi_struct_sizes) {
@@ -569,12 +575,16 @@ static void test_pipe_preserves_cow_allocation_error(void)
 TEST_FUNC(test_gfx_dup_close_restores_only_on_final_close) {
     reset_test_state();
     int idx = registered_count++;
-    int rc = devfs_register_chrdev("gfx_dup_test", NULL, &gfx_ops);
+    char name[32];
+    snprintf(name, sizeof(name), "gfx_dup_%d", idx);
+    int rc = devfs_register_chrdev(name, NULL, &gfx_ops);
     assert_true(rc >= 0);
-    struct vfs_node *node = test_node_with_idx(idx);
+    struct vfs_node *node = NULL;
+    assert_eq(0, devfs_lookup_node(name, &node));
+    assert_not_null(node);
 
     file_t *f = NULL;
-    rc = devfs_open_node(node, "/dev/gfx_dup_test", O_RDWR, &f);
+    rc = devfs_open_node(node, name, O_RDWR, &f);
     assert_eq(0, rc);
     assert_not_null(f);
     assert_not_null(f->dev_private);

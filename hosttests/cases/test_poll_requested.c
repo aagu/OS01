@@ -102,6 +102,33 @@ void netbuf_delete(struct netbuf *buf)             { (void)buf; }
 // are already provided by poll_clocksource_stub.c (linked into the
 // elf via POLL_PRODUCTION_OBJS).  Do NOT redefine them here.
 
+struct vfs_node *vfs_node_get(struct vfs_node *node)
+{
+    if (node) __sync_add_and_fetch(&node->refcount, 1);
+    return node;
+}
+
+void vfs_node_put(struct vfs_node *node)
+{
+    if (!node) return;
+    if (__sync_sub_and_fetch(&node->refcount, 1) == 0) {
+        if (node->name) free(node->name);
+        free(node);
+    }
+}
+
+int block_device_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
+int block_device_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
 // ── fd_read test fixtures (Task 2) ─────────────────────────
 // file.c fd_read's FD_VFS/FD_DEV branch calls vfs_read() in a
 // loop and copy_to_user_ft_res() per chunk.  Both are weak-linked
@@ -348,17 +375,17 @@ TEST_FUNC(test_real_tty_and_default_devfs_paths)
 
     rc = devfs_register_chrdev("poll-default", NULL, NULL);
     assert_eq(0, rc);
-    vfs_node_t node = {
-        .type = VFS_CHRDEV,
-        .fs_data = (void *)(uintptr_t)0,
-    };
+    vfs_node_t *node = NULL;
+    assert_eq(0, devfs_lookup_node("poll-default", &node));
+    assert_not_null(node);
     file_t device = {
         .type = FD_DEV,
         .flags = O_RDWR | O_NONBLOCK,
-        .node = &node,
+        .node = node,
     };
     mask = fd_poll(&device, POLLIN, NULL);
     assert_eq(POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM, mask);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_poll_table_allocation_bounds)
