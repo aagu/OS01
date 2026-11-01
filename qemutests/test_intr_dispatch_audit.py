@@ -417,7 +417,7 @@ ffff0000400a2bc8: d503207f     	wfi
 # Independent installed-surface fixture manifest (never imports production lists).
 SYNC_NAMES = "divide_error debug nmi int3 overflow bounds undefined_opcode dev_not_available double_fault coprocessor_segment_overrun invalid_TSS segment_not_present stack_segment_fault general_protection page_fault x87_FPU_error alignment_check machine_check SIMD_exception virtualization_exception".split()
 SYNC_VECTORS = list(range(15)) + list(range(16, 21))
-IRQ_VECTORS = list(range(0x20, 0x39)) + [0x40, 0x41, 0xff]
+IRQ_VECTORS = list(range(0x20, 0x39)) + [0x40, 0x41] + list(range(0x42, 0x80)) + [0xff]
 ERROR_VECTORS = {8, 10, 11, 12, 13, 14, 17}
 SAVE = ["%rax"] * 4 + ["%rbp", "%rdi", "%rsi", "%rdx", "%rcx", "%rbx"] + [f"%r{i}" for i in range(8, 16)]
 
@@ -455,8 +455,8 @@ def _phase2_world():
     # Restore-only is an identical-address alias, not a separate block.
     nm += f"{address('RESTORE_ALL'):x} T x86_intr_restore_only\n"
     for vector in IRQ_VECTORS:
-        name = f"IRQ{vector-32}_interrupt" if vector < 0x38 else {0x38:"lapic_timer_stub", 0x40:"_intr_stub_tlb", 0x41:"_intr_stub_resched", 0xff:"lapic_spurious_stub"}[vector]
-        target = "arch_irq_dispatch" if vector < 0x38 else "generic_intr_dispatch" if vector in (0x40, 0x41) else "x86_irq_entry"
+        name = f"IRQ{vector-32}_interrupt" if (vector < 0x38 or (0x42 <= vector <= 0x7f)) else {0x38:"lapic_timer_stub", 0x40:"_intr_stub_tlb", 0x41:"_intr_stub_resched", 0xff:"lapic_spurious_stub"}[vector]
+        target = "arch_irq_dispatch" if (vector < 0x38 or (0x42 <= vector <= 0x7f)) else "generic_intr_dispatch" if vector in (0x40, 0x41) else "x86_irq_entry"
         saved = (["$0x0", "$0x0"] + SAVE[1:]) if vector == 0x38 else (["$0x0"] + SAVE)
         instructions = [f"pushq {r}" for r in saved] + ["movq %rsp, %rdi", f"movq $0x{vector:x}, %rsi"]
         if vector == 0xff:
@@ -477,10 +477,10 @@ def _phase2_world():
     # Preserve the old bad-event address/anchor for the negative fixture.
     dis = dis.replace("ffff800000149b0e: ff d0                \tcallq\t*%rax", "ffff800000149b0e: ff d0                \tcallq\t*%rax\n" + "\n".join(_x86_line(0xffff800000149b10+i, "90", branch("callq", name).replace(" ", "\t", 1)) for i, name in enumerate(("x86_intr_decode_irq", "x86_handle_device_irq", "x86_handle_lapic_timer_irq", "x86_handle_registered_irq", "x86_handle_spurious_irq"))))
     idt = address("IDT_Table")
-    for installer, vectors in (("sys_vector_install", SYNC_VECTORS), ("arch_irq_install", range(32,56)), ("lapic_timer_init", [56]), ("ipi_init", [64,65]), ("lapic_init", [255])):
+    for installer, vectors in (("sys_vector_install", SYNC_VECTORS), ("arch_irq_install", list(range(32,56)) + list(range(66, 128))), ("lapic_timer_init", [56]), ("ipi_init", [64,65]), ("lapic_init", [255])):
         instructions = []
         for vector in vectors:
-            name = SYNC_NAMES[SYNC_VECTORS.index(vector)] if vector in SYNC_VECTORS else f"IRQ{vector-32}_interrupt" if vector < 56 else {56:"lapic_timer_stub",64:"_intr_stub_tlb",65:"_intr_stub_resched",255:"lapic_spurious_stub"}[vector]
+            name = SYNC_NAMES[SYNC_VECTORS.index(vector)] if vector in SYNC_VECTORS else f"IRQ{vector-32}_interrupt" if (vector < 56 or (66 <= vector <= 127)) else {56:"lapic_timer_stub",64:"_intr_stub_tlb",65:"_intr_stub_resched",255:"lapic_spurious_stub"}[vector]
             ist = 3 if vector == 8 else 0 if vector == 14 or vector >=32 else 1
             attr = 0x8e if vector == 2 or vector >=32 else 0xef if vector in (3,4,5) else 0x8f
             instructions += [f"movabsq $0x{address(name):x}, %rdx", f"movabsq $0x{idt+16*vector:x}, %rsi", f"movabsq $0x{idt+16*vector+8:x}, %rdi", "movl $0x80000, %eax", f"movl $0x{ist:x}, %ecx", "movw %dx, %ax", "andq $0x7, %rcx", f"addq $0x{attr<<8:x}, %rcx", "shlq $0x20, %rcx", "addq %rcx, %rax", "xorq %rcx, %rcx", "movl %edx, %ecx", "shrq $0x10, %rcx", "shlq $0x30, %rcx", "addq %rcx, %rax", "movq %rax, (%rsi)", "shrq $0x20, %rdx", "movq %rdx, (%rdi)"]

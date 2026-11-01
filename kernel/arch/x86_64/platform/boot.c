@@ -125,6 +125,9 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
     arch_boot_rsdp = bootctx->firmware.acpi_rsdp;
 
     arch_register_subsys();
+    if (subsys_status("apic") == -999) {
+        kpanic("apic: required subsys registration missing\n");
+    }
     subsys_init_all();
 
     int dev_res = device_boot_result();

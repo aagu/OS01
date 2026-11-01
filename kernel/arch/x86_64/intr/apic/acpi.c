@@ -4,6 +4,7 @@
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <core/debug.h>
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -145,8 +146,11 @@ static void ensure_mapped(uint64_t phys_addr)
 //  MADT parser
 // ──────────────────────────────────────────────
 
-static void parse_madt(struct MADT_HEADER *madt)
+static int parse_madt(struct MADT_HEADER *madt)
 {
+    if (!madt || madt->sdt.Length < sizeof(struct MADT_HEADER))
+        return -EINVAL;
+
     apic_info.lapic_base = madt->LocalApicAddress;
     madt_flags = madt->Flags;  // cache for apic_madt_flags()
     uint32_t table_length = madt->sdt.Length;
@@ -157,10 +161,11 @@ static void parse_madt(struct MADT_HEADER *madt)
                   madt, table_length, apic_info.lapic_base, madt->Flags);
 
     while (ptr < end) {
+        if ((size_t)(end - ptr) < sizeof(struct MADT_ENTRY))
+            return -EINVAL;
         struct MADT_ENTRY *entry = (struct MADT_ENTRY *)ptr;
-
-        if (entry->length == 0)
-            break;   // safety
+        if (entry->length < sizeof(struct MADT_ENTRY) || (size_t)(end - ptr) < entry->length)
+            return -EINVAL;
 
         switch (entry->type) {
 
@@ -181,16 +186,24 @@ static void parse_madt(struct MADT_HEADER *madt)
         }
 
         case MADT_TYPE_IOAPIC: {
+            if (entry->length < sizeof(struct MADT_IOAPIC))
+                return -EINVAL;
             struct MADT_IOAPIC *ioapic = (struct MADT_IOAPIC *)ptr;
-            if (apic_info.ioapic_count < MAX_IOAPICS) {
-                apic_info.ioapics[apic_info.ioapic_count].apic_id   = ioapic->ioapic_id;
-                apic_info.ioapics[apic_info.ioapic_count].mmio_base = ioapic->ioapic_address;
-                apic_info.ioapics[apic_info.ioapic_count].gsi_base  = ioapic->global_system_interrupt_base;
-                debug_irq("APIC:   IOAPIC id=%u addr=%#010x gsi_base=%u\n",
-                              ioapic->ioapic_id, ioapic->ioapic_address,
-                              ioapic->global_system_interrupt_base);
-                apic_info.ioapic_count++;
+            if (apic_info.ioapic_count >= MAX_IOAPICS) {
+                debug_irq("APIC: excess I/O APIC (> %d)\n", MAX_IOAPICS);
+                return -E2BIG;
             }
+            for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
+                if (apic_info.ioapics[i].apic_id == ioapic->ioapic_id)
+                    return -EINVAL;
+            }
+            apic_info.ioapics[apic_info.ioapic_count].apic_id   = ioapic->ioapic_id;
+            apic_info.ioapics[apic_info.ioapic_count].mmio_base = ioapic->ioapic_address;
+            apic_info.ioapics[apic_info.ioapic_count].gsi_base  = ioapic->global_system_interrupt_base;
+            debug_irq("APIC:   IOAPIC id=%u addr=%#010x gsi_base=%u\n",
+                          ioapic->ioapic_id, ioapic->ioapic_address,
+                          ioapic->global_system_interrupt_base);
+            apic_info.ioapic_count++;
             break;
         }
 
@@ -246,6 +259,7 @@ static void parse_madt(struct MADT_HEADER *madt)
 
         ptr += entry->length;
     }
+    return 0;
 }
 
 // ──────────────────────────────────────────────
@@ -329,7 +343,9 @@ int acpi_parse(uint64_t rsdp_phys)
         }
 
         if (memcmp(table->Signature, "APIC", 4) == 0) {
-            parse_madt((struct MADT_HEADER *)table);
+            int madt_rc = parse_madt((struct MADT_HEADER *)table);
+            if (madt_rc < 0)
+                return madt_rc;
         } else if (memcmp(table->Signature, "FACP", 4) == 0) {
             // FADT: store PM1a Control port for ACPI shutdown
             // PM1a_CNT_BLK is at offset 64 in the FADT (v1+)

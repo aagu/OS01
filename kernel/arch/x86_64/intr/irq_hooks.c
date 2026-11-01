@@ -16,9 +16,10 @@
 #include <arch/x86_64/regs.h>     // IA32_EFER, etc. (unused here but kept
                                           //   for consistency with the rest of the
                                           //   x86_64 arch layer)
-#include <intr/apic.h>                  // apic_available, get_ioapic_controller
+#include <intr/apic.h>                  // apic_available, ioapic_available, get_ioapic_controller
 #include <intr/pic.h>                   // get_pic_controller
-#include <intr/interrupt.h>             // MAX_GSI, irq_table, hw_int_controller_t
+#include <intr/interrupt.h>             // hw_int_controller_t
+#include <arch/x86_64/irq_route.h>       // x86_irq_route_*
 #include <core/debug.h>                 // debug_irq
 #include <log/log.h>                    // log_err (for spurious-vector log)
 #include <arch/cpu.h>              // arch_local_irq_disable
@@ -35,7 +36,7 @@
 
 hw_int_controller_t *arch_irq_select_controller(uint32_t gsi)
 {
-    if (apic_available()) {
+    if (ioapic_available()) {
         return get_ioapic_controller();
     }
     /* No IOAPIC: legacy PIC handles ISA IRQs 0-15 only. PCI GSIs
@@ -46,14 +47,39 @@ hw_int_controller_t *arch_irq_select_controller(uint32_t gsi)
     return (hw_int_controller_t *)0;
 }
 
+int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
+{
+    return x86_irq_route_prepare(gsi, vector);
+}
+
 uint64_t arch_irq_gsi_to_vector(uint32_t gsi)
 {
-    return (uint64_t)gsi + 0x20u;
+    const struct x86_irq_route *r = x86_irq_route_find_by_gsi(gsi);
+    if (r && r->allocated)
+        return r->vector;
+    if (!ioapic_available() && gsi < 24) {
+        return (uint64_t)(0x20 + gsi);
+    }
+    return UINT64_MAX;
 }
 
 uint32_t arch_irq_vector_to_gsi(uint64_t vector)
 {
-    return (uint32_t)(vector - 0x20u);
+    uint32_t gsi = UINT32_MAX;
+    if (x86_irq_route_lookup(vector, &gsi))
+        return gsi;
+    if (!ioapic_available() && vector >= 0x20 && vector <= 0x37) {
+        return (uint32_t)(vector - 0x20);
+    }
+    return UINT32_MAX;
+}
+
+uint32_t arch_irq_isa_to_gsi(uint8_t source)
+{
+    if (ioapic_available()) {
+        return isa_irq_to_gsi(source);
+    }
+    return (uint32_t)source;
 }
 
 // Body lifted from the old kernel/intr/pic/8259A.c::do_IRQ. The IDT
@@ -71,10 +97,17 @@ void x86_handle_device_irq(pt_regs_t *regs, uint64_t hwirq)
         return;
     }
     uint32_t gsi = arch_irq_vector_to_gsi(hwirq);
+    if (gsi == UINT32_MAX) {
+        log_err("do_IRQ: unmapped vector %#lx\n", hwirq);
+        return;
+    }
     irq_desc_t *irq = irq_desc_for_gsi(gsi);
     if (irq == NULL) {
         debug_irq("do_IRQ: hwirq %#lx → gsi %u has no descriptor\n",
                   hwirq, (unsigned)gsi);
+        if (ioapic_available()) {
+            lapic_eoi();
+        }
         return;
     }
     if (irq->handler != NULL) {
@@ -82,5 +115,7 @@ void x86_handle_device_irq(pt_regs_t *regs, uint64_t hwirq)
     }
     if (irq->controller != NULL) {
         irq->controller->ack(hwirq);
+    } else if (ioapic_available()) {
+        lapic_eoi();
     }
 }

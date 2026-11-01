@@ -107,3 +107,13 @@ int subsys_status(const char *name)
             return subsys_table[i].initialized;
     return -999;
 }
+
+#if defined(OS01_HOST_TEST)
+void subsys_test_reset(void)
+{
+    subsys_count = 0;
+    subsys_percpu_count = 0;
+    memset(subsys_table, 0, sizeof(subsys_table));
+    memset(subsys_percpu_table, 0, sizeof(subsys_percpu_table));
+}
+#endif

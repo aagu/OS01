@@ -5,6 +5,7 @@
 #include <driver/mouse_proto.h>
 #include <driver/input_route.h>
 #include <intr/interrupt.h>
+#include <arch/irq.h>
 #include <subsys/subsys.h>
 #include <percpu/percpu.h>
 #include <errno.h>
@@ -255,6 +256,7 @@ int mouse_init(void)
 {
     uint8_t original = 0;
     bool have_original = false, irq_installed = false, f4_sent = false;
+    uint32_t mouse_gsi = arch_irq_isa_to_gsi(12);
     bool wheel = false;
     int rc;
 
@@ -334,7 +336,7 @@ int mouse_init(void)
 base_mouse:
     if (expired(probe_deadline))
         goto fail;
-    if (register_irq(12, 0, mouse_handler, 0, IRQF_TRIGGER_EDGE, "mouse") != 1)
+    if (register_irq(mouse_gsi, 0, mouse_handler, 0, IRQF_TRIGGER_EDGE, "mouse") != 1)
         goto fail;
     irq_installed = true;
     if (i8042_write_command_byte((original & (uint8_t)~0x20) | 0x02) != I8042_OK)
@@ -366,7 +368,7 @@ fail:
     if (have_original)
         irq_disabled = i8042_write_command_byte(original & (uint8_t)~0x02) == I8042_OK;
     if (irq_installed && irq_disabled)
-        (void)unregister_irq(12);
+        (void)unregister_irq(mouse_gsi);
     i8042_set_aux_consumer(0);
     command_mode = false;
     reply_head = reply_tail = 0;

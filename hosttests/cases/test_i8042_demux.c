@@ -488,6 +488,8 @@ static int      kbd_reg_n;
 static const char *kbd_reg_last_name;
 static void   (*kbd_reg_handler)(uint64_t, uint64_t, pt_regs_t *);
 
+uint32_t arch_irq_isa_to_gsi(uint8_t source) { return (uint32_t)source; }
+
 int32_t register_irq(uint32_t gsi, void *arg,
         void (*handler)(uint64_t nr, uint64_t parameter, pt_regs_t *regs),
         uint64_t parameter, uint32_t flags, const char *irq_name)

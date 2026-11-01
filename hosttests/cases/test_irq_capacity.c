@@ -4,8 +4,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <setjmp.h>
 #include <intr/interrupt.h>
+#include <intr/apic.h>
 #include <arch/irq.h>
+#include <arch/x86_64/irq_route.h>
+#include <subsys/subsys.h>
+#include <arch/x86_64/gate.h>
+
+uint64_t *kernel_map = NULL;
+void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags)
+{
+    (void)pgdir; (void)physical_address; (void)virtual_address; (void)flags;
+}
+void lapic_configure_nmi(void) {}
+void x86_irq_entry(pt_regs_t *regs, uint64_t hwirq) { (void)regs; (void)hwirq; }
+void x86_intr_restore_only(void) {}
+struct gate_struct IDT_Table[256];
 
 /* Track host memory allocations to verify bounded descriptors and leak-free rollbacks */
 static size_t g_kmalloc_live_bytes = 0;
@@ -41,23 +56,38 @@ static int g_ctrl_enable_calls = 0;
 static int g_ctrl_disable_calls = 0;
 static uint64_t g_last_vector = 0;
 static uint64_t g_mock_install_ret = 0;
+static int g_pin_accessed[256];
+
+static void track_pin(uint64_t vector)
+{
+    uint32_t gsi = UINT32_MAX;
+    if (x86_irq_route_lookup(vector, &gsi)) {
+        if (gsi < 256) g_pin_accessed[gsi]++;
+    } else if (vector >= 0x20 && vector < 0x20 + 256) {
+        g_pin_accessed[vector - 0x20]++;
+    }
+}
 
 static uint64_t mock_install(uint64_t irq, void *arg) {
     g_ctrl_install_calls++;
     g_last_vector = irq;
+    track_pin(irq);
     return g_mock_install_ret;
 }
 static void mock_uninstall(uint64_t irq) {
     g_ctrl_uninstall_calls++;
     g_last_vector = irq;
+    track_pin(irq);
 }
 static void mock_enable(uint64_t irq) {
     g_ctrl_enable_calls++;
     g_last_vector = irq;
+    track_pin(irq);
 }
 static void mock_disable(uint64_t irq) {
     g_ctrl_disable_calls++;
     g_last_vector = irq;
+    track_pin(irq);
 }
 static void mock_ack(uint64_t irq) {
     g_last_vector = irq;
@@ -84,6 +114,9 @@ int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
 {
     if (g_route_prep_fail)
         return -EINVAL;
+    int rc = x86_irq_route_prepare(gsi, vector);
+    if (rc != -ENOSYS)
+        return rc;
     if (vector)
         *vector = 0x20 + gsi;
     return 0;
@@ -91,16 +124,46 @@ int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
 
 uint64_t arch_irq_gsi_to_vector(uint32_t gsi)
 {
+    const struct x86_irq_route *r = x86_irq_route_find_by_gsi(gsi);
+    if (r && r->allocated)
+        return r->vector;
     return 0x20 + gsi;
 }
 
 uint32_t arch_irq_vector_to_gsi(uint64_t vector)
 {
+    uint32_t gsi = UINT32_MAX;
+    if (x86_irq_route_lookup(vector, &gsi))
+        return gsi;
     return (uint32_t)(vector - 0x20);
+}
+
+static uint8_t s_mock_iso_source = 0;
+static uint32_t s_mock_iso_gsi = 0;
+static bool s_mock_iso_active = false;
+
+uint32_t arch_irq_isa_to_gsi(uint8_t source)
+{
+    if (s_mock_iso_active && source == s_mock_iso_source)
+        return s_mock_iso_gsi;
+    return (uint32_t)source;
 }
 
 void arch_irq_install(void) {}
 void softirq_init(void) {}
+
+apic_info_t apic_info;
+uint64_t arch_boot_rsdp = 0;
+uint8_t irq_trigger_for_gsi(uint32_t gsi) { (void)gsi; return ISO_TRIGGER_EDGE; }
+
+int g_log_level = 0;
+void _log_info_impl(const char *fmt, ...) { (void)fmt; }
+void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
+void _log_err_impl(const char *fmt, ...) { (void)fmt; }
+
+int acpi_parse(uint64_t rsdp) { (void)rsdp; return 1; }
+int ioapic_init(void) { return 1; }
+void arch_outb(uint16_t port, uint8_t val) { (void)port; (void)val; }
 
 static void dummy_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
 {
@@ -120,6 +183,9 @@ static void reset_test_state(void)
     g_mock_install_ret = 0;
     g_select_controller_avail = true;
     g_route_prep_fail = 0;
+    s_mock_iso_active = false;
+    memset(g_pin_accessed, 0, sizeof(g_pin_accessed));
+    x86_irq_routes_reset();
 }
 
 /* 1. Sparse ranges are bounded in memory and queryable */
@@ -394,6 +460,232 @@ TEST_FUNC(controller_install_failure_rolls_back)
     assert_eq(1, unregister_irq(5));
 }
 
+/* 8. x86 GSI/vector routing, bounds and exhaustion */
+TEST_FUNC(x86_irq_routes_allocation_and_vector_bounds)
+{
+    reset_test_state();
+
+    struct irq_gsi_range ranges[] = {
+        { .base = 0, .count = 24 },
+        { .base = 32, .count = 24 }
+    };
+
+    int rc = irq_registry_init_ranges(ranges, 2);
+    assert_eq(0, rc);
+
+    rc = x86_irq_routes_init(ranges, 2);
+    assert_eq(0, rc);
+
+    /* GSI 40 is in [32, 56) -> gets extended pool vector starting at 0x42 */
+    uint64_t vec40 = 0;
+    assert_eq(0, x86_irq_route_prepare(40, &vec40));
+    assert_eq(0x42, vec40);
+
+    /* GSI 24 is NOT in [0, 24) nor [32, 56) -> rejected */
+    uint64_t vec24 = 0;
+    assert_true(x86_irq_route_prepare(24, &vec24) != 0);
+
+    /* GSI 16 is in low range [0, 24) -> retains historical vector 0x30 (0x20 + 16) */
+    uint64_t vec16 = 0;
+    assert_eq(0, x86_irq_route_prepare(16, &vec16));
+    assert_eq(0x30, vec16);
+
+    /* Route lookup */
+    uint32_t gsi = 0;
+    assert_true(x86_irq_route_lookup(0x42, &gsi));
+    assert_eq(40, gsi);
+
+    assert_true(x86_irq_route_lookup(0x30, &gsi));
+    assert_eq(16, gsi);
+
+    /* Unmapped vector */
+    assert_false(x86_irq_route_lookup(0x24, &gsi));
+
+    /* Isolated/reserved vectors: 0x38 (timer), 0x39 (fixed MSI-X), 0x40/0x41 (IPI), 0x80 (syscall), 0xff (spurious) */
+    assert_false(x86_irq_route_lookup(0x38, &gsi));
+    assert_false(x86_irq_route_lookup(0x39, &gsi));
+    assert_false(x86_irq_route_lookup(0x40, &gsi));
+    assert_false(x86_irq_route_lookup(0x41, &gsi));
+    assert_false(x86_irq_route_lookup(0x80, &gsi));
+    assert_false(x86_irq_route_lookup(0xff, &gsi));
+
+    /* Fixture covering 24: range [0, 32) */
+    struct irq_gsi_range cov24_range = { .base = 0, .count = 32 };
+    assert_eq(0, irq_registry_init_ranges(&cov24_range, 1));
+    assert_eq(0, x86_irq_routes_init(&cov24_range, 1));
+    /* 24 is >= 24, so it enters the extended pool at 0x42 */
+    vec24 = 0;
+    assert_eq(0, x86_irq_route_prepare(24, &vec24));
+    assert_eq(0x42, vec24);
+
+    /* Extended pool exhaustion: exactly 62 extended vectors (0x42..0x7f) */
+    struct irq_gsi_range exhaust_range = { .base = 24, .count = 63 };
+    assert_eq(0, irq_registry_init_ranges(&exhaust_range, 1));
+    assert_eq(0, x86_irq_routes_init(&exhaust_range, 1));
+
+    for (uint32_t g = 24; g < 24 + 62; g++) {
+        uint64_t v = 0;
+        assert_eq(0, x86_irq_route_prepare(g, &v));
+        assert_eq((uint64_t)(0x42 + (g - 24)), v);
+    }
+
+    /* 63rd extended allocation must fail and mapping remains unchanged */
+    uint64_t v63 = 0;
+    assert_true(x86_irq_route_prepare(24 + 62, &v63) != 0);
+
+    /* Verify existing mappings are intact */
+    for (uint32_t g = 24; g < 24 + 62; g++) {
+        gsi = 0;
+        assert_true(x86_irq_route_lookup(0x42 + (g - 24), &gsi));
+        assert_eq(g, gsi);
+    }
+}
+
+/* 9. ISO single conversion and pin tracking */
+TEST_FUNC(iso_single_conversion_and_pin_tracking)
+{
+    reset_test_state();
+
+    /* Range covering GSI 0..23 */
+    struct irq_gsi_range range = { .base = 0, .count = 24 };
+    assert_eq(0, irq_registry_init_ranges(&range, 1));
+    assert_eq(0, x86_irq_routes_init(&range, 1));
+
+    /* Simulate MADT ISO: source 0 -> GSI 2 */
+    s_mock_iso_source = 0;
+    s_mock_iso_gsi = 2;
+    s_mock_iso_active = true;
+
+    /* ISA driver calls arch_irq_isa_to_gsi ONCE */
+    uint32_t actual_gsi = arch_irq_isa_to_gsi(0);
+    assert_eq(2, actual_gsi);
+
+    /* Register using actual GSI 2 */
+    assert_eq(1, register_irq(actual_gsi, NULL, dummy_handler, 0x1234, IRQF_TRIGGER_EDGE, "iso_pit"));
+    assert_eq(1, g_ctrl_install_calls);
+    assert_eq(1, g_ctrl_enable_calls);
+
+    /* Mask and unmask using actual GSI 2 */
+    irq_mask(actual_gsi);
+    assert_eq(1, g_ctrl_disable_calls);
+
+    irq_unmask(actual_gsi);
+    assert_eq(2, g_ctrl_enable_calls);
+
+    /* Unregister using actual GSI 2 */
+    assert_eq(1, unregister_irq(actual_gsi));
+    assert_eq(2, g_ctrl_disable_calls);
+    assert_eq(1, g_ctrl_uninstall_calls);
+
+    /* Verify pin operations: pin 2 was accessed multiple times, pin 0 was NEVER accessed */
+    assert_true(g_pin_accessed[2] > 0);
+    assert_eq(0, g_pin_accessed[0]);
+}
+
+/* 10. APIC failure stops dependent subsys phases */
+static jmp_buf s_panic_jb;
+static bool s_panic_expected = false;
+static int s_panic_calls = 0;
+
+void kpanic(const char *fmt, ...)
+{
+    (void)fmt;
+    s_panic_calls++;
+    if (s_panic_expected) {
+        longjmp(s_panic_jb, 1);
+    }
+    abort();
+}
+
+static int s_phase4_calls = 0;
+static int s_phase5_calls = 0;
+static int s_phase6_calls = 0;
+
+static int mock_phase4_init(void) { s_phase4_calls++; return 0; }
+static int mock_phase5_init(void) { s_phase5_calls++; return 0; }
+static int mock_phase6_init(void) { s_phase6_calls++; return 0; }
+
+/* Declarations for real _apic_init_wrapper and mockable test controls */
+extern int _apic_init_wrapper(void);
+extern void subsys_test_reset(void);
+extern int g_test_inject_apic_fail;
+
+TEST_FUNC(apic_failure_stops_dependent_phases)
+{
+    reset_test_state();
+
+    /* Test 1: Inject IOAPIC OOM (value 1) -> panic, phases 4/5/6 never run */
+    subsys_test_reset();
+    s_phase4_calls = s_phase5_calls = s_phase6_calls = s_panic_calls = 0;
+    register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    register_subsys("p4", mock_phase4_init, SUBSYS_PHASE_4, 0);
+    register_subsys("p5", mock_phase5_init, SUBSYS_PHASE_5, 0);
+    register_subsys("p6", mock_phase6_init, SUBSYS_PHASE_6, 0);
+
+    g_test_inject_apic_fail = -ENOMEM; /* OOM */
+    s_panic_expected = true;
+    if (setjmp(s_panic_jb) == 0) {
+        subsys_init_all();
+        assert_true(false); /* Should not be reached */
+    }
+    assert_eq(1, s_panic_calls);
+    assert_eq(0, s_phase4_calls);
+    assert_eq(0, s_phase5_calls);
+    assert_eq(0, s_phase6_calls);
+
+    /* Test 2: Inject Illegal topology (value -EINVAL) -> panic, phases 4/5/6 never run */
+    subsys_test_reset();
+    s_phase4_calls = s_phase5_calls = s_phase6_calls = s_panic_calls = 0;
+    register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    register_subsys("p4", mock_phase4_init, SUBSYS_PHASE_4, 0);
+    register_subsys("p5", mock_phase5_init, SUBSYS_PHASE_5, 0);
+    register_subsys("p6", mock_phase6_init, SUBSYS_PHASE_6, 0);
+
+    g_test_inject_apic_fail = -EINVAL; /* Illegal topology */
+    if (setjmp(s_panic_jb) == 0) {
+        subsys_init_all();
+        assert_true(false);
+    }
+    assert_eq(1, s_panic_calls);
+    assert_eq(0, s_phase4_calls);
+    assert_eq(0, s_phase5_calls);
+    assert_eq(0, s_phase6_calls);
+
+    /* Test 3: Inject > 4 controllers (-E2BIG) -> panic, phases 4/5/6 never run */
+    subsys_test_reset();
+    s_phase4_calls = s_phase5_calls = s_phase6_calls = s_panic_calls = 0;
+    register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    register_subsys("p4", mock_phase4_init, SUBSYS_PHASE_4, 0);
+    register_subsys("p5", mock_phase5_init, SUBSYS_PHASE_5, 0);
+    register_subsys("p6", mock_phase6_init, SUBSYS_PHASE_6, 0);
+
+    g_test_inject_apic_fail = -E2BIG; /* > 4 controllers */
+    if (setjmp(s_panic_jb) == 0) {
+        subsys_init_all();
+        assert_true(false);
+    }
+    assert_eq(1, s_panic_calls);
+    assert_eq(0, s_phase4_calls);
+    assert_eq(0, s_phase5_calls);
+    assert_eq(0, s_phase6_calls);
+
+    /* Test 4: Legitimate no-IOAPIC (returns 0) -> PIC boots, phases 4/5/6 DO execute */
+    subsys_test_reset();
+    s_phase4_calls = s_phase5_calls = s_phase6_calls = s_panic_calls = 0;
+    register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    register_subsys("p4", mock_phase4_init, SUBSYS_PHASE_4, 0);
+    register_subsys("p5", mock_phase5_init, SUBSYS_PHASE_5, 0);
+    register_subsys("p6", mock_phase6_init, SUBSYS_PHASE_6, 0);
+
+    g_test_inject_apic_fail = 0; /* Legitimate no-IOAPIC / PIC fallback */
+    s_panic_expected = false;
+    subsys_init_all();
+    assert_eq(0, s_panic_calls);
+    assert_eq(1, s_phase4_calls);
+    assert_eq(1, s_phase5_calls);
+    assert_eq(1, s_phase6_calls);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(sparse_ranges_are_bounded),
     TEST_ENTRY(range_validation_rejections),
@@ -402,6 +694,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(active_handler_refuses_reset),
     TEST_ENTRY(registration_validation_and_lifecycle),
     TEST_ENTRY(controller_install_failure_rolls_back),
+    TEST_ENTRY(x86_irq_routes_allocation_and_vector_bounds),
+    TEST_ENTRY(iso_single_conversion_and_pin_tracking),
+    TEST_ENTRY(apic_failure_stops_dependent_phases),
 TEST_LIST_END
 
 int main(void)

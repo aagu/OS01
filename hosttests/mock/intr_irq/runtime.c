@@ -20,12 +20,8 @@ uint64_t irq_test_gen(void) { return percpu_data[selected_cpu].tlb_ack_gen; }
 void ret_from_intr(void) { __builtin_trap(); }
 
 #include <stdlib.h>
+#include <stdbool.h>
 void *kmalloc(size_t size) { return malloc(size ? size : 1); }
 void kfree(void *ptr) { free(ptr); }
 
-int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
-{
-    if (vector)
-        *vector = 0x20 + gsi;
-    return 0;
-}
+__attribute__((weak)) bool ioapic_available(void) { return false; }

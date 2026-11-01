@@ -78,6 +78,7 @@ int subsys_status(const char *name) { return strcmp(name, "keyboard") == 0 ? key
 int register_subsys(const char *name, int (*init)(void), int phase, uint32_t flags)
 { (void)name; (void)init; (void)phase; (void)flags; return 0; }
 void kbd_mock_subsys_register_initcall(int (*fn)(void)) { (void)fn; }
+uint32_t arch_irq_isa_to_gsi(uint8_t source) { return (uint32_t)source; }
 int32_t register_irq(uint32_t gsi, void *arg,
         void (*handler)(uint64_t, uint64_t, pt_regs_t *), uint64_t parameter,
         uint32_t flags, const char *name)

@@ -2184,3 +2184,8 @@ _test-aarch64-run-m1-ap-bad-root:
 test-intr-irq-x86:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-intr-irq-x86 $(OS01_SUBMAKE_ARGS))
+
+.PHONY: test-irq-capacity
+test-irq-capacity:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-irq-capacity $(OS01_SUBMAKE_ARGS))

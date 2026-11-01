@@ -287,8 +287,8 @@ TEST_FUNC(backend_revalidates_every_field_and_vector) {
     BAD(native_status, 1);
     BAD(native_address, 1);
 #undef BAD
-    static const uint64_t bad[] = {0,    14,   0x1f, 0x39,  0x3f,      0x42,
-                                   0x7f, 0x80, 0xfe, 0x100, UINT64_MAX};
+    static const uint64_t bad[] = {0,    14,   0x1f, 0x39,  0x3a,      0x3f,
+                                   0x80, 0xfe, 0x100, UINT64_MAX};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         x86_intr_decode_irq(&e, &r, bad[i]);
         expect_bad(&e, &r);

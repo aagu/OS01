@@ -44,6 +44,12 @@ uint32_t arch_irq_vector_to_gsi(uint64_t vector)
 }
 
 __attribute__((weak))
+uint32_t arch_irq_isa_to_gsi(uint8_t source)
+{
+    return (uint32_t)source;
+}
+
+__attribute__((weak))
 int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
 {
     if (!vector)

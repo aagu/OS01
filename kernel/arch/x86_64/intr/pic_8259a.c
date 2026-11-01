@@ -101,6 +101,7 @@ hw_int_controller_t *get_pic_controller(void)
     return &pic_controller;
 }
 
+#include <intr/apic.h>
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -114,6 +115,13 @@ hw_int_controller_t *get_pic_controller(void)
 // and was removed when the file was relocated (AAGU-4.5).
 static int _pic_init_wrapper(void)
 {
+    if (ioapic_available()) {
+        log_info("8259A: skipped (IOAPIC line controller active)\n");
+        arch_outb(MASTER_OCW1, 0xff);
+        arch_outb(SLAVE_OCW1, 0xff);
+        arch_local_irq_enable();
+        return 0;
+    }
     pic_init();
     return 0;
 }

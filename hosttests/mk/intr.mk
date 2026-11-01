@@ -339,10 +339,11 @@ test_gic_probe: $(TEST_BLD)/test_gic_probe.elf
 	$<
 
 # x86 IRQ chain test
-IRQ_CHAIN_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+IRQ_CHAIN_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections -DOS01_HOST_TEST \
     -I$(TEST_MOCK)/intr_irq -I$(TEST_INC) $(KERNEL_INC)
 IRQ_CHAIN_SOURCES := arch/x86_64/intr/irq_entry.c \
     intr/irq.c \
+    arch/x86_64/intr/irq_route.c \
     arch/x86_64/intr/irq_hooks.c intr/vector_dispatch.c \
     arch/x86_64/intr/pic_8259a.c arch/x86_64/intr/apic/lapic_timer.c \
     arch/x86_64/intr/apic/ipi.c
@@ -410,13 +411,28 @@ $(TEST_BLD)/arch_irq_hooks.o: $(TESTS_DIR)/kernel/intr/arch_irq_hooks.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
+$(TEST_BLD)/irq_route_production.o: $(TESTS_DIR)/kernel/arch/x86_64/intr/irq_route.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/subsys_production.o: $(TESTS_DIR)/kernel/subsys/subsys.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/lapic_production.o: $(TESTS_DIR)/kernel/arch/x86_64/intr/apic/lapic.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
 $(TEST_BLD)/test_irq_capacity.o: $(TEST_CASES)/test_irq_capacity.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(IRQ_CHAIN_HOST_CFLAGS) $(FRAMEWORK_INC) -MMD -MP -c $< -o $@
 
 $(TEST_BLD)/test_irq_capacity.elf: $(TEST_BLD)/test_irq_capacity.o \
         $(TEST_BLD)/intr_irq_production.o \
-        $(TEST_BLD)/arch_irq_hooks.o
+        $(TEST_BLD)/arch_irq_hooks.o \
+        $(TEST_BLD)/irq_route_production.o \
+        $(TEST_BLD)/subsys_production.o \
+        $(TEST_BLD)/lapic_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $(filter %.o,$^)
 
 .PHONY: test-irq-capacity
@@ -428,4 +444,7 @@ test-irq-capacity: $(TEST_BLD)/test_irq_capacity.elf
 -include $(TEST_BLD)/test_irq_capacity.d
 -include $(TEST_BLD)/intr_irq_production.d
 -include $(TEST_BLD)/arch_irq_hooks.d
+-include $(TEST_BLD)/irq_route_production.d
+-include $(TEST_BLD)/subsys_production.d
+-include $(TEST_BLD)/lapic_production.d
 

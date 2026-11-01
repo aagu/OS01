@@ -3,6 +3,7 @@
 #include <arch/x86_64/cpuid.h>   // cpuid()
 #include <intr/apic.h>                 // lapic_timer_start / lapic_timer_set_premeasured
 #include <intr/interrupt.h>     // irq_mask / irq_unmask (PIT/LAPIC handoff)
+#include <arch/irq.h>
 #include <arch/x86_64/rtc.h>     // rtc_pie_calibrate (x86_64 platform glue)
 #include <sched/accounting.h>    // sched_accounting_cpu_start (monitor Task 2)
 
@@ -36,13 +37,14 @@ uint64_t arch_cycle_freq(void)
 // and the accounting publish — see subsys_percpu.c.)
 bool arch_tick_start(void)
 {
-    irq_mask(0);
+    uint32_t pit_gsi = arch_irq_isa_to_gsi(0);
+    irq_mask(pit_gsi);
     if (lapic_timer_start(100)) {
         // LAPIC 接管成功，PIT 保持掩蔽。
         sched_accounting_cpu_start(0, 100, true);
         return true;
     }
-    irq_unmask(0);
+    irq_unmask(pit_gsi);
     // LAPIC 未启动 → PIT 回退已重新使能，BSP tick 源依然有效。
     sched_accounting_cpu_start(0, 100, true);
     return false;

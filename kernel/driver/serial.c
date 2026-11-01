@@ -99,7 +99,8 @@ void init_serial(void)
 
 void init_serial_irq(void)
 {
-    register_irq(4, NULL, &serial_handler, 0, IRQF_TRIGGER_LEVEL, "serial");
+    uint32_t serial_gsi = arch_irq_isa_to_gsi(4);
+    register_irq(serial_gsi, NULL, &serial_handler, 0, IRQF_TRIGGER_LEVEL, "serial");
 
     // IOAPIC entry is now unmasked — safe to enable UART RX interrupts.
     arch_outb(SERIAL_COM1 + 1, 0x01);    // Enable RX interrupt (Data Available)

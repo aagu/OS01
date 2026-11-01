@@ -38,6 +38,10 @@ hw_int_controller_t *arch_irq_select_controller(uint32_t gsi);
 uint64_t arch_irq_gsi_to_vector(uint32_t gsi);
 uint32_t arch_irq_vector_to_gsi(uint64_t vector);
 
+// Translate legacy ISA IRQ source line to GSI.
+// Default: identity. x86 IOAPIC applies MADT Interrupt Source Overrides.
+uint32_t arch_irq_isa_to_gsi(uint8_t source);
+
 // Prepare architecture routing for a GSI and allocate or resolve its vector.
 // Returns 0 on success, or a negative errno on failure.
 int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector);

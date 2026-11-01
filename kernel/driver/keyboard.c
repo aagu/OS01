@@ -5,6 +5,7 @@
 #include <driver/input_ps2.h>
 #include <driver/input_route.h>
 #include <intr/interrupt.h>
+#include <arch/irq.h>
 #include <core/debug.h>
 #include <tty/tty.h>
 #include <arch/io.h>
@@ -495,7 +496,8 @@ int keyboard_init(void)
     if (keyboard_enable_irq() != 0)
         goto fail;
 
-    if (register_irq(1, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard") != 1) {
+    uint32_t kbd_gsi = arch_irq_isa_to_gsi(1);
+    if (register_irq(kbd_gsi, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard") != 1) {
         // Best-effort rollback: drop the IRQ-enable bit again so an
         // enabled but unhandled IRQ1 cannot storm the CPU.
         uint8_t cmd;
