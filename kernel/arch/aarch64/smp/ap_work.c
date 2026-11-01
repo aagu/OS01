@@ -11,6 +11,8 @@
 #include <stdbool.h>
 
 #include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/ipi.h>      /* P2: post-READY kick */
+#include <percpu/percpu.h>        /* P2: ipi_ready admission gate */
 #include <arch/aarch64/boot_log.h>  /* kputs/kputu */
 #include <arch/cpu.h>               /* arch_cpu_halt, arch_cycle_counter,
                                      * arch_cpu_pause */
@@ -20,6 +22,20 @@ struct ap_work ap_work[NR_CPUS];
 void ap_work_submit(uint32_t cpu, uint32_t seq, uint32_t cmd,
                     uint64_t arg0, uint64_t arg1)
 {
+    /* P2 frozen precondition (spec §5.2): the target's IPI channel
+     * must be live.  ap_work MAY be submitted before the target
+     * publishes scheduler_ok (a not-yet-scheduling AP still takes
+     * SGIs in its old work loop), but never before ipi_ready — a
+     * violation would silently strand the item.  Nothing is written
+     * to the slot on this path. */
+    if (cpu >= NR_CPUS ||
+        !__atomic_load_n(&percpu_data[cpu].ipi_ready, __ATOMIC_ACQUIRE)) {
+        kputs("[ap-work] FATAL: submit to cpu=");
+        kputu(cpu);
+        kputs(" without ipi_ready\n");
+        for (;;)
+            arch_cpu_halt();
+    }
     struct ap_work *slot = &ap_work[cpu];
     /* Plain stores for the payload, then a single release store to
      * publish READY — the AP's acquire load of READY must not observe
@@ -29,6 +45,10 @@ void ap_work_submit(uint32_t cpu, uint32_t seq, uint32_t cmd,
     slot->arg1 = arg1;
     slot->seq  = seq;
     __atomic_store_n(&slot->state, AP_WORK_READY, __ATOMIC_RELEASE);
+    /* P2: UNCONDITIONAL kick after the READY publication — never read
+     * scheduler_ok to decide (that is the store-buffering hole the
+     * contract closes).  The kick itself only requires ipi_ready. */
+    aarch64_sched_kick(cpu);
 }
 
 bool ap_work_wait(uint32_t cpu, uint32_t seq, uint64_t *out,

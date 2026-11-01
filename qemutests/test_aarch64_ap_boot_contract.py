@@ -115,10 +115,21 @@ class ApHandoffSourceContract(unittest.TestCase):
         self.assertIn('aarch64_ap_idle_handoff', tramp)
         self.assertIn('b.ne', tramp)
 
-    def test_arm_idle_polls_ap_work_and_pause_without_wfi(self):
+    def test_arm_idle_uses_the_masked_wait_helper(self):
+        # P2 (spec §5.3): the idle sleeps through the audited helper —
+        # no inline wfi and no IRQ state change around it in C.
         body = src(IDLE_C)
         self.assertIn('ap_work_run_one', body)
-        self.assertNotIn('wfi', body)
+        self.assertIn('aarch64_idle_wait_irq', body)
+        import re as _re
+        no_comments = _re.sub(r'/\*.*?\*/', '', body, flags=_re.S)
+        self.assertNotIn('wfi', no_comments)
+        # The wait helper is entered only AFTER the rq_lock release.
+        step = body.split('void arch_aarch64_idle_step', 1)[1]
+        step = step.split('\n}', 1)[0]
+        unlock = step.index('spin_unlock_irqrestore')
+        wait = step.index('aarch64_idle_wait_irq')
+        self.assertLess(unlock, wait)
 
     def test_kthread_prepare_accepts_verified_ap_targets(self):
         body = src(KTHREAD_C)
@@ -361,6 +372,48 @@ class ModeConflictContract(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("invalid AP_SCHED_CASE='bogus'", proc.stderr)
+
+
+class IdleWaitHelperAudit(unittest.TestCase):
+    """P2 Task 3: the REAL aarch64_idle_wait_irq body must be exactly
+    dsb sy / wfi / ret with NO DAIF-setting instruction (opening IRQs
+    before the WFI would consume a pending SGI and sleep with work
+    pending).  The source pins it; the harness audits the real ELF
+    after prepare — here with simulated objdump output."""
+
+    def test_source_is_exactly_the_three_instructions(self):
+        body = src('kernel/arch/aarch64/cpu/idle_wait.S')
+        fn = body.split('aarch64_idle_wait_irq:', 1)[1]
+        fn = fn.split('.size', 1)[0]
+        mnemonics = [ln.strip() for ln in fn.splitlines()
+                     if ln.strip() and not ln.strip().startswith('/*')]
+        self.assertEqual(mnemonics, ['dsb sy', 'wfi', 'ret'])
+        self.assertNotIn('daifclr', fn.lower())
+        self.assertNotIn('msr daif', fn.lower())
+
+    def test_simulated_objdump_audit(self):
+        import importlib.util
+        import types
+        spec = importlib.util.spec_from_file_location(
+            'aarch64_ap_scheduler', ROOT / RUNNER)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+
+        def audit(instrs):
+            text = ('ffff000040000000 <aarch64_idle_wait_irq>:\n' +
+                    '\n'.join(f'  ffff00004000{4 * i:04x}:\t{m}'
+                              for i, m in enumerate(instrs)))
+            return runner.audit_idle_wait_disassembly(text)
+
+        ok, err = audit(['dsb sy', 'wfi', 'ret'])
+        self.assertEqual((ok, err), (1, ''))
+        ok, err = audit(['dsb sy', 'msr daifclr, #2', 'wfi', 'ret'])
+        self.assertEqual(ok, 0)   # DAIF op: rejected (ok==0)
+        self.assertIn('daif', err)
+        ok, err = audit(['dsb sy', 'nop', 'wfi', 'ret'])
+        self.assertEqual(ok, 0)   # extra instruction: rejected (ok==0)
+        ok, err = audit(['dsb sy', 'wfi'])
+        self.assertEqual(ok, 0)   # missing ret: rejected (ok==0)
 
 
 if __name__ == '__main__':

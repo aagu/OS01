@@ -29,8 +29,20 @@
  * freestanding aarch64 kernel — use __atomic builtins. */
 #include <string.h>
 #include <arch/aarch64/ap_work.h>
+#include "../mock/ap_work_test_runtime.h"   /* P2: percpu mock + kick spy decls */
 
 /* ── mock runtime（ap_work_test_runtime.h 声明，这里给实现） ── */
+
+ap_work_mock_percpu_t percpu_data[NR_CPUS];
+uint32_t num_cpus = 8;
+int mock_kick_calls;
+unsigned mock_kicked_cpu;
+
+void aarch64_sched_kick(unsigned cpu)
+{
+    mock_kick_calls++;
+    mock_kicked_cpu = cpu;
+}
 
 static char log_buf[512];
 static size_t log_len;
@@ -94,10 +106,18 @@ static void mock_reset(void)
     fake_cycles = 0;
     cycle_step = 1;
     halt_armed = 0;
-    /* 生产侧 ap_work[] 是 BSS（零 = 全 IDLE）；host 上手动清零模拟。 */
-    for (uint32_t cpu = 0; cpu < NR_CPUS; cpu++)
+    mock_kick_calls = 0;
+    mock_kicked_cpu = 0xffffffffu;
+    /* 生产侧 ap_work[] 是 BSS（零 = 全 IDLE）；host 上手动清零模拟。
+     * P2: every mock CPU's IPI channel is live by default — the
+     * admission tests below clear it explicitly. */
+    memset(percpu_data, 0, sizeof(percpu_data));
+    for (uint32_t cpu = 0; cpu < NR_CPUS; cpu++) {
+        percpu_data[cpu].cpu_id = cpu;
+        percpu_data[cpu].ipi_ready = 1;
         __atomic_store_n(&ap_work[cpu].state, AP_WORK_IDLE,
                               __ATOMIC_RELAXED);
+    }
 }
 
 /* ── tests ── */
@@ -222,12 +242,62 @@ static void test_seq_first_is_one(void)
     assert_eq(AP_WORK_IDLE, state_of(3));
 }
 
+/* ── P2 Task 3: the post-READY kick + ipi_ready admission ──────── */
+
+static void test_kick_after_ready(void)
+{
+    TEST_SUITE("READY publication is followed by an unconditional kick");
+    mock_reset();
+    percpu_data[1].scheduler_ok = 0;   /* not scheduling yet — irrelevant */
+    ap_work_submit(1, 42, WORK_BARRIER, 0, 0);
+    assert_eq(1, mock_kick_calls);
+    assert_eq(1u, mock_kicked_cpu);
+    assert_eq(AP_WORK_READY, state_of(1));
+    /* the consumer still completes the round: kick did not change the
+     * seq/DONE semantics */
+    ap_work_run_one(1);
+    assert_eq(true, ap_work_wait(1, 42, NULL, 1000000));
+
+    TEST_SUITE("kick fires even with scheduler_ok == 0 (no old-ready read)");
+    /* covered above: percpu_data[1].scheduler_ok stayed 0 across the
+     * submit → the kick decision cannot have read it. */
+    assert_true(percpu_data[1].scheduler_ok == 0);
+}
+
+static void test_submit_admission(void)
+{
+    TEST_SUITE("submit to a not-IPI-ready cpu fail-stops without writing");
+    mock_reset();
+    percpu_data[2].ipi_ready = 0;
+    if (setjmp(halt_jb) == 0) {
+        halt_armed = 1;
+        ap_work_submit(2, 1, WORK_BARRIER, 0, 0);
+        halt_armed = 0;
+        assert_true(0);   /* must not return */
+    }
+    halt_armed = 0;
+    assert_eq(AP_WORK_IDLE, state_of(2));   /* nothing published */
+    assert_eq(0, mock_kick_calls);
+
+    TEST_SUITE("submit to an out-of-range cpu fail-stops");
+    if (setjmp(halt_jb) == 0) {
+        halt_armed = 1;
+        ap_work_submit(NR_CPUS, 1, WORK_BARRIER, 0, 0);
+        halt_armed = 0;
+        assert_true(0);
+    }
+    halt_armed = 0;
+    assert_eq(0, mock_kick_calls);
+}
+
 int main(void)
 {
     test_read64_roundtrip();
     test_seq_guard_and_second_submit();
     test_timeout_fatal();
     test_seq_first_is_one();
+    test_kick_after_ready();
+    test_submit_admission();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_ap_work_protocol",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

@@ -4,33 +4,68 @@
 #include <arch/cpu.h>
 #include <arch/spinlock.h>
 #include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/task_arch.h>
 
-/* P1 polling idle (spec §4): every aarch64 scheduler CPU — BSP and,
- * from the P1 handoff on, accepted APs — runs THIS loop.  Each
- * iteration consumes at most one ap_work item with IRQs enabled, then
- * checks need_resched / the runqueue under the rq_lock; with work it
- * schedules (IRQ state restored around it), without work it pauses.
- * There is deliberately NO WFI: no AP has a periodic timer in P1, so a
- * missed notification could never be recovered on an AP — the busy
- * poll is the notification mechanism until P2 adds the resched SGI. */
+/* P2 polling+sleeping idle (spec §5.3).  Call contract: idle task
+ * stack, IRQs ENABLED at entry, no lock held; returns with IRQs
+ * ENABLED.  One iteration:
+ *
+ *   1. consume at most one ap_work item with IRQs on (the handler may
+ *      touch the VMM and must not run masked or under the rq lock);
+ *   2. mask IRQs; under the rq_lock check need_resched / the runqueue
+ *      and acquire-load the ap_work slot state;
+ *   3. with runqueue work or a pending resched: leave the lock, then
+ *      schedule (IRQ state restored around it);
+ *   4. with a READY slot: leave the lock, restore IRQs, back to the
+ *      consumption path next iteration;
+ *   5. with NO work: release the lock and KEEP DAIF.I=1, then
+ *      dsb sy; wfi — a SGI arriving in that window stays pending and
+ *      wakes the WFI (never enable IRQs before the WFI: the SGI could
+ *      be consumed and the CPU would sleep with work pending).  After
+ *      the return: enable IRQs + ISB and re-check from the top.
+ *
+ * The wait helper is aarch64_idle_wait_irq (idle_wait.S): exactly
+ * dsb sy; wfi; ret, no DAIF change, audited by the harness.  The BSP
+ * runs the same protocol; its CNTP tick only advances time / drives
+ * the scan fallback, it is never a WFI safety net.  APs keep their
+ * CNTP off (AAGU-3).  An AP that was never admitted to the scheduler
+ * stays in its OLD work loop (secondary_idle) — this idle step only
+ * runs on the idle task stack. */
 void arch_aarch64_idle_step(void)
 {
     percpu_t *cpu = this_cpu();
 
+    /* 1. ap_work consumption with IRQs on. */
     ap_work_run_one(cpu_id());
 
+    /* 2. masked check under the rq lock. */
     arch_irq_state_t flags = arch_local_irq_save();
     uint64_t rq_flags = spin_lock_irqsave(&cpu->rq_lock);
-    bool work = __atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE) ||
+    bool need = __atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE) ||
                 !rbtree_empty(&cpu->run_queue);
+    uint32_t slot_state =
+        __atomic_load_n(&ap_work[cpu_id()].state, __ATOMIC_ACQUIRE);
     spin_unlock_irqrestore(&cpu->rq_lock, rq_flags);
-    if (work) {
+
+    /* 3. runnable work → schedule (IRQ state restored around it). */
+    if (need) {
         schedule();
         arch_local_irq_restore(flags);
         return;
     }
-    arch_local_irq_restore(flags);
-    arch_cpu_pause();
+
+    /* 4. a READY slot → back to the consumption path next round. */
+    if (slot_state == AP_WORK_READY) {
+        arch_local_irq_restore(flags);
+        return;
+    }
+
+    /* 5. nothing to do: keep IRQs MASKED across the wait. */
+    aarch64_idle_wait_irq();     /* dsb sy; wfi; ret */
+    arch_local_irq_enable();
+#ifdef __aarch64__
+    __asm__ __volatile__("isb" ::: "memory");
+#endif
 }
 
 void idle_resume(void)

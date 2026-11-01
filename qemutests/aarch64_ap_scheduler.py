@@ -369,6 +369,36 @@ def audit_fatal_owner_symbol(nm_or_none, elf, llvm_nm):
     return 1, "", None
 
 
+def audit_idle_wait_disassembly(objdump_text):
+    """The aarch64_idle_wait_irq disassembly must be EXACTLY
+    dsb sy / wfi / ret — no DAIF-setting instruction, nothing else.
+    Returns (ok, error)."""
+    lines = []
+    in_fn = False
+    for line in objdump_text.splitlines():
+        if 'aarch64_idle_wait_irq' in line and '>' in line:
+            in_fn = True
+            continue
+        if not in_fn:
+            continue
+        if line.strip().startswith('...') or 'Disassembly' in line:
+            break
+        stripped = line.strip()
+        if not stripped or stripped.endswith(':') and '\t' not in stripped:
+            continue
+        if '\t' in stripped:
+            mnem = stripped.split('\t')[-1].strip()
+            if mnem:
+                lines.append(mnem)
+    expected = ['dsb sy', 'wfi', 'ret']
+    for m in lines:
+        if 'daif' in m.lower():
+            return 0, f"DAIF-setting instruction in idle wait helper: {m}"
+    if lines != expected:
+        return 0, (f"idle wait helper body {lines} != expected {expected}")
+    return 1, ""
+
+
 def _sha256(path):
     import hashlib
     h = hashlib.sha256()
