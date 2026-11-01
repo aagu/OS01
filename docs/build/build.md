@@ -650,7 +650,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
 | `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`） |
-| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`m1-*`） |
+| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`m1-*`） |
 | `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |
@@ -728,3 +728,19 @@ BusyBox applet 的链接会让位于发现的原生程序。
 ```bash
 python3 tools/tests/test_user_build.py
 ```
+
+### aarch64 跨核唤醒验收（P2）
+
+`make PROFILE=aarch64-clang test-aarch64 MODE=sched-wake` 构建独立
+`sched-wake` kernel/image，运行1/2/4/8核各两次。选择器
+`AARCH64_AP_SCHED_TEST=wake`要求KERNEL_SELFTEST=1，由mode自动设置，
+并拒绝与旧sched/M1/sync-fault/no-ack/canary/systest组合。
+
+wake包络继承P1全部七项，加remote-wake、wake-switch、idle-race、sgi、
+work-sleep、scan-fallback六项。每AP分别给出100轮显式唤醒、100轮切出窗口
+唤醒、三种idle时序各100轮、1次真实ready交接及200次work唤醒、100轮scan
+fallback。UP只对跨核项给出全零NA行，仍运行本地scan和硬件self-SGI。
+严格runner验证phase、每CPU完整字段、恰一次START/END及全在线mask；准备阶段
+审计真实ELF的wake hook隔离和`dsb sy; wfi; ret`指令。归档含镜像、固件、
+ELF摘要、revision/dirty、命令、日志与退出状态。WFI计数证明经过等待路径，
+不表示QEMU物理省电；SGI不抢占不合作的线程。

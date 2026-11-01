@@ -54,9 +54,6 @@ void arch_sched_notify_remote(unsigned cpu)
 
 bool arch_sched_scan_blockers(void)
 {
-    /* Only the BSP scans the global blocker list: an AP-installed
-     * blocker could never be discovered by the single scanner, so APs
-     * are refused blocker_wait() (-EOPNOTSUPP) and the scanner skips
-     * tasks pinned to other CPUs before touching their state. */
+    /* BSP alone scans blockers, including AP waiters; AP timers remain off. */
     return cpu_id() == 0;
 }

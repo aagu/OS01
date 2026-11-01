@@ -26,6 +26,9 @@
 #include <log/log.h>
 #include <errno.h>
 #include <string.h>
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+#include <selftest/aarch64_ap_scheduler.h>
+#endif
 
 _Static_assert(sizeof(task_t) + 256 <= STACK_SIZE,
                "AP idle union cannot host the task metadata reserve");
@@ -178,6 +181,11 @@ void aarch64_ap_idle_handoff(uint32_t cpu)
     /* IRQs on (with the ordering barrier) BEFORE the readiness
      * publication: a pending SGI must be takeable the instant another
      * CPU may consider this AP schedulable. */
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+    /* The ready-overlap checkpoint: the AP is on its legal idle stack,
+     * IRQs still masked, scheduler_ok not yet published. */
+    test_aarch64_ap_sched_before_ready(cpu);
+#endif
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
     __atomic_store_n(&rq->scheduler_ok, 1, __ATOMIC_RELEASE);
@@ -210,6 +218,9 @@ void aarch64_ap_sched_release(void)
             if (arch_cycle_counter() > deadline)
                 ap_sched_fatal("AP scheduler_ok deadline (2s)", cpu);
             arch_cpu_pause();
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+            test_aarch64_ap_sched_poll_ready();
+#endif
         }
     }
     arch_local_irq_restore(irq_flags);

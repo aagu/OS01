@@ -16,6 +16,7 @@
 #include <core/assert.h>
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
 #include <selftest/aarch64_scheduler.h>
+#include <selftest/aarch64_ap_scheduler.h>
 #endif
 
 // ── Preemption flag ──────────────────────────────────────
@@ -88,6 +89,10 @@ void task_finish_switch(task_t *prev)
      * needs is captured while the rq_lock is held, and after the
      * unlock ONLY captured values are used — a waiter may reclaim a
      * zombie prev the instant on_cpu drops. */
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+    /* prev is still valid here: on_cpu has not been cleared. */
+    aarch64_ap_sched_before_finish(prev);
+#endif
     percpu_t *rq = &percpu_data[__atomic_load_n(&prev->cpu,
                                                 __ATOMIC_ACQUIRE)];
     unsigned notify_target = rq->cpu_id;
@@ -97,6 +102,9 @@ void task_finish_switch(task_t *prev)
         enqueue_task(prev, rq);
         __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
         reenqueued = true;
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+        aarch64_ap_sched_finish_enqueued(prev);
+#endif
     }
     __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&rq->rq_lock, flags);
@@ -172,7 +180,7 @@ retry:
     spin_unlock_irqrestore(&rq->rq_lock, flags);
 
     if ((int)notify_target != (int)cpu_id())
-        __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
+        sched_notify_remote_cpu(notify_target);
 }
 
 // Global PID counter — atomic because spawn/fork/exec may
@@ -206,6 +214,23 @@ int64_t  user_init_pid = 0;
  * may complete its blocker cleanup and exit as soon as the blocker is
  * gone, so a caller must not touch @task past this function.
  */
+/* task_list_lock protects blocker metadata; state also has rq-only writers. */
+static int64_t blocker_state_snapshot(task_t *task)
+{
+    for (;;) {
+        unsigned cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
+        percpu_t *rq = &percpu_data[cpu];
+        uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+        if (cpu != __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE)) {
+            spin_unlock_irqrestore(&rq->rq_lock, flags);
+            continue;
+        }
+        int64_t state = task->state;
+        spin_unlock_irqrestore(&rq->rq_lock, flags);
+        return state;
+    }
+}
+
 static void blocker_wake_locked(task_t *task)
 {
     // Only wake blocked tasks whose condition is actually met, or
@@ -214,7 +239,8 @@ static void blocker_wake_locked(task_t *task)
     // both paths clear the blocker before the wake is published).
     // The type pre-check lives here (not at the call sites): the
     // public entry's lock-free pre-check could read a stale field.
-    if (task->state != TASK_INTERRUPTIBLE && task->state != TASK_UNINTERRUPTIBLE)
+    int64_t state = blocker_state_snapshot(task);
+    if (state != TASK_INTERRUPTIBLE && state != TASK_UNINTERRUPTIBLE)
         return;
     if (task->blocker.type == BLOCKER_NONE)
         return;
@@ -248,6 +274,40 @@ void blocker_wake(task_t *task)
     spin_unlock_irqrestore(&task_list_lock, flags);
 }
 
+/* The child is live; resolve the changing parent only under list ownership. */
+void task_signal_parent(task_t *child, uint64_t signals)
+{
+    uint64_t flags = spin_lock_irqsave(&task_list_lock);
+    task_t *parent = child->parent;
+    if (parent && !(parent->flags & PF_KTHREAD)) {
+        __atomic_fetch_or(&parent->signal, signals, __ATOMIC_RELEASE);
+        blocker_wake_locked(parent);
+    }
+    spin_unlock_irqrestore(&task_list_lock, flags);
+}
+
+void task_wake_parent(task_t *child)
+{
+    uint64_t flags = spin_lock_irqsave(&task_list_lock);
+    task_t *parent = child->parent;
+    if (parent) {
+        int64_t state = blocker_state_snapshot(parent);
+        if (state == TASK_INTERRUPTIBLE || state == TASK_RUNNING)
+            task_wake(parent);
+    }
+    spin_unlock_irqrestore(&task_list_lock, flags);
+}
+
+void task_exit_zombie(void)
+{
+    uint64_t flags = arch_local_irq_save();
+    percpu_t *rq = this_cpu();
+    spin_lock(&rq->rq_lock);
+    current->state = TASK_ZOMBIE;
+    spin_unlock(&rq->rq_lock);
+    arch_local_irq_restore(flags);
+}
+
 /*
  * Scan all tasks for blocked ones whose conditions are now met.
  *
@@ -275,16 +335,26 @@ void sched_unblock_blocked(void)
          * taken under the target rq_lock (inside the helper); the
          * condition/signal handling both clear the blocker BEFORE the
          * wake is published. */
-        if (t->state != TASK_INTERRUPTIBLE)
+        if (blocker_state_snapshot(t) != TASK_INTERRUPTIBLE)
             continue;
         if (t->blocker.type == BLOCKER_NONE)
             continue;
 
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+        /* Test-only scan filter: skip the EXPLICIT wake's target so the
+         * scan=0 evidence proves the SGI wake path (the scan itself
+         * keeps running for every other task). */
+        if (aarch64_ap_sched_skip_scan(t))
+            continue;
+#endif
         bool was_scan_woken = t->blocker.check && t->blocker.check(t);
         bool signal_wake = t->blocker.signal_can_wake &&
                            (t->signal & ~t->blocked) != 0;
         if (was_scan_woken || signal_wake) {
             blocker_wake_locked(t);
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+            aarch64_ap_sched_scan_woke(t);
+#endif
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
             aarch64_sched_observe_scan_wake(t);
 #endif
@@ -383,17 +453,13 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
         self->state = TASK_RUNNING;
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     }
+    /* Callback can traverse the task list (waitpid); keep lifetime ownership
+     * until the interruption decision is complete, without holding rq_lock. */
+    bool interrupted = signal_can_wake && (self->signal & ~self->blocked) &&
+                       !check(self);
     spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    return interrupted ? -EINTR : 0;
 
-    // Step 6: Check if woken by signal.
-    // Re-check the condition first: if it's now met (e.g. child
-    // exited AND SIGCHLD was delivered), return 0 — the signal
-    // will be handled on the way back to userspace.
-    // Mask-aware: only an UNBLOCKED pending signal interrupts (POSIX).
-    if (signal_can_wake && (self->signal & ~self->blocked) && !check(self))
-        return -EINTR;
-
-    return 0;
 }
 
 void schedule(void)
@@ -459,6 +525,9 @@ void schedule(void)
     }
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
     aarch64_sched_observe_block_enqueue(current);
+#endif
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+    aarch64_ap_sched_after_dequeue(current);
 #endif
 
     // ── 3. Wake blocked tasks whose condition is now met ──

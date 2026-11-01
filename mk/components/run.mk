@@ -226,6 +226,16 @@ endif
 # boundary and refuses every other compile-affecting selector — the
 # outer make rejects, never just the profile's sub-make parse.
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
+ifeq ($(MODE),sched-wake)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error MODE=sched-wake cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
+endif
+ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
+$(error MODE=sched-wake cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
+endif
+endif
+endif
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),sched-ap)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
 $(error MODE=sched-ap cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
@@ -277,6 +287,24 @@ ifeq ($(filter $(SCHED_CASE),$(SCHED_CASES_VALID)),)
 $(error invalid SCHED_CASE='$(SCHED_CASE)'; valid: $(SCHED_CASES_VALID))
 endif
 endif
+# MODE=sched-wake: the P2 cross-CPU wakeup acceptance — the wake
+# variant owns kernel/image sched-wake trees via the controlled
+# sub-make (AARCH64_AP_SCHED_TEST=wake); no per-case selector (the
+# phase carries the whole envelope).
+.PHONY: _test-aarch64-prep-sched-wake _test-aarch64-run-sched-wake
+_test-aarch64-prep-sched-wake:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=wake aarch64-uefi
+_test-aarch64-run-sched-wake:
+	python3 qemutests/aarch64_ap_scheduler.py \
+	  --phase wake --case positive \
+	  --image "$(AARCH64_UEFI_SCHED_WAKE_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SCHED_WAKE_FIRMWARE)" \
+	  --elf "$(AARCH64_KERNEL_SCHED_WAKE_ELF)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-wake/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
 # Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
 # variable) so it survives across recipe lines — a shell variable set
 # in one `@`-prefixed recipe line is empty in the next (each `@` line is
@@ -500,8 +528,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
@@ -1974,7 +2002,7 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|m1-*>)';
+		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-*>)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
 	@echo ''

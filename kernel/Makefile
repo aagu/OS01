@@ -95,6 +95,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_scheduler.c \
                    selftest/aarch64_sched_observer.c \
                    selftest/test_aarch64_ap_scheduler.c \
+                   selftest/test_aarch64_ap_wake.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
@@ -405,6 +406,7 @@ ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
 ifeq ($(ARCH),aarch64)
 ALL_CFLAGS += $(if $(filter fatal-owner,$(AARCH64_AP_SCHED_TEST)),-DAARCH64_AP_SCHED_TEST_FATAL_OWNER=1)
 ALL_CFLAGS += $(if $(filter ap,$(AARCH64_AP_SCHED_TEST)),-DAARCH64_AP_SCHED_TEST_AP=1)
+ALL_CFLAGS += $(if $(filter wake,$(AARCH64_AP_SCHED_TEST)),-DAARCH64_AP_SCHED_WAKE_TEST=1)
 endif
 endif
 

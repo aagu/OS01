@@ -76,33 +76,75 @@ AP_CASE_CPU0_ONLY = ("admission", "default-mask")
 # Serial lines may carry a leading CR (the aarch64 console emits
 # \r before each line), so no ^ anchor: the failed=0 tail is the
 # discriminating part.
+# ── frozen wake-phase schema (plan P2 Task 4) ───────────────────────
+WAKE_CASE_FIELDS = {
+    "remote-wake": ("rounds", "completed", "duplicate", "explicit",
+                    "scan", "na"),
+    "wake-switch": ("rounds", "completed", "duplicate", "on_cpu_wakes",
+                    "finish_enqueues", "na"),
+    "idle-race": ("before_check", "after_check", "at_wait", "completed",
+                  "lost", "wfi_enter", "wfi_return", "na"),
+    "sgi": ("handler", "eoi", "bad_iar", "irq_switches", "tlb_ack_ok"),
+    "work-sleep": ("ready_overlap", "pending_before", "after_wait",
+                   "completed", "bad_seq", "na"),
+    "scan-fallback": ("rounds", "completed", "explicit", "scan", "na"),
+}
+WAKE_CASE_CPU0_ONLY = ("remote-wake", "wake-switch", "idle-race",
+                       "work-sleep", "scan-fallback")
+
 FRAMEWORK_END_OK = re.compile(
     r"\[TEST\] END suite=[A-Za-z0-9_-]+ total=[0-9]+ passed=[0-9]+ "
     r"failed=0 skipped=0")
 START_LINE = re.compile(
-    r"^\[ap-sched\] START phase=ap cpus=([0-9]+) accepted_mask=([0-9]+)$")
+    r"^\[ap-sched\] START phase=(ap|wake) cpus=([0-9]+) "
+    r"accepted_mask=([0-9]+)$")
 CASE_LINE = re.compile(
-    r"^\[ap-sched\] phase=ap case=([a-z-]+) cpu=([0-9]+)(?:\s+(.*))?$")
-END_LINE = re.compile(r"^\[ap-sched\] END phase=ap failed=([0-9]+)$")
+    r"^\[ap-sched\] phase=(ap|wake) case=([a-z-]+) cpu=([0-9]+)(?:\s+(.*))?$")
+END_LINE = re.compile(
+    r"^\[ap-sched\] END phase=(ap|wake) failed=([0-9]+)$")
 
+
+FATAL_LINE = re.compile(
+    r"^\[ap-fatal\] owner=([0-9]+) arrivals_mask=([0-9]+) "
+    r"entrants=([0-9]+) losers=([0-9]+)$", re.M)
+FATAL_SUCCESS_END = re.compile(r"^\[TEST\] END failed=0\s*$", re.M)
+
+
+INJECTION_SYMBOLS = (
+    "aarch64_ap_fatal_owner_enter",
+)
+# Symbol the fatal-owner ELF must carry.
+FATAL_OWNER_SYMBOL = "aarch64_ap_fatal_owner_enter"
 
 def parse_ap_start(line):
     m = START_LINE.match(line.strip())
     if not m:
         return None
-    cpus, mask = int(m.group(1)), int(m.group(2))
+    phase, cpus, mask = m.group(1), int(m.group(2)), int(m.group(3))
     if cpus < 1 or cpus > 8 or mask != (1 << cpus) - 1:
         return None
-    return cpus, mask
+    return cpus, mask, phase
 
 
-def parse_ap_case_line(line):
+def parse_ap_end(line):
+    m = END_LINE.match(line.strip())
+    if not m:
+        return None
+    phase, failed = m.group(1), int(m.group(2))
+    if failed != 0:
+        return None
+    return phase
+
+
+def parse_ap_case_line(line, phase="ap"):
     m = CASE_LINE.match(line.strip())
     if not m:
         return None
-    case, cpu = m.group(1), int(m.group(2))
+    if m.group(1) != phase:
+        return None
+    case, cpu = m.group(2), int(m.group(3))
     kv = {}
-    rest = m.group(3) or ""
+    rest = m.group(4) or ""
     for tok in rest.split():
         k, _, v = tok.partition("=")
         if not k or not v or not v.isdigit() or k in kv:
@@ -111,120 +153,106 @@ def parse_ap_case_line(line):
     return case, cpu, kv
 
 
-def parse_ap_end(line):
-    m = END_LINE.match(line.strip())
-    if not m:
-        return None
-    failed = int(m.group(1))
-    if failed != 0:
-        return None
-    return failed
-
-
-def check_ap_positive_evidence(text, cpus):
-    """The strict positive gate: exactly one START with the full
-    accepted mask, every case line present exactly once per required
-    CPU with every frozen field, exactly one END failed=0, all
-    bracketed by START and END in order.  Returns (ok, errors)."""
+def check_ap_positive_evidence(text, cpus, phase="ap"):
+    """The strict envelope gate for phase=ap OR phase=wake: exactly one
+    START with the full accepted mask and the RIGHT phase, every case
+    line present exactly once per required CPU with every frozen field
+    and value, exactly one END failed=0 with the same phase, all
+    bracketed in order.  Returns (ok, errors)."""
     errors = []
     lines = text.replace("\r", "").splitlines()
-    starts = [parse_ap_start(l) for l in lines]
-    starts = [s for s in starts if s]
-    if len(starts) != 1:
-        return 1, [f"expected exactly one START line, got {len(starts)}"]
-    start_cpus, _mask = starts[0]
-    if start_cpus != cpus:
-        errors.append(f"START cpus={start_cpus} != QEMU -smp {cpus}")
-
-    idx_start = next(i for i, l in enumerate(lines)
-                     if parse_ap_start(l))
-    idx_end = None
+    protocol = [(i, line) for i, line in enumerate(lines)
+                if re.match(r'^\[ap-sched\] (?:START\b|END\b|phase=)', line)]
+    starts = [(i, parse_ap_start(line)) for i, line in protocol if ' START ' in line]
+    ends = [(i, parse_ap_end(line)) for i, line in protocol if ' END ' in line]
+    if len(starts) != 1 or not starts[0][1] or starts[0][1][2] != phase:
+        return 1, [f'expected exactly one START phase={phase} line']
+    idx_start, start = starts[0]
+    if start[0] != cpus:
+        errors.append(f'START cpus={start[0]} != QEMU -smp {cpus}')
+    if len(ends) != 1 or ends[0][1] != phase:
+        return 1, errors + [f'expected exactly one END phase={phase} failed=0 line']
+    idx_end = ends[0][0]
+    if idx_end <= idx_start:
+        errors.append('END before START')
     cases = {}
-    order = []
-    for i, line in enumerate(lines[idx_start + 1:], start=idx_start + 1):
-        if parse_ap_start(line):
-            errors.append("second START line")
-            break
-        end = parse_ap_end(line)
-        if end is not None:
-            idx_end = i
-            break
-        parsed = parse_ap_case_line(line)
-        if parsed is None:
+    schema = dict(AP_CASE_FIELDS)
+    if phase == 'wake':
+        schema.update(WAKE_CASE_FIELDS)
+    for i, line in protocol:
+        if i in (idx_start, idx_end):
+            continue
+        parsed = parse_ap_case_line(line, phase)
+        if parsed is None or not idx_start < i < idx_end:
+            errors.append(f'malformed or out-of-envelope evidence: {line}')
             continue
         case, cpu, kv = parsed
-        if case not in AP_CASE_FIELDS:
-            errors.append(f"unknown case {case!r}")
+        if case not in schema or cpu >= cpus:
+            errors.append(f'unknown case/CPU {case} cpu={cpu}')
             continue
-        order.append((case, cpu))
+        if set(kv) != set(schema[case]):
+            errors.append(f'case {case} cpu={cpu}: wrong fields')
         key = (case, cpu)
         if key in cases:
-            errors.append(f"duplicate case line {key}")
+            errors.append(f'duplicate case line {key}')
         cases[key] = kv
-    if idx_end is None:
-        errors.append("no [ap-sched] END phase=ap failed=0 line")
-        return 1, errors
+
+    if not FRAMEWORK_END_OK.search(text):
+        errors.append("[TEST] END ... failed=0 missing (framework END owner)")
 
     accepted_cpus = list(range(cpus))
     up = cpus < 2
+    n_ap = cpus - 1
 
     def want(where, kv, field, value):
         if kv.get(field) != value:
             errors.append(f"{where}: {field}={kv.get(field)} != {value}")
 
-    for cpu in accepted_cpus:
-        where = f"case ready cpu={cpu}"
-        kv = cases.get(("ready", cpu))
+    def require_row(cid, cpu):
+        kv = cases.get((cid, cpu))
         if kv is None:
-            errors.append(f"missing case ready cpu={cpu}")
+            errors.append(f"missing case {cid} cpu={cpu}")
+        return kv
+
+    def cpu0_only(cid):
+        for cpu in accepted_cpus[1:]:
+            if (cid, cpu) in cases:
+                errors.append(f"case {cid} must be cpu=0 only")
+
+    # ready rows are required in BOTH phases with the same values.
+    for cpu in accepted_cpus:
+        kv = require_row("ready", cpu)
+        if kv is None:
             continue
-        want(where, kv, "scheduler_ok", 1)
-        want(where, kv, "idle_on_cpu", 1)
-        want(where, kv, "idle_on_rq", 0)
-        want(where, kv, "unique_stack", 1)
+        want(f"case ready cpu={cpu}", kv, "scheduler_ok", 1)
+        want(f"case ready cpu={cpu}", kv, "idle_on_cpu", 1)
+        want(f"case ready cpu={cpu}", kv, "idle_on_rq", 0)
+        want(f"case ready cpu={cpu}", kv, "unique_stack", 1)
 
     for cpu in accepted_cpus:
-        where = f"case entry cpu={cpu}"
-        kv = cases.get(("entry", cpu))
-        if kv is None:
-            errors.append(f"missing case entry cpu={cpu}")
-            continue
-        want(where, kv, "entries", 2)
-        for f in ("wrong_cpu", "bad_mask", "bad_sp", "bad_regs"):
-            want(where, kv, f, 0)
-
-    for cpu in accepted_cpus:
-        where = f"case yield cpu={cpu}"
-        kv = cases.get(("yield", cpu))
-        if kv is None:
-            errors.append(f"missing case yield cpu={cpu}")
-            continue
-        want(where, kv, "tasks", 2)
-        want(where, kv, "yields", 64)
-        want(where, kv, "bad_canary", 0)
-        want(where, kv, "irq_switches", 0)
-
-    for cpu in accepted_cpus:
-        where = f"case reap cpu={cpu}"
-        kv = cases.get(("reap", cpu))
-        if kv is None:
-            errors.append(f"missing case reap cpu={cpu}")
-            continue
-        for f in ("tasks", "stack_alloc", "stack_free", "ctx_alloc",
-                  "ctx_free"):
-            want(where, kv, f, 256)
-        for f in ("bad_stack", "duplicate", "overflow", "idle_freed"):
-            want(where, kv, f, 0)
-
-    for cpu in accepted_cpus:
-        where = f"case work cpu={cpu}"
-        kv = cases.get(("work", cpu))
-        if kv is None:
-            errors.append(f"missing case work cpu={cpu}")
-            continue
-        for f in ("pre_handoff", "post_handoff", "seq_ok"):
-            want(where, kv, f, 1)
-
+        kv = require_row("entry", cpu)
+        if kv is not None:
+            want(f"case entry cpu={cpu}", kv, "entries", 2)
+            for f in ("wrong_cpu", "bad_mask", "bad_sp", "bad_regs"):
+                want(f"case entry cpu={cpu}", kv, f, 0)
+        kv = require_row("yield", cpu)
+        if kv is not None:
+            want(f"case yield cpu={cpu}", kv, "tasks", 2)
+            want(f"case yield cpu={cpu}", kv, "yields", 64)
+            want(f"case yield cpu={cpu}", kv, "bad_canary", 0)
+            want(f"case yield cpu={cpu}", kv, "irq_switches", 0)
+        kv = require_row("reap", cpu)
+        if kv is not None:
+            for f in ("tasks", "stack_alloc", "stack_free",
+                      "ctx_alloc", "ctx_free"):
+                want(f"case reap cpu={cpu}", kv, f, 256)
+            for f in ("bad_stack", "duplicate", "overflow",
+                      "idle_freed"):
+                want(f"case reap cpu={cpu}", kv, f, 0)
+        kv = require_row("work", cpu)
+        if kv is not None:
+            for f in ("pre_handoff", "post_handoff", "seq_ok"):
+                want(f"case work cpu={cpu}", kv, f, 1)
     kv = cases.get(("admission", 0))
     if kv is None:
         errors.append("missing case admission cpu=0")
@@ -233,7 +261,6 @@ def check_ap_positive_evidence(text, cpus):
         want("case admission", kv, "zero_publish", 1)
         want("case admission", kv, "unready_rejected", 0 if up else 1)
         want("case admission", kv, "unready_na", 1 if up else 0)
-
     kv = cases.get(("default-mask", 0))
     if kv is None:
         errors.append("missing case default-mask cpu=0")
@@ -243,22 +270,52 @@ def check_ap_positive_evidence(text, cpus):
         want("case default-mask", kv, "bsp_to_ap", 0 if up else 1)
         want("case default-mask", kv, "ap_to_ap", 0 if up else 1)
         want("case default-mask", kv, "na", 1 if up else 0)
-
     for cid in AP_CASE_CPU0_ONLY:
-        for cpu in accepted_cpus[1:]:
-            if (cid, cpu) in cases:
-                errors.append(f"case {cid} must be cpu=0 only")
+        cpu0_only(cid)
+    if phase == "ap":
+        return (0 if not errors else 1), errors
 
-    if not FRAMEWORK_END_OK.search(text):
-        errors.append("[TEST] END ... failed=0 missing (framework END owner)")
+    # Each remote case must prove its result on every AP, never an aggregate.
+    for cpu in (range(1, cpus) if not up else (0,)):
+        for cid in ('remote-wake', 'wake-switch', 'idle-race', 'work-sleep', 'scan-fallback'):
+            kv = require_row(cid, cpu)
+            if kv is None:
+                continue
+            where = f'case {cid} cpu={cpu}'
+            na = up and cid != 'scan-fallback'
+            want(where, kv, 'na', int(na))
+            if na:
+                for field in WAKE_CASE_FIELDS[cid]:
+                    if field != 'na':
+                        want(where, kv, field, 0)
+                continue
+            expected = {
+                'remote-wake': dict(rounds=100, completed=100, duplicate=0, explicit=100, scan=0),
+                'wake-switch': dict(rounds=100, completed=100, duplicate=0, on_cpu_wakes=100, finish_enqueues=100),
+                'idle-race': dict(before_check=100, after_check=100, at_wait=100, completed=300, lost=0),
+                'work-sleep': dict(ready_overlap=1, pending_before=100, after_wait=100, completed=201, bad_seq=0),
+                'scan-fallback': dict(rounds=100, completed=100, explicit=0, scan=100),
+            }[cid]
+            for field, value in expected.items():
+                want(where, kv, field, value)
+            if cid == 'idle-race':
+                for field in ('wfi_enter', 'wfi_return'):
+                    if kv.get(field, 0) < 100:
+                        errors.append(f'{where}: {field} below 100')
+    for cpu in accepted_cpus:
+        kv = require_row('sgi', cpu)
+        if kv is None:
+            continue
+        if kv.get('handler', 0) < 1 or kv.get('handler') != kv.get('eoi'):
+            errors.append(f'case sgi cpu={cpu}: invalid handler/EOI counts')
+        for field in ('bad_iar', 'irq_switches'):
+            want(f'case sgi cpu={cpu}', kv, field, 0)
+        want(f'case sgi cpu={cpu}', kv, 'tlb_ack_ok', 1)
+    allowed_wake_cpus = set(range(1, cpus)) if not up else {0}
+    for cid, cpu in cases:
+        if cid in WAKE_CASE_FIELDS and cid != 'sgi' and cpu not in allowed_wake_cpus:
+            errors.append(f'case {cid} on unexpected cpu={cpu}')
     return (0 if not errors else 1), errors
-
-# Injection symbols that must NEVER appear in a normal sched-ap ELF.
-INJECTION_SYMBOLS = (
-    "aarch64_ap_fatal_owner_enter",
-)
-# Symbol the fatal-owner ELF must carry.
-FATAL_OWNER_SYMBOL = "aarch64_ap_fatal_owner_enter"
 
 
 def parse_ap_fatal_line(line):
@@ -387,7 +444,7 @@ def audit_idle_wait_disassembly(objdump_text):
         if not stripped or stripped.endswith(':') and '\t' not in stripped:
             continue
         if '\t' in stripped:
-            mnem = stripped.split('\t')[-1].strip()
+            mnem = ' '.join(stripped.split(':', 1)[-1].split())
             if mnem:
                 lines.append(mnem)
     expected = ['dsb sy', 'wfi', 'ret']
@@ -397,6 +454,36 @@ def audit_idle_wait_disassembly(objdump_text):
     if lines != expected:
         return 0, (f"idle wait helper body {lines} != expected {expected}")
     return 1, ""
+
+
+
+def audit_idle_wait_elf(elf, llvm_objdump):
+    if not Path(elf).is_file():
+        return 0, f'ELF not found: {elf}', None
+    try:
+        proc = subprocess.run([llvm_objdump, '-d', '--no-show-raw-insn',
+                               '--disassemble-symbols=aarch64_idle_wait_irq', str(elf)],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 0, str(exc), None
+    if proc.returncode:
+        return 0, proc.stderr or 'objdump failed', None
+    ok, error = audit_idle_wait_disassembly(proc.stdout)
+    return ok, error, None
+
+
+def audit_wake_hooks(elf, llvm_nm, expected):
+    symbols, error = _nm_symbols(llvm_nm, elf)
+    if symbols is None:
+        return 0, error, None
+    hooks = {'aarch64_ap_sched_idle_hook', 'aarch64_ap_sched_skip_scan',
+             'aarch64_ap_sched_after_dequeue', 'aarch64_ap_sched_before_finish',
+             'test_aarch64_ap_sched_before_ready', 'test_aarch64_ap_sched_poll_ready',
+             'aarch64_ap_sched_sgi_trace'}
+    present = hooks & symbols
+    if (expected and present != hooks) or (not expected and present):
+        return 0, f'wake hook isolation failed: expected={expected} present={sorted(present)}', None
+    return 1, '', None
 
 
 def _sha256(path):
@@ -433,6 +520,12 @@ def run_fatal_boot(args, paths, session_factory=None, archive_factory=None):
         "image_sha256": _sha256(paths["image"]),
         "elf": str(Path(paths["elf"]).resolve()),
         "elf_sha256": _sha256(paths["elf"]),
+        "image_sha256": _sha256(paths["image"]),
+        "firmware_sha256": _sha256(paths["firmware"]),
+        "revision": subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=_ROOT, text=True).strip(),
+        "dirty": bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=_ROOT, text=True).strip()),
+        "phase": getattr(args, 'phase', 'ap'),
+        "profile": args.profile,
         "deadline_s": BOOT_DEADLINE_SECONDS,
     }
     (run_dir / "metadata.json").write_text(
@@ -514,6 +607,7 @@ POSITIVE_MATRIX = [(cpus, rep) for cpus in (1, 2, 4, 8)
                    for rep in (1, 2)]
 
 
+
 def run_positive_boot(args, paths, cpus, repetition, session_factory=None,
                       archive_factory=None):
     """One positive boot at @cpus; strictly gated on the frozen
@@ -536,6 +630,12 @@ def run_positive_boot(args, paths, cpus, repetition, session_factory=None,
         "command": command, "case": "positive", "cpus": cpus,
         "run": repetition,
         "elf_sha256": _sha256(paths["elf"]),
+        "image_sha256": _sha256(paths["image"]),
+        "firmware_sha256": _sha256(paths["firmware"]),
+        "revision": subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=_ROOT, text=True).strip(),
+        "dirty": bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=_ROOT, text=True).strip()),
+        "phase": getattr(args, 'phase', 'ap'),
+        "profile": args.profile,
         "deadline_s": BOOT_DEADLINE_SECONDS,
     }
     (run_dir / "metadata.json").write_text(
@@ -548,6 +648,7 @@ def run_positive_boot(args, paths, cpus, repetition, session_factory=None,
                           "error": "ProcessSession is unavailable"}))
         return 2, ["spawn error"]
 
+    phase = getattr(args, "phase", "ap")
     session = None
     try:
         session = session_factory(
@@ -555,7 +656,7 @@ def run_positive_boot(args, paths, cpus, repetition, session_factory=None,
             timeout_s=BOOT_DEADLINE_SECONDS - DRAIN_SECONDS)
         session.start()
         session.wait_for(
-            lambda text: check_ap_positive_evidence(text, cpus)[0] == 0)
+            lambda text: any(END_LINE.match(line.strip()) for line in text.replace("\r", "").splitlines()))
         session.observe(DRAIN_SECONDS)
         session.stop()
         session.close()
@@ -569,7 +670,8 @@ def run_positive_boot(args, paths, cpus, repetition, session_factory=None,
 
     text = session.text
     timed_out = session.timed_out
-    accepted, why = check_ap_positive_evidence(text, cpus)
+    accepted, why = check_ap_positive_evidence(
+        text, cpus, getattr(args, "phase", "ap"))
     result = accepted == 0 and not timed_out
     errors = []
     if timed_out:
@@ -585,7 +687,8 @@ def run_positive_boot(args, paths, cpus, repetition, session_factory=None,
     (run_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n")
     print(json.dumps({
-        "event": "ap-sched-case", "case": "positive", "cpus": cpus,
+        "event": "ap-sched-case", "case": f"positive-{getattr(args, 'phase', 'ap')}",
+        "cpus": cpus,
         "run": repetition, "result": "PASS" if result else "FAIL",
         "timeout": timed_out,
         "stdout": str(run_dir / "stdout.log"),
@@ -620,6 +723,8 @@ def run_ap_mode(args):
         # exactly the two driver entry points.
         audits.append(audit_no_injection_symbols(None, paths["elf"],
                                                  args.llvm_nm))
+    audits.append(audit_idle_wait_elf(paths['elf'], getattr(args, 'llvm_objdump', 'llvm-objdump')))
+    audits.append(audit_wake_hooks(paths['elf'], args.llvm_nm, args.phase == 'wake'))
     records = [{"ok": ok, "error": err} for ok, err, _ in audits]
     print(json.dumps({"event": "symbol-audit", "records": records,
                       "ok": all(ok == 1 for ok, _, _ in audits)}))
@@ -719,12 +824,12 @@ def main():
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--qemu", default="qemu-system-aarch64")
     parser.add_argument("--llvm-nm", default="llvm-nm")
+    parser.add_argument("--llvm-objdump", default="llvm-objdump")
     parser.add_argument("--build-dir")
     parser.add_argument("--profile", default="default")
     parser.add_argument("--log-dir")
     args = parser.parse_args()
-    if args.phase == "wake":
-        parser.error("--phase wake arrives with P2")
+
     return run_ap_mode(args)
 
 

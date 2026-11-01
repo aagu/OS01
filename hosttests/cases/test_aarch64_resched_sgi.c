@@ -35,6 +35,17 @@ static uint32_t gicd_mock[0x400];
 static uint32_t gicc_mock[0x20];
 static struct gic_dev dev;
 
+static unsigned eoi_write_count;
+static uint32_t eoi_write_values[8];
+void gic_host_mmio_write(volatile uint32_t *address, uint32_t value)
+{
+    *address=value;
+    if (address == &gicc_mock[M_GICC_EOIR/4]) {
+        if (eoi_write_count < 8) eoi_write_values[eoi_write_count]=value;
+        eoi_write_count++;
+    }
+}
+
 struct gic_dev *gic_dev_current(void) { return &dev; }
 
 #include <arch/aarch64/dtb.h>
@@ -87,6 +98,7 @@ static void mock_reset(void)
     gic_unregister_handler(3);
     gic_unregister_handler(4);
     assert_eq(0, gic_register_handler(3, tlb_spy, 0, "tlb-spy"));
+    eoi_write_count=0;
     mock_need_slot = 0;
     mock_schedule_calls = 0;
     mock_lock_calls = 0;
@@ -106,6 +118,8 @@ static void suite_raw_iar_eoi(void)
     struct pt_regs *regs = NULL;
     gic_dev_dispatch(&dev, regs);
     assert_eq((uint32_t)((1u << 10) | 4u), rd(gicc_mock, M_GICC_EOIR));
+    assert_eq(1,eoi_write_count);
+    assert_eq((1u<<10)|4u,eoi_write_values[0]);
     assert_eq(1, (int)mock_need_slot);
     assert_eq(0, mock_schedule_calls);
     assert_eq(0, mock_lock_calls);
@@ -117,6 +131,8 @@ static void suite_tlb_not_regressed(void)
     mock_reset();
     gicc_mock[M_GICC_IAR / 4] = (2u << 10) | 3u;
     gic_dev_dispatch(&dev, NULL);
+    assert_eq(1,eoi_write_count);
+    assert_eq((2u<<10)|3u,eoi_write_values[0]);
     assert_eq(1, tlb_handler_calls);
     assert_eq((uint32_t)((2u << 10) | 3u), rd(gicc_mock, M_GICC_EOIR));
     assert_eq(0, (int)mock_need_slot);   /* TLB SGI does not touch it */
@@ -136,6 +152,9 @@ static void suite_duplicate_sgi_merges(void)
     /* Still exactly need=1 — merged SGIs never enqueue extra work. */
     assert_eq(1, (int)mock_need_slot);
     assert_eq(0, mock_schedule_calls);
+    assert_eq(2,eoi_write_count);
+    assert_eq(4,eoi_write_values[0]);
+    assert_eq(4,eoi_write_values[1]);
     (void)eoi_after_first;
 }
 
@@ -145,6 +164,7 @@ static void suite_spurious_no_eoi(void)
     mock_reset();
     gicc_mock[M_GICC_IAR / 4] = 0x3ffu;   /* GIC_INTID_SPURIOUS */
     gic_dev_dispatch(&dev, NULL);
+    assert_eq(0,eoi_write_count);
     assert_eq((uint32_t)0, rd(gicc_mock, M_GICC_EOIR));
 }
 

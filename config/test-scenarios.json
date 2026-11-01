@@ -3958,6 +3958,80 @@
         "action": "unique",
         "reason": "Links the REAL aarch64 cpu/sched_notify.c backend; P2 replaces this backend and the test pins the P1 semantics it must preserve."
       }
+    },
+    {
+      "id": "sched.p2.aarch64_idle_wakeup",
+      "component": "sched",
+      "behavior": "masked idle wait",
+      "trigger": "Host runner invokes test_aarch64_idle_wakeup.elf",
+      "assertions": [
+        "No rq lock or unmasked IRQ across the final check-to-WFI interval",
+        "Queued tasks and READY slots prevent sleeping"
+      ],
+      "failure_modes": [
+        "Lost wakeup, invalid IRQ/lock ordering, or incorrect interrupt delivery"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_idle_wakeup.c",
+        "selector": "test_aarch64_idle_wakeup",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Exercises the real P2 production implementation at its host-test hardware boundary"
+      }
+    },
+    {
+      "id": "sched.p2.blocker_remote_wake",
+      "component": "sched",
+      "behavior": "blocker publication and remote wake",
+      "trigger": "Host runner invokes test_blocker_remote_wake.elf",
+      "assertions": [
+        "Blocker metadata precedes runnable publication",
+        "Remote enqueue invokes the architecture notify hook after rq unlock",
+        "State snapshots use rq_lock while callbacks run under task_list_lock only"
+      ],
+      "failure_modes": [
+        "Lost wakeup, invalid IRQ/lock ordering, or incorrect interrupt delivery"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_blocker_remote_wake.c",
+        "selector": "test_blocker_remote_wake",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Exercises the real P2 production implementation at its host-test hardware boundary"
+      }
+    },
+    {
+      "id": "sched.p2.aarch64_resched_sgi",
+      "component": "sched",
+      "behavior": "SGI4 transport",
+      "trigger": "Host runner invokes test_aarch64_resched_sgi.elf",
+      "assertions": [
+        "Reschedule maps to SGI4 while TLB remains SGI3",
+        "Raw IAR is written exactly once to EOI",
+        "Handler publishes need_resched without scheduling"
+      ],
+      "failure_modes": [
+        "Lost wakeup, invalid IRQ/lock ordering, or incorrect interrupt delivery"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_resched_sgi.c",
+        "selector": "test_aarch64_resched_sgi",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Exercises the real P2 production implementation at its host-test hardware boundary"
+      }
     }
   ]
 }

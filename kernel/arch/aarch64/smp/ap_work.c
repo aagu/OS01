@@ -14,6 +14,7 @@
 #include <arch/aarch64/ipi.h>      /* P2: post-READY kick */
 #include <percpu/percpu.h>        /* P2: ipi_ready admission gate */
 #include <arch/aarch64/boot_log.h>  /* kputs/kputu */
+#include <log/log.h>
 #include <arch/cpu.h>               /* arch_cpu_halt, arch_cycle_counter,
                                      * arch_cpu_pause */
 
@@ -30,9 +31,7 @@ void ap_work_submit(uint32_t cpu, uint32_t seq, uint32_t cmd,
      * to the slot on this path. */
     if (cpu >= NR_CPUS ||
         !__atomic_load_n(&percpu_data[cpu].ipi_ready, __ATOMIC_ACQUIRE)) {
-        kputs("[ap-work] FATAL: submit to cpu=");
-        kputu(cpu);
-        kputs(" without ipi_ready\n");
+        log_err("[ap-work] FATAL: submit to cpu=%u without ipi_ready\n", cpu);
         for (;;)
             arch_cpu_halt();
     }

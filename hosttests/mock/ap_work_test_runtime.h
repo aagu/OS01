@@ -28,6 +28,9 @@
 
 /* Short-circuit the heavy kernel headers ap_work.c pulls in. */
 #define _ARCH_CPU_H                 /* <arch/cpu.h> */
+#define _KERNEL_LOG_H
+void ap_work_mock_log(const char *fmt, ...);
+#define log_err(...) ap_work_mock_log(__VA_ARGS__)
 #define OS01_AARCH64_BOOT_LOG_H     /* <arch/aarch64/boot_log.h> */
 #define _KERNEL_PERCPU_H            /* <percpu/percpu.h> (P2 ipi_ready) */
 #define _ARCH_SPINLOCK_H

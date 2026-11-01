@@ -33,12 +33,8 @@ __attribute__((weak)) void ipi_panic_unsupported_vector(uint32_t vector)
 #define AARCH64_IPI_SGI_TLB     3u
 #define AARCH64_IPI_SGI_RESCHED 4u
 
-/* percpu_t.need_resched sits at offset 8 from the arch per-CPU pointer
- * (PERCPU_NEED_RESCHED_OFFSET in <percpu/percpu.h>; that header pins
- * the same value with a _Static_assert, and task_arch.c cross-checks
- * this literal against the real offsetof at compile time). */
-#ifndef PERCPU_NEED_RESCHED_OFFSET
-#define PERCPU_NEED_RESCHED_OFFSET 8
+#ifdef __aarch64__
+#include <percpu/percpu.h>
 #endif
 
 /* Per-CPU GIC target byte cache. Static zero-init: before SMP bring-up
@@ -164,9 +160,7 @@ void ipi_broadcast(uint32_t vector, uint64_t target_mask)
 #if defined(__aarch64__)
 static uint64_t *aarch64_resched_need_slot(void)
 {
-    uint64_t tp;
-    __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(tp));
-    return (uint64_t *)(uintptr_t)(tp + PERCPU_NEED_RESCHED_OFFSET);
+    return &this_cpu()->need_resched;
 }
 #else
 /* Host seam: the hosttest overrides this weak default to inject a

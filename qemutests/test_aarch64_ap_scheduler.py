@@ -62,8 +62,8 @@ class StartLineTests(unittest.TestCase):
         for cpus in (1, 2, 4, 8):
             line = (f"[ap-sched] START phase=ap cpus={cpus} "
                     f"accepted_mask={(1 << cpus) - 1}")
-            self.assertEqual(ap_sched.parse_ap_start(line), (cpus,
-                                                             (1 << cpus) - 1))
+            self.assertEqual(ap_sched.parse_ap_start(line),
+                             (cpus, (1 << cpus) - 1, 'ap'))
 
     def test_start_rejects_missing_ap_downgrade(self):
         # a 4-CPU boot whose mask claims only 2 accepted APs must never
@@ -186,3 +186,134 @@ class PositiveGateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WakeGateTests(unittest.TestCase):
+    """P2 Task 4: the phase=wake envelope (P1-ready + six wake cases),
+    per-CPU sgi rows and the UP NA shapes."""
+
+    def _ok(self, text, cpus):
+        return ap_sched.check_ap_positive_evidence(text, cpus, "wake")
+
+    def _wake_trace(self, cpus):
+        lines = build_trace(cpus).replace('phase=ap', 'phase=wake').splitlines()
+        extra = []
+        for cpu in (range(1, cpus) if cpus > 1 else (0,)):
+            na = int(cpus == 1)
+            rows = {
+                'remote-wake': dict(rounds=100, completed=100, duplicate=0,
+                                    explicit=100, scan=0, na=0),
+                'wake-switch': dict(rounds=100, completed=100, duplicate=0,
+                                    on_cpu_wakes=100, finish_enqueues=100, na=0),
+                'idle-race': dict(before_check=100, after_check=100, at_wait=100,
+                                  completed=300, lost=0, wfi_enter=100,
+                                  wfi_return=100, na=0),
+                'work-sleep': dict(ready_overlap=1, pending_before=100,
+                                   after_wait=100, completed=201, bad_seq=0, na=0),
+                'scan-fallback': dict(rounds=100, completed=100, explicit=0,
+                                      scan=100, na=0),
+            }
+            for case, fields in rows.items():
+                if na and case != 'scan-fallback':
+                    fields = {key: int(key == 'na') for key in fields}
+                extra.append(case_line(case, cpu, fields).replace('phase=ap', 'phase=wake'))
+        for cpu in range(cpus):
+            extra.append(case_line('sgi', cpu, dict(handler=3, eoi=3, bad_iar=0,
+                              irq_switches=0, tlb_ack_ok=1)).replace('phase=ap', 'phase=wake'))
+        lines[-2:-2] = extra
+        return '\n'.join(lines) + '\n'
+
+    def test_case_phase_must_match_envelope(self):
+        text = self._wake_trace(2).replace('phase=wake case=entry', 'phase=ap case=entry')
+        self.assertNotEqual(self._ok(text, 2)[0], 0)
+
+    def test_wake_inherits_every_p1_case(self):
+        lines = self._wake_trace(2).splitlines()
+        text = '\n'.join(line for line in lines if 'case=reap ' not in line)
+        self.assertNotEqual(self._ok(text, 2)[0], 0)
+
+    def test_each_ap_requires_wake_evidence(self):
+        text = '\n'.join(line for line in self._wake_trace(4).splitlines()
+                         if 'case=remote-wake cpu=2 ' not in line)
+        self.assertNotEqual(self._ok(text, 4)[0], 0)
+
+    def test_unknown_field_and_cpu_rejected(self):
+        for text in (self._wake_trace(2).replace('case=ready cpu=1', 'case=ready cpu=7'),
+                     self._wake_trace(2).replace('bad_seq=0', 'bad_seq=0 invented=1')):
+            self.assertNotEqual(self._ok(text, 2)[0], 0)
+
+    def test_duplicate_end_and_outside_case_rejected(self):
+        trace = self._wake_trace(2)
+        for suffix in ('[ap-sched] END phase=wake failed=0\n',
+                       '[ap-sched] phase=wake case=sgi cpu=1 handler=3 eoi=3 bad_iar=0 irq_switches=0 tlb_ack_ok=1\n'):
+            self.assertNotEqual(self._ok(trace + suffix, 2)[0], 0)
+
+    def test_complete_wake_traces_pass(self):
+        for cpus in (1, 2, 4, 8):
+            ok, errors = self._ok(self._wake_trace(cpus), cpus)
+            self.assertEqual((ok, errors), (0, []), f"cpus={cpus}")
+
+    def test_wrong_phase_rejected(self):
+        text = self._wake_trace(2).replace(
+            "phase=wake", "phase=ap")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+    def test_explicit_backed_by_scan_rejected(self):
+        text = self._wake_trace(2).replace("scan=0", "scan=50")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+    def test_completed_short_by_one_rejected(self):
+        text = self._wake_trace(2).replace("completed=100",
+                                           "completed=99")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+    def test_missing_ap_sgi_row_rejected(self):
+        text = self._wake_trace(2).replace(
+            case_line("sgi", 1, {"handler": 3, "eoi": 3, "bad_iar": 0,
+                                 "irq_switches": 0,
+                                 "tlb_ack_ok": 1}).replace("phase=ap", "phase=wake") + "\n", "")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+    def test_eoi_mismatch_rejected(self):
+        text = self._wake_trace(2).replace("eoi=3", "eoi=2")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+    def test_na_pseudo_success_rejected(self):
+        # a 2-CPU boot claiming the UP na=1 shape is a downgrade
+        text = self._wake_trace(2).replace("na=0", "na=1").replace(
+            "rounds=100", "rounds=0").replace(
+            "explicit=100", "explicit=0").replace(
+            "scan=100", "scan=0").replace(
+            "on_cpu_wakes=100", "on_cpu_wakes=0").replace(
+            "finish_enqueues=100", "finish_enqueues=0").replace(
+            "before_check=100", "before_check=0").replace(
+            "after_check=100", "after_check=0").replace(
+            "at_wait=100", "at_wait=0").replace(
+            "completed=300", "completed=0").replace(
+            "completed=200", "completed=0").replace(
+            "ready_overlap=1", "ready_overlap=0").replace(
+            "pending_before=100", "pending_before=0").replace(
+            "after_wait=100", "after_wait=0").replace(
+            "wfi_enter=100", "wfi_enter=0").replace(
+            "wfi_return=100", "wfi_return=0")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+class PreparedElfAuditTests(unittest.TestCase):
+    def test_prepared_elf_wait_instructions_are_audited(self):
+        from unittest import mock
+        import tempfile
+        import types
+        with tempfile.TemporaryDirectory() as directory:
+            elf = Path(directory) / 'kernel.elf'
+            elf.write_bytes(b'ELF')
+            with mock.patch.object(ap_sched.subprocess, 'run', return_value=types.SimpleNamespace(
+                    returncode=0, stdout='0000 <aarch64_idle_wait_irq>:\n  0:\tdsb\tsy\n  4:\twfi\n  8:\tret\n', stderr='')) as run:
+                self.assertEqual(ap_sched.audit_idle_wait_elf(elf, 'llvm-objdump'), (1, '', None))
+                self.assertIn('--disassemble-symbols=aarch64_idle_wait_irq', run.call_args.args[0])
+            self.assertEqual(ap_sched.audit_idle_wait_elf(elf.parent / 'absent', 'llvm-objdump')[0], 0)

@@ -16,6 +16,9 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot/shootdown_probe.h>
 #include <selftest/aarch64_scheduler.h>
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+#include <selftest/aarch64_ap_scheduler.h>
+#endif
 #include <selftest/aarch64_sched_observer.h>
 #include <selftest/result.h>
 #include <time/timer.h>
@@ -404,7 +407,11 @@ void aarch64_sched_observe_switch(void)
     unsigned cpu = cpu_id();
     if (cpu < NR_CPUS) {
         switch_counts[cpu]++;
-        if (timer_irq_active[cpu])
+        if (timer_irq_active[cpu]
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+            || __atomic_load_n(&aarch64_ap_sched_sgi_active[cpu], __ATOMIC_ACQUIRE)
+#endif
+            )
             irq_switch_counts[cpu]++;
     }
 }

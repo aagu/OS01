@@ -1,11 +1,15 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-10-31）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-01）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
 
 ## 2026-11-01
+
+- feat(aarch64): **AP 协作式调度 P2 — SGI4 唤醒与 WFI idle 验收闭环**（分支 `aarch64-ap-sched`）：SGI4 handler 仅置 need_resched，GIC 统一写回完整 IAR；远端 runnable 入队后在 rq_lock 外发送通知。显式 blocker wake 与 fallback scan 共用受锁保护的状态判定，回调和 parent 解析保留 task-list 生命周期保护；退出的 zombie 转换先关 IRQ 再缓存并持有本 CPU rq_lock。idle 在 IRQ 屏蔽下最终检查 rq/ap_work，再进入 `dsb sy; wfi; ret`。新增严格的 `MODE=sched-wake`、每 AP 独立计数、三个 idle 边界各 100 轮、实际 work seq/DONE 握手、SGI/EOI/TLB ACK 证据，继承 P1 全部七个 case，接入 CI。最终 x86 systest 暴露并修复了既有 IST 异常栈被普通 IRQ 抢占的竞态：IST 同步异常改为 interrupt gate，返回分流保留 #PF/syscall 任务栈路径，用户异常退出切栈后恢复原 IF。
+
+  **验证**：wake 与 AP 正向矩阵各 8 次 boot、原 sched 16 次 boot，x86 host/static/phase-0/systest/kernel-selftest SMP2/8、ARM 旧模式和故障门、完整 harness；独立评审 R1/R2 修复后明确 **APPROVE**。完整命令、退出码与限制见 [验证报告](superpowers/reports/2026-10-31-aarch64-ap-sched-p2-validation.md)，修复和复审见 [评审记录](superpowers/reports/2026-11-01-aarch64-ap-sched-p2-final-review.md)。仍为 EL1 协作式调度，AP timer/IRQ 返回抢占/EL0 留待后续。
 
 - feat(aarch64): **aarch64 AP 协作式调度 P1 — 轮询协作式（accepted AP 进入公共 EEVDF 调度器）验收闭环**（分支 `aarch64-ap-sched`，commits `bdb932c6..2634b244`）：
   - **共同接口冻结（T1）**：新增 `<arch/sched.h>` 门面与 per-arch `cpu/sched_notify.c` 后端（`arch_kthread_default_mask`：x86 保持 num_cpus 覆盖 / aarch64 恒 1；`arch_sched_notify_remote`：x86 resched IPI / aarch64 P1 轮询 no-op；`arch_sched_scan_blockers`：x86 恒真 / aarch64 仅 BSP）；删除 `ARCH_HAS_REMOTE_RESCHED`；need_resched/scheduler_ok/t->cpu 全量 atomic 审计（读 acquire、写 release、调度清零 relaxed 且位于 rq_lock 保护的 pick 决策内）；

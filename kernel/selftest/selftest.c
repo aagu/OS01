@@ -180,7 +180,22 @@ void selftest_register_builtin_tests(void)
 #endif /* !__aarch64__ */
 
 #ifdef OS01_SELFTEST
-#if defined(__aarch64__) && defined(AARCH64_AP_SCHED_TEST_AP)
+#if defined(__aarch64__) && defined(AARCH64_AP_SCHED_WAKE_TEST)
+    /* P1 seven cases plus six wake cases. */
+    selftest_register_late("entry");
+    selftest_register_late("yield");
+    selftest_register_late("reap");
+    selftest_register_late("work");
+    selftest_register_late("admission");
+    selftest_register_late("default-mask");
+    selftest_register_late("ready");
+    selftest_register_late("remote-wake");
+    selftest_register_late("wake-switch");
+    selftest_register_late("idle-race");
+    selftest_register_late("sgi");
+    selftest_register_late("work-sleep");
+    selftest_register_late("scan-fallback");
+#elif defined(__aarch64__) && defined(AARCH64_AP_SCHED_TEST_AP)
     /* The AP production-path variant declares EXACTLY its seven case
      * IDs — the old scheduler suite's late IDs are not part of this
      * variant's manifest. */

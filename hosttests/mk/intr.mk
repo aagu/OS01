@@ -411,8 +411,13 @@ $(TEST_BLD)/test_aarch64_resched_sgi.o: $(TEST_CASES)/test_aarch64_resched_sgi.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+$(TEST_BLD)/resched_gic_driver_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/gic_driver.c \
+        $(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_HOST_CFLAGS) -DOS01_HOST_GIC_MMIO_TRACE=1 -c $< -o $@
+
 $(TEST_BLD)/test_aarch64_resched_sgi.elf: $(TEST_BLD)/test_aarch64_resched_sgi.o \
-		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/gic_driver_production.o
+		$(TEST_BLD)/aarch64_ipi_production.o $(TEST_BLD)/resched_gic_driver_production.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-aarch64-resched-sgi

@@ -8,6 +8,11 @@
 extern task_t *user_init_task;
 extern int64_t  user_init_pid;
 pid_t alloc_pid(void);
+/* Caller owns the live child; parent resolution/wake is under task_list_lock. */
+void task_signal_parent(task_t *child, uint64_t signals);
+void task_wake_parent(task_t *child);
+/* Current task only: IRQ masking precedes per-CPU lookup. */
+void task_exit_zombie(void);
 
 /* ── EEVDF algorithm constants & interface (fair.c) ── */
 #define EEVDF_MIN_SLICE  10   // time slice = 10 ticks = 100ms

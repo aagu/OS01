@@ -38,6 +38,8 @@
 #include "test_framework.h"
 #include "../mock/blocker_runtime.h"
 #include <errno.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 /* --wrap=schedule spy: counts production blocker_wait sleep points.
  * suite bodies that need the REAL schedule() call __real_schedule. */
@@ -61,6 +63,8 @@ void __wrap_schedule(void)
 
 static int cb_calls;
 static int cb_return;
+static int cb_rq_acquires;
+static void assert_cleared_at_enqueue(task_t *task);
 
 static bool check_cb(task_t *waiter)
 {
@@ -71,8 +75,13 @@ static bool check_cb(task_t *waiter)
     for (int i = 0; i < mock_lock_log_count; ++i) {
         if (mock_lock_log_addr[i] == &task_list_lock)
             tl += mock_lock_log_is_lock[i] ? 1 : -1;
+        for (unsigned c = 0; c < NR_CPUS; ++c)
+            if (mock_lock_log_addr[i] == &percpu_data[c].rq_lock) {
+                rq += mock_lock_log_is_lock[i] ? 1 : -1;
+                if (mock_lock_log_is_lock[i]) cb_rq_acquires++;
+            }
     }
-    (void)rq;
+    assert_eq(0, rq);
     mock_lock_depth_at_callback = tl;
     mock_cb_task = waiter;
     mock_cb_calls++;
@@ -174,13 +183,22 @@ static void suite_explicit_wake(void)
     cb_calls = 0;
     cb_return = 1;                       /* condition met */
 
+    num_cpus = 2;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 1;
+    cb_rq_acquires = 0;
     blocker_wake(&blocked);
+    blocker_wake(&blocked); /* second serialized helper caller is a no-op */
+    assert_eq(1, cb_rq_acquires);
     assert_eq(1, cb_calls);
     assert_eq(TASK_RUNNING, blocked.state);
     assert_eq(BLOCKER_NONE, blocked.blocker.type);
     assert_true(blocked.on_rq);
     assert_eq(1, mock_enqueue_calls);
     assert_eq(1, (int)percpu_data[1].need_resched);   /* remote publish */
+    assert_eq(1, mock_arch_notify_calls);
+    assert_eq(1, mock_arch_notified_cpu);
+    assert_eq(1, mock_arch_notify_need_at_hook);
 }
 
 /* ── 4-5. wake-before-switch handoff + no double enqueue ────────── */
@@ -268,21 +286,16 @@ static void suite_signal_path(void)
     blocked.blocker.signal_can_wake = true;
     cb_calls = 0;
     cb_return = 0;                       /* condition NOT met */
-    /* Simulate the scanner's signal branch (production runs this under
-     * task_list_lock; the branch clears the blocker, then wakes). */
+    mock_enqueue_event_hook = assert_cleared_at_enqueue;
+    list_init(&init_task_union.task.list);
+    task_list_add(&blocked);
     uint64_t flags = spin_lock_irqsave(&task_list_lock);
-    if (blocked.blocker.signal_can_wake &&
-        (blocked.signal & ~blocked.blocked)) {
-        /* production order: clear, then wake */
-        blocked.blocker.type = BLOCKER_NONE;
-        blocked.blocker.check = NULL;
-        task_wake(&blocked);
-        blocked.state = TASK_RUNNING;
-    }
+    sched_unblock_blocked();
     spin_unlock_irqrestore(&task_list_lock, flags);
     assert_eq(BLOCKER_NONE, blocked.blocker.type);
     assert_eq(TASK_RUNNING, blocked.state);
-    assert_eq(0, cb_calls);              /* signal path bypasses check */
+    assert_eq(2, cb_calls); /* production scanner and locked helper */
+
 }
 
 /* ── 8. the P1 AP refusal is removed ────────────────────────────── */
@@ -310,6 +323,129 @@ static void suite_ap_can_block(void)
     assert_eq(BLOCKER_NONE, sleeper.blocker.type);
 }
 
+static void assert_cleared_at_enqueue(task_t *task)
+{
+    assert_eq(BLOCKER_NONE, task->blocker.type);
+    assert_true(task->blocker.check == NULL);
+}
+
+static void suite_signal_resume_callback(void)
+{
+    TEST_SUITE("final signal-resume callback keeps task-list ownership");
+    sched_notify_reset();
+    task_t self = { .state=TASK_RUNNING, .cpu=0, .signal=1,
+                    .allowed_cpus=1, .thread=&init_thread };
+    mock_sched_current = &self;
+    cb_calls=0; cb_return=0;
+    assert_eq(-EINTR, blocker_wait(check_cb, BLOCKER_NANOSLEEP, true));
+    assert_eq(3, cb_calls);
+    assert_eq(1, mock_lock_depth_at_callback);
+}
+
+static task_t *migration_target;
+static void migrate_before_lock(spinlock_T *lock, int acquire)
+{
+    if (acquire && lock == &percpu_data[1].rq_lock) {
+        mock_lock_event_hook=NULL;
+        migration_target->cpu=2; /* other CPU completed migration before lock */
+    }
+}
+static void suite_migrated_snapshot(void)
+{
+    TEST_SUITE("snapshot retries if the task moved before rq lock acquisition");
+    sched_notify_reset();
+    task_t target={ .state=TASK_INTERRUPTIBLE, .cpu=1, .allowed_cpus=6 };
+    target.blocker.type=BLOCKER_NANOSLEEP; target.blocker.check=check_cb;
+    migration_target=&target; cb_return=1; cb_rq_acquires=0;
+    mock_lock_event_hook=migrate_before_lock;
+    blocker_wake(&target);
+    assert_eq(2, cb_rq_acquires);
+    assert_true(mock_enqueue_rq == &percpu_data[2]);
+}
+
+static task_t *guard_task;
+static size_t guard_size;
+static int guard_released;
+static void release_at_unlock(spinlock_T *lock, int acquire)
+{
+    if (!acquire && lock == &task_list_lock) {
+        mock_lock_event_hook=NULL;
+        assert_eq(0, mprotect(guard_task, guard_size, PROT_NONE));
+        guard_released=1;
+    }
+}
+static void suite_guarded_lifetime(void)
+{
+    TEST_SUITE("post-unlock task reads fault after the actual lifetime release");
+    sched_notify_reset();
+    guard_size=(size_t)sysconf(_SC_PAGESIZE);
+    guard_task=mmap(NULL,guard_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert_true(guard_task != MAP_FAILED);
+    if (guard_task==MAP_FAILED) return;
+    memset(guard_task,0,sizeof(*guard_task));
+    guard_task->state=TASK_INTERRUPTIBLE; guard_task->cpu=1;
+    guard_task->allowed_cpus=2; guard_task->blocker.type=BLOCKER_NANOSLEEP;
+    guard_task->blocker.check=check_cb; cb_return=1;
+    mock_enqueue_event_hook=assert_cleared_at_enqueue;
+    mock_lock_event_hook=release_at_unlock; guard_released=0;
+    blocker_wake(guard_task); /* any dangling read after list unlock SIGSEGVs */
+    assert_eq(1,guard_released);
+    assert_eq(0,munmap(guard_task,guard_size));
+}
+
+extern void task_signal_parent(task_t *child, uint64_t signals);
+extern void task_wake_parent(task_t *child);
+static task_t *reparent_child, *replacement_parent;
+static void reparent_at_lock(spinlock_T *lock, int acquire)
+{
+    if (acquire && lock==&task_list_lock) {
+        mock_lock_event_hook=NULL;
+        reparent_child->parent=replacement_parent;
+        assert_eq(0,mprotect(guard_task,guard_size,PROT_NONE));
+    }
+}
+static void suite_parent_lifetime(void)
+{
+    TEST_SUITE("parent is resolved after acquiring lifetime ownership");
+    sched_notify_reset();
+    guard_size=(size_t)sysconf(_SC_PAGESIZE);
+    guard_task=mmap(NULL,guard_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert_true(guard_task != MAP_FAILED); if(guard_task==MAP_FAILED)return;
+    task_t parent={ .state=TASK_INTERRUPTIBLE,.cpu=1,.allowed_cpus=2 };
+    parent.blocker.type=BLOCKER_NANOSLEEP;parent.blocker.check=check_cb;
+    task_t child={ .parent=guard_task };
+    reparent_child=&child;replacement_parent=&parent;cb_return=1;
+    mock_lock_event_hook=reparent_at_lock;
+    task_signal_parent(&child,1ULL<<17);
+    assert_eq(1ULL<<17,parent.signal);
+    assert_eq(TASK_RUNNING,parent.state);
+    task_wake_parent(&child);
+    assert_eq(1,mock_enqueue_calls); /* second helper caller cannot double enqueue */
+    assert_eq(0,munmap(guard_task,guard_size));
+}
+
+extern void task_exit_zombie(void);
+static void resume_on_next_cpu(void)
+{
+    mock_irq_mask_hook=NULL;
+    mock_sched_this_cpu=&percpu_data[1];
+    mock_sched_current->cpu=1;
+}
+static void suite_exit_masks_before_cpu_lookup(void)
+{
+    TEST_SUITE("exit masks IRQs before choosing and caching the rq lock");
+    sched_notify_reset();
+    task_t self={.state=TASK_RUNNING,.cpu=0};
+    mock_sched_current=&self;
+    mock_irq_mask_hook=resume_on_next_cpu;
+    task_exit_zombie();
+    assert_eq(TASK_ZOMBIE,self.state);
+    assert_eq(2,mock_lock_log_count);
+    assert_true(mock_lock_log_addr[0] == &percpu_data[1].rq_lock);
+    assert_true(mock_lock_log_addr[1] == mock_lock_log_addr[0]);
+    assert_eq(0,mock_irq_state);
+}
+
 int main(void)
 {
     suite_already_true();
@@ -319,6 +455,11 @@ int main(void)
     suite_no_read_after_unlock();
     suite_signal_path();
     suite_ap_can_block();
+    suite_signal_resume_callback();
+    suite_migrated_snapshot();
+    suite_guarded_lifetime();
+    suite_parent_lifetime();
+    suite_exit_masks_before_cpu_lookup();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_blocker_remote_wake",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

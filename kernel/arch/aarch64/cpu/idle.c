@@ -5,6 +5,9 @@
 #include <arch/spinlock.h>
 #include <arch/aarch64/ap_work.h>
 #include <arch/aarch64/task_arch.h>
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+#include <selftest/aarch64_ap_scheduler.h>
+#endif
 
 /* P2 polling+sleeping idle (spec §5.3).  Call contract: idle task
  * stack, IRQs ENABLED at entry, no lock held; returns with IRQs
@@ -37,6 +40,9 @@ void arch_aarch64_idle_step(void)
 
     /* 1. ap_work consumption with IRQs on. */
     ap_work_run_one(cpu_id());
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+    aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_AFTER_WORK);
+#endif
 
     /* 2. masked check under the rq lock. */
     arch_irq_state_t flags = arch_local_irq_save();
@@ -61,10 +67,19 @@ void arch_aarch64_idle_step(void)
     }
 
     /* 5. nothing to do: keep IRQs MASKED across the wait. */
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+    /* stage 2 may wait (<=2s) for BSP permission; stage 3 publishes
+     * WAIT_ARMED and returns at once — both IRQ-masked, no lock. */
+    aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_AFTER_CHECK);
+    aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_BEFORE_WAIT);
+#endif
     aarch64_idle_wait_irq();     /* dsb sy; wfi; ret */
     arch_local_irq_enable();
 #ifdef __aarch64__
     __asm__ __volatile__("isb" ::: "memory");
+#endif
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+    aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_AFTER_WAIT);
 #endif
 }
 

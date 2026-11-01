@@ -129,11 +129,13 @@ void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node);
 #define OS01_HOST_SPINLOCK_T_PROVIDED
 typedef struct { unsigned long lock; } spinlock_T;
 void mock_record_lock_op(spinlock_T *l, int is_lock);
+uint64_t arch_local_irq_save(void);
+void arch_local_irq_restore(uint64_t flags);
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
 static inline void spin_lock(spinlock_T *l) { mock_record_lock_op(l, 1); }
 static inline void spin_unlock(spinlock_T *l) { mock_record_lock_op(l, 0); }
-static inline uint64_t spin_lock_irqsave(spinlock_T *l) { mock_record_lock_op(l, 1); return 0; }
-static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; mock_record_lock_op(l, 0); }
+static inline uint64_t spin_lock_irqsave(spinlock_T *l) { uint64_t flags=arch_local_irq_save(); mock_record_lock_op(l, 1); return flags; }
+static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { mock_record_lock_op(l, 0); arch_local_irq_restore(f); }
 #endif
 
 typedef struct mm_struct {
@@ -284,6 +286,8 @@ static inline void arch_cpu_halt(void) { }
 void schedule(void);
 int blocker_wait(blocker_check_t check, int type, bool signal_can_wake);
 void blocker_wake(task_t *task);
+void task_list_add(task_t *task);
+void sched_unblock_blocked(void);
 void task_wake(task_t *t);
 void task_finish_switch(task_t *prev);
 void sched_notify_remote_cpu(unsigned cpu);
@@ -350,19 +354,23 @@ percpu_t *mock_sched_this_cpu;
 task_t *mock_sched_current;
 
 /* ── Lock-order recorder ── */
-spinlock_T *mock_lock_log_addr[32];
-int mock_lock_log_is_lock[32];
+spinlock_T *mock_lock_log_addr[256];
+int mock_lock_log_is_lock[256];
 int mock_lock_log_count;
+void (*mock_lock_event_hook)(spinlock_T *, int);
+void (*mock_enqueue_event_hook)(task_t *);
 void mock_record_lock_op(spinlock_T *l, int is_lock)
 {
-    if (mock_lock_log_count < 32) {
+    if (mock_lock_log_count < 256) {
         mock_lock_log_addr[mock_lock_log_count] = l;
         mock_lock_log_is_lock[mock_lock_log_count] = is_lock;
     }
     mock_lock_log_count++;
+    if (mock_lock_event_hook) mock_lock_event_hook(l, is_lock);
 }
 
 /* ── IRQ spies ── */
+void (*mock_irq_mask_hook)(void);
 int mock_irq_save_calls, mock_irq_restore_calls, mock_irq_enable_calls;
 arch_irq_state_t mock_irq_state;
 arch_irq_state_t arch_local_irq_save(void)
@@ -370,6 +378,7 @@ arch_irq_state_t arch_local_irq_save(void)
     mock_irq_save_calls++;
     arch_irq_state_t old = mock_irq_state;
     mock_irq_state = 1;
+    if (mock_irq_mask_hook) mock_irq_mask_hook();
     return old;
 }
 void arch_local_irq_restore(arch_irq_state_t state)
@@ -411,6 +420,7 @@ task_t *mock_enqueue_last;
 percpu_t *mock_enqueue_rq;
 void enqueue_task(task_t *task, percpu_t *rq)
 {
+    if (mock_enqueue_event_hook) mock_enqueue_event_hook(task);
     mock_enqueue_calls++;
     mock_enqueue_last = task;
     mock_enqueue_rq = rq;
@@ -502,6 +512,9 @@ void sched_notify_reset(void)
     }
     num_cpus = 1;
     mock_sched_this_cpu = &percpu_data[0];
+    mock_irq_mask_hook = NULL;
+    mock_lock_event_hook = NULL;
+    mock_enqueue_event_hook = NULL;
     mock_lock_log_count = 0;
     memset(mock_lock_log_addr, 0, sizeof(mock_lock_log_addr));
     memset(mock_lock_log_is_lock, 0, sizeof(mock_lock_log_is_lock));

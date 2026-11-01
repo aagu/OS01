@@ -9,12 +9,12 @@
  * Evidence envelope (frozen, BSP single writer):
  *   [ap-sched] START phase=ap cpus=<N> accepted_mask=<M>   (decimal,
  *       M must equal (1<<N)-1 — a missing AP may never downgrade)
- *   [ap-sched] phase=ap case=<id> cpu=<c> k=v ...          (7 cases)
+ *   [ap-sched] phase=" AP_PHASE " case=<id> cpu=<c> k=v ...          (7 cases)
  *   [ap-sched] END phase=ap failed=<0|n>
  * with exactly one START and one END bracketing every case line.
  */
 #if defined(__aarch64__) && defined(OS01_SELFTEST) && \
-    defined(AARCH64_AP_SCHED_TEST_AP)
+    (defined(AARCH64_AP_SCHED_TEST_AP) || defined(AARCH64_AP_SCHED_WAKE_TEST))
 
 #include <sched/task.h>
 #include <sched/internal.h>
@@ -34,6 +34,12 @@
 #include <core/printk.h>
 #include <errno.h>
 #include <kernel.h>
+
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
+#define AP_PHASE "wake"
+#else
+#define AP_PHASE "ap"
+#endif
 
 #define AP_RESOURCE_STACK  AARCH64_SCHED_RESOURCE_STACK
 #define AP_RESOURCE_THREAD AARCH64_SCHED_RESOURCE_THREAD
@@ -293,7 +299,7 @@ static int ap_case_ready(unsigned cpu)
         if (other != cpu && percpu_data[other].idle &&
             percpu_data[other].idle == idle)
             unique = false;
-    serial_printk("[ap-sched] phase=ap case=ready cpu=%u "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=ready cpu=%u "
                   "scheduler_ok=%u idle_on_cpu=%u idle_on_rq=%u "
                   "unique_stack=%u\n",
                   cpu, ok, on_cpu, on_rq, (unsigned)unique);
@@ -311,7 +317,7 @@ static int ap_case_entry(unsigned cpu)
         return -1;
     while (ap_entry_done[cpu] < 2 && jiffies < deadline)
         kthread_yield();
-    serial_printk("[ap-sched] phase=ap case=entry cpu=%u "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=entry cpu=%u "
                   "entries=%lu wrong_cpu=%lu bad_mask=%lu bad_sp=%lu "
                   "bad_regs=%lu\n",
                   cpu, (unsigned long)ap_entry_done[cpu],
@@ -336,7 +342,7 @@ static int ap_case_yield(unsigned cpu)
     while (ap_yield_done[cpu] < 2 && jiffies < deadline)
         kthread_yield();
     uint64_t irq_switches = irq_switch_counts[cpu] - irq_before;
-    serial_printk("[ap-sched] phase=ap case=yield cpu=%u "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=yield cpu=%u "
                   "tasks=%lu yields=%lu bad_canary=%lu irq_switches=%lu\n",
                   cpu, (unsigned long)ap_yield_done[cpu],
                   (unsigned long)ap_yield_count[cpu],
@@ -384,7 +390,7 @@ static int ap_case_reap(unsigned cpu)
     /* The observer's created counter records BOTH kinds (stack +
      * thread, two records per task); the frozen schema reports the
      * per-task and per-kind counts. */
-    serial_printk("[ap-sched] phase=ap case=reap cpu=%u "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=reap cpu=%u "
                   "tasks=%lu stack_alloc=%lu stack_free=%lu "
                   "ctx_alloc=%lu ctx_free=%lu bad_stack=%lu "
                   "duplicate=%lu overflow=%lu idle_freed=%u\n",
@@ -422,7 +428,7 @@ static int ap_case_work(unsigned cpu)
         else
             ap_work_post_ok[cpu] = 1;
     }
-    serial_printk("[ap-sched] phase=ap case=work cpu=%u "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=work cpu=%u "
                   "pre_handoff=%lu post_handoff=%lu seq_ok=%lu\n",
                   cpu, (unsigned long)ap_work_pre_ok[cpu],
                   (unsigned long)ap_work_post_ok[cpu],
@@ -433,7 +439,7 @@ static int ap_case_work(unsigned cpu)
 
 static void ap_case_admission(void)
 {
-    serial_printk("[ap-sched] phase=ap case=admission cpu=0 "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=admission cpu=0 "
                   "invalid_rejected=%lu zero_publish=%lu "
                   "unready_rejected=%lu unready_na=%lu\n",
                   (unsigned long)ap_admission_invalid_rejected,
@@ -493,7 +499,7 @@ static int ap_case_default_mask(void)
             kthread_yield();
         ap_to_ap = ap_cross_ok[2];
     }
-    serial_printk("[ap-sched] phase=ap case=default-mask cpu=0 "
+    serial_printk("[ap-sched] phase=" AP_PHASE " case=default-mask cpu=0 "
                   "default_cpu0=%lu ap_to_bsp=%lu bsp_to_ap=%lu "
                   "ap_to_ap=%lu na=%lu\n",
                   (unsigned long)default_cpu0,
@@ -506,43 +512,39 @@ static int ap_case_default_mask(void)
     return rc;
 }
 
+int test_aarch64_ap_scheduler_cases(void)
+{
+    const char *ids[] = { "ready", "entry", "yield", "reap", "work" };
+    int (*cases[])(unsigned) = { ap_case_ready, ap_case_entry, ap_case_yield,
+                                ap_case_reap, ap_case_work };
+    int failed = 0;
+    for (unsigned i = 0; i < 5; ++i) {
+        int result = 0;
+        for (unsigned cpu = 0; cpu < num_cpus; ++cpu)
+            result |= cases[i](cpu);
+        selftest_record_late(ids[i], result);
+        failed += result != 0;
+    }
+    ap_case_admission();
+    int admission = !(ap_admission_invalid_rejected && ap_admission_zero_publish &&
+        (num_cpus == 1 ? ap_admission_unready_na : ap_admission_unready_rejected));
+    selftest_record_late("admission", admission);
+    int placement = ap_case_default_mask();
+    selftest_record_late("default-mask", placement);
+    return failed + admission + (placement != 0);
+}
+
+#ifdef AARCH64_AP_SCHED_TEST_AP
 void test_aarch64_ap_scheduler_run(void)
 {
-    uint64_t accepted = aarch64_smp_accepted_mask();
     serial_printk("[ap-sched] START phase=ap cpus=%u accepted_mask=%lu\n",
-                  (unsigned)num_cpus, (unsigned long)accepted);
-
-    int failed = 0;
-    failed += ap_case_ready(0) != 0;
-    for (uint32_t cpu = 1; cpu < num_cpus; ++cpu)
-        failed += ap_case_ready(cpu) != 0;
-    failed += ap_case_entry(0) != 0;
-    for (uint32_t cpu = 1; cpu < num_cpus; ++cpu)
-        failed += ap_case_entry(cpu) != 0;
-    failed += ap_case_yield(0) != 0;
-    for (uint32_t cpu = 1; cpu < num_cpus; ++cpu)
-        failed += ap_case_yield(cpu) != 0;
-    failed += ap_case_reap(0) != 0;
-    for (uint32_t cpu = 1; cpu < num_cpus; ++cpu)
-        failed += ap_case_reap(cpu) != 0;
-    failed += ap_case_work(0) != 0;
-    for (uint32_t cpu = 1; cpu < num_cpus; ++cpu)
-        failed += ap_case_work(cpu) != 0;
-    ap_case_admission();
-    failed += ap_case_default_mask() != 0;
-
-    /* The single [TEST] END owner is selftest_end_run(); the
-     * [ap-sched] END envelope is written only by this driver. */
-    selftest_record_late("ready", 0);
-    selftest_record_late("entry", 0);
-    selftest_record_late("yield", 0);
-    selftest_record_late("reap", 0);
-    selftest_record_late("work", 0);
-    selftest_record_late("admission", 0);
-    selftest_record_late("default-mask", 0);
+                  (unsigned)num_cpus,
+                  (unsigned long)aarch64_smp_accepted_mask());
+    int failed = test_aarch64_ap_scheduler_cases();
     int end_failed = selftest_end_run();
     serial_printk("[ap-sched] END phase=ap failed=%u\n",
                   (unsigned)(failed + end_failed));
 }
+#endif /* AARCH64_AP_SCHED_TEST_AP */
 
-#endif /* aarch64 && OS01_SELFTEST && AARCH64_AP_SCHED_TEST_AP */
+#endif /* aarch64 && OS01_SELFTEST && (AP || WAKE) */

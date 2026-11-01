@@ -40,11 +40,10 @@ __asm__(".global aarch64_context_fatal_stack_top\n"
 
 _Static_assert(sizeof(task_t) + 256 + 16 < STACK_SIZE,
                "aarch64 task union has no usable context stack");
-/* P2 (spec §5.1): the resched SGI handler locates this CPU's
- * need_resched through TPIDR_EL1 + the ipi.h literal — pin the two
- * together here, where the real percpu_t is visible. */
+/* Pin the shared assembly-visible per-CPU layout; the SGI handler uses
+ * the real C field accessor, never a private copy of this offset. */
 _Static_assert(offsetof(percpu_t, need_resched) == PERCPU_NEED_RESCHED_OFFSET,
-               "ipi.c need-slot literal drifted from percpu_t.need_resched");
+               "per-CPU assembly offset drifted from percpu_t.need_resched");
 _Static_assert((STACK_SIZE & (STACK_SIZE - 1)) == 0,
                "stack mask requires a power-of-two stack size");
 
@@ -457,7 +456,7 @@ void arch_aarch64_bsp_handoff(void)
      * variant's runtime-admission check runs in the window where the
      * accepted APs are IPI-ready but not yet schedulable. */
     sched_boot_start();
-#ifdef AARCH64_AP_SCHED_TEST_AP
+#if defined(AARCH64_AP_SCHED_TEST_AP) || defined(AARCH64_AP_SCHED_WAKE_TEST)
     test_aarch64_ap_scheduler_before_release();
 #endif
     aarch64_ap_sched_release();
@@ -468,7 +467,11 @@ void arch_aarch64_bsp_handoff(void)
      * the cross-CPU barrier and park; the boot never completes. */
     test_aarch64_ap_fatal_owner_drive();
 #endif
-#if defined(AARCH64_AP_SCHED_TEST_AP)
+#if defined(AARCH64_AP_SCHED_WAKE_TEST)
+    /* The wake variant runs the P1-ready + six wake cases with the
+     * phase=wake envelope. */
+    test_aarch64_ap_scheduler_wake_run();
+#elif defined(AARCH64_AP_SCHED_TEST_AP)
     /* The AP production-path variant runs ONLY the seven frozen
      * ap-sched cases (the old suite's late probe is not run here). */
     test_aarch64_ap_scheduler_run();

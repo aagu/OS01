@@ -23,6 +23,7 @@
 #include <test_framework.h>
 #include <setjmp.h>
 #include <stdarg.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 /* NOTE: no <stdatomic.h> on this host config (wchar_t), same as the
@@ -46,6 +47,16 @@ void aarch64_sched_kick(unsigned cpu)
 
 static char log_buf[512];
 static size_t log_len;
+
+void ap_work_mock_log(const char *fmt, ...)
+{
+    char text[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    kputs(text);
+}
 
 void kputs(const char *s)
 {

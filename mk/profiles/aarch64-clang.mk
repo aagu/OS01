@@ -66,7 +66,7 @@ endif
 # the MODE=sched-ap surface: it must be a selftest build and it refuses
 # every other compile-affecting variant (old sched / M1 / sync-fault /
 # no-ack / canary / systest) exactly like AARCH64_SCHED_TEST does.
-AARCH64_AP_SCHED_TESTS_VALID := ap fatal-owner
+AARCH64_AP_SCHED_TESTS_VALID := ap wake fatal-owner
 ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
 ifeq ($(filter $(AARCH64_AP_SCHED_TEST),$(AARCH64_AP_SCHED_TESTS_VALID)),)
 $(error invalid AARCH64_AP_SCHED_TEST='$(AARCH64_AP_SCHED_TEST)'; valid: $(AARCH64_AP_SCHED_TESTS_VALID))
@@ -121,7 +121,11 @@ else ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 # harness's hardcoded AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}.
 KERNEL_VARIANT := $(if $(filter positive,$(AARCH64_SCHED_TEST)),sched,sched-fault-$(AARCH64_SCHED_TEST))
 else ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
+ifeq ($(filter wake,$(AARCH64_AP_SCHED_TEST)),wake)
+KERNEL_VARIANT := sched-wake
+else
 KERNEL_VARIANT := sched-ap$(if $(filter fatal-owner,$(AARCH64_AP_SCHED_TEST)),-fatal-owner)
+endif
 else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)

@@ -57,3 +57,6 @@ AARCH64_KERNEL_SCHED_AP_ELF     := $(BUILD_DIR)/kernel/sched-ap/kernel.elf
 AARCH64_UEFI_SCHED_AP_FATAL_DISK      := $(BUILD_DIR)/image/sched-ap-fatal-owner/aarch64-uefi.img
 AARCH64_UEFI_SCHED_AP_FATAL_FIRMWARE  := $(BUILD_DIR)/image/sched-ap-fatal-owner/QEMU_EFI.fd
 AARCH64_KERNEL_SCHED_AP_FATAL_ELF     := $(BUILD_DIR)/kernel/sched-ap-fatal-owner/kernel.elf
+AARCH64_UEFI_SCHED_WAKE_DISK      := $(BUILD_DIR)/image/sched-wake/aarch64-uefi.img
+AARCH64_UEFI_SCHED_WAKE_FIRMWARE  := $(BUILD_DIR)/image/sched-wake/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_WAKE_ELF     := $(BUILD_DIR)/kernel/sched-wake/kernel.elf
