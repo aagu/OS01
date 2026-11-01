@@ -101,8 +101,12 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertIn("test_runtime_udivti3", exit_status_ids)
         self.assertIn("test_page_table_runner", exit_status_ids)
 
-        # Full set check: 150 existing binaries plus three scheduler tests.
-        self.assertEqual(len(ids), 153, f"Expected 153 unique test binaries, got {len(ids)}")
+        # Full set check: the pinned count of registered host-test binaries.
+        # 153 at the ARCH-10 branch base (8bf0b9cd) plus the four binaries
+        # this branch added: test_irq_capacity (Task 2), test_nofile_limits
+        # (Task 5/6), test_poll_capacity and test_poll_nofile64 (Task 7).
+        # The pin stays a pin — it catches accidental additions/removals.
+        self.assertEqual(len(ids), 157, f"Expected 157 unique test binaries, got {len(ids)}")
         self.assertTrue({"test_switch_complete", "test_kthread_ctor",
                          "test_sched_layout_offsets"}.issubset(protocol_ids))
 

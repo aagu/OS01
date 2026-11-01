@@ -81,5 +81,5 @@ OS01 实行多层防护策略，每一层有明确的证明目标与局限性，
 ## 6. 场景目录 (`config/test-scenarios.json`) 维护契约
 
 - 场景目录记录全系统测试场景的设计映射（schema_version=1）。
-- 所有 150 个宿主测试二进制、静态审计工具、框架测试模块以及 guest suite 必须在目录中有对应的映射记录。
+- 所有 157 个宿主测试二进制、静态审计工具、框架测试模块以及 guest suite 必须在目录中有对应的映射记录。
 - 目录由 `python3 qemutests/scenario_catalog.py --check` 进行持续校验，作为 CI 与构建合规性门禁。

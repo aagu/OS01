@@ -386,6 +386,34 @@ TEST_FUNC(test_nofile64_admits_17_and_32_descriptors)
 #endif
 
 /* ============================================================
+ * Zero-descriptor semantics
+ * ============================================================ */
+
+TEST_FUNC(test_poll_zero_descriptors_allocates_no_pollfd_copy)
+{
+    reset_runtime();
+    setup_fds();
+
+    /* nfds == 0: the user array is not touched and the pollfd copy is
+     * NOT allocated; a non-positive timeout returns immediately. */
+    int64_t rc = do_poll(NULL, 0, 0);
+    assert_eq(0, rc);
+    assert_eq(0, kmalloc_calls);
+    assert_eq(0, schedule_calls);
+
+    /* A positive timeout still goes through the wait protocol — but
+     * still without a pollfd copy: only the wait entries (one internal
+     * slot) are allocated. */
+    rc = do_poll(NULL, 0, 100);
+    assert_eq(0, rc);
+    assert_eq(1, kmalloc_calls);
+    assert_eq((size_t)1 * sizeof(poll_wait_entry_t), kmalloc_sizes[0]);
+    assert_true(schedule_calls >= 1);
+    assert_true(fd_chains_empty());
+    assert_null(poll_timeout_head);
+}
+
+/* ============================================================
  * Wait-entry accounting
  * ============================================================ */
 
@@ -558,12 +586,31 @@ TEST_FUNC(test_every_kmalloc_failure_leaves_no_residue)
         kmalloc_fail_at = -1;
 
         assert_eq(-(int64_t)ENOMEM, got);
+        /* The call stops AT the failing allocation, so exactly
+         * fail_at + 1 allocations were attempted. */
+        assert_eq(fail_at + 1, kmalloc_calls);
         /* Every buffer that WAS allocated has been released again. */
         assert_all_allocations_released();
         assert_eq(0, schedule_calls);
         assert_true(fd_chains_empty());
         assert_null(poll_timeout_head);
     }
+
+    /* The do_poll path allocates exactly TWO buffers: the pollfd copy
+     * and the wait entries.  A third allocation would need a matching
+     * failure-injection point above — this assertion fails loudly if
+     * one appears. */
+    reset_runtime();
+    setup_fds();
+    struct pollfd pfds[1] = {
+        { .fd = 0, .events = POLLIN | POLLOUT, .revents = 0 },
+    };
+    int64_t got = do_poll(pfds, 1, 0);   /* non-blocking: nothing is ready */
+    assert_eq(0, got);
+    assert_eq(2, kmalloc_calls);
+    assert_all_allocations_released();
+    assert_true(fd_chains_empty());
+    assert_null(poll_timeout_head);
 }
 
 TEST_FUNC(test_input_copy_failure_leaves_no_residue)
@@ -665,6 +712,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_nofile64_admits_17_and_32_descriptors),
 #endif
     TEST_ENTRY(test_poll_rejects_a_null_array_before_the_count_check),
+    TEST_ENTRY(test_poll_zero_descriptors_allocates_no_pollfd_copy),
     TEST_ENTRY(test_every_descriptor_registers_two_wait_entries),
     TEST_ENTRY(test_duplicate_descriptors_are_charged_per_entry),
     TEST_ENTRY(test_poll_heap_allocates_both_buffers),

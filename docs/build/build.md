@@ -54,7 +54,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`; `intr-x86` builds its own isolated fault variants) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
-| `make test-static` | runtime / layout / canary / link-order audits (14 audits) | — |
+| `make test-static` | runtime / layout / canary / link-order audits (15 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|sched\|m1-*` | AArch64 PSCI / GIC / sync-fault / scheduler acceptance harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
@@ -624,7 +624,7 @@ make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 
 make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
 make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
-make test-static                    # 14 项静态审计
+make test-static                    # 15 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
 make PROFILE=aarch64-clang test-aarch64 MODE=sched  # EL1 调度器验收（正例矩阵 + 四个故障注入变体）
