@@ -85,6 +85,11 @@ jobs:
           git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
       - name: Framework regression (no QEMU)
+        # test_gui_runner takes ~292s of the default 300s per-module
+        # budget on a good runner; give the QEMU-booting fixtures real
+        # headroom on loaded shared runners.
+        env:
+          HARNESS_MODULE_TIMEOUT: 600
         run: make test-harness
 
   # ── x86_64 test surface (PR + push) ───────────────────────────
