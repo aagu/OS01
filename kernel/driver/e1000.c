@@ -10,6 +10,10 @@
 #include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page, free_pages, free_4k_page
 #include <memory/memory.h>    // Phy_To_Virt
 #include <intr/interrupt.h> // register_irq, unregister_irq
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
+#include <arch/x86_64/irq_route.h>
+#include <arch/x86_64/intr_vectors.h>
+#endif
 #include <arch/spinlock.h>
 #include <arch/barrier.h>
 #include <log/log.h>
@@ -439,40 +443,28 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
     pdev->driver_data = inst;
 
     // Interrupt mode selection:
-    // 1. Try MSI-X on vector 0x30 / GSI 16
-    bool msix_ok = (pci_msix_enable(pdev, 0x30) == 0);
-    if (msix_ok) {
-        uint32_t gsi_to_register = 16;
-        /* ARCH-9 Task 11: irq-conflict fault.  When this is the
-         * SECOND NIC probe, redirect its candidate GSI to the
-         * first card's already-held slot so the natural
-         * register_irq "already occupied" rejection path runs.
-         * register_irq returns 0 in that case; the existing
-         * failure path falls through to INTx / POLL. */
-        if (arch9_fault_should_force_irq_conflict() &&
-            arch9_fault_get_nic_probe_count() >= 1) {
-            gsi_to_register = arch9_fault_get_first_card_gsi();
-            log_info("e1000: irq-conflict fault: redirecting GSI %u to first-card slot %u\n",
-                      16, gsi_to_register);
-        }
-        int irq_res = register_irq(gsi_to_register, NULL, &e1000_handler,
-                                   (uint64_t)(uintptr_t)inst,
-                                   IRQF_TRIGGER_LEVEL, "e1000");
-        if (irq_res == 1) {
+    // 1. Try fixed MSI-X on vector 0x39 (X86_VECTOR_FIXED_MSIX)
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
+    int msix_reg = x86_fixed_msix_register(pdev, &e1000_handler, (uint64_t)(uintptr_t)inst);
+    if (msix_reg == 0) {
+        int prep_rc = pci_msix_prepare(pdev, (uint8_t)X86_VECTOR_FIXED_MSIX);
+        int unmask_rc = (prep_rc == 0) ? pci_msix_unmask(pdev) : prep_rc;
+        if (prep_rc == 0 && unmask_rc == 0) {
             inst->irq_mode = NIC_MSIX;
-            inst->gsi = gsi_to_register;
-            inst->irq_owned = true;
-            arch9_fault_record_card_gsi(gsi_to_register);
+            inst->gsi = 0;
+            inst->msix_owned = true;
+            inst->irq_owned = false;
+            arch9_fault_record_card_msix();
         } else {
-            // MSI-X enable succeeded on PCI device but GSI 16 is occupied;
-            // disable MSI-X and restore INTx before falling back.
             pci_interrupts_disable(pdev);
             pci_set_intx(pdev, true);
+            x86_fixed_msix_unregister(pdev);
         }
     }
+#endif
 
-    // 2. If GSI 16 occupied or MSI-X failed, try INTx
-    if (!inst->irq_owned) {
+    // 2. If MSI-X not owned, try INTx
+    if (!inst->msix_owned) {
         uint32_t intx_gsi = 0;
         if (pci_route_gsi(pdev, &intx_gsi) == 0) {
             uint32_t gsi_to_register = intx_gsi;
@@ -496,16 +488,18 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
                 inst->irq_mode = NIC_INTX;
                 inst->gsi = gsi_to_register;
                 inst->irq_owned = true;
+                inst->msix_owned = false;
                 arch9_fault_record_card_gsi(gsi_to_register);
             }
         }
     }
 
-    // 3. Fallback to POLL if both occupied / unavailable
-    if (!inst->irq_owned) {
+    // 3. Fallback to POLL if neither MSI-X nor INTx acquired
+    if (!inst->msix_owned && !inst->irq_owned) {
         inst->irq_mode = NIC_POLL;
         inst->gsi = 0;
         inst->irq_owned = false;
+        inst->msix_owned = false;
         e1000_write(inst, E1000_REG_IMC, 0xFFFFFFFF);
         pci_set_intx(pdev, false);
     } else {
@@ -581,6 +575,12 @@ err_unwind_irq:
     e1000_write(inst, E1000_REG_RCTL, 0);
     e1000_write(inst, E1000_REG_TCTL, 0);
     pci_interrupts_disable(pdev);
+    if (inst->msix_owned) {
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
+        x86_fixed_msix_unregister(pdev);
+#endif
+        inst->msix_owned = false;
+    }
     if (inst->irq_owned) {
         unregister_irq(inst->gsi);
         inst->irq_owned = false;
@@ -612,6 +612,12 @@ void e1000_remove(struct pci_device *pdev)
     pci_interrupts_disable(pdev);
 
     // 2. Revoke own IRQ
+    if (inst->msix_owned) {
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
+        x86_fixed_msix_unregister(pdev);
+#endif
+        inst->msix_owned = false;
+    }
     if (inst->irq_owned) {
         unregister_irq(inst->gsi);
         inst->irq_owned = false;
@@ -695,13 +701,27 @@ int e1000_legacy_init(struct pci_device *pdev, uint64_t bar, uint8_t gsi, int us
         pdev->driver_data = inst;
     }
 
-    uint8_t reg_gsi = use_msi ? 16 : gsi;
-    inst->gsi = reg_gsi;
-    inst->irq_mode = use_msi ? NIC_MSIX : NIC_INTX;
-
-    register_irq(reg_gsi, NULL, &e1000_handler, (uint64_t)(uintptr_t)inst,
-                 IRQF_TRIGGER_LEVEL, "e1000");
-    inst->irq_owned = true;
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
+    if (use_msi) {
+        inst->gsi = 0;
+        inst->irq_mode = NIC_MSIX;
+        x86_fixed_msix_register(pdev ? (const void *)pdev : (const void *)inst, &e1000_handler, (uint64_t)(uintptr_t)inst);
+        if (pdev) {
+            pci_msix_prepare(pdev, (uint8_t)X86_VECTOR_FIXED_MSIX);
+            pci_msix_unmask(pdev);
+        }
+        inst->msix_owned = true;
+        inst->irq_owned = false;
+    } else
+#endif
+    {
+        inst->gsi = gsi;
+        inst->irq_mode = NIC_INTX;
+        register_irq(gsi, NULL, &e1000_handler, (uint64_t)(uintptr_t)inst,
+                     IRQF_TRIGGER_LEVEL, "e1000");
+        inst->irq_owned = true;
+        inst->msix_owned = false;
+    }
 
     if (use_msi) {
         e1000_write(inst, E1000_REG_IVAR,
@@ -721,7 +741,7 @@ int e1000_legacy_init(struct pci_device *pdev, uint64_t bar, uint8_t gsi, int us
     log_info("e1000: MAC %02x:%02x:%02x:%02x:%02x:%02x IRQ=%u%s\n",
                 inst->mac[0], inst->mac[1], inst->mac[2],
                 inst->mac[3], inst->mac[4], inst->mac[5],
-                reg_gsi, use_msi ? " (MSI-X v0x30)" : "");
+                inst->gsi, use_msi ? " (MSI-X v0x39)" : "");
     return 0;
 }
 

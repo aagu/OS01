@@ -98,7 +98,7 @@ test-socket: $(TEST_BLD)/test_socket_net_readiness.elf
 	$<
 
 # ARCH-9 Phase C: e1000 private instance and IRQ modes
-E1000_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+E1000_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
     -include $(TEST_MOCK)/arch9/e1000_runtime.h -DOS01_HOST_TEST
 
 $(TEST_BLD)/e1000_production.o: $(TESTS_DIR)/kernel/driver/e1000.c
@@ -117,8 +117,9 @@ $(TEST_BLD)/test_e1000_instances.elf: $(TEST_BLD)/test_e1000_instances.o \
     $(TEST_BLD)/pci_match_production.o \
     $(TEST_BLD)/pci_platform_production.o \
     $(TEST_BLD)/irq_production.o \
+    $(TEST_BLD)/irq_route_production.o \
     $(LIBC_OBJS)
-	$(HOST_CC) -o $@ $^
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 .PHONY: test-e1000
 test-e1000: $(TEST_BLD)/test_e1000_instances.elf

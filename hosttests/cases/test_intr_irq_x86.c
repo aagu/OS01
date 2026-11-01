@@ -113,7 +113,7 @@ static void reset(void) {
 }
 static void expect_bad(struct intr_event *, pt_regs_t *);
 static void enter(pt_regs_t *r, uint64_t v) {
-    if (v >= 0x20 && v <= 0x37)
+    if ((v >= 0x20 && v <= 0x37) || v == 0x39)
         arch_irq_dispatch(r, v);
     else if (v == 0x40 || v == 0x41)
         generic_intr_dispatch(r, v);
@@ -287,7 +287,7 @@ TEST_FUNC(backend_revalidates_every_field_and_vector) {
     BAD(native_status, 1);
     BAD(native_address, 1);
 #undef BAD
-    static const uint64_t bad[] = {0,    14,   0x1f, 0x39,  0x3a,      0x3f,
+    static const uint64_t bad[] = {0,    14,   0x1f, 0x3a,      0x3f,
                                    0x80, 0xfe, 0x100, UINT64_MAX};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         x86_intr_decode_irq(&e, &r, bad[i]);

@@ -167,6 +167,7 @@ void arch_intr_handle_irq(const struct intr_event *event, pt_regs_t *regs)
 
     uint64_t vector = event->native_vector;
     if ((vector >= X86_VECTOR_DEVICE_FIRST && vector <= X86_VECTOR_DEVICE_LAST) ||
+        vector == X86_VECTOR_FIXED_MSIX ||
         (vector >= X86_VECTOR_DEVICE_EXT_FIRST && vector <= X86_VECTOR_DEVICE_EXT_LAST)) {
         x86_handle_device_irq(regs, vector);
         return;

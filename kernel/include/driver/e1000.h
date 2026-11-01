@@ -161,6 +161,7 @@ struct e1000_instance {
     enum nic_irq_mode  irq_mode;
     uint32_t           gsi;
     bool               irq_owned;
+    bool               msix_owned;
     bool               legacy_mode;
 
     // Descriptors and DMA

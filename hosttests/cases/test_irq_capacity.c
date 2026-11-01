@@ -186,6 +186,7 @@ static void reset_test_state(void)
     s_mock_iso_active = false;
     memset(g_pin_accessed, 0, sizeof(g_pin_accessed));
     x86_irq_routes_reset();
+    x86_fixed_msix_reset();
 }
 
 /* 1. Sparse ranges are bounded in memory and queryable */
@@ -686,6 +687,175 @@ TEST_FUNC(apic_failure_stops_dependent_phases)
     assert_eq(1, s_phase6_calls);
 }
 
+extern uint32_t g_lapic_eoi_count;
+
+void x86_handle_device_irq(pt_regs_t *regs, uint64_t hwirq)
+{
+    if (hwirq == 0x39) {
+        x86_fixed_msix_dispatch(regs, hwirq);
+        return;
+    }
+    uint32_t gsi = arch_irq_vector_to_gsi(hwirq);
+    if (gsi == UINT32_MAX) return;
+    irq_desc_t *irq = irq_desc_for_gsi(gsi);
+    if (!irq) return;
+    if (irq->handler != NULL) {
+        irq->handler(hwirq, irq->parameter, regs);
+    }
+    if (irq->controller != NULL && irq->controller->ack != NULL) {
+        irq->controller->ack(hwirq);
+    } else {
+        lapic_eoi();
+    }
+}
+
+static int s_gsi16_handler_calls = 0;
+static void mock_gsi16_handler(uint64_t vector, uint64_t param, pt_regs_t *regs)
+{
+    (void)vector; (void)param; (void)regs;
+    s_gsi16_handler_calls++;
+}
+
+static int s_msix_handler_calls = 0;
+static uint64_t s_msix_seen_vector = 0;
+static uint64_t s_msix_seen_param = 0;
+static void mock_msix_handler(uint64_t vector, uint64_t param, pt_regs_t *regs)
+{
+    (void)regs;
+    s_msix_handler_calls++;
+    s_msix_seen_vector = vector;
+    s_msix_seen_param = param;
+}
+
+/* 11. MSI-X vector 0x39 and real GSI16/0x30 coexist independently */
+TEST_FUNC(message_and_gsi16_are_independent)
+{
+    reset_test_state();
+
+    struct irq_gsi_range ranges[] = {
+        { .base = 0, .count = 24 }
+    };
+    assert_eq(0, irq_registry_init_ranges(ranges, 1));
+    assert_eq(0, x86_irq_routes_init(ranges, 1));
+
+    /* Register real GSI 16 (0x30) */
+    s_gsi16_handler_calls = 0;
+    int rc = register_irq(16, &s_mock_controller, mock_gsi16_handler, 0x1616,
+                          IRQF_TRIGGER_LEVEL, "test_gsi16");
+    assert_eq(1, rc);
+
+    /* Register fixed MSI-X on vector 0x39 with owner &dummy_dev1 */
+    int dummy_dev1 = 1;
+    s_msix_handler_calls = 0;
+    s_msix_seen_vector = 0;
+    s_msix_seen_param = 0;
+    rc = x86_fixed_msix_register(&dummy_dev1, mock_msix_handler, 0xCAFE);
+    assert_eq(0, rc);
+
+    static uint32_t mock_lapic[1024];
+    memset(mock_lapic, 0, sizeof(mock_lapic));
+    apic_info.lapic_base = (uint64_t)(uintptr_t)mock_lapic;
+    g_lapic_eoi_count = 0;
+    g_ctrl_install_calls = g_ctrl_uninstall_calls = 0;
+    g_ctrl_enable_calls = g_ctrl_disable_calls = 0;
+    g_last_vector = 0;
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+
+    /* 1. Trigger GSI 16 (vector 0x30) */
+    x86_handle_device_irq(&regs, 0x30);
+    assert_eq(1, s_gsi16_handler_calls);
+    assert_eq(0, s_msix_handler_calls);
+    assert_eq(0x30, g_last_vector); /* controller ack operated */
+
+    /* 2. Trigger fixed MSI-X (vector 0x39) */
+    g_last_vector = 0;
+    g_lapic_eoi_count = 0;
+    int prev_install = g_ctrl_install_calls;
+    int prev_uninstall = g_ctrl_uninstall_calls;
+    int prev_enable = g_ctrl_enable_calls;
+    int prev_disable = g_ctrl_disable_calls;
+
+    x86_handle_device_irq(&regs, 0x39);
+    assert_eq(1, s_gsi16_handler_calls); /* GSI 16 not called again */
+    assert_eq(1, s_msix_handler_calls);
+    assert_eq(0x39, s_msix_seen_vector);
+    assert_eq(0xCAFE, s_msix_seen_param);
+    assert_eq(0, g_last_vector); /* IOAPIC ack NOT touched */
+    assert_eq(prev_install, g_ctrl_install_calls);
+    assert_eq(prev_uninstall, g_ctrl_uninstall_calls);
+    assert_eq(prev_enable, g_ctrl_enable_calls);
+    assert_eq(prev_disable, g_ctrl_disable_calls);
+    assert_eq(1, g_lapic_eoi_count); /* exactly 1 LAPIC EOI */
+
+    /* Unregister fixed MSI-X, GSI16 remains unaffected */
+    assert_eq(0, x86_fixed_msix_unregister(&dummy_dev1));
+    irq_desc_t *desc16 = irq_desc_for_gsi(16);
+    assert_true(desc16 != NULL);
+    assert_true(desc16->handler == mock_gsi16_handler);
+
+    unregister_irq(16);
+}
+
+/* 12. Unregistering fixed MSI-X suppresses late delivery and retains reservation */
+TEST_FUNC(message_slot_late_delivery)
+{
+    reset_test_state();
+
+    struct irq_gsi_range ranges[] = {
+        { .base = 0, .count = 24 }
+    };
+    assert_eq(0, irq_registry_init_ranges(ranges, 1));
+    assert_eq(0, x86_irq_routes_init(ranges, 1));
+
+    static uint32_t mock_lapic[1024];
+    memset(mock_lapic, 0, sizeof(mock_lapic));
+    apic_info.lapic_base = (uint64_t)(uintptr_t)mock_lapic;
+    g_lapic_eoi_count = 0;
+
+    int dummy_dev1 = 1;
+    int dummy_dev2 = 2;
+
+    s_msix_handler_calls = 0;
+    s_msix_seen_param = 0;
+
+    /* Register owner 1 */
+    assert_eq(0, x86_fixed_msix_register(&dummy_dev1, mock_msix_handler, 0x1111));
+
+    /* Owner 2 attempts to register while registered -> rejected */
+    assert_true(x86_fixed_msix_register(&dummy_dev2, mock_msix_handler, 0x2222) != 0);
+
+    /* Unregister owner 1 */
+    assert_eq(0, x86_fixed_msix_unregister(&dummy_dev1));
+
+    /* Owner 2 attempts to register after unregister -> still rejected! Slot reserved for owner 1 */
+    assert_true(x86_fixed_msix_register(&dummy_dev2, mock_msix_handler, 0x2222) != 0);
+
+    /* Late delivery: message arrives on vector 0x39 after unregister */
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    g_lapic_eoi_count = 0;
+    s_msix_handler_calls = 0;
+    s_msix_seen_param = 0;
+
+    x86_handle_device_irq(&regs, 0x39);
+    assert_eq(0, s_msix_handler_calls); /* old handler NOT called */
+    assert_eq(0, s_msix_seen_param);   /* old param NOT called */
+    assert_eq(1, g_lapic_eoi_count);   /* safe LAPIC EOI performed */
+
+    /* Same owner (owner 1) can re-register */
+    assert_eq(0, x86_fixed_msix_register(&dummy_dev1, mock_msix_handler, 0x3333));
+    g_lapic_eoi_count = 0;
+    s_msix_handler_calls = 0;
+    x86_handle_device_irq(&regs, 0x39);
+    assert_eq(1, s_msix_handler_calls);
+    assert_eq(0x3333, s_msix_seen_param);
+    assert_eq(1, g_lapic_eoi_count);
+
+    x86_fixed_msix_unregister(&dummy_dev1);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(sparse_ranges_are_bounded),
     TEST_ENTRY(range_validation_rejections),
@@ -697,6 +867,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(x86_irq_routes_allocation_and_vector_bounds),
     TEST_ENTRY(iso_single_conversion_and_pin_tracking),
     TEST_ENTRY(apic_failure_stops_dependent_phases),
+    TEST_ENTRY(message_and_gsi16_are_independent),
+    TEST_ENTRY(message_slot_late_delivery),
 TEST_LIST_END
 
 int main(void)

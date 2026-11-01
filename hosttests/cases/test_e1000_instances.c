@@ -6,6 +6,7 @@
 #include <net/device.h>
 #include <driver/e1000.h>
 #include <intr/interrupt.h>
+#include <arch/x86_64/irq_route.h>
 #include <arch/pci.h>
 #include <errno.h>
 #include <string.h>
@@ -87,7 +88,9 @@ void test_e1000_mmio_write_hook(void *inst_ptr, uint32_t reg, uint32_t val)
         if (inst && inst->pdev && inst->pdev->driver_data == inst) {
             s_driver_data_set_at_ims = true;
         }
-        if (inst && inst->irq_owned && irq_table[inst->gsi].handler != NULL) {
+        if (inst && inst->msix_owned && x86_fixed_msix_is_registered()) {
+            s_handler_registered_at_ims = true;
+        } else if (inst && inst->irq_owned && irq_table[inst->gsi].handler != NULL) {
             s_handler_registered_at_ims = true;
         }
     }
@@ -208,14 +211,35 @@ int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector)
     return 0;
 }
 
+/* ── LAPIC mock ──────────────────────────────────────────────────── */
+uint32_t g_lapic_eoi_count = 0;
+void lapic_eoi(void)
+{
+    g_lapic_eoi_count++;
+}
+
 /* ── Mock PCI backend & MSI-X mapping ────────────────────────────── */
 static uint32_t s_fake_msix_table[16];
+static bool s_inject_msix_map_fail = false;
+static int s_msix_map_fail_after = -1;
+static int s_msix_map_call_count = 0;
 
 int arch_pci_msix_map(const struct pci_device *pdev, uint64_t table_phys, void **out_virt)
 {
     (void)pdev; (void)table_phys;
+    s_msix_map_call_count++;
+    if (s_inject_msix_map_fail) return -ENOMEM;
+    if (s_msix_map_fail_after >= 0) {
+        if (s_msix_map_fail_after == 0) return -ENOMEM;
+        s_msix_map_fail_after--;
+    }
     if (out_virt) *out_virt = s_fake_msix_table;
     return 0;
+}
+
+void arch_pci_msix_unmap(const struct pci_device *pdev, void *virt)
+{
+    (void)pdev; (void)virt;
 }
 
 #define MAX_CONFIG_DEVS 4
@@ -321,6 +345,11 @@ static void reset_test_state(void)
     s_inject_alloc_pages_fail = false;
     s_inject_alloc_4k_fail_after = -1;
     s_inject_net_register_fail = false;
+    s_inject_msix_map_fail = false;
+    s_msix_map_fail_after = -1;
+    s_msix_map_call_count = 0;
+    memset(s_fake_msix_table, 0, sizeof(s_fake_msix_table));
+    x86_fixed_msix_reset();
     s_ims_written = false;
     s_driver_data_set_at_ims = false;
     s_handler_registered_at_ims = false;
@@ -386,8 +415,8 @@ static void test_success_remove_one_of_two(void)
     reset_test_state();
 
     struct fake_e1000_fixture fix1, fix2;
-    setup_fixture(&fix1, 1); // slot 1 gets GSI 16 (MSI-X)
-    setup_fixture(&fix2, 2); // slot 2 gets GSI 12 (INTx because 16 is occupied)
+    setup_fixture(&fix1, 1); // slot 1 gets fixed MSI-X (vector 0x39)
+    setup_fixture(&fix2, 2); // slot 2 gets GSI 12 (INTx because fixed MSI-X slot is occupied)
 
     int rc1 = e1000_probe(&fix1.pdev, &e1000_pci_driver.id_table[0]);
     assert_eq(0, rc1);
@@ -396,9 +425,14 @@ static void test_success_remove_one_of_two(void)
 
     struct e1000_instance *inst1 = (struct e1000_instance *)fix1.pdev.driver_data;
     struct e1000_instance *inst2 = (struct e1000_instance *)fix2.pdev.driver_data;
-    assert_eq(16, inst1->gsi);
-    assert_eq(12, inst2->gsi);
+    assert_eq(0, inst1->gsi);
+    assert_true(inst1->msix_owned);
+    assert_eq(false, inst1->irq_owned);
     assert_eq(NIC_MSIX, inst1->irq_mode);
+
+    assert_eq(12, inst2->gsi);
+    assert_true(inst2->irq_owned);
+    assert_eq(false, inst2->msix_owned);
     assert_eq(NIC_INTX, inst2->irq_mode);
 
     uint32_t frees_before_remove = fake_free_pages_count + fake_free_4k_count;
@@ -408,7 +442,8 @@ static void test_success_remove_one_of_two(void)
 
     // Verify instance 1 is fully dismantled
     assert_eq(NULL, fix1.pdev.driver_data);
-    assert_eq(NULL, irq_table[16].handler); // Only instance 1's IRQ revoked
+    assert_eq(false, x86_fixed_msix_is_registered()); // Fixed MSI-X revoked
+    assert_eq(NULL, irq_table[16].handler); // Real GSI 16 was never touched
     uint32_t frees_after_remove = fake_free_pages_count + fake_free_4k_count;
     assert_true(frees_after_remove > frees_before_remove); // DMA freed
 
@@ -434,17 +469,19 @@ static void test_poll_mode_does_not_register_irq(void)
     struct fake_e1000_fixture fix;
     setup_fixture(&fix, 1); // candidate INTx GSI is 1 + 10 = 11
 
-    // Pre-occupy slot 16 (first_gsi) with first_handler
-    uint32_t first_gsi = 16;
-    void (*first_handler)(uint64_t, uint64_t, pt_regs_t *) = (void *)0x11111111;
-    irq_table[first_gsi].handler = first_handler;
+    // Pre-occupy fixed MSI-X slot with dummy owner
+    struct pci_device other_dev;
+    memset(&other_dev, 0, sizeof(other_dev));
+    other_dev.dev.id = 999;
+    int reg_rc = x86_fixed_msix_register(&other_dev, (void *)0x11111111, 0x1234);
+    assert_eq(0, reg_rc);
 
     // Pre-occupy candidate INTx slot 11 with candidate_handler
     uint32_t intx_gsi = 11;
     void (*cand_handler)(uint64_t, uint64_t, pt_regs_t *) = (void *)0x22222222;
     irq_table[intx_gsi].handler = cand_handler;
 
-    // Probe e1000: both slots occupied -> should enter NIC_POLL
+    // Probe e1000: fixed MSI-X held by other_dev, INTx occupied -> should enter NIC_POLL
     int rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
     assert_eq(0, rc);
 
@@ -456,16 +493,19 @@ static void test_poll_mode_does_not_register_irq(void)
 
     assert_eq(NIC_POLL, second_irq_mode);
     assert_eq(0, second_irq_owned);
-    assert_eq(first_handler, irq_table[first_gsi].handler);
+    assert_eq(false, inst->msix_owned);
     assert_eq(cand_handler, irq_table[intx_gsi].handler);
+    assert_true(x86_fixed_msix_is_registered());
 
     // Verify IMC disabled device interrupt sources
     uint32_t imc = *(volatile uint32_t *)(fix.mmio_space + E1000_REG_IMC);
     assert_eq(0xFFFFFFFF, imc);
 
     e1000_remove(&fix.pdev);
+    // After removing fix, other_dev must STILL own the slot!
+    assert_true(x86_fixed_msix_is_registered());
 
-    // Second subcase: MSI-X slot 16 occupied, BUT candidate INTx slot 11 is FREE
+    // Second subcase: candidate INTx slot 11 is FREE, but fixed MSI-X still held by other_dev
     irq_table[intx_gsi].handler = NULL;
     rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
     assert_eq(0, rc);
@@ -474,9 +514,11 @@ static void test_poll_mode_does_not_register_irq(void)
     assert_eq(NIC_INTX, inst->irq_mode);
     assert_eq(1, inst->irq_owned);
     assert_eq(11, inst->gsi);
-    assert_eq(first_handler, irq_table[first_gsi].handler);
+    assert_eq(false, inst->msix_owned);
+    assert_true(x86_fixed_msix_is_registered());
 
     e1000_remove(&fix.pdev);
+    x86_fixed_msix_unregister(&other_dev);
     teardown_fixture(&fix);
 }
 
@@ -494,7 +536,9 @@ static void test_enable_after_owner_ready(void)
 
     struct e1000_instance *inst = (struct e1000_instance *)fix.pdev.driver_data;
     assert_true(inst != NULL);
-    assert_true(inst->irq_owned);
+    assert_true(inst->msix_owned);
+    assert_false(inst->irq_owned);
+    assert_eq(0, inst->gsi);
     assert_true(s_ims_written);
     assert_true(s_driver_data_set_at_ims);
     assert_true(s_handler_registered_at_ims);
@@ -540,7 +584,7 @@ static void test_probe_failure_unwinds(void)
     rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
     assert_true(rc != 0);
     assert_eq(NULL, fix.pdev.driver_data);
-    assert_eq(NULL, irq_table[16].handler);
+    assert_eq(false, x86_fixed_msix_is_registered());
     assert_eq(0xFFFFFFFF, *(volatile uint32_t *)(fix.mmio_space + E1000_REG_IMC));
     s_inject_net_register_fail = false;
 
@@ -572,9 +616,12 @@ static void test_rx_single_consumer(void)
 
     fake_sys_mbox_wake_count = 0;
 
-    // Fire interrupt handler
-    assert_true(irq_table[inst->gsi].handler != NULL);
-    irq_table[inst->gsi].handler(0x30, (uint64_t)(uintptr_t)inst, NULL);
+    // Fire interrupt handler via fixed MSI-X dispatch
+    assert_true(inst->msix_owned);
+    assert_true(x86_fixed_msix_is_registered());
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    x86_fixed_msix_dispatch(&regs, 0x39);
 
     // Verify handler woke receiver but DID NOT consume descriptor
     assert_eq(1, fake_sys_mbox_wake_count);
@@ -611,6 +658,97 @@ static void test_unsupported_id_no_probe(void)
     teardown_fixture(&fix);
 }
 
+/* ── Test 8: Probe sequence and step-by-step fault injection ─────── */
+static void test_probe_order_and_step_faults(void)
+{
+    TEST_CASE("Strict probe sequence (register -> prepare -> unmask -> IMS) and step fault unwinding");
+    reset_test_state();
+
+    struct fake_e1000_fixture fix;
+    setup_fixture(&fix, 1);
+
+    // 1. Normal sequence verification
+    int rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
+    assert_eq(0, rc);
+    struct e1000_instance *inst = (struct e1000_instance *)fix.pdev.driver_data;
+    assert_true(inst != NULL);
+    assert_eq(NIC_MSIX, inst->irq_mode);
+    assert_true(inst->msix_owned);
+    assert_true(x86_fixed_msix_is_registered());
+    assert_true(s_ims_written);
+    assert_true(s_driver_data_set_at_ims);
+    assert_true(s_handler_registered_at_ims);
+    /* MSI-X table entry 0 unmasked */
+    assert_eq(0, s_fake_msix_table[3]);
+    assert_true(s_msix_map_call_count >= 2);
+
+    e1000_remove(&fix.pdev);
+    assert_eq(false, x86_fixed_msix_is_registered());
+
+    // Fixed MSI-X remains reserved for fix.pdev even after unregister
+    struct pci_device other_dev;
+    memset(&other_dev, 0, sizeof(other_dev));
+    other_dev.dev.id = 888;
+    int steal_rc = x86_fixed_msix_register(&other_dev, (void *)0x33333333, 0x5678);
+    assert_eq(-EBUSY, steal_rc);
+
+    // 2. Step Fault A: Registration collision (other owner holds fixed slot)
+    // Must NOT steal or unregister other owner; must fallback to INTx
+    reset_test_state();
+    int reg_rc = x86_fixed_msix_register(&other_dev, (void *)0x33333333, 0x5678);
+    assert_eq(0, reg_rc);
+
+    rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
+    assert_eq(0, rc);
+    inst = (struct e1000_instance *)fix.pdev.driver_data;
+    assert_true(inst != NULL);
+    assert_eq(NIC_INTX, inst->irq_mode);
+    assert_false(inst->msix_owned);
+    assert_true(inst->irq_owned);
+    assert_eq(11, inst->gsi);
+    // Other owner unaffected
+    assert_true(x86_fixed_msix_is_registered());
+
+    e1000_remove(&fix.pdev);
+    assert_true(x86_fixed_msix_is_registered());
+    x86_fixed_msix_unregister(&other_dev);
+    assert_false(x86_fixed_msix_is_registered());
+
+    // 3. Step Fault B: prepare fails (mapping failure on prepare)
+    // Slot was acquired by fix.pdev, but prepare failed.
+    // Must stop interrupts, unregister slot, and fall back to INTx.
+    reset_test_state();
+    s_inject_msix_map_fail = true;
+    rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
+    assert_eq(0, rc);
+    inst = (struct e1000_instance *)fix.pdev.driver_data;
+    assert_true(inst != NULL);
+    assert_eq(NIC_INTX, inst->irq_mode);
+    assert_false(inst->msix_owned);
+    assert_true(inst->irq_owned);
+    assert_eq(11, inst->gsi);
+    assert_false(x86_fixed_msix_is_registered()); // Unregistered on failure!
+    s_inject_msix_map_fail = false;
+    e1000_remove(&fix.pdev);
+
+    // 4. Step Fault C: unmask fails (mapping failure on unmask, call 2)
+    reset_test_state();
+    s_msix_map_fail_after = 1; // 1st call (prepare) succeeds, 2nd call (unmask) fails
+    rc = e1000_probe(&fix.pdev, &e1000_pci_driver.id_table[0]);
+    assert_eq(0, rc);
+    inst = (struct e1000_instance *)fix.pdev.driver_data;
+    assert_true(inst != NULL);
+    assert_eq(NIC_INTX, inst->irq_mode);
+    assert_false(inst->msix_owned);
+    assert_true(inst->irq_owned);
+    assert_eq(11, inst->gsi);
+    assert_false(x86_fixed_msix_is_registered()); // Unregistered on failure!
+    s_msix_map_fail_after = -1;
+    e1000_remove(&fix.pdev);
+
+    teardown_fixture(&fix);
+}
+
 /* ── Main Runner ─────────────────────────────────────────────────── */
 int main(void)
 {
@@ -623,6 +761,7 @@ int main(void)
     test_probe_failure_unwinds();
     test_rx_single_consumer();
     test_unsupported_id_no_probe();
+    test_probe_order_and_step_faults();
 
     printf("\n>>> ALL e1000 TESTS PASSED <<<\n");
     return 0;

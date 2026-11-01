@@ -63,6 +63,9 @@ Build_IRQ(12, 0x2c); Build_IRQ(13, 0x2d); Build_IRQ(14, 0x2e); Build_IRQ(15, 0x2
 Build_IRQ(16, 0x30); Build_IRQ(17, 0x31); Build_IRQ(18, 0x32); Build_IRQ(19, 0x33);
 Build_IRQ(20, 0x34); Build_IRQ(21, 0x35); Build_IRQ(22, 0x36); Build_IRQ(23, 0x37);
 
+// Fixed MSI-X slot (vector 0x39, nr = 25)
+Build_IRQ(25, 0x39);
+
 // Extended device IRQ pool: 0x42..0x7f (62 vectors, nr = vector - 32)
 Build_IRQ(34, 0x42); Build_IRQ(35, 0x43); Build_IRQ(36, 0x44); Build_IRQ(37, 0x45);
 Build_IRQ(38, 0x46); Build_IRQ(39, 0x47); Build_IRQ(40, 0x48); Build_IRQ(41, 0x49);
@@ -94,6 +97,8 @@ void arch_irq_install(void) {
     _irq_install_12(); _irq_install_13(); _irq_install_14(); _irq_install_15();
     _irq_install_16(); _irq_install_17(); _irq_install_18(); _irq_install_19();
     _irq_install_20(); _irq_install_21(); _irq_install_22(); _irq_install_23();
+
+    _irq_install_25();
 
     _irq_install_34(); _irq_install_35(); _irq_install_36(); _irq_install_37();
     _irq_install_38(); _irq_install_39(); _irq_install_40(); _irq_install_41();

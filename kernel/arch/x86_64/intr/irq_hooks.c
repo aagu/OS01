@@ -19,6 +19,7 @@
 #include <intr/apic.h>                  // apic_available, ioapic_available, get_ioapic_controller
 #include <intr/pic.h>                   // get_pic_controller
 #include <intr/interrupt.h>             // hw_int_controller_t
+#include <arch/x86_64/intr_vectors.h>
 #include <arch/x86_64/irq_route.h>       // x86_irq_route_*
 #include <core/debug.h>                 // debug_irq
 #include <log/log.h>                    // log_err (for spurious-vector log)
@@ -94,6 +95,10 @@ void x86_handle_device_irq(pt_regs_t *regs, uint64_t hwirq)
     arch_local_irq_disable();
     if ((hwirq & IRQ_VECTOR_HIGH_BIT) != 0) {
         log_err("do_IRQ: spurious vector %#018lx\n", hwirq);
+        return;
+    }
+    if (hwirq == X86_VECTOR_FIXED_MSIX) {
+        x86_fixed_msix_dispatch(regs, hwirq);
         return;
     }
     uint32_t gsi = arch_irq_vector_to_gsi(hwirq);

@@ -324,7 +324,7 @@ static void test_msix_mapping_failure(void)
 
     /* Case A: Injected mapping failure */
     s_inject_msix_map_fail = true;
-    int rc = pci_msix_enable(&dev, 0x45);
+    int rc = pci_msix_prepare(&dev, 0x45);
     assert_true(rc < 0);
     assert_eq(1, s_msix_map_call_count);
 
@@ -337,20 +337,26 @@ static void test_msix_mapping_failure(void)
     /* MSI-X Enable bit (bit 31 of cap dword at 0x40) remains 0 */
     assert_eq(0, s_fake_config_space[0x40 / 4] & 0x80000000U);
 
-    /* Case B: Mapping success */
+    /* Case B: Mapping success on prepare */
     s_inject_msix_map_fail = false;
-    rc = pci_msix_enable(&dev, 0x45);
+    rc = pci_msix_prepare(&dev, 0x45);
     assert_eq(0, rc);
     assert_eq(2, s_msix_map_call_count);
 
-    /* Table entry 0 is populated */
+    /* Table entry 0 is populated but masked */
     assert_eq(0xFEE00000U, s_fake_msix_table[0]); /* address */
     assert_eq(0x00000000U, s_fake_msix_table[1]); /* upper address */
     assert_eq(0x00000045U, s_fake_msix_table[2]); /* vector */
-    assert_eq(0x00000000U, s_fake_msix_table[3]); /* unmasked */
+    assert_eq(0x00000001U, s_fake_msix_table[3]); /* masked */
 
     /* MSI-X Enable bit is set */
     assert_true((s_fake_config_space[0x40 / 4] & 0x80000000U) != 0);
+
+    /* Case C: Unmask */
+    rc = pci_msix_unmask(&dev);
+    assert_eq(0, rc);
+    assert_eq(3, s_msix_map_call_count);
+    assert_eq(0x00000000U, s_fake_msix_table[3]); /* unmasked */
 }
 
 /* ── Test 4: Disable Interrupt Sources ───────────────────────────── */

@@ -433,9 +433,15 @@ def _run_case_body(case, smp, timeout, session_factory, archive):
         log_fh = open(log_path, "w", encoding="utf-8", errors="replace")
         try:
             while time.monotonic() < deadline:
-                time.sleep(0.5)
+                if hasattr(process, "_drain"):
+                    process._drain(0.5)
+                elif hasattr(process, "observe"):
+                    process.observe(0.5)
+                time.sleep(0.1)
                 log_text = process.text
+                log_fh.seek(0)
                 log_fh.write(log_text)
+                log_fh.truncate()
                 log_fh.flush()
                 # Wait for the kernel to declare the stack online AND
                 # the shell prompt to be ready.  Multi-NIC cases need

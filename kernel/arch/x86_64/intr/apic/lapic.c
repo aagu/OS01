@@ -13,6 +13,11 @@
 #include <errno.h>
 #include <stdint.h>
 
+#ifdef OS01_HOST_TEST
+#undef Phy_To_Virt
+#define Phy_To_Virt(addr) ((void *)(uintptr_t)(addr))
+#endif
+
 // ──────────────────────────────────────────────
 //  Internal state
 // ──────────────────────────────────────────────
@@ -44,8 +49,11 @@ void lapic_write(uint32_t offset, uint32_t value)
 //  EOI — signal end-of-interrupt to LAPIC
 // ──────────────────────────────────────────────
 
+uint32_t g_lapic_eoi_count = 0;
+
 void lapic_eoi(void)
 {
+    g_lapic_eoi_count++;
     lapic_write(LAPIC_EOI, 0);
 }
 

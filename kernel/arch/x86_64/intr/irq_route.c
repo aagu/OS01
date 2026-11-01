@@ -1,4 +1,5 @@
 #include <arch/x86_64/irq_route.h>
+#include <arch/x86_64/intr_vectors.h>
 #include <arch/irq.h>
 #include <intr/apic.h>
 #include <errno.h>
@@ -129,6 +130,7 @@ void x86_irq_routes_reset(void)
     }
     s_bucket_count = 0;
     s_ext_vector_bitmap = 0;
+    x86_fixed_msix_reset();
 }
 
 int x86_irq_route_prepare(uint32_t gsi, uint64_t *vector)
@@ -243,4 +245,91 @@ const struct x86_irq_route *x86_irq_route_find_by_vector(uint64_t vector)
     }
 
     return NULL;
+}
+
+/* ── Fixed MSI-X Single-Slot State Machine (vector 0x39) ────────── */
+
+enum x86_fixed_msix_state {
+    FIXED_MSIX_NEVER_OWNED = 0,
+    FIXED_MSIX_REGISTERED,
+    FIXED_MSIX_UNREGISTERED,
+};
+
+struct x86_fixed_msix_slot {
+    const void *owner;
+    arch_intr_handler_fn handler;
+    uint64_t param;
+    enum x86_fixed_msix_state state;
+};
+
+static struct x86_fixed_msix_slot s_fixed_msix = {
+    .owner = NULL,
+    .handler = NULL,
+    .param = 0,
+    .state = FIXED_MSIX_NEVER_OWNED,
+};
+
+void x86_fixed_msix_reset(void)
+{
+    s_fixed_msix.owner = NULL;
+    s_fixed_msix.handler = NULL;
+    s_fixed_msix.param = 0;
+    s_fixed_msix.state = FIXED_MSIX_NEVER_OWNED;
+}
+
+int x86_fixed_msix_register(const void *owner, arch_intr_handler_fn handler, uint64_t param)
+{
+    if (!owner || !handler)
+        return -EINVAL;
+
+    if (s_fixed_msix.state == FIXED_MSIX_NEVER_OWNED) {
+        s_fixed_msix.owner = owner;
+        s_fixed_msix.handler = handler;
+        s_fixed_msix.param = param;
+        s_fixed_msix.state = FIXED_MSIX_REGISTERED;
+        return 0;
+    }
+
+    if (s_fixed_msix.state == FIXED_MSIX_REGISTERED) {
+        return -EBUSY;
+    }
+
+    /* FIXED_MSIX_UNREGISTERED: slot reserved, do not transfer to other owner */
+    if (s_fixed_msix.owner != owner) {
+        return -EBUSY;
+    }
+
+    /* Same owner re-registering */
+    s_fixed_msix.handler = handler;
+    s_fixed_msix.param = param;
+    s_fixed_msix.state = FIXED_MSIX_REGISTERED;
+    return 0;
+}
+
+int x86_fixed_msix_unregister(const void *owner)
+{
+    if (!owner)
+        return -EINVAL;
+
+    if (s_fixed_msix.owner != owner || s_fixed_msix.state != FIXED_MSIX_REGISTERED)
+        return -EINVAL;
+
+    s_fixed_msix.state = FIXED_MSIX_UNREGISTERED;
+    s_fixed_msix.handler = NULL;
+    s_fixed_msix.param = 0;
+    return 0;
+}
+
+void x86_fixed_msix_dispatch(pt_regs_t *regs, uint64_t vector)
+{
+    (void)vector;
+    if (s_fixed_msix.state == FIXED_MSIX_REGISTERED && s_fixed_msix.handler) {
+        s_fixed_msix.handler(X86_VECTOR_FIXED_MSIX, s_fixed_msix.param, regs);
+    }
+    lapic_eoi();
+}
+
+bool x86_fixed_msix_is_registered(void)
+{
+    return s_fixed_msix.state == FIXED_MSIX_REGISTERED;
 }

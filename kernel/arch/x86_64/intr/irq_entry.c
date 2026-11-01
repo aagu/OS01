@@ -17,7 +17,10 @@ static void x86_dispatch_irq(pt_regs_t *regs, uint64_t vector)
 __attribute__((no_stack_protector))
 void arch_irq_dispatch(pt_regs_t *regs, uint64_t vector)
 {
-    if (!regs || vector < X86_VECTOR_DEVICE_FIRST || vector > X86_VECTOR_DEVICE_LAST)
+    if (!regs ||
+        !((vector >= X86_VECTOR_DEVICE_FIRST && vector <= X86_VECTOR_DEVICE_LAST) ||
+          vector == X86_VECTOR_FIXED_MSIX ||
+          (vector >= X86_VECTOR_DEVICE_EXT_FIRST && vector <= X86_VECTOR_DEVICE_EXT_LAST)))
         arch_intr_bad_event(0, regs);
     x86_dispatch_irq(regs, vector);
 }

@@ -484,6 +484,7 @@ _X86_IRQ = {
     **{v: (f"IRQ{v - 32}_interrupt", "arch_irq_dispatch")
        for v in range(0x20, 0x38)},
     0x38: ("lapic_timer_stub", "x86_irq_entry"),
+    0x39: ("IRQ25_interrupt", "arch_irq_dispatch"),
     0x40: ("_intr_stub_tlb", "generic_intr_dispatch"),
     0x41: ("_intr_stub_resched", "generic_intr_dispatch"),
     **{v: (f"IRQ{v - 32}_interrupt", "arch_irq_dispatch")
@@ -946,7 +947,7 @@ def _audit_x86_gate_elf(symtab, blocks, errors):
         return
     idt = idt_defs[0][0]
     groups = {"sys_vector_install": list(_X86_SYNC),
-              "arch_irq_install": list(range(32,56)) + list(range(66,128)),
+              "arch_irq_install": list(range(32,56)) + [57] + list(range(66,128)),
               "lapic_timer_init": [56], "ipi_init": [64,65],
               "lapic_init": [255]}
     aliases = {"eax":"rax", "ecx":"rcx", "edx":"rdx", "esi":"rsi", "edi":"rdi", "cl":"rcx"}
@@ -1032,10 +1033,10 @@ def _audit_x86_gate_sources(repo, errors):
             errors.append(f"gate source: {setter} type/DPL encoding changed")
     irq = source("kernel/arch/x86_64/intr/irq.c")
     pairs = [(int(n), int(v,0)) for n,v in re.findall(r"Build_IRQ\(\s*(\d+)\s*,\s*(0x[0-9a-f]+)\s*\)", irq)]
-    expected_pairs = [(n, n+32) for n in range(24)] + [(n, n+32) for n in range(34, 96)]
+    expected_pairs = [(n, n+32) for n in range(24)] + [(25, 57)] + [(n, n+32) for n in range(34, 96)]
     if pairs != expected_pairs or not re.search(r"set_intr_gate_raw\(vector,\s*0,", irq):
         errors.append("gate source: Build_IRQ installed vector/type/IST manifest differs")
-    expected_installs = set(range(24)) | set(range(34, 96))
+    expected_installs = set(range(24)) | {25} | set(range(34, 96))
     if set(map(int,re.findall(r"_irq_install_(\d+)\(\)", _function_body(irq,"void arch_irq_install")))) != expected_installs:
         errors.append("gate source: arch_irq_install omits an installed vector")
     for relative, text in (("kernel/arch/x86_64/intr/apic/lapic.c", r"set_intr_gate_raw\(SPURIOUS_VECTOR,\s*0,\s*lapic_spurious_stub\)"), ("kernel/arch/x86_64/intr/apic/lapic_timer.c", r"set_intr_gate_raw\(LAPIC_TIMER_VECTOR,\s*0,\s*lapic_timer_stub\)")):
