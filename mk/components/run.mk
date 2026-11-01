@@ -381,9 +381,19 @@ _test-aarch64-prep-sched-pc-low:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-low aarch64-uefi
 _test-aarch64-prep-sched-pc-data:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-data aarch64-uefi
+# The `all` runner also audits the ordinary normal + ordinary selftest
+# ELFs (`label=ordinary-*`), so `SCHED_CASE=all` must build them too —
+# a clean tree otherwise fails the audit with "ELF not found".
 _test-aarch64-prep-sched-all: _test-aarch64-prep-sched-positive \
 	_test-aarch64-prep-sched-sp-top _test-aarch64-prep-sched-sp-low \
-	_test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data
+	_test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data \
+	_test-aarch64-prep-sched-ordinary
+.PHONY: _test-aarch64-prep-sched-ordinary
+_test-aarch64-prep-sched-ordinary:
+	$(MAKE) AARCH64_SCHED_TEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= \
+	  AARCH64_SMP_TEST_NO_ACK_CPU=0 KERNEL_SELFTEST= aarch64-uefi
+	$(MAKE) AARCH64_SCHED_TEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= \
+	  AARCH64_SMP_TEST_NO_ACK_CPU=0 KERNEL_SELFTEST=1 aarch64-uefi
 
 # Per-SCHED_CASE explicit path maps for one runner invocation. The
 # runner's --variant schema is fixed: variant name + image + firmware +

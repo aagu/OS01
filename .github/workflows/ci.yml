@@ -392,6 +392,11 @@ jobs:
             make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
           done
 
+      - name: AArch64 AP cooperative scheduler P1
+        run: |
+          make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap || exit 1
+          make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner || exit 1
+
       - name: AArch64 M1 RAM-exhaustion MODEs
         run: |
           for mode in m1-ram m1-sparse m1-arena-exhaust m1-table-exhaust m1-ap-bad-root; do

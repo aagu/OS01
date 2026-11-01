@@ -5,6 +5,16 @@
 
 ---
 
+## 2026-11-01
+
+- feat(aarch64): **aarch64 AP 协作式调度 P1 — 轮询协作式（accepted AP 进入公共 EEVDF 调度器）验收闭环**（分支 `aarch64-ap-sched`，commits `bdb932c6..2634b244`）：
+  - **共同接口冻结（T1）**：新增 `<arch/sched.h>` 门面与 per-arch `cpu/sched_notify.c` 后端（`arch_kthread_default_mask`：x86 保持 num_cpus 覆盖 / aarch64 恒 1；`arch_sched_notify_remote`：x86 resched IPI / aarch64 P1 轮询 no-op；`arch_sched_scan_blockers`：x86 恒真 / aarch64 仅 BSP）；删除 `ARCH_HAS_REMOTE_RESCHED`；need_resched/scheduler_ok/t->cpu 全量 atomic 审计（读 acquire、写 release、调度清零 relaxed 且位于 rq_lock 保护的 pick 决策内）；
+  - **并发安全观测（T2）**：新增 `selftest/aarch64_sched_observer` 模块（专用 IRQ-safe 锁、单调非零 token、FREEING 中间态、512 活跃槽、批次失败旗标），kthread 全部释放点改为「捕获 token → kfree → 按 token 记完成」；首次入口观测改每 CPU 24 字节槽（`thread_entry.S` 经 TPIDR_EL1 定位）；switch/timer-IRQ 观测改每 CPU；旧 1000 任务回收验收迁入 observer 4×250 批次（累计断言保留）；pthread 宿主测试 1044 断言；
+  - **AP 单向 handoff（T3）**：新增 `arch/aarch64/cpu/ap_sched.c`（prepare 在 BSP 启动栈构造永久 AP idle union/thread 上下文、release gate 双重 admission（冻结 `aarch64_smp_accepted_mask`）、BSP 2 秒硬件期限等待、AP 侧 handoff 校验 current/ctx/元数据后 enable IRQ + ISB 再 release-store scheduler_ok）；`thread_entry.S` 新增验证 trampoline 与 fatal 无栈 ldaxr/stxr 单 owner 仲裁；fatal-owner 故障变体（`AARCH64_AP_SCHED_TEST=fatal-owner`）经真实 ap_work 项让双 CPU 同时进入非法 SP 路径并输出恰一行 `[ap-fatal] owner=<0|1> arrivals_mask=3 entrants=1 losers=1`；轮询 idle（每轮至多一个 ap_work + rq_lock 检查 + pause，无 WFI）；
+  - **生产路径 7 case 验收（T4）**：新增 `selftest/test_aarch64_ap_scheduler.c`（`AARCH64_AP_SCHED_TEST_AP` 专属）：ready/entry/yield/reap/work/admission/default-mask，每录用 CPU 一行冻结字段证据，`[ap-sched] START/END` 包络要求 `accepted_mask=(1<<cpus)-1`；runner `qemutests/aarch64_ap_scheduler.py`（fatal-owner 证据门早停 + llvm-nm ELF 审计 + 8-boot 正向矩阵）与 `test_aarch64_ap_boot_contract.py`/`test_aarch64_ap_scheduler.py` unittest 注册进 `make test-harness`；catalog 新增 `aarch64-sched-ap`、`aarch64-sched-ap-fatal`。
+
+  **验证**：`MODE=sched` 16/16 PASS；`MODE=sched-ap` 8/8 PASS（1/2/4/8 核 ×2）；fatal-owner 独立 2 核 boot PASS；`MODE=smp/no-ack/m3-probe/gic-spi/sync-fault` 与 idle smoke 1/2/4/8 核全 PASS；x86 test-host/test-static/phase-0/systest/kernel-selftest SMP2/8 全 PASS；runner unittest 143 项全过。完整门禁矩阵与命令/退出码记录见 [验证报告](superpowers/reports/2026-10-31-aarch64-ap-sched-p1-validation.md)。设计 [spec](superpowers/specs/2026-10-31-aarch64-ap-cooperative-scheduler-design.md)，实施 [plan P1](superpowers/plans/2026-10-31-aarch64-ap-sched-p1-cooperative.md)。**边界：idle 忙等轮询、无 resched SGI、无抢占；P2（SGI + WFI）、抢占、M4 待办。**
+
 ## 2026-10-31
 
 - feat(sched,net): **x86_64 init PID 1 闭环：延迟启动 lwIP tcpip 内核线程与引导探针**：将 `net_lwip_init()`（及 `KERNEL_SELFTEST` 变体下的 `sched_boot_probe_create()`）从 `kernel_main` 移入 `task_init()`（`kernel/arch/x86_64/cpu/sched_boot.c`），在 `spawn_user_task("/bin/init", NULL)` 之后、`sched_boot_start()` 之前调用。使得用户态 `/bin/init` 在所有构建变体下均为首个 `alloc_pid()` 消费者并恒为 PID 1，修复了此前因 PID 1 为 `tcpip_thread` 内核线程导致 `/bin/poweroff`、`halt`、`reboot` 向 PID 1 发送信号失败（`-EPERM`）而无法优雅关机的缺陷。同时保持引导创建窗口不变量：UP 下 BSP `scheduler_ok == 0` 保留非抢占串行执行与 CPU0 放置回退；SMP 下 post-AP / pre-BSP 放置语义不变；NIC IRQ 早到 RX 不依赖栈已启动。新增 `init_pid` late selftest 验证 `user_init_task->pid == 1`；phase-0 门禁追加 `init: running as PID 1` 顺序正则断言；更新相关架构与子系统文档及注释。

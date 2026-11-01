@@ -101,8 +101,19 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertIn("test_runtime_udivti3", exit_status_ids)
         self.assertIn("test_page_table_runner", exit_status_ids)
 
-        # Full set check: 150 existing binaries plus three scheduler tests.
-        self.assertEqual(len(ids), 153, f"Expected 153 unique test binaries, got {len(ids)}")
+        # Full set check: the count is derived from the REAL registry
+        # (mk/sched.mk & co), never hand-pinned — adding a host test
+        # must not require editing this assertion.
+        registry = subprocess.run(
+            ["make", "-s", "print-host-test-inventory"], cwd=ROOT,
+            capture_output=True, text=True, check=True)
+        registry_ids = {
+            line.split("\t")[0].strip()
+            for line in registry.stdout.splitlines()
+            if line.strip() and not line.startswith("make")
+        }
+        self.assertEqual(ids, registry_ids,
+                         "Inventory output must match the registered set exactly")
         self.assertTrue({"test_switch_complete", "test_kthread_ctor",
                          "test_sched_layout_offsets"}.issubset(protocol_ids))
 

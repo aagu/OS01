@@ -3855,6 +3855,109 @@
         "action": "unique",
         "reason": "Pins recorded x86 offsets independently of the production static assertions."
       }
+    },
+    {
+      "id": "sched.notify.contracts",
+      "component": "sched",
+      "behavior": "cross-CPU notification admission and arch backends",
+      "trigger": "host runner invokes test_sched_notify.elf, test_sched_notify_x86_backend.elf and test_sched_notify_aarch64_backend.elf",
+      "assertions": [
+        "remote notify publishes need_resched before the arch hook fires",
+        "invalid/not-ready targets are refused without publication",
+        "the x86 backend sends 0x41 to arch_processor_id; the aarch64 backend is the documented P1 polling no-op",
+        "the blocker scan and blocker_wait respect the arch scan policy"
+      ],
+      "failure_modes": [
+        "P1 froze the notify/scan contracts; these drive the REAL core.c, balance.c and per-arch backends."
+      ],
+      "uniqueness": "unique",
+      "reason": "P1 froze the notify/scan contracts; these drive the REAL core.c, balance.c and per-arch backends.",
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_sched_notify.c",
+        "selector": "test_sched_notify",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Drives the REAL core.c/balance.c notify admission and both per-arch backends against the frozen P1 contracts."
+      }
+    },
+    {
+      "id": "sched.observer.concurrent",
+      "component": "sched",
+      "behavior": "concurrency-safe resource observation",
+      "trigger": "host runner invokes test_aarch64_sched_observer.elf",
+      "assertions": [
+        "two CPUs allocate/release concurrently without losing records",
+        "tokens are never reused and stale tokens cannot complete records",
+        "end fails on live/FREEING records, overflow, duplicate completion and legacy alloc=false calls"
+      ],
+      "failure_modes": [
+        "P1 Task 2 froze the observer protocol; the pthread test drives the REAL kernel module."
+      ],
+      "uniqueness": "unique",
+      "reason": "P1 Task 2 froze the observer protocol; the pthread test drives the REAL kernel module.",
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_sched_observer.c",
+        "selector": "test_aarch64_sched_observer",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Pthread concurrency against the REAL observer module: tokens, batches and failure flags are frozen by P1 Task 2."
+      }
+    },
+    {
+      "id": "sched.notify.x86_backend",
+      "component": "sched",
+      "behavior": "x86 notify backend",
+      "trigger": "host runner invokes test_sched_notify_x86_backend.elf",
+      "assertions": [
+        "the x86 backend sends IPI_VECTOR_RESCHED (0x41) to the target's arch_processor_id",
+        "the x86 default mask keeps the num_cpus reach and scan admission is unconditional"
+      ],
+      "failure_modes": [
+        "x86 IPI wiring regressed or the default mask lost its historical reach"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_sched_notify_x86_backend.c",
+        "selector": "test_sched_notify_x86_backend",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Links the REAL x86_64 cpu/sched_notify.c backend; the x86 hardware contract cannot be exercised through the common fixture."
+      }
+    },
+    {
+      "id": "sched.notify.aarch64_backend",
+      "component": "sched",
+      "behavior": "aarch64 notify backend (P1 polling)",
+      "trigger": "host runner invokes test_sched_notify_aarch64_backend.elf",
+      "assertions": [
+        "the aarch64 notify hook is the documented P1 polling no-op",
+        "the default mask is the constant 1 and the scan policy is BSP-only"
+      ],
+      "failure_modes": [
+        "the P1 polling contract or the CPU0 default placement regressed"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_sched_notify_aarch64_backend.c",
+        "selector": "test_sched_notify_aarch64_backend",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Links the REAL aarch64 cpu/sched_notify.c backend; P2 replaces this backend and the test pins the P1 semantics it must preserve."
+      }
     }
   ]
 }

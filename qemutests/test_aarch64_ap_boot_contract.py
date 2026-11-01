@@ -6,6 +6,7 @@ aarch64_ap_scheduler runner's fatal-owner evidence parser and ELF audit
 exactly as `make ... MODE=sched-ap AP_SCHED_CASE=fatal-owner` will.
 """
 from pathlib import Path
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -219,6 +220,147 @@ class FatalOwnerEvidenceContract(unittest.TestCase):
             None, '/nonexistent/kernel.elf', 'llvm-nm')
         self.assertEqual(ok, 0)
         self.assertIn('ELF not found', err)
+
+
+class RunnerSessionCleanupContract(unittest.TestCase):
+    """A mock QemuSession proves the runner stops, joins and reports on
+    timeout and on exception — never a bare Popen reimplementation."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        import types
+        spec = importlib.util.spec_from_file_location(
+            'aarch64_ap_scheduler', ROOT / RUNNER)
+        cls.runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.runner)
+        # No real QEMU/dtb generation in these contract tests.
+        cls.runner.generate_diagnostic_dtb = lambda *a, **k: '/dev/null'
+        # Real files for the metadata SHA256 step.
+        tmp = Path(tempfile.mkdtemp(prefix='ap-runner-mock-'))
+        for name in ('img', 'fw', 'elf'):
+            (tmp / name).write_bytes(b'mock-' + name.encode())
+        cls.args = types.SimpleNamespace(
+            qemu='qemu', llvm_nm='llvm-nm', build_dir=None,
+            profile='test', log_dir=str(tmp), timeout=120,
+            case='fatal-owner', image=str(tmp / 'img'),
+            firmware=str(tmp / 'fw'), elf=str(tmp / 'elf'),
+            normal_elf=None, phase='ap')
+
+    def _make_factory(self, behavior):
+        events = {'started': 0, 'stopped': 0, 'joined': 0, 'closed': 0,
+                  'text': ''}
+
+        class MockSession:
+            def __init__(self, **kw):
+                events['started'] += 1
+                self.timed_out = False
+                self.returncode = None
+                self.text = ''
+                self.stopped_by_runner = False
+
+            def start(self):
+                events['started'] += 1
+
+            def wait_for(self, predicate):
+                behavior(self, predicate)
+                return ''
+
+            def observe(self, seconds):
+                return ''
+
+            def stop(self):
+                events['stopped'] += 1
+                self.stopped_by_runner = True
+
+            def close(self):
+                events['closed'] += 1
+
+            def join(self, timeout=None):
+                events['joined'] += 1
+
+        return MockSession, events
+
+    def test_timeout_stops_and_closes_the_session(self):
+        def timeout_behavior(session, predicate):
+            session.timed_out = True
+            session.text = 'no evidence ever'
+        factory, events = self._make_factory(timeout_behavior)
+        code = self.runner.run_fatal_boot(
+            self.args,
+            {'image': self.args.image, 'firmware': self.args.firmware,
+             'elf': self.args.elf},
+            session_factory=factory)
+        self.assertEqual(code, 1)   # timeout is a FAIL, not an ERROR
+        self.assertEqual(events['stopped'], 1)
+        self.assertEqual(events['closed'], 1)
+
+    def test_exception_stops_and_closes_the_session(self):
+        def boom(session, predicate):
+            raise RuntimeError('mid-boot failure')
+        factory, events = self._make_factory(boom)
+        code = self.runner.run_fatal_boot(
+            self.args,
+            {'image': self.args.image, 'firmware': self.args.firmware,
+             'elf': self.args.elf},
+            session_factory=factory)
+        self.assertEqual(code, 2)   # runner error
+        self.assertEqual(events['closed'], 1)
+
+    def test_duplicate_owner_evidence_fails(self):
+        import types
+        text = ('[ap-fatal] owner=0 arrivals_mask=3 entrants=1 losers=1\n'
+                '[ap-fatal] owner=1 arrivals_mask=3 entrants=1 losers=1\n')
+        ok, errors = self.runner.check_fatal_evidence(
+            self.runner.extract_ap_fatal_lines(text))
+        self.assertNotEqual(ok, 0)
+        self.assertTrue(any('exactly one owner line' in e for e in errors))
+
+    def test_participant_missing_fails(self):
+        # arrivals_mask=1 means only ONE of the two CPUs arrived — the
+        # frozen evidence requires both.
+        ok, errors = self.runner.check_fatal_evidence(
+            self.runner.extract_ap_fatal_lines(
+                '[ap-fatal] owner=0 arrivals_mask=1 entrants=1 losers=0\n'))
+        self.assertNotEqual(ok, 0)
+
+
+class ModeConflictContract(unittest.TestCase):
+    """MODE=sched-ap must be rejected at the OUTER make for conflicting
+    selectors (never only inside the profile sub-make)."""
+
+    def test_outer_make_rejects_kernel_selftest_override(self):
+        import subprocess
+        proc = subprocess.run(
+            ['make', 'PROFILE=aarch64-clang', 'test-aarch64',
+             'MODE=sched-ap', 'KERNEL_SELFTEST=1', '-n'],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('MODE=sched-ap cannot be combined',
+                      proc.stderr)
+
+    def test_outer_make_rejects_old_sched_selector(self):
+        import subprocess
+        proc = subprocess.run(
+            ['make', 'PROFILE=aarch64-clang', 'test-aarch64',
+             'MODE=sched-ap', 'AARCH64_SCHED_TEST=positive', '-n'],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        # The outer make must refuse the combination — either through
+        # the MODE=sched-ap guard or the profile's selector validation.
+        combined = ('MODE=sched-ap cannot be combined' in proc.stderr or
+                    'cannot be combined' in proc.stderr or
+                    'requires KERNEL_SELFTEST' in proc.stderr)
+        self.assertTrue(combined, proc.stderr[-500:])
+
+    def test_outer_make_rejects_invalid_mode_value(self):
+        import subprocess
+        proc = subprocess.run(
+            ['make', 'PROFILE=aarch64-clang', 'test-aarch64',
+             'MODE=sched-ap', 'AP_SCHED_CASE=bogus', '-n'],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("invalid AP_SCHED_CASE='bogus'", proc.stderr)
 
 
 if __name__ == '__main__':
