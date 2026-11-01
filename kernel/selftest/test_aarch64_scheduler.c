@@ -39,9 +39,10 @@ static volatile uint64_t irq_peer_started;
 static volatile uint64_t irq_peer_done;
 static volatile uint64_t irq_case_done;
 static volatile uint64_t ap_worker_finished;
+static volatile uint64_t ap_worker_on_target;
 static volatile uint64_t ap_worker_bad_cpu;
 static volatile uint64_t ap_worker_bad_affinity;
-static volatile uint64_t ap_workers_on_cpu0;
+static volatile uint64_t ap_worker_bad_blocker;
 static volatile uint64_t blocker_duplicate_enqueue;
 static volatile uint64_t blocker_preswitch_observed;
 static volatile uint64_t blocker_preswitch_matches;
@@ -259,16 +260,27 @@ static uint64_t irq_peer(uint64_t unused)
     return 0;
 }
 
-static uint64_t ap_cpu_probe_worker(uint64_t unused)
+static uint64_t ap_cpu_probe_worker(uint64_t target)
 {
-    (void)unused;
-    if (current->allowed_cpus != 1)
+    unsigned cpu = (unsigned)target;
+    if (current->allowed_cpus != (1ULL << cpu))
         ap_worker_bad_affinity++;
-    if (cpu_id() != 0 || current->cpu != 0)
-        ap_worker_bad_cpu++;
+    if (cpu_id() == cpu && current->cpu == cpu)
+        ap_worker_on_target++;
     else
-        ap_workers_on_cpu0++;
-    ap_worker_finished = 1;
+        ap_worker_bad_cpu++;
+    /* P1 (spec §4): an AP-pinned worker must be refused by
+     * blocker_wait with -EOPNOTSUPP and NO state change; the BSP
+     * worker sees the already-true condition return 0 immediately. */
+    int rc = blocker_wait(blocker_condition, BLOCKER_NANOSLEEP, false);
+    if (rc == -EOPNOTSUPP) {
+        if (current->state != TASK_RUNNING ||
+            current->blocker.type != BLOCKER_NONE)
+            ap_worker_bad_blocker++;
+    } else if (rc != 0) {
+        ap_worker_bad_blocker++;
+    }
+    ap_worker_finished++;
     return 0;
 }
 
@@ -700,7 +712,13 @@ static int case_idle(void)
     if (!create_kthread(idle_blocker_worker, 0, "sched-idle-waiter")) return -1;
     /* Schedule the worker once. It blocks and returns control to this
      * idle continuation, which pumps the same production idle step. */
+    log_info("[sched-diag] idle case: worker created jiffies=%lu\n",
+             (unsigned long)jiffies);
     schedule();
+    /* schedule() returns with IRQs masked by contract; the polling
+     * idle step requires IRQs ENABLED at entry (the old WFI idle used
+     * to re-enable on its sleep path, which masked this). */
+    arch_local_irq_enable();
     idle_pump_until_worker();
     uint64_t wake_ticks = jiffies - idle_tick_start;
     idle_case_active = 0;
@@ -747,41 +765,38 @@ static int case_timer(void)
 
 static int case_ap(void)
 {
+    /* P1 Task 3: the default create still lands on CPU0, an explicit
+     * pin to a ready AP runs there (UP pins its only ready CPU), and
+     * every accepted AP publishes scheduler_ok=1 with a quiet
+     * runqueue.  Completion waits on worker counters with a jiffies
+     * deadline — never on saved self-reaping task pointers. */
     uint32_t count = num_cpus;
-    ap_worker_finished = ap_worker_bad_cpu = ap_worker_bad_affinity = 0;
-    ap_workers_on_cpu0 = 0;
-    if (!create_kthread(ap_cpu_probe_worker, 0, "sched-ap-cpu-proof")) return -1;
-    uint64_t deadline = jiffies + 100;
-    while (!ap_worker_finished && jiffies < deadline) kthread_yield();
-    uint64_t ap_target_rejected = 1;
+    ap_worker_finished = ap_worker_on_target = 0;
+    ap_worker_bad_cpu = ap_worker_bad_affinity = ap_worker_bad_blocker = 0;
+    blocker_cond = 1;   /* the BSP worker's check returns immediately */
+    uint64_t expected = 1;
+    if (!create_kthread(ap_cpu_probe_worker, 0, "sched-ap-cpu-proof"))
+        return -1;
     if (count >= 2) {
-        /* Build a valid, unpublished task context and call the actual ARM
-         * backend. The common constructor's scheduler_ok check would reject
-         * CPU1 before reaching this frozen backend guard. */
-        void *raw = kmalloc(sizeof(union task_union) + STACK_SIZE);
-        thread_t *probe_thread = kmalloc(sizeof(thread_t));
-        if (!raw || !probe_thread) {
-            if (probe_thread) kfree(probe_thread);
-            if (raw) kfree(raw);
-            ap_target_rejected = 0;
-        } else {
-            task_t *probe = (task_t *)(((uintptr_t)raw + STACK_SIZE - 1) &
-                                       ~(uintptr_t)(STACK_SIZE - 1));
-            memset(probe, 0, sizeof(*probe));
-            memset(probe_thread, 0, sizeof(*probe_thread));
-            probe->thread = probe_thread;
-            probe->cpu = 1;
-            int rc = arch_kthread_prepare(probe, ap_cpu_probe_worker, 0);
-            ap_target_rejected = rc == -EINVAL && probe->allowed_cpus == 0;
-            kfree(probe_thread);
-            kfree(raw);
-        }
+        if (kernel_thread_on_cpu(ap_cpu_probe_worker, 1, 1) < 0)
+            return -1;
+    } else if (kernel_thread_on_cpu(ap_cpu_probe_worker, 0, 0) < 0) {
+        return -1;
     }
-    uint64_t cpu0_only = ap_target_rejected && ap_worker_finished &&
-                         !ap_worker_bad_cpu &&
-                         !ap_worker_bad_affinity && ap_workers_on_cpu0;
+    expected++;   /* the explicit pin worker (SMP: an AP; UP: CPU0) */
+    uint64_t deadline = jiffies + 200;
+    while (ap_worker_finished < expected && jiffies < deadline)
+        kthread_yield();
+    uint64_t default_cpu0 = ap_worker_finished >= 1 &&
+                            ap_worker_on_target >= 1 &&
+                            !ap_worker_bad_cpu && !ap_worker_bad_affinity;
+    uint64_t pinned_ap_ok = ap_worker_finished == expected &&
+                            ap_worker_on_target == expected &&
+                            !ap_worker_bad_blocker && !ap_worker_bad_cpu &&
+                            !ap_worker_bad_affinity;
     if (count >= 2)
         aarch64_shootdown_probe_run_late();
+    uint64_t ap_ready = 1;
     for (uint32_t cpu = 0; cpu < count; ++cpu) {
         if (cpu == 0) continue;
         percpu_t *p = &percpu_data[cpu];
@@ -790,16 +805,19 @@ static int case_ap(void)
         uint64_t work_ok = aarch64_shootdown_probe_late_ap_ok(cpu);
         serial_printk("[sched-evidence] id=aarch64_sched_ap cpu=%u scheduler_ok=%u nr_running=%u work_ok=%lu\n",
                       cpu, sched_ok, nr, (unsigned long)work_ok);
-        if (sched_ok || nr || !work_ok) cpu0_only = 0;
+        if (!sched_ok || nr || !work_ok) ap_ready = 0;
     }
     log_info("[sched-diag] cpu0 scheduler observations=%lu bad=%lu\n",
              (unsigned long)cpu0_observation_count,
              (unsigned long)cpu0_bad_observations);
-    cpu0_only = cpu0_only && cpu0_observation_count > 0 &&
-                cpu0_bad_observations == 0;
-    serial_printk("[sched-evidence] id=aarch64_sched_ap cpu_count=%u cpu0_only=%lu\n",
-                  count, (unsigned long)cpu0_only);
-    return count == num_cpus && cpu0_only ? 0 : -1;
+    ap_ready = ap_ready && cpu0_observation_count > 0 &&
+               cpu0_bad_observations == 0;
+    serial_printk("[sched-evidence] id=aarch64_sched_ap cpu_count=%u cpu0_only=%lu default_cpu0=%lu pinned_ap_ok=%lu\n",
+                  count, (unsigned long)ap_ready,
+                  (unsigned long)default_cpu0,
+                  (unsigned long)pinned_ap_ok);
+    return count == num_cpus && ap_ready && default_cpu0 && pinned_ap_ok
+           ? 0 : -1;
 }
 
 void test_aarch64_scheduler_run(void)

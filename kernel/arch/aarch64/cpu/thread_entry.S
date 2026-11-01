@@ -101,16 +101,101 @@ aarch64_bsp_stack_enter:
     b aarch64_context_fatal_asm
 .size aarch64_bsp_stack_enter, .-aarch64_bsp_stack_enter
 
+/* ── AP cooperative-scheduler trampoline (P1 spec §3.2) ─────────────
+ * x0 = new sp, x1 = thread_t* ctx, x2 = logical cpu.  Every spec stack
+ * boundary is validated BEFORE the SP is installed; on any mismatch the
+ * AP takes the (no-stack) fatal path instead of switching.  The old AP
+ * work stack is abandoned on purpose — it is a boot stack, not owned by
+ * the scheduler. */
+.align 2
+.global aarch64_ap_stack_enter
+.type aarch64_ap_stack_enter, %function
+aarch64_ap_stack_enter:
+    tst x0, #15
+    b.ne .Lap_bad
+    and x9, x0, #-(AARCH64_STACK_SIZE)
+    ldr x10, [x1, #AARCH64_THREAD_STACK_BASE_OFF]
+    cmp x9, x10
+    b.ne .Lap_bad
+    ldr x11, [x1, #AARCH64_THREAD_STACK_TOP_OFF]
+    add x12, x9, #AARCH64_STACK_SIZE
+    cmp x11, x12
+    b.ne .Lap_bad
+    ldr x13, [x1, #AARCH64_THREAD_USABLE_LOW_OFF]
+    cmp x0, x13
+    b.lo .Lap_bad
+    sub x9, x0, #16
+    cmp x9, x13
+    b.lo .Lap_bad
+    mov sp, x0
+    mov w0, w2
+    b aarch64_ap_idle_handoff
+.Lap_bad:
+    mov x0, #13
+    mov x1, sp
+    /* x2/x3: the base/top the trampoline derived for the diagnostic */
+    and x2, x1, #-(AARCH64_STACK_SIZE)
+    add x3, x2, #AARCH64_STACK_SIZE
+    b aarch64_context_fatal_asm
+.size aarch64_ap_stack_enter, .-aarch64_ap_stack_enter
+
 /* Invalid pre-C stack paths switch to a dedicated high-half emergency
- * stack before entering the logger.  No current accessor is involved. */
+ * stack before entering the logger.  No current accessor is involved.
+ * Since P1 (spec §6) the shared emergency stack is installed by ONE
+ * CPU only: an ldaxr/stxr arbitration on a BSS word runs BEFORE any
+ * stack is installed; losing CPUs mask IRQs and park stackless. */
 .align 2
 .global aarch64_context_fatal_asm
 .type aarch64_context_fatal_asm, %function
 aarch64_context_fatal_asm:
     msr daifset, #2
+#ifdef AARCH64_AP_SCHED_TEST_FATAL_OWNER
+    /* fatal-owner variant: record this CPU's arrival BEFORE the
+       arbitration (cpu via TPIDR_EL1 — no current exists here).  The
+       arrivals word is separate from the ownership word. */
+    adrp x11, aarch64_fatal_arrivals_word
+    add x11, x11, :lo12:aarch64_fatal_arrivals_word
+    mrs x12, tpidr_el1
+    ldr w13, [x12, #PERCPU_CPU_ID_OFFSET]
+    mov w10, #1
+    lsl w10, w10, w13
+.Lfatal_arrive:
+    ldaxr w9, [x11]
+    orr w9, w9, w10
+    stlxr w13, w9, [x11]
+    cbnz w13, .Lfatal_arrive
+#endif
+    adrp x9, aarch64_fatal_owner_word
+    add x9, x9, :lo12:aarch64_fatal_owner_word
+    mov w10, #1
+.Lfatal_claim:
+    ldaxr w11, [x9]
+    cbnz w11, .Lfatal_lose
+    stxr w12, w10, [x9]
+    cbnz w12, .Lfatal_claim
+    b .Lfatal_owner
+.Lfatal_lose:
+#ifdef AARCH64_AP_SCHED_TEST_FATAL_OWNER
+    adrp x11, aarch64_fatal_losers_word
+    add x11, x11, :lo12:aarch64_fatal_losers_word
+.Lfatal_lose_count:
+    ldxr w12, [x11]
+    add w12, w12, #1
+    stxr w13, w12, [x11]
+    cbnz w13, .Lfatal_lose_count
+#endif
+    /* Park stackless with IRQs masked; the owner never releases. */
+.Lfatal_park:
+    wfe
+    b .Lfatal_park
+.Lfatal_owner:
     adrp x9, aarch64_context_fatal_stack_top
     add x9, x9, :lo12:aarch64_context_fatal_stack_top
     mov sp, x9
+#ifdef AARCH64_AP_SCHED_TEST_FATAL_OWNER
+    bl aarch64_ap_fatal_owner_enter
+    brk #0
+#endif
     bl aarch64_context_fatal
     brk #0
 .size aarch64_context_fatal_asm, .-aarch64_context_fatal_asm

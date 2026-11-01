@@ -12,6 +12,7 @@
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/smp_boot_core.h>
 #include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/ap_sched.h>
 #include <arch/aarch64/ipi.h>     /* gic_target_bit_init (M3 Task 8) */
 #include <arch/aarch64/vmm_gate.h>/* ipi_ready_publish_and_count (Task 7) */
 #include <arch/irq.h>
@@ -81,6 +82,16 @@ int aarch64_smp_publish_boot(const struct aarch64_topology *topology)
 
 /* Preserve the frozen result for post-boot debugger diagnostics too. */
 static volatile struct smp_boot_result boot_result;
+
+/* The frozen boot ACK mask.  Every smp_boot_aps exit path publishes it
+ * exactly once (release store) BEFORE any AP can poll the release
+ * gate; readers acquire.  There is deliberately no lazy-init fallback:
+ * an unwritten static result must never be returned. */
+uint64_t aarch64_smp_accepted_mask(void)
+{
+    return (uint64_t)__atomic_load_n(&boot_result.online_mask,
+                                     __ATOMIC_ACQUIRE);
+}
 
 static __attribute__((noreturn)) void smp_fatal(const char *reason)
 {
@@ -269,11 +280,15 @@ void secondary_idle(uint32_t cpu_id)
     arch_local_irq_enable();              /* 生产也开 IRQ（M3 统一，去门控） */
     __asm__ __volatile__("isb" ::: "memory");
     ipi_ready_publish_and_count(cpu_id);
-    /* Work loop: run at most one ap_work item per iteration, then yield.
-     * Entered only after boot_online_set/boot_go_get above, so the boot
-     * handshake with the BSP is already complete. */
+    /* Work loop: run at most one ap_work item per iteration, then
+     * check the P1 release gate.  An ACCEPTED AP whose gate is open
+     * leaves this loop for good through the validating trampoline
+     * (aarch64_ap_sched_enter); a late or never-ACKed AP never passes
+     * released() and stays here forever — the pre-P1 behaviour. */
     for (;;) {
         ap_work_run_one(cpu_id);
+        if (aarch64_ap_sched_released(cpu_id))
+            aarch64_ap_sched_enter(cpu_id);
         arch_cpu_pause();
     }
 }

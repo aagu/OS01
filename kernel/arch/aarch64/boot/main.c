@@ -24,6 +24,7 @@
 #include <arch/aarch64/ram.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/task_arch.h>
+#include <arch/aarch64/ap_sched.h>
 #include <arch/aarch64/vmm_gate.h> /* smp_starting_enter / ipi_ready_publish_and_count (M3 Task 11) */
 #include <percpu/percpu.h>        /* percpu_data / num_cpus (M3 Task 11) */
 #include <sched/task.h>           /* init_task_union / STACK_SIZE */
@@ -794,9 +795,13 @@ void aarch64_main(const struct boot_context *handoff)
     gic_unexpected_probe();
     gic_ipi_test(dtb_cpu_count());
 #endif
-    /* All boot-stack probes retain their original order above. Prepare
-     * metadata only, then make the one-way transition to the idle stack. */
+    /* All boot-stack probes retain their original order above. The AP
+     * cooperative scheduler's permanent idle tasks are constructed
+     * HERE (P1 spec §3): still on the boot stack, after every probe,
+     * before the one-way transition to the BSP task stack.  Then the
+     * metadata-only preparation, then the stack switch. */
     arch_local_irq_disable();
+    aarch64_ap_sched_prepare();
     arch_aarch64_prepare_bsp_handoff();
     aarch64_bsp_stack_enter((uint64_t)&init_task_union + STACK_SIZE - 16);
 }

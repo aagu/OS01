@@ -175,9 +175,13 @@ EVIDENCE_FIELDS = {
         "tick_delta": _rng(3, None), "irq_frame_ok": _rng(1, 1),
         "nested_schedule": _rng(0, 0), "irq_switches": _rng(0, 0)},
 }
-AP_SUMMARY_FIELDS = {"cpu0_only": _rng(1, 1)}
+# P1 Task 3: accepted APs now run the cooperative scheduler, so every
+# admitted AP publishes scheduler_ok=1 with a quiet runqueue, and the
+# summary carries the default-CPU0 and explicit-ready-AP pin evidence.
+AP_SUMMARY_FIELDS = {"cpu0_only": _rng(1, 1), "default_cpu0": _rng(1, 1),
+                     "pinned_ap_ok": _rng(1, 1)}
 AP_OBSERVATION_FIELDS = {
-    "scheduler_ok": _rng(0, 0), "nr_running": _rng(0, 0),
+    "scheduler_ok": _rng(1, 1), "nr_running": _rng(0, 0),
     "work_ok": _rng(1, 1)}
 
 TEST_LINE = re.compile(r"^\[TEST\] (START|SELECT|BEGIN|PASS|FAIL|SKIP|END)\b(.*)$")
