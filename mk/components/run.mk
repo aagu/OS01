@@ -1820,7 +1820,10 @@ define _touch_check_hdr
 endef
 
 .PHONY: test-gui-incremental
-test-gui-incremental:
+# CI runs this on a fresh workspace BEFORE "Build disk.img", so the sysroot
+# (staging headers + libc.a the libgui compile/link consumes) must be built
+# here rather than inherited from an earlier step.
+test-gui-incremental: $(SYSROOT_STAMP)
 	$(call require_capability,rootfs)
 	@echo "  [test-gui-incremental] phase 1/4: a repeated build must not recompile"
 	$(call os01_submake,libgui,all)
@@ -2093,6 +2096,7 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	# ``targets`` mode used to fail first with ``OVMF_FIRMWARE must
 	# name a readable firmware file`` and short-circuited the loop
 	# before ``host-test`` could run.)
+	set -e; \
 	if [ "$(PROFILE)" = "x86_64-clang" ]; then \
 	  echo "  [test-contract] $(PROFILE)/arch9-build-contract"; \
 	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_arch9_build_contract; \
@@ -2101,7 +2105,6 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	  echo "  [test-contract] $(PROFILE)/dry-run-contract"; \
 	  PROFILE=$(PROFILE) python3 -m unittest qemutests.test_dry_run_contract; \
 	fi; \
-	@set -e; \
 	case "$(PROFILE)" in \
 	  x86_64-clang)    modes="$(X86_CONTRACT_MODES)";; \
 	  aarch64-clang)   modes="$(AARCH64_CONTRACT_MODES)";; \

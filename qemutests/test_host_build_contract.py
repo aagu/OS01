@@ -218,6 +218,16 @@ class HostBuildContractTests(unittest.TestCase):
         """-MP ensures phony targets for headers in depfiles so header moves don't crash make."""
         bld_dir = ROOT / "build" / "x86_64-clang" / "host-test"
         dep_file = bld_dir / "test_bootinfo_abi.d"
+        if not dep_file.exists():
+            # Fresh tree: produce the depfile ourselves instead of relying
+            # on another test (unittest runs methods alphabetically, so
+            # this test can precede the one that builds the object).
+            cmd = ["make", "-B", "-C", "hosttests",
+                   "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+                   "PROFILE=x86_64-clang",
+                   str(bld_dir / "test_bootinfo_abi.o")]
+            result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout)
         self.assertTrue(dep_file.exists())
         dep_content = dep_file.read_text()
         # -MP generates empty targets like:

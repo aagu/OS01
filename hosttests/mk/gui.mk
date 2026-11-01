@@ -402,7 +402,8 @@ $(GUI_DESKTOP_DIR)/%.o: $(TESTS_DIR)/user/desktop/%.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
-$(GUI_DESKTOP_DIR)/test_desktop_shell.o: $(TEST_CASES)/test_desktop_shell.c
+$(GUI_DESKTOP_DIR)/test_desktop_shell.o: $(TEST_CASES)/test_desktop_shell.c \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -I$(TESTS_DIR)/user/desktop -MMD -MP -c $< -o $@
 
@@ -458,18 +459,21 @@ $(GUI_WIDGET_DIR)/gui_native_fixture.o: $(TEST_MOCK)/gui_native_fixture.c \
 		$(TESTS_DIR)/libgui/internal/gui_platform_private.h \
 		$(TESTS_DIR)/libgui/internal/gui_input_private.h \
 		$(TESTS_DIR)/libgui/internal/gui_lvgl_private.h \
-		$(TESTS_DIR)/libgui/include/gui/gui_layout.h
+		$(TESTS_DIR)/libgui/include/gui/gui_layout.h \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
 $(GUI_WIDGET_DIR)/test_gui_widget.o: $(TEST_CASES)/test_gui_widget.c \
-		$(TEST_MOCK)/gui_native_fixture.h
+		$(TEST_MOCK)/gui_native_fixture.h \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
 # GUI-2b Task 4: the typed geometry / layout / text-mode contract.
 $(GUI_WIDGET_DIR)/test_gui_widget_layout.o: $(TEST_CASES)/test_gui_widget_layout.c \
-		$(TEST_MOCK)/gui_native_fixture.h
+		$(TEST_MOCK)/gui_native_fixture.h \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -498,7 +502,8 @@ test-gui-widget-layout: $(TEST_BLD)/test_gui_widget_layout.elf
 # focus-visual helper lets the test observe the theme's focus ring through
 # the public API only.
 $(GUI_WIDGET_DIR)/test_gui_widget_appearance.o: $(TEST_CASES)/test_gui_widget_appearance.c \
-		$(TEST_MOCK)/gui_native_fixture.h
+		$(TEST_MOCK)/gui_native_fixture.h \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -525,7 +530,8 @@ test-gui-widget-appearance: $(TEST_BLD)/test_gui_widget_appearance.elf
 
 # GUI-2b Task 6: the native event bridge and the platform statistics.
 $(GUI_WIDGET_DIR)/test_gui_widget_event.o: $(TEST_CASES)/test_gui_widget_event.c \
-		$(TEST_MOCK)/gui_native_fixture.h
+		$(TEST_MOCK)/gui_native_fixture.h \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -552,7 +558,8 @@ test-gui-widget-event: $(TEST_BLD)/test_gui_widget_event.elf
 
 # GUI-2b Task 7: the single focus engine (native + diagnostic registration).
 $(GUI_WIDGET_DIR)/test_gui_focus.o: $(TEST_CASES)/test_gui_focus.c \
-		$(TEST_MOCK)/gui_native_fixture.h
+		$(TEST_MOCK)/gui_native_fixture.h \
+		$(GUI_HOST_UAPI_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_HOST_CFLAGS) -MMD -MP -c $< -o $@
 

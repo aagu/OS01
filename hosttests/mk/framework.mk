@@ -14,6 +14,7 @@ TEST_BINS += \
 
 # Negative-contract binary: framework exit-code integrity
 $(TEST_BLD)/test_framework_contract.elf: $(TEST_CASES)/test_framework_contract.c
+	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_framework_contract.o
 	$(HOST_CC) -o $@ $(TEST_BLD)/test_framework_contract.o
 

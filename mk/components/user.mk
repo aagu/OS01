@@ -36,15 +36,19 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	@mkdir -p $(dir $(firstword $(USER_ARTIFACTS))) $(USER_BUILD_DIR)
 	@+$(SHELL) -ec '\
 	  if [ -n "$(DRY_RUN)" ]; then \
-	    env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	      $(if $(COMPILER_LAUNCHER),COMPILER_LAUNCHER="$(COMPILER_LAUNCHER)") \
-	      $(if $(CCACHE_DIR),CCACHE_DIR="$(CCACHE_DIR)") \
-	      $(if $(CCACHE_BASEDIR),CCACHE_BASEDIR="$(CCACHE_BASEDIR)") \
-	      $(if $(CCACHE_COMPILERCHECK),CCACHE_COMPILERCHECK="$(CCACHE_COMPILERCHECK)") \
-	      MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
-	      -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
-	      USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
-	      all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS); \
+	    if [ -f "$(SYSROOT)/usr/lib/libc.a" ]; then \
+	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	        $(if $(COMPILER_LAUNCHER),COMPILER_LAUNCHER="$(COMPILER_LAUNCHER)") \
+	        $(if $(CCACHE_DIR),CCACHE_DIR="$(CCACHE_DIR)") \
+	        $(if $(CCACHE_BASEDIR),CCACHE_BASEDIR="$(CCACHE_BASEDIR)") \
+	        $(if $(CCACHE_COMPILERCHECK),CCACHE_COMPILERCHECK="$(CCACHE_COMPILERCHECK)") \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	        USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
+	        all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS); \
+	    else \
+	      echo "  [dry-run] user programs: skipped — bare tree lacks the sysroot a real build would provide"; \
+	    fi; \
 	    exit 0; \
 	  fi; \
 	  mkdir -p "$(dir $(LOCK_DIR))"; \

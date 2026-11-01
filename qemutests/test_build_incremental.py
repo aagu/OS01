@@ -269,8 +269,14 @@ class CommandKeyContractTests(unittest.TestCase):
 
     def test_linker_switch_relinks(self):
         """Switching TARGET_LD linker wrapper must invalidate link key and relink without recompiling objects."""
+        # Resolve ld.lld from PATH: the CI container ships it under
+        # /usr/local/llvm-*/bin (symlinked into /usr/local/bin), and the
+        # sanitized sub-make PATH may differ from the harness's.
+        ld_lld = shutil.which("ld.lld")
+        if ld_lld is None:
+            self.skipTest("ld.lld not found on PATH")
         wrapper = self.work_dir / "ld-wrapper"
-        wrapper.write_text("#!/bin/sh\nexec /usr/bin/ld.lld \"$@\"\n")
+        wrapper.write_text(f"#!/bin/sh\nexec '{ld_lld}' \"$@\"\n")
         wrapper.chmod(0o755)
 
         link_key_file = ROOT / "build" / "x86_64-clang" / "kernel" / ".link_key"

@@ -358,10 +358,17 @@ EOF
              drain_smp=$(make -n PROFILE=aarch64-clang test-aarch64 MODE=smp)
              ! echo "$drain_smp" | grep -q AARCH64_SYNC_FAULT_TEST=1
              # ── x86 intr-x86 isolated destructive dispatch (Task 5) ──
+             # x86_64-only: these assertions dry-run/build x86_64 fault
+             # variants and nm-inspect $(base) kernel ELF paths, so they
+             # only make sense when the profile under test IS x86_64
+             # ($base = build/x86_64-clang). The aarch64 contract runs
+             # the profile-independent assertions above and skips this
+             # section entirely.
              # The suite must be accepted by the parse-time SUITE case
              # statement and must drive BOTH destructive cases (#BP and
              # the QMP-injected NMI) through their OWN isolated
              # kernel/image variants.
+             if [ "$profile" = "x86_64-clang" ]; then
              dry_intr=$(make -n PROFILE=x86_64-clang test-qemu SUITE=intr-x86 2>&1 || true)
              echo "$dry_intr" | grep -qF "X86_INTR_FAULT_TEST=bp " \
                || { echo "targets: intr-x86 dry-run did not select the #BP variant" >&2; exit 1; }
@@ -412,6 +419,7 @@ EOF
                || { echo "targets: the #BP variant does not carry the resume label" >&2; exit 1; }
              grep -q -- "-DX86_INTR_FAULT_TEST_BP=1" "$base/kernel/intr-x86-fault-bp/.cflags" \
                || { echo "targets: the probe macro did not reach the kernel compile flags" >&2; exit 1; }
+             fi
              ;;
     *) exit 64 ;;
     esac

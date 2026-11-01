@@ -24,15 +24,20 @@ $(KERNEL_ARTIFACT): $(SYSROOT_STAMP) $(KERNEL_RUNTIME_PREREQ) FORCE
 	@mkdir -p $(dir $@)
 	@+$(SHELL) -ec '\
 	  if [ -n "$(DRY_RUN)" ]; then \
-	    env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	      MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
-	      -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
-	      ARCH=x86_64 \
-	      kernel.bin \
-	      KERNEL_RUNTIME_INPUTS="$(KERNEL_RUNTIME_INPUTS)" \
-	      KERNEL_RUNTIME_PREREQ="$(KERNEL_RUNTIME_PREREQ)" \
-	      KERNEL_RUNTIME_LINK_RECEIPT="$(KERNEL_RUNTIME_LINK_RECEIPT)" \
-	      $(OS01_SUBMAKE_ARGS); \
+	    if [ -f "$(KERNEL_RUNTIME_PREREQ)" ] && [ -f "$(BUILD_DIR)/libc/lib/libk.a" ]; then \
+	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
+	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
+	        -C kernel OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
+	        ARCH=x86_64 \
+	        kernel.bin \
+	        OS01_KERNEL_SUBMAKE_DRY=1 \
+	        KERNEL_RUNTIME_INPUTS="$(KERNEL_RUNTIME_INPUTS)" \
+	        KERNEL_RUNTIME_PREREQ="$(KERNEL_RUNTIME_PREREQ)" \
+	        KERNEL_RUNTIME_LINK_RECEIPT="$(KERNEL_RUNTIME_LINK_RECEIPT)" \
+	        $(OS01_SUBMAKE_ARGS); \
+	    else \
+	      echo "  [dry-run] kernel.bin: skipped — bare tree lacks the x86_64 runtime/libc state a real build would provide"; \
+	    fi; \
 	    exit 0; \
 	  fi; \
 	  mkdir -p "$(dir $(LOCK_DIR))"; \

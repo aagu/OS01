@@ -21,6 +21,11 @@ class DryRunContractTests(unittest.TestCase):
         for p in target_root.rglob("*"):
             if ".git" in p.parts:
                 continue
+            # git worktrees under .worktrees/ are independent checkouts with
+            # their own builds/edits driven by other sessions; they are not
+            # part of this profile's dry-run surface.
+            if ".worktrees" in p.parts:
+                continue
             try:
                 st = p.stat()
                 snapshot[str(p.relative_to(target_root))] = (st.st_mtime_ns, st.st_size)

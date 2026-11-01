@@ -587,7 +587,14 @@ ifeq ($(ARCH),x86_64)
 ifneq ($(KERNEL_RUNTIME_LINK_REQUESTED),)
 KERNEL_RUNTIME_INPUT_SHA256 := $(strip $(shell sha256sum "$(KERNEL_RUNTIME_INPUTS)" 2>/dev/null | cut -d' ' -f1))
 ifeq ($(KERNEL_RUNTIME_INPUT_SHA256),)
+# A dry-run sub-make (make -n kernel.bin, e.g. the build-contract 'targets'
+# mode against a cleaned x86_64 tree) only parses this makefile; the runtime
+# archive may legitimately not exist yet, so skip the hard digest gate there.
+ifneq ($(OS01_KERNEL_SUBMAKE_DRY),)
+KERNEL_RUNTIME_INPUT_SHA256 := dry-run-no-archive
+else
 $(error failed to compute x86_64 kernel runtime input digest for '$(KERNEL_RUNTIME_INPUTS)')
+endif
 endif
 KERNEL_RUNTIME_IDENTITY_FILE := $(BUILD_DIR)/.runtime-link.identity
 KERNEL_RUNTIME_IDENTITY := prereq=$(KERNEL_RUNTIME_PREREQ)|input=$(KERNEL_RUNTIME_INPUTS)|sha256=$(KERNEL_RUNTIME_INPUT_SHA256)

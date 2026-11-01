@@ -175,10 +175,19 @@ $(UEFI_RUNTIME_STAMP): FORCE
 $(UEFI_EFI_ARTIFACT): $(UEFI_RUNTIME_STAMP) boot/uefi/Makefile \
 		$(UEFI_BOOT_INPUTS)
 	@mkdir -p $(dir $@)
-	@$(call os01_submake,boot/uefi,ARCH=$(UEFI_ARCH_FAMILY) \
-	  UEFI_RUNTIME_STAMP=$(UEFI_RUNTIME_STAMP) \
-	  UEFI_RUNTIME_CFLAGS='$(UEFI_RUNTIME_CFLAGS)' \
-	  UEFI_RUNTIME_MAKE='$(UEFI_RUNTIME_MAKE)' $(OS01_SUBMAKE_ARGS))
+	$(if $(DRY_RUN),\
+	  @+if [ -f "$(UEFI_RUNTIME_STAMP)" ]; then \
+	    $(call os01_submake_cmd,boot/uefi,ARCH=$(UEFI_ARCH_FAMILY) \
+	      UEFI_RUNTIME_STAMP=$(UEFI_RUNTIME_STAMP) \
+	      UEFI_RUNTIME_CFLAGS='$(UEFI_RUNTIME_CFLAGS)' \
+	      UEFI_RUNTIME_MAKE='$(UEFI_RUNTIME_MAKE)' $(OS01_SUBMAKE_ARGS)); \
+	  else \
+	    echo "  [dry-run] uefi: skipped — bare tree lacks the uefi-runtime stamp"; \
+	  fi,\
+	  $(call os01_submake,boot/uefi,ARCH=$(UEFI_ARCH_FAMILY) \
+	    UEFI_RUNTIME_STAMP=$(UEFI_RUNTIME_STAMP) \
+	    UEFI_RUNTIME_CFLAGS='$(UEFI_RUNTIME_CFLAGS)' \
+	    UEFI_RUNTIME_MAKE='$(UEFI_RUNTIME_MAKE)' $(OS01_SUBMAKE_ARGS)))
 	@cmp -s $(UEFI_BUILD_DIR)/$(UEFI_TARGET_EFI) $@ || cp $(UEFI_BUILD_DIR)/$(UEFI_TARGET_EFI) $@
 
 endif
