@@ -8,6 +8,7 @@
 #include <sched/boot.h>       // sched_boot_creation_begin (Phase 2, Ruling P2-2)
 #include <driver/serial.h>    // write_serial
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
+#include <bus/pci/pci_devfs.h> // pci_devfs_register_all
 #include <tty/boot.h>         // tty_boot_init
 #include <arch/x86_64/boot.h> // x86_64_boot_early/_memory/_subsystems/_device_nodes
 #include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
@@ -145,6 +146,12 @@ int kernel_main(const struct boot_context *bootctx)
     // owned by tty_boot_init() and fs_boot_probe_devfs() (Task 3).
     if (fs_boot_prepare() != 0)
         kpanic("fs_boot_prepare failed\n");
+
+    // ARCH-12: publish the PCI namespace now that devfs exists.  PCI
+    // devices were enumerated in subsys phase 6 (device-boot), which
+    // runs before this point.  A registration failure is NOT fatal —
+    // lspci is a diagnostic tool, not a boot-critical facility.
+    pci_devfs_register_all();
 
 #if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
     void arch10_capacity_fixture_init(void);
