@@ -325,10 +325,19 @@ TEST_FUNC(test_devfs_name_validation) {
     assert_eq(-EINVAL, devfs_register_chrdev(NULL, NULL, &s_test_cap_ops));
     assert_eq(-EINVAL, devfs_register_chrdev("", NULL, &s_test_cap_ops));
 
-    // Slash in name
-    assert_eq(-EINVAL, devfs_register_chrdev("sub/dev", NULL, &s_test_cap_ops));
+    // A '/' now separates path components: the name is registered as
+    // the multi-component path "sub/dev" and "sub" becomes a directory.
+    assert_eq(0, devfs_register_chrdev("sub/dev", NULL, &s_test_cap_ops));
+    vfs_node_t *sub_dir = vfs_lookup("/dev/sub");
+    assert_not_null(sub_dir);
+    assert_eq(VFS_DIR, sub_dir->type);
+    vfs_node_put(sub_dir);
+
+    // Absolute paths, trailing separators and empty components stay
+    // invalid.
     assert_eq(-EINVAL, devfs_register_chrdev("/leading", NULL, &s_test_cap_ops));
     assert_eq(-EINVAL, devfs_register_chrdev("trailing/", NULL, &s_test_cap_ops));
+    assert_eq(-EINVAL, devfs_register_chrdev("a//b", NULL, &s_test_cap_ops));
 
     // Name length >= DEVFS_NAME_MAX (32 characters)
     assert_eq(-EINVAL, devfs_register_chrdev("01234567890123456789012345678901", NULL, &s_test_cap_ops));

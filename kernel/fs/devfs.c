@@ -1039,9 +1039,10 @@ out:
     if (result == 0) {
         debug_fs("devfs: registered '%s' (id %lu)\n", path,
                  (unsigned long)leaf->id);
-    } else {
-        log_warn("devfs: registration of '%s' failed (%d)\n", path, result);
     }
+    // A failed registration is reported by the caller: it owns the
+    // severity (a boot-critical device is an error, an optional one is
+    // a warning).  devfs only hands back the errno.
     return result;
 }
 
