@@ -162,6 +162,43 @@ Block devices in devfs (`/dev/hda`, `/dev/hda1`, etc.) dispatch reads/writes thr
 
 All devfs nodes share a single `vfs_ops_t` vector; the device index is stored in `node->fs_data` and dispatched to the correct handler at runtime.
 
+### 子目录与多级路径（ARCH-11）
+
+devfs 的注册名是**相对挂载点 `/dev`** 的路径，可以包含 `/` 分隔的多级分量：
+
+```c
+devfs_register_path("pci/0000:00:1f.2/vendor", priv, &ops);
+```
+
+注册后用户态可见 `/dev/pci/0000:00:1f.2/vendor`。中间目录
+（`/dev/pci`、`/dev/pci/0000:00:1f.2`）**隐式创建**，并作为真实的目录出现在
+`ls /dev` 与 `ls /dev/pci` 中。`devfs_register_chrdev()` /
+`devfs_register_blkdev()` 是 `devfs_register_path()` /
+`devfs_register_blkdev_path()` 的历史拼写，同样接受多级路径；单分量调用
+（`devfs_register_chrdev("null", …)`）行为与之前完全一致。
+
+路径规则：
+
+| 规则 | 说明 |
+|------|------|
+| 相对路径 | 相对 `/dev`；前导 `/` 被拒绝（`-EINVAL`） |
+| 分隔符 | `/`；空分量（`a//b`）与尾随 `/` 被拒绝 |
+| 分量长度 | `< DEVFS_NAME_MAX`（32），超长不截断，直接 `-EINVAL` |
+| 深度 | `<= DEVFS_MAX_DEPTH`（16） |
+| 总量 | 绝对路径 `/dev/<path>` 必须 `< VFS_NAME_MAX`（256），否则 `-ENAMETOOLONG` |
+| 遍历语义 | `.` 与 `..` 分量被拒绝（devfs 不做 `..` 解析） |
+
+冲突语义：同路径重复注册返回 `-EEXIST`；中间分量已被设备占用返回 `-ENOTDIR`；
+中间分量已是目录则复用该目录。注册失败时已建立的中间目录保留——它们不承载
+任何外部可见状态。
+
+内部结构：devfs 用一棵树保存所有节点，目录与设备同构（`devfs_node_t`）。
+目录与设备共用同一个单调递增的 id 计数器，`ino` / `rdev` / `readdir` 的 `ino`
+保持一致且非零。记录一经发布不释放（unmount 只释放 VFS 节点）。
+
+VFS 侧的路径解析本身已支持多级分量（`__vfs_lookup_raw()` 逐分量调用
+`i_ops->lookup()`），devfs 只需对中间分量返回 `VFS_DIR` 节点即可，**无需修改 VFS**。
+
 ---
 
 ## procfs (`kernel/fs/procfs.c`, `kernel/include/fs/procfs.h`)

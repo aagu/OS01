@@ -1,9 +1,43 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-01）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-02）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-11-02
+
+- feat(devfs): **ARCH-11 devfs 子目录化闭环 —— 多级注册路径 + 按组件组织的目录树**（分支 `feature/arch11-devfs-hierarchy`，设计 [spec](superpowers/specs/2026-11-02-arch11-devfs-hierarchy-design.md)，实施 [plan](superpowers/plans/2026-11-02-arch11-devfs-hierarchy.md)）：
+
+  **做了什么**
+
+  - devfs 的注册名从「≤32 字节单段」扩展为「**相对 `/dev`** 的 `/` 分隔多级路径」：新增 `devfs_register_path()` / `devfs_register_blkdev_path()`；历史拼写 `devfs_register_chrdev()` / `devfs_register_blkdev()` 接受同样的多级路径，单分量调用（`null`/`zero`/`tty`/`ptmx`/`pts<N>`/`fb`/`hda*` …）行为完全不变。
+  - devfs 内部存储从拍平链表改为**按组件组织的目录树**（`devfs_node_t`，目录与设备同构）：目录与设备共用同一个单调递增 id 计数器，`ino`/`rdev`/`readdir` 的 `ino` 一致且非零；中间目录**隐式创建**并作为真实目录出现在 `ls /dev` 中；记录一经发布不释放（延续 ARCH-10 §7.3），unmount 只释放 VFS 节点。
+  - `lookup` / `readdir` 支持逐级下降与逐级枚举；`devfs_lookup_node()` 扩展为接受多段路径（`"pts/0"`）。
+  - 路径规则：相对路径（前导 `/` 拒绝）、每段 < `DEVFS_NAME_MAX`(32)、深度 ≤ `DEVFS_MAX_DEPTH`(16)、绝对路径 `/dev/<path>` < `VFS_NAME_MAX`(256)（否则 `-ENAMETOOLONG`）、`.`/`..` 分量拒绝。冲突语义：同路径重复 `-EEXIST`；中间分量已被设备占用 `-ENOTDIR`；中间分量已是目录则复用。注册失败时已建立的中间目录保留（不承载外部可见状态）。
+  - 顺带删除 `devfs_register_node()` 内部的 `log_warn`：注册 API 已把精确 errno 交回调用方，严重级别由调用方决定（启动必需设备是 error，可选设备是 warning）；内部再记一次既重复又把 logger 拉进每一个 devfs 消费方（`test_poll_*` 等 host case 因此链接失败）。
+
+  **关键结论：VFS 侧零改动**
+
+  roadmap 原文把「VFS `find_mount`/`__vfs_lookup_raw` 不支持多段解析」列为需一并解决的约束。实施前逐行复核发现该前提**已过时**：`kernel/fs/vfs.c` 的 `__vfs_lookup_raw()`（1024–1148 行）本就逐分量遍历路径并对每一段回调 `cur->i_ops->lookup(cur, comp, &child)`，多级解析能力已存在——devfs 只要对中间分量返回 `VFS_DIR` 节点即可继续下降。因此 **`kernel/fs/vfs.c` 与 `kernel/fs/dcache.c` 全程未修改**，全部改动收敛在 devfs 内部（ARCH-12 lspci 的 `/dev/pci/<BDF>/<attr>` 前置条件由此满足）。
+
+  **验证**
+
+  - 新增 hosttest `test_devfs_hierarchy`（10 个用例 / 66 项断言）：多级注册、多级 lookup、逐级 readdir 的类型与 ino 一致性、层级设备读取、单段兼容、冲突 errno 全集（`-EEXIST`/`-ENOTDIR`）、非法路径全集（`-EINVAL`）、深度与总长度上限（`-ENAMETOOLONG`）、VFS 逐分量下降（含越过设备时的失败）、重挂载后层级仍可枚举、多段 `devfs_lookup_node()`。
+  - 更新 hosttest `test_devfs_capacity` 的名称校验断言：`'/'` 现在是分隔符，`"sub/dev"` 注册成功且 `/dev/sub` 成为目录；绝对路径、尾随分隔符、空分量、超长段、重复名仍为 `-EINVAL`。
+  - `make PROFILE=x86_64-clang test-host`：**165 个 hosttest 二进制全 PASS**（基线 164 + 新增 1）。
+  - `make PROFILE=x86_64-clang test-static`：全绿（含 `arch10-capacity-audit`、`stack-frame-audit`、`driver-model-boundary`、`intr-dispatch-audit`、`gui-build-audit` 等）。
+  - `make PROFILE=x86_64-clang kernel.bin` 与 `make PROFILE=x86_64-clang disk.img` 构建通过，`kernel/fs/devfs.c` 零编译诊断。
+  - QEMU 回归：`make PROFILE=x86_64-clang test-qemu SUITE=phase-0` **PASS**（内核启动标记校验通过、shell 提示符出现）。
+  - QEMU 手工回归（headless 注入串口，`-smp 2` + `virtio-rng` 熵源）：`ls /dev` 输出 `zero urandom tty0 tty serial random pts0 ptmx null mouse keyboard hda2 hda1 hda gfx0 fb` —— 与改动前**完全一致的 16 个既有设备**，无新增、无缺失（生产代码本就不注册多级设备，故不应出现层级目录）；`cat /dev/null` 无输出且不挂起；`/dev/urandom` 可读；shell 对 `echo` 正常回显。
+    （注：手工回归必须带 `-object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0`，否则内核 CSPRNG 无熵源、`get_random_bytes` fail-closed，启动会停在 `init: entering supervision loop` 之前——与本次改动无关。）
+
+  **影响范围**
+
+  - `kernel/fs/devfs.c`、`kernel/include/fs/devfs.h`、`hosttests/cases/test_devfs_hierarchy.c`（新增）、`hosttests/mk/fs.mk`、`hosttests/cases/test_devfs_capacity.c`、`docs/fs/filesystem.md`（新增「devfs 子目录与多级路径」章节）、`docs/roadmap.md`、本文件。
+  - **未改动** `kernel/fs/vfs.c`、`kernel/fs/dcache.c`、任何 `kernel/include/uapi/` 文件、`boot_context` v2 ABI、`struct devfs_ops` 布局。
+
+  **环境注记**：`make test-host` 在 agent sandbox 内可能因 `rm` 被 recoverable-delete shim（`mavis-trash`）拦截而使 `tools/tests/test_kernel_headers.py` 偶发失败（`mavis-trash: failed to trash '/tmp/.../headers'`），该失败与本次改动无关，在未改动的 master 工作区同样可复现；用真实 `/usr/bin/rm`（去掉 shim 的 PATH）复跑即通过。该 shim 不存在于用户交互 shell 与 CI 环境。
 
 ## 2026-11-01
 

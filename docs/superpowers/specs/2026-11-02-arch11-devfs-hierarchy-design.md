@@ -351,6 +351,11 @@ root 节点的 `fs_data` 在 `devfs_fs_mount()` 中设置为 `&devfs_root`，
 新增/修改的内核代码一律使用 `log_err` / `log_warn` / `log_info` / `debug_fs()`，
 不使用裸 `serial_printk` / `color_printk`（例外白名单不含本次改动）。
 
+注册失败**不在 devfs 内部记日志**：注册 API 把精确 errno 交回调用方，
+严重级别由调用方决定（启动必需设备失败是 error，可选设备失败是 warning），
+devfs 内部再记一次既重复，又会把 logger 拉进每一个 devfs 消费方
+（`test_poll_*` 等 host case 因此链接失败）。成功路径用 `debug_fs()` 留痕。
+
 ---
 
 ## 7. 测试
