@@ -791,6 +791,9 @@ static int devfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     mp->root->ino = VFS_SYNTH_ROOT_INO;
     mp->root->mode = S_IFDIR | 0755;
     mp->root->nlink = 2;
+    // Bind the mount root to the devfs tree root so that lookups
+    // starting at /dev resolve against the registered records.
+    mp->root->fs_data = &devfs_root;
     return 0;
 }
 

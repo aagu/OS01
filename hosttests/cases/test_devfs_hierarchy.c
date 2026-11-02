@@ -290,6 +290,67 @@ TEST_FUNC(test_devfs_hierarchy_deep_and_long_paths) {
     assert_eq(-ENAMETOOLONG, devfs_register_path(toolong, NULL, &s_hier_ops));
 }
 
+TEST_FUNC(test_devfs_hierarchy_vfs_walk_through_mount) {
+    vfs_init();
+    devfs_init();
+
+    // The /dev mount root must carry the devfs root record so that
+    // the first lookup() below resolves against the tree.
+    assert_eq(0, devfs_register_path("usb/xhci/1-1/vendor",
+                                     (void *)(uintptr_t)0xAAAA, &s_hier_ops));
+
+    // Walk all three levels through the VFS path resolver.
+    vfs_node_t *leaf = vfs_lookup("/dev/usb/xhci/1-1/vendor");
+    assert_not_null(leaf);
+    if (leaf) {
+        assert_eq(VFS_CHRDEV, leaf->type);
+        uint64_t val = 0;
+        assert_eq((int)sizeof(val), leaf->f_ops->read(leaf, 0, sizeof(val), &val));
+        assert_eq(0xAAAA, val);
+        vfs_node_put(leaf);
+    }
+
+    // The intermediate directory must be reachable as a directory too.
+    vfs_node_t *mid = vfs_lookup("/dev/usb/xhci");
+    assert_not_null(mid);
+    assert_eq(VFS_DIR, mid->type);
+    vfs_node_put(mid);
+
+    // A path that continues past a device must fail.
+    vfs_node_t *bad = vfs_lookup("/dev/usb/xhci/1-1/vendor/extra");
+    assert_null(bad);
+}
+
+TEST_FUNC(test_devfs_hierarchy_remount) {
+    vfs_init();
+    devfs_init();
+
+    assert_eq(0, devfs_register_path("tree5/0000:00:1f.2/vendor",
+                                     (void *)(uintptr_t)0xCCCC, &s_hier_ops));
+
+    // Reinitialise VFS + devfs: this remounts devfs at /dev.
+    vfs_init();
+    devfs_init();
+
+    // The global device records survive the remount (ARCH-10 §7.3), so
+    // the whole hierarchy must still be reachable and enumerable.
+    vfs_node_t *leaf = vfs_lookup("/dev/tree5/0000:00:1f.2/vendor");
+    assert_not_null(leaf);
+    if (leaf) {
+        uint64_t val = 0;
+        assert_eq((int)sizeof(val), leaf->f_ops->read(leaf, 0, sizeof(val), &val));
+        assert_eq(0xCCCC, val);
+        vfs_node_put(leaf);
+    }
+
+    vfs_node_t *d1 = vfs_lookup("/dev/tree5");
+    assert_not_null(d1);
+    if (d1) {
+        assert_true(readdir_has(d1, "0000:00:1f.2", VFS_DIR));
+        vfs_node_put(d1);
+    }
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_devfs_hierarchy_register_and_lookup),
     TEST_ENTRY(test_devfs_hierarchy_readdir_per_level),
@@ -298,6 +359,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_devfs_hierarchy_conflicts),
     TEST_ENTRY(test_devfs_hierarchy_invalid_paths),
     TEST_ENTRY(test_devfs_hierarchy_deep_and_long_paths),
+    TEST_ENTRY(test_devfs_hierarchy_vfs_walk_through_mount),
+    TEST_ENTRY(test_devfs_hierarchy_remount),
 TEST_LIST_END
 
 int main(void) {
