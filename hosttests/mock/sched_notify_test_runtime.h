@@ -58,9 +58,7 @@
 #define _KERNEL_IPI_H
 
 /* ── Constants the skipped headers normally provide ───────────── */
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 #ifndef STACK_SIZE
 #define STACK_SIZE (32 * 1024)
 #endif

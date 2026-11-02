@@ -27,9 +27,7 @@
 /* The REAL ap_work protocol header (states + slot array) is
  * lightweight and included unchanged. */
 
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 #ifndef STACK_SIZE
 #define STACK_SIZE (32 * 1024)
 #endif
