@@ -7,6 +7,25 @@
 
 ## 2026-11-02
 
+- feat(pci): **ARCH-12 lspci PCI 设备列举命令闭环 —— 零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`**（分支 `feature/arch12-lspci`，设计 [spec](superpowers/specs/2026-11-02-arch12-lspci-design.md)，实施 [plan](superpowers/plans/2026-11-02-arch12-lspci.md)）：
+
+  **做了什么**
+
+  - 内核新增 `kernel/bus/pci/pci_devfs.c` / `kernel/include/bus/pci/pci_devfs.h`：在 `fs_boot_prepare()` 之后（devfs 已挂载、PCI 设备已在 subsys phase 6 枚举完毕）把每个已枚举的 PCI 设备发布成 `/dev/pci/<BDF>/<attr>`，属性集 7 项 —— `vendor`（`"0x8086\n"`）、`device`（`"0x2922\n"`）、`class`（24-bit，`"0x010601\n"`）、`config`（256 字节原始 config space）、`resource`（BAR 列表）、`irq`（路由后 GSI）、`driver`（绑定驱动名）。所有属性共用一张 `devfs_ops` 表，read 回调按 per-attribute 上下文分派；read 路径零动态分配。
+  - 用户态新增 `user/lspci.c`：`opendir`/`readdir` 枚举 `/dev/pci`，按 BDF 字典序输出，格式对齐 Linux lspci（`00:1f.2 SATA controller: Intel Corporation 82801IR/IO/IH SATA AHCI Controller (rev 00)`）；支持 `-x`（config space hex dump）、`-n`（不解析名称）、`-v`（Class 细分 / IRQ / 驱动 / Region）；内置 class 名表与 vendor:device 子集，命中失败时按「vendor 名 + device 十六进制」回退。
+  - `resource` **只报地址与类型、不报 BAR 容量**：ARCH-9 驱动模型契约明确 BAR 的无损 sizing 不可得（BAR 的 "length" 是驱动已知窗口而非 BAR 容量），编造 size 会给出误导性输出。
+
+  **关键结论：零新增 syscall、零 UAPI 变更**
+
+  - roadmap 原案假设需要新增 `SYS_pci_count` 等 syscall——复核发现该 syscall 从不存在，而 ARCH-11 已让 devfs 支持多级注册路径，枚举步骤因此可以直接落在文件系统命名空间里。`kernel/include/uapi/` **未改动**，`SYS_*` 编号集合不变。这正是 ARCH-11 作为 ARCH-12 前置条件的价值。
+  - `kernel/Makefile` **零改动**：`$(wildcard bus/pci/*.c)` 自动收集新文件；aarch64 profile 用显式源文件清单（不含 `bus/pci/*`），天然不编译本模块，无需 arch gate。
+  - `config/rootfs.mk` **零改动**：`/bin/lspci` 由 `$(USER_PROGRAMS)` 自动派生。
+
+  **验证**
+
+  - 新增 hosttest `test_pci_devfs`（7 个用例 / 48 断言）：mock `arch_pci_backend()` 提供合成 config space，驱动**真实** devfs 树——覆盖 7 个属性的字节内容、注册后 `/dev/pci/<BDF>/vendor` 可 `vfs_lookup()` 且类型为 `VFS_CHRDEV`、`/dev/pci` 的 readdir 列出 BDF 目录、BDF 目录列出 7 个属性名、read 按 offset 切片、越界返回 EOF。全量 hosttest 165 → 166 全绿。
+  - QEMU q35 实跑：内核日志 `pci_devfs: published 56 attribute nodes for 8 PCI devices`（8 设备 × 7 属性）；`ls /dev/pci` 列出 8 个 BDF 目录；`cat /dev/pci/0000:00:1f.2/vendor` 返回 `0x8086`；`/bin/lspci` 列出 8 个设备且格式与 Linux lspci 一致；`-n` 输出数字 ID、`-v` 输出 Class/IRQ/驱动/Region、`-x` 输出 16 字节一行 hex dump。
+
 - feat(devfs): **ARCH-11 devfs 子目录化闭环 —— 多级注册路径 + 按组件组织的目录树**（分支 `feature/arch11-devfs-hierarchy`，设计 [spec](superpowers/specs/2026-11-02-arch11-devfs-hierarchy-design.md)，实施 [plan](superpowers/plans/2026-11-02-arch11-devfs-hierarchy.md)）：
 
   **做了什么**

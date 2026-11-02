@@ -125,6 +125,7 @@ static const struct { uint16_t vendor, device; const char *name; } kDeviceNames[
     { 0x1234, 0x1111, "QEMU Virtual Video Controller" },
     { 0x1af4, 0x1000, "Virtio network device" },
     { 0x1af4, 0x1001, "Virtio block device" },
+    { 0x1af4, 0x1005, "Virtio RNG device" },
     { 0x1af4, 0x1041, "Virtio console" },
     { 0x1af4, 0x1042, "Virtio modern block device" },
     { 0x1af4, 0x1100, "Virtio GPU" },

@@ -199,6 +199,37 @@ devfs_register_path("pci/0000:00:1f.2/vendor", priv, &ops);
 VFS 侧的路径解析本身已支持多级分量（`__vfs_lookup_raw()` 逐分量调用
 `i_ops->lookup()`），devfs 只需对中间分量返回 `VFS_DIR` 节点即可，**无需修改 VFS**。
 
+### PCI 设备命名空间（ARCH-12）
+
+内核在 `fs_boot_prepare()` 之后（devfs 已挂载、PCI 设备已在 subsys phase 6
+枚举完毕）把每个已枚举的 PCI 设备发布成 `/dev/pci/<BDF>/<attr>`：
+
+| 路径 | 内容 |
+|------|------|
+| `/dev/pci/0000:00:1f.2/vendor` | vendor id，文本 `"0x8086\n"` |
+| `/dev/pci/0000:00:1f.2/device` | device id，文本 `"0x2922\n"` |
+| `/dev/pci/0000:00:1f.2/class` | 24-bit class code，文本 `"0x010601\n"` |
+| `/dev/pci/0000:00:1f.2/config` | 256 字节原始 config space（小端，逐字节原样） |
+| `/dev/pci/0000:00:1f.2/resource` | BAR 列表，每行 `Region N: <kind> at 0x<addr>` |
+| `/dev/pci/0000:00:1f.2/irq` | 路由后的 GSI，文本 `"16\n"`；取不到时 `"none\n"` |
+| `/dev/pci/0000:00:1f.2/driver` | 绑定的驱动名；未绑定时 `"none\n"` |
+
+- `<BDF>` 是 `domain:bus:slot.function`（如 `0000:00:1f.2`）。
+- `resource` 的 kind 取值：`PCI_BAR_IO` → `I/O ports`；`PCI_BAR_MMIO32` /
+  `PCI_BAR_MMIO64` → `Memory`；无效 BAR 与 64 位 BAR 的上半段不出现。
+- `resource` **只报地址与类型，不报 BAR 容量**——BAR 的无损 sizing 不可得
+  （ARCH-9 驱动模型契约：BAR 的 "length" 是驱动已知窗口而非 BAR 容量），
+  编造 size 会给出误导性输出。
+- `config` 的内容长度固定 256 字节；每次 read 都要跑 64 次
+  `pci_config_read32()`（每次一对 CF8/CFC 端口 I/O），与 Linux sysfs 同款行为。
+
+该命名空间由 `kernel/bus/pci/pci_devfs.c` 发布。**零新增 syscall、零 UAPI 变更**：
+用户态用 `opendir` / `readdir` 枚举 `/dev/pci` 与 `/dev/pci/<BDF>/`，
+再逐个读属性文件。对应的用户态命令是 `/bin/lspci`。
+
+注册失败**不阻断启动**：单个属性注册失败只跳过该节点并 `log_warn` 记录；
+重复注册（`-EEXIST`）视为幂等，不记日志。
+
 ---
 
 ## procfs (`kernel/fs/procfs.c`, `kernel/include/fs/procfs.h`)
