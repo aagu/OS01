@@ -19,6 +19,7 @@ $(eval $(call register_host_test,test_devfs_input_dispatch,fs,protocol-or-legacy
 $(eval $(call register_host_test,test_devfs_capacity,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_devfs_hierarchy,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_pci_devfs,fs,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_vfs_basic.elf \
@@ -39,7 +40,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_devfs_input_dispatch.elf \
     $(TEST_BLD)/test_devfs_capacity.elf \
     $(TEST_BLD)/test_devfs_hierarchy.elf \
-    $(TEST_BLD)/test_nofile_limits.elf
+    $(TEST_BLD)/test_nofile_limits.elf \
+    $(TEST_BLD)/test_pci_devfs.elf
 
 # Basic VFS & FAT32 tests
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
@@ -527,3 +529,49 @@ $(TEST_BLD)/test_nofile_limits.elf: $(TEST_BLD)/test_nofile_limits.o \
 .PHONY: test-nofile-limits
 test-nofile-limits: $(TEST_BLD)/test_nofile_limits.elf
 	$<
+
+# ── ARCH-12: the PCI device namespace in devfs ────────────────
+#
+# The case drives the PRODUCTION devfs tree and the PRODUCTION PCI
+# core: the case TU supplies a mock arch_pci_backend() that serves a
+# synthetic configuration space, and publishes a synthetic device
+# through pci_devfs_register_device().
+#
+# pci core is compiled with the VFS runtime flags (not PCI_HOST_CFLAGS):
+# pci_devfs.c pulls in fs/devfs.h -> fs/vfs.h -> arch/spinlock.h, and that
+# header is only excluded by the -D__SPINLOCK_H__ that VFS_HOST_CFLAGS
+# carries.  The object gets its own name so it does not collide with the
+# PCI_HOST_CFLAGS build of the same source in mk/drivers.mk.
+#
+# pci core is compiled with -ffunction-sections (VFS_HOST_CFLAGS) and the
+# binary is linked with --gc-sections: only pci_enumerate() reaches
+# device_alloc_id(), and the case never enumerates, so
+# kernel/device/core.c stays out of the link surface.
+$(TEST_BLD)/pci_core_fs_production.o: $(TESTS_DIR)/kernel/bus/pci/core.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/pci_devfs_production.o: $(TESTS_DIR)/kernel/bus/pci/pci_devfs.c \
+		$(TESTS_DIR)/kernel/include/bus/pci/pci_devfs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_pci_devfs.o: $(TEST_CASES)/test_pci_devfs.c \
+		$(TESTS_DIR)/kernel/include/bus/pci/pci_devfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_pci_devfs.elf: $(TEST_BLD)/test_pci_devfs.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/fat_production.o \
+		$(TEST_BLD)/tmpfs_production.o \
+		$(TEST_BLD)/devfs_vfs_production.o \
+		$(TEST_BLD)/pci_core_fs_production.o \
+		$(TEST_BLD)/pci_devfs_production.o \
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(TEST_BLD)/rwlock.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
