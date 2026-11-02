@@ -11,7 +11,10 @@
  */
 #include <bus/pci/pci_devfs.h>
 #include <bus/pci/driver.h>
+#include <fs/devfs.h>
+#include <fs/vfs.h>
 #include <log/log.h>
+#include <memory/slab.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -25,6 +28,11 @@
 
 // PCI configuration space length in bytes.
 #define PCI_DEVFS_CFG_LEN   256
+
+// The devfs namespace and the per-device directory name.
+#define PCI_DEVFS_NAMESPACE   "pci"
+#define PCI_DEVFS_BDF_MAX     32    // "0000:00:1f.2" + NUL
+#define PCI_DEVFS_PATH_MAX    64    // "pci/" + BDF + "/" + attribute + NUL
 
 // ── Individual attribute renderers ────────────────────────────
 // Each returns the CONTENT length (snprintf semantics: the returned
@@ -149,4 +157,116 @@ int pci_devfs_format_attr(const struct pci_device *pdev, pci_attr_id_t attr,
     case PCI_ATTR_DRIVER:   return fmt_driver(pdev, buf, size);
     default:                return -EINVAL;
     }
+}
+
+// ── devfs publication ─────────────────────────────────────────
+
+// Per-attribute context: the devfs node's private_data.  One context
+// per attribute node — the node has to know WHICH attribute it serves.
+typedef struct pci_attr_ctx {
+    struct pci_device *pdev;
+    uint8_t            attr;      // pci_attr_id_t
+} pci_attr_ctx_t;
+
+static const char *const s_attr_names[PCI_ATTR_COUNT] = {
+    "vendor", "device", "class", "config", "resource", "irq", "driver",
+};
+
+// One devfs_ops table for every attribute; the read callback dispatches
+// on the context's attribute id.
+static int pci_attr_read(vfs_node_t *node, uint64_t offset, uint64_t size,
+                          void *buffer)
+{
+    pci_attr_ctx_t *ctx = (pci_attr_ctx_t *)devfs_get_private(node);
+    if (!ctx || !ctx->pdev || !buffer) return -EINVAL;
+    if (size == 0) return 0;
+
+    char tmp[PCI_DEVFS_FMT_MAX];
+    int len = pci_devfs_format_attr(ctx->pdev, (pci_attr_id_t)ctx->attr,
+                                     tmp, sizeof(tmp));
+    if (len < 0) return len;
+    if (offset >= (uint64_t)len) return 0;
+
+    uint64_t avail = (uint64_t)len - offset;
+    uint64_t n = (size < avail) ? size : avail;
+    memcpy(buffer, tmp + offset, n);
+    return (int)n;
+}
+
+static const struct devfs_ops pci_attr_ops = {
+    .read = pci_attr_read,
+};
+
+// Publish /dev/pci/<BDF>/<attr> for one device.  Returns the number of
+// attribute nodes present afterwards; an already-existing node counts as
+// present, so the call is idempotent.
+int pci_devfs_register_device(const struct pci_device *pdev)
+{
+    if (!pdev) return -EINVAL;
+
+    char bdf[PCI_DEVFS_BDF_MAX];
+    int n = snprintf(bdf, sizeof(bdf), "%04x:%02x:%02x.%u",
+                     (unsigned)pdev->domain, (unsigned)pdev->bus,
+                     (unsigned)pdev->slot, (unsigned)pdev->fn);
+    if (n < 0 || (size_t)n >= sizeof(bdf)) return -EINVAL;
+
+    int published = 0;
+    for (int i = 0; i < PCI_ATTR_COUNT; i++) {
+        char path[PCI_DEVFS_PATH_MAX];
+        int pn = snprintf(path, sizeof(path), "%s/%s/%s",
+                          PCI_DEVFS_NAMESPACE, bdf, s_attr_names[i]);
+        if (pn < 0 || (size_t)pn >= sizeof(path)) {
+            log_warn("pci_devfs: path too long for attribute '%s'\n",
+                     s_attr_names[i]);
+            continue;
+        }
+
+        pci_attr_ctx_t *ctx = (pci_attr_ctx_t *)kmalloc(sizeof(*ctx));
+        if (!ctx) {
+            log_warn("pci_devfs: out of memory for '%s'\n", path);
+            continue;
+        }
+        ctx->pdev = (struct pci_device *)pdev;
+        ctx->attr = (uint8_t)i;
+
+        int rc = devfs_register_path(path, ctx, &pci_attr_ops);
+        if (rc == 0) {
+            published++;
+        } else if (rc == -EEXIST) {
+            // Already published (idempotent re-registration): the node is
+            // present but keeps the context it was created with, so ours
+            // is dead weight and must not be leaked.
+            kfree(ctx);
+            published++;
+        } else {
+            log_warn("pci_devfs: register '%s' failed (%d)\n", path, rc);
+            kfree(ctx);
+        }
+    }
+    return published;
+}
+
+static bool s_pci_devfs_registered = false;
+static int  s_pci_devfs_published = 0;
+
+// Publish the whole bus.  Called once from the kernel boot path after
+// devfs is mounted; a second call is a no-op that returns the count.
+int pci_devfs_register_all(void)
+{
+    if (s_pci_devfs_registered) return s_pci_devfs_published;
+
+    unsigned int count = pci_device_count();
+    int total = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        struct pci_device *pdev = pci_device_get(i);
+        if (!pdev) continue;
+        int r = pci_devfs_register_device(pdev);
+        if (r > 0) total += r;
+    }
+
+    s_pci_devfs_published = total;
+    s_pci_devfs_registered = true;
+    log_info("pci_devfs: published %d attribute nodes for %u PCI devices\n",
+             total, count);
+    return total;
 }

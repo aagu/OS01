@@ -314,12 +314,84 @@ TEST_FUNC(test_pci_devfs_format_reports_full_length) {
     assert_eq(-EINVAL, pci_devfs_format_attr(&s_mock_device, PCI_ATTR_COUNT, buf, sizeof(buf)));
 }
 
+TEST_FUNC(test_pci_devfs_register_publishes_paths) {
+    vfs_init();
+    devfs_init();
+
+    int published = pci_devfs_register_device(&s_mock_device);
+    assert_eq(7, published);
+
+    // The attribute node is reachable through the real VFS walk.
+    vfs_node_t *node = vfs_lookup("/dev/pci/" MOCK_BDF "/vendor");
+    assert_not_null(node);
+    if (node) {
+        assert_eq(VFS_CHRDEV, node->type);
+        vfs_node_put(node);
+    }
+
+    // /dev/pci lists the BDF as a directory.
+    vfs_node_t *ns = vfs_lookup("/dev/pci");
+    assert_not_null(ns);
+    if (ns) {
+        assert_eq(VFS_DIR, ns->type);
+        assert_true(readdir_has(ns, MOCK_BDF, VFS_DIR));
+        vfs_node_put(ns);
+    }
+
+    // The BDF directory lists all seven attributes.
+    vfs_node_t *bdf = vfs_lookup("/dev/pci/" MOCK_BDF);
+    assert_not_null(bdf);
+    if (bdf) {
+        assert_true(readdir_has(bdf, "vendor", VFS_CHRDEV));
+        assert_true(readdir_has(bdf, "device", VFS_CHRDEV));
+        assert_true(readdir_has(bdf, "class", VFS_CHRDEV));
+        assert_true(readdir_has(bdf, "config", VFS_CHRDEV));
+        assert_true(readdir_has(bdf, "resource", VFS_CHRDEV));
+        assert_true(readdir_has(bdf, "irq", VFS_CHRDEV));
+        assert_true(readdir_has(bdf, "driver", VFS_CHRDEV));
+        vfs_node_put(bdf);
+    }
+}
+
+TEST_FUNC(test_pci_devfs_read_slices_by_offset) {
+    vfs_init();
+    devfs_init();
+    pci_devfs_register_device(&s_mock_device);
+
+    vfs_node_t *node = vfs_lookup("/dev/pci/" MOCK_BDF "/vendor");
+    assert_not_null(node);
+    if (!node) return;
+
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+
+    // A full read returns the whole attribute.
+    assert_eq(7, vfs_read(node, 0, sizeof(buf), buf));
+    assert_mem_eq("0x8086\n", buf, 7);
+
+    // A read at an offset returns the tail only.  "0x8086\n" ends with
+    // "86\n" at index 4, so the tail is three bytes long.
+    memset(buf, 0, sizeof(buf));
+    assert_eq(3, vfs_read(node, 4, sizeof(buf), buf));
+    assert_mem_eq("86\n", buf, 3);
+
+    // A read past the end is EOF.
+    assert_eq(0, vfs_read(node, 7, sizeof(buf), buf));
+
+    // A zero-length read transfers nothing.
+    assert_eq(0, vfs_read(node, 0, 0, buf));
+
+    vfs_node_put(node);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_pci_devfs_attr_vendor_device_class),
     TEST_ENTRY(test_pci_devfs_attr_config_is_256_raw_bytes),
     TEST_ENTRY(test_pci_devfs_attr_resource_lists_bars),
     TEST_ENTRY(test_pci_devfs_attr_irq_and_driver),
     TEST_ENTRY(test_pci_devfs_format_reports_full_length),
+    TEST_ENTRY(test_pci_devfs_register_publishes_paths),
+    TEST_ENTRY(test_pci_devfs_read_slices_by_offset),
 TEST_LIST_END
 
 int main(void) {
