@@ -293,8 +293,7 @@ opendir("/dev/pci")
 
 - `BB:DD.F` = bus:slot.function（省略 domain，与 Linux lspci 默认一致）
 - class name 由 24-bit class code 查表（§4.4）
-- vendor/device name 由 vendor:device 查表（§4.4）；查不到时回退
-  `"<vendor_hex>:<device_hex>"`（如 `8086:100e`）
+- vendor/device name 由 §4.4 的两级查表得到，回退规则见 §4.4 的表格
 - `rev` 来自 config space 的 **byte 0x08**（revision ID）
 - 名称解析失败时不省略整行——回退形式保证输出始终可用
 
@@ -330,6 +329,17 @@ f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 	Region 0: I/O ports at 0xc000
 	Region 2: Memory at 0xfebf0000
 ```
+
+- `Class:` 行把 24-bit class code 拆成 base / subclass / ProgIF：
+  `Class: <base 名>, subclass: <subclass 名>, ProgIF: <2 位十六进制>`。
+  base 名用小写短名（`mass storage`、`network`、`display`、`bridge`、`serial bus` …）；
+  subclass 名只对 base `0x01`（mass storage）细分（`IDE` / `SCSI` / `RAID` / `SATA` /
+  `SAS` / `NVMe` …），其它 base 的 subclass 一律显示 `0x%02x`。
+- `IRQ:` 行取 `irq` 属性；属性为 `none` 时打印 `IRQ: none`。
+- `Kernel driver in use:` 行取 `driver` 属性；未绑定驱动时打印
+  `Kernel driver in use: none`（**总是打印这一行**，输出因此是确定的）。
+- `Region` 行直接来自 `resource` 属性的内容，每行前加一个 **TAB**。
+- `rev` 取自 config space 的 **byte 0x08**；config 读不到时摘要行显示 `(rev ??)`。
 
 ### 4.4 名称解析表
 
@@ -375,8 +385,18 @@ f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 `0x1234` → `QEMU/Bochs`；`0x10de` → `NVIDIA Corporation`；`0x1002` → `Advanced Micro Devices, Inc. [AMD/ATI]`；
 `0x1b36` → `Red Hat, Inc. (QEMU Virtual Machine)`。
 
-**回退**：vendor 名查不到 → 输出 vendor id 十六进制（`8086`）；
-device 名查不到 → 输出 `<vendor_hex>:<device_hex>`。
+**回退规则**（两级，vendor 与 device 各自独立回退）：
+
+| 情况 | 默认模式输出 | `-n` 模式输出 |
+|------|--------------|----------------|
+| vendor 命中、device 命中 | `<vendor 名> <device 名>` | `<vendor_hex>:<device_hex>` |
+| vendor 命中、device 未命中 | `<vendor 名> <device_hex>` | `<vendor_hex>:<device_hex>` |
+| vendor 未命中 | `<vendor_hex> <device_hex>` | `<vendor_hex>:<device_hex>` |
+
+- `vendor_hex` / `device_hex` 是 **4 位小写十六进制、不带 `0x` 前缀**（如 `8086`、`2922`）。
+- 未知 class → `"Unknown class [XXYYZZ]"`（`XXYYZZ` 是 6 位大写十六进制）。
+- `0x10de`（NVIDIA）的 device 命中规则是**按 vendor 通配**：任何 `0x10de:*` 都回退为
+  `"NVIDIA Corporation"`（对应 §4.4 表里的 `0x10de:0x10xx` 行）。
 
 ### 4.5 选项与退出码
 
