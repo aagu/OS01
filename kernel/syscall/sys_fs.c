@@ -268,7 +268,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
             break;
         }
         if (!current->files) {
-            syscall_result = -ENFILE;
+            syscall_result = -EMFILE;
             break;
         }
 
@@ -350,9 +350,11 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
 
         int newfd = fd_alloc(current->files, f);
         if (newfd < 0) {
+            // The install was refused: the caller keeps its file
+            // reference and releases it here (fd_alloc took nothing).
             file_free(f);
             f = NULL;          // already freed
-            syscall_result = -ENFILE;
+            syscall_result = newfd;   // real errno (-EMFILE)
             goto out_open;
         }
         f = NULL;  // fd_alloc took ownership
@@ -380,7 +382,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
     case SYS_dup: {
         // dup(int oldfd) → newfd / -errno
         int oldfd = (int)ctx->args[0];
-        syscall_result = fd_dup(current->files, oldfd, 0);
+        syscall_result = fd_dup(current->files, oldfd);
         break;
     }
     case SYS_dup2: {
@@ -615,6 +617,17 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         int cmd = (int)ctx->args[1];
         uint64_t arg = ctx->args[2];
 
+        // F_DUPFD / F_DUPFD_CLOEXEC decide their errno themselves:
+        // the requested minimum is validated BEFORE the source
+        // descriptor (POSIX/Linux order), so they must run before the
+        // generic source-descriptor check below.
+        if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
+            int start = (int)arg;
+            if (start < 0) start = 0;
+            syscall_result = fd_dupfd(current->files, fd, start);
+            break;
+        }
+
         if (fd < 0 || fd >= NOFILE || !current->files ||
             !current->files->fd[fd]) {
             syscall_result = -EBADF;
@@ -624,20 +637,6 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         file_t *f = current->files->fd[fd];
 
         switch (cmd) {
-        case F_DUPFD: {
-            // dup to >= arg
-            int start = (int)arg;
-            if (start < 0) start = 0;
-            syscall_result = fd_dup(current->files, fd, start);
-            break;
-        }
-        case F_DUPFD_CLOEXEC: {
-            // Same as F_DUPFD for now (close-on-exec not implemented)
-            int start = (int)arg;
-            if (start < 0) start = 0;
-            syscall_result = fd_dup(current->files, fd, start);
-            break;
-        }
         case F_GETFD:
             // close-on-exec flag (always 0 for now)
             syscall_result = 0;

@@ -8,8 +8,15 @@
 #include <arch/cpuid.h>
 #include <arch/x86_64/gate.h>
 #include <arch/irq.h>
+#include <arch/io.h>
 #include <arch/thread.h>
+#include <errno.h>
 #include <stdint.h>
+
+#ifdef OS01_HOST_TEST
+#undef Phy_To_Virt
+#define Phy_To_Virt(addr) ((void *)(uintptr_t)(addr))
+#endif
 
 // ──────────────────────────────────────────────
 //  Internal state
@@ -42,8 +49,11 @@ void lapic_write(uint32_t offset, uint32_t value)
 //  EOI — signal end-of-interrupt to LAPIC
 // ──────────────────────────────────────────────
 
+uint32_t g_lapic_eoi_count = 0;
+
 void lapic_eoi(void)
 {
+    g_lapic_eoi_count++;
     lapic_write(LAPIC_EOI, 0);
 }
 
@@ -170,12 +180,32 @@ int apic_available(void)
 //  APIC subsystem init: ACPI → LAPIC → IOAPIC
 // ──────────────────────────────────────────────
 
-void apic_init(uint64_t rsdp_phys)
+#if defined(OS01_HOST_TEST)
+int g_test_inject_apic_fail = 1;
+#endif
+
+int apic_init(uint64_t rsdp_phys)
 {
+#if defined(OS01_HOST_TEST)
+    if (g_test_inject_apic_fail != 1) {
+        int simulated_rc = g_test_inject_apic_fail;
+        if (simulated_rc < 0) {
+            return simulated_rc;
+        }
+        if (simulated_rc == 0) {
+            return 0;
+        }
+    }
+#endif
     debug_irq("APIC: initializing (RSDP=%#010lx)\n", rsdp_phys);
 
     // 1. Parse ACPI tables to find LAPIC / IOAPIC info
-    if (!acpi_parse(rsdp_phys)) {
+    int acpi_rc = acpi_parse(rsdp_phys);
+    if (acpi_rc < 0) {
+        debug_irq("APIC: ACPI parse fatal error: %d\n", acpi_rc);
+        return acpi_rc;
+    }
+    if (acpi_rc == 0) {
         debug_irq("APIC: ACPI parse failed — using default LAPIC base\n");
         apic_info.lapic_base = DEFAULT_LAPIC_BASE;
     }
@@ -183,13 +213,33 @@ void apic_init(uint64_t rsdp_phys)
     // 2. Initialize the Local APIC
     if (!lapic_init()) {
         debug_irq("APIC: LAPIC init failed — staying on PIC\n");
-        return;
+        arch_outb(0x22, 0x70);
+        arch_outb(0x23, 0x00);
+        return 0;
     }
 
     // 3. Initialize I/O APICs
-    ioapic_init();
+    int io_rc = ioapic_init();
+    if (io_rc < 0) {
+        debug_irq("APIC: IOAPIC init fatal error: %d\n", io_rc);
+        return io_rc;
+    }
+
+    if (io_rc == 0) {
+        // Legitimate no-IOAPIC: restore PIC mode / IMCR and configure LINT0 ExtINT
+        debug_irq("APIC: no IOAPIC found — falling back to legacy PIC\n");
+        arch_outb(0x22, 0x70);
+        arch_outb(0x23, 0x00);
+        if (lapic_ready) {
+            lapic_write(LAPIC_LVT_LINT0, LVT_DELIVERY_EXTINT);
+        }
+        return 0;
+    }
+
+    return 0;
 }
 
+#include <core/panic.h>
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The
 // _register function is collected by arch_register_subsys() at boot via
@@ -202,14 +252,26 @@ void apic_init(uint64_t rsdp_phys)
 // directory placement; the previous #ifdef __x86_64__ guard is now dead
 // and was removed when the file was relocated (AAGU-4.5).
 extern uint64_t arch_boot_rsdp;
+
+#if defined(OS01_HOST_TEST)
+int _apic_init_wrapper(void);
+int _apic_init_wrapper(void)
+#else
 static int _apic_init_wrapper(void)
+#endif
 {
-    apic_init(arch_boot_rsdp);
-    return 0;
+    int rc = apic_init(arch_boot_rsdp);
+    if (rc < 0) {
+        kpanic("apic: initialization failed: %d\n", rc);
+    }
+    return rc;
 }
 static int _apic_register(void)
 {
-    register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    int rc = register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
+    if (rc != 0) {
+        kpanic("apic: failed to register subsys\n");
+    }
     return 0;
 }
 SUBSYS_INITCALL(_apic_register);

@@ -43,7 +43,6 @@ extern void generic_intr_dispatch(pt_regs_t *, uint64_t);
 void ipi_init(void);
 void irq_test_cpu(unsigned);
 uint64_t irq_test_need(void), irq_test_watchdog(void), irq_test_gen(void);
-irq_desc_t irq_table[MAX_GSI];
 int g_log_level = 0;
 void _log_info_impl(const char *f, ...) { __builtin_trap(); }
 void _log_err_impl(const char *f, ...) { __builtin_trap(); }
@@ -102,14 +101,19 @@ static void reset(void) {
     bad_calls = disabled = eois = ticks = accounts = softirqs = flushes = trace_n = 0;
     seen_vector = seen_param = 0;
     seen_regs = 0;
-    memset(irq_table, 0, sizeof irq_table);
+    for (uint32_t i = 0; i < 24; i++) {
+        irq_desc_t *d = irq_desc_for_gsi(i);
+        if (d) memset(d, 0, sizeof(*d));
+    }
+    struct irq_gsi_range r = { .base = 0, .count = 24 };
+    irq_registry_init_ranges(&r, 1);
     memset(intr_handler_table, 0, sizeof(void *) * 256);
     memset(intr_handler_param, 0, sizeof(void *) * 256);
     irq_test_cpu(0);
 }
 static void expect_bad(struct intr_event *, pt_regs_t *);
 static void enter(pt_regs_t *r, uint64_t v) {
-    if (v >= 0x20 && v <= 0x37)
+    if ((v >= 0x20 && v <= 0x37) || v == 0x39)
         arch_irq_dispatch(r, v);
     else if (v == 0x40 || v == 0x41)
         generic_intr_dispatch(r, v);
@@ -138,9 +142,12 @@ TEST_FUNC(all_28_irq_vectors_both_origins) {
             assert_eq(0, e.native_status);
             assert_eq(0, e.native_address);
             if (v <= 0x37) {
-                irq_table[v - 0x20].handler = handler;
-                irq_table[v - 0x20].parameter = 0x123456789abcdef0ULL;
-                irq_table[v - 0x20].controller = &controller;
+                irq_desc_t *desc = irq_desc_for_gsi(v - 0x20);
+                if (desc) {
+                    desc->handler = handler;
+                    desc->parameter = 0x123456789abcdef0ULL;
+                    desc->controller = &controller;
+                }
             }
             if (v == 0x40 || v == 0x41) {
                 intr_handler_table[v] = handler;
@@ -183,8 +190,9 @@ TEST_FUNC(all_28_irq_vectors_both_origins) {
 TEST_FUNC(device_controller_ack_ownership) {
     pt_regs_t r = {.cs = 8};
     reset();
-    irq_table[8].controller = get_pic_controller();
-    irq_table[8].handler = handler;
+    irq_desc_t *d8 = irq_desc_for_gsi(8);
+    d8->controller = get_pic_controller();
+    d8->handler = handler;
     arch_irq_dispatch(&r, 0x28);
     assert_eq(4, trace_n);
     assert_eq(1, trace[0]);
@@ -192,12 +200,14 @@ TEST_FUNC(device_controller_ack_ownership) {
     assert_eq(0xa0, trace[2]);
     assert_eq(0x20, trace[3]);
     reset();
-    irq_table[0].controller = get_pic_controller();
+    irq_desc_t *d0 = irq_desc_for_gsi(0);
+    d0->controller = get_pic_controller();
     arch_irq_dispatch(&r, 0x20);
     assert_eq(2, trace_n);
     assert_eq(0x20, trace[1]);
     reset();
-    irq_table[0].handler = handler;
+    d0 = irq_desc_for_gsi(0);
+    d0->handler = handler;
     arch_irq_dispatch(&r, 0x20);
     assert_eq(2, trace_n);
     assert_eq(2, trace[1]);
@@ -277,8 +287,8 @@ TEST_FUNC(backend_revalidates_every_field_and_vector) {
     BAD(native_status, 1);
     BAD(native_address, 1);
 #undef BAD
-    static const uint64_t bad[] = {0,    14,   0x1f, 0x39,  0x3f,      0x42,
-                                   0x7f, 0x80, 0xfe, 0x100, UINT64_MAX};
+    static const uint64_t bad[] = {0,    14,   0x1f, 0x3a,      0x3f,
+                                   0x80, 0xfe, 0x100, UINT64_MAX};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         x86_intr_decode_irq(&e, &r, bad[i]);
         expect_bad(&e, &r);

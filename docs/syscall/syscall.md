@@ -81,6 +81,8 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 72 | `SYS_readlink` | rdi=path, rsi=buf, rdx=bufsz | Read symbolic link contents |
 | 73 | `SYS_lstat` | rdi=path, rsi=buf | File status without following final symlink |
 | 74 | `SYS_fstatat` | rdi=dirfd, rsi=path, rdx=buf, r10=flags | File status relative to directory fd |
+| 75 | `SYS_getrlimit` | rdi=resource, rsi=rlim | Get resource limits; supports `RLIMIT_NOFILE` (7). `rlim_cur` and `rlim_max` initialized to `OS01_NOFILE_CAPACITY` (default 32) |
+| 76 | `SYS_setrlimit` | rdi=resource, rsi=rlim | Set resource limits; `rlim_cur <= rlim_max <= OS01_NOFILE_CAPACITY`. Soft limit gates descriptor allocation (EMFILE) and poll nfds limit (EINVAL) |
 
 ## Definitions
 

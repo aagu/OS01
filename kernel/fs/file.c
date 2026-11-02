@@ -2,6 +2,7 @@
 #include <fs/vfs.h>
 #include <core/debug.h>
 #include <sched/task.h>
+#include <sched/resource.h>
 #include <arch/irq.h>
 #include <memory/slab.h>
 #include <kernel.h>
@@ -115,7 +116,14 @@ void file_free(file_t *f)
         // Check if both pipes are fully closed -> free them + reclaim slot
         int m2s_done = (!pty->master_to_slave->readers && !pty->master_to_slave->writers);
         int s2m_done = (!pty->slave_to_master->readers && !pty->slave_to_master->writers);
-        if (m2s_done && s2m_done) {
+        // A master that never had a slave (e.g. the descriptor install
+        // that followed the PTMX open failed) leaves the pty slot and
+        // its two pipes allocated: the phantom "other end" counters
+        // never reach zero.  Reclaim them so a failed install leaks
+        // neither the pty nor its pipes.
+        int master_without_slave =
+            (f->type == FD_PTY_MASTER) && !pty->slave_opened;
+        if ((m2s_done && s2m_done) || master_without_slave) {
             pipe_free(pty->master_to_slave);
             pipe_free(pty->slave_to_master);
             pty->master_to_slave = NULL;
@@ -269,20 +277,55 @@ files_t *files_dup(files_t *fs)
 }
 
 // ── Find lowest free fd slot ────────────────────────────────
-int fd_alloc(files_t *fs, file_t *f)
+// Install f into the lowest free slot of [min_fd, exclusive_limit).
+//
+// The upper bound is EXCLUSIVE and comes from the caller's snapshot
+// of the task's RLIMIT_NOFILE soft limit (see <sched/resource.h>).
+// The soft limit is snapshotted by the CALLER, before this function
+// takes files_t.lock — the resource lock and the files lock are
+// never held at the same time.
+//
+// Ownership: on success the caller's reference to f becomes the
+// slot's reference (the caller must not release it).  On failure the
+// reference is NOT taken — the caller keeps it and must release it.
+int fd_alloc_limit(files_t *fs, file_t *f, uint32_t min_fd, uint32_t exclusive_limit)
 {
-    if (!fs || !f) return -1;
+    // A missing descriptor table is a per-process limit condition, not
+    // a malformed request: every installation path reports it as
+    // -EMFILE (do_pipe, open(), socket(), accept()).
+    if (!fs) return -EMFILE;
+    if (!f) return -EINVAL;
+
+    // The fd array is the hard bound; a limit above it cannot widen it.
+    if (exclusive_limit > NOFILE) exclusive_limit = NOFILE;
+
     uint64_t fl = spin_lock_irqsave(&fs->lock);
     int ret = -1;
-    for (int i = 0; i < NOFILE; i++) {
+    for (uint32_t i = min_fd; i < exclusive_limit; i++) {
         if (fs->fd[i] == NULL) {
             fs->fd[i] = f;
-            ret = i;
+            ret = (int)i;
             break;
         }
     }
     spin_unlock_irqrestore(&fs->lock, fl);
+
+    if (ret < 0) {
+        log_debug("fd: no free slot in [%u,%u) — install refused\n",
+                  min_fd, exclusive_limit);
+        return -EMFILE;
+    }
     return ret;
+}
+
+// Install f into the lowest free slot below the current task's
+// RLIMIT_NOFILE soft limit.
+int fd_alloc(files_t *fs, file_t *f)
+{
+    // Snapshot the soft limit under the task's resource lock and
+    // release it BEFORE taking files_t.lock (lock order contract).
+    uint64_t soft = task_nofile_soft_current();
+    return fd_alloc_limit(fs, f, 0, (uint32_t)soft);
 }
 
 // ── Close a single fd ───────────────────────────────────────
@@ -335,20 +378,19 @@ void files_put_file(file_t *f)
 }
 
 // ── Centralized dup (slot writers must hold fs->lock) ──────
-int fd_dup(files_t *fs, int oldfd, int minfd)
+// Shared install helper: the lowest free slot in [min_fd, limit).
+// The caller holds no lock — files_t.lock is taken and released here.
+static int fd_dup_install(files_t *fs, int oldfd, uint32_t min_fd, uint32_t limit)
 {
-    if (!fs || oldfd < 0 || oldfd >= NOFILE || minfd < 0)
-        return -EBADF;
-
     uint64_t fl = spin_lock_irqsave(&fs->lock);
     file_t *f = fs->fd[oldfd];
     if (!f) { spin_unlock_irqrestore(&fs->lock, fl); return -EBADF; }
 
     int newfd = -1;
-    for (int i = minfd; i < NOFILE; i++) {
-        if (fs->fd[i] == NULL) { newfd = i; break; }
+    for (uint32_t i = min_fd; i < limit; i++) {
+        if (fs->fd[i] == NULL) { newfd = (int)i; break; }
     }
-    if (newfd < 0) { spin_unlock_irqrestore(&fs->lock, fl); return -ENFILE; }
+    if (newfd < 0) { spin_unlock_irqrestore(&fs->lock, fl); return -EMFILE; }
 
     file_get(f);
     fs->fd[newfd] = f;
@@ -356,17 +398,86 @@ int fd_dup(files_t *fs, int oldfd, int minfd)
     return newfd;
 }
 
+// dup(): install a second descriptor for oldfd at the lowest free
+// slot below the task's RLIMIT_NOFILE soft limit.
+//
+//   -EBADF  oldfd is not an open descriptor
+//   -EMFILE no free slot below the soft limit
+//
+// The source descriptor is checked FIRST: an invalid or closed oldfd
+// is -EBADF whatever the limit says.
+int fd_dup(files_t *fs, int oldfd)
+{
+    if (!fs || oldfd < 0 || oldfd >= NOFILE)
+        return -EBADF;
+
+    // Snapshot the soft limit under the task's resource lock and
+    // release it BEFORE taking files_t.lock (lock order contract).
+    uint64_t soft = task_nofile_soft_current();
+    uint32_t limit = (soft > NOFILE) ? NOFILE : (uint32_t)soft;
+
+    return fd_dup_install(fs, oldfd, 0, limit);
+}
+
+// F_DUPFD / F_DUPFD_CLOEXEC: install a second descriptor for oldfd at
+// the lowest free slot >= min_fd, bounded by the soft limit.
+//
+//   -EINVAL min_fd is not below the soft limit — the unreachable
+//           minimum is reported BEFORE the source descriptor, as
+//           POSIX/Linux do
+//   -EBADF  oldfd is not an open descriptor
+//   -EMFILE no free slot in [min_fd, soft)
+//
+// The errno is decided HERE, by the entry point that knows which
+// syscall it serves: plain dup() and F_DUPFD differ exactly there.
+int fd_dupfd(files_t *fs, int oldfd, int min_fd)
+{
+    if (min_fd < 0)
+        return -EINVAL;
+
+    // Snapshot the soft limit under the task's resource lock and
+    // release it BEFORE taking files_t.lock (lock order contract).
+    uint64_t soft = task_nofile_soft_current();
+    uint32_t limit = (soft > NOFILE) ? NOFILE : (uint32_t)soft;
+
+    // The requested minimum is validated FIRST: POSIX/Linux report
+    // EINVAL for an unreachable minimum even when the source
+    // descriptor is invalid.
+    if ((uint32_t)min_fd >= limit)
+        return -EINVAL;
+    if (!fs || oldfd < 0 || oldfd >= NOFILE)
+        return -EBADF;
+
+    return fd_dup_install(fs, oldfd, (uint32_t)min_fd, limit);
+}
+
+// dup2(oldfd, newfd): install oldfd's file at newfd and release the
+// descriptor previously installed there.
+//
+// The target range is validated BEFORE the old target is removed, so
+// a rejected request never closes the descriptor that lives there.
+// An already-open descriptor stays valid even when its number is
+// above the current soft limit — but a NEW descriptor may not be
+// installed above it.
 int fd_dup2(files_t *fs, int oldfd, int newfd)
 {
     if (!fs || oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE)
         return -EBADF;
 
+    // oldfd == newfd installs nothing: the descriptor is already
+    // there.  No limit check — an open descriptor stays valid.
     if (oldfd == newfd) {
         uint64_t fl = spin_lock_irqsave(&fs->lock);
         int ok = fs->fd[oldfd] != NULL;
         spin_unlock_irqrestore(&fs->lock, fl);
         return ok ? newfd : -EBADF;
     }
+
+    // Snapshot the soft limit under the task's resource lock and
+    // release it BEFORE taking files_t.lock (lock order contract).
+    uint64_t soft = task_nofile_soft_current();
+    if ((uint64_t)newfd >= soft)
+        return -EBADF;   // target outside [0, soft) — old target kept
 
     file_t *old_target = NULL;
     uint64_t fl = spin_lock_irqsave(&fs->lock);
@@ -1209,9 +1320,15 @@ int64_t fd_ioctl(file_t *f, int cmd, void *arg)
 
 // ── Create a pipe ──────────────────────────────────────────
 // Returns 0 on success, fills fds[0] = read end, fds[1] = write end.
+//
+// Both ends must fit below the task's RLIMIT_NOFILE soft limit.  A
+// pipe needs TWO slots: when the second install fails, the first
+// slot is rolled back and BOTH file objects are released exactly
+// once by reference count — the pipe's own reference is dropped by
+// the last file release, so it is never freed twice.
 int64_t do_pipe(int *user_fds)
 {
-    if (!current->files) return -ENFILE;
+    if (!current->files) return -EMFILE;
 
     pipe_t *p = pipe_alloc();
     if (!p) return -ENOMEM;
@@ -1232,12 +1349,23 @@ int64_t do_pipe(int *user_fds)
     wf->flags = O_WRONLY;
     wf->refcount = 1;
 
-    int rfd = fd_alloc(current->files, rf);
-    int wfd = fd_alloc(current->files, wf);
+    // Snapshot the soft limit once: both slots are judged by the same
+    // snapshot (the resource lock is released before files_t.lock).
+    uint64_t soft = task_nofile_soft_current();
+    uint32_t limit = (soft > NOFILE) ? NOFILE : (uint32_t)soft;
+
+    int rfd = fd_alloc_limit(current->files, rf, 0, limit);
+    int wfd = fd_alloc_limit(current->files, wf, 0, limit);
     if (rfd < 0 || wfd < 0) {
+        // Roll back completely: the installed end is closed (which
+        // releases its file reference), the other end is released
+        // here.  Each file object is released exactly once.
         if (rfd >= 0) fd_close(current->files, rfd);
+        else           file_put(rf);
         if (wfd >= 0) fd_close(current->files, wfd);
-        return -ENFILE;
+        else           file_put(wf);
+        log_debug("pipe: install refused — need two slots below %u\n", limit);
+        return -EMFILE;
     }
 
     // Cat B write-back: copy fds to user via _ft.  On _ft failure,

@@ -3,7 +3,7 @@
 #include "internal.h"
 
 _Static_assert(sizeof(compat_syscall_nr_t) == 2, "compat_syscall_nr_t must be 16-bit");
-_Static_assert(SYS_fstatat <= INT16_MAX, "OS01 syscall numbers must fit within int16_t");
+_Static_assert(SYS_setrlimit <= INT16_MAX, "OS01 syscall numbers must fit within int16_t");
 _Static_assert(LINUX_X86_64_NR_MAX <= 1024, "Linux nr table size sanity check");
 
 const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
@@ -56,8 +56,10 @@ const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
     [87]  = SYS_unlink,        // unlink (Linux 87)
     [88]  = SYS_symlink,
     [89]  = SYS_readlink,
+    [97]  = SYS_getrlimit,
     [102] = SYS_getppid,       // historical alias
     [110] = SYS_getppid,       // getppid
+    [160] = SYS_setrlimit,
     [162] = SYS_nanosleep,
     [164] = SYS_getifaddr,
     [201] = SYS_times,
@@ -65,5 +67,6 @@ const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
     [228] = SYS_clock_gettime,
     [231] = SYS_exit,          // exit_group
     [262] = SYS_fstatat,       // newfstatat
+    [302] = SYS_getrlimit,     // prlimit64 (adapter)
     [318] = SYS_getrandom,
 };

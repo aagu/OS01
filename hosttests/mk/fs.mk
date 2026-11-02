@@ -12,8 +12,12 @@ $(eval $(call register_host_test,test_elf_load_4k,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_canon,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_poll_requested,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_poll_waitqueue_handshake,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_poll_capacity,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_poll_nofile64,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_pty_winsize,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_devfs_input_dispatch,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_devfs_capacity,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_vfs_basic.elf \
@@ -26,10 +30,14 @@ TEST_BINS += \
     $(TEST_BLD)/test_canon.elf \
     $(TEST_BLD)/test_poll_requested.elf \
     $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
+    $(TEST_BLD)/test_poll_capacity.elf \
+    $(TEST_BLD)/nofile64/test_poll_nofile64.elf \
     $(TEST_BLD)/test_elf_layout.elf \
     $(TEST_BLD)/test_elf_load_4k.elf \
     $(TEST_BLD)/test_pty_winsize.elf \
-    $(TEST_BLD)/test_devfs_input_dispatch.elf
+    $(TEST_BLD)/test_devfs_input_dispatch.elf \
+    $(TEST_BLD)/test_devfs_capacity.elf \
+    $(TEST_BLD)/test_nofile_limits.elf
 
 # Basic VFS & FAT32 tests
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
@@ -262,7 +270,8 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/tty_poll_production.o \
     $(TEST_BLD)/devfs_poll_production.o \
     $(TEST_BLD)/poll_clocksource_stub.o \
-    $(TEST_BLD)/serial_sink_stub.o
+    $(TEST_BLD)/serial_sink_stub.o \
+    $(NOFILE_SOFT_STUB_OBJ)
 
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
@@ -275,6 +284,88 @@ $(TEST_BLD)/test_poll_waitqueue_handshake.o: $(TEST_CASES)/test_poll_waitqueue_h
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_poll_waitqueue_handshake.elf: $(TEST_BLD)/test_poll_waitqueue_handshake.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── ARCH-10 Task 7: the poll capacity contract ───────────────
+#
+# test_poll_capacity.c drives the REAL production poll/select code
+# and asserts the per-call capacity contract (the descriptor count is
+# bounded by the task's RLIMIT_NOFILE soft limit; both buffers are
+# heap-allocated; a wait chain that cannot be fully registered fails
+# with -ENOMEM instead of sleeping forever).
+$(TEST_BLD)/test_poll_capacity.o: $(TEST_CASES)/test_poll_capacity.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_poll_capacity.elf: $(TEST_BLD)/test_poll_capacity.o $(POLL_PRODUCTION_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── ARCH-10 Task 7: the NOFILE=64 build of the SAME poll code ──
+#
+# The default build caps a poll() call at the compile-time descriptor
+# capacity (16); a task with a raised soft limit must still be able to
+# poll more descriptors.  This is a REAL SECOND BUILD of the same
+# production sources with -DOS01_NOFILE_CAPACITY=64: every layout
+# consumer (the production objects, the case TU and the NOFILE
+# soft-limit stub) is compiled into a SEPARATE object directory, so the
+# 16-layout objects are never mixed with the 64-layout ones.  The stub
+# reports the capacity of ITS OWN build, so the 64 build's soft limit
+# really is 64.
+POLL64_BLD := $(TEST_BLD)/nofile64
+POLL64_HOST_CFLAGS := $(POLL_HOST_CFLAGS) -DOS01_NOFILE_CAPACITY=64
+
+$(POLL64_BLD)/poll_production.o: $(TESTS_DIR)/kernel/fs/poll.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/select_production.o: $(TESTS_DIR)/kernel/fs/select.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/file_poll_production.o: $(TESTS_DIR)/kernel/fs/file.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/tty_poll_production.o: $(TESTS_DIR)/kernel/tty/tty.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/poll_clocksource_stub.o: $(TEST_MOCK)/poll_clocksource_stub.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/serial_sink_stub.o: $(TEST_MOCK)/serial_sink_stub.c \
+		$(TEST_MOCK)/test_platform.h
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+		-DOS01_NOFILE_CAPACITY=64 \
+		-include $(TEST_MOCK)/test_platform.h \
+		$(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -c $< -o $@
+
+# The soft-limit snapshot stub must report THIS build's capacity.
+$(POLL64_BLD)/nofile_soft_stub.o: $(TEST_MOCK)/nofile_soft_stub.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_NOFILE_CAPACITY=64 $(KERNEL_INC) -c $< -o $@
+
+POLL64_PRODUCTION_OBJS := \
+    $(POLL64_BLD)/poll_production.o \
+    $(POLL64_BLD)/select_production.o \
+    $(POLL64_BLD)/file_poll_production.o \
+    $(POLL64_BLD)/tty_poll_production.o \
+    $(POLL64_BLD)/devfs_poll_production.o \
+    $(POLL64_BLD)/poll_clocksource_stub.o \
+    $(POLL64_BLD)/serial_sink_stub.o \
+    $(POLL64_BLD)/nofile_soft_stub.o
+
+$(POLL64_BLD)/test_poll_capacity.o: $(TEST_CASES)/test_poll_capacity.c
+	@mkdir -p $(POLL64_BLD)
+	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
+
+$(POLL64_BLD)/test_poll_nofile64.elf: $(POLL64_BLD)/test_poll_capacity.o $(POLL64_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # PTY window resize notifications
@@ -300,7 +391,8 @@ $(TEST_BLD)/test_pty_winsize.o: $(TEST_CASES)/test_pty_winsize.c \
 
 $(TEST_BLD)/test_pty_winsize.elf: $(TEST_BLD)/test_pty_winsize.o \
 		$(TEST_BLD)/pty_production.o \
-		$(TEST_BLD)/pty_file_production.o
+		$(TEST_BLD)/pty_file_production.o \
+		$(NOFILE_SOFT_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -lpthread -o $@ $^
 
 .PHONY: test-pty-winsize
@@ -321,3 +413,91 @@ $(TEST_BLD)/test_devfs_input_dispatch.o: $(TEST_CASES)/test_devfs_input_dispatch
 
 $(TEST_BLD)/test_devfs_input_dispatch.elf: $(TEST_BLD)/test_devfs_input_dispatch.o $(POLL_PRODUCTION_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+$(TEST_BLD)/test_devfs_capacity.o: $(TEST_CASES)/test_devfs_capacity.c \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TESTS_DIR)/kernel/include/fs/devfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_devfs_capacity.elf: $(TEST_BLD)/test_devfs_capacity.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/fat_production.o \
+		$(TEST_BLD)/tmpfs_production.o \
+		$(TEST_BLD)/devfs_vfs_production.o \
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(TEST_BLD)/rwlock.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=kmalloc -o $@ $^
+
+# ── ARCH-10 Task 6: NOFILE soft limit at descriptor installation ──
+#
+# The case drives the PRODUCTION descriptor-installation code:
+#   kernel/fs/file.c      fd_alloc_limit / fd_dup / fd_dup2 / do_pipe
+#   kernel/net/socket.c   socket() / accept() install paths
+#   kernel/tty/pty.c      PTMX install path
+#   kernel/sync/wait.c    the pipe wait queues
+#
+# Those TUs use the REAL kernel headers (the production task_t and the
+# production spinlock), so the mock runtime only supplies the lwIP
+# surface kernel/net/socket.c needs (its real lwIP headers are
+# compiled out under OS01_HOST_TEST) and the observation counters.
+FD_INSTALL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/fd_install_test_runtime.h \
+    $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -I$(TEST_MOCK) \
+    -I$(TEST_MOCK)/fd_install_include -I$(TEST_MOCK)/include
+
+$(TEST_BLD)/fd_install_file_production.o: $(TESTS_DIR)/kernel/fs/file.c \
+		$(TESTS_DIR)/kernel/include/fs/file.h \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_socket_production.o: $(TESTS_DIR)/kernel/net/socket.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_pty_production.o: $(TESTS_DIR)/kernel/tty/pty.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_wait_production.o: $(TESTS_DIR)/kernel/sync/wait.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/fd_install_stubs.o: $(TEST_MOCK)/fd_install_stubs.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_nofile_limits.o: $(TEST_CASES)/test_nofile_limits.c \
+		$(TEST_MOCK)/fd_install_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FD_INSTALL_HOST_CFLAGS) -D'errno=(*__errno_location())' \
+		-include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
+
+$(TEST_BLD)/test_nofile_limits.elf: $(TEST_BLD)/test_nofile_limits.o \
+    $(TEST_BLD)/fd_install_file_production.o \
+    $(TEST_BLD)/fd_install_socket_production.o \
+    $(TEST_BLD)/fd_install_pty_production.o \
+    $(TEST_BLD)/fd_install_wait_production.o \
+    $(TEST_BLD)/fd_install_stubs.o \
+    $(TEST_BLD)/sched_resource_production.o \
+    $(TEST_BLD)/sys_resource_production.o \
+    $(TEST_BLD)/libc_resource_production.o \
+    $(TEST_BLD)/syscall_dispatch_production.o \
+    $(TEST_BLD)/compat_dispatch_production.o \
+    $(TEST_BLD)/compat_table_x86_64_production.o \
+    $(TEST_BLD)/compat_proc_production.o \
+    $(TEST_BLD)/compat_fs_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-nofile-limits
+test-nofile-limits: $(TEST_BLD)/test_nofile_limits.elf
+	$<

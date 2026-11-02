@@ -625,6 +625,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # its own image + user variant and runs against it — the normal image
 # keeps the serial port clean.
 TEST_TERMINAL_PRESENT_IMAGE := $(BUILD_DIR)/image/terminal-present/disk.img
+TEST_ARCH10_CAPACITY_IMAGE := $(BUILD_DIR)/image/arch10-capacity/disk.img
 # The fd_refcount selftest asserts actual cross-CPU coverage.  Four vCPUs
 # avoid a scheduler-migration false negative seen with the interactive
 # default of two, while keeping this test-only setting independently
@@ -671,7 +672,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1412,6 +1413,7 @@ TEST_QEMU_FLAVOR_gui            =
 # image read-only (-snapshot) at 1/2 cores with QMP, injects real PS/2
 # key events and compares QMP screendumps.
 TEST_QEMU_FLAVOR_gui-desktop    =
+TEST_QEMU_FLAVOR_arch10-capacity = ARCH10_CAPACITY_TEST=1
 # Default baseline log path for the terminal-present suite; the
 # task-6 brief calls this out explicitly.  Tests pass this through to
 # the dispatcher as TERMINAL_PRESENT_BASELINE_LOG; an explicit
@@ -1428,6 +1430,7 @@ TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_terminal-present = $(TEST_TERMINAL_PRESENT_IMAGE)
 TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_arch10-capacity  = $(TEST_ARCH10_CAPACITY_IMAGE)
 # intr-x86 runs one image per destructive case; the suite target owns
 # the per-case paths (the value below is the informational echo only).
 TEST_QEMU_IMG_intr-x86         = $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
@@ -1450,6 +1453,11 @@ ifeq ($(KERNEL_SELFTEST),1)
 $(error ERROR: syscall E2E must not be combined with KERNEL_SELFTEST=1)
 endif
 endif
+ifeq ($(SUITE),arch10-capacity)
+ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),1)
+$(error ERROR: test-qemu SUITE=arch10-capacity requires ARCH10_CAPACITY_TEST=1 on the top-level make invocation)
+endif
+endif
 endif
 
 SYSTEST_TIMEOUT ?= 120
@@ -1461,8 +1469,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -1700,6 +1708,7 @@ STATIC_AUDIT_TARGETS = \
   test-driver-model-boundary \
   test-gui-build-audit \
   test-intr-dispatch-audit \
+  test-arch10-capacity-audit \
   test-user-canary
 
 .PHONY: $(STATIC_AUDIT_TARGETS) test-static test-static-prereqs
@@ -1753,6 +1762,12 @@ test-intr-dispatch-audit:
 	    --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
 	    --llvm-nm "$(LLVM_NM)" \
 	    --llvm-objdump "$(LLVM_OBJDUMP)" \
+	    --repo-root "$(OS01_ROOT)"
+
+test-arch10-capacity-audit:
+	$(call require_capability,rootfs)
+	$(RUN_STATIC_AUDIT) arch10-capacity-audit -- \
+	  python3 qemutests/arch10_capacity_audit.py \
 	    --repo-root "$(OS01_ROOT)"
 
 test-static: test-static-prereqs
@@ -1995,11 +2010,11 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All 13 static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, user-canary)';
+		 'test-static'         '(rootfs)'     'All static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, intr-dispatch, arch10-capacity, user-canary)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-gui-incremental' '(rootfs)'    'GUI library incremental contract (no-op rebuild, header-touch rebuild, staging orphan, generation publish)';
 	@printf '  %-22s %-13s %s\n' \
@@ -2272,3 +2287,8 @@ _test-aarch64-run-m1-ap-bad-root:
 test-intr-irq-x86:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-intr-irq-x86 $(OS01_SUBMAKE_ARGS))
+
+.PHONY: test-irq-capacity
+test-irq-capacity:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-irq-capacity $(OS01_SUBMAKE_ARGS))

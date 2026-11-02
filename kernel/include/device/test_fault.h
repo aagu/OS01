@@ -275,6 +275,13 @@ static inline void arch9_fault_record_card_gsi(uint32_t gsi) {
 #endif
 }
 
+static inline void arch9_fault_record_card_msix(void) {
+#ifdef OS01_TEST_FAULT
+    extern void arch9_fault_set_card_msix(void);
+    arch9_fault_set_card_msix();
+#endif
+}
+
 /* ── Fault-injection predicates ────────────────────────────────────
  * Each returns true if the matching symptom must fire in this build
  * variant.  For OS01=none the answer is always false (the runtime

@@ -11,10 +11,11 @@ int64_t sys_time_dispatch(syscall_ctx_t *ctx);
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx);
 int64_t sys_net_dispatch(syscall_ctx_t *ctx);
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx);
+int64_t sys_resource_dispatch(syscall_ctx_t *ctx);
 
 
 /* The fixed UAPI number and trace name live beside their handler. */
-static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
+static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
     [SYS_open] = { sys_fs_dispatch, "open" },
@@ -47,6 +48,8 @@ static const syscall_entry_t syscall_table[SYS_fstatat + 1] = {
     [SYS_readlink] = { sys_fs_dispatch, "readlink" },
     [SYS_lstat] = { sys_fs_dispatch, "lstat" },
     [SYS_fstatat] = { sys_fs_dispatch, "fstatat" },
+    [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
+    [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
     [SYS_brk] = { sys_mm_dispatch, "brk" },
     [SYS_mmap] = { sys_mm_dispatch, "mmap" },
     [SYS_mprotect] = { sys_mm_dispatch, "mprotect" },

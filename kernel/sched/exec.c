@@ -1,5 +1,6 @@
 #include <sched/task.h>
 #include <sched/internal.h>
+#include <sched/resource.h>
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
 #include <arch/spinlock.h>
@@ -385,6 +386,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     }
 
     memset(tsk, 0, sizeof(task_t));
+    task_nofile_init(tsk);
 
     // Monitor plan Task 2/4 (spec §2.1/§5.1): every creation path
     // assigns birth_id + start_ns and starts with zero real runtime,

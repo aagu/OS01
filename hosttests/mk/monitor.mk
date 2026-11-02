@@ -41,7 +41,8 @@ $(TEST_BLD)/test_monitor_file.o: $(TEST_CASES)/test_monitor_file.c \
 $(TEST_BLD)/test_monitor_file.elf: $(TEST_BLD)/test_monitor_file.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/gfx_file_production.o \
-		$(TEST_BLD)/serial_sink_stub.o
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(NOFILE_SOFT_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # Monitor plan Task 2: per-CPU tick accounting.  Host-compiles the REAL

@@ -16,4 +16,24 @@
 #define debug_block(...) do {} while (0)
 #endif
 
+/* The production block registry is a dynamically allocated, lock
+ * protected list.  test_platform.h already provides the canonical host
+ * spinlock_T surface, so the architecture spinlock header has to stay
+ * out of the way (it would redefine spinlock_T). */
+#ifndef _ARCH_SPINLOCK_H
+#define _ARCH_SPINLOCK_H 1
+#endif
+
+/* The block registry allocates its objects through the slab.  The host
+ * harness does not link the slab, so the production slab header is
+ * skipped and the allocator entry points are declared here — the same
+ * pattern the poll harness uses.  Every binary that links a
+ * kernel/block/blockdev.c object must provide kmalloc/kfree. */
+#ifndef _KERNEL_SLAB_H
+#define _KERNEL_SLAB_H 1
+#endif
+
+void *kmalloc(size_t size);
+size_t kfree(void *ptr);
+
 #endif /* ARCH9_BLOCK_RUNTIME_H */

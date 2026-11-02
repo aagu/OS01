@@ -99,6 +99,8 @@
 #define SYS_readlink      72   // readlink(path, buf, bufsz)
 #define SYS_lstat         73   // lstat(path, buf)
 #define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
+#define SYS_getrlimit     75   // getrlimit(resource, rlim)
+#define SYS_setrlimit     76   // setrlimit(resource, rlim)
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567

@@ -1,4 +1,6 @@
 #include <intr/apic.h>
+#include <arch/x86_64/irq_route.h>
+#include <arch/spinlock.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/vmm.h>
@@ -6,29 +8,47 @@
 #include <core/debug.h>
 #include <arch/io.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
+#include <errno.h>
+
+static bool s_ioapic_ready = false;
+static spinlock_T s_ioapic_locks[MAX_IOAPICS] = { {1}, {1}, {1}, {1} };
+
+bool ioapic_available(void)
+{
+    return s_ioapic_ready;
+}
 
 // ──────────────────────────────────────────────
 //  I/O APIC register access (indirect index/data)
 //  base = physical address; caller must have mapped the 2MB region.
+//  selector/data access is serialized per-controller via s_ioapic_locks.
 // ──────────────────────────────────────────────
 
-static inline void ioapic_write_reg(uint32_t ioapic_phys_base, uint8_t reg, uint32_t value)
+static inline void ioapic_write_reg(uint32_t ioapic_idx, uint8_t reg, uint32_t value)
 {
-    volatile uint32_t *regsel = (volatile uint32_t *)Phy_To_Virt(ioapic_phys_base);
-    volatile uint32_t *iowin  = (volatile uint32_t *)Phy_To_Virt(ioapic_phys_base + 0x10);
+    ioapic_entry_t *ioapic = &apic_info.ioapics[ioapic_idx];
+    uint64_t flags = spin_lock_irqsave(&s_ioapic_locks[ioapic_idx]);
+    volatile uint32_t *regsel = (volatile uint32_t *)Phy_To_Virt(ioapic->mmio_base);
+    volatile uint32_t *iowin  = (volatile uint32_t *)Phy_To_Virt(ioapic->mmio_base + 0x10);
 
     *regsel = reg;
     *iowin  = value;
+    spin_unlock_irqrestore(&s_ioapic_locks[ioapic_idx], flags);
 }
 
-static inline uint32_t ioapic_read_reg(uint32_t ioapic_phys_base, uint8_t reg)
+static inline uint32_t ioapic_read_reg(uint32_t ioapic_idx, uint8_t reg)
 {
-    volatile uint32_t *regsel = (volatile uint32_t *)Phy_To_Virt(ioapic_phys_base);
-    volatile uint32_t *iowin  = (volatile uint32_t *)Phy_To_Virt(ioapic_phys_base + 0x10);
+    ioapic_entry_t *ioapic = &apic_info.ioapics[ioapic_idx];
+    uint64_t flags = spin_lock_irqsave(&s_ioapic_locks[ioapic_idx]);
+    volatile uint32_t *regsel = (volatile uint32_t *)Phy_To_Virt(ioapic->mmio_base);
+    volatile uint32_t *iowin  = (volatile uint32_t *)Phy_To_Virt(ioapic->mmio_base + 0x10);
 
     *regsel = reg;
-    return *iowin;
+    uint32_t val = *iowin;
+    spin_unlock_irqrestore(&s_ioapic_locks[ioapic_idx], flags);
+    return val;
 }
 
 // ──────────────────────────────────────────────
@@ -42,9 +62,9 @@ void ioapic_dump_entries(void)
         debug_irq("IOAPIC[%u]: base=%#010x gsi_base=%u max_redir=%u\n",
                       i, ioapic->mmio_base, ioapic->gsi_base, ioapic->max_redir);
         for (uint32_t n = 0; n <= ioapic->max_redir; n++) {
-            uint32_t low  = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n));
+            uint32_t low  = ioapic_read_reg(i, IOAPIC_REG_REDTBL(n));
             if (OS01_DEBUG_irq) {
-                uint32_t high = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n) + 1);
+                uint32_t high __attribute__((unused)) = ioapic_read_reg(i, IOAPIC_REG_REDTBL(n) + 1);
                 debug_irq("  [%2u] %#018lx", n, ((uint64_t)high << 32) | low);
                 if (!(low & IOAPIC_RED_MASK))
                     debug_irq(" (enabled vec=%#x dest=%u)",
@@ -56,155 +76,74 @@ void ioapic_dump_entries(void)
 }
 
 // ──────────────────────────────────────────────
-//  Find the I/O APIC and GSI for a given IRQ vector
-// ──────────────────────────────────────────────
-
-// For now we have at most one I/O APIC.  Find the one whose GSI base
-// covers the desired GSI, and return the IOAPIC index.
-static int find_ioapic_for_gsi(uint32_t gsi, uint8_t *redir_index)
-{
-    for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
-        ioapic_entry_t *ioapic = &apic_info.ioapics[i];
-
-        if (gsi >= ioapic->gsi_base && gsi <= ioapic->gsi_base + ioapic->max_redir) {
-            *redir_index = (uint8_t)(gsi - ioapic->gsi_base);
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-// ──────────────────────────────────────────────
 //  I/O APIC → hw_int_controller_t interface
 // ──────────────────────────────────────────────
 
 static uint64_t ioapic_install(uint64_t nr, void *arg __attribute__((unused)))
 {
-    debug_irq("IOAPIC: install IRQ %u (ISA %u → GSI %u)\n",
-                  (unsigned)nr, (uint32_t)(nr - 0x20),
-                  isa_irq_to_gsi((uint8_t)(nr - 0x20)));
-
-    (void)nr;
+    const struct x86_irq_route *route = x86_irq_route_find_by_vector(nr);
+    if (route) {
+        debug_irq("IOAPIC: install IRQ %u (GSI %u pin %u on IOAPIC %u)\n",
+                  (unsigned)nr, route->gsi, route->pin, route->ioapic_idx);
+    }
     return 0;
 }
 
 static void ioapic_uninstall(uint64_t nr)
 {
-    uint32_t isa_irq = (uint32_t)(nr - 0x20);
-    uint32_t gsi = isa_irq_to_gsi((uint8_t)isa_irq);
-    uint8_t redir;
-    int idx = find_ioapic_for_gsi(gsi, &redir);
+    const struct x86_irq_route *route = x86_irq_route_find_by_vector(nr);
+    if (!route || route->ioapic_idx >= apic_info.ioapic_count)
+        return;
 
-    if (idx >= 0) {
-        ioapic_entry_t *ioapic = &apic_info.ioapics[idx];
-        // Mask the entry
-        uint32_t low = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir));
-        ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low | IOAPIC_RED_MASK);
+    uint32_t low = ioapic_read_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(route->pin));
+    ioapic_write_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(route->pin), low | IOAPIC_RED_MASK);
 
-        debug_irq("IOAPIC: uninstall IRQ %u (GSI %u)\n", (unsigned)nr, gsi);
-    }
+    debug_irq("IOAPIC: uninstall IRQ %u (GSI %u pin %u)\n",
+              (unsigned)nr, route->gsi, route->pin);
 }
 
 static void ioapic_enable(uint64_t nr)
 {
-    uint32_t isa_irq = (uint32_t)(nr - 0x20);
-    uint32_t gsi = isa_irq_to_gsi((uint8_t)isa_irq);
-    uint8_t redir;
-    int idx = find_ioapic_for_gsi(gsi, &redir);
-
-    if (idx < 0) {
-        debug_irq("IOAPIC: no I/O APIC found for GSI %u (IRQ %u)\n",
-                      gsi, (unsigned)nr);
+    const struct x86_irq_route *route = x86_irq_route_find_by_vector(nr);
+    if (!route || route->ioapic_idx >= apic_info.ioapic_count) {
+        debug_irq("IOAPIC: no route found for vector %#lx\n", nr);
         return;
     }
 
-    ioapic_entry_t *ioapic = &apic_info.ioapics[idx];
-
-    // ── Determine trigger mode ────────────────────────────────
-    // Priority: ISO override > device flags > GSI-range defaults
-    uint8_t iso_trig = ISO_TRIGGER_CONF_BUS;  // "not specified"
-    uint8_t iso_pol  = ISO_POLARITY_CONF_BUS;
-
-    // 1. Check ISO overrides (for ISA IRQ → GSI mappings)
-    for (uint32_t i = 0; i < apic_info.iso_count; i++) {
-        if (apic_info.isos[i].irq_source == isa_irq) {
-            iso_pol  = apic_info.isos[i].flags & ISO_POLARITY_MASK;
-            iso_trig = apic_info.isos[i].flags & ISO_TRIGGER_MASK;
-            break;
-        }
-    }
-
-    // 2. Determine trigger: ISO first, then device flags, then defaults
-    uint32_t use_level = 0;
-    if (iso_trig == ISO_TRIGGER_LEVEL)
-        use_level = 1;
-    else if (iso_trig == ISO_TRIGGER_EDGE)
-        use_level = 0;
-    else {
-        // ISO says "conforms to bus" or not present — check device flags
-        irq_desc_t *desc = &irq_table[nr - 32];
+    uint8_t redir = route->pin;
+    uint32_t low_flags = route->flags;
+    irq_desc_t *desc = irq_desc_for_gsi(route->gsi);
+    if (desc) {
         if (desc->flags & IRQF_TRIGGER_LEVEL)
-            use_level = 1;
+            low_flags |= IOAPIC_RED_TRIG_LEVEL;
         else if (desc->flags & IRQF_TRIGGER_EDGE)
-            use_level = 0;
-        else
-            // No hint from device either — use GSI-range defaults
-            use_level = (irq_trigger_for_gsi(gsi) == ISO_TRIGGER_LEVEL);
+            low_flags &= ~IOAPIC_RED_TRIG_LEVEL;
     }
-
-    // 3. Determine polarity: ISO first, then GSI-range defaults
-    uint32_t active_low = 0;
-    if (iso_pol == ISO_POLARITY_ACTIVE_LOW)
-        active_low = 1;
-    else if (iso_pol == ISO_POLARITY_ACTIVE_HIGH)
-        active_low = 0;
-    else
-        // ISA: active-high, PCI (GSI ≥ 16): active-low (INTx#)
-        active_low = (gsi >= 16);
-
-    // ── Build redirection entry ──────────────────────────────
-    uint32_t low_flags = 0;
-
-    if (active_low)
-        low_flags |= IOAPIC_RED_POL_LOW;
-    if (use_level)
-        low_flags |= IOAPIC_RED_TRIG_LEVEL;
-
-    // Vector number = IRQ vector (0x20 + isa_irq), physical destination mode
-    uint32_t vector = (uint32_t)nr;
-    low_flags |= vector;
+    low_flags |= (uint32_t)(nr & 0xFF);
     low_flags |= IOAPIC_RED_DEL_FIXED;
 
-    // Destination: route to BSP (physical destination mode).
     uint32_t bsp_lapic_id = (lapic_read(LAPIC_ID) >> 24) & 0xFF;
     uint32_t high = bsp_lapic_id << 24;
 
-    // Write the redirection entries
-    ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir) + 1, high);
-    ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low_flags);
+    ioapic_write_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(redir) + 1, high);
+    ioapic_write_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(redir), low_flags);
 
-    debug_irq("IOAPIC: enable IRQ %u (GSI %u, redir %u) → vector %#x trig=%s pol=%s dest=%#x low=%#x\n",
-                  (unsigned)nr, gsi, redir, (unsigned)vector,
-                  use_level ? "level" : "edge",
-                  active_low ? "lo" : "hi",
-                  bsp_lapic_id, low_flags);
+    debug_irq("IOAPIC: enable IRQ %u (GSI %u pin %u) → vector %#x dest=%#x low=%#x\n",
+              (unsigned)nr, route->gsi, redir, (unsigned)nr, bsp_lapic_id, low_flags);
 }
 
 static void ioapic_disable(uint64_t nr)
 {
-    uint32_t isa_irq = (uint32_t)(nr - 0x20);
-    uint32_t gsi = isa_irq_to_gsi((uint8_t)isa_irq);
-    uint8_t redir;
-    int idx = find_ioapic_for_gsi(gsi, &redir);
-
-    if (idx < 0)
+    const struct x86_irq_route *route = x86_irq_route_find_by_vector(nr);
+    if (!route || route->ioapic_idx >= apic_info.ioapic_count)
         return;
 
-    ioapic_entry_t *ioapic = &apic_info.ioapics[idx];
-    uint32_t low = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir));
-    ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(redir), low | IOAPIC_RED_MASK);
+    uint8_t redir = route->pin;
+    uint32_t low = ioapic_read_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(redir));
+    ioapic_write_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(redir), low | IOAPIC_RED_MASK);
 
-    debug_irq("IOAPIC: disable IRQ %u (GSI %u)\n", (unsigned)nr, gsi);
+    debug_irq("IOAPIC: disable IRQ %u (GSI %u pin %u)\n",
+              (unsigned)nr, route->gsi, redir);
 }
 
 static void ioapic_ack(uint64_t nr __attribute__((unused)))
@@ -236,11 +175,22 @@ hw_int_controller_t * get_ioapic_controller(void)
 
 int ioapic_init(void)
 {
+    for (uint32_t k = 0; k < MAX_IOAPICS; k++) {
+        spin_init(&s_ioapic_locks[k]);
+    }
+
     if (apic_info.ioapic_count == 0) {
         debug_irq("IOAPIC: no I/O APICs found in MADT\n");
+        s_ioapic_ready = false;
         return 0;
     }
 
+    if (apic_info.ioapic_count > MAX_IOAPICS) {
+        s_ioapic_ready = false;
+        return -E2BIG;
+    }
+
+    // 1. Map MMIO, validate topology and pin index representation across controllers
     for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
         ioapic_entry_t *ioapic = &apic_info.ioapics[i];
 
@@ -250,33 +200,65 @@ int ioapic_init(void)
                      (uintptr_t)Phy_To_Virt(ioapic_page), PAGE_KERNEL_PMD_NOCACHE);
 
         // Read version to get maximum redirection entry — cache it
-        uint32_t ver = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_VER);
+        uint32_t ver = ioapic_read_reg(i, IOAPIC_REG_VER);
         ioapic->max_redir = IOAPIC_VER_MAX_REDIR(ver);
 
-        debug_irq("IOAPIC: id=%u base=%#010x version=%#x max_redir=%u\n",
-                      ioapic->apic_id, ioapic->mmio_base, ver, ioapic->max_redir);
+        // Check endpoint addition overflow
+        uint64_t end = (uint64_t)ioapic->gsi_base + ioapic->max_redir + 1ULL;
+        if (end > UINT32_MAX + 1ULL)
+            return -EOVERFLOW;
+
+        // Check 8-bit redirection register index representation
+        if (0x10 + 2 * (uint32_t)ioapic->max_redir + 1 > 0xFF)
+            return -EINVAL;
+
+        // Check range overlap with prior controllers
+        for (uint32_t j = 0; j < i; j++) {
+            uint64_t end_j = (uint64_t)apic_info.ioapics[j].gsi_base +
+                             apic_info.ioapics[j].max_redir + 1ULL;
+            if (ioapic->gsi_base < end_j && end > apic_info.ioapics[j].gsi_base)
+                return -EINVAL;
+        }
+
+        debug_irq("IOAPIC[%u]: id=%u base=%#010x version=%#x max_redir=%u\n",
+                  i, ioapic->apic_id, ioapic->mmio_base, ver, ioapic->max_redir);
 
         // Mask all redirection entries initially
         for (uint32_t n = 0; n <= ioapic->max_redir; n++) {
-            uint32_t low = ioapic_read_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n));
-            ioapic_write_reg(ioapic->mmio_base, IOAPIC_REG_REDTBL(n), low | IOAPIC_RED_MASK);
+            ioapic_write_reg(i, IOAPIC_REG_REDTBL(n), IOAPIC_RED_MASK);
         }
 
-        debug_irq("IOAPIC: %u redirection entries masked\n", ioapic->max_redir + 1);
+        debug_irq("IOAPIC[%u]: %u redirection entries masked\n", i, ioapic->max_redir + 1);
     }
 
+    // 2. Prepare descriptor registry and x86 routing table
+    struct irq_gsi_range ranges[MAX_IOAPICS];
+    size_t range_count = apic_info.ioapic_count;
+    for (uint32_t i = 0; i < apic_info.ioapic_count; i++) {
+        ranges[i].base = apic_info.ioapics[i].gsi_base;
+        ranges[i].count = apic_info.ioapics[i].max_redir + 1;
+    }
+#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+    if (range_count < MAX_IOAPICS) {
+        ranges[range_count].base = 32;
+        ranges[range_count].count = 24;
+        range_count++;
+    }
+#endif
+
+    int rc = irq_registry_init_ranges(ranges, range_count);
+    if (rc < 0)
+        return rc;
+
+    rc = x86_irq_routes_init(ranges, range_count);
+    if (rc < 0)
+        return rc;
+
     // ── Switch from PIC to APIC mode via IMCR ──────────────
-    // On Intel chipsets with an 8259-compatible legacy PIC,
-    // the IMCR (Interrupt Mode Control Register) at port 0x22/0x23
-    // selects whether IRQs are routed through the PIC or I/O APIC.
-    // Without this, some QEMU versions and real hardware deliver
-    // interrupts solely through the PIC, ignoring the I/O APIC.
-    //
-    //  port 0x22 ← 0x70   (select IMCR register)
-    //  port 0x23 ← 0x01   (IMCR bit → APIC mode)
     arch_outb(0x22, 0x70);
     arch_outb(0x23, 0x01);
     debug_irq("IOAPIC: IMCR set to APIC mode\n");
 
+    s_ioapic_ready = true;
     return 1;
 }

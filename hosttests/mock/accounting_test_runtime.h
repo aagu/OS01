@@ -43,9 +43,7 @@ extern volatile uint32_t accounting_test_cpu;
 #define KERNEL_TASK_H
 #define _KERNEL_PERCPU_H
 
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 
 /* Spinlock stub — same shape/guard contract as test_platform.h. */
 #ifndef OS01_HOST_SPINLOCK_T_PROVIDED

@@ -130,11 +130,15 @@ test_mouse_init: $(TEST_BLD)/test_mouse_init.elf
 BLOCK_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
     -include $(TEST_MOCK)/arch9/block_runtime.h -DOS01_HOST_TEST
 
-$(TEST_BLD)/blockdev_production.o: $(TESTS_DIR)/kernel/block/blockdev.c
+$(TEST_BLD)/blockdev_production.o: $(TESTS_DIR)/kernel/block/blockdev.c \
+		$(TESTS_DIR)/kernel/include/block/blockdev.h \
+		$(TEST_MOCK)/arch9/block_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_block_device_ops.o: $(TEST_CASES)/test_block_device_ops.c
+$(TEST_BLD)/test_block_device_ops.o: $(TEST_CASES)/test_block_device_ops.c \
+		$(TESTS_DIR)/kernel/include/block/blockdev.h \
+		$(TEST_MOCK)/arch9/block_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
 

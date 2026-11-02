@@ -22,9 +22,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 
 /* Short-circuit the heavy kernel headers ap_work.c pulls in. */
 #define _ARCH_CPU_H                 /* <arch/cpu.h> */

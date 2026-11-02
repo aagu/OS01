@@ -3,6 +3,7 @@
 #include <fs/devfs.h>
 #include <block/blockdev.h>
 #include <core/debug.h>
+#include <log/log.h>
 #include <memory/slab.h>     // kmalloc, kfree
 #include <string.h>
 #include <stdlib.h>          // calloc
@@ -241,7 +242,14 @@ gpt_info_t *gpt_scan(block_device_t *disk)
             continue;
         }
 
-        devfs_register_blkdev(part->dev->name, part->dev);
+        int ret = devfs_register_blkdev(part->dev->name, part->dev);
+        if (ret != 0 && ret != -EEXIST) {
+            log_err("gpt: failed to register partition '%s' in devfs (%d)\n",
+                    part->dev->name, ret);
+            block_device_unregister_boot(part->dev);
+            part->dev = NULL;
+            continue;
+        }
 
         debug_block("gpt: partition '%s' LBA %lu-%lu (%lu sectors)\n",
                     part->name, start_lba, end_lba, length);

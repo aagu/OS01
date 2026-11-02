@@ -15,6 +15,11 @@ static task_t test_task;
 static files_t test_files;
 task_t *poll_test_current = &test_task;
 
+/* The descriptor capacity of THIS build (16 by default).  poll() is
+ * bounded by the task's RLIMIT_NOFILE soft limit, which the host stub
+ * reports as the build's capacity. */
+#define POLL_CAPACITY  OS01_NOFILE_CAPACITY
+
 static size_t allocation_sizes[8];
 static int allocation_count;
 static int poll_wake_count;
@@ -96,6 +101,33 @@ void netbuf_delete(struct netbuf *buf)             { (void)buf; }
 // syscall_check_user_range, copy_to_user_ft_res, copy_from_user_ft_res
 // are already provided by poll_clocksource_stub.c (linked into the
 // elf via POLL_PRODUCTION_OBJS).  Do NOT redefine them here.
+
+struct vfs_node *vfs_node_get(struct vfs_node *node)
+{
+    if (node) __sync_add_and_fetch(&node->refcount, 1);
+    return node;
+}
+
+void vfs_node_put(struct vfs_node *node)
+{
+    if (!node) return;
+    if (__sync_sub_and_fetch(&node->refcount, 1) == 0) {
+        if (node->name) free(node->name);
+        free(node);
+    }
+}
+
+int block_device_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
+
+int block_device_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)dev; (void)lba; (void)count; (void)buf;
+    return -1;
+}
 
 // ── fd_read test fixtures (Task 2) ─────────────────────────
 // file.c fd_read's FD_VFS/FD_DEV branch calls vfs_read() in a
@@ -343,17 +375,17 @@ TEST_FUNC(test_real_tty_and_default_devfs_paths)
 
     rc = devfs_register_chrdev("poll-default", NULL, NULL);
     assert_eq(0, rc);
-    vfs_node_t node = {
-        .type = VFS_CHRDEV,
-        .fs_data = (void *)(uintptr_t)0,
-    };
+    vfs_node_t *node = NULL;
+    assert_eq(0, devfs_lookup_node("poll-default", &node));
+    assert_not_null(node);
     file_t device = {
         .type = FD_DEV,
         .flags = O_RDWR | O_NONBLOCK,
-        .node = &node,
+        .node = node,
     };
     mask = fd_poll(&device, POLLIN, NULL);
     assert_eq(POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM, mask);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_poll_table_allocation_bounds)
@@ -369,19 +401,22 @@ TEST_FUNC(test_poll_table_allocation_bounds)
     allocation_count = 0;
     memset(allocation_sizes, 0, sizeof(allocation_sizes));
     memset(&pt, 0, sizeof(pt));
-    rc = poll_table_setup(&pt, POLL_MAX_FDS * 2 + 1);
+    rc = poll_table_setup(&pt, -1);
     assert_eq(-EINVAL, rc);
     assert_eq(0, allocation_count);
     if (rc == 0)
         poll_table_destroy(&pt);
 
+    /* The wait capacity is NOT capped by a compile-time constant any
+     * more: the caller sizes it per call from the soft limit, so the
+     * table must accept whatever capacity it is asked for. */
     allocation_count = 0;
     memset(allocation_sizes, 0, sizeof(allocation_sizes));
     memset(&pt, 0, sizeof(pt));
-    rc = poll_table_setup(&pt, POLL_MAX_FDS * 2);
+    rc = poll_table_setup(&pt, POLL_WAIT_SLOTS_PER_FD * 64);
     assert_eq(0, rc);
     assert_eq(1, allocation_count);
-    assert_eq((size_t)(POLL_MAX_FDS * 2) * sizeof(poll_wait_entry_t),
+    assert_eq((size_t)(POLL_WAIT_SLOTS_PER_FD * 64) * sizeof(poll_wait_entry_t),
               allocation_sizes[0]);
     poll_table_destroy(&pt);
 }
@@ -395,18 +430,22 @@ TEST_FUNC(test_real_poll_and_select_allocate_two_slots_per_fd)
     file_t master = make_blocked_pty_file(&pty, &master_to_slave,
                                           &slave_to_master);
 
-    struct pollfd pfds[POLL_MAX_FDS];
-    for (int i = 0; i < POLL_MAX_FDS; i++) {
+    struct pollfd pfds[POLL_CAPACITY];
+    for (int i = 0; i < POLL_CAPACITY; i++) {
         test_files.fd[i] = &master;
         pfds[i].fd = i;
         pfds[i].events = POLLIN | POLLOUT;
         pfds[i].revents = 0;
     }
-    int64_t rc = do_poll(pfds, POLL_MAX_FDS, 0);
+    int64_t rc = do_poll(pfds, POLL_CAPACITY, 0);
     assert_eq(0, rc);
-    assert_eq(1, allocation_count);
-    assert_eq((size_t)(POLL_MAX_FDS * 2) * sizeof(poll_wait_entry_t),
+    /* Two heap buffers per call: the pollfd copy and the wait entries. */
+    assert_eq(2, allocation_count);
+    assert_eq((size_t)POLL_CAPACITY * sizeof(struct pollfd),
               allocation_sizes[0]);
+    assert_eq((size_t)(POLL_CAPACITY * POLL_WAIT_SLOTS_PER_FD) *
+              sizeof(poll_wait_entry_t),
+              allocation_sizes[1]);
     assert_true(list_is_empty(&slave_to_master.read_poll));
     assert_true(list_is_empty(&master_to_slave.write_poll));
 

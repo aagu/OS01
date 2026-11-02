@@ -42,6 +42,8 @@ int64_t compat_linux_dispatch(syscall_ctx_t *ctx)
         return compat_sys_rt_sigaction(ctx);
     if (nr == 61)
         return compat_sys_wait4(ctx);
+    if (nr == 302)
+        return compat_sys_prlimit64(ctx);
 
     /* Standard 1:1 mapped native syscall */
     ctx->nr = (uint64_t)os_nr;

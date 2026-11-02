@@ -3,6 +3,7 @@
 #include <intr/apic.h>
 #include <intr/ipi.h>
 #include <sched/task.h>
+#include <sched/resource.h>
 #include <arch/cpu.h>
 #include <arch/x86_64/tss.h>
 #include <arch/irq.h>
@@ -180,6 +181,7 @@ static task_t *create_idle_task(uint32_t cpu_num)
 
     task_t *tsk = (task_t *)(((uint64_t)raw + STACK_SIZE - 1) & ~(STACK_SIZE - 1));
     memset(tsk, 0, sizeof(task_t));
+    task_nofile_init(tsk);
     tsk->stack_alloc_base = raw;
     tsk->state    = TASK_RUNNING;
     tsk->flags    = PF_KTHREAD;

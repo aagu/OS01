@@ -3,6 +3,7 @@
 
 #include <list.h>
 #include <stdint.h>
+#include <config/limits.h>
 #include <sys/types.h>      // pid_t (task_struct.pgrp/session, signal_pgrp)
 #include <arch/cpu.h>
 #include <arch/context.h>   // facade: per-arch thread_t + current/switch ops
@@ -184,6 +185,11 @@ typedef struct task_struct
     // ── File descriptor table ──────────────────────────
     struct files_struct *files;     // per-process fd table
 
+    // ── Resource limits (ARCH-10 Task 5) ───────────────
+    uint64_t nofile_soft;
+    uint64_t nofile_hard;
+    spinlock_T nofile_lock;
+
     // ── Process tree ───────────────────────────────────
     struct task_struct *parent;     // parent process (for waitpid)
     int64_t exit_code;              // exit status (harvested by waitpid)
@@ -259,6 +265,9 @@ extern task_t *init_task[NR_CPUS];
     .ctty = NULL,                     \
     .comm = "idle",                   /* monitor spec §5.1: kernel threads are named */ \
     .allowed_cpus = 1ULL,             /* BSP idle stays on cpu 0 forever */ \
+    .nofile_soft = OS01_NOFILE_CAPACITY, \
+    .nofile_hard = OS01_NOFILE_CAPACITY, \
+    .nofile_lock = { .lock = 1L }, \
 }
 
 

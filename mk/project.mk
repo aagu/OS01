@@ -34,8 +34,8 @@ endif
 ifneq ($(filter none,$(ARCH9_FAULT)),)
 # ARCH9_FAULT=none is the canonical build; no extra rejection needed.
 else
-ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS)),)
-$(error ARCH9_FAULT=$(ARCH9_FAULT) cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(ARCH10_CAPACITY_TEST)),)
+$(error ARCH9_FAULT=$(ARCH9_FAULT) cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/ARCH10_CAPACITY_TEST)
 endif
 ifneq ($(filter config/inittab.test,$(INITTAB_FILE)),)
 $(error ARCH9_FAULT=$(ARCH9_FAULT) cannot be combined with INITTAB_FILE=config/inittab.test)
@@ -53,8 +53,8 @@ ifeq ($(filter $(FB_RESOLUTION_TEST),0 1),)
 $(error FB_RESOLUTION_TEST='$(FB_RESOLUTION_TEST)' must be 0 or 1)
 endif
 ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
-ifneq ($(filter 1,$(KERNEL_SELFTEST) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
-$(error FB_RESOLUTION_TEST=1 cannot be combined with KERNEL_SELFTEST/KERNEL_CANARY_SELFTEST/OS01_SYSTEST/OS01_NETTEST)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(ARCH10_CAPACITY_TEST)),)
+$(error FB_RESOLUTION_TEST=1 cannot be combined with KERNEL_SELFTEST/KERNEL_CANARY_SELFTEST/OS01_SYSTEST/OS01_NETTEST/ARCH10_CAPACITY_TEST)
 endif
 ifneq ($(filter none,$(ARCH9_FAULT)),)
 else
@@ -105,14 +105,32 @@ endif
 # source of truth (the selector above only contributes to it).
 X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,))
 ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
-ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST)),)
-$(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is an x86-only destructive probe and cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST) $(ARCH10_CAPACITY_TEST)),)
+$(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is an x86-only destructive probe and cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST/ARCH10_CAPACITY_TEST)
 endif
 ifneq ($(filter none,$(ARCH9_FAULT)),)
 # ARCH9_FAULT=none is the canonical build; the destructive probe and
 # the driver-model fault fixture must never share a build.
 else
 $(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) cannot be combined with ARCH9_FAULT=$(ARCH9_FAULT))
+endif
+endif
+
+# ── ARCH10_CAPACITY_TEST — isolated capacity variant (spec §10) ────
+ARCH10_CAPACITY_TEST ?= 0
+ifeq ($(filter $(ARCH10_CAPACITY_TEST),0 1),)
+$(error ARCH10_CAPACITY_TEST='$(ARCH10_CAPACITY_TEST)' must be 0 or 1)
+endif
+ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST)),)
+$(error ARCH10_CAPACITY_TEST=1 cannot be combined with KERNEL_SELFTEST/KERNEL_CANARY_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST)
+endif
+ifneq ($(filter none,$(ARCH9_FAULT)),)
+else
+$(error ARCH10_CAPACITY_TEST=1 cannot be combined with ARCH9_FAULT=$(ARCH9_FAULT))
+endif
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+$(error ARCH10_CAPACITY_TEST=1 cannot be combined with X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE))
 endif
 endif
 
@@ -132,8 +150,8 @@ endif
 # the profile's own USER_BUILD_DIR/USER_ARTIFACT_DIR compute with an empty
 # USER_VARIANT.
 ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
-ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
-$(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(ARCH10_CAPACITY_TEST)),)
+$(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, OS01_NETTEST=1, or ARCH10_CAPACITY_TEST=1)
 endif
 endif
 # TERM_PRESENT_TEST — the terminal-present E2E suite needs the terminal's
@@ -145,8 +163,8 @@ ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
 USER_DEBUG := 1
 endif
 
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE)))
-USER_VARIANT  := $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH10_CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(ARCH9_FAULT)),,driver-model-$(ARCH9_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE)))
+USER_VARIANT  := $(if $(filter 1,$(ARCH10_CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 OS01_PROFILE_FILE := $(OS01_ROOT)/mk/profiles/$(PROFILE).mk
@@ -160,6 +178,12 @@ include $(OS01_PROFILE_FILE)
 ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
 ifeq ($(filter x86_64%,$(TARGET_TRIPLE)),)
 $(error FB_RESOLUTION_TEST=1 is only supported on x86 targets; TARGET_TRIPLE='$(TARGET_TRIPLE)')
+endif
+endif
+
+ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),)
+ifeq ($(filter x86_64%,$(TARGET_TRIPLE)),)
+$(error ARCH10_CAPACITY_TEST=1 is only supported on x86 targets; TARGET_TRIPLE='$(TARGET_TRIPLE)')
 endif
 endif
 
@@ -208,7 +232,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS KERNEL_EXTRA_LDFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST COMPILER_LAUNCHER CCACHE_DIR CCACHE_BASEDIR CCACHE_COMPILERCHECK HOST_TEST_JOBS
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS KERNEL_EXTRA_LDFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS ARCH9_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST COMPILER_LAUNCHER CCACHE_DIR CCACHE_BASEDIR CCACHE_COMPILERCHECK HOST_TEST_JOBS ARCH10_CAPACITY_TEST
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── Sysroot generation protocol (spec: sysroot single-writer) ──

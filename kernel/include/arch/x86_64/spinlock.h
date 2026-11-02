@@ -62,6 +62,10 @@ inline long __attribute__((always_inline)) spin_trylock(spinlock_T * lock)
 // Returns the old RFLAGS value — pass to _irqrestore.
 inline uint64_t __attribute__((always_inline)) spin_lock_irqsave(spinlock_T *lock)
 {
+#ifdef OS01_HOST_TEST
+    spin_lock(lock);
+    return 0;
+#else
     uint64_t flags;
     __asm__ __volatile__(
         "pushfq          \n\t"
@@ -73,6 +77,7 @@ inline uint64_t __attribute__((always_inline)) spin_lock_irqsave(spinlock_T *loc
     );
     spin_lock(lock);
     return flags;
+#endif
 }
 
 // Unlock and restore the interrupt flag to the state
@@ -80,10 +85,14 @@ inline uint64_t __attribute__((always_inline)) spin_lock_irqsave(spinlock_T *loc
 inline void __attribute__((always_inline)) spin_unlock_irqrestore(spinlock_T *lock, uint64_t flags)
 {
     spin_unlock(lock);
+#ifndef OS01_HOST_TEST
     // Re-enable interrupts ONLY if they were enabled before lock
     if (flags & RFLAGS_IF) {
         __asm__ __volatile__("sti" ::: "memory");
     }
+#else
+    (void)flags;
+#endif
 }
 
 #endif

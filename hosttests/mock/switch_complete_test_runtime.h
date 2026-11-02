@@ -56,9 +56,7 @@ void kthread_yield(void);
 #ifndef STACK_SIZE
 #define STACK_SIZE (32 * 1024)
 #endif
-#ifndef NR_CPUS
-#define NR_CPUS 8
-#endif
+#include <config/limits.h>
 
 /* Same values as sched/task.h. */
 #define PF_SELF_REAP  (1 << 5)

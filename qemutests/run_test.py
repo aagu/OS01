@@ -1070,6 +1070,9 @@ def main():
             # screendumps.  Imported lazily to mirror the gui dispatch.
             from qemutests.gui_desktop_test import test_gui_desktop
             result = test_gui_desktop(tester)
+        elif args.test_name == "arch10-capacity":
+            from qemutests.arch10_capacity import test_arch10_capacity
+            result = test_arch10_capacity(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False

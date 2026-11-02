@@ -12,7 +12,6 @@ $(eval $(call register_host_test,test_process_image_lifecycle,sched,protocol-or-
 $(eval $(call register_host_test,test_fork_user_map,sched,protocol-or-legacy))
 $(eval $(call register_host_test,test_percpu_layout,sched,protocol-or-legacy))
 $(eval $(call register_host_test,test_smp_starting_gate,sched,protocol-or-legacy))
-
 TEST_BINS += \
     $(TEST_BLD)/test_syscall_dispatch.elf \
     $(TEST_BLD)/test_compat_linux.elf \
@@ -53,7 +52,7 @@ $(TEST_BLD)/compat_table_x86_64_production.o: $(TESTS_DIR)/kernel/syscall/compat
 
 $(TEST_BLD)/compat_proc_production.o: $(TESTS_DIR)/kernel/syscall/compat/proc.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/compat_fs_production.o: $(TESTS_DIR)/kernel/syscall/compat/fs.c
 	@mkdir -p $(TEST_BLD)
@@ -61,9 +60,10 @@ $(TEST_BLD)/compat_fs_production.o: $(TESTS_DIR)/kernel/syscall/compat/fs.c
 
 $(TEST_BLD)/test_compat_linux.o: $(TEST_CASES)/test_compat_linux.c
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_compat_linux.elf: $(TEST_BLD)/test_compat_linux.o \
+    $(TEST_BLD)/sched_resource_production.o \
     $(TEST_BLD)/syscall_dispatch_production.o \
     $(TEST_BLD)/compat_dispatch_production.o \
     $(TEST_BLD)/compat_table_x86_64_production.o \
@@ -74,6 +74,22 @@ $(TEST_BLD)/test_compat_linux.elf: $(TEST_BLD)/test_compat_linux.o \
 .PHONY: test-compat-linux
 test-compat-linux: $(TEST_BLD)/test_compat_linux.elf
 	$<
+
+$(TEST_BLD)/sched_resource_production.o: $(TESTS_DIR)/kernel/sched/resource.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/sys_resource_production.o: $(TESTS_DIR)/kernel/syscall/sys_resource.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_resource_production.o: $(TESTS_DIR)/libc/resource/resource.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -D'errno=(*__errno_location())' -include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
+
+# The test_nofile_limits case (ARCH-10 Task 5 resource limits + Task 6
+# descriptor installation) is built by hosttests/mk/fs.mk — it links the
+# production descriptor-installation objects.
 
 # Standalone wait test
 $(TEST_BLD)/test_wait_basic.elf: $(TEST_BLD)/test_wait_basic.o
@@ -341,7 +357,8 @@ $(TEST_BLD)/test_switch_complete.o: $(TEST_CASES)/test_switch_complete.c \
 # simply stays closed through the tail cases).
 $(TEST_BLD)/test_switch_complete.elf: $(TEST_BLD)/test_switch_complete.o \
 		$(TEST_BLD)/switch_complete_production.o \
-		$(TEST_BLD)/sched_boot_production.o
+		$(TEST_BLD)/sched_boot_production.o \
+		$(TEST_BLD)/sched_resource_production.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-switch-complete
@@ -370,7 +387,8 @@ $(TEST_BLD)/test_kthread_ctor.o: $(TEST_CASES)/test_kthread_ctor.c \
 
 $(TEST_BLD)/test_kthread_ctor.elf: $(TEST_BLD)/test_kthread_ctor.o \
 		$(TEST_BLD)/switch_complete_production.o \
-		$(TEST_BLD)/sched_boot_production.o
+		$(TEST_BLD)/sched_boot_production.o \
+		$(TEST_BLD)/sched_resource_production.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-kthread-ctor

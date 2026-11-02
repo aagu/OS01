@@ -22,6 +22,7 @@
 
 #include <arch/io.h>
 #include <intr/interrupt.h>   // register_irq / unregister_irq
+#include <arch/irq.h>
 #include <intr/apic.h>        // lapic_read / lapic_write / LAPIC_* / LVT_MASK
 #include <arch/cpu.h>    // arch_cycle_counter / arch_cpu_pause
 #include <stddef.h>             // NULL
@@ -82,8 +83,9 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     lapic_write(LAPIC_TIMER_DIV, 0);
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 
-    // 2. Register IRQ8 (gsi=8) at level-triggered.
-    if (!register_irq(RTC_PIE_IRQ_GSI, NULL, rtc_pie_handler, 0,
+    // 2. Register IRQ8 via arch_irq_isa_to_gsi(8)
+    uint32_t rtc_gsi = arch_irq_isa_to_gsi(8);
+    if (!register_irq(rtc_gsi, NULL, rtc_pie_handler, 0,
                       IRQF_TRIGGER_LEVEL, "rtc-pie")) {
         return -1;
     }
@@ -109,7 +111,7 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     // 5. Disable PIE, unregister IRQ8.
     b = cmos_read(RTC_CMOS_REG_STATUS_B);
     cmos_write(RTC_CMOS_REG_STATUS_B, b & (uint8_t)~0x40);
-    unregister_irq(RTC_PIE_IRQ_GSI);
+    unregister_irq(rtc_gsi);
 
     if (rtc_pie_count < RTC_PIE_TICKS) return -1;
 

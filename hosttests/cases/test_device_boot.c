@@ -168,7 +168,7 @@ int devfs_register_blkdev(const char *name, block_device_t *dev)
 }
 
 void vfs_init(void) {}
-void devfs_init(void) {}
+int devfs_init(void) { return 0; }
 void vfs_debug_list(const char *path) { (void)path; }
 struct vfs_node *vfs_lookup(const char *path) { (void)path; return NULL; }
 int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size, void *buf) { (void)node; (void)offset; (void)size; (void)buf; return 0; }
@@ -332,7 +332,10 @@ static void reset_test_state(void)
 
     device_boot_reset_for_test();
     pci_core_reset_for_test();
-    block_device_init();
+    // ARCH-10: block_device_init() is idempotent and never resets the
+    // registry, so the host harness uses the explicit reset hook to
+    // start every case from an empty registry.
+    block_device_reset_for_test();
     device_core_init();
 
     set_test_pci_drivers(NULL, 0);

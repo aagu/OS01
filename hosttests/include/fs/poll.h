@@ -7,11 +7,19 @@
 #include <sync/wait.h>
 #include <arch/spinlock.h>
 
-// ── Max fds per poll call ──────────────────────────────
+// ── Wait slots per descriptor ─────────────────────────────
+//
+// Current device protocol: one descriptor registers at most TWO
+// independent wait chains (read + write).  The charge follows the
+// ARRAY ENTRY, not the descriptor number — a descriptor that appears
+// twice in the poll array is charged twice.
+//
+// The number of descriptors a single poll() call may carry is NOT
+// fixed here: it is bounded by the calling task's RLIMIT_NOFILE soft
+// limit (see <sched/resource.h>), and both per-call buffers are
+// allocated for that size.
 
-#define POLL_MAX_FDS  16
 #define POLL_WAIT_SLOTS_PER_FD  2
-#define POLL_MAX_WAIT_ENTRIES   (POLL_MAX_FDS * POLL_WAIT_SLOTS_PER_FD)
 
 // ── Poll event flags (Linux ABI) ──────────────────────
 
@@ -69,22 +77,38 @@ typedef struct poll_wait_entry {
 // it cascade-wakes pt.wq.  Entries are heap-allocated via
 // poll_table_setup and freed via poll_table_destroy.
 
+// ── Poll timeout registry node ─────────────────────────
+// One node per in-flight poll with a positive timeout.  The LAPIC tick
+// scans the registry list and wakes every node whose deadline passed.
+// Per-poll nodes (NOT a global single slot) so concurrent pollers
+// never clobber each other's timeout wakeup.
+
+typedef struct poll_timeout_node {
+    struct poll_timeout_node *next;
+    wait_queue_t             *wq;       // target: pt.wq
+    uint64_t                  deadline; // 纳秒 deadline（clocksource_read_ns 时间轴）
+} poll_timeout_node_t;
+
 typedef struct poll_table {
     wait_queue_t        wq;                      // main wait queue
     poll_wait_entry_t   *entries;                // dynamically allocated array
     int                 max_entries;             // capacity of entries array
     int                 nent;                    // active entry count
     bool                triggered;               // short-circuit: fd ready
+    int                 error;                   // sticky error (-ENOMEM when
+                                                // the wait chain overflowed)
+    poll_timeout_node_t tmo;                     // LAPIC tick timeout registry node
 } poll_table_t;
 
 // ── API ────────────────────────────────────────────────
 
-// Reset poll table for a new scan round (nent=0, triggered=false).
+// Reset poll table for a new scan round (nent=0, triggered=false,
+// error=0).
 // Does NOT re-init wq — call poll_table_setup once, then init per round.
 void poll_table_init(poll_table_t *pt);
 
 // One-time setup: validate/allocate entries + init wq + all entry nodes.
-// Returns 0, -EINVAL for an invalid/capacity-exceeding size, or -ENOMEM.
+// Returns 0, -EINVAL for an invalid size, or -ENOMEM.
 int poll_table_setup(poll_table_t *pt, int max_entries);
 
 // Free entries allocated by poll_table_setup.
@@ -94,11 +118,29 @@ void poll_table_destroy(poll_table_t *pt);
 // (protected by fd_lock).  When the fd becomes ready, its wake path
 // walks poll_list and calls wait_queue_wake_all(e->poll_wq).
 // Entries are indexed into pt->entries; capacity is pt->max_entries.
+// If the entries array is FULL the registration is refused and
+// pt->error is set to -ENOMEM — the wait is never dropped silently,
+// because a dropped registration would sleep forever.
 void poll_wait(poll_table_t *pt, list_t *poll_list, spinlock_T *fd_lock);
 
 // Remove all entries from their fd poll lists.  Uses entry.fd_lock
 // for mutual exclusion with fd wake paths.
 void poll_table_cleanup(poll_table_t *pt);
+
+// Compute the wait-entry capacity of ONE poll/select call.
+//
+//   nfds == 0  →  1 entry: a zero-descriptor call still needs one
+//                 internal wait slot for the wait protocol.
+//   nfds  > 0  →  POLL_WAIT_SLOTS_PER_FD * nfds entries.
+//
+// Returns 0 and stores the capacity in *entries, or:
+//   -EINVAL    entries is NULL
+//   -EOVERFLOW the capacity cannot be represented as an int, or the
+//              entry array byte size would overflow size_t
+//
+// Callers surface a capacity failure as -ENOMEM (the capacity could
+// not be provided).
+int poll_wait_capacity(uint64_t nfds, int *entries);
 
 // Forward-declared in kernel/fs/file.h; implementation in kernel/fs/poll.c.
 struct file;
@@ -107,5 +149,11 @@ uint32_t fd_poll(struct file *f, uint32_t requested,
 
 // do_poll — poll(2) syscall implementation.
 int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout);
+
+// do_poll_core — core polling loop (no user memory access).
+// Caller provides kfds and pt (already setup via poll_table_setup).
+// Caller is responsible for poll_table_destroy (not called inside).
+// Returns: ready count (>=0), -EINTR, -ENOMEM.
+int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, poll_table_t *pt);
 
 #endif // _KERNEL_POLL_H

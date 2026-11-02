@@ -1,10 +1,47 @@
-/* hosttests/cases/test_block_device_ops.c — ARCH-9 block ops & partition tests */
+/* hosttests/cases/test_block_device_ops.c — ARCH-9 block ops & partition tests
+ *
+ * ARCH-10: the block registry is a dynamic list of individually
+ * allocated objects.  The ARCH-9 ops/bounds coverage is kept as it was
+ * and the registry contract (dynamic growth, stable addresses,
+ * registration order, duplicate/OOM/EBUSY/EINVAL paths) is covered
+ * here. */
 #include "test_framework.h"
 #include <block/blockdev.h>
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+
+/* ── Allocation stub with failure injection ─────────────────────── */
+/* The production registry allocates every device object through the
+ * slab; the host harness provides the allocator so the OOM path can be
+ * exercised. */
+static int  s_kmalloc_calls = 0;
+static bool s_kmalloc_fail_next = false;
+
+void *kmalloc(size_t size)
+{
+    s_kmalloc_calls++;
+    if (s_kmalloc_fail_next) {
+        s_kmalloc_fail_next = false;
+        return NULL;
+    }
+    return calloc(1, size ? size : 1);
+}
+
+size_t kfree(void *ptr)
+{
+    free(ptr);
+    return 1;
+}
+
+static void reset_registry(void)
+{
+    block_device_reset_for_test();
+    s_kmalloc_calls = 0;
+    s_kmalloc_fail_next = false;
+}
 
 /* ── Fake tracking data ────────────────────────────────────────── */
 static int fake_read_calls = 0;
@@ -54,10 +91,26 @@ static const struct block_device_ops fake_ro_ops = {
     .flush = NULL,
 };
 
+/* Register a disk with a generated name; returns the new object. */
+static block_device_t *register_disk(const char *name, uint64_t sectors)
+{
+    struct block_device_desc desc = {
+        .name = name,
+        .sector_count = sectors,
+        .sector_size = 512,
+        .ops = &fake_rw_ops,
+        .kind = BLOCK_DISK,
+    };
+    block_device_t *dev = NULL;
+    if (block_device_register(&desc, &dev) != 0)
+        return NULL;
+    return dev;
+}
+
 /* ── Test 1: Complete registration ────────────────────────────── */
 TEST_FUNC(test_complete_registration)
 {
-    block_device_init();
+    reset_registry();
     fake_read_calls = 0;
     fake_write_calls = 0;
     fake_flush_calls = 0;
@@ -99,7 +152,7 @@ TEST_FUNC(test_complete_registration)
 /* ── Test 2: Read-only and bounds ─────────────────────────────── */
 TEST_FUNC(test_readonly_and_bounds)
 {
-    block_device_init();
+    reset_registry();
     fake_read_calls = 0;
     fake_write_calls = 0;
 
@@ -181,7 +234,7 @@ TEST_FUNC(test_readonly_and_bounds)
 /* ── Test 3: Registry failures ────────────────────────────────── */
 TEST_FUNC(test_registry_failures)
 {
-    block_device_init();
+    reset_registry();
     block_device_t *out = (block_device_t *)0xdeadbeef;
 
     /* NULL descriptor */
@@ -238,36 +291,6 @@ TEST_FUNC(test_registry_failures)
     assert_eq(-EEXIST, block_device_register(&valid_desc, &out));
     assert_null(out);
     assert_eq(1, block_device_count());
-
-    /* Fill table up to BLOCKDEV_MAX (8 slots) */
-    for (int i = 1; i < BLOCKDEV_MAX; i++) {
-        char name[BLOCKDEV_NAME_MAX];
-        snprintf(name, sizeof(name), "disk_%d", i);
-        struct block_device_desc d = {
-            .name = name,
-            .sector_count = 100,
-            .sector_size = 512,
-            .ops = &fake_rw_ops,
-            .kind = BLOCK_DISK,
-        };
-        block_device_t *d_out = NULL;
-        assert_eq(0, block_device_register(&d, &d_out));
-        assert_not_null(d_out);
-    }
-    assert_eq(BLOCKDEV_MAX, block_device_count());
-
-    /* Table full -> -ENOSPC */
-    struct block_device_desc extra = {
-        .name = "disk_overflow",
-        .sector_count = 100,
-        .sector_size = 512,
-        .ops = &fake_rw_ops,
-        .kind = BLOCK_DISK,
-    };
-    out = (block_device_t *)0xdeadbeef;
-    assert_eq(-ENOSPC, block_device_register(&extra, &out));
-    assert_null(out);
-    assert_eq(BLOCKDEV_MAX, block_device_count());
 }
 
 /* ── Test 4: Partition parent dispatch ────────────────────────── */
@@ -297,7 +320,7 @@ static const struct block_device_ops partition_test_ops = {
 
 TEST_FUNC(test_partition_parent_dispatch)
 {
-    block_device_init();
+    reset_registry();
     fake_read_calls = 0;
     fake_write_calls = 0;
     fake_last_lba = 0;
@@ -362,10 +385,193 @@ TEST_FUNC(test_partition_parent_dispatch)
     assert_eq(0, fake_write_calls);
 }
 
-/* ── Test 5: Boot unregister stability ────────────────────────── */
+/* ── Test 5: Dynamic growth keeps published objects stable ─────── */
+TEST_FUNC(test_dynamic_growth_stability)
+{
+    reset_registry();
+    fake_read_calls = 0;
+    fake_write_calls = 0;
+
+    block_device_t *first = NULL;
+
+    /* Register more devices than the old fixed table could hold. */
+    for (int i = 0; i < 12; i++) {
+        char name[BLOCKDEV_NAME_MAX];
+        snprintf(name, sizeof(name), "grow%d", i);
+        block_device_t *dev = register_disk(name, 64);
+        assert_not_null(dev);
+        if (i == 0)
+            first = dev;
+    }
+
+    assert_eq(12, block_device_count());
+
+    /* The first object did not move and is still enumerated first. */
+    assert_not_null(first);
+    assert_eq(first, block_device_get(0));
+    assert_str_eq("grow0", first->name);
+    assert_eq(1, first->present);
+
+    /* Its data path is unchanged after the registry grew. */
+    uint8_t buffer[512];
+    memset(buffer, 0, sizeof(buffer));
+    assert_eq(0, block_device_read(first, 3, 1, buffer));
+    assert_eq(1, fake_read_calls);
+    assert_eq(3, fake_last_lba);
+    assert_eq(1, fake_last_count);
+    assert_eq(0xAB, buffer[0]);
+
+    assert_eq(0, block_device_write(first, 7, 1, buffer));
+    assert_eq(1, fake_write_calls);
+    assert_eq(7, fake_last_lba);
+    assert_eq(1, fake_last_count);
+
+    /* The enumeration follows the successful registration order. */
+    for (int i = 0; i < 12; i++) {
+        char name[BLOCKDEV_NAME_MAX];
+        snprintf(name, sizeof(name), "grow%d", i);
+        block_device_t *dev = block_device_get(i);
+        assert_not_null(dev);
+        if (!dev)
+            continue;
+        assert_str_eq(name, dev->name);
+    }
+    assert_null(block_device_get(12));
+    assert_null(block_device_get(-1));
+}
+
+/* ── Test 6: Duplicate name is rejected ───────────────────────── */
+TEST_FUNC(test_duplicate_name_rejected)
+{
+    reset_registry();
+
+    block_device_t *first = register_disk("dup", 10);
+    assert_not_null(first);
+    assert_eq(1, block_device_count());
+
+    struct block_device_desc dup_desc = {
+        .name = "dup",
+        .sector_count = 10,
+        .sector_size = 512,
+        .ops = &fake_rw_ops,
+        .kind = BLOCK_DISK,
+    };
+    block_device_t *out = (block_device_t *)0xdeadbeef;
+    assert_eq(-EEXIST, block_device_register(&dup_desc, &out));
+    assert_null(out);
+
+    /* The registered set is unchanged. */
+    assert_eq(1, block_device_count());
+    assert_eq(first, block_device_get(0));
+}
+
+/* ── Test 7: Allocation failure reports -ENOMEM ───────────────── */
+TEST_FUNC(test_allocation_failure)
+{
+    reset_registry();
+
+    block_device_t *first = register_disk("keep", 10);
+    assert_not_null(first);
+    assert_eq(1, block_device_count());
+
+    struct block_device_desc desc = {
+        .name = "oom",
+        .sector_count = 10,
+        .sector_size = 512,
+        .ops = &fake_rw_ops,
+        .kind = BLOCK_DISK,
+    };
+
+    s_kmalloc_fail_next = true;
+    block_device_t *out = (block_device_t *)0xdeadbeef;
+    assert_eq(-ENOMEM, block_device_register(&desc, &out));
+    assert_null(out);
+
+    /* Exactly one allocation attempt was made for the failed device. */
+    assert_eq(2, s_kmalloc_calls);
+
+    /* The failed registration changed neither the count nor the set. */
+    assert_eq(1, block_device_count());
+    assert_eq(first, block_device_get(0));
+    assert_null(block_device_get(1));
+}
+
+/* ── Test 8: Parent with live children is busy ────────────────── */
+TEST_FUNC(test_parent_child_rollback)
+{
+    reset_registry();
+
+    block_device_t *parent = register_disk("disk", 1000);
+    assert_not_null(parent);
+
+    test_partition_ctx_t part_ctx = {
+        .parent = parent,
+        .offset_lba = 100,
+        .length = 50,
+    };
+    struct block_device_desc part_desc = {
+        .name = "disk1",
+        .sector_count = 50,
+        .sector_size = 512,
+        .ops = &partition_test_ops,
+        .private_data = &part_ctx,
+        .parent = parent,
+        .kind = BLOCK_PARTITION,
+    };
+    block_device_t *child = NULL;
+    assert_eq(0, block_device_register(&part_desc, &child));
+    assert_not_null(child);
+    assert_eq(2, block_device_count());
+
+    /* The parent still has a registered partition child -> -EBUSY. */
+    assert_eq(-EBUSY, block_device_unregister_boot(parent));
+    assert_eq(2, block_device_count());
+    assert_eq(parent, block_device_get(0));
+    assert_eq(child, block_device_get(1));
+
+    /* Roll back child first, then the parent. */
+    assert_eq(0, block_device_unregister_boot(child));
+    assert_eq(1, block_device_count());
+    assert_eq(parent, block_device_get(0));
+
+    assert_eq(0, block_device_unregister_boot(parent));
+    assert_eq(0, block_device_count());
+    assert_null(block_device_get(0));
+}
+
+/* ── Test 9: A foreign pointer is rejected without dereference ── */
+TEST_FUNC(test_unregister_non_member)
+{
+    reset_registry();
+
+    block_device_t *dev = register_disk("member", 10);
+    assert_not_null(dev);
+    assert_eq(1, block_device_count());
+
+    /* A stack object that is not a registry member: the call must not
+     * read or write it. */
+    struct block_device foreign;
+    memset(&foreign, 0x5A, sizeof(foreign));
+    struct block_device snapshot = foreign;
+    assert_eq(-EINVAL, block_device_unregister_boot(&foreign));
+    assert_eq(0, memcmp(&foreign, &snapshot, sizeof(foreign)));
+
+    /* A wild pointer: dereferencing it would fault the test. */
+    block_device_t *wild = (block_device_t *)0xdeadbeef;
+    assert_eq(-EINVAL, block_device_unregister_boot(wild));
+
+    /* NULL is rejected as well. */
+    assert_eq(-EINVAL, block_device_unregister_boot(NULL));
+
+    /* The registry is untouched. */
+    assert_eq(1, block_device_count());
+    assert_eq(dev, block_device_get(0));
+}
+
+/* ── Test 10: Boot unregister stability and ordering ──────────── */
 TEST_FUNC(test_boot_unregister_stability)
 {
-    block_device_init();
+    reset_registry();
 
     struct block_device_desc d0 = { .name = "d0", .sector_count = 100, .sector_size = 512, .ops = &fake_rw_ops, .kind = BLOCK_DISK };
     struct block_device_desc d1 = { .name = "d1", .sector_count = 100, .sector_size = 512, .ops = &fake_rw_ops, .kind = BLOCK_DISK };
@@ -401,17 +607,36 @@ TEST_FUNC(test_boot_unregister_stability)
     assert_eq(-EINVAL, block_device_read(saved_dev1, 0, 1, buf));
     assert_eq(-EINVAL, block_device_write(saved_dev1, 0, 1, buf));
 
-    /* Register a new device ("d3"): reuses the hole left by dev1 without shifting others */
+    /* Register a new device ("d3"): it is appended at the end of the
+       enumeration order and does not take the hole dev1 left behind. */
     struct block_device_desc d3 = { .name = "d3", .sector_count = 200, .sector_size = 512, .ops = &fake_rw_ops, .kind = BLOCK_DISK };
     block_device_t *dev3 = NULL;
     assert_eq(0, block_device_register(&d3, &dev3));
     assert_eq(3, block_device_count());
-    assert_eq(saved_dev1, dev3); /* Reuses slot 1 */
 
-    /* Check dev0 and dev2 still at same addresses */
+    /* Check dev0 and dev2 still at same addresses, d3 is last */
     assert_eq(saved_dev0, block_device_get(0));
-    assert_eq(saved_dev1, block_device_get(1));
-    assert_eq(saved_dev2, block_device_get(2));
+    assert_eq(saved_dev2, block_device_get(1));
+    assert_eq(dev3, block_device_get(2));
+    assert_str_eq("d3", block_device_get(2)->name);
+}
+
+/* ── Test 11: Initialization is idempotent ────────────────────── */
+TEST_FUNC(test_init_is_idempotent)
+{
+    reset_registry();
+
+    block_device_t *dev = register_disk("init_disk", 10);
+    assert_not_null(dev);
+    assert_eq(1, block_device_count());
+
+    /* Re-initializing must not reset the registry or drop the object. */
+    block_device_init();
+    block_device_init();
+    assert_eq(1, block_device_count());
+    assert_eq(dev, block_device_get(0));
+    assert_eq(1, dev->present);
+    assert_str_eq("init_disk", dev->name);
 }
 
 TEST_LIST_BEGIN
@@ -419,7 +644,13 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_readonly_and_bounds),
     TEST_ENTRY(test_registry_failures),
     TEST_ENTRY(test_partition_parent_dispatch),
+    TEST_ENTRY(test_dynamic_growth_stability),
+    TEST_ENTRY(test_duplicate_name_rejected),
+    TEST_ENTRY(test_allocation_failure),
+    TEST_ENTRY(test_parent_child_rollback),
+    TEST_ENTRY(test_unregister_non_member),
     TEST_ENTRY(test_boot_unregister_stability),
+    TEST_ENTRY(test_init_is_idempotent),
 TEST_LIST_END
 
 int main(void)

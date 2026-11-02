@@ -13,6 +13,7 @@
 #include <tty/pty.h>
 #include <fs/file.h>
 #include <fs/devfs.h>
+#include <log/log.h>
 #include <memory/uaccess.h>
 #include <string.h>
 #include <stdlib.h>
@@ -290,6 +291,12 @@ static int ptsN_open(const char *name, file_t **out_file)
     // Find matching PTY slot by checking name suffix "pts{N}"
     pty_t *pty = NULL;
     int name_len = (int)strlen(name);
+
+    // The scan and the "slave opened" marking happen under pty_lock:
+    // a master released in parallel must not reclaim the pty (and its
+    // pipes) between the two steps — the reclaim only fires while the
+    // slave was never opened.
+    uint64_t fl = spin_lock_irqsave(&pty_lock);
     for (int i = 0; i < PTY_MAX; i++) {
         if (!pty_table[i].allocated) continue;
         // Build expected suffix "pts0" … "pts7"
@@ -304,6 +311,11 @@ static int ptsN_open(const char *name, file_t **out_file)
             break;
         }
     }
+    // Mark the slave end as opened: a master released without a slave
+    // reclaims the pty slot (see the PTY branch of file_free()).
+    if (pty) pty->slave_opened = true;
+    spin_unlock_irqrestore(&pty_lock, fl);
+
     if (!pty) return -ENOENT;
 
     // Set controlling terminal
@@ -333,8 +345,13 @@ static const struct devfs_ops ptmx_ops = {
 //  pty_init: initialise table, register /dev/ptmx
 // ═══════════════════════════════════════════════════════════════
 
-void pty_init(void)
+int pty_init(void)
 {
     memset(pty_table, 0, sizeof(pty_table));
-    devfs_register_chrdev("ptmx", NULL, &ptmx_ops);
+    int rc = devfs_register_chrdev("ptmx", NULL, &ptmx_ops);
+    if (rc != 0 && rc != -EEXIST) {
+        log_err("pty: failed to register /dev/ptmx (%d)\n", rc);
+        return rc;
+    }
+    return 0;
 }

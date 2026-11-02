@@ -186,11 +186,20 @@ extern apic_info_t apic_info;
 //  Public API
 // ──────────────────────────────────────────────
 
-// Initialize the APIC subsystem: ACPI parse → LAPIC init → I/O APIC init
-void apic_init(uint64_t rsdp_phys);
+#include <stdbool.h>
 
-// Returns 1 if APIC is available and initialized
+// Initialize the APIC subsystem: ACPI parse → LAPIC init → I/O APIC init
+// Returns 0 on valid line mode chosen (including PIC fallback), negative errno on fatal failure.
+int apic_init(uint64_t rsdp_phys);
+
+// Returns 1 if LAPIC is available and initialized
 int apic_available(void);
+
+// Returns true if I/O APIC line controller is fully published and ready
+bool ioapic_available(void);
+
+// Initialize I/O APICs: returns 1 if ready, 0 if not found, negative errno on error
+int ioapic_init(void);
 
 // Parse ACPI tables from RSDP (fills apic_info)
 int acpi_parse(uint64_t rsdp_phys);

@@ -692,6 +692,29 @@
       }
     },
     {
+      "id": "fs.devfs.capacity",
+      "component": "fs",
+      "behavior": "devfs",
+      "trigger": "host runner invokes test_devfs_capacity.elf",
+      "assertions": [
+        "test_devfs_capacity passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_devfs_capacity"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_devfs_capacity.c",
+        "selector": "test_devfs_capacity",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying dynamic devfs capacity and dispatch stability"
+      }
+    },
+    {
       "id": "drivers.device.boot",
       "component": "drivers",
       "behavior": "device",
@@ -2552,6 +2575,98 @@
       "overlap_decision": {
         "action": "unique",
         "reason": "Primary host unit test verifying fs module waitqueue_handshake behavior"
+      }
+    },
+    {
+      "id": "intr.intr.irq_capacity",
+      "component": "intr",
+      "behavior": "intr",
+      "trigger": "host runner invokes test_irq_capacity.elf",
+      "assertions": [
+        "test_irq_capacity passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_irq_capacity"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_irq_capacity.c",
+        "selector": "test_irq_capacity",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying intr module irq_capacity behavior"
+      }
+    },
+    {
+      "id": "fs.resource.nofile_limits",
+      "component": "fs",
+      "behavior": "resource",
+      "trigger": "host runner invokes test_nofile_limits.elf",
+      "assertions": [
+        "test_nofile_limits passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_nofile_limits"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_nofile_limits.c",
+        "selector": "test_nofile_limits",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module resource behavior"
+      }
+    },
+    {
+      "id": "fs.poll.capacity",
+      "component": "fs",
+      "behavior": "poll",
+      "trigger": "host runner invokes test_poll_capacity.elf",
+      "assertions": [
+        "test_poll_capacity passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_poll_capacity"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_poll_capacity.c",
+        "selector": "test_poll_capacity",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module poll capacity behavior"
+      }
+    },
+    {
+      "id": "fs.poll.nofile64",
+      "component": "fs",
+      "behavior": "poll",
+      "trigger": "host runner invokes test_poll_nofile64.elf (the NOFILE=64 build of the same production poll code)",
+      "assertions": [
+        "test_poll_nofile64 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_poll_nofile64"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_poll_capacity.c",
+        "selector": "test_poll_nofile64",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying fs module poll capacity behavior at the NOFILE=64 capacity"
       }
     },
     {

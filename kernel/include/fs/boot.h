@@ -27,7 +27,7 @@
 // kernel_main (see kernel/core/main.c history).  The functions must remain
 // called from kernel_main in this exact order, with pty_init() and
 // x86_64_boot_device_nodes() interleaved per the brief.
-void fs_boot_prepare(void);
+int fs_boot_prepare(void);
 void fs_boot_mounts(void);
 void fs_boot_probe_devfs(void);
 

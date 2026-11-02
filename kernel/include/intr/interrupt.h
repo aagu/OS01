@@ -2,6 +2,7 @@
 #define _KERNEL_INTERRUPT_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <arch/irq.h>
 
 // ── IRQ trigger mode flags (passed to register_irq) ──────────
@@ -37,6 +38,15 @@ typedef struct irq_desc
 #define NR_IQRS MAX_GSI
 
 extern irq_desc_t irq_table[NR_IQRS];
+
+struct irq_gsi_range {
+    uint32_t base;
+    uint32_t count;
+};
+
+void irq_registry_init_pic(void);
+int irq_registry_init_ranges(const struct irq_gsi_range *ranges, size_t count);
+irq_desc_t *irq_desc_for_gsi(uint32_t gsi);
 
 // ── Register an IRQ handler for a given GSI ──────────────────
 // gsi:       Global System Interrupt number (0..MAX_GSI-1)

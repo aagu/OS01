@@ -14,6 +14,7 @@ typedef int pid_t;  /* for termios.h userspace declarations */
 typedef struct pty_struct {
     int         index;
     bool        allocated;
+    bool        slave_opened;  // the slave end was opened at least once
     pipe_t     *master_to_slave;   // master writes, slave reads
     pipe_t     *slave_to_master;   // slave writes, master reads
     spinlock_T  state_lock;
@@ -27,7 +28,7 @@ extern pty_t pty_table[PTY_MAX];
 extern spinlock_T pty_lock;
 
 // API
-void pty_init(void);
+int pty_init(void);
 pty_t *pty_alloc(void);
 
 // Called by fd_ioctl (weak stub in file.c overridden by real impl in pty.c)

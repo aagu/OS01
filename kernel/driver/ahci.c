@@ -718,30 +718,47 @@ void ahci_remove(struct pci_device *pdev)
         g_first_controller = NULL;
     }
 
-    // Reverse order teardown:
-    // 1. Device stop & unregister block devices
+    // Reverse order teardown.
+    //
+    // 1. Mask the interrupt source first: the block-device rollback
+    //    below is only valid while the driver is quiescent, i.e. no
+    //    interrupt handler can run for this controller.
+    pci_interrupts_disable(pdev);
+
+    // 2. Per port: stop the device (engine + DMA) and only then roll
+    //    the block device back.  block_device_unregister_boot() is a
+    //    boot-time rollback: it must not run while the device is still
+    //    executing.  The AHCI DMA lifetime rules are unchanged — the
+    //    page is still freed by ahci_port_teardown_dma().
     for (int i = 0; i < AHCI_MAX_PORTS; i++) {
         struct ahci_port *port = &ctrl->ports[i];
-        if (port->bdev) {
-            block_device_unregister_boot(port->bdev);
-            port->bdev = NULL;
-        }
         if (port->present && ctrl->hba) {
             ahci_port_teardown_dma(port, true);
         }
+        if (port->bdev) {
+            int uret = block_device_unregister_boot(port->bdev);
+            if (uret != 0) {
+                // The boot-phase rollback refuses a disk that still has
+                // registered partition children (-EBUSY).  The port is
+                // gone either way, so the reference is dropped and the
+                // failure is reported.
+                debug_block("AHCI: port %d: block_device_unregister_boot failed: %d\n",
+                            port->port_num, uret);
+            }
+            port->bdev = NULL;
+        }
     }
 
-    // 2. 自有 IRQ 撤销
-    pci_interrupts_disable(pdev);
+    // 3. 自有 IRQ 撤销
     if (ctrl->irq_registered) {
         unregister_irq(ctrl->irq);
         ctrl->irq_registered = false;
     }
 
-    // 3. Disable bus mastering
+    // 4. Disable bus mastering
     pci_set_bus_master(pdev, false);
 
-    // 4. Private free
+    // 5. Private free
     if (!pdev->dev.quarantined) {
         pdev->driver_data = NULL;
         kfree(ctrl);

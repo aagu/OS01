@@ -87,6 +87,8 @@ int pci_set_intx(struct pci_device *pdev, bool enabled);
 int pci_set_decode(struct pci_device *pdev, bool io, bool mmio);
 int pci_route_gsi(struct pci_device *pdev, uint32_t *out);
 int pci_msix_enable(struct pci_device *pdev, uint8_t vector);
+int pci_msix_prepare(struct pci_device *pdev, uint8_t vector);
+int pci_msix_unmask(struct pci_device *pdev);
 int pci_interrupts_disable(struct pci_device *pdev);
 
 #ifdef OS01_HOST_TEST

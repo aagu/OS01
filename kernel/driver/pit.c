@@ -2,6 +2,7 @@
 #include <time/timer.h>
 #include <arch/io.h>
 #include <intr/interrupt.h>
+#include <arch/irq.h>
 #include <stddef.h>
 #include <intr/apic.h>
 #include <kernel.h>
@@ -18,7 +19,8 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
 
 void pit_init()
 {
-    register_irq(0, NULL, &pit_handler, 0, IRQF_TRIGGER_EDGE, "pit");
+    uint32_t pit_gsi = arch_irq_isa_to_gsi(0);
+    register_irq(pit_gsi, NULL, &pit_handler, 0, IRQF_TRIGGER_EDGE, "pit");
     set_frequency(100); //100 times per sec
 }
 

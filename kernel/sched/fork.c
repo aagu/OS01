@@ -1,4 +1,5 @@
 #include <sched/task.h>
+#include <sched/resource.h>
 #include <sched/internal.h>
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
@@ -379,6 +380,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     // the parent's stack_alloc_base, and the parent's thread pointer
     // — all of which must belong to the CHILD, not the parent.
     tsk->stack_alloc_base = raw_alloc;
+    task_nofile_inherit(tsk, current);
 
     // Inherit from parent (safe value-copy fields, not pointers)
     tsk->flags       = current->flags;

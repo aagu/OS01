@@ -19,6 +19,7 @@ int64_t sys_time_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_net_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
+int64_t sys_resource_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 
 int main(void)
 {
@@ -41,6 +42,7 @@ int main(void)
         SYS_mkdir, SYS_rmdir, SYS_rename, SYS_truncate, SYS_ftruncate,
         SYS_chmod, SYS_fchmod, SYS_poll, SYS_ppoll, SYS_select,
         SYS_pselect6, SYS_symlink, SYS_readlink, SYS_lstat, SYS_fstatat,
+        SYS_getrlimit, SYS_setrlimit,
         SYS_brk, SYS_mmap, SYS_mprotect, SYS_munmap, SYS_futex,
         SYS_time, SYS_gettimeofday, SYS_clock_gettime, SYS_nanosleep, SYS_times,
         SYS_putchar, SYS_getrandom, SYS_sync, SYS_reboot, SYS_uname,

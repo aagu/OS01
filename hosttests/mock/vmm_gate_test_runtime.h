@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define NR_CPUS 8
+#include <config/limits.h>
 
 /* Short-circuit the heavy kernel headers vmm_gate.c pulls in. */
 #define _KERNEL_PERCPU_H

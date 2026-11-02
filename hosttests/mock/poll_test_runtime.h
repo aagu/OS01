@@ -43,6 +43,19 @@ typedef struct {
 extern task_t *poll_test_current;
 #define current poll_test_current
 
+/* ── ARCH-10 Task 6: RLIMIT_NOFILE soft-limit snapshot ───────
+ * kernel/fs/file.c installs a descriptor only below the installing
+ * task's NOFILE soft limit, read through task_nofile_soft()
+ * (declared by <sched/resource.h>).  The mock task_t above has no
+ * nofile fields, so the production kernel/sched/resource.c cannot
+ * be compiled against it.  This harness therefore links
+ * hosttests/mock/nofile_soft_stub.c, which supplies the snapshot.
+ * Every binary that links a kernel/fs/file.c object compiled against
+ * THIS runtime must link that stub too — otherwise the undefined
+ * reference to task_nofile_soft is only masked by --gc-sections
+ * dropping the unreferenced install functions. */
+uint64_t task_nofile_soft(task_t *t);
+
 void task_wake(task_t *task);
 void schedule(void);
 extern spinlock_T task_list_lock;

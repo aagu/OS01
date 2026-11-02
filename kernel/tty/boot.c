@@ -20,8 +20,29 @@
 #include <driver/keyboard.h>
 #include <fs/devfs.h>
 #include <log/log.h>          // log_info for "tty: console TTY created"
+#include <errno.h>
 
-void tty_boot_init(void)
+int tty_boot_register_devfs(void)
+{
+    // Register /dev/tty (magic → controlling terminal) and /dev/tty0
+    // (direct physical console) AFTER keyboard_set_tty so that
+    // keyboard_get_tty() returns the correct pointer for private_data.
+    int ret = devfs_register_chrdev("tty", keyboard_get_tty(), &tty_magic_ops);
+    if (ret != 0 && ret != -EEXIST) {
+        log_err("tty: failed to register /dev/tty (%d)\n", ret);
+        return ret;
+    }
+
+    ret = devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);
+    if (ret != 0 && ret != -EEXIST) {
+        log_err("tty: failed to register /dev/tty0 (%d)\n", ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+int tty_boot_init(void)
 {
     // console_putchar as output — routes all user-space writes
     // through the VT100 CSI terminal emulator.
@@ -33,9 +54,5 @@ void tty_boot_init(void)
         log_info("tty: console TTY created\n");
     }
 
-    // Register /dev/tty (magic → controlling terminal) and /dev/tty0
-    // (direct physical console) AFTER keyboard_set_tty so that
-    // keyboard_get_tty() returns the correct pointer for private_data.
-    devfs_register_chrdev("tty",  keyboard_get_tty(), &tty_magic_ops);
-    devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);
+    return tty_boot_register_devfs();
 }

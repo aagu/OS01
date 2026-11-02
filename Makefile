@@ -20,6 +20,9 @@ endif
 ifeq ($(OS01_NETTEST),1)
 INITTAB_FILE := config/inittab.nettest
 endif
+ifeq ($(ARCH10_CAPACITY_TEST),1)
+INITTAB_FILE := config/inittab.arch10-capacity
+endif
 
 include $(base)/mk/project.mk
 # Cross-component dependency graph (spec: mk/components/*.mk is the only

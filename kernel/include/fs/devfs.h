@@ -12,7 +12,6 @@ struct file;
 struct vma;
 
 #define DEVFS_NAME_MAX    32
-#define DEVFS_MAX_DEVICES 32
 
 // ── Device operations table ─────────────────────────────────
 // open:       returns a custom file_t.  Return -ENOSYS to fall back
@@ -73,14 +72,17 @@ int devfs_register_blkdev(const char *name, struct block_device *dev);
 int devfs_register_fs(void);
 
 // Initialize devfs and mount at /dev
-void devfs_init(void);
+int devfs_init(void);
 
 // TTY device ops tables — defined in devfs.c, registered in main.c
 // after keyboard_set_tty() so keyboard_get_tty() returns the correct pointer.
 extern const struct devfs_ops tty_magic_ops;
 extern const struct devfs_ops tty_phys_ops;
 
-// Poll a devfs device node — resolves node->fs_data index to device,
+// Lookup a devfs device by name and allocate an independent borrowed node.
+int devfs_lookup_node(const char *name, struct vfs_node **out);
+
+// Poll a devfs device node — resolves node->fs_data to device,
 // calls device's poll callback or returns always-ready if none.
 uint32_t devfs_poll(struct vfs_node *node, uint32_t requested,
                     struct poll_table *pt);
@@ -102,8 +104,8 @@ uint32_t devfs_poll_file(struct file *f, uint32_t requested,
 int devfs_open_node(struct vfs_node *node, const char *path, int flags,
                     struct file **out);
 
-// Dispatch ioctl to a devfs device node — resolves node->fs_data index
-// to device, calls device's ops->ioctl if present.
+// Dispatch ioctl to a devfs device node — resolves node->fs_data to device,
+// calls device's ops->ioctl if present.
 int devfs_ioctl_node(struct vfs_node *node, int cmd, void *arg);
 
 // Dispatch ioctl through a specific file_t.  Resolves f->node to the

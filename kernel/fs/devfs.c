@@ -1,7 +1,9 @@
+#include <arch/spinlock.h>
 #include <fs/devfs.h>
 #include <fs/vfs.h>
 #include <block/blockdev.h>
 #include <core/debug.h>
+#include <log/log.h>
 #include <random/random.h>
 #include <memory/vmm.h>
 #include <memory/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
@@ -18,18 +20,46 @@
 #include <string.h>
 #include <stdlib.h>
 
-// ── Internal device table ──────────────────────────────────
+// ── Internal dynamic device record ─────────────────────────
 
 typedef struct devfs_device {
+    uint64_t id;
     char name[DEVFS_NAME_MAX];
     uint8_t type;       // VFS_CHRDEV or VFS_BLKDEV
-    const struct devfs_ops *ops;  // replaced individual read/write/poll pointers
+    const struct devfs_ops *ops;
     void *private_data;
-    int registered;
+    struct devfs_device *next;
 } devfs_device_t;
 
-static devfs_device_t devices[DEVFS_MAX_DEVICES];
-static int device_count = 0;
+static spinlock_T devfs_lock = { 1 };
+static devfs_device_t *devfs_devices = NULL;
+static devfs_device_t *devfs_devices_tail = NULL;
+static uint64_t next_device_id = 1;
+
+static devfs_device_t *devfs_device_from_node(const vfs_node_t *node)
+{
+    if (!node) return NULL;
+    if (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV)
+        return NULL;
+    if (!node->fs_data) return NULL;
+#ifndef OS01_HOST_TEST
+    if ((uint64_t)node->fs_data < 0xffff800000000000ULL)
+        return NULL;
+#endif
+
+    devfs_device_t *candidate = (devfs_device_t *)node->fs_data;
+    uint64_t flags = spin_lock_irqsave(&devfs_lock);
+    devfs_device_t *cur = devfs_devices;
+    while (cur) {
+        if (cur == candidate) {
+            spin_unlock_irqrestore(&devfs_lock, flags);
+            return cur;
+        }
+        cur = cur->next;
+    }
+    spin_unlock_irqrestore(&devfs_lock, flags);
+    return NULL;
+}
 
 // The console TTY — obtained via get_dev_tty() from tty.c.
 
@@ -175,28 +205,24 @@ static int random_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
 {
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
-    /* Cap to one block so a runaway writer can't block the pool lock
-     * for long; the data still gets folded in (XOR accumulator in
-     * random_add_entropy). Mirrors Linux /dev/random write semantics
-     * (always succeeds, pool absorbs everything). */
     if (size > RANDOM_MAX_LEN) size = RANDOM_MAX_LEN;
     random_add_entropy(buffer, (size_t)size);
     return (int)size;
 }
 
-// ── Dispatch read/write via device index stored in node->fs_data ──
+// ── Dispatch read/write via device record stored in node->fs_data ──
 
 static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return -1;
 
     // Block device path: sector-level read via block_device_t
-    if (devices[idx].type == VFS_BLKDEV) {
-        block_device_t *bdev = (block_device_t *)devices[idx].private_data;
+    if (dev->type == VFS_BLKDEV) {
+        block_device_t *bdev = (block_device_t *)dev->private_data;
         if (!bdev || !buffer || size == 0) return 0;
-        uint32_t lba   = (uint32_t)(offset / 512);
+        uint64_t lba   = offset / 512;
         uint32_t count = (uint32_t)((size + 511) / 512);
         if (count == 0) return 0;
         uint8_t *tmp = kmalloc(count * 512);
@@ -208,44 +234,25 @@ static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *bu
         return (ret == 0) ? (int)size : -1;
     }
 
-    // Character device path (existing)
+    // Character device path
     if (
 #ifndef OS01_HOST_TEST
-        devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
 #endif
-        devices[idx].ops && devices[idx].ops->read)
-        return devices[idx].ops->read(node, offset, size, buffer);
+        dev->ops && dev->ops->read)
+        return dev->ops->read(node, offset, size, buffer);
     return -1;
 }
 
 // ── devfs_read_file — file-aware read dispatch (VFS bridge) ──
-// The vfs_ops.read_file hook of the devfs mount.  fd_read() routes
-// every device read through vfs_file_read(), which calls this bridge,
-// so the DEVICE sees the open file description and not just the node.
-//
-// Contract:
-//   - the device's ops->read_file is preferred and its result is
-//     returned AS-IS.  An error (e.g. -EACCES) is final: devfs never
-//     retries through the legacy node read, because that would let a
-//     refused read slip through the device's own decision;
-//   - only when ops->read_file is ABSENT does devfs fall back to the
-//     legacy node read (ops->read), which keeps every existing device
-//     (tty, pty, random, serial, fb, ...) working unchanged;
-//   - `buffer` is always kernel memory (fd_read bounces through a
-//     kernel buffer and copies to user space itself), so a device hook
-//     can never write into user memory.
 static int64_t devfs_read_file(file_t *f, uint64_t offset, uint64_t size,
                                 void *buffer)
 {
     if (!f || !f->node) return -1;
-    if (f->node->type != VFS_CHRDEV && f->node->type != VFS_BLKDEV)
-        return -1;
+    devfs_device_t *dev = devfs_device_from_node(f->node);
+    if (!dev) return -1;
 
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
-        return -1;
-
-    const struct devfs_ops *ops = devices[idx].ops;
+    const struct devfs_ops *ops = dev->ops;
     if (ops && ops->read_file)
         return ops->read_file(f, offset, size, buffer);
 
@@ -255,15 +262,15 @@ static int64_t devfs_read_file(file_t *f, uint64_t offset, uint64_t size,
 
 static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return -1;
 
     // Block device path: read-modify-write for unaligned edges
-    if (devices[idx].type == VFS_BLKDEV) {
-        block_device_t *bdev = (block_device_t *)devices[idx].private_data;
+    if (dev->type == VFS_BLKDEV) {
+        block_device_t *bdev = (block_device_t *)dev->private_data;
         if (!bdev || !buffer || size == 0) return 0;
-        uint32_t lba   = (uint32_t)(offset / 512);
+        uint64_t lba   = offset / 512;
         uint32_t count = (uint32_t)((size + 511) / 512);
         if (count == 0) return 0;
         uint8_t *tmp = kmalloc(count * 512);
@@ -277,33 +284,37 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
         return (ret == 0) ? (int)size : -1;
     }
 
-    // Character device path (existing)
-    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->write)
-        return devices[idx].ops->write(node, offset, size, buffer);
+    // Character device path
+    if (
+#ifndef OS01_HOST_TEST
+        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+#endif
+        dev->ops && dev->ops->write)
+        return dev->ops->write(node, offset, size, buffer);
     return -1;
 }
 
 // ── devfs_mmap — dispatch mmap for device-backed mmap ────────
 static int devfs_mmap(vfs_node_t *node, struct vma *vma)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return -EINVAL;
-    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->mmap)
-        return devices[idx].ops->mmap(node, vma);
+    if (
+#ifndef OS01_HOST_TEST
+        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+#endif
+        dev->ops && dev->ops->mmap)
+        return dev->ops->mmap(node, vma);
     return -ENODEV;
 }
 
 // ── devfs_poll — dispatch poll for fd_poll(FD_DEV) ─────────
-// node->fs_data holds the device index.  Resolve it and call
-// the device's poll callback, or return always-ready if none.
 uint32_t devfs_poll(vfs_node_t *node, uint32_t requested, poll_table_t *pt)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return POLLNVAL;
-
-    devfs_device_t *dev = &devices[idx];
 
     if (
 #ifndef OS01_HOST_TEST
@@ -317,79 +328,51 @@ uint32_t devfs_poll(vfs_node_t *node, uint32_t requested, poll_table_t *pt)
 }
 
 // ── devfs_poll_file — file-aware poll dispatch ─────────────
-// The legacy devfs_poll() can only see the NODE, so two open file
-// descriptions on the same device are indistinguishable.  Devices that
-// need the file identity (e.g. the input lease: only the bound reader
-// may consume the physical keyboard) register ops->poll_file.
-//
-// Contract:
-//   - node / device type / ops are validated BEFORE the device is
-//     touched; an invalid node yields POLLNVAL;
-//   - ops->poll_file is preferred and its result is returned AS-IS.
-//     A returned 0 means "not ready" — it is a real answer and is
-//     never upgraded to always-ready;
-//   - only when poll_file is ABSENT does devfs fall back to the
-//     legacy node poll (ops->poll, or always-ready when the device
-//     registers no poll callback at all).
 uint32_t devfs_poll_file(file_t *f, uint32_t requested, poll_table_t *pt)
 {
     if (!f || !f->node) return POLLNVAL;
     if (f->type != FD_DEV) return POLLNVAL;
-    if (f->node->type != VFS_CHRDEV && f->node->type != VFS_BLKDEV)
+
+    devfs_device_t *dev = devfs_device_from_node(f->node);
+    if (!dev)
         return POLLNVAL;
 
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
-        return POLLNVAL;
-
-    const struct devfs_ops *ops = devices[idx].ops;
+    const struct devfs_ops *ops = dev->ops;
     if (ops && ops->poll_file)
         return ops->poll_file(f, requested, pt);
 
-    // No file-aware callback: legacy node poll (ops->poll, or
-    // always-ready when the device registers none).
+    // No file-aware callback: legacy node poll
     return devfs_poll(f->node, requested, pt);
 }
 
 // ── devfs_ioctl_node — dispatch ioctl to a devfs device ─────
 int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return -ENODEV;
-    if (devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL && devices[idx].ops->ioctl)
-        return devices[idx].ops->ioctl(node, cmd, arg);
+    if (
+#ifndef OS01_HOST_TEST
+        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+#endif
+        dev->ops && dev->ops->ioctl)
+        return dev->ops->ioctl(node, cmd, arg);
     return -ENOTTY;
 }
 
 // ── devfs_ioctl_file — file-aware ioctl dispatch ────────────
-// Spec §3: prefer the file callback (it sees f->dev_private), and
-// fall through to the legacy node callback when the file callback
-// returns -ENOTTY.  Devices that have not registered a file
-// callback keep working — the node callback still runs.
-//
-// The host-half kernel ops-pointer guard from devfs_read/write is
-// dropped here on purpose: devfs_ioctl_file is called from fd_ioctl
-// AFTER the caller's fd table lock has already been released, so a
-// rogue node cannot be swapped in mid-dispatch.  A registered
-// ops->ioctl_file is the safe path; a missing one explicitly returns
-// -ENOTTY so the fallback to ops->ioctl is observable from userspace.
 int devfs_ioctl_file(file_t *f, int cmd, void *arg)
 {
     if (!f || !f->node) return -ENOTTY;
-    if (f->type != FD_DEV || f->node->type != VFS_CHRDEV)
-        return -ENOTTY;
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    if (f->type != FD_DEV) return -ENOTTY;
+
+    devfs_device_t *dev = devfs_device_from_node(f->node);
+    if (!dev)
         return -ENODEV;
 
-    const struct devfs_ops *ops = devices[idx].ops;
+    const struct devfs_ops *ops = dev->ops;
     if (ops && ops->ioctl_file) {
         int rc = ops->ioctl_file(f, cmd, arg);
-        // -ENOTTY from the file callback is the explicit "I do not
-        // handle this command" signal — fall through to the node
-        // callback for legacy compatibility.  Any other negative
-        // return is final (the device made a decision).
         if (rc != -ENOTTY) return rc;
     }
     if (ops && ops->ioctl) return ops->ioctl(f->node, cmd, arg);
@@ -397,24 +380,15 @@ int devfs_ioctl_file(file_t *f, int cmd, void *arg)
 }
 
 // ── devfs_release_file — per-file final-close hook ───────────
-// Called from file_free while the node reference is still live so
-// the device can reach f->dev_private through either path.  No-op
-// when no release_file callback is registered — this preserves the
-// behaviour of /dev/fb, /dev/tty, /dev/pty*, /dev/random, /dev/serial,
-// /dev/null, /dev/zero (none of which need per-file cleanup today).
-//
-// Idempotency: file_free already runs this exactly once on the
-// drop-to-zero transition.  Defensive guards: NULL f, NULL node,
-// out-of-range index, unregistered device, or missing callback all
-// return without side effects.
 void devfs_release_file(file_t *f)
 {
     if (!f || !f->node) return;
-    if (f->type != FD_DEV || f->node->type != VFS_CHRDEV) return;
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    if (f->type != FD_DEV) return;
+
+    devfs_device_t *dev = devfs_device_from_node(f->node);
+    if (!dev)
         return;
-    const struct devfs_ops *ops = devices[idx].ops;
+    const struct devfs_ops *ops = dev->ops;
     if (ops && ops->release_file) ops->release_file(f);
 }
 
@@ -422,35 +396,62 @@ void devfs_release_file(file_t *f)
 
 static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
 {
-    if (node->type != VFS_DIR) return -1;
+    if (!node || node->type != VFS_DIR || !entry) return -1;
 
-    uint64_t dev_idx = 0;
-    for (int i = 0; i < DEVFS_MAX_DEVICES; i++) {
-        if (!devices[i].registered) continue;
-        if (dev_idx == index) {
-            size_t nlen = strlen(devices[i].name);
+    uint64_t cur_idx = 0;
+    uint64_t flags = spin_lock_irqsave(&devfs_lock);
+    devfs_device_t *cur = devfs_devices;
+    while (cur) {
+        if (cur_idx == index) {
+            size_t nlen = strlen(cur->name);
             if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
-            memcpy(entry->name, devices[i].name, nlen);
+            memcpy(entry->name, cur->name, nlen);
             entry->name[nlen] = '\0';
-            entry->type = devices[i].type;
+            entry->type = cur->type;
             entry->size = 0;
-            entry->ino = i;  // store table index for vfs_lookup → node->fs_data
+            entry->ino = cur->id;
+            spin_unlock_irqrestore(&devfs_lock, flags);
             return 0;
         }
-        dev_idx++;
+        cur = cur->next;
+        cur_idx++;
     }
+    spin_unlock_irqrestore(&devfs_lock, flags);
 
     entry->name[0] = '\0';  // end of directory
     return 0;
 }
 
 // ── Single devfs operations vector ──────────────────────────
-// All devfs nodes share this vector.  The read/write dispatch
-// above routes to the correct device handler based on the
-// device index stored in node->fs_data during vfs_lookup.
 
 static const vfs_inode_ops_t devfs_iops;
 static const vfs_file_ops_t devfs_fops;
+
+static vfs_node_t *devfs_create_node_for_device(devfs_device_t *dev, vfs_node_t *dir)
+{
+    vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!child) return NULL;
+    child->name = strndup(dev->name, VFS_NAME_MAX - 1);
+    if (!child->name) {
+        kfree(child);
+        return NULL;
+    }
+    child->type = dev->type;
+    child->ino = dev->id;
+    child->rdev = dev->id;
+    child->mode = (dev->type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666;
+    child->nlink = 1;
+    child->size = 0;
+    if (dir) {
+        child->mount = dir->mount;
+        child->parent = vfs_node_get(dir);
+    }
+    child->fs_data = dev;
+    child->i_ops = &devfs_iops;
+    child->f_ops = &devfs_fops;
+    child->refcount = 1;
+    return child;
+}
 
 static int devfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
 {
@@ -459,33 +460,50 @@ static int devfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
     if (!dir || !name) return -EINVAL;
     if (dir->type != VFS_DIR) return -ENOTDIR;
 
-    for (int i = 0; i < DEVFS_MAX_DEVICES; i++) {
-        if (!devices[i].registered) continue;
-        if (strcmp(devices[i].name, name) == 0) {
-            vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
-            if (!child) return -ENOMEM;
-            child->name = strndup(devices[i].name, VFS_NAME_MAX - 1);
-            if (!child->name) {
-                kfree(child);
-                return -ENOMEM;
-            }
-            child->type = devices[i].type;
-            child->ino = (uint64_t)(i + 1);
-            child->rdev = (uint64_t)(i + 1);
-            child->mode = (devices[i].type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666;
-            child->nlink = 1;
-            child->size = 0;
-            child->mount = dir->mount;
-            child->parent = vfs_node_get(dir);
-            child->fs_data = (void *)(uintptr_t)i;
-            child->i_ops = &devfs_iops;
-            child->f_ops = &devfs_fops;
-            child->refcount = 1;
-            *out = child;
-            return 0;
+    uint64_t flags = spin_lock_irqsave(&devfs_lock);
+    devfs_device_t *cur = devfs_devices;
+    devfs_device_t *target = NULL;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) {
+            target = cur;
+            break;
         }
+        cur = cur->next;
     }
-    return -ENOENT;
+    spin_unlock_irqrestore(&devfs_lock, flags);
+
+    if (!target) return -ENOENT;
+
+    vfs_node_t *child = devfs_create_node_for_device(target, dir);
+    if (!child) return -ENOMEM;
+    *out = child;
+    return 0;
+}
+
+int devfs_lookup_node(const char *name, struct vfs_node **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!name) return -EINVAL;
+
+    uint64_t flags = spin_lock_irqsave(&devfs_lock);
+    devfs_device_t *cur = devfs_devices;
+    devfs_device_t *target = NULL;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) {
+            target = cur;
+            break;
+        }
+        cur = cur->next;
+    }
+    spin_unlock_irqrestore(&devfs_lock, flags);
+
+    if (!target) return -ENOENT;
+
+    vfs_node_t *child = devfs_create_node_for_device(target, NULL);
+    if (!child) return -ENOMEM;
+    *out = child;
+    return 0;
 }
 
 static const vfs_inode_ops_t devfs_iops = {
@@ -502,40 +520,25 @@ static const vfs_file_ops_t devfs_fops = {
 };
 
 // ── devfs_open_node — sys_open integration ──────────────────
-// Called from SYS_open after vfs_lookup.  If the node is a devfs
-// device node with an open callback, returns a custom file_t.
-// Otherwise returns -ENOSYS so SYS_open falls through to FD_VFS.
 int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
 {
     if (!out) return -EINVAL;
 
     // Guard: only process devfs device nodes.
-    if (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV)
+    if (!node || (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV))
         return -ENOSYS;
 
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return -ENODEV;
 
     if (
 #ifndef OS01_HOST_TEST
-        devices[idx].ops && (uint64_t)devices[idx].ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
 #endif
-        devices[idx].ops && devices[idx].ops->open) {
-        int rc = devices[idx].ops->open(path, out);
+        dev->ops && dev->ops->open) {
+        int rc = dev->ops->open(path, out);
         if (rc == 0 && *out) {
-            // Spec §3: the custom-open file is a real FD_DEV; its
-            // node ref must travel with it so file_free's existing
-            // vfs_node_put balances the lookup that brought us
-            // here.  Callbacks that already attached a node (the
-            // legacy tty_magic_open does, with a freshly calloc'd
-            // node) set *out->node themselves — don't double-get.
-            // Same for the FD_PTY_SLAVE branch of tty_magic_open:
-            // it sets f->type = FD_PTY_SLAVE explicitly and would
-            // be wrongly downgraded to FD_DEV by an unconditional
-            // assignment.  Only stamp defaults when the callback
-            // left them unset (file_alloc zeros the struct, so
-            // FD_NONE == "callback did not pick a type").
             if ((*out)->type == FD_NONE) (*out)->type = FD_DEV;
             if (!(*out)->node) (*out)->node = vfs_node_get(node);
             (*out)->flags = flags;
@@ -550,10 +553,8 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
     (*out)->type = FD_DEV;
     (*out)->node = vfs_node_get(node);
     (*out)->flags = flags;
-    // spec §4.1.1：若该设备是控制台 TTY，标记 tty + 默认 fg_pgrp
-    int didx = (int)(uintptr_t)node->fs_data;
-    if (didx >= 0 && didx < DEVFS_MAX_DEVICES && devices[didx].registered &&
-        devices[didx].private_data == keyboard_get_tty()) {
+    // Check if device is console TTY
+    if (dev->private_data && dev->private_data == keyboard_get_tty()) {
         (*out)->tty = get_dev_tty();
         if (current->pgrp != 0) {
             tty_t *tty = get_dev_tty();
@@ -603,34 +604,25 @@ static int tty_magic_open(const char *name, file_t **out_file)
 
     void *target = NULL;
     if (current->ctty_type == CTTY_PTY) {
-        // PTY slave: create FD_PTY_SLAVE file directly (I/O goes through
-        // pipe_read_internal/pipe_write_internal, not devfs callbacks)
         pty_t *pty = (pty_t *)current->ctty;
         if (!pty) return -ENXIO;
         file_t *f = file_alloc();
         if (!f) return -ENOMEM;
 
-        // /dev/tty opens are *extra* slave references beyond the one the
-        // placeholder pipe counts (readers=writers=1 from pty_alloc) cover.
-        // file_free() decrements master_to_slave->readers and
-        // slave_to_master->writers on close, so we must increment them here
-        // to stay balanced — otherwise each close underflows the count and
-        // the terminal misjudges EOF (systest fork-35 hang).  Lock order
-        // matches file_free(): pty_lock first, then the pipe locks.
         uint64_t pty_flags = spin_lock_irqsave(&pty_lock);
         if (!pty->allocated) {
             spin_unlock_irqrestore(&pty_lock, pty_flags);
-            free(f);  // bare file_t, nothing committed yet — no pipe cleanup
+            free(f);
             return -ENXIO;
         }
         if (pty->master_to_slave) {
             uint64_t fl = spin_lock_irqsave(&pty->master_to_slave->lock);
-            pty->master_to_slave->readers++;   // slave reads master_to_slave
+            pty->master_to_slave->readers++;
             spin_unlock_irqrestore(&pty->master_to_slave->lock, fl);
         }
         if (pty->slave_to_master) {
             uint64_t fl = spin_lock_irqsave(&pty->slave_to_master->lock);
-            pty->slave_to_master->writers++;   // slave writes slave_to_master
+            pty->slave_to_master->writers++;
             spin_unlock_irqrestore(&pty->slave_to_master->lock, fl);
         }
         spin_unlock_irqrestore(&pty_lock, pty_flags);
@@ -642,36 +634,40 @@ static int tty_magic_open(const char *name, file_t **out_file)
         return 0;
     }
 
-    // Physical TTY: fall through to device table lookup
     target = keyboard_get_tty();
 
-    for (int i = 0; i < device_count; i++) {
-        if (devices[i].private_data == target && devices[i].type == VFS_CHRDEV
-            && devices[i].registered) {
-            vfs_node_t *node = calloc(1, sizeof(vfs_node_t));
-            if (!node) return -ENOMEM;
-            node->type = VFS_CHRDEV;
-            node->fs_data = (void *)(uintptr_t)i;
-            node->i_ops = &devfs_iops;
-            node->f_ops = &devfs_fops;
-            node->nlink = 1;
-            node->refcount = 1;
-            *out_file = file_alloc();
-            if (!*out_file) { free(node); return -ENOMEM; }
-            (*out_file)->type = FD_DEV;
-            (*out_file)->node = node;
-            // spec §4.1.1：标记 TTY + 默认 fg_pgrp 兜底
-            (*out_file)->tty = get_dev_tty();
-            if (current->pgrp != 0) {
-                tty_t *tty = get_dev_tty();
-                if (tty) {
-                    uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
-                    if (tty->fg_pgrp == 0) tty->fg_pgrp = current->pgrp;
-                    spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
-                }
-            }
-            return 0;
+    uint64_t flags = spin_lock_irqsave(&devfs_lock);
+    devfs_device_t *cur = devfs_devices;
+    devfs_device_t *matched_dev = NULL;
+    while (cur) {
+        if (cur->private_data == target && cur->type == VFS_CHRDEV) {
+            matched_dev = cur;
+            break;
         }
+        cur = cur->next;
+    }
+    spin_unlock_irqrestore(&devfs_lock, flags);
+
+    if (matched_dev) {
+        vfs_node_t *node = devfs_create_node_for_device(matched_dev, NULL);
+        if (!node) return -ENOMEM;
+        *out_file = file_alloc();
+        if (!*out_file) {
+            vfs_node_put(node);
+            return -ENOMEM;
+        }
+        (*out_file)->type = FD_DEV;
+        (*out_file)->node = node;
+        (*out_file)->tty = get_dev_tty();
+        if (current->pgrp != 0) {
+            tty_t *tty = get_dev_tty();
+            if (tty) {
+                uint64_t f = spin_lock_irqsave(&tty->fg_pgrp_lock);
+                if (tty->fg_pgrp == 0) tty->fg_pgrp = current->pgrp;
+                spin_unlock_irqrestore(&tty->fg_pgrp_lock, f);
+            }
+        }
+        return 0;
     }
     return -ENXIO;
 }
@@ -699,105 +695,154 @@ static int devfs_fs_mount(struct vfs_mount *mp, block_device_t *dev, void *data)
     return 0;
 }
 
+static void devfs_fs_unmount(struct vfs_mount *mp)
+{
+    (void)mp;
+}
+
 static vfs_fs_type_t devfs_fs_type = {
     .name     = "devfs",
     .fs_flags = VFS_FS_NO_DCACHE,
     .mount    = devfs_fs_mount,
-    .unmount  = NULL,
+    .unmount  = devfs_fs_unmount,
 };
 
 int devfs_register_fs(void)
 {
-    return vfs_register_filesystem(&devfs_fs_type);
+    int ret = vfs_register_filesystem(&devfs_fs_type);
+    if (ret == -EEXIST) return 0;
+    return ret;
 }
 
-void devfs_init(void)
+int devfs_init(void)
 {
-    memset(devices, 0, sizeof(devices));
-    device_count = 0;
-
-    devfs_register_fs();
-
-    // Mount devfs at /dev
-    int ret = vfs_mount_fs("devfs", "/dev", NULL, NULL);
-    if (ret == 0) {
-        debug_fs("devfs: mounted at /dev\n");
-    } else {
-        debug_fs("devfs: mount FAILED\n");
-        return;
+    int ret = devfs_register_fs();
+    if (ret != 0 && ret != -EEXIST) {
+        log_err("devfs: register fs failed (%d)\n", ret);
+        return ret;
     }
 
-    // Register built-in character devices
-    devfs_register_chrdev("null",   NULL, &null_ops);
-    devfs_register_chrdev("zero",   NULL, &zero_ops);
-    devfs_register_chrdev("random", NULL, &random_ops);
-    devfs_register_chrdev("urandom", NULL, &random_ops);
-    devfs_register_chrdev("serial", NULL, &serial_ops);
-    // NOTE: /dev/tty and /dev/tty0 are registered in main.c
+    // Mount devfs at /dev
+    ret = vfs_mount_fs("devfs", "/dev", NULL, NULL);
+    if (ret != 0) {
+        log_err("devfs: mount at /dev failed (%d)\n", ret);
+        return ret;
+    }
+    debug_fs("devfs: mounted at /dev\n");
+
+    // Register built-in character devices (essential devices: failure aborts boot)
+    static const struct {
+        const char *name;
+        const struct devfs_ops *ops;
+    } builtins[] = {
+        { "null",    &null_ops },
+        { "zero",    &zero_ops },
+        { "random",  &random_ops },
+        { "urandom", &random_ops },
+        { "serial",  &serial_ops },
+    };
+
+    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
+        ret = devfs_register_chrdev(builtins[i].name, NULL, builtins[i].ops);
+        if (ret != 0 && ret != -EEXIST) {
+            log_err("devfs: failed to register essential device '%s' (%d)\n",
+                    builtins[i].name, ret);
+            return ret;
+        }
+    }
+
+    // NOTE: /dev/tty and /dev/tty0 are registered in tty_boot_init()
     // after keyboard_set_tty() so keyboard_get_tty() returns
     // the correct pointer.
+    return 0;
 }
 
 // ── Public API ──────────────────────────────────────────────
 
+static int devfs_validate_name(const char *name)
+{
+    if (!name || name[0] == '\0')
+        return -EINVAL;
+    if (strlen(name) >= DEVFS_NAME_MAX)
+        return -EINVAL;
+    if (strchr(name, '/'))
+        return -EINVAL;
+    return 0;
+}
+
+static int devfs_register_device(const char *name, uint8_t type,
+                                 void *private_data, const struct devfs_ops *ops)
+{
+    int val_rc = devfs_validate_name(name);
+    if (val_rc != 0)
+        return val_rc;
+
+    devfs_device_t *dev = (devfs_device_t *)calloc(1, sizeof(devfs_device_t));
+    if (!dev)
+        return -ENOMEM;
+
+    strncpy(dev->name, name, DEVFS_NAME_MAX - 1);
+    dev->name[DEVFS_NAME_MAX - 1] = '\0';
+    dev->type = type;
+    dev->ops = ops;
+    dev->private_data = private_data;
+    dev->next = NULL;
+
+    uint64_t flags = spin_lock_irqsave(&devfs_lock);
+    devfs_device_t *cur = devfs_devices;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) {
+            spin_unlock_irqrestore(&devfs_lock, flags);
+            kfree(dev);
+            return -EEXIST;
+        }
+        cur = cur->next;
+    }
+
+    dev->id = next_device_id++;
+    if (next_device_id == 0) {
+        next_device_id = 1;
+    }
+
+    if (!devfs_devices) {
+        devfs_devices = dev;
+        devfs_devices_tail = dev;
+    } else {
+        devfs_devices_tail->next = dev;
+        devfs_devices_tail = dev;
+    }
+    spin_unlock_irqrestore(&devfs_lock, flags);
+
+    debug_fs("devfs: registered '%s' (type %u, id %lu)\n", name, (unsigned)type, (unsigned long)dev->id);
+    return 0;
+}
+
 int devfs_register_chrdev(const char *name, void *private_data,
                           const struct devfs_ops *ops)
 {
-    if (device_count >= DEVFS_MAX_DEVICES)
-        return -1;
-
-    int idx = device_count;
-    size_t nlen = strlen(name);
-    if (nlen >= DEVFS_NAME_MAX) nlen = DEVFS_NAME_MAX - 1;
-    memcpy(devices[idx].name, name, nlen);
-    devices[idx].name[nlen] = '\0';
-
-    devices[idx].type = VFS_CHRDEV;
-    devices[idx].ops = ops;
-    devices[idx].private_data = private_data;
-    devices[idx].registered = 1;
-    device_count++;
-
-    debug_fs("devfs: registered '%s' (chrdev)\n", name);
-    return 0;
+    return devfs_register_device(name, VFS_CHRDEV, private_data, ops);
 }
 
 int devfs_register_blkdev(const char *name, block_device_t *dev)
 {
-    if (device_count >= DEVFS_MAX_DEVICES)
-        return -1;
-
-    int idx = device_count;
-    size_t nlen = strlen(name);
-    if (nlen >= DEVFS_NAME_MAX) nlen = DEVFS_NAME_MAX - 1;
-    memcpy(devices[idx].name, name, nlen);
-    devices[idx].name[nlen] = '\0';
-
-    devices[idx].type = VFS_BLKDEV;
-    devices[idx].ops = NULL;            // block device dispatch is separate
-    devices[idx].private_data = dev;    // block_device_t *
-    devices[idx].registered = 1;
-    device_count++;
-
-    debug_fs("devfs: registered blkdev '%s'\n", name);
-    return 0;
+    return devfs_register_device(name, VFS_BLKDEV, dev, NULL);
 }
 
 // ── devfs_get_private — retrieve private_data from a devfs node ──
 void *devfs_get_private(struct vfs_node *node)
 {
-    int idx = (int)(uintptr_t)node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(node);
+    if (!dev)
         return NULL;
-    return devices[idx].private_data;
+    return dev->private_data;
 }
 
 // ── devfs_get_file_ops — retrieve devfs_ops from an open device file ──
 const struct devfs_ops *devfs_get_file_ops(file_t *f)
 {
     if (!f || !f->node || f->type != FD_DEV) return NULL;
-    int idx = (int)(uintptr_t)f->node->fs_data;
-    if (idx < 0 || idx >= DEVFS_MAX_DEVICES || !devices[idx].registered)
+    devfs_device_t *dev = devfs_device_from_node(f->node);
+    if (!dev)
         return NULL;
-    return devices[idx].ops;
+    return dev->ops;
 }

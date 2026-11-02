@@ -129,6 +129,15 @@ struct vfs_node *vfs_node_get(struct vfs_node *node)
     return node;
 }
 
+void vfs_node_put(struct vfs_node *node)
+{
+    if (!node) return;
+    if (__sync_sub_and_fetch(&node->refcount, 1) == 0) {
+        if (node->name) free(node->name);
+        free(node);
+    }
+}
+
 /* devfs_init() registers the built-in null/zero/random/serial devices.
  * Their handlers must link even though this test never touches them. */
 void get_random_bytes(void *b, size_t n) { (void)b; (void)n; }
@@ -300,29 +309,13 @@ static void reset_mocks(void)
  * is discovered through devfs_get_private() so the test never has to
  * mirror the production device_count (devfs_init() registers five
  * built-in devices before the test's own). */
-static int register_mock_device(const char *name, void *priv,
-                                const struct devfs_ops *ops)
+static vfs_node_t *register_mock_device(const char *name, void *priv,
+                                        const struct devfs_ops *ops)
 {
-    if (devfs_register_chrdev(name, priv, ops) < 0) return -1;
-    for (int i = 0; i < DEVFS_MAX_DEVICES; i++) {
-        vfs_node_t probe;
-        memset(&probe, 0, sizeof(probe));
-        probe.type = VFS_CHRDEV;
-        probe.fs_data = (void *)(uintptr_t)i;
-        if (devfs_get_private(&probe) == priv) return i;
-    }
-    return -1;
-}
-
-static vfs_node_t mock_node(int idx)
-{
-    vfs_node_t n;
-    memset(&n, 0, sizeof(n));
-    n.type = VFS_CHRDEV;
-    n.fs_data = (void *)(uintptr_t)idx;
-    n.f_ops = devfs_mount_fops;
-    n.refcount = 1;
-    return n;
+    if (devfs_register_chrdev(name, priv, ops) < 0) return NULL;
+    vfs_node_t *node = NULL;
+    if (devfs_lookup_node(name, &node) != 0) return NULL;
+    return node;
 }
 
 static file_t mock_dev_file(vfs_node_t *node)
@@ -345,12 +338,11 @@ TEST_FUNC(test_file_identity_reaches_device) {
         .read_file = mock_aware_read_file,
         .poll_file = mock_aware_poll_file,
     };
-    int idx = register_mock_device("devfs_input_aware", &marker, &ops);
-    assert_true(idx >= 0);
+    vfs_node_t *node = register_mock_device("devfs_input_aware", &marker, &ops);
+    assert_not_null(node);
 
-    vfs_node_t node = mock_node(idx);
-    file_t f1 = mock_dev_file(&node);
-    file_t f2 = mock_dev_file(&node);
+    file_t f1 = mock_dev_file(node);
+    file_t f2 = mock_dev_file(node);
 
     /* Two open file descriptions on the SAME node must reach the device
      * as two distinct identities. */
@@ -378,6 +370,7 @@ TEST_FUNC(test_file_identity_reaches_device) {
 
     /* The generic VFS node read is never used by the devfs path. */
     assert_eq(0, vfs_read_calls);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_legacy_fallback) {
@@ -387,11 +380,10 @@ TEST_FUNC(test_legacy_fallback) {
         .read = mock_legacy_read,
         .poll = mock_legacy_poll,
     };
-    int idx = register_mock_device("devfs_input_legacy", &marker, &ops);
-    assert_true(idx >= 0);
+    vfs_node_t *node = register_mock_device("devfs_input_legacy", &marker, &ops);
+    assert_not_null(node);
 
-    vfs_node_t node = mock_node(idx);
-    file_t f = mock_dev_file(&node);
+    file_t f = mock_dev_file(node);
 
     uint8_t buf[4];
     int64_t rc = fd_read(&f, buf, sizeof(buf));
@@ -404,13 +396,19 @@ TEST_FUNC(test_legacy_fallback) {
     assert_eq(POLLOUT | POLLWRNORM, mask);
     assert_eq(1, mock_legacy.poll_calls);
     assert_eq(POLLOUT, mock_legacy.poll_requested_seen);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_invalid_node) {
     reset_mocks();
 
-    /* An out-of-range device index is not a valid devfs node. */
-    vfs_node_t bad = mock_node(DEVFS_MAX_DEVICES + 5);
+    /* An unregistered device pointer in fs_data is not a valid devfs node. */
+    vfs_node_t bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.type = VFS_CHRDEV;
+    bad.fs_data = (void *)(uintptr_t)0xdeadbeef;
+    bad.f_ops = devfs_mount_fops;
+    bad.refcount = 1;
     file_t f_bad = mock_dev_file(&bad);
     assert_eq(POLLNVAL, fd_poll(&f_bad, POLLIN, NULL));
 
@@ -419,8 +417,12 @@ TEST_FUNC(test_invalid_node) {
     assert_eq(POLLNVAL, fd_poll(&f_none, POLLIN, NULL));
 
     /* A node that is not a devfs device. */
-    vfs_node_t regular = mock_node(0);
+    vfs_node_t regular;
+    memset(&regular, 0, sizeof(regular));
     regular.type = VFS_FILE;
+    regular.fs_data = (void *)(uintptr_t)0xdeadbeef;
+    regular.f_ops = devfs_mount_fops;
+    regular.refcount = 1;
     file_t f_regular = mock_dev_file(&regular);
     assert_eq(POLLNVAL, fd_poll(&f_regular, POLLIN, NULL));
 
@@ -437,11 +439,10 @@ TEST_FUNC(test_file_read_uses_bounce) {
     static const struct devfs_ops ops = {
         .read_file = mock_aware_read_file,
     };
-    int idx = register_mock_device("devfs_input_bounce", &marker, &ops);
-    assert_true(idx >= 0);
+    vfs_node_t *node = register_mock_device("devfs_input_bounce", &marker, &ops);
+    assert_not_null(node);
 
-    vfs_node_t node = mock_node(idx);
-    file_t f = mock_dev_file(&node);
+    file_t f = mock_dev_file(node);
 
     uint8_t user_buf[8];
     memset(user_buf, 0, sizeof(user_buf));
@@ -457,6 +458,7 @@ TEST_FUNC(test_file_read_uses_bounce) {
     assert_eq(0xA5, user_buf[0]);
     assert_eq(0xA5, user_buf[3]);
     assert_eq(0x00, user_buf[4]);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_read_file_error_propagates) {
@@ -466,11 +468,10 @@ TEST_FUNC(test_read_file_error_propagates) {
         .read_file = mock_error_read_file,
         .read      = mock_error_legacy_read,
     };
-    int idx = register_mock_device("devfs_input_error", &marker, &ops);
-    assert_true(idx >= 0);
+    vfs_node_t *node = register_mock_device("devfs_input_error", &marker, &ops);
+    assert_not_null(node);
 
-    vfs_node_t node = mock_node(idx);
-    file_t f = mock_dev_file(&node);
+    file_t f = mock_dev_file(node);
 
     uint8_t buf[4];
     int64_t rc = fd_read(&f, buf, sizeof(buf));
@@ -479,6 +480,7 @@ TEST_FUNC(test_read_file_error_propagates) {
     /* The device decided to refuse the read: the node read must NOT be
      * used as an unconditional fallback (that would bypass EACCES). */
     assert_eq(0, mock_error.legacy_read_calls);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_poll_file_zero_is_not_always_ready) {
@@ -488,17 +490,17 @@ TEST_FUNC(test_poll_file_zero_is_not_always_ready) {
         .poll_file = mock_zero_poll_file,
         .poll      = mock_zero_legacy_poll,
     };
-    int idx = register_mock_device("devfs_input_zero", &marker, &ops);
-    assert_true(idx >= 0);
+    vfs_node_t *node = register_mock_device("devfs_input_zero", &marker, &ops);
+    assert_not_null(node);
 
-    vfs_node_t node = mock_node(idx);
-    file_t f = mock_dev_file(&node);
+    file_t f = mock_dev_file(node);
 
     uint32_t mask = fd_poll(&f, POLLIN, NULL);
     /* 0 is a legitimate answer ("not ready"), not "hook absent". */
     assert_eq(0, mask);
     assert_eq(1, mock_zero.file_poll_calls);
     assert_eq(0, mock_zero.legacy_poll_calls);
+    vfs_node_put(node);
 }
 
 TEST_FUNC(test_invalid_path_never_touches_the_device) {
@@ -508,25 +510,24 @@ TEST_FUNC(test_invalid_path_never_touches_the_device) {
         .read_file = mock_aware_read_file,
         .poll_file = mock_aware_poll_file,
     };
-    int idx = register_mock_device("devfs_input_invalid", &marker, &ops);
-    assert_true(idx >= 0);
-
-    /* Every invalid path is built on the mock device's OWN index, so a
-     * missing check would reach the device: the counters below then go
-     * up and the case fails. */
-    vfs_node_t node = mock_node(idx);
+    vfs_node_t *node = register_mock_device("devfs_input_invalid", &marker, &ops);
+    assert_not_null(node);
 
     /* 1. A file that is not a device file: the bridge itself rejects it.
      *    (fd_poll(FD_VFS) is the plain-file path and never reaches the
      *    bridge, so the bridge entry point is called directly here.) */
-    file_t f_vfs = mock_dev_file(&node);
+    file_t f_vfs = mock_dev_file(node);
     f_vfs.type = FD_VFS;
     assert_eq(POLLNVAL, devfs_poll_file(&f_vfs, POLLIN, NULL));
     assert_eq(0, mock_aware.poll_calls);
 
     /* 2. A node that is not a devfs device. */
-    vfs_node_t regular = mock_node(idx);
+    vfs_node_t regular;
+    memset(&regular, 0, sizeof(regular));
     regular.type = VFS_FILE;
+    regular.fs_data = node->fs_data;
+    regular.f_ops = devfs_mount_fops;
+    regular.refcount = 1;
     file_t f_regular = mock_dev_file(&regular);
     assert_eq(POLLNVAL, fd_poll(&f_regular, POLLIN, NULL));
     assert_eq(0, mock_aware.poll_calls);
@@ -543,14 +544,20 @@ TEST_FUNC(test_invalid_path_never_touches_the_device) {
     assert_eq(POLLNVAL, fd_poll(&f_none, POLLIN, NULL));
     assert_eq(0, mock_aware.poll_calls);
 
-    /* 5. An out-of-range device index. */
-    vfs_node_t bad = mock_node(DEVFS_MAX_DEVICES + 5);
+    /* 5. An unregistered device pointer in fs_data. */
+    vfs_node_t bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.type = VFS_CHRDEV;
+    bad.fs_data = (void *)(uintptr_t)0xdeadbeef;
+    bad.f_ops = devfs_mount_fops;
+    bad.refcount = 1;
     file_t f_bad = mock_dev_file(&bad);
     assert_eq(POLLNVAL, fd_poll(&f_bad, POLLIN, NULL));
     assert_eq(0, mock_aware.poll_calls);
 
     /* The generic VFS node read is never used either. */
     assert_eq(0, vfs_read_calls);
+    vfs_node_put(node);
 }
 
 TEST_LIST_BEGIN

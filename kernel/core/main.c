@@ -1,5 +1,7 @@
 #include <core/printk.h>      // serial_printk (still printed from kernel_main)
 #include <core/bootinfo.h>    // struct boot_context (used by signature)
+#include <core/panic.h>
+#include <log/log.h>
 #include <memory/memory.h>
 #include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
 #include <sched/task.h>       // task_init
@@ -141,11 +143,19 @@ int kernel_main(const struct boot_context *bootctx)
     // last so user-space can see /boot, /, /tmp, /proc by the time
     // init.elf spawns.  TTY wiring and the /dev smoke probe are now
     // owned by tty_boot_init() and fs_boot_probe_devfs() (Task 3).
-    fs_boot_prepare();
+    if (fs_boot_prepare() != 0)
+        kpanic("fs_boot_prepare failed\n");
 
-    pty_init();                     // init PTY table + register /dev/ptmx
+#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+    void arch10_capacity_fixture_init(void);
+    arch10_capacity_fixture_init();
+#endif
 
-    x86_64_boot_device_nodes();     // register keyboard/mouse/fb chrdevs
+    if (pty_init() != 0)
+        log_err("pty_init failed\n");
+
+    if (x86_64_boot_device_nodes() != 0)
+        kpanic("x86_64_boot_device_nodes failed\n");
 
     fs_boot_mounts();               // block-device devfs + GPT/FAT32/ext2 mounts + tmpfs/procfs
 
@@ -157,7 +167,8 @@ int kernel_main(const struct boot_context *bootctx)
     // mirrors the Task-2 partition between FS mount work and probe
     // work; the brief forbids calling fs_boot_probe_devfs() from
     // fs_boot_mounts().
-    tty_boot_init();
+    if (tty_boot_init() != 0)
+        log_err("tty_boot_init failed\n");
     fs_boot_probe_devfs();
 
     // ═══ 8. Per-CPU + SMP ═══════════════════════════════════

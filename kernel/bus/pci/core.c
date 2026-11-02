@@ -667,7 +667,8 @@ int pci_route_gsi(struct pci_device *pdev, uint32_t *out)
     return backend->route_gsi(pdev, out);
 }
 
-int pci_msix_enable(struct pci_device *pdev, uint8_t vector)
+static int pci_msix_find_table(struct pci_device *pdev, uint8_t *out_cap_ptr,
+                               uint32_t *out_cap_dword, uint64_t *out_table_phys)
 {
     if (!pdev) {
         return -EINVAL;
@@ -747,6 +748,23 @@ int pci_msix_enable(struct pci_device *pdev, uint8_t vector)
         return -EINVAL;
     }
 
+    if (out_cap_ptr) *out_cap_ptr = msix_cap_ptr;
+    if (out_cap_dword) *out_cap_dword = msix_dword;
+    if (out_table_phys) *out_table_phys = table_phys;
+    return 0;
+}
+
+int pci_msix_prepare(struct pci_device *pdev, uint8_t vector)
+{
+    uint8_t msix_cap_ptr = 0;
+    uint32_t msix_dword = 0;
+    uint64_t table_phys = 0;
+
+    int rc = pci_msix_find_table(pdev, &msix_cap_ptr, &msix_dword, &table_phys);
+    if (rc != 0) {
+        return rc;
+    }
+
     void *table_virt = NULL;
     rc = arch_pci_msix_map(pdev, table_phys, &table_virt);
     if (rc != 0 || !table_virt) {
@@ -758,12 +776,45 @@ int pci_msix_enable(struct pci_device *pdev, uint8_t vector)
     entry[0] = msi_addr;
     entry[1] = 0;
     entry[2] = (uint32_t)vector;
-    entry[3] = 0;
+    entry[3] = 1; /* Keep masked */
 
     arch_pci_msix_unmap(pdev, table_virt);
 
     msix_dword |= 0x80000000U;
     return pci_config_write32(pdev, msix_cap_ptr, msix_dword);
+}
+
+int pci_msix_unmask(struct pci_device *pdev)
+{
+    uint8_t msix_cap_ptr = 0;
+    uint32_t msix_dword = 0;
+    uint64_t table_phys = 0;
+
+    int rc = pci_msix_find_table(pdev, &msix_cap_ptr, &msix_dword, &table_phys);
+    if (rc != 0) {
+        return rc;
+    }
+
+    void *table_virt = NULL;
+    rc = arch_pci_msix_map(pdev, table_phys, &table_virt);
+    if (rc != 0 || !table_virt) {
+        return (rc != 0) ? rc : -ENOMEM;
+    }
+
+    volatile uint32_t *entry = (volatile uint32_t *)table_virt;
+    entry[3] = 0; /* Unmask vector */
+
+    arch_pci_msix_unmap(pdev, table_virt);
+    return 0;
+}
+
+int pci_msix_enable(struct pci_device *pdev, uint8_t vector)
+{
+    int rc = pci_msix_prepare(pdev, vector);
+    if (rc != 0) {
+        return rc;
+    }
+    return pci_msix_unmask(pdev);
 }
 
 int pci_interrupts_disable(struct pci_device *pdev)

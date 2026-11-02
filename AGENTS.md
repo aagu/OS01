@@ -7,7 +7,7 @@ Hobby OS. UEFI → Higher Half Kernel (`0xffff800000000000`). **Multicore SMP** 
 ```bash
 make run                 # Build + run
 make debug               # Build + QEMU paused, GDB :1234
-make clean               # MANDATORY after struct changes (no header deps!)
+make clean               # Clean build artifacts (header deps tracked via depfiles)
 make test-qemu SUITE=phase-0    # QEMU E2E boot (also: systest, inittab-phase, network)
 make test-host           # Host-side hosttests + PMM boot reservation
 make test-static         # Static audits: runtime, layout, canary, link-order
@@ -60,7 +60,7 @@ Logo:    aarch64 only: aarch64_boot_fb_init() → frame_buffer_init() → boot_l
 ## Critical gotchas (will crash silently if wrong)
 
 - **boot_context ABI**: both UEFI bootloaders (x86_64 + aarch64) build a `boot_context` v2 struct at a fixed physical address; bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`. See `kernel/include/core/bootinfo.h`.
-- **`make clean` mandatory** after any struct change (no header deps in Makefile — stale `.o` = silent `sizeof()` mismatch).
+- **ABI and struct layout invariants**: struct and register layout changes must be verified with static layout checks (e.g. `test-kernel-layout`). Header dependencies for C and assembly are tracked automatically via depfiles (`-MD -MP` and `-include $(ALL_DEPS)`), though a full rebuild (`make clean`) remains useful when testing clean boots or cross-subsystem ABI transitions.
 - **Syscall E2E invocation**: always run `make OS01_SYSTEST=1 test-syscall`; do not omit the top-level `OS01_SYSTEST=1` even though the target invokes a recursive make.
 - **`set_intr_gate_raw` only accepts assembly stubs**. Bare C `ret` leaks CS+RFLAGS. Use `DEFINE_INTR_STUB` + `REGISTER_INTR_HANDLER`.
 - **GS base** set ONCE via `wrmsr(IA32_GS_BASE)`. Never reload GS selector — clobbers per-CPU data.

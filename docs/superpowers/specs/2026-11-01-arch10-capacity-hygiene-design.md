@@ -131,7 +131,7 @@ PIC fallback 独立使用 0..15 的固定早期存储。早期 `irq_install()` �
 
 ### 6.2 分配与错误语义
 
-`do_poll()` 不再使用 `kfds[POLL_MAX_FDS]`。入口先检查 `nfds <= soft_limit`，否则 `-EINVAL`；检查 `nfds * sizeof(pollfd)`、`nfds * POLL_WAIT_SLOTS_PER_FD` 及 entries 字节数的溢出和内部 int 表示范围，然后校验/复制用户数组。采用堆分配 kfds 与 wait entries，失败返回 `-ENOMEM`。
+`do_poll()` 不再使用 `kfds[POLL_MAX_FDS]`。入口先校验用户指针：`nfds > 0` 而用户数组指针为 NULL 时返回 `-EFAULT`——空指针是坏指针而非坏个数，因此该检查先于个数检查（与 Linux `do_poll()` 顺序一致，也保住既有 `poll(NULL, nfds=-1)` 敌意指针用例的 `-EFAULT` 语义）。随后检查 `nfds <= soft_limit`，否则 `-EINVAL`；再检查 `nfds * sizeof(pollfd)`、`nfds * POLL_WAIT_SLOTS_PER_FD` 及 entries 字节数的溢出和内部 int 表示范围，然后校验/复制用户数组。个数检查（软上限）先于任何分配，容量判定因此在分配之前完成。采用堆分配 kfds 与 wait entries，失败返回 `-ENOMEM`。
 
 `POLL_WAIT_SLOTS_PER_FD=2` 暂保留为当前设备协议：每个条目至多登记独立 read/write 两个等待链，重复 fd 也按数组条目计费。删除与 16 绑定的 `POLL_MAX_FDS`/`POLL_MAX_WAIT_ENTRIES`，setup 校验实际容量和分配大小。若未来设备突破两个 slot，必须修改协议；本项至少确保溢出时显式报错，不允许 `poll_wait()` 静默丢弃等待项后永久睡眠。
 
