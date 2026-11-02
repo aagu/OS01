@@ -591,21 +591,51 @@ static int devfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
     return 0;
 }
 
+// Forward declaration — the implementation lives in the public API
+// section at the end of this file.
+static int devfs_split_path(const char *path,
+                             char comps[DEVFS_MAX_DEPTH][DEVFS_NAME_MAX],
+                             int *out_count);
+
 int devfs_lookup_node(const char *name, struct vfs_node **out)
 {
     if (!out) return -EINVAL;
     *out = NULL;
     if (!name) return -EINVAL;
 
+    char (*comps)[DEVFS_NAME_MAX] =
+        (char (*)[DEVFS_NAME_MAX])calloc(DEVFS_MAX_DEPTH, DEVFS_NAME_MAX);
+    if (!comps) return -ENOMEM;
+
+    int count = 0;
+    int rc = devfs_split_path(name, comps, &count);
+    if (rc != 0) {
+        kfree(comps);
+        return rc;
+    }
+
+    devfs_node_t *found = NULL;
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_node_t *target = devfs_find_child(&devfs_root, name);
+    devfs_node_t *cur = &devfs_root;
+    for (int i = 0; i < count; i++) {
+        devfs_node_t *child = devfs_find_child(cur, comps[i]);
+        if (!child) { found = NULL; break; }
+        found = child;
+        if (i + 1 < count) {
+            // Only a directory can be descended into.
+            if (child->kind != DEVFS_KIND_DIR) { found = NULL; break; }
+            cur = child;
+        }
+    }
     spin_unlock_irqrestore(&devfs_lock, flags);
 
-    if (!target) return -ENOENT;
+    kfree(comps);
 
-    vfs_node_t *child = (target->kind == DEVFS_KIND_DIR)
-                        ? devfs_create_dir_node(target, NULL)
-                        : devfs_create_node_for_record(target, NULL);
+    if (!found) return -ENOENT;
+
+    vfs_node_t *child = (found->kind == DEVFS_KIND_DIR)
+                        ? devfs_create_dir_node(found, NULL)
+                        : devfs_create_node_for_record(found, NULL);
     if (!child) return -ENOMEM;
     *out = child;
     return 0;

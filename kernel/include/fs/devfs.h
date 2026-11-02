@@ -100,7 +100,10 @@ int devfs_init(void);
 extern const struct devfs_ops tty_magic_ops;
 extern const struct devfs_ops tty_phys_ops;
 
-// Lookup a devfs device by name and allocate an independent borrowed node.
+// Lookup a devfs node by path and allocate an independent borrowed
+// node.  `name` is relative to the devfs mount point and may be a
+// single component ("gfx0") or a '/'-separated path ("pts/0").
+// The returned node has no parent and does not own the record.
 int devfs_lookup_node(const char *name, struct vfs_node **out);
 
 // Poll a devfs device node — resolves node->fs_data to device,

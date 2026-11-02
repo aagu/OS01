@@ -351,6 +351,40 @@ TEST_FUNC(test_devfs_hierarchy_remount) {
     }
 }
 
+TEST_FUNC(test_devfs_hierarchy_lookup_node_multi_segment) {
+    vfs_init();
+    devfs_init();
+
+    assert_eq(0, devfs_register_path("pts/0",
+                                     (void *)(uintptr_t)0xBBBB, &s_hier_ops));
+
+    // Single component still resolves.
+    vfs_node_t *plain = NULL;
+    assert_eq(0, devfs_lookup_node("pts", &plain));
+    assert_not_null(plain);
+    if (plain) {
+        assert_eq(VFS_DIR, plain->type);
+        vfs_node_put(plain);
+    }
+
+    // Multi component resolves to the device.
+    vfs_node_t *dev = NULL;
+    assert_eq(0, devfs_lookup_node("pts/0", &dev));
+    assert_not_null(dev);
+    if (dev) {
+        assert_eq(VFS_CHRDEV, dev->type);
+        uint64_t val = 0;
+        assert_eq((int)sizeof(val), dev->f_ops->read(dev, 0, sizeof(val), &val));
+        assert_eq(0xBBBB, val);
+        vfs_node_put(dev);
+    }
+
+    // Unknown component → -ENOENT
+    vfs_node_t *missing = NULL;
+    assert_eq(-ENOENT, devfs_lookup_node("pts/9", &missing));
+    assert_null(missing);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_devfs_hierarchy_register_and_lookup),
     TEST_ENTRY(test_devfs_hierarchy_readdir_per_level),
@@ -361,6 +395,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_devfs_hierarchy_deep_and_long_paths),
     TEST_ENTRY(test_devfs_hierarchy_vfs_walk_through_mount),
     TEST_ENTRY(test_devfs_hierarchy_remount),
+    TEST_ENTRY(test_devfs_hierarchy_lookup_node_multi_segment),
 TEST_LIST_END
 
 int main(void) {
