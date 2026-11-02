@@ -414,49 +414,47 @@ f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 
 ## 5. 测试
 
-### 5.1 新增 hosttest
+### 5.1 新增 hosttest：`hosttests/cases/test_pci_devfs.c` → `test_pci_devfs`（`fs` 类）
 
-分两个二进制——**属性层**与**devfs 集成层**分开，因为二者的链接面不同：属性层需要
-PCI 的 mock backend（`arch9/pci_runtime.h` 一族），集成层需要 VFS 的 mock runtime
-（`vfs_test_runtime.h` 一族），两套 force-include 的运行时互相不兼容。
+**一个二进制打通两层**：真实 devfs + 真实 PCI core + mock PCI backend。
+不引入 devfs 函数桩——`devfs_register_path()` / `devfs_get_private()` 都走生产实现，
+测试因此覆盖「注册 → 出现在目录树 → 能被 lookup → 能被 read」的完整链路。
 
-#### A) `hosttests/cases/test_pci_devfs.c` → `test_pci_devfs`（`drivers` 类）
+链接对象（在 `test_devfs_hierarchy` 的对象集上额外加两个 PCI 生产对象）：
 
-链接：`kernel/bus/pci/pci_devfs.c` + `kernel/bus/pci/core.c`（生产 TU）。
+| 对象 | 来源 |
+|------|------|
+| `vfs_production.o` / `dcache_production.o` / `ext2_production.o` / `fat_production.o` / `tmpfs_production.o` / `devfs_vfs_production.o` | `kernel/fs/*.c`（既有） |
+| `pci_core_production.o` | `kernel/bus/pci/core.c`（既有） |
+| `pci_devfs_production.o` | `kernel/bus/pci/pci_devfs.c`（新增） |
+| `serial_sink_stub.o` / `rwlock.o` | 既有 mock |
+
+链接用 `-Wl,--gc-sections`（既有 VFS 测试的惯例）：`pci core` 里只有
+`pci_enumerate()` 路径引用 `device_alloc_id()`，测试不调用枚举，因此
+`kernel/device/core.c` **不需要**进链接面。
+
 case TU 提供：
 
 - mock `arch_pci_backend()`：一份 256 字节的合成 config space
   （vendor `0x8086` / device `0x2922` / class `0x010601` / rev `0x00` /
-  BAR0 = I/O @ `0xc000` / BAR2 = MMIO @ `0xfebf0000` / 0x3C 处 int line+pin），
-  以及 `route_gsi` → GSI 16。
-- `g_log_level` 与 `_log_info_impl` / `_log_warn_impl` / `_log_err_impl` 桩。
-- `devfs_register_path()` 桩：记录 `(path, private_data, ops)` 三元组。
-- `devfs_get_private()` 桩：返回 `node->fs_data`（与生产语义同构）。
+  int line + pin 于 0x3C），以及 `route_gsi` → GSI 16。
+- `g_log_level` 与 `_log_info_impl` 桩（`_log_err_impl` / `_log_warn_impl`
+  由既有的 `serial_sink_stub.c` 提供）。
+- 一个合成的 `struct pci_device`（domain 0 / bus 0 / slot 0x1f / fn 2，
+  BAR0 = I/O @ `0xc000`，BAR2 = MMIO @ `0xfebf0000`，BAR1 与 BAR3 无效，
+  绑定一个名为 `"ahci"` 的假驱动）。
 
 | 用例 | 验证 |
 |------|------|
 | `test_pci_devfs_attr_vendor_device_class` | `vendor` → `"0x8086\n"`；`device` → `"0x2922\n"`；`class` → `"0x010601\n"` |
 | `test_pci_devfs_attr_config_is_256_raw_bytes` | `config` → 恰好 256 字节；前 4 字节 == `vendor \| device<<16`；byte 0x08 == rev |
 | `test_pci_devfs_attr_resource_lists_bars` | 含 `Region 0: I/O ports at 0xc000` 与 `Region 2: Memory at 0xfebf0000`；无效 BAR 不出现；**不含** `(size=` |
-| `test_pci_devfs_attr_irq_and_driver` | `irq` → mock `route_gsi` 的 GSI；`driver` → 绑定驱动名；未绑定 → `"none\n"` |
+| `test_pci_devfs_attr_irq_and_driver` | `irq` → mock `route_gsi` 的 GSI 16；`driver` → `"ahci\n"`；未绑定 → `"none\n"` |
 | `test_pci_devfs_format_reports_full_length` | `size` 小于内容长度时，返回值仍是**完整长度**（截断语义） |
-| `test_pci_devfs_register_publishes_paths` | 每设备 7 次注册；路径串依次为 `pci/0000:00:1f.2/{vendor,device,class,config,resource,irq,driver}`；7 次调用共用同一张 `devfs_ops` 表；`private_data` 是属性上下文 |
-| `test_pci_devfs_read_slices_by_offset` | 捕获到的 `ops->read` 按 `offset` 切片；`offset >= len` → 0（EOF）；`size == 0` → 0 |
+| `test_pci_devfs_register_publishes_paths` | 注册后 `/dev/pci/0000:00:1f.2/vendor` 可 `vfs_lookup()`，类型 `VFS_CHRDEV`；`vfs_readdir("/dev/pci")` 列出 `0000:00:1f.2` 且类型 `VFS_DIR`；`vfs_readdir("/dev/pci/0000:00:1f.2")` 列出 7 个属性名 |
+| `test_pci_devfs_read_slices_by_offset` | `vfs_read(node, 0, n, buf)` 读回属性内容；`vfs_read(node, len, n, buf)` → 0（EOF）；`vfs_read(node, 0, 0, buf)` → 0 |
 
-#### B) `hosttests/cases/test_pci_devfs_paths.c` → `test_pci_devfs_paths`（`fs` 类）
-
-链接：`kernel/bus/pci/pci_devfs.c` + **真实** `kernel/fs/devfs.c` + VFS 生产对象
-（与 `test_devfs_hierarchy` 同款对象集）。
-case TU 提供 mock `arch_pci_backend()` 与日志桩，并用 `pci_devfs_register_device()`
-发布一个**合成设备**（无需 PCI 枚举）。
-
-| 用例 | 验证 |
-|------|------|
-| `test_pci_devfs_paths_lookup_and_read` | `/dev/pci/0000:00:1f.2/vendor` 可 lookup，类型 `VFS_CHRDEV`，读回 `"0x8086\n"` |
-| `test_pci_devfs_paths_readdir_lists_bdf` | readdir `/dev/pci` 列出 `0000:00:1f.2`；readdir `/dev/pci/0000:00:1f.2` 列出 7 个属性名 |
-| `test_pci_devfs_paths_config_is_256_bytes` | 读 `config` 节点得到 256 字节 |
-
-两个二进制都必须：按仓库约定用 `register_host_test()` 注册 + `TEST_BINS` 条目 +
+注册方式：按仓库约定用 `register_host_test()` 注册 + `TEST_BINS` 条目 +
 构建规则，三者同一 commit 完成（AGENTS.md 硬性要求）。
 
 ### 5.2 QEMU E2E
@@ -481,10 +479,8 @@ case TU 提供 mock `arch_pci_backend()` 与日志桩，并用 `pci_devfs_regist
 | `kernel/bus/pci/pci_devfs.c` | 新增（属性上下文、格式化、注册、read 回调） |
 | `kernel/core/main.c` | 在 `fs_boot_prepare()` 之后调用 `pci_devfs_register_all()` |
 | `user/lspci.c` | 新增（枚举、名称解析、输出、选项） |
-| `hosttests/cases/test_pci_devfs.c` | 新增（属性层用例） |
-| `hosttests/cases/test_pci_devfs_paths.c` | 新增（devfs 集成层用例） |
-| `hosttests/mk/drivers.mk` | 注册 `test_pci_devfs` + `TEST_BINS` + 构建规则 |
-| `hosttests/mk/fs.mk` | 注册 `test_pci_devfs_paths` + `TEST_BINS` + 构建规则 |
+| `hosttests/cases/test_pci_devfs.c` | 新增（属性格式化 + devfs 集成用例） |
+| `hosttests/mk/fs.mk` | 注册 `test_pci_devfs` + `TEST_BINS` + 构建规则 |
 | `docs/fs/filesystem.md` | devfs 章节补 `/dev/pci` 命名空间说明 |
 | `docs/roadmap.md` | ARCH-12 标记闭环 + 当前状态行 |
 | `docs/changelog.md` | 闭环条目 |
@@ -514,15 +510,14 @@ aarch64 profile 用的是**显式**源文件清单（`kernel/Makefile:70-99`，�
 | `/dev/pci` 不存在（无 PCI 的架构） | lspci 崩溃 | 用户态检查 `opendir` 返回值，给出诊断 + 退出码 1 |
 | `resource` 伪造 BAR 容量 | 误导性输出 | 不输出 size，只输出地址与类型（§3.5） |
 | 内核注册失败静默 | lspci 缺设备 | 注册失败 `log_warn` + 计入返回值；用户态 `-v` 显示实际列出的设备数 |
-| hosttest 链接面过宽（pci core 拖出 device core） | 测试二进制链接失败 / 引入无关依赖 | 用 `-ffunction-sections -fdata-sections` + `--gc-sections`；不调用 `pci_enumerate()`，改用 `pci_devfs_register_device()` 发布合成设备；两个用例二进制按运行时分开（§5.1） |
+| hosttest 链接面过宽（pci core 拖出 device core） | 测试二进制链接失败 / 引入无关依赖 | 用 `-ffunction-sections -fdata-sections` + `--gc-sections`；不调用 `pci_enumerate()`，改用 `pci_devfs_register_device()` 发布合成设备；`kernel/device/core.c` 因此不进链接面 |
 | read 路径在栈上开 512 字节缓冲 | 内核栈压力 | 512 字节远低于内核栈容量；read 路径零动态分配 |
 
 ---
 
 ## 8. 验收标准
 
-1. `make PROFILE=x86_64-clang test-host` 全绿，含新增 `test_pci_devfs` 与
-   `test_pci_devfs_paths`（基线 165 → 167）。
+1. `make PROFILE=x86_64-clang test-host` 全绿，含新增 `test_pci_devfs`（基线 165 → 166）。
 2. `make PROFILE=x86_64-clang test-static` 全绿。
 3. `make PROFILE=x86_64-clang kernel.bin` 与 `disk.img` 构建通过。
 4. QEMU 中 `/bin/lspci` 列出实际 PCI 设备，格式对齐 Linux lspci；
