@@ -13,6 +13,11 @@ struct vma;
 
 #define DEVFS_NAME_MAX    32
 
+// Maximum number of path components in a single devfs registration
+// path ("pci/0000:00:1f.2/vendor" is 3).  Bounds the recursion of
+// the tree walk; generous enough for /dev/usb/<bus>/<port>/<iface>/…
+#define DEVFS_MAX_DEPTH   16
+
 // ── Device operations table ─────────────────────────────────
 // open:       returns a custom file_t.  Return -ENOSYS to fall back
 //             to the default FD_DEV allocation.
@@ -61,11 +66,16 @@ struct devfs_ops {
                           struct poll_table *pt);
 };
 
-// Register a character device that will appear under /dev/
+// Register a character device that will appear under /dev/.
+// `name` is a path RELATIVE to the devfs mount point: it may be a
+// single component ("null") or a '/'-separated multi-component path
+// ("pci/0000:00:1f.2/vendor").  Intermediate directories are created
+// implicitly.  A leading '/' is rejected — the path is relative.
 int devfs_register_chrdev(const char *name, void *private_data,
                           const struct devfs_ops *ops);
 
-// Register a block device that will appear under /dev/
+// Register a block device that will appear under /dev/.
+// `name` follows the same relative-path rules as devfs_register_chrdev().
 int devfs_register_blkdev(const char *name, struct block_device *dev);
 
 // Register devfs with VFS filesystem registry

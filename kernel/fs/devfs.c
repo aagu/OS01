@@ -20,23 +20,110 @@
 #include <string.h>
 #include <stdlib.h>
 
-// ── Internal dynamic device record ─────────────────────────
+// ── Internal device tree ────────────────────────────────────
+//
+// Every registered node lives in one tree rooted at devfs_root.  A
+// node is either a directory (DEVFS_KIND_DIR) or a device
+// (DEVFS_KIND_CHR / DEVFS_KIND_BLK).  A device registered under a
+// '/'-separated path ("pci/0000:00:1f.2/vendor") gets the
+// intermediate directories created implicitly.
+//
+// Records are never freed once published (ARCH-10 §7.3: "运行期已发布
+// 对象存活至关机"), so a record pointer stays valid after the registry
+// lock is dropped.
 
-typedef struct devfs_device {
-    uint64_t id;
-    char name[DEVFS_NAME_MAX];
-    uint8_t type;       // VFS_CHRDEV or VFS_BLKDEV
-    const struct devfs_ops *ops;
-    void *private_data;
-    struct devfs_device *next;
-} devfs_device_t;
+typedef enum {
+    DEVFS_KIND_DIR,
+    DEVFS_KIND_CHR,
+    DEVFS_KIND_BLK,
+} devfs_kind_t;
+
+typedef struct devfs_node {
+    char                    name[DEVFS_NAME_MAX];  // single path component
+    uint64_t                id;                    // stable, non-zero, monotonic
+    devfs_kind_t            kind;
+    const struct devfs_ops *ops;                   // devices only
+    void                   *private_data;          // devices only
+    struct devfs_node      *parent;
+    struct devfs_node      *first_child;
+    struct devfs_node      *last_child;
+    struct devfs_node      *next_sibling;
+    struct devfs_node      *prev_sibling;
+} devfs_node_t;
 
 static spinlock_T devfs_lock = { 1 };
-static devfs_device_t *devfs_devices = NULL;
-static devfs_device_t *devfs_devices_tail = NULL;
+static devfs_node_t devfs_root = {
+    .name = "",
+    .id   = 0,
+    .kind = DEVFS_KIND_DIR,
+};
 static uint64_t next_device_id = 1;
 
-static devfs_device_t *devfs_device_from_node(const vfs_node_t *node)
+// Find a direct child of `dir` named `name`.  Caller holds devfs_lock.
+static devfs_node_t *devfs_find_child(devfs_node_t *dir, const char *name)
+{
+    if (!dir || !name) return NULL;
+    for (devfs_node_t *cur = dir->first_child; cur; cur = cur->next_sibling) {
+        if (strcmp(cur->name, name) == 0)
+            return cur;
+    }
+    return NULL;
+}
+
+// Append `node` as the last child of `dir`.  Caller holds devfs_lock.
+static void devfs_link_child(devfs_node_t *dir, devfs_node_t *node)
+{
+    node->parent       = dir;
+    node->prev_sibling = dir->last_child;
+    node->next_sibling = NULL;
+    if (dir->last_child)
+        dir->last_child->next_sibling = node;
+    else
+        dir->first_child = node;
+    dir->last_child = node;
+}
+
+// Does the subtree rooted at `dir` contain `needle`?
+static bool devfs_subtree_contains(devfs_node_t *dir, const devfs_node_t *needle)
+{
+    if (!dir || !needle) return false;
+    for (devfs_node_t *cur = dir->first_child; cur; cur = cur->next_sibling) {
+        if (cur == needle) return true;
+        if (devfs_subtree_contains(cur, needle)) return true;
+    }
+    return false;
+}
+
+// Resolve a VFS directory node to the devfs directory record behind
+// it.  The mount root gets its fs_data in devfs_fs_mount(); the NULL
+// fallback keeps lookups working if that root node is ever replaced.
+static devfs_node_t *devfs_dir_record(const vfs_node_t *dir)
+{
+    if (!dir) return NULL;
+    devfs_node_t *rec = (devfs_node_t *)dir->fs_data;
+    if (!rec) return &devfs_root;
+    if (rec->kind != DEVFS_KIND_DIR) return NULL;
+    return rec;
+}
+
+// First device record whose private_data matches `priv`.
+// Caller holds devfs_lock.
+static devfs_node_t *devfs_find_device_by_private(devfs_node_t *dir, void *priv)
+{
+    if (!dir) return NULL;
+    for (devfs_node_t *cur = dir->first_child; cur; cur = cur->next_sibling) {
+        if (cur->kind != DEVFS_KIND_DIR) {
+            if (cur->private_data == priv)
+                return cur;
+        } else {
+            devfs_node_t *hit = devfs_find_device_by_private(cur, priv);
+            if (hit) return hit;
+        }
+    }
+    return NULL;
+}
+
+static devfs_node_t *devfs_device_from_node(const vfs_node_t *node)
 {
     if (!node) return NULL;
     if (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV)
@@ -47,18 +134,11 @@ static devfs_device_t *devfs_device_from_node(const vfs_node_t *node)
         return NULL;
 #endif
 
-    devfs_device_t *candidate = (devfs_device_t *)node->fs_data;
+    devfs_node_t *candidate = (devfs_node_t *)node->fs_data;
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_device_t *cur = devfs_devices;
-    while (cur) {
-        if (cur == candidate) {
-            spin_unlock_irqrestore(&devfs_lock, flags);
-            return cur;
-        }
-        cur = cur->next;
-    }
+    bool found = devfs_subtree_contains(&devfs_root, candidate);
     spin_unlock_irqrestore(&devfs_lock, flags);
-    return NULL;
+    return found ? candidate : NULL;
 }
 
 // The console TTY — obtained via get_dev_tty() from tty.c.
@@ -214,12 +294,12 @@ static int random_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *
 
 static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return -1;
 
     // Block device path: sector-level read via block_device_t
-    if (dev->type == VFS_BLKDEV) {
+    if (dev->kind == DEVFS_KIND_BLK) {
         block_device_t *bdev = (block_device_t *)dev->private_data;
         if (!bdev || !buffer || size == 0) return 0;
         uint64_t lba   = offset / 512;
@@ -249,7 +329,7 @@ static int64_t devfs_read_file(file_t *f, uint64_t offset, uint64_t size,
                                 void *buffer)
 {
     if (!f || !f->node) return -1;
-    devfs_device_t *dev = devfs_device_from_node(f->node);
+    devfs_node_t *dev = devfs_device_from_node(f->node);
     if (!dev) return -1;
 
     const struct devfs_ops *ops = dev->ops;
@@ -262,12 +342,12 @@ static int64_t devfs_read_file(file_t *f, uint64_t offset, uint64_t size,
 
 static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
 {
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return -1;
 
     // Block device path: read-modify-write for unaligned edges
-    if (dev->type == VFS_BLKDEV) {
+    if (dev->kind == DEVFS_KIND_BLK) {
         block_device_t *bdev = (block_device_t *)dev->private_data;
         if (!bdev || !buffer || size == 0) return 0;
         uint64_t lba   = offset / 512;
@@ -297,7 +377,7 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
 // ── devfs_mmap — dispatch mmap for device-backed mmap ────────
 static int devfs_mmap(vfs_node_t *node, struct vma *vma)
 {
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return -EINVAL;
     if (
@@ -312,7 +392,7 @@ static int devfs_mmap(vfs_node_t *node, struct vma *vma)
 // ── devfs_poll — dispatch poll for fd_poll(FD_DEV) ─────────
 uint32_t devfs_poll(vfs_node_t *node, uint32_t requested, poll_table_t *pt)
 {
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return POLLNVAL;
 
@@ -333,7 +413,7 @@ uint32_t devfs_poll_file(file_t *f, uint32_t requested, poll_table_t *pt)
     if (!f || !f->node) return POLLNVAL;
     if (f->type != FD_DEV) return POLLNVAL;
 
-    devfs_device_t *dev = devfs_device_from_node(f->node);
+    devfs_node_t *dev = devfs_device_from_node(f->node);
     if (!dev)
         return POLLNVAL;
 
@@ -348,7 +428,7 @@ uint32_t devfs_poll_file(file_t *f, uint32_t requested, poll_table_t *pt)
 // ── devfs_ioctl_node — dispatch ioctl to a devfs device ─────
 int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
 {
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return -ENODEV;
     if (
@@ -366,7 +446,7 @@ int devfs_ioctl_file(file_t *f, int cmd, void *arg)
     if (!f || !f->node) return -ENOTTY;
     if (f->type != FD_DEV) return -ENOTTY;
 
-    devfs_device_t *dev = devfs_device_from_node(f->node);
+    devfs_node_t *dev = devfs_device_from_node(f->node);
     if (!dev)
         return -ENODEV;
 
@@ -385,7 +465,7 @@ void devfs_release_file(file_t *f)
     if (!f || !f->node) return;
     if (f->type != FD_DEV) return;
 
-    devfs_device_t *dev = devfs_device_from_node(f->node);
+    devfs_node_t *dev = devfs_device_from_node(f->node);
     if (!dev)
         return;
     const struct devfs_ops *ops = dev->ops;
@@ -398,22 +478,27 @@ static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
 {
     if (!node || node->type != VFS_DIR || !entry) return -1;
 
+    devfs_node_t *rec = devfs_dir_record(node);
+    if (!rec) return -1;
+
     uint64_t cur_idx = 0;
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_device_t *cur = devfs_devices;
+    devfs_node_t *cur = rec->first_child;
     while (cur) {
         if (cur_idx == index) {
             size_t nlen = strlen(cur->name);
             if (nlen >= VFS_NAME_MAX) nlen = VFS_NAME_MAX - 1;
             memcpy(entry->name, cur->name, nlen);
             entry->name[nlen] = '\0';
-            entry->type = cur->type;
+            entry->type = (cur->kind == DEVFS_KIND_DIR) ? VFS_DIR :
+                          (cur->kind == DEVFS_KIND_BLK) ? VFS_BLKDEV :
+                                                           VFS_CHRDEV;
             entry->size = 0;
             entry->ino = cur->id;
             spin_unlock_irqrestore(&devfs_lock, flags);
             return 0;
         }
-        cur = cur->next;
+        cur = cur->next_sibling;
         cur_idx++;
     }
     spin_unlock_irqrestore(&devfs_lock, flags);
@@ -427,30 +512,59 @@ static int devfs_readdir(vfs_node_t *node, uint64_t index, vfs_dirent_t *entry)
 static const vfs_inode_ops_t devfs_iops;
 static const vfs_file_ops_t devfs_fops;
 
-static vfs_node_t *devfs_create_node_for_device(devfs_device_t *dev, vfs_node_t *dir)
+static vfs_node_t *devfs_create_node_for_record(devfs_node_t *rec, vfs_node_t *dir)
 {
     vfs_node_t *child = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
     if (!child) return NULL;
-    child->name = strndup(dev->name, VFS_NAME_MAX - 1);
+    child->name = strndup(rec->name, VFS_NAME_MAX - 1);
     if (!child->name) {
         kfree(child);
         return NULL;
     }
-    child->type = dev->type;
-    child->ino = dev->id;
-    child->rdev = dev->id;
-    child->mode = (dev->type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666;
+    child->type = (rec->kind == DEVFS_KIND_BLK) ? VFS_BLKDEV : VFS_CHRDEV;
+    child->ino = rec->id;
+    child->rdev = rec->id;
+    child->mode = (child->type == VFS_CHRDEV ? S_IFCHR : S_IFBLK) | 0666;
     child->nlink = 1;
     child->size = 0;
     if (dir) {
         child->mount = dir->mount;
         child->parent = vfs_node_get(dir);
     }
-    child->fs_data = dev;
+    child->fs_data = rec;
     child->i_ops = &devfs_iops;
     child->f_ops = &devfs_fops;
     child->refcount = 1;
     return child;
+}
+
+// Synthetic directory node for a devfs sub-directory.  Its fs_data
+// carries the directory record so that the next lookup() call knows
+// which directory it is descending into.
+static vfs_node_t *devfs_create_dir_node(devfs_node_t *rec, vfs_node_t *dir)
+{
+    vfs_node_t *node = (vfs_node_t *)calloc(1, sizeof(vfs_node_t));
+    if (!node) return NULL;
+    node->name = strndup(rec->name, VFS_NAME_MAX - 1);
+    if (!node->name) {
+        kfree(node);
+        return NULL;
+    }
+    node->type = VFS_DIR;
+    node->ino = rec->id;
+    node->rdev = 0;
+    node->mode = S_IFDIR | 0755;
+    node->nlink = 2;
+    node->size = 0;
+    if (dir) {
+        node->mount = dir->mount;
+        node->parent = vfs_node_get(dir);
+    }
+    node->fs_data = rec;
+    node->i_ops = &devfs_iops;
+    node->f_ops = &devfs_fops;
+    node->refcount = 1;
+    return node;
 }
 
 static int devfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
@@ -460,21 +574,18 @@ static int devfs_iop_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out)
     if (!dir || !name) return -EINVAL;
     if (dir->type != VFS_DIR) return -ENOTDIR;
 
+    devfs_node_t *rec = devfs_dir_record(dir);
+    if (!rec) return -ENOTDIR;
+
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_device_t *cur = devfs_devices;
-    devfs_device_t *target = NULL;
-    while (cur) {
-        if (strcmp(cur->name, name) == 0) {
-            target = cur;
-            break;
-        }
-        cur = cur->next;
-    }
+    devfs_node_t *target = devfs_find_child(rec, name);
     spin_unlock_irqrestore(&devfs_lock, flags);
 
     if (!target) return -ENOENT;
 
-    vfs_node_t *child = devfs_create_node_for_device(target, dir);
+    vfs_node_t *child = (target->kind == DEVFS_KIND_DIR)
+                        ? devfs_create_dir_node(target, dir)
+                        : devfs_create_node_for_record(target, dir);
     if (!child) return -ENOMEM;
     *out = child;
     return 0;
@@ -487,20 +598,14 @@ int devfs_lookup_node(const char *name, struct vfs_node **out)
     if (!name) return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_device_t *cur = devfs_devices;
-    devfs_device_t *target = NULL;
-    while (cur) {
-        if (strcmp(cur->name, name) == 0) {
-            target = cur;
-            break;
-        }
-        cur = cur->next;
-    }
+    devfs_node_t *target = devfs_find_child(&devfs_root, name);
     spin_unlock_irqrestore(&devfs_lock, flags);
 
     if (!target) return -ENOENT;
 
-    vfs_node_t *child = devfs_create_node_for_device(target, NULL);
+    vfs_node_t *child = (target->kind == DEVFS_KIND_DIR)
+                        ? devfs_create_dir_node(target, NULL)
+                        : devfs_create_node_for_record(target, NULL);
     if (!child) return -ENOMEM;
     *out = child;
     return 0;
@@ -528,7 +633,7 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
     if (!node || (node->type != VFS_CHRDEV && node->type != VFS_BLKDEV))
         return -ENOSYS;
 
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return -ENODEV;
 
@@ -637,19 +742,13 @@ static int tty_magic_open(const char *name, file_t **out_file)
     target = keyboard_get_tty();
 
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_device_t *cur = devfs_devices;
-    devfs_device_t *matched_dev = NULL;
-    while (cur) {
-        if (cur->private_data == target && cur->type == VFS_CHRDEV) {
-            matched_dev = cur;
-            break;
-        }
-        cur = cur->next;
-    }
+    devfs_node_t *matched_dev = devfs_find_device_by_private(&devfs_root, target);
+    if (matched_dev && matched_dev->kind != DEVFS_KIND_CHR)
+        matched_dev = NULL;
     spin_unlock_irqrestore(&devfs_lock, flags);
 
     if (matched_dev) {
-        vfs_node_t *node = devfs_create_node_for_device(matched_dev, NULL);
+        vfs_node_t *node = devfs_create_node_for_record(matched_dev, NULL);
         if (!node) return -ENOMEM;
         *out_file = file_alloc();
         if (!*out_file) {
@@ -777,40 +876,34 @@ static int devfs_register_device(const char *name, uint8_t type,
     if (val_rc != 0)
         return val_rc;
 
-    devfs_device_t *dev = (devfs_device_t *)calloc(1, sizeof(devfs_device_t));
+    devfs_kind_t kind = (type == VFS_BLKDEV) ? DEVFS_KIND_BLK : DEVFS_KIND_CHR;
+
+    devfs_node_t *dev = (devfs_node_t *)calloc(1, sizeof(devfs_node_t));
     if (!dev)
         return -ENOMEM;
 
     strncpy(dev->name, name, DEVFS_NAME_MAX - 1);
     dev->name[DEVFS_NAME_MAX - 1] = '\0';
-    dev->type = type;
+    dev->kind = kind;
     dev->ops = ops;
     dev->private_data = private_data;
-    dev->next = NULL;
 
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    devfs_device_t *cur = devfs_devices;
-    while (cur) {
-        if (strcmp(cur->name, name) == 0) {
-            spin_unlock_irqrestore(&devfs_lock, flags);
-            kfree(dev);
-            return -EEXIST;
-        }
-        cur = cur->next;
+    if (devfs_find_child(&devfs_root, name)) {
+        spin_unlock_irqrestore(&devfs_lock, flags);
+        kfree(dev);
+        return -EEXIST;
+    }
+
+    if (next_device_id == UINT64_MAX) {
+        // Refuse rather than wrap into a live id.
+        spin_unlock_irqrestore(&devfs_lock, flags);
+        kfree(dev);
+        return -ENOSPC;
     }
 
     dev->id = next_device_id++;
-    if (next_device_id == 0) {
-        next_device_id = 1;
-    }
-
-    if (!devfs_devices) {
-        devfs_devices = dev;
-        devfs_devices_tail = dev;
-    } else {
-        devfs_devices_tail->next = dev;
-        devfs_devices_tail = dev;
-    }
+    devfs_link_child(&devfs_root, dev);
     spin_unlock_irqrestore(&devfs_lock, flags);
 
     debug_fs("devfs: registered '%s' (type %u, id %lu)\n", name, (unsigned)type, (unsigned long)dev->id);
@@ -831,7 +924,7 @@ int devfs_register_blkdev(const char *name, block_device_t *dev)
 // ── devfs_get_private — retrieve private_data from a devfs node ──
 void *devfs_get_private(struct vfs_node *node)
 {
-    devfs_device_t *dev = devfs_device_from_node(node);
+    devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
         return NULL;
     return dev->private_data;
@@ -841,7 +934,7 @@ void *devfs_get_private(struct vfs_node *node)
 const struct devfs_ops *devfs_get_file_ops(file_t *f)
 {
     if (!f || !f->node || f->type != FD_DEV) return NULL;
-    devfs_device_t *dev = devfs_device_from_node(f->node);
+    devfs_node_t *dev = devfs_device_from_node(f->node);
     if (!dev)
         return NULL;
     return dev->ops;
