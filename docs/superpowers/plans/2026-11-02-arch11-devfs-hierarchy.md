@@ -748,6 +748,10 @@ static bool readdir_has(vfs_node_t *dir, const char *name, uint8_t type)
 }
 
 /* ── Test Cases ────────────────────────────────────────────── */
+// NOTE: devfs records live until shutdown (ARCH-10 §7.3), so they
+// survive the vfs_init()/devfs_init() pair each case runs.  Every
+// case therefore registers under its OWN top-level directory name to
+// stay independent of the cases that ran before it.
 
 TEST_FUNC(test_devfs_hierarchy_register_and_lookup) {
     vfs_init();
@@ -779,18 +783,18 @@ TEST_FUNC(test_devfs_hierarchy_readdir_per_level) {
     vfs_init();
     devfs_init();
 
-    assert_eq(0, devfs_register_path("pci/0000:00:1f.2/vendor",
+    assert_eq(0, devfs_register_path("tree2/0000:00:1f.2/vendor",
                                      (void *)(uintptr_t)0x2222, &s_hier_ops));
 
     vfs_node_t *root = vfs_lookup("/dev");
     assert_not_null(root);
-    assert_true(readdir_has(root, "pci", VFS_DIR));
+    assert_true(readdir_has(root, "tree2", VFS_DIR));
 
-    vfs_node_t *d1 = vfs_lookup("/dev/pci");
+    vfs_node_t *d1 = vfs_lookup("/dev/tree2");
     assert_not_null(d1);
     assert_true(readdir_has(d1, "0000:00:1f.2", VFS_DIR));
 
-    vfs_node_t *d2 = vfs_lookup("/dev/pci/0000:00:1f.2");
+    vfs_node_t *d2 = vfs_lookup("/dev/tree2/0000:00:1f.2");
     assert_not_null(d2);
     assert_true(readdir_has(d2, "vendor", VFS_CHRDEV));
 
@@ -803,10 +807,10 @@ TEST_FUNC(test_devfs_hierarchy_read_data) {
     vfs_init();
     devfs_init();
 
-    assert_eq(0, devfs_register_path("pci/0000:00:1f.2/vendor",
+    assert_eq(0, devfs_register_path("tree3/0000:00:1f.2/vendor",
                                      (void *)(uintptr_t)0x3333, &s_hier_ops));
 
-    vfs_node_t *leaf = vfs_lookup("/dev/pci/0000:00:1f.2/vendor");
+    vfs_node_t *leaf = vfs_lookup("/dev/tree3/0000:00:1f.2/vendor");
     assert_not_null(leaf);
     if (leaf) {
         uint64_t val = 0;
@@ -838,19 +842,19 @@ TEST_FUNC(test_devfs_hierarchy_conflicts) {
     vfs_init();
     devfs_init();
 
-    assert_eq(0, devfs_register_path("pci/0000:00:1f.2/vendor",
+    assert_eq(0, devfs_register_path("tree4/0000:00:1f.2/vendor",
                                      (void *)(uintptr_t)0x5555, &s_hier_ops));
 
     // Exact duplicate path
-    assert_eq(-EEXIST, devfs_register_path("pci/0000:00:1f.2/vendor",
+    assert_eq(-EEXIST, devfs_register_path("tree4/0000:00:1f.2/vendor",
                                            (void *)(uintptr_t)0x6666, &s_hier_ops));
 
     // "null" is a built-in character device, not a directory
     assert_eq(-ENOTDIR, devfs_register_path("null/foo",
                                              (void *)(uintptr_t)0x7777, &s_hier_ops));
 
-    // "pci" is now a directory — the name is taken
-    assert_eq(-EEXIST, devfs_register_path("pci",
+    // "tree4" is now a directory — the name is taken
+    assert_eq(-EEXIST, devfs_register_path("tree4",
                                            (void *)(uintptr_t)0x8888, &s_hier_ops));
 }
 
@@ -946,8 +950,13 @@ $(TEST_BLD)/test_devfs_hierarchy.elf: $(TEST_BLD)/test_devfs_hierarchy.o \
 		$(TEST_BLD)/serial_sink_stub.o \
 		$(TEST_BLD)/rwlock.o \
 		$(LIBC_OBJS) $(MOCK_OBJS)
-	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=kmalloc -o $@ $^
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 ```
+
+> **注意**：链接行**不要**加 `-Wl,--wrap=kmalloc`。该选项要求 case 自己提供
+> `__wrap_kmalloc` 符号（`test_devfs_capacity.c` 为 OOM 注入而自己定义了一个），
+> 否则 `vfs_production.o` 的 `kmalloc` 引用会链接失败。本 case 不做 OOM 注入，
+> 因此不需要这个 wrap。
 
 - [ ] **Step 3: 运行测试，确认它失败**
 

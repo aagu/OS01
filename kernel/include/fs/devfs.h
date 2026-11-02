@@ -74,9 +74,20 @@ struct devfs_ops {
 int devfs_register_chrdev(const char *name, void *private_data,
                           const struct devfs_ops *ops);
 
+// Register a character device under a '/'-separated path relative to
+// the devfs mount point ("pci/0000:00:1f.2/vendor").  Intermediate
+// directories are created implicitly.  Behaviourally identical to
+// devfs_register_chrdev(), which is the historical spelling kept for
+// source compatibility.
+int devfs_register_path(const char *path, void *private_data,
+                         const struct devfs_ops *ops);
+
 // Register a block device that will appear under /dev/.
 // `name` follows the same relative-path rules as devfs_register_chrdev().
 int devfs_register_blkdev(const char *name, struct block_device *dev);
+
+// Block-device counterpart of devfs_register_path().
+int devfs_register_blkdev_path(const char *path, struct block_device *dev);
 
 // Register devfs with VFS filesystem registry
 int devfs_register_fs(void);

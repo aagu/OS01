@@ -17,6 +17,7 @@ $(eval $(call register_host_test,test_poll_nofile64,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_pty_winsize,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_devfs_input_dispatch,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_devfs_capacity,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_devfs_hierarchy,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
 
 TEST_BINS += \
@@ -37,6 +38,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_pty_winsize.elf \
     $(TEST_BLD)/test_devfs_input_dispatch.elf \
     $(TEST_BLD)/test_devfs_capacity.elf \
+    $(TEST_BLD)/test_devfs_hierarchy.elf \
     $(TEST_BLD)/test_nofile_limits.elf
 
 # Basic VFS & FAT32 tests
@@ -432,6 +434,30 @@ $(TEST_BLD)/test_devfs_capacity.elf: $(TEST_BLD)/test_devfs_capacity.o \
 		$(TEST_BLD)/rwlock.o \
 		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=kmalloc -o $@ $^
+
+# ── ARCH-11: devfs sub-directory hierarchy ─────────────────────
+#
+# The case drives the PRODUCTION devfs tree: multi-component
+# registration paths, per-level lookup and readdir, and the path
+# validation rules.
+$(TEST_BLD)/test_devfs_hierarchy.o: $(TEST_CASES)/test_devfs_hierarchy.c \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TESTS_DIR)/kernel/include/fs/devfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_devfs_hierarchy.elf: $(TEST_BLD)/test_devfs_hierarchy.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/fat_production.o \
+		$(TEST_BLD)/tmpfs_production.o \
+		$(TEST_BLD)/devfs_vfs_production.o \
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(TEST_BLD)/rwlock.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # ── ARCH-10 Task 6: NOFILE soft limit at descriptor installation ──
 #

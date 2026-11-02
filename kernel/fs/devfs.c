@@ -858,67 +858,180 @@ int devfs_init(void)
 
 // ── Public API ──────────────────────────────────────────────
 
-static int devfs_validate_name(const char *name)
+// Split a relative '/'-separated path into components.
+//
+// Returns 0 and fills `comps` / `*out_count` on success, or:
+//   -EINVAL        NULL / empty / absolute / empty component / "." / ".."
+//                  / component >= DEVFS_NAME_MAX bytes / too many components
+//   -ENAMETOOLONG  the absolute user path would not fit in VFS_NAME_MAX
+//
+// `comps` must have room for DEVFS_MAX_DEPTH entries of DEVFS_NAME_MAX bytes.
+static int devfs_split_path(const char *path,
+                             char comps[DEVFS_MAX_DEPTH][DEVFS_NAME_MAX],
+                             int *out_count)
 {
-    if (!name || name[0] == '\0')
-        return -EINVAL;
-    if (strlen(name) >= DEVFS_NAME_MAX)
-        return -EINVAL;
-    if (strchr(name, '/'))
-        return -EINVAL;
+    if (!path || path[0] == '\0') return -EINVAL;
+
+    // devfs paths are relative to the mount point (/dev).
+    if (path[0] == '/') return -EINVAL;
+
+    // The absolute user path is "/dev/" + path and must fit in VFS_NAME_MAX.
+    size_t plen = strlen(path);
+    if (plen + strlen("/dev/") >= VFS_NAME_MAX) return -ENAMETOOLONG;
+
+    int count = 0;
+    const char *p = path;
+    for (;;) {
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+
+        if (len == 0) return -EINVAL;                // "", "a//b", "trailing/"
+        if (len >= DEVFS_NAME_MAX) return -EINVAL;   // too long — never truncate
+        if (count >= DEVFS_MAX_DEPTH) return -EINVAL;
+
+        // No traversal semantics in devfs.
+        if ((len == 1 && p[0] == '.') ||
+            (len == 2 && p[0] == '.' && p[1] == '.'))
+            return -EINVAL;
+
+        memcpy(comps[count], p, len);
+        comps[count][len] = '\0';
+        count++;
+
+        if (!slash) break;
+        p = slash + 1;
+    }
+
+    *out_count = count;
     return 0;
 }
 
-static int devfs_register_device(const char *name, uint8_t type,
-                                 void *private_data, const struct devfs_ops *ops)
+// Register a node at `path`, creating intermediate directories.
+//
+// Nodes are allocated BEFORE the registry lock is taken (allocation must
+// not happen under a spinlock).  One candidate node is prepared per path
+// component; a component that already exists in the tree reuses the
+// existing node and its candidate is discarded.
+//
+// Error codes:
+//   -EINVAL        malformed path (see devfs_split_path)
+//   -ENAMETOOLONG  the absolute path would not fit in VFS_NAME_MAX
+//   -EEXIST        the leaf name is already taken in its directory
+//   -ENOTDIR       an intermediate component is a device, not a directory
+//   -ENOMEM        allocation failed
+//   -ENOSPC        the id space is exhausted
+//
+// Intermediate directories that were already created stay in the tree when
+// a later step fails — they carry no externally visible state and rolling
+// them back would need extra reference counting.
+static int devfs_register_node(const char *path, devfs_kind_t kind,
+                                void *private_data,
+                                const struct devfs_ops *ops)
 {
-    int val_rc = devfs_validate_name(name);
-    if (val_rc != 0)
-        return val_rc;
+    char (*comps)[DEVFS_NAME_MAX] =
+        (char (*)[DEVFS_NAME_MAX])calloc(DEVFS_MAX_DEPTH, DEVFS_NAME_MAX);
+    if (!comps) return -ENOMEM;
 
-    devfs_kind_t kind = (type == VFS_BLKDEV) ? DEVFS_KIND_BLK : DEVFS_KIND_CHR;
+    int count = 0;
+    int rc = devfs_split_path(path, comps, &count);
+    if (rc != 0) {
+        kfree(comps);
+        return rc;
+    }
 
-    devfs_node_t *dev = (devfs_node_t *)calloc(1, sizeof(devfs_node_t));
-    if (!dev)
-        return -ENOMEM;
+    // One candidate node per component.  slots[i] is used only when
+    // component i does not already exist in the tree.
+    devfs_node_t *slots[DEVFS_MAX_DEPTH];
+    uint32_t used = 0;
+    for (int i = 0; i < count; i++) {
+        slots[i] = (devfs_node_t *)calloc(1, sizeof(devfs_node_t));
+        if (!slots[i]) {
+            for (int j = 0; j < i; j++)
+                kfree(slots[j]);
+            kfree(comps);
+            return -ENOMEM;
+        }
+        strncpy(slots[i]->name, comps[i], DEVFS_NAME_MAX - 1);
+        slots[i]->name[DEVFS_NAME_MAX - 1] = '\0';
+        slots[i]->kind = (i == count - 1) ? kind : DEVFS_KIND_DIR;
+    }
 
-    strncpy(dev->name, name, DEVFS_NAME_MAX - 1);
-    dev->name[DEVFS_NAME_MAX - 1] = '\0';
-    dev->kind = kind;
-    dev->ops = ops;
-    dev->private_data = private_data;
-
+    int result = 0;
+    devfs_node_t *leaf = NULL;
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
-    if (devfs_find_child(&devfs_root, name)) {
-        spin_unlock_irqrestore(&devfs_lock, flags);
-        kfree(dev);
-        return -EEXIST;
+
+    devfs_node_t *cur_dir = &devfs_root;
+    for (int i = 0; i < count - 1; i++) {
+        devfs_node_t *child = devfs_find_child(cur_dir, comps[i]);
+        if (!child) {
+            // Implicit directory.
+            if (next_device_id == UINT64_MAX) { result = -ENOSPC; goto out; }
+            slots[i]->id = next_device_id++;
+            devfs_link_child(cur_dir, slots[i]);
+            used |= (1u << i);
+            child = slots[i];
+        } else if (child->kind != DEVFS_KIND_DIR) {
+            // A device occupies this name — it cannot be a directory.
+            result = -ENOTDIR;
+            goto out;
+        }
+        cur_dir = child;
     }
 
-    if (next_device_id == UINT64_MAX) {
-        // Refuse rather than wrap into a live id.
-        spin_unlock_irqrestore(&devfs_lock, flags);
-        kfree(dev);
-        return -ENOSPC;
+    // Leaf: the name must be free in its directory.
+    if (devfs_find_child(cur_dir, comps[count - 1])) {
+        result = -EEXIST;
+        goto out;
     }
+    if (next_device_id == UINT64_MAX) { result = -ENOSPC; goto out; }
 
-    dev->id = next_device_id++;
-    devfs_link_child(&devfs_root, dev);
+    leaf = slots[count - 1];
+    leaf->id = next_device_id++;
+    leaf->kind = kind;
+    leaf->ops = ops;
+    leaf->private_data = private_data;
+    devfs_link_child(cur_dir, leaf);
+    used |= (1u << (count - 1));
+
+out:
     spin_unlock_irqrestore(&devfs_lock, flags);
 
-    debug_fs("devfs: registered '%s' (type %u, id %lu)\n", name, (unsigned)type, (unsigned long)dev->id);
-    return 0;
+    // Release the candidates that were not linked into the tree.
+    for (int i = 0; i < count; i++) {
+        if (!(used & (1u << i)))
+            kfree(slots[i]);
+    }
+    kfree(comps);
+
+    if (result == 0) {
+        debug_fs("devfs: registered '%s' (id %lu)\n", path,
+                 (unsigned long)leaf->id);
+    } else {
+        log_warn("devfs: registration of '%s' failed (%d)\n", path, result);
+    }
+    return result;
 }
 
 int devfs_register_chrdev(const char *name, void *private_data,
                           const struct devfs_ops *ops)
 {
-    return devfs_register_device(name, VFS_CHRDEV, private_data, ops);
+    return devfs_register_node(name, DEVFS_KIND_CHR, private_data, ops);
+}
+
+int devfs_register_path(const char *path, void *private_data,
+                         const struct devfs_ops *ops)
+{
+    return devfs_register_node(path, DEVFS_KIND_CHR, private_data, ops);
 }
 
 int devfs_register_blkdev(const char *name, block_device_t *dev)
 {
-    return devfs_register_device(name, VFS_BLKDEV, dev, NULL);
+    return devfs_register_node(name, DEVFS_KIND_BLK, dev, NULL);
+}
+
+int devfs_register_blkdev_path(const char *path, block_device_t *dev)
+{
+    return devfs_register_node(path, DEVFS_KIND_BLK, dev, NULL);
 }
 
 // ── devfs_get_private — retrieve private_data from a devfs node ──
