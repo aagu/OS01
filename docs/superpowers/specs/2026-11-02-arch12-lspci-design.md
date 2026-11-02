@@ -205,11 +205,11 @@ static int pci_attr_read(vfs_node_t *node, uint64_t offset, uint64_t size, void 
 
 ### 3.5 各属性的内容与格式
 
-| 属性 | 内容 | 格式 | 长度 |
+| 属性 | 内容 | 格式 | 内容长度（字节，不含 NUL） |
 |------|------|------|------|
-| `vendor` | vendor id | `"0x8086\n"` | 8 |
-| `device` | device id | `"0x2922\n"` | 8 |
-| `class` | 24-bit class code | `"0x010601\n"` | 10 |
+| `vendor` | vendor id | `"0x8086\n"` | 7 |
+| `device` | device id | `"0x2922\n"` | 7 |
+| `class` | 24-bit class code | `"0x010601\n"` | 9 |
 | `config` | 256 字节 config space | 原始字节 | 256（固定） |
 | `resource` | BAR 列表 | 每行一个 BAR | ≤ 256 |
 | `irq` | 中断 pin / GSI | `"16\n"` | ≤ 4 |
@@ -379,7 +379,6 @@ f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 | 0x1af4:0x1041 | Virtio console |
 | 0x1af4:0x1042 | Virtio modern block device |
 | 0x1af4:0x1100 | Virtio GPU |
-| 0x10de:0x10xx | NVIDIA Corporation |
 
 **vendor 名表**：`0x8086` → `Intel Corporation`；`0x1af4` → `Red Hat, Inc.`；
 `0x1234` → `QEMU/Bochs`；`0x10de` → `NVIDIA Corporation`；`0x1002` → `Advanced Micro Devices, Inc. [AMD/ATI]`；
@@ -395,8 +394,9 @@ f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 
 - `vendor_hex` / `device_hex` 是 **4 位小写十六进制、不带 `0x` 前缀**（如 `8086`、`2922`）。
 - 未知 class → `"Unknown class [XXYYZZ]"`（`XXYYZZ` 是 6 位大写十六进制）。
-- `0x10de`（NVIDIA）的 device 命中规则是**按 vendor 通配**：任何 `0x10de:*` 都回退为
-  `"NVIDIA Corporation"`（对应 §4.4 表里的 `0x10de:0x10xx` 行）。
+- `0x10de`（NVIDIA）只出现在 **vendor 名表**里，没有 device 条目——因此按上表回退成
+  `"NVIDIA Corporation <device_hex>"`。**不做** vendor 通配的 device 规则：一张表一套规则，
+  输出因此完全确定。
 
 ### 4.5 选项与退出码
 
