@@ -268,5 +268,14 @@ int main(int argc, char **argv)
     desktop_shell_destroy(shell);
     gui_input_destroy(input);
     gui_platform_destroy(platform);
+
+    /* Smoke mode reports via the automation marker on stdout (fd 1):
+     * under -serial stdio that is the QEMU serial line the runner
+     * greps for.  Only reached after a full render + clean teardown. */
+    if (smoke && rc == 0) {
+        static const char msg[] = "[DESKTOP] SMOKE PASS\n";
+        if (write(1, msg, sizeof(msg) - 1) != (ssize_t)(sizeof(msg) - 1))
+            return 1;
+    }
     return rc;
 }

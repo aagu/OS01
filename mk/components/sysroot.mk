@@ -45,7 +45,11 @@ endef
 
 $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
-	@in_key=$$( { find $(OS01_ROOT)/kernel/include -type f -exec sha256sum {} + 2>/dev/null | sort; printf 'arch: %s\n' "x86_64"; } | sha256sum | cut -d' ' -f1 ); \
+	@# FB_RESOLUTION_TEST is part of the key because kernel install-headers
+	@# publishes uapi/fb_test.h only in the test configuration: without it
+	@# a normal -> resolution-test flip in one build dir would skip the
+	@# staging sub-make and the sysroot would keep missing the UAPI header.
+	@in_key=$$( { find $(OS01_ROOT)/kernel/include -type f -exec sha256sum {} + 2>/dev/null | sort; printf 'arch: %s\n' "x86_64"; printf 'fb_resolution_test: %s\n' "$(FB_RESOLUTION_TEST)"; } | sha256sum | cut -d' ' -f1 ); \
 	old_key=""; \
 	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/kernel-headers/manifest" ]; then \
