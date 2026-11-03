@@ -1279,7 +1279,11 @@ STATE_EMITTING_SCENARIOS = ("interaction", "isolation", "crash", "fatal")
 
 # The bounds of a single step inside the interaction scenario.
 STEP_TIMEOUT_SECONDS = 12.0
-SHELL_TIMEOUT_SECONDS = 10.0
+# Generous against slow CI vCPUs: the interaction scenario's `wait <pid>`
+# exchange once blew a 10 s window on a loaded GitHub runner (the
+# scenario budget is 180 s, so the wider window stays a hang detector,
+# not a spec boundary). Host fakes set their own compressed value.
+SHELL_TIMEOUT_SECONDS = 30.0
 # The terminal redraws on its own schedule (its 30 FPS loop and the
 # foreground restore), so the recovery check waits for the redraw -- with
 # this bound.  A screen that stays on the GUI is a FAIL.
