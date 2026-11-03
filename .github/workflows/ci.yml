@@ -370,9 +370,16 @@ jobs:
 
       - name: Syscall E2E at 1/2/4/8 CPUs
         run: |
+          # SYSTEST_TIMEOUT rides the same margin precedent as the other
+          # CI-vCPU budgets (af422d7a, ae35d6cc): the 8-CPU TCG sweep on a
+          # loaded shared runner once stalled twice at 160 s (default
+          # 120 + 8-CPU bonus) while the identical tree passed the same
+          # sweep three times earlier that day and always passes on the
+          # dev box. 240 s keeps the hang detector honest without
+          # gating on runner weather.
           for cpus in 1 2 4 8; do
             echo "== systest @ ${cpus} CPU(s) =="
-            QEMU_SMP="${cpus}" make OS01_SYSTEST=1 test-qemu SUITE=systest || exit 1
+            QEMU_SMP="${cpus}" SYSTEST_TIMEOUT=240 make OS01_SYSTEST=1 test-qemu SUITE=systest || exit 1
           done
 
       - name: x86 guest nightly suites
