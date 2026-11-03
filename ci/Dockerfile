@@ -61,8 +61,13 @@ RUN wget -qO /tmp/llvm.tar.xz \
 # aarch64 SMP harness behaves differently on the older release. Build
 # only the two arches the CI needs; disable subsystems not used by the
 # project (user-mode,
-# block backends, GUI frontends, network slirp) to keep the layer small
-# (~200 MB rather than ~1.5 GB).
+# block backends, GUI frontends) to keep the layer small
+# (~200 MB rather than ~1.5 GB). slirp (the `-netdev user` backend the
+# network suite's DHCP test drives) stays enabled via the system
+# libslirp — QEMU ≥ 7.2 dropped the bundled submodule, so without
+# libslirp-dev configure silently disables it and `-netdev user` fails
+# at runtime with "network backend 'user' is not compiled into this
+# binary".
 #
 # If Ubuntu's packaged QEMU becomes sufficient, drop this layer and install
 # qemu-system-x86 + qemu-system-arm from apt instead.
@@ -75,7 +80,7 @@ RUN apt-get update && \
         python3 python3-pip python3-venv \
         libglib2.0-dev libpixman-1-dev libfdt-dev \
         zlib1g-dev libnfs-dev libaio-dev libcap-ng-dev \
-        libattr1-dev \
+        libattr1-dev libslirp-dev \
     && \
     cd /tmp && \
     wget -q https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz && \
@@ -88,6 +93,7 @@ RUN apt-get update && \
         --disable-user \
         --disable-guest-agent \
         --disable-vnc \
+        --enable-slirp \
         --enable-lto \
         --disable-werror \
     && \
@@ -101,7 +107,7 @@ RUN apt-get update && \
     apt-get purge -y --auto-remove \
         libglib2.0-dev libpixman-1-dev libfdt-dev \
         zlib1g-dev libnfs-dev libaio-dev libcap-ng-dev \
-        libattr1-dev \
+        libattr1-dev libslirp-dev \
         python3-pip python3-venv \
     && \
     rm -rf /var/lib/apt/lists/*
