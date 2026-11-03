@@ -53,6 +53,26 @@ test_gfx 持有 owner 后停止呈现（serial 时间线上
   外圈比对扫全屏；现按文档契约在视图框架内取样（视图偏移
   VIEW_X/VIEW_Y、外圈限定视图内、全视图判定比对视图尺寸）。
 
+## 同家族：gui input_interaction 在 1 vCPU 上饿死 ash
+
+nightly 验证运行（2026-11-03/04）暴露第二个同家族停摆：`SUITE=gui`
+的 `input_interaction` 用例在 CI 的 SMP=1 上每次都卡在
+`wait <probe_pid>`（10 s → 30 s 两个窗口都超时），SMP=2 则通过；
+开发机同样每次通过。
+
+证据（CI 归档串口转录）：探针的 `EXIT result=PASS exit_code=0`
+record 已到达串口（探针确认退出），随后 runner 输入的 `wait 17`
+仅剩终端回显，ash 的 `printf` 标记 30 s 内从未出现——终端在探针
+退出后的前台恢复窗口停摆，不再中继 PTY 输出，1 vCPU 上 ash 连同
+整个 shell 路径被饿死。内核侧 waitpid 本身可排除：blocker 框架
+（check-first + double-check + schedule() 时刻 backstop）对
+"子进程先死、父进程后 wait4" 是闭环的。
+
+两个套件的共同点是都压「探针退出 → 终端前台恢复 → 全量
+REDRAW present」这条 1-vCPU 关键路径。需要内核 gfx/终端层在慢速
+单核时序下的专门取证，超出 CI 修复任务范围；在解决之前 gui 与
+gui-desktop 在 nightly 中同样以非阻塞 + `::warning` 运行。
+
 ## 决定
 
 在像素契约解决之前，nightly 的 terminal-present 步骤保留执行但
