@@ -788,8 +788,16 @@ class ResolutionSession:
         return st["generation"] if st else None
 
     def shell_pid(self) -> Optional[int]:
-        m = re.search(r"PID=(\d+)", self.run('echo "PID=$$"'))
-        return int(m.group(1)) if m else None
+        # The first probe can come up empty on slow CI vCPUs (the echo's
+        # output loses the race against the wait window and run() times
+        # out without raising); retry before reporting None so a lost
+        # probe doesn't fail the whole case.
+        for _ in range(3):
+            m = re.search(r"PID=(\d+)", self.run('echo "PID=$$"'))
+            if m:
+                return int(m.group(1))
+            time.sleep(0.5)
+        return None
 
     def pty(self) -> Optional[str]:
         m = re.search(r"(/dev/pts\d+)", self.run("cat /proc/self/fd/0"))
