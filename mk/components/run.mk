@@ -1416,10 +1416,12 @@ TEST_QEMU_FLAVOR_gui            =
 TEST_QEMU_FLAVOR_gui-desktop    =
 TEST_QEMU_FLAVOR_arch10-capacity = ARCH10_CAPACITY_TEST=1
 # Default baseline log path for the terminal-present suite; the
-# task-6 brief calls this out explicitly.  Tests pass this through to
-# the dispatcher as TERMINAL_PRESENT_BASELINE_LOG; an explicit
-# override is allowed (e.g. for re-capturing the baseline elsewhere).
-TERMINAL_PRESENT_BASELINE_LOG ?= /tmp/os01-terminal-present-baseline/serial.log
+# task-6 brief calls this out explicitly.  The baseline pair lives in
+# the repo (qemutests/baselines/terminal-present/) so the suite works
+# on machines where the original /tmp evidence is gone (reboot,
+# nightly CI).  An explicit override is allowed (e.g. for re-capturing
+# the baseline elsewhere).
+TERMINAL_PRESENT_BASELINE_LOG ?= $(OS01_ROOT)/qemutests/baselines/terminal-present/serial.log
 TEST_QEMU_IMG_phase-0          = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest          = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase    = $(TEST_INITTAB_IMAGE)

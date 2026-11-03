@@ -1,0 +1,533 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;042;160t[2J[001;001HBdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00013 " from PciRoot(0x0)/Pci(0x3,0x0)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00013 " from PciRoot(0x0)/Pci(0x3,0x0)/Sata(0x0,0xFFFF,0x0)
+set VBE mode to 18
+serial port init succeed
+EFER: NXE enabled
+frame buffer remap succeed
+subsys: init  apic ... ok
+8259A: skipped (IOAPIC line controller active)
+subsys: init  pic ... ok
+subsys: init  clocksource ... ok
+subsys: init  timer ... ok
+subsys: init  lapic-timer ... ok
+subsys: init  pit ... ok
+serial: IRQ4 registered (IER=0x1 IIR=0xc1 MCR=0xb)
+subsys: init  serial ... ok
+subsys: init  keyboard ... ok
+subsys: init  device-boot ... ok
+subsys: init  mouse ... ok
+[thermal] non-Intel vendor (sig ebx=68747541 edx=69746e65 ecx=444d4163); publishing VENDOR unsupported
+subsys: init  thermal ... ok
+percpu: BSP  (cpu=0, apic_id=0) online
+percpu: AP   (cpu=1, apic_id=1) registered
+percpu: 2 CPU(s) registered (2 in MADT)
+CSPRNG: kernel build variant=default
+CSPRNG: pool seeded STRONG from UEFI GetRNG (boot_entropy)
+pci_devfs: published 56 attribute nodes for 8 PCI devices
+tty: console TTY created
+devfs: /dev/null read=0 write=4
+subsys: percpu lapic-timer-start cpu=0 ... ok
+subsys: percpu lapic-timer-start cpu=1 ... ok
+net: no network devices registered, skipping stack start
+
++--------------------------------+
+|  OS01 Init v1.0 (PID 1)        |
++--------------------------------+
+
+init: running as PID 1
+init: phase SYSINIT
+init: phase WAIT
+init: phase ONCE
+init: entering supervision loop
+fork: pid=1 returned 2
+init: started pid 2: '/bin/terminal' (respawn)
+fork: pid=2 returned 3
+
+
+BusyBox v1.36.1 (2026-11-04 00:48:47 CST) built-in shell (ash)
+
+# monitor
+fork: pid=3 returned 4
+[?1049h[2J[H[?25l[term-probe] wakes/s=11 presents/s=4 iter_avg_us=13917 iter_max_us=77646 refresh_avg_us=31 refresh_max_us=133 rest_avg_us=13885 present_avg_us=38152 present_max_us=77626
+[HOS01 monitor[0m[K
+CPU total: [2m--[0m[0m[K
+CPU0: [2m--[0m[0m[K
+CPU1: [2m--[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  [0m[K
+  PID    CPU%  S  NAME[0m[K
+     1      --  S  [37minit[0m[0m[K
+     2      --  S  [37mterminal[0m[0m[K
+     3      --  S  [37mbusybox[0m[0m[K
+     4      --  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=1956921625 end_ns=3140521167 full_frames=2 partial_frames=3 success_ns=141731821 success_bytes=10492448 success_max_ns=71791039 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=17
+[term-probe] wakes/s=5 presents/s=1 iter_avg_us=739 iter_max_us=3574 refresh_avg_us=28 refresh_max_us=35 rest_avg_us=711 present_avg_us=3543 present_max_us=3543
+[HOS01 monitor[0m[K
+CPU total: [32m0.5%[0m[0m[K
+CPU0: [32m1.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .[0m[K
+  PID    CPU%  S  NAME[0m[K
+     2    1.0%  S  [37mterminal[0m[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ..[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=3140521167 end_ns=5129897255 full_frames=0 partial_frames=2 success_ns=1482684 success_bytes=57344 success_max_ns=808793 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=9
+[term-probe] wakes/s=5 presents/s=2 iter_avg_us=698 iter_max_us=2170 refresh_avg_us=32 refresh_max_us=40 rest_avg_us=665 present_avg_us=1656 present_max_us=2125
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ...[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=5 presents/s=1 iter_avg_us=135 iter_max_us=532 refresh_avg_us=31 refresh_max_us=36 rest_avg_us=103 present_avg_us=505 present_max_us=505
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ....[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=5129897255 end_ns=7128090041 full_frames=0 partial_frames=2 success_ns=81590 success_bytes=1024 success_max_ns=40920 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=235 iter_max_us=842 refresh_avg_us=28 refresh_max_us=35 rest_avg_us=207 present_avg_us=819 present_max_us=819
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .....[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=7128090041 end_ns=8128282610 full_frames=0 partial_frames=1 success_ns=40920 success_bytes=512 success_max_ns=40920 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=241 iter_max_us=864 refresh_avg_us=30 refresh_max_us=34 rest_avg_us=211 present_avg_us=834 present_max_us=834
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ......[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=8128282610 end_ns=9130012801 full_frames=0 partial_frames=1 success_ns=39617 success_bytes=512 success_max_ns=39617 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=248 iter_max_us=882 refresh_avg_us=32 refresh_max_us=40 rest_avg_us=215 present_avg_us=852 present_max_us=852
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .......[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=161 iter_max_us=534 refresh_avg_us=32 refresh_max_us=43 rest_avg_us=129 present_avg_us=505 present_max_us=505
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ........[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=9130012801 end_ns=11128530485 full_frames=0 partial_frames=2 success_ns=80578 success_bytes=1024 success_max_ns=40610 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=237 iter_max_us=855 refresh_avg_us=28 refresh_max_us=36 rest_avg_us=209 present_avg_us=827 present_max_us=827
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .........[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=156 iter_max_us=529 refresh_avg_us=29 refresh_max_us=33 rest_avg_us=127 present_avg_us=498 present_max_us=498
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ..........[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=11128530485 end_ns=13129711882 full_frames=0 partial_frames=2 success_ns=80968 success_bytes=1024 success_max_ns=40850 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=248 iter_max_us=886 refresh_avg_us=31 refresh_max_us=37 rest_avg_us=216 present_avg_us=856 present_max_us=856
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ...........[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=160 iter_max_us=531 refresh_avg_us=31 refresh_max_us=39 rest_avg_us=128 present_avg_us=502 present_max_us=502
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ............[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=13129711882 end_ns=15129634440 full_frames=0 partial_frames=2 success_ns=80097 success_bytes=1024 success_max_ns=40269 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=247 iter_max_us=886 refresh_avg_us=30 refresh_max_us=35 rest_avg_us=216 present_avg_us=856 present_max_us=856
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .............[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=161 iter_max_us=535 refresh_avg_us=32 refresh_max_us=41 rest_avg_us=128 present_avg_us=503 present_max_us=503
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ..............[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=15129634440 end_ns=17128234617 full_frames=0 partial_frames=2 success_ns=81541 success_bytes=1024 success_max_ns=41382 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=245 iter_max_us=865 refresh_avg_us=34 refresh_max_us=37 rest_avg_us=211 present_avg_us=833 present_max_us=833
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ...............[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=154 iter_max_us=523 refresh_avg_us=28 refresh_max_us=32 rest_avg_us=126 present_avg_us=495 present_max_us=495
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=17128234617 end_ns=19128498698 full_frames=0 partial_frames=2 success_ns=80548 success_bytes=1024 success_max_ns=41372 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=241 iter_max_us=867 refresh_avg_us=29 refresh_max_us=33 rest_avg_us=211 present_avg_us=836 present_max_us=836
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=158 iter_max_us=536 refresh_avg_us=29 refresh_max_us=34 rest_avg_us=129 present_avg_us=506 present_max_us=506
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ..................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=19128498698 end_ns=21128217084 full_frames=0 partial_frames=2 success_ns=80186 success_bytes=1024 success_max_ns=40529 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=249 iter_max_us=857 refresh_avg_us=38 refresh_max_us=51 rest_avg_us=210 present_avg_us=829 present_max_us=829
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ...................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=21128217084 end_ns=22128326007 full_frames=0 partial_frames=1 success_ns=39487 success_bytes=512 success_max_ns=39487 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=239 iter_max_us=857 refresh_avg_us=29 refresh_max_us=36 rest_avg_us=209 present_avg_us=828 present_max_us=828
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ....................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=22128326007 end_ns=23128338048 full_frames=0 partial_frames=1 success_ns=40369 success_bytes=512 success_max_ns=40369 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=238 iter_max_us=851 refresh_avg_us=29 refresh_max_us=41 rest_avg_us=208 present_avg_us=823 present_max_us=823
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .....................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=159 iter_max_us=541 refresh_avg_us=29 refresh_max_us=32 rest_avg_us=130 present_avg_us=510 present_max_us=510
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ......................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=23128338048 end_ns=25128568458 full_frames=0 partial_frames=2 success_ns=101082 success_bytes=1024 success_max_ns=53504 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=267 iter_max_us=965 refresh_avg_us=31 refresh_max_us=35 rest_avg_us=236 present_avg_us=935 present_max_us=935
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .......................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=160 iter_max_us=537 refresh_avg_us=32 refresh_max_us=34 rest_avg_us=127 present_avg_us=500 present_max_us=500
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ........................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=25128568458 end_ns=27128322200 full_frames=0 partial_frames=2 success_ns=79916 success_bytes=1024 success_max_ns=40008 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=238 iter_max_us=854 refresh_avg_us=29 refresh_max_us=36 rest_avg_us=209 present_avg_us=826 present_max_us=826
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .........................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=27128322200 end_ns=28128527071 full_frames=0 partial_frames=1 success_ns=43117 success_bytes=512 success_max_ns=43117 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=241 iter_max_us=859 refresh_avg_us=31 refresh_max_us=36 rest_avg_us=209 present_avg_us=827 present_max_us=827
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ..........................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=28128527071 end_ns=29128676634 full_frames=0 partial_frames=1 success_ns=39767 success_bytes=512 success_max_ns=39767 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=239 iter_max_us=856 refresh_avg_us=29 refresh_max_us=36 rest_avg_us=209 present_avg_us=827 present_max_us=827
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ...........................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=174 iter_max_us=593 refresh_avg_us=31 refresh_max_us=50 rest_avg_us=143 present_avg_us=561 present_max_us=561
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ............................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=29128676634 end_ns=31128407414 full_frames=0 partial_frames=2 success_ns=84427 success_bytes=1024 success_max_ns=44530 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=2
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=234 iter_max_us=856 refresh_avg_us=27 refresh_max_us=33 rest_avg_us=207 present_avg_us=821 present_max_us=821
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  .............................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=31128407414 end_ns=32128527547 full_frames=0 partial_frames=1 success_ns=40560 success_bytes=512 success_max_ns=40560 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=242 iter_max_us=854 refresh_avg_us=32 refresh_max_us=53 rest_avg_us=209 present_avg_us=826 present_max_us=826
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ..............................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=32128527547 end_ns=33128561808 full_frames=0 partial_frames=1 success_ns=44852 success_bytes=512 success_max_ns=44852 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=242 iter_max_us=863 refresh_avg_us=32 refresh_max_us=36 rest_avg_us=210 present_avg_us=832 present_max_us=832
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ...............................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=33128561808 end_ns=34128703580 full_frames=0 partial_frames=1 success_ns=40569 success_bytes=512 success_max_ns=40569 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[term-probe] wakes/s=4 presents/s=1 iter_avg_us=234 iter_max_us=851 refresh_avg_us=25 refresh_max_us=31 rest_avg_us=208 present_avg_us=825 present_max_us=825
+[HOS01 monitor[0m[K
+CPU total: [32m0.0%[0m[0m[K
+CPU0: [32m0.0%[0m[0m[K
+CPU1: [32m0.0%[0m[0m[K
+PMM 占用: 38.0 MiB / 504.0 MiB ([32m7.5%[0m)[0m[K
+Temp: unsupported[0m[K
+CPU hist:  ................................[0m[K
+  PID    CPU%  S  NAME[0m[K
+     1    0.0%  S  [37minit[0m[0m[K
+     2    0.0%  S  [37mterminal[0m[0m[K
+     3    0.0%  S  [37mbusybox[0m[0m[K
+     4    0.0%  R  [37mmonitor[0m[0m[K
+[term-present] version=1 begin_ns=34128703580 end_ns=35130322009 full_frames=0 partial_frames=1 success_ns=39306 success_bytes=512 success_max_ns=39306 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=1
+[0m[?25h[?1049l# [term-probe] wakes/s=7 presents/s=3 iter_avg_us=14059 iter_max_us=96907 refresh_avg_us=65 refresh_max_us=327 rest_avg_us=13993 present_avg_us=32646 present_max_us=96577
+echo MONITOR SHELL ALIVE
+fork: pid=3 returned 5
+MONITOR SHELL ALIVE
+# [term-probe] wakes/s=9 presents/s=3 iter_avg_us=260 iter_max_us=805 refresh_avg_us=22 refresh_max_us=35 rest_avg_us=237 present_avg_us=707 present_max_us=784
+^C
+
+# [term-present] version=1 begin_ns=35130322009 end_ns=36692024522 full_frames=1 partial_frames=5 success_ns=93021050 success_bytes=5212768 success_max_ns=92270513 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=12
+echo SHELL_ALIVE_AFTER_CTRL_C
+fork: pid=3 returned 6
+SHELL_ALIVE_AFTER_CTRL_C
+# printf '\x1b[2J\x1b[Hclear-test\n'
+[2J[Hclear-test
+# [term-probe] wakes/s=20 presents/s=7 iter_avg_us=374 iter_max_us=2813 refresh_avg_us=20 refresh_max_us=40 rest_avg_us=353 present_avg_us=1005 present_max_us=2790
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=32 iter_max_us=38 refresh_avg_us=30 refresh_max_us=36 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=34 iter_max_us=44 refresh_avg_us=31 refresh_max_us=41 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=38 iter_max_us=44 refresh_avg_us=35 refresh_max_us=40 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=36 iter_max_us=41 refresh_avg_us=33 refresh_max_us=38 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=36 iter_max_us=46 refresh_avg_us=34 refresh_max_us=43 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=34 iter_max_us=39 refresh_avg_us=32 refresh_max_us=36 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=37 iter_max_us=41 refresh_avg_us=34 refresh_max_us=38 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=39 iter_max_us=45 refresh_avg_us=37 refresh_max_us=42 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=36 iter_max_us=38 refresh_avg_us=33 refresh_max_us=35 rest_avg_us=2 present_avg_us=0 present_max_us=0
+[term-probe] wakes/s=4 presents/s=0 iter_avg_us=37 iter_max_us=43 refresh_avg_us=34 refresh_max_us=39 rest_avg_us=2 present_avg_us=0 present_max_us=0
+/bin/test_gfx --present-rect-surface
+[term-present] version=1 begin_ns=36692024522 end_ns=48903444666 full_frames=0 partial_frames=7 success_ns=3466023 success_bytes=169088 success_max_ns=2182045 noop_calls=0 skipped_calls=0 failed_attempts=0 failed_ns=0 failed_max_ns=0 failed_completed_rect_bytes=0 failed_prefix=unknown rect_calls=24
+fork: pid=3 returned 7
+[present-rect-surface] ready
+[present-rect-surface] rect=10,10,8,8 done
+[present-rect-surface] rect=63,63,1,1 done
+[present-rect-surface] rect=0,0,64,64 done
+[present-rect-surface] PASS
+# [term-probe] wakes/s=11 presents/s=3 iter_avg_us=8720 iter_max_us=92769 refresh_avg_us=8474 refresh_max_us=92766 rest_avg_us=245 present_avg_us=886 present_max_us=1310

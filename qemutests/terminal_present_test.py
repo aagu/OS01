@@ -149,6 +149,14 @@ except Exception:  # pragma: no cover
     evaluate_present_window = None  # type: ignore[assignment]
 
 
+# ── Surface-protocol view geometry (pinned by the guest) ────────
+# user/test_gfx/test_gfx.c present_rect_surface_mode() opens its view
+# at this exact full-framebuffer offset; the pixel checker samples the
+# QMP screendumps through this frame.
+VIEW_X, VIEW_Y = 100, 100
+VIEW_W, VIEW_H = 64, 64
+
+
 # ── QEMU argv (matches Task-3 baseline manifest) ────────────────
 
 
@@ -353,21 +361,30 @@ def _verify_baseline(image: Path, firmware: Path, baseline_log: Path,
     of the baseline image identity)."""
     hard: List[str] = []
     soft: List[str] = []
+    # Identity fields may be null in a hand-maintained manifest; a null
+    # expected hash must downgrade to "no baseline reference" (soft note),
+    # never crash the runner.
     if not baseline_log.is_file():
         hard.append(f"baseline serial log missing: {baseline_log}")
-    if _sha256(image) != manifest.image_sha256:
+    if not manifest.image_sha256:
+        soft.append("baseline manifest has no image_sha256 reference")
+    elif _sha256(image) != manifest.image_sha256:
         soft.append(
             f"image sha256 mismatch "
             f"(expected {manifest.image_sha256[:12]}…, got "
             f"{_sha256(image)[:12]}…) — image rebuilt since baseline "
             f"capture; the spec §8 gate is evaluated on the current "
             f"image independently")
-    if _sha256(firmware) != manifest.firmware_sha256:
+    if not manifest.firmware_sha256:
+        soft.append("baseline manifest has no firmware_sha256 reference")
+    elif _sha256(firmware) != manifest.firmware_sha256:
         soft.append(
             f"firmware sha256 mismatch "
             f"(expected {manifest.firmware_sha256[:12]}…, got "
             f"{_sha256(firmware)[:12]}…)")
-    if baseline_log.is_file() and _sha256(baseline_log) != manifest.serial_sha256:
+    if not manifest.serial_sha256:
+        soft.append("baseline manifest has no serial_sha256 reference")
+    elif baseline_log.is_file() and _sha256(baseline_log) != manifest.serial_sha256:
         soft.append(
             f"baseline serial log sha256 mismatch "
             f"(expected {manifest.serial_sha256[:12]}…, got "
@@ -620,14 +637,18 @@ def _check_surface_pixels(run_dir: Path, rect_args: str,
     """Pixel-level assertion for one rect in the surface protocol.
 
     Loads the just-saved PPM (``run_dir / f"{label}.ppm"``) via
-    ``parse_ppm``, then asserts:
+    ``parse_ppm``, then asserts, in the VIEW coordinate frame (the
+    guest pins its view at VIEW_X,VIEW_Y with dims VIEW_W x VIEW_H on
+    the full framebuffer screendump):
       * The rect's interior pixels equal ``expected_interior``
         (RGB tuple).
-      * If a ``before`` Surface is provided, pixels OUTSIDE the
-        rect are unchanged from ``before`` (the previous
-        screencap — sentinel preservation).
+      * If a ``before`` Surface is provided, pixels OUTSIDE the rect
+        but INSIDE THE VIEW are unchanged from ``before`` (the
+        previous screencap — sentinel preservation).  The screen
+        outside the view belongs to the terminal console and is not
+        part of the contract.
       * For the full-view rect (``rect == view``), the BEFORE
-        check is replaced by the expectation that every pixel
+        check is replaced by the expectation that every view pixel
         equals ``expected_interior``.
 
     Returns an empty list on success, or a list of failure
@@ -636,8 +657,9 @@ def _check_surface_pixels(run_dir: Path, rect_args: str,
     failures: List[str] = []
     ppm_path = run_dir / f"{label}.ppm"
     # parse_ppm returns Surface(width, height, pixels).  The PPM is
-    # the FULL framebuffer; the test_gfx view is at (100,100,64,64)
-    # so the view's top-left pixel sits at fb offset (100,100).
+    # the FULL framebuffer; the test_gfx view is pinned at
+    # (VIEW_X, VIEW_Y, VIEW_W, VIEW_H) — see
+    # user/test_gfx/test_gfx.c present_rect_surface_mode().
     try:
         surf = parse_ppm(ppm_path.read_bytes())
     except Exception as exc:
@@ -645,9 +667,12 @@ def _check_surface_pixels(run_dir: Path, rect_args: str,
     x0, y0, w, h = (int(v) for v in rect_args.split(","))
     # Colour comparison: 0xAARRGGBB host-endian RGB32.
     exp_r, exp_g, exp_b = expected_interior
-    # Walk the rect interior.
-    for yy in range(y0, y0 + h):
-        for xx in range(x0, x0 + w):
+    full_view_rect = (w == VIEW_W and h == VIEW_H
+                      and x0 == 0 and y0 == 0)
+    # Walk the rect interior (fb coordinates = view offset + rect).
+    for jj in range(h):
+        for ii in range(w):
+            xx, yy = VIEW_X + x0 + ii, VIEW_Y + y0 + jj
             r, g, b = surf.pixel(xx, yy)
             if (r, g, b) != (exp_r, exp_g, exp_b):
                 failures.append(
@@ -658,31 +683,17 @@ def _check_surface_pixels(run_dir: Path, rect_args: str,
                     failures.append(
                         f"{label}: ... (truncated after 8 failures)")
                     return failures
-    # Sentinel preservation: outside the rect, the pixels must be
-    # unchanged from the BEFORE screencap.
-    full_view_rect = (w, h) == (surf.width - x0, surf.height - y0) \
-        and x0 == 0 and y0 == 0
     if full_view_rect:
-        # Every pixel must equal the expected colour (the rect
-        # covers the entire visible area).
-        for yy in range(surf.height):
-            for xx in range(surf.width):
-                if surf.pixel(xx, yy) != (exp_r, exp_g, exp_b):
-                    failures.append(
-                        f"{label}: full-view pixel ({xx},{yy}) != "
-                        f"({exp_r},{exp_g},{exp_b})")
-                    if len(failures) >= 8:
-                        failures.append(
-                            f"{label}: ... (truncated)")
-                        return failures
+        # The rect covers the entire view — interior walk above
+        # already checked every view pixel.
         return failures
     if before is None:
         return failures
-    # Outside the rect: every pixel must equal the corresponding
-    # pixel in `before`.
-    for yy in range(surf.height):
-        for xx in range(surf.width):
-            if x0 <= xx < x0 + w and y0 <= yy < y0 + h:
+    # Outside the rect but inside the view: every pixel must equal
+    # the corresponding pixel in `before` (sentinel preservation).
+    for yy in range(VIEW_Y, VIEW_Y + VIEW_H):
+        for xx in range(VIEW_X, VIEW_X + VIEW_W):
+            if x0 <= xx - VIEW_X < x0 + w and y0 <= yy - VIEW_Y < y0 + h:
                 continue  # interior already checked
             if surf.pixel(xx, yy) != before.pixel(xx, yy):
                 bf_r, bf_g, bf_b = before.pixel(xx, yy)
