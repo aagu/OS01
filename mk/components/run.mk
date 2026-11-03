@@ -67,6 +67,7 @@ RUN_QEMU_BASE = $(QEMU_BIN) -M q35 -smp $(SMP) \
 QEMU_IMAGE ?= $(NORMAL_IMAGE)
 RUN_QEMU_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=disk \
   -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+  -device qemu-xhci,id=xhci \
   -object rng-random,filename=/dev/urandom,id=rng0 \
   -device virtio-rng-pci,rng=rng0 \
   -m $(MEMORY) -display $(DISPLAY) -serial stdio
