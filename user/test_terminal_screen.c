@@ -49,6 +49,32 @@ static int wait_for_pixel(uint32_t *fb, uint32_t stride_pixels,
     return -1;
 }
 
+/* Region convergence: the restore is presented in rect batches, so on a
+ * loaded vCPU the later cells can lag the single pixel wait_for_pixel
+ * gate by tens of ms.  Poll the whole region against the snapshot
+ * within the window instead of assuming every rect landed together. */
+static int wait_for_region_match(uint32_t *fb, uint32_t stride_pixels,
+                                 const uint32_t *snapshot,
+                                 int w, int h, int timeout_ms)
+{
+    for (int elapsed = 0; elapsed < timeout_ms; elapsed += 10) {
+        int matched = 1;
+        for (int cy = 0; cy < h && matched; cy++) {
+            for (int cx = 0; cx < w; cx++) {
+                if (fb[(size_t)cy * stride_pixels + cx] != snapshot[cy * w + cx]) {
+                    matched = 0;
+                    break;
+                }
+            }
+        }
+        if (matched) {
+            return 0;
+        }
+        sleep_ms(10);
+    }
+    return -1;
+}
+
 int main(void)
 {
     int fb_fd = open("/dev/fb", O_RDONLY);
@@ -173,14 +199,20 @@ int main(void)
         FAIL("main screen 'M' not restored at (0, 2)");
     }
 
-    /* Verify entire 64x16 snapshot matches restored main screen */
-    for (int cy = 0; cy < 16; cy++) {
-        for (int cx = 0; cx < 64; cx++) {
-            if (fb[(size_t)cy * stride_pixels + cx] != main_snapshot[cy * 64 + cx]) {
-                FAIL("main screen snapshot mismatch at (%d, %d): expected 0x%08x got 0x%08x",
-                     cx, cy, main_snapshot[cy * 64 + cx], fb[(size_t)cy * stride_pixels + cx]);
+    /* Verify entire 64x16 snapshot matches restored main screen (with a
+     * convergence window: the restore's rect batches can lag the (0,2)
+     * probe above).  On timeout report the first mismatching pixel. */
+    if (wait_for_region_match(fb, stride_pixels, main_snapshot, 64, 16,
+                              1000) != 0) {
+        for (int cy = 0; cy < 16; cy++) {
+            for (int cx = 0; cx < 64; cx++) {
+                if (fb[(size_t)cy * stride_pixels + cx] != main_snapshot[cy * 64 + cx]) {
+                    FAIL("main screen snapshot mismatch at (%d, %d): expected 0x%08x got 0x%08x",
+                         cx, cy, main_snapshot[cy * 64 + cx], fb[(size_t)cy * stride_pixels + cx]);
+                }
             }
         }
+        FAIL("main screen snapshot never converged");
     }
 
     /* Restore cursor */
