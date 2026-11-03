@@ -8,6 +8,7 @@ $(eval $(call register_host_test,test_pci_driver_model,drivers,protocol-or-legac
 $(eval $(call register_host_test,test_pci_backend_irq,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_ahci_lifecycle,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_device_boot,drivers,protocol-or-legacy))
+$(eval $(call register_host_test,test_xhci_init,drivers,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_i8042_demux.elf \
@@ -17,7 +18,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_pci_driver_model.elf \
     $(TEST_BLD)/test_pci_backend_irq.elf \
     $(TEST_BLD)/test_ahci_lifecycle.elf \
-    $(TEST_BLD)/test_device_boot.elf
+    $(TEST_BLD)/test_device_boot.elf \
+    $(TEST_BLD)/test_xhci_init.elf
 
 # PS/2 Mouse & Keyboard over i8042
 I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
@@ -276,3 +278,29 @@ $(TEST_BLD)/test_device_boot.elf: $(TEST_BLD)/test_device_boot.o \
 .PHONY: test-device-boot
 test-device-boot: $(TEST_BLD)/test_device_boot.elf
 	$<
+
+# xHCI Phase 1: Controller Skeleton & Ring Init
+XHCI_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/xhci_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/xhci_production.o: $(TESTS_DIR)/kernel/driver/xhci.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_xhci_init.o: $(TEST_CASES)/test_xhci_init.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_xhci_init.elf: $(TEST_BLD)/test_xhci_init.o \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-xhci
+test-xhci: $(TEST_BLD)/test_xhci_init.elf
+	$<
+
