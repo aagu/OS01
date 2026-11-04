@@ -432,6 +432,13 @@ void test_xhci_ep0_control_transfer_and_descriptor(void)
     rc = xhci_get_device_descriptor(&ctrl, 1, &desc);
     assert_eq(rc, 0);
 
+    /* Only `actual` (8) bytes were transferred: fields beyond offset 8 must
+     * not leak stale DMA data (idVendor lives at offset 8). */
+    assert_eq(desc.idVendor, 0);
+    assert_eq(desc.idProduct, 0);
+    assert_eq(desc.bLength, 18);
+    assert_eq(desc.bDescriptorType, 1);
+
     /* Boundary Test 3: residual > 18 underflow guard -> actual = 0, must fail with -EIO */
     event_ring[3].parameter = 0x40000 + 11 * sizeof(struct xhci_trb);
     event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 30;
@@ -474,6 +481,125 @@ void test_xhci_ep0_ring_wrap(void)
     assert_eq(ep0_ring[0].control & XHCI_TRB_CYCLE_BIT, 0);
 }
 
+void test_xhci_command_completion_param_match(void)
+{
+    TEST_CASE("Command completion: stale event with wrong TRB pointer is skipped");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_enqueue = 0;
+    ctrl.cmd_ring_cycle = 1;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    /* Stale completion from an earlier timed-out command: slot 5, wrong TRB pointer */
+    event_ring[0].parameter = 0xDEADBEEFULL;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (5U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    /* The completion for the Enable Slot about to be submitted: TRB at index 0 */
+    event_ring[1].parameter = 0x10000;
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    uint8_t slot_id = 0;
+    int rc = xhci_enable_slot(&ctrl, 1, 3, &slot_id);
+    assert_eq(rc, 0);
+    assert_eq(slot_id, 1);
+    assert_true(ctrl.slots[1] != NULL);
+    assert_true(ctrl.slots[5] == NULL);
+    assert_eq(ctrl.event_ring_dequeue, 2);
+
+    xhci_free_slot(&ctrl, 1);
+}
+
+void test_xhci_transfer_event_slot_match(void)
+{
+    TEST_CASE("Transfer event: completion for another slot is skipped");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    slot.ep0_ring_virt = ep0_ring;
+    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_cycle = 1;
+    slot.ep0_ring_enqueue = 0;
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    uint8_t dma_buf[4096];
+    memset(dma_buf, 0, sizeof(dma_buf));
+    slot.dma_buf_virt = dma_buf;
+    slot.dma_buf_phys = 0x50000;
+
+    struct usb_device_descriptor raw = {
+        .bLength = 18,
+        .bDescriptorType = 1,
+        .bcdUSB = 0x0200,
+        .bMaxPacketSize0 = 64,
+        .idVendor = 0x0627,
+        .idProduct = 0x0001,
+        .bNumConfigurations = 1,
+    };
+    memcpy(dma_buf, &raw, 18);
+
+    ctrl.slots[1] = &slot;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    /* Stale transfer event for slot 7 with a STALL completion code */
+    event_ring[0].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_STALL << 24);
+    event_ring[0].control = (7U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    /* Real completion for slot 1 */
+    event_ring[1].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct usb_device_descriptor desc;
+    int rc = xhci_get_device_descriptor(&ctrl, 1, &desc);
+    assert_eq(rc, 0);
+    assert_eq(desc.idVendor, 0x0627);
+    assert_eq(desc.idProduct, 0x0001);
+    assert_eq(ctrl.event_ring_dequeue, 2);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -485,6 +611,8 @@ int main(void)
     test_xhci_slot_lifecycle_and_address_device();
     test_xhci_ep0_control_transfer_and_descriptor();
     test_xhci_ep0_ring_wrap();
+    test_xhci_command_completion_param_match();
+    test_xhci_transfer_event_slot_match();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

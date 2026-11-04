@@ -182,8 +182,9 @@ void xhci_delay_ms(uint32_t ms)
         __asm__ __volatile__("" ::: "memory");
 }
 
-int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
-                             struct xhci_trb *out_evt, uint32_t timeout_loops)
+static int xhci_poll_event_internal(struct xhci_controller *ctrl, uint32_t target_type,
+                                    uint64_t expect_param, uint8_t expect_slot,
+                                    struct xhci_trb *out_evt, uint32_t timeout_loops)
 {
     if (!ctrl || !ctrl->event_ring_virt || !ctrl->rt_regs) return -EINVAL;
 
@@ -208,7 +209,20 @@ int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
         xhci_write64(ctrl->rt_regs + 0x20 + XHCI_INTR_ERDP, erdp | XHCI_ERDP_EHB);
 
         uint32_t evt_type = (evt.control >> 10) & 0x3F;
-        if (evt_type == target_type || target_type == 0) {
+        bool matched = (evt_type == target_type || target_type == 0);
+        if (matched && expect_param && evt.parameter != expect_param) {
+            /* Completion of an earlier command that timed out: not ours. */
+            log_warn("[xhci] dropping stale completion event (trb=%llx, expected %llx)\n",
+                     (unsigned long long)evt.parameter, (unsigned long long)expect_param);
+            matched = false;
+        }
+        if (matched && expect_slot && ((evt.control >> 24) & 0xFF) != expect_slot) {
+            /* Transfer event belonging to another endpoint/slot. */
+            log_warn("[xhci] dropping transfer event for slot %u (waiting for slot %u)\n",
+                     (unsigned)((evt.control >> 24) & 0xFF), expect_slot);
+            matched = false;
+        }
+        if (matched) {
             if (out_evt) *out_evt = evt;
             return 0;
         }
@@ -224,6 +238,26 @@ int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
     }
 
     return -ETIMEDOUT;
+}
+
+int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
+                             struct xhci_trb *out_evt, uint32_t timeout_loops)
+{
+    return xhci_poll_event_internal(ctrl, target_type, 0, 0, out_evt, timeout_loops);
+}
+
+int xhci_poll_cmd_completion(struct xhci_controller *ctrl, uint64_t expect_trb_phys,
+                             struct xhci_trb *out_evt, uint32_t timeout_loops)
+{
+    return xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, expect_trb_phys, 0,
+                                    out_evt, timeout_loops);
+}
+
+int xhci_poll_transfer(struct xhci_controller *ctrl, uint8_t slot_id,
+                       struct xhci_trb *out_evt, uint32_t timeout_loops)
+{
+    return xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_TRANSFER_EVT, 0, slot_id,
+                                    out_evt, timeout_loops);
 }
 
 int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed)
@@ -290,12 +324,18 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
     memset(&trb, 0, sizeof(trb));
     trb.control = (XHCI_TRB_TYPE_ENABLE_SLOT << 10) | ctrl->cmd_ring_cycle;
 
+    /* Command Completion events echo the command TRB's physical address:
+     * match on it so a completion left by an earlier timed-out command
+     * cannot be misattributed to this one. */
+    uint64_t expect_trb = ctrl->cmd_ring_phys +
+                          (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
+
     int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
     if (rc != 0) return rc;
     xhci_write32(ctrl->db_regs, 0);
 
     struct xhci_trb evt;
-    rc = xhci_poll_event_filtered(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, &evt, XHCI_TIMEOUT_LOOPS);
+    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
     if (rc != 0) return rc;
     if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
         log_err("[xhci] enable slot command failed (cc=%u)\n",
@@ -395,12 +435,15 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     trb.parameter = slot->input_ctx_phys;
     trb.control = ((uint32_t)slot_id << 24) | (XHCI_TRB_TYPE_ADDRESS_DEV << 10) | ctrl->cmd_ring_cycle;
 
+    uint64_t expect_trb = ctrl->cmd_ring_phys +
+                          (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
+
     int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
     if (rc != 0) goto err_cmd;
     xhci_write32(ctrl->db_regs, 0);
 
     struct xhci_trb evt;
-    rc = xhci_poll_event_filtered(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, &evt, XHCI_TIMEOUT_LOOPS);
+    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
     if (rc != 0) goto err_cmd;
     if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
         log_err("[xhci] address device command failed (cc=%u)\n",
@@ -525,7 +568,7 @@ int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
     xhci_write32(ctrl->db_regs + slot_id * 4, 1);
 
     struct xhci_trb evt;
-    rc = xhci_poll_event_filtered(ctrl, XHCI_TRB_TYPE_TRANSFER_EVT, &evt, XHCI_TIMEOUT_LOOPS);
+    rc = xhci_poll_transfer(ctrl, slot_id, &evt, XHCI_TIMEOUT_LOOPS);
     if (rc != 0) return rc;
 
     uint32_t cc = (evt.status >> 24) & 0xFF;
@@ -541,7 +584,11 @@ int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
         return -EIO;
     }
 
-    memcpy(&slot->desc, slot->dma_buf_virt, sizeof(slot->desc));
+    /* Only the bytes the device actually sent are valid: zero the rest so
+     * fields beyond the transfer never leak stale DMA data. */
+    memset(&slot->desc, 0, sizeof(slot->desc));
+    uint32_t copy_len = actual < sizeof(slot->desc) ? actual : sizeof(slot->desc);
+    memcpy(&slot->desc, slot->dma_buf_virt, copy_len);
     *out_desc = slot->desc;
 
     log_info("[xhci] slot %u: USB device %04x:%04x (class %02x, subclass %02x, ep0_max=%u)\n",

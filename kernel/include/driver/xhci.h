@@ -290,6 +290,10 @@ int xhci_start(struct xhci_controller *ctrl);
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb);
 int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
                              struct xhci_trb *out_evt, uint32_t timeout_loops);
+int xhci_poll_cmd_completion(struct xhci_controller *ctrl, uint64_t expect_trb_phys,
+                             struct xhci_trb *out_evt, uint32_t timeout_loops);
+int xhci_poll_transfer(struct xhci_controller *ctrl, uint8_t slot_id,
+                       struct xhci_trb *out_evt, uint32_t timeout_loops);
 int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed);
 int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t speed,
                      uint8_t *out_slot_id);
