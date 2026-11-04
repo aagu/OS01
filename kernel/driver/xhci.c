@@ -31,6 +31,8 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
     uint32_t hcsparams2 = xhci_read32(ctrl->mmio_virt + XHCI_CAP_HCSPARAMS2);
     ctrl->max_scratchpads = (((hcsparams2 >> 21) & 0x1F) << 5) | ((hcsparams2 >> 27) & 0x1F);
 
+    ctrl->csz = (xhci_read32(ctrl->mmio_virt + XHCI_CAP_HCCPARAMS1) >> 2) & 1;
+
     ctrl->dboff = xhci_read32(ctrl->mmio_virt + XHCI_CAP_DBOFF) & ~0x03U;
     ctrl->rtsoff = xhci_read32(ctrl->mmio_virt + XHCI_CAP_RTSOFF) & ~0x1FU;
 
@@ -169,6 +171,15 @@ void xhci_setup_interrupter0(struct xhci_controller *ctrl)
 
     /* Configure ERDP with EHB set to clear busy */
     xhci_write64(ir0 + XHCI_INTR_ERDP, ctrl->event_ring_phys | XHCI_ERDP_EHB);
+}
+
+void xhci_delay_ms(uint32_t ms)
+{
+    /* Busy-wait: port reset recovery must not depend on the tick subsystem,
+     * which may not be calibrated at probe time. */
+    volatile uint32_t spins = ms * 20000u;
+    while (spins--)
+        __asm__ __volatile__("" ::: "memory");
 }
 
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb)
