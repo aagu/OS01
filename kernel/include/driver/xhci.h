@@ -295,6 +295,10 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
                      uint8_t *out_slot_id);
 int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id);
 void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id);
+int xhci_ep0_ring_enqueue(struct xhci_slot *slot, const struct xhci_trb *trb);
+int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
+                               struct usb_device_descriptor *out_desc);
+void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
 extern const struct pci_driver xhci_pci_driver;
 

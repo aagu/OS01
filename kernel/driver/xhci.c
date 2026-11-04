@@ -459,6 +459,122 @@ void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
     ctrl->slots[slot_id] = NULL;
 }
 
+int xhci_ep0_ring_enqueue(struct xhci_slot *slot, const struct xhci_trb *trb)
+{
+    if (!slot || !slot->ep0_ring_virt) return -EINVAL;
+
+    if (slot->ep0_ring_enqueue == XHCI_TRB_RING_SIZE - 1) {
+        /* Enqueue pointer sits on the Link TRB: make it valid for the
+         * controller, toggle the cycle, and wrap to index 0. */
+        struct xhci_trb *link = &slot->ep0_ring_virt[XHCI_TRB_RING_SIZE - 1];
+        if (slot->ep0_ring_cycle) {
+            link->control |= XHCI_TRB_CYCLE_BIT;
+        } else {
+            link->control &= ~XHCI_TRB_CYCLE_BIT;
+        }
+        slot->ep0_ring_cycle ^= 1;
+        slot->ep0_ring_enqueue = 0;
+    }
+
+    struct xhci_trb *dst = &slot->ep0_ring_virt[slot->ep0_ring_enqueue];
+    dst->parameter = trb->parameter;
+    dst->status = trb->status;
+    dst->control = (trb->control & ~XHCI_TRB_CYCLE_BIT) |
+                   (slot->ep0_ring_cycle ? XHCI_TRB_CYCLE_BIT : 0);
+    slot->ep0_ring_enqueue++;
+
+    return 0;
+}
+
+int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
+                               struct usb_device_descriptor *out_desc)
+{
+    if (!ctrl || !ctrl->db_regs || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS ||
+        !ctrl->slots[slot_id] || !out_desc)
+        return -EINVAL;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+
+    /* Setup Stage: GET_DESCRIPTOR(DEVICE), 8-byte request as immediate data. */
+    struct xhci_trb setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.parameter = 0x0012000001000680ULL;
+    setup.status = 8;
+    setup.control = (3U << 16) | (1U << 6) | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
+
+    /* Data Stage: IN, 18 bytes into the slot DMA buffer. */
+    struct xhci_trb data;
+    memset(&data, 0, sizeof(data));
+    data.parameter = slot->dma_buf_phys;
+    data.status = 18;
+    data.control = (1U << 16) | (XHCI_TRB_TYPE_DATA_STAGE << 10);
+
+    /* Status Stage: OUT handshake, interrupt on completion. */
+    struct xhci_trb status;
+    memset(&status, 0, sizeof(status));
+    status.control = (1U << 5) | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
+
+    int rc = xhci_ep0_ring_enqueue(slot, &setup);
+    if (rc != 0) return rc;
+    rc = xhci_ep0_ring_enqueue(slot, &data);
+    if (rc != 0) return rc;
+    rc = xhci_ep0_ring_enqueue(slot, &status);
+    if (rc != 0) return rc;
+
+    /* Ring the slot doorbell: Target = 1 (EP0). */
+    xhci_write32(ctrl->db_regs + slot_id * 4, 1);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_event_filtered(ctrl, XHCI_TRB_TYPE_TRANSFER_EVT, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc != 0) return rc;
+
+    uint32_t cc = (evt.status >> 24) & 0xFF;
+    if (cc != XHCI_COMP_SUCCESS && cc != XHCI_COMP_SHORT_TX) {
+        log_err("[xhci] slot %u: control transfer failed (cc=%u)\n", slot_id, cc);
+        return -EIO;
+    }
+
+    uint32_t residual = evt.status & 0xFFFFFF;
+    uint32_t actual = (residual <= 18) ? (18 - residual) : 0;
+    if (actual < 8) {
+        log_err("[xhci] slot %u: short descriptor read (%u bytes)\n", slot_id, actual);
+        return -EIO;
+    }
+
+    memcpy(&slot->desc, slot->dma_buf_virt, sizeof(slot->desc));
+    *out_desc = slot->desc;
+
+    log_info("[xhci] slot %u: USB device %04x:%04x (class %02x, subclass %02x, ep0_max=%u)\n",
+             slot_id, slot->desc.idVendor, slot->desc.idProduct,
+             slot->desc.bDeviceClass, slot->desc.bDeviceSubClass,
+             slot->desc.bMaxPacketSize0);
+    return 0;
+}
+
+void xhci_probe_ports(struct xhci_controller *ctrl)
+{
+    if (!ctrl || !ctrl->op_regs) return;
+
+    for (uint32_t p = 1; p <= ctrl->max_ports; p++) {
+        uint8_t speed = 0;
+        if (xhci_port_reset(ctrl, p, &speed) != 0) continue;
+
+        uint8_t slot_id = 0;
+        if (xhci_enable_slot(ctrl, (uint8_t)p, speed, &slot_id) != 0) continue;
+
+        if (xhci_address_device(ctrl, slot_id) != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            continue;
+        }
+
+        struct usb_device_descriptor desc;
+        if (xhci_get_device_descriptor(ctrl, slot_id, &desc) != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            continue;
+        }
+    }
+}
+
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb)
 {
     if (!ctrl || !ctrl->cmd_ring_virt || !trb) return -EINVAL;
@@ -637,6 +753,8 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
     log_info("[xhci] controller initialized and running (slots=%u, ports=%u)\n",
              ctrl->max_slots, ctrl->max_ports);
 
+    xhci_probe_ports(ctrl);
+
     return 0;
 }
 
@@ -653,6 +771,11 @@ void xhci_remove(struct pci_device *pdev)
         xhci_wait_bit(ctrl->op_regs + XHCI_OP_USBSTS, XHCI_STS_HCH, true, ctrl->op_regs);
     }
     ctrl->running = false;
+
+    /* Tear down any enumerated device slots */
+    for (uint8_t s = 1; s <= XHCI_MAX_MANAGED_SLOTS; s++) {
+        xhci_free_slot(ctrl, s);
+    }
 
     /* Free all DMA buffers */
     xhci_free_dma(ctrl);

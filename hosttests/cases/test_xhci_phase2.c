@@ -323,6 +323,157 @@ void test_xhci_slot_lifecycle_and_address_device(void)
     assert_eq(s_mock_page_count, initial_pages - 4); /* 4 pages freed */
 }
 
+void test_xhci_ep0_control_transfer_and_descriptor(void)
+{
+    TEST_CASE("EP0 control transfer: GET_DESCRIPTOR 3-stage TRBs, residual length bounds, unpacking");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    slot.ep0_ring_virt = ep0_ring;
+    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_cycle = 1;
+    slot.ep0_ring_enqueue = 0;
+
+    /* Initialize Link TRB at 255 */
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    uint8_t dma_buf[4096];
+    memset(dma_buf, 0, sizeof(dma_buf));
+    slot.dma_buf_virt = dma_buf;
+    slot.dma_buf_phys = 0x50000;
+
+    struct usb_device_descriptor raw = {
+        .bLength = 18,
+        .bDescriptorType = 1,
+        .bcdUSB = 0x0200,
+        .bDeviceClass = 0,
+        .bDeviceSubClass = 0,
+        .bDeviceProtocol = 0,
+        .bMaxPacketSize0 = 64,
+        .idVendor = 0x0627,
+        .idProduct = 0x0001,
+        .bcdDevice = 0x0100,
+        .bNumConfigurations = 1,
+    };
+    memcpy(dma_buf, &raw, 18);
+
+    ctrl.slots[1] = &slot;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    /* Feed mock Transfer Event (Type 32, Success, residual = 0) */
+    event_ring[0].parameter = 0x40000 + 2 * sizeof(struct xhci_trb); /* Status TRB */
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;             /* Residual = 0 */
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct usb_device_descriptor desc;
+    int rc = xhci_get_device_descriptor(&ctrl, 1, &desc);
+    assert_eq(rc, 0);
+
+    /* Verify the 3 TRBs placed on ep0_ring */
+    /* 1. Setup Stage TRB */
+    assert_eq((ep0_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_SETUP_STAGE);
+    assert_true((ep0_ring[0].control & (1U << 6)) != 0); /* IDT = 1 */
+    assert_eq((ep0_ring[0].control >> 16) & 3, 3);        /* TRT = 3 (IN Data) */
+    assert_eq(ep0_ring[0].parameter, 0x0012000001000680ULL);
+
+    /* 2. Data Stage TRB */
+    assert_eq((ep0_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_DATA_STAGE);
+    assert_true((ep0_ring[1].control & (1U << 16)) != 0); /* DIR = 1 (IN) */
+    assert_eq(ep0_ring[1].parameter, 0x50000);
+    assert_eq(ep0_ring[1].status & 0x1FFFF, 18);
+
+    /* 3. Status Stage TRB */
+    assert_eq((ep0_ring[2].control >> 10) & 0x3F, XHCI_TRB_TYPE_STATUS_STAGE);
+    assert_true((ep0_ring[2].control & (1U << 5)) != 0); /* IOC = 1 */
+
+    /* Verify Doorbell written: Target = 1 on Slot 1 Doorbell */
+    uint32_t db_val = *(volatile uint32_t *)(ctrl.db_regs + 1 * 4);
+    assert_eq(db_val, 1);
+
+    /* Verify unpacked descriptor fields */
+    assert_eq(desc.bLength, 18);
+    assert_eq(desc.bDescriptorType, 1);
+    assert_eq(desc.idVendor, 0x0627);
+    assert_eq(desc.idProduct, 0x0001);
+    assert_eq(desc.bMaxPacketSize0, 64);
+
+    /* Boundary Test 1: residual = 11 -> actual = 7 (< 8 bytes), must fail with -EIO */
+    event_ring[1].parameter = 0x40000 + 5 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 11;
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_get_device_descriptor(&ctrl, 1, &desc);
+    assert_eq(rc, -EIO);
+
+    /* Boundary Test 2: residual = 10 -> actual = 8 (>= 8 bytes), success with 0 */
+    event_ring[2].parameter = 0x40000 + 8 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 10;
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_get_device_descriptor(&ctrl, 1, &desc);
+    assert_eq(rc, 0);
+
+    /* Boundary Test 3: residual > 18 underflow guard -> actual = 0, must fail with -EIO */
+    event_ring[3].parameter = 0x40000 + 11 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 30;
+    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_get_device_descriptor(&ctrl, 1, &desc);
+    assert_eq(rc, -EIO);
+}
+
+void test_xhci_ep0_ring_wrap(void)
+{
+    TEST_CASE("EP0 ring Link TRB wrap and cycle toggle at index 255");
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    slot.ep0_ring_virt = ep0_ring;
+    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_cycle = 1;
+    slot.ep0_ring_enqueue = 254;
+
+    /* Initialize Link TRB at index 255 */
+    ep0_ring[255].parameter = 0x40000;
+    ep0_ring[255].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    struct xhci_trb trb1 = { .parameter = 1, .status = 0, .control = 0 };
+    struct xhci_trb trb2 = { .parameter = 2, .status = 0, .control = 0 };
+
+    /* Enqueue at index 254 */
+    xhci_ep0_ring_enqueue(&slot, &trb1);
+    assert_eq(slot.ep0_ring_enqueue, 255);
+    assert_eq(slot.ep0_ring_cycle, 1);
+
+    /* Enqueue next: should update Link TRB cycle to 1, toggle cycle to 0, and wrap to 0 */
+    xhci_ep0_ring_enqueue(&slot, &trb2);
+    assert_eq(ep0_ring[255].control & XHCI_TRB_CYCLE_BIT, 1);
+    assert_eq(slot.ep0_ring_enqueue, 1);
+    assert_eq(slot.ep0_ring_cycle, 0);
+    assert_eq(ep0_ring[0].parameter, 2);
+    assert_eq(ep0_ring[0].control & XHCI_TRB_CYCLE_BIT, 0);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -332,6 +483,8 @@ int main(void)
     test_xhci_event_poll_timeout();
     test_xhci_port_reset_normal_and_failure();
     test_xhci_slot_lifecycle_and_address_device();
+    test_xhci_ep0_control_transfer_and_descriptor();
+    test_xhci_ep0_ring_wrap();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
