@@ -290,6 +290,7 @@ int xhci_start(struct xhci_controller *ctrl);
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb);
 int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
                              struct xhci_trb *out_evt, uint32_t timeout_loops);
+int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed);
 void xhci_delay_ms(uint32_t ms);
 extern const struct pci_driver xhci_pci_driver;
 

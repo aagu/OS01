@@ -226,6 +226,61 @@ int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
     return -ETIMEDOUT;
 }
 
+int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed)
+{
+    if (!ctrl || !ctrl->op_regs || port_num < 1 || port_num > ctrl->max_ports)
+        return -EINVAL;
+
+    volatile uint8_t *port_reg = ctrl->op_regs + 0x400 + (port_num - 1) * 0x10;
+
+    uint32_t portsc = xhci_read32(port_reg);
+    if (!(portsc & XHCI_PORTSC_CCS)) {
+        return -ENODEV;
+    }
+
+    /* Power the port on first. */
+    if (!(portsc & XHCI_PORTSC_PP)) {
+        xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PP);
+        xhci_delay_ms(20);
+        portsc = xhci_read32(port_reg);
+    }
+
+    /* Issue reset, preserving RW1C bits and read-only state. */
+    xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PR);
+
+    /* Wait for reset completion: PR self-clears and PRC (or PED) reports it. */
+    int rc = -ETIMEDOUT;
+    for (uint32_t i = 0; i < XHCI_TIMEOUT_LOOPS; i++) {
+        portsc = xhci_read32(port_reg);
+        if (!(portsc & XHCI_PORTSC_PR) &&
+            ((portsc & XHCI_PORTSC_PRC) || (portsc & XHCI_PORTSC_PED))) {
+            rc = 0;
+            break;
+        }
+    }
+    if (rc != 0) {
+        log_err("[xhci] port %u: reset did not complete\n", port_num);
+        return rc;
+    }
+
+    /* Acknowledge the reset change flag. */
+    xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PRC);
+
+    portsc = xhci_read32(port_reg);
+    if (!(portsc & XHCI_PORTSC_PED)) {
+        log_warn("[xhci] port %u: reset completed but port not enabled (PED=0)\n", port_num);
+        return -EIO;
+    }
+
+    /* USB 2.0 reset recovery (T_RSTRCY >= 10ms). */
+    xhci_delay_ms(10);
+
+    if (out_speed) *out_speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
+    log_info("[xhci] port %u: connected, reset complete, speed=%u\n",
+             port_num, (unsigned)((portsc & XHCI_PORTSC_SPEED_MASK) >> 10));
+    return 0;
+}
+
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb)
 {
     if (!ctrl || !ctrl->cmd_ring_virt || !trb) return -EINVAL;

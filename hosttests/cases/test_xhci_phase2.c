@@ -202,6 +202,40 @@ void test_xhci_event_poll_timeout(void)
     assert_eq(rc, -ETIMEDOUT);
 }
 
+void test_xhci_port_reset_normal_and_failure(void)
+{
+    TEST_CASE("Port reset: connected normal case, disconnected, and PED failure");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.op_regs = s_mock_mmio + 0x20;
+    ctrl.max_ports = 4;
+
+    volatile uint32_t *port1 = (volatile uint32_t *)(ctrl.op_regs + 0x400);
+
+    /* Case A: Not connected */
+    *port1 = 0;
+    uint8_t speed = 0;
+    int rc = xhci_port_reset(&ctrl, 1, &speed);
+    assert_eq(rc, -ENODEV);
+
+    /* Case B: Connected, successful reset to High-Speed (speed = 3) */
+    s_inject_port_ped_fail = false;
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PP | (3U << 10);
+    rc = xhci_port_reset(&ctrl, 1, &speed);
+    assert_eq(rc, 0);
+    assert_eq(speed, 3);
+    /* Verify PED is enabled and PR is cleared */
+    assert_true((*port1 & XHCI_PORTSC_PED) != 0);
+    assert_eq(*port1 & XHCI_PORTSC_PR, 0);
+
+    /* Case C: Reset completed but PED = 0 (failure) */
+    s_inject_port_ped_fail = true;
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PP | (3U << 10);
+    rc = xhci_port_reset(&ctrl, 1, &speed);
+    assert_eq(rc, -EIO);
+    s_inject_port_ped_fail = false;
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -209,6 +243,7 @@ int main(void)
     test_xhci_portsc_rw1c_mask();
     test_xhci_event_poll_with_intervening_port_change();
     test_xhci_event_poll_timeout();
+    test_xhci_port_reset_normal_and_failure();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
