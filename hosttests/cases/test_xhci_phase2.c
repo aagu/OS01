@@ -142,11 +142,73 @@ void test_xhci_portsc_rw1c_mask(void)
     assert_true((preserved & XHCI_PORTSC_PR) != 0);
 }
 
+void test_xhci_event_poll_with_intervening_port_change(void)
+{
+    TEST_CASE("Event polling: consume Type 34 and retrieve target Type 33");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+
+    /* Entry 0: Port Status Change Event (Type 34) */
+    event_ring[0].parameter = 0;
+    event_ring[0].status = 0;
+    event_ring[0].control = (XHCI_TRB_TYPE_PORT_STATUS_EVT << 10) | 1; /* Cycle = 1 */
+
+    /* Entry 1: Command Completion Event (Type 33, Slot 1, Success) */
+    event_ring[1].parameter = 0x1000;
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1; /* Cycle = 1 */
+
+    struct xhci_trb evt;
+    int rc = xhci_poll_event_filtered(&ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, &evt, 100);
+    assert_eq(rc, 0);
+    assert_eq((evt.control >> 10) & 0x3F, XHCI_TRB_TYPE_CMD_CMPL_EVT);
+    assert_eq((evt.control >> 24) & 0xFF, 1);
+    assert_eq((evt.status >> 24) & 0xFF, XHCI_COMP_SUCCESS);
+    assert_eq(ctrl.event_ring_dequeue, 2);
+
+    /* Verify ERDP was updated with EHB bit set */
+    uint64_t erdp = *(volatile uint64_t *)(rt_regs + 0x20 + XHCI_INTR_ERDP);
+    assert_eq(erdp & ~XHCI_ERDP_EHB, 0x20000 + 2 * sizeof(struct xhci_trb));
+    assert_true((erdp & XHCI_ERDP_EHB) != 0);
+}
+
+void test_xhci_event_poll_timeout(void)
+{
+    TEST_CASE("Event polling: timeout when cycle bit does not match");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1; /* Ring expects 1, but entry has cycle 0 */
+    ctrl.rt_regs = rt_regs;
+
+    struct xhci_trb evt;
+    int rc = xhci_poll_event_filtered(&ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, &evt, 10);
+    assert_eq(rc, -ETIMEDOUT);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
     test_xhci_context_layout_32_vs_64();
     test_xhci_portsc_rw1c_mask();
+    test_xhci_event_poll_with_intervening_port_change();
+    test_xhci_event_poll_timeout();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

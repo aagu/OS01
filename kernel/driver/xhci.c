@@ -182,6 +182,50 @@ void xhci_delay_ms(uint32_t ms)
         __asm__ __volatile__("" ::: "memory");
 }
 
+int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
+                             struct xhci_trb *out_evt, uint32_t timeout_loops)
+{
+    if (!ctrl || !ctrl->event_ring_virt || !ctrl->rt_regs) return -EINVAL;
+
+    for (uint32_t i = 0; i < timeout_loops; i++) {
+        volatile struct xhci_trb *trb = &ctrl->event_ring_virt[ctrl->event_ring_dequeue];
+        uint32_t ctrl_word = *(volatile uint32_t *)&trb->control;
+
+        /* Cycle bit not written by the controller yet: no fresh event. */
+        if ((ctrl_word & XHCI_TRB_CYCLE_BIT) != ctrl->event_ring_cycle) {
+            continue;
+        }
+
+        struct xhci_trb evt = *trb;
+
+        ctrl->event_ring_dequeue = (ctrl->event_ring_dequeue + 1) % XHCI_TRB_RING_SIZE;
+        if (ctrl->event_ring_dequeue == 0) {
+            ctrl->event_ring_cycle ^= 1;
+        }
+
+        /* Advance ERDP with EHB set to clear the interrupt-pending state. */
+        uint64_t erdp = ctrl->event_ring_phys + ctrl->event_ring_dequeue * sizeof(struct xhci_trb);
+        xhci_write64(ctrl->rt_regs + 0x20 + XHCI_INTR_ERDP, erdp | XHCI_ERDP_EHB);
+
+        uint32_t evt_type = (evt.control >> 10) & 0x3F;
+        if (evt_type == target_type || target_type == 0) {
+            if (out_evt) *out_evt = evt;
+            return 0;
+        }
+        if (evt_type == XHCI_TRB_TYPE_PORT_STATUS_EVT) {
+            /* Intervening asynchronous port event: consumed and acknowledged
+             * above; keep waiting for the target. */
+            log_debug("[xhci] consumed asynchronous Port Status Change Event (port %u)\n",
+                      (unsigned)((evt.control >> 24) & 0xFF));
+            continue;
+        }
+        log_warn("[xhci] unexpected event type %u while waiting for type %u\n",
+                 evt_type, target_type);
+    }
+
+    return -ETIMEDOUT;
+}
+
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb)
 {
     if (!ctrl || !ctrl->cmd_ring_virt || !trb) return -EINVAL;
