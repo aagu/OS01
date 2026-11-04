@@ -236,6 +236,93 @@ void test_xhci_port_reset_normal_and_failure(void)
     s_inject_port_ped_fail = false;
 }
 
+void test_xhci_slot_lifecycle_and_address_device(void)
+{
+    TEST_CASE("Slot lifecycle: Enable Slot, Address Device, Input Context DWs, Free Slot");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_enqueue = 0;
+    ctrl.cmd_ring_cycle = 1;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    uint64_t dcbaa[64];
+    memset(dcbaa, 0, sizeof(dcbaa));
+    ctrl.dcbaa_virt = dcbaa;
+    ctrl.dcbaa_phys = 0x30000;
+    ctrl.csz = 0;
+
+    /* Pre-populate event ring:
+     * Event 0: Command Completion Event for Enable Slot -> slot_id = 1, Success
+     * Event 1: Command Completion Event for Address Device -> slot_id = 1, Success
+     */
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x10000 + sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    uint8_t slot_id = 0;
+    int rc = xhci_enable_slot(&ctrl, 1, 3, &slot_id);
+    assert_eq(rc, 0);
+    assert_eq(slot_id, 1);
+    assert_true(ctrl.slots[1] != NULL);
+    assert_eq(ctrl.slots[1]->port_num, 1);
+    assert_eq(ctrl.slots[1]->speed, 3);
+
+    rc = xhci_address_device(&ctrl, slot_id);
+    assert_eq(rc, 0);
+
+    /* Verify DCBAA[1] set to physical address of dev_ctx */
+    assert_eq(ctrl.dcbaa_virt[1], ctrl.slots[1]->dev_ctx_phys);
+
+    /* Verify Input Context DW fields */
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(ctrl.slots[1]->input_ctx_virt, ctrl.csz);
+    assert_eq(ctrl_ctx[0], 0);                /* Drop Flags */
+    assert_eq(ctrl_ctx[1], (1U<<0) | (1U<<1));/* Add Flags: Slot + EP0 */
+
+    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(ctrl.slots[1]->input_ctx_virt, ctrl.csz);
+    assert_eq(slot_ctx[0], (3U << 20) | (1U << 27)); /* Speed=3, Context Entries=1 */
+    assert_eq(slot_ctx[1], (1U << 16));               /* Root Hub Port = 1 */
+
+    uint32_t *ep0_ctx = (uint32_t *)xhci_input_ep0_ctx(ctrl.slots[1]->input_ctx_virt, ctrl.csz);
+    assert_eq(ep0_ctx[1], (3U << 1) | (4U << 3) | (64U << 16)); /* CErr=3, EP Type=4, MPS=64 */
+    assert_eq(ep0_ctx[2] & 1U, 1U);                              /* DCS = 1 */
+    assert_eq(ep0_ctx[4], 8U);                                   /* Average TRB Length = 8 */
+
+    /* Verify EP0 Ring Link TRB at index 255 */
+    struct xhci_trb *link = &ctrl.slots[1]->ep0_ring_virt[XHCI_TRB_RING_SIZE - 1];
+    assert_eq((link->control >> 10) & 0x3F, XHCI_TRB_TYPE_LINK);
+    assert_true((link->control & XHCI_TRB_LINK_TC) != 0);
+
+    /* Free slot and verify memory teardown */
+    int initial_pages = s_mock_page_count;
+    xhci_free_slot(&ctrl, slot_id);
+    assert_true(ctrl.slots[1] == NULL);
+    assert_eq(ctrl.dcbaa_virt[1], 0);
+    assert_eq(s_mock_page_count, initial_pages - 4); /* 4 pages freed */
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -244,6 +331,7 @@ int main(void)
     test_xhci_event_poll_with_intervening_port_change();
     test_xhci_event_poll_timeout();
     test_xhci_port_reset_normal_and_failure();
+    test_xhci_slot_lifecycle_and_address_device();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

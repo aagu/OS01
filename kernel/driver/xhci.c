@@ -281,6 +281,184 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
     return 0;
 }
 
+int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t speed,
+                     uint8_t *out_slot_id)
+{
+    if (!ctrl || !ctrl->cmd_ring_virt || !ctrl->db_regs) return -EINVAL;
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.control = (XHCI_TRB_TYPE_ENABLE_SLOT << 10) | ctrl->cmd_ring_cycle;
+
+    int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
+    if (rc != 0) return rc;
+    xhci_write32(ctrl->db_regs, 0);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_event_filtered(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc != 0) return rc;
+    if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] enable slot command failed (cc=%u)\n",
+                (unsigned)((evt.status >> 24) & 0xFF));
+        return -EIO;
+    }
+
+    uint8_t slot_id = (evt.control >> 24) & 0xFF;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) return -ERANGE;
+
+    struct xhci_slot *slot = (struct xhci_slot *)kmalloc(sizeof(struct xhci_slot));
+    if (!slot) return -ENOMEM;
+    memset(slot, 0, sizeof(*slot));
+    slot->slot_id = slot_id;
+    slot->port_num = port_num;
+    slot->speed = speed;
+    slot->active = true;
+    ctrl->slots[slot_id] = slot;
+
+    log_info("[xhci] slot %u allocated (port %u)\n", slot_id, port_num);
+    if (out_slot_id) *out_slot_id = slot_id;
+    return 0;
+}
+
+int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
+{
+    if (!ctrl || !ctrl->dcbaa_virt) return -EINVAL;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
+        return -EINVAL;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+
+    /* Strict allocation order with rollback unwind. */
+    slot->input_ctx_phys = alloc_4k_page();
+    if (!slot->input_ctx_phys) goto err_input;
+    slot->input_ctx_virt = (void *)Phy_To_Virt(slot->input_ctx_phys);
+
+    slot->dev_ctx_phys = alloc_4k_page();
+    if (!slot->dev_ctx_phys) goto err_dev;
+    slot->dev_ctx_virt = (void *)Phy_To_Virt(slot->dev_ctx_phys);
+
+    slot->ep0_ring_phys = alloc_4k_page();
+    if (!slot->ep0_ring_phys) goto err_ep0;
+    slot->ep0_ring_virt = (struct xhci_trb *)Phy_To_Virt(slot->ep0_ring_phys);
+
+    slot->dma_buf_phys = alloc_4k_page();
+    if (!slot->dma_buf_phys) goto err_dma;
+    slot->dma_buf_virt = (void *)Phy_To_Virt(slot->dma_buf_phys);
+
+    memset(slot->input_ctx_virt, 0, 4096);
+    memset(slot->dev_ctx_virt, 0, 4096);
+    memset(slot->ep0_ring_virt, 0, 4096);
+    memset(slot->dma_buf_virt, 0, 4096);
+
+    /* Output device context must be registered before the command. */
+    ctrl->dcbaa_virt[slot_id] = slot->dev_ctx_phys;
+
+    /* EP0 Transfer Ring: Link TRB wraps index 255 back to the ring base. */
+    struct xhci_trb *link = &slot->ep0_ring_virt[XHCI_TRB_RING_SIZE - 1];
+    link->parameter = slot->ep0_ring_phys;
+    link->status = 0;
+    link->control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+    slot->ep0_ring_cycle = 1;
+    slot->ep0_ring_enqueue = 0;
+
+    uint16_t max_packet_size;
+    switch (slot->speed) {
+    case XHCI_PORT_SPEED_LOW:
+        max_packet_size = 8;
+        break;
+    case XHCI_PORT_SPEED_SUPER:
+        max_packet_size = 512;
+        break;
+    default:
+        max_packet_size = 64;
+        break;
+    }
+    slot->max_packet_size = max_packet_size;
+
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(slot->input_ctx_virt, ctrl->csz);
+    ctrl_ctx[0] = 0;                        /* Drop Flags */
+    ctrl_ctx[1] = (1U << 0) | (1U << 1);    /* Add Flags: Slot + EP0 */
+
+    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, ctrl->csz);
+    slot_ctx[0] = ((uint32_t)slot->speed << 20) | (1U << 27); /* Speed, Context Entries=1 */
+    slot_ctx[1] = ((uint32_t)slot->port_num << 16);           /* Root Hub Port Number */
+
+    uint32_t *ep0_ctx = (uint32_t *)xhci_input_ep0_ctx(slot->input_ctx_virt, ctrl->csz);
+    ep0_ctx[0] = 0;                                              /* EP State */
+    ep0_ctx[1] = (3U << 1) | (4U << 3) | ((uint32_t)max_packet_size << 16); /* CErr, EP Type=Control, MPS */
+    ep0_ctx[2] = (uint32_t)(slot->ep0_ring_phys & 0xFFFFFFF0ULL) | 1U;      /* TR Dequeue Lo, DCS=1 */
+    ep0_ctx[3] = (uint32_t)(slot->ep0_ring_phys >> 32);                     /* TR Dequeue Hi */
+    ep0_ctx[4] = 8U;                                             /* Average TRB Length */
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.parameter = slot->input_ctx_phys;
+    trb.control = ((uint32_t)slot_id << 24) | (XHCI_TRB_TYPE_ADDRESS_DEV << 10) | ctrl->cmd_ring_cycle;
+
+    int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
+    if (rc != 0) goto err_cmd;
+    xhci_write32(ctrl->db_regs, 0);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_event_filtered(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc != 0) goto err_cmd;
+    if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] address device command failed (cc=%u)\n",
+                (unsigned)((evt.status >> 24) & 0xFF));
+        goto err_cmd;
+    }
+
+    log_info("[xhci] slot %u addressed successfully\n", slot_id);
+    return 0;
+
+err_cmd:
+    ctrl->dcbaa_virt[slot_id] = 0;
+    /* fallthrough: release pages, keep the slot struct for the caller's
+     * xhci_free_slot teardown. */
+err_dma:
+    if (slot->dma_buf_phys) {
+        free_4k_page(slot->dma_buf_phys);
+        slot->dma_buf_phys = 0;
+        slot->dma_buf_virt = NULL;
+    }
+err_ep0:
+    if (slot->ep0_ring_phys) {
+        free_4k_page(slot->ep0_ring_phys);
+        slot->ep0_ring_phys = 0;
+        slot->ep0_ring_virt = NULL;
+    }
+err_dev:
+    if (slot->dev_ctx_phys) {
+        free_4k_page(slot->dev_ctx_phys);
+        slot->dev_ctx_phys = 0;
+        slot->dev_ctx_virt = NULL;
+    }
+err_input:
+    if (slot->input_ctx_phys) {
+        free_4k_page(slot->input_ctx_phys);
+        slot->input_ctx_phys = 0;
+        slot->input_ctx_virt = NULL;
+    }
+    return rc != 0 ? rc : -EIO;
+}
+
+void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
+{
+    if (!ctrl || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) return;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (!slot) return;
+
+    if (ctrl->dcbaa_virt) ctrl->dcbaa_virt[slot_id] = 0;
+    if (slot->input_ctx_phys) free_4k_page(slot->input_ctx_phys);
+    if (slot->dev_ctx_phys) free_4k_page(slot->dev_ctx_phys);
+    if (slot->ep0_ring_phys) free_4k_page(slot->ep0_ring_phys);
+    if (slot->dma_buf_phys) free_4k_page(slot->dma_buf_phys);
+
+    kfree(slot);
+    ctrl->slots[slot_id] = NULL;
+}
+
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb)
 {
     if (!ctrl || !ctrl->cmd_ring_virt || !trb) return -EINVAL;
