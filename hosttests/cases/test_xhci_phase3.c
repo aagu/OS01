@@ -115,11 +115,99 @@ void test_xhci_dynamic_ep_rings_lifecycle_and_oom_rollback(void)
     assert_eq(s_mock_page_count, base_pages);
 }
 
+void test_xhci_parse_config_descriptor_hierarchy(void)
+{
+    TEST_CASE("Parse valid USB Configuration Descriptor hierarchy (Tablet HID)");
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.speed = XHCI_PORT_SPEED_FULL;
+
+    /* Raw descriptor hierarchy for QEMU usb-tablet:
+     * Config (9B): total_len=34, 1 iface, config_val=1
+     * Interface (9B): iface=0, alt=0, eps=1, class=3 (HID), subclass=0, proto=0
+     * HID (9B): desc_len=9, type=0x21
+     * Endpoint (7B): addr=0x81 (EP1 IN -> DCI 3), attr=3 (Intr), mps=8, interval=10
+     */
+    uint8_t raw_desc[34] = {
+        /* Config */
+        9, USB_DESC_TYPE_CONFIGURATION, 34, 0, 1, 1, 0, 0x80, 50,
+        /* Interface */
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        /* HID */
+        9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
+        /* Endpoint */
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10
+    };
+
+    int rc = xhci_setup_endpoint_rings(&slot, raw_desc, sizeof(raw_desc));
+    assert_eq(rc, 0);
+    assert_eq(slot.max_dci, 3);
+    assert_true(slot.iface.active);
+    assert_eq(slot.iface.class_code, 3);
+    assert_eq(slot.iface.num_endpoints, 1);
+
+    assert_true(slot.ep_rings != NULL);
+    assert_true(slot.ep_rings[3] != NULL);
+    assert_eq(slot.ep_rings[3]->dci, 3);
+    assert_eq(slot.ep_rings[3]->ep_type, XHCI_EP_TYPE_INTR_IN);
+    assert_eq(slot.ep_rings[3]->max_packet_size, 8);
+    /* For Full-Speed Interrupt with bInterval=10, 2^(6-3) = 8ms <= 10ms -> interval=6 */
+    assert_eq(slot.ep_rings[3]->interval, 6);
+    assert_true(slot.ep_rings[3]->ring_phys != 0);
+
+    /* Verify Link TRB initialized at index 255 */
+    struct xhci_trb *link = &slot.ep_rings[3]->ring_virt[XHCI_TRB_RING_SIZE - 1];
+    assert_eq((link->control >> 10) & 0x3F, XHCI_TRB_TYPE_LINK);
+    assert_true((link->control & XHCI_TRB_LINK_TC) != 0);
+
+    xhci_free_endpoint_rings(&slot);
+}
+
+void test_xhci_parse_corrupt_descriptor_guards(void)
+{
+    TEST_CASE("Defensive guards against corrupt descriptors");
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+
+    /* Guard 1: Sub-descriptor len underflow (len < 7 for endpoint) */
+    uint8_t underflow_desc[16] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 16, 0, 1, 1, 0, 0x80, 50,
+        5, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10 /* len=5 is < 7 */
+    };
+    int max_dci = xhci_parse_config_descriptor(&slot, underflow_desc, sizeof(underflow_desc));
+    assert_eq(max_dci, 1); /* Ignored corrupt endpoint */
+
+    /* Guard 2: ep_num == 0 (bEndpointAddress = 0x80) */
+    uint8_t ep0_desc[16] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 16, 0, 1, 1, 0, 0x80, 50,
+        7, USB_DESC_TYPE_ENDPOINT, 0x80, 3, 8, 0, 10 /* ep_num=0 is invalid for non-EP0 */
+    };
+    max_dci = xhci_parse_config_descriptor(&slot, ep0_desc, sizeof(ep0_desc));
+    assert_eq(max_dci, 1);
+
+    /* Guard 3: OOM during ring allocation rolls back without leak */
+    uint8_t valid_desc[34] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 34, 0, 1, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10
+    };
+    int base_pages = s_mock_page_count;
+    s_inject_alloc_fail_countdown = 0; /* Fail next alloc_4k_page */
+    int rc = xhci_setup_endpoint_rings(&slot, valid_desc, sizeof(valid_desc));
+    assert_eq(rc, -ENOMEM);
+    assert_true(slot.ep_rings == NULL);
+    assert_eq(s_mock_page_count, base_pages); /* Clean rollback */
+    s_inject_alloc_fail_countdown = -1;
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
     test_xhci_phase3_structs_and_offsets();
     test_xhci_dynamic_ep_rings_lifecycle_and_oom_rollback();
+    test_xhci_parse_config_descriptor_hierarchy();
+    test_xhci_parse_corrupt_descriptor_guards();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

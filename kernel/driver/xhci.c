@@ -627,6 +627,184 @@ int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
     return 0;
 }
 
+uint8_t xhci_calc_interval(uint8_t speed, uint8_t ep_type, uint8_t bInterval)
+{
+    /* The Interval field is only meaningful for Interrupt endpoints; every
+     * other endpoint type must program it as 0 (xHCI 6.2.3.4). */
+    if (ep_type != XHCI_EP_TYPE_INTR_IN && ep_type != XHCI_EP_TYPE_INTR_OUT)
+        return 0;
+
+    if (bInterval == 0) return 3;
+
+    if (speed == XHCI_PORT_SPEED_HIGH || speed == XHCI_PORT_SPEED_SUPER) {
+        return (bInterval <= 16) ? (uint8_t)(bInterval - 1) : 15;
+    }
+
+    /* Full / Low speed Interrupt: the polling period is 2^(interval - 3) ms,
+     * so pick the smallest exponent whose period still fits in bInterval ms. */
+    uint8_t interval = 3;
+    while (interval < 10 && (1U << (interval - 3 + 1)) <= bInterval) {
+        interval++;
+    }
+    return interval;
+}
+
+int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
+                                  uint16_t length)
+{
+    if (!slot || !buffer || length < 2) return 0;
+
+    uint16_t offset = 0;
+    uint8_t max_dci = 1; /* EP0 always exists at DCI 1 */
+
+    while (offset + 2 <= length) {
+        uint8_t len = buffer[offset];
+        uint8_t type = buffer[offset + 1];
+
+        /* Corrupt descriptor: a zero/short length or a length that runs past
+         * the buffer end makes the rest of the hierarchy untrustworthy. */
+        if (len < 2 || (uint16_t)(offset + len) > length) break;
+
+        if (type == USB_DESC_TYPE_INTERFACE) {
+            if (len < sizeof(struct usb_interface_descriptor)) break;
+            const struct usb_interface_descriptor *iface =
+                (const struct usb_interface_descriptor *)(buffer + offset);
+            /* Only the primary interface of the active configuration. */
+            if (iface->bInterfaceNumber == 0 && iface->bAlternateSetting == 0) {
+                slot->iface.interface_num = iface->bInterfaceNumber;
+                slot->iface.class_code = iface->bInterfaceClass;
+                slot->iface.subclass_code = iface->bInterfaceSubClass;
+                slot->iface.protocol = iface->bInterfaceProtocol;
+                slot->iface.num_endpoints = iface->bNumEndpoints;
+                slot->iface.active = true;
+            }
+        } else if (type == USB_DESC_TYPE_ENDPOINT) {
+            if (len < sizeof(struct usb_endpoint_descriptor)) break;
+            const struct usb_endpoint_descriptor *ep =
+                (const struct usb_endpoint_descriptor *)(buffer + offset);
+            uint8_t ep_num = ep->bEndpointAddress & 0x0F;
+            uint8_t is_in = (ep->bEndpointAddress & 0x80) != 0;
+            /* EP0 is owned by the dedicated EP0 ring: a non-EP0 descriptor
+             * claiming endpoint number 0 is corrupt. */
+            if (ep_num == 0) {
+                offset += len;
+                continue;
+            }
+            uint8_t dci = ep_num * 2 + (is_in ? 1 : 0);
+            if (dci < XHCI_MIN_ENDPOINT_DCI || dci > XHCI_MAX_ENDPOINT_DCI) {
+                offset += len;
+                continue;
+            }
+            if (dci > max_dci) max_dci = dci;
+        }
+
+        offset += len;
+    }
+
+    return max_dci;
+}
+
+int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
+                               uint16_t length)
+{
+    if (!slot || !buffer) return -EINVAL;
+
+    /* Defensive reset: drop any ring discovered by a previous enumeration
+     * before the hierarchy is re-parsed, so a stale table can never be
+     * reused with a different max_dci. */
+    xhci_free_endpoint_rings(slot);
+
+    int max_dci = xhci_parse_config_descriptor(slot, buffer, length);
+    if (max_dci < XHCI_MIN_ENDPOINT_DCI) return 0; /* EP0 only: nothing to ring */
+
+    slot->ep_rings = kmalloc(sizeof(struct xhci_ep_ring *) * (max_dci + 1));
+    if (!slot->ep_rings) return -ENOMEM;
+    memset(slot->ep_rings, 0, sizeof(struct xhci_ep_ring *) * (max_dci + 1));
+    slot->max_dci = (uint8_t)max_dci;
+
+    /* Second pass: instantiate one transfer ring per discovered endpoint. */
+    uint16_t offset = 0;
+    while (offset + 2 <= length) {
+        uint8_t len = buffer[offset];
+        uint8_t type = buffer[offset + 1];
+        if (len < 2 || (uint16_t)(offset + len) > length) break;
+
+        if (type == USB_DESC_TYPE_ENDPOINT &&
+            len >= sizeof(struct usb_endpoint_descriptor)) {
+            const struct usb_endpoint_descriptor *ep =
+                (const struct usb_endpoint_descriptor *)(buffer + offset);
+            uint8_t ep_num = ep->bEndpointAddress & 0x0F;
+            uint8_t is_in = (ep->bEndpointAddress & 0x80) != 0;
+            if (ep_num == 0) {
+                offset += len;
+                continue;
+            }
+            uint8_t dci = ep_num * 2 + (is_in ? 1 : 0);
+            /* Out of range or already defined: skip, never duplicate. */
+            if (dci < XHCI_MIN_ENDPOINT_DCI || dci > max_dci || slot->ep_rings[dci]) {
+                offset += len;
+                continue;
+            }
+
+            struct xhci_ep_ring *ring = kmalloc(sizeof(struct xhci_ep_ring));
+            if (!ring) goto oom;
+            memset(ring, 0, sizeof(*ring));
+
+            ring->ring_phys = alloc_4k_page();
+            if (!ring->ring_phys) {
+                kfree(ring);
+                goto oom;
+            }
+            ring->ring_virt = (struct xhci_trb *)Phy_To_Virt(ring->ring_phys);
+            memset(ring->ring_virt, 0, 4096);
+
+            /* Link TRB at index 255 wraps the ring back to its base. */
+            struct xhci_trb *link = &ring->ring_virt[XHCI_TRB_RING_SIZE - 1];
+            link->parameter = ring->ring_phys;
+            link->status = 0;
+            link->control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+            ring->cycle = 1;
+            ring->enqueue = 0;
+            ring->dci = dci;
+
+            switch (ep->bmAttributes & 3) {
+            case 0: /* Control */
+                ring->ep_type = XHCI_EP_TYPE_CONTROL;
+                break;
+            case 1: /* Isochronous */
+                ring->ep_type = is_in ? XHCI_EP_TYPE_ISOCH_IN : XHCI_EP_TYPE_ISOCH_OUT;
+                break;
+            case 2: /* Bulk */
+                ring->ep_type = is_in ? XHCI_EP_TYPE_BULK_IN : XHCI_EP_TYPE_BULK_OUT;
+                break;
+            default: /* Interrupt */
+                ring->ep_type = is_in ? XHCI_EP_TYPE_INTR_IN : XHCI_EP_TYPE_INTR_OUT;
+                break;
+            }
+
+            ring->interval = xhci_calc_interval(slot->speed, ring->ep_type, ep->bInterval);
+            ring->max_packet_size = ep->wMaxPacketSize & 0x7FF;
+            ring->active = true;
+
+            slot->ep_rings[dci] = ring;
+
+            log_info("[xhci] slot %u: endpoint DCI %u configured (type=%u, mps=%u, interval=%u)\n",
+                     slot->slot_id, (unsigned)dci, (unsigned)ring->ep_type,
+                     (unsigned)ring->max_packet_size, (unsigned)ring->interval);
+        }
+
+        offset += len;
+    }
+
+    return 0;
+
+oom:
+    /* Roll back every ring allocated so far: no page and no struct leaks. */
+    xhci_free_endpoint_rings(slot);
+    return -ENOMEM;
+}
+
 void xhci_probe_ports(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->op_regs) return;

@@ -422,6 +422,11 @@ void xhci_free_endpoint_rings(struct xhci_slot *slot);
 int xhci_ep0_ring_enqueue(struct xhci_slot *slot, const struct xhci_trb *trb);
 int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
                                struct usb_device_descriptor *out_desc);
+uint8_t xhci_calc_interval(uint8_t speed, uint8_t ep_type, uint8_t bInterval);
+int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
+                                  uint16_t length);
+int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
+                               uint16_t length);
 void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
 extern const struct pci_driver xhci_pci_driver;
