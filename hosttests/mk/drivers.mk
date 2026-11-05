@@ -10,6 +10,7 @@ $(eval $(call register_host_test,test_ahci_lifecycle,drivers,protocol-or-legacy)
 $(eval $(call register_host_test,test_device_boot,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_xhci_init,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_xhci_phase2,drivers,protocol-or-legacy))
+$(eval $(call register_host_test,test_xhci_phase3,drivers,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_i8042_demux.elf \
@@ -21,7 +22,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_ahci_lifecycle.elf \
     $(TEST_BLD)/test_device_boot.elf \
     $(TEST_BLD)/test_xhci_init.elf \
-    $(TEST_BLD)/test_xhci_phase2.elf
+    $(TEST_BLD)/test_xhci_phase2.elf \
+    $(TEST_BLD)/test_xhci_phase3.elf
 
 # PS/2 Mouse & Keyboard over i8042
 I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
@@ -321,5 +323,22 @@ $(TEST_BLD)/test_xhci_phase2.elf: $(TEST_BLD)/test_xhci_phase2.o \
 
 .PHONY: test-xhci-phase2
 test-xhci-phase2: $(TEST_BLD)/test_xhci_phase2.elf
+	$<
+
+$(TEST_BLD)/test_xhci_phase3.o: $(TEST_CASES)/test_xhci_phase3.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_xhci_phase3.elf: $(TEST_BLD)/test_xhci_phase3.o \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-xhci-phase3
+test-xhci-phase3: $(TEST_BLD)/test_xhci_phase3.elf
 	$<
 

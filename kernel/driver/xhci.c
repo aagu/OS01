@@ -368,6 +368,10 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
 
     struct xhci_slot *slot = ctrl->slots[slot_id];
 
+    /* rc is used by every error path below, including the ones taken before
+     * the command is issued: seed it with the allocation failure code. */
+    int rc = -ENOMEM;
+
     /* Strict allocation order with rollback unwind. */
     slot->input_ctx_phys = alloc_4k_page();
     if (!slot->input_ctx_phys) goto err_input;
@@ -438,7 +442,7 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     uint64_t expect_trb = ctrl->cmd_ring_phys +
                           (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
 
-    int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
+    rc = xhci_cmd_ring_enqueue(ctrl, &trb);
     if (rc != 0) goto err_cmd;
     xhci_write32(ctrl->db_regs, 0);
 
@@ -485,6 +489,26 @@ err_input:
     return rc != 0 ? rc : -EIO;
 }
 
+void xhci_free_endpoint_rings(struct xhci_slot *slot)
+{
+    if (!slot || !slot->ep_rings) return;
+
+    for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
+        if (slot->ep_rings[dci]) {
+            if (slot->ep_rings[dci]->ring_phys) {
+                free_4k_page(slot->ep_rings[dci]->ring_phys);
+                slot->ep_rings[dci]->ring_phys = 0;
+            }
+            kfree(slot->ep_rings[dci]);
+            slot->ep_rings[dci] = NULL;
+        }
+    }
+
+    kfree(slot->ep_rings);
+    slot->ep_rings = NULL;
+    slot->max_dci = 0;
+}
+
 void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
 {
     if (!ctrl || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) return;
@@ -493,6 +517,11 @@ void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
     if (!slot) return;
 
     if (ctrl->dcbaa_virt) ctrl->dcbaa_virt[slot_id] = 0;
+
+    /* Release the dynamically allocated endpoint rings before the base DMA
+     * contexts: the endpoint rings are indexed by slot->max_dci. */
+    xhci_free_endpoint_rings(slot);
+
     if (slot->input_ctx_phys) free_4k_page(slot->input_ctx_phys);
     if (slot->dev_ctx_phys) free_4k_page(slot->dev_ctx_phys);
     if (slot->ep0_ring_phys) free_4k_page(slot->ep0_ring_phys);

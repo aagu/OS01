@@ -18,6 +18,7 @@
 #define XHCI_TRB_TYPE_ENABLE_SLOT   9
 #define XHCI_TRB_TYPE_DISABLE_SLOT  10
 #define XHCI_TRB_TYPE_ADDRESS_DEV   11
+#define XHCI_TRB_TYPE_CONFIG_EP     12
 #define XHCI_TRB_TYPE_TRANSFER_EVT   32
 #define XHCI_TRB_TYPE_CMD_CMPL_EVT   33
 #define XHCI_TRB_TYPE_PORT_STATUS_EVT 34
@@ -66,6 +67,29 @@
 
 /* Slots managed by the driver (1-based; array is sized [MAX + 1]) */
 #define XHCI_MAX_MANAGED_SLOTS      32
+
+/* USB descriptor types (bDescriptorType) */
+#define USB_DESC_TYPE_DEVICE        1
+#define USB_DESC_TYPE_CONFIGURATION 2
+#define USB_DESC_TYPE_STRING        3
+#define USB_DESC_TYPE_INTERFACE     4
+#define USB_DESC_TYPE_ENDPOINT      5
+#define USB_DESC_TYPE_HID           0x21
+#define USB_DESC_TYPE_REPORT        0x22
+
+/* xHCI endpoint types (Endpoint Context DW1 bits [5:3]) */
+#define XHCI_EP_TYPE_INVALID        0
+#define XHCI_EP_TYPE_ISOCH_OUT      1
+#define XHCI_EP_TYPE_BULK_OUT       2
+#define XHCI_EP_TYPE_INTR_OUT       3
+#define XHCI_EP_TYPE_CONTROL        4
+#define XHCI_EP_TYPE_ISOCH_IN       5
+#define XHCI_EP_TYPE_BULK_IN        6
+#define XHCI_EP_TYPE_INTR_IN        7
+
+/* Device Context Index bounds: EP0 is DCI 1, DCI 0 is the Slot Context */
+#define XHCI_MIN_ENDPOINT_DCI       2
+#define XHCI_MAX_ENDPOINT_DCI       31
 
 /* Capability Register Offsets (relative to BAR0 MMIO base) */
 #define XHCI_CAP_CAPLENGTH          0x00
@@ -141,6 +165,75 @@ struct usb_device_descriptor {
     uint8_t  bNumConfigurations;
 } __attribute__((packed));
 
+/* USB Standard Configuration Descriptor (USB 2.0 §9.5, 9 bytes) */
+struct usb_config_descriptor {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint16_t wTotalLength;
+    uint8_t  bNumInterfaces;
+    uint8_t  bConfigurationValue;
+    uint8_t  iConfiguration;
+    uint8_t  bmAttributes;
+    uint8_t  bMaxPower;
+} __attribute__((packed));
+
+/* USB Standard Interface Descriptor (USB 2.0 §9.4, 9 bytes) */
+struct usb_interface_descriptor {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint8_t  bInterfaceNumber;
+    uint8_t  bAlternateSetting;
+    uint8_t  bNumEndpoints;
+    uint8_t  bInterfaceClass;
+    uint8_t  bInterfaceSubClass;
+    uint8_t  bInterfaceProtocol;
+    uint8_t  iInterface;
+} __attribute__((packed));
+
+/* USB Standard Endpoint Descriptor (USB 2.0 §9.3.7, 7 bytes) */
+struct usb_endpoint_descriptor {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint8_t  bEndpointAddress;  /* bit 7: 1=IN, 0=OUT; bits 3:0: EP num */
+    uint8_t  bmAttributes;      /* bits 1:0: 0=Ctrl, 1=Isoch, 2=Bulk, 3=Intr */
+    uint16_t wMaxPacketSize;
+    uint8_t  bInterval;
+} __attribute__((packed));
+
+/* USB HID Descriptor (USB 2.0 §9.23, 9 bytes) */
+struct usb_hid_descriptor {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint16_t bcdHID;
+    uint8_t  bCountryCode;
+    uint8_t  bNumDescriptors;
+    uint8_t  bReportDescriptorType;
+    uint16_t wReportDescriptorLength;
+} __attribute__((packed));
+
+/* Per-endpoint transfer ring instance (dynamically allocated per DCI) */
+struct xhci_ep_ring {
+    uint64_t ring_phys;             /* 4KB DMA page physical address */
+    struct xhci_trb *ring_virt;     /* Virtual address */
+    uint32_t enqueue;               /* Enqueue index (0..254) */
+    uint8_t cycle;                  /* Producer cycle state */
+    uint8_t dci;                    /* Device Context Index (2..31) */
+    uint8_t ep_type;                /* XHCI_EP_TYPE_* */
+    uint16_t max_packet_size;       /* Endpoint max packet size */
+    uint8_t interval;               /* Computed xHCI interval exponent */
+    bool active;
+};
+
+/* Summary of the primary interface parsed from the descriptor hierarchy */
+struct xhci_interface_info {
+    uint8_t interface_num;
+    uint8_t class_code;
+    uint8_t subclass_code;
+    uint8_t protocol;
+    uint8_t num_endpoints;
+    bool active;
+};
+
 /* Context size helpers: HCCPARAMS1.CSZ selects 32B (csz=0) or 64B (csz=1)
  * context entries. Input context = [ctrl][slot][31 x ep]; device context =
  * [slot][31 x ep]. */
@@ -171,6 +264,20 @@ static inline void *xhci_dev_ep0_ctx(void *base, uint8_t csz)
     return (uint8_t *)base + (csz ? 64 : 32);
 }
 
+/* Input Context: [ctrl][slot][EP0 (DCI 1)][EP DCI 2..31] — the endpoint
+ * context for a given DCI lives at index (1 + dci). */
+static inline void *xhci_input_ep_ctx(void *base, uint8_t csz, uint8_t dci)
+{
+    return (uint8_t *)base + (1 + dci) * (csz ? 64 : 32);
+}
+
+/* Output Device Context: [slot][EP0 (DCI 1)][EP DCI 2..31] — the endpoint
+ * context for a given DCI lives at index dci. */
+static inline void *xhci_dev_ep_ctx(void *base, uint8_t csz, uint8_t dci)
+{
+    return (uint8_t *)base + dci * (csz ? 64 : 32);
+}
+
 /* Per-slot driver state (slot_id is 1-based) */
 struct xhci_slot {
     uint8_t slot_id;
@@ -196,8 +303,20 @@ struct xhci_slot {
     uint64_t dma_buf_phys;
     void *dma_buf_virt;
 
+    /* Dynamically allocated endpoint ring table: array of pointers sized
+     * (max_dci + 1).  Index 0 is unused, index 1 is EP0 (handled by the
+     * dedicated EP0 ring), indexes 2..max_dci map to device endpoints. */
+    struct xhci_ep_ring **ep_rings;
+    uint8_t max_dci;
+
     /* Cached Device Descriptor */
     struct usb_device_descriptor desc;
+
+    /* Cached Configuration Descriptor & parsed interface summary */
+    struct usb_config_descriptor config_desc;
+    struct xhci_interface_info iface;
+
+    bool configured;
 };
 
 /* xHCI Controller Instance State */
@@ -299,6 +418,7 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
                      uint8_t *out_slot_id);
 int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id);
 void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id);
+void xhci_free_endpoint_rings(struct xhci_slot *slot);
 int xhci_ep0_ring_enqueue(struct xhci_slot *slot, const struct xhci_trb *trb);
 int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
                                struct usb_device_descriptor *out_desc);
