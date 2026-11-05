@@ -805,6 +805,129 @@ oom:
     return -ENOMEM;
 }
 
+/* Standard IN control transfer on EP0: Setup + Data + Status stages.
+ * Reads `length` bytes of the requested descriptor into the slot DMA
+ * buffer and returns the number of bytes actually transferred, or a
+ * negative errno. */
+static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slot *slot,
+                                   uint8_t desc_type, uint16_t length)
+{
+    /* Setup Stage: GET_DESCRIPTOR(desc_type), 8-byte setup packet as
+     * immediate data.  Layout: wLength[63:48] wIndex[47:32]
+     * wValue[31:16] bRequest[15:8] bmRequestType[7:0]. */
+    struct xhci_trb setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.parameter = ((uint64_t)length << 48) |
+                      ((uint64_t)(desc_type << 8) << 16) |
+                      ((uint64_t)0x06 << 8) | 0x80ULL;
+    setup.status = 8;
+    setup.control = (3U << 16) | (1U << 6) | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
+
+    /* Data Stage: IN, `length` bytes into the slot DMA buffer. */
+    struct xhci_trb data;
+    memset(&data, 0, sizeof(data));
+    data.parameter = slot->dma_buf_phys;
+    data.status = length;
+    data.control = (1U << 16) | (XHCI_TRB_TYPE_DATA_STAGE << 10);
+
+    /* Status Stage: OUT handshake, interrupt on completion. */
+    struct xhci_trb status;
+    memset(&status, 0, sizeof(status));
+    status.control = (1U << 5) | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
+
+    int rc = xhci_ep0_ring_enqueue(slot, &setup);
+    if (rc != 0) return rc;
+    rc = xhci_ep0_ring_enqueue(slot, &data);
+    if (rc != 0) return rc;
+    rc = xhci_ep0_ring_enqueue(slot, &status);
+    if (rc != 0) return rc;
+
+    /* Ring the slot doorbell: Target = 1 (EP0). */
+    xhci_write32(ctrl->db_regs + slot->slot_id * 4, 1);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_transfer(ctrl, slot->slot_id, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc != 0) return rc;
+
+    uint32_t cc = (evt.status >> 24) & 0xFF;
+    if (cc != XHCI_COMP_SUCCESS && cc != XHCI_COMP_SHORT_TX) {
+        log_err("[xhci] slot %u: GET_DESCRIPTOR(0x%02x) failed (cc=%u)\n",
+                slot->slot_id, desc_type, cc);
+        return -EIO;
+    }
+
+    uint32_t residual = evt.status & 0xFFFFFF;
+    if (residual > length) {
+        log_err("[xhci] slot %u: GET_DESCRIPTOR(0x%02x) residual %u exceeds %u\n",
+                slot->slot_id, desc_type, residual, length);
+        return -EIO;
+    }
+
+    return (int)(length - residual);
+}
+
+int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
+                                struct usb_config_descriptor *out_desc)
+{
+    if (!ctrl || !ctrl->db_regs || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS ||
+        !ctrl->slots[slot_id])
+        return -EINVAL;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (!slot->ep0_ring_virt || !slot->dma_buf_virt) return -EINVAL;
+
+    /* Stage 1: the 9-byte header carries wTotalLength of the whole
+     * configuration descriptor hierarchy. */
+    int rc = xhci_ep0_get_descriptor(ctrl, slot, USB_DESC_TYPE_CONFIGURATION, 9);
+    if (rc < 0) return rc;
+    if (rc < (int)sizeof(struct usb_config_descriptor)) {
+        log_err("[xhci] slot %u: short configuration descriptor header (%d bytes)\n",
+                slot_id, rc);
+        return -EIO;
+    }
+
+    struct usb_config_descriptor temp_cfg;
+    memcpy(&temp_cfg, slot->dma_buf_virt, sizeof(temp_cfg));
+
+    if (temp_cfg.bLength != sizeof(struct usb_config_descriptor) ||
+        temp_cfg.bDescriptorType != USB_DESC_TYPE_CONFIGURATION) {
+        log_err("[xhci] slot %u: invalid configuration descriptor header "
+                "(len=%u type=%u)\n", slot_id, temp_cfg.bLength, temp_cfg.bDescriptorType);
+        return -EIO;
+    }
+    if (temp_cfg.wTotalLength < sizeof(struct usb_config_descriptor) ||
+        temp_cfg.wTotalLength > 4096) {
+        log_err("[xhci] slot %u: configuration descriptor wTotalLength out of range (%u)\n",
+                slot_id, temp_cfg.wTotalLength);
+        return -EINVAL;
+    }
+
+    /* Stage 2: read the whole hierarchy into the DMA buffer. */
+    rc = xhci_ep0_get_descriptor(ctrl, slot, USB_DESC_TYPE_CONFIGURATION,
+                                 temp_cfg.wTotalLength);
+    if (rc < 0) return rc;
+
+    uint32_t actual = (uint32_t)rc;
+    if (actual < sizeof(struct usb_config_descriptor)) {
+        log_err("[xhci] slot %u: short configuration descriptor body (%u bytes)\n",
+                slot_id, actual);
+        return -EIO;
+    }
+
+    /* Only the bytes the device really sent are valid. */
+    uint16_t parse_len = (actual < temp_cfg.wTotalLength) ? (uint16_t)actual
+                                                          : temp_cfg.wTotalLength;
+
+    slot->config_desc = temp_cfg;
+    if (out_desc) *out_desc = temp_cfg;
+
+    log_info("[xhci] slot %u: config %u total_len=%u interfaces=%u\n",
+             slot_id, temp_cfg.bConfigurationValue, temp_cfg.wTotalLength,
+             temp_cfg.bNumInterfaces);
+
+    return parse_len;
+}
+
 void xhci_probe_ports(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->op_regs) return;

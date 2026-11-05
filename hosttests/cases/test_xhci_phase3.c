@@ -201,6 +201,129 @@ void test_xhci_parse_corrupt_descriptor_guards(void)
     s_inject_alloc_fail_countdown = -1;
 }
 
+void test_xhci_get_config_descriptor_two_stage(void)
+{
+    TEST_CASE("Two-stage GET_DESCRIPTOR (9B header then full 34B body) with short-tx bounds");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+    slot.speed = XHCI_PORT_SPEED_FULL;
+
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    slot.ep0_ring_virt = ep0_ring;
+    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_cycle = 1;
+    slot.ep0_ring_enqueue = 0;
+
+    uint8_t dma_buf[4096];
+    memset(dma_buf, 0, sizeof(dma_buf));
+    slot.dma_buf_virt = dma_buf;
+    slot.dma_buf_phys = 0x50000;
+
+    ctrl.slots[1] = &slot;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    /* Mock response for Stage 1 (9B header): wTotalLength = 34 */
+    struct usb_config_descriptor raw_cfg = {
+        .bLength = 9,
+        .bDescriptorType = USB_DESC_TYPE_CONFIGURATION,
+        .wTotalLength = 34,
+        .bNumInterfaces = 1,
+        .bConfigurationValue = 1,
+    };
+    memcpy(dma_buf, &raw_cfg, 9);
+
+    /* Event 0: Transfer Event for Stage 1 (Status TRB @ 0x40000 + 2*16) */
+    event_ring[0].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    /* Event 1: Transfer Event for Stage 2 (Status TRB @ 0x40000 + 5*16) */
+    event_ring[1].parameter = 0x40000 + 5 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct usb_config_descriptor cfg;
+    int bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
+    assert_eq(bytes_read, 34);
+    assert_eq(cfg.bLength, 9);
+    assert_eq(cfg.bDescriptorType, USB_DESC_TYPE_CONFIGURATION);
+    assert_eq(cfg.wTotalLength, 34);
+    assert_eq(cfg.bConfigurationValue, 1);
+
+    /* Verify Stage 1 Setup TRB wLength = 9 */
+    assert_eq((ep0_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_SETUP_STAGE);
+    assert_eq((ep0_ring[0].parameter >> 48) & 0xFFFF, 9);
+
+    /* Verify Stage 2 Setup TRB wLength = 34 */
+    assert_eq((ep0_ring[3].control >> 10) & 0x3F, XHCI_TRB_TYPE_SETUP_STAGE);
+    assert_eq((ep0_ring[3].parameter >> 48) & 0xFFFF, 34);
+
+    /* Boundary Test 1: Stage 2 SHORT_TX with residual = 4 (34 - 4 = 30 bytes) */
+    event_ring[2].parameter = 0x40000 + 8 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[3].parameter = 0x40000 + 11 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SHORT_TX << 24) | 4; /* Residual = 4 */
+    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
+    assert_eq(bytes_read, 30);
+
+    /* Boundary Test 2: Stage 2 actual < 9 bytes (e.g. residual = 28 -> actual = 6) returns -EIO */
+    event_ring[4].parameter = 0x40000 + 14 * sizeof(struct xhci_trb);
+    event_ring[4].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[5].parameter = 0x40000 + 17 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_SHORT_TX << 24) | 28; /* Residual = 28 */
+    event_ring[5].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
+    assert_eq(bytes_read, -EIO);
+
+    /* Boundary Test 3: Residual underflow (residual = 50 > 34) returns -EIO */
+    event_ring[6].parameter = 0x40000 + 20 * sizeof(struct xhci_trb);
+    event_ring[6].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[6].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[7].parameter = 0x40000 + 23 * sizeof(struct xhci_trb);
+    event_ring[7].status = (XHCI_COMP_SUCCESS << 24) | 50;
+    event_ring[7].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
+    assert_eq(bytes_read, -EIO);
+
+    /* Boundary Test 4: Header wTotalLength > 4096 returns -EINVAL */
+    raw_cfg.wTotalLength = 5000;
+    memcpy(dma_buf, &raw_cfg, 9);
+    event_ring[8].parameter = 0x40000 + 26 * sizeof(struct xhci_trb);
+    event_ring[8].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[8].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
+    assert_eq(bytes_read, -EINVAL);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -208,6 +331,7 @@ int main(void)
     test_xhci_dynamic_ep_rings_lifecycle_and_oom_rollback();
     test_xhci_parse_config_descriptor_hierarchy();
     test_xhci_parse_corrupt_descriptor_guards();
+    test_xhci_get_config_descriptor_two_stage();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
