@@ -1001,6 +1001,57 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
     return 0;
 }
 
+int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id, uint8_t config_value)
+{
+    if (!ctrl || !ctrl->db_regs || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS ||
+        !ctrl->slots[slot_id])
+        return -EINVAL;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (!slot->ep0_ring_virt) return -EINVAL;
+
+    /* Setup Stage: SET_CONFIGURATION(config_value), no data stage.
+     * Layout: wLength[63:48] wIndex[47:32] wValue[31:16]
+     * bRequest[15:8] bmRequestType[7:0]. */
+    struct xhci_trb setup;
+    memset(&setup, 0, sizeof(setup));
+    setup.parameter = ((uint64_t)config_value << 16) | (0x09ULL << 8) | 0x00ULL;
+    setup.status = 8;
+    setup.control = (0U << 16) | (1U << 6) | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
+
+    /* Status Stage: DIR = 1 (IN), interrupt on completion. */
+    struct xhci_trb status;
+    memset(&status, 0, sizeof(status));
+    status.control = (1U << 16) | (1U << 5) | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
+
+    int rc = xhci_ep0_ring_enqueue(slot, &setup);
+    if (rc != 0) return rc;
+    rc = xhci_ep0_ring_enqueue(slot, &status);
+    if (rc != 0) return rc;
+
+    /* Ring the slot doorbell: Target = 1 (EP0). */
+    xhci_write32(ctrl->db_regs + slot->slot_id * 4, 1);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_transfer(ctrl, slot->slot_id, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc != 0) return rc;
+
+    uint32_t cc = (evt.status >> 24) & 0xFF;
+    if (cc != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] slot %u: SET_CONFIGURATION(%u) failed (cc=%u)\n",
+                slot_id, config_value, cc);
+        return -EIO;
+    }
+
+    slot->configured = true;
+
+    log_info("[xhci] slot %u: configured with config %u (iface class %02x:%02x, ep_count=%u)\n",
+             slot_id, config_value, slot->iface.class_code, slot->iface.subclass_code,
+             slot->iface.num_endpoints);
+
+    return 0;
+}
+
 void xhci_probe_ports(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->op_regs) return;
@@ -1019,6 +1070,36 @@ void xhci_probe_ports(struct xhci_controller *ctrl)
 
         struct usb_device_descriptor desc;
         if (xhci_get_device_descriptor(ctrl, slot_id, &desc) != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            continue;
+        }
+
+        /* Phase 3: read the configuration descriptor hierarchy, build the
+         * endpoint rings, program the endpoint contexts and move the device
+         * into the Configured state. */
+        struct usb_config_descriptor cfg;
+        int rc = xhci_get_config_descriptor(ctrl, slot_id, &cfg);
+        if (rc <= 0) {
+            xhci_free_slot(ctrl, slot_id);
+            continue;
+        }
+
+        struct xhci_slot *slot = ctrl->slots[slot_id];
+        rc = xhci_setup_endpoint_rings(slot, (const uint8_t *)slot->dma_buf_virt,
+                                       (uint16_t)rc);
+        if (rc != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            continue;
+        }
+
+        rc = xhci_configure_endpoints(ctrl, slot_id);
+        if (rc != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            continue;
+        }
+
+        rc = xhci_set_configuration(ctrl, slot_id, cfg.bConfigurationValue);
+        if (rc != 0) {
             xhci_free_slot(ctrl, slot_id);
             continue;
         }

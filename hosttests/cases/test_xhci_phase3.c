@@ -409,6 +409,62 @@ void test_xhci_configure_endpoint_input_context(void)
     kfree(slot.ep_rings);
 }
 
+void test_xhci_set_configuration_2_stage_transfer(void)
+{
+    TEST_CASE("SET_CONFIGURATION 2-stage zero-length control transfer (Setup TRT=0, Status DIR=1)");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    slot.ep0_ring_virt = ep0_ring;
+    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_cycle = 1;
+    slot.ep0_ring_enqueue = 0;
+
+    ctrl.slots[1] = &slot;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    /* Feed mock Transfer Event for Status TRB @ 0x40000 + 1*16 */
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    int rc = xhci_set_configuration(&ctrl, 1, 1);
+    assert_eq(rc, 0);
+    assert_true(slot.configured);
+
+    /* Verify Setup Stage TRB: TRT = 0 (No Data), IDT = 1, bRequest = 9, wValue = 1 */
+    assert_eq((ep0_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_SETUP_STAGE);
+    assert_eq((ep0_ring[0].control >> 16) & 3, 0);        /* TRT = 0 */
+    assert_true((ep0_ring[0].control & (1U << 6)) != 0); /* IDT = 1 */
+    assert_eq(ep0_ring[0].parameter & 0xFFFF, (0x09U << 8)); /* bRequest=9, bmRequestType=0 */
+    assert_eq((ep0_ring[0].parameter >> 16) & 0xFFFF, 1);    /* wValue=1 */
+
+    /* Verify Status Stage TRB: DIR = 1 (IN), IOC = 1 */
+    assert_eq((ep0_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_STATUS_STAGE);
+    assert_true((ep0_ring[1].control & (1U << 16)) != 0); /* DIR = 1 */
+    assert_true((ep0_ring[1].control & (1U << 5)) != 0);  /* IOC = 1 */
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -418,6 +474,7 @@ int main(void)
     test_xhci_parse_corrupt_descriptor_guards();
     test_xhci_get_config_descriptor_two_stage();
     test_xhci_configure_endpoint_input_context();
+    test_xhci_set_configuration_2_stage_transfer();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

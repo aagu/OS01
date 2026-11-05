@@ -430,6 +430,8 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
 int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
                                 struct usb_config_descriptor *out_desc);
 int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id);
+int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id,
+                            uint8_t config_value);
 void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
 extern const struct pci_driver xhci_pci_driver;
