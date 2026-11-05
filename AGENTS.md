@@ -33,6 +33,18 @@ target taxonomy and flag conventions.
 **BusyBox**: `git submodule update --init` (built and included in disk.img automatically).
 For the authoritative catalog of every `make` target, capability gate, test bucket, and alias policy, see [Build System Harness](docs/build/build.md).
 
+## Git workflow
+
+- **Merging a feature branch back into `master`**: use `git merge --ff` so the merge
+  fast-forwards whenever the branch can. Only fall back to `--no-ff` when a merge
+  commit is actually required (i.e. `master` has diverged) or when the merge
+  commit itself carries meaning.
+- Do **not** infer a merge policy from the merge commits visible in `git log`:
+  most of them exist because `master` had parallel commits at merge time, not
+  because merge commits are preferred. Check with
+  `git merge-base --is-ancestor <master-side> <branch-side>` before choosing a
+  merge mode.
+
 ## Architecture
 
 ```
