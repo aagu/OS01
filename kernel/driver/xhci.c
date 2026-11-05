@@ -928,6 +928,79 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
     return parse_len;
 }
 
+int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
+{
+    if (!ctrl || !ctrl->cmd_ring_virt || !ctrl->db_regs ||
+        slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
+        return -EINVAL;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (!slot->input_ctx_virt || !slot->input_ctx_phys) return -EINVAL;
+
+    /* The device exposes no non-EP0 endpoint: the EP0 context programmed by
+     * the Address Device command is still the complete device context. */
+    if (!slot->ep_rings || slot->max_dci < XHCI_MIN_ENDPOINT_DCI) return 0;
+
+    memset(slot->input_ctx_virt, 0, 4096);
+
+    /* Input Control Context: Drop Flags = 0, Add Flags = Slot Context plus
+     * every endpoint context that is being configured. */
+    uint32_t add_flags = (1U << 0);
+    for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
+        if (slot->ep_rings[dci] && slot->ep_rings[dci]->active) {
+            add_flags |= (1U << dci);
+        }
+    }
+
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(slot->input_ctx_virt, ctrl->csz);
+    ctrl_ctx[0] = 0; /* Drop Flags */
+    ctrl_ctx[1] = add_flags;
+
+    /* Slot Context: speed, Context Entries and root hub port number. */
+    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, ctrl->csz);
+    slot_ctx[0] = ((uint32_t)slot->speed << 20) | ((uint32_t)slot->max_dci << 27);
+    slot_ctx[1] = ((uint32_t)slot->port_num << 16);
+
+    /* Endpoint Contexts. */
+    for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
+        struct xhci_ep_ring *ring = slot->ep_rings[dci];
+        if (!ring || !ring->active) continue;
+
+        uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, ctrl->csz, dci);
+        ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval */
+        ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
+                    ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MPS */
+        ep_ctx[2] = (uint32_t)(ring->ring_phys & 0xFFFFFFF0ULL) | 1U; /* TR Dequeue Lo, DCS=1 */
+        ep_ctx[3] = (uint32_t)(ring->ring_phys >> 32);                /* TR Dequeue Hi */
+        ep_ctx[4] = (uint32_t)ring->max_packet_size;                  /* Average TRB Length */
+    }
+
+    /* Configure Endpoint command (TRB type 12). */
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.parameter = slot->input_ctx_phys;
+    trb.control = ((uint32_t)slot_id << 24) | (XHCI_TRB_TYPE_CONFIG_EP << 10) |
+                  ctrl->cmd_ring_cycle;
+
+    uint64_t expect_trb = ctrl->cmd_ring_phys +
+                          (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
+
+    int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
+    if (rc != 0) return rc;
+    xhci_write32(ctrl->db_regs, 0);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc != 0) return rc;
+    if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] slot %u: configure endpoint command failed (cc=%u)\n",
+                slot_id, (unsigned)((evt.status >> 24) & 0xFF));
+        return -EIO;
+    }
+
+    return 0;
+}
+
 void xhci_probe_ports(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->op_regs) return;

@@ -324,6 +324,91 @@ void test_xhci_get_config_descriptor_two_stage(void)
     assert_eq(bytes_read, -EINVAL);
 }
 
+void test_xhci_configure_endpoint_input_context(void)
+{
+    TEST_CASE("Configure Endpoint: Input Control Context Add Flags and EP Context DWs");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+    slot.port_num = 1;
+    slot.speed = XHCI_PORT_SPEED_FULL;
+    slot.max_dci = 3;
+
+    uint8_t input_ctx[4096];
+    memset(input_ctx, 0, sizeof(input_ctx));
+    slot.input_ctx_virt = input_ctx;
+    slot.input_ctx_phys = 0x35000;
+
+    slot.ep_rings = kmalloc(sizeof(struct xhci_ep_ring *) * 4);
+    struct xhci_ep_ring ring3 = {
+        .ring_phys = 0x48000,
+        .dci = 3,
+        .ep_type = XHCI_EP_TYPE_INTR_IN,
+        .max_packet_size = 8,
+        .interval = 6,
+        .active = true,
+    };
+    slot.ep_rings[3] = &ring3;
+    ctrl.slots[1] = &slot;
+
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_enqueue = 0;
+    ctrl.cmd_ring_cycle = 1;
+
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    memset(event_ring, 0, sizeof(event_ring));
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    uint8_t rt_regs[0x100];
+    memset(rt_regs, 0, sizeof(rt_regs));
+    ctrl.rt_regs = rt_regs;
+
+    uint8_t db_regs[0x1000];
+    memset(db_regs, 0, sizeof(db_regs));
+    ctrl.db_regs = db_regs;
+
+    /* Feed mock Command Completion Event for Configure Endpoint */
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    int rc = xhci_configure_endpoints(&ctrl, 1);
+    assert_eq(rc, 0);
+
+    /* Verify Input Control Context: Add Flags = bit 0 (Slot) | bit 3 (EP1 IN) = 0x09 */
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(slot.input_ctx_virt, ctrl.csz);
+    assert_eq(ctrl_ctx[0], 0);             /* Drop Flags = 0 */
+    assert_eq(ctrl_ctx[1], (1U << 0) | (1U << 3)); /* Add Flags */
+
+    /* Verify Slot Context: Context Entries = 3 */
+    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot.input_ctx_virt, ctrl.csz);
+    assert_eq((slot_ctx[0] >> 27) & 0x1F, 3);
+
+    /* Verify Endpoint 3 Context DWs */
+    uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot.input_ctx_virt, ctrl.csz, 3);
+    assert_eq((ep_ctx[0] >> 16) & 0xFF, 6); /* Interval = 6 */
+    assert_eq((ep_ctx[1] >> 1) & 3, 3);     /* CErr = 3 */
+    assert_eq((ep_ctx[1] >> 3) & 7, 7);     /* EP Type = 7 (Interrupt IN) */
+    assert_eq((ep_ctx[1] >> 16) & 0xFFFF, 8);/* Max Packet Size = 8 */
+    assert_eq(ep_ctx[2] & 1U, 1U);          /* DCS = 1 */
+    assert_eq(ep_ctx[2] & 0xFFFFFFF0U, 0x48000); /* Base phys lo */
+
+    /* Verify Command Ring submission: Type 12 */
+    assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_CONFIG_EP);
+    assert_eq((cmd_ring[0].control >> 24) & 0xFF, 1); /* Slot ID */
+
+    kfree(slot.ep_rings);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -332,6 +417,7 @@ int main(void)
     test_xhci_parse_config_descriptor_hierarchy();
     test_xhci_parse_corrupt_descriptor_guards();
     test_xhci_get_config_descriptor_two_stage();
+    test_xhci_configure_endpoint_input_context();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
