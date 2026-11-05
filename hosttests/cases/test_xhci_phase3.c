@@ -199,6 +199,35 @@ void test_xhci_parse_corrupt_descriptor_guards(void)
     assert_true(slot.ep_rings == NULL);
     assert_eq(s_mock_page_count, base_pages); /* Clean rollback */
     s_inject_alloc_fail_countdown = -1;
+
+    /* Guard 4: a duplicated endpoint descriptor must not create a second ring */
+    uint8_t dup_desc[41] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 41, 0, 1, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10
+    };
+    rc = xhci_setup_endpoint_rings(&slot, dup_desc, sizeof(dup_desc));
+    assert_eq(rc, 0);
+    assert_eq(slot.max_dci, 3);
+    assert_true(slot.ep_rings != NULL);
+    assert_true(slot.ep_rings[3] != NULL);
+    assert_true(slot.ep_rings[2] == NULL);
+    xhci_free_endpoint_rings(&slot);
+
+    /* Guard 5: an isochronous endpoint is left unconfigured */
+    uint8_t isoch_desc[34] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 34, 0, 1, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 1, 8, 0, 10 /* attr = 1 (isochronous) */
+    };
+    rc = xhci_setup_endpoint_rings(&slot, isoch_desc, sizeof(isoch_desc));
+    assert_eq(rc, 0);
+    assert_true(slot.ep_rings != NULL);
+    assert_true(slot.ep_rings[3] == NULL); /* no ring for the isoch endpoint */
+    xhci_free_endpoint_rings(&slot);
 }
 
 void test_xhci_get_config_descriptor_two_stage(void)
@@ -272,10 +301,19 @@ void test_xhci_get_config_descriptor_two_stage(void)
     /* Verify Stage 1 Setup TRB wLength = 9 */
     assert_eq((ep0_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_SETUP_STAGE);
     assert_eq((ep0_ring[0].parameter >> 48) & 0xFFFF, 9);
+    /* The Setup Stage carries the 8-byte setup packet as immediate data. */
+    assert_true((ep0_ring[0].control & (1U << 6)) != 0); /* IDT = 1 */
+    assert_eq(ep0_ring[0].status & 0x1FFFF, 8);
+    /* The Data Stage names the DMA buffer and its length. */
+    assert_eq((ep0_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_DATA_STAGE);
+    assert_true((ep0_ring[1].control & (1U << 16)) != 0); /* DIR = 1 (IN) */
+    assert_eq(ep0_ring[1].parameter, 0x50000);
+    assert_eq(ep0_ring[1].status & 0x1FFFF, 9);
 
     /* Verify Stage 2 Setup TRB wLength = 34 */
     assert_eq((ep0_ring[3].control >> 10) & 0x3F, XHCI_TRB_TYPE_SETUP_STAGE);
     assert_eq((ep0_ring[3].parameter >> 48) & 0xFFFF, 34);
+    assert_eq(ep0_ring[4].status & 0x1FFFF, 34);
 
     /* Boundary Test 1: Stage 2 SHORT_TX with residual = 4 (34 - 4 = 30 bytes) */
     event_ring[2].parameter = 0x40000 + 8 * sizeof(struct xhci_trb);
@@ -392,6 +430,8 @@ void test_xhci_configure_endpoint_input_context(void)
     /* Verify Slot Context: Context Entries = 3 */
     uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot.input_ctx_virt, ctrl.csz);
     assert_eq((slot_ctx[0] >> 27) & 0x1F, 3);
+    assert_eq((slot_ctx[0] >> 20) & 0xF, XHCI_PORT_SPEED_FULL); /* Speed */
+    assert_eq((slot_ctx[1] >> 16) & 0xFF, 1);                    /* Root Hub Port Number */
 
     /* Verify Endpoint 3 Context DWs */
     uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot.input_ctx_virt, ctrl.csz, 3);
@@ -401,12 +441,43 @@ void test_xhci_configure_endpoint_input_context(void)
     assert_eq((ep_ctx[1] >> 16) & 0xFFFF, 8);/* Max Packet Size = 8 */
     assert_eq(ep_ctx[2] & 1U, 1U);          /* DCS = 1 */
     assert_eq(ep_ctx[2] & 0xFFFFFFF0U, 0x48000); /* Base phys lo */
+    assert_eq(ep_ctx[3], 0);                /* TR Dequeue Hi */
+    assert_eq(ep_ctx[4], 8);                /* Average TRB Length */
 
     /* Verify Command Ring submission: Type 12 */
     assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_CONFIG_EP);
     assert_eq((cmd_ring[0].control >> 24) & 0xFF, 1); /* Slot ID */
 
     kfree(slot.ep_rings);
+
+    /* An EP0-only device still gets the Configure Endpoint command: it is
+     * the command that moves the slot from Addressed to Configured. */
+    struct xhci_slot ep0_slot;
+    memset(&ep0_slot, 0, sizeof(ep0_slot));
+    ep0_slot.slot_id = 2;
+    ep0_slot.port_num = 1;
+    ep0_slot.speed = XHCI_PORT_SPEED_FULL;
+    ep0_slot.max_dci = 0;
+
+    uint8_t ep0_input[4096];
+    memset(ep0_input, 0, sizeof(ep0_input));
+    ep0_slot.input_ctx_virt = ep0_input;
+    ep0_slot.input_ctx_phys = 0x36000;
+    ctrl.slots[2] = &ep0_slot;
+
+    /* Command completion event for the second command (TRB at index 1) */
+    event_ring[1].parameter = 0x10000 + sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (2U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    rc = xhci_configure_endpoints(&ctrl, 2);
+    assert_eq(rc, 0);
+    assert_eq((cmd_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_CONFIG_EP);
+
+    uint32_t *ep0_ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(ep0_input, ctrl.csz);
+    assert_eq(ep0_ctrl_ctx[1], 1U << 0); /* Add Flags: Slot Context only */
+    uint32_t *ep0_slot_ctx = (uint32_t *)xhci_input_slot_ctx(ep0_input, ctrl.csz);
+    assert_eq((ep0_slot_ctx[0] >> 27) & 0x1F, 1); /* Context Entries = 1 */
 }
 
 void test_xhci_set_configuration_2_stage_transfer(void)

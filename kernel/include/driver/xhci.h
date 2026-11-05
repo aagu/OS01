@@ -25,6 +25,12 @@
 #define XHCI_TRB_LINK_TC            (1U << 1)
 #define XHCI_TRB_CYCLE_BIT          (1U << 0)
 
+/* TRB Control field bits */
+#define XHCI_TRB_C_ISP              (1U << 2)  /* Interrupt on Short Packet */
+#define XHCI_TRB_C_IOC              (1U << 5)  /* Interrupt on Completion */
+#define XHCI_TRB_C_IDT              (1U << 6)  /* Immediate Data Transfer */
+#define XHCI_TRB_C_DIR              (1U << 16) /* Direction: 1 = IN */
+
 /* Completion codes (TRB status bits [31:24]) */
 #define XHCI_COMP_INVALID           0
 #define XHCI_COMP_SUCCESS           1

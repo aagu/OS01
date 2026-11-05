@@ -654,16 +654,19 @@ int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
 {
     if (!slot || !buffer || length < 2) return 0;
 
-    uint16_t offset = 0;
+    /* 32-bit arithmetic: offset + len must not wrap around the 16-bit
+     * boundary, or the bounds check below could be bypassed. */
+    uint32_t offset = 0;
+    uint32_t total = length;
     uint8_t max_dci = 1; /* EP0 always exists at DCI 1 */
 
-    while (offset + 2 <= length) {
+    while (offset + 2 <= total) {
         uint8_t len = buffer[offset];
         uint8_t type = buffer[offset + 1];
 
         /* Corrupt descriptor: a zero/short length or a length that runs past
          * the buffer end makes the rest of the hierarchy untrustworthy. */
-        if (len < 2 || (uint16_t)(offset + len) > length) break;
+        if (len < 2 || offset + len > total) break;
 
         if (type == USB_DESC_TYPE_INTERFACE) {
             if (len < sizeof(struct usb_interface_descriptor)) break;
@@ -723,11 +726,12 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
     slot->max_dci = (uint8_t)max_dci;
 
     /* Second pass: instantiate one transfer ring per discovered endpoint. */
-    uint16_t offset = 0;
-    while (offset + 2 <= length) {
+    uint32_t offset = 0;
+    uint32_t total = length;
+    while (offset + 2 <= total) {
         uint8_t len = buffer[offset];
         uint8_t type = buffer[offset + 1];
-        if (len < 2 || (uint16_t)(offset + len) > length) break;
+        if (len < 2 || offset + len > total) break;
 
         if (type == USB_DESC_TYPE_ENDPOINT &&
             len >= sizeof(struct usb_endpoint_descriptor)) {
@@ -742,6 +746,17 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             uint8_t dci = ep_num * 2 + (is_in ? 1 : 0);
             /* Out of range or already defined: skip, never duplicate. */
             if (dci < XHCI_MIN_ENDPOINT_DCI || dci > max_dci || slot->ep_rings[dci]) {
+                offset += len;
+                continue;
+            }
+
+            /* Isochronous endpoints need a bandwidth allocation that this
+             * driver does not model, and their Interval field follows a
+             * different encoding: leave them unconfigured instead of
+             * programming an endpoint context that cannot work. */
+            if ((ep->bmAttributes & 3) == 1) {
+                log_warn("[xhci] slot %u: isochronous endpoint DCI %u not supported\n",
+                         slot->slot_id, (unsigned)dci);
                 offset += len;
                 continue;
             }
@@ -772,13 +787,10 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             case 0: /* Control */
                 ring->ep_type = XHCI_EP_TYPE_CONTROL;
                 break;
-            case 1: /* Isochronous */
-                ring->ep_type = is_in ? XHCI_EP_TYPE_ISOCH_IN : XHCI_EP_TYPE_ISOCH_OUT;
-                break;
             case 2: /* Bulk */
                 ring->ep_type = is_in ? XHCI_EP_TYPE_BULK_IN : XHCI_EP_TYPE_BULK_OUT;
                 break;
-            default: /* Interrupt */
+            default: /* Interrupt (isochronous endpoints are skipped above) */
                 ring->ep_type = is_in ? XHCI_EP_TYPE_INTR_IN : XHCI_EP_TYPE_INTR_OUT;
                 break;
             }
@@ -808,7 +820,13 @@ oom:
 /* Standard IN control transfer on EP0: Setup + Data + Status stages.
  * Reads `length` bytes of the requested descriptor into the slot DMA
  * buffer and returns the number of bytes actually transferred, or a
- * negative errno. */
+ * negative errno.
+ *
+ * The completion event is requested on the Data Stage TRB, because that is
+ * the TRB whose Transfer Event Length carries the residual of a short
+ * transfer.  A controller that only reported the Status Stage TRB would
+ * always announce a zero residual and the short-packet guard below could
+ * never fire. */
 static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slot *slot,
                                    uint8_t desc_type, uint16_t length)
 {
@@ -821,19 +839,25 @@ static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slo
                       ((uint64_t)(desc_type << 8) << 16) |
                       ((uint64_t)0x06 << 8) | 0x80ULL;
     setup.status = 8;
-    setup.control = (3U << 16) | (1U << 6) | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
+    setup.control = (3U << 16) | XHCI_TRB_C_IDT | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
 
-    /* Data Stage: IN, `length` bytes into the slot DMA buffer. */
+    /* Data Stage: IN, `length` bytes into the slot DMA buffer.
+     *
+     * The completion event is requested on the Data Stage TRB: that is the
+     * TRB whose Transfer Event Length carries the residual of a short
+     * transfer, so the driver can tell how many bytes the device really
+     * sent.  A controller that only reported the Status Stage would always
+     * announce a zero residual. */
     struct xhci_trb data;
     memset(&data, 0, sizeof(data));
     data.parameter = slot->dma_buf_phys;
     data.status = length;
-    data.control = (1U << 16) | (XHCI_TRB_TYPE_DATA_STAGE << 10);
+    data.control = XHCI_TRB_C_DIR | XHCI_TRB_C_IOC | (XHCI_TRB_TYPE_DATA_STAGE << 10);
 
-    /* Status Stage: OUT handshake, interrupt on completion. */
+    /* Status Stage: OUT handshake. */
     struct xhci_trb status;
     memset(&status, 0, sizeof(status));
-    status.control = (1U << 5) | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
+    status.control = (XHCI_TRB_TYPE_STATUS_STAGE << 10);
 
     int rc = xhci_ep0_ring_enqueue(slot, &setup);
     if (rc != 0) return rc;
@@ -937,18 +961,22 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
     struct xhci_slot *slot = ctrl->slots[slot_id];
     if (!slot->input_ctx_virt || !slot->input_ctx_phys) return -EINVAL;
 
-    /* The device exposes no non-EP0 endpoint: the EP0 context programmed by
-     * the Address Device command is still the complete device context. */
-    if (!slot->ep_rings || slot->max_dci < XHCI_MIN_ENDPOINT_DCI) return 0;
-
     memset(slot->input_ctx_virt, 0, 4096);
+
+    /* The Configure Endpoint command is what moves the slot from Addressed to
+     * Configured, so it is issued even when the device exposes no non-EP0
+     * endpoint: in that case only the Slot Context is added.  Context
+     * Entries must stay at least 1, because EP0 lives at DCI 1. */
+    uint32_t context_entries = slot->max_dci ? slot->max_dci : 1;
 
     /* Input Control Context: Drop Flags = 0, Add Flags = Slot Context plus
      * every endpoint context that is being configured. */
     uint32_t add_flags = (1U << 0);
-    for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
-        if (slot->ep_rings[dci] && slot->ep_rings[dci]->active) {
-            add_flags |= (1U << dci);
+    if (slot->ep_rings) {
+        for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
+            if (slot->ep_rings[dci] && slot->ep_rings[dci]->active) {
+                add_flags |= (1U << dci);
+            }
         }
     }
 
@@ -958,21 +986,23 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
 
     /* Slot Context: speed, Context Entries and root hub port number. */
     uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, ctrl->csz);
-    slot_ctx[0] = ((uint32_t)slot->speed << 20) | ((uint32_t)slot->max_dci << 27);
+    slot_ctx[0] = ((uint32_t)slot->speed << 20) | (context_entries << 27);
     slot_ctx[1] = ((uint32_t)slot->port_num << 16);
 
     /* Endpoint Contexts. */
-    for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
-        struct xhci_ep_ring *ring = slot->ep_rings[dci];
-        if (!ring || !ring->active) continue;
+    if (slot->ep_rings) {
+        for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
+            struct xhci_ep_ring *ring = slot->ep_rings[dci];
+            if (!ring || !ring->active) continue;
 
-        uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, ctrl->csz, dci);
-        ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval */
-        ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
-                    ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MPS */
-        ep_ctx[2] = (uint32_t)(ring->ring_phys & 0xFFFFFFF0ULL) | 1U; /* TR Dequeue Lo, DCS=1 */
-        ep_ctx[3] = (uint32_t)(ring->ring_phys >> 32);                /* TR Dequeue Hi */
-        ep_ctx[4] = (uint32_t)ring->max_packet_size;                  /* Average TRB Length */
+            uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, ctrl->csz, dci);
+            ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval */
+            ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
+                        ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MPS */
+            ep_ctx[2] = (uint32_t)(ring->ring_phys & 0xFFFFFFF0ULL) | 1U; /* TR Dequeue Lo, DCS=1 */
+            ep_ctx[3] = (uint32_t)(ring->ring_phys >> 32);                /* TR Dequeue Hi */
+            ep_ctx[4] = (uint32_t)ring->max_packet_size;                  /* Average TRB Length */
+        }
     }
 
     /* Configure Endpoint command (TRB type 12). */
