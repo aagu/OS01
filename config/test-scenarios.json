@@ -4027,6 +4027,61 @@
       }
     },
     {
+      "id": "sched.tick.local_accounting",
+      "component": "sched",
+      "behavior": "aarch64 per-CPU local tick accounting",
+      "trigger": "host runner invokes test_aarch64_sched_tick.elf",
+      "assertions": [
+        "the REAL sched_tick.c/time.c/fair.c/accounting.c objects charge exactly one busy and one idle sample per delivered tick",
+        "a tick before the init gate never reads current and never touches the accounting locks",
+        "a start outside the admission mask or without the published idle metadata is refused without a register write",
+        "the BSP requests a reschedule on every valid tick while an AP idle tick does not",
+        "the global time base advances on CPU0 only"
+      ],
+      "failure_modes": [
+        "the local tick double-counts a sample, charges an AP the global tick, or touches an accounting lock that does not exist yet"
+      ],
+      "uniqueness": "unique",
+      "reason": "Only this host test links the REAL aarch64 local tick accounting objects; the product selftest proves the runtime behaviour, not the counters.",
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_sched_tick.c",
+        "selector": "test_aarch64_sched_tick",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "No other host test links the REAL aarch64 local tick accounting objects (sched_tick.c + time.c + fair.c + accounting.c)."
+      }
+    },
+    {
+      "id": "sched.tick.schedule_charge",
+      "component": "sched",
+      "behavior": "aarch64 schedule() no longer charges the vruntime",
+      "trigger": "host runner invokes test_aarch64_sched_charge.elf",
+      "assertions": [
+        "sixteen schedule() calls on an aarch64 view charge neither the vruntime nor the task runtime",
+        "the same sixteen calls on the x86_64 view still charge the vruntime"
+      ],
+      "failure_modes": [
+        "the vruntime is billed twice (once per schedule() call and once per delivered tick) or the x86_64 charge regressed"
+      ],
+      "uniqueness": "unique",
+      "reason": "The charge regression needs both compilation views of the SAME production core.c; the tick test uses a reduced mock surface that cannot host it.",
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_aarch64_sched_charge.c",
+        "selector": "test_aarch64_sched_charge",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Only this host test compiles the production core.c in an aarch64 AND an x86_64 view and compares the real vruntime."
+      }
+    },
+    {
       "id": "sched.notify.x86_backend",
       "component": "sched",
       "behavior": "x86 notify backend",
