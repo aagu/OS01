@@ -287,7 +287,9 @@ typedef struct bcache_buf {
   （沿用 `test_block_device_ops.c` 模式 + `OS01_HOST_TEST` reset 钩子）：
   读缺失填充、写后读命中不落盘（fake 设备读到旧值、包装层读到新值）、
   flush 后 fake 设备读到新值、在途缓冲被 flush 跳过且保持 DIRTY、
-  LRU 逐出与脏块写回、容量耗尽阻塞后恢复、reset 丢弃契约（用例间重置）。
+  LRU 逐出与脏块写回、reset 丢弃契约（用例间重置）。
+  （缓存耗尽睡眠等待路径不由宿主单线程用例覆盖——单线程无法安全构造
+  全耗尽而不会自锁；该路径以实现评审 + 内核自测并发路径间接覆盖。）
 - **内核自测 `kernel/selftest/test_bcache.c`**：pinned kthread 双 CPU 对
   同一测试盘的相同 sector 并发读/写（断言 sector 原子性：读到的必是某次
   完整写入的模式）与相邻 sector 并发（断言无串扰）+ flush + 校验
