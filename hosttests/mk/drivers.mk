@@ -11,6 +11,7 @@ $(eval $(call register_host_test,test_device_boot,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_xhci_init,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_xhci_phase2,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_xhci_phase3,drivers,protocol-or-legacy))
+$(eval $(call register_host_test,test_usb_devfs,drivers,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_i8042_demux.elf \
@@ -23,7 +24,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_device_boot.elf \
     $(TEST_BLD)/test_xhci_init.elf \
     $(TEST_BLD)/test_xhci_phase2.elf \
-    $(TEST_BLD)/test_xhci_phase3.elf
+    $(TEST_BLD)/test_xhci_phase3.elf \
+    $(TEST_BLD)/test_usb_devfs.elf
 
 # PS/2 Mouse & Keyboard over i8042
 I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
@@ -340,5 +342,25 @@ $(TEST_BLD)/test_xhci_phase3.elf: $(TEST_BLD)/test_xhci_phase3.o \
 
 .PHONY: test-xhci-phase3
 test-xhci-phase3: $(TEST_BLD)/test_xhci_phase3.elf
+	$<
+
+# Phase 4: USB devfs & lsusb
+USB_DEVFS_HOST_CFLAGS := $(XHCI_HOST_CFLAGS) -D__SPINLOCK_H__
+
+$(TEST_BLD)/test_usb_devfs.o: $(TEST_CASES)/test_usb_devfs.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USB_DEVFS_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_usb_devfs.elf: $(TEST_BLD)/test_usb_devfs.o \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-usb-devfs
+test-usb-devfs: $(TEST_BLD)/test_usb_devfs.elf
 	$<
 

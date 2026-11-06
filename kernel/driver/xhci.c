@@ -16,6 +16,21 @@
 
 #define XHCI_TIMEOUT_LOOPS 500000
 
+#define XHCI_MAX_CONTROLLERS 4
+static struct xhci_controller *s_xhci_controllers[XHCI_MAX_CONTROLLERS];
+static uint8_t s_xhci_controller_count = 0;
+
+uint8_t xhci_controller_count(void)
+{
+    return s_xhci_controller_count;
+}
+
+struct xhci_controller *xhci_controller_get(uint8_t index)
+{
+    if (index >= s_xhci_controller_count) return NULL;
+    return s_xhci_controllers[index];
+}
+
 int xhci_parse_capabilities(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->mmio_virt) return -EINVAL;
@@ -526,6 +541,12 @@ void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
     if (slot->dev_ctx_phys) free_4k_page(slot->dev_ctx_phys);
     if (slot->ep0_ring_phys) free_4k_page(slot->ep0_ring_phys);
     if (slot->dma_buf_phys) free_4k_page(slot->dma_buf_phys);
+
+    if (slot->raw_descriptors) {
+        kfree(slot->raw_descriptors);
+        slot->raw_descriptors = NULL;
+        slot->raw_descriptors_len = 0;
+    }
 
     kfree(slot);
     ctrl->slots[slot_id] = NULL;
@@ -1133,6 +1154,16 @@ void xhci_probe_ports(struct xhci_controller *ctrl)
             xhci_free_slot(ctrl, slot_id);
             continue;
         }
+
+        /* Phase 4: Cache concatenated binary descriptors (Device + Config hierarchy) */
+        uint16_t total_len = sizeof(struct usb_device_descriptor) + slot->config_desc.wTotalLength;
+        slot->raw_descriptors = kmalloc(total_len);
+        if (slot->raw_descriptors) {
+            memcpy(slot->raw_descriptors, &slot->desc, sizeof(struct usb_device_descriptor));
+            memcpy(slot->raw_descriptors + sizeof(struct usb_device_descriptor),
+                   slot->dma_buf_virt, slot->config_desc.wTotalLength);
+            slot->raw_descriptors_len = total_len;
+        }
     }
 }
 
@@ -1311,6 +1342,11 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
     }
 
     pdev->driver_data = ctrl;
+    if (s_xhci_controller_count < XHCI_MAX_CONTROLLERS) {
+        s_xhci_controllers[s_xhci_controller_count++] = ctrl;
+    } else {
+        log_warn("[xhci] controller limit (%u) reached\n", XHCI_MAX_CONTROLLERS);
+    }
     log_info("[xhci] controller initialized and running (slots=%u, ports=%u)\n",
              ctrl->max_slots, ctrl->max_ports);
 
@@ -1340,6 +1376,17 @@ void xhci_remove(struct pci_device *pdev)
 
     /* Free all DMA buffers */
     xhci_free_dma(ctrl);
+
+    /* Unregister controller from global tracking */
+    for (uint8_t i = 0; i < s_xhci_controller_count; i++) {
+        if (s_xhci_controllers[i] == ctrl) {
+            for (uint8_t j = i; j + 1 < s_xhci_controller_count; j++) {
+                s_xhci_controllers[j] = s_xhci_controllers[j + 1];
+            }
+            s_xhci_controller_count--;
+            break;
+        }
+    }
 
     /* Restore PCI configuration */
     pci_set_decode(pdev, false, false);

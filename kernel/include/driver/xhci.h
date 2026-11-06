@@ -323,6 +323,10 @@ struct xhci_slot {
     struct xhci_interface_info iface;
 
     bool configured;
+
+    /* Raw binary descriptors (Device Descriptor + Configuration Hierarchy) */
+    uint8_t *raw_descriptors;
+    uint16_t raw_descriptors_len;
 };
 
 /* xHCI Controller Instance State */
@@ -440,6 +444,10 @@ int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id,
                             uint8_t config_value);
 void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
+
+uint8_t xhci_controller_count(void);
+struct xhci_controller *xhci_controller_get(uint8_t index);
+
 extern const struct pci_driver xhci_pci_driver;
 
 #endif /* _DRIVER_XHCI_H */
