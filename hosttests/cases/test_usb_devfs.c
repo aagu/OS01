@@ -311,6 +311,69 @@ void test_usb_devfs_registration_and_lookup(void)
     assert_eq(s_mock_devfs_count, 10); /* No duplicates added */
 }
 
+/* Prototypes from user/lsusb.c */
+int lsusb_parse_filter(const char *arg, int *out_bus, int *out_devnum);
+int lsusb_unpack_descriptors(const uint8_t *buf, size_t len, char *out_text, size_t max_out);
+
+void test_lsusb_filter_and_unpack_logic(void)
+{
+    TEST_CASE("lsusb -s filter parsing and binary descriptor tree unpacking");
+    int bus = -1, devnum = -1;
+
+    /* Valid filter cases */
+    assert_eq(lsusb_parse_filter("1:2", &bus, &devnum), 0);
+    assert_eq(bus, 1);
+    assert_eq(devnum, 2);
+
+    assert_eq(lsusb_parse_filter("1:", &bus, &devnum), 0);
+    assert_eq(bus, 1);
+    assert_eq(devnum, -1);
+
+    assert_eq(lsusb_parse_filter(":2", &bus, &devnum), 0);
+    assert_eq(bus, -1);
+    assert_eq(devnum, 2);
+
+    assert_eq(lsusb_parse_filter("2", &bus, &devnum), 0);
+    assert_eq(bus, -1);
+    assert_eq(devnum, 2);
+
+    /* Invalid filter cases */
+    assert_eq(lsusb_parse_filter("", &bus, &devnum), -1);
+    assert_eq(lsusb_parse_filter(":", &bus, &devnum), -1);
+    assert_eq(lsusb_parse_filter("1:2:3", &bus, &devnum), -1);
+    assert_eq(lsusb_parse_filter("1:abc", &bus, &devnum), -1);
+    assert_eq(lsusb_parse_filter("-1:1", &bus, &devnum), -1);
+    assert_eq(lsusb_parse_filter("abc", &bus, &devnum), -1);
+
+    /* Descriptor unpacker test: 18B Device Desc + 34B Config Hierarchy */
+    uint8_t raw[52] = {
+        /* Device Desc (18B) */
+        18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x27, 0x06, 0x01, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+        /* Config Desc (9B) */
+        9, 2, 34, 0, 1, 1, 0, 0x80, 50,
+        /* Interface Desc (9B) */
+        9, 4, 0, 0, 1, 3, 0, 0, 0,
+        /* HID Desc (9B) */
+        9, 0x21, 0x10, 0x01, 0, 1, 0x22, 68, 0,
+        /* Endpoint Desc (7B) */
+        7, 5, 0x81, 3, 8, 0, 10
+    };
+
+    char text[1024];
+    int rc = lsusb_unpack_descriptors(raw, sizeof(raw), text, sizeof(text));
+    assert_eq(rc, 0);
+    assert_true(strstr(text, "Device Descriptor:") != NULL);
+    assert_true(strstr(text, "idVendor           0x0627") != NULL);
+    assert_true(strstr(text, "idProduct          0x0001") != NULL);
+    assert_true(strstr(text, "Configuration Descriptor:") != NULL);
+    assert_true(strstr(text, "Human Interface Device") != NULL);
+    assert_true(strstr(text, "0x81  EP 1 IN") != NULL);
+
+    /* Malformed descriptor stream protection */
+    rc = lsusb_unpack_descriptors(raw, 10, text, sizeof(text));
+    assert_eq(rc, -1); /* Truncated Device Descriptor */
+}
+
 int main(void)
 {
     TEST_SUITE("usb_devfs");
@@ -319,6 +382,7 @@ int main(void)
     test_usb_devfs_formatting();
     test_usb_devfs_descriptors_binary_slicing();
     test_usb_devfs_registration_and_lookup();
+    test_lsusb_filter_and_unpack_logic();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
