@@ -24,6 +24,14 @@ ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST)),)
 $(error KERNEL_CANARY_SELFTEST=1 cannot be combined with KERNEL_SELFTEST=1, OS01_SYSTEST=1, or OS01_NETTEST=1)
 endif
 endif
+# ── aarch64-only selectors ─────────────────────────────────────
+# The per-CPU tick accounting variant (2026-11-06) is aarch64-only:
+# the local CNTP tick, its accounting and its evidence producer have no
+# x86_64 counterpart.  The x86_64 profile rejects the selector so a
+# "tick" image can never be built here by accident.
+ifneq ($(strip $(AARCH64_SCHED_TICK_TEST)),)
+$(error AARCH64_SCHED_TICK_TEST='$(AARCH64_SCHED_TICK_TEST)' is aarch64-only; the x86_64 profile must not select the per-CPU tick variant)
+endif
 # ── Isolated destructive dispatch probe (Task 5, spec §9.3) ──────
 # The probe-selection MACRO arrives through KERNEL_EXTRA_CFLAGS — the
 # channel that already crosses the controlled sub-make boundary

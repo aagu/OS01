@@ -7,6 +7,9 @@
 #ifdef AARCH64_AP_SCHED_WAKE_TEST
 #include <selftest/aarch64_ap_scheduler.h>
 #endif
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
+#endif
 
 #define GICD_CTLR       0x000u
 #define GICD_TYPER      0x004u
@@ -32,12 +35,16 @@ static inline void w32(volatile uint32_t *m, uint32_t off, uint32_t v)
 #else
     m[off / 4u] = v;
 #endif
-#ifdef AARCH64_AP_SCHED_WAKE_TEST
-    /* Observe each actual EOIR write, not just a completed dispatch call.
-     * In this driver offset 0x10 is written only for the CPU-interface EOI. */
+#if defined(AARCH64_AP_SCHED_WAKE_TEST) || defined(AARCH64_SCHED_TICK_TEST)
+/* Observe each actual EOIR write, not just a completed dispatch call.
+ * In this driver offset 0x10 is written only for the CPU-interface EOI. */
     if (off == GICC_EOIR && (v & 0x3ffu) == 4u) {
         extern uint32_t gic_trace_cpu(void);
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
         aarch64_ap_sched_sgi_trace(gic_trace_cpu(), v, true);
+#else
+        aarch64_sched_tick_sgi_trace(gic_trace_cpu(), v, true);
+#endif
     }
 #endif
 }
@@ -208,10 +215,14 @@ void gic_dev_dispatch(struct gic_dev *dev, struct pt_regs *regs)
     uint32_t iar = gic_ack(dev);
     uint32_t intid = iar & 0x3ffu;
     if (intid == GIC_INTID_SPURIOUS) return;          /* 绝不写 EOIR */
-#ifdef AARCH64_AP_SCHED_WAKE_TEST
+#if defined(AARCH64_AP_SCHED_WAKE_TEST) || defined(AARCH64_SCHED_TICK_TEST)
     if (intid == 4u) {
         extern uint32_t gic_trace_cpu(void);
+#ifdef AARCH64_AP_SCHED_WAKE_TEST
         aarch64_ap_sched_sgi_trace(gic_trace_cpu(), iar, false);
+#else
+        aarch64_sched_tick_sgi_trace(gic_trace_cpu(), iar, false);
+#endif
     }
 #endif
     uint64_t param = 0;

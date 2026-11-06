@@ -41,6 +41,9 @@
 #include <arch/spinlock.h>
 #include <arch/cpu.h>
 #include <log/log.h>
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
+#endif
 
 /* Per-CPU "the local scheduler tick is really running" state.  The
  * array is static: no assembly-visible structure field is added.  The
@@ -123,6 +126,28 @@ bool aarch64_sched_tick_start(void)
     return true;
 }
 
+bool aarch64_sched_tick_started(unsigned cpu)
+{
+    if (cpu >= NR_CPUS)
+        return false;
+    return __atomic_load_n(&g_started[cpu], __ATOMIC_ACQUIRE) != 0;
+}
+
+#ifdef AARCH64_SCHED_TICK_TEST
+/* The idle sleep boundary of CPU @cpu (selftest build only).  The
+ * idle step and the tick variant's sleep probe report their sleep
+ * boundary through this wrapper, so the observer hooks stay OUT of
+ * the idle C file (whose source contract allows exactly one sleep
+ * primitive: the audited wait helper). */
+void aarch64_sched_tick_sleep_boundary(unsigned cpu, bool entering)
+{
+    if (entering)
+        aarch64_sched_tick_wfi_enter(cpu);
+    else
+        aarch64_sched_tick_wfi_return(cpu);
+}
+#endif /* AARCH64_SCHED_TICK_TEST */
+
 void aarch64_sched_tick(void)
 {
     /* Ready gate: before aarch64_sched_tick_init() the accounting
@@ -152,6 +177,11 @@ void aarch64_sched_tick(void)
      * sched_account_tick — the runqueue lock below is never nested
      * with it. */
     sched_account_tick();
+#ifdef AARCH64_SCHED_TICK_TEST
+    /* The per-CPU tick observer (selftest build only): one local
+     * sample of THIS CPU's local tick. */
+    aarch64_sched_tick_observe(cpu, false);
+#endif
 
     /* Scheduler fields: the running task's vruntime and the per-CPU
      * watchdog counter.  IRQs are masked in the interrupt handler, so

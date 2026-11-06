@@ -47,4 +47,17 @@ bool aarch64_sched_tick_start(void);
  * switches, never allocates, never formats a log line. */
 void aarch64_sched_tick(void);
 
+/* Is the local scheduler tick of CPU @cpu really running?  READ-ONLY:
+ * it never arms, rearms or touches a register.  Returns false for an
+ * unknown CPU and for a CPU whose start was refused. */
+bool aarch64_sched_tick_started(unsigned cpu);
+
+#if defined(OS01_SELFTEST) && defined(AARCH64_SCHED_TICK_TEST)
+/* The idle sleep boundary of CPU @cpu (selftest build only): the idle
+ * step and the tick variant's sleep probe report their sleep boundary
+ * through this wrapper.  The observer hooks themselves stay in the
+ * tick selftest TU. */
+void aarch64_sched_tick_sleep_boundary(unsigned cpu, bool entering);
+#endif
+
 #endif /* OS01_AARCH64_SCHED_TICK_H */

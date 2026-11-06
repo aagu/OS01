@@ -60,3 +60,9 @@ AARCH64_KERNEL_SCHED_AP_FATAL_ELF     := $(BUILD_DIR)/kernel/sched-ap-fatal-owne
 AARCH64_UEFI_SCHED_WAKE_DISK      := $(BUILD_DIR)/image/sched-wake/aarch64-uefi.img
 AARCH64_UEFI_SCHED_WAKE_FIRMWARE  := $(BUILD_DIR)/image/sched-wake/QEMU_EFI.fd
 AARCH64_KERNEL_SCHED_WAKE_ELF     := $(BUILD_DIR)/kernel/sched-wake/kernel.elf
+# Per-CPU tick accounting (2026-11-06, Task 4): the sched-tick variant
+# owns its own kernel/image/firmware trees — never a symlink into
+# another variant's artifacts.
+AARCH64_UEFI_SCHED_TICK_DISK      := $(BUILD_DIR)/image/sched-tick/aarch64-uefi.img
+AARCH64_UEFI_SCHED_TICK_FIRMWARE  := $(BUILD_DIR)/image/sched-tick/QEMU_EFI.fd
+AARCH64_KERNEL_SCHED_TICK_ELF     := $(BUILD_DIR)/kernel/sched-tick/kernel.elf

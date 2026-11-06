@@ -4042,17 +4042,78 @@
         "the local tick double-counts a sample, charges an AP the global tick, or touches an accounting lock that does not exist yet"
       ],
       "uniqueness": "unique",
-      "reason": "Only this host test links the REAL aarch64 local tick accounting objects; the product selftest proves the runtime behaviour, not the counters.",
+      "reason": "Only this host test links the REAL aarch64 local tick accounting objects; the product selftest proves the runtime behaviour, not the counters, and the strict parser proves that a malformed evidence batch is rejected.",
       "primary": {
         "layer": "host",
         "source": "hosttests/cases/test_aarch64_sched_tick.c",
         "selector": "test_aarch64_sched_tick",
         "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
       },
-      "supporting": [],
+      "supporting": [
+        {
+          "layer": "harness",
+          "source": "qemutests/test_aarch64_sched_tick.py",
+          "selector": "test_aarch64_sched_tick",
+          "evidence": "UNITTEST_OK",
+          "distinct_risk": "The parser gate rejects a MALFORMED evidence batch (missing/duplicate/unknown case rows, a wrong accepted_mask, an AP global tick, a busy/runtime mismatch, a missing END); the host test counts the very same counters but cannot see the shipped protocol at all."
+        },
+        {
+          "layer": "kernel_selftest",
+          "source": "kernel/selftest/test_aarch64_sched_tick.c",
+          "selector": "test_aarch64_sched_tick_run",
+          "evidence": "SCHED_TICK_EVIDENCE_BATCH",
+          "distinct_risk": "Only the product image measures the evidence ON the CPU it describes (the idle window in the idle context, the busy/yield/deadline windows on a pinned worker, the remote SGI on the sleeping target); the host test drives the real accounting objects with a mocked timer and cannot observe the real interrupt delivery."
+        }
+      ],
       "overlap_decision": {
         "action": "unique",
         "reason": "No other host test links the REAL aarch64 local tick accounting objects (sched_tick.c + time.c + fair.c + accounting.c)."
+      }
+    },
+    {
+      "id": "sched.tick.product_evidence",
+      "component": "sched",
+      "behavior": "per_cpu_tick_evidence",
+      "trigger": "make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick",
+      "assertions": [
+        "every admitted CPU publishes exactly one row per case, with the whole batch before the matching selftest_record_late() records",
+        "the idle window is sampled in the target's own idle context and charges neither runtime nor vruntime",
+        "the busy window charges exactly one runtime tick and one vruntime tick per delivered sample",
+        "the yield window runs with the interrupts masked: no sample, no charge and no self-switch",
+        "the deadline window raises the pending flag without a switch inside an interrupt and survives a real interrupt",
+        "the global window splits the local samples into busy and idle, and only the BSP advances the global time base",
+        "the remote window proves a real resched SGI4 delivery on the target while the target's periodic tick keeps running"
+      ],
+      "failure_modes": [
+        "the per-CPU evidence is collected on the wrong CPU, a tick is double-counted, an AP claims a global tick, or the remote SGI is faked by the periodic timer"
+      ],
+      "uniqueness": "unique",
+      "reason": "The seven frozen per-CPU tick cases exist only in the product image; the host test proves the counters and the parser proves the protocol, neither of them produces the shipped evidence batch.",
+      "primary": {
+        "layer": "kernel_selftest",
+        "source": "kernel/selftest/test_aarch64_sched_tick.c",
+        "selector": "test_aarch64_sched_tick_run",
+        "evidence": "SCHED_TICK_EVIDENCE_BATCH"
+      },
+      "supporting": [
+        {
+          "layer": "harness",
+          "source": "qemutests/test_aarch64_sched_tick.py",
+          "selector": "test_aarch64_sched_tick",
+          "evidence": "UNITTEST_OK",
+          "distinct_risk": "The strict parser is the only gate that rejects a structurally wrong evidence batch (a missing CPU row, a duplicated case, an AP global tick, a missing or duplicated END) which the product image itself cannot detect."
+        },
+        {
+          "layer": "host",
+          "source": "hosttests/cases/test_aarch64_sched_tick.c",
+          "selector": "test_aarch64_sched_tick",
+          "evidence": "ALL_TESTS_PASSED_OR_EXIT_0",
+          "distinct_risk": "The host test drives the REAL accounting objects with a mocked timer and pins the counter arithmetic; the product image proves the real interrupt delivery, which the mock cannot reproduce."
+        }
+      ],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Only the product image collects the per-CPU evidence on the CPU it describes; the host test and the parser cover different risks."
       }
     },
     {

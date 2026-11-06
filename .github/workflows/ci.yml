@@ -468,6 +468,12 @@ jobs:
       - name: AArch64 AP scheduler P2 wakeup
         run: make PROFILE=aarch64-clang test-aarch64 MODE=sched-wake
 
+      - name: AArch64 per-CPU tick accounting
+        # The dedicated sched-tick variant (KERNEL_VARIANT=sched-tick):
+        # the runner drives the frozen 1/2/4/8 x 2 matrix and rejects
+        # every per-CPU evidence deviation.
+        run: make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick
+
       - name: AArch64 M1 RAM-exhaustion MODEs
         run: |
           for mode in m1-ram m1-sparse m1-arena-exhaust m1-table-exhaust m1-ap-bad-root; do

@@ -196,4 +196,125 @@ aarch64_sched_timer_irq_probe:
     add sp, sp, #128
     ret
 .size aarch64_sched_timer_irq_probe, .-aarch64_sched_timer_irq_probe
+
+#ifdef AARCH64_SCHED_TICK_TEST
+.align 2
+.global aarch64_sched_tick_irq_probe
+.type aarch64_sched_tick_irq_probe, %function
+/* x0 = pointer to THIS CPU's local tick counter, x1 = the target
+ * count, x2 = the deadline in cntvct ticks.
+ *
+ * The probe waits for a REAL interrupt of the CALLING CPU: the local
+ * tick of that CPU increments the counter the caller passes in, so the
+ * probe never waits for the BSP's count.  The count must STRICTLY grow
+ * beyond the snapshot the probe itself took at entry — a tick that
+ * landed before the probe started never interrupted it and must not
+ * count as the witness.  The caller-saved sentinels must survive the
+ * entry.S save/restore path.
+ *
+ * Returns 0 = ok, 1 = register corruption, 2 = SP drift, 4 = timeout. */
+aarch64_sched_tick_irq_probe:
+    /* The frame is 160 bytes: the callee-saved pairs occupy 0..95
+     * (x29/x30 live at 80/88), the arguments at 96/104/112, the
+     * sentinels at 120/128/136 and the entry snapshot at 144.  The
+     * entry snapshot MUST NOT reuse the x30 slot at 88 — overwriting
+     * it would turn the epilogue's `ret` into a jump to the counter
+     * value. */
+    sub sp, sp, #160
+    stp x19, x20, [sp, #0]
+    stp x21, x22, [sp, #16]
+    stp x23, x24, [sp, #32]
+    stp x25, x26, [sp, #48]
+    stp x27, x28, [sp, #64]
+    stp x29, x30, [sp, #80]
+    str x0, [sp, #96]          /* the local counter pointer */
+    str x1, [sp, #104]         /* the target count */
+    str x2, [sp, #112]         /* the deadline (cntvct ticks) */
+    mov x9, sp
+    str x9, [sp, #120]         /* the SP sentinel */
+    mov x10, #0x5a5a
+    eor x9, x9, x10
+    str x9, [sp, #128]
+    mvn x9, x9
+    str x9, [sp, #136]
+    mov x0, #0x1111
+    mov x1, #0x2222
+    mov x2, #0x3333
+    mov x3, #0x4444
+    mov x4, #0x5555
+    mov x5, #0x6666
+    mov x18, #0x7777
+    /* The entry snapshot of THIS CPU's local counter.  The probe only
+     * accepts a STRICT growth observed from this snapshot: the caller's
+     * budget (`target`) may already have been consumed by a tick that
+     * landed between the caller's read and the probe's entry — such a
+     * tick never interrupted the probe, so it must not be counted as
+     * the witness.  The snapshot is taken AFTER the sentinels are live,
+     * so every observed growth happened while the sentinels were
+     * installed. */
+    ldr x9, [sp, #96]
+    ldar x10, [x9]             /* the entry count */
+    str x10, [sp, #144]
+.Ltick_wait:
+    ldr x9, [sp, #96]
+    ldar x10, [x9]             /* the LOCAL counter (acquire) */
+    ldr x11, [sp, #144]        /* the entry count */
+    cmp x10, x11
+    b.ls .Ltick_wait_more      /* no growth since the entry: not yet */
+    ldr x11, [sp, #104]        /* the target count */
+    cmp x10, x11
+    b.hs .Ltick_check          /* grown AND at least the target */
+.Ltick_wait_more:
+    mrs x10, cntvct_el0
+    ldr x11, [sp, #112]
+    cmp x10, x11
+    b.hs .Ltick_timeout
+    wfi
+    b .Ltick_wait
+.Ltick_check:
+    mov w12, wzr
+    mov x6, #0x1111
+    cmp x0, x6
+    b.ne .Ltick_regs_bad
+    mov x6, #0x2222
+    cmp x1, x6
+    b.ne .Ltick_regs_bad
+    mov x6, #0x3333
+    cmp x2, x6
+    b.ne .Ltick_regs_bad
+    mov x6, #0x4444
+    cmp x3, x6
+    b.ne .Ltick_regs_bad
+    mov x6, #0x5555
+    cmp x4, x6
+    b.ne .Ltick_regs_bad
+    mov x6, #0x6666
+    cmp x5, x6
+    b.ne .Ltick_regs_bad
+    mov x6, #0x7777
+    cmp x18, x6
+    b.ne .Ltick_regs_bad
+    mov x9, sp
+    ldr x10, [sp, #120]
+    cmp x9, x10
+    b.eq .Ltick_restore
+    mov w12, #2
+    b .Ltick_restore
+.Ltick_regs_bad:
+    mov w12, #1
+    b .Ltick_restore
+.Ltick_timeout:
+    mov w12, #4
+.Ltick_restore:
+    mov w0, w12
+    ldp x19, x20, [sp, #0]
+    ldp x21, x22, [sp, #16]
+    ldp x23, x24, [sp, #32]
+    ldp x25, x26, [sp, #48]
+    ldp x27, x28, [sp, #64]
+    ldp x29, x30, [sp, #80]
+    add sp, sp, #160
+    ret
+.size aarch64_sched_tick_irq_probe, .-aarch64_sched_tick_irq_probe
+#endif /* AARCH64_SCHED_TICK_TEST */
 #endif

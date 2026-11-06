@@ -67,6 +67,9 @@
 #ifdef OS01_SELFTEST
 #include <selftest/aarch64_scheduler.h>
 #endif
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
+#endif
 
 #define TICKS_PER_SECOND   AARCH64_TIMER_HZ
 
@@ -115,6 +118,11 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
     if (cpu_id() == 0) {
         /* Global time base — BSP only. */
         tick_handler();
+#ifdef AARCH64_SCHED_TICK_TEST
+        /* The per-CPU tick observer (selftest build only): the BSP's
+         * completed global tick. */
+        aarch64_sched_tick_observe(0, true);
+#endif
         /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
          * requires >=3 [tick] N lines per case. */
         uint64_t t = g_ticks + 1;

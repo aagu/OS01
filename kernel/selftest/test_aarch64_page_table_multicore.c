@@ -88,6 +88,9 @@
 #include <memory/pmm.h>
 #include <memory/vmm.h>        /* tlb_shootdown */
 #include <percpu/percpu.h>
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
+#endif
 
 #if defined(__aarch64__) && defined(OS01_SELFTEST)
 
@@ -310,12 +313,23 @@ static uint32_t mc_gen_of(uint32_t cpu)
 
 /* ── AP-side extension commands (strong override of the weak hook) ──
  * The fatal-owner AP-scheduler variant supplies its own override and
- * never runs this probe, so this TU stays out of its way. */
+ * never runs this probe, so this TU stays out of its way.
+ *
+ * The kernel keeps exactly ONE strong ap_work_ext_run(): this
+ * dispatcher forwards the per-CPU tick variant's idle-window command
+ * (WORK_SCHED_TICK_IDLE) to the tick selftest TU, whose handler runs
+ * the measurement in the TARGET's idle context. */
 #ifndef AARCH64_AP_SCHED_TEST_FATAL_OWNER
 bool ap_work_ext_run(uint32_t cmd, uint64_t arg0, uint64_t arg1,
                      uint64_t *out)
 {
     (void)arg1;
+#ifdef AARCH64_SCHED_TICK_TEST
+    if (cmd == WORK_SCHED_TICK_IDLE)
+        return aarch64_sched_tick_idle_work(out);
+    if (cmd == WORK_SCHED_TICK_SEND_SGI)
+        return aarch64_sched_tick_send_sgi_work(out);
+#endif
     if (cmd == WORK_PT_MAP) {
         struct mc_map_args *a = (struct mc_map_args *)(uintptr_t)arg0;
         a->rc = aarch64_pt_map_4k_ext(a->root, a->va, a->pa,

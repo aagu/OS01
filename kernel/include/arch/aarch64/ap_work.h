@@ -45,8 +45,23 @@ enum ap_work_cmd { WORK_READ64 = 1, WORK_BARRIER = 2 };
  * `struct mc_loop_args` (BSS kernel VA, identical on every core).
  * The handler loops until iters_done == iters OR stop != 0, then
  * sets ap_done = 1 and returns; the BSP polls ap_done + slot
- * state to wait for completion. */
-enum ap_work_cmd_ext { WORK_PT_MAP = 4, WORK_PT_REPLACE_LOOP = 5 };
+ * state to wait for completion.
+ *
+ * 2026-11-06 per-CPU tick accounting (Task 4): added
+ * WORK_SCHED_TICK_IDLE and WORK_SCHED_TICK_SEND_SGI.
+ * WORK_SCHED_TICK_IDLE asks the TARGET CPU to measure its OWN idle
+ * window; the measurement must run in the target's idle context (the
+ * accounting classifies a sample of the idle task as idle), which is
+ * exactly where the ap_work handler runs.
+ * WORK_SCHED_TICK_SEND_SGI asks the AP to send a REAL resched SGI4
+ * and a TLB SGI3 to the BSP, so the BSP can be the TARGET of a remote
+ * interrupt exchange (the BSP's own idle step never reaches its WFI:
+ * the BSP tick requests a reschedule on every tick).
+ * The handlers live in the tick selftest TU; the kernel keeps exactly
+ * ONE strong ap_work_ext_run() dispatcher. */
+enum ap_work_cmd_ext { WORK_PT_MAP = 4, WORK_PT_REPLACE_LOOP = 5,
+                        WORK_SCHED_TICK_IDLE = 6,
+                        WORK_SCHED_TICK_SEND_SGI = 7 };
 
 /* Weak extension dispatcher (M3.6 Task 26): return true when `cmd`
  * was consumed and *out holds the result; false to leave the item

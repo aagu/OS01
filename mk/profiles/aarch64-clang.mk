@@ -84,6 +84,33 @@ $(error AARCH64_AP_SCHED_TEST='$(AARCH64_AP_SCHED_TEST)' cannot be combined with
 endif
 endif
 
+# ── Per-CPU tick accounting selector (AARCH64_SCHED_TICK_TEST) ──
+# The tick variant (2026-11-06, Task 4) is the ONLY selector of its
+# kind: AARCH64_SCHED_TICK_TEST=1 selects the dedicated sched-tick
+# kernel/image/firmware trees and compiles the product evidence
+# producer (kernel/selftest/test_aarch64_sched_tick.c).  It is a
+# selftest image, it refuses every other compile-affecting variant
+# (old sched / AP / M1 / no-ack / sync-fault / canary / weak /
+# OS01_SYSTEST) exactly like AARCH64_SCHED_TEST does, and only the
+# value 1 is accepted.
+AARCH64_SCHED_TICK_TESTS_VALID := 1
+ifneq ($(strip $(AARCH64_SCHED_TICK_TEST)),)
+ifeq ($(filter $(AARCH64_SCHED_TICK_TEST),$(AARCH64_SCHED_TICK_TESTS_VALID)),)
+$(error invalid AARCH64_SCHED_TICK_TEST='$(AARCH64_SCHED_TICK_TEST)'; valid: $(AARCH64_SCHED_TICK_TESTS_VALID))
+endif
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_SCHED_TICK_TEST='$(AARCH64_SCHED_TICK_TEST)' requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(strip $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_M1_TEST) $(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error AARCH64_SCHED_TICK_TEST='$(AARCH64_SCHED_TICK_TEST)' cannot be combined with other compile-affecting test variants)
+endif
+ifneq ($(strip $(AARCH64_SMP_TEST_NO_ACK_CPU)),)
+ifeq ($(filter 0,$(strip $(AARCH64_SMP_TEST_NO_ACK_CPU))),)
+$(error AARCH64_SCHED_TICK_TEST='$(AARCH64_SCHED_TICK_TEST)' cannot be combined with AARCH64_SMP_TEST_NO_ACK_CPU=$(AARCH64_SMP_TEST_NO_ACK_CPU))
+endif
+endif
+endif
+
 AARCH64_SCHED_TESTS_VALID := positive sp-top sp-low pc-low pc-data
 ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 ifeq ($(filter $(AARCH64_SCHED_TEST),$(AARCH64_SCHED_TESTS_VALID)),)
@@ -131,6 +158,9 @@ KERNEL_VARIANT := sched-wake
 else
 KERNEL_VARIANT := sched-ap$(if $(filter fatal-owner,$(AARCH64_AP_SCHED_TEST)),-fatal-owner)
 endif
+else ifneq ($(strip $(AARCH64_SCHED_TICK_TEST)),)
+# The per-CPU tick variant owns its own kernel/image/firmware trees.
+KERNEL_VARIANT := sched-tick
 else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)

@@ -21,6 +21,9 @@
 #endif
 #include <selftest/aarch64_sched_observer.h>
 #include <selftest/result.h>
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
+#endif
 #include <time/timer.h>
 #include <memory/slab.h>
 #include <log/log.h>
@@ -563,14 +566,27 @@ void aarch64_sched_observe_switch(void)
 #endif
             )
             irq_switch_counts[cpu]++;
+#ifdef AARCH64_SCHED_TICK_TEST
+        /* The per-CPU tick observer: a switch that happened while an
+         * interrupt was active must never happen (the tick never
+         * switches). */
+        if (timer_irq_active[cpu])
+            aarch64_sched_tick_irq_switch(cpu);
+#endif
     }
 }
 
 void aarch64_sched_observe_nested_schedule(void)
 {
     unsigned cpu = cpu_id();
-    if (cpu < NR_CPUS && timer_irq_active[cpu])
+    if (cpu < NR_CPUS && timer_irq_active[cpu]) {
         irq_nested_seen[cpu]++;
+#ifdef AARCH64_SCHED_TICK_TEST
+        /* The per-CPU tick observer: a nested schedule() inside an
+         * interrupt must never happen. */
+        aarch64_sched_tick_irq_nested(cpu);
+#endif
+    }
 }
 
 void aarch64_sched_observe_timer_irq(struct pt_regs *regs, bool entering)

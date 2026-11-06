@@ -4,9 +4,13 @@
 #include <arch/cpu.h>
 #include <arch/spinlock.h>
 #include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/sched_tick.h>
 #include <arch/aarch64/task_arch.h>
 #ifdef AARCH64_AP_SCHED_WAKE_TEST
 #include <selftest/aarch64_ap_scheduler.h>
+#endif
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
 #endif
 
 /* P2 polling+sleeping idle (spec §5.3).  Call contract: idle task
@@ -75,10 +79,21 @@ void arch_aarch64_idle_step(void)
     aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_AFTER_CHECK);
     aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_BEFORE_WAIT);
 #endif
+    #ifdef AARCH64_SCHED_TICK_TEST
+    /* The per-CPU tick observer (selftest build only): the target
+     * records its idle sleep boundary, so a remote wake can be
+     * distinguished from a periodic-timer wake.  The boundary is
+     * reported through the arch-private wrapper, so this file keeps
+     * exactly one sleep primitive — the audited wait helper below. */
+    aarch64_sched_tick_sleep_boundary(cpu_id(), true);
+#endif
     aarch64_idle_wait_irq();     /* dsb sy; wfi; ret */
     arch_local_irq_enable();
 #ifdef __aarch64__
     __asm__ __volatile__("isb" ::: "memory");
+#endif
+#ifdef AARCH64_SCHED_TICK_TEST
+    aarch64_sched_tick_sleep_boundary(cpu_id(), false);
 #endif
 #ifdef AARCH64_AP_SCHED_WAKE_TEST
     aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_AFTER_WAIT);
@@ -91,3 +106,21 @@ void idle_resume(void)
         arch_aarch64_idle_step();
     }
 }
+
+#ifdef AARCH64_SCHED_TICK_TEST
+/* The tick variant's sleep probe: ONE interruptible sleep on the
+ * CALLING CPU, recorded through the SAME observers the idle step
+ * uses.  The remote case needs a REALLY sleeping target: the BSP's
+ * own idle step never reaches its wait (the BSP tick requests a
+ * reschedule on every tick, so the idle step always leaves through
+ * schedule()), and the BSP must be able to prove that a REMOTE SGI4
+ * woke it instead of the periodic timer. */
+void arch_aarch64_tick_sleep_probe(void)
+{
+    aarch64_sched_tick_sleep_boundary(cpu_id(), true);
+    aarch64_idle_wait_irq();     /* dsb sy; wfi; ret */
+    arch_local_irq_enable();
+    __asm__ __volatile__("isb" ::: "memory");
+    aarch64_sched_tick_sleep_boundary(cpu_id(), false);
+}
+#endif /* AARCH64_SCHED_TICK_TEST */

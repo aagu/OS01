@@ -231,6 +231,22 @@ class CiWorkflowContractTests(unittest.TestCase):
                 for c in _make_commands(self.text)),
             "ci.yml must run an AArch64 test-aarch64 MODE=... smoke")
 
+    def test_aarch64_sched_tick_mode_is_run(self) -> None:
+        """The per-CPU tick accounting variant must have a REAL CI step.
+
+        A catalog entry alone is not enough: the workflow must invoke
+        the dedicated MODE=sched-tick acceptance runner.
+        """
+        commands = _make_commands(self.text)
+        self.assertTrue(
+            any("test-aarch64" in c and "MODE=sched-tick" in c
+                for c in commands),
+            "ci.yml must run `test-aarch64 MODE=sched-tick`")
+        self.assertTrue(
+            any("PROFILE=aarch64-clang" in c and "MODE=sched-tick" in c
+                for c in commands),
+            "the sched-tick CI step must select the aarch64-clang profile")
+
     # ── 4. failed jobs upload artifacts ──────────────────────────
     def test_failed_jobs_upload_artifacts(self) -> None:
         self.assertIn(

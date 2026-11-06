@@ -22,6 +22,7 @@ trace fails".  The covered failure modes are the ones the plan freezes:
 
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -371,6 +372,87 @@ class BootBehaviourTests(unittest.TestCase):
 class SelfTestEntryPointTests(unittest.TestCase):
     def test_module_self_test_passes(self):
         runner.self_test()
+
+
+class SelectorMatrixTests(unittest.TestCase):
+    """The build-selector contract of the tick variant (Task 4 Step 1).
+
+    ``AARCH64_SCHED_TICK_TEST=1`` is a compile-affecting variant like
+    every other aarch64 test variant: it needs ``KERNEL_SELFTEST=1``,
+    it refuses every other variant, only the value ``1`` is accepted,
+    and the x86_64 profile rejects it outright.  ``make -n`` evaluates
+    the parse-time gates without building anything.
+    """
+
+    AARCH64_TARGET = "aarch64-uefi-kernel"
+
+    def _make(self, *args, profile="aarch64-clang", target=None):
+        return subprocess.run(
+            ["make", "-n", f"PROFILE={profile}", *args,
+             target or self.AARCH64_TARGET],
+            cwd=_ROOT, capture_output=True, text=True, timeout=180)
+
+    def test_tick_selector_alone_is_accepted(self):
+        proc = self._make("KERNEL_SELFTEST=1", "AARCH64_SCHED_TICK_TEST=1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("AARCH64_SCHED_TICK_TEST=1", proc.stdout)
+        self.assertIn("-DAARCH64_SCHED_TICK_TEST=1", proc.stdout)
+        # The variant owns an ISOLATED kernel tree.
+        self.assertIn("kernel/sched-tick", proc.stdout)
+
+    def test_tick_selector_requires_kernel_selftest(self):
+        proc = self._make("AARCH64_SCHED_TICK_TEST=1")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("AARCH64_SCHED_TICK_TEST", proc.stderr)
+
+    def test_invalid_tick_selector_value_rejected(self):
+        proc = self._make("KERNEL_SELFTEST=1", "AARCH64_SCHED_TICK_TEST=2")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("AARCH64_SCHED_TICK_TEST", proc.stderr)
+
+    def test_tick_selector_conflicts_with_every_other_variant(self):
+        conflicts = (
+            "AARCH64_SCHED_TEST=positive",
+            "AARCH64_AP_SCHED_TEST=ap",
+            "AARCH64_M1_TEST=sparse",
+            "AARCH64_SMP_TEST_NO_ACK_CPU=1",
+            "AARCH64_SYNC_FAULT_TEST=1",
+            "KERNEL_TEST_FORCE_NO_RNDRRS=1",
+            "OS01_SYSTEST=1",
+        )
+        for conflict in conflicts:
+            with self.subTest(conflict=conflict):
+                proc = self._make("KERNEL_SELFTEST=1",
+                                  "AARCH64_SCHED_TICK_TEST=1", conflict)
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("AARCH64_SCHED_TICK_TEST", proc.stderr)
+
+    def test_x86_profile_rejects_the_aarch64_tick_selector(self):
+        proc = self._make("KERNEL_SELFTEST=1", "AARCH64_SCHED_TICK_TEST=1",
+                          profile="x86_64-clang", target="kernel.bin")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("AARCH64_SCHED_TICK_TEST", proc.stderr)
+
+    def test_mode_sched_tick_sets_its_own_selector(self):
+        proc = subprocess.run(
+            ["make", "-n", "PROFILE=aarch64-clang", "test-aarch64",
+             "MODE=sched-tick"],
+            cwd=_ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("AARCH64_SCHED_TICK_TEST=1", proc.stdout)
+        self.assertIn("qemutests/aarch64_sched_tick.py", proc.stdout)
+
+    def test_mode_sched_tick_rejects_foreign_overrides(self):
+        for override in ("KERNEL_SELFTEST=1",
+                         "AARCH64_SCHED_TEST=positive",
+                         "AARCH64_AP_SCHED_TEST=ap"):
+            with self.subTest(override=override):
+                proc = subprocess.run(
+                    ["make", "-n", "PROFILE=aarch64-clang", "test-aarch64",
+                     "MODE=sched-tick", "KERNEL_SELFTEST=1", override],
+                    cwd=_ROOT, capture_output=True, text=True, timeout=300)
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("sched-tick", proc.stderr)
 
 
 if __name__ == '__main__':

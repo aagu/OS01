@@ -228,6 +228,16 @@ endif
 # boundary and refuses every other compile-affecting selector — the
 # outer make rejects, never just the profile's sub-make parse.
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
+ifeq ($(MODE),sched-tick)
+ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error MODE=sched-tick cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
+endif
+ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
+$(error MODE=sched-tick cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_AP_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
+endif
+endif
+endif
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),sched-wake)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
 $(error MODE=sched-wake cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
@@ -293,6 +303,10 @@ endif
 # variant owns kernel/image sched-wake trees via the controlled
 # sub-make (AARCH64_AP_SCHED_TEST=wake); no per-case selector (the
 # phase carries the whole envelope).
+# MODE=sched-tick (2026-11-06, Task 4): the per-CPU tick acceptance —
+# the tick variant owns kernel/image sched-tick trees via the controlled
+# sub-make (AARCH64_SCHED_TICK_TEST=1); the runner drives the frozen
+# 1/2/4/8 x 2 matrix.
 .PHONY: _test-aarch64-prep-sched-wake _test-aarch64-run-sched-wake
 _test-aarch64-prep-sched-wake:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=wake aarch64-uefi
@@ -306,6 +320,18 @@ _test-aarch64-run-sched-wake:
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-wake/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+.PHONY: _test-aarch64-prep-sched-tick _test-aarch64-run-sched-tick
+_test-aarch64-prep-sched-tick:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TICK_TEST=1 aarch64-uefi
+_test-aarch64-run-sched-tick:
+	python3 qemutests/aarch64_sched_tick.py \
+	  --image "$(AARCH64_UEFI_SCHED_TICK_DISK)" \
+	  --firmware "$(AARCH64_UEFI_SCHED_TICK_FIRMWARE)" \
+	  --elf "$(AARCH64_KERNEL_SCHED_TICK_ELF)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-tick/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
 # variable) so it survives across recipe lines — a shell variable set
@@ -530,8 +556,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)

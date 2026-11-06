@@ -21,6 +21,9 @@
 #include <selftest/aarch64_ap_scheduler.h>
 #include <selftest/result.h>
 #endif
+#ifdef AARCH64_SCHED_TICK_TEST
+#include <selftest/aarch64_sched_tick.h>
+#endif
 
 extern char _text_start, _text_end;
 
@@ -306,8 +309,15 @@ static void test_aarch64_ap_fatal_owner_drive(void)
 
 void arch_task_switch(task_t *prev, task_t *next)
 {
-    if (prev == next)
+    if (prev == next) {
+#ifdef AARCH64_SCHED_TICK_TEST
+        /* The self-switch tripwire (selftest build only): a scheduler
+         * that asks the arch to switch to the CURRENT task is a bug —
+         * the cooperative path must never reach the arch switch. */
+        aarch64_sched_tick_self_switch(cpu_id());
+#endif
         return;
+    }
     aarch64_sched_fault_inject(prev, next);
     const char *reason = 0;
     if (!arch_task_context_valid(next, &reason)) {
@@ -492,6 +502,17 @@ void arch_aarch64_bsp_handoff(void)
     /* The AP production-path variant runs ONLY the seven frozen
      * ap-sched cases (the old suite's late probe is not run here). */
     test_aarch64_ap_scheduler_run();
+#elif defined(AARCH64_SCHED_TICK_TEST)
+    /* The per-CPU tick variant runs the seven frozen tick cases on
+     * every admitted CPU.  The whole evidence batch is published
+     * BEFORE the matching selftest_record_late() records; the
+     * "[sched-tick] END" line is printed AFTER selftest_end_run(),
+     * so the runner sees it behind the selftest END. */
+    test_aarch64_sched_tick_run();
+    int selftest_failed = selftest_end_run();
+    serial_printk("[selftest] done (failed=%u)\n",
+                  (unsigned)selftest_failed);
+    serial_printk("[sched-tick] END failed=%u\n", (unsigned)selftest_failed);
 #elif defined(OS01_SELFTEST)
     test_aarch64_scheduler_run();
     int selftest_failed = selftest_end_run();

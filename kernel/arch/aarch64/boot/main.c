@@ -544,6 +544,10 @@ void aarch64_main(const struct boot_context *handoff)
         selftest_begin_run(13);
 #elif defined(AARCH64_AP_SCHED_TEST_AP)
         selftest_begin_run(7);
+#elif defined(AARCH64_SCHED_TICK_TEST)
+        /* The per-CPU tick variant declares EXACTLY its seven late
+         * IDs (tick-ready .. tick-remote). */
+        selftest_begin_run(7);
 #else
         selftest_begin_run(9);
 #endif

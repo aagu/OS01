@@ -683,6 +683,23 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
         ).decode()
         self.assertFalse(parse_v1(text, suite=SUITE).ok)
 
+    def _handoff_branch(self, handoff: str, marker: str) -> str:
+        """The body of ONE preprocessor branch of the aarch64 handoff.
+
+        The handoff owns one branch per compile-affecting variant; each
+        of them must emit exactly one END.  The per-variant manifests
+        stay independent: the ordinary variant's nine late IDs are
+        untouched by the tick variant's seven.
+        """
+        start = handoff.find(marker)
+        self.assertNotEqual(start, -1, f"handoff must contain {marker}")
+        rest = handoff[start + len(marker):]
+        end = rest.find("\n#elif")
+        if end == -1:
+            end = rest.find("\n#endif")
+        self.assertNotEqual(end, -1, f"branch {marker} must be terminated")
+        return rest[:end]
+
     def test_aarch64_runs_late_cases_before_the_single_end(self) -> None:
         boot = _read_kernel_source("kernel/arch/aarch64/boot/main.c")
         handoff = _read_kernel_source("kernel/arch/aarch64/cpu/task_arch.c")
@@ -692,12 +709,23 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
         self.assertLess(begin, run, "begin_run must precede early run_all")
         self.assertNotIn("selftest_end_run();", boot,
                          "END belongs after the scheduler late cases")
-        self.assertEqual(handoff.count("selftest_end_run();"), 1,
+        # Every END-emitting branch of the handoff owns exactly one END.
+        default = self._handoff_branch(handoff, "#elif defined(OS01_SELFTEST)")
+        self.assertEqual(default.count("selftest_end_run();"), 1,
                          "the handoff must emit exactly one END")
-        late = handoff.find("test_aarch64_scheduler_run();")
-        end = handoff.find("selftest_end_run();")
+        late = default.find("test_aarch64_scheduler_run();")
+        end = default.find("selftest_end_run();")
         self.assertNotEqual(late, -1, "handoff must execute late cases")
         self.assertLess(late, end, "late cases must precede END")
+        # The per-CPU tick variant is a SEPARATE branch with its own
+        # single END; the ordinary variant's manifest is unchanged.
+        tick = self._handoff_branch(handoff,
+                                    "#elif defined(AARCH64_SCHED_TICK_TEST)")
+        self.assertEqual(tick.count("selftest_end_run();"), 1,
+                         "the tick variant must emit exactly one END")
+        self.assertLess(tick.find("test_aarch64_sched_tick_run();"),
+                        tick.find("selftest_end_run();"),
+                        "the tick evidence batch must precede END")
         registry = _read_kernel_source("kernel/selftest/selftest.c")
         ids = re.findall(r'selftest_register_late\("(aarch64_sched_[a-z]+)"\)',
                          registry)
@@ -705,6 +733,20 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
             "aarch64_sched_yield", "aarch64_sched_regs", "aarch64_sched_entry",
             "aarch64_sched_irq", "aarch64_sched_blocker", "aarch64_sched_reclaim",
             "aarch64_sched_idle", "aarch64_sched_timer", "aarch64_sched_ap",
+        ])
+
+    def test_aarch64_tick_variant_registers_its_own_seven_late_ids(self) -> None:
+        """The tick variant declares EXACTLY its seven frozen case IDs."""
+        registry = _read_kernel_source("kernel/selftest/selftest.c")
+        branch = registry.split("#elif defined(__aarch64__) && "
+                                "defined(AARCH64_SCHED_TICK_TEST)")
+        self.assertEqual(len(branch), 2,
+                         "the registry must own a tick-variant branch")
+        ids = re.findall(r'selftest_register_late\("([a-z0-9-]+)"\)',
+                         branch[1].split("#elif")[0])
+        self.assertEqual(ids, [
+            "tick-ready", "tick-idle", "tick-busy", "tick-yield",
+            "tick-deadline", "tick-global", "tick-remote",
         ])
 
 

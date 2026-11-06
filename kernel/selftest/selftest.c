@@ -206,6 +206,17 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("work");
     selftest_register_late("admission");
     selftest_register_late("default-mask");
+#elif defined(__aarch64__) && defined(AARCH64_SCHED_TICK_TEST)
+    /* The per-CPU tick variant declares EXACTLY its seven frozen case
+     * IDs — the evidence rows are published per CPU before the
+     * matching selftest_record_late() records. */
+    selftest_register_late("tick-ready");
+    selftest_register_late("tick-idle");
+    selftest_register_late("tick-busy");
+    selftest_register_late("tick-yield");
+    selftest_register_late("tick-deadline");
+    selftest_register_late("tick-global");
+    selftest_register_late("tick-remote");
 #elif defined(__aarch64__)
     selftest_register_late("aarch64_sched_yield");
     selftest_register_late("aarch64_sched_regs");

@@ -43,9 +43,10 @@ void gic_cpu_init(void)                                /* 每核各跑一次（b
     __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");   /* 屏障在 wrapper (hw 层零依赖) */
 }
 
-#ifdef AARCH64_AP_SCHED_WAKE_TEST
-/* P2 wake variant: the gic_driver SGI4 trace needs the logical CPU in
- * the dispatch path (the production trace accessor is file-static). */
+#if defined(AARCH64_AP_SCHED_WAKE_TEST) || defined(AARCH64_SCHED_TICK_TEST)
+/* P2 wake variant / per-CPU tick variant: the gic_driver SGI4 trace
+ * needs the logical CPU in the dispatch path (the production trace
+ * accessor is file-static). */
 uint32_t gic_trace_cpu(void) { return cpu_id(); }
 #endif
 
