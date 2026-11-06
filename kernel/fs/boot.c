@@ -17,6 +17,7 @@
 #include <block/blockdev.h>
 #include <log/log.h>          // log_* for GPT/ext2/FAT32 fallback logs
 #include <core/panic.h>
+#include <memory/slab.h>
 #include <stdbool.h>
 #include <errno.h>
 
@@ -98,7 +99,10 @@ static bool mount_partitioned_disk(void)
     // Dual-partition layout:
     //   gpt->partitions[0] = hda1 (FAT32 ESP) → /boot
     //   gpt->partitions[1] = hda2 (ext2)      → /
-    if (gpt->count < 2) return false;
+    if (gpt->count < 2) {
+        kfree(gpt);
+        return false;
+    }
 
     bool root_ok = false;
 
@@ -112,6 +116,7 @@ static bool mount_partitioned_disk(void)
         log_warn("FAT32: /boot mount failed\n");
     }
 
+    kfree(gpt);
     return root_ok;
 }
 

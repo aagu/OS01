@@ -109,10 +109,10 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
 
 void sys_sem_free(sys_sem_t *sem)
 {
-    // lwIP semaphores are created once at init and never freed.
-    // We allocate them with kmalloc but free is a no-op — they
-    // live for the lifetime of the kernel.
-    (void)sem;
+    if (!sem || !*sem) return;
+    os_sem_t *s = (os_sem_t *)*sem;
+    *sem = 0;
+    kfree(s);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -393,7 +393,12 @@ u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
 
 void sys_mbox_free(sys_mbox_t *mbox)
 {
-    (void)mbox;
+    if (!mbox || !*mbox) return;
+    os_mbox_t *mb = (os_mbox_t *)*mbox;
+    if (mb == g_tcpip_mbox)
+        g_tcpip_mbox = NULL;
+    *mbox = 0;
+    kfree(mb);
 }
 
 // ── mbox trypost (lwIP calls these directly, not via macros) ──

@@ -254,8 +254,14 @@ int pty_slave_ioctl(pty_t *pty, int cmd, void *arg)
 static int ptmx_open(const char *name, file_t **out_file)
 {
     (void)name;
+    file_t *f = file_alloc();
+    if (!f) return -ENOMEM;
+
     pty_t *pty = pty_alloc();
-    if (!pty) return -ENOMEM;
+    if (!pty) {
+        file_free(f);
+        return -ENOMEM;
+    }
 
     // Register the slave device node: "/dev/pts{N}"
     char slave_name[16];
@@ -269,12 +275,13 @@ static int ptmx_open(const char *name, file_t **out_file)
         if (pty->slave_to_master) pipe_free(pty->slave_to_master);
         pty->master_to_slave = NULL;
         pty->slave_to_master = NULL;
+        uint64_t fl = spin_lock_irqsave(&pty_lock);
         pty->allocated = false;
+        spin_unlock_irqrestore(&pty_lock, fl);
+        file_free(f);
         return rc;
     }
 
-    file_t *f = file_alloc();
-    if (!f) return -ENOMEM;
     f->type = FD_PTY_MASTER;
     f->pty = pty;
     f->flags = O_RDWR;
@@ -288,6 +295,9 @@ static int ptmx_open(const char *name, file_t **out_file)
 
 static int ptsN_open(const char *name, file_t **out_file)
 {
+    file_t *f = file_alloc();
+    if (!f) return -ENOMEM;
+
     // Find matching PTY slot by checking name suffix "pts{N}"
     pty_t *pty = NULL;
     int name_len = (int)strlen(name);
@@ -316,14 +326,15 @@ static int ptsN_open(const char *name, file_t **out_file)
     if (pty) pty->slave_opened = true;
     spin_unlock_irqrestore(&pty_lock, fl);
 
-    if (!pty) return -ENOENT;
+    if (!pty) {
+        file_free(f);
+        return -ENOENT;
+    }
 
     // Set controlling terminal
     current->ctty_type = CTTY_PTY;
     current->ctty = pty;
 
-    file_t *f = file_alloc();
-    if (!f) return -ENOMEM;
     f->type = FD_PTY_SLAVE;
     f->pty = pty;
     f->flags = O_RDWR;

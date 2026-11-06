@@ -24,6 +24,17 @@ spinlock_T pty_lock = { 1 };
 
 #include "lwip/err.h"     // err_t, ERR_OK, ERR_CLSD
 #include "lwip/api.h"     // netconn_recv, netconn_write, netconn_delete, netbuf
+#include <net/socket.h>
+
+// Weak fallback so host tests linking file.c without socket.c resolve cleanly.
+// Strong implementation lives in kernel/net/socket.c.
+__attribute__((weak)) void socket_free(socket_t *s)
+{
+    if (!s) return;
+    if (s->rx_nb) netbuf_delete((struct netbuf *)s->rx_nb);
+    if (s->conn) netconn_delete((struct netconn *)s->conn);
+    kfree(s);
+}
 
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
@@ -159,9 +170,7 @@ void file_free(file_t *f)
     f->dev_private = NULL;
     f->fs_private = NULL;
     if (f->type == FD_SOCKET && f->sock) {
-        if (f->sock->conn)
-            netconn_delete((struct netconn *)f->sock->conn);
-        free(f->sock);
+        socket_free(f->sock);
     }
     // Poison to catch use-after-free
     f->pipe = NULL;

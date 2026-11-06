@@ -412,6 +412,7 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
 
     /* 1. Retained tail within [requested, aligned_new).  If
      *    requested is page-aligned, there is no retained tail. */
+    uint64_t free_old_phys = 0;
     if (requested < aligned_new) {
         /* The page containing 'requested' is the aligned_new page
          * (which lies at start_brk + k*PAGE_4K_SIZE for some k).
@@ -432,7 +433,8 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
                            (void *)Phy_To_Virt(old_phys),
                            PAGE_4K_SIZE);
                     *pte = new_phys | page_prot;
-                    (void)page_cow_put(old_phys);
+                    if (page_cow_put(old_phys))
+                        free_old_phys = old_phys;
                     old_phys = new_phys;
                 } else {
                     (void)page_cow_put(old_phys);
@@ -457,6 +459,8 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
     mm->end_brk       = requested;
     heap_vma->vm_end  = requested;
     tlb_shootdown();
+    if (free_old_phys)
+        free_4k_page(free_old_phys);
     if (result) *result = requested;
     spin_unlock(&mm->lock);
     return 0;
@@ -817,6 +821,7 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
     }
 
     uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
+    uint64_t deferred_free_head = 0;
 
     list_t *pos = current->mm->vma_list.next;
     while (pos != &current->mm->vma_list) {
@@ -856,8 +861,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
                         if (!new_phys) continue; // OOM: skip this page
                         memcpy((void *)Phy_To_Virt(new_phys),
                                (void *)Phy_To_Virt(phys), PAGE_4K_SIZE);
-                        page_cow_put(phys);
+                        bool last = page_cow_put(phys);
                         *pte = new_phys | new_page_prot;
+                        if (last) {
+                            *(uint64_t *)Phy_To_Virt(phys) = deferred_free_head;
+                            deferred_free_head = phys;
+                        }
                     } else {
                         // Last sharer: promote in-place
                         (void)page_cow_put(phys);
@@ -879,10 +888,16 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 
     spin_unlock(&current->mm->lock);
 
+    flush_tlb();
+    while (deferred_free_head) {
+        uint64_t next = *(uint64_t *)Phy_To_Virt(deferred_free_head);
+        free_4k_page(deferred_free_head);
+        deferred_free_head = next;
+    }
+
     if (addr < end)
         return -ENOMEM;
 
-    flush_tlb();
     return 0;
 }
 
