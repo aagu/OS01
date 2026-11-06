@@ -6,6 +6,7 @@
 #include <arch/aarch64/ap_sched.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/ap_work.h>
+#include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_init/start */
 #include <arch/aarch64/ipi.h>   /* P2: need-slot offset cross-check */
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
@@ -433,6 +434,12 @@ void arch_aarch64_prepare_bsp_handoff(void)
     const char *reason = 0;
     if (!arch_task_context_valid(&init_task_union.task, &reason))
         fatal_context(12, init_thread.sp, base, top);
+
+    /* The per-CPU scheduler tick is initialized HERE, on the boot
+     * stack: it only initializes data (the accounting locks and the
+     * ready gate) and never reads `current`.  It must run before any
+     * AP handoff and before the BSP starts its own tick. */
+    aarch64_sched_tick_init();
 }
 
 void arch_aarch64_bsp_handoff(void)
@@ -451,6 +458,16 @@ void arch_aarch64_bsp_handoff(void)
         fatal_context(11, (uintptr_t)__builtin_frame_address(0),
                       (uintptr_t)&init_task_union, (uintptr_t)&init_task_union + STACK_SIZE);
     sched_boot_publish_idle();
+    /* Start the BSP's LOCAL scheduler tick now: the idle metadata and
+     * sched_boot_publish_idle() are in place and IRQs are still
+     * disabled.  The BSP's counter was already armed during the early
+     * boot phase — the start only verifies it and publishes the
+     * accounting lifecycle.  A failure must never publish
+     * scheduler_ok: the handoff fails the boot instead. */
+    if (!aarch64_sched_tick_start()) {
+        log_err("[sched-tick] FATAL: BSP local tick start failed\n");
+        for (;;) arch_cpu_halt();
+    }
     /* Publish BSP scheduler_ok FIRST, then open the AP release gate and
      * wait for every accepted AP's scheduler_ok (P1 spec §3.2).  The AP
      * variant's runtime-admission check runs in the window where the

@@ -111,13 +111,37 @@ static inline void list_del(list_t *entry)
     entry->prev->next = entry->next;
 }
 
-/* ── rbtree surface: stubbed (the notify/scan cases never enqueue for
- *    real — pick_eevdf/dequeue/enqueue are test spies). ─────────── */
+/* ── rbtree surface ──────────────────────────────────────────────
+ * Default: stubbed (the notify/scan cases never enqueue for real —
+ * pick_eevdf/dequeue/enqueue are test spies).
+ *
+ * BLOCKER_RUNTIME_REAL_FAIR: the REAL red-black tree, so the REAL
+ * fair.c can be linked instead of the spies.  This is what the
+ * aarch64 schedule-charge regression needs: update_curr() must never
+ * be a stub — the assertion is about the real vruntime value. */
+#ifdef BLOCKER_RUNTIME_REAL_FAIR
+typedef struct rbtree_node {
+    struct rbtree_node *left;
+    struct rbtree_node *right;
+    struct rbtree_node *parent;
+    unsigned long color;
+} rbtree_node_t;
+typedef struct rbtree_root { rbtree_node_t *rb_node; } rbtree_root_t;
+static inline int rbtree_empty(rbtree_root_t *root) { return root->rb_node == NULL; }
+rbtree_node_t *rbtree_insert(rbtree_root_t *root, rbtree_node_t *node,
+                             int (*cmp)(rbtree_node_t *a, rbtree_node_t *b));
+void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node);
+rbtree_node_t *rbtree_first(rbtree_root_t *root);
+rbtree_node_t *rbtree_last(rbtree_root_t *root);
+rbtree_node_t *rbtree_prev(rbtree_node_t *node);
+rbtree_node_t *rbtree_next(rbtree_node_t *node);
+#else
 typedef struct { uint64_t stub; } rbtree_node_t;
 typedef struct { uint64_t stub; } rbtree_root_t;
 void *rbtree_last(rbtree_root_t *root);
 void *rbtree_prev(void *node);
 void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node);
+#endif
 
 /* ── Spin surface ───────────────────────────────────────────────
  * Production objects get the recording copy (mock_record_lock_op is
@@ -180,6 +204,7 @@ typedef struct task_struct {
     rbtree_node_t rb_node;
     uint64_t vruntime;
     uint64_t deadline;
+    uint64_t runtime_ticks;    /* per-task runtime (accounting.c) */
     bool on_rq;
 
     char comm[64];
@@ -294,7 +319,11 @@ unsigned sched_pick_cpu_mask(uint64_t allowed);
 void sched_balance(percpu_t *rq);
 
 /* fair.c stand-ins (NOT linked in this fixture — the spies are the
- * test's observation points; no scheduler algorithm is copied). */
+ * test's observation points; no scheduler algorithm is copied).
+ *
+ * BLOCKER_RUNTIME_REAL_FAIR: the REAL kernel/sched/fair.c is linked
+ * instead, so update_curr() is never stubbed.  The DECLARATIONS stay
+ * either way — core.c needs them. */
 void update_curr(task_t *task);
 void enqueue_task(task_t *task, percpu_t *rq);
 void dequeue_task(task_t *task, percpu_t *rq);
@@ -409,7 +438,10 @@ void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void))
 }
 void arch_task_check_prev(task_t *t) { (void)t; }
 
-/* ── fair.c stand-in spies ── */
+/* ── fair.c stand-in spies ──────────────────────────────────────
+ * BLOCKER_RUNTIME_REAL_FAIR: the REAL fair.c is linked, so these
+ * spies are NOT emitted (a duplicate definition would collide). */
+#ifndef BLOCKER_RUNTIME_REAL_FAIR
 int mock_update_curr_calls;
 void update_curr(task_t *task) { (void)task; mock_update_curr_calls++; }
 
@@ -441,9 +473,11 @@ task_t *pick_eevdf(percpu_t *rq)
     (void)rq;
     return mock_pick_next ? mock_pick_next : mock_idle_task;
 }
+#endif /* !BLOCKER_RUNTIME_REAL_FAIR */
 
 /* ── rbtree stubs (balance.c's migration path stays unreachable:
  *    every fixture nr_running is 0, so rbtree_last is never hit) ── */
+#ifndef BLOCKER_RUNTIME_REAL_FAIR
 void *rbtree_last(rbtree_root_t *root) { (void)root; return NULL; }
 void *rbtree_prev(void *node) { (void)node; return NULL; }
 void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node)
@@ -451,6 +485,7 @@ void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node)
     (void)root;
     (void)node;
 }
+#endif
 
 /* ── x86 IPI spy ── */
 int mock_ipi_send_calls;
@@ -521,6 +556,7 @@ void sched_notify_reset(void)
     mock_log_err_calls = mock_log_warn_calls = mock_log_info_calls = 0;
     mock_switch_calls = 0;
     mock_switch_prev = mock_switch_next = NULL;
+#ifndef BLOCKER_RUNTIME_REAL_FAIR
     mock_update_curr_calls = 0;
     mock_enqueue_calls = 0;
     mock_enqueue_last = NULL;
@@ -528,6 +564,7 @@ void sched_notify_reset(void)
     mock_dequeue_calls = 0;
     mock_pick_next = NULL;
     mock_idle_task = NULL;
+#endif
     mock_ipi_send_calls = 0;
     mock_ipi_dest_apic_id = 0;
     mock_ipi_vector = 0;
@@ -558,7 +595,9 @@ void sched_notify_reset(void)
     percpu_data[0].online = 1;
     percpu_data[0].scheduler_ok = 1;
     mock_sched_current = &init_task_union.task;
+#ifndef BLOCKER_RUNTIME_REAL_FAIR
     mock_idle_task = &init_task_union.task;
+#endif
 }
 #endif /* BLOCKER_TEST_SPIES */
 

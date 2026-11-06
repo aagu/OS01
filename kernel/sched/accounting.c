@@ -25,10 +25,12 @@
  * or updated as a consistent set.  The hot path (sched_account_tick)
  * and the read path perform no formatting and no allocation.
  *
- * aarch64: no per-CPU tick source is wired up yet, so nothing calls
- * sched_accounting_cpu_start() there and every core reads valid=0
- * (unavailable).  No x86-specific clocksource helpers are used here —
- * this file is arch-neutral.
+ * aarch64: every ADMITTED CPU owns a private CNTP interrupt that is
+ * used ONLY for the local scheduler tick, so sched_accounting_tick()
+ * is called once per delivered CNTP interrupt from the local tick
+ * path (kernel/arch/aarch64/cpu/sched_tick.c).  The BSP's global
+ * tick_handler() never accounts a second time.  No x86-specific
+ * clocksource helpers are used here — this file is arch-neutral.
  */
 
 #include <sched/accounting.h>

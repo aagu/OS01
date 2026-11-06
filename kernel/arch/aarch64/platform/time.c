@@ -11,10 +11,15 @@
  * (R3.1 fix for R1 CRITICAL-1: qemutests/aarch64_uefi_smp.py:545/574
  * asserts >=3 [tick] N lines per case).
  *
- * Order contract (phase1 spec §2.3 + phase2 unification):
+ * Order contract (phase1 spec §2.3 + phase2 unification + the per-CPU
+ * tick accounting):
  *   1. Rewrite CNTP_TVAL_EL0 = period  (FIRST; avoids losing a tick)
- *   2. Call tick_handler() — jiffies++, need_resched=1, watchdog++,
- *      timer-list scan, set_softirq_status(TIMER_SIRQ)
+ *   2. On the BSP, call tick_handler() — jiffies++, poll-timeout scan,
+ *      timer-list scan, set_softirq_status(TIMER_SIRQ).  The per-CPU
+ *      accounting, the need_resched request and the watchdog counter
+ *      are NOT here: they belong to the local scheduler tick
+ *      (aarch64_sched_tick(), step 5), which charges the vruntime per
+ *      DELIVERED local tick.
  *   3. Print "[tick] N" once per second (LAST; output may be slow)
  *   4. EOI is performed by gic_dev_dispatch after this returns.
  *
@@ -55,6 +60,8 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/timer.h>
+#include <arch/aarch64/sched_tick.h>
+#include <percpu/percpu.h>     /* cpu_id() — the BSP owns the global tick */
 #include <log/log.h>
 #include <time/clockevent.h>   /* tick_handler() */
 #ifdef OS01_SELFTEST
@@ -81,10 +88,16 @@ static volatile uint64_t g_ticks;
 static struct aarch64_timer_config g_timer_config;
 
 /* Registered CNTP PPI tick handler.  Order contract per phase1 spec §2.3
- * + phase2 unification:
- *   1. Rewrite TVAL FIRST (avoid losing a tick).
- *   2. Call tick_handler() — unified semantic with x86_64.
- *   3. Per-second "[tick] N" debug print (KEEP per R3.1).
+ * + phase2 unification + the per-CPU tick accounting spec §5:
+ *   1. Rewrite TVAL FIRST (avoid losing a tick) — the period comes
+ *      from the FROZEN configuration, so every CPU re-arms with the
+ *      same value.
+ *   2. The GLOBAL time base belongs to the BSP alone: tick_handler()
+ *      (jiffies, poll timeout, timer list / TIMER_SIRQ) and the
+ *      per-second "[tick] N" line run on CPU0 only.  An AP never
+ *      touches the global objects and never prints.
+ *   3. The LOCAL scheduler tick runs on every CPU: per-CPU / per-task
+ *      accounting, the tick-driven vruntime and the watchdog counter.
  *   4. EOI is performed by gic_dev_dispatch after this returns.
  *
  * Same-priority nesting is masked at the GIC anyway (PPI priority
@@ -99,14 +112,19 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
     (void)regs;
 #endif
     cntp_tval_el0_write(g_timer_config.period);  /* TVAL rewrite FIRST */
-    tick_handler();                   /* unified tick semantic */
-    /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
-     * requires >=3 [tick] N lines per case. */
-    uint64_t t = g_ticks + 1;
-    g_ticks = t;
-    if ((t % TICKS_PER_SECOND) == 0) {
-        log_info("[tick] %lu\n", (unsigned long)(t / TICKS_PER_SECOND));
+    if (cpu_id() == 0) {
+        /* Global time base — BSP only. */
+        tick_handler();
+        /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
+         * requires >=3 [tick] N lines per case. */
+        uint64_t t = g_ticks + 1;
+        g_ticks = t;
+        if ((t % TICKS_PER_SECOND) == 0) {
+            log_info("[tick] %lu\n", (unsigned long)(t / TICKS_PER_SECOND));
+        }
     }
+    /* Local scheduler tick — every admitted CPU. */
+    aarch64_sched_tick();
 #ifdef OS01_SELFTEST
     aarch64_sched_observe_timer_irq(regs, false);
 #endif
@@ -208,6 +226,53 @@ bool aarch64_timer_start_local(void)
 
     return timer_arm_local(period);
 }
+
+/* BSP: verify that the local counter is really running.  Read-only:
+ * no rearm, no handler registration, no change to the global jiffies
+ * or the per-second counter. */
+bool aarch64_timer_local_running(void)
+{
+    uint64_t ctl = cntp_ctl_el0_read();
+    return (ctl & 1UL) != 0 && (ctl & (1UL << 1)) == 0;
+}
+
+#ifdef OS01_SELFTEST
+/* OS01_SELFTEST ONLY: mask the calling CPU's local CNTP interrupt.
+ *
+ * The saved control word is returned so the caller can restore the
+ * exact state later; 0 means "the counter is not running" or "IMASK
+ * did not stick" and is a hard failure for the caller.  Only the
+ * CALLING CPU's counter is touched — the BSP's global time source is
+ * never masked by this helper. */
+uint64_t aarch64_sched_tick_test_mask_local(void)
+{
+    uint64_t ctl = cntp_ctl_el0_read();
+    if ((ctl & 1UL) == 0)
+        return 0;               /* the counter is not running */
+    cntp_ctl_el0_write(ctl | (1UL << 1));   /* set IMASK */
+    cntp_isb();
+    uint64_t readback = cntp_ctl_el0_read();
+    if ((readback & (1UL << 1)) == 0)
+        return 0;               /* IMASK did not stick */
+    return ctl;
+}
+
+/* OS01_SELFTEST ONLY: restore the calling CPU's local CNTP interrupt.
+ *
+ * Order contract (same as the arm path): TVAL (rearm) -> CTL -> ISB
+ * -> read-back.  The counter keeps running while it is masked, so the
+ * value is re-armed before IMASK is cleared; otherwise an expired
+ * counter would deliver a burst of pending interrupts. */
+void aarch64_sched_tick_test_restore_local(uint64_t saved_ctl)
+{
+    if (!saved_ctl)
+        return;
+    cntp_tval_el0_write(g_timer_config.period);
+    cntp_ctl_el0_write(saved_ctl);
+    cntp_isb();
+    (void)cntp_ctl_el0_read();
+}
+#endif /* OS01_SELFTEST */
 
 /* BSP: register the CNTP IRQ handler and publish the frozen
  * configuration.  The GIC handler table is GLOBAL — this is the only

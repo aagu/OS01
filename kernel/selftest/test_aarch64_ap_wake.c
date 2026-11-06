@@ -8,6 +8,7 @@
 #include <arch/aarch64/ap_work.h>
 #include <arch/aarch64/ipi.h>
 #include <arch/aarch64/smp.h>
+#include <arch/aarch64/timer.h>   /* selftest-only local CNTP mask/restore */
 #include <memory/vmm.h>
 #include <intr/ipi.h>
 #include <selftest/aarch64_ap_scheduler.h>
@@ -31,6 +32,13 @@ static struct {
 } fixture;
 static struct {
     uint64_t request, arrived, permit, enters, returns;
+    /* Masked-window handshake: the target masks its OWN local CNTP
+     * interrupt before it acknowledges the window and restores it only
+     * after the window's marker/work completed.  The BSP never starts
+     * the next round before the restore ACK. */
+    uint64_t mask_requested, masked, mask_failed, saved_ctl;
+    uint64_t restore_request, restored;
+    uint64_t mask_total, restore_total;
 } gates[NR_CPUS];
 static uint64_t checkpoint[NR_CPUS];
 static uint32_t ready_seq[NR_CPUS];
@@ -147,8 +155,35 @@ void aarch64_ap_sched_idle_hook(unsigned cpu, unsigned stage)
 {
     if (stage == AP_SCHED_IDLE_BEFORE_WAIT) INC(&gates[cpu].enters);
     if (stage == AP_SCHED_IDLE_AFTER_WAIT) INC(&gates[cpu].returns);
+
+    /* The BSP closed the masked window: restore the LOCAL CNTP
+     * interrupt (CTL + rearm + ISB) on this CPU and publish the
+     * restore ACK.  The BSP's own time source is never touched. */
+    if (LOAD(&gates[cpu].restore_request) && !LOAD(&gates[cpu].restored)) {
+        aarch64_sched_tick_test_restore_local(LOAD(&gates[cpu].saved_ctl));
+        STORE(&gates[cpu].restored, 1);
+        INC(&gates[cpu].restore_total);
+        return;
+    }
+
     uint64_t requested = LOAD(&gates[cpu].request);
     if (!requested || requested != stage) return;
+
+    /* Mask the LOCAL CNTP interrupt BEFORE the acknowledgement: a
+     * periodic tick must never rescue the window under test.  The
+     * target is the only CPU that masks its own counter. */
+    if (LOAD(&gates[cpu].mask_requested)) {
+        uint64_t saved = aarch64_sched_tick_test_mask_local();
+        if (!saved) {
+            INC(&gates[cpu].mask_failed);
+            INC(&failures);
+        } else {
+            STORE(&gates[cpu].saved_ctl, saved);
+            STORE(&gates[cpu].masked, 1);
+            INC(&gates[cpu].mask_total);
+        }
+    }
+
     STORE(&gates[cpu].arrived, 1);
     /* Stage 3 must return immediately; stages 1/2 can wait without locks. */
     if (stage != AP_SCHED_IDLE_BEFORE_WAIT)
@@ -214,22 +249,66 @@ void test_aarch64_ap_sched_poll_ready(void)
 }
 
 /* Arm a real idle boundary and kick the CPU out of any preceding WFI.
- * The ACK is produced by the target hook, never by the sender. */
+ * The ACK is produced by the target hook, never by the sender.
+ *
+ * The window is MASKED: the target masks its own local CNTP interrupt
+ * before it acknowledges, so the AP's periodic tick can never rescue
+ * the window under test. */
+/* Close the masked window: the TARGET restores its local CNTP
+ * interrupt (CTL + rearm + ISB) and publishes the restore ACK.  The
+ * BSP never starts the next round before that ACK, and a target that
+ * cannot restore is a hard failure (never a silent pass). */
+static bool close_window(unsigned cpu);
+
 static bool arm_idle(unsigned cpu, unsigned stage)
 {
     STORE(&gates[cpu].arrived, 0);
     STORE(&gates[cpu].permit, 0);
     STORE(&gates[cpu].request, stage);
+    STORE(&gates[cpu].mask_requested, 1);
+    STORE(&gates[cpu].masked, 0);
+    STORE(&gates[cpu].mask_failed, 0);
+    STORE(&gates[cpu].saved_ctl, 0);
+    STORE(&gates[cpu].restored, 1);
+    STORE(&gates[cpu].restore_request, 0);
     aarch64_sched_kick(cpu);
     if (!wait_value(&gates[cpu].arrived, 1, false)) {
         STORE(&gates[cpu].permit, 1);
         STORE(&gates[cpu].request, 0);
+        /* The target may have masked before it acknowledged: the
+         * window MUST be closed before the case gives up. */
+        close_window(cpu);
+        return false;
+    }
+    if (LOAD(&gates[cpu].mask_failed)) {
+        /* The mask did not stick: the window is NOT protected, so the
+         * case fails instead of pretending the window was protected. */
+        STORE(&gates[cpu].permit, 1);
+        close_window(cpu);
+        INC(&failures);
         return false;
     }
     if (stage == AP_SCHED_IDLE_BEFORE_WAIT) {
         /* Allow the target to pass its wait boundary; no claim of physical sleep. */
         uint64_t until = arch_cycle_counter() + arch_cycle_freq() / 100000;
         while (arch_cycle_counter() < until) arch_cpu_pause();
+    }
+    return true;
+}
+
+/* Close the masked window: the TARGET restores its local CNTP
+ * interrupt (CTL + rearm + ISB) and publishes the restore ACK.  The
+ * BSP never starts the next round before that ACK, and a target that
+ * cannot restore is a hard failure (never a silent pass). */
+static bool close_window(unsigned cpu)
+{
+    STORE(&gates[cpu].restore_request, 1);
+    STORE(&gates[cpu].restored, 0);
+    /* The CNTP is masked: only an SGI can pull the target out of WFI. */
+    aarch64_sched_kick(cpu);
+    if (!wait_value(&gates[cpu].restored, 1, false)) {
+        INC(&failures);
+        return false;
     }
     return true;
 }
@@ -303,6 +382,8 @@ static int idle_case(unsigned cpu)
 {
     uint64_t counts[3] = {0}, completed = 0;
     uint64_t entered = LOAD(&gates[cpu].enters), returned = LOAD(&gates[cpu].returns);
+    uint64_t mask_base = LOAD(&gates[cpu].mask_total);
+    uint64_t restore_base = LOAD(&gates[cpu].restore_total);
     for (unsigned timing = 0; timing < 3; ++timing) {
         for (unsigned round = 0; round < ROUNDS; ++round) {
             reset_fixture(0);
@@ -310,38 +391,61 @@ static int idle_case(unsigned cpu)
             unsigned gen = ++generation;
             aarch64_sched_observer_begin(cpu, gen);
             if (kernel_thread_on_cpu(marker, cpu, cpu) < 0) {
-                STORE(&gates[cpu].permit, 1); return -1;
+                STORE(&gates[cpu].permit, 1);
+                close_window(cpu);
+                return -1;
             }
             STORE(&gates[cpu].permit, 1);
-            if (!wait_value(&fixture.done, 1, false) || finish_batch(cpu, gen)) return -1;
+            if (!wait_value(&fixture.done, 1, false) || finish_batch(cpu, gen)) {
+                close_window(cpu);
+                return -1;
+            }
+            /* The window's marker completed: close the masked window
+             * before the next round starts. */
+            if (!close_window(cpu)) return -1;
             if (LOAD(&fixture.done) != 1 || LOAD(&fixture.bad)) return -1;
             ++counts[timing];
             ++completed;
         }
     }
-    serial_printk("[ap-sched] phase=wake case=idle-race cpu=%u before_check=%lu after_check=%lu at_wait=%lu completed=%lu lost=%lu wfi_enter=%lu wfi_return=%lu na=0\n",
+    uint64_t masked = LOAD(&gates[cpu].mask_total) - mask_base;
+    uint64_t restored = LOAD(&gates[cpu].restore_total) - restore_base;
+    serial_printk("[ap-sched] phase=wake case=idle-race cpu=%u before_check=%lu after_check=%lu at_wait=%lu completed=%lu lost=%lu wfi_enter=%lu wfi_return=%lu masked=%lu restored=%lu na=0\n",
                   cpu, counts[0], counts[1], counts[2], completed,
                   (uint64_t)(3 * ROUNDS - completed), LOAD(&gates[cpu].enters) - entered,
-                  LOAD(&gates[cpu].returns) - returned);
-    return 0;
+                  LOAD(&gates[cpu].returns) - returned, masked, restored);
+    /* Every window must have been protected AND closed again. */
+    return masked == 3 * ROUNDS && restored == 3 * ROUNDS ? 0 : -1;
 }
 
 static int work_case(unsigned cpu)
 {
     uint64_t pending = 0, after = 0;
+    uint64_t mask_base = LOAD(&gates[cpu].mask_total);
+    uint64_t restore_base = LOAD(&gates[cpu].restore_total);
     for (unsigned timing = 0; timing < 2; ++timing) {
         for (unsigned round = 0; round < ROUNDS; ++round) {
             if (!arm_idle(cpu, timing + 2)) return -1;
             uint32_t seq = submit_next(cpu, WORK_BARRIER);
             STORE(&gates[cpu].permit, 1);
-            if (!complete_work(cpu, seq)) return -1;
+            if (!complete_work(cpu, seq)) {
+                close_window(cpu);
+                return -1;
+            }
+            /* The window's work completed: close the masked window
+             * before the next round starts. */
+            if (!close_window(cpu)) return -1;
             if (timing) ++after;
             else ++pending;
         }
     }
-    serial_printk("[ap-sched] phase=wake case=work-sleep cpu=%u ready_overlap=%lu pending_before=%lu after_wait=%lu completed=%lu bad_seq=0 na=0\n",
-                  cpu, ready_ok[cpu], pending, after, ready_ok[cpu] + pending + after);
-    return ready_ok[cpu] != 1 ? -1 : 0;
+    uint64_t masked = LOAD(&gates[cpu].mask_total) - mask_base;
+    uint64_t restored = LOAD(&gates[cpu].restore_total) - restore_base;
+    serial_printk("[ap-sched] phase=wake case=work-sleep cpu=%u ready_overlap=%lu pending_before=%lu after_wait=%lu completed=%lu bad_seq=0 masked=%lu restored=%lu na=0\n",
+                  cpu, ready_ok[cpu], pending, after, ready_ok[cpu] + pending + after,
+                  masked, restored);
+    if (ready_ok[cpu] != 1) return -1;
+    return masked == 2 * ROUNDS && restored == 2 * ROUNDS ? 0 : -1;
 }
 
 static int sgi_case(void)
@@ -378,8 +482,8 @@ void test_aarch64_ap_scheduler_wake_run(void)
     if (num_cpus == 1) {
         serial_printk("[ap-sched] phase=wake case=remote-wake cpu=0 rounds=0 completed=0 duplicate=0 explicit=0 scan=0 na=1\n");
         serial_printk("[ap-sched] phase=wake case=wake-switch cpu=0 rounds=0 completed=0 duplicate=0 on_cpu_wakes=0 finish_enqueues=0 na=1\n");
-        serial_printk("[ap-sched] phase=wake case=idle-race cpu=0 before_check=0 after_check=0 at_wait=0 completed=0 lost=0 wfi_enter=0 wfi_return=0 na=1\n");
-        serial_printk("[ap-sched] phase=wake case=work-sleep cpu=0 ready_overlap=0 pending_before=0 after_wait=0 completed=0 bad_seq=0 na=1\n");
+        serial_printk("[ap-sched] phase=wake case=idle-race cpu=0 before_check=0 after_check=0 at_wait=0 completed=0 lost=0 wfi_enter=0 wfi_return=0 masked=0 restored=0 na=1\n");
+        serial_printk("[ap-sched] phase=wake case=work-sleep cpu=0 ready_overlap=0 pending_before=0 after_wait=0 completed=0 bad_seq=0 masked=0 restored=0 na=1\n");
         results[5] = blocker_case(0, 3);
     } else {
         for (unsigned cpu = 1; cpu < num_cpus; ++cpu) {

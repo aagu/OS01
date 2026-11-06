@@ -84,6 +84,14 @@ int tlb_handler_calls;
 static void tlb_spy(uint32_t intid, uint64_t param, struct pt_regs *regs)
 { (void)intid; (void)param; (void)regs; tlb_handler_calls++; }
 
+/* CNTP PPI handler spy (registered on intid 30, the PPI the QEMU virt
+ * DTB reports for the physical timer). */
+int ppi_handler_calls;
+static void ppi_spy(uint32_t intid, uint64_t param, struct pt_regs *regs)
+{ (void)intid; (void)param; (void)regs; ppi_handler_calls++; }
+
+#define M_CNTP_PPI 30u
+
 static uint32_t rd(const uint32_t *m, uint32_t off) { return m[off / 4]; }
 
 static void mock_reset(void)
@@ -97,12 +105,14 @@ static void mock_reset(void)
      * previous suite's registrations before re-registering. */
     gic_unregister_handler(3);
     gic_unregister_handler(4);
+    gic_unregister_handler(M_CNTP_PPI);
     assert_eq(0, gic_register_handler(3, tlb_spy, 0, "tlb-spy"));
     eoi_write_count=0;
     mock_need_slot = 0;
     mock_schedule_calls = 0;
     mock_lock_calls = 0;
     tlb_handler_calls = 0;
+    ppi_handler_calls = 0;
 }
 
 static void suite_raw_iar_eoi(void)
@@ -168,12 +178,49 @@ static void suite_spurious_no_eoi(void)
     assert_eq((uint32_t)0, rd(gicc_mock, M_GICC_EOIR));
 }
 
+/* The CNTP PPI is delivered through the SAME production GIC dispatch
+ * path as an SGI, but it is a private peripheral interrupt: the
+ * complete IAR must reach EOIR exactly once and a spurious IAR must
+ * never be EOIed at all (a duplicated EOI would acknowledge a
+ * non-delivered interrupt and lose the next tick). */
+static void suite_ppi_eoi_once(void)
+{
+    TEST_SUITE("CNTP PPI is EOIed once with the complete IAR");
+    mock_reset();
+    assert_eq(0, gic_register_handler(M_CNTP_PPI, ppi_spy, 0, "cntp-ppi"));
+    /* CPU2 delivered the PPI -> IAR = (2 << 10) | 30. */
+    gicc_mock[M_GICC_IAR / 4] = (2u << 10) | M_CNTP_PPI;
+    gic_dev_dispatch(&dev, NULL);
+    assert_eq(1, eoi_write_count);
+    assert_eq((2u << 10) | M_CNTP_PPI, eoi_write_values[0]);
+    assert_eq((uint32_t)((2u << 10) | M_CNTP_PPI), rd(gicc_mock, M_GICC_EOIR));
+    assert_eq(1, ppi_handler_calls);
+    /* The PPI is not a resched SGI: it never touches the need_resched
+     * slot and it never calls schedule() from the handler. */
+    assert_eq(0, (int)mock_need_slot);
+    assert_eq(0, mock_schedule_calls);
+}
+
+static void suite_ppi_spurious_not_eoied(void)
+{
+    TEST_SUITE("a spurious IAR is never EOIed (no PPI double-EOI)");
+    mock_reset();
+    assert_eq(0, gic_register_handler(M_CNTP_PPI, ppi_spy, 0, "cntp-ppi"));
+    gicc_mock[M_GICC_IAR / 4] = 0x3ffu;
+    gic_dev_dispatch(&dev, NULL);
+    assert_eq(0, eoi_write_count);
+    assert_eq(0, ppi_handler_calls);
+    assert_eq((uint32_t)0, rd(gicc_mock, M_GICC_EOIR));
+}
+
 int main(void)
 {
     suite_raw_iar_eoi();
     suite_tlb_not_regressed();
     suite_duplicate_sgi_merges();
     suite_spurious_no_eoi();
+    suite_ppi_eoi_once();
+    suite_ppi_spurious_not_eoied();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_aarch64_resched_sgi",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

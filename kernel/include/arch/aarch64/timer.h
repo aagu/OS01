@@ -70,4 +70,36 @@ bool aarch64_timer_publish_config(void);
  * CNTP_CTL does not show ENABLE=1 / IMASK=0. */
 bool aarch64_timer_start_local(void);
 
+/* BSP: verify that the LOCAL counter of the calling CPU is really
+ * running (CNTP_CTL_EL0.ENABLE=1 and IMASK=0).  READ-ONLY: it never
+ * re-arms the counter, never registers a handler and never touches
+ * the global jiffies or the per-second counter.  Used by the BSP's
+ * scheduler-tick start, whose counter was already armed during the
+ * early boot phase. */
+bool aarch64_timer_local_running(void);
+
+#ifdef OS01_SELFTEST
+/* OS01_SELFTEST ONLY — mask / restore the CALLING CPU's local CNTP
+ * interrupt.
+ *
+ * The P2 wake acceptance must prove that a remote wake does NOT
+ * depend on the AP's periodic tick: the target masks its own CNTP
+ * interrupt before it acknowledges the window, and restores it (CTL +
+ * rearm + ISB) only after the window's marker/work has completed.
+ *
+ * aarch64_sched_tick_test_mask_local():
+ *   saves CNTP_CTL_EL0, sets IMASK, executes ISB and reads the
+ *   register back.  Returns the SAVED control word, or 0 when the
+ *   counter is not running or when IMASK did not stick (a running
+ *   counter always has ENABLE set, so 0 can never be a valid saved
+ *   value).  The caller MUST treat 0 as a hard failure.
+ *
+ * aarch64_sched_tick_test_restore_local(saved_ctl):
+ *   re-arms the counter with the frozen period, writes the saved
+ *   control word back (IMASK cleared), executes ISB and reads the
+ *   register back.  A saved_ctl of 0 is a no-op. */
+uint64_t aarch64_sched_tick_test_mask_local(void);
+void aarch64_sched_tick_test_restore_local(uint64_t saved_ctl);
+#endif /* OS01_SELFTEST */
+
 #endif /* OS01_AARCH64_TIMER_H */

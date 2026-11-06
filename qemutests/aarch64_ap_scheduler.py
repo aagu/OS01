@@ -83,10 +83,11 @@ WAKE_CASE_FIELDS = {
     "wake-switch": ("rounds", "completed", "duplicate", "on_cpu_wakes",
                     "finish_enqueues", "na"),
     "idle-race": ("before_check", "after_check", "at_wait", "completed",
-                  "lost", "wfi_enter", "wfi_return", "na"),
+                  "lost", "wfi_enter", "wfi_return", "masked", "restored",
+                  "na"),
     "sgi": ("handler", "eoi", "bad_iar", "irq_switches", "tlb_ack_ok"),
     "work-sleep": ("ready_overlap", "pending_before", "after_wait",
-                   "completed", "bad_seq", "na"),
+                   "completed", "bad_seq", "masked", "restored", "na"),
     "scan-fallback": ("rounds", "completed", "explicit", "scan", "na"),
 }
 WAKE_CASE_CPU0_ONLY = ("remote-wake", "wake-switch", "idle-race",
@@ -292,8 +293,10 @@ def check_ap_positive_evidence(text, cpus, phase="ap"):
             expected = {
                 'remote-wake': dict(rounds=100, completed=100, duplicate=0, explicit=100, scan=0),
                 'wake-switch': dict(rounds=100, completed=100, duplicate=0, on_cpu_wakes=100, finish_enqueues=100),
-                'idle-race': dict(before_check=100, after_check=100, at_wait=100, completed=300, lost=0),
-                'work-sleep': dict(ready_overlap=1, pending_before=100, after_wait=100, completed=201, bad_seq=0),
+                'idle-race': dict(before_check=100, after_check=100, at_wait=100, completed=300, lost=0,
+                                  masked=300, restored=300),
+                'work-sleep': dict(ready_overlap=1, pending_before=100, after_wait=100, completed=201, bad_seq=0,
+                                   masked=200, restored=200),
                 'scan-fallback': dict(rounds=100, completed=100, explicit=0, scan=100),
             }[cid]
             for field, value in expected.items():

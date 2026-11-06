@@ -37,9 +37,7 @@ static volatile uint64_t yield_done;
 static volatile uint64_t entry_count;
 static volatile uint64_t entry_arg;
 static volatile uint64_t irq_checks;
-static volatile uint64_t irq_stop;
 static volatile uint64_t irq_peer_started;
-static volatile uint64_t irq_peer_done;
 static volatile uint64_t irq_case_done;
 static volatile uint64_t ap_worker_finished;
 static volatile uint64_t ap_worker_on_target;
@@ -207,59 +205,208 @@ static uint64_t blocker_waker(uint64_t unused)
     return 0;
 }
 
-static uint64_t irq_worker(uint64_t unused)
+/* ── Deterministic IRQ four-state fixture ───────────────────────────
+ *
+ * The four states under test are:
+ *
+ *   on_switch    IRQs ENABLED + another runnable task -> a REAL switch
+ *   off_switch   IRQs MASKED  + another runnable task -> a REAL switch
+ *   on_noswitch  IRQs ENABLED + only this task runnable -> NO switch
+ *   off_noswitch IRQs MASKED  + only this task runnable -> NO switch
+ *
+ * The fixture NEVER relies on "yield often enough until the scheduler
+ * happens to pick the other task".  The EEVDF order of the two
+ * runnable tasks is arranged EXPLICITLY under the runqueue lock, so
+ * every pick in the fixture is decided by the arrangement and not by
+ * luck:
+ *
+ *   - irq_order(self, other) puts @other at the runqueue's current
+ *     min_vruntime F (deadline F + EEVDF_MIN_SLICE) and @self at
+ *     F + 2*EEVDF_MIN_SLICE (deadline F + 3*EEVDF_MIN_SLICE), so
+ *     @other is STRICTLY preferred.  A task that is on the runqueue
+ *     is DEQUEUED before its vruntime is rewritten and RE-ENQUEUED
+ *     afterwards, so the rbtree key (the deadline) is always
+ *     recomputed by enqueue_task() — the key is never modified in
+ *     place.  A task that is NOT on the runqueue (the blocked peer)
+ *     only gets its vruntime rewritten; its deadline is computed when
+ *     it is enqueued again.
+ *
+ *   - the peer SLEEPS in blocker_wait(): it is off the runqueue, so it
+ *     can never win a pick by accident, and the worker wakes it
+ *     explicitly through the production blocker wake path.
+ *
+ * The peer exits FIRST.  From the exit handshake on the worker never
+ * dereferences the peer pointer again, and the peer's reap is
+ * confirmed through the INDEPENDENT resource observer (the released
+ * stack counter) — never through the task pointer.
+ *
+ * The artificial vruntime placement belongs to this fixture ONLY: it
+ * is never a production charging path (aarch64 charges the vruntime
+ * from the delivered local tick, see kernel/arch/aarch64/cpu/
+ * sched_tick.c). */
+#define IRQ_OBSERVER_GENERATION 100u
+
+static task_t *volatile irq_peer_task;
+static task_t *volatile irq_worker_task;
+static volatile uint64_t irq_peer_req;
+static volatile uint64_t irq_peer_ack;
+static volatile uint64_t irq_peer_exit;
+static volatile uint64_t irq_peer_exiting;
+static volatile uint64_t irq_peer_reaped;
+
+static bool irq_peer_condition(task_t *task)
 {
-    (void)unused;
-    uint64_t daif_before, daif_after;
-    for (unsigned i = 0; i < 512 && !(irq_checks & 1); ++i) {
-        uint64_t before = switch_counts[0];
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
-        kthread_yield();
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
-        if (!(daif_before & (1u << 7)) && !(daif_after & (1u << 7)) &&
-            switch_counts[0] != before) irq_checks |= 1;
+    (void)task;
+    uint64_t req = __atomic_load_n(&irq_peer_req, __ATOMIC_ACQUIRE);
+    uint64_t ack = __atomic_load_n(&irq_peer_ack, __ATOMIC_ACQUIRE);
+    uint64_t exit_req = __atomic_load_n(&irq_peer_exit, __ATOMIC_ACQUIRE);
+    return req != ack || exit_req != 0;
+}
+
+/* Put @other strictly before @self on CPU0's runqueue. */
+static void irq_order(task_t *self, task_t *other)
+{
+    percpu_t *rq = &percpu_data[0];
+    uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+    uint64_t f = rq->min_vruntime;
+    if (other->on_rq) {
+        dequeue_task(other, rq);
+        other->vruntime = f;
+        enqueue_task(other, rq);
+    } else {
+        other->vruntime = f;
     }
-    arch_irq_state_t f = arch_local_irq_save();
-    for (unsigned i = 0; i < 512 && !(irq_checks & 4); ++i) {
-        uint64_t before = switch_counts[0];
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
-        kthread_yield();
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
-        if ((daif_before & (1u << 7)) && (daif_after & (1u << 7)) &&
-            switch_counts[0] != before) irq_checks |= 4;
+    if (self->on_rq) {
+        dequeue_task(self, rq);
+        self->vruntime = f + 2 * EEVDF_MIN_SLICE;
+        enqueue_task(self, rq);
+    } else {
+        self->vruntime = f + 2 * EEVDF_MIN_SLICE;
     }
-    arch_local_irq_restore(f);
-    irq_stop = 1;
-    for (unsigned i = 0; i < 512 && !irq_peer_done; ++i) kthread_yield();
-    for (unsigned i = 0; i < 512 && !(irq_checks & 2); ++i) {
-        uint64_t before = switch_counts[0];
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
-        kthread_yield();
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
-        if (!(daif_before & (1u << 7)) && !(daif_after & (1u << 7)) &&
-            switch_counts[0] == before) irq_checks |= 2;
-    }
-    f = arch_local_irq_save();
-    for (unsigned i = 0; i < 512 && !(irq_checks & 8); ++i) {
-        uint64_t before = switch_counts[0];
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
-        kthread_yield();
-        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
-        if ((daif_before & (1u << 7)) && (daif_after & (1u << 7)) &&
-            switch_counts[0] == before) irq_checks |= 8;
-    }
-    arch_local_irq_restore(f);
-    irq_case_done = 1;
-    return 0;
+    spin_unlock_irqrestore(&rq->rq_lock, flags);
 }
 
 static uint64_t irq_peer(uint64_t unused)
 {
     (void)unused;
     irq_peer_started = 1;
-    while (!irq_stop)
+    for (;;) {
+        /* Sleep until the worker asks for something: the peer must not
+         * hold the runqueue while the fixture decides the order. */
+        if (blocker_wait(irq_peer_condition, BLOCKER_NANOSLEEP, false) != 0)
+            break;
+        if (__atomic_load_n(&irq_peer_exit, __ATOMIC_ACQUIRE)) {
+            /* Exit handshake: the worker stops dereferencing the peer
+             * pointer from here on. */
+            __atomic_store_n(&irq_peer_exiting, 1, __ATOMIC_RELEASE);
+            break;
+        }
+        uint64_t req = __atomic_load_n(&irq_peer_req, __ATOMIC_ACQUIRE);
+        /* Symmetric arrangement: the worker must be the task that is
+         * picked when this peer yields back. */
+        irq_order(current, irq_worker_task);
         kthread_yield();
-    irq_peer_done = 1;
+        __atomic_store_n(&irq_peer_ack, req, __ATOMIC_RELEASE);
+    }
+    return 0;
+}
+
+static uint64_t irq_worker(uint64_t unused)
+{
+    (void)unused;
+    uint64_t before, after;
+    uint64_t daif_before, daif_after;
+    uint64_t deadline = jiffies + 100;
+
+    /* The peer must have reached its blocking point: a peer that is
+     * still queued could win a pick by accident. */
+    while (!irq_peer_started && jiffies < deadline)
+        kthread_yield();
+    if (!irq_peer_started)
+        return 1;
+
+    /* Baseline of the INDEPENDENT resource observer: the peer's reap
+     * is confirmed through the released-stack counter, never through
+     * the peer task pointer. */
+    uint64_t released_base =
+        aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_STACK);
+
+    /* ── State 1: IRQs ENABLED, another runnable task -> REAL switch ── */
+    before = switch_counts[0];
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
+    irq_order(current, irq_peer_task);
+    __atomic_store_n(&irq_peer_req, 1, __ATOMIC_RELEASE);
+    blocker_wake(irq_peer_task);
+    kthread_yield();
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
+    after = switch_counts[0];
+    if (after != before && !(daif_before & (1u << 7)) &&
+        !(daif_after & (1u << 7)))
+        irq_checks |= 1;
+
+    /* ── State 2: IRQs MASKED, another runnable task -> REAL switch ── */
+    {
+        arch_irq_state_t flags = arch_local_irq_save();
+        before = switch_counts[0];
+        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
+        irq_order(current, irq_peer_task);
+        __atomic_store_n(&irq_peer_req, 2, __ATOMIC_RELEASE);
+        blocker_wake(irq_peer_task);
+        kthread_yield();
+        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
+        after = switch_counts[0];
+        uint64_t off_ok = (after != before) && (daif_before & (1u << 7)) &&
+                          (daif_after & (1u << 7));
+        /* The masked state must be restored when the worker leaves the
+         * critical section. */
+        arch_local_irq_restore(flags);
+        uint64_t daif_restored;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(daif_restored));
+        if (off_ok && !(daif_restored & (1u << 7)))
+            irq_checks |= 4;
+    }
+
+    /* ── The peer exits: it must be the task that is picked, so the
+     *    worker pushes itself behind it before the request. ── */
+    irq_order(current, irq_peer_task);
+    __atomic_store_n(&irq_peer_exit, 1, __ATOMIC_RELEASE);
+    blocker_wake(irq_peer_task);
+    while (!irq_peer_exiting && jiffies < deadline)
+        kthread_yield();
+    while (aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_STACK) <
+               released_base + 1 && jiffies < deadline)
+        kthread_yield();
+    if (__atomic_load_n(&irq_peer_exiting, __ATOMIC_ACQUIRE) &&
+        aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_STACK) >=
+            released_base + 1)
+        irq_peer_reaped = 1;
+    /* The peer is gone: drop the pointer BEFORE the no-switch states. */
+    irq_peer_task = NULL;
+
+    /* ── State 3: IRQs ENABLED, the worker is the ONLY runnable task
+     *    -> the yield must NOT switch. ── */
+    before = switch_counts[0];
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif_before));
+    kthread_yield();
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif_after));
+    after = switch_counts[0];
+    if (after == before && !(daif_before & (1u << 7)) &&
+        !(daif_after & (1u << 7)))
+        irq_checks |= 2;
+
+    /* ── State 4: IRQs MASKED, the worker is the ONLY runnable task
+     *    -> the yield must NOT switch. ── */
+    {
+        arch_irq_state_t flags = arch_local_irq_save();
+        before = switch_counts[0];
+        kthread_yield();
+        after = switch_counts[0];
+        if (after == before)
+            irq_checks |= 8;
+        arch_local_irq_restore(flags);
+    }
+
+    irq_case_done = 1;
     return 0;
 }
 
@@ -289,18 +436,21 @@ static uint64_t timer_pressure_worker(uint64_t unused)
     uint64_t deadline = timer_pressure_until + 100;
     while (jiffies < timer_pressure_until && jiffies < deadline)
         kthread_yield();
-    uint64_t target = aarch64_sched_timer_tick_count + 1;
+    uint64_t target = __atomic_load_n(&aarch64_sched_timer_tick_count,
+                                      __ATOMIC_ACQUIRE) + 1;
     uint64_t cycles = arch_cycle_freq();
     uint64_t cycle_deadline = arch_cycle_counter() +
                               (cycles ? cycles * 2 : 100000000);
     log_info("[sched-diag] timer probe start target=%lu ticks=%lu\n",
              (unsigned long)target,
-             (unsigned long)aarch64_sched_timer_tick_count);
+             (unsigned long)__atomic_load_n(&aarch64_sched_timer_tick_count,
+                                            __ATOMIC_ACQUIRE));
     timer_probe_status = (uint64_t)(unsigned)aarch64_sched_timer_irq_probe(
         target, cycle_deadline);
     log_info("[sched-diag] timer probe done status=%lu ticks=%lu\n",
              (unsigned long)timer_probe_status,
-             (unsigned long)aarch64_sched_timer_tick_count);
+             (unsigned long)__atomic_load_n(&aarch64_sched_timer_tick_count,
+                                            __ATOMIC_ACQUIRE));
     timer_stop = 1;
     uint64_t peer_deadline = jiffies + 100;
     while (!timer_peer_done && jiffies < peer_deadline)
@@ -430,7 +580,15 @@ void aarch64_sched_observe_timer_irq(struct pt_regs *regs, bool entering)
         return;
     if (entering) {
         timer_irq_active[cpu]++;
-        aarch64_sched_timer_tick_count++;
+        /* The GLOBAL tick counter belongs to the BSP alone.  Every
+         * admitted CPU now delivers its own CNTP interrupt, so a
+         * shared increment would be a data race and would mix the
+         * CPUs' samples.  The BSP publishes it with a release RMW;
+         * probe.S reads it with LDAR (acquire) and the C readers use
+         * an acquire load. */
+        if (cpu == 0)
+            __atomic_add_fetch(&aarch64_sched_timer_tick_count, 1,
+                               __ATOMIC_RELEASE);
         if (regs && !((uintptr_t)regs & 15)) {
             uint64_t *words = (uint64_t *)regs;
             uint64_t sum = 0;
@@ -556,19 +714,45 @@ static int case_entry(void)
 static int case_irq(void)
 {
     uint64_t on_switch, on_noswitch, off_switch, off_noswitch;
-    irq_checks = 0; irq_stop = 0; irq_peer_started = 0;
-    irq_peer_done = irq_case_done = 0;
-    if (!create_kthread(irq_peer, 0, "sched-irq-peer")) return -1;
-    if (!create_kthread(irq_worker, 0, "sched-irq")) return -1;
+    irq_checks = 0;
+    irq_peer_req = irq_peer_ack = 0;
+    irq_peer_exit = irq_peer_exiting = irq_peer_reaped = 0;
+    irq_peer_started = 0;
+    irq_case_done = 0;
+    irq_peer_task = NULL;
+    irq_worker_task = NULL;
+
+    /* The reap of the two fixture tasks is confirmed through the
+     * INDEPENDENT resource observer: a task pointer is never used as
+     * a liveness proof. */
+    uint64_t released_before =
+        aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_STACK);
+    aarch64_sched_observer_begin(0, IRQ_OBSERVER_GENERATION);
+    irq_peer_task = create_kthread(irq_peer, 0, "sched-irq-peer");
+    if (!irq_peer_task) {
+        aarch64_sched_observer_end(0, IRQ_OBSERVER_GENERATION);
+        return -1;
+    }
+    irq_worker_task = create_kthread(irq_worker, 0, "sched-irq");
+    if (!irq_worker_task) {
+        aarch64_sched_observer_end(0, IRQ_OBSERVER_GENERATION);
+        return -1;
+    }
     uint64_t deadline = jiffies + 100;
     while (!irq_case_done && jiffies < deadline)
         arch_aarch64_idle_step();
+    /* Both fixture tasks must be RELEASED before the batch can end. */
+    while (aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_STACK) <
+               released_before + 2 && jiffies < deadline)
+        arch_aarch64_idle_step();
+    int observer_failed = aarch64_sched_observer_end(0, IRQ_OBSERVER_GENERATION);
     on_switch = (irq_checks & 1) != 0;
     on_noswitch = (irq_checks & 2) != 0;
     off_switch = (irq_checks & 4) != 0;
     off_noswitch = (irq_checks & 8) != 0;
-    log_info("[sched-diag] irq raw observations=%lu done=%lu idle_state=%lu idle_on_rq=%lu\n",
+    log_info("[sched-diag] irq raw observations=%lu done=%lu peer_reaped=%lu observer_failed=%lu idle_state=%lu idle_on_rq=%lu\n",
              (unsigned long)irq_checks, (unsigned long)irq_case_done,
+             (unsigned long)irq_peer_reaped, (unsigned long)observer_failed,
              (unsigned long)(current == percpu_data[0].idle &&
                              current->state == TASK_RUNNING),
              (unsigned long)current->on_rq);
@@ -577,7 +761,8 @@ static int case_irq(void)
                   (unsigned long)on_noswitch, (unsigned long)off_noswitch);
     return irq_case_done && current == percpu_data[0].idle &&
            current->state == TASK_RUNNING && !current->on_rq &&
-           on_switch && off_switch && on_noswitch && off_noswitch ? 0 : -1;
+           on_switch && off_switch && on_noswitch && off_noswitch &&
+           irq_peer_reaped && !observer_failed ? 0 : -1;
 }
 
 static int case_blocker(void)
@@ -736,12 +921,17 @@ static int case_idle(void)
 static int case_timer(void)
 {
     uint64_t before = jiffies;
-    for (unsigned c = 0; c < NR_CPUS; ++c) {
-        irq_frame_seen[c] = irq_frame_bad[c] = irq_nested_seen[c] = 0;
-        irq_switch_counts[c] = 0;
-        timer_irq_active[c] = 0;
-    }
-    aarch64_sched_timer_tick_count = 0;
+    /* Only CPU0's OWN slots are cleared here, and only with the BSP's
+     * interrupts masked: the AP slots belong to the APs, which keep
+     * observing their own CNTP interrupts while this case runs (a BSP
+     * memset of a live AP slot would be a data race on a slot the AP
+     * is still writing). */
+    arch_irq_state_t irq_flags = arch_local_irq_save();
+    irq_frame_seen[0] = irq_frame_bad[0] = irq_nested_seen[0] = 0;
+    irq_switch_counts[0] = 0;
+    timer_irq_active[0] = 0;
+    __atomic_store_n(&aarch64_sched_timer_tick_count, 0, __ATOMIC_RELEASE);
+    arch_local_irq_restore(irq_flags);
     timer_pressure_until = before + 3;
     timer_stop = timer_probe_done = timer_peer_done = 0;
     timer_probe_status = 0;
@@ -761,7 +951,8 @@ static int case_timer(void)
     serial_printk("[sched-evidence] id=aarch64_sched_timer tick_delta=%lu irq_frame_ok=%lu nested_schedule=%lu irq_switches=%lu\n",
                   (unsigned long)tick_delta, (unsigned long)irq_frame_ok,
                   (unsigned long)nested_schedule, (unsigned long)irq_switches);
-    return tick_delta >= 3 && aarch64_sched_timer_tick_count >= 3 &&
+    return tick_delta >= 3 &&
+           __atomic_load_n(&aarch64_sched_timer_tick_count, __ATOMIC_ACQUIRE) >= 3 &&
            pressure_switches > 0 && irq_frame_ok && !nested_schedule && !irq_switches
            ? 0 : -1;
 }

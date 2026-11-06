@@ -552,12 +552,15 @@ $(TEST_BLD)/test_blocker_remote_wake.elf: $(TEST_BLD)/test_blocker_remote_wake.o
 test-blocker-remote-wake: $(TEST_BLD)/test_blocker_remote_wake.elf
 	$<
 
-# ── aarch64 per-CPU tick accounting (Task 1) ───────────────────
-# Compiles the REAL kernel/arch/aarch64/platform/time.c against
-# mock/aarch64_sched_tick_runtime.h, which replaces ONLY the machine /
-# GIC / DTB / IRQ / log boundaries.  The configuration validation, the
-# publish/acquire protocol, the TVAL -> CTL -> ISB -> read-back arm
-# order and the ENABLE-clearing failure path are the PRODUCTION
+# ── aarch64 per-CPU tick accounting (Task 1 + Task 2) ───────────
+# Compiles the REAL kernel/arch/aarch64/platform/time.c,
+# kernel/arch/aarch64/cpu/sched_tick.c, kernel/sched/fair.c and
+# kernel/sched/accounting.c against mock/aarch64_sched_tick_runtime.h,
+# which replaces ONLY the machine / GIC / DTB / IRQ / CPU-identity
+# boundaries.  The configuration validation, the publish/acquire
+# protocol, the TVAL -> CTL -> ISB -> read-back arm order, the
+# ENABLE-clearing failure path, the ready / started / admission gates
+# and the exact busy/idle accounting increments are the PRODUCTION
 # algorithm — the mock never re-implements them.
 $(eval $(call register_host_test,test_aarch64_sched_tick,sched,protocol-or-legacy))
 
@@ -567,29 +570,169 @@ TEST_BINS += $(TEST_BLD)/test_aarch64_sched_tick.elf
 # vsnprintf and the OS01 libc headers would shadow <stdio.h>.
 SCHED_TICK_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC)
 SCHED_TICK_PROD_CFLAGS := $(SCHED_TICK_CFLAGS) \
-    -include $(TEST_MOCK)/aarch64_sched_tick_runtime.h
+    -include $(TEST_MOCK)/aarch64_sched_tick_runtime.h \
+    -ffunction-sections -fdata-sections
 
-# Private object name: the monitor plan already owns
+# Private object names: the monitor plan already owns
 # accounting_production.o — a shared name would clobber that object.
 $(TEST_BLD)/aarch64_timer_production.o: \
 		$(TESTS_DIR)/kernel/arch/aarch64/platform/time.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/timer.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sched_tick.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/reg.h \
 		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(SCHED_TICK_PROD_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/aarch64_sched_tick_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/cpu/sched_tick.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sched_tick.h \
+		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_TICK_PROD_CFLAGS) -c $< -o $@
+
+# The REAL update_curr(): fair.c's runqueue helpers are dropped by
+# --gc-sections, but update_curr itself must never be stubbed.
+$(TEST_BLD)/aarch64_fair_production.o: \
+		$(TESTS_DIR)/kernel/sched/fair.c \
+		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_TICK_PROD_CFLAGS) -c $< -o $@
+
+# The REAL per-CPU usage counters.
+$(TEST_BLD)/aarch64_accounting_production.o: \
+		$(TESTS_DIR)/kernel/sched/accounting.c \
+		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_TICK_PROD_CFLAGS) -c $< -o $@
+
+# The real red-black tree: fair.c's enqueue/dequeue helpers reference
+# it.  Compiled against the OS01 libc headers only — this object never
+# includes <stdio.h>.
+$(TEST_BLD)/aarch64_sched_tick_rbtree.o: \
+		$(TESTS_DIR)/libc/rbtree/rbtree.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/libc/include -c $< -o $@
+
+# The test TU does NOT use FRAMEWORK_INC: the mock owns the whole
+# host surface (percpu_t, task_t, the lock recorder and the current
+# accessor), and test_platform.h would collide with it.
 $(TEST_BLD)/test_aarch64_sched_tick.o: \
 		$(TEST_CASES)/test_aarch64_sched_tick.c \
 		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_TICK_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(SCHED_TICK_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_aarch64_sched_tick.elf: \
 		$(TEST_BLD)/test_aarch64_sched_tick.o \
-		$(TEST_BLD)/aarch64_timer_production.o
-	$(HOST_CC) -o $@ $^
+		$(TEST_BLD)/aarch64_timer_production.o \
+		$(TEST_BLD)/aarch64_sched_tick_production.o \
+		$(TEST_BLD)/aarch64_fair_production.o \
+		$(TEST_BLD)/aarch64_accounting_production.o \
+		$(TEST_BLD)/aarch64_sched_tick_rbtree.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 .PHONY: test-aarch64-sched-tick-host
 test-aarch64-sched-tick-host: $(TEST_BLD)/test_aarch64_sched_tick.elf
 	$<
+
+# ── aarch64 schedule-charge regression (Task 2, step 2) ─────────
+# The REAL kernel/sched/core.c + fair.c + balance.c, host-compiled
+# through the blocker mock in its BLOCKER_RUNTIME_REAL_FAIR mode:
+# update_curr() is the REAL implementation, so the assertion is about
+# the real vruntime value and never about a call counter.
+#
+# The same sources are compiled TWICE:
+#   - the aarch64 view (-D__aarch64__): core.c takes the aarch64
+#     branch, so schedule() does NOT charge the vruntime;
+#   - the x86_64 view: schedule() still charges it.
+# The host system ABI macros are preserved (-U__x86_64__ would break
+# the host libc) and the machine headers are masked by the preinclude.
+$(eval $(call register_host_test,test_aarch64_sched_charge,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_aarch64_sched_charge_aarch64.elf \
+    $(TEST_BLD)/test_aarch64_sched_charge_x86.elf
+
+CHARGE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+CHARGE_AARCH64_CFLAGS := $(CHARGE_HOST_CFLAGS) -D__aarch64__ \
+    -DBLOCKER_RUNTIME_REAL_FAIR=1 \
+    -include $(TEST_MOCK)/blocker_runtime.h
+CHARGE_X86_CFLAGS := $(CHARGE_HOST_CFLAGS) \
+    -DBLOCKER_RUNTIME_REAL_FAIR=1 \
+    -include $(TEST_MOCK)/blocker_runtime.h
+
+$(TEST_BLD)/aarch64_charge_rbtree.o: $(TESTS_DIR)/libc/rbtree/rbtree.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/libc/include -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_aarch64_core.o: \
+		$(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CHARGE_AARCH64_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_aarch64_fair.o: \
+		$(TESTS_DIR)/kernel/sched/fair.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CHARGE_AARCH64_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_aarch64_balance.o: \
+		$(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CHARGE_AARCH64_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_aarch64_test.o: \
+		$(TEST_CASES)/test_aarch64_sched_charge.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(CHARGE_HOST_CFLAGS) -DBLOCKER_RUNTIME_REAL_FAIR=1 -DEXPECT_SCHED_CHARGE=0 -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_charge_aarch64.elf: \
+		$(TEST_BLD)/aarch64_charge_aarch64_test.o \
+		$(TEST_BLD)/aarch64_charge_aarch64_core.o \
+		$(TEST_BLD)/aarch64_charge_aarch64_fair.o \
+		$(TEST_BLD)/aarch64_charge_aarch64_balance.o \
+		$(TEST_BLD)/aarch64_charge_rbtree.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/aarch64_charge_x86_core.o: \
+		$(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CHARGE_X86_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_x86_fair.o: \
+		$(TESTS_DIR)/kernel/sched/fair.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CHARGE_X86_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_x86_balance.o: \
+		$(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(CHARGE_X86_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/aarch64_charge_x86_test.o: \
+		$(TEST_CASES)/test_aarch64_sched_charge.c \
+		$(TEST_MOCK)/blocker_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(CHARGE_HOST_CFLAGS) -DBLOCKER_RUNTIME_REAL_FAIR=1 -DEXPECT_SCHED_CHARGE=1 -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_charge_x86.elf: \
+		$(TEST_BLD)/aarch64_charge_x86_test.o \
+		$(TEST_BLD)/aarch64_charge_x86_core.o \
+		$(TEST_BLD)/aarch64_charge_x86_fair.o \
+		$(TEST_BLD)/aarch64_charge_x86_balance.o \
+		$(TEST_BLD)/aarch64_charge_rbtree.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-sched-charge-host
+test-aarch64-sched-charge-host: \
+		$(TEST_BLD)/test_aarch64_sched_charge_aarch64.elf \
+		$(TEST_BLD)/test_aarch64_sched_charge_x86.elf
+	$(TEST_BLD)/test_aarch64_sched_charge_aarch64.elf
+	$(TEST_BLD)/test_aarch64_sched_charge_x86.elf

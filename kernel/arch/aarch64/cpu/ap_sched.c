@@ -15,6 +15,7 @@
 #include <arch/aarch64/ap_sched.h>
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/smp.h>
+#include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_start */
 #include <arch/context.h>
 #include <sched/task.h>
 #include <sched/internal.h>
@@ -177,6 +178,16 @@ void aarch64_ap_idle_handoff(uint32_t cpu)
     idle->on_cpu = 1;
     idle->on_rq = 0;
     idle->in_schedule = 0;
+
+    /* Start the AP's LOCAL scheduler tick: the idle metadata is
+     * installed and IRQs are still disabled, so the tick cannot be
+     * delivered before the gates below are in place.  The AP arms its
+     * own CNTP from the BSP's published configuration — it never
+     * touches the global GIC handler table and never advances the
+     * global time base.  A failure must never publish scheduler_ok:
+     * the handoff fails the boot instead. */
+    if (!aarch64_sched_tick_start())
+        ap_sched_fatal("handoff: local tick start failed", cpu);
 
     /* IRQs on (with the ordering barrier) BEFORE the readiness
      * publication: a pending SGI must be takeable the instant another

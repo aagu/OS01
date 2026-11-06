@@ -207,9 +207,11 @@ class WakeGateTests(unittest.TestCase):
                                     on_cpu_wakes=100, finish_enqueues=100, na=0),
                 'idle-race': dict(before_check=100, after_check=100, at_wait=100,
                                   completed=300, lost=0, wfi_enter=100,
-                                  wfi_return=100, na=0),
+                                  wfi_return=100, masked=300, restored=300,
+                                  na=0),
                 'work-sleep': dict(ready_overlap=1, pending_before=100,
-                                   after_wait=100, completed=201, bad_seq=0, na=0),
+                                   after_wait=100, completed=201, bad_seq=0,
+                                   masked=200, restored=200, na=0),
                 'scan-fallback': dict(rounds=100, completed=100, explicit=0,
                                       scan=100, na=0),
             }
@@ -256,6 +258,23 @@ class WakeGateTests(unittest.TestCase):
     def test_wrong_phase_rejected(self):
         text = self._wake_trace(2).replace(
             "phase=wake", "phase=ap")
+        ok, errors = self._ok(text, 2)
+        self.assertNotEqual(ok, 0)
+
+    def test_unprotected_window_rejected(self):
+        """A window that was not masked (or not restored) is a hard
+        failure: the periodic tick could have rescued the window."""
+        for old, new in (('masked=300', 'masked=0'),
+                         ('restored=300', 'restored=0'),
+                         ('masked=200', 'masked=199'),
+                         ('restored=200', 'restored=0')):
+            with self.subTest(old=old, new=new):
+                text = self._wake_trace(2).replace(old, new)
+                ok, errors = self._ok(text, 2)
+                self.assertNotEqual(ok, 0)
+
+    def test_missing_mask_field_rejected(self):
+        text = self._wake_trace(2).replace(' masked=300', '')
         ok, errors = self._ok(text, 2)
         self.assertNotEqual(ok, 0)
 

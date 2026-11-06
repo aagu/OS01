@@ -76,6 +76,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    sched/core.c sched/boot.c sched/kthread.c sched/diag.c \
                    sched/identity.c sched/resource.c \
                    sched/fair.c sched/balance.c \
+                   sched/accounting.c \
                    intr/dispatch.c \
                    core/stack_chk.c \
                    core/printk.c \
@@ -520,7 +521,8 @@ SCHED_COMMON_COMPILE_TUS := \
     sched/fair.c \
     sched/balance.c \
     sched/identity.c \
-    sched/diag.c
+    sched/diag.c \
+    sched/accounting.c
 # Objects are flat (core.o, boot.o, ...) so the pattern rule's stem maps
 # 1:1 back onto sched/<name>.c.
 SCHED_COMPILE_CHECK_OBJS := $(foreach t,$(SCHED_COMMON_COMPILE_TUS),$(BUILD_DIR)/sched-compile-check/$(notdir $(t:.c=.o)))

@@ -30,8 +30,10 @@
  * The wait helper is aarch64_idle_wait_irq (idle_wait.S): exactly
  * dsb sy; wfi; ret, no DAIF change, audited by the harness.  The BSP
  * runs the same protocol; its CNTP tick only advances time / drives
- * the scan fallback, it is never a WFI safety net.  APs keep their
- * CNTP off (AAGU-3).  An AP that was never admitted to the scheduler
+ * the scan fallback, it is never a WFI safety net.  An ADMITTED AP
+ * owns a PRIVATE CNTP interrupt for its local scheduler tick (per-CPU
+ * accounting); it never advances the global clock.  An AP that was
+ * never admitted to the scheduler
  * stays in its OLD work loop (secondary_idle) — this idle step only
  * runs on the idle task stack. */
 void arch_aarch64_idle_step(void)

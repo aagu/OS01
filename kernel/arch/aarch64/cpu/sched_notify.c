@@ -54,6 +54,9 @@ void arch_sched_notify_remote(unsigned cpu)
 
 bool arch_sched_scan_blockers(void)
 {
-    /* BSP alone scans blockers, including AP waiters; AP timers remain off. */
+    /* BSP alone scans blockers, including AP waiters: the blocker
+     * metadata and the wake delivery are global objects.  An AP's own
+     * CNTP interrupt (the local scheduler tick) never runs the global
+     * scan. */
     return cpu_id() == 0;
 }

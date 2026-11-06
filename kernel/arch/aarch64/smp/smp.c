@@ -223,17 +223,26 @@ void secondary_idle(uint32_t cpu_id)
 {
     /* Assembly validated our slot/MPIDR, SP, TPIDR and vectors. All
      * accesses below retain the slot's identity VA. IRQs stay masked. */
-    /* AAGU-3 Option A: BSP 独占 CNTP tick 所有权.
+    /* Per-CPU tick ownership (per-CPU tick accounting, Task 2).
      *
-     * timer core (kernel/time/timer.c) 与 softirq (kernel/intr/softirq.c)
-     * 目前没有 per-CPU 拆分, jiffies 与 g_ticks 都是 BSS 全局变量. 让 AP 也开
-     * CNTP 会让多个 CPU 并发跑 tick_handler() / do_timer(), 触发读写 race.
+     * The GLOBAL time base still belongs to the BSP alone: the timer
+     * core (kernel/time/timer.c) and the softirq path
+     * (kernel/intr/softirq.c) have no per-CPU split, so jiffies and the
+     * timer list are global BSS objects.  An AP therefore never runs
+     * tick_handler() and never touches the global clock.
      *
-     * 契约: BSP 在 aarch64_main 末尾调 arch_tick_start() 启动 BSP 本核的
-     * CNTP; AP 永不启动自己的 CNTP, 一律 wfi idle. AP 这里显式写
-     * CNTP_CTL_EL0 = 0 是防御性的 (reset 默认就是 0; 显式写一遍防止后续
-     * 任何路径意外把它打开). 此项决定落地为本 issue 评审建议的 Option A,
-     * 真正 per-CPU clockevent + per-CPU jiffies 留作后续单独 issue. */
+     * What an ADMITTED AP does own is its OWN private CNTP
+     * interrupt, which is used ONLY for the local scheduler tick
+     * (per-CPU / per-task accounting and the tick-driven vruntime).
+     * That counter is armed later, from the AP idle handoff, through
+     * aarch64_sched_tick_start() -> aarch64_timer_start_local(), using
+     * the configuration the BSP froze and published.
+     *
+     * The defensive write below is therefore still correct: the
+     * counter is cleared here, while the AP is still in its pre-
+     * admission work loop, so no path can leave a half-armed timer
+     * running before the AP is admitted.  The AP's real arm happens
+     * in the admission handoff, never here. */
     cntp_ctl_el0_write(0);
     gic_cpu_init();
     /* Phase 2 #3: install real per-CPU data for AP. head.S:649
@@ -248,8 +257,9 @@ void secondary_idle(uint32_t cpu_id)
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_ap));
     percpu_install_gs(cpu_id);
     percpu_init(cpu_id, mpidr_ap);
-    /* AAGU-3: AP 不接收 CNTP tick (见上 Option A 契约). tick_handler()
-     * 仅在 BSP 上跑, 由全局 jiffies 推进. Per-CPU 路径是后续工作. */
+    /* Per-CPU tick (Task 2): the AP's OWN CNTP interrupt is armed
+     * later, in the admission handoff; tick_handler() (the global
+     * jiffies / timer list) only ever runs on the BSP. */
     /* Test-only loss of ACK: the AP still reaches C initialization and
      * observes the persistent idle command after the BSP times out. */
     if (aarch64_page_table_ap_verify(cpu_id))for(;;)arch_cpu_halt();

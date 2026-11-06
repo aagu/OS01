@@ -25,8 +25,9 @@
  * global accounting to be initialized (sched_accounting_init), the
  * target CPU's scheduler to be up, and a valid tick source to have
  * been started on that CPU (LAPIC success or enabled-PIT fallback on
- * x86_64).  Cores whose timer never started report valid=0 and are
- * displayed as unavailable — never as 0%. */
+ * x86_64; the private CNTP interrupt on aarch64).  Cores whose timer
+ * never started report valid=0 and are displayed as unavailable —
+ * never as 0%. */
 struct cpu_usage_snapshot {
     uint64_t busy_ticks;
     uint64_t idle_ticks;
@@ -53,6 +54,9 @@ void sched_accounting_cpu_start(unsigned cpu, unsigned hz, bool started);
 /* Hot path: called once per valid local-timer interrupt.  BSP ticks
  * account inside tick_handler(); AP ticks account in lapic_timer_handler()'s
  * AP branch (the BSP LAPIC path must NOT call this a second time).
+ * On aarch64 the accounting is called from the LOCAL scheduler tick
+ * (kernel/arch/aarch64/cpu/sched_tick.c), once per delivered CNTP
+ * interrupt — the BSP's global tick_handler() never accounts twice.
  * Inert until accounting_ready && scheduler_ok && an idle task is
  * published && the CPU's tick source is valid. Unclassifiable ticks
  * leave CPU counters and task runtime unchanged. */

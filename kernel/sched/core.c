@@ -512,7 +512,14 @@ void schedule(void)
     rq->watchdog_counter = 0;
 
     // ── 1. Update current task's vruntime ──────────────────
+#if !defined(__aarch64__)
+    // x86_64 charges the vruntime per schedule() call.  aarch64
+    // charges it per DELIVERED local tick (see
+    // kernel/arch/aarch64/cpu/sched_tick.c): charging here as well
+    // would bill the same tick twice and would make the vruntime
+    // depend on the yield frequency instead of the elapsed time.
     update_curr(current);
+#endif
 
     // ── 2. Dequeue + conditional re-enqueue current ─────────
     {
