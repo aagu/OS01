@@ -329,6 +329,45 @@ rtc_write_datetime(&new_dt);
 * `block_device_register_raw` - 无需 AHCI 包装的注册
 * `block_device_read` / `block_device_write` - 扇区级读写（含边界检查）
 
+### xHCI USB 主机控制器驱动（ARCH-14）
+
+位于 `kernel/driver/xhci.c`，头文件 `kernel/include/driver/xhci.h`：
+
+* **驱动模型接入**：基于 ARCH-9 统一驱动框架，定义 `xhci_pci_driver`（`class = 0x0c0330`，串行总线控制器 / USB / xHCI），通过 `PCI_DRIVER_DECLARE()` 写入 `.pci_drivers` 链接段由 PCI 核心自动探测绑定。
+* **MMIO 映射与寄存器解析**：读取 PCI BAR0，映射 MMIO 地址空间；解析 Capability 寄存器（`CAPLENGTH`、`HCIVERSION`、`HCSPARAMS1..3`、`HCCPARAMS1`、`DBOFF`、`RTSOFF`）以及 Operational 寄存器基址。
+* **DMA 环与中断器初始化**：
+  - 分配 DCBAA（Device Context Base Address Array），设置控制器 `MaxSlotsEn`。
+  - 命令环（Command Ring）：分配 256 项 TRB（每项 16 字节），末项配置为 Link TRB 并支持 Toggle Cycle；基址写入 `CRCR` 寄存器。
+  - 事件环与中断器 0：配置单段 ERST（Event Ring Segment Table）与 256 项 Event TRB 环；初始化 `IMAN`、`IMOD`、`ERSTSZ`、`ERSTBA` 与 `ERDP`。
+  - 启动控制器：写入 `USBCMD.RS` 并握手等待 `USBSTS.HCH` 清零。
+* **根集线器探测与设备枚举**：
+  - 轮询 8 个根端口的 PORTSC 寄存器检测当前连接状态（CCS）。
+  - 对接入设备端口写 PR 发起复位，等待 PRC 置位完成速度协商（Super/High/Full/Low）。
+  - 向命令环提交 Enable Slot TRB，轮询事件环获取分配的 `slot_id`。
+* **上下文配置与地址分配**：
+  - 分配 Input Context 与 Output Device Context（根据 `HCCPARAMS1.CSZ` 适配 32 字节或 64 字节上下文尺寸），挂入 DCBAA 数组。
+  - 配置 Slot Context（Route String、Speed、Context Entries、Root Hub Port Num）与 EP0 Context（Control EP、Max Packet Size、Transfer Ring Base、Cycle）。
+  - 提交 Address Device TRB，完成 USB 设备地址分配。
+* **EP0 控制传输引擎**：
+  - 为控制端点分配独立 4KB EP0 Transfer Ring 与专用 4KB DMA 数据缓冲区。
+  - 构建标准三段式控制传输 TRB 序列：Setup TRB（8 字节 USB 请求）、Data Stage TRB（方向与缓冲长度）以及 Status TRB（反向空包确认，IOC=1）。
+  - 敲响 Doorbell 0x01 发起传输；轮询事件环处理 Transfer Event，获取 18 字节标准设备描述符（Device Descriptor）并缓存至 `slot->desc`。
+* **配置解析与动态端点管理**：
+  - 两阶段读取完整配置描述符层次树（先读取 9 字节头部获取 `wTotalLength`，再单次读满完整层次树）；递归解析 Configuration / Interface / HID / Endpoint 描述符。
+  - 动态端点环：`struct xhci_slot` 中采用 `struct xhci_ep_ring **ep_rings` 动态指针数组（按 `max_dci + 1` 动态分配），彻底废除预分配静态数组；并在 `xhci_free_slot()` 中按端点倒序安全释放。
+  - 构建 Input Context 激活工作端点（Interrupt/Bulk 等），入队 Configure Endpoint TRB；提交 `SET_CONFIGURATION` 标准 USB 请求，设备迁移进入 Configured 状态。
+* **全局控制器跟踪注册表**：维护全局控制器跟踪表 `s_xhci_controllers`，暴露 `xhci_controller_count()` 与 `xhci_controller_get()` 供上层驱动或子系统调用。
+
+### USB devfs 驱动（ARCH-14）
+
+位于 `kernel/driver/usb_devfs.c`，头文件 `kernel/include/driver/usb_devfs.h`：
+
+* **devfs 命名空间发布**：在系统引导阶段（`fs_boot_prepare()` 之后）通过 `usb_devfs_register_all()` 遍历所有活跃 USB 设备，挂载 `/dev/usb/<bus>-<port>/<attr>` 目录树。
+* **属性集合**：
+  - 文本属性：`bus`、`devnum`、`port`、`vendor`、`product`、`class`、`subclass`、`protocol`、`speed`。
+  - 二进制属性：`descriptors`（拼接 Device Descriptor 与完整 Configuration 描述符层次树），实现 `usb_attr_read()` 支持任意 `offset` 与 `count` 的切片读取与 EOF 截断。
+* **架构解耦**：接入 ARCH-11 多级 devfs 机制，**零新增 syscall、零 UAPI 变更**；配套用户态实用工具 `/bin/lsusb`（`user/lsusb.c`）。
+
 ### 帧缓冲驱动
 
 帧缓冲在 `kernel/core/main.c` 中初始化：
@@ -568,6 +607,8 @@ typedef struct hw_int_type {
 * `kernel/driver/pit.c` - PIT 定时器驱动
 * `kernel/driver/rtc.c` - RTC 实时时钟驱动
 * `kernel/driver/ahci.c` - AHCI SATA 驱动
+* `kernel/driver/xhci.c` - xHCI USB 3.0 主机控制器驱动
+* `kernel/driver/usb_devfs.c` - USB devfs 属性发布驱动
 * `kernel/driver/pci.c` - PCI 配置空间访问
 
 ### 驱动程序头文件
@@ -581,6 +622,8 @@ typedef struct hw_int_type {
 * `kernel/include/driver/pit.h` - PIT 定时器驱动头文件
 * `kernel/include/driver/rtc.h` - RTC 实时时钟驱动头文件
 * `kernel/include/driver/ahci.h` - AHCI SATA 驱动头文件
+* `kernel/include/driver/xhci.h` - xHCI 驱动头文件
+* `kernel/include/driver/usb_devfs.h` - USB devfs 驱动头文件
 * `kernel/include/driver/pci.h` - PCI 驱动头文件
 
 ### 设备相关头文件

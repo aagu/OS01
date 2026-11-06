@@ -1,11 +1,68 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-02）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-06）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
 
-## 2026-11-02
+## 2026-11-06
+
+- feat(xhci,usb,user): **ARCH-14 USB xHCI 主机控制器与用户态 lsusb 全栈闭环（Phase 1–4 全链路）**（设计 [spec P1](superpowers/specs/2026-11-06-xhci-p1-design.md) / [spec P2](superpowers/specs/2026-11-06-xhci-phase2-design.md) / [spec P3](superpowers/specs/2026-11-06-xhci-phase3-design.md) / [spec P4](superpowers/specs/2026-11-06-usb-devfs-lsusb-design.md)，实施 [plan P1](superpowers/plans/2026-11-06-xhci-p1-bringup.md) / [plan P2](superpowers/plans/2026-11-06-xhci-phase2.md) / [plan P3](superpowers/plans/2026-11-06-xhci-phase3.md) / [plan P4](superpowers/plans/2026-11-06-usb-devfs-lsusb.md)）：
+
+  **做了什么**
+
+  - **Phase 1 控制器生命周期与基础环机制**（commit `c54a1583`）：
+    - 接入 ARCH-9 驱动模型：定义 `xhci_pci_driver`（`class=0x0c0330`），通过 `PCI_DRIVER_DECLARE()` 注册。
+    - MMIO 映射与寄存器解析：BAR0 MMIO 映射，解析 Capability Registers（CAPLENGTH、HCIVERSION、HCSPARAMS1..3、HCCPARAMS1、DBOFF、RTSOFF）与 Operational Registers 偏移。
+    - DMA 数据结构分配：DCBAA（Device Context Base Address Array）、Command Ring（256 TRB 循环环结构，支持 Link TRB 与 Toggle Cycle）、Event Ring 与 ERST（Event Ring Segment Table）、Interrupter 0 初始化（IMAN/IMOD/ERSTSZ/ERSTBA/ERDP）。
+    - 握手与控制器启动：执行 xHCI Reset（USBCMD.HCRST）并等待 USBSTS.CNR 清零；配置 MaxSlotsEn；设置 USBCMD.RS 启动控制器并验证运行状态。
+    - Root Hub 端口探测：枚举 8 个物理端口，读取 PORTSC 状态并检测 CCS（Current Connect Status）。
+
+  - **Phase 2 端口复位、Slot 分配与 EP0 控制传输**（commit `dcd10284`）：
+    - 端口复位与速度协商：向 PORTSC 写入 PR（Port Reset）位，保留 RW1C 与 RO 位防误清；等待 PRC（Port Reset Change）置位并回写清除；从 PORTSC[13:10] 读取 Port Speed（Full/Low/High/Super）。
+    - Slot 分配与设备上下文建立：向 Command Ring 入队 Enable Slot TRB 并响门铃；轮询 Event Ring 等待 Command Completion Event，获取 slot_id；分配 Input Control Context、Output Device Context（Slot Context 与 EP0 Context，依据 HCCPARAMS1.CSZ 确定 32/64 字节结构）并写入 DCBAA[slot_id]。
+    - 地址分配（Address Device）：配置 Input Context（A0/A1 置位），设置 Slot Context（Route String、Speed、Context Entries=1、Root Hub Port Num），设置 EP0 Context（EP Type=4 Control、Max Packet Size、Transfer Ring Base、Cycle=1）；入队 Address Device TRB 并等待完成。
+    - EP0 控制传输引擎：实现通用控制传输管道，分配独立 4KB EP0 Transfer Ring 与专用 4KB DMA 数据缓冲；构建 Setup TRB（8 字节 USB Request）、Data Stage TRB（DIR IN/OUT、长度、ISP/IDT 标志）与 Status TRB（反向空包、IOC=1）；敲响 Doorbell 0x01 发起传输；轮询事件环捕获 Transfer Event，校验 Completion Code 与残余长度；成功获取 18 字节标准 Device Descriptor 并缓存至 `slot->desc`。
+
+  - **Phase 3 配置解析、动态端点环与多端点配置**（commit `78d6ff85`）：
+    - 配置描述符层次树解析：两阶段获取完整配置描述符（先读 9 字节头部取 `wTotalLength`，再单次读满完整层次树）；递归解析 Configuration / Interface / HID / Endpoint 描述符，记录多端点拓扑信息。
+    - 动态端点环管理：为满足零硬编码约束，`struct xhci_slot` 中采用 `struct xhci_ep_ring **ep_rings` 动态指针数组（按 `max_dci + 1` 动态分配），彻底废除预分配静态数组；并在 `xhci_free_slot()` 中按端点倒序安全释放。
+    - 端点上下文配置与生驱动绑定：计算 USB 2.0 / 3.0 与端点类型对应的周期轮询间隔（`bInterval` 转换）；构建 Input Context（Add Context Flags），填充各端点 Context（EP Type=Interrupt/Bulk/Isoch/Control、Max Packet Size、Transfer Ring Base、Average TRB Length、Mult、CErr）；向命令环提交 Configure Endpoint TRB 并等待成功。
+    - Set Configuration：提交 USB 标准请求 `SET_CONFIGURATION`，使 USB 设备正式由 Address 状态流转入 Configured 状态，准备就绪供驱动使用。
+
+  - **Phase 4 `/dev/usb` 属性切片节点与用户态 `/bin/lsusb` 工具**（commit `cf071a0b` ~ `ae7a5999`）：
+    - 控制器跟踪与描述符缓存：在 `xhci.c` 中维护全局控制器跟踪注册表（`s_xhci_controllers` / `xhci_controller_count()` / `xhci_controller_get()`）；设备配置完成后自动拼合 Device Descriptor 与 Configuration Hierarchy 二进制数据至 `slot->raw_descriptors`。
+    - 内核 `usb_devfs` 驱动：新建 `kernel/driver/usb_devfs.c` 与 `kernel/include/driver/usb_devfs.h`。在 `main.c` 引导阶段（`pci_devfs_register_all()` 之后）自动遍历所有已配置 USB 设备，注册 `/dev/usb/<bus>-<port>/<attr>` 10 项属性节点：
+      - 文本属性：`bus`、`devnum`、`port`、`vendor`、`product`、`class`、`subclass`、`protocol`、`speed`。
+      - 二进制属性：`descriptors`（对齐 Linux `/sys/bus/usb/devices/.../descriptors`），实现 `usb_attr_read()` 支持任意 `offset`/`size` 切片读取与 EOF 截断。
+    - 用户态 `/bin/lsusb` 工具：新建 `user/lsusb.c`。
+      - 扫描 `/dev/usb/`，解析属性并对条目执行 `qsort()`（按 bus 和 port 确定性升序排序）。
+      - 标准一行输出（`Bus 001 Device 001: ID 0627:0001 QEMU USB Tablet`）。
+      - `-s [[bus]:][devnum]` 过滤器解析（支持 `X:Y`、`X:`、`:Y`、`Y` 多种语法）。
+      - `-v` 详细视图：读取 `descriptors` 节点并进行完整层次树反序列化（Device Descriptor 18 项字段、Configuration Descriptor、Interface Descriptor、Endpoint Descriptor）。
+
+  **关键结论与架构决策**
+
+  - **零新增 syscall、零 UAPI 破坏**：完全依托 ARCH-11 devfs 多级路径机制实现，USB 设备属性直接暴露在 `/dev/usb/<bus>-<port>/<attr>` 文件系统中，保持系统 ABI 纯粹与整洁。
+  - **动态分配资源**：`struct xhci_ep_ring **ep_rings` 按实际端点最大 DCI 动态分配，不浪费内存且不设硬编码端点上限。
+  - **严密头文件与实现对称性**：严格遵守 `AGENTS.md` 规范，`kernel/driver/xhci.c` ↔ `kernel/include/driver/xhci.h`、`kernel/driver/usb_devfs.c` ↔ `kernel/include/driver/usb_devfs.h`。
+  - **轻量 mock 与宏隔离**：在 hosttests 中独立实现轻量 mock devfs，并通过 `-D__SPINLOCK_H__` 隔绝内核特权自旋锁，通过 `-DLSUSB_NO_MAIN` 杜绝符号冲突。
+
+  **验证**
+
+  - **单元测试全覆盖**：新增 `test_xhci_init.c`（Phase 1）、`test_xhci_phase2.c`（Phase 2）、`test_xhci_phase3.c`（Phase 3）、`test_usb_devfs.c`（Phase 4，80 项断言）。
+  - **全量回归**：`make test-host`（全部 63+ 宿主套件全绿）、`make test-static`（13 项静态架构与内存审计全绿）、`make disk.img` 正常打包 `/bin/lsusb`（0755 权限）。
+  - **QEMU 实机端到端验证**：
+    - 启动日志成功捕获：`[xhci] controller initialized and running`、`[xhci] slot 1 allocated`、`[xhci] slot 1: USB device 0627:0001 (class 00, subclass 00, ep0_max=64)`、`[xhci] slot 1: endpoint DCI 3 configured (type=7, mps=8, interval=3)`、`[usb_devfs] registered 1 USB device(s)`。
+    - 串口注入执行 `/bin/lsusb`：正确输出 `Bus 001 Device 001: ID 0627:0001 QEMU USB Tablet`。
+    - 串口注入执行 `/bin/lsusb -v`：完整展开 Device / Configuration / Interface (Human Interface Device) / Endpoint (0x81 EP 1 IN Interrupt) 描述符树。
+    - 串口注入执行 `/bin/lsusb -s 1:1`：正确过滤命中目标平板设备。
+
+  **影响范围**
+
+  - 新增：`kernel/driver/xhci.c`、`kernel/include/driver/xhci.h`、`kernel/driver/usb_devfs.c`、`kernel/include/driver/usb_devfs.h`、`user/lsusb.c`、`hosttests/cases/test_xhci_init.c`、`hosttests/cases/test_xhci_phase2.c`、`hosttests/cases/test_xhci_phase3.c`、`hosttests/cases/test_usb_devfs.c`、`hosttests/mock/arch9/xhci_runtime.h`。
+  - 修改：`kernel/core/main.c`（挂载后调用 `usb_devfs_register_all()`）、`hosttests/mk/drivers.mk`。
+
 
 - feat(pci): **ARCH-12 lspci PCI 设备列举命令闭环 —— 零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`**（分支 `feature/arch12-lspci`，设计 [spec](superpowers/specs/2026-11-02-arch12-lspci-design.md)，实施 [plan](superpowers/plans/2026-11-02-arch12-lspci.md)）：
 

@@ -230,6 +230,34 @@ VFS 侧的路径解析本身已支持多级分量（`__vfs_lookup_raw()` 逐分�
 注册失败**不阻断启动**：单个属性注册失败只跳过该节点并 `log_warn` 记录；
 重复注册（`-EEXIST`）视为幂等，不记日志。
 
+### USB 设备命名空间（ARCH-14）
+
+内核在 `fs_boot_prepare()` 之后（devfs 已挂载且 xHCI 控制器与设备枚举配置完毕）
+调用 `usb_devfs_register_all()`，将所有已枚举配置的 USB 设备发布成 `/dev/usb/<bus>-<port>/<attr>`：
+
+| 路径 | 内容 |
+|------|------|
+| `/dev/usb/1-1/bus` | 总线号，文本 `"1\n"` |
+| `/dev/usb/1-1/devnum` | 设备号（分配的 slot_id），文本 `"1\n"` |
+| `/dev/usb/1-1/port` | 根集线器端口号，文本 `"1\n"` |
+| `/dev/usb/1-1/vendor` | Vendor ID，文本 `"0x0627\n"` |
+| `/dev/usb/1-1/product` | Product ID，文本 `"0x0001\n"` |
+| `/dev/usb/1-1/class` | 设备类别代码，文本 `"0x00\n"` |
+| `/dev/usb/1-1/subclass` | 子类别代码，文本 `"0x00\n"` |
+| `/dev/usb/1-1/protocol` | 协议代码，文本 `"0x00\n"` |
+| `/dev/usb/1-1/speed` | 协商速度，文本 `"super\n"` / `"high\n"` / `"full\n"` / `"low\n"` |
+| `/dev/usb/1-1/descriptors` | 原始二进制描述符切片（对齐 Linux `/sys/bus/usb/devices/.../descriptors`） |
+
+- `<bus>-<port>` 表示 USB 拓扑路径（例如总线 1 端口 1 为 `1-1`）。
+- `descriptors` 节点为原始二进制描述符流：先拼接 18 字节标准 Device Descriptor，紧跟完整 Configuration 描述符层次树（含 Configuration、Interface、HID、Endpoint 描述符等）。
+- `descriptors` 的读操作由 `usb_attr_read()` 实现，支持任意 `offset` 与 `count` 的切片读取与 EOF 截断。
+- 该命名空间由 `kernel/driver/usb_devfs.c` 驱动实现并接入 ARCH-11 多级 devfs 路径体系。**零新增 syscall、零 UAPI 变更**。
+- 对应的用户态工具是 `/bin/lsusb`（`user/lsusb.c`）：
+  - 默认模式：枚举 `/dev/usb/`，按 bus 和 port 确定性升序排序并输出单行摘要（例如 `Bus 001 Device 001: ID 0627:0001 QEMU USB Tablet`）。
+  - `-s [[bus]:][devnum]`：过滤指定总线或设备。
+  - `-v`：读取 `descriptors` 属性并反序列化打印完整的 USB 描述符树。
+- 注册失败**不阻断启动**：usb_devfs 为诊断和设备信息服务，注册出错仅记录 `log_warn`，不影响系统正常引导。
+
 ---
 
 ## procfs (`kernel/fs/procfs.c`, `kernel/include/fs/procfs.h`)

@@ -166,7 +166,7 @@ Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_T
 4. `x86_64_boot_subsystems(bootctx)` — `arch_boot_rsdp` + `arch_register_subsys()` + `subsys_init_all()` → APIC/PIC/timer/PIT/LAPIC-timer/keyboard/AHCI (phases 3-6).
 5. `x86_64_boot_percpu()` — MADT traversal, BSP `percpu_init` + `percpu_install_gs(0)` + `num_cpus` publication (Task 6 — brought forward so the CSPRNG and FS code see a valid `this_cpu()`).
 6. `random_init(bootctx)` — CSPRNG seed (BSP, once).
-7. `fs_boot_prepare()` → `pty_init()` → `x86_64_boot_device_nodes()` → `fs_boot_mounts()` → `tty_boot_init()` → `fs_boot_probe_devfs()` — VFS / devfs / x86 chrdevs / mounts / console TTY / `/dev/null` smoke probe.
+7. `fs_boot_prepare()` → `pci_devfs_register_all()` → `usb_devfs_register_all()` → `pty_init()` → `x86_64_boot_device_nodes()` → `fs_boot_mounts()` → `tty_boot_init()` → `fs_boot_probe_devfs()` — VFS / devfs / PCI (`/dev/pci`) & USB (`/dev/usb`) device namespaces / x86 chrdevs / mounts / console TTY / `/dev/null` smoke probe.
 8. `x86_64_boot_aps()` — `tick_start()` → `smp_boot_aps()` → per-CPU subsystem dispatch (`arch_register_subsys_percpu()` + `subsys_init_percpu()`).
 9. `#ifdef OS01_SELFTEST` — `selftest_run_all()`.
 10. `sched_boot_creation_begin()` — opens BSP boot creation window.
