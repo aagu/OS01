@@ -4216,6 +4216,75 @@
         "action": "unique",
         "reason": "Primary host unit test verifying xHCI host controller phase-1 init behavior"
       }
+    },
+    {
+      "id": "drivers.xhci.phase2",
+      "component": "drivers",
+      "behavior": "xhci",
+      "trigger": "host runner invokes test_xhci_phase2.elf",
+      "assertions": [
+        "test_xhci_phase2 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_xhci_phase2"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_xhci_phase2.c",
+        "selector": "test_xhci_phase2",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying xHCI host controller phase-2 bring-up behavior against a mock MMIO space"
+      }
+    },
+    {
+      "id": "drivers.xhci.phase3",
+      "component": "drivers",
+      "behavior": "xhci",
+      "trigger": "host runner invokes test_xhci_phase3.elf",
+      "assertions": [
+        "test_xhci_phase3 passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_xhci_phase3"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_xhci_phase3.c",
+        "selector": "test_xhci_phase3",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying xHCI host controller phase-3 doorbell/transfer-ring behavior"
+      }
+    },
+    {
+      "id": "drivers.usb.devfs",
+      "component": "drivers",
+      "behavior": "usb",
+      "trigger": "host runner invokes test_usb_devfs.elf",
+      "assertions": [
+        "test_usb_devfs passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_usb_devfs"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_usb_devfs.c",
+        "selector": "test_usb_devfs",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying the USB device namespace under devfs and lsusb descriptor extraction"
+      }
     }
   ]
 }
