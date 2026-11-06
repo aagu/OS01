@@ -691,6 +691,16 @@ test-harness: test-framework-contract
 test-framework-contract:
 	$(call os01_submake,hosttests,test-framework-contract $(OS01_SUBMAKE_ARGS))
 
+# Focused aarch64 per-CPU tick accounting hosttest (Task 1).  The
+# binary is the REAL kernel/arch/aarch64/platform/time.c host-compiled
+# against the machine-boundary mock: the frozen CNTP configuration and
+# the local timer start are the production algorithm.  No QEMU, no
+# kernel build — the root target forwards to the SAME-named hosttests
+# target through the controlled sub-make boundary.
+.PHONY: test-aarch64-sched-tick-host
+test-aarch64-sched-tick-host:
+	$(call os01_submake,hosttests,test-aarch64-sched-tick-host $(OS01_SUBMAKE_ARGS))
+
 # Focused M1 host tests (aarch64 M1 plan). Each CASE runs the matching
 # focused TEST_BINS entry under hosttests/.  Unknown non-empty CASE
 # aborts non-zero. With CASE omitted the umbrella runs the full M1

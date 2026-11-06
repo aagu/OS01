@@ -122,4 +122,13 @@ static inline void cntp_ctl_el0_write(uint64_t v)
     __asm__ __volatile__("msr cntp_ctl_el0, %0" :: "r"(v) : "memory");
 }
 
+/* Instruction barrier after a CNTP register update: the new TVAL /
+ * CTL value must be visible to the counter before the next interrupt
+ * can be taken.  The timer backend sequences TVAL -> CTL -> ISB ->
+ * read-back, so the barrier is part of the arm contract. */
+static inline void cntp_isb(void)
+{
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
 #endif /* _ARCH_AARCH64_GIC_H */

@@ -551,3 +551,45 @@ $(TEST_BLD)/test_blocker_remote_wake.elf: $(TEST_BLD)/test_blocker_remote_wake.o
 .PHONY: test-blocker-remote-wake
 test-blocker-remote-wake: $(TEST_BLD)/test_blocker_remote_wake.elf
 	$<
+
+# ── aarch64 per-CPU tick accounting (Task 1) ───────────────────
+# Compiles the REAL kernel/arch/aarch64/platform/time.c against
+# mock/aarch64_sched_tick_runtime.h, which replaces ONLY the machine /
+# GIC / DTB / IRQ / log boundaries.  The configuration validation, the
+# publish/acquire protocol, the TVAL -> CTL -> ISB -> read-back arm
+# order and the ENABLE-clearing failure path are the PRODUCTION
+# algorithm — the mock never re-implements them.
+$(eval $(call register_host_test,test_aarch64_sched_tick,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_aarch64_sched_tick.elf
+
+# No LIBC_INC: the fixture captures the log lines through the host's
+# vsnprintf and the OS01 libc headers would shadow <stdio.h>.
+SCHED_TICK_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC)
+SCHED_TICK_PROD_CFLAGS := $(SCHED_TICK_CFLAGS) \
+    -include $(TEST_MOCK)/aarch64_sched_tick_runtime.h
+
+# Private object name: the monitor plan already owns
+# accounting_production.o — a shared name would clobber that object.
+$(TEST_BLD)/aarch64_timer_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/platform/time.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/timer.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/reg.h \
+		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_TICK_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_tick.o: \
+		$(TEST_CASES)/test_aarch64_sched_tick.c \
+		$(TEST_MOCK)/aarch64_sched_tick_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FRAMEWORK_INC) $(SCHED_TICK_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_aarch64_sched_tick.elf: \
+		$(TEST_BLD)/test_aarch64_sched_tick.o \
+		$(TEST_BLD)/aarch64_timer_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-aarch64-sched-tick-host
+test-aarch64-sched-tick-host: $(TEST_BLD)/test_aarch64_sched_tick.elf
+	$<

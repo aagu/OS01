@@ -1,4 +1,5 @@
-/* aarch64 CNTP physical-timer tick ISR (Phase 2 P2 follow-up #2).
+/* aarch64 CNTP physical-timer backend (per-CPU tick accounting,
+ * Task 1: freeze the CNTP configuration + arm the local counter).
  *
  * Phase 1 (Task 2.2) had the ISR do its own TVAL rewrite + per-second
  * "[tick] N" print but DID NOT call tick_handler() — so jiffies stayed
@@ -25,28 +26,42 @@
  * handler table so the generic dispatch can route CNTP PPI ticks to it.
  * Subsequent re-arms happen in the ISR itself.
  *
+ * Per-CPU tick accounting (Task 1):
+ *   - the BSP FREEZES the CNTP configuration (counter frequency,
+ *     period, PPI) and publishes it; every AP acquires that frozen
+ *     configuration before arming its own counter;
+ *   - the GIC handler slot is GLOBAL and owned by the BSP: the
+ *     per-CPU entry point (`aarch64_timer_start_local()`) never
+ *     registers a handler;
+ *   - a registration conflict (-2, "already registered") is a HARD
+ *     failure — the slot would belong to a foreign handler;
+ *   - a local counter frequency that differs from the BSP's is a
+ *     HARD failure — the two CPUs' samples would not be comparable;
+ *   - a failed arm leaves CNTP_CTL_EL0.ENABLE cleared, so a
+ *     half-armed timer can never deliver an interrupt.
+ *
  * Output policy: printing on every 100 Hz tick would flood the
  * polled PL011 (~100 characters/second), so we print one line per
- * second (every 100th tick). */
+ * second (every 100th tick).  The "[cntp]" and "[tick]" lines are
+ * part of the QEMU harness evidence protocol and are emitted through
+ * log_info() — the aarch64 log backend adds no prefix, so the bytes
+ * on the wire are unchanged. */
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <arch/regs.h>
+#include <arch/cpu.h>
 #include <arch/aarch64/reg.h>
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/timer.h>
+#include <log/log.h>
 #include <time/clockevent.h>   /* tick_handler() */
 #ifdef OS01_SELFTEST
 #include <selftest/aarch64_scheduler.h>
 #endif
 
-/* Forward from pl011.c. */
-void kputs(const char *s);
-void kputu(uint64_t v);
-void kputx(uint64_t v);
-
-#define HZ                 100U
-#define TICKS_PER_SECOND   HZ
+#define TICKS_PER_SECOND   AARCH64_TIMER_HZ
 
 /* Counter for once-per-second print.  This is per-CPU logically but
  * phase 1 is single-core so a plain uint64 is fine.  It is written
@@ -58,10 +73,12 @@ void kputx(uint64_t v);
  * so v2's "export g_ticks" requirement is retracted. */
 static volatile uint64_t g_ticks;
 
-/* Cached "current period in ticks" — set by arch_tick_start(),
- * re-read by the ISR from CNTP_TVAL_EL0.  We keep the integer so
- * the ISR doesn't have to re-issue the mrs every entry. */
-static uint64_t g_period;
+/* Frozen CNTP configuration.  The BSP publishes it once (release
+ * store on `ready`, fields written first); every AP acquires it
+ * read-only before arming its own counter.  The period is read back
+ * from here by the ISR, so the re-arm value is always the frozen one
+ * and never a per-CPU copy that could drift. */
+static struct aarch64_timer_config g_timer_config;
 
 /* Registered CNTP PPI tick handler.  Order contract per phase1 spec §2.3
  * + phase2 unification:
@@ -81,68 +98,170 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
 #else
     (void)regs;
 #endif
-    cntp_tval_el0_write(g_period);  /* TVAL rewrite FIRST (phase1 spec §2.3) */
+    cntp_tval_el0_write(g_timer_config.period);  /* TVAL rewrite FIRST */
     tick_handler();                   /* unified tick semantic */
     /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
      * requires >=3 [tick] N lines per case. */
     uint64_t t = g_ticks + 1;
     g_ticks = t;
     if ((t % TICKS_PER_SECOND) == 0) {
-        kputs("[tick] ");
-        kputu(t / TICKS_PER_SECOND);
-        kputs("\n");
+        log_info("[tick] %lu\n", (unsigned long)(t / TICKS_PER_SECOND));
     }
 #ifdef OS01_SELFTEST
     aarch64_sched_observe_timer_irq(regs, false);
 #endif
 }
 
-bool arch_tick_start(void)
+/* Validate a CNTP configuration.
+ *
+ *   - the PPI must be a private peripheral interrupt (16..31);
+ *   - the counter frequency must be at least the nominal tick rate;
+ *   - the resulting period must be a usable TVAL value: 1 <= period
+ *     <= INT32_MAX (CNTP_TVAL_EL0 is a signed 32-bit-ish window and
+ *     the per-CPU accounting counts in ticks).
+ *
+ * Returns false and leaves *period_out untouched when the
+ * configuration is rejected. */
+static bool timer_config_valid(uint64_t freq, uint32_t ppi, uint64_t *period_out)
 {
-    uint64_t freq = cntfrq_el0();
-    if (freq == 0) {
+    if (ppi < AARCH64_TIMER_PPI_FIRST || ppi > AARCH64_TIMER_PPI_LAST)
+        return false;
+    if (freq < AARCH64_TIMER_HZ)
+        return false;
+    uint64_t period = freq / AARCH64_TIMER_HZ;
+    if (period == 0 || period > (uint64_t)INT32_MAX)
+        return false;
+    if (period_out)
+        *period_out = period;
+    return true;
+}
+
+/* Disable the local counter: CNTP_CTL_EL0.ENABLE cleared, then ISB.
+ *
+ * The write is UNCONDITIONAL: the failure path must guarantee that the
+ * counter is off even when the read-back that detected the failure is
+ * itself broken (a counter that reports a stale CTL must never be
+ * left enabled). */
+static void timer_disable_local(void)
+{
+    uint64_t ctl = cntp_ctl_el0_read();
+    ctl &= ~1UL;
+    cntp_ctl_el0_write(ctl);
+    cntp_isb();
+}
+
+/* Arm the local counter for one period.
+ *
+ * Order contract: TVAL -> CTL -> ISB -> read-back.
+ *   - TVAL is written FIRST so the counter cannot expire between the
+ *     control update and the value being programmed;
+ *   - CNTP_CTL_EL0 bit 0 = ENABLE (set), bit 1 = IMASK (cleared, so
+ *     the tick is actually delivered);
+ *   - the read-back must show ENABLE=1 and IMASK=0, otherwise the
+ *     counter is disabled again and the start fails. */
+static bool timer_arm_local(uint64_t period)
+{
+    cntp_tval_el0_write(period);
+
+    uint64_t ctl = cntp_ctl_el0_read();
+    ctl |= 1UL;             /* bit 0 = ENABLE */
+    ctl &= ~(1UL << 1);     /* bit 1 = IMASK — we want it CLEAR */
+    cntp_ctl_el0_write(ctl);
+    cntp_isb();
+
+    ctl = cntp_ctl_el0_read();
+    if ((ctl & 1UL) == 0 || (ctl & (1UL << 1)) != 0) {
+        timer_disable_local();
         return false;
     }
-    g_period = freq / HZ;
-    if (g_period == 0) {
-        g_period = 1;
+    return true;
+}
+
+/* Arm the LOCAL counter of the calling CPU from the frozen
+ * configuration.  Never registers a GIC handler. */
+bool aarch64_timer_start_local(void)
+{
+    if (__atomic_load_n(&g_timer_config.ready, __ATOMIC_ACQUIRE) != 1U) {
+        log_err("[timer] local start refused: configuration not published\n");
+        return false;
+    }
+
+    uint64_t freq = g_timer_config.freq;
+    uint64_t period = g_timer_config.period;
+    uint32_t ppi = g_timer_config.ppi;
+
+    /* Re-validate the acquired configuration: an AP must never arm
+     * from a configuration the BSP itself would have rejected. */
+    uint64_t check_period = 0;
+    if (!timer_config_valid(freq, ppi, &check_period) || check_period != period) {
+        log_err("[timer] local start refused: invalid published configuration\n");
+        return false;
+    }
+
+    /* The local counter must run at the frozen frequency: otherwise
+     * the local samples of the two CPUs are not comparable. */
+    uint64_t local_freq = cntfrq_el0();
+    if (local_freq != freq) {
+        log_err("[timer] local start refused: local frequency mismatch\n");
+        return false;
+    }
+
+    return timer_arm_local(period);
+}
+
+/* BSP: register the CNTP IRQ handler and publish the frozen
+ * configuration.  The GIC handler table is GLOBAL — this is the only
+ * registration of the CNTP PPI in the system. */
+bool aarch64_timer_publish_config(void)
+{
+    uint64_t freq = cntfrq_el0();
+    uint32_t ppi = dtb_cntp_ppi();
+    uint64_t period = 0;
+
+    if (!timer_config_valid(freq, ppi, &period)) {
+        log_err("[cntp] FATAL: invalid CNTP configuration\n");
+        return false;
     }
 
     /* Register the tick handler with the GIC handler table BEFORE we
-     * arm the timer.  If the registration fails (e.g. unexpected -2
-     * "already registered" from a re-init), we still proceed — the
-     * earlier registration is just as valid. */
-    int rc_reg = gic_register_handler(dtb_cntp_ppi(), cntp_tick_handler, 0,
-                                      "cntp-tick");
-    if (rc_reg != 0 && rc_reg != -2) {
+     * arm the timer.  A non-zero return is a hard failure: -2 means
+     * the slot is already owned by another handler, and the tick would
+     * be delivered to the wrong code. */
+    int rc_reg = gic_register_handler(ppi, cntp_tick_handler, 0, "cntp-tick");
+    if (rc_reg != 0) {
+        log_err("[cntp] FATAL: CNTP handler registration failed\n");
         return false;
     }
 
-    /* Arm and enable.  CNTP_CTL_EL0 bit 0 = EN (enable).  bit 1 =
-     * IMASK (interrupt mask).  We leave IMASK=0 (unmasked) so the
-     * tick fires when TVAL reaches 0. */
-    cntp_tval_el0_write(g_period);
-    /* Read-modify-write to preserve reserved bits. */
-    uint64_t ctl = cntp_ctl_el0_read();
-    ctl |= 1UL;  /* bit 0 = ENABLE */
-    /* IMASK is bit 1; we want it CLEAR. */
-    ctl &= ~(1UL << 1);
-    cntp_ctl_el0_write(ctl);
+    /* Publish the frozen configuration: fields first, `ready` last
+     * (release store).  Every AP acquires it before arming its own
+     * counter. */
+    g_timer_config.freq = freq;
+    g_timer_config.period = period;
+    g_timer_config.ppi = ppi;
+    __atomic_store_n(&g_timer_config.ready, 1U, __ATOMIC_RELEASE);
+    return true;
+}
 
-    /* Read-back sanity: ENABLE must be set.  If not, the timer is
-     * not actually running and the GIC will never see a tick. */
-    ctl = cntp_ctl_el0_read();
-    if ((ctl & 1UL) == 0) {
+bool arch_tick_start(void)
+{
+    /* BSP boot start.  Any failure shuts the local counter down again
+     * before returning, so a half-armed timer can never deliver an
+     * interrupt after the caller decided to fail-stop. */
+    if (!aarch64_timer_publish_config()) {
+        timer_disable_local();
+        return false;
+    }
+    if (!aarch64_timer_start_local()) {
+        log_err("[cntp] FATAL: local timer start failed\n");
+        timer_disable_local();
         return false;
     }
 
     /* Period value matches the spec for QEMU virt (62500000 / 100). */
-    kputs("[cntp] freq=");
-    kputu(freq);
-    kputs(" Hz, period=");
-    kputu(g_period);
-    kputs(" ticks (");
-    kputu(HZ);
-    kputs(" Hz)\n");
+    log_info("[cntp] freq=%lu Hz, period=%lu ticks (%u Hz)\n",
+             (unsigned long)g_timer_config.freq,
+             (unsigned long)g_timer_config.period,
+             (unsigned)AARCH64_TIMER_HZ);
     return true;
 }
