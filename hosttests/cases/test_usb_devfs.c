@@ -4,6 +4,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <driver/xhci.h>
+#include <driver/usb_devfs.h>
 #include <arch/pci.h>
 #include <errno.h>
 #include <string.h>
@@ -102,11 +103,172 @@ void test_xhci_controller_registry(void)
     }
 }
 
+/* Mock devfs node structure for driving usb_attr_read */
+struct vfs_node {
+    void *private_data;
+};
+
+void *devfs_get_private(struct vfs_node *node)
+{
+    return node ? node->private_data : NULL;
+}
+
+#define MAX_MOCK_DEVFS_NODES 32
+struct mock_devfs_entry {
+    char path[64];
+    void *ctx;
+    const struct devfs_ops *ops;
+};
+static struct mock_devfs_entry s_mock_devfs[MAX_MOCK_DEVFS_NODES];
+static int s_mock_devfs_count = 0;
+
+int devfs_register_path(const char *path, void *private_data, const struct devfs_ops *ops)
+{
+    for (int i = 0; i < s_mock_devfs_count; i++) {
+        if (strcmp(s_mock_devfs[i].path, path) == 0) {
+            return -EEXIST;
+        }
+    }
+    if (s_mock_devfs_count >= MAX_MOCK_DEVFS_NODES) return -ENOMEM;
+    strncpy(s_mock_devfs[s_mock_devfs_count].path, path, 63);
+    s_mock_devfs[s_mock_devfs_count].ctx = private_data;
+    s_mock_devfs[s_mock_devfs_count].ops = ops;
+    s_mock_devfs_count++;
+    return 0;
+}
+
+void test_usb_devfs_formatting(void)
+{
+    TEST_CASE("Format USB devfs text attributes (10 attributes & 5 speeds)");
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+
+    slot.slot_id = 1;
+    slot.port_num = 2;
+    slot.speed = XHCI_PORT_SPEED_FULL;
+    slot.desc.idVendor = 0x0627;
+    slot.desc.idProduct = 0x0001;
+    slot.desc.bDeviceClass = 0x03;
+    slot.desc.bDeviceSubClass = 0x01;
+    slot.desc.bDeviceProtocol = 0x02;
+
+    char buf[64];
+
+    /* Test all 10 attributes */
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_BUS, buf, sizeof(buf)), 2);
+    assert_eq(strcmp(buf, "1\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_DEVNUM, buf, sizeof(buf)), 2);
+    assert_eq(strcmp(buf, "1\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_PORT, buf, sizeof(buf)), 2);
+    assert_eq(strcmp(buf, "2\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_VENDOR, buf, sizeof(buf)), 7);
+    assert_eq(strcmp(buf, "0x0627\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_PRODUCT, buf, sizeof(buf)), 7);
+    assert_eq(strcmp(buf, "0x0001\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_CLASS, buf, sizeof(buf)), 5);
+    assert_eq(strcmp(buf, "0x03\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_SUBCLASS, buf, sizeof(buf)), 5);
+    assert_eq(strcmp(buf, "0x01\n"), 0);
+
+    assert_eq(usb_devfs_format_attr(&slot, 1, USB_ATTR_PROTOCOL, buf, sizeof(buf)), 5);
+    assert_eq(strcmp(buf, "0x02\n"), 0);
+
+    /* Test all 5 speed encodings */
+    slot.speed = XHCI_PORT_SPEED_LOW;
+    usb_devfs_format_attr(&slot, 1, USB_ATTR_SPEED, buf, sizeof(buf));
+    assert_eq(strcmp(buf, "low\n"), 0);
+
+    slot.speed = XHCI_PORT_SPEED_FULL;
+    usb_devfs_format_attr(&slot, 1, USB_ATTR_SPEED, buf, sizeof(buf));
+    assert_eq(strcmp(buf, "full\n"), 0);
+
+    slot.speed = XHCI_PORT_SPEED_HIGH;
+    usb_devfs_format_attr(&slot, 1, USB_ATTR_SPEED, buf, sizeof(buf));
+    assert_eq(strcmp(buf, "high\n"), 0);
+
+    slot.speed = XHCI_PORT_SPEED_SUPER;
+    usb_devfs_format_attr(&slot, 1, USB_ATTR_SPEED, buf, sizeof(buf));
+    assert_eq(strcmp(buf, "super\n"), 0);
+
+    slot.speed = 99;
+    usb_devfs_format_attr(&slot, 1, USB_ATTR_SPEED, buf, sizeof(buf));
+    assert_eq(strcmp(buf, "unknown\n"), 0);
+
+    /* Test small buffer truncation safety (snprintf return length) */
+    char tiny[3];
+    int len = usb_devfs_format_attr(&slot, 1, USB_ATTR_VENDOR, tiny, sizeof(tiny));
+    assert_eq(len, 7); /* Full length reported */
+    assert_eq(tiny[0], '0');
+    assert_eq(tiny[1], 'x');
+    assert_eq(tiny[2], '\0');
+}
+
+void test_usb_devfs_descriptors_binary_slicing(void)
+{
+    TEST_CASE("Descriptors binary reading, slicing and EOF bounds via REAL usb_attr_read");
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+
+    uint8_t raw[52];
+    for (int i = 0; i < 52; i++) raw[i] = (uint8_t)i;
+    slot.raw_descriptors = raw;
+    slot.raw_descriptors_len = 52;
+
+    usb_attr_ctx_t ctx = {
+        .slot = &slot,
+        .bus_id = 1,
+        .attr = USB_ATTR_DESCRIPTORS,
+    };
+    struct vfs_node node = { .private_data = &ctx };
+    uint8_t out[64];
+
+    /* 1. Normal read from offset 0 */
+    memset(out, 0, sizeof(out));
+    int n = usb_attr_read(&node, 0, 18, out);
+    assert_eq(n, 18);
+    assert_eq(out[0], 0);
+    assert_eq(out[17], 17);
+
+    /* 2. Slice read from offset 18 */
+    memset(out, 0, sizeof(out));
+    n = usb_attr_read(&node, 18, 34, out);
+    assert_eq(n, 34);
+    assert_eq(out[0], 18);
+    assert_eq(out[33], 51);
+
+    /* 3. Clamped read: request 100 bytes at offset 10 (avail = 42) */
+    memset(out, 0, sizeof(out));
+    n = usb_attr_read(&node, 10, 100, out);
+    assert_eq(n, 42);
+    assert_eq(out[0], 10);
+    assert_eq(out[41], 51);
+
+    /* 4. Exact EOF read: offset = 52 returns 0 */
+    n = usb_attr_read(&node, 52, 10, out);
+    assert_eq(n, 0);
+
+    /* 5. Beyond EOF read: offset = 60 returns 0 */
+    n = usb_attr_read(&node, 60, 10, out);
+    assert_eq(n, 0);
+
+    /* 6. Invalid input checks */
+    assert_eq(usb_attr_read(NULL, 0, 10, out), -EINVAL);
+    assert_eq(usb_attr_read(&node, 0, 0, out), 0);
+}
+
 int main(void)
 {
     TEST_SUITE("usb_devfs");
     test_xhci_raw_descriptors_caching_and_teardown();
     test_xhci_controller_registry();
+    test_usb_devfs_formatting();
+    test_usb_devfs_descriptors_binary_slicing();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
