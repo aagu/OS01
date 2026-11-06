@@ -55,6 +55,7 @@
 struct boot_context;
 struct MEMORY_RANGE;
 size_t pmm_arch_normalize(const struct boot_context *ctx, struct MEMORY_RANGE *out);
+uint64_t pmm_arch_zone_split(void);
 
 struct pmm_phys_range {
     uint64_t start;   /* inclusive, granule-aligned PA */

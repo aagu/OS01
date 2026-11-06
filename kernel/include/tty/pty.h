@@ -7,8 +7,6 @@
 #include <stdbool.h>
 #include <fs/file.h>
 #include <arch/spinlock.h>
-
-typedef int pid_t;  /* for termios.h userspace declarations */
 #include <termios.h>
 
 typedef struct pty_struct {

@@ -2,6 +2,7 @@
 #define _TERMIOS_H 1
 
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {

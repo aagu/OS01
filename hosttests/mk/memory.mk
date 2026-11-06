@@ -95,7 +95,7 @@ $(TEST_BLD)/pmm_production.o: $(TESTS_DIR)/kernel/memory/pmm.c \
 		$(TEST_MOCK)/pmm_include/arch/spinlock.h \
 		$(TEST_MOCK)/pmm_include/arch/cpu.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/pmm_arch_default.o: $(TESTS_DIR)/kernel/memory/pmm_arch.c
 	@mkdir -p $(TEST_BLD)

@@ -27,7 +27,6 @@
 #include <syscall/dispatch.h>
 #include <syscall/compat.h>
 #include <string.h>
-typedef int pid_t;
 #include <core/debug.h>
 #include <memory/uaccess.h>
 #include <kernel.h>
