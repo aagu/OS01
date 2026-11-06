@@ -5,6 +5,7 @@
 #include <bus/pci/driver.h>
 #include <driver/xhci.h>
 #include <driver/usb_devfs.h>
+#include <fs/devfs.h>
 #include <arch/pci.h>
 #include <errno.h>
 #include <string.h>
@@ -103,14 +104,9 @@ void test_xhci_controller_registry(void)
     }
 }
 
-/* Mock devfs node structure for driving usb_attr_read */
-struct vfs_node {
-    void *private_data;
-};
-
 void *devfs_get_private(struct vfs_node *node)
 {
-    return node ? node->private_data : NULL;
+    return node ? node->fs_data : NULL;
 }
 
 #define MAX_MOCK_DEVFS_NODES 32
@@ -225,7 +221,7 @@ void test_usb_devfs_descriptors_binary_slicing(void)
         .bus_id = 1,
         .attr = USB_ATTR_DESCRIPTORS,
     };
-    struct vfs_node node = { .private_data = &ctx };
+    struct vfs_node node = { .fs_data = &ctx };
     uint8_t out[64];
 
     /* 1. Normal read from offset 0 */
@@ -262,6 +258,59 @@ void test_usb_devfs_descriptors_binary_slicing(void)
     assert_eq(usb_attr_read(&node, 0, 0, out), 0);
 }
 
+void test_usb_devfs_registration_and_lookup(void)
+{
+    TEST_CASE("Publish slot nodes under /dev/usb/<bus>-<port>/ and verify 10 attributes via mock devfs");
+    s_mock_devfs_count = 0;
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+    slot.port_num = 1;
+    slot.speed = XHCI_PORT_SPEED_FULL;
+    slot.configured = true;
+    slot.desc.idVendor = 0x0627;
+    slot.desc.idProduct = 0x0001;
+
+    uint8_t raw[52];
+    memset(raw, 0x42, sizeof(raw));
+    slot.raw_descriptors = raw;
+    slot.raw_descriptors_len = 52;
+
+    int published = usb_devfs_register_slot(1, &slot);
+    assert_eq(published, 10);
+    assert_eq(s_mock_devfs_count, 10);
+
+    /* Verify specific registered paths */
+    bool found_vendor = false, found_desc = false;
+    for (int i = 0; i < s_mock_devfs_count; i++) {
+        if (strcmp(s_mock_devfs[i].path, "usb/1-1/vendor") == 0) {
+            found_vendor = true;
+            struct vfs_node n = { .fs_data = s_mock_devfs[i].ctx };
+            char buf[32];
+            memset(buf, 0, sizeof(buf));
+            int r = s_mock_devfs[i].ops->read(&n, 0, sizeof(buf), buf);
+            assert_eq(r, 7);
+            assert_eq(strcmp(buf, "0x0627\n"), 0);
+        }
+        if (strcmp(s_mock_devfs[i].path, "usb/1-1/descriptors") == 0) {
+            found_desc = true;
+            struct vfs_node n = { .fs_data = s_mock_devfs[i].ctx };
+            uint8_t out[18];
+            int r = s_mock_devfs[i].ops->read(&n, 0, 18, out);
+            assert_eq(r, 18);
+            assert_eq(out[0], 0x42);
+        }
+    }
+    assert_true(found_vendor);
+    assert_true(found_desc);
+
+    /* Test idempotent re-registration */
+    int re_pub = usb_devfs_register_slot(1, &slot);
+    assert_eq(re_pub, 10);
+    assert_eq(s_mock_devfs_count, 10); /* No duplicates added */
+}
+
 int main(void)
 {
     TEST_SUITE("usb_devfs");
@@ -269,6 +318,7 @@ int main(void)
     test_xhci_controller_registry();
     test_usb_devfs_formatting();
     test_usb_devfs_descriptors_binary_slicing();
+    test_usb_devfs_registration_and_lookup();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

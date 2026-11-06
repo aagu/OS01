@@ -9,6 +9,7 @@
 #include <driver/serial.h>    // write_serial
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
 #include <bus/pci/pci_devfs.h> // pci_devfs_register_all
+#include <driver/usb_devfs.h> // usb_devfs_register_all
 #include <tty/boot.h>         // tty_boot_init
 #include <arch/x86_64/boot.h> // x86_64_boot_early/_memory/_subsystems/_device_nodes
 #include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
@@ -152,6 +153,10 @@ int kernel_main(const struct boot_context *bootctx)
     // runs before this point.  A registration failure is NOT fatal —
     // lspci is a diagnostic tool, not a boot-critical facility.
     pci_devfs_register_all();
+
+    // ARCH-14 Phase 4: publish the USB devfs namespace under /dev/usb/<bus>-<port>/
+    // for all enumerated USB devices. Failure is non-fatal (diagnostic facility).
+    usb_devfs_register_all();
 
 #if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
     void arch10_capacity_fixture_init(void);

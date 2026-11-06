@@ -103,6 +103,7 @@ int usb_devfs_register_slot(uint8_t bus_id, struct xhci_slot *slot)
 {
     if (!slot) return -EINVAL;
 
+    int published = 0;
     for (int a = 0; a < USB_ATTR_COUNT; a++) {
         char path[USB_DEVFS_PATH_MAX];
         snprintf(path, sizeof(path), "%s/%u-%u/%s",
@@ -112,23 +113,32 @@ int usb_devfs_register_slot(uint8_t bus_id, struct xhci_slot *slot)
                  s_attr_names[a]);
 
         usb_attr_ctx_t *ctx = kmalloc(sizeof(usb_attr_ctx_t));
-        if (!ctx) return -ENOMEM;
+        if (!ctx) continue;
         ctx->slot = slot;
         ctx->bus_id = bus_id;
         ctx->attr = (uint8_t)a;
 
         int rc = devfs_register_path(path, ctx, &s_usb_attr_ops);
-        if (rc != 0) {
+        if (rc == 0) {
+            published++;
+        } else if (rc == -EEXIST) {
+            kfree(ctx);
+            published++;
+        } else {
             log_warn("[usb_devfs] failed to register %s: %d\n", path, rc);
             kfree(ctx);
-            return rc;
         }
     }
-    return 0;
+    return published;
 }
+
+static bool s_usb_devfs_registered = false;
+static int s_usb_devfs_published = 0;
 
 int usb_devfs_register_all(void)
 {
+    if (s_usb_devfs_registered) return s_usb_devfs_published;
+
     uint8_t count = xhci_controller_count();
     int registered = 0;
 
@@ -140,13 +150,15 @@ int usb_devfs_register_all(void)
         for (uint8_t s = 1; s <= XHCI_MAX_MANAGED_SLOTS; s++) {
             struct xhci_slot *slot = ctrl->slots[s];
             if (slot && slot->active && slot->configured) {
-                if (usb_devfs_register_slot(bus_id, slot) == 0) {
+                if (usb_devfs_register_slot(bus_id, slot) > 0) {
                     registered++;
                 }
             }
         }
     }
 
+    s_usb_devfs_registered = true;
+    s_usb_devfs_published = registered;
     log_info("[usb_devfs] registered %d USB device(s)\n", registered);
     return registered;
 }
