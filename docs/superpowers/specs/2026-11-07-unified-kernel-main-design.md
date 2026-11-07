@@ -61,14 +61,24 @@
 #ifndef ARCH_FEATURES_H
 #define ARCH_FEATURES_H
 
+#ifndef OS01_HAS_VFS
 #if defined(__x86_64__)
 #define OS01_HAS_VFS        1
-#define OS01_HAS_USERSPACE  1
 #elif defined(__aarch64__)
 #define OS01_HAS_VFS        0
+#else
+#error "Unsupported architecture for OS01_HAS_VFS default"
+#endif
+#endif
+
+#ifndef OS01_HAS_USERSPACE
+#if defined(__x86_64__)
+#define OS01_HAS_USERSPACE  1
+#elif defined(__aarch64__)
 #define OS01_HAS_USERSPACE  0
 #else
-#error "Unsupported architecture for OS01 feature gates"
+#error "Unsupported architecture for OS01_HAS_USERSPACE default"
+#endif
 #endif
 
 /* 编译期契约：特征宏必须严格定义为 0 或 1，不得留空或未定义 */

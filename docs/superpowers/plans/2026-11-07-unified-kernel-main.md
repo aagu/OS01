@@ -19,7 +19,7 @@
 
 ## Review Focus
 
-1. **`AARCH64_READELF` 工具配置与退出码捕获**：Make recipe 展开必须能定位 `llvm-readelf`，通过 `syms="$$(...) || exit 1"` 校验工具自身状态，杜绝管道屏蔽错误。
+1. **`AARCH64_READELF` 工具配置与退出码捕获**：Make recipe 展开必须能定位 `llvm-readelf`，通过 `syms="$$(...)" || exit 1` 校验工具自身状态，杜绝管道屏蔽错误。
 2. **符号审计假阳性/假阴性**：`readelf -Ws` 正则必须严格匹配末尾字段 `[[:space:]]+kernel_main[[:space:]]*$$`，拒绝 `kernel_main.extra`、`kernel_main_alt` 或仅为 `UND` 的未定义符号。
 3. **栈帧门禁与编译告警**：`stack_frame_audit.py` 与 `test_stack_frame_audit.py` 必须精准更新基线例外为 `aarch64_early_arena_preflight: 1600`；除 `pmm_init` 与 `aarch64_early_arena_preflight` 两个已批准的 scheme 5 早期启动栈帧告警外，双架构编排函数无任何编译 warning。
 4. **`head.S` 遗留符号**：删除 `.globl aarch64_main` 声明与跳转，防止产物中残留未定义符号 `U aarch64_main`。
@@ -40,32 +40,71 @@
 - Test: `make test-harness`
 
 - [ ] **Step 1: 编写 Python 跨架构编译探针测试**
-  在 `qemutests/test_boot_facade_headers.py` 中编写单元测试，使用 `clang -fsyntax-only` 探测：
-  - `clang -target x86_64-none-elf -fsyntax-only` 编译包含 `arch/features.h` 与 `arch/boot.h` 的代码块，断言 `OS01_HAS_VFS == 1`、`OS01_HAS_USERSPACE == 1`、`arch_selftest_expected_late() == 8`；
-  - `clang -target aarch64-none-elf -fsyntax-only` 编译包含上述头的代码块，断言 `OS01_HAS_VFS == 0`、`OS01_HAS_USERSPACE == 0`，并在无宏、`AARCH64_AP_SCHED_TEST_AP=1`、`AARCH64_AP_SCHED_WAKE_TEST=1`、`AARCH64_SCHED_TICK_TEST=1` 宏下分别断言 `arch_selftest_expected_late()` 为 9、7、13、7；
-  - 注入非法组合（如 `-DOS01_HAS_VFS=0 -DOS01_HAS_USERSPACE=1`），断言触发 `#error` 语法错误。
+  在 `qemutests/test_boot_facade_headers.py` 中编写单元测试，使用真实 `clang` 探测：
+  - `clang -target x86_64-none-elf -fsyntax-only` 编译包含 `arch/features.h` 与 `arch/boot.h` 的代码块，断言 `_Static_assert(OS01_HAS_VFS == 1)`、`_Static_assert(OS01_HAS_USERSPACE == 1)`、`_Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 8)`；
+  - `clang -target aarch64-none-elf -fsyntax-only` 编译包含上述头的代码块，断言 `_Static_assert(OS01_HAS_VFS == 0)`、`_Static_assert(OS01_HAS_USERSPACE == 0)`，并在无宏、`AARCH64_AP_SCHED_TEST_AP=1`、`AARCH64_AP_SCHED_WAKE_TEST=1`、`AARCH64_SCHED_TICK_TEST=1` 宏下分别断言 `_Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 9/7/13/7)`；
+  - 验证生成代码：通过 `clang -O2 -S -emit-llvm` 验证 `arch_selftest_expected_late()` 在双架构及各变体下精确生成 `ret i32 <N>`，附带负向断言（期望值不匹配时测试必须报错）；
+  - 验证依赖非法报错：通过注入 `-DOS01_HAS_VFS=0 -DOS01_HAS_USERSPACE=1` 与 `-DOS01_HAS_VFS=2`，验证编译器精准触发 `#error` 失败，且不是因为宏重复定义告警。
 - [ ] **Step 2: 创建 `kernel/include/arch/features.h`**
-  实现 Spec §3 所述的特征宏：
-  - 架构默认值：x86=1/1，aarch64=0/0；
-  - 0/1 显式取值静态断言；
-  - `OS01_HAS_USERSPACE` 依赖 `OS01_HAS_VFS` 断言。
+  实现 Spec §3 所述的特征宏（采用 `#ifndef ... #endif` 允许外部安全注入覆盖，同时默认值跨架构定义）：
+  ```c
+  #ifndef OS01_HAS_VFS
+  #if defined(__x86_64__)
+  #define OS01_HAS_VFS        1
+  #elif defined(__aarch64__)
+  #define OS01_HAS_VFS        0
+  #else
+  #error "Unsupported architecture for OS01_HAS_VFS default"
+  #endif
+  #endif
+
+  #ifndef OS01_HAS_USERSPACE
+  #if defined(__x86_64__)
+  #define OS01_HAS_USERSPACE  1
+  #elif defined(__aarch64__)
+  #define OS01_HAS_USERSPACE  0
+  #else
+  #error "Unsupported architecture for OS01_HAS_USERSPACE default"
+  #endif
+  #endif
+
+  #if (OS01_HAS_VFS != 0 && OS01_HAS_VFS != 1)
+  #error "OS01_HAS_VFS must be explicitly defined as 0 or 1"
+  #endif
+
+  #if (OS01_HAS_USERSPACE != 0 && OS01_HAS_USERSPACE != 1)
+  #error "OS01_HAS_USERSPACE must be explicitly defined as 0 or 1"
+  #endif
+
+  #if (OS01_HAS_USERSPACE && !OS01_HAS_VFS)
+  #error "OS01_HAS_USERSPACE requires OS01_HAS_VFS"
+  #endif
+  ```
 - [ ] **Step 3: 创建并更新各架构的 `boot.h` 与通用的 `kernel/include/arch/boot.h`**
   - 在 `kernel/include/arch/x86_64/boot.h` 中提供：
     ```c
+    #ifndef ARCH_SELFTEST_EXPECTED_LATE
+    #define ARCH_SELFTEST_EXPECTED_LATE 8U
+    #endif
+
     static inline unsigned int arch_selftest_expected_late(void) {
-        return 8;
+        return ARCH_SELFTEST_EXPECTED_LATE;
     }
     ```
   - 在 `kernel/include/arch/aarch64/boot.h` 中提供：
     ```c
-    static inline unsigned int arch_selftest_expected_late(void) {
+    #ifndef ARCH_SELFTEST_EXPECTED_LATE
     #if defined(AARCH64_AP_SCHED_WAKE_TEST)
-        return 13;
+    #define ARCH_SELFTEST_EXPECTED_LATE 13U
     #elif defined(AARCH64_AP_SCHED_TEST_AP) || defined(AARCH64_SCHED_TICK_TEST)
-        return 7;
+    #define ARCH_SELFTEST_EXPECTED_LATE 7U
     #else
-        return 9;
+    #define ARCH_SELFTEST_EXPECTED_LATE 9U
     #endif
+    #endif
+
+    static inline unsigned int arch_selftest_expected_late(void) {
+        return ARCH_SELFTEST_EXPECTED_LATE;
     }
     ```
   - 在 `kernel/include/arch/boot.h` 中包含 `<arch/features.h>` 与相应 per-arch 头，声明 Spec §6.1 规定的 8 个 Facade 函数（包含 `void arch_early_panic(const char *msg) __attribute__((noreturn));`）。
