@@ -8,7 +8,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 ## 当前状态（一句话）
 
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统，PID 1 init 优雅关机闭环）
-- **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、**ARCH-5（VFS 抽象补强：fs 注册表/ops 分离/元数据/活跃节点回收/挂载树/dcache，2026-10-24 闭环）**、ARCH-7（移除 `#define mmap`）、ARCH-9（驱动模型/PCI/总线解耦）、**ARCH-10（静态容量与工程卫生，2026-11-02 闭环）**、**ARCH-11（devfs 子目录化：多级注册路径 + 目录树，2026-11-02 闭环）**、**ARCH-12（lspci PCI 设备列举命令：零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`，2026-11-02 闭环）**、**ARCH-14（USB xHCI 主机控制器与用户态 lsusb：Phase 1–4 全链路，2026-11-06 闭环）** 均已闭环合入 master；剩余 ARCH-6、ARCH-8 推进中
+- **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、**ARCH-5（VFS 抽象补强：fs 注册表/ops 分离/元数据/活跃节点回收/挂载树/dcache，2026-10-24 闭环）**、ARCH-7（移除 `#define mmap`）、ARCH-9（驱动模型/PCI/总线解耦）、**ARCH-10（静态容量与工程卫生，2026-11-02 闭环）**、**ARCH-11（devfs 子目录化：多级注册路径 + 目录树，2026-11-02 闭环）**、**ARCH-12（lspci PCI 设备列举命令：零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`，2026-11-02 闭环）**、**ARCH-14（USB xHCI 主机控制器与用户态 lsusb：Phase 1–4 全链路，2026-11-06 闭环）**、**ARCH-6（FS 并发与块缓存：调度器 per-mount mutex + blockdev 写回块缓存 + 四核 FS 压测，2026-11-07 闭环）** 均已闭环合入 master；剩余 ARCH-8 推进中
 - **aarch64 适配**：Generic Timer 全栈 + GICv2 Phase 1 + IPI fix + EL1 sync 致命诊断 + M0 启动直映 + M1 运行期直映 + M2 Slab 接入 + M3 内核 VMM + **EL1 BSP 协作式内核线程调度（P1–P5 全通过，2026-10-31 闭环合入 master）** + **AP 协作式调度 P1（轮询协作式：accepted AP 经单向 task-stack handoff 进入公共 EEVDF 调度器，显式 pinned kthread 全生命周期跨核覆盖，无 SGI/无抢占，2026-11-01 完成验收）** + **AP 调度 P2（SGI4 显式远端唤醒 + WFI idle，2026-11-01 验收）** + **引导字标（boot logo 经 `fb_write` facade 绘制与端到端验证）** 已闭环；中断/异常分派统一（arch-neutral dispatch + 6 条入口 + x86 20 异常 28 IRQ 第二期）已闭环；M4 用户态 VMA 与统一 kernel_main 尚未启动
 - **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移、QEMU 分辨率切换与显示所有权协调器、LVGL v9.5.0 初步移植与图形 showcase、**GUI-1 LVGL 平台后端（libgui）**、**GUI-2 输入与焦点**、**GUI-3 Material 风格桌面**、**GUI-2b 原生控件体系与统一焦点引擎（彻底废除桌面临时自建焦点，`gui_widget.h` / `gui_layout.h` / `gui_event.h` / `gui_focus.h`，2026-10-26 闭环）** 均已合入 master；后续推进 GUI-4 字体资源与 GUI-5/6 窗口服务器
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
@@ -81,6 +81,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 - **ARCH-11 devfs 子目录化**（2026-11-02 闭环，devfs 注册支持 `/` 分隔多级路径、内部按组件树状组织目录节点、隐式创建中间目录与 readdir 逐级遍历，VFS 零修改）
 - **ARCH-12 lspci PCI 设备列举命令**（2026-11-02 闭环，零 syscall 实现 `/dev/pci/<BDF>/<attr>` 命名空间发布，用户态 `/bin/lspci` 工具支持 `-x`/`-n`/`-v`）
 - **ARCH-14 USB xHCI 主机控制器与用户态 lsusb**（2026-11-06 闭环，Phase 1–4 全链路：PCI 探测与 MMIO 初始化、端口复位与 Slot 分配、EP0 控制传输与描述符获取、配置树解析与动态端点环、多端点配置、全局控制器跟踪、`/dev/usb` 10 类属性与二进制切片读取节点、`/bin/lsusb` 确定性排序与 `-v`/`-s` 支持，合入 master commit `cf071a0b` ~ `ae7a5999`）
+- **ARCH-6 FS 并发与块缓存**（2026-11-07 闭环，短中期目标全交付：ext2/FAT/tmpfs 三大 FS 大锁从「spinlock 持锁跨 AHCI 忙等」升级为调度器支持的 per-mount `mutex_t`（tmpfs 由全局锁改 per-mount ctx，pre-SMP 挂载期沿用 vfs bootstrap 门控豁免）；blockdev 层新增 sector 粒度写回块缓存 `kernel/block/bcache.c`（物理盘 (dev, LBA) 哈希、分区透传、per-buf pin/BUSY 预留 + ARM→重查等待握手、data_lock sector 原子性、LRU 逐出脏写回可恢复、耗尽睡眠等待、显式 `block_device_flush()` 与 `SYS_sync` 全盘 flush 接线）；SMP 验收 = 内核 late 双 CPU 自测 `bcache_smp_coherence`（同 sector 原子性/并发缺失/flush drain/耗尽等待）+ 宿主 `test_bcache` 23 用例 + 四核用户态压测 suite `arch6-fsstress`（4 worker × ext2/tmpfs/vfat 并发写读校验/rename/跨 worker 可见性/共享目录竞争，fail-closed 解析器 + 宿主协议回归 28 项）；commit `5e233fe1` ~ `1b432f75`）
 
 **ABI 决策（2026-10-04）**：OS01 自有 syscall ABI（`kernel/include/uapi/syscall.h`）为**唯一标准**；Linux x86_64 ABI 仅作为兼容层（服务 BusyBox 等 `PF_LINUX_ABI` 二进制），不反向主导编号或语义。
 
@@ -88,7 +89,6 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 问题 | 目标 / 完成条件 | 依赖 |
 |----|------|----------------|------|
-| ARCH-6 FS 并发与块缓存 | `fat.c`、`tmpfs.c` 0 处加锁（`ext2.c` 19 处），默认 `-smp 2` 下 FAT 表/簇分配/tmpfs 目录存在数据竞争；全内核无 buffer/page cache，每次读直达 AHCI | 短期：每挂载点锁兜底 FAT/tmpfs；中期：blockdev 层按 (dev, blkno) 哈希的块缓存，ext2/FAT 共用，含写回与一致性；SMP 并发读写压力用例 | 独立（正确性优先）；块缓存与 ARCH-9 块层解耦协同 |
 | ARCH-8 子系统框架补完 | phase 用魔数 3–6，Phase 1–2 / 7–9 仍硬编码于 `kernel_main`；同 phase 内顺序依赖链接顺序（需 link-order 审计兜底）；必需子系统失败只打印 `FAIL` 继续启动；固定表 `MAX_SUBSYS 64`/`MAX_SUBSYS_PERCPU 16`；框架自身用 `serial_printk` 违背日志规范 | 命名 phase 枚举并覆盖全部启动阶段；支持显式依赖（或 phase 内 order 字段）取代链接顺序；非 OPTIONAL 失败 `panic`；表改链接段驱动（容量随注册数）；日志改 `log_*` | 与“统一 kernel_main”协同 |
 
 ### 🖥 P3 GUI

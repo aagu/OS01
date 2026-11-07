@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-11-07
+
+- feat(fs,block): **ARCH-6 FS 并发与块缓存全栈闭环**（设计 [spec](superpowers/specs/2026-11-07-arch6-fs-concurrency-blockcache-design.md)，实施 [plan](superpowers/plans/2026-11-07-arch6-fs-concurrency-blockcache.md)，commit `5e233fe1` ~ `1b432f75`）：
+
+  **做了什么**
+
+  - **Phase 1 FS 锁升级**（commit `5e233fe1` ~ `54426769`）：
+    - `vfs_sched_ready()` 门面（`kernel/fs/vfs.c`）：调度器就绪判定 + `vfs_test_set_sched_ready()` 宿主钩子，与 `vfs_ns_lock` 同一 bootstrap 豁免语义（pre-SMP 单核挂载期不取调度器锁）。
+    - ext2/FAT：per-mount `spinlock_T` 大锁升级为调度器支持 `mutex_t`（进程上下文持锁跨 AHCI 忙等 I/O 不再烧核自旋），`_locked` 后缀约定同步；hosttest 锁内检断言改 `mutex owner` 语义并激活真实取锁路径。
+    - tmpfs：全局 `tmpfs_lock` 改 per-mount `tmpfs_mount_ctx_t`（mutex + root），挂载/卸载分配与释放 ctx；跨挂载 rename 由 VFS `-EXDEV` 保证排除。
+
+  - **Phase 2 写回块缓存（`kernel/block/bcache.c` + 对称头）**（commit `aa779c33` ~ `29b96793`）：
+    - 2048 项 × 512B 槽池（元数据/数据分池分配），(物理盘 dev, LBA) 哈希 + 分区设备透传（`dev->parent != NULL` 不进缓存，物理块以父盘 key 收敛）。
+    - 并发协议：per-buf `refcnt` pin、`BUSY` 独占维护预留（填充/写回/flush drain/逐出）、per-buf `data_lock`（irqsave，512B memcpy sector 原子性）、ARM→重查等待握手（能前进时须在本次锁内预留；key 消失视作无未来生产者，绝不 schedule）、全局唤醒在元数据锁外。
+    - 写回语义：写驻留 `VALID|DIRTY` 不落盘；显式 `block_device_flush(dev)` 快照 DIRTY key 后逐 key BUSY 预留 + 等 pin 归零 + 锁外写回，成功才清 DIRTY；`block_device_flush` 先软件写回再可选驱动 flush；`SYS_sync` 遍历全部 `BLOCK_DISK`，失败续盘返首错。
+    - LRU 逐出：free list → LRU 尾（跳过 pinned/BUSY）；脏受害项先持旧 key BUSY 锁外写回，失败保 key/data/DIRTY 返原错，成功才转移 key；池耗尽 ARM→重查等待而非 ENOMEM。
+    - 设备退役/测试 reset 静默丢弃缓存项（退役设备 ops 已空，无写回路径）。
+
+  - **Phase 3 SMP 验收**（commit `83d37709`、`bfe97914`、`1b432f75`）：
+    - 内核 late 自测 `bcache_smp_coherence`（`kernel/selftest/test_bcache.c`，late case 第 9 项）：双 pinned kthread 验证同 sector 原子性（完整 512B 只能是 A/B 模式）、并发首次缺失单次后端读、相邻 sector 隔离、flush 等 pinned 读取、耗尽等待与释放、flush 后端可见性与无泄漏；worker 用 `blocker_wait` 真阻塞让 idle harness 可发令。
+    - 宿主 `hosttests/cases/test_bcache.c` 23 用例（读填充/写回读己之写/flush 持久化与在途跳过/失败保脏/驱动 flush 错误/分区 key 收敛/LRU 逐出写回/耗尽等待）+ `arch6_bcache_runtime` 宿主等待环境（wrap `wait_queue_arm/sleep` 注入 ARM 前/后完成窗口）。
+    - 四核用户态压测 suite `arch6-fsstress`（`user/test_arch6_fsstress/` + `config/inittab.arch6-fsstress` + fail-closed 解析器 `qemutests/arch6_fsstress.py` + 宿主协议回归 `qemutests/test_arch6_fsstress.py` 28 项）：4 worker × ext2/tmpfs/vfat 并发创建/32 段签名写读/rename/跨 worker 可见性/删除 + `shared/` 并发创建删除竞争窗口；管道屏障（收齐四个唯一事件才放行）、SMP=4 强制 gate、rootfs 三分支过滤、nightly CI 登记。
+
+  **验证**：`test-host` / `test-static` / `OS01_SYSTEST=1 test-qemu SUITE=systest`（99/99）/ `KERNEL_SELFTEST=1 test-kernel-selftest`（43/43，含 9 late case 与四核证据）/ `ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress`（12 worker PASS + 父 PASS ×2）全绿。
+
+---
+
 ## 2026-11-06
 
 - feat(xhci,usb,user): **ARCH-14 USB xHCI 主机控制器与用户态 lsusb 全栈闭环（Phase 1–4 全链路）**（设计 [spec P1](superpowers/specs/2026-11-06-xhci-p1-design.md) / [spec P2](superpowers/specs/2026-11-06-xhci-phase2-design.md) / [spec P3](superpowers/specs/2026-11-06-xhci-phase3-design.md) / [spec P4](superpowers/specs/2026-11-06-usb-devfs-lsusb-design.md)，实施 [plan P1](superpowers/plans/2026-11-06-xhci-p1-bringup.md) / [plan P2](superpowers/plans/2026-11-06-xhci-phase2.md) / [plan P3](superpowers/plans/2026-11-06-xhci-phase3.md) / [plan P4](superpowers/plans/2026-11-06-usb-devfs-lsusb.md)）：

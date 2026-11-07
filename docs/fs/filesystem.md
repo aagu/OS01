@@ -32,6 +32,67 @@ A static table of up to `BLOCKDEV_MAX` (8) devices is maintained.
 
 ---
 
+## FS Concurrency & Block Cache (ARCH-6, `kernel/block/bcache.c`, `kernel/include/block/bcache.h`)
+
+### Per-mount locking (Phase 1)
+
+- Each of ext2, FAT32 and tmpfs guards its whole VFS-op operation bodies with a
+  **scheduler-backed per-mount `mutex_t`** (`kernel/sync/mutex.c`); tmpfs keeps
+  its mutex plus root node in a per-mount `tmpfs_mount_ctx_t` (mount->fs_data).
+  Boot-time mounting (pre-SMP, single core) skips the mutex via
+  `vfs_sched_ready()` — the same `vfs_bootstrap` exemption `vfs_ns_lock` uses;
+  host tests opt in with `vfs_test_set_sched_ready(true)`.
+- Lock order: `FS mutex → mount->active_lock (node bookkeeping only) → bcache
+  metadata lock (leaf)`. The bcache metadata lock never nests with the
+  per-buffer data locks, the wait-queue lock, or the AHCI port lock; all I/O,
+  sleeping and allocation happen outside cache spinlocks.
+
+### Block cache (Phase 2)
+
+- `block_device_read/write` on a **physical disk** (`dev->parent == NULL`) go
+  through the sector-granular cache (2048 × 512 B slots, (dev, LBA) hash).
+  **Partition devices never enter the cache**: their ops forward to the
+  parent's wrapper, so a physical block has exactly one key.
+- Write-back: writes update the cached sector and mark it `VALID|DIRTY`
+  without touching the backend; reads are served from the cache
+  (read-your-writes). Consistency contract: the cache is the single source of
+  truth for resident blocks — **no module may bypass the wrapper** and issue
+  raw `ops->read/write` against a published device (cache write-back itself
+  excepted).
+- Durability: `block_device_flush(dev)` snapshots the dirty (dev, LBA) keys,
+  reserves each with `BUSY` (blocking new pins), drains in-flight pins, writes
+  back outside all locks and clears `DIRTY` only on success; a failing
+  write-back keeps key/data/DIRTY and returns the raw error. `SYS_sync`
+  flushes every registered `BLOCK_DISK` (first error wins, remaining disks
+  still flushed). This is backend visibility, **not a power-loss
+  guarantee** (the AHCI flush hook is a no-op).
+- Concurrency: per-buffer `refcnt` pins, an exclusive `BUSY` reservation for
+  maintenance (fill / flush drain / evict), a per-buffer `data_lock`
+  (irqsave) making single-sector copies atomic, and an ARM→recheck wait
+  handshake on a global wait queue (a waiter that can progress reserves in
+  the same critical section; a vanished key is "no future producer" and never
+  schedules).
+- Eviction: free list first, then the LRU tail that is unpinned and not BUSY;
+  a dirty victim writes back under its old key's BUSY reservation before the
+  slot is transformed, keeping key/data/DIRTY on failure. Pool exhaustion
+  waits instead of failing.
+- Device retirement (`block_device_unregister_boot`) and the test reset hook
+  silently **drop** the retired device's entries (no write-back — the ops are
+  gone).
+
+### SMP acceptance
+
+- `make KERNEL_SELFTEST=1 test-kernel-selftest` runs the late
+  `bcache_smp_coherence` case (two pinned kthreads: same-sector atomicity,
+  concurrent first miss, adjacent-sector isolation, flush behind a held pin,
+  exhaustion wait, backend visibility, no leaks).
+- `make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress` boots the
+  four-CPU stress variant: four workers concurrently create / write / verify /
+  rename / cross-read / delete files on ext2, tmpfs and vfat plus a shared
+  directory race window, with fail-closed marker parsing.
+
+---
+
 ## VFS Layer (`kernel/fs/vfs.c`, `kernel/include/fs/vfs.h`)
 
 ### Key Structures
