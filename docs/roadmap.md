@@ -94,7 +94,23 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 问题 | 目标 / 完成条件 | 依赖 |
 |----|------|----------------|------|
-| ARCH-8 子系统框架补完 | phase 用魔数 3–6（`SUBSYS_PHASE_3..6`），只覆盖中断控制器/定时器/设备 IRQ/存储四段；启动其余阶段（1/2/7/8/9）由 facade 钩子与 `kernel_main` 内的 `OS01_HAS_VFS` 段落分担，尚无覆盖全启动阶段的命名 phase 枚举；同 phase 内顺序依赖链接顺序（需 link-order 审计兜底）；必需子系统失败只打印 `FAIL` 继续启动；固定表 `MAX_SUBSYS 64`/`MAX_SUBSYS_PERCPU 16`；框架自身用 `serial_printk` 违背日志规范 | 命名 phase 枚举并覆盖全部启动阶段；支持显式依赖（或 phase 内 order 字段）取代链接顺序；非 OPTIONAL 失败 `panic`；表改链接段驱动（容量随注册数）；日志改 `log_*` | 统一 kernel_main ✅（2026-11-07），耦合已解除，可独立排期；**当前状态：尚未启动（仓库内 subsys 框架仍为 phase 魔数 + 固定表 + FAIL 继续启动）** |
+| ARCH-8 子系统框架补完 | 数字 phase 3–6 仅覆盖部分启动阶段；同 phase 按注册/链接顺序执行；非 OPTIONAL 失败在框架中仅日志记录；固定注册表和 per-CPU 回调执行位置需明确契约。框架当前已使用 `log_*` | 失败传播归 BOOT-3；命名阶段、依赖检查、per-CPU 语义归 BOOT-4；固定表是否改链接段驱动按容量与生命周期需求裁决，不预设完整 DAG 或将全部启动流程纳入注册框架 | 统一 kernel_main ✅；按下方五个 spec 推进，避免重复实施；**尚未启动** |
+
+#### 启动编排治理：五个 spec（2026-11-07）
+
+依据：[系统启动顺序、阶段抽象与优化分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md)（源码基准 `b3a4f3bc`）。当前为**待编写 spec / 待实施**；报告仅作静态分析，CPU 握手与早期 IRQ 风险尚无 QEMU 复现证据。
+
+| Spec | 范围 | 验收目标 | 依赖 / 状态 |
+|------|------|----------|-------------|
+| BOOT-1 CPU 生命周期与 SMP 握手 | 明确 percpu 构造、online、ipi_ready、scheduler_ok 的生产者与消费者；修正 x86 AP 响应等待条件，并保留 aarch64 shootdown 资格约束 | 延迟/不响应 AP 不会误判成功；IPI/调度只使用符合条件的 CPU；双架构 SMP/shootdown 回归 | 统一 kernel_main ✅；待编写 spec |
+| BOOT-2 早期中断与时间设施启动顺序 | 分离控制器配置、handler 安装、中断源启动、CPU IRQ 放行；核查 BSP percpu、IRQ 返回、softirq 与早期校准依赖 | 首次 IRQ 可达路径满足前置条件；PIT/LAPIC handoff、校准及 fallback 正常；先观测/注入验证风险再定修复 | BOOT-1；待编写 spec |
+| BOOT-3 启动失败传播与必需能力检查 | 注册/initcall 错误传播，必需/可选策略，根挂载、TTY/PTY、PID 1 创建检查；承接 ARCH-8 失败处理 | 必需步骤失败原处停止并明确定位；可选失败可降级；覆盖注册失败、根挂载和初始运行环境创建失败 | 建议在 BOOT-2 后验收；待编写 spec |
+| BOOT-4 阶段契约与跨架构编排 | 公共 boot 钩子前置/后置能力、命名阶段、同阶段依赖、per-CPU 准备与本核执行的区分；承接 ARCH-8 编排部分 | 同名钩子完成能力明确；双架构按特性门满足契约；必要顺序不依赖偶然链接次序；注释/文档一致 | BOOT-1～3；待编写 spec |
+| BOOT-5 调度启动与系统服务解耦 | 拆分 task_init 的架构准备、idle、标准 fd、PID 1、运行态发布、网络/thermal、自测及 idle loop；明确 VFS bootstrap 退出边界 | init 保持 PID 1；任务可运行时机满足运行态契约；网络、thermal、late selftest、终端/Ctrl-C 正常 | BOOT-4；待编写 spec |
+
+建议集成顺序：**BOOT-1 → BOOT-2 → BOOT-3 → BOOT-4 → BOOT-5**。前三项优先解决正确性，后两项整理结构；BOOT-3 的失败策略设计可提前进行。每项独立编写设计 spec 和实施 plan，包含文件边界、不变量、正常/失败路径验收及双架构适用范围。
+
+范围约束：保持主要挂载先于 SMP、init 先取得 PID 1、IPI/调度分别发布就绪；不在同一改动中顺带做并行启动、完整依赖 DAG、EL0 适配或低层 AP API 全面统一。根盘选择、init respawn 退避/ASKFIRST 非阻塞监督、启动耗时观测和诊断 probe 分离留作后续独立项。实施时 syscall E2E 与内核 selftest 分开运行。
 
 ### 🖥 P3 GUI
 
@@ -222,6 +238,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | `docs/fs/filesystem.md` | VFS 注册表、ops 分离、元数据、挂载树、dcache、FAT32、ext2、devfs、procfs、tmpfs、GPT、block device |
 | `docs/driver/driver.md` | 驱动子系统（keyboard, serial, ahci, pci, e1000, virtio-net, fb, mouse, gfx0, logo, xhci, usb_devfs） |
 | `docs/subsys/subsys.md` | 子系统注册框架（`SUBSYS_INITCALL()` + phase 顺序） |
+| [启动顺序与阶段抽象分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md) | 静态证据、CPU/IRQ/失败传播风险及 BOOT-1～5 spec 拆分依据（尚未实施） |
 | `docs/log/log.md` | 日志级别、DEBUG_CHANNELS、LOG_TARGET、NDEBUG |
 | `docs/build/build.md` + `docs/build/toolchain.md` | 构建系统手册（三篇合一：profile 构建体系、端到端运行调试、构建/测试 harness 权威 taxonomy 与 6 bucket 目标）+ 工具链指南 |
 | `docs/testing/testing-policy.md` | 测试分层规范、场景归属与覆盖策略 |
