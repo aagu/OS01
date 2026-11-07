@@ -80,6 +80,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    intr/dispatch.c \
                    core/stack_chk.c \
                    core/printk.c \
+                   core/main.c \
                    driver/logo.c \
                    driver/arch_fb_write.c \
                    subsys/subsys.c \
