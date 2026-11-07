@@ -12,21 +12,27 @@
 #include <sched/internal.h>
 #include <sched/diag.h>
 #include <percpu/percpu.h>
-#include <core/printk.h>
+#include <log/log.h>
 #include <kernel.h>
 #include <time/timer.h>
 
 // ── Dump all tasks ─────────────────────────────────────────
+// BOOT-1 Task 2: converted from bare serial_printk to log_err (the hang
+// dump is a fatal-diagnostic path) per the kernel logging policy; the
+// per-CPU online read is an acquire diagnostic snapshot of each CPU's
+// release publication.
 void hang_dump_all(void)
 {
     uint64_t jif = jiffies;
 
-    serial_printk("\n========== HANG DETECTED ==========\n");
+    log_err("\n========== HANG DETECTED ==========\n");
 
     for (int i = 0; i < (int)num_cpus; i++) {
         percpu_t *cpu = &percpu_data[i];
-        serial_printk("CPU %d: online=%d sched_ok=%d watchdog=%lu sched_count=%lu\n",
-                      i, cpu->online, cpu->scheduler_ok,
+        log_err("CPU %d: online=%d sched_ok=%d watchdog=%lu sched_count=%lu\n",
+                      i,
+                      __atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE),
+                      __atomic_load_n(&cpu->scheduler_ok, __ATOMIC_ACQUIRE),
                       (unsigned long)cpu->watchdog_counter,
                       (unsigned long)cpu->schedule_count);
     }
@@ -48,7 +54,7 @@ void hang_dump_all(void)
             case TASK_STOPPED:      state_str = "STOPPED";      break;
         }
 
-        serial_printk("  task %d: pid=%d cpu=%d state=%s counter=%ld flags=%#lx\n",
+        log_err("  task %d: pid=%d cpu=%d state=%s counter=%ld flags=%#lx\n",
                       task_idx++, t->pid, t->cpu, state_str,
                       (long)t->counter, (unsigned long)t->flags);
         /* Architecture-specific saved context (x86: rip/rsp/cr3) —
@@ -56,7 +62,7 @@ void hang_dump_all(void)
          * thread->rip / thread->rsp / thread->cr3 directly. */
         arch_dump_task_context(t);
     }
-    serial_printk("  (%d tasks total at jiffies=%lu)\n",
+    log_err("  (%d tasks total at jiffies=%lu)\n",
                   task_idx, (unsigned long)jif);
-    serial_printk("=====================================\n\n");
+    log_err("=====================================\n\n");
 }

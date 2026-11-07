@@ -41,14 +41,19 @@
 #define _KERNEL_IPI_H
 #define _KERNEL_DEBUG_H
 
-/* Minimal percpu_t: only the fields tlb.c touches.  The production
- * layout is pinned by test_percpu_layout.c. */
+/* Minimal percpu_t: only the fields tlb.c touches (scheduler_ok is
+ * present so a case can pin that the TLB condition does NOT consult it
+ * — an IPI-only CPU stays a shootdown target; BOOT-1 Task 2).  This is
+ * a dependency-isolation mock, NOT the production type: the real
+ * percpu_t layout is pinned by test_percpu_layout.c and by the real
+ * percpu.c host compile in test_boot_cpu_lifecycle.c. */
 typedef struct percpu {
     uint64_t self;
     uint64_t need_resched;
     uint32_t cpu_id;
     uint32_t arch_processor_id;
     uint32_t online;
+    uint32_t scheduler_ok;
     uint32_t ipi_ready;
     uint32_t tlb_ack_gen;
 } percpu_t;

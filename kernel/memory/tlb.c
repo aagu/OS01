@@ -69,7 +69,11 @@ static uint64_t build_target_mask_excl_self(void)
     uint64_t ready = 0;
 
     for (uint32_t cpu = 0; cpu < num_cpus; cpu++) {
-        if (cpu == self || !percpu_data[cpu].online)
+        /* BOOT-1: acquire — the target's own release publication must be
+         * visible before we aim an IPI at it.  scheduler_ok deliberately
+         * NOT consulted: an IPI-only CPU still flushes shared mappings. */
+        if (cpu == self ||
+            !__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE))
             continue;
         if (__atomic_load_n(&percpu_data[cpu].ipi_ready,
                             __ATOMIC_ACQUIRE))

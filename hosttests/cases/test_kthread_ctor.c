@@ -524,6 +524,57 @@ static void suite_arch_default_mask(void)
     assert_eq(1, (int)mock_notified_cpu);
 }
 
+/* ── 9. BOOT-1 Task 2: unpinned-picker qualification three-state ──
+ * sched_pick_cpu_mask() (the REAL balance.c picker behind unpinned
+ * creation) must skip offline CPUs and online-but-not-scheduler_ok
+ * CPUs, and place on a ready-and-allowed CPU. */
+static void suite_picker_qualification_three_states(void)
+{
+    /* offline: bit allowed by the default mask but online == 0 — the
+     * picker must not land the task there even though scheduler_ok==1. */
+    TEST_SUITE("picker skips offline CPU");
+    switch_tail_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 0;
+    percpu_data[1].scheduler_ok = 1;
+    mock_arch_default_mask = 3ULL;          /* both CPUs in the mask */
+    int pid = kernel_thread(ctor_fn, 7, PF_KTHREAD);
+    assert_true(pid >= 1);
+    assert_eq(0, (int)last_created_task()->cpu);   /* landed on CPU0 */
+
+    /* online but scheduler not started: also skipped by the picker
+     * (window is closed here — sched_boot_start ran in reset). */
+    TEST_SUITE("picker skips online-but-unscheduled CPU");
+    switch_tail_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 0;
+    mock_arch_default_mask = 3ULL;
+    pid = kernel_thread(ctor_fn, 7, PF_KTHREAD);
+    assert_true(pid >= 1);
+    assert_eq(0, (int)last_created_task()->cpu);
+
+    /* ready and allowed: the picker may use the eligible CPU (empty
+     * runqueue wins the tiebreak). */
+    TEST_SUITE("picker places on ready-and-allowed CPU");
+    switch_tail_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[0].nr_running = 4;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 1;
+    percpu_data[1].nr_running = 0;
+    mock_arch_default_mask = 3ULL;
+    pid = kernel_thread(ctor_fn, 7, PF_KTHREAD);
+    assert_true(pid >= 1);
+    assert_eq(1, (int)last_created_task()->cpu);
+}
+
 int main(void)
 {
     suite_window_initially_closed();
@@ -537,6 +588,7 @@ int main(void)
     suite_runtime_create();
     suite_notify_uses_captured_cpu_after_publication();
     suite_arch_default_mask();
+    suite_picker_qualification_three_states();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_kthread_ctor",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

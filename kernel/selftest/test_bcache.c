@@ -431,7 +431,8 @@ int test_bcache_smp_coherence(void)
     arch_irq_state_t flags = arch_local_irq_save();
     unsigned hcpu = cpu_id(), peer;
     for (peer = 0; peer < num_cpus && peer < NR_CPUS; peer++)
-        if (peer != hcpu && percpu_data[peer].online &&
+        if (peer != hcpu &&
+            __atomic_load_n(&percpu_data[peer].online, __ATOMIC_ACQUIRE) &&
             percpu_data[peer].scheduler_ok)
             break;
     if (peer >= num_cpus || peer >= NR_CPUS) {

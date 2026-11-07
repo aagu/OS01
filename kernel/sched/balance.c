@@ -30,7 +30,7 @@ unsigned sched_pick_cpu_mask(uint64_t allowed)
             continue;
         if (i >= num_cpus)
             break;  /* mask bit beyond live set — nothing else can match */
-        if (!percpu_data[i].online ||
+        if (!__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) ||
             !__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE))
             continue;
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
@@ -145,7 +145,8 @@ void sched_balance(percpu_t *rq)
     uint64_t max_vr = 0;
 
     for (uint32_t i = 0; i < num_cpus; i++) {
-        if (i == rq->cpu_id || !percpu_data[i].online ||
+        if (i == rq->cpu_id ||
+            !__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) ||
             !__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE))
             continue;
         uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;

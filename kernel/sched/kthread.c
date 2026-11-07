@@ -73,7 +73,7 @@ static int kthread_place_unpinned(unsigned *out_cpu)
     if (c == NR_CPUS) {
         if (!sched_boot_creation_open())
             return -EINVAL;
-        if (!percpu_data[0].online)
+        if (!__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE))
             return -EINVAL;
         c = 0;
     }
@@ -102,7 +102,7 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
         return -EINVAL;
     if (target_cpu >= NR_CPUS || target_cpu >= num_cpus)
         return -EINVAL;
-    if (!percpu_data[target_cpu].online)
+    if (!__atomic_load_n(&percpu_data[target_cpu].online, __ATOMIC_ACQUIRE))
         return -EINVAL;
     if (!__atomic_load_n(&percpu_data[target_cpu].scheduler_ok,
                          __ATOMIC_ACQUIRE)) {
@@ -316,7 +316,7 @@ int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu)
 {
     if (cpu >= NR_CPUS || cpu >= num_cpus)
         return -EINVAL;
-    if (!percpu_data[cpu].online ||
+    if (!__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE) ||
         !__atomic_load_n(&percpu_data[cpu].scheduler_ok, __ATOMIC_ACQUIRE))
         return -EINVAL;
 

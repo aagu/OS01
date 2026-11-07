@@ -177,7 +177,9 @@ int sched_accounting_read(unsigned cpu, struct cpu_usage_snapshot *out)
 
     /* online comes from the percpu actual online state, not from the
      * accounting bookkeeping. */
-    out->online = (cpu < num_cpus) ? percpu_data[cpu].online : 0;
+    out->online = (cpu < num_cpus)
+                      ? __atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE)
+                      : 0;   /* BOOT-1: acquire diagnostic snapshot */
 
     /* valid requires the global publish, this CPU's scheduler being
      * up, and a really-started tick source on this CPU. */

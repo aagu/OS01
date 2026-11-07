@@ -86,9 +86,12 @@ void test_boot_debug_guards(void)
     assert_not_null(src);
     if (!src) return;
 
-    /* BSP: handler registered, percpu ready, IF enabled */
+    /* BSP: handler registered, percpu ready, IF enabled.  BOOT-1: the
+     * online guard is an acquire load (the AP/BSP release publication),
+     * not a plain field read. */
     assert_true(contains(src, "ASSERT(intr_handler_table[IPI_VECTOR_TLB] != 0)"));
-    assert_true(contains(src, "ASSERT(percpu_data[0].online == 1)"));
+    assert_true(contains(src,
+        "ASSERT(__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) == 1)"));
     assert_true(contains(src, "ASSERT(x86_irqs_enabled())"));
     free(src);
 }

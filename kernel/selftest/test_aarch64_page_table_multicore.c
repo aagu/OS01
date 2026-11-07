@@ -383,7 +383,7 @@ static int section_target_set(void)
 {
     /* Precondition: AP1 is online AND has published its IPI channel —
      * i.e. tlb.c's build_target_mask_excl_self() must include it. */
-    if (!percpu_data[1].online)
+    if (!__atomic_load_n(&percpu_data[1].online, __ATOMIC_ACQUIRE))
         return section_fail("target_set:ap1_offline", -EIO);
     if (!__atomic_load_n(&percpu_data[1].ipi_ready, __ATOMIC_ACQUIRE))
         return section_fail("target_set:ap1_not_ready", -EIO);

@@ -142,6 +142,64 @@ static void case_mask_excludes_unready_offline_self(void)
  * online but NOT yet ipi_ready is never targeted, so its ack generation
  * must be unchanged by the shootdown; once it publishes ipi_ready, the
  * NEXT shootdown targets it and bumps its gen exactly once. */
+
+/* BOOT-1 Task 2: the three target-qualification states, named per the
+ * plan.  The shootdown condition stays online ∧ ipi_ready ∧ ¬self —
+ * scheduler_ok must NOT gate shootdown eligibility (an unadmitted but
+ * IPI-ready aarch64 AP still services shared-page-table shootdowns). */
+
+static void case_offline_ready_excluded(void)
+{
+    TEST_SUITE("tlb_shootdown: offline_ready_excluded");
+    reset_mock(3);
+    /* offline but ipi_ready: must NOT be targeted ... */
+    percpu_data[1].online = 0; percpu_data[1].ipi_ready = 1;
+    /* ...while a fully ready peer is. */
+    percpu_data[2].online = 1; percpu_data[2].ipi_ready = 1;
+    ack_on_broadcast = 1;
+
+    tlb_shootdown();
+
+    assert_eq(mock_ipi_mask, 1UL << 2);
+    assert_eq(percpu_data[1].tlb_ack_gen, 0);    /* untouched */
+    assert_eq(percpu_data[2].tlb_ack_gen, 1);
+    assert_false(panic_armed);
+}
+
+static void case_online_ipi_missing_excluded(void)
+{
+    TEST_SUITE("tlb_shootdown: online_ipi_missing_excluded");
+    reset_mock(2);
+    percpu_data[1].online = 1; percpu_data[1].ipi_ready = 0;
+    ack_on_broadcast = 1;
+
+    tlb_shootdown();
+
+    assert_eq(mock_ipi_mask, 0);                 /* no ready target */
+    assert_eq(mock_ipi_calls, 0);                /* no IPI at all */
+    assert_eq(tlb_mock_local_flushes, 1);        /* local flush still ran */
+    assert_eq(percpu_data[1].tlb_ack_gen, 0);    /* untouched */
+    assert_false(panic_armed);
+}
+
+static void case_online_ipi_without_scheduler_included(void)
+{
+    TEST_SUITE("tlb_shootdown: online_ipi_without_scheduler_included");
+    reset_mock(2);
+    /* IPI-only state: online ∧ ipi_ready but scheduler_ok == 0 — exactly
+     * an unadmitted aarch64 AP that must still flush shared mappings. */
+    percpu_data[1].online = 1; percpu_data[1].ipi_ready = 1;
+    percpu_data[1].scheduler_ok = 0;
+    ack_on_broadcast = 1;
+
+    tlb_shootdown();
+
+    assert_eq(mock_ipi_mask, 1UL << 1);          /* IS a target */
+    assert_eq(percpu_data[1].tlb_ack_gen, 1);    /* acked exactly once */
+    assert_false(panic_armed);
+}
+
+/* M3.1 audit gate continuation: unready-now means targeted-later. */
 static void case_unready_gen_defers_until_ready(void)
 {
     TEST_SUITE("tlb_shootdown: unready CPU gen defers until ready");
@@ -214,6 +272,9 @@ int main(void)
 {
     case_ok_two_targets();
     case_mask_excludes_unready_offline_self();
+    case_offline_ready_excluded();
+    case_online_ipi_missing_excluded();
+    case_online_ipi_without_scheduler_included();
     case_unready_gen_defers_until_ready();
     case_single_cpu_no_broadcast();
     case_wraparound();

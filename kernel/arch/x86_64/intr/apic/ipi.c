@@ -85,7 +85,12 @@ void ipi_broadcast(uint32_t vector, uint64_t target_mask)
     for (uint32_t i = 0; i < num_cpus; i++) {
         if (!(target_mask & (1UL << i)))
             continue;
-        if (!percpu_data[i].online)
+        /* BOOT-1: acquire — a target's readiness publication must be
+         * visible before the IPI aims at it.  ipi_broadcast stays a
+         * vector-generic transport: ipi_ready gating is the callers'
+         * protocol responsibility (TLB shootdown builds its mask in
+         * memory/tlb.c), not a blanket check here. */
+        if (!__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE))
             continue;
         ipi_send(percpu_data[i].arch_processor_id, (uint8_t)vector);
     }

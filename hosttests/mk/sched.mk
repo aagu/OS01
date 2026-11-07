@@ -65,7 +65,8 @@ test_boot_lifecycle_construction: $(TEST_BLD)/test_boot_cpu_lifecycle.elf \
 test_boot_lifecycle_wait: $(TEST_BLD)/test_x86_smp_boot_sync.elf
 	$(TEST_BLD)/test_x86_smp_boot_sync.elf
 
-test_boot_lifecycle_all: test_boot_lifecycle_construction test_boot_lifecycle_wait
+test_boot_lifecycle_all: test_boot_lifecycle_construction test_boot_lifecycle_wait \
+	test_tlb_serial_protocol
 
 # ── Sched Subsystem Host Tests (spec §5) ────────────────────────
 

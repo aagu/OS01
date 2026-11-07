@@ -337,7 +337,8 @@ int test_fd_refcount(void)
     arch_irq_state_t flags = arch_local_irq_save();
     unsigned reader_cpu = cpu_id(), peer;
     for (peer = 0; peer < num_cpus && peer < NR_CPUS; peer++) {
-        if (peer != reader_cpu && percpu_data[peer].online &&
+        if (peer != reader_cpu &&
+            __atomic_load_n(&percpu_data[peer].online, __ATOMIC_ACQUIRE) &&
             percpu_data[peer].scheduler_ok)
             break;
     }

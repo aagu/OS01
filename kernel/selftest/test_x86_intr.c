@@ -115,7 +115,8 @@ static int live_remote(void)
     unsigned self = cpu_id();
     target = NR_CPUS;
     for (unsigned i = 0; i < num_cpus; ++i)
-        if (i != self && percpu_data[i].online &&
+        if (i != self &&
+            __atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) &&
             __atomic_load_n(&percpu_data[i].ipi_ready, __ATOMIC_ACQUIRE)) {
             target = i;
             break;
