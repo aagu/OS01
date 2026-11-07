@@ -68,7 +68,7 @@ LIBGUI_BUILD_DIR := $(BUILD_DIR)/libgui
 # lets component sub-makes that include ONLY the profile (via
 # OS01_PROFILE_FILE, e.g. user/Makefile) resolve it from OS01_SYSTEST on
 # their own command line (passed through OS01_SUBMAKE_ARGS).
-USER_VARIANT ?= $(if $(filter 1,$(ARCH10_CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
+USER_VARIANT ?= $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(ARCH10_CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 # Variant-scoped user dirs: the compile-affecting variant keys the user object
 # dir and the user artifact dir, so a systest build compiles fresh objects
 # into build/<profile>/user/systest and publishes artifacts into

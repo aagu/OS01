@@ -239,23 +239,23 @@ HOST_TEST 专用 reserve/complete 只构造没有外层读 API 调用栈的填�
 **Files:**
 - Create: `user/test_arch6_fsstress/test_arch6_fsstress.c`、`user/test_arch6_fsstress/app.mk`（`APP_SOURCES := test_arch6_fsstress.c`）
 - Create: `config/inittab.arch6-fsstress`（`tty1:once:/bin/test_arch6_fsstress`）
-- Modify: `Makefile`、`mk/project.mk`、`config/rootfs.mk`、`mk/components/run.mk`
+- Modify: `Makefile`、`mk/project.mk`、`config/rootfs.mk`、`mk/components/run.mk`、`mk/profiles/x86_64-clang.mk`、`mk/tests/catalog.mk`、`.github/workflows/ci.yml`
 - Modify: `qemutests/run_test.py`（显式 suite 分支；现有框架不自动发现新解析器）
 - Create: `qemutests/arch6_fsstress.py`、`qemutests/test_arch6_fsstress.py`
 
 **Interfaces:** 4个worker×3个FS；逐项 `[arch6-fsstress] <fs> worker<N> PASS`，失败 `FAIL(<detail>)`；只有父进程确认全部子进程exit0及12个结果后打印最终 `[arch6-fsstress] PASS`。命令 `make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress`；有效QEMU核数必须为4。
 
-- [ ] **Step 1: 先写解析/启动参数失败测试**。缺少/重复worker结果、任意FAIL、缺最终PASS、只有最终PASS、panic、非四核或SMP/QEMU_SMP冲突均不能通过；正常完整日志及四核参数通过。测试不实际启动QEMU。将 `qemutests.test_arch6_fsstress` 加入 TEST_HARNESS_MODULES，Run: `python3 -m unittest qemutests.test_arch6_fsstress`；Expected: 新解析器尚无导致失败。
-- [ ] **Step 2: 实现压测**。父进程预建 `/arch6stress`、`/tmp/arch6stress`、`/boot/arch6stress`，每个根内预建并列的 `files/`、`shared/`。每worker独占 `files/f<N>`，写32段签名数据，读回逐段校验，rename到 `files/f<N>.done`；全员rename后，读取相邻worker文件并按邻居签名校验；全员读完后各删自己的文件；全员删完由父进程确认 `files/` 为空。
+- [x] **Step 1: 先写解析/启动参数失败测试**。缺少/重复worker结果、任意FAIL、缺最终PASS、只有最终PASS、panic、非四核或SMP/QEMU_SMP冲突均不能通过；正常完整日志及四核参数通过。测试不实际启动QEMU。将 `qemutests.test_arch6_fsstress` 加入 TEST_HARNESS_MODULES，Run: `python3 -m unittest qemutests.test_arch6_fsstress`；Expected: 新解析器尚无导致失败。
+- [x] **Step 2: 实现压测**。父进程预建 `/arch6stress`、`/tmp/arch6stress`、`/boot/arch6stress`，每个根内预建并列的 `files/`、`shared/`。每worker独占 `files/f<N>`，写32段签名数据，读回逐段校验，rename到 `files/f<N>.done`；全员rename后，读取相邻worker文件并按邻居签名校验；全员读完后各删自己的文件；全员删完由父进程确认 `files/` 为空。
   shared阶段全员屏障后各建唯一文件，全员建完后各删自己的文件，全员删完由父检查 `shared/` 的readdir为空（忽略`.`/`..`）。父进程最后依次rmdir files/、shared/、测试根目录；不在shared仍存在时断言测试根为空，不由worker相互unlink。
   屏障用一根共享child→parent事件管道、四根parent→child释放管道（创建时10个FD+标准3个，不超过默认16）；fork后关闭无关端。固定小事件记录以单次write发出，包含worker/fs/阶段/成功状态；父对每阶段收齐四个唯一事件再释放。poll带有界预算；任何FAIL/EOF/超时立即终止并waitpid回收其余子进程，禁止依赖文件轮询充当屏障。只在全部阶段与子进程退出成功后发最终PASS。
-- [ ] **Step 3: 构建与runner接线**。
+- [x] **Step 3: 构建与runner接线**。
   - Makefile 在 include project.mk 前按旗标选择 inittab；project.mk 定义0/1校验，新增与 systest/nettest/selftest/canary/arch10/分辨率/terminal-present/ARCH9_FAULT/X86_INTR_FAULT_CASE/自定义测试inittab 的互斥检查；已有互斥列表同步加入新旗标。IMAGE_VARIANT/USER_VARIANT 加 arch6-fsstress；OS01_SUBMAKE_ALLOWED 加旗标；不新增内核fixture宏。
   - rootfs三分支过滤：arch6排除sh/test_arch10_capacity；arch10排除sh/test_arch6_fsstress；正常排除sh和两套专用程序。用户app自动发现，无需额外登记。
   - run.mk 加 TEST_ARCH6_FSSTRESS_IMAGE、TEST_QEMU_IMG_arch6-fsstress、TEST_QEMU_FLAVOR_arch6-fsstress=ARCH6_FSSTRESS_TEST=1、suite白名单/usage/顶层旗标gate；此suite要求SMP=4。runner启动前若QEMU_SMP已设置且不等于SMP则报错，再为本suite显式传 `QEMU_SMP="$(SMP)"`；其他suite保持原行为。
   - run_test.py 显式分派 test_arch6_fsstress(tester)；新函数启动前校验 tester._effective_smp == "4"，总超时180s，解析完整累计串口日志，核验percpu四核证据、12个唯一结果、无FAIL/panic和父最终PASS。只调用一次start_qemu并由公共finally清理；保留标准结果归档。
-- [ ] **Step 4: 验证**。Run: `python3 -m unittest qemutests.test_arch6_fsstress`、`make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress`（连续两次）、`make test-qemu SUITE=phase-0`。Expected: 单测绿、每次12项+最终PASS、实际四核，正常盘可启动；检查正常rootfs manifest未安装专用压测程序，不以phase-0启动成功替代过滤检查。
-- [ ] **Step 5: Commit** `git commit -m "test(e2e): four-CPU concurrent FS stress suite"`
+- [x] **Step 4: 验证**。Run: `python3 -m unittest qemutests.test_arch6_fsstress`、`make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress`（连续两次）、`make test-qemu SUITE=phase-0`。Expected: 单测绿、每次12项+最终PASS、实际四核，正常盘可启动；检查正常rootfs manifest未安装专用压测程序，不以phase-0启动成功替代过滤检查。
+- [x] **Step 5: Commit** `git commit -m "test(e2e): four-CPU concurrent FS stress suite"`
 
 ### Task 10: 文档闭环与终验
 

@@ -1,0 +1,4 @@
+# ARCH-6 four-CPU FS stress variant: the stress program is the only
+# userland resident (rootfs.mk excludes the interactive shell here).
+# id:action:process
+tty1:once:/bin/test_arch6_fsstress

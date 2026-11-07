@@ -405,6 +405,7 @@ jobs:
           # assignment on a bash FUNCTION call persists after the call.
           suite env FB_RESOLUTION_TEST=1 make test-qemu SUITE=resolution
           suite env ARCH10_CAPACITY_TEST=1 make test-qemu SUITE=arch10-capacity
+          suite env QEMU_SMP=4 make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress
           suite make test-qemu SUITE=driver-model
           suite make test-qemu SUITE=monitor
           # terminal-present runs but does not block: the perf gate and

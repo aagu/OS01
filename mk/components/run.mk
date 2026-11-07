@@ -628,6 +628,7 @@ TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
 # keeps the serial port clean.
 TEST_TERMINAL_PRESENT_IMAGE := $(BUILD_DIR)/image/terminal-present/disk.img
 TEST_ARCH10_CAPACITY_IMAGE := $(BUILD_DIR)/image/arch10-capacity/disk.img
+TEST_ARCH6_FSSTRESS_IMAGE := $(BUILD_DIR)/image/arch6-fsstress/disk.img
 # The fd_refcount selftest asserts actual cross-CPU coverage.  Four vCPUs
 # avoid a scheduler-migration false negative seen with the interactive
 # default of two, while keeping this test-only setting independently
@@ -674,7 +675,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_arch6_fsstress
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1416,6 +1417,8 @@ TEST_QEMU_FLAVOR_gui            =
 # key events and compares QMP screendumps.
 TEST_QEMU_FLAVOR_gui-desktop    =
 TEST_QEMU_FLAVOR_arch10-capacity = ARCH10_CAPACITY_TEST=1
+# ARCH-6: image-variant switch only (no kernel fixture consumes the flag).
+TEST_QEMU_FLAVOR_arch6-fsstress = ARCH6_FSSTRESS_TEST=1
 # Default baseline log path for the terminal-present suite; the
 # task-6 brief calls this out explicitly.  The baseline pair lives in
 # the repo (qemutests/baselines/terminal-present/) so the suite works
@@ -1435,6 +1438,7 @@ TEST_QEMU_IMG_terminal-present = $(TEST_TERMINAL_PRESENT_IMAGE)
 TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_arch10-capacity  = $(TEST_ARCH10_CAPACITY_IMAGE)
+TEST_QEMU_IMG_arch6-fsstress  = $(TEST_ARCH6_FSSTRESS_IMAGE)
 # intr-x86 runs one image per destructive case; the suite target owns
 # the per-case paths (the value below is the informational echo only).
 TEST_QEMU_IMG_intr-x86         = $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
@@ -1462,6 +1466,19 @@ ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),1)
 $(error ERROR: test-qemu SUITE=arch10-capacity requires ARCH10_CAPACITY_TEST=1 on the top-level make invocation)
 endif
 endif
+ifeq ($(SUITE),arch6-fsstress)
+ifneq ($(filter 1,$(ARCH6_FSSTRESS_TEST)),1)
+$(error ERROR: test-qemu SUITE=arch6-fsstress requires ARCH6_FSSTRESS_TEST=1 on the top-level make invocation)
+endif
+ifneq ($(SMP),4)
+$(error ERROR: test-qemu SUITE=arch6-fsstress requires SMP=4 on the top-level make invocation)
+endif
+ifneq ($(QEMU_SMP),)
+ifneq ($(QEMU_SMP),4)
+$(error ERROR: test-qemu SUITE=arch6-fsstress requires QEMU_SMP=4 (got QEMU_SMP=$(QEMU_SMP)))
+endif
+endif
+endif
 endif
 
 SYSTEST_TIMEOUT ?= 120
@@ -1473,8 +1490,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -1539,6 +1556,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# inside ``test-qemu-intr-x86`` for the same reason.
 	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
+	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
 	  NETWORK_NIC="$(NETWORK_NIC)" \
 	  FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
@@ -2014,7 +2032,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity>, CASE=<id> selects one systest case)';
+		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress>, CASE=<id> selects one systest case)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \
