@@ -117,9 +117,9 @@ ffff000040080060: d65f03c0     	ret
 
     def test_baseline_limits(self) -> None:
         self.assertIn("pmm_init", sfa.BASELINE_EXCEPTIONS)
-        self.assertIn("aarch64_main", sfa.BASELINE_EXCEPTIONS)
+        self.assertIn("aarch64_early_arena_preflight", sfa.BASELINE_EXCEPTIONS)
         self.assertGreaterEqual(sfa.BASELINE_EXCEPTIONS["pmm_init"], 1760)
-        self.assertGreaterEqual(sfa.BASELINE_EXCEPTIONS["aarch64_main"], 1584)
+        self.assertGreaterEqual(sfa.BASELINE_EXCEPTIONS["aarch64_early_arena_preflight"], 1584)
 
     def test_real_elf_audit_when_available(self) -> None:
         arm_elf = ROOT / "build" / "aarch64-clang" / "kernel" / "kernel.elf"
@@ -127,7 +127,7 @@ ffff000040080060: d65f03c0     	ret
             sizes = sfa.parse_stack_sizes(arm_elf, "llvm-objdump")
             self.assertGreater(len(sizes), 50)
             self.assertEqual(sizes.get("pmm_init"), 1760)
-            self.assertEqual(sizes.get("aarch64_main"), 1584)
+            self.assertEqual(sizes.get("aarch64_early_arena_preflight"), 1584)
             for func, size in sizes.items():
                 if size > 512:
                     self.assertIn(func, sfa.BASELINE_EXCEPTIONS)

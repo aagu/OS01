@@ -28,7 +28,6 @@
 .globl aarch64_dtb_slot
 .globl aarch64_dtb_mpidr_table
 .globl aarch64_dtb_cpu_count
-.globl aarch64_main
 .globl exception_vectors
 .globl secondary_start
 .globl secondary_panic
@@ -296,11 +295,11 @@ _start:
     /* 10. BSP stack + TPIDR_EL1. */
     bl      setup_bsp_stack_and_tpidr
 
-    /* 11. Absolute branch to aarch64_main (high-half).
+    /* 11. Absolute branch to kernel_main (high-half).
      *     x19 still holds the entry handoff from _start; setup_* clobbered
      *     x0, so restore it before the call. */
     mov     x0, x19
-    ldr     x30, =aarch64_main
+    ldr     x30, =kernel_main
     blr     x30
 
 99: b       99b

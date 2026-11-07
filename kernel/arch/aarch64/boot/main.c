@@ -1,6 +1,7 @@
 /* UEFI-only AArch64 BSP entry. APs enter secondary_idle independently. */
 #include <stdint.h>
 #include <string.h>
+#include <arch/boot.h>
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/page_table_selftest.h>
@@ -403,15 +404,19 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
     }
 }
 
-void aarch64_main(const struct boot_context *handoff)
+void arch_early_panic(const char *msg)
+{
+    (void)msg;
+    pl011_init();
+    log_err("UEFI-A64: corrupt handoff\n");
+    log_err("[smp] FATAL: invalid UEFI handoff\n");
+    for (;;) arch_cpu_halt();
+}
+
+void arch_early_init(const struct boot_context *bootctx)
 {
     arch_local_irq_disable();
     pl011_init();
-    if (!boot_context_valid(handoff)) {
-        log_err("UEFI-A64: corrupt handoff\n");
-        log_err("[smp] FATAL: invalid UEFI handoff\n");
-        for (;;) arch_cpu_halt();
-    }
     uint64_t vbar = (uint64_t)(uintptr_t)exception_vectors;
     __asm__ __volatile__("msr vbar_el1, %0\n\tisb" :: "r"(vbar) : "memory");
 
@@ -419,22 +424,31 @@ void aarch64_main(const struct boot_context *handoff)
      * aarch64_ram_map before any further hardware bring-up. The
      * helper halts the BSP on failure, so a non-zero return here
      * means the BSP is already gone. */
-    aarch64_ram_init(handoff);
+    aarch64_ram_init(bootctx);
+}
 
-    /* Populate PMMngr fields that pmm_init reads. Mirrors the
-     * kernel/core/main.c:155-159 prelude on x86_64, but uses the
-     * aarch64 VMA linker symbols (_text_start/_text_end/.../_kernel_end)
-     * because _text/_edata/_end do not exist on aarch64. */
+__attribute__((noinline))
+static void aarch64_early_arena_preflight(const struct boot_context *handoff)
+{
+    struct MEMORY_RANGE scratch[MEMORY_RANGE_MAX];
+    size_t n = pmm_arch_normalize(handoff, scratch);
+    if (n == 0) {
+        log_err("[smp] FATAL: pmm_arch_normalize returned no ranges\n");
+        for (;;) arch_cpu_halt();
+    }
+    if (aarch64_early_arena_prepare(scratch, n) != 0) {
+        log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
+        for (;;) arch_cpu_halt();
+    }
+}
+
+void arch_boot_memory(const struct boot_context *bootctx)
+{
     extern char _text_start[], _text_end[];
     extern char _rodata_end[];
     extern char _data_end[];
     extern char _kernel_end[];
 
-    /* Sanity check: the aarch64 identity map must be active before
-     * pmm_init runs (otherwise Virt_To_Phy on high-half VMAs returns
-     * nonsense and the kernel-image walk in Step 7 silently corrupts
-     * pages_struct[]). head.S installs the identity map before
-     * dropping to C. */
     if ((uint64_t)&_text_start < ARCH_PAGE_OFFSET) {
         log_err("[smp] FATAL: aarch64 identity map not active\n");
         arch_cpu_halt();
@@ -446,30 +460,9 @@ void aarch64_main(const struct boot_context *handoff)
     PMMngr.end_rodata  = (uint64_t)&_rodata_end;
     PMMngr.start_brk   = (uint64_t)&_kernel_end;
 
-    /* M1 preflight: select and publish the early arena BEFORE pmm_init.
-     * aarch64_early_arena_prepare() drives aarch64_early_arena_plan() (pure input validation
-     * + checked metadata sizing + low-window arena selection) and, only
-     * after every check has passed, sets PMMngr.start_brk = OFFSET +
-     * base_pa so pmm_init() places the metadata segment at the high-half
-     * alias of the arena base. On any failure the function returns a
-     * negative errno; the BSP halts here with the need / available
-     * diagnostic. The function does NOT write to memory outside the
-     * PMM until the success path; a fatal here means no metadata was
-     * touched, so the BSP halts cleanly without corrupting RAM. */
-    {
-        struct MEMORY_RANGE scratch[MEMORY_RANGE_MAX];
-        size_t n = pmm_arch_normalize(handoff, scratch);
-        if (n == 0) {
-            log_err("[smp] FATAL: pmm_arch_normalize returned no ranges\n");
-            for (;;) arch_cpu_halt();
-        }
-        if (aarch64_early_arena_prepare(scratch, n) != 0) {
-            log_err("[smp] FATAL: aarch64 M1 arena preflight failed\n");
-            for (;;) arch_cpu_halt();
-        }
-    }
+    aarch64_early_arena_preflight(bootctx);
 
-    pmm_init(handoff);
+    pmm_init(bootctx);
 
 #if OS01_SELFTEST
     {
@@ -484,24 +477,7 @@ void aarch64_main(const struct boot_context *handoff)
         log_err("M1 FATAL reason=runtime-init\n");
         for (;;) arch_cpu_halt();
     }
-    /* M3.5 Task 24: pin kernel_map = (ptbl_t)(pa + ARCH_PAGE_OFFSET)
-     * where pa = aarch64_read_ttbr1() & AARCH64_TTBR_BASE_MASK.
-     * arch_boot_direct_map_init() above configured the runtime page
-     * tables and (via aarch64_install_ttbr1()) installed the M1
-     * root into TTBR1_EL1; arch_vmm_init reads TTBR1 back, validates
-     * the masked PA (nonzero, 4 KiB aligned, < 1 TiB), and publishes
-     * the same kernel_map pointer every downstream arch_vmm_* entry
-     * expects. The M1 root remains live until the next translation
-     * table change; arch_vmm_init just locates and re-publishes it.
-     *
-     * The call runs BEFORE aarch64_page_table_probe_prepare() and BEFORE the
-     * selftest_run_all() block below so the kernel_map assertion in
-     * the M3 selftest sees the live state.
-     *
-     * Any non-zero rc is fatal — the BSP halts here with a numeric
-     * reason; v1 review item 16 forbids returning to the caller
-     * because every subsequent page-table-touching path assumes
-     * kernel_map is pinned. */
+
     {
         int rc = arch_vmm_init();
         if (rc) {
@@ -511,74 +487,25 @@ void aarch64_main(const struct boot_context *handoff)
             for (;;) arch_cpu_halt();
         }
     }
-    /* NEW (spec 2026-10-06): populate Pos from bootctx->graphics and map
-     * the framebuffer MMIO via frame_buffer_init (in
-     * kernel/arch/aarch64/runtime/printk_fb.c). color_printk becomes
-     * live as a result; PL011 remains the canonical boot console (every
-     * kputs/serial_printk still goes to PL011; the banner below is the
-     * first output that ALSO lands on the screen).
-     *
-     * Called BEFORE selftest_run_all / dtb_init / gic_init / smp_boot_aps
-     * so APs see the live Pos via SMP cache coherence. APs only READ
-     * Pos (color_printk from kernel/memory/slab.c error paths); they
-     * never write to it. */
-    aarch64_boot_fb_init(handoff);
+
+    aarch64_boot_fb_init(bootctx);
     if (aarch64_page_table_probe_prepare()) {
         log_err("M1 FATAL reason=probe\n");
         for (;;) arch_cpu_halt();
     }
+}
 
+void arch_pre_subsys_selftest(const struct boot_context *bootctx)
+{
+    (void)bootctx;
 #if defined(OS01_SELFTEST)
-    /* M2 Task 6: run the built-in kernel selftests (selftest.c) on the
-     * BSP after PMM/slab are up — mirrors kernel/core/main.c on x86_64.
-     * The aarch64 registration set is portable-only (see the
-     * __aarch64__ guards in selftest.c); prints the harness-asserted
-     * '[selftest] slab: 16/16 PASS' marker among others. Placement:
-     * after M1 runtime init / probe prepare, before DTB/GIC/SMP setup,
-     * so the sync-fault probe block below stays the last pre-SMP
-     * activity. */
     {
-        /* Declare all scheduler late IDs before START; END is emitted
-         * by the post-handoff driver after the late records. */
-        /* The AP/wake variants declare EXACTLY their seven case IDs;
-         * every other aarch64 selftest shape declares nine. */
-#if defined(AARCH64_AP_SCHED_WAKE_TEST)
-        selftest_begin_run(13);
-#elif defined(AARCH64_AP_SCHED_TEST_AP)
-        selftest_begin_run(7);
-#elif defined(AARCH64_SCHED_TICK_TEST)
-        /* The per-CPU tick variant declares EXACTLY its seven late
-         * IDs (tick-ready .. tick-remote). */
-        selftest_begin_run(7);
-#else
-        selftest_begin_run(9);
-#endif
+        selftest_begin_run(arch_selftest_expected_late());
         (void)selftest_run_all();
     }
 #endif
 
 #if AARCH64_SYNC_FAULT_TEST
-    /* AAGU-EL1-sync (spec §5): a controlled EL1h sync fault probe.
-     * Runs on the BSP after the PMM/page-table selftests have torn
-     * down their temporary mapping and BEFORE DTB/GIC/SMP setup, so
-     * the only side effect is the expected data abort. We:
-     *   1. Derive the active TTBR root the way aarch64_pt_smoke_test()
-     *      does (validate the raw TTBR0_EL1 and convert to a
-     *      direct-map pointer); any malformed TTBR halts here.
-     *   2. Require AARCH64_PT_SELFTEST_VA to be absent (the smoke
-     *      test unmap leaves it ENOENT). Anything else is fatal.
-     *   3. Print `[aarch64-sync-test] armed` exactly once.
-     *   4. Perform a volatile inline-asm `ldr` from that VA with a
-     *      register output (must not be optimized away).
-     *   5. Print `[aarch64-sync-test] returned` directly after.
-     * The `returned` marker MUST be unreachable — the data abort
-     * fires on the inline ldr and Task 1's fatal path halts the CPU
-     * before any later instruction can run. If the harness ever sees
-     * `returned`, the fault did not fire and the test fails.
-     *
-     * This block is gated by AARCH64_SYNC_FAULT_TEST (set only on
-     * the dedicated sync-fault variant); production and ordinary
-     * selftest images never see it. */
     {
         uint64_t ttbr_raw = aarch64_read_ttbr1();
         if ((ttbr_raw & ~AARCH64_TTBR_ALLOWED_MASK) != 0) {
@@ -602,10 +529,6 @@ void aarch64_main(const struct boot_context *handoff)
             for (;;) arch_cpu_halt();
         }
         kputs("[aarch64-sync-test] armed\n");
-        /* Volatile inline-asm ldr from the absent VA. The fault is
-         * expected to fire on this instruction; the compiler must NOT
-         * reorder or elide the load, and the register output forces
-         * the assembler to emit the read. */
         uint64_t probed;
         __asm__ __volatile__(
             "ldr %0, [%2]\n\t"
@@ -613,89 +536,46 @@ void aarch64_main(const struct boot_context *handoff)
             : "m"(*(volatile uint64_t *)(uintptr_t)AARCH64_PT_SELFTEST_VA),
               "r"((uint64_t)(uintptr_t)AARCH64_PT_SELFTEST_VA)
             : "memory");
-        /* Unreachable in the passing test path. */
         kputs("[aarch64-sync-test] returned\n");
         (void)probed;
         for (;;) arch_cpu_halt();
     }
 #endif
+}
 
-    /* Invalid or missing platform information is FATAL here, before any
-     * GIC or PSCI access. Only valid platforms can degrade and keep ticks. */
-    dtb_init(handoff);
+void arch_boot_subsystems(const struct boot_context *bootctx)
+{
+    dtb_init(bootctx);
     log_info("OS01 aarch64 uefi handoff ok\n");
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();
+}
 
-    /* M3 (Task 11): publish BSP double-state BEFORE the first possible
-     * PSCI CPU_ON. percpu_install_gs/percpu_init are pure memory setup
-     * with no hardware dependency; doing them here closes the window
-     * where an AP is already running while the BSP has no runtime
-     * percpu_t and online==0. percpu_init now also sets online with a
-     * release store (M3.5 Task 25 fix); this BSP store is redundant
-     * but kept as belt-and-braces for the pre-AP window. num_cpus
-     * gates the TLB shootdown IPI loop
-     * (kernel/memory/tlb.c), so it must also be visible before any AP
-     * can run. smp_starting_enter() latches the one-way SMP gate: from
-     * here on vmm_gate_check() refuses a VMM change until every DTB CPU
-     * has published ipi_ready. */
-    {
-        extern void percpu_install_gs(uint32_t cpu);
-        extern void percpu_init(uint32_t cpu, uint32_t apic_id);
-        uint32_t mpidr_bsp;
-        __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
-        percpu_install_gs(0);
-        percpu_init(0, mpidr_bsp);
-        __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&num_cpus, dtb_cpu_count(), __ATOMIC_RELEASE);
-        smp_starting_enter();
-    }
+void arch_boot_percpu(void)
+{
+    extern void percpu_install_gs(uint32_t cpu);
+    extern void percpu_init(uint32_t cpu, uint32_t apic_id);
+    uint32_t mpidr_bsp;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
+    percpu_install_gs(0);
+    percpu_init(0, mpidr_bsp);
+    __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&num_cpus, dtb_cpu_count(), __ATOMIC_RELEASE);
+    smp_starting_enter();
+}
 
+void arch_boot_aps(void)
+{
     uint32_t active = smp_boot_aps();
     if (active == dtb_cpu_count())
         (void)test_spinlock_smp(active);
     else
         log_warn("[spinlock] status=SKIP\n");
 
-    /* BSP-only timer and IRQs begin after AP startup/testing has settled. */
-    /* SUBSYS_INITCALL Task 2 — register+dispatch pair (R3-1 critical).
-     * Mirror of x86_64 kernel/core/main.c:193-194. Without the second
-     * call, no SUBSYS_INITCALL-registered initcall ever runs.
-     *
-     * - arch_register_subsys() iterates the .subsys_init linker range
-     *   and calls each queued _register wrapper, which populates
-     *   subsys_table[] via register_subsys().
-     * - subsys_init_phase(SUBSYS_PHASE_4) walks subsys_table[] and
-     *   invokes every registered init wrapper for phase 4 — after
-     *   Task 3's gate flip on clocksource.c landed, this is the path
-     *   that actually calls clocksource_init(). Group 3b (this commit)
-     *   removed the previous explicit Option B fallback so the
-     *   dispatch path is the single source of invocation.
-     *
-     * arch_register_subsys() is declared via <arch/subsys.h>... NOT
-     * pulled in here (R3-3 NIT: avoid <arch/subsys.h> transitively),
-     * so we forward-declare it locally. subsys_init_phase() and the
-     * SUBSYS_PHASE_4 macro come from <subsys/subsys.h> (added above). */
     extern void arch_register_subsys(void);
     arch_register_subsys();
     subsys_init_phase(SUBSYS_PHASE_4);
 
-    /* aarch64 Generic Timer Task 2.2 GREEN — emit the three
-     * [clocksource] markers required by
-     * qemutests/aarch64_uefi_smp.py --expect-clk (clk_evidence_ok
-     * asserts exactly one active=true, one freq=<N>, one mult= shift=).
-     * We print the markers here from main.c (instead of from inside
-     * clocksource_init()) so the kernel TU here avoids
-     * `#include <time/clocksource.h>`, which transitively pulls in
-     * <list.h> via <time/timer.h> — see the forward-decl block above.
-     *
-     * The block must come AFTER `subsys_init_phase(SUBSYS_PHASE_4)`
-     * above and BEFORE `arch_tick_start()` below so:
-     *   1. `clocksource_init()` has already been dispatched, so
-     *      `clocksource_active == true` and the markers print.
-     *   2. The markers appear in the QEMU stdout.log BEFORE the
-     *      `[cntp]` marker emitted by arch_tick_start(), satisfying
-     *      the harness evidence gate. */
     if (clocksource_active) {
         kputs("[clocksource] active=true\n");
         kputs("[clocksource] freq=");
@@ -708,87 +588,37 @@ void aarch64_main(const struct boot_context *handoff)
         kputs("\n");
     }
 
-    /* softirq_init() must run BEFORE arch_tick_start(): tick_handler()
-     * calls set_softirq_status(TIMER_SIRQ), which dereferences
-     * softirq_status (BSS; zeroed). softirq_init() clears the
-     * softirq vector and status.
-     *
-     * On x86_64, softirq_init() is called from kernel/intr/irq.c:78
-     * (existing). aarch64 has no irq.c — explicit call needed. */
     extern void softirq_init(void);
     softirq_init();
-
-    /* Phase 2 #3: BSP percpu data is now installed before smp_boot_aps()
-     * (M3 Task 11) — see the block above the SMP bring-up call. */
 
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
         for (;;) arch_cpu_halt();
     }
 #if OS01_SELFTEST
-    /* Task 2.3b — arm the PL011 RX SPI handler BEFORE IRQ unmask, so a
-     * pending SPI cannot fire into an empty handler table. */
     gic_spi_test_init();
 #endif
     log_info("[IRQ] enabled (DAIF.IRQ cleared)\n");
     arch_local_irq_enable();
     __asm__ __volatile__("isb" ::: "memory");
-    /* M3 (Task 11): publish BSP ipi_ready through the same one-shot
-     * function as the APs — only AFTER the tick handler is registered
-     * (arch_tick_start above), the TLB SGI handler is live (gic_init)
-     * and DAIF.I is unmasked. Publishing earlier would let a pending
-     * TLB SGI arrive with IRQs masked (no ack → initiator timeout). */
     ipi_ready_publish_and_count(0);
 
-    /* M3.5 Task 25: production shootdown probe (spec §7.3).
-     *
-     * Runs AFTER BSP ipi_ready is published and AFTER smp_boot_aps()
-     * has returned (all APs gone through the boot handshake and into
-     * secondary_idle). The probe waits inside for ipi_ready_count
-     * to reach dtb_cpu_count() — APs publish ipi_ready only AFTER
-     * opening IRQs + ISB (secondary_idle tail, Task 10 Step 4), so a
-     * poll is required.
-     *
-     * The probe runs in production AND selftest builds. Single-CPU
-     * boots (-smp 1) skip it via the dtb_cpu_count() >= 2 gate —
-     * the probe body's `requires-at-least-one-AP` FAIL path would
-     * otherwise halt the system on every -smp 1 selftest run,
-     * breaking MODE=smp 1/2/4. The body itself still owns the
-     * FAIL contract (hosttest pins the 0-AP path); production and
-     * selftest images at -smp >= 2 reach the full 7-step sequence
-     * and either print "SHOOTDOWN-PROBE: OK" or halt. */
     if (dtb_cpu_count() >= 2) {
         aarch64_shootdown_probe();
     } else {
         kputs("SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
     }
+}
 
+void arch_post_smp_selftest(void)
+{
 #if OS01_SELFTEST
-    /* M3.6 Task 26: multi-core selftest (spec §8.2 ①②⑤⑥) — real-core
-     * shootdown target-set/gen, partial-mask SGI, same-pt_lock
-     * interleave and concurrent shared-L1 creation. MUST run post-SMP
-     * (APs in secondary_idle + ipi_ready), i.e. NOT through the
-     * pre-SMP selftest_run_all() table. Prints the harness-asserted
-     * '[selftest] m3mc: N/N PASS' marker (SKIP line at -smp 1). */
     {
         extern int test_aarch64_page_table_multicore_run(void);
         (void)test_aarch64_page_table_multicore_run();
     }
 #endif
 
-    /* M3.4 Task 21: ID_AA64MMFR2_EL1.BBM (Break-before-Make levels).
-     *
-     * The split_block_2m path on a PUBLISHED root depends on the BBM
-     * support level reported here — levels 0/1/2 describe how much
-     * BBM flexibility the CPU provides for block↔table descriptor
-     * replacement.  M3.4 returns -EPERM for published-root splits
-     * because the spec scopes the real implementation to F10; this
-     * print lets F10 cite the actual level when it lands.
-     *
-     * IMPORTANT (F10 caveat): cortex-a53 / QEMU passing this print
-     * does NOT replace the architectural prerequisite — the F10
-     * design must reconcile the value against Arm ARM (and against
-     * each real target silicon) before relying on BBM. */
     {
         uint64_t mmfr2 = 0;
         __asm__ __volatile__("mrs %0, ID_AA64MMFR2_EL1" : "=r"(mmfr2));
@@ -798,24 +628,23 @@ void aarch64_main(const struct boot_context *handoff)
     }
 
 #if OS01_SELFTEST
-    /* Task 2.2 — dispatch chain selftest probes.
-     * VBAR is installed (line 188-189); handler table is populated
-     * (arch_tick_start registered cntp_tick_handler); dispatch is
-     * live (gic.c::gic_init ran).  The probes fire a deterministic
-     * SGI 2 (clobber probe) and a SPI 40 (unexpected probe) and
-     * require IRQs to be unmasked above. */
     kputs("[gic] dispatch ready\n");
     gic_clobber_probe();
     gic_unexpected_probe();
     gic_ipi_test(dtb_cpu_count());
 #endif
-    /* All boot-stack probes retain their original order above. The AP
-     * cooperative scheduler's permanent idle tasks are constructed
-     * HERE (P1 spec §3): still on the boot stack, after every probe,
-     * before the one-way transition to the BSP task stack.  Then the
-     * metadata-only preparation, then the stack switch. */
+}
+
+int arch_boot_device_nodes(void)
+{
+    return 0;
+}
+
+void arch_start_kernel_idle(void)
+{
     arch_local_irq_disable();
     aarch64_ap_sched_prepare();
     arch_aarch64_prepare_bsp_handoff();
     aarch64_bsp_stack_enter((uint64_t)&init_task_union + STACK_SIZE - 16);
+    for (;;) arch_cpu_halt();
 }
