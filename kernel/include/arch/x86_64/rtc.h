@@ -23,3 +23,9 @@
 int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out);
 
 #endif /* _KERNEL_ARCH_X86_64_RTC_H */
+
+/* BOOT-2: bounded spin budget for the RTC/TSC calibration windows.
+ * This is a POLLING budget (pause rounds), not a wall-clock deadline —
+ * never describe it as seconds in logs.  Shared by the RTC PIE
+ * transaction (rtc_pie.c) and the LAPIC TSC-window calibration. */
+#define BOOT2_CALIBRATION_SPIN_LIMIT 50000000u

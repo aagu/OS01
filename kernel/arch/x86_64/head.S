@@ -5,6 +5,9 @@
 
 ENTRY(_start)
 
+    /* BOOT-2: the FIRST executed instruction is cli — the boot must not
+     * depend on UEFI-legacy IF state.  (RCX/RAX protocol reads follow.) */
+    cli
     // Bootloader may use MS ABI (RCX) or SysV ABI (RDI)
     // Prefer RCX (clang-built EFI), fallback to RDI (gcc-built EFI)
     movq    %rcx,   %rax

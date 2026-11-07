@@ -28,6 +28,7 @@
 #include <stdint.h>
 
 #include <percpu/percpu.h>
+#include <core/panic.h>
 #include <arch/x86_64/tss.h>
 #include <intr/apic.h>
 #include <intr/ipi.h>         /* IPI_VECTOR_TLB */
@@ -83,6 +84,14 @@ void ipi_ready_publish_ap(uint32_t cpu)
 
 void x86_64_boot_percpu(void)
 {
+    /* BOOT-2: construct exactly once.  The x86 boot calls this right
+     * after phase 3 (before any device IRQ can be enabled); any later
+     * call must go through the verify-only late facade. */
+    if (num_cpus != 0) {
+        log_warn("percpu: already constructed (num_cpus=%u); ignoring "
+                 "repeat call\n", num_cpus);
+        return;
+    }
     uint32_t cpu_idx = 0;
     for (uint32_t i = 0; i < apic_info.lapic_count; i++) {
         if (!(apic_info.lapics[i].flags & 1))
@@ -145,7 +154,18 @@ void x86_64_boot_aps(void)
 
 void arch_boot_percpu(void)
 {
-    x86_64_boot_percpu();
+    /* BOOT-2: late public facade.  Construction happened in the x86
+     * private boot helper (phase 3 → percpu); this path only VERIFIES
+     * the prepared state — no GS write, no runqueue reset, no topology
+     * change. */
+    if (num_cpus == 0) {
+        x86_64_boot_percpu();
+        return;
+    }
+    if (__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) != 1 ||
+        percpu_data[0].self != (uint64_t)&percpu_data[0]) {
+        kpanic("BOOT-2: late percpu verify failed\n");
+    }
 }
 
 void arch_boot_aps(void)

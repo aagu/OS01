@@ -384,6 +384,62 @@ test_boot_irq_registration: $(TEST_BLD)/test_boot_irq_registration.elf
 .PHONY: test_boot_irq_time_registration
 test_boot_irq_time_registration: test_boot_irq_registration
 
+# Context + RTC groups (BOOT-2 Task 2).  Both compile the REAL chain
+# (registry/dispatch/PIC/IOAPIC-link/pit/tick/timer/softirq) plus, for
+# rtc, the REAL rtc_pie.c transaction and time.c frequency cache; for
+# context, the REAL orchestrator (platform/boot.c) and BOOT-1 percpu
+# constructor (smp/boot.c) against the boot_irq_time machine mocks.
+$(eval $(call register_host_test,test_boot_irq_context,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_rtc_pie_calibration,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_boot_irq_context.elf $(TEST_BLD)/test_rtc_pie_calibration.elf
+
+BOOT2_CORE_SOURCES := intr/irq.c \
+    arch/x86_64/intr/irq_route.c arch/x86_64/intr/irq_hooks.c \
+    arch/x86_64/intr/irq_entry.c intr/vector_dispatch.c \
+    arch/x86_64/intr/pic_8259a.c arch/x86_64/intr/apic/ioapic.c \
+    intr/dispatch.c arch/x86_64/intr/dispatch.c \
+    arch/x86_64/intr/bad_event.c arch/x86_64/intr/intr_decode.c \
+    driver/pit.c time/tick.c time/timer.c intr/softirq.c \
+    percpu/percpu.c
+BOOT2_CONTEXT_SOURCES := $(BOOT2_CORE_SOURCES) \
+    arch/x86_64/platform/boot_irq.c subsys/subsys.c \
+    arch/x86_64/smp/boot.c arch/x86_64/platform/boot.c
+BOOT2_RTC_SOURCES := $(BOOT2_CORE_SOURCES) \
+    arch/x86_64/platform/rtc_pie.c arch/x86_64/platform/time.c \
+    arch/x86_64/platform/boot_irq.c
+
+$(TEST_BLD)/boot2-context/%.o $(TEST_BLD)/boot2-rtc/%.o: $(TESTS_DIR)/kernel/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/boot2-context/runtime.o $(TEST_BLD)/boot2-rtc/runtime.o: $(TEST_MOCK)/boot_irq_time/runtime.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_boot_irq_context.o: $(TEST_CASES)/test_boot_irq_context.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) -idirafter $(TESTS_DIR)/libc/include -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_rtc_pie_calibration.o: $(TEST_CASES)/test_rtc_pie_calibration.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) -idirafter $(TESTS_DIR)/libc/include -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_boot_irq_context.elf: $(addprefix $(TEST_BLD)/boot2-context/,$(BOOT2_CONTEXT_SOURCES:.c=.o)) \
+		$(TEST_BLD)/boot2-context/runtime.o $(TEST_BLD)/test_boot_irq_context.o
+	$(HOST_CC) -Wl,--wrap=arch_irq_select_controller -Wl,--gc-sections -o $@ $^
+
+$(TEST_BLD)/test_rtc_pie_calibration.elf: $(addprefix $(TEST_BLD)/boot2-rtc/,$(BOOT2_RTC_SOURCES:.c=.o)) \
+		$(TEST_BLD)/boot2-rtc/runtime.o $(TEST_BLD)/test_rtc_pie_calibration.o
+	$(HOST_CC) -Wl,--wrap=arch_irq_select_controller -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_irq_time_context test_boot_irq_time_rtc
+test_boot_irq_time_context: $(TEST_BLD)/test_boot_irq_context.elf
+	$<
+test_boot_irq_time_rtc: $(TEST_BLD)/test_rtc_pie_calibration.elf
+	$<
+
+
 # x86 IRQ chain test
 IRQ_CHAIN_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections -DOS01_HOST_TEST \
     -I$(TEST_MOCK)/intr_irq -I$(TEST_INC) $(KERNEL_INC)

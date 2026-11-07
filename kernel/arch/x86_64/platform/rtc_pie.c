@@ -1,30 +1,29 @@
-/* kernel/arch/x86_64/rtc_pie.c -- x86_64 platform-specific RTC PIE
- * (Periodic Interrupt Enable) calibration. Splits out the TSC+LAPIC
- * frequency measurement from the old kernel/driver/rtc.c so the
- * arch-neutral rtc core (kernel/driver/rtc.c) stays clean.
+/* kernel/arch/x86_64/rtc_pie.c -- BOOT-2 RTC PIE calibration transaction
+ * (spec §4).  Splits the TSC+LAPIC joint measurement from the old
+ * kernel/driver/rtc.c so the arch-neutral rtc core stays clean.
  *
- * This code combines:
- *   - CMOS RTC: 0x70/0x71 port I/O, registers A and B for PIE
- *     configuration (PC-AT MC146818 specifics)
- *   - LAPIC:    LVT_TIMER / TIMER_DIV / TIMER_INIT (LAPIC specifics)
- *   - IRQ8:     via arch_irq_select_controller / register_irq
- *               (arch-neutral API; resolves to IOAPIC or PIC on x86_64)
- *   - TSC:      arch_cycle_counter (arch-neutral)
- *
- * All four pieces are x86_64 platform glue -- hence this file lives
- * under kernel/arch/x86_64 and is only compiled on x86_64.
- *
- * Triggered by kernel/arch/x86_64/time.c when CPUID 0x15 returns 0
- * (no nominal TSC frequency). On success, both TSC and LAPIC
- * frequencies are reported; the LAPIC result is fed into
- * lapic_timer_set_premeasured for the LAPIC period-mode init.
+ * The transaction is the whole spec §4 sequence, in order:
+ *   preconditions (outputs non-NULL, calibration window allowed, IF=0)
+ *   → save A/B, register IRQ8 with IRQF_NO_AUTOEN (registration FIRST —
+ *     a failure leaves no PIE/timer change behind)
+ *   → B: clear PIE/AIE/UIE, program A=1024Hz, read C clear, LAPIC
+ *     masked with DIV=0/INIT=max
+ *   → enable PIE, unmask IRQ8, open the controlled window (sti)
+ *   → foreground: acquire-wait for 256 valid PF samples using the raw
+ *     TSC (never clocksource/jiffies/schedule); the >2^32-cycle guard
+ *     AND BOOT2_CALIBRATION_SPIN_LIMIT pause rounds both bound the wait
+ *   → close: IRQs off, mask route, clear PIE/AIE/UIE + C, restore A/B,
+ *     unregister the owned route (kept masked), restore masked LAPIC
+ *   → compute; outputs written only on success.
  */
 
 #include <arch/io.h>
-#include <intr/interrupt.h>   // register_irq / unregister_irq
+#include <intr/interrupt.h>   // register_irq / unregister_irq / irq_mask
 #include <arch/irq.h>
 #include <intr/apic.h>        // lapic_read / lapic_write / LAPIC_* / LVT_MASK
-#include <arch/cpu.h>    // arch_cycle_counter / arch_cpu_pause
+#include <arch/cpu.h>         // arch_cycle_counter / arch_cpu_pause
+#include <arch/x86_64/platform/boot_irq.h>  // calibration window
+#include <arch/x86_64/rtc.h>  // BOOT2_CALIBRATION_SPIN_LIMIT
 #include <stddef.h>             // NULL
 
 // ── CMOS RTC port I/O (local to this file; same as rtc_cmos.c) ──
@@ -35,6 +34,11 @@
 #define RTC_CMOS_REG_STATUS_C 0x0Cu
 #define RTC_PIE_TICKS         256u     // sample window (~250ms @ 1024Hz)
 #define RTC_PIE_IRQ_GSI       8u       // GSI 8 = legacy RTC
+#define RTC_B_PIE             0x40u
+#define RTC_B_AIE             0x20u
+#define RTC_B_UIE             0x10u
+#define RTC_C_PF              0x40u
+#define RTC_RATE_1024HZ       0x06u
 
 static inline void cmos_write(uint8_t reg, uint8_t val)
 {
@@ -48,8 +52,9 @@ static inline uint8_t cmos_read(uint8_t reg)
     return arch_inb(RTC_CMOS_DATA);
 }
 
-// ── LAPIC sample state (handler-context; cross-CPU volatile) ──
+// ── Sample state (handler-context; cross-CPU volatile) ──
 static volatile uint32_t rtc_pie_count;
+static volatile bool     rtc_pie_done;
 static volatile uint64_t rtc_pie_tsc0;
 static volatile uint64_t rtc_pie_tsc1;
 // LAPIC counter sampled inside the handler so it shares the same
@@ -60,8 +65,16 @@ static volatile uint32_t rtc_pie_lapic1;
 static void rtc_pie_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
 {
     (void)nr; (void)parameter; (void)regs;
-    // Read reg 0x0C to clear the PIE interrupt flag.
-    (void)cmos_read(RTC_CMOS_REG_STATUS_C);
+    // Read reg 0x0C to clear the IRQ reason.
+    uint8_t c = cmos_read(RTC_CMOS_REG_STATUS_C);
+
+    /* BOOT-2: ONLY a periodic tick (C.PF) is a sample.  An IRQ with
+     * C=0 or AF/UF-only reasons is spurious for this measurement and
+     * must not advance the window. */
+    if (!(c & RTC_C_PF))
+        return;
+    if (rtc_pie_done)
+        return;                     /* saturated: the 257th+ never rewrites */
 
     if (rtc_pie_count == 0) {
         rtc_pie_tsc0 = arch_cycle_counter();
@@ -71,59 +84,103 @@ static void rtc_pie_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
     if (rtc_pie_count >= RTC_PIE_TICKS) {
         rtc_pie_tsc1 = arch_cycle_counter();
         rtc_pie_lapic1 = lapic_read(LAPIC_TIMER_CUR);
+        rtc_pie_done = true;        /* release-publish the last sample */
     }
 }
 
 int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
 {
-    // 1. Mask LAPIC timer to avoid countdown-to-zero firing on an
-    //    unregistered vector (would GP# → triple fault).
+    /* ── Preconditions: touch nothing on failure. ── */
+    if (tsc_hz_out == NULL || lapic_hz_out == NULL)
+        return -1;
+    if (!x86_boot_irq_calibration_allowed())
+        return -1;
+    /* Entry IF must be 0: the window API opens/closes it.  (The saved
+     * word is whole RFLAGS on x86 — test the IF bit.) */
+    arch_irq_state_t entry_flags = arch_local_irq_save();
+    arch_local_irq_restore(entry_flags);
+    if (entry_flags & (1UL << 9))
+        return -1;
+
+    x86_boot_irq_calibration_begin();
+
+    int rc = -1;
+    uint8_t save_a = 0, save_b = 0;
+    uint32_t rtc_gsi = arch_irq_isa_to_gsi(RTC_PIE_IRQ_GSI);
+
+    /* Mask the LAPIC timer through the whole transaction. */
     lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
-    // divisor=0 means ÷2 (SDM 000b). Must be explicit.
-    lapic_write(LAPIC_TIMER_DIV, 0);
+
+    /* ── 1. Register FIRST (IRQF_NO_AUTOEN): a failure leaves no
+     *       PIE/timer change behind. ── */
+    if (!register_irq(rtc_gsi, NULL, rtc_pie_handler, 0,
+                      IRQF_TRIGGER_LEVEL | IRQF_NO_AUTOEN, "rtc-pie"))
+        goto out;
+
+    save_a = cmos_read(RTC_CMOS_REG_STATUS_A);
+    save_b = cmos_read(RTC_CMOS_REG_STATUS_B);
+
+    /* ── 2. Configure with everything still masked. ── */
+    cmos_write(RTC_CMOS_REG_STATUS_B,
+               (uint8_t)(save_b & (uint8_t)~(RTC_B_PIE | RTC_B_AIE | RTC_B_UIE)));
+    cmos_write(RTC_CMOS_REG_STATUS_A,
+               (uint8_t)((save_a & 0xF0) | RTC_RATE_1024HZ));
+    (void)cmos_read(RTC_CMOS_REG_STATUS_C);   /* clear stale pending */
+    lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
+    lapic_write(LAPIC_TIMER_DIV, 0);          /* divisor=0 means ÷2 */
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 
-    // 2. Register IRQ8 via arch_irq_isa_to_gsi(8)
-    uint32_t rtc_gsi = arch_irq_isa_to_gsi(8);
-    if (!register_irq(rtc_gsi, NULL, rtc_pie_handler, 0,
-                      IRQF_TRIGGER_LEVEL, "rtc-pie")) {
-        return -1;
-    }
-
-    // 3. Enable PIE: reg B bit 6 = PIE; reg A low 4 bits = 1024Hz (0b0110 = 6).
-    uint8_t b = cmos_read(RTC_CMOS_REG_STATUS_B);
-    cmos_write(RTC_CMOS_REG_STATUS_B, b | 0x40);
-    uint8_t a = cmos_read(RTC_CMOS_REG_STATUS_A);
-    cmos_write(RTC_CMOS_REG_STATUS_A, (uint8_t)((a & 0xF0) | 0x06));
-
-    // 4. Loop until either N ticks have fired or TSC has advanced
-    //    > 2^32 cycles (≈500ms @ 8.6GHz; failsafe in case IRQ8
-    //    never arrives so the boot doesn't hang).
+    /* ── 3. Arm: PIE last, route unmask, THEN the controlled window. ── */
     rtc_pie_count = 0;
+    rtc_pie_done = false;
+    cmos_write(RTC_CMOS_REG_STATUS_B, (uint8_t)((save_b & (uint8_t)~(RTC_B_AIE | RTC_B_UIE)) | RTC_B_PIE));
+    irq_unmask(rtc_gsi);
+    arch_local_irq_enable();          /* controlled window: IF=1 */
+
+    /* ── 4. Foreground acquire wait: raw TSC + bounded pause budget. ── */
     uint64_t tsc_start = arch_cycle_counter();
-    while (rtc_pie_count < RTC_PIE_TICKS) {
-        if (arch_cycle_counter() - tsc_start > 0x100000000ULL) {
-            break;
-        }
+    uint32_t rounds = 0;
+    while (!rtc_pie_done) {
+        if (arch_cycle_counter() - tsc_start > 0x100000000ULL)
+            break;                    /* original failsafe */
+        if (++rounds > BOOT2_CALIBRATION_SPIN_LIMIT)
+            break;                    /* BOOT-2 bounded budget */
         arch_cpu_pause();
     }
 
-    // 5. Disable PIE, unregister IRQ8.
-    b = cmos_read(RTC_CMOS_REG_STATUS_B);
-    cmos_write(RTC_CMOS_REG_STATUS_B, b & (uint8_t)~0x40);
-    unregister_irq(rtc_gsi);
+    /* ── 5. Close: IRQs off first, then unwind everything we own. ── */
+    arch_local_irq_disable();         /* window closed; exit IF=0 */
+    irq_mask(rtc_gsi);                /* route masked (also re-closes IRQ2) */
+    cmos_write(RTC_CMOS_REG_STATUS_B,
+               (uint8_t)(cmos_read(RTC_CMOS_REG_STATUS_B)
+                         & (uint8_t)~(RTC_B_PIE | RTC_B_AIE | RTC_B_UIE)));
+    (void)cmos_read(RTC_CMOS_REG_STATUS_C);   /* clear pending */
+    cmos_write(RTC_CMOS_REG_STATUS_A, save_a); /* restore A ... */
+    cmos_write(RTC_CMOS_REG_STATUS_B, save_b); /* ... and B: restore is NOT
+                                                  a route re-enable */
+    unregister_irq(rtc_gsi);          /* owned route stays masked */
+    lapic_write(LAPIC_LVT_TIMER, LVT_MASK);   /* restore masked LAPIC */
+    lapic_write(LAPIC_TIMER_DIV, 0);
+    lapic_write(LAPIC_TIMER_INIT, 0);
 
-    if (rtc_pie_count < RTC_PIE_TICKS) return -1;
+    /* ── 6. Compute: both elapses positive, results representable. ── */
+    if (rtc_pie_done && rtc_pie_count >= RTC_PIE_TICKS) {
+        uint64_t elapsed_lapic = (uint64_t)rtc_pie_lapic0 - (uint64_t)rtc_pie_lapic1;
+        uint64_t tsc_elapsed   = rtc_pie_tsc1 - rtc_pie_tsc0;
+        uint64_t n = RTC_PIE_TICKS - 1;
+        if (tsc_elapsed > 0 && elapsed_lapic > 0 &&
+            tsc_elapsed <= UINT64_MAX / (1024u * RTC_PIE_TICKS) &&
+            elapsed_lapic <= UINT64_MAX / (1024u * RTC_PIE_TICKS)) {
+            *tsc_hz_out   = tsc_elapsed   * 1024u / n;
+            *lapic_hz_out = elapsed_lapic * 1024u / n;
+            if (*tsc_hz_out != 0 && *lapic_hz_out != 0)
+                rc = 0;               /* success: outputs written ONCE */
+        }
+    }
 
-    // 6. Compute frequencies. TSC elapsed covers N-1 PIE cycles;
-    //    LAPIC elapsed covers the same window (decrementing, so
-    //    lapic0 > lapic1). `elapsed_lapic` is already divided by 2
-    //    (LAPIC_TIMER_DIV=0), so the rate we compute is the
-    //    decrement rate, which is what lapic_timer_start expects.
-    uint64_t elapsed_lapic = (uint64_t)rtc_pie_lapic0 - (uint64_t)rtc_pie_lapic1;
-    uint64_t tsc_elapsed   = rtc_pie_tsc1 - rtc_pie_tsc0;
-    uint64_t n = RTC_PIE_TICKS - 1;
-    *tsc_hz_out   = tsc_elapsed   * 1024 / n;
-    *lapic_hz_out = elapsed_lapic * 1024 / n;
-    return 0;
+out:
+    x86_boot_irq_calibration_end();
+    /* All paths return IF=0. */
+    arch_local_irq_disable();
+    return rc;
 }

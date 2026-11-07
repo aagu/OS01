@@ -4,6 +4,7 @@
  * prove "preserve entry IF" and "enable latches pending even with
  * IF=0" against the REAL controller code. */
 #include <stdint.h>
+#include <stdbool.h>
 #include <arch/regs.h>
 
 typedef uint64_t arch_irq_state_t;
@@ -17,6 +18,12 @@ uint32_t arch_irq_vector_to_gsi(uint64_t vector);
 int arch_irq_route_prepare(uint32_t gsi, uint64_t *vector);
 void arch_irq_dispatch(pt_regs_t *regs, uint64_t hwirq);
 void irq_install(void);
+uint32_t arch_irq_isa_to_gsi(uint8_t source);
+bool arch_tick_start(void);
+void lapic_timer_calibrate(void);
+void lapic_timer_init(void);
+void irq_mask(uint32_t gsi);
+void irq_unmask(uint32_t gsi);
 
 void arch_local_irq_enable(void);
 void arch_local_irq_disable(void);

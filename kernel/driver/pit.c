@@ -17,11 +17,35 @@ void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attri
     serial_poll();       // x86 串口轮询 fallback，留在本层
 }
 
-void pit_init()
+/* BOOT-2 prepare/start split: the prepare registers masked
+ * (IRQF_NO_AUTOEN) and programs 100 Hz; the route opens only in
+ * pit_start, after the runtime-open precondition check. */
+static bool pit_prepared_flag;
+static bool pit_started_flag;
+
+bool pit_prepared(void) { return pit_prepared_flag; }
+
+int pit_init(void)
 {
+    if (pit_prepared_flag)
+        return -1;              /* repeat prepare: boot protocol error */
     uint32_t pit_gsi = arch_irq_isa_to_gsi(0);
-    register_irq(pit_gsi, NULL, &pit_handler, 0, IRQF_TRIGGER_EDGE, "pit");
-    set_frequency(100); //100 times per sec
+    if (!register_irq(pit_gsi, NULL, &pit_handler, 0,
+                      IRQF_TRIGGER_EDGE | IRQF_NO_AUTOEN, "pit"))
+        return -1;
+    set_frequency(100);         /* 100 times per sec */
+    pit_prepared_flag = true;
+    return 0;
+}
+
+int pit_start(void)
+{
+    if (!pit_prepared_flag || pit_started_flag)
+        return -1;
+    uint32_t pit_gsi = arch_irq_isa_to_gsi(0);
+    irq_unmask(pit_gsi);
+    pit_started_flag = true;
+    return 0;
 }
 
 void set_frequency(uint16_t hz)
@@ -42,8 +66,7 @@ void set_frequency(uint16_t hz)
 // race init order with sibling drivers).
 static int _pit_init_wrapper(void)
 {
-    pit_init();
-    return 0;
+    return pit_init();
 }
 static int _pit_register(void)
 {

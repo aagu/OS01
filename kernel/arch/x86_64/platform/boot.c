@@ -56,7 +56,9 @@
 #include <intr/interrupt.h>        /* irq_install                        */
 #include <arch/x86_64/spinlock.h>   /* spin_init                          */
 #include <arch/subsys.h>           /* arch_boot_rsdp, arch_register_subsys*/
-#include <subsys/subsys.h>         /* subsys_init_all                    */
+#include <subsys/subsys.h>         /* subsys_init_phase                  */
+#include <arch/x86_64/platform/boot_irq.h>  /* BOOT-2 context/runtime  */
+#include <arch/x86_64/smp_boot.h> /* x86_64_boot_percpu (BOOT-2 early)  */
 #include <device/boot.h>
 #include <core/panic.h>
 
@@ -130,7 +132,23 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
     if (subsys_status("apic") == -999) {
         kpanic("apic: required subsys registration missing\n");
     }
-    subsys_init_all();
+
+    /* BOOT-2 phased orchestration (spec §3.2): controllers first, then
+     * the BSP percpu (BOOT-1 constructor, before ANY device IRQ can be
+     * enabled), then the phase-4 time facilities, then the controlled
+     * runtime open (PIT start + first sti).  Each initcall phase sees
+     * exactly the prerequisites its drivers need. */
+    subsys_init_phase(3);
+
+    x86_64_boot_percpu();
+    x86_boot_irq_context_prepare();
+
+    subsys_init_phase(4);
+
+    x86_boot_irq_runtime_open();
+
+    subsys_init_phase(5);
+    subsys_init_phase(6);
 
     int dev_res = device_boot_result();
     if (dev_res != 0) {

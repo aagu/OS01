@@ -752,17 +752,26 @@ test-framework-contract:
 # handoff targets are added by their own BOOT-2 tasks; until then a
 # missing group target fails structurally without blocking the shipped
 # groups).
-.PHONY: test-boot-irq-time-host _test-boot-irq-time-host-run-registration
+.PHONY: test-boot-irq-time-host _test-boot-irq-time-host-run-registration _test-boot-irq-time-host-run-context _test-boot-irq-time-host-run-rtc _test-boot-irq-time-host-run-all
+_test-boot-irq-time-host-run-all:
+	@echo "  [test-boot-irq-time-host] all (registration context rtc; handoff arrives with its task)"
+	$(call os01_submake,hosttests,test_boot_irq_time_registration test_boot_irq_time_context test_boot_irq_time_rtc $(OS01_SUBMAKE_ARGS))
 _test-boot-irq-time-host-run-registration:
 	@echo "  [test-boot-irq-time-host] registration"
 	$(call os01_submake,hosttests,test_boot_irq_time_registration $(OS01_SUBMAKE_ARGS))
+_test-boot-irq-time-host-run-context:
+	@echo "  [test-boot-irq-time-host] context"
+	$(call os01_submake,hosttests,test_boot_irq_time_context $(OS01_SUBMAKE_ARGS))
+_test-boot-irq-time-host-run-rtc:
+	@echo "  [test-boot-irq-time-host] rtc"
+	$(call os01_submake,hosttests,test_boot_irq_time_rtc $(OS01_SUBMAKE_ARGS))
 test-boot-irq-time-host: CASE ?=
 test-boot-irq-time-host: CASE := $(CASE)
 test-boot-irq-time-host: $(if $(CASE),_test-boot-irq-time-host-run-$(CASE),_test-boot-irq-time-host-run-registration)
 	$(call require_capability,rootfs)
 	@case "$(CASE)" in \
-	    ""|registration) echo "  [test-boot-irq-time-host] CASE=${CASE:-registration}";; \
-	    context|rtc|handoff|all) echo "  [test-boot-irq-time-host] CASE=$(CASE) (group target arrives with its BOOT-2 task)" >&2; exit 1;; \
+	    ""|registration|context|rtc|all) echo "  [test-boot-irq-time-host] CASE=${CASE:-registration}";; \
+	    handoff) echo "  [test-boot-irq-time-host] CASE=handoff (group target arrives with its BOOT-2 task)" >&2; exit 1;; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: registration context rtc handoff all" >&2; exit 1;; \
 	esac
 

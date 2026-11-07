@@ -26,7 +26,9 @@ void pic_init()
     arch_outb(MASTER_OCW1, 0xff);
     arch_outb(SLAVE_OCW1, 0xff);
 
-    arch_local_irq_enable();
+    /* BOOT-2: controller init only configures hardware and preserves
+     * the entry IF — the first sti belongs to x86_boot_irq_runtime_open
+     * after the PIT is the confirmed periodic source. */
 }
 
 // NOTE: The hardware-IRQ dispatch path (formerly `do_IRQ`) lives in
@@ -145,7 +147,7 @@ static int _pic_init_wrapper(void)
         log_info("8259A: skipped (IOAPIC line controller active)\n");
         arch_outb(MASTER_OCW1, 0xff);
         arch_outb(SLAVE_OCW1, 0xff);
-        arch_local_irq_enable();
+        /* BOOT-2: preserve entry IF (see pic_init). */
         return 0;
     }
     pic_init();
