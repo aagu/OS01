@@ -701,11 +701,21 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
         return rest[:end]
 
     def test_aarch64_runs_late_cases_before_the_single_end(self) -> None:
+        main_c = _read_kernel_source("kernel/core/main.c")
         boot = _read_kernel_source("kernel/arch/aarch64/boot/main.c")
         handoff = _read_kernel_source("kernel/arch/aarch64/cpu/task_arch.c")
-        self.assertIn("selftest_begin_run(9);", boot)
+
+        self.assertIn("arch_pre_subsys_selftest(bootctx);", main_c)
+        self.assertIn("arch_boot_subsystems(bootctx);", main_c)
+        self.assertLess(
+            main_c.find("arch_pre_subsys_selftest(bootctx);"),
+            main_c.find("arch_boot_subsystems(bootctx);"),
+            "arch_pre_subsys_selftest must precede arch_boot_subsystems in kernel_main",
+        )
+
+        self.assertIn("selftest_begin_run(arch_selftest_expected_late());", boot)
         run = boot.find("selftest_run_all();")
-        begin = boot.find("selftest_begin_run(9);")
+        begin = boot.find("selftest_begin_run(arch_selftest_expected_late());")
         self.assertLess(begin, run, "begin_run must precede early run_all")
         self.assertNotIn("selftest_end_run();", boot,
                          "END belongs after the scheduler late cases")
