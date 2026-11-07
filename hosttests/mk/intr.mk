@@ -338,6 +338,52 @@ $(TEST_BLD)/test_gic_probe.elf: $(TEST_BLD)/test_gic_probe.o $(TEST_BLD)/gic_dri
 test_gic_probe: $(TEST_BLD)/test_gic_probe.elf
 	$<
 
+# ── BOOT-2 boot-irq-time host tests ─────────────────────────────
+# Compiles the REAL kernel/intr/irq.c and the REAL 8259A controller
+# against the boot_irq_time port-IMR/IF mock.  Private object dir keeps
+# the production compile isolated from the IRQ_CHAIN suite.
+$(eval $(call register_host_test,test_boot_irq_registration,intr,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_boot_irq_registration.elf
+
+BOOT2_REG_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -DOS01_HOST_TEST -I$(TEST_MOCK)/boot_irq_time -I$(TEST_INC) $(KERNEL_INC)
+BOOT2_REG_SOURCES := intr/irq.c \
+    arch/x86_64/intr/irq_route.c arch/x86_64/intr/irq_hooks.c \
+    arch/x86_64/intr/irq_entry.c intr/vector_dispatch.c \
+    arch/x86_64/intr/pic_8259a.c \
+    arch/x86_64/intr/apic/ioapic.c intr/dispatch.c \
+    arch/x86_64/intr/dispatch.c arch/x86_64/intr/bad_event.c \
+    arch/x86_64/intr/intr_decode.c
+BOOT2_REG_OBJS := $(TEST_BLD)/boot2-registration/runtime.o \
+    $(addprefix $(TEST_BLD)/boot2-registration/,$(BOOT2_REG_SOURCES:.c=.o))
+
+$(TEST_BLD)/boot2-registration/%.o: $(TESTS_DIR)/kernel/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/boot2-registration/runtime.o: $(TEST_MOCK)/boot_irq_time/runtime.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_boot_irq_registration.o: $(TEST_CASES)/test_boot_irq_registration.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) -idirafter $(TESTS_DIR)/libc/include -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_boot_irq_registration.elf: $(BOOT2_REG_OBJS) $(TEST_BLD)/test_boot_irq_registration.o
+	$(HOST_CC) -Wl,--wrap=arch_irq_select_controller -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_irq_registration
+test_boot_irq_registration: $(TEST_BLD)/test_boot_irq_registration.elf
+	$<
+
+# Focused BOOT-2 groups.  Task 1 ships the registration group; the
+# context / rtc / handoff groups are added by their own tasks — the root
+# dispatcher already accepts their CASE names, and a missing group
+# target must never block the registration RED.
+.PHONY: test_boot_irq_time_registration
+test_boot_irq_time_registration: test_boot_irq_registration
+
 # x86 IRQ chain test
 IRQ_CHAIN_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections -DOS01_HOST_TEST \
     -I$(TEST_MOCK)/intr_irq -I$(TEST_INC) $(KERNEL_INC)

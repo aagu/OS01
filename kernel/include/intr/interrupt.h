@@ -9,6 +9,8 @@
 #define IRQF_TRIGGER_NONE    0x00   // Let system decide
 #define IRQF_TRIGGER_EDGE    0x01   // Edge-triggered
 #define IRQF_TRIGGER_LEVEL   0x02   // Level-triggered
+#define IRQF_NO_AUTOEN       0x04   // BOOT-2: install masked; owner unmasks
+                                    // explicitly (never enable-then-disable)
 #define IRQF_SHARED          0x80   // Shared IRQ line (future)
 
 // ── Max GSI we handle ────────────────────────────────────────

@@ -35,36 +35,62 @@ void pic_init()
 // directly. The PIC controller implementation stays here because it
 // is a x86_64 platform driver, not arch-neutral plumbing.
 
+/* BOOT-2: the slave PIC sits behind master IRQ2, so a slave input is
+ * only deliverable when BOTH the slave bit and the master cascade bit
+ * are unmasked.  Enable opens the cascade alongside the slave bit;
+ * disable masks the slave bit and closes IRQ2 only when the LAST slave
+ * input goes masked (other slave users must keep the cascade).  The
+ * IMR read-modify-write runs with IRQs off and restores the caller's
+ * IF — this is boot-time BSP usage, not an SMP PIC redesign. */
+#define PIC_CASCADE_VEC 0x22   /* master IRQ2 → vector 0x20 + 2 */
+
 void pic_enable(uint64_t nr)
 {
     uint16_t port;
-    uint8_t value;
+    uint8_t bit;
+    arch_irq_state_t flags = arch_local_irq_save();
     if (nr >= 0x28)
     {
         nr -= 8;
         port = SLAVE_OCW1;
+        bit = (uint8_t)(1 << (nr - 0x20));
+        arch_outb(port, arch_inb(port) & (uint8_t)~bit);
+        /* Open the master cascade for this slave input. */
+        arch_outb(MASTER_OCW1, arch_inb(MASTER_OCW1)
+                               & (uint8_t)~(1 << 2));
     }
     else
+    {
         port = MASTER_OCW1;
-
-    value = arch_inb(port) & ~(1 << (nr - 0x20));
-    arch_outb(port, value);
+        bit = (uint8_t)(1 << (nr - 0x20));
+        arch_outb(port, arch_inb(port) & (uint8_t)~bit);
+    }
+    arch_local_irq_restore(flags);
 }
 
 void pic_disable(uint64_t nr)
 {
     uint16_t port;
-    uint8_t value;
+    uint8_t bit;
+    arch_irq_state_t flags = arch_local_irq_save();
     if (nr >= 0x28)
     {
         nr -= 8;
         port = SLAVE_OCW1;
+        bit = (uint8_t)(1 << (nr - 0x20));
+        arch_outb(port, arch_inb(port) | bit);
+        /* Close the master cascade only when NO slave input is left
+         * unmasked. */
+        if (arch_inb(SLAVE_OCW1) == 0xff)
+            arch_outb(MASTER_OCW1, arch_inb(MASTER_OCW1) | (1 << 2));
     }
     else
+    {
         port = MASTER_OCW1;
-
-    value = arch_inb(port) | (1 << (nr - 0x20));
-    arch_outb(port, value);
+        bit = (uint8_t)(1 << (nr - 0x20));
+        arch_outb(port, arch_inb(port) | bit);
+    }
+    arch_local_irq_restore(flags);
 }
 
 uint64_t pic_install(uint64_t nr, void * data __attribute__((unused)))

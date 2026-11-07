@@ -745,6 +745,27 @@ test-harness: test-framework-contract
 test-framework-contract:
 	$(call os01_submake,hosttests,test-framework-contract $(OS01_SUBMAKE_ARGS))
 
+# Focused BOOT-2 early-IRQ/time host tests.  Each CASE forwards to the
+# matching hosttests target through the controlled sub-make boundary;
+# CASE omitted runs `all`.  Unknown non-empty CASE aborts non-zero.  The
+# full group set is registration|context|rtc|handoff (context/rtc/
+# handoff targets are added by their own BOOT-2 tasks; until then a
+# missing group target fails structurally without blocking the shipped
+# groups).
+.PHONY: test-boot-irq-time-host _test-boot-irq-time-host-run-registration
+_test-boot-irq-time-host-run-registration:
+	@echo "  [test-boot-irq-time-host] registration"
+	$(call os01_submake,hosttests,test_boot_irq_time_registration $(OS01_SUBMAKE_ARGS))
+test-boot-irq-time-host: CASE ?=
+test-boot-irq-time-host: CASE := $(CASE)
+test-boot-irq-time-host: $(if $(CASE),_test-boot-irq-time-host-run-$(CASE),_test-boot-irq-time-host-run-registration)
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    ""|registration) echo "  [test-boot-irq-time-host] CASE=${CASE:-registration}";; \
+	    context|rtc|handoff|all) echo "  [test-boot-irq-time-host] CASE=$(CASE) (group target arrives with its BOOT-2 task)" >&2; exit 1;; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: registration context rtc handoff all" >&2; exit 1;; \
+	esac
+
 # Focused BOOT-1 CPU-lifecycle host tests.  Each CASE forwards to the
 # matching hosttests target through the controlled sub-make boundary:
 #   construction — real percpu construction test + existing

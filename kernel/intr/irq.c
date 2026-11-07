@@ -248,7 +248,12 @@ int32_t register_irq(uint32_t gsi, void *arg,
             return 0;
         }
     }
-    if (controller->enable != NULL) {
+    /* BOOT-2: IRQF_NO_AUTOEN installs masked — the owner unmasks
+     * explicitly when its window opens.  The controller init already
+     * masks every input, so masked registration is the ABSENCE of an
+     * enable, never an enable-then-disable (which would latch a real
+     * edge into the IRR even with IF=0). */
+    if (controller->enable != NULL && !(flags & IRQF_NO_AUTOEN)) {
         controller->enable(vector);
     }
 
