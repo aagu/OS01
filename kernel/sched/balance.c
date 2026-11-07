@@ -92,11 +92,12 @@ void sched_notify_remote_cpu(unsigned cpu)
     if ((int)cpu == (int)cpu_id())
         return;
     percpu_t *dst = &percpu_data[cpu];
-    if (!dst->online ||
+    if (!__atomic_load_n(&dst->online, __ATOMIC_ACQUIRE) ||
         !__atomic_load_n(&dst->scheduler_ok, __ATOMIC_ACQUIRE)) {
         log_err("[sched] sched_notify_remote: target cpu=%u not ready "
                 "(online=%u scheduler_ok=%u)\n",
-                cpu, dst->online,
+                cpu,
+                __atomic_load_n(&dst->online, __ATOMIC_ACQUIRE),
                 __atomic_load_n(&dst->scheduler_ok, __ATOMIC_ACQUIRE));
         return;
     }

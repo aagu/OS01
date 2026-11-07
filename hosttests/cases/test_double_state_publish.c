@@ -467,11 +467,43 @@ static void suite_x86_smp_order(void)
     free(buf);
 }
 
+/* BOOT-1 Task 2 consumer-acquire contract (final-review finding): the
+ * sched consumers the plan names must read runtime online with acquire
+ * — pointer-based accesses (dst->online / rq->online) included.  The
+ * Task 2 grep audit missed exactly these, so the contract is pinned in
+ * source text, not in a grep. */
+static void suite_sched_consumer_acquire_contract(void)
+{
+    TEST_SUITE("double_state_publish sched consumer acquire contract");
+    const char *checks[][3] = {
+        /* file, function scope start, needle that must appear after it */
+        { "kernel/sched/balance.c", "void sched_notify_remote_cpu(",
+          "__atomic_load_n(&dst->online, __ATOMIC_ACQUIRE)" },
+        { "kernel/sched/kthread.c", "int kthread_alloc_and_publish(",
+          "__atomic_load_n(&rq->online, __ATOMIC_ACQUIRE)" },
+    };
+    for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", OS01_KERNEL_SRC, checks[i][0]);
+        char *buf = read_file(path);
+        assert_true(buf != NULL);
+        if (!buf) continue;
+        long scope = find_idx(buf, checks[i][1]);
+        long needle = find_idx(buf, checks[i][2]);
+        assert_true(scope >= 0);
+        assert_true(needle >= 0);
+        if (scope >= 0 && needle >= 0)
+            assert_true(needle > scope);
+        free(buf);
+    }
+}
+
 int main(void)
 {
     suite_kernel_main_order();
     suite_aarch64_boot_order();
     suite_ap_tail_order();
+    suite_sched_consumer_acquire_contract();
     suite_x86_boot_order();
     suite_x86_smp_order();
     suite_negative_scope_checks();

@@ -232,7 +232,7 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
 
     /* Re-validate the placement under the same protected snapshot that
      * publishes the task: the target CPU must still be usable. */
-    if (!rq->online ||
+    if (!__atomic_load_n(&rq->online, __ATOMIC_ACQUIRE) ||
         (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE) &&
          !(target_cpu == 0 && !pinned && sched_boot_creation_open()))) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
