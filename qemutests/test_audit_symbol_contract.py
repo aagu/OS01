@@ -102,6 +102,35 @@ class AuditSymbolContractTests(unittest.TestCase):
         res3 = subprocess.run(["bash", "-c", script, "bash", obsolete], capture_output=True, text=True)
         self.assertNotEqual(res3.returncode, 0)
 
+    def test_recipe_tool_missing_fails(self) -> None:
+        recipe = """
+        READELF="nonexistent_readelf_binary_12345"
+        if ! command -v "$READELF" >/dev/null 2>&1; then
+            echo "AUDIT GATE FAIL: $READELF tool not found" >&2
+            exit 1
+        fi
+        """
+        res = subprocess.run(["bash", "-c", recipe], capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("AUDIT GATE FAIL: nonexistent_readelf_binary_12345 tool not found", res.stderr)
+
+    def test_recipe_tool_nonzero_exit_fails(self) -> None:
+        recipe = """
+        fake_tool() {
+            echo "42: ffff000040081234 120 FUNC GLOBAL DEFAULT 2 kernel_main"
+            return 7
+        }
+        syms="$(fake_tool)" || {
+            echo "AUDIT GATE FAIL: readelf exited with failure" >&2
+            exit 1
+        }
+        echo "UNEXPECTED PASS"
+        """
+        res = subprocess.run(["bash", "-c", recipe], capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("AUDIT GATE FAIL: readelf exited with failure", res.stderr)
+        self.assertNotIn("UNEXPECTED PASS", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

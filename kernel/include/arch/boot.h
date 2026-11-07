@@ -14,10 +14,11 @@ struct boot_context;
 /*
  * Unified Kernel Boot Orchestration Facade
  *
- * Each architecture implements strong symbol overrides for these hooks,
- * or falls back to weak default stubs defined in kernel/core/main.c.
+ * Each architecture implements strong symbol overrides for these hooks.
+ * Missing implementations result in a link-time error.
  */
 
+/* msg is reserved; implementations emit legacy strings to preserve test harness regex compatibility */
 void arch_early_panic(const char *msg) __attribute__((noreturn));
 void arch_early_init(const struct boot_context *bootctx);
 void arch_boot_memory(const struct boot_context *bootctx);

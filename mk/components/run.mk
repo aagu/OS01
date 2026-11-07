@@ -141,7 +141,9 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	@if ! command -v $(AARCH64_READELF) >/dev/null 2>&1; then \
 	    echo "AUDIT GATE FAIL: $(AARCH64_READELF) tool not found" >&2; exit 1; \
 	fi
-	@syms="$$($(AARCH64_READELF) -Ws $(BUILD_DIR)/artifacts/kernel.elf)" || exit 1; \
+	@syms="$$($(AARCH64_READELF) -Ws $(BUILD_DIR)/artifacts/kernel.elf)" || { \
+	    echo "AUDIT GATE FAIL: $(AARCH64_READELF) exited with failure on $(BUILD_DIR)/artifacts/kernel.elf" >&2; exit 1; \
+	}; \
 	if ! echo "$$syms" | grep -qE 'FUNC[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+kernel_main[[:space:]]*$$'; then \
 	    echo "AUDIT GATE FAIL: kernel_main must be defined as GLOBAL FUNC symbol" >&2; exit 1; \
 	fi; \
