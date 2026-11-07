@@ -1,0 +1,442 @@
+// hosttests/cases/test_bcache.c — ARCH-6 block cache unit tests.
+//
+// Links the production kernel/block/bcache.c and kernel/sync/wait.c
+// against the arch6_bcache_runtime host substrate.  Fake devices are
+// registered through the production block_device_register (which also
+// initializes the cache pools — except init_oom_retry, which runs
+// first and drives bcache_init directly under allocation injection).
+//
+// Wait-window cases use the HOST_TEST reserve/complete hooks: the fake
+// ops->read NEVER blocks, so any real scheduling inside bcache must be
+// driven by complete_busy from the wait_queue_arm wrapper (see the
+// wraps at the bottom of this file).
+
+#include "test_framework.h"
+#include <block/bcache.h>
+#include <block/blockdev.h>
+#include <sync/wait.h>
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// ── Allocator with injection (same surface as test_block_device_ops) ──
+static int  s_kmalloc_calls = 0;
+static int  s_kfree_calls   = 0;
+static int  s_kmalloc_fail_at = 0;   // 1-based call ordinal to fail; 0 = never
+static bool s_kmalloc_failed  = false;
+
+void *kmalloc(size_t size)
+{
+    s_kmalloc_calls++;
+    if (s_kmalloc_fail_at && s_kmalloc_calls == s_kmalloc_fail_at) {
+        s_kmalloc_failed = true;
+        return NULL;
+    }
+    return malloc(size ? size : 1);
+}
+
+size_t kfree(void *ptr)
+{
+    s_kfree_calls++;
+    free(ptr);
+    return 0;
+}
+
+// ── Fake block device ─────────────────────────────────────────────────
+#define FAKE_SECTORS 64
+
+enum fake_mode {
+    FAKE_OK = 0,
+    FAKE_FAIL_FIRST_READ,   // next read returns -EIO once
+};
+
+typedef struct {
+    uint8_t        backend[FAKE_SECTORS][BCACHE_SECTOR];
+    int            reads;
+    int            writes;
+    int            last_count;
+    uint64_t       last_lba;
+    enum fake_mode mode;
+} fake_dev_t;
+
+static int fake_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)dev;
+    fake_dev_t *f = (fake_dev_t *)dev->private_data;
+    f->reads++;                        // every backend call counts
+    f->last_lba   = lba;
+    f->last_count = (int)count;
+    if (f->mode == FAKE_FAIL_FIRST_READ) {
+        f->mode = FAKE_OK;
+        return -EIO;
+    }
+    f->last_lba   = lba;
+    f->last_count = (int)count;
+    for (uint32_t i = 0; i < count; i++) {
+        if (lba + i < FAKE_SECTORS)
+            memcpy((uint8_t *)buf + i * BCACHE_SECTOR, f->backend[lba + i],
+                   BCACHE_SECTOR);
+    }
+    return 0;
+}
+
+static int fake_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)dev;
+    fake_dev_t *f = (fake_dev_t *)dev->private_data;
+    f->writes++;
+    f->last_lba   = lba;
+    f->last_count = (int)count;
+    for (uint32_t i = 0; i < count; i++) {
+        if (lba + i < FAKE_SECTORS)
+            memcpy(f->backend[lba + i], (const uint8_t *)buf + i * BCACHE_SECTOR,
+                   BCACHE_SECTOR);
+    }
+    return 0;
+}
+
+static const struct block_device_ops fake_ops = {
+    .read  = fake_read,
+    .write = fake_write,
+    .flush = NULL,
+};
+
+static fake_dev_t      s_fake;
+static block_device_t *s_disk = NULL;
+
+static const uint8_t PATTERN_A = 0xA7;
+
+static void fake_reset(void)
+{
+    memset(&s_fake, 0, sizeof(s_fake));
+    for (int i = 0; i < FAKE_SECTORS; i++)
+        memset(s_fake.backend[i], PATTERN_A, BCACHE_SECTOR);
+}
+
+static void fake_register(void)
+{
+    fake_reset();
+    s_kmalloc_calls = 0;
+    s_kfree_calls   = 0;
+    s_kmalloc_fail_at = 0;
+    struct block_device_desc desc = {
+        .name         = "bcachefake",
+        .sector_count = FAKE_SECTORS,
+        .sector_size  = BCACHE_SECTOR,
+        .ops          = &fake_ops,
+        .private_data = &s_fake,
+        .parent       = NULL,
+        .kind         = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+    assert_not_null(s_disk);
+}
+
+static void fake_unregister(void)
+{
+    if (s_disk) {
+        block_device_unregister_boot(s_disk);
+        s_disk = NULL;
+    }
+    bcache_reset_for_test();
+}
+
+// ── Wait-window scripting ─────────────────────────────────────────────
+// wait_queue_arm is wrapped at link time.  The script (armed by a case)
+// drives bcache_test_complete_busy either right before the real arm or
+// right after it, covering both halves of the ARM→recheck handshake.
+static int  s_arm_hook   = 0;   // 0=off, 1=complete before arm, 2=after arm
+static int  s_arm_calls  = 0;
+static int  s_completes  = 0;
+
+void __real_wait_queue_arm(wait_queue_t *wq);
+
+static void run_complete_script(void)
+{
+    if (!s_arm_hook) return;
+    block_device_t *dev = s_disk;
+    uint64_t lba = 5;
+    int io = 0;
+    const void *sector = NULL;
+    uint8_t tmp[BCACHE_SECTOR];
+    memset(tmp, 0x5C, sizeof(tmp));
+    switch (s_arm_hook) {
+    case 1:
+    case 2:
+        io = 0; sector = tmp;
+        break;
+    case 3:   // error completion
+        io = -EIO; sector = NULL;
+        break;
+    default:
+        return;
+    }
+    s_completes++;
+    if (io == 0)
+        bcache_test_complete_busy(dev, lba, 0, tmp);
+    else
+        bcache_test_complete_busy(dev, lba, io, NULL);
+    s_arm_hook = 0;
+}
+
+void __wrap_wait_queue_arm(wait_queue_t *wq)
+{
+    s_arm_calls++;
+    if (s_arm_hook == 1 || s_arm_hook == 3)
+        run_complete_script();        // 1: ok / 3: -EIO, before ARM
+    __real_wait_queue_arm(wq);
+    if (s_arm_hook == 2)
+        run_complete_script();        // ok, after ARM
+}
+
+void __real_wait_queue_sleep(wait_queue_t *wq);
+void __wrap_wait_queue_sleep(wait_queue_t *wq)
+{
+    __real_wait_queue_sleep(wq);
+}
+
+extern int arch6_bcache_schedule_count;
+
+// ── Cases ─────────────────────────────────────────────────────────────
+
+TEST_FUNC(init_oom_retry) {
+    // Runs first: the pools are not yet initialized (no register happened).
+    // Every allocation point of bcache_init must fail cleanly (no partial
+    // publish, everything it took gets freed) and a retry must succeed.
+    s_kmalloc_calls = 0;
+    s_kfree_calls   = 0;
+
+    s_kmalloc_fail_at = 2;          // data pool fails: metadata pool must be freed
+    assert_eq(-ENOMEM, bcache_init());
+    assert_true(s_kmalloc_failed);
+    // one allocation failed (NULL, nothing to free), the other was freed
+    assert_eq(s_kmalloc_calls - 1, s_kfree_calls);
+
+    s_kmalloc_calls  = 0;           // ordinals are per-attempt
+    s_kfree_calls    = 0;
+    s_kmalloc_fail_at = 1;          // metadata pool fails: nothing to free
+    assert_eq(-ENOMEM, bcache_init());
+    assert_eq(s_kmalloc_calls - 1, s_kfree_calls);
+
+    s_kmalloc_fail_at = 0;
+    assert_eq(0, bcache_init());
+
+    // Idempotent after success; reset keeps the pools (no allocation).
+    int before = s_kmalloc_calls;
+    assert_eq(0, bcache_init());
+    bcache_reset_for_test();
+    assert_eq(before, s_kmalloc_calls);
+}
+
+TEST_FUNC(read_miss_fills) {
+    fake_register();
+    uint8_t buf[BCACHE_SECTOR];
+    memset(buf, 0, sizeof(buf));
+
+    assert_eq(0, bcache_read_sector(s_disk, 5, buf));
+    assert_eq(1, s_fake.reads);
+    assert_eq(PATTERN_A, buf[0]);
+
+    uint8_t buf2[BCACHE_SECTOR];
+    assert_eq(0, bcache_read_sector(s_disk, 5, buf2));
+    assert_eq(1, s_fake.reads);                 // served from cache
+    assert_mem_eq(buf, buf2, BCACHE_SECTOR);
+
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(1, st.entries);
+    assert_eq(0, st.pinned);
+    assert_eq(0, st.busy);
+    assert_eq(0, st.waiters);
+    fake_unregister();
+}
+
+TEST_FUNC(read_error_retries) {
+    fake_register();
+    uint8_t buf[BCACHE_SECTOR];
+
+    s_fake.mode = FAKE_FAIL_FIRST_READ;
+    assert_eq(-EIO, bcache_read_sector(s_disk, 9, buf));
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.entries);
+    assert_eq(0, st.pinned);
+    assert_eq(0, st.busy);
+
+    assert_eq(0, bcache_read_sector(s_disk, 9, buf));
+    assert_eq(2, s_fake.reads);
+    assert_eq(PATTERN_A, buf[0]);
+    fake_unregister();
+}
+
+TEST_FUNC(reset_drops_entries) {
+    fake_register();
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, bcache_read_sector(s_disk, 1, buf));
+    assert_eq(0, bcache_read_sector(s_disk, 2, buf));
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(2, st.entries);
+
+    bcache_reset_for_test();
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.entries);
+
+    assert_eq(0, bcache_read_sector(s_disk, 1, buf));
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(1, st.entries);
+    fake_unregister();
+}
+
+TEST_FUNC(unregister_drops_entries) {
+    fake_register();
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, bcache_read_sector(s_disk, 3, buf));
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(1, st.entries);
+
+    // Boot unregister must silently drop the cache entries for the
+    // retired device — the ops are gone, so writeback is impossible.
+    assert_eq(0, block_device_unregister_boot(s_disk));
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.entries);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
+TEST_FUNC(busy_wake_before_arm) {
+    fake_register();
+    uint8_t pattern[BCACHE_SECTOR];
+    memset(pattern, 0x5C, sizeof(pattern));
+
+    assert_eq(0, bcache_test_reserve_busy(s_disk, 5));
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(1, st.entries);
+    assert_eq(1, st.busy);
+    assert_eq(1, st.pinned);          // test-owned pin
+
+    s_arm_calls = 0;
+    s_completes = 0;
+    s_arm_hook  = 1;                  // complete right before ARM
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, bcache_read_sector(s_disk, 5, buf));
+    assert_mem_eq(pattern, buf, BCACHE_SECTOR);
+    assert_eq(0, s_fake.reads);       // filled by the scripted producer
+    assert_eq(1, s_arm_calls);        // one wait window, no lost wake
+    assert_eq(1, s_completes);
+    assert_eq(0, arch6_bcache_schedule_count);  // recheck satisfied: no sleep
+
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.pinned);
+    assert_eq(0, st.busy);
+    assert_eq(0, st.waiters);
+    fake_unregister();
+}
+
+TEST_FUNC(busy_wake_after_arm) {
+    fake_register();
+    uint8_t pattern[BCACHE_SECTOR];
+    memset(pattern, 0x5C, sizeof(pattern));
+
+    assert_eq(0, bcache_test_reserve_busy(s_disk, 5));
+
+    s_arm_calls = 0;
+    s_completes = 0;
+    s_arm_hook  = 2;                  // complete right after ARM
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, bcache_read_sector(s_disk, 5, buf));
+    assert_mem_eq(pattern, buf, BCACHE_SECTOR);
+    assert_eq(1, s_arm_calls);
+    assert_eq(1, s_completes);
+    assert_eq(0, arch6_bcache_schedule_count);
+
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.pinned);
+    assert_eq(0, st.busy);
+    assert_eq(0, st.waiters);
+    fake_unregister();
+}
+
+TEST_FUNC(busy_error_complete_then_retry) {
+    fake_register();
+    uint8_t buf[BCACHE_SECTOR];
+
+    assert_eq(0, bcache_test_reserve_busy(s_disk, 5));
+    s_arm_calls = 0;
+    s_completes = 0;
+    s_arm_hook  = 3;                  // complete with -EIO
+    // The failed fill was reclaimed, so the waiter retries fresh and
+    // succeeds — a failed fill is never served as a hit.
+    assert_eq(0, bcache_read_sector(s_disk, 5, buf));
+    assert_eq(PATTERN_A, buf[0]);
+    assert_eq(1, s_completes);
+    assert_eq(1, s_fake.reads);       // retry did its own backend read
+
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(1, st.entries);
+    assert_eq(0, st.pinned);
+    assert_eq(0, st.busy);
+    fake_unregister();
+}
+
+TEST_FUNC(complete_rejects_foreign_or_repeat) {
+    fake_register();
+    uint8_t pattern[BCACHE_SECTOR];
+    memset(pattern, 0x33, sizeof(pattern));
+
+    assert_eq(0, bcache_test_reserve_busy(s_disk, 6));
+    assert_eq(0, bcache_test_complete_busy(s_disk, 6, 0, pattern));  // first
+    assert_eq(-EINVAL, bcache_test_complete_busy(s_disk, 6, 0, pattern)); // repeat
+    assert_eq(-EINVAL, bcache_test_complete_busy(s_disk, 7, 0, pattern)); // foreign key
+
+    // Reserve again; the key-exists rejection still applies.
+    assert_eq(0, bcache_test_reserve_busy(s_disk, 7));
+    assert_eq(-EEXIST, bcache_test_reserve_busy(s_disk, 7));
+    assert_eq(0, bcache_test_complete_busy(s_disk, 7, 0, pattern));
+    fake_unregister();
+}
+
+TEST_FUNC(sector_size_mismatch_rejected) {
+    fake_register();
+    // A non-512 sector device must not enter the cache.
+    static fake_dev_t f2;
+    memset(&f2, 0, sizeof(f2));
+    static const struct block_device_ops ops2 = { .read = fake_read, .write = fake_write };
+    struct block_device_desc desc = {
+        .name = "bcachefake4k", .sector_count = 16, .sector_size = 4096,
+        .ops = &ops2, .private_data = &f2, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    block_device_t *d4k = NULL;
+    assert_eq(0, block_device_register(&desc, &d4k));
+    uint8_t buf[4096];
+    assert_eq(-EINVAL, bcache_read_sector(d4k, 0, buf));
+    bcache_test_stats_t st;
+    bcache_debug_stats(d4k, &st);
+    assert_eq(0, st.entries);
+    block_device_unregister_boot(d4k);
+    bcache_reset_for_test();
+    fake_unregister();
+}
+
+TEST_LIST_BEGIN
+    TEST_ENTRY(init_oom_retry),
+    TEST_ENTRY(read_miss_fills),
+    TEST_ENTRY(read_error_retries),
+    TEST_ENTRY(reset_drops_entries),
+    TEST_ENTRY(unregister_drops_entries),
+    TEST_ENTRY(busy_wake_before_arm),
+    TEST_ENTRY(busy_wake_after_arm),
+    TEST_ENTRY(busy_error_complete_then_retry),
+    TEST_ENTRY(complete_rejects_foreign_or_repeat),
+    TEST_ENTRY(sector_size_mismatch_rejected),
+TEST_LIST_END
+
+int main(void)
+{
+    RUN_ALL_TESTS();
+    return __test_stats.failed > 0 ? 1 : 0;
+}

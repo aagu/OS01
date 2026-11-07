@@ -17,6 +17,7 @@
 // block_device keeps the shape the ARCH-9 consumers already know.
 
 #include <block/blockdev.h>
+#include <block/bcache.h>
 #include <core/debug.h>
 #include <errno.h>
 #include <kernel.h>          // container_of
@@ -81,6 +82,12 @@ void block_device_init(void)
     if (g_registry_ready)
         return;
 
+    // ARCH-6: the cache pools must exist before the first device is
+    // published.  A failed cache init leaves the registry not-ready so a
+    // later register retries it.
+    if (bcache_init() != 0)
+        return;
+
     g_registry_ready = 1;
     debug_block("block: subsystem initialized\n");
 }
@@ -102,7 +109,12 @@ int block_device_register(const struct block_device_desc *desc, block_device_t *
     if (!desc->ops || !desc->ops->read)
         return -EINVAL;
 
-    block_device_init();   // idempotent
+    // ARCH-6: cache pools must exist before a device publishes.  Retried
+    // on every register when a previous init failed.
+    if (bcache_init() != 0) {
+        debug_block("block: cache init failed, cannot register %s\n", desc->name);
+        return -ENOMEM;
+    }
 
     // Allocate and initialize outside the registry lock: the object is
     // published only after the duplicate-name re-check below.
@@ -196,6 +208,11 @@ int block_device_unregister_boot(block_device_t *dev)
     name[sizeof(name) - 1] = '\0';
 
     spin_unlock_irqrestore(&g_registry_lock, flags);
+
+    // ARCH-6: silent drop of this device's cache entries (no writeback —
+    // the ops are retired).  Only reached for a successfully retired,
+    // quiescent device; a foreign/EBUSY rejection returns earlier.
+    bcache_drop_device(dev);
 
     debug_block("block: unregistering %s\n", name);
     return 0;
@@ -333,6 +350,9 @@ int block_device_count(void)
 // published objects live until power-off.
 void block_device_reset_for_test(void)
 {
+    // Drop cache entries (no writeback) before the device objects vanish.
+    bcache_reset_for_test();
+
     uint64_t flags = spin_lock_irqsave(&g_registry_lock);
 
     list_t *lists[2] = { &g_registry, &g_retired };
