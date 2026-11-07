@@ -44,21 +44,35 @@ size_t kfree(void *ptr)
 
 // ── Fake block device ─────────────────────────────────────────────────
 #define FAKE_SECTORS 64
+#define BIG_SECTORS  (BCACHE_BUFS + 16)
 
 enum fake_mode {
     FAKE_OK = 0,
     FAKE_FAIL_FIRST_READ,   // next read returns -EIO once
 };
 
+static uint8_t s_small_backend[FAKE_SECTORS][BCACHE_SECTOR];
+static uint8_t s_big_backend[BIG_SECTORS + 1][BCACHE_SECTOR];
+
+// Optional per-write hook (used to inject events inside a victim
+// writeback, e.g. publishing the requested key to exercise the
+// alloc-time recheck).
+static void (*s_write_hook)(block_device_t *dev, uint64_t lba) = NULL;
+
 typedef struct {
-    uint8_t        backend[FAKE_SECTORS][BCACHE_SECTOR];
+    uint8_t      (*backend)[BCACHE_SECTOR];
+    uint32_t       nsectors;
     int            reads;
     int            writes;
     int            last_count;
     uint64_t       last_lba;
     enum fake_mode mode;
-    int            fail_writes;    // when set, writes return -EIO once... persistently until cleared
+    int            fail_writes;    // when set, writes return -EIO until cleared
 } fake_dev_t;
+
+static fake_dev_t s_fake;
+static fake_dev_t s_big;
+static fake_dev_t s_devB;
 
 static int fake_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
 {
@@ -71,10 +85,8 @@ static int fake_read(block_device_t *dev, uint64_t lba, uint32_t count, void *bu
         f->mode = FAKE_OK;
         return -EIO;
     }
-    f->last_lba   = lba;
-    f->last_count = (int)count;
     for (uint32_t i = 0; i < count; i++) {
-        if (lba + i < FAKE_SECTORS)
+        if (lba + i < f->nsectors)
             memcpy((uint8_t *)buf + i * BCACHE_SECTOR, f->backend[lba + i],
                    BCACHE_SECTOR);
     }
@@ -83,15 +95,15 @@ static int fake_read(block_device_t *dev, uint64_t lba, uint32_t count, void *bu
 
 static int fake_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *buf)
 {
-    (void)dev;
     fake_dev_t *f = (fake_dev_t *)dev->private_data;
     f->writes++;
     f->last_lba   = lba;
     f->last_count = (int)count;
+    if (s_write_hook) s_write_hook(dev, lba);
     if (f->fail_writes)
         return -EIO;
     for (uint32_t i = 0; i < count; i++) {
-        if (lba + i < FAKE_SECTORS)
+        if (lba + i < f->nsectors)
             memcpy(f->backend[lba + i], (const uint8_t *)buf + i * BCACHE_SECTOR,
                    BCACHE_SECTOR);
     }
@@ -110,21 +122,24 @@ static const struct block_device_ops fake_ops = {
     .flush = NULL,
 };
 
-static fake_dev_t      s_fake;
 static block_device_t *s_disk = NULL;
 
 static const uint8_t PATTERN_A = 0xA7;
 
-static void fake_reset(void)
+static void fake_init(fake_dev_t *f, uint8_t (*backend)[BCACHE_SECTOR],
+                      uint32_t nsectors)
 {
-    memset(&s_fake, 0, sizeof(s_fake));
-    for (int i = 0; i < FAKE_SECTORS; i++)
-        memset(s_fake.backend[i], PATTERN_A, BCACHE_SECTOR);
+    memset(f, 0, sizeof(*f));
+    f->backend  = backend;
+    f->nsectors = nsectors;
+    for (uint32_t i = 0; i < nsectors; i++)
+        memset(backend[i], PATTERN_A, BCACHE_SECTOR);
 }
 
 static void fake_register(void)
 {
-    fake_reset();
+    fake_init(&s_fake, s_small_backend, FAKE_SECTORS);
+    s_write_hook = NULL;
     s_kmalloc_calls = 0;
     s_kfree_calls   = 0;
     s_kmalloc_fail_at = 0;
@@ -140,6 +155,7 @@ static void fake_register(void)
     assert_eq(0, block_device_register(&desc, &s_disk));
     assert_not_null(s_disk);
 }
+
 
 static void fake_unregister(void)
 {
@@ -160,6 +176,7 @@ static int  s_arm_calls  = 0;
 static int  s_completes  = 0;
 static int  s_arm_phase  = 0;
 static void (*s_arm_action)(void) = NULL;
+static uint64_t s_exhaustion_unpin_lba;
 
 void __real_wait_queue_arm(wait_queue_t *wq);
 
@@ -185,6 +202,14 @@ static void run_unpin_action(void)
 {
     s_completes++;
     bcache_debug_unpin(s_disk, 8);    // release the pin a flush waits on
+    s_arm_action = NULL;
+    s_arm_phase  = 0;
+}
+
+static void run_exhaustion_unpin(void)
+{
+    s_completes++;
+    bcache_debug_unpin(s_disk, s_exhaustion_unpin_lba);
     s_arm_action = NULL;
     s_arm_phase  = 0;
 }
@@ -650,6 +675,288 @@ TEST_FUNC(driver_flush_error_reported) {
     fake_unregister();
 }
 
+
+// ── Task 6: LRU eviction, recoverable dirty evict, exhaustion wait ────
+
+static void fill_pool_dirty(block_device_t *dev, fake_dev_t *f, uint32_t count)
+{
+    uint8_t buf[BCACHE_SECTOR];
+    memset(buf, 0x81, sizeof(buf));
+    for (uint32_t i = 0; i < count; i++) {
+        assert_eq(0, block_device_write(dev, i, 1, buf));
+    }
+}
+
+TEST_FUNC(evict_writes_back) {
+    fake_init(&s_big, s_big_backend, BIG_SECTORS);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakebig", .sector_count = BIG_SECTORS, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+
+    fill_pool_dirty(s_disk, &s_big, BIG_SECTORS);   // BCACHE_BUFS+16 dirty writes
+
+    // The 16 earliest writes were evicted to make room: write-back on
+    // evict must have pushed them to the backend already (no flush yet).
+    for (uint32_t i = 0; i < 16; i++)
+        assert_eq(0x81, s_big.backend[i][0]);
+
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(BCACHE_BUFS, st.entries);
+
+    // Resident entries serve from the cache.
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, block_device_read(s_disk, 100, 1, buf));
+    assert_eq(0x81, buf[0]);
+
+    // Explicit flush drains the rest.
+    assert_eq(0, block_device_flush(s_disk));
+    for (uint32_t i = 0; i < BIG_SECTORS; i++)
+        assert_eq(0x81, s_big.backend[i][0]);
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
+TEST_FUNC(lru_preserves_hot) {
+    fake_init(&s_big, s_big_backend, BIG_SECTORS);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakehot", .sector_count = BIG_SECTORS, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+
+    fill_pool_dirty(s_disk, &s_big, BCACHE_BUFS);   // pool exactly full
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, block_device_read(s_disk, 0, 1, buf));   // make LBA0 hot
+    int reads_baseline = s_big.reads;
+
+    uint8_t wbuf[BCACHE_SECTOR];
+    memset(wbuf, 0x82, sizeof(wbuf));
+    for (uint32_t i = 0; i < 8; i++)
+        assert_eq(0, block_device_write(s_disk, BCACHE_BUFS + i, 1, wbuf));
+
+    // Hot entry survived; cold tails were evicted instead.  LBA0 holds
+    // the fill pattern (fill_pool_dirty wrote it).
+    assert_eq(0, block_device_read(s_disk, 0, 1, buf));
+    assert_eq(0x81, buf[0]);
+    assert_eq(reads_baseline, s_big.reads);   // no backend read for LBA0
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
+TEST_FUNC(evict_error_preserves_victim) {
+    fake_init(&s_big, s_big_backend, BIG_SECTORS + 1);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakeev", .sector_count = BIG_SECTORS + 1, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+
+    // LBA0 written FIRST so it is the LRU tail (oldest) when the pool
+    // overflows; it is dirty, so eviction must write it back.
+    fill_pool_dirty(s_disk, &s_big, BIG_SECTORS);
+
+    s_big.fail_writes = 1;              // victim write-back will fail
+    uint8_t buf[BCACHE_SECTOR];
+    memset(buf, 0x83, sizeof(buf));
+    assert_eq(-EIO, block_device_write(s_disk, BIG_SECTORS, 1, buf));
+    // wait — write of the NEW key succeeds without backend; the victim
+    // write-back failure surfaces on the new request.
+    s_big.fail_writes = 0;
+
+    // The victim kept its key, data and DIRTY; nothing stuck BUSY.
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(BCACHE_BUFS, st.entries);
+    assert_eq(0, st.busy);
+    assert_eq(0, st.pinned);
+    uint8_t rbuf[BCACHE_SECTOR];
+    assert_eq(0, block_device_read(s_disk, 0, 1, rbuf));   // victim data intact
+    assert_eq(0x81, rbuf[0]);
+
+    // Recovered: the eviction now succeeds and the victim is written back.
+    assert_eq(0, block_device_write(s_disk, BIG_SECTORS, 1, buf));
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
+// recheck script: inside the victim write-back, free one slot and publish
+// the requested key through the real reserve+complete path.
+static fake_dev_t *s_recheck_victim_dev;
+static block_device_t *s_recheck_key_dev;   // device of the requested key
+static uint64_t s_recheck_key_lba;
+static int s_recheck_ran = 0;
+
+static void evict_recheck_write_hook(block_device_t *dev, uint64_t lba)
+{
+    (void)dev; (void)lba;
+    if (!s_recheck_ran) {
+        s_recheck_ran = 1;
+        // Free capacity, then publish+complete the requested key.
+        bcache_test_drop_key(s_recheck_key_dev, 5);   // a filled, clean key
+        uint8_t tmp[BCACHE_SECTOR];
+        memset(tmp, 0x84, sizeof(tmp));
+        assert_eq(0, bcache_test_reserve_busy(s_recheck_key_dev, s_recheck_key_lba));
+        assert_eq(0, bcache_test_complete_busy(s_recheck_key_dev, s_recheck_key_lba, 0, tmp));
+    }
+}
+
+TEST_FUNC(evict_rechecks_requested_key) {
+    fake_init(&s_big, s_big_backend, BIG_SECTORS + 1);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakerc", .sector_count = BIG_SECTORS + 1, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+    fake_init(&s_devB, s_small_backend, FAKE_SECTORS);
+    struct block_device_desc bdesc = {
+        .name = "bcachefakeb", .sector_count = FAKE_SECTORS, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_devB, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    block_device_t *devB = NULL;
+    assert_eq(0, block_device_register(&bdesc, &devB));
+
+    // Fill the pool with clean A entries, keeping B's dirty entry oldest
+    // (LRU tail).  Order: write B first, then read-fill A entries.
+    uint8_t wbuf[BCACHE_SECTOR];
+    memset(wbuf, 0x85, sizeof(wbuf));
+    assert_eq(0, block_device_write(devB, 3, 1, wbuf));    // B dirty, oldest
+    uint8_t touch[BCACHE_SECTOR];
+    for (uint32_t i = 0; i < BCACHE_BUFS - 1; i++)
+        assert_eq(0, block_device_read(s_disk, i, 1, touch));  // A clean fill
+
+    // Request a NEW A key: victim = B's dirty entry (LRU tail).
+    s_recheck_ran = 0;
+    s_recheck_victim_dev = &s_devB;
+    s_recheck_key_dev = s_disk;
+    s_recheck_key_lba = BCACHE_BUFS + 5;
+    s_write_hook = evict_recheck_write_hook;
+
+    uint8_t buf[BCACHE_SECTOR];
+    int reads_before_request = s_big.reads;
+    assert_eq(0, block_device_read(s_disk, BCACHE_BUFS + 5, 1, buf));
+    assert_eq(0x84, buf[0]);                 // served by the scripted fill
+    assert_eq(reads_before_request, s_big.reads);   // no backend read for it
+
+    // Victim write-back landed on B's backend; B's entry stayed resident
+    // (no double key for the request; the freed A slot was reused by the
+    // scripted publication, the victim returned clean).
+    assert_eq(0x85, s_devB.backend[3][0]);
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    bcache_test_stats_t stb;
+    bcache_debug_stats(devB, &stb);
+    assert_eq(BCACHE_BUFS - 1, st.entries);  // -1 dropped, +1 published
+    assert_eq(1, stb.entries);               // victim stayed with B
+    assert_eq(0, stb.dirty);                 // write-back cleared it
+
+    s_write_hook = NULL;
+    block_device_unregister_boot(devB);
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
+// exhaustion script: release one pin so the waiter can make progress.
+static void exhaustion_schedule_script(void)
+{
+    bcache_debug_unpin(s_disk, s_exhaustion_unpin_lba);
+}
+
+TEST_FUNC(exhaustion_waits_for_unpin) {
+    fake_init(&s_big, s_big_backend, BIG_SECTORS);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakeex", .sector_count = BIG_SECTORS, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+
+    // Pin every slot: fill + pin BCACHE_BUFS distinct keys.
+    for (uint32_t i = 0; i < BCACHE_BUFS; i++)
+        assert_eq(0, bcache_debug_pin(s_disk, i));
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(BCACHE_BUFS, st.entries);
+    assert_eq(BCACHE_BUFS, st.pinned);
+
+    // A new key must wait (no free slot, all pinned) — the schedule
+    // script releases one pin and the request completes.
+    s_exhaustion_unpin_lba = 5;
+    arch6_bcache_set_schedule_script(exhaustion_schedule_script);
+    uint8_t buf[BCACHE_SECTOR];
+    assert_eq(0, block_device_read(s_disk, BCACHE_BUFS, 1, buf));
+    arch6_bcache_set_schedule_script(NULL);
+    assert_eq(PATTERN_A, buf[0]);
+
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(BCACHE_BUFS, st.entries);      // LBA5's slot reused for the new key
+    assert_eq(0, st.busy);
+    assert_eq(0, st.waiters);
+
+    // Drain the remaining pins; the cache must come out clean.
+    for (uint32_t i = 0; i < BCACHE_BUFS; i++) {
+        if (i == 5) continue;                // its entry was reused
+        bcache_debug_unpin(s_disk, i);
+    }
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.pinned);
+    assert_eq(0, st.pinned);
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
+TEST_FUNC(exhaustion_wake_windows) {
+    fake_init(&s_big, s_big_backend, BIG_SECTORS);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakeew", .sector_count = BIG_SECTORS, .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL, .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+
+    for (uint32_t round = 0; round < 2; round++) {
+        for (uint32_t i = 0; i < BCACHE_BUFS; i++)
+            assert_eq(0, bcache_debug_pin(s_disk, i));
+
+        // Release the LAST pin either before or after the waiter's ARM.
+        s_exhaustion_unpin_lba = BCACHE_BUFS - 1;
+        s_arm_phase = round == 0 ? 1 : 2;
+        s_arm_action = run_exhaustion_unpin;
+        s_completes = 0;
+        uint8_t buf[BCACHE_SECTOR];
+        assert_eq(0, block_device_read(s_disk, BCACHE_BUFS, 1, buf));
+        assert_eq(PATTERN_A, buf[0]);
+        assert_eq(1, s_completes);
+        s_arm_phase = 0;
+        s_arm_action = NULL;
+        s_completes = 0;
+
+        bcache_test_stats_t st;
+        bcache_debug_stats(s_disk, &st);
+        assert_eq(0, st.busy);
+        assert_eq(0, st.waiters);
+        // Drain remaining pins for the next round.
+        for (uint32_t i = 0; i < BCACHE_BUFS - 1; i++)
+            bcache_debug_unpin(s_disk, i);
+        bcache_debug_unpin(s_disk, BCACHE_BUFS);
+        bcache_reset_for_test();
+    }
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(init_oom_retry),
     TEST_ENTRY(read_miss_fills),
@@ -668,6 +975,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(flush_failed_write_keeps_dirty),
     TEST_ENTRY(flush_without_driver_callback),
     TEST_ENTRY(driver_flush_error_reported),
+    TEST_ENTRY(evict_writes_back),
+    TEST_ENTRY(lru_preserves_hot),
+    TEST_ENTRY(evict_error_preserves_victim),
+    TEST_ENTRY(evict_rechecks_requested_key),
+    TEST_ENTRY(exhaustion_waits_for_unpin),
+    TEST_ENTRY(exhaustion_wake_windows),
 TEST_LIST_END
 
 int main(void)

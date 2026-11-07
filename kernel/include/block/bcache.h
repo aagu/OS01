@@ -61,6 +61,10 @@ void bcache_debug_stats(struct block_device *dev, bcache_test_stats_t *out);
 int bcache_debug_pin(struct block_device *dev, uint64_t lba);
 void bcache_debug_unpin(struct block_device *dev, uint64_t lba);
 
+// Drop a single key without writeback (silent).  Host-test helper for
+// scripting capacity changes inside injected writeback windows.
+int bcache_test_drop_key(struct block_device *dev, uint64_t lba);
+
 #endif // OS01_HOST_TEST || OS01_SELFTEST
 
 #ifdef OS01_HOST_TEST

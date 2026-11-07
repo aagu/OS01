@@ -38,9 +38,10 @@
 
 // ── Buffer metadata ───────────────────────────────────────────────────
 enum bcache_flags {
-    BC_VALID = 1u << 0,
-    BC_DIRTY = 1u << 1,
-    BC_BUSY  = 1u << 2,
+    BC_VALID   = 1u << 0,
+    BC_DIRTY   = 1u << 1,
+    BC_BUSY    = 1u << 2,
+    BC_LLINKED = 1u << 3,   // buffer is on the LRU list
 };
 
 typedef struct bcache_buf {
@@ -87,6 +88,9 @@ static inline int bcache_key_eq(const bcache_buf_t *b, struct block_device *dev,
 
 static void bcache_lru_remove(bcache_buf_t *b)
 {
+    if (!(b->flags & BC_LLINKED))
+        return;                        // not on the list (free slot)
+    b->flags &= ~BC_LLINKED;
     if (b->lru_prev) b->lru_prev->lru_next = b->lru_next;
     else             g_lru_head = b->lru_next;
     if (b->lru_next) b->lru_next->lru_prev = b->lru_prev;
@@ -96,6 +100,7 @@ static void bcache_lru_remove(bcache_buf_t *b)
 
 static void bcache_lru_push_front(bcache_buf_t *b)
 {
+    b->flags |= BC_LLINKED;
     b->lru_prev = NULL;
     b->lru_next = g_lru_head;
     if (g_lru_head) g_lru_head->lru_prev = b;
@@ -174,10 +179,27 @@ static void bcache_hash_remove(bcache_buf_t *b)
     }
 }
 
-static bcache_buf_t *bcache_take_free_slot(void)
+// Pool candidate for reuse: a free slot, or the least-recently-used
+// entry that is unpinned and not BUSY (pinned entries in between are
+// skipped — the caller handles dirty write-back).  Lock held.
+static bcache_buf_t *bcache_pick_candidate(void)
 {
-    if (g_free_top == 0) return NULL;   // Task 6: LRU eviction replaces this
-    return g_free_stack[--g_free_top];
+    if (g_free_top > 0)
+        return g_free_stack[--g_free_top];
+    for (bcache_buf_t *v = g_lru_tail; v; v = v->lru_prev)
+        if (v->refcnt == 0 && !(v->flags & BC_BUSY))
+            return v;
+    return NULL;
+}
+
+static int bcache_pool_has_candidate(void)
+{
+    if (g_free_top > 0)
+        return 1;
+    for (bcache_buf_t *v = g_lru_tail; v; v = v->lru_prev)
+        if (v->refcnt == 0 && !(v->flags & BC_BUSY))
+            return 1;
+    return 0;
 }
 
 static void bcache_return_slot(bcache_buf_t *b)
@@ -214,21 +236,109 @@ static void bcache_waiter_sub(struct block_device *dev)
     spin_unlock_irqrestore(&g_bcache_lock, flags);
 }
 
-// Publish a BUSY reservation for a missing key: takes a free slot and
-// hashes the BUSY entry with the caller's pin already held.  Returns the
-// buffer, or NULL when no slot is available.  Caller must re-check the
-// hash right before calling (done by the single lock-held caller below).
-static bcache_buf_t *bcache_publish_busy(struct block_device *dev, uint64_t lba)
+// Publish a BUSY reservation for a missing key on a taken slot: hashes
+// the BUSY entry with the caller's pin already held.  Caller picked the
+// slot (free or evictable LRU tail) under the lock.
+static void bcache_publish_on(bcache_buf_t *b, struct block_device *dev, uint64_t lba)
 {
-    bcache_buf_t *b = bcache_take_free_slot();
-    if (!b) return NULL;
+    if (b->dev)
+        bcache_hash_remove(b);          // evicted victim: leave its old key
+    bcache_lru_remove(b);
     b->dev    = dev;
     b->lba    = lba;
     b->flags  = BC_BUSY;
     b->refcnt = 1;                      // caller's pin
     bcache_hash_insert(b);
     bcache_lru_push_front(b);
-    return b;
+}
+
+// Allocate a slot for (dev, lba) and publish it BUSY with the caller's
+// pin.  Handles LRU eviction of a dirty victim (write-back outside every
+// lock, old key held BUSY so it cannot be re-published underneath us) and
+// pool exhaustion (ARM→recheck wait for a candidate).
+//
+// Returns the published buffer, or NULL:
+//   *err == 0        — the key already exists / appeared: caller retries
+//   *err != 0        — victim write-back failed: error propagated
+static bcache_buf_t *bcache_alloc_for_key(struct block_device *dev, uint64_t lba,
+                                          int *err)
+{
+    *err = 0;
+    uint64_t irq = arch_local_irq_save();
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+        if (bcache_hash_lookup(dev, lba)) {
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            arch_local_irq_restore(irq);
+            return NULL;                // key exists: caller retries
+        }
+        bcache_buf_t *victim = bcache_pick_candidate();
+        if (!victim) {
+            // Exhausted: every slot is pinned or BUSY.  Wait for a pin
+            // release / BUSY clear / slot return, reserving nothing — the
+            // retry re-picks atomically under the lock.
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            bcache_waiter_add(dev);
+            wait_queue_arm(&g_bcache_wq);
+
+            flags = spin_lock_irqsave(&g_bcache_lock);
+            int have = bcache_pool_has_candidate();
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            if (have) {
+                wait_queue_disarm();
+                bcache_waiter_sub(dev);
+                continue;               // retry the pick in the outer loop
+            }
+            schedule();
+            wait_queue_disarm();
+            bcache_waiter_sub(dev);
+            continue;
+        }
+
+        if (!(victim->flags & BC_DIRTY)) {
+            // Clean victim (or free slot): transform in place.
+            bcache_publish_on(victim, dev, lba);
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            arch_local_irq_restore(irq);
+            return victim;
+        }
+
+        // Dirty victim: hold its OLD key BUSY (blocks re-publish, new
+        // pins and eviction), write back outside every lock.
+        struct block_device *vdev = victim->dev;
+        uint64_t           vlba = victim->lba;
+        victim->flags |= BC_BUSY;
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+
+        int ret = vdev->ops->write(vdev, vlba, 1, victim->data);
+
+        flags = spin_lock_irqsave(&g_bcache_lock);
+        // Re-check the requested key: it may have been published while
+        // the write-back ran.  If so, release the victim (DIRTY cleared —
+        // the write succeeded) and let the caller hit it.
+        if (ret == 0 && bcache_hash_lookup(dev, lba)) {
+            victim->flags &= ~(BC_BUSY | BC_DIRTY);
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            wait_queue_wake_all(&g_bcache_wq);
+            arch_local_irq_restore(irq);
+            return NULL;                // key exists: caller retries
+        }
+        victim->flags &= ~BC_BUSY;
+        if (ret == 0) {
+            // Transform the victim into the requested key.
+            bcache_publish_on(victim, dev, lba);
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            wait_queue_wake_all(&g_bcache_wq);
+            arch_local_irq_restore(irq);
+            return victim;
+        }
+        // Failure: old key/data/DIRTY preserved, BUSY released.
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        wait_queue_wake_all(&g_bcache_wq);
+        arch_local_irq_restore(irq);
+        *err = ret;
+        return NULL;
+    }
 }
 
 // Success finish for a fill/complete: data already in the buffer.
@@ -367,11 +477,16 @@ int bcache_read_sector(struct block_device *dev, uint64_t lba, void *buf)
             return 0;
         }
 
-        // Missing: publish BUSY + pin, fill outside the lock.
-        b = bcache_publish_busy(dev, lba);
+        // Missing: allocate (with LRU eviction / exhaustion wait), fill
+        // outside the lock.
         spin_unlock_irqrestore(&g_bcache_lock, flags);
-        if (!b)
-            return -ENOMEM;                // Task 6: exhaustion waits instead
+        int aerr = 0;
+        b = bcache_alloc_for_key(dev, lba, &aerr);
+        if (!b) {
+            if (aerr)
+                return aerr;
+            continue;                      // key appeared: retry the lookup
+        }
 
         int ret = dev->ops->read(dev, lba, 1, b->data);   // raw ops: no recursion
         if (ret != 0) {
@@ -518,12 +633,16 @@ int bcache_write_sector(struct block_device *dev, uint64_t lba, const void *buf)
             return 0;
         }
 
-        // Missing key: publish BUSY + pin, no fill read needed — a whole
-        // sector write overwrites the data.
-        b = bcache_publish_busy(dev, lba);
+        // Missing key: allocate (with LRU eviction / exhaustion wait) —
+        // a whole sector write overwrites the data, no fill read needed.
         spin_unlock_irqrestore(&g_bcache_lock, flags);
-        if (!b)
-            return -ENOMEM;                // Task 6: exhaustion waits instead
+        int aerr = 0;
+        b = bcache_alloc_for_key(dev, lba, &aerr);
+        if (!b) {
+            if (aerr)
+                return aerr;
+            continue;                      // key appeared: retry the lookup
+        }
 
         uint64_t dflags = spin_lock_irqsave(&b->data_lock);
         memcpy(b->data, buf, BCACHE_SECTOR);
@@ -732,9 +851,34 @@ int bcache_test_reserve_busy(struct block_device *dev, uint64_t lba)
         spin_unlock_irqrestore(&g_bcache_lock, flags);
         return -EEXIST;
     }
-    bcache_buf_t *b = bcache_publish_busy(dev, lba);
+    // Free slot only — the reservation never evicts (spec: no free slot
+    // means -ENOMEM for the scripting hook).
+    if (g_free_top == 0) {
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        return -ENOMEM;
+    }
+    bcache_buf_t *b = g_free_stack[--g_free_top];
+    bcache_publish_on(b, dev, lba);
     spin_unlock_irqrestore(&g_bcache_lock, flags);
-    return b ? 0 : -ENOMEM;
+    return 0;
+}
+
+int bcache_test_drop_key(struct block_device *dev, uint64_t lba)
+{
+    if (!g_bcache_ready || !dev)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+    bcache_buf_t *b = bcache_hash_lookup(dev, lba);
+    if (!b || (b->flags & BC_BUSY) || b->refcnt > 0) {
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        return -EINVAL;
+    }
+    bcache_hash_remove(b);
+    bcache_lru_remove(b);
+    bcache_return_slot(b);
+    spin_unlock_irqrestore(&g_bcache_lock, flags);
+    wait_queue_wake_all(&g_bcache_wq);
+    return 0;
 }
 
 int bcache_test_complete_busy(struct block_device *dev, uint64_t lba,
