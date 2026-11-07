@@ -338,7 +338,8 @@ void vfs_test_on_active_register(vfs_node_t *node)
     } else if (strcmp(node->mount->fs_type->name, "vfat") == 0) {
         fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
         if (fs) {
-            assert_eq(0, fs->fat_lifecycle_lock.lock); // lock must be HELD (0)
+            // mutex owner: 0=free, >0=holder — must be HELD during I/O
+            assert_true(fs->lock.owner != 0);
         }
     }
 }
@@ -348,7 +349,7 @@ static void on_fat_block_read(block_device_t *dev, uint64_t lba)
 {
     (void)dev; (void)lba;
     if (s_test_fat_fs) {
-        assert_eq(0, s_test_fat_fs->fat_lifecycle_lock.lock);
+        assert_true(s_test_fat_fs->lock.owner != 0);
     }
 }
 
