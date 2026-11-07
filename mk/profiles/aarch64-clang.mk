@@ -149,8 +149,8 @@ else ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 # each fault owns kernel/sched-fault-<value> + image/sched-fault-<value>.
 # Further down, sync-fault likewise wins over weak-selftest when both
 # KERNEL_TEST_FORCE_NO_RNDRRS=1 and AARCH64_SYNC_FAULT_TEST=1 are set,
-# so the dedicated image/firmware paths (`image/sync-fault/`) match the
-# harness's hardcoded AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}.
+# so the dedicated image path (`image/sync-fault/`) matches the
+# harness's sync-fault target path.
 KERNEL_VARIANT := $(if $(filter positive,$(AARCH64_SCHED_TEST)),sched,sched-fault-$(AARCH64_SCHED_TEST))
 else ifneq ($(strip $(AARCH64_AP_SCHED_TEST)),)
 ifeq ($(filter wake,$(AARCH64_AP_SCHED_TEST)),wake)

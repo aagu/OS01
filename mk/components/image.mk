@@ -179,6 +179,11 @@ $(AARCH64_UEFI_FIRMWARE):
 # same on-disk file is also reachable through its relative spelling. This
 # alias mirrors the x86 `build/<profile>/firmware/OVMF.fd` rule.
 build/$(PROFILE)/firmware/QEMU_EFI.fd: $(AARCH64_UEFI_FIRMWARE)
+
+# Backward-compatibility alias for scripts expecting QEMU_EFI.fd under image/
+$(BUILD_DIR)/image/QEMU_EFI.fd: $(AARCH64_UEFI_FIRMWARE)
+	@mkdir -p "$(dir $@)"
+	@ln -sf ../firmware/QEMU_EFI.fd "$@"
 endif
 
 # ── aarch64 UEFI bring-up image (64 MiB FAT) ────────────────

@@ -318,9 +318,9 @@ _test-aarch64-prep-sched-wake:
 _test-aarch64-run-sched-wake:
 	python3 qemutests/aarch64_ap_scheduler.py \
 	  --phase wake --case positive \
-	  --image "$(AARCH64_UEFI_SCHED_WAKE_DISK)" \
-	  --firmware "$(AARCH64_UEFI_SCHED_WAKE_FIRMWARE)" \
-	  --elf "$(AARCH64_KERNEL_SCHED_WAKE_ELF)" \
+	  --image "$(call aarch64_variant_disk,sched-wake)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --elf "$(call aarch64_variant_kernel,sched-wake)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
@@ -330,9 +330,9 @@ _test-aarch64-prep-sched-tick:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TICK_TEST=1 aarch64-uefi
 _test-aarch64-run-sched-tick:
 	python3 qemutests/aarch64_sched_tick.py \
-	  --image "$(AARCH64_UEFI_SCHED_TICK_DISK)" \
-	  --firmware "$(AARCH64_UEFI_SCHED_TICK_FIRMWARE)" \
-	  --elf "$(AARCH64_KERNEL_SCHED_TICK_ELF)" \
+	  --image "$(call aarch64_variant_disk,sched-tick)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --elf "$(call aarch64_variant_kernel,sched-tick)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
@@ -368,7 +368,7 @@ _test-aarch64-prep-gic-spi:
 # the fault injection flag through the controlled sub-make boundary. The
 # recipe mirrors _test-aarch64-prep-smp so the dry-run contract still
 # honours `make -n`; Task 3's harness target consumes the produced
-# image/firmware from AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}.
+# sync-fault image via $(call aarch64_variant_disk,sync-fault).
 _test-aarch64-prep-sync-fault:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SYNC_FAULT_TEST=1 aarch64-uefi
 
@@ -382,8 +382,8 @@ _test-aarch64-run-smp:
 	  --expect-slab-selftest --expect-m3-selftest --expect-m3mc-selftest \
 	  --expect-scheduler-selftest \
 	  $(TEST_AARCH64_EXTRA_smp) \
-	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(call aarch64_variant_disk,selftest)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
@@ -400,22 +400,21 @@ _test-aarch64-run-gic-spi:
 	python3 qemutests/aarch64_gic_spi.py \
 	  --diagnostic-dtb=auto \
 	  --expect-scheduler-selftest \
-	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_SELFTEST_DISK)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(call aarch64_variant_disk,selftest)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 # AAGU-EL1-sync Task 3: drives the dedicated sync-fault QEMU image
-# (KERNEL_VARIANT=sync-fault, AARCH64_UEFI_SYNC_FAULT_{DISK,FIRMWARE}) in 1-CPU
-# mode and asserts the EL1h sync fatal diagnostic via
-# qemutests/aarch64_sync_fault.py. The harness parser is the only
-# success criterion: timeouts do NOT count, and the run target only
+# (KERNEL_VARIANT=sync-fault) in 1-CPU mode and asserts the EL1h sync fatal
+# diagnostic via qemutests/aarch64_sync_fault.py. The harness parser is the
+# only success criterion: timeouts do NOT count, and the run target only
 # consumes the dedicated sync-fault paths (never the selftest image).
 _test-aarch64-run-sync-fault:
 	python3 qemutests/aarch64_sync_fault.py \
 	  --timeout 60 \
-	  --firmware "$(AARCH64_UEFI_SYNC_FAULT_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_SYNC_FAULT_DISK)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(call aarch64_variant_disk,sync-fault)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
@@ -460,39 +459,39 @@ _test-aarch64-prep-sched-ordinary:
 # runner's --variant schema is fixed: variant name + image + firmware +
 # ELF. `all` passes all five maps (positive matrix + every fault case).
 AARCH64_SCHED_RUN_ARGS_positive = --case positive \
-  --variant positive --image "$(AARCH64_UEFI_SCHED_DISK)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FIRMWARE)" --elf "$(AARCH64_KERNEL_SCHED_ELF)"
+  --variant positive --image "$(call aarch64_variant_disk,sched)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" --elf "$(call aarch64_variant_kernel,sched)"
 AARCH64_SCHED_RUN_ARGS_sp-top = --case sp-top \
-  --variant sp-top --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-top)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-top)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-top)"
+  --variant sp-top --image "$(call aarch64_variant_disk,sched-fault-sp-top)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-sp-top)"
 AARCH64_SCHED_RUN_ARGS_sp-low = --case sp-low \
-  --variant sp-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-low)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-low)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-low)"
+  --variant sp-low --image "$(call aarch64_variant_disk,sched-fault-sp-low)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-sp-low)"
 AARCH64_SCHED_RUN_ARGS_pc-low = --case pc-low \
-  --variant pc-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-low)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-low)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-low)"
+  --variant pc-low --image "$(call aarch64_variant_disk,sched-fault-pc-low)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-pc-low)"
 AARCH64_SCHED_RUN_ARGS_pc-data = --case pc-data \
-  --variant pc-data --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-data)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data)"
+  --variant pc-data --image "$(call aarch64_variant_disk,sched-fault-pc-data)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-pc-data)"
 AARCH64_SCHED_RUN_ARGS_all = --case all \
-  --variant positive --image "$(AARCH64_UEFI_SCHED_DISK)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FIRMWARE)" --elf "$(AARCH64_KERNEL_SCHED_ELF)" \
-  --variant sp-top --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-top)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-top)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-top)" \
-  --variant sp-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_sp-low)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-low)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_sp-low)" \
-  --variant pc-low --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-low)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-low)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-low)" \
-  --variant pc-data --image "$(AARCH64_UEFI_SCHED_FAULT_DISK_pc-data)" \
-  --firmware "$(AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data)" \
-  --elf "$(AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data)"
+  --variant positive --image "$(call aarch64_variant_disk,sched)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" --elf "$(call aarch64_variant_kernel,sched)" \
+  --variant sp-top --image "$(call aarch64_variant_disk,sched-fault-sp-top)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-sp-top)" \
+  --variant sp-low --image "$(call aarch64_variant_disk,sched-fault-sp-low)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-sp-low)" \
+  --variant pc-low --image "$(call aarch64_variant_disk,sched-fault-pc-low)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-pc-low)" \
+  --variant pc-data --image "$(call aarch64_variant_disk,sched-fault-pc-data)" \
+  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+  --elf "$(call aarch64_variant_kernel,sched-fault-pc-data)"
 .PHONY: _test-aarch64-run-sched
 _test-aarch64-run-sched:
 	python3 qemutests/aarch64_scheduler.py \
@@ -516,13 +515,22 @@ _test-aarch64-prep-sched-ap:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=$(AP_SCHED_SELECTOR_$(AP_SCHED_CASE)) aarch64-uefi
 _test-aarch64-run-sched-ap:
 ifeq ($(AP_SCHED_CASE),fatal-owner)
-	python3 qemutests/aarch64_ap_scheduler.py 	  --phase ap --case fatal-owner 	  --image "$(AARCH64_UEFI_SCHED_AP_FATAL_DISK)" 	  --firmware "$(AARCH64_UEFI_SCHED_AP_FATAL_FIRMWARE)" 	  --elf "$(AARCH64_KERNEL_SCHED_AP_FATAL_ELF)" 	  --normal-elf "$(AARCH64_KERNEL_SCHED_AP_ELF)" 	  --qemu "$(AARCH64_QEMU)" 	  --llvm-nm "$(AARCH64_NM)" 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	python3 qemutests/aarch64_ap_scheduler.py \
+	  --phase ap --case fatal-owner \
+	  --image "$(call aarch64_variant_disk,sched-ap-fatal-owner)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --elf "$(call aarch64_variant_kernel,sched-ap-fatal-owner)" \
+	  --normal-elf "$(call aarch64_variant_kernel,sched-ap)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 else
 	python3 qemutests/aarch64_ap_scheduler.py \
 	  --phase ap --case positive \
-	  --image "$(AARCH64_UEFI_SCHED_AP_DISK)" \
-	  --firmware "$(AARCH64_UEFI_SCHED_AP_FIRMWARE)" \
-	  --elf "$(AARCH64_KERNEL_SCHED_AP_ELF)" \
+	  --image "$(call aarch64_variant_disk,sched-ap)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --elf "$(call aarch64_variant_kernel,sched-ap)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
@@ -2283,8 +2291,8 @@ _test-aarch64-run-m1-ram:
 	  --elf "$(BUILD_DIR)/kernel/kernel.elf" --elf "$(BUILD_DIR)/kernel/selftest/kernel.elf"
 	python3 qemutests/aarch64_m1_matrix.py \
 	  --normal-image "$(BUILD_DIR)/image/aarch64-uefi.img" \
-	  --selftest-image "$(AARCH64_UEFI_SELFTEST_DISK)" \
-	  --firmware "$(AARCH64_UEFI_SELFTEST_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
+	  --selftest-image "$(call aarch64_variant_disk,selftest)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ram"
 
@@ -2293,8 +2301,8 @@ _test-aarch64-prep-m1-sparse:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=sparse AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 _test-aarch64-run-m1-sparse:
 	python3 qemutests/aarch64_m1_matrix.py --variant sparse \
-	  --image "$(BUILD_DIR)/image/m1-sparse/aarch64-uefi.img" \
-	  --firmware "$(BUILD_DIR)/image/m1-sparse/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --image "$(call aarch64_variant_disk,m1-sparse)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-sparse"
 
@@ -2303,8 +2311,8 @@ _test-aarch64-prep-m1-arena-exhaust:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=arena-exhaust AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 _test-aarch64-run-m1-arena-exhaust:
 	python3 qemutests/aarch64_m1_matrix.py --variant arena-exhaust \
-	  --image "$(BUILD_DIR)/image/m1-arena-exhaust/aarch64-uefi.img" \
-	  --firmware "$(BUILD_DIR)/image/m1-arena-exhaust/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --image "$(call aarch64_variant_disk,m1-arena-exhaust)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-arena-exhaust"
 
@@ -2313,8 +2321,8 @@ _test-aarch64-prep-m1-table-exhaust:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=table-exhaust AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 _test-aarch64-run-m1-table-exhaust:
 	python3 qemutests/aarch64_m1_matrix.py --variant table-exhaust \
-	  --image "$(BUILD_DIR)/image/m1-table-exhaust/aarch64-uefi.img" \
-	  --firmware "$(BUILD_DIR)/image/m1-table-exhaust/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --image "$(call aarch64_variant_disk,m1-table-exhaust)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-table-exhaust"
 
@@ -2323,8 +2331,8 @@ _test-aarch64-prep-m1-ap-bad-root:
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=ap-bad-root AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
 _test-aarch64-run-m1-ap-bad-root:
 	python3 qemutests/aarch64_m1_matrix.py --variant ap-bad-root \
-	  --image "$(BUILD_DIR)/image/m1-ap-bad-root/aarch64-uefi.img" \
-	  --firmware "$(BUILD_DIR)/image/m1-ap-bad-root/QEMU_EFI.fd" --qemu "$(AARCH64_QEMU)" \
+	  --image "$(call aarch64_variant_disk,m1-ap-bad-root)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ap-bad-root"
 

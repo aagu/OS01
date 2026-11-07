@@ -2,67 +2,15 @@
 # These paths follow the profile-private layout (build/<profile>). The EFI
 # app artifact and the bring-up image are produced by mk/components/uefi.mk
 # and mk/components/image.mk respectively.
-# AAGU-5.6: image + firmware paths are variant-aware so WEAK build (variant=
-# weak-selftest) lands under image/weak-selftest/ instead of clobbering the
-# default STRONG/NONE image. Both rules in mk/components/image.mk now use
-# these $(AARCH64_UEFI_*) variables as their target/dependency names.
+# Image paths are variant-aware so variant builds land under their own
+# image/<variant>/ directory without clobbering each other.
+# Firmware is profile-private and shared across all variants (matching x86 OVMF).
 AARCH64_UEFI_DISK     := $(BUILD_DIR)/image$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))/aarch64-uefi.img
-AARCH64_UEFI_FIRMWARE := $(BUILD_DIR)/image$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))/QEMU_EFI.fd
-# QEMU harness recipes (test-aarch64-uefi-smp / test-aarch64-gic-spi) build
-# the image in a sub-make with KERNEL_SELFTEST=1, so the produced image lands
-# under image/selftest/ (KERNEL_VARIANT=selftest, aarch64-clang.mk).  The
-# outer recipe cannot see the inner KERNEL_VARIANT, so spell the variant dir
-# explicitly; keep in sync with the profile's KERNEL_VARIANT block.
-AARCH64_UEFI_SELFTEST_DISK     := $(BUILD_DIR)/image/selftest/aarch64-uefi.img
-AARCH64_UEFI_SELFTEST_FIRMWARE := $(BUILD_DIR)/image/selftest/QEMU_EFI.fd
-# Spec §5: the sync-fault variant must produce its own kernel/image/firmware
-# tree — never reuse selftest/ for the destructive EL1h sync fault probe
-# (the fault build deliberately injects an UNMAPped ldr and is not safe to
-# run as part of the selftest image).  Mirror AARCH64_UEFI_SELFTEST_*'s
-# hard-coded spelling so the harness sees the resolved paths even when the
-# outer KERNEL_VARIANT is empty.
-AARCH64_UEFI_SYNC_FAULT_DISK     := $(BUILD_DIR)/image/sync-fault/aarch64-uefi.img
-AARCH64_UEFI_SYNC_FAULT_FIRMWARE := $(BUILD_DIR)/image/sync-fault/QEMU_EFI.fd
-# MODE=sched (spec §10.2, P5 Task 1): the sched acceptance variants own
-# their own kernel/image/firmware trees exactly like sync-fault. The
-# outer MODE=sched recipes cannot infer a recursive make's KERNEL_VARIANT,
-# so the five (positive + four fault) triples are spelled here once and
-# consumed explicitly by _test-aarch64-{prep,run}-sched — never a symlink
-# or reuse of another variant's artifacts. Keep in sync with the profile's
-# KERNEL_VARIANT block (positive → sched, fault → sched-fault-<value>).
-AARCH64_UEFI_SCHED_DISK      := $(BUILD_DIR)/image/sched/aarch64-uefi.img
-AARCH64_UEFI_SCHED_FIRMWARE  := $(BUILD_DIR)/image/sched/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_ELF     := $(BUILD_DIR)/kernel/sched/kernel.elf
-AARCH64_UEFI_SCHED_FAULT_DISK_sp-top     := $(BUILD_DIR)/image/sched-fault-sp-top/aarch64-uefi.img
-AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-top := $(BUILD_DIR)/image/sched-fault-sp-top/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_FAULT_ELF_sp-top     := $(BUILD_DIR)/kernel/sched-fault-sp-top/kernel.elf
-AARCH64_UEFI_SCHED_FAULT_DISK_sp-low     := $(BUILD_DIR)/image/sched-fault-sp-low/aarch64-uefi.img
-AARCH64_UEFI_SCHED_FAULT_FIRMWARE_sp-low := $(BUILD_DIR)/image/sched-fault-sp-low/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_FAULT_ELF_sp-low     := $(BUILD_DIR)/kernel/sched-fault-sp-low/kernel.elf
-AARCH64_UEFI_SCHED_FAULT_DISK_pc-low     := $(BUILD_DIR)/image/sched-fault-pc-low/aarch64-uefi.img
-AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-low := $(BUILD_DIR)/image/sched-fault-pc-low/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_FAULT_ELF_pc-low     := $(BUILD_DIR)/kernel/sched-fault-pc-low/kernel.elf
-AARCH64_UEFI_SCHED_FAULT_DISK_pc-data     := $(BUILD_DIR)/image/sched-fault-pc-data/aarch64-uefi.img
-AARCH64_UEFI_SCHED_FAULT_FIRMWARE_pc-data := $(BUILD_DIR)/image/sched-fault-pc-data/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_FAULT_ELF_pc-data     := $(BUILD_DIR)/kernel/sched-fault-pc-data/kernel.elf
+AARCH64_UEFI_FIRMWARE ?= $(BUILD_DIR)/firmware/QEMU_EFI.fd
 AARCH64_KERNEL_ELF    := $(KERNEL_BUILD_DIR)/kernel.elf
 AARCH64_HEAD_OBJECT   := $(KERNEL_BUILD_DIR)/arch/aarch64/head.o
-# P1 AP cooperative scheduler acceptance (spec §7): MODE=sched-ap owns
-# its kernel/image/firmware trees — `ap` → sched-ap (P1 Task 4), the
-# fatal-owner fault variant → sched-ap-fatal-owner.  Spelled explicitly
-# like the MODE=sched triplets; never a symlink into another variant.
-AARCH64_UEFI_SCHED_AP_DISK      := $(BUILD_DIR)/image/sched-ap/aarch64-uefi.img
-AARCH64_UEFI_SCHED_AP_FIRMWARE  := $(BUILD_DIR)/image/sched-ap/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_AP_ELF     := $(BUILD_DIR)/kernel/sched-ap/kernel.elf
-AARCH64_UEFI_SCHED_AP_FATAL_DISK      := $(BUILD_DIR)/image/sched-ap-fatal-owner/aarch64-uefi.img
-AARCH64_UEFI_SCHED_AP_FATAL_FIRMWARE  := $(BUILD_DIR)/image/sched-ap-fatal-owner/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_AP_FATAL_ELF     := $(BUILD_DIR)/kernel/sched-ap-fatal-owner/kernel.elf
-AARCH64_UEFI_SCHED_WAKE_DISK      := $(BUILD_DIR)/image/sched-wake/aarch64-uefi.img
-AARCH64_UEFI_SCHED_WAKE_FIRMWARE  := $(BUILD_DIR)/image/sched-wake/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_WAKE_ELF     := $(BUILD_DIR)/kernel/sched-wake/kernel.elf
-# Per-CPU tick accounting (2026-11-06, Task 4): the sched-tick variant
-# owns its own kernel/image/firmware trees — never a symlink into
-# another variant's artifacts.
-AARCH64_UEFI_SCHED_TICK_DISK      := $(BUILD_DIR)/image/sched-tick/aarch64-uefi.img
-AARCH64_UEFI_SCHED_TICK_FIRMWARE  := $(BUILD_DIR)/image/sched-tick/QEMU_EFI.fd
-AARCH64_KERNEL_SCHED_TICK_ELF     := $(BUILD_DIR)/kernel/sched-tick/kernel.elf
+
+# Helper functions for cross-variant artifact paths consumed by test runners
+# in mk/components/run.mk when the outer make has no KERNEL_VARIANT set.
+aarch64_variant_disk   = $(BUILD_DIR)/image/$(1)/aarch64-uefi.img
+aarch64_variant_kernel = $(BUILD_DIR)/kernel/$(1)/kernel.elf
