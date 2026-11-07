@@ -139,6 +139,55 @@ class ApHandoffSourceContract(unittest.TestCase):
                       body)
 
 
+class Boot1RuntimePublicationContract(unittest.TestCase):
+    """BOOT-1 Task 4: the ARM AP publishes its own runtime online, the
+    shootdown probe gate keeps construction before any runtime reader,
+    and the no-ack observation sits after the probe, before the
+    scheduler handoff."""
+
+    def test_ap_publishes_runtime_online_before_boot_ack(self):
+        smp_src = src("kernel/arch/aarch64/smp/smp.c")
+        idle = smp_src.split("void secondary_idle(", 1)[1].split(
+            "for (;;) {", 1)[0]
+        # runtime online release publication, strictly between the
+        # page-table verify and the boot-slot ACK.
+        verify = idle.index("aarch64_page_table_ap_verify(cpu_id)")
+        online = idle.index(
+            "&percpu_data[cpu_id].online, 1, __ATOMIC_RELEASE")
+        ack = idle.index("boot_online_set(cpu_id)")
+        self.assertLess(verify, online)
+        self.assertLess(online, ack)
+        # The NO_ACK injection must not gate the publication.
+        self.assertLess(online, idle.index("AARCH64_SMP_TEST_NO_ACK_CPU"))
+
+    def test_no_ack_observation_after_probe_with_compile_guard(self):
+        main_src = src("kernel/arch/aarch64/boot/main.c")
+        aps = main_src.split("void arch_boot_aps(void)", 1)[1]
+        guard = aps.index("#if AARCH64_SMP_TEST_NO_ACK_CPU == 1")
+        probe = aps.index("aarch64_shootdown_probe();")
+        obs = aps.index("boot1_no_ack_observation();")
+        self.assertLess(probe, obs)
+        self.assertLess(guard, obs)
+        # Values are read/acquire-asserted BEFORE the record is emitted
+        # (the definition sits above arch_boot_aps; the guarded call is
+        # inside it).
+        fn = main_src.split("boot1_no_ack_observation(void)", 1)[1].split(
+            "void arch_boot_aps(void)", 1)[0]
+        for needle in ("__ATOMIC_ACQUIRE", "aarch64_smp_accepted_mask",
+                       "scheduler_ok"):
+            self.assertIn(needle, fn)
+        self.assertLess(fn.index("__ATOMIC_ACQUIRE"),
+                        fn.index("[boot-1] a64-no-ack cpu=1"))
+
+    def test_probe_gate_waits_for_all_ipi_ready_before_runtime_reads(self):
+        probe_src = src("kernel/arch/aarch64/boot/shootdown_probe.c")
+        # The construction-before-runtime-reader barrier: the probe must
+        # wait for ipi_ready_count to reach the discovered CPU count
+        # before it reads runtime online / starts page-table changes.
+        self.assertIn("ipi_ready_count", probe_src)
+        self.assertIn("dtb_cpu_count", probe_src)
+
+
 class AcceptedMaskContract(unittest.TestCase):
     def test_smp_header_declares_accepted_mask(self):
         self.assertIn('uint64_t aarch64_smp_accepted_mask(void);', src(SMP_H))

@@ -97,6 +97,9 @@ UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\n
 [smp] summary requested=2 online=1 status=DEGRADED\n
 [spinlock] status=SKIP\n
 [smp-test] no_ack_cpu=1\n
+SHOOTDOWN-PROBE: START\n
+SHOOTDOWN-PROBE: OK\n
+[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0\n
 [tick] 1\n
 [tick] 2\n
 [tick] 3\n
@@ -128,6 +131,9 @@ UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
 [smp] cpu=1 target_mpidr=0x1 rc=0
 [smp] requested=2 online=1 status=DEGRADED
 [spinlock] status=SKIP
+SHOOTDOWN-PROBE: START
+SHOOTDOWN-PROBE: OK
+[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0
 [tick] 1
 [tick] 2
 [tick] 3
@@ -630,6 +636,10 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
         return False
     if kernel_failure(text):
         return False
+    # BOOT-1 Task 4: the no-ack runtime record is fault-image-only
+    # evidence — a normal boot printing it is running the wrong image.
+    if re.search(r"^\[boot-1\] a64-no-ack ", text, re.MULTILINE):
+        return False
     if expect_scheduler_selftest and not scheduler_selftest_evidence_ok(text):
         return False
     if expect_gic and not gic_evidence_ok(text, cpus):
@@ -788,6 +798,7 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
         return False
     if hard_kernel_failure(text):
         return False
+
     if not re.search(r"^\[smp\] topology (?:requested=2 discovered=2|source=uefi-dtb cpus=2)$", text, re.MULTILINE):
         return False
     online = re.findall(r"^\[smp\] cpu=(\d+) online(?: mpidr=0x[0-9a-fA-F]+)?$", text, re.MULTILINE)
@@ -797,6 +808,24 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
     summaries = re.findall(r"^\[smp\] (?:summary )?requested=(\d+) online=(\d+) status=(\w+)$", text, re.MULTILINE)
     injections = re.findall(r"^\[smp-test\] no_ack_cpu=([^\n]+)$", text, re.MULTILINE)
     if timeouts != ["1"] or summaries != [("2", "1", "DEGRADED")] or injections != ["1"]:
+        return False
+    # BOOT-1 Task 4: the DEGRADED evidence must be backed by exactly one
+    # runtime-qualification record — CPU1 was online and IPI-ready but
+    # never admitted (scheduler_ok=0, accepted=0).  The anchored
+    # full-line match rejects missing, duplicate, wrong-CPU and
+    # truncated records, and every wrong field value, in one stroke.
+    # The record must also FOLLOW the (unique, complete) shootdown probe
+    # result — the BSP read the state only after the probe returned.
+    no_ack_re = re.compile(
+        r"^\[boot-1\] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0$",
+        re.MULTILINE)
+    records = list(no_ack_re.finditer(text))
+    if len(records) != 1:
+        return False
+    probes = list(re.finditer(r"^SHOOTDOWN-PROBE: OK$", text, re.MULTILINE))
+    if len(probes) != 1:
+        return False
+    if records[0].start() < probes[0].end():
         return False
     # A no-ACK case must never start even a partial shared-count test.
     spinlock = list(re.finditer(r"^\[spinlock\][^\n]*$", text, re.MULTILINE))

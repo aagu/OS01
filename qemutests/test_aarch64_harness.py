@@ -376,6 +376,52 @@ class UefiSmpEvidenceTests(unittest.TestCase):
         self.assertFalse(smp.acceptance_evidence(
             _ns(expect_no_ack=1), "UEFI: booting OS01\n", 2))
 
+    # ── BOOT-1 Task 4: the runtime-qualification record ──────────
+    RECORD = "[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0"
+
+    def _no_record_stream(self) -> str:
+        return smp.current_degraded_log.replace(self.RECORD + "\n", "")
+
+    def test_no_ack_without_runtime_record_rejected(self):
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=1), self._no_record_stream(), 2))
+
+    def test_no_ack_duplicate_record_rejected(self):
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=1), smp.current_degraded_log + self.RECORD + "\n", 2))
+
+    def test_no_ack_record_before_probe_rejected(self):
+        stream = smp.current_degraded_log.replace(
+            "SHOOTDOWN-PROBE: OK\n", "").replace(
+            self.RECORD + "\n", self.RECORD + "\nSHOOTDOWN-PROBE: OK\n")
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=1), stream, 2))
+
+    def test_no_ack_wrong_field_values_rejected(self):
+        for old, new in (
+                ("online=1", "online=0"),
+                ("ipi_ready=1", "ipi_ready=0"),
+                ("scheduler_ok=0", "scheduler_ok=1"),
+                ("accepted=0", "accepted=1"),
+                ("a64-no-ack cpu=1", "a64-no-ack cpu=2")):
+            with self.subTest(record=new):
+                broken = smp.current_degraded_log.replace(self.RECORD, new)
+                self.assertFalse(smp.acceptance_evidence(
+                    _ns(expect_no_ack=1), broken, 2))
+
+    def test_no_ack_truncated_record_rejected(self):
+        broken = smp.current_degraded_log.replace(
+            self.RECORD, self.RECORD[: -len(" accepted=0")])
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=1), broken, 2))
+
+    def test_normal_mode_rejects_no_ack_record(self):
+        # The record is fault-image-only evidence: a normal-mode stream
+        # carrying it is running the wrong image.
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=None),
+            smp.current_log_for_2_cpus + self.RECORD + "\n", 2))
+
 
 class UefiSmpLifecycleTests(SuiteUnitAdapterTests):
     def setUp(self):

@@ -568,6 +568,40 @@ void arch_boot_percpu(void)
     smp_starting_enter();
 }
 
+#if AARCH64_SMP_TEST_NO_ACK_CPU == 1
+/* BOOT-1 Task 4: the no-ack runtime-qualification observation.  The
+ * NO_ACK AP never ACKs its boot slot (so it is never admitted), but it
+ * DID publish its own runtime online and IPI readiness — exactly the
+ * distinction the frozen admission contract rests on.  The BSP reads
+ * CPU1's runtime/admission state AFTER the shootdown probe returned
+ * (the probe is the construction-before-runtime-reader barrier) and
+ * BEFORE the scheduler handoff; every value is acquired or read
+ * through the existing accepted-mask API and asserted before the
+ * record is emitted.  A mismatched precondition emits nothing, so the
+ * harness rejects the run on the missing record instead of trusting a
+ * fabricated one. */
+static void boot1_no_ack_observation(void)
+{
+    if (dtb_cpu_count() < 2)
+        return;
+    uint32_t online = __atomic_load_n(&percpu_data[1].online,
+                                      __ATOMIC_ACQUIRE);
+    uint32_t ipi_ready = __atomic_load_n(&percpu_data[1].ipi_ready,
+                                         __ATOMIC_ACQUIRE);
+    uint32_t sched_ok = __atomic_load_n(&percpu_data[1].scheduler_ok,
+                                        __ATOMIC_ACQUIRE);
+    uint32_t accepted = (aarch64_smp_accepted_mask() >> 1) & 1u;
+    if (online != 1 || ipi_ready != 1 || sched_ok != 0 || accepted != 0) {
+        log_warn("[boot-1] a64-no-ack precondition mismatch "
+                 "(online=%u ipi_ready=%u scheduler_ok=%u accepted=%u)\n",
+                 online, ipi_ready, sched_ok, accepted);
+        return;
+    }
+    log_info("[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 "
+             "scheduler_ok=0 accepted=0\n");
+}
+#endif
+
 void arch_boot_aps(void)
 {
     uint32_t active = smp_boot_aps();
@@ -612,6 +646,12 @@ void arch_boot_aps(void)
     } else {
         kputs("SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
     }
+
+#if AARCH64_SMP_TEST_NO_ACK_CPU == 1
+    /* BOOT-1: exactly one runtime-qualification record, after the
+     * probe and before the scheduler handoff (spec §5.3/§8.3). */
+    boot1_no_ack_observation();
+#endif
 }
 
 void arch_post_smp_selftest(void)
