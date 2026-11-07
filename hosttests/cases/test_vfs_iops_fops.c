@@ -72,6 +72,7 @@ int procfs_register_fs(void) { return vfs_register_filesystem(&s_host_procfs_typ
 
 TEST_FUNC(test_lookup_300_entries_tmpfs) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
 
     for (int i = 0; i < 300; i++) {
@@ -94,6 +95,7 @@ TEST_FUNC(test_lookup_300_entries_tmpfs) {
 
 TEST_FUNC(test_devfs_and_tmpfs_metadata_and_getattr) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     devfs_init();
     assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
 
@@ -127,6 +129,7 @@ TEST_FUNC(test_devfs_and_tmpfs_metadata_and_getattr) {
 
 TEST_FUNC(test_write_and_truncate_stat_consistency) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
 
     vfs_node_t *created = NULL;
@@ -174,6 +177,7 @@ TEST_FUNC(test_write_and_truncate_stat_consistency) {
 
 TEST_FUNC(test_erofs_eopnotsupp_and_exdev) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
     assert_eq(0, vfs_mount_fs("procfs", "/proc", NULL, NULL));
 
@@ -328,12 +332,14 @@ void vfs_test_on_active_register(vfs_node_t *node)
     if (strcmp(node->mount->fs_type->name, "ext2") == 0) {
         ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
         if (fs) {
-            assert_eq(0, fs->lock.lock); // lock must be HELD (0)
+            // mutex owner: 0=free, >0=holder — must be HELD during I/O
+            assert_true(fs->lock.owner != 0);
         }
     } else if (strcmp(node->mount->fs_type->name, "vfat") == 0) {
         fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
         if (fs) {
-            assert_eq(0, fs->fat_lifecycle_lock.lock); // lock must be HELD (0)
+            // mutex owner: 0=free, >0=holder — must be HELD during I/O
+            assert_true(fs->lock.owner != 0);
         }
     }
 }
@@ -343,12 +349,13 @@ static void on_fat_block_read(block_device_t *dev, uint64_t lba)
 {
     (void)dev; (void)lba;
     if (s_test_fat_fs) {
-        assert_eq(0, s_test_fat_fs->fat_lifecycle_lock.lock);
+        assert_true(s_test_fat_fs->lock.owner != 0);
     }
 }
 
 TEST_FUNC(test_tmpfs_orphan_lifecycle_and_evict) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
 
     vfs_node_t *created = NULL;
@@ -405,6 +412,7 @@ TEST_FUNC(test_tmpfs_orphan_lifecycle_and_evict) {
 
 TEST_FUNC(test_ext2_orphan_deferred_reclaim_and_sole_reclaimer) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     format_mock_ext2_disk();
     assert_eq(0, vfs_mount_fs("ext2", "/", &s_ram_block_dev, NULL));
 
@@ -486,6 +494,7 @@ TEST_FUNC(test_ext2_orphan_deferred_reclaim_and_sole_reclaimer) {
 
 TEST_FUNC(test_fat32_shared_file_object_and_orphan_reclaim) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     format_mock_fat32_disk();
     assert_eq(0, vfs_mount_fs("vfat", "/", &s_ram_block_dev, NULL));
 
@@ -596,6 +605,7 @@ TEST_FUNC(test_fat32_shared_file_object_and_orphan_reclaim) {
 
 TEST_FUNC(test_ext2_disk_inode_metadata_stat) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     format_mock_ext2_disk();
     assert_eq(0, vfs_mount_fs("ext2", "/", &s_ram_block_dev, NULL));
 
@@ -635,6 +645,7 @@ TEST_FUNC(test_ext2_disk_inode_metadata_stat) {
 
 TEST_FUNC(test_fat32_rmdir_open_dir_deferred_reclaim) {
     vfs_init();
+    vfs_test_set_sched_ready(true);
     format_mock_fat32_disk();
     assert_eq(0, vfs_mount_fs("vfat", "/", &s_ram_block_dev, NULL));
 

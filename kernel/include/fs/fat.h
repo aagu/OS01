@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
+#include <sync/mutex.h>
 #include <arch/spinlock.h>
 
 // ── FAT32 BIOS Parameter Block ────────────────────────────
@@ -110,7 +111,7 @@ typedef struct {
     uint32_t           sectors_per_cluster;
     uint16_t           bytes_per_sector;
     uint32_t           root_cluster;
-    spinlock_T         fat_lifecycle_lock;
+    mutex_t            lock;          // scheduler-backed per-mount lock (ARCH-6)
     uint64_t           next_object_id;
     fat_file_object_t *file_objects;
 #ifdef OS01_HOST_TEST

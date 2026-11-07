@@ -275,6 +275,7 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("sched_boot_probe");
     selftest_register_late("init_pid");
     selftest_register_late("fd_refcount");
+    selftest_register_late("bcache_smp_coherence");
     selftest_register_late("pgrp_signal");
     selftest_register_late("tty_vintr");
     selftest_register_late("x86_intr");

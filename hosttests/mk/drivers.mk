@@ -4,6 +4,7 @@ $(eval $(call register_host_test,test_i8042_demux,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_mouse_init,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_mouse_proto,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_block_device_ops,drivers,protocol-or-legacy))
+$(eval $(call register_host_test,test_bcache,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_pci_driver_model,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_pci_backend_irq,drivers,protocol-or-legacy))
 $(eval $(call register_host_test,test_ahci_lifecycle,drivers,protocol-or-legacy))
@@ -18,6 +19,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_mouse_init.elf \
     $(TEST_BLD)/test_mouse_proto.elf \
     $(TEST_BLD)/test_block_device_ops.elf \
+    $(TEST_BLD)/test_bcache.elf \
     $(TEST_BLD)/test_pci_driver_model.elf \
     $(TEST_BLD)/test_pci_backend_irq.elf \
     $(TEST_BLD)/test_ahci_lifecycle.elf \
@@ -150,11 +152,56 @@ $(TEST_BLD)/test_block_device_ops.o: $(TEST_CASES)/test_block_device_ops.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BLOCK_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_block_device_ops.elf: $(TEST_BLD)/test_block_device_ops.o $(TEST_BLD)/blockdev_production.o $(LIBC_OBJS)
+$(TEST_BLD)/test_block_device_ops.elf: $(TEST_BLD)/test_block_device_ops.o $(TEST_BLD)/blockdev_production.o $(TEST_BLD)/bcache_production.o $(TEST_BLD)/bcache_wait.o $(TEST_BLD)/arch6_bcache_runtime.o $(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-block
 test-block: $(TEST_BLD)/test_block_device_ops.elf
+	$<
+
+# ARCH-6: block cache read core + deterministic wait harness.  The bcache
+# objects and the production wait queue are compiled with the arch6 runtime
+# (same spinlock_T/task_t layout across objects); the elf wraps
+# wait_queue_arm/sleep so cases can inject completion windows.
+# Note: no FRAMEWORK_INC here — test_platform.h would conflict with the
+# arch6 runtime's spinlock_T/task_t substrate (mutex_runtime.h pattern).
+BCACHE_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_MOCK) -I$(TEST_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch6_bcache_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/bcache_production.o: $(TESTS_DIR)/kernel/block/bcache.c \
+		$(TESTS_DIR)/kernel/include/block/bcache.h \
+		$(TESTS_DIR)/kernel/include/block/blockdev.h \
+		$(TEST_MOCK)/arch6_bcache_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BCACHE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/bcache_wait.o: $(TESTS_DIR)/kernel/sync/wait.c \
+		$(TEST_MOCK)/arch6_bcache_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BCACHE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/arch6_bcache_runtime.o: $(TEST_MOCK)/arch6_bcache_runtime.c \
+		$(TEST_MOCK)/arch6_bcache_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_bcache.o: $(TEST_CASES)/test_bcache.c \
+		$(TESTS_DIR)/kernel/include/block/bcache.h \
+		$(TESTS_DIR)/kernel/include/block/blockdev.h \
+		$(TEST_MOCK)/arch6_bcache_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BCACHE_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_bcache.elf: $(TEST_BLD)/test_bcache.o \
+		$(TEST_BLD)/bcache_production.o \
+		$(TEST_BLD)/bcache_wait.o \
+		$(TEST_BLD)/arch6_bcache_runtime.o \
+		$(TEST_BLD)/blockdev_production.o \
+		$(LIBC_OBJS)
+	$(HOST_CC) -Wl,--wrap=wait_queue_arm -Wl,--wrap=wait_queue_sleep -o $@ $^
+
+.PHONY: test-bcache
+test-bcache: $(TEST_BLD)/test_bcache.elf
 	$<
 
 # ARCH-9 Phase B: PCI driver model & enumeration
@@ -243,6 +290,9 @@ $(TEST_BLD)/test_ahci_lifecycle.elf: $(TEST_BLD)/test_ahci_lifecycle.o \
     $(TEST_BLD)/ahci_production.o \
     $(TEST_BLD)/ahci_lifecycle_production.o \
     $(TEST_BLD)/blockdev_production.o \
+    $(TEST_BLD)/bcache_production.o \
+    $(TEST_BLD)/bcache_wait.o \
+    $(TEST_BLD)/arch6_bcache_runtime.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -275,6 +325,9 @@ $(TEST_BLD)/test_device_boot.elf: $(TEST_BLD)/test_device_boot.o \
     $(TEST_BLD)/fs_boot_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/blockdev_production.o \
+    $(TEST_BLD)/bcache_production.o \
+    $(TEST_BLD)/bcache_wait.o \
+    $(TEST_BLD)/arch6_bcache_runtime.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
     $(TEST_BLD)/pci_platform_production.o \

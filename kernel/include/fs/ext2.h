@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
-#include <arch/spinlock.h>
+#include <sync/mutex.h>
 
 // ── Constants ──────────────────────────────────────────
 #define EXT2_SB_OFFSET      1024
@@ -123,7 +123,7 @@ typedef struct {
     uint32_t           num_block_groups;
     uint32_t           inode_size;
     ext2_bgdesc_t     *bgdesc_table;
-    spinlock_T         lock;        // ★ spinlock_T (capital T), see spinlock.h:10
+    mutex_t           lock;         // scheduler-backed per-mount lock (ARCH-6)
     ext2_superblock_t  sb_raw;              // cached superblock for writeback
     uint32_t           bgdesc_block;         // bgdesc table start block number
     uint32_t           bgdesc_table_blocks;  // number of blocks in bgdesc table

@@ -37,16 +37,36 @@ void vfs_end_bootstrap(void)
     vfs_bootstrap = 0;
 }
 
+// Scheduler-backed locking gate for VFS and per-mount FS locks: the same
+// exemption semantics as vfs_ns_lock — during boot (pre-SMP, single core)
+// there is no concurrency to serialize, and mutex_lock would schedule()
+// before the scheduler exists. Runtime idle/IRQ contexts must never call
+// the FS ops that take these locks.
+bool vfs_sched_ready(void)
+{
+    return !vfs_bootstrap && current && current->pid > 0;
+}
+
+#ifdef OS01_HOST_TEST
+// Host-test only: clear vfs_bootstrap so the scheduler-backed lock paths
+// (vfs_ns_lock, per-mount FS mutexes) actually engage under the host mock
+// runtime. Never call from production code.
+void vfs_test_set_sched_ready(bool ready)
+{
+    vfs_bootstrap = ready ? 0 : 1;
+}
+#endif
+
 static inline void vfs_ns_lock(void)
 {
-    if (!vfs_bootstrap && current && current->pid > 0) {
+    if (vfs_sched_ready()) {
         mutex_lock(&vfs_namespace_lock);
     }
 }
 
 static inline void vfs_ns_unlock(void)
 {
-    if (!vfs_bootstrap && current && current->pid > 0) {
+    if (vfs_sched_ready()) {
         mutex_unlock(&vfs_namespace_lock);
     }
 }

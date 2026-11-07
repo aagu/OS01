@@ -4401,6 +4401,29 @@
         "action": "unique",
         "reason": "Primary host unit test verifying the USB device namespace under devfs and lsusb descriptor extraction"
       }
+    },
+    {
+      "id": "drivers.block.bcache",
+      "component": "drivers",
+      "behavior": "block",
+      "trigger": "host runner invokes test_bcache.elf",
+      "assertions": [
+        "test_bcache passes all internal assertions"
+      ],
+      "failure_modes": [
+        "assertion failure or exit-code mismatch in test_bcache"
+      ],
+      "primary": {
+        "layer": "host",
+        "source": "hosttests/cases/test_bcache.c",
+        "selector": "test_bcache",
+        "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+      },
+      "supporting": [],
+      "overlap_decision": {
+        "action": "unique",
+        "reason": "Primary host unit test verifying ARCH-6 block cache read core, wait handshake, init/error and reset contracts"
+      }
     }
   ]
 }

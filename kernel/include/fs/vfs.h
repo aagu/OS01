@@ -170,6 +170,15 @@ static inline uint64_t vfs_node_stable_ino(const vfs_node_t *node)
 void vfs_init(void);
 void vfs_end_bootstrap(void);
 
+// True once the scheduler is running and FS ops may take scheduler-backed
+// mutexes (per-mount FS locks, vfs namespace lock). False during boot.
+bool vfs_sched_ready(void);
+#ifdef OS01_HOST_TEST
+// Host tests only: force-clear/set vfs_bootstrap so scheduler-backed lock
+// paths engage under the mock runtime.
+void vfs_test_set_sched_ready(bool ready);
+#endif
+
 int                 vfs_register_filesystem(vfs_fs_type_t *fs_type);
 int                 vfs_unregister_filesystem(const char *name);
 const vfs_fs_type_t *vfs_find_filesystem(const char *name);

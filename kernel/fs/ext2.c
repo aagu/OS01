@@ -7,6 +7,23 @@
 #include <errno.h>
 #include <kernel.h>
 
+// ── Per-mount big lock (ARCH-6) ──────────────────────────
+// Scheduler-backed mutex in process context. vfs_sched_ready() is false
+// during boot (pre-SMP, single core — no contention) and on host tests
+// that did not opt in via vfs_test_set_sched_ready(); there the lock is a
+// no-op exactly like vfs_ns_lock's bootstrap exemption.
+static inline void ext2_lock(ext2_fs_t *fs)
+{
+    if (vfs_sched_ready())
+        mutex_lock(&fs->lock);
+}
+
+static inline void ext2_unlock(ext2_fs_t *fs)
+{
+    if (vfs_sched_ready())
+        mutex_unlock(&fs->lock);
+}
+
 #ifdef OS01_SELFTEST
 static ext2_fs_t *ext2_selftest_fs;  // set by ext2_init, used by selftests
 #endif
@@ -696,14 +713,14 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
     uint32_t ino = ext2_node_ino(node);
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     ext2_inode_t inode;
     if (ext2_read_inode(fs, ino, &inode) != 0) {
-        spin_unlock(&fs->lock); return -1;
+        ext2_unlock(fs); return -1;
     }
 
-    if (offset >= inode.i_size) { spin_unlock(&fs->lock); return 0; }
+    if (offset >= inode.i_size) { ext2_unlock(fs); return 0; }
     /* P2-7: avoid `offset + size` uint64_t overflow. The previous line
      * guarantees offset < inode.i_size (i_size is uint32_t, offset is
      * uint64_t — the comparison widens i_size and succeeds only when
@@ -721,7 +738,7 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
     uint64_t file_off = offset;
 
     uint8_t *block_buf = kmalloc(4096);
-    if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+    if (!block_buf) { ext2_unlock(fs); return -ENOMEM; }
 
     while (remaining > 0) {
         uint32_t logical_block = (uint32_t)(file_off / fs->block_size);
@@ -740,7 +757,7 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
         }
 
         if (ext2_read_block(fs, phys, block_buf) != 0) {
-            kfree(block_buf); spin_unlock(&fs->lock); return -1;
+            kfree(block_buf); ext2_unlock(fs); return -1;
         }
 
         uint32_t chunk = (uint32_t)(fs->block_size - block_off);
@@ -753,7 +770,7 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
     }
 
     kfree(block_buf);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return (int)size;
 }
 
@@ -765,16 +782,16 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     uint32_t ino = ext2_node_ino(node);
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     ext2_inode_t inode;
     if (ext2_read_inode(fs, ino, &inode) != 0) {
-        spin_unlock(&fs->lock); return -EIO;
+        ext2_unlock(fs); return -EIO;
     }
 
     // Reject extent-based inodes
     if (inode.i_flags & 0x00080000) {
-        spin_unlock(&fs->lock); return -EOPNOTSUPP;
+        ext2_unlock(fs); return -EOPNOTSUPP;
     }
 
     // Ensure blocks are allocated for the write range
@@ -783,7 +800,7 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
 
     for (uint32_t lb = first_blk; lb <= last_blk; lb++) {
         if (ext2_bmap_alloc(fs, &inode, lb) == 0) {
-            spin_unlock(&fs->lock); return -ENOSPC;
+            ext2_unlock(fs); return -ENOSPC;
         }
     }
 
@@ -796,7 +813,7 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     uint64_t file_off  = offset;
 
     uint8_t *block_buf = kmalloc(4096);
-    if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+    if (!block_buf) { ext2_unlock(fs); return -ENOMEM; }
 
     int write_err = 0;
     while (remaining > 0) {
@@ -839,7 +856,7 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
                 spin_unlock(&node->mount->active_lock);
             }
         }
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return write_err;
     }
 
@@ -857,7 +874,7 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
         spin_unlock(&node->mount->active_lock);
     }
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return (int)size;
 }
 
@@ -869,15 +886,15 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
     uint32_t ino = ext2_node_ino(node);
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     ext2_inode_t inode;
     if (ext2_read_inode(fs, ino, &inode) != 0) {
-        spin_unlock(&fs->lock); return -EIO;
+        ext2_unlock(fs); return -EIO;
     }
 
     if (inode.i_flags & 0x00080000) {
-        spin_unlock(&fs->lock); return -EOPNOTSUPP;
+        ext2_unlock(fs); return -EOPNOTSUPP;
     }
 
     uint32_t old_blocks = (inode.i_size + fs->block_size - 1) / fs->block_size;
@@ -887,7 +904,7 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
         // Extend: allocate new blocks
         for (uint32_t lb = old_blocks; lb < new_blocks; lb++) {
             if (ext2_bmap_alloc(fs, &inode, lb) == 0) {
-                spin_unlock(&fs->lock); return -ENOSPC;
+                ext2_unlock(fs); return -ENOSPC;
             }
         }
     } else if (new_size < inode.i_size) {
@@ -906,10 +923,10 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
                 uint32_t idx = lb - 12;
                 if (inode.i_block[12] != 0) {
                     uint32_t *indirect = kmalloc(4096);
-                    if (!indirect) { spin_unlock(&fs->lock); return -ENOMEM; }
+                    if (!indirect) { ext2_unlock(fs); return -ENOMEM; }
                     if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
                         kfree(indirect);
-                        spin_unlock(&fs->lock); return -EIO;
+                        ext2_unlock(fs); return -EIO;
                     }
                     indirect[idx] = 0;
                     ext2_write_block(fs, inode.i_block[12], indirect);
@@ -944,7 +961,7 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
         spin_unlock(&node->mount->active_lock);
     }
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -966,7 +983,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
         return NULL;
     }
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t dir_ino = ext2_node_ino(dir);
 
@@ -975,7 +992,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
     uint8_t dummy_type;
     if (ext2_find_dirent(fs, dir_ino, name, &dummy_ino, &dummy_type,
                          &dummy_block, &dummy_off) == 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;  // already exists
@@ -983,7 +1000,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
 
     uint32_t new_ino = alloc_inode(fs, EXT2_S_IFREG | 0644);
     if (new_ino == 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -991,7 +1008,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
 
     if (dirent_add(fs, dir_ino, name, new_ino, 1 /* EXT2_FT_REG_FILE */) != 0) {
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1011,7 +1028,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_create(struct vfs_nod
 
     vfs_active_node_register(node);
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return node;
 }
 
@@ -1037,7 +1054,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
     size_t tlen = strlen(target);
     if (tlen == 0) return -EINVAL;  // POSIX: empty target is invalid
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t parent_ino = ext2_node_ino(parent);
 
@@ -1053,11 +1070,11 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
                                          &existing_ino, &existing_ft,
                                          &existing_blk, &existing_off);
     if (find_rc == 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return -EEXIST;
     }
     if (find_rc != -ENOENT) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return find_rc;  // -EIO / -ENOTDIR / -ENOMEM etc.
     }
 
@@ -1065,7 +1082,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
     //    the on-disk inode to zero-init + mode + links_count=1.
     uint32_t ino = alloc_inode(fs, EXT2_S_IFLNK | 0777);
     if (ino == 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return -ENOSPC;
     }
 
@@ -1081,7 +1098,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
                  : ext2_read_inode(fs, ino, &inode);
     if (rc != 0) {
         free_inode(fs, ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return -EIO;
     }
 
@@ -1096,7 +1113,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
         target_blk = alloc_block(fs);
         if (target_blk == 0) {
             free_inode(fs, ino);
-            spin_unlock(&fs->lock);
+            ext2_unlock(fs);
             return -ENOSPC;
         }
         inode.i_blocks = fs->block_size / 512;
@@ -1106,7 +1123,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
         if (!block_buf) {
             free_block(fs, target_blk);
             free_inode(fs, ino);
-            spin_unlock(&fs->lock);
+            ext2_unlock(fs);
             return -ENOMEM;
         }
         memcpy(block_buf, target, tlen);
@@ -1119,7 +1136,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
             kfree(block_buf);
             free_block(fs, target_blk);
             free_inode(fs, ino);
-            spin_unlock(&fs->lock);
+            ext2_unlock(fs);
             return -EIO;
         }
         kfree(block_buf);
@@ -1132,7 +1149,7 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
     if (rc != 0) {
         if (inode.i_blocks > 0) free_block(fs, target_blk);
         free_inode(fs, ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return -EIO;
     }
 
@@ -1143,11 +1160,11 @@ static __attribute__((noinline)) int ext2_vfs_symlink(struct vfs_node *parent,
     if (rc != 0) {
         if (inode.i_blocks > 0) free_block(fs, target_blk);
         free_inode(fs, ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return rc;
     }
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -1157,7 +1174,7 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
     if (!dir || !dir->mount || !name) return -EINVAL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t dir_ino = ext2_node_ino(dir);
     uint32_t target_ino, block, off;
@@ -1165,14 +1182,14 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
 
     int ret = ext2_find_dirent(fs, dir_ino, name,
                                &target_ino, &file_type, &block, &off);
-    if (ret != 0) { spin_unlock(&fs->lock); return ret; }
+    if (ret != 0) { ext2_unlock(fs); return ret; }
 
     // Remove dirent first (write ordering: dirent → inode → bitmap → sb → data)
     dirent_del(fs, dir_ino, name);
 
     ext2_inode_t inode;
     if (ext2_read_inode(fs, target_ino, &inode) != 0) {
-        spin_unlock(&fs->lock); return -EIO;
+        ext2_unlock(fs); return -EIO;
     }
 
     inode.i_links_count--;
@@ -1196,7 +1213,7 @@ static __attribute__((noinline)) int ext2_vfs_unlink(struct vfs_node *dir, const
         ext2_write_inode(fs, target_ino, &inode);
     }
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -1218,7 +1235,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
         return NULL;
     }
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t dir_ino = ext2_node_ino(dir);
 
@@ -1226,7 +1243,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     uint8_t dummy_type;
     if (ext2_find_dirent(fs, dir_ino, name, &dummy_ino, &dummy_type,
                          &dummy_block, &dummy_off) == 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1234,7 +1251,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
 
     uint32_t new_ino = alloc_inode(fs, EXT2_S_IFDIR | 0755);
     if (new_ino == 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1244,7 +1261,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     uint32_t dir_blk = alloc_block(fs);
     if (dir_blk == 0) {
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1255,7 +1272,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     if (ext2_read_inode(fs, new_ino, &new_inode) != 0) {
         free_block(fs, dir_blk);
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1271,7 +1288,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
     if (!block_data) {
         free_block(fs, dir_blk);
         free_inode(fs, new_ino);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1313,7 +1330,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
         fs->bgdesc_table[parent_group].bg_used_dirs_count--;
         ext2_write_inode(fs, dir_ino, &dir_inode);
         ext2_write_superblock(fs);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(node->name);
         kfree(node);
         return NULL;
@@ -1333,7 +1350,7 @@ static __attribute__((noinline)) struct vfs_node *ext2_vfs_mkdir(struct vfs_node
 
     vfs_active_node_register(node);
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return node;
 }
 
@@ -1343,7 +1360,7 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
     if (!dir || !dir->mount || !name) return -EINVAL;
     ext2_fs_t *fs = (ext2_fs_t *)dir->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t dir_ino = ext2_node_ino(dir);
     uint32_t target_ino, block, off;
@@ -1351,20 +1368,20 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
 
     int ret = ext2_find_dirent(fs, dir_ino, name,
                                &target_ino, &file_type, &block, &off);
-    if (ret != 0) { spin_unlock(&fs->lock); return ret; }
+    if (ret != 0) { ext2_unlock(fs); return ret; }
 
     if (file_type != 2 /* EXT2_FT_DIR */) {
-        spin_unlock(&fs->lock); return -ENOTDIR;
+        ext2_unlock(fs); return -ENOTDIR;
     }
 
     ext2_inode_t target_inode;
     if (ext2_read_inode(fs, target_ino, &target_inode) != 0) {
-        spin_unlock(&fs->lock); return -EIO;
+        ext2_unlock(fs); return -EIO;
     }
 
     // Check directory is empty (only "." and ".." entries with valid inode)
     uint8_t *bd = kmalloc(4096);
-    if (!bd) { spin_unlock(&fs->lock); return -ENOMEM; }
+    if (!bd) { ext2_unlock(fs); return -ENOMEM; }
     for (uint32_t blk_idx = 0; ; blk_idx++) {
         uint32_t phys = ext2_bmap(fs, &target_inode, blk_idx);
         if (phys == 0) break;
@@ -1379,7 +1396,7 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
                 de->inode != target_ino &&
                 de->inode != dir_ino) {
                 kfree(bd);
-                spin_unlock(&fs->lock); return -ENOTEMPTY;
+                ext2_unlock(fs); return -ENOTEMPTY;
             }
             off2 += de->rec_len;
         }
@@ -1419,7 +1436,7 @@ static __attribute__((noinline)) int ext2_vfs_rmdir(struct vfs_node *dir, const 
         ext2_reclaim_orphan_inode_locked(fs, target_ino);
     }
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -1433,18 +1450,18 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
     uint32_t ino = ext2_node_ino(node);
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     ext2_inode_t dir_inode;
     if (ext2_read_inode(fs, ino, &dir_inode) != 0) {
-        spin_unlock(&fs->lock); return -1;
+        ext2_unlock(fs); return -1;
     }
     if (!(dir_inode.i_mode & EXT2_S_IFDIR)) {
-        spin_unlock(&fs->lock); return -1;
+        ext2_unlock(fs); return -1;
     }
 
     uint8_t *block_data = kmalloc(4096);
-    if (!block_data) { spin_unlock(&fs->lock); return -ENOMEM; }
+    if (!block_data) { ext2_unlock(fs); return -ENOMEM; }
     uint64_t entry_idx = 0;
 
     for (uint32_t blk_idx = 0; ; blk_idx++) {
@@ -1482,7 +1499,7 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
                             entry->size = _inode.i_size;
                     }
                     kfree(block_data);
-                    spin_unlock(&fs->lock);
+                    ext2_unlock(fs);
                     return 0;
                 }
                 entry_idx++;
@@ -1493,7 +1510,7 @@ static __attribute__((noinline)) int ext2_vfs_readdir(struct vfs_node *node, uin
 
     kfree(block_data);
     entry->name[0] = '\0';
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -1510,11 +1527,11 @@ static __attribute__((noinline)) int ext2_vfs_readlink(struct vfs_node *node, ch
     if (!node->mount) return -EINVAL;
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     ext2_inode_t inode;
     if (ext2_read_inode(fs, ext2_node_ino(node), &inode) != 0) {
-        spin_unlock(&fs->lock); return -EIO;
+        ext2_unlock(fs); return -EIO;
     }
 
     int rc;
@@ -1528,12 +1545,12 @@ static __attribute__((noinline)) int ext2_vfs_readlink(struct vfs_node *node, ch
     } else {
         // Long symlink: target in i_block[0]'s data block
         uint32_t phys = inode.i_block[0];
-        if (phys == 0) { spin_unlock(&fs->lock); return -EIO; }
+        if (phys == 0) { ext2_unlock(fs); return -EIO; }
 
         uint8_t *block_buf = kmalloc(fs->block_size);
-        if (!block_buf) { spin_unlock(&fs->lock); return -ENOMEM; }
+        if (!block_buf) { ext2_unlock(fs); return -ENOMEM; }
         if (ext2_read_block(fs, phys, block_buf) != 0) {
-            kfree(block_buf); spin_unlock(&fs->lock); return -EIO;
+            kfree(block_buf); ext2_unlock(fs); return -EIO;
         }
         size_t tlen = inode.i_size;
         if (tlen > fs->block_size) tlen = fs->block_size;
@@ -1542,7 +1559,7 @@ static __attribute__((noinline)) int ext2_vfs_readlink(struct vfs_node *node, ch
         kfree(block_buf);
         rc = (int)tlen;
     }
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return rc;
 }
 
@@ -1554,7 +1571,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
         return -EINVAL;
     ext2_fs_t *fs = (ext2_fs_t *)olddir->mount->fs_data;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t old_ino = ext2_node_ino(olddir);
     uint32_t new_ino_dir = ext2_node_ino(newdir);
@@ -1563,7 +1580,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
 
     int ret = ext2_find_dirent(fs, old_ino, oldname,
                                &target_ino, &file_type, &block, &off);
-    if (ret != 0) { spin_unlock(&fs->lock); return ret; }
+    if (ret != 0) { ext2_unlock(fs); return ret; }
 
     // Check if target exists in newdir
     uint32_t exist_ino, exist_block, exist_off;
@@ -1573,7 +1590,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                                   &exist_block, &exist_off);
 
     ext2_inode_t *inobuf = kmalloc(2 * sizeof(ext2_inode_t));
-    if (!inobuf) { spin_unlock(&fs->lock); return -ENOMEM; }
+    if (!inobuf) { ext2_unlock(fs); return -ENOMEM; }
     ext2_inode_t *ino_a = &inobuf[0];
     ext2_inode_t *ino_b = &inobuf[1];
 
@@ -1583,7 +1600,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
             ext2_read_inode(fs, exist_ino, ino_a);
             // Check if non-empty (same pattern as rmdir)
             uint8_t *bd = kmalloc(4096);
-            if (!bd) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
+            if (!bd) { kfree(inobuf); ext2_unlock(fs); return -ENOMEM; }
             for (uint32_t bi = 0; ; bi++) {
                 uint32_t p = ext2_bmap(fs, ino_a, bi);
                 if (p == 0) break;
@@ -1593,7 +1610,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
                     ext2_dirent_t *de = (ext2_dirent_t *)(bd + o2);
                     if (de->rec_len == 0) break;
                     if (de->inode != 0 && de->inode != exist_ino && de->inode != new_ino_dir) {
-                        kfree(bd); kfree(inobuf); spin_unlock(&fs->lock); return -ENOTEMPTY;
+                        kfree(bd); kfree(inobuf); ext2_unlock(fs); return -ENOTEMPTY;
                     }
                     o2 += de->rec_len;
                 }
@@ -1655,14 +1672,14 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
     if (del_ret != 0) {
         log_err("ext2_rename: dirent_del(%s) failed ret=%d\n", oldname, del_ret);
         kfree(inobuf);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return del_ret;
     }
     int add_ret = dirent_add(fs, new_ino_dir, newname, target_ino, file_type);
     if (add_ret != 0) {
         log_err("ext2_rename: dirent_add(%s) failed ret=%d\n", newname, add_ret);
         kfree(inobuf);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return add_ret;
     }
 
@@ -1678,7 +1695,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
         ext2_read_inode(fs, target_ino, ino_a);
         uint32_t first_block = ino_a->i_block[0];
         uint8_t *dir_data = kmalloc(4096);
-        if (!dir_data) { kfree(inobuf); spin_unlock(&fs->lock); return -ENOMEM; }
+        if (!dir_data) { kfree(inobuf); ext2_unlock(fs); return -ENOMEM; }
         ext2_read_block(fs, first_block, dir_data);
 
         ext2_dirent_t *dotdot = (ext2_dirent_t *)(dir_data + 12);
@@ -1704,7 +1721,7 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
     }
 
     kfree(inobuf);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -1743,13 +1760,13 @@ static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
         return -ENOMEM;
     }
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t child_ino = 0, blk = 0, off = 0;
     uint8_t ft = 0;
     int rc = ext2_find_dirent(fs, dir_ino, name, &child_ino, &ft, &blk, &off);
     if (rc != 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(child->name);
         kfree(child);
         return rc;
@@ -1757,7 +1774,7 @@ static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
 
     ext2_inode_t disk_ino;
     if (ext2_read_inode(fs, child_ino, &disk_ino) != 0) {
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         kfree(child->name);
         kfree(child);
         return -EIO;
@@ -1788,7 +1805,7 @@ static int ext2_iop_lookup(struct vfs_node *dir, const char *name,
 
     vfs_active_node_register(child);
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
 
     *out = child;
     return 0;
@@ -1800,13 +1817,13 @@ static int ext2_iop_getattr(struct vfs_node *node, struct stat *buf)
     ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
     uint32_t ino = ext2_node_ino(node);
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
     ext2_inode_t disk_ino;
     int rc = ext2_read_inode(fs, ino, &disk_ino);
     if (rc == 0) {
         ext2_fill_vfs_node(node, ino, &disk_ino);
     }
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
 
     if (rc != 0) return -EIO;
     int grc = vfs_generic_getattr(node, buf);
@@ -1829,7 +1846,7 @@ static void ext2_iop_evict_node(struct vfs_node *node)
     uint32_t ino = (uint32_t)node->ino;
     bool should_reclaim = false;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
     spin_lock(&node->mount->active_lock);
 
     vfs_active_node_unregister_locked(node->mount, node);
@@ -1852,7 +1869,7 @@ static void ext2_iop_evict_node(struct vfs_node *node)
     if (should_reclaim) {
         ext2_reclaim_orphan_inode_locked(fs, ino);
     }
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
 }
 
 // ── VFS operations table ────────────────────────────────
@@ -1885,7 +1902,7 @@ int ext2_init(block_device_t *dev, ext2_fs_t **out_fs)
     ext2_fs_t *fs = calloc(1, sizeof(ext2_fs_t));
     if (!fs) return -1;
     fs->dev = dev;
-    spin_init(&fs->lock);
+    mutex_init(&fs->lock);
 
     // Read superblock (byte 1024 = sector 2)
     uint8_t *sb_buf = kmalloc(1024);
@@ -2026,13 +2043,13 @@ int ext2_selftest_block_alloc(void)
 
     uint8_t *save_bitmap = NULL, *save_bgdesc = NULL, *save_sb = NULL, *save_blk = NULL;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     // Choose first group that has free blocks
     uint32_t g = 0;
     while (g < fs->num_block_groups && fs->bgdesc_table[g].bg_free_blocks_count == 0)
         g++;
-    if (g >= fs->num_block_groups) { spin_unlock(&fs->lock); return 0; }
+    if (g >= fs->num_block_groups) { ext2_unlock(fs); return 0; }
 
     uint32_t bitmap_block = fs->bgdesc_table[g].bg_block_bitmap;
     // g * sizeof(ext2_bgdesc_t) / fs->block_size: index into the bgdesc
@@ -2080,7 +2097,7 @@ cleanup:
     if (save_sb) kfree(save_sb);
     if (save_bgdesc) kfree(save_bgdesc);
     if (save_bitmap) kfree(save_bitmap);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return 0;
 }
 
@@ -2092,12 +2109,12 @@ int ext2_selftest_inode_alloc(void)
     uint8_t *save_ibitmap = NULL, *save_sb = NULL, *save_itable = NULL;
     int ret = 0;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     uint32_t g = 0;
     while (g < fs->num_block_groups && fs->bgdesc_table[g].bg_free_inodes_count == 0)
         g++;
-    if (g >= fs->num_block_groups) { spin_unlock(&fs->lock); return 0; }
+    if (g >= fs->num_block_groups) { ext2_unlock(fs); return 0; }
 
     uint32_t inode_bitmap_block = fs->bgdesc_table[g].bg_inode_bitmap;
     uint32_t inode_table_start  = fs->bgdesc_table[g].bg_inode_table;
@@ -2138,7 +2155,7 @@ cleanup:
     if (save_itable) kfree(save_itable);
     if (save_sb) kfree(save_sb);
     if (save_ibitmap) kfree(save_ibitmap);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return ret;
 }
 
@@ -2150,7 +2167,7 @@ int ext2_selftest_dirent_roundtrip(void)
     uint8_t *save_dir_blk = NULL, *save_itable_blk = NULL, *save_sb = NULL;
     int ret = 0;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     // Use root inode (2) as the test directory
     uint32_t dir_ino = EXT2_ROOT_INO;
@@ -2161,7 +2178,7 @@ int ext2_selftest_dirent_roundtrip(void)
 
     // Save first dir block
     uint32_t first_phys = ext2_bmap(fs, &root_inode, 0);
-    if (first_phys == 0) { spin_unlock(&fs->lock); return 0; }
+    if (first_phys == 0) { ext2_unlock(fs); return 0; }
     save_dir_blk = kmalloc(4096);
     if (!save_dir_blk) goto cleanup;
     ext2_read_block(fs, first_phys, save_dir_blk);
@@ -2236,7 +2253,7 @@ cleanup:
     if (save_sb) kfree(save_sb);
     if (save_itable_blk) kfree(save_itable_blk);
     if (save_dir_blk) kfree(save_dir_blk);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return ret;
 }
 
@@ -2254,7 +2271,7 @@ int ext2_selftest_write_read(void)
     uint8_t *block_data = NULL, *save_data = NULL, *write_buf = NULL, *read_buf = NULL;
     int ret = 0;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     // Find a regular file in root directory
     uint32_t dir_ino = EXT2_ROOT_INO;
@@ -2326,7 +2343,7 @@ cleanup:
     if (write_buf) kfree(write_buf);
     if (save_data) kfree(save_data);
     if (block_data) kfree(block_data);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     return ret;
 }
 
@@ -2358,7 +2375,7 @@ int ext2_selftest_sparse_read(void)
     uint32_t test_ino = 0;
     ext2_inode_t saved_inode;
 
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
 
     // Find the first regular file in the root directory.
     ext2_inode_t dir_inode;
@@ -2381,23 +2398,23 @@ int ext2_selftest_sparse_read(void)
     }
     if (!test_ino) {
         kfree(block_data);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return 0;   // SKIP — no regular file in root
     }
 
     if (ext2_read_inode(fs, test_ino, &saved_inode) != 0) {
         kfree(block_data);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return -1;
     }
     if (saved_inode.i_block[0] == 0) {
         // Case A needs at least one real block to interleave with a hole.
         kfree(block_data);
-        spin_unlock(&fs->lock);
+        ext2_unlock(fs);
         return 0;
     }
 
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
 
     // Acquire the ext2 mount for the synthetic vfs_node_t.
     vfs_node_t *root_node = vfs_lookup("/");
@@ -2424,13 +2441,13 @@ int ext2_selftest_sparse_read(void)
     int fail = 0;
 
     // ===== Case A: hole in middle =====
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
     ext2_inode_t mod = saved_inode;
     mod.i_size = 8192;
     mod.i_blocks = 8;   // one block × (block_size / 512)
     for (int i = 1; i < 15; i++) mod.i_block[i] = 0;
     int wrc = ext2_write_inode(fs, test_ino, &mod);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     if (wrc != 0) { fail = 1; goto cleanup; }
 
     memset(buf, 0xCC, 8192);   // sentinel — hole must overwrite
@@ -2441,12 +2458,12 @@ int ext2_selftest_sparse_read(void)
     }
 
     // ===== Case B: fully sparse =====
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
     mod.i_size = 4096;
     mod.i_blocks = 0;
     for (int i = 0; i < 15; i++) mod.i_block[i] = 0;
     wrc = ext2_write_inode(fs, test_ino, &mod);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
     if (wrc != 0) { fail = 1; goto cleanup; }
 
     memset(buf, 0xCC, 4096);
@@ -2458,9 +2475,9 @@ int ext2_selftest_sparse_read(void)
 
 cleanup:
     // Restore the original inode before returning.
-    spin_lock(&fs->lock);
+    ext2_lock(fs);
     ext2_write_inode(fs, test_ino, &saved_inode);
-    spin_unlock(&fs->lock);
+    ext2_unlock(fs);
 
     kfree(buf);
     kfree(block_data);

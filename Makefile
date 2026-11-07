@@ -23,6 +23,9 @@ endif
 ifeq ($(CAPACITY_TEST),1)
 INITTAB_FILE := config/inittab.arch10-capacity
 endif
+ifeq ($(ARCH6_FSSTRESS_TEST),1)
+INITTAB_FILE := config/inittab.arch6-fsstress
+endif
 
 include $(base)/mk/project.mk
 # Cross-component dependency graph (spec: mk/components/*.mk is the only
