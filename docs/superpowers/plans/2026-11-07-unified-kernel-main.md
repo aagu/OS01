@@ -4,7 +4,7 @@
 
 **Goal:** 将 x86_64 与 aarch64 双架构的启动流程编排彻底统一到单一的 `kernel/core/main.c::kernel_main()`，通过特征宏包裹暂不支持的能力，消除 `aarch64_main()`。
 
-**Architecture:** 按照 OS01 的 `weak-default + strong-override` 模式建立跨架构启动 Facade（`kernel/include/arch/boot.h`），在 `kernel/include/arch/features.h` 中提供编译期特性隔离，将 aarch64 早期 arena 预检的大栈帧抽离至独立函数以满足 512 字节通用栈帧门禁，升级 `test-aarch64-audit` 使用 `readelf` 严格审计入口符号。
+**Architecture:** 按照 OS01 的 `weak-default + strong-override` 模式建立跨架构启动 Facade（`kernel/include/arch/boot.h`），在 `kernel/include/arch/features.h` 中提供编译期特性隔离，在架构头中提供 `arch_selftest_expected_late()` 自测计数 helper，将 aarch64 早期 arena 预检的大栈帧抽离至独立函数以满足 512 字节通用栈帧门禁，升级 `test-aarch64-audit` 使用 `readelf` 严格审计入口符号并重构源码契约测试。
 
 **Tech Stack:** C (Clang / LLVM), AArch64 / x86_64 Assembly, GNU Make, Python unittest, QEMU.
 
@@ -19,49 +19,60 @@
 
 ## Review Focus
 
-1. **`AARCH64_READELF` 工具缺失与未定义**：Make recipe 展开必须能定位 `llvm-readelf`，工具缺失或执行非零时必须显式报错退出。
-2. **符号审计假阳性/假阴性**：`readelf -Ws` 正则必须严格匹配完整末尾字段，拒绝 `kernel_main.extra` 或仅为 `UND` 的未定义符号。
-3. **栈帧门禁回归**：`stack_frame_audit.py` 与 `test_stack_frame_audit.py` 必须精准更新基线例外为 `aarch64_early_arena_preflight: 1600`，`test-static` 与 `test-aarch64-audit` 均绿。
+1. **`AARCH64_READELF` 工具配置与退出码捕获**：Make recipe 展开必须能定位 `llvm-readelf`，通过 `syms="$$(...) || exit 1"` 校验工具自身状态，杜绝管道屏蔽错误。
+2. **符号审计假阳性/假阴性**：`readelf -Ws` 正则必须严格匹配末尾字段 `[[:space:]]+kernel_main[[:space:]]*$$`，拒绝 `kernel_main.extra`、`kernel_main_alt` 或仅为 `UND` 的未定义符号。
+3. **栈帧门禁与编译告警**：`stack_frame_audit.py` 与 `test_stack_frame_audit.py` 必须精准更新基线例外为 `aarch64_early_arena_preflight: 1600`；除 `pmm_init` 与 `aarch64_early_arena_preflight` 两个已批准的 scheme 5 早期启动栈帧告警外，双架构编排函数无任何编译 warning。
 4. **`head.S` 遗留符号**：删除 `.globl aarch64_main` 声明与跳转，防止产物中残留未定义符号 `U aarch64_main`。
-5. **契约测试解耦**：`test_double_state_publish.c` 与 `test_kernel_selftest_result.py` 不得依赖整文件全局字符串物理位置，必须按函数作用域断言调用顺序。
+5. **契约测试解耦与依赖序**：源码契约测试更新与代码迁移紧密衔接，保证全量 harness 门禁持续可通行。
 
 ---
 
-### Task 1: 特征宏与 Facade 头文件体系建设
+### Task 1: 特征宏、Facade 头文件体系与自测计数 Helper
 
 **Files:**
 - Create: `kernel/include/arch/features.h`
 - Create: `kernel/include/arch/boot.h`
-- Create: `kernel/include/arch/x86_64/boot_features.h` (或内嵌在 `boot.h`)
-- Create: `kernel/include/arch/aarch64/boot_features.h` (或内嵌在 `boot.h`)
-- Test: `hosttests/cases/test_boot_facade_headers.c`
+- Create: `kernel/include/arch/x86_64/boot.h` (或更新现有)
+- Create: `kernel/include/arch/aarch64/boot.h` (或新建)
+- Create: `qemutests/test_boot_facade_headers.py`
+- Modify: `mk/components/run.mk:716` (`TEST_HARNESS_MODULES`)
+- Test: `python3 -m unittest qemutests.test_boot_facade_headers`
+- Test: `make test-harness`
 
-- [ ] **Step 1: 编写 Host 单元测试验证特征宏与 Facade 声明**
-  在 `hosttests/cases/` 增加 `test_boot_facade_headers.c`，在宿主模拟环境下分别定义 `__x86_64__` 与 `__aarch64__`，断言：
-  - `OS01_HAS_VFS` 与 `OS01_HAS_USERSPACE` 在 x86 为 1，在 ARM 为 0；
-  - 非法值与依赖不匹配时编译报错；
-  - `arch/boot.h` 声明的 8 个核心函数原型可用。
+- [ ] **Step 1: 编写 Python 跨架构编译探针测试**
+  在 `qemutests/test_boot_facade_headers.py` 中编写单元测试，使用 `clang -fsyntax-only` 探测：
+  - `clang -target x86_64-none-elf -fsyntax-only` 编译包含 `arch/features.h` 与 `arch/boot.h` 的代码块，断言 `OS01_HAS_VFS == 1`、`OS01_HAS_USERSPACE == 1`、`arch_selftest_expected_late() == 8`；
+  - `clang -target aarch64-none-elf -fsyntax-only` 编译包含上述头的代码块，断言 `OS01_HAS_VFS == 0`、`OS01_HAS_USERSPACE == 0`，并在无宏、`AARCH64_AP_SCHED_TEST_AP=1`、`AARCH64_AP_SCHED_WAKE_TEST=1`、`AARCH64_SCHED_TICK_TEST=1` 宏下分别断言 `arch_selftest_expected_late()` 为 9、7、13、7；
+  - 注入非法组合（如 `-DOS01_HAS_VFS=0 -DOS01_HAS_USERSPACE=1`），断言触发 `#error` 语法错误。
 - [ ] **Step 2: 创建 `kernel/include/arch/features.h`**
   实现 Spec §3 所述的特征宏：
   - 架构默认值：x86=1/1，aarch64=0/0；
   - 0/1 显式取值静态断言；
   - `OS01_HAS_USERSPACE` 依赖 `OS01_HAS_VFS` 断言。
-- [ ] **Step 3: 创建 `kernel/include/arch/boot.h`**
-  声明 Spec §6.1 中的跨架构通用 Facade 接口：
-  - `arch_early_init`
-  - `arch_boot_memory`
-  - `arch_pre_subsys_selftest`
-  - `arch_boot_subsystems`
-  - `arch_boot_percpu`
-  - `arch_boot_aps`
-  - `arch_post_smp_selftest`
-  - `arch_boot_device_nodes`
-  - `arch_early_panic`
-  - `arch_start_kernel_idle`
-- [ ] **Step 4: 运行 host 验证测试**
-  执行 `make -C hosttests`（或对应目标）确认头文件独立解析与宏校验通过。
+- [ ] **Step 3: 创建并更新各架构的 `boot.h` 与通用的 `kernel/include/arch/boot.h`**
+  - 在 `kernel/include/arch/x86_64/boot.h` 中提供：
+    ```c
+    static inline unsigned int arch_selftest_expected_late(void) {
+        return 8;
+    }
+    ```
+  - 在 `kernel/include/arch/aarch64/boot.h` 中提供：
+    ```c
+    static inline unsigned int arch_selftest_expected_late(void) {
+    #if defined(AARCH64_AP_SCHED_WAKE_TEST)
+        return 13;
+    #elif defined(AARCH64_AP_SCHED_TEST_AP) || defined(AARCH64_SCHED_TICK_TEST)
+        return 7;
+    #else
+        return 9;
+    #endif
+    }
+    ```
+  - 在 `kernel/include/arch/boot.h` 中包含 `<arch/features.h>` 与相应 per-arch 头，声明 Spec §6.1 规定的 8 个 Facade 函数（包含 `void arch_early_panic(const char *msg) __attribute__((noreturn));`）。
+- [ ] **Step 4: 将 `qemutests.test_boot_facade_headers` 加入 `TEST_HARNESS_MODULES`**
+  更新 `mk/components/run.mk`，执行 `make test-harness` 确认通过。
 - [ ] **Step 5: Commit**
-  `git add kernel/include/arch/ hosttests/ && git commit -m "feat(arch): add feature gates and boot facade prototypes"`
+  `git add kernel/include/arch/ qemutests/test_boot_facade_headers.py mk/components/run.mk && git commit -m "feat(arch): add feature gates, boot facade and selftest late helpers"`
 
 ---
 
@@ -97,7 +108,7 @@
       #endif
       ```
   - `kernel/arch/x86_64/platform/boot.c`:
-    - `arch_boot_device_nodes`: 调用 `x86_64_boot_device_nodes()`，返回结果
+    - `arch_boot_device_nodes`: 调用 `x86_64_boot_device_nodes()`，返回其执行状态码
 - [ ] **Step 3: 运行 x86_64 静态检查**
   执行 `make test-static` 确保 x86 符号与函数原型一致。
 - [ ] **Step 4: Commit**
@@ -161,43 +172,14 @@
 - [ ] **Step 2: 改造 `kernel/Makefile`**
   - 在 aarch64 的 `KERNEL_C_SOURCES` 列表中加入 `core/main.c`
 - [ ] **Step 3: 验证 aarch64 与 x86_64 内核编译链接**
-  - 执行 `make PROFILE=aarch64-clang aarch64-uefi-kernel`，检查编译无 error/warning
+  - 执行 `make PROFILE=aarch64-clang aarch64-uefi-kernel`，检查编译成功（仅有预期的 `pmm_init` 与 `aarch64_early_arena_preflight` 栈帧警告，无任何其他 warning/error）
   - 执行 `make PROFILE=x86_64-clang kernel.bin`，检查编译无 error/warning
 - [ ] **Step 4: Commit**
   `git add kernel/core/main.c kernel/Makefile && git commit -m "refactor(core): unify boot orchestration in single kernel_main"`
 
 ---
 
-### Task 5: 符号审计门禁与三态测试接入
-
-**Files:**
-- Modify: `mk/components/run.mk`
-- Create: `qemutests/test_audit_symbol_contract.py`
-- Test: `make test-harness`
-- Test: `make PROFILE=aarch64-clang test-aarch64-audit`
-
-- [ ] **Step 1: 编写 `test_audit_symbol_contract.py` 覆盖三态场景**
-  在 `qemutests/test_audit_symbol_contract.py` 中编写单元测试，使用模拟 readelf 输出测试审计逻辑：
-  - 正常 `FUNC GLOBAL DEFAULT 2 kernel_main$`：PASS
-  - 缺失 `kernel_main`：FAIL
-  - `kernel_main` 仅为 `UND`：FAIL
-  - 后缀错误符号（如 `kernel_main.extra`）：FAIL
-  - 残留 `aarch64_main`：FAIL
-  - 工具返回非零退出码（即使产生文本）：FAIL
-  - 工具缺失：FAIL
-- [ ] **Step 2: 更新 `mk/components/run.mk`**
-  - 定义 `AARCH64_READELF ?= llvm-readelf`
-  - 在 `test-aarch64-audit` 中捕获 `syms` 变量并检查退出码，收紧正则为 `[[:space:]]+kernel_main[[:space:]]*$$`
-  - 将 `qemutests.test_audit_symbol_contract` 追加到 `TEST_HARNESS_MODULES`
-- [ ] **Step 3: 运行 `make test-harness` 与 aarch64 审计**
-  - `make test-harness` 全绿
-  - `make PROFILE=aarch64-clang test-aarch64-audit` 通过
-- [ ] **Step 4: Commit**
-  `git add mk/components/run.mk qemutests/test_audit_symbol_contract.py && git commit -m "test(audit): add rigorous symbol audit for aarch64 kernel_main"`
-
----
-
-### Task 6: 源码契约测试语义化重构
+### Task 5: 源码契约测试语义化重构（与代码迁移同步闭环）
 
 **Files:**
 - Modify: `hosttests/cases/test_double_state_publish.c`
@@ -215,10 +197,39 @@
   - 扫描 `kernel/core/main.c::kernel_main()` 确认 `arch_pre_subsys_selftest()` 的存在与调用时序；
   - 扫描 `arch_pre_subsys_selftest()` 确认 `selftest_begin_run` 与 `selftest_run_all` 的顺序。
 - [ ] **Step 3: 运行宿主与框架测试**
-  - 执行 `make test-host`
-  - 执行 `make test-harness`
+  - 执行 `make test-host` 确认通过
+  - 执行 `make test-harness` 确认通过（消除了对旧字面量匹配的脆弱依赖）
 - [ ] **Step 4: Commit**
   `git add hosttests/cases/test_double_state_publish.c qemutests/test_kernel_selftest_result.py && git commit -m "test(contract): refactor boot sequence assertions to semantic scoped checks"`
+
+---
+
+### Task 6: 符号审计门禁与三态测试接入
+
+**Files:**
+- Modify: `mk/components/run.mk`
+- Create: `qemutests/test_audit_symbol_contract.py`
+- Test: `make test-harness`
+- Test: `make PROFILE=aarch64-clang test-aarch64-audit`
+
+- [ ] **Step 1: 编写 `test_audit_symbol_contract.py` 覆盖三态场景**
+  在 `qemutests/test_audit_symbol_contract.py` 中编写单元测试，使用模拟 readelf 输出测试审计逻辑：
+  - 正常 `FUNC GLOBAL DEFAULT 2 kernel_main$`：PASS
+  - 缺失 `kernel_main`：FAIL
+  - `kernel_main` 仅为 `UND`：FAIL
+  - 后缀错误符号（如 `kernel_main.extra`、`kernel_main_alt`）：FAIL
+  - 残留 `aarch64_main`：FAIL
+  - 工具返回非零退出码（即使产生文本）：FAIL
+  - 工具缺失：FAIL
+- [ ] **Step 2: 更新 `mk/components/run.mk`**
+  - 定义 `AARCH64_READELF ?= llvm-readelf`
+  - 在 `test-aarch64-audit` 中捕获 `syms` 变量并检查退出码，收紧正则为 `[[:space:]]+kernel_main[[:space:]]*$$`
+  - 将 `qemutests.test_audit_symbol_contract` 追加到 `TEST_HARNESS_MODULES`
+- [ ] **Step 3: 运行 `make test-harness` 与 aarch64 审计**
+  - `make test-harness` 全绿
+  - `make PROFILE=aarch64-clang test-aarch64-audit` 通过
+- [ ] **Step 4: Commit**
+  `git add mk/components/run.mk qemutests/test_audit_symbol_contract.py && git commit -m "test(audit): add rigorous symbol audit for aarch64 kernel_main"`
 
 ---
 
