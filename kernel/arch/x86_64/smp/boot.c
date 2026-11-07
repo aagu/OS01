@@ -21,6 +21,9 @@
 //                          _percpu).  No state, no locals.
 
 #include <arch/x86_64/smp_boot.h>
+#include <arch/boot.h>
+#include <selftest/result.h>
+#include <core/selftest.h>
 
 #include <stdint.h>
 
@@ -130,3 +133,26 @@ void x86_64_boot_aps(void)
     arch_register_subsys_percpu();
     subsys_init_percpu();
 }
+
+// ── Boot Facade Strong Overrides ─────────────────────────────
+
+void arch_boot_percpu(void)
+{
+    x86_64_boot_percpu();
+}
+
+void arch_boot_aps(void)
+{
+    x86_64_boot_aps();
+}
+
+void arch_post_smp_selftest(void)
+{
+#ifdef OS01_SELFTEST
+    serial_printk("[selftest] running built-in tests...\n");
+    selftest_begin_run(arch_selftest_expected_late());
+    selftest_run_all();
+    serial_printk("[selftest] done\n");
+#endif
+}
+

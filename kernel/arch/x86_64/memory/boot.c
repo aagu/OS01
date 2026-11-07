@@ -19,6 +19,7 @@
 // kernel_main() are preserved verbatim.
 
 #include <arch/x86_64/boot.h>
+#include <arch/boot.h>
 
 #include <core/printk.h>            /* Pos, frame_buffer_*,
                                        color_printk                       */
@@ -60,3 +61,16 @@ void x86_64_boot_memory(const struct boot_context *bootctx)
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
     log_info("frame buffer remap succeed\n");
 }
+
+// ── Boot Facade Strong Overrides ─────────────────────────────
+
+void arch_boot_memory(const struct boot_context *bootctx)
+{
+    x86_64_boot_memory(bootctx);
+}
+
+void arch_pre_subsys_selftest(const struct boot_context *bootctx)
+{
+    (void)bootctx;
+}
+
