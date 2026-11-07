@@ -5,18 +5,14 @@
  * page_cow_*) is preserved byte-for-byte; only pmm_init changes form.
  * Two private-helper color_printk calls in get_page_attribute and
  * set_page_attribute are replaced with log_err.
- *
- * aarch64 link is -nostdlib -ffreestanding; libc headers (<string.h>,
- * <list.h>) are unavailable. Inline the few libc-only symbols used by
- * the public surface (list_t, list_init, list_add_to_behind) at the
- * top; forward-declare memset and slab_init so the rewritten pmm_init
- * body can call them without dragging libc into the translation unit.
  */
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <string.h>
+#include <list.h>
 #include <core/bootinfo.h>
 #include <log/log.h>
 #include <arch/cpu.h>     /* arch_cpu_halt — required for fatal paths */
@@ -26,48 +22,14 @@
 #include <memory/pmm_arch.h>      /* range-based boot reservation + claim
                                    * (Task 2): pmm_arch_boot_reservations,
                                    * pmm_reserve_boot_ranges,
-                                   * pmm_claim_free_frame */
+                                   * pmm_claim_free_frame,
+                                   * pmm_arch_normalize, pmm_arch_zone_split */
+#include <memory/slab.h>
 #include <memory/memory.h>       /* Virt_To_Phy, Phy_To_Virt */
 #include <core/printk.h>       /* color_printk (public surface) */
 #include <core/debug.h>        /* debug_mm (existing call sites) */
 #include <arch/spinlock.h>
 #include <kernel.h>              /* container_of */
-
-/* ── Inlined libc-only helpers ────────────────────────────────
- * The public surface uses list_t / list_init / list_add_to_behind.
- * On aarch64 there is no <list.h>; inline the minimal set so the
- * preserved surface compiles without the libc header. */
-typedef struct List {
-    struct List * prev;
-    struct List * next;
-} list_t;
-
-static inline void list_init(struct List * lst)
-{
-    lst->prev = lst;
-    lst->next = lst;
-}
-
-static inline void list_add_to_behind(struct List * entry,
-                                      struct List * new_entry)
-{
-    new_entry->next = entry->next;
-    new_entry->prev = entry;
-    new_entry->next->prev = new_entry;
-    entry->next = new_entry;
-}
-
-/* ── Forward declarations ────────────────────────────────────
- * memset: libc on x86_64 (linked through -lk) and kernel/arch/aarch64/
- * memset.c on aarch64.  slab_init: kernel/memory/slab.c on x86_64 and
- * kernel/arch/aarch64/slab_stub.c on aarch64.  pmm_arch_normalize /
- * pmm_arch_zone_split: kernel/memory/pmm_arch.c weak default; per-arch
- * strong overrides in kernel/arch/<arch>/pmm_arch.c. */
-void *memset(void *s, int c, size_t n);
-size_t slab_init(void);
-size_t pmm_arch_normalize(const struct boot_context *ctx,
-                          struct MEMORY_RANGE *out);
-uint64_t pmm_arch_zone_split(void);
 
 uint64_t page_init(struct Page * page, uint64_t flags)
 {
@@ -312,11 +274,9 @@ void pmm_init(const struct boot_context *ctx)
         }
     }
 
-    /* Step 8: slab + subpage pools. Inline the subpage_pools init since
-     * <list.h> is libc (not on the aarch64 include path). */
+    /* Step 8: slab + subpage pools. */
     slab_init();
-    subpage_pools.prev = &subpage_pools;
-    subpage_pools.next = &subpage_pools;
+    list_init(&subpage_pools);
 
     pmm_initialized = 1;
 }

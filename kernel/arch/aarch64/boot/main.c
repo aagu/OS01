@@ -370,7 +370,7 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
     spin_init(&Pos.lock);
 
     if (!(handoff->flags & BOOT_CONTEXT_HAS_FRAMEBUFFER)) {
-        kputs("[fb] no framebuffer in handoff; color_printk disabled\n");
+        log_info("[fb] no framebuffer in handoff; color_printk disabled\n");
     } else {
         Pos.Phy_addr    = (uint32_t *)handoff->graphics.FrameBufferBase;
         Pos.FB_length   = handoff->graphics.FrameBufferSize;
@@ -381,7 +381,7 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
 
         frame_buffer_init();
         if (!Pos.FB_addr)
-            kputs("[fb] mapping failed; color_printk disabled\n");
+            log_warn("[fb] mapping failed; color_printk disabled\n");
     }
 
     /* OS01 boot logo.  Drawn FIRST so the [fb] banner below lands under
@@ -394,10 +394,12 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
         log_info("[logo] skipped: no framebuffer\n");
 
     if (Pos.FB_addr) {
+        /* Screen test pattern: render test banner expected by
+         * qemutests/aarch64_boot_logo.py (check: fb-visible). */
         color_printk(WHITE, BLUE,
                      "[fb] aarch64 color_printk active (%ux%u)\n",
                      Pos.XResolution, Pos.YResolution);
-        kputs("[fb] frame buffer remap succeed (banner on screen)\n");
+        log_info("[fb] frame buffer remap succeed (banner on screen)\n");
     }
 }
 

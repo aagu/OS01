@@ -210,6 +210,7 @@ AR             ?= llvm-ar
 # Archive tool for the target (spec profile variable TARGET_AR).
 TARGET_AR      ?= llvm-ar
 OBJ_CPY        ?= llvm-objcopy
+LLVM_OBJDUMP   ?= llvm-objdump
 AARCH64_QEMU   ?= qemu-system-aarch64
 AARCH64_UEFI_FIRMWARE_SOURCE ?= https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd
 RUNTIME_MACHINE_kernel := EM_AARCH64

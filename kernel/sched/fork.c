@@ -323,7 +323,7 @@ fail:
                              *     ref; balance it with page_cow_put.
                              *     The shared phys stays alive for
                              *     parent + any other siblings. */
-                            if ((pte & PAGE_VALID) &&
+                            if ((pte & (PAGE_VALID | PAGE_PROTNONE)) &&
                                 (pte & PAGE_4K_MASK) &&
                                 !is_placeholder &&
                                 !is_vmio) {

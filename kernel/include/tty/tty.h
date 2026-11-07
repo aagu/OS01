@@ -6,8 +6,6 @@
 #include <list.h>
 #include <arch/spinlock.h>
 #include <tty/canon.h>
-typedef int pid_t;  /* for termios.h userspace declarations */
-
 struct poll_table;  /* forward declaration — full definition in kernel/poll.h */
 struct vfs_node;    /* forward declaration — full definition in fs/vfs.h */
 #include <termios.h>

@@ -246,7 +246,9 @@ gpt_info_t *gpt_scan(block_device_t *disk)
         if (ret != 0 && ret != -EEXIST) {
             log_err("gpt: failed to register partition '%s' in devfs (%d)\n",
                     part->dev->name, ret);
+            void *ctx = part->dev->private_data;
             block_device_unregister_boot(part->dev);
+            kfree(ctx);
             part->dev = NULL;
             continue;
         }

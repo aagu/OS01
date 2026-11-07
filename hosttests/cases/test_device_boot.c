@@ -583,12 +583,13 @@ static void test_root_requirement(void)
     block_device_t *disk_dev = NULL;
     assert_eq(0, block_device_register(&disk_desc, &disk_dev));
 
-    gpt_info_t fake_gpt;
-    memset(&fake_gpt, 0, sizeof(fake_gpt));
-    fake_gpt.count = 2;
-    fake_gpt.partitions[0].dev = disk_dev;
-    fake_gpt.partitions[1].dev = disk_dev;
-    s_mock_gpt = &fake_gpt;
+    gpt_info_t *fake_gpt = kmalloc(sizeof(gpt_info_t));
+    assert_not_null(fake_gpt);
+    memset(fake_gpt, 0, sizeof(*fake_gpt));
+    fake_gpt->count = 2;
+    fake_gpt->partitions[0].dev = disk_dev;
+    fake_gpt->partitions[1].dev = disk_dev;
+    s_mock_gpt = fake_gpt;
     s_mock_ext2_init_ret = 0;
     s_mock_fat32_init_ret = 0;
 
@@ -625,7 +626,13 @@ static void test_root_requirement(void)
     /* Subtest D: GPT present but ext2_init fails -> panics with root filesystem unavailable */
     reset_test_state();
     assert_eq(0, block_device_register(&disk_desc, &disk_dev));
-    s_mock_gpt = &fake_gpt;
+    fake_gpt = kmalloc(sizeof(gpt_info_t));
+    assert_not_null(fake_gpt);
+    memset(fake_gpt, 0, sizeof(*fake_gpt));
+    fake_gpt->count = 2;
+    fake_gpt->partitions[0].dev = disk_dev;
+    fake_gpt->partitions[1].dev = disk_dev;
+    s_mock_gpt = fake_gpt;
     s_mock_ext2_init_ret = -EIO;
 
     s_panic_jmp_armed = true;
@@ -639,7 +646,13 @@ static void test_root_requirement(void)
     /* Subtest E: GPT present, ext2 succeeds, fat32 /boot fails -> fs_boot_mounts does not panic */
     reset_test_state();
     assert_eq(0, block_device_register(&disk_desc, &disk_dev));
-    s_mock_gpt = &fake_gpt;
+    fake_gpt = kmalloc(sizeof(gpt_info_t));
+    assert_not_null(fake_gpt);
+    memset(fake_gpt, 0, sizeof(*fake_gpt));
+    fake_gpt->count = 2;
+    fake_gpt->partitions[0].dev = disk_dev;
+    fake_gpt->partitions[1].dev = disk_dev;
+    s_mock_gpt = fake_gpt;
     s_mock_ext2_init_ret = 0;
     s_mock_fat32_init_ret = -EIO;
 

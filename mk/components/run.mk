@@ -149,6 +149,11 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	    --llvm-nm "$(AARCH64_NM)" \
 	    --llvm-objdump "$(AARCH64_OBJDUMP)" \
 	    --repo-root "$(OS01_ROOT)"
+	$(RUN_STATIC_AUDIT) stack-frame-audit -- \
+	  python3 qemutests/stack_frame_audit.py \
+	  --elf "$(BUILD_DIR)/artifacts/kernel.elf" \
+	  --llvm-objdump "$(AARCH64_OBJDUMP)" \
+	  --limit 512
 # Manual negative control (Fix round 1): the same pipeline run against the
 # x86 kernel.elf must hit symbols (proves the filter works):
 #   make PROFILE=x86_64-clang kernel.bin
@@ -700,7 +705,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1773,11 +1778,11 @@ test-header-object-audit:
 	  --clang "$(CLANG)"
 
 test-stack-frame-audit:
-	$(call require_capability,rootfs)
+	$(call require_capability,kernel)
 	$(RUN_STATIC_AUDIT) stack-frame-audit -- \
 	  python3 qemutests/stack_frame_audit.py \
-	  --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
-	  --llvm-objdump "$(LLVM_OBJDUMP)" \
+	  --elf "$(if $(wildcard $(BUILD_DIR)/artifacts/kernel.elf),$(BUILD_DIR)/artifacts/kernel.elf,$(KERNEL_BUILD_DIR)/kernel.elf)" \
+	  --llvm-objdump "$(or $(LLVM_OBJDUMP),$(AARCH64_OBJDUMP),llvm-objdump)" \
 	  --limit 512
 
 test-driver-model-boundary:
