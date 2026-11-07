@@ -138,5 +138,48 @@ SGI handler只设置标志，公共GIC dispatch写回完整raw IAR作一次EOI�
 idle在IRQ开启时消费ap_work，屏蔽IRQ并检查rq/READY；无工作时释放锁，
 保持IRQ屏蔽执行`dsb sy; wfi`，返回后才开启IRQ并重检。ap_work的READY发表后
 无条件kick，只依赖ipi_ready，避免scheduler_ok交接时省略通知。BSP仍独占
-全局timer和blocker scan；AP没有周期timer。默认线程留BSP，显式pinned线程
-可在AP运行；尚无IRQ返回抢占、迁移、EL0或用户MM。
+全局时间基准（jiffies/poll timeout/timer list/blocker scan）；AP不推进全局
+时间基准，但已录用AP拥有私有的100 Hz CNTP周期中断（见下节）。默认线程留BSP，
+显式pinned线程可在AP运行；尚无IRQ返回抢占、迁移、EL0或用户MM。
+
+## aarch64 每核调度 tick 记账
+
+每个已录用CPU（含BSP）拥有私有的CNTP周期中断，**名义频率100 Hz**。该中断只
+做三件事：取本核记账样本、把本核运行任务的vruntime推进1格、在BSP上请求一次
+协作式reschedule。它**不是**全局时间基准：jiffies、poll timeout、timer list
+（TIMER_SIRQ）与blocker scan仍由BSP独占。
+
+采样语义是**一计真实递送的CNTP中断 = 一个样本**，不做墙钟补算；丢掉的tick
+不会被事后补上。因此100 Hz是名义值，实际样本数以真实递送的中断数为准。
+
+记账入口是arch-neutral的`sched_account_tick()`：中断时若当前任务是该核的
+idle任务则计idle样本，否则计busy样本并给该任务累加一个runtime tick。
+`update_curr()`在aarch64上改由本核tick驱动（每tick +1 vruntime），公共
+`schedule()`不再重复计费——否则同一tick会被计两次，且vruntime会依赖yield
+频率而不是经过时间。
+
+CNTP配置在启动期**冻结**并由BSP一次性发表（`aarch64_timer_publish_config()`
+注册handler并发表配置，AP用acquire读并校验），AP随后只arm自己的计数器
+（`aarch64_timer_start_local()`）。契约：频率必须≥100 Hz，period=freq/100
+且落在`1..INT32_MAX`，PPI落在16..31，AP频率与BSP不一致必须失败；arm失败后
+清CTL的ENABLE位。
+
+中断路径保持EL1协作式：tick handler与IRQ返回路径都**不得**调用`schedule()`，
+只发布记账并（仅BSP）置`need_resched`。BSP每个有效tick（含idle tick）
+release-store `need_resched=1`，以便空runqueue也经由普通协作入口走到blocker
+扫描；AP的idle tick不无条件请求调度，只有本核繁忙任务越过deadline时才置位。
+
+锁序：usage lock（`sched_account_tick()`内部取用并释放）与rq lock**从不嵌套**，
+tick不取`task_list_lock`。
+
+验收面：`MODE=sched-tick`（`AARCH64_SCHED_TICK_TEST=1` → variant `sched-tick`）
+在每个已录用CPU上发布七个冻结case（tick-ready/tick-idle/tick-busy/
+tick-yield/tick-deadline/tick-global/tick-remote），runner
+`qemutests/aarch64_sched_tick.py` 按冻结字段与跨字段关系严格解析，1/2/4/8核
+各两次。证据在被描述的CPU上采集：idle窗口在目标自己的idle上下文测量，busy/
+yield/deadline/global窗口在目标核的pinned worker上测量，remote窗口让每个CPU
+都成为一次真实SGI4的目标。详见
+[验证报告](superpowers/reports/2026-11-06-aarch64-percpu-tick-accounting-validation.md)。
+
+仍为EL1协作式：**没有IRQ返回抢占**，没有迁移，没有EL0或用户MM。
+
