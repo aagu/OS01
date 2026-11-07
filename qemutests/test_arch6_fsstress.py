@@ -273,7 +273,7 @@ class MakeVariantTests(unittest.TestCase):
         for flag, wanted, absent in (
             (None, None, ("test_arch6_fsstress", "test_arch10_capacity")),
             ("ARCH6_FSSTRESS_TEST=1", "test_arch6_fsstress", ("test_arch10_capacity",)),
-            ("ARCH10_CAPACITY_TEST=1", "test_arch10_capacity", ("test_arch6_fsstress",)),
+            ("CAPACITY_TEST=1", "test_arch10_capacity", ("test_arch6_fsstress",)),
         ):
             with self.subTest(flag=flag):
                 args = ["make", "-s", "--eval", probe, "arch6-filter-check"]
@@ -287,7 +287,7 @@ class MakeVariantTests(unittest.TestCase):
     def test_conflicting_test_variants_rejected(self):
         root = Path(__file__).resolve().parents[1]
         for extra in ("TERM_PRESENT_TEST=1", "INITTAB_FILE=config/inittab.test",
-                      "KERNEL_SELFTEST=1", "ARCH10_CAPACITY_TEST=1"):
+                      "KERNEL_SELFTEST=1", "CAPACITY_TEST=1"):
             with self.subTest(extra=extra):
                 proc = subprocess.run(
                     ["make", "-s", "ARCH6_FSSTRESS_TEST=1", extra, "print-run-paths"],
