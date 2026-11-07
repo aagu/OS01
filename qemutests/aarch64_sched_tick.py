@@ -567,9 +567,9 @@ def audit_artifacts(llvm_nm, build_dir, profile, image, firmware, elf):
             if image_dir != build / "image" / variant:
                 errors.append(f"{image_path}: the image must live in "
                               f"<build>/image/{variant}/")
-            if firmware_dir != image_dir:
+            if firmware_dir != image_dir and firmware_dir != build / "firmware":
                 errors.append(f"{firmware_path}: the firmware must live "
-                              "beside the image")
+                              "under firmware/ or beside the image")
     records.append({"elf": str(elf_path), "variant": variant,
                     "profile": profile, "machine": machine,
                     "symbols": sorted(set(TICK_SYMBOLS) & names),

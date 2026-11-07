@@ -266,6 +266,14 @@ class ArtifactAuditTests(unittest.TestCase):
         self.assertTrue(ok, errors)
         self.assertEqual(errors, [], records)
 
+    def test_valid_artifacts_unified_firmware_pass(self):
+        unified_firmware = self.build / "firmware" / "QEMU_EFI.fd"
+        unified_firmware.parent.mkdir(parents=True, exist_ok=True)
+        unified_firmware.write_bytes(b"firmware")
+        ok, errors, records = self._audit(firmware=str(unified_firmware))
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [], records)
+
     def test_not_an_aarch64_elf_rejected(self):
         self.elf.write_bytes(_elf_bytes(machine=62))     # EM_X86_64
         ok, errors, _ = self._audit()
