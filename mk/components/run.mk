@@ -132,10 +132,24 @@ AARCH64_NM     ?= llvm-nm
 # the aarch64 ELF, so it gets its own overridable host tool here.  No
 # x86 toolchain include is pulled into the aarch64 path.
 AARCH64_OBJDUMP ?= llvm-objdump
+AARCH64_READELF ?= llvm-readelf
 .PHONY: test-aarch64-audit
 test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
+	@echo "  [audit] aarch64 kernel.elf: entry symbol contract"
+	@if ! command -v $(AARCH64_READELF) >/dev/null 2>&1; then \
+	    echo "AUDIT GATE FAIL: $(AARCH64_READELF) tool not found" >&2; exit 1; \
+	fi
+	@syms="$$($(AARCH64_READELF) -Ws $(BUILD_DIR)/artifacts/kernel.elf)" || { \
+	    echo "AUDIT GATE FAIL: $(AARCH64_READELF) exited with failure on $(BUILD_DIR)/artifacts/kernel.elf" >&2; exit 1; \
+	}; \
+	if ! echo "$$syms" | grep -qE 'FUNC[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+kernel_main[[:space:]]*$$'; then \
+	    echo "AUDIT GATE FAIL: kernel_main must be defined as GLOBAL FUNC symbol" >&2; exit 1; \
+	fi; \
+	if echo "$$syms" | grep -qE '[[:space:]]+aarch64_main[[:space:]]*$$'; then \
+	    echo "AUDIT GATE FAIL: obsolete symbol aarch64_main found in ELF" >&2; exit 1; \
+	fi
 	@echo "  [audit] aarch64 kernel.elf: no vma_*/uaccess_*/fork_* or sched-split x86-subsystem T/t symbols"
 	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_|spawn_user_task|files_(alloc|dup|unpin)|vfs_lookup|vmm_free_user_map|do_fork)')"; \
 	  if [ -n "$$bad" ]; then \
@@ -714,7 +728,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"

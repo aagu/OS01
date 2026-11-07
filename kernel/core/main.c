@@ -4,32 +4,27 @@
 #include <log/log.h>
 #include <memory/memory.h>
 #include <arch/cpu.h>         // arch_cycle_counter, arch_cpu_halt
-#include <sched/task.h>       // task_init
-#include <sched/boot.h>       // sched_boot_creation_begin (Phase 2, Ruling P2-2)
-#include <driver/serial.h>    // write_serial
+#include <arch/boot.h>        // arch_* boot facade hooks and OS01_HAS_* feature gates
+#include <random/random.h>    // random_init
+
+#if OS01_HAS_VFS
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
 #include <bus/pci/pci_devfs.h> // pci_devfs_register_all
 #include <driver/usb_devfs.h> // usb_devfs_register_all
 #include <tty/boot.h>         // tty_boot_init
-#include <arch/x86_64/boot.h> // x86_64_boot_early/_memory/_subsystems/_device_nodes
-#include <arch/x86_64/smp_boot.h> // x86_64_boot_percpu / _aps
-#include <core/selftest.h>    // selftest_run_all
-#include <selftest/result.h>  // protocol-v1 coordinator (begin/run/end)
-#include <sync/futex.h>       // futex_init
-#include <tty/console.h>      // console_init
 #include <tty/pty.h>          // pty_init
-#include <random/random.h>    // random_init
-#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
-#include <arch/x86_64/intr_fault_probe.h>   // x86_intr_fault_probe_run
 #endif
 
-// ── Kernel symbols ─────────────────────────────────────────
+#if OS01_HAS_USERSPACE
+#include <sched/task.h>       // task_init
+#include <sched/boot.h>       // sched_boot_creation_begin (Phase 2, Ruling P2-2)
+#include <sync/futex.h>       // futex_init
+#include <tty/console.h>      // console_init
+#endif
 
-extern char _text;
-extern char _etext;
-extern char _edata;
-extern char _erodata;
-extern char _end;
+#if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI))
+#include <arch/x86_64/intr_fault_probe.h>   // x86_intr_fault_probe_run
+#endif
 
 // ── Stack canary (single source: kernel/core/stack_chk.c) ──
 // kernel_main() replaces __stack_chk_guard with arch_cycle_counter() as
@@ -37,7 +32,7 @@ extern char _end;
 // __stack_chk_fail itself lives in stack_chk.c per AAGU-4 spec §2.1.
 extern unsigned long __stack_chk_guard;
 
-#ifdef OS01_CANARY_SELFTEST
+#if defined(__x86_64__) && defined(OS01_CANARY_SELFTEST)
 __attribute__((noinline))
 static void kernel_canary_selftest_trip(void)
 {
@@ -54,13 +49,13 @@ static void kernel_canary_selftest_trip(void)
 //  Init phases (ordered by dependency):
 //    1. CPU + interrupt infrastructure
 //    2. Memory subsystem (PMM, VMM)
-//    3. Interrupt controllers (APIC → IOAPIC → PIC)
-//    4. Timers (PIT 100 Hz, LAPIC timer calibrated)
-//    5. Device IRQ registration (keyboard, serial)
-//    6. Storage + filesystem (AHCI, VFS, FAT, devfs)
-//    7. Console TTY (connects IRQ input to shell stdin)
+//    3. Interrupt controllers
+//    4. Timers & per-CPU local structures
+//    5. Device IRQ registration & subsystems
+//    6. Storage + filesystem (AHCI, VFS, FAT, devfs) [if OS01_HAS_VFS]
+//    7. Console TTY [if OS01_HAS_VFS]
 //    8. Per-CPU + SMP bringup
-//    9. Scheduler + user-space init (/init.elf)
+//    9. Scheduler + user-space init (/init.elf) [if OS01_HAS_USERSPACE]
 //
 __attribute__((no_stack_protector))
 int kernel_main(const struct boot_context *bootctx)
@@ -68,94 +63,45 @@ int kernel_main(const struct boot_context *bootctx)
     // ═══ 0. Stack canary — MUST be the first statement ════════
     __stack_chk_guard = arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE;
 
-#ifdef OS01_CANARY_SELFTEST
+#if defined(__x86_64__) && defined(OS01_CANARY_SELFTEST)
     kernel_canary_selftest_trip();
     __builtin_unreachable();
 #endif
 
-    // ═══ 0.5. Handoff sanity — symmetric with aarch64_main ═══
-    // init_serial() has not run yet, so report via write_serial directly.
+    // ═══ 0.5. Handoff sanity ══════════════════════════════════
     if (!boot_context_valid(bootctx)) {
-        const char *p = "\n*** Corrupt UEFI handoff ***\n";
-        for (; *p; p++) write_serial(*p);
-        while (1) arch_cpu_halt();
+        arch_early_panic("corrupt UEFI handoff");
     }
 
     // ═══ 1. CPU + interrupt infrastructure ═══════════════════
-    x86_64_boot_early(bootctx);
+    arch_early_init(bootctx);
 
     // ═══ 2. Memory subsystem ═════════════════════════════════
-    x86_64_boot_memory(bootctx);
+    arch_boot_memory(bootctx);
 
-    // ═══ 3-6. Subsystem framework ══════════════════════════════════
-    // arch_register_subsys() + subsys_init_all() dispatches:
-    //   Phase 3: interrupt controllers (apic, pic)
-    //   Phase 4: timers (timer, pit, lapic-timer)
-    //   Phase 5: device IRQs (keyboard, serial)
-    //   Phase 6: storage (ahci)
-    x86_64_boot_subsystems(bootctx);
+    // ═══ 2.5. Pre-subsystem selftest / fault probe ════════════
+    arch_pre_subsys_selftest(bootctx);
 
-    // ═══ 8a. BSP per-CPU registration (Task 6) ═════════════════
-    // x86_64_boot_percpu() owns MADT traversal, percpu_init(), BSP
-    // TSS/GS/online, and num_cpus publication; it runs BEFORE the
-    // filesystem phase so device/FS code sees a valid this_cpu().
-    // Audit summary: num_cpus has exactly one writer (boot.c), GS is
-    // installed before online=1, tlb_shootdown/ipi_broadcast only
-    // target online CPUs (APs are offline until x86_64_boot_aps()),
-    // and the slab lock is statically initialized.  See the Task 6
-    // report in .superpowers/sdd/ for the full audit.
-    x86_64_boot_percpu();
+    // ═══ 3. Subsystem framework / interrupt controller ═══════
+    arch_boot_subsystems(bootctx);
 
-    random_init(bootctx);               // seed the CSPRNG pool (BSP, once)
+    // ═══ 4. BSP per-CPU registration ══════════════════════════
+    arch_boot_percpu();
 
-#if defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI)
-    // ═══ Isolated destructive dispatch probe (Task 5, spec §9.3) ═══
-    // The dedicated `intr-x86-fault-bp` / `intr-x86-fault-nmi`
-    // variants compile this probe in; the normal build does not (the
-    // source is only added to the kernel source list when the
-    // probe-selection macro is present).
-    //
-    // Placement: AFTER x86_64_boot_percpu() — the IDT is installed
-    // (x86_64_boot_early), the serial port is up (x86_64_boot_early),
-    // the interrupt controllers are programmed (x86_64_boot_subsystems:
-    // MADT-described LINT inputs are configured for NMI delivery) and
-    // the BSP's per-CPU area plus num_cpus
-    // are published (x86_64_boot_percpu) — and BEFORE
-    // x86_64_boot_aps(), the FS/TTY bring-up, the network stack and
-    // the user-space init.  The probe halts the CPU, so nothing may
-    // follow it: at this point no AP is online (x86_64_boot_aps() has
-    // not run), no task and no thread exists, and the guest serial
-    // stream is a single-CPU ordered log the acceptance runner can
-    // judge unambiguously.
-    //
-    // random_init() runs first so the boot log carries the isolated
-    // variant marker ("CSPRNG: kernel build variant=intr-x86-fault-*")
-    // that proves the running kernel is the fault variant; the probe
-    // prints the same token itself.
+    // ═══ 5. Seed the CSPRNG pool ═════════════════════════════
+    random_init(bootctx);
+
+#if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI))
     x86_intr_fault_probe_run();
-    for (;;) arch_cpu_halt();           // the probe never returns
+    for (;;) arch_cpu_halt();
 #endif
 
-    // ── FS bring-up + x86 device node registration (Task 2 split) ──
-    // Order matters: devfs must exist before any devfs_register_*() call;
-    // PTY must exist before keyboard_set_tty() (later in tty_boot_init())
-    // can route input through the master fd; the x86 device nodes
-    // (keyboard/mouse/fb) are registered after PTY so pty_init has a
-    // clean view of devfs; the partition-mount + tmpfs + procfs come
-    // last so user-space can see /boot, /, /tmp, /proc by the time
-    // init.elf spawns.  TTY wiring and the /dev smoke probe are now
-    // owned by tty_boot_init() and fs_boot_probe_devfs() (Task 3).
+#if OS01_HAS_VFS
+    // ═══ 6. FS bring-up + device node registration ═══════════
     if (fs_boot_prepare() != 0)
         kpanic("fs_boot_prepare failed\n");
 
-    // ARCH-12: publish the PCI namespace now that devfs exists.  PCI
-    // devices were enumerated in subsys phase 6 (device-boot), which
-    // runs before this point.  A registration failure is NOT fatal —
-    // lspci is a diagnostic tool, not a boot-critical facility.
     pci_devfs_register_all();
-
-    // ARCH-14 Phase 4: publish the USB devfs namespace under /dev/usb/<bus>-<port>/
-    // for all enumerated USB devices. Failure is non-fatal (diagnostic facility).
     usb_devfs_register_all();
 
 #if defined(CAPACITY_TEST) && CAPACITY_TEST
@@ -166,72 +112,34 @@ int kernel_main(const struct boot_context *bootctx)
     if (pty_init() != 0)
         log_err("pty_init failed\n");
 
-    if (x86_64_boot_device_nodes() != 0)
-        kpanic("x86_64_boot_device_nodes failed\n");
+    if (arch_boot_device_nodes() != 0)
+        kpanic("arch_boot_device_nodes failed\n");
 
-    fs_boot_mounts();               // block-device devfs + GPT/FAT32/ext2 mounts + tmpfs/procfs
+    fs_boot_mounts();
 
-    // ═══ 7. Console TTY + /dev smoke probe (Task 3 split) ═════
-    // tty_boot_init() allocates the console TTY, wires serial/keyboard/
-    // dev_tty to it (preserving the if(console) scope verbatim), then
-    // registers /dev/tty and /dev/tty0.  fs_boot_probe_devfs() lists
-    // /dev and runs the /dev/null read/write smoke test.  The split
-    // mirrors the Task-2 partition between FS mount work and probe
-    // work; the brief forbids calling fs_boot_probe_devfs() from
-    // fs_boot_mounts().
+    // ═══ 7. Console TTY + /dev smoke probe ════════════════════
     if (tty_boot_init() != 0)
         log_err("tty_boot_init failed\n");
     fs_boot_probe_devfs();
+#endif /* OS01_HAS_VFS */
 
-    // ═══ 8. Per-CPU + SMP ═══════════════════════════════════
-    // x86_64_boot_percpu() owns MADT traversal, percpu_init(), BSP
-    // TSS/GS/online, and num_cpus publication.  x86_64_boot_aps()
-    // owns tick_start() → smp_boot_aps() → per-CPU subsystem
-    // dispatch.  Both helpers live in kernel/arch/x86_64/smp/boot.c;
-    // see <arch/x86_64/smp_boot.h> for the interface.
-    //
-    // Task 6 moved x86_64_boot_percpu() to just after
-    // x86_64_boot_subsystems() (before random_init) — see the audit
-    // note there.  x86_64_boot_aps() stays in place here.
-    x86_64_boot_aps();
+    // ═══ 8. Per-CPU + SMP ════════════════════════════════════
+    arch_boot_aps();
 
-#ifdef OS01_SELFTEST
-    serial_printk("[selftest] running built-in tests...\n");
-    /* Declare the complete protocol-v1 selection before START: the
-     * registered boot-time (early) cases plus the scheduled cases
-     * task_init() runs later.  selftest_run_all() executes the early
-     * subset; task_init() records the late cases and emits the single
-     * END via selftest_end_run(). */
-    selftest_begin_run(9);
-    selftest_run_all();
-    serial_printk("[selftest] done\n");
+    // ═══ 8.5. Post-SMP selftest & probes ══════════════════════
+    arch_post_smp_selftest();
+
+#if OS01_HAS_USERSPACE
+    // ═══ 9. Scheduler + user-space init ══════════════════════
+    sched_boot_creation_begin();
+    futex_init();
+    console_init();
+    task_init();
+#else
+    // ═══ Non-userspace architectures: enter kernel idle loop ══
+    arch_start_kernel_idle();
 #endif
 
-    // ═══ Open boot creation window (post-SMP, pre-scheduler) ═══
-    // Open the BSP boot creation window FIRST (spec §8.1 / Ruling
-    // P2-2): x86_64_boot_percpu() (above) has established percpu, the
-    // current task stack and the CPU0 runqueue, and BSP scheduler_ok is
-    // not yet published.  While the window is open, an unpinned
-    // boot-service kernel_thread/create_kthread whose placement finds
-    // no eligible CPU (none is scheduler_ok yet on UP) falls back to
-    // CPU0 and queues there; sched_boot_start() (from task_init) closes
-    // it permanently BEFORE publishing scheduler_ok.  Inside task_init()
-    // (kernel/arch/x86_64/cpu/sched_boot.c), spawn_user_task("/bin/init")
-    // runs FIRST so user init is always PID 1, followed immediately by
-    // sched_boot_probe_create() (under OS01_SELFTEST) and net_lwip_init()
-    // before sched_boot_start() closes the window.
-    sched_boot_creation_begin();
-
-    futex_init();                        // init futex hash buckets
-
-    // Initialize the software terminal cursor — called at the very end
-    // of kernel init so Pos.YPosition won't change after this point.
-    console_init();
-
-    // ═══ 9. Scheduler + user-space init ═════════════════════
-    task_init();                         // spawns /init.elf, enters idle loop
-
-    // unreachable
     while (1) arch_cpu_halt();
     return 0;
 }

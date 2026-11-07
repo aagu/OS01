@@ -214,6 +214,12 @@ $(error CAPACITY_TEST=1 is only supported on x86 targets; TARGET_TRIPLE='$(TARGE
 endif
 endif
 
+ifneq ($(filter 1,$(KERNEL_CANARY_SELFTEST)),)
+ifeq ($(filter x86_64%,$(TARGET_TRIPLE)),)
+$(error KERNEL_CANARY_SELFTEST=1 is only supported on x86 targets; TARGET_TRIPLE='$(TARGET_TRIPLE)')
+endif
+endif
+
 # ── Capability gate ────────────────────────────────────────────
 # $(call require_capability,<cap>) aborts during parse / recipe
 # expansion when the selected profile does not declare <cap>.

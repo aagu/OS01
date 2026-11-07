@@ -23,7 +23,7 @@ BASELINE_EXCEPTIONS: dict[str, int] = {
     # Early memory init (boot stack, pre-heap: scheme 5)
     "pmm_init": 1760,
     "pmm_arch_normalize": 536,
-    "aarch64_main": 1600,
+    "aarch64_early_arena_preflight": 1600,
 }
 
 

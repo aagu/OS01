@@ -43,6 +43,7 @@
 //   // per-CPU/AP boot
 
 #include <arch/x86_64/boot.h>
+#include <arch/boot.h>
 
 #include <core/bootinfo.h>         /* struct boot_context (graphics,
                                       firmware fields)                   */
@@ -191,3 +192,29 @@ int x86_64_boot_device_nodes(void)
 
     return 0;
 }
+
+// ── Boot Facade Strong Overrides ─────────────────────────────
+
+void arch_early_init(const struct boot_context *bootctx)
+{
+    x86_64_boot_early(bootctx);
+}
+
+void arch_boot_subsystems(const struct boot_context *bootctx)
+{
+    x86_64_boot_subsystems(bootctx);
+}
+
+int arch_boot_device_nodes(void)
+{
+    return x86_64_boot_device_nodes();
+}
+
+void arch_early_panic(const char *msg)
+{
+    (void)msg;
+    const char *p = "\n*** Corrupt UEFI handoff ***\n";
+    for (; *p; p++) write_serial(*p);
+    while (1) arch_cpu_halt();
+}
+
