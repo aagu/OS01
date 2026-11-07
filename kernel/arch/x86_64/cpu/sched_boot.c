@@ -225,6 +225,18 @@ void task_init(void)
 #endif
 
 #ifdef OS01_SELFTEST
+    // ── ARCH-6 block cache SMP coherence selftest ────────────
+    // After scheduler_ok=1: real two-CPU cache concurrency — same-sector
+    // atomicity, concurrent first miss, flush drain behind a held pin and
+    // the exhaustion wait.  May evict real boot-disk cache entries while
+    // its fake disk fills the pool (never calls the global reset hook).
+    {
+        extern int test_bcache_smp_coherence(void);
+        selftest_record_late("bcache_smp_coherence", test_bcache_smp_coherence());
+    }
+#endif
+
+#ifdef OS01_SELFTEST
     // ── pgrp signal selftest ─────────────────────────────────
     // After scheduler_ok=1 (kernel_thread + schedule() work).
     {

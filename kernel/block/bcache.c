@@ -781,6 +781,14 @@ void bcache_reset_for_test(void)
     spin_unlock_irqrestore(&g_bcache_lock, flags);
 }
 
+uint32_t bcache_debug_free_slots(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+    uint32_t n = (uint32_t)g_free_top;
+    spin_unlock_irqrestore(&g_bcache_lock, flags);
+    return n;
+}
+
 void bcache_debug_stats(struct block_device *dev, bcache_test_stats_t *out)
 {
     if (!out) return;

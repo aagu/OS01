@@ -55,6 +55,7 @@ void bcache_reset_for_test(void);
 
 // Per-device counters (metadata-lock protected).
 void bcache_debug_stats(struct block_device *dev, bcache_test_stats_t *out);
+uint32_t bcache_debug_free_slots(void);
 
 // Pin the given key (filling it via the normal read path first if needed)
 // and keep the pin held, to simulate an in-flight consumer.

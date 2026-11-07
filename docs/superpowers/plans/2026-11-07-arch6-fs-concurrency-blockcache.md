@@ -217,7 +217,7 @@ HOST_TEST 专用 reserve/complete 只构造没有外层读 API 调用栈的填�
 
 **Interfaces:** Consumes Task 4 调试接口和 `kernel_thread_on_cpu`。新增 late id `bcache_smp_coherence`：在 x86 OS01_SELFTEST 下 `selftest_register_late`；sched_boot 在 scheduler_ok=1 后执行 `test_bcache_smp_coherence()`，用 `selftest_record_late` 报结果，在 selftest_end_run 前完成。main 中 `selftest_begin_run(8)` 同步改为 9；不得用 early selftest_register(fn)。
 
-- [ ] **Step 1: 实现自测和 late 接线**。fake 盘 backend 至少 `(BCACHE_BUFS+32)*512` 字节，注册 bcachetest；父 idle harness 只发起 worker、观察/超时/yield，所有可能等待的 bcache 操作由 pid>0 的 pinned worker 执行；两个 CPU 均须 online/scheduler_ok，否则明确失败，不宣称覆盖。
+- [x] **Step 1: 实现自测和 late 接线**。fake 盘 backend 至少 `(BCACHE_BUFS+32)*512` 字节，注册 bcachetest；父 idle harness 只发起 worker、观察/超时/yield，所有可能等待的 bcache 操作由 pid>0 的 pinned worker 执行；两个 CPU 均须 online/scheduler_ok，否则明确失败，不宣称覆盖。
   - `same_sector_atomic`：先 seed PATTERN_A，再以原子握手保证读写双方在整个压力窗口均有进展；读到的完整 512B 只能是 A/B，不以仅启动了两线程作为重叠证据。
   - `same_sector_concurrent_miss`：fake read 回调停住首个未缓存 key 的填充，另一 CPU读同 key须进入 BUSY等待；释放后两方数据一致，后端 reads只增1、测试设备该 key唯一。
   - `adjacent_sector_isolation`：两个 CPU各写 LBA10/11，结束后完整校验最终模式。
@@ -225,8 +225,8 @@ HOST_TEST 专用 reserve/complete 只构造没有外层读 API 调用栈的填�
   - `exhaustion_waits`：worker pin满2048槽；另一worker读新key，父harness观察 waiters及等待任务状态，确认未完成后通知持pin worker释放一项；新请求完成后清理全部pin。fake盘填满时可正常逐出真实启动盘缓存，禁止调用全局 reset。
   - `flush_backend_visibility` / `no_leaks`：workers结束后由worker flush并直读fake数组；按测试设备 pinned=busy=waiters=0，静默 unregister 后 entries=0。不得把全局占用数与 fake盘项数比较。
   所有等待沿用 fd_refcount 的 jiffies预算与 IRQ恢复约定；超时先设 abort、释放测试pin/后端停顿、等待workers退出，再退役设备；未确认退出则不得清理仍在访问的数据或报告PASS。
-- [ ] **Step 2: 验证**。Run: `make KERNEL_SELFTEST=1 test-kernel-selftest`（不得 OS01_SYSTEST）；Expected: 协议含 SELECT/BEGIN/PASS bcache_smp_coherence，9个late case均记录、单一END，全套通过；保留阻塞→释放→完成证据。
-- [ ] **Step 3: Commit** `git commit -m "test(kernel): late SMP cache coherence and exhaustion selftest"`
+- [x] **Step 2: 验证**。Run: `make KERNEL_SELFTEST=1 test-kernel-selftest`（不得 OS01_SYSTEST）；Expected: 协议含 SELECT/BEGIN/PASS bcache_smp_coherence，9个late case均记录、单一END，全套通过；保留阻塞→释放→完成证据。
+- [x] **Step 3: Commit** `git commit -m "test(kernel): late SMP cache coherence and exhaustion selftest"`
 
 ### Task 8: 缓存阶段全量回归与正常交互盘冒烟
 
