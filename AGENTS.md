@@ -54,6 +54,7 @@ Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
 Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline + pick_eevdf + sched_balance SMP 负载均衡
 Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
+Facade:  双架构共用单一 kernel_main 入口（2026-11-07 闭环）→ arch/boot.h 强覆盖钩子 → arch/features.h 特性门（OS01_HAS_VFS / OS01_HAS_USERSPACE）→ aarch64_main 已删除
 Logo:    aarch64 only: aarch64_boot_fb_init() → frame_buffer_init() → boot_logo_show() → [fb] banner
 ```
 

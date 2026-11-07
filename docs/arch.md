@@ -4,7 +4,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 
 > **weak-default + strong-override**：每个 arch-neutral 头文件位于 `kernel/include/arch/<topic>.h`，作为派发 facade。弱默认实现在 `kernel/<subsys>/arch_*.c`（FATAL-halt / panic-on-call / silent no-op / identity），强覆盖实现在 `kernel/arch/<arch>/<topic>.c`（per-arch 真实现）。链接器按强覆盖优先解析。`SUBSYS_INITCALL()` + `.subsys_init` section 用于 driver 自注册。
 
-下面列出本模式涉及的所有 facade-override 对（截至 v25 arch-cleanup 系列完成）。
+下面列出本模式涉及的所有 facade-override 对（截至 v25 arch-cleanup 系列完成，2026-11-07 新增「启动编排 facade」一行）。
 
 ---
 
@@ -21,6 +21,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 | `memory/pmm.h` `pmm_init(boot_context*)` | `memory/pmm_arch.c`（弱默认 `pmm_arch_normalize`/`pmm_arch_zone_split`） | `arch/x86_64/memory/pmm_arch.c`（E820 + kernel-LMA/handoff/trampoline excludes + 2 MiB granule + sort/merge） | `arch/aarch64/memory/pmm_arch.c`（读 `aarch64_ram_map_get()`） | 物理内存 arch-neutral 入口；`MEMORY_RANGE[]` 中介；RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`） |
 | `arch/boot_memory.h` `arch_boot_direct_map_init/ready/ranges` | 无默认实现；每架构提供同名后端 | `arch/x86_64/memory/boot_direct_map.c`，checked `vmm_init()` + zone cutoff | `arch/aarch64/memory/boot_direct_map.c`，arena + strict TTBR1 + AP 验证 | 启动期共同契约；coverage 是映射 RAM，包含已占用页；动态 VMM 不在 M1 范围内 |
 | `log/log.h` `_log_*_impl` 宏 | `log/log.c` core（gate-wrapped） | `core/log.c` 走 `_log_writev` + vsnprintf + serial | `arch/aarch64/runtime/log_impl.c` 走 `kputs(fmt)` 忽略 variadic | 跨 arch 日志；aarch64 `-nostdlib` 无 vsnprintf |
+| `arch/boot.h` 启动编排钩子（`arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_subsystems` / `arch_boot_percpu` / `arch_boot_device_nodes` / `arch_boot_aps` / `arch_post_smp_selftest` / `arch_early_panic` + 无用户态专用 `arch_start_kernel_idle`） | 无弱默认 —— 缺实现即链接失败 | `arch/x86_64/{platform/boot.c,memory/boot.c,smp/boot.c}`（转调 `x86_64_boot_early/memory/subsystems/device_nodes/percpu/aps`） | `arch/aarch64/boot/main.c`（原 `aarch64_main()` 改写为同名 facade 实现） | 双架构共用单一 `kernel_main` 入口（2026-11-07 闭环）；配合 `arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 编译期特性门裁剪缺省阶段 |
 
 **共同模式**：多数 facade 满足「weak default 提供无操作/panic/FATAL/identity 默认行为，strong override 提供真实现，per-arch 通过头文件位于 `kernel/include/arch/<arch>/` 镜像」。链接器强覆盖优先解析同名符号。**没有运行时分派**：编译期决定。
 
@@ -109,15 +110,19 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 
 ## 距离单一 kernel_main 还差多远（v25 后）
 
+> **2026-11-07 更新：Spec C（统一 kernel_main）已闭环**，双架构共用单一 `kernel/core/main.c::kernel_main()` 入口，`aarch64_main` 已删除。剩余差距集中在用户态与抢占语义（M4 用户地址空间、EL0/SVC 异常、IRQ 返回抢占、统一 SMP），粗估仍为 4–8 周（一个人全职）。设计与实施记录见 [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md) / [plan](superpowers/plans/2026-11-07-unified-kernel-main.md)，闭环摘要见 `docs/changelog.md` 2026-11-07 条目。
+
 ~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
-1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。第二期已将当前安装的全部 48 条 x86 入口接入：异常 `0..14,16..20` 与 IRQ `0x20..0x37,0x38,0x40,0x41,0xff`；syscall `0x80` 及未安装 ISA 异常不在范围。gate 类型/DPL/IST 与返回语义保留，设备 ACK 和 timer/IPI EOI 仍归原业务，`0xff` 不 EOI 且不执行 `ret_from_intr` 工作。MADT type-4 按 processor UID/LINT/flags 配置 NMI，AP 在 GDT/IDT/TSS/TR 就绪后才启用路由。第二期证据见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)。EL0/SVC、aarch64 可恢复 abort/uaccess、用户页表/ASID/COW、aarch64 `smp.c` 的 context switch 拆分，以及统一 `kernel_main` 仍待实施。预计 2–4 周。
-2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`。预计 2–3 周。
-3. **Spec C — 统一 kernel_main**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。预计 2–4 周。
+1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。第二期已将当前安装的全部 48 条 x86 入口接入：异常 `0..14,16..20` 与 IRQ `0x20..0x37,0x38,0x40,0x41,0xff`；syscall `0x80` 及未安装 ISA 异常不在范围。gate 类型/DPL/IST 与返回语义保留，设备 ACK 和 timer/IPI EOI 仍归原业务，`0xff` 不 EOI 且不执行 `ret_from_intr` 工作。MADT type-4 按 processor UID/LINT/flags 配置 NMI，AP 在 GDT/IDT/TSS/TR 就绪后才启用路由。第二期证据见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)。**剩余**：EL0/SVC、aarch64 可恢复 abort/uaccess、用户页表/ASID/COW、aarch64 `smp.c` 的 context switch 拆分。预计 2–4 周。
+2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`（三者仓库内均尚未落地；当前只有跨架构钩子 `arch_boot_aps()` 与 per-arch 各自的启动实现）。预计 2–3 周。
+3. **Spec C — 统一 kernel_main（✅ 2026-11-07 闭环）**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。**实际落地为 `kernel/include/arch/boot.h` 的 9 个强覆盖启动钩子 + `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 编译期特性门**；x86_64 拆为 `x86_64_boot_early/memory/subsystems/device_nodes/percpu/aps`，aarch64 由原 `aarch64_main()` 改写为同名 facade 实现；入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。这些靠 arch 抽象层封装，统一接口、不统一实现。
 
 **v25 已统一**：页表层级名（PGD/PUD/PMD/PTE，bit-position 仍 per-arch）、bootinfo ABI（解析层仍 per-arch，但输出 v2 已 arch-neutral）、intr dispatch hook 化、driver 自注册 initcall、kernel_thread_entry arch-neutral、RTC 拆分（核心 arch-neutral + per-arch CMOS/PIE）。
+
+**2026-11-07 已统一**：启动入口 —— 单一 `kernel/core/main.c::kernel_main()` + `arch/boot.h` 强覆盖启动钩子 + `arch/features.h` 编译期特性门；`aarch64_main` 符号删除，入口唯一性由 readelf 符号审计门禁强制。
 
 ---
 

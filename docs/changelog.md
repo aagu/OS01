@@ -1,11 +1,43 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-06）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-07）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
 
 ## 2026-11-07
+
+- refactor(core,arch): **双架构统一 kernel_main 启动编排闭环 —— 单一全局入口 + 跨架构启动 facade**（设计 [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md)，实施 [plan](superpowers/plans/2026-11-07-unified-kernel-main.md)，commit `6cc48115` ~ `402cf7e6`）：
+
+  **做了什么**
+
+  - **编译期特性门（`kernel/include/arch/features.h`，新增）**：`OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 两个 0/1 特征宏，默认 x86_64 = 1/1、aarch64 = 0/0；取值非法（≠0/1）与非法组合（有用户态但无 VFS）由 `#error` 直接拒绝，构建侧可用 `-D` 安全覆盖。
+  - **跨架构启动 facade（`kernel/include/arch/boot.h`，新增）**：定义 9 个强覆盖钩子 —— `arch_early_panic` / `arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_subsystems` / `arch_boot_percpu` / `arch_boot_device_nodes` / `arch_boot_aps` / `arch_post_smp_selftest`，外加无用户态架构专用的 `arch_start_kernel_idle`；**不设 weak no-op 兜底 —— 缺实现即链接失败**。
+  - **单一入口（`kernel/core/main.c::kernel_main()`）**：x86_64 与 aarch64 共用同一编排序列 —— 栈 canary → handoff 校验 → `arch_early_init` → `arch_boot_memory` → `arch_pre_subsys_selftest` → `arch_boot_subsystems` → `arch_boot_percpu` → `random_init` →（`OS01_HAS_VFS`）FS / 设备节点 / TTY → `arch_boot_aps` → `arch_post_smp_selftest` →（`OS01_HAS_USERSPACE`）`task_init()`，否则转入 `arch_start_kernel_idle()`。`aarch64_main()` 彻底删除，`kernel/arch/aarch64/head.S` 不再声明 `.globl aarch64_main`。
+  - **x86_64 适配（`kernel/arch/x86_64/{platform/boot.c,memory/boot.c,smp/boot.c}`）**：原 `kernel_main` 内联的启动块拆为 `x86_64_boot_early` / `x86_64_boot_memory` / `x86_64_boot_subsystems` / `x86_64_boot_device_nodes` / `x86_64_boot_percpu` / `x86_64_boot_aps`，再由 facade 钩子转调；启动时序逐字保留（percpu 标记仍跟在 `/dev/null` 探测之后、AP 仍在 devfs smoke 之后拉起）。
+  - **aarch64 适配（`kernel/arch/aarch64/boot/main.c`）**：原 `aarch64_main()` 主体改写为同名 facade 实现，dtb → GIC → per-CPU → AP → 协作调度自测 → idle 的既有顺序保持；早期物理内存 arena 预检的 1536 B scratch 数组（实测栈帧 1568 B）隔离到 `aarch64_early_arena_preflight()`，使全部编排函数满足 512 B 栈帧门禁（该预检是唯一登记在案的例外，基线上限 1600）。
+  - **自测计数统一（`arch_selftest_expected_late()`）**：per-arch 头内定义 late 自测期望条数（x86_64 = 9；aarch64 = 9 / 13（sched-wake）/ 7（sched-ap、sched-tick）），两架构共用同一 harness 判定入口。
+  - **门禁**：新增 `qemutests/test_boot_facade_headers.py`（双架构 `-fsyntax-only` 探针 + 非法宏组合 `#error` 负向断言 + `arch_selftest_expected_late()` 生成 LLVM IR 的精确值断言）与 `qemutests/test_audit_symbol_contract.py`（readelf 符号契约：正常存在 / 缺失 / 仅 `UND` / 后缀错误 / 残留 `aarch64_main` / 工具缺失 / 工具非零退出码），并接入 `make test-harness` 与 `make PROFILE=aarch64-clang test-aarch64-audit`（新增可覆盖的 `AARCH64_READELF`，工具缺失即门禁失败）。
+  - **契约测试语义化（commit `6b923628`）**：`hosttests/cases/test_double_state_publish.c` 由字符串匹配改为分阶段语义断言，`qemutests/test_kernel_selftest_result.py` 与 `qemutests/test_stack_frame_audit.py` 同步适配新的 late 自测计数与栈帧例外。
+
+  **关键结论与架构决策**
+
+  - **入口唯一性由构建门禁保证**：不再依赖「代码里只有一个入口」的评审承诺，而是由 `test-aarch64-audit` 在 CI 内强制 `kernel_main` 为 `GLOBAL FUNC` 且产物中不存在 `aarch64_main`。
+  - **架构差异靠 facade + 特性门隔离，而非散落的 `#ifdef`**：无用户态架构不再维护一份独立的 `main`，而是走同一条 `kernel_main` 序列，在缺失阶段处由特性门裁剪。
+  - **本次只统一「入口与编排」，不统一用户态**：M4 用户地址空间、EL0/SVC 异常、IRQ 返回抢占与统一 SMP 启动仍未开始（见 `docs/roadmap.md` P2 剩余项）。
+
+  **验证**
+
+  - `make test-static` 全绿（含 stack-frame-audit / intr-dispatch-audit / kernel-layout / symbol 相关静态审计）。
+  - `make test-host`：host C 单元套件（182 项 PASS）与 `pmm_boot_reservation_test` / `test_kernel_selftest_result` / `test_user_build` / `test_cursor_icon` 全绿；`tools/tests/test_kernel_headers.py` 在受限沙箱内被 `rm` 回收 shim（mavis-trash）无法清理 `/tmp` 暂存目录打断，脱离 make 直跑 2/2 通过 —— 属沙箱环境限制，非代码回归。
+  - `make test-harness`（含新增 `test_boot_facade_headers` 与 `test_audit_symbol_contract` 两个模块）全绿。
+  - `make PROFILE=aarch64-clang aarch64-uefi-kernel` 独立编译链接成功；`make PROFILE=aarch64-clang test-aarch64-audit` 通过（`[audit] aarch64 kernel.elf: entry symbol contract` + intr-dispatch-audit + stack-frame-audit 全 PASS）；另用 `llvm-readelf -Ws` 双向核对：x86_64 与 aarch64 产物各仅一个 `GLOBAL FUNC kernel_main`，无 `aarch64_main` 残留。
+  - `make test-qemu SUITE=phase-0` 通过（`PASS: Kernel booted, boot markers verified, shell prompt appeared`）；`make OS01_SYSTEST=1 test-qemu SUITE=systest` 通过（`PASS: all 99 syscall tests passed`）—— 统一入口未改变 x86_64 启动时序与用户态行为。
+
+  **影响范围**
+
+  - 新增：`kernel/include/arch/features.h`、`kernel/include/arch/boot.h`、`kernel/include/arch/aarch64/boot.h`、`qemutests/test_boot_facade_headers.py`、`qemutests/test_audit_symbol_contract.py`。
+  - 修改：`kernel/core/main.c`、`kernel/arch/aarch64/boot/main.c`、`kernel/arch/aarch64/head.S`、`kernel/arch/x86_64/platform/boot.c`、`kernel/arch/x86_64/memory/boot.c`、`kernel/arch/x86_64/smp/boot.c`、`kernel/include/arch/x86_64/boot.h`、`mk/components/run.mk`、`hosttests/cases/test_double_state_publish.c`、`qemutests/test_kernel_selftest_result.py`、`qemutests/test_stack_frame_audit.py`。
 
 - feat(fs,block): **ARCH-6 FS 并发与块缓存全栈闭环**（设计 [spec](superpowers/specs/2026-11-07-arch6-fs-concurrency-blockcache-design.md)，实施 [plan](superpowers/plans/2026-11-07-arch6-fs-concurrency-blockcache.md)，commit `5e233fe1` ~ `1b432f75`）：
 

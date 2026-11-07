@@ -1,14 +1,14 @@
 # OS01 优化路线图
 
-> **基准**: `925c3e07`（2026-11-06）；xHCI 主机控制器与 USB 核心栈 Phase 1–4、/dev/usb 多级节点与 /bin/lsusb、ARCH-10/11/12/14 闭环、aarch64 EL1/AP 调度器闭环
-> **日期**: 2026-11-06
+> **基准**: `9eefb967`（2026-11-07）；USB xHCI 主机控制器与 USB 核心栈 Phase 1–4、/dev/usb 多级节点与 /bin/lsusb、ARCH-10/11/12/14 闭环、ARCH-6 FS 并发与块缓存闭环、双架构统一 kernel_main 启动编排
+> **日期**: 2026-11-07
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`。
 
 ## 当前状态（一句话）
 
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统，PID 1 init 优雅关机闭环）
-- **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、**ARCH-5（VFS 抽象补强：fs 注册表/ops 分离/元数据/活跃节点回收/挂载树/dcache，2026-10-24 闭环）**、ARCH-7（移除 `#define mmap`）、ARCH-9（驱动模型/PCI/总线解耦）、**ARCH-10（静态容量与工程卫生，2026-11-02 闭环）**、**ARCH-11（devfs 子目录化：多级注册路径 + 目录树，2026-11-02 闭环）**、**ARCH-12（lspci PCI 设备列举命令：零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`，2026-11-02 闭环）**、**ARCH-14（USB xHCI 主机控制器与用户态 lsusb：Phase 1–4 全链路，2026-11-06 闭环）**、**ARCH-6（FS 并发与块缓存：调度器 per-mount mutex + blockdev 写回块缓存 + 四核 FS 压测，2026-11-07 闭环）** 均已闭环合入 master；剩余 ARCH-8 推进中
+- **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、**ARCH-5（VFS 抽象补强：fs 注册表/ops 分离/元数据/活跃节点回收/挂载树/dcache，2026-10-24 闭环）**、ARCH-7（移除 `#define mmap`）、ARCH-9（驱动模型/PCI/总线解耦）、**ARCH-10（静态容量与工程卫生，2026-11-02 闭环）**、**ARCH-11（devfs 子目录化：多级注册路径 + 目录树，2026-11-02 闭环）**、**ARCH-12（lspci PCI 设备列举命令：零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`，2026-11-02 闭环）**、**ARCH-14（USB xHCI 主机控制器与用户态 lsusb：Phase 1–4 全链路，2026-11-06 闭环）**、**ARCH-6（FS 并发与块缓存：调度器 per-mount mutex + blockdev 写回块缓存 + 四核 FS 压测，2026-11-07 闭环）** 均已闭环合入 master；**双架构统一 kernel_main（启动 facade 钩子 + 单一 `kernel_main` 入口，2026-11-07 闭环）**；剩余 ARCH-8（子系统框架补完）待启动
 - **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移、QEMU 分辨率切换与显示所有权协调器、LVGL v9.5.0 初步移植与图形 showcase、**GUI-1 LVGL 平台后端（libgui）**、**GUI-2 输入与焦点**、**GUI-3 Material 风格桌面**、**GUI-2b 原生控件体系与统一焦点引擎（彻底废除桌面临时自建焦点，`gui_widget.h` / `gui_layout.h` / `gui_event.h` / `gui_focus.h`，2026-10-26 闭环）** 均已合入 master；后续推进 GUI-4 字体资源与 GUI-5/6 窗口服务器
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
 - **硬件适配**：**USB xHCI 主机控制器与 USB 核心栈 Phase 1–4 就绪**（PCI 探测、寄存器解析、命令/事件环、中断器0、Root Hub 端口复位、Slot 分配、地址配置、EP0 控制传输、配置描述符层次树解析、动态端点环、多端点配置、`/dev/usb` 属性切片节点与用户态 `/bin/lsusb` 工具全部闭环）；后续推进 USB HID 输入、USB 大容量存储 (BOT) 与真机启动验证。
@@ -54,16 +54,21 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 #### 架构统一推进链（迈向单一 kernel_main）
 
+本节已完成项：
+
+- **统一 kernel_main（2026-11-07 闭环，merge `402cf7e6`）**：双架构启动编排统一到单一 `kernel/core/main.c::kernel_main()`，`aarch64_main` 符号彻底消除。跨架构启动 facade `kernel/include/arch/boot.h`（`arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_subsystems` / `arch_boot_percpu` / `arch_boot_device_nodes` / `arch_boot_aps` / `arch_post_smp_selftest` / `arch_start_kernel_idle` 等强覆盖钩子，缺实现即链接失败）+ 编译期特性门 `kernel/include/arch/features.h`（`OS01_HAS_VFS` / `OS01_HAS_USERSPACE`）；aarch64 早期 arena 预检的大栈帧隔离到 `aarch64_early_arena_preflight()`，编排函数栈帧统一收敛到 512 字节门禁内；新增 `qemutests/test_boot_facade_headers.py` 与 `qemutests/test_audit_symbol_contract.py` 门禁（readelf 严格校验唯一 `kernel_main` 入口、拒绝 `aarch64_main` 残留）。设计 [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md)，实施 [plan](superpowers/plans/2026-11-07-unified-kernel-main.md)，闭环记录见 `docs/changelog.md` 2026-11-07 条目。
+
+剩余待统一项：
+
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 统一 kernel_main | 单 `kernel_main` 按固定顺序调 `arch_early_init()` / `arch_late_init()` / `scheduler_init()`；aarch64 必须先 dtb 才能用 DTB 信息；内存阶段须满足 M0→PMM→M1→M2/M3 的资源可用顺序。**Spec A 中断 dispatch / Spec B SMP+timer / Spec C kernel_main 单一入口** | M1–M3 的顺序契约 ✅；SMP ✅, arch_irq ✅, GIC ✅, Timer ✅, UEFI 链 ✅ | 长项 spec |
-| 中断/异常 dispatch 统一（剩余项） | 第一期（6 条入口）与第二期（x86 48 条入口）已完成。**剩余待统一**：EL0/SVC 异常、aarch64 可恢复 abort 与 uaccess 恢复路径、用户页表、ASID/COW、统一 SMP、统一 `kernel_main` | arch_irq ✅, head.S ✅, GIC ✅；M4 用户态路径仍未开始 | Linux do_IRQ |
-| SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现 | GIC ✅, 启动链 ✅ | opuntiaOS |
+| 中断/异常 dispatch 统一（剩余项） | 第一期（6 条入口）与第二期（x86 48 条入口）已完成。**剩余待统一**：EL0/SVC 异常、aarch64 可恢复 abort 与 uaccess 恢复路径、用户页表、ASID/COW、统一 SMP | arch_irq ✅, head.S ✅, GIC ✅；M4 用户态路径仍未开始 | Linux do_IRQ |
+| SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现。当前仅有跨架构钩子 `arch_boot_aps()`，尚无统一 AP 启动语义 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一（剩余项） | EL1 架构上下文门面（`arch/context.h`）与 aarch64 BSP 切换已闭环。**剩余待统一**：多核 SMP 调度切换、IRQ 返回抢占与用户态 EL0/sysret 切换 | EL1 调度 ✅；SMP 启动统一；M4 用户态 | Tilck |
-| CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份 | 独立 | Linux cpufeature |
-| GICv2 Phase 2 | SError/真机覆盖率；`aarch64_main` 接 GIC init；handler 表扩容（SGIs 0-15 + PPI 16-31 全注册）；dtb_gicd_base 解耦 | GICv2 Phase 1 ✅ | |
+| CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份（仓库内目前无此接口） | 独立 | Linux cpufeature |
+| GICv2 Phase 2 | SError/真机覆盖率；`aarch64_main` 接 GIC init → 已随统一 kernel_main 改为在 `kernel_main` 路径的 GIC init 阶段接入；handler 表扩容（SGIs 0-15 + PPI 16-31 全注册）；dtb_gicd_base 解耦 | GICv2 Phase 1 ✅ | |
 
-**距离单一 kernel_main 还差多远（粗估，一个人全职）**：~4–8 周。详见 `docs/arch.md` 末段 3 个 spec/plan 增量推进。
+**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：单一入口已达成；剩余差距集中在用户态与抢占语义 —— M4 用户地址空间与 EL0 异常路径、IRQ 返回抢占、统一 SMP 启动与多核上下文切换，约 4–8 周。详见 `docs/arch.md` 末段与统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
 
@@ -89,7 +94,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 问题 | 目标 / 完成条件 | 依赖 |
 |----|------|----------------|------|
-| ARCH-8 子系统框架补完 | phase 用魔数 3–6，Phase 1–2 / 7–9 仍硬编码于 `kernel_main`；同 phase 内顺序依赖链接顺序（需 link-order 审计兜底）；必需子系统失败只打印 `FAIL` 继续启动；固定表 `MAX_SUBSYS 64`/`MAX_SUBSYS_PERCPU 16`；框架自身用 `serial_printk` 违背日志规范 | 命名 phase 枚举并覆盖全部启动阶段；支持显式依赖（或 phase 内 order 字段）取代链接顺序；非 OPTIONAL 失败 `panic`；表改链接段驱动（容量随注册数）；日志改 `log_*` | 与“统一 kernel_main”协同 |
+| ARCH-8 子系统框架补完 | phase 用魔数 3–6（`SUBSYS_PHASE_3..6`），只覆盖中断控制器/定时器/设备 IRQ/存储四段；启动其余阶段（1/2/7/8/9）由 facade 钩子与 `kernel_main` 内的 `OS01_HAS_VFS` 段落分担，尚无覆盖全启动阶段的命名 phase 枚举；同 phase 内顺序依赖链接顺序（需 link-order 审计兜底）；必需子系统失败只打印 `FAIL` 继续启动；固定表 `MAX_SUBSYS 64`/`MAX_SUBSYS_PERCPU 16`；框架自身用 `serial_printk` 违背日志规范 | 命名 phase 枚举并覆盖全部启动阶段；支持显式依赖（或 phase 内 order 字段）取代链接顺序；非 OPTIONAL 失败 `panic`；表改链接段驱动（容量随注册数）；日志改 `log_*` | 统一 kernel_main ✅（2026-11-07），耦合已解除，可独立排期；**当前状态：尚未启动（仓库内 subsys 框架仍为 phase 魔数 + 固定表 + FAIL 继续启动）** |
 
 ### 🖥 P3 GUI
 
@@ -201,6 +206,7 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | `docs/architecture.md` | 启动链、内存布局、初始化序列（全局骨架图） |
 | `docs/boot/boot.md` | UEFI 引导 + `boot_context` v2 ABI + v25 E820 拆分 |
 | `docs/arch.md` | arch-neutral facade + per-arch 强覆盖模式（含 `arch/fb_write.h` 门面）+ v25 arch-cleanup 系列 7 子系统矩阵 |
+| `docs/superpowers/specs/2026-11-07-unified-kernel-main-design.md` + `docs/superpowers/plans/2026-11-07-unified-kernel-main.md` | 双架构统一 kernel_main 的设计与实施计划（2026-11-07 闭环：启动 facade 钩子 + 特性门 + 单一入口符号审计） |
 | `docs/arch/cross-boundary-symbols.md` | **跨边界符号/ABI 边界规范（AAGU-4）** —— builtin、UAPI、arch-value、libc 镜像 4 类规则 + 现状对照表 + 后续 issue 切分 |
 | `docs/arch/entropy-source-facade.md` | **arch-neutral entropy facade spec（AAGU-5.3 / .5）** —— STRONG/WEAK/NONE 三档质量标签 + 控制流决策 + 禁止条款 |
 | `docs/memory/memory.md` + `docs/memory/cow-mmap.md` | 物理/虚拟内存管理 + COW fork/mmap + v25 PMM arch-neutral + 页表层级统一 |

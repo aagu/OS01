@@ -39,13 +39,13 @@
 - Test: `python3 -m unittest qemutests.test_boot_facade_headers`
 - Test: `make test-harness`
 
-- [ ] **Step 1: 编写 Python 跨架构编译探针测试**
+- [x] **Step 1: 编写 Python 跨架构编译探针测试**
   在 `qemutests/test_boot_facade_headers.py` 中编写单元测试，使用真实 `clang` 探测：
   - `clang -target x86_64-none-elf -fsyntax-only` 编译包含 `arch/features.h` 与 `arch/boot.h` 的代码块，断言 `_Static_assert(OS01_HAS_VFS == 1)`、`_Static_assert(OS01_HAS_USERSPACE == 1)`、`_Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 8)`；
   - `clang -target aarch64-none-elf -fsyntax-only` 编译包含上述头的代码块，断言 `_Static_assert(OS01_HAS_VFS == 0)`、`_Static_assert(OS01_HAS_USERSPACE == 0)`，并在无宏、`AARCH64_AP_SCHED_TEST_AP=1`、`AARCH64_AP_SCHED_WAKE_TEST=1`、`AARCH64_SCHED_TICK_TEST=1` 宏下分别断言 `_Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 9/7/13/7)`；
   - 验证生成代码：通过 `clang -O2 -S -emit-llvm` 验证 `arch_selftest_expected_late()` 在双架构及各变体下精确生成 `ret i32 <N>`，附带负向断言（期望值不匹配时测试必须报错）；
   - 验证依赖非法报错：通过注入 `-DOS01_HAS_VFS=0 -DOS01_HAS_USERSPACE=1` 与 `-DOS01_HAS_VFS=2`，验证编译器精准触发 `#error` 失败，且不是因为宏重复定义告警。
-- [ ] **Step 2: 创建 `kernel/include/arch/features.h`**
+- [x] **Step 2: 创建 `kernel/include/arch/features.h`**
   实现 Spec §3 所述的特征宏（采用 `#ifndef ... #endif` 允许外部安全注入覆盖，同时默认值跨架构定义）：
   ```c
   #ifndef OS01_HAS_VFS
@@ -80,7 +80,7 @@
   #error "OS01_HAS_USERSPACE requires OS01_HAS_VFS"
   #endif
   ```
-- [ ] **Step 3: 创建并更新各架构的 `boot.h` 与通用的 `kernel/include/arch/boot.h`**
+- [x] **Step 3: 创建并更新各架构的 `boot.h` 与通用的 `kernel/include/arch/boot.h`**
   - 在 `kernel/include/arch/x86_64/boot.h` 中提供：
     ```c
     #ifndef ARCH_SELFTEST_EXPECTED_LATE
@@ -108,9 +108,9 @@
     }
     ```
   - 在 `kernel/include/arch/boot.h` 中包含 `<arch/features.h>` 与相应 per-arch 头，声明 Spec §6.1 规定的 8 个 Facade 函数（包含 `void arch_early_panic(const char *msg) __attribute__((noreturn));`）。
-- [ ] **Step 4: 将 `qemutests.test_boot_facade_headers` 加入 `TEST_HARNESS_MODULES`**
+- [x] **Step 4: 将 `qemutests.test_boot_facade_headers` 加入 `TEST_HARNESS_MODULES`**
   更新 `mk/components/run.mk`，执行 `make test-harness` 确认通过。
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git add kernel/include/arch/ qemutests/test_boot_facade_headers.py mk/components/run.mk && git commit -m "feat(arch): add feature gates, boot facade and selftest late helpers"`
 
 ---
@@ -124,9 +124,10 @@
 - Modify: `mk/project.mk`
 - Test: `make test-static`
 
-- [ ] **Step 1: 在 `mk/project.mk` 限制 `KERNEL_CANARY_SELFTEST` 仅限 x86_64**
+- [x] **Step 1: 在 `mk/project.mk` 限制 `KERNEL_CANARY_SELFTEST` 仅限 x86_64**
   添加约束：若 `KERNEL_CANARY_SELFTEST=1` 且 `TARGET_TRIPLE` 不以 `x86_64` 开头，显式 `$(error KERNEL_CANARY_SELFTEST=1 is only supported on x86 targets)`。
-- [ ] **Step 2: 在 x86_64 boot 模块中实现 Facade 函数**
+  > **落地偏差（2026-11-07 复核）**：约束未落在 `mk/project.mk`，而是在 C 侧以 `#if defined(__x86_64__) && defined(OS01_CANARY_SELFTEST)` 收敛（`kernel/core/main.c` 的 canary 自测段），效果等价且不引入额外构建分支。
+- [x] **Step 2: 在 x86_64 boot 模块中实现 Facade 函数**
   - `kernel/arch/x86_64/platform/boot.c`:
     - `arch_early_init`: 调用既有 `x86_64_boot_early()`
     - `arch_boot_subsystems`: 调用既有 `x86_64_boot_subsystems()`
@@ -148,9 +149,9 @@
       ```
   - `kernel/arch/x86_64/platform/boot.c`:
     - `arch_boot_device_nodes`: 调用 `x86_64_boot_device_nodes()`，返回其执行状态码
-- [ ] **Step 3: 运行 x86_64 静态检查**
+- [x] **Step 3: 运行 x86_64 静态检查**
   执行 `make test-static` 确保 x86 符号与函数原型一致。
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git add kernel/arch/x86_64/ mk/project.mk && git commit -m "feat(arch/x86_64): implement boot facade hooks and gate canary test"`
 
 ---
@@ -164,17 +165,17 @@
 - Modify: `qemutests/test_stack_frame_audit.py`
 - Test: `python3 -m unittest qemutests.test_stack_frame_audit`
 
-- [ ] **Step 1: 隔离 aarch64 1536 字节栈数组**
+- [x] **Step 1: 隔离 aarch64 1536 字节栈数组**
   在 `kernel/arch/aarch64/boot/main.c` 中，将原 `aarch64_main()` 内的 `scratch[MEMORY_RANGE_MAX]` 逻辑提取到独立的 `noinline` 辅助函数：
   ```c
   __attribute__((noinline))
   static void aarch64_early_arena_preflight(const struct boot_context *handoff)
   ```
-- [ ] **Step 2: 更新 `stack_frame_audit.py` 及测试基线例外**
+- [x] **Step 2: 更新 `stack_frame_audit.py` 及测试基线例外**
   - 在 `qemutests/stack_frame_audit.py:26`：将 `"aarch64_main": 1600` 替换为 `"aarch64_early_arena_preflight": 1600`。
   - 在 `qemutests/test_stack_frame_audit.py`：同步替换断言名称。
   - 运行 `python3 -m unittest qemutests.test_stack_frame_audit` 确保单元测试通过。
-- [ ] **Step 3: 在 `kernel/arch/aarch64/boot/main.c` 中实现 Facade 接口并移除 `aarch64_main()`**
+- [x] **Step 3: 在 `kernel/arch/aarch64/boot/main.c` 中实现 Facade 接口并移除 `aarch64_main()`**
   - `arch_early_init`: `pl011_init()`, `vbar_el1` 设置, `aarch64_ram_init(bootctx)`
   - `arch_boot_memory`: `aarch64_early_arena_preflight()`, `pmm_init()`, smoke/boot_map selftest, `arch_boot_direct_map_init()`, `arch_vmm_init()`, `aarch64_boot_fb_init()`, `aarch64_page_table_probe_prepare()`
   - `arch_pre_subsys_selftest`: 执行 `selftest_begin_run(arch_selftest_expected_late())` + `selftest_run_all()`，紧随其后运行 `AARCH64_SYNC_FAULT_TEST` 探针
@@ -185,10 +186,10 @@
   - `arch_boot_device_nodes`: 弱默认返回 0
   - `arch_early_panic`: 内部先调用 `pl011_init()`，输出 `UEFI-A64: corrupt handoff\n[smp] FATAL: invalid UEFI handoff\n`，`for (;;) arch_cpu_halt();`
   - `arch_start_kernel_idle`: 关中断, `aarch64_ap_sched_prepare()`, `arch_aarch64_prepare_bsp_handoff()`, `aarch64_bsp_stack_enter(...)`
-- [ ] **Step 4: 修改 aarch64 `head.S`**
+- [x] **Step 4: 修改 aarch64 `head.S`**
   - 删除 line 31: `.globl aarch64_main`
   - 修改 line 303: `ldr x30, =aarch64_main` -> `ldr x30, =kernel_main`
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   `git add kernel/arch/aarch64/ qemutests/stack_frame_audit.py qemutests/test_stack_frame_audit.py && git commit -m "feat(arch/aarch64): implement boot facade hooks, isolate stack frame and update head.S"`
 
 ---
@@ -201,19 +202,19 @@
 - Test: `make PROFILE=aarch64-clang aarch64-uefi-kernel`
 - Test: `make PROFILE=x86_64-clang kernel.bin`
 
-- [ ] **Step 1: 改造 `kernel/core/main.c`**
+- [x] **Step 1: 改造 `kernel/core/main.c`**
   - 引入 `<arch/boot.h>`
   - 将 `main.c` 中的阶段调用切换为 Facade 接口
   - 包裹 `OS01_HAS_VFS` 与 `OS01_HAS_USERSPACE` 分支
   - 保留 `void arch10_capacity_fixture_init(void);` 局部前向声明
   - 保留 `arch_early_panic("corrupt UEFI handoff")` 校验失败处理
   - 非用户态架构在末尾调用 `arch_start_kernel_idle()`
-- [ ] **Step 2: 改造 `kernel/Makefile`**
+- [x] **Step 2: 改造 `kernel/Makefile`**
   - 在 aarch64 的 `KERNEL_C_SOURCES` 列表中加入 `core/main.c`
-- [ ] **Step 3: 验证 aarch64 与 x86_64 内核编译链接**
+- [x] **Step 3: 验证 aarch64 与 x86_64 内核编译链接**
   - 执行 `make PROFILE=aarch64-clang aarch64-uefi-kernel`，检查编译成功（仅有预期的 `pmm_init` 与 `aarch64_early_arena_preflight` 栈帧警告，无任何其他 warning/error）
   - 执行 `make PROFILE=x86_64-clang kernel.bin`，检查编译无 error/warning
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git add kernel/core/main.c kernel/Makefile && git commit -m "refactor(core): unify boot orchestration in single kernel_main"`
 
 ---
@@ -226,19 +227,19 @@
 - Test: `make test-host`
 - Test: `make test-harness`
 
-- [ ] **Step 1: 重构 `hosttests/cases/test_double_state_publish.c`**
+- [x] **Step 1: 重构 `hosttests/cases/test_double_state_publish.c`**
   - 将全局扫描拆解为作用域断言：
     1. 扫描 `kernel/core/main.c::kernel_main()` 确认 `arch_boot_percpu()` 在 `arch_boot_aps()` 之前调用；
     2. 扫描 `arch_boot_percpu()` 确认 `percpu_init` -> `online=1` -> `num_cpus` -> `smp_starting_enter()`；
     3. 扫描 `arch_boot_aps()` 确认 `smp_boot_aps()` -> `arch_local_irq_enable()` -> `ipi_ready_publish_and_count(0)`；
   - 包含负向测试：函数定义位置交换依然 PASS，实际调用位置交换 FAIL。
-- [ ] **Step 2: 重构 `qemutests/test_kernel_selftest_result.py`**
+- [x] **Step 2: 重构 `qemutests/test_kernel_selftest_result.py`**
   - 扫描 `kernel/core/main.c::kernel_main()` 确认 `arch_pre_subsys_selftest()` 的存在与调用时序；
   - 扫描 `arch_pre_subsys_selftest()` 确认 `selftest_begin_run` 与 `selftest_run_all` 的顺序。
-- [ ] **Step 3: 运行宿主与框架测试**
+- [x] **Step 3: 运行宿主与框架测试**
   - 执行 `make test-host` 确认通过
   - 执行 `make test-harness` 确认通过（消除了对旧字面量匹配的脆弱依赖）
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git add hosttests/cases/test_double_state_publish.c qemutests/test_kernel_selftest_result.py && git commit -m "test(contract): refactor boot sequence assertions to semantic scoped checks"`
 
 ---
@@ -251,7 +252,7 @@
 - Test: `make test-harness`
 - Test: `make PROFILE=aarch64-clang test-aarch64-audit`
 
-- [ ] **Step 1: 编写 `test_audit_symbol_contract.py` 覆盖三态场景**
+- [x] **Step 1: 编写 `test_audit_symbol_contract.py` 覆盖三态场景**
   在 `qemutests/test_audit_symbol_contract.py` 中编写单元测试，使用模拟 readelf 输出测试审计逻辑：
   - 正常 `FUNC GLOBAL DEFAULT 2 kernel_main$`：PASS
   - 缺失 `kernel_main`：FAIL
@@ -260,14 +261,14 @@
   - 残留 `aarch64_main`：FAIL
   - 工具返回非零退出码（即使产生文本）：FAIL
   - 工具缺失：FAIL
-- [ ] **Step 2: 更新 `mk/components/run.mk`**
+- [x] **Step 2: 更新 `mk/components/run.mk`**
   - 定义 `AARCH64_READELF ?= llvm-readelf`
   - 在 `test-aarch64-audit` 中捕获 `syms` 变量并检查退出码，收紧正则为 `[[:space:]]+kernel_main[[:space:]]*$$`
   - 将 `qemutests.test_audit_symbol_contract` 追加到 `TEST_HARNESS_MODULES`
-- [ ] **Step 3: 运行 `make test-harness` 与 aarch64 审计**
+- [x] **Step 3: 运行 `make test-harness` 与 aarch64 审计**
   - `make test-harness` 全绿
   - `make PROFILE=aarch64-clang test-aarch64-audit` 通过
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   `git add mk/components/run.mk qemutests/test_audit_symbol_contract.py && git commit -m "test(audit): add rigorous symbol audit for aarch64 kernel_main"`
 
 ---
@@ -300,3 +301,29 @@
   - `make PROFILE=aarch64-clang test-aarch64 MODE=gic-spi`
   - `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe`
 - [ ] **Step 4: 检查 `git status` 与 `git diff` 确认工作区完全干净**
+
+---
+
+## 验证状态（2026-11-07 复核，roadmap/changelog 对账时补记）
+
+> 本节记录「统一 kernel_main」闭环在 2026-11-07 的复核结果，Task 1–6 的 26 个实施步骤已按实际提交逐条勾选（对应 commit `b87f4f23` / `bd48cd43` / `477e6c21` / `a92ab503` / `6b923628` / `19f10543`，合并为 `402cf7e6`）。Task 7 的勾选状态按**实际重跑过的命令**记录，未重跑者保持未勾选。
+
+**已重跑并通过**
+
+| 命令 | 结果 |
+|------|------|
+| `make test-static` | 全绿（runtime/layout/canary/link-order/intr-dispatch/stack-frame 等 13 项静态审计） |
+| `make test-host` | host C 单元套件 182 项 PASS；`pmm_boot_reservation_test` / `test_kernel_selftest_result` / `test_user_build` / `test_cursor_icon` 通过。`tools/tests/test_kernel_headers.py` 在受限沙箱内被 `rm` 回收 shim（mavis-trash）无法清理 `/tmp` 暂存目录打断，脱离 make 直跑 2/2 通过 —— 属沙箱环境限制，非代码回归 |
+| `make test-harness` | `[framework] ALL MODULES PASSED`（含新增 `test_boot_facade_headers`、`test_audit_symbol_contract`） |
+| `make PROFILE=aarch64-clang aarch64-uefi-kernel` | 编译链接成功 |
+| `make PROFILE=aarch64-clang test-aarch64-audit` | 通过：`[audit] aarch64 kernel.elf: entry symbol contract` + intr-dispatch-audit + stack-frame-audit 全 PASS |
+| `make test-qemu SUITE=phase-0` | `PASS: Kernel booted, boot markers verified, shell prompt appeared` |
+| `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `PASS: all 99 syscall tests passed` |
+| 入口符号核对 | `llvm-readelf -Ws` 双向确认：x86_64 与 aarch64 产物各仅一个 `GLOBAL FUNC kernel_main`，无 `aarch64_main` 残留 |
+
+**本次未重跑（保持未勾选，需在完整验收窗口补跑）**
+
+- `make KERNEL_SELFTEST=1 test-kernel-selftest`
+- `make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity`
+- aarch64 QEMU 各 MODE（`smp` / `boot-logo` / `sched` / `sched-ap` / `sched-wake` / `sched-tick` / `no-ack` / `sync-fault` / `gic-spi` / `m3-probe`）
+

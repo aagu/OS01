@@ -156,9 +156,11 @@ AP init also has per-CPU subsystem init via `subsys_init_percpu()` (last step of
 
 Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_TARGET` (serial/fb/both), `NDEBUG` eliminates debug. `log_err`/`log_warn`/`log_info`/`log_debug` macros + `debug_<channel>()` macros (`sched`, `tty`, `vfs`, `mm`, `irq`, `syscall`, `task`, `ipi`, `block`, `fs`).
 
-## Init sequence (`kernel_main()`)
+## Init sequence (`kernel_main()` — 跨架构统一入口)
 
-`kernel_main()` is a thin orchestrator. Each phase below is a single helper call (or short block) — see `kernel/arch/x86_64/boot.h` and `kernel/arch/x86_64/smp_boot.h` for the helper contracts.
+`kernel_main()`（`kernel/core/main.c`）是 **x86_64 与 aarch64 共用的唯一全局入口**（2026-11-07 闭环；原 aarch64 `aarch64_main()` 已删除，入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制）。它是 thin orchestrator：架构相关阶段一律走 `kernel/include/arch/boot.h` 的强覆盖钩子（`arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_subsystems` / `arch_boot_percpu` / `arch_boot_device_nodes` / `arch_boot_aps` / `arch_post_smp_selftest`），缺用户态的架构由 `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 特性门裁掉 VFS / 用户态段落，转入 `arch_start_kernel_idle()`。
+
+下面列出 x86_64 侧的实际阶段展开（每阶段一个 helper 调用）—— helper 契约见 `kernel/arch/x86_64/boot.h` 与 `kernel/arch/x86_64/smp_boot.h`；aarch64 侧为同名 facade 实现（dtb → GIC → per-CPU → AP → 协作调度自测 → idle），见 `kernel/arch/aarch64/boot/main.c`。
 
 1. Stack canary seed (`arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE`).
 2. `x86_64_boot_early(bootctx)` — framebuffer Pos, IDT (`sys_vector_install` + `irq_install`), serial, EFER NXE.
