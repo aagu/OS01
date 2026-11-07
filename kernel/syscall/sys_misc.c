@@ -9,6 +9,7 @@
 #include <random/random.h>
 #include <uapi/time.h>
 #include <string.h>
+#include <block/blockdev.h>
 #include <log/log.h>
 
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
@@ -38,10 +39,23 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
         break;
     }
     case SYS_sync: {
-        // sync() — flush filesystem caches to disk
-        // For OS01 (FAT32 without write-back cache), this is a no-op.
-        // Future: flush AHCI/FAT buffers here.
-        syscall_result = 0;
+        // sync() — write back the ARCH-6 block cache for every disk.
+        // Partition devices carry no cache entries (physical-disk keys
+        // only), so enumerating BLOCK_DISK covers all dirty data.  One
+        // failing disk does not stop the others; the first error is
+        // reported after every disk got its chance.
+        int first_err = 0;
+        for (int i = 0; ; i++) {
+            block_device_t *d = block_device_get(i);
+            if (!d)
+                break;
+            if (d->kind != BLOCK_DISK)
+                continue;
+            int r = block_device_flush(d);
+            if (r != 0 && first_err == 0)
+                first_err = r;
+        }
+        syscall_result = first_err;
         break;
     }
     case SYS_reboot:

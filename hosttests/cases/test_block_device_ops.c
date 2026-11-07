@@ -7,6 +7,7 @@
  * here. */
 #include "test_framework.h"
 #include <block/blockdev.h>
+#include <block/bcache.h>
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
@@ -219,16 +220,23 @@ TEST_FUNC(test_readonly_and_bounds)
     assert_eq(0, fake_read_calls);
     assert_eq(0, fake_write_calls);
 
-    /* Valid read/write reaches driver */
+    /* Valid read reaches driver per-sector (ARCH-6 cache split) */
     assert_eq(0, block_device_read(dev, 10, 5, buffer));
-    assert_eq(1, fake_read_calls);
-    assert_eq(10, fake_last_lba);
-    assert_eq(5, fake_last_count);
+    assert_eq(5, fake_read_calls);
+    assert_eq(14, fake_last_lba);
+    assert_eq(1, fake_last_count);
+    /* Second identical read is served from the cache: no backend calls. */
+    assert_eq(0, block_device_read(dev, 10, 5, buffer));
+    assert_eq(5, fake_read_calls);
 
+    /* Write is write-back: nothing reaches the driver until a flush. */
     assert_eq(0, block_device_write(dev, 20, 2, buffer));
-    assert_eq(1, fake_write_calls);
-    assert_eq(20, fake_last_lba);
-    assert_eq(2, fake_last_count);
+    assert_eq(0, fake_write_calls);
+    assert_eq(0, block_device_flush(dev));
+    assert_eq(2, fake_write_calls);
+    /* Flush drains in slot order — either dirty sector may be written last. */
+    assert_true(fake_last_lba == 20 || fake_last_lba == 21);
+    assert_eq(1, fake_last_count);
 }
 
 /* ── Test 3: Registry failures ────────────────────────────────── */
@@ -312,10 +320,16 @@ static int partition_fake_write(block_device_t *dev, uint64_t lba, uint32_t coun
     return block_device_write(ctx->parent, ctx->offset_lba + lba, count, buf);
 }
 
+static int partition_fake_flush(block_device_t *dev)
+{
+    test_partition_ctx_t *ctx = (test_partition_ctx_t *)dev->private_data;
+    return block_device_flush(ctx->parent);
+}
+
 static const struct block_device_ops partition_test_ops = {
     .read = partition_fake_read,
     .write = partition_fake_write,
-    .flush = NULL,
+    .flush = partition_fake_flush,
 };
 
 TEST_FUNC(test_partition_parent_dispatch)
@@ -361,17 +375,22 @@ TEST_FUNC(test_partition_parent_dispatch)
 
     uint8_t buffer[4096] = {0};
 
-    /* Read from partition: lba 10, count 5 -> parent should see LBA 110, count 5 */
+    /* Read from partition: lba 10, count 5 -> per-sector calls at the
+       parent, LBAs 110..114, count 1 each (cached under the disk key). */
     assert_eq(0, block_device_read(part_dev, 10, 5, buffer));
-    assert_eq(1, fake_read_calls);
-    assert_eq((uint64_t)(100 + 10), fake_last_lba);
-    assert_eq(5, fake_last_count);
+    assert_eq(5, fake_read_calls);
+    assert_eq((uint64_t)(100 + 14), fake_last_lba);
+    assert_eq(1, fake_last_count);
 
-    /* Write to partition: lba 20, count 2 -> parent should see LBA 120, count 2 */
+    /* Write to partition: lba 20, count 2 -> write-back caches at the
+       parent disk key; a flush drains per-sector (LBA 120 and 121). */
     assert_eq(0, block_device_write(part_dev, 20, 2, buffer));
-    assert_eq(1, fake_write_calls);
-    assert_eq((uint64_t)(100 + 20), fake_last_lba);
-    assert_eq(2, fake_last_count);
+    assert_eq(0, fake_write_calls);
+    assert_eq(0, block_device_flush(part_dev));
+    assert_eq(2, fake_write_calls);
+    /* Slot-order drain: either dirty sector may land last. */
+    assert_true(fake_last_lba == 120 || fake_last_lba == 121);
+    assert_eq(1, fake_last_count);
 
     /* Out of bounds read on partition (length is 50, reading 45 + 10 = 55):
        Block layer catches it before calling partition_read, parent ops NOT called */
@@ -422,6 +441,8 @@ TEST_FUNC(test_dynamic_growth_stability)
     assert_eq(0xAB, buffer[0]);
 
     assert_eq(0, block_device_write(first, 7, 1, buffer));
+    assert_eq(0, fake_write_calls);            // write-back: resident dirty
+    assert_eq(0, block_device_flush(first));
     assert_eq(1, fake_write_calls);
     assert_eq(7, fake_last_lba);
     assert_eq(1, fake_last_count);

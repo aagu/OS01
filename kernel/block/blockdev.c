@@ -255,6 +255,21 @@ int block_device_read(block_device_t *dev, uint64_t lba,
     if (!dev->ops || !dev->ops->read)
         return -EINVAL;
 
+    // ARCH-6: physical disks go through the sector cache; partitions
+    // forward through their ops to the parent's wrapper (which caches
+    // under the disk key), so physical blocks have exactly one key.
+    if (dev->parent == NULL) {
+        uint8_t *out = buffer;
+        for (uint32_t i = 0; i < count; i++) {
+            int ret = bcache_read_sector(dev, lba + i, out + (size_t)i * BCACHE_SECTOR);
+            if (ret != 0) {
+                dev->last_error = ret;     // first error wins; done sectors stay
+                return ret;
+            }
+        }
+        return 0;
+    }
+
     int ret = dev->ops->read(dev, lba, count, buffer);
     if (ret != 0)
         dev->last_error = ret;
@@ -290,6 +305,19 @@ int block_device_write(block_device_t *dev, uint64_t lba,
         return -EINVAL;
     }
 
+    // ARCH-6: same physical-disk-only rule as the read path above.
+    if (dev->parent == NULL) {
+        const uint8_t *in = buffer;
+        for (uint32_t i = 0; i < count; i++) {
+            int ret = bcache_write_sector(dev, lba + i, in + (size_t)i * BCACHE_SECTOR);
+            if (ret != 0) {
+                dev->last_error = ret;
+                return ret;
+            }
+        }
+        return 0;
+    }
+
     int ret = dev->ops->write(dev, lba, count, buffer);
     if (ret != 0)
         dev->last_error = ret;
@@ -301,6 +329,16 @@ int block_device_flush(block_device_t *dev)
 {
     if (!dev || !dev->present)
         return -EINVAL;
+
+    // ARCH-6: software write-back first — the driver flush callback is
+    // optional but the dirty data must reach the backend regardless.
+    if (dev->parent == NULL) {
+        int cret = bcache_flush_device(dev);
+        if (cret != 0) {
+            dev->last_error = cret;
+            return cret;
+        }
+    }
 
     if (!dev->ops || !dev->ops->flush)
         return 0;

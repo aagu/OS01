@@ -363,8 +363,7 @@ int bcache_read_sector(struct block_device *dev, uint64_t lba, void *buf)
         }
         if (b && (b->flags & BC_VALID)) {
             spin_unlock_irqrestore(&g_bcache_lock, flags);
-            bcache_pin_copy_out(b, buf);
-            bcache_unpin(b);
+            bcache_pin_copy_out(b, buf);   // pins, copies, unpins
             return 0;
         }
 
@@ -390,17 +389,228 @@ int bcache_read_sector(struct block_device *dev, uint64_t lba, void *buf)
     }
 }
 
-// ── Task 5 / Task 6 scope (stubs for this task) ───────────────────────
-int bcache_write_sector(struct block_device *dev, uint64_t lba, const void *buf)
+// ── Wait helpers for the write/flush paths ────────────────────────────
+
+// Reserve the key BUSY (no pin of our own) for exclusive maintenance.
+// Returns the buffer with BUSY held (entry stable: BUSY blocks eviction
+// and new pins), or NULL when the key vanished.  When the recheck finds
+// the key free, BUSY is taken in that same critical section.
+static bcache_buf_t *bcache_reserve_key_busy(struct block_device *dev, uint64_t lba)
 {
-    (void)dev; (void)lba; (void)buf;
-    return -ENOSYS;
+    uint64_t irq = arch_local_irq_save();
+    for (;;) {
+        bcache_buf_t *b;
+        uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+        b = bcache_hash_lookup(dev, lba);
+        if (!b) {
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            arch_local_irq_restore(irq);
+            return NULL;
+        }
+        if (!(b->flags & BC_BUSY)) {
+            b->flags |= BC_BUSY;               // reserve in this lock
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            arch_local_irq_restore(irq);
+            return b;
+        }
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        bcache_waiter_add(dev);
+        wait_queue_arm(&g_bcache_wq);
+
+        flags = spin_lock_irqsave(&g_bcache_lock);
+        b = bcache_hash_lookup(dev, lba);
+        int gone = (b == NULL);
+        int free_ = (b && !(b->flags & BC_BUSY));
+        if (free_)
+            b->flags |= BC_BUSY;
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        if (gone || free_) {
+            wait_queue_disarm();
+            bcache_waiter_sub(dev);
+            arch_local_irq_restore(irq);
+            return free_ ? b : NULL;
+        }
+        schedule();
+        wait_queue_disarm();
+        bcache_waiter_sub(dev);
+        // loop: full recheck
+    }
 }
 
+// Wait for the in-flight pins on our BUSY-reserved buffer to drain.  The
+// buffer is stable while BUSY is held.  An already-zero pin count (or one
+// observed on the post-ARM recheck) proceeds without scheduling.
+static void bcache_wait_buf_pins_released(bcache_buf_t *b)
+{
+    uint64_t irq = arch_local_irq_save();
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+        int drained = (b->refcnt == 0);
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        if (drained) {
+            arch_local_irq_restore(irq);
+            return;
+        }
+        bcache_waiter_add(b->dev);
+        wait_queue_arm(&g_bcache_wq);
+
+        flags = spin_lock_irqsave(&g_bcache_lock);
+        drained = (b->refcnt == 0);
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        if (drained) {
+            wait_queue_disarm();
+            bcache_waiter_sub(b->dev);
+            arch_local_irq_restore(irq);
+            return;
+        }
+        schedule();
+        wait_queue_disarm();
+        bcache_waiter_sub(b->dev);
+    }
+}
+
+// ── Write path ────────────────────────────────────────────────────────
+int bcache_write_sector(struct block_device *dev, uint64_t lba, const void *buf)
+{
+    if (!g_bcache_ready)
+        return -ENOMEM;
+    if (!dev || !dev->present || !buf)
+        return -EINVAL;
+    if (dev->sector_size != BCACHE_SECTOR)
+        return -EINVAL;
+
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+        bcache_buf_t *b = bcache_hash_lookup(dev, lba);
+        if (b && (b->flags & BC_BUSY)) {
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            // Wait for exclusive access, then mutate the pinned buffer.
+            b = bcache_reserve_key_busy(dev, lba);
+            if (!b)
+                continue;                  // key vanished: retry
+            uint64_t dflags = spin_lock_irqsave(&b->data_lock);
+            memcpy(b->data, buf, BCACHE_SECTOR);
+            spin_unlock_irqrestore(&b->data_lock, dflags);
+            flags = spin_lock_irqsave(&g_bcache_lock);
+            b->flags |= BC_VALID | BC_DIRTY;   // bitwise: keep any new BUSY
+            b->flags &= ~BC_BUSY;
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            wait_queue_wake_all(&g_bcache_wq);
+            return 0;
+        }
+        if (b) {
+            // Valid hit: pin, copy under data_lock, commit flags.
+            b->refcnt++;
+            bcache_lru_remove(b);
+            bcache_lru_push_front(b);
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+
+            uint64_t dflags = spin_lock_irqsave(&b->data_lock);
+            memcpy(b->data, buf, BCACHE_SECTOR);
+            spin_unlock_irqrestore(&b->data_lock, dflags);
+
+            flags = spin_lock_irqsave(&g_bcache_lock);
+            b->flags |= BC_VALID | BC_DIRTY;   // bitwise: keep any new BUSY
+            int last = (--b->refcnt == 0);
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            if (last)
+                wait_queue_wake_all(&g_bcache_wq);
+            return 0;
+        }
+
+        // Missing key: publish BUSY + pin, no fill read needed — a whole
+        // sector write overwrites the data.
+        b = bcache_publish_busy(dev, lba);
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        if (!b)
+            return -ENOMEM;                // Task 6: exhaustion waits instead
+
+        uint64_t dflags = spin_lock_irqsave(&b->data_lock);
+        memcpy(b->data, buf, BCACHE_SECTOR);
+        spin_unlock_irqrestore(&b->data_lock, dflags);
+
+        flags = spin_lock_irqsave(&g_bcache_lock);
+        b->flags = (b->flags & ~BC_BUSY) | BC_VALID | BC_DIRTY;
+        spin_unlock_irqrestore(&g_bcache_lock, flags);
+        wait_queue_wake_all(&g_bcache_wq);
+        bcache_unpin(b);
+        return 0;
+    }
+}
+
+// ── Flush (spec §5.5: DIRTY-key snapshot + per-key BUSY drain) ────────
 int bcache_flush_device(struct block_device *dev)
 {
-    (void)dev;
-    return -ENOSYS;
+    if (!g_bcache_ready)
+        return -ENOMEM;
+    if (!dev)
+        return -EINVAL;
+
+    // Target array outside any lock.  Flush entries are one-shot per call;
+    // a device can hold at most BCACHE_BUFS dirty keys.
+    uint64_t (*targets)[2] = kmalloc(sizeof(uint64_t) * 2 * BCACHE_BUFS);
+    if (!targets) {
+        debug_block("bcache: flush target allocation failed\n");
+        return -ENOMEM;
+    }
+
+    // Snapshot: the linearization boundary of this flush.  Pinned and
+    // BUSY keys are included — they are drained below.
+    uint32_t ntargets = 0;
+    uint64_t flags = spin_lock_irqsave(&g_bcache_lock);
+    for (int i = 0; i < BCACHE_BUFS; i++) {
+        bcache_buf_t *b = &g_bufs[i];
+        if (b->dev == dev && (b->flags & BC_DIRTY) && ntargets < BCACHE_BUFS) {
+            targets[ntargets][0] = (uint64_t)(uintptr_t)b->dev;
+            targets[ntargets][1] = b->lba;
+            ntargets++;
+        }
+    }
+    spin_unlock_irqrestore(&g_bcache_lock, flags);
+
+    int first_err = 0;
+    for (uint32_t t = 0; t < ntargets; t++) {
+        uint64_t lba = targets[t][1];
+        for (;;) {
+            // Reserve BUSY: blocks new pins, eviction, and concurrent
+            // flushes on this key.  A vanished or clean key means the
+            // writeback already succeeded elsewhere (evict / other flush).
+            bcache_buf_t *b = bcache_reserve_key_busy(dev, lba);
+            if (!b)
+                break;
+            uint64_t chk = spin_lock_irqsave(&g_bcache_lock);
+            int still_dirty = (b->flags & BC_DIRTY) != 0;
+            spin_unlock_irqrestore(&g_bcache_lock, chk);
+            if (!still_dirty) {
+                chk = spin_lock_irqsave(&g_bcache_lock);
+                b->flags &= ~BC_BUSY;
+                spin_unlock_irqrestore(&g_bcache_lock, chk);
+                wait_queue_wake_all(&g_bcache_wq);
+                break;
+            }
+
+            // Drain in-flight pins, then write back outside every lock.
+            bcache_wait_buf_pins_released(b);
+            int ret = dev->ops->write(dev, lba, 1, b->data);
+
+            chk = spin_lock_irqsave(&g_bcache_lock);
+            b->flags &= ~BC_BUSY;
+            if (ret == 0)
+                b->flags &= ~BC_DIRTY;     // only success clears DIRTY
+            spin_unlock_irqrestore(&g_bcache_lock, chk);
+            wait_queue_wake_all(&g_bcache_wq);
+
+            if (ret != 0) {
+                if (!first_err)
+                    first_err = ret;
+                break;                     // keep key/data/DIRTY on failure
+            }
+            break;
+        }
+    }
+
+    kfree(targets);
+    return first_err;
 }
 
 void bcache_drop_device(struct block_device *dev)
