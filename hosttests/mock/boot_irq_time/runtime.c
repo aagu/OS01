@@ -47,8 +47,7 @@ void lapic_eoi(void) {}
 unsigned long boot2_account_tick_calls;
 void sched_account_tick(void) { boot2_account_tick_calls++; }
 void sched_accounting_cpu_start(uint32_t cpu, uint32_t hz, bool ok)
-{ (void)cpu; (void)hz; (void)ok; }
-void lapic_timer_set_premeasured(uint64_t hz) { (void)hz; }
+{ (void)cpu; (void)hz; (void)ok; boot2_account_tick_calls++; }
 void serial_poll(void) {}
 int device_boot_result(void) { return 0; }
 /* Fatal boundary: recorded, never returns in a passing test. */
@@ -56,14 +55,22 @@ unsigned long boot2_kpanic_calls;
 /* glibc _exit — declared directly: <unistd.h> resolves to the OS01
  * libc shadow here, which clashes with the host types. */
 void _exit(int) __attribute__((noreturn));
+/* A test can arm a hook to catch the fatal (longjmp); default kills. */
+void (*boot2_kpanic_hook)(void);
 void kpanic(const char *msg, ...)
 {
     (void)msg;
     boot2_kpanic_calls++;
-    /* A BOOT-2 fatal is fatal: the forked test child records it as a
-     * failure instead of running off __builtin_unreachable. */
+    if (boot2_kpanic_hook)
+        boot2_kpanic_hook();
     _exit(86);
 }
+/* clocksource/gate/TSC machine boundaries for lapic_timer.c + time.c */
+uint64_t boot2_clocksource_freq;
+uint64_t clocksource_freq_hz(void) { return boot2_clocksource_freq; }
+uint64_t boot2_rdtscp_value;
+uint64_t rdtscp_serialized(void) { return boot2_rdtscp_value; }
+uint64_t boot2_rdtscp_value;
 /* ACPI/MADT data query: no ACPI tables on the host. */
 uint8_t irq_trigger_for_gsi(uint32_t gsi) { (void)gsi; return 0; }
 uint32_t isa_irq_to_gsi(uint8_t source) { return source; }
@@ -214,8 +221,6 @@ void _log_debug_impl(const char *f, ...) { (void)f; }
 unsigned long boot2_early_puts_calls;
 void arch_early_puts(const char *s) { (void)s; boot2_early_puts_calls++; }
 void arch_early_putc(char c) { (void)c; boot2_early_puts_calls++; }
-unsigned long boot2_lapic_timer_irq_calls;
-void x86_handle_lapic_timer_irq(pt_regs_t *r) { (void)r; boot2_lapic_timer_irq_calls++; }
 
 /* Exception handler surface (arch dispatch.c): unreachable in this
  * suite — any call is a test-protocol violation. */
@@ -240,6 +245,7 @@ void x86_handle_undefined_opcode(pt_regs_t *r, uint64_t e) { __builtin_trap(); }
 void x86_handle_general_protection(pt_regs_t *r, uint64_t e) { __builtin_trap(); }
 void x86_handle_page_fault(pt_regs_t *r, uint64_t e, uint64_t a) { __builtin_trap(); }
 
+void ret_from_intr(void) { __builtin_trap(); }   /* host never irets */
 void arch_this_cpu_set(unsigned id) { selected_cpu = id; }
 
 /* percpu/tick-field accessors for the context test TU (which cannot

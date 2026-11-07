@@ -755,7 +755,7 @@ test-framework-contract:
 .PHONY: test-boot-irq-time-host _test-boot-irq-time-host-run-registration _test-boot-irq-time-host-run-context _test-boot-irq-time-host-run-rtc _test-boot-irq-time-host-run-all
 _test-boot-irq-time-host-run-all:
 	@echo "  [test-boot-irq-time-host] all (registration context rtc; handoff arrives with its task)"
-	$(call os01_submake,hosttests,test_boot_irq_time_registration test_boot_irq_time_context test_boot_irq_time_rtc $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_irq_time_registration test_boot_irq_time_context test_boot_irq_time_rtc test_boot_irq_time_handoff $(OS01_SUBMAKE_ARGS))
 _test-boot-irq-time-host-run-registration:
 	@echo "  [test-boot-irq-time-host] registration"
 	$(call os01_submake,hosttests,test_boot_irq_time_registration $(OS01_SUBMAKE_ARGS))
@@ -765,13 +765,15 @@ _test-boot-irq-time-host-run-context:
 _test-boot-irq-time-host-run-rtc:
 	@echo "  [test-boot-irq-time-host] rtc"
 	$(call os01_submake,hosttests,test_boot_irq_time_rtc $(OS01_SUBMAKE_ARGS))
+_test-boot-irq-time-host-run-handoff:
+	@echo "  [test-boot-irq-time-host] handoff"
+	$(call os01_submake,hosttests,test_boot_irq_time_handoff $(OS01_SUBMAKE_ARGS))
 test-boot-irq-time-host: CASE ?=
 test-boot-irq-time-host: CASE := $(CASE)
 test-boot-irq-time-host: $(if $(CASE),_test-boot-irq-time-host-run-$(CASE),_test-boot-irq-time-host-run-registration)
 	$(call require_capability,rootfs)
 	@case "$(CASE)" in \
-	    ""|registration|context|rtc|all) echo "  [test-boot-irq-time-host] CASE=${CASE:-registration}";; \
-	    handoff) echo "  [test-boot-irq-time-host] CASE=handoff (group target arrives with its BOOT-2 task)" >&2; exit 1;; \
+	    ""|registration|context|rtc|handoff|all) echo "  [test-boot-irq-time-host] CASE=${CASE:-registration}";; \
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: registration context rtc handoff all" >&2; exit 1;; \
 	esac
 

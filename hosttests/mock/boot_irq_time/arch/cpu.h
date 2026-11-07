@@ -11,6 +11,7 @@ void arch_cpu_pause(void);
 static inline void arch_nop(void) {}
 
 uint64_t arch_cycle_counter(void);
+uint64_t rdtscp_serialized(void);
 
 /* GS base install → runtime poison model (records + enables reads). */
 void boot2_test_install_gs(void *base);

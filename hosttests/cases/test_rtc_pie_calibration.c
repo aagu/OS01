@@ -162,11 +162,11 @@ static void bad_preconditions(void)
 
     /* NULL outputs. */
     assert_eq(-1, rtc_pie_calibrate(NULL, NULL));
-    /* Entry IF=1. */
-    boot2_if_flag = 1;
+    /* Entry IF=1 (the mock flag word carries whole RFLAGS; bit 9 = IF). */
+    boot2_if_flag = 1u << 9;
     uint64_t t = 0, l = 0;
     assert_eq(-1, rtc_pie_calibrate(&t, &l));
-    assert_eq(1, boot2_if_flag);            /* IF unchanged */
+    assert_eq(1u << 9, (unsigned)boot2_if_flag);   /* IF unchanged */
     boot2_if_flag = 0;
 
     /* No hardware touched: A/B same, no pending, route still masked. */

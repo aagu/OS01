@@ -354,7 +354,9 @@ BOOT2_REG_SOURCES := intr/irq.c \
     arch/x86_64/intr/pic_8259a.c \
     arch/x86_64/intr/apic/ioapic.c intr/dispatch.c \
     arch/x86_64/intr/dispatch.c arch/x86_64/intr/bad_event.c \
-    arch/x86_64/intr/intr_decode.c
+    arch/x86_64/intr/intr_decode.c \
+    arch/x86_64/intr/apic/lapic_timer.c arch/x86_64/platform/time.c \
+    time/tick.c time/timer.c intr/softirq.c
 BOOT2_REG_OBJS := $(TEST_BLD)/boot2-registration/runtime.o \
     $(addprefix $(TEST_BLD)/boot2-registration/,$(BOOT2_REG_SOURCES:.c=.o))
 
@@ -404,10 +406,12 @@ BOOT2_CORE_SOURCES := intr/irq.c \
     percpu/percpu.c
 BOOT2_CONTEXT_SOURCES := $(BOOT2_CORE_SOURCES) \
     arch/x86_64/platform/boot_irq.c subsys/subsys.c \
-    arch/x86_64/smp/boot.c arch/x86_64/platform/boot.c
+    arch/x86_64/smp/boot.c arch/x86_64/platform/boot.c \
+    arch/x86_64/intr/apic/lapic_timer.c arch/x86_64/platform/time.c
 BOOT2_RTC_SOURCES := $(BOOT2_CORE_SOURCES) \
     arch/x86_64/platform/rtc_pie.c arch/x86_64/platform/time.c \
-    arch/x86_64/platform/boot_irq.c
+    arch/x86_64/platform/boot_irq.c \
+    arch/x86_64/intr/apic/lapic_timer.c
 
 $(TEST_BLD)/boot2-context/%.o $(TEST_BLD)/boot2-rtc/%.o: $(TESTS_DIR)/kernel/%.c
 	@mkdir -p $(dir $@)
@@ -432,6 +436,21 @@ $(TEST_BLD)/test_boot_irq_context.elf: $(addprefix $(TEST_BLD)/boot2-context/,$(
 $(TEST_BLD)/test_rtc_pie_calibration.elf: $(addprefix $(TEST_BLD)/boot2-rtc/,$(BOOT2_RTC_SOURCES:.c=.o)) \
 		$(TEST_BLD)/boot2-rtc/runtime.o $(TEST_BLD)/test_rtc_pie_calibration.o
 	$(HOST_CC) -Wl,--wrap=arch_irq_select_controller -Wl,--gc-sections -o $@ $^
+
+$(eval $(call register_host_test,test_boot_tick_handoff,sched,protocol-or-legacy))
+TEST_BINS += $(TEST_BLD)/test_boot_tick_handoff.elf
+
+$(TEST_BLD)/test_boot_tick_handoff.o: $(TEST_CASES)/test_boot_tick_handoff.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) -idirafter $(TESTS_DIR)/libc/include -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_boot_tick_handoff.elf: $(addprefix $(TEST_BLD)/boot2-context/,$(BOOT2_CONTEXT_SOURCES:.c=.o)) \
+		$(TEST_BLD)/boot2-context/runtime.o $(TEST_BLD)/test_boot_tick_handoff.o
+	$(HOST_CC) -Wl,--wrap=arch_irq_select_controller -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_irq_time_handoff
+test_boot_irq_time_handoff: $(TEST_BLD)/test_boot_tick_handoff.elf
+	$<
 
 .PHONY: test_boot_irq_time_context test_boot_irq_time_rtc
 test_boot_irq_time_context: $(TEST_BLD)/test_boot_irq_context.elf

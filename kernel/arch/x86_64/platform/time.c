@@ -6,6 +6,8 @@
 #include <arch/irq.h>
 #include <arch/x86_64/rtc.h>     // rtc_pie_calibrate (x86_64 platform glue)
 #include <sched/accounting.h>    // sched_accounting_cpu_start (monitor Task 2)
+#include <driver/pit.h>         // pit_prepared (BOOT-2 handoff gate)
+#include <core/panic.h>         // kpanic (BOOT-2 fatal)
 
 // 三级回落：CPUID 15h → RTC PIE（BOOT-2 受控窗口）→ 0。
 // BOOT-2: the FIRST boot-time decision (including a failed 0) is cached;
@@ -54,15 +56,26 @@ uint64_t arch_cycle_freq(void)
 // and the accounting publish — see subsys_percpu.c.)
 bool arch_tick_start(void)
 {
+    /* BOOT-2 BSP handoff (spec §5.2): one IRQ-off region; at most one
+     * periodic source unmasked at any moment.  A PIT that was never
+     * prepared is a boot-protocol error (no fallback to publish). */
+    if (!pit_prepared())
+        kpanic("BOOT-2: tick handoff without a prepared bootstrap PIT");
+
     uint32_t pit_gsi = arch_irq_isa_to_gsi(0);
+    arch_irq_state_t flags = arch_local_irq_save();
+
     irq_mask(pit_gsi);
-    if (lapic_timer_start(100)) {
+    bool ok = lapic_timer_start(100);
+    if (ok) {
         // LAPIC 接管成功，PIT 保持掩蔽。
         sched_accounting_cpu_start(0, 100, true);
-        return true;
+    } else {
+        // 失败：LAPIC 已保证 masked/stopped（start 失败路径），PIT 重新
+        // 放行 —— false 表示 PIT 有效回退，不是无 tick。
+        irq_unmask(pit_gsi);
+        sched_accounting_cpu_start(0, 100, true);
     }
-    irq_unmask(pit_gsi);
-    // LAPIC 未启动 → PIT 回退已重新使能，BSP tick 源依然有效。
-    sched_accounting_cpu_start(0, 100, true);
-    return false;
+    arch_local_irq_restore(flags);
+    return ok;
 }

@@ -13,6 +13,7 @@
 #include <intr/softirq.h>
 #include <time/clockevent.h>   // tick_handler()
 #include <time/clocksource.h>  // clocksource_freq_hz()
+#include <arch/x86_64/rtc.h>   // BOOT2_CALIBRATION_SPIN_LIMIT (BOOT-2)
 #include <sched/accounting.h>  // sched_account_tick()
 #include <stdbool.h>
 
@@ -84,9 +85,21 @@ void lapic_timer_calibrate(void)
     lapic_write(LAPIC_TIMER_DIV, lapic_timer_divisor);
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 
+    // BOOT-2: bounded TSC window — the pause budget is a polling
+    // budget (BOOT2_CALIBRATION_SPIN_LIMIT), not a wall-clock deadline.
+    // A stuck TSC, reversed samples or exhausted budget leave the timer
+    // uncalibrated (hz stays 0 → start refuses) instead of hanging.
     uint64_t tsc0 = rdtscp_serialized();
-    while (rdtscp_serialized() - tsc0 < tsc_hz / 100)   // 10ms TSC 窗口
+    uint32_t rounds = 0;
+    while (rdtscp_serialized() - tsc0 < tsc_hz / 100) {   // 10ms TSC 窗口
+        if (++rounds > BOOT2_CALIBRATION_SPIN_LIMIT) {
+            lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
+            lapic_timer_hz = 0;
+            debug_sched("LAPIC timer: TSC window budget exhausted\n");
+            return;
+        }
         arch_cpu_pause();
+    }
 
     uint32_t cur = lapic_read(LAPIC_TIMER_CUR);
     uint64_t elapsed = 0xFFFFFFFFULL - cur;
@@ -95,6 +108,13 @@ void lapic_timer_calibrate(void)
     // elapsed 是 ÷2 后 10ms 递减量，除以 10ms 得递减率 → elapsed * 100（不 ×2）。
     // 若误写 *200 得真实频率，lapic_timer_start 的 init_count=hz/freq 会被 divisor
     // 再 ÷2 → 50Hz（正确是保持 ×100）。
+    // Reverse/degenerate samples are rejected (finite failure).
+    if (cur >= 0xFFFFFFFFULL || elapsed == 0) {
+        lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
+        lapic_timer_hz = 0;
+        debug_sched("LAPIC timer: invalid TSC-window sample\n");
+        return;
+    }
     lapic_timer_hz = elapsed * 100;
 
     debug_sched("LAPIC timer: %u ticks/10ms → %lu Hz (div=%u, TSC)\n",
@@ -111,8 +131,13 @@ void lapic_timer_calibrate(void)
 
 bool lapic_timer_start(uint32_t freq_hz)
 {
-    if (!lapic_timer_hz) {
-        debug_sched("LAPIC timer: not calibrated, skipping start\n");
+    if (!lapic_timer_hz || freq_hz == 0 ||
+        lapic_timer_hz / freq_hz > 0xFFFFFFFFULL) {
+        /* BOOT-2: refuse without unmasking — the caller keeps its PIT
+         * fallback. */
+        lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
+        debug_sched("LAPIC timer: refusing start (hz=%lu freq=%u)\n",
+                    (unsigned long)lapic_timer_hz, freq_hz);
         return false;
     }
 
@@ -226,12 +251,10 @@ void lapic_timer_init(void)
 {
     // Register the assembly stub (NOT the C function directly —
     // the CPU interrupt gate entry doesn't set up pt_regs).
+    // BOOT-2: calibration is NOT here — the orchestrator runs it once
+    // at phase-4 end (after the whole phase, so the clocksource result
+    // no longer depends on same-phase link order; no double init).
     set_intr_gate_raw(LAPIC_TIMER_VECTOR, 0, lapic_timer_stub);
-
-    // 校准（RTC PIE 联合结果优先，否则 TSC 窗口）。
-    lapic_timer_calibrate();
-
-    // Start is deferred to caller — GS base must be set first.
 }
 
 #include <subsys/subsys.h>

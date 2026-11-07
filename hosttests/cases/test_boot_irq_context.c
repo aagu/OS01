@@ -75,7 +75,6 @@ extern unsigned long boot2_irq_enable_calls;
 extern unsigned long boot2_account_tick_calls;
 void boot2_test_install_gs(void *base);
 void boot2_tsc_set(uint64_t v);
-extern unsigned long boot2_lapic_timer_irq_calls;
 extern unsigned long boot2_gs_installs;
 extern void (*boot2_gs_install_hook)(void);
 extern void (*boot2_sti_hook)(void);
@@ -108,7 +107,13 @@ static void tr(int e) { if (trace_n < 32) trace[trace_n++] = e; }
 static int boot2_apic_init(void) { tr(T_APIC_P3); return 0; }
 static int boot2_timer_init(void) { tr(T_TIMER_P4); timer_init(); return 0; }
 static int boot2_cs_init(void) { tr(T_CS_P4); return 0; }
-static int boot2_lapic_stub_init(void) { tr(T_LAPIC_P4); return 0; }
+static int boot2_lapic_stub_init(void)
+{
+    tr(T_LAPIC_P4);
+    extern void lapic_timer_init(void);
+    lapic_timer_init();      /* BOOT-2: stub install ONLY (no calibrate) */
+    return 0;
+}
 static int boot2_pit_init(void)
 {
     tr(T_PIT_P4);
