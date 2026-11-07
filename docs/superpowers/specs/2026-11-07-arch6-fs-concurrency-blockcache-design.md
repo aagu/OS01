@@ -1,7 +1,7 @@
 # ARCH-6 FS 并发与块缓存 — 设计规格
 
 - 日期：2026-11-07
-- 状态：待评审
+- 状态：独立子 agent 复审通过（2026-11-07，第 2 轮 `approve`；仅设计文档，尚未实施）
 - 对应 roadmap：`docs/roadmap.md` 的 ARCH-6「FS 并发与块缓存」
 - 前置：ARCH-9（驱动模型/块设备 ops）✅、ARCH-5（VFS 抽象/active_nodes/dcache）✅、ARCH-10（动态 blockdev 容量）✅
 
@@ -70,9 +70,10 @@ roadmap 对 ARCH-6 的原始描述：
 
 - **不做 per-inode 细粒度锁**（i_rwsem 类）：仍维持 per-mount 大锁语义，
   只换锁类型与归属；细粒度并发属后续演进。
-- **不做日志/崩溃一致性**（journaling、fsck）：写回只保证内核内读己之写
-  与显式 flush 后的持久性；掉电窗口与 AHCI flush no-op（`ahci.c:63-67`）
-  现状一致，不扩大承诺。
+- **不做日志/崩溃一致性**（journaling、fsck）：保证内核内读己之写，以及
+  显式 flush 成功后目标数据已由后端 `ops->write` 成功接收。AHCI flush
+  目前为 no-op（`ahci.c:63-67`），因此不承诺设备易失缓存已经提交到稳定介质。
+  软件写回会扩大未 sync 时的掉电丢失窗口；设备级 flush 命令不在本期范围。
 - **不做 page cache**（文件页粒度缓存）：只做 blockdev 层 sector 缓存。
 - **不做异步 I/O / 请求队列**：AHCI 忙等模型保持不变；缓存读写仍是同步调用。
 - **不改 UAPI / syscall 号**（`SYS_sync` 已存在，仅补实现）。
@@ -122,8 +123,8 @@ roadmap 对 ARCH-6 的原始描述：
 写回策略三选一：全程 write-through（一致性最简但每次写仍同步忙等 DMA，
 缓存只加速读）、纯写回+定期写回（一致性边界最复杂、需要定时器基础设施）、
 **写回+显式 flush（采用）**。脏块按 LRU 驻留；`block_device_flush(dev)`
-同步全量写回；`SYS_sync` 对所有盘调 flush；逐出脏块前先写回。这是性能与
-一致性的平衡点，也是 Linux buffer cache 的基础形态。
+同步完成调用开始时的脏 key 集合；`SYS_sync` 对所有盘调 flush；逐出脏块前
+先成功写回。并发写入的边界和错误返回由 §5.5 定义。
 
 ---
 
@@ -164,15 +165,18 @@ syscall/ELF loader/kthread 进程上下文）。
 ### 4.3 锁序不变量（全期有效）
 
 ```
-fs 大锁(mutex) → mount->active_lock(spinlock) → bcache 元数据自旋锁（叶子）
+FS mutex → mount->active_lock（仅 FS 节点簿记）
+FS mutex → bcache_lock（缓存元数据）
+FS mutex → data_lock（单 sector 拷贝）
 ```
 
-- 缓存元数据锁是叶子锁：持有时绝不取 FS 锁或 active_lock；持 FS 锁调
-  `block_device_read/write` 进入缓存路径取缓存锁，方向单一，无死锁环。
-- 缓存缓冲的 BUSY 等待用 wait queue 睡眠（进程上下文），睡眠时只持缓存
-  元数据锁的瞬时区，不持 FS 锁以外的自旋锁——持 FS mutex 睡眠等待缓存
-  BUSY 是合法的（mutex 可睡眠）。
-- AHCI `port->lock`（irqsave）保持最内层，不变。
+- `active_lock` 临界区不得调用块 I/O、等待缓存或取 `data_lock`。缓存元数据锁
+  是叶子锁；不与 `data_lock`、等待队列锁或 AHCI port lock 嵌套。
+- `data_lock` 只包围 kernel buffer 的拷贝，使用 irqsave/irqrestore；释放后
+  才取元数据锁提交 flags。pin 贯穿两段临界区，防止中间被复用。
+- 等待和 I/O 时不持任何自旋锁；可持外层 FS mutex。裸 blockdev 调用和
+  自测无需 FS mutex，但必须处于调度器就绪的非 idle 进程上下文；启动期
+  单核路径没有并发 BUSY/pin 等待。AHCI 自行管理 port lock，缓存锁不跨 DMA。
 
 ### 4.4 验收
 
@@ -206,7 +210,7 @@ typedef struct bcache_buf {
     uint32_t           flags;           /* VALID | DIRTY | BUSY */
     int                refcnt;
     spinlock_T         data_lock;       /* 短临界区：数据拷贝/改写（锁内无 I/O） */
-    uint8_t           *data;            /* sector_size 字节，kmalloc */
+    uint8_t           *data;            /* 本期支持 512 字节 sector */
 } bcache_buf_t;
 ```
 
@@ -217,83 +221,111 @@ typedef struct bcache_buf {
   (a) 同一物理扇区不存在两个缓存项；(b) `SYS_sync` 枚举 `BLOCK_DISK` 即
   覆盖全部脏数据（分区 key 下永远没有脏项）。缓存接入的透传性仅对物理盘
   调用方成立；分区调用方多一层函数调用，语义不变。
-- 粒度 = `dev->sector_size`（当前全链路 512 字节）；一次多 sector 请求在
-  包装层按 sector 拆分逐个命中/缺失（4KB ext2 块 = 8 个缓存项）。
+- 粒度 = 512 字节（当前全链路如此）；本期缓存对 `sector_size != 512` 返回
+  `-EINVAL`，不得用固定大小数据区接收更大的 sector。一次多 sector 请求在
+  包装层按 sector 拆分（4KB ext2 块 = 8 项）；请求可能部分完成后遇错，返回
+  首个错误，已经完成的 sector 不回滚，保留既有块接口的错误返回形式。
 - 容量：编译期常量 `BCACHE_BUFS`（默认 2048 项 ≈ 1 MiB 数据 + 元数据，
   512 MiB 内存预算下安全）+ 哈希桶 `BCACHE_BUCKETS`（默认 512，链地址法），
-  启动时 `kmalloc` 一次性分配（blockdev 注册前、slab 就绪后，pre-SMP 单核
-  初始化无竞争）。
+  在 slab 就绪、首次 blockdev 注册前初始化。元数据池与恰好 1 MiB 的数据池
+  分开 `kmalloc`（单次分配上限 1 MiB）；不在元数据锁内分配。初始化失败
+  清理已分配部分并向注册/块操作返回 `-ENOMEM`，不得发布半初始化状态；
+  `bcache_init()` 成功后幂等，host reset 保留池但清空项，允许失败后重试。
 
 ### 5.3 并发控制
 
-- **全局元数据自旋锁 `bcache_lock`（irqsave）**：只保护哈希查找、LRU 摘挂、
-  refcnt/flags 变更、脏链表——纯内存操作，临界区极短，锁内绝不做 I/O。
-- **per-buf `refcnt`（pin）**：查找命中即 pin +1，释放元数据锁后再拷贝数据
-  或发起 I/O；用毕解 pin。eviction 只考虑 `refcnt == 0 && !BUSY` 的 LRU 尾。
-- **per-buf `data_lock`（自旋）——sector 原子性**：持有 pin 的命中读
-  （拷出）与写（改写 + 置 DIRTY）都在 `data_lock` 内做 `memcpy`，保证
-  同一 sector 的并发裸读/裸写（如 Phase 2 内核自测双 CPU 直压场景，上方
-  无 FS mutex）观察到的数据是该 sector 一次完整写的结果（旧值或新值，
-  不撕裂）。`data_lock` 锁内无 I/O、无内存分配，临界区为 512B memcpy 量级。
-- **per-buf `BUSY` 标志 + 全局 `bcache_wq` 等待队列**：读缺失填充/写回/
-  逐出的 AHCI I/O 期间置 BUSY（此时该 buf 不接受新 pin，等待者睡眠）；
-  完成方 `wait_queue_wake_all`。睡眠只发生在持 FS mutex 的进程上下文，
-  合法（§4.3）。
-- **缓存槽耗尽**：无可逐出槽（全部 `refcnt > 0` 或 BUSY）时在 `bcache_wq`
-  上睡眠等待槽位释放，无失败路径。进度保证：pin 只在单次块层调用内持有、
-  解 pin 不依赖任何 FS mutex，故持 FS mutex 睡眠等待槽位不会死锁。
-  （主机自测对 reset 钩子有专门的「丢弃全部缓存项」契约，见 §5.5。）
-- 中断上下文永不进缓存路径（现状成立：无任何 IRQ 路径调 block I/O）。
+- **元数据锁**保护哈希、LRU、refcnt 和全部 flags；无独立脏链表，flush
+  在锁内扫描固定槽池生成 key 快照，避免数据修改与脏链发布分离。
+- **pin 生命周期**：命中时在元数据锁内 pin；新项在发布 BUSY key 时
+  `refcnt = 1`。调用方完成数据拷贝和 flags 提交后才解 pin。读填充清 BUSY
+  时保留该 pin；逐出只选 `refcnt == 0 && !BUSY` 的 LRU 项。
+- **sector 原子性**：命中读/写在 `data_lock` 的 irqsave 临界区内做完整
+  512B memcpy；写在释放 data_lock 后、仍持 pin 时，在元数据锁内提交
+  `VALID|DIRTY`（按位更新，保留其他任务设置的 BUSY），最后解 pin。
+- **BUSY 是独占维护预留**：填充、逐出及 flush 使用；所有查找先检查 BUSY，
+  再检查 VALID。BUSY key 必须已经可被哈希查到；同 key 后到者不得另立项。
+  flush 可在现有 pin 尚未归零时先置 BUSY，阻止新 pin，再等待旧持有者
+  完成；旧持有者提交 flags/解 pin 不等待 BUSY、不取 FS 锁。
+- **等待握手**：发现 BUSY、无可逐出槽，或维护方等待旧 pin 归零时，先
+  释放元数据锁；本地 IRQ 保持关闭，`wait_queue_arm` 后重新取元数据锁
+  重查条件（能前进时须在本次锁内预留资源），释放锁后才决定 `schedule()`。
+  返回后在等待队列锁内 `wait_queue_disarm`，再恢复原 IRQ 状态。元数据锁
+  与队列锁不嵌套；唤醒可以先于 schedule，不能覆盖已恢复的 TASK_RUNNING。
+- **唤醒事件**：refcnt 降到零、BUSY 清除、失败释放槽、测试释放 pin 后，
+  均在释放元数据锁后 `wait_queue_wake_all`。等待是不可中断的内部重试；
+  被信号唤醒也必须清理队列节点，再重查，不能遗留 pin/BUSY。
+- **耗尽与进度**：没有可用槽时等待上述事件，不把暂时占满当作 ENOMEM。
+  每次 sector 操作至多持有一个普通 pin，释放它不依赖等待者持有的 FS 锁；
+  后端写回失败则返回该错误，不能因坏盘永远等待。中断上下文不得调用缓存。
 
 ### 5.4 读路径
 
 `block_device_read(dev, lba, count, buf)`（物理盘 key，§5.2）逐 sector：
-1. 查哈希：命中 VALID → pin → `data_lock` 内拷出 → 解 pin（内存速度）。
-2. 缺失：从 free list / LRU 尾取槽（无可逐出则睡眠等待，§5.3；脏则先写回，
-   见 5.5）→ 置 BUSY → `dev->ops->read(dev, lba, 1, buf->data)`（原始 ops，
-   绕过包装防递归）→ 锁内置 VALID、挂哈希/LRU、清 BUSY → 唤醒等待者 →
-   pin → 拷出 → 解 pin。
-3. 同 sector 并发缺失：后到者看到 BUSY 即睡眠，由完成方唤醒重查哈希，
-   不重复发起 I/O。
+1. 锁内查哈希：BUSY 按 §5.3 等待；否则 VALID 命中即 pin、更新 LRU，
+   解锁后在 data_lock 内拷出，完成后解 pin。
+2. 缺失：锁内取 free/可逐出槽（脏逐出见 §5.5），在同一临界区查重并发布
+   `(dev, lba, BUSY, refcnt=1)`；解锁后原始 `ops->read(dev,lba,1,data)`。
+3. 成功：锁内置 VALID、清 BUSY，保留调用方 pin；解锁唤醒后拷出，再解 pin。
+   失败：不置 VALID，撤销哈希项，归还槽并释放 pin/BUSY，解锁唤醒并返回错误。
+   同 sector 等待者重查后可重试，不把失败的内容作为命中。
 
 ### 5.5 写路径与一致性
 
-- `block_device_write(dev, lba, count, buf)`（物理盘 key）逐 sector：取
-  缓冲（命中或分配，同上）→ pin → `data_lock` 内改写数据 → 置
-  `VALID|DIRTY` → 解 pin → 挂脏管理 → **不立即下盘**。读己之写由缓存保证
-  （缓存是驻留块唯一事实源）。
+- 整 sector 写命中时 pin，新项按 §5.4 发布 BUSY key + pin，但无需先读盘。
+  在 data_lock 内复制，随后锁内提交 VALID|DIRTY，新项同时清 BUSY，最后
+  解 pin 并唤醒。缓存是驻留块的事实源，写成功仅表示软件缓存已接收。
 - **唯一性不变量**：缓存接入后，任何模块不得绕过包装层直接调
   `dev->ops->read/write` 访问已挂盘设备（缓存写回本身除外）。现状审计：
   ext2/FAT/GPT/devfs blkdev 均经包装层；AHCI 自身不发起 FS 语义 I/O。
-- `block_device_flush(dev)`：遍历该盘 key 下的脏缓冲，**跳过
-  `refcnt > 0` 或 BUSY 的在途缓冲（保持其 DIRTY，留给下一次 flush）**，
-  其余逐个 `ops->write` 下盘并清 DIRTY。契约：flush 返回时，所有在
-  flush 开始前已完成的 write() 的数据均已下盘；与 flush 并发在途的写
-  属 best-effort（Linux buffer cache 同款语义）。测试只在静默状态断言
-  flush 完整性。
-- `SYS_sync` 改为对 registry 内全部 `BLOCK_DISK` 调 `block_device_flush`
-  （`sys_misc.c` stub 接线；分区设备无脏项，无需枚举）。
-- 逐出脏块：先写回再复用槽位（write-behind on evict）。
-- `block_device_flush` 语义向下透传：分区设备 flush → 父盘 flush（现状
-  `partition_flush` 已如此，保持）。
+- **flush 边界**：锁外分配最多 BCACHE_BUFS 个 `(dev,lba)` 的目标数组，
+  再在元数据锁内快照该盘全部 DIRTY key（含 BUSY/pinned 项）；快照时刻是
+  本次 flush 的线性化边界。此前已完成的写，其值或同 sector 后续覆盖版本
+  必须在成功返回前被后端成功接收；快照后新增的脏 key 不要求纳入本次。
+- **逐目标处理**：每次按 key 重新查哈希，不能保存可复用槽的裸指针。
+  key 已不存在或已干净表示先前已有成功写回；BUSY 则等待后重查；否则锁内
+  置 BUSY，阻止新 pin，按 §5.3 等旧 pin 归零，再锁外 `ops->write`。
+  成功才清 DIRTY，失败保留 key/VALID/DIRTY；两种情况均清 BUSY、唤醒。
+  多个 flush 依靠同一 BUSY 协议串行访问各 key，不需要额外全局睡眠锁。
+- **包装层与错误**：物理盘 `block_device_flush` 必须先调用缓存 flush，
+  成功后才调用可选 `ops->flush`；没有驱动 flush 回调也不能跳过软件写回。
+  缓存分配失败返回 ENOMEM；写回失败或驱动 flush 失败返回原错误并更新
+  last_error。`SYS_sync` 遍历所有 BLOCK_DISK，失败后继续其他盘，最后返回
+  首个负错误或 0。分区 flush 继续经 partition_flush 转发父盘包装层。
+- **逐出**：锁内选 refcnt=0 且非 BUSY 的 LRU 项并置 BUSY；脏项锁外
+  写回，失败保留旧 key/data/DIRTY，清 BUSY 并返回错误。成功后才移除旧 key。
+  脏逐出释放锁期间，新请求 key 可能已被其他 CPU 发布，因此复用前必须
+  锁内重新查重：已有项则归还所选槽并重试，否则原子发布新 BUSY key + pin。
+- **错误回收规则**：所有填充、写回、逐出失败路径必须释放自己拥有的
+  pin/BUSY，保留尚未成功写回的数据，并唤醒等待者；失败不能伪装成干净命中。
 - **设备退役/测试 reset 契约**：`block_device_unregister_boot`（生产仅
   pre-mount 回滚路径）与 `block_device_reset_for_test`（hosttest）
   对该设备的缓存项**丢弃而不写回**（设备已退役，写回无意义且 ops 已
-  置空），并从哈希/LRU/脏链全部摘除；hosttest 据此在用例间安全重置。
+  置空），并从哈希/LRU 全部摘除；hosttest 据此在用例间安全重置。
+  drop/reset 只允许无在途访问的静默设备/测试环境；必须在释放设备对象前
+  丢弃项，不能用全局 reset 清理仍在使用的启动盘。
 
 ### 5.6 测试（随 Phase 2 落地）
 
-- **hosttest `hosttests/cases/test_bcache.c`**：注册 fake block device
-  （沿用 `test_block_device_ops.c` 模式 + `OS01_HOST_TEST` reset 钩子）：
-  读缺失填充、写后读命中不落盘（fake 设备读到旧值、包装层读到新值）、
-  flush 后 fake 设备读到新值、在途缓冲被 flush 跳过且保持 DIRTY、
-  LRU 逐出与脏块写回、reset 丢弃契约（用例间重置）。
-  （缓存耗尽睡眠等待路径不由宿主单线程用例覆盖——单线程无法安全构造
-  全耗尽而不会自锁；该路径以实现评审 + 内核自测并发路径间接覆盖。）
-- **内核自测 `kernel/selftest/test_bcache.c`**：pinned kthread 双 CPU 对
-  同一测试盘的相同 sector 并发读/写（断言 sector 原子性：读到的必是某次
-  完整写入的模式）与相邻 sector 并发（断言无串扰）+ flush + 校验
-  （`test_fd_refcount` 模式），结束断言全部 buf refcnt 归零无泄漏。
+- **hosttest `test_bcache`**：fake 内存盘双视角验证读填充、分区/父盘同 key、
+  写后读、flush 写回、LRU、静默 drop/reset；逐出测试先只检查被逐出项，
+  全量后端检查必须在显式 flush 后。故障注入覆盖初始化 OOM、读失败重试、
+  flush/逐出失败保脏以及驱动 flush 错误返回。
+- 宿主增加可脚本化的调度器/IRQ 环境，链接生产 wait.c（参考
+  test_mutex_handshake）：在 ARM 前/后及 schedule 前注入完成事件，验证
+  BUSY/耗尽/flush-drain 不丢唤醒。仅 OS01_HOST_TEST 提供按 key 的 BUSY
+  reserve/complete 钩子，复用真实发布、成功/失败收尾和唤醒 helper；reserve
+  仅允许缺失 key，持有专属测试 pin，complete 只接受自己拥有的预留并释放
+  该 pin。脚本用 complete 推进状态，禁止在外层 fake read 栈内嵌套同 key
+  读取并期待外层自行完成；单线程脚本只验证等待握手，不冒充真实 SMP 证据。
+- **内核 late 自测 `bcache_smp_coherence`**：调度器就绪后运行，两个 pinned
+  kthread 以握手证明重叠：先 seed 合法模式，再压同 sector 原子性、相邻
+  sector 隔离、并发首次缺失只读一次，以及 flush 等 pinned 读取完成。
+- **确定性耗尽自测**：fake 盘至少 BCACHE_BUFS+1 个 sector；先通过测试钩子
+  pin 满全局槽池，再让另一非 idle worker 请求新 sector，确认进入等待后
+  释放一个 pin，断言唤醒完成。无调度器的 idle harness 只协调和 yield，
+  不亲自执行可能睡眠的缓存操作；异常/超时必须让 worker 退出并释放测试 pin。
+- 调试接口按 dev 返回 entries/pinned/busy/dirty/waiters；收尾检查测试盘
+  pinned=busy=waiters=0，drop 后 entries=0，不限制真实启动盘的全局占用数。
 
 ---
 
@@ -301,16 +333,26 @@ typedef struct bcache_buf {
 
 ### 6.1 用户态压测（arch10-capacity 模式）
 
-- `user/test_arch6_fsstress/`：fork N 组 worker（`SMP` 核数对齐，≥4），
+- `user/test_arch6_fsstress/`：固定 fork 4 个 worker，QEMU 使用 4 个 CPU，
   每组对三个挂载点各跑一轮：**创建 → 写入带校验和的模式数据 → 读回校验 →
   改名 → 跨 worker 交换文件校验可见性 → 删除**；文件名含 worker 编号避免
   同名冲突，另有共享目录上的并发创建/删除竞争窗口。输出
   `[arch6-fsstress] <fs> worker<N> PASS/FAIL(<detail>)` 逐项标记 +
   最终 `[arch6-fsstress] PASS`。
+- 主进程通过管道协调阶段：全员完成 rename 后才交换读取；全员完成跨
+  worker 校验后才各自删除自己的文件；全员删完后由主进程检查目录为空。
+  此处交换文件放在每个测试根目录的独立 `files/` 中，空目录断言只检查
+  `files/`；预建的 `shared/` 与它并列。shared 阶段每个 worker 只创建/删除
+  自己的唯一文件，分别设创建前、创建完成、删除完成屏障，再检查 shared/
+  为空。父进程最后依次删除 files/、shared/、测试根目录。屏障协调不依赖
+  被测 FS；任一 worker 失败，主进程终止并回收其余 worker，禁止无限轮询
+  或由单个 child 发出最终 PASS。
 - `config/inittab.arch6-fsstress`、`run.mk` 的
   `TEST_QEMU_FLAVOR_arch6-fsstress` / 镜像变量 / SUITE 校验 / recipe、
   `qemutests/arch6_fsstress.py` 标记解析器，全部照抄 arch10-capacity 骨架；
-  QEMU 以 `-smp 4` 跑（`KERNEL_SELFTEST_SMP` 同源的 `SMP` 变量）。
+  验收命令 `make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress`。
+  suite 将有效 SMP 显式传到 TestRunner，拒绝非 4 或与 QEMU_SMP 冲突的设置，
+  解析器核验四核启动证据、12 个唯一 worker PASS、无 FAIL 和父进程最终 PASS。
 - **scenario-catalog 契约**：`register_host_test`（如新增）必须同步
   `test-scenarios.json` 条目（CI 首个未映射项即停）。
 
@@ -330,8 +372,10 @@ typedef struct bcache_buf {
 |------|------|
 | mutex 化后某条 ops 路径实际运行于非进程上下文 → `schedule()` 死机 | 现状审计 FS 调用只出现在 syscall/ELF loader/kthread；`vfs_sched_ready()` 门控兜底 boot 期；压测 + selftest 全套回归 |
 | 递归取锁死锁（mutex owner 按 pid 记账，非重入） | 现有 spinlock 同样非重入，所有 ops 已保证单次取锁；helper 落地时逐函数核对取锁点无嵌套 |
-| 写回缓存掩盖数据错误（读到的永远是缓存） | hosttest 用 fake 设备读旧值/新值双视角验证；内核自测 flush 后直读 fake 设备校验 |
-| 缓存击穿（同 sector 并发缺失重复 I/O） | BUSY 标志 + 等待队列串行化同 sector 填充 |
+| 写回缓存掩盖数据错误（读到的永远是缓存） | fake 后端双视角、显式 flush 后校验；不把后端可见性称作掉电持久性 |
+| 缓存击穿或提前复用 | 锁内先发布 BUSY key + 调用方 pin；完成数据/flags 操作后才解 pin |
+| 丢唤醒/耗尽挂死 | ARM→重查握手、解 pin/清 BUSY 唤醒；脚本化窗口测试 + pin 满池的真实 SMP 用例 |
+| 后端错误丢脏数据 | 错误状态机保留旧 key/data/DIRTY，返回错误并唤醒；故障注入验收 |
 | 512B 拆分引入的跨 sector 请求性能回退 | 多 sector 请求在包装层顺序逐 sector 处理，命中路径纯内存拷贝；压测对比不劣化（验收观察项，非硬门槛） |
 | CI 计时型 flake | 压测断言只看校验和与标记，不设 wall-time 门槛；jiffies 预算沿用 fd_refcount 先例 |
 
@@ -341,4 +385,4 @@ typedef struct bcache_buf {
 
 - 各 ops 取锁 helper 的具体落点与命名（Phase 1 内自行裁定）。
 - `bcache` 与 `blockdev.c` 之间的内部接口形态（静态链接直调即可，无需 ops）。
-- 压测 worker 数、循环次数与 jiffies 预算的具体取值（以 CI 稳定为先）。
+- 压测循环次数与 jiffies 预算（以 CI 稳定为先）；worker/CPU 数固定为 4。
