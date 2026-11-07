@@ -66,7 +66,8 @@ void ipi_ready_publish_bsp(void)
      * (smp_boot_aps) — publishing before that would ack nothing. */
     ASSERT(intr_handler_table[IPI_VECTOR_TLB] != 0);
     ASSERT(this_cpu() == &percpu_data[0]);
-    ASSERT(percpu_data[0].online == 1);
+    /* BOOT-1: ipi_ready=1 ⇒ online=1 (spec §4 invariant 4). */
+    ASSERT(__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) == 1);
     ASSERT(x86_irqs_enabled());
     __atomic_store_n(&percpu_data[0].ipi_ready, 1, __ATOMIC_RELEASE);
 }
@@ -74,6 +75,8 @@ void ipi_ready_publish_bsp(void)
 void ipi_ready_publish_ap(uint32_t cpu)
 {
     ASSERT(cpu < num_cpus);
+    /* BOOT-1: ipi_ready=1 ⇒ online=1 (spec §4 invariant 4). */
+    ASSERT(__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE) == 1);
     ASSERT(x86_irqs_enabled());
     __atomic_store_n(&percpu_data[cpu].ipi_ready, 1, __ATOMIC_RELEASE);
 }
@@ -97,7 +100,11 @@ void x86_64_boot_percpu(void)
             percpu_data[0].tss = &init_tss[0];
             percpu_data[0].tss_hw = arch_task_boot_state();
             percpu_install_gs(0);
-            percpu_data[0].online = 1;
+            /* BOOT-1: the BSP's own runtime online publication is the
+             * ONLY place besides the AP paths where online is written.
+             * percpu_init() deliberately leaves it 0 — a constructed
+             * CPU is not a running CPU (spec §5.1). */
+            __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
             log_info("percpu: BSP  (cpu=%u, apic_id=%u) online\n",
                      cpu_idx, apic_info.lapics[i].apic_id);
         } else {

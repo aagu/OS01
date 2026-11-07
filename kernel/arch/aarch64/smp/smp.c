@@ -248,7 +248,9 @@ void secondary_idle(uint32_t cpu_id)
     /* Phase 2 #3: install real per-CPU data for AP. head.S:649
      * already set TPIDR_EL1 = &percpu_data[cpu_id]; percpu_install_gs
      * re-confirms (idempotent) and percpu_init populates
-     * self/cpu_id/arch_processor_id/online/rq_lock. Inline asm
+     * self/cpu_id/arch_processor_id/rq_lock (BOOT-1: percpu_init does
+     * NOT publish online — the AP does that itself further below, after
+     * the page-table verify and before the boot ACK). Inline asm
      * 'mrs xN, mpidr_el1' (no helper function — does not exist
      * in codebase, R3 NIT-2). */
     extern void percpu_install_gs(uint32_t cpu);
@@ -263,6 +265,12 @@ void secondary_idle(uint32_t cpu_id)
     /* Test-only loss of ACK: the AP still reaches C initialization and
      * observes the persistent idle command after the BSP times out. */
     if (aarch64_page_table_ap_verify(cpu_id))for(;;)arch_cpu_halt();
+    /* BOOT-1: the AP publishes its own RUNTIME online here — after
+     * percpu_init/page-table verify, BEFORE the boot ACK.  This is the
+     * runtime percpu_t online (release store, spec §5.3), distinct from
+     * the boot-slot ACK below: the NO_ACK injection suppresses only the
+     * ACK, never runtime online, and grants no scheduler admission. */
+    __atomic_store_n(&percpu_data[cpu_id].online, 1, __ATOMIC_RELEASE);
     if (cpu_id != AARCH64_SMP_TEST_NO_ACK_CPU)
         boot_online_set(cpu_id);
     uint32_t command;

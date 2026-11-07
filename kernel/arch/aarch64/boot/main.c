@@ -558,6 +558,10 @@ void arch_boot_percpu(void)
     uint32_t mpidr_bsp;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_bsp));
     percpu_install_gs(0);
+    /* BOOT-1: percpu_init only PREPARES data (online stays 0); this
+     * release store is the BSP's explicit runtime online publication —
+     * the single BSP publication point (spec §5.1).  APs publish their
+     * own online in secondary_idle before their boot ACK. */
     percpu_init(0, mpidr_bsp);
     __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&num_cpus, dtb_cpu_count(), __ATOMIC_RELEASE);

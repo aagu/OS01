@@ -1,3 +1,72 @@
+# ── BOOT-1 CPU lifecycle host tests ─────────────────────────────
+# Both cases compile the REAL production object and replace only the
+# machine boundary via preinclude mocks (mock/boot_cpu_runtime.h for
+# percpu.c, mock/x86_smp_boot_sync_runtime.h for boot_sync.c) — the
+# construction and bounded-wait algorithms under test are never
+# reimplemented in the tests.
+$(eval $(call register_host_test,test_boot_cpu_lifecycle,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_x86_smp_boot_sync,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_cpu_lifecycle.elf \
+    $(TEST_BLD)/test_x86_smp_boot_sync.elf
+
+# Private object names: no other suite may own the production compile of
+# these sources, and a shared name would clobber that object.
+BOOT_CPU_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+BOOT_CPU_PROD_CFLAGS := $(BOOT_CPU_HOST_CFLAGS) \
+    -include $(TEST_MOCK)/boot_cpu_runtime.h
+
+$(TEST_BLD)/boot_cpu_percpu_production.o: $(TESTS_DIR)/kernel/percpu/percpu.c \
+		$(TEST_MOCK)/boot_cpu_runtime.h \
+		$(TESTS_DIR)/kernel/include/percpu/percpu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_CPU_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_cpu_lifecycle.o: $(TEST_CASES)/test_boot_cpu_lifecycle.c \
+		$(TEST_MOCK)/boot_cpu_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_CPU_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_cpu_lifecycle.elf: $(TEST_BLD)/test_boot_cpu_lifecycle.o \
+		$(TEST_BLD)/boot_cpu_percpu_production.o
+	$(HOST_CC) -o $@ $^
+
+X86_BOOT_SYNC_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC)
+X86_BOOT_SYNC_PROD_CFLAGS := $(X86_BOOT_SYNC_HOST_CFLAGS) \
+	-include $(TEST_MOCK)/x86_smp_boot_sync_runtime.h
+
+$(TEST_BLD)/x86_boot_sync_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/smp/boot_sync.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/smp/boot_sync.h \
+		$(TEST_MOCK)/x86_smp_boot_sync_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_BOOT_SYNC_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_x86_smp_boot_sync.o: $(TEST_CASES)/test_x86_smp_boot_sync.c \
+		$(TEST_MOCK)/x86_smp_boot_sync_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_BOOT_SYNC_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_x86_smp_boot_sync.elf: $(TEST_BLD)/test_x86_smp_boot_sync.o \
+		$(TEST_BLD)/x86_boot_sync_production.o
+	$(HOST_CC) -o $@ $^
+
+# Focused dispatch (root entry: make test-boot-lifecycle-host CASE=...):
+#   construction — the real construction test + existing layout/publish
+#                  tests; does NOT build the wait binary
+#   wait         — only the bounded-wait helper test
+#   all          — both groups
+.PHONY: test_boot_lifecycle_construction test_boot_lifecycle_wait test_boot_lifecycle_all
+test_boot_lifecycle_construction: $(TEST_BLD)/test_boot_cpu_lifecycle.elf \
+		test_percpu_layout test_double_state_publish
+	$(TEST_BLD)/test_boot_cpu_lifecycle.elf
+
+test_boot_lifecycle_wait: $(TEST_BLD)/test_x86_smp_boot_sync.elf
+	$(TEST_BLD)/test_x86_smp_boot_sync.elf
+
+test_boot_lifecycle_all: test_boot_lifecycle_construction test_boot_lifecycle_wait
+
 # ── Sched Subsystem Host Tests (spec §5) ────────────────────────
 
 $(eval $(call register_host_test,test_syscall_dispatch,sched,protocol-or-legacy))

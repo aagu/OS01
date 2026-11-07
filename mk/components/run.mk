@@ -745,6 +745,33 @@ test-harness: test-framework-contract
 test-framework-contract:
 	$(call os01_submake,hosttests,test-framework-contract $(OS01_SUBMAKE_ARGS))
 
+# Focused BOOT-1 CPU-lifecycle host tests.  Each CASE forwards to the
+# matching hosttests target through the controlled sub-make boundary:
+#   construction — real percpu construction test + existing
+#                  layout/publish tests (no wait-object dependency)
+#   wait         — only the real bounded-wait helper test
+#   all          — both groups (default when CASE is omitted)
+# Unknown non-empty CASE aborts non-zero (missing per-case rule) and the
+# trailing case re-checks the dispatch so the error names the valid set.
+.PHONY: test-boot-lifecycle-host _test-boot-lifecycle-host-run-construction _test-boot-lifecycle-host-run-wait _test-boot-lifecycle-host-run-all
+_test-boot-lifecycle-host-run-construction:
+	@echo "  [test-boot-lifecycle-host] construction"
+	$(call os01_submake,hosttests,test_boot_lifecycle_construction $(OS01_SUBMAKE_ARGS))
+_test-boot-lifecycle-host-run-wait:
+	@echo "  [test-boot-lifecycle-host] wait"
+	$(call os01_submake,hosttests,test_boot_lifecycle_wait $(OS01_SUBMAKE_ARGS))
+_test-boot-lifecycle-host-run-all:
+	@echo "  [test-boot-lifecycle-host] all"
+	$(call os01_submake,hosttests,test_boot_lifecycle_all $(OS01_SUBMAKE_ARGS))
+test-boot-lifecycle-host: CASE ?=
+test-boot-lifecycle-host: CASE := $(CASE)
+test-boot-lifecycle-host: $(if $(CASE),_test-boot-lifecycle-host-run-$(CASE),_test-boot-lifecycle-host-run-all)
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    ""|construction|wait|all) echo "  [test-boot-lifecycle-host] CASE=${CASE:-all}";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: construction wait all" >&2; exit 1;; \
+	esac
+
 # Focused aarch64 per-CPU tick accounting hosttest (Task 1).  The
 # binary is the REAL kernel/arch/aarch64/platform/time.c host-compiled
 # against the machine-boundary mock: the frozen CNTP configuration and
