@@ -52,13 +52,13 @@ else ifneq ($(filter 1,$(FB_RESOLUTION_TEST)),)
 # FB_RESOLUTION_TEST=1 compiles the /dev/fbtest control surface; isolate its
 # kernel/image artifacts so the production tree is never touched.
 KERNEL_VARIANT := resolution-test
-else ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),)
+else ifneq ($(filter 1,$(CAPACITY_TEST)),)
 KERNEL_VARIANT := arch10-capacity
-else ifneq ($(filter none,$(ARCH9_FAULT)),)
+else ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
 KERNEL_VARIANT :=
 else
-# ARCH9_FAULT != none — kernel/image live under driver-model-<fault>/.
-KERNEL_VARIANT := driver-model-$(ARCH9_FAULT)
+# DRIVER_MODEL_FAULT != none — kernel/image live under driver-model-<fault>/.
+KERNEL_VARIANT := driver-model-$(DRIVER_MODEL_FAULT)
 endif
 # The destructive fault variant wins over every other variant: it must
 # never share objects or images with another test mode (mk/project.mk
@@ -76,7 +76,7 @@ LIBGUI_BUILD_DIR := $(BUILD_DIR)/libgui
 # lets component sub-makes that include ONLY the profile (via
 # OS01_PROFILE_FILE, e.g. user/Makefile) resolve it from OS01_SYSTEST on
 # their own command line (passed through OS01_SUBMAKE_ARGS).
-USER_VARIANT ?= $(if $(filter 1,$(ARCH10_CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
+USER_VARIANT ?= $(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 # Variant-scoped user dirs: the compile-affecting variant keys the user object
 # dir and the user artifact dir, so a systest build compiles fresh objects
 # into build/<profile>/user/systest and publishes artifacts into

@@ -11,8 +11,8 @@ Tests cover:
      - 120s absolute deadline enforced
      - Normal image path is never written/modified
   3. Build variant isolation & parse-time rejection:
-     - Rejection of non-0/1 values for ARCH10_CAPACITY_TEST
-     - Rejection of ARCH10_CAPACITY_TEST=1 on aarch64
+     - Rejection of non-0/1 values for CAPACITY_TEST
+     - Rejection of CAPACITY_TEST=1 on aarch64
      - Rejection of conflicts with systest/selftest/network/fault variants
      - Root-to-child passing via OS01_SUBMAKE_ALLOWED
      - Isolated kernel/image/user object directories
@@ -149,19 +149,19 @@ class TestBuildVariantIsolation(unittest.TestCase):
     """Test build variant rejection and directory isolation."""
 
     def test_non_0_1_switch_rejected(self):
-        cmd = ["make", "--no-print-directory", "-n", "ARCH10_CAPACITY_TEST=2", "kernel.bin"]
+        cmd = ["make", "--no-print-directory", "-n", "CAPACITY_TEST=2", "kernel.bin"]
         p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
-        self.assertNotEqual(p.returncode, 0, "ARCH10_CAPACITY_TEST=2 must be rejected at parse time")
+        self.assertNotEqual(p.returncode, 0, "CAPACITY_TEST=2 must be rejected at parse time")
         self.assertIn("must be 0 or 1", p.stderr + p.stdout)
 
     def test_aarch64_profile_rejected(self):
         cmd = [
             "make", "--no-print-directory", "-n",
-            "PROFILE=aarch64-clang", "ARCH10_CAPACITY_TEST=1",
+            "PROFILE=aarch64-clang", "CAPACITY_TEST=1",
             "kernel.bin"
         ]
         p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
-        self.assertNotEqual(p.returncode, 0, "ARCH10_CAPACITY_TEST=1 must be rejected on aarch64 profile")
+        self.assertNotEqual(p.returncode, 0, "CAPACITY_TEST=1 must be rejected on aarch64 profile")
         self.assertTrue(any(phrase in (p.stderr + p.stdout).lower() for phrase in ["x86-only", "only supported on x86"]))
 
     def test_conflicting_variants_rejected(self):
@@ -171,20 +171,20 @@ class TestBuildVariantIsolation(unittest.TestCase):
             "OS01_NETTEST=1",
             "KERNEL_CANARY_SELFTEST=1",
             "FB_RESOLUTION_TEST=1",
-            "ARCH9_FAULT=bad-nic-bar",
+            "DRIVER_MODEL_FAULT=bad-nic-bar",
             "X86_INTR_FAULT_TEST=bp",
         ]
         for c in conflicts:
             cmd = [
                 "make", "--no-print-directory", "-n",
-                "ARCH10_CAPACITY_TEST=1", c, "kernel.bin"
+                "CAPACITY_TEST=1", c, "kernel.bin"
             ]
             p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=60)
-            self.assertNotEqual(p.returncode, 0, f"ARCH10_CAPACITY_TEST=1 + {c} must fail at parse time")
+            self.assertNotEqual(p.returncode, 0, f"CAPACITY_TEST=1 + {c} must fail at parse time")
 
     def test_submake_allowed_contains_flag(self):
         project_mk = (ROOT / "mk" / "project.mk").read_text()
-        self.assertIn("ARCH10_CAPACITY_TEST", project_mk)
+        self.assertIn("CAPACITY_TEST", project_mk)
 
     def test_variant_directories_isolated(self):
         paths = cap.arch10_capacity_variant_paths(ROOT, "x86_64-clang")

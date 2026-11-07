@@ -1,5 +1,5 @@
 // kernel/selftest/arch10_capacity_fixture.c — Isolated test fixture for ARCH-10 capacity.
-// Compiled ONLY when ARCH10_CAPACITY_TEST=1.
+// Compiled ONLY when CAPACITY_TEST=1.
 
 #include <block/blockdev.h>
 #include <fs/devfs.h>

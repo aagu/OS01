@@ -53,9 +53,9 @@ ifeq ($(USER_DEBUG),1)
 override CFLAGS += -DUSER_DEBUG=1
 endif
 
-# ── ARCH10_CAPACITY_TEST (Task 10 capacity test variant) ──────
-ifeq ($(ARCH10_CAPACITY_TEST),1)
-override CFLAGS += -DOS01_NOFILE_CAPACITY=64 -DARCH10_CAPACITY_TEST=1
+# ── CAPACITY_TEST (capacity test variant) ──────────────────────
+ifeq ($(CAPACITY_TEST),1)
+override CFLAGS += -DOS01_NOFILE_CAPACITY=64 -DCAPACITY_TEST=1
 endif
 
 # ── Compile & link keys ──────────────────────────────────────

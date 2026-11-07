@@ -3,7 +3,7 @@
 driver_matrix_run.py — Drive the ARCH-9 driver discovery matrix in QEMU.
 
 Task 11 brief §Step 3.  For each (case, smp) pair, builds the right
-kernel (ARCH9_FAULT=... when needed), spawns QEMU, sends the guest
+kernel (DRIVER_MODEL_FAULT=... when needed), spawns QEMU, sends the guest
 probe via -serial stdio, parses markers, and asserts the case's contract.
 
 Usage:
@@ -48,9 +48,9 @@ DEFAULT_TIMEOUT = 45  # seconds per case; boot ~18s + probe window
 
 def _read_paths_for(fault):
     """Resolve the kernel artifact + image paths via
-    `make print-run-paths ARCH9_FAULT=<fault>`."""
+    `make print-run-paths DRIVER_MODEL_FAULT=<fault>`."""
     env = dict(os.environ)
-    env["ARCH9_FAULT"] = fault
+    env["DRIVER_MODEL_FAULT"] = fault
     p = subprocess.run(
         ["make", "--no-print-directory", "-s", "print-run-paths"],
         cwd=WORKTREE_ROOT, env=env,
@@ -76,14 +76,14 @@ def _sha256_file(p: str) -> str:
 def _build_for_fault(fault):
     """Build the kernel (and image if non-canonical) for `fault`."""
     env = dict(os.environ)
-    env["ARCH9_FAULT"] = fault
+    env["DRIVER_MODEL_FAULT"] = fault
     if fault == "none":
         # Canonical: build the normal image.
         cmd = ["make", "--no-print-directory", "disk.img"]
     else:
         # Build the variant image; mk/components/image.mk routes
         # IMAGE_VARIANT=driver-model-<fault>.
-        cmd = ["make", "--no-print-directory", f"ARCH9_FAULT={fault}", "image"]
+        cmd = ["make", "--no-print-directory", f"DRIVER_MODEL_FAULT={fault}", "image"]
     p = subprocess.run(cmd, cwd=WORKTREE_ROOT, env=env,
                        capture_output=True, text=True, timeout=1800)
     return p.returncode == 0
@@ -216,7 +216,7 @@ def _run_case(case, smp, timeout=DEFAULT_TIMEOUT, session_factory=None):
 
     Make still owns the build recipe: ``_read_paths_for`` (via
     ``make print-run-paths``) and ``_build_for_fault`` (via
-    ``make ARCH9_FAULT=<fault> image``) are unchanged.  Build
+    ``make DRIVER_MODEL_FAULT=<fault> image``) are unchanged.  Build
     failures end the case before QEMU is launched.
 
     Each invocation creates a fresh ``RunArchive`` (spec §7.2) under

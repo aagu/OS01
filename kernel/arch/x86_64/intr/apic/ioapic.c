@@ -238,7 +238,7 @@ int ioapic_init(void)
         ranges[i].base = apic_info.ioapics[i].gsi_base;
         ranges[i].count = apic_info.ioapics[i].max_redir + 1;
     }
-#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+#if defined(CAPACITY_TEST) && CAPACITY_TEST
     if (range_count < MAX_IOAPICS) {
         ranges[range_count].base = 32;
         ranges[range_count].count = 24;

@@ -37,21 +37,21 @@ KERNEL_HEADERS := include
 # Arch gate: aarch64 selects only these architecture-neutral sources.
 # Architecture implementation files are collected once via ARCH_C_SOURCES.
 
-# ARCH9_FAULT — driver-model matrix fault fixture (Task 11).
-# project.mk validates ARCH9_FAULT and rejects conflict combinations.
+# DRIVER_MODEL_FAULT — driver-model matrix fault fixture (Task 11).
+# project.mk validates DRIVER_MODEL_FAULT and rejects conflict combinations.
 # Pass the value to C as a string token so test_fault.h can switch on it.
 # `none` is the canonical build and excludes device/test_fault.c from
 # the source list so a normal kernel build is byte-identical to one
-# without ARCH9_FAULT (matches the brief's normal-before/after hash
+# without DRIVER_MODEL_FAULT (matches the brief's normal-before/after hash
 # invariant).  KERNEL_TEST_FAULT_C_SOURCES is defined here so the
-# wildcard collection below picks up test_fault.c when ARCH9_FAULT is
+# wildcard collection below picks up test_fault.c when DRIVER_MODEL_FAULT is
 # non-none.  The ALL_CFLAGS additions are appended AFTER ALL_CFLAGS is
-# defined below (see ARCH9_FAULT_FLAGS block after ALL_CFLAGS).
-ifneq ($(filter none,$(ARCH9_FAULT)),)
+# defined below (see DRIVER_MODEL_FAULT_FLAGS block after ALL_CFLAGS).
+ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
 KERNEL_TEST_FAULT_C_SOURCES :=
-ARCH9_FAULT_FLAGS := -UOS01_TEST_FAULT
+DRIVER_MODEL_FAULT_FLAGS := -UOS01_TEST_FAULT
 else
-ARCH9_FAULT_FLAGS := -DOS01_TEST_FAULT=1 '-DARCH9_FAULT_NAME="$(ARCH9_FAULT)"'
+DRIVER_MODEL_FAULT_FLAGS := -DOS01_TEST_FAULT=1 '-DDRIVER_MODEL_FAULT_NAME="$(DRIVER_MODEL_FAULT)"'
 KERNEL_TEST_FAULT_C_SOURCES := device/test_fault.c
 endif
 
@@ -151,7 +151,7 @@ KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
 # below (it only matches arch/x86_64/...).  The source compiles on any
 # arch (no x86 headers); aarch64 can adopt it when it gains a consumer.
 KERNEL_C_SOURCES += arch/thermal.c
-ifeq ($(ARCH10_CAPACITY_TEST),1)
+ifeq ($(CAPACITY_TEST),1)
 KERNEL_C_SOURCES += selftest/arch10_capacity_fixture.c
 endif
 endif
@@ -288,11 +288,11 @@ print-canary-contract:
 	  'KERNEL_BUILD_DIR=$(KERNEL_BUILD_DIR)' \
 	  '$(if $(findstring -DOS01_CANARY_SELFTEST,$(ALL_CFLAGS)),OS01_CANARY_SELFTEST=1,OS01_CANARY_SELFTEST=0)'
 
-# ── ARCH9_FAULT fixture (Task 11) ──────────────────────────
+# ── DRIVER_MODEL_FAULT fixture (Task 11) ──────────────────────────
 # Append the fault-fixture flags to ALL_CFLAGS AFTER the variable is
 # defined above (KERNEL_TEST_FAULT_C_SOURCES was already wired into
 # KERNEL_C_SOURCES by the source-discovery block).
-ALL_CFLAGS += $(ARCH9_FAULT_FLAGS)
+ALL_CFLAGS += $(DRIVER_MODEL_FAULT_FLAGS)
 
 # ── Caller-supplied extra flags ────────────────────────────
 # Folded into ALL_CFLAGS AFTER the variable is defined (the isolated
@@ -306,8 +306,8 @@ ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 # list was assembled.  Empty for the production (0) build.
 ALL_CFLAGS += $(FB_RESOLUTION_TEST_FLAGS)
 
-ifeq ($(ARCH10_CAPACITY_TEST),1)
-ALL_CFLAGS += -DOS01_NOFILE_CAPACITY=64 -DARCH10_CAPACITY_TEST=1
+ifeq ($(CAPACITY_TEST),1)
+ALL_CFLAGS += -DOS01_NOFILE_CAPACITY=64 -DCAPACITY_TEST=1
 endif
 
 # ── lwIP networking stack ────────────────────────────────────
@@ -395,7 +395,7 @@ endif
 # (aarch64_sched_fault_inject). `positive` — and every non-fault build
 # (normal / ordinary selftest) — contributes no define, so those ELFs
 # carry no injection symbol at all (asserted by the harness nm audit).
-# The names deliberately do not collide with ARCH9_FAULT /
+# The names deliberately do not collide with DRIVER_MODEL_FAULT /
 # FB_RESOLUTION_TEST / AARCH64_M1_TEST / AARCH64_SYNC_FAULT_TEST.
 ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 ifeq ($(ARCH),aarch64)

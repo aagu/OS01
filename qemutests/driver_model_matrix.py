@@ -8,7 +8,7 @@ RED tests in qemutests/test_driver_model_matrix.py pin down.
 
 Public surface:
     matrix_case_names()           -> tuple[str, ...] of 15 cases
-    case_fault(case)              -> ARCH9_FAULT slug for a case
+    case_fault(case)              -> DRIVER_MODEL_FAULT slug for a case
     fault_variant_paths(fault)    -> dict of build paths
     build_matrix_plan(smp, fault) -> plan dict (incl. observability)
     build_mock_qemu_argv(case, smp) -> list[str] of QEMU argv tokens
@@ -449,12 +449,12 @@ def build_mock_qemu_argv(case, smp):
 
 
 def dry_run_kernel_build(fault, extra=()):
-    """Invoke `make -n ARCH9_FAULT=<fault> kernel.bin` and capture
+    """Invoke `make -n DRIVER_MODEL_FAULT=<fault> kernel.bin` and capture
     stdout/stderr + exit code.  Used to verify path slugs land in
     recipe expansions and that conflicting kernel flags abort parse."""
     env = dict(os.environ)
     if fault != "none":
-        env["ARCH9_FAULT"] = fault
+        env["DRIVER_MODEL_FAULT"] = fault
     cmd = ["make", "--no-print-directory", "-n", "kernel.bin"]
     cmd[2:2] = list(extra)
     proc = subprocess.run(
@@ -535,7 +535,7 @@ class IrqModeAssertionFailed(HarnessError):
 # Per-NIC IRQ-mode line emitted by kernel/driver/{e1000,virtio-net}.c
 # immediately after net_device_register would be called.  Format:
 #   arch9-irq-mode: bdf=0000:00:01.0 nic=eth0 mode=INTX
-# Only compiled in under ARCH9_FAULT != none (OS01_TEST_FAULT guard).
+# Only compiled in under DRIVER_MODEL_FAULT != none (OS01_TEST_FAULT guard).
 ARCH9_IRQ_MODE_RE = re.compile(
     r"arch9-irq-mode:\s+"
     r"bdf=(?P<bdf>\d{4}:\d{2}:\d{2}\.\d)\s+"

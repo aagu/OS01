@@ -1334,7 +1334,7 @@ DRIVER_MODEL_LOG_DIR := $(OS01_ROOT)/test-results/driver-model
 .PHONY: _test-driver-model-prep _test-driver-model-run
 # _test-driver-model-prep builds the canonical (non-fault) disk image
 # which the matrix harness needs for all the no-fault cases.  Fault
-# cases build their own variant images via `make ARCH9_FAULT=<fault>`.
+# cases build their own variant images via `make DRIVER_MODEL_FAULT=<fault>`.
 _test-driver-model-prep:
 	@mkdir -p $(DRIVER_MODEL_LOG_DIR)
 	$(MAKE) --no-print-directory disk.img
@@ -1427,7 +1427,7 @@ TEST_QEMU_FLAVOR_resolution     =
 # driver-model reuses the normal image path (matrix harness rebuilds
 # variant images itself); the build contract test and the matrix
 # python harness both produce fault variant images via
-# `make ARCH9_FAULT=<fault>`.
+# `make DRIVER_MODEL_FAULT=<fault>`.
 TEST_QEMU_FLAVOR_driver-model   =
 # monitor (monitor plan Task 9) runs the normal image directly: the test
 # helper /bin/test_monitor and /bin/monitor are both installed into the
@@ -1464,7 +1464,7 @@ TEST_QEMU_FLAVOR_gui            =
 # image read-only (-snapshot) at 1/2 cores with QMP, injects real PS/2
 # key events and compares QMP screendumps.
 TEST_QEMU_FLAVOR_gui-desktop    =
-TEST_QEMU_FLAVOR_arch10-capacity = ARCH10_CAPACITY_TEST=1
+TEST_QEMU_FLAVOR_arch10-capacity = CAPACITY_TEST=1
 # Default baseline log path for the terminal-present suite; the
 # task-6 brief calls this out explicitly.  The baseline pair lives in
 # the repo (qemutests/baselines/terminal-present/) so the suite works
@@ -1507,8 +1507,8 @@ $(error ERROR: syscall E2E must not be combined with KERNEL_SELFTEST=1)
 endif
 endif
 ifeq ($(SUITE),arch10-capacity)
-ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),1)
-$(error ERROR: test-qemu SUITE=arch10-capacity requires ARCH10_CAPACITY_TEST=1 on the top-level make invocation)
+ifneq ($(filter 1,$(CAPACITY_TEST)),1)
+$(error ERROR: test-qemu SUITE=arch10-capacity requires CAPACITY_TEST=1 on the top-level make invocation)
 endif
 endif
 endif
@@ -2154,7 +2154,7 @@ test-contract: $(if $(filter x86_64-clang,$(PROFILE)),disk.img,aarch64-uefi)
 	$(call require_capability,$(if $(filter x86_64-clang,$(PROFILE)),rootfs,uefi))
 	$(MAKE) --no-print-directory _test-contract-prep-$(if $(filter x86_64-clang,$(PROFILE)),x86,aarch64)
 	# arch9-build-contract runs FIRST: it dry-runs ``make -n
-	# ARCH9_FAULT=<fault> kernel.bin``, whose ``$(KERNEL_ARTIFACT)``
+	# DRIVER_MODEL_FAULT=<fault> kernel.bin``, whose ``$(KERNEL_ARTIFACT)``
 	# recipe carries an ``@+$(SHELL) -ec '...'`` line that forces
 	# execution under ``-n`` (so it sees the real publish-lock /
 	# sysroot-symlink state). The ``host-test`` mode at the END of
@@ -2253,31 +2253,32 @@ unlock-profile:
 	  echo "no lock held at $(LOCK_DIR)"; \
 	fi
 
-# ARCH-9 driver model matrix fault-fixture cleanup (Task 11).
+# Driver model matrix fault-fixture cleanup.
 # Removes ONLY the derived kernel/image artifacts for the given fault
 # (kernel/driver-model-<fault>/ + artifacts/kernel/driver-model-<fault>/
 # + image/driver-model-<fault>/); never touches libc, user, firmware,
 # or normal artifacts.  Used between fault runs so the matrix harness
 # can switch faults without `make clean` of the whole profile.
-.PHONY: clean-arch9-fixture
-# Parse-time validation: ARCH9_FAULT must be a known non-none slug.
+.PHONY: clean-driver-model-fixture clean-arch9-fixture
+# Parse-time validation: DRIVER_MODEL_FAULT must be a known non-none slug.
 # project.mk's enum gate covers all values; this target refuses empty,
 # "none", or any non-driver-model variant (defence in depth).
-ifneq ($(filter $(ARCH9_FAULT),none),)
-clean-arch9-fixture:
-	@echo "ERROR: clean-arch9-fixture requires ARCH9_FAULT=<non-none slug>" >&2; \
+ifneq ($(filter $(DRIVER_MODEL_FAULT),none),)
+clean-driver-model-fixture:
+	@echo "ERROR: clean-driver-model-fixture requires DRIVER_MODEL_FAULT=<non-none slug>" >&2; \
 	exit 1
-else ifeq ($(filter $(ARCH9_FAULT),observe bad-nic-bar adapter-fail ahci-empty irq-conflict),)
-clean-arch9-fixture:
-	@echo "ERROR: ARCH9_FAULT='$(ARCH9_FAULT)' is not a known driver-model fault slug" >&2; \
+else ifeq ($(filter $(DRIVER_MODEL_FAULT),observe bad-nic-bar adapter-fail ahci-empty irq-conflict),)
+clean-driver-model-fixture:
+	@echo "ERROR: DRIVER_MODEL_FAULT='$(DRIVER_MODEL_FAULT)' is not a known driver-model fault slug" >&2; \
 	exit 1
 else
-clean-arch9-fixture:
-	@echo "  [clean-arch9-fixture] ARCH9_FAULT=$(ARCH9_FAULT)"
-	rm -rf "$(BUILD_DIR)/kernel/driver-model-$(ARCH9_FAULT)"
-	rm -rf "$(BUILD_DIR)/artifacts/kernel/driver-model-$(ARCH9_FAULT)"
-	rm -rf "$(BUILD_DIR)/image/driver-model-$(ARCH9_FAULT)"
+clean-driver-model-fixture:
+	@echo "  [clean-driver-model-fixture] DRIVER_MODEL_FAULT=$(DRIVER_MODEL_FAULT)"
+	rm -rf "$(BUILD_DIR)/kernel/driver-model-$(DRIVER_MODEL_FAULT)"
+	rm -rf "$(BUILD_DIR)/artifacts/kernel/driver-model-$(DRIVER_MODEL_FAULT)"
+	rm -rf "$(BUILD_DIR)/image/driver-model-$(DRIVER_MODEL_FAULT)"
 endif
+clean-arch9-fixture: clean-driver-model-fixture
 
 # M1 uses distinct immutable build/image variants; outer flags never choose
 # the matrix's normal/selftest artifact implicitly.

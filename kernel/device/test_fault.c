@@ -1,6 +1,6 @@
 /* kernel/device/test_fault.c — Driver-model matrix fault fixture (Task 11)
  *
- * Only compiled when ARCH9_FAULT != none (kernel/Makefile).  The
+ * Only compiled when DRIVER_MODEL_FAULT != none (kernel/Makefile).  The
  * canonical (none) build never sees this TU so kernel/device/test_fault.c
  * cannot pollute the normal kernel.bin — the brief's normal-before/after
  * hash invariant.
@@ -49,7 +49,7 @@ void arch9_fault_set_card_msix(void) {
     s_nic_probe_count++;
 }
 #else
-/* ARCH9_FAULT_NAME is injected as -DARCH9_FAULT_NAME=<slug> from
+/* DRIVER_MODEL_FAULT_NAME is injected as -DDRIVER_MODEL_FAULT_NAME=<slug> from
  * kernel/Makefile.  Convert the slug to the enum value at boot. */
 static int s_active_fault = OS01_TEST_FAULT_NONE;
 
@@ -91,9 +91,9 @@ int arch9_fault_get_active(void)
 
 static int _fault_dispatch_at_init(void)
 {
-    s_active_fault = resolve_slug(ARCH9_FAULT_NAME);
+    s_active_fault = resolve_slug(DRIVER_MODEL_FAULT_NAME);
     log_info("arch9-fault: slug=%s active=%d\n",
-              ARCH9_FAULT_NAME, s_active_fault);
+              DRIVER_MODEL_FAULT_NAME, s_active_fault);
     return 0;
 }
 

@@ -20,7 +20,7 @@ endif
 ifeq ($(OS01_NETTEST),1)
 INITTAB_FILE := config/inittab.nettest
 endif
-ifeq ($(ARCH10_CAPACITY_TEST),1)
+ifeq ($(CAPACITY_TEST),1)
 INITTAB_FILE := config/inittab.arch10-capacity
 endif
 

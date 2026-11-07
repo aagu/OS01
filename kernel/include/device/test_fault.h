@@ -9,12 +9,12 @@
  * Task 11 brief §Step 4.  This header is the fault enum + macro API used
  * by the kernel probe paths (device/boot.c, net/lwip.c, driver/ahci.c)
  * to inject a single fault per build variant.  Only one of the six
- * ARCH9_FAULT slugs is active at any time (project.mk rejects
+ * DRIVER_MODEL_FAULT slugs is active at any time (project.mk rejects
  * combinations and unknown values).  The fixture is a tiny TU
- * (kernel/device/test_fault.c) compiled only when ARCH9_FAULT != none.
+ * (kernel/device/test_fault.c) compiled only when DRIVER_MODEL_FAULT != none.
  *
  * Architectural contract:
- *   - All hooks MUST be no-ops when ARCH9_FAULT=none.  The normal
+ *   - All hooks MUST be no-ops when DRIVER_MODEL_FAULT=none.  The normal
  *     build never touches kernel/device/test_fault.c, so the canonical
  *     kernel.bin hash is byte-identical to a build that omits the
  *     fixture (verified by the brief's normal-before/after hash check).
@@ -23,7 +23,7 @@
  *
  * The active fault is dispatched at RUNTIME via
  * arch9_fault_get_active(): the preprocessor sees a single -D
- * ARCH9_FAULT_NAME=<slug> token and the dispatcher in test_fault.c
+ * DRIVER_MODEL_FAULT_NAME=<slug> token and the dispatcher in test_fault.c
  * converts it to the OS01_TEST_FAULT_* enum value.  This sidesteps
  * the preprocessor's inability to substring-match in #if directives.
  */
@@ -112,7 +112,7 @@ int arch9_fault_get_active(void);
  * For NONE builds, every hook expands to nothing (the inline function
  * bodies never run because the observation counter block is inside
  * #ifdef OS01_TEST_FAULT — and OS01_TEST_FAULT is undefined when
- * ARCH9_FAULT=none).
+ * DRIVER_MODEL_FAULT=none).
  */
 
 static inline void arch9_fault_on_pci_enumerate_begin(unsigned n_drivers) {
@@ -246,7 +246,7 @@ static inline void arch9_fault_on_probe_unbound_no_match_bdf(uint16_t bdf_key) {
 /* ── Cross-driver IRQ-conflict helpers ────────────────────────────
  * Used by e1000.c / virtio-net.c to track the first card's GSI so
  * the second probe can detect a candidate GSI collision and fall to
- * POLL (ir-conflict fault).  All hooks are no-ops when ARCH9_FAULT
+ * POLL (ir-conflict fault).  All hooks are no-ops when DRIVER_MODEL_FAULT
  * is none. */
 static inline uint32_t arch9_fault_get_first_card_gsi(void) {
 #ifdef OS01_TEST_FAULT

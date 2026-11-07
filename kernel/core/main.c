@@ -158,7 +158,7 @@ int kernel_main(const struct boot_context *bootctx)
     // for all enumerated USB devices. Failure is non-fatal (diagnostic facility).
     usb_devfs_register_all();
 
-#if defined(ARCH10_CAPACITY_TEST) && ARCH10_CAPACITY_TEST
+#if defined(CAPACITY_TEST) && CAPACITY_TEST
     void arch10_capacity_fixture_init(void);
     arch10_capacity_fixture_init();
 #endif

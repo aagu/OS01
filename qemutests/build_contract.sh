@@ -401,7 +401,7 @@ EOF
              ! make -n PROFILE=x86_64-clang X86_INTR_FAULT_TEST=invalid print-run-paths
              for conflict in KERNEL_SELFTEST=1 OS01_SYSTEST=1 OS01_NETTEST=1 \
                             KERNEL_CANARY_SELFTEST=1 KERNEL_TEST_FORCE_NO_RNDRRS=1 \
-                            FB_RESOLUTION_TEST=1 ARCH9_FAULT=observe; do
+                            FB_RESOLUTION_TEST=1 DRIVER_MODEL_FAULT=observe; do
                ! make -n PROFILE=x86_64-clang X86_INTR_FAULT_TEST=bp $conflict print-run-paths \
                  || { echo "targets: X86_INTR_FAULT_TEST=bp + $conflict must be rejected" >&2; exit 1; }
              done

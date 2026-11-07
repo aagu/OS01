@@ -8,7 +8,7 @@ asserts, without building anything, that:
     while FB_RESOLUTION_TEST=0 (and unset) keeps the normal image path;
   * an unknown value is rejected at parse time;
   * it is mutually exclusive with OS01_SYSTEST / OS01_NETTEST /
-    KERNEL_SELFTEST / KERNEL_CANARY_SELFTEST / ARCH9_FAULT;
+    KERNEL_SELFTEST / KERNEL_CANARY_SELFTEST / DRIVER_MODEL_FAULT;
   * a non-x86 target rejects FB_RESOLUTION_TEST=1 explicitly.
 
 All make invocations use cheap introspection targets (print-run-paths /
@@ -79,7 +79,7 @@ def test_unknown_value():
 
 def test_conflicts():
     for extra in ("OS01_SYSTEST=1", "OS01_NETTEST=1", "KERNEL_SELFTEST=1",
-                  "KERNEL_CANARY_SELFTEST=1", "ARCH9_FAULT=observe"):
+                  "KERNEL_CANARY_SELFTEST=1", "DRIVER_MODEL_FAULT=observe"):
         rc, out = run_make(["PROFILE=x86_64-clang", "FB_RESOLUTION_TEST=1",
                             extra, "print-run-paths"])
         check(f"FB_RESOLUTION_TEST=1 conflicts with {extra}",

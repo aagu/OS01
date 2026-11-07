@@ -1,7 +1,7 @@
 # config/rootfs.mk — version-controlled disk-image input manifest (spec:
 # "Rootfs manifest"). Programs use the shared discovery list. sh.c is built
 # for development, while /bin/sh remains the BusyBox applet.
-ROOTFS_USER_PROGRAMS := $(if $(filter 1,$(ARCH10_CAPACITY_TEST)),$(filter-out sh,$(USER_PROGRAMS)),$(filter-out sh test_arch10_capacity,$(USER_PROGRAMS)))
+ROOTFS_USER_PROGRAMS := $(if $(filter 1,$(CAPACITY_TEST)),$(filter-out sh,$(USER_PROGRAMS)),$(filter-out sh test_arch10_capacity,$(USER_PROGRAMS)))
 ROOTFS_FILES := $(foreach p,$(ROOTFS_USER_PROGRAMS),/bin/$(p)=$(USER_ARTIFACT_DIR)/$(p).elf:0755) \
                 /bin/busybox=$(USER_ARTIFACT_DIR)/busybox.elf:0755 \
                 /kernel.bin=$(KERNEL_ARTIFACT):0644 /etc/inittab=$(INITTAB_FILE):0644

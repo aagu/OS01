@@ -3,17 +3,17 @@
 test_arch9_build_contract.py — Build-contract test for the ARCH-9 driver
 discovery matrix.
 
-Validates the REAL Make rules (no path rewriting) for ARCH9_FAULT
+Validates the REAL Make rules (no path rewriting) for DRIVER_MODEL_FAULT
 plumbing:
 
   - Valid enum values produce KERNEL_VARIANT=driver-model-<fault> and
     put kernel + image artifacts in the documented paths.
-  - Unknown ARCH9_FAULT is rejected at parse time.
+  - Unknown DRIVER_MODEL_FAULT is rejected at parse time.
   - Non-none + conflicting kernel flags (KERNEL_SELFTEST,
     OS01_SYSTEST, OS01_NETTEST, KERNEL_CANARY_SELFTEST,
     KERNEL_TEST_FORCE_NO_RNDRRS, INITTAB_FILE=test) aborts at parse.
   - The print-run-paths target prints the variant image path under
-    ARCH9_FAULT=<non-none>.
+    DRIVER_MODEL_FAULT=<non-none>.
   - The matrix's make test-qemu SUITE=driver-model is accepted by the
     parse-time SUITE case statement.
 
@@ -61,16 +61,16 @@ class TestArch9FaultContract(unittest.TestCase):
         self.profile = os.environ.get("PROFILE", "x86_64-clang")
 
     def test_unknown_fault_rejected(self):
-        r = run_make("-n", "ARCH9_FAULT=invalid", "print-run-paths")
+        r = run_make("-n", "DRIVER_MODEL_FAULT=invalid", "print-run-paths")
         self.assertNotEqual(r.returncode, 0,
-                             "unknown ARCH9_FAULT must abort")
-        self.assertIn("ARCH9_FAULT='invalid'", r.stderr + r.stdout,
+                             "unknown DRIVER_MODEL_FAULT must abort")
+        self.assertIn("DRIVER_MODEL_FAULT='invalid'", r.stderr + r.stdout,
                       "error message must name the bad value")
 
     def test_none_fault_is_canonical(self):
-        # With ARCH9_FAULT=none, the build dir is the canonical one
+        # With DRIVER_MODEL_FAULT=none, the build dir is the canonical one
         # (no driver-model-<fault>/ suffix anywhere).
-        r = run_make("-n", "ARCH9_FAULT=none", "print-run-paths")
+        r = run_make("-n", "DRIVER_MODEL_FAULT=none", "print-run-paths")
         self.assertEqual(r.returncode, 0,
                          f"print-run-paths failed: {r.stderr}")
         img_lines = parse_image_lines(r.stdout)
@@ -80,7 +80,7 @@ class TestArch9FaultContract(unittest.TestCase):
                              f"none fault must not inject slug: {ln!r}")
 
     def test_observe_fault_uses_variant_dir(self):
-        r = run_make("-n", "ARCH9_FAULT=observe", "print-run-paths")
+        r = run_make("-n", "DRIVER_MODEL_FAULT=observe", "print-run-paths")
         self.assertEqual(r.returncode, 0,
                          f"print-run-paths failed: {r.stderr}")
         img_lines = parse_image_lines(r.stdout)
@@ -88,7 +88,7 @@ class TestArch9FaultContract(unittest.TestCase):
                         f"observe fault must isolate image dir: {img_lines!r}")
 
     def test_bad_nic_bar_uses_variant_dir(self):
-        r = run_make("-n", "ARCH9_FAULT=bad-nic-bar", "print-run-paths")
+        r = run_make("-n", "DRIVER_MODEL_FAULT=bad-nic-bar", "print-run-paths")
         self.assertEqual(r.returncode, 0,
                          f"print-run-paths failed: {r.stderr}")
         img_lines = parse_image_lines(r.stdout)
@@ -99,7 +99,7 @@ class TestArch9FaultContract(unittest.TestCase):
         for fault in ("observe", "bad-nic-bar", "adapter-fail",
                        "ahci-empty", "irq-conflict"):
             with self.subTest(fault=fault):
-                r = run_make("-n", f"ARCH9_FAULT={fault}", "print-run-paths")
+                r = run_make("-n", f"DRIVER_MODEL_FAULT={fault}", "print-run-paths")
                 self.assertEqual(r.returncode, 0,
                                  f"{fault} print-run-paths failed: {r.stderr}")
                 img = parse_image_lines(r.stdout)
@@ -116,12 +116,12 @@ class TestArch9FaultContract(unittest.TestCase):
         ):
             with self.subTest(conflict=conflict):
                 r = run_make("-n",
-                              "ARCH9_FAULT=bad-nic-bar",
+                              "DRIVER_MODEL_FAULT=bad-nic-bar",
                               conflict,
                               "print-run-paths")
                 self.assertNotEqual(
                     r.returncode, 0,
-                    f"{conflict} + ARCH9_FAULT=bad-nic-bar must abort",
+                    f"{conflict} + DRIVER_MODEL_FAULT=bad-nic-bar must abort",
                 )
                 out = r.stderr + r.stdout
                 self.assertTrue(
@@ -131,7 +131,7 @@ class TestArch9FaultContract(unittest.TestCase):
 
     def test_inittab_test_conflict_rejected(self):
         r = run_make("-n",
-                      "ARCH9_FAULT=bad-nic-bar",
+                      "DRIVER_MODEL_FAULT=bad-nic-bar",
                       "INITTAB_FILE=config/inittab.test",
                       "print-run-paths")
         self.assertNotEqual(r.returncode, 0,
@@ -140,13 +140,13 @@ class TestArch9FaultContract(unittest.TestCase):
     def test_print_run_paths_kernel_artifact_slug(self):
         # The kernel artifact path must live under
         # artifacts/kernel/driver-model-<fault>/kernel.bin.
-        r = run_make("-n", "ARCH9_FAULT=observe",
+        r = run_make("-n", "DRIVER_MODEL_FAULT=observe",
                       "print-run-paths")
         self.assertEqual(r.returncode, 0)
         # print-run-paths only prints firmware + image; the kernel
         # build recipe is on the dry-run's recipe path.  Validate
         # by running -n kernel.bin and grepping for the slug.
-        r2 = run_make("-n", "ARCH9_FAULT=observe", "kernel.bin")
+        r2 = run_make("-n", "DRIVER_MODEL_FAULT=observe", "kernel.bin")
         self.assertEqual(r2.returncode, 0)
         # /kernel/driver-model-observe/ should appear in the dry-run
         self.assertTrue(
@@ -184,7 +184,7 @@ class TestDriverModelSuiteAcceptance(unittest.TestCase):
         # Recipe-time gate: invoke make WITHOUT -n so the case
         # statement actually runs.  Unknown SUITE -> exit 1.
         r = run_make("test-qemu", "SUITE=not-a-real-suite",
-                      "ARCH9_FAULT=none")
+                      "DRIVER_MODEL_FAULT=none")
         # Without the disk.img built, make will fail before reaching
         # the SUITE gate.  We only require that make did not succeed
         # AND that, if the recipe ran far enough, the gate fired.
@@ -215,14 +215,14 @@ class TestMatrixCaseNames(unittest.TestCase):
 
 
 class TestCleanArch39FixtureTarget(unittest.TestCase):
-    """make clean-arch9-fixture ARCH9_FAULT=<fault> cleans only the
+    """make clean-driver-model-fixture DRIVER_MODEL_FAULT=<fault> cleans only the
     derived driver-model-<fault>/ paths, never the normal artifact."""
 
     def test_clean_arch9_fixture_unknown_rejected(self):
-        r = run_make("-n", "clean-arch9-fixture",
-                      "ARCH9_FAULT=invalid")
+        r = run_make("-n", "clean-driver-model-fixture",
+                      "DRIVER_MODEL_FAULT=invalid")
         self.assertNotEqual(r.returncode, 0,
-                             "unknown ARCH9_FAULT must abort")
+                             "unknown DRIVER_MODEL_FAULT must abort")
 
 
 if __name__ == "__main__":

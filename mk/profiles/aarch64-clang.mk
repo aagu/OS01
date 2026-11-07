@@ -25,18 +25,18 @@ LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 # KERNEL_SELFTEST=1 (sync-fault is a selftest variant, not a free-standing
 # mode); flagging it alone is rejected at parse time below.
 
-# ARCH9_FAULT is x86-only: the driver model matrix harness drives PCI NIC
+# DRIVER_MODEL_FAULT is x86-only: the driver model matrix harness drives PCI NIC
 # / AHCI faults that aarch64 does not implement. Reject non-none here so
 # the matrix never silently degrades to a passing aarch64 variant.
-ifneq ($(filter none,$(ARCH9_FAULT)),)
+ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
 # pass — none is the canonical build for aarch64 too
 else
-$(error ARCH9_FAULT=$(ARCH9_FAULT) is x86-only; aarch64 profile must keep ARCH9_FAULT=none)
+$(error DRIVER_MODEL_FAULT=$(DRIVER_MODEL_FAULT) is x86-only; aarch64 profile must keep DRIVER_MODEL_FAULT=none)
 endif
 #
-# ARCH10_CAPACITY_TEST is x86-only
-ifneq ($(filter 1,$(ARCH10_CAPACITY_TEST)),)
-$(error ARCH10_CAPACITY_TEST=1 is x86-only; aarch64 profile must keep ARCH10_CAPACITY_TEST=0)
+# CAPACITY_TEST is x86-only
+ifneq ($(filter 1,$(CAPACITY_TEST)),)
+$(error CAPACITY_TEST=1 is x86-only; aarch64 profile must keep CAPACITY_TEST=0)
 endif
 
 # X86_INTR_FAULT_TEST is x86-only as well: the destructive #BP / NMI
@@ -59,7 +59,7 @@ endif
 # P5 Task 1). `positive` selects KERNEL_VARIANT=sched (the strict
 # evidence image); the four fault values select sched-fault-<value>
 # and each maps to exactly ONE numeric compile define in kernel/Makefile
-# (AARCH64_SCHED_FAULT_<TOKEN>=1 — no collision with ARCH9_FAULT /
+# (AARCH64_SCHED_FAULT_<TOKEN>=1 — no collision with DRIVER_MODEL_FAULT /
 # FB_RESOLUTION_TEST / AARCH64_M1_TEST / AARCH64_SYNC_FAULT_TEST).
 # Nonempty requires KERNEL_SELFTEST=1 (the sched variants are selftest
 # images) and rejects every other compile-affecting test variant so the
