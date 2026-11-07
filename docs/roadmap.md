@@ -98,11 +98,11 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 #### 启动编排治理：五个 spec（2026-11-07）
 
-依据：[系统启动顺序、阶段抽象与优化分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md)（源码基准 `b3a4f3bc`）。当前为**待编写 spec / 待实施**；报告仅作静态分析，CPU 握手与早期 IRQ 风险尚无 QEMU 复现证据。
+依据：[系统启动顺序、阶段抽象与优化分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md)（源码基准 `b3a4f3bc`）。BOOT-1 的 spec/plan 已通过子 agent 文档评审，BOOT-2～5 待编写 spec；**全部尚未实施**。分析报告仅作静态分析，CPU 握手与早期 IRQ 风险尚无 QEMU 复现证据。
 
 | Spec | 范围 | 验收目标 | 依赖 / 状态 |
 |------|------|----------|-------------|
-| BOOT-1 CPU 生命周期与 SMP 握手 | 明确 percpu 构造、online、ipi_ready、scheduler_ok 的生产者与消费者；修正 x86 AP 响应等待条件，并保留 aarch64 shootdown 资格约束 | 延迟/不响应 AP 不会误判成功；IPI/调度只使用符合条件的 CPU；双架构 SMP/shootdown 回归 | 统一 kernel_main ✅；待编写 spec |
+| BOOT-1 CPU 生命周期与 SMP 握手 | 明确 percpu 构造、online、ipi_ready、scheduler_ok 的生产者与消费者；修正 x86 AP 响应等待条件，并保留 aarch64 shootdown 资格约束 | 延迟/不响应 AP 不会误判成功；IPI/调度只使用符合条件的 CPU；双架构 SMP/shootdown 回归 | 统一 kernel_main ✅；[spec R2](superpowers/specs/2026-11-07-boot-1-cpu-lifecycle-design.md) / [plan R2](superpowers/plans/2026-11-07-boot-1-cpu-lifecycle.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-07-boot-1-doc-review.md)）；待实施 |
 | BOOT-2 早期中断与时间设施启动顺序 | 分离控制器配置、handler 安装、中断源启动、CPU IRQ 放行；核查 BSP percpu、IRQ 返回、softirq 与早期校准依赖 | 首次 IRQ 可达路径满足前置条件；PIT/LAPIC handoff、校准及 fallback 正常；先观测/注入验证风险再定修复 | BOOT-1；待编写 spec |
 | BOOT-3 启动失败传播与必需能力检查 | 注册/initcall 错误传播，必需/可选策略，根挂载、TTY/PTY、PID 1 创建检查；承接 ARCH-8 失败处理 | 必需步骤失败原处停止并明确定位；可选失败可降级；覆盖注册失败、根挂载和初始运行环境创建失败 | 建议在 BOOT-2 后验收；待编写 spec |
 | BOOT-4 阶段契约与跨架构编排 | 公共 boot 钩子前置/后置能力、命名阶段、同阶段依赖、per-CPU 准备与本核执行的区分；承接 ARCH-8 编排部分 | 同名钩子完成能力明确；双架构按特性门满足契约；必要顺序不依赖偶然链接次序；注释/文档一致 | BOOT-1～3；待编写 spec |
