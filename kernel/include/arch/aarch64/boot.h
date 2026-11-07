@@ -1,0 +1,18 @@
+#ifndef _ARCH_AARCH64_BOOT_H
+#define _ARCH_AARCH64_BOOT_H
+
+#ifndef ARCH_SELFTEST_EXPECTED_LATE
+#if defined(AARCH64_AP_SCHED_WAKE_TEST)
+#define ARCH_SELFTEST_EXPECTED_LATE 13U
+#elif defined(AARCH64_AP_SCHED_TEST_AP) || defined(AARCH64_SCHED_TICK_TEST)
+#define ARCH_SELFTEST_EXPECTED_LATE 7U
+#else
+#define ARCH_SELFTEST_EXPECTED_LATE 9U
+#endif
+#endif
+
+static inline unsigned int arch_selftest_expected_late(void) {
+    return ARCH_SELFTEST_EXPECTED_LATE;
+}
+
+#endif /* _ARCH_AARCH64_BOOT_H */
