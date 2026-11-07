@@ -27,6 +27,63 @@ extern bool lapic_timer_start(uint32_t freq_hz);
 // 两侧握手自旋的统一上限（BSP 等 AP、AP 等 BSP 用同一宏）。
 #define SYNC_SPIN_LIMIT 1000000u
 
+// ── BOOT-1 fault-matrix injection (compile-flag controlled) ──────
+// The X86_SMP_BOOT_TEST_* macros arrive through KERNEL_EXTRA_CFLAGS and
+// exist ONLY in the isolated boot-lifecycle-<case> kernel variant.  A
+// normal build defines none of them: no injection code, no marker
+// strings (the suite's runner audits the normal ELF for exactly that).
+// CPU1 is always the fault target; the BSP budget is never changed.
+#if defined(X86_SMP_BOOT_TEST_DELAY_ONLINE) || \
+    defined(X86_SMP_BOOT_TEST_NO_ONLINE) || \
+    defined(X86_SMP_BOOT_TEST_NO_SCHEDULER)
+#if defined(X86_SMP_BOOT_TEST_DELAY_ONLINE)
+#define BOOT1_FAULT_VARIANT_NAME "boot-lifecycle-delay-online"
+#elif defined(X86_SMP_BOOT_TEST_NO_ONLINE)
+#define BOOT1_FAULT_VARIANT_NAME "boot-lifecycle-no-online"
+#else
+#define BOOT1_FAULT_VARIANT_NAME "boot-lifecycle-no-scheduler"
+#endif
+static void boot1_fault_variant_identity(void)
+{
+    log_info("[boot-1] variant=" BOOT1_FAULT_VARIANT_NAME "\n");
+}
+
+/* Called on the AP immediately BEFORE the online publication. */
+static void boot1_fault_before_online(uint32_t cpu)
+{
+    if (cpu != 1)
+        return;
+#ifdef X86_SMP_BOOT_TEST_DELAY_ONLINE
+    log_info("[boot-1] delay cpu=1 spins=100000\n");
+    for (volatile uint32_t d = 0; d < 100000; d++)
+        arch_cpu_pause();
+#endif
+#ifdef X86_SMP_BOOT_TEST_NO_ONLINE
+    /* Never publish online: the BSP's required wait must time out. */
+    for (;;)
+        arch_cpu_pause();
+#endif
+}
+
+/* Called on the AP immediately AFTER ipi_ready_publish_ap. */
+static void boot1_fault_after_ipi_ready(uint32_t cpu)
+{
+#ifdef X86_SMP_BOOT_TEST_NO_SCHEDULER
+    if (cpu == 1) {
+        /* online/TSC/IPI all published; scheduler_ok never follows. */
+        for (;;)
+            arch_cpu_pause();
+    }
+#else
+    (void)cpu;
+#endif
+}
+#else
+static inline void boot1_fault_variant_identity(void) {}
+static inline void boot1_fault_before_online(uint32_t cpu) { (void)cpu; }
+static inline void boot1_fault_after_ipi_ready(uint32_t cpu) { (void)cpu; }
+#endif
+
 static void ap_init_lapic(void)
 {
     uint32_t id = lapic_read(LAPIC_ID) >> 24;
@@ -147,6 +204,7 @@ void ap_entry(void)
      * attempt above are all complete here.  Release store: the BSP's
      * bounded wait acquire-reads this exact publication.  Publishing
      * BEFORE the TSC handshake avoids BSP/AP mutual spin (spec §5.2). */
+    boot1_fault_before_online(cpu->cpu_id);
     __atomic_store_n(&cpu->online, 1, __ATOMIC_RELEASE);
     uint32_t w = 0;
     while (w++ < SYNC_SPIN_LIMIT &&
@@ -162,6 +220,7 @@ void ap_entry(void)
      * (lidt above) and IRQs are unmasked (arch_local_irq_enable above).
      * No smp_starting gate on x86 (aarch64-only sequencing device). */
     ipi_ready_publish_ap(cpu->cpu_id);
+    boot1_fault_after_ipi_ready(cpu->cpu_id);
     debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
                   cpu->cpu_id, cpu->idle->pid);
 
@@ -228,6 +287,7 @@ static void boot_fatal_cpu(uint32_t cpu, const char *stage)
 
 void smp_boot_aps(void)
 {
+    boot1_fault_variant_identity();
     ipi_init();
     /* M3 Task 12: BSP publishes ipi_ready only after the TLB IPI handler
      * is registered (ipi_init above) and before any AP exists to target.

@@ -48,6 +48,12 @@ X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_C
 ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
 $(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is x86-only; the aarch64 profile must not select a destructive fault variant)
 endif
+# X86_SMP_BOOT_TEST is x86-only as well: the BOOT-1 CPU-lifecycle fault
+# matrix injects into the x86 AP boot path (kernel/arch/x86_64/smp/smp.c).
+X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_EXTRA_CFLAGS)),delay-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_ONLINE,$(KERNEL_EXTRA_CFLAGS)),no-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_SCHEDULER,$(KERNEL_EXTRA_CFLAGS)),no-scheduler,)))
+ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
+$(error X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE) is x86-only; the aarch64 profile must not select a boot-lifecycle fault variant)
+endif
 #
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ifeq ($(filter 1,$(KERNEL_SELFTEST)),)

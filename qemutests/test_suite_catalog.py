@@ -81,6 +81,7 @@ class TestSuiteCatalogContract(unittest.TestCase):
             "monitor",
             "terminal-present",
             "intr-x86",
+            "boot-lifecycle",
             "gui",
             "gui-desktop",
         }

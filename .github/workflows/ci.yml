@@ -423,6 +423,11 @@ jobs:
           ( suite make test-qemu SUITE=terminal-present ) || \
             echo "::warning::terminal-present known-failing (surface pixel contract, see docs/debug/2026-11-04-terminal-present-surface-pixels.md)"
           suite make test-qemu SUITE=intr-x86
+          # BOOT-1 fault matrix: the target itself runs the whole 8-group
+          # matrix serially (normal 1/2/4/8, delay 2/4, fatal 2/2); the
+          # 90 s per-case timeout is a per-QEMU-run bound, NOT the matrix
+          # budget — the nightly job's 240-minute budget above covers it.
+          suite make test-qemu SUITE=boot-lifecycle
           # gui and gui-desktop run non-blocking for the same reason as
           # terminal-present: on 1-vCPU CI runners the guest's terminal
           # wedges around display-ownership transitions (input_interaction's

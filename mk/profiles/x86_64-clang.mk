@@ -42,6 +42,9 @@ endif
 # The macro NAME (not the whole flag) is matched, so the spelling stays
 # identical to the C sources' `#if defined(X86_INTR_FAULT_TEST_BP)`.
 X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,))
+# BOOT-1 CPU-lifecycle fault matrix (Task 3): same macro-derived case —
+# a direct KERNEL_EXTRA_CFLAGS selection resolves here too.
+X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_EXTRA_CFLAGS)),delay-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_ONLINE,$(KERNEL_EXTRA_CFLAGS)),no-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_SCHEDULER,$(KERNEL_EXTRA_CFLAGS)),no-scheduler,)))
 ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
 KERNEL_VARIANT := weak-selftest
 else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
@@ -65,6 +68,11 @@ endif
 # refuses the conflicting combinations at parse time).
 ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
 KERNEL_VARIANT := intr-x86-fault-$(X86_INTR_FAULT_CASE)
+endif
+# The BOOT-1 fault variant also wins over every other variant (mk/project.mk
+# refuses the conflicting combinations at parse time).
+ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
+KERNEL_VARIANT := boot-lifecycle-$(X86_SMP_BOOT_CASE)
 endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc

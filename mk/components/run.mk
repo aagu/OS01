@@ -728,7 +728,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1399,6 +1399,95 @@ _test-driver-model-run:
 test-qemu-driver-model: _test-driver-model-prep _test-driver-model-run
 	@true
 
+# ── boot-lifecycle: BOOT-1 x86 CPU-lifecycle fault matrix ───────
+# Task 3 (spec §8.2): eight serially-run groups — normal 1/2/4/8 CPUs,
+# delay-online 2/4, and the two fatal cases at 2 CPUs (CPU1 always the
+# fault target).  Normal groups run the NORMAL image read-only
+# (-snapshot); fault groups build their isolated boot-lifecycle-<case>
+# kernel/image variants through the controlled sub-make boundary
+# (KERNEL_EXTRA_CFLAGS carries the X86_SMP_BOOT_TEST_* macro).  The
+# normal image hash is taken BEFORE the first fault build and re-checked
+# after every fault build, so the matrix proves it never wrote the
+# normal image.  Each group is judged by qemutests/boot_lifecycle.py,
+# whose parser is the only success criterion (a timeout is never a
+# pass).  The whole target must stay within ONE CI job budget (>= 20
+# min); the per-case timeout (90 s) is a per-QEMU-run bound, NOT the
+# matrix budget.
+BOOT_LIFECYCLE_TIMEOUT ?= 90
+TEST_BOOT_LIFECYCLE_IMAGE_normal      := $(NORMAL_IMAGE)
+TEST_BOOT_LIFECYCLE_ELF_normal        := $(BUILD_DIR)/kernel/kernel.elf
+TEST_BOOT_LIFECYCLE_IMAGE_delay-online  := $(BUILD_DIR)/image/boot-lifecycle-delay-online/disk.img
+TEST_BOOT_LIFECYCLE_ELF_delay-online    := $(BUILD_DIR)/kernel/boot-lifecycle-delay-online/kernel.elf
+TEST_BOOT_LIFECYCLE_IMAGE_no-online     := $(BUILD_DIR)/image/boot-lifecycle-no-online/disk.img
+TEST_BOOT_LIFECYCLE_ELF_no-online       := $(BUILD_DIR)/kernel/boot-lifecycle-no-online/kernel.elf
+TEST_BOOT_LIFECYCLE_IMAGE_no-scheduler   := $(BUILD_DIR)/image/boot-lifecycle-no-scheduler/disk.img
+TEST_BOOT_LIFECYCLE_ELF_no-scheduler     := $(BUILD_DIR)/kernel/boot-lifecycle-no-scheduler/kernel.elf
+TEST_BOOT_LIFECYCLE_LOG_DIR := $(abspath $(BUILD_DIR))/test-results/boot-lifecycle
+
+# Each case invocation is written out explicitly (a define/foreach
+# expansion glues recipe lines together); the two normal/fault loops
+# shell-iterate over the CPU counts.
+define _boot_lifecycle_run
+	@echo "  [test-qemu] SUITE=boot-lifecycle: case=$(1) cpus=$(2)"
+	python3 qemutests/boot_lifecycle.py --case $(1) --cpus $(2) \
+	  --timeout $(BOOT_LIFECYCLE_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_BOOT_LIFECYCLE_IMAGE_$(1))" \
+	  --kernel-elf "$(TEST_BOOT_LIFECYCLE_ELF_$(1))" \
+	  --qemu "$(QEMU_BIN)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
+	  --log-dir "$(TEST_BOOT_LIFECYCLE_LOG_DIR)/$(1)-$(2)-$$$$"
+endef
+
+.PHONY: _test-boot-lifecycle-normal-image
+_test-boot-lifecycle-normal-image:
+	@echo "  [test-qemu] SUITE=boot-lifecycle: building the normal image"
+	$(MAKE) --no-print-directory image
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.before"
+
+.PHONY: _test-boot-lifecycle-normal-cases
+_test-boot-lifecycle-normal-cases:
+	$(call _boot_lifecycle_run,normal,1)
+	$(call _boot_lifecycle_run,normal,2)
+	$(call _boot_lifecycle_run,normal,4)
+	$(call _boot_lifecycle_run,normal,8)
+
+.PHONY: _test-boot-lifecycle-fault-delay
+_test-boot-lifecycle-fault-delay:
+	@echo "  [test-qemu] SUITE=boot-lifecycle: building the delay-online variant"
+	$(MAKE) --no-print-directory X86_SMP_BOOT_TEST=delay-online KERNEL_SELFTEST= image
+	$(call _boot_lifecycle_run,delay-online,2)
+	$(call _boot_lifecycle_run,delay-online,4)
+
+.PHONY: _test-boot-lifecycle-fault-no-online
+_test-boot-lifecycle-fault-no-online:
+	@echo "  [test-qemu] SUITE=boot-lifecycle: building the no-online variant"
+	$(MAKE) --no-print-directory X86_SMP_BOOT_TEST=no-online KERNEL_SELFTEST= image
+	$(call _boot_lifecycle_run,no-online,2)
+
+.PHONY: _test-boot-lifecycle-fault-no-scheduler
+_test-boot-lifecycle-fault-no-scheduler:
+	@echo "  [test-qemu] SUITE=boot-lifecycle: building the no-scheduler variant"
+	$(MAKE) --no-print-directory X86_SMP_BOOT_TEST=no-scheduler KERNEL_SELFTEST= image
+	$(call _boot_lifecycle_run,no-scheduler,2)
+
+.PHONY: _test-boot-lifecycle-normal-hash-check
+_test-boot-lifecycle-normal-hash-check:
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.after"
+	cmp "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.before" "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.after"
+
+# The dispatch order is deliberate: the NORMAL image is built and hashed
+# FIRST, then the normal matrix, then each fault variant builds and runs,
+# and the normal-image hash is re-checked at the very end.
+.PHONY: test-qemu-boot-lifecycle
+test-qemu-boot-lifecycle: _test-boot-lifecycle-normal-image \
+	_test-boot-lifecycle-normal-cases \
+	_test-boot-lifecycle-fault-delay \
+	_test-boot-lifecycle-fault-no-online \
+	_test-boot-lifecycle-fault-no-scheduler \
+	_test-boot-lifecycle-normal-hash-check
+	@true
+
 # ── intr-x86: isolated destructive #BP / NMI acceptance ─────────
 # Task 5 (spec §9.3): the two fatal entries that cannot be exercised
 # through the ordinary boot or the kernel-selftest image get their OWN
@@ -1532,6 +1621,11 @@ TEST_QEMU_IMG_arch6-fsstress  = $(TEST_ARCH6_FSSTRESS_IMAGE)
 # intr-x86 runs one image per destructive case; the suite target owns
 # the per-case paths (the value below is the informational echo only).
 TEST_QEMU_IMG_intr-x86         = $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
+# boot-lifecycle (BOOT-1 Task 3) runs the 8-group matrix itself (normal
+# reuses the normal image read-only; fault cases build isolated
+# boot-lifecycle-<case> variants inside the suite target).
+TEST_QEMU_FLAVOR_boot-lifecycle =
+TEST_QEMU_IMG_boot-lifecycle   = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -1580,8 +1674,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|arch10-capacity|arch6-fsstress) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -1622,6 +1716,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-driver-model || exit 1; \
 	elif [ "$(SUITE)" = "intr-x86" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-intr-x86 || exit 1; \
+	elif [ "$(SUITE)" = "boot-lifecycle" ]; then \
+	  $(MAKE) --no-print-directory test-qemu-boot-lifecycle || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
 	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
@@ -1644,7 +1740,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# python harness inside ``test-qemu-driver-model`` and must NOT
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
-	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ]; then \
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \

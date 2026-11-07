@@ -116,6 +116,60 @@ $(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) cannot be combined with DRIVE
 endif
 endif
 
+# ── X86_SMP_BOOT_TEST — BOOT-1 CPU-lifecycle fault matrix ────────
+# The x86 isolation matrix needs three controlled CPU1 boot faults
+# (delay-online / no-online / no-scheduler) that CANNOT be exercised on
+# the normal image: each case gets its OWN kernel/image variant
+# (boot-lifecycle-<case>), and the normal build must never carry the
+# injection code or the fault marker strings.
+#
+# Same plumbing as X86_INTR_FAULT_TEST: the selection MACRO travels
+# through KERNEL_EXTRA_CFLAGS — the channel that already crosses the
+# controlled sub-make boundary (OS01_SUBMAKE_ALLOWED below) — and the
+# variant slug is derived from that SAME macro, so the compiled fault
+# and the artifact paths can never disagree.  The injection code lives
+# in kernel/arch/x86_64/smp/smp.c under the macros ONLY, so a normal
+# kernel contains neither the injection nor the markers (the suite's
+# ELF audit proves it).
+X86_SMP_BOOT_TEST ?=
+X86_SMP_BOOT_TESTS_VALID := none delay-online no-online no-scheduler
+ifneq ($(strip $(X86_SMP_BOOT_TEST)),)
+ifeq ($(filter $(X86_SMP_BOOT_TEST),$(X86_SMP_BOOT_TESTS_VALID)),)
+$(error X86_SMP_BOOT_TEST='$(X86_SMP_BOOT_TEST)' is not one of: $(X86_SMP_BOOT_TESTS_VALID))
+endif
+endif
+ifeq ($(X86_SMP_BOOT_TEST),delay-online)
+X86_SMP_BOOT_CFLAGS := -DX86_SMP_BOOT_TEST_DELAY_ONLINE=1
+else ifeq ($(X86_SMP_BOOT_TEST),no-online)
+X86_SMP_BOOT_CFLAGS := -DX86_SMP_BOOT_TEST_NO_ONLINE=1
+else ifeq ($(X86_SMP_BOOT_TEST),no-scheduler)
+X86_SMP_BOOT_CFLAGS := -DX86_SMP_BOOT_TEST_NO_SCHEDULER=1
+else
+X86_SMP_BOOT_CFLAGS :=
+endif
+ifneq ($(strip $(X86_SMP_BOOT_CFLAGS)),)
+ifeq ($(findstring $(X86_SMP_BOOT_CFLAGS),$(KERNEL_EXTRA_CFLAGS)),)
+override KERNEL_EXTRA_CFLAGS := $(strip $(KERNEL_EXTRA_CFLAGS) $(X86_SMP_BOOT_CFLAGS))
+endif
+endif
+# The effective case — derived from the macro, which is the single
+# source of truth (the selector above only contributes to it).
+X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_EXTRA_CFLAGS)),delay-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_ONLINE,$(KERNEL_EXTRA_CFLAGS)),no-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_SCHEDULER,$(KERNEL_EXTRA_CFLAGS)),no-scheduler,)))
+ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
+# Fault images boot normal init until the fatal point: they must never
+# share a build with another test variant.
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST) $(CAPACITY_TEST) $(ARCH6_FSSTRESS_TEST)),)
+$(error X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE) is an x86-only fault variant and cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST/CAPACITY_TEST/ARCH6_FSSTRESS_TEST)
+endif
+ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
+else
+$(error X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE) cannot be combined with DRIVER_MODEL_FAULT=$(DRIVER_MODEL_FAULT))
+endif
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+$(error X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE) cannot be combined with X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE))
+endif
+endif
+
 # ── CAPACITY_TEST — isolated capacity variant (spec §10) ──────────
 CAPACITY_TEST ?= 0
 ifeq ($(filter $(CAPACITY_TEST),0 1),)
@@ -190,7 +244,7 @@ ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
 USER_DEBUG := 1
 endif
 
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE)))
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE)))
 USER_VARIANT  := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)

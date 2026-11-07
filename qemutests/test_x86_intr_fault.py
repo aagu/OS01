@@ -462,7 +462,8 @@ class ApNmiOrderingTests(unittest.TestCase):
             "static task_t *create_idle_task", 1)[0]
         ordered = ["ap_init_lapic();", "lgdt %0", "lidt %0", "lretq",
                    "set_tss64(", "load_TR(", "lapic_configure_nmi();",
-                   "cpu->online = 1", "ipi_ready_publish_ap("]
+                   # BOOT-1: the AP release-publishes its own online.
+                   "&cpu->online, 1, __ATOMIC_RELEASE", "ipi_ready_publish_ap("]
         positions = [entry.index(token) for token in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(entry.count("lapic_configure_nmi();"), 1)
