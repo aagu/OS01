@@ -74,6 +74,12 @@ int bcache_test_drop_key(struct block_device *dev, uint64_t lba);
 // BUSY reservation for a MISSING key exactly like the real read-fill
 // publication path, holding a test-owned pin; complete finishes it
 // through the real success/reclaim helpers.
+// Deterministic TOCTOU injection (host tests): invoked by the read fast
+// path after the metadata lock is released and before the buffer is
+// pinned.  A test hook can evict/reuse the looked-up key in that window;
+// with the pin-under-lock fix the eviction must be refused.
+void bcache_test_set_post_lookup_hook(void (*fn)(struct block_device *dev,
+                                                 uint64_t lba));
 int  bcache_test_reserve_busy(struct block_device *dev, uint64_t lba);
 // Returns 0, or -EINVAL when the (dev, lba) has no test-owned BUSY
 // reservation (foreign key, already completed).

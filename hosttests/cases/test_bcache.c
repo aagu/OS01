@@ -68,11 +68,26 @@ typedef struct {
     uint64_t       last_lba;
     enum fake_mode mode;
     int            fail_writes;    // when set, writes return -EIO until cleared
+    int            irq_at_write;   // -1 unset; else IRQ state seen in write
 } fake_dev_t;
 
 static fake_dev_t s_fake;
 static fake_dev_t s_big;
 static fake_dev_t s_devB;
+
+// TOCTOU injection state (read_pin_under_lock_toc_tou)
+static uint64_t s_toc_target;
+static void toc_hook(block_device_t *dev, uint64_t lba)
+{
+    if (lba != s_toc_target) return;
+    s_toc_target = (uint64_t)-1;
+    // The window under test: with the pin taken under the metadata
+    // lock, the eviction of this key must be REFUSED (refcnt > 0).
+    assert_eq(-EINVAL, bcache_test_drop_key(dev, lba));
+    uint8_t nb[BCACHE_SECTOR];
+    memset(nb, 0x92, sizeof(nb));
+    assert_eq(0, bcache_write_sector(dev, 20, nb));   // reuses the slot
+}
 
 static int fake_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
 {
@@ -99,6 +114,8 @@ static int fake_write(block_device_t *dev, uint64_t lba, uint32_t count, const v
     f->writes++;
     f->last_lba   = lba;
     f->last_count = (int)count;
+    extern int arch6_bcache_irq_enabled;
+    f->irq_at_write = arch6_bcache_irq_enabled;
     if (s_write_hook) s_write_hook(dev, lba);
     if (f->fail_writes)
         return -EIO;
@@ -957,6 +974,58 @@ TEST_FUNC(exhaustion_wake_windows) {
     bcache_reset_for_test();
 }
 
+TEST_FUNC(read_pin_under_lock_toc_tou) {
+    // C1 regression: the read fast path must pin the looked-up buffer
+    // under the metadata lock.  The post-lookup hook fires inside the
+    // (formerly racy) window: it drops the key and reuses the freed
+    // slot for a different key with different data.  A racy reader
+    // would then pin the repurposed buffer and return that data.
+    fake_register();
+    uint8_t wbuf[BCACHE_SECTOR], rbuf[BCACHE_SECTOR];
+    memset(wbuf, 0x91, sizeof(wbuf));
+    assert_eq(0, block_device_write(s_disk, 10, 1, wbuf));   // key 10 dirty
+
+    s_toc_target = 10;
+    bcache_test_set_post_lookup_hook(toc_hook);
+
+    assert_eq(0, bcache_read_sector(s_disk, 10, rbuf));
+    bcache_test_set_post_lookup_hook(NULL);
+    // Pattern A was written into key 10; the hook's interference write
+    // went to key 20 with pattern B.  A racy reader returns 0x92.
+    assert_eq(0x91, rbuf[0]);
+
+    bcache_test_stats_t st;
+    bcache_debug_stats(s_disk, &st);
+    assert_eq(0, st.pinned);
+    fake_unregister();
+}
+
+TEST_FUNC(evict_writeback_irq_enabled) {
+    // I1 regression: the dirty-victim write-back must not run the
+    // backend DMA with local IRQs disabled.
+    fake_init(&s_big, s_big_backend, BIG_SECTORS);
+    s_write_hook = NULL;
+    struct block_device_desc desc = {
+        .name = "bcachefakeirq", .sector_count = BIG_SECTORS + 1,
+        .sector_size = BCACHE_SECTOR,
+        .ops = &fake_ops, .private_data = &s_big, .parent = NULL,
+        .kind = BLOCK_DISK,
+    };
+    assert_eq(0, block_device_register(&desc, &s_disk));
+
+    fill_pool_dirty(s_disk, &s_big, BIG_SECTORS);   // pool full, all dirty
+    s_big.irq_at_write = -1;
+    uint8_t buf[BCACHE_SECTOR];
+    memset(buf, 0x93, sizeof(buf));
+    // Overflows the pool: the LRU dirty victim write-back runs inside
+    // bcache_alloc_for_key.
+    assert_eq(0, block_device_write(s_disk, BIG_SECTORS, 1, buf));
+    assert_eq(1, s_big.irq_at_write);   // IRQs were ENABLED during writeback
+    block_device_unregister_boot(s_disk);
+    s_disk = NULL;
+    bcache_reset_for_test();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(init_oom_retry),
     TEST_ENTRY(read_miss_fills),
@@ -968,6 +1037,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(busy_error_complete_then_retry),
     TEST_ENTRY(complete_rejects_foreign_or_repeat),
     TEST_ENTRY(sector_size_mismatch_rejected),
+    TEST_ENTRY(read_pin_under_lock_toc_tou),
+    TEST_ENTRY(evict_writeback_irq_enabled),
     TEST_ENTRY(partition_key_convergence),
     TEST_ENTRY(write_back_read_your_writes),
     TEST_ENTRY(flush_persists_to_backend),

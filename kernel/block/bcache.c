@@ -304,14 +304,18 @@ static bcache_buf_t *bcache_alloc_for_key(struct block_device *dev, uint64_t lba
         }
 
         // Dirty victim: hold its OLD key BUSY (blocks re-publish, new
-        // pins and eviction), write back outside every lock.
+        // pins and eviction), write back outside every lock and with
+        // local IRQs enabled — the backend DMA is a busy-wait poll and
+        // must not mask timer ticks/IPIs for its duration.
         struct block_device *vdev = victim->dev;
         uint64_t           vlba = victim->lba;
         victim->flags |= BC_BUSY;
         spin_unlock_irqrestore(&g_bcache_lock, flags);
+        arch_local_irq_restore(irq);
 
         int ret = vdev->ops->write(vdev, vlba, 1, victim->data);
 
+        irq = arch_local_irq_save();
         flags = spin_lock_irqsave(&g_bcache_lock);
         // Re-check the requested key: it may have been published while
         // the write-back ran.  If so, release the victim (DIRTY cleared —
@@ -449,6 +453,15 @@ static bcache_buf_t *bcache_wait_key_ready(struct block_device *dev, uint64_t lb
     }
 }
 
+#ifdef OS01_HOST_TEST
+static void (*bc_post_lookup_hook)(struct block_device *, uint64_t);
+void bcache_test_set_post_lookup_hook(void (*fn)(struct block_device *,
+                                                 uint64_t))
+{
+    bc_post_lookup_hook = fn;
+}
+#endif
+
 // ── Read path ─────────────────────────────────────────────────────────
 int bcache_read_sector(struct block_device *dev, uint64_t lba, void *buf)
 {
@@ -472,8 +485,23 @@ int bcache_read_sector(struct block_device *dev, uint64_t lba, void *buf)
             return 0;
         }
         if (b && (b->flags & BC_VALID)) {
+            b->refcnt++;                   // pin under the metadata lock:
+            bcache_lru_remove(b);          // an unlocked pin lets a concurrent
+            bcache_lru_push_front(b);      // eviction transform the buffer
             spin_unlock_irqrestore(&g_bcache_lock, flags);
-            bcache_pin_copy_out(b, buf);   // pins, copies, unpins
+#ifdef OS01_HOST_TEST
+            if (bc_post_lookup_hook)
+                bc_post_lookup_hook(dev, lba);
+#endif
+            uint64_t dflags = spin_lock_irqsave(&b->data_lock);
+            memcpy(buf, b->data, BCACHE_SECTOR);
+            spin_unlock_irqrestore(&b->data_lock, dflags);
+
+            flags = spin_lock_irqsave(&g_bcache_lock);
+            int last = (--b->refcnt == 0);
+            spin_unlock_irqrestore(&g_bcache_lock, flags);
+            if (last)
+                wait_queue_wake_all(&g_bcache_wq);
             return 0;
         }
 
