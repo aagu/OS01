@@ -47,14 +47,14 @@ static inline void atomic_write(volatile uint64_t *ptr, uint64_t val)
 }
 
 // Atomic compare-and-swap: if *ptr == old, set *ptr = new and return 1.
-static inline int atomic_cas(volatile uint64_t *ptr, uint64_t old, uint64_t new)
+static inline int atomic_cas(volatile uint64_t *ptr, uint64_t old, uint64_t new_value)
 {
     uint8_t result;
     __asm__ __volatile__(
         "lock cmpxchgq %3, %1\n\t"
         "sete %0"
         : "=a"(result), "+m"(*ptr)
-        : "a"(old), "r"(new)
+        : "a"(old), "r"(new_value)
         : "memory"
     );
     return result;
