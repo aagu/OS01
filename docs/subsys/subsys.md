@@ -84,7 +84,7 @@ void subsys_init_percpu(void);        // run on all online CPUs
 - `register_subsys` appends to a static table (max 64 entries).
 - `subsys_init_phase(phase)` iterates the table, calling `init()` for matching uninitialized entries. Prints `ok`, `SKIP (optional, ret=N)`, or `FAIL (ret=N)` for each.
 - `subsys_init_all()` loops phases 3-6 inclusive.
-- `subsys_init_percpu()` iterates per-CPU entries, calling each `init_percpu(cpu_id)` for every online CPU (`0 .. num_cpus-1`).
+- `subsys_init_percpu()` iterates per-CPU entries, calling each `init_percpu(cpu_id)` for every discovered CPU (`0 .. num_cpus-1`).  BOOT-1: `num_cpus` is the traversal bound over discovered CPUs, NOT an online count — a constructed-but-not-yet-running AP still has online == 0 (`percpu_init` never publishes; each arch's boot path release-publishes runtime online at its own readiness point, see docs/smp/smp.md "BOOT-1 two-stage handshake").
 - `subsys_status` returns `1` (success), `<0` (failure), `0` (not run), or `-999` (unknown).
 
 ---

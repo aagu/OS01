@@ -592,9 +592,9 @@ static void boot1_no_ack_observation(void)
                                         __ATOMIC_ACQUIRE);
     uint32_t accepted = (aarch64_smp_accepted_mask() >> 1) & 1u;
     if (online != 1 || ipi_ready != 1 || sched_ok != 0 || accepted != 0) {
-        log_warn("[boot-1] a64-no-ack precondition mismatch "
-                 "(online=%u ipi_ready=%u scheduler_ok=%u accepted=%u)\n",
-                 online, ipi_ready, sched_ok, accepted);
+        /* aarch64 log_impl ignores variadic args (no vsnprintf), so the
+         * mismatch path must not use format specifiers. */
+        log_warn("[boot-1] a64-no-ack precondition mismatch\n");
         return;
     }
     log_info("[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 "

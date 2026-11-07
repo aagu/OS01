@@ -27,7 +27,7 @@ Phase 8: TSC sync and warp check               cpu.h rdtsc(), smp.c comparison
 | 8 | `need_resched` | Per-CPU reschedule flag (entry.S reads via `%gs:8`) |
 | 16 | `cpu_id` | Logical CPU number (0..NR_CPUS-1) |
 | 20 | `arch_processor_id` | APIC ID (x86) / MPIDR_EL1 (aarch64) |
-| 24 | `online` | Set to 1 when CPU is fully initialised |
+| 24 | `online` | Runtime online: 1 only after the CPU ITSELF published its local-init completion (release); construction leaves it 0 — see BOOT-1 contracts below |
 | 28 | `scheduler_ok` | Per-CPU guard (schedule() returns before this is set) |
 | 32 | `tss` | Pointer to this CPU's TSS descriptor |
 | 40 | `tlb_wanted` | Atomic flag: TLB invalidation requested |
@@ -70,9 +70,11 @@ for each enabled LAPIC/x2APIC:
     if cpu_idx == 0:
         percpu_data[0].tss = &init_tss[0];
         percpu_install_gs(0);      // BSP can use this_cpu() now
-        percpu_data[0].online = 1;
+        __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
     else:
-        // Registered but offline — smp_boot_aps() will wake them
+        // Constructed but NOT online — construction never publishes
+        // (BOOT-1): smp_boot_aps() wakes them and each AP publishes
+        // its own online
 num_cpus = cpu_idx;  // runtime count
 
 smp_boot_aps();
@@ -135,7 +137,21 @@ BSP sends INIT IPI (delivery mode 5, assert level)
   → send SIPI (delivery mode 6, vector = 0x8000 >> 12 = 0x08)
   → wait ~200μs
   → send second SIPI (Intel SDM: reliability)
-  → spin-wait for percpu_data[i].online == 1 (max ~1s)
+  → BOOT-1 two-stage handshake:
+      stage 2: x86_smp_wait_u32_acquire(&online, 5000000) — bounded
+               acquire poll of the AP's OWN publication
+      TSC go/sample handshake (release/acquire; tsc_boot written
+      before sampled; sampling timeout keeps offset=0 and is NOT a
+      boot failure)
+      stage 3: x86_smp_wait_u32_acquire(&scheduler_ok, 5000000),
+      then acquire re-check online ∧ ipi_ready, log
+      "[boot-1] ready cpu=..."; only then is the trampoline data
+      refilled for the next AP
+  Any failure (prepare/online/scheduler/invariant) hits the noreturn
+  boot_fatal_cpu(): "[boot-1] FATAL cpu=.. stage=.." + kpanic — the
+  pre-BOOT-1 "free idle + continue" degradation is gone, so no
+  resource a late AP may use is ever released.  After all discovered
+  CPUs: one "[boot-1] complete discovered=N ready=N" (N includes BSP)
 ```
 
 ICR usage:
