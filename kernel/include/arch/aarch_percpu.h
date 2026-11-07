@@ -74,7 +74,7 @@ extern aarch64_boot_percpu_t aarch64_boot_percpu[NR_CPUS];
 extern uint8_t aarch64_boot_stacks[NR_CPUS][AARCH64_BOOT_STACK_SIZE];
 
 /* Slot in `.boot.bss` where BSP parks `dtb_base` after clearing .bss.
- * head.S writes x19 here so that aarch64_main can reload it (x0 is
+ * head.S writes x19 here so that the kernel_main boot path can reload it (x0 is
  * clobbered by the high-half C trampoline). */
 extern uint64_t aarch64_dtb_slot;
 

@@ -7,7 +7,7 @@
  * constructs the production exclusions from linker symbols, and
  * prints the spec's success summary before GIC initialization.
  *
- * Boot order: aarch64_main() calls aarch64_ram_init(handoff)
+ * Boot order: the kernel_main boot sequence calls aarch64_ram_init(handoff)
  * AFTER boot_context_valid() and BEFORE dtb_init()/gic_init().
  * The success summary must be the only RAM-related line emitted
  * before the rest of the bring-up continues.
@@ -76,7 +76,7 @@ int aarch64_ram_init(const struct boot_context *handoff)
     uint64_t descriptor_bytes;
     int rc;
 
-    /* Defensive double-check. aarch64_main already called
+    /* Defensive double-check. The boot path already called
      * boot_context_valid() before this point, but a future
      * caller that skips that check must still fail closed here. */
     if (!boot_context_valid(handoff))

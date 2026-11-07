@@ -14,7 +14,7 @@ __attribute__((section(".boot.bss"), aligned(16)))
 uint8_t aarch64_boot_stacks[NR_CPUS][AARCH64_BOOT_STACK_SIZE];
 
 /* DTB slot: written by head.S AFTER .boot.bss has been cleared, so the
- * write is safe and survives into aarch64_main.
+ * write is safe and survives into the kernel_main boot sequence.
  */
 __attribute__((section(".boot.bss"), aligned(8)))
 uint64_t aarch64_dtb_slot;

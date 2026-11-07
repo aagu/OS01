@@ -23,7 +23,7 @@
  *   3. Print "[tick] N" once per second (LAST; output may be slow)
  *   4. EOI is performed by gic_dev_dispatch after this returns.
  *
- * `arch_tick_start()` is called by aarch64_main AFTER dtb_init,
+ * `arch_tick_start()` is called by the kernel_main boot sequence AFTER dtb_init,
  * gic_init, softirq_init() (explicit, see main.c) and the SUBSYS hook
  * (Phase 2 #1 commit bddf8eb: arch_register_subsys() +
  * subsys_init_phase(SUBSYS_PHASE_4)).  It enables the CNTP, arms it for

@@ -14,7 +14,7 @@
  *   8.  set TCR_EL1 + MAIR_EL1 + TTBR0_EL1 + TTBR1_EL1 → isb
  *   9.  construct SCTLR_EL1 (RES1 + M + C + I) → isb
  *  10.  set BSP stack + TPIDR_EL1 = &aarch64_boot_percpu[0]
- *  11.  absolute blr to aarch64_main (high-half)
+ *  11.  absolute blr to kernel_main (high-half)
  */
 
 .globl _boot_start

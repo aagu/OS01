@@ -359,7 +359,7 @@ fail:
  * framebuffer MMIO. Gate on BOOT_CONTEXT_HAS_FRAMEBUFFER so a system
  * without ramfb (or with broken GOP) still boots cleanly via PL011.
  *
- * Called once from aarch64_main, after arch_vmm_init returns success. */
+ * Called once from the kernel_main boot sequence, after arch_vmm_init returns success. */
 static void aarch64_boot_fb_init(const struct boot_context *handoff)
 {
     /* spin_init(&Pos.lock) MUST run on every boot path — including the
