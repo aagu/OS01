@@ -98,13 +98,13 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 #### 启动编排治理：五个 spec（2026-11-07）
 
-依据：[系统启动顺序、阶段抽象与优化分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md)（源码基准 `b3a4f3bc`）。BOOT-1 已有实现与验收记录；BOOT-2 的 spec/plan 已通过子 agent 文档评审、待实施；BOOT-3～5 待编写 spec。原分析报告为历史静态快照，后续实施证据以各项验证报告为准；BOOT-2 早期 IRQ 顺序风险尚未修复。
+依据：[系统启动顺序、阶段抽象与优化分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md)（源码基准 `b3a4f3bc`）。BOOT-1/2 已有实现与验收记录；BOOT-3 的 spec/plan 已通过子 agent 文档评审、待实施；BOOT-4/5 待编写 spec。原分析报告为历史静态快照，后续实施证据以各项验证报告为准；启动失败传播与必需能力检查仍归 BOOT-3。
 
 | Spec | 范围 | 验收目标 | 依赖 / 状态 |
 |------|------|----------|-------------|
 | BOOT-1 CPU 生命周期与 SMP 握手 | 明确 percpu 构造、online、ipi_ready、scheduler_ok 的生产者与消费者；修正 x86 AP 响应等待条件，并保留 aarch64 shootdown 资格约束 | 延迟/不响应 AP 不会误判成功；IPI/调度只使用符合条件的 CPU；双架构 SMP/shootdown 回归 | 统一 kernel_main ✅；[spec R2](superpowers/specs/2026-11-07-boot-1-cpu-lifecycle-design.md) / [plan R2](superpowers/plans/2026-11-07-boot-1-cpu-lifecycle.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-07-boot-1-doc-review.md)）；**已实施并验收**（2026-11-08，[验证报告](superpowers/reports/2026-11-07-boot-1-validation.md)：构造/发布分离、x86 两阶段握手与 fail-closed、消费者 acquire 审计、8 组 boot-lifecycle 故障矩阵、aarch64 no-ack runtime 资格记录；全部门禁 rc=0）。BOOT-2 早期 IRQ 顺序风险仍未解决 |
 | BOOT-2 早期中断与时间设施启动顺序 | 分离控制器配置、masked handler 注册、中断源启动、CPU IRQ 放行；明确 BSP percpu、RTC PF采样/PIC级联、IRQ返回和bootstrap PIT依赖 | 首次 IRQ 可达路径满足前置条件；RTC事务清理、PIT/LAPIC handoff与fallback正常；真实IRQ/frame配对返回及phase5前PIT证据 | BOOT-1已有验收记录；[spec R2](superpowers/specs/2026-11-08-boot-2-early-irq-time-design.md) / [plan R2](superpowers/plans/2026-11-08-boot-2-early-irq-time.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-08-boot-2-doc-review.md)）；**已实施并验收**（2026-11-08，[验证报告](superpowers/reports/2026-11-08-boot-2-validation.md)：masked registration/PIC 级联、BSP context 状态机、受控 RTC 事务、有界校准与原子 handoff、10 组 boot-irq-time 矩阵；全部门禁 rc=0）。BOOT-3～5 待实施 |
-| BOOT-3 启动失败传播与必需能力检查 | 注册/initcall 错误传播，必需/可选策略，根挂载、TTY/PTY、PID 1 创建检查；承接 ARCH-8 失败处理 | 必需步骤失败原处停止并明确定位；可选失败可降级；覆盖注册失败、根挂载和初始运行环境创建失败 | 建议在 BOOT-2 后验收；待编写 spec |
+| BOOT-3 启动失败传播与必需能力检查 | 注册首错latch/initcall屏障、必需/可选策略、根挂载与TTY/PTY、私有stdio事务及spawn继承失败检查；承接ARCH-8失败处理 | 必需失败立即停止并跨架构准确归因；可选失败可查询降级；17组隔离故障矩阵与真实ARM日志/exec发布前验证 | BOOT-1/2已有验收记录；[spec R3](superpowers/specs/2026-11-08-boot-3-failure-policy-design.md) / [plan R2](superpowers/plans/2026-11-08-boot-3-failure-policy.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-08-boot-3-doc-review.md)）；**待实施** |
 | BOOT-4 阶段契约与跨架构编排 | 公共 boot 钩子前置/后置能力、命名阶段、同阶段依赖、per-CPU 准备与本核执行的区分；承接 ARCH-8 编排部分 | 同名钩子完成能力明确；双架构按特性门满足契约；必要顺序不依赖偶然链接次序；注释/文档一致 | BOOT-1～3；待编写 spec |
 | BOOT-5 调度启动与系统服务解耦 | 拆分 task_init 的架构准备、idle、标准 fd、PID 1、运行态发布、网络/thermal、自测及 idle loop；明确 VFS bootstrap 退出边界 | init 保持 PID 1；任务可运行时机满足运行态契约；网络、thermal、late selftest、终端/Ctrl-C 正常 | BOOT-4；待编写 spec |
 
