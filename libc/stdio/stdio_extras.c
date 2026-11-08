@@ -22,27 +22,24 @@ int vprintf(const char *fmt, va_list ap) {
  * own (there is no FILE to hang an indicator on), so a write failure is
  * reported through the return value and errno — never as a fake
  * success. */
-int dprintf(int fd, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-
+/* vdprintf is the core: measure with one va_copy pass, format into a
+ * buffer with the original list, then one write_all (EINTR-retrying,
+ * short-write-looping) to the raw descriptor.  A truncation past
+ * INT_MAX, a failed allocation or a failed write is an error — never
+ * a fake success. */
+int vdprintf(int fd, const char *fmt, va_list ap) {
     va_list cp;
     va_copy(cp, ap);
     size_t total = vformatter(NULL, 0, fmt, cp, 0);
     va_end(cp);
-    if (total == SIZE_MAX || total > INT_MAX) {
-        va_end(ap);
+    if (total == SIZE_MAX || total > INT_MAX)
         return -1;
-    }
 
     char *buf = malloc(total + 1);
-    if (!buf) {
-        va_end(ap);
+    if (!buf)
         return -1;
-    }
 
     size_t n = vformatter(buf, total + 1, fmt, ap, 1);
-    va_end(ap);
     if (n == SIZE_MAX) {
         free(buf);
         return -1;
@@ -51,6 +48,14 @@ int dprintf(int fd, const char *fmt, ...) {
     ssize_t w = write_all(fd, buf, n);
     free(buf);
     return (w < 0) ? -1 : (int)n;
+}
+
+int dprintf(int fd, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vdprintf(fd, fmt, ap);
+    va_end(ap);
+    return r;
 }
 
 /* ── The FILE consumers ──────────────────────────────────────────────

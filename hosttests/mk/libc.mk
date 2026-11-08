@@ -15,6 +15,7 @@ $(eval $(call register_host_test,test_libc_shutdown,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stream_state,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stdio_io,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_line,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_stdio_format,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -31,7 +32,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_shutdown.elf \
     $(TEST_BLD)/test_libc_stream_state.elf \
     $(TEST_BLD)/test_libc_stdio_io.elf \
-    $(TEST_BLD)/test_libc_line.elf
+    $(TEST_BLD)/test_libc_line.elf \
+    $(TEST_BLD)/test_libc_stdio_format.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -375,6 +377,7 @@ $(TEST_BLD)/test_libc_stdio_io.o: $(TEST_CASES)/test_libc_stdio_io.c \
 
 $(TEST_BLD)/test_libc_stdio_io.elf: $(TEST_BLD)/test_libc_stdio_io.o \
         $(OS01_LIBC_STREAM_OBJS) \
+        $(OS01_LIBC_STREAM_DIR)/vasprintf.o \
         $(OS01_LIBC_STREAM_DIR)/fcntl.o \
         $(TEST_BLD)/libc_stream_runtime.o
 	$(HOST_CC) -o $@ $^
@@ -403,6 +406,7 @@ $(TEST_BLD)/test_libc_line.o: $(TEST_CASES)/test_libc_line.c \
 
 $(TEST_BLD)/test_libc_line.elf: $(TEST_BLD)/test_libc_line.o \
         $(OS01_LIBC_STREAM_OBJS) \
+        $(OS01_LIBC_STREAM_DIR)/vasprintf.o \
         $(OS01_LIBC_STREAM_DIR)/fcntl.o \
         $(OS01_LIBC_STREAM_DIR)/getdelim.o \
         $(TEST_BLD)/libc_stream_runtime.o
@@ -410,6 +414,39 @@ $(TEST_BLD)/test_libc_line.elf: $(TEST_BLD)/test_libc_line.o \
 
 .PHONY: test-libc-line
 test-libc-line: $(TEST_BLD)/test_libc_line.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: format group (T9) ───────────────────────────
+# Formatted fd IO (dprintf/vdprintf/asprintf) + the seek family
+# (stdio_seek.o) + the REAL lseek wrapper (unistd/lseek.o, explicit
+# rule like fcntl.o).  asprintf.o / stdio_seek.o ride the stream-dir
+# pattern rule; the descriptor mock forwards SYS_lseek/SYS_fcntl to
+# the host kernel, and allocation failures are --wrap armed again.
+$(OS01_LIBC_STREAM_DIR)/lseek.o: $(LIBC_SRC)/unistd/lseek.c
+	@mkdir -p $(OS01_LIBC_STREAM_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_stdio_format.o: $(TEST_CASES)/test_libc_stdio_format.c \
+        $(TEST_MOCK)/libc_stream_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
+
+$(TEST_BLD)/test_libc_stdio_format.elf: $(TEST_BLD)/test_libc_stdio_format.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(OS01_LIBC_STREAM_DIR)/fcntl.o \
+        $(OS01_LIBC_STREAM_DIR)/getdelim.o \
+        $(OS01_LIBC_STREAM_DIR)/vasprintf.o \
+        $(OS01_LIBC_STREAM_DIR)/asprintf.o \
+        $(OS01_LIBC_STREAM_DIR)/stdio_seek.o \
+        $(OS01_LIBC_STREAM_DIR)/lseek.o \
+        $(TEST_BLD)/libc_stream_runtime.o
+	$(HOST_CC) -Wl,--wrap=malloc -o $@ $^
+
+.PHONY: test-libc-stdio-format
+test-libc-stdio-format: $(TEST_BLD)/test_libc_stdio_format.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

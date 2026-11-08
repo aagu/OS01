@@ -5183,6 +5183,33 @@
     "action": "unique",
     "reason": "Primary host unit test for dynamic line IO and the standard character interfaces (T8); the stream-state and io groups cover disjoint stream properties"
    }
+  },
+  {
+   "id": "libc.stdio.format_and_seek",
+   "component": "libc",
+   "behavior": "stdio",
+   "trigger": "host runner invokes test_libc_stdio_format.elf",
+   "assertions": [
+    "dprintf writes exact formatted bytes to a real descriptor; vdprintf and vasprintf each consume a va_copy so one va_list serves both",
+    "an interrupted write is retried and a permanent write failure answers -1; an asprintf allocation failure leaves *strp NULL and the next call works",
+    "the lseek wrapper answers -1 with ESPIPE on a pipe and EINVAL on a bad whence, and a query does not move the offset",
+    "fseeko/ftello report and target the stream's LOGICAL position (a pending ungetc byte subtracted for SEEK_CUR), a seek discards the pushback and clears the EOF indicator",
+    "rewind clears the error indicator; freopen re-points the SAME stream with a parsed mode (append verified), reopens stdin, rejects NULL paths with EINVAL and invalidates the old stream when the open fails"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_stdio_format"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_stdio_format.c",
+    "selector": "test_libc_stdio_format",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for formatted fd IO and stream positioning/re-opening (T9); the io/line groups cover disjoint stream properties and the vasprintf group covers the formatter core"
+   }
   }
  ]
 }

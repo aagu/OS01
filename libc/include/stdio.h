@@ -74,8 +74,10 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 int sscanf(const char *str, const char *fmt, ...);
 int skip_atoi(const char **s);
 int dprintf(int fd, const char *fmt, ...);
+int vdprintf(int fd, const char *fmt, va_list ap);
 void perror(const char *s);
 int vasprintf(char **strp, const char *fmt, va_list ap);
+int asprintf(char **strp, const char *fmt, ...);
 int fileno_unlocked(FILE *f);
 
 /* ── Stream lifecycle ───────────────────────────────────────────────
@@ -83,12 +85,28 @@ int fileno_unlocked(FILE *f);
  * fopen/fdopen hand back a FILE* that owns a real stream state; fclose
  * closes it.  freopen re-points an existing stream at a new file.
  */
+/* Seek whence values (POSIX: <stdio.h>). */
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 FILE *fopen(const char *path, const char *mode);
 FILE *fdopen(int fd, const char *mode);
 FILE *freopen(const char *path, const char *mode, FILE *f);
 int   fclose(FILE *f);
 int   fflush(FILE *f);
+
+/* Stream positioning (T9).  fseeko/ftello are the off_t forms; the
+ * plain fseek/ftell call them (off_t is long here).  A successful seek
+ * discards the pushback byte and clears the EOF indicator; rewind()
+ * additionally clears the error indicator.  An fseek(0, SEEK_CUR) on
+ * a stream holding an ungetc'd byte re-positions to the stream's
+ * LOGICAL position (physical minus the pushed-back byte). */
+int   fseek(FILE *f, long off, int whence);
 int   fseeko(FILE *f, long off, int whence);
+long  ftell(FILE *f);
+off_t ftello(FILE *f);
+void  rewind(FILE *f);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f);
 size_t fwrite(const void *p, size_t s, size_t n, FILE *f);
 
