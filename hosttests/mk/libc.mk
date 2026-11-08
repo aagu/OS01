@@ -170,6 +170,12 @@ $(TEST_BLD)/test_libc_api.elf: $(TEST_BLD)/test_libc_api.o $(OS01_LIBC_PREFIX_OB
 
 .PHONY: test-libc-api
 test-libc-api: $(TEST_BLD)/test_libc_api.elf
+	@# The manifest is only regenerated when the script or a header changes,
+	@# so the drift check cannot live inside the manifest rule: it would be
+	@# skipped on an ordinary rebuild.  Running it here checks the headers
+	@# against the manifest on EVERY invocation of the api group.
+	python3 $(TESTS_DIR)/scripts/audit_libc_api.py --check-headers \
+	    --include-dir $(LIBC_INC_DIR)
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

@@ -182,8 +182,10 @@ class HostBuildContractTests(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout)
-        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertEqual(len(calls), 1)
+        calls = ([json.loads(line) for line in self.calls.read_text().splitlines()]
+                 if self.calls.exists() else [])
+        self.assertEqual(len(calls), 1,
+                         f"expected exactly one sub-make call, got {len(calls)}")
         self.assertIn("test-libc-api", calls[0])
 
     def test_default_goal_builds_full_set(self):

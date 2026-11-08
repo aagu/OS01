@@ -659,21 +659,44 @@ def _strip_comments(text: str) -> str:
     return _LINE_COMMENT.sub(" ", text)
 
 
-def _logical_statements(text: str) -> list[str]:
+def _logical_statements(text: str) -> list[tuple[str, int]]:
     """Split a header into logical statements.
 
     A statement ends at a `;` or at a closing brace, but only at brace
     depth zero: a struct definition or a `static inline` body is one
     statement, not a sequence of declarations.
+
+    Each statement is returned together with the preprocessor BRANCH PATH
+    it appeared at: a tuple holding, for every open conditional, the index
+    of the branch that is active.  Two declarations are in mutually
+    exclusive branches exactly when their paths differ at some frame that
+    BOTH of them have — that is the `#if`/`#else` case, where repeating a
+    name is legal C.
+
+    A path that is merely SHORTER is not a different branch: a declaration
+    outside an include guard has a shorter path than one inside it, and
+    that difference is exactly the defect this detects (a declaration left
+    outside the guard's `#endif`).
     """
-    out: list[str] = []
+    out: list[tuple[str, tuple[int, ...]]] = []
     buf = ""
     depth = 0
+    frames: list[int] = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
         if line.startswith("#"):
+            words = line.split()
+            directive = words[0] if words else ""
+            if directive in ("#if", "#ifdef", "#ifndef"):
+                frames.append(0)
+            elif directive in ("#else", "#elif"):
+                if frames:
+                    frames[-1] += 1
+            elif directive == "#endif":
+                if frames:
+                    frames.pop()
             # Preprocessor directives are not declarations.  A directive
             # may continue on the next line with a trailing backslash.
             if not line.endswith("\\"):
@@ -684,26 +707,22 @@ def _logical_statements(text: str) -> list[str]:
         depth += line.count("{") - line.count("}")
         tail = buf.rstrip()
         if depth <= 0 and (tail.endswith(";") or tail.endswith("}")):
-            out.append(tail)
+            out.append((tail, tuple(frames)))
             buf = ""
             depth = 0
     return out
 
 
-def declared_functions(text: str, unique: bool = True) -> list[str]:
-    """Return the externally linked functions a header declares.
+def declared_declarations(text: str) -> list[tuple[str, str, tuple[int, ...]]]:
+    """Return (name, raw text, branch path) for each declaration.
 
-    `static` helpers (including `static inline` bodies) are implementation
-    detail, not the public interface, so they are not reported.
-
-    With unique=False a name that appears more than once is reported once per
-    occurrence.  The default (unique=True) hides duplicates, which is why a
-    header that declares the same function twice used to pass the drift
-    check unnoticed.
+    The raw text is the statement with its whitespace collapsed but its
+    ATTRIBUTES kept, so that an attribute-only variant of a declaration
+    stays distinguishable from an exact repeat.  The branch path is the
+    preprocessor branch path the declaration appeared at.
     """
-    names: list[str] = []
-    seen: set[str] = set()
-    for stmt in _logical_statements(_strip_comments(text)):
+    out: list[tuple[str, str, tuple[int, ...]]] = []
+    for stmt, path in _logical_statements(_strip_comments(text)):
         s = _ATTRIBUTE.sub(" ", stmt).strip()
         if not s or s.startswith("typedef"):
             continue
@@ -724,11 +743,80 @@ def declared_functions(text: str, unique: bool = True) -> list[str]:
             continue
         if name in _KEYWORDS:
             continue
+        out.append((name, " ".join(stmt.split()), path))
+    return out
+
+
+def declared_functions(text: str, unique: bool = True) -> list[str]:
+    """Return the externally linked functions a header declares.
+
+    `static` helpers (including `static inline` bodies) are implementation
+    detail, not the public interface, so they are not reported.
+
+    With unique=False a name that appears more than once is reported once per
+    occurrence.  The default (unique=True) hides duplicates, which is why a
+    header that declares the same function twice used to pass the drift
+    check unnoticed.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for name, _raw, _path in declared_declarations(text):
         if unique and name in seen:
             continue
         seen.add(name)
         names.append(name)
     return names
+
+
+def duplicate_declarations(text: str) -> tuple[list[str], list[str]]:
+    """Return (hard duplicates, benign repeats) in a header's declarations.
+
+    A HARD duplicate is the very same declaration repeated unconditionally:
+    the header says the exact same thing twice, so the second copy is dead
+    text.  The historical cause was a declaration left outside the include
+    guard's `#endif`, which made the tail re-process on every inclusion.
+
+    A BENIGN repeat is the same name declared again with a different
+    signature, or inside a conditional branch.  Both are legal C and must
+    not be reported as a defect.
+    """
+    by_name: dict[str, list[tuple[str, tuple[int, ...]]]] = {}
+    for name, raw, path in declared_declarations(text):
+        by_name.setdefault(name, []).append((raw, path))
+    hard: list[str] = []
+    benign: list[str] = []
+    for name, entries in by_name.items():
+        if len(entries) < 2:
+            continue
+        for i, (raw_a, path_a) in enumerate(entries):
+            for raw_b, path_b in entries[i + 1:]:
+                if raw_a != raw_b:
+                    continue
+                # The same declaration twice.  It is only a defect when
+                # both copies can be compiled at the same time — that is,
+                # when their branch paths are not mutually exclusive.
+                if not _mutually_exclusive(path_a, path_b):
+                    hard.append(name)
+                    break
+            else:
+                continue
+            break
+        else:
+            benign.append(name)
+    return sorted(set(hard)), sorted(set(benign))
+
+
+def _mutually_exclusive(path_a: tuple[int, ...], path_b: tuple[int, ...]) -> bool:
+    """True when two branch paths select different, mutually exclusive branches.
+
+    The paths differ at a frame only when BOTH have that frame — a shorter
+    path is not a different branch, it is the same branch seen from
+    outside one more conditional.
+    """
+    for i in range(min(len(path_a), len(path_b))):
+        if path_a[i] != path_b[i]:
+            return True
+    return False
 
 
 def read_header(include_dir: str, header: str) -> str:
@@ -812,6 +900,15 @@ def libk_required(group: str, profile: str = "x86_64-clang") -> set[str]:
 
 # ── C manifest emission ────────────────────────────────────────────────
 
+def classified_headers(include_dir: str, groups: list[str]) -> set[str]:
+    """The headers the manifest covers: every group header plus the
+    explicitly excluded ones."""
+    headers: set[str] = set(EXCLUDED_HEADERS)
+    for group in groups:
+        headers.update(group_headers(group))
+    return headers
+
+
 def check_manifest_against_headers(include_dir: str, groups: list[str]) -> list[str]:
     """Return the drift errors between the manifest and the shipped headers.
 
@@ -860,16 +957,20 @@ def check_manifest_against_headers(include_dir: str, groups: list[str]) -> list[
             # guard's #endif, which left the tail outside the guard).  The
             # "not in" comparisons above cannot see it: a duplicate is still
             # "in" the manifest, so it never shows up as unlisted.
-            raw = [
-                s for s in declared_functions(read_header(include_dir, header),
-                                             unique=False)
-                if s not in EXCLUDED_SYMBOLS
-            ]
-            duplicates = sorted({s for s in raw if raw.count(s) > 1})
-            if duplicates:
+            hard, benign = duplicate_declarations(
+                read_header(include_dir, header))
+            hard = [s for s in hard if s not in EXCLUDED_SYMBOLS]
+            benign = [s for s in benign if s not in EXCLUDED_SYMBOLS]
+            if hard:
                 errors.append(
                     f"{group}/{header}: header declares the same function more "
-                    f"than once: {', '.join(duplicates)}"
+                    f"than once: {', '.join(hard)}"
+                )
+            if benign:
+                notes.append(
+                    f"{group}/{header}: the same name is declared again with a "
+                    f"different signature or inside a conditional branch "
+                    f"(legal C): {', '.join(benign)}"
                 )
     return errors
 
@@ -940,10 +1041,11 @@ def infer_profile(*paths: str | None) -> str | None:
 
 
 def audit(include_dir: str, libc_archive: str | None, libk_archive: str | None,
-          profile: str = "x86_64-clang") -> int:
+          profile: str = "x86_64-clang", groups: list[str] | None = None) -> int:
     errors: list[str] = []
     notes: list[str] = []
-    groups = enabled_groups()
+    if groups is None:
+        groups = enabled_groups()
 
     # Every header under libc/include must be classified: either it belongs
     # to an enabled group or it is explicitly excluded with a reason.  A
@@ -987,16 +1089,20 @@ def audit(include_dir: str, libc_archive: str | None, libk_archive: str | None,
                     f"{group}/{header}: header declares symbols missing from the "
                     f"manifest: {', '.join(unlisted)}"
                 )
-            raw = [
-                s for s in declared_functions(read_header(include_dir, header),
-                                             unique=False)
-                if s not in EXCLUDED_SYMBOLS
-            ]
-            duplicates = sorted({s for s in raw if raw.count(s) > 1})
-            if duplicates:
+            hard, benign = duplicate_declarations(
+                read_header(include_dir, header))
+            hard = [s for s in hard if s not in EXCLUDED_SYMBOLS]
+            benign = [s for s in benign if s not in EXCLUDED_SYMBOLS]
+            if hard:
                 errors.append(
                     f"{group}/{header}: header declares the same function more "
-                    f"than once: {', '.join(duplicates)}"
+                    f"than once: {', '.join(hard)}"
+                )
+            if benign:
+                notes.append(
+                    f"{group}/{header}: the same name is declared again with a "
+                    f"different signature or inside a conditional branch "
+                    f"(legal C): {', '.join(benign)}"
                 )
         for header, reason in sorted(EXCLUDED_HEADERS.items()):
             notes.append(f"excluded header {header}: {reason}")
@@ -1078,6 +1184,9 @@ def main(argv: list[str]) -> int:
                     help="write the C manifest consumed by the host test")
     ap.add_argument("--audit", action="store_true",
                     help="audit the shipped headers (and archives if given)")
+    ap.add_argument("--check-headers", action="store_true",
+                    help="check the manifest against the headers only "
+                         "(no archive); fails on drift")
     ap.add_argument("--groups", default="",
                     help="comma separated group list (default: enabled groups)")
     ap.add_argument("--include-dir", default=os.path.join(REPO_ROOT, "libc", "include"))
@@ -1105,6 +1214,21 @@ def main(argv: list[str]) -> int:
     else:
         groups = enabled_groups()
 
+    if args.check_headers:
+        # The header half of the audit, on its own.  The api group runs
+        # this on EVERY invocation: the manifest is only regenerated when
+        # the script or a header changes, so a drift check that lived
+        # inside --emit-c-header would be skipped on an ordinary rebuild.
+        drift = check_manifest_against_headers(args.include_dir, groups)
+        if drift:
+            print("ERROR: the API manifest has drifted from the headers:",
+                  file=sys.stderr)
+            for e in drift:
+                print(f"  {e}", file=sys.stderr)
+            return 2
+        print(f"[audit] headers OK ({len(groups)} group(s), "
+              f"{len(classified_headers(args.include_dir, groups))} header(s))")
+        return 0
     if args.emit_c_header:
         # The manifest is emitted at build time, so the drift check runs on
         # EVERY build that consumes it: a header that was added or changed
@@ -1124,7 +1248,7 @@ def main(argv: list[str]) -> int:
         return 0
     if args.audit:
         return audit(args.include_dir, args.libc_archive or None,
-                     args.libk_archive or None, profile)
+                     args.libk_archive or None, profile, groups)
     return list_manifest(profile)
 
 
