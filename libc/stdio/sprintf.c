@@ -2,7 +2,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <limits.h>
-#include "stdio_internal.h"
+#include <stdio/internal.h>
 
 int sprintf(char *buf, const char *fmt, ...)
 {

@@ -49,7 +49,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Groups ──────────────────────────────────────────────────────────────
 # Every group names the task that delivers it.  ENABLED_GROUPS lists the
 # groups delivered so far; a later task appends its group here.
-ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env", "shutdown")
+ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env", "shutdown", "stream")
 
 # Headers that are deliberately NOT part of the api group, with the reason.
 # An excluded header is still compiled by nothing in the api group, so it
@@ -72,6 +72,12 @@ EXCLUDED_HEADERS: dict[str, str] = {
     "endian.h": "internal byte-order helper, not a user libc interface",
     "chacha20.h": "internal crypto helper, not a user libc interface",
     "features.h": "internal feature-test macro header",
+    # Private stdio headers (T5).  They live under include/<module>/ because
+    # they belong to the libc implementation, not to the public interface:
+    # the public <stdio.h> keeps FILE opaque, and these two headers carry
+    # the stream state and the bounded formatter.
+    "stdio/file.h": "private stdio header (stream state), not a public libc interface",
+    "stdio/internal.h": "private stdio header (bounded formatter), not a public libc interface",
 }
 
 # Symbols a header declares only under a host-test-only condition.  They
@@ -307,8 +313,13 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "sscanf",
         "skip_atoi",
         "dprintf",
-        "ferror_unlocked",
+        "feof",
+        "ferror",
         "clearerr",
+        "feof_unlocked",
+        "ferror_unlocked",
+        "clearerr_unlocked",
+        "ungetc",
         "perror",
         "fopen",
         "fdopen",
@@ -655,6 +666,29 @@ API_GROUPS: dict[str, dict] = {
         },
         # The env group owns behaviour: the user libc must really export
         # every interface it owns.
+        "require_user_export": True,
+    },
+    "stream": {
+        "task": "T5",
+        "title": "one stream state for the standard streams and the opened files",
+        # The stream group owns the status indicators of a stream, but it
+        # does not own the header they are declared in: stdio.h declares
+        # the whole stream API and is audited for declaration drift by
+        # the api group.
+        "headers": {},
+        "owned": {
+            "stdio.h": [
+                "feof",
+                "ferror",
+                "clearerr",
+                "feof_unlocked",
+                "ferror_unlocked",
+                "clearerr_unlocked",
+                "ungetc",
+            ],
+        },
+        # The stream group owns behaviour: the user libc must really
+        # export every interface it owns.
         "require_user_export": True,
     },
     "shutdown": {

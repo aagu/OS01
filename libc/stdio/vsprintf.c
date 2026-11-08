@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
-#include "stdio_internal.h"
+#include <stdio/internal.h>
 #ifndef __is_libk
 /* Float-format conversion depends on `double` type support; the libk
  * build uses -mgeneral-regs-only (no FPU/FP registers), so the floatconv

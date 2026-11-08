@@ -46,9 +46,12 @@ TEST_FUNC(test_fread_unregistered_stream_returns_zero) {
     off_t off = lseek(fd, 0, 0);  /* 0 == SEEK_SET */
     assert_eq(off, 0);
 
-    mini_file_t fake = { .fd = fd, .mode = 0 };
+    /* A stream-shaped object the libc never handed out: the public
+     * header keeps FILE opaque, so the test builds its own.  The libc
+     * must reject it instead of reading a descriptor out of it. */
+    struct { int fd; int mode; } fake = { .fd = fd, .mode = 0 };
     char buf[4] = {0};
-    size_t n = fread(buf, 1, sizeof buf, &fake);
+    size_t n = fread(buf, 1, sizeof buf, (FILE *)&fake);
     /* Post-fix expectation: unregistered stream → 0 bytes read. */
     assert_eq(n, 0);
 
@@ -66,8 +69,8 @@ TEST_FUNC(test_fwrite_unregistered_stream_returns_zero) {
     int fd = mkstemp(tmpl);
     assert_true(fd >= 0);
 
-    mini_file_t fake = { .fd = fd, .mode = 1 };
-    size_t n = fwrite("x", 1, 1, &fake);
+    struct { int fd; int mode; } fake = { .fd = fd, .mode = 1 };
+    size_t n = fwrite("x", 1, 1, (FILE *)&fake);
     assert_eq(n, 0);    /* post-fix: not registered */
 
     close(fd);

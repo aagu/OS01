@@ -12,7 +12,9 @@ extern "C" {
 
 #define EOF (-1)
 
-/* FILE type - stub for headers that reference it */
+/* FILE is an OPAQUE type: the public header declares the tag only, and the
+ * real definition lives in the private header <stdio/file.h>.  A caller can
+ * therefore never depend on the layout of a stream. */
 typedef struct __FILE FILE;
 
 #define ZEROPAD	1		/* pad with zero */
@@ -37,9 +39,9 @@ typedef struct __FILE FILE;
  * userland and x86_64 libk kernel-side builds. */
 #if defined(__x86_64__)
 #define do_div(n,base) ({ \
-int __res; \
-__asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
-__res; })
+	int __res; \
+	__asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
+	__res; })
 #elif defined(__aarch64__)
 #define do_div(n,base) ({ \
     unsigned long __b = (unsigned long)(base); \
@@ -72,47 +74,71 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 int sscanf(const char *str, const char *fmt, ...);
 int skip_atoi(const char **s);
 int dprintf(int fd, const char *fmt, ...);
-int ferror_unlocked(void *f);
-int clearerr(void *f);
 void perror(const char *s);
-void *fopen(const char *path, const char *mode);
-void *fdopen(int fd, const char *mode);
-void *freopen(const char *path, const char *mode, void *f);
-int fclose(void *f);
-int fseeko(void *f, long off, int whence);
-size_t fread(void *ptr, size_t size, size_t nmemb, void *f);
-int fflush(void *f);
-
 int vasprintf(char **strp, const char *fmt, va_list ap);
 int fileno_unlocked(FILE *f);
 
+/* ── Stream lifecycle ───────────────────────────────────────────────
+ *
+ * fopen/fdopen hand back a FILE* that owns a real stream state; fclose
+ * closes it.  freopen re-points an existing stream at a new file.
+ */
+FILE *fopen(const char *path, const char *mode);
+FILE *fdopen(int fd, const char *mode);
+FILE *freopen(const char *path, const char *mode, FILE *f);
+int   fclose(FILE *f);
+int   fflush(FILE *f);
+int   fseeko(FILE *f, long off, int whence);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f);
+size_t fwrite(const void *p, size_t s, size_t n, FILE *f);
+
+/* ── Stream status indicators ──────────────────────────────────────
+ *
+ * The EOF indicator is sticky: it is set when a read reaches end-of-file
+ * and stays set until clearerr() (or a successful ungetc()) clears it.
+ * The error indicator is set by an I/O failure — an error is NOT an
+ * end-of-file, so it never sets the EOF indicator.
+ */
+int  feof(FILE *f);
+int  ferror(FILE *f);
+void clearerr(FILE *f);
+int  feof_unlocked(FILE *f);
+int  ferror_unlocked(FILE *f);
+void clearerr_unlocked(FILE *f);
+
+/* ungetc pushes one byte back onto a readable stream.  EOF is not a valid
+ * pushback character, and only ONE byte may be held at a time.  A
+ * successful ungetc clears the EOF indicator. */
+int  ungetc(int c, FILE *f);
+
+/* ── Character and string I/O ────────────────────────────────────── */
+int   getc_unlocked(FILE *f);
+int   putc_unlocked(int c, FILE *f);
+#define fputs_unlocked(s,f) fputs(s,f)
+int   fputs(const char *s, FILE *f);
+int   getchar(void);
+int   getchar_unlocked(void);
+char *fgets_unlocked(char *s, int size, FILE *f);
+ssize_t getline(char **lineptr, size_t *n, FILE *f);
+
+/* ── Formatted output ────────────────────────────────────────────── */
+int vprintf(const char *fmt, __builtin_va_list ap);
+int vfprintf(FILE *f, const char *fmt, __builtin_va_list ap);
+int fprintf(FILE *f, const char *fmt, ...);
+int vsnprintf(char *b, unsigned long s, const char *fmt, va_list ap);
+int putchar_unlocked(int c);
+int fputc(int c, FILE *f);
+
+/* ── The standard streams ──────────────────────────────────────────
+ *
+ * The sentinel VALUES are kept (they are part of the historical ABI and
+ * appear in user code), but they are never dereferenced: the libc's
+ * resolver maps them onto three real stream states, so stdin, stdout and
+ * stderr carry exactly the same EOF / error / pushback state as any
+ * fopen()-ed stream. */
 #define stdin  ((FILE*)1)
 #define stdout ((FILE*)2)
 #define stderr ((FILE*)3)
-
-/* Minimal FILE struct shared by fopen/fdopen/fread/fwrite/fgets/getc */
-typedef struct {
-    int fd;
-    int mode;  /* 0=read, 1=write */
-} mini_file_t;
-
-int getc_unlocked(void *f);
-int putc_unlocked(int c, void *f);
-#define fputs_unlocked(s,f) fputs(s,f)
-
-int fputs(const char *s, void *f);
-int getchar(void);
-int getchar_unlocked(void);
-char *fgets_unlocked(char *s, int size, void *f);
-ssize_t getline(char **lineptr, size_t *n, void *f);
-
-int vprintf(const char *fmt, __builtin_va_list ap);
-int vfprintf(void *f, const char *fmt, __builtin_va_list ap);
-int fprintf(void *f, const char *fmt, ...);
-int vsnprintf(char *b, unsigned long s, const char *fmt, va_list ap);
-int putchar_unlocked(int c);
-int fputc(int c, void *f);
-size_t fwrite(const void *p, size_t s, size_t n, void *f);
 
 #ifdef __cplusplus
 }

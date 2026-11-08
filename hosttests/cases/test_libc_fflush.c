@@ -33,11 +33,10 @@
 #include <string.h>
 #include "stdio_test_shims.h"
 
-/* mini_file_t is defined in <stdio.h> but the host test framework pulls
- * in stdio.h via test_framework.h, so the layout { int fd; int mode; }
- * is visible. fopen() is the real one (linked from libc_stdio_file.o). */
-extern void *fopen(const char *path, const char *mode);
-extern int  fclose(void *f);
+/* The stream interface is declared by <stdio.h> (FILE has been opaque
+ * since T5: the public header no longer publishes a stream layout), so
+ * this test calls the declared prototypes directly.  fopen()/fclose() are
+ * the real ones, linked from libc_stdio_file.o. */
 
 TEST_FUNC(test_fflush_null_returns_zero) {
     /* POSIX: fflush(NULL) flushes ALL streams. With no streams to flush
@@ -47,7 +46,8 @@ TEST_FUNC(test_fflush_null_returns_zero) {
 }
 
 TEST_FUNC(test_fflush_stdout_returns_zero) {
-    /* stdout is a sentinel ((FILE*)2), not a mini_file_t. */
+    /* stdout is a sentinel ((FILE*)2) that the resolver maps onto a real
+     * stream state. */
     int rc = fflush(stdout);
     assert_eq(rc, 0);
 }

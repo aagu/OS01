@@ -3,7 +3,7 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <stdint.h>
-#include "stdio_internal.h"
+#include <stdio/internal.h>
 
 int vasprintf(char **strp, const char *fmt, va_list ap)
 {

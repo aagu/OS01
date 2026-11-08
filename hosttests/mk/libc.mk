@@ -12,6 +12,7 @@ $(eval $(call register_host_test,test_libc_api,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_alloc,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_environ,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_shutdown,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_stream_state,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -25,7 +26,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_api.elf \
     $(TEST_BLD)/test_libc_alloc.elf \
     $(TEST_BLD)/test_libc_environ.elf \
-    $(TEST_BLD)/test_libc_shutdown.elf
+    $(TEST_BLD)/test_libc_shutdown.elf \
+    $(TEST_BLD)/test_libc_stream_state.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -291,6 +293,61 @@ $(TEST_BLD)/test_libc_shutdown.elf: $(TEST_BLD)/test_libc_shutdown.o \
 
 .PHONY: test-libc-shutdown
 test-libc-shutdown: $(TEST_BLD)/test_libc_shutdown.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: stream group (T5) ─────────────────────────────────
+# The stream group drives the REAL production stream core
+# (libc/stdio/stdio_file.c, stdio_extras.c, printf.c, putchar.c, puts.c,
+# getchar_unlocked.c).  They are linked as they are — no renamed copies,
+# no re-implementation — so a call in the test can never resolve to the
+# host libc's same-named implementation.
+#
+# The boundary that IS replaced is the descriptor boundary: read(),
+# write() and close() (hosttests/mock/libc_stream_runtime.c).  The mock
+# serves scripted descriptors and passes every other descriptor on to
+# the host kernel, so the test's own output still reaches the terminal
+# while the stream state under test stays fully production code.
+# The stream objects are compiled WITHOUT the test_platform.h
+# force-include: that header defines __is_libk, and the kernel-side copy
+# of the module is not the one under test.  The stream group drives the
+# USER libc, exactly like the shipped libc.a is built.
+OS01_LIBC_STREAM_DIR := $(TEST_BLD)/user-std
+OS01_LIBC_STREAM_OBJS := \
+    $(OS01_LIBC_STREAM_DIR)/stdio_file.o \
+    $(OS01_LIBC_STREAM_DIR)/stdio_extras.o \
+    $(OS01_LIBC_STREAM_DIR)/printf.o \
+    $(OS01_LIBC_STREAM_DIR)/putchar.o \
+    $(OS01_LIBC_STREAM_DIR)/puts.o \
+    $(OS01_LIBC_STREAM_DIR)/getchar_unlocked.o \
+    $(OS01_LIBC_STREAM_DIR)/vsprintf.o \
+    $(OS01_LIBC_STREAM_DIR)/vsnprintf.o \
+    $(OS01_LIBC_STREAM_DIR)/sprintf.o \
+    $(OS01_LIBC_STREAM_DIR)/floatconv.o
+
+$(OS01_LIBC_STREAM_DIR)/%.o: $(LIBC_SRC)/stdio/%.c
+	@mkdir -p $(OS01_LIBC_STREAM_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_stream_runtime.o: $(TEST_MOCK)/libc_stream_runtime.c \
+		$(TEST_MOCK)/libc_stream_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_stream_state.o: $(TEST_CASES)/test_libc_stream_state.c \
+		$(TEST_MOCK)/libc_stream_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
+
+$(TEST_BLD)/test_libc_stream_state.elf: $(TEST_BLD)/test_libc_stream_state.o \
+		$(OS01_LIBC_STREAM_OBJS) \
+		$(TEST_BLD)/libc_stream_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-stream-state
+test-libc-stream-state: $(TEST_BLD)/test_libc_stream_state.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
