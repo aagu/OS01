@@ -44,7 +44,6 @@ void pic_init()
  * input goes masked (other slave users must keep the cascade).  The
  * IMR read-modify-write runs with IRQs off and restores the caller's
  * IF — this is boot-time BSP usage, not an SMP PIC redesign. */
-#define PIC_CASCADE_VEC 0x22   /* master IRQ2 → vector 0x20 + 2 */
 
 void pic_enable(uint64_t nr)
 {

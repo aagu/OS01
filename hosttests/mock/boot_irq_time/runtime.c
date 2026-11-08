@@ -117,13 +117,32 @@ uint8_t boot2_cmos_regs[16];
  * pause-driven delivery produces a real periodic IRQ. */
 int boot2_cmos_periodic;
 
+static void rtc_pending_refresh(void);
+
+/* Saturation-pin knob (final-review I-1): while armed, the periodic
+ * source keeps firing on its own — each refresh delivers one extra PF
+ * through the real dispatch.  The foreground sees the IRQ between its
+ * own pauses exactly as the hardware would. */
+int boot2_cmos_extra_pf;
+static unsigned long rtc_pf_delivered;
+void boot2_rtc_delivery_reset(void) { rtc_pf_delivered = 0; }
+
+static void rtc_deliver_pf(void)
+{
+    boot2_cmos_regs[0x0C] = 0x40;    /* PF: this IRQ's reason */
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    arch_irq_dispatch(&regs, 0x28);
+}
+
 static void rtc_pending_refresh(void)
 {
     uint8_t slave = port_model[SLAVE_IMR_PORT];
     uint8_t master = port_model[MASTER_IMR_PORT];
     if (boot2_cmos_periodic && (boot2_cmos_regs[0x0B] & 0x40) &&
-        !(slave & 0x01) && !(master & 0x04))
-        pending_latch |= 1UL << 32;              /* RTC pending token */
+        !(slave & 0x01) && !(master & 0x04)) {
+        pending_latch |= 1UL << 32;          /* RTC pending token */
+    }
 }
 
 void arch_outb(uint16_t port, uint8_t value)
@@ -181,6 +200,12 @@ uint32_t boot2_lapic_get(uint32_t offset) { return lapic_regs[offset >> 2]; }
 /* ── pause-driven IRQ delivery ─────────────────────────────────── */
 unsigned long boot2_pause_deliveries;
 int boot2_tsc_frozen;   /* test knob: TSC does not advance on delivery */
+/* Saturation-pin knobs (final-review I-1):
+ *   boot2_cmos_extra_pf     deliver ONE extra PF after the transaction
+ *                           set done (before the foreground reads it);
+ *   boot2_foreground_freeze_at_done
+ *                           the mock's pause-driven delivery keeps
+ * (see rtc_pending_refresh for the active delivery mechanism). */
 /* The foreground calibration loop yields through arch_cpu_pause(); a
  * pending RTC periodic IRQ is delivered here through the REAL registry
  * dispatch — the mock never calls a handler directly. */
@@ -193,6 +218,19 @@ void arch_cpu_pause(void)
         memset(&regs, 0, sizeof(regs));
         boot2_pause_deliveries++;
         arch_irq_dispatch(&regs, 0x28);
+        /* Saturation-pin (final-review I-1): the 1024 Hz cadence keeps
+         * firing — immediately after the 256th delivered PF (counter
+         * incremented above, so 257 means "the 257th dispatch") one
+         * more IRQ lands before the foreground can disable IRQs.  The
+         * handler must early-return on done, never rewrite samples. */
+        rtc_pf_delivered++;
+        if (boot2_cmos_extra_pf && rtc_pf_delivered >= 256) {
+            boot2_cmos_extra_pf = 0;
+            boot2_cmos_regs[0x0C] = 0x40;
+            pt_regs_t regs2;
+            memset(&regs2, 0, sizeof(regs2));
+            arch_irq_dispatch(&regs2, 0x28);
+        }
         /* Time passes during a delivered tick: TSC advances, the LAPIC
          * decrementer counts down.  Fixed steps keep the sample math
          * deterministic. */

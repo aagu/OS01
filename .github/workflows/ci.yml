@@ -431,6 +431,8 @@ jobs:
           # BOOT-2 early-IRQ/time matrix: 10 serial groups (normal
           # 1/2/4/8, force-rtc 2, rtc-timeout 1, bsp-lapic-fail 1/2/4,
           # unsafe-open 1); the 90 s per-case timeout is per-QEMU-run.
+          # Worst case ~10 groups x ~2-5 min wall clock (builds + boots)
+          # — well inside this nightly job's 240-minute budget.
           suite make test-qemu SUITE=boot-irq-time
           # gui and gui-desktop run non-blocking for the same reason as
           # terminal-present: on 1-vCPU CI runners the guest's terminal

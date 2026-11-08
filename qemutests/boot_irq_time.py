@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """BOOT-2 x86 early-IRQ/time fault-matrix acceptance runner.
 
-Task 4 of the BOOT-2 plan (spec §7.2) needs *isolated* evidence that the
-x86 AP boot handshake behaves under three controlled CPU1 faults:
+Task 4 of the BOOT-2 plan (spec §7.2) needs *isolated* evidence for the
+BSP early-IRQ/time boot-path faults:
 
   * ``force-rtc``      — bypasses the CPUID nominal TSC answer; the
     real RTC window must produce 256 handler samples and paired returns.
@@ -118,7 +118,6 @@ _ANY_BOOT1_FATAL_RE = re.compile(r"^\[boot-1\] FATAL ", re.MULTILINE)
 # A panic line that is NOT the expected BOOT-1 fatal consequence.
 # kpanic renders "kernel panic: <msg>"; the BOOT-1 fatal path is the
 # only panic a fault case may produce.
-_PANIC_RE = re.compile(r"kernel panic", re.IGNORECASE)
 # A panic line that is NOT the expected BOOT-1 fatal consequence is
 # judged on the WHOLE line (kpanic renders "kernel panic - not syncing:
 # BOOT-1: AP boot failed ..."), which is the only allowed panic.
@@ -634,7 +633,7 @@ def _sigterm_handler(signum, frame):  # noqa: ANN001, ARG001
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="OS01 BOOT-1 x86 CPU-lifecycle fault-matrix acceptance")
+        description="OS01 BOOT-2 x86 early-IRQ/time fault-matrix acceptance")
     parser.add_argument("--case", choices=list(CASES), required=True)
     parser.add_argument("--cpus", type=int, required=True)
     parser.add_argument("--timeout", type=float, default=90.0)

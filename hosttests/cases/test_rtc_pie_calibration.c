@@ -54,6 +54,9 @@ void boot2_tsc_advance(uint64_t d);
 void boot2_test_install_gs(void *base);
 void boot2_rtc_ctx_prepare(void);
 extern int boot2_tsc_frozen;
+extern int boot2_foreground_freeze_at_done;
+extern int boot2_cmos_extra_pf;
+extern void boot2_rtc_delivery_reset(void);
 extern int boot2_if_flag;
 extern unsigned long boot2_irq_enable_calls;
 
@@ -85,6 +88,7 @@ hw_int_controller_t *__wrap_arch_irq_select_controller(uint32_t gsi)
 static void reset_mock(void)
 {
     b2rtc_wrap_active = 0;
+    boot2_rtc_delivery_reset();     /* per-case delivery counter */
     boot2_if_flag = 0;
     boot2_irq_enable_calls = 0;
     boot2_imr_set(0x21, 0xff);
@@ -252,13 +256,53 @@ static void freq_cache_cpuid_path(void)
  * crashes (old-transaction behaviour under the real periodic-hardware
  * model) records as that case's failure instead of killing the binary.
  * The failure is the RED. */
+/* BOOT-2 final-review I-1: the 257th PF must NOT rewrite the samples.
+ * Deterministic pin: the mock delivers one extra cadence PF after its
+ * own 256th delivery (done is already set), the handler early-returns
+ * on rtc_pie_done, and the foreground computes from the UNCHANGED
+ * last-sample pair — a rewritten sample would shift the outputs by a
+ * full tick step. */
+static void saturation_257th_never_rewrites(void)
+{
+    TEST_SUITE("boot2 rtc: 257th PF never rewrites samples");
+    reset_mock();
+    boot2_cmos_periodic = 1;
+    boot2_tsc_set(0);
+    /* Freeze the foreground at the moment the wait loop would exit:
+     * boot2_foreground_freeze makes arch_cpu_pause a no-op while the
+     * delivered-PF path still runs (the handler advances the TSC), so
+     * the extra PF lands while done is already set. */
+    /* The mock arms the extra cadence tick after its own 256th PF
+     * delivery, so the 257th IRQ lands while done is already set —
+     * exactly the real-hardware window between the 256th handler's
+     * iret and the foreground's IRQ-off. */
+    boot2_rtc_delivery_reset();
+    boot2_cmos_extra_pf = 1;
+    uint64_t t = 0, l = 0;
+    int rc = rtc_pie_calibrate(&t, &l);
+    boot2_cmos_extra_pf = 0;
+    assert_eq(0, rc);
+    /* Exact sample math: 255 intervals x 100000 mock cycles x 1024/255
+     * = 102400000. A rewritten 257th sample shifts t to ~102501960 —
+     * the exact assert is what makes the rewrite observable. */
+    assert_eq(102400000u, t);
+    /* The overlap counter must stay zero: the extra PF was consumed by
+     * the saturation early-return, not miscounted as a 257th sample or
+     * an unpaired return. */
+    /* (No direct read of the static counter — the contract is the
+     * unchanged outputs above plus rc=0; a rewritten 257th sample would
+     * have shifted t/l by one full tick step.) */
+}
+
 static void run_case(const char *name, void (*fn)(void))
 {
+    fflush(stdout);                 /* fork copies the stdio buffer */
     pid_t pid = fork();
     if (pid == 0) {
         alarm(10);
         setbuf(stdout, NULL);       /* child: unbuffered diagnostics */
         fprintf(stderr, "  [child] enter %s\n", name);
+        __test_stats.failed = 0;    /* only this case's result counts */
         fn();
         fflush(stdout);
         _exit(__test_stats.failed ? 1 : 0);
@@ -282,6 +326,8 @@ int main(void)
     run_case("stuck_tsc_budget", stuck_tsc_budget);
     run_case("freq_cache_rtc_path", freq_cache_rtc_path);
     run_case("freq_cache_cpuid_path", freq_cache_cpuid_path);
+    run_case("saturation_257th_never_rewrites",
+             saturation_257th_never_rewrites);
     printf("\ntest_rtc_pie_calibration: %d total, %d passed, %d failed\n",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

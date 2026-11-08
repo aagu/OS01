@@ -754,7 +754,7 @@ test-framework-contract:
 # groups).
 .PHONY: test-boot-irq-time-host _test-boot-irq-time-host-run-registration _test-boot-irq-time-host-run-context _test-boot-irq-time-host-run-rtc _test-boot-irq-time-host-run-all
 _test-boot-irq-time-host-run-all:
-	@echo "  [test-boot-irq-time-host] all (registration context rtc; handoff arrives with its task)"
+	@echo "  [test-boot-irq-time-host] all (registration context rtc handoff)"
 	$(call os01_submake,hosttests,test_boot_irq_time_registration test_boot_irq_time_context test_boot_irq_time_rtc test_boot_irq_time_handoff $(OS01_SUBMAKE_ARGS))
 _test-boot-irq-time-host-run-registration:
 	@echo "  [test-boot-irq-time-host] registration"

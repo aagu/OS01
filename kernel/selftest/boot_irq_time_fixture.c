@@ -117,8 +117,9 @@ static void snapshot_begin(void)
 static void phase_begin(int phase)
 {
     snapshot_begin();
-    /* Any token still live from the previous phase is a cross-phase
-     * overlap: count it and reset, never carry it. */
+    /* Tokens still live from the previous phase are dropped here (the
+     * per-phase counters never carried them); boot2_test_after_rtc
+     * separately counts RTC-phase residuals into unexpected_overlaps. */
     for (unsigned i = 0; i < B2T_MAX_TOKENS; i++)
         tokens[i].live = false;
     live_tokens[0][0] = live_tokens[0][1] = live_tokens[0][2] = 0;
