@@ -72,7 +72,8 @@ int  register_subsys(const char *name, int (*init)(void),
                      int phase, uint32_t flags);
 void subsys_init_all(void);           // run phases 3-6 in order
 void subsys_init_phase(int phase);    // run a single phase
-int  subsys_status(const char *name); // query init result
+int  subsys_status(const char *name); // query init status (1=ok, -1=fail, 0=uninit, -ENOENT)
+int  subsys_result(const char *name); // query raw init return code (0 or raw negative rc)
 
 // ── Per-CPU init (after SMP bringup) ─────────────────────
 int  register_subsys_percpu(const char *name,
@@ -81,11 +82,14 @@ int  register_subsys_percpu(const char *name,
 void subsys_init_percpu(void);        // run on all online CPUs
 ```
 
-- `register_subsys` appends to a static table (max 64 entries).
+- `register_subsys` appends to a static table (max 64 entries). Duplicate names return `-EEXIST`, invalid arguments return `-EINVAL`, table exhaustion returns `-ENOSPC`. Registration errors are never swallowed.
 - `subsys_init_phase(phase)` iterates the table, calling `init()` for matching uninitialized entries. Prints `ok`, `SKIP (optional, ret=N)`, or `FAIL (ret=N)` for each.
+- If a non-optional (required) subsystem returns non-zero, it triggers `boot_failure_stop("subsys", entry->name, rc, -1)` immediately, halting system boot without executing later phases or userspace startup.
+- If an optional subsystem returns non-zero, it emits `boot_failure_warn("subsys", entry->name, rc, -1)` and continues cleanly.
 - `subsys_init_all()` loops phases 3-6 inclusive.
-- `subsys_init_percpu()` iterates per-CPU entries, calling each `init_percpu(cpu_id)` for every discovered CPU (`0 .. num_cpus-1`).  BOOT-1: `num_cpus` is the traversal bound over discovered CPUs, NOT an online count — a constructed-but-not-yet-running AP still has online == 0 (`percpu_init` never publishes; each arch's boot path release-publishes runtime online at its own readiness point, see docs/smp/smp.md "BOOT-1 two-stage handshake").
-- `subsys_status` returns `1` (success), `<0` (failure), `0` (not run), or `-999` (unknown).
+- `subsys_init_percpu()` iterates per-CPU entries, calling each `init_percpu(cpu_id)` for every discovered CPU (`0 .. num_cpus-1`). If a per-CPU callback returns non-zero, non-optional entries halt via `boot_failure_stop("subsys-percpu", ...)` and optional entries warn via `boot_failure_warn("subsys-percpu", ...)`.
+- `subsys_status` returns `1` (success), `-1` (failure), `0` (not run), or `-ENOENT` (`-2`, unknown).
+- `subsys_result` returns `0` (success/not run) or the raw negative return code on failure.
 
 ---
 
@@ -206,6 +210,21 @@ console_init();
 // to create tcpip_thread before sched_boot_start() closes the window.
 task_init();
 ```
+
+---
+
+## BOOT-3 Startup Failure & Capability Policies
+
+Under BOOT-3 failure policies:
+- **Registration integrity**: Subsystem and per-CPU registration failures (`-EEXIST`, `-EINVAL`, `-ENOSPC`) are captured by `arch_register_subsys` / `arch_register_subsys_percpu`. Any registration error halts boot via `boot_failure_stop("registration", name, rc, -1)`.
+- **Structured fatal halting**: Required subsystem failures halt immediately using:
+  `boot_failure_stop(const char *stage, const char *component, int rc, int cpu_id);`
+  which formats `[boot-3] FATAL stage=<stage> component=<component> rc=<rc>` (with `cpu=<cpu_id>` for per-CPU entries) without heap allocation and enters `arch_boot_fatal_halt()`.
+- **Degraded continuation**: Optional subsystems log warnings using:
+  `boot_failure_warn(const char *stage, const char *component, int rc, int cpu_id);`
+  formatting `[boot-3] WARN stage=<stage> component=<component> rc=<rc>` and continuing without halting.
+- **Root & terminal capabilities**: Root filesystem mounting (`fs_boot_mounts`) is required; failure triggers fatal halt. Console TTY and PTY initialization are required for interactive userspace and halt on failure. Optional mounts (`/proc`, `/dev/shm`, `/tmp`) warn and degrade.
+- **Initial task stdio & inheritance integrity**: Before spawning PID 1 `/bin/init`, kernel creates 3 valid stdio file descriptors (stdin, stdout, stderr) attached to `/dev/tty`. Any fd table allocation error or inheritance duplication failure stops boot before userspace starts.
 
 ---
 

@@ -188,3 +188,9 @@ yield/deadline/global窗口在目标核的pinned worker上测量，remote窗口�
 
 仍为EL1协作式：**没有IRQ返回抢占**，没有迁移，没有EL0或用户MM。
 
+## 启动失败与诊断日志契约 (BOOT-3)
+
+通用启动错误与致命退出逻辑位于 `kernel/core/boot_failure.c`。
+- **AArch64 mini-formatter 兼容约束**：AArch64 early console/logger mini-formatter 仅保证稳定支持 `%s`，不保证通用整数说明符。因此 `boot_failure_stop` 与 `boot_failure_warn` 在栈上使用无堆分配的专用十进制格式化（带负号与 `INT64_MIN` 正确处理），生成固定栈缓冲区后统一通过 `%s` 传入 `log_err` / `log_warn`。
+- **HALT 边界**：致命退出直接调用 `arch_boot_fatal_halt()`（x86_64: cli + hlt 循环；aarch64: wfi 循环），不依赖已初始化的调度器，不在致命路径产生二次锁竞争或内存分配。
+
