@@ -77,9 +77,51 @@ TEST_FUNC(test_fwrite_unregistered_stream_returns_zero) {
     unlink(tmpl);
 }
 
+/* T7: a size*nmemb multiplication overflow must answer 0 without a
+ * syscall — proven with a REAL populated file: the byte must still be
+ * there for the following well-formed read. */
+TEST_FUNC(test_fread_overflow_returns_zero_no_consumption) {
+    char tmpl[] = "/tmp/test_fread_ovf_XXXXXX";
+    int fd = mkstemp(tmpl);
+    assert_true(fd >= 0);
+    assert_eq(1, (ssize_t)pwrite(fd, "x", 1, 0));
+    assert_eq(0, (off_t)lseek(fd, 0, 0));
+
+    FILE *f = fdopen(fd, "r");
+    assert_not_null(f);
+    char buf[4];
+    size_t huge = (size_t)-1 / 2;
+    assert_eq(0, (int)fread(buf, huge, 3, f));   /* 3 > SIZE_MAX/huge */
+    assert_eq(0, feof(f));                       /* nothing was read */
+    assert_eq(1, (int)fread(buf, 1, 1, f));      /* file position intact */
+    assert_eq('x', buf[0]);
+    fclose(f);
+    unlink(tmpl);
+}
+
+/* T7: a partial item at EOF returns the FULL-item count and sets EOF. */
+TEST_FUNC(test_fread_partial_item_eof) {
+    char tmpl[] = "/tmp/test_fread_partial_XXXXXX";
+    int fd = mkstemp(tmpl);
+    assert_true(fd >= 0);
+    assert_eq(10, (ssize_t)pwrite(fd, "0123456789", 10, 0));
+    assert_eq(0, (off_t)lseek(fd, 0, 0));
+
+    FILE *f = fdopen(fd, "r");
+    assert_not_null(f);
+    char buf[16];
+    /* 3 items of 4 requested, 10 bytes exist: 2 full items. */
+    assert_eq(2, (int)fread(buf, 4, 3, f));
+    assert_eq(1, feof(f));
+    fclose(f);
+    unlink(tmpl);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_fread_unregistered_stream_returns_zero),
     TEST_ENTRY(test_fwrite_unregistered_stream_returns_zero),
+    TEST_ENTRY(test_fread_overflow_returns_zero_no_consumption),
+    TEST_ENTRY(test_fread_partial_item_eof),
 TEST_LIST_END
 
 int main(void) {

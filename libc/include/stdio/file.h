@@ -82,6 +82,29 @@ struct __FILE {
 FILE *__stdio_resolve(FILE *f);
 int  __stdio_fd(FILE *f);
 
+/* ── The shared mode-string parser ───────────────────────────────────
+ *
+ * The one place a fopen mode string is turned into access capabilities
+ * and open(2) flags.  Both fopen() and fdopen() go through it, and so
+ * will freopen() (T9) — one parser, one matrix, no drift.
+ *
+ *   "r"  → __STDIO_READ             , O_RDONLY
+ *   "w"  → __STDIO_WRITE            , O_WRONLY|O_CREAT|O_TRUNC
+ *   "a"  → __STDIO_WRITE            , O_WRONLY|O_CREAT|O_APPEND
+ *   "+"  → adds the other direction , access bits → O_RDWR
+ *   "b"  → accepted anywhere after mode[0], no effect (no text mode)
+ *
+ * The "e" (close-on-exec) and "x" (exclusive) extensions are REJECTED
+ * with EINVAL: this libc does not promise O_CLOEXEC or O_EXCL, and a
+ * silent fake success would hide that.  An empty mode, an unknown
+ * leading character or a repeated '+' is EINVAL as well.
+ *
+ * Returns 0 and fills both outputs on success; -1 with errno set
+ * (EINVAL) on failure.  `open_flags` may be NULL for a caller that
+ * only needs the access check (fdopen() opens nothing).
+ */
+int __stdio_parse_mode(const char *mode, int *open_flags, unsigned *access);
+
 /* ── Shared stream I/O helpers ───────────────────────────────────────
  *
  * These update the stream state as a side effect (EOF / error flags,

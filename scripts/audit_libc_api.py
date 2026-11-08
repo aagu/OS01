@@ -208,7 +208,9 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "closedir",
     ],
     "errno.h": [],
-    "fcntl.h": [],
+    "fcntl.h": [
+        "fcntl",
+    ],
     "float.h": [],
     "getopt.h": [
         "getopt",

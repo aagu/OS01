@@ -5127,6 +5127,35 @@
     "action": "unique",
     "reason": "Primary host unit test proving kernel VFS atomic append semantics across the three writable filesystems"
    }
+  },
+  {
+   "id": "libc.stdio.stream_io",
+   "component": "libc",
+   "behavior": "stdio",
+   "trigger": "host runner invokes test_libc_stdio_io.elf",
+   "assertions": [
+    "fopen mode matrix opens r/w/a/r+/w+/a+ with the correct access and append flags; w truncates and a appends on a real file",
+    "the e/x extensions, empty and malformed mode strings are rejected with EINVAL",
+    "fdopen does not truncate, keeps the caller's fd usable on failure, and 'a' enables descriptor append via F_SETFL preserving existing status flags",
+    "fread with zero size, zero count or overflowing size*count issues no read syscall; a partial item at EOF returns the full-item count; EINTR is retried",
+    "fwrite reports completed items on a budgeted short-then-fail write, keeps the successful bytes and sets the error indicator; EINTR is retried",
+    "fclose reports a failing close as EOF and releases the stream anyway",
+    "fcntl takes no vararg for F_GETFL/F_GETFD, one int for F_SETFL/F_SETFD/F_DUPFD, rejects unsupported commands with EINVAL and maps bad descriptors to EBADF"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_stdio_io"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_stdio_io.c",
+    "selector": "test_libc_stdio_io",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for stream mode parsing, item-accurate fread/fwrite and the fcntl wrapper (T7); registry and stream-state groups cover disjoint properties"
+   }
   }
  ]
 }

@@ -13,6 +13,7 @@ $(eval $(call register_host_test,test_libc_alloc,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_environ,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_shutdown,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stream_state,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_stdio_io,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -27,7 +28,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_alloc.elf \
     $(TEST_BLD)/test_libc_environ.elf \
     $(TEST_BLD)/test_libc_shutdown.elf \
-    $(TEST_BLD)/test_libc_stream_state.elf
+    $(TEST_BLD)/test_libc_stream_state.elf \
+    $(TEST_BLD)/test_libc_stdio_io.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -348,6 +350,35 @@ $(TEST_BLD)/test_libc_stream_state.elf: $(TEST_BLD)/test_libc_stream_state.o \
 
 .PHONY: test-libc-stream-state
 test-libc-stream-state: $(TEST_BLD)/test_libc_stream_state.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: io group (T7) ───────────────────────────────
+# Stream modes + reliable item IO + the fcntl wrapper.  The
+# production stdio objects are the SAME user-mode objects the stream
+# group compiles (OS01_LIBC_STREAM_DIR pattern rule); fcntl.c joins
+# them with its own rule, and the replaced boundary is the descriptor
+# mock (libc_stream_runtime.o), whose SYS_fcntl hook forwards to the
+# host kernel so the wrapper is driven against real descriptors.
+$(OS01_LIBC_STREAM_DIR)/fcntl.o: $(LIBC_SRC)/unistd/fcntl.c
+	@mkdir -p $(OS01_LIBC_STREAM_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_stdio_io.o: $(TEST_CASES)/test_libc_stdio_io.c \
+        $(TEST_MOCK)/libc_stream_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
+
+$(TEST_BLD)/test_libc_stdio_io.elf: $(TEST_BLD)/test_libc_stdio_io.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(OS01_LIBC_STREAM_DIR)/fcntl.o \
+        $(TEST_BLD)/libc_stream_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-stdio-io
+test-libc-stdio-io: $(TEST_BLD)/test_libc_stdio_io.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

@@ -3967,6 +3967,80 @@ static void test_vfs_append(void)
     }
 }
 
+// ── T7: stdio modes on target temp files (libc-completion plan) ──
+//
+// The mode matrix, exercised through the REAL kernel on a tmpfs
+// file: fopen("w") truncates, fopen("a") appends at the REAL end
+// (the kernel's T6 atomic append, reached through the libc fopen
+// layer), "r+" reads and writes, fdopen("a") turns a plain
+// descriptor append-only through F_SETFL and the byte lands at EOF
+// even though the descriptor position sits at 0, and a malformed
+// mode ("wx" — the close-on-exec/exclusive extensions are not
+// promised) is rejected with EINVAL.  EINTR behaviour is host-only
+// (regular-file syscalls on this kernel never interrupt).
+static void test_stdio_modes(void)
+{
+    static const char *path = "/tmp/systest_stdio.dat";
+    char buf[32];
+    ssize_t n;
+    unlink(path);
+
+    /* fopen "w": create/truncate, write at 0 */
+    FILE *f = fopen(path, "w");
+    CHECK3(f != NULL, "fopen w", "opened");
+    size_t w = fwrite("hello", 1, 5, f);
+    CHECK3(w == 5, "fwrite w", "5 bytes");
+    fclose(f);
+
+    /* fopen "a": appends at the real end */
+    f = fopen(path, "a");
+    CHECK3(f != NULL, "fopen a", "opened");
+    w = fwrite("WORLD", 1, 5, f);
+    CHECK3(w == 5, "fwrite a", "5 bytes");
+    fclose(f);
+
+    /* fopen "r": exact read-back */
+    memset(buf, 0, sizeof(buf));
+    f = fopen(path, "r");
+    CHECK3(f != NULL, "fopen r", "opened");
+    size_t r = fread(buf, 1, sizeof(buf) - 1, f);
+    CHECK3(r == 10 && memcmp(buf, "helloWORLD", 10) == 0,
+           "fread r", "content matches");
+    fclose(f);
+
+    /* fdopen("a"): a plain descriptor at position 0, the byte must
+     * land at the file's REAL end */
+    int fd = open(path, O_RDWR);
+    CHECK3(fd >= 0, "open fdopen", "descriptor");
+    f = fdopen(fd, "a");
+    CHECK3(f != NULL, "fdopen a", "opened");
+    w = fwrite("!", 1, 1, f);
+    CHECK3(w == 1, "fdopen a write", "1 byte at EOF");
+    fclose(f);                      /* fdopen owns the fd */
+
+    /* verify the complete file content */
+    fd = open(path, O_RDONLY);
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    CHECK3(n == 11 && memcmp(buf, "helloWORLD!", 11) == 0,
+           "fdopen a verify", "appended at real end");
+
+    /* malformed mode: the "x" extension is not promised */
+    errno = 0;
+    f = fopen(path, "wx");
+    CHECK3(f == NULL && errno == EINVAL, "fopen wx", "EINVAL");
+
+    /* fopen "w" on an existing file truncates it */
+    f = fopen(path, "w");
+    CHECK3(f != NULL, "fopen w truncate", "opened");
+    fclose(f);
+    fd = open(path, O_RDONLY);
+    n = read(fd, buf, 1);
+    close(fd);
+    CHECK3(n == 0, "fopen w truncate", "file empty");
+    unlink(path);
+}
+
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
 // The kernel reserves [0x400000, 0x20600000) for the ELF image
 // (envelope incl. segment gaps), the heap (committed + reserve),
@@ -4476,6 +4550,7 @@ static const test_case_t tests[] = {
     {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
     {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
     {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
+    {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

@@ -58,6 +58,23 @@ void stream_rt_fail_read(int fd, int err);
  * reaches the end of file and sets the EOF indicator. */
 void stream_rt_fail_read_once(int fd, int err);
 
+/* The NEXT write on `fd` fails with `err` (typically EINTR); later
+ * writes behave normally again.  Lets a test prove the libc's write
+ * loop retries an interrupted write instead of giving up. */
+void stream_rt_fail_write_once(int fd, int err);
+
+/* Writes on `fd` succeed only while the CUMULATIVE byte count stays
+ * within `budget`; the write that would exceed it fails with EIO and
+ * the excess is not written.  Lets a test produce a deterministic
+ * short-then-fail write and prove the libc reports the completed
+ * items without losing the successful bytes. */
+void stream_rt_write_budget(int fd, size_t budget);
+
+/* close() on `fd` fails with `err` (the descriptor is NOT actually
+ * closed).  Lets a test prove fclose() propagates the close error as
+ * EOF while still releasing the stream. */
+void stream_rt_fail_close(int fd, int err);
+
 /* Writes on `fd` fail with `err` (an errno value). */
 void stream_rt_fail_write(int fd, int err);
 

@@ -22,4 +22,18 @@
 
 #define FD_CLOEXEC  1
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* File-descriptor control.  F_GETFL/F_GETFD take no third argument;
+ * F_SETFL/F_SETFD/F_DUPFD/F_DUPFD_CLOEXEC take an int.  Every other
+ * command is rejected with EINVAL without a syscall.  Returns the
+ * command's value, or -1 with errno set. */
+int fcntl(int fd, int cmd, ...);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

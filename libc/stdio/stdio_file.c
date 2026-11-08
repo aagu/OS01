@@ -137,7 +137,7 @@ int __stdio_fd(FILE *f)
  * extensions and every invalid combination); this is the base contract:
  * "r", "w" and "a", each optionally followed by "+" and/or "b".
  */
-static int mode_caps_flags(const char *mode, int *caps, int *flags)
+int __stdio_parse_mode(const char *mode, int *open_flags, unsigned *access)
 {
     if (!mode || !mode[0]) {
         errno = EINVAL;
@@ -167,7 +167,7 @@ static int mode_caps_flags(const char *mode, int *caps, int *flags)
         }
     }
 
-    int c;
+    unsigned c;
     int fl;
     switch (base) {
     case 0:                                   /* "r" */
@@ -190,25 +190,26 @@ static int mode_caps_flags(const char *mode, int *caps, int *flags)
         fl = (fl & ~(O_RDONLY | O_WRONLY)) | O_RDWR;
     }
 
-    *caps = c;
-    *flags = fl;
+    if (access) *access = c;
+    if (open_flags) *open_flags = fl;
     return 0;
 }
 
 FILE *fopen(const char *path, const char *mode)
 {
-    int caps, flags;
+    unsigned access;
+    int flags;
     if (!path) {
         errno = EINVAL;
         return NULL;
     }
-    if (mode_caps_flags(mode, &caps, &flags) != 0)
+    if (__stdio_parse_mode(mode, &flags, &access) != 0)
         return NULL;
 
     FILE *st = calloc(1, sizeof(*st));
     if (!st) return NULL;
     st->pending = -1;
-    st->caps = caps;
+    st->caps = (int)access;
     st->fd = open(path, flags, 0666);
     if (st->fd < 0) {
         free(st);
@@ -229,19 +230,33 @@ FILE *fopen(const char *path, const char *mode)
 
 FILE *fdopen(int fd, const char *mode)
 {
-    int caps, flags;
+    unsigned access;
+    int flags;
     if (fd < 0) {
         errno = EBADF;
         return NULL;
     }
-    if (mode_caps_flags(mode, &caps, &flags) != 0)
+    if (__stdio_parse_mode(mode, &flags, &access) != 0)
         return NULL;
 
     FILE *st = calloc(1, sizeof(*st));
     if (!st) return NULL;
     st->pending = -1;
     st->fd = fd;
-    st->caps = caps;
+    st->caps = (int)access;
+
+    /* POSIX: fdopen "a" makes the stream append.  fdopen does NOT
+     * open (or truncate) anything, so the append bit goes onto the
+     * descriptor through F_SETFL, PRESERVING whatever status flags the
+     * descriptor already carries (O_NONBLOCK and friends must
+     * survive).  The kernel-side O_APPEND write path is the real
+     * atomic append (T6). */
+    if (mode[0] == 'a') {
+        int old_flags = fcntl(fd, F_GETFL);
+        if (old_flags >= 0)
+            fcntl(fd, F_SETFL, old_flags | O_APPEND);
+    }
+
     /* fdopen does NOT open the file, so it must not close the fd when
      * the registration fails — POSIX leaves the fd open on failure. */
     st->owns_fd = 1;
@@ -490,12 +505,30 @@ size_t fwrite(const void *p, size_t s, size_t n, FILE *f)
     }
     st->last_op = __STDIO_OP_WRITE;
 
-    ssize_t w = write_all(st->fd, (const char *)p, s * n);
-    if (w < 0) {
-        st->error = 1;
-        return 0;
+    /* Byte loop (write_all's discipline: EINTR retries, a zero write
+     * with bytes remaining is an error), but with the POSIX item
+     * accounting: the return value counts FULL items, and the bytes
+     * that did land stay landed — a short-then-fail write must report
+     * the completed items, not zero, and must not lose the successful
+     * bytes.  write_all() itself stays all-or-nothing for the printf
+     * paths, which have no item size to report against. */
+    size_t total = s * n;
+    size_t done = 0;
+    while (done < total) {
+        ssize_t w = write(st->fd, (const char *)p + done,
+                          (uint64_t)(total - done));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            st->error = 1;
+            break;
+        }
+        if (w == 0) {
+            st->error = 1;
+            break;
+        }
+        done += (size_t)w;
     }
-    return (size_t)w / s;
+    return done / s;
 }
 
 int fflush(FILE *f)

@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -46,9 +47,13 @@ struct desc_state {
 
     int  capture_write;
     int  werr;
+    int  werr_once;
+    size_t budget;            /* 0 = no budget; else cumulative cap */
+    size_t budget_used;
     char wbuf[CAPTURE_CAP];
     size_t wlen;
 
+    int cerr;                 /* close fails with this when non-zero */
     int closes;
 };
 
@@ -102,9 +107,31 @@ ssize_t read(int fd, void *buf, size_t count)
 ssize_t write(int fd, const void *buf, size_t count)
 {
     struct desc_state *d = desc_for(fd);
+    if (d && d->werr_once) {
+        int e = d->werr_once;
+        d->werr_once = 0;
+        errno = e;
+        return -1;
+    }
     if (d && d->werr) {
         errno = d->werr;
         return -1;
+    }
+    if (d && d->budget) {
+        if (d->budget_used >= d->budget) {
+            errno = EIO;
+            return -1;
+        }
+        size_t room = d->budget - d->budget_used;
+        size_t n = (count < room) ? count : room;
+        if (d->capture_write && n > 0) {
+            size_t cap_room = CAPTURE_CAP - d->wlen;
+            size_t cn = (n < cap_room) ? n : cap_room;
+            memcpy(d->wbuf + d->wlen, buf, cn);
+            d->wlen += cn;
+        }
+        d->budget_used += n;
+        return (ssize_t)n;
     }
     if (d && d->capture_write) {
         size_t room = CAPTURE_CAP - d->wlen;
@@ -129,6 +156,10 @@ int close(int fd)
     struct desc_state *d = desc_for(fd);
     if (d)
         d->closes++;
+    if (d && d->cerr) {
+        errno = d->cerr;
+        return -1;
+    }
     if (d && d->virtual_fd)
         return 0;
     return (int)raw_syscall(SYS_close, fd, 0, 0);
@@ -138,6 +169,23 @@ int close(int fd)
 int64_t host_test_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     switch (nr) {
+    case 19:   /* OS01 SYS_fcntl — the libc's fcntl() wrapper is under
+                * test, so its syscall must reach a REAL descriptor
+                * control backend.  Redirect to the HOST kernel's fcntl
+                * number (this file compiles against the HOST's
+                * <sys/syscall.h>, so SYS_fcntl here is the host's,
+                * e.g. 72 on x86_64 — NOT the OS01 19 the switch saw).
+                * Calling fcntl() by name would recurse into the linked
+                * production wrapper, so the raw syscall is used, and
+                * the host's -1/errno answer is translated into the
+                * kernel convention the wrapper expects (negative errno
+                * as the value). */
+    {
+        long r = syscall(SYS_fcntl, (int)arg1, (int)arg2, (int)arg3);
+        if (r < 0)
+            return -(int64_t)*__errno_location();
+        return (int64_t)r;
+    }
     case 11:   /* SYS_fork — the test forks a child for the checks that
                 * close a standard stream (closing fd 1 would take the
                 * test's own output down with it). */
@@ -162,6 +210,10 @@ void stream_rt_reset(void)
         d->rerr_once = 0;
         d->capture_write = 0;
         d->werr = 0;
+        d->werr_once = 0;
+        d->budget = 0;
+        d->budget_used = 0;
+        d->cerr = 0;
         d->wlen = 0;
         d->closes = 0;
     }
@@ -208,6 +260,27 @@ void stream_rt_fail_write(int fd, int err)
     struct desc_state *d = desc_for(fd);
     if (!d) return;
     d->werr = err;
+}
+
+void stream_rt_fail_write_once(int fd, int err)
+{
+    struct desc_state *d = desc_for(fd);
+    if (d) d->werr_once = err;
+}
+
+void stream_rt_write_budget(int fd, size_t budget)
+{
+    struct desc_state *d = desc_for(fd);
+    if (d) {
+        d->budget = budget;
+        d->budget_used = 0;
+    }
+}
+
+void stream_rt_fail_close(int fd, int err)
+{
+    struct desc_state *d = desc_for(fd);
+    if (d) d->cerr = err;
 }
 
 void stream_rt_capture_write(int fd)
