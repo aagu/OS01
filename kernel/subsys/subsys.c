@@ -7,13 +7,14 @@
 #include <errno.h>
 #include <string.h>
 
-#define MAX_SUBSYS        64
-#define MAX_SUBSYS_PERCPU 16
+#define MAX_SUBSYS             64
+#define MAX_SUBSYS_CPU_PREPARE 16
+#define MAX_SUBSYS_PERCPU      MAX_SUBSYS_CPU_PREPARE
 
-static subsys_entry_t        subsys_table[MAX_SUBSYS];
-static int                   subsys_count = 0;
-static subsys_percpu_entry_t subsys_percpu_table[MAX_SUBSYS_PERCPU];
-static int                   subsys_percpu_count = 0;
+static subsys_entry_t             subsys_table[MAX_SUBSYS];
+static int                        subsys_count = 0;
+static subsys_cpu_prepare_entry_t subsys_cpu_prepare_table[MAX_SUBSYS_CPU_PREPARE];
+static int                        subsys_cpu_prepare_count = 0;
 
 /* Registration latch and sealing state */
 static struct {
@@ -24,7 +25,7 @@ static struct {
 } reg_latch = {0};
 
 static int bsp_sealed = 0;
-static int percpu_sealed = 0;
+static int cpu_prepare_sealed = 0;
 
 static void latch_reg_error(const char *name, int rc, int phase)
 {
@@ -131,21 +132,21 @@ int register_subsys_deps(const char *name, int (*init)(void),
     return 0;
 }
 
-// ── 注册（per-CPU 二次 init） ─────────────────────────────
+// ── 注册（BSP CPU 数据准备） ──────────────────────────────
 
-int register_subsys_percpu(const char *name,
-                            int (*init_percpu)(int cpu_id),
-                            uint32_t flags)
+int register_subsys_cpu_prepare(const char *name,
+                                 int (*prepare_for_cpu)(int target_cpu),
+                                 uint32_t flags)
 {
     if (reg_latch.has_error)
         return -EINVAL;
 
-    if (percpu_sealed) {
+    if (cpu_prepare_sealed) {
         latch_reg_error(name ? name : "late_register", -EINVAL, -1);
         return -EINVAL;
     }
 
-    if (!name || name[0] == '\0' || !init_percpu) {
+    if (!name || name[0] == '\0' || !prepare_for_cpu) {
         latch_reg_error(name, -EINVAL, -1);
         return -EINVAL;
     }
@@ -155,27 +156,34 @@ int register_subsys_percpu(const char *name,
         return -EINVAL;
     }
 
-    for (int i = 0; i < subsys_percpu_count; i++) {
-        if (strcmp(subsys_percpu_table[i].name, name) == 0) {
+    for (int i = 0; i < subsys_cpu_prepare_count; i++) {
+        if (strcmp(subsys_cpu_prepare_table[i].name, name) == 0) {
             latch_reg_error(name, -EEXIST, -1);
             return -EEXIST;
         }
     }
 
-    if (subsys_percpu_count >= MAX_SUBSYS_PERCPU) {
+    if (subsys_cpu_prepare_count >= MAX_SUBSYS_CPU_PREPARE) {
         latch_reg_error(name, -ENOSPC, -1);
         return -ENOSPC;
     }
 
-    subsys_percpu_entry_t *e = &subsys_percpu_table[subsys_percpu_count];
-    e->name        = name;
-    e->init_percpu = init_percpu;
-    e->flags       = flags;
-    e->initialized = 0;
-    e->raw_result  = -EAGAIN;
-    e->failed_mask = 0;
-    subsys_percpu_count++;
+    subsys_cpu_prepare_entry_t *e = &subsys_cpu_prepare_table[subsys_cpu_prepare_count];
+    e->name            = name;
+    e->prepare_for_cpu = prepare_for_cpu;
+    e->flags           = flags;
+    e->initialized     = 0;
+    e->raw_result      = 0;
+    e->failed_mask     = 0;
+    subsys_cpu_prepare_count++;
     return 0;
+}
+
+int register_subsys_percpu(const char *name,
+                            int (*init_percpu)(int cpu_id),
+                            uint32_t flags)
+{
+    return register_subsys_cpu_prepare(name, init_percpu, flags);
 }
 
 // ── Common initcall iterator ──────────────────────────────
@@ -389,19 +397,19 @@ void subsys_init_all(void)
         subsys_init_phase(phase);
 }
 
-// ── 执行（per-CPU 二次 init） ─────────────────────────────
+// ── 执行（BSP CPU 数据准备） ──────────────────────────────
 
-void subsys_init_percpu(void)
+void subsys_prepare_cpus(void)
 {
     if (reg_latch.has_error) {
         boot_failure_stop("register", reg_latch.name, reg_latch.rc,
                           reg_latch.phase, -1);
     }
 
-    percpu_sealed = 1;
+    cpu_prepare_sealed = 1;
 
-    for (int i = 0; i < subsys_percpu_count; i++) {
-        subsys_percpu_entry_t *e = &subsys_percpu_table[i];
+    for (int i = 0; i < subsys_cpu_prepare_count; i++) {
+        subsys_cpu_prepare_entry_t *e = &subsys_cpu_prepare_table[i];
         if (e->initialized != 0)
             continue;
 
@@ -409,7 +417,7 @@ void subsys_init_percpu(void)
         uint64_t fail_mask = 0;
 
         for (uint32_t cpu = 0; cpu < num_cpus; cpu++) {
-            int ret = e->init_percpu((int)cpu);
+            int ret = e->prepare_for_cpu((int)cpu);
 
             if (reg_latch.has_error) {
                 boot_failure_stop("register", reg_latch.name, reg_latch.rc,
@@ -423,9 +431,11 @@ void subsys_init_percpu(void)
                     first_fail_rc = ret;
                 fail_mask |= (1ULL << cpu);
                 boot_failure_warn("percpu", e->name, ret, -1, (int)cpu);
-                log_warn("subsys: percpu %s cpu=%u ... SKIP (optional, ret=%d)\n", e->name, cpu, ret);
+                log_warn("subsys: cpu-prepare %s target=%u executor=bsp ... SKIP (optional, ret=%d)\n",
+                         e->name, cpu, ret);
             } else {
-                log_info("subsys: percpu %s cpu=%u ... ok\n", e->name, cpu);
+                log_info("subsys: cpu-prepare %s target=%u executor=bsp ... ok\n",
+                         e->name, cpu);
             }
         }
 
@@ -440,6 +450,11 @@ void subsys_init_percpu(void)
     }
 }
 
+void subsys_init_percpu(void)
+{
+    subsys_prepare_cpus();
+}
+
 // ── 查询 ─────────────────────────────────────────────────
 
 int subsys_status(const char *name)
@@ -448,9 +463,9 @@ int subsys_status(const char *name)
     for (int i = 0; i < subsys_count; i++)
         if (strcmp(subsys_table[i].name, name) == 0)
             return subsys_table[i].initialized;
-    for (int i = 0; i < subsys_percpu_count; i++)
-        if (strcmp(subsys_percpu_table[i].name, name) == 0)
-            return subsys_percpu_table[i].initialized;
+    for (int i = 0; i < subsys_cpu_prepare_count; i++)
+        if (strcmp(subsys_cpu_prepare_table[i].name, name) == 0)
+            return subsys_cpu_prepare_table[i].initialized;
     return -999;
 }
 
@@ -463,21 +478,26 @@ int subsys_result(const char *name)
     return -ENOENT;
 }
 
-int subsys_percpu_result(const char *name, uint64_t *failed_mask)
+int subsys_cpu_prepare_result(const char *name, uint64_t *failed_mask)
 {
     if (!name) {
         if (failed_mask) *failed_mask = 0;
         return -ENOENT;
     }
-    for (int i = 0; i < subsys_percpu_count; i++) {
-        if (strcmp(subsys_percpu_table[i].name, name) == 0) {
+    for (int i = 0; i < subsys_cpu_prepare_count; i++) {
+        if (strcmp(subsys_cpu_prepare_table[i].name, name) == 0) {
             if (failed_mask)
-                *failed_mask = subsys_percpu_table[i].failed_mask;
-            return subsys_percpu_table[i].raw_result;
+                *failed_mask = subsys_cpu_prepare_table[i].failed_mask;
+            return subsys_cpu_prepare_table[i].raw_result;
         }
     }
     if (failed_mask) *failed_mask = 0;
     return -ENOENT;
+}
+
+int subsys_percpu_result(const char *name, uint64_t *failed_mask)
+{
+    return subsys_cpu_prepare_result(name, failed_mask);
 }
 
 int subsys_require_ready(const char *name)
@@ -502,11 +522,11 @@ int subsys_require_ready(const char *name)
 void subsys_test_reset(void)
 {
     subsys_count = 0;
-    subsys_percpu_count = 0;
+    subsys_cpu_prepare_count = 0;
     memset(subsys_table, 0, sizeof(subsys_table));
-    memset(subsys_percpu_table, 0, sizeof(subsys_percpu_table));
+    memset(subsys_cpu_prepare_table, 0, sizeof(subsys_cpu_prepare_table));
     memset(&reg_latch, 0, sizeof(reg_latch));
     bsp_sealed = 0;
-    percpu_sealed = 0;
+    cpu_prepare_sealed = 0;
 }
 #endif

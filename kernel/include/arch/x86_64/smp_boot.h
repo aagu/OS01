@@ -14,9 +14,8 @@
 //                          this_cpu() is valid for the tick source.
 //
 //   x86_64_boot_aps()    — tick_start() → smp_boot_aps() →
-//                          arch_register_subsys_percpu() →
-//                          subsys_init_percpu().  Owns the BSP→AP
-//                          bring-up and the per-CPU subsystem dispatch.
+//                          subsys_prepare_cpus().  Owns the BSP→AP
+//                          bring-up and the BSP CPU prepare dispatch.
 //
 // Call order in kernel_main (post-Task-6):
 //     x86_64_boot_subsystems(bootctx);

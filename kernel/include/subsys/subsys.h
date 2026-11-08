@@ -38,13 +38,15 @@ typedef struct {
 // ── 子系统入口（per-CPU 二次 init） ──────────────────────
 typedef struct {
     const char *name;
-    int  (*init_percpu)(int cpu_id);   // 每个在线 CPU 上执行一次
+    int  (*prepare_for_cpu)(int target_cpu);   // BSP 串行遍历为每个目标 CPU 准备数据
     uint32_t flags;
     // private:
     int initialized;
     int raw_result;
     uint64_t failed_mask;
-} subsys_percpu_entry_t;
+} subsys_cpu_prepare_entry_t;
+
+typedef subsys_cpu_prepare_entry_t subsys_percpu_entry_t;
 
 typedef int (*subsys_initcall_t)(void);
 
@@ -54,6 +56,13 @@ int  register_subsys(const char *name, int (*init)(void),
 int  register_subsys_deps(const char *name, int (*init)(void),
                          int phase, uint32_t flags,
                          const char *const *requires, unsigned require_count);
+int  register_subsys_cpu_prepare(const char *name,
+                                 int (*prepare_for_cpu)(int target_cpu),
+                                 uint32_t flags);
+void subsys_prepare_cpus(void);
+int  subsys_cpu_prepare_result(const char *name, uint64_t *failed_mask);
+
+/* Deprecated wrappers (retained for compatibility) */
 int  register_subsys_percpu(const char *name,
                             int (*init_percpu)(int cpu_id),
                             uint32_t flags);

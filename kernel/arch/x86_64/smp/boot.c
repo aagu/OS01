@@ -16,9 +16,8 @@
 //
 //   x86_64_boot_aps()    — tick_start() (now this_cpu() is valid for
 //                          the BSP) → smp_boot_aps() (INIT-SIPI-SIPI
-//                          for every AP) → per-CPU subsystem dispatch
-//                          (arch_register_subsys_percpu + subsys_init
-//                          _percpu).  No state, no locals.
+//                          for every AP) → BSP CPU prepare dispatch
+//                          (subsys_prepare_cpus).  No state, no locals.
 
 #include <arch/x86_64/smp_boot.h>
 #include <arch/boot.h>
@@ -145,9 +144,8 @@ void x86_64_boot_aps(void)
 
     smp_boot_aps();
 
-    // per-CPU 子系统二次 init
-    arch_register_subsys_percpu();
-    subsys_init_percpu();
+    // BSP CPU 数据准备 dispatch
+    subsys_prepare_cpus();
 }
 
 // ── Boot Facade Strong Overrides ─────────────────────────────

@@ -4962,6 +4962,29 @@
     "action": "unique",
     "reason": "BOOT-4 Task 1 host evidence"
    }
+  },
+  {
+   "id": "boot.contract.cpu_prepare_host",
+   "component": "boot",
+   "behavior": "boot-stage-contracts",
+   "trigger": "host runner invokes test_boot_contract_cpu_prepare.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_contract_cpu_prepare.c",
+    "selector": "test_boot_contract_cpu_prepare",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-4 Task 2 host evidence"
+   }
   }
  ]
 }

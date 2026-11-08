@@ -59,9 +59,8 @@ uint64_t arch_cycle_freq(void)
 // publish valid=1 — LAPIC success AND the enabled-PIT fallback — so do
 // NOT gate the publish on this function's LAPIC-success bool: a LAPIC
 // failure here still leaves the PIT ticking at 100 Hz, and the BSP's
-// accounting would otherwise stay "unavailable" forever.  (The BSP
-// per-cpu subsys callback deliberately skips both the hardware start
-// and the accounting publish — see subsys_percpu.c.)
+// accounting would otherwise stay "unavailable" forever.  (BSP CPU prepare
+// deliberately skips both the hardware start and the accounting publish.)
 bool arch_tick_start(void)
 {
     /* BOOT-2 BSP handoff (spec §5.2): one IRQ-off region; at most one
