@@ -85,6 +85,7 @@ class TestSuiteCatalogContract(unittest.TestCase):
             "boot-irq-time",
             "boot-failure",
             "boot-contract",
+            "boot-services",
             "gui",
             "gui-desktop",
         }

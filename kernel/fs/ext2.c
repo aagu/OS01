@@ -6,6 +6,7 @@
 #include <stdlib.h>          // calloc
 #include <errno.h>
 #include <kernel.h>
+#include <selftest/boot_services_fixture.h>
 
 // ── Per-mount big lock (ARCH-6) ──────────────────────────
 // Scheduler-backed mutex in process context. vfs_sched_ready() is false
@@ -14,8 +15,10 @@
 // no-op exactly like vfs_ns_lock's bootstrap exemption.
 static inline void ext2_lock(ext2_fs_t *fs)
 {
-    if (vfs_sched_ready())
+    if (vfs_sched_ready()) {
         mutex_lock(&fs->lock);
+        boot5_test_fs_locked();
+    }
 }
 
 static inline void ext2_unlock(ext2_fs_t *fs)

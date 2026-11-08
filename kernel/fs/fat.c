@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <memory/slab.h>
+#include <selftest/boot_services_fixture.h>
 
 // ── Per-mount big lock (ARCH-6) ──────────────────────────
 // Scheduler-backed mutex in process context; no-op while vfs_sched_ready()
@@ -13,8 +14,10 @@
 // vfs_ns_lock.
 static inline void fat_lock(fat32_fs_t *fs)
 {
-    if (vfs_sched_ready())
+    if (vfs_sched_ready()) {
         mutex_lock(&fs->lock);
+        boot5_test_fs_locked();
+    }
 }
 
 static inline void fat_unlock(fat32_fs_t *fs)

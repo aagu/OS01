@@ -5100,6 +5100,29 @@
     "action": "unique",
     "reason": "BOOT-4 aarch64 stage contracts and dependency orchestration"
    }
+  },
+  {
+   "id": "boot.services.x86",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "make test-qemu SUITE=boot-services",
+   "assertions": [
+    "runner exits 0 with 8 passing runs and archived metadata"
+   ],
+   "failure_modes": [
+    "vfs runtime violation, overlap timing violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_services.py",
+    "selector": "--case normal",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 scheduler and services startup ordering and overlap proof"
+   }
   }
  ]
 }

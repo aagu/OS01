@@ -6,6 +6,7 @@
 #include <init/userspace.h>
 #include <init/services.h>
 #include <selftest/boot_late.h>
+#include <selftest/boot_services_fixture.h>
 #include <sched/task.h>
 #include <sched/resource.h>
 #include <sched/internal.h>
@@ -67,6 +68,7 @@ void kernel_start_userspace(void)
     init_task_union.task.pgrp = 1;
     init_task_union.task.session = 1;
     boot3_test_spawn_enter();
+    boot5_test_arm();
     int64_t init_pid = spawn_user_task(boot3_test_init_path(), NULL);
     boot3_test_spawn_leave();
     if (init_pid < 0) {
@@ -77,6 +79,7 @@ void kernel_start_userspace(void)
     }
     log_info("init: spawned user-space init, pid=%d\n", (int)init_pid);
     log_info("[boot-5] init-created pid=1\n");
+    boot5_test_after_init();
 
     // 6. Selftest probe & boot services prepare (net)
     selftest_boot_creation_probe();

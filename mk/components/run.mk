@@ -1952,6 +1952,66 @@ test-qemu-boot-contract: _test-boot-contract-normal-image \
 	_test-boot-contract-normal-hash-check
 	@true
 
+# ── BOOT-5 scheduler and services test ──────────────────────────────
+BOOT_SERVICES_TIMEOUT ?= 120
+TEST_BOOT_SERVICES_IMAGE_normal  := $(NORMAL_IMAGE)
+TEST_BOOT_SERVICES_ELF_normal    := $(BUILD_DIR)/kernel/kernel.elf
+TEST_BOOT_SERVICES_IMAGE_no-net  := $(NORMAL_IMAGE)
+TEST_BOOT_SERVICES_ELF_no-net    := $(BUILD_DIR)/kernel/kernel.elf
+TEST_BOOT_SERVICES_IMAGE_overlap := $(BUILD_DIR)/image/boot-services-overlap/disk.img
+TEST_BOOT_SERVICES_ELF_overlap   := $(BUILD_DIR)/kernel/boot-services-overlap/kernel.elf
+TEST_BOOT_SERVICES_LOG_DIR       := $(abspath $(BUILD_DIR))/test-results/boot-services
+
+define _boot_services_x86_run
+	@echo "  [test-qemu] SUITE=boot-services: case=$(1) cpus=$(2)"
+	python3 qemutests/boot_services.py --case $(1) --cpus $(2) \
+	  --timeout $(BOOT_SERVICES_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_BOOT_SERVICES_IMAGE_$(1))" \
+	  --kernel-elf "$(TEST_BOOT_SERVICES_ELF_$(1))" \
+	  --qemu "$(QEMU_BIN)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
+	  --log-dir "$(TEST_BOOT_SERVICES_LOG_DIR)/$(1)-$(2)cpu-$$$$"
+endef
+
+.PHONY: _test-boot-services-normal-image
+_test-boot-services-normal-image:
+	@echo "  [test-qemu] SUITE=boot-services: building the normal image"
+	$(MAKE) --no-print-directory BOOT_SERVICES_TEST=none KERNEL_SELFTEST= image
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-services.normal.before"
+
+.PHONY: _test-boot-services-normal-cases
+_test-boot-services-normal-cases:
+	$(call _boot_services_x86_run,normal,1)
+	$(call _boot_services_x86_run,normal,2)
+	$(call _boot_services_x86_run,normal,4)
+	$(call _boot_services_x86_run,normal,8)
+
+.PHONY: _test-boot-services-no-net-cases
+_test-boot-services-no-net-cases:
+	$(call _boot_services_x86_run,no-net,1)
+	$(call _boot_services_x86_run,no-net,2)
+
+.PHONY: _test-boot-services-variant-overlap
+_test-boot-services-variant-overlap:
+	@echo "  [test-qemu] SUITE=boot-services: building the overlap variant"
+	$(MAKE) --no-print-directory BOOT_SERVICES_TEST=overlap KERNEL_SELFTEST= image
+	$(call _boot_services_x86_run,overlap,2)
+	$(call _boot_services_x86_run,overlap,4)
+
+.PHONY: _test-boot-services-normal-hash-check
+_test-boot-services-normal-hash-check:
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-services.normal.after"
+	cmp "$(NORMAL_IMAGE_DIR)/boot-services.normal.before" "$(NORMAL_IMAGE_DIR)/boot-services.normal.after"
+
+.PHONY: test-qemu-boot-services
+test-qemu-boot-services: _test-boot-services-normal-image \
+	_test-boot-services-normal-cases \
+	_test-boot-services-no-net-cases \
+	_test-boot-services-variant-overlap \
+	_test-boot-services-normal-hash-check
+	@true
+
 test-qemu-boot-lifecycle: _test-boot-lifecycle-normal-image \
 	_test-boot-lifecycle-normal-cases \
 	_test-boot-lifecycle-fault-delay \
@@ -2104,6 +2164,8 @@ TEST_QEMU_FLAVOR_boot-failure  =
 TEST_QEMU_IMG_boot-failure     = $(NORMAL_IMAGE)
 TEST_QEMU_FLAVOR_boot-contract =
 TEST_QEMU_IMG_boot-contract    = $(NORMAL_IMAGE)
+TEST_QEMU_FLAVOR_boot-services =
+TEST_QEMU_IMG_boot-services    = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -2152,8 +2214,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|arch10-capacity|arch6-fsstress) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -2202,6 +2264,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-boot-failure || exit 1; \
 	elif [ "$(SUITE)" = "boot-contract" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-contract || exit 1; \
+	elif [ "$(SUITE)" = "boot-services" ]; then \
+	  $(MAKE) --no-print-directory test-qemu-boot-services || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
 	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
@@ -2224,7 +2288,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# python harness inside ``test-qemu-driver-model`` and must NOT
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
-	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ]; then \
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ] && [ "$(SUITE)" != "boot-services" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \

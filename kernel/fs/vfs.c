@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <selftest/boot_services_fixture.h>
 
 #ifdef OS01_HOST_TEST
 void vfs_test_on_active_register(vfs_node_t *node) __attribute__((weak));
@@ -66,6 +67,7 @@ static inline void vfs_ns_lock(void)
 {
     if (vfs_sched_ready()) {
         mutex_lock(&vfs_namespace_lock);
+        boot5_test_fs_locked();
     }
 }
 

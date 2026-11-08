@@ -65,6 +65,11 @@ endif
 ifneq ($(strip $(BOOT_FAILURE_TEST)),)
 $(error BOOT_FAILURE_TEST is x86-only; the aarch64 profile must not select a boot-failure fault variant)
 endif
+ifneq ($(strip $(BOOT_SERVICES_TEST)),)
+ifneq ($(BOOT_SERVICES_TEST),none)
+$(error BOOT_SERVICES_TEST is x86-only; the aarch64 profile must not select a boot-services test variant)
+endif
+endif
 # BOOT-4 stage contract matrix:
 BOOT_CONTRACT_CASE := $(if $(findstring BOOT_CONTRACT_TEST=reverse,$(KERNEL_EXTRA_CFLAGS)),reverse,$(if $(findstring BOOT_CONTRACT_TEST=missing,$(KERNEL_EXTRA_CFLAGS)),missing,$(if $(findstring BOOT_CONTRACT_TEST=cycle,$(KERNEL_EXTRA_CFLAGS)),cycle,)))
 #

@@ -135,7 +135,8 @@ KERNEL_C_SOURCES := \
     $(filter-out selftest/arch10_capacity_fixture.c \
                  selftest/boot_contract_fixture.c \
                  selftest/boot_failure_fixture.c \
-                 selftest/boot_irq_time_fixture.c,$(wildcard selftest/*.c)) \
+                 selftest/boot_irq_time_fixture.c \
+                 selftest/boot_services_fixture.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \
@@ -246,7 +247,19 @@ KERNEL_BOOT4_FIXTURE_C_SOURCES :=
 KERNEL_BOOT4_FLAGS :=
 endif
 
-ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES) $(KERNEL_BOOT4_FIXTURE_C_SOURCES)
+# ── BOOT-5 scheduler and services fixture ───────────────────
+BOOT_SERVICES_CASE ?=
+ifneq ($(strip $(BOOT_SERVICES_CASE)),)
+KERNEL_BOOT5_FIXTURE_C_SOURCES := selftest/boot_services_fixture.c
+ifeq ($(BOOT_SERVICES_CASE),overlap)
+KERNEL_BOOT5_FLAGS := -DBOOT_SERVICES_TEST=overlap -DBOOT_SERVICES_TEST_OVERLAP=1
+endif
+else
+KERNEL_BOOT5_FIXTURE_C_SOURCES :=
+KERNEL_BOOT5_FLAGS :=
+endif
+
+ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES) $(KERNEL_BOOT4_FIXTURE_C_SOURCES) $(KERNEL_BOOT5_FIXTURE_C_SOURCES)
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
@@ -362,6 +375,7 @@ ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 ALL_CFLAGS += $(KERNEL_BOOT2_IRQ_TIME_FLAGS)
 ALL_CFLAGS += $(KERNEL_BOOT3_FLAGS)
 ALL_CFLAGS += $(KERNEL_BOOT4_FLAGS)
+ALL_CFLAGS += $(KERNEL_BOOT5_FLAGS)
 
 # ── FB_RESOLUTION_TEST fault surface (Task 9) ──────────────
 # Same pattern: appended after ALL_CFLAGS is defined and after the source
