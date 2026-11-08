@@ -45,6 +45,7 @@ import argparse
 import tempfile
 import http.server
 import socketserver
+import socket
 import threading
 import traceback
 from pathlib import Path
@@ -764,6 +765,41 @@ class _EchoTCPHandler(socketserver.BaseRequestHandler):
             self.request.sendall(data)
 
 
+class _HalfCloseTCPHandler(socketserver.BaseRequestHandler):
+    """Answers only AFTER the client half-closed its write side.
+
+    The guest's shutdown case sends a request, calls shutdown(fd,
+    SHUT_WR) and then waits for the answer.  This server therefore
+    reads until the EOF that the half-close produces and only then
+    sends the fixed confirmation: a response that arrives after the
+    client's own SHUT_WR is exactly what proves the half-close worked
+    and that the read side stayed open.
+
+    The read deadline keeps a client that never half-closes from
+    holding the handler (and its thread) forever.
+    """
+
+    CONFIRMATION = b"OS01-SHUTDOWN-OK\n"
+    READ_DEADLINE_S = 10
+
+    def handle(self):
+        self.request.settimeout(self.READ_DEADLINE_S)
+        try:
+            while True:
+                data = self.request.recv(4096)
+                if not data:
+                    break            # EOF: the client half-closed
+        except (socket.timeout, OSError):
+            # No EOF within the deadline: the client never half-closed.
+            # Answer nothing, so the guest's read times out and the
+            # case FAILs.
+            return
+        try:
+            self.request.sendall(self.CONFIRMATION)
+        except OSError:
+            pass
+
+
 class _PayloadHTTPHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         payload = b"OS01 network test\n"
@@ -797,6 +833,7 @@ class NetworkServices:
     def start(self):
         endpoints = [
             (10002, _EchoTCPHandler),
+            (10003, _HalfCloseTCPHandler),
             (18080, _PayloadHTTPHandler),
         ]
         for port, handler in endpoints:
@@ -881,10 +918,25 @@ def test_network(tester):
             print("FAIL: could not parse network result")
             return False
         passed, failed = int(match.group(1)), int(match.group(2))
-        if passed != 6 or failed:
+        # The shutdown case is required EXPLICITLY: the summary count
+        # alone would accept a run that never executed it, and a
+        # replayed marker from an older run would satisfy a plain
+        # "in output" check.  The marker must therefore sit between
+        # this run's DHCP evidence and this run's RESULT summary.
+        dhcp_at = output.find("DHCP")
+        shutdown_at = output.find("[NET TEST] shutdown: PASS")
+        result_at = output.find("[NET TEST] RESULT:")
+        if shutdown_at < 0 or result_at < 0 or not (dhcp_at < shutdown_at < result_at):
+            print("FAIL: network RESULT without this run's shutdown PASS marker "
+                  "(missing case or stale/foreign output)")
+            return False
+        if failed:
             print(f"FAIL: network regression: {passed} passed, {failed} failed")
             return False
-        print("PASS: DHCP, UDP, DNS, TCP, wget, and socket_exit")
+        if passed != 7:
+            print(f"FAIL: network regression: {passed} passed, {failed} failed")
+            return False
+        print("PASS: DHCP, UDP, DNS, TCP, shutdown, wget, and socket_exit")
         return True
     finally:
         services.close()

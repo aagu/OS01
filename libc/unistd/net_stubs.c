@@ -47,11 +47,6 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
     errno = ENOSYS; return -1;
 }
 
-int shutdown(int sockfd, int how) {
-    (void)sockfd; (void)how;
-    errno = ENOSYS; return -1;
-}
-
 int getnameinfo(const struct sockaddr *sa, socklen_t salen,
                 char *host, socklen_t hostlen,
                 char *serv, socklen_t servlen, int flags) {

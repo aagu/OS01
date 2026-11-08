@@ -16,7 +16,14 @@
 #define HOST_IP "10.0.2.2"
 #define UDP_PORT 10001
 #define TCP_PORT 10002
+#define SHUTDOWN_PORT 10003
 #define HTTP_PORT 18080
+
+/* The fixed answer the controlled half-close service sends AFTER it has
+ * seen the client's EOF.  Its arrival proves that the client's own
+ * shutdown(fd, SHUT_WR) reached the kernel and that the read side of
+ * the socket stayed open. */
+#define SHUTDOWN_CONFIRMATION "OS01-SHUTDOWN-OK\n"
 
 static int passed;
 static int failed;
@@ -155,6 +162,55 @@ out:
     return ok;
 }
 
+// shutdown(fd, SHUT_WR) half-closes the write side: the controlled
+// service on port 10003 reads until it sees the EOF and only then
+// answers with a fixed confirmation.  Receiving that answer proves
+// both that the half-close reached the kernel and that the read side
+// of the socket is still open.
+static int test_shutdown(void)
+{
+    static const char message[] = "os01-shutdown";
+    char reply[64];
+    size_t received = 0;
+    int ok = 0;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
+    struct sockaddr_in peer = {0};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(SHUTDOWN_PORT);
+    if (!inet_aton(HOST_IP, &peer.sin_addr) ||
+        connect(fd, (struct sockaddr *)&peer, sizeof(peer)) < 0)
+        goto out;
+
+    if (write(fd, message, sizeof(message)) != (int)sizeof(message))
+        goto out;
+
+    // Half-close the write side.  The service sees the EOF only if the
+    // syscall really reached the kernel.
+    if (shutdown(fd, SHUT_WR) < 0)
+        goto out;
+
+    // The answer must still arrive after our own SHUT_WR: the read
+    // side is untouched.  Read until the service closes the connection.
+    for (;;) {
+        if (!wait_readable(fd))
+            goto out;
+        int n = (int)read(fd, reply + received, sizeof(reply) - 1 - received);
+        if (n < 0)
+            goto out;
+        if (n == 0)
+            break;                 /* the service closed: complete answer */
+        received += (size_t)n;
+        if (received >= sizeof(reply) - 1)
+            goto out;              /* longer than the fixed confirmation */
+    }
+    reply[received] = '\0';
+    ok = !strcmp(reply, SHUTDOWN_CONFIRMATION);
+out:
+    close(fd);
+    return ok;
+}
+
 static int test_wget(void)
 {
     const char *output = "/home/nettest.out";
@@ -206,6 +262,7 @@ int main(void)
     result("UDP", test_udp());
     result("DNS", test_dns());
     result("TCP", test_tcp());
+    result("shutdown", test_shutdown());
     result("wget", test_wget());
     result("socket_exit", test_socket_exit());
     printf("[NET TEST] RESULT: %d passed, %d failed\n", passed, failed);

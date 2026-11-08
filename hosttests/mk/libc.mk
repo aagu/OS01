@@ -11,6 +11,7 @@ $(eval $(call register_host_test,test_aarch64_color_printk_abi,libc,protocol-or-
 $(eval $(call register_host_test,test_libc_api,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_alloc,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_environ,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_shutdown,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -23,7 +24,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
     $(TEST_BLD)/test_libc_api.elf \
     $(TEST_BLD)/test_libc_alloc.elf \
-    $(TEST_BLD)/test_libc_environ.elf
+    $(TEST_BLD)/test_libc_environ.elf \
+    $(TEST_BLD)/test_libc_shutdown.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -253,6 +255,42 @@ $(TEST_BLD)/test_libc_environ.elf: $(TEST_BLD)/test_libc_environ.o \
 
 .PHONY: test-libc-environ
 test-libc-environ: $(TEST_BLD)/test_libc_environ.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: shutdown group (T4) ─────────────────────────────
+# The shutdown group drives the REAL production wrapper
+# (libc/unistd/shutdown.c) under the `os01_` prefix.  The only thing
+# that is replaced is the syscall boundary: <sys/syscall.h> routes every
+# syscall through the `host_test_syscall` hook under OS01_HOST_TEST, so
+# the test sees the exact syscall number and arguments.
+#
+# The production object is compiled WITHOUT the test_platform.h
+# force-include: that header defines __is_libk, and the kernel-side copy
+# of the wrapper (which fails explicitly) is not the one under test.
+OS01_LIBC_SHUTDOWN_FNS := shutdown
+OS01_LIBC_SHUTDOWN_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_SHUTDOWN_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))
+OS01_LIBC_SHUTDOWN_DIR := $(TEST_BLD)/prefixed-shutdown
+OS01_LIBC_SHUTDOWN_OBJS := $(OS01_LIBC_SHUTDOWN_DIR)/shutdown.o
+
+$(OS01_LIBC_SHUTDOWN_DIR)/%.o: $(LIBC_SRC)/unistd/%.c
+	@mkdir -p $(OS01_LIBC_SHUTDOWN_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_SHUTDOWN_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_shutdown.o: $(TEST_CASES)/test_libc_shutdown.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_SHUTDOWN_PREFIX_DEFS) \
+		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_shutdown.elf: $(TEST_BLD)/test_libc_shutdown.o \
+		$(OS01_LIBC_SHUTDOWN_OBJS)
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-shutdown
+test-libc-shutdown: $(TEST_BLD)/test_libc_shutdown.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

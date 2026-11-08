@@ -49,7 +49,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Groups ──────────────────────────────────────────────────────────────
 # Every group names the task that delivers it.  ENABLED_GROUPS lists the
 # groups delivered so far; a later task appends its group here.
-ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env")
+ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env", "shutdown")
 
 # Headers that are deliberately NOT part of the api group, with the reason.
 # An excluded header is still compiled by nothing in the api group, so it
@@ -653,6 +653,23 @@ API_GROUPS: dict[str, dict] = {
         },
         # The env group owns behaviour: the user libc must really export
         # every interface it owns.
+        "require_user_export": True,
+    },
+    "shutdown": {
+        "task": "T4",
+        "title": "shutdown connected to the existing kernel syscall",
+        # The shutdown group owns the shutdown interface, but it does not
+        # own the header it is declared in: sys/socket.h declares the
+        # whole socket API and is audited for declaration drift by the
+        # api group.
+        "headers": {},
+        "owned": {
+            "sys/socket.h": [
+                "shutdown",
+            ],
+        },
+        # The shutdown group owns behaviour: the user libc must really
+        # export the interface it owns.
         "require_user_export": True,
     },
 }
