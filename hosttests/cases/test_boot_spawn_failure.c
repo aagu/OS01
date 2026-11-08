@@ -101,6 +101,9 @@ void free_pages(uint64_t addr, int order) { (void)addr; (void)order; }
 /* Arch & Sched mocks */
 pid_t alloc_pid(void) { return 1; }
 uint32_t sched_pick_cpu(void) { return 0; }
+unsigned sched_pick_cpu_mask(uint64_t mask) { (void)mask; return 0; }
+bool sched_boot_creation_open(void) { return true; }
+void *arch_this_cpu_ptr(void) { return &percpu_data[0]; }
 
 void *kmalloc(size_t sz) { return malloc(sz); }
 void kfree(void *p) { free(p); }
@@ -159,6 +162,9 @@ static void reset_spawn_test_state(void)
     vmm_free_user_map_calls = 0;
     inject_files_dup_fail = 0;
     mock_bootstrap_active = false;
+    memset(percpu_data, 0, sizeof(percpu_data));
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
 }
 
 static void test_spawn_bootstrap_active_rejection(void)

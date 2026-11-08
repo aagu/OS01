@@ -125,6 +125,9 @@ uint64_t alloc_pages(int type, int order) { (void)type; (void)order; return 0x20
 void free_pages(uint64_t addr, int order) { (void)addr; (void)order; }
 pid_t alloc_pid(void) { return 1; }
 uint32_t sched_pick_cpu(void) { return 0; }
+unsigned sched_pick_cpu_mask(uint64_t mask) { (void)mask; return 0; }
+bool sched_boot_creation_open(void) { return true; }
+void *arch_this_cpu_ptr(void) { return &percpu_data[0]; }
 
 int arch_auxv_platform(void *buf, size_t max) { (void)buf; (void)max; return 0; }
 size_t arch_auxv_payload_size(void) { return 0; }

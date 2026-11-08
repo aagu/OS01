@@ -1,6 +1,7 @@
 #include <sched/task.h>
 #include <sched/internal.h>
 #include <sched/resource.h>
+#include <sched/boot.h>
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
 #include <arch/spinlock.h>
@@ -341,9 +342,33 @@ static void destroy_unpublished_user_mm(mm_t *mm)
 //   - mm:           caller (this function) kfree's the struct mm
 //   - thread:       kfree(thd)
 //   - task stack:   kfree(raw_alloc)
+static bool spawn_boot_target_allowed(unsigned cpu)
+{
+    if (num_cpus == 0 || cpu >= num_cpus || cpu >= NR_CPUS)
+        return false;
+    if (!__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE))
+        return false;
+    if (__atomic_load_n(&percpu_data[cpu].scheduler_ok, __ATOMIC_ACQUIRE))
+        return true;
+    if (cpu_id() == 0 && cpu == 0 && sched_boot_creation_open())
+        return true;
+    return false;
+}
+
 int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     if (vfs_bootstrap_active())
+        return -EAGAIN;
+
+    uint64_t mask = (num_cpus >= NR_CPUS) ? ~0ULL : ((1ULL << num_cpus) - 1);
+    unsigned target = sched_pick_cpu_mask(mask);
+    if (target == NR_CPUS) {
+        if (spawn_boot_target_allowed(0))
+            target = 0;
+        else
+            return -EAGAIN;
+    }
+    if (!spawn_boot_target_allowed(target))
         return -EAGAIN;
 
     int s_argc = 0, s_envc = 0;
@@ -407,11 +432,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     tsk->signal = 0;
     tsk->blocked = 0;                        // user tasks start with empty blocked mask
     tsk->priority = 5;                     // 50 ms quantum at 100 Hz
-    tsk->cpu = sched_pick_cpu();          // place on least-loaded CPU
+    tsk->cpu = target;                     // determined by placement policy
     /* Thermal plan Task 2: user tasks default to all-online mask. */
-    tsk->allowed_cpus = (num_cpus >= NR_CPUS)
-                       ? ~0ULL
-                       : ((1ULL << num_cpus) - 1);
+    tsk->allowed_cpus = mask;
 
     // Inherit fd table from parent (the init task)
     tsk->parent = current;
@@ -553,17 +576,29 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     // make tsk visible to other CPUs.  Once listed, the task is
     // discoverable by schedule() / waitpid() / signal_pgrp() and
     // cannot be unpublished — only do_exit / reap can retire it.
-    tsk->state = TASK_RUNNING;
-    {
-        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-        list_add_to_before(&init_task_union.task.list, &tsk->list);
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    uint64_t rq_flags = spin_lock_irqsave(&percpu_data[target].rq_lock);
+
+    if (vfs_bootstrap_active() || !spawn_boot_target_allowed(target)) {
+        spin_unlock_irqrestore(&percpu_data[target].rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        return -EAGAIN;
     }
-    {
-        uint64_t flags = spin_lock_irqsave(&percpu_data[tsk->cpu].rq_lock);
-        enqueue_task(tsk, &percpu_data[tsk->cpu]);
-        spin_unlock_irqrestore(&percpu_data[tsk->cpu].rq_lock, flags);
-    }
+
+    tsk->cpu = target;
+    tsk->state = TASK_RUNNING;
+    list_add_to_before(&init_task_union.task.list, &tsk->list);
+    enqueue_task(tsk, &percpu_data[target]);
+
+    spin_unlock_irqrestore(&percpu_data[target].rq_lock, rq_flags);
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+
     sched_notify_remote(tsk);
 
     // The first user task we create is "init" — track it globally.

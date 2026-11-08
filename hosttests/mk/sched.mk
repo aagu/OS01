@@ -917,6 +917,35 @@ $(TEST_BLD)/test_boot_task_init.elf: \
 		$(TEST_BLD)/boot3_sched_boot_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
+# ── BOOT-5 Task 2: initial spawn placement & publication ─────────
+$(eval $(call register_host_test,test_boot_services_spawn,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_services_spawn.elf
+
+$(TEST_BLD)/boot5_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot5_boot_production.o: $(TESTS_DIR)/kernel/sched/boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_spawn.o: $(TEST_CASES)/test_boot_services_spawn.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_spawn.elf: \
+		$(TEST_BLD)/test_boot_services_spawn.o \
+		$(TEST_BLD)/boot3_exec_production.o \
+		$(TEST_BLD)/boot5_balance_production.o \
+		$(TEST_BLD)/boot5_boot_production.o
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=sched_notify_remote -Wl,--wrap=malloc -Wl,--wrap=calloc -o $@ $^
+
+.PHONY: test_boot_services_spawn
+test_boot_services_spawn: $(TEST_BLD)/test_boot_services_spawn.elf
+	$<
+
 .PHONY: test_boot_task_init
 test_boot_task_init: $(TEST_BLD)/test_boot_task_init.elf
 	$<
