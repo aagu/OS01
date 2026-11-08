@@ -73,6 +73,7 @@
 #include <fs/devfs.h>
 #include <log/log.h>
 #include <errno.h>
+#include <selftest/boot_failure_fixture.h>
 
 // ── Stage 1 of 3: early CPU + interrupt infrastructure ───────
 // Mirrors the legacy lines 90-108 of kernel_main(): record the firmware
@@ -128,6 +129,8 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
 {
     // ═══ RSDP: 传递给 arch 子系统 ═══
     arch_boot_rsdp = bootctx->firmware.acpi_rsdp;
+
+    boot3_test_early_init();
 
     arch_register_subsys();
     if (subsys_status("apic") == -999) {

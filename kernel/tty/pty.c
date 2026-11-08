@@ -22,6 +22,7 @@
 #include <sys/ioctl.h>
 
 #include <uapi/time.h>
+#include <selftest/boot_failure_fixture.h>
 
 // ── Forward declarations for ops tables ─────────────────────────
 static int ptmx_open(const char *name, file_t **out_file);
@@ -358,6 +359,10 @@ static const struct devfs_ops ptmx_ops = {
 
 int pty_init(void)
 {
+    if (boot3_test_fail_site("ptmx")) {
+        return -ENOMEM;
+    }
+
     memset(pty_table, 0, sizeof(pty_table));
     int rc = devfs_register_chrdev("ptmx", NULL, &ptmx_ops);
     if (rc != 0) {

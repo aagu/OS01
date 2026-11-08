@@ -16,6 +16,7 @@
 #include <fs/procfs.h>
 #include <block/blockdev.h>
 #include <core/boot_failure.h>
+#include <selftest/boot_failure_fixture.h>
 #include <log/log.h>          // log_* for GPT/ext2/FAT32 fallback logs
 #include <core/panic.h>
 #include <memory/slab.h>
@@ -103,6 +104,11 @@ static int mount_partitioned_disk(void)
         return -EINVAL;
     }
 
+    if (boot3_test_fail_site("root")) {
+        kfree(gpt);
+        return -EIO;
+    }
+
     int rc = vfs_mount_fs("ext2", "/", gpt->partitions[1].dev, NULL);
     if (rc != 0) {
         log_err("EXT2: mount failed — / not available\n");
@@ -133,6 +139,7 @@ void fs_boot_mounts(void)
     if (root_rc != 0) {
         boot_failure_stop("fs", "root", root_rc, -1, -1);
     }
+    boot3_test_sentinel("root-ready");
 
     // /tmp → tmpfs (independent of disk)
     int tmp_rc = tmpfs_init();

@@ -50,6 +50,7 @@
 #include <kernel.h>
 #include <fcntl.h>
 #include <net/net.h>
+#include <selftest/boot_failure_fixture.h>
 
 void task_init(void)
 {
@@ -86,6 +87,7 @@ void task_init(void)
     if (stdio_rc != 0) {
         boot_failure_stop("stdio", failed_comp, stdio_rc, -1, -1);
     }
+    boot3_test_sentinel("stdio-ready");
 
     // pid_counter starts at 1.  spawn_user_task("/bin/init", NULL) is the
     // first alloc_pid() consumer on the system (R1), so user init is
@@ -93,11 +95,13 @@ void task_init(void)
     // user_init_pid are also recorded on this first call.
     init_task_union.task.pgrp = 1;
     init_task_union.task.session = 1;
-    int64_t init_pid = spawn_user_task("/bin/init", NULL);
+    boot3_test_spawn_enter();
+    int64_t init_pid = spawn_user_task(boot3_test_init_path(), NULL);
+    boot3_test_spawn_leave();
     if (init_pid < 0) {
         boot_failure_stop("init", "/bin/init", init_pid, -1, -1);
     }
-    debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
+    log_info("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
 #ifdef OS01_SELFTEST
     // ── x86 UP boot-window probe (P5 Task 4 / spec §10.1 item 4) ──

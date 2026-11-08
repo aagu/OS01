@@ -21,6 +21,7 @@
 #include <fs/devfs.h>
 #include <log/log.h>          // log_info for "tty: console TTY created"
 #include <errno.h>
+#include <selftest/boot_failure_fixture.h>
 
 int tty_boot_register_devfs(tty_t *console)
 {
@@ -47,6 +48,10 @@ int tty_boot_register_devfs(tty_t *console)
 
 int tty_boot_init(void)
 {
+    if (boot3_test_fail_site("console")) {
+        return -ENOMEM;
+    }
+
     // console_putchar as output — routes all user-space writes
     // through the VT100 CSI terminal emulator.
     tty_t *console = tty_alloc(console_putchar, NULL);
@@ -64,5 +69,6 @@ int tty_boot_init(void)
     tty_set_dev_tty(console);        // /dev/tty read/write → TTY
     log_info("tty: console TTY created\n");
 
+    boot3_test_sentinel("terminal-ready");
     return 0;
 }

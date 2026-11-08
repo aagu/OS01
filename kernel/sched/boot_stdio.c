@@ -14,6 +14,7 @@
 #include <fs/file.h>
 #include <fs/vfs.h>
 #include <errno.h>
+#include <selftest/boot_failure_fixture.h>
 
 int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
 {
@@ -22,14 +23,18 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
         return -EINVAL;
     }
 
+    boot3_test_stdio_enter();
+
     files_t *files = files_alloc();
     if (!files) {
+        boot3_test_stdio_leave();
         if (failed_component) *failed_component = "files";
         return -ENOMEM;
     }
 
     vfs_node_t *tty = vfs_lookup("/dev/tty");
     if (!tty) {
+        boot3_test_stdio_leave();
         files_unpin(files);
         if (failed_component) *failed_component = "tty-node";
         return -ENOENT;
@@ -40,6 +45,7 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
     /* fd 0: stdin (O_RDWR) */
     file_t *f0 = file_alloc();
     if (!f0) {
+        boot3_test_stdio_leave();
         vfs_node_put(tty);
         files_unpin(files);
         if (failed_component) *failed_component = "file-0";
@@ -50,6 +56,7 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
     f0->flags = O_RDWR;
     int rc0 = fd_alloc_limit(files, f0, 0, soft);
     if (rc0 < 0 || rc0 != 0) {
+        boot3_test_stdio_leave();
         file_put(f0);
         vfs_node_put(tty);
         files_unpin(files);
@@ -60,6 +67,7 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
     /* fd 1: stdout (O_WRONLY) */
     file_t *f1 = file_alloc();
     if (!f1) {
+        boot3_test_stdio_leave();
         vfs_node_put(tty);
         files_unpin(files);
         if (failed_component) *failed_component = "file-1";
@@ -70,6 +78,7 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
     f1->flags = O_WRONLY;
     int rc1 = fd_alloc_limit(files, f1, 0, soft);
     if (rc1 < 0 || rc1 != 1) {
+        boot3_test_stdio_leave();
         file_put(f1);
         vfs_node_put(tty);
         files_unpin(files);
@@ -80,6 +89,7 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
     /* fd 2: stderr (O_WRONLY) */
     file_t *f2 = file_alloc();
     if (!f2) {
+        boot3_test_stdio_leave();
         vfs_node_put(tty);
         files_unpin(files);
         if (failed_component) *failed_component = "file-2";
@@ -90,12 +100,15 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
     f2->flags = O_WRONLY;
     int rc2 = fd_alloc_limit(files, f2, 0, soft);
     if (rc2 < 0 || rc2 != 2) {
+        boot3_test_stdio_leave();
         file_put(f2);
         vfs_node_put(tty);
         files_unpin(files);
         if (failed_component) *failed_component = "fd-2";
         return rc2 < 0 ? rc2 : -EMFILE;
     }
+
+    boot3_test_stdio_leave();
 
     /* Independent lookup reference is released; slots hold their own references */
     vfs_node_put(tty);

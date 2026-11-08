@@ -4709,6 +4709,236 @@
     "action": "unique",
     "reason": "BOOT-2 Task 4 matrix evidence"
    }
+  },
+  {
+   "id": "boot.failure.normal",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "make test-qemu SUITE=boot-failure --case normal 1/2/4",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing init-created/pid1/shell, variant marker leak, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_failure.py",
+    "selector": "--case normal",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "boot.failure.fatal",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "make test-qemu SUITE=boot-failure --case required-subsys|registration|root|tty|pty|stdio|init|child-fds",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing fatal line, wrong metadata, continuation past barrier, timeout"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_failure.py",
+    "selector": "--case <fatal-case>",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "boot.failure.optional",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "make test-qemu SUITE=boot-failure --case optional-subsys 1/2",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing warn line, missing continuation sentinel, missing downstream sentinels, timeout"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_failure.py",
+    "selector": "--case optional-subsys",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "boot.failure.subsys_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_failure_subsys.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_failure_subsys.c",
+    "selector": "test_boot_failure_subsys",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 1 host evidence"
+   }
+  },
+  {
+   "id": "boot.failure.log_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_failure_log.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_failure_log.c",
+    "selector": "test_boot_failure_log",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 1 host evidence"
+   }
+  },
+  {
+   "id": "boot.failure.mounts_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_failure_mounts.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_failure_mounts.c",
+    "selector": "test_boot_failure_mounts",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 2 host evidence"
+   }
+  },
+  {
+   "id": "boot.failure.terminal_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_failure_terminal.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_failure_terminal.c",
+    "selector": "test_boot_failure_terminal",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 2 host evidence"
+   }
+  },
+  {
+   "id": "boot.failure.stdio_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_stdio.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_stdio.c",
+    "selector": "test_boot_stdio",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 3 host evidence"
+   }
+  },
+  {
+   "id": "boot.failure.spawn_failure_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_spawn_failure.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_spawn_failure.c",
+    "selector": "test_boot_spawn_failure",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 3 host evidence"
+   }
+  },
+  {
+   "id": "boot.failure.task_init_host",
+   "component": "boot",
+   "behavior": "boot-failure-policy",
+   "trigger": "host runner invokes test_boot_task_init.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_task_init.c",
+    "selector": "test_boot_task_init",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-3 Task 3 host evidence"
+   }
   }
  ]
 }

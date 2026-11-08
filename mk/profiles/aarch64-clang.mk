@@ -58,6 +58,13 @@ X86_BOOT_IRQ_TIME_CASE := $(if $(findstring X86_BOOT_IRQ_TIME_TEST=1,$(KERNEL_EX
 ifneq ($(strip $(X86_BOOT_IRQ_TIME_CASE)),)
 $(error X86_BOOT_IRQ_TIME_TEST is x86-only; the aarch64 profile must not select a boot-irq-time fault variant)
 endif
+BOOT_FAILURE_CASE := $(if $(findstring BOOT_FAILURE_TEST=,$(KERNEL_EXTRA_CFLAGS)),boot-failure,)
+ifneq ($(strip $(BOOT_FAILURE_CASE)),)
+$(error BOOT_FAILURE_TEST is x86-only; the aarch64 profile must not select a boot-failure fault variant)
+endif
+ifneq ($(strip $(BOOT_FAILURE_TEST)),)
+$(error BOOT_FAILURE_TEST is x86-only; the aarch64 profile must not select a boot-failure fault variant)
+endif
 #
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ifeq ($(filter 1,$(KERNEL_SELFTEST)),)

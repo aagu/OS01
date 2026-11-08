@@ -434,6 +434,7 @@ jobs:
           # Worst case ~10 groups x ~2-5 min wall clock (builds + boots)
           # — well inside this nightly job's 240-minute budget.
           suite make test-qemu SUITE=boot-irq-time
+          suite make test-qemu SUITE=boot-failure
           # gui and gui-desktop run non-blocking for the same reason as
           # terminal-present: on 1-vCPU CI runners the guest's terminal
           # wedges around display-ownership transitions (input_interaction's

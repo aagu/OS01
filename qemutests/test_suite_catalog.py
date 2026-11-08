@@ -83,6 +83,7 @@ class TestSuiteCatalogContract(unittest.TestCase):
             "intr-x86",
             "boot-lifecycle",
             "boot-irq-time",
+            "boot-failure",
             "gui",
             "gui-desktop",
         }

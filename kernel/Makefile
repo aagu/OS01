@@ -132,6 +132,7 @@ KERNEL_C_SOURCES := \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
     $(filter-out selftest/arch10_capacity_fixture.c \
+                 selftest/boot_failure_fixture.c \
                  selftest/boot_irq_time_fixture.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
@@ -216,7 +217,18 @@ KERNEL_BOOT2_FIXTURE_C_SOURCES := selftest/boot_irq_time_fixture.c
 else
 KERNEL_BOOT2_FIXTURE_C_SOURCES :=
 endif
-ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES)
+
+# ── BOOT-3 failure policy fixture ───────────────────────────
+BOOT_FAILURE_CASE ?=
+ifneq ($(strip $(BOOT_FAILURE_CASE)),)
+KERNEL_BOOT3_FIXTURE_C_SOURCES := selftest/boot_failure_fixture.c
+KERNEL_BOOT3_FLAGS := -DBOOT_FAILURE_CASE=\"$(BOOT_FAILURE_CASE)\"
+else
+KERNEL_BOOT3_FIXTURE_C_SOURCES :=
+KERNEL_BOOT3_FLAGS :=
+endif
+
+ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES)
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
@@ -330,6 +342,7 @@ ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 # BOOT-2 fixture/case flags: folded AFTER ALL_CFLAGS is defined (same
 # pattern as the fault-fixture flags above).
 ALL_CFLAGS += $(KERNEL_BOOT2_IRQ_TIME_FLAGS)
+ALL_CFLAGS += $(KERNEL_BOOT3_FLAGS)
 
 # ── FB_RESOLUTION_TEST fault surface (Task 9) ──────────────
 # Same pattern: appended after ALL_CFLAGS is defined and after the source

@@ -14,6 +14,7 @@
 #include <fs/devfs.h>
 #include <sys/stat.h>
 #include <memory/uaccess.h>
+#include <selftest/boot_failure_fixture.h>
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -39,6 +40,8 @@ __attribute__((weak)) void socket_free(socket_t *s)
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
 {
+    if (boot3_test_in_stdio_window())
+        return NULL;
     file_t *f = (file_t *)calloc(1, sizeof(file_t));
     if (!f) return NULL;
     f->refcount = 1;
@@ -263,6 +266,8 @@ void files_free(files_t *fs)
 files_t *files_dup(files_t *fs)
 {
     if (!fs) return NULL;
+    if (boot3_test_in_spawn_window() && boot3_test_fail_site("spawn-fds"))
+        return NULL;
 
     files_t *new_fs = (files_t *)calloc(1, sizeof(files_t));
     if (!new_fs) return NULL;

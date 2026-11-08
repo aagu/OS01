@@ -728,7 +728,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1636,6 +1636,143 @@ test-qemu-boot-irq-time: _test-boot-irq-time-normal-image \
 	_test-boot-irq-time-normal-hash-check
 	@true
 
+# ── boot-failure: BOOT-3 startup failure policy matrix ─────────
+# 17 serially-run groups:
+#   - normal (1, 2, 4 cpus)
+#   - required-subsys (1, 2 cpus)
+#   - optional-subsys (1, 2 cpus)
+#   - registration (1 cpu)
+#   - root (1 cpu)
+#   - tty (1 cpu)
+#   - pty (1 cpu)
+#   - stdio (1, 2 cpus)
+#   - init (1, 2 cpus)
+#   - child-fds (1, 2 cpus)
+BOOT_FAILURE_TIMEOUT ?= 90
+TEST_BOOT_FAILURE_IMAGE_normal           := $(NORMAL_IMAGE)
+TEST_BOOT_FAILURE_ELF_normal             := $(BUILD_DIR)/kernel/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_required-subsys  := $(BUILD_DIR)/image/boot-failure-required-subsys/disk.img
+TEST_BOOT_FAILURE_ELF_required-subsys    := $(BUILD_DIR)/kernel/boot-failure-required-subsys/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_optional-subsys  := $(BUILD_DIR)/image/boot-failure-optional-subsys/disk.img
+TEST_BOOT_FAILURE_ELF_optional-subsys    := $(BUILD_DIR)/kernel/boot-failure-optional-subsys/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_registration     := $(BUILD_DIR)/image/boot-failure-registration/disk.img
+TEST_BOOT_FAILURE_ELF_registration       := $(BUILD_DIR)/kernel/boot-failure-registration/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_root             := $(BUILD_DIR)/image/boot-failure-root/disk.img
+TEST_BOOT_FAILURE_ELF_root               := $(BUILD_DIR)/kernel/boot-failure-root/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_tty              := $(BUILD_DIR)/image/boot-failure-tty/disk.img
+TEST_BOOT_FAILURE_ELF_tty                := $(BUILD_DIR)/kernel/boot-failure-tty/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_pty              := $(BUILD_DIR)/image/boot-failure-pty/disk.img
+TEST_BOOT_FAILURE_ELF_pty                := $(BUILD_DIR)/kernel/boot-failure-pty/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_stdio            := $(BUILD_DIR)/image/boot-failure-stdio/disk.img
+TEST_BOOT_FAILURE_ELF_stdio              := $(BUILD_DIR)/kernel/boot-failure-stdio/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_init             := $(BUILD_DIR)/image/boot-failure-init/disk.img
+TEST_BOOT_FAILURE_ELF_init               := $(BUILD_DIR)/kernel/boot-failure-init/kernel.elf
+TEST_BOOT_FAILURE_IMAGE_child-fds        := $(BUILD_DIR)/image/boot-failure-child-fds/disk.img
+TEST_BOOT_FAILURE_ELF_child-fds          := $(BUILD_DIR)/kernel/boot-failure-child-fds/kernel.elf
+TEST_BOOT_FAILURE_LOG_DIR := $(abspath $(BUILD_DIR))/test-results/boot-failure
+
+define _boot_failure_run
+	@echo "  [test-qemu] SUITE=boot-failure: case=$(1) cpus=$(2)"
+	python3 qemutests/boot_failure.py --case $(1) --cpus $(2) \
+	  --timeout $(BOOT_FAILURE_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_BOOT_FAILURE_IMAGE_$(1))" \
+	  --kernel-elf "$(TEST_BOOT_FAILURE_ELF_$(1))" \
+	  --qemu "$(QEMU_BIN)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)"
+endef
+
+.PHONY: _test-boot-failure-normal-image
+_test-boot-failure-normal-image:
+	@echo "  [test-qemu] SUITE=boot-failure: building the normal image"
+	$(MAKE) --no-print-directory image
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-failure.normal.before"
+
+.PHONY: _test-boot-failure-normal-cases
+_test-boot-failure-normal-cases:
+	$(call _boot_failure_run,normal,1)
+	$(call _boot_failure_run,normal,2)
+	$(call _boot_failure_run,normal,4)
+
+.PHONY: _test-boot-failure-fault-required-subsys
+_test-boot-failure-fault-required-subsys:
+	@echo "  [test-qemu] SUITE=boot-failure: building the required-subsys variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=required-subsys KERNEL_SELFTEST= image
+	$(call _boot_failure_run,required-subsys,1)
+	$(call _boot_failure_run,required-subsys,2)
+
+.PHONY: _test-boot-failure-fault-optional-subsys
+_test-boot-failure-fault-optional-subsys:
+	@echo "  [test-qemu] SUITE=boot-failure: building the optional-subsys variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=optional-subsys KERNEL_SELFTEST= image
+	$(call _boot_failure_run,optional-subsys,1)
+	$(call _boot_failure_run,optional-subsys,2)
+
+.PHONY: _test-boot-failure-fault-registration
+_test-boot-failure-fault-registration:
+	@echo "  [test-qemu] SUITE=boot-failure: building the registration variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=registration KERNEL_SELFTEST= image
+	$(call _boot_failure_run,registration,1)
+
+.PHONY: _test-boot-failure-fault-root
+_test-boot-failure-fault-root:
+	@echo "  [test-qemu] SUITE=boot-failure: building the root variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=root KERNEL_SELFTEST= image
+	$(call _boot_failure_run,root,1)
+
+.PHONY: _test-boot-failure-fault-tty
+_test-boot-failure-fault-tty:
+	@echo "  [test-qemu] SUITE=boot-failure: building the tty variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=tty KERNEL_SELFTEST= image
+	$(call _boot_failure_run,tty,1)
+
+.PHONY: _test-boot-failure-fault-pty
+_test-boot-failure-fault-pty:
+	@echo "  [test-qemu] SUITE=boot-failure: building the pty variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=pty KERNEL_SELFTEST= image
+	$(call _boot_failure_run,pty,1)
+
+.PHONY: _test-boot-failure-fault-stdio
+_test-boot-failure-fault-stdio:
+	@echo "  [test-qemu] SUITE=boot-failure: building the stdio variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=stdio KERNEL_SELFTEST= image
+	$(call _boot_failure_run,stdio,1)
+	$(call _boot_failure_run,stdio,2)
+
+.PHONY: _test-boot-failure-fault-init
+_test-boot-failure-fault-init:
+	@echo "  [test-qemu] SUITE=boot-failure: building the init variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=init KERNEL_SELFTEST= image
+	$(call _boot_failure_run,init,1)
+	$(call _boot_failure_run,init,2)
+
+.PHONY: _test-boot-failure-fault-child-fds
+_test-boot-failure-fault-child-fds:
+	@echo "  [test-qemu] SUITE=boot-failure: building the child-fds variant"
+	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=child-fds KERNEL_SELFTEST= image
+	$(call _boot_failure_run,child-fds,1)
+	$(call _boot_failure_run,child-fds,2)
+
+.PHONY: _test-boot-failure-normal-hash-check
+_test-boot-failure-normal-hash-check:
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-failure.normal.after"
+	cmp "$(NORMAL_IMAGE_DIR)/boot-failure.normal.before" "$(NORMAL_IMAGE_DIR)/boot-failure.normal.after"
+
+.PHONY: test-qemu-boot-failure
+test-qemu-boot-failure: _test-boot-failure-normal-image \
+	_test-boot-failure-normal-cases \
+	_test-boot-failure-fault-required-subsys \
+	_test-boot-failure-fault-optional-subsys \
+	_test-boot-failure-fault-registration \
+	_test-boot-failure-fault-root \
+	_test-boot-failure-fault-tty \
+	_test-boot-failure-fault-pty \
+	_test-boot-failure-fault-stdio \
+	_test-boot-failure-fault-init \
+	_test-boot-failure-fault-child-fds \
+	_test-boot-failure-normal-hash-check
+	@true
+
 test-qemu-boot-lifecycle: _test-boot-lifecycle-normal-image \
 	_test-boot-lifecycle-normal-cases \
 	_test-boot-lifecycle-fault-delay \
@@ -1832,8 +1969,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|arch10-capacity|arch6-fsstress) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|arch10-capacity|arch6-fsstress) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -1878,6 +2015,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-boot-lifecycle || exit 1; \
 	elif [ "$(SUITE)" = "boot-irq-time" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-irq-time || exit 1; \
+	elif [ "$(SUITE)" = "boot-failure" ]; then \
+	  $(MAKE) --no-print-directory test-qemu-boot-failure || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
 	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
@@ -1900,7 +2039,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# python harness inside ``test-qemu-driver-model`` and must NOT
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
-	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ]; then \
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \

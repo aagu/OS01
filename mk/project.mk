@@ -220,6 +220,46 @@ $(error X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE) cannot be combined with
 endif
 endif
 
+# ── BOOT_FAILURE_TEST — BOOT-3 startup failure policy matrix ───────
+BOOT_FAILURE_TEST ?=
+BOOT_FAILURE_TESTS_VALID := none required-subsys optional-subsys registration root tty pty stdio init child-fds
+ifneq ($(strip $(BOOT_FAILURE_TEST)),)
+ifeq ($(filter $(BOOT_FAILURE_TEST),$(BOOT_FAILURE_TESTS_VALID)),)
+$(error BOOT_FAILURE_TEST='$(BOOT_FAILURE_TEST)' is not one of: $(BOOT_FAILURE_TESTS_VALID))
+endif
+endif
+ifeq ($(BOOT_FAILURE_TEST),none)
+BOOT_FAILURE_CFLAGS :=
+else ifneq ($(strip $(BOOT_FAILURE_TEST)),)
+BOOT_FAILURE_CFLAGS := -DBOOT_FAILURE_TEST=$(BOOT_FAILURE_TEST)
+else
+BOOT_FAILURE_CFLAGS :=
+endif
+ifneq ($(strip $(BOOT_FAILURE_CFLAGS)),)
+ifeq ($(findstring BOOT_FAILURE_TEST=,$(KERNEL_EXTRA_CFLAGS)),)
+override KERNEL_EXTRA_CFLAGS := $(strip $(KERNEL_EXTRA_CFLAGS) $(BOOT_FAILURE_CFLAGS))
+endif
+endif
+BOOT_FAILURE_CASE := $(if $(findstring BOOT_FAILURE_TEST=required-subsys,$(KERNEL_EXTRA_CFLAGS)),required-subsys,$(if $(findstring BOOT_FAILURE_TEST=optional-subsys,$(KERNEL_EXTRA_CFLAGS)),optional-subsys,$(if $(findstring BOOT_FAILURE_TEST=registration,$(KERNEL_EXTRA_CFLAGS)),registration,$(if $(findstring BOOT_FAILURE_TEST=root,$(KERNEL_EXTRA_CFLAGS)),root,$(if $(findstring BOOT_FAILURE_TEST=tty,$(KERNEL_EXTRA_CFLAGS)),tty,$(if $(findstring BOOT_FAILURE_TEST=pty,$(KERNEL_EXTRA_CFLAGS)),pty,$(if $(findstring BOOT_FAILURE_TEST=stdio,$(KERNEL_EXTRA_CFLAGS)),stdio,$(if $(findstring BOOT_FAILURE_TEST=init,$(KERNEL_EXTRA_CFLAGS)),init,$(if $(findstring BOOT_FAILURE_TEST=child-fds,$(KERNEL_EXTRA_CFLAGS)),child-fds,)))))))))
+ifneq ($(strip $(BOOT_FAILURE_CASE)),)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST) $(CAPACITY_TEST) $(ARCH6_FSSTRESS_TEST)),)
+$(error BOOT_FAILURE_TEST=$(BOOT_FAILURE_CASE) cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST/CAPACITY_TEST/ARCH6_FSSTRESS_TEST)
+endif
+ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
+else
+$(error BOOT_FAILURE_TEST=$(BOOT_FAILURE_CASE) cannot be combined with DRIVER_MODEL_FAULT=$(DRIVER_MODEL_FAULT))
+endif
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+$(error BOOT_FAILURE_TEST=$(BOOT_FAILURE_CASE) cannot be combined with X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE))
+endif
+ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
+$(error BOOT_FAILURE_TEST=$(BOOT_FAILURE_CASE) cannot be combined with X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE))
+endif
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_CASE)),)
+$(error BOOT_FAILURE_TEST=$(BOOT_FAILURE_CASE) cannot be combined with X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE))
+endif
+endif
+
 # ── CAPACITY_TEST — isolated capacity variant (spec §10) ──────────
 CAPACITY_TEST ?= 0
 ifeq ($(filter $(CAPACITY_TEST),0 1),)
@@ -294,7 +334,7 @@ ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
 USER_DEBUG := 1
 endif
 
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE))$(if $(strip $(X86_BOOT_IRQ_TIME_CASE)),boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE)))
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE))$(if $(strip $(X86_BOOT_IRQ_TIME_CASE)),boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE))$(if $(strip $(BOOT_FAILURE_CASE)),boot-failure-$(BOOT_FAILURE_CASE)))
 USER_VARIANT  := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
@@ -369,7 +409,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS KERNEL_EXTRA_LDFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS DRIVER_MODEL_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST COMPILER_LAUNCHER CCACHE_DIR CCACHE_BASEDIR CCACHE_COMPILERCHECK HOST_TEST_JOBS CAPACITY_TEST ARCH6_FSSTRESS_TEST
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS KERNEL_EXTRA_LDFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS DRIVER_MODEL_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST COMPILER_LAUNCHER CCACHE_DIR CCACHE_BASEDIR CCACHE_COMPILERCHECK HOST_TEST_JOBS CAPACITY_TEST ARCH6_FSSTRESS_TEST BOOT_FAILURE_TEST
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── Sysroot generation protocol (spec: sysroot single-writer) ──
