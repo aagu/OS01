@@ -186,6 +186,19 @@ int64_t host_test_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t ar
             return -(int64_t)*__errno_location();
         return (int64_t)r;
     }
+    case 18:   /* OS01 SYS_lseek — the T9 seek family drives the REAL
+                * production lseek wrapper, so its syscall must reach a
+                * real descriptor backend.  Redirect to the HOST
+                * kernel's lseek number (this file compiles against the
+                * HOST <sys/syscall.h>), translating the host's
+                * -1/errno answer into the kernel's negative-errno
+                * convention the wrapper expects. */
+    {
+        long r = syscall(SYS_lseek, (int)arg1, (long)arg2, (int)arg3);
+        if (r < 0)
+            return -(int64_t)*__errno_location();
+        return (int64_t)r;
+    }
     case 11:   /* SYS_fork — the test forks a child for the checks that
                 * close a standard stream (closing fd 1 would take the
                 * test's own output down with it). */

@@ -4,6 +4,19 @@
 #include <sys/cdefs.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Wide integer conversion (T10).  Same core, caps and errno discipline
+ * as the <stdlib.h> strto* family; see strtoll.c. */
+intmax_t strtoimax(const char *nptr, char **endptr, int base);
+uintmax_t strtoumax(const char *nptr, char **endptr, int base);
+
+#ifdef __cplusplus
+}
+#endif
+
 /* Printf format macros */
 
 #define PRId8   "d"

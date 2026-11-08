@@ -16,6 +16,7 @@ $(eval $(call register_host_test,test_libc_stream_state,libc,protocol-or-legacy)
 $(eval $(call register_host_test,test_libc_stdio_io,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_line,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stdio_format,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_integer,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -33,7 +34,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_stream_state.elf \
     $(TEST_BLD)/test_libc_stdio_io.elf \
     $(TEST_BLD)/test_libc_line.elf \
-    $(TEST_BLD)/test_libc_stdio_format.elf
+    $(TEST_BLD)/test_libc_stdio_format.elf \
+    $(TEST_BLD)/test_libc_integer.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -447,6 +449,51 @@ $(TEST_BLD)/test_libc_stdio_format.elf: $(TEST_BLD)/test_libc_stdio_format.o \
 
 .PHONY: test-libc-stdio-format
 test-libc-stdio-format: $(TEST_BLD)/test_libc_stdio_format.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: integer group (T10) ─────────────────────────
+# The strto* family against the SHARED glibc oracle: the oracle is a
+# separate host binary built with NO OS01 include paths (it cannot
+# help but run the host's strto*), and the test popens it and compares
+# byte-identical result tuples.  The production objects are the REAL
+# libc/stdlib converters compiled as the user libc (their names shadow
+# the host's by first definition); the stream objects ride along for
+# snprintf's formatter.
+$(TEST_BLD)/strtox_oracle: $(TESTS_DIR)/hosttests/oracle/strtox_oracle.c \
+        $(TESTS_DIR)/hosttests/data/strtox_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -O0 -Wall -o $@ $<
+
+$(TEST_BLD)/user-int/strtol.o: $(LIBC_SRC)/stdlib/strtol.c \
+        $(LIBC_SRC)/include/stdlib/strtox.h
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/strtoll.o: $(LIBC_SRC)/stdlib/strtoll.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+INTEGER_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+    -I$(TESTS_DIR)/hosttests/data \
+    -D'STRTOX_ORACLE_PATH="$(TEST_BLD)/strtox_oracle"'
+
+$(TEST_BLD)/test_libc_integer.o: $(TEST_CASES)/test_libc_integer.c \
+        $(TESTS_DIR)/hosttests/data/strtox_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(INTEGER_TEST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_libc_integer.elf: $(TEST_BLD)/test_libc_integer.o \
+        $(TEST_BLD)/user-int/strtol.o \
+        $(TEST_BLD)/user-int/strtoll.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(TEST_BLD)/libc_stream_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-integer
+test-libc-integer: $(TEST_BLD)/test_libc_integer.elf $(TEST_BLD)/strtox_oracle
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

@@ -21,6 +21,7 @@
 #include <termios.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <inttypes.h>
 #include <rbtree.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -4116,7 +4117,68 @@ static void test_busybox_lines(void)
     unlink(out);
 }
 
+// ── T10: integer conversions on a uint64 token (libc-completion
+//    plan) ──
+//
+// The strto* family must survive the full uint64 range without
+// truncation: a token written to tmpfs, read back as text, and
+// converted must reproduce the exact value (UINTMAX_MAX, INTMAX_MIN,
+// a base-16 token with the high bits set), and an overflow must
+// answer ERANGE with the saturated maximum.  The strtol family was
+// previously able to truncate these (strtoull was a truncation cast
+// of strtoul) — this case pins the fix on the real kernel.
+static void test_integer_conversions(void)
+{
+    static const char *path = "/tmp/systest_inttok.txt";
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK3(fd >= 0, "inttok setup", "file created");
+    if (fd < 0) return;
+    const char *content =
+        "18446744073709551615\n"
+        "-9223372036854775808\n"
+        "0xdeadbeefcafebabe\n"
+        "99999999999999999999999\n";
+    ssize_t wn = write(fd, content, strlen(content));
+    close(fd);
+    CHECK3(wn == (ssize_t)strlen(content), "inttok setup", "tokens seeded");
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { FAIL("inttok reopen"); return; }
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) { FAIL("inttok read"); return; }
+    buf[n] = '\0';
+
+    errno = 0;
+    char *e = NULL;
+    uintmax_t u = strtoumax(buf, &e, 10);
+    CHECK3(u == UINTMAX_MAX && errno == 0 &&
+           (long)(e - buf) == 20, "strtoumax uint64 token",
+           "full uint64 range, exact consumption");
+
+    errno = 0;
+    intmax_t m = strtoimax(e + 1, &e, 10);
+    CHECK3(m == INTMAX_MIN && errno == 0,
+           "strtoimax int64 minimum", "INTMAX_MIN exact");
+
+    errno = 0;
+    u = strtoumax(e + 1, &e, 16);
+    CHECK3(u == 0xdeadbeefcafebabeULL && errno == 0 &&
+           (long)(e - buf) == 60, "strtoumax base16 token",
+           "high-bit token exact");
+
+    errno = 0;
+    u = strtoumax(e + 1, &e, 10);
+    CHECK3(u == UINTMAX_MAX && errno == ERANGE, "strtoumax overflow",
+           "ERANGE with saturated maximum");
+
+    unlink(path);
+}
+
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
+
 
 // The kernel reserves [0x400000, 0x20600000) for the ELF image
 // (envelope incl. segment gaps), the heap (committed + reserve),
@@ -4628,6 +4690,7 @@ static const test_case_t tests[] = {
     {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
+    {"integer_conversions", "integer conversions", test_integer_conversions, 1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},
