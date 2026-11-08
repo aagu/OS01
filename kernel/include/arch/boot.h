@@ -44,6 +44,9 @@ void arch_post_smp_selftest(void);
 
 #if !OS01_HAS_USERSPACE
 void arch_start_kernel_idle(void) __attribute__((noreturn));
+#else
+void arch_sched_boot_prepare(void);
+void arch_sched_boot_idle(void) __attribute__((noreturn));
 #endif
 
 #endif /* ARCH_BOOT_H */

@@ -495,11 +495,12 @@ def _read_kernel_source(relpath: str) -> str:
 _REGISTER_RE = re.compile(r'selftest_register\(\s*"([^"]+)"')
 _REGISTER_LATE_RE = re.compile(r'selftest_register_late\(\s*"([^"]+)"')
 
-# The x86 system startup TU.  Phase 2 of the aarch64 EL1 scheduler plan
-# moved the x86 late-selftest calls and the coordinator's END out of the
-# arch-neutral kernel/sched/core.c into this x86-only file; the
-# contract itself ("END follows every late record") is unchanged.
-X86_SCHED_BOOT_SRC = "kernel/arch/x86_64/cpu/sched_boot.c"
+# The late selftest TU. BOOT-5 moved the late-selftest execution
+# and the coordinator's END out of kernel/arch/x86_64/cpu/sched_boot.c
+# into kernel/selftest/boot_late.c; the contract itself ("END follows
+# every late record") is unchanged.
+BOOT_LATE_SELFTEST_SRC = "kernel/selftest/boot_late.c"
+X86_SCHED_BOOT_SRC = BOOT_LATE_SELFTEST_SRC
 
 
 def _registered_case_ids(relpath: str) -> List[str]:

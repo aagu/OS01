@@ -1,6 +1,8 @@
 #ifndef _MOCK_BOOT_FAILURE_ARCH_IRQ_H
 #define _MOCK_BOOT_FAILURE_ARCH_IRQ_H
 
+#include <stdint.h>
+
 typedef unsigned long arch_irq_state_t;
 void arch_local_irq_disable(void);
 void arch_local_irq_enable(void);

@@ -17,10 +17,7 @@
 #endif
 
 #if OS01_HAS_USERSPACE
-#include <sched/task.h>       // task_init
-#include <sched/boot.h>       // sched_boot_creation_begin (Phase 2, Ruling P2-2)
-#include <sync/futex.h>       // futex_init
-#include <tty/console.h>      // console_init
+#include <init/userspace.h>   // kernel_start_userspace
 #endif
 
 #if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI))
@@ -171,10 +168,7 @@ int kernel_main(const struct boot_context *bootctx)
 
 #if OS01_HAS_USERSPACE
     // ═══ 9. Scheduler + user-space init ══════════════════════
-    sched_boot_creation_begin();
-    futex_init();
-    console_init();
-    task_init();
+    kernel_start_userspace();
 #else
     // ═══ Non-userspace architectures: enter kernel idle loop ══
     arch_start_kernel_idle();

@@ -1,6 +1,6 @@
-/* hosttests/cases/test_boot_task_init.c — BOOT-3 Task 3 task_init startup barrier test.
+/* hosttests/cases/test_boot_task_init.c — BOOT-3 Task 3 task_init / kernel_start_userspace startup barrier test.
  *
- * Verifies task_init() in x86 sched_boot.c:
+ * Verifies kernel_start_userspace() in kernel/init/userspace.c:
  *   - Stdio failure halts immediately via boot_failure_stop("stdio", component, rc, -1, -1)
  *     and DOES NOT call spawn_user_task.
  *   - spawn_user_task negative return halts immediately via boot_failure_stop("init", "/bin/init", rc, -1, -1)
@@ -9,6 +9,7 @@
  */
 
 #include "test_framework.h"
+#include <init/userspace.h>
 #include <sched/task.h>
 #include <sched/boot.h>
 #include <sched/boot_stdio.h>
@@ -122,6 +123,12 @@ void file_put(file_t *f) { (void)f; }
 
 void arch_task_init_platform(void) {}
 void sched_boot_publish_idle(void) {}
+void sched_boot_creation_begin(void) {}
+void futex_init(void) {}
+void console_init(void) {}
+void arch_sched_boot_prepare(void) {}
+void arch_sched_boot_idle(void) { longjmp(test_exit_jmp, 3); }
+void printk(const char *fmt, ...) { (void)fmt; }
 
 int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
 {
@@ -141,8 +148,10 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 }
 
 void sched_boot_probe_create(void) {}
+void selftest_boot_creation_probe(void) {}
+void selftest_boot_run_late(void) {}
 
-void net_lwip_init(void)
+void boot_services_prepare(void)
 {
     record_ev(EV_NET_INIT);
     net_lwip_init_calls++;
@@ -163,15 +172,14 @@ void vfs_end_bootstrap(void)
     vfs_end_bootstrap_calls++;
 }
 
-int arch_thermal_start_worker(void)
+void boot_services_start(void)
 {
     record_ev(EV_THERMAL);
     thermal_worker_calls++;
-    return 0;
 }
 
-/* Prototype of task_init */
-void task_init(void);
+/* Prototype of kernel_start_userspace */
+void kernel_start_userspace(void);
 
 static void reset_task_init_state(void)
 {
@@ -204,7 +212,7 @@ static void test_task_init_stdio_failure(void)
     mock_stdio_component = "files";
 
     if (setjmp(test_exit_jmp) == 0) {
-        task_init();
+        kernel_start_userspace();
         assert_true(false); /* Should not be reached */
     }
 
@@ -225,7 +233,7 @@ static void test_task_init_spawn_negative_failure(void)
     mock_spawn_rc = -1; /* ELF missing */
 
     if (setjmp(test_exit_jmp) == 0) {
-        task_init();
+        kernel_start_userspace();
         assert_true(false); /* Should not be reached */
     }
 
@@ -251,7 +259,7 @@ static void test_task_init_spawn_negative_failure(void)
     mock_spawn_rc = -ENOMEM;
 
     if (setjmp(test_exit_jmp) == 0) {
-        task_init();
+        kernel_start_userspace();
         assert_true(false); /* Should not be reached */
     }
 
@@ -277,7 +285,7 @@ static void test_task_init_success_path(void)
     jump_on_net = 1; /* Stop at net_lwip_init so we don't enter hlt idle loop */
 
     if (setjmp(test_exit_jmp) == 0) {
-        task_init();
+        kernel_start_userspace();
         assert_true(false);
     }
 

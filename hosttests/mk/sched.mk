@@ -914,20 +914,48 @@ $(TEST_BLD)/boot3_test_task_init.o: $(TEST_CASES)/test_boot_task_init.c
 
 $(TEST_BLD)/test_boot_task_init.elf: \
 		$(TEST_BLD)/boot3_test_task_init.o \
-		$(TEST_BLD)/boot3_sched_boot_production.o
+		$(TEST_BLD)/boot5_userspace_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # ── BOOT-5 Task 2: initial spawn placement & publication ─────────
 $(eval $(call register_host_test,test_boot_services_spawn,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_services_sequence,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_services_services,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_services_late,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_services_mechanisms,sched,protocol-or-legacy))
 
 TEST_BINS += \
-    $(TEST_BLD)/test_boot_services_spawn.elf
+    $(TEST_BLD)/test_boot_services_spawn.elf \
+    $(TEST_BLD)/test_boot_services_sequence.elf \
+    $(TEST_BLD)/test_boot_services_services.elf \
+    $(TEST_BLD)/test_boot_services_late.elf \
+    $(TEST_BLD)/test_boot_services_mechanisms.elf
 
 $(TEST_BLD)/boot5_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
 
 $(TEST_BLD)/boot5_boot_production.o: $(TESTS_DIR)/kernel/sched/boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot5_userspace_production.o: $(TESTS_DIR)/kernel/init/userspace.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -DOS01_SELFTEST=1 -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot5_services_production.o: $(TESTS_DIR)/kernel/init/services.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot5_late_production.o: $(TESTS_DIR)/kernel/selftest/boot_late.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -DOS01_SELFTEST=1 -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot5_mechanisms_sched_boot.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/sched_boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot5_mechanisms_task_arch.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/task_arch.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
 
@@ -942,8 +970,53 @@ $(TEST_BLD)/test_boot_services_spawn.elf: \
 		$(TEST_BLD)/boot5_boot_production.o
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=sched_notify_remote -Wl,--wrap=malloc -Wl,--wrap=calloc -o $@ $^
 
-.PHONY: test_boot_services_spawn
+$(TEST_BLD)/test_boot_services_sequence.o: $(TEST_CASES)/test_boot_services_sequence.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -DOS01_SELFTEST=1 -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_sequence.elf: \
+		$(TEST_BLD)/test_boot_services_sequence.o \
+		$(TEST_BLD)/boot5_userspace_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+$(TEST_BLD)/test_boot_services_services.o: $(TEST_CASES)/test_boot_services_services.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_services.elf: \
+		$(TEST_BLD)/test_boot_services_services.o \
+		$(TEST_BLD)/boot5_services_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+$(TEST_BLD)/test_boot_services_late.o: $(TEST_CASES)/test_boot_services_late.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -DOS01_SELFTEST=1 -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_late.elf: \
+		$(TEST_BLD)/test_boot_services_late.o \
+		$(TEST_BLD)/boot5_late_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+$(TEST_BLD)/test_boot_services_mechanisms.o: $(TEST_CASES)/test_boot_services_mechanisms.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_mechanisms.elf: \
+		$(TEST_BLD)/test_boot_services_mechanisms.o \
+		$(TEST_BLD)/boot5_mechanisms_sched_boot.o \
+		$(TEST_BLD)/boot5_mechanisms_task_arch.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_services_spawn test_boot_services_sequence test_boot_services_services test_boot_services_late test_boot_services_mechanisms
 test_boot_services_spawn: $(TEST_BLD)/test_boot_services_spawn.elf
+	$<
+test_boot_services_sequence: $(TEST_BLD)/test_boot_services_sequence.elf
+	$<
+test_boot_services_services: $(TEST_BLD)/test_boot_services_services.elf
+	$<
+test_boot_services_late: $(TEST_BLD)/test_boot_services_late.elf
+	$<
+test_boot_services_mechanisms: $(TEST_BLD)/test_boot_services_mechanisms.elf
 	$<
 
 .PHONY: test_boot_task_init

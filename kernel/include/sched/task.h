@@ -283,7 +283,6 @@ extern task_t *init_task[NR_CPUS];
 
 
 uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags, uint64_t stack_start, uint64_t stack_size);
-void task_init();
 int64_t spawn_user_task(const char *path, const char *const *argv);
 int64_t sys_exec(const char *path, pt_regs_t *regs,
                  const char *const *argv, const char *const *envp);

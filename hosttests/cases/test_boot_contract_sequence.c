@@ -6,7 +6,7 @@
  *   - failure at fs_boot_prepare halts without entering SMP;
  *   - failure at pty_init halts without entering SMP;
  *   - failure at ARCH_BOOT_CHECK_PRE_SMP halts without calling arch_boot_aps;
- *   - failure at ARCH_BOOT_CHECK_RUNTIME halts without calling task_init;
+ *   - failure at ARCH_BOOT_CHECK_RUNTIME halts without calling kernel_start_userspace;
  *   - normal completion reaches user space or kernel idle.
  */
 
@@ -225,9 +225,10 @@ void console_init(void)
     trace_record("console_init");
 }
 
-void task_init(void)
+void kernel_start_userspace(void)
 {
-    trace_record("task_init");
+    trace_record("kernel_start_userspace");
+    longjmp(g_test_exit_jmp, 10);
 }
 
 void arch_start_kernel_idle(void)
@@ -327,7 +328,7 @@ static void test_normal_sequence_order(void)
     int idx_run = trace_find("arch_boot_runtime");
     int idx_val_run = trace_find("validate_runtime");
     int idx_postselftest = trace_find("arch_post_smp_selftest");
-    int idx_task = trace_find("task_init");
+    int idx_task = trace_find("kernel_start_userspace");
 
     assert_true(idx_early >= 0);
     assert_true(idx_mem > idx_early);
@@ -435,7 +436,7 @@ static void test_failure_at_pre_smp_checkpoint(void)
     assert_true(trace_find("arch_boot_aps") < 0);
 }
 
-/* 6. Failure at runtime checkpoint halts before task_init */
+/* 6. Failure at runtime checkpoint halts before kernel_start_userspace */
 static void test_failure_at_runtime_checkpoint(void)
 {
     trace_reset();
@@ -453,7 +454,7 @@ static void test_failure_at_runtime_checkpoint(void)
     assert_eq(-EIO, last_stop_rc);
 
     assert_true(trace_find("validate_runtime") >= 0);
-    assert_true(trace_find("task_init") < 0);
+    assert_true(trace_find("kernel_start_userspace") < 0);
 }
 
 int main(void)

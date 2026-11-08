@@ -124,6 +124,7 @@ KERNEL_C_SOURCES := \
     $(wildcard fs/*.c) \
     $(wildcard sched/*.c) \
     $(wildcard sync/*.c) \
+    $(wildcard init/*.c) \
     $(filter-out driver/fb_test.c,$(wildcard driver/*.c)) \
     $(wildcard ipc/*.c) \
     $(wildcard tty/*.c) \
