@@ -52,6 +52,23 @@ __attribute__((__noreturn__))
 void exit(int status);
 
 // ── Environment ────────────────────────────────────────────
+// One environment table.  `environ` is the public array of "NAME=VALUE"
+// strings; the libc keeps a parallel record of the entries it owns.
+//
+//   * getenv() returns the value of the first entry with that name, or
+//     NULL when there is none.
+//   * setenv() copies the value: the copy belongs to the libc and is
+//     released when it is replaced, removed, or the environment cleared.
+//     overwrite == 0 leaves an existing value alone and allocates nothing.
+//   * unsetenv() removes EVERY entry with that name.
+//   * putenv() borrows the caller's string: the libc stores the pointer
+//     and never frees it.  A string without '=' removes the variable.
+//   * clearenv() empties the environment.  It never frees an inherited
+//     string (the block the kernel handed to crt0) nor a borrowed one.
+//
+// An invalid name (empty, or containing '=') and a NULL value are rejected
+// with -1 and errno == EINVAL; a failed allocation returns -1 with
+// errno == ENOMEM and leaves the environment unchanged.
 
 extern char **environ;
 

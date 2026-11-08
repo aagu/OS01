@@ -49,7 +49,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Groups ──────────────────────────────────────────────────────────────
 # Every group names the task that delivers it.  ENABLED_GROUPS lists the
 # groups delivered so far; a later task appends its group here.
-ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc")
+ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env")
 
 # Headers that are deliberately NOT part of the api group, with the reason.
 # An excluded header is still compiled by nothing in the api group, so it
@@ -633,6 +633,26 @@ API_GROUPS: dict[str, dict] = {
         },
         # Unlike the api group, the alloc group owns behaviour: the user
         # libc must really export every interface it owns.
+        "require_user_export": True,
+    },
+    "env": {
+        "task": "T3",
+        "title": "one environment table with per-entry ownership",
+        # The env group owns the environment interfaces, but it does not
+        # own the header they are declared in: stdlib.h declares the whole
+        # C library and is audited for declaration drift by the api group.
+        "headers": {},
+        "owned": {
+            "stdlib.h": [
+                "getenv",
+                "setenv",
+                "unsetenv",
+                "putenv",
+                "clearenv",
+            ],
+        },
+        # The env group owns behaviour: the user libc must really export
+        # every interface it owns.
         "require_user_export": True,
     },
 }

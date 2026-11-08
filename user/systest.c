@@ -3571,7 +3571,8 @@ static int startup_layout_errors(int argc, char **argv)
 
 /* Entry probe: re-execed /bin/systest lands here BEFORE the test table.
  * Exit codes: 10 + argc*2 + envc on success (10..15, 138 for the envc=128
- * boundary case), 20 for the --pathcheck execvp case, 99 on any failure,
+ * boundary case), 20 for the --pathcheck execvp case, 21 for the
+ * --envinherit case, 22 for the --envclear case, 99 on any failure,
  * 127 if execve itself returned. Never runs the test suite or forks. */
 static void startup_probe(int argc, char **argv)
 {
@@ -3582,8 +3583,12 @@ static void startup_probe(int argc, char **argv)
 
     int pathcheck = (argc == 2 && argv[1] != NULL &&
                      strcmp(argv[1], "--pathcheck") == 0);
+    int envinherit = (argc == 2 && argv[1] != NULL &&
+                      strcmp(argv[1], "--envinherit") == 0);
+    int envclear = (argc == 2 && argv[1] != NULL &&
+                    strcmp(argv[1], "--envclear") == 0);
     int errs = startup_layout_errors(argc, argv);
-    if (argc == 2 && !pathcheck &&
+    if (argc == 2 && !pathcheck && !envinherit && !envclear &&
         (argv[1] == NULL || strcmp(argv[1], "--envcheck") != 0))
         errs |= SU_ERR_ARGV_STR;
     if (errs) exit(99);
@@ -3600,6 +3605,34 @@ static void startup_probe(int argc, char **argv)
         v = getenv("PATH");
         if (v == NULL || strcmp(v, "/pathtest") != 0) exit(99);
         exit(20);
+    }
+    if (envinherit) {
+        /* The parent mutated its environment and handed the result to
+         * execve(): the child must see exactly the value the parent
+         * expects (this covers both the inherited and the overwritten
+         * value, because the parent sets OS01_ENV_EXPECT to the value it
+         * just wrote). */
+        const char *got = getenv("OS01_ENV_CHILD");
+        const char *want = getenv("OS01_ENV_EXPECT");
+        if (got == NULL || want == NULL) exit(99);
+        if (strcmp(got, want) != 0) exit(99);
+        exit(21);
+    }
+    if (envclear) {
+        /* clearenv() empties the environment, but the block the kernel
+         * handed to crt0 belongs to the process image: it may not be
+         * freed.  The entry is read again AFTER clearenv() to prove the
+         * memory is still intact. */
+        char *first = environ[0];
+        int readable = 0;
+        if (first == NULL) exit(99);
+        clearenv();
+        if (getenv("OS01_ENV_CHILD") != NULL) exit(99);
+        if (environ != NULL && environ[0] != NULL) exit(99);
+        for (int i = 0; i < 64 && first[i] != '\0'; i++)
+            if (first[i] == '=') { readable = 1; break; }
+        if (!readable) exit(99);
+        exit(22);
     }
     /* getenv must reflect the real envp (spec §6.2): exact value when
      * envc==1, NULL when empty. For envc>1 the '='-shape check in
@@ -3697,6 +3730,86 @@ static void test_startup_execvp(void)
     CHECK3(ok, "startup execvp PATH", ok ? "resolved via non-default PATH" : "fallback or not found");
     unlink("/pathtest/startup-probe");
     rmdir("/pathtest");
+}
+
+/* Environment mutation (libc completion T3): a variable the parent sets
+ * must reach the child through fork+execve, an overwrite must be visible
+ * too, and clearenv() must empty the environment WITHOUT freeing the
+ * block the kernel handed to crt0.
+ *
+ * The child runs the startup probe in --envinherit mode (exit 21: the
+ * value the child sees equals the value the parent expects) and in
+ * --envclear mode (exit 22: the environment is empty and the inherited
+ * entry is still readable after clearenv()). */
+static int env_probe_exit(char **av, int expect_code)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        extern char **environ;
+        execve("/bin/systest", av, environ);
+        exit(127);                     /* execve returned: failure */
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 0;
+    return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == expect_code;
+}
+
+static void test_environ_mutation(void)
+{
+    extern char **environ;
+    char *inherited = NULL;
+    int envc = 0;
+    const char *v;
+
+    while (environ[envc] != NULL) envc++;
+    if (envc > 0) inherited = environ[0];
+
+    /* setenv is visible immediately */
+    CHECK3(setenv("OS01_ENV_CHILD", "inherited", 1) == 0,
+           "environ setenv", "accepted");
+    v = getenv("OS01_ENV_CHILD");
+    CHECK3(v != NULL && strcmp(v, "inherited") == 0,
+           "environ setenv", "value visible");
+    CHECK3(setenv("OS01_ENV_EXPECT", "inherited", 1) == 0,
+           "environ setenv", "expectation set");
+
+    /* fork + execve: the child inherits the parent's environment */
+    char *av_inherit[3] = {(char *)"startup-probe", (char *)"--envinherit", NULL};
+    int ok = env_probe_exit(av_inherit, 21);
+    CHECK3(ok, "environ fork/exec",
+           ok ? "child inherited the parent's environment" : "child did not see it");
+
+    /* an overwrite reaches the next child as well */
+    CHECK3(setenv("OS01_ENV_CHILD", "overridden", 1) == 0,
+           "environ overwrite", "accepted");
+    v = getenv("OS01_ENV_CHILD");
+    CHECK3(v != NULL && strcmp(v, "overridden") == 0,
+           "environ overwrite", "new value visible");
+    CHECK3(setenv("OS01_ENV_EXPECT", "overridden", 1) == 0,
+           "environ overwrite", "expectation set");
+    ok = env_probe_exit(av_inherit, 21);
+    CHECK3(ok, "environ overwrite",
+           ok ? "child saw the overwritten value" : "child saw the old value");
+
+    /* the child clears the environment it inherited from the kernel */
+    char *av_clear[3] = {(char *)"startup-probe", (char *)"--envclear", NULL};
+    ok = env_probe_exit(av_clear, 22);
+    CHECK3(ok, "environ clearenv",
+           ok ? "child cleared without freeing the inherited block"
+              : "child failed to clear the environment");
+
+    /* clearenv empties the parent's environment, and the entry the
+     * kernel handed to crt0 is still readable (it was never freed) */
+    CHECK3(clearenv() == 0, "environ clearenv", "accepted");
+    CHECK3(getenv("OS01_ENV_CHILD") == NULL,
+           "environ clearenv", "environment empty");
+    if (inherited != NULL) {
+        int readable = 0;
+        for (int i = 0; i < 64 && inherited[i] != '\0'; i++)
+            if (inherited[i] == '=') { readable = 1; break; }
+        CHECK3(readable, "environ clearenv", "inherited block still readable");
+    }
 }
 
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
@@ -4206,6 +4319,7 @@ static const test_case_t tests[] = {
     {"startup_layout",    "startup layout",    test_startup_layout,          1, 0},
     {"startup_matrix",    "startup matrix",    test_startup_matrix,          1, 0},
     {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
+    {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

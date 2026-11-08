@@ -10,6 +10,7 @@ $(eval $(call register_host_test,test_libc_getopt,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_aarch64_color_printk_abi,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_api,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_alloc,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_environ,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -21,7 +22,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
     $(TEST_BLD)/test_libc_api.elf \
-    $(TEST_BLD)/test_libc_alloc.elf
+    $(TEST_BLD)/test_libc_alloc.elf \
+    $(TEST_BLD)/test_libc_environ.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -205,6 +207,52 @@ $(TEST_BLD)/test_libc_alloc.elf: $(TEST_BLD)/test_libc_alloc.o \
 
 .PHONY: test-libc-alloc
 test-libc-alloc: $(TEST_BLD)/test_libc_alloc.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: env group (T3) ─────────────────────────────────
+# The env group drives the REAL production environment module
+# (libc/stdlib/environ.c) under the `os01_` prefix, so a call in the
+# test can never resolve to the host libc's same-named implementation.
+#
+# The production object is compiled WITHOUT the test_platform.h
+# force-include: that header defines __is_libk, and the kernel-side copy
+# of the module (which has no user errno) is not the one under test.
+# The host test drives the USER environment.
+#
+# The allocator is the one boundary that is replaced: the module
+# allocates its strings and its table through malloc/free/realloc, and
+# the test supplies a ledger for those entry points so a chosen
+# allocation can fail and so the test can see which strings the libc
+# owns.
+OS01_LIBC_ENV_FNS := getenv setenv unsetenv putenv clearenv environ
+OS01_LIBC_ENV_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_ENV_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))
+OS01_LIBC_ENV_ALLOC_DEFS := \
+    -Dmalloc=$(OS01_LIBC_PREFIX)malloc \
+    -Dfree=$(OS01_LIBC_PREFIX)free \
+    -Drealloc=$(OS01_LIBC_PREFIX)realloc
+OS01_LIBC_ENV_DIR := $(TEST_BLD)/prefixed-env
+OS01_LIBC_ENV_OBJS := $(OS01_LIBC_ENV_DIR)/environ.o
+
+$(OS01_LIBC_ENV_DIR)/%.o: $(LIBC_SRC)/stdlib/%.c
+	@mkdir -p $(OS01_LIBC_ENV_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_ENV_PREFIX_DEFS) \
+		$(OS01_LIBC_ENV_ALLOC_DEFS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_environ.o: $(TEST_CASES)/test_libc_environ.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_ENV_PREFIX_DEFS) \
+		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_environ.elf: $(TEST_BLD)/test_libc_environ.o \
+		$(OS01_LIBC_ENV_OBJS)
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-environ
+test-libc-environ: $(TEST_BLD)/test_libc_environ.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
