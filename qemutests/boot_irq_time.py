@@ -127,7 +127,9 @@ _BOOT1_PANIC_RE = re.compile(
     r"BOOT-2: boot IRQ/time protocol violation)")
 _RTC_TIMEOUT_ROOTFS_PANIC = ("[kernel panic] root filesystem unavailable")
 _RTC_TIMEOUT_RE = re.compile(
-    r"^" + re.escape(_RTC_TIMEOUT_ROOTFS_PANIC) + r"$", re.MULTILINE)
+    r"(?:^" + re.escape(_RTC_TIMEOUT_ROOTFS_PANIC) + r"$|"
+    r"^\[boot-3\] FATAL stage=fs component=root rc=-19 phase=-1 cpu=-1$)",
+    re.MULTILINE)
 
 
 def _unexpected_panics(text: str) -> list[str]:
@@ -310,8 +312,7 @@ def check_evidence(text: str, case: str, cpus: int) -> tuple[bool, list[str]]:
                 or _SHELL_RE.search(text):
             errors.append("rtc-timeout must NOT reach userspace "
                           "(clocksource inactive ⇒ no storage)")
-        if not re.search(r"^\[kernel panic\] root filesystem unavailable$",
-                         text, re.MULTILINE):
+        if not _RTC_TIMEOUT_RE.search(text):
             errors.append("rtc-timeout missing the expected rootfs-"
                           "unavailable terminal line")
 
