@@ -56,18 +56,11 @@ int   unsetenv(const char *name);
 int   putenv(char *string);
 int   clearenv(void);
 
+double strtod(const char *nptr, char **endptr);
+double atof(const char *nptr);
+
 #ifdef __cplusplus
 }
 #endif
-void *realloc(void *ptr, size_t size);
-int rand(void);
-char *realpath(const char *path, char *resolved);
-void srand(unsigned int seed);
 
 #endif /* _STDLIB_H */
-void *realloc(void *ptr, size_t size);
-int rand(void);
-char *realpath(const char *path, char *resolved);
-void srand(unsigned int seed);
-double strtod(const char *nptr, char **endptr);
-double atof(const char *nptr);

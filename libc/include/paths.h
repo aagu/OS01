@@ -13,5 +13,6 @@
 #define _PATH_VARRUN   "/var/run"
 #define _PATH_VARTMP   "/var/tmp"
 
-#endif
 #define _PATH_TTY "/dev/tty"
+
+#endif /* _PATHS_H */

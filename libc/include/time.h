@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef uint64_t clock_t;
 
@@ -29,11 +32,16 @@ clock_t clock(void);
 size_t strftime(char *s, size_t maxsize, const char *format, const struct tm *tm);
 char *strptime(const char *buf, const char *format, struct tm *tm);
 
-#endif
 struct tm *localtime_r(const time_t *t, struct tm *r);
 struct tm *gmtime_r(const time_t *t, struct tm *r);
 char *ctime_r(const time_t *t, char *b);
 char *asctime_r(const struct tm *t, char *b);
 char *ctime(const time_t *t);
 char *asctime(const struct tm *t);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _TIME_H */
 

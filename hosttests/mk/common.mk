@@ -10,9 +10,16 @@ TEST_CASES := $(TEST_SRC)/cases
 COMPILER_LAUNCHER ?=
 HOST_CC_BASE ?= clang
 HOST_CC      := $(if $(strip $(COMPILER_LAUNCHER)),$(strip $(COMPILER_LAUNCHER)) )$(HOST_CC_BASE)
+HOST_CXX_BASE ?= clang++
+HOST_CXX     := $(if $(strip $(COMPILER_LAUNCHER)),$(strip $(COMPILER_LAUNCHER)) )$(HOST_CXX_BASE)
+
+# nm is used by the host harnesses that inspect an object file's symbol
+# table (the libc api group checks the C linkage of the declarations).
+NM_TOOL ?= $(shell command -v nm 2>/dev/null || command -v llvm-nm 2>/dev/null)
 
 KERNEL_INC := -I$(TESTS_DIR)/kernel/include
-LIBC_INC := -I$(TESTS_DIR)/libc/include
+LIBC_INC_DIR := $(TESTS_DIR)/libc/include
+LIBC_INC := -I$(LIBC_INC_DIR)
 FRAMEWORK_INC := -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
 
 HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter \
@@ -30,6 +37,39 @@ POLL_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
 SYNC_HOST_CFLAGS := $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC)
 
 LIBC_SRC := $(TESTS_DIR)/libc
+
+# ── Host-test production-symbol prefix ──────────────────────────────
+# A host test must never mistake the host libc's implementation of a
+# POSIX name for the OS01 implementation.  The relevant production libc
+# sources are therefore compiled for the host test under an `os01_`
+# prefix, and the test translation units call the prefixed names.
+#
+# ONE mechanism is used, consistently, on both sides: one -D rename per
+# prefixed function.  The flags are applied to
+#
+#   1. the production sources compiled for the host test
+#      ($(OS01_LIBC_PREFIX_OBJS)), and
+#   2. the test translation units that call them.
+#
+# The prefix is a HOST-TEST-ONLY convention: libc.a and libk.a are built
+# without these flags, so an `os01_` name never reaches a shipped
+# artifact and the userland ABI of libc/include/*.h is unchanged.
+#
+# Only true boundary functions are replaced with test doubles (the raw
+# syscall entry, read/write and the allocator entry points needed for
+# fault injection).  Everything else under test is real production code.
+OS01_LIBC_PREFIX := os01_
+OS01_LIBC_PREFIXED_FNS := memcpy memset memmove memcmp strlen strcmp strncmp strcpy
+OS01_LIBC_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_PREFIXED_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))
+OS01_LIBC_PREFIX_CFLAGS := $(OS01_LIBC_PREFIX_DEFS)
+OS01_LIBC_PREFIX_DIR := $(TEST_BLD)/prefixed
+OS01_LIBC_PREFIX_OBJS := $(addprefix $(OS01_LIBC_PREFIX_DIR)/,$(addsuffix .o,$(OS01_LIBC_PREFIXED_FNS)))
+
+# The same production sources, compiled with the prefix.  These are the
+# REAL libc/string/*.c implementations.
+$(OS01_LIBC_PREFIX_DIR)/%.o: $(LIBC_SRC)/string/%.c
+	@mkdir -p $(OS01_LIBC_PREFIX_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_PREFIX_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 LIBC_OBJS := \
     $(TEST_BLD)/libc_memset.o \

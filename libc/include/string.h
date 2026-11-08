@@ -5,6 +5,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int memcmp(const void*, const void*, size_t);
 int bcmp(const void*, const void*, size_t);
 void* memcpy(void* __restrict, const void* __restrict, size_t);
@@ -37,9 +41,7 @@ char *strpbrk(const char *s, const char *accept);
 char *strerror(int errnum);
 void perror(const char *s);
 
-#endif
 char *strchrnul(const char *s, int c);
-void *mempcpy(void *d, const void *s, size_t n);
 void *mempcpy(void *d, const void *s, size_t n);
 char *stpncpy(char *d, const char *s, size_t n);
 char *strsignal(int sig);
@@ -50,3 +52,9 @@ char *stpcpy(char *d, const char *s);
 int strcasecmp(const char *s1, const char *s2);
 char *strndup(const char *s, size_t n);
 int strncasecmp(const char *s1, const char *s2, size_t n);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _STRING_H */

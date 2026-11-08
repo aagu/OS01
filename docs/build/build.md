@@ -512,6 +512,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-intr-irq-x86` | x86 IRQ production-chain host subset；执行 `test_intr_irq_x86`，仍注册于 `test-host`；要求 rootfs 能力 |
 | `test-monitor-host` | monitor 宿主聚焦测试分发（`CASE=`，见下） |
 | `test-gui-host` | GUI 宿主聚焦测试分发（`CASE=`，见下） |
+| `test-libc-host` | libc 补全计划宿主聚焦测试分发（`LIBC_CASE=`，见下） |
 
 #### monitor 聚焦 CASE（`test-monitor-host CASE=`）
 
@@ -541,6 +542,39 @@ GUI-2 plan（2026-10-20）引入 `make PROFILE=x86_64-clang test-gui-host CASE=<
 `CASE=all`（或不指定 `CASE`）跑全部。**只存在这一个列表**——不维护第二份并行的 CASE 清单。新增宿主二进制必须同时接入 `hosttests/Makefile::TEST_BINS`、`run_hosttests` 协议与本 focused 入口。
 
 所有测试**只**从仓库根的 make 入口运行：`make PROFILE=x86_64-clang test-gui-host CASE=...`。**不要**用 `make -C hosttests`。
+
+#### libc 聚焦 CASE（`test-libc-host LIBC_CASE=`）
+
+libc 补全计划（2026-11-08）引入 `make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<name>`。合法取值由 `mk/components/run.mk` 的**单一列表** `LIBC_HOST_CASES` 定义（计划固定集合）：
+
+```
+api alloc env shutdown stream append io line format integer float scan time path dir regex
+```
+
+`LIBC_CASE=all`（或不指定）跑**已交付**的组。已交付集合由 `LIBC_HOST_DELIVERED_CASES` 记录，每个补全任务把自己的 case 追加进去并新增对应的 `_test-libc-host-run-<case>` 规则：
+
+| CASE | 内容 | 交付任务 |
+| --- | --- | --- |
+| `api` | 公开头契约：每个公开头自包含、跨 TU 只有一份定义、C++ 消费者拿到 C linkage；同时链接 `os01_` 前缀的生产对象 | T1 |
+
+行为约定：
+
+- 非法 `LIBC_CASE`（不在上面的固定集合内）在任何递归构建之前失败，退出码非零并列出合法取值；
+- 已在固定集合内但**本阶段尚未交付**的 case 同样失败（非零），并打印已交付组，避免把“没有这个组”误报成通过；
+- `LIBC_HOST_CASES`（合法性）与 `LIBC_HOST_DELIVERED_CASES`（已交付）分工不同：前者由计划固定，后者逐任务增长。
+
+公开接口清单（哪些头、哪些接口、哪个任务负责）保存在 `scripts/audit_libc_api.py`，是唯一真源；宿主测试用的 C 清单由该脚本在构建时生成，测试与审计脚本不会各持一份。审计脚本同时检查：清单与头文件是否漂移、每个头是否被归类、用户 libc 的全量接口是否已导出、libk 是否仍导出既有子集。
+
+归档侧的审计（导出符号、libk 子集未退化）有独立入口：
+
+```
+make PROFILE=x86_64-clang test-libc-api-audit   # 用户 libc + libk 归档审计
+make PROFILE=aarch64-clang test-libc-api-audit  # 仅 libk（aarch64 不产出 libc.a）
+```
+
+libk 基线按 profile 区分（x86_64 与 aarch64 的 `libk.a` 导出集合不同），脚本接受 `--profile`，默认从归档路径推断。
+
+所有测试**只**从仓库根的 make 入口运行：`make PROFILE=x86_64-clang test-libc-host LIBC_CASE=...`。**不要**用 `make -C hosttests`。
 
 #### GUI 头文件的发布规则（single-writer sysroot）
 
@@ -640,6 +674,8 @@ make test-qemu SUITE=monitor        # 终端 monitor 1/2/8 核矩阵 + 终端生
 make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 稳态字节/ns 性能门控（spec §8）；baseline 通过 TERMINAL_PRESENT_BASELINE_LOG 覆盖
 make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
 make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
+make PROFILE=x86_64-clang test-libc-host LIBC_CASE=api     # libc 补全宿主聚焦 CASE（LIBC_HOST_CASES / LIBC_HOST_DELIVERED_CASES）
+make PROFILE=x86_64-clang test-libc-api-audit              # libc 归档导出审计（用户 libc + libk）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity # ARCH-10 隔离容量与工程完整性验收
 make test-static                    # 15 项静态审计

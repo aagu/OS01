@@ -52,4 +52,4 @@
 #define PRIxMAX  "llx"
 #define PRIXMAX  "llX"
 
-#endif
+#endif /* _INTTYPES_H */

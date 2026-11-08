@@ -5,6 +5,10 @@
 typedef unsigned long nfds_t;
 struct pollfd { int fd; short events; short revents; };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Poll event flags — MUST match kernel/include/fs/poll.h
 #define POLLIN      0x001
 #define POLLPRI     0x002
@@ -18,4 +22,7 @@ struct pollfd { int fd; short events; short revents; };
 #define POLLWRBAND  0x200
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+#ifdef __cplusplus
+}
+#endif
 #endif

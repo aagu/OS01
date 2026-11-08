@@ -2945,3 +2945,71 @@ test-intr-irq-x86:
 test-irq-capacity:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-irq-capacity $(OS01_SUBMAKE_ARGS))
+
+# ── libc completion focused host tests (T1) ───────────────────────
+# make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<case>
+#
+# LIBC_HOST_CASES is the FIXED case list of the libc completion plan; a
+# value outside it is invalid and fails non-zero.  LIBC_HOST_DELIVERED_CASES
+# is the subset delivered so far: "all" (and the default) runs exactly
+# those, and a registered-but-undelivered case fails non-zero with a clear
+# message instead of silently reporting a pass for a group that does not
+# exist yet.  Each completion task appends its case to the delivered list
+# and adds the matching _test-libc-host-run-<case> rule.
+LIBC_HOST_CASES := api alloc env shutdown stream append io line format integer float scan time path dir regex
+LIBC_HOST_DELIVERED_CASES := api
+
+.PHONY: test-libc-host _test-libc-host-run-all
+_test-libc-host-run-api:
+	@echo "  [test-libc-host] api"
+	$(call os01_submake,hosttests,test-libc-api $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
+	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"
+
+# Catch-all: a registered case that no task has delivered yet.
+_test-libc-host-run-%:
+	@echo "ERROR: LIBC_CASE='$*' is registered but not delivered in this stage." >&2
+	@echo "       Delivered groups: $(LIBC_HOST_DELIVERED_CASES)" >&2
+	@echo "       See docs/superpowers/plans/2026-11-08-libc-completion.md" >&2
+	@exit 1
+
+LIBC_CASE_RAW := $(strip $(LIBC_CASE))
+LIBC_CASE_EFFECTIVE := $(if $(LIBC_CASE_RAW),$(LIBC_CASE_RAW),all)
+LIBC_CASE_VALID := $(if $(filter 1,$(words $(LIBC_CASE_EFFECTIVE))),$(filter all $(LIBC_HOST_CASES),$(LIBC_CASE_EFFECTIVE)))
+
+# Prerequisites run before recipes, even before require_capability, so the
+# graph is only populated for a capable profile and one exact valid CASE.
+test-libc-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(LIBC_CASE_VALID)),_test-libc-host-run-$(LIBC_CASE_EFFECTIVE))
+	$(call require_capability,rootfs)
+	$(if $(LIBC_CASE_VALID),,$(error unknown LIBC_CASE='$(LIBC_CASE_RAW)'; valid: $(LIBC_HOST_CASES), all))
+	@echo "  [test-libc-host] LIBC_CASE=$(LIBC_CASE_EFFECTIVE)"
+
+# ── libc completion archive audit (T1) ────────────────────────────
+# make PROFILE=x86_64-clang test-libc-api-audit
+#
+# The header contract is checked by the api host group; this target checks
+# the OTHER half of the same manifest — what the shipped archives actually
+# export.  The manifest in scripts/audit_libc_api.py is the single source of
+# truth for both: it names the headers, the interfaces and the task that
+# owns each group, so a manifest that drifts away from the headers is an
+# audit failure rather than a silent staleness.
+#
+# The libk baseline is per profile (an x86_64 libk.a and an aarch64 libk.a
+# export different subsets), so the profile is passed explicitly instead of
+# being guessed from the archive path.
+#
+# The aarch64 profile builds no libc.a (its libc component only produces the
+# kernel-side libk.a), so the user-libc archive is audited only when it
+# exists.  The libk.a itself comes from `lib` on a userland profile and from
+# the kernel build on a kernel-only profile.
+LIBC_API_AUDIT_PREREQ := $(if $(filter userland,$(PROFILE_CAPABILITIES)),lib,$(BUILD_DIR)/artifacts/kernel.elf)
+
+.PHONY: test-libc-api-audit
+test-libc-api-audit: $(LIBC_API_AUDIT_PREREQ)
+	@echo "  [test-libc-api-audit] profile=$(PROFILE)"
+	python3 $(OS01_ROOT)/scripts/audit_libc_api.py --audit \
+	    --profile "$(PROFILE)" \
+	    --include-dir $(OS01_ROOT)/libc/include \
+	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libc.a),--libc-archive $(LIBC_BUILD_DIR)/lib/libc.a) \
+	    --libk-archive $(LIBC_BUILD_DIR)/lib/libk.a

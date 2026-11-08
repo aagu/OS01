@@ -30,6 +30,12 @@
 #define AT_EXECFN         31   /* program filename */
 #define AT_SYSINFO_EHDR   33   /* vDSO entry — OS01 has none (always miss) */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 unsigned long getauxval(unsigned long type);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SYS_AUXV_H */

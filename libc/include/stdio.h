@@ -6,6 +6,10 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define EOF (-1)
 
 /* FILE type - stub for headers that reference it */
@@ -101,9 +105,6 @@ int getchar(void);
 int getchar_unlocked(void);
 char *fgets_unlocked(char *s, int size, void *f);
 ssize_t getline(char **lineptr, size_t *n, void *f);
-int getchar_unlocked(void);
-char *fgets_unlocked(char *s, int size, void *f);
-ssize_t getline(char **lineptr, size_t *n, void *f);
 
 int fflush(void *f);
 int vprintf(const char *fmt, __builtin_va_list ap);
@@ -113,5 +114,9 @@ int vsnprintf(char *b, unsigned long s, const char *fmt, va_list ap);
 int putchar_unlocked(int c);
 int fputc(int c, void *f);
 size_t fwrite(const void *p, size_t s, size_t n, void *f);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _STDIO_H */

@@ -98,6 +98,17 @@ _Static_assert(SYS_getrlimit == 75, "SYS_getrlimit drift vs kernel/include/uapi/
 _Static_assert(SYS_setrlimit == 76, "SYS_setrlimit drift vs kernel/include/uapi/syscall.h");
 
 // ── Generic syscall helper ─────────────────────────────────
+// The declarations below are given C language linkage so a C++ consumer
+// sees the same symbol names as a C consumer: without it the C++ name
+// would be mangled and a C++ caller could never bind to the C library's
+// symbol.  The header-local `static inline` wrappers keep their own
+// (internal) linkage; they are never referenced across a library
+// boundary.  NOTE: sys/syscall.h also provides a raw `fork()` wrapper,
+// which shadows the POSIX `fork()` declared by <unistd.h>; that
+// shadowing is pre-existing and is recorded for the task that owns fork().
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #ifdef OS01_HOST_TEST
 int64_t host_test_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3) __attribute__((weak));
@@ -191,5 +202,9 @@ static inline int64_t syscall6(uint64_t nr,
         : "memory");
     return ret;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
