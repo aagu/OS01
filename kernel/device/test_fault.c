@@ -142,14 +142,17 @@ static int _fault_dump_subsys_init(void)
  * observe the cumulative counters.  PHASE_5 places the dispatcher
  * ahead of AHCI (PHASE_6).  The dump subsys runs in PHASE_6 so the
  * AHCI probe has already run by the time we print. */
+static const char *const _fault_dump_deps[] = {"device-boot"};
+
 static int _fault_register(void)
 {
     int rc = register_subsys("arch9-fault-dispatch", _fault_dispatch_at_init,
-                             SUBSYS_PHASE_5, 1 /* OPTIONAL */);
+                             SUBSYS_PHASE_DEVICE_IRQ, 1 /* OPTIONAL */);
     if (rc != 0)
         return rc;
-    return register_subsys("arch9-fault-dump", _fault_dump_subsys_init,
-                           SUBSYS_PHASE_6, 1 /* OPTIONAL */);
+    return register_subsys_deps("arch9-fault-dump", _fault_dump_subsys_init,
+                                SUBSYS_PHASE_STORAGE, 1 /* OPTIONAL */,
+                                _fault_dump_deps, 1);
 }
 SUBSYS_INITCALL(_fault_register);
 #endif

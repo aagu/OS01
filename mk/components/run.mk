@@ -782,6 +782,37 @@ test-boot-failure-host: $(if $(CASE),_test-boot-failure-host-run-$(CASE),_test-b
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: subsys log mounts terminal stdio spawn task-init all" >&2; exit 1;; \
 	esac
 
+# ── BOOT-4 stage contract host tests ───────────────────────────
+.PHONY: test-boot-contract-host _test-boot-contract-host-run-subsys _test-boot-contract-host-run-cpu-prepare _test-boot-contract-host-run-sequence _test-boot-contract-host-run-checks _test-boot-contract-host-run-softirq _test-boot-contract-host-run-all
+_test-boot-contract-host-run-all:
+	@echo "  [test-boot-contract-host] all (subsys)"
+	$(call os01_submake,hosttests,test_boot_contract_subsys $(OS01_SUBMAKE_ARGS))
+_test-boot-contract-host-run-subsys:
+	@echo "  [test-boot-contract-host] subsys"
+	$(call os01_submake,hosttests,test_boot_contract_subsys $(OS01_SUBMAKE_ARGS))
+_test-boot-contract-host-run-cpu-prepare:
+	@echo "  [test-boot-contract-host] cpu-prepare"
+	$(call os01_submake,hosttests,test_boot_contract_cpu_prepare $(OS01_SUBMAKE_ARGS))
+_test-boot-contract-host-run-sequence:
+	@echo "  [test-boot-contract-host] sequence"
+	$(call os01_submake,hosttests,test_boot_contract_sequence $(OS01_SUBMAKE_ARGS))
+_test-boot-contract-host-run-checks:
+	@echo "  [test-boot-contract-host] checks"
+	$(call os01_submake,hosttests,test_boot_contract_checks $(OS01_SUBMAKE_ARGS))
+_test-boot-contract-host-run-softirq:
+	@echo "  [test-boot-contract-host] softirq"
+	$(call os01_submake,hosttests,test_boot_contract_softirq $(OS01_SUBMAKE_ARGS))
+_test-boot-contract-host-run-%:
+	@echo "ERROR: unknown CASE='$*'; valid: subsys cpu-prepare sequence checks softirq all" >&2; exit 1
+test-boot-contract-host: CASE ?=
+test-boot-contract-host: CASE := $(CASE)
+test-boot-contract-host: $(if $(CASE),_test-boot-contract-host-run-$(CASE),_test-boot-contract-host-run-all)
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    ""|subsys|cpu-prepare|sequence|checks|softirq|all) echo "  [test-boot-contract-host] CASE=${CASE:-all}";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: subsys cpu-prepare sequence checks softirq all" >&2; exit 1;; \
+	esac
+
 # Focused BOOT-2 early-IRQ/time host tests.  Each CASE forwards to the
 # matching hosttests target through the controlled sub-make boundary;
 # CASE omitted runs `all`.  Unknown non-empty CASE aborts non-zero.  The

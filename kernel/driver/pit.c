@@ -74,9 +74,12 @@ static int _pit_init_wrapper(void)
 {
     return pit_init();
 }
+static const char *const _pit_deps[] = {"timer"};
+
 static int _pit_register(void)
 {
-    return register_subsys("pit", _pit_init_wrapper,
-                           SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
+    return register_subsys_deps("pit", _pit_init_wrapper,
+                                SUBSYS_PHASE_TIME, SUBSYS_FLAG_OPTIONAL,
+                                _pit_deps, 1);
 }
 SUBSYS_INITCALL(_pit_register);

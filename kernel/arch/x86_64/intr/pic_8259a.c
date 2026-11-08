@@ -152,9 +152,12 @@ static int _pic_init_wrapper(void)
     pic_init();
     return 0;
 }
+static const char *const _pic_deps[] = {"apic"};
+
 static int _pic_register(void)
 {
-    return register_subsys("pic", _pic_init_wrapper,
-                           SUBSYS_PHASE_3, SUBSYS_FLAG_OPTIONAL);
+    return register_subsys_deps("pic", _pic_init_wrapper,
+                                SUBSYS_PHASE_CONTROLLERS, SUBSYS_FLAG_OPTIONAL,
+                                _pic_deps, 1);
 }
 SUBSYS_INITCALL(_pic_register);

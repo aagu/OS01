@@ -920,3 +920,24 @@ $(TEST_BLD)/test_boot_task_init.elf: \
 .PHONY: test_boot_task_init
 test_boot_task_init: $(TEST_BLD)/test_boot_task_init.elf
 	$<
+
+# ── BOOT-4 stage contract host tests ─────────────────────────────
+$(eval $(call register_host_test,test_boot_contract_subsys,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_contract_subsys.elf
+
+BOOT4_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure -I$(TEST_MOCK)/include $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/boot4_test_subsys.o: $(TEST_CASES)/test_boot_contract_subsys.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_contract_subsys.elf: \
+		$(TEST_BLD)/boot4_test_subsys.o \
+		$(TEST_BLD)/boot3_subsys_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test_boot_contract_subsys
+test_boot_contract_subsys: $(TEST_BLD)/test_boot_contract_subsys.elf
+	$<

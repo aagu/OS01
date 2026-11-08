@@ -49,6 +49,13 @@ static void latch_reg_error(const char *name, int rc, int phase)
 int register_subsys(const char *name, int (*init)(void),
                     int phase, uint32_t flags)
 {
+    return register_subsys_deps(name, init, phase, flags, NULL, 0);
+}
+
+int register_subsys_deps(const char *name, int (*init)(void),
+                         int phase, uint32_t flags,
+                         const char *const *requires, unsigned require_count)
+{
     if (reg_latch.has_error)
         return -EINVAL;
 
@@ -62,7 +69,7 @@ int register_subsys(const char *name, int (*init)(void),
         return -EINVAL;
     }
 
-    if (phase < SUBSYS_PHASE_3 || phase > SUBSYS_PHASE_6) {
+    if (phase < SUBSYS_PHASE_CONTROLLERS || phase > SUBSYS_PHASE_STORAGE) {
         latch_reg_error(name, -EINVAL, phase);
         return -EINVAL;
     }
@@ -70,6 +77,33 @@ int register_subsys(const char *name, int (*init)(void),
     if ((flags & ~SUBSYS_FLAG_OPTIONAL) != 0) {
         latch_reg_error(name, -EINVAL, phase);
         return -EINVAL;
+    }
+
+    if (require_count > SUBSYS_MAX_REQUIRES) {
+        latch_reg_error(name, -EINVAL, phase);
+        return -EINVAL;
+    }
+
+    if (require_count > 0 && !requires) {
+        latch_reg_error(name, -EINVAL, phase);
+        return -EINVAL;
+    }
+
+    for (unsigned k = 0; k < require_count; k++) {
+        if (!requires[k] || requires[k][0] == '\0') {
+            latch_reg_error(name, -EINVAL, phase);
+            return -EINVAL;
+        }
+        if (strcmp(requires[k], name) == 0) {
+            latch_reg_error(name, -EINVAL, phase);
+            return -EINVAL;
+        }
+        for (unsigned j = 0; j < k; j++) {
+            if (strcmp(requires[k], requires[j]) == 0) {
+                latch_reg_error(name, -EINVAL, phase);
+                return -EINVAL;
+            }
+        }
     }
 
     for (int i = 0; i < subsys_count; i++) {
@@ -85,12 +119,14 @@ int register_subsys(const char *name, int (*init)(void),
     }
 
     subsys_entry_t *e = &subsys_table[subsys_count];
-    e->name   = name;
-    e->init   = init;
-    e->phase  = phase;
-    e->flags  = flags;
-    e->initialized = 0;
-    e->raw_result  = -EAGAIN;
+    e->name          = name;
+    e->init          = init;
+    e->phase         = phase;
+    e->flags         = flags;
+    e->requires      = requires;
+    e->require_count = require_count;
+    e->initialized   = 0;
+    e->raw_result    = -EAGAIN;
     subsys_count++;
     return 0;
 }
@@ -165,45 +201,191 @@ void subsys_register_initcalls(subsys_initcall_t *begin, subsys_initcall_t *end)
     }
 }
 
+// ── Preflight 依赖与拓扑校验 ─────────────────────────────
+
+static int find_bsp_subsys(const char *name)
+{
+    if (!name) return -1;
+    for (int i = 0; i < subsys_count; i++) {
+        if (strcmp(subsys_table[i].name, name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void preflight_bsp_table(void)
+{
+    /* 1. 依赖存在性及未来阶段检查（按注册序） */
+    for (int i = 0; i < subsys_count; i++) {
+        subsys_entry_t *cons = &subsys_table[i];
+        for (unsigned k = 0; k < cons->require_count; k++) {
+            const char *req = cons->requires[k];
+            int p_idx = find_bsp_subsys(req);
+            if (p_idx < 0) {
+                latch_reg_error(cons->name, -ENOENT, cons->phase);
+                boot_failure_stop("register", cons->name, -ENOENT, cons->phase, -1);
+            }
+            if (subsys_table[p_idx].phase > cons->phase) {
+                latch_reg_error(cons->name, -EINVAL, cons->phase);
+                boot_failure_stop("register", cons->name, -EINVAL, cons->phase, -1);
+            }
+        }
+    }
+
+    /* 2. 有界图环检测：
+     * 为每个节点按注册序检查从自身出发能否回到自身。
+     * 首个满足者即为最早实际环成员（诊断报告最早实际环成员而非其消费者）。
+     */
+    for (int i = 0; i < subsys_count; i++) {
+        int queue[MAX_SUBSYS];
+        int head = 0, tail = 0;
+        uint64_t visited = 0;
+
+        for (unsigned k = 0; k < subsys_table[i].require_count; k++) {
+            int dep = find_bsp_subsys(subsys_table[i].requires[k]);
+            if (dep >= 0) {
+                if (dep == i) {
+                    latch_reg_error(subsys_table[i].name, -ELOOP, subsys_table[i].phase);
+                    boot_failure_stop("register", subsys_table[i].name, -ELOOP, subsys_table[i].phase, -1);
+                }
+                queue[tail++] = dep;
+            }
+        }
+
+        while (head < tail) {
+            int curr = queue[head++];
+            if (!(visited & (1ULL << curr))) {
+                visited |= (1ULL << curr);
+                for (unsigned k = 0; k < subsys_table[curr].require_count; k++) {
+                    int dep = find_bsp_subsys(subsys_table[curr].requires[k]);
+                    if (dep >= 0) {
+                        if (dep == i) {
+                            latch_reg_error(subsys_table[i].name, -ELOOP, subsys_table[i].phase);
+                            boot_failure_stop("register", subsys_table[i].name, -ELOOP, subsys_table[i].phase, -1);
+                        }
+                        if (!(visited & (1ULL << dep))) {
+                            queue[tail++] = dep;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── 执行（BSP 一次性 init，按 phase） ─────────────────────
 
 void subsys_init_phase(int phase)
 {
+    if (phase < SUBSYS_PHASE_CONTROLLERS || phase > SUBSYS_PHASE_STORAGE) {
+        boot_failure_stop("subsys", "phase", -EINVAL, phase, -1);
+    }
+
     if (reg_latch.has_error) {
         boot_failure_stop("register", reg_latch.name, reg_latch.rc,
                           reg_latch.phase, -1);
     }
 
-    bsp_sealed = 1;
+    if (!bsp_sealed) {
+        bsp_sealed = 1;
+        preflight_bsp_table();
+    }
 
-    for (int i = 0; i < subsys_count; i++) {
-        subsys_entry_t *e = &subsys_table[i];
-        if (e->phase != phase || e->initialized != 0)
-            continue;
+    for (int round = 0; round < MAX_SUBSYS; round++) {
+        int uninit_in_phase = 0;
+        int progress = 0;
 
-        int ret = e->init();
-        e->raw_result = ret;
-        e->initialized = (ret == 0) ? 1 : -1;
+        for (int i = 0; i < subsys_count; i++) {
+            subsys_entry_t *e = &subsys_table[i];
+            if (e->phase != phase || e->initialized != 0)
+                continue;
 
-        if (reg_latch.has_error) {
-            boot_failure_stop("register", reg_latch.name, reg_latch.rc,
-                              reg_latch.phase, -1);
+            uninit_in_phase++;
+
+            int can_run = 1;
+            for (unsigned k = 0; k < e->require_count; k++) {
+                int p_idx = find_bsp_subsys(e->requires[k]);
+                subsys_entry_t *prod = &subsys_table[p_idx];
+
+                if (prod->phase < phase) {
+                    if (prod->initialized == 0) {
+                        log_err("[boot-4] blocked component=%s dependency=%s\n", e->name, prod->name);
+                        boot_failure_stop("subsys", e->name, -EAGAIN, phase, -1);
+                    }
+                    if (prod->initialized != 1) {
+                        log_err("[boot-4] blocked component=%s dependency=%s\n", e->name, prod->name);
+                        if (!(e->flags & SUBSYS_FLAG_OPTIONAL)) {
+                            boot_failure_stop("subsys", e->name, -ENODEV, phase, -1);
+                        } else {
+                            e->initialized = -1;
+                            e->raw_result = -ENODEV;
+                            boot_failure_warn("subsys", e->name, -ENODEV, phase, -1);
+                            can_run = 0;
+                            progress = 1;
+                            break;
+                        }
+                    }
+                } else {
+                    /* prod->phase == phase */
+                    if (prod->initialized == 0) {
+                        can_run = 0;
+                        break;
+                    }
+                    if (prod->initialized != 1) {
+                        log_err("[boot-4] blocked component=%s dependency=%s\n", e->name, prod->name);
+                        if (!(e->flags & SUBSYS_FLAG_OPTIONAL)) {
+                            boot_failure_stop("subsys", e->name, -ENODEV, phase, -1);
+                        } else {
+                            e->initialized = -1;
+                            e->raw_result = -ENODEV;
+                            boot_failure_warn("subsys", e->name, -ENODEV, phase, -1);
+                            can_run = 0;
+                            progress = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (can_run) {
+                int ret = e->init();
+                e->raw_result = ret;
+                e->initialized = (ret == 0) ? 1 : -1;
+                progress = 1;
+
+                if (reg_latch.has_error) {
+                    boot_failure_stop("register", reg_latch.name, reg_latch.rc,
+                                      reg_latch.phase, -1);
+                }
+
+                if (ret == 0) {
+                    log_info("subsys: init  %s ... ok\n", e->name);
+                } else if (e->flags & SUBSYS_FLAG_OPTIONAL) {
+                    boot_failure_warn("subsys", e->name, ret, phase, -1);
+                    log_warn("subsys: init  %s ... SKIP (optional, ret=%d)\n", e->name, ret);
+                } else {
+                    boot_failure_stop("subsys", e->name, ret, phase, -1);
+                }
+            }
         }
 
-        if (ret == 0) {
-            log_info("subsys: init  %s ... ok\n", e->name);
-        } else if (e->flags & SUBSYS_FLAG_OPTIONAL) {
-            boot_failure_warn("subsys", e->name, ret, phase, -1);
-            log_warn("subsys: init  %s ... SKIP (optional, ret=%d)\n", e->name, ret);
-        } else {
-            boot_failure_stop("subsys", e->name, ret, phase, -1);
+        if (uninit_in_phase == 0)
+            break;
+
+        if (!progress) {
+            for (int i = 0; i < subsys_count; i++) {
+                if (subsys_table[i].phase == phase && subsys_table[i].initialized == 0) {
+                    boot_failure_stop("register", subsys_table[i].name, -ELOOP, phase, -1);
+                }
+            }
+            break;
         }
     }
 }
 
 void subsys_init_all(void)
 {
-    for (int phase = 3; phase <= 6; phase++)
+    for (int phase = SUBSYS_PHASE_CONTROLLERS; phase <= SUBSYS_PHASE_STORAGE; phase++)
         subsys_init_phase(phase);
 }
 

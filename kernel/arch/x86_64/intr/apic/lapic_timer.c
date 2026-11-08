@@ -287,9 +287,12 @@ static int _lapic_timer_init_wrapper(void)
     lapic_timer_init();
     return 0;
 }
+static const char *const _lapic_timer_deps[] = {"timer"};
+
 static int _lapic_timer_register(void)
 {
-    return register_subsys("lapic-timer", _lapic_timer_init_wrapper,
-                           SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
+    return register_subsys_deps("lapic-timer", _lapic_timer_init_wrapper,
+                                SUBSYS_PHASE_TIME, SUBSYS_FLAG_OPTIONAL,
+                                _lapic_timer_deps, 1);
 }
 SUBSYS_INITCALL(_lapic_timer_register);

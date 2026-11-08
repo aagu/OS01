@@ -125,14 +125,17 @@ void thermal_read(uint32_t cpu, struct thermal_sample *out)
 }
 
 #ifndef OS01_HOST_TEST
+static const char *const _thermal_deps[] = {"clocksource"};
+
 /* Self-registration via the .subsys_init linker section (same mechanism
  * as serial/keyboard/pit).  Phase 6 is the last subsystem phase, so the
  * clocksource is running when the first samples are taken.  Optional:
  * a missing or failed thermal backend must never block boot. */
 static int thermal_subsys_register(void)
 {
-    return register_subsys("thermal", thermal_subsys_init,
-                           SUBSYS_PHASE_6, SUBSYS_FLAG_OPTIONAL);
+    return register_subsys_deps("thermal", thermal_subsys_init,
+                                SUBSYS_PHASE_STORAGE, SUBSYS_FLAG_OPTIONAL,
+                                _thermal_deps, 1);
 }
 SUBSYS_INITCALL(thermal_subsys_register);
 #endif /* OS01_HOST_TEST */
