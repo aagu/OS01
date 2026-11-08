@@ -28,6 +28,24 @@ static int sched_boot_start_calls = 0;
 static int vfs_end_bootstrap_calls = 0;
 static int thermal_worker_calls = 0;
 
+enum {
+    EV_NONE = 0,
+    EV_STDIO_PREPARE = 1,
+    EV_VFS_END_BOOTSTRAP = 2,
+    EV_SPAWN_USER_TASK = 3,
+    EV_NET_INIT = 4,
+    EV_SCHED_BOOT_START = 5,
+    EV_THERMAL = 6,
+    EV_BOOT_STOP = 7,
+};
+static int recorded_events[32];
+static int recorded_event_count = 0;
+static void record_ev(int ev)
+{
+    if (recorded_event_count < 32)
+        recorded_events[recorded_event_count++] = ev;
+}
+
 static int mock_stdio_rc = 0;
 static const char *mock_stdio_component = "none";
 static int64_t mock_spawn_rc = 1;
@@ -47,6 +65,7 @@ __attribute__((noreturn))
 void boot_failure_stop(const char *stage, const char *component,
                        int64_t rc, int phase, int cpu)
 {
+    record_ev(EV_BOOT_STOP);
     stop_calls++;
     snprintf(last_stop_stage, sizeof(last_stop_stage), "%s", stage ? stage : "unknown");
     snprintf(last_stop_component, sizeof(last_stop_component), "%s", component ? component : "unknown");
@@ -107,6 +126,7 @@ void sched_boot_publish_idle(void) {}
 int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
 {
     (void)idle;
+    record_ev(EV_STDIO_PREPARE);
     stdio_prepare_calls++;
     if (failed_component) *failed_component = mock_stdio_component;
     return mock_stdio_rc;
@@ -115,6 +135,7 @@ int sched_boot_prepare_stdio(task_t *idle, const char **failed_component)
 int64_t spawn_user_task(const char *path, const char *const *argv)
 {
     (void)path; (void)argv;
+    record_ev(EV_SPAWN_USER_TASK);
     spawn_user_task_calls++;
     return mock_spawn_rc;
 }
@@ -123,6 +144,7 @@ void sched_boot_probe_create(void) {}
 
 void net_lwip_init(void)
 {
+    record_ev(EV_NET_INIT);
     net_lwip_init_calls++;
     if (jump_on_net) {
         longjmp(test_exit_jmp, 2);
@@ -131,16 +153,19 @@ void net_lwip_init(void)
 
 void sched_boot_start(void)
 {
+    record_ev(EV_SCHED_BOOT_START);
     sched_boot_start_calls++;
 }
 
 void vfs_end_bootstrap(void)
 {
+    record_ev(EV_VFS_END_BOOTSTRAP);
     vfs_end_bootstrap_calls++;
 }
 
 int arch_thermal_start_worker(void)
 {
+    record_ev(EV_THERMAL);
     thermal_worker_calls++;
     return 0;
 }
@@ -157,6 +182,8 @@ static void reset_task_init_state(void)
     sched_boot_start_calls = 0;
     vfs_end_bootstrap_calls = 0;
     thermal_worker_calls = 0;
+    recorded_event_count = 0;
+    memset(recorded_events, 0, sizeof(recorded_events));
     mock_stdio_rc = 0;
     mock_stdio_component = "none";
     mock_spawn_rc = 1;
@@ -185,6 +212,7 @@ static void test_task_init_stdio_failure(void)
     assert_str_eq("stdio", last_stop_stage);
     assert_str_eq("files", last_stop_component);
     assert_eq(-ENOMEM, last_stop_rc);
+    assert_eq(0, vfs_end_bootstrap_calls);
     assert_eq(0, spawn_user_task_calls);
     assert_eq(0, net_lwip_init_calls);
     assert_eq(0, sched_boot_start_calls);
@@ -205,10 +233,17 @@ static void test_task_init_spawn_negative_failure(void)
     assert_str_eq("init", last_stop_stage);
     assert_str_eq("/bin/init", last_stop_component);
     assert_eq(-1, last_stop_rc);
+    assert_eq(1, vfs_end_bootstrap_calls);
     assert_eq(1, spawn_user_task_calls);
     assert_eq(0, net_lwip_init_calls);
     assert_eq(0, sched_boot_start_calls);
     assert_eq(0, thermal_worker_calls);
+
+    /* Assert sequence: stdio -> vfs_end_bootstrap -> spawn_user_task -> stop */
+    assert_eq(EV_STDIO_PREPARE, recorded_events[0]);
+    assert_eq(EV_VFS_END_BOOTSTRAP, recorded_events[1]);
+    assert_eq(EV_SPAWN_USER_TASK, recorded_events[2]);
+    assert_eq(EV_BOOT_STOP, recorded_events[3]);
 
     /* Test -ENOMEM */
     reset_task_init_state();
@@ -224,8 +259,14 @@ static void test_task_init_spawn_negative_failure(void)
     assert_str_eq("init", last_stop_stage);
     assert_str_eq("/bin/init", last_stop_component);
     assert_eq(-ENOMEM, last_stop_rc);
+    assert_eq(1, vfs_end_bootstrap_calls);
     assert_eq(1, spawn_user_task_calls);
     assert_eq(0, net_lwip_init_calls);
+
+    assert_eq(EV_STDIO_PREPARE, recorded_events[0]);
+    assert_eq(EV_VFS_END_BOOTSTRAP, recorded_events[1]);
+    assert_eq(EV_SPAWN_USER_TASK, recorded_events[2]);
+    assert_eq(EV_BOOT_STOP, recorded_events[3]);
 }
 
 static void test_task_init_success_path(void)
@@ -242,8 +283,15 @@ static void test_task_init_success_path(void)
 
     assert_eq(0, stop_calls);
     assert_eq(1, stdio_prepare_calls);
+    assert_eq(1, vfs_end_bootstrap_calls);
     assert_eq(1, spawn_user_task_calls);
     assert_eq(1, net_lwip_init_calls);
+
+    /* Assert sequence: stdio -> vfs_end_bootstrap -> spawn_user_task -> net */
+    assert_eq(EV_STDIO_PREPARE, recorded_events[0]);
+    assert_eq(EV_VFS_END_BOOTSTRAP, recorded_events[1]);
+    assert_eq(EV_SPAWN_USER_TASK, recorded_events[2]);
+    assert_eq(EV_NET_INIT, recorded_events[3]);
 }
 
 int main(void)

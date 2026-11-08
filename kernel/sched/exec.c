@@ -343,6 +343,9 @@ static void destroy_unpublished_user_mm(mm_t *mm)
 //   - task stack:   kfree(raw_alloc)
 int64_t spawn_user_task(const char *path, const char *const *argv)
 {
+    if (vfs_bootstrap_active())
+        return -EAGAIN;
+
     int s_argc = 0, s_envc = 0;
     if (startup_args_count((char *const *)argv, NULL, &s_argc, &s_envc) != 0)
         return -E2BIG;

@@ -89,6 +89,11 @@ void task_init(void)
     }
     boot3_test_sentinel("stdio-ready");
 
+    // BOOT-5 Task 1: End VFS bootstrap after stdio initialization and all
+    // bootstrap namespace/mount operations have completed, and before the
+    // first user task is published.
+    vfs_end_bootstrap();
+
     // pid_counter starts at 1.  spawn_user_task("/bin/init", NULL) is the
     // first alloc_pid() consumer on the system (R1), so user init is
     // always PID 1 across all build variants.  user_init_task /
@@ -126,7 +131,6 @@ void task_init(void)
     // sched_boot_start(): close the boot creation window FIRST, then
     // publish CPU0 scheduler_ok = 1, then return (Ruling P2-3).
     sched_boot_start();
-    vfs_end_bootstrap();
 
     // Thermal plan Task 3: arch-neutral startup hook for any CPU-pinned
     // service worker (currently: BSP-pinned thermal core-DTS sampler).

@@ -37,6 +37,12 @@ spinlock_T task_list_lock = {1};
 
 /* Inject flags */
 static int inject_files_dup_fail = 0;
+static bool mock_bootstrap_active = false;
+
+bool vfs_bootstrap_active(void)
+{
+    return mock_bootstrap_active;
+}
 
 files_t *files_dup(files_t *fs)
 {
@@ -152,6 +158,20 @@ static void reset_spawn_test_state(void)
     vma_free_all_calls = 0;
     vmm_free_user_map_calls = 0;
     inject_files_dup_fail = 0;
+    mock_bootstrap_active = false;
+}
+
+static void test_spawn_bootstrap_active_rejection(void)
+{
+    reset_spawn_test_state();
+    mock_bootstrap_active = true;
+
+    int64_t ret = spawn_user_task("/bin/init", NULL);
+    assert_eq(-EAGAIN, ret);
+    assert_eq(0, task_add_to_list_calls);
+    assert_eq(0, sched_enqueue_calls);
+    assert_eq(0, sched_notify_calls);
+    assert_eq(0, vfs_node_put_calls);
 }
 
 static void test_spawn_files_dup_failure(void)
@@ -182,6 +202,7 @@ int main(void)
 {
     TEST_SUITE("BOOT-3 test_boot_spawn_failure");
 
+    test_spawn_bootstrap_active_rejection();
     test_spawn_files_dup_failure();
 
     TEST_RESULTS();

@@ -622,3 +622,33 @@ $(TEST_BLD)/test_boot_failure_terminal.elf: \
 .PHONY: test_boot_failure_terminal
 test_boot_failure_terminal: $(TEST_BLD)/test_boot_failure_terminal.elf
 	$<
+
+# BOOT-5 Task 1: VFS bootstrap end contract test
+$(eval $(call register_host_test,test_boot_services_vfs,fs,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_services_vfs.elf
+
+$(TEST_BLD)/test_boot_services_vfs.o: $(TEST_CASES)/test_boot_services_vfs.c \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_boot_services_vfs.elf: \
+		$(TEST_BLD)/test_boot_services_vfs.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/fat_production.o \
+		$(TEST_BLD)/tmpfs_production.o \
+		$(TEST_BLD)/devfs_vfs_production.o \
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(TEST_BLD)/rwlock.o \
+		$(TEST_BLD)/boot3_exec_production.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=vfs_lookup -lpthread -o $@ $^
+
+.PHONY: test_boot_services_vfs
+test_boot_services_vfs: $(TEST_BLD)/test_boot_services_vfs.elf
+	$<

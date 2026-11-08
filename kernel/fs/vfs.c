@@ -34,7 +34,12 @@ static int normalize_vfs_path(const char *in, char *out);
 
 void vfs_end_bootstrap(void)
 {
-    vfs_bootstrap = 0;
+    __atomic_store_n(&vfs_bootstrap, 0, __ATOMIC_RELEASE);
+}
+
+bool vfs_bootstrap_active(void)
+{
+    return __atomic_load_n(&vfs_bootstrap, __ATOMIC_ACQUIRE) != 0;
 }
 
 // Scheduler-backed locking gate for VFS and per-mount FS locks: the same
@@ -44,7 +49,7 @@ void vfs_end_bootstrap(void)
 // the FS ops that take these locks.
 bool vfs_sched_ready(void)
 {
-    return !vfs_bootstrap && current && current->pid > 0;
+    return !vfs_bootstrap_active() && current && current->pid > 0;
 }
 
 #ifdef OS01_HOST_TEST
@@ -53,7 +58,7 @@ bool vfs_sched_ready(void)
 // runtime. Never call from production code.
 void vfs_test_set_sched_ready(bool ready)
 {
-    vfs_bootstrap = ready ? 0 : 1;
+    __atomic_store_n(&vfs_bootstrap, ready ? 0 : 1, __ATOMIC_RELEASE);
 }
 #endif
 
@@ -116,7 +121,7 @@ void vfs_init(void)
     mount_count = 0;
     rwlock_init(&mount_lock);
     mutex_init(&vfs_namespace_lock);
-    vfs_bootstrap = 1;
+    __atomic_store_n(&vfs_bootstrap, 1, __ATOMIC_RELEASE);
 
     fs_type_list = NULL;
     memset(fs_type_usage, 0, sizeof(fs_type_usage));

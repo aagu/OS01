@@ -169,6 +169,7 @@ static inline uint64_t vfs_node_stable_ino(const vfs_node_t *node)
 
 void vfs_init(void);
 void vfs_end_bootstrap(void);
+bool vfs_bootstrap_active(void);
 
 // True once the scheduler is running and FS ops may take scheduler-backed
 // mutexes (per-mount FS locks, vfs namespace lock). False during boot.

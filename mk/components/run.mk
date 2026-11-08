@@ -853,6 +853,46 @@ test-boot-contract-host: $(if $(CASE),_test-boot-contract-host-run-$(CASE),_test
 	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: subsys cpu-prepare sequence checks softirq all" >&2; exit 1;; \
 	esac
 
+# ── BOOT-5 scheduler and services host tests ───────────────────
+.PHONY: test-boot-services-host _test-boot-services-host-run-vfs _test-boot-services-host-run-spawn _test-boot-services-host-run-sequence _test-boot-services-host-run-services _test-boot-services-host-run-late _test-boot-services-host-run-mechanisms _test-boot-services-host-run-all
+_test-boot-services-host-run-all:
+	@echo "  [test-boot-services-host] all (vfs spawn sequence services late mechanisms)"
+	$(call os01_submake,hosttests,test_boot_services_vfs $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_services_spawn $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_services_sequence $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_services_services $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_services_late $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_services_mechanisms $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-vfs:
+	@echo "  [test-boot-services-host] vfs"
+	$(call os01_submake,hosttests,test_boot_services_vfs $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-spawn:
+	@echo "  [test-boot-services-host] spawn"
+	$(call os01_submake,hosttests,test_boot_services_spawn $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-sequence:
+	@echo "  [test-boot-services-host] sequence"
+	$(call os01_submake,hosttests,test_boot_services_sequence $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-services:
+	@echo "  [test-boot-services-host] services"
+	$(call os01_submake,hosttests,test_boot_services_services $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-late:
+	@echo "  [test-boot-services-host] late"
+	$(call os01_submake,hosttests,test_boot_services_late $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-mechanisms:
+	@echo "  [test-boot-services-host] mechanisms"
+	$(call os01_submake,hosttests,test_boot_services_mechanisms $(OS01_SUBMAKE_ARGS))
+_test-boot-services-host-run-%:
+	@echo "ERROR: unknown CASE='$*'; valid: vfs spawn sequence services late mechanisms all" >&2; exit 1
+test-boot-services-host: CASE ?=
+test-boot-services-host: CASE := $(CASE)
+test-boot-services-host: $(if $(CASE),_test-boot-services-host-run-$(CASE),_test-boot-services-host-run-all)
+	$(call require_capability,rootfs)
+	@case "$(CASE)" in \
+	    ""|vfs|spawn|sequence|services|late|mechanisms|all) echo "  [test-boot-services-host] CASE=${CASE:-all}";; \
+	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: vfs spawn sequence services late mechanisms all" >&2; exit 1;; \
+	esac
+
+
 # Focused BOOT-2 early-IRQ/time host tests.  Each CASE forwards to the
 # matching hosttests target through the controlled sub-make boundary;
 # CASE omitted runs `all`.  Unknown non-empty CASE aborts non-zero.  The
