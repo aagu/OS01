@@ -135,8 +135,8 @@ KERNEL_C_SOURCES := \
     $(filter-out selftest/arch10_capacity_fixture.c \
                  selftest/boot_contract_fixture.c \
                  selftest/boot_failure_fixture.c \
-                 selftest/boot_irq_time_fixture.c \
-                 selftest/boot_services_fixture.c,$(wildcard selftest/*.c)) \
+                 selftest/boot_services_fixture.c \
+                 selftest/boot_irq_time_fixture.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \

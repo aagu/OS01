@@ -5102,6 +5102,144 @@
    }
   },
   {
+   "id": "boot.services.vfs_host",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "host runner invokes test_boot_services_vfs.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "vfs bootstrap active violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_services_vfs.c",
+    "selector": "test_boot_services_vfs",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 Task 1 VFS bootstrap handoff host evidence"
+   }
+  },
+  {
+   "id": "boot.services.spawn_host",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "host runner invokes test_boot_services_spawn.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "spawn eligibility or publication atomicity violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_services_spawn.c",
+    "selector": "test_boot_services_spawn",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 Task 2 initial spawn placement and publication host evidence"
+   }
+  },
+  {
+   "id": "boot.services.sequence_host",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "host runner invokes test_boot_services_sequence.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "userspace startup sequence violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_services_sequence.c",
+    "selector": "test_boot_services_sequence",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 Task 3 userspace sequence host evidence"
+   }
+  },
+  {
+   "id": "boot.services.services_host",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "host runner invokes test_boot_services_services.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "service startup ordering or failure non-fatal violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_services_services.c",
+    "selector": "test_boot_services_services",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 Task 3 services lifecycle host evidence"
+   }
+  },
+  {
+   "id": "boot.services.late_host",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "host runner invokes test_boot_services_late.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "late selftest sequence or END violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_services_late.c",
+    "selector": "test_boot_services_late",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 Task 3 late selftests host evidence"
+   }
+  },
+  {
+   "id": "boot.services.mechanisms_host",
+   "component": "boot",
+   "behavior": "scheduler-services",
+   "trigger": "host runner invokes test_boot_services_mechanisms.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "x86 sched boot prepare TSS or idle halt loop violation, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_services_mechanisms.c",
+    "selector": "test_boot_services_mechanisms",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-5 Task 3 architecture mechanisms host evidence"
+   }
+  },
+  {
    "id": "boot.services.x86",
    "component": "boot",
    "behavior": "scheduler-services",

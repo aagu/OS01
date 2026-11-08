@@ -436,6 +436,7 @@ jobs:
           suite make test-qemu SUITE=boot-irq-time
           suite make test-qemu SUITE=boot-failure
           suite make test-qemu SUITE=boot-contract
+          suite make test-qemu SUITE=boot-services
           # gui and gui-desktop run non-blocking for the same reason as
           # terminal-present: on 1-vCPU CI runners the guest's terminal
           # wedges around display-ownership transitions (input_interaction's
