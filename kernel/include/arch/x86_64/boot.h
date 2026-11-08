@@ -37,7 +37,8 @@ int x86_64_boot_device_nodes(void);
 // handoff check, not inside an arch-scoped stage.
 void x86_64_boot_early(const struct boot_context *bootctx);
 void x86_64_boot_memory(const struct boot_context *bootctx);
-void x86_64_boot_subsystems(const struct boot_context *bootctx);
+void x86_64_boot_controllers(const struct boot_context *bootctx);
+void x86_64_boot_devices(const struct boot_context *bootctx);
 
 #ifndef ARCH_SELFTEST_EXPECTED_LATE
 #define ARCH_SELFTEST_EXPECTED_LATE 9U

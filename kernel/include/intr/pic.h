@@ -2,6 +2,7 @@
 #define _KERNEL_PIC_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define MASTER_ICW1 0x20
 #define MASTER_ICW2 0x21
@@ -30,5 +31,6 @@ void pic_ack(uint64_t nr);
 // Get the global PIC hw_int_controller_t (for ISA IRQ fallback when no IOAPIC)
 #include <intr/interrupt.h>
 hw_int_controller_t *get_pic_controller(void);
+bool pic_irq_unmasked(unsigned isa_irq);
 
 #endif

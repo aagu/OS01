@@ -42,6 +42,7 @@ struct cpu_usage_snapshot {
  * spinlock — "不能仅依赖清零"), then release-publish accounting_ready
  * so early tick interrupts stay inert until the locks exist. */
 void sched_accounting_init(void);
+bool sched_accounting_is_ready(void);
 
 /* Publish a tick-source lifecycle for one CPU.  started=true means a
  * periodic tick is really running (the caller must pass the real

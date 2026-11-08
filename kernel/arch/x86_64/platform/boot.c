@@ -125,7 +125,7 @@ void x86_64_boot_early(const struct boot_context *bootctx)
 //   Phase 5: device IRQs (keyboard, serial)
 //   Phase 6: storage (ahci)
 // (See kernel/include/subsys/subsys.h for the phase definitions.)
-void x86_64_boot_subsystems(const struct boot_context *bootctx)
+void x86_64_boot_controllers(const struct boot_context *bootctx)
 {
     // ═══ RSDP: 传递给 arch 子系统 ═══
     arch_boot_rsdp = bootctx->firmware.acpi_rsdp;
@@ -158,17 +158,14 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
      * sti/GS read. */
     x86_boot_irq_calibration_begin();
 #endif
-    /* BOOT-2 phased orchestration (spec §3.2): controllers first, then
-     * the BSP percpu (BOOT-1 constructor, before ANY device IRQ can be
-     * enabled), then the phase-4 time facilities, then the controlled
-     * runtime open (PIT start + first sti).  Each initcall phase sees
-     * exactly the prerequisites its drivers need. */
-    subsys_init_phase(3);
+    /* BOOT-2 phased orchestration: controllers first */
+    subsys_init_phase(SUBSYS_PHASE_CONTROLLERS);
+}
 
-    x86_64_boot_percpu();
-    x86_boot_irq_context_prepare();
-
-    subsys_init_phase(4);
+void x86_64_boot_devices(const struct boot_context *bootctx)
+{
+    (void)bootctx;
+    subsys_init_phase(SUBSYS_PHASE_TIME);
 
     /* BOOT-2 Task 3: the LAPIC calibration runs once at phase-4 end,
      * reading the FINAL clocksource result (no same-phase link-order
@@ -180,8 +177,8 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
 #ifdef X86_BOOT_IRQ_TIME_TEST
     log_info("[boot-2-test] devices-begin\n");
 #endif
-    subsys_init_phase(5);
-    subsys_init_phase(6);
+    subsys_init_phase(SUBSYS_PHASE_DEVICE_IRQ);
+    subsys_init_phase(SUBSYS_PHASE_STORAGE);
 
     int dev_res = device_boot_result();
     if (dev_res != 0) {
@@ -251,9 +248,14 @@ void arch_early_init(const struct boot_context *bootctx)
     x86_64_boot_early(bootctx);
 }
 
-void arch_boot_subsystems(const struct boot_context *bootctx)
+void arch_boot_controllers(const struct boot_context *bootctx)
 {
-    x86_64_boot_subsystems(bootctx);
+    x86_64_boot_controllers(bootctx);
+}
+
+void arch_boot_devices(const struct boot_context *bootctx)
+{
+    x86_64_boot_devices(bootctx);
 }
 
 int arch_boot_device_nodes(void)

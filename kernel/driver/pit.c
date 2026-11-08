@@ -30,6 +30,7 @@ static bool pit_prepared_flag;
 static bool pit_started_flag;
 
 bool pit_prepared(void) { return pit_prepared_flag; }
+bool pit_started(void) { return pit_started_flag; }
 
 int pit_init(void)
 {

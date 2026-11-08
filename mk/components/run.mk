@@ -785,8 +785,12 @@ test-boot-failure-host: $(if $(CASE),_test-boot-failure-host-run-$(CASE),_test-b
 # ── BOOT-4 stage contract host tests ───────────────────────────
 .PHONY: test-boot-contract-host _test-boot-contract-host-run-subsys _test-boot-contract-host-run-cpu-prepare _test-boot-contract-host-run-sequence _test-boot-contract-host-run-checks _test-boot-contract-host-run-softirq _test-boot-contract-host-run-all
 _test-boot-contract-host-run-all:
-	@echo "  [test-boot-contract-host] all (subsys)"
+	@echo "  [test-boot-contract-host] all (subsys cpu-prepare softirq sequence checks)"
 	$(call os01_submake,hosttests,test_boot_contract_subsys $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_contract_cpu_prepare $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_contract_softirq $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_contract_sequence $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_contract_checks $(OS01_SUBMAKE_ARGS))
 _test-boot-contract-host-run-subsys:
 	@echo "  [test-boot-contract-host] subsys"
 	$(call os01_submake,hosttests,test_boot_contract_subsys $(OS01_SUBMAKE_ARGS))

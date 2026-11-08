@@ -22,6 +22,7 @@ timer_t * create_timer(void (* func)(void * data), void * data, uint64_t expire_
 void init_timer(timer_t *timer, void (*func)(void *data), void *data,
                 uint64_t expire_jiffies);
 void timer_init();
+void do_timer(void *data);
 void add_timer(timer_t * timer);
 void del_timer(timer_t * timer);
 void destroy_timer(timer_t *timer);

@@ -2,6 +2,7 @@
 #define _KERNEL_APIC_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <intr/interrupt.h>
 #include <arch/cpu.h>
 
@@ -229,12 +230,14 @@ uint32_t apic_madt_flags(void);
 // Consults ISO overrides and GSI-range defaults.
 // Returns ISO_TRIGGER_EDGE or ISO_TRIGGER_LEVEL.
 uint8_t irq_trigger_for_gsi(uint32_t gsi);
+bool ioapic_irq_unmasked(uint32_t gsi);
 
 // ── LAPIC per-CPU timer ────────────────────────
 // 校准（RTC PIE 联合结果优先，否则 TSC 窗口）。
 void lapic_timer_calibrate(void);
 // 以给定频率启动周期定时器。返回 true=已启动，false=未校准（调用方回退 PIT）。
 bool lapic_timer_start(uint32_t freq_hz);
+bool lapic_timer_local_running(void);
 // One-shot BSP setup: register IDT gate, calibrate, start at 100 Hz.
 void lapic_timer_init(void);
 

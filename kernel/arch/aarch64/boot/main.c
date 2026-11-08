@@ -543,12 +543,16 @@ void arch_pre_subsys_selftest(const struct boot_context *bootctx)
 #endif
 }
 
-void arch_boot_subsystems(const struct boot_context *bootctx)
+void arch_boot_controllers(const struct boot_context *bootctx)
 {
     dtb_init(bootctx);
     log_info("OS01 aarch64 uefi handoff ok\n");
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();
+
+    extern void arch_register_subsys(void);
+    arch_register_subsys();
+    subsys_init_phase(SUBSYS_PHASE_CONTROLLERS);
 }
 
 void arch_boot_percpu(void)
@@ -566,6 +570,22 @@ void arch_boot_percpu(void)
     __atomic_store_n(&percpu_data[0].online, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&num_cpus, dtb_cpu_count(), __ATOMIC_RELEASE);
     smp_starting_enter();
+}
+
+void arch_boot_devices(const struct boot_context *bootctx)
+{
+    (void)bootctx;
+    extern void softirq_init(void);
+    softirq_init();
+
+    subsys_init_phase(SUBSYS_PHASE_TIME);
+    subsys_init_phase(SUBSYS_PHASE_DEVICE_IRQ);
+    subsys_init_phase(SUBSYS_PHASE_STORAGE);
+}
+
+void arch_boot_smp_prepare(void)
+{
+    /* N/A for AArch64: BSP timer/IRQ/accounting are initialized post-SMP */
 }
 
 #if AARCH64_SMP_TEST_NO_ACK_CPU == 1
@@ -610,10 +630,11 @@ void arch_boot_aps(void)
     else
         log_warn("[spinlock] status=SKIP\n");
 
-    extern void arch_register_subsys(void);
-    arch_register_subsys();
-    subsys_init_phase(SUBSYS_PHASE_4);
+    subsys_prepare_cpus();
+}
 
+void arch_boot_runtime(void)
+{
     if (clocksource_active) {
         kputs("[clocksource] active=true\n");
         kputs("[clocksource] freq=");
@@ -625,9 +646,6 @@ void arch_boot_aps(void)
         kputu((uint64_t)clocksource_shift);
         kputs("\n");
     }
-
-    extern void softirq_init(void);
-    softirq_init();
 
     if (!arch_tick_start()) {
         log_err("[smp] FATAL: BSP timer initialization failed\n");
@@ -679,10 +697,12 @@ void arch_post_smp_selftest(void)
 #endif
 }
 
+#if OS01_HAS_VFS
 int arch_boot_device_nodes(void)
 {
     return 0;
 }
+#endif
 
 void arch_start_kernel_idle(void)
 {

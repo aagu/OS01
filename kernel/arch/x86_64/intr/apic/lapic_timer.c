@@ -175,6 +175,22 @@ bool lapic_timer_start(uint32_t freq_hz)
     return true;
 }
 
+bool lapic_timer_local_running(void)
+{
+    if (!apic_available())
+        return false;
+    uint32_t lvt = lapic_read(LAPIC_LVT_TIMER);
+    if (lvt & LVT_MASK)
+        return false;
+    if (!(lvt & (1 << 17)))
+        return false;
+    if ((lvt & 0xFF) != LAPIC_TIMER_VECTOR)
+        return false;
+    if (lapic_read(LAPIC_TIMER_INIT) == 0)
+        return false;
+    return true;
+}
+
 // ── Per-CPU tick handler (called from assembly stub) ──────
 // rdi = pt_regs *, rsi = 0 (no error code for interrupts).
 // Sets need_resched and sends EOI.

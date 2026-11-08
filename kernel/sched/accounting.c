@@ -73,6 +73,11 @@ void sched_accounting_init(void)
     __atomic_store_n(&accounting_ready, 1, __ATOMIC_RELEASE);
 }
 
+bool sched_accounting_is_ready(void)
+{
+    return __atomic_load_n(&accounting_ready, __ATOMIC_ACQUIRE) != 0;
+}
+
 void sched_accounting_cpu_start(unsigned cpu, unsigned hz, bool started)
 {
     if (cpu >= NR_CPUS)

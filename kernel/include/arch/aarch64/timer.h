@@ -77,6 +77,7 @@ bool aarch64_timer_start_local(void);
  * scheduler-tick start, whose counter was already armed during the
  * early boot phase. */
 bool aarch64_timer_local_running(void);
+bool aarch64_timer_config_ready(void);
 
 #ifdef OS01_SELFTEST
 /* OS01_SELFTEST ONLY — mask / restore the CALLING CPU's local CNTP

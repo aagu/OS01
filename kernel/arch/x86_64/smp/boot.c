@@ -39,6 +39,7 @@
 #include <sched/accounting.h>
 #include <subsys/subsys.h>
 #include <arch/subsys.h>
+#include <arch/x86_64/platform/boot_irq.h>
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <core/assert.h>
@@ -126,7 +127,7 @@ void x86_64_boot_percpu(void)
     num_cpus = cpu_idx;
 }
 
-void x86_64_boot_aps(void)
+void arch_boot_smp_prepare(void)
 {
     // Monitor plan Task 2: initialize the per-CPU tick accounting ONCE,
     // here, BEFORE tick_start(): GS/percpu are already usable (BSP's
@@ -141,7 +142,10 @@ void x86_64_boot_aps(void)
     // percpu_install_gs(0)），this_cpu() 可用。tick_start 先掩 PIT
     // 再启 LAPIC，失败回退 PIT。
     tick_start();
+}
 
+void x86_64_boot_aps(void)
+{
     smp_boot_aps();
 
     // BSP CPU 数据准备 dispatch
@@ -152,23 +156,18 @@ void x86_64_boot_aps(void)
 
 void arch_boot_percpu(void)
 {
-    /* BOOT-2: late public facade.  Construction happened in the x86
-     * private boot helper (phase 3 → percpu); this path only VERIFIES
-     * the prepared state — no GS write, no runqueue reset, no topology
-     * change. */
-    if (num_cpus == 0) {
-        x86_64_boot_percpu();
-        return;
-    }
-    if (__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) != 1 ||
-        percpu_data[0].self != (uint64_t)&percpu_data[0]) {
-        kpanic("BOOT-2: late percpu verify failed\n");
-    }
+    x86_64_boot_percpu();
+    x86_boot_irq_context_prepare();
 }
 
 void arch_boot_aps(void)
 {
     x86_64_boot_aps();
+}
+
+void arch_boot_runtime(void)
+{
+    /* x86 runtime bringup completes during earlier phases; no redundant operations */
 }
 
 void arch_post_smp_selftest(void)

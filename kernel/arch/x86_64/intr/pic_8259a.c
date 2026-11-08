@@ -128,6 +128,22 @@ hw_int_controller_t *get_pic_controller(void)
     return &pic_controller;
 }
 
+bool pic_irq_unmasked(unsigned isa_irq)
+{
+    if (isa_irq >= 16)
+        return false;
+    if (isa_irq < 8) {
+        uint8_t imr = arch_inb(MASTER_OCW1);
+        return !(imr & (uint8_t)(1 << isa_irq));
+    } else {
+        uint8_t slave_imr = arch_inb(SLAVE_OCW1);
+        if (slave_imr & (uint8_t)(1 << (isa_irq - 8)))
+            return false;
+        uint8_t master_imr = arch_inb(MASTER_OCW1);
+        return !(master_imr & (uint8_t)(1 << 2));
+    }
+}
+
 #include <intr/apic.h>
 #include <subsys/subsys.h>
 // Register this driver into the platform's subsystem table. The

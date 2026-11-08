@@ -84,12 +84,24 @@ int kernel_main(const struct boot_context *bootctx)
     arch_pre_subsys_selftest(bootctx);
 
     // ═══ 3. Subsystem framework / interrupt controller ═══════
-    arch_boot_subsystems(bootctx);
+    arch_boot_controllers(bootctx);
 
     // ═══ 4. BSP per-CPU registration ══════════════════════════
     arch_boot_percpu();
 
-    // ═══ 5. Seed the CSPRNG pool ═════════════════════════════
+    // ═══ 5. Devices & time facilities ═════════════════════════
+    arch_boot_devices(bootctx);
+
+    // ═══ 5.1. Checkpoint: devices ═════════════════════════════
+    {
+        const char *comp = NULL;
+        int rc = arch_boot_validate(ARCH_BOOT_CHECK_DEVICES, &comp);
+        if (rc != 0)
+            boot_failure_stop("subsys", comp ? comp : "boot-contract", rc, -1, 0);
+        log_info("[boot-4] checkpoint=devices status=ok\n");
+    }
+
+    // ═══ 5.2. Seed the CSPRNG pool ════════════════════════════
     random_init(bootctx);
 
 #if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI))
@@ -127,8 +139,32 @@ int kernel_main(const struct boot_context *bootctx)
     fs_boot_probe_devfs();
 #endif /* OS01_HAS_VFS */
 
+    // ═══ 7.5. SMP prepare ═════════════════════════════════════
+    arch_boot_smp_prepare();
+
+    // ═══ 7.6. Checkpoint: pre-smp ═════════════════════════════
+    {
+        const char *comp = NULL;
+        int rc = arch_boot_validate(ARCH_BOOT_CHECK_PRE_SMP, &comp);
+        if (rc != 0)
+            boot_failure_stop("subsys", comp ? comp : "boot-contract", rc, -1, 0);
+        log_info("[boot-4] checkpoint=pre-smp status=ok\n");
+    }
+
     // ═══ 8. Per-CPU + SMP ════════════════════════════════════
     arch_boot_aps();
+
+    // ═══ 8.2. Arch runtime bringup ════════════════════════════
+    arch_boot_runtime();
+
+    // ═══ 8.3. Checkpoint: runtime ═════════════════════════════
+    {
+        const char *comp = NULL;
+        int rc = arch_boot_validate(ARCH_BOOT_CHECK_RUNTIME, &comp);
+        if (rc != 0)
+            boot_failure_stop("subsys", comp ? comp : "boot-contract", rc, -1, 0);
+        log_info("[boot-4] checkpoint=runtime status=ok\n");
+    }
 
     // ═══ 8.5. Post-SMP selftest & probes ══════════════════════
     arch_post_smp_selftest();

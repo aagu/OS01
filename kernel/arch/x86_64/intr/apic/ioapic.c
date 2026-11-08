@@ -262,3 +262,17 @@ int ioapic_init(void)
     s_ioapic_ready = true;
     return 1;
 }
+
+bool ioapic_irq_unmasked(uint32_t gsi)
+{
+    if (!s_ioapic_ready)
+        return false;
+    const struct x86_irq_route *route = x86_irq_route_find_by_gsi(gsi);
+    if (!route || route->ioapic_idx >= apic_info.ioapic_count)
+        return false;
+    ioapic_entry_t *ioapic = &apic_info.ioapics[route->ioapic_idx];
+    if (route->pin > ioapic->max_redir)
+        return false;
+    uint32_t low = ioapic_read_reg(route->ioapic_idx, IOAPIC_REG_REDTBL(route->pin));
+    return !(low & IOAPIC_RED_MASK);
+}

@@ -22,6 +22,7 @@
 int pit_init(void);
 int pit_start(void);
 bool pit_prepared(void);
+bool pit_started(void);
 
 /* Legacy frequency programming (used by pit_init). */
 void set_frequency(uint16_t hz);

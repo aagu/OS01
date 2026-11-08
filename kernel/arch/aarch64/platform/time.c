@@ -244,6 +244,11 @@ bool aarch64_timer_local_running(void)
     return (ctl & 1UL) != 0 && (ctl & (1UL << 1)) == 0;
 }
 
+bool aarch64_timer_config_ready(void)
+{
+    return __atomic_load_n(&g_timer_config.ready, __ATOMIC_ACQUIRE) == 1U;
+}
+
 #ifdef OS01_SELFTEST
 /* OS01_SELFTEST ONLY: mask the calling CPU's local CNTP interrupt.
  *

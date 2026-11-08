@@ -924,10 +924,16 @@ test_boot_task_init: $(TEST_BLD)/test_boot_task_init.elf
 # ── BOOT-4 stage contract host tests ─────────────────────────────
 $(eval $(call register_host_test,test_boot_contract_subsys,sched,protocol-or-legacy))
 $(eval $(call register_host_test,test_boot_contract_cpu_prepare,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_contract_softirq,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_contract_sequence,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_contract_checks,sched,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_boot_contract_subsys.elf \
-    $(TEST_BLD)/test_boot_contract_cpu_prepare.elf
+    $(TEST_BLD)/test_boot_contract_cpu_prepare.elf \
+    $(TEST_BLD)/test_boot_contract_softirq.elf \
+    $(TEST_BLD)/test_boot_contract_sequence.elf \
+    $(TEST_BLD)/test_boot_contract_checks.elf
 
 BOOT4_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure -I$(TEST_MOCK)/include $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
@@ -956,3 +962,68 @@ $(TEST_BLD)/test_boot_contract_cpu_prepare.elf: \
 .PHONY: test_boot_contract_cpu_prepare
 test_boot_contract_cpu_prepare: $(TEST_BLD)/test_boot_contract_cpu_prepare.elf
 	$<
+
+$(TEST_BLD)/boot4_test_softirq.o: $(TEST_CASES)/test_boot_contract_softirq.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/boot4_softirq_production.o: $(TESTS_DIR)/kernel/intr/softirq.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/boot4_timer_production.o: $(TESTS_DIR)/kernel/time/timer.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_boot_contract_softirq.elf: \
+		$(TEST_BLD)/boot4_test_softirq.o \
+		$(TEST_BLD)/boot4_softirq_production.o \
+		$(TEST_BLD)/boot4_timer_production.o \
+		$(TEST_BLD)/boot2-context/runtime.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_contract_softirq
+test_boot_contract_softirq: $(TEST_BLD)/test_boot_contract_softirq.elf
+	$<
+
+$(TEST_BLD)/boot4_test_sequence.o: $(TEST_CASES)/test_boot_contract_sequence.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_contract_sequence.elf: $(TEST_BLD)/boot4_test_sequence.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test_boot_contract_sequence
+test_boot_contract_sequence: $(TEST_BLD)/test_boot_contract_sequence.elf
+	$<
+
+$(TEST_BLD)/boot4_test_checks.o: $(TEST_CASES)/test_boot_contract_checks.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/boot4_x86_checks_production.o: $(TESTS_DIR)/kernel/arch/x86_64/platform/boot_contract.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_contract_checks.elf: \
+		$(TEST_BLD)/boot4_test_checks.o \
+		$(TEST_BLD)/boot4_x86_checks_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/boot4_test_checks_a64.o: $(TEST_CASES)/test_boot_contract_checks.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -U__x86_64__ -D__aarch64__ -c $< -o $@
+
+$(TEST_BLD)/boot4_a64_checks_production.o: $(TESTS_DIR)/kernel/arch/aarch64/platform/boot_contract.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -U__x86_64__ -D__aarch64__ -c $< -o $@
+
+$(TEST_BLD)/test_boot_contract_checks_a64.elf: \
+		$(TEST_BLD)/boot4_test_checks_a64.o \
+		$(TEST_BLD)/boot4_a64_checks_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test_boot_contract_checks
+test_boot_contract_checks: $(TEST_BLD)/test_boot_contract_checks.elf $(TEST_BLD)/test_boot_contract_checks_a64.elf
+	$(TEST_BLD)/test_boot_contract_checks.elf
+	$(TEST_BLD)/test_boot_contract_checks_a64.elf
