@@ -29,6 +29,21 @@ void free(void * ptr);
  * leaves the old block untouched. */
 void *reallocarray(void *ptr, size_t nmemb, size_t size);
 
+#ifndef __is_libk
+/* Aligned allocation is a user-libc capability: the kernel side (libk)
+ * keeps the plain slab allocator and does not define these symbols, so
+ * the declarations are hidden in __is_libk mode.  POSIX puts them in
+ * <stdlib.h>, so they are declared here as well as in <malloc.h>.
+ *
+ * posix_memalign requires an alignment that is a power of two and a
+ * multiple of sizeof(void *); it reports a failure through its return
+ * value (EINVAL / ENOMEM) and never through errno.
+ * aligned_alloc additionally requires a size that is a multiple of the
+ * alignment. */
+extern int posix_memalign(void **, size_t, size_t);
+extern void *aligned_alloc(size_t, size_t);
+#endif
+
 // ── String conversion ────────────────────────────────────────
 long strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);

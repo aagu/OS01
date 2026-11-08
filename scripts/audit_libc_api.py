@@ -344,6 +344,8 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "calloc",
         "free",
         "reallocarray",
+        "posix_memalign",
+        "aligned_alloc",
         "strtol",
         "strtoul",
         "atoi",

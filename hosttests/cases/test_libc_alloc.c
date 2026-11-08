@@ -594,7 +594,13 @@ static void alloc_stress_heap_tiles(void)
             /* ordinary allocation */
             size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
             unsigned char *p = malloc(sz);
-            if (p) {
+            if (!p) {
+                printf("  [FAIL] malloc(%zu) failed after %d operations\n",
+                       sz, op);
+                assert_true(0);
+                return;
+            }
+            {
                 for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
                     if (!live[i].alive) {
                         live[i].ptr = p;
@@ -609,11 +615,28 @@ static void alloc_stress_heap_tiles(void)
                     free(p);
             }
         } else if (choice < 50) {
-            /* aligned allocation */
-            size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
+            /* aligned allocation: aligned_alloc requires the size to be a
+             * multiple of the alignment, so the size is rounded DOWN to
+             * one.  (Without that, every pair but the lucky one was
+             * EINVAL and this branch never really ran.) */
             size_t al = aligns[(r >> 20) % (sizeof(aligns) / sizeof(aligns[0]))];
-            unsigned char *p = aligned_alloc(al, sz);
-            if (p) {
+            size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
+            /* aligned_alloc requires the size to be a multiple of the
+             * alignment, so the size is rounded DOWN to one.  (Without
+             * that, every pair but the lucky one was EINVAL and this
+             * branch never really ran.)  The ROUNDED size is the one the
+             * block holds, so it is also the one the payload uses. */
+            size_t want = (sz / al) * al;
+            if (!want)
+                want = al;
+            unsigned char *p = aligned_alloc(al, want);
+            if (!p) {
+                printf("  [FAIL] aligned_alloc(%zu,%zu) failed after %d "
+                       "operations\n", al, want, op);
+                assert_true(0);
+                return;
+            }
+            {
                 if (((uintptr_t)p % al) != 0) {
                     printf("  [FAIL] aligned_alloc(%zu,%zu) is not %zu-aligned\n",
                            al, sz, al);
@@ -623,10 +646,10 @@ static void alloc_stress_heap_tiles(void)
                 for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
                     if (!live[i].alive) {
                         live[i].ptr = p;
-                        live[i].len = sz;
+                        live[i].len = want;
                         live[i].pat = pat++;
                         live[i].alive = 1;
-                        memset(p, live[i].pat, sz);
+                        memset(p, live[i].pat, want);
                         break;
                     }
                 }
@@ -638,7 +661,14 @@ static void alloc_stress_heap_tiles(void)
             size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
             size_t al = aligns[(r >> 20) % (sizeof(aligns) / sizeof(aligns[0]))];
             void *out = NULL;
-            if (posix_memalign(&out, al, sz) == 0 && out) {
+            int rc = posix_memalign(&out, al, sz);
+            if (rc != 0 || !out) {
+                printf("  [FAIL] posix_memalign(%zu,%zu) failed (rc=%d) after "
+                       "%d operations\n", al, sz, rc, op);
+                assert_true(0);
+                return;
+            }
+            {
                 unsigned char *p = out;
                 if (((uintptr_t)p % al) != 0) {
                     printf("  [FAIL] posix_memalign(%zu,%zu) is not %zu-aligned\n",
