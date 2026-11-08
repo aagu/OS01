@@ -71,7 +71,13 @@ void tick_handler(void);   // 统一 tick 语义（arch IRQ handler 调用，无
 uint64_t tick_get_jiffies(void);
 ```
 
-> 注意：**没有独立的 tick_init()**——PIT 在 phase 4 由 `pit_init()` 照常启动，
+> BOOT-2：PIT 已分离为 prepare/start——`pit_init()` 仅准备（IRQF_NO_AUTOEN
+> masked 注册 + 100Hz 编程，不 unmask）；`pit_start()` 在 runtime-open 前置
+> 检查后一次性 unmask（handoff 的 mask/unmask 对不算第二次 start）。重复
+> prepare/start 是启动协议错误。校准窗口与放行顺序见
+> docs/superpowers/reports/2026-11-08-boot-2-validation.md。
+>
+> 注意：**没有独立的 tick_init()**——PIT 在 phase 4 由 `pit_init()` 准备，
 > `tick_handler()` 由 PIT/LAPIC 的 arch IRQ handler 直接调用；`tick_start()` 在
 > `kernel/core/main.c:294`（percpu+GS 就绪后）显式调用。
 
@@ -109,6 +115,13 @@ uint64_t tick_get_jiffies(void);
 
 - `lapic_timer_init()`：注册 IDT 门 + 校准（subsys Phase 4）
 - `lapic_timer_calibrate()`：**RTC PIE 联合结果优先**（250ms 窗口更稳），
+  TSC 窗口路径受 `BOOT2_CALIBRATION_SPIN_LIMIT=50000000u` pause 预算约束
+  （轮询预算，不是秒数）；卡死 TSC/反向样本有限失败，LAPIC 保持 uncalibrated
+  （hz=0 → start 拒绝且 LVT masked）。`lapic_timer_init()` 只装 stub，校准
+  由编排器在 phase 4 末统一执行一次（消除同 phase 链接顺序依赖）。
+  `arch_tick_start()` 是原子 IRQ-off 区：PIT 未 prepared 即 fatal；LAPIC
+  失败保持 masked/stopped 且 PIT 重新放行（false=有效回退）；accounting
+  恰发布一次；入口 IF 恢复。
   否则 TSC 窗口（~10ms）
 - `lapic_timer_start()`：每 CPU 周期模式启动
   - ⚠️ **必须写 per-LAPIC `LAPIC_TIMER_DIV`**：AP 复位后 DIV=÷1，静态值 ÷2

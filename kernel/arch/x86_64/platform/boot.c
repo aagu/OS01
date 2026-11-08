@@ -58,6 +58,7 @@
 #include <arch/subsys.h>           /* arch_boot_rsdp, arch_register_subsys*/
 #include <subsys/subsys.h>         /* subsys_init_phase                  */
 #include <arch/x86_64/platform/boot_irq.h>  /* BOOT-2 context/runtime  */
+#include <intr/apic.h>             /* lapic_timer_calibrate (BOOT-2)     */
 #include <arch/x86_64/smp_boot.h> /* x86_64_boot_percpu (BOOT-2 early)  */
 #include <device/boot.h>
 #include <core/panic.h>
@@ -165,6 +166,11 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
     x86_boot_irq_context_prepare();
 
     subsys_init_phase(4);
+
+    /* BOOT-2 Task 3: the LAPIC calibration runs once at phase-4 end,
+     * reading the FINAL clocksource result (no same-phase link-order
+     * dependency; the stub was installed by lapic_timer_init above). */
+    lapic_timer_calibrate();
 
     x86_boot_irq_runtime_open();
 

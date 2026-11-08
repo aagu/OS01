@@ -334,7 +334,7 @@ kernel_main(kern_boot_para_info);
 10. **初始化定时器**：初始化系统定时器
     ```c
     timer_init();
-    pit_init();
+    pit_init();   /* BOOT-2: prepare-only（masked）；pit_start 在 runtime-open */
     ```
 
 11. **初始化键盘**：初始化键盘驱动

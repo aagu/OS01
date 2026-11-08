@@ -8,6 +8,7 @@
 #include <sched/accounting.h>    // sched_accounting_cpu_start (monitor Task 2)
 #include <driver/pit.h>         // pit_prepared (BOOT-2 handoff gate)
 #include <core/panic.h>         // kpanic (BOOT-2 fatal)
+#include <log/log.h>
 #ifdef X86_BOOT_IRQ_TIME_TEST
 #include <selftest/boot_irq_time_fixture.h>
 #endif
@@ -84,6 +85,8 @@ bool arch_tick_start(void)
         sched_accounting_cpu_start(0, 100, true);
     }
     arch_local_irq_restore(flags);
+    /* Spec §6: the handoff's one-line completion/degradation record. */
+    log_info("[boot-2] tick-source=%s\n", ok ? "lapic" : "pit");
 #ifdef X86_BOOT_IRQ_TIME_TEST
     boot2_test_after_handoff(ok);
 #endif

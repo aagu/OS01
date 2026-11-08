@@ -58,6 +58,7 @@
 位于 `kernel/intr/irq.c` 中，处理外部设备中断：
 
 * `register_irq` - 注册中断处理函数
+* `IRQF_NO_AUTOEN`（0x04，BOOT-2）- masked 注册：完成 descriptor/route/install 但跳过 controller enable（绝不先 enable 再 disable——那会在 IRR 锁存真实边沿），由拥有者在自己的窗口显式 unmask；无 flag 调用者保持原 auto-enable
 * `unregister_irq` - 注销中断处理函数
 * `irq_install` - 安装中断门
 
@@ -141,6 +142,12 @@ typedef struct irq_desc
 ```c
 // 在 timer_init() 中
 register_irq(IRQ0, NULL, timer_irq_handler, 0, &pic_controller, "timer");
+```
+
+BOOT-2 补充（x86 PIC）：enable slave 输入（0x28–0x2f）会同时打开 master
+IRQ2 级联；disable 只在最后一个 slave 输入关闭后才 mask 级联（其它 slave
+使用者不受影响）。IMR 读改写在关中断区内完成并恢复来时 IF——这是启动期
+BSP 用法，不是完整 SMP PIC 重构。
 ```
 
 ## 中断处理示例
