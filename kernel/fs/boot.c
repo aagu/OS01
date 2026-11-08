@@ -15,6 +15,7 @@
 #include <fs/tmpfs.h>
 #include <fs/procfs.h>
 #include <block/blockdev.h>
+#include <core/boot_failure.h>
 #include <log/log.h>          // log_* for GPT/ext2/FAT32 fallback logs
 #include <core/panic.h>
 #include <memory/slab.h>
@@ -82,18 +83,16 @@ static block_device_t *find_first_disk(void)
     return NULL;
 }
 
-static bool mount_partitioned_disk(void)
+static int mount_partitioned_disk(void)
 {
     block_device_t *disk = find_first_disk();
-    if (!disk) return false;
+    if (!disk) return -ENODEV;
 
     gpt_info_t *gpt = gpt_scan(disk);
     if (!gpt) {
         // Fallback: old single-FAT32 layout (whole disk is FAT32).
-        if (vfs_mount_fs("vfat", "/", disk, NULL) == 0) {
-            return true;
-        }
-        return false;
+        int rc = vfs_mount_fs("vfat", "/", disk, NULL);
+        return rc;
     }
 
     // Dual-partition layout:
@@ -101,23 +100,24 @@ static bool mount_partitioned_disk(void)
     //   gpt->partitions[1] = hda2 (ext2)      → /
     if (gpt->count < 2) {
         kfree(gpt);
-        return false;
+        return -EINVAL;
     }
 
-    bool root_ok = false;
-
-    if (vfs_mount_fs("ext2", "/", gpt->partitions[1].dev, NULL) == 0) {
-        root_ok = true;
-    } else {
+    int rc = vfs_mount_fs("ext2", "/", gpt->partitions[1].dev, NULL);
+    if (rc != 0) {
         log_err("EXT2: mount failed — / not available\n");
+        kfree(gpt);
+        return rc;
     }
 
-    if (vfs_mount_fs("vfat", "/boot", gpt->partitions[0].dev, NULL) != 0) {
+    int boot_rc = vfs_mount_fs("vfat", "/boot", gpt->partitions[0].dev, NULL);
+    if (boot_rc != 0) {
         log_warn("FAT32: /boot mount failed\n");
+        boot_failure_warn("fs", "/boot", boot_rc, -1, -1);
     }
 
     kfree(gpt);
-    return root_ok;
+    return 0;
 }
 
 // ── fs_boot_mounts ────────────────────────────────────────────
@@ -129,15 +129,21 @@ static bool mount_partitioned_disk(void)
 void fs_boot_mounts(void)
 {
     register_block_devices();
-    bool root_ok = mount_partitioned_disk();
-    if (!root_ok) {
-        kpanic("root filesystem unavailable\n");
+    int root_rc = mount_partitioned_disk();
+    if (root_rc != 0) {
+        boot_failure_stop("fs", "root", root_rc, -1, -1);
     }
 
     // /tmp → tmpfs (independent of disk)
-    tmpfs_init();
+    int tmp_rc = tmpfs_init();
+    if (tmp_rc != 0) {
+        boot_failure_warn("fs", "tmpfs", tmp_rc, -1, -1);
+    }
 
-    procfs_init();                  // /proc
+    int proc_rc = procfs_init();                  // /proc
+    if (proc_rc != 0) {
+        boot_failure_warn("fs", "procfs", proc_rc, -1, -1);
+    }
 }
 
 

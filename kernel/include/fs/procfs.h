@@ -30,7 +30,7 @@
 // ── Public API ─────────────────────────────────────────────────
 
 int procfs_register_fs(void);
-void procfs_init(void);
+int procfs_init(void);
 
 // ── Monitor plan Task 4: per-file snapshot lifecycle (spec §6) ──
 // The four statistics nodes (stat/thermal/meminfo/status) generate

@@ -50,6 +50,32 @@ static bool s_panic_jmp_armed = false;
 static jmp_buf s_panic_jmp;
 static char s_last_panic_msg[256];
 
+static bool s_boot_stop_jmp_armed = false;
+static jmp_buf s_boot_stop_jmp;
+static char s_last_stop_stage[32];
+static char s_last_stop_component[64];
+static int64_t s_last_stop_rc = 0;
+
+__attribute__((noreturn))
+void boot_failure_stop(const char *stage, const char *component,
+                       int64_t rc, int phase, int cpu)
+{
+    (void)phase; (void)cpu;
+    snprintf(s_last_stop_stage, sizeof(s_last_stop_stage), "%s", stage ? stage : "");
+    snprintf(s_last_stop_component, sizeof(s_last_stop_component), "%s", component ? component : "");
+    s_last_stop_rc = rc;
+    if (s_boot_stop_jmp_armed) {
+        longjmp(s_boot_stop_jmp, 1);
+    }
+    abort();
+}
+
+void boot_failure_warn(const char *stage, const char *component,
+                       int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)rc; (void)phase; (void)cpu;
+}
+
 #include <unistd.h>
 
 void kpanic(const char *fmt, ...)
@@ -562,14 +588,16 @@ static void test_root_requirement(void)
     TEST_CASE("Root requirement: missing disk/failed mount panics, valid GPT and FAT fallback succeed");
     reset_test_state();
 
-    /* Subtest A: No block devices -> fs_boot_mounts panics with 'root filesystem unavailable' */
-    s_panic_jmp_armed = true;
-    if (setjmp(s_panic_jmp) == 0) {
+    /* Subtest A: No block devices -> fs_boot_mounts halts via boot_failure_stop */
+    s_boot_stop_jmp_armed = true;
+    if (setjmp(s_boot_stop_jmp) == 0) {
         fs_boot_mounts();
         assert_true(false); /* Should not be reached */
     }
-    s_panic_jmp_armed = false;
-    assert_not_null(strstr(s_last_panic_msg, "root filesystem unavailable"));
+    s_boot_stop_jmp_armed = false;
+    assert_str_eq("fs", s_last_stop_stage);
+    assert_str_eq("root", s_last_stop_component);
+    assert_eq(-ENODEV, s_last_stop_rc);
 
     /* Subtest B: Dual-partition GPT layout -> ext2 root mount succeeds */
     reset_test_state();
@@ -623,7 +651,7 @@ static void test_root_requirement(void)
     assert_true(s_root_mounted);
     assert_str_eq("vfat", s_root_fs_type);
 
-    /* Subtest D: GPT present but ext2_init fails -> panics with root filesystem unavailable */
+    /* Subtest D: GPT present but ext2_init fails -> stops with root error */
     reset_test_state();
     assert_eq(0, block_device_register(&disk_desc, &disk_dev));
     fake_gpt = kmalloc(sizeof(gpt_info_t));
@@ -635,13 +663,15 @@ static void test_root_requirement(void)
     s_mock_gpt = fake_gpt;
     s_mock_ext2_init_ret = -EIO;
 
-    s_panic_jmp_armed = true;
-    if (setjmp(s_panic_jmp) == 0) {
+    s_boot_stop_jmp_armed = true;
+    if (setjmp(s_boot_stop_jmp) == 0) {
         fs_boot_mounts();
         assert_true(false); /* Should not reach */
     }
-    s_panic_jmp_armed = false;
-    assert_not_null(strstr(s_last_panic_msg, "root filesystem unavailable"));
+    s_boot_stop_jmp_armed = false;
+    assert_str_eq("fs", s_last_stop_stage);
+    assert_str_eq("root", s_last_stop_component);
+    assert_eq(-EIO, s_last_stop_rc);
 
     /* Subtest E: GPT present, ext2 succeeds, fat32 /boot fails -> fs_boot_mounts does not panic */
     reset_test_state();

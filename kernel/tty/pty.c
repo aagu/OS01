@@ -360,7 +360,7 @@ int pty_init(void)
 {
     memset(pty_table, 0, sizeof(pty_table));
     int rc = devfs_register_chrdev("ptmx", NULL, &ptmx_ops);
-    if (rc != 0 && rc != -EEXIST) {
+    if (rc != 0) {
         log_err("pty: failed to register /dev/ptmx (%d)\n", rc);
         return rc;
     }

@@ -1,5 +1,6 @@
 #include <core/printk.h>      // serial_printk (still printed from kernel_main)
 #include <core/bootinfo.h>    // struct boot_context (used by signature)
+#include <core/boot_failure.h>
 #include <core/panic.h>
 #include <log/log.h>
 #include <memory/memory.h>
@@ -98,8 +99,9 @@ int kernel_main(const struct boot_context *bootctx)
 
 #if OS01_HAS_VFS
     // ═══ 6. FS bring-up + device node registration ═══════════
-    if (fs_boot_prepare() != 0)
-        kpanic("fs_boot_prepare failed\n");
+    int fs_prep = fs_boot_prepare();
+    if (fs_prep != 0)
+        boot_failure_stop("fs", "devfs", fs_prep, -1, -1);
 
     pci_devfs_register_all();
     usb_devfs_register_all();
@@ -109,8 +111,9 @@ int kernel_main(const struct boot_context *bootctx)
     arch10_capacity_fixture_init();
 #endif
 
-    if (pty_init() != 0)
-        log_err("pty_init failed\n");
+    int pty_rc = pty_init();
+    if (pty_rc != 0)
+        boot_failure_stop("pty", "ptmx", pty_rc, -1, -1);
 
     if (arch_boot_device_nodes() != 0)
         kpanic("arch_boot_device_nodes failed\n");
@@ -118,8 +121,9 @@ int kernel_main(const struct boot_context *bootctx)
     fs_boot_mounts();
 
     // ═══ 7. Console TTY + /dev smoke probe ════════════════════
-    if (tty_boot_init() != 0)
-        log_err("tty_boot_init failed\n");
+    int tty_rc = tty_boot_init();
+    if (tty_rc != 0)
+        boot_failure_stop("tty", "console", tty_rc, -1, -1);
     fs_boot_probe_devfs();
 #endif /* OS01_HAS_VFS */
 

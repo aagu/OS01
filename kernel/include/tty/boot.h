@@ -26,7 +26,9 @@
 // on devfs existing.  Must run before fs_boot_probe_devfs() because the
 // /dev debug-list and /dev/null smoke test run after the TTY node
 // registration is in place.
-int tty_boot_register_devfs(void);
+#include <tty/tty.h>
+
+int tty_boot_register_devfs(tty_t *console);
 int tty_boot_init(void);
 
 #endif // _KERNEL_TTY_BOOT_H

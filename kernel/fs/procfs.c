@@ -697,13 +697,17 @@ int procfs_register_fs(void)
 }
 
 // ── Initialise and mount ─────────────────────────────────────
-void procfs_init(void)
+int procfs_init(void)
 {
-    procfs_register_fs();
+    int reg = procfs_register_fs();
+    if (reg != 0 && reg != -EEXIST) {
+        return reg;
+    }
     int ret = vfs_mount_fs("procfs", "/proc", NULL, NULL);
     if (ret == 0) {
         debug_fs("procfs: mounted at /proc\n");
     } else {
         debug_fs("procfs: mount FAILED\n");
     }
+    return ret;
 }

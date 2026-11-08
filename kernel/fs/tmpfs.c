@@ -849,12 +849,17 @@ int tmpfs_register_fs(void)
     return vfs_register_filesystem(&tmpfs_fs_type);
 }
 
-void tmpfs_init(void)
+int tmpfs_init(void)
 {
-    tmpfs_register_fs();
-    if (vfs_mount_fs("tmpfs", "/tmp", NULL, NULL) == 0) {
+    int reg = tmpfs_register_fs();
+    if (reg != 0 && reg != -EEXIST) {
+        return reg;
+    }
+    int mnt = vfs_mount_fs("tmpfs", "/tmp", NULL, NULL);
+    if (mnt == 0) {
         debug_fs("tmpfs: mounted at /tmp\n");
     }
+    return mnt;
 }
 
 #ifdef OS01_SELFTEST

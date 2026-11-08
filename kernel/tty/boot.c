@@ -22,19 +22,22 @@
 #include <log/log.h>          // log_info for "tty: console TTY created"
 #include <errno.h>
 
-int tty_boot_register_devfs(void)
+int tty_boot_register_devfs(tty_t *console)
 {
+    if (!console) {
+        return -EINVAL;
+    }
+
     // Register /dev/tty (magic → controlling terminal) and /dev/tty0
-    // (direct physical console) AFTER keyboard_set_tty so that
-    // keyboard_get_tty() returns the correct pointer for private_data.
-    int ret = devfs_register_chrdev("tty", keyboard_get_tty(), &tty_magic_ops);
-    if (ret != 0 && ret != -EEXIST) {
+    // (direct physical console) with explicit console instance.
+    int ret = devfs_register_chrdev("tty", console, &tty_magic_ops);
+    if (ret != 0) {
         log_err("tty: failed to register /dev/tty (%d)\n", ret);
         return ret;
     }
 
-    ret = devfs_register_chrdev("tty0", keyboard_get_tty(), &tty_phys_ops);
-    if (ret != 0 && ret != -EEXIST) {
+    ret = devfs_register_chrdev("tty0", console, &tty_phys_ops);
+    if (ret != 0) {
         log_err("tty: failed to register /dev/tty0 (%d)\n", ret);
         return ret;
     }
@@ -47,12 +50,19 @@ int tty_boot_init(void)
     // console_putchar as output — routes all user-space writes
     // through the VT100 CSI terminal emulator.
     tty_t *console = tty_alloc(console_putchar, NULL);
-    if (console) {
-        serial_set_tty(console);         // serial IRQ → TTY
-        keyboard_set_tty(console);       // keyboard IRQ → TTY
-        tty_set_dev_tty(console);        // /dev/tty read/write → TTY
-        log_info("tty: console TTY created\n");
+    if (!console) {
+        return -ENOMEM;
     }
 
-    return tty_boot_register_devfs();
+    int ret = tty_boot_register_devfs(console);
+    if (ret != 0) {
+        return ret;
+    }
+
+    serial_set_tty(console);         // serial IRQ → TTY
+    keyboard_set_tty(console);       // keyboard IRQ → TTY
+    tty_set_dev_tty(console);        // /dev/tty read/write → TTY
+    log_info("tty: console TTY created\n");
+
+    return 0;
 }

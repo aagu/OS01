@@ -575,3 +575,50 @@ $(TEST_BLD)/test_pci_devfs.elf: $(TEST_BLD)/test_pci_devfs.o \
 		$(TEST_BLD)/rwlock.o \
 		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── BOOT-3 mounts & terminal host tests ───────────────────────────
+$(eval $(call register_host_test,test_boot_failure_mounts,fs,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_failure_terminal,fs,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_failure_mounts.elf \
+    $(TEST_BLD)/test_boot_failure_terminal.elf
+
+$(TEST_BLD)/boot3_fs_boot_production.o: $(TESTS_DIR)/kernel/fs/boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/boot3_test_mounts.o: $(TEST_CASES)/test_boot_failure_mounts.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_failure_mounts.elf: \
+		$(TEST_BLD)/boot3_test_mounts.o \
+		$(TEST_BLD)/boot3_fs_boot_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test_boot_failure_mounts
+test_boot_failure_mounts: $(TEST_BLD)/test_boot_failure_mounts.elf
+	$<
+
+$(TEST_BLD)/boot3_tty_boot_production.o: $(TESTS_DIR)/kernel/tty/boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/boot3_pty_production.o: $(TESTS_DIR)/kernel/tty/pty.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PTY_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_failure_terminal.o: $(TEST_CASES)/test_boot_failure_terminal.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_failure_terminal.elf: \
+		$(TEST_BLD)/test_boot_failure_terminal.o \
+		$(TEST_BLD)/boot3_tty_boot_production.o \
+		$(TEST_BLD)/boot3_pty_production.o
+	$(HOST_CC) -Wl,--gc-sections -lpthread -o $@ $^
+
+.PHONY: test_boot_failure_terminal
+test_boot_failure_terminal: $(TEST_BLD)/test_boot_failure_terminal.elf
+	$<
