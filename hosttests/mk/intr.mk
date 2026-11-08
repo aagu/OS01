@@ -413,11 +413,19 @@ BOOT2_RTC_SOURCES := $(BOOT2_CORE_SOURCES) \
     arch/x86_64/platform/boot_irq.c \
     arch/x86_64/intr/apic/lapic_timer.c
 
-$(TEST_BLD)/boot2-context/%.o $(TEST_BLD)/boot2-rtc/%.o: $(TESTS_DIR)/kernel/%.c
+$(TEST_BLD)/boot2-context/%.o: $(TESTS_DIR)/kernel/%.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
 
-$(TEST_BLD)/boot2-context/runtime.o $(TEST_BLD)/boot2-rtc/runtime.o: $(TEST_MOCK)/boot_irq_time/runtime.c
+$(TEST_BLD)/boot2-rtc/%.o: $(TESTS_DIR)/kernel/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/boot2-context/runtime.o: $(TEST_MOCK)/boot_irq_time/runtime.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/boot2-rtc/runtime.o: $(TEST_MOCK)/boot_irq_time/runtime.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(BOOT2_REG_HOST_CFLAGS) $(LIBC_INC) -MMD -MP -c $< -o $@
 

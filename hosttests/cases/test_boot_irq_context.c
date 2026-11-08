@@ -42,7 +42,8 @@ void do_softirq(void);
 #include <unistd.h>
 
 /* production surfaces */
-void x86_64_boot_subsystems(const struct boot_context *bootctx);
+void x86_64_boot_controllers(const struct boot_context *bootctx);
+void x86_64_boot_devices(const struct boot_context *bootctx);
 void x86_64_boot_percpu(void);
 void arch_boot_percpu(void);
 void timer_init(void);
@@ -172,7 +173,9 @@ static void run_orchestrator(void)
     struct boot_context bootctx;
     memset(&bootctx, 0, sizeof(bootctx));
     bootctx.firmware.acpi_rsdp = 0x1234;
-    x86_64_boot_subsystems(&bootctx);
+    x86_64_boot_controllers(&bootctx);
+    arch_boot_percpu();
+    x86_64_boot_devices(&bootctx);
 }
 
 static void orchestrator_order(void)

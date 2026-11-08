@@ -156,6 +156,13 @@ void x86_64_boot_aps(void)
 
 void arch_boot_percpu(void)
 {
+    if (num_cpus != 0) {
+        if (__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) != 1 ||
+            percpu_data[0].self != (uint64_t)&percpu_data[0]) {
+            kpanic("BOOT-2: late percpu verify failed\n");
+        }
+        return;
+    }
     x86_64_boot_percpu();
     x86_boot_irq_context_prepare();
 }

@@ -52,15 +52,29 @@ void serial_poll(void) {}
 int device_boot_result(void) { return 0; }
 /* Fatal boundary: recorded, never returns in a passing test. */
 unsigned long boot2_kpanic_calls;
+#include <stdarg.h>
+#include <stdio.h>
 /* glibc _exit — declared directly: <unistd.h> resolves to the OS01
  * libc shadow here, which clashes with the host types. */
 void _exit(int) __attribute__((noreturn));
+long write(int, const void *, unsigned long);
 /* A test can arm a hook to catch the fatal (longjmp); default kills. */
 void (*boot2_kpanic_hook)(void);
 void kpanic(const char *msg, ...)
 {
-    (void)msg;
     boot2_kpanic_calls++;
+    if (msg) {
+        char buf[256];
+        va_list ap;
+        va_start(ap, msg);
+        vsnprintf(buf, sizeof(buf), msg, ap);
+        va_end(ap);
+        (void)write(2, "KPANIC: ", 8);
+        const char *p = buf;
+        while (*p) p++;
+        (void)write(2, buf, (size_t)(p - buf));
+        (void)write(2, "\n", 1);
+    }
     if (boot2_kpanic_hook)
         boot2_kpanic_hook();
     _exit(86);
@@ -251,9 +265,21 @@ void boot2_tsc_advance(uint64_t d) { tsc_model += d; }
 void *kmalloc(size_t size) { return malloc(size ? size : 1); }
 void kfree(void *ptr) { free(ptr); }
 __attribute__((weak)) bool ioapic_available(void) { return false; }
-int g_log_level = 0;
+int g_log_level = 3;
 void _log_info_impl(const char *f, ...) { (void)f; }
-void _log_err_impl(const char *f, ...) { (void)f; }
+void _log_err_impl(const char *f, ...)
+{
+    if (f) {
+        char buf[256];
+        va_list ap;
+        va_start(ap, f);
+        vsnprintf(buf, sizeof(buf), f, ap);
+        va_end(ap);
+        const char *p = buf;
+        while (*p) p++;
+        (void)write(2, buf, (size_t)(p - buf));
+    }
+}
 void _log_warn_impl(const char *f, ...) { (void)f; }
 void _log_debug_impl(const char *f, ...) { (void)f; }
 unsigned long boot2_early_puts_calls;
