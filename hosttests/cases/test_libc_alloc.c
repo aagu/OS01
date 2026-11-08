@@ -489,6 +489,231 @@ static void aligned_alloc_bad_multiple(void)
     }
 }
 
+
+/* ── the heap must stay tiled ───────────────────────────────────────────
+ *
+ * The allocator's blocks tile the heap: walking from the heap base by
+ * each block's size must land exactly on the program break.  A hole in the
+ * heap breaks that walk, and the allocator's coalescing step - which finds
+ * the next block by ADDRESS - would then read whatever bytes happen to be
+ * in the hole as a block header.  That is how an allocation's payload was
+ * once read as a block header, and how the allocator ended up handing out
+ * overlapping blocks.
+ *
+ * The regression: carving an aligned block out of a free block whose tail
+ * remainder was too small to be a free block of its own used to DROP the
+ * remainder, leaving a hole.  The remainder is now absorbed by the aligned
+ * block, which keeps the heap tiled.
+ *
+ * The block header layout mirrored here is libc/stdlib/malloc.c's: a size_t
+ * size (the TOTAL block size, header included) followed by an int is_free.
+ */
+#define ALLOC_BLOCK_HEADER_SIZE 16
+#define ALLOC_BLOCK_ALIGN        16
+
+static int alloc_heap_tiles(void)
+{
+    uint64_t base = libc_heap_runtime_base();
+    uint64_t brk = libc_heap_runtime_brk();
+    uint64_t p = base;
+    int blocks = 0;
+
+    if (brk <= base)
+        return 1;
+    while (p < brk) {
+        uint64_t size = *(uint64_t *)p;
+        if (size < ALLOC_BLOCK_HEADER_SIZE || (size % ALLOC_BLOCK_ALIGN) != 0)
+            return 0;                       /* not a block header at all */
+        if (size > brk - p)
+            return 0;                       /* the block runs past the break */
+        p += size;
+        blocks++;
+        if (blocks > 100000)
+            return 0;
+    }
+    return p == brk;
+}
+
+/* A live allocation must be backed by exactly one block whose header sits
+ * ALLOC_BLOCK_HEADER_SIZE bytes before the user pointer, and that block must
+ * be marked allocated. */
+static int alloc_live_is_backed(unsigned char *ptr)
+{
+    uint64_t base = libc_heap_runtime_base();
+    uint64_t brk = libc_heap_runtime_brk();
+    uint64_t want = (uint64_t)(uintptr_t)ptr - ALLOC_BLOCK_HEADER_SIZE;
+    uint64_t p = base;
+
+    while (p < brk) {
+        uint64_t size = *(uint64_t *)p;
+        if (size < ALLOC_BLOCK_HEADER_SIZE || (size % ALLOC_BLOCK_ALIGN) != 0)
+            return 0;
+        if (p + size > brk)
+            return 0;
+        if (p == want)
+            return *(int *)(p + 8) == 0;   /* is_free must be clear */
+        p += size;
+    }
+    return 0;
+}
+
+#define ALLOC_STRESS_MAX_LIVE 64
+
+static void alloc_stress_heap_tiles(void)
+{
+    static const size_t sizes[] = { 1, 7, 16, 17, 64, 100, 200, 512 };
+    static const size_t aligns[] = { 16, 32, 64, 256 };
+    struct { unsigned char *ptr; size_t len; unsigned char pat; int alive; }
+        live[ALLOC_STRESS_MAX_LIVE];
+    uint32_t seed = 0x5eed1234u;
+    unsigned char pat = 0xA5;
+    int i;
+    int op;
+
+    TEST_SUITE("alloc_stress_heap_tiles");
+
+    for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
+        live[i].ptr = NULL;
+        live[i].len = 0;
+        live[i].pat = 0;
+        live[i].alive = 0;
+    }
+
+    /* A fixed seed keeps the case deterministic: a regression must fail
+     * the same way on every run. */
+    for (op = 0; op < 4000; op++) {
+        uint32_t r = seed * 1103515245u + 12345u;
+        unsigned choice;
+        seed = r;
+
+        r = seed * 1103515245u + 12345u;
+        seed = r;
+        choice = (r >> 8) % 100;
+
+        if (choice < 30) {
+            /* ordinary allocation */
+            size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
+            unsigned char *p = malloc(sz);
+            if (p) {
+                for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
+                    if (!live[i].alive) {
+                        live[i].ptr = p;
+                        live[i].len = sz;
+                        live[i].pat = pat++;
+                        live[i].alive = 1;
+                        memset(p, live[i].pat, sz);
+                        break;
+                    }
+                }
+                if (i == ALLOC_STRESS_MAX_LIVE)
+                    free(p);
+            }
+        } else if (choice < 50) {
+            /* aligned allocation */
+            size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
+            size_t al = aligns[(r >> 20) % (sizeof(aligns) / sizeof(aligns[0]))];
+            unsigned char *p = aligned_alloc(al, sz);
+            if (p) {
+                if (((uintptr_t)p % al) != 0) {
+                    printf("  [FAIL] aligned_alloc(%zu,%zu) is not %zu-aligned\n",
+                           al, sz, al);
+                    assert_true(0);
+                    return;
+                }
+                for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
+                    if (!live[i].alive) {
+                        live[i].ptr = p;
+                        live[i].len = sz;
+                        live[i].pat = pat++;
+                        live[i].alive = 1;
+                        memset(p, live[i].pat, sz);
+                        break;
+                    }
+                }
+                if (i == ALLOC_STRESS_MAX_LIVE)
+                    free(p);
+            }
+        } else if (choice < 65) {
+            /* aligned allocation through the POSIX entry point */
+            size_t sz = sizes[(r >> 16) % (sizeof(sizes) / sizeof(sizes[0]))];
+            size_t al = aligns[(r >> 20) % (sizeof(aligns) / sizeof(aligns[0]))];
+            void *out = NULL;
+            if (posix_memalign(&out, al, sz) == 0 && out) {
+                unsigned char *p = out;
+                if (((uintptr_t)p % al) != 0) {
+                    printf("  [FAIL] posix_memalign(%zu,%zu) is not %zu-aligned\n",
+                           al, sz, al);
+                    assert_true(0);
+                    return;
+                }
+                for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
+                    if (!live[i].alive) {
+                        live[i].ptr = p;
+                        live[i].len = sz;
+                        live[i].pat = pat++;
+                        live[i].alive = 1;
+                        memset(p, live[i].pat, sz);
+                        break;
+                    }
+                }
+                if (i == ALLOC_STRESS_MAX_LIVE)
+                    free(p);
+            }
+        } else if (choice < 85) {
+            /* reallocation */
+            i = (int)((r >> 16) % ALLOC_STRESS_MAX_LIVE);
+            if (live[i].alive) {
+                size_t sz = sizes[(r >> 20) % (sizeof(sizes) / sizeof(sizes[0]))];
+                unsigned char *np = realloc(live[i].ptr, sz);
+                if (np) {
+                    live[i].ptr = np;
+                    live[i].len = sz;
+                    live[i].pat = pat++;
+                    memset(np, live[i].pat, sz);
+                }
+            }
+        } else {
+            /* release */
+            i = (int)((r >> 16) % ALLOC_STRESS_MAX_LIVE);
+            if (live[i].alive) {
+                free(live[i].ptr);
+                live[i].alive = 0;
+                live[i].ptr = NULL;
+            }
+        }
+
+        /* The heap must still tile after EVERY operation: that is the
+         * invariant a dropped remainder breaks. */
+        if (!alloc_heap_tiles()) {
+            printf("  [FAIL] the heap no longer tiles after operation %d\n", op);
+            assert_true(0);
+            return;
+        }
+        /* Every live allocation must still be backed by its own block. */
+        for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
+            if (live[i].alive && !alloc_live_is_backed(live[i].ptr)) {
+                printf("  [FAIL] live block %d (%p) is not backed by a block "
+                       "header after operation %d\n", i, live[i].ptr, op);
+                assert_true(0);
+                return;
+            }
+        }
+        /* The payload of every live allocation must be untouched. */
+        if ((op % 64) == 0) {
+            for (i = 0; i < ALLOC_STRESS_MAX_LIVE; i++) {
+                if (!live[i].alive)
+                    continue;
+                if (!buffer_is(live[i].ptr, live[i].len, live[i].pat)) {
+                    printf("  [FAIL] live block %d was overwritten after "
+                           "operation %d\n", i, op);
+                    assert_true(0);
+                    return;
+                }
+            }
+        }
+    }
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(calloc_product_wrap),
     TEST_ENTRY(malloc_roundup_wrap),
@@ -496,6 +721,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(aligned_block_lifecycle),
     TEST_ENTRY(posix_memalign_bad_alignment),
     TEST_ENTRY(aligned_alloc_bad_multiple),
+    TEST_ENTRY(alloc_stress_heap_tiles),
 TEST_LIST_END
 
 int main(void)

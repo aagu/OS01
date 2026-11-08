@@ -223,6 +223,21 @@ static void *alloc_aligned(size_t alignment, size_t size)
         front = (size_t)(head - base);
         back = (size_t)(end - (head + need));
 
+        // A remainder smaller than MIN_BLOCK_SIZE cannot be a free block of
+        // its own.  Dropping it would leave a HOLE in the heap: the block
+        // that follows the free block still starts at `end`, but the
+        // aligned block would claim to end at head+need, so the heap would
+        // no longer tile.  try_coalesce walks the heap by address, so it
+        // would later step into the hole and coalesce with whatever bytes
+        // happen to be there - which is how an allocation's payload ended
+        // up being read as a block header.  The remainder is therefore
+        // absorbed by the aligned block, which then covers exactly the
+        // space the free block used to cover.
+        if (back != 0 && back < MIN_BLOCK_SIZE) {
+            need += back;
+            back = 0;
+        }
+
         {
             free_block_t *old_next = block->next;
             free_block_t *back_free = NULL;
