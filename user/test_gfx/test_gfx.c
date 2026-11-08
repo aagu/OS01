@@ -507,14 +507,13 @@ static void present_rect_surface_mode(void)
      * emulated serial port under -serial stdio). */
     printf("[present-rect-surface] ready\n");
 
-    /* Block on stdin until the runner types "go".  We use read()
-     * (not stdio) because OS01's libc does not declare fgets;
-     * the runner sends "go\n" so a single 4-byte read is enough. */
+    /* Block on stdin until the runner types "go".  Standard fgets now
+     * that the libc declares it (T8): one line, consumed as a line,
+     * with the stream state (EOF/error indicators) behind it instead
+     * of a single raw read that could under-read a split line. */
     char line[64];
-    ssize_t got_n = read(STDIN_FILENO, line, sizeof(line) - 1);
-    if (got_n <= 0)
+    if (!fgets(line, (int)sizeof(line), stdin))
         FAIL("stdin closed before 'go'");
-    line[got_n] = '\0';
 
     /* Open the view at (VX, VY, VW, VH).  gfx_open does the
      * /dev/gfx0 open + CREATE_VIEW + GET_INFO + mmap; failure

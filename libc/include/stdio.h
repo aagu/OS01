@@ -119,6 +119,24 @@ int   fputs(const char *s, FILE *f);
 int   getchar(void);
 int   getchar_unlocked(void);
 char *fgets_unlocked(char *s, int size, FILE *f);
+
+/* The standard character spellings (T8).  They share the T5 stream
+ * state — resolver, sticky EOF/error indicators, the single pushback
+ * byte, capability checks — so getc and getc_unlocked observe exactly
+ * the same stream (this libc is single-threaded; the unlocked pair
+ * differs in name only, like every other unlocked pair here). */
+int   fgetc(FILE *f);
+int   getc(FILE *f);
+int   putc(int c, FILE *f);
+int   fileno(FILE *f);
+char *fgets(char *s, int size, FILE *f);
+
+/* Dynamic delimited line reading (T8): getdelim reads until `delim`
+ * (inclusive) or EOF, growing the caller's buffer; getline is the
+ * newline form.  Returns the byte count including the delimiter, or
+ * -1 when nothing was read and the stream hit EOF/error.  On failure
+ * *lineptr and *n stay consistent and the buffer remains freeable. */
+ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *f);
 ssize_t getline(char **lineptr, size_t *n, FILE *f);
 
 /* ── Formatted output ────────────────────────────────────────────── */

@@ -5156,6 +5156,33 @@
     "action": "unique",
     "reason": "Primary host unit test for stream mode parsing, item-accurate fread/fwrite and the fcntl wrapper (T7); registry and stream-state groups cover disjoint properties"
    }
+  },
+  {
+   "id": "libc.stdio.dynamic_lines",
+   "component": "libc",
+   "behavior": "stdio",
+   "trigger": "host runner invokes test_libc_line.elf",
+   "assertions": [
+    "getline returns lines with newline, empty lines, and the final segment without newline, then -1 with the EOF indicator; lengths and terminating NULs are exact",
+    "getdelim honors a delimiter other than newline and includes it; embedded NUL bytes are preserved with the length contract",
+    "the buffer grows past a small caller buffer and across a failed-and-retried growth; a growth ENOMEM leaves the caller's buffer freeable with *lineptr/*n consistent and the prefix preserved",
+    "a capacity beyond SSIZE_MAX is rejected with EINVAL without a read; a read error is distinct from EOF (error indicator, EOF untouched)",
+    "fgets consumes nothing with n==1, returns lines with and without newline, and answers NULL at EOF; fgetc/getc/putc/fileno share the T5 stream state"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_line"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_line.c",
+    "selector": "test_libc_line",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for dynamic line IO and the standard character interfaces (T8); the stream-state and io groups cover disjoint stream properties"
+   }
   }
  ]
 }

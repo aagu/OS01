@@ -349,8 +349,8 @@ TEST_FUNC(test_fwrite_budget_reports_completed_items) {
 
     size_t len = 0;
     const char *captured = stream_rt_written(vfd, &len);
-    assert_eq(9, (size_t)len);
-    assert_mem_eq("abcdefgh", captured, 8);  /* exactly the first 2 items */
+    assert_eq(9, (size_t)len);   /* items 1+2 (8 bytes) + the first byte of item 3 */
+    assert_mem_eq("abcdefgh", captured, 8);  /* the two COMPLETED items */
     fclose(f);
     stream_rt_reset();
 }

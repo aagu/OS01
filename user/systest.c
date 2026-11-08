@@ -4041,7 +4041,83 @@ static void test_stdio_modes(void)
     unlink(path);
 }
 
+
+// ── T8: BusyBox line applets through the libc getline (libc
+//    completion plan) ──
+//
+// getdelim/getline now exist in libc.a and the BusyBox private build
+// carries -DHAVE_GETLINE=1 (config/busybox.config.in), so
+// xmalloc_fgetline resolves getline from OUR libc instead of libbb's
+// fallback.  This case runs the real applets head/tail/cat over a
+// five-line tmpfs file with stdout redirected to a file, and checks
+// the exact extracted lines.
+static int busybox_lines_expect(const char **av, const char *out_path,
+                                const char *expect, const char *label)
+{
+    unlink(out_path);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int out = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (out < 0) _exit(120);
+        if (dup2(out, 1) < 0) _exit(121);
+        close(out);
+        execve(av[0], (char *const *)av, NULL);
+        _exit(127);
+    }
+    if (pid <= 0) { FAIL("%s: fork", label); return 0; }
+
+    int st = -1;
+    if (waitpid(pid, &st, 0) != pid) { FAIL("%s: waitpid", label); return 0; }
+    if ((st & 0x7f) != 0 || ((st >> 8) & 0xff) != 0) {
+        FAIL("%s: exit status=%d", label, st);
+        return 0;
+    }
+
+    int fd = open(out_path, O_RDONLY);
+    if (fd < 0) { FAIL("%s: no output", label); return 0; }
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n < 0) n = 0;
+    buf[n] = '\0';
+    int ok = (strcmp(buf, expect) == 0);
+    CHECK3(ok, label, ok ? "exact output" : buf);
+    return ok;
+}
+
+static void test_busybox_lines(void)
+{
+    static const char *path = "/tmp/systest_bb_lines.txt";
+    static const char *out = "/tmp/systest_bb_lines.out";
+    unlink(path);
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK3(fd >= 0, "bb lines setup", "file created");
+    if (fd < 0) return;
+    const char *content = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    ssize_t wn = write(fd, content, strlen(content));
+    close(fd);
+    CHECK3(wn == (ssize_t)strlen(content), "bb lines setup", "5 lines seeded");
+
+    char *av_head[5] = {(char *)"/bin/head", (char *)"-n",
+                        (char *)"2", (char *)path, NULL};
+    if (!busybox_lines_expect(av_head, out, "alpha\nbeta\n", "bb head -n 2")) {
+        /* the CHECK3 inside already reported the failure detail */
+    }
+
+    char *av_tail[5] = {(char *)"/bin/tail", (char *)"-n",
+                        (char *)"2", (char *)path, NULL};
+    busybox_lines_expect(av_tail, out, "delta\nepsilon\n", "bb tail -n 2");
+
+    char *av_cat[4] = {(char *)"/bin/cat", (char *)path, NULL};
+    busybox_lines_expect(av_cat, out, content, "bb cat");
+
+    unlink(path);
+    unlink(out);
+}
+
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
+
 // The kernel reserves [0x400000, 0x20600000) for the ELF image
 // (envelope incl. segment gaps), the heap (committed + reserve),
 // the 0x203ff000 guard page and the 2 MiB user stack.  No mapping
@@ -4551,6 +4627,7 @@ static const test_case_t tests[] = {
     {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
     {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
+    {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

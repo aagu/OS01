@@ -27,4 +27,11 @@
 #define LLONG_MAX   9223372036854775807LL
 #define ULLONG_MAX  18446744073709551615ULL
 
+/* Largest value of a signed size (POSIX).  ssize_t is `long` in this
+ * environment, so the bound is the signed 64-bit max.  The static
+ * assert tying this to the ssize_t width lives next to the typedef in
+ * <sys/types.h> — it cannot live here, because sys/types.h includes
+ * stdint.h, which includes this header BEFORE the typedef is reached. */
+#define SSIZE_MAX   __PTRDIFF_MAX__
+
 #endif

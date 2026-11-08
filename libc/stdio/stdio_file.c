@@ -615,6 +615,82 @@ int fputc(int c, FILE *f)
     return __stdio_write_byte(f, c);
 }
 
+/* ── Standard character interfaces (T8) ──────────────────────────────
+ *
+ * fgetc/getc/putc/fileno are the standard spellings of what the T5
+ * state machine already provides: the SAME resolver, the SAME sticky
+ * EOF/error indicators, the SAME single pushback byte (ungetc) and the
+ * SAME capability checks as fread/fwrite — one state, no drift between
+ * the locked and unlocked spellings (this libc is single-threaded, so
+ * getc/getc_unlocked differ in name only, exactly like the other
+ * unlocked pairs).
+ */
+int fgetc(FILE *f)
+{
+    return __stdio_read_byte(f);
+}
+
+int getc(FILE *f)
+{
+    return fgetc(f);
+}
+
+int putc(int c, FILE *f)
+{
+    return fputc(c, f);
+}
+
+int fileno(FILE *f)
+{
+    int fd = __stdio_fd(f);
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    return fd;
+}
+
+/* fgets: read at most n-1 bytes, stopping after a newline.  POSIX
+ * contract, on the T5 state machine:
+ *   - n <= 0: NULL, nothing consumed;
+ *   - n == 1: s[0] = '\0' and s returned WITHOUT touching the
+ *     descriptor — unless the stream already sits at EOF (the sticky
+ *     indicator), where POSIX says NULL;
+ *   - EOF before any byte: NULL (eof indicator set);
+ *   - I/O error: NULL (error indicator set, errno from the read);
+ *   - otherwise s, NUL-terminated, delimiter included.
+ */
+char *fgets(char *s, int n, FILE *f)
+{
+    if (!s || n <= 0) return NULL;
+
+    FILE *st = __stdio_resolve(f);
+    if (!st) return NULL;
+    if (st->eof) return NULL;
+
+    if (n == 1) {
+        s[0] = '\0';
+        return s;
+    }
+
+    int i = 0;
+    while (i < n - 1) {
+        int c = __stdio_read_byte(f);
+        if (c == EOF) {
+            /* Error and EOF are distinct indicators: only a real error
+             * leaves the buffer unusable.  EOF after at least one byte
+             * returns the partial line (POSIX). */
+            if (ferror(f)) return NULL;
+            if (i == 0) return NULL;
+            break;
+        }
+        s[i++] = (char)c;
+        if (c == '\n') break;
+    }
+    s[i] = '\0';
+    return s;
+}
+
 int fputs(const char *s, FILE *f)
 {
     if (!s) return EOF;

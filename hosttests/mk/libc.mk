@@ -14,6 +14,7 @@ $(eval $(call register_host_test,test_libc_environ,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_shutdown,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stream_state,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stdio_io,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_line,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -29,7 +30,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_environ.elf \
     $(TEST_BLD)/test_libc_shutdown.elf \
     $(TEST_BLD)/test_libc_stream_state.elf \
-    $(TEST_BLD)/test_libc_stdio_io.elf
+    $(TEST_BLD)/test_libc_stdio_io.elf \
+    $(TEST_BLD)/test_libc_line.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -379,6 +381,35 @@ $(TEST_BLD)/test_libc_stdio_io.elf: $(TEST_BLD)/test_libc_stdio_io.o \
 
 .PHONY: test-libc-stdio-io
 test-libc-stdio-io: $(TEST_BLD)/test_libc_stdio_io.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: line group (T8) ─────────────────────────────
+# Dynamic line reading (getdelim/getline) + the standard character
+# interfaces.  Production stdio + the T8 getdelim.o; the descriptor
+# mock is the same one the stream/io groups use, and the allocation
+# failures come from -Wl,--wrap on malloc/realloc (armed counters in
+# the case file), so no mock allocator is needed.
+$(OS01_LIBC_STREAM_DIR)/getdelim.o: $(LIBC_SRC)/stdio/getdelim.c
+	@mkdir -p $(OS01_LIBC_STREAM_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_libc_line.o: $(TEST_CASES)/test_libc_line.c \
+        $(TEST_MOCK)/libc_stream_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
+
+$(TEST_BLD)/test_libc_line.elf: $(TEST_BLD)/test_libc_line.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(OS01_LIBC_STREAM_DIR)/fcntl.o \
+        $(OS01_LIBC_STREAM_DIR)/getdelim.o \
+        $(TEST_BLD)/libc_stream_runtime.o
+	$(HOST_CC) -Wl,--wrap=malloc -Wl,--wrap=realloc -o $@ $^
+
+.PHONY: test-libc-line
+test-libc-line: $(TEST_BLD)/test_libc_line.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
