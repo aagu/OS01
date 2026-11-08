@@ -123,33 +123,39 @@ static void api_fmt(char *dst, size_t n, const char *fmt, ...)
     dst[n - 1] = '\0';
 }
 
-/* True when `needle` occurs in `hay`. */
-static int api_contains(const char *hay, const char *needle)
+/* True when the newline separated symbol list holds a C++ mangled name
+ * for `name`.
+ *
+ * The Itanium ABI mangles an unqualified name as "_Z" + the decimal
+ * length of the name + the name + an optional parameter encoding.  The
+ * length prefix makes the match exact: "_Z4fork" can only be the
+ * mangling of the 4-character name "fork", so a shorter name that
+ * happens to prefix a longer one cannot produce a false positive.
+ */
+static int api_sym_list_has_mangled(const char *list, const char *name)
 {
     size_t nlen = 0;
-    size_t hlen = 0;
-    size_t i;
+    char prefix[32];
+    int plen;
 
-    if (!hay || !needle) {
-        return 0;
-    }
-    while (needle[nlen]) {
+    while (name[nlen]) {
         nlen++;
     }
-    while (hay[hlen]) {
-        hlen++;
-    }
-    if (nlen == 0 || nlen > hlen) {
+    plen = snprintf(prefix, sizeof(prefix), "_Z%u", (unsigned)nlen);
+    if (plen <= 0 || (size_t)plen >= sizeof(prefix)) {
         return 0;
     }
-    for (i = 0; i + nlen <= hlen; i++) {
-        size_t k = 0;
-        while (k < nlen && hay[i + k] == needle[k]) {
-            k++;
+    while (*list) {
+        const char *eol = list;
+        while (*eol && *eol != '\n') {
+            eol++;
         }
-        if (k == nlen) {
+        if ((size_t)(eol - list) >= (size_t)plen &&
+            memcmp(list, prefix, (size_t)plen) == 0 &&
+            strncmp(list + plen, name, nlen) == 0) {
             return 1;
         }
+        list = *eol ? eol + 1 : eol;
     }
     return 0;
 }
@@ -349,8 +355,9 @@ static int api_parse_nm(const char *path)
     while (i < len) {
         int start = i;
         int end;
-        char *obj;
-        char *sep;
+        char *line;
+        char *field;
+        char *name;
         int idx = -1;
 
         while (i < len && buf[i] != '\n') {
@@ -361,59 +368,75 @@ static int api_parse_nm(const char *path)
             i++;
         }
         buf[end] = '\0';
+        line = buf + start;
 
-        /* nm --print-file-name prefixes EVERY line with "<file>:" */
-        obj = buf + start;
-        sep = obj;
-        while (*sep && !(sep[0] == '.' && sep[1] == 'o' && sep[2] == ':')) {
-            sep++;
+        /* `nm --format=posix --print-file-name` emits one record per line:
+         *   "<file>: <name> <type> <value> <size>"
+         * The symbol name is the SECOND field, so it is read positionally
+         * instead of being guessed from the last whitespace-separated
+         * token (which breaks on any nm flavour with a trailing column).
+         */
+        field = line;
+        while (*field && *field != ' ' && *field != '\t') {
+            field++;
         }
-        if (*sep == '\0') {
+        if (*field == '\0') {
             continue;
         }
-        *sep = '\0';
-        sep += 3;
+        *field++ = '\0';
+        while (*field == ' ' || *field == '\t') {
+            field++;
+        }
 
-        if (obj[0] == 'c' && obj[1] == 'p' && obj[2] == 'p' && obj[3] == '_') {
-            int n = 0;
-            const char *q = obj + 4;
+        name = field;
+        while (*field && *field != ' ' && *field != '\t') {
+            field++;
+        }
+        if (*field == '\0') {
+            continue;
+        }
+        *field++ = '\0';
+        while (*field == ' ' || *field == '\t') {
+            field++;
+        }
+        /* field 3 is the symbol type; only the name is needed here */
+        while (*field && *field != ' ' && *field != '\t') {
+            field++;
+        }
+        if (*field) {
+            *field = '\0';
+        }
+
+        /* Attribute the record to its probe object.  The probe name is
+         * "cpp_<index>", so the index is the digits right after the
+         * prefix — matched exactly, not by a substring scan. */
+        if (line[0] == 'c' && line[1] == 'p' && line[2] == 'p' && line[3] == '_') {
+            const char *q = line + 4;
+            long n = 0;
             int ok = 1;
             while (*q >= '0' && *q <= '9') {
                 n = n * 10 + (*q - '0');
                 q++;
             }
-            if (*q != '\0') {
+            if (n < 0 || n >= OS01_API_HEADER_COUNT) {
                 ok = 0;
             }
-            if (ok && n >= 0 && n < OS01_API_HEADER_COUNT) {
-                idx = n;
+            if (ok) {
+                idx = (int)n;
             }
         }
         if (idx < 0) {
             continue;
         }
 
-        /* the symbol name is the last whitespace separated field */
         {
-            const char *name = sep;
-            const char *p2 = sep;
-            const char *last = sep;
-            while (*p2) {
-                if (*p2 == ' ' || *p2 == '\t') {
-                    last = p2 + 1;
-                }
-                p2++;
+            size_t used = 0;
+            while (used < API_SYM_MAX - 1 && api_obj_syms[idx][used]) {
+                used++;
             }
-            name = last;
-            if (*name) {
-                size_t used = 0;
-                while (used < API_SYM_MAX - 1 && api_obj_syms[idx][used]) {
-                    used++;
-                }
-                if (used + strlen(name) + 2 < API_SYM_MAX) {
-                    api_obj_syms[idx][used] = '\n';
-                    memcpy(&api_obj_syms[idx][used + 1], name, strlen(name) + 1);
-                }
+            if (used + strlen(name) + 2 < API_SYM_MAX) {
+                api_obj_syms[idx][used] = '\n';
+                memcpy(&api_obj_syms[idx][used + 1], name, strlen(name) + 1);
             }
         }
     }
@@ -563,7 +586,7 @@ static void api_cpp_linkage(void)
     }
 
     /* Collect the symbols each C++ object references. */
-    api_fmt(cmd, sizeof(cmd), "cd %s && %s --print-file-name",
+    api_fmt(cmd, sizeof(cmd), "cd %s && %s --format=posix --print-file-name",
             OS01_API_PROBE_DIR, OS01_API_NM);
     for (i = 0; i < OS01_API_HEADER_COUNT; i++) {
         api_fmt(cmd + strlen(cmd), sizeof(cmd) - strlen(cmd), " cpp_%d.o", i);
@@ -591,9 +614,19 @@ static void api_cpp_linkage(void)
                 continue;   /* referenced with its plain C name */
             }
             if (api_sym_list_has_local(api_obj_syms[i], sym)) {
-                continue;   /* the header defines it itself (internal) */
+                /* The header DEFINES the function itself (internal
+                 * linkage), so the declaration's language linkage is not
+                 * observable and the C view behaves the same way.  This is
+                 * not a silent pass: the exemption is printed so it is
+                 * visible in the test output.  Today the only hit is
+                 * unistd.h's `fork`, which is the `static inline` wrapper
+                 * in sys/syscall.h that shadows the POSIX fork(). */
+                printf("  [NOTE] %s: %s is defined by the header itself "
+                       "(internal linkage) — C linkage not observable\n",
+                       os01_api_headers[i].header, sym);
+                continue;
             }
-            if (api_contains(api_obj_syms[i], sym)) {
+            if (api_sym_list_has_mangled(api_obj_syms[i], sym)) {
                 printf("  [FAIL] %s: %s has C++ linkage (missing "
                        "extern \"C\")\n", os01_api_headers[i].header, sym);
             } else {

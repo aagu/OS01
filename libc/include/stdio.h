@@ -106,7 +106,6 @@ int getchar_unlocked(void);
 char *fgets_unlocked(char *s, int size, void *f);
 ssize_t getline(char **lineptr, size_t *n, void *f);
 
-int fflush(void *f);
 int vprintf(const char *fmt, __builtin_va_list ap);
 int vfprintf(void *f, const char *fmt, __builtin_va_list ap);
 int fprintf(void *f, const char *fmt, ...);

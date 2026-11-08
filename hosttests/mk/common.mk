@@ -58,6 +58,13 @@ LIBC_SRC := $(TESTS_DIR)/libc
 # Only true boundary functions are replaced with test doubles (the raw
 # syscall entry, read/write and the allocator entry points needed for
 # fault injection).  Everything else under test is real production code.
+#
+# NOTE: $(LIBC_OBJS) below is the LEGACY path — the pre-existing libc host
+# tests link the unprefixed production objects.  It still works (the
+# objects define the symbol, so the host libc cannot interpose), but it is
+# a second convention.  NEW host tests must use the prefixed objects
+# ($(OS01_LIBC_PREFIX_OBJS)) instead; migrating the legacy tests is a
+# separate cleanup, tracked in the plan's ledger.
 OS01_LIBC_PREFIX := os01_
 OS01_LIBC_PREFIXED_FNS := memcpy memset memmove memcmp strlen strcmp strncmp strcpy
 OS01_LIBC_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_PREFIXED_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))

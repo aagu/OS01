@@ -651,11 +651,16 @@ def _logical_statements(text: str) -> list[str]:
     return out
 
 
-def declared_functions(text: str) -> list[str]:
+def declared_functions(text: str, unique: bool = True) -> list[str]:
     """Return the externally linked functions a header declares.
 
     `static` helpers (including `static inline` bodies) are implementation
     detail, not the public interface, so they are not reported.
+
+    With unique=False a name that appears more than once is reported once per
+    occurrence.  The default (unique=True) hides duplicates, which is why a
+    header that declares the same function twice used to pass the drift
+    check unnoticed.
     """
     names: list[str] = []
     seen: set[str] = set()
@@ -678,7 +683,9 @@ def declared_functions(text: str) -> list[str]:
         name = m.group("name")
         if "static" in head.split():
             continue
-        if name in _KEYWORDS or name in seen:
+        if name in _KEYWORDS:
+            continue
+        if unique and name in seen:
             continue
         seen.add(name)
         names.append(name)
@@ -755,6 +762,68 @@ def libk_required(group: str, profile: str = "x86_64-clang") -> set[str]:
 
 
 # ── C manifest emission ────────────────────────────────────────────────
+
+def check_manifest_against_headers(include_dir: str, groups: list[str]) -> list[str]:
+    """Return the drift errors between the manifest and the shipped headers.
+
+    The same checks the --audit mode performs, but without the archive half:
+    every header under include_dir must be classified, and every group's
+    header->symbol map must match the header's declared functions EXACTLY.
+    """
+    errors: list[str] = []
+    classified: set[str] = set(EXCLUDED_HEADERS)
+    for group in groups:
+        classified.update(group_headers(group))
+    for root, _dirs, files in os.walk(include_dir):
+        for name in files:
+            if not name.endswith(".h"):
+                continue
+            rel = os.path.relpath(os.path.join(root, name), include_dir)
+            if rel not in classified:
+                errors.append(
+                    f"{rel}: public header is neither in an enabled group nor "
+                    f"in EXCLUDED_HEADERS"
+                )
+    for group in groups:
+        for header, syms in sorted(group_headers(group).items()):
+            path = os.path.join(include_dir, header)
+            if not os.path.isfile(path):
+                errors.append(f"{group}/{header}: missing from {include_dir}")
+                continue
+            declared = [
+                s for s in declared_functions(read_header(include_dir, header))
+                if s not in EXCLUDED_SYMBOLS
+            ]
+            missing = [s for s in syms if s not in declared]
+            unlisted = [s for s in declared if s not in syms]
+            if missing:
+                errors.append(
+                    f"{group}/{header}: manifest lists symbols the header does not "
+                    f"declare: {', '.join(missing)}"
+                )
+            if unlisted:
+                errors.append(
+                    f"{group}/{header}: header declares symbols missing from the "
+                    f"manifest: {', '.join(unlisted)}"
+                )
+            # A function declared twice in one header is a real defect (the
+            # historical cause was declarations placed after the include
+            # guard's #endif, which left the tail outside the guard).  The
+            # "not in" comparisons above cannot see it: a duplicate is still
+            # "in" the manifest, so it never shows up as unlisted.
+            raw = [
+                s for s in declared_functions(read_header(include_dir, header),
+                                             unique=False)
+                if s not in EXCLUDED_SYMBOLS
+            ]
+            duplicates = sorted({s for s in raw if raw.count(s) > 1})
+            if duplicates:
+                errors.append(
+                    f"{group}/{header}: header declares the same function more "
+                    f"than once: {', '.join(duplicates)}"
+                )
+    return errors
+
 
 def emit_c_header(path: str, groups: list[str]) -> None:
     lines: list[str] = []
@@ -869,6 +938,17 @@ def audit(include_dir: str, libc_archive: str | None, libk_archive: str | None,
                     f"{group}/{header}: header declares symbols missing from the "
                     f"manifest: {', '.join(unlisted)}"
                 )
+            raw = [
+                s for s in declared_functions(read_header(include_dir, header),
+                                             unique=False)
+                if s not in EXCLUDED_SYMBOLS
+            ]
+            duplicates = sorted({s for s in raw if raw.count(s) > 1})
+            if duplicates:
+                errors.append(
+                    f"{group}/{header}: header declares the same function more "
+                    f"than once: {', '.join(duplicates)}"
+                )
         for header, reason in sorted(EXCLUDED_HEADERS.items()):
             notes.append(f"excluded header {header}: {reason}")
         for symbol, reason in sorted(EXCLUDED_SYMBOLS.items()):
@@ -923,7 +1003,7 @@ def audit(include_dir: str, libc_archive: str | None, libk_archive: str | None,
     return 0
 
 
-def list_manifest() -> int:
+def list_manifest(profile: str = "x86_64-clang") -> int:
     for group in enabled_groups():
         info = API_GROUPS[group]
         print(f"group {group} (task {info['task']}): {info['title']}")
@@ -973,12 +1053,26 @@ def main(argv: list[str]) -> int:
         groups = enabled_groups()
 
     if args.emit_c_header:
+        # The manifest is emitted at build time, so the drift check runs on
+        # EVERY build that consumes it: a header that was added or changed
+        # without updating the manifest fails the build here instead of
+        # being noticed by hand later.
+        drift = check_manifest_against_headers(args.include_dir, groups)
+        if drift:
+            print("ERROR: the API manifest has drifted from the headers:",
+                  file=sys.stderr)
+            for e in drift:
+                print(f"  {e}", file=sys.stderr)
+            print("ERROR: fix scripts/audit_libc_api.py (and every group that "
+                  "lists the affected header) or the header itself.",
+                  file=sys.stderr)
+            return 2
         emit_c_header(args.emit_c_header, groups)
         return 0
     if args.audit:
         return audit(args.include_dir, args.libc_archive or None,
                      args.libk_archive or None, profile)
-    return list_manifest()
+    return list_manifest(profile)
 
 
 if __name__ == "__main__":

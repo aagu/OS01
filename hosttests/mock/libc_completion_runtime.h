@@ -32,15 +32,19 @@
 
 #include <stddef.h>
 
-/* The prefix itself, and the helper that spells a prefixed name. */
-#define OS01_LIBC_PREFIX      "os01_"
-#define OS01_LIBC_FN(name)    os01_##name
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* The production entry points the host test links under their prefixed
- * names.  These are the REAL libc string sources, compiled
- * with the prefix flags; they are declared here so a test translation
- * unit can name them without relying on the -D rename being visible in
- * every header it includes.  The signatures match `libc/include/string.h`.
+ * names.  These are the REAL libc sources, compiled with the prefix flags
+ * (the flags live in `hosttests/mk/common.mk`, `OS01_LIBC_PREFIX_DEFS`);
+ * they are declared here so a test translation unit can name them without
+ * relying on the -D rename being visible in every header it includes.
+ * The signatures match `libc/include/string.h`.
+ *
+ * The prefix string itself is deliberately NOT duplicated here: the make
+ * side owns it, and two constants for one name is how they drift.
  */
 void *os01_memcpy(void *dst, const void *src, size_t n);
 void *os01_memmove(void *dst, const void *src, size_t n);
@@ -58,5 +62,9 @@ char  *os01_strcpy(char *dst, const char *src);
  * `libc/include/stdlib.h` does not (and must not) expose it.
  */
 int system(const char *command);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OS01_LIBC_COMPLETION_RUNTIME_H */

@@ -559,6 +559,7 @@ api alloc env shutdown stream append io line format integer float scan time path
 
 行为约定：
 
+- `test-libc-host` 需要 `rootfs` 能力（与 `test-monitor-host` / `test-gui-host` 相同）；
 - 非法 `LIBC_CASE`（不在上面的固定集合内）在任何递归构建之前失败，退出码非零并列出合法取值；
 - 已在固定集合内但**本阶段尚未交付**的 case 同样失败（非零），并打印已交付组，避免把“没有这个组”误报成通过；
 - `LIBC_HOST_CASES`（合法性）与 `LIBC_HOST_DELIVERED_CASES`（已交付）分工不同：前者由计划固定，后者逐任务增长。

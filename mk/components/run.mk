@@ -2960,6 +2960,12 @@ LIBC_HOST_CASES := api alloc env shutdown stream append io line format integer f
 LIBC_HOST_DELIVERED_CASES := api
 
 .PHONY: test-libc-host _test-libc-host-run-all
+# Every delivered case's run target is phony, derived from the delivered list
+# so a task that appends to LIBC_HOST_DELIVERED_CASES cannot forget it.  A
+# non-phony run target would be satisfied by a stray file of the same name in
+# the repository root, and the group would silently be skipped while
+# test-libc-host still exited 0 — a green run that ran nothing.
+.PHONY: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
 _test-libc-host-run-api:
 	@echo "  [test-libc-host] api"
 	$(call os01_submake,hosttests,test-libc-api $(OS01_SUBMAKE_ARGS))
@@ -2999,6 +3005,10 @@ test-libc-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(LIBC_CASE_
 # export different subsets), so the profile is passed explicitly instead of
 # being guessed from the archive path.
 #
+# LIBC_GROUPS narrows the audit to a comma separated subset of the enabled
+# groups (default: all enabled groups).  It is for debugging a single group;
+# the gate always covers every enabled group when it is unset.
+#
 # The aarch64 profile builds no libc.a (its libc component only produces the
 # kernel-side libk.a), so the user-libc archive is audited only when it
 # exists.  The libk.a itself comes from `lib` on a userland profile and from
@@ -3010,6 +3020,7 @@ test-libc-api-audit: $(LIBC_API_AUDIT_PREREQ)
 	@echo "  [test-libc-api-audit] profile=$(PROFILE)"
 	python3 $(OS01_ROOT)/scripts/audit_libc_api.py --audit \
 	    --profile "$(PROFILE)" \
+	    $(if $(strip $(LIBC_GROUPS)),--groups $(LIBC_GROUPS)) \
 	    --include-dir $(OS01_ROOT)/libc/include \
 	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libc.a),--libc-archive $(LIBC_BUILD_DIR)/lib/libc.a) \
 	    --libk-archive $(LIBC_BUILD_DIR)/lib/libk.a

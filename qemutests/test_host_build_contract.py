@@ -141,6 +141,51 @@ class HostBuildContractTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("test-monitor-file", calls[0])
 
+    def test_libc_focused_dispatch_equivalent(self):
+        """The libc focused umbrella must validate LIBC_CASE before recursive make.
+
+        Mirrors test_focused_dispatch_equivalent for test-monitor-host: an
+        illegal case must fail WITHOUT invoking the sub-make, and a valid
+        case must dispatch exactly the one expected sub-make target.
+        """
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR") if k in os.environ}
+
+        # 1. Illegal LIBC_CASE must fail without recursive make
+        self.calls.unlink(missing_ok=True)
+        cmd = ["make", "--no-print-directory", f"MAKE={self.probe}",
+               "PROFILE=x86_64-clang", "test-libc-host", "LIBC_CASE=bogus_case"]
+        result = subprocess.run(cmd, cwd=ROOT, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown LIBC_CASE", result.stdout)
+        self.assertFalse(self.calls.exists() and self.calls.read_text().strip(),
+                         "Submake was invoked for an illegal LIBC_CASE")
+
+        # 2. A case that is registered but not delivered must also fail
+        #    WITHOUT invoking the sub-make — a group that does not exist yet
+        #    must never be reported as a pass.
+        self.calls.unlink(missing_ok=True)
+        cmd = ["make", "--no-print-directory", f"MAKE={self.probe}",
+               "PROFILE=x86_64-clang", "test-libc-host", "LIBC_CASE=regex"]
+        result = subprocess.run(cmd, cwd=ROOT, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not delivered", result.stdout)
+
+        # 3. Valid LIBC_CASE dispatches exactly the expected target
+        self.calls.unlink(missing_ok=True)
+        cmd = ["make", "--no-print-directory", f"MAKE={self.probe}",
+               "PROFILE=x86_64-clang", "test-libc-host", "LIBC_CASE=api"]
+        result = subprocess.run(cmd, cwd=ROOT, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("test-libc-api", calls[0])
+
     def test_default_goal_builds_full_set(self):
         """Default goal of hosttests builds all protocol and exit-status binaries, but not expected-failure."""
         # Query hosttests/Makefile default goal via make -n -B
