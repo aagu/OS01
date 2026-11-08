@@ -421,8 +421,16 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     list_init(&tsk->io_wait_node);
     list_init(&tsk->list);
     tsk->exit_code = 0;
-    if (current->files)
+    if (current->files) {
         tsk->files = files_dup(current->files);
+        if (!tsk->files) {
+            kfree(raw_alloc);
+            kfree(thd);
+            kfree(mm);
+            vfs_node_put(node);
+            return -ENOMEM;
+        }
+    }
     tsk->thread = thd;
 
     // FPU save area — user tasks may use float/SSE

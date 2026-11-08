@@ -749,7 +749,7 @@ test-framework-contract:
 .PHONY: test-boot-failure-host _test-boot-failure-host-run-subsys _test-boot-failure-host-run-log _test-boot-failure-host-run-mounts _test-boot-failure-host-run-terminal _test-boot-failure-host-run-stdio _test-boot-failure-host-run-spawn _test-boot-failure-host-run-task-init _test-boot-failure-host-run-all
 _test-boot-failure-host-run-all:
 	@echo "  [test-boot-failure-host] all (subsys log mounts terminal stdio spawn task-init)"
-	$(call os01_submake,hosttests,test_boot_failure_subsys test_boot_failure_log $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_boot_failure_subsys test_boot_failure_log test_boot_failure_mounts test_boot_failure_terminal test_boot_stdio test_boot_spawn_failure test_boot_task_init $(OS01_SUBMAKE_ARGS))
 _test-boot-failure-host-run-subsys:
 	@echo "  [test-boot-failure-host] subsys"
 	$(call os01_submake,hosttests,test_boot_failure_subsys $(OS01_SUBMAKE_ARGS))

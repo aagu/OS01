@@ -815,7 +815,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_boot_failure_subsys.elf \
     $(TEST_BLD)/test_boot_failure_log.elf
 
-BOOT3_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+BOOT3_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure -I$(TEST_MOCK)/include $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
 $(TEST_BLD)/boot3_subsys_production.o: $(TESTS_DIR)/kernel/subsys/subsys.c
 	@mkdir -p $(TEST_BLD)
@@ -854,4 +854,69 @@ $(TEST_BLD)/test_boot_failure_log.elf: \
 
 .PHONY: test_boot_failure_log
 test_boot_failure_log: $(TEST_BLD)/test_boot_failure_log.elf
+	$<
+
+$(eval $(call register_host_test,test_boot_stdio,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_spawn_failure,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_task_init,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_stdio.elf \
+    $(TEST_BLD)/test_boot_spawn_failure.elf \
+    $(TEST_BLD)/test_boot_task_init.elf
+
+$(TEST_BLD)/boot3_stdio_production.o: $(TESTS_DIR)/kernel/sched/boot_stdio.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot3_file_production.o: $(TESTS_DIR)/kernel/fs/file.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot3_test_stdio.o: $(TEST_CASES)/test_boot_stdio.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_stdio.elf: \
+		$(TEST_BLD)/boot3_test_stdio.o \
+		$(TEST_BLD)/boot3_stdio_production.o \
+		$(TEST_BLD)/boot3_file_production.o
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
+
+.PHONY: test_boot_stdio
+test_boot_stdio: $(TEST_BLD)/test_boot_stdio.elf
+	$<
+
+$(TEST_BLD)/boot3_exec_production.o: $(TESTS_DIR)/kernel/sched/exec.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot3_test_spawn_failure.o: $(TEST_CASES)/test_boot_spawn_failure.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_spawn_failure.elf: \
+		$(TEST_BLD)/boot3_test_spawn_failure.o \
+		$(TEST_BLD)/boot3_exec_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_spawn_failure
+test_boot_spawn_failure: $(TEST_BLD)/test_boot_spawn_failure.elf
+	$<
+
+$(TEST_BLD)/boot3_sched_boot_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/sched_boot.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/boot3_test_task_init.o: $(TEST_CASES)/test_boot_task_init.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_task_init.elf: \
+		$(TEST_BLD)/boot3_test_task_init.o \
+		$(TEST_BLD)/boot3_sched_boot_production.o
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test_boot_task_init
+test_boot_task_init: $(TEST_BLD)/test_boot_task_init.elf
 	$<

@@ -31,6 +31,8 @@
 #include <sched/resource.h>
 #include <sched/internal.h>
 #include <sched/boot.h>
+#include <sched/boot_stdio.h>
+#include <core/boot_failure.h>
 #include <percpu/percpu.h>
 #include <arch/spinlock.h>
 #include <arch/irq.h>
@@ -79,42 +81,10 @@ void task_init(void)
 
     // ── Set up fd 0/1/2 on the idle task ─────────────────
     // These will be inherited by the first user task (init.elf).
-    {
-        files_t *files = files_alloc();
-        if (files) {
-            current->files = files;  // attach to idle task
-
-            // The install targets the BSP idle task, NOT necessarily
-            // the task get_current_task() resolves to on the boot
-            // stack — so the target's own NOFILE soft limit is passed
-            // explicitly instead of relying on the current-task
-            // snapshot inside fd_alloc().
-            uint32_t soft = (uint32_t)task_nofile_soft(&init_task_union.task);
-
-            // All three fds go through /dev/tty:
-            //   read  → keyboard (ASCII-translated scancodes)
-            //   write → framebuffer (GTK window) + serial (terminal)
-            vfs_node_t *tty = vfs_lookup("/dev/tty");
-            if (tty) {
-                file_t *f0 = file_alloc();
-                if (f0) {
-                    f0->type = FD_DEV; f0->node = vfs_node_get(tty); f0->flags = O_RDWR;
-                    if (fd_alloc_limit(files, f0, 0, soft) < 0) file_put(f0);
-                }
-
-                file_t *f1 = file_alloc();
-                if (f1) {
-                    f1->type = FD_DEV; f1->node = vfs_node_get(tty); f1->flags = O_WRONLY;
-                    if (fd_alloc_limit(files, f1, 0, soft) < 0) file_put(f1);
-                }
-
-                file_t *f2 = file_alloc();
-                if (f2) {
-                    f2->type = FD_DEV; f2->node = vfs_node_get(tty); f2->flags = O_WRONLY;
-                    if (fd_alloc_limit(files, f2, 0, soft) < 0) file_put(f2);
-                }
-            }
-        }
+    const char *failed_comp = NULL;
+    int stdio_rc = sched_boot_prepare_stdio(&init_task_union.task, &failed_comp);
+    if (stdio_rc != 0) {
+        boot_failure_stop("stdio", failed_comp, stdio_rc, -1, -1);
     }
 
     // pid_counter starts at 1.  spawn_user_task("/bin/init", NULL) is the
@@ -124,7 +94,9 @@ void task_init(void)
     init_task_union.task.pgrp = 1;
     init_task_union.task.session = 1;
     int64_t init_pid = spawn_user_task("/bin/init", NULL);
-    (void)init_pid;
+    if (init_pid < 0) {
+        boot_failure_stop("init", "/bin/init", init_pid, -1, -1);
+    }
     debug_task("init: spawned user-space init, pid=%d\n", (int)init_pid);
 
 #ifdef OS01_SELFTEST
