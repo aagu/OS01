@@ -3812,6 +3812,161 @@ static void test_environ_mutation(void)
     }
 }
 
+// ── T6: kernel atomic append (libc-completion plan) ─────────
+//
+// O_APPEND must land every write at the file's REAL end, with the
+// EOF choice, the byte commit and the file-offset update serialized
+// inside the filesystem's own mount mutex.  This case proves it on
+// the REAL kernel under real SMP preemption, on all three writable
+// filesystems (tmpfs /tmp, ext2 /, FAT32 /boot):
+//
+//   phase 1 — APPEND_WRITERS children each open the file
+//     INDEPENDENTLY (their own open-file description, stale offset 0)
+//     and append fixed-length records.  A record carries its writer
+//     tag, sequence number, deterministic payload and checksum, so
+//     the verifier can prove: every record intact (no torn write),
+//     per-writer sequences 0..N-1 in file order (no loss, no
+//     overwrite), and the exact expected record count.
+//   phase 2 — the same writers share ONE open-file description
+//     (inherited across fork, like dup).  The description's offset
+//     is updated by the append hook under the filesystem lock, so
+//     after all children are joined the parent's SEEK_CUR must equal
+//     the file's actual EOF — the "late returner must not clobber a
+//     newer offset" contract, exercised with real preemption (the
+//     host test covers it only sequentially).
+//
+// Raw open/write only — the plan deliberately does not rely on the
+// fopen layer here (T7+ deliver it).
+#define APPEND_REC               32
+#define APPEND_PAYLOAD_OFF       8
+#define APPEND_CSUM_OFF          28
+#define APPEND_WRITERS           4
+#define APPEND_RECS_PER_WRITER   6
+
+static void append_fill_record(uint8_t *rec, uint32_t tag, uint32_t seq)
+{
+    memset(rec, 0, APPEND_REC);
+    memcpy(rec, &tag, 4);
+    memcpy(rec + 4, &seq, 4);
+    for (int i = 0; i < (int)(APPEND_CSUM_OFF - APPEND_PAYLOAD_OFF); i++)
+        rec[APPEND_PAYLOAD_OFF + i] =
+            (uint8_t)((tag * 31 + seq * 17 + i * 7) & 0xff);
+    uint32_t csum = 0;
+    for (int i = 0; i < APPEND_CSUM_OFF; i++) csum += rec[i];
+    memcpy(rec + APPEND_CSUM_OFF, &csum, 4);
+}
+
+/* Verify every record; returns 0 or a negative reason code:
+ *  -2 torn record  -3 bad tag  -4 per-writer sequence gap  -5 payload
+ *  mismatch  -6 wrong record count  -7 a writer is missing records */
+static int append_verify_file(const char *path, uint32_t expect_total)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    uint32_t next[APPEND_WRITERS + 1];
+    memset(next, 0, sizeof(next));
+    uint8_t buf[APPEND_REC], ref[APPEND_REC];
+    uint32_t total = 0;
+    int rc = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, APPEND_REC);
+        if (n == 0) break;
+        if (n != APPEND_REC) { rc = -2; break; }
+        uint32_t tag, seq;
+        memcpy(&tag, buf, 4);
+        memcpy(&seq, buf + 4, 4);
+        if (tag < 1 || tag > APPEND_WRITERS) { rc = -3; break; }
+        if (seq != next[tag]) { rc = -4; break; }
+        next[tag]++;
+        append_fill_record(ref, tag, seq);
+        if (memcmp(ref, buf, APPEND_REC) != 0) { rc = -5; break; }
+        total++;
+    }
+    close(fd);
+    if (rc != 0) return rc;
+    if (total != expect_total) return -6;
+    for (int t = 1; t <= APPEND_WRITERS; t++)
+        if (next[t] != APPEND_RECS_PER_WRITER) return -7;
+    return 0;
+}
+
+/* One append round on one filesystem directory.  `shared` selects
+ * phase 2 (fork/dup shared description) vs phase 1 (independent
+ * opens).  Returns 0 on success, non-zero reason on the first
+ * failed check. */
+static int append_round(const char *dir, int shared)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "%s/systest_append.dat", dir);
+    unlink(path);
+
+    int total_recs = APPEND_WRITERS * APPEND_RECS_PER_WRITER;
+
+    int root = open(path, O_CREAT | O_WRONLY, 0644);
+    if (root < 0) return -10;
+    close(root);
+
+    int sfd = -1;
+    if (shared) {
+        /* ONE description, inherited by every child: the offset is
+         * shared state that only the append hook may advance. */
+        sfd = open(path, O_RDWR | O_APPEND);
+        if (sfd < 0) { unlink(path); return -11; }
+    }
+
+    pid_t pids[APPEND_WRITERS];
+    int started = 0;
+    for (int w = 0; w < APPEND_WRITERS; w++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            int fd = shared ? sfd : open(path, O_WRONLY | O_APPEND);
+            if (fd < 0) _exit(100);
+            for (uint32_t sq = 0; sq < APPEND_RECS_PER_WRITER; sq++) {
+                uint8_t rec[APPEND_REC];
+                append_fill_record(rec, (uint32_t)w + 1, sq);
+                if (write(fd, rec, APPEND_REC) != APPEND_REC) _exit(101);
+            }
+            if (!shared) close(fd);
+            _exit(0);
+        }
+        if (pid > 0) pids[started++] = pid;
+    }
+
+    int child_fail = 0;
+    for (int w = 0; w < started; w++) {
+        int st = -1;
+        if (waitpid(pids[w], &st, 0) != pids[w] || st != 0) child_fail++;
+    }
+    int rc = (started == APPEND_WRITERS && child_fail == 0) ? 0 : -12;
+    if (rc == 0) {
+        int v = append_verify_file(path, (uint32_t)total_recs);
+        if (v != 0) { rc = (shared ? -20 : -30) + v; }
+    }
+    if (rc == 0 && shared) {
+        /* the shared description's offset must BE the file's EOF */
+        off_t pos = lseek(sfd, 0, SEEK_CUR);
+        off_t end = lseek(sfd, 0, SEEK_END);
+        if (pos != end || end != (off_t)(total_recs * APPEND_REC))
+            rc = -40;
+    }
+    if (sfd >= 0) close(sfd);
+    unlink(path);
+    return rc;
+}
+
+static void test_vfs_append(void)
+{
+    static const char *dirs[3] = { "/tmp", "/", "/boot" };
+    for (int d = 0; d < 3; d++) {
+        int r = append_round(dirs[d], 0);
+        CHECKF(r == 0, "append independent opens", "%s rc=%d",
+               "%s rc=%d", dirs[d], r);
+        r = append_round(dirs[d], 1);
+        CHECKF(r == 0, "append shared fd offset", "%s rc=%d",
+               "%s rc=%d", dirs[d], r);
+    }
+}
+
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
 // The kernel reserves [0x400000, 0x20600000) for the ELF image
 // (envelope incl. segment gaps), the heap (committed + reserve),
@@ -4320,6 +4475,7 @@ static const test_case_t tests[] = {
     {"startup_matrix",    "startup matrix",    test_startup_matrix,          1, 0},
     {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
     {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
+    {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

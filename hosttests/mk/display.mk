@@ -63,7 +63,8 @@ $(TEST_BLD)/test_gfx_file_lifecycle.elf: $(TEST_BLD)/test_gfx_file_lifecycle.o \
 		$(TEST_BLD)/gfx_devfs_production.o \
 		$(TEST_BLD)/gfx_file_production.o \
 		$(TEST_BLD)/serial_sink_stub.o \
-		$(NOFILE_SOFT_STUB_OBJ)
+		$(NOFILE_SOFT_STUB_OBJ) \
+		$(VFS_APPEND_LINK_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
@@ -134,7 +135,8 @@ $(TEST_BLD)/test_gfx_device.elf: $(TEST_BLD)/test_gfx_device.o \
 		$(TEST_BLD)/gfx_file_production.o \
 		$(TEST_BLD)/gfx_fault_bridge.o \
 		$(TEST_BLD)/serial_sink_stub.o \
-		$(NOFILE_SOFT_STUB_OBJ)
+		$(NOFILE_SOFT_STUB_OBJ) \
+		$(VFS_APPEND_LINK_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 test-gfx-device: $(TEST_BLD)/test_gfx_device.elf

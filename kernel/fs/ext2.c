@@ -1,5 +1,6 @@
 // kernel/fs/ext2.c
 #include <fs/ext2.h>
+#include <fs/file.h>
 #include <core/debug.h>
 #include <memory/slab.h>     // kmalloc, kfree
 #include <string.h>
@@ -775,37 +776,25 @@ static __attribute__((noinline)) int ext2_vfs_read(struct vfs_node *node, uint64
 }
 
 // ── VFS write implementation ────────────────────────────
-static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
-                           uint64_t size, void *buffer)
+/* The write body with the filesystem lock ALREADY held and the inode
+ * already read.  The append hook reuses it, so a plain write and an
+ * append share the SAME serialization boundary. */
+static int ext2_write_locked(ext2_fs_t *fs, struct vfs_node *node,
+                              uint32_t ino, ext2_inode_t *inode,
+                              uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !buffer || size == 0) return 0;
-    uint32_t ino = ext2_node_ino(node);
-    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
-
-    ext2_lock(fs);
-
-    ext2_inode_t inode;
-    if (ext2_read_inode(fs, ino, &inode) != 0) {
-        ext2_unlock(fs); return -EIO;
-    }
-
-    // Reject extent-based inodes
-    if (inode.i_flags & 0x00080000) {
-        ext2_unlock(fs); return -EOPNOTSUPP;
-    }
-
     // Ensure blocks are allocated for the write range
     uint32_t first_blk = (uint32_t)(offset / fs->block_size);
     uint32_t last_blk  = (uint32_t)((offset + size - 1) / fs->block_size);
 
     for (uint32_t lb = first_blk; lb <= last_blk; lb++) {
-        if (ext2_bmap_alloc(fs, &inode, lb) == 0) {
-            ext2_unlock(fs); return -ENOSPC;
+        if (ext2_bmap_alloc(fs, inode, lb) == 0) {
+            return -ENOSPC;
         }
     }
 
     // Persist inode changes from bmap_alloc
-    ext2_write_inode(fs, ino, &inode);
+    ext2_write_inode(fs, ino, inode);
 
     // RMW per block
     const uint8_t *src = (const uint8_t *)buffer;
@@ -813,14 +802,14 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
     uint64_t file_off  = offset;
 
     uint8_t *block_buf = kmalloc(4096);
-    if (!block_buf) { ext2_unlock(fs); return -ENOMEM; }
+    if (!block_buf) return -ENOMEM;
 
     int write_err = 0;
     while (remaining > 0) {
         uint32_t logical_block = (uint32_t)(file_off / fs->block_size);
         uint32_t block_off     = (uint32_t)(file_off % fs->block_size);
 
-        uint32_t phys = ext2_bmap(fs, &inode, logical_block);
+        uint32_t phys = ext2_bmap(fs, inode, logical_block);
         if (phys == 0) { write_err = -EIO; break; }
 
         if (ext2_read_block(fs, phys, block_buf) != 0) {
@@ -844,38 +833,92 @@ static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint6
 
     if (write_err != 0) {
         if (file_off > offset) {
-            if (file_off > inode.i_size)
-                inode.i_size = (uint32_t)file_off;
-            if ((uint64_t)inode.i_size > node->size)
-                node->size = inode.i_size;
-            inode.i_mtime = 0;
-            ext2_write_inode(fs, ino, &inode);
+            if (file_off > inode->i_size)
+                inode->i_size = (uint32_t)file_off;
+            if ((uint64_t)inode->i_size > node->size)
+                node->size = inode->i_size;
+            inode->i_mtime = 0;
+            ext2_write_inode(fs, ino, inode);
             if (node->mount) {
+                /* Lock order: the filesystem lock is held, the active
+                 * lock is taken inside it. */
                 spin_lock(&node->mount->active_lock);
-                vfs_active_nodes_sync_size_locked(node->mount, ino, inode.i_size, inode.i_mtime);
+                vfs_active_nodes_sync_size_locked(node->mount, ino, inode->i_size, inode->i_mtime);
                 spin_unlock(&node->mount->active_lock);
             }
         }
-        ext2_unlock(fs);
         return write_err;
     }
 
     // Update i_size if write extended the file
-    if (offset + size > inode.i_size)
-        inode.i_size = offset + size;
-    if ((uint64_t)inode.i_size > node->size)
-        node->size = inode.i_size;
-    inode.i_mtime = 0;
-    ext2_write_inode(fs, ino, &inode);
+    if (offset + size > inode->i_size)
+        inode->i_size = offset + size;
+    if ((uint64_t)inode->i_size > node->size)
+        node->size = inode->i_size;
+    inode->i_mtime = 0;
+    ext2_write_inode(fs, ino, inode);
 
     if (node->mount) {
         spin_lock(&node->mount->active_lock);
-        vfs_active_nodes_sync_size_locked(node->mount, ino, inode.i_size, inode.i_mtime);
+        vfs_active_nodes_sync_size_locked(node->mount, ino, inode->i_size, inode->i_mtime);
         spin_unlock(&node->mount->active_lock);
     }
 
-    ext2_unlock(fs);
     return (int)size;
+}
+
+// ── VFS write implementation ────────────────────────────
+static __attribute__((noinline)) int ext2_vfs_write(struct vfs_node *node, uint64_t offset,
+                           uint64_t size, void *buffer)
+{
+    if (!node || !buffer || size == 0) return 0;
+    uint32_t ino = ext2_node_ino(node);
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+
+    ext2_lock(fs);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, ino, &inode) != 0) {
+        ext2_unlock(fs); return -EIO;
+    }
+
+    // Reject extent-based inodes
+    if (inode.i_flags & 0x00080000) {
+        ext2_unlock(fs); return -EOPNOTSUPP;
+    }
+
+    int n = ext2_write_locked(fs, node, ino, &inode, offset, size, buffer);
+    ext2_unlock(fs);
+    return n;
+}
+
+/* Atomic append.  The real EOF is chosen INSIDE the filesystem lock, so
+ * two appenders that opened the same file independently cannot pick the
+ * same offset and overwrite each other.  The file's offset is advanced
+ * to the end of the COMMITTED range before the lock is released. */
+static int ext2_vfs_append(struct file *f, uint64_t size, const void *buffer)
+{
+    if (!f || !f->node || !buffer || size == 0) return -EINVAL;
+    struct vfs_node *node = f->node;
+    uint32_t ino = ext2_node_ino(node);
+    ext2_fs_t *fs = (ext2_fs_t *)node->mount->fs_data;
+
+    ext2_lock(fs);
+
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs, ino, &inode) != 0) {
+        ext2_unlock(fs); return -EIO;
+    }
+    if (inode.i_flags & 0x00080000) {
+        ext2_unlock(fs); return -EOPNOTSUPP;
+    }
+
+    uint64_t offset = inode.i_size;          /* the real end of the file */
+    int n = ext2_write_locked(fs, node, ino, &inode, offset, size, (void *)buffer);
+    /* A commit of zero bytes leaves the offset alone. */
+    if (n > 0) f->offset = offset + (uint64_t)n;
+    ext2_unlock(fs);
+    return n;
 }
 
 // ── VFS truncate implementation ─────────────────────────
@@ -1890,6 +1933,7 @@ const vfs_inode_ops_t ext2_iops = {
 const vfs_file_ops_t ext2_fops = {
     .read     = ext2_vfs_read,
     .write    = ext2_vfs_write,
+    .append   = ext2_vfs_append,
     .readdir  = ext2_vfs_readdir,
 };
 

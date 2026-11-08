@@ -77,6 +77,26 @@ typedef struct vfs_file_ops {
                        struct vfs_dirent *entry);
     int     (*mmap)(struct vfs_node *node, struct vma *vma);
 
+    // Optional atomic-append hook.
+    //
+    // A write to a descriptor opened with O_APPEND has to land at the
+    // REAL end of the file, and the choice of that end, the write and
+    // the update of the file's offset must happen under the
+    // filesystem's OWN serialization (its mount mutex).  Otherwise two
+    // appenders that opened the same file independently could pick the
+    // same offset and overwrite each other — which is exactly what an
+    // lseek()+write() pair in user space cannot prevent.
+    //
+    // The hook receives the open-file description, so it can update its
+    // offset.  It must: take the mount mutex, choose the real EOF,
+    // write there, advance the file's offset to the end of the COMMITTED
+    // range and only then release the mutex.  A commit of zero bytes
+    // must leave the offset alone.
+    //
+    // The buffer is a kernel bounce buffer, never a user pointer: the
+    // user memory is copied before the hook is called.
+    int     (*append)(struct file *f, uint64_t size, const void *buffer);
+
     // Optional per-file snapshot lifecycle hooks (procfs statistics, etc.)
     int     (*open_file)(struct file *f);
     int64_t (*read_file)(struct file *f, uint64_t offset,
@@ -235,6 +255,11 @@ int vfs_read(struct vfs_node *node, uint64_t offset,
 // Write to a file
 int vfs_write(struct vfs_node *node, uint64_t offset,
               uint64_t size, void *buffer);
+
+// Atomic append: commit `size` bytes at the real end of the file and
+// advance the file's offset to the end of the committed range.  The
+// serialization happens inside the filesystem's own mount mutex.
+int vfs_append(struct file *f, uint64_t size, const void *buffer);
 
 // Read directory entries
 int vfs_readdir(struct vfs_node *dir, uint64_t index,

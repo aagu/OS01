@@ -1165,6 +1165,40 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         if (!(acc == O_WRONLY || acc == O_RDWR))
             return -1;
 
+        // O_APPEND: the bytes must land at the REAL end of the file, and
+        // the choice of that end has to be serialized with the other
+        // appenders.  The filesystem's own append hook does both inside
+        // its mount mutex.
+        //
+        // This path therefore copies at most ONE bounce buffer (outside
+        // the mutex), calls the hook ONCE and returns.  A larger request
+        // is answered with a legal short write; the libc continues with
+        // the rest.  The hook updates the file's offset itself, so this
+        // path must NOT advance it again on the way out — a late returner
+        // must not overwrite a newer position.
+        //
+        // Only a regular file on a filesystem goes through the VFS
+        // append: a character device, a pipe and a socket keep the plain
+        // write path, because O_APPEND does not make them seekable.
+        if (f->type == FD_VFS && (f->flags & O_APPEND)) {
+            void *abuf = kmalloc(UACCESS_BOUNCE_SIZE);
+            if (!abuf) return -ENOMEM;
+
+            uint64_t chunk = size < UACCESS_BOUNCE_SIZE
+                             ? size : UACCESS_BOUNCE_SIZE;
+
+            // The user memory is touched BEFORE the filesystem's mutex is
+            // taken: the hook never sees a user pointer.
+            ssize_t arc = copy_from_user_ft(abuf, buf, (size_t)chunk);
+            if (arc < 0) { kfree(abuf); return arc; }
+
+            int64_t n = vfs_append(f, chunk, abuf);
+            kfree(abuf);
+            if (n < 0) return n;
+            if (n == 0) return -1;      /* nothing was committed */
+            return n;                   /* a short write is legal */
+        }
+
         // Task 8: chunk bounce through kernel buffer.  We _ft-copy
         // a chunk into kbuf, then vfs_write it; offset advances
         // after the _ft succeeds (so user-fault on chunk N leaves

@@ -225,6 +225,18 @@ $(TEST_BLD)/nofile_soft_stub.o: $(TEST_MOCK)/nofile_soft_stub.c
 
 NOFILE_SOFT_STUB_OBJ := $(TEST_BLD)/nofile_soft_stub.o
 
+# libc-completion Task T6: the O_APPEND call site in kernel/fs/file.c
+# dispatches through vfs_append() (kernel/fs/vfs.c).  The harnesses that
+# compile kernel/fs/file.c WITHOUT kernel/fs/vfs.c link this stub so the
+# link stays closed; the real VFS append test links the production object
+# instead and must NOT link this stub.  See
+# hosttests/mock/vfs_append_link_stub.c.
+$(TEST_BLD)/vfs_append_link_stub.o: $(TEST_MOCK)/vfs_append_link_stub.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -c $< -o $@
+
+VFS_APPEND_LINK_STUB_OBJ := $(TEST_BLD)/vfs_append_link_stub.o
+
 # Default test case compilation
 $(TEST_BLD)/%.o: $(TEST_CASES)/%.c
 	@mkdir -p $(TEST_BLD)

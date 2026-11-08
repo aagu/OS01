@@ -5100,6 +5100,33 @@
     "action": "unique",
     "reason": "BOOT-4 aarch64 stage contracts and dependency orchestration"
    }
+  },
+  {
+   "id": "fs.vfs.atomic_append",
+   "component": "fs",
+   "behavior": "vfs",
+   "trigger": "host runner invokes test_vfs_append.elf",
+   "assertions": [
+    "appends from two independent open-file descriptions land at the real EOF on tmpfs, ext2 and FAT32 without overwriting existing content",
+    "a shared open-file description with a stale offset comes out of fd_write with offset equal to the last commit end",
+    "a write larger than UACCESS_BOUNCE_SIZE is a legal short write of exactly one bounce",
+    "a failing user copy (EFAULT) and a failing bounce allocation (ENOMEM) commit nothing",
+    "append after truncate lands at zero; dispatch reports EROFS/EOPNOTSUPP per filesystem capability; O_APPEND device files stay on the plain write path"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_vfs_append"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_vfs_append.c",
+    "selector": "test_vfs_append",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test proving kernel VFS atomic append semantics across the three writable filesystems"
+   }
   }
  ]
 }
