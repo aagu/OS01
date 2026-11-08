@@ -25,6 +25,14 @@
 #include <arch/x86_64/platform/boot_irq.h>  // calibration window
 #include <arch/x86_64/rtc.h>  // BOOT2_CALIBRATION_SPIN_LIMIT
 #include <stddef.h>             // NULL
+#ifdef X86_BOOT_IRQ_TIME_TEST
+#include <selftest/boot_irq_time_fixture.h>
+#define B2T_RTC_HOOK(regs)      boot2_test_rtc_pf(regs)
+#define B2T_RTC_DONE(rc)        boot2_test_after_rtc(rc)
+#else
+#define B2T_RTC_HOOK(regs)      ((void)0)
+#define B2T_RTC_DONE(rc)        ((void)0)
+#endif
 
 // ── CMOS RTC port I/O (local to this file; same as rtc_cmos.c) ──
 #define RTC_CMOS_ADDR         0x70u
@@ -64,7 +72,8 @@ static volatile uint32_t rtc_pie_lapic1;
 
 static void rtc_pie_handler(uint64_t nr, uint64_t parameter, pt_regs_t *regs)
 {
-    (void)nr; (void)parameter; (void)regs;
+    (void)nr; (void)parameter;
+    B2T_RTC_HOOK(regs);   /* BOOT-2 test fixture (variants only) */
     // Read reg 0x0C to clear the IRQ reason.
     uint8_t c = cmos_read(RTC_CMOS_REG_STATUS_C);
 
@@ -134,7 +143,9 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     rtc_pie_count = 0;
     rtc_pie_done = false;
     cmos_write(RTC_CMOS_REG_STATUS_B, (uint8_t)((save_b & (uint8_t)~(RTC_B_AIE | RTC_B_UIE)) | RTC_B_PIE));
-    irq_unmask(rtc_gsi);
+#ifndef X86_BOOT_IRQ_TIME_RTC_TIMEOUT
+    irq_unmask(rtc_gsi);   /* rtc-timeout keeps the route masked */
+#endif
     arch_local_irq_enable();          /* controlled window: IF=1 */
 
     /* ── 4. Foreground acquire wait: raw TSC + bounded pause budget. ── */
@@ -179,6 +190,7 @@ int rtc_pie_calibrate(uint64_t *tsc_hz_out, uint64_t *lapic_hz_out)
     }
 
 out:
+    B2T_RTC_DONE(rc);
     x86_boot_irq_calibration_end();
     /* All paths return IF=0. */
     arch_local_irq_disable();

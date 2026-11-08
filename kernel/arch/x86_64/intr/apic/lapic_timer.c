@@ -14,6 +14,9 @@
 #include <time/clockevent.h>   // tick_handler()
 #include <time/clocksource.h>  // clocksource_freq_hz()
 #include <arch/x86_64/rtc.h>   // BOOT2_CALIBRATION_SPIN_LIMIT (BOOT-2)
+#ifdef X86_BOOT_IRQ_TIME_TEST
+#include <selftest/boot_irq_time_fixture.h>
+#endif
 #include <sched/accounting.h>  // sched_account_tick()
 #include <stdbool.h>
 
@@ -131,6 +134,14 @@ void lapic_timer_calibrate(void)
 
 bool lapic_timer_start(uint32_t freq_hz)
 {
+#ifdef X86_BOOT_IRQ_TIME_BSP_LAPIC_FAIL
+    /* Isolated matrix: the BSP handoff attempt fails (PIT fallback);
+     * AP starts (cpu_id != 0) are unaffected. */
+    if (cpu_id() == 0) {
+        lapic_write(LAPIC_LVT_TIMER, LVT_MASK);
+        return false;
+    }
+#endif
     if (!lapic_timer_hz || freq_hz == 0 ||
         lapic_timer_hz / freq_hz > 0xFFFFFFFFULL) {
         /* BOOT-2: refuse without unmasking — the caller keeps its PIT
@@ -172,6 +183,9 @@ void lapic_timer_handler(pt_regs_t *regs __attribute__((unused)),
                          uint64_t error_code __attribute__((unused)))
 {
     if (cpu_id() == 0) {
+#ifdef X86_BOOT_IRQ_TIME_TEST
+        boot2_test_timer_irq(1, regs);   /* BOOT-2 fixture: BSP LAPIC */
+#endif
         // BSP 驱动 jiffies + poll 扫描（tick_handler 内含 watchdog++/softirq）。
         tick_handler();
     } else {

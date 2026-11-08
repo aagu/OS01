@@ -130,7 +130,8 @@ KERNEL_C_SOURCES := \
     $(wildcard block/*.c) \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
-    $(filter-out selftest/arch10_capacity_fixture.c,$(wildcard selftest/*.c)) \
+    $(filter-out selftest/arch10_capacity_fixture.c \
+                 selftest/boot_irq_time_fixture.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \
@@ -191,12 +192,36 @@ ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
 # above ONLY for the dedicated fault variant.
 ARCH_C_SOURCES := $(filter-out $(ARCHDIR)/intr/fault_probe.c, $(ARCH_C_SOURCES))
 ARCH_C_SOURCES += $(KERNEL_X86_INTR_FAULT_C_SOURCES)
+
+# ── BOOT-2 isolation fixture ─────────────────────────────────
+# kernel/selftest/boot_irq_time_fixture.c is compiled ONLY for the
+# boot-irq-time fault variants; the normal build never links the
+# fixture (no fixture symbol, no marker string).
+ifneq ($(findstring X86_BOOT_IRQ_TIME_TEST=rtc-timeout,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_BOOT2_IRQ_TIME_FLAGS := -DX86_BOOT_IRQ_TIME_TEST=1 -DX86_BOOT_IRQ_TIME_RTC_TIMEOUT=1 -DX86_BOOT_IRQ_TIME_FORCE_RTC=1
+else ifneq ($(findstring X86_BOOT_IRQ_TIME_TEST=force-rtc,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_BOOT2_IRQ_TIME_FLAGS := -DX86_BOOT_IRQ_TIME_TEST=1 -DX86_BOOT_IRQ_TIME_FORCE_RTC=1
+else ifneq ($(findstring X86_BOOT_IRQ_TIME_TEST=bsp-lapic-fail,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_BOOT2_IRQ_TIME_FLAGS := -DX86_BOOT_IRQ_TIME_TEST=1 -DX86_BOOT_IRQ_TIME_BSP_LAPIC_FAIL=1
+else ifneq ($(findstring X86_BOOT_IRQ_TIME_TEST=unsafe-open,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_BOOT2_IRQ_TIME_FLAGS := -DX86_BOOT_IRQ_TIME_TEST=1 -DX86_BOOT_IRQ_TIME_UNSAFE_OPEN=1
+else
+KERNEL_BOOT2_IRQ_TIME_FLAGS :=
+endif
+ifneq ($(strip $(KERNEL_BOOT2_IRQ_TIME_FLAGS)),)
+# (ALL_CFLAGS is redefined below — the flag fold happens in the
+# DRIVER_MODEL_FAULT block area after that definition.)
+KERNEL_BOOT2_FIXTURE_C_SOURCES := selftest/boot_irq_time_fixture.c
+else
+KERNEL_BOOT2_FIXTURE_C_SOURCES :=
+endif
+ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES)
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
 ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S, $(ARCH_ASM_SOURCES))
 
-ALL_C_SOURCES   := $(KERNEL_C_SOURCES) $(ARCH_C_SOURCES)
+ALL_C_SOURCES   := $(KERNEL_C_SOURCES) $(ARCH_C_SOURCES) $(ALL_C_SOURCES_EXTRA)
 # kallsyms is a two-pass build artifact, not a regular source
 ALL_C_SOURCES   := $(filter-out core/kallsyms.c, $(ALL_C_SOURCES))
 ALL_S_SOURCES   := $(ARCH_ASM_SOURCES)
@@ -301,6 +326,9 @@ ALL_CFLAGS += $(DRIVER_MODEL_FAULT_FLAGS)
 # the probe block above).  This is also the flags-cache contract's
 # invalidation handle.
 ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
+# BOOT-2 fixture/case flags: folded AFTER ALL_CFLAGS is defined (same
+# pattern as the fault-fixture flags above).
+ALL_CFLAGS += $(KERNEL_BOOT2_IRQ_TIME_FLAGS)
 
 # ── FB_RESOLUTION_TEST fault surface (Task 9) ──────────────
 # Same pattern: appended after ALL_CFLAGS is defined and after the source

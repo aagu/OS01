@@ -105,13 +105,37 @@ check_signal:
     andq    %rsp,       %rbx
     # current->signal == 0?  Skip if no pending signals.
     cmpq    $0, TASK_SIGNAL_OFFSET(%rbx)
+#ifdef X86_BOOT_IRQ_TIME_TEST
+    je  boot2_test_restore
+#else
     je  RESTORE_ALL
+#endif
     # Deliver pending signals.
     movq    %rsp,   %rdi
     call    arch_do_signal_delivery
     testl   %eax,   %eax
+#ifdef X86_BOOT_IRQ_TIME_TEST
+    jz  boot2_test_restore    # nothing delivered → break loop
+#else
     jz  RESTORE_ALL           # nothing delivered → break loop
+#endif
     jmp check_signal          # try next pending signal
+
+#ifdef X86_BOOT_IRQ_TIME_TEST
+/* BOOT-2 test tail: the two check_signal RESTORE_ALL exits land here.
+ * %rsp still points at the saved frame (pt_regs).  Keep it in %rbx
+ * (callee-saved across the C call), align the stack, count one paired
+ * return for whichever handler token owns this exact frame, restore
+ * %rsp and fall through to the normal RESTORE_ALL — every GPR is still
+ * restored from the original frame. */
+boot2_test_restore:
+    movq    %rsp,   %rbx
+    andq    $-16,   %rsp
+    movq    %rbx,   %rdi
+    call    boot2_test_irq_return
+    movq    %rbx,   %rsp
+    jmp     RESTORE_ALL
+#endif
 
 ENTRY(divide_error)
 	pushq	$0

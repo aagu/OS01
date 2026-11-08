@@ -15,6 +15,9 @@
 #include <log/log.h>
 #include <core/panic.h>
 #include <kernel.h>
+#ifdef X86_BOOT_IRQ_TIME_TEST
+#include <selftest/boot_irq_time_fixture.h>
+#endif
 #include <stddef.h>
 
 enum boot2_state {
@@ -109,6 +112,9 @@ void x86_boot_irq_runtime_open(void)
     boot2_state = BOOT2_RUNTIME;
     log_info("[boot-2] runtime-open source=pit\n");
     arch_local_irq_enable();
+#ifdef X86_BOOT_IRQ_TIME_TEST
+    boot2_test_after_runtime_open();
+#endif
 }
 
 bool x86_boot_irq_runtime_opened(void)

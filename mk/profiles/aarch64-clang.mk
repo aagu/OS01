@@ -54,6 +54,10 @@ X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_E
 ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
 $(error X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE) is x86-only; the aarch64 profile must not select a boot-lifecycle fault variant)
 endif
+X86_BOOT_IRQ_TIME_CASE := $(if $(findstring X86_BOOT_IRQ_TIME_TEST=1,$(KERNEL_EXTRA_CFLAGS)),boot-irq-time,)
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_CASE)),)
+$(error X86_BOOT_IRQ_TIME_TEST is x86-only; the aarch64 profile must not select a boot-irq-time fault variant)
+endif
 #
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ifeq ($(filter 1,$(KERNEL_SELFTEST)),)

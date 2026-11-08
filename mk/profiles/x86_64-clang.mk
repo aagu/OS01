@@ -45,6 +45,9 @@ X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_C
 # BOOT-1 CPU-lifecycle fault matrix (Task 3): same macro-derived case —
 # a direct KERNEL_EXTRA_CFLAGS selection resolves here too.
 X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_EXTRA_CFLAGS)),delay-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_ONLINE,$(KERNEL_EXTRA_CFLAGS)),no-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_SCHEDULER,$(KERNEL_EXTRA_CFLAGS)),no-scheduler,)))
+# BOOT-2 early-IRQ/time fault matrix: same macro-derived case (the
+# selector contributes a single -DX86_BOOT_IRQ_TIME_TEST=<case> token).
+X86_BOOT_IRQ_TIME_CASE := $(if $(findstring X86_BOOT_IRQ_TIME_TEST=rtc-timeout,$(KERNEL_EXTRA_CFLAGS)),rtc-timeout,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=force-rtc,$(KERNEL_EXTRA_CFLAGS)),force-rtc,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=bsp-lapic-fail,$(KERNEL_EXTRA_CFLAGS)),bsp-lapic-fail,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=unsafe-open,$(KERNEL_EXTRA_CFLAGS)),unsafe-open,))))
 ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
 KERNEL_VARIANT := weak-selftest
 else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
@@ -73,6 +76,9 @@ endif
 # refuses the conflicting combinations at parse time).
 ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
 KERNEL_VARIANT := boot-lifecycle-$(X86_SMP_BOOT_CASE)
+endif
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_CASE)),)
+KERNEL_VARIANT := boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE)
 endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc

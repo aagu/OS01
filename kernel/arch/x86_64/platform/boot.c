@@ -133,6 +133,27 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
         kpanic("apic: required subsys registration missing\n");
     }
 
+#if defined(X86_BOOT_IRQ_TIME_TEST)
+    {
+        /* Isolated variant identity (spec §7.2).  rtc-timeout implies
+         * FORCE_RTC, so the more specific case must win the #if. */
+#if defined(X86_BOOT_IRQ_TIME_RTC_TIMEOUT)
+        log_info("[boot-2-test] variant=boot-irq-time-rtc-timeout\n");
+#elif defined(X86_BOOT_IRQ_TIME_FORCE_RTC)
+        log_info("[boot-2-test] variant=boot-irq-time-force-rtc\n");
+#elif defined(X86_BOOT_IRQ_TIME_BSP_LAPIC_FAIL)
+        log_info("[boot-2-test] variant=boot-irq-time-bsp-lapic-fail\n");
+#elif defined(X86_BOOT_IRQ_TIME_UNSAFE_OPEN)
+        log_info("[boot-2-test] variant=boot-irq-time-unsafe-open\n");
+#endif
+    }
+#endif
+#if defined(X86_BOOT_IRQ_TIME_UNSAFE_OPEN)
+    /* unsafe-open: the controlled window is opened BEFORE the context
+     * exists — the state machine must fail closed here, before any
+     * sti/GS read. */
+    x86_boot_irq_calibration_begin();
+#endif
     /* BOOT-2 phased orchestration (spec §3.2): controllers first, then
      * the BSP percpu (BOOT-1 constructor, before ANY device IRQ can be
      * enabled), then the phase-4 time facilities, then the controlled
@@ -147,6 +168,9 @@ void x86_64_boot_subsystems(const struct boot_context *bootctx)
 
     x86_boot_irq_runtime_open();
 
+#ifdef X86_BOOT_IRQ_TIME_TEST
+    log_info("[boot-2-test] devices-begin\n");
+#endif
     subsys_init_phase(5);
     subsys_init_phase(6);
 

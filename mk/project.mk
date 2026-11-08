@@ -170,6 +170,56 @@ $(error X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE) cannot be combined with X86_INTR_
 endif
 endif
 
+# ── X86_BOOT_IRQ_TIME_TEST — BOOT-2 early-IRQ fault matrix ───────
+# Same plumbing as the BOOT-1/X86_INTR selectors: the macro travels
+# through KERNEL_EXTRA_CFLAGS (the controlled sub-make channel) and the
+# variant slug is derived from that macro, so the compiled fixture and
+# the artifact paths can never disagree.  Cases:
+#   force-rtc      bypass the CPUID nominal TSC answer (real RTC window)
+#   rtc-timeout    force-rtc + keep the RTC route masked (bounded timeout)
+#   bsp-lapic-fail the BSP handoff fails; AP timer starts unaffected
+#   unsafe-open    open the controlled window before the context exists
+# The fixture (kernel/selftest/boot_irq_time_fixture.c) and the entry.S
+# test tail are compiled ONLY under these macros — a normal kernel
+# carries neither fixture symbols nor marker strings.
+X86_BOOT_IRQ_TIME_TEST ?=
+X86_BOOT_IRQ_TIME_TESTS_VALID := none force-rtc rtc-timeout bsp-lapic-fail unsafe-open
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_TEST)),)
+ifeq ($(filter $(X86_BOOT_IRQ_TIME_TEST),$(X86_BOOT_IRQ_TIME_TESTS_VALID)),)
+$(error X86_BOOT_IRQ_TIME_TEST='$(X86_BOOT_IRQ_TIME_TEST)' is not one of: $(X86_BOOT_IRQ_TIME_TESTS_VALID))
+endif
+endif
+ifeq ($(X86_BOOT_IRQ_TIME_TEST),none)
+X86_BOOT_IRQ_TIME_CFLAGS :=
+else ifneq ($(strip $(X86_BOOT_IRQ_TIME_TEST)),)
+# Single-token macro: the kernel build derives the per-case macros (the
+# user/runtime sub-make chain cannot take multi-word KERNEL_EXTRA values).
+X86_BOOT_IRQ_TIME_CFLAGS := -DX86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_TEST)
+else
+X86_BOOT_IRQ_TIME_CFLAGS :=
+endif
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_CFLAGS)),)
+ifeq ($(findstring X86_BOOT_IRQ_TIME_TEST=,$(KERNEL_EXTRA_CFLAGS)),)
+override KERNEL_EXTRA_CFLAGS := $(strip $(KERNEL_EXTRA_CFLAGS) $(X86_BOOT_IRQ_TIME_CFLAGS))
+endif
+endif
+X86_BOOT_IRQ_TIME_CASE := $(if $(findstring X86_BOOT_IRQ_TIME_TEST=rtc-timeout,$(KERNEL_EXTRA_CFLAGS)),rtc-timeout,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=force-rtc,$(KERNEL_EXTRA_CFLAGS)),force-rtc,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=bsp-lapic-fail,$(KERNEL_EXTRA_CFLAGS)),bsp-lapic-fail,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=unsafe-open,$(KERNEL_EXTRA_CFLAGS)),unsafe-open,))))
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_CASE)),)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST) $(CAPACITY_TEST) $(ARCH6_FSSTRESS_TEST)),)
+$(error X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE) cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST/CAPACITY_TEST/ARCH6_FSSTRESS_TEST)
+endif
+ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
+else
+$(error X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE) cannot be combined with DRIVER_MODEL_FAULT=$(DRIVER_MODEL_FAULT))
+endif
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+$(error X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE) cannot be combined with X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE))
+endif
+ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
+$(error X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE) cannot be combined with X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE))
+endif
+endif
+
 # ── CAPACITY_TEST — isolated capacity variant (spec §10) ──────────
 CAPACITY_TEST ?= 0
 ifeq ($(filter $(CAPACITY_TEST),0 1),)
@@ -244,7 +294,7 @@ ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
 USER_DEBUG := 1
 endif
 
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE)))
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE))$(if $(strip $(X86_BOOT_IRQ_TIME_CASE)),boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE)))
 USER_VARIANT  := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)

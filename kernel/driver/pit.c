@@ -10,9 +10,15 @@
 #include <driver/serial.h>
 #include <tty/console.h>
 #include <core/debug.h>
+#ifdef X86_BOOT_IRQ_TIME_TEST
+#include <selftest/boot_irq_time_fixture.h>
+#endif
 
 void pit_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)), pt_regs_t * regs __attribute__((unused)))
 {
+#ifdef X86_BOOT_IRQ_TIME_TEST
+    boot2_test_timer_irq(0, regs);   /* BOOT-2 fixture (variants only) */
+#endif
     tick_handler();      // 统一 tick 语义（jiffies++/poll/need_resched/watchdog/softirq）
     serial_poll();       // x86 串口轮询 fallback，留在本层
 }

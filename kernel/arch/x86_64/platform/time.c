@@ -8,6 +8,9 @@
 #include <sched/accounting.h>    // sched_accounting_cpu_start (monitor Task 2)
 #include <driver/pit.h>         // pit_prepared (BOOT-2 handoff gate)
 #include <core/panic.h>         // kpanic (BOOT-2 fatal)
+#ifdef X86_BOOT_IRQ_TIME_TEST
+#include <selftest/boot_irq_time_fixture.h>
+#endif
 
 // 三级回落：CPUID 15h → RTC PIE（BOOT-2 受控窗口）→ 0。
 // BOOT-2: the FIRST boot-time decision (including a failed 0) is cached;
@@ -23,7 +26,11 @@ uint64_t arch_cycle_freq(void)
         return cycle_freq_cache;
 
     uint32_t eax, ebx, ecx, edx;
+#ifndef X86_BOOT_IRQ_TIME_FORCE_RTC
     cpuid(0x15, &eax, &ebx, &ecx, &edx);
+#else
+    eax = ebx = ecx = 0;   /* force-rtc: bypass the CPUID nominal answer */
+#endif
     if (ecx != 0 && eax != 0) {   // eax==0 防 boot 期 #DE（畸形/虚拟 CPU）
         /* CPUID answered: no RTC side effects at all. */
         cycle_freq_cache = (uint64_t)ecx * ebx / eax;
@@ -77,5 +84,8 @@ bool arch_tick_start(void)
         sched_accounting_cpu_start(0, 100, true);
     }
     arch_local_irq_restore(flags);
+#ifdef X86_BOOT_IRQ_TIME_TEST
+    boot2_test_after_handoff(ok);
+#endif
     return ok;
 }

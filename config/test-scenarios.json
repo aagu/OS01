@@ -4548,6 +4548,167 @@
     "action": "unique",
     "reason": "BOOT-1 Task 1: real boot_sync.c bounded acquire wait contract (seven boundary cases incl. last-check semantics)"
    }
+  },
+  {
+   "id": "smp.boot2.normal",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "make test-qemu SUITE=boot-irq-time --case normal 1/2/4/8",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_irq_time.py",
+    "selector": "--case normal",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "smp.boot2.force_rtc",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "make test-qemu SUITE=boot-irq-time --case force-rtc 2",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_irq_time.py",
+    "selector": "--case force-rtc",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "smp.boot2.fatal",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "make test-qemu SUITE=boot-irq-time --case unsafe-open 1",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_irq_time.py",
+    "selector": "--case unsafe-open",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "smp.boot2.registration_host",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "host runner invokes test_boot_irq_registration.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_irq_registration.c",
+    "selector": "test_boot_irq_registration",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "smp.boot2.context_host",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "host runner invokes test_boot_irq_context.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_irq_context.c",
+    "selector": "test_boot_irq_context",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "smp.boot2.rtc_host",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "host runner invokes test_rtc_pie_calibration.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_rtc_pie_calibration.c",
+    "selector": "test_rtc_pie_calibration",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
+  },
+  {
+   "id": "smp.boot2.handoff_host",
+   "component": "smp",
+   "behavior": "boot2-irq-time",
+   "trigger": "host runner invokes test_boot_tick_handoff.elf",
+   "assertions": [
+    "runner exits 0 with archived metadata"
+   ],
+   "failure_modes": [
+    "missing/duplicate/truncated markers, timeout, silent, self-exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_boot_tick_handoff.c",
+    "selector": "test_boot_tick_handoff",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-2 Task 4 matrix evidence"
+   }
   }
  ]
 }
