@@ -77,9 +77,18 @@ ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *f)
     char *buf = *lineptr;
     size_t cap = *n;
 
-    if (!buf || cap == 0) {
+    if (!buf) {
+        /* No buffer at all: allocate one (the caller frees it). */
         buf = NULL;
         cap = 0;
+        if (!grow_line(&buf, &cap, 1)) {
+            errno = ENOMEM;
+            return -1;
+        }
+    } else if (cap == 0) {
+        /* A buffer the caller says has no room: grow FROM THEIR
+         * pointer (realloc), so the block they may still hold a
+         * reference to is the one being extended — nothing leaks. */
         if (!grow_line(&buf, &cap, 1)) {
             errno = ENOMEM;
             return -1;

@@ -255,7 +255,7 @@ TEST_FUNC(test_getdelim_enomem_keeps_buffer_consistent) {
     assert_not_null(line);
     assert_eq(256, (size_t)cap);                 /* the landed growth */
     size_t kept = cap - 1;
-    if (n == -ENOMEM * 0 - 1 && kept > 0 && kept <= TAIL_LEN) {
+    if (n == -1 && kept > 0 && kept <= TAIL_LEN) {
         assert_mem_eq(tail, line, kept);         /* the 'B' prefix ... */
         /* (no NUL is promised INSIDE the buffer on the ENOMEM path —
          * only the *lineptr/*n consistency and freeability are) */

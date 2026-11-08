@@ -4047,11 +4047,13 @@ static void test_stdio_modes(void)
 //    completion plan) ──
 //
 // getdelim/getline now exist in libc.a and the BusyBox private build
-// carries -DHAVE_GETLINE=1 (config/busybox.config.in), so
-// xmalloc_fgetline resolves getline from OUR libc instead of libbb's
-// fallback.  This case runs the real applets head/tail/cat over a
-// five-line tmpfs file with stdout redirected to a file, and checks
-// the exact extracted lines.
+// carries -DHAVE_GETLINE=1 (config/busybox.config.in).  NOTE: busybox
+// 1.36.1's own getline call sites sit inside #if 0, so nothing in
+// THIS binary references getline today — head/tail extract lines via
+// bb_get_chunk_from_file, an fgetc loop.  That is exactly why this
+// case still matters: it drives OUR fgetc path through real applets
+// over a five-line tmpfs file with stdout redirected to a file, and
+// checks the exact extracted lines.
 static int busybox_lines_expect(const char **av, const char *out_path,
                                 const char *expect, const char *label)
 {

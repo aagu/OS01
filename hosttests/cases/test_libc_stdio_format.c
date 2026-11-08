@@ -46,7 +46,6 @@ void *__wrap_malloc(size_t size)
     return __real_malloc(size);
 }
 
-extern ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 extern off_t lseek(int fd, off_t offset, int whence); /* libc's own decl */
 
 static char g_path[128];
