@@ -154,8 +154,7 @@ static int _pic_init_wrapper(void)
 }
 static int _pic_register(void)
 {
-    register_subsys("pic", _pic_init_wrapper,
-                    SUBSYS_PHASE_3, SUBSYS_FLAG_OPTIONAL);
-    return 0;
+    return register_subsys("pic", _pic_init_wrapper,
+                           SUBSYS_PHASE_3, SUBSYS_FLAG_OPTIONAL);
 }
 SUBSYS_INITCALL(_pic_register);

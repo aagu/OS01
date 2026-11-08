@@ -62,8 +62,7 @@ static int _clocksource_init_wrapper(void)
 }
 static int _clocksource_register(void)
 {
-    register_subsys("clocksource", _clocksource_init_wrapper,
-                    SUBSYS_PHASE_4, 0);
-    return 0;
+    return register_subsys("clocksource", _clocksource_init_wrapper,
+                           SUBSYS_PHASE_4, 0);
 }
 SUBSYS_INITCALL(_clocksource_register);

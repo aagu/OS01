@@ -253,8 +253,7 @@ static int _init_serial_irq_wrapper(void)
 }
 static int _serial_register(void)
 {
-    register_subsys("serial", _init_serial_irq_wrapper,
-                    SUBSYS_PHASE_5, 0);
-    return 0;
+    return register_subsys("serial", _init_serial_irq_wrapper,
+                           SUBSYS_PHASE_5, 0);
 }
 SUBSYS_INITCALL(_serial_register);

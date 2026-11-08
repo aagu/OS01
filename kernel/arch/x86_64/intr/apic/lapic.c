@@ -268,10 +268,6 @@ static int _apic_init_wrapper(void)
 }
 static int _apic_register(void)
 {
-    int rc = register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
-    if (rc != 0) {
-        kpanic("apic: failed to register subsys\n");
-    }
-    return 0;
+    return register_subsys("apic", _apic_init_wrapper, SUBSYS_PHASE_3, 0);
 }
 SUBSYS_INITCALL(_apic_register);

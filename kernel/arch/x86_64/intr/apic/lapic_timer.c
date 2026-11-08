@@ -289,8 +289,7 @@ static int _lapic_timer_init_wrapper(void)
 }
 static int _lapic_timer_register(void)
 {
-    register_subsys("lapic-timer", _lapic_timer_init_wrapper,
-                    SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
-    return 0;
+    return register_subsys("lapic-timer", _lapic_timer_init_wrapper,
+                           SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
 }
 SUBSYS_INITCALL(_lapic_timer_register);

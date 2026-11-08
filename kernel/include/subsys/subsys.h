@@ -23,6 +23,7 @@ typedef struct {
     uint32_t flags;
     // private:
     int   initialized;          // 0=未执行, 1=成功, <0=失败
+    int   raw_result;           // 原始返回码
 } subsys_entry_t;
 
 // ── 子系统入口（per-CPU 二次 init） ──────────────────────
@@ -32,7 +33,11 @@ typedef struct {
     uint32_t flags;
     // private:
     int initialized;
+    int raw_result;
+    uint64_t failed_mask;
 } subsys_percpu_entry_t;
+
+typedef int (*subsys_initcall_t)(void);
 
 // ── 函数声明 ─────────────────────────────────────────────
 int  register_subsys(const char *name, int (*init)(void),
@@ -44,6 +49,14 @@ void subsys_init_all(void);
 void subsys_init_phase(int phase);
 void subsys_init_percpu(void);
 int  subsys_status(const char *name);
+void subsys_register_initcalls(subsys_initcall_t *begin, subsys_initcall_t *end);
+int  subsys_result(const char *name);
+int  subsys_percpu_result(const char *name, uint64_t *failed_mask);
+int  subsys_require_ready(const char *name);
+
+#if defined(OS01_HOST_TEST)
+void subsys_test_reset(void);
+#endif
 
 // ── Self-registration via linker section ─────────────────
 // Drivers place a function pointer in the .subsys_init section via
@@ -51,7 +64,6 @@ int  subsys_status(const char *name);
 // __subsys_init_start..__subsys_init_end and calls each. This avoids
 // __attribute__((constructor)), which has no runtime support in this
 // libc-free kernel (no .init_array iteration in startup code).
-typedef int (*subsys_initcall_t)(void);
 
 #define SUBSYS_INITCALL(fn)                                            \
     static subsys_initcall_t __subsys_initcall_##fn                   \

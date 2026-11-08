@@ -1,6 +1,7 @@
 // kernel/arch/x86_64/subsys_percpu.c
 
 #include <subsys/subsys.h>
+#include <core/boot_failure.h>
 #include <intr/apic.h>
 
 static int _lapic_timer_start_percpu(int cpu_id)
@@ -27,5 +28,8 @@ static int _lapic_timer_start_percpu(int cpu_id)
 
 void arch_register_subsys_percpu(void)
 {
-    register_subsys_percpu("lapic-timer-start", _lapic_timer_start_percpu, 0);
+    int rc = register_subsys_percpu("lapic-timer-start", _lapic_timer_start_percpu, 0);
+    if (rc != 0) {
+        boot_failure_stop("register", "lapic-timer-start", rc, -1, -1);
+    }
 }

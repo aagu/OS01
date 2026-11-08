@@ -260,6 +260,20 @@ unsigned long boot2_early_puts_calls;
 void arch_early_puts(const char *s) { (void)s; boot2_early_puts_calls++; }
 void arch_early_putc(char c) { (void)c; boot2_early_puts_calls++; }
 
+__attribute__((noreturn))
+void boot_failure_stop(const char *stage, const char *component,
+                       int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)rc; (void)phase; (void)cpu;
+    abort();
+}
+
+void boot_failure_warn(const char *stage, const char *component,
+                       int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)rc; (void)phase; (void)cpu;
+}
+
 /* Exception handler surface (arch dispatch.c): unreachable in this
  * suite — any call is a test-protocol violation. */
 void x86_handle_debug(pt_regs_t *r, uint64_t e) { __builtin_trap(); }

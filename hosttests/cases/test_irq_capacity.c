@@ -598,6 +598,18 @@ void kpanic(const char *fmt, ...)
     abort();
 }
 
+__attribute__((noreturn))
+void boot_failure_stop(const char *stage, const char *component, int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)rc; (void)phase; (void)cpu;
+    kpanic("boot failure: %s %s\n", stage ? stage : "", component ? component : "");
+}
+
+void boot_failure_warn(const char *stage, const char *component, int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)rc; (void)phase; (void)cpu;
+}
+
 static int s_phase4_calls = 0;
 static int s_phase5_calls = 0;
 static int s_phase6_calls = 0;

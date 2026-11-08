@@ -18,8 +18,5 @@
 
 void arch_register_subsys(void)
 {
-    for (subsys_initcall_t *p = __subsys_init_start;
-         p < __subsys_init_end; p++) {
-        (*p)();
-    }
+    subsys_register_initcalls(__subsys_init_start, __subsys_init_end);
 }

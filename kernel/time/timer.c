@@ -155,8 +155,7 @@ static int _timer_init_wrapper(void)
 }
 static int _timer_register(void)
 {
-    register_subsys("timer", _timer_init_wrapper,
-                    SUBSYS_PHASE_4, 0);
-    return 0;
+    return register_subsys("timer", _timer_init_wrapper,
+                           SUBSYS_PHASE_4, 0);
 }
 SUBSYS_INITCALL(_timer_register);

@@ -76,8 +76,7 @@ static int _pit_init_wrapper(void)
 }
 static int _pit_register(void)
 {
-    register_subsys("pit", _pit_init_wrapper,
-                    SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
-    return 0;
+    return register_subsys("pit", _pit_init_wrapper,
+                           SUBSYS_PHASE_4, SUBSYS_FLAG_OPTIONAL);
 }
 SUBSYS_INITCALL(_pit_register);

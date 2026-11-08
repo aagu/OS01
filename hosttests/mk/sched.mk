@@ -806,3 +806,52 @@ test-aarch64-sched-charge-host: \
 		$(TEST_BLD)/test_aarch64_sched_charge_x86.elf
 	$(TEST_BLD)/test_aarch64_sched_charge_aarch64.elf
 	$(TEST_BLD)/test_aarch64_sched_charge_x86.elf
+
+# ── BOOT-3 failure policy host tests ─────────────────────────────
+$(eval $(call register_host_test,test_boot_failure_subsys,sched,protocol-or-legacy))
+$(eval $(call register_host_test,test_boot_failure_log,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_boot_failure_subsys.elf \
+    $(TEST_BLD)/test_boot_failure_log.elf
+
+BOOT3_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/boot3_subsys_production.o: $(TESTS_DIR)/kernel/subsys/subsys.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/boot3_test_subsys.o: $(TEST_CASES)/test_boot_failure_subsys.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_failure_subsys.elf: \
+		$(TEST_BLD)/boot3_test_subsys.o \
+		$(TEST_BLD)/boot3_subsys_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test_boot_failure_subsys
+test_boot_failure_subsys: $(TEST_BLD)/test_boot_failure_subsys.elf
+	$<
+
+$(TEST_BLD)/boot3_log_failure_production.o: $(TESTS_DIR)/kernel/core/boot_failure.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/boot3_log_aarch64_impl.o: $(TESTS_DIR)/kernel/arch/aarch64/runtime/log_impl.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/boot3_test_log.o: $(TEST_CASES)/test_boot_failure_log.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_boot_failure_log.elf: \
+		$(TEST_BLD)/boot3_test_log.o \
+		$(TEST_BLD)/boot3_log_failure_production.o \
+		$(TEST_BLD)/boot3_log_aarch64_impl.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test_boot_failure_log
+test_boot_failure_log: $(TEST_BLD)/test_boot_failure_log.elf
+	$<

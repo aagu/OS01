@@ -192,9 +192,8 @@ static int _device_boot_subsys_init(void)
 
 static int _device_boot_register(void)
 {
-    register_subsys("device-boot", _device_boot_subsys_init,
-                    SUBSYS_PHASE_6, 0 /* non-OPTIONAL */);
-    return 0;
+    return register_subsys("device-boot", _device_boot_subsys_init,
+                           SUBSYS_PHASE_6, 0 /* non-OPTIONAL */);
 }
 SUBSYS_INITCALL(_device_boot_register);
 #endif

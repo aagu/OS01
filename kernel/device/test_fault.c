@@ -144,11 +144,12 @@ static int _fault_dump_subsys_init(void)
  * AHCI probe has already run by the time we print. */
 static int _fault_register(void)
 {
-    register_subsys("arch9-fault-dispatch", _fault_dispatch_at_init,
-                    SUBSYS_PHASE_5, 1 /* OPTIONAL */);
-    register_subsys("arch9-fault-dump", _fault_dump_subsys_init,
-                    SUBSYS_PHASE_6, 1 /* OPTIONAL */);
-    return 0;
+    int rc = register_subsys("arch9-fault-dispatch", _fault_dispatch_at_init,
+                             SUBSYS_PHASE_5, 1 /* OPTIONAL */);
+    if (rc != 0)
+        return rc;
+    return register_subsys("arch9-fault-dump", _fault_dump_subsys_init,
+                           SUBSYS_PHASE_6, 1 /* OPTIONAL */);
 }
 SUBSYS_INITCALL(_fault_register);
 #endif
