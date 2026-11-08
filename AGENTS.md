@@ -121,7 +121,9 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
   | timeout 50 qemu-system-x86_64 -M q35 \
       -drive if=pflash,format=raw,readonly=on,file="$FW" \
       -drive file="$IMG",format=raw,if=none,id=disk -device ahci,id=ahci \
-      -device ide-hd,drive=disk,bus=ahci.0 -m 512 -smp 1 -serial stdio \
+      -device ide-hd,drive=disk,bus=ahci.0 \
+      -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 \
+      -m 512 -smp 1 -serial stdio \
       -display none -no-reboot -no-shutdown > /tmp/log 2>&1
 ```
 
@@ -134,7 +136,9 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 
 | File | Purpose |
 |------|---------|
-| `kernel/core/main.c` | Init sequence (subsys → VFS → SMP → futex_init → task_init) |
+| `kernel/core/main.c` | Init sequence (subsys → VFS → SMP → kernel_start_userspace) |
+| `kernel/init/userspace.c` | Public userspace startup orchestration (VFS runtime handoff, /bin/init publication, runtime ready) |
+| `kernel/init/services.c` | Boot background services (lwIP network prepare, thermal start) |
 | `kernel/arch/x86_64/head.S` | Entry, page tables, GDT, IDT, TSS |
 | `kernel/arch/x86_64/intr/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
 | `kernel/arch/x86_64/intr/trap.c` | Exception handlers + do_system_call + do_signal_delivery |

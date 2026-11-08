@@ -132,24 +132,26 @@ When a task wakes from blocking, its `vruntime` is raised to `min_vruntime - EEV
 - `__switch_to(prev, next)`: updates per-CPU TSS.rsp0 via `this_cpu()->tss`, swaps FS selector (GS base is per-CPU, never touched), switches CR3 if needed
 - **Kernel threads** (PF_KTHREAD): `thd->rip` = `kernel_thread_func` which pops pt_regs from stack
 - **User processes**: `thd->rip` = `ret_from_intr` (RESTORE_ALL + iretq path)
-- **Per-CPU scheduler guard**: `this_cpu()->scheduler_ok` — set by `ap_entry()`/`task_init()`. Timer ticks before this is set are no-ops.
+- **Per-CPU scheduler guard**: `this_cpu()->scheduler_ok` — set by `ap_entry()` / `sched_boot_start()`. Timer ticks before this is set are no-ops.
 - **`on_cpu`/`on_rq`/`in_schedule`**: atomic ACQUIRE/RELEASE semantics prevent double-book (one task on two CPUs). See [scheduler-complexity.md](scheduler-complexity.md) for the race analysis.
 
 ## Task creation
 
 ### spawn_user_task(path, argv)
-1. Opens ELF via `vfs_lookup(path)`
-2. Validates ELF header with `elf_validate()`
-3. Allocates `task_union` (32KB-aligned malloc) + `thread_t` + `mm_t` via malloc/calloc
-4. Creates fresh PML4 (vmm_alloc_map), copies kernel entries from init PML4 (slots 256-511)
-5. Loads ELF segments into new address space via `elf_load()`
-6. Maps user stack page (2MB) at `USER_STACK_BASE` (0x800000); the 2MB page at 0x600000 is left unmapped as a stack guard
-7. Sets up `pt_regs` on kernel stack: CS=USER_CS, SS/DS/ES=USER_DS, RSP=USER_STACK_TOP, RIP=entry_point, RFLAGS IF=1
-8. Sets `thd->rip = ret_from_intr` → first entry through RESTORE_ALL → iretq to ring 3
-9. Calls `sched_pick_cpu()` → picks CPU with lowest nr_running; sets `task.cpu`
-10. Enqueues via `enqueue_task()` under target CPU's `rq_lock`
-11. Sends IPI reschedule to target CPU if different from current
-12. Returns PID on success, -1 on error
+1. Checks VFS runtime gate via `vfs_bootstrap_active()` — rejects with `-EAGAIN` if VFS bootstrap is still active.
+2. Selects candidate CPU via `sched_pick_cpu_mask()` and verifies placement eligibility via `spawn_boot_target_allowed(cpu)` (online and (`scheduler_ok` or BSP creation window open)).
+3. Opens ELF via `vfs_lookup(path)`
+4. Validates ELF header with `elf_validate()`
+5. Allocates `task_union` (32KB-aligned malloc) + `thread_t` + `mm_t` via malloc/calloc
+6. Creates fresh PML4 (vmm_alloc_map), copies kernel entries from init PML4 (slots 256-511)
+7. Loads ELF segments into new address space via `elf_load()`
+8. Maps user stack page (2MB) at `USER_STACK_BASE` (0x800000); the 2MB page at 0x600000 is left unmapped as a stack guard
+9. Sets up `pt_regs` on kernel stack: CS=USER_CS, SS/DS/ES=USER_DS, RSP=USER_STACK_TOP, RIP=entry_point, RFLAGS IF=1
+10. Sets `thd->rip = ret_from_intr` → first entry through RESTORE_ALL → iretq to ring 3
+11. Acquires `task_list_lock -> rq_lock` in strict lock hierarchy and re-verifies placement eligibility and VFS runtime state. On failure: unlocks, rolls back unpublished task memory/mappings, and returns `-EAGAIN`.
+12. Atomically inserts into `task_list` (`list_add_to_before`) and enqueues to target runqueue (`enqueue_task`) under both locks, then releases `rq_lock` then `task_list_lock`.
+13. Sends IPI reschedule to target CPU if different from current
+14. Tracks `/bin/init` globally on first publication, returns PID on success (PID 1 for init), -errno on error.
 
 ### do_fork(regs, clone_flags, stack_start, stack_size)
 - Allocates task_union + thread_t

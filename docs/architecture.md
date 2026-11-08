@@ -157,7 +157,7 @@ Init phases ordered by dependency. Under the unified boot stage contracts (BOOT-
 | 7 | — | — | VFS / devfs / mounts / TTY / `/dev` smoke | `fs_boot_*()` + `tty_boot_init()` helpers |
 | 8 | — | — | SMP prepare & accounting publication | `arch_boot_smp_prepare()` |
 | 9 | — | — | AP bring-up + CPU preparation dispatch | `arch_boot_aps()` → `subsys_prepare_cpus()` |
-| 10 | — | — | Scheduler + user-space init | `task_init()` in `kernel_main` |
+| 10 | — | — | Scheduler + user-space init | `kernel_start_userspace()` in `kernel/init/userspace.c` |
 
 ---
 
@@ -165,7 +165,7 @@ Init phases ordered by dependency. Under the unified boot stage contracts (BOOT-
 
 `kernel_main()`（`kernel/core/main.c`）是 **x86_64 与 aarch64 共用的唯一全局入口**（2026-11-07 闭环；原 aarch64 `aarch64_main()` 已删除，入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制）。它是 thin orchestrator：架构相关阶段一律走 `kernel/include/arch/boot.h` 的强覆盖钩子（`arch_early_init` / `arch_boot_memory` / `arch_boot_controllers` / `arch_boot_percpu` / `arch_boot_devices` / `arch_boot_smp_prepare` / `arch_boot_aps` / `arch_boot_runtime` / `arch_boot_validate`），缺用户态的架构由 `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 特性门裁掉 VFS / 用户态段落，转入 `arch_start_kernel_idle()`。
 
-阶段展开与能力核验证（BOOT-4 契约）：
+阶段展开与能力核验证（BOOT-4 与 BOOT-5 契约）：
 
 1. Stack canary seed (`arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE`).
 2. `arch_early_init(bootctx)` — framebuffer Pos, IDT/vectors, serial, EFER NXE.
@@ -183,8 +183,15 @@ Init phases ordered by dependency. Under the unified boot stage contracts (BOOT-
 14. `arch_boot_runtime()` — 时钟与中断运行期放行，输出 runtime 证据。
 15. **Checkpoint `ARCH_BOOT_CHECK_RUNTIME`** — 校验全局就绪能力，输出 `[boot-4] checkpoint=runtime status=ok`。
 16. `#ifdef OS01_SELFTEST` — `selftest_run_all()`, `arch_post_smp_selftest()`。
-17. `sched_boot_creation_begin()`, `futex_init()`, `console_init()`。
-18. `task_init()` — 构造 stdio（`/dev/tty`），创建 `/init.elf` (PID 1)，启动调度器进入 idle 循环。
+17. `kernel_start_userspace()`（`kernel/init/userspace.c`）：
+    - 阶段 1：开启创建窗口 `sched_boot_creation_begin()`，初始化 `futex_init()` 与 `console_init()`。
+    - 阶段 2：执行架构准备 `arch_sched_boot_prepare()`、`init_mm` 段基址初始化与 `sched_boot_publish_idle()`。
+    - 阶段 3：构建 idle 任务标准 I/O（`sched_boot_prepare_stdio`）。
+    - 阶段 4：结束 VFS 引导 `vfs_end_bootstrap()`，输出 `[boot-5] vfs-runtime`。
+    - 阶段 5：发布用户态首个任务 `spawn_user_task("/bin/init", NULL)`（PID 1，在 `task_list_lock -> rq_lock` 下重检准入并原子入队），输出 `[boot-5] init-created pid=1`。
+    - 阶段 6：执行自测创建探针并准备启动后台服务 `boot_services_prepare()`（lwIP 网络线程）。
+    - 阶段 7：置 `current->state = TASK_RUNNING`，启动调度器 `sched_boot_start()`（闭合创建窗口，输出 `[boot-5] runtime-ready window=closed`）。
+    - 阶段 8：启动运行期后台服务 `boot_services_start()`（thermal worker），执行 late selftests，调用 `arch_sched_boot_idle()` 进入架构 idle 循环。
 
 ## Framebuffer resolution switching
 

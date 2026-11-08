@@ -34,7 +34,7 @@ A static table of up to `BLOCKDEV_MAX` (8) devices is maintained.
 
 ## FS Concurrency & Block Cache (ARCH-6, `kernel/block/bcache.c`, `kernel/include/block/bcache.h`)
 
-### Per-mount locking (Phase 1)
+### Per-mount locking (Phase 1) & VFS Bootstrap Handoff (BOOT-5)
 
 - Each of ext2, FAT32 and tmpfs guards its whole VFS-op operation bodies with a
   **scheduler-backed per-mount `mutex_t`** (`kernel/sync/mutex.c`); tmpfs keeps
@@ -42,6 +42,10 @@ A static table of up to `BLOCKDEV_MAX` (8) devices is maintained.
   Boot-time mounting (pre-SMP, single core) skips the mutex via
   `vfs_sched_ready()` — the same `vfs_bootstrap` exemption `vfs_ns_lock` uses;
   host tests opt in with `vfs_test_set_sched_ready(true)`.
+- **VFS Bootstrap Lifecycle**:
+  - `vfs_bootstrap_active()`: Initially true during early kernel init. Guards against premature userspace task creation — `spawn_user_task()` rejects with `-EAGAIN` while active.
+  - `vfs_end_bootstrap()`: Called in `kernel_start_userspace()` after stdio `/dev/tty` setup and all boot mounts/nodes are finalized, immediately before the first user task (`/bin/init`) is published. Emits protocol sentinel `[boot-5] vfs-runtime`.
+  - `vfs_sched_ready()`: Evaluates to true once the scheduler is live (`percpu_data[0].scheduler_ok`), transitioning FS locks from bootstrap bypass mode to full concurrency enforcement.
 - Lock order: `FS mutex → mount->active_lock (node bookkeeping only) → bcache
   metadata lock (leaf)`. The bcache metadata lock never nests with the
   per-buffer data locks, the wait-queue lock, or the AHCI port lock; all I/O,
