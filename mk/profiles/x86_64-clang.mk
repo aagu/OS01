@@ -50,6 +50,8 @@ X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_E
 X86_BOOT_IRQ_TIME_CASE := $(if $(findstring X86_BOOT_IRQ_TIME_TEST=rtc-timeout,$(KERNEL_EXTRA_CFLAGS)),rtc-timeout,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=force-rtc,$(KERNEL_EXTRA_CFLAGS)),force-rtc,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=bsp-lapic-fail,$(KERNEL_EXTRA_CFLAGS)),bsp-lapic-fail,$(if $(findstring X86_BOOT_IRQ_TIME_TEST=unsafe-open,$(KERNEL_EXTRA_CFLAGS)),unsafe-open,))))
 # BOOT-3 startup failure policy matrix:
 BOOT_FAILURE_CASE := $(if $(findstring BOOT_FAILURE_TEST=required-subsys,$(KERNEL_EXTRA_CFLAGS)),required-subsys,$(if $(findstring BOOT_FAILURE_TEST=optional-subsys,$(KERNEL_EXTRA_CFLAGS)),optional-subsys,$(if $(findstring BOOT_FAILURE_TEST=registration,$(KERNEL_EXTRA_CFLAGS)),registration,$(if $(findstring BOOT_FAILURE_TEST=root,$(KERNEL_EXTRA_CFLAGS)),root,$(if $(findstring BOOT_FAILURE_TEST=tty,$(KERNEL_EXTRA_CFLAGS)),tty,$(if $(findstring BOOT_FAILURE_TEST=pty,$(KERNEL_EXTRA_CFLAGS)),pty,$(if $(findstring BOOT_FAILURE_TEST=stdio,$(KERNEL_EXTRA_CFLAGS)),stdio,$(if $(findstring BOOT_FAILURE_TEST=init,$(KERNEL_EXTRA_CFLAGS)),init,$(if $(findstring BOOT_FAILURE_TEST=child-fds,$(KERNEL_EXTRA_CFLAGS)),child-fds,)))))))))
+# BOOT-4 stage contract matrix:
+BOOT_CONTRACT_CASE := $(if $(findstring BOOT_CONTRACT_TEST=reverse,$(KERNEL_EXTRA_CFLAGS)),reverse,$(if $(findstring BOOT_CONTRACT_TEST=missing,$(KERNEL_EXTRA_CFLAGS)),missing,$(if $(findstring BOOT_CONTRACT_TEST=cycle,$(KERNEL_EXTRA_CFLAGS)),cycle,)))
 ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)
 KERNEL_VARIANT := weak-selftest
 else ifneq ($(filter 1,$(KERNEL_SELFTEST)),)
@@ -84,6 +86,9 @@ KERNEL_VARIANT := boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE)
 endif
 ifneq ($(strip $(BOOT_FAILURE_CASE)),)
 KERNEL_VARIANT := boot-failure-$(BOOT_FAILURE_CASE)
+endif
+ifneq ($(strip $(BOOT_CONTRACT_CASE)),)
+KERNEL_VARIANT := boot-contract-$(BOOT_CONTRACT_CASE)
 endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc

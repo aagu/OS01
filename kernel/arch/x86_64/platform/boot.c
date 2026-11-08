@@ -44,6 +44,7 @@
 
 #include <arch/x86_64/boot.h>
 #include <arch/boot.h>
+#include <selftest/boot_contract_fixture.h>
 
 #include <core/bootinfo.h>         /* struct boot_context (graphics,
                                       firmware fields)                   */
@@ -136,6 +137,7 @@ void x86_64_boot_controllers(const struct boot_context *bootctx)
     if (subsys_status("apic") == -999) {
         kpanic("apic: required subsys registration missing\n");
     }
+    boot4_test_register();
 
 #if defined(X86_BOOT_IRQ_TIME_TEST)
     {

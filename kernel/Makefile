@@ -132,6 +132,7 @@ KERNEL_C_SOURCES := \
     $(wildcard time/*.c) \
     $(wildcard percpu/*.c) \
     $(filter-out selftest/arch10_capacity_fixture.c \
+                 selftest/boot_contract_fixture.c \
                  selftest/boot_failure_fixture.c \
                  selftest/boot_irq_time_fixture.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
@@ -228,7 +229,23 @@ KERNEL_BOOT3_FIXTURE_C_SOURCES :=
 KERNEL_BOOT3_FLAGS :=
 endif
 
-ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES)
+# ── BOOT-4 stage contract fixture ───────────────────────────
+BOOT_CONTRACT_CASE ?=
+ifneq ($(strip $(BOOT_CONTRACT_CASE)),)
+KERNEL_BOOT4_FIXTURE_C_SOURCES := selftest/boot_contract_fixture.c
+ifeq ($(BOOT_CONTRACT_CASE),reverse)
+KERNEL_BOOT4_FLAGS := -DBOOT_CONTRACT_TEST=reverse -DBOOT_CONTRACT_CASE_REVERSE=1
+else ifeq ($(BOOT_CONTRACT_CASE),missing)
+KERNEL_BOOT4_FLAGS := -DBOOT_CONTRACT_TEST=missing -DBOOT_CONTRACT_CASE_MISSING=1
+else ifeq ($(BOOT_CONTRACT_CASE),cycle)
+KERNEL_BOOT4_FLAGS := -DBOOT_CONTRACT_TEST=cycle -DBOOT_CONTRACT_CASE_CYCLE=1
+endif
+else
+KERNEL_BOOT4_FIXTURE_C_SOURCES :=
+KERNEL_BOOT4_FLAGS :=
+endif
+
+ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES) $(KERNEL_BOOT4_FIXTURE_C_SOURCES)
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
@@ -343,6 +360,7 @@ ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
 # pattern as the fault-fixture flags above).
 ALL_CFLAGS += $(KERNEL_BOOT2_IRQ_TIME_FLAGS)
 ALL_CFLAGS += $(KERNEL_BOOT3_FLAGS)
+ALL_CFLAGS += $(KERNEL_BOOT4_FLAGS)
 
 # ── FB_RESOLUTION_TEST fault surface (Task 9) ──────────────
 # Same pattern: appended after ALL_CFLAGS is defined and after the source

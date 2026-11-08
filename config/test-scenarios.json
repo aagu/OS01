@@ -5054,6 +5054,52 @@
     "action": "unique",
     "reason": "BOOT-4 Task 3 checks host evidence"
    }
+  },
+  {
+   "id": "boot.contract.x86",
+   "component": "boot",
+   "behavior": "boot-stage-contracts",
+   "trigger": "make test-qemu SUITE=boot-contract",
+   "assertions": [
+    "runner exits 0 with 7 passing runs and archived metadata"
+   ],
+   "failure_modes": [
+    "missing checkpoints, wrong dependency order, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_contract.py",
+    "selector": "--arch x86_64",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-4 stage contracts and dependency orchestration"
+   }
+  },
+  {
+   "id": "boot.contract.aarch64",
+   "component": "boot",
+   "behavior": "boot-stage-contracts",
+   "trigger": "make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract",
+   "assertions": [
+    "runner exits 0 with 7 passing runs and archived metadata"
+   ],
+   "failure_modes": [
+    "missing checkpoints, wrong dependency order, timeout, self-exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/boot_contract.py",
+    "selector": "--arch aarch64",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "BOOT-4 aarch64 stage contracts and dependency orchestration"
+   }
   }
  ]
 }

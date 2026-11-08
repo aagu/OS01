@@ -571,6 +571,42 @@ _test-aarch64-run-m3-probe:
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-m3-probe/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
+.PHONY: _test-aarch64-prep-boot-contract _test-aarch64-run-boot-contract
+_test-aarch64-prep-boot-contract:
+	@true
+
+define _boot_contract_aarch64_run
+	@echo "  [test-aarch64] MODE=boot-contract: case=$(1) cpus=$(2)"
+	python3 qemutests/boot_contract.py --arch aarch64 --case $(1) --cpus $(2) \
+	  --timeout $(BOOT_CONTRACT_TIMEOUT) \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(if $(filter normal,$(1)),$(BUILD_DIR)/image/aarch64-uefi.img,$(BUILD_DIR)/image/boot-contract-$(1)/aarch64-uefi.img)" \
+	  --kernel-elf "$(if $(filter normal,$(1)),$(BUILD_DIR)/kernel/kernel.elf,$(BUILD_DIR)/kernel/boot-contract-$(1)/kernel.elf)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --log-dir "$(abspath $(BUILD_DIR))/test-results/boot-contract/aarch64-$(1)-$(2)cpu"
+endef
+
+_test-aarch64-run-boot-contract:
+	@echo "  [test-aarch64] MODE=boot-contract: building normal aarch64 image"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=none KERNEL_SELFTEST= aarch64-uefi
+	@mkdir -p "$(BUILD_DIR)/image"
+	sha256sum "$(BUILD_DIR)/image/aarch64-uefi.img" > "$(BUILD_DIR)/image/aarch64-boot-contract.normal.before"
+	$(call _boot_contract_aarch64_run,normal,1)
+	$(call _boot_contract_aarch64_run,normal,2)
+	$(call _boot_contract_aarch64_run,normal,4)
+	@echo "  [test-aarch64] MODE=boot-contract: building reverse variant"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=reverse KERNEL_SELFTEST= aarch64-uefi
+	$(call _boot_contract_aarch64_run,reverse,1)
+	$(call _boot_contract_aarch64_run,reverse,2)
+	@echo "  [test-aarch64] MODE=boot-contract: building missing variant"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=missing KERNEL_SELFTEST= aarch64-uefi
+	$(call _boot_contract_aarch64_run,missing,1)
+	@echo "  [test-aarch64] MODE=boot-contract: building cycle variant"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=cycle KERNEL_SELFTEST= aarch64-uefi
+	$(call _boot_contract_aarch64_run,cycle,1)
+	sha256sum "$(BUILD_DIR)/image/aarch64-uefi.img" > "$(BUILD_DIR)/image/aarch64-boot-contract.normal.after"
+	cmp "$(BUILD_DIR)/image/aarch64-boot-contract.normal.before" "$(BUILD_DIR)/image/aarch64-boot-contract.normal.after"
+
 # test-aarch64: the umbrella. Dispatches to the per-MODE prep + run helpers.
 test-aarch64: MODE ?= smp
 test-aarch64: MODE := $(MODE)
@@ -583,8 +619,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
@@ -728,7 +764,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure qemutests.test_boot_contract
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -1808,6 +1844,74 @@ test-qemu-boot-failure: _test-boot-failure-normal-image \
 	_test-boot-failure-normal-hash-check
 	@true
 
+# ── BOOT-4 stage contracts matrix (x86_64 7-run orchestration) ──────
+BOOT_CONTRACT_TIMEOUT ?= 120
+TEST_BOOT_CONTRACT_IMAGE_normal  := $(BUILD_DIR)/image/disk.img
+TEST_BOOT_CONTRACT_ELF_normal    := $(BUILD_DIR)/kernel/kernel.elf
+TEST_BOOT_CONTRACT_IMAGE_reverse := $(BUILD_DIR)/image/boot-contract-reverse/disk.img
+TEST_BOOT_CONTRACT_ELF_reverse   := $(BUILD_DIR)/kernel/boot-contract-reverse/kernel.elf
+TEST_BOOT_CONTRACT_IMAGE_missing := $(BUILD_DIR)/image/boot-contract-missing/disk.img
+TEST_BOOT_CONTRACT_ELF_missing   := $(BUILD_DIR)/kernel/boot-contract-missing/kernel.elf
+TEST_BOOT_CONTRACT_IMAGE_cycle   := $(BUILD_DIR)/image/boot-contract-cycle/disk.img
+TEST_BOOT_CONTRACT_ELF_cycle     := $(BUILD_DIR)/kernel/boot-contract-cycle/kernel.elf
+TEST_BOOT_CONTRACT_LOG_DIR       := $(abspath $(BUILD_DIR))/test-results/boot-contract
+
+define _boot_contract_x86_run
+	@echo "  [test-qemu] SUITE=boot-contract: case=$(1) cpus=$(2)"
+	python3 qemutests/boot_contract.py --arch x86_64 --case $(1) --cpus $(2) \
+	  --timeout $(BOOT_CONTRACT_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_BOOT_CONTRACT_IMAGE_$(1))" \
+	  --kernel-elf "$(TEST_BOOT_CONTRACT_ELF_$(1))" \
+	  --qemu "$(QEMU_BIN)" \
+	  --log-dir "$(TEST_BOOT_CONTRACT_LOG_DIR)/x86_64-$(1)-$(2)cpu"
+endef
+
+.PHONY: _test-boot-contract-normal-image
+_test-boot-contract-normal-image:
+	@echo "  [test-qemu] SUITE=boot-contract: building the normal image"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=none KERNEL_SELFTEST= image
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-contract.normal.before"
+
+.PHONY: _test-boot-contract-normal-cases
+_test-boot-contract-normal-cases:
+	$(call _boot_contract_x86_run,normal,1)
+	$(call _boot_contract_x86_run,normal,2)
+	$(call _boot_contract_x86_run,normal,4)
+
+.PHONY: _test-boot-contract-variant-reverse
+_test-boot-contract-variant-reverse:
+	@echo "  [test-qemu] SUITE=boot-contract: building the reverse variant"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=reverse KERNEL_SELFTEST= image
+	$(call _boot_contract_x86_run,reverse,1)
+	$(call _boot_contract_x86_run,reverse,2)
+
+.PHONY: _test-boot-contract-variant-missing
+_test-boot-contract-variant-missing:
+	@echo "  [test-qemu] SUITE=boot-contract: building the missing variant"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=missing KERNEL_SELFTEST= image
+	$(call _boot_contract_x86_run,missing,1)
+
+.PHONY: _test-boot-contract-variant-cycle
+_test-boot-contract-variant-cycle:
+	@echo "  [test-qemu] SUITE=boot-contract: building the cycle variant"
+	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=cycle KERNEL_SELFTEST= image
+	$(call _boot_contract_x86_run,cycle,1)
+
+.PHONY: _test-boot-contract-normal-hash-check
+_test-boot-contract-normal-hash-check:
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-contract.normal.after"
+	cmp "$(NORMAL_IMAGE_DIR)/boot-contract.normal.before" "$(NORMAL_IMAGE_DIR)/boot-contract.normal.after"
+
+.PHONY: test-qemu-boot-contract
+test-qemu-boot-contract: _test-boot-contract-normal-image \
+	_test-boot-contract-normal-cases \
+	_test-boot-contract-variant-reverse \
+	_test-boot-contract-variant-missing \
+	_test-boot-contract-variant-cycle \
+	_test-boot-contract-normal-hash-check
+	@true
+
 test-qemu-boot-lifecycle: _test-boot-lifecycle-normal-image \
 	_test-boot-lifecycle-normal-cases \
 	_test-boot-lifecycle-fault-delay \
@@ -1956,6 +2060,10 @@ TEST_QEMU_FLAVOR_boot-lifecycle =
 TEST_QEMU_IMG_boot-lifecycle   = $(NORMAL_IMAGE)
 TEST_QEMU_FLAVOR_boot-irq-time =
 TEST_QEMU_IMG_boot-irq-time    = $(NORMAL_IMAGE)
+TEST_QEMU_FLAVOR_boot-failure  =
+TEST_QEMU_IMG_boot-failure     = $(NORMAL_IMAGE)
+TEST_QEMU_FLAVOR_boot-contract =
+TEST_QEMU_IMG_boot-contract    = $(NORMAL_IMAGE)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -2004,8 +2112,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|arch10-capacity|arch6-fsstress) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|arch10-capacity|arch6-fsstress) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -2052,6 +2160,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-boot-irq-time || exit 1; \
 	elif [ "$(SUITE)" = "boot-failure" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-failure || exit 1; \
+	elif [ "$(SUITE)" = "boot-contract" ]; then \
+	  $(MAKE) --no-print-directory test-qemu-boot-contract || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
 	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
@@ -2074,7 +2184,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# python harness inside ``test-qemu-driver-model`` and must NOT
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
-	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ]; then \
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \

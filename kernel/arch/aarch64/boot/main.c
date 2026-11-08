@@ -29,6 +29,7 @@
 #include <arch/aarch64/vmm_gate.h> /* smp_starting_enter / ipi_ready_publish_and_count (M3 Task 11) */
 #include <percpu/percpu.h>        /* percpu_data / num_cpus (M3 Task 11) */
 #include <sched/task.h>           /* init_task_union / STACK_SIZE */
+#include <selftest/boot_contract_fixture.h>
 #include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
@@ -552,6 +553,7 @@ void arch_boot_controllers(const struct boot_context *bootctx)
 
     extern void arch_register_subsys(void);
     arch_register_subsys();
+    boot4_test_register();
     subsys_init_phase(SUBSYS_PHASE_CONTROLLERS);
 }
 

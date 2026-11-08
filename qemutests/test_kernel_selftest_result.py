@@ -706,11 +706,11 @@ class KernelSelftestAarch64BootOnlyTests(unittest.TestCase):
         handoff = _read_kernel_source("kernel/arch/aarch64/cpu/task_arch.c")
 
         self.assertIn("arch_pre_subsys_selftest(bootctx);", main_c)
-        self.assertIn("arch_boot_subsystems(bootctx);", main_c)
+        self.assertIn("arch_boot_controllers(bootctx);", main_c)
         self.assertLess(
             main_c.find("arch_pre_subsys_selftest(bootctx);"),
-            main_c.find("arch_boot_subsystems(bootctx);"),
-            "arch_pre_subsys_selftest must precede arch_boot_subsystems in kernel_main",
+            main_c.find("arch_boot_controllers(bootctx);"),
+            "arch_pre_subsys_selftest must precede arch_boot_controllers in kernel_main",
         )
 
         self.assertIn("selftest_begin_run(arch_selftest_expected_late());", boot)

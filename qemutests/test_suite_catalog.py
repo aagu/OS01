@@ -84,6 +84,7 @@ class TestSuiteCatalogContract(unittest.TestCase):
             "boot-lifecycle",
             "boot-irq-time",
             "boot-failure",
+            "boot-contract",
             "gui",
             "gui-desktop",
         }
@@ -109,6 +110,7 @@ class TestSuiteCatalogContract(unittest.TestCase):
             "aarch64-m1-arena-exhaust",
             "aarch64-m1-table-exhaust",
             "aarch64-m1-ap-bad-root",
+            "aarch64-boot-contract",
         }
         for s in expected_aarch64:
             self.assertIn(s, self.record_map, f"Missing aarch64 suite: {s}")

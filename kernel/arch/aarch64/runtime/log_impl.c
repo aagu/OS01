@@ -45,6 +45,17 @@ static void vlog(const char *fmt, va_list ap)
                 kputu((uint64_t)(unsigned)va_arg(ap, unsigned));
                 fmt += 2;
                 continue;
+            case 'd': {
+                int val = va_arg(ap, int);
+                if (val < 0) {
+                    kputs("-");
+                    kputu((uint64_t)(unsigned)(-val));
+                } else {
+                    kputu((uint64_t)(unsigned)val);
+                }
+                fmt += 2;
+                continue;
+            }
             case 'l':
                 if (fmt[2] == 'u') {
                     kputu((uint64_t)va_arg(ap, unsigned long));

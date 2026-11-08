@@ -16,6 +16,7 @@ terminal-present	x86_64-clang	rootfs	terminal-present	1	512	60	isolated	exclusiv
 intr-x86	x86_64-clang	rootfs	intr-x86	1	512	120	isolated	shared	nightly	test-qemu SUITE=intr-x86	_test-suite-prepare	_test-suite-run
 boot-irq-time	x86_64-clang	rootfs	boot-irq-time	1,2,4,8	512	90	isolated	exclusive	nightly	test-qemu SUITE=boot-irq-time	_test-suite-prepare	_test-suite-run
 boot-failure	x86_64-clang	rootfs	boot-failure	1,2,4	512	90	isolated	exclusive	nightly	test-qemu SUITE=boot-failure	_test-suite-prepare	_test-suite-run
+boot-contract	x86_64-clang	rootfs	boot-contract	1,2,4	512	120	isolated	exclusive	nightly	test-qemu SUITE=boot-contract	_test-suite-prepare	_test-suite-run
 boot-lifecycle	x86_64-clang	rootfs	boot-lifecycle	1,2,4,8	512	90	isolated	exclusive	nightly	test-qemu SUITE=boot-lifecycle	_test-suite-prepare	_test-suite-run
 arch10-capacity	x86_64-clang	rootfs	arch10-capacity	1,2	512	120	isolated	shared	nightly	make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity	_test-suite-prepare	_test-suite-run
 arch6-fsstress	x86_64-clang	rootfs	arch6-fsstress	4	512	180	isolated	shared	nightly	make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress	-	-
@@ -38,6 +39,7 @@ aarch64-sched-ap	aarch64-clang	uefi	sched-ap	1,2,4,8	512	120	isolated	shared	nig
 aarch64-sched-ap-fatal	aarch64-clang	uefi	sched-ap-fatal-owner	2	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner	-	-
 aarch64-sched-wake	aarch64-clang	uefi	sched-wake	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-wake	-	-
 aarch64-sched-tick	aarch64-clang	uefi	sched-tick	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-tick	-	-
+aarch64-boot-contract	aarch64-clang	uefi	boot-contract	1,2,4	512	120	isolated	exclusive	nightly	test-aarch64 MODE=boot-contract	-	-
 endef
 
 export TEST_SUITE_CATALOG_DATA

@@ -435,6 +435,7 @@ jobs:
           # — well inside this nightly job's 240-minute budget.
           suite make test-qemu SUITE=boot-irq-time
           suite make test-qemu SUITE=boot-failure
+          suite make test-qemu SUITE=boot-contract
           # gui and gui-desktop run non-blocking for the same reason as
           # terminal-present: on 1-vCPU CI runners the guest's terminal
           # wedges around display-ownership transitions (input_interaction's
@@ -493,6 +494,9 @@ jobs:
             echo "== aarch64 MODE=${mode} =="
             make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
           done
+
+      - name: AArch64 boot stage contracts
+        run: make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract
 
       - name: Upload run logs on failure
         if: failure()
