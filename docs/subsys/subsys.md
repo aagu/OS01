@@ -22,23 +22,24 @@ Defined in `kernel/include/subsys/subsys.h`:
 typedef struct {
     const char *name;       // subsystem name (logging, debug)
     int  (*init)(void);     // init function: 0 = success, non-0 = failure
-    int   phase;            // phase number (SUBSYS_PHASE_3 through _6)
+    int   phase;            // phase number (SUBSYS_PHASE_CONTROLLERS..STORAGE)
     uint32_t flags;         // SUBSYS_FLAG_OPTIONAL, etc.
+    const char *const *requires; // NULL-terminated list of subsystem dependencies (max 8)
     // private:
     int   initialized;      // 0 = not run, 1 = ok, <0 = failed
 } subsys_entry_t;
 ```
 
-### Per-CPU entry (one init call per online CPU)
+### CPU preparation entry (BSP executor iterates CPUs)
 
 ```c
 typedef struct {
     const char *name;
-    int  (*init_percpu)(int cpu_id);  // called once per online CPU
+    int  (*prepare_cpu)(unsigned int cpu_id); // executed on BSP for each cpu_id 0..num_cpus-1
     uint32_t flags;
     // private:
     int initialized;
-} subsys_percpu_entry_t;
+} subsys_cpu_prepare_entry_t;
 ```
 
 ### Flags
@@ -51,43 +52,54 @@ typedef struct {
 
 ## Phase Numbering
 
-Phases 1-2 and 7-9 are dispatched through `kernel_main` via the `x86_64_boot_*` helpers (see `kernel/arch/x86_64/boot.h`, `kernel/arch/x86_64/smp_boot.h`); `kernel_main` itself is a thin orchestrator and never calls `subsys_init_all()` directly. The subsystem framework manages phases 3-6 (still `subsys_init_all()`, but invoked from `x86_64_boot_subsystems()`):
+Phases 1-2 and 7-9 are dispatched through `kernel_main` via the `arch_boot_*` hooks (see `kernel/include/arch/boot.h`); `kernel_main` itself is a thin cross-architecture orchestrator. The subsystem framework manages phases 3-6:
 
-| Phase | Constant         | Subsystems                        | Dispatch site                              |
-|-------|------------------|-----------------------------------|--------------------------------------------|
-| 1-2   | — (helper)       | CPU infrastructure, memory        | `x86_64_boot_early()` + `x86_64_boot_memory()` |
-| 3     | `SUBSYS_PHASE_3` | Interrupt controllers (APIC, PIC) | `x86_64_boot_subsystems()` → `subsys_init_all()` |
-| 4     | `SUBSYS_PHASE_4` | Timers (PIT, LAPIC timer)         | subsys framework                           |
-| 5     | `SUBSYS_PHASE_5` | Device IRQs (keyboard, serial)    | subsys framework                           |
-| 6     | `SUBSYS_PHASE_6` | Storage (AHCI, VirtIO-BLK)        | subsys framework                           |
-| 7-9   | — (helper)       | TTY, SMP, scheduler               | `tty_boot_init()` + `x86_64_boot_percpu()` + `x86_64_boot_aps()` |
+| Phase | Named Constant | Alias | Subsystems | Dispatch Hook |
+|---|---|---|---|---|
+| 1-2 | — | — | CPU infrastructure, memory | `arch_early_init()` + `arch_boot_memory()` |
+| 3 | `SUBSYS_PHASE_CONTROLLERS` | `SUBSYS_PHASE_3` | Interrupt controllers (APIC, PIC) | `arch_boot_controllers()` |
+| 4 | `SUBSYS_PHASE_TIME` | `SUBSYS_PHASE_4` | Timers (PIT, LAPIC timer) | `arch_boot_devices()` |
+| 5 | `SUBSYS_PHASE_DEVICE_IRQ` | `SUBSYS_PHASE_5` | Device IRQs (keyboard, serial) | `arch_boot_devices()` |
+| 6 | `SUBSYS_PHASE_STORAGE` | `SUBSYS_PHASE_6` | Storage & devices (AHCI, VirtIO-BLK, dev-boot) | `arch_boot_devices()` |
+| 7-9 | — | — | TTY, SMP, scheduler | `tty_boot_init()` + `arch_boot_smp_prepare()` + `arch_boot_aps()` |
 
 ---
 
 ## API
 
 ```c
-// ── BSP-side init ─────────────────────────────────────────
+// ── BSP-side init & dependencies ──────────────────────────
 int  register_subsys(const char *name, int (*init)(void),
                      int phase, uint32_t flags);
+int  register_subsys_deps(const char *name, int (*init)(void),
+                          int phase, uint32_t flags,
+                          const char *const *requires);
 void subsys_init_all(void);           // run phases 3-6 in order
 void subsys_init_phase(int phase);    // run a single phase
 int  subsys_status(const char *name); // query init status (1=ok, -1=fail, 0=uninit, -ENOENT)
 int  subsys_result(const char *name); // query raw init return code (0 or raw negative rc)
+int  subsys_require_ready(const char *dependency); // 0 = ready, -EAGAIN = uninit, -EIO = failed, -ENOENT = missing
 
-// ── Per-CPU init (after SMP bringup) ─────────────────────
-int  register_subsys_percpu(const char *name,
-                            int (*init_percpu)(int cpu_id),
-                            uint32_t flags);
-void subsys_init_percpu(void);        // run on all online CPUs
+// ── CPU Preparation (BSP executor) ────────────────────────
+int  register_subsys_cpu_prepare(const char *name,
+                                 int (*prepare_cpu)(unsigned int cpu_id),
+                                 uint32_t flags);
+void subsys_prepare_cpus(void);       // run on BSP for each cpu_id 0..num_cpus-1
+
+// Deprecated compatibility wrappers:
+int  register_subsys_percpu(const char *name, int (*init_percpu)(int cpu_id), uint32_t flags);
+void subsys_init_percpu(void);
 ```
 
-- `register_subsys` appends to a static table (max 64 entries). Duplicate names return `-EEXIST`, invalid arguments return `-EINVAL`, table exhaustion returns `-ENOSPC`. Registration errors are never swallowed.
-- `subsys_init_phase(phase)` iterates the table, calling `init()` for matching uninitialized entries. Prints `ok`, `SKIP (optional, ret=N)`, or `FAIL (ret=N)` for each.
-- If a non-optional (required) subsystem returns non-zero, it triggers `boot_failure_stop("subsys", entry->name, rc, -1)` immediately, halting system boot without executing later phases or userspace startup.
-- If an optional subsystem returns non-zero, it emits `boot_failure_warn("subsys", entry->name, rc, -1)` and continues cleanly.
-- `subsys_init_all()` loops phases 3-6 inclusive.
-- `subsys_init_percpu()` iterates per-CPU entries, calling each `init_percpu(cpu_id)` for every discovered CPU (`0 .. num_cpus-1`). If a per-CPU callback returns non-zero, non-optional entries halt via `boot_failure_stop("subsys-percpu", ...)` and optional entries warn via `boot_failure_warn("subsys-percpu", ...)`.
+- `register_subsys` / `register_subsys_deps` appends to a static table (max 64 entries). Duplicate names return `-EEXIST`, invalid arguments return `-EINVAL`, table exhaustion returns `-ENOSPC`.
+- Dependency preflight: before dispatching any phase callbacks, `subsys_init_all()` (or the first `subsys_init_phase()`) validates dependencies for all registered entries across all phases:
+  - Missing dependencies return `-ENOENT`.
+  - Dependency cycles return `-ELOOP`.
+  - Max dependencies per entry is `SUBSYS_MAX_REQUIRES` (8).
+  - Dependencies must belong to an earlier or identical phase. Within the same phase, topological sorting executes providers before consumers while preserving stable FIFO registration order for independent items.
+- If a non-optional (required) subsystem returns non-zero, it triggers `boot_failure_stop("subsys", entry->name, rc, -1, -1)` immediately, halting system boot without executing later phases or userspace startup.
+- If an optional subsystem returns non-zero, it emits `boot_failure_warn("subsys", entry->name, rc, -1, -1)` and continues cleanly. If a consumer requires an optional provider that failed, `subsys_require_ready()` returns `-EIO`.
+- `subsys_prepare_cpus()` iterates CPU preparation entries, executing each `prepare_cpu(cpu_id)` on the BSP for every discovered CPU (`0 .. num_cpus-1`). Logging explicitly emits `cpu-prepare <name> target=<id> executor=bsp`. Optional and required failure policies mirror BSP phases (`boot_failure_stop` / `boot_failure_warn` on stage `cpu-prepare`).
 - `subsys_status` returns `1` (success), `-1` (failure), `0` (not run), or `-ENOENT` (`-2`, unknown).
 - `subsys_result` returns `0` (success/not run) or the raw negative return code on failure.
 

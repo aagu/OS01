@@ -134,47 +134,57 @@ Deferred processing; `TIMER_SIRQ` set by timer hardirq.
 
 ## Subsystem framework (`kernel/subsys/`)
 
-Init phases ordered by dependency. After the kernel-main refactor (Tasks 4-6) x86_64's `kernel_main` is a thin orchestrator: phases 1-2 are dispatched through `x86_64_boot_early()` + `x86_64_boot_memory()` (see `kernel/arch/x86_64/platform/boot.c`), phases 3-6 through `x86_64_boot_subsystems()` (which itself drives the subsys framework), phase 7 (VFS/TTY/devfs smoke) is split across `fs_boot_*` + `tty_boot_init()` helpers, and BSP per-CPU + AP bring-up live in `x86_64_boot_percpu()` + `x86_64_boot_aps()` (see `kernel/arch/x86_64/smp/boot.c`). The subsys framework still owns the actual phase 3-6 dispatch — the helpers above just wire up the calls.
+Init phases ordered by dependency. Under the unified boot stage contracts (BOOT-4), `kernel_main` is a thin cross-architecture orchestrator driving explicit phase boundaries:
+- `arch_boot_controllers()`: phase 3 interrupt controllers (`SUBSYS_PHASE_CONTROLLERS`)
+- `arch_boot_percpu()`: BSP per-CPU registration (MADT traversal / MPIDR, `percpu_install_gs(0)`)
+- `arch_boot_devices()`: phase 4 timers (`SUBSYS_PHASE_TIME`), LAPIC calibration / runtime open, phase 5 device IRQs (`SUBSYS_PHASE_DEVICE_IRQ`), and phase 6 storage (`SUBSYS_PHASE_STORAGE`)
+- Capability validation checkpoint `ARCH_BOOT_CHECK_DEVICES` (`[boot-4] checkpoint=devices status=ok`)
+- VFS / devfs / mounts / TTY
+- `arch_boot_smp_prepare()`: scheduler accounting publication and tick preparation
+- Capability validation checkpoint `ARCH_BOOT_CHECK_PRE_SMP` (`[boot-4] checkpoint=pre-smp status=ok`)
+- `arch_boot_aps()`: AP bring-up and CPU preparation dispatch (`subsys_prepare_cpus()`, executed on BSP)
+- `arch_boot_runtime()`: clocksource/tick release and runtime confirmation
+- Capability validation checkpoint `ARCH_BOOT_CHECK_RUNTIME` (`[boot-4] checkpoint=runtime status=ok`)
 
-| Phase | Subsystems | Dispatched by |
-|-------|------------|---------------|
-| 1 | CPU infrastructure (framebuffer Pos, IDT, serial, EFER NXE) | `x86_64_boot_early()` |
-| 2 | Memory (PMM, VMM, FB remap, early logo) | `x86_64_boot_memory()` |
-| 3-6 | Interrupt controllers, timers, device IRQs, storage (subsys framework drives APIC/PIC/PIT/LAPIC-timer/keyboard/AHCI) | subsys framework via `x86_64_boot_subsystems()` |
-| 8 | BSP per-CPU registration (brought forward — see below) | `x86_64_boot_percpu()` |
-| 7 | VFS / devfs / mounts / TTY / `/dev` smoke | `fs_boot_*()` + `tty_boot_init()` helpers in `kernel_main` |
-| 9 | AP bring-up + per-CPU subsystem dispatch | `x86_64_boot_aps()` |
-| 10 | Scheduler + user-space init | `task_init()` in `kernel_main` |
+| Phase | Named Constant | Alias | Subsystems | Dispatched by |
+|-------|----------------|-------|------------|---------------|
+| 1-2 | — | — | CPU infrastructure (Pos, IDT, serial, NXE), Memory (PMM, VMM, FB remap) | `arch_early_init()` + `arch_boot_memory()` |
+| 3 | `SUBSYS_PHASE_CONTROLLERS` | `SUBSYS_PHASE_3` | Interrupt controllers (APIC, PIC / GIC) | `arch_boot_controllers()` |
+| — | — | — | BSP per-CPU registration (`num_cpus`, `this_cpu()`) | `arch_boot_percpu()` |
+| 4 | `SUBSYS_PHASE_TIME` | `SUBSYS_PHASE_4` | Timers (PIT, LAPIC timer, CNTP) | `arch_boot_devices()` |
+| 5 | `SUBSYS_PHASE_DEVICE_IRQ` | `SUBSYS_PHASE_5` | Device IRQs (keyboard, serial) | `arch_boot_devices()` |
+| 6 | `SUBSYS_PHASE_STORAGE` | `SUBSYS_PHASE_6` | Storage & devices (AHCI, VirtIO-BLK, dev-boot) | `arch_boot_devices()` |
+| 7 | — | — | VFS / devfs / mounts / TTY / `/dev` smoke | `fs_boot_*()` + `tty_boot_init()` helpers |
+| 8 | — | — | SMP prepare & accounting publication | `arch_boot_smp_prepare()` |
+| 9 | — | — | AP bring-up + CPU preparation dispatch | `arch_boot_aps()` → `subsys_prepare_cpus()` |
+| 10 | — | — | Scheduler + user-space init | `task_init()` in `kernel_main` |
 
-The order of these stages is preserved verbatim by `kernel_main` — see `kernel/arch/x86_64/boot.h` for the helper signatures and `kernel/arch/x86_64/smp_boot.h` for the per-CPU/AP helpers.
-
-**SMP can be brought forward as far as phase 8.** As of Task 6 the BSP `percpu_init` + `percpu_install_gs(0)` + `num_cpus` publication run *before* `random_init()` (which calls into the CSPRNG), the filesystem mounts, and the TTY wiring. This is required because the CSPRNG and the FS code both call into `this_cpu()`-aware paths, and `tlb_shootdown`/`ipi_broadcast` now target only `online` CPUs — i.e., BSP-only until `x86_64_boot_aps()` marks APs online. The APs themselves are started by `x86_64_boot_aps()` *after* the devfs smoke probe (`fs_boot_probe_devfs()`), preserving the original "percpu marker follows /dev/null in the boot log" ordering.
-
-AP init also has per-CPU subsystem init via `subsys_init_percpu()` (last step of `x86_64_boot_aps()`).
-
-## Log system (`kernel/log/`)
-
-Four levels: `LOG_ERR`, `LOG_WARN`, `LOG_INFO`, `LOG_DEBUG`. Compile-time `LOG_TARGET` (serial/fb/both), `NDEBUG` eliminates debug. `log_err`/`log_warn`/`log_info`/`log_debug` macros + `debug_<channel>()` macros (`sched`, `tty`, `vfs`, `mm`, `irq`, `syscall`, `task`, `ipi`, `block`, `fs`).
+---
 
 ## Init sequence (`kernel_main()` — 跨架构统一入口)
 
-`kernel_main()`（`kernel/core/main.c`）是 **x86_64 与 aarch64 共用的唯一全局入口**（2026-11-07 闭环；原 aarch64 `aarch64_main()` 已删除，入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制）。它是 thin orchestrator：架构相关阶段一律走 `kernel/include/arch/boot.h` 的强覆盖钩子（`arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_subsystems` / `arch_boot_percpu` / `arch_boot_device_nodes` / `arch_boot_aps` / `arch_post_smp_selftest`），缺用户态的架构由 `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 特性门裁掉 VFS / 用户态段落，转入 `arch_start_kernel_idle()`。
+`kernel_main()`（`kernel/core/main.c`）是 **x86_64 与 aarch64 共用的唯一全局入口**（2026-11-07 闭环；原 aarch64 `aarch64_main()` 已删除，入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制）。它是 thin orchestrator：架构相关阶段一律走 `kernel/include/arch/boot.h` 的强覆盖钩子（`arch_early_init` / `arch_boot_memory` / `arch_boot_controllers` / `arch_boot_percpu` / `arch_boot_devices` / `arch_boot_smp_prepare` / `arch_boot_aps` / `arch_boot_runtime` / `arch_boot_validate`），缺用户态的架构由 `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 特性门裁掉 VFS / 用户态段落，转入 `arch_start_kernel_idle()`。
 
-下面列出 x86_64 侧的实际阶段展开（每阶段一个 helper 调用）—— helper 契约见 `kernel/arch/x86_64/boot.h` 与 `kernel/arch/x86_64/smp_boot.h`；aarch64 侧为同名 facade 实现（dtb → GIC → per-CPU → AP → 协作调度自测 → idle），见 `kernel/arch/aarch64/boot/main.c`。
+阶段展开与能力核验证（BOOT-4 契约）：
 
 1. Stack canary seed (`arch_cycle_counter() ^ 0xDEADBEEFCAFEBABE`).
-2. `x86_64_boot_early(bootctx)` — framebuffer Pos, IDT (`sys_vector_install` + `irq_install`), serial, EFER NXE.
-3. `x86_64_boot_memory(bootctx)` — PMM, VMM, FB remap, early logo.
-4. `x86_64_boot_subsystems(bootctx)` — `arch_boot_rsdp` + `arch_register_subsys()` + `subsys_init_all()` → APIC/PIC/timer/PIT/LAPIC-timer/keyboard/AHCI (phases 3-6).
-5. `x86_64_boot_percpu()` — MADT traversal, BSP `percpu_init` + `percpu_install_gs(0)` + `num_cpus` publication (Task 6 — brought forward so the CSPRNG and FS code see a valid `this_cpu()`).
-6. `random_init(bootctx)` — CSPRNG seed (BSP, once).
-7. `fs_boot_prepare()` → `pci_devfs_register_all()` → `usb_devfs_register_all()` → `pty_init()` → `x86_64_boot_device_nodes()` → `fs_boot_mounts()` → `tty_boot_init()` → `fs_boot_probe_devfs()` — VFS / devfs / PCI (`/dev/pci`) & USB (`/dev/usb`) device namespaces / x86 chrdevs / mounts / console TTY / `/dev/null` smoke probe. Under BOOT-3 failure policies, root mount, console TTY, and PTY are mandatory capabilities; failure triggers `boot_failure_stop` halt. Optional mounts (`/proc`, `/dev/shm`, `/tmp`) warn via `boot_failure_warn` and allow degraded boot.
-8. `x86_64_boot_aps()` — `tick_start()` → `smp_boot_aps()` → per-CPU subsystem dispatch (`arch_register_subsys_percpu()` + `subsys_init_percpu()`). Subsystem registration errors trigger `boot_failure_stop("registration", ...)` halt.
-9. `#ifdef OS01_SELFTEST` — `selftest_run_all()`.
-10. `sched_boot_creation_begin()` — opens BSP boot creation window.
-11. `futex_init()` — init futex hash buckets.
-12. `console_init()` — initialise the software terminal cursor.
-13. `task_init()` — constructs initial stdio table (stdin/stdout/stderr attached to `/dev/tty`), spawns `/init.elf` as PID 1 verifying file descriptor inheritance, invokes boot-window services (`sched_boot_probe_create()` under selftest, `net_lwip_init()` creating `tcpip_thread`), closes the boot creation window (`sched_boot_start()`), then enters the idle loop. Any stdio allocation or spawn inheritance failure halts boot via `boot_failure_stop` before userspace execution. EEVDF scheduler active: per-CPU rbtree runqueues + `sched_balance()` work stealing + vruntime/deadline fair scheduling.
+2. `arch_early_init(bootctx)` — framebuffer Pos, IDT/vectors, serial, EFER NXE.
+3. `arch_boot_memory(bootctx)` — PMM, VMM, FB remap, early logo.
+4. `arch_pre_subsys_selftest()` — 内核早期自测（如开启）。
+5. `arch_boot_controllers(bootctx)` — 控制器注册与 Phase 3 (`SUBSYS_PHASE_CONTROLLERS`) 启动。
+6. `arch_boot_percpu()` — BSP per-CPU 初始化（x86 MADT / ARM MPIDR），发布 `num_cpus`，激活 `this_cpu()`。
+7. `arch_boot_devices(bootctx)` — Phase 4 时间源初始化与校准、打开 runtime window、Phase 5 设备 IRQ、Phase 6 存储与设备发现。
+8. **Checkpoint `ARCH_BOOT_CHECK_DEVICES`** — 校验 BSP 本地中断状态、控制器/时间源就绪、设备引导摘要，输出 `[boot-4] checkpoint=devices status=ok`。
+9. `random_init(bootctx)` — CSPRNG seed (BSP, once)。
+10. `fs_boot_prepare()` → `pci_devfs_register_all()` → `usb_devfs_register_all()` → `pty_init()` → `arch_boot_device_nodes()` → `fs_boot_mounts()` → `tty_boot_init()` → `fs_boot_probe_devfs()` — VFS / devfs / PCI & USB 设备节点 / chrdevs / mounts / console TTY / `/dev/null` smoke probe。根挂载、console TTY 与 PTY 缺失触发 `boot_failure_stop` 停机。
+11. `arch_boot_smp_prepare()` — 调度器 accounting 发布，准备多核时钟源。
+12. **Checkpoint `ARCH_BOOT_CHECK_PRE_SMP`** — 校验单核 tick 独占递送、调度器 accounting 就绪，输出 `[boot-4] checkpoint=pre-smp status=ok`。
+13. `arch_boot_aps()` — 启动 APs，并在 BSP 上为每个发现的 CPU 执行 `subsys_prepare_cpus()`。
+14. `arch_boot_runtime()` — 时钟与中断运行期放行，输出 runtime 证据。
+15. **Checkpoint `ARCH_BOOT_CHECK_RUNTIME`** — 校验全局就绪能力，输出 `[boot-4] checkpoint=runtime status=ok`。
+16. `#ifdef OS01_SELFTEST` — `selftest_run_all()`, `arch_post_smp_selftest()`。
+17. `sched_boot_creation_begin()`, `futex_init()`, `console_init()`。
+18. `task_init()` — 构造 stdio（`/dev/tty`），创建 `/init.elf` (PID 1)，启动调度器进入 idle 循环。
 
 ## Framebuffer resolution switching
 

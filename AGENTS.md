@@ -53,8 +53,8 @@ Kernel:  head.S → GDT/IDT/TSS → lretq → 0xffff800000100000 → kernel_main
 Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+0xffff800000000000
 SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
 Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline + pick_eevdf + sched_balance SMP 负载均衡
-Init:    head.S → kernel_main → subsys → VFS/FS → TTY → percpu → SMP → task_init → /init.elf (→ parse_inittab)
-Facade:  双架构共用单一 kernel_main 入口（2026-11-07 闭环）→ arch/boot.h 强覆盖钩子 → arch/features.h 特性门（OS01_HAS_VFS / OS01_HAS_USERSPACE）→ aarch64_main 已删除
+Init:    head.S → kernel_main → arch_boot_controllers → arch_boot_percpu → arch_boot_devices (check: devices) → VFS/FS → TTY → arch_boot_smp_prepare (check: pre-smp) → arch_boot_aps (subsys_prepare_cpus) → arch_boot_runtime (check: runtime) → task_init → /init.elf (→ parse_inittab)
+Facade:  双架构共用单一 kernel_main 入口（2026-11-07 闭环）→ arch/boot.h 阶段契约与能力校验（arch_boot_* + arch_boot_validate 三检查点）→ arch/features.h 特性门（OS01_HAS_VFS / OS01_HAS_USERSPACE）→ aarch64_main 已删除
 Logo:    aarch64 only: aarch64_boot_fb_init() → frame_buffer_init() → boot_logo_show() → [fb] banner
 ```
 

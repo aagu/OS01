@@ -79,9 +79,8 @@ num_cpus = cpu_idx;  // runtime count
 
 smp_boot_aps();
 
-// Per-CPU subsystem init (LAPIC timer start, etc.)
-arch_register_subsys_percpu();
-subsys_init_percpu();
+// CPU subsystem preparation on BSP (executor=BSP, target=0..num_cpus-1)
+subsys_prepare_cpus();
 
 ## AP trampoline
 
