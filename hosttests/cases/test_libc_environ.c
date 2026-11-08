@@ -170,12 +170,41 @@ static void env_install(const char *const *entries)
     environ = env_inherited;
 }
 
+/* The module allocates its table as TWO arrays of char* (the entries
+ * and the ownership map).  Everything else it allocates is a string, and
+ * every string must be released again — so the number of live
+ * allocations at the end of a case is exactly these two arrays. */
+#define ENV_TABLE_ARRAYS 2
+
 /* Release everything the libc owns and start from a fresh inherited
- * environment. */
+ * environment.
+ *
+ * The foreign-free counter is reset here, so a free of a pointer the
+ * libc never allocated is attributed to the case that caused it — and
+ * not to whichever case happens to run next. */
 static void env_reset(const char *const *entries)
 {
     clearenv();
     env_install(entries);
+    env_free_foreign = 0;
+}
+
+/* The end of a case.
+ *
+ * The cleanup first hands the public array back to the libc: through an
+ * array the APPLICATION owns, the libc deliberately keeps the strings it
+ * allocated, because that array may still refer to them.  Owning the
+ * array again is what makes the cleanup release them, so a string the
+ * libc allocated and forgot is still live when the count is checked. */
+static void env_case_end(void)
+{
+    setenv("__env_probe__", "1", 1);
+    clearenv();
+
+    /* The libc must never free a pointer it did not allocate. */
+    assert_eq(0, env_free_foreign);
+    /* And it must give back every string it took. */
+    assert_eq(ENV_TABLE_ARRAYS, env_ledger_count);
 }
 
 /* The value of a variable, or a marker when it is not set.  The marker
@@ -213,6 +242,8 @@ TEST_FUNC(setenv_visible)
     assert_eq(0, setenv("OS01_VAR", "hello", 1));
     assert_str_eq("hello", env_value("OS01_VAR"));
     assert_true(env_has_entry("OS01_VAR=hello"));
+
+    env_case_end();
 }
 
 TEST_FUNC(overwrite_and_remove)
@@ -238,6 +269,8 @@ TEST_FUNC(overwrite_and_remove)
 
     /* removing a variable that is not there is not an error */
     assert_eq(0, unsetenv("K"));
+
+    env_case_end();
 }
 
 TEST_FUNC(preserve_inherited)
@@ -258,6 +291,8 @@ TEST_FUNC(preserve_inherited)
     assert_str_eq("2", env_value("B"));
     assert_str_eq("3", env_value("C"));
     assert_str_eq("4", env_value("D"));
+
+    env_case_end();
 }
 
 TEST_FUNC(putenv_borrowed)
@@ -276,6 +311,7 @@ TEST_FUNC(putenv_borrowed)
     /* and the libc never frees a string it does not own */
     assert_eq(0, clearenv());
     assert_eq(0, env_free_foreign);
+    env_case_end();
 }
 
 TEST_FUNC(invalid_name)
@@ -310,6 +346,8 @@ TEST_FUNC(invalid_name)
     assert_str_eq("1", env_value("A"));
     assert_str_eq("2", env_value("B"));
     assert_false(env_has_entry("A=B"));
+
+    env_case_end();
 }
 
 TEST_FUNC(duplicate_inherited_unset)
@@ -329,6 +367,8 @@ TEST_FUNC(duplicate_inherited_unset)
 
     /* the other inherited entries survive */
     assert_str_eq("1", env_value("A"));
+
+    env_case_end();
 }
 
 TEST_FUNC(many_entries)
@@ -360,6 +400,8 @@ TEST_FUNC(many_entries)
     big[1024] = '\0';
     assert_eq(0, setenv("BIG", big, 1));
     assert_str_eq(big, env_value("BIG"));
+
+    env_case_end();
 }
 
 TEST_FUNC(clearenv_then_set)
@@ -380,6 +422,8 @@ TEST_FUNC(clearenv_then_set)
     assert_eq(0, setenv("Y", "2", 1));
     assert_str_eq("2", env_value("Y"));
     assert_null(getenv("A"));
+
+    env_case_end();
 }
 
 TEST_FUNC(allocation_failure_preserves)
@@ -411,6 +455,8 @@ TEST_FUNC(allocation_failure_preserves)
     assert_str_eq("old", env_value("KEEP"));
     assert_true(environ == env_before);
     assert_eq(live_before, env_ledger_count);
+
+    env_case_end();
 }
 
 TEST_LIST_BEGIN

@@ -144,10 +144,19 @@ static int env_take_over(size_t extra)
     for (i = 0; i < n; i++)
         slots[i] = environ[i];
 
-    /* The previous state is dropped, not freed: the application may still
-     * hold a pointer to the array we allocated, and the strings in it may
-     * still be referenced there. */
+    /* The table this module allocated is released: POSIX lets a
+     * setenv()/unsetenv() change the public array, so an application
+     * that kept the old `environ` pointer has to re-read it (glibc's
+     * realloc of the same array behaves the same way).
+     *
+     * The STRINGS the old table owned are NOT released: the array the
+     * application installed may still refer to them, and getenv() hands
+     * out a pointer INTO such a string.  Releasing them would hand the
+     * application a dangling pointer, so they are deliberately leaked
+     * here.  That is the one leak this module accepts, and it only
+     * happens when the application replaces the public array itself. */
     free(env_owned);
+    free(env_slots);
     env_slots = slots;
     env_owned = owned;
     env_count = n;
@@ -162,6 +171,8 @@ static int env_grow(size_t extra)
     size_t new_cap = env_cap ? env_cap * 2 : 8;
     char **slots;
     char **owned;
+    char **old_slots = env_slots;
+    char **old_owned = env_owned;
     size_t i;
 
     while (new_cap < env_count + extra + 1)
@@ -183,12 +194,15 @@ static int env_grow(size_t extra)
         slots[i] = NULL;
         owned[i] = NULL;
     }
-    free(env_slots);
-    free(env_owned);
+    /* Publish the new arrays first, then release the old ones: the
+     * public pointer must never refer to freed memory, not even for the
+     * few instructions between the two steps. */
     env_slots = slots;
     env_owned = owned;
     env_cap = new_cap;
     environ = slots;
+    free(old_slots);
+    free(old_owned);
     return 0;
 }
 
@@ -217,7 +231,12 @@ static void env_remove_from(size_t from, const char *name, size_t name_len)
     size_t i = from;
 
     while (i < env_count) {
-        if (env_entry_matches(env_slots[i], name, name_len)) {
+        /* The application may write into the public array, so a slot can
+         * be empty even though the libc still counts it.  The empty slot
+         * is skipped: it holds no entry, and env_entry_matches() would
+         * dereference it. */
+        if (env_slots[i] != NULL &&
+            env_entry_matches(env_slots[i], name, name_len)) {
             if (env_owns(i))
                 free(env_owned[i]);
             for (size_t j = i; j + 1 < env_count; j++) {
@@ -406,10 +425,15 @@ int clearenv(void)
      * be referenced there, so nothing is freed: the state is dropped and
      * the environment starts empty. */
     free(env_owned);
+    free(env_slots);
     env_owned = NULL;
     env_slots = NULL;
     env_count = 0;
     env_cap = 0;
+    /* The empty array is the libc's own.  It is reset before it is
+     * published again, so a write the application made into the
+     * previous incarnation of it cannot survive into this one. */
+    env_empty[0] = NULL;
     environ = env_empty;
     return 0;
 }
