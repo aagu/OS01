@@ -78,6 +78,28 @@ $(OS01_LIBC_PREFIX_DIR)/%.o: $(LIBC_SRC)/string/%.c
 	@mkdir -p $(OS01_LIBC_PREFIX_DIR)
 	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_PREFIX_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
+# ── Host-test production-symbol prefix: the allocator ──────────────────
+# The allocator lives in different production sources (libc/stdlib/*.c), so
+# it gets its own prefixed object set.  It is one object per SOURCE FILE,
+# not one per symbol: free() and realloc() are defined in malloc.c.
+#
+# The allocator objects are compiled WITHOUT the test_platform.h
+# force-include.  That header defines __is_libk, and the allocator's kernel
+# path (the slab allocator) is not what the host test drives: the host test
+# exercises the USER allocator, the SYS_brk heap.  Everything else about the
+# production code stays untouched — same sources, same compiler flags.
+OS01_LIBC_ALLOC_FNS := malloc free calloc realloc reallocarray posix_memalign aligned_alloc
+OS01_LIBC_ALLOC_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_ALLOC_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))
+OS01_LIBC_ALLOC_DIR := $(TEST_BLD)/prefixed-alloc
+OS01_LIBC_ALLOC_OBJS := \
+    $(OS01_LIBC_ALLOC_DIR)/malloc.o \
+    $(OS01_LIBC_ALLOC_DIR)/calloc.o \
+    $(OS01_LIBC_ALLOC_DIR)/reallocarray.o
+
+$(OS01_LIBC_ALLOC_DIR)/%.o: $(LIBC_SRC)/stdlib/%.c
+	@mkdir -p $(OS01_LIBC_ALLOC_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_ALLOC_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
 LIBC_OBJS := \
     $(TEST_BLD)/libc_memset.o \
     $(TEST_BLD)/libc_memcpy.o \

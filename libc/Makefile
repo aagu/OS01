@@ -49,7 +49,7 @@ C_SOURCES := \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
     $(wildcard rbtree/*.c) \
-    stdlib/calloc.c stdlib/malloc.c \
+    stdlib/calloc.c stdlib/malloc.c stdlib/reallocarray.c \
     stdio/vsprintf.c \
     $(wildcard string/*.c) \
     $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))

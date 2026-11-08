@@ -9,6 +9,7 @@ $(eval $(call register_host_test,test_libc_fread_fwrite_validate,libc,protocol-o
 $(eval $(call register_host_test,test_libc_getopt,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_aarch64_color_printk_abi,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_api,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_alloc,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -19,7 +20,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
     $(TEST_BLD)/test_libc_getopt.elf \
     $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
-    $(TEST_BLD)/test_libc_api.elf
+    $(TEST_BLD)/test_libc_api.elf \
+    $(TEST_BLD)/test_libc_alloc.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -168,6 +170,35 @@ $(TEST_BLD)/test_libc_api.elf: $(TEST_BLD)/test_libc_api.o $(OS01_LIBC_PREFIX_OB
 
 .PHONY: test-libc-api
 test-libc-api: $(TEST_BLD)/test_libc_api.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: alloc group (T2) ─────────────────────────────────
+# The alloc group exercises the REAL production allocator: libc/stdlib/
+# malloc.c, calloc.c and reallocarray.c, compiled under the `os01_` prefix
+# (see common.mk) so a call can never resolve to the host libc's
+# same-named implementation.
+#
+# The allocator's heap is the mock in hosttests/mock/libc_heap_runtime.h:
+# the production allocator grows its heap with SYS_brk, and the test
+# translation unit supplies the syscall boundary (host_test_syscall) plus
+# the ENOMEM growth fault injection.
+$(TEST_BLD)/test_libc_alloc.o: $(TEST_CASES)/test_libc_alloc.c \
+		$(TEST_MOCK)/libc_heap_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_PREFIX_CFLAGS) \
+		$(OS01_LIBC_ALLOC_PREFIX_DEFS) $(FRAMEWORK_INC) $(LIBC_INC) \
+		-I$(TEST_MOCK) -c $< -o $@
+
+$(TEST_BLD)/test_libc_alloc.elf: $(TEST_BLD)/test_libc_alloc.o \
+		$(OS01_LIBC_PREFIX_OBJS) $(OS01_LIBC_ALLOC_OBJS)
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-alloc
+test-libc-alloc: $(TEST_BLD)/test_libc_alloc.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

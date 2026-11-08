@@ -8,6 +8,12 @@ that group; only the groups delivered so far are enabled.  T1 delivers the
 exactly one definition across translation units, and gives its declarations C
 linkage so a C++ consumer links against the same symbols).
 
+T2 delivers the ``alloc`` group: the allocation interfaces (overflow-safe
+``calloc``/``malloc``/``reallocarray`` and the aligned allocation calls).
+That group owns its interfaces through an "owned" map instead of a header
+inventory, because the headers it touches (malloc.h, stdlib.h) also carry
+interfaces other groups own.
+
 Scope rules (design spec "分配与环境"; plan "文件与构建责任"):
 
 * the user libc is audited against the FULL user-facing interface set;
@@ -43,7 +49,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Groups ──────────────────────────────────────────────────────────────
 # Every group names the task that delivers it.  ENABLED_GROUPS lists the
 # groups delivered so far; a later task appends its group here.
-ENABLED_GROUPS: tuple[str, ...] = ("api",)
+ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc")
 
 # Headers that are deliberately NOT part of the api group, with the reason.
 # An excluded header is still compiled by nothing in the api group, so it
@@ -218,6 +224,8 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "free",
         "calloc",
         "realloc",
+        "posix_memalign",
+        "aligned_alloc",
     ],
     "math.h": [],
     "mntent.h": [
@@ -335,6 +343,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "malloc",
         "calloc",
         "free",
+        "reallocarray",
         "strtol",
         "strtoul",
         "atoi",
@@ -596,6 +605,36 @@ API_GROUPS: dict[str, dict] = {
         # functional groups (alloc/env/shutdown/...) that own the behaviour.
         "require_user_export": False,
     },
+    "alloc": {
+        "task": "T2",
+        "title": "overflow-safe allocation and aligned allocation",
+        # The alloc group owns the allocation interfaces, but it does not
+        # own the headers they are declared in: malloc.h and stdlib.h are
+        # audited for declaration drift by the api group, which lists every
+        # public interface of both headers.
+        "headers": {},
+        # "owned" names the interfaces the group delivers (header -> the
+        # symbols it owns).  It replaces the header inventory for the
+        # export and libk checks: a header can declare interfaces other
+        # groups own (stdlib.h declares the whole C library), while the
+        # owned map names exactly what this group is responsible for.
+        "owned": {
+            "malloc.h": [
+                "malloc",
+                "free",
+                "calloc",
+                "realloc",
+                "posix_memalign",
+                "aligned_alloc",
+            ],
+            "stdlib.h": [
+                "reallocarray",
+            ],
+        },
+        # Unlike the api group, the alloc group owns behaviour: the user
+        # libc must really export every interface it owns.
+        "require_user_export": True,
+    },
 }
 
 
@@ -734,8 +773,18 @@ def group_headers(group: str) -> dict[str, list[str]]:
 
 
 def all_group_symbols(group: str) -> set[str]:
+    """The interfaces a group is responsible for.
+
+    A group that declares an "owned" map owns exactly those symbols — even
+    when the header they live in also declares interfaces other groups own.
+    A group without an "owned" map owns every symbol of the headers it
+    audits.
+    """
+    info = API_GROUPS[group]
+    owned = info.get("owned")
+    source = owned if owned is not None else info["headers"]
     syms: set[str] = set()
-    for names in group_headers(group).values():
+    for names in source.values():
         syms.update(names)
     return syms
 
@@ -1009,6 +1058,10 @@ def list_manifest(profile: str = "x86_64-clang") -> int:
         print(f"group {group} (task {info['task']}): {info['title']}")
         for header, syms in sorted(group_headers(group).items()):
             print(f"  {header}: {len(syms)} interface(s)")
+        owned = info.get("owned")
+        if owned is not None:
+            for header, syms in sorted(owned.items()):
+                print(f"  owns {header}: {', '.join(syms)}")
         print(f"  libk requirement set: {len(libk_required(group, profile))} symbol(s)")
     print("")
     print("excluded headers:")

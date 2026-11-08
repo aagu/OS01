@@ -24,6 +24,11 @@ void* malloc (size_t size);
 void* calloc (size_t n, size_t size);
 void free(void * ptr);
 
+/* Realloc with an overflow-checked size: the new size is nmemb * size and
+ * the product must not wrap around.  A failing call returns NULL and
+ * leaves the old block untouched. */
+void *reallocarray(void *ptr, size_t nmemb, size_t size);
+
 // ── String conversion ────────────────────────────────────────
 long strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
