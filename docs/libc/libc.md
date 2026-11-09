@@ -58,7 +58,8 @@ make PROFILE=x86_64-clang test-libc-host LIBC_CASE=path
 python3 scripts/audit_libc_api.py --check-headers --include-dir libc/include
 python3 scripts/audit_libc_api.py --profile aarch64-clang --check-headers --include-dir libc/include
 
-# guest 端到端（108 条 syscall 用例 + T17 的 10 条 libc 验收用例）
+# guest 端到端（用例表 119 条：118 条通过 + 1 条 SKIP；
+#   108 条原有 + T17 的 10 条 libc 验收用例）
 make OS01_SYSTEST=1 test-syscall
 
 # RED 复现（这两个是"预期的失败"，退出码非零就是复现成功）

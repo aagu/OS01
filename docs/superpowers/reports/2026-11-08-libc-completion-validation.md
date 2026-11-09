@@ -116,18 +116,33 @@ guest 整轮：`make OS01_SYSTEST=1 test-syscall` ⇒ **118 条**（原 108 + �
 | `user/test_monitor.c` | 手写扫描器解析 `"<birth> <ppid>"`，注释写着"libc 的最小 sscanf 不支持字段宽度" | 用真实的 `sscanf(msg, "%lu %lu", …)`（T12 已交付宽度感知的扫描核） |
 | `user/test_gfx/test_gfx.c` | 曾经绕过 `fgets`（自己 `read` 一行） | 已在 T8 期间改为真实 `fgets`（本轮只核对，无改动） |
 | 桌面时钟/日期/Files | —— | 走真实库能力：时钟用 `localtime`/`strftime`，Files 用 `opendir`/`scandir`；打开失败保留旧视图（依赖 T15 的 `ENOTDIR` 语义） |
-| BusyBox | 子模块未被改写 | `getline` 由 libc 真实提供，`HAVE_GETLINE` 的 fallback 不再参与 |
+| BusyBox | 子模块未被改写（`thirdpart/busybox-1.36.1` 干净，`git diff HEAD -- thirdpart/` 无输出） | `getline` 由 libc 真实提供，`HAVE_GETLINE` 的 fallback 不再参与 |
+
+**消费者清理的实测证据**：`test_monitor` 是 guest 程序（`/bin/test_monitor`），
+`make PROFILE=x86_64-clang test-qemu SUITE=monitor` 会真的跑它 ——
+实测 **exit 0**（`1-core PASS` / `2-core PASS` / `8-core PASS`）。这条门不在计划
+T17 的清单里（清单只列了 network / phase-0 / gui-desktop），但没有它，改动就只有
+"能编译"这一层证据，所以补跑了。
 
 ### 4.3 api 审计：覆盖表全部组
 
 `scripts/audit_libc_api.py` 的 `ENABLED_GROUPS` 从 5 组扩到 **15 组**
 （api / alloc / env / shutdown / stream / append / io / line / format / integer /
-float / scan / time / path / dir），每一组带自己的 `owned` 符号表，于是审计现在
-对**覆盖表的每一个接口**都要求：
+float / scan / time / path / dir）。其中 **14 个功能组**各带自己的 `owned` 符号表
+（合计 **96 个符号**，正好是计划覆盖表的全部接口），于是审计对这 96 个接口都要求：
 
-* 用户 `libc.a` 真的导出它（`require_user_export`）；
-* `libk.a` 没有丢掉它**原本就有**的导出（`LIBK_SUPPORTED` 基线）；
+* 用户 `libc.a` 真的导出它（`require_user_export: True`）；
+* `libk.a` 没有丢掉它**原本就有**的导出（`LIBK_SUPPORTED` 基线，按 profile 区分）；
 * `libk.a` 没有获得用户态专属符号（`posix_memalign`/`aligned_alloc` 等）。
+
+`api` 组是**头文件层面的声明契约**（`require_user_export: False`，它保证每个公开头
+"被正确声明"——自包含、跨 TU 只有一份定义、C++ linkage —— 而不是"背后被实现"）；
+导出强制属于拥有行为的那些功能组。
+
+> **审计的边界**：公开头总共声明了 337 个符号，其中 **96 个**是本计划覆盖表的接口
+> （导出被强制），其余 241 个（`strcpy`、`memcpy`、`printf`、`socket` …）是本轮之前
+> 就存在的 libc 表面，**不在本计划的覆盖范围内**，审计不对它们的导出做强制。
+> 覆盖表的 96 个接口与 14 个功能组的 `owned` 表一一对应（逐组核对过）。
 
 `--check-headers` 现在输出 `headers OK (15 group(s), 75 header(s))`。
 
@@ -145,6 +160,7 @@ float / scan / time / path / dir），每一组带自己的 `owned` 符号表，
 | 静态审计 | `make PROFILE=x86_64-clang test-static` | exit 0；15 个审计全 PASS（runtime / stack-canary / validate-kernel / runtime-link-order / kernel-runtime-link / syscall-boundary / kernel-layout / kernel-canary-contract / header-object / stack-frame / driver-model-boundary / gui-build / intr-dispatch / arch10-capacity / user-canary） |
 | guest 整轮 | `make OS01_SYSTEST=1 test-syscall` | exit 0；`[TEST] END suite=systest total=119 passed=118 failed=0 skipped=1` |
 | guest qemu 套件 | `make PROFILE=x86_64-clang test-qemu SUITE=network` / `SUITE=phase-0` / `SUITE=gui-desktop` | 三个都 exit 0 |
+| 消费者（monitor） | `make PROFILE=x86_64-clang test-qemu SUITE=monitor` | exit 0（1/2/8 核全 PASS；这条门不在计划清单里，是为消费者清理补的证据，见 §4.2） |
 | 桌面 host 组 | `make PROFILE=x86_64-clang test-gui-host` | exit 0（20 组） |
 | api 头审计（两个 profile） | `python3 scripts/audit_libc_api.py --check-headers --include-dir libc/include`（x86_64-clang 与 aarch64-clang 各一次） | 两个都 exit 0；`headers OK (15 group(s), 75 header(s))` |
 | 归档审计（x86_64） | `make PROFILE=x86_64-clang test-libc-api-audit` | exit 0；`[audit] OK` |
