@@ -51,6 +51,15 @@ DIR *opendir(const char *name);
 struct dirent *readdir(DIR *dir);
 int closedir(DIR *dir);
 
+/* T15 — the directory descriptor and the sorted-scan APIs. */
+int dirfd(DIR *dirp);
+DIR *fdopendir(int fd);
+int scandir(const char *dirp,
+            struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **));
+int alphasort(const struct dirent **a, const struct dirent **b);
+
 #ifdef __cplusplus
 }
 #endif

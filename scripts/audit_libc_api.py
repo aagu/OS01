@@ -212,6 +212,10 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "opendir",
         "readdir",
         "closedir",
+        "dirfd",
+        "fdopendir",
+        "scandir",
+        "alphasort",
     ],
     "errno.h": [],
     "fcntl.h": [

@@ -21,6 +21,7 @@ $(eval $(call register_host_test,test_libc_float_parse,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_path,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_scan,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_time,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_dir,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -43,7 +44,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_float_parse.elf \
     $(TEST_BLD)/test_libc_path.elf \
     $(TEST_BLD)/test_libc_scan.elf \
-    $(TEST_BLD)/test_libc_time.elf
+    $(TEST_BLD)/test_libc_time.elf \
+    $(TEST_BLD)/test_libc_dir.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -766,6 +768,68 @@ test-libc-path: $(TEST_BLD)/test_libc_path.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout 60 $(TEST_BLD)/test_libc_path.elf
+
+# ── libc completion: dir group (T15) ────────────────────────────────
+# The directory descriptor and the sorted scan: opendir/readdir/closedir
+# with the record validation and the errno semantics, dirfd/fdopendir
+# with the descriptor ownership rules, and scandir/alphasort.  The
+# PRODUCTION sources are linked (libc/unistd/dirent.c,
+# libc/stdlib/scandir.c and the production open/fstat/close wrappers);
+# only the directory itself is replaced, by
+# hosttests/mock/libc_dir_runtime.c.
+$(TEST_BLD)/user-int/dirent.o: $(LIBC_SRC)/unistd/dirent.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/scandir.o: $(LIBC_SRC)/stdlib/scandir.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/fstat.o: $(LIBC_SRC)/unistd/fstat.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/open.o: $(LIBC_SRC)/unistd/open.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/close.o: $(LIBC_SRC)/unistd/close.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_dir_runtime.o: $(TEST_MOCK)/libc_dir_runtime.c \
+        $(TEST_MOCK)/libc_dir_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
+
+DIR_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+    -I$(TEST_MOCK)
+
+$(TEST_BLD)/test_libc_dir.o: $(TEST_CASES)/test_libc_dir.c \
+        $(TEST_MOCK)/libc_dir_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(DIR_TEST_CFLAGS) -c $< -o $@
+
+# The malloc/realloc/free of the libc are interposed with the linker's
+# --wrap so that an allocation failure can be injected at a chosen point
+# (the group counts the live allocations to prove that the failure path
+# releases everything it took).
+$(TEST_BLD)/test_libc_dir.elf: $(TEST_BLD)/test_libc_dir.o \
+        $(TEST_BLD)/user-int/dirent.o \
+        $(TEST_BLD)/user-int/scandir.o \
+        $(TEST_BLD)/user-int/fstat.o \
+        $(TEST_BLD)/user-int/open.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(TEST_BLD)/libc_stream_runtime.o \
+        $(TEST_BLD)/libc_dir_runtime.o
+	$(HOST_CC) -Wl,--wrap=malloc -Wl,--wrap=realloc -Wl,--wrap=free \
+	    -o $@ $^
+
+.PHONY: test-libc-dir
+test-libc-dir: $(TEST_BLD)/test_libc_dir.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout 60 $(TEST_BLD)/test_libc_dir.elf
 
 # ── the RED build of the path group (T14 evidence) ───────────────────
 # The RED build links the PRE-T14 state, i.e. the commit that preceded

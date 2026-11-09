@@ -5353,6 +5353,37 @@
     "action": "unique",
     "reason": "Primary host unit test for realpath() and the variadic exec wrappers against a fake filesystem and a fake exec boundary"
    }
+  },
+  {
+   "id": "libc.dir.scan",
+   "component": "libc",
+   "behavior": "dir",
+   "trigger": "host runner invokes test_libc_dir.elf",
+   "assertions": [
+    "opendir() on a regular file answers ENOTDIR (the directory type is checked with fstat())",
+    "fdopendir() takes the descriptor over: closedir() closes it; on failure the descriptor is NOT closed and stays the caller's",
+    "readdir() sets errno when the kernel fails and leaves errno UNCHANGED at the end of the directory",
+    "every kernel record is validated: a length that lies, a length below the header, or a name that is not NUL-terminated inside the record answers EIO instead of walking off the buffer",
+    "d_off is the kernel's cookie copied from the record, not a running entry counter",
+    "scandir() honours the filter, keeps the kernel order without a comparator and sorts with alphasort(); an empty directory answers 0",
+    "the entries scandir() returns are independent copies",
+    "every allocation failure releases the copies, the array and the directory stream and never writes a half-finished array into the caller's pointer"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_dir"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_dir.c",
+    "notes": "the production dirent.c/scandir.c are linked; only the directory itself (open/fstat/getdents64/close) is faked by hosttests/mock/libc_dir_runtime.c",
+    "selector": "test_libc_dir",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for dirfd()/fdopendir()/scandir()/alphasort() and for the directory stream's record validation against a fake directory"
+   }
   }
  ]
 }
