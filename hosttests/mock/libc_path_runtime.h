@@ -51,6 +51,19 @@ void path_rt_set_exec_errno(int err);
  * global value. */
 void path_rt_set_exec_errno_for(const char *path, int err);
 
+/* Run the REAL host shell for an execve("/bin/sh", argv, envp) attempt.
+ *
+ * The argv the libc handed to the shell is turned into a real command
+ * line and run by the host's shell, so the script path is resolved by a
+ * real POSIX shell in a real directory layout: a BARE name is resolved
+ * relative to the CURRENT DIRECTORY, a path is resolved as a path.  The
+ * mock answers ENOEXEC afterwards, because the libc only ever sees the
+ * shell's exit — and by then the script has already run.
+ *
+ * This is what makes the ENOEXEC hand-off observable end to end: the
+ * script itself records what the shell was told to run. */
+void path_rt_set_real_shell(int on);
+
 /* How many exec attempts were made. */
 int path_rt_exec_count(void);
 

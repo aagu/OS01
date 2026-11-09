@@ -26,8 +26,13 @@
  *     it with NULL;
  *   - execle() passes its EXPLICIT environment;
  *   - an EMPTY segment of PATH means the current directory;
+ *   - an EMPTY PATH searches NO directory at all, while an UNSET PATH uses
+ *     the implementation's default path (the two states are different);
  *   - EACCES takes priority over the ENOENT of the other candidates;
- *   - an ENOEXEC candidate is run through /bin/sh.
+ *   - an ENOEXEC candidate is run through /bin/sh, and the shell is given
+ *     the RESOLVED CANDIDATE PATH rather than the bare name — checked on
+ *     the recorded argv AND end to end, against the host's real shell in a
+ *     real directory layout.
  *
  * NOTE: assert_eq() stringizes its expression into a printf format, so
  * every call whose format string contains a '%' is hoisted into a
@@ -38,6 +43,7 @@
 #include "test_framework.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -415,11 +421,150 @@ TEST_FUNC(test_execvp_enoexec_uses_bin_sh)
     assert_str_eq("/p1/tool", path_rt_exec_path(0));
     assert_str_eq("/bin/sh", path_rt_exec_path(1));
     assert_str_eq("/bin/sh", path_rt_exec_argv0(1));
-    /* the shell's argv is {"/bin/sh", <the file>, argv[1], …} — the
-     * ORIGINAL argv[0] is dropped, which is what glibc does */
-    assert_str_eq("tool", path_rt_exec_argv(1, 1));
+    /* the shell's argv is {"/bin/sh", <the RESOLVED CANDIDATE>, argv[1], …}:
+     * the shell is given the path the search found — NOT the bare name — and
+     * the ORIGINAL argv[0] is dropped, which is what glibc does.  A bare
+     * name would be resolved by the shell relative to the CURRENT
+     * DIRECTORY, so a script outside the CWD would not be found and a file
+     * with the same name IN the CWD would be run instead. */
+    assert_str_eq("/p1/tool", path_rt_exec_argv(1, 1));
     assert_str_eq("arg1", path_rt_exec_argv(1, 2));
     assert_eq(NULL, path_rt_exec_argv(1, 3));
+}
+
+TEST_FUNC(test_execvp_empty_path_searches_nothing)
+{
+    fs_reset();
+    /* An EMPTY PATH names NO directory: nothing is searched at all and the
+     * answer is ENOENT.  The empty PATH and the unset PATH are two
+     * DIFFERENT states — glibc searches the default path only when PATH is
+     * NOT SET. */
+    setenv("PATH", "", 1);
+    path_rt_set_exec_errno(ENOENT);
+
+    errno = 0;
+    (void)execlp("tool", "arg0", (char *)NULL);
+
+    assert_eq(ENOENT, errno);
+    assert_eq(0, path_rt_exec_count());
+}
+
+TEST_FUNC(test_execvp_unset_path_uses_the_default_path)
+{
+    fs_reset();
+    /* PATH is NOT SET: the implementation's default path is searched.
+     * OS01 has no confstr(_CS_PATH), so the default is its own: /bin. */
+    unsetenv("PATH");
+    path_rt_set_exec_errno(ENOENT);
+
+    (void)execlp("tool", "arg0", (char *)NULL);
+
+    assert_eq(1, path_rt_exec_count());
+    assert_str_eq("/bin/tool", path_rt_exec_path(0));
+}
+
+/* ── the ENOEXEC hand-off, end to end ────────────────────────────────
+ *
+ * The case above checks WHAT the libc hands to the shell.  This one runs
+ * the hand-off for real: a real directory layout, a real script and the
+ * host's real /bin/sh.  The script records what the shell was told to
+ * run, so the difference between the resolved candidate path and the bare
+ * name is visible in the file the script writes.
+ *
+ * The layout:
+ *   <root>/p1/tool   the script the PATH search finds
+ *   <root>/out      where the script records "$0|$1"
+ *
+ * The script is NOT in the current directory, so a shell that received the
+ * BARE name "tool" would not find it at all — it would look for "tool"
+ * relative to the current directory.
+ */
+
+/* The filesystem calls below are the HOST's: the path group links no
+ * production open()/write()/mkdir() object, so these resolve to the host
+ * libc and act on the real filesystem.  (stat() and getcwd() are NOT used:
+ * the path group links OS01's own stat() and getcwd(), and those answer
+ * from the mock's fake filesystem.) */
+static int real_write_file(const char *path, const char *content)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    size_t len = strlen(content);
+
+    if (fd < 0)
+        return -1;
+    if (write(fd, content, len) != (int64_t)len) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+static int real_read_file(const char *path, char *buf, size_t size)
+{
+    int fd = open(path, O_RDONLY);
+    int64_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, buf, size - 1);
+    close(fd);
+    if (n < 0)
+        return -1;
+    buf[n] = '\0';
+    /* the trailing newline of the script's output is not part of the
+     * recorded value */
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        buf[--n] = '\0';
+    return (int)n;
+}
+
+TEST_FUNC(test_execvp_enoexec_runs_the_script_the_search_found)
+{
+    char root[64];
+    char dir[96];
+    char script[128];
+    char out[128];
+    char body[256];
+    char expect[160];
+    char buf[256];
+    int n;
+
+    snprintf(root, sizeof(root), "/tmp/os01-libc-path-%d", (int)getpid());
+    snprintf(dir, sizeof(dir), "%s/p1", root);
+    snprintf(script, sizeof(script), "%s/tool", dir);
+    snprintf(out, sizeof(out), "%s/out", root);
+
+    mkdir(root, 0755);
+    mkdir(dir, 0755);
+    /* The script records the shell's $0 (the script path the shell was
+     * given) and its $1 (the first argument the libc passed on). */
+    snprintf(body, sizeof(body),
+             "#!/bin/sh\nprintf '%%s|%%s\\n' \"$0\" \"$1\" > '%s'\n", out);
+    assert_eq(0, real_write_file(script, body));
+
+    fs_reset();
+    setenv("PATH", dir, 1);
+    /* The candidate is a script, not a binary: the kernel answers ENOEXEC. */
+    path_rt_set_exec_errno_for(script, ENOEXEC);
+    /* ... and the shell attempt is handed to the REAL host shell. */
+    path_rt_set_real_shell(1);
+
+    (void)execlp("tool", "arg0", "arg1", (char *)NULL);
+    path_rt_set_real_shell(0);
+
+    /* The script ran, and it saw the RESOLVED CANDIDATE as its $0 — a
+     * bare name would have left the file unwritten.  Its $1 is the
+     * caller's argv[1]: the libc drops argv[0], exactly as glibc does. */
+    n = real_read_file(out, buf, sizeof(buf));
+    assert_true(n > 0);
+    snprintf(expect, sizeof(expect), "%s|arg1", script);
+    assert_str_eq(expect, buf);
+
+    unlink(script);
+    unlink(out);
+    rmdir(dir);
+    rmdir(root);
 }
 
 TEST_FUNC(test_execle_passes_explicit_envp)
@@ -480,6 +625,9 @@ TEST_ENTRY(test_execlp_searches_path),
 TEST_ENTRY(test_execvp_empty_path_segment_is_cwd),
 TEST_ENTRY(test_execvp_eacces_beats_enoent),
 TEST_ENTRY(test_execvp_enoexec_uses_bin_sh),
+TEST_ENTRY(test_execvp_empty_path_searches_nothing),
+TEST_ENTRY(test_execvp_unset_path_uses_the_default_path),
+TEST_ENTRY(test_execvp_enoexec_runs_the_script_the_search_found),
 TEST_ENTRY(test_execle_passes_explicit_envp),
 TEST_ENTRY(test_execvp_name_with_slash_skips_path),
 #endif

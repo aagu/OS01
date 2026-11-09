@@ -48,11 +48,18 @@
 #define PATH_RT_MAX_EXEC    16
 #define PATH_RT_MAX_ARGV    16
 #define PATH_RT_MAX_ENV     16
+/* The command line the REAL shell mode builds. */
+#define PATH_RT_MAX_CMD     1024
 /* The KERNEL's own limit on the number of symbolic links it will follow in
  * ONE path resolution: MAXSYMLINKS is 8 in kernel/include/fs/vfs.h.  The
  * mock enforces exactly that, so the difference between the kernel's
  * one-shot resolution and the libc's component-wise walk is observable. */
 #define PATH_RT_MAX_LINKS   8
+
+/* The host's system(3).  OS01's <stdlib.h> does not declare it (the libc
+ * has no system()), so the declaration is spelled out here; the host libc
+ * provides the symbol. */
+extern int system(const char *command);
 
 struct path_rt_entry {
     char     path[PATH_RT_MAX_PATH];
@@ -77,6 +84,7 @@ static int g_nexec;
 static int g_exec_errno = ENOENT;
 static char g_exec_errno_path[PATH_RT_MAX_PATH];
 static int g_exec_errno_specific;
+static int g_real_shell;
 
 void path_rt_reset(void)
 {
@@ -85,9 +93,53 @@ void path_rt_reset(void)
     g_exec_errno = ENOENT;
     g_exec_errno_path[0] = '\0';
     g_exec_errno_specific = ENOENT;
+    g_real_shell = 0;
     strcpy(g_cwd, "/cwd");
     /* the root always exists and is a directory */
     path_rt_add("/", S_IFDIR, NULL);
+}
+
+void path_rt_set_real_shell(int on)
+{
+    g_real_shell = on;
+}
+
+/* Build the command line the REAL shell mode runs: "/bin/sh" followed by
+ * the argv[1..] the libc handed to the shell, each single-quoted.  The
+ * quoting is what makes the difference observable: a bare script name is
+ * resolved by the shell relative to the CURRENT DIRECTORY, while a path
+ * is resolved as a path. */
+static void path_rt_build_cmd(char *buf, size_t size, char *const argv[])
+{
+    static const char shell[] = "/bin/sh";
+    size_t used;
+    int i;
+
+    used = 0;
+    for (i = 0; i < (int)sizeof(shell) - 1; i++)
+        buf[used++] = shell[i];
+    buf[used] = '\0';
+
+    for (i = 1; argv != NULL && argv[i] != NULL && used + 4 < size; i++) {
+        const char *p = argv[i];
+
+        buf[used++] = ' ';
+        buf[used++] = '\'';
+        while (*p != '\0' && used + 4 < size) {
+            if (*p == '\'') {
+                /* close the quote, escape a quote, open it again */
+                buf[used++] = '\'';
+                buf[used++] = '\\';
+                buf[used++] = '\'';
+                buf[used++] = '\'';
+            } else {
+                buf[used++] = *p;
+            }
+            p++;
+        }
+        buf[used++] = '\'';
+        buf[used] = '\0';
+    }
 }
 
 void path_rt_set_cwd(const char *cwd)
@@ -428,6 +480,20 @@ int64_t host_test_syscall_ext(uint64_t nr, uint64_t arg1, uint64_t arg2,
                 }
             }
         }
+        /* The REAL shell mode: an execve("/bin/sh", argv, envp) attempt is
+         * handed to the HOST's shell, so the script path is resolved by a
+         * real POSIX shell in a real directory layout.  The mock then
+         * answers ENOEXEC — the libc only ever sees the shell's exit, and
+         * by then the script has already run. */
+        if (g_real_shell && path != NULL && strcmp(path, "/bin/sh") == 0 &&
+            argv != NULL && argv[1] != NULL) {
+            char cmd[PATH_RT_MAX_CMD];
+
+            path_rt_build_cmd(cmd, sizeof(cmd), argv);
+            (void)system(cmd);
+            return -ENOEXEC;
+        }
+
         /* The exec NEVER succeeds in the mock: it always answers the
          * armed errno, so that execvp() can be observed walking the PATH. */
         if (g_exec_errno_path[0] != '\0' &&
