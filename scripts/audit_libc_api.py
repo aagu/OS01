@@ -57,6 +57,7 @@ ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env", "shutdown", "stream")
 # --audit so the exclusion is never silent.
 EXCLUDED_HEADERS: dict[str, str] = {
     "stdlib/strtox.h": "private integer-conversion core (T10)",
+    "stdlib/floatscan.h": "private float scanner surface (T11)",
     # Deferred by the T1 brief: regex.h keeps its current types and inline
     # implementation until T16 migrates it.  The api group therefore does
     # not check its self-containment / two-TU / C++ properties yet.
@@ -392,6 +393,8 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "putenv",
         "clearenv",
         "strtod",
+        "strtof",
+        "strtold",
         "atof",
     ],
     "string.h": [

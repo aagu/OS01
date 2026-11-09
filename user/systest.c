@@ -4179,7 +4179,54 @@ static void test_integer_conversions(void)
     unlink(path);
 }
 
+// ── T11: long double precision across processes (libc-completion
+//    plan) ──
+//
+// strtold must preserve MORE significant bits than strtod (the x87
+// 80-bit format carries 64 mantissa bits vs 53), deterministically,
+// in a fresh process after fork+exec through the scheduler.  The
+// expected 80-bit pattern of 3.14159265358979323846264338327950288
+// (little-endian: 8 mantissa bytes + the 2 exponent/sign bytes) was
+// produced by the T11 host oracle and is hard-coded here — both the
+// host glibc and the OS01 floatscan are correctly rounded, so the
+// bits must match on the target exactly.  The old strtod could not
+// even accept this check: it lost the tail digits to repeated
+// multiply/divide, and strtold did not exist.
+static const char *fp_ld_expected = "\x35\xc2\x68\x21\xa2\xda\x0f\xc9\x00\x40";
+
+static void test_float_precision(void)
+{
+    const char *s = "3.14159265358979323846264338327950288";
+
+    /* the long double result must differ from the double one (extra
+     * precision survived the parse) */
+    long double ld = strtold(s, NULL);
+    double d = strtod(s, NULL);
+    long double dw = (long double)d;
+    CHECK3(ld != dw, "float ld extra precision",
+           "long double carries more bits than double");
+    CHECK3((ld - dw) > 0 && (ld - dw) < 1e-15L, "float ld sane delta",
+           "difference at the double-precision scale");
+
+    /* the exact 80-bit pattern, in-process */
+    CHECK3(memcmp(&ld, fp_ld_expected, 10) == 0, "float ld pattern",
+           "x87 80-bit pattern exact");
+
+    /* the same parse in a fresh process after fork (scheduler +
+     * syscall path), verified against the parent's pattern */
+    pid_t pid = fork();
+    if (pid == 0) {
+        long double c = strtold(s, NULL);
+        _exit(memcmp(&c, fp_ld_expected, 10) == 0 ? 0 : 1);
+    }
+    int st = -1;
+    int64_t w = waitpid(pid, &st, 0);
+    CHECK3(w == pid && st == 0, "float ld fresh process",
+           "child parse bit-identical");
+}
+
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
+
 
 
 // The kernel reserves [0x400000, 0x20600000) for the ELF image
@@ -4693,6 +4740,7 @@ static const test_case_t tests[] = {
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
     {"integer_conversions", "integer conversions", test_integer_conversions, 1, 0},
+    {"float_precision",   "float precision",   test_float_precision,        1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

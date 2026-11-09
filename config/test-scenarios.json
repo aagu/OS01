@@ -5237,6 +5237,32 @@
     "action": "unique",
     "reason": "Primary host unit test for the integer conversion core, checked row-by-row against an independently compiled glibc oracle process"
    }
+  },
+  {
+   "id": "libc.stdlib.float_parse",
+   "component": "libc",
+   "behavior": "stdlib",
+   "trigger": "host runner invokes test_libc_float_parse.elf",
+   "assertions": [
+    "the musl floatscan port agrees with the standalone glibc oracle on the full float table by raw IEEE BIT PATTERNS (float 4B, double 8B, the 10 significant bytes of the x87 80-bit long double) plus consumed length and errno",
+    "hex floats, INF/NAN (with sign and n-char payloads), negative zero, subnormals and overflow/underflow ERANGE all match glibc",
+    "a 35-digit value parses to a long double strictly finer than its double, and LDBL_MAX's decimal prefix round-trips exactly",
+    "no-conversion preserves errno with endptr at nptr; \"1e+\" consumes one character; overflow answers inf+ERANGE and underflow 0+ERANGE"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_float_parse"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_float_parse.c",
+    "selector": "test_libc_float_parse",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the vendored musl floatscan, checked bit-for-bit against an independently compiled glibc oracle process"
+   }
   }
  ]
 }

@@ -94,6 +94,8 @@ int   putenv(char *string);
 int   clearenv(void);
 
 double strtod(const char *nptr, char **endptr);
+float strtof(const char *nptr, char **endptr);
+long double strtold(const char *nptr, char **endptr);
 double atof(const char *nptr);
 
 #ifdef __cplusplus
