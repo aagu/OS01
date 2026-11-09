@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ssp.h>
+#include <time.h>
 
 // ── Forward declarations for the H11 signal-handler test ─────
 // Defined at file scope after test_hostile() so the handler's
@@ -4178,6 +4179,154 @@ static void test_integer_conversions(void)
     unlink(path);
 }
 
+// ── T13: the calendar core, the POSIX TZ and the formatting on the
+//    real kernel (libc-completion plan) ──
+//
+// The host group proves the conversion against a glibc oracle; this
+// case proves that the SAME libc works in the guest: the epoch is a
+// Thursday, the broken-down fields are right, the leap year 2000 and
+// the non-leap year 2100 differ, mktime normalizes and round-trips,
+// timegm is the UTC twin, strftime formats, and the zone follows the
+// environment.  The instants are CONSTANTS — nothing here reads a wall
+// clock, except the last probe, which only checks that the clock the
+// desktop shows is a moving one.
+static void test_time_conversion(void)
+{
+    struct tm tm;
+    struct tm *p;
+    time_t t;
+
+    /* the epoch: 1970-01-01 was a Thursday */
+    t = (time_t)0;
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 70 && p->tm_mon == 0 && p->tm_mday == 1 &&
+           p->tm_hour == 0 && p->tm_min == 0 && p->tm_sec == 0 &&
+           p->tm_wday == 4 && p->tm_yday == 0,
+           "time epoch", "1970-01-01 is a Thursday");
+
+    /* one second before the epoch */
+    t = (time_t)-1;
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 69 && p->tm_mon == 11 && p->tm_mday == 31 &&
+           p->tm_hour == 23 && p->tm_min == 59 && p->tm_sec == 59,
+           "time before epoch", "1969-12-31 23:59:59");
+
+    /* 2000 is a leap year, 2100 is not */
+    t = (time_t)951782400;   /* 2000-02-29T00:00:00Z */
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_mon == 1 && p->tm_mday == 29 && p->tm_yday == 59,
+           "time leap 2000", "2000-02-29 is day 59");
+
+    t = (time_t)4107542400;  /* 2100-03-01T00:00:00Z */
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 200 && p->tm_mon == 2 && p->tm_mday == 1 &&
+           p->tm_yday == 59,
+           "time non-leap 2100", "2100-03-01 is day 59");
+
+    /* after the 32-bit boundary */
+    t = (time_t)2147483648;  /* 2038-01-19T03:14:08Z */
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 138 && p->tm_mon == 0 && p->tm_mday == 19 &&
+           p->tm_hour == 3 && p->tm_min == 14 && p->tm_sec == 8,
+           "time after 2038", "2038-01-19T03:14:08Z");
+
+    /* an instant that cannot be represented is EOVERFLOW, not a wrong
+     * answer */
+    t = (time_t)9223372036854775807LL;
+    memset(&tm, 0, sizeof tm);
+    errno = 0;
+    p = gmtime_r(&t, &tm);
+    CHECK3(p == NULL && errno == EOVERFLOW, "time overflow",
+           "EOVERFLOW for an unrepresentable instant");
+
+    /* mktime normalizes the broken-down fields.  The zone is pinned to
+     * UTC first, so the expectation does not depend on the boot
+     * environment. */
+    unsetenv("TZ");
+    tzset();
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = 2024 - 1900;
+    tm.tm_mon = 1;          /* February (29 days in 2024) */
+    tm.tm_mday = 32;        /* the 3rd of March */
+    tm.tm_hour = 12;
+    t = mktime(&tm);
+    CHECK3(t == (time_t)1709467200 && tm.tm_mon == 2 && tm.tm_mday == 3 &&
+           tm.tm_hour == 12,
+           "time mktime normalizes", "2024-02-32 is 2024-03-03");
+
+    /* timegm is the UTC twin */
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = 2024 - 1900;
+    tm.tm_mon = 2;
+    tm.tm_mday = 10;
+    tm.tm_hour = 7;
+    t = timegm(&tm);
+    CHECK3(t == (time_t)1710054000, "time timegm",
+           "2024-03-10T07:00:00Z");
+
+    /* strftime formats the broken-down time */
+    {
+        char buf[64];
+        size_t n;
+
+        memset(&tm, 0, sizeof tm);
+        tm.tm_year = 2021 - 1900;
+        tm.tm_mon = 0;
+        tm.tm_mday = 3;
+        tm.tm_hour = 4;
+        tm.tm_min = 5;
+        tm.tm_sec = 6;
+        tm.tm_wday = 0;
+        tm.tm_yday = 2;
+        n = strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tm);
+        CHECK3(n == 19 && strcmp(buf, "2021-01-03 04:05:06") == 0,
+               "time strftime", "2021-01-03 04:05:06");
+    }
+
+    /* the zone follows the environment */
+    setenv("TZ", "CST-8", 1);
+    t = (time_t)1710050400;  /* 2024-03-10T06:00:00Z */
+    memset(&tm, 0, sizeof tm);
+    p = localtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_hour == 14 && p->tm_isdst == 0,
+           "time zone", "CST-8 is UTC+8");
+
+    /* a malformed zone is UTC, not a leftover */
+    setenv("TZ", "not-a-zone", 1);
+    memset(&tm, 0, sizeof tm);
+    p = localtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_hour == 6, "time malformed zone",
+           "a malformed TZ is UTC");
+    unsetenv("TZ");
+
+    /* the wall clock the desktop shows is a MOVING one */
+    {
+        struct timespec ts1;
+        struct timespec ts2;
+
+        if (clock_gettime(CLOCK_REALTIME, &ts1) == 0) {
+            int64_t a = (int64_t)ts1.tv_sec * 1000000000LL + (int64_t)ts1.tv_nsec;
+            int64_t b;
+            int spins = 0;
+            do {
+                if (clock_gettime(CLOCK_REALTIME, &ts2) != 0) {
+                    break;
+                }
+                b = (int64_t)ts2.tv_sec * 1000000000LL + (int64_t)ts2.tv_nsec;
+            } while (b == a && ++spins < 1000);
+            CHECK3(b > a, "time wall clock moves",
+                   "CLOCK_REALTIME advances");
+        } else {
+            skip_case("no-clock-gettime");
+        }
+    }
+}
+
 // ── T11: long double precision across processes (libc-completion
 //    plan) ──
 //
@@ -4740,6 +4889,7 @@ static const test_case_t tests[] = {
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
     {"integer_conversions", "integer conversions", test_integer_conversions, 1, 0},
     {"float_precision",   "float precision",   test_float_precision,        1, 0},
+    {"time_conversion",   "time conversion",   test_time_conversion,        1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

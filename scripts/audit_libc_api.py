@@ -58,6 +58,10 @@ ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env", "shutdown", "stream")
 EXCLUDED_HEADERS: dict[str, str] = {
     "stdlib/strtox.h": "private integer-conversion core (T10)",
     "stdlib/floatscan.h": "private float scanner surface (T11)",
+    # Private time header (T13): the integer calendar core and the
+    # POSIX TZ surface.  They belong to the libc implementation, not to
+    # the public interface.
+    "time/calendar.h": "private calendar/TZ core (T13)",
     # Deferred by the T1 brief: regex.h keeps its current types and inline
     # implementation until T16 migrates it.  The api group therefore does
     # not check its self-containment / two-TU / C++ properties yet.
@@ -546,6 +550,9 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "gmtime",
         "localtime",
         "mktime",
+        "timegm",
+        "difftime",
+        "tzset",
         "clock",
         "strftime",
         "strptime",

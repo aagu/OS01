@@ -19,6 +19,7 @@ $(eval $(call register_host_test,test_libc_stdio_format,libc,protocol-or-legacy)
 $(eval $(call register_host_test,test_libc_integer,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_float_parse,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_scan,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_time,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -39,7 +40,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_stdio_format.elf \
     $(TEST_BLD)/test_libc_integer.elf \
     $(TEST_BLD)/test_libc_float_parse.elf \
-    $(TEST_BLD)/test_libc_scan.elf
+    $(TEST_BLD)/test_libc_scan.elf \
+    $(TEST_BLD)/test_libc_time.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -600,6 +602,97 @@ $(TEST_BLD)/test_libc_scan.elf: $(TEST_BLD)/test_libc_scan.o \
 
 .PHONY: test-libc-scan
 test-libc-scan: $(TEST_BLD)/test_libc_scan.elf $(TEST_BLD)/scanf_oracle
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: time group (T13) ──────────────────────────────
+# The calendar core (libc/time/calendar.c), the POSIX TZ parser
+# (libc/time/tz.c), the formatter (libc/time/strftime.c) and the public
+# entry points (libc/time/time.c + time_r.c) against the SHARED glibc
+# oracle: the oracle is a separate host binary built with NO OS01
+# include paths (it cannot help but run the host's gmtime/localtime/
+# mktime/strftime/asctime), and the test compares the rows of the
+# shared table byte for byte.
+#
+# Production objects: the REAL libc/time/*.c compiled as the user libc,
+# so their definitions shadow the host's.  Nothing else is linked: the
+# group needs no stream machinery, and the test provides the plain
+# `int errno` the libc declares (the host's errno is a TLS symbol).
+$(TEST_BLD)/time_oracle: $(TESTS_DIR)/hosttests/oracle/time_oracle.c \
+        $(TESTS_DIR)/hosttests/data/time_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -O0 -Wall -o $@ $<
+
+$(TEST_BLD)/user-time/calendar.o: $(LIBC_SRC)/time/calendar.c \
+        $(LIBC_SRC)/include/time/calendar.h
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-time/tz.o: $(LIBC_SRC)/time/tz.c \
+        $(LIBC_SRC)/include/time/calendar.h
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-time/strftime.o: $(LIBC_SRC)/time/strftime.c \
+        $(LIBC_SRC)/include/time/calendar.h
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-time/time.o: $(LIBC_SRC)/time/time.c \
+        $(LIBC_SRC)/include/time/calendar.h
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-time/time_r.o: $(LIBC_SRC)/time/time_r.c \
+        $(LIBC_SRC)/include/time/calendar.h
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+# strptime is part of the time module under test (it has to round-trip
+# with strftime), so the PRODUCTION parser is linked as well — and with
+# it the C-locale helpers it uses, so that no part of the round-trip
+# silently falls back to the host's libc.
+$(TEST_BLD)/user-time/strptime.o: $(LIBC_SRC)/time/strptime.c
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-time/ctype.o: $(LIBC_SRC)/ctype/ctype.c
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-time/string_extras.o: $(LIBC_SRC)/string/extras.c
+	@mkdir -p $(TEST_BLD)/user-time
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_time_runtime.o: $(TEST_MOCK)/libc_time_runtime.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) -I$(TEST_INC) -c $< -o $@
+
+TIME_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+    -I$(TESTS_DIR)/hosttests/data \
+    -D'TIME_ORACLE_PATH="$(TEST_BLD)/time_oracle"'
+
+$(TEST_BLD)/test_libc_time.o: $(TEST_CASES)/test_libc_time.c \
+        $(TESTS_DIR)/hosttests/data/time_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TIME_TEST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_libc_time.elf: $(TEST_BLD)/test_libc_time.o \
+        $(TEST_BLD)/user-time/calendar.o \
+        $(TEST_BLD)/user-time/tz.o \
+        $(TEST_BLD)/user-time/strftime.o \
+        $(TEST_BLD)/user-time/time.o \
+        $(TEST_BLD)/user-time/time_r.o \
+        $(TEST_BLD)/user-time/strptime.o \
+        $(TEST_BLD)/user-time/ctype.o \
+        $(TEST_BLD)/user-time/string_extras.o \
+        $(TEST_BLD)/libc_time_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-time
+test-libc-time: $(TEST_BLD)/test_libc_time.elf $(TEST_BLD)/time_oracle
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

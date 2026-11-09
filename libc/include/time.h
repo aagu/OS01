@@ -27,6 +27,9 @@ time_t time(time_t *t);
 struct tm *gmtime(const time_t *t);
 struct tm *localtime(const time_t *t);
 time_t mktime(struct tm *tm);
+time_t timegm(struct tm *tm);
+double difftime(time_t time1, time_t time0);
+void tzset(void);
 clock_t clock(void);
 
 size_t strftime(char *s, size_t maxsize, const char *format, const struct tm *tm);

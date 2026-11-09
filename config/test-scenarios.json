@@ -5291,6 +5291,37 @@
     "action": "unique",
     "reason": "Primary host unit test for the in-memory scanf core, checked row-by-row (count plus argument bytes) against an independently compiled glibc oracle process"
    }
+  },
+  {
+   "id": "libc.time.calendar_tz_format",
+   "component": "libc",
+   "behavior": "time",
+   "trigger": "host runner invokes test_libc_time.elf",
+   "assertions": [
+    "the calendar core agrees with the standalone glibc oracle on the whole epoch table: the broken-down fields of every instant, the weekday, the day of the year and the EOVERFLOW of an instant that is not representable",
+    "the POSIX TZ rules agree with the oracle for UTC0, a fixed western and eastern offset, a quoted zone name, the Jn / n / Mm.w.d rule spellings, the northern DST rules and the southern (year-crossing) ones",
+    "the zone follows the environment inside one process: an unset, an empty and a malformed TZ are UTC, a setenv is picked up without a tzset(), and a putenv string edited IN PLACE is picked up as well",
+    "mktime normalizes the broken-down fields (the month 13, the day 32, the hour 25), fills in the weekday and the day of the year, and a SUCCESSFUL mktime never sets EOVERFLOW even when the answer is (time_t)-1",
+    "the spring gap is normalized FORWARD and the autumn repeat is resolved to the STANDARD time when tm_isdst is negative, while an explicit tm_isdst selects the daylight or the standard offset",
+    "strftime implements the whole C locale conversion list (a/A/b/B/c/C/d/D/e/F/g/G/h/H/I/j/m/M/n/p/r/R/S/t/T/u/U/V/w/W/x/X/y/Y/z/Z/%%), the E and O modifiers select the basic form, an unknown conversion answers 0, and the buffer contract holds: maxsize 0, exactly too small and exactly enough",
+    "asctime/ctime keep the fixed 26-byte layout and fail with EOVERFLOW when the broken-down time cannot be laid out in it",
+    "strptime round-trips with strftime (the numeric and the month-name forms) and rejects an out-of-range field",
+    "clock() answers (clock_t)-1 with errno = EINVAL: OS01 has no process CPU time accounting, and the wall clock is not passed off as CPU time"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_time"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_time.c",
+    "selector": "test_libc_time",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the calendar core, the POSIX TZ rules and the time formatting, checked row-by-row against an independently compiled glibc oracle process"
+   }
   }
  ]
 }
