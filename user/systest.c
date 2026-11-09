@@ -4941,12 +4941,306 @@ typedef struct {
     int quick;           /* 1 = included by --quick */
 } test_case_t;
 
+/* ── T15: the directory descriptor and the sorted scan against the REAL
+ * guest filesystems ────────────────────────────────────────────────
+ *
+ * Two traps are avoided on purpose:
+ *
+ *  1. The kernel SORTS the entries by name BEFORE it writes them out
+ *     (vfs_getdents in kernel/fs/vfs.c sorts, then emits).  A guest
+ *     assertion "the scan comes back sorted" therefore proves NOTHING
+ *     — it would hold even if the comparator were never called.  The
+ *     comparator used here is by name LENGTH, which differs from the
+ *     name order, so it can only hold if scandir() really called it.
+ *
+ *  2. d_off in OS01 is the kernel's own sequence number (d_off = pos+1
+ *     in vfs_getdents), not a rich cookie.  The property under test is
+ *     the right one for a libc: the value is copied VERBATIM from the
+ *     kernel's record.  The check cross-reads the raw records with
+ *     getdents64(2) and compares them one by one with what readdir()
+ *     handed back.
+ */
+
+/* scandir() returns "." and ".." as well — the filter below drops them
+ * so that the count is the number of REAL entries. */
+static int dir_filter_files(const struct dirent *e)
+{
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+        return 0;
+    return 1;
+}
+
+/* By name LENGTH, then by name.  Deliberately NOT the name order. */
+static int dir_cmp_by_len(const struct dirent **a, const struct dirent **b)
+{
+    size_t la = strlen((*a)->d_name);
+    size_t lb = strlen((*b)->d_name);
+
+    if (la != lb)
+        return la < lb ? -1 : 1;
+    return strcmp((*a)->d_name, (*b)->d_name);
+}
+
+/* The raw kernel record: the name sits at offsetof(d_name) == 19, NOT
+ * at sizeof(struct linux_dirent64) == 24. */
+#define DIR_RAW_NAME_OFF 19
+
+/* Read the raw records of a directory and collect their d_off values. */
+static int dir_raw_offs(int fd, uint64_t *offs, int max, int *count)
+{
+    char buf[4096];
+    int64_t ret;
+    unsigned pos = 0;
+    int n = 0;
+
+    *count = 0;
+    ret = syscall(SYS_getdents64, (uint64_t)fd, (uint64_t)buf,
+                  (uint64_t)sizeof(buf));
+    if (ret <= 0)
+        return -1;
+    while (pos < (unsigned)ret) {
+        const char *rec = buf + pos;
+        unsigned short reclen;
+
+        if (pos + DIR_RAW_NAME_OFF > (unsigned)ret)
+            return -1;
+        reclen = *(const unsigned short *)(const void *)(rec + 16);
+        if (reclen == 0 || pos + reclen > (unsigned)ret)
+            return -1;
+        if (n < max)
+            offs[n++] = *(const uint64_t *)(const void *)(rec + 8);
+        pos += reclen;
+    }
+    *count = n;
+    return 0;
+}
+
+/* An independent sort oracle: a plain insertion sort over the names,
+ * so the alphasort result is checked against code that does not share
+ * the comparator under test. */
+static void dir_sort_names(char names[8][32], int n)
+{
+    int i, j;
+
+    for (i = 1; i < n; i++) {
+        char tmp[32];
+        strncpy(tmp, names[i], sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        j = i - 1;
+        while (j >= 0 && strcmp(names[j], tmp) > 0) {
+            strncpy(names[j + 1], names[j], sizeof(names[0]) - 1);
+            names[j + 1][sizeof(names[0]) - 1] = '\0';
+            j--;
+        }
+        strncpy(names[j + 1], tmp, sizeof(tmp) - 1);
+        names[j + 1][sizeof(tmp) - 1] = '\0';
+    }
+}
+
+static void test_dir_scan_vfs(void)
+{
+    int ok;
+    int fd;
+    int dupfd;
+    DIR *dir;
+    struct dirent *e;
+    struct dirent **list = NULL;
+    struct dirent **sorted = NULL;
+    char oracle[8][32];
+    uint64_t raw_offs[64];
+    uint64_t read_offs[64];
+    int raw_n = 0;
+    int read_n = 0;
+    int n;
+
+    /* ── (a) tmpfs: a directory with three files whose names have three
+     * DIFFERENT lengths, and whose name order differs from their length
+     * order ("aaa" < "b" < "zz" by name, but "b" < "zz" < "aaa" by
+     * length). ── */
+    mkdir("/tmp/dt", 0755);
+    fd = open("/tmp/dt/aaa", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0)
+        close(fd);
+    fd = open("/tmp/dt/b", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0)
+        close(fd);
+    fd = open("/tmp/dt/zz", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0)
+        close(fd);
+
+    dir = opendir("/tmp/dt");
+    ok = (dir != NULL);
+    CHECK3(ok, "dir tmpfs opendir", ok ? "/tmp/dt" : "opendir failed");
+    if (dir) {
+        int seen = 0;
+        int names_ok = 1;
+        while ((e = readdir(dir)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            seen++;
+            if (strcmp(e->d_name, "aaa") != 0 && strcmp(e->d_name, "b") != 0 &&
+                strcmp(e->d_name, "zz") != 0)
+                names_ok = 0;
+        }
+        ok = (seen == 3) && names_ok;
+        CHECK3(ok, "dir tmpfs entries", ok ? "3 entries" : "wrong entry set");
+        closedir(dir);
+    }
+
+    /* ── (b) ext2: the root filesystem is a real ext2, /bin lives on it ── */
+    dir = opendir("/bin");
+    ok = (dir != NULL);
+    CHECK3(ok, "dir ext2 opendir", ok ? "/bin" : "opendir failed");
+    if (dir) {
+        int found = 0;
+        while ((e = readdir(dir)) != NULL)
+            if (strcmp(e->d_name, "systest") == 0)
+                found = 1;
+        CHECK3(found, "dir ext2 entries", found ? "systest found" : "systest missing");
+        closedir(dir);
+    }
+
+    /* ── (c) the descriptor ownership: fdopendir() takes the descriptor
+     * over, closedir() closes it, and the ORIGINAL stays open ── */
+    fd = open("/tmp/dt", O_RDONLY);
+    ok = (fd >= 0);
+    CHECK3(ok, "dir open", ok ? "opened" : "open failed");
+    if (fd >= 0) {
+        dupfd = dup(fd);
+        ok = (dupfd >= 0);
+        CHECK3(ok, "dir dup", ok ? "dup ok" : "dup failed");
+        if (dupfd >= 0) {
+            dir = fdopendir(dupfd);
+            ok = (dir != NULL);
+            CHECK3(ok, "dir fdopendir", ok ? "taken over" : "failed");
+            if (dir) {
+                ok = (closedir(dir) == 0);
+                CHECK3(ok, "dir closedir", ok ? "closed" : "close failed");
+                /* the taken-over descriptor is REALLY closed now */
+                errno = 0;
+                ok = (fcntl(dupfd, F_GETFD) == -1) && (errno == EBADF);
+                CHECK3(ok, "dir closedir closes the descriptor",
+                       ok ? "EBADF" : "still open");
+                /* the ORIGINAL descriptor is untouched */
+                ok = (fcntl(fd, F_GETFD) == 0);
+                CHECK3(ok, "dir the original descriptor is untouched",
+                       ok ? "still open" : "was closed");
+                /* ... and it is still usable */
+                dir = fdopendir(fd);
+                ok = (dir != NULL);
+                CHECK3(ok, "dir the original descriptor is still usable",
+                       ok ? "usable" : "unusable");
+                if (dir)
+                    closedir(dir);
+            }
+        }
+    }
+
+    /* ── the FAILURE path: fdopendir() on a regular file answers
+     * ENOTDIR and does NOT close the caller's descriptor.  This is the
+     * contract the desktop's file view relies on: a failed opendir()
+     * keeps the old view instead of replacing it with an empty one. ── */
+    fd = open("/tmp/dt/zz", O_RDONLY);
+    ok = (fd >= 0);
+    if (ok) {
+        errno = 0;
+        dir = fdopendir(fd);
+        ok = (dir == NULL) && (errno == ENOTDIR);
+        CHECK3(ok, "dir fdopendir on a regular file", ok ? "ENOTDIR" : "wrong");
+        /* the descriptor is still the caller's */
+        ok = (fcntl(fd, F_GETFD) == 0);
+        CHECK3(ok, "dir the failed fdopendir keeps the descriptor",
+               ok ? "still open" : "was closed");
+        /* and opendir() on a regular file answers ENOTDIR as well */
+        errno = 0;
+        ok = (opendir("/tmp/dt/zz") == NULL) && (errno == ENOTDIR);
+        CHECK3(ok, "dir opendir on a regular file", ok ? "ENOTDIR" : "wrong");
+        close(fd);
+    }
+
+    /* ── (d) scandir() really calls the comparator: the order by LENGTH
+     * differs from the kernel's (name) order ── */
+    n = scandir("/tmp/dt", &list, dir_filter_files, dir_cmp_by_len);
+    ok = (n == 3);
+    CHECK3(ok, "dir scandir entry count", ok ? "3 entries" : "wrong count");
+    if (ok) {
+        ok = strcmp(list[0]->d_name, "b") == 0 &&
+             strcmp(list[1]->d_name, "zz") == 0 &&
+             strcmp(list[2]->d_name, "aaa") == 0;
+    }
+    CHECK3(ok, "dir scandir uses the comparator",
+           ok ? "length order" : "the comparator was not used");
+    if (list) {
+        int i;
+        for (i = 0; i < n; i++)
+            free(list[i]);
+        free(list);
+        list = NULL;
+    }
+
+    /* ── alphasort() against an INDEPENDENT oracle ── */
+    n = scandir("/tmp/dt", &sorted, dir_filter_files, alphasort);
+    ok = (n == 3);
+    CHECK3(ok, "dir alphasort entry count", ok ? "3 entries" : "wrong count");
+    if (ok) {
+        int i;
+        for (i = 0; i < n; i++) {
+            strncpy(oracle[i], sorted[i]->d_name, sizeof(oracle[0]) - 1);
+            oracle[i][sizeof(oracle[0]) - 1] = '\0';
+        }
+        dir_sort_names(oracle, n);
+        for (i = 0; i < n; i++)
+            if (strcmp(oracle[i], sorted[i]->d_name) != 0)
+                ok = 0;
+    }
+    CHECK3(ok, "dir alphasort matches the oracle",
+           ok ? "same order" : "different order");
+    if (sorted) {
+        int i;
+        for (i = 0; i < n; i++)
+            free(sorted[i]);
+        free(sorted);
+        sorted = NULL;
+    }
+
+    /* ── (e) d_off is copied VERBATIM from the kernel's record: the raw
+     * getdents64(2) records are compared with what readdir() returned ── */
+    fd = open("/tmp/dt", O_RDONLY);
+    ok = (fd >= 0) && (dir_raw_offs(fd, raw_offs, 64, &raw_n) == 0);
+    CHECK3(ok, "dir raw getdents64", ok ? "read" : "failed");
+    if (ok) {
+        dir = opendir("/tmp/dt");
+        while (dir && (e = readdir(dir)) != NULL && read_n < 64)
+            read_offs[read_n++] = e->d_off;
+        if (dir)
+            closedir(dir);
+        ok = (read_n == raw_n);
+        if (ok) {
+            int i;
+            for (i = 0; i < raw_n; i++)
+                if (raw_offs[i] != read_offs[i])
+                    ok = 0;
+        }
+        CHECK3(ok, "dir d_off is the kernel's own value",
+               ok ? "identical" : "d_off differs");
+    }
+    if (fd >= 0)
+        close(fd);
+
+    /* ── cleanup ── */
+    unlink("/tmp/dt/aaa");
+    unlink("/tmp/dt/b");
+    unlink("/tmp/dt/zz");
+    rmdir("/tmp/dt");
+}
+
 static const test_case_t tests[] = {
     {"startup_layout",    "startup layout",    test_startup_layout,          1, 0},
     {"startup_matrix",    "startup matrix",    test_startup_matrix,          1, 0},
     {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
     {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
     {"realpath_vfs",      "realpath vfs",      test_realpath_vfs,            1, 0},
+    {"dir_scan_vfs",      "dir scan vfs",      test_dir_scan_vfs,            1, 0},
     {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},

@@ -5367,7 +5367,8 @@
     "d_off is the kernel's cookie copied from the record, not a running entry counter",
     "scandir() honours the filter, keeps the kernel order without a comparator and sorts with alphasort(); an empty directory answers 0",
     "the entries scandir() returns are independent copies",
-    "every allocation failure releases the copies, the array and the directory stream and never writes a half-finished array into the caller's pointer"
+    "every allocation failure releases the copies, the array and the directory stream and never writes a half-finished array into the caller's pointer",
+    "in the guest: a real tmpfs and ext2 directory are enumerated, the descriptor fdopendir() takes over is really closed (fcntl(F_GETFD) answers EBADF) while the original stays open, scandir()'s comparator is proven to be called with a comparator that differs from the kernel's pre-sorted name order, and d_off is cross-checked against the raw getdents64(2) records"
    ],
    "failure_modes": [
     "assertion failure or exit-code mismatch in test_libc_dir"
@@ -5379,7 +5380,15 @@
     "selector": "test_libc_dir",
     "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
    },
-   "supporting": [],
+   "supporting": [
+    {
+     "layer": "qemu_e2e",
+     "source": "user/systest.c",
+     "selector": "dir_scan_vfs",
+     "evidence": "guest case dir_scan_vfs: real tmpfs (/tmp) and ext2 (/bin) enumeration, fdopendir()/closedir() ownership checked with fcntl(F_GETFD), scandir()'s comparator checked with a comparator that DIFFERS from the kernel's pre-sorted name order, alphasort() checked against an independent oracle, and d_off cross-checked against the raw getdents64(2) records",
+     "distinct_risk": "The host group fakes the directory, so it cannot show that the REAL kernel's records are accepted (the kernel writes reclen = round8(24 + namelen + 1) with the name at offset 19), that the descriptor is really closed in the guest, or that scandir()'s comparator is really called on kernel-pre-sorted entries. The guest case covers exactly those three risks."
+    }
+   ],
    "overlap_decision": {
     "action": "unique",
     "reason": "Primary host unit test for dirfd()/fdopendir()/scandir()/alphasort() and for the directory stream's record validation against a fake directory"
