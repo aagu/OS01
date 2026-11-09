@@ -17,7 +17,8 @@
  *   - the symbolic-link budget: 40 links resolve, the 41st answers ELOOP;
  *   - a path that does not fit answers ENAMETOOLONG;
  *   - resolved == NULL hands the caller a buffer IT owns;
- *   - ".." is popped LEXICALLY — the deliberate divergence from glibc;
+ *   - ".." is applied to the RESOLVED path (the link is followed first),
+ *     which is the answer glibc gives as well;
  *   - realpath() succeeding does NOT mean the kernel could open() the
  *     same path (the kernel follows 8 links in one resolution, the libc
  *     walks 40 one component at a time);
@@ -51,16 +52,27 @@
 /* The RED build links the pre-T14 state: realpath was an empty stub in
  * libc/stdlib/malloc.c that answered NULL, and execl/execlp/execle had
  * NO definition at all.  The stub is provided here so that the RED is a
- * BEHAVIOURAL failure and not a link error; the exec wrappers are
- * compiled out of the RED for the same reason. */
+ * BEHAVIOURAL failure and not a link error.
+ *
+ * Two RED transcripts are produced from it:
+ *   RED-1 (behavioural)  -DPATH_RED_STUB -DPATH_RED_NO_EXECL
+ *       The stub realpath is linked and the exec cases are compiled out:
+ *       every realpath case fails as an ASSERTION (never a crash).
+ *   RED-2 (link)         -DPATH_RED_STUB
+ *       The exec cases stay in and libc/unistd/execl.c is NOT linked:
+ *       the LINK itself fails with "undefined reference to execl".
+ */
 #ifdef PATH_RED_STUB
-#define HAVE_EXECL 0
 char *realpath(const char *path, char *resolved)
 {
     (void)path;
     (void)resolved;
     return NULL;
 }
+#endif
+
+#ifdef PATH_RED_NO_EXECL
+#define HAVE_EXECL 0
 #else
 #define HAVE_EXECL 1
 #endif
@@ -95,6 +107,13 @@ static void assert_path(const char *expected, const char *actual)
 static void fs_reset(void)
 {
     path_rt_reset();
+    /* The PATH must be ISOLATED: execvp() reads it through getenv(), and
+     * without this the exec cases would walk the HOST's PATH — which
+     * makes them machine-dependent and leaves the "an empty PATH segment
+     * means the current directory" rule untested.  Every exec case sets
+     * its own PATH; fs_reset() clears it so the cases cannot pollute
+     * each other. */
+    unsetenv("PATH");
     path_rt_set_cwd("/cwd");
     path_rt_add("/cwd", DIR, NULL);
     path_rt_add("/cwd/file", REG, NULL);
@@ -210,26 +229,32 @@ TEST_FUNC(test_realpath_symlink_budget_40_41)
     char buf[PATH_MAX];
     char link[64];
 
+    char target[64];
+
     fs_reset();
     /* A chain of 40 links: l0 -> l1 -> ... -> l39 -> file.
      * realpath() walks them ONE COMPONENT AT A TIME (an lstat per
      * component), so the kernel's own MAXSYMLINKS never applies here. */
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 39; i++) {
         snprintf(link, sizeof(link), "/cwd/l%d", i);
-        if (i + 1 < 40)
-            path_rt_add(link, LNK, "l1");
-        else
-            path_rt_add(link, LNK, "file");
+        snprintf(target, sizeof(target), "l%d", i + 1);
+        path_rt_add(link, LNK, target);
     }
-    /* every link in the chain points at "l1" relative to its own
-     * directory, so the chain is l0 -> l1 -> l1 -> ... (still a chain of
-     * 40 links to walk) */
+    path_rt_add("/cwd/l39", LNK, "file");
     assert_path("/cwd/file", realpath("/cwd/l0", buf));
 
     /* The 41st link exceeds the libc's budget: ELOOP. */
-    path_rt_add("/cwd/over", LNK, "l1");
-    assert_eq(NULL, realpath("/cwd/over", buf));
-    assert_eq(ELOOP, errno);
+    for (int i = 0; i < 40; i++) {
+        snprintf(link, sizeof(link), "/cwd/m%d", i);
+        snprintf(target, sizeof(target), "m%d", i + 1);
+        path_rt_add(link, LNK, target);
+    }
+    path_rt_add("/cwd/m40", LNK, "file");
+    {
+        char *r = realpath("/cwd/m0", buf);
+        assert_eq(0, r != NULL);
+        assert_eq(ELOOP, errno);
+    }
 }
 
 TEST_FUNC(test_realpath_path_too_long)
@@ -258,21 +283,23 @@ TEST_FUNC(test_realpath_resolved_null_is_caller_owned)
     free(out);
 }
 
-TEST_FUNC(test_realpath_dotdot_is_lexical)
+TEST_FUNC(test_realpath_dotdot_applies_to_the_resolved_path)
 {
     char buf[PATH_MAX];
 
     fs_reset();
-    /* "/cwd/par" is a symbolic link to "/other" — a DIRECTORY link.
-     * A PHYSICAL resolution of "/cwd/par/.." asks the kernel for the
-     * parent of the resolved inode, which is "/".  OS01 pops the last
-     * component LEXICALLY and answers "/cwd".  This is the documented
-     * divergence from glibc (which answers "/"), and this case pins the
-     * current behaviour so it cannot change unnoticed. */
+    /* "/cwd/par" is a symbolic link to the DIRECTORY "/other".  The link
+     * is RESOLVED BEFORE the ".." is applied, so the ".." pops the
+     * resolved target's last component and the answer is "/" — the
+     * parent of "/other".  This is the same answer glibc gives (it asks
+     * the kernel for the parent INODE of the resolved directory).
+     * (An earlier claim that OS01 popped ".." LEXICALLY was WRONG: the
+     * walk resolves each component's link as it goes, so the ".." sees
+     * the resolved path.) */
     path_rt_add("/cwd/par", LNK, "/other");
-    assert_path("/cwd", realpath("/cwd/par/..", buf));
-    /* the same path without the link is unaffected */
-    assert_path("/cwd", realpath("/cwd/..", buf));
+    assert_path("/", realpath("/cwd/par/..", buf));
+    /* and a plain ".." pops the resolved prefix's last component */
+    assert_path("/", realpath("/cwd/..", buf));
 }
 
 TEST_FUNC(test_realpath_success_is_not_open_success)
@@ -281,11 +308,15 @@ TEST_FUNC(test_realpath_success_is_not_open_success)
     char link[64];
     struct stat st;
 
+    char target[64];
+
     fs_reset();
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 11; i++) {
         snprintf(link, sizeof(link), "/cwd/k%d", i);
-        path_rt_add(link, LNK, "k1");
+        snprintf(target, sizeof(target), "k%d", i + 1);
+        path_rt_add(link, LNK, target);
     }
+    path_rt_add("/cwd/k11", LNK, "file");
     /* realpath() resolves the chain: it lstat()s ONE COMPONENT at a time,
      * so the kernel never has to follow 12 links in one resolution. */
     assert_path("/cwd/file", realpath("/cwd/k0", buf));
@@ -322,6 +353,7 @@ TEST_FUNC(test_execl_builds_argv)
 TEST_FUNC(test_execlp_searches_path)
 {
     fs_reset();
+    setenv("PATH", "/p1:/p2", 1);
     path_rt_set_exec_errno(ENOENT);
 
     (void)execlp("tool", "arg0", (char *)NULL);
@@ -337,6 +369,7 @@ TEST_FUNC(test_execlp_searches_path)
 TEST_FUNC(test_execvp_empty_path_segment_is_cwd)
 {
     fs_reset();
+    setenv("PATH", ":/bin:", 1);
     path_rt_set_exec_errno(ENOENT);
 
     /* PATH=":/bin:" — the FIRST segment is empty, so it means the
@@ -354,6 +387,7 @@ TEST_FUNC(test_execvp_empty_path_segment_is_cwd)
 TEST_FUNC(test_execvp_eacces_beats_enoent)
 {
     fs_reset();
+    setenv("PATH", "/p1:/p2", 1);
     path_rt_set_exec_errno(ENOENT);
     /* "/p2/tool" exists but is not executable */
     path_rt_set_exec_errno_for("/p2/tool", EACCES);
@@ -369,19 +403,23 @@ TEST_FUNC(test_execvp_eacces_beats_enoent)
 TEST_FUNC(test_execvp_enoexec_uses_bin_sh)
 {
     fs_reset();
+    setenv("PATH", "/p1:/p2", 1);
     path_rt_set_exec_errno(ENOENT);
     path_rt_set_exec_errno_for("/p1/tool", ENOEXEC);
 
     (void)execlp("tool", "arg0", "arg1", (char *)NULL);
 
-    /* the ENOEXEC candidate is re-run through /bin/sh */
+    /* the ENOEXEC candidate is re-run through /bin/sh IMMEDIATELY —
+     * the PATH search is NOT continued (glibc's behaviour) */
     assert_eq(2, path_rt_exec_count());
     assert_str_eq("/p1/tool", path_rt_exec_path(0));
     assert_str_eq("/bin/sh", path_rt_exec_path(1));
     assert_str_eq("/bin/sh", path_rt_exec_argv0(1));
+    /* the shell's argv is {"/bin/sh", <the file>, argv[1], …} — the
+     * ORIGINAL argv[0] is dropped, which is what glibc does */
     assert_str_eq("tool", path_rt_exec_argv(1, 1));
-    assert_str_eq("arg0", path_rt_exec_argv(1, 2));
-    assert_str_eq("arg1", path_rt_exec_argv(1, 3));
+    assert_str_eq("arg1", path_rt_exec_argv(1, 2));
+    assert_eq(NULL, path_rt_exec_argv(1, 3));
 }
 
 TEST_FUNC(test_execle_passes_explicit_envp)
@@ -410,6 +448,7 @@ TEST_FUNC(test_execle_passes_explicit_envp)
 TEST_FUNC(test_execvp_name_with_slash_skips_path)
 {
     fs_reset();
+    setenv("PATH", "/p1:/p2", 1);
     path_rt_set_exec_errno(ENOENT);
 
     /* a name that contains a '/' is NOT searched for in PATH */
@@ -433,7 +472,7 @@ TEST_ENTRY(test_realpath_missing_component),
 TEST_ENTRY(test_realpath_symlink_budget_40_41),
 TEST_ENTRY(test_realpath_path_too_long),
 TEST_ENTRY(test_realpath_resolved_null_is_caller_owned),
-TEST_ENTRY(test_realpath_dotdot_is_lexical),
+TEST_ENTRY(test_realpath_dotdot_applies_to_the_resolved_path),
 TEST_ENTRY(test_realpath_success_is_not_open_success),
 #if HAVE_EXECL
 TEST_ENTRY(test_execl_builds_argv),

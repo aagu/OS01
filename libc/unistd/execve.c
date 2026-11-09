@@ -46,7 +46,6 @@ int64_t execvp(const char *file, char *const argv[])
     size_t flen;
     int saved_errno = ENOENT;
     int saw_eacces = 0;
-    int saw_enoexec = 0;
 
     if (!file || !*file) {
         errno = ENOENT;
@@ -90,39 +89,40 @@ int64_t execvp(const char *file, char *const argv[])
             if (e == EACCES) {
                 saw_eacces = 1;
             } else if (e == ENOEXEC) {
-                saw_enoexec = 1;
+                /* The candidate exists but is not a binary executable:
+                 * run it through /bin/sh IMMEDIATELY, as POSIX and glibc
+                 * do — the PATH search is not continued. */
+                {
+                    size_t argc = 0;
+                    char **newargv;
+
+                    while (argv[argc] != NULL)
+                        argc++;
+                    /* "/bin/sh", the file name, the original argv[1..],
+                     * and the NULL — argc + 2 entries in all. */
+                    newargv = malloc((argc + 2) * sizeof(char *));
+                    if (newargv == NULL) {
+                        errno = ENOMEM;
+                        return -1;
+                    }
+                    newargv[0] = (char *)"/bin/sh";
+                    newargv[1] = (char *)file;
+                    for (size_t i = 1; i < argc; i++)
+                        newargv[i + 1] = argv[i];
+                    newargv[argc + 1] = NULL;
+
+                    {
+                        int64_t ret = execve("/bin/sh", newargv, environ);
+                        free(newargv);
+                        return ret;
+                    }
+                }
             } else if (e != ENOENT && e != ENOTDIR) {
                 saved_errno = e;
             }
 
             if (!colon) break;
             seg = colon + 1;
-        }
-    }
-
-    if (saw_enoexec) {
-        /* The file exists but is not a binary executable: run it with
-         * /bin/sh, as POSIX and glibc do. */
-        size_t n = 0;
-        char **newargv;
-
-        while (argv[n] != NULL)
-            n++;
-        newargv = malloc((n + 2) * sizeof(char *));
-        if (newargv == NULL) {
-            errno = ENOMEM;
-            return -1;
-        }
-        newargv[0] = (char *)"/bin/sh";
-        newargv[1] = (char *)file;
-        for (size_t i = 1; i <= n; i++)
-            newargv[i + 1] = argv[i];
-        newargv[n + 2] = NULL;
-
-        {
-            int64_t ret = execve("/bin/sh", newargv, environ);
-            free(newargv);
-            return ret;
         }
     }
 

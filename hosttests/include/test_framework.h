@@ -54,7 +54,15 @@ static test_stats_t __test_stats;
     const char *__se = (expected); \
     const char *__sa = (actual); \
     __test_stats.total++; \
-    if (strcmp(__se, __sa) != 0) { \
+    if (__se == NULL || __sa == NULL) { \
+        /* A NULL must be a clear ASSERTION FAILURE, never a crash: \
+         * strcmp(NULL, …) would segfault and take the whole suite \
+         * with it, hiding every later case. */ \
+        __test_stats.failed++; \
+        printf("  [FAIL] %s:%d: assert_str_eq(expected=%s, actual=%s)\n", \
+               __FILE__, __LINE__, \
+               __se ? __se : "(null)", __sa ? __sa : "(null)"); \
+    } else if (strcmp(__se, __sa) != 0) { \
         __test_stats.failed++; \
         printf("  [FAIL] %s:%d: assert_str_eq(expected=\"%s\", actual=\"%s\")\n", \
                __FILE__, __LINE__, __se, __sa); \

@@ -3022,6 +3022,68 @@ _test-libc-host-run-path:
 	@echo "  [test-libc-host] path"
 	$(call os01_submake,hosttests,test-libc-path $(OS01_SUBMAKE_ARGS))
 
+# The RED build of the path group (T14 evidence).  It is NOT part of
+# LIBC_HOST_CASES: a RED build must never be reachable through the
+# delivered-case namespace, and it is EXPECTED to fail — that failure is
+# the transcript.
+#
+# RED-1 (behavioural): the path group is built against the pre-T14
+#   realpath (an empty stub that answered NULL) — every realpath case
+#   fails as an ASSERTION.
+# RED-2 (link): the exec wrappers.  Before T14, execl/execlp/execle had
+#   NO definition in OS01's own libc archive, so a user program calling
+#   them failed to link.  The host's glibc defines them, so the hole is
+#   invisible in a host link — it is reproduced here against the real
+#   archive: the member T14 added is deleted from a copy of libc.a and
+#   a probe program is linked against the result.  A CONTROL link
+#   against the pristine archive must succeed, so the only difference
+#   between the two links is the exec wrappers.
+.PHONY: test-libc-path-red
+test-libc-path-red:
+	@echo "=== RED-1 (behaviour): realpath was a stub that answered NULL ==="
+	@set +e; \
+	  $(call os01_submake_cmd,hosttests,test-libc-path-red $(OS01_SUBMAKE_ARGS)); \
+	  rc_run=$$?; \
+	  echo "RED-1 exit code: $$rc_run"; \
+	  echo "=== RED-2 (link): execl/execlp/execle had NO definition before T14 ==="; \
+	  tmp=$$(mktemp -d); \
+	  cp $(SYSROOT)/usr/lib/libc.a $$tmp/libc.a || exit 1; \
+	  echo "--- the pre-T14 tree had no libc/unistd/execl.c at all:"; \
+	  git -C $(OS01_ROOT) ls-tree b7c33ba6 libc/unistd/ | \
+	    awk '{print $$4}' | grep -c '^execl\.c$$'; \
+	  echo "--- deleting the archive member that T14 added (execl.o):"; \
+	  $(LLVM_AR) d $$tmp/libc.a execl.o; \
+	  echo "--- execl/execlp/execle left in the archive (expected: none):"; \
+	  $(LLVM_NM) -P $$tmp/libc.a | \
+	    awk '$$1=="execl" || $$1=="execlp" || $$1=="execle"'; \
+	  printf '%s\n' '#include <unistd.h>' \
+	    'int main(void) { execl("/bin/sh", "sh", (char *)0); return 0; }' > $$tmp/probe.c; \
+	  $(EFFECTIVE_CC) --sysroot=$(SYSROOT) -ffreestanding -fno-pic -fno-pie \
+	    -I$(SYSROOT)/usr/include -c $$tmp/probe.c -o $$tmp/probe.o || exit 1; \
+	  echo "--- CONTROL: link the probe against the PRISTINE archive:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$(SYSROOT)/usr/lib -o $$tmp/probe_ctrl.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_ctrl=$$?; \
+	  echo "CONTROL exit code: $$rc_ctrl"; \
+	  echo "--- RED-2: link the probe against the archive WITHOUT execl.o:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$$tmp -o $$tmp/probe_red.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_link=$$?; \
+	  echo "RED-2 exit code: $$rc_link"; \
+	  rm -rf $$tmp; \
+	  if [ $$rc_run -eq 0 ]; then \
+	    echo "ERROR: the behavioural RED run passed"; exit 1; fi; \
+	  if [ $$rc_ctrl -ne 0 ]; then \
+	    echo "ERROR: the CONTROL link failed — the RED proves nothing"; exit 1; fi; \
+	  if [ $$rc_link -eq 0 ]; then \
+	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
+	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
+	  exit 1
+
 _test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
 	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"
 

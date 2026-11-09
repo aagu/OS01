@@ -766,3 +766,60 @@ test-libc-path: $(TEST_BLD)/test_libc_path.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout 60 $(TEST_BLD)/test_libc_path.elf
+
+# ── the RED build of the path group (T14 evidence) ───────────────────
+# The RED build links the PRE-T14 state, i.e. the commit that preceded
+# the T14 implementation (b7c33ba6): realpath was an empty stub that
+# answered NULL (it lived in libc/stdlib/malloc.c) and execl/execlp/
+# execle had NO definition anywhere in the tree.
+#
+# Two transcripts, both reproducible from this target:
+#   RED-1 (behavioural): the stub realpath is linked and the exec cases
+#     are compiled out, so every realpath case fails as an ASSERTION
+#     instead of crashing or failing to link.
+#   RED-2 (link): the exec cases stay in and libc/unistd/execl.c is NOT
+#     linked, so the link itself fails with "undefined reference to
+#     execl" — the proof that the wrappers had no definition before T14.
+#
+# The stub realpath lives in the test file itself (see the PATH_RED_STUB
+# block in hosttests/cases/test_libc_path.c) so that the RED state is
+# self-contained and does not need the pre-T14 malloc.c dragged in.
+$(TEST_BLD)/red/test_libc_path_red.o: $(TEST_CASES)/test_libc_path.c \
+        $(TEST_MOCK)/libc_path_runtime.h
+	@mkdir -p $(TEST_BLD)/red
+	$(HOST_CC) $(PATH_TEST_CFLAGS) -DPATH_RED_STUB -DPATH_RED_NO_EXECL \
+	    -c $< -o $@
+
+# The RED transcript of the path group: the behavioural RED.  The LINK
+# RED for the exec wrappers is NOT done here — the host's glibc defines
+# execl/execlp/execle, so a host link can never show the hole.  It is
+# reproduced against OS01's own libc archive by the root-level
+# `test-libc-path-red` target (mk/components/run.mk).
+.PHONY: test-libc-path-red
+test-libc-path-red: $(TEST_BLD)/red/test_libc_path_red.o \
+        $(TEST_BLD)/user-int/lstat.o \
+        $(TEST_BLD)/user-int/stat.o \
+        $(TEST_BLD)/user-int/readlink.o \
+        $(TEST_BLD)/user-int/getcwd.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(TEST_BLD)/libc_stream_runtime.o \
+        $(TEST_BLD)/libc_path_runtime.o
+	@echo "=== RED-1 (behaviour): realpath was a stub that answered NULL ==="
+	@set +e; \
+	  $(HOST_CC) -o $(TEST_BLD)/red/test_libc_path_red.elf \
+	    $(TEST_BLD)/red/test_libc_path_red.o \
+	    $(TEST_BLD)/user-int/lstat.o \
+	    $(TEST_BLD)/user-int/stat.o \
+	    $(TEST_BLD)/user-int/readlink.o \
+	    $(TEST_BLD)/user-int/getcwd.o \
+	    $(OS01_LIBC_STREAM_OBJS) \
+	    $(TEST_BLD)/libc_stream_runtime.o \
+	    $(TEST_BLD)/libc_path_runtime.o; \
+	  $(TEST_BLD)/red/test_libc_path_red.elf; \
+	  rc_run=$$?; \
+	  echo "RED-1 exit code: $$rc_run"; \
+	  if [ $$rc_run -eq 0 ]; then \
+	    echo "ERROR: the RED run passed — the RED state is not reproduced"; \
+	    exit 1; \
+	  fi; \
+	  exit 1

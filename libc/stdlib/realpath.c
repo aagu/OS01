@@ -23,12 +23,19 @@
  * back the resolved PATH as a string, so the userland walk above is what
  * produces the answer.
  *
- * KNOWN LIMITATION — ".." is popped LEXICALLY, not physically: if a parent
- * directory is itself a symbolic link, realpath() here returns the path
- * through that link, while a physical resolution would have followed it.
- * glibc resolves ".." physically (it asks the kernel for the parent of the
- * resolved inode).  The divergence is only observable with a ".." that
- * crosses a symbolic link.
+ * ".." applies to the RESOLVED prefix, not to the text of the input: the
+ * walk resolves each component's symbolic link as it goes, and the ".."
+ * then pops the last component of the path resolved SO FAR.  E.g.
+ * "/cwd/par/.." with "/cwd/par" a link to the directory "/other" answers
+ * "/" — the parent of "/other", not of "/cwd/par".  That is the answer
+ * glibc gives as well: glibc's realpath() walks the components the same
+ * way and pops the resolved prefix, so there is NO divergence here.
+ *
+ * (An earlier revision of this file claimed that the ".." was popped
+ * LEXICALLY and that this diverged from glibc.  That claim was WRONG:
+ * the link is resolved BEFORE the ".." is applied.  The pinned case is
+ * hosttests/cases/test_libc_path.c,
+ * test_realpath_dotdot_applies_to_the_resolved_path.)
  */
 #include <stdlib.h>
 #include <string.h>
@@ -209,9 +216,23 @@ char *realpath(const char *path, char *resolved)
                 /* Compose the new pending string: the target, then the
                  * components that were after the link. */
                 {
-                    const char *rest = slash ? slash + 1 : NULL;
+                    /* `rest` points INTO `pending`, and the composition
+                     * below overwrites `pending` — so the remainder is
+                     * copied out FIRST, or the copy would read the bytes
+                     * the first memcpy had just replaced. */
+                    char restbuf[PATH_MAX];
+                    const char *rest = NULL;
                     size_t tlen2 = strlen(target);
-                    size_t rlen = rest ? strlen(rest) : 0;
+                    size_t rlen = 0;
+
+                    if (slash != NULL) {
+                        rlen = strlen(slash + 1);
+                        if (rlen >= sizeof(restbuf))
+                            rlen = sizeof(restbuf) - 1;
+                        memcpy(restbuf, slash + 1, rlen);
+                        restbuf[rlen] = '\0';
+                        rest = restbuf;
+                    }
 
                     if (target[0] == '/') {
                         /* An absolute target restarts from the root. */

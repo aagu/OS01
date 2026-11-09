@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -3756,6 +3757,67 @@ static int env_probe_exit(char **av, int expect_code)
     return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == expect_code;
 }
 
+/* T14: realpath() against the REAL guest VFS.  The symbolic link is
+ * created with symlink(2), i.e. the link lives in the very filesystem
+ * the kernel resolves, so this exercises the real path walk (readlink
+ * on a real ext2 inode), not a mock.  The answers are compared with
+ * each other rather than with hardcoded strings, because the rootfs
+ * layout (and whether "/bin" is itself a link) is not part of the
+ * contract. */
+static void test_realpath_vfs(void)
+{
+    /* NOTE: no PATH_MAX here on purpose.  A user program is compiled with
+     * -ffreestanding, so __STDC_HOSTED__ is 0 and clang's own resource
+     * <limits.h> is used INSTEAD of OS01's libc/include/limits.h — the
+     * project's PATH_MAX is therefore not visible to user code (see the
+     * T14 report, "known gap").  realpath(path, NULL) hands the answer
+     * back malloc'd, so no caller buffer is needed at all. */
+    char *r;
+    char *r2;
+    int ok;
+
+    mkdir("/rptest", 0755);
+    symlink("/bin/systest", "/rptest/link");
+
+    r = realpath("/bin/systest", NULL);
+    ok = (r != NULL) && r[0] == '/';
+    CHECK3(ok, "realpath absolute", ok ? r : "not resolved");
+    free(r);
+
+    /* the link must resolve to the same answer as its target */
+    r = realpath("/bin/systest", NULL);
+    r2 = realpath("/rptest/link", NULL);
+    ok = (r != NULL) && (r2 != NULL) && strcmp(r, r2) == 0;
+    CHECK3(ok, "realpath symlink", ok ? r2 : "link not resolved");
+    free(r);
+    free(r2);
+
+    /* "." and ".." are applied to the RESOLVED prefix */
+    r = realpath("/bin/systest", NULL);
+    r2 = realpath("/bin/./systest", NULL);
+    ok = (r != NULL) && (r2 != NULL) && strcmp(r, r2) == 0;
+    CHECK3(ok, "realpath dot", ok ? r2 : "dot not normalised");
+    free(r);
+    free(r2);
+
+    r = realpath("/bin/systest", NULL);
+    r2 = realpath("/bin/../bin/systest", NULL);
+    ok = (r != NULL) && (r2 != NULL) && strcmp(r, r2) == 0;
+    CHECK3(ok, "realpath dotdot", ok ? r2 : "dotdot not normalised");
+    free(r);
+    free(r2);
+
+    /* a missing component answers ENOENT */
+    errno = 0;
+    r = realpath("/rptest/missing", NULL);
+    ok = (r == NULL) && errno == ENOENT;
+    CHECK3(ok, "realpath missing", ok ? "ENOENT" : "wrong answer");
+    free(r);
+
+    unlink("/rptest/link");
+    rmdir("/rptest");
+}
+
 static void test_environ_mutation(void)
 {
     extern char **environ;
@@ -4884,6 +4946,7 @@ static const test_case_t tests[] = {
     {"startup_matrix",    "startup matrix",    test_startup_matrix,          1, 0},
     {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
     {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
+    {"realpath_vfs",      "realpath vfs",      test_realpath_vfs,            1, 0},
     {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},

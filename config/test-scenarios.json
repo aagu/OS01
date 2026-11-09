@@ -5334,7 +5334,7 @@
     "a trailing '/' requires the final component to be a directory, else ENOTDIR",
     "the symbolic-link budget is 40: 40 links resolve and the 41st answers ELOOP",
     "a path that does not fit answers ENAMETOOLONG; resolved == NULL hands the caller a buffer it owns",
-    "'..' is popped LEXICALLY, so a '..' that crosses a symbolic link answers the path through the link (the documented divergence from glibc)",
+    "'..' applies to the RESOLVED path: the symbolic link is resolved first and the '..' then pops the resolved prefix, which is the answer glibc gives as well",
     "realpath() succeeding does NOT imply the kernel could open() the same path: the kernel follows 8 links in one resolution (MAXSYMLINKS) while the libc walks 40 one component at a time",
     "execl/execlp/execle build a NULL-terminated argv in the argument order and free it on the failure path",
     "execle() passes its EXPLICIT environment; an empty PATH segment means the current directory; EACCES takes priority over the other candidates' ENOENT; an ENOEXEC candidate is run through /bin/sh"
