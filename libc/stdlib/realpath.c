@@ -55,15 +55,28 @@ _Static_assert(PATH_MAX == 256, "PATH_MAX must match the kernel's VFS_NAME_MAX")
  * not fit in PATH_MAX bytes (the terminating NUL included). */
 static int rp_append(char *dst, size_t len, const char *comp, size_t clen)
 {
-    /* dst is "/" or a directory path with no trailing slash */
-    size_t need = len + 1 + clen + 1;   /* '/', the component, the NUL */
-    if (need > PATH_MAX) {
-        errno = ENAMETOOLONG;
-        return -1;
+    /* dst is "/" or a directory path with no trailing slash.  The root
+     * already ends in a '/', so the separator is not repeated there —
+     * otherwise the root would grow a "//" on every component. */
+    size_t pos = len;
+    size_t need;
+
+    if (len == 0 || dst[len - 1] != '/') {
+        need = len + 1 + clen + 1;       /* '/', the component, the NUL */
+        if (need > PATH_MAX) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        dst[pos++] = '/';
+    } else {
+        need = len + clen + 1;           /* the component, the NUL */
+        if (need > PATH_MAX) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
     }
-    dst[len] = '/';
-    memcpy(dst + len + 1, comp, clen);
-    dst[len + 1 + clen] = '\0';
+    memcpy(dst + pos, comp, clen);
+    dst[pos + clen] = '\0';
     return 0;
 }
 
@@ -155,7 +168,10 @@ char *realpath(const char *path, char *resolved)
             continue;
         }
 
-        /* Build the candidate and look at it. */
+        /* Build the candidate and look at it.  rp_append() expects its
+         * destination to ALREADY hold the prefix, so the resolved prefix
+         * is copied in first — cand is an uninitialised buffer. */
+        memcpy(cand, work, len + 1);
         if (rp_append(cand, len, comp, clen) != 0)
             return NULL;
 

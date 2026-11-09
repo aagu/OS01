@@ -166,8 +166,26 @@ int close(int fd)
 }
 
 /* ── The syscall boundary hook ────────────────────────────────────── */
+
+/* The weak extension point (see below).  It is declared here, next to
+ * the hook that consults it, so a group that wants it only has to
+ * define it. */
+extern int64_t host_test_syscall_ext(uint64_t nr, uint64_t arg1, uint64_t arg2,
+                                      uint64_t arg3) __attribute__((weak));
 int64_t host_test_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
+    /* A WEAK extension point: a group that needs OTHER syscalls — the
+     * path group needs lstat/readlink/getcwd/exec — provides
+     * host_test_syscall_ext().  It answers INT64_MIN for a syscall it
+     * does not handle, so the stream boundary runs exactly as before.
+     * The extension is weak and undefined in every other group, so they
+     * are unaffected. */
+    if (host_test_syscall_ext) {
+        int64_t ext = host_test_syscall_ext(nr, arg1, arg2, arg3);
+        if (ext != INT64_MIN)
+            return ext;
+    }
+
     switch (nr) {
     case 19:   /* OS01 SYS_fcntl — the libc's fcntl() wrapper is under
                 * test, so its syscall must reach a REAL descriptor

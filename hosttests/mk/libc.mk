@@ -18,6 +18,7 @@ $(eval $(call register_host_test,test_libc_line,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stdio_format,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_integer,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_float_parse,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_path,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_scan,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_time,libc,protocol-or-legacy))
 
@@ -40,6 +41,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_stdio_format.elf \
     $(TEST_BLD)/test_libc_integer.elf \
     $(TEST_BLD)/test_libc_float_parse.elf \
+    $(TEST_BLD)/test_libc_path.elf \
     $(TEST_BLD)/test_libc_scan.elf \
     $(TEST_BLD)/test_libc_time.elf
 
@@ -697,3 +699,70 @@ test-libc-time: $(TEST_BLD)/test_libc_time.elf $(TEST_BLD)/time_oracle
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
+
+# ── libc completion: path group (T14) ────────────────────────────────
+# realpath() and the variadic exec wrappers (execl/execlp/execle) plus
+# the execvp() PATH search, against a FAKE FILESYSTEM and a fake exec
+# boundary (hosttests/mock/libc_path_runtime.c).  The production sources
+# are the real ones: libc/stdlib/realpath.c, libc/unistd/execl.c,
+# libc/unistd/execve.c and the production lstat/readlink/stat/getcwd
+# wrappers — only the syscalls below them are replaced.
+$(TEST_BLD)/user-int/realpath.o: $(LIBC_SRC)/stdlib/realpath.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/execl.o: $(LIBC_SRC)/unistd/execl.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/execve.o: $(LIBC_SRC)/unistd/execve.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/lstat.o: $(LIBC_SRC)/sys/stat/lstat.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/stat.o: $(LIBC_SRC)/unistd/stat.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/readlink.o: $(LIBC_SRC)/unistd/readlink.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/getcwd.o: $(LIBC_SRC)/unistd/getcwd.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/libc_path_runtime.o: $(TEST_MOCK)/libc_path_runtime.c \
+        $(TEST_MOCK)/libc_path_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
+
+PATH_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+    -I$(TEST_MOCK)
+
+$(TEST_BLD)/test_libc_path.o: $(TEST_CASES)/test_libc_path.c \
+        $(TEST_MOCK)/libc_path_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PATH_TEST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_libc_path.elf: $(TEST_BLD)/test_libc_path.o \
+        $(TEST_BLD)/user-int/realpath.o \
+        $(TEST_BLD)/user-int/execl.o \
+        $(TEST_BLD)/user-int/execve.o \
+        $(TEST_BLD)/user-int/lstat.o \
+        $(TEST_BLD)/user-int/stat.o \
+        $(TEST_BLD)/user-int/readlink.o \
+        $(TEST_BLD)/user-int/getcwd.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(TEST_BLD)/libc_stream_runtime.o \
+        $(TEST_BLD)/libc_path_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-path
+test-libc-path: $(TEST_BLD)/test_libc_path.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout 60 $(TEST_BLD)/test_libc_path.elf

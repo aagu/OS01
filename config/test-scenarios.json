@@ -5322,6 +5322,37 @@
     "action": "unique",
     "reason": "Primary host unit test for the calendar core, the POSIX TZ rules and the time formatting, checked row-by-row against an independently compiled glibc oracle process"
    }
+  },
+  {
+   "id": "libc.path.realpath_exec",
+   "component": "libc",
+   "behavior": "path",
+   "trigger": "host runner invokes test_libc_path.elf",
+   "assertions": [
+    "realpath() resolves the relative, absolute, root, repeated-slash, '.' and '..' forms against the working directory and answers an absolute path",
+    "a relative and an absolute symbolic link are followed to their target; a dangling link answers ENOENT",
+    "a trailing '/' requires the final component to be a directory, else ENOTDIR",
+    "the symbolic-link budget is 40: 40 links resolve and the 41st answers ELOOP",
+    "a path that does not fit answers ENAMETOOLONG; resolved == NULL hands the caller a buffer it owns",
+    "'..' is popped LEXICALLY, so a '..' that crosses a symbolic link answers the path through the link (the documented divergence from glibc)",
+    "realpath() succeeding does NOT imply the kernel could open() the same path: the kernel follows 8 links in one resolution (MAXSYMLINKS) while the libc walks 40 one component at a time",
+    "execl/execlp/execle build a NULL-terminated argv in the argument order and free it on the failure path",
+    "execle() passes its EXPLICIT environment; an empty PATH segment means the current directory; EACCES takes priority over the other candidates' ENOENT; an ENOEXEC candidate is run through /bin/sh"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_path"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_path.c",
+    "selector": "test_libc_path",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for realpath() and the variadic exec wrappers against a fake filesystem and a fake exec boundary"
+   }
   }
  ]
 }
