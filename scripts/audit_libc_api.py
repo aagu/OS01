@@ -1278,6 +1278,42 @@ def list_manifest(profile: str = "x86_64-clang") -> int:
     return 0
 
 
+
+def check_path_max_matches_vfs_name_max(include_dir: str) -> list[str]:
+    """The libc's PUBLIC PATH_MAX must equal the kernel's VFS_NAME_MAX.
+
+    The userland path helpers (realpath) assume a whole path fits in one
+    VFS_NAME_MAX-sized buffer, NUL included, so the two limits may not
+    drift apart.  The kernel side carries the compile-time assert
+    (kernel/include/fs/vfs.h); this is the host-side half, so the tie is
+    checked on every header audit and not only when the kernel is built.
+    """
+    errs: list[str] = []
+
+    def macro(path: str, name: str) -> int | None:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            errs.append(f"cannot read {path}: {exc}")
+            return None
+        m = re.search(r"^\s*#\s*define\s+" + re.escape(name) +
+                      r"\s+(\d+)", text, re.MULTILINE)
+        if not m:
+            errs.append(f"{name} is not defined in {path}")
+            return None
+        return int(m.group(1))
+
+    path_max = macro(os.path.join(include_dir, "limits.h"), "PATH_MAX")
+    vfs_name_max = macro(os.path.join(REPO_ROOT, "kernel", "include", "fs",
+                                      "vfs.h"), "VFS_NAME_MAX")
+    if path_max is not None and vfs_name_max is not None \
+            and path_max != vfs_name_max:
+        errs.append(f"PATH_MAX ({path_max}) must equal the kernel's "
+                    f"VFS_NAME_MAX ({vfs_name_max})")
+    return errs
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--list", action="store_true",
@@ -1326,6 +1362,13 @@ def main(argv: list[str]) -> int:
             print("ERROR: the API manifest has drifted from the headers:",
                   file=sys.stderr)
             for e in drift:
+                print(f"  {e}", file=sys.stderr)
+            return 2
+        limit_errs = check_path_max_matches_vfs_name_max(args.include_dir)
+        if limit_errs:
+            print("ERROR: the public path limit does not match the kernel's:",
+                  file=sys.stderr)
+            for e in limit_errs:
                 print(f"  {e}", file=sys.stderr)
             return 2
         print(f"[audit] headers OK ({len(groups)} group(s), "

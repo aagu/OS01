@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>   // size_t
+#include <limits.h>  // PATH_MAX (the libc's public path limit)
 #include <stdbool.h>
 #include <block/blockdev.h>
 #include <sys/stat.h>
@@ -29,6 +30,15 @@ typedef enum {
 
 #define MAXSYMLINKS 8
 #define VFS_NAME_MAX 256
+
+/* The libc's PUBLIC path limit must equal the kernel's name limit — the
+ * userland path helpers (realpath) assume a whole path fits in one
+ * VFS_NAME_MAX-sized buffer, NUL included.  This is the compile-time half
+ * of that contract; scripts/audit_libc_api.py re-checks it from the two
+ * headers on the host side.  This round does NOT enlarge the kernel's
+ * capacity. */
+_Static_assert(PATH_MAX == VFS_NAME_MAX,
+               "PATH_MAX (libc/include/limits.h) must equal VFS_NAME_MAX");
 
 // ── Forward declarations ──────────────────────────────────
 struct vfs_node;

@@ -34,4 +34,12 @@
  * stdint.h, which includes this header BEFORE the typedef is reached. */
 #define SSIZE_MAX   __PTRDIFF_MAX__
 
+/* PATH_MAX — the maximum length of a path, INCLUDING the terminating NUL.
+ * It is deliberately equal to the kernel's VFS_NAME_MAX
+ * (kernel/include/fs/vfs.h); this round does NOT enlarge the kernel's
+ * capacity.  The two are tied together twice: by a compile-time assert on
+ * the kernel side (kernel/include/fs/vfs.h) and by the host audit in
+ * scripts/audit_libc_api.py, which reads both headers. */
+#define PATH_MAX    256
+
 #endif

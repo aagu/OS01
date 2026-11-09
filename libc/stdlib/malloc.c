@@ -473,11 +473,6 @@ void *realloc(void *ptr, size_t size) {
     return new;
 }
 
-char *realpath(const char *path, char *resolved) {
-    (void)path; (void)resolved;
-    return NULL;
-}
-
 #ifndef __is_libk
 // ── posix_memalign / aligned_alloc (T2) ─────────────────────────
 // User libc only.  The kernel side (libk) keeps the plain slab allocator
