@@ -26,8 +26,9 @@
  *     it with NULL;
  *   - execle() passes its EXPLICIT environment;
  *   - an EMPTY segment of PATH means the current directory;
- *   - an EMPTY PATH searches NO directory at all, while an UNSET PATH uses
- *     the implementation's default path (the two states are different);
+ *   - an EMPTY PATH is not the unset PATH: an empty PATH is read as one
+ *     EMPTY SEGMENT, i.e. the current directory, while an UNSET PATH uses
+ *     the implementation's default path;
  *   - EACCES takes priority over the ENOENT of the other candidates;
  *   - an ENOEXEC candidate is run through /bin/sh, and the shell is given
  *     the RESOLVED CANDIDATE PATH rather than the bare name — checked on
@@ -432,21 +433,23 @@ TEST_FUNC(test_execvp_enoexec_uses_bin_sh)
     assert_eq(NULL, path_rt_exec_argv(1, 3));
 }
 
-TEST_FUNC(test_execvp_empty_path_searches_nothing)
+TEST_FUNC(test_execvp_empty_path_searches_the_current_directory)
 {
     fs_reset();
-    /* An EMPTY PATH names NO directory: nothing is searched at all and the
-     * answer is ENOENT.  The empty PATH and the unset PATH are two
-     * DIFFERENT states — glibc searches the default path only when PATH is
-     * NOT SET. */
+    /* An EMPTY PATH is NOT the unset PATH: an empty PATH names no
+     * directory, and the scan reads it as ONE EMPTY SEGMENT — the
+     * CURRENT DIRECTORY.  This is glibc's answer, measured with a decoy
+     * in the current directory: with PATH="" glibc RUNS it. */
     setenv("PATH", "", 1);
     path_rt_set_exec_errno(ENOENT);
 
     errno = 0;
     (void)execlp("tool", "arg0", (char *)NULL);
 
+    /* Exactly one candidate: the current directory. */
+    assert_eq(1, path_rt_exec_count());
+    assert_str_eq("./tool", path_rt_exec_path(0));
     assert_eq(ENOENT, errno);
-    assert_eq(0, path_rt_exec_count());
 }
 
 TEST_FUNC(test_execvp_unset_path_uses_the_default_path)
@@ -625,7 +628,7 @@ TEST_ENTRY(test_execlp_searches_path),
 TEST_ENTRY(test_execvp_empty_path_segment_is_cwd),
 TEST_ENTRY(test_execvp_eacces_beats_enoent),
 TEST_ENTRY(test_execvp_enoexec_uses_bin_sh),
-TEST_ENTRY(test_execvp_empty_path_searches_nothing),
+TEST_ENTRY(test_execvp_empty_path_searches_the_current_directory),
 TEST_ENTRY(test_execvp_unset_path_uses_the_default_path),
 TEST_ENTRY(test_execvp_enoexec_runs_the_script_the_search_found),
 TEST_ENTRY(test_execle_passes_explicit_envp),

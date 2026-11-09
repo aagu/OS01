@@ -36,10 +36,10 @@ int64_t execv(const char *path, char *const argv[])
  *   - a name that contains a '/' is NOT searched for in PATH;
  *   - a PATH that is NOT SET uses the implementation's default path
  *     (OS01_EXECVP_DEFAULT_PATH);
- *   - an EMPTY PATH names NO directory at all: nothing is searched and
- *     the answer is ENOENT.  The empty PATH and the unset PATH are two
- *     DIFFERENT states — the old implementation merged them and searched
- *     /bin for an empty PATH, which is not what glibc does;
+ *   - an EMPTY PATH is NOT the unset PATH: it names no directory, and
+ *     the scan below reads it as ONE EMPTY SEGMENT, i.e. the CURRENT
+ *     DIRECTORY — the same answer glibc gives (measured: with PATH=""
+ *     a program that sits in the current directory IS found and run);
  *   - an EMPTY segment of PATH means the CURRENT DIRECTORY.  The old
  *     implementation used strtok_r(), which SKIPS empty segments, so
  *     "PATH=:/bin:" silently lost the current directory.  The scan below
@@ -79,12 +79,13 @@ int64_t execvp(const char *file, char *const argv[])
     if (path_env == NULL) {
         /* PATH is NOT SET: search the implementation's default path. */
         path_env = OS01_EXECVP_DEFAULT_PATH;
-    } else if (*path_env == '\0') {
-        /* PATH is SET but EMPTY: it names no directory, so NOTHING is
-         * searched and the answer is ENOENT (this is glibc's answer too). */
-        errno = ENOENT;
-        return -1;
     }
+    /* An EMPTY PATH is NOT the unset PATH.  An empty PATH names no
+     * directory, and the walk below reads it as ONE EMPTY SEGMENT, i.e.
+     * the CURRENT DIRECTORY — which is what glibc does: with PATH="" a
+     * program that sits in the current directory IS found and run.
+     * (The empty PATH and the unset PATH used to be merged here, and the
+     * merged answer — searching /bin — was wrong for both.) */
     flen = strlen(file);
 
     {
