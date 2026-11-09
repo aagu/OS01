@@ -18,6 +18,11 @@
  *     namelen + 1) and puts the name at offsetof(..., d_name) == 19; a
  *     Linux kernel uses round8(19 + namelen + 1) for reclen and the same
  *     offset for the name.
+ *   - the record set of a directory ALWAYS begins with the two dot
+ *     entries: tmpfs synthesises them (kernel/fs/tmpfs.c — index 0 is ".",
+ *     index 1 is "..") and ext2 stores them as ordinary entries.  The
+ *     mock emits them the same way, so the host group sees the same entry
+ *     set as the guest.
  *   - close(2) closes the descriptor.
  *
  * The mock injects the two failure modes the libc must survive:
@@ -78,7 +83,6 @@ struct dir_rt_fd {
     int      used;
     int      path_index;
     int      host_fd;      /* the real host descriptor handed out */
-    int      closed;
     unsigned pos;
 };
 
@@ -184,7 +188,6 @@ static int dir_rt_alloc_fd(int path_index)
             g_fds[i].used = 1;
             g_fds[i].path_index = path_index;
             g_fds[i].host_fd = fd;
-            g_fds[i].closed = 0;
             g_fds[i].pos = 0;
             return fd;
         }
@@ -204,18 +207,49 @@ static int dir_rt_fd_index(int fd)
 
 /* Fill the buffer with the records of one directory.  The record layout
  * follows the OS01 kernel: the name at offset 19, reclen =
- * round8(sizeof(struct linux_dirent64) + namelen + 1). */
+ * round8(sizeof(struct linux_dirent64) + namelen + 1).
+ *
+ * The two dot entries come FIRST, exactly as the real kernel emits them:
+ * tmpfs synthesises them (kernel/fs/tmpfs.c — index 0 is ".", index 1 is
+ * "..") and ext2 stores them as ordinary directory entries.  Their cookie
+ * is the kernel's own numbering (pos + 1), so they carry 1 and 2 while the
+ * registered entries keep the cookies the test gives them — the libc must
+ * copy whatever the record says, never a counter of its own.
+ *
+ * The REGISTERED entries are NOT sorted: the sort is what the libc is
+ * under test for, so the mock hands them over in registration order (the
+ * kernel sorts them by name before they reach the user). */
 static int64_t dir_rt_fill(struct dir_rt_fd *f, char *buf, unsigned count)
 {
     struct dir_rt_path *p = &g_paths[f->path_index];
     unsigned written = 0;
 
-    while (f->pos < (unsigned)p->nentries) {
-        struct dir_rt_entry *e = &p->entries[f->pos];
-        size_t namelen = strlen(e->name);
-        size_t reclen = (24 + namelen + 1 + 7) & ~(size_t)7;
-        char *rec = buf + written;
+    for (;;) {
+        const char *name;
+        unsigned char type;
+        uint64_t d_off;
+        size_t namelen;
+        size_t reclen;
+        char *rec;
         struct linux_dirent64 *d;
+
+        if (f->pos < 2) {
+            name = (f->pos == 0) ? "." : "..";
+            type = DT_DIR;
+            d_off = (uint64_t)f->pos + 1;
+        } else {
+            unsigned idx = f->pos - 2;
+
+            if (idx >= (unsigned)p->nentries)
+                break;
+            name = p->entries[idx].name;
+            type = p->entries[idx].type;
+            d_off = p->entries[idx].d_off;
+        }
+
+        namelen = strlen(name);
+        reclen = (24 + namelen + 1 + 7) & ~(size_t)7;
+        rec = buf + written;
 
         if (written + reclen > count)
             break;
@@ -223,8 +257,8 @@ static int64_t dir_rt_fill(struct dir_rt_fd *f, char *buf, unsigned count)
         memset(rec, 0, reclen);
         d = (struct linux_dirent64 *)(void *)rec;
         d->d_ino = 1000 + f->pos;
-        d->d_off = (int64_t)e->d_off;
-        d->d_type = e->type;
+        d->d_off = (int64_t)d_off;
+        d->d_type = type;
         d->d_reclen = (unsigned short)reclen;
 
         if (p->bad_mode == 2) {
@@ -232,7 +266,7 @@ static int64_t dir_rt_fill(struct dir_rt_fd *f, char *buf, unsigned count)
              * whole name area is filled with a non-NUL byte. */
             memset(rec + DIR_RT_NAME_OFFSET, 'x', reclen - DIR_RT_NAME_OFFSET);
         } else {
-            memcpy(rec + DIR_RT_NAME_OFFSET, e->name, namelen + 1);
+            memcpy(rec + DIR_RT_NAME_OFFSET, name, namelen + 1);
         }
 
         if (p->bad_mode == 1) {

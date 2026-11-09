@@ -831,6 +831,67 @@ test-libc-dir: $(TEST_BLD)/test_libc_dir.elf
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout 60 $(TEST_BLD)/test_libc_dir.elf
 
+# ── the RED build of the dir group (T15 evidence) ───────────────────
+# The RED build links the PRE-T15 state: dirent.c as it was at 7aeb732a
+# (the commit before the T15 implementation).  That implementation
+#   - does not check the type in opendir()  → a regular file opens;
+#   - does not set errno when the kernel fails → the errno stays;
+#   - does not copy the kernel's d_off      → the cookie is lost;
+# and the sorted-scan API (dirfd/fdopendir/scandir/alphasort) had NO
+# definition at all.
+#
+# RED-1 (behavioural): the new-API cases are compiled out (those symbols
+#   had no definition before T15, so the link would fail) and the OLD
+#   dirent.c is linked instead of the current one — the cases that cover
+#   the new behaviour then fail as ASSERTIONS.
+# RED-2 (link): the archive members T15 added are deleted from a copy of
+#   libc.a and a probe is linked against the result; the CONTROL link
+#   against the pristine archive must succeed.  That half is done by the
+#   root-level `test-libc-dir-red` target (mk/components/run.mk).
+#
+# The old dirent.c is taken from the tree itself, so the RED state is the
+# historical implementation and not a hand-written approximation.
+$(TEST_BLD)/red/dirent_pre_t15.c:
+	@mkdir -p $(TEST_BLD)/red
+	git show 7aeb732a:libc/unistd/dirent.c > $@
+
+$(TEST_BLD)/red/dirent_pre_t15.o: $(TEST_BLD)/red/dirent_pre_t15.c
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/red/test_libc_dir_red.o: $(TEST_CASES)/test_libc_dir.c \
+        $(TEST_MOCK)/libc_dir_runtime.h
+	@mkdir -p $(TEST_BLD)/red
+	$(HOST_CC) $(DIR_TEST_CFLAGS) -DDIR_RED_NO_NEW_API \
+	    -DDIR_RED_NO_BAD_RECORDS -c $< -o $@
+
+.PHONY: test-libc-dir-red
+test-libc-dir-red: $(TEST_BLD)/red/test_libc_dir_red.o \
+        $(TEST_BLD)/red/dirent_pre_t15.o
+	@echo "=== RED-1 (behaviour): the pre-T15 dirent.c has no type check, no errno and no d_off ==="
+	@set +e; \
+	  $(HOST_CC) -Wl,--wrap=malloc -Wl,--wrap=realloc -Wl,--wrap=free \
+	    -o $(TEST_BLD)/red/test_libc_dir_red.elf \
+	    $(TEST_BLD)/red/test_libc_dir_red.o \
+	    $(TEST_BLD)/red/dirent_pre_t15.o \
+	    $(TEST_BLD)/user-int/fstat.o \
+	    $(TEST_BLD)/user-int/open.o \
+	    $(OS01_LIBC_STREAM_OBJS) \
+	    $(TEST_BLD)/libc_stream_runtime.o \
+	    $(TEST_BLD)/libc_dir_runtime.o; \
+	  rc_link=$$?; \
+	  if [ $$rc_link -ne 0 ]; then \
+	    echo "ERROR: the RED build did not link — the behavioural RED would prove nothing"; \
+	    exit 1; \
+	  fi; \
+	  $(TEST_BLD)/red/test_libc_dir_red.elf; \
+	  rc_run=$$?; \
+	  echo "RED-1 exit code: $$rc_run"; \
+	  if [ $$rc_run -eq 0 ]; then \
+	    echo "ERROR: the RED run passed — the RED state is not reproduced"; \
+	    exit 1; \
+	  fi; \
+	  exit 1
+
 # ── the RED build of the path group (T14 evidence) ───────────────────
 # The RED build links the PRE-T14 state, i.e. the commit that preceded
 # the T14 implementation (b7c33ba6): realpath was an empty stub that

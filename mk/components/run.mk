@@ -3088,6 +3088,71 @@ test-libc-path-red:
 	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
 	  exit 1
 
+# The RED build of the dir group (T15 evidence).  It is NOT part of
+# LIBC_HOST_CASES: a RED build must never be reachable through the
+# delivered-case namespace, and it is EXPECTED to fail — that failure is
+# the transcript.
+#
+# RED-1 (behavioural): the dir group is built against the PRE-T15
+#   dirent.c (opendir() did not check the type, readdir() did not set
+#   errno and did not copy the kernel's d_off), with the new-API cases
+#   compiled out — those symbols had no definition before T15.
+# RED-2 (link): the directory descriptor and the sorted scan (dirfd,
+#   fdopendir, scandir, alphasort) had NO definition before T15, so a user
+#   program calling them failed to link.  The host's glibc defines them,
+#   so the hole is invisible in a host link — it is reproduced here against
+#   the real archive: the members T15 added are deleted from a copy of
+#   libc.a and a probe program is linked against the result.  A CONTROL
+#   link against the pristine archive must succeed, so the only difference
+#   between the two links is the T15 members.
+.PHONY: test-libc-dir-red
+test-libc-dir-red:
+	@echo "=== RED-1 (behaviour): the pre-T15 dirent.c has no type check, no errno and no d_off ==="
+	@set +e; \
+	  $(call os01_submake_cmd,hosttests,test-libc-dir-red $(OS01_SUBMAKE_ARGS)); \
+	  rc_run=$$?; \
+	  echo "RED-1 (sub-make) exit code: $$rc_run"; \
+	  echo "=== RED-2 (link): dirfd/fdopendir/scandir/alphasort had NO definition before T15 ==="; \
+	  tmp=$$(mktemp -d); \
+	  cp $(SYSROOT)/usr/lib/libc.a $$tmp/libc.a || exit 1; \
+	  echo "--- the pre-T15 tree had no libc/stdlib/scandir.c at all:"; \
+	  git -C $(OS01_ROOT) ls-tree 7aeb732a libc/stdlib/ | \
+	    awk '{print $$4}' | grep -c '^scandir\.c$$'; \
+	  echo "--- deleting the archive members that T15 added (scandir.o, dirent.o):"; \
+	  $(LLVM_AR) d $$tmp/libc.a scandir.o dirent.o; \
+	  echo "--- dirfd/fdopendir/scandir/alphasort left in the archive (expected: none):"; \
+	  $(LLVM_NM) -P $$tmp/libc.a | \
+	    awk '$$1=="dirfd" || $$1=="fdopendir" || $$1=="scandir" || $$1=="alphasort"'; \
+	  printf '%s\n' '#include <dirent.h>' \
+	    'int main(void) { DIR *d = 0; struct dirent **l = 0;' \
+	    '  (void)dirfd(d); (void)fdopendir(0);' \
+	    '  (void)scandir("/", &l, 0, alphasort); return 0; }' > $$tmp/probe.c; \
+	  $(EFFECTIVE_CC) --sysroot=$(SYSROOT) -ffreestanding -fno-pic -fno-pie \
+	    -I$(SYSROOT)/usr/include -c $$tmp/probe.c -o $$tmp/probe.o || exit 1; \
+	  echo "--- CONTROL: link the probe against the PRISTINE archive:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$(SYSROOT)/usr/lib -o $$tmp/probe_ctrl.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_ctrl=$$?; \
+	  echo "CONTROL exit code: $$rc_ctrl"; \
+	  echo "--- RED-2: link the probe against the archive WITHOUT the T15 members:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$$tmp -o $$tmp/probe_red.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_link=$$?; \
+	  echo "RED-2 exit code: $$rc_link"; \
+	  rm -rf $$tmp; \
+	  if [ $$rc_run -eq 0 ]; then \
+	    echo "ERROR: the behavioural RED run passed"; exit 1; fi; \
+	  if [ $$rc_ctrl -ne 0 ]; then \
+	    echo "ERROR: the CONTROL link failed — the RED proves nothing"; exit 1; fi; \
+	  if [ $$rc_link -eq 0 ]; then \
+	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
+	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
+	  exit 1
+
 _test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
 	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"
 
