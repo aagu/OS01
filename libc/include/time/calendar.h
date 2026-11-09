@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * libc/include/time/calendar.h — the PRIVATE time core (libc-completion
  * plan T13).
@@ -128,5 +132,9 @@ const struct __os01_tzinfo *__os01_tz(void);
 /* The offset (seconds EAST of UTC) in effect at the given instant, and
  * the DST flag that goes with it (`*isdst` may be NULL). */
 int __os01_tz_offset(int64_t seconds, int *isdst);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _TIME_CALENDAR_H */

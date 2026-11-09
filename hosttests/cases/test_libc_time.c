@@ -1113,5 +1113,5 @@ TEST_LIST_END
 int main(void)
 {
     RUN_ALL_TESTS();
-    return 0;
+    return __test_stats.failed > 0 ? 1 : 0;
 }
