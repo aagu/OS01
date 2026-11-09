@@ -30,26 +30,48 @@
 #include <stdlib.h>
 #include <stdlib/strtox.h>
 
-struct __strtox_result __strtox(const char *nptr, int base,
-                                uintmax_t max_pos, uintmax_t max_neg)
+/* The shared core (T10), extended with a SCAN LIMIT (T12).
+ *
+ * `limit` (when not NULL) is the EXCLUSIVE end of the region the scan
+ * may look at: the field-width-limited conversions of scanf need a
+ * number that stops at the width instead of running to the end of the
+ * digit run.  With limit == NULL the behaviour is exactly the T10
+ * behaviour (an unbounded scan up to the terminating NUL).
+ *
+ * The limit also bounds the whitespace skip, the sign and the "0x"
+ * prefix probe, so a width-limited field can never read past its own
+ * end. */
+struct __strtox_result __strtox_limit(const char *nptr, int base,
+                                       uintmax_t max_pos, uintmax_t max_neg,
+                                       const char *limit)
 {
     struct __strtox_result r = { 0, nptr, 0, 0, 0 };
     const char *s = nptr;
 
-    while (isspace((unsigned char)*s)) s++;
+/* the end of the scanned region: the limit (exclusive) or the NUL */
+#define STRTOX_END(p) (((limit) && (p) >= (limit)) || *(p) == '\0')
 
-    if (*s == '-') { r.neg = 1; s++; }
-    else if (*s == '+') s++;
+    while (!STRTOX_END(s) && isspace((unsigned char)*s)) s++;
+
+    if (!STRTOX_END(s)) {
+        if (*s == '-') { r.neg = 1; s++; }
+        else if (*s == '+') s++;
+    }
 
     /* Base detection with the POSIX "0x" commit rule: the leading 0
      * counts as a digit of an octal/auto parse even when the "0x" is
      * incomplete ("0xg" parses as "0" ending at 'x'). */
-    if ((base == 0 || base == 16) && *s == '0' &&
+    if ((base == 0 || base == 16) && !STRTOX_END(s) && *s == '0' &&
         (s[1] == 'x' || s[1] == 'X')) {
-        int d = (s[2] >= '0' && s[2] <= '9') ? s[2] - '0'
-              : (s[2] >= 'a' && s[2] <= 'f') ? s[2] - 'a' + 10
-              : (s[2] >= 'A' && s[2] <= 'F') ? s[2] - 'A' + 10
-              : -1;
+        int d = -1;
+        /* the digit behind the "0x" only counts when it lies inside the
+         * scanned region (s[2] is always inside the string: s[1] is an
+         * 'x', so the NUL terminates it at the latest) */
+        if ((!limit || s + 2 < limit) && s[2] != '\0') {
+            if (s[2] >= '0' && s[2] <= '9') d = s[2] - '0';
+            else if (s[2] >= 'a' && s[2] <= 'f') d = s[2] - 'a' + 10;
+            else if (s[2] >= 'A' && s[2] <= 'F') d = s[2] - 'A' + 10;
+        }
         if (d >= 0 && d < 16) {
             s += 2;
             base = 16;
@@ -58,7 +80,7 @@ struct __strtox_result __strtox(const char *nptr, int base,
         } else {
             base = 16;      /* explicit 16: the bare "0" is a digit */
         }
-    } else if (base == 0 && *s == '0') {
+    } else if (base == 0 && !STRTOX_END(s) && *s == '0') {
         base = 8;
     } else if (base == 0) {
         base = 10;
@@ -68,7 +90,7 @@ struct __strtox_result __strtox(const char *nptr, int base,
     uintmax_t cutoff = cap / (uintmax_t)base;
     uintmax_t cutlim = cap % (uintmax_t)base;
 
-    while (*s) {
+    while (!STRTOX_END(s)) {
         int d;
         char c = *s;
         if (c >= '0' && c <= '9')
@@ -92,8 +114,17 @@ struct __strtox_result __strtox(const char *nptr, int base,
         s++;
     }
 
+#undef STRTOX_END
+
     r.end = s;
     return r;
+}
+
+/* The unbounded spelling: the T10 contract, unchanged. */
+struct __strtox_result __strtox(const char *nptr, int base,
+                                uintmax_t max_pos, uintmax_t max_neg)
+{
+    return __strtox_limit(nptr, base, max_pos, max_neg, NULL);
 }
 
 /* The wrapper boilerplate: validate the base, run the core, publish

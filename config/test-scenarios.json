@@ -5263,6 +5263,34 @@
     "action": "unique",
     "reason": "Primary host unit test for the vendored musl floatscan, checked bit-for-bit against an independently compiled glibc oracle process"
    }
+  },
+  {
+   "id": "libc.stdio.scan_parse",
+   "component": "libc",
+   "behavior": "stdio",
+   "trigger": "host runner invokes test_libc_scan.elf",
+   "assertions": [
+    "the in-memory scanf core agrees with the standalone glibc oracle on the whole scan table: the conversion count AND the raw bytes of every argument slot (the conversion decides how many bytes are written, so a wrong store type, a wrongly NUL-terminated %3c or a suppressed conversion that wrongly consumed a va_arg all show up)",
+    "every length modifier stores into its own type: %hhd/%hd/%d/%ld/%lld/%jd/%zu/%td and the unsigned spellings, plus %Lf into a long double and %f into a float",
+    "the field width limits the scanned input (%2d%d splits \"12345\" into 12 and 345), the leading whitespace is not counted against the width, a width of 0 means no limit, and the width never includes the terminating NUL of a %s / %[ field",
+    "%n stores the number of characters consumed so far without counting as a conversion, and a suppressed conversion consumes no va_arg at all",
+    "an empty or whitespace-only input answers EOF, a first-character mismatch answers 0, %c does not skip whitespace and does not NUL-terminate, and the scan sets honour the negation, the leading ']' and the ranges",
+    "an unsupported conversion or an illegal length-modifier combination terminates the scan explicitly and consumes no further argument"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_scan"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_scan.c",
+    "selector": "test_libc_scan",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the in-memory scanf core, checked row-by-row (count plus argument bytes) against an independently compiled glibc oracle process"
+   }
   }
  ]
 }

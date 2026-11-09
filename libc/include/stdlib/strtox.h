@@ -41,6 +41,17 @@ struct __strtox_result {
 struct __strtox_result __strtox(const char *nptr, int base,
                                 uintmax_t max_pos, uintmax_t max_neg);
 
+/* The BOUNDED spelling (T12): the scan stops at `limit` (exclusive) as
+ * well as at the terminating NUL.  It exists for the field-width
+ * limited conversions of scanf, whose number must stop at the width
+ * instead of running to the end of the digit run.  `limit` bounds the
+ * whitespace skip, the sign and the "0x" prefix probe too, so a bounded
+ * field never reads past its own end.  limit == NULL is exactly
+ * __strtox(). */
+struct __strtox_result __strtox_limit(const char *nptr, int base,
+                                       uintmax_t max_pos, uintmax_t max_neg,
+                                       const char *limit);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

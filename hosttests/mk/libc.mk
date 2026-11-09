@@ -18,6 +18,7 @@ $(eval $(call register_host_test,test_libc_line,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_stdio_format,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_integer,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_float_parse,libc,protocol-or-legacy))
+$(eval $(call register_host_test,test_libc_scan,libc,protocol-or-legacy))
 
 TEST_BINS += \
     $(TEST_BLD)/test_libc_string.elf \
@@ -37,7 +38,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_libc_line.elf \
     $(TEST_BLD)/test_libc_stdio_format.elf \
     $(TEST_BLD)/test_libc_integer.elf \
-    $(TEST_BLD)/test_libc_float_parse.elf
+    $(TEST_BLD)/test_libc_float_parse.elf \
+    $(TEST_BLD)/test_libc_scan.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c
@@ -542,6 +544,62 @@ $(TEST_BLD)/test_libc_float_parse.elf: $(TEST_BLD)/test_libc_float_parse.o \
 
 .PHONY: test-libc-float-parse
 test-libc-float-parse: $(TEST_BLD)/test_libc_float_parse.elf $(TEST_BLD)/floatscan_oracle
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
+# ── libc completion: scan group (T12) ────────────────────────────
+# The in-memory scanf core (libc/stdio/vsscanf.c + libc/stdio/sscanf.c)
+# against the SHARED glibc oracle: the oracle is a separate host binary
+# built with NO OS01 include paths (it cannot help but run the host's
+# sscanf), and the test compares the CONVERSION COUNT plus the raw
+# bytes of every argument slot — the conversion decides how many bytes
+# are written, so a wrong store type, a wrongly NUL-terminated %3c or
+# a suppressed conversion that wrongly consumed a va_arg all show up.
+# Production objects: the REAL libc/stdio/sscanf.c + vsscanf.c
+# (compiled as the user libc, so their definitions shadow the host's),
+# plus the T10 integer core (the bounded __strtox_limit) and the T11
+# float scanner that the float conversions use.
+$(TEST_BLD)/scanf_oracle: $(TESTS_DIR)/hosttests/oracle/scanf_oracle.c \
+        $(TESTS_DIR)/hosttests/data/scan_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -O0 -Wall -o $@ $<
+
+$(TEST_BLD)/user-int/vsscanf.o: $(LIBC_SRC)/stdio/vsscanf.c \
+        $(LIBC_SRC)/include/stdlib/strtox.h \
+        $(LIBC_SRC)/include/stdlib/floatscan.h
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/user-int/sscanf.o: $(LIBC_SRC)/stdio/sscanf.c
+	@mkdir -p $(TEST_BLD)/user-int
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+# -Wno-format: the test deliberately feeds the scanner invalid and
+# edge-case format strings ("%Ld", "%q", "%0d") that the compiler's
+# format checker rightly complains about.
+SCAN_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+    -I$(TESTS_DIR)/hosttests/data \
+    -Wno-format \
+    -D'SCANF_ORACLE_PATH="$(TEST_BLD)/scanf_oracle"'
+
+$(TEST_BLD)/test_libc_scan.o: $(TEST_CASES)/test_libc_scan.c \
+        $(TESTS_DIR)/hosttests/data/scan_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCAN_TEST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_libc_scan.elf: $(TEST_BLD)/test_libc_scan.o \
+        $(TEST_BLD)/user-int/vsscanf.o \
+        $(TEST_BLD)/user-int/sscanf.o \
+        $(TEST_BLD)/user-int/strtol.o \
+        $(TEST_BLD)/user-int/floatscan.o \
+        $(OS01_LIBC_STREAM_OBJS) \
+        $(TEST_BLD)/libc_stream_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-libc-scan
+test-libc-scan: $(TEST_BLD)/test_libc_scan.elf $(TEST_BLD)/scanf_oracle
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \

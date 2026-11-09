@@ -71,7 +71,16 @@ int puts(const char*);
 int vsprintf(char * buf,const char *fmt, va_list args);
 int sprintf(char *buf, const char *fmt, ...);
 int snprintf(char *buf, size_t size, const char *fmt, ...);
+/* ── In-memory scanning (T12) ─────────────────────────────────────
+ *
+ * sscanf reads from a string; vsscanf is the core and takes the
+ * va_list directly.  Both understand the field width, the length
+ * modifiers (hh h l ll j z t L), the assignment-suppressing '*', the
+ * %n count and the %[ scan sets.  The return value is the number of
+ * ASSIGNED conversions (EOF when the input fails before the first
+ * conversion completes, 0 on a matching failure). */
 int sscanf(const char *str, const char *fmt, ...);
+int vsscanf(const char *str, const char *fmt, va_list ap);
 int skip_atoi(const char **s);
 int dprintf(int fd, const char *fmt, ...);
 int vdprintf(int fd, const char *fmt, va_list ap);

@@ -1714,13 +1714,11 @@ static void test_proc_maps(void)
 
         char perm[5];
         // Parse first 6 columns (skip inode): addr-end perms off dev ino.
-        // NOTE: OS01 libc sscanf has no %lx/%4s (length/width) support, so
-        // parse hex into 32-bit temps (all user map addresses are < 4GB).
-        unsigned int s32, e32;
-        int fields = sscanf(line, "%x-%x %s %*x %*s %*x",
-                            &s32, &e32, perm);
-        start = s32;
-        end = e32;
+        // The map addresses are 64 bit and the permission field is four
+        // characters wide, so this needs the length modifier and the
+        // field width of the scanf core (T12).
+        int fields = sscanf(line, "%lx-%lx %4s %*x %*s %*x",
+                            &start, &end, perm);
         if (fields >= 3 && perm[0] != '\0')
             lines++;
 
@@ -3240,7 +3238,8 @@ static void test_42_getdents_dt_lnk(void)
 
 // ── 43-53: 用户态栈 canary / AT_RANDOM（spec 2026-09-17-user-stack-canary）──
 
-/* hex nibble（libc sscanf 只有 %d/%s/%c/%x/%u，无 %lx——手工解析） */
+/* hex nibble（canary_dump 的 "GUARD %016lx" 是严格的定宽十六进制字段，
+ * 用手写解析可以同时检查"恰好 16 位"这个格式约束） */
 static int hexval(int c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -4349,9 +4348,9 @@ static void test_protected_ranges(void)
                 char *nl = strchr(q, '\n');
                 if (nl) { *nl = '\0'; q = nl + 1; }
                 else    { q = line + strlen(line); }
-                unsigned int s32, e32;
-                if (sscanf(line, "%x-%x", &s32, &e32) >= 1) {
-                    if (s32 == 0x400000UL) has_image = 1;
+                unsigned long s64, e64;
+                if (sscanf(line, "%lx-%lx", &s64, &e64) >= 1) {
+                    if (s64 == 0x400000UL) has_image = 1;
                 }
                 if (strstr(line, "[heap]")) has_heap = 1;
             }

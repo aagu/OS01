@@ -2957,7 +2957,7 @@ test-irq-capacity:
 # exist yet.  Each completion task appends its case to the delivered list
 # and adds the matching _test-libc-host-run-<case> rule.
 LIBC_HOST_CASES := api alloc env shutdown stream append io line format integer float scan time path dir regex
-LIBC_HOST_DELIVERED_CASES := api alloc env shutdown stream append io line format integer float
+LIBC_HOST_DELIVERED_CASES := api alloc env shutdown stream append io line format integer float scan
 
 .PHONY: test-libc-host _test-libc-host-run-all
 # Every delivered case's run target is phony, derived from the delivered list
@@ -3009,6 +3009,10 @@ _test-libc-host-run-integer:
 _test-libc-host-run-float:
 	@echo "  [test-libc-host] float"
 	$(call os01_submake,hosttests,test-libc-float-parse $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-scan:
+	@echo "  [test-libc-host] scan"
+	$(call os01_submake,hosttests,test-libc-scan $(OS01_SUBMAKE_ARGS))
 
 _test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
 	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"

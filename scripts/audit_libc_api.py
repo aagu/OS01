@@ -318,6 +318,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "sprintf",
         "snprintf",
         "sscanf",
+        "vsscanf",
         "skip_atoi",
         "dprintf",
         "feof",
