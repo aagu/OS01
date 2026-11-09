@@ -39,10 +39,40 @@
  */
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
 #include <errno.h>
 #include <limits.h>
+
+/* The user-space implementation needs the path syscalls.  <unistd.h> and
+ * <sys/stat.h> pull in <sys/syscall.h>, which carries x86_64 inline asm and
+ * cannot be compiled into the aarch64 kernel-side library, so they are
+ * included for the USER libc only. */
+#ifndef __is_libk
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
+#ifdef __is_libk
+
+/* The kernel-side library (libk) keeps the HISTORICAL surface: the symbol
+ * is exported, but it is the empty shell that has always been there — it
+ * answers NULL.  T14 moved that shell out of malloc.c and replaced it with
+ * the real user-space implementation; keeping the shell here
+ *
+ *   - preserves the frozen libk surface on BOTH profiles (the audit's
+ *     "libk lost an already-supported export" check stays meaningful), and
+ *   - keeps the kernel archive free of an object that would issue USER
+ *     syscalls from ring 0 if the kernel ever referenced it.
+ *
+ * The aarch64 libk subset lists this file explicitly for exactly this
+ * reason (see libc/Makefile). */
+char *realpath(const char *path, char *resolved)
+{
+    (void)path;
+    (void)resolved;
+    return NULL;
+}
+
+#else
 
 #ifndef PATH_MAX
 #define PATH_MAX 256
@@ -287,3 +317,5 @@ char *realpath(const char *path, char *resolved)
         return out;
     }
 }
+
+#endif /* !__is_libk */
