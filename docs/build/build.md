@@ -556,6 +556,21 @@ api alloc env shutdown stream append io line format integer float scan time path
 | CASE | 内容 | 交付任务 |
 | --- | --- | --- |
 | `api` | 公开头契约：每个公开头自包含、跨 TU 只有一份定义、C++ 消费者拿到 C linkage；同时链接 `os01_` 前缀的生产对象 | T1 |
+| `alloc` | 分配器的溢出检查与对齐分配：`calloc`/`reallocarray` 的乘法溢出、`posix_memalign`/`aligned_alloc` 的参数检查 | T2 |
+| `env` | 单一环境变量表与逐项归属：`setenv`/`unsetenv`/`putenv`/`clearenv` 的可见性、借用语义与失败原子性 | T3 |
+| `shutdown` | `shutdown(2)` 接真实 `SYS_shutdown`：参数转发、errno 映射、非法的 `how` 报 `EINVAL` | T4 |
+| `stream` | 流状态机：`feof`/`ferror`/`clearerr`/`ungetc`（含 unlocked 版）与标准流生命周期 | T5 |
+| `append` | 内核真实 `O_APPEND` 的原子追加（跨独立 fd 与共享 fd） | T6 |
+| `io` | `fopen`/`fdopen`/`fclose`/`fread`/`fwrite` 与真实 `fcntl`、完整项 IO、close 错误 | T7 |
+| `line` | 字符与行接口：`fgetc`/`getc`/`putc`/`fileno`/`fgets`/`getdelim`/`getline`（含 unlocked 版） | T8 |
+| `format` | `dprintf`/`vdprintf`/`asprintf` 与 `fseek`/`fseeko`/`ftell`/`ftello`/`rewind`/`freopen` | T9 |
+| `integer` | 整数转换：`strtol`/`strtoul`/`strtoll`/`strtoimax`/`strtoumax` 的范围、负号、endptr 与进制 | T10 |
+| `float` | 浮点转换：`strtod`/`strtof`/`strtold` 按目标精度的舍入、特殊值与范围错误 | T11 |
+| `scan` | `sscanf`/`vsscanf`：字段宽度、长度修饰符、`%n` 与扫描集 | T12 |
+| `time` | 日历换算与 POSIX TZ：`gmtime`/`localtime` 及 `_r`、`mktime`、`strftime`、`strptime`、`ctime`/`asctime` | T13 |
+| `path` | `realpath` 与 `exec` 家族：`execl`/`execlp`/`execle`/`execvp` 的参数、环境与 PATH 搜索 | T14 |
+| `dir` | `opendir`/`readdir`/`closedir`/`dirfd`/`fdopendir`/`scandir`/`alphasort`：fd 归属、条目复制与排序 | T15 |
+| `regex` | POSIX 正则引擎 | **未交付**（2026-11-09 用户决定本期不实现，命令按"已登记未交付"失败） |
 
 行为约定：
 

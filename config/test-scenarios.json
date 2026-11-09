@@ -5393,6 +5393,189 @@
     "action": "unique",
     "reason": "Primary host unit test for dirfd()/fdopendir()/scandir()/alphasort() and for the directory stream's record validation against a fake directory"
    }
+  },
+  {
+   "id": "libc.api.header_contract",
+   "component": "libc",
+   "behavior": "api",
+   "trigger": "host runner invokes test_libc_api.elf",
+   "assertions": [
+    "every public libc header compiles on its own: the header declares everything it uses, so a single-translation-unit consumer never fails on a missing include",
+    "two translation units that include the same header link together: the header has exactly one definition and no duplicate symbol",
+    "a C++ consumer sees the declarations with C linkage and links against the production C symbol",
+    "the binary calls the REAL production objects under the os01_ prefix: os01_strlen/os01_strcmp/os01_memcmp cannot resolve to the host libc's same-named implementation",
+    "the regex.h stub baseline is recorded as-is: the inline stub still reports a match for a non-matching input (the POSIX regex engine is out of scope for this cycle, so this case documents the known limitation instead of asserting the final behaviour)"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_api",
+    "a probe that cannot be compiled or linked is reported per probe, not as a batch failure"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_api.c",
+    "selector": "test_libc_api",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "contract",
+     "source": "scripts/audit_libc_api.py",
+     "selector": "audit_libc_api",
+     "evidence": "the header audit passes for every enabled group (EXIT_0) and the archive audit finds every declared symbol defined exactly once in libc.a (and the libk subset in libk.a)",
+     "distinct_risk": "The host group compiles probes against the headers, so it can see a declaration that does not match the headers but NOT a symbol that is exported twice or missing from the archive. The audit script reads libc.a and libk.a itself and covers exactly that risk."
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the public header contract (self-contained headers, two translation units, C++ linkage) and for the production-object prefix; the archive-side symbol audit is the supporting contract check"
+   }
+  },
+  {
+   "id": "libc.stdlib.alloc_contracts",
+   "component": "libc",
+   "behavior": "stdlib",
+   "trigger": "host runner invokes test_libc_alloc.elf",
+   "assertions": [
+    "calloc refuses a request whose element count times element size wraps around: the answer is NULL with errno = ENOMEM",
+    "malloc refuses a request whose rounded size plus the block header wraps around, and reports a heap that cannot grow",
+    "a failing reallocarray leaves the old block byte-for-byte intact and the old block stays freeable",
+    "an aligned block is a real block: it is aligned, it survives realloc with its content, it does not disturb its neighbours and it is freed in any order",
+    "posix_memalign with a bad alignment is EINVAL, and neither the output pointer nor errno changes",
+    "aligned_alloc with a size that is not a multiple of the alignment is EINVAL",
+    "a stress run over many heap tiles keeps the block bookkeeping consistent"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_alloc"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_alloc.c",
+    "selector": "test_libc_alloc",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "qemu_e2e",
+     "source": "user/systest.c",
+     "selector": "55_libc_alloc",
+     "evidence": "guest case 55_libc_alloc: malloc alignment, calloc zeroing, the calloc and reallocarray overflow answers (ENOMEM), the realloc content, posix_memalign and aligned_alloc including the C11 size rule (EINVAL)",
+     "distinct_risk": "The host group drives the allocator over a MOCKED brk heap with a failure-injection ledger, so it can show the arithmetic but not the real heap growth. The guest case covers exactly that: the same production allocator over the real kernel brk, with the overflow checks answering ENOMEM and an aligned block surviving a real process lifetime."
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the allocator's overflow, alignment and failure-atomicity contracts against a mocked heap"
+   }
+  },
+  {
+   "id": "libc.stdlib.env_ownership",
+   "component": "libc",
+   "behavior": "stdlib",
+   "trigger": "host runner invokes test_libc_environ.elf",
+   "assertions": [
+    "a variable set with setenv() is visible to getenv() right away and appears in the public environ array",
+    "overwrite=0 keeps the old value, overwrite=1 replaces it, unsetenv() removes it, and removing a variable that is not there is not an error",
+    "the inherited entries survive a mutation",
+    "putenv() borrows the caller's string: the libc sees the change and never frees it",
+    "an empty name, a name with '=' and a NULL value are EINVAL, and the environment is untouched",
+    "unsetenv() removes EVERY entry with that name, not just the first one",
+    "40 variables and a 1024 byte value survive",
+    "clearenv() empties the environment without freeing the inherited block, and the environment can be built again afterwards",
+    "a failed allocation leaves the environment and the old value exactly as they were"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_environ"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_environ.c",
+    "selector": "test_libc_environ",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "qemu_e2e",
+     "source": "user/systest.c",
+     "selector": "56_libc_env",
+     "evidence": "guest case 56_libc_env: setenv/getenv, the overwrite, the borrowed putenv string, unsetenv, and the table reaching a child through fork + execve (the startup probe answers exit 21)",
+     "distinct_risk": "The host group replaces the allocator with a ledger so it can force an allocation failure, but it cannot show that the environment survives a REAL fork + execve into a new process image, nor that the crt0 inherited block is not freed illegally on the way. The guest case covers exactly those two risks."
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the single environment table: visibility, ownership (copy vs borrow), the invalid-name contract and failure atomicity"
+   }
+  },
+  {
+   "id": "libc.unistd.shutdown_syscall",
+   "component": "libc",
+   "behavior": "unistd",
+   "trigger": "host runner invokes test_libc_shutdown.elf",
+   "assertions": [
+    "the wrapper issues SYS_shutdown exactly once, with the descriptor and the `how` it was given",
+    "a kernel error becomes -1 with errno set to the negated kernel code (EBADF)",
+    "an invalid `how` is EINVAL and NO syscall is issued: the kernel maps every `how` it does not know to 'neither direction' and would accept it silently, so the POSIX check belongs in the wrapper"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_shutdown"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_shutdown.c",
+    "selector": "test_libc_shutdown",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "qemu_e2e",
+     "source": "user/nettest.c",
+     "selector": "shutdown",
+     "evidence": "guest nettest case 'shutdown': shutdown(fd, SHUT_WR) reaches the kernel and the peer observes the half-closed write side",
+     "distinct_risk": "The host group replaces the syscall boundary with a recording hook, so it can only show WHICH syscall number and arguments the wrapper issues. It cannot show that the kernel really performs the half-close or that the peer sees the end of the stream. The nettest case covers exactly that."
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the shutdown(2) wrapper: the syscall is really issued, the errno mapping and the POSIX `how` check"
+   }
+  },
+  {
+   "id": "libc.stdio.stream_state",
+   "component": "libc",
+   "behavior": "stdio",
+   "trigger": "host runner invokes test_libc_stream_state.elf",
+   "assertions": [
+    "the EOF indicator is sticky: a read that reaches end-of-file sets it and it STAYS set until clearerr() (or a successful ungetc()) clears it",
+    "an I/O failure sets the ERROR indicator and leaves the EOF indicator alone: an error is not an end-of-file",
+    "exactly ONE byte may be pushed back, EOF is not a valid pushback character, and a successful ungetc clears the EOF indicator",
+    "clearerr() drops the EOF indicator AND the error indicator",
+    "each of the four properties is checked on a REGISTERED stream and on a STANDARD stream, because the standard streams have to behave exactly like any other stream",
+    "closing a standard stream really closes its descriptor, and a registered stream whose descriptor happens to be 0, 1 or 2 is not mistaken for the corresponding sentinel",
+    "an invalid or closed handle is rejected, the registry enforces its cap and reuses a freed slot",
+    "a write failure sets the error indicator, and the formatted output goes through the stream state"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_stream_state"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_stream_state.c",
+    "selector": "test_libc_stream_state",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "qemu_e2e",
+     "source": "user/systest.c",
+     "selector": "57_libc_stdio",
+     "evidence": "guest case 57_libc_stdio: fopen mode parsing on a real file, complete-item fwrite, fflush, the fseek/ftell family, fgets, getline, the EOF/error indicators and the 'a' mode appending instead of truncating",
+     "distinct_risk": "The host group fakes the descriptor boundary (read/write/close) and the stream registry, so it cannot show that the mode parser reaches a REAL file of the guest filesystem, that the seek family reports the REAL file offsets, or that the 'a' mode really appends instead of truncating. The guest case covers exactly those risks."
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test for the stream state machine (EOF/error indicators, the one-byte pushback, clearerr, the registry cap and the standard streams) against a faked descriptor boundary"
+   }
   }
  ]
 }

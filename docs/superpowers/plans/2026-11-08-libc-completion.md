@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 覆盖本次扫描答复中除 glob 外的 libc 补全和语义修复，消除已声明无定义、假成功和调用方绕过代码，并提供真实生产对象与 QEMU 证据。
+**Goal:** 覆盖本次扫描答复中**除 glob 与 POSIX 正则外**的 libc 补全和语义修复，消除已声明无定义、假成功和调用方绕过代码，并提供真实生产对象与 QEMU 证据。
 
 **Architecture:** 保留 OS01 libc、syscall ABI 和双架构 libk 构建边界。先建立分配、环境、FILE 和数值转换公共能力，再增加薄包装和目录/匹配算法；复杂浮点和正则算法局部移植，逐组验收。
 
@@ -33,6 +33,15 @@
 
 按用户最新要求，glob/globfree 及仅为其增加的 fnmatch 改造暂不覆盖，不进入本轮 API 清单、测试选择器或完成条件。
 
+**2026-11-09 用户决定：POSIX 正则引擎（`regcomp`/`regexec`/`regerror`/`regfree`）本期同样不实现。**
+因此 T16 整体推迟到后续周期：本期不移植 TRE，`libc/include/regex.h` 保持 T1 的**内联桩**
+（`regex_t` 就是 `int`，`regcomp()` 恒返回 0，`regexec()` 恒返回 0=REG_NOMATCH），它不是
+"声明无定义"，但确实是**假成功**的一部分 —— 这一限制记入 T17 的文档与验收报告。
+`LIBC_CASE=regex` 仍保留在 case 名单里（**已登记、未交付**）：它不是拼写错误，而是
+"这一组在本期不存在"，报错信息因此是 "registered but not delivered" 而不是 "unknown
+LIBC_CASE"；`qemutests/test_host_build_contract.py` 也用它做"已登记未交付必须硬失败"的
+对照。
+
 | 上轮建议 | 任务 | 完成条件 |
 |---|---|---|
 | calloc 溢出、malloc 元数据边界、reallocarray、posix_memalign、aligned_alloc | T2 | 旧块不丢、对齐结果可 free/realloc、libk 无退化 |
@@ -48,7 +57,7 @@
 | gmtime/localtime 及 _r、mktime、strftime、ctime/asctime 及 _r | T13 | UTC/POSIX TZ、C locale 格式、桌面调用正常 |
 | realpath | T14 | 逐组件解析，符号链接和错误路径 |
 | scandir/alphasort/dirfd/fdopendir | T15 | fd 所有权、条目复制、排序、清理 |
-| regcomp/regexec/regerror/regfree | T16 | C locale BRE/ERE，禁止永远匹配成功 |
+| regcomp/regexec/regerror/regfree | T16（**本期不做**，推迟到后续周期） | C locale BRE/ERE，禁止永远匹配成功 |
 | execl/execlp/execle、execvp 空 PATH 段等 | T14 | 参数/环境传递和搜索错误正确 |
 | 头文件、构建、BusyBox、host/QEMU/ARM 回归、文档 | T1/T17 及各任务 | 符号、行为、消费者三层验收 |
 
@@ -248,7 +257,13 @@
 - [ ] 运行 `make PROFILE=x86_64-clang test-libc-host LIBC_CASE=dir`；QEMU 在 tmpfs/ext2 上验证枚举、fd 关闭和排序；回归桌面 Files 保留旧视图的错误处理。
 - [ ] 提交 `feat(libc): add directory descriptor and sorted scan APIs`。
 
-### T16：真实 POSIX 正则实现
+### T16：真实 POSIX 正则实现（**本期不做** —— 2026-11-09 用户决定，与 glob 一并不实现）
+
+> 本节保留原文，供后续周期直接执行。**本期（2026-11-09）不实施**：不移植 TRE，
+> 不新增 `libc/regex/`，不加 `regex` host 组，不做 `LIBC_CASE=regex`。
+> `libc/include/regex.h` 保持 T1 的内联桩，`scripts/audit_libc_api.py` 里该头的
+> 排除理由随之改为"本期范围外"。本期相关的**唯一**动作是：T17 的文档与验收报告
+> 必须把"正则仍是内联桩、regcomp 恒成功、regexec 恒不匹配"记为已知限制。
 
 **Files:** 新增 `libc/regex/{regcomp,regexec,regerror,regfree,tre-mem}.c` 和实际需要的上游内部单元；新增 `libc/include/regex/{tre,compat}.h`；修改 `libc/include/regex.h`、`libc/Makefile`、T11 的第三方 manifest/许可；新增 `hosttests/cases/test_libc_regex.c`。
 
@@ -264,7 +279,7 @@
 
 **Files:** 扩展 `user/systest.c`、`user/nettest.c`、现有桌面测试、`qemutests/run_test.py`、`qemutests/test_run_test_harness.py`；修改 `hosttests/mk/libc.mk`、`mk/components/{user,run}.mk`、`config/test-scenarios.json`、`docs/build/build.md`；新增 `docs/libc/libc.md`、`docs/superpowers/reports/2026-11-08-libc-completion-validation.md`。固定复用 systest，不创建独立 probe。
 
-**Interfaces:** 最终 api 审计启用覆盖表全部组；在 user/systest.c 的 tests[] 增加 required=1、quick=0 的用例 55_libc_alloc、56_libc_env、57_libc_stdio、58_libc_integer、59_libc_float、60_libc_scan、61_libc_time、62_libc_path_exec、63_libc_dir、64_libc_regex、65_libc_append（实施时先查 ID 未占用）；全部复用现有 START/SELECT/BEGIN/PASS/FAIL/END protocol v1。每模块任务在自身 GREEN 阶段填入所属 case，本任务聚合；CASE 选择不能通过过滤遗漏必测用例。
+**Interfaces:** 最终 api 审计启用覆盖表全部组；在 user/systest.c 的 tests[] 增加 required=1、quick=0 的用例 55_libc_alloc、56_libc_env、57_libc_stdio、58_libc_integer、59_libc_float、60_libc_scan、61_libc_time、62_libc_path_exec、63_libc_dir、65_libc_append（实施时先查 ID 未占用；**64_libc_regex 本期不做**，ID 保留不用）；全部复用现有 START/SELECT/BEGIN/PASS/FAIL/END protocol v1。每模块任务在自身 GREEN 阶段填入所属 case，本任务聚合；CASE 选择不能通过过滤遗漏必测用例。
 
 - [ ] 完成 `api` 清单：全部声明、archive 定义恰一份、真实目标静态链接、无宿主/未满足内部符号；检查 BusyBox HAVE_GETLINE 生效及无私有源改动；所有头通过独立 C/C++ TU 编译。
 - [ ] 移除已被修复的 gfx fgets、systest scanf 绕过代码；桌面时钟/date/Files 以及 BusyBox 文件/网络路径必须调用真实库能力。grep/sed 只有当前 config 启用时才作为附加消费者，不能靠临时启用 applet 代替直接 API 测试。
@@ -276,7 +291,8 @@
 
 ## 计划自检
 
-- 覆盖：上轮建议除 glob 外全部映射到覆盖表；glob 及其 fnmatch 支撑改造按用户要求暂不覆盖；附带修复只限必要依赖和错误语义。
+- 覆盖：上轮建议除 **glob 与 POSIX 正则**外全部映射到覆盖表；glob 及其 fnmatch 支撑改造、
+  以及 POSIX 正则引擎（T16），均按用户要求本期暂不覆盖；附带修复只限必要依赖和错误语义。
 - 类型：FILE 统一私有化、clearerr 为 void、fseeko/ftello 使用 off_t、regex 捕获偏移可表示 -1；exec 保持当前 OS01 返回类型兼容。
 - 依赖：环境先于 TZ/PATH，流状态先于字符/定位接口，整数/浮点先于 scanf；无循环。
 - 证据：host 重命名生产符号 + 独立 oracle + archive link + 目标行为；没有把宿主或 shell 自带实现算成 libc 完成。

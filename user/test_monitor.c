@@ -353,17 +353,16 @@ static int snapshot_mode(void)
             int64_t got = read(fds[0], msg, sizeof msg - 1);
             if (p > 0) waitpid(p, NULL, 0);
             if (got > 0) {
-                /* msg is "<birth> <ppid>"; parse without sscanf (the
-                 * libc's minimal sscanf does not honour field widths). */
-                char *s = msg;
-                while (*s == ' ') s++;
-                char *cb = s;
-                while (*s && *s != ' ') s++;
-                if (*s) *s++ = '\0';
-                while (*s == ' ') s++;
-                char *cpp = s;
-                ok = (strcmp(cb, my_birth) != 0) &&
-                     (strcmp(cpp, my_pid) == 0);
+                /* msg is "<birth> <ppid>".  The width-aware sscanf
+                 * parses it — the manual scanner that used to stand in
+                 * for it is gone with the libc's own scanner (T12). */
+                unsigned long birth = 0;
+                unsigned long ppid = 0;
+                if (sscanf(msg, "%lu %lu", &birth, &ppid) == 2) {
+                    unsigned long my_birth_v = strtoul(my_birth, NULL, 10);
+                    unsigned long my_pid_v = strtoul(my_pid, NULL, 10);
+                    ok = (birth != my_birth_v) && (ppid == my_pid_v);
+                }
             }
             close(fds[0]);
         }

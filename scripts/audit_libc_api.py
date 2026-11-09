@@ -49,7 +49,16 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Groups ──────────────────────────────────────────────────────────────
 # Every group names the task that delivers it.  ENABLED_GROUPS lists the
 # groups delivered so far; a later task appends its group here.
-ENABLED_GROUPS: tuple[str, ...] = ("api", "alloc", "env", "shutdown", "stream")
+#
+# T17 enables the WHOLE coverage table: every group the plan promises is
+# now audited, so the shipped archive must really export every interface
+# the table covers, and libk must not have lost an export it already had.
+# The regex group is NOT among them — the POSIX regex engine is out of
+# scope for this cycle (see the regex.h exclusion above).
+ENABLED_GROUPS: tuple[str, ...] = (
+    "api", "alloc", "env", "shutdown", "stream", "append", "io", "line",
+    "format", "integer", "float", "scan", "time", "path", "dir",
+)
 
 # Headers that are deliberately NOT part of the api group, with the reason.
 # An excluded header is still compiled by nothing in the api group, so it
@@ -62,10 +71,13 @@ EXCLUDED_HEADERS: dict[str, str] = {
     # POSIX TZ surface.  They belong to the libc implementation, not to
     # the public interface.
     "time/calendar.h": "private calendar/TZ core (T13)",
-    # Deferred by the T1 brief: regex.h keeps its current types and inline
-    # implementation until T16 migrates it.  The api group therefore does
-    # not check its self-containment / two-TU / C++ properties yet.
-    "regex.h": "deferred to T16 (current regex.h is a stub with inline bodies)",
+    # The POSIX regex engine is NOT implemented this round (2026-11-09 user
+    # decision, the same round that excludes glob): regex.h keeps the T1
+    # inline stub.  The api group therefore does not check its
+    # self-containment / two-TU / C++ properties, and the stub's "always
+    # succeeds" behaviour is a KNOWN LIMITATION recorded in the libc
+    # completion report.
+    "regex.h": "out of scope this round (the POSIX regex engine is not implemented; regex.h keeps the T1 inline stub)",
     # Out of scope for this round (plan "范围覆盖与依赖").
     "glob.h": "out of scope this round (glob/globfree excluded by the plan)",
     "fnmatch.h": "out of scope this round (fnmatch rework excluded by the plan)",
@@ -101,7 +113,7 @@ EXCLUDED_SYMBOLS: dict[str, str] = {
 LIBK_NOT_REQUIRED: frozenset[str] = frozenset({
     # user-only aligned allocation (T2)
     "posix_memalign", "aligned_alloc",
-    # regex group (T16)
+    # regex group (not implemented this round — see the regex.h exclusion)
     "regcomp", "regexec", "regerror", "regfree",
     # float scanning (T11/T12)
     "strtof", "strtold", "sscanf", "vsscanf", "fscanf", "scanf", "vscanf",
@@ -739,6 +751,199 @@ API_GROUPS: dict[str, dict] = {
         },
         # The shutdown group owns behaviour: the user libc must really
         # export the interface it owns.
+        "require_user_export": True,
+    },
+    # ── T6..T15: the groups the coverage table promises ───────────────
+    # Each of them owns the interfaces ITS task delivered.  The api group
+    # above already audits every public declaration; these groups add the
+    # other half: the shipped user archive must really export every
+    # interface the group owns, and libk must not LOSE an export it
+    # already had.
+    "append": {
+        "task": "T6",
+        "title": "atomic O_APPEND writes with the offset chosen inside the FS lock",
+        # The append semantics live in the kernel's filesystem layer; the
+        # libc side is the pair that rides on it: open(O_APPEND) and
+        # write().  The same two interfaces are also reachable through
+        # the stream layer (the io group) — the groups overlap on
+        # purpose, because the property is a property of the pair.
+        "headers": {},
+        "owned": {
+            "unistd.h": [
+                "open",
+                "write",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "io": {
+        "task": "T7",
+        "title": "open modes, complete-item IO and close errors",
+        "headers": {},
+        "owned": {
+            "stdio.h": [
+                "fopen",
+                "fdopen",
+                "fclose",
+                "fread",
+                "fwrite",
+            ],
+            "fcntl.h": [
+                "fcntl",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "line": {
+        "task": "T8",
+        "title": "standard character interfaces and dynamic line reading",
+        "headers": {},
+        "owned": {
+            "stdio.h": [
+                "fgetc",
+                "getc",
+                "putc",
+                "fileno",
+                "fgets",
+                "getdelim",
+                "getline",
+                "getc_unlocked",
+                "putc_unlocked",
+                "fgets_unlocked",
+                "getchar",
+                "getchar_unlocked",
+                "fputc",
+                "fputs",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "format": {
+        "task": "T9",
+        "title": "formatted fd output and the seek family",
+        "headers": {},
+        "owned": {
+            "stdio.h": [
+                "dprintf",
+                "vdprintf",
+                "asprintf",
+                "fseek",
+                "fseeko",
+                "ftell",
+                "ftello",
+                "rewind",
+                "freopen",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "integer": {
+        "task": "T10",
+        "title": "integer conversion core and the intmax interfaces",
+        "headers": {},
+        "owned": {
+            "stdlib.h": [
+                "strtol",
+                "strtoul",
+                "strtoll",
+                "strtoull",
+                "atoi",
+                "atol",
+                "atoll",
+            ],
+            "inttypes.h": [
+                "strtoimax",
+                "strtoumax",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "float": {
+        "task": "T11",
+        "title": "precision-aware floating point parsing",
+        "headers": {},
+        "owned": {
+            "stdlib.h": [
+                "strtod",
+                "strtof",
+                "strtold",
+                "atof",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "scan": {
+        "task": "T12",
+        "title": "the width-aware, typed in-memory scanf core",
+        "headers": {},
+        "owned": {
+            "stdio.h": [
+                "sscanf",
+                "vsscanf",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "time": {
+        "task": "T13",
+        "title": "calendar conversion, POSIX TZ and time formatting",
+        "headers": {},
+        "owned": {
+            "time.h": [
+                "time",
+                "gmtime",
+                "localtime",
+                "mktime",
+                "timegm",
+                "difftime",
+                "tzset",
+                "clock",
+                "strftime",
+                "strptime",
+                "localtime_r",
+                "gmtime_r",
+                "ctime_r",
+                "asctime_r",
+                "ctime",
+                "asctime",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "path": {
+        "task": "T14",
+        "title": "canonical path resolution and the exec wrappers",
+        "headers": {},
+        "owned": {
+            "stdlib.h": [
+                "realpath",
+            ],
+            "unistd.h": [
+                "execl",
+                "execlp",
+                "execle",
+                "execvp",
+                "execve",
+                "execv",
+            ],
+        },
+        "require_user_export": True,
+    },
+    "dir": {
+        "task": "T15",
+        "title": "the directory descriptor and the sorted scan",
+        "headers": {},
+        "owned": {
+            "dirent.h": [
+                "opendir",
+                "readdir",
+                "closedir",
+                "dirfd",
+                "fdopendir",
+                "scandir",
+                "alphasort",
+            ],
+        },
         "require_user_export": True,
     },
 }
