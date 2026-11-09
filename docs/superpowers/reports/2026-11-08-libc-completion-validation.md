@@ -291,4 +291,4 @@ T17 的 guest 用例清单、计划自检的覆盖行。
 | 批审记录 | `.superpowers/sdd/2026-11-08-libc-completion/review-*.md` |
 | 过程台账 | `.superpowers/sdd/2026-11-08-libc-completion/progress.md` |
 | 证据 transcript | `.superpowers/sdd/2026-11-08-libc-completion/evidence/` |
-| 提交序列 | `git log --oneline 0377e0b8..feature/libc-completion`（29 个提交） |
+| 提交序列 | `git log --oneline 0377e0b8..feature/libc-completion`（31 个提交；末两个是 T17 的 `b9c7e518` 与 `bc59a898`） |
