@@ -28,6 +28,17 @@
 //   - a width on %c / %s / %[ is a MAXIMUM, not a requirement: "ab" with
 //     "%3[abc]" matches "ab" and succeeds.
 //
+// Whitespace handling (POSIX + glibc):
+//   - whitespace IN THE FORMAT matches any amount of whitespace in the
+//     input (including none),
+//   - the numeric conversions and %s skip leading whitespace in the
+//     input,
+//   - %c and %[ do NOT: the 'c' item is one character and the '[' item
+//     is "a sequence of characters of exactly those in the set", so a
+//     leading space that is not in the set is a MATCHING FAILURE
+//     (sscanf(" abc", "%[abc]", buf) == 0, and the destination is left
+//     untouched).
+//
 // Return value (POSIX + glibc):
 //   - the number of ASSIGNED conversions; %n and %* assignments do not
 //     count,
@@ -44,14 +55,19 @@
 //     count so far (glibc agrees).
 //   - POSIX character classes ("%[[:alpha:]]") are supported; glibc's
 //     scanf does not implement them.
-//   - out-of-range integer results TRUNCATE to the target type (the C
-//     standard leaves them undefined); glibc saturates some 8-byte
-//     targets and truncates the others.
+//   - out-of-range integer results are made deterministic and sane: a
+//     value whose magnitude does not fit in 64 bits CLAMPS to the target
+//     type's range (glibc does the same for its 8-byte signed targets),
+//     and a magnitude that fits in 64 bits but not in the target type is
+//     TRUNCATED to its two's-complement low bits (glibc's answer for the
+//     1/2/4-byte targets; glibc saturates its 8-byte targets instead).
+//     The C standard leaves both undefined.
 //
 // errno: scanf never changes it (the value on entry is restored on exit).
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -314,10 +330,70 @@ static int scan_float(const char *text, int width, int prec,
  * applied in two's complement, so the store never overflows a signed
  * type (no UB); the result is then truncated to the width of the target
  * type, which is what glibc does for the 1/2/4-byte targets (e.g.
- * "%hhd" of "300" stores 44). */
-static void scan_store_int(void *p, int lm, int uns, uintmax_t mag, int neg)
+ * "%hhd" of "300" stores 44).
+ *
+ * `overflow` says that the magnitude did NOT fit in 64 bits (the digit
+ * run is longer than UINTMAX_MAX).  Such a value is out of range for
+ * EVERY target type, and the C standard leaves the result undefined, so
+ * OS01 makes it deterministic and sane: the store CLAMPS to the target
+ * type's range — the maximum for a positive value, the minimum for a
+ * negative one.  That is the same answer glibc gives for its 8-byte
+ * signed targets ("%lld" of "-99999999999999999999" stores LONG_MIN),
+ * and it agrees with this libc's own strto* convention (T10 saturates
+ * at LONG_MAX/LONG_MIN and raises ERANGE).  Without this, negating a
+ * saturated magnitude would store 1 for a negative overflow — a value
+ * that means nothing.
+ *
+ * A magnitude that DOES fit in 64 bits but not in the target type is
+ * TRUNCATED (the two's-complement low bits), which is glibc's answer
+ * for the 1/2/4-byte targets; glibc saturates its 8-byte targets
+ * instead, and that difference is documented in the T12 report. */
+static void scan_store_int(void *p, int lm, int uns, uintmax_t mag, int neg,
+                           int overflow)
 {
-    uint64_t bits = neg ? (uint64_t)(0u - (uint64_t)mag) : (uint64_t)mag;
+    uint64_t bits;
+
+    if (overflow) {
+        /* the value is out of range for every target: clamp */
+        switch (lm) {
+        case LM_HH:
+            if (uns) *(unsigned char *)p = UCHAR_MAX;
+            else     *(signed char *)p  = neg ? SCHAR_MIN : SCHAR_MAX;
+            break;
+        case LM_H:
+            if (uns) *(unsigned short *)p = USHRT_MAX;
+            else     *(short *)p          = neg ? SHRT_MIN : SHRT_MAX;
+            break;
+        case LM_L:
+            if (uns) *(unsigned long *)p = ULONG_MAX;
+            else     *(long *)p          = neg ? LONG_MIN : LONG_MAX;
+            break;
+        case LM_LL:
+            if (uns) *(unsigned long long *)p = ULLONG_MAX;
+            else     *(long long *)p          = neg ? LLONG_MIN : LLONG_MAX;
+            break;
+        case LM_J:
+            if (uns) *(uintmax_t *)p = UINTMAX_MAX;
+            else     *(intmax_t *)p  = neg ? INTMAX_MIN : INTMAX_MAX;
+            break;
+        case LM_Z:
+            if (uns) *(size_t *)p = SIZE_MAX;
+            else     *(ssize_t *)p = neg ? (ssize_t)PTRDIFF_MIN
+                                        : (ssize_t)PTRDIFF_MAX;
+            break;
+        case LM_T:
+            if (uns) *(size_t *)p = SIZE_MAX;
+            else     *(ptrdiff_t *)p = neg ? PTRDIFF_MIN : PTRDIFF_MAX;
+            break;
+        default:
+            if (uns) *(unsigned int *)p = UINT_MAX;
+            else     *(int *)p          = neg ? INT_MIN : INT_MAX;
+            break;
+        }
+        return;
+    }
+
+    bits = neg ? (uint64_t)(0u - (uint64_t)mag) : (uint64_t)mag;
 
     switch (lm) {
     case LM_HH:
@@ -465,7 +541,7 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
                 }
                 if (!spec.suppress) {
                     void *p = va_arg(ap, void *);
-                    scan_store_int(p, spec.lm, uns, r.val, r.neg);
+                    scan_store_int(p, spec.lm, uns, r.val, r.neg, r.range);
                     count++;
                 }
                 s = r.end;
@@ -564,7 +640,12 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
                 stop = 1;                    /* a malformed set */
                 break;
             }
-            while (isspace((unsigned char)*s)) s++;
+            /* NO whitespace skipping here: the '[' input item is "a
+             * sequence of characters of exactly those in the set", so a
+             * leading space that is not in the set is a MATCHING
+             * FAILURE (POSIX and glibc both behave this way; only %s
+             * skips leading whitespace).  A space that IS a member of
+             * the set is matched and stored like any other member. */
             if (*s == '\0') { input_failure = 1; break; }
             if (!spec.suppress)
                 p = va_arg(ap, void *);

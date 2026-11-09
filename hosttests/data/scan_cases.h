@@ -128,6 +128,26 @@ static const struct scan_case scan_cases[] = {
     { "k_fail",      "xyz",     "%[a-c]", { SK_PLAIN, 0, 0, 0 } },
     { "k_dash",      "a-b",     "%[a-]",  { SK_PLAIN, 0, 0, 0 } },
 
+    /* ── the scan set does NOT skip leading whitespace ────────────
+     * Whitespace skipping is a property of %s (and of the numeric
+     * conversions), NOT of %[: the '[' input item is "a sequence of
+     * characters of exactly those in the set", so a leading space that
+     * is not in the set is a MATCHING FAILURE.  These rows were taken
+     * from the host glibc (probed before the table was written):
+     *   " abc" "%[abc]"   -> 0, the destination is left untouched
+     *   "  "   "%[a-c]"   -> 0, the destination is left untouched
+     *   " abc" "%[ abc]"  -> 1, the space IS a set member and is stored
+     *   " \tabc" "%[abc]" -> 0
+     *   " abc" "%[^ ]"    -> 0 (the space is excluded by the negation)
+     *   ""     "%[a-c]"  -> -1 (an input failure before any conversion)
+     */
+    { "k_ws_lead",   " abc",    "%[abc]",  { SK_PLAIN, 0, 0, 0 } },
+    { "k_ws_only",   "  ",      "%[a-c]",  { SK_PLAIN, 0, 0, 0 } },
+    { "k_ws_in_set", " abc",    "%[ abc]", { SK_PLAIN, 0, 0, 0 } },
+    { "k_tab_lead",  " \tabc",  "%[abc]",  { SK_PLAIN, 0, 0, 0 } },
+    { "k_neg_ws",    " abc",    "%[^ ]",   { SK_PLAIN, 0, 0, 0 } },
+    { "k_empty",     "",        "%[a-c]",  { SK_PLAIN, 0, 0, 0 } },
+
     /* ── %p ─────────────────────────────────────────────────────── */
     { "p_p",         "0x7f001234", "%p", { SK_PLAIN, 0, 0, 0 } },
     { "p_plain",     "7f001234", "%p",   { SK_PLAIN, 0, 0, 0 } },

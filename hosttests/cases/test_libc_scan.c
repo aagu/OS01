@@ -309,6 +309,55 @@ TEST_FUNC(test_length_modifier_stores) {
     assert_true(ull == 18446744073709551615ULL);
 }
 
+TEST_FUNC(test_out_of_range_integer_stores) {
+    long long ll = 0;
+    int i = 0;
+    int n;
+
+    /* A magnitude that does NOT fit in 64 bits is out of range for every
+     * target type: OS01 clamps it to the target's range (the maximum
+     * for a positive value, the minimum for a negative one).  glibc
+     * gives the same answer for its 8-byte signed targets (LONG_MIN),
+     * and it agrees with this libc's own strto* convention (T10
+     * saturates at LONG_MAX/LONG_MIN). */
+    n = sscanf("-99999999999999999999", "%lld", &ll);
+    assert_eq(1, n);
+    assert_eq(-9223372036854775807LL - 1LL, ll);
+
+    ll = 0;
+    n = sscanf("99999999999999999999", "%lld", &ll);
+    assert_eq(1, n);
+    assert_eq(9223372036854775807LL, ll);
+
+    /* the same rule for the 4-byte target */
+    i = 0;
+    n = sscanf("-99999999999999999999", "%d", &i);
+    assert_eq(1, n);
+    assert_eq(-2147483647 - 1, i);
+
+    /* a magnitude that FITS in 64 bits but not in the target type is
+     * TRUNCATED to the two's-complement low bits (glibc's answer for
+     * the 1/2/4-byte targets: "%hhd" of "300" is 44) */
+    {
+        signed char c = 0;
+        n = sscanf("300", "%hhd", &c);
+        assert_eq(1, n);
+        assert_eq(44, (int)c);
+    }
+    {
+        short sh = 0;
+        n = sscanf("70000", "%hd", &sh);
+        assert_eq(1, n);
+        assert_eq(4464, (int)sh);
+    }
+    {
+        unsigned u = 0;
+        n = sscanf("-1", "%u", &u);
+        assert_eq(1, n);
+        assert_eq(4294967295u, u);
+    }
+}
+
 TEST_FUNC(test_n_stores_the_consumed_length) {
     int v = 0;
     int n = -1;
@@ -450,6 +499,46 @@ TEST_FUNC(test_scanset_rules) {
     n = sscanf("123abc", "%[[:digit:]]", buf);
     assert_eq(1, n);
     assert_str_eq("123", buf);
+
+    /* %[ does NOT skip leading whitespace: the '[' input item is "a
+     * sequence of characters of exactly those in the set", so a leading
+     * space that is not in the set is a MATCHING FAILURE — the count
+     * stays 0 and the destination is left untouched (POSIX and glibc). */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf(" abc", "%[abc]", buf);
+    assert_eq(0, n);
+    assert_eq(POISON, buf[0] & 0xff);
+
+    /* a whitespace-only input is a matching failure as well (NOT EOF) */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf("  ", "%[a-c]", buf);
+    assert_eq(0, n);
+    assert_eq(POISON, buf[0] & 0xff);
+
+    /* a tab in front of the set is no different */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf(" \tabc", "%[abc]", buf);
+    assert_eq(0, n);
+    assert_eq(POISON, buf[0] & 0xff);
+
+    /* the negated set does not skip the whitespace either */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf(" abc", "%[^ ]", buf);
+    assert_eq(0, n);
+    assert_eq(POISON, buf[0] & 0xff);
+
+    /* a space that IS a member of the set is matched and stored */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf(" abc", "%[ abc]", buf);
+    assert_eq(1, n);
+    assert_str_eq(" abc", buf);
+
+    /* an empty input is an input failure (EOF), as for every other
+     * conversion that consumes input */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf("", "%[a-c]", buf);
+    assert_eq(-1, n);
+    assert_eq(POISON, buf[0] & 0xff);
 }
 
 TEST_FUNC(test_literal_percent_and_pointer) {
@@ -580,6 +669,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_oracle_byte_agreement),
     TEST_ENTRY(test_width_limits_the_scanned_input),
     TEST_ENTRY(test_length_modifier_stores),
+    TEST_ENTRY(test_out_of_range_integer_stores),
     TEST_ENTRY(test_n_stores_the_consumed_length),
     TEST_ENTRY(test_suppressed_conversion_takes_no_argument),
     TEST_ENTRY(test_input_failure_and_matching_failure),
