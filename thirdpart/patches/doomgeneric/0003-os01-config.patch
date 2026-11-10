@@ -1,0 +1,386 @@
+--- a/doomgeneric/m_config.c
++++ b/doomgeneric/m_config.c
+@@ -1585,16 +1585,30 @@
+ //    sends an interrupt). So I added a fake scan code of 126 for it.
+ //    The presence of this is important so we can bind PrintScreen as
+ //    a screenshot key.
++// OS01: the OS01 controller maps scancode 29 to FIRE and scancode 57 to
++// USE.  The upstream table maps 29 to KEY_RCTRL and 57 to the space bar,
++// which makes the saver write the internal key codes 163/162; the loader
++// then clears them again because they are >= 128.  Only these two entries
++// change -- every other mapping, and the Shift special case at 54, stays
++// as upstream.
++#if defined(OS01_DOOM)
++#define OS01_SCANCODE_FIRE KEY_FIRE
++#define OS01_SCANCODE_USE  KEY_USE
++#else
++#define OS01_SCANCODE_FIRE KEY_RCTRL
++#define OS01_SCANCODE_USE  ' '
++#endif
++
+ static const int scantokey[128] =
+ {
+     0  ,    27,     '1',    '2',    '3',    '4',    '5',    '6',
+     '7',    '8',    '9',    '0',    '-',    '=',    KEY_BACKSPACE, 9,
+     'q',    'w',    'e',    'r',    't',    'y',    'u',    'i',
+-    'o',    'p',    '[',    ']',    13,		KEY_RCTRL, 'a',    's',
++    'o',    'p',    '[',    ']',    13,		OS01_SCANCODE_FIRE, 'a',    's',
+     'd',    'f',    'g',    'h',    'j',    'k',    'l',    ';',
+     '\'',   '`',    KEY_RSHIFT,'\\',   'z',    'x',    'c',    'v',
+     'b',    'n',    'm',    ',',    '.',    '/',    KEY_RSHIFT,KEYP_MULTIPLY,
+-    KEY_RALT,  ' ',  KEY_CAPSLOCK,KEY_F1,  KEY_F2,   KEY_F3,   KEY_F4,   KEY_F5,
++    KEY_RALT,  OS01_SCANCODE_USE,  KEY_CAPSLOCK,KEY_F1,  KEY_F2,   KEY_F3,   KEY_F4,   KEY_F5,
+     KEY_F6,   KEY_F7,   KEY_F8,   KEY_F9,   KEY_F10,  /*KEY_NUMLOCK?*/KEY_PAUSE,KEY_SCRLCK,KEY_HOME,
+     KEY_UPARROW,KEY_PGUP,KEY_MINUS,KEY_LEFTARROW,KEYP_5,KEY_RIGHTARROW,KEYP_PLUS,KEY_END,
+     KEY_DOWNARROW,KEY_PGDN,KEY_INS,KEY_DEL,0,   0,      0,      KEY_F11,
+@@ -1608,14 +1622,23 @@
+ 
+ static void SaveDefaultCollection(default_collection_t *collection)
+ {
+-#if ORIGCODE
++#if ORIGCODE || defined(OS01_DOOM)
+     default_t *defaults;
+     int i, v;
+     FILE *f;
+ 	
+     f = fopen (collection->filename, "w");
+     if (!f)
++    {
++#if defined(OS01_DOOM)
++        // OS01: an unwritable config file must be reported, never
++        // silently treated as a successful save.
++        I_Error("Could not open config file %s for writing",
++                collection->filename);
++#else
+ 	return; // can't write the file, but don't complain
++#endif
++    }
+ 
+     defaults = collection->defaults;
+ 		
+@@ -1707,8 +1730,22 @@
+         fprintf(f, "\n");
+     }
+ 
++#if defined(OS01_DOOM)
++    // OS01: a failed write must be reported.  fflush() surfaces the
++    // buffered write error and ferror() the ones already seen.
++    if (fflush(f) != 0 || ferror(f))
++    {
++        I_Error("Error writing config file %s", collection->filename);
++    }
++
++    if (fclose(f) != 0)
++    {
++        I_Error("Error closing config file %s", collection->filename);
++    }
++#else
+     fclose (f);
+ #endif
++#endif
+ }
+ 
+ // Parses integer values in the configuration file
+@@ -1725,6 +1762,143 @@
+     return parm;
+ }
+ 
++#if defined(OS01_DOOM)
++// OS01: a CHECKED integer parse.  The upstream ParseIntParameter leaves
++// its output untouched when the conversion fails, so a broken config line
++// would install whatever happened to be on the stack.  strtol() with base
++// 0 has the same semantics as the upstream "%i" (decimal, 0-prefixed
++// octal and 0x-prefixed hexadecimal) and reports where it stopped.
++static boolean ParseIntParameterChecked(const char *strparm, int *parm)
++{
++    char *end = NULL;
++    long value;
++
++    if (strparm == NULL || *strparm == '\0')
++    {
++        return false;
++    }
++
++    errno = 0;
++    value = strtol(strparm, &end, 0);
++
++    if (end == strparm || end == NULL || *end != '\0')
++    {
++        return false;
++    }
++
++    if (errno == ERANGE || value < INT_MIN || value > INT_MAX)
++    {
++        return false;
++    }
++
++    *parm = (int) value;
++    return true;
++}
++
++// OS01: a CHECKED float parse, with the same intent as the upstream
++// atof(): the whole value must be consumed and the result must be
++// representable.
++static boolean ParseFloatParameterChecked(const char *strparm, float *value)
++{
++    char *end = NULL;
++    float result;
++
++    if (strparm == NULL || *strparm == '\0')
++    {
++        return false;
++    }
++
++    errno = 0;
++    result = strtof(strparm, &end);
++
++    if (end == strparm || end == NULL || *end != '\0')
++    {
++        return false;
++    }
++
++    if (errno == ERANGE)
++    {
++        return false;
++    }
++
++    *value = result;
++    return true;
++}
++
++// OS01: the OS01 loader installs a value only when the whole entry is
++// usable.  A broken number and an unmappable key code keep the DEFAULT
++// and are reported: an invalid binding is never generated.
++static void SetVariableChecked(default_t *def, char *value)
++{
++    switch (def->type)
++    {
++        case DEFAULT_STRING:
++            * (char **) def->location = strdup(value);
++            break;
++
++        case DEFAULT_INT:
++        case DEFAULT_INT_HEX:
++        {
++            int parm;
++
++            if (!ParseIntParameterChecked(value, &parm))
++            {
++                fprintf(stderr,
++                        "Config: ignoring invalid value \"%s\" for %s\n",
++                        value, def->name);
++                return;
++            }
++
++            * (int *) def->location = parm;
++            break;
++        }
++
++        case DEFAULT_KEY:
++        {
++            int intparm;
++
++            if (!ParseIntParameterChecked(value, &intparm))
++            {
++                fprintf(stderr,
++                        "Config: ignoring invalid key \"%s\" for %s\n",
++                        value, def->name);
++                return;
++            }
++
++            if (intparm < 0 || intparm >= 128)
++            {
++                fprintf(stderr,
++                        "Config: ignoring unmappable key %d for %s\n",
++                        intparm, def->name);
++                return;
++            }
++
++            // Keep the vanilla scancode so that the saver writes it back.
++            def->untranslated = intparm;
++            def->original_translated = scantokey[intparm];
++            * (int *) def->location = def->original_translated;
++            break;
++        }
++
++        case DEFAULT_FLOAT:
++        {
++            float parm;
++
++            if (!ParseFloatParameterChecked(value, &parm))
++            {
++                fprintf(stderr,
++                        "Config: ignoring invalid value \"%s\" for %s\n",
++                        value, def->name);
++                return;
++            }
++
++            * (float *) def->location = parm;
++            break;
++        }
++    }
++}
++#endif
++
+ static void SetVariable(default_t *def, char *value)
+ {
+     int intparm;
+@@ -1828,6 +2002,134 @@
+     }
+ 
+     fclose (f);
++#elif defined(OS01_DOOM)
++    // OS01: a line-oriented loader.  It never uses fscanf(): the whole
++    // entry is read with fgets() and converted with the checked parsers
++    // above, so a general "fscanf" dependency is not introduced.
++    //
++    // The rules are:
++    //   * the read is bounded -- a line that does not fit is dropped
++    //     WHOLE and the input resynchronises on the next newline;
++    //   * the input always advances, so a bad line cannot spin;
++    //   * a read error terminates instead of looping on feof();
++    //   * a missing file is the normal first-run case, any other open
++    //     error is reported.
++    FILE *f;
++    default_t *def;
++    char line[256];
++
++    errno = 0;
++    f = fopen(collection->filename, "r");
++
++    if (f == NULL)
++    {
++        if (errno != ENOENT)
++        {
++            I_Error("Could not open config file %s", collection->filename);
++        }
++
++        // No config file yet: the normal first-run case.
++        return;
++    }
++
++    while (fgets(line, sizeof(line), f) != NULL)
++    {
++        size_t len = strlen(line);
++        char *name;
++        char *value;
++        char *p;
++
++        if (len > 0 && line[len - 1] == '\n')
++        {
++            line[--len] = '\0';
++        }
++        else if (len + 1 == sizeof(line))
++        {
++            // The line does not fit: drop it WHOLE and resynchronise on
++            // the next newline.  A truncated line is never applied.
++            int c;
++
++            while ((c = fgetc(f)) != EOF && c != '\n')
++            {
++            }
++
++            continue;
++        }
++
++        // Strip the carriage return of DOS text files.
++        while (len > 0 && !isprint(line[len - 1]))
++        {
++            line[--len] = '\0';
++        }
++
++        p = line;
++
++        while (*p == ' ' || *p == '\t')
++        {
++            ++p;
++        }
++
++        if (*p == '\0')
++        {
++            // Empty line: ignore it.
++            continue;
++        }
++
++        name = p;
++
++        while (*p != '\0' && *p != ' ' && *p != '\t')
++        {
++            ++p;
++        }
++
++        if (*p != '\0')
++        {
++            *p++ = '\0';
++        }
++
++        if (strlen(name) >= 80)
++        {
++            fprintf(stderr, "Config: ignoring malformed entry in %s\n",
++                    collection->filename);
++            continue;
++        }
++
++        while (*p == ' ' || *p == '\t')
++        {
++            ++p;
++        }
++
++        value = p;
++
++        // Find the setting in the list.
++        def = SearchCollection(collection, name);
++
++        if (def == NULL || !def->bound)
++        {
++            // Unknown variable?  Unbound variables are also treated as
++            // unknown.
++            continue;
++        }
++
++        // Surrounded by quotes? If so, remove them.
++        if (strlen(value) >= 2
++         && value[0] == '"' && value[strlen(value) - 1] == '"')
++        {
++            value[strlen(value) - 1] = '\0';
++            memmove(value, value + 1, strlen(value) + 1);
++        }
++
++        SetVariableChecked(def, value);
++    }
++
++    if (ferror(f))
++    {
++        // A read error must terminate, not spin on feof().
++        fclose(f);
++        I_Error("Error reading config file %s", collection->filename);
++    }
++
++    fclose(f);
+ #endif
+ }
+ 
+@@ -2042,11 +2344,23 @@
+ 
+ static char *GetDefaultConfigDir(void)
+ {
++#if defined(OS01_DOOM)
++    // OS01: M_LoadDefaults() concatenates the config dir and the file
++    // name, so "." would produce ".default.cfg" instead of
++    // "./default.cfg".  "./" keeps the upstream concatenation correct.
++    char *result = (char *)malloc(3);
++    result[0] = '.';
++    result[1] = '/';
++    result[2] = '\0';
++
++    return result;
++#else
+     char *result = (char *)malloc(2);
+     result[0] = '.';
+     result[1] = '\0';
+ 
+     return result;
++#endif
+ }
+ 
+ // 

@@ -85,4 +85,39 @@ test-doom-engine-exit: $(TEST_BLD)/test_doom_engine_exit.elf
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
 
+# ── D03 T3: the configuration round-trip ────────────────────────────────
+#
+# The fixture host-compiles the REAL patched m_config.c (the unit under
+# test) together with the upstream m_misc.c it needs for
+# M_StringJoin/M_MakeDirectory, and drives them through the public
+# configuration interface only.
+$(eval $(call register_host_test,test_doom_config,doom,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_doom_config.elf
+
+$(DOOM_HOST_DIR)/m_config.o: $(DOOM_ENGINE_SRC)/m_config.c $(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(DOOM_HOST_DIR)/m_misc.o: $(DOOM_ENGINE_SRC)/m_misc.c $(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_doom_config.o: $(TEST_CASES)/test_doom_config.c \
+		$(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_doom_config.elf: $(TEST_BLD)/test_doom_config.o \
+		$(DOOM_HOST_DIR)/m_config.o $(DOOM_HOST_DIR)/m_misc.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-doom-config
+test-doom-config: $(TEST_BLD)/test_doom_config.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
 -include $(DOOM_HOST_DIR)/*.d

@@ -1398,6 +1398,12 @@ _test-doom-host-run-build:
 	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_build_contract -v
 	$(call os01_submake,hosttests,test-doom-engine-exit $(OS01_SUBMAKE_ARGS))
 
+# The configuration round-trip (T3): it drives the REAL patched
+# m_config.c on the host through the public configuration interface.
+_test-doom-host-run-config:
+	@echo "  [test-doom-host] config"
+	$(call os01_submake,hosttests,test-doom-config $(OS01_SUBMAKE_ARGS))
+
 .PHONY: test-gui-widget test-gui-focus
 test-gui-widget:
 	$(call require_capability,rootfs)
