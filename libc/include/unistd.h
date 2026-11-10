@@ -114,18 +114,6 @@ extern char *optarg;
 extern int optind, opterr, optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
 
-#ifdef __cplusplus
-}
-#endif
-int vfork(void);
-int setsid(void);
-pid_t getsid(pid_t pid);
-
-#endif /* _UNISTD_H */
-int vfork(void);
-int setsid(void);
-pid_t getsid(pid_t pid);
-
 /* sysconf() */
 #define _SC_CLK_TCK 2
 #define _SC_ARG_MAX 4
@@ -152,3 +140,9 @@ pid_t getpgid(pid_t pid);
 int tcsetpgrp(int fd, pid_t pgrp);
 pid_t tcgetpgrp(int fd);
 int killpg(pid_t pgrp, int sig);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _UNISTD_H */

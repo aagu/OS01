@@ -41,34 +41,12 @@
 extern ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 extern off_t   lseek(int fd, off_t offset, int whence);
 
-/* mini_file_t layout from <stdio.h>: { int fd; int mode; } — the same
- * layout the host test framework already sees via test_framework.h. */
-
-extern void *fopen(const char *path, const char *mode);
-extern void *fdopen(int fd, const char *mode);
-extern int   fclose(void *f);
-extern int   fflush(void *f);
-extern size_t fread(void *ptr, size_t size, size_t nmemb, void *f);
-extern size_t fwrite(const void *p, size_t s, size_t n, void *f);
-
-/* P1-5 review round 2: every FILE consumer in stdio_extras.c must
- * route through file_to_fd() so the registry check applies uniformly.
- * If any of these still bypasses the registry, an unregistered FILE*
- * would slip through and dereference an arbitrary struct address —
- * the footgun the original P1-5 cleanup missed.
- *
- * fileno_unlocked's signature in <stdio.h> uses FILE*; the other five
- * use void* (matching the OS01 libc convention that stdio routines take
- * void* for FILE*). The extern redeclarations here mirror those
- * signatures so this test compiles against the libc without
- * conflicting. */
-#include <stdio.h>   /* FILE / fileno_unlocked's declared signature */
-extern int   fileno_unlocked(FILE *f);
-extern int   getc_unlocked(void *f);
-extern int   putc_unlocked(int c, void *f);
-extern char *fgets_unlocked(char *s, int n, void *f);
-extern int   fputc(int c, void *f);
-extern int   fputs(const char *s, void *f);
+/* The stream interface is declared by <stdio.h> (FILE is opaque since
+ * T5: the public header no longer publishes a stream layout), so this
+ * test calls the declared prototypes directly and does not redeclare
+ * them.  A FILE* that the libc does not own must be rejected by every
+ * consumer instead of being dereferenced. */
+#include <stdio.h>
 
 /* OPEN_FILES_MAX is a private #define in libc/stdio/stdio_file.c — the
  * hosttest must agree on the cap, so mirror it here. If the upstream
@@ -199,12 +177,16 @@ TEST_FUNC(test_fread_fwrite_on_unregistered_stream_is_rejected) {
     assert_true(fd >= 0);
     pwrite(fd, "x", 1, 0);   /* host syscall; bypasses stdio shims */
 
-    mini_file_t fake = { .fd = fd, .mode = 0 };
+    /* A stream-shaped object that the libc never handed out.  The
+     * public header no longer publishes a stream layout, so the test
+     * builds its own; the point is that the libc must reject it
+     * instead of reading a descriptor out of it. */
+    struct { int fd; int mode; } fake = { .fd = fd, .mode = 0 };
     char buf[4] = {0};
-    assert_eq(fread(buf, 1, sizeof buf, &fake), 0);
+    assert_eq(fread(buf, 1, sizeof buf, (FILE *)&fake), 0);
 
     fake.mode = 1;
-    assert_eq(fwrite("x", 1, 1, &fake), 0);
+    assert_eq(fwrite("x", 1, 1, (FILE *)&fake), 0);
 
     close(fd);
     unlink(tmpl);

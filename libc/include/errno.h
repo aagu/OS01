@@ -83,6 +83,12 @@
 #define	ESTALE		116	/* Stale NFS file handle */
 #define	ECANCELED	125	/* Operation Canceled */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern int errno;
+#ifdef __cplusplus
+}
+#endif
 
 #endif

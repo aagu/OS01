@@ -7,6 +7,9 @@
 #define XATTR_CREATE  1
 #define XATTR_REPLACE 2
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 ssize_t getxattr(const char *path, const char *name, void *value, size_t size);
 ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size);
 ssize_t fgetxattr(int fd, const char *name, void *value, size_t size);
@@ -19,5 +22,8 @@ int fsetxattr(int fd, const char *name, const void *value, size_t size, int flag
 int removexattr(const char *path, const char *name);
 int lremovexattr(const char *path, const char *name);
 int fremovexattr(int fd, const char *name);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SYS_XATTR_H */

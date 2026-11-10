@@ -34,6 +34,8 @@ docs/
 ├── log/          [log.md](log/log.md)                                 ← 日志子系统 + DEBUG_CHANNELS
 ├── subsys/       [subsys.md](subsys/subsys.md)                        ← 子系统注册框架
 │
+├── libc/         [libc.md](libc/libc.md)                               ← 用户态 libc：接口覆盖 / 语义要点 / 已知限制
+│
 ├── build/       [build.md](build/build.md) + [toolchain.md](build/toolchain.md)  ← 编译/运行/调试
 ├── debug/       [debug.md](debug/debug.md)                            ← 调试方法（活跃）
 │

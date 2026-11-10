@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 
 /* ── 布局常量（像素） ───────────────────────────────────────────── */
@@ -400,9 +401,25 @@ static void on_setting_activate(const gui_event_t *event, void *userdata)
 
 /* ── 时钟 ──────────────────────────────────────────────────────────── */
 
+/*
+ * 墙钟来源。OS01 的内核目前没有 RTC：time() 恒为 0，而
+ * clock_gettime(CLOCK_REALTIME) 报告的是启动以来的单调时间。桌面时钟
+ * 用后者（失败时退回 time()），于是状态栏的时钟**每秒真的走**——一个
+ * 写死的 "--:--" 只会是错误路径上的兜底，不再是常态。
+ */
+static time_t desktop_wall_clock(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        return (time_t)ts.tv_sec;
+    }
+    return time(NULL);
+}
+
 static void format_clock(const desktop_shell_t *shell, char *buf, size_t len)
 {
-    time_t now = time(NULL);
+    time_t now = desktop_wall_clock();
     struct tm tm_buf;
     struct tm *tm = localtime_r(&now, &tm_buf);
 
@@ -558,7 +575,7 @@ static bool build_status_bar(desktop_shell_t *shell, gui_widget_t parent)
             return false;
         }
     }
-    shell->last_clock = time(NULL);
+    shell->last_clock = desktop_wall_clock();
 
     (void)c;
     return true;
@@ -1650,7 +1667,7 @@ desktop_shell_t *desktop_shell_create(gui_platform_t *platform, gui_input_t *inp
     shell->density = DESKTOP_DENSITY_COMFORTABLE;
     shell->clock_24h = true;
     shell->pending_setting = DESKTOP_SETTING_NONE;
-    shell->start_time = time(NULL);
+    shell->start_time = desktop_wall_clock();
 
     shell->app_state = desktop_app_state_create();
     if (shell->app_state == NULL) {
@@ -1750,7 +1767,7 @@ void desktop_shell_tick(desktop_shell_t *shell)
     desktop_app_refresh(shell);
 
     /* 时钟单独节流：一秒一次。 */
-    time_t now = time(NULL);
+    time_t now = desktop_wall_clock();
     if (now == shell->last_clock) {
         return;
     }

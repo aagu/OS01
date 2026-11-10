@@ -880,7 +880,8 @@ $(TEST_BLD)/boot3_test_stdio.o: $(TEST_CASES)/test_boot_stdio.c
 $(TEST_BLD)/test_boot_stdio.elf: \
 		$(TEST_BLD)/boot3_test_stdio.o \
 		$(TEST_BLD)/boot3_stdio_production.o \
-		$(TEST_BLD)/boot3_file_production.o
+		$(TEST_BLD)/boot3_file_production.o \
+		$(VFS_APPEND_LINK_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=calloc -o $@ $^
 
 .PHONY: test_boot_stdio

@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -21,11 +22,13 @@
 #include <termios.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <inttypes.h>
 #include <rbtree.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/ssp.h>
+#include <time.h>
 
 // ── Forward declarations for the H11 signal-handler test ─────
 // Defined at file scope after test_hostile() so the handler's
@@ -1713,13 +1716,11 @@ static void test_proc_maps(void)
 
         char perm[5];
         // Parse first 6 columns (skip inode): addr-end perms off dev ino.
-        // NOTE: OS01 libc sscanf has no %lx/%4s (length/width) support, so
-        // parse hex into 32-bit temps (all user map addresses are < 4GB).
-        unsigned int s32, e32;
-        int fields = sscanf(line, "%x-%x %s %*x %*s %*x",
-                            &s32, &e32, perm);
-        start = s32;
-        end = e32;
+        // The map addresses are 64 bit and the permission field is four
+        // characters wide, so this needs the length modifier and the
+        // field width of the scanf core (T12).
+        int fields = sscanf(line, "%lx-%lx %4s %*x %*s %*x",
+                            &start, &end, perm);
         if (fields >= 3 && perm[0] != '\0')
             lines++;
 
@@ -3239,7 +3240,8 @@ static void test_42_getdents_dt_lnk(void)
 
 // ── 43-53: 用户态栈 canary / AT_RANDOM（spec 2026-09-17-user-stack-canary）──
 
-/* hex nibble（libc sscanf 只有 %d/%s/%c/%x/%u，无 %lx——手工解析） */
+/* hex nibble（canary_dump 的 "GUARD %016lx" 是严格的定宽十六进制字段，
+ * 用手写解析可以同时检查"恰好 16 位"这个格式约束） */
 static int hexval(int c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -3571,7 +3573,8 @@ static int startup_layout_errors(int argc, char **argv)
 
 /* Entry probe: re-execed /bin/systest lands here BEFORE the test table.
  * Exit codes: 10 + argc*2 + envc on success (10..15, 138 for the envc=128
- * boundary case), 20 for the --pathcheck execvp case, 99 on any failure,
+ * boundary case), 20 for the --pathcheck execvp case, 21 for the
+ * --envinherit case, 22 for the --envclear case, 99 on any failure,
  * 127 if execve itself returned. Never runs the test suite or forks. */
 static void startup_probe(int argc, char **argv)
 {
@@ -3582,8 +3585,12 @@ static void startup_probe(int argc, char **argv)
 
     int pathcheck = (argc == 2 && argv[1] != NULL &&
                      strcmp(argv[1], "--pathcheck") == 0);
+    int envinherit = (argc == 2 && argv[1] != NULL &&
+                      strcmp(argv[1], "--envinherit") == 0);
+    int envclear = (argc == 2 && argv[1] != NULL &&
+                    strcmp(argv[1], "--envclear") == 0);
     int errs = startup_layout_errors(argc, argv);
-    if (argc == 2 && !pathcheck &&
+    if (argc == 2 && !pathcheck && !envinherit && !envclear &&
         (argv[1] == NULL || strcmp(argv[1], "--envcheck") != 0))
         errs |= SU_ERR_ARGV_STR;
     if (errs) exit(99);
@@ -3600,6 +3607,34 @@ static void startup_probe(int argc, char **argv)
         v = getenv("PATH");
         if (v == NULL || strcmp(v, "/pathtest") != 0) exit(99);
         exit(20);
+    }
+    if (envinherit) {
+        /* The parent mutated its environment and handed the result to
+         * execve(): the child must see exactly the value the parent
+         * expects (this covers both the inherited and the overwritten
+         * value, because the parent sets OS01_ENV_EXPECT to the value it
+         * just wrote). */
+        const char *got = getenv("OS01_ENV_CHILD");
+        const char *want = getenv("OS01_ENV_EXPECT");
+        if (got == NULL || want == NULL) exit(99);
+        if (strcmp(got, want) != 0) exit(99);
+        exit(21);
+    }
+    if (envclear) {
+        /* clearenv() empties the environment, but the block the kernel
+         * handed to crt0 belongs to the process image: it may not be
+         * freed.  The entry is read again AFTER clearenv() to prove the
+         * memory is still intact. */
+        char *first = environ[0];
+        int readable = 0;
+        if (first == NULL) exit(99);
+        clearenv();
+        if (getenv("OS01_ENV_CHILD") != NULL) exit(99);
+        if (environ != NULL && environ[0] != NULL) exit(99);
+        for (int i = 0; i < 64 && first[i] != '\0'; i++)
+            if (first[i] == '=') { readable = 1; break; }
+        if (!readable) exit(99);
+        exit(22);
     }
     /* getenv must reflect the real envp (spec §6.2): exact value when
      * envc==1, NULL when empty. For envc>1 the '='-shape check in
@@ -3699,7 +3734,711 @@ static void test_startup_execvp(void)
     rmdir("/pathtest");
 }
 
+/* Environment mutation (libc completion T3): a variable the parent sets
+ * must reach the child through fork+execve, an overwrite must be visible
+ * too, and clearenv() must empty the environment WITHOUT freeing the
+ * block the kernel handed to crt0.
+ *
+ * The child runs the startup probe in --envinherit mode (exit 21: the
+ * value the child sees equals the value the parent expects) and in
+ * --envclear mode (exit 22: the environment is empty and the inherited
+ * entry is still readable after clearenv()). */
+static int env_probe_exit(char **av, int expect_code)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        extern char **environ;
+        execve("/bin/systest", av, environ);
+        exit(127);                     /* execve returned: failure */
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 0;
+    return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == expect_code;
+}
+
+/* T14: realpath() against the REAL guest VFS.  The symbolic link is
+ * created with symlink(2), i.e. the link lives in the very filesystem
+ * the kernel resolves, so this exercises the real path walk (readlink
+ * on a real ext2 inode), not a mock.  The answers are compared with
+ * each other rather than with hardcoded strings, because the rootfs
+ * layout (and whether "/bin" is itself a link) is not part of the
+ * contract. */
+static void test_realpath_vfs(void)
+{
+    /* NOTE: no PATH_MAX here on purpose.  A user program is compiled with
+     * -ffreestanding, so __STDC_HOSTED__ is 0 and clang's own resource
+     * <limits.h> is used INSTEAD of OS01's libc/include/limits.h — the
+     * project's PATH_MAX is therefore not visible to user code (see the
+     * T14 report, "known gap").  realpath(path, NULL) hands the answer
+     * back malloc'd, so no caller buffer is needed at all. */
+    char *r;
+    char *r2;
+    int ok;
+
+    mkdir("/rptest", 0755);
+    symlink("/bin/systest", "/rptest/link");
+
+    r = realpath("/bin/systest", NULL);
+    ok = (r != NULL) && r[0] == '/';
+    CHECK3(ok, "realpath absolute", ok ? r : "not resolved");
+    free(r);
+
+    /* the link must resolve to the same answer as its target */
+    r = realpath("/bin/systest", NULL);
+    r2 = realpath("/rptest/link", NULL);
+    ok = (r != NULL) && (r2 != NULL) && strcmp(r, r2) == 0;
+    CHECK3(ok, "realpath symlink", ok ? r2 : "link not resolved");
+    free(r);
+    free(r2);
+
+    /* "." and ".." are applied to the RESOLVED prefix */
+    r = realpath("/bin/systest", NULL);
+    r2 = realpath("/bin/./systest", NULL);
+    ok = (r != NULL) && (r2 != NULL) && strcmp(r, r2) == 0;
+    CHECK3(ok, "realpath dot", ok ? r2 : "dot not normalised");
+    free(r);
+    free(r2);
+
+    r = realpath("/bin/systest", NULL);
+    r2 = realpath("/bin/../bin/systest", NULL);
+    ok = (r != NULL) && (r2 != NULL) && strcmp(r, r2) == 0;
+    CHECK3(ok, "realpath dotdot", ok ? r2 : "dotdot not normalised");
+    free(r);
+    free(r2);
+
+    /* a missing component answers ENOENT */
+    errno = 0;
+    r = realpath("/rptest/missing", NULL);
+    ok = (r == NULL) && errno == ENOENT;
+    CHECK3(ok, "realpath missing", ok ? "ENOENT" : "wrong answer");
+    free(r);
+
+    unlink("/rptest/link");
+    rmdir("/rptest");
+}
+
+static void test_environ_mutation(void)
+{
+    extern char **environ;
+    char *inherited = NULL;
+    int envc = 0;
+    const char *v;
+
+    while (environ[envc] != NULL) envc++;
+    if (envc > 0) inherited = environ[0];
+
+    /* setenv is visible immediately */
+    CHECK3(setenv("OS01_ENV_CHILD", "inherited", 1) == 0,
+           "environ setenv", "accepted");
+    v = getenv("OS01_ENV_CHILD");
+    CHECK3(v != NULL && strcmp(v, "inherited") == 0,
+           "environ setenv", "value visible");
+    CHECK3(setenv("OS01_ENV_EXPECT", "inherited", 1) == 0,
+           "environ setenv", "expectation set");
+
+    /* fork + execve: the child inherits the parent's environment */
+    char *av_inherit[3] = {(char *)"startup-probe", (char *)"--envinherit", NULL};
+    int ok = env_probe_exit(av_inherit, 21);
+    CHECK3(ok, "environ fork/exec",
+           ok ? "child inherited the parent's environment" : "child did not see it");
+
+    /* an overwrite reaches the next child as well */
+    CHECK3(setenv("OS01_ENV_CHILD", "overridden", 1) == 0,
+           "environ overwrite", "accepted");
+    v = getenv("OS01_ENV_CHILD");
+    CHECK3(v != NULL && strcmp(v, "overridden") == 0,
+           "environ overwrite", "new value visible");
+    CHECK3(setenv("OS01_ENV_EXPECT", "overridden", 1) == 0,
+           "environ overwrite", "expectation set");
+    ok = env_probe_exit(av_inherit, 21);
+    CHECK3(ok, "environ overwrite",
+           ok ? "child saw the overwritten value" : "child saw the old value");
+
+    /* the child clears the environment it inherited from the kernel */
+    char *av_clear[3] = {(char *)"startup-probe", (char *)"--envclear", NULL};
+    ok = env_probe_exit(av_clear, 22);
+    CHECK3(ok, "environ clearenv",
+           ok ? "child cleared without freeing the inherited block"
+              : "child failed to clear the environment");
+
+    /* clearenv empties the parent's environment, and the entry the
+     * kernel handed to crt0 is still readable (it was never freed) */
+    CHECK3(clearenv() == 0, "environ clearenv", "accepted");
+    CHECK3(getenv("OS01_ENV_CHILD") == NULL,
+           "environ clearenv", "environment empty");
+    if (inherited != NULL) {
+        int readable = 0;
+        for (int i = 0; i < 64 && inherited[i] != '\0'; i++)
+            if (inherited[i] == '=') { readable = 1; break; }
+        CHECK3(readable, "environ clearenv", "inherited block still readable");
+    }
+}
+
+// ── T6: kernel atomic append (libc-completion plan) ─────────
+//
+// O_APPEND must land every write at the file's REAL end, with the
+// EOF choice, the byte commit and the file-offset update serialized
+// inside the filesystem's own mount mutex.  This case proves it on
+// the REAL kernel under real SMP preemption, on all three writable
+// filesystems (tmpfs /tmp, ext2 /, FAT32 /boot):
+//
+//   phase 1 — APPEND_WRITERS children each open the file
+//     INDEPENDENTLY (their own open-file description, stale offset 0)
+//     and append fixed-length records.  A record carries its writer
+//     tag, sequence number, deterministic payload and checksum, so
+//     the verifier can prove: every record intact (no torn write),
+//     per-writer sequences 0..N-1 in file order (no loss, no
+//     overwrite), and the exact expected record count.
+//   phase 2 — the same writers share ONE open-file description
+//     (inherited across fork, like dup).  The description's offset
+//     is updated by the append hook under the filesystem lock, so
+//     after all children are joined the parent's SEEK_CUR must equal
+//     the file's actual EOF — the "late returner must not clobber a
+//     newer offset" contract, exercised with real preemption (the
+//     host test covers it only sequentially).
+//
+// Raw open/write only — the plan deliberately does not rely on the
+// fopen layer here (T7+ deliver it).
+#define APPEND_REC               32
+#define APPEND_PAYLOAD_OFF       8
+#define APPEND_CSUM_OFF          28
+#define APPEND_WRITERS           4
+#define APPEND_RECS_PER_WRITER   6
+
+static void append_fill_record(uint8_t *rec, uint32_t tag, uint32_t seq)
+{
+    memset(rec, 0, APPEND_REC);
+    memcpy(rec, &tag, 4);
+    memcpy(rec + 4, &seq, 4);
+    for (int i = 0; i < (int)(APPEND_CSUM_OFF - APPEND_PAYLOAD_OFF); i++)
+        rec[APPEND_PAYLOAD_OFF + i] =
+            (uint8_t)((tag * 31 + seq * 17 + i * 7) & 0xff);
+    uint32_t csum = 0;
+    for (int i = 0; i < APPEND_CSUM_OFF; i++) csum += rec[i];
+    memcpy(rec + APPEND_CSUM_OFF, &csum, 4);
+}
+
+/* Verify every record; returns 0 or a negative reason code:
+ *  -2 torn record  -3 bad tag  -4 per-writer sequence gap  -5 payload
+ *  mismatch  -6 wrong record count  -7 a writer is missing records */
+static int append_verify_file(const char *path, uint32_t expect_total)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    uint32_t next[APPEND_WRITERS + 1];
+    memset(next, 0, sizeof(next));
+    uint8_t buf[APPEND_REC], ref[APPEND_REC];
+    uint32_t total = 0;
+    int rc = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, APPEND_REC);
+        if (n == 0) break;
+        if (n != APPEND_REC) { rc = -2; break; }
+        uint32_t tag, seq;
+        memcpy(&tag, buf, 4);
+        memcpy(&seq, buf + 4, 4);
+        if (tag < 1 || tag > APPEND_WRITERS) { rc = -3; break; }
+        if (seq != next[tag]) { rc = -4; break; }
+        next[tag]++;
+        append_fill_record(ref, tag, seq);
+        if (memcmp(ref, buf, APPEND_REC) != 0) { rc = -5; break; }
+        total++;
+    }
+    close(fd);
+    if (rc != 0) return rc;
+    if (total != expect_total) return -6;
+    for (int t = 1; t <= APPEND_WRITERS; t++)
+        if (next[t] != APPEND_RECS_PER_WRITER) return -7;
+    return 0;
+}
+
+/* One append round on one filesystem directory.  `shared` selects
+ * phase 2 (fork/dup shared description) vs phase 1 (independent
+ * opens).  Returns 0 on success, non-zero reason on the first
+ * failed check. */
+static int append_round(const char *dir, int shared)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "%s/systest_append.dat", dir);
+    unlink(path);
+
+    int total_recs = APPEND_WRITERS * APPEND_RECS_PER_WRITER;
+
+    int root = open(path, O_CREAT | O_WRONLY, 0644);
+    if (root < 0) return -10;
+    close(root);
+
+    int sfd = -1;
+    if (shared) {
+        /* ONE description, inherited by every child: the offset is
+         * shared state that only the append hook may advance. */
+        sfd = open(path, O_RDWR | O_APPEND);
+        if (sfd < 0) { unlink(path); return -11; }
+    }
+
+    pid_t pids[APPEND_WRITERS];
+    int started = 0;
+    for (int w = 0; w < APPEND_WRITERS; w++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            int fd = shared ? sfd : open(path, O_WRONLY | O_APPEND);
+            if (fd < 0) _exit(100);
+            for (uint32_t sq = 0; sq < APPEND_RECS_PER_WRITER; sq++) {
+                uint8_t rec[APPEND_REC];
+                append_fill_record(rec, (uint32_t)w + 1, sq);
+                if (write(fd, rec, APPEND_REC) != APPEND_REC) _exit(101);
+            }
+            if (!shared) close(fd);
+            _exit(0);
+        }
+        if (pid > 0) pids[started++] = pid;
+    }
+
+    int child_fail = 0;
+    for (int w = 0; w < started; w++) {
+        int st = -1;
+        if (waitpid(pids[w], &st, 0) != pids[w] || st != 0) child_fail++;
+    }
+    int rc = (started == APPEND_WRITERS && child_fail == 0) ? 0 : -12;
+    if (rc == 0) {
+        int v = append_verify_file(path, (uint32_t)total_recs);
+        if (v != 0) { rc = (shared ? -20 : -30) + v; }
+    }
+    if (rc == 0 && shared) {
+        /* the shared description's offset must BE the file's EOF */
+        off_t pos = lseek(sfd, 0, SEEK_CUR);
+        off_t end = lseek(sfd, 0, SEEK_END);
+        if (pos != end || end != (off_t)(total_recs * APPEND_REC))
+            rc = -40;
+    }
+    if (sfd >= 0) close(sfd);
+    unlink(path);
+    return rc;
+}
+
+static void test_vfs_append(void)
+{
+    static const char *dirs[3] = { "/tmp", "/", "/boot" };
+    for (int d = 0; d < 3; d++) {
+        int r = append_round(dirs[d], 0);
+        CHECKF(r == 0, "append independent opens", "%s rc=%d",
+               "%s rc=%d", dirs[d], r);
+        r = append_round(dirs[d], 1);
+        CHECKF(r == 0, "append shared fd offset", "%s rc=%d",
+               "%s rc=%d", dirs[d], r);
+    }
+}
+
+// ── T7: stdio modes on target temp files (libc-completion plan) ──
+//
+// The mode matrix, exercised through the REAL kernel on a tmpfs
+// file: fopen("w") truncates, fopen("a") appends at the REAL end
+// (the kernel's T6 atomic append, reached through the libc fopen
+// layer), "r+" reads and writes, fdopen("a") turns a plain
+// descriptor append-only through F_SETFL and the byte lands at EOF
+// even though the descriptor position sits at 0, and a malformed
+// mode ("wx" — the close-on-exec/exclusive extensions are not
+// promised) is rejected with EINVAL.  EINTR behaviour is host-only
+// (regular-file syscalls on this kernel never interrupt).
+static void test_stdio_modes(void)
+{
+    static const char *path = "/tmp/systest_stdio.dat";
+    char buf[32];
+    ssize_t n;
+    unlink(path);
+
+    /* fopen "w": create/truncate, write at 0 */
+    FILE *f = fopen(path, "w");
+    CHECK3(f != NULL, "fopen w", "opened");
+    size_t w = fwrite("hello", 1, 5, f);
+    CHECK3(w == 5, "fwrite w", "5 bytes");
+    fclose(f);
+
+    /* fopen "a": appends at the real end */
+    f = fopen(path, "a");
+    CHECK3(f != NULL, "fopen a", "opened");
+    w = fwrite("WORLD", 1, 5, f);
+    CHECK3(w == 5, "fwrite a", "5 bytes");
+    fclose(f);
+
+    /* fopen "r": exact read-back */
+    memset(buf, 0, sizeof(buf));
+    f = fopen(path, "r");
+    CHECK3(f != NULL, "fopen r", "opened");
+    size_t r = fread(buf, 1, sizeof(buf) - 1, f);
+    CHECK3(r == 10 && memcmp(buf, "helloWORLD", 10) == 0,
+           "fread r", "content matches");
+    fclose(f);
+
+    /* fdopen("a"): a plain descriptor at position 0, the byte must
+     * land at the file's REAL end */
+    int fd = open(path, O_RDWR);
+    CHECK3(fd >= 0, "open fdopen", "descriptor");
+    f = fdopen(fd, "a");
+    CHECK3(f != NULL, "fdopen a", "opened");
+    w = fwrite("!", 1, 1, f);
+    CHECK3(w == 1, "fdopen a write", "1 byte at EOF");
+    fclose(f);                      /* fdopen owns the fd */
+
+    /* verify the complete file content */
+    fd = open(path, O_RDONLY);
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    CHECK3(n == 11 && memcmp(buf, "helloWORLD!", 11) == 0,
+           "fdopen a verify", "appended at real end");
+
+    /* malformed mode: the "x" extension is not promised */
+    errno = 0;
+    f = fopen(path, "wx");
+    CHECK3(f == NULL && errno == EINVAL, "fopen wx", "EINVAL");
+
+    /* fopen "w" on an existing file truncates it */
+    f = fopen(path, "w");
+    CHECK3(f != NULL, "fopen w truncate", "opened");
+    fclose(f);
+    fd = open(path, O_RDONLY);
+    n = read(fd, buf, 1);
+    close(fd);
+    CHECK3(n == 0, "fopen w truncate", "file empty");
+    unlink(path);
+}
+
+
+// ── T8: BusyBox line applets through the libc getline (libc
+//    completion plan) ──
+//
+// getdelim/getline now exist in libc.a and the BusyBox private build
+// carries -DHAVE_GETLINE=1 (config/busybox.config.in).  NOTE: busybox
+// 1.36.1's own getline call sites sit inside #if 0, so nothing in
+// THIS binary references getline today — head/tail extract lines via
+// bb_get_chunk_from_file, an fgetc loop.  That is exactly why this
+// case still matters: it drives OUR fgetc path through real applets
+// over a five-line tmpfs file with stdout redirected to a file, and
+// checks the exact extracted lines.
+static int busybox_lines_expect(const char **av, const char *out_path,
+                                const char *expect, const char *label)
+{
+    unlink(out_path);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int out = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (out < 0) _exit(120);
+        if (dup2(out, 1) < 0) _exit(121);
+        close(out);
+        execve(av[0], (char *const *)av, NULL);
+        _exit(127);
+    }
+    if (pid <= 0) { FAIL("%s: fork", label); return 0; }
+
+    int st = -1;
+    if (waitpid(pid, &st, 0) != pid) { FAIL("%s: waitpid", label); return 0; }
+    if ((st & 0x7f) != 0 || ((st >> 8) & 0xff) != 0) {
+        FAIL("%s: exit status=%d", label, st);
+        return 0;
+    }
+
+    int fd = open(out_path, O_RDONLY);
+    if (fd < 0) { FAIL("%s: no output", label); return 0; }
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n < 0) n = 0;
+    buf[n] = '\0';
+    int ok = (strcmp(buf, expect) == 0);
+    CHECK3(ok, label, ok ? "exact output" : buf);
+    return ok;
+}
+
+static void test_busybox_lines(void)
+{
+    static const char *path = "/tmp/systest_bb_lines.txt";
+    static const char *out = "/tmp/systest_bb_lines.out";
+    unlink(path);
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK3(fd >= 0, "bb lines setup", "file created");
+    if (fd < 0) return;
+    const char *content = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    ssize_t wn = write(fd, content, strlen(content));
+    close(fd);
+    CHECK3(wn == (ssize_t)strlen(content), "bb lines setup", "5 lines seeded");
+
+    char *av_head[5] = {(char *)"/bin/head", (char *)"-n",
+                        (char *)"2", (char *)path, NULL};
+    if (!busybox_lines_expect(av_head, out, "alpha\nbeta\n", "bb head -n 2")) {
+        /* the CHECK3 inside already reported the failure detail */
+    }
+
+    char *av_tail[5] = {(char *)"/bin/tail", (char *)"-n",
+                        (char *)"2", (char *)path, NULL};
+    busybox_lines_expect(av_tail, out, "delta\nepsilon\n", "bb tail -n 2");
+
+    char *av_cat[4] = {(char *)"/bin/cat", (char *)path, NULL};
+    busybox_lines_expect(av_cat, out, content, "bb cat");
+
+    unlink(path);
+    unlink(out);
+}
+
+// ── T10: integer conversions on a uint64 token (libc-completion
+//    plan) ──
+//
+// The strto* family must survive the full uint64 range without
+// truncation: a token written to tmpfs, read back as text, and
+// converted must reproduce the exact value (UINTMAX_MAX, INTMAX_MIN,
+// a base-16 token with the high bits set), and an overflow must
+// answer ERANGE with the saturated maximum.  The strtol family was
+// previously able to truncate these (strtoull was a truncation cast
+// of strtoul) — this case pins the fix on the real kernel.
+static void test_integer_conversions(void)
+{
+    static const char *path = "/tmp/systest_inttok.txt";
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK3(fd >= 0, "inttok setup", "file created");
+    if (fd < 0) return;
+    const char *content =
+        "18446744073709551615\n"
+        "-9223372036854775808\n"
+        "0xdeadbeefcafebabe\n"
+        "99999999999999999999999\n";
+    ssize_t wn = write(fd, content, strlen(content));
+    close(fd);
+    CHECK3(wn == (ssize_t)strlen(content), "inttok setup", "tokens seeded");
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { FAIL("inttok reopen"); return; }
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) { FAIL("inttok read"); return; }
+    buf[n] = '\0';
+
+    errno = 0;
+    char *e = NULL;
+    uintmax_t u = strtoumax(buf, &e, 10);
+    CHECK3(u == UINTMAX_MAX && errno == 0 &&
+           (long)(e - buf) == 20, "strtoumax uint64 token",
+           "full uint64 range, exact consumption");
+
+    errno = 0;
+    intmax_t m = strtoimax(e + 1, &e, 10);
+    CHECK3(m == INTMAX_MIN && errno == 0,
+           "strtoimax int64 minimum", "INTMAX_MIN exact");
+
+    errno = 0;
+    u = strtoumax(e + 1, &e, 16);
+    CHECK3(u == 0xdeadbeefcafebabeULL && errno == 0 &&
+           (long)(e - buf) == 60, "strtoumax base16 token",
+           "high-bit token exact");
+
+    errno = 0;
+    u = strtoumax(e + 1, &e, 10);
+    CHECK3(u == UINTMAX_MAX && errno == ERANGE, "strtoumax overflow",
+           "ERANGE with saturated maximum");
+
+    unlink(path);
+}
+
+// ── T13: the calendar core, the POSIX TZ and the formatting on the
+//    real kernel (libc-completion plan) ──
+//
+// The host group proves the conversion against a glibc oracle; this
+// case proves that the SAME libc works in the guest: the epoch is a
+// Thursday, the broken-down fields are right, the leap year 2000 and
+// the non-leap year 2100 differ, mktime normalizes and round-trips,
+// timegm is the UTC twin, strftime formats, and the zone follows the
+// environment.  The instants are CONSTANTS — nothing here reads a wall
+// clock, except the last probe, which only checks that the clock the
+// desktop shows is a moving one.
+static void test_time_conversion(void)
+{
+    struct tm tm;
+    struct tm *p;
+    time_t t;
+
+    /* the epoch: 1970-01-01 was a Thursday */
+    t = (time_t)0;
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 70 && p->tm_mon == 0 && p->tm_mday == 1 &&
+           p->tm_hour == 0 && p->tm_min == 0 && p->tm_sec == 0 &&
+           p->tm_wday == 4 && p->tm_yday == 0,
+           "time epoch", "1970-01-01 is a Thursday");
+
+    /* one second before the epoch */
+    t = (time_t)-1;
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 69 && p->tm_mon == 11 && p->tm_mday == 31 &&
+           p->tm_hour == 23 && p->tm_min == 59 && p->tm_sec == 59,
+           "time before epoch", "1969-12-31 23:59:59");
+
+    /* 2000 is a leap year, 2100 is not */
+    t = (time_t)951782400;   /* 2000-02-29T00:00:00Z */
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_mon == 1 && p->tm_mday == 29 && p->tm_yday == 59,
+           "time leap 2000", "2000-02-29 is day 59");
+
+    t = (time_t)4107542400;  /* 2100-03-01T00:00:00Z */
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 200 && p->tm_mon == 2 && p->tm_mday == 1 &&
+           p->tm_yday == 59,
+           "time non-leap 2100", "2100-03-01 is day 59");
+
+    /* after the 32-bit boundary */
+    t = (time_t)2147483648;  /* 2038-01-19T03:14:08Z */
+    memset(&tm, 0, sizeof tm);
+    p = gmtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_year == 138 && p->tm_mon == 0 && p->tm_mday == 19 &&
+           p->tm_hour == 3 && p->tm_min == 14 && p->tm_sec == 8,
+           "time after 2038", "2038-01-19T03:14:08Z");
+
+    /* an instant that cannot be represented is EOVERFLOW, not a wrong
+     * answer */
+    t = (time_t)9223372036854775807LL;
+    memset(&tm, 0, sizeof tm);
+    errno = 0;
+    p = gmtime_r(&t, &tm);
+    CHECK3(p == NULL && errno == EOVERFLOW, "time overflow",
+           "EOVERFLOW for an unrepresentable instant");
+
+    /* mktime normalizes the broken-down fields.  The zone is pinned to
+     * UTC first, so the expectation does not depend on the boot
+     * environment. */
+    unsetenv("TZ");
+    tzset();
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = 2024 - 1900;
+    tm.tm_mon = 1;          /* February (29 days in 2024) */
+    tm.tm_mday = 32;        /* the 3rd of March */
+    tm.tm_hour = 12;
+    t = mktime(&tm);
+    CHECK3(t == (time_t)1709467200 && tm.tm_mon == 2 && tm.tm_mday == 3 &&
+           tm.tm_hour == 12,
+           "time mktime normalizes", "2024-02-32 is 2024-03-03");
+
+    /* timegm is the UTC twin */
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = 2024 - 1900;
+    tm.tm_mon = 2;
+    tm.tm_mday = 10;
+    tm.tm_hour = 7;
+    t = timegm(&tm);
+    CHECK3(t == (time_t)1710054000, "time timegm",
+           "2024-03-10T07:00:00Z");
+
+    /* strftime formats the broken-down time */
+    {
+        char buf[64];
+        size_t n;
+
+        memset(&tm, 0, sizeof tm);
+        tm.tm_year = 2021 - 1900;
+        tm.tm_mon = 0;
+        tm.tm_mday = 3;
+        tm.tm_hour = 4;
+        tm.tm_min = 5;
+        tm.tm_sec = 6;
+        tm.tm_wday = 0;
+        tm.tm_yday = 2;
+        n = strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tm);
+        CHECK3(n == 19 && strcmp(buf, "2021-01-03 04:05:06") == 0,
+               "time strftime", "2021-01-03 04:05:06");
+    }
+
+    /* the zone follows the environment */
+    setenv("TZ", "CST-8", 1);
+    t = (time_t)1710050400;  /* 2024-03-10T06:00:00Z */
+    memset(&tm, 0, sizeof tm);
+    p = localtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_hour == 14 && p->tm_isdst == 0,
+           "time zone", "CST-8 is UTC+8");
+
+    /* a malformed zone is UTC, not a leftover */
+    setenv("TZ", "not-a-zone", 1);
+    memset(&tm, 0, sizeof tm);
+    p = localtime_r(&t, &tm);
+    CHECK3(p != NULL && p->tm_hour == 6, "time malformed zone",
+           "a malformed TZ is UTC");
+    unsetenv("TZ");
+
+    /* the wall clock the desktop shows is a MOVING one */
+    {
+        struct timespec ts1;
+        struct timespec ts2;
+
+        if (clock_gettime(CLOCK_REALTIME, &ts1) == 0) {
+            int64_t a = (int64_t)ts1.tv_sec * 1000000000LL + (int64_t)ts1.tv_nsec;
+            int64_t b;
+            int spins = 0;
+            do {
+                if (clock_gettime(CLOCK_REALTIME, &ts2) != 0) {
+                    break;
+                }
+                b = (int64_t)ts2.tv_sec * 1000000000LL + (int64_t)ts2.tv_nsec;
+            } while (b == a && ++spins < 1000);
+            CHECK3(b > a, "time wall clock moves",
+                   "CLOCK_REALTIME advances");
+        } else {
+            skip_case("no-clock-gettime");
+        }
+    }
+}
+
+// ── T11: long double precision across processes (libc-completion
+//    plan) ──
+//
+// strtold must preserve MORE significant bits than strtod (the x87
+// 80-bit format carries 64 mantissa bits vs 53), deterministically,
+// in a fresh process after fork+exec through the scheduler.  The
+// expected 80-bit pattern of 3.14159265358979323846264338327950288
+// (little-endian: 8 mantissa bytes + the 2 exponent/sign bytes) was
+// produced by the T11 host oracle and is hard-coded here — both the
+// host glibc and the OS01 floatscan are correctly rounded, so the
+// bits must match on the target exactly.  The old strtod could not
+// even accept this check: it lost the tail digits to repeated
+// multiply/divide, and strtold did not exist.
+static const char *fp_ld_expected = "\x35\xc2\x68\x21\xa2\xda\x0f\xc9\x00\x40";
+
+static void test_float_precision(void)
+{
+    const char *s = "3.14159265358979323846264338327950288";
+
+    /* the long double result must differ from the double one (extra
+     * precision survived the parse) */
+    long double ld = strtold(s, NULL);
+    double d = strtod(s, NULL);
+    long double dw = (long double)d;
+    CHECK3(ld != dw, "float ld extra precision",
+           "long double carries more bits than double");
+    CHECK3((ld - dw) > 0 && (ld - dw) < 1e-15L, "float ld sane delta",
+           "difference at the double-precision scale");
+
+    /* the exact 80-bit pattern, in-process */
+    CHECK3(memcmp(&ld, fp_ld_expected, 10) == 0, "float ld pattern",
+           "x87 80-bit pattern exact");
+
+    /* the same parse in a fresh process after fork (scheduler +
+     * syscall path), verified against the parent's pattern */
+    pid_t pid = fork();
+    if (pid == 0) {
+        long double c = strtold(s, NULL);
+        _exit(memcmp(&c, fp_ld_expected, 10) == 0 ? 0 : 1);
+    }
+    int st = -1;
+    int64_t w = waitpid(pid, &st, 0);
+    CHECK3(w == pid && st == 0, "float ld fresh process",
+           "child parse bit-identical");
+}
+
 // ── 50: protected ranges (Task 5, heap/ELF isolation plan) ─
+
+
+
 // The kernel reserves [0x400000, 0x20600000) for the ELF image
 // (envelope incl. segment gaps), the heap (committed + reserve),
 // the 0x203ff000 guard page and the 2 MiB user stack.  No mapping
@@ -3820,9 +4559,9 @@ static void test_protected_ranges(void)
                 char *nl = strchr(q, '\n');
                 if (nl) { *nl = '\0'; q = nl + 1; }
                 else    { q = line + strlen(line); }
-                unsigned int s32, e32;
-                if (sscanf(line, "%x-%x", &s32, &e32) >= 1) {
-                    if (s32 == 0x400000UL) has_image = 1;
+                unsigned long s64, e64;
+                if (sscanf(line, "%lx-%lx", &s64, &e64) >= 1) {
+                    if (s64 == 0x400000UL) has_image = 1;
                 }
                 if (strstr(line, "[heap]")) has_heap = 1;
             }
@@ -4202,10 +4941,943 @@ typedef struct {
     int quick;           /* 1 = included by --quick */
 } test_case_t;
 
+/* ── T15: the directory descriptor and the sorted scan against the REAL
+ * guest filesystems ────────────────────────────────────────────────
+ *
+ * Two traps are avoided on purpose:
+ *
+ *  1. The kernel SORTS the entries by name BEFORE it writes them out
+ *     (vfs_getdents in kernel/fs/vfs.c sorts, then emits).  A guest
+ *     assertion "the scan comes back sorted" therefore proves NOTHING
+ *     — it would hold even if the comparator were never called.  The
+ *     comparator used here is by name LENGTH, which differs from the
+ *     name order, so it can only hold if scandir() really called it.
+ *
+ *  2. d_off in OS01 is the kernel's own sequence number (d_off = pos+1
+ *     in vfs_getdents), not a rich cookie.  The property under test is
+ *     the right one for a libc: the value is copied VERBATIM from the
+ *     kernel's record.  The check cross-reads the raw records with
+ *     getdents64(2) and compares them one by one with what readdir()
+ *     handed back.
+ */
+
+/* scandir() returns "." and ".." as well — the filter below drops them
+ * so that the count is the number of REAL entries. */
+static int dir_filter_files(const struct dirent *e)
+{
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+        return 0;
+    return 1;
+}
+
+/* By name LENGTH, then by name.  Deliberately NOT the name order. */
+static int dir_cmp_by_len(const struct dirent **a, const struct dirent **b)
+{
+    size_t la = strlen((*a)->d_name);
+    size_t lb = strlen((*b)->d_name);
+
+    if (la != lb)
+        return la < lb ? -1 : 1;
+    return strcmp((*a)->d_name, (*b)->d_name);
+}
+
+/* The raw kernel record: the name sits at offsetof(d_name) == 19, NOT
+ * at sizeof(struct linux_dirent64) == 24. */
+#define DIR_RAW_NAME_OFF 19
+
+/* Read the raw records of a directory and collect their d_off values. */
+static int dir_raw_offs(int fd, uint64_t *offs, int max, int *count)
+{
+    char buf[4096];
+    int64_t ret;
+    unsigned pos = 0;
+    int n = 0;
+
+    *count = 0;
+    ret = syscall(SYS_getdents64, (uint64_t)fd, (uint64_t)buf,
+                  (uint64_t)sizeof(buf));
+    if (ret <= 0)
+        return -1;
+    while (pos < (unsigned)ret) {
+        const char *rec = buf + pos;
+        unsigned short reclen;
+
+        if (pos + DIR_RAW_NAME_OFF > (unsigned)ret)
+            return -1;
+        reclen = *(const unsigned short *)(const void *)(rec + 16);
+        if (reclen == 0 || pos + reclen > (unsigned)ret)
+            return -1;
+        if (n < max)
+            offs[n++] = *(const uint64_t *)(const void *)(rec + 8);
+        pos += reclen;
+    }
+    *count = n;
+    return 0;
+}
+
+/* An independent sort oracle: a plain insertion sort over the names,
+ * so the alphasort result is checked against code that does not share
+ * the comparator under test. */
+static void dir_sort_names(char names[8][32], int n)
+{
+    int i, j;
+
+    for (i = 1; i < n; i++) {
+        char tmp[32];
+        strncpy(tmp, names[i], sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        j = i - 1;
+        while (j >= 0 && strcmp(names[j], tmp) > 0) {
+            strncpy(names[j + 1], names[j], sizeof(names[0]) - 1);
+            names[j + 1][sizeof(names[0]) - 1] = '\0';
+            j--;
+        }
+        strncpy(names[j + 1], tmp, sizeof(tmp) - 1);
+        names[j + 1][sizeof(tmp) - 1] = '\0';
+    }
+}
+
+static void test_dir_scan_vfs(void)
+{
+    int ok;
+    int fd;
+    int dupfd;
+    DIR *dir;
+    struct dirent *e;
+    struct dirent **list = NULL;
+    struct dirent **sorted = NULL;
+    char oracle[8][32];
+    uint64_t raw_offs[64];
+    uint64_t read_offs[64];
+    int raw_n = 0;
+    int read_n = 0;
+    int n;
+
+    /* ── (a) tmpfs: a directory with three files whose names have three
+     * DIFFERENT lengths, and whose name order differs from their length
+     * order ("aaa" < "b" < "zz" by name, but "b" < "zz" < "aaa" by
+     * length). ── */
+    mkdir("/tmp/dt", 0755);
+    fd = open("/tmp/dt/aaa", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0)
+        close(fd);
+    fd = open("/tmp/dt/b", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0)
+        close(fd);
+    fd = open("/tmp/dt/zz", O_WRONLY | O_CREAT, 0644);
+    if (fd >= 0)
+        close(fd);
+
+    dir = opendir("/tmp/dt");
+    ok = (dir != NULL);
+    CHECK3(ok, "dir tmpfs opendir", ok ? "/tmp/dt" : "opendir failed");
+    if (dir) {
+        int seen = 0;
+        int names_ok = 1;
+        while ((e = readdir(dir)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            seen++;
+            if (strcmp(e->d_name, "aaa") != 0 && strcmp(e->d_name, "b") != 0 &&
+                strcmp(e->d_name, "zz") != 0)
+                names_ok = 0;
+        }
+        ok = (seen == 3) && names_ok;
+        CHECK3(ok, "dir tmpfs entries", ok ? "3 entries" : "wrong entry set");
+        closedir(dir);
+    }
+
+    /* ── (b) ext2: the root filesystem is a real ext2, /bin lives on it ── */
+    dir = opendir("/bin");
+    ok = (dir != NULL);
+    CHECK3(ok, "dir ext2 opendir", ok ? "/bin" : "opendir failed");
+    if (dir) {
+        int found = 0;
+        while ((e = readdir(dir)) != NULL)
+            if (strcmp(e->d_name, "systest") == 0)
+                found = 1;
+        CHECK3(found, "dir ext2 entries", found ? "systest found" : "systest missing");
+        closedir(dir);
+    }
+
+    /* ── (c) the descriptor ownership: fdopendir() takes the descriptor
+     * over, closedir() closes it, and the ORIGINAL stays open ── */
+    fd = open("/tmp/dt", O_RDONLY);
+    ok = (fd >= 0);
+    CHECK3(ok, "dir open", ok ? "opened" : "open failed");
+    if (fd >= 0) {
+        dupfd = dup(fd);
+        ok = (dupfd >= 0);
+        CHECK3(ok, "dir dup", ok ? "dup ok" : "dup failed");
+        if (dupfd >= 0) {
+            dir = fdopendir(dupfd);
+            ok = (dir != NULL);
+            CHECK3(ok, "dir fdopendir", ok ? "taken over" : "failed");
+            if (dir) {
+                ok = (closedir(dir) == 0);
+                CHECK3(ok, "dir closedir", ok ? "closed" : "close failed");
+                /* the taken-over descriptor is REALLY closed now */
+                errno = 0;
+                ok = (fcntl(dupfd, F_GETFD) == -1) && (errno == EBADF);
+                CHECK3(ok, "dir closedir closes the descriptor",
+                       ok ? "EBADF" : "still open");
+                /* the ORIGINAL descriptor is untouched */
+                ok = (fcntl(fd, F_GETFD) == 0);
+                CHECK3(ok, "dir the original descriptor is untouched",
+                       ok ? "still open" : "was closed");
+                /* ... and it is still usable */
+                dir = fdopendir(fd);
+                ok = (dir != NULL);
+                CHECK3(ok, "dir the original descriptor is still usable",
+                       ok ? "usable" : "unusable");
+                if (dir)
+                    closedir(dir);
+            }
+        }
+    }
+
+    /* ── the FAILURE path: fdopendir() on a regular file answers
+     * ENOTDIR and does NOT close the caller's descriptor.  This is the
+     * contract the desktop's file view relies on: a failed opendir()
+     * keeps the old view instead of replacing it with an empty one. ── */
+    fd = open("/tmp/dt/zz", O_RDONLY);
+    ok = (fd >= 0);
+    if (ok) {
+        errno = 0;
+        dir = fdopendir(fd);
+        ok = (dir == NULL) && (errno == ENOTDIR);
+        CHECK3(ok, "dir fdopendir on a regular file", ok ? "ENOTDIR" : "wrong");
+        /* the descriptor is still the caller's */
+        ok = (fcntl(fd, F_GETFD) == 0);
+        CHECK3(ok, "dir the failed fdopendir keeps the descriptor",
+               ok ? "still open" : "was closed");
+        /* and opendir() on a regular file answers ENOTDIR as well */
+        errno = 0;
+        ok = (opendir("/tmp/dt/zz") == NULL) && (errno == ENOTDIR);
+        CHECK3(ok, "dir opendir on a regular file", ok ? "ENOTDIR" : "wrong");
+        close(fd);
+    }
+
+    /* ── (d) scandir() really calls the comparator: the order by LENGTH
+     * differs from the kernel's (name) order ── */
+    n = scandir("/tmp/dt", &list, dir_filter_files, dir_cmp_by_len);
+    ok = (n == 3);
+    CHECK3(ok, "dir scandir entry count", ok ? "3 entries" : "wrong count");
+    if (ok) {
+        ok = strcmp(list[0]->d_name, "b") == 0 &&
+             strcmp(list[1]->d_name, "zz") == 0 &&
+             strcmp(list[2]->d_name, "aaa") == 0;
+    }
+    CHECK3(ok, "dir scandir uses the comparator",
+           ok ? "length order" : "the comparator was not used");
+    if (list) {
+        int i;
+        for (i = 0; i < n; i++)
+            free(list[i]);
+        free(list);
+        list = NULL;
+    }
+
+    /* ── alphasort() against an INDEPENDENT oracle ── */
+    n = scandir("/tmp/dt", &sorted, dir_filter_files, alphasort);
+    ok = (n == 3);
+    CHECK3(ok, "dir alphasort entry count", ok ? "3 entries" : "wrong count");
+    if (ok) {
+        int i;
+        for (i = 0; i < n; i++) {
+            strncpy(oracle[i], sorted[i]->d_name, sizeof(oracle[0]) - 1);
+            oracle[i][sizeof(oracle[0]) - 1] = '\0';
+        }
+        dir_sort_names(oracle, n);
+        for (i = 0; i < n; i++)
+            if (strcmp(oracle[i], sorted[i]->d_name) != 0)
+                ok = 0;
+    }
+    CHECK3(ok, "dir alphasort matches the oracle",
+           ok ? "same order" : "different order");
+    if (sorted) {
+        int i;
+        for (i = 0; i < n; i++)
+            free(sorted[i]);
+        free(sorted);
+        sorted = NULL;
+    }
+
+    /* ── (e) d_off is copied VERBATIM from the kernel's record: the raw
+     * getdents64(2) records are compared with what readdir() returned ── */
+    fd = open("/tmp/dt", O_RDONLY);
+    ok = (fd >= 0) && (dir_raw_offs(fd, raw_offs, 64, &raw_n) == 0);
+    CHECK3(ok, "dir raw getdents64", ok ? "read" : "failed");
+    if (ok) {
+        dir = opendir("/tmp/dt");
+        while (dir && (e = readdir(dir)) != NULL && read_n < 64)
+            read_offs[read_n++] = e->d_off;
+        if (dir)
+            closedir(dir);
+        ok = (read_n == raw_n);
+        if (ok) {
+            int i;
+            for (i = 0; i < raw_n; i++)
+                if (raw_offs[i] != read_offs[i])
+                    ok = 0;
+        }
+        CHECK3(ok, "dir d_off is the kernel's own value",
+               ok ? "identical" : "d_off differs");
+    }
+    if (fd >= 0)
+        close(fd);
+
+    /* ── cleanup ── */
+    unlink("/tmp/dt/aaa");
+    unlink("/tmp/dt/b");
+    unlink("/tmp/dt/zz");
+    rmdir("/tmp/dt");
+}
+
+// ── libc completion acceptance (T17) ─────────────────────────────────────
+// The guest-side acceptance of the SHIPPED libc: every group the plan's
+// coverage table promises is driven here on the real guest — the shipped
+// libc.a, the real VFS, the real kernel, the real BusyBox shell.  The
+// host groups own the fine-grained behaviour (and they compare against
+// an independent oracle); these cases own the different question: "does
+// the archive we ship actually work inside the guest?".
+//
+// The cases are named after the plan's guest case list (55_libc_alloc …
+// 65_libc_append; 64_libc_regex is NOT implemented this cycle — the POSIX
+// regex engine is out of scope, so regex.h is still the T1 inline stub).
+
+// ── 55_libc_alloc ────────────────────────────────────────────────────────
+// The allocator the shipped libc ships: alignment, the overflow checks
+// and the growth path.
+static void test_libc_alloc(void)
+{
+    void *p;
+    void *q;
+    void *r;
+    void *ap = NULL;
+    unsigned char *bytes;
+    char *keep;
+    int zeroed = 1;
+    int rc;
+
+    p = malloc(64);
+    CHECK3(p != NULL, "alloc malloc", p ? "64 bytes" : "NULL");
+    CHECK3(p != NULL && ((uintptr_t)p % 16) == 0, "alloc alignment",
+           (p && ((uintptr_t)p % 16) == 0) ? "16-byte aligned" : "misaligned");
+
+    q = calloc(16, 8);
+    bytes = (unsigned char *)q;
+    for (int i = 0; q != NULL && i < 128; i++)
+        if (bytes[i] != 0) zeroed = 0;
+    CHECK3(q != NULL && zeroed, "alloc calloc zeroes",
+           (q && zeroed) ? "128 zero bytes" : "not zeroed");
+
+    // The overflow check: the element count times the element size must
+    // not wrap, or the caller would get a block far smaller than it asked
+    // for.
+    errno = 0;
+    p = calloc((size_t)-1 / 2, 4);
+    CHECK3(p == NULL && errno == ENOMEM, "alloc calloc overflow",
+           (p == NULL && errno == ENOMEM) ? "ENOMEM" : "no overflow answer");
+
+    errno = 0;
+    r = reallocarray(NULL, (size_t)-1, 2);
+    CHECK3(r == NULL && errno == ENOMEM, "alloc reallocarray overflow",
+           (r == NULL && errno == ENOMEM) ? "ENOMEM" : "no overflow answer");
+
+    // Growth keeps the content.
+    keep = malloc(4);
+    memcpy(keep, "abc", 4);
+    keep = realloc(keep, 128);
+    CHECK3(keep != NULL && strcmp(keep, "abc") == 0,
+           "alloc realloc keeps the content",
+           (keep && strcmp(keep, "abc") == 0) ? "abc" : "content lost");
+
+    // Aligned allocation: posix_memalign reports through its return value
+    // and never touches errno; aligned_alloc follows C11 (the size must be
+    // a multiple of the alignment).
+    errno = 0;
+    rc = posix_memalign(&ap, 64, 128);
+    CHECK3(rc == 0 && ap != NULL && ((uintptr_t)ap % 64) == 0,
+           "alloc posix_memalign",
+           (rc == 0 && ap && ((uintptr_t)ap % 64) == 0) ? "64-byte aligned"
+                                                       : "not aligned");
+
+    errno = 0;
+    q = aligned_alloc(32, 96);
+    CHECK3(q != NULL && ((uintptr_t)q % 32) == 0, "alloc aligned_alloc",
+           (q && ((uintptr_t)q % 32) == 0) ? "32-byte aligned" : "not aligned");
+
+    errno = 0;
+    q = aligned_alloc(32, 100);
+    CHECK3(q == NULL && errno == EINVAL, "alloc aligned_alloc size rule",
+           (q == NULL && errno == EINVAL) ? "EINVAL" : "no EINVAL");
+
+    free(p);
+    free(keep);
+    free(ap);
+    free(q);
+}
+
+// ── 56_libc_env ──────────────────────────────────────────────────────────
+// One environment table with per-entry ownership: setenv copies, putenv
+// borrows, unsetenv removes, and the table reaches a child through
+// fork + execve.
+static void test_libc_env(void)
+{
+    const char *got;
+    int ok;
+
+    setenv("OS01_LIBC_ENV", "one", 1);
+    got = getenv("OS01_LIBC_ENV");
+    ok = got != NULL && strcmp(got, "one") == 0;
+    CHECK3(ok, "env setenv/getenv", ok ? "one" : "wrong value");
+
+    // An overwrite replaces the value.
+    setenv("OS01_LIBC_ENV", "two", 1);
+    got = getenv("OS01_LIBC_ENV");
+    ok = got != NULL && strcmp(got, "two") == 0;
+    CHECK3(ok, "env overwrite", ok ? "two" : "wrong value");
+
+    // putenv borrows the caller's string: the table must not copy it.
+    {
+        static char borrowed[] = "OS01_LIBC_PUT=put";
+        ok = putenv(borrowed) == 0;
+        got = getenv("OS01_LIBC_PUT");
+        ok = ok && got != NULL && strcmp(got, "put") == 0;
+        CHECK3(ok, "env putenv", ok ? "put" : "wrong value");
+    }
+
+    unsetenv("OS01_LIBC_ENV");
+    CHECK3(getenv("OS01_LIBC_ENV") == NULL, "env unsetenv",
+           getenv("OS01_LIBC_ENV") == NULL ? "removed" : "still there");
+
+    // The table reaches a child: the child re-execs itself through the
+    // startup probe, which compares the inherited value with the expected
+    // one (exit 21).
+    {
+        char *av[3] = {(char *)"startup-probe", (char *)"--envinherit", NULL};
+        char *ep[3] = {(char *)"OS01_ENV_CHILD=v", (char *)"OS01_ENV_EXPECT=v",
+                       NULL};
+        ok = run_startup_probe_case(av, ep, 21) == 1;
+        CHECK3(ok, "env reaches the child", ok ? "exit 21" : "wrong exit");
+    }
+}
+
+// ── 57_libc_stdio ────────────────────────────────────────────────────────
+// The stream layer on a real file of the guest filesystem: the mode
+// parser, complete-item IO, the seek family and the dynamic line reader.
+static void test_libc_stdio(void)
+{
+    const char *path = "/tmp/libc_stdio_case.dat";
+    FILE *f;
+    char buf[64];
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t got;
+    int ok;
+
+    unlink(path);
+    f = fopen(path, "w+");
+    CHECK3(f != NULL, "stdio fopen w+", f ? path : "NULL");
+    if (f == NULL) return;
+
+    ok = fwrite("line1\nline2\n", 1, 12, f) == 12;
+    CHECK3(ok, "stdio fwrite", ok ? "12 bytes" : "short write");
+    ok = fflush(f) == 0;
+    CHECK3(ok, "stdio fflush", ok ? "flushed" : "failed");
+
+    ok = fseek(f, 0, SEEK_END) == 0 && ftell(f) == 12;
+    CHECK3(ok, "stdio fseek/ftell", ok ? "at 12" : "wrong offset");
+    ok = fseek(f, 0, SEEK_SET) == 0 && ftell(f) == 0;
+    CHECK3(ok, "stdio rewind offset", ok ? "at 0" : "wrong offset");
+
+    ok = fgets(buf, sizeof(buf), f) != NULL && strcmp(buf, "line1\n") == 0;
+    CHECK3(ok, "stdio fgets", ok ? "line1" : "wrong line");
+
+    got = getline(&line, &cap, f);
+    ok = got > 0 && strcmp(line, "line2\n") == 0;
+    CHECK3(ok, "stdio getline", ok ? "line2" : "wrong line");
+    free(line);
+    line = NULL;
+    cap = 0;
+
+    // At the end of the file the EOF indicator is set, and the error
+    // indicator is not.
+    ok = feof(f) == 0;            /* the last getline ended ON the newline */
+    CHECK3(ok, "stdio feof is sticky only after a read past the end",
+           ok ? "not at EOF yet" : "unexpected EOF");
+
+    ok = ferror(f) == 0;
+    CHECK3(ok, "stdio ferror", ok ? "no error" : "error flagged");
+    fclose(f);
+
+    // "a" must NOT truncate: the file keeps its content.
+    f = fopen(path, "a");
+    ok = f != NULL;
+    CHECK3(ok, "stdio fopen a", ok ? "opened" : "NULL");
+    if (f != NULL) {
+        fputs("line3\n", f);
+        fclose(f);
+        f = fopen(path, "r");
+        if (f != NULL) {
+            int total = 0;
+            while (fgets(buf, sizeof(buf), f) != NULL) total++;
+            fclose(f);
+            ok = total == 3;
+            CHECK3(ok, "stdio append mode keeps the file", ok ? "3 lines"
+                                                             : "wrong line count");
+        }
+    }
+    unlink(path);
+}
+
+// ── 58_libc_integer ──────────────────────────────────────────────────────
+// The integer conversion core: the boundaries, the endptr and the
+// overflow answers.
+static void test_libc_integer(void)
+{
+    char *end;
+    long v;
+    unsigned long uv;
+    long long llv;
+    intmax_t im;
+    uintmax_t um;
+    int ok;
+
+    errno = 0;
+    v = strtol("123", &end, 10);
+    ok = v == 123 && *end == '\0' && errno == 0;
+    CHECK3(ok, "integer strtol", ok ? "123" : "wrong value");
+
+    errno = 0;
+    v = strtol("  -42abc", &end, 10);
+    ok = v == -42 && strcmp(end, "abc") == 0;
+    CHECK3(ok, "integer strtol endptr", ok ? "endptr at abc" : "wrong endptr");
+
+    // One past LONG_MAX: the value saturates and errno says ERANGE.
+    errno = 0;
+    v = strtol("9223372036854775808", &end, 10);
+    ok = v == LONG_MAX && errno == ERANGE;
+    CHECK3(ok, "integer strtol overflow", ok ? "LONG_MAX + ERANGE"
+                                             : "wrong overflow answer");
+
+    /* strtoul() takes the minus sign and negates the result: "-1" is
+     * ULONG_MAX and that is NOT an overflow, so errno stays 0.  (glibc
+     * answers the same; the host group compares against that oracle.) */
+    errno = 0;
+    uv = strtoul("-1", &end, 10);
+    ok = uv == ULONG_MAX && errno == 0;
+    CHECK3(ok, "integer strtoul -1", ok ? "ULONG_MAX, no ERANGE"
+                                       : "wrong answer");
+
+    errno = 0;
+    llv = strtoll("-9223372036854775809", &end, 10);
+    /* The bound is spelled out instead of using LLONG_MIN: the macro's
+     * literal does not fit a signed type, and the compiler says so. */
+    ok = llv == (-9223372036854775807LL - 1) && errno == ERANGE;
+    CHECK3(ok, "integer strtoll underflow", ok ? "LLONG_MIN + ERANGE"
+                                               : "wrong overflow answer");
+
+    /* One past INTMAX_MAX: the value saturates and errno says ERANGE.
+     * (The bound is spelled out because INTMAX_MAX's own literal does
+     * not fit a signed type.) */
+    errno = 0;
+    im = strtoimax("170141183460469231731687303715884105727", &end, 10);
+    ok = im == INTMAX_MAX && errno == ERANGE;
+    CHECK3(ok, "integer strtoimax overflow", ok ? "INTMAX_MAX + ERANGE"
+                                                : "wrong overflow answer");
+
+    errno = 0;
+    im = strtoimax("9223372036854775807", &end, 10);
+    ok = im == INTMAX_MAX && errno == 0;
+    CHECK3(ok, "integer strtoimax max", ok ? "INTMAX_MAX" : "wrong value");
+
+    errno = 0;
+    um = strtoumax("18446744073709551616", &end, 10);
+    ok = um == UINTMAX_MAX && errno == ERANGE;
+    CHECK3(ok, "integer strtoumax overflow", ok ? "UINTMAX_MAX + ERANGE"
+                                                : "wrong overflow answer");
+
+    // The base handling: 0x with base 0 and with base 16 are the same.
+    v = strtol("0x1f", &end, 16);
+    ok = v == 31 && *end == '\0';
+    CHECK3(ok, "integer base 16", ok ? "31" : "wrong value");
+    v = strtol("0x1f", &end, 0);
+    ok = v == 31 && *end == '\0';
+    CHECK3(ok, "integer base 0", ok ? "31" : "wrong value");
+
+    // An empty input converts nothing: the endptr stays at the input and
+    // no error is raised.
+    errno = 0;
+    v = strtol("   ", &end, 10);
+    ok = v == 0 && end != NULL && *end != '\0' && errno == 0;
+    CHECK3(ok, "integer no conversion", ok ? "endptr unmoved" : "wrong answer");
+}
+
+// ── 59_libc_float ────────────────────────────────────────────────────────
+// The precision-aware float scanner: the long double keeps more bits than
+// the double, the hexadecimal form parses, and the range errors are
+// visible.
+static void test_libc_float(void)
+{
+    char *end;
+    double d;
+    float f;
+    long double ld;
+    int ok;
+
+    errno = 0;
+    d = strtod("3.5", &end);
+    ok = d == 3.5 && *end == '\0' && errno == 0;
+    CHECK3(ok, "float strtod", ok ? "3.5" : "wrong value");
+
+    // The long double must NOT be routed through a double: the value it
+    // keeps is more precise than the double's.
+    d = strtod("0.1", &end);
+    ld = strtold("0.1", &end);
+    ok = ld != (long double)d;
+    CHECK3(ok, "float strtold keeps the extra bits",
+           ok ? "long double is finer" : "same as double");
+
+    errno = 0;
+    d = strtod("0x1.8p+1", &end);
+    ok = d == 3.0 && *end == '\0';
+    CHECK3(ok, "float hexadecimal", ok ? "3.0" : "wrong value");
+
+    // "1e+" is a complete "1" followed by junk: the exponent sign without
+    // digits belongs to the tail.
+    errno = 0;
+    d = strtod("1e+", &end);
+    ok = d == 1.0 && strcmp(end, "e+") == 0;
+    CHECK3(ok, "float partial exponent", ok ? "consumed 1" : "wrong endptr");
+
+    errno = 0;
+    d = strtod("1e400", &end);
+    ok = (d > 1e308) && errno == ERANGE;
+    CHECK3(ok, "float overflow", ok ? "ERANGE" : "no ERANGE");
+
+    errno = 0;
+    f = strtof("2.5", &end);
+    ok = f == 2.5f && *end == '\0';
+    CHECK3(ok, "float strtof", ok ? "2.5" : "wrong value");
+
+    errno = 0;
+    d = strtod("", &end);
+    ok = d == 0.0 && *end == '\0' && errno == 0;
+    CHECK3(ok, "float no conversion", ok ? "0, endptr unmoved" : "wrong answer");
+}
+
+// ── 60_libc_scan ─────────────────────────────────────────────────────────
+// The width-aware, typed scanf core.
+static void test_libc_scan(void)
+{
+    int a = 0;
+    int b = 0;
+    unsigned long addr = 0;
+    char word[16];
+    long long ll = 0;
+    size_t used = 0;
+    int n;
+    int ok;
+
+    n = sscanf("12 34", "%d %d", &a, &b);
+    ok = n == 2 && a == 12 && b == 34;
+    CHECK3(ok, "scan two integers", ok ? "12 34" : "wrong values");
+
+    n = sscanf("0x1000", "%lx", &addr);
+    ok = n == 1 && addr == 0x1000;
+    CHECK3(ok, "scan %lx", ok ? "0x1000" : "wrong value");
+
+    // The field width limits the scan set — and the NUL is NOT counted.
+    memset(word, 'x', sizeof(word));
+    n = sscanf("abcdefgh", "%4s", word);
+    ok = n == 1 && strcmp(word, "abcd") == 0;
+    CHECK3(ok, "scan %4s width", ok ? "abcd" : "wrong word");
+
+    // %n stores the consumed length and is NOT a conversion.
+    n = sscanf("42", "%d%n", &a, &used);
+    ok = n == 1 && a == 42 && used == 2;
+    CHECK3(ok, "scan %n", ok ? "count 1, used 2" : "wrong count");
+
+    // A typed store writes the target's own width.
+    n = sscanf("-5", "%lld", &ll);
+    ok = n == 1 && ll == -5;
+    CHECK3(ok, "scan %lld", ok ? "-5" : "wrong value");
+
+    // An empty input answers EOF; a first-character mismatch answers 0.
+    n = sscanf("", "%d", &a);
+    ok = n == EOF;
+    CHECK3(ok, "scan empty input", ok ? "EOF" : "wrong answer");
+    n = sscanf("x1", "%d", &a);
+    ok = n == 0;
+    CHECK3(ok, "scan no match", ok ? "0" : "wrong answer");
+}
+
+// ── 61_libc_time ─────────────────────────────────────────────────────────
+// The calendar core and the POSIX TZ parser.  The guest has NO real-time
+// clock (SYS_time answers the boot counter), so every answer here is
+// computed from a FIXED timestamp — the case must not depend on a wall
+// clock that does not exist.
+static void test_libc_time(void)
+{
+    time_t t = 1700000000;          /* 2023-11-14 22:13:20 UTC */
+    struct tm tm;
+    struct tm back;
+    char buf[64];
+    int ok;
+
+    setenv("TZ", "UTC0", 1);
+    tzset();
+
+    gmtime_r(&t, &tm);
+    ok = tm.tm_year == 123 && tm.tm_mon == 10 && tm.tm_mday == 14 &&
+         tm.tm_hour == 22 && tm.tm_min == 13 && tm.tm_sec == 20;
+    CHECK3(ok, "time gmtime", ok ? "2023-11-14 22:13:20" : "wrong fields");
+
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    ok = strcmp(buf, "2023-11-14 22:13:20") == 0;
+    CHECK3(ok, "time strftime", ok ? buf : buf);
+
+    // A fixed offset: "CST-8" is UTC+8, so the local time is 8 hours later.
+    setenv("TZ", "CST-8", 1);
+    tzset();
+    localtime_r(&t, &tm);
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    ok = strcmp(buf, "2023-11-15 06:13:20") == 0;
+    CHECK3(ok, "time localtime with TZ", ok ? buf : buf);
+
+    // mktime turns the broken-down time back into the timestamp.
+    ok = mktime(&tm) == t;
+    CHECK3(ok, "time mktime round-trip", ok ? "same timestamp" : "wrong");
+
+    // timegm is the UTC counterpart.
+    gmtime_r(&t, &tm);
+    ok = timegm(&tm) == t;
+    CHECK3(ok, "time timegm", ok ? "same timestamp" : "wrong");
+
+    // strptime parses what strftime wrote.
+    memset(&back, 0, sizeof(back));
+    ok = strptime("2023-11-14 22:13:20", "%Y-%m-%d %H:%M:%S", &back) != NULL;
+    ok = ok && back.tm_year == 123 && back.tm_mon == 10 && back.tm_mday == 14;
+    CHECK3(ok, "time strptime", ok ? "parsed" : "wrong fields");
+
+    ok = difftime(100, 40) == 60.0;
+    CHECK3(ok, "time difftime", ok ? "60" : "wrong");
+
+    // clock() answers the CPU time, which this kernel does not provide:
+    // the case pins that it says so instead of pretending.
+    errno = 0;
+    ok = clock() == (clock_t)-1;
+    CHECK3(ok, "time clock reports no CPU time", ok ? "unavailable" : "a value");
+}
+
+// ── 62_libc_path_exec ────────────────────────────────────────────────────
+// realpath against the REAL guest filesystem and the execvp PATH search —
+// including the ENOEXEC hand-off, which is only observable when a REAL
+// shell runs the script.
+static void test_libc_path_exec(void)
+{
+    char resolved[256];
+    char *auto_buf;
+    pid_t pid;
+    int status = 0;
+    int fd;
+    int ok;
+
+    // A symlink on the real filesystem, resolved by realpath.  The link
+    // lives on the ROOT filesystem (ext2): the tmpfs under /tmp has no
+    // symlink operation, so the kernel answers EOPNOTSUPP there.
+    unlink("/libc_path_link");
+    unlink("/libc_path_target");
+    fd = open("/libc_path_target", O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) close(fd);
+    ok = symlink("/libc_path_target", "/libc_path_link") == 0;
+    CHECK3(ok, "path symlink", ok ? "created" : "failed");
+
+    ok = realpath("/libc_path_link", resolved) != NULL &&
+         strcmp(resolved, "/libc_path_target") == 0;
+    CHECK3(ok, "path realpath", ok ? resolved : "wrong answer");
+
+    // resolved == NULL: the libc allocates the buffer and the caller owns
+    // it.
+    auto_buf = realpath("/libc_path_link", NULL);
+    ok = auto_buf != NULL && strcmp(auto_buf, "/libc_path_target") == 0;
+    CHECK3(ok, "path realpath(NULL)", ok ? "caller-owned buffer" : "NULL");
+    free(auto_buf);
+
+    // The ENOEXEC hand-off: a SCRIPT is not a binary, so the libc must
+    // run it through /bin/sh — and it must hand the shell the RESOLVED
+    // path, not the bare name.  The script is NOT in the current
+    // directory, so a shell that received the bare name would not find
+    // it at all and would answer 127 instead of the script's own code.
+    unlink("/tmp/libc_script");
+    fd = open("/tmp/libc_script", O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) {
+        const char *body = "#!/bin/sh\nexit 42\n";
+        write(fd, body, strlen(body));
+        close(fd);
+        chmod("/tmp/libc_script", 0755);
+    }
+    pid = fork();
+    if (pid == 0) {
+        char *av[2];
+        chdir("/");
+        setenv("PATH", "/tmp", 1);
+        av[0] = (char *)"libc_script";
+        av[1] = NULL;
+        execvp("libc_script", av);
+        _exit(127);
+    }
+    if (pid > 0) waitpid(pid, &status, 0);
+    ok = pid > 0 && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 42;
+    CHECK3(ok, "path execvp hands the shell the resolved path",
+           ok ? "the script ran" : "the shell did not find the script");
+
+    unlink("/tmp/libc_script");
+    unlink("/libc_path_link");
+    unlink("/libc_path_target");
+}
+
+// ── 63_libc_dir ──────────────────────────────────────────────────────────
+// The directory descriptor and the sorted scan against the REAL guest
+// filesystems (tmpfs under /tmp, ext2 under /bin).
+static void test_libc_dir(void)
+{
+    DIR *d;
+    struct dirent *e;
+    struct dirent **list = NULL;
+    int fd;
+    int dir_fd;
+    int n;
+    int dots = 0;
+    int sorted = 1;
+    int ok;
+
+    d = opendir("/tmp");
+    ok = d != NULL;
+    CHECK3(ok, "dir opendir /tmp", ok ? "/tmp" : "NULL");
+    if (d != NULL) {
+        while ((e = readdir(d)) != NULL)
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                dots++;
+        ok = dots == 2;
+        CHECK3(ok, "dir the kernel's dot entries", ok ? "2 dot entries"
+                                                     : "missing dot entries");
+        dir_fd = dirfd(d);
+        ok = dir_fd >= 0;
+        CHECK3(ok, "dir dirfd", ok ? "descriptor" : "no descriptor");
+        ok = closedir(d) == 0;
+        CHECK3(ok, "dir closedir", ok ? "closed" : "failed");
+    }
+
+    // fdopendir takes the descriptor over: closedir closes it.
+    fd = open("/tmp", O_RDONLY);
+    d = fdopendir(fd);
+    ok = d != NULL && dirfd(d) == fd;
+    CHECK3(ok, "dir fdopendir takes the descriptor", ok ? "taken over"
+                                                        : "failed");
+    if (d != NULL) closedir(d);
+    errno = 0;
+    ok = fcntl(fd, F_GETFD) == -1 && errno == EBADF;
+    CHECK3(ok, "dir closedir closes the descriptor", ok ? "EBADF" : "still open");
+
+    // scandir with alphasort: the order is the name order.
+    n = scandir("/tmp", &list, NULL, alphasort);
+    ok = n >= 2 && list != NULL;
+    CHECK3(ok, "dir scandir", ok ? "entries collected" : "failed");
+    if (ok) {
+        for (int i = 1; i < n; i++)
+            if (strcmp(list[i - 1]->d_name, list[i]->d_name) > 0) sorted = 0;
+        CHECK3(sorted, "dir alphasort orders by name",
+               sorted ? "name order" : "wrong order");
+        for (int i = 0; i < n; i++) free(list[i]);
+        free(list);
+    }
+}
+
+// ── 65_libc_append ───────────────────────────────────────────────────────
+// The append semantics through the LIBC surface: the "a" mode must not
+// truncate, and two independent descriptors with O_APPEND must both land
+// at the end of the file.
+static void test_libc_append(void)
+{
+    const char *path = "/tmp/libc_append_case.dat";
+    FILE *f;
+    char buf[64];
+    int fd;
+    int n;
+    int ok;
+
+    unlink(path);
+    f = fopen(path, "w");
+    ok = f != NULL;
+    CHECK3(ok, "append fopen w", ok ? "created" : "NULL");
+    if (f != NULL) {
+        fputs("first\n", f);
+        fclose(f);
+    }
+
+    // "a" appends and does NOT truncate.
+    f = fopen(path, "a");
+    ok = f != NULL;
+    CHECK3(ok, "append fopen a", ok ? "opened" : "NULL");
+    if (f != NULL) {
+        fputs("second\n", f);
+        fclose(f);
+    }
+    fd = open(path, O_RDONLY);
+    n = fd >= 0 ? read(fd, buf, sizeof(buf) - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (n > 0) buf[n] = '\0';
+    ok = n > 0 && strcmp(buf, "first\nsecond\n") == 0;
+    CHECK3(ok, "append mode keeps the file", ok ? "both lines" : buf);
+
+    // Two independent descriptors with O_APPEND: neither write may land
+    // on top of the other.
+    unlink(path);
+    fd = open(path, O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) close(fd);
+    {
+        int a = open(path, O_WRONLY | O_APPEND);
+        int b = open(path, O_WRONLY | O_APPEND);
+        if (a >= 0) { write(a, "A", 1); close(a); }
+        if (b >= 0) { write(b, "B", 1); close(b); }
+    }
+    fd = open(path, O_RDONLY);
+    n = fd >= 0 ? read(fd, buf, sizeof(buf) - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (n > 0) buf[n] = '\0';
+    ok = n == 2 && buf[0] != buf[1] && (buf[0] == 'A' || buf[0] == 'B') &&
+         (buf[1] == 'A' || buf[1] == 'B');
+    CHECK3(ok, "append two descriptors", ok ? "both bytes" : "overlapped");
+
+    unlink(path);
+}
+
 static const test_case_t tests[] = {
     {"startup_layout",    "startup layout",    test_startup_layout,          1, 0},
     {"startup_matrix",    "startup matrix",    test_startup_matrix,          1, 0},
     {"startup_execvp",    "startup execvp",    test_startup_execvp,          1, 0},
+    {"environ_mutation",  "environ mutation",  test_environ_mutation,        1, 0},
+    {"realpath_vfs",      "realpath vfs",      test_realpath_vfs,            1, 0},
+    {"dir_scan_vfs",      "dir scan vfs",      test_dir_scan_vfs,            1, 0},
+    {"vfs_append",        "vfs atomic append", test_vfs_append,             1, 0},
+    {"55_libc_alloc",     "libc alloc",         test_libc_alloc,             1, 0},
+    {"56_libc_env",       "libc env",           test_libc_env,               1, 0},
+    {"57_libc_stdio",     "libc stdio",         test_libc_stdio,             1, 0},
+    {"58_libc_integer",   "libc integer",       test_libc_integer,           1, 0},
+    {"59_libc_float",     "libc float",         test_libc_float,             1, 0},
+    {"60_libc_scan",      "libc scan",          test_libc_scan,              1, 0},
+    {"61_libc_time",      "libc time",          test_libc_time,              1, 0},
+    {"62_libc_path_exec", "libc path exec",     test_libc_path_exec,         1, 0},
+    {"63_libc_dir",       "libc dir",           test_libc_dir,               1, 0},
+    {"65_libc_append",    "libc append",        test_libc_append,            1, 0},
+    {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
+    {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
+    {"integer_conversions", "integer conversions", test_integer_conversions, 1, 0},
+    {"float_precision",   "float precision",   test_float_precision,        1, 0},
+    {"time_conversion",   "time conversion",   test_time_conversion,        1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
     {"putchar",           "putchar syscall",   test_putchar,                 1, 1},

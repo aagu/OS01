@@ -1494,6 +1494,35 @@ int vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer)
     return node->f_ops->write(node, offset, size, buffer);
 }
 
+// ── Atomic append ─────────────────────────────────────────
+//
+// The VFS-level entry of the optional per-filesystem append hook.
+//
+// The hook is what makes an O_APPEND write atomic with respect to other
+// appenders: the FILESYSTEM picks the real end of the file inside its
+// own mount mutex, writes there and updates the file's offset before it
+// releases the mutex.  User space cannot do that with an lseek()+write()
+// pair, because the offset it observed is stale by the time the write
+// reaches the filesystem.
+//
+// The buffer is a kernel bounce buffer: the caller copies the user bytes
+// out before calling this, so no user pointer ever reaches the
+// filesystem.
+int vfs_append(struct file *f, uint64_t size, const void *buffer)
+{
+    if (!f || !f->node || !buffer || size == 0) return -EINVAL;
+    if (!f->node->f_ops || !vfs_is_valid_kptr(f->node->f_ops))
+        return -EINVAL;
+    if (!f->node->f_ops->append || !vfs_is_valid_kptr(f->node->f_ops->append)) {
+        // A filesystem that cannot be written to at all is read-only;
+        // every other filesystem simply does not implement the append.
+        if (!f->node->f_ops->write || !vfs_is_valid_kptr(f->node->f_ops->write))
+            return -EROFS;
+        return -EOPNOTSUPP;
+    }
+    return f->node->f_ops->append(f, size, buffer);
+}
+
 // ── Read directory ────────────────────────────────────────
 int vfs_readdir(vfs_node_t *dir, uint64_t index, vfs_dirent_t *entry)
 {

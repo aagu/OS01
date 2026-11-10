@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdio/file.h>
 
 #if defined(__is_libk)
 #include <core/printk.h>
@@ -11,12 +12,11 @@ int putchar(int ic) {
     char c = (char) ic;
     putchark(WHITE,BLACK,c);
 #else
-    char c = (char)ic;
-    int64_t ret = write(1, &c, 1);
-    if (ret < 0) {
-        errno = (int)(-ret);
+    /* putchar writes to the standard output STREAM, so a failed write
+     * is visible as stdout's error indicator and as EOF — the caller
+     * never sees a fake success. */
+    if (__stdio_write_byte(stdout, ic) == EOF)
         return EOF;
-    }
 #endif
     return (unsigned char)ic;
 }

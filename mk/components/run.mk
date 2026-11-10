@@ -3049,3 +3049,265 @@ test-intr-irq-x86:
 test-irq-capacity:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-irq-capacity $(OS01_SUBMAKE_ARGS))
+
+# ── libc completion focused host tests (T1) ───────────────────────
+# make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<case>
+#
+# LIBC_HOST_CASES is the FIXED case list of the libc completion plan; a
+# value outside it is invalid and fails non-zero.  LIBC_HOST_DELIVERED_CASES
+# is the subset delivered so far: "all" (and the default) runs exactly
+# those, and a registered-but-undelivered case fails non-zero with a clear
+# message instead of silently reporting a pass for a group that does not
+# exist yet.  Each completion task appends its case to the delivered list
+# and adds the matching _test-libc-host-run-<case> rule.
+LIBC_HOST_CASES := api alloc env shutdown stream append io line format integer float scan time path dir regex
+LIBC_HOST_DELIVERED_CASES := api alloc env shutdown stream append io line format integer float path scan time dir
+
+.PHONY: test-libc-host _test-libc-host-run-all
+# Every delivered case's run target is phony, derived from the delivered list
+# so a task that appends to LIBC_HOST_DELIVERED_CASES cannot forget it.  A
+# non-phony run target would be satisfied by a stray file of the same name in
+# the repository root, and the group would silently be skipped while
+# test-libc-host still exited 0 — a green run that ran nothing.
+.PHONY: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
+_test-libc-host-run-api:
+	@echo "  [test-libc-host] api"
+	$(call os01_submake,hosttests,test-libc-api $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-alloc:
+	@echo "  [test-libc-host] alloc"
+	$(call os01_submake,hosttests,test-libc-alloc $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-env:
+	@echo "  [test-libc-host] env"
+	$(call os01_submake,hosttests,test-libc-environ $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-shutdown:
+	@echo "  [test-libc-host] shutdown"
+	$(call os01_submake,hosttests,test-libc-shutdown $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-stream:
+	@echo "  [test-libc-host] stream"
+	$(call os01_submake,hosttests,test-libc-stream-state $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-append:
+	@echo "  [test-libc-host] append"
+	$(call os01_submake,hosttests,test-vfs-append $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-io:
+	@echo "  [test-libc-host] io"
+	$(call os01_submake,hosttests,test-libc-stdio-io $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-line:
+	@echo "  [test-libc-host] line"
+	$(call os01_submake,hosttests,test-libc-line $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-format:
+	@echo "  [test-libc-host] format"
+	$(call os01_submake,hosttests,test-libc-stdio-format $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-integer:
+	@echo "  [test-libc-host] integer"
+	$(call os01_submake,hosttests,test-libc-integer $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-float:
+	@echo "  [test-libc-host] float"
+	$(call os01_submake,hosttests,test-libc-float-parse $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-scan:
+	@echo "  [test-libc-host] scan"
+	$(call os01_submake,hosttests,test-libc-scan $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-time:
+	@echo "  [test-libc-host] time"
+	$(call os01_submake,hosttests,test-libc-time $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-dir:
+	@echo "  [test-libc-host] dir"
+	$(call os01_submake,hosttests,test-libc-dir $(OS01_SUBMAKE_ARGS))
+
+_test-libc-host-run-path:
+	@echo "  [test-libc-host] path"
+	$(call os01_submake,hosttests,test-libc-path $(OS01_SUBMAKE_ARGS))
+
+# The RED build of the path group (T14 evidence).  It is NOT part of
+# LIBC_HOST_CASES: a RED build must never be reachable through the
+# delivered-case namespace, and it is EXPECTED to fail — that failure is
+# the transcript.
+#
+# RED-1 (behavioural): the path group is built against the pre-T14
+#   realpath (an empty stub that answered NULL) — every realpath case
+#   fails as an ASSERTION.
+# RED-2 (link): the exec wrappers.  Before T14, execl/execlp/execle had
+#   NO definition in OS01's own libc archive, so a user program calling
+#   them failed to link.  The host's glibc defines them, so the hole is
+#   invisible in a host link — it is reproduced here against the real
+#   archive: the member T14 added is deleted from a copy of libc.a and
+#   a probe program is linked against the result.  A CONTROL link
+#   against the pristine archive must succeed, so the only difference
+#   between the two links is the exec wrappers.
+.PHONY: test-libc-path-red
+test-libc-path-red:
+	@echo "=== RED-1 (behaviour): realpath was a stub that answered NULL ==="
+	@set +e; \
+	  $(call os01_submake_cmd,hosttests,test-libc-path-red $(OS01_SUBMAKE_ARGS)); \
+	  rc_run=$$?; \
+	  echo "RED-1 exit code: $$rc_run"; \
+	  echo "=== RED-2 (link): execl/execlp/execle had NO definition before T14 ==="; \
+	  tmp=$$(mktemp -d); \
+	  cp $(SYSROOT)/usr/lib/libc.a $$tmp/libc.a || exit 1; \
+	  echo "--- the pre-T14 tree had no libc/unistd/execl.c at all:"; \
+	  git -C $(OS01_ROOT) ls-tree b7c33ba6 libc/unistd/ | \
+	    awk '{print $$4}' | grep -c '^execl\.c$$'; \
+	  echo "--- deleting the archive member that T14 added (execl.o):"; \
+	  $(LLVM_AR) d $$tmp/libc.a execl.o; \
+	  echo "--- execl/execlp/execle left in the archive (expected: none):"; \
+	  $(LLVM_NM) -P $$tmp/libc.a | \
+	    awk '$$1=="execl" || $$1=="execlp" || $$1=="execle"'; \
+	  printf '%s\n' '#include <unistd.h>' \
+	    'int main(void) { execl("/bin/sh", "sh", (char *)0); return 0; }' > $$tmp/probe.c; \
+	  $(EFFECTIVE_CC) --sysroot=$(SYSROOT) -ffreestanding -fno-pic -fno-pie \
+	    -I$(SYSROOT)/usr/include -c $$tmp/probe.c -o $$tmp/probe.o || exit 1; \
+	  echo "--- CONTROL: link the probe against the PRISTINE archive:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$(SYSROOT)/usr/lib -o $$tmp/probe_ctrl.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_ctrl=$$?; \
+	  echo "CONTROL exit code: $$rc_ctrl"; \
+	  echo "--- RED-2: link the probe against the archive WITHOUT execl.o:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$$tmp -o $$tmp/probe_red.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_link=$$?; \
+	  echo "RED-2 exit code: $$rc_link"; \
+	  rm -rf $$tmp; \
+	  if [ $$rc_run -eq 0 ]; then \
+	    echo "ERROR: the behavioural RED run passed"; exit 1; fi; \
+	  if [ $$rc_ctrl -ne 0 ]; then \
+	    echo "ERROR: the CONTROL link failed — the RED proves nothing"; exit 1; fi; \
+	  if [ $$rc_link -eq 0 ]; then \
+	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
+	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
+	  exit 1
+
+# The RED build of the dir group (T15 evidence).  It is NOT part of
+# LIBC_HOST_CASES: a RED build must never be reachable through the
+# delivered-case namespace, and it is EXPECTED to fail — that failure is
+# the transcript.
+#
+# RED-1 (behavioural): the dir group is built against the PRE-T15
+#   dirent.c (opendir() did not check the type, readdir() did not set
+#   errno and did not copy the kernel's d_off), with the new-API cases
+#   compiled out — those symbols had no definition before T15.
+# RED-2 (link): the directory descriptor and the sorted scan (dirfd,
+#   fdopendir, scandir, alphasort) had NO definition before T15, so a user
+#   program calling them failed to link.  The host's glibc defines them,
+#   so the hole is invisible in a host link — it is reproduced here against
+#   the real archive: the members T15 added are deleted from a copy of
+#   libc.a and a probe program is linked against the result.  A CONTROL
+#   link against the pristine archive must succeed, so the only difference
+#   between the two links is the T15 members.
+.PHONY: test-libc-dir-red
+test-libc-dir-red:
+	@echo "=== RED-1 (behaviour): the pre-T15 dirent.c has no type check, no errno and no d_off ==="
+	@set +e; \
+	  $(call os01_submake_cmd,hosttests,test-libc-dir-red $(OS01_SUBMAKE_ARGS)); \
+	  rc_run=$$?; \
+	  echo "RED-1 (sub-make) exit code: $$rc_run"; \
+	  echo "=== RED-2 (link): dirfd/fdopendir/scandir/alphasort had NO definition before T15 ==="; \
+	  tmp=$$(mktemp -d); \
+	  cp $(SYSROOT)/usr/lib/libc.a $$tmp/libc.a || exit 1; \
+	  echo "--- the pre-T15 tree had no libc/stdlib/scandir.c at all:"; \
+	  git -C $(OS01_ROOT) ls-tree 7aeb732a libc/stdlib/ | \
+	    awk '{print $$4}' | grep -c '^scandir\.c$$'; \
+	  echo "--- deleting the archive members that T15 added (scandir.o, dirent.o):"; \
+	  $(LLVM_AR) d $$tmp/libc.a scandir.o dirent.o; \
+	  echo "--- dirfd/fdopendir/scandir/alphasort left in the archive (expected: none):"; \
+	  $(LLVM_NM) -P $$tmp/libc.a | \
+	    awk '$$1=="dirfd" || $$1=="fdopendir" || $$1=="scandir" || $$1=="alphasort"'; \
+	  printf '%s\n' '#include <dirent.h>' \
+	    'int main(void) { DIR *d = 0; struct dirent **l = 0;' \
+	    '  (void)dirfd(d); (void)fdopendir(0);' \
+	    '  (void)scandir("/", &l, 0, alphasort); return 0; }' > $$tmp/probe.c; \
+	  $(EFFECTIVE_CC) --sysroot=$(SYSROOT) -ffreestanding -fno-pic -fno-pie \
+	    -I$(SYSROOT)/usr/include -c $$tmp/probe.c -o $$tmp/probe.o || exit 1; \
+	  echo "--- CONTROL: link the probe against the PRISTINE archive:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$(SYSROOT)/usr/lib -o $$tmp/probe_ctrl.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_ctrl=$$?; \
+	  echo "CONTROL exit code: $$rc_ctrl"; \
+	  echo "--- RED-2: link the probe against the archive WITHOUT the T15 members:"; \
+	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
+	    -L$$tmp -o $$tmp/probe_red.elf \
+	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
+	    $$tmp/probe.o -lc; \
+	  rc_link=$$?; \
+	  echo "RED-2 exit code: $$rc_link"; \
+	  rm -rf $$tmp; \
+	  if [ $$rc_run -eq 0 ]; then \
+	    echo "ERROR: the behavioural RED run passed"; exit 1; fi; \
+	  if [ $$rc_ctrl -ne 0 ]; then \
+	    echo "ERROR: the CONTROL link failed — the RED proves nothing"; exit 1; fi; \
+	  if [ $$rc_link -eq 0 ]; then \
+	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
+	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
+	  exit 1
+
+_test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
+	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"
+
+# Catch-all: a registered case that no task has delivered yet.
+_test-libc-host-run-%:
+	@echo "ERROR: LIBC_CASE='$*' is registered but not delivered in this stage." >&2
+	@echo "       Delivered groups: $(LIBC_HOST_DELIVERED_CASES)" >&2
+	@echo "       See docs/superpowers/plans/2026-11-08-libc-completion.md" >&2
+	@exit 1
+
+LIBC_CASE_RAW := $(strip $(LIBC_CASE))
+LIBC_CASE_EFFECTIVE := $(if $(LIBC_CASE_RAW),$(LIBC_CASE_RAW),all)
+LIBC_CASE_VALID := $(if $(filter 1,$(words $(LIBC_CASE_EFFECTIVE))),$(filter all $(LIBC_HOST_CASES),$(LIBC_CASE_EFFECTIVE)))
+
+# Prerequisites run before recipes, even before require_capability, so the
+# graph is only populated for a capable profile and one exact valid CASE.
+test-libc-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(LIBC_CASE_VALID)),_test-libc-host-run-$(LIBC_CASE_EFFECTIVE))
+	$(call require_capability,rootfs)
+	$(if $(LIBC_CASE_VALID),,$(error unknown LIBC_CASE='$(LIBC_CASE_RAW)'; valid: $(LIBC_HOST_CASES), all))
+	@echo "  [test-libc-host] LIBC_CASE=$(LIBC_CASE_EFFECTIVE)"
+
+# ── libc completion archive audit (T1) ────────────────────────────
+# make PROFILE=x86_64-clang test-libc-api-audit
+#
+# The header contract is checked by the api host group; this target checks
+# the OTHER half of the same manifest — what the shipped archives actually
+# export.  The manifest in scripts/audit_libc_api.py is the single source of
+# truth for both: it names the headers, the interfaces and the task that
+# owns each group, so a manifest that drifts away from the headers is an
+# audit failure rather than a silent staleness.
+#
+# The libk baseline is per profile (an x86_64 libk.a and an aarch64 libk.a
+# export different subsets), so the profile is passed explicitly instead of
+# being guessed from the archive path.
+#
+# LIBC_GROUPS narrows the audit to a comma separated subset of the enabled
+# groups (default: all enabled groups).  It is for debugging a single group;
+# the gate always covers every enabled group when it is unset.
+#
+# The aarch64 profile builds no libc.a (its libc component only produces the
+# kernel-side libk.a), so the user-libc archive is audited only when it
+# exists.  The libk.a itself comes from `lib` on a userland profile and from
+# the kernel build on a kernel-only profile.
+LIBC_API_AUDIT_PREREQ := $(if $(filter userland,$(PROFILE_CAPABILITIES)),lib,$(BUILD_DIR)/artifacts/kernel.elf)
+
+.PHONY: test-libc-api-audit
+test-libc-api-audit: $(LIBC_API_AUDIT_PREREQ)
+	@echo "  [test-libc-api-audit] profile=$(PROFILE)"
+	python3 $(OS01_ROOT)/scripts/audit_libc_api.py --audit \
+	    --profile "$(PROFILE)" \
+	    $(if $(strip $(LIBC_GROUPS)),--groups $(LIBC_GROUPS)) \
+	    --include-dir $(OS01_ROOT)/libc/include \
+	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libc.a),--libc-archive $(LIBC_BUILD_DIR)/lib/libc.a) \
+	    --libk-archive $(LIBC_BUILD_DIR)/lib/libk.a

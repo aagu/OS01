@@ -43,6 +43,64 @@ TEST_BINS += \
     $(TEST_BLD)/test_nofile_limits.elf \
     $(TEST_BLD)/test_pci_devfs.elf
 
+
+# ── libc-completion T6: kernel atomic append ──────────────────
+#
+# test_vfs_append drives the REAL fd_write → vfs_append →
+# {tmpfs,ext2,fat} chain over a RAM disk.  The FS production objects
+# are the SAME objects the registry test links (compiled against
+# vfs_test_runtime.h); only file.c is recompiled here, because its
+# new O_APPEND path needs vfs_append_runtime.h (scheduler stubs +
+# fault injection) on top of the VFS runtime.  This binary must NOT
+# link mock_kernel.o: vfs_append_runtime.c owns kmalloc (fault
+# injection) and the printk/panic stubs.
+$(eval $(call register_host_test,test_vfs_append,fs,protocol-or-legacy))
+TEST_BINS += $(TEST_BLD)/test_vfs_append.elf
+
+APPEND_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
+    -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
+    -include $(TEST_MOCK)/vfs_append_runtime.h \
+    -I$(TEST_MOCK) -I$(TEST_MOCK)/append_include \
+    $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/vfs_append_runtime.o: $(TEST_MOCK)/vfs_append_runtime.c \
+        $(TEST_MOCK)/vfs_append_runtime.h \
+        $(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(APPEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/append_file_production.o: $(TESTS_DIR)/kernel/fs/file.c \
+        $(TESTS_DIR)/kernel/include/fs/file.h \
+        $(TEST_MOCK)/vfs_append_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(APPEND_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_vfs_append.o: $(TEST_CASES)/test_vfs_append.c \
+        $(TEST_MOCK)/vfs_append_runtime.h \
+        $(TEST_MOCK)/vfs_ram_disk.h \
+        $(TESTS_DIR)/kernel/include/fs/vfs.h \
+        $(TESTS_DIR)/kernel/include/fs/file.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(APPEND_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_vfs_append.elf: $(TEST_BLD)/test_vfs_append.o \
+        $(TEST_BLD)/vfs_production.o \
+        $(TEST_BLD)/dcache_production.o \
+        $(TEST_BLD)/ext2_production.o \
+        $(TEST_BLD)/fat_production.o \
+        $(TEST_BLD)/tmpfs_production.o \
+        $(TEST_BLD)/devfs_vfs_production.o \
+        $(TEST_BLD)/append_file_production.o \
+        $(TEST_BLD)/vfs_append_runtime.o \
+        $(TEST_BLD)/serial_sink_stub.o \
+        $(TEST_BLD)/rwlock.o \
+        $(LIBC_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-vfs-append
+test-vfs-append: $(TEST_BLD)/test_vfs_append.elf
+	$<
+
 # Basic VFS & FAT32 tests
 $(TEST_BLD)/test_vfs_basic.elf: $(TEST_BLD)/test_vfs_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
@@ -275,7 +333,8 @@ POLL_PRODUCTION_OBJS := \
     $(TEST_BLD)/devfs_poll_production.o \
     $(TEST_BLD)/poll_clocksource_stub.o \
     $(TEST_BLD)/serial_sink_stub.o \
-    $(NOFILE_SOFT_STUB_OBJ)
+    $(NOFILE_SOFT_STUB_OBJ) \
+    $(VFS_APPEND_LINK_STUB_OBJ)
 
 $(TEST_BLD)/test_poll_requested.o: $(TEST_CASES)/test_poll_requested.c
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
@@ -363,7 +422,8 @@ POLL64_PRODUCTION_OBJS := \
     $(POLL64_BLD)/devfs_poll_production.o \
     $(POLL64_BLD)/poll_clocksource_stub.o \
     $(POLL64_BLD)/serial_sink_stub.o \
-    $(POLL64_BLD)/nofile_soft_stub.o
+    $(POLL64_BLD)/nofile_soft_stub.o \
+    $(VFS_APPEND_LINK_STUB_OBJ)
 
 $(POLL64_BLD)/test_poll_capacity.o: $(TEST_CASES)/test_poll_capacity.c
 	@mkdir -p $(POLL64_BLD)
@@ -396,7 +456,8 @@ $(TEST_BLD)/test_pty_winsize.o: $(TEST_CASES)/test_pty_winsize.c \
 $(TEST_BLD)/test_pty_winsize.elf: $(TEST_BLD)/test_pty_winsize.o \
 		$(TEST_BLD)/pty_production.o \
 		$(TEST_BLD)/pty_file_production.o \
-		$(NOFILE_SOFT_STUB_OBJ)
+		$(NOFILE_SOFT_STUB_OBJ) \
+		$(VFS_APPEND_LINK_STUB_OBJ)
 	$(HOST_CC) -Wl,--gc-sections -lpthread -o $@ $^
 
 .PHONY: test-pty-winsize
@@ -511,6 +572,7 @@ $(TEST_BLD)/test_nofile_limits.o: $(TEST_CASES)/test_nofile_limits.c \
 		-include $(TEST_INC)/gfx_client_errno.h -c $< -o $@
 
 $(TEST_BLD)/test_nofile_limits.elf: $(TEST_BLD)/test_nofile_limits.o \
+    $(VFS_APPEND_LINK_STUB_OBJ) \
     $(TEST_BLD)/fd_install_file_production.o \
     $(TEST_BLD)/fd_install_socket_production.o \
     $(TEST_BLD)/fd_install_pty_production.o \

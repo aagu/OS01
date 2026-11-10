@@ -1,0 +1,81 @@
+# thirdpart/musl-libc-algorithms.manifest — vendored musl algorithms
+#
+# Provenance (libc-completion plan T11, "固定 musl 1.2.5 源档来源和 SHA256"):
+#   Archive : https://musl.libc.org/releases/musl-1.2.5.tar.gz
+#   SHA256  : a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+#   License : standard MIT (see musl-libc-algorithms/COPYRIGHT, copied
+#             verbatim from the archive's COPYRIGHT file).
+#
+# What is vendored, where, and how it was adapted
+# -----------------------------------------------
+# libc/stdlib/floatscan.c
+#   from src/internal/floatscan.c (507 lines)
+#   adaptation diff (this is the full list; everything else is verbatim):
+#     - #include <stdio.h>/<math.h> replaced by the private
+#       <stdlib/floatscan.h> + libc's own <errno.h>/<ctype.h>/<float.h>;
+#       `hidden` dropped (the scanner is static to this archive's TU).
+#     - FILE* replaced by the memory-only shfile_t pseudo-FILE
+#       (libc/include/stdlib/floatscan.h): musl's shgetc/shunget/shcnt/
+#       shlim/sh_fromstring macros with __uflow and the real FILE
+#       implementation NOT imported — strtod-family input is always a
+#       NUL-terminated memory string.  Behaviour difference, deliberate:
+#       shgetc answers EOF sticky at the terminating NUL without
+#       advancing (musl reads the NUL byte and advances), which keeps
+#       musl's shunget bookkeeping balanced and the POSIX endptr exact.
+#     - the four math calls are vendored in the same file as static
+#       helpers (see below), because OS01's freestanding libc has no
+#       libm to answer scalbn/scalbnl/copysignl/fmodl.
+#     - errno=EINVAL on no-conversion is SUPPRESSED by the wrappers in
+#       libc/stdlib/strtod.c (they save/restore errno around a
+#       zero-consumption scan): musl sets EINVAL there, glibc/POSIX
+#       practice and our T10 strtox discipline preserve errno.  The
+#       scanner itself is untouched.
+#     - no-conversion detection moved to the WRAPPERS: the scanner's
+#       EINVAL flags it, the wrappers answer endptr = nptr and restore
+#       errno (musl leaves endptr past the whitespace and keeps
+#       EINVAL; glibc answers nptr + untouched errno, and the oracle
+#       table pins that).
+#     - subnormal ERANGE raised to glibc's practice: EVERY inexact
+#       subnormal result answers ERANGE (musl only some).  EXACT
+#       subnormals stay silent — "0x1p-1074" answers errno=0 like
+#       glibc — so the check applies to decimal inputs only.
+#     - "nan(<n-chars>)" payload support added (mk_nan): the payload
+#       digits are read as a DECIMAL number into the low mantissa
+#       bits with the sign bit honoured ("nan(123)" / "-nan" match
+#       glibc bit-for-bit).  musl returns a payload-less positive NaN
+#       here; __builtin_nanf(payload) was rejected because a runtime
+#       string turns the builtin into a libm nanf() call and OS01 has
+#       no libm.  Non-digit n-chars end the payload (simplification;
+#       the test table only exercises digit payloads).
+#     - the strtod/strtof wrappers narrow NaNs BIT-EXACTLY (sign +
+#       payload rebuilt from the 80-bit mantissa): the x87 narrowing
+#       instruction would otherwise drop the payload of "nan(123)"
+#       when producing a float/double.
+#
+#   static helpers inside libc/stdlib/floatscan.c (same MIT license):
+#     - copysignl  from src/math/copysignl.c   (LDBL_MANT_DIG==64 branch)
+#     - scalbn     from src/math/scalbn.c
+#     - scalbnl    from src/math/scalbnl.c     (LDBL_MANT_DIG==64 branch)
+#     - fmodl      from src/math/fmodl.c       (LDBL_MANT_DIG==64 branch)
+#     with libm.h's union ldshape (little-endian 80-bit x87 layout)
+#     trimmed in, isnan(x) written as x != x, fabsl/copysign delegated
+#     to compiler builtins (no libcall on x86_64).
+#
+# Patches to the module after vendoring
+# -------------------------------------
+# None yet.  If musl fixes a floatscan bug after 1.2.5, the patch is
+# reviewed against the adaptation diff above (only the listed deltas
+# are OS01-specific; everything else applies cleanly) and this manifest
+# gains a dated entry describing what was taken and why.
+#
+# Not applicable / deliberately not imported
+# ------------------------------------------
+# src/internal/stdio_impl.h, __uflow, the real FILE machinery — replaced
+# by the memory pseudo-FILE (see above).
+# src/internal/shgetc.c/shgetc.h — folded into the pseudo-FILE macros in
+# libc/include/stdlib/floatscan.h (the __shlim/__shgetc functions only
+# serve real-FILE and width-limited scanf, neither of which this port
+# has).
+# wcsto*-family callers (need real FILE pushback semantics) — OS01 has
+# no wchar layer.
+# musl's locale-dependent scanning — musl floatscan has none.

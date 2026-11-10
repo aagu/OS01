@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>   // size_t
+#include <limits.h>  // PATH_MAX (the libc's public path limit)
 #include <stdbool.h>
 #include <block/blockdev.h>
 #include <sys/stat.h>
@@ -29,6 +30,15 @@ typedef enum {
 
 #define MAXSYMLINKS 8
 #define VFS_NAME_MAX 256
+
+/* The libc's PUBLIC path limit must equal the kernel's name limit — the
+ * userland path helpers (realpath) assume a whole path fits in one
+ * VFS_NAME_MAX-sized buffer, NUL included.  This is the compile-time half
+ * of that contract; scripts/audit_libc_api.py re-checks it from the two
+ * headers on the host side.  This round does NOT enlarge the kernel's
+ * capacity. */
+_Static_assert(PATH_MAX == VFS_NAME_MAX,
+               "PATH_MAX (libc/include/limits.h) must equal VFS_NAME_MAX");
 
 // ── Forward declarations ──────────────────────────────────
 struct vfs_node;
@@ -76,6 +86,26 @@ typedef struct vfs_file_ops {
     int     (*readdir)(struct vfs_node *node, uint64_t index,
                        struct vfs_dirent *entry);
     int     (*mmap)(struct vfs_node *node, struct vma *vma);
+
+    // Optional atomic-append hook.
+    //
+    // A write to a descriptor opened with O_APPEND has to land at the
+    // REAL end of the file, and the choice of that end, the write and
+    // the update of the file's offset must happen under the
+    // filesystem's OWN serialization (its mount mutex).  Otherwise two
+    // appenders that opened the same file independently could pick the
+    // same offset and overwrite each other — which is exactly what an
+    // lseek()+write() pair in user space cannot prevent.
+    //
+    // The hook receives the open-file description, so it can update its
+    // offset.  It must: take the mount mutex, choose the real EOF,
+    // write there, advance the file's offset to the end of the COMMITTED
+    // range and only then release the mutex.  A commit of zero bytes
+    // must leave the offset alone.
+    //
+    // The buffer is a kernel bounce buffer, never a user pointer: the
+    // user memory is copied before the hook is called.
+    int     (*append)(struct file *f, uint64_t size, const void *buffer);
 
     // Optional per-file snapshot lifecycle hooks (procfs statistics, etc.)
     int     (*open_file)(struct file *f);
@@ -236,6 +266,11 @@ int vfs_read(struct vfs_node *node, uint64_t offset,
 // Write to a file
 int vfs_write(struct vfs_node *node, uint64_t offset,
               uint64_t size, void *buffer);
+
+// Atomic append: commit `size` bytes at the real end of the file and
+// advance the file's offset to the end of the committed range.  The
+// serialization happens inside the filesystem's own mount mutex.
+int vfs_append(struct file *f, uint64_t size, const void *buffer);
 
 // Read directory entries
 int vfs_readdir(struct vfs_node *dir, uint64_t index,

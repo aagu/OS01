@@ -6,8 +6,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
-#include "stdio_internal.h"
+#include <stdio/file.h>
+#include <stdio/internal.h>
 
+/* printf writes to the standard output STREAM, not to a bare
+ * descriptor: the write goes through the stream state, so stdout's
+ * error indicator is set when the write fails, and a printf() after
+ * fclose(stdout) fails instead of writing to a descriptor the process no
+ * longer owns. */
 static int vprintf_core(const char *format, va_list ap)
 {
     va_list cp;
@@ -26,7 +32,7 @@ static int vprintf_core(const char *format, va_list ap)
     if (n == SIZE_MAX) {
         ret = -1;
     } else {
-        ssize_t w = write_all(1, buf, n);
+        long w = __stdio_write(stdout, buf, n);
         ret = (w < 0) ? -1 : (int)n;
     }
     free(buf);

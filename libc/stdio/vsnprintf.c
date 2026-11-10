@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
-#include "stdio_internal.h"
+#include <stdio/internal.h>
 
 int vsnprintf(char *b, unsigned long s, const char *fmt, va_list ap)
 {

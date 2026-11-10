@@ -1,6 +1,7 @@
 #include <fs/fat.h>
 #include <block/blockdev.h>
 #include <fs/vfs.h>
+#include <fs/file.h>
 #include <core/debug.h>
 #include <string.h>
 #include <stdlib.h>
@@ -868,6 +869,35 @@ static int fat_read(struct vfs_node *node, uint64_t offset,
     return rc;
 }
 
+/* The write body with the filesystem lock ALREADY held.  The append
+ * hook reuses it, so a plain write and an append share the SAME
+ * serialization boundary. */
+static int fat_write_locked(fat32_fs_t *fs, struct vfs_node *node,
+                            fat_file_object_t *obj, uint64_t offset,
+                            uint64_t size, void *buffer)
+{
+    if (obj->first_cluster < 2) {
+        uint32_t cl = fat32_alloc_cluster(fs, 0);
+        if (cl == 0) return -1;
+        obj->first_cluster = cl;
+    }
+
+    int written = fat32_write_data(fs, obj->first_cluster, offset, size, buffer);
+    if (written > 0 && offset + (uint64_t)written > obj->size) {
+        obj->size = (uint32_t)(offset + (uint64_t)written);
+    }
+    fat32_sync_obj_dirent_locked(fs, obj);
+    node->size = obj->size;
+    if (node->mount) {
+        /* Lock order: the filesystem lock is held, the active lock is
+         * taken inside it. */
+        spin_lock(&node->mount->active_lock);
+        vfs_active_nodes_sync_size_locked(node->mount, obj->object_id, obj->size, 0);
+        spin_unlock(&node->mount->active_lock);
+    }
+    return written;
+}
+
 static int fat_write(struct vfs_node *node, uint64_t offset,
                      uint64_t size, void *buffer)
 {
@@ -882,26 +912,33 @@ static int fat_write(struct vfs_node *node, uint64_t offset,
         return -1;
     }
 
-    if (obj->first_cluster < 2) {
-        uint32_t cl = fat32_alloc_cluster(fs, 0);
-        if (cl == 0) {
-            fat_unlock(fs);
-            return -1;
-        }
-        obj->first_cluster = cl;
+    int written = fat_write_locked(fs, node, obj, offset, size, buffer);
+    fat_unlock(fs);
+    return written;
+}
+
+/* Atomic append.  The real EOF is chosen INSIDE the filesystem lock, so
+ * two appenders that opened the same file independently cannot pick the
+ * same offset and overwrite each other.  The file's offset is advanced
+ * to the end of the COMMITTED range before the lock is released. */
+static int fat_vfs_append(struct file *f, uint64_t size, const void *buffer)
+{
+    if (!f || !f->node || !f->node->mount || !buffer || size == 0)
+        return -EINVAL;
+    struct vfs_node *node = f->node;
+    fat32_fs_t *fs = (fat32_fs_t *)node->mount->fs_data;
+
+    fat_lock(fs);
+    fat_file_object_t *obj = fat_file_obj(node);
+    if (!obj) {
+        fat_unlock(fs);
+        return -EINVAL;
     }
 
-    int written = fat32_write_data(fs, obj->first_cluster, offset, size, buffer);
-    if (written > 0 && offset + (uint64_t)written > obj->size) {
-        obj->size = (uint32_t)(offset + (uint64_t)written);
-    }
-    fat32_sync_obj_dirent_locked(fs, obj);
-    node->size = obj->size;
-    if (node->mount) {
-        spin_lock(&node->mount->active_lock);
-        vfs_active_nodes_sync_size_locked(node->mount, obj->object_id, obj->size, 0);
-        spin_unlock(&node->mount->active_lock);
-    }
+    uint64_t offset = obj->size;             /* the real end of the file */
+    int written = fat_write_locked(fs, node, obj, offset, size, (void *)buffer);
+    /* A commit of zero bytes leaves the offset alone. */
+    if (written > 0) f->offset = offset + (uint64_t)written;
     fat_unlock(fs);
     return written;
 }
@@ -1741,6 +1778,7 @@ const vfs_inode_ops_t fat_iops = {
 const vfs_file_ops_t fat_fops = {
     .read     = fat_read,
     .write    = fat_write,
+    .append   = fat_vfs_append,
     .readdir  = fat_readdir,
 };
 

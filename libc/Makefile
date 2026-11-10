@@ -43,13 +43,20 @@ LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stac
 # gets fixed at the source (see libc/stdlib/malloc.c: `<sys/syscall.h>` is
 # gated under `#ifndef __is_libk`); the kernel side uses slab, so the asm
 # path is unreachable when the libc mode is off.
+#
+# `stdlib/realpath.c` is in the aarch64 list for the libk SURFACE only: under
+# __is_libk the file compiles to the historical empty shell (it answers NULL),
+# so the kernel archive exports the symbol without gaining an object that
+# would issue user syscalls.  The user-space implementation is in the same
+# file, behind `#ifndef __is_libk`.
 ifeq ($(HOSTARCH),aarch64)
 C_SOURCES := \
     $(wildcard ctype/*.c) \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
     $(wildcard rbtree/*.c) \
-    stdlib/calloc.c stdlib/malloc.c \
+    stdlib/calloc.c stdlib/malloc.c stdlib/reallocarray.c \
+    stdlib/realpath.c \
     stdio/vsprintf.c \
     $(wildcard string/*.c) \
     $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))

@@ -1029,8 +1029,9 @@ class NetworkSuiteTests(unittest.TestCase):
 
     CHUNKS_POSITIVE = [
         b"OS01 boot done\n",
-        b"DHCP OK\n",
-        b"[NET TEST] RESULT: 6 passed, 0 failed\n",
+        b"[NET TEST] DHCP: PASS\n",
+        b"[NET TEST] shutdown: PASS\n",
+        b"[NET TEST] RESULT: 7 passed, 0 failed\n",
     ]
 
     CHUNKS_NEGATIVE = [
@@ -1039,12 +1040,39 @@ class NetworkSuiteTests(unittest.TestCase):
 
     CHUNKS_OLD_PASS_REPLAY = [
         b"PASS: 2025-08-01 old network run completed\n",
-        b"[NET TEST] RESULT: 6 passed, 0 failed\n",
+        b"[NET TEST] RESULT: 7 passed, 0 failed\n",
     ]
 
     CHUNKS_LATE_PANIC = [
-        b"[NET TEST] RESULT: 6 passed, 0 failed\n",
+        b"[NET TEST] DHCP: PASS\n",
+        b"[NET TEST] shutdown: PASS\n",
+        b"[NET TEST] RESULT: 7 passed, 0 failed\n",
         b"Kernel panic: post-net\n",
+    ]
+
+    # The shutdown case never ran: the summary count alone would accept
+    # this, the explicit marker must not.
+    CHUNKS_MISSING_SHUTDOWN = [
+        b"OS01 boot done\n",
+        b"[NET TEST] DHCP: PASS\n",
+        b"[NET TEST] RESULT: 7 passed, 0 failed\n",
+    ]
+
+    # A shutdown marker replayed from an older run: it sits BEFORE this
+    # run's DHCP evidence, so it cannot be this run's marker.
+    CHUNKS_STALE_SHUTDOWN = [
+        b"[NET TEST] shutdown: PASS\n",
+        b"OS01 boot done\n",
+        b"[NET TEST] DHCP: PASS\n",
+        b"[NET TEST] RESULT: 7 passed, 0 failed\n",
+    ]
+
+    # The guest reported the shutdown case as failed (the service timed
+    # out): the summary must not be accepted.
+    CHUNKS_FAILED_SUMMARY = [
+        b"[NET TEST] DHCP: PASS\n",
+        b"[NET TEST] shutdown: FAIL\n",
+        b"[NET TEST] RESULT: 6 passed, 1 failed\n",
     ]
 
     def setUp(self) -> None:
@@ -1082,6 +1110,37 @@ class NetworkSuiteTests(unittest.TestCase):
         # BEFORE the current run's first [NET TEST] RESULT line is
         # discarded — only the current run's RESULT counts.
         tester = self._runner_with(self.CHUNKS_OLD_PASS_REPLAY)
+        try:
+            self.rt.NetworkServices = lambda: _NetworkStub()
+            self.assertFalse(self.rt.test_network(tester))
+        finally:
+            tester.cleanup()
+
+    def test_network_missing_shutdown_case_rejected(self) -> None:
+        # The shutdown case is required explicitly: a summary that does
+        # not carry this run's shutdown PASS marker is rejected even
+        # when the counts look right.
+        tester = self._runner_with(self.CHUNKS_MISSING_SHUTDOWN)
+        try:
+            self.rt.NetworkServices = lambda: _NetworkStub()
+            self.assertFalse(self.rt.test_network(tester))
+        finally:
+            tester.cleanup()
+
+    def test_network_stale_shutdown_marker_rejected(self) -> None:
+        # A shutdown marker that arrived BEFORE this run's DHCP evidence
+        # belongs to an older run and must not satisfy the gate.
+        tester = self._runner_with(self.CHUNKS_STALE_SHUTDOWN)
+        try:
+            self.rt.NetworkServices = lambda: _NetworkStub()
+            self.assertFalse(self.rt.test_network(tester))
+        finally:
+            tester.cleanup()
+
+    def test_network_failed_summary_rejected(self) -> None:
+        # The guest reported the shutdown case as failed (the service
+        # timed out): failed must be 0 for the run to pass.
+        tester = self._runner_with(self.CHUNKS_FAILED_SUMMARY)
         try:
             self.rt.NetworkServices = lambda: _NetworkStub()
             self.assertFalse(self.rt.test_network(tester))

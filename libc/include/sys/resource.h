@@ -37,7 +37,13 @@ struct os01_rlimit64 {
 };
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 int getrlimit(int resource, struct rlimit *rlim);
 int setrlimit(int resource, const struct rlimit *rlim);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SYS_RESOURCE_H */

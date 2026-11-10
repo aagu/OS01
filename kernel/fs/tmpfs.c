@@ -12,6 +12,7 @@
 
 #include <fs/tmpfs.h>
 #include <fs/vfs.h>
+#include <fs/file.h>
 #include <core/debug.h>
 #include <memory/pmm.h>      // alloc_4k_page, free_4k_page
 #include <memory/memory.h>    // Phy_To_Virt, Virt_To_Phy
@@ -250,18 +251,16 @@ static int tmpfs_vfs_read(struct vfs_node *node, uint64_t offset,
     return (int)size;
 }
 
-static int tmpfs_vfs_write(struct vfs_node *node, uint64_t offset,
-                            uint64_t size, void *buffer)
+/* The write body with the mount mutex ALREADY held.  The append hook
+ * reuses it, so a plain write and an append share the SAME
+ * serialization boundary — that is what makes an append atomic with
+ * respect to the other writers of the same filesystem. */
+static int tmpfs_write_locked(tmpfs_node_t *tn, struct vfs_node *node,
+                              uint64_t offset, uint64_t size, void *buffer)
 {
-    if (!node || !buffer || size == 0) return 0;
-    tmpfs_mount_ctx_t *ctx = tmpfs_ctx_of(node);
-    tmpfs_lock_ctx(ctx);
-    tmpfs_node_t *tn = tmpfs_get_node(node);
-    if (!tn) { tmpfs_unlock_ctx(ctx); return 0; }
-
     uint64_t end_pos = offset + size;
     uint64_t last_blk = (end_pos > 0) ? ((end_pos - 1) / 4096) : 0;
-    if (tmpfs_grow_to(tn, last_blk) != 0) { tmpfs_unlock_ctx(ctx); return -1; }
+    if (tmpfs_grow_to(tn, last_blk) != 0) return -1;
     if (end_pos > tn->size) tn->size = end_pos;
     node->size = tn->size;
 
@@ -273,7 +272,7 @@ static int tmpfs_vfs_write(struct vfs_node *node, uint64_t offset,
         uint64_t blk_idx = pos / 4096;
         uint32_t blk_off = (uint32_t)(pos % 4096);
         tmpfs_block_ptr_t *bp = tmpfs_find_block(tn, blk_idx);
-        if (!bp) { tmpfs_unlock_ctx(ctx); return -1; }
+        if (!bp) return -1;
 
         uint32_t chunk = 4096 - blk_off;
         if (chunk > remaining) chunk = (uint32_t)remaining;
@@ -283,13 +282,49 @@ static int tmpfs_vfs_write(struct vfs_node *node, uint64_t offset,
         remaining -= chunk;
     }
     if (node->mount) {
+        /* Lock order: the mount mutex is held, the active lock is taken
+         * inside it. */
         spin_lock(&node->mount->active_lock);
         vfs_active_nodes_sync_size_locked(node->mount, (uint64_t)(uintptr_t)tn,
                                           tn->size, tn->mtime);
         spin_unlock(&node->mount->active_lock);
     }
-    tmpfs_unlock_ctx(ctx);
     return (int)size;
+}
+
+static int tmpfs_vfs_write(struct vfs_node *node, uint64_t offset,
+                            uint64_t size, void *buffer)
+{
+    if (!node || !buffer || size == 0) return 0;
+    tmpfs_mount_ctx_t *ctx = tmpfs_ctx_of(node);
+    tmpfs_lock_ctx(ctx);
+    tmpfs_node_t *tn = tmpfs_get_node(node);
+    if (!tn) { tmpfs_unlock_ctx(ctx); return 0; }
+
+    int n = tmpfs_write_locked(tn, node, offset, size, buffer);
+    tmpfs_unlock_ctx(ctx);
+    return n;
+}
+
+/* Atomic append.  The real EOF is chosen INSIDE the mount mutex, so two
+ * appenders that opened the same file independently cannot pick the same
+ * offset and overwrite each other.  The file's offset is advanced to the
+ * end of the COMMITTED range before the mutex is released. */
+static int tmpfs_vfs_append(struct file *f, uint64_t size, const void *buffer)
+{
+    if (!f || !f->node || !buffer || size == 0) return -EINVAL;
+    struct vfs_node *node = f->node;
+    tmpfs_mount_ctx_t *ctx = tmpfs_ctx_of(node);
+    tmpfs_lock_ctx(ctx);
+    tmpfs_node_t *tn = tmpfs_get_node(node);
+    if (!tn) { tmpfs_unlock_ctx(ctx); return -EINVAL; }
+
+    uint64_t offset = tn->size;              /* the real end of the file */
+    int n = tmpfs_write_locked(tn, node, offset, size, (void *)buffer);
+    /* A commit of zero bytes leaves the offset alone. */
+    if (n > 0) f->offset = offset + (uint64_t)n;
+    tmpfs_unlock_ctx(ctx);
+    return n;
 }
 
 static int tmpfs_vfs_readdir(struct vfs_node *node, uint64_t index,
@@ -762,6 +797,7 @@ static const vfs_inode_ops_t tmpfs_iops = {
 static const vfs_file_ops_t tmpfs_fops = {
     .read     = tmpfs_vfs_read,
     .write    = tmpfs_vfs_write,
+    .append   = tmpfs_vfs_append,
     .readdir  = tmpfs_vfs_readdir,
 };
 

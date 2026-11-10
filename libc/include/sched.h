@@ -12,6 +12,10 @@ typedef struct {
     unsigned long __bits[__CPU_SETSIZE / __NCPUBITS];
 } cpu_set_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define CPU_SET(cpu, cpusetp) \
     ((cpusetp)->__bits[(cpu) / __NCPUBITS] |= (1UL << ((cpu) % __NCPUBITS)))
 #define CPU_ZERO(cpusetp) \
@@ -46,5 +50,9 @@ int sched_get_priority_max(int policy);
 int sched_get_priority_min(int policy);
 int sched_setscheduler(pid_t pid, int policy, const void *param);
 int sched_getscheduler(pid_t pid);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _SCHED_H */
