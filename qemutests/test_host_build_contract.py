@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 VALID_GROUPS = {
     "framework", "libc", "memory", "sched", "fs", "intr",
-    "drivers", "net", "display", "terminal", "monitor", "gui"
+    "drivers", "net", "display", "terminal", "monitor", "gui",
+    "doom",
 }
 
 VALID_ACCEPTANCES = {"protocol-or-legacy", "exit-status", "expected-failure"}

@@ -13,4 +13,5 @@ DOOMGENERIC_REVISION := e257a09527062bfb986b6e5e0780839b6cbd5b71
 # or reordering a patch rebuilds the archive.  A patch that does not
 # apply cleanly is a hard error, never a skipped patch.
 DOOMGENERIC_PATCHES := \
-  0001-os01-no-zenity.patch
+  0001-os01-no-zenity.patch \
+  0002-os01-quit.patch

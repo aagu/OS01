@@ -1390,9 +1390,13 @@ test-doom-host: $(if $(filter all,$(DOOM_CASE_EFFECTIVE)),$(foreach c,$(DOOM_HOS
 # profile gate, the patch application, the rebuild trigger and the
 # "no system/fscanf dependency" property of the production objects.
 # It is a build contract, so it runs the unittest module directly.
+#
+# The exit behaviour (T2) belongs to the same group: it drives the REAL
+# patched i_system.c on the host, so it runs as a host test binary.
 _test-doom-host-run-build:
 	@echo "  [test-doom-host] build"
 	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_build_contract -v
+	$(call os01_submake,hosttests,test-doom-engine-exit $(OS01_SUBMAKE_ARGS))
 
 .PHONY: test-gui-widget test-gui-focus
 test-gui-widget:

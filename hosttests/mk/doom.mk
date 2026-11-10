@@ -15,8 +15,13 @@
 # `make test-doom-host DOOM_CASE=build|config|all`.
 
 DOOM_HOST_DIR := $(TEST_BLD)/doom
-DOOM_PRIVATE_DIR := $(BUILD_DIR)/doom-upstream
+# The private patched copy lives under the USER build directory -- the very
+# same directory user/doom/engine.mk writes into.
+DOOM_PRIVATE_DIR := $(USER_BUILD_DIR)/doom-upstream
 DOOM_ENGINE_SRC := $(DOOM_PRIVATE_DIR)/doomgeneric
+# The shipped production objects (target build), used by the symbol-table
+# assertions.
+DOOM_PROD_OBJ_DIR := $(USER_BUILD_DIR)/obj/doom-engine/obj
 
 # The private copy only exists after the user build prepared it.  The
 # fixture builds it on demand through the same user sub-make the root
@@ -25,12 +30,15 @@ DOOM_ENGINE_SRC := $(DOOM_PRIVATE_DIR)/doomgeneric
 doom-engine-private:
 	@$(MAKE) --no-print-directory -C $(TESTS_DIR)/user \
 	    OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
-	    SYSROOT_DIR="$(SYSROOT_DIR)" doom-engine-archive
+	    SYSROOT_DIR="$(SYSROOT)" doom-engine-archive
 
 $(DOOM_HOST_DIR)/.private.stamp: doom-engine-private
 	@mkdir -p $(dir $@)
 	@test -f "$(DOOM_ENGINE_SRC)/m_config.c" || { \
 	    echo "ERROR: the private doomgeneric copy is missing $(DOOM_ENGINE_SRC)"; \
+	    exit 1; }
+	@test -f "$(DOOM_ENGINE_SRC)/i_system.c" || { \
+	    echo "ERROR: the private doomgeneric copy is missing $(DOOM_ENGINE_SRC)/i_system.c"; \
 	    exit 1; }
 	@touch $@
 
@@ -39,10 +47,42 @@ $(DOOM_HOST_DIR)/.private.stamp: doom-engine-private
 # host fixture observes the production code paths.
 DOOM_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -I$(DOOM_ENGINE_SRC) \
-    -I$(TESTS_DIR)/thirdpart/doomgeneric \
     -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE \
     -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
     -DOS01_DOOM \
     -iquote $(TEST_INC) -iquote $(TEST_MOCK)
+
+# ── D03 T2: the exit behaviour ───────────────────────────────────────
+#
+# The fixture host-compiles the REAL patched i_system.c and intercepts the
+# libc exit() at link time (--wrap=exit): the production source is never
+# modified and no test entry point is installed in the engine.
+$(eval $(call register_host_test,test_doom_engine_exit,doom,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_doom_engine_exit.elf
+
+$(DOOM_HOST_DIR)/i_system.o: $(DOOM_ENGINE_SRC)/i_system.c $(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_doom_engine_exit.o: $(TEST_CASES)/test_doom_engine_exit.c \
+		$(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) \
+	    -DOS01_DOOM_NM='"$(NM_TOOL)"' \
+	    -DOS01_DOOM_PROD_OBJECT='"$(DOOM_PROD_OBJ_DIR)/i_system.o"' \
+	    -c $< -o $@
+
+$(TEST_BLD)/test_doom_engine_exit.elf: $(TEST_BLD)/test_doom_engine_exit.o \
+		$(DOOM_HOST_DIR)/i_system.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -Wl,--wrap=exit -o $@ $^
+
+.PHONY: test-doom-engine-exit
+test-doom-engine-exit: $(TEST_BLD)/test_doom_engine_exit.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
 
 -include $(DOOM_HOST_DIR)/*.d

@@ -1,0 +1,16 @@
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -261,6 +261,13 @@
+     SDL_Quit();
+
+     exit(0);
++#elif defined(OS01_DOOM)
++    // OS01: a normal quit must terminate the process.  The exit
++    // handlers above have already run, so the engine must not fall
++    // through and return to the caller with nothing left to shut
++    // the machine down.  This is an OS01-only branch: ORIGCODE
++    // stays undefined and no other platform is impersonated.
++    exit(0);
+ #endif
+ }
+
