@@ -17,53 +17,12 @@ extern "C" {
  * therefore never depend on the layout of a stream. */
 typedef struct __FILE FILE;
 
-#define ZEROPAD	1		/* pad with zero */
-#define SIGN	2		/* unsigned/signed long */
-#define PLUS	4		/* show plus */
-#define SPACE	8		/* space if plus */
-#define LEFT	16		/* left justified */
-#define SPECIAL	32		/* 0x */
-#define SMALL	64		/* use 'abcdef' instead of 'ABCDEF' */
-
-/* do_div: per-arch inline asm.
- *   x86_64 : divq — single instruction, quotient in rax, remainder in rdx.
- *   aarch64: udiv + msub — two instructions, quotient via udiv, remainder
- *            via msub = dividend - quotient*divisor. The dividend is read
- *            twice (udiv's source operand Xn + msub's source operand Xa);
- *            no constraint tying is used, so the compiler doesn't merge
- *            those reads — each asm instruction re-loads __qn.
- *   else   : portable C fallback.
- *
- * libc/stdio is x86_64-only on the libc userland side (the Makefile
- * gates libc.a to x86_64), so the asm path covers both x86_64 libc
- * userland and x86_64 libk kernel-side builds. */
-#if defined(__x86_64__)
-#define do_div(n,base) ({ \
-	int __res; \
-	__asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
-	__res; })
-#elif defined(__aarch64__)
-#define do_div(n,base) ({ \
-    unsigned long __b = (unsigned long)(base); \
-    unsigned long long __qn = (unsigned long long)(n); \
-    unsigned long long __q; \
-    unsigned long __rem; \
-    __asm__ volatile ("udiv %0, %1, %2" \
-                      : "=r"(__q) \
-                      : "r"(__qn), "r"(__b)); \
-    __asm__ volatile ("msub %0, %3, %1, %2" \
-                      : "=r"(__rem) \
-                      : "r"(__q), "r"(__qn), "r"(__b)); \
-    (n) = __q; \
-    __rem; })
-#else
-#define do_div(n,base) ({ \
-    unsigned long long __q = (n); \
-    (n) = __q / (unsigned long)(base); \
-    (unsigned long)(__q % (unsigned long)(base)); \
-})
-#endif
-#define is_digit(c)	((c) >= '0' && (c) <= '9')
+/* NOTE: the printf format flags (ZEROPAD/SIGN/PLUS/SPACE/LEFT/SPECIAL/
+ * SMALL) and the helpers do_div()/is_digit() are the libc's IMPLEMENTATION
+ * detail.  They live in the private header <stdio/internal.h>, so a
+ * consumer is free to use those names for its own identifiers — a public
+ * header that defines `LEFT` breaks every caller that has an enum member
+ * of that name. */
 
 int printf(const char* __restrict, ...);
 int putchar(int);
@@ -88,6 +47,20 @@ void perror(const char *s);
 int vasprintf(char **strp, const char *fmt, va_list ap);
 int asprintf(char **strp, const char *fmt, ...);
 int fileno_unlocked(FILE *f);
+
+/* ── File removal and renaming ────────────────────────────────────
+ *
+ * These are the standard positions of the two calls.  <unistd.h> keeps its
+ * historical declaration of rename() (and of the unlink/rmdir family that
+ * remove() is built on); the declaration there is IDENTICAL to the one
+ * below, so a consumer may include either header — or both — and always
+ * see the same type.
+ *
+ * remove(path) removes a file, a directory or a symbolic link; see
+ * libc/stdio/remove.c for the exact semantics (a link is removed itself,
+ * never its target). */
+int rename(const char *oldpath, const char *newpath);
+int remove(const char *path);
 
 /* ── Stream lifecycle ───────────────────────────────────────────────
  *

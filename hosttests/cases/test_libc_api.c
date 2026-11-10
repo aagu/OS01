@@ -15,6 +15,15 @@
  *                              match for a non-matching input.  This is the
  *                              T1 behaviour RED baseline; T16 replaces the
  *                              expectation when regex is migrated.
+ *   api_stdio_namespace_clean  the public <stdio.h> owns NO implementation
+ *                              name: the printf format flags and the
+ *                              do_div/is_digit helpers live in the private
+ *                              header, so a consumer may use those names
+ *   api_standard_header_two_tu the interfaces are reachable at their
+ *                              STANDARD positions (<strings.h>, <stdio.h>,
+ *                              <sys/stat.h>) with the standard signatures,
+ *                              and they agree with the historical positions
+ *                              (<string.h>, <unistd.h>)
  *
  * The harness drives the host compiler: it writes probe sources into the
  * profile build directory and compiles/links them.  All compiler
@@ -754,6 +763,197 @@ static void api_regex_stub_baseline(void)
     assert_eq(0, rc);
 }
 
+/* ── case 5: the public <stdio.h> owns no implementation namespace ── */
+
+/* The printf format flags (ZEROPAD/SIGN/PLUS/SPACE/LEFT/SPECIAL/SMALL) and
+ * the two helpers (do_div/is_digit) are the libc's IMPLEMENTATION detail.
+ * They live in the private header <stdio/internal.h> now, so a consumer
+ * may use those names as its own identifiers.
+ *
+ * The probe below declares exactly that: ordinary enumerators and ordinary
+ * function prototypes.  While the public header still owned the names, the
+ * macros would rewrite the probe into something that does not compile —
+ * which is the RED this case records. */
+static void api_stdio_namespace_clean(void)
+{
+    char cmd[API_CMD_MAX];
+    char path[API_TEXT_MAX];
+    int rc;
+
+    TEST_SUITE("api_stdio_namespace_clean");
+
+    api_fmt(path, sizeof(path), "%s/ns_clean.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <stdio.h>\n"
+                   "enum { LEFT = 1, RIGHT = 2, SIGN = 4, PLUS = 8,\n"
+                   "       SPACE = 16, SPECIAL = 32, SMALL = 64,\n"
+                   "       ZEROPAD = 128 };\n"
+                   "int os01_api_ns_do_div(int a, int b);\n"
+                   "int os01_api_ns_is_digit(int c);\n"
+                   "int os01_api_ns_value(void)\n"
+                   "{\n"
+                   "    return LEFT + SIGN + PLUS + SPACE + SPECIAL + SMALL\n"
+                   "         + ZEROPAD + os01_api_ns_do_div(7, 2)\n"
+                   "         + os01_api_ns_is_digit('4');\n"
+                   "}\n");
+    api_fmt(cmd, sizeof(cmd),
+            "cd %s && %s -std=c11 -fsyntax-only -I%s ns_clean.c",
+            OS01_API_PROBE_DIR, OS01_API_CC, OS01_API_INCLUDE_DIR);
+    rc = api_run(cmd);
+    if (rc != 0) {
+        printf("  [FAIL] the public <stdio.h> still owns implementation names "
+               "(LEFT/SIGN/PLUS/SPACE/SPECIAL/SMALL/ZEROPAD, do_div, "
+               "is_digit): a consumer cannot use those names itself\n");
+    }
+    assert_eq(0, rc);
+
+    /* Negative control: the very same construct with the macro forced back
+     * in MUST fail to compile.  Without it the positive result above would
+     * not prove that the harness can see the pollution at all. */
+    api_fmt(path, sizeof(path), "%s/ns_polluted.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <stdio.h>\n"
+                   "enum { LEFT = 1 };\n"
+                   "int os01_api_ns_polluted(void) { return LEFT; }\n");
+    api_fmt(cmd, sizeof(cmd),
+            "cd %s && %s -std=c11 -fsyntax-only -I%s -DLEFT=16 ns_polluted.c",
+            OS01_API_PROBE_DIR, OS01_API_CC, OS01_API_INCLUDE_DIR);
+    rc = api_run(cmd);
+    if (rc == 0) {
+        printf("  [FAIL] negative control compiled: the harness cannot see a "
+               "macro that shadows a consumer's own identifier\n");
+    }
+    assert_true(rc != 0);
+}
+
+/* ── case 6: the interfaces live at their STANDARD positions ───────── */
+
+/* The declarations an application is expected to find:
+ *
+ *   <strings.h>    strcasecmp / strncasecmp
+ *   <stdio.h>      rename / remove
+ *   <sys/stat.h>   mkdir
+ *
+ * The first version of these interfaces kept the historical positions
+ * (<string.h> and <unistd.h>); the standard positions are added ALONGSIDE
+ * them, so both spellings must agree on the type.  The probes below take
+ * the address of every interface through a TYPED function pointer, so a
+ * declaration with the wrong signature is a compile error rather than a
+ * silent mismatch, and they are linked together so that a header that
+ * defines a symbol twice would show up as a duplicate definition. */
+static void api_standard_header_two_tu(void)
+{
+    char cmd[API_CMD_MAX];
+    char path[API_TEXT_MAX];
+    int rc;
+
+    TEST_SUITE("api_standard_header_two_tu");
+
+    /* TU 1: <strings.h> — the case-insensitive comparison family. */
+    api_fmt(path, sizeof(path), "%s/std_strings.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <strings.h>\n"
+                   "static int (*os01_api_ref_strcasecmp)(const char *, const char *) =\n"
+                   "    &strcasecmp;\n"
+                   "static int (*os01_api_ref_strncasecmp)(const char *, const char *, size_t) =\n"
+                   "    &strncasecmp;\n"
+                   "int os01_api_std_strings(void)\n"
+                   "{\n"
+                   "    return os01_api_ref_strcasecmp != 0\n"
+                   "         && os01_api_ref_strncasecmp != 0;\n"
+                   "}\n");
+
+    /* TU 2: <stdio.h> — the file-removal and renaming pair. */
+    api_fmt(path, sizeof(path), "%s/std_stdio.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <stdio.h>\n"
+                   "static int (*os01_api_ref_remove)(const char *) = &remove;\n"
+                   "static int (*os01_api_ref_rename)(const char *, const char *) =\n"
+                   "    &rename;\n"
+                   "int os01_api_std_stdio(void)\n"
+                   "{\n"
+                   "    return os01_api_ref_remove != 0 && os01_api_ref_rename != 0;\n"
+                   "}\n");
+
+    /* TU 3: <sys/stat.h> — the directory creation call. */
+    api_fmt(path, sizeof(path), "%s/std_stat.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <sys/stat.h>\n"
+                   "static int (*os01_api_ref_mkdir)(const char *, int) = &mkdir;\n"
+                   "int os01_api_std_stat(void)\n"
+                   "{\n"
+                   "    return os01_api_ref_mkdir != 0;\n"
+                   "}\n");
+
+    /* TU 4: the historical positions — they must still agree. */
+    api_fmt(path, sizeof(path), "%s/std_legacy.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <string.h>\n"
+                   "#include <unistd.h>\n"
+                   "static int (*os01_api_ref_legacy_strcasecmp)(const char *, const char *) =\n"
+                   "    &strcasecmp;\n"
+                   "static int (*os01_api_ref_legacy_rename)(const char *, const char *) =\n"
+                   "    &rename;\n"
+                   "static int (*os01_api_ref_legacy_mkdir)(const char *, int) = &mkdir;\n"
+                   "int os01_api_std_legacy(void)\n"
+                   "{\n"
+                   "    return os01_api_ref_legacy_strcasecmp != 0\n"
+                   "         && os01_api_ref_legacy_rename != 0\n"
+                   "         && os01_api_ref_legacy_mkdir != 0;\n"
+                   "}\n");
+
+    /* TU 5: the standard position and the historical position in ONE
+     * translation unit: two declarations of the same name with different
+     * types would be a compile error here. */
+    api_fmt(path, sizeof(path), "%s/std_both.c", OS01_API_PROBE_DIR);
+    api_write_file(path,
+                   "#include <stdio.h>\n"
+                   "#include <string.h>\n"
+                   "#include <strings.h>\n"
+                   "#include <sys/stat.h>\n"
+                   "#include <unistd.h>\n"
+                   "static int (*os01_api_ref_both_strcasecmp)(const char *, const char *) =\n"
+                   "    &strcasecmp;\n"
+                   "static int (*os01_api_ref_both_rename)(const char *, const char *) =\n"
+                   "    &rename;\n"
+                   "static int (*os01_api_ref_both_mkdir)(const char *, int) = &mkdir;\n"
+                   "int os01_api_std_both(void)\n"
+                   "{\n"
+                   "    return os01_api_ref_both_strcasecmp != 0\n"
+                   "         && os01_api_ref_both_rename != 0\n"
+                   "         && os01_api_ref_both_mkdir != 0;\n"
+                   "}\n");
+
+    api_fmt(path, sizeof(path), "%s/std_main.c", OS01_API_PROBE_DIR);
+    api_write_file(path, "int main(void) { return 0; }\n");
+
+    api_fmt(cmd, sizeof(cmd),
+            "cd %s && %s -std=c11 -c -I%s std_strings.c std_stdio.c "
+            "std_stat.c std_legacy.c std_both.c std_main.c",
+            OS01_API_PROBE_DIR, OS01_API_CC, OS01_API_INCLUDE_DIR);
+    rc = api_run(cmd);
+    if (rc != 0) {
+        printf("  [FAIL] the standard-position probes did not compile "
+               "(exit %d): an interface is missing or has the wrong "
+               "signature\n", rc);
+    }
+    assert_eq(0, rc);
+    if (rc != 0) {
+        return;
+    }
+
+    api_fmt(cmd, sizeof(cmd),
+            "cd %s && %s -o std_all std_strings.o std_stdio.o std_stat.o "
+            "std_legacy.o std_both.o std_main.o",
+            OS01_API_PROBE_DIR, OS01_API_CC);
+    rc = api_run(cmd);
+    if (rc != 0) {
+        printf("  [FAIL] the standard-position link failed (exit %d): a "
+               "header defines a symbol more than once\n", rc);
+    }
+    assert_eq(0, rc);
+}
+
 /* ── the production objects really are the ones under test ────────── */
 
 static void api_production_objects(void)
@@ -774,6 +974,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(api_two_translation_units),
     TEST_ENTRY(api_cpp_linkage),
     TEST_ENTRY(api_regex_stub_baseline),
+    TEST_ENTRY(api_stdio_namespace_clean),
+    TEST_ENTRY(api_standard_header_two_tu),
     TEST_ENTRY(api_production_objects),
 TEST_LIST_END
 

@@ -384,6 +384,8 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "putchar_unlocked",
         "fputc",
         "fwrite",
+        "rename",
+        "remove",
     ],
     "stdlib.h": [
         "realloc",
@@ -455,6 +457,13 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "strndup",
         "strncasecmp",
     ],
+    # The standard position of the case-insensitive comparisons.  The
+    # declarations are identical to the ones in string.h, which stays in
+    # place for the consumers that already include it.
+    "strings.h": [
+        "strcasecmp",
+        "strncasecmp",
+    ],
     "sys/auxv.h": [
         "getauxval",
     ],
@@ -513,6 +522,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "ioctl",
         "getdents64",
         "access",
+        "mkdir",
     ],
     "sys/statfs.h": [
         "statfs",

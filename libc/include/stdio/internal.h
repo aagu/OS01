@@ -21,6 +21,86 @@
  * private header; every stdio translation unit needs both. */
 #include <stdio/file.h>
 
+/* ── The printf format flags ───────────────────────────────────────
+ *
+ * These flags are the libc's IMPLEMENTATION detail: they describe the
+ * parsed format string of one conversion, not the public interface of the
+ * C library.  They used to live in the public <stdio.h>, where they
+ * polluted the namespace of every consumer: a caller with an enum member
+ * named LEFT (or a variable named SIGN) could not even include the
+ * header any more.  They belong here, next to the formatter that
+ * interprets them.
+ *
+ * Every definition is guarded: the host-test platform stub
+ * (hosttests/mock/test_platform.h) provides the same names for the kernel
+ * sources it compiles, and the two must never fight over them. */
+#ifndef ZEROPAD
+#define ZEROPAD	1		/* pad with zero */
+#endif
+#ifndef SIGN
+#define SIGN	2		/* unsigned/signed long */
+#endif
+#ifndef PLUS
+#define PLUS	4		/* show plus */
+#endif
+#ifndef SPACE
+#define SPACE	8		/* space if plus */
+#endif
+#ifndef LEFT
+#define LEFT	16		/* left justified */
+#endif
+#ifndef SPECIAL
+#define SPECIAL	32		/* 0x */
+#endif
+#ifndef SMALL
+#define SMALL	64		/* use 'abcdef' instead of 'ABCDEF' */
+#endif
+
+/* do_div: per-arch inline asm.
+ *   x86_64 : divq — single instruction, quotient in rax, remainder in rdx.
+ *   aarch64: udiv + msub — two instructions, quotient via udiv, remainder
+ *            via msub = dividend - quotient*divisor. The dividend is read
+ *            twice (udiv's source operand Xn + msub's source operand Xa);
+ *            no constraint tying is used, so the compiler doesn't merge
+ *            those reads — each asm instruction re-loads __qn.
+ *   else   : portable C fallback.
+ *
+ * libc/stdio is x86_64-only on the libc userland side (the Makefile
+ * gates libc.a to x86_64), so the asm path covers both x86_64 libc
+ * userland and x86_64 libk kernel-side builds. */
+#ifndef do_div
+#if defined(__x86_64__)
+#define do_div(n,base) ({ \
+	int __res; \
+	__asm__("divq %%rcx":"=a" (n),"=d" (__res):"0" (n),"1" (0),"c" (base)); \
+	__res; })
+#elif defined(__aarch64__)
+#define do_div(n,base) ({ \
+    unsigned long __b = (unsigned long)(base); \
+    unsigned long long __qn = (unsigned long long)(n); \
+    unsigned long long __q; \
+    unsigned long __rem; \
+    __asm__ volatile ("udiv %0, %1, %2" \
+                      : "=r"(__q) \
+                      : "r"(__qn), "r"(__b)); \
+    __asm__ volatile ("msub %0, %3, %1, %2" \
+                      : "=r"(__rem) \
+                      : "r"(__q), "r"(__qn), "r"(__b)); \
+    (n) = __q; \
+    __rem; })
+#else
+#define do_div(n,base) ({ \
+    unsigned long long __q = (n); \
+    (n) = __q / (unsigned long)(base); \
+    (unsigned long)(__q % (unsigned long)(base)); \
+})
+#endif
+#endif /* do_div */
+
+#ifndef is_digit
+#define is_digit(c)	((c) >= '0' && (c) <= '9')
+#endif
+
 /*
  * Bounded core formatter. Internal to the stdio implementation; not part of
  * the public libc API.

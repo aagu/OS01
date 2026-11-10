@@ -141,6 +141,7 @@ int    stat(const char *path, struct stat *buf);
 int    lstat(const char *path, struct stat *buf);
 int    fstat(int fd, struct stat *buf);
 int    fstatat(int dirfd, const char *path, struct stat *buf, int flags);
+int    mkdir(const char *path, int mode);
 int64_t lseek(int fd, int64_t offset, int whence);
 int    fcntl(int fd, int cmd, ...);
 int    ioctl(int fd, unsigned long request, ...);
