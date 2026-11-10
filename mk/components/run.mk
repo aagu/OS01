@@ -2620,7 +2620,20 @@ test-gui-incremental: $(SYSROOT_STAMP)
 	@rm -f $(BUILD_DIR)/stamps/sysroot.stamp
 	$(MAKE) --no-print-directory sysroot
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
-	@echo "  [test-gui-incremental] all four incremental assertions PASS"
+	@echo "  [test-gui-incremental] phase 5/5: modifying the published PS2 header must rekey the generation and rebuild the consumers"
+	@+$(SHELL) -ec '\
+	  hdr=libgui/include/gui/gui_input_ps2.h; \
+	  bak=$(BUILD_DIR)/incr-ps2-header.bak; \
+	  cp "$$hdr" "$$bak"; \
+	  trap "cp \"$$bak\" \"$$hdr\"" EXIT; \
+	  $(GUI_INCREMENTAL_AUDIT) --header gui_input_ps2.h --incremental-snapshot "$(BUILD_DIR)/incr-ps2rekey.json" --incremental-phase ps2rekey; \
+	  printf "\n/* D02 incremental probe: temporary marker */\n" >> "$$hdr"; \
+	  $(call os01_submake_cmd,libgui,all); \
+	  $(MAKE) --no-print-directory test-gui-host CASE=input-decode; \
+	  rm -f $(BUILD_DIR)/stamps/sysroot.stamp; \
+	  $(MAKE) --no-print-directory sysroot; \
+	  $(GUI_INCREMENTAL_AUDIT) --header gui_input_ps2.h --incremental-compare "$(BUILD_DIR)/incr-ps2rekey.json" --incremental-phase ps2rekey'
+	@echo "  [test-gui-incremental] all five incremental assertions PASS"
 
 # ── test-runtime: original recipe (lines 364-385 of run.mk) ──
 test-runtime: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT))

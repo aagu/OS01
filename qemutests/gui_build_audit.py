@@ -701,6 +701,88 @@ int main(void)
 """
 
 
+def _consumer_flags(repo_root: Path, cflags: list[str]) -> list[str]:
+    """The user build's compile flags WITHOUT the user program's own
+    ``-Icommon`` directory.
+
+    The link probes compile a consumer that must see the PUBLISHED headers
+    only: the user's shared directory is the one include path that belongs
+    to the program under test, so it is dropped.  Everything else (the
+    sysroot include paths, the toolchain flags) is kept as it is.
+    """
+    user_dir = repo_root / "user"
+    common_dir = (user_dir / "common").resolve()
+
+    def _is_common(path: Path) -> bool:
+        try:
+            return path.resolve() == common_dir
+        except OSError:
+            return False
+
+    out: list[str] = []
+    idx = 0
+    while idx < len(cflags):
+        tok = cflags[idx]
+        if tok in ("-I", "-isystem"):
+            # A separated flag/value pair: drop it only when it points at
+            # the user program's own common directory.
+            if idx + 1 < len(cflags) and _is_common(user_dir / cflags[idx + 1]):
+                idx += 2
+                continue
+            out.extend(cflags[idx: idx + 2])
+            idx += 2
+            continue
+        if tok.startswith("-I"):
+            if _is_common(user_dir / tok[len("-I"):]):
+                idx += 1
+                continue
+        elif tok.startswith("-isystem"):
+            if _is_common(user_dir / tok[len("-isystem"):]):
+                idx += 1
+                continue
+        out.append(tok)
+        idx += 1
+    return out
+
+
+def _build_startup_objects(
+    repo_root: Path,
+    profile_vars: dict[str, str],
+    obj_dir: Path,
+    errors: list[str],
+    label: str,
+) -> dict[str, Path] | None:
+    """Build crt0.o and sigreturn_trampoline.o the way user/Makefile does.
+
+    The startup objects are part of the TARGET link, so a consumer probe
+    must link against the same ones — they are built here with the target
+    toolchain and the same flags, from the same sources.
+    """
+    user_dir = repo_root / "user"
+    cc = profile_vars.get("cc", "").split()
+    cflags = profile_vars.get("cflags", "").split()
+    startup_srcs = {
+        "crt0.o": user_dir / "crt0.S",
+        "sigreturn_trampoline.o": user_dir / "sigreturn_trampoline.S",
+    }
+    built: dict[str, Path] = {}
+    for obj_name, src in startup_srcs.items():
+        if not src.is_file():
+            errors.append(f"{label}: startup source missing: {src}")
+            return None
+        res = run_cmd(
+            [*cc, *cflags, "-c", str(src), "-o", str(obj_dir / obj_name)],
+            cwd=user_dir,
+        )
+        if res.returncode != 0:
+            errors.append(
+                f"{label}: building {obj_name} from {src.name} failed:\n{res.stderr.strip()}"
+            )
+            return None
+        built[obj_name] = obj_dir / obj_name
+    return built
+
+
 def audit_link_probe(
     repo_root: Path,
     gen_dir: Path,
@@ -730,37 +812,7 @@ def audit_link_probe(
     # The consumer must compile against the published sysroot ONLY.  The
     # user build adds "-Icommon" (the user program's own shared directory);
     # the probe drops it and proves that nothing else is needed.
-    common_dir = (user_dir / "common").resolve()
-
-    def _is_common(path: Path) -> bool:
-        try:
-            return path.resolve() == common_dir
-        except OSError:
-            return False
-
-    consumer_flags: list[str] = []
-    idx = 0
-    while idx < len(cflags):
-        tok = cflags[idx]
-        if tok in ("-I", "-isystem"):
-            # A separated flag/value pair: drop it only when it points at
-            # the user program's own common directory.
-            if idx + 1 < len(cflags) and _is_common(user_dir / cflags[idx + 1]):
-                idx += 2
-                continue
-            consumer_flags.extend(cflags[idx: idx + 2])
-            idx += 2
-            continue
-        if tok.startswith("-I"):
-            if _is_common(user_dir / tok[len("-I"):]):
-                idx += 1
-                continue
-        elif tok.startswith("-isystem"):
-            if _is_common(user_dir / tok[len("-isystem"):]):
-                idx += 1
-                continue
-        consumer_flags.append(tok)
-        idx += 1
+    consumer_flags = _consumer_flags(repo_root, cflags)
 
     consumer_includes = [p for _, p in _include_paths(consumer_flags, repo_root)]
     for path in consumer_includes:
@@ -778,19 +830,9 @@ def audit_link_probe(
         "crt0.o": user_dir / "crt0.S",
         "sigreturn_trampoline.o": user_dir / "sigreturn_trampoline.S",
     }
-    for obj_name, src in startup_srcs.items():
-        if not src.is_file():
-            errors.append(f"link probe: startup source missing: {src}")
-            return
-        res = run_cmd(
-            [*cc, *cflags, "-c", str(src), "-o", str(obj_dir / obj_name)],
-            cwd=user_dir,
-        )
-        if res.returncode != 0:
-            errors.append(
-                f"link probe: building {obj_name} from {src.name} failed:\n{res.stderr.strip()}"
-            )
-            return
+    startup = _build_startup_objects(repo_root, profile_vars, obj_dir, errors, "link probe")
+    if startup is None:
+        return
 
     # 2. The consumer: only <gui/gui.h>, no private include path.
     consumer_c = work_dir / "gui_link_probe_consumer.c"
@@ -893,6 +935,361 @@ def audit_link_probe(
             "gui link probe: PASS "
             f"(negative control rejected the undefined symbol {GUI_PROBE_NEGATIVE_SYMBOL})"
         )
+
+
+# ── D02: the published PS/2 decoder header and its consumer ──────────────
+#
+# The pure PS/2 decoder is published as <gui/gui_input_ps2.h>.  Two
+# contracts follow from that and are checked here:
+#
+#   published_ps2_header   the header is really published, byte-identical
+#                          to its source, self-sufficient on the published
+#                          include path alone, and free of private/LVGL
+#                          includes;
+#   decoder_only_link_map  an independent consumer that calls ONLY
+#                          gui_ps2_* links the decoder and nothing else:
+#                          no platform object, no input adapter, no LVGL
+#                          object, no gfx object.
+
+PS2_PUBLIC_HEADER = "gui_input_ps2.h"
+PS2_PROBE_SOURCE = "hosttests/cases/probe_gui_ps2_public.c"
+
+# The archive members libgui may contribute to a decoder-only link.
+PS2_ALLOWED_LIBGUI_MEMBERS = frozenset({"input_ps2.o"})
+
+# libgui members that must never appear in a decoder-only link: the
+# platform layer, the full input adapter layer, the widget/layout/theme
+# layer and the shared gfx client policy.
+PS2_FORBIDDEN_LIBGUI_MEMBERS = frozenset({
+    "platform.o", "tick.o", "input.o", "input_lvgl.o", "input_focus.o",
+    "widget.o", "layout.o", "appearance.o", "event.o", "focus.o",
+    "theme.o", "theme_apply.o", "cursor_icon.o", "gfx_client_policy.o",
+})
+
+# Every LVGL object is named lv_*.o.
+PS2_FORBIDDEN_MEMBER_PREFIXES = ("lv_",)
+
+# The only gui_* symbols a decoder-only consumer may end up with.
+PS2_ALLOWED_GUI_SYMBOLS = frozenset({
+    "gui_ps2_init", "gui_ps2_feed", "gui_ps2_expire",
+})
+
+# The includes the published header may name.  Anything else (LVGL, the
+# private bridge headers, the gfx client) would make the published header
+# unusable by an independent consumer.
+PS2_ALLOWED_HEADER_INCLUDES = frozenset({"stdint.h", "gui/gui_input.h"})
+
+
+def _map_members(map_file: Path) -> list[tuple[str, str]]:
+    """The (archive, member) pairs a linker map records.
+
+    The map lists every archive member the linker pulled in, which is the
+    only place the "what did this link really drag in" question can be
+    answered exactly.  The target linker (lld) writes the member as
+    ``<path>/<archive>.a(<member>.o):(<section>)``, so the archive name and
+    the member name are read out of that shape.
+    """
+    try:
+        text = map_file.read_text(errors="replace")
+    except OSError:
+        return []
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for archive, member in re.findall(r"([A-Za-z0-9_.+-]+\.a)\(([^)]+)\)", text):
+        key = (archive, member)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def audit_published_ps2_header(
+    repo_root: Path,
+    gen_dir: Path,
+    profile_vars: dict[str, str],
+    work_dir: Path,
+    errors: list[str],
+) -> bool:
+    """The published <gui/gui_input_ps2.h> is really published and usable."""
+    ok = True
+    published = gen_dir / "usr" / "include" / "gui" / PS2_PUBLIC_HEADER
+    source = repo_root / "libgui" / "include" / "gui" / PS2_PUBLIC_HEADER
+
+    if not published.is_file():
+        errors.append(
+            f"published_ps2_header: the published header is missing: {published}"
+        )
+        return False
+    if published.stat().st_size == 0:
+        errors.append("published_ps2_header: the published header is empty")
+        ok = False
+
+    # The published copy must be the source, byte for byte: the install
+    # rule copies the file, so any difference is a broken publication.
+    if source.is_file():
+        if published.read_bytes() != source.read_bytes():
+            errors.append(
+                "published_ps2_header: the published header differs from its "
+                f"source ({source})"
+            )
+            ok = False
+    else:
+        errors.append(f"published_ps2_header: the source header is missing: {source}")
+        ok = False
+
+    # No private or LVGL include may appear in the published header.
+    text = published.read_text(errors="replace")
+    for inc in re.findall(r'#\s*include\s+[<"]([^>"]+)[>"]', text):
+        if inc not in PS2_ALLOWED_HEADER_INCLUDES:
+            errors.append(
+                f"published_ps2_header: the published header includes {inc}, "
+                "which an independent consumer cannot use"
+            )
+            ok = False
+
+    # Self-sufficiency: the published include path ALONE must compile a
+    # translation unit that includes the header and nothing else.
+    cc = profile_vars.get("cc", "").split()
+    if not cc:
+        errors.append("published_ps2_header: the target compiler is empty")
+        return False
+    tu = work_dir / "ps2_selfcontained.c"
+    tu.write_text(
+        "#include <gui/gui_input_ps2.h>\n"
+        "int os01_ps2_selfcontained(void) { return 0; }\n"
+    )
+    res = run_cmd(
+        [
+            *cc,
+            "-ffreestanding",
+            "-fno-builtin",
+            "-std=c11",
+            "-fsyntax-only",
+            "-I",
+            str(gen_dir / "usr" / "include"),
+            str(tu),
+        ],
+        cwd=work_dir,
+    )
+    if res.returncode != 0:
+        errors.append(
+            "published_ps2_header: the published include path alone cannot "
+            f"compile the header:\n{res.stderr.strip()}"
+        )
+        ok = False
+
+    if ok:
+        print(
+            "published_ps2_header: PASS "
+            f"({published} is published, byte-identical to its source and "
+            "self-sufficient on the published include path)"
+        )
+    return ok
+
+
+def audit_ps2_decoder_link_map(
+    repo_root: Path,
+    gen_dir: Path,
+    profile_vars: dict[str, str],
+    work_dir: Path,
+    errors: list[str],
+) -> bool:
+    """Link an independent gui_ps2_* consumer and audit the link map.
+
+    The consumer is the repository's probe TU (hosttests/cases/
+    probe_gui_ps2_public.c).  It is compiled with the target toolchain
+    against the PUBLISHED generation only, and linked in the exact order
+    user/Makefile uses::
+
+        crt0.o sigreturn_trampoline.o probe.o -lgui -lgfx -lc
+
+    The link map then answers the question the contract asks: what did
+    this consumer really drag in?  Only the decoder and libc may answer.
+    """
+    ok = True
+    cc = profile_vars.get("cc", "").split()
+    ld = profile_vars.get("ld", "").split()
+    raw_ldflags = profile_vars.get("raw_ldflags", "").split()
+    cflags = profile_vars.get("cflags", "").split()
+    if not cc or not ld or not raw_ldflags:
+        errors.append("decoder_only_link_map: the target toolchain variables are empty")
+        return False
+
+    consumer_flags = _consumer_flags(repo_root, cflags)
+
+    # Every include path the consumer sees must be inside the published
+    # generation: the probe must compile against the PUBLICATION, not
+    # against the repository sources.
+    include_paths = [p for _, p in _include_paths(consumer_flags, repo_root)]
+    for path in include_paths:
+        if gen_dir not in path.parents and path != gen_dir:
+            errors.append(
+                f"decoder_only_link_map: the consumer include path {path} is "
+                "outside the published sysroot"
+            )
+            ok = False
+
+    obj_dir = work_dir / "ps2probe"
+    obj_dir.mkdir(parents=True, exist_ok=True)
+
+    startup = _build_startup_objects(repo_root, profile_vars, obj_dir, errors, "decoder_only_link_map")
+    if startup is None:
+        return False
+
+    probe_src = repo_root / PS2_PROBE_SOURCE
+    if not probe_src.is_file():
+        errors.append(f"decoder_only_link_map: the probe source is missing: {probe_src}")
+        return False
+    probe_o = obj_dir / "probe_gui_ps2_public.o"
+
+    # -H prints every header the preprocessor opened: it is the proof that
+    # the PUBLISHED decoder header (not a repository copy) was used.
+    res = run_cmd(
+        [*cc, *consumer_flags, "-H", "-c", str(probe_src), "-o", str(probe_o)],
+        cwd=repo_root,
+    )
+    if res.returncode != 0:
+        errors.append(
+            "decoder_only_link_map: the independent consumer failed to compile "
+            f"against the published headers:\n{res.stderr.strip()}"
+        )
+        return False
+    trace = res.stderr
+    published_trace = [
+        ln for ln in trace.splitlines()
+        if PS2_PUBLIC_HEADER in ln
+    ]
+    if not published_trace:
+        errors.append(
+            "decoder_only_link_map: the consumer did not include "
+            f"<gui/{PS2_PUBLIC_HEADER}> at all"
+        )
+        ok = False
+    for ln in published_trace:
+        if str(gen_dir) not in ln:
+            errors.append(
+                "decoder_only_link_map: the consumer picked up the decoder "
+                f"header OUTSIDE the published generation: {ln.strip()}"
+            )
+            ok = False
+
+    # The link, in the exact order user/Makefile uses, with a map.
+    elf = obj_dir / "ps2_probe.elf"
+    map_file = obj_dir / "ps2_probe.map"
+    link_cmd = [
+        *ld,
+        *raw_ldflags,
+        f"-Map={map_file}",
+        "-o",
+        str(elf),
+        str(startup["crt0.o"]),
+        str(startup["sigreturn_trampoline.o"]),
+        str(probe_o),
+        "-lgui",
+        "-lgfx",
+        "-lc",
+    ]
+    res = run_cmd(link_cmd, cwd=repo_root / "user")
+    if res.returncode != 0:
+        errors.append(
+            "decoder_only_link_map: linking the independent consumer failed:\n"
+            f"command: {' '.join(link_cmd)}\n{res.stderr.strip()}"
+        )
+        return False
+    if not elf.is_file():
+        errors.append("decoder_only_link_map: the linker produced no ELF")
+        return False
+
+    members = _map_members(map_file)
+    if not members:
+        errors.append("decoder_only_link_map: the link map records no archive member")
+        ok = False
+
+    libgui_members = sorted({m for a, m in members if a.startswith("libgui.a")})
+    libgfx_members = sorted({m for a, m in members if a.startswith("libgfx.a")})
+    lvgl_members = sorted(
+        {m for _a, m in members if m.startswith(PS2_FORBIDDEN_MEMBER_PREFIXES)}
+    )
+    forbidden = sorted(set(libgui_members) & PS2_FORBIDDEN_LIBGUI_MEMBERS)
+
+    if not libgui_members:
+        errors.append(
+            "decoder_only_link_map: the link pulled NO member out of libgui.a — "
+            "the decoder was not linked at all"
+        )
+        ok = False
+    extra = sorted(set(libgui_members) - PS2_ALLOWED_LIBGUI_MEMBERS)
+    if extra:
+        errors.append(
+            "decoder_only_link_map: libgui contributed members a decoder-only "
+            f"consumer must not pull in: {extra}"
+        )
+        ok = False
+    if forbidden:
+        errors.append(
+            "decoder_only_link_map: the platform/input/LVGL layer was linked in: "
+            f"{forbidden}"
+        )
+        ok = False
+    if lvgl_members:
+        errors.append(
+            f"decoder_only_link_map: LVGL objects were linked in: {lvgl_members}"
+        )
+        ok = False
+    if libgfx_members:
+        errors.append(
+            "decoder_only_link_map: the gfx library was linked in: "
+            f"{libgfx_members}"
+        )
+        ok = False
+
+    # The linked ELF must really carry the decoder, and nothing else from
+    # the GUI world.
+    llvm_nm = os.environ.get("LLVM_NM", "llvm-nm")
+    nm_res = run_cmd([llvm_nm, "--defined-only", str(elf)], cwd=repo_root)
+    if nm_res.returncode != 0:
+        errors.append(
+            f"decoder_only_link_map: cannot inspect the linked ELF with {llvm_nm}"
+        )
+        ok = False
+    else:
+        defined = set()
+        for line in nm_res.stdout.splitlines():
+            parts = line.split()
+            if parts:
+                defined.add(parts[-1])
+        missing = sorted(PS2_ALLOWED_GUI_SYMBOLS - defined)
+        if missing:
+            errors.append(
+                "decoder_only_link_map: the linked ELF does not define the "
+                f"decoder entry points: {missing}"
+            )
+            ok = False
+        stray = sorted(
+            s for s in defined
+            if s.startswith("gui_") and s not in PS2_ALLOWED_GUI_SYMBOLS
+        )
+        if stray:
+            errors.append(
+                "decoder_only_link_map: the linked ELF carries GUI symbols a "
+                f"decoder-only consumer must not have: {stray}"
+            )
+            ok = False
+        stray_lvgl = sorted(s for s in defined if s.startswith("lv_"))
+        if stray_lvgl:
+            errors.append(
+                f"decoder_only_link_map: the linked ELF carries LVGL symbols: {stray_lvgl}"
+            )
+            ok = False
+
+    if ok:
+        print(
+            "decoder_only_link_map: PASS "
+            f"(libgui members: {libgui_members}, "
+            f"libc/libgfx members: {sorted({m for a, m in members if not a.startswith('libgui.a')})})"
+        )
+    return ok
 
 
 # ── Host fixture build contract ─────────────────────────────────────────
@@ -1520,6 +1917,14 @@ def audit_sysroot_and_build(
                 else:
                     audit_user_flag_hygiene(repo_root, profile_vars, errors)
                     audit_link_probe(repo_root, gen_dir, profile_vars, work_dir, errors)
+                    if not audit_published_ps2_header(
+                        repo_root, gen_dir, profile_vars, work_dir, errors
+                    ):
+                        errors.append("published_ps2_header: FAILED")
+                    if not audit_ps2_decoder_link_map(
+                        repo_root, gen_dir, profile_vars, work_dir, errors
+                    ):
+                        errors.append("decoder_only_link_map: FAILED")
 
     # 8. The host fixture build contract.
     audit_host_fixture_contract(repo_root, build_dir, errors)
@@ -1556,7 +1961,7 @@ def audit_sysroot_and_build(
 # invariants that need no build step (the dependency tracking itself, the
 # staging manifest, the published generations).
 
-INCREMENTAL_PHASES = ("noop", "touch", "install", "publish")
+INCREMENTAL_PHASES = ("noop", "touch", "install", "publish", "ps2rekey")
 
 # The files libgui's install rule publishes.  The staging tree must contain
 # exactly these (plus its own manifest) after an install.
@@ -1796,6 +2201,9 @@ def _incremental_paths(
         "gui_layout.h": "test_gui_widget_layout.elf",
         "gui_event.h": "test_gui_widget_event.elf",
         "gui_focus.h": "test_gui_focus.elf",
+        # D02: the published PS/2 decoder header — its consumer is the
+        # input-decode fixture, which compiles against the public path.
+        "gui_input_ps2.h": "test_gui_input_decode.elf",
     }
     fixture_name = consumer_fixtures.get(header_name, "test_gui_input_decode.elf")
     return {
@@ -1849,7 +2257,9 @@ def incremental_snapshot(
             for p in sorted(paths["staging"].rglob("*"))
             if p.is_file()
         } if paths["staging"].is_dir() else {},
-        "generations": _generation_snapshots(paths["generations"], with_digests=(phase == "publish")),
+        "generations": _generation_snapshots(
+            paths["generations"], with_digests=(phase in ("publish", "ps2rekey"))
+        ),
     }
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
@@ -2041,6 +2451,72 @@ def incremental_compare(
                     f"incremental: a private header was staged: "
                     f"{leaked.relative_to(staging)}"
                 )
+
+    elif phase == "ps2rekey":
+        # D02: modifying the PUBLISHED decoder header must rekey the
+        # generation and rebuild the consumers.
+        #
+        # The staging input digest covers every file under libgui/, so a
+        # change to the public header produces a NEW generation.  The
+        # generation must then carry the CHANGED header (byte-wise), the
+        # objects that depend on it must have been rebuilt, the archive
+        # must have been relinked and the consumer fixture must have been
+        # rebuilt.
+        before_gens = data.get("generations", {})
+        after_gens = _generation_snapshots(paths["generations"], with_digests=True)
+        new_gens = sorted(set(after_gens) - set(before_gens))
+        if not new_gens:
+            errors.append(
+                f"incremental: modifying {header.name} did not create a new "
+                "sysroot generation"
+            )
+        rel = f"usr/include/gui/{PS2_PUBLIC_HEADER}"
+        for name in new_gens:
+            files = after_gens[name]
+            if rel not in files:
+                errors.append(
+                    f"incremental: the new generation {name} does not publish {rel}"
+                )
+                continue
+            old_digests = {
+                before_gens[old].get(rel)
+                for old in before_gens
+                if rel in before_gens.get(old, {})
+            }
+            if files[rel] in old_digests:
+                errors.append(
+                    f"incremental: the new generation {name} publishes an "
+                    f"UNCHANGED {rel} — the header change did not reach the "
+                    "generation"
+                )
+        dotd_view = set(_dependent_objects(paths["obj_root"], header))
+        if not dotd_view:
+            errors.append(
+                f"incremental: no libgui object depends on {header.name} — the "
+                "rebuild contract cannot be established"
+            )
+        objects_before = data.get("objects", {})
+        for obj in sorted(dotd_view):
+            before = objects_before.get(str(obj))
+            after = obj.stat().st_mtime_ns if obj.is_file() else None
+            if before is None or before == after:
+                errors.append(
+                    f"incremental: modifying {header.name} did not rebuild the "
+                    f"dependent object {obj.name}"
+                )
+        before_archive = (data.get("archive") or {}).get("mtime_ns")
+        after_archive = paths["archive"].stat().st_mtime_ns if paths["archive"].is_file() else None
+        if before_archive == after_archive:
+            errors.append(
+                f"incremental: modifying {header.name} did not relink libgui.a"
+            )
+        before_fixture = (data.get("fixture") or {}).get("mtime_ns")
+        after_fixture = paths["fixture"].stat().st_mtime_ns if paths["fixture"].is_file() else None
+        if before_fixture is not None and before_fixture == after_fixture:
+            errors.append(
+                f"incremental: modifying {header.name} did not rebuild the "
+                f"consumer {paths['fixture'].name}"
+            )
 
     elif phase == "publish":
         before_gens = data.get("generations", {})

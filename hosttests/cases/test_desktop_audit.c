@@ -276,23 +276,76 @@ TEST_FUNC(test_no_direct_input_device_access)
 
 /* ── 审计 ④：不得包含 libgui 的私有头 ───────────────────────────── */
 
+/* The private bridge headers of libgui.  The published decoder API shares
+ * its basename with one of them: <gui/gui_input_ps2.h> is PUBLIC (D02),
+ * while <gui_input_ps2.h> (the internal bridge) is private.  A plain
+ * substring match would flag the published header as well, so the
+ * occurrence is checked against its INCLUDE PATH: the public form is
+ * spelled "gui/<name>", the bridge is spelled "<name>".
+ *
+ * The same rule the build audit applies to the published tree (it accepts
+ * the header at usr/include/gui/<name> and rejects it everywhere else). */
+static const char *const g_private_headers[] = {
+    "gui_lvgl_private.h",
+    "gui_input_private.h",
+    "gui_platform_private.h",
+    "gui_tick.h",
+    "gui_widget_private.h",
+    "gui_cursor_icon.h",
+    "gui_input_ps2.h",
+};
+
+static bool is_public_gui_include(const char *text, size_t at)
+{
+    /* True when the name at `at` is the published "gui/<name>" form. */
+    if (at < 4) {
+        return false;
+    }
+    return memcmp(text + at - 4, "gui/", 4) == 0;
+}
+
+/* Only ONE private name has a published counterpart: the decoder API
+ * <gui/gui_input_ps2.h> (D02).  Every other private header is private in
+ * EVERY spelling — "gui/gui_input_private.h" is not a public header. */
+static bool has_public_counterpart(const char *name)
+{
+    return strcmp(name, "gui_input_ps2.h") == 0;
+}
+
 static bool has_private_header(const char *text)
 {
-    static const char *const banned[] = {
-        "gui_lvgl_private.h",
-        "gui_input_private.h",
-        "gui_platform_private.h",
-        "gui_tick.h",
-        "gui_widget_private.h",
-        "gui_cursor_icon.h",
-        "gui_input_ps2.h",
-    };
-    for (size_t i = 0; i < sizeof(banned) / sizeof(banned[0]); i++) {
-        if (find(text, banned[i]) >= 0) {
-            return true;
+    for (size_t i = 0; i < sizeof(g_private_headers) / sizeof(g_private_headers[0]); i++) {
+        long hit = find(text, g_private_headers[i]);
+        while (hit >= 0) {
+            size_t at = (size_t)hit;
+            if (!is_public_gui_include(text, at) ||
+                !has_public_counterpart(g_private_headers[i])) {
+                return true;
+            }
+            hit = find(text + at + 1, g_private_headers[i]);
         }
     }
     return false;
+}
+
+/* The published decoder API must be ACCEPTED and the private bridge must
+ * be REJECTED — the desktop sources may include <gui/gui_input_ps2.h>
+ * (D02 published it), but never <gui_input_ps2.h>. */
+TEST_FUNC(test_published_ps2_header_is_not_a_private_header)
+{
+    /* the published form: allowed */
+    assert_false(has_private_header("#include <gui/gui_input_ps2.h>\n"));
+    assert_false(has_private_header("#include \"gui/gui_input_ps2.h\"\n"));
+
+    /* the internal bridge: forbidden */
+    assert_true(has_private_header("#include <gui_input_ps2.h>\n"));
+    assert_true(has_private_header("#include \"gui_input_ps2.h\"\n"));
+    assert_true(has_private_header(
+        "#include <libgui/internal/gui_input_ps2.h>\n"));
+
+    /* the other private headers stay forbidden in every spelling */
+    assert_true(has_private_header("#include <gui/gui_input_private.h>\n"));
+    assert_true(has_private_header("#include <gui_lvgl_private.h>\n"));
 }
 
 TEST_FUNC(test_no_private_libgui_headers)
@@ -478,6 +531,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_no_hand_drawn_primitives),
     TEST_ENTRY(test_no_direct_input_device_access),
     TEST_ENTRY(test_no_private_libgui_headers),
+    TEST_ENTRY(test_published_ps2_header_is_not_a_private_header),
     TEST_ENTRY(test_no_window_decoration_identifiers),
     TEST_ENTRY(test_no_literal_font_sizes),
     TEST_ENTRY(test_no_backend_includes_or_symbols),
