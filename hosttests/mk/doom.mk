@@ -160,4 +160,69 @@ test-doom-video: $(TEST_BLD)/test_doom_video.elf
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
 
+# ── D04 T2: leased PS/2 input & Doom key edges ───────────────────────
+$(eval $(call register_host_test,test_doom_input,doom,protocol-or-legacy))
+$(eval $(call register_host_test,test_doom_input_engine,doom,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_doom_input.elf $(TEST_BLD)/test_doom_input_engine.elf
+
+DOOM_INPUT_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
+    -I$(TESTS_DIR)/user/doom \
+    -I$(TESTS_DIR)/user \
+    -I$(TESTS_DIR)/libgui/include \
+    -I$(TESTS_DIR)/libgfx \
+    -I$(TESTS_DIR)/kernel/include \
+    -I$(DOOM_ENGINE_SRC) \
+    -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE \
+    -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DOS01_DOOM \
+    -iquote $(TEST_INC) -iquote $(TEST_MOCK) \
+    -D'errno=(*__errno_location())' \
+    -include $(TEST_INC)/gfx_client_errno.h
+
+$(DOOM_HOST_DIR)/doom_input.o: $(TESTS_DIR)/user/doom/doom_input.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_INPUT_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(DOOM_HOST_DIR)/input_ps2.o: $(TESTS_DIR)/libgui/src/input_ps2.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_INPUT_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(DOOM_HOST_DIR)/i_input.o: $(DOOM_ENGINE_SRC)/i_input.c $(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(DOOM_HOST_DIR)/d_event.o: $(DOOM_ENGINE_SRC)/d_event.c $(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_doom_input.o: $(TEST_CASES)/test_doom_input.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_INPUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_doom_input_engine.o: $(TEST_CASES)/test_doom_input_engine.c \
+		$(DOOM_HOST_DIR)/.private.stamp
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_INPUT_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_doom_input.elf: $(TEST_BLD)/test_doom_input.o \
+		$(DOOM_HOST_DIR)/doom_input.o \
+		$(DOOM_HOST_DIR)/input_ps2.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -Wl,--wrap=open,--wrap=read,--wrap=close -o $@ $^
+
+$(TEST_BLD)/test_doom_input_engine.elf: $(TEST_BLD)/test_doom_input_engine.o \
+		$(DOOM_HOST_DIR)/doom_input.o \
+		$(DOOM_HOST_DIR)/input_ps2.o \
+		$(DOOM_HOST_DIR)/i_input.o \
+		$(DOOM_HOST_DIR)/d_event.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -Wl,--wrap=open,--wrap=read,--wrap=close -o $@ $^
+
+.PHONY: test-doom-input
+test-doom-input: $(TEST_BLD)/test_doom_input.elf $(TEST_BLD)/test_doom_input_engine.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $^
+
 -include $(DOOM_HOST_DIR)/*.d

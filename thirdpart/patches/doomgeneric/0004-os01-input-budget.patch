@@ -1,0 +1,15 @@
+--- a/doomgeneric/i_input.c
++++ b/doomgeneric/i_input.c
+@@ -283,8 +283,11 @@
+     unsigned char key;
+ 
+     
+-	while (DG_GetKey(&pressed, &key))
++    int count = 0;
++
++	while (count < 16 && DG_GetKey(&pressed, &key))
+     {
++        count++;
+         UpdateShiftStatus(pressed, key);
+ 
+         // process event
