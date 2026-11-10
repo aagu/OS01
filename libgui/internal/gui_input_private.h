@@ -22,7 +22,7 @@
 
 #include <gui/gui_focus.h>
 #include <gui/gui_input.h>
-#include <gui_input_ps2.h>
+#include <gui/gui_input_ps2.h>
 #include <gfx.h>
 #include <lvgl/lvgl.h>
 #include <uapi/mouse.h>

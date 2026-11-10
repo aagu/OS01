@@ -31,7 +31,7 @@
 #include <string.h>
 
 #include <gui/gui_input.h>
-#include <gui_input_ps2.h>
+#include <gui/gui_input_ps2.h>
 
 /* ── Set 1 前缀与特殊序列字节 ───────────────────────────────── */
 

@@ -793,14 +793,14 @@ test-gui-input-decode: $(TEST_BLD)/test_gui_input_decode.elf
 
 $(TEST_BLD)/test_gui_input_decode.o: $(TEST_CASES)/test_gui_input_decode.c \
 		$(TESTS_DIR)/libgui/include/gui/gui_input.h \
-		$(TESTS_DIR)/libgui/internal/gui_input_ps2.h \
+		$(TESTS_DIR)/libgui/include/gui/gui_input_ps2.h \
 		$(TEST_INC)/test_framework.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GUI_INPUT_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/gui_input_ps2_production.o: $(TESTS_DIR)/libgui/src/input_ps2.c \
 		$(TESTS_DIR)/libgui/include/gui/gui_input.h \
-		$(TESTS_DIR)/libgui/internal/gui_input_ps2.h
+		$(TESTS_DIR)/libgui/include/gui/gui_input_ps2.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GUI_INPUT_HOST_CFLAGS) -c $< -o $@
 
