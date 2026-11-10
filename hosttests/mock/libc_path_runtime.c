@@ -30,6 +30,8 @@
  * extension point host_test_syscall_ext() instead. */
 #define OS01_SYS_EXEC     5
 #define OS01_SYS_STAT     16
+#define OS01_SYS_UNLINK   23
+#define OS01_SYS_RMDIR    25
 #define OS01_SYS_READLINK 72
 #define OS01_SYS_LSTAT    73
 #define OS01_SYS_GETCWD   15
@@ -86,6 +88,100 @@ static char g_exec_errno_path[PATH_RT_MAX_PATH];
 static int g_exec_errno_specific;
 static int g_real_shell;
 
+/* ── the deletion boundary ──────────────────────────────────────────
+ *
+ * The recording of the attempts and the injected errno live here.  The
+ * recording counts the ATTEMPTS, the successful ones and the failed ones
+ * alike: the test asserts how many deletion calls remove() made, so a
+ * fallback that calls unlink() after a failed rmdir() is visible. */
+#define PATH_RT_MAX_RECORD 16
+#define PATH_RT_MAX_ERRTAB 8
+
+static struct {
+    char path[PATH_RT_MAX_PATH];
+} g_unlink_rec[PATH_RT_MAX_RECORD];
+static int g_nunlink;
+static char g_rmdir_rec[PATH_RT_MAX_RECORD][PATH_RT_MAX_PATH];
+static int g_nrmdir;
+static int g_nlstat;
+
+struct path_rt_errtab {
+    char path[PATH_RT_MAX_PATH];
+    int  err;
+    int  used;
+};
+
+static struct path_rt_errtab g_lstat_err[PATH_RT_MAX_ERRTAB];
+static struct path_rt_errtab g_unlink_err[PATH_RT_MAX_ERRTAB];
+static struct path_rt_errtab g_rmdir_err[PATH_RT_MAX_ERRTAB];
+
+static void path_rt_inject(struct path_rt_errtab *tab, int n, const char *path,
+                           int err)
+{
+    int i;
+
+    if (path == NULL || err == 0)
+        return;
+    for (i = 0; i < n; i++) {
+        if (!tab[i].used) {
+            strncpy(tab[i].path, path, sizeof(tab[i].path) - 1);
+            tab[i].path[sizeof(tab[i].path) - 1] = '\0';
+            tab[i].err = err;
+            tab[i].used = 1;
+            return;
+        }
+    }
+}
+
+static int path_rt_injected(const struct path_rt_errtab *tab, int n,
+                            const char *path)
+{
+    int i;
+
+    if (path == NULL)
+        return 0;
+    for (i = 0; i < n; i++) {
+        if (tab[i].used && strcmp(tab[i].path, path) == 0)
+            return tab[i].err;
+    }
+    return 0;
+}
+
+void path_rt_set_lstat_errno_for(const char *path, int err)
+{
+    path_rt_inject(g_lstat_err, PATH_RT_MAX_ERRTAB, path, err);
+}
+
+void path_rt_set_unlink_errno_for(const char *path, int err)
+{
+    path_rt_inject(g_unlink_err, PATH_RT_MAX_ERRTAB, path, err);
+}
+
+void path_rt_set_rmdir_errno_for(const char *path, int err)
+{
+    path_rt_inject(g_rmdir_err, PATH_RT_MAX_ERRTAB, path, err);
+}
+
+int path_rt_unlink_count(void) { return g_nunlink; }
+
+const char *path_rt_unlink_path(int n)
+{
+    if (n < 0 || n >= g_nunlink)
+        return NULL;
+    return g_unlink_rec[n].path;
+}
+
+int path_rt_rmdir_count(void) { return g_nrmdir; }
+
+const char *path_rt_rmdir_path(int n)
+{
+    if (n < 0 || n >= g_nrmdir)
+        return NULL;
+    return g_rmdir_rec[n];
+}
+
+int path_rt_lstat_count(void) { return g_nlstat; }
+
 void path_rt_reset(void)
 {
     g_nentries = 0;
@@ -94,6 +190,14 @@ void path_rt_reset(void)
     g_exec_errno_path[0] = '\0';
     g_exec_errno_specific = ENOENT;
     g_real_shell = 0;
+    g_nunlink = 0;
+    g_nrmdir = 0;
+    g_nlstat = 0;
+    memset(g_unlink_rec, 0, sizeof(g_unlink_rec));
+    memset(g_rmdir_rec, 0, sizeof(g_rmdir_rec));
+    memset(g_lstat_err, 0, sizeof(g_lstat_err));
+    memset(g_unlink_err, 0, sizeof(g_unlink_err));
+    memset(g_rmdir_err, 0, sizeof(g_rmdir_err));
     strcpy(g_cwd, "/cwd");
     /* the root always exists and is a directory */
     path_rt_add("/", S_IFDIR, NULL);
@@ -237,6 +341,47 @@ static const struct path_rt_entry *path_rt_find(const char *path)
             return &g_entries[i];
     }
     return NULL;
+}
+
+/* Does the path still exist in the fake filesystem? */
+int path_rt_exists(const char *path)
+{
+    if (path == NULL)
+        return 0;
+    return path_rt_find(path) != NULL;
+}
+
+/* Remove the node from the fake filesystem.  The table is a flat list of
+ * whole paths, so the entries behind it are shifted down. */
+static void path_rt_remove_entry(const char *path)
+{
+    int i;
+
+    for (i = 0; i < g_nentries; i++) {
+        if (strcmp(g_entries[i].path, path) == 0) {
+            int j;
+            for (j = i; j + 1 < g_nentries; j++)
+                g_entries[j] = g_entries[j + 1];
+            g_nentries--;
+            return;
+        }
+    }
+}
+
+/* Does the directory still hold an entry?  The fake filesystem is flat, so
+ * a child is any path that starts with "<dir>/".  This is what makes the
+ * "rmdir on a non-empty directory" case observable. */
+static int path_rt_has_children(const char *path)
+{
+    size_t len = strlen(path);
+    int i;
+
+    for (i = 0; i < g_nentries; i++) {
+        if (strncmp(g_entries[i].path, path, len) == 0 &&
+            g_entries[i].path[len] == '/')
+            return 1;
+    }
+    return 0;
 }
 
 /* Resolve `path` to the entry it names.
@@ -400,11 +545,70 @@ int64_t host_test_syscall_ext(uint64_t nr, uint64_t arg1, uint64_t arg2,
         const char *path = (const char *)(uintptr_t)arg1;
         struct stat *st = (struct stat *)(uintptr_t)arg2;
         int err;
-        const struct path_rt_entry *e = path_rt_resolve(path, 0, &err);
+        const struct path_rt_entry *e;
+        int injected;
+
+        g_nlstat++;
+        injected = path_rt_injected(g_lstat_err, PATH_RT_MAX_ERRTAB, path);
+        if (injected != 0)
+            return -injected;
+
+        e = path_rt_resolve(path, 0, &err);
 
         if (e == NULL)
             return -err;
         path_rt_fill_stat(st, e->mode);
+        return 0;
+    }
+    case OS01_SYS_UNLINK: {
+        const char *path = (const char *)(uintptr_t)arg1;
+        const struct path_rt_entry *e;
+        int injected;
+
+        if (g_nunlink < PATH_RT_MAX_RECORD) {
+            strncpy(g_unlink_rec[g_nunlink].path, path ? path : "",
+                    sizeof(g_unlink_rec[g_nunlink].path) - 1);
+            g_unlink_rec[g_nunlink].path[
+                sizeof(g_unlink_rec[g_nunlink].path) - 1] = '\0';
+        }
+        g_nunlink++;
+
+        injected = path_rt_injected(g_unlink_err, PATH_RT_MAX_ERRTAB, path);
+        if (injected != 0)
+            return -injected;
+
+        e = path_rt_find(path);
+        if (e == NULL)
+            return -ENOENT;
+        if (S_ISDIR(e->mode))
+            return -EISDIR;   /* the kernel refuses to unlink a directory */
+        path_rt_remove_entry(path);
+        return 0;
+    }
+    case OS01_SYS_RMDIR: {
+        const char *path = (const char *)(uintptr_t)arg1;
+        const struct path_rt_entry *e;
+        int injected;
+
+        if (g_nrmdir < PATH_RT_MAX_RECORD) {
+            strncpy(g_rmdir_rec[g_nrmdir], path ? path : "",
+                    sizeof(g_rmdir_rec[g_nrmdir]) - 1);
+            g_rmdir_rec[g_nrmdir][sizeof(g_rmdir_rec[g_nrmdir]) - 1] = '\0';
+        }
+        g_nrmdir++;
+
+        injected = path_rt_injected(g_rmdir_err, PATH_RT_MAX_ERRTAB, path);
+        if (injected != 0)
+            return -injected;
+
+        e = path_rt_find(path);
+        if (e == NULL)
+            return -ENOENT;
+        if (!S_ISDIR(e->mode))
+            return -ENOTDIR;
+        if (path_rt_has_children(path))
+            return -ENOTEMPTY;   /* the kernel refuses a non-empty directory */
+        path_rt_remove_entry(path);
         return 0;
     }
     case OS01_SYS_STAT: {

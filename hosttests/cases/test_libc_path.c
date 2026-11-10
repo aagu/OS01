@@ -607,6 +607,138 @@ TEST_FUNC(test_execvp_name_with_slash_skips_path)
 }
 #endif /* HAVE_EXECL */
 
+/* ── the remove() cases ──────────────────────────────────────────── */
+
+/* remove() classifies the path with lstat() — the call that does NOT
+ * follow the final component — and then performs EXACTLY ONE deletion:
+ * rmdir() for a directory, unlink() for everything else.
+ *
+ * The properties the cases pin:
+ *   - a regular file is removed with ONE unlink() and the node is gone;
+ *   - an empty directory is removed with ONE rmdir() and the node is gone;
+ *   - a symbolic link is removed ITSELF: the link goes, the directory it
+ *     points at stays;
+ *   - a non-empty directory fails with ENOTEMPTY and NOTHING is changed —
+ *     in particular there is no fallback to unlink(), which would both
+ *     destroy the directory entry and overwrite the errno;
+ *   - a failing lstat() keeps ITS errno and no deletion is attempted at
+ *     all;
+ *   - a failing unlink()/rmdir() keeps ITS errno and the node stays.
+ *
+ * The production objects are linked under the os01_ prefix (see the make
+ * rule), so the host libc's remove/unlink/rmdir can never answer for
+ * them. */
+
+TEST_FUNC(test_remove_regular_file)
+{
+    fs_reset();
+    path_rt_add("/cwd/reg", REG, NULL);
+
+    errno = 0;
+    assert_eq(0, os01_remove("/cwd/reg"));
+    assert_eq(1, path_rt_unlink_count());
+    assert_eq(0, path_rt_rmdir_count());
+    assert_path("/cwd/reg", path_rt_unlink_path(0));
+    assert_eq(0, path_rt_exists("/cwd/reg"));
+}
+
+TEST_FUNC(test_remove_empty_dir)
+{
+    fs_reset();
+    path_rt_add("/cwd/emptydir", DIR, NULL);
+
+    errno = 0;
+    assert_eq(0, os01_remove("/cwd/emptydir"));
+    assert_eq(0, path_rt_unlink_count());
+    assert_eq(1, path_rt_rmdir_count());
+    assert_path("/cwd/emptydir", path_rt_rmdir_path(0));
+    assert_eq(0, path_rt_exists("/cwd/emptydir"));
+}
+
+TEST_FUNC(test_remove_directory_symlink)
+{
+    fs_reset();
+    path_rt_add("/cwd/target", DIR, NULL);
+    path_rt_add("/cwd/link", LNK, "/cwd/target");
+
+    errno = 0;
+    assert_eq(0, os01_remove("/cwd/link"));
+    /* only the LINK is removed: the directory it points at stays */
+    assert_eq(1, path_rt_unlink_count());
+    assert_eq(0, path_rt_rmdir_count());
+    assert_eq(0, path_rt_exists("/cwd/link"));
+    assert_eq(1, path_rt_exists("/cwd/target"));
+}
+
+TEST_FUNC(test_remove_nonempty_dir)
+{
+    fs_reset();
+    path_rt_add("/cwd/full", DIR, NULL);
+    path_rt_add("/cwd/full/child", REG, NULL);
+
+    errno = 0;
+    assert_eq(-1, os01_remove("/cwd/full"));
+    assert_eq(ENOTEMPTY, errno);
+    /* the directory was classified with ONE lstat() and the deletion was
+     * attempted with rmdir() alone — no fallback to unlink() */
+    assert_eq(1, path_rt_lstat_count());
+    assert_eq(1, path_rt_rmdir_count());
+    assert_eq(0, path_rt_unlink_count());
+    /* nothing changed */
+    assert_eq(1, path_rt_exists("/cwd/full"));
+    assert_eq(1, path_rt_exists("/cwd/full/child"));
+}
+
+TEST_FUNC(test_remove_lstat_failure)
+{
+    fs_reset();
+
+    /* a path that does not exist: lstat() answers ENOENT */
+    errno = 0;
+    assert_eq(-1, os01_remove("/cwd/missing"));
+    assert_eq(ENOENT, errno);
+    assert_eq(0, path_rt_unlink_count());
+    assert_eq(0, path_rt_rmdir_count());
+
+    /* an lstat() that fails with EACCES keeps ITS errno */
+    path_rt_set_lstat_errno_for("/cwd/denied", EACCES);
+    errno = 0;
+    assert_eq(-1, os01_remove("/cwd/denied"));
+    assert_eq(EACCES, errno);
+    assert_eq(0, path_rt_unlink_count());
+    assert_eq(0, path_rt_rmdir_count());
+}
+
+TEST_FUNC(test_remove_unlink_failure)
+{
+    fs_reset();
+    path_rt_add("/cwd/reg", REG, NULL);
+    path_rt_set_unlink_errno_for("/cwd/reg", EACCES);
+
+    errno = 0;
+    assert_eq(-1, os01_remove("/cwd/reg"));
+    assert_eq(EACCES, errno);
+    assert_eq(1, path_rt_unlink_count());
+    assert_eq(0, path_rt_rmdir_count());
+    /* the node is still there */
+    assert_eq(1, path_rt_exists("/cwd/reg"));
+}
+
+TEST_FUNC(test_remove_rmdir_failure)
+{
+    fs_reset();
+    path_rt_add("/cwd/dir", DIR, NULL);
+    path_rt_set_rmdir_errno_for("/cwd/dir", EPERM);
+
+    errno = 0;
+    assert_eq(-1, os01_remove("/cwd/dir"));
+    assert_eq(EPERM, errno);
+    assert_eq(0, path_rt_unlink_count());
+    assert_eq(1, path_rt_rmdir_count());
+    /* the node is still there */
+    assert_eq(1, path_rt_exists("/cwd/dir"));
+}
+
 TEST_LIST_BEGIN
 TEST_ENTRY(test_realpath_relative_uses_cwd),
 TEST_ENTRY(test_realpath_absolute_and_root),
@@ -634,6 +766,13 @@ TEST_ENTRY(test_execvp_enoexec_runs_the_script_the_search_found),
 TEST_ENTRY(test_execle_passes_explicit_envp),
 TEST_ENTRY(test_execvp_name_with_slash_skips_path),
 #endif
+TEST_ENTRY(test_remove_regular_file),
+TEST_ENTRY(test_remove_empty_dir),
+TEST_ENTRY(test_remove_directory_symlink),
+TEST_ENTRY(test_remove_nonempty_dir),
+TEST_ENTRY(test_remove_lstat_failure),
+TEST_ENTRY(test_remove_unlink_failure),
+TEST_ENTRY(test_remove_rmdir_failure),
 TEST_LIST_END
 
 int main(void)

@@ -58,6 +58,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENABLED_GROUPS: tuple[str, ...] = (
     "api", "alloc", "env", "shutdown", "stream", "append", "io", "line",
     "format", "integer", "float", "scan", "time", "path", "dir", "abs",
+    "remove",
 )
 
 # Headers that are deliberately NOT part of the api group, with the reason.
@@ -983,6 +984,25 @@ API_GROUPS: dict[str, dict] = {
                 "abs",
                 "labs",
                 "llabs",
+            ],
+        },
+        "require_user_export": True,
+    },
+    # ── D01/T3: remove() ───────────────────────────────────────────────
+    # remove() is a user interface with a real definition
+    # (libc/stdio/remove.c), so the user libc must really export it.  It
+    # classifies the path with lstat() and performs exactly one deletion:
+    # rmdir() for a directory, unlink() for everything else.
+    #
+    # libk is not required to provide it: the kernel side has no user
+    # filesystem, so the libk copy answers with a failure.
+    "remove": {
+        "task": "D01/T3",
+        "title": "remove() with the file and directory semantics",
+        "headers": {},
+        "owned": {
+            "stdio.h": [
+                "remove",
             ],
         },
         "require_user_export": True,

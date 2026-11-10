@@ -87,4 +87,40 @@ int path_rt_exec_envc(int n);
 /* The n-th exec attempt's envp[i], or NULL. */
 const char *path_rt_exec_env(int n, int i);
 
+/* ── the removal boundary (remove/unlink/rmdir) ─────────────────────
+ *
+ * The mock answers the two deletion syscalls the way the kernel does:
+ * unlink() removes a non-directory, rmdir() removes an EMPTY directory,
+ * and both fail with the errno the kernel would use.  A successful call
+ * removes the node from the fake filesystem, so the test can see that the
+ * path is gone.
+ *
+ * Every attempt is recorded — the failed ones included — so the test can
+ * assert WHICH deletion call was made and HOW MANY of them were made. */
+
+/* How many unlink attempts were made, and the path of the n-th one. */
+int path_rt_unlink_count(void);
+const char *path_rt_unlink_path(int n);
+
+/* How many rmdir attempts were made, and the path of the n-th one. */
+int path_rt_rmdir_count(void);
+const char *path_rt_rmdir_path(int n);
+
+/* How many lstat attempts were made. */
+int path_rt_lstat_count(void);
+
+/* The errno the lstat of THIS path answers (0 = no injection: the call
+ * behaves normally).  The injection applies to every later lstat of the
+ * same path. */
+void path_rt_set_lstat_errno_for(const char *path, int err);
+
+/* The errno the next unlink of THIS path answers (0 = no injection). */
+void path_rt_set_unlink_errno_for(const char *path, int err);
+
+/* The errno the next rmdir of THIS path answers (0 = no injection). */
+void path_rt_set_rmdir_errno_for(const char *path, int err);
+
+/* Does the path still exist in the fake filesystem? */
+int path_rt_exists(const char *path);
+
 #endif /* OS01_LIBC_PATH_RUNTIME_H */

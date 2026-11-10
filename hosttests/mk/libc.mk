@@ -775,7 +775,37 @@ $(TEST_BLD)/libc_path_runtime.o: $(TEST_MOCK)/libc_path_runtime.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -I$(TEST_MOCK) -c $< -o $@
 
-PATH_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+# The removal family (D01/T3): the PRODUCTION libc/stdio/remove.c plus the
+# production unlink/rmdir wrappers it is built on, linked under the
+# `os01_` prefix so that the host libc's remove/unlink/rmdir can never
+# answer for them.  The objects are compiled WITHOUT the test_platform.h
+# force-include: that header defines __is_libk, and the kernel-side copy
+# of the wrappers (which fail explicitly) is not the one under test.
+#
+# lstat() is NOT renamed: the path group already links the production
+# lstat wrapper, and remove() classifies the path with it.
+OS01_LIBC_REMOVE_FNS := remove unlink rmdir
+OS01_LIBC_REMOVE_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_REMOVE_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))
+OS01_LIBC_REMOVE_DIR := $(TEST_BLD)/prefixed-remove
+OS01_LIBC_REMOVE_OBJS := \
+    $(OS01_LIBC_REMOVE_DIR)/remove.o \
+    $(OS01_LIBC_REMOVE_DIR)/unlink.o \
+    $(OS01_LIBC_REMOVE_DIR)/rmdir.o
+
+$(OS01_LIBC_REMOVE_DIR)/remove.o: $(LIBC_SRC)/stdio/remove.c
+	@mkdir -p $(OS01_LIBC_REMOVE_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_REMOVE_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
+$(OS01_LIBC_REMOVE_DIR)/unlink.o: $(LIBC_SRC)/unistd/unlink.c
+	@mkdir -p $(OS01_LIBC_REMOVE_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_REMOVE_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
+$(OS01_LIBC_REMOVE_DIR)/rmdir.o: $(LIBC_SRC)/unistd/rmdir.c
+	@mkdir -p $(OS01_LIBC_REMOVE_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_REMOVE_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
+PATH_TEST_CFLAGS := $(HOST_CFLAGS) $(OS01_LIBC_REMOVE_PREFIX_DEFS) \
+    $(FRAMEWORK_INC) $(LIBC_INC) \
     -I$(TEST_MOCK)
 
 $(TEST_BLD)/test_libc_path.o: $(TEST_CASES)/test_libc_path.c \
@@ -791,6 +821,7 @@ $(TEST_BLD)/test_libc_path.elf: $(TEST_BLD)/test_libc_path.o \
         $(TEST_BLD)/user-int/stat.o \
         $(TEST_BLD)/user-int/readlink.o \
         $(TEST_BLD)/user-int/getcwd.o \
+        $(OS01_LIBC_REMOVE_OBJS) \
         $(OS01_LIBC_STREAM_OBJS) \
         $(TEST_BLD)/libc_stream_runtime.o \
         $(TEST_BLD)/libc_path_runtime.o
