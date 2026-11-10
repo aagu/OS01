@@ -120,4 +120,44 @@ test-doom-config: $(TEST_BLD)/test_doom_config.elf
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
 
+# ── D04 T1: video presentation & integer scaling ─────────────────────
+$(eval $(call register_host_test,test_doom_video,doom,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_doom_video.elf
+
+DOOM_VIDEO_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
+    -I$(TESTS_DIR)/user/doom \
+    -I$(TESTS_DIR)/user \
+    -I$(TESTS_DIR)/user/common \
+    -I$(TESTS_DIR)/libgfx \
+    -I$(TESTS_DIR)/kernel/include \
+    -iquote $(TEST_INC) -iquote $(TEST_MOCK) \
+    -D'errno=(*__errno_location())' \
+    -include $(TEST_INC)/gfx_client_errno.h
+
+$(DOOM_HOST_DIR)/doom_video.o: $(TESTS_DIR)/user/doom/doom_video.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_VIDEO_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(DOOM_HOST_DIR)/gfx_client_policy.o: $(TESTS_DIR)/user/common/gfx_client_policy.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_VIDEO_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_doom_video.o: $(TEST_CASES)/test_doom_video.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_VIDEO_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_doom_video.elf: $(TEST_BLD)/test_doom_video.o \
+		$(DOOM_HOST_DIR)/doom_video.o \
+		$(DOOM_HOST_DIR)/gfx_client_policy.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -Wl,--wrap=open,--wrap=read,--wrap=close -o $@ $^
+
+.PHONY: test-doom-video
+test-doom-video: $(TEST_BLD)/test_doom_video.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
 -include $(DOOM_HOST_DIR)/*.d
