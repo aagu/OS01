@@ -121,9 +121,16 @@ _ROW_RE = re.compile(
     r'\{\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*[^,]+,\s*([01])\s*,\s*([01])\s*\}')
 
 
+def _systest_c_path() -> Path:
+    p = ROOT / "user" / "systest" / "systest.c"
+    if p.exists():
+        return p
+    return ROOT / "user" / "systest.c"
+
+
 def _parse_systest_table():
     """Return a list of (id, name, required, quick) from user/systest.c."""
-    src = (ROOT / "user" / "systest.c").read_text(encoding="utf-8")
+    src = _systest_c_path().read_text(encoding="utf-8")
     start = _TABLE_START_RE.search(src)
     if start is None:
         return []
@@ -458,7 +465,7 @@ class SystestUnknownCaseArchiveTests(unittest.TestCase):
 
 
 def _read_systest_src() -> str:
-    return (ROOT / "user" / "systest.c").read_text(encoding="utf-8")
+    return _systest_c_path().read_text(encoding="utf-8")
 
 
 def _brace_block(text: str, open_idx: int) -> str:
