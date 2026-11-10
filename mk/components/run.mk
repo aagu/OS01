@@ -2631,23 +2631,43 @@ test-gui-incremental: $(SYSROOT_STAMP)
 	#    earlier runs and failed from the second run onwards.  A unique
 	#    edit is also what a real header edit looks like.
 	# 2. The EXIT trap restores the source header AND republishes the
-	#    sysroot, so the probe content never survives in the staging tree
-	#    or in the published generation (the published header must stay
-	#    byte-identical to its source for the build audit).  The trap
-	#    preserves the exit status of the phase.
+	#    sysroot.  It then verifies that the source, the staging tree and
+	#    the CURRENT sysroot hold the same header content; only then may
+	#    the phase report success.  A failed restore, a failed republish
+	#    or a mismatch makes the phase fail (non-zero) and prints the
+	#    republish log path — the probe content must never survive in the
+	#    active build state.  (Historical generations keep the probe
+	#    marker on purpose: they are immutable evidence.)
+	# 3. The phase is SERIAL only: it mutates the shared source header and
+	#    uses a fixed backup path, so concurrent runs are not supported.
+	#    The nonce comes from /proc/sys/kernel/random/uuid; if that
+	#    source is unavailable the phase fails explicitly instead of
+	#    falling back to a wall-clock read that may repeat.
 	@echo "  [test-gui-incremental] phase 5/5: modifying the published PS2 header must rekey the generation and rebuild the consumers"
 	@+$(SHELL) -ec '\
 	  hdr=libgui/include/gui/gui_input_ps2.h; \
 	  bak=$(BUILD_DIR)/incr-ps2-header.bak; \
 	  cp "$$hdr" "$$bak"; \
-	  restore() { st=$$?; \
+	  restore() { main=$$?; st=$$main; \
 	    cp "$$bak" "$$hdr" || st=1; \
 	    rm -f $(BUILD_DIR)/stamps/sysroot.stamp; \
-	    $(MAKE) --no-print-directory sysroot >$(BUILD_DIR)/incr-ps2-republish.log 2>&1 || true; \
+	    if $(MAKE) --no-print-directory sysroot >$(BUILD_DIR)/incr-ps2-republish.log 2>&1; then repub=0; else repub=1; st=1; fi; \
+	    src=$$(sha256sum "$$hdr" 2>/dev/null | cut -d" " -f1); \
+	    stg=$$(sha256sum $(STAGING_DIR)/gui/usr/include/gui/gui_input_ps2.h 2>/dev/null | cut -d" " -f1); \
+	    pub=$$(sha256sum $(SYSROOT)/usr/include/gui/gui_input_ps2.h 2>/dev/null | cut -d" " -f1); \
+	    if [ -z "$$src" ] || [ "$$src" != "$$stg" ] || [ "$$src" != "$$pub" ]; then st=1; fi; \
+	    if [ $$st -ne 0 ]; then \
+	      echo "  [test-gui-incremental] ERROR: phase 5 did not complete cleanly (main=$$main republish=$$repub); see $(BUILD_DIR)/incr-ps2-republish.log" >&2; \
+	      echo "  [test-gui-incremental] source=$$src staging=$$stg published=$$pub" >&2; \
+	    fi; \
 	    exit $$st; }; \
 	  trap restore EXIT; \
 	  $(GUI_INCREMENTAL_AUDIT) --header gui_input_ps2.h --incremental-snapshot "$(BUILD_DIR)/incr-ps2rekey.json" --incremental-phase ps2rekey; \
-	  nonce=$$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N); \
+	  nonce=$$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true); \
+	  if [ -z "$$nonce" ]; then \
+	    echo "  [test-gui-incremental] ERROR: no unique nonce source (/proc/sys/kernel/random/uuid unavailable)" >&2; \
+	    exit 1; \
+	  fi; \
 	  printf "\n/* D02 incremental probe: temporary marker %s */\n" "$$nonce" >> "$$hdr"; \
 	  $(call os01_submake_cmd,libgui,all); \
 	  $(MAKE) --no-print-directory test-gui-host CASE=input-decode; \

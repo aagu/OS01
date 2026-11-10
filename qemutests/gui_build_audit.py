@@ -7,7 +7,8 @@ import argparse
 import json
 import os
 import shlex
-from pathlib import Path
+import shutil
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -64,19 +65,69 @@ GUI_PRIVATE_HEADERS = (
     "gui_widget_private.h",
 )
 
-def _is_public_gui_header(path: Path) -> bool:
-    """True when `path` is a PUBLISHED public GUI header.
+def _published_relpath(path: Path, root: Path) -> tuple[str, ...] | None:
+    """The normalised path of `path` relative to `root`, or None.
 
-    The public headers live at <root>/usr/include/gui/<name>.  The private
-    list is matched by BASENAME, so a public header whose name collides
-    with a private one (gui_input_ps2.h is both: the published decoder
-    API and the internal forwarder) must be recognised by its POSITION
-    and not reported as a leak.
+    The path is normalised textually (so "usr/include/gui/../include/gui/x.h"
+    is NOT the same location as "usr/include/gui/x.h") but symlinks are NOT
+    resolved: a link inside the published tree must never be mistaken for a
+    published file.
+    """
+    try:
+        rel = PurePosixPath(os.path.normpath(str(path))).relative_to(
+            PurePosixPath(os.path.normpath(str(root)))
+        )
+    except ValueError:
+        return None
+    return rel.parts
+
+
+def _is_public_gui_header(path: Path, root: Path) -> bool:
+    """True only for the PUBLISHED public GUI header <root>/usr/include/gui/<name>.
+
+    The public headers live at exactly <root>/usr/include/gui/<name>.  The
+    private list is matched by BASENAME, so a public header whose name
+    collides with a private one (gui_input_ps2.h is both: the published
+    decoder API and the internal forwarder) must be recognised by its
+    POSITION — the full canonical position relative to the published root,
+    not just a basename plus an "include/gui" suffix.  A copy under another
+    directory (usr/include/other/include/gui/<name>) or a path that only
+    reaches the canonical position through ".." is NOT the published
+    header.
+
+    A symbolic link is never the published file: it may point outside the
+    published tree, so neither the file itself nor any directory inside
+    the published root may be a link.
     """
     if path.name not in GUI_PUBLIC_HEADERS:
         return False
-    parts = path.parts
-    return len(parts) >= 3 and parts[-3] == "include" and parts[-2] == "gui"
+    rel = _published_relpath(path, root)
+    if rel != ("usr", "include", "gui", path.name):
+        return False
+    current = root
+    for part in rel[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return False
+    return not root.joinpath(*rel).is_symlink()
+
+
+def _private_header_leaks(root: Path) -> list[Path]:
+    """Every private bridge header published anywhere under `root`.
+
+    Symlinks are inspected too: a link named like a private header is a
+    leak even when it does not resolve to a regular file.
+    """
+    leaks: list[Path] = []
+    for p in sorted(root.rglob("*")):
+        if not (p.is_file() or p.is_symlink()):
+            continue
+        if p.name not in GUI_PRIVATE_HEADERS:
+            continue
+        if _is_public_gui_header(p, root):
+            continue        # the published decoder API, not the bridge
+        leaks.append(p)
+    return leaks
 
 
 # The public input API (libgui/include/gui/gui_input.h).  These are the
@@ -583,17 +634,22 @@ def audit_published_headers(
 
     # No private libgui header may appear ANYWHERE in the published
     # generation (a private header copied under another directory is still a
-    # leak).
+    # leak), and the published include tree must not contain symbolic links
+    # (a link may resolve outside the published tree).
     for root in roots:
-        for p in root.rglob("*"):
-            if not p.is_file() or p.name not in GUI_PRIVATE_HEADERS:
-                continue
-            if _is_public_gui_header(p):
-                continue        # the published decoder API, not the bridge
+        for leak in _private_header_leaks(root):
             errors.append(
                 f"private libgui header published in the sysroot generation: "
-                f"{p.relative_to(root)}"
+                f"{leak.relative_to(root)}"
             )
+        inc_root = root / "usr" / "include"
+        if inc_root.is_dir():
+            for link in sorted(inc_root.rglob("*")):
+                if link.is_symlink():
+                    errors.append(
+                        f"symbolic link in the published include tree: "
+                        f"{link.relative_to(root)} -> {os.readlink(link)}"
+                    )
 
 
 # ── The real target link probe ──────────────────────────────────────────
@@ -1002,6 +1058,103 @@ def _map_members(map_file: Path) -> list[tuple[str, str]]:
         seen.add(key)
         out.append(key)
     return out
+
+
+def audit_public_header_position_guard(
+    repo_root: Path,
+    gen_dir: Path,
+    work_dir: Path,
+    errors: list[str],
+) -> bool:
+    """The public-header exemption is decided by the EXACT published position.
+
+    The published decoder API shares its basename with the internal bridge
+    header, so the exemption must not be reachable from another directory,
+    from a ".." path or through a symbolic link.  Every counterexample below
+    must be REJECTED: the bridge header counts as a leak.
+    """
+    ok = True
+
+    def expect(condition: bool, message: str) -> None:
+        nonlocal ok
+        if not condition:
+            errors.append(f"public_header_position_guard: {message}")
+            ok = False
+
+    source_public = repo_root / "libgui" / "include" / "gui" / PS2_PUBLIC_HEADER
+    source_bridge = repo_root / "libgui" / "internal" / "gui_input_ps2.h"
+    public_bytes = source_public.read_bytes()
+    bridge_bytes = source_bridge.read_bytes()
+
+    # 1. the canonical published position is the only exempt one
+    root = work_dir / "position-guard-root"
+    if root.exists():
+        shutil.rmtree(root)
+    canonical = root / "usr" / "include" / "gui" / PS2_PUBLIC_HEADER
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(public_bytes)
+    expect(
+        _is_public_gui_header(canonical, root),
+        "the canonical published header was not recognised",
+    )
+
+    # 2. the same basename in ANOTHER include/gui directory is a leak
+    foreign = root / "usr" / "include" / "other" / "include" / "gui" / PS2_PUBLIC_HEADER
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(bridge_bytes)
+    expect(
+        not _is_public_gui_header(foreign, root),
+        "a bridge header under another include/gui directory was exempted",
+    )
+    leaks = {p.relative_to(root).as_posix() for p in _private_header_leaks(root)}
+    expect(
+        "usr/include/other/include/gui/gui_input_ps2.h" in leaks,
+        f"the foreign bridge header was not reported as a leak (leaks: {sorted(leaks)})",
+    )
+
+    # 3. the canonical position reached through ".." is not the published one
+    dotted = root / "usr" / "include" / "gui" / ".." / "include" / "gui" / PS2_PUBLIC_HEADER
+    expect(
+        not _is_public_gui_header(dotted, root),
+        "a '..' path to the published position was exempted",
+    )
+
+    # 4. a FILE symlink at the published position is not the published file
+    link_root = work_dir / "position-guard-filelink-root"
+    if link_root.exists():
+        shutil.rmtree(link_root)
+    link_target = link_root / "usr" / "include" / "gui" / PS2_PUBLIC_HEADER
+    link_target.parent.mkdir(parents=True)
+    os.symlink(source_public, link_target)
+    expect(
+        not _is_public_gui_header(link_target, link_root),
+        "a symbolic link at the published position was exempted",
+    )
+    link_leaks = {p.relative_to(link_root).as_posix() for p in _private_header_leaks(link_root)}
+    expect(
+        f"usr/include/gui/{PS2_PUBLIC_HEADER}" in link_leaks,
+        f"a symbolic link named like a private header was not reported as a leak "
+        f"(leaks: {sorted(link_leaks)})",
+    )
+
+    # 5. a DIRECTORY symlink for the include/gui directory is not the
+    #    published tree either
+    dir_root = work_dir / "position-guard-dirlink-root"
+    if dir_root.exists():
+        shutil.rmtree(dir_root)
+    real_dir = dir_root / "elsewhere" / "gui"
+    real_dir.mkdir(parents=True)
+    (real_dir / PS2_PUBLIC_HEADER).write_bytes(public_bytes)
+    (dir_root / "usr" / "include").mkdir(parents=True)
+    os.symlink(real_dir, dir_root / "usr" / "include" / "gui")
+    expect(
+        not _is_public_gui_header(dir_root / "usr" / "include" / "gui" / PS2_PUBLIC_HEADER, dir_root),
+        "a symlinked include/gui directory was exempted",
+    )
+
+    if ok:
+        print("gui public header position guard: PASS")
+    return ok
 
 
 def audit_published_ps2_header(
@@ -1925,6 +2078,10 @@ def audit_sysroot_and_build(
                         repo_root, gen_dir, profile_vars, work_dir, errors
                     ):
                         errors.append("decoder_only_link_map: FAILED")
+                    if not audit_public_header_position_guard(
+                        repo_root, gen_dir, work_dir, errors
+                    ):
+                        errors.append("public_header_position_guard: FAILED")
 
     # 8. The host fixture build contract.
     audit_host_fixture_contract(repo_root, build_dir, errors)
@@ -2445,7 +2602,7 @@ def incremental_compare(
             for leaked in sorted(staging.rglob("*.h")):
                 if leaked.name not in GUI_PRIVATE_HEADERS:
                     continue
-                if _is_public_gui_header(leaked):
+                if _is_public_gui_header(leaked, staging):
                     continue        # the published decoder API, not the bridge
                 errors.append(
                     f"incremental: a private header was staged: "

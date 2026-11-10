@@ -280,8 +280,9 @@ TEST_FUNC(test_no_direct_input_device_access)
  * its basename with one of them: <gui/gui_input_ps2.h> is PUBLIC (D02),
  * while <gui_input_ps2.h> (the internal bridge) is private.  A plain
  * substring match would flag the published header as well, so the
- * occurrence is checked against its INCLUDE PATH: the public form is
- * spelled "gui/<name>", the bridge is spelled "<name>".
+ * occurrence is checked against the FULL include token: only the exact
+ * published spelling "gui/<name>" is exempt, every other spelling of the
+ * same basename stays private.
  *
  * The same rule the build audit applies to the published tree (it accepts
  * the header at usr/include/gui/<name> and rejects it everywhere else). */
@@ -295,15 +296,6 @@ static const char *const g_private_headers[] = {
     "gui_input_ps2.h",
 };
 
-static bool is_public_gui_include(const char *text, size_t at)
-{
-    /* True when the name at `at` is the published "gui/<name>" form. */
-    if (at < 4) {
-        return false;
-    }
-    return memcmp(text + at - 4, "gui/", 4) == 0;
-}
-
 /* Only ONE private name has a published counterpart: the decoder API
  * <gui/gui_input_ps2.h> (D02).  Every other private header is private in
  * EVERY spelling — "gui/gui_input_private.h" is not a public header. */
@@ -312,17 +304,103 @@ static bool has_public_counterpart(const char *name)
     return strcmp(name, "gui_input_ps2.h") == 0;
 }
 
+/* The published spelling of a private name is EXACTLY "gui/<name>".  A
+ * path that merely ends in "gui/<name>" ("evil/include/gui/<name>",
+ * "notgui/<name>") is a different include and stays private. */
+static bool is_published_spelling(const char *token, size_t len, const char *name)
+{
+    size_t nlen = strlen(name);
+    return len == 4 + nlen &&
+           memcmp(token, "gui/", 4) == 0 &&
+           memcmp(token + 4, name, nlen) == 0;
+}
+
+/* The header token of the next #include directive at or after `from`.
+ * The token is the text between the delimiters; *end points at the closing
+ * delimiter.  Returns NULL when there is no further include directive. */
+static const char *next_include_token(const char *from, const char **end)
+{
+    const char *p = from;
+    while ((p = strchr(p, '#')) != NULL) {
+        /* The '#' must start a line (only whitespace before it): an
+         * "#include" inside a string literal is not an include. */
+        bool line_start = true;
+        for (const char *b = p - 1; b >= from && *b != '\n'; b--) {
+            if (*b != ' ' && *b != '\t') {
+                line_start = false;
+                break;
+            }
+        }
+        const char *q = p + 1;
+        while (*q == ' ' || *q == '\t') {
+            q++;
+        }
+        if (!line_start || strncmp(q, "include", 7) != 0 ||
+            (isalnum((unsigned char)q[7]) || q[7] == '_')) {
+            p++;
+            continue;
+        }
+        q += 7;
+        while (*q == ' ' || *q == '\t') {
+            q++;
+        }
+        char close;
+        if (*q == '<') {
+            close = '>';
+        } else if (*q == '"') {
+            close = '"';
+        } else {
+            p++;
+            continue;
+        }
+        const char *start = q + 1;
+        const char *e = strchr(start, close);
+        if (e == NULL) {
+            p++;
+            continue;
+        }
+        *end = e;
+        return start;
+    }
+    return NULL;
+}
+
+/* The last path component of an include token. */
+static const char *include_basename(const char *token, size_t len)
+{
+    const char *slash = NULL;
+    for (size_t i = 0; i < len; i++) {
+        if (token[i] == '/') {
+            slash = token + i;
+        }
+    }
+    return slash != NULL ? slash + 1 : token;
+}
+
 static bool has_private_header(const char *text)
 {
-    for (size_t i = 0; i < sizeof(g_private_headers) / sizeof(g_private_headers[0]); i++) {
-        long hit = find(text, g_private_headers[i]);
-        while (hit >= 0) {
-            size_t at = (size_t)hit;
-            if (!is_public_gui_include(text, at) ||
-                !has_public_counterpart(g_private_headers[i])) {
-                return true;
+    const char *cursor = text;
+    for (;;) {
+        const char *end = NULL;
+        const char *token = next_include_token(cursor, &end);
+        if (token == NULL) {
+            break;
+        }
+        size_t len = (size_t)(end - token);
+        /* The cursor only ever moves FORWARD, in absolute coordinates. */
+        cursor = end + 1;
+        const char *base = include_basename(token, len);
+        size_t blen = len - (size_t)(base - token);
+        for (size_t i = 0; i < sizeof(g_private_headers) / sizeof(g_private_headers[0]); i++) {
+            const char *name = g_private_headers[i];
+            if (blen != strlen(name) || memcmp(base, name, blen) != 0) {
+                continue;
             }
-            hit = find(text + at + 1, g_private_headers[i]);
+            /* Private — unless it is the exact published spelling. */
+            if (has_public_counterpart(name) && is_published_spelling(token, len, name)) {
+                continue;
+            }
+            return true;
         }
     }
     return false;
@@ -346,6 +424,42 @@ TEST_FUNC(test_published_ps2_header_is_not_a_private_header)
     /* the other private headers stay forbidden in every spelling */
     assert_true(has_private_header("#include <gui/gui_input_private.h>\n"));
     assert_true(has_private_header("#include <gui_lvgl_private.h>\n"));
+}
+
+/* Counterexamples for the include-token matcher: a substring algorithm
+ * misses the private spellings below and mis-reports the legal published
+ * spelling when it occurs more than once. */
+TEST_FUNC(test_private_header_matcher_counterexamples)
+{
+    /* the legal published spelling, twice in a row: still legal */
+    assert_false(has_private_header(
+        "#include <gui/gui_input_ps2.h>\n#include <gui/gui_input_ps2.h>\n"));
+    assert_false(has_private_header(
+        "#include <gui/gui_input_ps2.h>\n#include \"gui/gui_input_ps2.h\"\n"));
+
+    /* public and private mixed: the private one must be caught */
+    assert_true(has_private_header(
+        "#include <gui/gui_input_ps2.h>\n#include <gui_input_ps2.h>\n"));
+    assert_true(has_private_header(
+        "#include <gui_input_ps2.h>\n#include <gui/gui_input_ps2.h>\n"));
+
+    /* a path that merely ENDS in "gui/<name>" is not the published one */
+    assert_true(has_private_header(
+        "#include <evil/include/gui/gui_input_ps2.h>\n"));
+    assert_true(has_private_header(
+        "#include <notgui/gui_input_ps2.h>\n"));
+
+    /* a relative path to the published header is still the bridge */
+    assert_true(has_private_header(
+        "#include \"../include/gui/gui_input_ps2.h\"\n"));
+    assert_true(has_private_header(
+        "#include \"libgui/internal/gui_input_ps2.h\"\n"));
+
+    /* other private headers keep the same rule */
+    assert_true(has_private_header(
+        "#include <gui/gui_input_private.h>\n"));
+    assert_false(has_private_header(
+        "#include <gui/gui_input.h>\n#include <gui/gui_input.h>\n"));
 }
 
 TEST_FUNC(test_no_private_libgui_headers)
