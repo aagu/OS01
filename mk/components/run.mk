@@ -1370,7 +1370,7 @@ test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_R
 #
 # An unknown case is rejected with a locating message and a non-zero
 # exit status.
-DOOM_HOST_REGISTERED_CASES := build config video input
+DOOM_HOST_REGISTERED_CASES := build config video input runtime
 DOOM_CASE_RAW := $(DOOM_CASE)
 DOOM_CASE_EFFECTIVE = $(if $(strip $(DOOM_CASE_RAW)),$(DOOM_CASE_RAW),all)
 
@@ -1378,7 +1378,7 @@ _test-doom-host-run-%:
 	@echo "ERROR: unknown DOOM_CASE='$*'; valid: $(DOOM_HOST_REGISTERED_CASES), all" >&2
 	@exit 1
 
-.PHONY: test-doom-host _test-doom-host-run-build _test-doom-host-run-config _test-doom-host-run-video _test-doom-host-run-input
+.PHONY: test-doom-host _test-doom-host-run-build _test-doom-host-run-config _test-doom-host-run-video _test-doom-host-run-input _test-doom-host-run-runtime
 test-doom-host: $(if $(filter all,$(DOOM_CASE_EFFECTIVE)),$(foreach c,$(DOOM_HOST_REGISTERED_CASES),_test-doom-host-run-$(c)),_test-doom-host-run-$(DOOM_CASE_EFFECTIVE))
 	$(call require_capability,rootfs)
 	@case "$(DOOM_CASE_EFFECTIVE)" in \
@@ -1413,6 +1413,11 @@ _test-doom-host-run-video:
 _test-doom-host-run-input:
 	@echo "  [test-doom-host] input"
 	$(call os01_submake,hosttests,test-doom-input $(OS01_SUBMAKE_ARGS))
+
+# D04 T3: runtime lifetime and cooperative shutdown
+_test-doom-host-run-runtime:
+	@echo "  [test-doom-host] runtime"
+	$(call os01_submake,hosttests,test-doom-runtime $(OS01_SUBMAKE_ARGS))
 
 .PHONY: test-gui-widget test-gui-focus
 test-gui-widget:

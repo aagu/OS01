@@ -225,4 +225,47 @@ test-doom-input: $(TEST_BLD)/test_doom_input.elf $(TEST_BLD)/test_doom_input_eng
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $^
 
+# ── D04 T3: runtime lifetime and cooperative shutdown ────────────────
+$(eval $(call register_host_test,test_doom_runtime,doom,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_doom_runtime.elf
+
+DOOM_RUNTIME_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
+    -I$(TESTS_DIR)/user/doom \
+    -I$(TESTS_DIR)/user \
+    -I$(TESTS_DIR)/user/common \
+    -I$(TESTS_DIR)/libgui/include \
+    -I$(TESTS_DIR)/libgfx \
+    -I$(TESTS_DIR)/kernel/include \
+    -I$(DOOM_ENGINE_SRC) \
+    -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE \
+    -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DOS01_DOOM \
+    -iquote $(TEST_INC) -iquote $(TEST_MOCK) \
+    -D'errno=(*__errno_location())' \
+    -include $(TEST_INC)/gfx_client_errno.h
+
+$(DOOM_HOST_DIR)/doom_runtime.o: $(TESTS_DIR)/user/doom/doom_runtime.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_doom_runtime.o: $(TEST_CASES)/test_doom_runtime.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_doom_runtime.elf: $(TEST_BLD)/test_doom_runtime.o \
+		$(DOOM_HOST_DIR)/doom_runtime.o \
+		$(DOOM_HOST_DIR)/doom_video.o \
+		$(DOOM_HOST_DIR)/doom_input.o \
+		$(DOOM_HOST_DIR)/input_ps2.o \
+		$(DOOM_HOST_DIR)/gfx_client_policy.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -Wl,--wrap=open,--wrap=read,--wrap=close,--wrap=nanosleep,--wrap=clock_gettime,--wrap=abort -o $@ $^
+
+.PHONY: test-doom-runtime
+test-doom-runtime: $(TEST_BLD)/test_doom_runtime.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
 -include $(DOOM_HOST_DIR)/*.d
