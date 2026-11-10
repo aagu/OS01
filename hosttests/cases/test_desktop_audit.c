@@ -87,8 +87,40 @@ static char *slurp(const char *path)
  * 是在陈述约定，不是在违规。字符串字面量必须保留 —— 设备路径正是以
  * 字符串形式出现的。
  */
+/* ── C 翻译阶段 2：反斜杠-换行拼接（就地） ───────────────────────────
+ *
+ * 阶段 2 **无条件**删除"反斜杠 + 换行"，不管它在不在注释或字符串里。
+ * 因此它必须发生在阶段 3（注释）之前：否则
+ *   // hello\
+ *   #include <x.h>        会被当成"行注释到物理行末"，下一行的指令就漏出来了
+ * 而 C 的真实语义是拼接后整行都是注释。
+ *
+ * 就地拼接（压缩缓冲区），让 strip_comments 无论被谁调用都拿到
+ * 正确的顺序——调用方无法再把阶段顺序搞反。
+ */
+static void splice_lines_in_place(char *text)
+{
+    size_t j = 0;
+    for (size_t i = 0; text[i] != '\0'; ) {
+        if (text[i] == '\\') {
+            size_t k = i + 1;
+            if (text[k] == '\r') {
+                k++;
+            }
+            if (text[k] == '\n') {
+                i = k + 1;
+                continue;
+            }
+        }
+        text[j++] = text[i++];
+    }
+    text[j] = '\0';
+}
+
 static char *strip_comments(char *text, bool is_make)
 {
+    /* 阶段 2 必须先于阶段 3。 */
+    splice_lines_in_place(text);
     size_t len = strlen(text);
     size_t i = 0;
     bool in_block = false;
@@ -225,12 +257,9 @@ static char *load(const char *name)
     snprintf(path, sizeof(path), "%s/%s", GUI_DESKTOP_SRC, name);
     char *text = slurp(path);
     assert_not_null(text);
-    /* 阶段 2 的拼接必须发生在注释剥离之前。 */
-    char *spliced = splice_lines(text);
-    assert_not_null(spliced);
-    free(text);
     bool is_make = (strstr(name, ".mk") != NULL);
-    return strip_comments(spliced, is_make);
+    /* strip_comments 内部先做阶段 2 的拼接，再剥离注释。 */
+    return strip_comments(text, is_make);
 }
 
 /* 在 text 里找 needle；找到返回其偏移，否则返回 -1。 */
@@ -582,27 +611,84 @@ TEST_FUNC(test_private_header_matcher_counterexamples)
  * "#include" that ends up inside a string or a comment is not. */
 TEST_FUNC(test_private_header_line_splicing)
 {
+    /* 期望值由 clang -E 实证（见 task-6 报告）：拼接后的输入要么真的
+     * 包含桥接头，要么根本没有。
+     *
+     * 注意：下面用字符串拼接写出"反斜杠 + 真实换行"。写成
+     * "#include \\\n <x.h>" 这种字面量是**错的**——C 编译器会在
+     * 编译字面量时把它自己拼掉，测试就退化成了单行输入。 */
+    const char *spliced_dir =
+        "#include \\" "\n <gui_input_ps2.h>\n";
+    const char *spliced_word =
+        "#inc\\" "\nlude <gui_input_ps2.h>\n";
+    const char *spliced_token =
+        "#include <gui_input_\\" "\nps2.h>\n";
+    const char *spliced_public =
+        "#include \\" "\n <gui/gui_input_ps2.h>\n";
+    const char *spliced_string =
+        "const char *s = \"hello\\" "\n#include <gui_input_ps2.h>\";\n";
+    const char *spliced_line_comment =
+        "// hello\\" "\n#include <gui_input_ps2.h>\n";
+    const char *spliced_block_then_directive =
+        "/* a\\" "\nb */ #include <gui_input_ps2.h>\n";
+    const char *spliced_block_inside =
+        "/* a\\" "\n#include <gui_input_ps2.h> */\n";
+
     /* spliced directives: the bridge header IS included */
-    assert_true(has_private_header("#include \\\n <gui_input_ps2.h>\n"));
-    assert_true(has_private_header("#inc\\\nlude <gui_input_ps2.h>\n"));
-    assert_true(has_private_header("#include <gui_input_\\\nps2.h>\n"));
+    assert_true(has_private_header(spliced_dir));
+    assert_true(has_private_header(spliced_word));
+    assert_true(has_private_header(spliced_token));
 
     /* the published spelling stays legal when it is spliced */
-    assert_false(has_private_header("#include \\\n <gui/gui_input_ps2.h>\n"));
+    assert_false(has_private_header(spliced_public));
 
     /* spliced into a string literal: not a directive */
-    assert_false(has_private_header(
-        "const char *s = \"hello\\\n#include <gui_input_ps2.h>\";\n"));
+    assert_false(has_private_header(spliced_string));
 
-    /* spliced into a line comment: not a directive */
-    assert_false(has_private_header(
-        "// hello\\\n#include <gui_input_ps2.h>\n"));
+    /* spliced into a line comment: the WHOLE logical line is a comment */
+    assert_false(has_private_header(spliced_line_comment));
+
+    /* a block comment that ENDS before the directive: real directive */
+    assert_true(has_private_header(spliced_block_then_directive));
+
+    /* a block comment that CONTAINS the directive: not a directive */
+    assert_false(has_private_header(spliced_block_inside));
 
     /* a plain string and a plain trailing comment stay ignored */
     assert_false(has_private_header(
         "const char *s = \"#include <gui_input_ps2.h>\";\n"));
     assert_false(has_private_header(
         "#include <gui/gui_input_ps2.h> /* #include <gui_input_ps2.h> */\n"));
+}
+
+/* The order of the C translation phases must not depend on the caller:
+ * stripping the comments first and matching afterwards must give the same
+ * answer as matching the raw source. */
+TEST_FUNC(test_private_header_phase_order_independent)
+{
+    const char *cases[] = {
+        "// hello\\" "\n#include <gui_input_ps2.h>\n",
+        "/* a\\" "\n#include <gui_input_ps2.h> */\n",
+        "/* a\\" "\nb */ #include <gui_input_ps2.h>\n",
+        "const char *s = \"hello\\" "\n#include <gui_input_ps2.h>\";\n",
+        "#include \\" "\n <gui_input_ps2.h>\n",
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *copy = malloc(strlen(cases[i]) + 1);
+        assert_not_null(copy);
+        strcpy(copy, cases[i]);
+        bool direct = has_private_header(copy);
+        free(copy);
+
+        char *copy2 = malloc(strlen(cases[i]) + 1);
+        assert_not_null(copy2);
+        strcpy(copy2, cases[i]);
+        char *stripped = strip_comments(copy2, false);
+        bool after_strip = has_private_header(stripped);
+        free(copy2);
+
+        assert_true(direct == after_strip);
+    }
 }
 
 TEST_FUNC(test_no_private_libgui_headers)
