@@ -2489,6 +2489,19 @@ def incremental_compare(
                     f"UNCHANGED {rel} — the header change did not reach the "
                     "generation"
                 )
+            # The published copy must be the CURRENT source, byte for
+            # byte: this states the contract ("a changed public header
+            # must reach the generation") directly, without relying on
+            # the digests of the older generations.
+            published = paths["generations"] / name / rel
+            source_bytes = header.read_bytes() if header.is_file() else None
+            if source_bytes is not None and published.is_file():
+                if published.read_bytes() != source_bytes:
+                    errors.append(
+                        f"incremental: the new generation {name} does not "
+                        f"publish the current content of {rel} — the header "
+                        "change did not reach the generation"
+                    )
         dotd_view = set(_dependent_objects(paths["obj_root"], header))
         if not dotd_view:
             errors.append(

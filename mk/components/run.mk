@@ -2620,14 +2620,35 @@ test-gui-incremental: $(SYSROOT_STAMP)
 	@rm -f $(BUILD_DIR)/stamps/sysroot.stamp
 	$(MAKE) --no-print-directory sysroot
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
+	# Phase 5 edits the PUBLISHED decoder header, republishes and checks
+	# that the new generation carries the edit.  Two properties make this
+	# phase repeatable instead of history-dependent:
+	#
+	# 1. The probe edit carries a per-run nonce.  A constant marker made
+	#    every run publish byte-identical header content, so the audit's
+	#    "the new generation must publish content that no earlier
+	#    generation published" check collided with the generations of the
+	#    earlier runs and failed from the second run onwards.  A unique
+	#    edit is also what a real header edit looks like.
+	# 2. The EXIT trap restores the source header AND republishes the
+	#    sysroot, so the probe content never survives in the staging tree
+	#    or in the published generation (the published header must stay
+	#    byte-identical to its source for the build audit).  The trap
+	#    preserves the exit status of the phase.
 	@echo "  [test-gui-incremental] phase 5/5: modifying the published PS2 header must rekey the generation and rebuild the consumers"
 	@+$(SHELL) -ec '\
 	  hdr=libgui/include/gui/gui_input_ps2.h; \
 	  bak=$(BUILD_DIR)/incr-ps2-header.bak; \
 	  cp "$$hdr" "$$bak"; \
-	  trap "cp \"$$bak\" \"$$hdr\"" EXIT; \
+	  restore() { st=$$?; \
+	    cp "$$bak" "$$hdr" || st=1; \
+	    rm -f $(BUILD_DIR)/stamps/sysroot.stamp; \
+	    $(MAKE) --no-print-directory sysroot >$(BUILD_DIR)/incr-ps2-republish.log 2>&1 || true; \
+	    exit $$st; }; \
+	  trap restore EXIT; \
 	  $(GUI_INCREMENTAL_AUDIT) --header gui_input_ps2.h --incremental-snapshot "$(BUILD_DIR)/incr-ps2rekey.json" --incremental-phase ps2rekey; \
-	  printf "\n/* D02 incremental probe: temporary marker */\n" >> "$$hdr"; \
+	  nonce=$$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N); \
+	  printf "\n/* D02 incremental probe: temporary marker %s */\n" "$$nonce" >> "$$hdr"; \
 	  $(call os01_submake_cmd,libgui,all); \
 	  $(MAKE) --no-print-directory test-gui-host CASE=input-decode; \
 	  rm -f $(BUILD_DIR)/stamps/sysroot.stamp; \
