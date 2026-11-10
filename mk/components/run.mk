@@ -1419,6 +1419,12 @@ _test-doom-host-run-runtime:
 	@echo "  [test-doom-host] runtime"
 	$(call os01_submake,hosttests,test-doom-runtime $(OS01_SUBMAKE_ARGS))
 
+# D05: Doom asset validation and packaging contract
+.PHONY: test-doom-assets
+test-doom-assets:
+	$(call require_capability,rootfs)
+	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_assets -v
+
 .PHONY: test-gui-widget test-gui-focus
 test-gui-widget:
 	$(call require_capability,rootfs)
