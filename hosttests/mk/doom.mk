@@ -244,6 +244,10 @@ DOOM_RUNTIME_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -D'errno=(*__errno_location())' \
     -include $(TEST_INC)/gfx_client_errno.h
 
+$(DOOM_HOST_DIR)/doom_os01.o: $(TESTS_DIR)/user/doom/doom_os01.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
 $(DOOM_HOST_DIR)/doom_runtime.o: $(TESTS_DIR)/user/doom/doom_runtime.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -MMD -MP -c $< -o $@
@@ -253,13 +257,14 @@ $(TEST_BLD)/test_doom_runtime.o: $(TEST_CASES)/test_doom_runtime.c
 	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_doom_runtime.elf: $(TEST_BLD)/test_doom_runtime.o \
+		$(DOOM_HOST_DIR)/doom_os01.o \
 		$(DOOM_HOST_DIR)/doom_runtime.o \
 		$(DOOM_HOST_DIR)/doom_video.o \
 		$(DOOM_HOST_DIR)/doom_input.o \
 		$(DOOM_HOST_DIR)/input_ps2.o \
 		$(DOOM_HOST_DIR)/gfx_client_policy.o
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -Wl,--wrap=open,--wrap=read,--wrap=close,--wrap=nanosleep,--wrap=clock_gettime,--wrap=abort -o $@ $^
+	$(HOST_CC) -Wl,--wrap=open,--wrap=read,--wrap=close,--wrap=nanosleep,--wrap=clock_gettime,--wrap=abort,--wrap=exit -o $@ $^
 
 .PHONY: test-doom-runtime
 test-doom-runtime: $(TEST_BLD)/test_doom_runtime.elf

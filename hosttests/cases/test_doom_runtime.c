@@ -25,6 +25,10 @@
 #include <uapi/fb.h>
 #include <gfx.h>
 #include "doom_runtime.h"
+#include "doom_os01.h"
+
+int DG_GetKey(int *pressed, unsigned char *key);
+uint32_t *DG_ScreenBuffer = NULL;
 
 #define FAKE_FB_FD  555
 #define FAKE_KBD_FD 777
@@ -52,10 +56,14 @@ static int  g_nanosleep_call_count;
 
 static struct fb_info g_fb_info;
 
+static uint32_t g_mock_display_flags;
+
 static void reset_runtime_mocks(void)
 {
     memset(g_trace, 0, sizeof(g_trace));
     g_trace_count = 0;
+
+    g_mock_display_flags = GFX_DISPLAY_STATE_FOREGROUND;
 
     g_fail_fb_open = false;
     g_fail_gfx_open = false;
@@ -218,7 +226,7 @@ int gfx_get_display_state(gfx_handle_t *h, gfx_display_state_t *out)
     (void)h;
     if (out) {
         out->generation = 1;
-        out->flags = GFX_DISPLAY_STATE_FOREGROUND;
+        out->flags = g_mock_display_flags;
         out->reserved = 0;
     }
     return 0;
@@ -382,12 +390,106 @@ static void test_sleep_eintr_remaining(void)
     assert_eq(1, g_nanosleep_call_count);
 }
 
+static jmp_buf g_exit_jmp;
+static bool    g_exit_caught;
+static int     g_exit_status;
+
+void __wrap_exit(int status)
+{
+    g_exit_caught = true;
+    g_exit_status = status;
+    longjmp(g_exit_jmp, 1);
+}
+
+static void test_reject_unsafe_engine_args(void)
+{
+    doom_os01_config_t cfg;
+    int out_argc = 0;
+    char **out_argv = NULL;
+
+    /* -scaling rejected */
+    char *args1[] = { "doom", "-scaling", "2" };
+    assert_eq(-1, doom_os01_parse_args(3, args1, &cfg, &out_argc, &out_argv));
+
+    /* -gfxmode rejected */
+    char *args2[] = { "doom", "-gfxmode", "640x400" };
+    assert_eq(-1, doom_os01_parse_args(3, args2, &cfg, &out_argc, &out_argv));
+
+    /* @response-file rejected */
+    char *args3[] = { "doom", "@args.txt" };
+    assert_eq(-1, doom_os01_parse_args(2, args3, &cfg, &out_argc, &out_argv));
+
+    /* --os01-scale without argument rejected */
+    char *args4[] = { "doom", "--os01-scale" };
+    assert_eq(-1, doom_os01_parse_args(2, args4, &cfg, &out_argc, &out_argv));
+
+    /* --os01-scale 4 (invalid range) rejected */
+    char *args5[] = { "doom", "--os01-scale", "4" };
+    assert_eq(-1, doom_os01_parse_args(3, args5, &cfg, &out_argc, &out_argv));
+
+    /* --os01-data-dir without argument rejected */
+    char *args6[] = { "doom", "--os01-data-dir" };
+    assert_eq(-1, doom_os01_parse_args(2, args6, &cfg, &out_argc, &out_argv));
+}
+
+static void test_iwad_before_chdir(void)
+{
+    doom_os01_config_t cfg;
+    int out_argc = 0;
+    char **out_argv = NULL;
+
+    char *args[] = { "doom", "-iwad", "relative/game.wad", "--os01-scale", "2" };
+    assert_eq(0, doom_os01_parse_args(5, args, &cfg, &out_argc, &out_argv));
+    assert_eq(2, cfg.scale);
+    assert_true(cfg.iwad_path[0] == '/'); /* Must be absolute! */
+    assert_true(strstr(cfg.iwad_path, "relative/game.wad") != NULL);
+}
+
+static void test_missing_iwad_no_acquire(void)
+{
+    reset_runtime_mocks();
+    /* Non-existent IWAD path */
+    const char *non_existent = "/tmp/does_not_exist_doom_12345.wad";
+    int rc = doom_os01_verify_iwad(non_existent);
+    assert_eq(-1, rc);
+
+    /* Verify no gfx acquisition occurred */
+    assert_eq(0, g_trace_count);
+}
+
+static void test_dg_getkey_error_exits(void)
+{
+    reset_runtime_mocks();
+    doom_runtime_t rt;
+    assert_eq(0, doom_runtime_open(&rt, 0));
+
+    /* Revoke foreground owner */
+    g_mock_display_flags = 0;
+
+    int pressed = 0;
+    unsigned char key = 0;
+    g_exit_caught = false;
+
+    if (setjmp(g_exit_jmp) == 0) {
+        DG_GetKey(&pressed, &key);
+    }
+
+    assert_true(g_exit_caught);
+    assert_eq(1, g_exit_status);
+
+    doom_runtime_cleanup();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_failure_at_each_stage),
     TEST_ENTRY(test_double_cleanup),
     TEST_ENTRY(test_signal_handler_only_flag),
     TEST_ENTRY(test_clock_failure_fatal),
     TEST_ENTRY(test_sleep_eintr_remaining),
+    TEST_ENTRY(test_reject_unsafe_engine_args),
+    TEST_ENTRY(test_iwad_before_chdir),
+    TEST_ENTRY(test_missing_iwad_no_acquire),
+    TEST_ENTRY(test_dg_getkey_error_exits),
 TEST_LIST_END
 
 int main(void)

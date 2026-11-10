@@ -16,6 +16,7 @@ typedef struct doom_runtime {
 int doom_runtime_open(doom_runtime_t *rt, unsigned requested_scale);
 void doom_runtime_close(doom_runtime_t *rt);
 void doom_runtime_cleanup(void);
+doom_runtime_t *doom_runtime_get_active(void);
 uint64_t doom_runtime_now_ms(void);
 void doom_runtime_sleep_ms(uint32_t ms);
 void doom_runtime_install_signals(void);

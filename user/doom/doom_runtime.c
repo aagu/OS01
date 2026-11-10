@@ -10,6 +10,11 @@
 #include <gfx.h>
 #include "doom_runtime.h"
 
+#ifndef __sig_atomic_t_defined
+typedef int sig_atomic_t;
+#define __sig_atomic_t_defined 1
+#endif
+
 static doom_runtime_t *g_active_runtime = NULL;
 static volatile sig_atomic_t g_exit_requested = 0;
 
@@ -89,6 +94,11 @@ void doom_runtime_cleanup(void)
         g_active_runtime = NULL;
         doom_runtime_close(rt);
     }
+}
+
+doom_runtime_t *doom_runtime_get_active(void)
+{
+    return g_active_runtime;
 }
 
 uint64_t doom_runtime_now_ms(void)

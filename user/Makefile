@@ -81,12 +81,10 @@ USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR
 # ── Program discovery and app manifests ─────────────────────
 .DEFAULT_GOAL := all
 USER_BUILD_CONTEXT := 1
-include $(OS01_ROOT)/user/apps.mk
-# D03: the Doom engine archive.  Loaded HERE (and only here) so the root
-# discovery include (user/apps.mk) never prepares the private source copy
-# and never compiles the engine.  The engine is not an application: no
-# app.mk, no ELF, no /bin/doom.
+# D04: Doom engine archive definitions (DOOM_ARCHIVE, DOOM_PRIVATE_DIR, DOOM_SOURCE_STAMP)
+# must be available when user/doom/app.mk is evaluated by apps.mk.
 include $(OS01_ROOT)/user/doom/engine.mk
+include $(OS01_ROOT)/user/apps.mk
 PROGRAMS := $(addprefix $(BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 CRT0_OBJ := $(OBJ_DIR)/crt0.o
 SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
@@ -144,7 +142,7 @@ $(foreach app,$(USER_FLAT_PROGRAMS),$(eval $(call flat_program,$(app))))
 
 define directory_program
 USER_APP_$(1)_OBJECTS := $(call user_objects,$(USER_APP_$(1)_SOURCES)) $(USER_APP_$(1)_EXTRA_OBJS)
-USER_OBJECTS += $$(USER_APP_$(1)_OBJECTS)
+USER_OBJECTS += $$(filter %.o,$$(USER_APP_$(1)_OBJECTS))
 $$(OBJ_DIR)/$(1)/.app_key: USER_COMPILE_KEY_FORCE
 	@mkdir -p $$(dir $$@)
 	@printf '%s\n' 'cflags=$(strip $$(USER_APP_$(1)_CFLAGS)) ldflags=$(strip $$(USER_APP_$(1)_LDFLAGS))' > $$@.new
@@ -159,7 +157,7 @@ endef
 $(foreach app,$(USER_DIRECTORY_PROGRAMS),$(eval $(call directory_program,$(app))))
 
 .SECONDARY: $(USER_OBJECTS)
--include $(USER_OBJECTS:.o=.d)
+-include $(filter %.d,$(USER_OBJECTS:.o=.d))
 
 clean:
 	rm -rf $(BUILD_DIR)

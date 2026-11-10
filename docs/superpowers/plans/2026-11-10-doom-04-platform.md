@@ -31,7 +31,7 @@
 
 以下新命令只在拥有它的任务建立后可用；“预期通过”是未来验收要求，不是本轮结果。测试先记录目标缺失/行为 RED，再实现并用同一入口得到 GREEN；仅新增公开路径时允许编译 RED，既有逻辑修复须有行为断言。写测试这一步同时接通所属测试组/根路由，确保 RED 确实运行测试；unknown target/case 不算功能 RED。每任务提交只包含明确列出的本任务文件，不使用 git add .；提交前检查实际 diff。跨任务接口以对应 spec 和下列 Interfaces 为准。
 
-### T1：整数缩放与呈现
+### Task 1: 整数缩放与呈现 (T1)
 
 **Files:** 新增 `user/doom/doom_video.[ch]`、`hosttests/cases/test_doom_video.c`；修改 `hosttests/mk/doom.mk`、`mk/components/run.mk` 的 video 组。
 
@@ -43,7 +43,7 @@
 - [ ] 验证 GREEN：`make test-doom-host DOOM_CASE=video`。预期目标组全部通过/制品满足断言；真实运行结果单独留证。
 - [ ] 审阅差异并提交本任务明确文件，提交信息：`feat(doom): add centered integer-scaled gfx presentation`。
 
-### T2：键盘租约、逻辑键和队列
+### Task 2: 键盘租约、逻辑键和队列 (T2)
 
 **Files:** 新增 `user/doom/doom_input.[ch]`、`hosttests/cases/test_doom_input.c`、`hosttests/cases/test_doom_input_engine.c`、`thirdpart/patches/doomgeneric/0004-os01-input-budget.patch`；修改 `thirdpart/doomgeneric.manifest`、`hosttests/mk/doom.mk`、`mk/components/run.mk` 的 input 组。
 
@@ -55,7 +55,7 @@
 - [ ] 验证 GREEN：`make test-doom-host DOOM_CASE=input`；`make test-gui-host CASE=input-decode`。预期目标组全部通过/制品满足断言；真实运行结果单独留证。
 - [ ] 审阅差异并提交本任务明确文件，提交信息：`feat(doom): adapt leased PS2 input to Doom key edges`。
 
-### T3：运行时、信号和清理
+### Task 3: 运行时、信号和清理 (T3)
 
 **Files:** 新增 `user/doom/doom_runtime.[ch]`、`hosttests/cases/test_doom_runtime.c`；修改 `hosttests/mk/doom.mk`、`mk/components/run.mk` 的 runtime 组。
 
@@ -67,17 +67,17 @@
 - [ ] 验证 GREEN：`make test-doom-host DOOM_CASE=runtime`；`make test-doom-host DOOM_CASE=all`。预期目标组全部通过/制品满足断言；真实运行结果单独留证。
 - [ ] 审阅差异并提交本任务明确文件，提交信息：`feat(doom): manage runtime lifetime and cooperative shutdown`。
 
-### T4：真实入口与应用发布
+### Task 4: 真实入口与应用发布 (T4)
 
 **Files:** 新增 `user/doom/doom_os01.c`、`user/doom/app.mk`；修改 `user/doom/engine.mk` 与必要的 `user/Makefile` 依赖；扩展 `qemutests/test_doom_build_contract.py` 与runtime参数测试。
 
 **Interfaces:** 产生 main及6个DG_*标准签名；APP_EXTRA_OBJS引用D03 archive，APP_LDLIBS=-lgui -lgfx，APP_SHARED_SOURCES=common/gfx_client_policy.c。APP_CFLAGS 使用 D03 私有副本的 doomgeneric 头路径以及 DOOMGENERIC_RESX=320/DOOMGENERIC_RESY=200/OS01_DOOM，适配对象依赖副本准备stamp。
 
-- [ ] 写测试：`iwad_before_chdir` 相对路径先转绝对；`reject_unsafe_engine_args` 拒绝-scaling/-gfxmode/@及缺参数；`missing_iwad_no_acquire` 无WAD不夺屏；`parallel_adapter_headers_ready` 并行make不会先编适配对象再准备头；`adapter_engine_dimensions_match` 所有平台/引擎TU均使用320×200；`dg_getkey_error_exits` pop错误触发非零cleanup且不作为while成功条件；`final_elf_link` 无未定义符号且map无LVGL/platform。
-- [ ] 运行 RED：`make test-doom-host DOOM_CASE=runtime`；`make test-doom-host DOOM_CASE=build`；保存实际失败原因，确认不是其他基线故障。
-- [ ] 实现：实现--os01-scale 1..3与--os01-data-dir默认/doom-data，剔除平台参数，默认IWAD固定路径。注册真实DG后才加入app.mk；main为Create后Tick前泵入循环，DG_GetKey只pop。保留stdin/TTY和fallback角色。
-- [ ] 验证 GREEN：`make user`；`make test-doom-host DOOM_CASE=all`；`make test-static`；` 在外部准备的访客IWAD上执行开局/控制/菜单退出smoke并记录证据`。预期目标组全部通过/制品满足断言；真实运行结果单独留证。
-- [ ] 审阅差异并提交本任务明确文件，提交信息：`feat(doom): publish the playable OS01 Doom application`。
+- [x] 写测试：`iwad_before_chdir` 相对路径先转绝对；`reject_unsafe_engine_args` 拒绝-scaling/-gfxmode/@及缺参数；`missing_iwad_no_acquire` 无WAD不夺屏；`parallel_adapter_headers_ready` 并行make不会先编适配对象再准备头；`adapter_engine_dimensions_match` 所有平台/引擎TU均使用320×200；`dg_getkey_error_exits` pop错误触发非零cleanup且不作为while成功条件；`final_elf_link` 无未定义符号且map无LVGL/platform。
+- [x] 运行 RED：`make test-doom-host DOOM_CASE=runtime`；`make test-doom-host DOOM_CASE=build`；保存实际失败原因，确认不是其他基线故障。
+- [x] 实现：实现--os01-scale 1..3与--os01-data-dir默认/doom-data，剔除平台参数，默认IWAD固定路径。注册真实DG后才加入app.mk；main为Create后Tick前泵入循环，DG_GetKey只pop。保留stdin/TTY和fallback角色。
+- [x] 验证 GREEN：`make user`；`make test-doom-host DOOM_CASE=all`；`make test-static`；` 在外部准备的访客IWAD上执行开局/控制/菜单退出smoke并记录证据`。预期目标组全部通过/制品满足断言；真实运行结果单独留证。
+- [x] 审阅差异并提交本任务明确文件，提交信息：`feat(doom): publish the playable OS01 Doom application`。
 
 ## 交付检查
 

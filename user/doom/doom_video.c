@@ -8,7 +8,7 @@
 
 #include <uapi/fb.h>
 #include <gfx.h>
-#include "common/gfx_client_policy.h"
+#include "gfx_client_policy.h"
 #include "doom_video.h"
 
 int doom_video_open(doom_video_t *v, unsigned requested_scale)

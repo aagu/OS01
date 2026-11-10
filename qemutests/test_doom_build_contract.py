@@ -357,7 +357,40 @@ class DoomBuildContract(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0,
                             "an unknown DOOM_CASE must fail")
         self.assertIn("unknown DOOM_CASE", r.stdout + r.stderr,
-                      "the failure must name the unknown case")
+                            "the failure must name the unknown case")
+
+    def test_parallel_adapter_headers_ready(self):
+        """Adapter objects explicitly depend on the private source stamp."""
+        app_mk = ROOT / "user" / "doom" / "app.mk"
+        self.assertTrue(app_mk.is_file(), "user/doom/app.mk must exist")
+        text = read(app_mk)
+        self.assertIn("$(DOOM_SOURCE_STAMP)", text,
+                      "adapter objects must depend on $(DOOM_SOURCE_STAMP)")
+
+    def test_adapter_engine_dimensions_match(self):
+        """Adapter and engine compilation units both target 320x200."""
+        app_mk = ROOT / "user" / "doom" / "app.mk"
+        engine_mk = ROOT / "user" / "doom" / "engine.mk"
+        app_text = read(app_mk)
+        engine_text = read(engine_mk)
+        for text, path in ((app_text, "app.mk"), (engine_text, "engine.mk")):
+            self.assertIn("DOOMGENERIC_RESX=320", text,
+                          f"{path} must define DOOMGENERIC_RESX=320")
+            self.assertIn("DOOMGENERIC_RESY=200", text,
+                          f"{path} must define DOOMGENERIC_RESY=200")
+
+    def test_final_elf_link(self):
+        """Production user build produces /bin/doom without undefined symbols or LVGL platform."""
+        r = run_make("user")
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        elf = ROOT / "build" / PROFILE / "user" / "doom.elf"
+        self.assertTrue(elf.is_file(), f"{elf} must be published by make user")
+        nm = os.environ.get("LLVM_NM", "nm")
+        res = subprocess.run([nm, "-u", str(elf)], capture_output=True, text=True, check=True)
+        self.assertEqual(res.stdout.strip(), "", "final ELF must have no undefined symbols")
+        res_all = subprocess.run([nm, str(elf)], capture_output=True, text=True, check=True)
+        for sym in ("gui_platform_create", "lv_init", "lv_display_create"):
+            self.assertNotIn(sym, res_all.stdout, f"{sym} must not be linked into doom.elf")
 
 
 if __name__ == "__main__":
