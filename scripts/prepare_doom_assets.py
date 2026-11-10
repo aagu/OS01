@@ -167,10 +167,14 @@ def main() -> int:
         )
         dest_stamp.write_text(stamp_content, encoding="utf-8")
 
-        # Move to output_dir
+        # Move to output_dir, preserving mtime if content is identical
         out_dir.mkdir(parents=True, exist_ok=True)
         for fname in ("iwad.wad", "IWAD-LICENSE.txt", "IWAD-SOURCE.txt", ".doom_assets.stamp"):
-            (tmp_dir / fname).replace(out_dir / fname)
+            src_f = tmp_dir / fname
+            dst_f = out_dir / fname
+            if dst_f.is_file() and dst_f.read_bytes() == src_f.read_bytes():
+                continue
+            src_f.replace(dst_f)
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)

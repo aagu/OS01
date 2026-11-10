@@ -245,5 +245,174 @@ class DoomAssetsValidationTest(unittest.TestCase):
         self.assertGreater(len(out_stamp.read_text().strip()), 0)
 
 
+class DoomAssetsRootMakeTest(unittest.TestCase):
+    """T2: Root Makefile integration, provenance preservation and rootfs lifecycle."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="doom-root-make-")
+        self.tmp_dir = Path(self._tmp.name)
+        self.build_dir = self.tmp_dir / "build"
+        self.fake_iwad = self.tmp_dir / "doom1.wad"
+        self.fake_iwad_data = b"IWAD" + b"\x01\x02\x03\x04" * 256
+        self.fake_iwad.write_bytes(self.fake_iwad_data)
+        self.fake_sha256 = sha256_of(self.fake_iwad_data)
+
+        self.fake_license = self.tmp_dir / "LICENSE.txt"
+        self.fake_license_data = b"Doom Test License Version 1.0\n"
+        self.fake_license.write_bytes(self.fake_license_data)
+
+        self.fake_source = "Test Source v1.0"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_make(self, *extra_args: str) -> subprocess.CompletedProcess:
+        cmd = ["make", f"BUILD_DIR={self.build_dir}"] + list(extra_args)
+        return subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+
+    def test_root_make_source_literal(self):
+        """Root make preserves quotes, variables, backticks, and make functions verbatim."""
+        sentinel1 = self.tmp_dir / "sentinel1.txt"
+        sentinel2 = self.tmp_dir / "sentinel2.txt"
+        source_val = f'origin "quotes" \'single\' $SOME_VAR `touch {sentinel1}` ; $(shell touch {sentinel2})'
+
+        r = self.run_make(
+            "doom-assets",
+            f"DOOM_IWAD={self.fake_iwad}",
+            f"DOOM_IWAD_SHA256={self.fake_sha256}",
+            f"DOOM_IWAD_LICENSE={self.fake_license}",
+            f"DOOM_IWAD_SOURCE={source_val}",
+        )
+        self.assertEqual(r.returncode, 0, f"make doom-assets failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+        self.assertFalse(sentinel1.exists(), "shell backtick inside DOOM_IWAD_SOURCE must not be executed")
+        self.assertFalse(sentinel2.exists(), "make function inside DOOM_IWAD_SOURCE must not be executed")
+
+        source_out = self.build_dir / "doom-assets" / "IWAD-SOURCE.txt"
+        self.assertTrue(source_out.is_file(), "IWAD-SOURCE.txt must exist")
+        self.assertEqual(source_out.read_text().rstrip("\r\n"), source_val)
+
+    def test_root_make_partial_inputs_fail(self):
+        """Root make with 1, 2, or 3 variables must fail without publishing artifacts."""
+        vars_map = {
+            "DOOM_IWAD": str(self.fake_iwad),
+            "DOOM_IWAD_SHA256": self.fake_sha256,
+            "DOOM_IWAD_LICENSE": str(self.fake_license),
+            "DOOM_IWAD_SOURCE": self.fake_source,
+        }
+
+        # Test omitting each variable
+        for omit_k in vars_map:
+            args = [f"{k}={v}" for k, v in vars_map.items() if k != omit_k]
+            r = self.run_make("doom-assets", *args)
+            self.assertNotEqual(r.returncode, 0, f"omitting {omit_k} must fail make")
+
+        stamp = self.build_dir / "doom-assets" / ".doom_assets.stamp"
+        self.assertFalse(stamp.exists(), "stamp must not exist after failed partial make")
+
+    def test_unchanged_stamp_stable(self):
+        """Repeated make invocations without changes keep stamp mtime stable."""
+        common_args = [
+            "doom-assets",
+            f"DOOM_IWAD={self.fake_iwad}",
+            f"DOOM_IWAD_SHA256={self.fake_sha256}",
+            f"DOOM_IWAD_LICENSE={self.fake_license}",
+            f"DOOM_IWAD_SOURCE={self.fake_source}",
+        ]
+        r1 = self.run_make(*common_args)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        stamp = self.build_dir / "doom-assets" / ".doom_assets.stamp"
+        self.assertTrue(stamp.is_file())
+        mtime1 = stamp.stat().st_mtime_ns
+
+        # Run again with same inputs
+        r2 = self.run_make(*common_args)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        mtime2 = stamp.stat().st_mtime_ns
+        self.assertEqual(mtime1, mtime2, "stamp mtime must remain unchanged when inputs do not change")
+
+    def test_same_path_bytes_change(self):
+        """Modifying IWAD bytes in-place updates stamp mtime and packaged output."""
+        common_args_base = [
+            "doom-assets",
+            f"DOOM_IWAD={self.fake_iwad}",
+            f"DOOM_IWAD_LICENSE={self.fake_license}",
+            f"DOOM_IWAD_SOURCE={self.fake_source}",
+        ]
+        r1 = self.run_make(*common_args_base, f"DOOM_IWAD_SHA256={self.fake_sha256}")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        stamp = self.build_dir / "doom-assets" / ".doom_assets.stamp"
+        out_iwad = self.build_dir / "doom-assets" / "iwad.wad"
+        mtime1 = stamp.stat().st_mtime_ns
+
+        # Modify fake_iwad in-place
+        new_data = b"IWAD_MODIFIED_BYTES_" + b"\x99" * 512
+        self.fake_iwad.write_bytes(new_data)
+        new_sha256 = sha256_of(new_data)
+
+        r2 = self.run_make(*common_args_base, f"DOOM_IWAD_SHA256={new_sha256}")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        mtime2 = stamp.stat().st_mtime_ns
+        self.assertGreater(mtime2, mtime1, "stamp mtime must move when IWAD bytes change")
+        self.assertEqual(out_iwad.read_bytes(), new_data)
+
+    def test_license_change(self):
+        """Modifying license in-place updates stamp mtime and packaged license output."""
+        common_args_base = [
+            "doom-assets",
+            f"DOOM_IWAD={self.fake_iwad}",
+            f"DOOM_IWAD_SHA256={self.fake_sha256}",
+            f"DOOM_IWAD_LICENSE={self.fake_license}",
+            f"DOOM_IWAD_SOURCE={self.fake_source}",
+        ]
+        r1 = self.run_make(*common_args_base)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        stamp = self.build_dir / "doom-assets" / ".doom_assets.stamp"
+        out_lic = self.build_dir / "doom-assets" / "IWAD-LICENSE.txt"
+        mtime1 = stamp.stat().st_mtime_ns
+
+        # Modify fake_license in-place
+        new_lic_data = b"Updated license text 2.0\n"
+        self.fake_license.write_bytes(new_lic_data)
+
+        r2 = self.run_make(*common_args_base)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        mtime2 = stamp.stat().st_mtime_ns
+        self.assertGreater(mtime2, mtime1, "stamp mtime must move when license text changes")
+        self.assertEqual(out_lic.read_bytes(), new_lic_data)
+
+    def test_remove_inputs_no_residue(self):
+        """Rootfs manifest includes assets when configured, and leaves no residue when removed."""
+        variant = "doom-asset-test"
+        manifest_path = ROOT / "build" / "x86_64-clang" / "image" / variant / "rootfs.manifest"
+
+        common_args = [
+            f"IMAGE_VARIANT={variant}",
+            str(manifest_path),
+        ]
+        asset_args = [
+            f"DOOM_IWAD={self.fake_iwad}",
+            f"DOOM_IWAD_SHA256={self.fake_sha256}",
+            f"DOOM_IWAD_LICENSE={self.fake_license}",
+            f"DOOM_IWAD_SOURCE={self.fake_source}",
+        ]
+
+        # Build with assets
+        r1 = subprocess.run(["make"] + common_args + asset_args, cwd=str(ROOT), capture_output=True, text=True)
+        self.assertEqual(r1.returncode, 0, f"make rootfs.manifest with assets failed:\n{r1.stderr}")
+        self.assertTrue(manifest_path.is_file())
+        manifest_text1 = manifest_path.read_text()
+        self.assertIn("/usr/share/games/doom/iwad.wad", manifest_text1)
+        self.assertIn("/usr/share/games/doom/IWAD-LICENSE.txt", manifest_text1)
+        self.assertIn("/usr/share/games/doom/IWAD-SOURCE.txt", manifest_text1)
+
+        # Build without assets (empty group)
+        r2 = subprocess.run(["make"] + common_args, cwd=str(ROOT), capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, f"make rootfs.manifest without assets failed:\n{r2.stderr}")
+        manifest_text2 = manifest_path.read_text()
+        self.assertNotIn("/usr/share/games/doom/iwad.wad", manifest_text2)
+        self.assertNotIn("/usr/share/games/doom/IWAD-LICENSE.txt", manifest_text2)
+        self.assertNotIn("/usr/share/games/doom/IWAD-SOURCE.txt", manifest_text2)
+
+
 if __name__ == "__main__":
     unittest.main()

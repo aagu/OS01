@@ -46,6 +46,39 @@ ROOTFS_MANIFEST := $(IMAGE_DIR)/rootfs.manifest
 #   symlink<TAB>dest<TAB>target
 include $(OS01_ROOT)/config/rootfs.mk
 
+# ── D05: Doom asset artifact rule ─────────────────────────────
+DOOM_ASSET_DIR   := $(BUILD_DIR)/doom-assets
+DOOM_ASSET_STAMP := $(DOOM_ASSET_DIR)/.doom_assets.stamp
+DOOM_ASSET_KEY   := $(DOOM_ASSET_DIR)/.doom_assets.key
+
+$(DOOM_ASSET_KEY): export OS01_DOOM_ASSET_IWAD = $(value DOOM_IWAD)
+$(DOOM_ASSET_KEY): export OS01_DOOM_ASSET_SHA256 = $(value DOOM_IWAD_SHA256)
+$(DOOM_ASSET_KEY): export OS01_DOOM_ASSET_LICENSE = $(value DOOM_IWAD_LICENSE)
+$(DOOM_ASSET_KEY): export OS01_DOOM_ASSET_SOURCE = $(value DOOM_IWAD_SOURCE)
+$(DOOM_ASSET_KEY): FORCE
+	@mkdir -p $(dir $@)
+	@python3 -c 'import os, sys; [sys.stdout.write(k.lower() + "=" + os.environ.get("OS01_DOOM_ASSET_" + k, "") + "\n") for k in ["IWAD", "SHA256", "LICENSE", "SOURCE"]]' > $@.new
+	@cmp -s $@.new $@ && rm -f $@.new || mv $@.new $@
+
+$(DOOM_ASSET_STAMP): export OS01_DOOM_ASSET_IWAD = $(value DOOM_IWAD)
+$(DOOM_ASSET_STAMP): export OS01_DOOM_ASSET_SHA256 = $(value DOOM_IWAD_SHA256)
+$(DOOM_ASSET_STAMP): export OS01_DOOM_ASSET_LICENSE = $(value DOOM_IWAD_LICENSE)
+$(DOOM_ASSET_STAMP): export OS01_DOOM_ASSET_SOURCE = $(value DOOM_IWAD_SOURCE)
+
+DOOM_ASSET_REAL_DEPS := $(if $(filter 4,$(DOOM_ASSET_COUNT)),$(strip $(value DOOM_IWAD)) $(strip $(value DOOM_IWAD_LICENSE)))
+
+$(DOOM_ASSET_STAMP): $(DOOM_ASSET_KEY) $(OS01_ROOT)/scripts/prepare_doom_assets.py $(DOOM_ASSET_REAL_DEPS)
+ifeq ($(DOOM_ASSET_COUNT),4)
+	@mkdir -p $(dir $@)
+	python3 $(OS01_ROOT)/scripts/prepare_doom_assets.py --from-env --output-dir $(DOOM_ASSET_DIR)
+else
+	@echo "ERROR: doom-assets target requires all four variables (DOOM_IWAD, DOOM_IWAD_SHA256, DOOM_IWAD_LICENSE, DOOM_IWAD_SOURCE)" >&2
+	@exit 1
+endif
+
+.PHONY: doom-assets
+doom-assets: $(DOOM_ASSET_STAMP)
+
 # Dynamic discovery must invalidate staging on removals as well as additions.
 # Preserve mtime when the expanded input list is unchanged.
 ROOTFS_INPUTS_STAMP := $(IMAGE_DIR)/rootfs.inputs
@@ -54,9 +87,12 @@ $(ROOTFS_INPUTS_STAMP): FORCE
 	@printf '%s\n' $(ROOTFS_FILES) $(ROOTFS_SYMLINKS) > $@.tmp
 	@cmp -s $@.tmp $@ && rm -f $@.tmp || mv $@.tmp $@
 
-$(ROOTFS_MANIFEST): $(ROOTFS_INPUTS_STAMP) $(OS01_ROOT)/config/rootfs.mk \
+ROOTFS_MANIFEST_DEPS := $(ROOTFS_INPUTS_STAMP) $(OS01_ROOT)/config/rootfs.mk \
 		$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf \
-		$(KERNEL_ARTIFACT) $(INITTAB_FILE)
+		$(KERNEL_ARTIFACT) $(INITTAB_FILE) \
+		$(if $(filter 4,$(DOOM_ASSET_COUNT)),$(DOOM_ASSET_STAMP))
+
+$(ROOTFS_MANIFEST): $(ROOTFS_MANIFEST_DEPS)
 	@rm -rf $(ROOTFS_STAGING)
 	@mkdir -p $(ROOTFS_STAGING) $(dir $@)
 	@rm -f $@.tmp

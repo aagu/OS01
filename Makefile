@@ -1,6 +1,9 @@
 ROOT_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 base := $(patsubst %/,%,$(dir $(ROOT_MAKEFILE)))
 
+# D05: Do not export or expand Doom asset variables across recursive makes or early shells
+unexport DOOM_IWAD DOOM_IWAD_SHA256 DOOM_IWAD_LICENSE DOOM_IWAD_SOURCE
+
 # ── Profile selection ───────────────────────────────────────
 # mk/project.mk selects PROFILE (default x86_64-clang), includes the
 # profile (validated toolchain + host/run/link parameters), and defines

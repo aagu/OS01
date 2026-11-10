@@ -9,3 +9,12 @@ ROOTFS_FILES := $(foreach p,$(ROOTFS_USER_PROGRAMS),/bin/$(p)=$(USER_ARTIFACT_DI
 ROOTFS_SYMLINKS := /bin/wget=busybox /bin/login=busybox /bin/sh=busybox /bin/[=busybox /bin/[[=busybox /bin/cat=busybox /bin/head=busybox /bin/tail=busybox /bin/cp=busybox /bin/mv=busybox /bin/rm=busybox /bin/mkdir=busybox /bin/rmdir=busybox /bin/echo=busybox /bin/printf=busybox /bin/sort=busybox /bin/ps=busybox /bin/kill=busybox /bin/mount=busybox /bin/grep=busybox /bin/sed=busybox /bin/awk=busybox /bin/find=busybox /bin/ln=busybox /bin/xargs=busybox /bin/tar=busybox /bin/gzip=busybox /bin/gunzip=busybox /bin/ping=busybox /bin/ifconfig=busybox /bin/clear=busybox /bin/dmesg=busybox
 # A discovered native program takes precedence over an applet symlink.
 ROOTFS_SYMLINKS := $(filter-out $(foreach p,$(ROOTFS_USER_PROGRAMS),/bin/$(p)=%),$(ROOTFS_SYMLINKS))
+
+# D05: Optional Doom assets (installed only when all 4 asset variables are provided)
+ifeq ($(DOOM_ASSET_COUNT),4)
+DOOM_ASSET_DIR := $(BUILD_DIR)/doom-assets
+ROOTFS_FILES += /usr/share/games/doom/iwad.wad=$(DOOM_ASSET_DIR)/iwad.wad:0644 \
+                /usr/share/games/doom/IWAD-LICENSE.txt=$(DOOM_ASSET_DIR)/IWAD-LICENSE.txt:0644 \
+                /usr/share/games/doom/IWAD-SOURCE.txt=$(DOOM_ASSET_DIR)/IWAD-SOURCE.txt:0644
+endif
+
