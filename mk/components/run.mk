@@ -1360,6 +1360,40 @@ test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_R
 	    *) echo "  [test-gui-host] CASE=$(GUI_CASE_EFFECTIVE)";; \
 	  esac
 
+# ── D03: the Doom engine work package ───────────────────────────
+#
+# Focused host entry for the Doom work package:
+#   make test-doom-host DOOM_CASE=build    the engine build contract
+#                                         and the exit behaviour group
+#   make test-doom-host DOOM_CASE=config   the configuration round-trip
+#   make test-doom-host DOOM_CASE=all      every delivered group
+#
+# An unknown case is rejected with a locating message and a non-zero
+# exit status.
+DOOM_HOST_REGISTERED_CASES := build config
+DOOM_CASE_RAW := $(DOOM_CASE)
+DOOM_CASE_EFFECTIVE = $(if $(strip $(DOOM_CASE_RAW)),$(DOOM_CASE_RAW),all)
+
+_test-doom-host-run-%:
+	@echo "ERROR: unknown DOOM_CASE='$*'; valid: $(DOOM_HOST_REGISTERED_CASES), all" >&2
+	@exit 1
+
+.PHONY: test-doom-host _test-doom-host-run-build _test-doom-host-run-config
+test-doom-host: $(if $(filter all,$(DOOM_CASE_EFFECTIVE)),$(foreach c,$(DOOM_HOST_REGISTERED_CASES),_test-doom-host-run-$(c)),_test-doom-host-run-$(DOOM_CASE_EFFECTIVE))
+	$(call require_capability,rootfs)
+	@case "$(DOOM_CASE_EFFECTIVE)" in \
+	    all) echo "  [test-doom-host] full registered group: $(DOOM_HOST_REGISTERED_CASES)";; \
+	    *) echo "  [test-doom-host] DOOM_CASE=$(DOOM_CASE_EFFECTIVE)";; \
+	  esac
+
+# The build contract: the pinned upstream, the fixed 80-unit list, the
+# profile gate, the patch application, the rebuild trigger and the
+# "no system/fscanf dependency" property of the production objects.
+# It is a build contract, so it runs the unittest module directly.
+_test-doom-host-run-build:
+	@echo "  [test-doom-host] build"
+	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_build_contract -v
+
 .PHONY: test-gui-widget test-gui-focus
 test-gui-widget:
 	$(call require_capability,rootfs)

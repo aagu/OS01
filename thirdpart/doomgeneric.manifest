@@ -1,0 +1,16 @@
+# thirdpart/doomgeneric.manifest
+# doomgeneric input manifest (spec: third-party source manifests).
+#
+# The engine sources are a PINNED upstream submodule: the D03 spec fixes
+# the revision so the archive is reproducible.  A different revision is a
+# hard error, never a silent update.
+DOOMGENERIC_SOURCE   := thirdpart/doomgeneric
+DOOMGENERIC_REVISION := e257a09527062bfb986b6e5e0780839b6cbd5b71
+
+# The patch set applied to the pinned upstream, IN ORDER.  The entries
+# are file names inside thirdpart/patches/doomgeneric.  The list AND the
+# patch contents are part of the engine's input digest: adding, removing
+# or reordering a patch rebuilds the archive.  A patch that does not
+# apply cleanly is a hard error, never a skipped patch.
+DOOMGENERIC_PATCHES := \
+  0001-os01-no-zenity.patch

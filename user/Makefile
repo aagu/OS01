@@ -82,6 +82,11 @@ USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR
 .DEFAULT_GOAL := all
 USER_BUILD_CONTEXT := 1
 include $(OS01_ROOT)/user/apps.mk
+# D03: the Doom engine archive.  Loaded HERE (and only here) so the root
+# discovery include (user/apps.mk) never prepares the private source copy
+# and never compiles the engine.  The engine is not an application: no
+# app.mk, no ELF, no /bin/doom.
+include $(OS01_ROOT)/user/doom/engine.mk
 PROGRAMS := $(addprefix $(BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 CRT0_OBJ := $(OBJ_DIR)/crt0.o
 SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
@@ -115,7 +120,7 @@ $(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.l
 -include $(RUNTIME_PROBE_OBJ:.o=.d)
 
 .PHONY: all clean
-all: $(PROGRAMS) $(RUNTIME_PROBE_ELF)
+all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(DOOM_ARCHIVE)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)

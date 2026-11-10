@@ -32,6 +32,7 @@ include mk/display.mk
 include mk/terminal.mk
 include mk/monitor.mk
 include mk/gui.mk
+include mk/doom.mk
 
 .PHONY: all clean
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)

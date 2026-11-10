@@ -88,6 +88,10 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	  done; \
 	  cmp -s "$(USER_BUILD_DIR)/user_udivti3_link_probe.elf" "$(USER_RUNTIME_PROBE)" || cp "$(USER_BUILD_DIR)/user_udivti3_link_probe.elf" "$(USER_RUNTIME_PROBE)"; \
 	  test -f "$(USER_RUNTIME_PROBE)" || { echo "ERROR: missing user runtime probe artifact $(USER_RUNTIME_PROBE)"; exit 1; }; \
+	  test -f "$(USER_BUILD_DIR)/obj/doom-engine/libdoom-engine.a" || { \
+	    echo "ERROR: missing the doom engine archive (D03)"; \
+	    echo "       Expected: $(USER_BUILD_DIR)/obj/doom-engine/libdoom-engine.a"; \
+	    exit 1; }; \
 	'
 
 # ── BusyBox adapter ───────────────────────────────────────────

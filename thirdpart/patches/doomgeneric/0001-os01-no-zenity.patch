@@ -1,0 +1,24 @@
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -264,7 +264,7 @@
+ #endif
+ }
+ 
+-#if !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__)
++#if !defined(_WIN32) && !defined(__MACOSX__) && !defined(__DJGPP__) && !defined(OS01_DOOM)
+ #define ZENITY_BINARY "/usr/bin/zenity"
+ 
+ // returns non-zero if zenity is available
+@@ -453,7 +453,11 @@
+         printf("%s\n", msgbuf);
+         exit(-1);
+     }
+-
++#elif defined(OS01_DOOM)
++    // OS01: there is no GUI error box.  The message has already been
++    // written to stderr above and the exit status stays non-zero.
++    {
++    }
+ #else
+     {
+         ZenityErrorBox(msgbuf);
