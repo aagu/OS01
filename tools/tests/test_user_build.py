@@ -20,6 +20,13 @@ class UserBuildTest(unittest.TestCase):
         for src in (ROOT / 'user').glob('*'):
             if src.name == 'Makefile' or src.suffix == '.mk':
                 shutil.copy(src, self.user / src.name)
+        # D03: user/Makefile includes the Doom engine rules from
+        # user/doom/engine.mk, so the fixture root has to carry that
+        # directory or the include fails.  The rules themselves stay inert
+        # here: the engine is gated on the userland capability, which the
+        # fixture profile does not declare.
+        shutil.copytree(ROOT / 'user' / 'doom', self.user / 'doom',
+                        dirs_exist_ok=True)
         (self.user / 'crt0.S').write_text('.global _start\n_start: jmp _start\n')
         (self.user / 'sigreturn_trampoline.S').write_text('.text\n')
         (self.user / 'linker.ld').write_text('ENTRY(_start)\nSECTIONS { . = 0x400000; .text : { *(.text*) } .data : { *(.data*) } .bss : { *(.bss*) } }\n')
