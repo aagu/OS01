@@ -19,12 +19,21 @@
  * Layer 3 — errno discipline: ERANGE on overflow/underflow, errno
  * preserved when nothing is consumed (the scanner's EINVAL on
  * no-conversion is suppressed by the wrappers).
+ *
+ * Layer 4 — the absolute value of a binary64: fabs() clears the sign
+ * bit, so -0.0 becomes +0.0, the infinities lose their sign and a NaN
+ * keeps its payload.  The header inline is renamed in this translation
+ * unit, so the host libc's fabs can never answer for it, and a SECOND
+ * translation unit (the same source compiled with -DOS01_FABS_PROBE_TU
+ * and -fno-builtin) links against the same header.
  */
 
 #include "test_framework.h"
 
 #include <errno.h>
 #include <float.h>
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +41,26 @@
 #include <sys/wait.h>
 
 #include "../data/floatscan_cases.h"
+
+#ifdef OS01_FABS_PROBE_TU
+
+/* ── the second translation unit of the fabs probe ──────────────────
+ *
+ * The SAME source, compiled with -DOS01_FABS_PROBE_TU, carries nothing
+ * but this function: it includes <math.h> and calls fabs() exactly like
+ * the test translation unit does.  It is compiled with -fno-builtin, so
+ * the compiler's builtin cannot answer the call either — the header's
+ * implementation is the only possible answer.
+ *
+ * Two translation units, one header, one definition: the link proves
+ * that the header carries no duplicate definition, and it proves that
+ * the implementation really lives in the header. */
+int os01_fabs_probe_value(void)
+{
+    return (fabs(-3.5) == 3.5 && fabs(-0.0) == 0.0) ? 42 : 0;
+}
+
+#else
 
 /* baked in by the make rule; stays inside the profile build dir */
 #ifndef FLOATSCAN_ORACLE_PATH
@@ -207,10 +236,67 @@ TEST_FUNC(test_errno_and_consumption_contract) {
     assert_eq(0, (long)(e - "abc"));
 }
 
+/* ── the absolute value of a binary64 ─────────────────────────────── */
+
+/* The bit contract of fabs(): it clears the SIGN BIT of the binary64
+ * representation, and that is exactly the whole contract:
+ *
+ *   -0.0   → +0.0     (the value stays zero, the sign bit is cleared)
+ *   -Inf   → +Inf
+ *   NaN    → NaN      (the payload survives, the sign bit is cleared)
+ *   -7.5   → +7.5
+ *
+ * The header inline is renamed to os01_fabs in this translation unit (see
+ * the make rule), so the host libc's fabs can never answer for it: the
+ * link would fail if <math.h> did not carry the implementation.  The
+ * signbit()/isfinite() macros of the same header are used unchanged. */
+TEST_FUNC(fabs_bit_contract) {
+    union { double d; uint64_t u; } v;
+
+    /* -0.0 → +0.0 */
+    double nz = fabs(-0.0);
+    assert_eq(0, (int)nz);
+    assert_eq(0, signbit(nz));
+    /* the input really was the negative zero */
+    assert_eq(1, signbit(-0.0));
+
+    /* -Inf → +Inf */
+    double inf = fabs(-INFINITY);
+    assert_true(inf == INFINITY);
+    assert_eq(0, signbit(inf));
+    assert_eq(1, signbit(-INFINITY));
+
+    /* NaN: the payload survives, the sign bit is cleared.  The input is a
+     * NEGATIVE quiet NaN with a payload of 1, so the result must be the
+     * same NaN with the sign bit cleared. */
+    v.u = 0xfff8000000000001ull;
+    v.d = fabs(v.d);
+    assert_true(v.u == 0x7ff8000000000001ull);
+    if (v.u != 0x7ff8000000000001ull) {
+        printf("  [FAIL] fabs(NaN) bits: got %016llx, want %016llx\n",
+               (unsigned long long)v.u,
+               (unsigned long long)0x7ff8000000000001ull);
+    }
+    /* and it is still a NaN */
+    assert_eq(0, isfinite(v.d));
+
+    /* ordinary magnitudes */
+    assert_true(fabs(-7.5) == 7.5);
+    assert_true(fabs(7.5) == 7.5);
+    assert_true(fabs(-0.5) == 0.5);
+
+    /* the second translation unit of the probe: it includes the same
+     * header, calls the same function and is compiled with -fno-builtin.
+     * It links, so the header carries exactly one definition. */
+    extern int os01_fabs_probe_value(void);
+    assert_eq(42, os01_fabs_probe_value());
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_oracle_bit_pattern_agreement),
     TEST_ENTRY(test_long_double_keeps_extra_precision),
     TEST_ENTRY(test_errno_and_consumption_contract),
+    TEST_ENTRY(fabs_bit_contract),
 TEST_LIST_END
 
 int main(void)
@@ -218,3 +304,5 @@ int main(void)
     RUN_ALL_TESTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
+
+#endif /* OS01_FABS_PROBE_TU */

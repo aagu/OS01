@@ -486,7 +486,25 @@ $(TEST_BLD)/user-int/strtoll.o: $(LIBC_SRC)/stdlib/strtoll.c
 	@mkdir -p $(TEST_BLD)/user-int
 	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
 
-INTEGER_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+# The absolute-value family (D01/T2): the PRODUCTION libc/stdlib/abs.c,
+# compiled under the `os01_` prefix, so a call in the test can never
+# resolve to the host libc's abs/labs/llabs — and the link fails if the
+# production file did not define them at all.
+#
+# The object is compiled WITHOUT the test_platform.h force-include: that
+# header defines __is_libk, and the kernel-side copy of the module is
+# not the one under test.  The host test drives the USER libc.
+OS01_LIBC_ABS_FNS := abs labs llabs
+OS01_LIBC_ABS_PREFIX_DEFS := $(foreach f,$(OS01_LIBC_ABS_FNS),-D$(f)=$(OS01_LIBC_PREFIX)$(f))
+OS01_LIBC_ABS_DIR := $(TEST_BLD)/prefixed-abs
+OS01_LIBC_ABS_OBJS := $(OS01_LIBC_ABS_DIR)/abs.o
+
+$(OS01_LIBC_ABS_DIR)/%.o: $(LIBC_SRC)/stdlib/%.c
+	@mkdir -p $(OS01_LIBC_ABS_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBC_ABS_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
+INTEGER_TEST_CFLAGS := $(HOST_CFLAGS) $(OS01_LIBC_ABS_PREFIX_DEFS) \
+    $(FRAMEWORK_INC) $(LIBC_INC) \
     -I$(TESTS_DIR)/hosttests/data \
     -D'STRTOX_ORACLE_PATH="$(TEST_BLD)/strtox_oracle"'
 
@@ -498,6 +516,7 @@ $(TEST_BLD)/test_libc_integer.o: $(TEST_CASES)/test_libc_integer.c \
 $(TEST_BLD)/test_libc_integer.elf: $(TEST_BLD)/test_libc_integer.o \
         $(TEST_BLD)/user-int/strtol.o \
         $(TEST_BLD)/user-int/strtoll.o \
+        $(OS01_LIBC_ABS_OBJS) \
         $(OS01_LIBC_STREAM_OBJS) \
         $(TEST_BLD)/libc_stream_runtime.o
 	$(HOST_CC) -o $@ $^
@@ -534,14 +553,28 @@ $(TEST_BLD)/user-int/floatscan.o: $(LIBC_SRC)/stdlib/floatscan.c \
 
 FLOAT_TEST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
     -I$(TESTS_DIR)/hosttests/data \
-    -D'FLOATSCAN_ORACLE_PATH="$(TEST_BLD)/floatscan_oracle"'
+    -D'FLOATSCAN_ORACLE_PATH="$(TEST_BLD)/floatscan_oracle"' \
+    -Dfabs=$(OS01_LIBC_PREFIX)fabs
 
 $(TEST_BLD)/test_libc_float_parse.o: $(TEST_CASES)/test_libc_float_parse.c \
         $(TESTS_DIR)/hosttests/data/floatscan_cases.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FLOAT_TEST_CFLAGS) -c $< -o $@
 
+# The second translation unit of the fabs probe: the SAME source compiled
+# with -DOS01_FABS_PROBE_TU, so it carries nothing but the probe function.
+# It is compiled with -fno-builtin, so the compiler's builtin cannot
+# answer the fabs() call either — the header's implementation is the only
+# possible answer.  It links into the same binary as the test
+# translation unit, so a header that defined the symbol twice would show
+# up as a duplicate definition.
+$(TEST_BLD)/user-float/fabs_probe.o: $(TEST_CASES)/test_libc_float_parse.c
+	@mkdir -p $(TEST_BLD)/user-float
+	$(HOST_CC) $(FLOAT_TEST_CFLAGS) -DOS01_FABS_PROBE_TU -fno-builtin \
+	    -c $< -o $@
+
 $(TEST_BLD)/test_libc_float_parse.elf: $(TEST_BLD)/test_libc_float_parse.o \
+        $(TEST_BLD)/user-float/fabs_probe.o \
         $(TEST_BLD)/user-int/strtod.o \
         $(TEST_BLD)/user-int/floatscan.o \
         $(OS01_LIBC_STREAM_OBJS) \

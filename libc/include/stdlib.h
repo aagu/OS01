@@ -54,6 +54,14 @@ long long atoll(const char *nptr);
 long long strtoll(const char *nptr, char **endptr, int base);
 unsigned long long strtoull(const char *nptr, char **endptr, int base);
 
+// ── Absolute value ───────────────────────────────────────────
+// The magnitude of the argument.  The most negative value of each type
+// has no representable magnitude: C leaves that case undefined, and this
+// libc adds no saturating behaviour of its own.
+int abs(int j);
+long labs(long j);
+long long llabs(long long j);
+
 // ── Sorting ──────────────────────────────────────────────────
 void qsort(void *base, size_t nmemb, size_t size,
            int (*compar)(const void *, const void *));

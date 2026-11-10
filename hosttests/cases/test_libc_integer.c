@@ -291,6 +291,39 @@ TEST_FUNC(test_long_min_no_ub_and_intmax) {
     assert_eq(LLONG_MIN, atoll("-9223372036854775808"));
 }
 
+/* ── the absolute-value family ───────────────────────────────────── */
+
+/* abs/labs/llabs are the PRODUCTION implementations of libc/stdlib/abs.c,
+ * linked under the os01_ prefix (see the make rule): the host libc's
+ * abs can never answer for them, and the link fails if the production
+ * file did not define them at all.
+ *
+ * The values checked are the ordinary ones; the most negative value of
+ * each type is deliberately NOT asserted, because C leaves its absolute
+ * value undefined and this libc adds no saturating behaviour of its own. */
+TEST_FUNC(integer_abs_values)
+{
+    /* int */
+    assert_eq(7, os01_abs(-7));
+    assert_eq(0, os01_abs(0));
+    assert_eq(7, os01_abs(7));
+
+    /* long */
+    assert_eq(7L, os01_labs(-7L));
+    assert_eq(0L, os01_labs(0L));
+    assert_eq(7L, os01_labs(7L));
+
+    /* long long */
+    assert_eq(7LL, os01_llabs(-7LL));
+    assert_eq(0LL, os01_llabs(0LL));
+    assert_eq(7LL, os01_llabs(7LL));
+
+    /* the magnitude, not the sign: the result is never negative. */
+    assert_true(os01_abs(-1) > 0);
+    assert_true(os01_labs(-1L) > 0L);
+    assert_true(os01_llabs(-1LL) > 0LL);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_oracle_table_agreement),
     TEST_ENTRY(test_strtoul_sign_wraps),
@@ -299,6 +332,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_strtoll_is_not_a_truncation_cast),
     TEST_ENTRY(test_0x_commit_rule_and_invalid_base),
     TEST_ENTRY(test_long_min_no_ub_and_intmax),
+    TEST_ENTRY(integer_abs_values),
 TEST_LIST_END
 
 int main(void)

@@ -57,7 +57,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # scope for this cycle (see the regex.h exclusion above).
 ENABLED_GROUPS: tuple[str, ...] = (
     "api", "alloc", "env", "shutdown", "stream", "append", "io", "line",
-    "format", "integer", "float", "scan", "time", "path", "dir",
+    "format", "integer", "float", "scan", "time", "path", "dir", "abs",
 )
 
 # Headers that are deliberately NOT part of the api group, with the reason.
@@ -260,7 +260,12 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "posix_memalign",
         "aligned_alloc",
     ],
-    "math.h": [],
+    "math.h": [
+        # NOTE: fabs() is a header inline (a static inline in math.h), so it
+        # is not an externally linked function and the audit does not
+        # require the archive to export it.  The interface inventory of this
+        # header therefore stays empty on purpose.
+    ],
     "mntent.h": [
         "setmntent",
         "getmntent",
@@ -419,6 +424,9 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "strtof",
         "strtold",
         "atof",
+        "abs",
+        "labs",
+        "llabs",
     ],
     "string.h": [
         "memcmp",
@@ -952,6 +960,29 @@ API_GROUPS: dict[str, dict] = {
                 "fdopendir",
                 "scandir",
                 "alphasort",
+            ],
+        },
+        "require_user_export": True,
+    },
+    # ── D01/T2: the absolute-value family ───────────────────────────────
+    # abs/labs/llabs are ordinary libc functions with an ordinary
+    # definition (libc/stdlib/abs.c), so the user libc must really export
+    # them.  libk is not required to: the family is not part of the
+    # already-supported subset of any profile, and the kernel side has no
+    # use for it.
+    #
+    # The floating-point absolute value (fabs) is NOT in this group: it is
+    # a header inline in math.h, so there is nothing for the archive to
+    # export and nothing for the audit to require.
+    "abs": {
+        "task": "D01/T2",
+        "title": "the integer absolute-value family",
+        "headers": {},
+        "owned": {
+            "stdlib.h": [
+                "abs",
+                "labs",
+                "llabs",
             ],
         },
         "require_user_export": True,
