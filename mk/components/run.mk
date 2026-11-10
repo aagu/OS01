@@ -2650,7 +2650,7 @@ test-gui-incremental: $(SYSROOT_STAMP)
 	  cp "$$hdr" "$$bak"; \
 	  restore() { main=$$?; st=$$main; \
 	    cp "$$bak" "$$hdr" || st=1; \
-	    rm -f $(BUILD_DIR)/stamps/sysroot.stamp; \
+	    rm -f $(BUILD_DIR)/stamps/sysroot.stamp || st=1; \
 	    if $(MAKE) --no-print-directory sysroot >$(BUILD_DIR)/incr-ps2-republish.log 2>&1; then repub=0; else repub=1; st=1; fi; \
 	    src=$$(sha256sum "$$hdr" 2>/dev/null | cut -d" " -f1); \
 	    stg=$$(sha256sum $(STAGING_DIR)/gui/usr/include/gui/gui_input_ps2.h 2>/dev/null | cut -d" " -f1); \

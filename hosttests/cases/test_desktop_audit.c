@@ -180,6 +180,44 @@ static char *strip_comments(char *text, bool is_make)
     return text;
 }
 
+/* ── C 翻译阶段 2：反斜杠-换行拼接 ─────────────────────────────────
+ *
+ * 源文件里的反斜杠续行在 C 的**阶段 2**就消失了——它早于注释与字符串
+ * 的解释。审计必须按同样的顺序处理，否则
+ *   "hello\
+ *   #include <x.h>"      拼接后是字符串，不是指令
+ *   // hello\
+ *   #include <x.h>       拼接后是整行注释，不是指令
+ * 这两种输入会被误判成私有头，而
+ *   #include \
+ *    <x.h>                拼接后是真正的指令
+ * 又会被漏判。
+ */
+static char *splice_lines(const char *text)
+{
+    size_t len = strlen(text);
+    char *out = malloc(len + 1);
+    if (out == NULL) {
+        return NULL;
+    }
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == '\\') {
+            size_t k = i + 1;
+            if (k < len && text[k] == '\r') {
+                k++;
+            }
+            if (k < len && text[k] == '\n') {
+                i = k;          /* drop the backslash and the newline */
+                continue;
+            }
+        }
+        out[j++] = text[i];
+    }
+    out[j] = '\0';
+    return out;
+}
+
 /* 把源文件读进来；读不到直接失败（审计必须真的看见源码）。 */
 static char *load(const char *name)
 {
@@ -187,8 +225,12 @@ static char *load(const char *name)
     snprintf(path, sizeof(path), "%s/%s", GUI_DESKTOP_SRC, name);
     char *text = slurp(path);
     assert_not_null(text);
+    /* 阶段 2 的拼接必须发生在注释剥离之前。 */
+    char *spliced = splice_lines(text);
+    assert_not_null(spliced);
+    free(text);
     bool is_make = (strstr(name, ".mk") != NULL);
-    return strip_comments(text, is_make);
+    return strip_comments(spliced, is_make);
 }
 
 /* 在 text 里找 needle；找到返回其偏移，否则返回 -1。 */
@@ -315,56 +357,6 @@ static bool is_published_spelling(const char *token, size_t len, const char *nam
            memcmp(token + 4, name, nlen) == 0;
 }
 
-/* The header token of the next #include directive at or after `from`.
- * The token is the text between the delimiters; *end points at the closing
- * delimiter.  Returns NULL when there is no further include directive. */
-static const char *next_include_token(const char *from, const char **end)
-{
-    const char *p = from;
-    while ((p = strchr(p, '#')) != NULL) {
-        /* The '#' must start a line (only whitespace before it): an
-         * "#include" inside a string literal is not an include. */
-        bool line_start = true;
-        for (const char *b = p - 1; b >= from && *b != '\n'; b--) {
-            if (*b != ' ' && *b != '\t') {
-                line_start = false;
-                break;
-            }
-        }
-        const char *q = p + 1;
-        while (*q == ' ' || *q == '\t') {
-            q++;
-        }
-        if (!line_start || strncmp(q, "include", 7) != 0 ||
-            (isalnum((unsigned char)q[7]) || q[7] == '_')) {
-            p++;
-            continue;
-        }
-        q += 7;
-        while (*q == ' ' || *q == '\t') {
-            q++;
-        }
-        char close;
-        if (*q == '<') {
-            close = '>';
-        } else if (*q == '"') {
-            close = '"';
-        } else {
-            p++;
-            continue;
-        }
-        const char *start = q + 1;
-        const char *e = strchr(start, close);
-        if (e == NULL) {
-            p++;
-            continue;
-        }
-        *end = e;
-        return start;
-    }
-    return NULL;
-}
-
 /* The last path component of an include token. */
 static const char *include_basename(const char *token, size_t len)
 {
@@ -377,33 +369,155 @@ static const char *include_basename(const char *token, size_t len)
     return slash != NULL ? slash + 1 : token;
 }
 
-static bool has_private_header(const char *text)
+/* True when the include token names a private libgui header. */
+static bool token_is_private(const char *token, size_t len)
 {
-    const char *cursor = text;
-    for (;;) {
-        const char *end = NULL;
-        const char *token = next_include_token(cursor, &end);
-        if (token == NULL) {
-            break;
+    const char *base = include_basename(token, len);
+    size_t blen = len - (size_t)(base - token);
+    for (size_t i = 0; i < sizeof(g_private_headers) / sizeof(g_private_headers[0]); i++) {
+        const char *name = g_private_headers[i];
+        if (blen != strlen(name) || memcmp(base, name, blen) != 0) {
+            continue;
         }
-        size_t len = (size_t)(end - token);
-        /* The cursor only ever moves FORWARD, in absolute coordinates. */
-        cursor = end + 1;
-        const char *base = include_basename(token, len);
-        size_t blen = len - (size_t)(base - token);
-        for (size_t i = 0; i < sizeof(g_private_headers) / sizeof(g_private_headers[0]); i++) {
-            const char *name = g_private_headers[i];
-            if (blen != strlen(name) || memcmp(base, name, blen) != 0) {
-                continue;
-            }
-            /* Private — unless it is the exact published spelling. */
-            if (has_public_counterpart(name) && is_published_spelling(token, len, name)) {
-                continue;
-            }
-            return true;
+        /* Private — unless it is the exact published spelling. */
+        if (has_public_counterpart(name) && is_published_spelling(token, len, name)) {
+            continue;
         }
+        return true;
     }
     return false;
+}
+
+/* Scan one logical line for an #include directive.
+ *
+ * `at_start` tracks "only whitespace so far on this line", which is what
+ * makes the '#' a directive introducer.  String literals, character
+ * literals and comments are skipped: an "#include" inside them is not an
+ * include.  *in_block carries the block-comment state across lines.
+ */
+static bool scan_logical_line(const char *line, size_t len, bool *in_block)
+{
+    bool in_string = false;
+    bool in_char = false;
+    bool at_start = true;
+    size_t i = 0;
+
+    while (i < len) {
+        char c = line[i];
+        if (*in_block) {
+            if (c == '*' && i + 1 < len && line[i + 1] == '/') {
+                *in_block = false;
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_string) {
+            if (c == '\\' && i + 1 < len) {
+                i += 2;
+                continue;
+            }
+            if (c == '"') {
+                in_string = false;
+            }
+            i++;
+            continue;
+        }
+        if (in_char) {
+            if (c == '\\' && i + 1 < len) {
+                i += 2;
+                continue;
+            }
+            if (c == '\'') {
+                in_char = false;
+            }
+            i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && line[i + 1] == '*') {
+            *in_block = true;
+            i += 2;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && line[i + 1] == '/') {
+            return false;   /* the rest of the line is a comment */
+        }
+        if (c == '"') {
+            in_string = true;
+            at_start = false;
+            i++;
+            continue;
+        }
+        if (c == '\'') {
+            in_char = true;
+            at_start = false;
+            i++;
+            continue;
+        }
+        if (at_start && (c == ' ' || c == '\t')) {
+            i++;
+            continue;
+        }
+        if (at_start && c == '#') {
+            size_t j = i + 1;
+            while (j < len && (line[j] == ' ' || line[j] == '\t')) {
+                j++;
+            }
+            if (j + 7 <= len && strncmp(line + j, "include", 7) == 0 &&
+                !(j + 7 < len &&
+                  (isalnum((unsigned char)line[j + 7]) || line[j + 7] == '_'))) {
+                size_t k = j + 7;
+                while (k < len && (line[k] == ' ' || line[k] == '\t')) {
+                    k++;
+                }
+                if (k < len && (line[k] == '<' || line[k] == '"')) {
+                    char close = (line[k] == '<') ? '>' : '"';
+                    size_t start = k + 1;
+                    size_t end = start;
+                    while (end < len && line[end] != close) {
+                        end++;
+                    }
+                    if (end < len) {
+                        bool priv = token_is_private(line + start, end - start);
+                        i = end + 1;
+                        at_start = false;
+                        if (priv) {
+                            return true;
+                        }
+                        continue;
+                    }
+                }
+            }
+            at_start = false;
+            i++;
+            continue;
+        }
+        at_start = false;
+        i++;
+    }
+    return false;
+}
+
+static bool has_private_header(const char *text)
+{
+    /* 阶段 2 的拼接在这里也要做一次：调用方可能直接传入未处理的源码
+     * （单元测试就是如此）。已经拼接过的文本再拼接一次是恒等变换。 */
+    char *spliced = splice_lines(text);
+    if (spliced == NULL) {
+        return false;
+    }
+    bool found = false;
+    bool in_block = false;
+    const char *line = spliced;
+    while (*line != '\0' && !found) {
+        const char *eol = strchr(line, '\n');
+        size_t len = eol != NULL ? (size_t)(eol - line) : strlen(line);
+        found = scan_logical_line(line, len, &in_block);
+        line = eol != NULL ? eol + 1 : line + len;
+    }
+    free(spliced);
+    return found;
 }
 
 /* The published decoder API must be ACCEPTED and the private bridge must
@@ -460,6 +574,35 @@ TEST_FUNC(test_private_header_matcher_counterexamples)
         "#include <gui/gui_input_private.h>\n"));
     assert_false(has_private_header(
         "#include <gui/gui_input.h>\n#include <gui/gui_input.h>\n"));
+}
+
+/* The C translation phase 2 (backslash-newline splicing) happens BEFORE
+ * comments and string literals are interpreted.  These cases pin both
+ * directions: a spliced include directive is a real directive, and an
+ * "#include" that ends up inside a string or a comment is not. */
+TEST_FUNC(test_private_header_line_splicing)
+{
+    /* spliced directives: the bridge header IS included */
+    assert_true(has_private_header("#include \\\n <gui_input_ps2.h>\n"));
+    assert_true(has_private_header("#inc\\\nlude <gui_input_ps2.h>\n"));
+    assert_true(has_private_header("#include <gui_input_\\\nps2.h>\n"));
+
+    /* the published spelling stays legal when it is spliced */
+    assert_false(has_private_header("#include \\\n <gui/gui_input_ps2.h>\n"));
+
+    /* spliced into a string literal: not a directive */
+    assert_false(has_private_header(
+        "const char *s = \"hello\\\n#include <gui_input_ps2.h>\";\n"));
+
+    /* spliced into a line comment: not a directive */
+    assert_false(has_private_header(
+        "// hello\\\n#include <gui_input_ps2.h>\n"));
+
+    /* a plain string and a plain trailing comment stay ignored */
+    assert_false(has_private_header(
+        "const char *s = \"#include <gui_input_ps2.h>\";\n"));
+    assert_false(has_private_header(
+        "#include <gui/gui_input_ps2.h> /* #include <gui_input_ps2.h> */\n"));
 }
 
 TEST_FUNC(test_no_private_libgui_headers)

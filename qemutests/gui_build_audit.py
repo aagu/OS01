@@ -91,9 +91,16 @@ def _is_public_gui_header(path: Path, root: Path) -> bool:
     decoder API and the internal forwarder) must be recognised by its
     POSITION — the full canonical position relative to the published root,
     not just a basename plus an "include/gui" suffix.  A copy under another
-    directory (usr/include/other/include/gui/<name>) or a path that only
-    reaches the canonical position through ".." is NOT the published
+    directory (usr/include/other/include/gui/<name>) is NOT the published
     header.
+
+    The path is NORMALISED (os.path.normpath) before it is compared, so a
+    path that denotes another directory — e.g. usr/include/gui/../include/
+    gui/<name>, which normalises to usr/include/include/gui/<name> — is
+    rejected, while a path that denotes the very same file through ".."
+    (usr/include/gui/../gui/<name>) is accepted: after normalisation it IS
+    the canonical position.  Textual paths of that kind are not produced by
+    the tree walk; the rule is stated here so the policy is exact.
 
     A symbolic link is never the published file: it may point outside the
     published tree, so neither the file itself nor any directory inside
@@ -549,6 +556,31 @@ def _include_targets(content: str) -> list[tuple[str, str]]:
     return out
 
 
+def _read_published_header(path: Path, root: Path, errors: list[str], reported: set[Path]) -> str | None:
+    """Read a published header, reporting irregular entries as errors.
+
+    A header that is a symbolic link to a directory (or any non-regular
+    file) must be a STRUCTURED audit error: reading it would raise
+    IsADirectoryError and abort the whole audit.
+    """
+    if path in reported:
+        return None
+    if path.is_dir() or not path.is_file():
+        reported.add(path)
+        errors.append(
+            f"published header {path.relative_to(root)} is not a regular file"
+        )
+        return None
+    try:
+        return path.read_text(errors="replace")
+    except OSError as exc:
+        reported.add(path)
+        errors.append(
+            f"published header {path.relative_to(root)} cannot be read: {exc}"
+        )
+        return None
+
+
 def audit_published_headers(
     gen_dir: Path,
     sysroot: Path,
@@ -566,6 +598,27 @@ def audit_published_headers(
     for root in roots:
         gui_dir = root / "usr" / "include" / "gui"
         inc_root = root / "usr" / "include"
+        # The published include tree must consist of REAL directories.  A
+        # symbolic link for usr, usr/include or usr/include/gui can
+        # redirect the whole tree: rglob does NOT descend into a linked
+        # directory, so the per-file checks below would never see its
+        # content — the generation would publish headers from outside it.
+        # The ROOT itself may be a link on purpose (the sysroot points at
+        # its generation), so it is deliberately not restricted here.
+        redirected = False
+        for rel_dir in ("usr", "usr/include", "usr/include/gui"):
+            d = root / rel_dir
+            if d.is_symlink():
+                redirected = True
+                errors.append(
+                    f"symbolic link in the published include tree: "
+                    f"{d.relative_to(root)} -> {os.readlink(d)}"
+                )
+        if redirected:
+            # Do not read through the link: that tree is not part of the
+            # published generation.
+            continue
+        reported: set[Path] = set()
         if not gui_dir.is_dir():
             errors.append(f"published GUI include directory missing: {gui_dir}")
             continue
@@ -596,7 +649,9 @@ def audit_published_headers(
             # bare "<stdio.h>" is a compiler/system header and is not the
             # publication's responsibility.
             for hdr in sorted(gui_dir.rglob("*.h")):
-                content = hdr.read_text(errors="replace")
+                content = _read_published_header(hdr, root, errors, reported)
+                if content is None:
+                    continue
                 for form, target in _include_targets(content):
                     if form == '"':
                         candidates = [hdr.parent / target, inc_root / target]
@@ -624,8 +679,10 @@ def audit_published_headers(
         # include tree: no published header may expose an LVGL type.
         if inc_root.is_dir():
             for hdr in sorted(inc_root.rglob("*.h")):
-                code = _strip_c_comments(hdr.read_text(errors="replace"))
-                match = re.search(r"\blv_\w+", code)
+                code = _read_published_header(hdr, root, errors, reported)
+                if code is None:
+                    continue
+                match = re.search(r"\blv_\w+", _strip_c_comments(code))
                 if match:
                     errors.append(
                         f"published header {hdr.relative_to(root)} exposes the LVGL "
@@ -1150,6 +1207,62 @@ def audit_public_header_position_guard(
     expect(
         not _is_public_gui_header(dir_root / "usr" / "include" / "gui" / PS2_PUBLIC_HEADER, dir_root),
         "a symlinked include/gui directory was exempted",
+    )
+
+    # 6. FULL-FUNCTION level: an ancestor directory link (usr, usr/include)
+    #    must be reported by audit_published_headers itself.  The helper
+    #    already refuses those paths, but rglob does not descend into a
+    #    linked directory, so only the complete audit can catch them.
+    for link_name, payload in (
+        ("usr", ("include", "gui")),
+        ("usr/include", ("gui",)),
+    ):
+        outside = work_dir / f"outside-{link_name.replace('/', '-')}"
+        outside.mkdir(parents=True, exist_ok=True)
+        for public in sorted(GUI_PUBLIC_HEADERS):
+            dest = outside.joinpath(*payload, public)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(public_bytes)
+        tree = work_dir / f"ancestor-{link_name.replace('/', '-')}-root"
+        if tree.exists():
+            shutil.rmtree(tree)
+        link_path = tree / link_name
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, link_path)
+        full_errors: list[str] = []
+        audit_published_headers(tree, tree, full_errors)
+        expect(
+            any("symbolic link in the published include tree" in e for e in full_errors),
+            f"audit_published_headers did not report the {link_name} link "
+            f"(errors: {full_errors})",
+        )
+
+    # 7. FULL-FUNCTION level: a published header that is a link to a
+    #    directory must be a structured error, not an exception that
+    #    aborts the audit.
+    irregular = work_dir / "irregular-header-root"
+    if irregular.exists():
+        shutil.rmtree(irregular)
+    empty_dir = irregular / "empty"
+    empty_dir.mkdir(parents=True)
+    odd_gui = irregular / "usr" / "include" / "gui"
+    odd_gui.mkdir(parents=True)
+    for public in sorted(GUI_PUBLIC_HEADERS):
+        if public == PS2_PUBLIC_HEADER:
+            continue
+        (odd_gui / public).write_bytes(public_bytes)
+    os.symlink(empty_dir, odd_gui / PS2_PUBLIC_HEADER)
+    irregular_errors: list[str] = []
+    try:
+        audit_published_headers(irregular, irregular, irregular_errors)
+        raised = False
+    except Exception as exc:  # pragma: no cover - the audit must not raise
+        irregular_errors.append(f"raised: {exc}")
+        raised = True
+    expect(not raised, f"audit_published_headers raised on an irregular header: {irregular_errors}")
+    expect(
+        any("not a regular file" in e for e in irregular_errors),
+        f"the irregular published header was not reported: {irregular_errors}",
     )
 
     if ok:
