@@ -41,6 +41,10 @@ GUI_PUBLIC_HEADERS = (
     # backend-free: the caller names a widget by its value handle and a
     # policy by an enum.
     "gui_focus.h",
+    # D02: the pure userspace PS/2 Set 1 decoder.  It is backend-free (no
+    # LVGL types, no device IO), so an independent application can use it
+    # without the GUI platform layer.
+    "gui_input_ps2.h",
 )
 
 # Private / bridge headers of libgui.  They carry the internal state layout,
@@ -59,6 +63,21 @@ GUI_PRIVATE_HEADERS = (
     # be published.
     "gui_widget_private.h",
 )
+
+def _is_public_gui_header(path: Path) -> bool:
+    """True when `path` is a PUBLISHED public GUI header.
+
+    The public headers live at <root>/usr/include/gui/<name>.  The private
+    list is matched by BASENAME, so a public header whose name collides
+    with a private one (gui_input_ps2.h is both: the published decoder
+    API and the internal forwarder) must be recognised by its POSITION
+    and not reported as a leak.
+    """
+    if path.name not in GUI_PUBLIC_HEADERS:
+        return False
+    parts = path.parts
+    return len(parts) >= 3 and parts[-3] == "include" and parts[-2] == "gui"
+
 
 # The public input API (libgui/include/gui/gui_input.h).  These are the
 # symbols an application actually calls; the archive must export them.
@@ -567,11 +586,14 @@ def audit_published_headers(
     # leak).
     for root in roots:
         for p in root.rglob("*"):
-            if p.is_file() and p.name in GUI_PRIVATE_HEADERS:
-                errors.append(
-                    f"private libgui header published in the sysroot generation: "
-                    f"{p.relative_to(root)}"
-                )
+            if not p.is_file() or p.name not in GUI_PRIVATE_HEADERS:
+                continue
+            if _is_public_gui_header(p):
+                continue        # the published decoder API, not the bridge
+            errors.append(
+                f"private libgui header published in the sysroot generation: "
+                f"{p.relative_to(root)}"
+            )
 
 
 # ── The real target link probe ──────────────────────────────────────────
@@ -1142,6 +1164,7 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui_event.h",
         "usr/include/gui/gui_layout.h",
         "usr/include/gui/gui_focus.h",
+        "usr/include/gui/gui_input_ps2.h",
         "usr/share/licenses/libgui/LVGL-LICENCE.txt",
     ]
     for rel_path in required_files:
@@ -1158,7 +1181,10 @@ def audit_sysroot_and_build(
         "usr/include/gui/gui_lvgl_private.h",
         "usr/include/gui/gui_input_private.h",
         "usr/include/gui/gui_platform_private.h",
-        "usr/include/gui/gui_input_ps2.h",
+        # D02: the PS/2 decoder's PUBLIC header (gui/gui_input_ps2.h) IS
+        # published — the private BRIDGE (libgui/internal/gui_input_ps2.h)
+        # is what must never reach the generation, and it is published
+        # under no path.
         "usr/include/gui/gui_tick.h",
         "usr/include/gui/gui_cursor_icon.h",
         "usr/include/gui/gui_widget_private.h",
@@ -1543,6 +1569,7 @@ GUI_STAGED_FILES = (
     "usr/include/gui/gui_event.h",
     "usr/include/gui/gui_layout.h",
     "usr/include/gui/gui_focus.h",
+    "usr/include/gui/gui_input_ps2.h",
     "usr/lib/libgui.a",
     "usr/share/licenses/libgui/LVGL-LICENCE.txt",
 )
@@ -2006,11 +2033,14 @@ def incremental_compare(
                         f"{sorted(GUI_STAGED_FILES)}"
                     )
             for leaked in sorted(staging.rglob("*.h")):
-                if leaked.name in GUI_PRIVATE_HEADERS:
-                    errors.append(
-                        f"incremental: a private header was staged: "
-                        f"{leaked.relative_to(staging)}"
-                    )
+                if leaked.name not in GUI_PRIVATE_HEADERS:
+                    continue
+                if _is_public_gui_header(leaked):
+                    continue        # the published decoder API, not the bridge
+                errors.append(
+                    f"incremental: a private header was staged: "
+                    f"{leaked.relative_to(staging)}"
+                )
 
     elif phase == "publish":
         before_gens = data.get("generations", {})

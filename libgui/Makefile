@@ -120,6 +120,7 @@ install: $(ARCHIVE)
 	   $(LIBGUI_DIR)/include/gui/gui_input.h $(LIBGUI_DIR)/include/gui/gui_theme.h \
 	   $(LIBGUI_DIR)/include/gui/gui_widget.h $(LIBGUI_DIR)/include/gui/gui_event.h \
 	   $(LIBGUI_DIR)/include/gui/gui_layout.h $(LIBGUI_DIR)/include/gui/gui_focus.h \
+	   $(LIBGUI_DIR)/include/gui/gui_input_ps2.h \
 	   $(INSTALL_ROOT)/usr/include/gui/
 	cp $(LVGL_DIR)/LICENCE.txt $(INSTALL_ROOT)/usr/share/licenses/libgui/LVGL-LICENCE.txt
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
