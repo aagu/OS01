@@ -57,18 +57,25 @@ void frame_buffer_init()
     Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_OFFSET;
     tlb_shootdown();
 
-    /* Revoke the early alias.  From here on the framebuffer physical
-     * pages have exactly ONE mapping (the permanent one above), so the
-     * kernel mapping, the /dev/fb user alias and the early boot range
-     * can never access the same page under two different memory types
-     * (IA32_PAT forbids memory-type aliasing).  The permanent mapping
-     * is already installed and Pos.FB_addr already points at it, so no
-     * console write can reach the revoked range. */
-    int revoked = fb_x86_revoke_early_alias(FB_EARLY_PMD_TABLE,
-                                            VIRT_FRAMEBUFFER_EARLY,
-                                            Pos.FB_length);
+    /* Switch from the early alias to the permanent mapping in the ONE
+     * order that is safe: publish first, revoke second.  The helper
+     * does both (and skips the revocation while a writer lease is
+     * outstanding); the host regression calls the same helper, so the
+     * production order is covered by the test.
+     *
+     * The guarantee is NOT "Pos.FB_addr was updated, so nothing can
+     * reach the old range" -- Pos.FB_addr is a separate variable, and
+     * updating it does not change the coordinator's published address,
+     * which is what every writer lease is granted. */
+    int revoked = fb_x86_publish_and_revoke_early_alias(
+                        Pos.FB_addr, Pos.FB_length,
+                        FB_EARLY_PMD_TABLE,
+                        VIRT_FRAMEBUFFER_EARLY, Pos.FB_length);
+
+    /* The log call is safe here: the coordinator already publishes the
+     * permanent mapping, so a console writer that takes a lease now
+     * draws into the permanent mapping, not into the revoked range. */
     if (revoked > 0) {
         log_info("fb: revoked %d early alias entries\n", revoked);
     }
-    fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
 }

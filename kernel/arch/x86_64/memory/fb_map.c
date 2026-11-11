@@ -6,8 +6,10 @@
  */
 
 #include <arch/x86_64/fb_map.h>
-#include <arch/x86_64/msr.h>       /* rdmsr (guest-side cache-type diagnostic) */
+#include <arch/x86_64/msr_safe.h>    /* arch_rdmsr_safe (cache-state diagnostic) */
+#include <arch/x86_64/cpuid.h>       /* cpuid (MTRR capability check) */
 #include <driver/fb_cache.h>
+#include <driver/fb_state.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/vmm.h>
@@ -36,34 +38,144 @@ struct fb_pmd_record {
 static struct fb_pmd_record s_records[FB_MAP_MAX_PAGES];
 
 #ifndef OS01_HOST_TEST
-/* ── Guest-side cache-type diagnostic ────────────────────────────────
+/* ── Guest-side page-table / cache-state diagnostic ───────────────────
  *
- * The page-table bits are only half of the story: the memory type the
- * CPU actually applies to the framebuffer pages also depends on
- * IA32_PAT, CR0.CD/NW and the MTRRs.  A host test can check the bit
- * ENCODING, but not the type the CPU derives from it -- so the guest
- * reports the registers it really uses, once, right after the mapping
- * is installed.  The values are printed so a run's log carries the
- * evidence (leaf entry / PAT / CR0).
+ * SCOPE (read this before quoting the numbers):
  *
- * IA32_PAT = 0x277.  The MTRR registers are NOT read here: OS01 never
- * programs them, and a plain RDMSR of IA32_MTRR_DEF_TYPE raises #GP on
- * this host -- the MTRR state is therefore reported as "not verified".
+ *   This prints the STATE that participates in the effective memory
+ *   type of the framebuffer pages, and it derives the MTRR type that
+ *   covers the BAR0 physical range.  It does NOT claim to prove the
+ *   effective type of every access:
+ *
+ *     * the printed leaf entries are the ones this mapping installed
+ *       (first and last), not a proof about the whole BAR0;
+ *     * the MTRR derivation covers IA32_MTRR_DEF_TYPE plus the VARIABLE
+ *       MTRR ranges (0x200-0x20F).  The fixed ranges (0xFE/0xFF) only
+ *       cover the first 4 MiB of physical memory, which the framebuffer
+ *       BAR0 is far above, so they cannot change the answer;
+ *     * the interaction with nested paging (AMD NPT / Intel EPT) is
+ *       NOT evaluated here.  Under NPT the guest PAT entry and the
+ *       host page-table attributes decide the guest access; the guest
+ *       side can only report its own PAT.
+ *
+ * MSR addresses (IA32_MSR register numbers, 64-bit view):
+ *   IA32_PAT           = 0x277
+ *   IA32_MTRR_CAP      = 0x0FE   (0x1FE is the 32-bit legacy alias)
+ *   IA32_MTRR_DEF_TYPE = 0x2FF   (0x1FF is the 32-bit legacy alias)
+ *   IA32_MTRR_BASE(n)  = 0x200 + 2n
+ *   IA32_MTRR_MASK(n)  = 0x201 + 2n
+ *
+ * The reads go through arch_rdmsr_safe(): a #GP from an MSR the
+ * (virtual) CPU does not implement is recovered as an error instead
+ * of killing the guest, so a missing capability is reported as
+ * "unknown" rather than crashing the boot.
  */
-static void fb_x86_log_effective_cache_type(uint64_t leaf)
+#define FB_IA32_PAT            0x277u
+#define FB_IA32_MTRR_CAP       0x0FEu
+#define FB_IA32_MTRR_DEF_TYPE  0x2FFu
+#define FB_IA32_MTRR_BASE(n)   (0x200u + 2u * (n))
+#define FB_IA32_MTRR_MASK(n)   (0x201u + 2u * (n))
+
+/* MTRR type ranking: smaller rank == more restrictive.  On an overlap
+ * the more restrictive type wins (Intel SDM Vol 3A §11.2.3). */
+static int fb_mtrr_type_rank(uint64_t type)
 {
-    uint64_t pat = rdmsr(0x277);          /* IA32_PAT */
-    uint64_t cr0 = 0;
+    switch (type & 0xFFu) {
+    case 0x00: return 0;  /* UC  */
+    case 0x04: return 1;  /* WT  */
+    case 0x05: return 2;  /* WP  */
+    case 0x01: return 3;  /* WB  */
+    default:   return 4;  /* unknown/reserved: treat as least restrictive */
+    }
+}
+
+static const char *fb_mtrr_type_name(uint64_t type)
+{
+    switch (type & 0xFFu) {
+    case 0x00: return "UC";
+    case 0x01: return "WB";
+    case 0x04: return "WT";
+    case 0x05: return "WP";
+    default:   return "?";
+    }
+}
+
+/* Derive the MTRR type that covers [pa, pa+size).  Returns the type
+ * value and sets *known to false when the state could not be read. */
+static uint64_t fb_x86_mtrr_type_for(uint64_t pa, uint64_t size, bool *known)
+{
+    *known = false;
+
+    uint64_t def = 0;
+    if (arch_rdmsr_safe(FB_IA32_MTRR_DEF_TYPE, &def) != 0) {
+        return 0;
+    }
+
+    uint64_t cap = 0;
+    if (arch_rdmsr_safe(FB_IA32_MTRR_CAP, &cap) != 0) {
+        /* No MTRR capability register: the default type is all we have. */
+        *known = true;
+        return def;
+    }
+
+    uint64_t vcnt = cap & 0xFFu;
+    uint64_t best = def;
+    int best_rank = fb_mtrr_type_rank(def);
+
+    for (uint64_t i = 0; i < vcnt && i < 16u; i++) {
+        uint64_t base = 0, mask = 0;
+        if (arch_rdmsr_safe(FB_IA32_MTRR_BASE(i), &base) != 0) continue;
+        if (arch_rdmsr_safe(FB_IA32_MTRR_MASK(i), &mask) != 0) continue;
+
+        uint64_t base_addr = base & ~0xFFFu;     /* reserved low bits */
+        uint64_t mask_addr = mask & ~0xFFFu;
+
+        /* The range covers [base_addr, base_addr + ~mask_addr]. */
+        uint64_t range_end = base_addr + (~mask_addr & 0x0000FFFFFFFFFFFFULL);
+        if (pa + size <= base_addr || pa > range_end) {
+            continue;   /* does not cover our range */
+        }
+
+        int rank = fb_mtrr_type_rank(base);
+        if (rank < best_rank) {
+            best_rank = rank;
+            best = base & 0xFFu;
+        }
+    }
+
+    *known = true;
+    return best;
+}
+
+static void fb_x86_log_page_table_state(uint64_t first_leaf, uint64_t last_leaf,
+                                        uint64_t pages, uint64_t pa)
+{
+    uint64_t pat = 0, cap = 0, def = 0, cr0 = 0;
+    int pat_ok  = (arch_rdmsr_safe(FB_IA32_PAT, &pat) == 0);
+    int cap_ok  = (arch_rdmsr_safe(FB_IA32_MTRR_CAP, &cap) == 0);
+    int def_ok  = (arch_rdmsr_safe(FB_IA32_MTRR_DEF_TYPE, &def) == 0);
+
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    cpuid(1, &eax, &ebx, &ecx, &edx);
+    int mtrr_capable = (int)((edx >> 12) & 1u);
 
     __asm__ __volatile__("movq %%cr0, %0" : "=r"(cr0));
 
-    log_info("fb: pmd_leaf=0x%lx pat=0x%lx cr0=0x%lx cd=%d nw=%d\n",
-             leaf, pat, cr0,
-             (int)((cr0 >> 30) & 1), (int)((cr0 >> 29) & 1));
+    bool mtrr_known = false;
+    uint64_t mtrr_type = fb_x86_mtrr_type_for(pa, 0, &mtrr_known);
+
+    log_info("fb: leaf_first=0x%lx leaf_last=0x%lx pages=%lu pa=0x%lx\n",
+             first_leaf, last_leaf, pages, pa);
+    log_info("fb: pat=0x%lx(%d) mtrr_capable=%d mtrr_cap=0x%lx(%d) mtrr_def=0x%lx(%d) "
+             "mtrr_type_for_pa=%s(%d) cr0=0x%lx cd=%d nw=%d\n",
+             pat, pat_ok, mtrr_capable, cap, cap_ok, def, def_ok,
+             fb_mtrr_type_name(mtrr_type), mtrr_known,
+             cr0, (int)((cr0 >> 30) & 1), (int)((cr0 >> 29) & 1));
 }
 #endif
 
-int fb_x86_map_checked(uint64_t phys, uint64_t size, uint32_t **out_addr)
+int fb_x86_map_checked(uint64_t phys, uint64_t size, fb_cache_policy_t policy,
+                       uint32_t **out_addr)
 {
     if (!out_addr) {
         return -EINVAL;
@@ -113,12 +225,17 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, uint32_t **out_addr)
      * -- x86 explicitly forbids that (IA32_PAT: avoid memory-type
      * aliasing).
      *
-     * The policy is sampled ONCE here, so the install and the
-     * verification below always agree on the expected entry value.
+     * The candidate policy is an ARGUMENT, not a global read: the
+     * mapping and the policy are published as ONE transaction.  The
+     * global policy is committed only after every leaf entry is
+     * installed AND verified; on any failure this call leaves both the
+     * page table and the global policy exactly as it found them, so a
+     * failed probe can never leave the /dev/fb alias with a memory type
+     * that contradicts the kernel mapping.
+     *
      * The host regression asserts the resulting page-table bits against
      * its own hard-coded expectation; it does not reuse this
      * expression. */
-    fb_cache_policy_t policy = fb_cache_policy_get();
     uint64_t pmd_flags = fb_x86_kernel_pmd_flags(policy);
 
     struct fb_pmd_record *records = s_records;
@@ -157,8 +274,12 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, uint32_t **out_addr)
         records[i].written = true;
 
 #ifdef OS01_HOST_TEST
-        if (g_mock_corrupt_pmd_phys) {
-            pmd[pmd_idx] ^= 0x1000ULL;
+        if (g_mock_corrupt_pmd_entry) {
+            /* Corrupt BOTH the PAT bit (bit 12) and the lowest physical
+             * address bit of a 2MiB leaf (bit 21).  Bit 12 alone is the
+             * 2MiB leaf's PAT bit -- NOT part of the physical address --
+             * so a PA-only corruption has to flip bit 21 or higher. */
+            pmd[pmd_idx] ^= (0x1000ULL | 0x200000ULL);
         }
 #endif
     }
@@ -175,12 +296,18 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, uint32_t **out_addr)
         }
     }
 
-    /* All entries verified: flush TLB / broadcast shootdown */
+    /* All entries verified: the mapping is complete.  Publish the
+     * policy TOGETHER with the mapping (transaction commit), then flush
+     * the TLB / broadcast the shootdown.  From this point on the global
+     * policy describes exactly the attribute the kernel mapping uses. */
+    fb_cache_policy_set(policy);
     tlb_shootdown();
     *out_addr = (uint32_t *)va_base;
 
 #ifndef OS01_HOST_TEST
-    fb_x86_log_effective_cache_type(records[0].pmd[records[0].pmd_idx]);
+    fb_x86_log_page_table_state(records[0].pmd[records[0].pmd_idx],
+                                 records[num_pages - 1].pmd[records[num_pages - 1].pmd_idx],
+                                 (uint64_t)num_pages, phys);
 #endif
     return 0;
 
@@ -238,4 +365,31 @@ int fb_x86_revoke_early_alias(uint64_t *pmd_table, uint64_t va_base, uint64_t si
         flush_tlb();
     }
     return revoked;
+}
+
+/* ── Ordered switch from the early alias to the permanent mapping ────
+ *
+ * See the declaration in <arch/x86_64/fb_map.h> for the contract: the
+ * permanent mapping is published to the coordinator FIRST, the early
+ * alias is revoked SECOND, and the revocation is skipped while a writer
+ * lease is outstanding.
+ */
+int fb_x86_publish_and_revoke_early_alias(uint32_t *perm_addr, uint64_t perm_size,
+                                           uint64_t *early_pmd, uint64_t early_va,
+                                           uint64_t early_size)
+{
+    if (!perm_addr || !early_pmd || early_size == 0) {
+        return -EINVAL;
+    }
+
+    /* 1. Publish the permanent mapping.  From here on every writer lease
+     *    is granted the permanent address. */
+    fb_publish_initial_mapping(perm_addr, perm_size);
+
+    /* 2. Revoke the early alias only when no lease can still hold it. */
+    if (fb_active_writers_count() != 0) {
+        return 0;
+    }
+
+    return fb_x86_revoke_early_alias(early_pmd, early_va, early_size);
 }

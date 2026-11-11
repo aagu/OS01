@@ -393,12 +393,24 @@ int bga_probe(struct pci_device *pdev, const struct pci_device_id *id)
      *
      * The assumption "BAR0 is RAM" belongs to THIS backend, not to the
      * generic gfx layer: any other framebuffer backend (and the generic
-     * GOP fallback) keeps the conservative uncacheable default. */
-    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
-
+     * GOP fallback) keeps the conservative uncacheable default.
+     *
+     * TRANSACTION: the policy is handed to the mapper as the CANDIDATE
+     * for THIS mapping.  fb_x86_map_checked() publishes the global
+     * policy only after the leaf entries are installed and verified, and
+     * restores the page table while leaving the global policy untouched
+     * on failure.  So after a failed probe the kernel mapping is still
+     * the fallback (uncacheable) one AND the policy still says
+     * uncacheable -- the /dev/fb alias cannot disagree with the kernel
+     * mapping.  (Publishing the policy BEFORE the mapping would be the
+     * bug: a failed probe would leave WB policy over a UC mapping.) */
     uint32_t *mapped_addr = NULL;
-    int map_rc = fb_x86_map_checked(bar_base, vram_capacity, &mapped_addr);
+    int map_rc = fb_x86_map_checked(bar_base, vram_capacity,
+                                     FB_CACHE_POLICY_WRITEBACK, &mapped_addr);
     if (map_rc != 0) {
+        /* Mapping failed: the page table was restored and the global
+         * policy was not touched, so the fallback state is consistent
+         * (uncacheable mapping + uncacheable policy). */
         bga_outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_ID);
         bga_outw(VBE_DISPI_IOPORT_DATA, orig_id);
         bga_outw(VBE_DISPI_IOPORT_INDEX, orig_index);
@@ -421,6 +433,13 @@ int bga_probe(struct pci_device *pdev, const struct pci_device_id *id)
     bga_outw(VBE_DISPI_IOPORT_INDEX, orig_index);
 
     if (inst_rc != 0) {
+        /* The backend install failed AFTER the mapping was installed.
+         * The mapping is write-back and the published policy is
+         * write-back too -- the mapper commits both together -- so the
+         * two still agree and no alias is created.  Rolling the policy
+         * back to uncacheable here would be the bug: the kernel
+         * mapping would stay write-back while the /dev/fb alias became
+         * uncacheable. */
         fb_transition_end();
         return inst_rc;
     }
