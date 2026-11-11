@@ -72,3 +72,11 @@ Doom 在独占输入租约下直接读取 PS/2 键盘：
 - 发布测试控制工具 `/bin/doom_testctl`，支持 `ebusy`（预占图形测试冲突退出）、`sigkill <child_pid>`（外部信号强杀安全回收验证）以及 `mode-switch`（运行时切换屏幕分辨率测试所有权校验退出）；
 - `/bin/doom` 包含诊断上报桩，格式化输出 `[doom-diag] v=1 ...` 到串口设备 `/dev/serial`；
 - 普通生产构建（未设置 `DOOM_TEST=1`）不包含 `/bin/doom_testctl`，`/bin/doom` 中亦不包含任何诊断上报代码。
+
+## 引擎许可与来源材料（D06）
+
+只要镜像中发布了 `/bin/doom`（无论是否打包 IWAD 数据），构建系统均会自动生成并安装引擎许可与开源补丁材料至以下路径：
+- `/usr/share/licenses/doom/LICENSE`：`doomgeneric` 上游开源许可证
+- `/usr/share/doc/doom/SOURCE.txt`：上游源码仓库 URL、固化 Commit 哈希及架构说明
+- `/usr/share/doc/doom/PATCHES.txt`：OS01 适配套件全量补丁应用顺序、功能说明与 SHA256 校验列表
+- `/usr/share/doc/doom/patches/*`：全量补丁文件原文，供离线合规审核与复现验证

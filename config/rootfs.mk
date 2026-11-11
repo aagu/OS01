@@ -18,3 +18,15 @@ ROOTFS_FILES += /usr/share/games/doom/iwad.wad=$(DOOM_ASSET_DIR)/iwad.wad:0644 \
                 /usr/share/games/doom/IWAD-SOURCE.txt=$(DOOM_ASSET_DIR)/IWAD-SOURCE.txt:0644
 endif
 
+# D06: Doom engine provenance & license notice (installed whenever /bin/doom is published)
+ifneq ($(filter doom,$(ROOTFS_USER_PROGRAMS)),)
+DOOM_NOTICE_DIR := $(BUILD_DIR)/doom-notice
+DOOM_PATCHES_MANIFEST ?= $(OS01_ROOT)/thirdpart/doomgeneric.manifest
+-include $(DOOM_PATCHES_MANIFEST)
+ROOTFS_FILES += /usr/share/licenses/doom/LICENSE=$(DOOM_NOTICE_DIR)/LICENSE:0644 \
+                /usr/share/doc/doom/SOURCE.txt=$(DOOM_NOTICE_DIR)/SOURCE.txt:0644 \
+                /usr/share/doc/doom/PATCHES.txt=$(DOOM_NOTICE_DIR)/PATCHES.txt:0644 \
+                $(foreach patch,$(DOOMGENERIC_PATCHES),/usr/share/doc/doom/patches/$(patch)=$(DOOM_NOTICE_DIR)/patches/$(patch):0644)
+endif
+
+

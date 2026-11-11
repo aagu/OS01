@@ -79,6 +79,26 @@ endif
 .PHONY: doom-assets
 doom-assets: $(DOOM_ASSET_STAMP)
 
+# ── D06: Doom engine notice artifact rule ─────────────────────
+DOOM_NOTICE_DIR   := $(BUILD_DIR)/doom-notice
+DOOM_NOTICE_STAMP := $(DOOM_NOTICE_DIR)/.doom_notice.stamp
+DOOM_ENGINE_LICENSE := $(OS01_ROOT)/thirdpart/doomgeneric/LICENSE
+DOOM_ENGINE_MANIFEST := $(OS01_ROOT)/thirdpart/doomgeneric.manifest
+DOOM_ENGINE_PATCH_DIR := $(OS01_ROOT)/thirdpart/patches/doomgeneric
+-include $(DOOM_ENGINE_MANIFEST)
+DOOM_ENGINE_PATCH_FILES := $(addprefix $(DOOM_ENGINE_PATCH_DIR)/,$(DOOMGENERIC_PATCHES))
+
+$(DOOM_NOTICE_STAMP): $(DOOM_ENGINE_LICENSE) $(DOOM_ENGINE_MANIFEST) $(DOOM_ENGINE_PATCH_FILES) $(OS01_ROOT)/scripts/prepare_doom_engine_notice.py
+	@mkdir -p $(dir $@)
+	python3 $(OS01_ROOT)/scripts/prepare_doom_engine_notice.py \
+		--manifest $(DOOM_ENGINE_MANIFEST) \
+		--license $(DOOM_ENGINE_LICENSE) \
+		--patch-dir $(DOOM_ENGINE_PATCH_DIR) \
+		--output-dir $(DOOM_NOTICE_DIR)
+
+.PHONY: doom-notice
+doom-notice: $(DOOM_NOTICE_STAMP)
+
 # Dynamic discovery must invalidate staging on removals as well as additions.
 # Preserve mtime when the expanded input list is unchanged.
 ROOTFS_INPUTS_STAMP := $(IMAGE_DIR)/rootfs.inputs
@@ -90,7 +110,8 @@ $(ROOTFS_INPUTS_STAMP): FORCE
 ROOTFS_MANIFEST_DEPS := $(ROOTFS_INPUTS_STAMP) $(OS01_ROOT)/config/rootfs.mk \
 		$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf \
 		$(KERNEL_ARTIFACT) $(INITTAB_FILE) \
-		$(if $(filter 4,$(DOOM_ASSET_COUNT)),$(DOOM_ASSET_STAMP))
+		$(if $(filter 4,$(DOOM_ASSET_COUNT)),$(DOOM_ASSET_STAMP)) \
+		$(if $(filter doom,$(ROOTFS_USER_PROGRAMS)),$(DOOM_NOTICE_STAMP))
 
 $(ROOTFS_MANIFEST): $(ROOTFS_MANIFEST_DEPS)
 	@rm -rf $(ROOTFS_STAGING)
