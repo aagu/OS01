@@ -263,7 +263,7 @@ aarch64_el0_enter:
     msr     sp_el0, x1
     mov     x4, #AARCH64_EL0_PROBE_PSTATE
     cbz     w3, 1f
-    bic     x4, x4, #0x80               /* enable IRQ only for this EL0 run */
+    bic     x4, x4, #AARCH64_EL0_PROBE_IRQ_MASK
 1:  msr     spsr_el1, x4
     mov     x0, x2                      /* sole input to the user code */
     .irp reg,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30

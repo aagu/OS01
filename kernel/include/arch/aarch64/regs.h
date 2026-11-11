@@ -67,6 +67,7 @@ _Static_assert(sizeof(pt_regs_t) == 34 * 8,
 #define PT_REGS_SIZE       (34 * 8)
 
 #define AARCH64_EL0_PROBE_PSTATE 0x3c0 /* DAIF masked, EL0t */
+#define AARCH64_EL0_PROBE_IRQ_MASK 0x80
 
 /* ID_AA64ISAR0_EL1.RNDR 字段（bits[63:60]）：
  *   0b0000 = 不支持 RNDR/RNDRRS

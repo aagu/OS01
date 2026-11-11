@@ -24,6 +24,10 @@ _start:
     b.eq 7f
     cmp x12, #5
     b.eq 7f
+    cmp x12, #6
+    b.eq 7f
+    cmp x12, #7
+    b.eq 7f
     adrp x9, _start
     ldr x0, [x11]
     str x0, [sp, #-16]!
@@ -102,9 +106,17 @@ _start:
     mov x15, sp
     and x15, x15, #-4096                /* same slot despite different SPs */
     str x0, [x15]
-    cmp x0, #4
+    cmp x0, #6
+    cset x16, hs
+    tst x0, #1
     cset x14, eq
+    cbnz x16, .Lirq_pair_poll
     svc #5
+    b .Lpair_check
+.Lirq_pair_poll:
+    svc #6                              /* status only; no SVC handoff */
+    cbz x1, .Lirq_pair_poll
+.Lpair_check:
     cset x10, eq
     cmp x10, x14
     b.ne 2b
@@ -125,7 +137,12 @@ _start:
     b.ne 2b
     cmp x11, x30
     b.ne 2b
-    b 1b
+    cmp x0, #6
+    b.lo 1b
+    svc #1                              /* report that this context resumed */
+.Lreported:
+    svc #6                              /* A waits for the last timer IRQ */
+    b .Lreported
 
 .data
 .balign 8

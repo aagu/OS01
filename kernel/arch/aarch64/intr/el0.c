@@ -18,6 +18,7 @@ struct el0_peer {
 
 /* Only live on the BSP before scheduler handoff. */
 static aarch64_el0_handler active_handler;
+static aarch64_el0_timer_handler active_timer;
 static void *active_arg;
 static uint64_t *active_root;
 static struct el0_peer *parked;
@@ -48,7 +49,8 @@ static bool probe_stage_valid(bool irq)
 }
 
 static int run(const struct aarch64_el0_start *start, struct el0_peer *peer,
-               bool irq, aarch64_el0_handler handler, void *arg)
+               bool irq, aarch64_el0_handler handler,
+               aarch64_el0_timer_handler timer, void *arg)
 {
     uintptr_t kernel_sp;
     __asm__ volatile("mov %0, sp" : "=r"(kernel_sp));
@@ -80,6 +82,7 @@ static int run(const struct aarch64_el0_start *start, struct el0_peer *peer,
 
     active_arg = arg;
     active_handler = handler;
+    active_timer = timer;
     parked = peer;
     switch_ttbr0(root_pa);
     active_root = start->root;
@@ -91,6 +94,7 @@ static int run(const struct aarch64_el0_start *start, struct el0_peer *peer,
         aarch64_pt_root_unpublish_local(peer_pa);
     aarch64_pt_root_unpublish_local(root_pa);
     active_handler = NULL;
+    active_timer = NULL;
     active_arg = NULL;
     __asm__ volatile("msr sp_el0, %0\n\tmsr daif, %1"
                      :: "r"(saved_sp), "r"(daif) : "memory");
@@ -105,11 +109,12 @@ int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
                    bool irq, aarch64_el0_handler handler, void *arg)
 {
     const struct aarch64_el0_start start = { root, pc, sp, x0 };
-    return run(&start, NULL, irq, handler, arg);
+    return run(&start, NULL, irq, handler, NULL, arg);
 }
 
 int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
-                        aarch64_el0_handler handler, void *arg)
+                        aarch64_el0_handler handler,
+                        aarch64_el0_timer_handler timer, void *arg)
 {
     struct el0_peer peer = {
         .root = starts[1].root,
@@ -120,7 +125,9 @@ int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
             .spsr_el1 = AARCH64_EL0_PROBE_PSTATE,
         },
     };
-    return run(&starts[0], &peer, false, handler, arg);
+    if (timer)
+        peer.regs.spsr_el1 &= ~AARCH64_EL0_PROBE_IRQ_MASK;
+    return run(&starts[0], &peer, timer != NULL, handler, timer, arg);
 }
 
 bool aarch64_el0_swap(pt_regs_t *regs)
@@ -136,6 +143,12 @@ bool aarch64_el0_swap(pt_regs_t *regs)
     active_root = next_root;
     *regs = next;
     return true;
+}
+
+void aarch64_el0_timer_return(pt_regs_t *regs)
+{
+    if (active_timer)
+        active_timer(regs, active_arg);
 }
 
 /* Called only by the lower-AArch64 synchronous vector. */

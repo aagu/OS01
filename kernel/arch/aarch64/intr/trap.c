@@ -35,6 +35,8 @@
 #include <arch/intr.h>
 #include <arch/aarch64/sync_fault.h>
 #if AARCH64_EL0_TEST
+#include <arch/aarch64/el0.h>
+#include <arch/aarch64/timer.h>
 #include <arch/aarch64/uaccess.h>
 #endif
 #include <arch/aarch64/intr_decode.h>
@@ -68,7 +70,12 @@ void aarch64_el0_irq(pt_regs_t *regs)
     aarch64_intr_decode_irq(&ev, regs);
     /* Report the actual entry; the backend cross-checks the saved mode. */
     ev.native_vector = AARCH64_EL0_IRQ_SLOT;
+    uint64_t ticks = aarch64_el0_timer_ticks();
     arch_intr_dispatch(&ev, regs);
+    /* Only CNTP advances this counter, on the same IRQ-masked BSP.
+     * Wait until dispatch has issued EOI before replacing the frame. */
+    if (aarch64_el0_timer_ticks() != ticks)
+        aarch64_el0_timer_return(regs);
 }
 #endif
 

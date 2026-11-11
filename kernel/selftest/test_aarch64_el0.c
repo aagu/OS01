@@ -280,6 +280,10 @@ int test_aarch64_el0(void)
 struct pair_run {
     struct space spaces[2];
     unsigned step;
+    unsigned switches;
+    bool ready;
+    bool timed_out;
+    uint64_t start;
     uint64_t esr;
 };
 
@@ -306,7 +310,48 @@ static bool handle_pair_sync(pt_regs_t *regs, uint64_t esr, uint64_t far,
     return pair->step < 4 && aarch64_el0_swap(regs);
 }
 
-static int test_switch_on_high_stack(void)
+static bool handle_preempt_sync(pt_regs_t *regs, uint64_t esr, uint64_t far,
+                                void *arg)
+{
+    (void)far;
+    struct pair_run *pair = arg;
+    unsigned index = pair->switches % 2;
+    bool reported = pair->step > index;
+    pair->esr = esr;
+    if (esr >> 26 != 0x15 || regs->x0 != 6 + index ||
+        aarch64_el0_active_root() != pair->spaces[index].elf.root)
+        return false;
+    if ((esr & 0x1ffffff) == 6 &&
+        regs->sp_el0 == pair_stack(index) - (reported ? 0 : 16)) {
+        if (arch_cycle_counter() - pair->start >= cntfrq_el0() / 2) {
+            pair->timed_out = true;
+            return false;
+        }
+        pair->ready = true;
+        regs->x1 = !reported && pair->switches >= 2;
+        return true;
+    }
+    if ((esr & 0x1ffffff) == 1 && regs->sp_el0 == pair_stack(index) &&
+        pair->switches == 2 + index && pair->step == index) {
+        pair->step++;
+        return index == 0; /* A waits for the final timer handoff. */
+    }
+    return false;
+}
+
+static void handle_preempt_tick(pt_regs_t *regs, void *arg)
+{
+    struct pair_run *pair = arg;
+    /* Do not leave until the current context has set up its canaries.
+     * At the third handoff A must already have reported its checks. */
+    if (pair->ready && pair->switches < 3 &&
+        (pair->switches != 2 || pair->step == 1) && aarch64_el0_swap(regs)) {
+        pair->switches++;
+        pair->ready = false;
+    }
+}
+
+static int test_pair(bool preempt)
 {
     uint64_t baseline = pmm_probe_4k_allocated_count();
     struct pair_run pair = {0};
@@ -316,11 +361,18 @@ static int test_switch_on_high_stack(void)
     __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
                      : "=r"(before0), "=r"(before1));
     if (setup(a, 0xa1) && setup(b, 0xb1)) {
+        unsigned action = preempt ? 6 : 4;
         const struct aarch64_el0_start starts[] = {
-            { a->elf.root, a->elf.entry, pair_stack(0), 4 },
-            { b->elf.root, b->elf.entry, pair_stack(1), 5 },
+            { a->elf.root, a->elf.entry, pair_stack(0), action },
+            { b->elf.root, b->elf.entry, pair_stack(1), action + 1 },
         };
-        rc = aarch64_el0_run_pair(starts, handle_pair_sync, &pair);
+        if (preempt) {
+            pair.start = arch_cycle_counter();
+            rc = aarch64_el0_run_pair(starts, handle_preempt_sync,
+                                     handle_preempt_tick, &pair);
+        } else {
+            rc = aarch64_el0_run_pair(starts, handle_pair_sync, NULL, &pair);
+        }
     }
     __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
                      : "=r"(after0), "=r"(after1));
@@ -328,17 +380,38 @@ static int test_switch_on_high_stack(void)
     teardown(b);
     bool restored = before0 == after0 && before1 == after1;
     bool freed = baseline == pmm_probe_4k_allocated_count();
-    if (rc || pair.step != 4 || !restored || !freed) {
-        log_err("M4.5: run=%d step=%u esr=%lx TTBR restored=%u reclaim=%u\n",
-                rc, pair.step, pair.esr, restored, freed);
+    bool complete = preempt ? pair.switches == 3 && pair.step == 2 : pair.step == 4;
+    if (rc || !complete || !restored || !freed) {
+        log_err("M4.%u: run=%d step=%u switches=%u timeout=%u esr=%lx restored=%u reclaim=%u\n",
+                preempt ? 6u : 5u, rc, pair.step, pair.switches, pair.timed_out,
+                pair.esr, restored, freed);
         return -1;
     }
     return 0;
 }
 
+static int test_switch_on_high_stack(void)
+{
+    return test_pair(false);
+}
+
 int test_aarch64_el0_switch(void)
 {
     return aarch64_el0_test_high_stack(test_switch_on_high_stack);
+}
+
+static int test_preempt_on_high_stack(void)
+{
+    return test_pair(true);
+}
+
+int test_aarch64_el0_preempt(void)
+{
+    if (dtb_cpu_count() != 1) {
+        log_err("M4.6: use SMP=1 for the EL0 preemption probe\n");
+        return -1;
+    }
+    return aarch64_el0_test_high_stack(test_preempt_on_high_stack);
 }
 
 static int test_irq_on_high_stack(void)

@@ -25,16 +25,25 @@ struct aarch64_el0_start {
     uint64_t pc, sp, x0;
 };
 
-/* Run starts[0], with starts[1] parked at its entry point. Both roots
- * must be distinct. This is BSP-only before SMP, with IRQs masked. */
-int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
-                        aarch64_el0_handler handler, void *arg);
+/* Runs with IRQs masked on the live EL0 frame after the timer's GIC EOI.
+ * Like the sync callback, it must not block, schedule, or enable IRQs. */
+typedef void (*aarch64_el0_timer_handler)(pt_regs_t *regs, void *arg);
 
-/* Only from the pair's SVC callback, with its live frame. Return this
- * result from the callback to resume the peer or abort the run. */
+/* Run starts[0], with starts[1] parked at its entry point. Both roots
+ * must be distinct. A NULL timer callback selects the pre-SMP run with
+ * IRQs masked; a callback selects the single-BSP timer stage. */
+int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
+                        aarch64_el0_handler handler,
+                        aarch64_el0_timer_handler timer, void *arg);
+
+/* Only from the pair's SVC or timer callback, with its live frame.
+ * A successful swap arranges for ERET to resume the peer. */
 bool aarch64_el0_swap(pt_regs_t *regs);
 
-/* Private root while the probe is executing (including its SVC handler). */
+/* Lower-EL IRQ adapter only, after dispatching a real CNTP tick. */
+void aarch64_el0_timer_return(pt_regs_t *regs);
+
+/* Private root while the probe or one of its handlers is executing. */
 uint64_t *aarch64_el0_active_root(void);
 
 #endif

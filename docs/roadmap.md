@@ -49,7 +49,7 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 
 | 阶段 | 任务与完成条件 | 前置 |
 |------|----------------|------|
-| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；将跨页权限检查和 uaccess 故障恢复接入产品用户态。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；M4.1 已在隔离自测镜像验证私有 TTBR0、EL0/SVC 往返、权限故障和回收；M4.2 复用该镜像验证 SVC 跨页复制、`-EFAULT` 和 EL1 复制故障恢复；M4.3 已从内存中的静态 AArch64 ELF 装载并执行同一个探针；M4.4 验证了私有 TTBR0 下真实定时器 IRQ 返回 EL0；M4.5 在自测镜像中验证了两个私有 EL0 上下文通过 SVC 协作切换。产品路径仍待接入用户地址空间生命周期、异常分派与 uaccess。以隔离、权限、COW、回收和用户态 QEMU 用例验收。 | M3 ✅；Slab ✅、EL1 调度/上下文门面 ✅、EL0 异常路径 |
+| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；将跨页权限检查和 uaccess 故障恢复接入产品用户态。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；M4.1 已在隔离自测镜像验证私有 TTBR0、EL0/SVC 往返、权限故障和回收；M4.2 复用该镜像验证 SVC 跨页复制、`-EFAULT` 和 EL1 复制故障恢复；M4.3 已从内存中的静态 AArch64 ELF 装载并执行同一个探针；M4.4 验证了私有 TTBR0 下真实定时器 IRQ 返回 EL0；M4.5 在自测镜像中验证了两个私有 EL0 上下文通过 SVC 协作切换；M4.6 验证了两个上下文由真实 CNTP IRQ 切换。产品路径仍待接入用户地址空间生命周期、异常分派与 uaccess。以隔离、权限、COW、回收和用户态 QEMU 用例验收。 | M3 ✅；Slab ✅、EL1 调度/上下文门面 ✅、EL0 异常路径 |
 
 #### 架构统一推进链（迈向单一 kernel_main）
 

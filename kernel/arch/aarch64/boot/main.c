@@ -678,7 +678,9 @@ void arch_post_smp_selftest(void)
 {
 #if AARCH64_EL0_TEST
     extern int test_aarch64_el0_irq(void);
+    extern int test_aarch64_el0_preempt(void);
     selftest_record_late("aarch64_el0_irq", test_aarch64_el0_irq());
+    selftest_record_late("aarch64_el0_preempt", test_aarch64_el0_preempt());
 #endif
 #if OS01_SELFTEST
     {
