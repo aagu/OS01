@@ -685,7 +685,8 @@ $(TEST_BLD)/test_aarch64_backend_4k.o: $(TEST_CASES)/test_aarch64_backend_4k.c \
 $(TEST_BLD)/test_aarch64_backend_4k.elf: \
 		$(TEST_BLD)/test_aarch64_backend_4k.o \
 		$(TEST_BLD)/aarch64_pt_production.o \
-		$(TEST_BLD)/vmm_backend_production.o
+		$(TEST_BLD)/vmm_backend_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test_aarch64_backend_4k
@@ -704,7 +705,8 @@ $(TEST_BLD)/test_vmm_replace_protocol.o: $(TEST_CASES)/test_vmm_replace_protocol
 $(TEST_BLD)/test_vmm_replace_protocol.elf: \
 		$(TEST_BLD)/test_vmm_replace_protocol.o \
 		$(TEST_BLD)/aarch64_pt_production.o \
-		$(TEST_BLD)/vmm_backend_production.o
+		$(TEST_BLD)/vmm_backend_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test_vmm_replace_protocol
@@ -723,7 +725,8 @@ $(TEST_BLD)/test_vmm_prot_none.o: $(TEST_CASES)/test_vmm_prot_none.c \
 $(TEST_BLD)/test_vmm_prot_none.elf: \
 		$(TEST_BLD)/test_vmm_prot_none.o \
 		$(TEST_BLD)/aarch64_pt_production.o \
-		$(TEST_BLD)/vmm_backend_production.o
+		$(TEST_BLD)/vmm_backend_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test_vmm_prot_none
@@ -777,6 +780,10 @@ $(TEST_BLD)/test_foundational_primitives.elf: $(TEST_BLD)/test_foundational_prim
 		$(TEST_BLD)/vmm_gate_production.o
 	$(HOST_CC) -o $@ $^
 
+# Also linked into the four arch_vmm_* backend ELFs (aarch64 M4 plan
+# Task 2): supplies the user-mm ownership/runtime/busy and
+# pmm_4k_page_allocated() dependencies the backend's user-root branch
+# gained (production user_mm.c is aarch64-kernel-only).
 $(TEST_BLD)/vmm_gate_test_stubs.o: $(TEST_MOCK)/vmm_gate_test_stubs.c \
 		$(TEST_MOCK)/vmm_gate_test_runtime.h
 	@mkdir -p $(TEST_BLD)
@@ -821,7 +828,8 @@ $(TEST_BLD)/test_aarch64_arch_vmm_init.o: \
 $(TEST_BLD)/test_aarch64_arch_vmm_init.elf: \
 		$(TEST_BLD)/test_aarch64_arch_vmm_init.o \
 		$(TEST_BLD)/aarch64_pt_production.o \
-		$(TEST_BLD)/vmm_backend_production.o
+		$(TEST_BLD)/vmm_backend_production.o \
+		$(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test_aarch64_arch_vmm_init

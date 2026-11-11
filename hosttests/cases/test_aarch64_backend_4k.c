@@ -683,6 +683,122 @@ TEST_FUNC(test_backend_unmap_2m_empty_slot_linux_enoent)
     assert_eq(-ENOENT, rc);
 }
 
+/* ── M4 user-root branch (managed root via stub ownership) ─────────
+ *
+ * The backend's user-root path (aarch64_user_mm_owns_root) is driven
+ * with a stub-designated managed root: the four 4 KiB entries must
+ * accept it in place of kernel_map and enforce the user VA window,
+ * the allocated-PA check and the update-PA-match contract.  The full
+ * permission/busy/SVC matrix lives in the QEMU acceptance case
+ * (test_aarch64_user_mm, plan Task 3); here we pin the host-linkable
+ * core: empty-slot update → -ENOENT, different-PA update → -EINVAL
+ * (leaf preserved), and the query still returning the original PA
+ * and permissions. */
+
+/* Stub-side helpers (defined in mock/vmm_gate_test_stubs.c). */
+void vmm_test_user_mm_set_owned_root(uint64_t *root);
+void vmm_test_pmm_reset(void);
+void vmm_test_pmm_mark(uint64_t pa);
+void vmm_test_pmm_unmark(uint64_t pa);
+
+/* User VAs live in the production window [AARCH64_USER_MIN,
+ * AARCH64_USER_LIMIT); the pt walk only indexes descriptors, so the
+ * value needs no host mapping. */
+#define TEST_USER_VA UINT64_C(0x00400000)
+
+static uint64_t *fresh_managed_user_root(void)
+{
+    /* The pool reuses slot 0 across tests, so a fresh root would land
+     * on the same VA a previous test left in kernel_map and the
+     * preflight would take the kernel branch.  A user-root test must
+     * run with kernel_map disjoint: park it at NULL (every kernel_map
+     * test sets its own root at start, and main() resets it). */
+    kernel_map = NULL;
+    uint64_t pa = alloc_4k_page();
+    if (pa == 0) return NULL;
+    uint64_t *va = (uint64_t *)(uintptr_t)(pa + ARCH_PAGE_OFFSET);
+    memset(va, 0, MOCK_PA_STRIDE);
+    vmm_test_user_mm_set_owned_root(va);
+    return va;
+}
+
+TEST_FUNC(test_backend_user_root_update_and_query_contract)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0x5000ULL;
+    vmm_test_pmm_mark(pa);
+
+    /* Map user RW/NX at a user VA through the managed root. */
+    int rc = arch_vmm_map_4k_new(root, pa, TEST_USER_VA,
+                                 VM_USER_RW | VM_NO_EXEC);
+    assert_eq(0, rc);
+
+    /* Query returns the original PA and semantic permissions. */
+    uint64_t qpa = 0;
+    uint32_t qvm = 0;
+    rc = arch_vmm_query_4k(root, TEST_USER_VA, &qpa, &qvm);
+    assert_eq(0, rc);
+    assert_eq(pa, qpa);
+    assert_true((qvm & VM_PRESENT) != 0);
+    assert_true((qvm & VM_USER)    != 0);
+    assert_true((qvm & VM_WRITE)   != 0);
+    assert_true((qvm & VM_NO_EXEC) != 0);
+
+    /* Update with a DIFFERENT PA → -EINVAL, original leaf preserved. */
+    uint64_t other_pa = 0x7000ULL;
+    vmm_test_pmm_mark(other_pa);
+    rc = arch_vmm_update_4k(root, other_pa, TEST_USER_VA,
+                            VM_USER_RO | VM_NO_EXEC, NULL, NULL);
+    assert_eq(-EINVAL, rc);
+    rc = arch_vmm_query_4k(root, TEST_USER_VA, &qpa, &qvm);
+    assert_eq(0, rc);
+    assert_eq(pa, qpa);
+    assert_true((qvm & VM_WRITE) != 0);   /* still the RW leaf */
+
+    /* Update of an empty slot → -ENOENT. */
+    rc = arch_vmm_update_4k(root, other_pa, TEST_USER_VA + 0x1000,
+                            VM_USER_RO | VM_NO_EXEC, NULL, NULL);
+    assert_eq(-ENOENT, rc);
+
+    /* Teardown: drop the managed root so later tests start clean. */
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
+TEST_FUNC(test_backend_user_root_rejects_kernel_va_and_bare_rw)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0x9000ULL;
+    vmm_test_pmm_mark(pa);
+
+    /* Kernel-half VA (above the user window) → -EINVAL. */
+    int rc = arch_vmm_map_4k_new(root, pa, TEST_VA_BASE,
+                                 VM_USER_RW | VM_NO_EXEC);
+    assert_eq(-EINVAL, rc);
+
+    /* Bare VM_USER_RW (would request RWX) → -EINVAL. */
+    rc = arch_vmm_map_4k_new(root, pa, TEST_USER_VA, VM_USER_RW);
+    assert_eq(-EINVAL, rc);
+
+    /* Unallocated PA → -EINVAL. */
+    rc = arch_vmm_map_4k_new(root, 0xb000ULL, TEST_USER_VA,
+                             VM_USER_RW | VM_NO_EXEC);
+    assert_eq(-EINVAL, rc);
+
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_4k_kernel_rw_normal),
     TEST_ENTRY(test_backend_4k_kernel_ro_normal),
@@ -706,6 +822,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_split_published_root_linux_eperm),
     TEST_ENTRY(test_backend_split_alloc_fail_linux_enomem),
     TEST_ENTRY(test_backend_unmap_2m_empty_slot_linux_enoent),
+    TEST_ENTRY(test_backend_user_root_update_and_query_contract),
+    TEST_ENTRY(test_backend_user_root_rejects_kernel_va_and_bare_rw),
 TEST_LIST_END
 
 int main(void)

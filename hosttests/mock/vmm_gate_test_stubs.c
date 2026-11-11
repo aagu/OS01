@@ -16,3 +16,67 @@
 percpu_t percpu_data[NR_CPUS];
 
 uint32_t dtb_cpu_count(void) { return 1; }
+
+/* Default BSP. Tests that need a non-BSP caller set this directly. */
+uint32_t g_test_cpu_id = 0;
+
+/* ── M4 user-mm ownership stubs ──────────────────────────────────
+ * vmm_backend.c's user-root branch calls into aarch64_user_mm_*;
+ * production user_mm.c is kernel-only (aarch64 build). These stubs
+ * default to "no user roots" so the existing kernel_map tests keep
+ * their contracts. A test designates a managed root via
+ * vmm_test_user_mm_set_owned_root() and controls allocated-page
+ * bookkeeping via vmm_test_pmm_{reset,mark,unmark}. */
+
+static uint64_t *g_test_owned_root;
+
+void vmm_test_user_mm_set_owned_root(uint64_t *root)
+{
+    g_test_owned_root = root;
+}
+
+bool aarch64_user_mm_owns_root(const uint64_t *root)
+{
+    return root != NULL && (uint64_t *)root == g_test_owned_root;
+}
+
+bool aarch64_user_mm_root_busy(const uint64_t *root)
+{
+    (void)root;
+    return false;
+}
+
+int aarch64_user_mm_runtime_check(void)
+{
+    return 0;
+}
+
+#define VMM_TEST_PMM_MAX 64
+static uint64_t g_test_pmm[VMM_TEST_PMM_MAX];
+static unsigned g_test_pmm_n;
+
+void vmm_test_pmm_reset(void) { g_test_pmm_n = 0; }
+
+void vmm_test_pmm_mark(uint64_t pa)
+{
+    if (g_test_pmm_n < VMM_TEST_PMM_MAX)
+        g_test_pmm[g_test_pmm_n++] = pa;
+}
+
+void vmm_test_pmm_unmark(uint64_t pa)
+{
+    for (unsigned i = 0; i < g_test_pmm_n; i++) {
+        if (g_test_pmm[i] == pa) {
+            g_test_pmm[i] = g_test_pmm[--g_test_pmm_n];
+            return;
+        }
+    }
+}
+
+bool pmm_4k_page_allocated(uint64_t pa)
+{
+    for (unsigned i = 0; i < g_test_pmm_n; i++)
+        if (g_test_pmm[i] == pa)
+            return true;
+    return false;
+}

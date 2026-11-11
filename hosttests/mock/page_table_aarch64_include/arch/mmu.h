@@ -8,6 +8,13 @@
  * above 0x00007fffffffffff as non-canonical and mmap refuses them. */
 #define ARCH_PAGE_OFFSET UINT64_C(0x100000000)
 
+/* M4 user-root VA window — mirrors the production values in
+ * kernel/include/arch/mmu.h (aarch64 branch). The host test never
+ * dereferences user VAs (the pt walk only indexes descriptors), so
+ * the production values are safe here as-is. */
+#define AARCH64_USER_MIN   UINT64_C(0x1000)
+#define AARCH64_USER_LIMIT (UINT64_C(1) << 48)
+
 /* Minimal host stubs for the few symbols page_table.c pulls in via
  * <arch/mmu.h>.  On real aarch64 the production header defines them
  * via inline asm; on x86 host (where this mock is used) the

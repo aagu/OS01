@@ -17,7 +17,12 @@
  *
  * All entry points call vmm_gate_check() first (covered by the
  * underlying aarch64_pt_* primitives, which also gate-check on their
- * own — the duplicate is cheap and documents the contract).
+ * own — the duplicate is cheap and documents the contract).  The M4
+ * exception is the four 4 KiB entries: they route through the shared
+ * prepare_4k_root() preflight, which keeps the literal gate first for
+ * kernel_map and moves it after the user-mm ownership/runtime/busy
+ * checks for registered user roots (audited by
+ * test_smp_starting_gate.c's prepare_4k_root rules).
  *
  * kernel_map is the single address-space root for aarch64 (M1 root).
  * The x86 backend owns its own kernel_map in kernel/memory/vmm.c; the
@@ -34,6 +39,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /* No <arch/irq.h> — the DEBUG invariant below reads DAIF directly
  * via a local `mrs` asm; arch_local_irq_save/restore are not used. */
@@ -41,6 +47,7 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>
 #include <arch/aarch64/vmm_gate.h>
+#include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <memory/pmm.h>
 #include <memory/vmm.h>
@@ -293,14 +300,175 @@ int arch_vmm_init(void)
 
 /* ── 4 KiB map / query / unmap / update ───────────────────────────── */
 
+/* ── M4 user-root branch (registered mm-owned roots) ─────────────── */
+
+/* The three legal EL0 permission masks (M4 spec 页表操作契约).  Bare
+ * VM_USER_RW would request RWX and is rejected by the exact-mask
+ * match; encode_perm keeps PXN set on every user leaf, so EL1 can
+ * never execute a user mapping. */
+static bool user_perm_legal(uint32_t vm)
+{
+    return vm == (VM_USER_RW | VM_NO_EXEC) ||
+           vm == (VM_USER_RO | VM_NO_EXEC) ||
+           vm == VM_USER_RO;
+}
+
+/* All four entries validate the user VA window and 4 KiB alignment. */
+static int user_check_va(uint64_t virt)
+{
+    if (virt < AARCH64_USER_MIN || virt >= AARCH64_USER_LIMIT ||
+        (virt & (PAGE_4K_SIZE - 1)) != 0)
+        return -EINVAL;
+    return 0;
+}
+
+/* PA alignment + physical range (allocated-page check is per-entry). */
+static int user_check_pa(uint64_t phys)
+{
+    if ((phys & (PAGE_4K_SIZE - 1)) != 0 || phys >= (UINT64_C(1) << 40))
+        return -EINVAL;
+    return 0;
+}
+
+static int user_map_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                       uint32_t vm_flags)
+{
+    int rc = user_check_va(virt);
+    if (!rc) rc = user_check_pa(phys);
+    if (!rc && !user_perm_legal(vm_flags)) rc = -EINVAL;
+    /* map checks the PA belongs to an allocated 4 KiB normal page
+     * BEFORE building tables. */
+    if (!rc && !pmm_4k_page_allocated(phys)) rc = -EINVAL;
+    if (rc) return rc;
+    uint32_t perm = vm_to_perm(vm_flags);
+    return pt_err_to_linux(aarch64_pt_map_4k_ext(pgdir, virt, phys, perm, 0));
+}
+
+static int user_query_4k(uint64_t *pgdir, uint64_t virt,
+                         uint64_t *phys_out, uint32_t *vm_out)
+{
+    int rc = user_check_va(virt);
+    if (rc) return rc;
+
+    uint64_t pa = 0;
+    uint32_t perm = 0;
+    uint64_t sw = 0;
+    rc = aarch64_pt_query_4k_ext(pgdir, virt, &pa, &perm, &sw);
+    if (rc == AARCH64_PT_EPROT_NONE) {
+        if (phys_out) *phys_out = pa;
+        if (vm_out)   *vm_out   = VM_PROTNONE;
+        return AARCH64_PT_EPROT_NONE;
+    }
+    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
+    if (phys_out) *phys_out = pa;
+    if (vm_out)   *vm_out   = perm_to_vm(perm, sw);
+    return AARCH64_PT_OK;
+}
+
+static int user_unmap_4k(uint64_t *pgdir, uint64_t virt,
+                         uint64_t *phys_out, uint32_t *old_vm_out)
+{
+    int rc = user_check_va(virt);
+    if (rc) return rc;
+
+    uint64_t pa = 0;
+    uint32_t perm = 0;
+    uint64_t sw = 0;
+    rc = aarch64_pt_unmap_4k_ext(pgdir, virt, &pa, &perm, &sw);
+    if (rc == AARCH64_PT_EPROT_NONE) {
+        if (phys_out)   *phys_out   = pa;
+        if (old_vm_out) *old_vm_out = VM_PROTNONE;
+        return AARCH64_PT_EPROT_NONE;
+    }
+    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
+    if (phys_out)   *phys_out   = pa;
+    if (old_vm_out) *old_vm_out = perm_to_vm(perm, sw);
+    return AARCH64_PT_OK;
+}
+
+static int user_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                          uint32_t vm_flags, uint64_t *old_phys_out,
+                          uint32_t *old_vm_out)
+{
+    int rc = user_check_va(virt);
+    if (!rc) rc = user_check_pa(phys);
+    if (!rc && !user_perm_legal(vm_flags)) rc = -EINVAL;
+    if (rc) return rc;
+
+    /* Query the leaf first: an empty slot is -ENOENT; an existing
+     * leaf whose PA differs from the request is -EINVAL with the
+     * original leaf preserved.  (Serialized by the mm holder, so the
+     * query→replace pair cannot interleave.) */
+    uint64_t old_pa = 0;
+    uint32_t old_perm = 0;
+    uint64_t old_sw = 0;
+    rc = aarch64_pt_query_4k_ext(pgdir, virt, &old_pa, &old_perm, &old_sw);
+    if (rc == AARCH64_PT_EPROT_NONE) {
+        rc = AARCH64_PT_OK;          /* stash: counts as a mapped leaf */
+    } else if (rc != AARCH64_PT_OK) {
+        return pt_err_to_linux(rc);
+    }
+    if (phys != old_pa)
+        return -EINVAL;
+    /* PA matches: same allocated-page check as map. */
+    if (!pmm_4k_page_allocated(phys))
+        return -EINVAL;
+
+    uint32_t perm = vm_to_perm(vm_flags);
+    /* aarch64_pt_replace_4k hands back the PRIOR decoded perm + sw
+     * (taken before the descriptor is rewritten) — that is the "old PA
+     * and permissions" the M4 contract returns. */
+    uint64_t prev_pa = 0;
+    uint32_t prev_perm = 0;
+    uint64_t prev_sw = 0;
+    rc = aarch64_pt_replace_4k(pgdir, virt, phys, perm, 0,
+                               &prev_pa, &prev_perm, &prev_sw);
+    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
+    if (old_phys_out) *old_phys_out = prev_pa;
+    if (old_vm_out)   *old_vm_out   = perm_to_vm(prev_perm, prev_sw);
+    return AARCH64_PT_OK;
+}
+
+/* Shared 4 KiB preflight (M4 plan Task 2).  kernel_map keeps the
+ * original M3 gate order — vmm_gate_check first, then the DEBUG IRQ
+ * assertion, then the pinned-root check.  A registered mm-owned user
+ * root confirms ownership, runs the user-mm runtime gate, refuses
+ * writes while the root is installed or published (-EBUSY — that
+ * reject path is legal with DAIF.I masked in an SVC callback and does
+ * NOT trigger the IRQ assertion), and only then passes the M3 gate.
+ * Unknown roots are -EINVAL.  *user tells the entry which contract
+ * applies. */
+static int prepare_4k_root(uint64_t *pgdir, bool write, bool *user)
+{
+    if ((ptbl_t)pgdir == kernel_map) {
+        vmm_gate_check();
+        if (write)
+            vmm_debug_assert_irqs_enabled("prepare_4k_root");
+        return check_kernel_map();
+    }
+
+    if (!aarch64_user_mm_owns_root((const uint64_t *)pgdir))
+        return -EINVAL;
+    *user = true;
+
+    int rc = aarch64_user_mm_runtime_check();
+    if (rc) return rc;
+    if (write && aarch64_user_mm_root_busy((const uint64_t *)pgdir))
+        return -EBUSY;
+    vmm_gate_check();
+    if (write)
+        vmm_debug_assert_irqs_enabled("prepare_4k_root(user)");
+    return 0;
+}
+
 int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                         uint32_t vm_flags)
 {
-    vmm_gate_check();
-    vmm_debug_assert_irqs_enabled("arch_vmm_map_4k_new");
-    int rc = check_kernel_map();
+    bool user = false;
+    int rc = prepare_4k_root(pgdir, true, &user);
     if (rc) return rc;
-    if (pgdir != kernel_map) return -EINVAL;
+    if (user) return user_map_4k(pgdir, phys, virt, vm_flags);
+
     if ((vm_flags & VM_HUGE) != 0) return -EINVAL;   /* use map_2m */
     rc = check_vm_flags(vm_flags);
     if (rc) return rc;
@@ -317,10 +485,10 @@ int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *vm_out)
 {
-    vmm_gate_check();
-    int rc = check_kernel_map();
+    bool user = false;
+    int rc = prepare_4k_root(pgdir, false, &user);
     if (rc) return rc;
-    if (pgdir != kernel_map) return -EINVAL;
+    if (user) return user_query_4k(pgdir, virt, phys_out, vm_out);
 
     uint64_t pa = 0;
     uint32_t perm = 0;
@@ -342,11 +510,10 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
 int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *old_vm_out)
 {
-    vmm_gate_check();
-    vmm_debug_assert_irqs_enabled("arch_vmm_unmap_4k");
-    int rc = check_kernel_map();
+    bool user = false;
+    int rc = prepare_4k_root(pgdir, true, &user);
     if (rc) return rc;
-    if (pgdir != kernel_map) return -EINVAL;
+    if (user) return user_unmap_4k(pgdir, virt, phys_out, old_vm_out);
 
     uint64_t pa = 0;
     uint32_t perm = 0;
@@ -369,11 +536,13 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                        uint32_t vm_flags, uint64_t *old_phys_out,
                        uint32_t *old_vm_out)
 {
-    vmm_gate_check();
-    vmm_debug_assert_irqs_enabled("arch_vmm_update_4k");
-    int rc = check_kernel_map();
+    bool user = false;
+    int rc = prepare_4k_root(pgdir, true, &user);
     if (rc) return rc;
-    if (pgdir != kernel_map) return -EINVAL;
+    if (user)
+        return user_update_4k(pgdir, phys, virt, vm_flags,
+                              old_phys_out, old_vm_out);
+
     if ((vm_flags & VM_HUGE) != 0) return -EINVAL;
     rc = check_vm_flags(vm_flags);
     if (rc) return rc;

@@ -80,6 +80,7 @@
  */
 
 #include <test_framework.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <setjmp.h>
@@ -104,6 +105,11 @@ typedef struct {
     uint32_t ipi_ready, tlb_ack_gen;
 } vmm_test_percpu_t;
 vmm_test_percpu_t percpu_data[8];
+
+/* Controllable caller CPU for aarch64_user_mm_runtime_check() (M4).
+ * The production gate object reads this through the mock cpu_id()
+ * from vmm_gate_test_runtime.h. Default BSP. */
+uint32_t g_test_cpu_id = 0;
 
 /* dtb_cpu_count is settable so case 2/3 can drive the count-vs-cpu
  * mismatch on demand. */
@@ -155,6 +161,10 @@ static void case_pre_smp_exception(void)
     vmm_gate_check();
     /* And once more, deterministically, to prove idempotence. */
     vmm_gate_check();
+
+    /* M4: before bring-up starts the user-mm runtime check must refuse
+     * with -EAGAIN regardless of the (ambient) mock topology. */
+    assert_eq(-EAGAIN, aarch64_user_mm_runtime_check());
 }
 
 /* ── Cases 2 + 3: BSP+AP both publish via the SAME function ───────── */
@@ -171,6 +181,14 @@ static void case_post_smp_count_mismatch_then_match(void)
     /* BSP-side: latch the SMP gate. After this, vmm_gate_check refuses
      * to admit a VMM change until every DTB CPU has published ipi_ready. */
     smp_starting_enter();
+
+    /* M4: single-core topology, BSP caller, no IPI published yet →
+     * -EAGAIN (bring-up entered but readiness not reached). The mock
+     * values are restored immediately so the M3 flow below is unchanged. */
+    mock_cpu_count_val = 1;
+    assert_eq(-EAGAIN, aarch64_user_mm_runtime_check());
+    mock_cpu_count_val = 2;
+
     /* ipi_ready_publish_and_count is the SINGLE one-shot publication
      * site for BSP and APs alike — per the v3 fix for item 9. */
     ipi_ready_publish_and_count(0);
@@ -180,6 +198,23 @@ static void case_post_smp_count_mismatch_then_match(void)
      * so the gate MUST refuse. vmm_gate_check pre-condition: count(1)
      * < cpu_count(2). */
     assert_true(EXPECT_VIOLATION(vmm_gate_check()));
+
+    /* M4: BSP published (count == 1) on a single-core topology → the
+     * user-mm runtime check admits. Restored right after. */
+    mock_cpu_count_val = 1;
+    assert_eq(0, aarch64_user_mm_runtime_check());
+    mock_cpu_count_val = 2;
+
+    /* M4: non-BSP caller → -EOPNOTSUPP, restored immediately. */
+    g_test_cpu_id = 1;
+    assert_eq(-EOPNOTSUPP, aarch64_user_mm_runtime_check());
+    g_test_cpu_id = 0;
+
+    /* M4: multi-core DTB topology → -EOPNOTSUPP (checked before IPI
+     * readiness). Restored to the M3 ambient value right after. */
+    mock_cpu_count_val = 3;
+    assert_eq(-EOPNOTSUPP, aarch64_user_mm_runtime_check());
+    mock_cpu_count_val = 2;
 
     /* AP(1) publishes through the same function. count is now 2. */
     ipi_ready_publish_and_count(1);
@@ -349,11 +384,21 @@ static int first_stmt_is_gate_check(const char *body, size_t body_len)
 /* Public-entry list for page_table.c (aarch64_pt_*). Exceptions are
  * either pre-SMP init (init_locks) or a pure encoder (encode_block_desc)
  * and are documented in the audit's failure message so a future
- * contributor sees why they are skipped. */
+ * contributor sees why they are skipped.
+ *
+ * `via_prepare` (aarch64 M4 user-mm plan Task 2): the four 4 KiB
+ * arch_vmm_* entries open with the shared prepare_4k_root() preflight
+ * instead of a literal vmm_gate_check() first statement — the gate
+ * moves INSIDE the helper, after the user-mm ownership/runtime/busy
+ * checks. Such entries are audited by audit_prepare_4k_root_entry()
+ * (preflight before any page-table call, error return before it, and
+ * the helper itself passing the M3 gate before admitting). Partial
+ * initializers leave the field 0 for every other entry. */
 typedef struct {
     const char *signature;   /* needle: the exact signature line */
     int         exempt;      /* 1 = documented exception */
     const char *reason;      /* why exempt */
+    int         via_prepare; /* 1 = audited via prepare_4k_root() */
 } entry_spec_t;
 
 static const entry_spec_t k_page_table_entries[] = {
@@ -392,27 +437,120 @@ static const entry_spec_t k_page_table_entries[] = {
 
 static const entry_spec_t k_vmm_backend_entries[] = {
     { "int arch_vmm_init(void)",
-      0, NULL },
+      0, NULL, 0 },
     { "int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,",
-      0, NULL },
+      0, NULL, 1 },
     { "int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,",
-      0, NULL },
+      0, NULL, 1 },
     { "int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,",
-      0, NULL },
+      0, NULL, 1 },
     { "int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,",
-      0, NULL },
+      0, NULL, 1 },
     { "int arch_vmm_map_2m(uint64_t *pgdir, uint64_t phys, uint64_t virt,",
-      0, NULL },
+      0, NULL, 0 },
     { "int arch_vmm_unmap_2m(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out)",
-      0, NULL },
+      0, NULL, 0 },
     { "int arch_vmm_split_2m_to_4k(uint64_t *pgdir, uint64_t virt)",
-      0, NULL },
+      0, NULL, 0 },
 };
 
 static long find_idx(const char *hay, const char *needle)
 {
     const char *p = strstr(hay, needle);
     return p ? (long)(p - hay) : -1L;
+}
+
+/* Bounded needle search (the audited bodies are slices of a larger
+ * buffer, not NUL-terminated). Returns the offset inside [hay, hay+len)
+ * or -1. */
+static long find_in(const char *hay, size_t len, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (n == 0 || len < n) return -1L;
+    for (size_t i = 0; i + n <= len; i++)
+        if (memcmp(hay + i, needle, n) == 0)
+            return (long)i;
+    return -1L;
+}
+
+/* Audit one via_prepare entry (aarch64 M4 user-mm plan Task 2): the
+ * shared prepare_4k_root() preflight must run BEFORE any page-table
+ * call in the entry body, its error must return before that call
+ * (`if (rc) return rc;` guard), and the helper's own body must order
+ * ownership → runtime check → busy → vmm_gate_check so the M3 gate
+ * is the LAST thing to admit. The caller has already stripped
+ * comments from `src`. Returns the number of failures (0 or 1). */
+static int audit_prepare_4k_root_entry(const char *src,
+                                       const char *body, size_t body_len,
+                                       const char *file_desc,
+                                       const char *sig_name)
+{
+    static const char k_prep_sig[] = "static int prepare_4k_root(";
+    static const char k_prepare[]  = "prepare_4k_root(";
+    static const char k_guard[]    = "if (rc) return rc;";
+    static const char k_pt[]       = "aarch64_pt_";
+    static const char k_owns[]     = "aarch64_user_mm_owns_root";
+    static const char k_runtime[]  = "aarch64_user_mm_runtime_check";
+    static const char k_busy[]     = "aarch64_user_mm_root_busy";
+    static const char k_gate[]     = "vmm_gate_check";
+
+    long prep = find_in(body, body_len, k_prepare);
+    if (prep < 0) {
+        printf("  [AUDIT-FAIL] %s: \"%s\" does not call prepare_4k_root()\n",
+               file_desc, sig_name);
+        return 1;
+    }
+    long first_pt = find_in(body, body_len, k_pt);
+    if (first_pt >= 0) {
+        if (prep > first_pt) {
+            printf("  [AUDIT-FAIL] %s: \"%s\" reaches aarch64_pt_* "
+                   "before prepare_4k_root()\n", file_desc, sig_name);
+            return 1;
+        }
+        long guard = find_in(body, body_len, k_guard);
+        if (guard < 0 || guard < prep || guard > first_pt) {
+            printf("  [AUDIT-FAIL] %s: \"%s\" lacks an `if (rc) return rc;` "
+                   "guard between prepare_4k_root() and the first "
+                   "page-table call\n", file_desc, sig_name);
+            return 1;
+        }
+    }
+
+    long psig = find_idx(src, k_prep_sig);
+    if (psig < 0) {
+        printf("  [AUDIT-FAIL] %s: prepare_4k_root() definition not found\n",
+               file_desc);
+        return 1;
+    }
+    long pbody_open = find_body_open(src, psig);
+    long pbody_close = (pbody_open >= 0) ? find_body_close(src, pbody_open) : -1L;
+    if (pbody_open < 0 || pbody_close < 0) {
+        printf("  [AUDIT-FAIL] %s: prepare_4k_root() body not found\n",
+               file_desc);
+        return 1;
+    }
+    const char *pbody = src + pbody_open + 1;
+    size_t plen = (size_t)(pbody_close - pbody_open - 1);
+    long o_owns  = find_in(pbody, plen, k_owns);
+    long o_rt    = find_in(pbody, plen, k_runtime);
+    long o_busy  = find_in(pbody, plen, k_busy);
+    if (o_owns < 0 || o_rt < 0 || o_busy < 0 ||
+        !(o_owns < o_rt && o_rt < o_busy)) {
+        printf("  [AUDIT-FAIL] %s: prepare_4k_root() order is not "
+               "owns_root → runtime_check → root_busy\n", file_desc);
+        return 1;
+    }
+    /* The M3 gate must ADMIT the user path: a vmm_gate_check() call
+     * must follow the busy check.  (The kernel_map branch legitimately
+     * gates first, so first-occurrence ordering would false-fail —
+     * search only the tail after root_busy.) */
+    long o_gate = find_in(pbody + o_busy, plen - (size_t)o_busy, k_gate);
+    if (o_gate < 0) {
+        printf("  [AUDIT-FAIL] %s: prepare_4k_root() admits without "
+               "passing vmm_gate_check after the busy check\n", file_desc);
+        return 1;
+    }
+    return 0;
 }
 
 /* Audit one file: walk k_entries[], for each non-exempt entry find
@@ -464,6 +602,17 @@ static int audit_gate_check_first(const char *path,
         /* The body we hand the predicate starts AFTER the opening `{`
          * (the open brace itself is not a statement). */
         const char *body = src + body_open + 1;
+        if (e->via_prepare) {
+            /* M4: the four 4 KiB entries route through the shared
+             * prepare_4k_root() preflight; audited separately below
+             * (prepare before any page-table call, error return
+             * guard, helper passes the M3 gate). */
+            if (audit_prepare_4k_root_entry(src, body, body_len,
+                                            file_desc,
+                                            e->signature) != 0)
+                fails++;
+            continue;
+        }
         if (!first_stmt_is_gate_check(body, body_len)) {
             printf("  [AUDIT-FAIL] %s: first stmt of \"%s\" is NOT "
                    "vmm_gate_check(); (or a return ..._ext(...) delegator)\n",

@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/dtb.h>       /* dtb_cpu_count */
@@ -139,4 +140,25 @@ void vmm_gate_check(void)
     if (ready < expected) {
         vmm_gate_violation("vmm_gate_check: ipi_ready_count < cpu_count");
     }
+}
+
+/* ── M4 user-mm runtime gate ────────────────────────────────────── */
+
+/* Ordered per the M4 spec (运行期门控与检查顺序): bring-up, topology,
+ * IPI readiness. Unlike vmm_gate_check this gate RETURNS errors
+ * instead of raising a violation — user-root callers are expected to
+ * handle a not-yet-ready system by refusing the operation. */
+int aarch64_user_mm_runtime_check(void)
+{
+    if (__atomic_load_n(&smp_starting, __ATOMIC_ACQUIRE) == 0)
+        return -EAGAIN;                     /* bring-up not started */
+
+    if (dtb_cpu_count() != 1)               /* single-core only (v1) */
+        return -EOPNOTSUPP;
+    if (cpu_id() != 0)                      /* BSP caller only */
+        return -EOPNOTSUPP;
+
+    if (ipi_ready_count_get() != 1)         /* BSP published, no APs */
+        return -EAGAIN;
+    return 0;
 }

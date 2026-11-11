@@ -34,6 +34,11 @@ typedef struct {
 } vmm_test_percpu_t;
 vmm_test_percpu_t percpu_data[8];
 
+/* M4: the production gate object reads cpu_id() through the mock in
+ * vmm_gate_test_runtime.h; this TU defines the variable (it does not
+ * link vmm_gate_test_stubs.c, which owns the default definition). */
+uint32_t g_test_cpu_id = 0;
+
 static uint32_t mock_cpu_count_val = 8;
 uint32_t dtb_cpu_count(void) { return mock_cpu_count_val; }
 

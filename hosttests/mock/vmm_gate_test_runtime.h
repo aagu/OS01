@@ -52,4 +52,14 @@ static inline void spin_init(spinlock_T *l) { l->lock = 1; }
 static inline void spin_lock(spinlock_T *l) { (void)l; }
 static inline void spin_unlock(spinlock_T *l) { (void)l; }
 
+/* Controllable cpu_id() for the production gate object (aarch64 M4
+ * user-mm runtime check). The production <percpu/percpu.h> provides
+ * cpu_id() inline; the mock replaces it with a settable variable.
+ * TUs that link vmm_gate_production.o must define g_test_cpu_id
+ * exactly once — vmm_gate_test_stubs.c defaults it to 0;
+ * test_smp_starting_gate.c and test_foundational_primitives.c define
+ * their own (they do not link the stub object). */
+extern uint32_t g_test_cpu_id;
+static inline uint32_t cpu_id(void) { return g_test_cpu_id; }
+
 #endif /* OS01_VMM_GATE_TEST_RUNTIME_H */
