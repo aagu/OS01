@@ -92,7 +92,11 @@ exception_vectors:
 
 /* ───── Synchronous exception, EL0 (AArch64) ───── */
 .balign 0x80
+#if AARCH64_EL0_TEST
+    b   el0_sync_entry
+#else
 9:  b   .
+#endif
 
 /* ───── IRQ, EL0 ───── */
 .balign 0x80
@@ -127,9 +131,7 @@ exception_vectors:
  * bl 到 el1_irq(struct pt_regs *)，x0 = sp（指向刚压好的帧）。
  * eret 前完整恢复。
  * ────────────────────────────────────────────────────────────── */
-.balign 0x80
-.globl el1_irq_entry
-el1_irq_entry:
+.macro save_pt_regs
     sub     sp, sp, #PT_REGS_SIZE
     stp     x0, x1,   [sp, #PT_REGS_X0]
     stp     x2, x3,   [sp, #PT_REGS_X2]
@@ -153,8 +155,15 @@ el1_irq_entry:
     str     x1,       [sp, #PT_REGS_ELR_EL1]
     mrs     x1, sp_el0
     str     x1,       [sp, #PT_REGS_SP_EL0]
+.endm
+
+.balign 0x80
+.globl el1_irq_entry
+el1_irq_entry:
+    save_pt_regs
     mov     x0, sp                       /* x0 = &regs for el1_irq */
     bl      el1_irq
+restore_pt_regs:
     ldr     x1,       [sp, #PT_REGS_SP_EL0]
     msr     sp_el0, x1
     ldr     x1,       [sp, #PT_REGS_ELR_EL1]
@@ -197,31 +206,7 @@ el1_irq_entry:
 .balign 0x80
 .globl el1_sync_entry
 el1_sync_entry:
-    sub     sp, sp, #PT_REGS_SIZE
-    stp     x0, x1,   [sp, #PT_REGS_X0]
-    stp     x2, x3,   [sp, #PT_REGS_X2]
-    stp     x4, x5,   [sp, #PT_REGS_X4]
-    stp     x6, x7,   [sp, #PT_REGS_X6]
-    stp     x8, x9,   [sp, #PT_REGS_X8]
-    stp     x10, x11, [sp, #PT_REGS_X10]
-    stp     x12, x13, [sp, #PT_REGS_X12]
-    stp     x14, x15, [sp, #PT_REGS_X14]
-    stp     x16, x17, [sp, #PT_REGS_X16]
-    stp     x18, x19, [sp, #PT_REGS_X18]
-    stp     x20, x21, [sp, #PT_REGS_X20]
-    stp     x22, x23, [sp, #PT_REGS_X22]
-    stp     x24, x25, [sp, #PT_REGS_X24]
-    stp     x26, x27, [sp, #PT_REGS_X26]
-    stp     x28, x29, [sp, #PT_REGS_X28]
-    str     x30,      [sp, #PT_REGS_X30]
-    /* Snapshot 系统寄存器到 PT_REGS_* 槽位。x3 是 caller-saved；此
-     * 时 x0-x30 已压栈，临时覆盖 x3 不影响异常现场。 */
-    mrs     x3, spsr_el1
-    str     x3,       [sp, #PT_REGS_SPSR_EL1]
-    mrs     x3, elr_el1
-    str     x3,       [sp, #PT_REGS_ELR_EL1]
-    mrs     x3, sp_el0
-    str     x3,       [sp, #PT_REGS_SP_EL0]
+    save_pt_regs
     /* 再次读取 ESR/FAR 到 caller-saved x1/x2 直接做参数；
      * 已有 PT_REGS 现场保留 SPSR/ELR/SP_EL0 三个槽供 C 解码。 */
     mrs     x1, esr_el1
@@ -232,3 +217,51 @@ el1_sync_entry:
 0:  msr     daifset, #0xf
     wfi
     b       0b
+
+#if AARCH64_EL0_TEST
+/* The test runs before interrupt sources are configured. SPSR keeps
+ * DAIF masked; only a lower-EL synchronous exception is expected. */
+.balign 0x80
+el0_sync_entry:
+    save_pt_regs
+    mov     x0, sp
+    mrs     x1, esr_el1
+    mrs     x2, far_el1
+    bl      aarch64_el0_sync
+    cbnz    w0, restore_pt_regs
+    adr     x1, .Lel0_done
+    str     x1, [sp, #PT_REGS_ELR_EL1]
+    mov     x1, #0x3c5                  /* DAIF masked, EL1h */
+    str     x1, [sp, #PT_REGS_SPSR_EL1]
+    b       restore_pt_regs
+
+/* Save the EL1 caller across the user run. The exception exit unwinds
+ * its own pt_regs before ERET, so the continuation sees this frame. */
+.globl aarch64_el0_enter
+.type aarch64_el0_enter, %function
+aarch64_el0_enter:
+    stp     x29, x30, [sp, #-96]!
+    stp     x19, x20, [sp, #16]
+    stp     x21, x22, [sp, #32]
+    stp     x23, x24, [sp, #48]
+    stp     x25, x26, [sp, #64]
+    stp     x27, x28, [sp, #80]
+    msr     elr_el1, x0
+    msr     sp_el0, x1
+    mov     x3, #0x3c0                  /* DAIF masked, EL0t */
+    msr     spsr_el1, x3
+    mov     x0, x2                      /* sole input to the user code */
+    .irp reg,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+    mov     x\reg, xzr
+    .endr
+    eret
+.Lel0_done:
+    ldp     x19, x20, [sp, #16]
+    ldp     x21, x22, [sp, #32]
+    ldp     x23, x24, [sp, #48]
+    ldp     x25, x26, [sp, #64]
+    ldp     x27, x28, [sp, #80]
+    ldp     x29, x30, [sp], #96
+    ret
+.size aarch64_el0_enter, . - aarch64_el0_enter
+#endif

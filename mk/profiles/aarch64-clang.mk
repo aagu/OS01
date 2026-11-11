@@ -155,7 +155,18 @@ $(error AARCH64_SCHED_TEST='$(AARCH64_SCHED_TEST)' cannot be combined with AARCH
 endif
 endif
 endif
-ifneq ($(strip $(BOOT_CONTRACT_CASE)),)
+ifneq ($(filter-out 0 1,$(AARCH64_EL0_TEST)),)
+$(error invalid AARCH64_EL0_TEST='$(AARCH64_EL0_TEST)'; expected 0 or 1)
+endif
+ifeq ($(AARCH64_EL0_TEST),1)
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_EL0_TEST=1 requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(strip $(BOOT_CONTRACT_CASE) $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SCHED_TICK_TEST) $(filter-out 0,$(AARCH64_SYNC_FAULT_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST))),)
+$(error AARCH64_EL0_TEST=1 cannot be combined with another test variant)
+endif
+KERNEL_VARIANT := m4-1
+else ifneq ($(strip $(BOOT_CONTRACT_CASE)),)
 KERNEL_VARIANT := boot-contract-$(BOOT_CONTRACT_CASE)
 else ifneq ($(strip $(AARCH64_M1_TEST)),)
 ifeq ($(filter $(AARCH64_M1_TEST),sparse arena-exhaust table-exhaust ap-bad-root),)

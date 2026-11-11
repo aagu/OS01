@@ -94,6 +94,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_arch_atomic_u64.c \
                    selftest/test_aarch64_rndr_encoding.c \
                    selftest/test_aarch64_page_table_selftest.c \
+                   selftest/test_aarch64_el0.c \
                    selftest/test_aarch64_page_table_multicore.c \
                    selftest/test_aarch64_scheduler.c \
                    selftest/aarch64_sched_observer.c \
@@ -441,6 +442,9 @@ endif
 # ── Built-in selftests (make KERNEL_SELFTEST=1) ────────────────
 ifdef KERNEL_SELFTEST
 ALL_CFLAGS += -DOS01_SELFTEST=1
+ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
+ALL_CFLAGS += -DAARCH64_EL0_TEST=1
+endif
 endif
 
 # AAGU-EL1-sync (spec §5): the dedicated sync-fault variant gates an

@@ -163,6 +163,10 @@ void selftest_register_builtin_tests(void)
      * x86_64 the body is a no-op stub so registration stays
      * portable. */
     selftest_register("aarch64_pt_vmm",            test_aarch64_page_table_selftest);
+#if AARCH64_EL0_TEST
+    extern int test_aarch64_el0(void);
+    selftest_register("aarch64_el0", test_aarch64_el0);
+#endif
 #endif /* __aarch64__ */
 #if !defined(__aarch64__)
     /* x86_64-only: these tests pull in subsystems (VFS, ext2, sync

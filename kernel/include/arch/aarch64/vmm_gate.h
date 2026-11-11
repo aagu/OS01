@@ -39,6 +39,12 @@
  * returns false; a full registry is a violation (and returns false). */
 bool aarch64_pt_root_publish(uint64_t root_pa);
 
+#if AARCH64_EL0_TEST
+/* Only for private pre-SMP roots, after TTBR0 restore and local TLBI. */
+void aarch64_pt_root_unpublish_local(uint64_t root_pa);
+bool aarch64_vmm_pre_smp(void);
+#endif
+
 /* True iff *root is a published root PA. *root == 0 → false. */
 bool aarch64_pt_root_is_published(const uint64_t *root);
 

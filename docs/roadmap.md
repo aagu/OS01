@@ -49,7 +49,7 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 
 | 阶段 | 任务与完成条件 | 前置 |
 |------|----------------|------|
-| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；把 `arch_user_range_accessible()` 的 aarch64 fail-closed 实现替换为真实跨页权限检查，并接通 uaccess 故障恢复。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；EL1 sync 目前只有致命诊断，EL0 sync 入口仍未接入。以隔离、权限、COW、回收和用户态 QEMU 用例验收。**当前状态：尚未开始（仓库内无对应实现代码）** | M3 ✅；Slab ✅、EL1 调度/上下文门面 ✅、EL0 异常路径 |
+| M4 用户地址空间与 VMA | 建立 aarch64 用户页表根、EL0 权限和地址空间切换/回收，再使 VMA/mmap/ELF、缺页分配、COW 与 `munmap` 使用 M3 接口；把 `arch_user_range_accessible()` 的 aarch64 fail-closed 实现替换为真实跨页权限检查，并接通 uaccess 故障恢复。现有 `memory/vma.c` 和 x86_64 `do_page_fault()` 直接使用 x86 PTE flag，需先剥离架构语义；M4.1 已在隔离自测镜像验证私有 TTBR0、EL0/SVC 往返、权限故障和回收。产品路径仍待接入用户地址空间生命周期、异常分派与 uaccess。以隔离、权限、COW、回收和用户态 QEMU 用例验收。 | M3 ✅；Slab ✅、EL1 调度/上下文门面 ✅、EL0 异常路径 |
 
 #### 架构统一推进链（迈向单一 kernel_main）
 
@@ -57,7 +57,7 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 中断/异常 dispatch 统一（剩余项） | 第一期（6 条入口）与第二期（x86 48 条入口）已完成。**剩余待统一**：EL0/SVC 异常、aarch64 可恢复 abort 与 uaccess 恢复路径、用户页表、ASID/COW、统一 SMP | arch_irq ✅, head.S ✅, GIC ✅；M4 用户态路径仍未开始 | Linux do_IRQ |
+| 中断/异常 dispatch 统一（剩余项） | 第一期（6 条入口）与第二期（x86 48 条入口）已完成。**剩余待统一**：EL0/SVC 异常、aarch64 可恢复 abort 与 uaccess 恢复路径、用户页表、ASID/COW、统一 SMP | arch_irq ✅, head.S ✅, GIC ✅；M4.1 EL0 自测已接入；产品路径待接入 | Linux do_IRQ |
 | SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现。当前仅有跨架构钩子 `arch_boot_aps()`，尚无统一 AP 启动语义 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一（剩余项） | EL1 架构上下文门面（`arch/context.h`）与 aarch64 BSP 切换已闭环。**剩余待统一**：多核 SMP 调度切换、IRQ 返回抢占与用户态 EL0/sysret 切换 | EL1 调度 ✅；SMP 启动统一；M4 用户态 | Tilck |
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份（仓库内目前无此接口） | 独立 | Linux cpufeature |
