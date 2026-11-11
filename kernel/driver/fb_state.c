@@ -6,6 +6,7 @@
  */
 
 #include <driver/fb_state.h>
+#include <driver/fb_cache.h>
 #include <driver/fb.h>
 #include <driver/bga.h>
 #include <driver/fb_test.h>
@@ -35,6 +36,24 @@
 /* ── Display coordinator private state ── */
 static spinlock_T display_state_lock;
 static mutex_t    display_mutex;
+
+/* ── Framebuffer cache policy ─────────────────────────────────
+ * Published once during boot by the identified framebuffer backend
+ * (see <driver/fb_cache.h>).  The default is UNCACHEABLE: a platform
+ * whose backend never identified ordinary RAM keeps the conservative
+ * choice.  The value is written before any user-visible mapping is
+ * installed and read afterwards, so a plain word is enough. */
+static fb_cache_policy_t g_fb_cache_policy = FB_CACHE_POLICY_UNCACHEABLE;
+
+fb_cache_policy_t fb_cache_policy_get(void)
+{
+    return g_fb_cache_policy;
+}
+
+void fb_cache_policy_set(fb_cache_policy_t policy)
+{
+    g_fb_cache_policy = policy;
+}
 
 static struct fb_state g_fb_state;
 static uint64_t        g_fb_phys __attribute__((unused));

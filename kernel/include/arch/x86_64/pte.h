@@ -11,6 +11,8 @@
  */
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <driver/fb_cache.h>   /* fb_cache_policy_t: framebuffer cache policy */
 
 //page table attribute
 
@@ -62,6 +64,41 @@
 #define PAGE_USER_PTE       (PAGE_USER  | PAGE_WRITE     | PAGE_VALID)   // user R/W 4KB
 #define PAGE_USER_PTE_RO    (PAGE_USER  | PAGE_VALID)                    // user read-only 4KB
 #define PAGE_KERNEL_PTE     (PAGE_WRITE | PAGE_VALID)                    // kernel 4KB
+// ── Framebuffer cache policy → x86 PTE cache bits ────────────────────
+// The policy is published by the identified framebuffer backend (see
+// <driver/fb_cache.h>).  These two helpers are the ONLY place where a
+// policy becomes hardware bits, so the kernel mapping, the /dev/fb
+// user alias and the early boot alias can never drift apart.
+//
+//   UC (uncacheable): PCD=1, PWT=1  -- device registers, and every
+//                                      framebuffer whose backend has
+//                                      not identified ordinary RAM.
+//   WB (write-back):  PCD=0, PWT=0  -- ordinary RAM (QEMU Standard VGA
+//                                      RAM backend).
+#define PAGE_FB_CACHE_UC   (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)
+#define PAGE_FB_CACHE_WB   (0UL)
+
+static inline uint64_t fb_x86_cache_bits(fb_cache_policy_t policy)
+{
+    return (policy == FB_CACHE_POLICY_WRITEBACK) ? PAGE_FB_CACHE_WB
+                                                  : PAGE_FB_CACHE_UC;
+}
+
+/* Kernel-side 2MiB framebuffer leaf entry. */
+static inline uint64_t fb_x86_kernel_pmd_flags(fb_cache_policy_t policy)
+{
+    return PAGE_KERNEL_PMD | fb_x86_cache_bits(policy);
+}
+
+/* User-side 4KiB /dev/fb alias entry.  It maps the SAME physical pages
+ * as the kernel mapping above, so it must carry the SAME memory type. */
+static inline uint64_t fb_x86_user_pte_flags(fb_cache_policy_t policy,
+                                             bool writable)
+{
+    return (writable ? PAGE_USER_PTE : PAGE_USER_PTE_RO)
+           | fb_x86_cache_bits(policy);
+}
+
 #define PAGE_PROTNONE       (1UL << 9)   // software bit: PROT_NONE stash marker
 // bit 9 is x86_64 PTE ignored. mprotect(PROT_NONE) sets this, clears Valid
 // but keeps phys.  mprotect(PROT_READ) walks PTEs to restore Valid + clear this.

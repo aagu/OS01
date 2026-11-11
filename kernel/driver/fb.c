@@ -8,6 +8,7 @@
 // the MMIO pages from COW, demand paging, and premature freeing.
 
 #include <driver/fb.h>
+#include <driver/fb_cache.h>       // fb_cache_policy_get: shared FB cache policy
 #include <log/log.h>
 #include <core/printk.h>      // Pos, frame_buffer
 #include <memory/vma.h>         // vma_t, VMA_IO, VMA_SHARED
@@ -99,7 +100,9 @@ static int fb_write(struct vfs_node *node, uint64_t offset,
 
 // ── fb_mmap: map framebuffer into user space ─────────────────
 // Validates SHARED and bounds under control mutex, then eagerly fills
-// PTEs with uncacheable MMIO mappings. If an intermediate mapping fails,
+// the user PTEs with the framebuffer cache policy published by the
+// identified framebuffer backend (the same policy the kernel mapping
+// uses -- see <driver/fb_cache.h>). If an intermediate mapping fails,
 // rollbacks installed PTEs, syncs TLB, and sets sticky if unmap failed.
 static int fb_mmap(struct vfs_node *node, struct vma *vma_)
 {
@@ -140,13 +143,21 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
         }
     }
 
-    // Eagerly fill PTEs with uncacheable MMIO attributes.
+    // Eagerly fill PTEs for the user alias of the framebuffer pages.
     // The physical framebuffer pages start at Pos.Phy_addr.
     uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
     uint64_t fb_phys = (uint64_t)Pos.Phy_addr;
 
-    uint64_t page_flags = (is_writable ? PAGE_USER_PTE : PAGE_USER_PTE_RO)
-                          | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH;
+    /* The user alias maps the SAME physical pages as the kernel's
+     * framebuffer mapping, so it MUST carry the same memory type:
+     * x86 forbids accessing one physical page under two different
+     * memory types (IA32_PAT: avoid memory-type aliasing).  The policy
+     * is the one published by the identified framebuffer backend, i.e.
+     * exactly the policy fb_x86_map_checked() installed the kernel
+     * mapping with.  Both the read-only and the (test-only) writable
+     * raw mmap path go through here. */
+    uint64_t page_flags = fb_x86_user_pte_flags(fb_cache_policy_get(),
+                                                 is_writable);
 
     uint64_t installed_end = vma->vm_start;
     bool map_failed = false;

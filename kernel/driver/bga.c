@@ -7,6 +7,7 @@
 
 #include <driver/bga.h>
 #include <driver/fb_state.h>
+#include <driver/fb_cache.h>
 #include <driver/fb_test.h>
 #include <arch/x86_64/fb_map.h>
 #include <core/printk.h>
@@ -376,7 +377,25 @@ int bga_probe(struct pci_device *pdev, const struct pci_device_id *id)
         return -ENODEV;
     }
 
-    /* 7. Checked mapping of full VRAM */
+    /* 7. Checked mapping of full VRAM
+     *
+     * Cache policy: this backend is the QEMU Standard VGA RAM backend.
+     * Its BAR0 is plain host RAM -- QEMU creates that region with
+     * memory_region_init_ram_flags_nomigrate() and the host-side VGA
+     * scanout reads exactly those bytes -- so the framebuffer pages
+     * are ordinary cacheable memory, not device registers (BAR2 is
+     * the register window and stays uncacheable).
+     *
+     * Publishing that fact here is what lets the kernel mapping, the
+     * /dev/fb user alias and the early boot alias share one policy:
+     * x86 forbids accessing the same physical page under two different
+     * memory types (IA32_PAT: avoid memory-type aliasing).
+     *
+     * The assumption "BAR0 is RAM" belongs to THIS backend, not to the
+     * generic gfx layer: any other framebuffer backend (and the generic
+     * GOP fallback) keeps the conservative uncacheable default. */
+    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
+
     uint32_t *mapped_addr = NULL;
     int map_rc = fb_x86_map_checked(bar_base, vram_capacity, &mapped_addr);
     if (map_rc != 0) {
