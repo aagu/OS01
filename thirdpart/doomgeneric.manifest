@@ -16,4 +16,5 @@ DOOMGENERIC_PATCHES := \
   0001-os01-no-zenity.patch \
   0002-os01-quit.patch \
   0003-os01-config.patch \
-  0004-os01-input-budget.patch
+  0004-os01-input-budget.patch \
+  0005-os01-test-observe.patch

@@ -13,6 +13,10 @@
 #include "doomgeneric.h"
 #include "i_system.h"
 
+#ifdef OS01_DOOM_DIAG
+#include "diag.h"
+#endif
+
 static doom_runtime_t g_runtime;
 static doom_os01_config_t g_cfg;
 
@@ -91,6 +95,20 @@ int doom_os01_parse_args(int argc, char **argv, doom_os01_config_t *cfg,
                 snprintf(cfg->iwad_path, sizeof(cfg->iwad_path), "%s/%s", cwd, path);
             }
             iwad_seen = true;
+        } else if (strcmp(argv[i], "--os01-diag-nonce") == 0 || strcmp(argv[i], "--diag-nonce") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "doom: diag nonce requires an argument\n");
+                return -1;
+            }
+            strncpy(cfg->diag_nonce, argv[++i], sizeof(cfg->diag_nonce) - 1);
+            cfg->diag_nonce[sizeof(cfg->diag_nonce) - 1] = '\0';
+        } else if (strcmp(argv[i], "--os01-diag-action") == 0 || strcmp(argv[i], "--diag-action") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "doom: diag action requires an argument\n");
+                return -1;
+            }
+            strncpy(cfg->diag_action, argv[++i], sizeof(cfg->diag_action) - 1);
+            cfg->diag_action[sizeof(cfg->diag_action) - 1] = '\0';
         }
     }
 
@@ -109,7 +127,11 @@ int doom_os01_parse_args(int argc, char **argv, doom_os01_config_t *cfg,
 
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--os01-scale") == 0 ||
-                strcmp(argv[i], "--os01-data-dir") == 0) {
+                strcmp(argv[i], "--os01-data-dir") == 0 ||
+                strcmp(argv[i], "--os01-diag-nonce") == 0 ||
+                strcmp(argv[i], "--diag-nonce") == 0 ||
+                strcmp(argv[i], "--os01-diag-action") == 0 ||
+                strcmp(argv[i], "--diag-action") == 0) {
                 i++;
                 continue;
             }
@@ -236,6 +258,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifdef OS01_DOOM_DIAG
+    doom_diag_init(g_cfg.diag_nonce);
+    if (g_cfg.diag_action[0]) {
+        doom_diag_set_action(g_cfg.diag_action);
+    }
+#endif
+
     doomgeneric_Create(new_argc, new_argv);
     doom_runtime_set_engine_created(1);
 
@@ -245,6 +274,15 @@ int main(int argc, char **argv)
             exit(1);
         }
         doomgeneric_Tick();
+#ifdef OS01_DOOM_DIAG
+        const char *act = doom_diag_get_action();
+        if (act && strcmp(act, "self-release") == 0) {
+            if (doom_diag_first_frame_done()) {
+                doom_diag_self_release();
+                doom_diag_set_action("");
+            }
+        }
+#endif
     }
 
     I_Quit();

@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -70,6 +70,75 @@ def parse_diag_record(line: str) -> Optional[dict]:
                 k, v = item.split("=", 1)
                 res[k] = v
     return res
+
+
+def validate_ticcmd_up(records: List[dict]) -> Tuple[bool, str]:
+    """Validate that key release (UP) zeroes the ticcmd movement while position was updated during down."""
+    tics = [r for r in records if r["type"] == "tic"]
+    if not tics:
+        return False, "No tic records to validate UP clearing"
+    down_found = False
+    up_cleared = False
+    pos_changed = False
+    first_pos = None
+
+    for t in tics:
+        fwd = int(t.get("fwd", 0))
+        x = int(t.get("x", 0))
+        y = int(t.get("y", 0))
+        if first_pos is None:
+            first_pos = (x, y)
+        if fwd > 0:
+            down_found = True
+            if (x, y) != first_pos:
+                pos_changed = True
+        elif down_found and fwd == 0:
+            up_cleared = True
+            break
+
+    if not down_found:
+        return False, "Movement DOWN (fwd > 0) never observed"
+    if not pos_changed:
+        return False, "Player position never changed during movement"
+    if not up_cleared:
+        return False, "Ticcmd UP failed: forwardmove was not zeroed"
+    return True, "UP zeroing validated"
+
+
+def validate_combination_keys(records: List[dict]) -> Tuple[bool, str]:
+    """Validate that releasing move key only clears movement, keeping fire/use buttons active."""
+    tics = [r for r in records if r["type"] == "tic"]
+    combo_seen = False
+    move_released_combo_intact = False
+
+    for t in tics:
+        fwd = int(t.get("fwd", 0))
+        buttons = int(t.get("buttons", 0))
+        if buttons > 0 and fwd > 0:
+            combo_seen = True
+        elif combo_seen and fwd == 0:
+            if buttons > 0:
+                move_released_combo_intact = True
+                break
+            else:
+                return False, "Releasing movement prematurely cleared buttons"
+
+    if not combo_seen:
+        return False, "Combination (buttons > 0 and fwd > 0) never observed"
+    if not move_released_combo_intact:
+        return False, "Releasing movement did not preserve buttons state"
+    return True, "Combination key release validated"
+
+
+def validate_save_load_match(save_rec: dict, load_rec: dict) -> Tuple[bool, str]:
+    """Validate that loaded game state matches saved state."""
+    if save_rec.get("slot") != load_rec.get("slot"):
+        return False, f"Save slot mismatch: saved {save_rec.get('slot')} != loaded {load_rec.get('slot')}"
+    if save_rec.get("map") != load_rec.get("map"):
+        return False, f"Map mismatch: saved {save_rec.get('map')} != loaded {load_rec.get('map')}"
+    if save_rec.get("hp") != load_rec.get("hp"):
+        return False, f"Health mismatch: saved {save_rec.get('hp')} != loaded {load_rec.get('hp')}"
+    return True, "Save/load state matched"
 
 
 def build_qemu_argv(image: str, firmware: str, qmp_sock: str, smp: int = 1) -> List[str]:
@@ -129,6 +198,9 @@ class DoomRunner:
         self.reasons: List[str] = []
         self.scenarios: List[dict] = []
         self.records: List[dict] = []
+        self.require_tic_evidence: bool = False
+        self.require_save_evidence: bool = False
+        self.require_load_evidence: bool = False
 
     def run(self) -> int:
         """Run Doom QEMU suite and return 0 on success, non-zero on failure."""
@@ -292,6 +364,13 @@ class DoomRunner:
         if session and session.returncode is not None and session.returncode != 0:
             if not any("exit code" in r.lower() or "crashed" in r.lower() for r in self.reasons):
                 self.reasons.append(f"QEMU exited with non-zero code {session.returncode}")
+
+        if self.require_tic_evidence and not any(r["type"] == "tic" for r in self.records):
+            self.reasons.append("Missing required tic state evidence")
+        if self.require_save_evidence and not any(r["type"] == "save" for r in self.records):
+            self.reasons.append("Missing required save state evidence")
+        if self.require_load_evidence and not any(r["type"] == "load" for r in self.records):
+            self.reasons.append("Missing required load state evidence")
 
         status = "PASS" if not self.reasons else "FAIL"
         summary = {

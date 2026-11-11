@@ -428,6 +428,10 @@ jobs:
           # 90 s per-case timeout is a per-QEMU-run bound, NOT the matrix
           # budget — the nightly job's 240-minute budget above covers it.
           suite make test-qemu SUITE=boot-lifecycle
+          # Doom E2E suite (nightly/manual): requires external IWAD asset bridge
+          if [ -n "$DOOM_IWAD_PATH" ]; then
+            suite make DOOM_TEST=1 test-qemu SUITE=doom
+          fi
           # BOOT-2 early-IRQ/time matrix: 10 serial groups (normal
           # 1/2/4/8, force-rtc 2, rtc-timeout 1, bsp-lapic-fail 1/2/4,
           # unsafe-open 1); the 90 s per-case timeout is per-QEMU-run.

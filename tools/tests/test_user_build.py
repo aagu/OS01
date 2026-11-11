@@ -25,8 +25,8 @@ class UserBuildTest(unittest.TestCase):
         # directory or the include fails.  The rules themselves stay inert
         # here: the engine is gated on the userland capability, which the
         # fixture profile does not declare.
-        shutil.copytree(ROOT / 'user' / 'doom', self.user / 'doom',
-                        dirs_exist_ok=True)
+        (self.user / 'doom').mkdir(exist_ok=True)
+        shutil.copy(ROOT / 'user' / 'doom' / 'engine.mk', self.user / 'doom' / 'engine.mk')
         (self.user / 'crt0.S').write_text('.global _start\n_start: jmp _start\n')
         (self.user / 'sigreturn_trampoline.S').write_text('.text\n')
         (self.user / 'linker.ld').write_text('ENTRY(_start)\nSECTIONS { . = 0x400000; .text : { *(.text*) } .data : { *(.data*) } .bss : { *(.bss*) } }\n')

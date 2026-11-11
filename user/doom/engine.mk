@@ -68,6 +68,10 @@ DOOM_ENGINE_DEFS := -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE \
                     -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
                     -DOS01_DOOM
 
+ifneq ($(filter 1,$(DOOM_TEST))$(filter doom-diag,$(USER_VARIANT)),)
+DOOM_ENGINE_DEFS += -DOS01_DOOM_DIAG
+endif
+
 # The engine compiles against the LEASED immutable generation
 # ($(SYSROOT_DIR) is the generation the root user component leased) with
 # the profile's target compiler and the project's warning policy.  The
@@ -80,6 +84,10 @@ DOOM_ENGINE_CFLAGS := --sysroot=$(SYSROOT_DIR) \
     -I$(TARGET_INCDIR) \
     -Wall -Wextra -O2 \
     $(DOOM_ENGINE_DEFS)
+
+ifneq ($(filter 1,$(DOOM_TEST))$(filter doom-diag,$(USER_VARIANT)),)
+DOOM_ENGINE_CFLAGS += -I$(OS01_ROOT)/user/doom
+endif
 
 # ── The private source copy ──────────────────────────────────────
 # The digest covers the ACTUAL upstream content, the upstream commit,

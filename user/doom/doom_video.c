@@ -11,6 +11,10 @@
 #include "gfx_client_policy.h"
 #include "doom_video.h"
 
+#ifdef OS01_DOOM_DIAG
+#include "diag.h"
+#endif
+
 int doom_video_open(doom_video_t *v, unsigned requested_scale)
 {
     if (!v) {
@@ -161,17 +165,26 @@ int doom_video_draw(doom_video_t *v, const uint32_t *pixels)
         prc = gfx_present(v->handle);
         if (prc == 0) {
             v->initial_present_pending = 0;
+#ifdef OS01_DOOM_DIAG
+            doom_diag_first_frame();
+#endif
             return 0;
         }
     } else {
         prc = gfx_present_rect(v->handle, (uint32_t)v->offset_x, (uint32_t)v->offset_y,
                                v->scaled_w, v->scaled_h);
         if (prc == 0) {
+#ifdef OS01_DOOM_DIAG
+            doom_diag_present_stat(0, 0, 0);
+#endif
             return 0;
         }
     }
 
     int err = errno;
+#ifdef OS01_DOOM_DIAG
+    doom_diag_present_stat(prc, err, 0);
+#endif
     gfx_client_verdict_t verdict = gfx_client_classify(err);
     if (verdict == GFX_CLIENT_RETRY) {
         return 1;

@@ -388,6 +388,56 @@ class DoomRunnerStrictFailureTests(unittest.TestCase):
         self.assertEqual(summary["record_count"], 1)
         self.assertTrue((self.out_dir / "doom_title.ppm").exists())
 
+    def test_incomplete_line_rejected(self):
+        """Half-line or truncated record without trailing newline must not be parsed."""
+        from qemutests.doom_test import parse_diag_record
+        self.assertIsNone(parse_diag_record("[doom-diag] v=1 nonce=123 seq=1"))
+
+    def test_missing_state_evidence_fails(self):
+        """A scenario missing required tic or save evidence must FAIL."""
+        from qemutests.doom_test import DoomRunner
+        runner = DoomRunner(
+            image=self.img,
+            firmware=self.fw,
+            smp=1,
+            timeout=30.0,
+            output_dir=self.out_dir,
+        )
+        nonce = runner.nonce
+        # Only ready marker is emitted, but scenario requires tic state
+        session = FakeProcessSession(
+            argv=[],
+            run_dir=self.out_dir,
+            timeout_s=60.0,
+            initial_text=f"[doom-diag] v=1 nonce={nonce} pid=42 seq=1 type=ready\n",
+            exit_code=0,
+        )
+        qmp = FakeQMP(path="qmp.sock")
+        runner.session_factory = lambda **kw: session
+        runner.qmp_factory = lambda path: qmp
+        # Require tic evidence
+        runner.require_tic_evidence = True
+        rc = runner.run()
+        self.assertNotEqual(rc, 0, "Missing required state evidence must fail")
+
+    def test_normal_build_has_no_diag_or_testctl(self):
+        """Normal user build must not install doom_testctl or include diag hooks."""
+        from qemutests.test_doom_build_contract import run_make
+        r = run_make("DOOM_TEST=0", "-n", "image")
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("doom_testctl.elf", r.stdout)
+
+    def test_normal_diag_normal_rebuild_isolated(self):
+        """Rebuilding normal -> diag -> normal uses separate user variant dirs."""
+        from qemutests.test_doom_build_contract import run_make
+        r_normal1 = run_make("DOOM_TEST=0", "print-user-paths")
+        r_diag = run_make("DOOM_TEST=1", "print-user-paths")
+        r_normal2 = run_make("DOOM_TEST=0", "print-user-paths")
+        if r_diag.returncode == 0 and r_normal1.returncode == 0:
+            self.assertIn("doom-diag", r_diag.stdout)
+            self.assertNotIn("doom-diag", r_normal1.stdout)
+            self.assertNotIn("doom-diag", r_normal2.stdout)
+
     def test_smp_validation(self):
         """Runner must reject SMP values other than 1 or 2."""
         from qemutests.doom_test import DoomRunner
@@ -401,6 +451,61 @@ class DoomRunnerStrictFailureTests(unittest.TestCase):
                         smp=bad_smp,  # type: ignore
                         output_dir=self.out_dir,
                     )
+
+    def test_validate_ticcmd_up_clearing_success(self):
+        from qemutests.doom_test import validate_ticcmd_up
+        records = [
+            {"type": "tic", "fwd": 25, "x": 100, "y": 200},
+            {"type": "tic", "fwd": 25, "x": 110, "y": 200},
+            {"type": "tic", "fwd": 0, "x": 115, "y": 200},
+        ]
+        ok, msg = validate_ticcmd_up(records)
+        self.assertTrue(ok, msg)
+
+    def test_validate_ticcmd_up_clearing_fails_if_not_zeroed(self):
+        from qemutests.doom_test import validate_ticcmd_up
+        records = [
+            {"type": "tic", "fwd": 25, "x": 100, "y": 200},
+            {"type": "tic", "fwd": 25, "x": 110, "y": 200},
+        ]
+        ok, msg = validate_ticcmd_up(records)
+        self.assertFalse(ok)
+        self.assertIn("forwardmove was not zeroed", msg)
+
+    def test_validate_combination_keys_success(self):
+        from qemutests.doom_test import validate_combination_keys
+        records = [
+            {"type": "tic", "buttons": 1, "fwd": 25},
+            {"type": "tic", "buttons": 1, "fwd": 0},
+            {"type": "tic", "buttons": 0, "fwd": 0},
+        ]
+        ok, msg = validate_combination_keys(records)
+        self.assertTrue(ok, msg)
+
+    def test_validate_combination_keys_fails_premature_clear(self):
+        from qemutests.doom_test import validate_combination_keys
+        records = [
+            {"type": "tic", "buttons": 1, "fwd": 25},
+            {"type": "tic", "buttons": 0, "fwd": 0},
+        ]
+        ok, msg = validate_combination_keys(records)
+        self.assertFalse(ok)
+        self.assertIn("prematurely cleared buttons", msg)
+
+    def test_validate_save_load_match_success(self):
+        from qemutests.doom_test import validate_save_load_match
+        s = {"slot": "0", "map": "1", "hp": "100"}
+        l = {"slot": "0", "map": "1", "hp": "100"}
+        ok, msg = validate_save_load_match(s, l)
+        self.assertTrue(ok, msg)
+
+    def test_validate_save_load_mismatch_fails(self):
+        from qemutests.doom_test import validate_save_load_match
+        s = {"slot": "0", "map": "1", "hp": "100"}
+        l = {"slot": "0", "map": "2", "hp": "100"}
+        ok, msg = validate_save_load_match(s, l)
+        self.assertFalse(ok)
+        self.assertIn("Map mismatch", msg)
 
 
 if __name__ == "__main__":

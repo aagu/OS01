@@ -1370,7 +1370,7 @@ test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_R
 #
 # An unknown case is rejected with a locating message and a non-zero
 # exit status.
-DOOM_HOST_REGISTERED_CASES := build config video input runtime
+DOOM_HOST_REGISTERED_CASES := build config video input runtime diag
 DOOM_CASE_RAW := $(DOOM_CASE)
 DOOM_CASE_EFFECTIVE = $(if $(strip $(DOOM_CASE_RAW)),$(DOOM_CASE_RAW),all)
 
@@ -1378,7 +1378,7 @@ _test-doom-host-run-%:
 	@echo "ERROR: unknown DOOM_CASE='$*'; valid: $(DOOM_HOST_REGISTERED_CASES), all" >&2
 	@exit 1
 
-.PHONY: test-doom-host _test-doom-host-run-build _test-doom-host-run-config _test-doom-host-run-video _test-doom-host-run-input _test-doom-host-run-runtime
+.PHONY: test-doom-host _test-doom-host-run-build _test-doom-host-run-config _test-doom-host-run-video _test-doom-host-run-input _test-doom-host-run-runtime _test-doom-host-run-diag
 test-doom-host: $(if $(filter all,$(DOOM_CASE_EFFECTIVE)),$(foreach c,$(DOOM_HOST_REGISTERED_CASES),_test-doom-host-run-$(c)),_test-doom-host-run-$(DOOM_CASE_EFFECTIVE))
 	$(call require_capability,rootfs)
 	@case "$(DOOM_CASE_EFFECTIVE)" in \
@@ -1418,6 +1418,11 @@ _test-doom-host-run-input:
 _test-doom-host-run-runtime:
 	@echo "  [test-doom-host] runtime"
 	$(call os01_submake,hosttests,test-doom-runtime $(OS01_SUBMAKE_ARGS))
+
+# D06 T3: diagnostic observation fixture
+_test-doom-host-run-diag:
+	@echo "  [test-doom-host] diag"
+	$(call os01_submake,hosttests,test-doom-diag $(OS01_SUBMAKE_ARGS))
 
 # D05: Doom asset validation and packaging contract
 .PHONY: test-doom-assets
@@ -2837,6 +2842,11 @@ print-run-paths:
 	$(call require_capability,rootfs)
 	@echo firmware=$(abspath $(OVMF_FIRMWARE))
 	@echo image=$(abspath $(DISK_IMG))
+
+.PHONY: print-user-paths
+print-user-paths:
+	@echo user_build_dir=$(abspath $(USER_BUILD_DIR))
+	@echo user_artifact_dir=$(abspath $(USER_ARTIFACT_DIR))
 
 # ── Help ─────────────────────────────────────────────────────
 # Lists the root Makefile's user-facing targets, grouped by category, with the

@@ -273,4 +273,28 @@ test-doom-runtime: $(TEST_BLD)/test_doom_runtime.elf
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
 
+# ── D06: diagnostic observation fixture ──────────────────────────────
+$(eval $(call register_host_test,test_doom_diag,doom,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_doom_diag.elf
+
+$(DOOM_HOST_DIR)/diag.o: $(TESTS_DIR)/user/doom/diag.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_doom_diag.o: $(TEST_CASES)/test_doom_diag.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_doom_diag.elf: $(TEST_BLD)/test_doom_diag.o $(DOOM_HOST_DIR)/diag.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-doom-diag
+test-doom-diag: $(TEST_BLD)/test_doom_diag.elf
+	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
+	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
+	    --timeout $(HOST_TEST_TIMEOUT) \
+	    $<
+
 -include $(DOOM_HOST_DIR)/*.d

@@ -2,6 +2,9 @@
 # Only immediate user/*/app.mk directories define applications; common/ has none.
 USER_SOURCE_DIR := $(OS01_ROOT)/user
 USER_APP_MAKEFILES := $(sort $(wildcard $(USER_SOURCE_DIR)/*/app.mk))
+ifeq ($(filter 1,$(DOOM_TEST))$(filter doom-diag,$(USER_VARIANT)),)
+USER_APP_MAKEFILES := $(filter-out $(USER_SOURCE_DIR)/doom_testctl/app.mk,$(USER_APP_MAKEFILES))
+endif
 USER_FLAT_SOURCES := $(notdir $(wildcard $(USER_SOURCE_DIR)/*.c))
 ifneq ($(FB_RESOLUTION_TEST),1)
 USER_FLAT_SOURCES := $(filter-out test_resolution.c,$(USER_FLAT_SOURCES))

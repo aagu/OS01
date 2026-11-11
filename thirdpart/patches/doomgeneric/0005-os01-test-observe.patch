@@ -1,0 +1,87 @@
+--- a/doomgeneric/g_game.c	2026-11-11 09:49:48.594766404 +0800
++++ b/doomgeneric/g_game.c	2026-11-11 09:49:48.594813213 +0800
+@@ -28,6 +28,10 @@
+ #include "deh_main.h"
+ #include "deh_misc.h"
+ 
++#ifdef OS01_DOOM_DIAG
++#include "diag.h"
++#endif
++
+ #include "z_zone.h"
+ #include "f_finale.h"
+ #include "m_argv.h"
+@@ -1023,6 +1027,17 @@
+ 	D_PageTicker (); 
+ 	break;
+     }        
++#ifdef OS01_DOOM_DIAG
++    if (playeringame[consoleplayer]) {
++        player_t *p = &players[consoleplayer];
++        int px = p->mo ? p->mo->x : 0;
++        int py = p->mo ? p->mo->y : 0;
++        int pangle = p->mo ? (int)p->mo->angle : 0;
++        doom_diag_tic(gametic, leveltime, gamestate, gamemap,
++                      px, py, pangle,
++                      p->cmd.forwardmove, p->cmd.sidemove, p->cmd.angleturn, p->cmd.buttons);
++    }
++#endif
+ } 
+  
+  
+@@ -1589,6 +1604,15 @@
+     
+     // draw the pattern into the back screen
+     R_FillBackScreen (); 
++#ifdef OS01_DOOM_DIAG
++    if (playeringame[consoleplayer]) {
++        player_t *p = &players[consoleplayer];
++        int px = p->mo ? p->mo->x : 0;
++        int py = p->mo ? p->mo->y : 0;
++        int pangle = p->mo ? (int)p->mo->angle : 0;
++        doom_diag_load(savegameslot, gamemap, px, py, pangle, p->health);
++    }
++#endif
+ } 
+  
+ 
+@@ -1675,6 +1699,16 @@
+     remove(savegame_file);
+     rename(temp_savegame_file, savegame_file);
+     
++#ifdef OS01_DOOM_DIAG
++    if (playeringame[consoleplayer]) {
++        player_t *p = &players[consoleplayer];
++        int px = p->mo ? p->mo->x : 0;
++        int py = p->mo ? p->mo->y : 0;
++        int pangle = p->mo ? (int)p->mo->angle : 0;
++        doom_diag_save(savegameslot, savedescription, gamemap, px, py, pangle, p->health);
++    }
++#endif
++
+     gameaction = ga_nothing;
+     M_StringCopy(savedescription, "", sizeof(savedescription));
+ 
+--- a/doomgeneric/m_config.c	2026-11-11 09:49:48.594844822 +0800
++++ b/doomgeneric/m_config.c	2026-11-11 09:49:48.594876061 +0800
+@@ -28,6 +28,10 @@
+ 
+ #include "doomtype.h"
+ #include "doomkeys.h"
++
++#ifdef OS01_DOOM_DIAG
++#include "diag.h"
++#endif
+ #include "doomfeatures.h"
+ #include "i_system.h"
+ #include "m_argv.h"
+@@ -1930,6 +1934,9 @@
+ 
+     LoadDefaultCollection(&doom_defaults);
+     LoadDefaultCollection(&extra_defaults);
++#ifdef OS01_DOOM_DIAG
++    doom_diag_bindings();
++#endif
+ }
+ 
+ // Get a configuration file variable by its name
