@@ -1,17 +1,22 @@
 # OS01 优化路线图
 
-> **基准**: `9eefb967`（2026-11-07）；USB xHCI 主机控制器与 USB 核心栈 Phase 1–4、/dev/usb 多级节点与 /bin/lsusb、ARCH-10/11/12/14 闭环、ARCH-6 FS 并发与块缓存闭环、双架构统一 kernel_main 启动编排
-> **日期**: 2026-11-07
+> **基准**: `2aa56068`（2026-11-11）；BOOT-1~5 启动治理、libc 补全 T1~T17、Doom 移植 D01~D06、
+> systest 模块化、aarch64 每核 tick 记账、framebuffer write-back 修复均已闭环
+> **日期**: 2026-11-11
 
-roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`。
+roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`，
+近期闭环项的快速索引见文末「近期闭环索引」。
 
 ## 当前状态（一句话）
 
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统，PID 1 init 优雅关机闭环）
-- **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、**ARCH-5（VFS 抽象补强：fs 注册表/ops 分离/元数据/活跃节点回收/挂载树/dcache，2026-10-24 闭环）**、ARCH-7（移除 `#define mmap`）、ARCH-9（驱动模型/PCI/总线解耦）、**ARCH-10（静态容量与工程卫生，2026-11-02 闭环）**、**ARCH-11（devfs 子目录化：多级注册路径 + 目录树，2026-11-02 闭环）**、**ARCH-12（lspci PCI 设备列举命令：零 syscall 的 `/dev/pci` 命名空间 + `/bin/lspci`，2026-11-02 闭环）**、**ARCH-14（USB xHCI 主机控制器与用户态 lsusb：Phase 1–4 全链路，2026-11-06 闭环）**、**ARCH-6（FS 并发与块缓存：调度器 per-mount mutex + blockdev 写回块缓存 + 四核 FS 压测，2026-11-07 闭环）** 均已闭环合入 master；**双架构统一 kernel_main（启动 facade 钩子 + 单一 `kernel_main` 入口，2026-11-07 闭环）**；剩余 ARCH-8（子系统框架补完）待启动
-- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移、QEMU 分辨率切换与显示所有权协调器、LVGL v9.5.0 初步移植与图形 showcase、**GUI-1 LVGL 平台后端（libgui）**、**GUI-2 输入与焦点**、**GUI-3 Material 风格桌面**、**GUI-2b 原生控件体系与统一焦点引擎（彻底废除桌面临时自建焦点，`gui_widget.h` / `gui_layout.h` / `gui_event.h` / `gui_focus.h`，2026-10-26 闭环）** 均已合入 master；后续推进 GUI-4 字体资源与 GUI-5/6 窗口服务器
+- **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、ARCH-5（VFS 抽象补强）、ARCH-6（FS 并发与块缓存）、ARCH-7（移除 `#define mmap`）、ARCH-8（子系统框架补完，2026-11-08 随 BOOT-3/BOOT-4 闭环）、ARCH-9（驱动模型/PCI/总线解耦）、ARCH-10（静态容量与工程卫生）、ARCH-11（devfs 子目录化）、ARCH-12（`/bin/lspci`）、ARCH-14（USB xHCI + `/bin/lsusb`）**均已闭环合入 master**
+- **启动编排治理**：BOOT-1~5 五项 spec 全部实施并验收（2026-11-08）—— CPU 生命周期与 SMP 握手、早期中断与时间设施顺序、启动失败传播、阶段契约与跨架构编排、调度启动与服务解耦；双架构统一 `kernel_main` 入口已于 2026-11-07 闭环
+- **用户态 libc**：补全 T1~T17 闭环（2026-11-09），15 个接口组全部交付且有 host + guest 证据；**POSIX 正则引擎（T16）与 glob 匹配本期不实现**（用户决定，保留桩）
+- **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移、QEMU 分辨率切换与显示所有权协调器、LVGL v9.5.0 初步移植与图形 showcase、GUI-1 LVGL 平台后端、GUI-2 输入与焦点、GUI-3 Material 风格桌面、GUI-2b 原生控件体系与统一焦点引擎均已合入 master；**帧缓冲映射已从 UC 改为 write-back 并统一所有别名 cache policy（2026-11-11）**；后续推进 GUI-4 字体资源与 GUI-5/6 窗口服务器
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；用户态 ASLR 规划中
-- **硬件适配**：**USB xHCI 主机控制器与 USB 核心栈 Phase 1–4 就绪**（PCI 探测、寄存器解析、命令/事件环、中断器0、Root Hub 端口复位、Slot 分配、地址配置、EP0 控制传输、配置描述符层次树解析、动态端点环、多端点配置、`/dev/usb` 属性切片节点与用户态 `/bin/lsusb` 工具全部闭环）；后续推进 USB HID 输入、USB 大容量存储 (BOT) 与真机启动验证。
+- **硬件适配**：USB xHCI 主机控制器与 USB 核心栈 Phase 1–4 就绪（PCI 探测、寄存器解析、命令/事件环、中断器 0、Root Hub 端口复位、Slot 分配、地址配置、EP0 控制传输、配置描述符层次树解析、动态端点环、多端点配置、`/dev/usb` 属性切片节点与用户态 `/bin/lsusb`）；ACPI **S5 关机已实现**（FADT PM1a + SLP_EN）；后续推进 USB HID 输入、USB 大容量存储 (BOT)、ACPI 休眠与真机启动验证
+- **应用层**：Doom 移植闭环（2026-11-11）—— `doomgeneric` 引擎经独占 `libgfx` surface + 租约化 PS/2 输入发布为 `/bin/doom`，含 IWAD 本地打包、许可材料、存档与配置持久化、跨 SMP boot 玩法验证；**音频输出为禁用静音桩**（尚无声卡驱动）
 
 详细背景、commit 记录、经验教训见 `docs/changelog.md` + 各专题 closure 文档（`docs/archive/aarch64/`）+ 主题 docs。
 
@@ -27,24 +32,18 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| ASLR-A：mmap 基址 | 先限 x86_64 用户态：每次新地址空间建立时随机化 mmap 搜索基址；fork 继承现有布局；保留 MAP_FIXED 语义，并验证地址窗口、冲突与溢出 | STRONG-only `kernel_random_get_strong()` ✅；需先定熵不可用时的失败语义与用户 VA 窗口 | |
-| ASLR-B：ET_DYN/PIE | 单独实施可重定位 ELF 的加载偏移、静态 PIE 重定位及用户程序构建迁移（含 BusyBox） | ASLR-A 验收；当前 ELF loader 仅支持 ET_EXEC、用户构建使用 `-fno-pie -no-pie`；需设计重定位、linker script、启动 ABI/auxv 与回退测试 | |
-| UBSan + KASan | 内核编译期 instrument | 独立 | ArvernOS |
-| 堆加固 | malloc double-free/溢出检测 | 独立 | |
-| NX 页 | 栈/堆不可执行 + mmap `PROT_EXEC` 审计 | 独立 | |
+| ASLR-A：mmap 基址 | 先限 x86_64 用户态：每次新地址空间建立时随机化 mmap 搜索基址；fork 继承现有布局；保留 MAP_FIXED 语义，并验证地址窗口、冲突与溢出 | STRONG-only `kernel_random_get_strong()` ✅（`kernel/random/random.c`）；需先定熵不可用时的失败语义与用户 VA 窗口 | |
+| ASLR-B：ET_DYN/PIE | 单独实施可重定位 ELF 的加载偏移、静态 PIE 重定位及用户程序构建迁移（含 BusyBox） | ASLR-A 验收；当前 ELF loader 仅支持 ET_EXEC（`kernel/include/fs/elf.h` 只定义 `ET_EXEC`）、用户构建使用 `-fno-pie -no-pie`（`mk/components/run.mk`）；需设计重定位、linker script、启动 ABI/auxv 与回退测试 | |
+| UBSan + KASan | 内核编译期 instrument | 独立（构建体系当前无 `-fsanitize` 接入） | ArvernOS |
+| 堆加固 | malloc double-free/溢出检测 | 独立（`libc/stdlib/malloc.c` 现无 free-list 校验/poison 机制） | |
+| NX 页 | 栈/堆不可执行 + mmap `PROT_EXEC` 审计 | 独立（`kernel/memory/vma.c` 已支持 `PROT_EXEC` 语义，**但栈/堆不可执行尚未审计**） | |
 
 ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 `USER_STACK_BASE=0x1400000`；栈随机化另列后续范围，完成 A/B 后也不能称为完整用户态 ASLR。aarch64 phase 1 尚无用户态，本项先不扩大到 aarch64。
 
 ### 🏗 P2 aarch64 适配
 
-已完成前置项（详见 `docs/changelog.md` + 各专题报告）：
-- **基础与外设**：v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Phase 2 #1~#5 / GICv2 Phase 1 + GIC probe fix / AAGU-3 subsys_stub convergence / AAGU-29 libk.a link / IPI TPIDR_EL1 fix / EL1 sync 致命诊断 / **引导字标（boot logo 经 `fb_write` facade 绘制）**。
-- **内存管理**：**M0 启动映射契约**（`head.S` 0..2 GiB boot map）/ **M1 运行期直映**（`arch_boot_direct_map_*` 接口 + 独立 TTBR1）/ **M2 Slab 接入**（编译生产 `memory/slab.c`，2026-10-05 闭环）/ **M3 内核 VMM**（语义层拆分 + aarch64 backend + SMP shootdown + M3.1 audit gate，2026-10-05 闭环）。
-- **执行体与调度**：**EL1 BSP 协作式内核线程调度（P1–P5 全通过）**（2026-10-31 闭环，merge `fa7d51ac`）：架构上下文门面（`arch/context.h` + per-arch `thread_t` 布局与偏移断言）、公共调度器拆分（`sched/boot.c`/`sched/kthread.c`/`sched/internal.h`）、aarch64 EL1 切换机器码（`switch.S`/`thread_entry.S`/`task_arch.c` 预切栈校验）与 BSP 栈交接、协作 `kthread_yield()`/blocker/`kthread_exit()` 自回收、`MODE=sched` 严格证据 runner 与 4 个编译期故障注入变体。
-- **aarch64 AP 协作式调度 P1 — 轮询协作式（2026-11-01 验收）**：`<arch/sched.h>` 门面 + per-arch `cpu/sched_notify.c` 后端（默认 mask/通知/scan 策略）、并发安全资源 observer（token/批次/失败旗标）、`arch/aarch64/cpu/ap_sched.c` 单向 task-stack handoff（prepare/release/released/enter/idle_handoff/stack_enter + 冻结 `smp_accepted_mask` admission）、fatal 无栈单 owner 仲裁（`AARCH64_AP_SCHED_TEST=fatal-owner` 独立 2 核故障 boot）、生产路径 7 case 验收（`MODE=sched-ap` 1/2/4/8 核矩阵 + `aarch64_ap_scheduler.py` 严格 runner）。P1 验收时 idle 全程忙等轮询，后续 P2 已替换此 idle 路径。
-- **aarch64 AP 协作式调度 P2 — SGI + WFI（2026-11-01 验收）**：SGI4 远端通知、显式 blocker wake 与生命周期保护、IRQ 屏蔽的最终工作检查和 `dsb sy; wfi; ret` 等待窗口；`MODE=sched-wake` 继承 P1 七个 case 并新增六个 wake case，1/2/4/8 核各两次运行。两轮独立评审修复后明确 APPROVE；[验证报告](superpowers/reports/2026-10-31-aarch64-ap-sched-p2-validation.md) / [评审记录](superpowers/reports/2026-11-01-aarch64-ap-sched-p2-final-review.md)。**仍为 EL1 协作式：AP timer、IRQ 返回抢占、迁移与 M4 用户态不在本期范围。**
-- **aarch64 每核调度 tick 记账（2026-11-06 验收）**：每个已录用 CPU 拥有私有的 100 Hz CNTP 周期中断（本核记账样本 + tick 驱动 vruntime；BSP 仍独占 jiffies/poll timeout/timer list/blocker scan，全局时间基准不迁移到 AP）；CNTP 配置在启动期冻结并由 BSP 一次性发表，AP 只 arm 自己的计数器（频率/PPI/period 越界即失败）；`schedule()` 不再在 aarch64 计费，避免同一 tick 双计；中断路径保持协作式（tick handler 与 IRQ 返回路径都不调用 `schedule()`），BSP 每个有效 tick（含 idle）请求一次协作 reschedule，AP idle tick 不无条件请求；`MODE=sched-tick` 变体在每个已录用 CPU 上发布七个冻结 case 的证据行，严格 runner `qemutests/aarch64_sched_tick.py` 按冻结字段与跨字段关系解析，1/2/4/8 核各两次运行。[验证报告](superpowers/reports/2026-11-06-aarch64-percpu-tick-accounting-validation.md)。**仍为 EL1 协作式：没有 IRQ 返回抢占，没有迁移，EL0/统一 kernel_main 仍未完成。**
-- **中断/异常分派统一**：**第一期（2026-10-24）** 落地架构中立无状态分派器 `arch_intr_dispatch()` 与 6 条统一入口（aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF）；**第二期（2026-10-25）** 接入 x86 当前安装的 20 条异常与 28 条 IRQ。
+**已完成前置项**（详见 `docs/changelog.md` 2026-10-05 ~ 11-07 各条目 + `docs/arch.md`）：
+v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Phase 2 #1~#5 / GICv2 Phase 1 / AAGU-3 subsys_stub convergence / AAGU-29 libk.a link / IPI TPIDR_EL1 fix / 引导字标 / M0 启动映射契约 / M1 运行期直映 / M2 Slab 接入 / M3 内核 VMM / EL1 BSP 协作式内核线程调度 P1–P5 / AP 协作式调度 P1（轮询）与 P2（SGI + WFI）/ 每核调度 tick 记账 / 中断-异常分派统一第一期与第二期 / 双架构统一 `kernel_main`。
 
 #### 内存管理与执行体后续任务
 
@@ -54,10 +53,6 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 #### 架构统一推进链（迈向单一 kernel_main）
 
-本节已完成项：
-
-- **统一 kernel_main（2026-11-07 闭环，merge `402cf7e6`）**：双架构启动编排统一到单一 `kernel/core/main.c::kernel_main()`，`aarch64_main` 符号彻底消除。跨架构启动 facade `kernel/include/arch/boot.h`（`arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_subsystems` / `arch_boot_percpu` / `arch_boot_device_nodes` / `arch_boot_aps` / `arch_post_smp_selftest` / `arch_start_kernel_idle` 等强覆盖钩子，缺实现即链接失败）+ 编译期特性门 `kernel/include/arch/features.h`（`OS01_HAS_VFS` / `OS01_HAS_USERSPACE`）；aarch64 早期 arena 预检的大栈帧隔离到 `aarch64_early_arena_preflight()`，编排函数栈帧统一收敛到 512 字节门禁内；新增 `qemutests/test_boot_facade_headers.py` 与 `qemutests/test_audit_symbol_contract.py` 门禁（readelf 严格校验唯一 `kernel_main` 入口、拒绝 `aarch64_main` 残留）。设计 [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md)，实施 [plan](superpowers/plans/2026-11-07-unified-kernel-main.md)，闭环记录见 `docs/changelog.md` 2026-11-07 条目。
-
 剩余待统一项：
 
 | 项 | 内容 | 依赖 | 借鉴 |
@@ -66,27 +61,13 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现。当前仅有跨架构钩子 `arch_boot_aps()`，尚无统一 AP 启动语义 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一（剩余项） | EL1 架构上下文门面（`arch/context.h`）与 aarch64 BSP 切换已闭环。**剩余待统一**：多核 SMP 调度切换、IRQ 返回抢占与用户态 EL0/sysret 切换 | EL1 调度 ✅；SMP 启动统一；M4 用户态 | Tilck |
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份（仓库内目前无此接口） | 独立 | Linux cpufeature |
-| GICv2 Phase 2 | SError/真机覆盖率；`aarch64_main` 接 GIC init → 已随统一 kernel_main 改为在 `kernel_main` 路径的 GIC init 阶段接入；handler 表扩容（SGIs 0-15 + PPI 16-31 全注册）；dtb_gicd_base 解耦 | GICv2 Phase 1 ✅ | |
+| GICv2 Phase 2 | SError/真机覆盖率；GIC init 现已在 `kernel_main` 路径的阶段契约下接入（`aarch64_main` 已于 2026-11-07 删除）；handler 表扩容（当前仅注册 SGI 0~4，尚未覆盖 SGI 0-15 + PPI 16-31 全注册）；dtb_gicd_base 解耦 | GICv2 Phase 1 ✅ | |
 
 **距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：单一入口已达成；剩余差距集中在用户态与抢占语义 —— M4 用户地址空间与 EL0 异常路径、IRQ 返回抢占、统一 SMP 启动与多核上下文切换，约 4–8 周。详见 `docs/arch.md` 末段与统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
 
-### 🧱 P2 架构治理 / 扩展性（2026-10-04 仓库扫描）
-
-已完成治理任务（已合入 master，交付详情见 `docs/changelog.md`）：
-- **ARCH-1 syscall 层脱离 arch**（2026-10-04 完成，74 个 syscall 业务 switch 抽离出 `trap.c`）
-- **ARCH-2 Linux ABI 兼容层独立**（2026-10-05 完成，`kernel/syscall/compat/` 独立子目录，`int16_t` 翻译表防溢出）
-- **ARCH-3 头文件全局符号消除 + `-z muldefs` 裁撤**（2026-10-04 完成，消除 37 TU 重复符号风险）
-- **ARCH-4 拆分 `sched/task.c`**（2026-10-04 完成，2764 行巨无霸拆分为调度、进程生命周期、用户栈/ELF 等子模块）
-- **ARCH-5 VFS 抽象补强（Phase 1–4 全阶段）**（2026-10-24 完成，merge `c01d7969`：文件系统类型注册表 `vfs_fs_type_t`、`inode_operations`/`file_operations` 拆分并实现 `lookup`/`getattr`、`vfs_node` 元数据补全、活跃节点 `active_nodes` 与延迟孤儿回收、层级节点挂载树、256 项 LRU dcache 引擎）
-- **ARCH-7 移除 `#define mmap uint64_t*` 类型宏**（2026-10-23 完成，替换为 `typedef uint64_t *ptbl_t;` 并清理 11 处绕行块）
-- **ARCH-9 驱动模型 / 总线抽象**（2026-10-06 完成，块设备 ops、PCI core + typed `pci_driver`、`net_device` 抽象、多网卡与 BDF 观测）
-- **ARCH-10 静态容量与工程卫生**（2026-11-02 闭环，单点 NR_CPUS、范围/动态 IOAPIC GSI 上限、x86 扩展中断向量表与固定 MSI-X 解耦、动态 poll 与 RLIMIT_NOFILE 软硬限制、动态 blockdev/devfs、工程卫生与 .gitignore/.S 清理、隔离变体 arch10-capacity 验收）
-- **ARCH-11 devfs 子目录化**（2026-11-02 闭环，devfs 注册支持 `/` 分隔多级路径、内部按组件树状组织目录节点、隐式创建中间目录与 readdir 逐级遍历，VFS 零修改）
-- **ARCH-12 lspci PCI 设备列举命令**（2026-11-02 闭环，零 syscall 实现 `/dev/pci/<BDF>/<attr>` 命名空间发布，用户态 `/bin/lspci` 工具支持 `-x`/`-n`/`-v`）
-- **ARCH-14 USB xHCI 主机控制器与用户态 lsusb**（2026-11-06 闭环，Phase 1–4 全链路：PCI 探测与 MMIO 初始化、端口复位与 Slot 分配、EP0 控制传输与描述符获取、配置树解析与动态端点环、多端点配置、全局控制器跟踪、`/dev/usb` 10 类属性与二进制切片读取节点、`/bin/lsusb` 确定性排序与 `-v`/`-s` 支持，合入 master commit `cf071a0b` ~ `ae7a5999`）
-- **ARCH-6 FS 并发与块缓存**（2026-11-07 闭环，短中期目标全交付：ext2/FAT/tmpfs 三大 FS 大锁从「spinlock 持锁跨 AHCI 忙等」升级为调度器支持的 per-mount `mutex_t`（tmpfs 由全局锁改 per-mount ctx，pre-SMP 挂载期沿用 vfs bootstrap 门控豁免）；blockdev 层新增 sector 粒度写回块缓存 `kernel/block/bcache.c`（物理盘 (dev, LBA) 哈希、分区透传、per-buf pin/BUSY 预留 + ARM→重查等待握手、data_lock sector 原子性、LRU 逐出脏写回可恢复、耗尽睡眠等待、显式 `block_device_flush()` 与 `SYS_sync` 全盘 flush 接线）；SMP 验收 = 内核 late 双 CPU 自测 `bcache_smp_coherence`（同 sector 原子性/并发缺失/flush drain/耗尽等待）+ 宿主 `test_bcache` 23 用例 + 四核用户态压测 suite `arch6-fsstress`（4 worker × ext2/tmpfs/vfat 并发写读校验/rename/跨 worker 可见性/共享目录竞争，fail-closed 解析器 + 宿主协议回归 28 项）；commit `5e233fe1` ~ `1b432f75`）
+### 🧱 P2 架构治理 / 扩展性
 
 **ABI 决策（2026-10-04）**：OS01 自有 syscall ABI（`kernel/include/uapi/syscall.h`）为**唯一标准**；Linux x86_64 ABI 仅作为兼容层（服务 BusyBox 等 `PF_LINUX_ABI` 二进制），不反向主导编号或语义。
 
@@ -94,38 +75,24 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 问题 | 目标 / 完成条件 | 依赖 |
 |----|------|----------------|------|
-| ARCH-8 子系统框架补完 | 数字 phase 3–6 仅覆盖部分启动阶段；同 phase 按注册/链接顺序执行；BOOT-3 已实现失败屏障；固定注册表和 per-CPU 回调执行位置仍需明确契约。框架当前已使用 `log_*` | 失败传播归 BOOT-3；命名阶段、依赖检查、per-CPU 语义归 BOOT-4；固定表是否改链接段驱动按容量与生命周期需求裁决，不预设完整 DAG 或将全部启动流程纳入注册框架 | 统一 kernel_main ✅；BOOT-1～5 全部完成并已验收 |
-
-#### 启动编排治理：五个 spec（2026-11-07）
-
-依据：[系统启动顺序、阶段抽象与优化分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md)（源码基准 `b3a4f3bc`）。BOOT-1～5 全部实施完成并已通过验证。原分析报告为历史静态快照，后续实施证据以各项验证报告为准；启动失败传播与必需能力检查仍归 BOOT-3。
-
-| Spec | 范围 | 验收目标 | 依赖 / 状态 |
-|------|------|----------|-------------|
-| BOOT-1 CPU 生命周期与 SMP 握手 | 明确 percpu 构造、online、ipi_ready、scheduler_ok 的生产者与消费者；修正 x86 AP 响应等待条件，并保留 aarch64 shootdown 资格约束 | 延迟/不响应 AP 不会误判成功；IPI/调度只使用符合条件的 CPU；双架构 SMP/shootdown 回归 | 统一 kernel_main ✅；[spec R2](superpowers/specs/2026-11-07-boot-1-cpu-lifecycle-design.md) / [plan R2](superpowers/plans/2026-11-07-boot-1-cpu-lifecycle.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-07-boot-1-doc-review.md)）；**已实施并验收**（2026-11-08，[验证报告](superpowers/reports/2026-11-07-boot-1-validation.md)：构造/发布分离、x86 两阶段握手与 fail-closed、消费者 acquire 审计、8 组 boot-lifecycle 故障矩阵、aarch64 no-ack runtime 资格记录；全部门禁 rc=0）。BOOT-2 后续实现与验收见下行 |
-| BOOT-2 早期中断与时间设施启动顺序 | 分离控制器配置、masked handler 注册、中断源启动、CPU IRQ 放行；明确 BSP percpu、RTC PF采样/PIC级联、IRQ返回和bootstrap PIT依赖 | 首次 IRQ 可达路径满足前置条件；RTC事务清理、PIT/LAPIC handoff与fallback正常；真实IRQ/frame配对返回及phase5前PIT证据 | BOOT-1已有验收记录；[spec R2](superpowers/specs/2026-11-08-boot-2-early-irq-time-design.md) / [plan R2](superpowers/plans/2026-11-08-boot-2-early-irq-time.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-08-boot-2-doc-review.md)）；**已实施并验收**（2026-11-08，[验证报告](superpowers/reports/2026-11-08-boot-2-validation.md)：masked registration/PIC 级联、BSP context 状态机、受控 RTC 事务、有界校准与原子 handoff、10 组 boot-irq-time 矩阵；全部门禁 rc=0）。BOOT-3 后续实现与验收见下行；BOOT-4后续实现与验收见下行；BOOT-5已完成 |
-| BOOT-3 启动失败传播与必需能力检查 | 注册首错latch/initcall屏障、必需/可选策略、根挂载与TTY/PTY、私有stdio事务及spawn继承失败检查；承接ARCH-8失败处理 | 必需失败立即停止并跨架构准确归因；可选失败可查询降级；17组隔离故障矩阵与真实ARM日志/exec发布前验证 | BOOT-1/2已有验收记录；[spec R3](superpowers/specs/2026-11-08-boot-3-failure-policy-design.md) / [plan R2](superpowers/plans/2026-11-08-boot-3-failure-policy.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-08-boot-3-doc-review.md)）；**已有实现与验收记录**（2026-11-08，[验证报告](superpowers/reports/2026-11-08-boot-3-validation.md)，实现收束 `eebecfbf`） |
-| BOOT-4 阶段契约与跨架构编排 | 公共钩子与真实能力核验、四命名阶段/有限requires、BSP CPU准备与本核硬件初始化区分；保留固定表，承接ARCH-8编排 | 双架构公共后置条件可核验；同阶段依赖不靠链接次序；14组隔离编排矩阵；注释/文档一致 | BOOT-1～3已有记录；[spec R2](superpowers/specs/2026-11-08-boot-4-stage-contracts-design.md) / [plan R2](superpowers/plans/2026-11-08-boot-4-stage-contracts.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-08-boot-4-stage-contracts-doc-review.md)）；**已实施并验收**（2026-11-08，[验证报告](superpowers/reports/2026-11-08-boot-4-validation.md)：阶段常量与拓扑预检、BSP CPU准备与本地硬件解耦、公共启动钩子与三检查点能力核验、双架构 14 组 boot-contract 矩阵全 PASS；全部门禁 rc=0）。BOOT-5 验收见下行 |
-| BOOT-5 调度启动与系统服务解耦 | 公共用户态启动策略、网络/thermal和late selftest与架构机制分离；VFSruntime先于首任务publish；spawn资格重检与完整发布 | PID1优先；UPcreation window/AP并发与真实FS锁证据；8组新矩阵及终端/Ctrl-C回归 | BOOT-1～4已有记录；[spec R2](superpowers/specs/2026-11-08-boot-5-scheduler-services-design.md) / [plan R2](superpowers/plans/2026-11-08-boot-5-scheduler-services.md) 均经子 agent **APPROVE**（[评审记录](superpowers/reports/2026-11-08-boot-5-doc-review.md)）；**已实施并验收**（2026-11-08，[验证报告](superpowers/reports/2026-11-08-boot-5-validation.md)：VFS runtime 门禁与交接、初始用户任务 placement 准入重检与原子发布、公共用户态初始化与后台服务解耦、8 组 boot-services 矩阵及无头终端 Ctrl-C 回归全 PASS；全部门禁 rc=0） |
-
-建议集成顺序：**BOOT-1 → BOOT-2 → BOOT-3 → BOOT-4 → BOOT-5**。前三项优先解决正确性，后两项整理结构；BOOT-3 的失败策略设计可提前进行。每项独立编写设计 spec 和实施 plan，包含文件边界、不变量、正常/失败路径验收及双架构适用范围。
-
-范围约束：保持主要挂载先于 SMP、init 先取得 PID 1、IPI/调度分别发布就绪；不在同一改动中顺带做并行启动、完整依赖 DAG、EL0 适配或低层 AP API 全面统一。根盘选择、init respawn 退避/ASKFIRST 非阻塞监督、启动耗时观测和诊断 probe 分离留作后续独立项。实施时 syscall E2E 与内核 selftest 分开运行。
+| ARCH-8 子系统框架补完 | 数字 phase 3–6 仅覆盖部分启动阶段；同 phase 按注册/链接顺序执行；BOOT-3 已实现失败屏障；固定注册表和 per-CPU 回调执行位置仍需明确契约。框架当前已使用 `log_*` | **已闭环（2026-11-08）**：失败传播归 BOOT-3（required 致命停止 / optional 警告降级）；命名阶段、依赖检查、per-CPU 语义归 BOOT-4（命名阶段常量 + `register_subsys_deps` + 拓扑预检 + BSP-only `subsys_prepare_cpus`）；固定表是否改链接段驱动按容量与生命周期需求裁决，未预设完整 DAG | 统一 kernel_main ✅；BOOT-1～5 全部完成并已验收 |
 
 ### 🖥 P3 GUI
 
-已完成基座与功能（详见 `docs/changelog.md`）：
-- **底层与驱动**：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（`/dev/mouse` 8 字节事件 ABI）、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移至 libgfx、匿名 mmap 像素缓冲。
-- **显示所有权与恢复**：帧缓冲显示所有权协调器（`g_owner`/`g_fallback` 状态机、自动 fallback 回退、libgfx API、原始 mmap 边界与只读 PTE 保护、terminal 接管与故障恢复，2026-10-11 闭环）。
-- **LVGL 基础与平台后端**：LVGL v9.5.0 sysroot 接入；**GUI-1 LVGL 平台后端（libgui）**（显示/离屏后端、tick、flush、生命周期，2026-10-19/20 闭环）。
-- **输入交互与桌面外壳**：**GUI-2 输入与焦点**（独占物理输入租约、LVGL indev、光标、修饰键、Tab 焦点，2026-10-22 闭环）；**GUI-3 Material 风格桌面**（令牌表驱动、状态栏/启动器/抽屉/设置、四个壳内应用、16×24 图标光标、`surface_dim` 壁纸角色，2026-10-24 闭环）。
-- **原生控件体系**：**GUI-2b 原生控件与统一焦点引擎**（`gui_widget.h`、`gui_layout.h`、`gui_event.h` 与 `gui_focus.h`，彻底废除桌面临时自建焦点，2026-10-26 闭环）。
+**已完成基座与功能**（详见 `docs/changelog.md` + `docs/gui/gui.md`）：
+- **底层与驱动**：fb、fb mmap、terminal 双缓冲 + alt-screen、键盘扫描码、PS/2 鼠标驱动（`/dev/mouse` 8 字节事件 ABI）、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移至 libgfx、匿名 mmap 像素缓冲
+- **显示所有权与恢复**：帧缓冲显示所有权协调器（`g_owner`/`g_fallback` 状态机、自动 fallback 回退、libgfx API、原始 mmap 边界与只读 PTE 保护、terminal 接管与故障恢复，2026-10-11 闭环）
+- **LVGL 基础与平台后端**：LVGL v9.5.0 sysroot 接入；GUI-1 LVGL 平台后端（libgui）（显示/离屏后端、tick、flush、生命周期，2026-10-19/20 闭环）
+- **输入交互与桌面外壳**：GUI-2 输入与焦点（独占物理输入租约、LVGL indev、光标、修饰键、Tab 焦点，2026-10-22 闭环）；GUI-3 Material 风格桌面（令牌表驱动、状态栏/启动器/抽屉/设置、四个壳内应用、16×24 图标光标、`surface_dim` 壁纸角色，2026-10-24 闭环）
+- **原生控件体系**：GUI-2b 原生控件与统一焦点引擎（`gui_widget.h`、`gui_layout.h`、`gui_event.h` 与 `gui_focus.h`，彻底废除桌面临时自建焦点，2026-10-26 闭环）
+- **帧缓冲 cache policy**（2026-11-11 闭环）：framebuffer 映射由 UC 改为 write-back，policy 由 backend 自证发布并与页表映射构成同一事务，所有别名（kernel 永久映射 / `/dev/fb` 用户别名 / early boot 别名）统一同一内存类型
+- **纯 PS/2 decoder API**（2026-11-10）：扫描码解码从 `libgui` 内部拆为纯函数公开头，供 Doom 的租约输入适配复用
 
 #### 后续功能任务（按依赖推进）
 
 | 项 | 内容 / 完成条件 | 依赖 |
 |----|-----------------|------|
-| GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1 ✅、GUI-2 ✅、GUI-3 ✅、GUI-2b ✅；GUI-3 界面文案现暂用 ASCII，汉字字形归本项 |
+| GUI-4 字体与资源 | 先使用裁剪的抗锯齿位图字体与编译内置图标，覆盖桌面所需字号；单列中文字符集、字库容量与输入方案。按需再引入动态字体或文件资源加载，并审计依赖、许可证及缓存开销 | GUI-1 ✅、GUI-2 ✅、GUI-3 ✅、GUI-2b ✅；**当前字体仍为 LVGL 内置 `lv_font_montserrat_{12,14,16,20,24}`（仅 ASCII）**，无中文字形、无自建裁剪位图字体 |
 | GUI-5 Window Server + compositor | 单独设计 surface、IPC、缓冲共享、损伤区域、Z-order、移动/缩放、遮挡、焦点/输入抓取与进程退出回收；可信窗口服务器统一呈现，收紧 `/dev/fb` 与重叠 gfx view 的旁路访问。IPC/共享内存能力先评估，缺项独立补齐；客户端允许使用 LVGL 或其他绘制库 | GUI-1 ✅、GUI-2 ✅、GUI-2b ✅；IPC/共享缓冲与图形权限设计；借鉴 opuntiaOS/HackOS |
 | GUI-6 terminal 窗口化 | 保留 PTY/VT100 核心，将渲染输出接入窗口 surface；键盘只投递到焦点终端，验证 Ctrl-C、alt-screen、窗口关闭和 shell 存活；缩放时更新 PTY winsize 并接通 SIGWINCH | GUI-5；terminal/PTY ✅；SIGWINCH（P5 剩余项） |
 
@@ -135,54 +102,54 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 | 项 | 当前边界 / 后续工作 | 验收依据 |
 |----|---------------------|----------|
-| 测试与 showcase 分离（优先） | 固定尺寸离屏 smoke 不依赖真实屏幕；显示 showcase 不以静默离屏回退替代屏幕验收。覆盖分辨率/最大宽度边界、分配与 present 失败；runner 验证无换行 prompt、静默超时、仅输入回显和跨块标记 | 离屏、屏幕、输入三类结果可区分；失败非零退出并保留日志 |
-| 脏矩形与批量提交 | 当前 LVGL 局部绘制后，libgfx 的 present 仍提交整个视图。先确保一次逻辑刷新最多一次提交；再设计受边界校验的损伤区域/批量 present ABI，并评估减少额外缓冲复制 | 静态界面无无效提交；小区域变化减少上传字节；保留越界/用户指针防护 |
-| 帧耗时与呈现能力 | 分别测量绘制、复制、内核提交和等待开销，覆盖多分辨率及实际阴影/滚动/动画场景；按瓶颈优化。vsync、page flip、write-combining 或 GPU 后端另行设计；当前私有缓冲不保证无撕裂 | 记录帧耗时分布、CPU 占用与上传量；优化前后使用同一场景比较 |
+| 测试与 showcase 分离（优先） | 固定尺寸离屏 smoke 不依赖真实屏幕；显示 showcase 不以静默离屏回退替代屏幕验收。覆盖分辨率/最大宽度边界、分配与 present 失败；runner 验证无换行 prompt、静默超时、仅输入回显和跨块标记 | 离屏、屏幕、输入三类结果可区分；失败非零退出并保留日志。**2026-11-11 已补齐 host 可见的帧缓冲像素验收探针（`user/fb_pixel_test/` + `qemutests/fb_pixel_verify.py`），并强制几何门槛（裁小图直接 FAIL 且非零退出）** |
+| 脏矩形与批量提交 | 当前 LVGL 局部绘制后，libgfx 的常规 `GFX_PRESENT` 仍逐行提交整个视图（已为 terminal 落地 `GFX_PRESENT_RECT` 部分矩形 present，但那是终端专用路径，**不是通用损伤区域 ABI**）。先确保一次逻辑刷新最多一次提交；再设计受边界校验的损伤区域/批量 present ABI，并评估减少额外缓冲复制 | 静态界面无无效提交；小区域变化减少上传字节；保留越界/用户指针防护 |
+| 帧耗时与呈现能力 | 分别测量绘制、复制、内核提交和等待开销，覆盖多分辨率及实际阴影/滚动/动画场景；按瓶颈优化。vsync、page flip、write-combining 或 GPU 后端另行设计；当前私有缓冲不保证无撕裂 | 记录帧耗时分布、CPU 占用与上传量；优化前后使用同一场景比较。**2026-11-11 已取得首组基线：WB KVM 9.65 / 9.59 ms/帧 vs UC KVM 510.3 / 512.8 ms/帧（同一份源码、逐像素比对 1,296,000 像素 0 失配）—— 可见 UC→WB 的量级收益；但这只降低拷贝时间，不提供无撕裂保证** |
 | 内存池与资源生命周期 | 评估 4 MiB TLSF 池是否适合桌面；大型绘制缓冲使用 mmap，预算包含字体、图片、图层与多窗口 surface。测试反复创建/销毁、低内存和池耗尽，明确失败处理 | 内存占用有上限；长期运行无持续增长；耗尽不崩溃或破坏状态 |
-| libc / 可选 LVGL 能力 | 按实际需求整理 `lseek/SEEK_*` 的标准头声明并补 `fseek/ftell`；浮点矩阵/矢量功能启用前补所需 libm。pthread 后端等待线程、条件变量、信号量与递归 mutex 完整实现；FreeType/ThorVG/图片解码库逐项审计 | 每次配置扩展重新验证构建、符号和运行时；不让可选依赖阻塞基础桌面 |
+| libc / 可选 LVGL 能力 | 按实际需求整理 `lseek/SEEK_*` 的标准头声明并补 `fseek/ftell`；浮点矩阵/矢量功能启用前补所需 libm。pthread 后端等待线程、条件变量、信号量与递归 mutex 完整实现；FreeType/ThorVG/图片解码库逐项审计 | 每次配置扩展重新验证构建、符号和运行时；不让可选依赖阻塞基础桌面。**注：stdio 高级流接口（`getline`/`fseeko`/`fgets`/`getdelim`）已随 libc 补全 T8/T9 交付** |
 | 构建与版本维护 | 持续验证无修改构建、配置/头文件变更重编、staging 孤立文件清除及已发布 sysroot 编译；审计实际 archive 与当前对象清单一致，删除源码时重建归档。保留固定版本，升级单独回归 | 增量结果与干净构建一致；无陈旧归档成员；符号审计与 GUI 回归通过 |
 
 ### 🔧 P4 硬件适配
 
-已完成前置基座（2026-11-06 闭环，详见 `docs/changelog.md`）：
+**已完成前置基座**（详见 `docs/changelog.md`）：
 - **xHCI 主机控制器与 USB 核心栈（Phase 1–4 全闭环合入 master）**：
   - **Phase 1 控制器生命周期**：PCI 探测、MMIO 映射、能力/操作寄存器解析、命令环/事件环/中断器 0/DCBAA 分配与握手启动、Root Hub 端口连接检测（commit `c54a1583`）。
   - **Phase 2 端口复位、Slot 分配与 EP0 控制传输**：端口复位与速度协商、Enable Slot、Address Device、EP0 控制传输（Setup/Data/Status TRB 与事件环轮询）及 18 字节设备描述符获取（commit `dcd10284`）。
   - **Phase 3 配置解析、动态端点环与多端点配置**：配置描述符层次树解析、`struct xhci_ep_ring **ep_rings` 动态分配、Configure Endpoint、Set Configuration 及迁移至 Configured 状态（commit `78d6ff85`）。
   - **Phase 4 `/dev/usb` 属性切片节点与 `/bin/lsusb`**：控制器跟踪与原始描述符缓存、`usb_devfs` 10 类文本与二进制切片读取节点、用户态 `/bin/lsusb` 实用工具（`-s [[bus]:][devnum]` 过滤与 `-v` 完整树状解析器，commit `cf071a0b` ~ `ae7a5999`）。
+- **ACPI S5 关机**：`kernel/arch/x86_64/intr/apic/acpi.c` 从 FADT 取 PM1a Control Block 端口（offset 64），`kernel/arch/x86_64/intr/syscall_frame.c` 在 `RB_POWER_OFF` 下写 `SLP_EN`（0x2000）后阻塞等待平台下电。
 
 #### 待实施硬件适配任务
 
 | 项 | 内容 / 完成条件 | 依赖 | 借鉴 |
 |----|-----------------|------|------|
-| USB HID 驱动 | 利用 xHCI 中断端点（IN TRB 传输环）轮询或事件通知，解析 Boot Protocol / HID Report 键盘与鼠标事件，对接系统输入子系统（替换或并存 PS/2） | xHCI 核心栈 ✅；输入子系统 ✅ | Linux usbhid |
+| USB HID 驱动 | 利用 xHCI 中断端点（IN TRB 传输环）轮询或事件通知，解析 Boot Protocol / HID Report 键盘与鼠标事件，对接系统输入子系统（替换或并存 PS/2） | xHCI 核心栈 ✅；输入子系统 ✅（当前 `kernel/include/driver/xhci.h` 仅有 HID 描述符结构体，**尚无 HID 驱动**） | Linux usbhid |
 | USB 大容量存储 (MSC/BOT) | 实现 USB Mass Storage Class Bulk-Only Transport (BOT)，经批量端点发送 CBW/CSW 与 SCSI transparent command set（INQUIRY/READ CAPACITY/READ10/WRITE10），接入 `block_device` 驱动模型 | xHCI 核心栈 ✅；ARCH-9 块设备层 ✅ | Linux usb-storage / Tilck |
 | 真机启动 (USB) | 制作实机可引导 USB 盘，验证 UEFI + bootloader + xHCI 实机硬件自举路径 | USB 存储 / FAT32 ✅ | Tilck |
 | NVMe 驱动 | PCIe NVMe 1.4+ 控制器驱动，Admin/IO 队列对与 Doorbell 机制，替代 AHCI 成为高性能块设备 | ARCH-9 PCI/块设备 ✅ | Linux nvme / HelenOS |
 | HPET clocksource | 真实硬件跨平台高精度定时器源 | 独立 | |
-| ACPI 电源管理 | 解析 DSDT/FADT，实现 ACPI 关机与休眠 | 独立 | |
+| ACPI 电源管理（休眠部分） | DSDT/FADT 解析已完成、S5 关机已闭环；**剩余 S3 睡眠/唤醒**（`SLP_TYP` 选择、进入与唤醒路径、真机验证） | S5 ✅ | |
 
 ### 📐 P5 ABI 扩展/兼容性
 
-已完成（详见 `docs/changelog.md`）：symlink/readlink、exec symlink ABI、syscall 边界审计、AAGU-4 跨边界符号全套、AAGU-5 entropy facade 全套、arch source groups、AAGU-29 libk.a link、arch entropy strong overrides（RDSEED/RNDRRS = STRONG）。
+**已完成**（详见 `docs/changelog.md`）：symlink/readlink、exec symlink ABI、syscall 边界审计、AAGU-4 跨边界符号全套、AAGU-5 entropy facade 全套、arch source groups、AAGU-29 libk.a link、arch entropy strong overrides（RDSEED/RNDRRS = STRONG）、**用户态 libc 补全 T1~T17（15 个接口组）**。
 
-依赖链：`ELF loader ✅ → 动态链接器 → 共享 libc → Alpine apk/musl`；`futex ✅ → clone → pthread`；`socket ✅ → AF_UNIX`；`mbedTLS ✅ → HTTPS`。
+依赖链：`ELF loader ✅ → 动态链接器 → 共享 libc → Alpine apk/musl`；`futex ✅ → clone → pthread`；`socket ✅ → AF_UNIX`；`mbedTLS ✅（仅入库为 `libmbedtls.a`，尚未接入 BusyBox；BusyBox 走自带 TLS）→ HTTPS`。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 动态链接器 | PT_INTERP + ld.so + 共享 libc | ELF ✅ | cavOS |
+| 动态链接器 | PT_INTERP + ld.so + 共享 libc | ELF ✅（loader **显式不检查** PT_INTERP，`kernel/fs/elf.c`） | cavOS |
 | rt_sigaction | 现代信号语义（SA_RESTART/si_value/实时信号），替换老 SYS_signal | 信号重构 | |
 | clone/pthread | 线程模型 + pthread_create | futex ✅ | |
 | readv/writev | scatter-gather I/O | 独立 | |
 | openat/dup3/pipe2 | 现代 syscall 变体 | 独立；ARCH-5 挂载树与 dcache 已就绪 ✅ | |
-| FIFO 命名管道 | S_IFIFO 语义 + mkfifo | 独立；ARCH-5 已就绪 ✅ | |
+| FIFO 命名管道 | S_IFIFO 语义 + mkfifo | 独立；ARCH-5 已就绪 ✅（当前仅有 pipe 的合成 stat，**无 mkfifo**） | |
 | alarm/setitimer | POSIX 定时器（busybox timeout 需要） | 独立 | |
-| 作业控制（部分完成）| setpgid/setsid/getpgid/getsid ✅、tcgetpgrp/tcsetpgrp ✅、tty ISIG + VINTR/VQUIT ✅、kill pid=0/-pid/-1 ✅；**剩余**：SIGWINCH 派发、SIGTSTP/SIGCONT 完整作业控制（bg/fg/jobs） | tty termios ✅ | |
-| /proc 完善 | status（signal mask/ppid/utime/stime）+ cmdline + stat | 独立 | |
-| HTTPS/TLS | mbedTLS 集成 BusyBox wget | mbedTLS ✅ | |
+| 作业控制（部分完成）| setpgid/setsid/getpgid/getsid ✅、tcgetpgrp/tcsetpgrp ✅、tty ISIG + VINTR/VQUIT ✅、kill pid=0/-pid/-1 ✅；**剩余**：SIGWINCH 派发（当前 SIGWINCH/SIGCONT/SIGTSTP 仅按 SIG_DFL 忽略，**不派发到前台进程组**）、SIGTSTP/SIGCONT 完整作业控制（bg/fg/jobs） | tty termios ✅ | |
+| /proc 完善 | `stat` ✅ 已就绪（自有 key-value 格式，非 Linux 定长列 ABI）；`status` 已有 Name/Pid/PPid/State/CPU/Priority/BirthId/StartNs/SampleNs/RuntimeTicks，**仍缺 signal mask 与 utime/stime**；**`cmdline` 完全缺失** | 独立 | |
+| HTTPS/TLS | mbedTLS 集成 BusyBox wget —— **HTTPS 能力本身已具备**：`CONFIG_TLS=y` 启用 BusyBox 1.36 **自带**的 TLS 客户端（`networking/tls.c` + `tls_{aes,rsa,fe,pstm}*.c`，非 OpenSSL/mbedTLS 后端），`CONFIG_FEATURE_WGET_HTTPS=y` 时 `wget` 直接走 `tls_handshake()`；`libmbedtls.a` 已入库到 sysroot 但 **wget 并不链接它**。**剩余**：二选一 —— 把 mbedTLS 真正接进 BusyBox，或明确改用 BusyBox 内建 TLS 并放弃 mbedTLS 路线；并补 HTTPS 端到端验证（当前无 `wget https://` 实测证据） | mbedTLS ✅ 已入库为 `libmbedtls.a` | |
 | AF_UNIX/socketpair | 本地 socket IPC | socket ✅ | |
-| 更多 applet | grep/sed/find，先补 libc regex/fnmatch | libc | |
-| libc 完整性 | printf `%f/%F/%e/%E/%g/%G` + `%ld/%lu` + `%x/%o`、strtod、getopt、getcwd ✅；**仍缺**：stdio 高级流接口（getline/fseeko）、cut/paste 的 getopt 解析 | 独立 | |
+| 更多 applet | BusyBox 侧 grep/sed/find 已就绪 ✅；**libc 侧 POSIX 正则引擎（T16）未实现**（`libc/include/regex.h` 为桩头），`glob` 为返回 `GLOB_NOMATCH` 的桩；`fnmatch` 已实现（`*`/`?`/`[]`，flags 未支持） | libc | |
 | Alpine apk/musl | musl 二进制包兼容路线 | 动态链接器 | cavOS |
 
 ### Parked（未闭环 follow-on，随时可拾起）
@@ -214,14 +181,37 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 
 ---
 
+## 近期闭环索引（2026-11-06 ~ 2026-11-11）
+
+只列条目名与文档指针；完整「做了什么 / 关键结论 / 验证」见 `docs/changelog.md` 对应日期条目。
+
+| 闭环项 | 日期 | 详情 |
+|--------|------|------|
+| 双架构统一 `kernel_main` 启动编排（单一入口 + 跨架构启动 facade + 特性门） | 2026-11-07 | [changelog](changelog.md#2026-11-07) · [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md) |
+| ARCH-6 FS 并发与块缓存（per-mount mutex + 写回块缓存 + 四核压测） | 2026-11-07 | [changelog](changelog.md#2026-11-07) · [spec](superpowers/specs/2026-11-07-arch6-fs-concurrency-blockcache-design.md) |
+| aarch64 每核调度 tick 记账 | 2026-11-06 | [changelog](changelog.md#2026-11-06) · [验证报告](superpowers/reports/2026-11-06-aarch64-percpu-tick-accounting-validation.md) |
+| BOOT-1 CPU 生命周期与 SMP 握手 | 2026-11-08 | [boot.md](boot/boot.md#启动编排治理boot-1--boot-52026-11-08-全部验收) · [验证报告](superpowers/reports/2026-11-07-boot-1-validation.md) |
+| BOOT-2 早期中断与时间设施启动顺序 | 2026-11-08 | [boot.md](boot/boot.md#启动编排治理boot-1--boot-52026-11-08-全部验收) · [验证报告](superpowers/reports/2026-11-08-boot-2-validation.md) |
+| BOOT-3 启动失败传播与必需能力检查（**同时闭环 ARCH-8 失败处理部分**） | 2026-11-08 | [subsys.md](subsys/subsys.md#boot-3-startup-failure--capability-policies) · [验证报告](superpowers/reports/2026-11-08-boot-3-validation.md) |
+| BOOT-4 阶段契约与跨架构编排（**同时闭环 ARCH-8 命名阶段 / 依赖检查 / per-CPU 语义部分**） | 2026-11-08 | [subsys.md](subsys/subsys.md#boot-4-named-stages-dependency-topology--per-cpu-semantics) · [arch.md](arch.md#启动阶段契约boot-42026-11-08-闭环) · [验证报告](superpowers/reports/2026-11-08-boot-4-validation.md) |
+| BOOT-5 调度启动与系统服务解耦 | 2026-11-08 | [boot.md](boot/boot.md#启动编排治理boot-1--boot-52026-11-08-全部验收) · [验证报告](superpowers/reports/2026-11-08-boot-5-validation.md) |
+| 用户态 libc 补全 T1~T17（15 个接口组 + 端到端验收） | 2026-11-09 | [libc.md](libc/libc.md) · [验收报告](superpowers/reports/2026-11-08-libc-completion-validation.md) |
+| libc `remove()` 双语义 + 整数 abs 家族 | 2026-11-10 | [changelog](changelog.md#2026-11-10) |
+| 纯 PS/2 decoder API（从 libgui 内部拆为公开纯函数头） | 2026-11-10 | [changelog](changelog.md#2026-11-10) |
+| systest 模块化（6094 行单体 → 8 模块，119 条用例） | 2026-11-10 | [changelog](changelog.md#2026-11-10) |
+| Doom 移植 D01~D06 全链路 | 2026-11-11 | [games/doom.md](games/doom.md) · [验收报告](superpowers/reports/2026-11-10-doom-validation.md) |
+| framebuffer 映射 UC → write-back + 别名 cache policy 统一 + 像素验收 | 2026-11-11 | [driver.md](driver/driver.md#帧缓冲-cache-policy-与映射事务2026-11-11-闭环) · [changelog](changelog.md#2026-11-11) |
+
+---
+
 ## 相关文档
 
 | 文档 | 内容 |
 |------|------|
 | `docs/README.md` | 文档索引（按 0-4 层组织，按阅读顺序排列） |
 | `docs/architecture.md` | 启动链、内存布局、初始化序列（全局骨架图） |
-| `docs/boot/boot.md` | UEFI 引导 + `boot_context` v2 ABI + v25 E820 拆分 |
-| `docs/arch.md` | arch-neutral facade + per-arch 强覆盖模式（含 `arch/fb_write.h` 门面）+ v25 arch-cleanup 系列 7 子系统矩阵 |
+| `docs/boot/boot.md` | UEFI 引导 + `boot_context` v2 ABI + v25 E820 拆分 + **BOOT-1~5 启动编排治理** |
+| `docs/arch.md` | Multi-arch weak-default + strong-override 总览（facade/override 矩阵、页表层级、bootinfo ABI、驱动 initcall、IRQ hook 3 段、RTC 拆分、BOOT-3/BOOT-4 启动契约、距离单一 `kernel_main`） |
 | `docs/superpowers/specs/2026-11-07-unified-kernel-main-design.md` + `docs/superpowers/plans/2026-11-07-unified-kernel-main.md` | 双架构统一 kernel_main 的设计与实施计划（2026-11-07 闭环：启动 facade 钩子 + 特性门 + 单一入口符号审计） |
 | `docs/arch/cross-boundary-symbols.md` | **跨边界符号/ABI 边界规范（AAGU-4）** —— builtin、UAPI、arch-value、libc 镜像 4 类规则 + 现状对照表 + 后续 issue 切分 |
 | `docs/arch/entropy-source-facade.md` | **arch-neutral entropy facade spec（AAGU-5.3 / .5）** —— STRONG/WEAK/NONE 三档质量标签 + 控制流决策 + 禁止条款 |
@@ -229,16 +219,18 @@ ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 
 | `docs/interrupt/interrupt.md` | 中断处理（do_IRQ、register_irq、IDT、共同事件分派） |
 | `docs/smp/smp.md` | SMP 架构 + 负载均衡实施总结 |
 | `docs/sched/scheduler.md` + `docs/sched/scheduler-complexity.md` | EEVDF 调度器设计、复杂度评估与上下文门面抽象 |
-| `docs/syscall/syscall.md` | 71+ syscall 表 + 用户指针边界语义 + syscall 边界审计触达清单 |
+| `docs/syscall/syscall.md` | 77 syscall 表（0..76）+ 用户指针边界语义 + syscall 边界审计触达清单 |
 | `docs/signal/signal.md` | 信号投递、handler、sigreturn、Ctrl-C→SIGINT |
 | `docs/time/timer.md` | Timer 重构架构 + nanosleep 修复 + 重构实施总结 |
 | `docs/gui/gui.md` | Tetris、Material 桌面、libgui 平台后端与原生控件统一焦点体系 |
 | `docs/fs/io-multiplexing.md` | select/pselect 实施总结 |
 | `docs/net/network.md` + `docs/archive/lwip-debugging-experience.md` | lwIP 网络栈 + 正确性加固 + init PID 1 延迟启动 |
 | `docs/fs/filesystem.md` | VFS 注册表、ops 分离、元数据、挂载树、dcache、FAT32、ext2、devfs、procfs、tmpfs、GPT、block device |
-| `docs/driver/driver.md` | 驱动子系统（keyboard, serial, ahci, pci, e1000, virtio-net, fb, mouse, gfx0, logo, xhci, usb_devfs） |
-| `docs/subsys/subsys.md` | 子系统注册框架（`SUBSYS_INITCALL()` + phase 顺序） |
-| [启动顺序与阶段抽象分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md) | 静态证据、CPU/IRQ/失败传播风险及 BOOT-1～5 spec 拆分依据（尚未实施） |
+| `docs/driver/driver.md` | 驱动子系统（keyboard, serial, ahci, pci, e1000, virtio-net, fb, mouse, gfx0, logo, xhci, usb_devfs）+ **帧缓冲 cache policy 与映射事务** |
+| `docs/subsys/subsys.md` | 子系统注册框架（`SUBSYS_INITCALL()` + 阶段顺序 + **BOOT-3 失败策略 / BOOT-4 阶段契约与依赖拓扑**） |
+| `docs/libc/libc.md` | 用户态 libc：接口覆盖 / 语义要点 / 已知限制（含 T1~T17 落地状态表） |
+| `docs/games/doom.md` | Doom 移植：默认构建行为 / IWAD 打包 / 运行参数 / 按键 / 诊断构建 / 引擎许可与来源材料 |
+| [启动顺序与阶段抽象分析](superpowers/reports/2026-11-07-boot-sequence-analysis.md) | 静态证据、CPU/IRQ/失败传播风险及 BOOT-1～5 spec 拆分依据（**五项均已实施并验收**） |
 | `docs/log/log.md` | 日志级别、DEBUG_CHANNELS、LOG_TARGET、NDEBUG |
 | `docs/build/build.md` + `docs/build/toolchain.md` | 构建系统手册（三篇合一：profile 构建体系、端到端运行调试、构建/测试 harness 权威 taxonomy 与 6 bucket 目标）+ 工具链指南 |
 | `docs/testing/testing-policy.md` | 测试分层规范、场景归属与覆盖策略 |

@@ -240,6 +240,42 @@ Under BOOT-3 failure policies:
 
 ---
 
+## BOOT-4 Named Stages, Dependency Topology & Per-CPU Semantics
+
+BOOT-4 replaced bare numeric phase literals with named constants and made
+same-phase ordering an explicit, checked property rather than a side effect of
+link order:
+
+- **Named phases**: `SUBSYS_PHASE_CONTROLLERS = 3`, `SUBSYS_PHASE_TIME = 4`,
+  `SUBSYS_PHASE_DEVICE_IRQ = 5`, `SUBSYS_PHASE_STORAGE = 6`.
+- **Dependency declaration**: `register_subsys_deps()` accepts up to
+  `SUBSYS_MAX_REQUIRES` (8) requires per subsystem.
+- **Topology preflight** runs before the first phase dispatch:
+  - missing dependency → `-ENOENT` and boot stops;
+  - cycle → `-ELOOP`, reporting the first component that closed the cycle
+    (depth-first colouring);
+  - subsystems in the same phase are dispatched in **topological order**, and
+    items without requires keep strict registration (FIFO) order.
+- **Readiness query**: `subsys_require_ready()` returns `0` when ready,
+  `-EAGAIN` when not yet ready, `-EIO` when a dependency failed, `-ENOENT`
+  when the required subsystem is missing.
+- **Per-CPU semantics**: `subsys_prepare_cpus` runs **on the BSP only**
+  (`executor=BSP`) and allocates generic software state for every discovered
+  CPU (bounded by `num_cpus`); it performs **no local hardware initialisation**.
+  The previously registered-but-never-executed `_lapic_timer_start_percpu` and
+  `kernel/arch/x86_64/smp/subsys_percpu.c` were removed. Log format is
+  `cpu-prepare <name> target=<id> executor=bsp`.
+- **Cross-architecture hook split**: the coarse `arch_boot_subsystems` was
+  replaced by symmetric strong-override hooks — `arch_boot_controllers`
+  (phase 3, interrupt controllers), `arch_boot_device_nodes` (device nodes),
+  `arch_boot_percpu` (per-CPU state publication) — with three public capability
+  checkpoints verified by the orchestrator.
+
+Verification: 14 isolated cross-architecture `boot-contract` matrices, all PASS.
+See [验证报告](../superpowers/reports/2026-11-08-boot-4-validation.md).
+
+---
+
 ## File Locations
 
 | File | Purpose |

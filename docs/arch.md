@@ -126,6 +126,30 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 
 ---
 
+## 启动阶段契约（BOOT-4，2026-11-08 闭环）
+
+BOOT-4 把「同一启动阶段内的子系统先后顺序」从链接顺序的副作用变成**可核验的显式契约**，
+并在 x86_64 与 aarch64 之间共用同一套阶段定义：
+
+- **命名阶段常量**：`SUBSYS_PHASE_CONTROLLERS=3` / `SUBSYS_PHASE_TIME=4` /
+  `SUBSYS_PHASE_DEVICE_IRQ=5` / `SUBSYS_PHASE_STORAGE=6`（`kernel/include/subsys/subsys.h`）。
+  裸数字 phase 字面量已弃用。
+- **依赖声明与拓扑预检**：`register_subsys_deps()` 最多声明 8 项依赖；首次阶段调度前
+  执行全局预检 —— 缺失依赖 `-ENOENT`、循环依赖 `-ELOOP`（上报首个成环组件）；同阶段内
+  按拓扑序稳定调度，无依赖项保持注册序。
+- **per-CPU 执行位置**：`subsys_prepare_cpus` **仅在 BSP 执行**（`executor=BSP`），只做
+  通用软件数据结构分配，**不做本核硬件初始化**；原先注册但从未执行的
+  `_lapic_timer_start_percpu` 与 `kernel/arch/x86_64/smp/subsys_percpu.c` 已删除。
+- **对称强覆盖钩子**：粗粒度的 `arch_boot_subsystems` 被拆成
+  `arch_boot_controllers` / `arch_boot_device_nodes` / `arch_boot_percpu` 三个对称钩子，
+  配三个公共能力检查点，由编排层统一核验。
+
+两架构各 14 组隔离编排矩阵全 PASS。详见
+[验证报告](superpowers/reports/2026-11-08-boot-4-validation.md) 与
+[subsys.md](subsys/subsys.md)。
+
+---
+
 ## 设计依据
 
 - 详细 spec：`docs/superpowers/specs/2026-09-09-pmm-arch-neutral-design.md`（13 轮 subagent review 通过）

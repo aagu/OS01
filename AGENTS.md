@@ -11,7 +11,7 @@ make clean               # Clean build artifacts (header deps tracked via depfil
 make test-qemu SUITE=phase-0    # QEMU E2E boot (also: systest, inittab-phase, network)
 make test-host           # Host-side hosttests + PMM boot reservation
 make test-static         # Static audits: runtime, layout, canary, link-order
-make OS01_SYSTEST=1 test-qemu SUITE=systest   # 228-test syscall suite
+make OS01_SYSTEST=1 test-qemu SUITE=systest   # 119-case syscall suite
 make KERNEL_SELFTEST=1 test-kernel-selftest    # Built-in kernel selftests
 ```
 
@@ -155,7 +155,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
 | `kernel/sync/futex.c` | Futex hash table (SYS_futex=47) |
 | `kernel/include/core/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
-| `kernel/include/uapi/syscall.h` | Syscall numbers (0..74) |
+| `kernel/include/uapi/syscall.h` | Syscall numbers (0..76) |
 | `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
 | `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |
 
@@ -169,7 +169,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | [docs/smp/smp.md](docs/smp/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown, load balancing, EEVDF rbtree runqueues |
 | [docs/sched/scheduler.md](docs/sched/scheduler.md) | Task system, EEVDF scheduler, context switch, spawn/fork/exec/exit, blocker framework |
 | [docs/sched/scheduler-complexity.md](docs/sched/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
-| [docs/syscall/syscall.md](docs/syscall/syscall.md) | Syscall table (75 syscalls), dispatch, invocation |
+| [docs/syscall/syscall.md](docs/syscall/syscall.md) | Syscall table (77 syscalls), dispatch, invocation |
 | [docs/fs/filesystem.md](docs/fs/filesystem.md) | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
 | [docs/memory/cow-mmap.md](docs/memory/cow-mmap.md) | COW fork, VMA, mmap/mprotect/munmap, 4KB page pool |
 | [docs/signal/signal.md](docs/signal/signal.md) | Signal delivery, handler, sigreturn, Ctrl-C→SIGINT |

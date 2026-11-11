@@ -530,6 +530,29 @@ void kernel_main(const struct boot_context *bootctx);
 
 字节相同，aarch64 编译视图纯净（看不到 E820 符号）。详见 `docs/arch.md`「bootinfo ABI」段。
 
+## 启动编排治理（BOOT-1 ~ BOOT-5，2026-11-08 全部验收）
+
+UEFI 引导与 `boot_context` 交接之后，**内核侧**的启动编排另有一套治理契约。
+依据 [启动顺序、阶段抽象与优化分析](../superpowers/reports/2026-11-07-boot-sequence-analysis.md)
+拆出的五项 spec，已于 2026-11-08 全部实施并各自通过独立验证：
+
+| Spec | 治理目标 | 落地要点 |
+|------|---------|---------|
+| **BOOT-1** CPU 生命周期与 SMP 握手 | percpu 构造 / online / ipi_ready / scheduler_ok 的生产者与消费者分离 | `percpu_init` 只构造不发布；online 以 release 发布、消费端全部 acquire；`ipi_ready=1 ⇒ online=1` 前置断言；x86 两阶段握手；失败 `boot_fatal_cpu()` fail-closed 且资源永不回收；aarch64 runtime online / boot ACK / admission accepted mask 三层资格分离 |
+| **BOOT-2** 早期中断与时间设施启动顺序 | 控制器配置、masked handler 注册、中断源启动、CPU IRQ 放行四件事分离 | `IRQF_NO_AUTOEN` masked registration；PIC slave 级联按真实 IMR 语义；控制器 init 阶段**不 sti**；PIT prepare/start 分离；RTC 受控事务（有界校准、所有出口恢复硬件状态）；LAPIC 校准移至 phase4 末一次执行；原子 BSP tick handoff |
+| **BOOT-3** 启动失败传播与必需能力检查 | 必需/可选策略可判定，失败可跨架构归因 | 注册错误不再被忽略；required 立即致命停止、optional 警告降级；根挂载与 TTY/PTY 为必需能力；初始任务 stdio 绑定失败即停（详见 [subsys.md](../subsys/subsys.md) 与 [arch.md](../arch.md)） |
+| **BOOT-4** 阶段契约与跨架构编排 | 同阶段依赖不靠链接次序，per-CPU 执行位置明确 | 命名阶段常量 + `register_subsys_deps` 依赖声明 + 拓扑预检（缺失 `-ENOENT`、循环 `-ELOOP`）；`subsys_prepare_cpus` 仅在 BSP 执行且只做软件数据结构分配；拆出对称强覆盖钩子 |
+| **BOOT-5** 调度启动与系统服务解耦 | 架构机制与公共策略分离，首任务发布原子化 | `vfs_end_bootstrap()` 前置到首任务发布之前，bootstrap 窗口内 `spawn_user_task()` fail-closed；初始用户任务准入校验 + 持锁原子发布；公共用户态编排与后台服务从架构 `sched_boot.c` 剥离到 `kernel/init/userspace.c` / `kernel/init/services.c` |
+
+**范围约束**：这五项只治理启动编排，**不做**并行启动、完整依赖 DAG、EL0 适配或低层 AP
+API 全面统一。根盘选择、init respawn 退避/ASKFIRST 非阻塞监督、启动耗时观测与诊断
+probe 分离留作后续独立项。
+
+**验证矩阵**：BOOT-1 8 组 `boot-lifecycle`、BOOT-2 10 组 `boot-irq-time`、BOOT-3 17 组
+隔离故障矩阵、BOOT-4 14 组双架构 `boot-contract`、BOOT-5 8 组 `boot-services` —— 全 PASS。
+
+逐项 spec / plan / 验证报告见 `docs/superpowers/specs|plans|reports/2026-11-0{7,8}-boot-*`。
+
 ## 总结
 
 本系统的引导流程是一个从 UEFI 固件到内核执行的完整过程，包括：

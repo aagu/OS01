@@ -19,7 +19,7 @@ docs/
 │   ├── [cross-boundary-symbols.md](arch/cross-boundary-symbols.md)
 │   └── [entropy-source-facade.md](arch/entropy-source-facade.md)
 │
-├── boot/         [boot.md](boot/boot.md)                              ← UEFI 引导 + boot_context ABI
+├── boot/         [boot.md](boot/boot.md)                              ← UEFI 引导 + boot_context ABI + BOOT-1~5 启动编排治理
 ├── memory/       [memory.md](memory/memory.md) + [cow-mmap.md](memory/cow-mmap.md) + 导读
 ├── interrupt/    [interrupt.md](interrupt/interrupt.md) + 导读
 ├── smp/          [smp.md](smp/smp.md)                                  ← 多核启动 / IPI / 负载均衡
@@ -32,9 +32,11 @@ docs/
 ├── net/          [network.md](net/network.md)                         ← lwIP + 驱动 + socket
 ├── gui/          [gui.md](gui/gui.md)                                 ← 2D 图形 + 终端 + 游戏
 ├── log/          [log.md](log/log.md)                                 ← 日志子系统 + DEBUG_CHANNELS
-├── subsys/       [subsys.md](subsys/subsys.md)                        ← 子系统注册框架
+├── subsys/       [subsys.md](subsys/subsys.md)                        ← 子系统注册框架 + BOOT-3/BOOT-4 启动契约
 │
 ├── libc/         [libc.md](libc/libc.md)                               ← 用户态 libc：接口覆盖 / 语义要点 / 已知限制
+│
+├── games/        [doom.md](games/doom.md)                             ← Doom 移植：构建 / IWAD 打包 / 运行参数 / 许可材料
 │
 ├── build/       [build.md](build/build.md) + [toolchain.md](build/toolchain.md)  ← 编译/运行/调试
 ├── debug/       [debug.md](debug/debug.md)                            ← 调试方法（活跃）

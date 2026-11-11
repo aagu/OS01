@@ -1,6 +1,6 @@
 # Syscall interface
 
-System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 75 syscalls total (0..74).
+System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. Up to 6 arguments via the `syscall6()` wrapper. Return value in `rax`. 77 syscalls total (0..76).
 
 ## Syscall table
 
@@ -117,7 +117,7 @@ Higher-level libc functions (`read()`, `exec()`, etc.) call these wrappers.
 
 The adapter writes the handler result to `rax` unless `sigreturn` successfully restored a saved frame and set `suppress_writeback`. After the syscall, it delivers pending signals only when the saved frame has user CPL=3. Return goes through `ret_from_exception` → `RESTORE_ALL` → `iretq`.
 
-Unimplemented and out-of-range numbers return `-EINVAL`, including defined-but-unimplemented `SYS_getpeername` (62). The UAPI table covers 0..74; 74 numbers have handlers. Changing the Linux ABI translation table, its signed 8-bit representation, or unknown-number conventions is deferred to ARCH-2.
+Unimplemented and out-of-range numbers return `-EINVAL`, including defined-but-unimplemented `SYS_getpeername` (62). The UAPI table covers 0..76; 76 numbers have handlers. Changing the Linux ABI translation table, its signed 8-bit representation, or unknown-number conventions is deferred to ARCH-2.
 
 ## Known bug
 

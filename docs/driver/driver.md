@@ -393,6 +393,37 @@ rtc_write_datetime(&new_dt);
   * 现存原始可写 mmap 时，拒绝新的 `GFX_ACQUIRE`（返回 `-EBUSY`）。
   * 只读 mmap 页表项映射为只读 PTE，`do_mprotect` 对 `VMA_IO`（包含 fb 物理页）的写权限变更直接拦截返回 `-EPERM`，杜绝绕过所有权协调器篡改显存。
 
+#### 帧缓冲 cache policy 与映射事务（2026-11-11 闭环）
+
+帧缓冲映射的**内存类型**此前一律为 UC，导致 QEMU Standard VGA RAM 的逐字节拷贝退化为
+极慢路径。修复后，cache policy 由 **backend 自证**并与页表映射构成**同一个事务**：
+
+* **policy 由 backend 发布**（`kernel/include/driver/fb_cache.h`，实现 `kernel/driver/fb_state.c`）：
+  `fb_cache_policy_t`（`UNCACHEABLE` / `WRITEBACK`）+ `fb_cache_policy_get/set()`。
+  **默认 UNCACHEABLE** —— 任何没有"自证是普通 RAM"的 backend（含 generic GOP fallback）
+  保持保守选择；只有 QEMU Standard VGA RAM backend 发布 `WRITEBACK`。
+  "BAR0 是普通 RAM"这一假设从通用 gfx 层移到 backend 侧（`kernel/driver/bga.c`）。
+* **policy → 硬件位只有一个翻译点**：`kernel/include/arch/x86_64/pte.h` 的
+  `fb_x86_cache_bits()` / `fb_x86_kernel_pmd_flags()` / `fb_x86_user_pte_flags()`。
+  kernel 永久映射（`kernel/arch/x86_64/memory/fb_map.c`）、`/dev/fb` 用户别名（只读与可写
+  两条路径，`kernel/driver/fb.c`）、early boot 别名（`kernel/arch/x86_64/runtime/printk_fb.c`）
+  全部走同一策略 ⇒ 同一物理页不再被两种内存类型访问
+  （IA32_PAT 禁止 memory-type aliasing）。
+* **映射与 policy 事务化**：`fb_x86_map_checked()` 显式接收候选 policy，**只有在全部叶子
+  条目装好并校验通过后才提交全局 policy**；失败时页表回滚且全局 policy 一律不动。
+* **early alias 显式撤销**：`fb_x86_revoke_early_alias()` 在永久映射装好后直接清掉 boot
+  页表里那几条 PMD（boot 页表就是 kernel 页表，`vmm_init()` 直接采用 boot PGD），
+  而不是靠"没人再用"的注释承诺。
+* **真设备寄存器不受影响**：`PAGE_KERNEL_PMD_NOCACHE` 的使用者（PCI config / APIC /
+  IOAPIC / LAPIC / ACPI / AHCI / e1000 / xHCI）一行未动。
+
+**边界（重要）**：本次只降低像素拷贝时间，**不提供任何无撕裂保证**（仍无 vsync /
+page flip / 双缓冲）；且 PTE 位不等于最终有效内存类型 —— PAT / MTRR / CR0.CD-NW /
+嵌套分页（NPT/EPT）与宿主 PAT 都参与决定，guest 侧看不到嵌套分页，因此日志明确打印
+`effective memory type = NOT EVALUATED`。详见
+[changelog](../changelog.md) 2026-11-11 条目与
+[fix-report-3](../../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report-3.md)。
+
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
 受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。

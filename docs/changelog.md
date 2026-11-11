@@ -7,6 +7,29 @@
 
 ## 2026-11-11
 
+- feat(doom,user,build): **OS01 Doom 移植闭环 —— D01~D06 六阶段全链路交付**（设计 [spec](superpowers/specs/2026-11-10-doom-port-design.md)，实施 [plan D01](superpowers/plans/2026-11-10-doom-01-libc.md) ~ [plan D06](superpowers/plans/2026-11-10-doom-06-e2e.md)，验证 [验收报告](superpowers/reports/2026-11-10-doom-validation.md)，用户侧说明见 [games/doom.md](games/doom.md)）：
+
+  **做了什么**
+
+  - **D01 libc 前置**（`86297f65`）：补齐引擎所需的 libc 语义 —— 公开标准头、printf 宏私有化，使 `doomgeneric` 能以 OS01 libc 编译而不自带一套 libc。
+  - **D02 纯 PS/2 decoder API**（`b0a4c550`、`20e54209`、`492aabf6`、`27df6834`）：把 PS/2 扫描码解码从 `libgui` 内部拆成**纯函数公开头**（`refactor(gui): publish the pure PS2 decoder API`），解码逻辑与 GUI 平台层解耦，键位重编码阶段可重复执行。
+  - **D03 引擎接入**（`bf8e58ed`、`8ff13385`）：固定上游 `doomgeneric` 提交 `e257a09527062bfb986b6e5e0780839b6cbd5b71`，以 80 个编译单元 + 5 个有序适配补丁（去 Zenity 弹窗、规范 `I_Quit`、配置持久化、PS/2 独占租约批量非阻塞读、只读诊断上报）构建引擎归档。
+  - **D04 平台层**（`a1a9f2f3`、`7439bb2e`、`223068f4`、`25d83370`、`478ce648`）：独占 `libgfx` surface 渲染（居中整数倍缩放）、租约化 PS/2 输入适配为 Doom 键沿、运行时生命周期与协作式退出、正常 quit 与错误退出均返回标准状态码、配置与控制绑定持久化。
+  - **D05 资产与许可**（`277201e6`、`f177869d`、`489e9dd3`）：本地 IWAD 输入校验（路径/SHA256/许可证/来源四变量成组提供，缺一即构建中止）、rootfs 清单跟踪 IWAD 内容、引擎许可与补丁材料按序打包（`/usr/share/licenses/doom/LICENSE`、`/usr/share/doc/doom/{SOURCE,PATCHES}.txt`、`/usr/share/doc/doom/patches/*`）。
+  - **D06 端到端**（`b3f83fe3`、`6fdc54c1`、`721b828b`）：新增 QEMU runner（严格失败处理）+ 隔离 SMP 套件 + 跨 SMP boot 的玩法与持久状态验证。
+
+  **关键结论与架构决策**
+
+  - **默认构建保持纯离线**：`make image` 只发布 `/bin/doom` 可执行文件，**不自动下载或打包任何 IWAD**；未打包 IWAD 时运行会提示缺失并安全退出，且不夺取图形所有权。
+  - **诊断能力与生产构建隔离**：`DOOM_TEST=1` 才注入 `/bin/doom_testctl` 与 `[doom-diag]` 串口上报桩；普通生产构建不含任何诊断代码。
+  - **未验证事项如实记录**：Freedoom 全关卡分发未实测（不影响本轮交付）；**音频输出为禁用静音桩** —— OS01 尚无声卡驱动与音频混音子系统。
+
+  **验证**
+
+  - 验收场景 10 项全 PASS：标题与开局、持续控制、组合键控制、菜单与退出、配置持久化、存档与读档、错误 IWAD、EBUSY 冲突、模式切换失效、SIGKILL 强杀回收。
+  - SMP=1 / SMP=2 矩阵通过；测试镜像走独立 variant（`build/x86_64-clang/image/doom-test/disk.img`），普通镜像哈希前后一致。
+  - `qemutests.test_doom_runner` 18/18、`test_doom_build_contract` 18/18、`test_doom_engine_notice` 4/4、`make test-doom-host DOOM_CASE=all` 6/6、`make test-harness` 47/47、`make test-host` PASS、`make test-static` 14/14。
+
 - fix(gfx,fb): **framebuffer 映射从不当 UC 改为 write-back，并统一所有 framebuffer 别名的 cache policy**（commit `3b933d92` ~ `043ab3a3`，报告见 [fix-report](../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report.md)）：
 
   **做了什么**
@@ -69,6 +92,82 @@
 
 ---
 
+## 2026-11-10
+
+- refactor(libgui): **PS/2 扫描码解码拆为纯函数公开 API**（commit `b0a4c550` ~ `27df6834`，Doom 移植 D02 阶段的前置）：解码逻辑从 `libgui` 内部搬到**纯函数公开头**，不依赖 GUI 平台状态，键位重编码阶段可重复执行。`libgui` 的输入层与 Doom 的租约输入适配共用同一份解码语义，避免两处各写一套扫描码表。
+
+- feat(libc): **`remove()` 补齐文件与目录双语义**（commit `468324c7`）：用 **不跟随最后分量** 的 `lstat()` 判定路径类型，然后**只做一次**删除 —— 目录走 `rmdir()`，其余走 `unlink()`。因此符号链接删除的是链接本身，其指向的目录保留。刻意不设 fallback：`rmdir()` 失败（目录非空等）即返回原始错误，不退回 `unlink()` 造成误删。
+
+- feat(libc): **整数 abs 家族与最小 fabs**（commit `6d4a76dc`）：`abs()` / `labs()` / `llabs()` 以**无符号**运算求幅值，使取负对最小负数也有定义；结果经 `volatile` 传递，避免编译器识别 `x < 0 ? -x : x` 惯用法后改写成对 `abs()` 自身的 CALL —— 那会在用户态递归到宿主 libc 的 `abs`（或直接自我递归）。
+
+- refactor(systest): **6094 行单体 `user/systest.c` 拆分为 8 个领域模块**（commit `5f52ebb3`）：按 `apps.mk` 多文件应用契约拆为 `systest.h`（harness 宏与共享计数器）、`app.mk`（源文件清单）、`systest.c`（启动探针 + `tests[]` 表 + CLI 解析 + runner）、`test_fs.c`（VFS/IO/dir/symlink/procfs/devfs）、`test_proc.c`（进程/fork/exec/waitpid/信号/pgrp/EEVDF/atexit/hostile）、`test_mem.c`（brk/mmap/COW/SSP canary/用户态故障）、`test_time_poll.c`（time/clock/nanosleep/poll/select/termios）、`test_libc.c`（stdio/转换/格式化/busybox 行/Linux ABI）、`test_rbtree.c`（rbtree 校验与压力）、`test_net.c`（网络 syscall 边界）。用例表仍是 **119 条**（拆分只改组织不改覆盖面）。`qemutests/test_systest_protocol.py` 同步适配新路径。
+
+## 2026-11-09
+
+- feat(libc,test): **用户态 libc 补全 T1–T17 交付并验收**（设计 [spec](superpowers/specs/2026-11-08-libc-completion-design.md)，实施 [plan](superpowers/plans/2026-11-08-libc-completion.md)，验证 [验收报告](superpowers/reports/2026-11-08-libc-completion-validation.md)，接口现状见 [libc/libc.md](libc/libc.md)）：
+
+  **做了什么**
+
+  - **15 个接口组全部交付**，每组都有宿主（host）证据，10 组另有 guest 证据：
+
+    | 组 | 任务 | 接口 | host 组用例 |
+    |---|---|---|---|
+    | api | T1 | 全部公开头的自包含/单定义/C linkage 契约 | `test_libc_api`（5 例） |
+    | alloc | T2 | `malloc`/`calloc`/`realloc`/`free`/`reallocarray`/`posix_memalign`/`aligned_alloc` | `test_libc_alloc`（7 例） |
+    | env | T3 | `getenv`/`setenv`/`unsetenv`/`putenv`/`clearenv` | `test_libc_environ`（9 例） |
+    | shutdown | T4 | `shutdown` 接真实 syscall | `test_libc_shutdown`（3 例） |
+    | stream | T5 | `feof`/`ferror`/`clearerr`/`ungetc` + 标准流生命周期 | `test_libc_stream_state`（13 例 / 324 断言） |
+    | append | T6 | 内核真实 `O_APPEND` 原子追加 | `test_vfs_append`（9 例） |
+    | io | T7 | `fopen`/`fdopen`/`fclose`/`fread`/`fwrite` + 真实 `fcntl` | `test_libc_stdio_io`（13 例） |
+    | line | T8 | `fgetc`/`getc`/`putc`/`fileno`/`fgets`/`getdelim`/`getline` | `test_libc_line`（11 例） |
+    | format | T9 | `dprintf`/`vdprintf`/`asprintf` + `fseek`/`fseeko`/`ftell`/`ftello`/`rewind`/`freopen` | `test_libc_stdio_format`（10 例） |
+    | integer | T10 | `strtol`/`strtoul`/`strtoll`/`strtoull`/`atoi`/`atol`/`atoll`/`strtoimax`/`strtoumax` | `test_libc_integer`（7 例） |
+    | float | T11 | `strtod`/`strtof`/`strtold`/`atof`（按目标精度） | `test_libc_float_parse`（3 例） |
+    | scan | T12 | `sscanf`/`vsscanf`（宽度、长度修饰符、`%n`、扫描集） | `test_libc_scan`（13 例 / 151 断言） |
+    | time | T13 | `gmtime`/`localtime`/`_r`、`mktime`、`strftime`、`strptime`、`tzset`、`timegm` 等 | `test_libc_time`（10 例 / 201 断言） |
+    | path | T14 | `realpath` + `execl`/`execlp`/`execle`/`execvp`（PATH 搜索） | `test_libc_path`（24 例 / 78 断言） |
+    | dir | T15 | `opendir`/`readdir`/`closedir`/`dirfd`/`fdopendir`/`scandir`/`alphasort` | `test_libc_dir`（19 例 / 131 断言） |
+    | 验收 | T17 | 端到端验收 + 消费者清理 + 场景目录补登记 + 文档 | guest 119 条用例表 |
+
+  - **本期不实现（2026-11-09 用户决定）**：T16 POSIX 正则引擎与 glob/globfree 匹配 —— `libc/stdlib/glob.c` 保留为返回 `GLOB_NOMATCH` 的桩，`libc/include/regex.h` 为桩头。理由与影响见验收报告 §6。
+
+  **关键结论与架构决策**
+
+  - **顺带修掉的基线缺陷**：`opendir()` 不检查类型（桌面的 Files 打开普通文件时用**空列表**替换旧视图）；`execvp()` 把**裸名**直接交给 `/bin/sh`（脚本不在 CWD 时找不到，或误执行 CWD 里同名文件）；**空 `PATH` 与未设置 `PATH` 被合并处理**（空 `PATH` 语义是"当前目录"，不是"不搜"）；`realpath()` 的 `..` 语义（先解析符号链接再应用 `..`，与 glibc 同构）。
+  - **oracle 对拍而非自证**：整数/浮点/扫描转换三组均与**独立编译的宿主 oracle** 比对，浮点按 **IEEE bit pattern** 逐位比对（float 4B / double 8B / long double 10 有效字节）。
+
+  **验证**
+
+  - 15 组 host 全绿（`make PROFILE=x86_64-clang test-libc-host LIBC_CASE=all`）。
+  - guest 端到端：`make OS01_SYSTEST=1 test-syscall` —— 用例表 **119 条，118 通过 + 1 SKIP，0 失败**（108 条原有 + T17 新增 10 条 libc 验收用例）。
+
+## 2026-11-08
+
+- refactor(boot,subsys,sched,smp,irq,time): **启动编排治理 BOOT-1 ~ BOOT-5 五项 spec 全部实施并验收**（分析 [报告](superpowers/reports/2026-11-07-boot-sequence-analysis.md)；各阶段 spec/plan 见 `docs/superpowers/specs|plans/2026-11-0{7,8}-boot-*`；逐项验证报告见 `docs/superpowers/reports/2026-11-0{7,8}-boot-*-validation.md`）：
+
+  **做了什么**
+
+  - **BOOT-1 CPU 生命周期与 SMP 握手**（`8524c55b` ~ `b38b6ca1`）：`percpu_init` 只**构造**不发布 online；online 发布为 release、消费端全部 acquire；`ipi_ready=1 ⇒ online=1` 前置断言；x86 两阶段握手（INIT-SIPI-SIPI → 等 online → TSC 采样 → 等 scheduler_ok → 复核）；失败一律 `boot_fatal_cpu()` **fail-closed 且资源永不回收**；aarch64 三层资格（runtime online / boot ACK / admission accepted mask）分离。
+  - **BOOT-2 早期中断与时间设施启动顺序**（`8f898d4e` ~ `bc9c82f9`）：`IRQF_NO_AUTOEN` masked registration；PIC slave 级联真实 IMR 语义；控制器 init 阶段**不 sti**；PIT prepare/start 分离；RTC 受控事务（仅 C.PF 计数、256 样本饱和、50M 双预算、所有出口恢复 A/B/route/LAPIC/IF=0）；LAPIC 校准有界化并移到 phase4 末一次执行；原子 BSP tick handoff（IRQ-off 区，PIT 未 prepared 即 fatal）。
+  - **BOOT-3 启动失败传播与必需能力检查**（`78bd5f53` ~ `eebecfbf`）：注册错误不再被忽略（`-EEXIST`/`-EINVAL`/`-ENOSPC` 首个错误锁存）；**required 子系统立即致命停止**（`[boot-3] FATAL stage=subsys component=<name> rc=<rc>`）、**optional 警告降级**；根挂载与 TTY/PTY 为必需能力，`/proc`、`/dev/shm`、`/tmp` 为可选；初始任务 stdio 绑定失败即停。
+  - **BOOT-4 阶段契约与跨架构编排**（`49ea9e65` ~ `f610e665`）：弃用裸数字阶段常量，定义 `SUBSYS_PHASE_CONTROLLERS/TIME/DEVICE_IRQ/STORAGE`；`register_subsys_deps` 最多 8 项依赖 + **拓扑预检**（缺失 `-ENOENT`、循环 `-ELOOP` 并上报首个成环组件、同阶段按拓扑序稳定调度）；`subsys_prepare_cpus` 仅在 BSP 执行且只做软件数据结构分配（删除未执行的 `_lapic_timer_start_percpu`）；拆出对称强覆盖钩子 `arch_boot_controllers` / `arch_boot_device_nodes` / `arch_boot_percpu`。
+  - **BOOT-5 调度启动与系统服务解耦**（`262813e4` ~ `fe629c7e`）：`vfs_end_bootstrap()` 前置到 stdio 就绪之后、首任务发布之前，`spawn_user_task()` 在 bootstrap 窗口内 fail-closed 返回 `-EAGAIN`；初始用户任务**准入校验 + 持锁原子发布**（`task_list_lock → rq_lock` 下重新核验后 `list_add_to_before` + `enqueue_task`）；公共用户态编排与后台服务从架构 `sched_boot.c` 剥离到 `kernel/init/userspace.c` 与 `kernel/init/services.c`；late selftests 迁到 `kernel/selftest/boot_late.c`。
+
+  **关键结论与架构决策**
+
+  - **五项 spec 全部 APPROVE**：每项的 spec 与 plan 均经独立子 agent 评审 APPROVE，实施后各自有独立验证报告与故障矩阵。
+  - **失败传播与降级是显式契约**：必需能力失败立即停止并跨架构准确归因，可选能力失败可查询降级状态 —— 承接 ARCH-8 的失败处理部分。
+  - **启动阶段依赖不靠链接次序**：同阶段依赖由拓扑预检保证，固定注册表与 per-CPU 执行位置契约化 —— 承接 ARCH-8 的命名阶段 / 依赖检查 / per-CPU 语义部分。
+  - **范围约束守住了**：本次只治理启动编排，不做并行启动、完整依赖 DAG、EL0 适配或低层 AP API 全面统一。
+
+  **验证**
+
+  - BOOT-1：8 组 boot-lifecycle 隔离故障矩阵全 PASS（延迟/不响应 AP 不误判成功，fail-closed 后无 ready 行、无 PID1、无后续 CPU）。
+  - BOOT-2：10 组 boot-irq-time 矩阵 + masked registration/PIC 级联 host 组 + RTC 校准 7 用例 + tick handoff 6 用例。
+  - BOOT-3：17 组隔离故障矩阵 + 真实 ARM 日志 + exec 发布前验证。
+  - BOOT-4：14 组双架构 boot-contract 矩阵全 PASS。
+  - BOOT-5：8 组 boot-services 矩阵 + 无头终端 Ctrl-C 回归全 PASS。
+
 ## 2026-11-07
 
 - refactor(core,arch): **双架构统一 kernel_main 启动编排闭环 —— 单一全局入口 + 跨架构启动 facade**（设计 [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md)，实施 [plan](superpowers/plans/2026-11-07-unified-kernel-main.md)，commit `6cc48115` ~ `402cf7e6`）：
@@ -130,7 +229,7 @@
 
 ## 2026-11-06
 
-- feat(xhci,usb,user): **ARCH-14 USB xHCI 主机控制器与用户态 lsusb 全栈闭环（Phase 1–4 全链路）**（设计 [spec P1](superpowers/specs/2026-11-06-xhci-p1-design.md) / [spec P2](superpowers/specs/2026-11-06-xhci-phase2-design.md) / [spec P3](superpowers/specs/2026-11-06-xhci-phase3-design.md) / [spec P4](superpowers/specs/2026-11-06-usb-devfs-lsusb-design.md)，实施 [plan P1](superpowers/plans/2026-11-06-xhci-p1-bringup.md) / [plan P2](superpowers/plans/2026-11-06-xhci-phase2.md) / [plan P3](superpowers/plans/2026-11-06-xhci-phase3.md) / [plan P4](superpowers/plans/2026-11-06-usb-devfs-lsusb.md)）：
+- feat(xhci,usb,user): **ARCH-14 USB xHCI 主机控制器与用户态 lsusb 全栈闭环（Phase 1–4 全链路）**（设计 [spec P1](superpowers/specs/2026-11-03-xhci-phase1-design.md) / [spec P2](superpowers/specs/2026-11-04-xhci-phase2-design.md) / [spec P3](superpowers/specs/2026-11-05-xhci-phase3-design.md) / [spec P4](superpowers/specs/2026-11-06-usb-devfs-lsusb-design.md)，实施 [plan P1](superpowers/plans/2026-11-03-xhci-phase1.md) / [plan P2](superpowers/plans/2026-11-04-xhci-phase2.md) / [plan P3](superpowers/plans/2026-11-05-xhci-phase3.md) / [plan P4](superpowers/plans/2026-11-06-usb-devfs-lsusb.md)）：
 
   **做了什么**
 
@@ -237,6 +336,27 @@
   - **未改动** `kernel/fs/vfs.c`、`kernel/fs/dcache.c`、任何 `kernel/include/uapi/` 文件、`boot_context` v2 ABI、`struct devfs_ops` 布局。
 
   **环境注记**：`make test-host` 在 agent sandbox 内可能因 `rm` 被 recoverable-delete shim（`mavis-trash`）拦截而使 `tools/tests/test_kernel_headers.py` 偶发失败（`mavis-trash: failed to trash '/tmp/.../headers'`），该失败与本次改动无关，在未改动的 master 工作区同样可复现；用真实 `/usr/bin/rm`（去掉 shim 的 PATH）复跑即通过。该 shim 不存在于用户交互 shell 与 CI 环境。
+
+- feat(aarch64,sched): **aarch64 每核调度 tick 记账闭环**（设计 [spec](superpowers/specs/2026-11-06-aarch64-percpu-tick-accounting-design.md)，实施 [plan](superpowers/plans/2026-11-06-aarch64-percpu-tick-accounting.md)，验证 [报告](superpowers/reports/2026-11-06-aarch64-percpu-tick-accounting-validation.md)，commit `5e9e3c40` ~ `8f1805f6`）：
+
+  **做了什么**
+
+  - **每核私有 100 Hz CNTP 周期中断**（`AARCH64_SCHED_TICK_HZ = 100`）：一计**真实递送**的 CNTP 中断 = 一个样本；不做墙钟补算，丢掉的 tick 不事后补。
+  - **全局时间基准不迁移**：jiffies、poll timeout、timer list / TIMER_SIRQ、blocker scan 仍由 BSP 独占；AP 不推进全局时间。
+  - **每核记账与 vruntime**：`current == rq->idle` → idle 样本，否则 busy 样本并给该任务加 1 个 runtime tick；vruntime 每样本 +1；**aarch64 上 `schedule()` 不再计费**（否则同一 tick 双计，且 vruntime 会依赖 yield 频率）。
+  - **CNTP 配置启动期冻结**：BSP 一次性发表（字段先写、ready 最后 release-store），AP acquire 读并校验后只 arm 自己的计数器；freq ≥ 100 Hz、period = freq/100 且 `1 <= period <= INT32_MAX`、PPI ∈ 16..31，AP freq 与 BSP 不一致即失败，arm 失败后清 CTL ENABLE。
+  - **中断路径保持协作式**：tick handler 与 IRQ 返回路径**都不调用** `schedule()`；BSP 每个有效 tick（含 idle）release-store `need_resched=1`，AP 仅在本核繁忙任务越过 EEVDF deadline 时置位（idle tick 不无条件请求调度）。
+
+  **关键结论与架构决策**
+
+  - **仍是 EL1 协作式**：没有 IRQ 返回抢占，没有任务迁移，EL0/统一 `kernel_main` 当时尚未完成（统一 `kernel_main` 于 2026-11-07 另行闭环）。
+  - **锁序约束**：usage lock（`sched_account_tick()` 内部取用并释放）与 rq lock **从不嵌套**，tick 不取 `task_list_lock`。
+  - **GIC handler 注册恰好一次**：重复注册（`-2`）必须失败。
+
+  **验证**
+
+  - `MODE=sched-tick` 变体在每个已录用 CPU 上发布七个冻结 case 的证据行，严格 runner `qemutests/aarch64_sched_tick.py` 按冻结字段与跨字段关系解析，1/2/4/8 核各两次运行。
+  - 独立评审 APPROVE；评审提出的 2 个 Important 已修完并各自有针对性验证。
 
 ## 2026-11-01
 
@@ -427,9 +547,9 @@
 
 - feat(gui): **GUI-1 LVGL 平台后端（libgui）闭环**（2026-10-19/20，7 个 commit `2fb58e71` → `d829b36f`，已合入 `master`）：从 `test_lvgl` 抽出可复用的 `libgui` 平台层，roadmap 的 GUI-1 行此前**漏勾**，本次一并更正。① `build(lvgl)`（`2fb58e71`）：fatal 断言改为 `LV_ASSERT_HANDLER` 立即 `_exit(1)`，并新增 `qemutests/gui_build_audit.py` 审计**真实**宏展开（不靠改配置伪造红灯）；② `feat(gui)`（`622d6734`）：公共 API `gui_platform.h`（`gui_platform_create/destroy/get_width/get_height/get_mode/step/get_pixel`）与私有 tick 契约 `libgui/internal/gui_tick.h`、`gui_lvgl_private.h`，公共 sysroot 只发布 `gui.h`/`gui_input.h`/`gui_platform.h`，不暴露 LVGL 类型；③ `feat(gui)`（`648a23f7`）：`libgui/src/platform.c` + `libgui/src/tick.c` 实现显示/离屏后端、tick、flush、生命周期与失败回退，`gui_platform_step()` 输出下一次 poll 等待时间供驱动方结合 `poll` 推进，格式/stride/容量/错误传播由宿主确定性契约测试钉死；④ `test(gui)`（`c27b900a`）：真实 LVGL 渲染（跨 partial 行边界取样）、50 轮 create→destroy 生命周期、4 MiB TLSF 池耗尽后触发 fatal 断言的子进程；⑤ `build(gui)`（`f5a9f7bf`）：目标归档迁移与 sysroot 原子发布；⑥ `refactor(test_lvgl)`（`acebb9df`）：应用改用平台生命周期与 poll/step 循环；⑦ `test(gui)`（`d829b36f`）：QEMU 门禁覆盖 SMP 冒烟、显示所有权与 fatal 恢复。设计 [spec](superpowers/specs/2026-10-19-gui-1-lvgl-platform-backend-design.md)、实施 [plan](superpowers/plans/2026-10-19-gui-1-lvgl-platform-backend.md)。
 
-- test(resolution): **roadmap Parked #5 #1–#7 闭环**（分支 `fix/resolution-switcher-cosmetic`，commit [`cd65b868`](../../logs/git/refs/master)）：`qemutests/test_resolution_switcher.py` 7 项 cosmetic/鲁棒性收尾一次性合并（+231/−24，1 文件）。① `expect()` 增 `sentinels=` 参数，boot/restore/m{} 三类 surface 强制 `(0,0)=黑` sentinel（来自 `terminal_render.c:356` `gfx_fill_rect(... bg)` 后置约束）由 `_mk_surface_with_sentinel(w,h,fill=(2,2,2),sentinel=(0,0,(0,0,0)))` host 复现非纯黑 surface + 已知像素双源 ground truth；② `_drain_case` 用 hold-then-setres-assert-EBUSY 串起三步且 release 匹配 `start=` 过滤陈旧 serial；③ `wait_for(r"HOLD ok", ..., start=mark)` 收紧所有 callsite 防陈旧行；④ `_client_eagain_case` 同 start 化 + hold 8s 余量；⑤ `_mmap_case` 改 `parse_resjson` 过滤 `op=="mmap" and rc==0`，不再误命中 rc:-1 失败 JSON；⑥ `run_test_suite` 现跑三启动 `_isolation_case`（spec §8.2 item-1 隔离契约）；⑦ `PROMPT_RE = re.compile(rf"^{re.escape(PROMPT)}", re.MULTILINE)` 行首锚定 3 callsite 替换；⑧ `main()` `parser.error()` 校验 `case` 置于 firmware gate 之前，未知 case 返回 SystemExit(2)。补充 5 host unit test（`test_round_trip_sentinel_violation`、`test_mmap_helper_filters_partial_success`、`test_prompt_re_matches_at_line_start`/`_rejects_mid_line`/`_matches_after_first_command`、`test_main_unknown_case_exits_2`、`test_main_round_trip_standalone_rejected`）。roadmap Parked #5 #8–#21（客户端策略/`terminal.c:301-302` present 门限/`fb_test` 残留/T6 pty/`fb_write_row` 死码等）仍未闭环。
+- test(resolution): **roadmap Parked #5 #1–#7 闭环**（分支 `fix/resolution-switcher-cosmetic`，commit `cd65b868`）：`qemutests/test_resolution_switcher.py` 7 项 cosmetic/鲁棒性收尾一次性合并（+231/−24，1 文件）。① `expect()` 增 `sentinels=` 参数，boot/restore/m{} 三类 surface 强制 `(0,0)=黑` sentinel（来自 `terminal_render.c:356` `gfx_fill_rect(... bg)` 后置约束）由 `_mk_surface_with_sentinel(w,h,fill=(2,2,2),sentinel=(0,0,(0,0,0)))` host 复现非纯黑 surface + 已知像素双源 ground truth；② `_drain_case` 用 hold-then-setres-assert-EBUSY 串起三步且 release 匹配 `start=` 过滤陈旧 serial；③ `wait_for(r"HOLD ok", ..., start=mark)` 收紧所有 callsite 防陈旧行；④ `_client_eagain_case` 同 start 化 + hold 8s 余量；⑤ `_mmap_case` 改 `parse_resjson` 过滤 `op=="mmap" and rc==0`，不再误命中 rc:-1 失败 JSON；⑥ `run_test_suite` 现跑三启动 `_isolation_case`（spec §8.2 item-1 隔离契约）；⑦ `PROMPT_RE = re.compile(rf"^{re.escape(PROMPT)}", re.MULTILINE)` 行首锚定 3 callsite 替换；⑧ `main()` `parser.error()` 校验 `case` 置于 firmware gate 之前，未知 case 返回 SystemExit(2)。补充 5 host unit test（`test_round_trip_sentinel_violation`、`test_mmap_helper_filters_partial_success`、`test_prompt_re_matches_at_line_start`/`_rejects_mid_line`/`_matches_after_first_command`、`test_main_unknown_case_exits_2`、`test_main_round_trip_standalone_rejected`）。roadmap Parked #5 #8–#21（客户端策略/`terminal.c:301-302` present 门限/`fb_test` 残留/T6 pty/`fb_write_row` 死码等）仍未闭环。
 
-- fix(aarch64): **phantom `-ENOENT` 根因钉死并修复**（分支 `fix/aarch64-phantom-enoent`，commit [`80eed2e9`](../../logs/git/refs/master)）：`kernel/include/arch/atomic.h` 的 AArch64 `arch_atomic_cas()` 内联汇编执行 `cmp` 但只声明 `"memory"` clobber，未声明 `"cc"`，导致编译器保留 PROTNONE 检测的 `tst` NZCV 跨 CAS 跨过去再被 `csel` 消费。首次 CAS 失败（lock busy）时 `cmp 0,1` 把 Z=0，csel 依此清掉描述符 V 位，retry 路径不改 desc 直接 `stlr` 出 V=0/TABLE=1/PA=correct 的畸形 desc，下一次读 V=0 即 phantom `-ENOENT`。修复 +1 行（加 `"cc"`）。回归钉死测试：新增 `kernel/selftest/test_aarch64_page_table_multicore.c` §5b（BSP+AP 紧邻 PTE 索引上 500 次 `replace_4k` RW→RO 原子循环，`ap_work_cmd_ext` 增 `WORK_PT_REPLACE_LOOP=5` 枚举值驱动 AP 侧）—— cpus=4 无修复 100% 复现，有修复 100% PASS；cpus=2/4 实端到端各 5/5 PASS。roadmap Parked #2 + M4「不得引入并发 `arch_vmm_*` updater」硬约束同步撤销。根因证据：`docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`（前后 disasm）；pause-session 期间的历史档：`docs/aarch64-phantom-enoent-handoff-2026-10-19.md`。
+- fix(aarch64): **phantom `-ENOENT` 根因钉死并修复**（分支 `fix/aarch64-phantom-enoent`，commit `80eed2e9`）：`kernel/include/arch/atomic.h` 的 AArch64 `arch_atomic_cas()` 内联汇编执行 `cmp` 但只声明 `"memory"` clobber，未声明 `"cc"`，导致编译器保留 PROTNONE 检测的 `tst` NZCV 跨 CAS 跨过去再被 `csel` 消费。首次 CAS 失败（lock busy）时 `cmp 0,1` 把 Z=0，csel 依此清掉描述符 V 位，retry 路径不改 desc 直接 `stlr` 出 V=0/TABLE=1/PA=correct 的畸形 desc，下一次读 V=0 即 phantom `-ENOENT`。修复 +1 行（加 `"cc"`）。回归钉死测试：新增 `kernel/selftest/test_aarch64_page_table_multicore.c` §5b（BSP+AP 紧邻 PTE 索引上 500 次 `replace_4k` RW→RO 原子循环，`ap_work_cmd_ext` 增 `WORK_PT_REPLACE_LOOP=5` 枚举值驱动 AP 侧）—— cpus=4 无修复 100% 复现，有修复 100% PASS；cpus=2/4 实端到端各 5/5 PASS。roadmap Parked #2 + M4「不得引入并发 `arch_vmm_*` updater」硬约束同步撤销。根因证据：`docs/aarch64-phantom-enoent-root-cause-2026-10-19.md`（前后 disasm）；pause-session 期间的历史档：`docs/aarch64-phantom-enoent-handoff-2026-10-19.md`。
 
 ## 2026-10-19
 
