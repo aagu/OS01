@@ -1,0 +1,4 @@
+# Framebuffer pixel acceptance probe: the only process that owns the
+# display, so nothing else writes the framebuffer while the host takes
+# its screendump.
+tty1:once:/bin/fb_pixel_test
