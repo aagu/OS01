@@ -92,8 +92,15 @@ def dump_and_compare(qmp, outdir, tag, stamp, expected_fn, tries=12, delay=0.5):
     is never hidden by an endless retry."""
     attempts = []
     first_ppm = None
+    w = h = 0
+    body = b""
+    res = None
+    ppm = None
     for i in range(tries):
-        ppm = os.path.join(outdir, "%s-%s.ppm" % (tag, stamp))
+        # Every attempt gets its OWN file: with a shared name the later
+        # attempts would overwrite the first one and "first_ppm" would
+        # point at a different picture than the one it was taken from.
+        ppm = os.path.join(outdir, "%s-%s-attempt%d.ppm" % (tag, stamp, i))
         resp = qmp.execute("screendump", filename=ppm, format="ppm")
         if "error" in resp:
             return {"error": "screendump failed: %r" % resp, "attempts": attempts}
@@ -103,13 +110,15 @@ def dump_and_compare(qmp, outdir, tag, stamp, expected_fn, tries=12, delay=0.5):
         res = compare(w, h, body, expected_fn)
         res["attempt"] = i
         res["ppm"] = ppm
-        attempts.append({"attempt": i, "mismatches": res["mismatches"]})
+        attempts.append({"attempt": i, "ppm": ppm, "width": w, "height": h,
+                         "pixels": res["pixels"], "mismatches": res["mismatches"],
+                         "kind": res["kind"]})
         if res["mismatches"] == 0:
             res["first_ppm"] = first_ppm
             res["tries_used"] = i + 1
+            res["attempts"] = attempts
             return res
         time.sleep(delay)
-    res = compare(w, h, body, expected_fn)
     res["attempt"] = tries - 1
     res["ppm"] = ppm
     res["first_ppm"] = first_ppm
@@ -138,10 +147,14 @@ def compare(w, h, body, expected_fn):
             if got == pattern_pixel(FRAME_OLD, x, y):
                 old_matches += 1
     kind = "match"
-    if mismatches == total:
-        kind = "nothing matches the expected frame"
-    elif old_matches == total:
+    # "the whole screen still shows the OLD frame" has to be checked
+    # FIRST: when every pixel is the old frame, every pixel mismatches
+    # as well, so the "mismatches == total" test below would swallow
+    # this classification and the report would say "nothing matches".
+    if old_matches == total:
         kind = "the whole screen still shows the OLD frame"
+    elif mismatches == total:
+        kind = "nothing matches the expected frame"
     elif mismatches:
         kind = "partial mismatch"
     return {
@@ -282,6 +295,10 @@ def main():
         result["full_marker"] = line.strip()
         result["width"] = width
         result["height"] = height
+        if width <= 0 or height <= 0:
+            result["error"] = ("guest reported a non-positive display size "
+                               "%dx%d" % (width, height))
+            return finish(result, result_path)
 
         qmp = Qmp(qmp_sock)
         qmp.execute("qmp_capabilities")
@@ -293,6 +310,20 @@ def main():
         result["full"] = full
         result["ppm_size"] = [full.get("width"), full.get("height")]
 
+        # ── the screendump must cover the whole display ──
+        # The comparison range is decided by the PPM's own header, so a
+        # cropped picture would silently shrink the acceptance area.
+        # The screenshot therefore has to match the size the guest
+        # reported, and both the expected and the actual size are kept
+        # in the result.
+        result["full_dimensions"] = {
+            "expected": [width, height],
+            "actual": [full.get("width"), full.get("height")],
+        }
+        result["full_dimensions"]["ok"] = (
+            result["full_dimensions"]["actual"] ==
+            result["full_dimensions"]["expected"])
+
         # ── the rect step ──
         line = wait_for(serial, "RECT_DONE", args.timeout)
         if line is None:
@@ -300,14 +331,74 @@ def main():
             return finish(result, result_path)
         result["rect_marker"] = line.strip()
 
+        rkv = parse_kv(line)
+        rect_mode_w = int(rkv["width"])
+        rect_mode_h = int(rkv["height"])
+        rect_x = int(rkv["x"])
+        rect_y = int(rkv["y"])
+        rect_w = int(rkv["w"])
+        rect_h = int(rkv["h"])
+
+        geom = {
+            "reported": {"x": rect_x, "y": rect_y, "w": rect_w, "h": rect_h},
+            "expected": {"x": RECT_X, "y": RECT_Y, "w": RECT_W, "h": RECT_H},
+            "same_display_mode": (rect_mode_w == width and rect_mode_h == height),
+            "inside_display": (rect_w > 0 and rect_h > 0 and rect_x >= 0 and
+                               rect_y >= 0 and rect_x + rect_w <= width and
+                               rect_y + rect_h <= height),
+        }
+        geom["matches_contract"] = (geom["reported"] == geom["expected"])
+        geom["ok"] = (geom["same_display_mode"] and geom["inside_display"] and
+                      geom["matches_contract"])
+        result["rect_geometry"] = geom
+
         rect = dump_and_compare(qmp, args.out, "rect", stamp, expected_after_rect)
         if "error" in rect:
             result["error"] = rect["error"]
             return finish(result, result_path)
         result["rect"] = rect
 
-        ok = (result["full"]["mismatches"] == 0 and
+        result["rect_dimensions"] = {
+            "expected": [width, height],
+            "actual": [rect.get("width"), rect.get("height")],
+        }
+        result["rect_dimensions"]["ok"] = (
+            result["rect_dimensions"]["actual"] ==
+            result["rect_dimensions"]["expected"])
+
+        ok = (result["full_dimensions"]["ok"] and
+              result["rect_dimensions"]["ok"] and
+              result["rect_geometry"]["ok"] and
+              result["full"]["mismatches"] == 0 and
               result["rect"]["mismatches"] == 0)
+
+        reasons = []
+        if not result["full_dimensions"]["ok"]:
+            reasons.append(
+                "full screendump is %sx%s but the guest display is %dx%d" % (
+                    result["full_dimensions"]["actual"][0],
+                    result["full_dimensions"]["actual"][1], width, height))
+        if not result["rect_dimensions"]["ok"]:
+            reasons.append(
+                "rect screendump is %sx%s but the guest display is %dx%d" % (
+                    result["rect_dimensions"]["actual"][0],
+                    result["rect_dimensions"]["actual"][1], width, height))
+        if not result["rect_geometry"]["ok"]:
+            reasons.append(
+                "rect geometry %s is not usable (same display mode: %s, "
+                "inside display: %s, matches contract: %s)" % (
+                    geom["reported"], geom["same_display_mode"],
+                    geom["inside_display"], geom["matches_contract"]))
+        if result["full"]["mismatches"]:
+            reasons.append("full frame: %d/%d pixels differ (%s)" % (
+                result["full"]["mismatches"], result["full"]["pixels"],
+                result["full"]["kind"]))
+        if result["rect"]["mismatches"]:
+            reasons.append("rect frame: %d/%d pixels differ (%s)" % (
+                result["rect"]["mismatches"], result["rect"]["pixels"],
+                result["rect"]["kind"]))
+        result["fail_reasons"] = reasons
+
         result["verdict"] = "PASS" if ok else "FAIL"
         return finish(result, result_path, ok)
     finally:
