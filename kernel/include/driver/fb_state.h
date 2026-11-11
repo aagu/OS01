@@ -38,6 +38,15 @@ bool fb_has_raw_writable_mmap_seen(void);
 bool fb_has_owner_or_fallback(void);
 bool fb_is_raw_writable_allowed(void);
 void fb_set_raw_writable_allowed_for_test(bool allowed);
+
+/*
+ * fb_set_backend_install_fail_for_test:
+ * Test hook that makes fb_install_backend() fail with -EINVAL even
+ * though its arguments are valid.  It exists so the host regression
+ * can cover the "mapping committed, backend install failed" failure
+ * point, which is different from the "mapping failed" point.
+ */
+void fb_set_backend_install_fail_for_test(bool fail);
 void fb_update_console_ownership_locked(void);
 uint32_t fb_active_writers_count(void);
 

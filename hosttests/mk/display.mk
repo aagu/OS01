@@ -5,6 +5,7 @@ $(eval $(call register_host_test,test_display_owner,display,protocol-or-legacy))
 $(eval $(call register_host_test,test_fb_resolution_hooks,display,protocol-or-legacy))
 $(eval $(call register_host_test,test_fb_resolution_ioctl,display,protocol-or-legacy))
 $(eval $(call register_host_test,test_fb_state,display,protocol-or-legacy))
+$(eval $(call register_host_test,test_fb_mtrr,display,protocol-or-legacy))
 $(eval $(call register_host_test,test_fb_uapi,display,protocol-or-legacy))
 $(eval $(call register_host_test,test_fb_writers,display,protocol-or-legacy))
 $(eval $(call register_host_test,test_gfx_client,display,protocol-or-legacy))
@@ -22,6 +23,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_gfx_primitives.elf \
     $(TEST_BLD)/test_fb_uapi.elf \
     $(TEST_BLD)/test_fb_state.elf \
+    $(TEST_BLD)/test_fb_mtrr.elf \
     $(TEST_BLD)/test_fb_writers.elf \
     $(TEST_BLD)/test_bga_resolution.elf \
     $(TEST_BLD)/test_bga_non_x86.elf \
@@ -348,6 +350,27 @@ $(TEST_BLD)/test_fb_state.elf: $(TEST_BLD)/test_fb_state.o $(TEST_BLD)/fb_state.
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-state: $(TEST_BLD)/test_fb_state.elf
+	$<
+
+# MTRR raw readout + guest-side range decoding test (round 3).  The
+# decoder under test is the SAME production object the kernel links
+# (kernel/arch/x86_64/memory/fb_mtrr.c); only the MSR read primitive is
+# replaced, so the regression cannot drift away from production.
+FB_MTRR_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST $(KERNEL_INC) -I$(TEST_INC)
+
+$(TEST_BLD)/fb_mtrr.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/fb_mtrr.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/fb_mtrr.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_MTRR_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_fb_mtrr.o: $(TEST_CASES)/test_fb_mtrr.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_MTRR_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_fb_mtrr.elf: $(TEST_BLD)/test_fb_mtrr.o $(TEST_BLD)/fb_mtrr.o
+	$(HOST_CC) -o $@ $^
+
+test-fb-mtrr: $(TEST_BLD)/test_fb_mtrr.elf
 	$<
 
 # Framebuffer writer admission, leases, and raw mmap rollback test (QEMU resolution switcher Task 3)

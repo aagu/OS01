@@ -44,8 +44,11 @@ int fb_x86_revoke_early_alias(uint64_t *pmd_table, uint64_t va_base, uint64_t si
  * function, so the regression covers the production order).
  *
  *   1. publish the permanent mapping in the coordinator -- the
- *      coordinator hands that address to every writer lease, so after
- *      this step no lease can hold the early address any more;
+ *      coordinator hands that address to every NEW writer lease, so
+ *      after this step no new lease is granted the early address; a
+ *      lease that was already handed out keeps the address it holds
+ *      (that is why the revocation below waits for the writer count to
+ *      reach zero);
  *   2. revoke the early alias, but only while no writer lease is
  *      outstanding (a lease holds the address it was granted, and that
  *      address must not become unmapped underneath it).

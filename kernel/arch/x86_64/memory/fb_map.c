@@ -6,6 +6,7 @@
  */
 
 #include <arch/x86_64/fb_map.h>
+#include <arch/x86_64/fb_mtrr.h>   /* MTRR raw readout + guest-side decode */
 #include <arch/x86_64/msr_safe.h>    /* arch_rdmsr_safe (cache-state diagnostic) */
 #include <arch/x86_64/cpuid.h>       /* cpuid (MTRR capability check) */
 #include <driver/fb_cache.h>
@@ -42,135 +43,112 @@ static struct fb_pmd_record s_records[FB_MAP_MAX_PAGES];
  *
  * SCOPE (read this before quoting the numbers):
  *
- *   This prints the STATE that participates in the effective memory
- *   type of the framebuffer pages, and it derives the MTRR type that
- *   covers the BAR0 physical range.  It does NOT claim to prove the
- *   effective type of every access:
+ *   This prints THREE DIFFERENT things and never conflates them:
  *
- *     * the printed leaf entries are the ones this mapping installed
- *       (first and last), not a proof about the whole BAR0;
- *     * the MTRR derivation covers IA32_MTRR_DEF_TYPE plus the VARIABLE
- *       MTRR ranges (0x200-0x20F).  The fixed ranges (0xFE/0xFF) only
- *       cover the first 4 MiB of physical memory, which the framebuffer
- *       BAR0 is far above, so they cannot change the answer;
- *     * the interaction with nested paging (AMD NPT / Intel EPT) is
- *       NOT evaluated here.  Under NPT the guest PAT entry and the
- *       host page-table attributes decide the guest access; the guest
- *       side can only report its own PAT.
+ *     1. the RAW guest-visible state: IA32_PAT, IA32_MTRR_CAP,
+ *        IA32_MTRR_DEF_TYPE, the fixed-range registers, and every
+ *        variable range's base/mask;
+ *     2. the GUEST-SIDE decode of the guest's OWN MTRR configuration
+ *        for the framebuffer's physical range -- a well defined
+ *        function of (1), computed by <arch/x86_64/fb_mtrr.h> with the
+ *        architectural rules;
+ *     3. the EFFECTIVE memory type of the accesses -- this is NOT
+ *        evaluated and CANNOT be evaluated from inside the guest:
+ *        under nested paging (AMD NPT / Intel EPT) the effective type
+ *        is decided by the host's page tables and the host's PAT, and
+ *        the guest cannot observe either of them.
  *
- * MSR addresses (IA32_MSR register numbers, 64-bit view):
- *   IA32_PAT           = 0x277
- *   IA32_MTRR_CAP      = 0x0FE   (0x1FE is the 32-bit legacy alias)
- *   IA32_MTRR_DEF_TYPE = 0x2FF   (0x1FF is the 32-bit legacy alias)
- *   IA32_MTRR_BASE(n)  = 0x200 + 2n
- *   IA32_MTRR_MASK(n)  = 0x201 + 2n
+ *   So this diagnostic never claims that the processor used a
+ *   particular memory type for the framebuffer.  It reports what the
+ *   guest's own configuration says, and states explicitly that the
+ *   effective type is not evaluated.
+ *
+ * MSR addresses (IA32 MSR register numbers, 64-bit view).  There is
+ * NO "32-bit legacy alias" rule for these registers: the same number
+ * is used from 32-bit and 64-bit code.  IA32_MTRR_CAP is 0x0FE in
+ * 64-bit mode and 0x1FE in 32-bit mode; IA32_MTRR_DEF_TYPE is 0x2FF
+ * in both modes -- 0x1FF is NOT an alias for it.
+ *
+ * The fixed-range registers (IA32_MTRR_FIX64R_0..3 / FIX4R_0..3)
+ * describe only the lowest physical memory -- at most the lowest
+ * 256 MiB on any x86-64 part (the FIX64R_0 regions are 1 MiB each on
+ * the AMD family) -- while the framebuffer BAR0 sits at 2 GiB, far
+ * above them, so they cannot change the decode.  Their raw values are
+ * printed anyway so that this can be checked instead of assumed.
  *
  * The reads go through arch_rdmsr_safe(): a #GP from an MSR the
  * (virtual) CPU does not implement is recovered as an error instead
  * of killing the guest, so a missing capability is reported as
  * "unknown" rather than crashing the boot.
  */
-#define FB_IA32_PAT            0x277u
-#define FB_IA32_MTRR_CAP       0x0FEu
-#define FB_IA32_MTRR_DEF_TYPE  0x2FFu
-#define FB_IA32_MTRR_BASE(n)   (0x200u + 2u * (n))
-#define FB_IA32_MTRR_MASK(n)   (0x201u + 2u * (n))
-
-/* MTRR type ranking: smaller rank == more restrictive.  On an overlap
- * the more restrictive type wins (Intel SDM Vol 3A §11.2.3). */
-static int fb_mtrr_type_rank(uint64_t type)
+static int fb_x86_read_msr(uint32_t msr, uint64_t *value, void *ctx)
 {
-    switch (type & 0xFFu) {
-    case 0x00: return 0;  /* UC  */
-    case 0x04: return 1;  /* WT  */
-    case 0x05: return 2;  /* WP  */
-    case 0x01: return 3;  /* WB  */
-    default:   return 4;  /* unknown/reserved: treat as least restrictive */
-    }
-}
-
-static const char *fb_mtrr_type_name(uint64_t type)
-{
-    switch (type & 0xFFu) {
-    case 0x00: return "UC";
-    case 0x01: return "WB";
-    case 0x04: return "WT";
-    case 0x05: return "WP";
-    default:   return "?";
-    }
-}
-
-/* Derive the MTRR type that covers [pa, pa+size).  Returns the type
- * value and sets *known to false when the state could not be read. */
-static uint64_t fb_x86_mtrr_type_for(uint64_t pa, uint64_t size, bool *known)
-{
-    *known = false;
-
-    uint64_t def = 0;
-    if (arch_rdmsr_safe(FB_IA32_MTRR_DEF_TYPE, &def) != 0) {
-        return 0;
-    }
-
-    uint64_t cap = 0;
-    if (arch_rdmsr_safe(FB_IA32_MTRR_CAP, &cap) != 0) {
-        /* No MTRR capability register: the default type is all we have. */
-        *known = true;
-        return def;
-    }
-
-    uint64_t vcnt = cap & 0xFFu;
-    uint64_t best = def;
-    int best_rank = fb_mtrr_type_rank(def);
-
-    for (uint64_t i = 0; i < vcnt && i < 16u; i++) {
-        uint64_t base = 0, mask = 0;
-        if (arch_rdmsr_safe(FB_IA32_MTRR_BASE(i), &base) != 0) continue;
-        if (arch_rdmsr_safe(FB_IA32_MTRR_MASK(i), &mask) != 0) continue;
-
-        uint64_t base_addr = base & ~0xFFFu;     /* reserved low bits */
-        uint64_t mask_addr = mask & ~0xFFFu;
-
-        /* The range covers [base_addr, base_addr + ~mask_addr]. */
-        uint64_t range_end = base_addr + (~mask_addr & 0x0000FFFFFFFFFFFFULL);
-        if (pa + size <= base_addr || pa > range_end) {
-            continue;   /* does not cover our range */
-        }
-
-        int rank = fb_mtrr_type_rank(base);
-        if (rank < best_rank) {
-            best_rank = rank;
-            best = base & 0xFFu;
-        }
-    }
-
-    *known = true;
-    return best;
+    (void)ctx;
+    return arch_rdmsr_safe(msr, value);
 }
 
 static void fb_x86_log_page_table_state(uint64_t first_leaf, uint64_t last_leaf,
-                                        uint64_t pages, uint64_t pa)
+                                        uint64_t pages, uint64_t pa, uint64_t size)
 {
-    uint64_t pat = 0, cap = 0, def = 0, cr0 = 0;
-    int pat_ok  = (arch_rdmsr_safe(FB_IA32_PAT, &pat) == 0);
-    int cap_ok  = (arch_rdmsr_safe(FB_IA32_MTRR_CAP, &cap) == 0);
-    int def_ok  = (arch_rdmsr_safe(FB_IA32_MTRR_DEF_TYPE, &def) == 0);
-
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
     cpuid(1, &eax, &ebx, &ecx, &edx);
-    int mtrr_capable = (int)((edx >> 12) & 1u);
+    bool mtrr_capable = ((edx >> 12) & 1u) != 0u;
 
+    /* MAXPHYADDR (CPUID.0x80000008[7:0]) bounds the physical address
+     * width the MTRR mask arithmetic may use. */
+    unsigned max_phys = 36;
+    cpuid(0x80000000u, &eax, &ebx, &ecx, &edx);
+    if (eax >= 0x80000008u) {
+        cpuid(0x80000008u, &eax, &ebx, &ecx, &edx);
+        max_phys = (unsigned)(eax & 0xFFu);
+    }
+
+    uint64_t cr0 = 0;
     __asm__ __volatile__("movq %%cr0, %0" : "=r"(cr0));
 
-    bool mtrr_known = false;
-    uint64_t mtrr_type = fb_x86_mtrr_type_for(pa, 0, &mtrr_known);
+    struct fb_mtrr_raw raw;
+    fb_mtrr_read_raw(fb_x86_read_msr, NULL, max_phys, mtrr_capable, &raw);
 
-    log_info("fb: leaf_first=0x%lx leaf_last=0x%lx pages=%lu pa=0x%lx\n",
-             first_leaf, last_leaf, pages, pa);
-    log_info("fb: pat=0x%lx(%d) mtrr_capable=%d mtrr_cap=0x%lx(%d) mtrr_def=0x%lx(%d) "
-             "mtrr_type_for_pa=%s(%d) cr0=0x%lx cd=%d nw=%d\n",
-             pat, pat_ok, mtrr_capable, cap, cap_ok, def, def_ok,
-             fb_mtrr_type_name(mtrr_type), mtrr_known,
+    log_info("fb: leaf_first=0x%lx leaf_last=0x%lx pages=%lu pa=0x%lx size=0x%lx\n",
+             first_leaf, last_leaf, pages, pa, size);
+    log_info("fb: pat=0x%lx(%d) mtrr_capable=%d mtrr_cap=0x%lx(%d) "
+             "mtrr_def_type=0x%lx(%d) cr0=0x%lx cd=%d nw=%d\n",
+             raw.pat, (int)raw.pat_ok, (int)mtrr_capable,
+             raw.cap, (int)raw.cap_ok, raw.def_type, (int)raw.def_ok,
              cr0, (int)((cr0 >> 30) & 1), (int)((cr0 >> 29) & 1));
+    log_info("fb: mtrr raw: def_type=0x%lx E=%d FE=%d def_type_field=%s "
+             "fixed64r0=0x%lx(%d) fixed4r0=0x%lx(%d) vcount=%u max_physaddr=%u\n",
+             raw.def_type,
+             (int)((raw.def_type & FB_MTRR_DEF_TYPE_E) ? 1 : 0),
+             (int)((raw.def_type & FB_MTRR_DEF_TYPE_FE) ? 1 : 0),
+             fb_mtrr_type_name(raw.def_type),
+             raw.fixed64r0, (int)raw.fixed64r0_ok,
+             raw.fixed4r0, (int)raw.fixed4r0_ok,
+             raw.range_count, max_phys);
+
+    for (unsigned i = 0; i < raw.range_count && i < FB_MTRR_MAX_RANGES; i++) {
+        log_info("fb: mtrr raw range%u: base=0x%lx mask=0x%lx type=%s V=%d\n",
+                 i, raw.base[i], raw.mask[i],
+                 fb_mtrr_type_name(raw.base[i]),
+                 (int)((raw.mask[i] & FB_MTRR_MASK_V) ? 1 : 0));
+    }
+
+    struct fb_mtrr_decode dec;
+    fb_mtrr_decode_range(&raw, pa, size, &dec);
+    if (dec.status == FB_MTRR_DECODE_UNIFORM) {
+        log_info("fb: mtrr guest-decode pa=0x%lx size=0x%lx: %s "
+                 "(guest's own MTRR configuration only, covering=%u)\n",
+                 pa, size, fb_mtrr_type_name(dec.type), dec.covering);
+    } else if (dec.status == FB_MTRR_DECODE_MIXED) {
+        log_info("fb: mtrr guest-decode pa=0x%lx size=0x%lx: MIXED "
+                 "(guest's own MTRR configuration only, covering=%u)\n",
+                 pa, size, dec.covering);
+    } else {
+        log_info("fb: mtrr guest-decode pa=0x%lx size=0x%lx: UNKNOWN (%s)\n",
+                 pa, size, dec.reason ? dec.reason : "no reason");
+    }
+    log_info("fb: effective memory type (incl. nested paging / host PAT) "
+             "= NOT EVALUATED\n");
 }
 #endif
 
@@ -307,7 +285,7 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, fb_cache_policy_t policy,
 #ifndef OS01_HOST_TEST
     fb_x86_log_page_table_state(records[0].pmd[records[0].pmd_idx],
                                  records[num_pages - 1].pmd[records[num_pages - 1].pmd_idx],
-                                 (uint64_t)num_pages, phys);
+                                 (uint64_t)num_pages, phys, size);
 #endif
     return 0;
 

@@ -68,6 +68,7 @@ static bool            g_backend_failed;
 static bool            g_raw_mmap_seen;
 static bool            g_raw_writable_mmap_seen;
 static bool            g_raw_writable_test_allowed;
+static bool            g_backend_install_fail_for_test;
 static bool            g_initialized;
 
 static const void     *g_owner;
@@ -160,6 +161,14 @@ void fb_publish_initial_mapping(uint32_t *addr, uint64_t mapped_size)
 int fb_install_backend(const struct bga_caps *caps, uint32_t *addr, uint64_t mapped_size)
 {
     if (!caps || !addr || mapped_size == 0 || caps->vram_bytes == 0) {
+        return -EINVAL;
+    }
+
+    /* Test hook: make the backend installation fail AFTER the page
+     * table mapping was already committed, so the regression can cover
+     * that failure point (the mapping and the policy are published
+     * together, so they still have to agree afterwards). */
+    if (g_backend_install_fail_for_test) {
         return -EINVAL;
     }
 
@@ -456,6 +465,11 @@ bool fb_is_raw_writable_allowed(void)
 void fb_set_raw_writable_allowed_for_test(bool allowed)
 {
     g_raw_writable_test_allowed = allowed;
+}
+
+void fb_set_backend_install_fail_for_test(bool fail)
+{
+    g_backend_install_fail_for_test = fail;
 }
 
 uint32_t fb_active_writers_count(void)
