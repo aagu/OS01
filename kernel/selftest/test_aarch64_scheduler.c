@@ -1053,6 +1053,8 @@ void test_aarch64_scheduler_run(void)
 #if AARCH64_EL0_TEST
     extern int test_aarch64_el0_task(void);
     selftest_record_late("aarch64_el0_task", test_aarch64_el0_task());
+    extern int test_aarch64_user_mm(void);
+    selftest_record_late("aarch64_user_mm", test_aarch64_user_mm());
 #endif
 }
 
