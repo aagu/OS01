@@ -20,6 +20,10 @@ _start:
     b.eq 4f
     cmp x12, #3
     b.eq 5f
+    cmp x12, #4
+    b.eq 7f
+    cmp x12, #5
+    b.eq 7f
     adrp x9, _start
     ldr x0, [x11]
     str x0, [sp, #-16]!
@@ -88,6 +92,39 @@ _start:
     cmp x11, x13
     b.ne 2b
     mov x0, xzr
+    b 1b
+
+/* Both contexts write probe_bss at the same VA with different values. */
+7:  str x0, [x13]
+    add x19, x0, #0x190
+    add x30, x0, #0x300
+    stp x19, x30, [sp, #-16]!
+    mov x15, sp
+    and x15, x15, #-4096                /* same slot despite different SPs */
+    str x0, [x15]
+    cmp x0, #4
+    cset x14, eq
+    svc #5
+    cset x10, eq
+    cmp x10, x14
+    b.ne 2b
+    ldr x10, [x13]
+    cmp x10, x0
+    b.ne 2b
+    ldr x10, [x15]
+    cmp x10, x0
+    b.ne 2b
+    add x13, x0, #0x190
+    cmp x19, x13
+    b.ne 2b
+    add x13, x0, #0x300
+    cmp x30, x13
+    b.ne 2b
+    ldp x10, x11, [sp], #16
+    cmp x10, x19
+    b.ne 2b
+    cmp x11, x30
+    b.ne 2b
     b 1b
 
 .data

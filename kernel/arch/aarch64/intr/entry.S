@@ -261,7 +261,7 @@ aarch64_el0_enter:
     stp     x27, x28, [sp, #80]
     msr     elr_el1, x0
     msr     sp_el0, x1
-    mov     x4, #0x3c0                  /* DAIF masked, EL0t */
+    mov     x4, #AARCH64_EL0_PROBE_PSTATE
     cbz     w3, 1f
     bic     x4, x4, #0x80               /* enable IRQ only for this EL0 run */
 1:  msr     spsr_el1, x4

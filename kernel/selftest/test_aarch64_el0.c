@@ -277,6 +277,70 @@ int test_aarch64_el0(void)
     return aarch64_el0_test_high_stack(test_aarch64_el0_on_high_stack);
 }
 
+struct pair_run {
+    struct space spaces[2];
+    unsigned step;
+    uint64_t esr;
+};
+
+static uint64_t pair_stack(unsigned index)
+{
+    return STACK_TOP - 32 * index;
+}
+
+static bool handle_pair_sync(pt_regs_t *regs, uint64_t esr, uint64_t far,
+                             void *arg)
+{
+    (void)far;
+    struct pair_run *pair = arg;
+    unsigned index = pair->step % 2;
+    bool yield = pair->step < 2;
+    pair->esr = esr;
+    if (pair->step >= 4 || esr >> 26 != 0x15 ||
+        (esr & 0x1ffffff) != (yield ? 5u : 1u) ||
+        regs->x0 != 4 + index ||
+        regs->sp_el0 != pair_stack(index) - (yield ? 16 : 0) ||
+        aarch64_el0_active_root() != pair->spaces[index].elf.root)
+        return false;
+    pair->step++;
+    return pair->step < 4 && aarch64_el0_swap(regs);
+}
+
+static int test_switch_on_high_stack(void)
+{
+    uint64_t baseline = pmm_probe_4k_allocated_count();
+    struct pair_run pair = {0};
+    struct space *a = &pair.spaces[0], *b = &pair.spaces[1];
+    int rc = -1;
+    uint64_t before0, before1, after0, after1;
+    __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
+                     : "=r"(before0), "=r"(before1));
+    if (setup(a, 0xa1) && setup(b, 0xb1)) {
+        const struct aarch64_el0_start starts[] = {
+            { a->elf.root, a->elf.entry, pair_stack(0), 4 },
+            { b->elf.root, b->elf.entry, pair_stack(1), 5 },
+        };
+        rc = aarch64_el0_run_pair(starts, handle_pair_sync, &pair);
+    }
+    __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
+                     : "=r"(after0), "=r"(after1));
+    teardown(a);
+    teardown(b);
+    bool restored = before0 == after0 && before1 == after1;
+    bool freed = baseline == pmm_probe_4k_allocated_count();
+    if (rc || pair.step != 4 || !restored || !freed) {
+        log_err("M4.5: run=%d step=%u esr=%lx TTBR restored=%u reclaim=%u\n",
+                rc, pair.step, pair.esr, restored, freed);
+        return -1;
+    }
+    return 0;
+}
+
+int test_aarch64_el0_switch(void)
+{
+    return aarch64_el0_test_high_stack(test_switch_on_high_stack);
+}
+
 static int test_irq_on_high_stack(void)
 {
     uint64_t baseline = pmm_probe_4k_allocated_count();

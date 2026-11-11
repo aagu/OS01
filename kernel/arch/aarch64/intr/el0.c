@@ -11,10 +11,16 @@
 
 extern void aarch64_el0_enter(uint64_t pc, uint64_t sp, uint64_t x0, bool irq);
 
+struct el0_peer {
+    uint64_t *root;
+    pt_regs_t regs;
+};
+
 /* Only live on the BSP before scheduler handoff. */
 static aarch64_el0_handler active_handler;
 static void *active_arg;
 static uint64_t *active_root;
+static struct el0_peer *parked;
 
 uint64_t *aarch64_el0_active_root(void)
 {
@@ -41,40 +47,95 @@ static bool probe_stage_valid(bool irq)
            aarch64_timer_local_running();
 }
 
-int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
-                   bool irq, aarch64_el0_handler handler, void *arg)
+static int run(const struct aarch64_el0_start *start, struct el0_peer *peer,
+               bool irq, aarch64_el0_handler handler, void *arg)
 {
     uintptr_t kernel_sp;
     __asm__ volatile("mov %0, sp" : "=r"(kernel_sp));
-    if (!root || !handler || active_handler || !probe_stage_valid(irq) ||
+    if (!start->root || !handler || active_handler || !probe_stage_valid(irq) ||
         kernel_sp < ARCH_PAGE_OFFSET)
         return -1;
-    uint64_t root_pa = (uintptr_t)root - ARCH_PAGE_OFFSET;
+    uint64_t root_pa = (uintptr_t)start->root - ARCH_PAGE_OFFSET;
     if (aarch64_pt_root_is_published(&root_pa))
         return -1;
+    uint64_t peer_pa = 0;
+    if (peer) {
+        if (!peer->root || peer->root == start->root)
+            return -1;
+        peer_pa = (uintptr_t)peer->root - ARCH_PAGE_OFFSET;
+        if (!peer_pa || aarch64_pt_root_is_published(&peer_pa))
+            return -1;
+    }
     uint64_t boot_ttbr0, saved_sp, daif;
     __asm__ volatile("mrs %0, ttbr0_el1\n\t"
                      "mrs %1, sp_el0\n\t"
                      "mrs %2, daif\n\tmsr daifset, #0xf"
                      : "=r"(boot_ttbr0), "=r"(saved_sp), "=r"(daif) :: "memory");
-    if (!aarch64_pt_root_publish(root_pa)) {
-        __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
-        return -1;
+    if (!aarch64_pt_root_publish(root_pa))
+        goto restore_daif;
+    if (peer_pa && !aarch64_pt_root_publish(peer_pa)) {
+        aarch64_pt_root_unpublish_local(root_pa);
+        goto restore_daif;
     }
 
     active_arg = arg;
     active_handler = handler;
+    parked = peer;
     switch_ttbr0(root_pa);
-    active_root = root;
-    aarch64_el0_enter(pc, sp, x0, irq);
+    active_root = start->root;
+    aarch64_el0_enter(start->pc, start->sp, start->x0, irq);
     active_root = NULL;
+    parked = NULL;
     switch_ttbr0(boot_ttbr0);
+    if (peer_pa)
+        aarch64_pt_root_unpublish_local(peer_pa);
     aarch64_pt_root_unpublish_local(root_pa);
     active_handler = NULL;
     active_arg = NULL;
     __asm__ volatile("msr sp_el0, %0\n\tmsr daif, %1"
                      :: "r"(saved_sp), "r"(daif) : "memory");
     return 0;
+
+restore_daif:
+    __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+    return -1;
+}
+
+int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
+                   bool irq, aarch64_el0_handler handler, void *arg)
+{
+    const struct aarch64_el0_start start = { root, pc, sp, x0 };
+    return run(&start, NULL, irq, handler, arg);
+}
+
+int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
+                        aarch64_el0_handler handler, void *arg)
+{
+    struct el0_peer peer = {
+        .root = starts[1].root,
+        .regs = {
+            .elr_el1 = starts[1].pc,
+            .sp_el0 = starts[1].sp,
+            .x0 = starts[1].x0,
+            .spsr_el1 = AARCH64_EL0_PROBE_PSTATE,
+        },
+    };
+    return run(&starts[0], &peer, false, handler, arg);
+}
+
+bool aarch64_el0_swap(pt_regs_t *regs)
+{
+    if (!parked)
+        return false;
+    uint64_t *next_root = parked->root;
+    pt_regs_t next = parked->regs;
+    parked->root = active_root;
+    parked->regs = *regs;
+
+    switch_ttbr0((uintptr_t)next_root - ARCH_PAGE_OFFSET);
+    active_root = next_root;
+    *regs = next;
+    return true;
 }
 
 /* Called only by the lower-AArch64 synchronous vector. */

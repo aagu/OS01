@@ -165,7 +165,9 @@ void selftest_register_builtin_tests(void)
     selftest_register("aarch64_pt_vmm",            test_aarch64_page_table_selftest);
 #if AARCH64_EL0_TEST
     extern int test_aarch64_el0(void);
+    extern int test_aarch64_el0_switch(void);
     selftest_register("aarch64_el0", test_aarch64_el0);
+    selftest_register("aarch64_el0_switch", test_aarch64_el0_switch);
 #endif
 #endif /* __aarch64__ */
 #if !defined(__aarch64__)

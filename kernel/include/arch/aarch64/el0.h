@@ -20,6 +20,20 @@ typedef bool (*aarch64_el0_handler)(pt_regs_t *regs, uint64_t esr,
 int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
                    bool irq, aarch64_el0_handler handler, void *arg);
 
+struct aarch64_el0_start {
+    uint64_t *root;
+    uint64_t pc, sp, x0;
+};
+
+/* Run starts[0], with starts[1] parked at its entry point. Both roots
+ * must be distinct. This is BSP-only before SMP, with IRQs masked. */
+int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
+                        aarch64_el0_handler handler, void *arg);
+
+/* Only from the pair's SVC callback, with its live frame. Return this
+ * result from the callback to resume the peer or abort the run. */
+bool aarch64_el0_swap(pt_regs_t *regs);
+
 /* Private root while the probe is executing (including its SVC handler). */
 uint64_t *aarch64_el0_active_root(void);
 
