@@ -17,7 +17,7 @@
   - **修复映射失败时的回滚缺陷**：原回滚循环用 `j <= i`，而 `i` 在验证循环里被复用成"第几条验证失败"，导致只恢复前几条、其余已写入条目保留被破坏的 PA（由新增回归抓出）。
   - **真设备寄存器不受影响**：`PAGE_KERNEL_PMD_NOCACHE` 的使用者（PCI config / APIC / IOAPIC / LAPIC / ACPI / AHCI / e1000 / xHCI）一行未动。
   - **present 路径移除冗余 fence**：原 `arch_wmb()`（sfence）被 `fb_writer_end()` 取显示状态锁时的 `lock decq`（带 memory clobber 的全屏障）覆盖，独立性未被证明；且原注释承诺的"host scanout 不会拿到更旧的帧"是过强承诺（sfence 不提供 vsync / 显示完成语义）。
-  - **guest 侧内存类型诊断**：映射装好后打印叶子 PMD 条目、`IA32_PAT` 与 CR0（CD/NW），使日志能证明 CPU 实际采用的属性。
+  - **guest 侧内存类型诊断**：映射装好后打印叶子 PMD 条目、`IA32_PAT` 与 CR0（CD/NW），以及 MTRR/PAT 的**原始寄存器值**和**guest 自身 MTRR 配置**对 BAR0 的解码结果。**这条诊断不证明 CPU 实际采用的属性**：最终有效内存类型还取决于嵌套分页（NPT/EPT）与宿主 PAT，guest 侧看不到，因此日志明确打印"effective memory type = NOT EVALUATED"。（第三轮更正：原文此处写的是"使日志能证明 CPU 实际采用的属性"，与本文件下方"不再宣称证明有效类型"自相矛盾，已直接改正。）
 
   **关键结论与架构决策**
 
@@ -30,6 +30,25 @@
   - **反例测试**：把"写入处与验证处一起改回 UC"、以及"用户别名被强制 UC"分别注入实现，新回归**变红**；改回后**变绿**（红/绿输出见报告 §3.2）。
   - UC/WB × KVM/TCG 四格对照用最终源码重跑，每格带日志路径、源码/产物 sha256 与 mtime（见报告 §2）。
 
+- fix(gfx,fb): **第三轮评审修复 —— 像素验收强制几何门槛；MTRR 推导按架构规则重写；文档矛盾改正**（报告见 [fix-report-3](../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report-3.md)）：
+
+  **做了什么**
+
+  - **像素验收强制几何门槛**（`qemutests/fb_pixel_verify.py`）：比较范围此前由 PPM 自报尺寸决定，截图被裁小就会静默缩小验收范围。现在 full/rect 比较前**强制** PPM 尺寸等于 guest 报告的 `(width,height)`，并**核对 `RECT_DONE` 的 x/y/w/h**（同一显示模式、矩形在显示范围内、与 host 契约一致）；尺寸不匹配**直接 FAIL**，实际与期望尺寸都写进结果 JSON 的 `full_dimensions` / `rect_dimensions`。新增永久回归 `qemutests/test_fb_pixel_verify_dimensions.py`（走完整 `main()` 判定路径，裁成 1×1 / 640×480 必须 FAIL 且**非零退出**，整屏正确图仍 PASS）。
+  - **MTRR 推导按架构规则重写**（新增 `kernel/arch/x86_64/memory/fb_mtrr.c` + `kernel/include/arch/x86_64/fb_mtrr.h`）：类型编码改正为 **0=UC, 1=WC, 4=WT, 5=WP, 6=WB**（旧代码把 1 当成 WB）；检查 `DEF_TYPE.E`（MTRR 关闭 ⇒ 全物理内存 UC）与 `MASK.V`（禁用 range 必须忽略）；掩码算术改为 **64 位**（旧的 `~0xFFFu` 是 32 位补码，会抹掉 base/mask 高位）；按 MAXPHYADDR 限制物理地址宽度；default type **只在没有适用 variable range 时**使用；重叠类型按 SDM Table 11-6 合并，超过 3 个重叠 range 判 unknown；**任何 MSR 读失败即 unknown**；推导**覆盖传入的 size**并检查范围内类型是否均一（不均一 ⇒ MIXED）。
+  - **三件事分开陈述**：日志分别打印 ①原始寄存器值 ②**guest 自身 MTRR 配置**对 BAR0 的解码 ③"最终有效内存类型 = NOT EVALUATED"（嵌套分页与宿主 PAT 在 guest 侧不可见，**不声称知道 CPU 实际采用的类型**）。
+  - **三类失败路径的永久覆盖补齐**（N3）：新增 **allocation 失败**（checked next-level 返回 -ENOMEM）与 **backend-install 失败**（映射已提交后安装失败）两条永久回归，都断言"fallback kernel PMD / 全局 policy / 真实 `fb_mmap()` 的 RO 与 RW PTE"三者一致。
+  - **诊断整理**（N1/N2/N4）：`compare()` 先判"整屏仍是 OLD 帧"再判"全不匹配"（旧顺序让前者不可达）；PA mask 注释由 `bits 51:21` 改为实际的 `bits 47:21`；`screendump` 文件名带 attempt index，`first_ppm` 不再被覆盖，返回完整 attempts 列表。
+  - **文档矛盾直接改正**（不是追加相反结论）：本文件上方"能证明 CPU 实际采用的属性"一句已就地改正；`0x1FF` 不是 `IA32_MTRR_DEF_TYPE` 的别名；fixed MTRR range 的覆盖范围表述改为"最低的物理内存（≤256 MiB）"，BAR0 真实地址更正为 `0x80000000`；`fix-report-2.md` 里"已改准确/已同步改掉"的不实陈述已就地标注为更正。
+
+  **验证**
+
+  - 新增宿主回归 `test-fb-mtrr`（**64** 断言全绿）：把第三轮评审列出的 **5 个 MTRR 负例**做成永久用例，另加 32 位截断、读失败即 unknown、范围内均一性、真实机器状态等用例。
+  - 新增永久回归 `qemutests/test_fb_pixel_verify_dimensions.py`（4 个用例全绿，裁小图**非零退出**）。
+  - 宿主 fb 组全绿：`test-fb-state` 200、`test-fb-hooks` **238**（新增 51 断言）、`test-fb-writers` 112、`test-bga` 84+6、`test-fb-uapi` 27、`test-fb-ioctl` 173、`test-fb-mtrr` 64。
+  - 反例实测：把"先发布 policy 再映射"注入实现后，**新增的 allocation 失败回归也会变红**（`fb_cache_policy_get()` 期望 0 实得 1），改回后全绿。
+  - 像素验收四格实机复跑（WB/UC × KVM/TCG），见 fix-report-3 §5。
+
 - fix(gfx,fb): **第二轮评审修复 —— framebuffer cache policy 与页表映射成为同一个事务；撤销 early alias 之前先发布 permanent snapshot；补 host 可见像素验收**（commit `0ec37a58` ~ `efd76843`，报告见 [fix-report-2](../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report-2.md)）：
 
   **做了什么**
@@ -37,7 +56,7 @@
   - **policy 事务化**：`fb_x86_map_checked()` 改为**显式接收候选 policy**，只有在全部叶子条目装好并校验通过后才提交全局 policy；失败时页表回滚且**全局 policy 一律不动** ⇒ probe 失败后 fallback 映射（UC）与 policy（UC）不再互相矛盾，也就不会给 `/dev/fb` 别名发一个与映射相反的内存类型。
   - **early alias 撤销与 snapshot 发布的顺序**：新增 `fb_x86_publish_and_revoke_early_alias()`（生产与宿主回归**共用**同一函数），先发布 permanent snapshot 再撤销 early alias，且在没有 writer lease 在手时才撤销；原先"Pos 已更新所以没有 writer 能到旧范围"的注释被删除（`Pos.FB_addr` 与 coordinator 的已发布地址是两个变量）。
   - **host 可见像素验收**：新增 guest 探针 `user/fb_pixel_test/`（独占 owner、FBIOSURRENDER、按 (frame,x,y) 的可重算图案、full + 偏离原点的 rect）与 host 脚本 `qemutests/fb_pixel_verify.py`（QMP `screendump` + **逐像素**比对，有界重试并记录抓图次数）。
-  - **guest 侧缓存状态诊断**：纠正 MTRR MSR 地址（`IA32_MTRR_DEF_TYPE=0x2FF`、`IA32_MTRR_CAP=0x0FE`；`0x1FE` 是 32 位 legacy 视图），改用 `arch_rdmsr_safe()` 读取并加 CPUID 能力检查；函数改名 `fb_x86_log_page_table_state()`，措辞降级为"报告参与决定内存类型的状态"，**不再宣称证明有效类型**。
+  - **guest 侧缓存状态诊断**：纠正 MTRR MSR 地址（`IA32_MTRR_DEF_TYPE=0x2FF`、`IA32_MTRR_CAP=0x0FE`；`0x1FE` 是 **IA32_MTRR_CAP 本身**在 32 位模式下的视图，`0x1FF` **不是** `IA32_MTRR_DEF_TYPE` 的别名），改用 `arch_rdmsr_safe()` 读取并加 CPUID 能力检查；函数改名 `fb_x86_log_page_table_state()`，措辞降级为"报告参与决定内存类型的状态"，**不再宣称证明有效类型**。（第三轮更正：第二轮的 MTRR **类型推导算法本身是错的**，已在第三轮整体重写，见下方第三条。）
 
   **验证**
 
