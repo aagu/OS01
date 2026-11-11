@@ -30,6 +30,24 @@
   - **反例测试**：把"写入处与验证处一起改回 UC"、以及"用户别名被强制 UC"分别注入实现，新回归**变红**；改回后**变绿**（红/绿输出见报告 §3.2）。
   - UC/WB × KVM/TCG 四格对照用最终源码重跑，每格带日志路径、源码/产物 sha256 与 mtime（见报告 §2）。
 
+- fix(gfx,fb): **第二轮评审修复 —— framebuffer cache policy 与页表映射成为同一个事务；撤销 early alias 之前先发布 permanent snapshot；补 host 可见像素验收**（commit `0ec37a58` ~ `efd76843`，报告见 [fix-report-2](../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report-2.md)）：
+
+  **做了什么**
+
+  - **policy 事务化**：`fb_x86_map_checked()` 改为**显式接收候选 policy**，只有在全部叶子条目装好并校验通过后才提交全局 policy；失败时页表回滚且**全局 policy 一律不动** ⇒ probe 失败后 fallback 映射（UC）与 policy（UC）不再互相矛盾，也就不会给 `/dev/fb` 别名发一个与映射相反的内存类型。
+  - **early alias 撤销与 snapshot 发布的顺序**：新增 `fb_x86_publish_and_revoke_early_alias()`（生产与宿主回归**共用**同一函数），先发布 permanent snapshot 再撤销 early alias，且在没有 writer lease 在手时才撤销；原先"Pos 已更新所以没有 writer 能到旧范围"的注释被删除（`Pos.FB_addr` 与 coordinator 的已发布地址是两个变量）。
+  - **host 可见像素验收**：新增 guest 探针 `user/fb_pixel_test/`（独占 owner、FBIOSURRENDER、按 (frame,x,y) 的可重算图案、full + 偏离原点的 rect）与 host 脚本 `qemutests/fb_pixel_verify.py`（QMP `screendump` + **逐像素**比对，有界重试并记录抓图次数）。
+  - **guest 侧缓存状态诊断**：纠正 MTRR MSR 地址（`IA32_MTRR_DEF_TYPE=0x2FF`、`IA32_MTRR_CAP=0x0FE`；`0x1FE` 是 32 位 legacy 视图），改用 `arch_rdmsr_safe()` 读取并加 CPUID 能力检查；函数改名 `fb_x86_log_page_table_state()`，措辞降级为"报告参与决定内存类型的状态"，**不再宣称证明有效类型**。
+
+  **验证**
+
+  - 宿主 fb 组全绿：`test-fb-state` 200、`test-fb-hooks` 187、`test-fb-writers` 112、`test-bga` 84+6、`test-fb-uapi` 27、`test-fb-ioctl` 173。
+  - **`LOG_TARGET=both` boot 回归通过**（第二轮评审的原始复现点不再挂死）。
+  - **像素验收 4 格全 PASS**（WB/UC × KVM/TCG）：full 与 rect 各 **1,296,000 像素逐个比对、0 失配**。
+  - 四格性能（最终源码，每格 2 次）：WB KVM 9.65 / 9.59 ms/帧，UC KVM 510.3 / 512.8 ms/帧；TCG 两次读数波动与 UC/WB 差值同量级，**不作显著性结论**。
+  - 反例实测：把"先发布 policy 再映射"与"去掉 snapshot 发布"分别注入实现，新回归**变红**；改回后**变绿**（输出见报告 §5）。
+
+
 ---
 
 ## 2026-11-07
