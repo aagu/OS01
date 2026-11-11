@@ -40,7 +40,7 @@
 bool aarch64_pt_root_publish(uint64_t root_pa);
 
 #if AARCH64_EL0_TEST
-/* Only for private pre-SMP roots, after TTBR0 restore and local TLBI. */
+/* For roots private to the BSP, after TTBR0 restore and local TLBI. */
 void aarch64_pt_root_unpublish_local(uint64_t root_pa);
 bool aarch64_vmm_pre_smp(void);
 #endif

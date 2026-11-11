@@ -1,14 +1,17 @@
 #if AARCH64_EL0_TEST
 
 #include <arch/aarch64/el0.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/aarch64/timer.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/mmu.h>
 #include <stddef.h>
+#include <percpu/percpu.h>
 
-extern void aarch64_el0_enter(uint64_t pc, uint64_t sp, uint64_t x0);
+extern void aarch64_el0_enter(uint64_t pc, uint64_t sp, uint64_t x0, bool irq);
 
-/* Only live on the BSP, before GIC/timer and AP startup. */
+/* Only live on the BSP before scheduler handoff. */
 static aarch64_el0_handler active_handler;
 static void *active_arg;
 static uint64_t *active_root;
@@ -28,12 +31,22 @@ static void switch_ttbr0(uint64_t raw)
                      :: "r"(raw) : "memory");
 }
 
+static bool probe_stage_valid(bool irq)
+{
+    if (!irq)
+        return aarch64_vmm_pre_smp();
+    return !aarch64_vmm_pre_smp() && dtb_cpu_count() == 1 &&
+           ipi_ready_count_get() == 1 && cpu_id() == 0 &&
+           !__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE) &&
+           aarch64_timer_local_running();
+}
+
 int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
-                   aarch64_el0_handler handler, void *arg)
+                   bool irq, aarch64_el0_handler handler, void *arg)
 {
     uintptr_t kernel_sp;
     __asm__ volatile("mov %0, sp" : "=r"(kernel_sp));
-    if (!root || !handler || active_handler || !aarch64_vmm_pre_smp() ||
+    if (!root || !handler || active_handler || !probe_stage_valid(irq) ||
         kernel_sp < ARCH_PAGE_OFFSET)
         return -1;
     uint64_t root_pa = (uintptr_t)root - ARCH_PAGE_OFFSET;
@@ -53,7 +66,7 @@ int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
     active_handler = handler;
     switch_ttbr0(root_pa);
     active_root = root;
-    aarch64_el0_enter(pc, sp, x0);
+    aarch64_el0_enter(pc, sp, x0, irq);
     active_root = NULL;
     switch_ttbr0(boot_ttbr0);
     aarch64_pt_root_unpublish_local(root_pa);

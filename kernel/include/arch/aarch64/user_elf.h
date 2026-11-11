@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Bounded, memory-backed ET_EXEC loader for the pre-SMP EL0 probe. */
+/* Bounded, memory-backed ET_EXEC loader for the BSP EL0 probe. */
 #define AARCH64_ELF_MAX_PAGES 16
 
 struct aarch64_user_elf {

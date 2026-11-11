@@ -144,6 +144,10 @@ void aarch64_intr_decode_irq(struct intr_event *out, const pt_regs_t *regs)
     out->fault_addr_valid = false;
     out->fault_addr = 0;
     out->native_vector = AARCH64_EL1H_IRQ_SLOT;
+#if AARCH64_EL0_TEST
+    if (out->origin == INTR_ORIGIN_USER)
+        out->native_vector = AARCH64_EL0_IRQ_SLOT;
+#endif
     out->native_status = 0;
     out->native_address = 0;
 }

@@ -7,6 +7,9 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/ipi.h>    /* aarch64_resched_sgi_handler (P2) */
 #include <percpu/percpu.h>
+#if AARCH64_EL0_TEST
+#include <arch/mmu.h>
+#endif
 
 static struct gic_dev g_gic;
 struct gic_dev *gic_dev_current(void) { return &g_gic; }
@@ -52,8 +55,16 @@ uint32_t gic_trace_cpu(void) { return cpu_id(); }
 
 void gic_init(void)
 {
-    if (gic_dev_init(&g_gic, (volatile uint32_t *)dtb_gicd_base(),
-                     (volatile uint32_t *)dtb_gicc_base()) != 0) {
+    uintptr_t gicd = dtb_gicd_base();
+    uintptr_t gicc = dtb_gicc_base();
+#if AARCH64_EL0_TEST
+    /* QEMU virt Device window, also mapped in TTBR1 by M1. The probe
+     * replaces TTBR0 and cannot rely on the boot identity map. */
+    gicd += ARCH_PAGE_OFFSET;
+    gicc += ARCH_PAGE_OFFSET;
+#endif
+    if (gic_dev_init(&g_gic, (volatile uint32_t *)gicd,
+                     (volatile uint32_t *)gicc) != 0) {
         log_err("[gic] FATAL: GICD IIDR=0\n");
         for (;;) __asm__ __volatile__("wfi" ::: "memory");
     }

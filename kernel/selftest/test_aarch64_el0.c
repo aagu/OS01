@@ -1,6 +1,10 @@
 #if AARCH64_EL0_TEST
 
 #include <arch/aarch64/el0.h>
+#include <arch/aarch64/dtb.h>
+#include <arch/cpu.h>
+#include <arch/aarch64/reg.h>
+#include <arch/aarch64/timer.h>
 #include <arch/aarch64/uaccess.h>
 #include <arch/aarch64/user_elf.h>
 #include <fs/elf.h>
@@ -31,6 +35,7 @@ struct run {
     unsigned traps;
     bool passed;
     uint64_t esr, far, pc, x0;
+    uint64_t irq_start, wait_start;
 };
 
 static int exercise_uaccess(uint64_t addr, uint64_t len)
@@ -71,6 +76,26 @@ static bool handle_sync(pt_regs_t *regs, uint64_t esr, uint64_t far, void *arg)
     const uint64_t iss = esr & 0x1ffffff;
 
     run->traps++;
+    if (run->action == 3) {
+        if (ec == 0x15 && iss == 4 && regs->sp_el0 == STACK_TOP - 16) {
+            uint64_t now = arch_cycle_counter();
+            uint64_t ticks = aarch64_el0_timer_ticks();
+            if (run->traps == 1) {
+                run->wait_start = now;
+                run->irq_start = ticks;
+            }
+            if (ticks - run->irq_start >= 2)
+                regs->x0 = 1;
+            else if (now - run->wait_start >= cntfrq_el0() / 2)
+                regs->x0 = (uint64_t)-ETIMEDOUT;
+            else
+                regs->x0 = 0;
+            return true;
+        }
+        run->passed = ec == 0x15 && iss == 1 && regs->sp_el0 == STACK_TOP &&
+                      !regs->x0 && aarch64_el0_timer_ticks() - run->irq_start >= 2;
+        goto done;
+    }
     if (run->action == 2) {
         if (run->traps <= 2 && ec == 0x15 && iss == 3) {
             regs->x0 = exercise_uaccess(regs->x0, regs->x1);
@@ -99,7 +124,7 @@ static bool handle_sync(pt_regs_t *regs, uint64_t esr, uint64_t far, void *arg)
         }
     }
 done:
-    /* PL011 still relies on the boot TTBR0. Report only after restore. */
+    /* Publish diagnostics after the probe restores the boot context. */
     run->esr = esr;
     run->far = far;
     run->pc = regs->elr_el1;
@@ -148,7 +173,7 @@ static bool exercise(struct space *space, uint64_t value, uint64_t action)
                      : "=r"(before0), "=r"(before1));
     struct run run = { .value = value, .action = action };
     int rc = aarch64_el0_run(space->elf.root, space->elf.entry, STACK_TOP, action,
-                            handle_sync, &run);
+                            action == 3, handle_sync, &run);
     __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
                      : "=r"(after0), "=r"(after1));
     if (rc || before0 != after0 || before1 != after1) {
@@ -168,18 +193,18 @@ static bool exercise(struct space *space, uint64_t value, uint64_t action)
 __asm__(
     ".pushsection .text, \"ax\"\n"
     ".balign 4\n"
-    ".global test_aarch64_el0\n"
-    ".type test_aarch64_el0, %function\n"
-    "test_aarch64_el0:\n"
+    ".global aarch64_el0_test_high_stack\n"
+    ".type aarch64_el0_test_high_stack, %function\n"
+    "aarch64_el0_test_high_stack:\n"
     "    mov x9, sp\n"
     "    orr x10, x9, #0xffff000000000000\n"
     "    mov sp, x10\n"
     "    stp x9, x30, [sp, #-16]!\n"
-    "    bl test_aarch64_el0_on_high_stack\n"
+    "    blr x0\n"
     "    ldp x9, x30, [sp], #16\n"
     "    mov sp, x9\n"
     "    ret\n"
-    ".size test_aarch64_el0, . - test_aarch64_el0\n"
+    ".size aarch64_el0_test_high_stack, . - aarch64_el0_test_high_stack\n"
     ".popsection\n");
 
 static bool reject_bad_entry(void)
@@ -221,7 +246,6 @@ static bool dirty_free_pages(void)
     return ok;
 }
 
-__attribute__((used))
 static int test_aarch64_el0_on_high_stack(void)
 {
     if (!reject_bad_entry() || !dirty_free_pages())
@@ -245,5 +269,29 @@ static int test_aarch64_el0_on_high_stack(void)
         }
     }
     return 0;
+}
+extern int aarch64_el0_test_high_stack(int (*test)(void));
+
+int test_aarch64_el0(void)
+{
+    return aarch64_el0_test_high_stack(test_aarch64_el0_on_high_stack);
+}
+
+static int test_irq_on_high_stack(void)
+{
+    uint64_t baseline = pmm_probe_4k_allocated_count();
+    struct space space = {0};
+    bool ok = setup(&space, 0xa1) && exercise(&space, 0xa1, 3);
+    teardown(&space);
+    return ok && pmm_probe_4k_allocated_count() == baseline ? 0 : -1;
+}
+
+int test_aarch64_el0_irq(void)
+{
+    if (dtb_cpu_count() != 1) {
+        log_err("M4.4: use SMP=1 for the EL0 IRQ probe\n");
+        return -1;
+    }
+    return aarch64_el0_test_high_stack(test_irq_on_high_stack);
 }
 #endif

@@ -17,7 +17,7 @@ typedef void (*gic_handler_fn)(uint32_t intid, uint64_t param, struct pt_regs *r
 enum gic_irq_type { GIC_IRQ_INVALID = 0, GIC_IRQ_SGI, GIC_IRQ_PPI, GIC_IRQ_SPI };
 
 struct gic_dev {
-    volatile uint32_t *gicd;                 /* Device-nGnRnE, identity 映射 */
+    volatile uint32_t *gicd;                 /* Device-nGnRnE mapping */
     volatile uint32_t *gicc;
     uint32_t nr_intids;                      /* (TYPER.ITLinesNumber+1)*32, cap 1020 */
     volatile uint32_t dbg_last_iar;          /* 单槽 trace（hosttest 默认路径）;

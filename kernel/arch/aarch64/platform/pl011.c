@@ -14,8 +14,14 @@
 #include <stdint.h>
 #include <arch/cpu.h>   /* arch_nop for tiny spin waits */
 
-/* MMIO base: QEMU virt wires PL011 here (per spec §2.2). */
-#define PL011_BASE       ((volatile uint32_t *)0x09000000UL)
+/* QEMU virt PL011. The M4 probe needs diagnostics with private TTBR0;
+ * both the bootstrap high alias and the M1 tree cover this Device PA. */
+#if AARCH64_EL0_TEST
+#include <arch/mmu.h>
+#define PL011_BASE ((volatile uint32_t *)(ARCH_PAGE_OFFSET + 0x09000000UL))
+#else
+#define PL011_BASE ((volatile uint32_t *)0x09000000UL)
+#endif
 
 /* Register offsets (32-bit, little-endian). */
 #define PL011_DR         0x00   /* Data Register               */

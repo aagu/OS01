@@ -18,6 +18,8 @@ _start:
     mov     x12, x0
     cmp x12, #2
     b.eq 4f
+    cmp x12, #3
+    b.eq 5f
     adrp x9, _start
     ldr x0, [x11]
     str x0, [sp, #-16]!
@@ -61,6 +63,29 @@ _start:
     mov x1, #2
     svc #3
     cmn x0, #EFAULT
+    b.ne 2b
+    mov x0, xzr
+    b 1b
+
+/* Keep live state across the timer IRQs and the SVC polls. The first
+ * SVC captures the timer count only after these sentinels are live. */
+5:  mov x19, #0x1944
+    mov x30, #0x3044
+    stp x19, x30, [sp, #-16]!
+6:  svc #4
+    cmp x0, #0
+    b.lt 2b
+    b.eq 6b
+    mov x13, #0x1944
+    cmp x19, x13
+    b.ne 2b
+    ldp x10, x11, [sp], #16
+    cmp x10, x13
+    b.ne 2b
+    mov x13, #0x3044
+    cmp x30, x13
+    b.ne 2b
+    cmp x11, x13
     b.ne 2b
     mov x0, xzr
     b 1b

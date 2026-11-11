@@ -54,8 +54,23 @@ void el1_irq(struct pt_regs *regs)
     struct intr_event ev;
 
     aarch64_intr_decode_irq(&ev, regs);
+#if AARCH64_EL0_TEST
+    ev.native_vector = AARCH64_EL1H_IRQ_SLOT;
+#endif
     arch_intr_dispatch(&ev, regs);
 }
+
+#if AARCH64_EL0_TEST
+void aarch64_el0_irq(pt_regs_t *regs)
+{
+    struct intr_event ev;
+
+    aarch64_intr_decode_irq(&ev, regs);
+    /* Report the actual entry; the backend cross-checks the saved mode. */
+    ev.native_vector = AARCH64_EL0_IRQ_SLOT;
+    arch_intr_dispatch(&ev, regs);
+}
+#endif
 
 /* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。
  *

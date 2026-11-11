@@ -231,6 +231,9 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("aarch64_sched_idle");
     selftest_register_late("aarch64_sched_timer");
     selftest_register_late("aarch64_sched_ap");
+#if AARCH64_EL0_TEST
+    selftest_register_late("aarch64_el0_irq");
+#endif
 #endif
 #if !defined(__aarch64__)
     selftest_register("ext2_magic",        ext2_selftest_magic);

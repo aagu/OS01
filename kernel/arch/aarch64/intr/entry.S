@@ -100,7 +100,11 @@ exception_vectors:
 
 /* ───── IRQ, EL0 ───── */
 .balign 0x80
+#if AARCH64_EL0_TEST
+    b   el0_irq_entry
+#else
 10: b   .
+#endif
 
 /* ───── FIQ, EL0 ───── */
 .balign 0x80
@@ -222,8 +226,14 @@ el1_sync_entry:
 #endif
 
 #if AARCH64_EL0_TEST
-/* The test runs before interrupt sources are configured. SPSR keeps
- * DAIF masked; only a lower-EL synchronous exception is expected. */
+el0_irq_entry:
+    save_pt_regs
+    mov     x0, sp
+    bl      aarch64_el0_irq
+    b       restore_pt_regs
+
+/* Lower-EL sync saves the same frame as IRQ. The handler selects
+ * whether to resume EL0 or return to the masked EL1 caller. */
 .balign 0x80
 el0_sync_entry:
     save_pt_regs
@@ -251,8 +261,10 @@ aarch64_el0_enter:
     stp     x27, x28, [sp, #80]
     msr     elr_el1, x0
     msr     sp_el0, x1
-    mov     x3, #0x3c0                  /* DAIF masked, EL0t */
-    msr     spsr_el1, x3
+    mov     x4, #0x3c0                  /* DAIF masked, EL0t */
+    cbz     w3, 1f
+    bic     x4, x4, #0x80               /* enable IRQ only for this EL0 run */
+1:  msr     spsr_el1, x4
     mov     x0, x2                      /* sole input to the user code */
     .irp reg,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
     mov     x\reg, xzr

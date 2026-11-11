@@ -78,6 +78,10 @@ bool aarch64_timer_start_local(void);
  * early boot phase. */
 bool aarch64_timer_local_running(void);
 bool aarch64_timer_config_ready(void);
+#if AARCH64_EL0_TEST
+/* BSP probe only: number of CNTP IRQs whose saved frame was EL0t. */
+uint64_t aarch64_el0_timer_ticks(void);
+#endif
 
 #ifdef OS01_SELFTEST
 /* OS01_SELFTEST ONLY — mask / restore the CALLING CPU's local CNTP

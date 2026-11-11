@@ -22,12 +22,9 @@
 //  padding, so memcmp is never used.  Any disagreement means the
 //  contract is broken → arch_intr_bad_event().
 //
-//  Origin rule (spec §6.2): phase one accepts ONLY EL1h frames
-//  (saved SPSR_EL1 M[4:0] = 0b00101).  The native_vector is the
-//  VBAR slot the entry was actually taken through (0x200 sync /
-//  0x280 IRQ) regardless of the saved mode; a non-EL1h frame is
-//  rejected through the ORIGIN field and the saved SPSR, never by
-//  expecting a different slot value.
+//  Normal images accept EL1h frames only. The M4 probe also admits
+//  EL0t IRQs with an active private root, and cross-checks the actual
+//  VBAR slot against the saved mode. EL1 sync policy is unchanged.
 //
 //  Sync contradiction rule: ESR.EC 0x20/0x24 (instruction/data
 //  abort taken from a LOWER EL) cannot occur in a frame whose
@@ -51,6 +48,9 @@
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/gic.h>
+#if AARCH64_EL0_TEST
+#include <arch/aarch64/el0.h>
+#endif
 
 /* ESR_EL1.EC values that describe a fault taken from a LOWER EL —
  * impossible in a frame saved by the EL1h sync entry. */
@@ -124,16 +124,20 @@ void arch_intr_handle_irq(const struct intr_event *event, pt_regs_t *regs)
     struct intr_event redecoded;
 
     /* 1. Deterministic re-validation against the pure IRQ decode of the
-     *    saved frame (slot 0x280, zero native payload, no fault fields). */
+     *    saved frame (zero native payload, no fault fields). */
     aarch64_intr_decode_irq(&redecoded, regs);
     if (!aarch64_event_matches(event, &redecoded)) {
         arch_intr_bad_event(event, regs);
     }
 
-    /* 2. Origin whitelist: only EL1h frames belong to this entry. */
-    if (!aarch64_frame_is_el1h(event, regs)) {
+    bool valid = aarch64_frame_is_el1h(event, regs);
+#if AARCH64_EL0_TEST
+    valid |= event->origin == INTR_ORIGIN_USER &&
+             (regs->spsr_el1 & A64_SPSR_MODE_MASK) == 0 &&
+             aarch64_el0_active_root();
+#endif
+    if (!valid)
         arch_intr_bad_event(event, regs);
-    }
 
     /* 3. The existing GIC dispatcher owns IAR/EOI and the handler table
      *    (including SGI shootdown and spurious INTID handling); it is

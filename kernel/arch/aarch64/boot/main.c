@@ -676,6 +676,10 @@ void arch_boot_runtime(void)
 
 void arch_post_smp_selftest(void)
 {
+#if AARCH64_EL0_TEST
+    extern int test_aarch64_el0_irq(void);
+    selftest_record_late("aarch64_el0_irq", test_aarch64_el0_irq());
+#endif
 #if OS01_SELFTEST
     {
         extern int test_aarch64_page_table_multicore_run(void);

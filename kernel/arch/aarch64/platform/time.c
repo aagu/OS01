@@ -82,6 +82,15 @@
  * a deterministic SGI/SPI pair rather than relying on this counter,
  * so v2's "export g_ticks" requirement is retracted. */
 static volatile uint64_t g_ticks;
+#if AARCH64_EL0_TEST
+/* Observed by SVC while IRQ is masked, on the same BSP. */
+static volatile uint64_t el0_ticks;
+
+uint64_t aarch64_el0_timer_ticks(void)
+{
+    return el0_ticks;
+}
+#endif
 
 /* Frozen CNTP configuration.  The BSP publishes it once (release
  * store on `ready`, fields written first); every AP acquires it
@@ -133,6 +142,10 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
     }
     /* Local scheduler tick — every admitted CPU. */
     aarch64_sched_tick();
+#if AARCH64_EL0_TEST
+    if (regs && (regs->spsr_el1 & 0x1f) == 0)
+        el0_ticks++;
+#endif
 #ifdef OS01_SELFTEST
     aarch64_sched_observe_timer_irq(regs, false);
 #endif
