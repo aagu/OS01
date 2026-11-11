@@ -489,6 +489,22 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
 
     kfree(row_buf);
     fb_writer_end(&lease);
+
+    /* No explicit store fence here, and none is needed.
+     *
+     * fb_writer_end() (called just above) takes the display state lock.
+     * The x86 spinlock's spin_lock() is a LOCK-prefixed read-modify-write
+     * ("lock decq") with a "memory" clobber, i.e. a full barrier: it is
+     * strictly stronger than the sfence that used to sit at this point.
+     * An sfence here would therefore be redundant.
+     *
+     * What this ordering does NOT provide: any display-completion or
+     * vsync semantics.  The host-side scanout samples the same physical
+     * memory independently of this present, so a frame can still be
+     * observed half-updated.  Removing that requires page flipping /
+     * double buffering, which this driver does not implement (see the
+     * "What this does NOT do" note at the top of this file). */
+
     if (rc < 0) return rc;
 
     /* Fold any pending failed-attempt prefix bytes from a previous
@@ -665,6 +681,13 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
 
     kfree(row_buf);
     fb_writer_end(&lease);
+
+    /* No explicit store fence here, and none is needed -- see the
+     * comment in gfx_ioctl_present(): fb_writer_end() takes the display
+     * state lock, whose x86 LOCK-prefixed read-modify-write is a full
+     * barrier, strictly stronger than an sfence.  It provides store
+     * ordering only; it says nothing about vsync or display
+     * completion. */
 
     if (rc < 0) {
         atomic_add_u64(&g_present_stats.failed_attempts, 1);
