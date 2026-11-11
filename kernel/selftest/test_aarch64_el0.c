@@ -1,6 +1,7 @@
 #if AARCH64_EL0_TEST
 
 #include <arch/aarch64/el0.h>
+#include <arch/aarch64/uaccess.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>
 #include <arch/mmu.h>
@@ -8,21 +9,25 @@
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <stddef.h>
+#include <errno.h>
 
 #define CODE_VA 0x100000
+#define CROSS_VA 0x101fff
 #define STACK_TOP (CODE_VA + 3 * PAGE_4K_SIZE)
 #define STR1(x) #x
 #define STR(x) STR1(x)
 
 /* Relocation-free EL0 code: load the root's data, use the EL0 stack,
  * and continue after the first SVC. x0 on entry selects the final action:
- * 0 exits, 1 writes to the read-only code page, otherwise read from x0. */
+ * 0 exits, 1 writes to the read-only code page, 2 runs uaccess, otherwise read from x0. */
 extern const char el0_blob[], el0_blob_end[];
 __asm__(
     ".pushsection .rodata, \"a\"\n"
     ".balign 4\n"
     "el0_blob:\n"
     "    mov x12, x0\n"
+    "    cmp x12, #2\n"
+    "    b.eq 4f\n"
     "    mov x9, #" STR(CODE_VA) "\n"
     "    ldr x0, [x9, #4096]\n"
     "    str x0, [sp, #-16]!\n"
@@ -45,6 +50,30 @@ __asm__(
     "1:  svc #1\n"
     "2:  svc #2\n"
     "    b 2b\n"
+    "4:  mov x0, #" STR(CODE_VA) "\n"
+    "    add x0, x0, #2, lsl #12\n"
+    "    sub x9, x0, #1\n"
+    "    mov w10, #0x12\n"
+    "    strb w10, [x9]\n"
+    "    mov w10, #0x34\n"
+    "    strb w10, [x9, #1]\n"
+    "    mov x0, x9\n"
+    "    mov x1, #2\n"
+    "    svc #3\n"
+    "    cbnz x0, 2b\n"
+    "    ldrb w10, [x9]\n"
+    "    cmp w10, #0x34\n"
+    "    b.ne 2b\n"
+    "    ldrb w10, [x9, #1]\n"
+    "    cmp w10, #0x12\n"
+    "    b.ne 2b\n"
+    "    sub x0, sp, #1\n"             /* last mapped byte + unmapped page */
+    "    mov x1, #2\n"
+    "    svc #3\n"
+    "    cmn x0, #" STR(EFAULT) "\n"
+    "    b.ne 2b\n"
+    "    mov x0, xzr\n"
+    "    b 1b\n"
     "el0_blob_end:\n"
     ".popsection\n");
 
@@ -56,6 +85,37 @@ struct run {
     uint64_t esr, far, pc, x0;
 };
 
+static int exercise_uaccess(uint64_t addr, uint64_t len)
+{
+    unsigned char bytes[2] = {0};
+    if (len != sizeof(bytes))
+        return -EINVAL;
+    int rc = aarch64_copy_from_user(bytes, addr, len);
+    if (rc)
+        return rc;
+    if (addr != CROSS_VA || bytes[0] != 0x12 || bytes[1] != 0x34)
+        return 2;
+    const unsigned char sentinel = 0x7f;
+    unsigned char last;
+    if (aarch64_copy_to_user(STACK_TOP - 1, &sentinel, 1) ||
+        aarch64_copy_from_user(bytes, STACK_TOP - 1, 2) != -EFAULT ||
+        bytes[0] != 0x12 || bytes[1] != 0x34 ||
+        aarch64_copy_to_user(STACK_TOP - 1, bytes, 2) != -EFAULT ||
+        aarch64_copy_from_user(&last, STACK_TOP - 1, 1) || last != sentinel ||
+        aarch64_copy_to_user(CODE_VA, bytes, 1) != -EFAULT ||
+        aarch64_copy_from_user(bytes, (uintptr_t)&bytes, 1) != -EFAULT ||
+        aarch64_copy_from_user(bytes, UINT64_MAX, 2) != -EFAULT)
+        return 3;
+
+    /* Skip preflight only here, to execute both actual faulting opcodes. */
+    if (aarch64_copy_from_user_raw(bytes, STACK_TOP, 1) != -EFAULT ||
+        aarch64_copy_to_user_raw(CODE_VA, bytes, 1) != -EFAULT)
+        return 4;
+
+    const unsigned char swapped[] = {0x34, 0x12};
+    return aarch64_copy_to_user(addr, swapped, sizeof(swapped)) ? 5 : 0;
+}
+
 static bool handle_sync(pt_regs_t *regs, uint64_t esr, uint64_t far, void *arg)
 {
     struct run *run = arg;
@@ -63,6 +123,14 @@ static bool handle_sync(pt_regs_t *regs, uint64_t esr, uint64_t far, void *arg)
     const uint64_t iss = esr & 0x1ffffff;
 
     run->traps++;
+    if (run->action == 2) {
+        if (run->traps <= 2 && ec == 0x15 && iss == 3) {
+            regs->x0 = exercise_uaccess(regs->x0, regs->x1);
+            return true;
+        }
+        run->passed = run->traps == 3 && ec == 0x15 && iss == 1 && !regs->x0;
+        goto done;
+    }
     if (run->traps == 1 && ec == 0x15 && iss == 0 &&
         regs->x0 == run->value && regs->sp_el0 == STACK_TOP - 16 &&
         regs->x12 == run->action) {
@@ -82,6 +150,7 @@ static bool handle_sync(pt_regs_t *regs, uint64_t esr, uint64_t far, void *arg)
                 : far == run->action && !write && dfsc >= 0x0d && dfsc <= 0x0f;
         }
     }
+done:
     /* PL011 still relies on the boot TTBR0. Report only after restore. */
     run->esr = esr;
     run->far = far;
@@ -183,7 +252,7 @@ static bool exercise(struct space *space, uint64_t value, uint64_t action)
         return false;
     }
     if (!run.passed)
-        log_err("M4.1: trap=%u esr=%lx far=%lx pc=%lx x0=%lx action=%lx\n",
+        log_err("M4: trap=%u esr=%lx far=%lx pc=%lx x0=%lx action=%lx\n",
                 run.traps, run.esr, run.far, run.pc, run.x0, action);
     return run.passed;
 }
@@ -220,7 +289,8 @@ static int test_aarch64_el0_on_high_stack(void)
             ok = exercise(&a, 0xa1 + round, 0) &&
                  exercise(&b, 0xb1 + round, 0) &&
                  exercise(&a, 0xa1 + round, 1) &&
-                 exercise(&b, 0xb1 + round, (uintptr_t)&b);
+                 exercise(&b, 0xb1 + round, (uintptr_t)&b) &&
+                 (round != 0 || exercise(&a, 0xa1 + round, 2));
         bool a_freed = teardown(&a);
         bool b_freed = teardown(&b);
         if (!ok || !a_freed || !b_freed) {

@@ -14,7 +14,8 @@
  *
  *   entry.S `el1_sync_entry` (offset 0x200) → `aarch64_el1_sync(regs,
  *   esr, far)`: decode the sync event from the raw ESR/FAR snapshot,
- *   dispatch, and NEVER return — the sync backend ends in the original
+ *   dispatch (unless the M4 probe handles a user-copy abort). The
+ *   unhandled sync backend ends in the original
  *   fatal diagnostic or bad-event, and an unexpected return of the
  *   common entry itself goes straight to arch_intr_bad_event().
  *
@@ -33,6 +34,9 @@
 #include <arch/regs.h>
 #include <arch/intr.h>
 #include <arch/aarch64/sync_fault.h>
+#if AARCH64_EL0_TEST
+#include <arch/aarch64/uaccess.h>
+#endif
 #include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/gic.h>
@@ -55,15 +59,18 @@ void el1_irq(struct pt_regs *regs)
 
 /* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。
  *
- * noreturn：后端终点是原 fatal 诊断或 bad-event；共同入口按整体定义
+ * 未被 M4 探针恢复的异常：后端终点是原 fatal 诊断或 bad-event；共同入口按整体定义
  * 可返回，若它意外返回则立即执行 bad-event 停机（spec §6.2），汇编的
  * DAIF+WFI 兜底保持不可达但保留。
  *
  * 早期可达链：no_stack_protector（canary prologue 依赖的 guard reload
  * 在 per-CPU 初始化前不可用）。 */
-__attribute__((noreturn, no_stack_protector))
 void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
 {
+#if AARCH64_EL0_TEST
+    if (aarch64_uaccess_fixup(regs, esr, far))
+        return;
+#endif
     struct intr_event ev;
 
     aarch64_intr_decode_sync(&ev, regs, esr, far);

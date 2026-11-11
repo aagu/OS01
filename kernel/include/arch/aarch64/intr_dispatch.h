@@ -24,10 +24,13 @@
 #include <arch/regs.h>
 
 /* entry.S el1_sync_entry's C landing point (slot 0x200).  Builds the
- * normalized event from the raw ESR/FAR snapshot, enters the common
- * dispatcher and never comes back: an unexpected return of the common
- * entry goes straight to arch_intr_bad_event(). */
-__attribute__((noreturn, no_stack_protector))
+ * normalized event from the raw ESR/FAR snapshot and dispatches it.
+ * The M4 probe can return after a recognized user-copy abort; all
+ * other exceptions reach fatal dispatch or arch_intr_bad_event(). */
+#if !AARCH64_EL0_TEST
+__attribute__((noreturn))
+#endif
+__attribute__((no_stack_protector))
 void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far);
 
 /* The pre-existing EL1h sync fatal diagnostic (frozen output contract,

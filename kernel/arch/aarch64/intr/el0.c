@@ -11,6 +11,12 @@ extern void aarch64_el0_enter(uint64_t pc, uint64_t sp, uint64_t x0);
 /* Only live on the BSP, before GIC/timer and AP startup. */
 static aarch64_el0_handler active_handler;
 static void *active_arg;
+static uint64_t *active_root;
+
+uint64_t *aarch64_el0_active_root(void)
+{
+    return active_root;
+}
 
 static void switch_ttbr0(uint64_t raw)
 {
@@ -46,7 +52,9 @@ int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
     active_arg = arg;
     active_handler = handler;
     switch_ttbr0(root_pa);
+    active_root = root;
     aarch64_el0_enter(pc, sp, x0);
+    active_root = NULL;
     switch_ttbr0(boot_ttbr0);
     aarch64_pt_root_unpublish_local(root_pa);
     active_handler = NULL;

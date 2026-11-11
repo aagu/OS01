@@ -133,6 +133,8 @@ static inline bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
 #elif defined(__aarch64__)
 
 #define ARCH_PAGE_OFFSET 0xffff000000000000ULL
+#define AARCH64_USER_MIN 0x1000ULL
+#define AARCH64_USER_LIMIT (1ULL << 48)
 
 static inline uint64_t *arch_get_page_table(void)
 {
@@ -181,16 +183,9 @@ static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
     return (pte[l3] & 0xFFFFFFFFFFFFF000ULL) | (va & 0xFFF);
 }
 
-// aarch64 stub: fail-closed.  No uaccess support on this arch yet (OS01
-// runs x86_64 only); a false return forces syscall_check_user_range to
-// -EFAULT every user pointer, matching the "no SMAP/SMEP / no get_user_pages"
-// scope (see design §10).
-static inline bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
-                                              uint64_t len, bool writable)
-{
-    (void)pgtbl; (void)addr; (void)len; (void)writable;
-    return false;
-}
+/* Snapshot of a lower-address range in a direct-mapped AArch64 root. */
+bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
+                                uint64_t len, bool writable);
 
 #else
 #error "Unsupported architecture"

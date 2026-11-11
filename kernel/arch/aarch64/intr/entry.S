@@ -199,9 +199,8 @@ restore_pt_regs:
  * AAPCS64 参数：(x0=sp → &regs, x1=esr, x2=far)。ESR_EL1/FAR_EL1 在
  * 调用 C 前用 caller-saved 通用寄存器暂存，再分别送入 x1/x2。
  *
- * aarch64_el1_sync（dispatch phase 1 适配器）是 noreturn：构造事件并
- * 进入共同分派后，终点是原 fatal 诊断或 bad-event；汇编后置不可返回
- * 的 WFI 兜底，防止编译器/ABI 失误意外 `eret`。
+ * M4 探针仅在 uaccess 修复后返回到 restore_pt_regs；其他异常
+ * 经共同分派进入 fatal/bad-event。普通镜像保留 WFI 兜底。
  * ────────────────────────────────────────────────────────────── */
 .balign 0x80
 .globl el1_sync_entry
@@ -213,10 +212,14 @@ el1_sync_entry:
     mrs     x2, far_el1
     mov     x0, sp                       /* x0 = &regs */
     bl      aarch64_el1_sync
+#if AARCH64_EL0_TEST
+    b       restore_pt_regs
+#else
     /* noreturn fallback：禁用中断 + 永久 WFI，杜绝 eret。 */
 0:  msr     daifset, #0xf
     wfi
     b       0b
+#endif
 
 #if AARCH64_EL0_TEST
 /* The test runs before interrupt sources are configured. SPSR keeps

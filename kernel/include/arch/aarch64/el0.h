@@ -20,4 +20,7 @@ typedef bool (*aarch64_el0_handler)(pt_regs_t *regs, uint64_t esr,
 int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
                    aarch64_el0_handler handler, void *arg);
 
+/* Private root while the probe is executing (including its SVC handler). */
+uint64_t *aarch64_el0_active_root(void);
+
 #endif
