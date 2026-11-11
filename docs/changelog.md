@@ -1,7 +1,34 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-07）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-11）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
+
+---
+
+## 2026-11-11
+
+- fix(gfx,fb): **framebuffer 映射从不当 UC 改为 write-back，并统一所有 framebuffer 别名的 cache policy**（commit `3b933d92` ~ `043ab3a3`，报告见 [fix-report](../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report.md)）：
+
+  **做了什么**
+
+  - **cache policy 由 backend 发布**（新增 `kernel/include/driver/fb_cache.h`）：`fb_cache_policy_t`（UNCACHEABLE / WRITEBACK）+ `fb_cache_policy_get/set()`（实现放在 `kernel/driver/fb_state.c`）。默认 UNCACHEABLE —— 任何没有"自证是普通 RAM"的 backend（含 generic GOP fallback）保持保守选择；只有 QEMU Standard VGA RAM backend 发布 WRITEBACK。"BAR0 是普通 RAM"这一假设从通用 gfx 层移到 backend 侧（`kernel/driver/bga.c`）。
+  - **policy → 硬件位只有一个翻译点**（`kernel/include/arch/x86_64/pte.h` 的 `fb_x86_cache_bits()` / `fb_x86_kernel_pmd_flags()` / `fb_x86_user_pte_flags()`）：kernel 永久映射（`fb_map.c`）、`/dev/fb` 用户别名（只读与测试配置下的可写两条路径，`fb.c`）、early boot 别名（`printk_fb.c`）全部走同一策略 ⇒ 同一物理页不再被两种内存类型访问（IA32_PAT 禁止 memory-type aliasing）。
+  - **early alias 显式撤销**（新增 `fb_x86_revoke_early_alias()`）：boot 页表就是 kernel 页表（`vmm_init()` 直接采用 boot PGD），early 别名一直在活动页表里；现在永久映射装好后直接清掉那几条 PMD，而不是靠"没人再用"的注释承诺。
+  - **修复映射失败时的回滚缺陷**：原回滚循环用 `j <= i`，而 `i` 在验证循环里被复用成"第几条验证失败"，导致只恢复前几条、其余已写入条目保留被破坏的 PA（由新增回归抓出）。
+  - **真设备寄存器不受影响**：`PAGE_KERNEL_PMD_NOCACHE` 的使用者（PCI config / APIC / IOAPIC / LAPIC / ACPI / AHCI / e1000 / xHCI）一行未动。
+  - **present 路径移除冗余 fence**：原 `arch_wmb()`（sfence）被 `fb_writer_end()` 取显示状态锁时的 `lock decq`（带 memory clobber 的全屏障）覆盖，独立性未被证明；且原注释承诺的"host scanout 不会拿到更旧的帧"是过强承诺（sfence 不提供 vsync / 显示完成语义）。
+  - **guest 侧内存类型诊断**：映射装好后打印叶子 PMD 条目、`IA32_PAT` 与 CR0（CD/NW），使日志能证明 CPU 实际采用的属性。
+
+  **关键结论与架构决策**
+
+  - **撤回"每次写退化成 KVM_EXIT_SHADOW"的机制断言**：该 exit reason 在 KVM ABI 里不存在；现按**机制推断**记录（AMD NPT 下 guest PAT 由 G_PAT 决定、硬件把 guest 访问强制成 UC；guest 逐字节拷贝无法按 WB cache line 合并；TCG 不模拟该硬件代价）。同时写明前提：PTE=0x83 **不等于**所有硬件最终必为 WB（PAT / MTRR / CR0.CD-NW / NPT-EPT 都参与决定）。
+  - **性能修复 ≠ 撕裂修复**：本次只降低像素拷贝时间，**不提供任何无撕裂保证**（仍无 vsync / page flip / 双缓冲，逐行写可见 front buffer 仍会撕裂）；后续工作已记录在报告 §7。
+
+  **验证**
+
+  - 宿主回归新增 5 个独立页表属性用例 + 1 个 `/dev/fb` 别名属性用例（期望值是**手写位模式**，不复用实现宏）：`test-fb-state` 188 断言、`test-fb-writers` 112、`test-fb-uapi` 27、`test-fb-ioctl` 173、`test-fb-hooks` 153，全绿。
+  - **反例测试**：把"写入处与验证处一起改回 UC"、以及"用户别名被强制 UC"分别注入实现，新回归**变红**；改回后**变绿**（红/绿输出见报告 §3.2）。
+  - UC/WB × KVM/TCG 四格对照用最终源码重跑，每格带日志路径、源码/产物 sha256 与 mtime（见报告 §2）。
 
 ---
 
