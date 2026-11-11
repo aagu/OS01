@@ -341,23 +341,23 @@ TEST_FUNC(test_checked_map_validation)
     uint32_t *out_addr = NULL;
 
     /* 1. NULL out_addr */
-    int rc = fb_x86_map_checked(0x20000000ULL, 2 * 1024 * 1024, NULL);
+    int rc = fb_x86_map_checked(0x20000000ULL, 2 * 1024 * 1024, FB_CACHE_POLICY_UNCACHEABLE, NULL);
     CHECK_EQ(-EINVAL, rc);
 
     /* 2. Zero size */
-    rc = fb_x86_map_checked(0x20000000ULL, 0, &out_addr);
+    rc = fb_x86_map_checked(0x20000000ULL, 0, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(-EINVAL, rc);
 
     /* 3. Unaligned phys (not 2MiB aligned) */
-    rc = fb_x86_map_checked(0x20001000ULL, 2 * 1024 * 1024, &out_addr);
+    rc = fb_x86_map_checked(0x20001000ULL, 2 * 1024 * 1024, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(-EINVAL, rc);
 
     /* 4. Unaligned size (not 2MiB aligned) */
-    rc = fb_x86_map_checked(0x20000000ULL, 4096, &out_addr);
+    rc = fb_x86_map_checked(0x20000000ULL, 4096, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(-EINVAL, rc);
 
     /* 5. Address range overflow */
-    rc = fb_x86_map_checked(UINT64_MAX - (2 * 1024 * 1024) + 1, 4 * 1024 * 1024, &out_addr);
+    rc = fb_x86_map_checked(UINT64_MAX - (2 * 1024 * 1024) + 1, 4 * 1024 * 1024, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(-EINVAL, rc);
 }
 
@@ -375,7 +375,7 @@ TEST_FUNC(test_checked_map_allocation_failure_and_rollback)
     g_mock_alloc_table_fail_countdown = 1;
 
     uint32_t *out_addr = (uint32_t *)0x12345;
-    int rc = fb_x86_map_checked(0xe0000000ULL, 16 * 1024 * 1024, &out_addr);
+    int rc = fb_x86_map_checked(0xe0000000ULL, 16 * 1024 * 1024, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(-ENOMEM, rc);
     CHECK_PTR_EQ(NULL, out_addr);
 
@@ -397,10 +397,10 @@ TEST_FUNC(test_checked_map_corrupted_phys_and_rollback)
     fb_publish_initial_mapping((uint32_t *)0xffffa00000000000ULL, old_mapped_size);
 
     /* Configure verification to fail */
-    g_mock_corrupt_pmd_phys = true;
+    g_mock_corrupt_pmd_entry = true;
 
     uint32_t *out_addr = (uint32_t *)0x12345;
-    int rc = fb_x86_map_checked(0xe0000000ULL, 16 * 1024 * 1024, &out_addr);
+    int rc = fb_x86_map_checked(0xe0000000ULL, 16 * 1024 * 1024, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(-EIO, rc);
     CHECK_PTR_EQ(NULL, out_addr);
 
@@ -420,7 +420,7 @@ TEST_FUNC(test_checked_map_success)
     uint64_t map_size = 16 * 1024 * 1024;
     uint32_t *out_addr = NULL;
 
-    int rc = fb_x86_map_checked(phys_base, map_size, &out_addr);
+    int rc = fb_x86_map_checked(phys_base, map_size, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(0, rc);
     CHECK_PTR_EQ((void *)0xFFFF900000000000ULL, (void *)out_addr);
 
@@ -527,8 +527,10 @@ TEST_FUNC(test_fb_cache_policy_wb_leaf_bits)
     uint64_t size = 16 * 1024 * 1024;   /* 8 x 2MiB pages */
     uint32_t *out_addr = NULL;
 
-    int rc = fb_x86_map_checked(phys, size, &out_addr);
+    int rc = fb_x86_map_checked(phys, size, FB_CACHE_POLICY_WRITEBACK, &out_addr);
     CHECK_EQ(0, rc);
+    /* The mapping commits the policy it was asked for. */
+    CHECK_EQ(FB_CACHE_POLICY_WRITEBACK, fb_cache_policy_get());
 
     /* Every leaf of the mapped range, walked independently. */
     for (size_t i = 0; i < 8; i++) {
@@ -558,7 +560,7 @@ TEST_FUNC(test_fb_cache_policy_uc_leaf_bits)
     uint64_t size = 16 * 1024 * 1024;
     uint32_t *out_addr = NULL;
 
-    int rc = fb_x86_map_checked(phys, size, &out_addr);
+    int rc = fb_x86_map_checked(phys, size, FB_CACHE_POLICY_UNCACHEABLE, &out_addr);
     CHECK_EQ(0, rc);
 
     for (size_t i = 0; i < 8; i++) {
@@ -586,7 +588,7 @@ TEST_FUNC(test_fb_cache_policy_alias_matches_kernel_mapping)
 
     uint64_t phys = 0xe0000000ULL;
     uint32_t *out_addr = NULL;
-    int rc = fb_x86_map_checked(phys, 8 * 1024 * 1024, &out_addr);
+    int rc = fb_x86_map_checked(phys, 8 * 1024 * 1024, FB_CACHE_POLICY_WRITEBACK, &out_addr);
     CHECK_EQ(0, rc);
 
     uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE);
@@ -627,7 +629,7 @@ TEST_FUNC(test_fb_cache_policy_rollback_preserves_attributes)
     uint64_t size = 8 * 1024 * 1024;
     uint32_t *out_addr = NULL;
 
-    int rc = fb_x86_map_checked(phys, size, &out_addr);
+    int rc = fb_x86_map_checked(phys, size, FB_CACHE_POLICY_WRITEBACK, &out_addr);
     CHECK_EQ(0, rc);
 
     uint64_t leaves[4];
@@ -639,10 +641,13 @@ TEST_FUNC(test_fb_cache_policy_rollback_preserves_attributes)
     /* Re-map the same range with a corrupted physical address: the
      * verification must fail and the rollback must restore the previous
      * entries bit for bit -- cache attributes included. */
-    g_mock_corrupt_pmd_phys = true;
-    rc = fb_x86_map_checked(phys, size, &out_addr);
+    g_mock_corrupt_pmd_entry = true;
+    rc = fb_x86_map_checked(phys, size, FB_CACHE_POLICY_WRITEBACK, &out_addr);
     CHECK_EQ(-EIO, rc);
     CHECK_PTR_EQ(NULL, out_addr);
+    /* A FAILED mapping must not publish the candidate policy: the
+     * global policy still describes the mapping that is really there. */
+    CHECK_EQ(FB_CACHE_POLICY_WRITEBACK, fb_cache_policy_get());
 
     for (size_t i = 0; i < 4; i++) {
         uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE + i * 0x200000ULL);
@@ -682,6 +687,71 @@ TEST_FUNC(test_fb_early_alias_revocation)
     CHECK_EQ(0, fb_x86_revoke_early_alias(table, early_va, size));
 }
 
+
+/* ── Test 16: the published snapshot never points into a revoked range ──
+ *
+ * The permanent mapping is published to the coordinator BEFORE the early
+ * boot alias is revoked.  The coordinator hands that published address to
+ * every writer lease, so the order is what keeps a console/logger writer
+ * from taking a lease whose address is about to become unmapped.
+ *
+ * The test calls the SAME helper the kernel path calls
+ * (fb_x86_publish_and_revoke_early_alias), so it covers the production
+ * order and not a re-implementation of it. */
+TEST_FUNC(test_fb_publish_precedes_early_alias_revoke)
+{
+    fb_resolution_runtime_reset();
+
+    struct fb_info info = make_default_info();
+    uint64_t gop_size = 1024 * 768 * 4;
+    fb_bootstrap_state(0xe0000000ULL, gop_size, &info);
+
+    /* Early init publishes the EARLY address. */
+    uint32_t *early = (uint32_t *)0xFFFF80003F000000ULL;
+    fb_publish_initial_mapping(early, gop_size);
+
+    fb_snapshot_t snap;
+    CHECK_EQ(0, fb_snapshot_read(&snap));
+    CHECK_PTR_EQ(early, snap.addr);
+
+    /* The early alias lives in a boot PMD table; build a stand-in with
+     * the entries the early init would have written. */
+    uint64_t early_pmd[512];
+    memset(early_pmd, 0, sizeof(early_pmd));
+    const uint64_t early_va = 0xFFFF80003F000000ULL;
+    const uint64_t alias_size = 4 * 1024 * 1024;
+    size_t idx0 = (size_t)(early_va >> 21) & 0x1ff;
+    size_t idx1 = (size_t)((early_va + 2 * 1024 * 1024) >> 21) & 0x1ff;
+    early_pmd[idx0] = 0xe0000000ULL | EXPECT_PMD_LEAF_UC;
+    early_pmd[idx1] = 0xe0000000ULL | EXPECT_PMD_LEAF_UC;
+
+    /* Permanent init: install the permanent mapping, then run the
+     * ordered switch (publish, then revoke). */
+    uint32_t *mapped = NULL;
+    int rc = fb_x86_map_checked(0xe0000000ULL, 4 * 1024 * 1024,
+                                 FB_CACHE_POLICY_UNCACHEABLE, &mapped);
+    CHECK_EQ(0, rc);
+
+    int revoked = fb_x86_publish_and_revoke_early_alias(
+                      mapped, 4 * 1024 * 1024, early_pmd, early_va, alias_size);
+    CHECK_EQ(2, revoked);
+    CHECK_EQ(0, early_pmd[idx0]);
+    CHECK_EQ(0, early_pmd[idx1]);
+
+    /* After the switch the coordinator must publish the PERMANENT
+     * address -- never the revoked one. */
+    CHECK_EQ(0, fb_snapshot_read(&snap));
+    CHECK_PTR_EQ(mapped, snap.addr);
+
+    /* And a writer lease must be granted the permanent address: a lease
+     * taken after the revocation must not carry the early address. */
+    fb_lease_t lease;
+    rc = fb_writer_begin(&lease, 0);
+    CHECK_EQ(0, rc);
+    CHECK_PTR_EQ(mapped, lease.snapshot.addr);
+    fb_writer_end(&lease);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_bootstrap_before_first_writer),
     TEST_ENTRY(test_transition_drains_frame),
@@ -698,6 +768,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_fb_cache_policy_alias_matches_kernel_mapping),
     TEST_ENTRY(test_fb_cache_policy_rollback_preserves_attributes),
     TEST_ENTRY(test_fb_early_alias_revocation),
+    TEST_ENTRY(test_fb_publish_precedes_early_alias_revoke),
 TEST_LIST_END
 
 int main(void)

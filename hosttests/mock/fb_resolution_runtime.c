@@ -27,7 +27,7 @@ bool     g_mock_yield_on_wait = false;
 uint32_t g_mock_tlb_shootdown_count = 0;
 uint32_t g_mock_flush_tlb_count = 0;
 int      g_mock_alloc_table_fail_countdown = -1;
-bool     g_mock_corrupt_pmd_phys = false;
+bool     g_mock_corrupt_pmd_entry = false;
 uint32_t g_mock_hardware_call_count = 0;
 
 /* ── Mutex mock ── */
@@ -158,7 +158,7 @@ void fb_resolution_runtime_reset(void)
     g_mock_tlb_shootdown_count = 0;
     g_mock_flush_tlb_count = 0;
     g_mock_alloc_table_fail_countdown = -1;
-    g_mock_corrupt_pmd_phys = false;
+    g_mock_corrupt_pmd_entry = false;
     g_mock_hardware_call_count = 0;
 
     memset(g_root_pgd, 0, sizeof(g_root_pgd));

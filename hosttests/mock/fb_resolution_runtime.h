@@ -137,7 +137,7 @@ extern bool     g_mock_yield_on_wait;
 extern uint32_t g_mock_tlb_shootdown_count;
 extern uint32_t g_mock_flush_tlb_count;
 extern int      g_mock_alloc_table_fail_countdown;
-extern bool     g_mock_corrupt_pmd_phys;
+extern bool     g_mock_corrupt_pmd_entry;
 extern uint32_t g_mock_hardware_call_count;
 
 void fb_resolution_runtime_reset(void);

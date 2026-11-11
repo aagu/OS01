@@ -41,6 +41,10 @@
 #include <uapi/fb_test.h>
 #include <driver/fb.h>
 #include <driver/fb_state.h>
+#include <driver/fb_cache.h>
+#include <arch/x86_64/fb_map.h>
+#include <memory/vma.h>
+#include <memory/vmm.h>
 #include <driver/fb_test.h>
 #include <driver/bga.h>
 #include <core/printk.h>
@@ -225,8 +229,25 @@ file_t *file_alloc(void) { return (file_t *)calloc(1, sizeof(file_t)); }
 void vfs_node_put(struct vfs_node *n) { (void)n; }
 void write_serial_unlocked(unsigned char c) { (void)c; }
 void write_serial(char c) { (void)c; }
+/* The user alias PTE attributes the REAL fb_mmap() installs are recorded
+ * here: the framebuffer cache-policy regression compares them with the
+ * kernel mapping's leaf PMD entry. */
+#define HOOK_MAX_PTE 64
+static uint64_t g_hook_pte_flags[HOOK_MAX_PTE];
+static uint64_t g_hook_pte_virt[HOOK_MAX_PTE];
+static size_t   g_hook_pte_count;
+
 int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
-{ (void)pgdir; (void)phys; (void)virt; (void)flags; return 0; }
+{
+    (void)pgdir; (void)phys;
+    if (g_hook_pte_count < HOOK_MAX_PTE) {
+        g_hook_pte_flags[g_hook_pte_count] = flags;
+        g_hook_pte_virt[g_hook_pte_count] = virt;
+        g_hook_pte_count++;
+    }
+    (void)virt; (void)flags;
+    return 0;
+}
 void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt) { (void)pgdir; (void)virt; }
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out)
 { (void)pgdir; (void)virt; (void)phys_out; (void)vm_out; return -ENOENT; }
@@ -775,6 +796,167 @@ static void test_consumed_token_identifies_the_armed_fault(void)
     fb_test_ops.release_file(f);
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Regression: a FAILED backend probe must not leave the policy and the
+ * mapping disagreeing.
+ *
+ * The framebuffer cache policy and the page-table attributes have to
+ * describe the SAME physical pages: the kernel mapping, the /dev/fb user
+ * alias and the early boot alias must all use one memory type (x86
+ * forbids accessing one page under two types -- IA32_PAT).
+ *
+ * The dangerous shape is "publish the policy first, map afterwards": if
+ * the mapping then fails, the policy says write-back while the mapping
+ * is still the uncacheable fallback, and every later /dev/fb alias is
+ * built from the wrong policy.
+ *
+ * This test therefore:
+ *   1. installs the uncacheable FALLBACK kernel mapping (what
+ *      arch_boot_memory() leaves behind),
+ *   2. makes the real checked map fail inside the real bga_probe(),
+ *   3. asserts the fallback leaf is still uncacheable AND the global
+ *      policy still says uncacheable,
+ *   4. calls the REAL fb_ops.mmap() and asserts that the user alias
+ *      carries the same memory type as the kernel mapping (read-only
+ *      AND writable).
+ *
+ * The expectations are hand written bit patterns:
+ *   2MiB leaf: PS|RW|P = 0x83, uncacheable adds PCD|PWT = 0x9B
+ *   4KiB user PTE: U|P = 0x05 (read-only), U|RW|P = 0x07 (writable)
+ *   uncacheable adds PCD|PWT = 0x18
+ * ═══════════════════════════════════════════════════════════════════ */
+#define HOOK_EXPECT_PMD_LEAF_UC  0x9BULL
+#define HOOK_EXPECT_PMD_LEAF_WB  0x83ULL
+/* The non-cache part of the user PTE: U|P (read-only) and U|RW|P
+ * (writable).  The cache bits are asserted separately. */
+#define HOOK_EXPECT_PTE_RO       0x05ULL
+#define HOOK_EXPECT_PTE_W        0x07ULL
+#define HOOK_EXPECT_CACHE_MASK   0x18ULL
+
+/* Independent walk of the mock page table (shifts 39/30/21 re-derived
+ * here, not taken from the mapper under test). */
+static uint64_t hook_pmd_leaf(uint64_t va)
+{
+    uint64_t pgd_idx = (va >> 39) & 0x1ff;
+    uint64_t pud_idx = (va >> 30) & 0x1ff;
+    uint64_t pmd_idx = (va >> 21) & 0x1ff;
+
+    uint64_t pgd_entry = kernel_map[pgd_idx];
+    if (!(pgd_entry & 1)) return 0;
+    uint64_t *pud = (uint64_t *)(pgd_entry & ~0xFFFULL);
+    uint64_t pud_entry = pud[pud_idx];
+    if (!(pud_entry & 1)) return 0;
+    uint64_t *pmd = (uint64_t *)(pud_entry & ~0xFFFULL);
+    return pmd[pmd_idx];
+}
+
+static void test_probe_failure_keeps_policy_and_alias_consistent(void)
+{
+    printf("\n--- test_probe_failure_keeps_policy_and_alias_consistent ---\n");
+    setup_env();
+
+    /* 1. The fallback kernel mapping (uncacheable), as arch_boot_memory()
+     *    leaves it before the backend probe runs. */
+    uint32_t *mapped = NULL;
+    int rc = fb_x86_map_checked(FAKE_PCI_BAR0_BASE, 16 * 1024 * 1024,
+                                 FB_CACHE_POLICY_UNCACHEABLE, &mapped);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(FB_CACHE_POLICY_UNCACHEABLE, fb_cache_policy_get());
+
+    uint64_t leaf = hook_pmd_leaf(0xFFFF900000000000ULL);
+    CHECK_EQ(HOOK_EXPECT_PMD_LEAF_UC, leaf & 0x1FFULL);
+
+    /* 2. Make the real checked map fail inside the real probe. */
+    g_mock_corrupt_pmd_entry = true;
+
+    struct pci_device pdev;
+    memset(&pdev, 0, sizeof(pdev));
+    pdev.vendor = BGA_PCI_VENDOR_ID;
+    pdev.device = BGA_PCI_DEVICE_ID;
+    pdev.class_code = 0x030000;
+    pdev.bars[0].kind = PCI_BAR_MMIO32;
+    pdev.bars[0].address = FAKE_PCI_BAR0_BASE;
+    pdev.bars[0].valid = true;
+
+    struct pci_device_id id;
+    memset(&id, 0, sizeof(id));
+    id.vendor = BGA_PCI_VENDOR_ID;
+    id.device = BGA_PCI_DEVICE_ID;
+
+    rc = bga_probe(&pdev, &id);
+    CHECK_EQ(-ENODEV, rc);
+    g_mock_corrupt_pmd_entry = false;
+
+    /* 3. The fallback mapping survived, and the policy still describes
+     *    it -- the probe must NOT have published write-back. */
+    leaf = hook_pmd_leaf(0xFFFF900000000000ULL);
+    CHECK_EQ(HOOK_EXPECT_PMD_LEAF_UC, leaf & 0x1FFULL);
+    CHECK_EQ(FB_CACHE_POLICY_UNCACHEABLE, fb_cache_policy_get());
+
+    /* 4. The REAL user alias must carry the same memory type as the
+     *    kernel mapping -- read-only and writable. */
+    struct mm_struct mm;
+    memset(&mm, 0, sizeof(mm));
+    mm.pgdir = (uint64_t *)0x1000;
+    current->mm = &mm;
+
+    vma_t vma;
+    memset(&vma, 0, sizeof(vma));
+    vma.vm_start = 0x10000;
+    vma.vm_end   = 0x14000;
+    vma.vm_file  = NULL;
+
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
+    memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
+    g_hook_pte_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_hook_pte_count);
+    for (size_t i = 0; i < g_hook_pte_count; i++) {
+        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_CACHE_MASK, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+    }
+
+    fb_set_raw_writable_allowed_for_test(true);
+    vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
+    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
+    g_hook_pte_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_hook_pte_count);
+    for (size_t i = 0; i < g_hook_pte_count; i++) {
+        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_CACHE_MASK, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+    }
+    fb_set_raw_writable_allowed_for_test(false);
+
+    /* 5. The same invariant for the SUCCESS path: a write-back mapping
+     *    must come with a write-back alias (the negative case: if the
+     *    alias were built from a different policy, this fails). */
+    setup_env();
+    memset(&mm, 0, sizeof(mm));
+    mm.pgdir = (uint64_t *)0x1000;
+    current->mm = &mm;
+
+    rc = fb_x86_map_checked(FAKE_PCI_BAR0_BASE, 16 * 1024 * 1024,
+                             FB_CACHE_POLICY_WRITEBACK, &mapped);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(FB_CACHE_POLICY_WRITEBACK, fb_cache_policy_get());
+    leaf = hook_pmd_leaf(0xFFFF900000000000ULL);
+    CHECK_EQ(HOOK_EXPECT_PMD_LEAF_WB, leaf & 0x1FFULL);
+
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
+    g_hook_pte_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    for (size_t i = 0; i < g_hook_pte_count; i++) {
+        CHECK_EQ(0, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+    }
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_cold_file_callbacks_initialize_lock),
     TEST_ENTRY(test_hooks_abi),
@@ -792,6 +974,9 @@ TEST_LIST_BEGIN
     /* Roadmap parked "QEMU 分辨率切换器收尾 follow-up" #4: the token is
      * a real discriminator of the consumed fault. */
     TEST_ENTRY(test_consumed_token_identifies_the_armed_fault),
+    /* Round-2 BLOCKING 1: a failed probe must not leave the cache
+     * policy and the page-table attributes disagreeing. */
+    TEST_ENTRY(test_probe_failure_keeps_policy_and_alias_consistent),
 TEST_LIST_END
 
 int main(void)
