@@ -18,6 +18,7 @@
 #include <uapi/fb.h>
 #include <uapi/gfx.h>
 #include <driver/fb_state.h>
+#include <driver/fb_cache.h>
 #include <driver/fb.h>
 #include <driver/gfx.h>
 #include <core/printk.h>
@@ -738,6 +739,88 @@ static void test_raw_mmap_ownership_boundaries(void)
     fb_owner_detach(owner_cookie);
 }
 
+/* ── Test: the /dev/fb alias carries the framebuffer cache policy ─────
+ *
+ * The user alias maps the SAME physical pages as the kernel's
+ * framebuffer mapping, so it must carry the same memory type: x86
+ * forbids accessing one physical page under two different memory types
+ * (IA32_PAT: avoid memory-type aliasing).
+ *
+ * The expectations are hand written bit patterns, NOT the
+ * implementation's flag expressions:
+ *   bit 0 P = 1, bit 1 RW = 1 (writable) / 0 (read-only), bit 2 U = 1
+ *   bit 3 PWT, bit 4 PCD = the cache policy bits
+ *   => read-only user PTE = 0x05, writable user PTE = 0x07
+ *   => uncacheable adds PCD|PWT = 0x18
+ */
+#define EXPECT_USER_PTE_RO      0x05ULL
+#define EXPECT_USER_PTE_W       0x07ULL
+#define EXPECT_CACHE_BITS_MASK  0x18ULL
+
+static void test_raw_mmap_cache_policy(void)
+{
+    printf("\n--- test_raw_mmap_cache_policy ---\n");
+
+    vma_t vma;
+    memset(&vma, 0, sizeof(vma));
+    vma.vm_start = 0x10000;
+    vma.vm_end   = 0x14000; /* 4 pages = 16KB */
+    vma.vm_file  = NULL;
+
+    /* 1. Write-back policy (the QEMU VGA RAM backend publishes it):
+     *    the alias must be write-back -- no PCD, no PWT. */
+    setup_test_environment();
+    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
+
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    g_current_map_page = 0;
+    g_installed_count = 0;
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_installed_count);
+    for (size_t i = 0; i < g_installed_count; i++) {
+        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(0, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
+    }
+
+    /* 2. Same policy, writable alias (test build only). */
+    setup_test_environment();
+    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
+    fb_set_raw_writable_allowed_for_test(true);
+
+    vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
+    g_current_map_page = 0;
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_installed_count);
+    for (size_t i = 0; i < g_installed_count; i++) {
+        CHECK_EQ(EXPECT_USER_PTE_W, g_installed_flags[i] & ~EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(0, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
+    }
+
+    /* 3. Uncacheable policy: the alias must be uncacheable too -- the
+     *    two mappings must never disagree about the memory type of the
+     *    shared physical pages. */
+    setup_test_environment();
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    g_current_map_page = 0;
+    g_installed_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_installed_count);
+    for (size_t i = 0; i < g_installed_count; i++) {
+        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_CACHE_BITS_MASK, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
+    }
+
+    /* Restore the default policy for the remaining tests. */
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+    fb_set_raw_writable_allowed_for_test(false);
+}
+
 int main(void)
 {
     printf("=== Test Runner: Framebuffer Writers Admission ===\n");
@@ -749,6 +832,7 @@ int main(void)
     test_write_row_leased_and_resize();
     test_kpanic_trylock_no_deadlock();
     test_raw_mmap_ownership_boundaries();
+    test_raw_mmap_cache_policy();
 
     printf("\n  ---\n  Total: %u | Passed: %u | Failed: %d\n",
            __test_stats.total, __test_stats.passed, g_failed);

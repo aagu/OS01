@@ -15,7 +15,9 @@
 #include "fb_resolution_runtime.h"
 #include <uapi/fb.h>
 #include <driver/fb_state.h>
+#include <driver/fb_cache.h>
 #include <arch/x86_64/fb_map.h>
+#include <arch/x86_64/pte.h>
 
 static int g_failed = 0;
 
@@ -461,6 +463,225 @@ TEST_FUNC(test_test_set_generation_hook)
     fb_writer_end(&lease);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * B2 regression: independent page-table attribute assertions.
+ *
+ * The expectations below are RAW BIT PATTERNS written out by hand.  They
+ * deliberately do NOT reuse the implementation's flag macros
+ * (PAGE_KERNEL_PMD / PAGE_USER_PTE / ...): if the test derived its
+ * expectation from the same expression the implementation uses, then
+ * changing the implementation back to uncacheable would keep the test
+ * green -- which is exactly the blind spot this regression exists to
+ * close.
+ *
+ * Hand-derived x86-64 expectations for a 2MiB PMD leaf entry:
+ *   bit 0  P   (present)   = 1
+ *   bit 1  RW  (writable)  = 1
+ *   bit 3  PWT             = 0 write-back / 1 uncacheable
+ *   bit 4  PCD             = 0 write-back / 1 uncacheable
+ *   bit 7  PS  (2MiB page) = 1
+ *   bit 12 PAT             = 0
+ *   bits 51:21 = physical address
+ *   => write-back leaf = 0x83, uncacheable leaf = 0x9B
+ *
+ * Hand-derived 4KiB user PTE expectations:
+ *   bit 0 P = 1, bit 1 RW = 1 (writable) / 0 (read-only), bit 2 U = 1
+ *   => writable user PTE = 0x07, read-only user PTE = 0x05
+ * ═══════════════════════════════════════════════════════════════════ */
+#define EXPECT_PMD_PA_MASK      0x0000FFFFFFE00000ULL   /* bits 51:21 */
+#define EXPECT_PMD_LEAF_WB     0x83ULL
+#define EXPECT_PMD_LEAF_UC     0x9BULL
+#define EXPECT_PTE_USER_W      0x07ULL
+#define EXPECT_PTE_USER_RO     0x05ULL
+#define EXPECT_CACHE_BITS_MASK 0x18ULL   /* PCD (bit 4) | PWT (bit 3) */
+
+/* Independent walk of the mock page table: kernel_map -> PGD -> PUD -> PMD.
+ * The index arithmetic is re-derived here (shifts 39 / 30 / 21, the
+ * x86-64 architectural values) instead of calling into the mapping code
+ * under test.  Returns 0 when the walk does not reach a leaf. */
+static uint64_t mock_pmd_leaf(uint64_t va)
+{
+    uint64_t pgd_idx = (va >> 39) & 0x1ff;
+    uint64_t pud_idx = (va >> 30) & 0x1ff;
+    uint64_t pmd_idx = (va >> 21) & 0x1ff;
+
+    uint64_t pgd_entry = kernel_map[pgd_idx];
+    if (!(pgd_entry & 1)) return 0;
+    uint64_t *pud = (uint64_t *)(pgd_entry & ~0xFFFULL);
+    uint64_t pud_entry = pud[pud_idx];
+    if (!(pud_entry & 1)) return 0;
+    uint64_t *pmd = (uint64_t *)(pud_entry & ~0xFFFULL);
+    return pmd[pmd_idx];
+}
+
+/* The permanent framebuffer mapping always starts here (VIRT_FRAMEBUFFER_OFFSET). */
+#define TEST_FB_VA_BASE 0xFFFF900000000000ULL
+
+/* ── Test 11: write-back policy installs write-back leaves ──────────── */
+TEST_FUNC(test_fb_cache_policy_wb_leaf_bits)
+{
+    fb_resolution_runtime_reset();
+    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
+
+    uint64_t phys = 0xe0000000ULL;
+    uint64_t size = 16 * 1024 * 1024;   /* 8 x 2MiB pages */
+    uint32_t *out_addr = NULL;
+
+    int rc = fb_x86_map_checked(phys, size, &out_addr);
+    CHECK_EQ(0, rc);
+
+    /* Every leaf of the mapped range, walked independently. */
+    for (size_t i = 0; i < 8; i++) {
+        uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE + i * 0x200000ULL);
+        uint64_t expect_pa = phys + i * 0x200000ULL;
+
+        CHECK_EQ(expect_pa & EXPECT_PMD_PA_MASK, leaf & EXPECT_PMD_PA_MASK);
+        CHECK_EQ(EXPECT_PMD_LEAF_WB, leaf & ~EXPECT_PMD_PA_MASK);
+        CHECK_EQ(0, leaf & EXPECT_CACHE_BITS_MASK);   /* PCD=0, PWT=0 */
+        CHECK_EQ(0, leaf & 0x1000);                  /* PAT=0 */
+        CHECK_EQ(0x01, leaf & 0x01);                    /* present */
+        CHECK_EQ(0x02, leaf & 0x02);                    /* writable */
+        CHECK_EQ(0x80, leaf & 0x80);                    /* 2MiB page */
+        CHECK_EQ(0, leaf & 0x04);                    /* supervisor only */
+    }
+
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+}
+
+/* ── Test 12: uncacheable policy installs uncacheable leaves ───────── */
+TEST_FUNC(test_fb_cache_policy_uc_leaf_bits)
+{
+    fb_resolution_runtime_reset();
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+
+    uint64_t phys = 0xe0000000ULL;
+    uint64_t size = 16 * 1024 * 1024;
+    uint32_t *out_addr = NULL;
+
+    int rc = fb_x86_map_checked(phys, size, &out_addr);
+    CHECK_EQ(0, rc);
+
+    for (size_t i = 0; i < 8; i++) {
+        uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE + i * 0x200000ULL);
+        uint64_t expect_pa = phys + i * 0x200000ULL;
+
+        CHECK_EQ(expect_pa & EXPECT_PMD_PA_MASK, leaf & EXPECT_PMD_PA_MASK);
+        CHECK_EQ(EXPECT_PMD_LEAF_UC, leaf & ~EXPECT_PMD_PA_MASK);
+        CHECK_EQ(EXPECT_CACHE_BITS_MASK, leaf & EXPECT_CACHE_BITS_MASK); /* UC */
+    }
+
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+}
+
+/* ── Test 13: the /dev/fb alias carries the same memory type ─────────
+ *
+ * The user alias maps the SAME physical pages as the kernel mapping, so
+ * it must not be uncacheable while the kernel mapping is write-back
+ * (x86 forbids memory-type aliasing).  The expectation is again a hand
+ * written bit pattern, not the implementation's expression. */
+TEST_FUNC(test_fb_cache_policy_alias_matches_kernel_mapping)
+{
+    fb_resolution_runtime_reset();
+    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
+
+    uint64_t phys = 0xe0000000ULL;
+    uint32_t *out_addr = NULL;
+    int rc = fb_x86_map_checked(phys, 8 * 1024 * 1024, &out_addr);
+    CHECK_EQ(0, rc);
+
+    uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE);
+    CHECK_EQ(EXPECT_PMD_LEAF_WB, leaf & ~EXPECT_PMD_PA_MASK);
+
+    /* The flags fb_mmap() installs for the user alias. */
+    uint64_t user_w  = fb_x86_user_pte_flags(FB_CACHE_POLICY_WRITEBACK, true);
+    uint64_t user_ro = fb_x86_user_pte_flags(FB_CACHE_POLICY_WRITEBACK, false);
+
+    CHECK_EQ(EXPECT_PTE_USER_W,  user_w  & ~EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(EXPECT_PTE_USER_RO, user_ro & ~EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(0, user_w  & EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(0, user_ro & EXPECT_CACHE_BITS_MASK);
+
+    /* Alias consistency: the alias and the kernel mapping must agree on
+     * the memory type of the shared physical pages. */
+    CHECK_EQ(leaf & EXPECT_CACHE_BITS_MASK, user_w & EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(leaf & EXPECT_CACHE_BITS_MASK, user_ro & EXPECT_CACHE_BITS_MASK);
+
+    /* And with the uncacheable policy the alias must be uncacheable too. */
+    uint64_t uc_w  = fb_x86_user_pte_flags(FB_CACHE_POLICY_UNCACHEABLE, true);
+    uint64_t uc_ro = fb_x86_user_pte_flags(FB_CACHE_POLICY_UNCACHEABLE, false);
+    CHECK_EQ(EXPECT_CACHE_BITS_MASK, uc_w  & EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(EXPECT_CACHE_BITS_MASK, uc_ro & EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(EXPECT_PTE_USER_W,  uc_w  & ~EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(EXPECT_PTE_USER_RO, uc_ro & ~EXPECT_CACHE_BITS_MASK);
+
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+}
+
+/* ── Test 14: a failed mapping restores the previous attributes ────── */
+TEST_FUNC(test_fb_cache_policy_rollback_preserves_attributes)
+{
+    fb_resolution_runtime_reset();
+    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
+
+    uint64_t phys = 0xe0000000ULL;
+    uint64_t size = 8 * 1024 * 1024;
+    uint32_t *out_addr = NULL;
+
+    int rc = fb_x86_map_checked(phys, size, &out_addr);
+    CHECK_EQ(0, rc);
+
+    uint64_t leaves[4];
+    for (size_t i = 0; i < 4; i++) {
+        leaves[i] = mock_pmd_leaf(TEST_FB_VA_BASE + i * 0x200000ULL);
+        CHECK_EQ(EXPECT_PMD_LEAF_WB, leaves[i] & ~EXPECT_PMD_PA_MASK);
+    }
+
+    /* Re-map the same range with a corrupted physical address: the
+     * verification must fail and the rollback must restore the previous
+     * entries bit for bit -- cache attributes included. */
+    g_mock_corrupt_pmd_phys = true;
+    rc = fb_x86_map_checked(phys, size, &out_addr);
+    CHECK_EQ(-EIO, rc);
+    CHECK_PTR_EQ(NULL, out_addr);
+
+    for (size_t i = 0; i < 4; i++) {
+        uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE + i * 0x200000ULL);
+        CHECK_EQ(leaves[i], leaf);
+        CHECK_EQ(EXPECT_PMD_LEAF_WB, leaf & ~EXPECT_PMD_PA_MASK);
+    }
+
+    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
+}
+
+/* ── Test 15: the early boot alias is revoked ──────────────────────── */
+TEST_FUNC(test_fb_early_alias_revocation)
+{
+    /* Stand-in for the boot PUD[0] PMD table that holds the early alias. */
+    uint64_t table[512];
+    memset(table, 0, sizeof(table));
+
+    const uint64_t early_va = 0xFFFF80003F000000ULL;  /* VIRT_FRAMEBUFFER_EARLY */
+    const uint64_t size = 4 * 1024 * 1024;            /* 2 x 2MiB pages */
+    const uint64_t leaf_uc = 0xe0000000ULL | EXPECT_PMD_LEAF_UC;
+
+    size_t idx0 = (size_t)((early_va) >> 21) & 0x1ff;
+    size_t idx1 = (size_t)((early_va + 2 * 1024 * 1024) >> 21) & 0x1ff;
+    size_t nbr  = (idx1 + 1) & 0x1ff;
+
+    table[idx0] = leaf_uc;
+    table[idx1] = leaf_uc;
+    table[nbr]  = 0xdeadbeefULL;   /* must survive untouched */
+
+    int revoked = fb_x86_revoke_early_alias(table, early_va, size);
+    CHECK_EQ(2, revoked);
+    CHECK_EQ(0, table[idx0]);
+    CHECK_EQ(0, table[idx1]);
+    CHECK_EQ(0xdeadbeefULL, table[nbr]);
+
+    /* Idempotent: nothing left to clear. */
+    CHECK_EQ(0, fb_x86_revoke_early_alias(table, early_va, size));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_bootstrap_before_first_writer),
     TEST_ENTRY(test_transition_drains_frame),
@@ -472,6 +693,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_checked_map_corrupted_phys_and_rollback),
     TEST_ENTRY(test_checked_map_success),
     TEST_ENTRY(test_test_set_generation_hook),
+    TEST_ENTRY(test_fb_cache_policy_wb_leaf_bits),
+    TEST_ENTRY(test_fb_cache_policy_uc_leaf_bits),
+    TEST_ENTRY(test_fb_cache_policy_alias_matches_kernel_mapping),
+    TEST_ENTRY(test_fb_cache_policy_rollback_preserves_attributes),
+    TEST_ENTRY(test_fb_early_alias_revocation),
 TEST_LIST_END
 
 int main(void)
