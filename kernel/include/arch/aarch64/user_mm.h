@@ -28,14 +28,17 @@ typedef struct mm_struct mm_t;
 int aarch64_user_mm_create(mm_t **out);
 
 /* Destroy an mm-owned user root.  Callers must first detach the root,
- * flush TLB and drop their leaf data pages.  Refuses NULL, init_mm and
- * unowned mms with -EINVAL.  If the root is installed or still
- * published, or a read-only scan finds any leaf (including unexpected
- * block mappings or PA-stashing invalid leaves), returns -EBUSY with
- * the tree, registration and mm fully intact.  On success the
- * registration is revoked, then every intermediate table and the root
- * page are freed, then the mm — returns 0.  Empty tables left behind
- * by failed table builds are reclaimed by the same second pass. */
+ * flush TLB and drop their leaf data pages.  Refuses NULL and init_mm
+ * with -EINVAL, returns -EAGAIN/-EOPNOTSUPP when the user-mm runtime
+ * gate refuses (same check as create, see
+ * aarch64_user_mm_runtime_check), and -EINVAL for an unowned mm.  If
+ * the root is installed or still published, or a read-only scan finds
+ * any leaf (including unexpected block mappings or PA-stashing
+ * invalid leaves), returns -EBUSY with the tree, registration and mm
+ * fully intact.  On success the registration is revoked, then every
+ * intermediate table and the root page are freed, then the mm —
+ * returns 0.  Empty tables left behind by failed table builds are
+ * reclaimed by the same second pass. */
 int aarch64_user_mm_destroy(mm_t *mm);
 
 /* True iff `root` — the direct-map root pointer exactly as passed as

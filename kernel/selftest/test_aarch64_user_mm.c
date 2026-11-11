@@ -30,9 +30,12 @@
  * for the in-run -EBUSY map attempt and the bare-RW/unallocated-PA
  * rejects (the -EBUSY path never creates the leaf). */
 #define UM_SVC_VA    (UM_CODE_VA + 4 * PAGE_4K_SIZE)
-/* Independent L2 branch (L1[0].L2[256]): mapped then unmapped to leave
- * two empty tables in front of the branch that still has leaves. */
-#define UM_L2X_VA    0x20000000
+/* Independent L2 branch at L1[0].L2[1]: its L2 index (0x200000>>21 = 1)
+ * sorts BELOW the code/data/stack branch's L2 index (0x400000>>21 = 2),
+ * so the destroy scan walks the empty subtree — left behind by a
+ * map-then-unmap of this VA — BEFORE it reaches the branch that still
+ * holds leaves. */
+#define UM_L2X_VA    0x200000
 #define UM_KVA       0xffff800000100000ULL   /* kernel-half → -EINVAL */
 #define UM_VALUE     0x5a
 #define UM_STATUS    (UM_VALUE + 2)

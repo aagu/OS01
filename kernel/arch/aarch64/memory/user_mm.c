@@ -180,6 +180,13 @@ int aarch64_user_mm_destroy(mm_t *mm)
     if (!mm || mm == &init_mm)
         return -EINVAL;
 
+    /* Spec 运行期门控与检查顺序: destroy uses the runtime gate like
+     * create — before walking records or freeing anything, so an
+     * unready/unfriendly topology never gets past this point. */
+    int rc = aarch64_user_mm_runtime_check();
+    if (rc)
+        return rc;
+
     /* Ownership lookup: lock held only for the walk. */
     user_mm_record_t *rec = NULL;
     uint64_t daif = spin_lock_irqsave(&user_mm_records_lock);

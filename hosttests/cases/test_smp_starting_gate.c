@@ -626,15 +626,54 @@ static int audit_gate_check_first(const char *path,
 
 static int g_gate_audit_fails = 0;
 
+/* M4 spec (运行期门控与检查顺序): "创建、销毁和用户根的四个 M3 入口均
+ * 使用该检查" — aarch64_user_mm_destroy must run the user-mm runtime
+ * gate like create does.  Pinned by source scan: the destroy body must
+ * call aarch64_user_mm_runtime_check.  (user_mm.c is aarch64-kernel
+ * only, so a link-level host test cannot reach it.) */
+static int audit_destroy_runtime_gate(const char *path)
+{
+    static const char k_sig[] = "int aarch64_user_mm_destroy(mm_t *mm)";
+    static const char k_gate[] = "aarch64_user_mm_runtime_check";
+    char *src = slurp(path);
+    assert_not_null(src);
+    strip_comments(src);
+    int fails = 0;
+    long sig = find_idx(src, k_sig);
+    if (sig < 0) {
+        printf("  [AUDIT-MISS] user_mm.c: destroy signature not found\n");
+        fails++;
+    } else {
+        long body_open = find_body_open(src, sig);
+        long body_close = (body_open >= 0) ? find_body_close(src, body_open) : -1L;
+        if (body_open < 0 || body_close < 0) {
+            printf("  [AUDIT-MISS] user_mm.c: destroy body not found\n");
+            fails++;
+        } else {
+            const char *body = src + body_open + 1;
+            size_t len = (size_t)(body_close - body_open - 1);
+            if (find_in(body, len, k_gate) < 0) {
+                printf("  [AUDIT-FAIL] user_mm.c: aarch64_user_mm_destroy "
+                       "does not call aarch64_user_mm_runtime_check\n");
+                fails++;
+            }
+        }
+    }
+    free(src);
+    return fails;
+}
+
 static void case_source_scan_gate_check_first(void)
 {
     TEST_SUITE("case 5: source-scan — every public aarch64_pt_*/arch_vmm_* "
                "entry calls vmm_gate_check() first");
 
-    char pt_path[512], vb_path[512];
+    char pt_path[512], vb_path[512], um_path[512];
     snprintf(pt_path, sizeof(pt_path), "%s/kernel/arch/aarch64/memory/page_table.c",
              OS01_KERNEL_SRC);
     snprintf(vb_path, sizeof(vb_path), "%s/kernel/arch/aarch64/memory/vmm_backend.c",
+             OS01_KERNEL_SRC);
+    snprintf(um_path, sizeof(um_path), "%s/kernel/arch/aarch64/memory/user_mm.c",
              OS01_KERNEL_SRC);
 
     g_gate_audit_fails = 0;
@@ -646,6 +685,7 @@ static void case_source_scan_gate_check_first(void)
         vb_path, k_vmm_backend_entries,
         sizeof(k_vmm_backend_entries) / sizeof(k_vmm_backend_entries[0]),
         "vmm_backend.c");
+    g_gate_audit_fails += audit_destroy_runtime_gate(um_path);
 
     assert_eq(0, g_gate_audit_fails);
 }
