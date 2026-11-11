@@ -236,6 +236,7 @@ void selftest_register_builtin_tests(void)
 #if AARCH64_EL0_TEST
     selftest_register_late("aarch64_el0_irq");
     selftest_register_late("aarch64_el0_preempt");
+    selftest_register_late("aarch64_el0_task");
 #endif
 #endif
 #if !defined(__aarch64__)

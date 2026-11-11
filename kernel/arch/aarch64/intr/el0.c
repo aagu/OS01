@@ -8,6 +8,7 @@
 #include <arch/mmu.h>
 #include <stddef.h>
 #include <percpu/percpu.h>
+#include <sched/task.h>
 
 extern void aarch64_el0_enter(uint64_t pc, uint64_t sp, uint64_t x0, bool irq);
 
@@ -16,7 +17,7 @@ struct el0_peer {
     pt_regs_t regs;
 };
 
-/* Only live on the BSP before scheduler handoff. */
+/* Only live on the BSP; no task switch while a probe root is installed. */
 static aarch64_el0_handler active_handler;
 static aarch64_el0_timer_handler active_timer;
 static void *active_arg;
@@ -38,24 +39,34 @@ static void switch_ttbr0(uint64_t raw)
                      :: "r"(raw) : "memory");
 }
 
-static bool probe_stage_valid(bool irq)
+enum el0_run_mode { EL0_EARLY, EL0_BOOT_IRQ, EL0_KTHREAD };
+
+static bool probe_stage_valid(enum el0_run_mode mode)
 {
-    if (!irq)
+    if (mode == EL0_EARLY)
         return aarch64_vmm_pre_smp();
-    return !aarch64_vmm_pre_smp() && dtb_cpu_count() == 1 &&
-           ipi_ready_count_get() == 1 && cpu_id() == 0 &&
-           !__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE) &&
-           aarch64_timer_local_running();
+    if (aarch64_vmm_pre_smp() || dtb_cpu_count() != 1 ||
+        ipi_ready_count_get() != 1 || cpu_id() != 0)
+        return false;
+    bool ready = __atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE);
+    if (mode == EL0_BOOT_IRQ)
+        return !ready && aarch64_timer_local_running();
+    if (!ready)
+        return false;
+    task_t *self = current;
+    return self != percpu_data[0].idle && (self->flags & PF_KTHREAD) &&
+           self->cpu == 0 && self->state == TASK_RUNNING &&
+           self->on_cpu && !self->in_schedule;
 }
 
 static int run(const struct aarch64_el0_start *start, struct el0_peer *peer,
-               bool irq, aarch64_el0_handler handler,
+               enum el0_run_mode mode, aarch64_el0_handler handler,
                aarch64_el0_timer_handler timer, void *arg)
 {
     uintptr_t kernel_sp;
     __asm__ volatile("mov %0, sp" : "=r"(kernel_sp));
-    if (!start->root || !handler || active_handler || !probe_stage_valid(irq) ||
-        kernel_sp < ARCH_PAGE_OFFSET)
+    if (!start->root || !handler || active_handler ||
+        kernel_sp < ARCH_PAGE_OFFSET || !probe_stage_valid(mode))
         return -1;
     uint64_t root_pa = (uintptr_t)start->root - ARCH_PAGE_OFFSET;
     if (aarch64_pt_root_is_published(&root_pa))
@@ -86,7 +97,7 @@ static int run(const struct aarch64_el0_start *start, struct el0_peer *peer,
     parked = peer;
     switch_ttbr0(root_pa);
     active_root = start->root;
-    aarch64_el0_enter(start->pc, start->sp, start->x0, irq);
+    aarch64_el0_enter(start->pc, start->sp, start->x0, mode == EL0_BOOT_IRQ);
     active_root = NULL;
     parked = NULL;
     switch_ttbr0(boot_ttbr0);
@@ -109,7 +120,13 @@ int aarch64_el0_run(uint64_t *root, uint64_t pc, uint64_t sp, uint64_t x0,
                    bool irq, aarch64_el0_handler handler, void *arg)
 {
     const struct aarch64_el0_start start = { root, pc, sp, x0 };
-    return run(&start, NULL, irq, handler, NULL, arg);
+    return run(&start, NULL, irq ? EL0_BOOT_IRQ : EL0_EARLY, handler, NULL, arg);
+}
+
+int aarch64_el0_run_kthread(struct aarch64_el0_start start,
+                           aarch64_el0_handler handler, void *arg)
+{
+    return run(&start, NULL, EL0_KTHREAD, handler, NULL, arg);
 }
 
 int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
@@ -127,7 +144,8 @@ int aarch64_el0_run_pair(const struct aarch64_el0_start starts[2],
     };
     if (timer)
         peer.regs.spsr_el1 &= ~AARCH64_EL0_PROBE_IRQ_MASK;
-    return run(&starts[0], &peer, timer != NULL, handler, timer, arg);
+    return run(&starts[0], &peer, timer ? EL0_BOOT_IRQ : EL0_EARLY,
+               handler, timer, arg);
 }
 
 bool aarch64_el0_swap(pt_regs_t *regs)

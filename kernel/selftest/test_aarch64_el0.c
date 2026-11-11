@@ -3,6 +3,7 @@
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/cpu.h>
+#include <arch/irq.h>
 #include <arch/aarch64/reg.h>
 #include <arch/aarch64/timer.h>
 #include <arch/aarch64/uaccess.h>
@@ -14,6 +15,9 @@
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/slab.h>
+#include <percpu/percpu.h>
+#include <sched/task.h>
+#include <selftest/aarch64_sched_observer.h>
 #include <stddef.h>
 #include <errno.h>
 
@@ -430,5 +434,119 @@ int test_aarch64_el0_irq(void)
         return -1;
     }
     return aarch64_el0_test_high_stack(test_irq_on_high_stack);
+}
+
+enum { TASK_VALUE = 0x4a, TASK_STATUS = TASK_VALUE + 1 };
+
+struct task_probe {
+    struct run trap;
+    uint64_t *root;
+    int pid, rc;
+    uint64_t ttbr0, ttbr1;
+    bool freed, witness_ok;
+};
+
+static bool task_probe_current(int pid)
+{
+    return cpu_id() == 0 && (current->flags & PF_KTHREAD) &&
+           current != &init_task_union.task && current->pid == pid &&
+           current->on_cpu && !current->in_schedule;
+}
+
+static void read_task_ttbrs(uint64_t *ttbr0, uint64_t *ttbr1)
+{
+    __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
+                     : "=r"(*ttbr0), "=r"(*ttbr1));
+}
+
+static bool handle_task_sync(pt_regs_t *regs, uint64_t esr, uint64_t far,
+                             void *arg)
+{
+    struct task_probe *probe = arg;
+    uint64_t ttbr0, ttbr1;
+    read_task_ttbrs(&ttbr0, &ttbr1);
+    if (!(regs->spsr_el1 & AARCH64_EL0_PROBE_IRQ_MASK) ||
+        !task_probe_current(probe->pid) || aarch64_el0_active_root() != probe->root ||
+        ttbr0 != (uintptr_t)probe->root - ARCH_PAGE_OFFSET || ttbr1 != probe->ttbr1)
+        return false;
+    return handle_sync(regs, esr, far, &probe->trap);
+}
+
+static bool task_probe_boot_root(const struct task_probe *probe)
+{
+    uint64_t ttbr0, ttbr1;
+    read_task_ttbrs(&ttbr0, &ttbr1);
+    return ttbr0 == probe->ttbr0 && ttbr1 == probe->ttbr1 &&
+           !aarch64_el0_active_root();
+}
+
+static uint64_t task_probe_worker(uint64_t arg)
+{
+    struct task_probe *probe = (void *)(uintptr_t)arg;
+    uint64_t baseline = pmm_probe_4k_allocated_count();
+    struct space space = {0};
+    if (task_probe_current(probe->pid) && setup(&space, TASK_VALUE)) {
+        probe->root = space.elf.root;
+        struct aarch64_el0_start start = { space.elf.root, space.elf.entry, STACK_TOP, 0 };
+        probe->rc = aarch64_el0_run_kthread(start, handle_task_sync, probe);
+    }
+    if (!task_probe_boot_root(probe)) {
+        /* Do not free a possibly live root or switch to another task. */
+        arch_local_irq_disable();
+        log_err("M4.7: boot page tables not restored; stopping before teardown\n");
+        for (;;)
+            arch_cpu_halt();
+    }
+    teardown(&space);
+    probe->root = NULL;
+    probe->freed = pmm_probe_4k_allocated_count() == baseline;
+    return probe->trap.passed ? probe->trap.x0 : (uint64_t)-1;
+}
+
+static uint64_t task_probe_witness(uint64_t arg)
+{
+    struct task_probe *probe = (void *)(uintptr_t)arg;
+    probe->witness_ok = task_probe_current(probe->pid) && task_probe_boot_root(probe);
+    return 0;
+}
+
+int test_aarch64_el0_task(void)
+{
+    if (dtb_cpu_count() != 1)
+        return -1;
+
+    /* Do not leave a pointer to the idle continuation's stack in a
+     * runnable thread if the scheduler ever fails to run it here. */
+    static struct task_probe probe;
+    probe = (struct task_probe){ .rc = -1, .trap = { .value = TASK_VALUE } };
+    read_task_ttbrs(&probe.ttbr0, &probe.ttbr1);
+    const unsigned batch = 0x47;
+    const unsigned stack = AARCH64_SCHED_RESOURCE_STACK;
+    const unsigned thread = AARCH64_SCHED_RESOURCE_THREAD;
+    uint64_t stack_before = aarch64_sched_observer_released(stack);
+    uint64_t thread_before = aarch64_sched_observer_released(thread);
+    aarch64_sched_observer_begin(0, batch);
+    probe.pid = kernel_thread_on_cpu(task_probe_worker, (uintptr_t)&probe, 0);
+    if (probe.pid > 0)
+        kthread_yield();
+    bool reaped = aarch64_sched_observer_released(stack) == stack_before + 1 &&
+                  aarch64_sched_observer_released(thread) == thread_before + 1;
+    if (reaped) {
+        probe.pid = kernel_thread_on_cpu(task_probe_witness, (uintptr_t)&probe, 0);
+        if (probe.pid > 0)
+            kthread_yield();
+    }
+    bool witness_reaped = aarch64_sched_observer_released(stack) == stack_before + 2 &&
+                          aarch64_sched_observer_released(thread) == thread_before + 2;
+    bool clean = aarch64_sched_observer_end(0, batch) == 0;
+    if (probe.rc || !probe.trap.passed || probe.trap.x0 != TASK_STATUS ||
+        !probe.freed || !reaped || !probe.witness_ok ||
+        !witness_reaped || !clean) {
+        log_err("M4.7: rc=%d traps=%u status=%lx freed=%u reaped=%u witness=%u/%u observer=%u\n",
+                probe.rc, probe.trap.traps, probe.trap.x0, probe.freed,
+                reaped, probe.witness_ok, witness_reaped, clean);
+        return -1;
+    }
+    return 0;
 }
 #endif

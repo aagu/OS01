@@ -1050,6 +1050,10 @@ void test_aarch64_scheduler_run(void)
                     (unsigned)(rc < 0 ? -rc : rc));
         selftest_record_late(ids[i], rc);
     }
+#if AARCH64_EL0_TEST
+    extern int test_aarch64_el0_task(void);
+    selftest_record_late("aarch64_el0_task", test_aarch64_el0_task());
+#endif
 }
 
 #endif /* __aarch64__ && OS01_SELFTEST */

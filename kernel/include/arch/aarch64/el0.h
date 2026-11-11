@@ -25,6 +25,11 @@ struct aarch64_el0_start {
     uint64_t pc, sp, x0;
 };
 
+/* Run one ELF context on a scheduled BSP kthread's own stack, with
+ * IRQs masked. No scheduling is allowed while its root is installed. */
+int aarch64_el0_run_kthread(struct aarch64_el0_start start,
+                           aarch64_el0_handler handler, void *arg);
+
 /* Runs with IRQs masked on the live EL0 frame after the timer's GIC EOI.
  * Like the sync callback, it must not block, schedule, or enable IRQs. */
 typedef void (*aarch64_el0_timer_handler)(pt_regs_t *regs, void *arg);
