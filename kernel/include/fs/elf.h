@@ -76,6 +76,8 @@ typedef struct {
 /* p_type values */
 #define PT_NULL    0
 #define PT_LOAD    1
+#define PT_DYNAMIC 2
+#define PT_INTERP  3
 #define PT_NOTE    4
 
 /* Note types */
@@ -93,8 +95,9 @@ typedef struct {
 #define PF_W       2
 #define PF_R       4
 
-/* EM_X86_64 */
+/* e_machine values */
 #define EM_X86_64  0x3e
+#define EM_AARCH64 183
 
 /**
  * elf_validate() — Quick-check whether a VFS node contains a valid ELF64.

@@ -99,6 +99,9 @@ bool     page_cow_put(uint64_t phys);   // returns true when count reaches 0
 uint16_t page_cow_refs(uint64_t phys);
 
 bool pmm_4k_page_allocated(uint64_t phys);
+#if AARCH64_EL0_TEST
+uint64_t pmm_probe_4k_allocated_count(void);
+#endif
 
 /* Locked PMM usage snapshot (monitor design spec §4.1).  pmm_get_stats
  * sums the Zone counters once under the allocator-internal pmm_lock —

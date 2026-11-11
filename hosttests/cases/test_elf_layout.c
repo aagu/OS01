@@ -344,6 +344,18 @@ TEST_FUNC(test_invalid_header_overflow_phoff_past_file) {
     assert_eq(-ENOEXEC, elf_layout_validate(&ehdr, phdrs, fs, &out));
 }
 
+TEST_FUNC(test_invalid_truncated_phdr_table) {
+    elf64_ehdr_t ehdr;
+    build_min_ehdr(&ehdr, 2, 0x400000);
+    elf64_phdr_t phdrs[2] = {0};
+    build_phdr(&phdrs[0], PT_LOAD, PF_R | PF_X,
+               sizeof(ehdr), 0x400000, 4, 0x1000);
+
+    elf_layout_t out;
+    uint64_t truncated = natural_file_size(2, 0) - 1;
+    assert_eq(-ENOEXEC, elf_layout_validate(&ehdr, phdrs, truncated, &out));
+}
+
 TEST_FUNC(test_invalid_filesz_gt_memsz) {
     elf64_ehdr_t ehdr;
     build_min_ehdr(&ehdr, 1, 0x400100);
@@ -609,6 +621,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_invalid_no_pt_load),
     TEST_ENTRY(test_invalid_wrong_phentsize),
     TEST_ENTRY(test_invalid_header_overflow_phoff_past_file),
+    TEST_ENTRY(test_invalid_truncated_phdr_table),
     TEST_ENTRY(test_invalid_filesz_gt_memsz),
     TEST_ENTRY(test_invalid_file_range_overflow),
     TEST_ENTRY(test_invalid_virtual_range_overflow),

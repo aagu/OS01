@@ -16,9 +16,8 @@
  *     without PMM/VMM/VFS mocks.
  *   * Checked arithmetic everywhere a uint64_t can wrap.
  *
- * The kernel build picks this file up via `$(wildcard fs/*.c)` in
- * kernel/Makefile; the hosttest harness links it directly through
- * the test_elf_layout rule in hosttests/Makefile.
+ * The x86 kernel and AArch64 probe link this file through kernel/Makefile.
+ * The hosttest harness links it through its test_elf_layout rule.
  */
 
 #include <fs/elf_layout.h>
@@ -74,10 +73,10 @@ static inline int add_overflows(uint64_t a, uint64_t b, uint64_t *out) {
     return 0;
 }
 
-int elf_layout_validate(const elf64_ehdr_t *ehdr,
-                        const elf64_phdr_t *phdrs,
-                        uint64_t file_size,
-                        elf_layout_t *out)
+int elf_layout_validate_machine(const elf64_ehdr_t *ehdr,
+                                const elf64_phdr_t *phdrs,
+                                uint64_t file_size, uint16_t machine,
+                                elf_layout_t *out)
 {
     /* ── 1. ELF identity (magic, class, endianness, machine, type) ── */
     if (ehdr->e_ident[EI_MAG0] != ELFMAG0 ||
@@ -89,7 +88,7 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
         return -ENOEXEC;
     if (ehdr->e_ident[EI_DATA] != ELFDATA2LSB)
         return -ENOEXEC;
-    if (ehdr->e_machine != EM_X86_64)
+    if (ehdr->e_machine != machine)
         return -ENOEXEC;
     if (ehdr->e_type != ET_EXEC)
         return -ENOEXEC;
@@ -99,17 +98,14 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
      * The caller is supposed to deliver phdrs within the file, but we
      * re-check using e_phoff/e_phnum/e_phentsize and file_size so
      * header overflow can never silently leak through (spec §4
-     * "程序头或文件数据越界").  An over-sized phnum or phentsize
-     * multiplies into a wrap — both checks below catch the wrap. */
+     * "程序头或文件数据越界"). Both fields are 16-bit, so their
+     * product fits in uint64_t; the addition to e_phoff may wrap. */
     if (ehdr->e_phnum == 0)
         return -ENOEXEC;
     if (ehdr->e_phentsize != sizeof(elf64_phdr_t))
         return -ENOEXEC;
 
-    uint64_t phdr_table_size;
-    if (add_overflows((uint64_t)ehdr->e_phnum,
-                      (uint64_t)ehdr->e_phentsize, &phdr_table_size))
-        return -ENOEXEC;
+    uint64_t phdr_table_size = (uint64_t)ehdr->e_phnum * ehdr->e_phentsize;
     uint64_t phdr_table_end;
     if (add_overflows(ehdr->e_phoff, phdr_table_size, &phdr_table_end))
         return -ENOEXEC;
@@ -224,4 +220,12 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
     out->elf_end   = elf_end;
     out->heap_base = heap_base;
     return 0;
+}
+
+int elf_layout_validate(const elf64_ehdr_t *ehdr,
+                        const elf64_phdr_t *phdrs,
+                        uint64_t file_size,
+                        elf_layout_t *out)
+{
+    return elf_layout_validate_machine(ehdr, phdrs, file_size, EM_X86_64, out);
 }

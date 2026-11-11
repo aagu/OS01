@@ -2,80 +2,28 @@
 
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/uaccess.h>
+#include <arch/aarch64/user_elf.h>
+#include <fs/elf.h>
 #include <arch/aarch64/page_table.h>
-#include <arch/aarch64/vmm_backend.h>
 #include <arch/mmu.h>
 #include <log/log.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
+#include <memory/slab.h>
 #include <stddef.h>
 #include <errno.h>
 
-#define CODE_VA 0x100000
-#define CROSS_VA 0x101fff
+#define CODE_VA 0x400000
+#define DATA_VA (CODE_VA + PAGE_4K_SIZE)
+#define CROSS_VA (DATA_VA + PAGE_4K_SIZE - 1)
 #define STACK_TOP (CODE_VA + 3 * PAGE_4K_SIZE)
-#define STR1(x) #x
-#define STR(x) STR1(x)
+extern const char _binary_aarch64_el0_elf_start[], _binary_aarch64_el0_elf_end[];
 
-/* Relocation-free EL0 code: load the root's data, use the EL0 stack,
- * and continue after the first SVC. x0 on entry selects the final action:
- * 0 exits, 1 writes to the read-only code page, 2 runs uaccess, otherwise read from x0. */
-extern const char el0_blob[], el0_blob_end[];
-__asm__(
-    ".pushsection .rodata, \"a\"\n"
-    ".balign 4\n"
-    "el0_blob:\n"
-    "    mov x12, x0\n"
-    "    cmp x12, #2\n"
-    "    b.eq 4f\n"
-    "    mov x9, #" STR(CODE_VA) "\n"
-    "    ldr x0, [x9, #4096]\n"
-    "    str x0, [sp, #-16]!\n"
-    "    mov x30, #0x1234\n"
-    "    svc #0\n"
-    "    ldr x10, [sp], #16\n"
-    "    add x10, x10, #1\n"
-    "    cmp x0, x10\n"
-    "    b.ne 2f\n"
-    "    mov x10, #0x1234\n"
-    "    cmp x30, x10\n"
-    "    b.ne 2f\n"
-    "    cbz x12, 1f\n"
-    "    cmp x12, #1\n"
-    "    b.ne 3f\n"
-    "    str x0, [x9]\n"
-    "    b 2f\n"
-    "3:  ldr x0, [x12]\n"
-    "    b 2f\n"
-    "1:  svc #1\n"
-    "2:  svc #2\n"
-    "    b 2b\n"
-    "4:  mov x0, #" STR(CODE_VA) "\n"
-    "    add x0, x0, #2, lsl #12\n"
-    "    sub x9, x0, #1\n"
-    "    mov w10, #0x12\n"
-    "    strb w10, [x9]\n"
-    "    mov w10, #0x34\n"
-    "    strb w10, [x9, #1]\n"
-    "    mov x0, x9\n"
-    "    mov x1, #2\n"
-    "    svc #3\n"
-    "    cbnz x0, 2b\n"
-    "    ldrb w10, [x9]\n"
-    "    cmp w10, #0x34\n"
-    "    b.ne 2b\n"
-    "    ldrb w10, [x9, #1]\n"
-    "    cmp w10, #0x12\n"
-    "    b.ne 2b\n"
-    "    sub x0, sp, #1\n"             /* last mapped byte + unmapped page */
-    "    mov x1, #2\n"
-    "    svc #3\n"
-    "    cmn x0, #" STR(EFAULT) "\n"
-    "    b.ne 2b\n"
-    "    mov x0, xzr\n"
-    "    b 1b\n"
-    "el0_blob_end:\n"
-    ".popsection\n");
+static size_t fixture_size(void)
+{
+    return (uintptr_t)_binary_aarch64_el0_elf_end -
+           (uintptr_t)_binary_aarch64_el0_elf_start;
+}
 
 struct run {
     uint64_t value;
@@ -159,81 +107,38 @@ done:
     return false;
 }
 
-static void copy_code(uint64_t pa)
-{
-    char *code = (char *)Phy_To_Virt(pa);
-    size_t size = (uintptr_t)el0_blob_end - (uintptr_t)el0_blob;
-    __builtin_memcpy(code, el0_blob, size);
-    uint64_t ctr;
-    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
-    size_t line = 4UL << ((ctr >> 16) & 0xf);
-    for (size_t i = 0; i < size; i += line)
-        __asm__ volatile("dc cvau, %0" :: "r"(code + i) : "memory");
-    /* The instruction fetch uses a different VA from the copy. */
-    __asm__ volatile("dsb ish\n\tic iallu\n\tdsb ish\n\tisb" ::: "memory");
-}
-
 struct space {
-    uint64_t *root;
-    uint64_t leaf[3];
+    struct aarch64_user_elf elf;
+    uint64_t stack_pa;
 };
 
 static bool setup(struct space *space, uint64_t value)
 {
-    space->root = aarch64_el0_root_create();
-    if (!space->root)
+    int rc = aarch64_user_elf_load(_binary_aarch64_el0_elf_start,
+                                   fixture_size(), &space->elf);
+    if (rc) {
+        log_err("M4.3: fixture load rc=%d\n", rc);
         return false;
-    for (unsigned i = 0; i < 3; i++) {
-        uint64_t pa = alloc_4k_page();
-        if (!pa)
-            return false;
-        space->leaf[i] = pa;
-        __builtin_memset((void *)Phy_To_Virt(pa), 0, PAGE_4K_SIZE);
-        uint32_t perm = i ? AARCH64_PT_USER_RW
-                          : AARCH64_PT_USER_RO | AARCH64_PT_EXEC;
-        int rc = aarch64_el0_map(space->root, CODE_VA + i * PAGE_4K_SIZE, pa, perm);
-        if (rc) {
-            log_err("M4.1: map slot=%u rc=%d\n", i, rc);
-            return false;
-        }
     }
-    copy_code(space->leaf[0]);
-    *(uint64_t *)Phy_To_Virt(space->leaf[1]) = value;
-    return true;
+    uint64_t pa;
+    uint32_t perm;
+    if (aarch64_pt_query_4k(space->elf.root, DATA_VA, &pa, &perm) ||
+        perm != AARCH64_PT_USER_RW)
+        return false;
+    *(uint64_t *)Phy_To_Virt(pa) = value;
+
+    space->stack_pa = alloc_4k_page();
+    if (!space->stack_pa)
+        return false;
+    __builtin_memset((void *)Phy_To_Virt(space->stack_pa), 0, PAGE_4K_SIZE);
+    return aarch64_el0_map(space->elf.root, STACK_TOP - PAGE_4K_SIZE,
+                           space->stack_pa, AARCH64_PT_USER_RW) == 0;
 }
 
-static bool teardown(struct space *space)
+static void teardown(struct space *space)
 {
-    /* All three VAs share one path to L3. Record every allocated table
-     * before teardown, including intermediates from a partial setup. */
-    uint64_t tables[4] = {0};
-    uint64_t *table = space->root;
-    const uint64_t bits = AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE;
-    for (unsigned i = 0; table && i < 4; i++) {
-        tables[i] = (uintptr_t)table - ARCH_PAGE_OFFSET;
-        if (i == 3)
-            break;
-        unsigned index = (CODE_VA >> (39 - 9 * i)) & 0x1ff;
-        uint64_t desc = table[index];
-        table = (desc & bits) == bits
-            ? (uint64_t *)Phy_To_Virt(desc & AARCH64_TTBR_BASE_MASK) : NULL;
-    }
-    aarch64_el0_root_destroy(space->root);
-    bool ok = true;
-    for (unsigned i = 0; i < 4; i++)
-        if (tables[i] && pmm_4k_page_allocated(tables[i]))
-            ok = false;
-    for (unsigned i = 0; i < 3; i++) {
-        uint64_t pa = space->leaf[i];
-        if (pa) {
-            if (!pmm_4k_page_allocated(pa))
-                ok = false;
-            free_4k_page(pa);
-            if (pmm_4k_page_allocated(pa))
-                ok = false;
-        }
-    }
-    return ok;
+    aarch64_user_elf_destroy(&space->elf);
+    free_4k_page(space->stack_pa);
 }
 
 static bool exercise(struct space *space, uint64_t value, uint64_t action)
@@ -242,7 +147,7 @@ static bool exercise(struct space *space, uint64_t value, uint64_t action)
     __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
                      : "=r"(before0), "=r"(before1));
     struct run run = { .value = value, .action = action };
-    int rc = aarch64_el0_run(space->root, CODE_VA, STACK_TOP, action,
+    int rc = aarch64_el0_run(space->elf.root, space->elf.entry, STACK_TOP, action,
                             handle_sync, &run);
     __asm__ volatile("mrs %0, ttbr0_el1\n\tmrs %1, ttbr1_el1"
                      : "=r"(after0), "=r"(after1));
@@ -277,11 +182,51 @@ __asm__(
     ".size test_aarch64_el0, . - test_aarch64_el0\n"
     ".popsection\n");
 
+static bool reject_bad_entry(void)
+{
+    size_t size = fixture_size();
+    elf64_ehdr_t *bad = kmalloc(size);
+    if (!bad)
+        return false;
+    __builtin_memcpy(bad, _binary_aarch64_el0_elf_start, size);
+    bad->e_entry = DATA_VA; /* mapped by the ELF but not executable */
+    uint64_t before = pmm_probe_4k_allocated_count();
+    struct aarch64_user_elf elf = {0};
+    int rc = aarch64_user_elf_load(bad, size, &elf);
+    bool ok = rc == -ENOEXEC && !elf.root && !elf.page_count &&
+              before == pmm_probe_4k_allocated_count();
+    aarch64_user_elf_destroy(&elf);
+    kfree(bad);
+    if (!ok)
+        log_err("M4.3: bad entry rejection rc=%d\n", rc);
+    return ok;
+}
+
+/* Dirty the reusable pages first so missing BSS clearing cannot be
+ * hidden by fresh QEMU RAM. Root, tables and ELF leaves fit in 8 pages. */
+static bool dirty_free_pages(void)
+{
+    uint64_t pages[8] = {0};
+    bool ok = true;
+    for (unsigned i = 0; i < 8; i++) {
+        pages[i] = alloc_4k_page();
+        if (!pages[i]) {
+            ok = false;
+            break;
+        }
+        __builtin_memset((void *)Phy_To_Virt(pages[i]), 0xa5, PAGE_4K_SIZE);
+    }
+    for (unsigned i = 0; i < 8; i++)
+        free_4k_page(pages[i]);
+    return ok;
+}
+
 __attribute__((used))
 static int test_aarch64_el0_on_high_stack(void)
 {
-    if ((uintptr_t)el0_blob_end - (uintptr_t)el0_blob > PAGE_4K_SIZE)
+    if (!reject_bad_entry() || !dirty_free_pages())
         return -1;
+    uint64_t baseline = pmm_probe_4k_allocated_count();
     for (unsigned round = 0; round < 8; round++) {
         struct space a = {0}, b = {0};
         bool ok = setup(&a, 0xa1 + round) && setup(&b, 0xb1 + round);
@@ -291,11 +236,11 @@ static int test_aarch64_el0_on_high_stack(void)
                  exercise(&a, 0xa1 + round, 1) &&
                  exercise(&b, 0xb1 + round, (uintptr_t)&b) &&
                  (round != 0 || exercise(&a, 0xa1 + round, 2));
-        bool a_freed = teardown(&a);
-        bool b_freed = teardown(&b);
-        if (!ok || !a_freed || !b_freed) {
-            log_err("M4.1: round=%u execution=%u reclaim=%u/%u\n",
-                    round, ok, a_freed, b_freed);
+        teardown(&a);
+        teardown(&b);
+        bool freed = pmm_probe_4k_allocated_count() == baseline;
+        if (!ok || !freed) {
+            log_err("M4: round=%u execution=%u reclaim=%u\n", round, ok, freed);
             return -1;
         }
     }

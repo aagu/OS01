@@ -541,6 +541,20 @@ bool pmm_4k_page_allocated(uint64_t phys)
     return allocated;
 }
 
+#if AARCH64_EL0_TEST
+uint64_t pmm_probe_4k_allocated_count(void)
+{
+    uint64_t count = 0;
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+    for (list_t *pos = subpage_pools.next; pos != &subpage_pools; pos = pos->next) {
+        struct subpage_pool *pool = container_of(pos, struct subpage_pool, list);
+        count += pool->alloc_count - 1; /* exclude the pool's metadata slot */
+    }
+    spin_unlock_irqrestore(&subpage_lock, flags);
+    return count;
+}
+#endif
+
 uint64_t alloc_4k_page(void)
 {
     // subpage_pools is initialized in pmm_init() — no lazy init needed.

@@ -102,6 +102,9 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_ap_wake.c \
                    selftest/test_aarch64_sched_tick.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c
+ifeq ($(AARCH64_EL0_TEST),1)
+KERNEL_C_SOURCES += fs/elf_layout.c
+endif
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
 # intr/dispatch.c is the arch-neutral common dispatcher (intr-dispatch
@@ -279,6 +282,9 @@ C_OBJECTS       := $(patsubst %.c,$(BUILD_DIR)/%.o,$(ALL_C_SOURCES))
 ASM_OBJECTS     := $(patsubst %.S,$(BUILD_DIR)/%.o,$(ALL_S_SOURCES))
 
 KERNEL_EXTRA_OBJECTS ?=
+ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_el0_image.o
+endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
 
@@ -639,6 +645,15 @@ $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
 
 # ── Special objects ────────────────────────────────────────
+ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
+$(BUILD_DIR)/generated/aarch64_el0.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_el0.o selftest/fixtures/aarch64_el0.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_el0_image.o: $(BUILD_DIR)/generated/aarch64_el0.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+endif
+
 # PSF font → .o (both arches — kernel/core/printk.c on x86_64 AND
 # kernel/arch/aarch64/runtime/printk_fb.c on aarch64 reference these symbols)
 # `ld -r -b binary` derives the embedded symbols (_binary_kernel_font_psf_*)
@@ -853,6 +868,9 @@ clean:
 
 # ── Auto-dependency tracking ───────────────────────────────
 ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS) $(ASM_OBJECTS))
+ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
+ALL_DEPS += $(BUILD_DIR)/selftest/fixtures/aarch64_el0.d
+endif
 ifeq ($(ARCH),x86_64)
 ALL_DEPS += $(BUILD_DIR)/$(ARCHDIR)/trampoline.d
 endif

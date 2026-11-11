@@ -57,4 +57,10 @@ int elf_layout_validate(const elf64_ehdr_t *ehdr,
                         uint64_t file_size,
                         elf_layout_t *out);
 
+/* Same user address envelope with an explicit target machine. */
+int elf_layout_validate_machine(const elf64_ehdr_t *ehdr,
+                                const elf64_phdr_t *phdrs,
+                                uint64_t file_size, uint16_t machine,
+                                elf_layout_t *out);
+
 #endif /* _FS_ELF_LAYOUT_H */
