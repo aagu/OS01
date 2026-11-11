@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <list.h>
 #include <memory/vmm.h>
+#include <memory/mm.h>   // mm_alloc (compat forward — moved out of this header)
 #include <fs/vfs.h>
 
 // Forward declarations (avoids circular task.h ↔ vma.h)
@@ -54,7 +55,6 @@ int       vma_insert(mm_t *mm, vma_t *vma);
 void      vma_remove(mm_t *mm, vma_t *vma);
 void      vma_free_all(mm_t *mm);
 vma_t    *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
-mm_t     *mm_alloc(void);   // allocate + init an mm_t (lock = unlocked)
 
 // ── mm_init_user_heap — heap-VMA initializer ────────────────
 // Must be called after a successful elf_load() on the new mm.

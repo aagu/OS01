@@ -10,7 +10,6 @@
 #include <memory/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
 #include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
 #include <string.h>
-#include <stdlib.h>                 // calloc (used by mm_alloc)
 #include <errno.h>
 
 // User-VA layout (must mirror kernel/arch/x86_64/intr/trap.c
@@ -125,19 +124,6 @@ vma_t *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
         pos = pos->next;
     }
     return NULL; // caller doesn't use return value
-}
-
-// mm_alloc — allocate + initialize an mm_t.  Centralizes the "lock = 1L"
-// invariant so no call site can forget it (lock == 0 is the LOCKED state
-// and would deadlock the first taker).
-mm_t *mm_alloc(void)
-{
-    mm_t *mm = (mm_t *)calloc(1, sizeof(mm_t));
-    if (!mm) return NULL;
-    list_init(&mm->vma_list);
-    mm->mmap_base = 0x40000000;
-    spin_init(&mm->lock);
-    return mm;
 }
 
 // mm_init_user_heap — install the unique heap VMA and set mm's break

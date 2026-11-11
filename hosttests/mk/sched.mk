@@ -255,6 +255,16 @@ $(TEST_BLD)/vma_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) -c $< -o $@
 
+# mm_alloc moved out of vma.c (aarch64 M4 user-mm plan Task 1) — the
+# lifecycle suite links the production mm.c object so the mm_t lifecycle
+# stays covered by the same harness.
+$(TEST_BLD)/mm_production.o: $(TESTS_DIR)/kernel/memory/mm.c \
+		$(TESTS_DIR)/kernel/include/memory/mm.h \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(LIFECYCLE_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/lifecycle_stubs.o: $(TEST_MOCK)/lifecycle/lifecycle_stubs.c \
 		$(TEST_MOCK)/lifecycle/lifecycle_stubs.h \
 		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
@@ -268,6 +278,7 @@ $(TEST_BLD)/test_process_image_lifecycle.o: $(TEST_CASES)/test_process_image_lif
 
 $(TEST_BLD)/test_process_image_lifecycle.elf: $(TEST_BLD)/test_process_image_lifecycle.o \
 		$(TEST_BLD)/vma_production.o \
+		$(TEST_BLD)/mm_production.o \
 		$(TEST_BLD)/lifecycle_stubs.o
 	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
 
@@ -280,6 +291,12 @@ FORK_USER_MAP_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
 
 $(TEST_BLD)/vma_fork_user_map_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/mm_fork_user_map_production.o: $(TESTS_DIR)/kernel/memory/mm.c \
+		$(TESTS_DIR)/kernel/include/memory/mm.h \
 		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FORK_USER_MAP_HOST_CFLAGS) -c $< -o $@
@@ -297,6 +314,7 @@ $(TEST_BLD)/test_fork_user_map.o: $(TEST_CASES)/test_fork_user_map.c \
 
 $(TEST_BLD)/test_fork_user_map.elf: $(TEST_BLD)/test_fork_user_map.o \
 		$(TEST_BLD)/vma_fork_user_map_production.o \
+		$(TEST_BLD)/mm_fork_user_map_production.o \
 		$(TEST_BLD)/fork_user_map_stubs.o
 	$(HOST_CC) -o $@ $^
 
