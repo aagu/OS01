@@ -24,6 +24,7 @@ sysroot generation.
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -391,6 +392,143 @@ class DoomBuildContract(unittest.TestCase):
         res_all = subprocess.run([nm, str(elf)], capture_output=True, text=True, check=True)
         for sym in ("gui_platform_create", "lv_init", "lv_display_create"):
             self.assertNotIn(sym, res_all.stdout, f"{sym} must not be linked into doom.elf")
+
+
+class DoomSuiteBuildContractTests(unittest.TestCase):
+    """Pin DOOM_TEST=1, suite catalog, isolated variant, and budget contracts."""
+
+    def test_doom_variant_separate_from_normal(self):
+        """DOOM_TEST=1 must direct image paths to image/doom-test/disk.img without touching normal image."""
+        r_normal = run_make("print-run-paths")
+        self.assertEqual(r_normal.returncode, 0)
+        self.assertIn("image/disk.img", r_normal.stdout)
+
+        r_test = run_make("DOOM_TEST=1", "print-run-paths")
+        self.assertEqual(r_test.returncode, 0, r_test.stderr)
+        self.assertIn("image/doom-test/disk.img", r_test.stdout)
+
+    def test_variant_rejects_other_fixture(self):
+        """DOOM_TEST=1 cannot be combined with conflicting test variants or fault injection."""
+        conflicts = [
+            ("KERNEL_SELFTEST=1", "KERNEL_SELFTEST"),
+            ("OS01_SYSTEST=1", "OS01_SYSTEST"),
+            ("CAPACITY_TEST=1", "CAPACITY_TEST"),
+            ("DRIVER_MODEL_FAULT=observe", "DRIVER_MODEL_FAULT"),
+        ]
+        for arg, label in conflicts:
+            with self.subTest(conflict=label):
+                r = run_make("DOOM_TEST=1", arg, "image")
+                self.assertNotEqual(r.returncode, 0, f"DOOM_TEST=1 + {arg} should fail")
+                self.assertIn("cannot be combined", r.stderr + r.stdout)
+
+    def test_smp_1_2_catalog(self):
+        """doom suite must be registered in catalog with SMP=1,2, rootfs, isolated, and nightly tier."""
+        from qemutests.test_catalog import load_catalog
+        records, errors = load_catalog()
+        self.assertEqual(errors, [])
+        record_map = {r.id: r for r in records}
+        self.assertIn("doom", record_map, "doom suite must be registered in mk/tests/catalog.mk")
+        d = record_map["doom"]
+        self.assertEqual(d.profile, "x86_64-clang")
+        self.assertEqual(d.capability, "rootfs")
+        self.assertEqual(d.variant, "doom-test")
+        self.assertEqual(d.cpus, [1, 2])
+        self.assertEqual(d.memory_mib, 512)
+        self.assertEqual(d.image_policy, "isolated")
+        self.assertEqual(d.tier, "nightly")
+        self.assertGreaterEqual(d.timeout_s, 240)
+
+    def test_raw_resource_env_survives_real_prepare(self):
+        """Tricky source string survives make and environment bridge without executing subshells."""
+        sentinel = Path("/tmp/os01_test_sentinel_never_execute")
+        if sentinel.exists():
+            sentinel.unlink()
+        tricky_source = f"OS01 Doom source 'single' \"double\" $HOME `touch {sentinel}` ; $(shell touch {sentinel})"
+        r = run_make(
+            "DOOM_TEST=1",
+            "DOOM_IWAD=/dev/null",
+            "DOOM_IWAD_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "DOOM_IWAD_LICENSE=/dev/null",
+            f"DOOM_IWAD_SOURCE={tricky_source}",
+            "-n",
+            "test-qemu",
+            "SUITE=doom",
+        )
+        self.assertFalse(sentinel.exists(), "Command in DOOM_IWAD_SOURCE must never execute!")
+        self.assertEqual(r.returncode, 0, f"make dry-run failed:\n{r.stderr}\n{r.stdout}")
+
+    def test_unsupported_profile_fails(self):
+        """Profile lacking rootfs capability must fail to run doom suite."""
+        r = subprocess.run(
+            ["make", "-n", "PROFILE=aarch64-clang", "DOOM_TEST=1", "test-qemu", "SUITE=doom"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(r.returncode, 0, "aarch64-clang must fail capability gate for doom suite")
+        self.assertTrue(
+            "lacks capability 'rootfs'" in r.stderr or "lacks capability 'rootfs'" in r.stdout,
+            r.stderr + r.stdout,
+        )
+
+    def test_prepared_run_never_builds(self):
+        """_test-suite-run must not invoke compiler or build steps."""
+        r = run_make("-n", "_test-suite-run", "PREPARED_MANIFEST=/tmp/fake.json", "RUN_CONFIG=doom_smp1")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        out = r.stdout + r.stderr
+        for forbidden in ("clang -c", "ld.lld", "llvm-ar", "image.stamp"):
+            self.assertNotIn(forbidden, out, f"_test-suite-run must not invoke {forbidden}")
+
+    def test_assigned_smp_runs_once(self):
+        """prepare_suite for doom produces distinct cases for smp=1 and smp=2, each running once."""
+        from qemutests.run_suite_matrix import prepare_suite
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            manifest = tmp_p / "manifest.json"
+            fake_img = tmp_p / "disk.img"
+            fake_img.write_bytes(b"disk")
+            fake_fw = tmp_p / "OVMF.fd"
+            fake_fw.write_bytes(b"fw")
+
+            prepare_suite(
+                suite_id="doom",
+                manifest_path=manifest,
+                build_dir=tmp_p,
+                profile="x86_64-clang",
+                img_path=fake_img,
+                fw_path=fake_fw,
+                variant="doom-test",
+            )
+            self.assertTrue(manifest.exists())
+            data = json.loads(manifest.read_text())
+            cases = data.get("cases", [])
+            self.assertEqual(len(cases), 2, "doom suite must have 2 configurations in manifest (SMP=1 and SMP=2)")
+            smps = [c.get("smp") for c in cases]
+            self.assertEqual(sorted(smps), [1, 2])
+
+    def test_outer_budget_covers_all_stages(self):
+        """Single-config outer budget is 300s (240s runner + 60s cleanup), and dual-config is 660s."""
+        from qemutests.run_suite_matrix import prepare_suite
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            manifest = tmp_p / "manifest.json"
+            fake_img = tmp_p / "disk.img"
+            fake_img.write_bytes(b"disk")
+            fake_fw = tmp_p / "OVMF.fd"
+            fake_fw.write_bytes(b"fw")
+
+            prepare_suite(
+                suite_id="doom",
+                manifest_path=manifest,
+                build_dir=tmp_p,
+                profile="x86_64-clang",
+                img_path=fake_img,
+                fw_path=fake_fw,
+                variant="doom-test",
+            )
+            data = json.loads(manifest.read_text())
+            for c in data.get("cases", []):
+                self.assertEqual(c.get("timeout_s"), 300, "Each doom case in manifest must have timeout_s=300")
 
 
 if __name__ == "__main__":

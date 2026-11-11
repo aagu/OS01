@@ -311,6 +311,34 @@ class DoomRunner:
         return 0 if status == "PASS" else 1
 
 
+def test_doom(tester: Optional[Any] = None) -> bool:
+    """run_test.py dispatcher entry point."""
+    image = os.environ.get("DISK_IMG") or (Path(tester.disk_img) if tester and hasattr(tester, "disk_img") else None)
+    firmware = os.environ.get("OVMF_FIRMWARE") or (Path(tester.firmware) if tester and hasattr(tester, "firmware") else None)
+    if not image or not Path(image).is_file():
+        print("FAIL: DISK_IMG is not a readable file")
+        return False
+    if not firmware or not Path(firmware).is_file():
+        print("FAIL: OVMF_FIRMWARE is not a readable file")
+        return False
+
+    smp_val = os.environ.get("QEMU_SMP")
+    if smp_val is None and tester and getattr(tester, "_effective_smp", None):
+        smp_val = tester._effective_smp
+    smp = int(smp_val) if smp_val else 1
+    timeout = float(tester.timeout) if tester and getattr(tester, "timeout", None) else 240.0
+    out_dir = Path(os.environ.get("OS01_ISOLATED_RUN_DIR", "")) if os.environ.get("OS01_ISOLATED_RUN_DIR") else None
+
+    runner = DoomRunner(
+        image=Path(image),
+        firmware=Path(firmware),
+        smp=smp,
+        timeout=timeout,
+        output_dir=out_dir,
+    )
+    return runner.run() == 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="OS01 Doom QEMU integration test runner")
     parser.add_argument("--image", required=True, type=Path, help="Path to prepared disk image")

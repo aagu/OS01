@@ -206,7 +206,16 @@ def execute_matrix_tasks(
     if executor is None:
         def default_exec(t: ScheduledTask) -> int:
             cmd = ["make", "_test-suite-run", f"PREPARED_MANIFEST={t.manifest_path}", f"RUN_CONFIG={t.config_id}"]
-            rc, _ = run_command_bounded(cmd, timeout_s=300.0)
+            timeout_s = 300.0
+            try:
+                m_data = json.loads(t.manifest_path.read_text(encoding="utf-8"))
+                for c in m_data.get("cases", []):
+                    if c.get("config_id") == t.config_id:
+                        timeout_s = float(c.get("timeout_s", 300.0))
+                        break
+            except Exception:
+                pass
+            rc, _ = run_command_bounded(cmd, timeout_s=timeout_s)
             return rc
         executor = default_exec
 
@@ -278,6 +287,46 @@ def prepare_suite(
     if fw_path.is_file() and not prep_fw.is_file():
         shutil.copy2(fw_path, prep_fw)
 
+    if suite_id == "doom":
+        cases = [
+            {
+                "config_id": f"{suite_id}_smp1",
+                "smp": 1,
+                "memory_mib": 512,
+                "timeout_s": 300,
+                "image_path": str(prep_img.resolve()),
+                "firmware_path": str(prep_fw.resolve()) if prep_fw.is_file() else "",
+                "image_sha256": compute_sha256(prep_img),
+                "firmware_sha256": compute_sha256(prep_fw) if prep_fw.is_file() else "",
+                "is_exclusive": False,
+            },
+            {
+                "config_id": f"{suite_id}_smp2",
+                "smp": 2,
+                "memory_mib": 512,
+                "timeout_s": 300,
+                "image_path": str(prep_img.resolve()),
+                "firmware_path": str(prep_fw.resolve()) if prep_fw.is_file() else "",
+                "image_sha256": compute_sha256(prep_img),
+                "firmware_sha256": compute_sha256(prep_fw) if prep_fw.is_file() else "",
+                "is_exclusive": False,
+            },
+        ]
+    else:
+        cases = [
+            {
+                "config_id": f"{suite_id}_default",
+                "smp": 1,
+                "memory_mib": 512,
+                "timeout_s": 300,
+                "image_path": str(prep_img.resolve()),
+                "firmware_path": str(prep_fw.resolve()) if prep_fw.is_file() else "",
+                "image_sha256": compute_sha256(prep_img),
+                "firmware_sha256": compute_sha256(prep_fw) if prep_fw.is_file() else "",
+                "is_exclusive": (suite_id == "terminal-present"),
+            }
+        ]
+
     manifest_data = {
         "schema_version": 1,
         "batch_id": f"batch_{int(time.time())}",
@@ -285,18 +334,7 @@ def prepare_suite(
         "profile": profile,
         "variant": variant,
         "tool_versions": {"qemu": "8.2.2"},
-        "cases": [
-            {
-                "config_id": f"{suite_id}_default",
-                "smp": 1,
-                "memory_mib": 512,
-                "image_path": str(prep_img.resolve()),
-                "firmware_path": str(prep_fw.resolve()) if prep_fw.is_file() else "",
-                "image_sha256": compute_sha256(prep_img),
-                "firmware_sha256": compute_sha256(prep_fw) if prep_fw.is_file() else "",
-                "is_exclusive": (suite_id == "terminal-present"),
-            }
-        ],
+        "cases": cases,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest_data, indent=2) + "\n", encoding="utf-8")
@@ -313,20 +351,31 @@ def run_suite_config(
     manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
     suite_id = manifest_data.get("suite_id")
 
+    case_smp = 1
+    case_timeout = 300.0
+    for c in manifest_data.get("cases", []):
+        if c.get("config_id") == config_id:
+            case_smp = c.get("smp", 1)
+            case_timeout = float(c.get("timeout_s", 300.0))
+            break
+
     # Dispatch to existing suite runner without rebuilding
     sub_env = {
         "DISK_IMG": str(env.disk_path),
         "OVMF_FIRMWARE": str(env.firmware_path),
         "OS01_BUILD_DIR": str(build_dir.resolve()),
         "OS01_ISOLATED_RUN_DIR": str(env.run_dir.resolve()),
+        "QEMU_SMP": str(case_smp),
     }
 
     if suite_id == "kernel-selftest":
         cmd = ["python3", "qemutests/run_kernel_selftest.py"]
+    elif suite_id == "doom":
+        cmd = ["python3", "qemutests/run_test.py", "--smp", str(case_smp), "--timeout", str(case_timeout), suite_id]
     else:
         cmd = ["python3", "qemutests/run_test.py", suite_id]
 
-    rc, out = run_command_bounded(cmd, timeout_s=300.0, env=sub_env)
+    rc, out = run_command_bounded(cmd, timeout_s=case_timeout, env=sub_env)
     print(out)
     return rc
 

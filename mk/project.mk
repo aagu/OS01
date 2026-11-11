@@ -421,8 +421,41 @@ ifeq ($(filter 1,$(TERM_PRESENT_TEST)),1)
 USER_DEBUG := 1
 endif
 
-IMAGE_VARIANT := $(strip $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE))$(if $(strip $(X86_BOOT_IRQ_TIME_CASE)),boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE))$(if $(strip $(BOOT_FAILURE_CASE)),boot-failure-$(BOOT_FAILURE_CASE))$(if $(strip $(BOOT_CONTRACT_CASE)),boot-contract-$(BOOT_CONTRACT_CASE))$(if $(strip $(BOOT_SERVICES_CASE)),boot-services-$(BOOT_SERVICES_CASE)))
-USER_VARIANT  := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
+# ── DOOM_TEST — isolated Doom integration suite variant (D06) ────────
+DOOM_TEST ?= 0
+ifeq ($(filter $(DOOM_TEST),0 1),)
+$(error DOOM_TEST='$(DOOM_TEST)' must be 0 or 1)
+endif
+ifneq ($(filter 1,$(DOOM_TEST)),)
+ifneq ($(filter 1,$(KERNEL_SELFTEST) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST) $(CAPACITY_TEST) $(ARCH6_FSSTRESS_TEST) $(TERM_PRESENT_TEST)),)
+$(error DOOM_TEST=1 cannot be combined with KERNEL_SELFTEST/KERNEL_CANARY_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST/CAPACITY_TEST/ARCH6_FSSTRESS_TEST/TERM_PRESENT_TEST)
+endif
+ifneq ($(filter none,$(DRIVER_MODEL_FAULT)),)
+else
+$(error DOOM_TEST=1 cannot be combined with DRIVER_MODEL_FAULT=$(DRIVER_MODEL_FAULT))
+endif
+ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
+$(error DOOM_TEST=1 cannot be combined with X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE))
+endif
+ifneq ($(strip $(X86_SMP_BOOT_CASE)),)
+$(error DOOM_TEST=1 cannot be combined with X86_SMP_BOOT_TEST=$(X86_SMP_BOOT_CASE))
+endif
+ifneq ($(strip $(X86_BOOT_IRQ_TIME_CASE)),)
+$(error DOOM_TEST=1 cannot be combined with X86_BOOT_IRQ_TIME_TEST=$(X86_BOOT_IRQ_TIME_CASE))
+endif
+ifneq ($(strip $(BOOT_FAILURE_CASE)),)
+$(error DOOM_TEST=1 cannot be combined with BOOT_FAILURE_TEST=$(BOOT_FAILURE_CASE))
+endif
+ifneq ($(strip $(BOOT_CONTRACT_CASE)),)
+$(error DOOM_TEST=1 cannot be combined with BOOT_CONTRACT_TEST=$(BOOT_CONTRACT_CASE))
+endif
+ifneq ($(strip $(BOOT_SERVICES_CASE)),)
+$(error DOOM_TEST=1 cannot be combined with BOOT_SERVICES_TEST=$(BOOT_SERVICES_CASE))
+endif
+endif
+
+IMAGE_VARIANT := $(strip $(if $(filter 1,$(DOOM_TEST)),doom-test)$(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(OS01_NETTEST)),nettest)$(if $(filter config/inittab.test,$(INITTAB_FILE)),inittab-test)$(if $(filter 1,$(KERNEL_SELFTEST)),selftest)$(if $(filter 1,$(KERNEL_CANARY_SELFTEST)),canary-selftest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(TERM_PRESENT_TEST)),terminal-present)$(if $(filter none,$(DRIVER_MODEL_FAULT)),,driver-model-$(DRIVER_MODEL_FAULT))$(if $(strip $(X86_INTR_FAULT_CASE)),intr-x86-fault-$(X86_INTR_FAULT_CASE))$(if $(strip $(X86_SMP_BOOT_CASE)),boot-lifecycle-$(X86_SMP_BOOT_CASE))$(if $(strip $(X86_BOOT_IRQ_TIME_CASE)),boot-irq-time-$(X86_BOOT_IRQ_TIME_CASE))$(if $(strip $(BOOT_FAILURE_CASE)),boot-failure-$(BOOT_FAILURE_CASE))$(if $(strip $(BOOT_CONTRACT_CASE)),boot-contract-$(BOOT_CONTRACT_CASE))$(if $(strip $(BOOT_SERVICES_CASE)),boot-services-$(BOOT_SERVICES_CASE)))
+USER_VARIANT  := $(if $(filter 1,$(DOOM_TEST)),doom-diag)$(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),arch6-fsstress)$(if $(filter 1,$(CAPACITY_TEST)),arch10-capacity)$(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(FB_RESOLUTION_TEST)),resolution-test)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 OS01_PROFILE_FILE := $(OS01_ROOT)/mk/profiles/$(PROFILE).mk
@@ -496,7 +529,7 @@ endef
 # tasks can rely on them without rework. OS01_SUBMAKE_ARGS is recursive so it
 # is evaluated at recipe-expansion time — after the root Makefile has applied
 # its LOG_TARGET / INITTAB_FILE / ... defaults.
-OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS KERNEL_EXTRA_LDFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS DRIVER_MODEL_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST COMPILER_LAUNCHER CCACHE_DIR CCACHE_BASEDIR CCACHE_COMPILERCHECK HOST_TEST_JOBS CAPACITY_TEST ARCH6_FSSTRESS_TEST BOOT_FAILURE_TEST BOOT_CONTRACT_TEST BOOT_SERVICES_TEST
+OS01_SUBMAKE_ALLOWED := CLANG UEFI_CLANG LLVM_AR LLVM_NM LLVM_OBJCOPY LLVM_OBJDUMP LLVM_READOBJ LLVM_READELF TARGET_LD RUNTIME_PROVIDER LOG_TARGET KERNEL_SELFTEST KERNEL_CANARY_SELFTEST KERNEL_TEST_FORCE_NO_RNDRRS KERNEL_EXTRA_CFLAGS KERNEL_EXTRA_LDFLAGS OS01_SYSTEST OS01_NETTEST INITTAB_FILE AARCH64_QEMU SMP AARCH64_SMP_TEST_NO_ACK_CPU AARCH64_SYNC_FAULT_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_UEFI_FIRMWARE_SOURCE QEMU_BIN DEBUG DEBUG_CHANNELS DRIVER_MODEL_FAULT FB_RESOLUTION_TEST USER_DEBUG TERM_PRESENT_TEST COMPILER_LAUNCHER CCACHE_DIR CCACHE_BASEDIR CCACHE_COMPILERCHECK HOST_TEST_JOBS CAPACITY_TEST ARCH6_FSSTRESS_TEST BOOT_FAILURE_TEST BOOT_CONTRACT_TEST BOOT_SERVICES_TEST DOOM_TEST
 OS01_SUBMAKE_ARGS = $(foreach v,$(OS01_SUBMAKE_ALLOWED),$(if $($(v)),$(v)=$($(v))))
 
 # ── D05: Doom asset root-level input validation ───────────────

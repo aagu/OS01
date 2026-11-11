@@ -2192,6 +2192,7 @@ TEST_QEMU_FLAVOR_gui            =
 # image read-only (-snapshot) at 1/2 cores with QMP, injects real PS/2
 # key events and compares QMP screendumps.
 TEST_QEMU_FLAVOR_gui-desktop    =
+TEST_QEMU_FLAVOR_doom           = DOOM_TEST=1
 TEST_QEMU_FLAVOR_arch10-capacity = CAPACITY_TEST=1
 # ARCH-6: image-variant switch only (no kernel fixture consumes the flag).
 TEST_QEMU_FLAVOR_arch6-fsstress = ARCH6_FSSTRESS_TEST=1
@@ -2202,6 +2203,7 @@ TEST_QEMU_FLAVOR_arch6-fsstress = ARCH6_FSSTRESS_TEST=1
 # nightly CI).  An explicit override is allowed (e.g. for re-capturing
 # the baseline elsewhere).
 TERMINAL_PRESENT_BASELINE_LOG ?= $(OS01_ROOT)/qemutests/baselines/terminal-present/serial.log
+TEST_DOOM_IMAGE                = $(BUILD_DIR)/image/doom-test/disk.img
 TEST_QEMU_IMG_phase-0          = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_systest          = $(TEST_SYSTEST_IMAGE)
 TEST_QEMU_IMG_inittab-phase    = $(TEST_INITTAB_IMAGE)
@@ -2213,6 +2215,7 @@ TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_terminal-present = $(TEST_TERMINAL_PRESENT_IMAGE)
 TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
 TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
+TEST_QEMU_IMG_doom             = $(TEST_DOOM_IMAGE)
 TEST_QEMU_IMG_arch10-capacity  = $(TEST_ARCH10_CAPACITY_IMAGE)
 TEST_QEMU_IMG_arch6-fsstress  = $(TEST_ARCH6_FSSTRESS_IMAGE)
 # intr-x86 runs one image per destructive case; the suite target owns
@@ -2279,8 +2282,8 @@ test-qemu: SUITE := $(SUITE)
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress, got '$(SUITE)'" >&2; exit 1;; \
+	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress|doom) ;; \
+	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress|doom, got '$(SUITE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
@@ -2331,6 +2334,11 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-boot-contract || exit 1; \
 	elif [ "$(SUITE)" = "boot-services" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-services || exit 1; \
+	elif [ "$(SUITE)" = "doom" ]; then \
+	  if [ "$(DOOM_ASSET_COUNT)" != "4" ]; then \
+	    echo "ERROR: SUITE=doom requires all four DOOM_IWAD variables to be provided" >&2; exit 1; \
+	  fi; \
+	  $(MAKE) MAKEOVERRIDES= DOOM_TEST=1 $(TEST_DOOM_IMAGE) || exit 1; \
 	else \
 	  if [ "$(SUITE)" = "systest" ] && [ -n "$(CASE)" ]; then \
 	    case "$(CASE)" in *[!A-Za-z0-9_.-]*) echo "ERROR: CASE='$(CASE)' must match [A-Za-z0-9_.-]+ (see user/systest.c --list)" >&2; exit 2;; esac; \
@@ -2421,7 +2429,14 @@ _test-suite-prepare:
 	@if [ -z "$(SUITE_ID)" ] || [ -z "$(PREPARED_MANIFEST)" ]; then \
 	  echo "ERROR: _test-suite-prepare requires SUITE_ID=<id> and PREPARED_MANIFEST=<path>" >&2; exit 2; \
 	fi
-	@$(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE_ID)) image
+	@if [ "$(SUITE_ID)" = "doom" ]; then \
+	  if [ "$(DOOM_ASSET_COUNT)" != "4" ]; then \
+	    echo "ERROR: SUITE=doom requires all four DOOM_IWAD variables to be provided" >&2; exit 2; \
+	  fi; \
+	  $(MAKE) MAKEOVERRIDES= DOOM_TEST=1 $(TEST_DOOM_IMAGE) || exit 1; \
+	else \
+	  $(MAKE) $(TEST_QEMU_FLAVOR_$(SUITE_ID)) image || exit 1; \
+	fi
 	python3 qemutests/run_suite_matrix.py prepare \
 	  --suite-id "$(SUITE_ID)" \
 	  --manifest "$(PREPARED_MANIFEST)" \
@@ -2429,7 +2444,7 @@ _test-suite-prepare:
 	  --profile "$(PROFILE)" \
 	  --image "$(TEST_QEMU_IMG_$(SUITE_ID))" \
 	  --firmware "$(OVMF_FIRMWARE)" \
-	  --variant "$(if $(TEST_QEMU_FLAVOR_$(SUITE_ID)),$(SUITE_ID),none)"
+	  --variant "$(if $(filter doom,$(SUITE_ID)),doom-test,$(if $(TEST_QEMU_FLAVOR_$(SUITE_ID)),$(SUITE_ID),none))"
 
 # _test-suite-run has NO build prerequisites (no compiler, no image, no sysroot)
 _test-suite-run:

@@ -23,6 +23,7 @@ arch10-capacity	x86_64-clang	rootfs	arch10-capacity	1,2	512	120	isolated	shared	
 arch6-fsstress	x86_64-clang	rootfs	arch6-fsstress	4	512	180	isolated	shared	nightly	make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress	-	-
 gui	x86_64-clang	rootfs	none	1,2	512	60	read-only	shared	nightly	test-qemu SUITE=gui	_test-suite-prepare	_test-suite-run
 gui-desktop	x86_64-clang	rootfs	none	1	512	60	read-only	shared	nightly	test-qemu SUITE=gui-desktop	_test-suite-prepare	_test-suite-run
+doom	x86_64-clang	rootfs	doom-test	1,2	512	240	isolated	shared	nightly	test-qemu SUITE=doom	_test-suite-prepare	_test-suite-run
 kernel-selftest	x86_64-clang	rootfs	selftest	8	512	75	isolated	shared	pr	test-kernel-selftest	-	-
 systest-repeat	x86_64-clang	rootfs	none	1	512	180	read-only	shared	nightly	test-syscall-repeat	-	-
 aarch64-smp	aarch64-clang	uefi	selftest	1,2,4	512	90	isolated	shared	pr	test-aarch64 MODE=smp	-	-

@@ -1128,6 +1128,9 @@ def main():
         elif args.test_name == "arch6-fsstress":
             from qemutests.arch6_fsstress import test_arch6_fsstress
             result = test_arch6_fsstress(tester)
+        elif args.test_name == "doom":
+            from qemutests.doom_test import test_doom
+            result = test_doom(tester)
         else:
             print(f"Unknown test: {args.test_name}")
             result = False
