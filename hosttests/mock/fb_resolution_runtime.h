@@ -137,6 +137,11 @@ extern bool     g_mock_yield_on_wait;
 extern uint32_t g_mock_tlb_shootdown_count;
 extern uint32_t g_mock_flush_tlb_count;
 extern int      g_mock_alloc_table_fail_countdown;
+/* Make the CHECKED next-level allocator fail with -ENOMEM even when the
+ * table already exists.  The existing countdown above only fires when a
+ * new table has to be allocated, so it cannot cover a failure that
+ * happens after the fallback mapping is already in place. */
+extern bool     g_mock_next_level_alloc_fail;
 extern bool     g_mock_corrupt_pmd_entry;
 extern uint32_t g_mock_hardware_call_count;
 

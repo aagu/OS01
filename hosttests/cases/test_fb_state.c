@@ -481,14 +481,16 @@ TEST_FUNC(test_test_set_generation_hook)
  *   bit 4  PCD             = 0 write-back / 1 uncacheable
  *   bit 7  PS  (2MiB page) = 1
  *   bit 12 PAT             = 0
- *   bits 51:21 = physical address
+ *   bits 47:21 = physical address (the mask covers the 48-bit physical
+ *                     address space; the upper bits of the entry are
+ *                     NX / reserved and are masked out here)
  *   => write-back leaf = 0x83, uncacheable leaf = 0x9B
  *
  * Hand-derived 4KiB user PTE expectations:
  *   bit 0 P = 1, bit 1 RW = 1 (writable) / 0 (read-only), bit 2 U = 1
  *   => writable user PTE = 0x07, read-only user PTE = 0x05
  * ═══════════════════════════════════════════════════════════════════ */
-#define EXPECT_PMD_PA_MASK      0x0000FFFFFFE00000ULL   /* bits 51:21 */
+#define EXPECT_PMD_PA_MASK      0x0000FFFFFFE00000ULL   /* bits 47:21 */
 #define EXPECT_PMD_LEAF_WB     0x83ULL
 #define EXPECT_PMD_LEAF_UC     0x9BULL
 #define EXPECT_PTE_USER_W      0x07ULL

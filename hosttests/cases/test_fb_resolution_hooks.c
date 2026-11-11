@@ -957,6 +957,146 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     }
 }
 
+/* Drive the REAL fb_ops.mmap() and check that the user alias carries the
+ * expected memory type: the cache bits must match the kernel mapping, and
+ * the read-only / writable PTE bit patterns must stay as expected. */
+static void check_alias_cache_bits(unsigned expected_cache_bits)
+{
+    struct mm_struct mm;
+    memset(&mm, 0, sizeof(mm));
+    mm.pgdir = (uint64_t *)0x1000;
+    current->mm = &mm;
+
+    vma_t vma;
+    memset(&vma, 0, sizeof(vma));
+    vma.vm_start = 0x10000;
+    vma.vm_end   = 0x14000;
+    vma.vm_file  = NULL;
+
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
+    memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
+    g_hook_pte_count = 0;
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_hook_pte_count);
+    for (size_t i = 0; i < g_hook_pte_count; i++) {
+        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(expected_cache_bits, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+    }
+
+    fb_set_raw_writable_allowed_for_test(true);
+    vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
+    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
+    memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
+    g_hook_pte_count = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(4, g_hook_pte_count);
+    for (size_t i = 0; i < g_hook_pte_count; i++) {
+        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(expected_cache_bits, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+    }
+    fb_set_raw_writable_allowed_for_test(false);
+}
+
+/* Build the fake PCI device the probe needs. */
+static void fill_fake_bga_device(struct pci_device *pdev, struct pci_device_id *id)
+{
+    memset(pdev, 0, sizeof(*pdev));
+    pdev->vendor = BGA_PCI_VENDOR_ID;
+    pdev->device = BGA_PCI_DEVICE_ID;
+    pdev->class_code = 0x030000;
+    pdev->bars[0].kind = PCI_BAR_MMIO32;
+    pdev->bars[0].address = FAKE_PCI_BAR0_BASE;
+    pdev->bars[0].valid = true;
+
+    memset(id, 0, sizeof(*id));
+    id->vendor = BGA_PCI_VENDOR_ID;
+    id->device = BGA_PCI_DEVICE_ID;
+}
+
+/* ── N3: the ALLOCATION failure point of the probe ──────────────────
+ *
+ * The mapping fails while the next-level page table is being obtained
+ * (-ENOMEM).  The fallback mapping and the global policy must both stay
+ * uncacheable, and the REAL user alias must agree with them. */
+static void test_probe_allocation_failure_keeps_policy_and_alias_consistent(void)
+{
+    printf("\n--- test_probe_allocation_failure_keeps_policy_and_alias_consistent ---\n");
+    setup_env();
+
+    /* 1. The fallback kernel mapping (uncacheable), as arch_boot_memory()
+     *    leaves it before the backend probe runs. */
+    uint32_t *mapped = NULL;
+    int rc = fb_x86_map_checked(FAKE_PCI_BAR0_BASE, 16 * 1024 * 1024,
+                                 FB_CACHE_POLICY_UNCACHEABLE, &mapped);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(FB_CACHE_POLICY_UNCACHEABLE, fb_cache_policy_get());
+    CHECK_EQ(HOOK_EXPECT_PMD_LEAF_UC,
+             hook_pmd_leaf(0xFFFF900000000000ULL) & 0x1FFULL);
+
+    /* 2. The REAL checked mapping fails with -ENOMEM inside the REAL
+     *    probe. */
+    g_mock_next_level_alloc_fail = true;
+
+    struct pci_device pdev;
+    struct pci_device_id id;
+    fill_fake_bga_device(&pdev, &id);
+
+    rc = bga_probe(&pdev, &id);
+    CHECK_EQ(-ENODEV, rc);
+    g_mock_next_level_alloc_fail = false;
+
+    /* 3. The fallback mapping survived and the policy still describes
+     *    it: the probe must NOT have published write-back. */
+    CHECK_EQ(HOOK_EXPECT_PMD_LEAF_UC,
+             hook_pmd_leaf(0xFFFF900000000000ULL) & 0x1FFULL);
+    CHECK_EQ(FB_CACHE_POLICY_UNCACHEABLE, fb_cache_policy_get());
+
+    /* 4. The REAL user alias must carry the same memory type as the
+     *    kernel mapping -- read-only and writable. */
+    check_alias_cache_bits(HOOK_EXPECT_CACHE_MASK);
+}
+
+/* ── N3: the BACKEND-INSTALL failure point of the probe ────────────
+ *
+ * Here the mapping was already committed (write-back) when the backend
+ * installation failed.  Rolling the policy back to uncacheable at that
+ * point would be the bug: the kernel mapping would stay write-back while
+ * the /dev/fb alias became uncacheable.  Mapping and policy must agree. */
+static void test_probe_backend_install_failure_keeps_policy_and_alias_consistent(void)
+{
+    printf("\n--- test_probe_backend_install_failure_keeps_policy_and_alias_consistent ---\n");
+    setup_env();
+
+    uint32_t *mapped = NULL;
+    int rc = fb_x86_map_checked(FAKE_PCI_BAR0_BASE, 16 * 1024 * 1024,
+                                 FB_CACHE_POLICY_UNCACHEABLE, &mapped);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(FB_CACHE_POLICY_UNCACHEABLE, fb_cache_policy_get());
+
+    /* The backend installation fails AFTER the mapping was committed. */
+    fb_set_backend_install_fail_for_test(true);
+
+    struct pci_device pdev;
+    struct pci_device_id id;
+    fill_fake_bga_device(&pdev, &id);
+
+    rc = bga_probe(&pdev, &id);
+    CHECK_EQ(-EINVAL, rc);
+    fb_set_backend_install_fail_for_test(false);
+
+    /* The mapping is write-back and the published policy is write-back:
+     * the mapper commits them together. */
+    CHECK_EQ(HOOK_EXPECT_PMD_LEAF_WB,
+             hook_pmd_leaf(0xFFFF900000000000ULL) & 0x1FFULL);
+    CHECK_EQ(FB_CACHE_POLICY_WRITEBACK, fb_cache_policy_get());
+
+    /* ... and the REAL user alias agrees with the kernel mapping. */
+    check_alias_cache_bits(0);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_cold_file_callbacks_initialize_lock),
     TEST_ENTRY(test_hooks_abi),
@@ -977,6 +1117,8 @@ TEST_LIST_BEGIN
     /* Round-2 BLOCKING 1: a failed probe must not leave the cache
      * policy and the page-table attributes disagreeing. */
     TEST_ENTRY(test_probe_failure_keeps_policy_and_alias_consistent),
+    TEST_ENTRY(test_probe_allocation_failure_keeps_policy_and_alias_consistent),
+    TEST_ENTRY(test_probe_backend_install_failure_keeps_policy_and_alias_consistent),
 TEST_LIST_END
 
 int main(void)
