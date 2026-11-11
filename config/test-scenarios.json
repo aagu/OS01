@@ -2942,7 +2942,7 @@
    "supporting": [
     {
      "layer": "qemu_e2e",
-     "source": "user/systest.c",
+     "source": "user/systest/systest.c",
      "selector": "test_syscall_boundary",
      "evidence": "SYSTEST_PASS",
      "distinct_risk": "Catches CPU ring3->ring0 SYSCALL/SYSRET context switch register corruption"
@@ -3266,7 +3266,7 @@
    "supporting": [
     {
      "layer": "qemu_e2e",
-     "source": "user/systest.c",
+     "source": "user/systest/systest.c",
      "selector": "test_fork_cow",
      "evidence": "PASS_MARKER",
      "distinct_risk": "Catches real hardware MMIO page fault delivery and CR3 reload timing not simulated in host memory mocks"
@@ -3865,7 +3865,7 @@
    ],
    "primary": {
     "layer": "qemu_e2e",
-    "source": "user/systest.c",
+    "source": "user/systest/systest.c",
     "selector": "systest",
     "evidence": "PASS_MARKER"
    },
@@ -5544,7 +5544,7 @@
    "supporting": [
     {
      "layer": "qemu_e2e",
-     "source": "user/systest.c",
+     "source": "user/systest/systest.c",
      "selector": "dir_scan_vfs",
      "evidence": "guest case dir_scan_vfs: real tmpfs (/tmp) and ext2 (/bin) enumeration, fdopendir()/closedir() ownership checked with fcntl(F_GETFD), scandir()'s comparator checked with a comparator that DIFFERS from the kernel's pre-sorted name order, alphasort() checked against an independent oracle, and d_off cross-checked against the raw getdents64(2) records",
      "distinct_risk": "The host group fakes the directory, so it cannot show that the REAL kernel's records are accepted (the kernel writes reclen = round8(24 + namelen + 1) with the name at offset 19), that the descriptor is really closed in the guest, or that scandir()'s comparator is really called on kernel-pre-sorted entries. The guest case covers exactly those three risks."
@@ -5617,7 +5617,7 @@
    "supporting": [
     {
      "layer": "qemu_e2e",
-     "source": "user/systest.c",
+     "source": "user/systest/systest.c",
      "selector": "55_libc_alloc",
      "evidence": "guest case 55_libc_alloc: malloc alignment, calloc zeroing, the calloc and reallocarray overflow answers (ENOMEM), the realloc content, posix_memalign and aligned_alloc including the C11 size rule (EINVAL)",
      "distinct_risk": "The host group drives the allocator over a MOCKED brk heap with a failure-injection ledger, so it can show the arithmetic but not the real heap growth. The guest case covers exactly that: the same production allocator over the real kernel brk, with the overflow checks answering ENOMEM and an aligned block surviving a real process lifetime."
@@ -5656,7 +5656,7 @@
    "supporting": [
     {
      "layer": "qemu_e2e",
-     "source": "user/systest.c",
+     "source": "user/systest/systest.c",
      "selector": "56_libc_env",
      "evidence": "guest case 56_libc_env: setenv/getenv, the overwrite, the borrowed putenv string, unsetenv, and the table reaching a child through fork + execve (the startup probe answers exit 21)",
      "distinct_risk": "The host group replaces the allocator with a ledger so it can force an allocation failure, but it cannot show that the environment survives a REAL fork + execve into a new process image, nor that the crt0 inherited block is not freed illegally on the way. The guest case covers exactly those two risks."
@@ -5727,7 +5727,7 @@
    "supporting": [
     {
      "layer": "qemu_e2e",
-     "source": "user/systest.c",
+     "source": "user/systest/systest.c",
      "selector": "57_libc_stdio",
      "evidence": "guest case 57_libc_stdio: fopen mode parsing on a real file, complete-item fwrite, fflush, the fseek/ftell family, fgets, getline, the EOF/error indicators and the 'a' mode appending instead of truncating",
      "distinct_risk": "The host group fakes the descriptor boundary (read/write/close) and the stream registry, so it cannot show that the mode parser reaches a REAL file of the guest filesystem, that the seek family reports the REAL file offsets, or that the 'a' mode really appends instead of truncating. The guest case covers exactly those risks."
@@ -5736,6 +5736,144 @@
    "overlap_decision": {
     "action": "unique",
     "reason": "Primary host unit test for the stream state machine (EOF/error indicators, the one-byte pushback, clearerr, the registry cap and the standard streams) against a faked descriptor boundary"
+   }
+  },
+  {
+   "id": "doom.engine.exit",
+   "component": "doom",
+   "behavior": "engine",
+   "trigger": "host runner invokes test_doom_engine_exit.elf",
+   "assertions": [
+    "test_doom_engine_exit passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_doom_engine_exit"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_doom_engine_exit.c",
+    "selector": "test_doom_engine_exit",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying Doom engine exit contracts"
+   }
+  },
+  {
+   "id": "doom.engine.config",
+   "component": "doom",
+   "behavior": "engine",
+   "trigger": "host runner invokes test_doom_config.elf",
+   "assertions": [
+    "test_doom_config passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_doom_config"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_doom_config.c",
+    "selector": "test_doom_config",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying Doom configuration round-trip"
+   }
+  },
+  {
+   "id": "doom.platform.video",
+   "component": "doom",
+   "behavior": "video",
+   "trigger": "host runner invokes test_doom_video.elf",
+   "assertions": [
+    "test_doom_video passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_doom_video"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_doom_video.c",
+    "selector": "test_doom_video",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying Doom video presentation and scaling"
+   }
+  },
+  {
+   "id": "doom.platform.input",
+   "component": "doom",
+   "behavior": "input",
+   "trigger": "host runner invokes test_doom_input.elf",
+   "assertions": [
+    "test_doom_input passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_doom_input"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_doom_input.c",
+    "selector": "test_doom_input",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying Doom PS/2 input adaptation"
+   }
+  },
+  {
+   "id": "doom.platform.input_engine",
+   "component": "doom",
+   "behavior": "input",
+   "trigger": "host runner invokes test_doom_input_engine.elf",
+   "assertions": [
+    "test_doom_input_engine passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_doom_input_engine"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_doom_input_engine.c",
+    "selector": "test_doom_input_engine",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying Doom engine event queue integration"
+   }
+  },
+  {
+   "id": "doom.platform.runtime",
+   "component": "doom",
+   "behavior": "runtime",
+   "trigger": "host runner invokes test_doom_runtime.elf",
+   "assertions": [
+    "test_doom_runtime passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_doom_runtime"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_doom_runtime.c",
+    "selector": "test_doom_runtime",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying Doom runtime lifecycle and cooperative shutdown"
    }
   }
  ]
