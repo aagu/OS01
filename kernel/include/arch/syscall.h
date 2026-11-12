@@ -3,6 +3,11 @@
 #include <stdint.h>
 int64_t arch_syscall_putchar(uint64_t ch);
 __attribute__((noreturn)) void arch_syscall_reboot(int cmd);
+/* Terminate the calling task with an already-encoded exit status.
+ * The status carries the user exit code in the high byte, exactly the
+ * encoding waitpid() decodes.  Never returns: the architecture owns the
+ * task teardown (x86 writes current->exit_code and calls do_exit()). */
+__attribute__((noreturn)) void arch_syscall_exit(uint64_t status);
 /* Frame-dependent process operations: only architecture code interprets
  * arch_frame. Exec parameters have already been copied into kernel memory.
  * Sigreturn returns zero after restoring the frame, or a negative error. */

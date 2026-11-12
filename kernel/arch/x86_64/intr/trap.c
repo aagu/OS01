@@ -60,8 +60,8 @@ static inline task_t *task_from_tss(void)
 // `sig` is the fatal signal to record as the task's termination reason.
 // It is forwarded to do_exit() which stores it verbatim into
 // current->exit_code; waitpid() decodes the low byte as a signal
-// (WIFSIGNALED / WTERMSIG) per the encoding in kernel/syscall/sys_proc.c
-// (SYS_exit path puts the user-supplied code in the high byte; signal
+// (WIFSIGNALED / WTERMSIG) per the encoding in kernel/syscall/sys_native.c
+// (the SYS_exit path puts the user-supplied code in the high byte; signal
 // deaths put the signal in the low byte).  This used to always pass 0,
 // which made a parent waitpid() see WIFEXITED && WEXITSTATUS == 0 —
 // indistinguishable from a clean exit(0), silently breaking POSIX signal

@@ -109,8 +109,38 @@ $(TEST_BLD)/test_syscall_dispatch.elf: $(TEST_BLD)/test_syscall_dispatch.o $(TES
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-syscall-dispatch
-test-syscall-dispatch: $(TEST_BLD)/test_syscall_dispatch.elf
-	$<
+test-syscall-dispatch: $(TEST_BLD)/test_syscall_dispatch.elf \
+		$(TEST_BLD)/test_syscall_dispatch_subset.elf
+	$(TEST_BLD)/test_syscall_dispatch.elf
+	$(TEST_BLD)/test_syscall_dispatch_subset.elf
+
+# ── AArch64 syscall subset (M4 Task 1) ─────────────────────────
+#
+# The SAME production dispatcher source, compiled with the AArch64
+# subset configuration: only the four shared native entries stay
+# visible.  The case source is shared with the full-table binary — the
+# subset assertions live behind OS01_SYSCALL_A64_SUBSET in the case
+# itself, so both configurations are proven by one source of truth.
+$(eval $(call register_host_test,test_syscall_dispatch_subset,sched,protocol-or-legacy))
+
+TEST_BINS += \
+    $(TEST_BLD)/test_syscall_dispatch_subset.elf
+
+$(TEST_BLD)/syscall_dispatch_a64_subset_production.o: \
+		$(TESTS_DIR)/kernel/syscall/dispatch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -DOS01_SYSCALL_A64_SUBSET=1 \
+		-c $< -o $@
+
+$(TEST_BLD)/test_syscall_dispatch_subset.o: $(TEST_CASES)/test_syscall_dispatch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -DOS01_SYSCALL_A64_SUBSET=1 \
+		-c $< -o $@
+
+$(TEST_BLD)/test_syscall_dispatch_subset.elf: \
+		$(TEST_BLD)/test_syscall_dispatch_subset.o \
+		$(TEST_BLD)/syscall_dispatch_a64_subset_production.o
+	$(HOST_CC) -o $@ $^
 
 $(TEST_BLD)/compat_dispatch_production.o: $(TESTS_DIR)/kernel/syscall/compat/dispatch.c
 	@mkdir -p $(TEST_BLD)

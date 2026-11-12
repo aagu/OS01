@@ -12,10 +12,25 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx);
 int64_t sys_net_dispatch(syscall_ctx_t *ctx);
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx);
 int64_t sys_resource_dispatch(syscall_ctx_t *ctx);
+int64_t sys_native_exit(syscall_ctx_t *ctx);
+int64_t sys_native_getpid(syscall_ctx_t *ctx);
+int64_t sys_native_getppid(syscall_ctx_t *ctx);
+int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
 
 
-/* The fixed UAPI number and trace name live beside their handler. */
+/* The fixed UAPI number and trace name live beside their handler.
+ *
+ * The four shared native entries (exit, getpid, getppid,
+ * clock_gettime) sit OUTSIDE the full-set block: they are the entries
+ * every architecture serves, so the AArch64 port compiles this very
+ * table with OS01_SYSCALL_A64_SUBSET=1 and hides every other entry
+ * instead of carrying a second, divergent table. */
 static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
+    [SYS_exit] = { sys_native_exit, "exit" },
+    [SYS_getpid] = { sys_native_getpid, "getpid" },
+    [SYS_getppid] = { sys_native_getppid, "getppid" },
+    [SYS_clock_gettime] = { sys_native_clock_gettime, "clock_gettime" },
+#ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
     [SYS_open] = { sys_fs_dispatch, "open" },
@@ -57,7 +72,6 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_futex] = { sys_mm_dispatch, "futex" },
     [SYS_time] = { sys_time_dispatch, "time" },
     [SYS_gettimeofday] = { sys_time_dispatch, "gettimeofday" },
-    [SYS_clock_gettime] = { sys_time_dispatch, "clock_gettime" },
     [SYS_nanosleep] = { sys_time_dispatch, "nanosleep" },
     [SYS_times] = { sys_time_dispatch, "times" },
     [SYS_putchar] = { sys_misc_dispatch, "putchar" },
@@ -78,12 +92,9 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getifaddr] = { sys_net_dispatch, "getifaddr" },
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
-    [SYS_exit] = { sys_proc_dispatch, "exit" },
-    [SYS_getpid] = { sys_proc_dispatch, "getpid" },
     [SYS_exec] = { sys_proc_dispatch, "exec" },
     [SYS_fork] = { sys_proc_dispatch, "fork" },
     [SYS_waitpid] = { sys_proc_dispatch, "waitpid" },
-    [SYS_getppid] = { sys_proc_dispatch, "getppid" },
     [SYS_umask] = { sys_proc_dispatch, "umask" },
     [SYS_kill] = { sys_proc_dispatch, "kill" },
     [SYS_signal] = { sys_proc_dispatch, "signal" },
@@ -93,6 +104,7 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getpgid] = { sys_proc_dispatch, "getpgid" },
     [SYS_setsid] = { sys_proc_dispatch, "setsid" },
     [SYS_getsid] = { sys_proc_dispatch, "getsid" },
+#endif
 };
 bool syscall_has_handler(uint64_t nr)
 {

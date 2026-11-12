@@ -51,31 +51,6 @@ int64_t sys_time_dispatch(syscall_ctx_t *ctx)
         syscall_result = 0;
         break;
     }
-    case SYS_clock_gettime: {
-        // clock_gettime(clockid_t clk_id, struct timespec *tp)
-        // OS01 has no real RTC wall clock yet (gettimeofday returns 0),
-        // so both CLOCK_REALTIME and CLOCK_MONOTONIC report the same
-        // monotonic clocksource time (clocksource_read_ns, ns).
-        uint64_t clk_id = ctx->args[0];
-        struct timespec *tp = (struct timespec *)ctx->args[1];
-        if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC) {
-            syscall_result = -EINVAL;
-            break;
-        }
-        if (!tp) {
-            syscall_result = -EFAULT;
-            break;
-        }
-        uint64_t ns = arch_clocksource_read_ns();
-        struct timespec kts = {
-            .tv_sec  = ns / 1000000000ULL,
-            .tv_nsec = ns % 1000000000ULL,
-        };
-        ssize_t r = copy_to_user_ft(tp, &kts, sizeof(kts));
-        if (r < 0) { syscall_result = r; break; }
-        syscall_result = 0;
-        break;
-    }
     case SYS_nanosleep: {
         // nanosleep(const struct timespec *req, struct timespec *rem).
         // req → kernel copy; rem ← kernel copy on -EINTR (NULL legal).

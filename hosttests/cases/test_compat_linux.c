@@ -39,6 +39,14 @@ int64_t sys_net_dispatch(syscall_ctx_t *ctx)  { last_dispatched_ctx = ctx; retur
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
 int64_t sys_resource_dispatch(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
 
+/* The four shared native entries (kernel/syscall/sys_native.c) are
+ * reached by the 1:1 remapped Linux numbers; they record the same
+ * context and report the same mocked result as the family stubs. */
+int64_t sys_native_exit(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
+int64_t sys_native_getpid(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
+int64_t sys_native_getppid(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
+int64_t sys_native_clock_gettime(syscall_ctx_t *ctx) { last_dispatched_ctx = ctx; return mock_dispatch_return; }
+
 int main(void)
 {
     /* 1. Compile-time & type sanity */

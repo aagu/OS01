@@ -165,20 +165,6 @@ int64_t sys_proc_dispatch(syscall_ctx_t *ctx)
 {
     int64_t ret = -EINVAL;
     switch (ctx->nr) {
-    case SYS_exit: {
-        // exit(int code) — terminate current process.
-        // Encode as Linux does: exit code in the high byte (code<<8),
-        // so waitpid() status can distinguish a normal exit (WIFEXITED)
-        // from a signal death (low byte = signal → WIFSIGNALED).
-        uint64_t code = ctx->args[0] & 0xFF;
-        current->exit_code = code << 8;
-        do_exit(code << 8);
-        // unreachable — do_exit calls schedule() which never returns
-    }
-    case SYS_getpid: {
-        ret = current->pid;
-        break;
-    }
     case SYS_exec: {
         // exec(const char *path, char *const argv[], char *const envp[])
         // If argv == NULL: old behavior (no args)
@@ -381,14 +367,6 @@ int64_t sys_proc_dispatch(syscall_ctx_t *ctx)
     }
     case SYS_getsid: {
         ret = current->session;
-        break;
-    }
-    case SYS_getppid: {
-        // getppid() → parent PID (or 0 for init)
-        if (current->parent)
-            ret = current->parent->pid;
-        else
-            ret = 0;
         break;
     }
     case SYS_umask: {

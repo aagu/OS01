@@ -1,5 +1,6 @@
 #include <arch/syscall.h>
 #include <arch/x86_64/hw.h>
+#include <arch/irq.h>
 #include <core/printk.h>
 #include <driver/serial.h>
 #include <intr/apic.h>
@@ -25,6 +26,19 @@ int64_t arch_syscall_putchar(uint64_t ch)
         spin_unlock_irqrestore(&serial_lock, sf);
     }
     return (unsigned char)c;
+}
+
+void arch_syscall_exit(uint64_t status)
+{
+    // exit(int code) — the shared native handler encodes the user code
+    // in the high byte and hands the status over here.
+    current->exit_code = (int64_t)status;
+    do_exit(status);
+    // do_exit() ends in schedule(), which never returns.  If it ever
+    // did, the task would have no valid way back to user mode: mask
+    // interrupts and stop instead of returning to the caller.
+    arch_local_irq_disable();
+    while (1) __asm__ __volatile__("hlt");
 }
 
 void arch_syscall_reboot(int cmd)

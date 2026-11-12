@@ -21,9 +21,118 @@ int64_t sys_net_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 int64_t sys_resource_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBADF; }
 
+/* The four shared native entries live in kernel/syscall/sys_native.c.  Their
+ * stand-ins are distinguishable from each other AND from the family stubs, so
+ * a table entry wired to the wrong handler cannot hide behind a sibling's
+ * value. */
+#define NATIVE_EXIT_MARK          (-1001)
+#define NATIVE_GETPID_MARK        (-1002)
+#define NATIVE_GETPPID_MARK       (-1003)
+#define NATIVE_CLOCK_GETTIME_MARK (-1004)
+
+int64_t sys_native_exit(syscall_ctx_t *ctx)
+{
+    received = ctx;
+    return NATIVE_EXIT_MARK;
+}
+
+int64_t sys_native_getpid(syscall_ctx_t *ctx)
+{
+    received = ctx;
+    return NATIVE_GETPID_MARK;
+}
+
+int64_t sys_native_getppid(syscall_ctx_t *ctx)
+{
+    received = ctx;
+    return NATIVE_GETPPID_MARK;
+}
+
+int64_t sys_native_clock_gettime(syscall_ctx_t *ctx)
+{
+    received = ctx;
+    return NATIVE_CLOCK_GETTIME_MARK;
+}
+
+/* The value the shared native handler must report for `nr`; every other
+ * entry belongs to a family stub. */
+static int64_t expected_return(uint64_t nr)
+{
+    switch (nr) {
+    case SYS_exit:          return NATIVE_EXIT_MARK;
+    case SYS_getpid:        return NATIVE_GETPID_MARK;
+    case SYS_getppid:       return NATIVE_GETPPID_MARK;
+    case SYS_clock_gettime: return NATIVE_CLOCK_GETTIME_MARK;
+    default:                return -EBADF;
+    }
+}
+
 int main(void)
 {
     syscall_ctx_t ctx = { .nr = UINT64_MAX };
+
+    /* An empty context never reaches a handler. */
+    if (syscall_dispatch(NULL) != -EINVAL)
+        return 1;
+
+#ifdef OS01_SYSCALL_A64_SUBSET
+    /* ── AArch64 subset ─────────────────────────────────────────
+     * The AArch64 port compiles the SAME table with only the four
+     * shared native entries visible.  Every other number must be
+     * absent: a leftover entry would let an unsupported number reach
+     * user mode through the AArch64 SVC path. */
+    static const uint64_t shared[] = {
+        SYS_exit, SYS_getpid, SYS_getppid, SYS_clock_gettime,
+    };
+    for (unsigned i = 0; i < sizeof(shared) / sizeof(shared[0]); i++) {
+        if (!syscall_has_handler(shared[i])) {
+            fprintf(stderr, "shared syscall %llu must have a handler\n",
+                    (unsigned long long)shared[i]);
+            return 1;
+        }
+        if (!syscall_name(shared[i])) {
+            fprintf(stderr, "shared syscall %llu must have a trace name\n",
+                    (unsigned long long)shared[i]);
+            return 1;
+        }
+        ctx = (syscall_ctx_t){ .nr = shared[i],
+            .args = { 11, 22, 33, 44, 55, 66 }, .arch_frame = &ctx };
+        received = NULL;
+        int64_t ret = syscall_dispatch(&ctx);
+        if (ret != expected_return(shared[i]) || received != &ctx ||
+            ctx.arch_frame != &ctx || ctx.suppress_writeback) {
+            fprintf(stderr, "shared syscall %llu did not reach its own handler\n",
+                    (unsigned long long)shared[i]);
+            return 1;
+        }
+        for (unsigned j = 0; j < 6; j++)
+            if (ctx.args[j] != 11 * (j + 1)) return 1;
+    }
+
+    /* Numbers the AArch64 port does not serve: a plain read, the
+     * unimplemented getpeername slot, an out-of-range number, and a
+     * high-bit polluted number. */
+    if (syscall_has_handler(SYS_read) || syscall_has_handler(SYS_getpeername) ||
+        syscall_has_handler(UINT64_MAX) ||
+        syscall_has_handler((1ULL << 32) | SYS_getpid)) {
+        fprintf(stderr, "AArch64 subset exposes an unsupported syscall\n");
+        return 1;
+    }
+    const uint64_t hidden[] = {
+        SYS_read, SYS_getpeername, UINT64_MAX, (1ULL << 32) | SYS_getpid,
+    };
+    for (unsigned i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {
+        ctx.nr = hidden[i];
+        if (syscall_dispatch(&ctx) != -EINVAL) {
+            fprintf(stderr, "hidden syscall %llu must dispatch to -EINVAL\n",
+                    (unsigned long long)hidden[i]);
+            return 1;
+        }
+    }
+#else
+    /* ── Full x86 table ─────────────────────────────────────────
+     * The x86 port keeps the complete set: every registered number
+     * still reaches a handler and the context survives untouched. */
     if (syscall_has_handler(SYS_getpeername) || syscall_has_handler(62) ||
         syscall_has_handler(UINT64_MAX) ||
         !syscall_name(SYS_getpeername) ||
@@ -57,7 +166,8 @@ int main(void)
         ctx = (syscall_ctx_t){ .nr = calls[i],
             .args = { 11, 22, 33, 44, 55, 66 }, .arch_frame = &ctx };
         received = NULL;
-        if (!syscall_has_handler(ctx.nr) || syscall_dispatch(&ctx) != -EBADF ||
+        if (!syscall_has_handler(ctx.nr) ||
+            syscall_dispatch(&ctx) != expected_return(ctx.nr) ||
             received != &ctx || ctx.arch_frame != &ctx || ctx.suppress_writeback) {
             fprintf(stderr, "syscall %llu did not preserve dispatch context\n",
                     (unsigned long long)ctx.nr);
@@ -66,6 +176,7 @@ int main(void)
         for (unsigned j = 0; j < 6; j++)
             if (ctx.args[j] != 11 * (j + 1)) return 1;
     }
+#endif
     puts("syscall dispatch: PASS");
     return 0;
 }
