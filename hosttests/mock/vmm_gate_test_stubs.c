@@ -29,10 +29,16 @@ uint32_t g_test_cpu_id = 0;
  * bookkeeping via vmm_test_pmm_{reset,mark,unmark}. */
 
 static uint64_t *g_test_owned_root;
+static int g_test_root_busy;
 
 void vmm_test_user_mm_set_owned_root(uint64_t *root)
 {
     g_test_owned_root = root;
+}
+
+void vmm_test_user_mm_set_busy(int busy)
+{
+    g_test_root_busy = busy;
 }
 
 bool aarch64_user_mm_owns_root(const uint64_t *root)
@@ -43,7 +49,7 @@ bool aarch64_user_mm_owns_root(const uint64_t *root)
 bool aarch64_user_mm_root_busy(const uint64_t *root)
 {
     (void)root;
-    return false;
+    return g_test_root_busy != 0;
 }
 
 /* vmm_gate.c now defines this gate too, and some host tests link the

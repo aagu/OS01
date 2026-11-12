@@ -53,6 +53,7 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>
 #include <memory/vmm.h>
+#include <memory/user_vm.h>
 
 #ifndef OS01_KERNEL_SRC
 #error "Define OS01_KERNEL_SRC to the kernel source root (-DOS01_KERNEL_SRC=...)"
@@ -697,9 +698,15 @@ TEST_FUNC(test_backend_unmap_2m_empty_slot_linux_enoent)
 
 /* Stub-side helpers (defined in mock/vmm_gate_test_stubs.c). */
 void vmm_test_user_mm_set_owned_root(uint64_t *root);
+void vmm_test_user_mm_set_busy(int busy);
 void vmm_test_pmm_reset(void);
 void vmm_test_pmm_mark(uint64_t pa);
 void vmm_test_pmm_unmark(uint64_t pa);
+
+/* Host stubs for the production AArch64 leaf adapter's failure path.
+ * arch_user_vm_invariant() is never reached by these tests. */
+int g_log_level = 3;   /* LOG_ERR */
+void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 
 /* User VAs live in the production window [AARCH64_USER_MIN,
  * AARCH64_USER_LIMIT); the pt walk only indexes descriptors, so the
@@ -799,6 +806,227 @@ TEST_FUNC(test_backend_user_root_rejects_kernel_va_and_bare_rw)
     vmm_test_pmm_reset();
 }
 
+/* ── M4 Task 1: user-root PROT_NONE (VM_PROTNONE) semantics ────────
+ *
+ * The anonymous-policy layer keeps a resident page through PROT_NONE
+ * by stashing the PA.  The managed user-root branch therefore has to
+ * accept an exact VM_PROTNONE update (and only an update — map_new
+ * keeps the old permission table), report the stashed leaf as exactly
+ * VM_PROTNONE, preserve the PA on unmap, and refuse every write while
+ * the root is published/installed. */
+TEST_FUNC(test_backend_user_root_rw_to_none_to_rw)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0x5000ULL;
+    vmm_test_pmm_mark(pa);
+
+    int rc = arch_vmm_map_4k_new(root, pa, TEST_USER_VA,
+                                 VM_USER_RW | VM_NO_EXEC);
+    assert_eq(0, rc);
+
+    /* First user NONE update: the pre-M4 backend rejected it -EINVAL. */
+    uint64_t old_pa = 0;
+    uint32_t old_vm = 0;
+    rc = arch_vmm_update_4k(root, pa, TEST_USER_VA, VM_PROTNONE,
+                            &old_pa, &old_vm);
+    assert_eq(0, rc);
+    assert_eq(pa, old_pa);
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC), old_vm);
+
+    /* Query reports the exact stash state and keeps the PA. */
+    uint64_t qpa = 0;
+    uint32_t qvm = 0;
+    rc = arch_vmm_query_4k(root, TEST_USER_VA, &qpa, &qvm);
+    assert_eq(AARCH64_PT_EPROT_NONE, rc);
+    assert_eq(pa, qpa);
+    assert_eq((uint32_t)VM_PROTNONE, qvm);
+
+    /* Restoring must report the PRIOR state as exactly VM_PROTNONE. */
+    old_pa = 0xdeadULL;
+    old_vm = 0xdeadU;
+    rc = arch_vmm_update_4k(root, pa, TEST_USER_VA,
+                            VM_USER_RW | VM_NO_EXEC, &old_pa, &old_vm);
+    assert_eq(0, rc);
+    assert_eq(pa, old_pa);
+    assert_eq((uint32_t)VM_PROTNONE, old_vm);
+
+    rc = arch_vmm_query_4k(root, TEST_USER_VA, &qpa, &qvm);
+    assert_eq(0, rc);
+    assert_eq(pa, qpa);
+    assert_true((qvm & VM_PRESENT)  != 0);
+    assert_true((qvm & VM_PROTNONE) == 0);
+    assert_true((qvm & VM_WRITE)    != 0);
+    assert_true((qvm & VM_USER)     != 0);
+
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
+TEST_FUNC(test_backend_user_root_none_unmap_returns_pa)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0x6000ULL;
+    vmm_test_pmm_mark(pa);
+
+    assert_eq(0, arch_vmm_map_4k_new(root, pa, TEST_USER_VA,
+                                     VM_USER_RO | VM_NO_EXEC));
+    assert_eq(0, arch_vmm_update_4k(root, pa, TEST_USER_VA, VM_PROTNONE,
+                                    NULL, NULL));
+
+    /* Direct unmap of a stashed leaf: M3 sentinel + PA + exact state. */
+    uint64_t out_pa = 0;
+    uint32_t out_vm = 0;
+    int rc = arch_vmm_unmap_4k(root, TEST_USER_VA, &out_pa, &out_vm);
+    assert_eq(AARCH64_PT_EPROT_NONE, rc);
+    assert_eq(pa, out_pa);
+    assert_eq((uint32_t)VM_PROTNONE, out_vm);
+
+    rc = arch_vmm_query_4k(root, TEST_USER_VA, NULL, NULL);
+    assert_eq(-ENOENT, rc);
+
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
+TEST_FUNC(test_backend_user_root_map_new_rejects_none)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0x7000ULL;
+    vmm_test_pmm_mark(pa);
+
+    /* map_new keeps the old permission table: NONE is update-only. */
+    int rc = arch_vmm_map_4k_new(root, pa, TEST_USER_VA, VM_PROTNONE);
+    assert_eq(-EINVAL, rc);
+
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
+TEST_FUNC(test_backend_user_root_busy_rejects_writes)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0x8000ULL;
+    uint64_t pa2 = 0x9000ULL;
+    vmm_test_pmm_mark(pa);
+    vmm_test_pmm_mark(pa2);
+
+    assert_eq(0, arch_vmm_map_4k_new(root, pa, TEST_USER_VA,
+                                     VM_USER_RW | VM_NO_EXEC));
+
+    vmm_test_user_mm_set_busy(1);
+
+    /* map / update / unmap are writes: published or installed root is
+     * -EBUSY and the existing leaf stays untouched. */
+    assert_eq(-EBUSY, arch_vmm_map_4k_new(root, pa2, TEST_USER_VA + 0x1000,
+                                          VM_USER_RW | VM_NO_EXEC));
+    assert_eq(-EBUSY, arch_vmm_update_4k(root, pa, TEST_USER_VA, VM_PROTNONE,
+                                         NULL, NULL));
+    assert_eq(-EBUSY, arch_vmm_unmap_4k(root, TEST_USER_VA, NULL, NULL));
+
+    /* Query is read-only and remains available. */
+    uint64_t qpa = 0;
+    uint32_t qvm = 0;
+    int rc = arch_vmm_query_4k(root, TEST_USER_VA, &qpa, &qvm);
+    assert_eq(0, rc);
+    assert_eq(pa, qpa);
+    assert_true((qvm & VM_PRESENT) != 0);
+
+    vmm_test_user_mm_set_busy(0);
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
+/* ── M4 Task 1: leaf adapter tri-state normalization ──────────────
+ *
+ * arch_user_vm_{query,remove} map the backend's {0, -ENOENT,
+ * AARCH64_PT_EPROT_NONE} onto {PRESENT, ABSENT, STASHED}.  Remove must
+ * keep the PA it just removed, including for a stashed leaf. */
+TEST_FUNC(test_user_vm_leaf_adapter_states)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t pa = 0xa000ULL;
+    vmm_test_pmm_mark(pa);
+
+    struct user_vm_leaf leaf;
+    memset(&leaf, 0xAA, sizeof(leaf));
+
+    int rc = arch_user_vm_query(root, TEST_USER_VA, &leaf);
+    assert_eq(0, rc);
+    assert_eq(USER_VM_ABSENT, leaf.state);
+    assert_eq(0, leaf.pa);
+
+    assert_eq(0, arch_vmm_map_4k_new(root, pa, TEST_USER_VA,
+                                     VM_USER_RW | VM_NO_EXEC));
+
+    rc = arch_user_vm_query(root, TEST_USER_VA, &leaf);
+    assert_eq(0, rc);
+    assert_eq(USER_VM_PRESENT, leaf.state);
+    assert_eq(pa, leaf.pa);
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC), leaf.flags);
+
+    assert_eq(0, arch_vmm_update_4k(root, pa, TEST_USER_VA, VM_PROTNONE,
+                                    NULL, NULL));
+
+    rc = arch_user_vm_query(root, TEST_USER_VA, &leaf);
+    assert_eq(0, rc);
+    assert_eq(USER_VM_STASHED, leaf.state);
+    assert_eq(pa, leaf.pa);
+    assert_eq((uint32_t)VM_PROTNONE, leaf.flags);
+
+    /* Removing a stashed leaf is "removed and PA valid". */
+    memset(&leaf, 0xAA, sizeof(leaf));
+    rc = arch_user_vm_remove(root, TEST_USER_VA, &leaf);
+    assert_eq(0, rc);
+    assert_eq(USER_VM_STASHED, leaf.state);
+    assert_eq(pa, leaf.pa);
+    assert_eq((uint32_t)VM_PROTNONE, leaf.flags);
+
+    rc = arch_user_vm_query(root, TEST_USER_VA, &leaf);
+    assert_eq(0, rc);
+    assert_eq(USER_VM_ABSENT, leaf.state);
+
+    /* Removing a present leaf reports PRESENT and the PA. */
+    assert_eq(0, arch_vmm_map_4k_new(root, pa, TEST_USER_VA,
+                                     VM_USER_RO | VM_NO_EXEC));
+    memset(&leaf, 0xAA, sizeof(leaf));
+    rc = arch_user_vm_remove(root, TEST_USER_VA, &leaf);
+    assert_eq(0, rc);
+    assert_eq(USER_VM_PRESENT, leaf.state);
+    assert_eq(pa, leaf.pa);
+
+    /* Other failures pass through unchanged. */
+    rc = arch_user_vm_query(root, TEST_VA_BASE, &leaf);
+    assert_eq(-EINVAL, rc);
+
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_4k_kernel_rw_normal),
     TEST_ENTRY(test_backend_4k_kernel_ro_normal),
@@ -824,6 +1052,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_unmap_2m_empty_slot_linux_enoent),
     TEST_ENTRY(test_backend_user_root_update_and_query_contract),
     TEST_ENTRY(test_backend_user_root_rejects_kernel_va_and_bare_rw),
+    TEST_ENTRY(test_backend_user_root_rw_to_none_to_rw),
+    TEST_ENTRY(test_backend_user_root_none_unmap_returns_pa),
+    TEST_ENTRY(test_backend_user_root_map_new_rejects_none),
+    TEST_ENTRY(test_backend_user_root_busy_rejects_writes),
+    TEST_ENTRY(test_user_vm_leaf_adapter_states),
 TEST_LIST_END
 
 int main(void)

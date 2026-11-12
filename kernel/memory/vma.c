@@ -1,5 +1,6 @@
 // kernel/memory/vma.c — VMA linked-list management
 #include <memory/vma.h>
+#include <memory/vm_area.h>
 #include <sched/task.h>
 #include <kernel.h>
 #include <memory/slab.h>
@@ -22,20 +23,11 @@
 #define USER_STACK_BASE    0x20400000UL
 #define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
 
-// Find the VMA containing addr, or NULL
+// Find the VMA containing addr, or NULL.
+// Thin x86 wrapper over the shared arch-neutral primitive.
 vma_t *vma_find(mm_t *mm, uint64_t addr)
 {
-    if (!mm) return NULL;
-    list_t *pos = mm->vma_list.next;
-    while (pos != &mm->vma_list) {
-        vma_t *v = container_of(pos, vma_t, list);
-        if (addr >= v->vm_start && addr < v->vm_end)
-            return v;
-        if (addr < v->vm_start)
-            break; // sorted — addr falls in a gap
-        pos = pos->next;
-    }
-    return NULL;
+    return vm_area_lookup(mm, addr);
 }
 
 // Insert vma into mm->vma_list sorted by vm_start.
@@ -43,25 +35,17 @@ vma_t *vma_find(mm_t *mm, uint64_t addr)
 // Returns 0 on success.
 int vma_insert(mm_t *mm, vma_t *vma)
 {
-    if (!mm || !vma) return -EINVAL;
-
-    list_t *pos = mm->vma_list.next;
-    while (pos != &mm->vma_list) {
-        vma_t *v = container_of(pos, vma_t, list);
-        if (vma->vm_start < v->vm_start)
-            break;
-        pos = pos->next;
-    }
-    list_add_to_before(pos, &vma->list);
-    return 0;
+    return vm_area_insert_sorted(mm, vma);
 }
 
 // Remove and free a single VMA node (does NOT free pages).
+// The file reference and the node stay x86-owned: only the list
+// unlinking is shared with the AArch64 policy.
 void vma_remove(mm_t *mm, vma_t *vma)
 {
     (void)mm;
     if (!vma) return;
-    list_del(&vma->list);
+    vm_area_unlink(vma);
     if (vma->vm_file)
         vfs_node_put(vma->vm_file);
     kfree(vma);

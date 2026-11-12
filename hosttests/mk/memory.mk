@@ -145,6 +145,14 @@ BRK_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
 
 $(TEST_BLD)/vma_brk_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TEST_MOCK)/brk/brk_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/vm_area_brk_production.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TEST_MOCK)/brk/brk_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
@@ -162,6 +170,7 @@ $(TEST_BLD)/test_brk_pages.o: $(TEST_CASES)/test_brk_pages.c \
 
 $(TEST_BLD)/test_brk_pages.elf: $(TEST_BLD)/test_brk_pages.o \
 		$(TEST_BLD)/vma_brk_production.o \
+		$(TEST_BLD)/vm_area_brk_production.o \
 		$(TEST_BLD)/brk_stubs.o
 	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
 
@@ -173,6 +182,14 @@ PRANGES_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                        -I$(TEST_MOCK)/pranges
 
 $(TEST_BLD)/vma_pranges_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/vm_area_pranges_production.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TEST_MOCK)/pranges/pranges_runtime.h
 	@mkdir -p $(TEST_BLD)
@@ -191,6 +208,7 @@ $(TEST_BLD)/test_user_protected_ranges.o: $(TEST_CASES)/test_user_protected_rang
 
 $(TEST_BLD)/test_user_protected_ranges.elf: $(TEST_BLD)/test_user_protected_ranges.o \
 		$(TEST_BLD)/vma_pranges_production.o \
+		$(TEST_BLD)/vm_area_pranges_production.o \
 		$(TEST_BLD)/pranges_stubs.o
 	$(HOST_CC) -o $@ $^
 
@@ -208,6 +226,14 @@ $(TEST_BLD)/uaccess_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/uaccess.
 	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/vma_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/vm_area_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
 	@mkdir -p $(TEST_BLD)
@@ -227,6 +253,7 @@ $(TEST_BLD)/test_user_write_cow.o: $(TEST_CASES)/test_user_write_cow.c \
 $(TEST_BLD)/test_user_write_cow.elf: $(TEST_BLD)/test_user_write_cow.o \
 		$(TEST_BLD)/uaccess_uwrite_cow_production.o \
 		$(TEST_BLD)/vma_uwrite_cow_production.o \
+		$(TEST_BLD)/vm_area_uwrite_cow_production.o \
 		$(TEST_BLD)/uwrite_cow_stubs.o
 	$(HOST_CC) -o $@ $^
 
@@ -673,10 +700,21 @@ $(TEST_BLD)/vmm_backend_production.o: \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/user_vm_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm.c \
+		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/log/log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_aarch64_backend_4k.o: $(TEST_CASES)/test_aarch64_backend_4k.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
-		$(TESTS_DIR)/kernel/include/memory/vmm.h
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/memory/user_vm.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
 		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
@@ -686,6 +724,7 @@ $(TEST_BLD)/test_aarch64_backend_4k.elf: \
 		$(TEST_BLD)/test_aarch64_backend_4k.o \
 		$(TEST_BLD)/aarch64_pt_production.o \
 		$(TEST_BLD)/vmm_backend_production.o \
+		$(TEST_BLD)/user_vm_production.o \
 		$(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 

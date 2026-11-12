@@ -313,6 +313,15 @@ static bool user_perm_legal(uint32_t vm)
            vm == VM_USER_RO;
 }
 
+/* The M4 anonymous policy needs ONE extra update-only state: an exact
+ * VM_PROTNONE stash (PRESENT clear, PA preserved).  map_new keeps the
+ * original permission table — creating an invalid leaf directly would
+ * lose the only description of whether the page ever existed. */
+static bool user_update_perm_legal(uint32_t vm)
+{
+    return user_perm_legal(vm) || vm == VM_PROTNONE;
+}
+
 /* All four entries validate the user VA window and 4 KiB alignment. */
 static int user_check_va(uint64_t virt)
 {
@@ -392,7 +401,7 @@ static int user_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
 {
     int rc = user_check_va(virt);
     if (!rc) rc = user_check_pa(phys);
-    if (!rc && !user_perm_legal(vm_flags)) rc = -EINVAL;
+    if (!rc && !user_update_perm_legal(vm_flags)) rc = -EINVAL;
     if (rc) return rc;
 
     /* Query the leaf first: an empty slot is -ENOENT; an existing
@@ -403,7 +412,8 @@ static int user_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint32_t old_perm = 0;
     uint64_t old_sw = 0;
     rc = aarch64_pt_query_4k_ext(pgdir, virt, &old_pa, &old_perm, &old_sw);
-    if (rc == AARCH64_PT_EPROT_NONE) {
+    bool was_stashed = (rc == AARCH64_PT_EPROT_NONE);
+    if (was_stashed) {
         rc = AARCH64_PT_OK;          /* stash: counts as a mapped leaf */
     } else if (rc != AARCH64_PT_OK) {
         return pt_err_to_linux(rc);
@@ -417,15 +427,22 @@ static int user_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     uint32_t perm = vm_to_perm(vm_flags);
     /* aarch64_pt_replace_4k hands back the PRIOR decoded perm + sw
      * (taken before the descriptor is rewritten) — that is the "old PA
-     * and permissions" the M4 contract returns. */
+     * and permissions" the M4 contract returns.  The software word
+     * carries VM_PROTNONE so a NONE update really stashes the PA. */
     uint64_t prev_pa = 0;
     uint32_t prev_perm = 0;
     uint64_t prev_sw = 0;
-    rc = aarch64_pt_replace_4k(pgdir, virt, phys, perm, 0,
+    rc = aarch64_pt_replace_4k(pgdir, virt, phys, perm, vm_to_sw(vm_flags),
                                &prev_pa, &prev_perm, &prev_sw);
     if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
     if (old_phys_out) *old_phys_out = prev_pa;
-    if (old_vm_out)   *old_vm_out   = perm_to_vm(prev_perm, prev_sw);
+    if (old_vm_out) {
+        /* A stashed prior state has no live permission bits; the
+         * policy expects the exact semantic word, not the leftover
+         * descriptor AP/exec bits perm_to_vm would reconstruct. */
+        *old_vm_out = was_stashed ? VM_PROTNONE
+                                  : perm_to_vm(prev_perm, prev_sw);
+    }
     return AARCH64_PT_OK;
 }
 
