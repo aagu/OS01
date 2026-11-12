@@ -479,7 +479,7 @@ static void suite_sched_consumer_acquire_contract(void)
         /* file, function scope start, needle that must appear after it */
         { "kernel/sched/balance.c", "void sched_notify_remote_cpu(",
           "__atomic_load_n(&dst->online, __ATOMIC_ACQUIRE)" },
-        { "kernel/sched/kthread.c", "int kthread_alloc_and_publish(",
+        { "kernel/sched/kthread.c", "int sched_alloc_and_publish_task(",
           "__atomic_load_n(&rq->online, __ATOMIC_ACQUIRE)" },
     };
     for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); ++i) {
