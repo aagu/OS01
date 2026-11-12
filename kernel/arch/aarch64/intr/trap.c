@@ -35,6 +35,7 @@
 #include <arch/intr.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/uaccess.h>
+#include <arch/aarch64/user_vm.h>
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/timer.h>
@@ -62,7 +63,12 @@ void el1_irq(struct pt_regs *regs)
 #if AARCH64_EL0_TEST
     ev.native_vector = AARCH64_EL1H_IRQ_SLOT;
 #endif
+    /* A user-VM edit transaction requires depth zero; the GIC path
+     * (including nested IRQs taken while the policy runs) is bracketed
+     * here so an IRQ handler can never borrow the SVC authorization. */
+    aarch64_vm_irq_enter();
     arch_intr_dispatch(&ev, regs);
+    aarch64_vm_irq_leave();
 }
 
 void aarch64_el0_irq(pt_regs_t *regs)

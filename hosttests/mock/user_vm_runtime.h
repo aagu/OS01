@@ -15,6 +15,16 @@
 
 #include "test_platform.h"
 
+/* ── AArch64 register frame for the host-compiled VM adapter ────
+ * user_task.h and intr/dispatch.h include <arch/regs.h>; on an x86
+ * host that facade would select the x86 pt_regs and the aarch64
+ * inline helpers would not compile.  Shadow the facade with the
+ * real aarch64 layout instead. */
+#ifndef _KERNEL_ARCH_REGS_FACADE_H
+#define _KERNEL_ARCH_REGS_FACADE_H
+#endif
+#include <arch/aarch64/regs.h>
+
 /* ── Skip heavy production headers ─────────────────────────── */
 #ifndef KERNEL_TASK_H
 #define KERNEL_TASK_H
@@ -92,6 +102,27 @@ size_t   kfree(void *ptr);
 uint64_t alloc_4k_page(void);
 void     free_4k_page(uint64_t pa);
 
+/* ── CPU / IRQ boundary replaced by the host runtime ──────── */
+static inline void arch_cpu_halt(void)
+{
+    /* The invariant path is never expected in a host case; failing
+     * loudly is better than hanging the runner. */
+    abort();
+}
+
+typedef uint64_t arch_irq_state_t;
+unsigned long user_vm_test_irq_save(void);
+void          user_vm_test_irq_restore(unsigned long state);
+void          user_vm_test_irq_enable(void);
+void          user_vm_test_irq_disable(void);
+
+#define arch_local_irq_save() \
+    ((arch_irq_state_t)user_vm_test_irq_save())
+#define arch_local_irq_restore(s) \
+    user_vm_test_irq_restore((unsigned long)(s))
+#define arch_local_irq_enable()  user_vm_test_irq_enable()
+#define arch_local_irq_disable() user_vm_test_irq_disable()
+
 /* ── Test controls (implemented in user_vm_runtime.c) ────── */
 /* Reset the fake leaf store, allocators, counters and fault
  * injection.  Call at the start of every test. */
@@ -116,5 +147,19 @@ int      user_vm_test_leaf_state(uint64_t va);
 uint64_t user_vm_test_leaf_pa(uint64_t va);
 uint32_t user_vm_test_leaf_vm(uint64_t va);
 int      user_vm_test_leaf_count(void);
+
+/* ── Transaction-layer boundary controls (M4 Task 3) ──────── */
+void user_vm_test_set_current_mm(mm_t *mm);
+void user_vm_test_set_frame_valid(int ok);
+void user_vm_test_set_ttbr0(uint64_t root_pa);
+void user_vm_test_set_published(int ok);
+void user_vm_test_set_irq(int masked);
+void user_vm_test_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0);
+
+int      user_vm_test_irq_masked(void);
+int      user_vm_test_root_switches(void);
+uint64_t user_vm_test_installed_root(void);
+int      user_vm_test_tls_restores(void);
+uint64_t user_vm_test_live_tls(int which);
 
 #endif /* OS01_USER_VM_RUNTIME_H */

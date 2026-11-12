@@ -30,6 +30,15 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getpid] = { sys_native_getpid, "getpid" },
     [SYS_getppid] = { sys_native_getppid, "getppid" },
     [SYS_clock_gettime] = { sys_native_clock_gettime, "clock_gettime" },
+
+    /* The four VM numbers are served by both architectures: the x86
+     * branch of sys_mm.c keeps the shared do_* / mm_set_brk path, the
+     * AArch64 branch delegates to arch_syscall_user_vm().  SYS_futex
+     * stays in the x86-only block below. */
+    [SYS_brk] = { sys_mm_dispatch, "brk" },
+    [SYS_mmap] = { sys_mm_dispatch, "mmap" },
+    [SYS_mprotect] = { sys_mm_dispatch, "mprotect" },
+    [SYS_munmap] = { sys_mm_dispatch, "munmap" },
 #ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
@@ -65,10 +74,6 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_fstatat] = { sys_fs_dispatch, "fstatat" },
     [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
     [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
-    [SYS_brk] = { sys_mm_dispatch, "brk" },
-    [SYS_mmap] = { sys_mm_dispatch, "mmap" },
-    [SYS_mprotect] = { sys_mm_dispatch, "mprotect" },
-    [SYS_munmap] = { sys_mm_dispatch, "munmap" },
     [SYS_futex] = { sys_mm_dispatch, "futex" },
     [SYS_time] = { sys_time_dispatch, "time" },
     [SYS_gettimeofday] = { sys_time_dispatch, "gettimeofday" },

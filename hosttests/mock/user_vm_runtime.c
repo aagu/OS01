@@ -11,6 +11,8 @@
 
 #include "user_vm_runtime.h"
 
+#include <arch/aarch64/user_task.h>
+#include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_backend.h>
 #include <errno.h>
 #include <log/log.h>
@@ -18,6 +20,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <uapi/syscall.h>
 
 /* ══════════════════════════════════════════════════════════════
  * Fault injection
@@ -230,6 +233,127 @@ uint32_t user_vm_test_leaf_vm(uint64_t va)
 }
 
 /* ══════════════════════════════════════════════════════════════
+ * Transaction-layer boundary (M4 Task 3)
+ * ══════════════════════════════════════════════════════════════ */
+
+static struct mm_struct *g_current_mm;
+static int      g_frame_valid;
+static uint64_t g_ttbr0;
+static int      g_published;
+static int      g_irq_masked = 1;
+static int      g_root_switches;
+static int      g_root_installs;
+static uint64_t g_installed_root;
+static uint64_t g_tls_live[2];
+static int      g_tls_restores;
+
+void user_vm_test_set_current_mm(mm_t *mm)   { g_current_mm = mm; }
+void user_vm_test_set_frame_valid(int ok)    { g_frame_valid = ok; }
+void user_vm_test_set_ttbr0(uint64_t root_pa){ g_ttbr0 = root_pa; }
+void user_vm_test_set_published(int ok)      { g_published = ok; }
+void user_vm_test_set_irq(int masked)        { g_irq_masked = masked; }
+void user_vm_test_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0)
+{
+    g_tls_live[0] = tpidr_el0;
+    g_tls_live[1] = tpidrro_el0;
+}
+
+int      user_vm_test_irq_masked(void)   { return g_irq_masked; }
+int      user_vm_test_root_switches(void){ return g_root_switches; }
+uint64_t user_vm_test_installed_root(void){ return g_installed_root; }
+int      user_vm_test_tls_restores(void) { return g_tls_restores; }
+uint64_t user_vm_test_live_tls(int which)
+{
+    return (which == 0 || which == 1) ? g_tls_live[which] : 0;
+}
+
+unsigned long user_vm_test_irq_save(void)
+{
+    unsigned long prev = (unsigned long)g_irq_masked;
+    g_irq_masked = 1;
+    return prev;
+}
+
+void user_vm_test_irq_restore(unsigned long state)
+{
+    g_irq_masked = (int)(state & 1UL);
+}
+
+void user_vm_test_irq_enable(void)  { g_irq_masked = 0; }
+void user_vm_test_irq_disable(void) { g_irq_masked = 1; }
+
+/* The real formal-frame admission is scheduler/CPU aware; the host
+ * case supplies the verdict. */
+bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
+{
+    return g_frame_valid != 0 && regs != NULL;
+}
+
+struct mm_struct *aarch64_user_current_mm(void)
+{
+    return g_current_mm;
+}
+
+uint64_t aarch64_user_vm_read_ttbr0(void)
+{
+    return g_ttbr0;
+}
+
+bool aarch64_user_vm_root_published(uint64_t root_pa)
+{
+    return g_published != 0 && root_pa != 0;
+}
+
+void aarch64_user_vm_save_tls(uint64_t *tpidr_el0, uint64_t *tpidrro_el0)
+{
+    if (tpidr_el0)   *tpidr_el0   = g_tls_live[0];
+    if (tpidrro_el0) *tpidrro_el0 = g_tls_live[1];
+}
+
+void aarch64_user_vm_restore_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0)
+{
+    g_tls_live[0] = tpidr_el0;
+    g_tls_live[1] = tpidrro_el0;
+    g_tls_restores++;
+}
+
+void aarch64_user_restore_kernel_root(void)
+{
+    g_root_switches++;
+    g_installed_root = 0;
+    g_ttbr0 = 0;
+}
+
+void aarch64_user_install_root(uint64_t root_pa)
+{
+    /* Production clears both EL0 thread pointers on every install. */
+    g_tls_live[0] = 0;
+    g_tls_live[1] = 0;
+    g_root_installs++;
+    g_installed_root = root_pa;
+    g_ttbr0 = root_pa;
+}
+
+/* The AArch64 subset's served numbers: the four shared natives plus
+ * the four VM entries (SYS_futex and everything else absent). */
+bool syscall_has_handler(uint64_t nr)
+{
+    switch (nr) {
+    case SYS_exit:
+    case SYS_getpid:
+    case SYS_getppid:
+    case SYS_clock_gettime:
+    case SYS_brk:
+    case SYS_mmap:
+    case SYS_mprotect:
+    case SYS_munmap:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
  * Reset + log stubs
  * ══════════════════════════════════════════════════════════════ */
 
@@ -245,10 +369,21 @@ void user_vm_test_reset(void)
     g_map_calls   = 0;
     g_free_count  = 0;
     g_double_frees = 0;
-    /* Any pages left live by a previous test are intentionally leaked:
-     * a test that does not clean up is itself a bug, but freeing here
-     * would hide it from user_vm_test_double_frees(). */
+    for (int i = 0; i < g_live_count; i++)
+        free((void *)(uintptr_t)g_live[i]);
     g_live_count = 0;
+
+    g_current_mm   = NULL;
+    g_frame_valid  = 0;
+    g_ttbr0        = 0;
+    g_published    = 0;
+    g_irq_masked   = 1;
+    g_root_switches = 0;
+    g_root_installs = 0;
+    g_installed_root = 0;
+    g_tls_live[0]  = 0;
+    g_tls_live[1]  = 0;
+    g_tls_restores = 0;
 }
 
 int g_log_level = 3;   /* LOG_ERR */

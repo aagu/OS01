@@ -80,6 +80,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    sched/accounting.c \
                    intr/dispatch.c \
                    syscall/dispatch.c syscall/sys_native.c \
+                   syscall/sys_mm.c \
                    core/stack_chk.c \
                    core/printk.c \
                    core/boot_failure.c \

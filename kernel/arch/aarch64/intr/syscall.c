@@ -10,6 +10,7 @@
  */
 
 #include <arch/aarch64/syscall.h>
+#include <arch/aarch64/user_vm.h>
 #include <errno.h>
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
@@ -44,7 +45,14 @@ void aarch64_user_syscall(pt_regs_t *regs)
         .suppress_writeback = false,
     };
 
+    /* A returning native dispatch may authorise a user-VM edit
+     * transaction.  SYS_exit is skipped inside enter(); a number
+     * without a handler never reaches this point. */
+    aarch64_vm_native_enter(regs, nr);
+
     int64_t ret = syscall_dispatch(&ctx);
+
+    aarch64_vm_native_leave();
 
     /* Both success and error keep every other register, SP, NZCV and
      * the hardware-saved return PC; only x0 carries the result. */

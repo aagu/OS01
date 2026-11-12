@@ -22,6 +22,7 @@
 
 #include <arch/aarch64/uaccess.h>
 #include <arch/aarch64/user_task.h>
+#include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/mmu.h>
@@ -54,48 +55,65 @@ static struct aarch64_uaccess_window g_window;
  * opened here and no lock is held on return: the publish registry and
  * the page-table walker finish before the caller touches user memory.
  */
-static bool aarch64_user_range_precheck(uint64_t addr, size_t len,
-                                        bool writable, bool skip_permission,
-                                        struct mm_struct **out_mm,
-                                        uint64_t *out_root_pa)
+/* Three outcomes: the range/task/root snapshot is usable, it is not
+ * usable at all, or it is usable but the page-permission walk failed.
+ * Only the last case may try the anonymous demand-fill path — a hole
+ * or PROT_NONE page still ends in -EFAULT after that attempt. */
+enum aarch64_range_result {
+    AARCH64_RANGE_OK,
+    AARCH64_RANGE_DENIED,
+    AARCH64_RANGE_PERMISSION,
+};
+
+static enum aarch64_range_result
+aarch64_user_range_precheck(uint64_t addr, size_t len,
+                            bool writable, bool skip_permission,
+                            struct mm_struct **out_mm,
+                            uint64_t *out_root_pa)
 {
     if (addr < AARCH64_USER_MIN || addr >= AARCH64_USER_LIMIT)
-        return false;
+        return AARCH64_RANGE_DENIED;
     if (len > AARCH64_USER_LIMIT - addr)
-        return false;
+        return AARCH64_RANGE_DENIED;
 
     struct mm_struct *mm = aarch64_user_current_mm();
     if (!mm || !mm->pgdir)
-        return false;
+        return AARCH64_RANGE_DENIED;
 
     uint64_t root_pa = (uintptr_t)mm->pgdir;
     if (!aarch64_pt_root_is_published(&root_pa))
-        return false;
+        return AARCH64_RANGE_DENIED;
 
     uint64_t ttbr0;
     __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0));
     if ((ttbr0 & AARCH64_TTBR_BASE_MASK) != root_pa)
-        return false;
+        return AARCH64_RANGE_DENIED;
 
     /* The M4 acceptance bypass skips ONLY this page-permission walk; the
      * range, task, mm and root checks above still gate the window. */
     if (!skip_permission &&
         !arch_user_range_accessible((void *)Phy_To_Virt(root_pa),
                                     addr, (uint64_t)len, writable))
-        return false;
+        return AARCH64_RANGE_PERMISSION;
 
     *out_mm = mm;
     *out_root_pa = root_pa;
-    return true;
+    return AARCH64_RANGE_OK;
 }
 
 /* The one fault exit: a failed copy reports -EFAULT and invokes the
  * caller's cleanup callback at most once. */
-static ssize_t user_copy_fault(void (*on_fault)(void *), void *arg)
+static ssize_t user_copy_fault_ret(void (*on_fault)(void *), void *arg,
+                                   int err)
 {
     if (on_fault)
         on_fault(arg);
-    return -EFAULT;
+    return err;
+}
+
+static ssize_t user_copy_fault(void (*on_fault)(void *), void *arg)
+{
+    return user_copy_fault_ret(on_fault, arg, -EFAULT);
 }
 
 /* ── The formal copy ────────────────────────────────────────────
@@ -116,15 +134,42 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
 
     arch_irq_state_t state = arch_local_irq_save();
 
+    /* A nested copy is refused before any other check; the outer
+     * window is preserved. */
+    if (g_window.present)
+        goto fault;
+
     struct mm_struct *mm = NULL;
     uint64_t root_pa = 0;
 
-    if (!aarch64_user_range_precheck(user_addr, n, write, skip_permission,
-                                     &mm, &root_pa))
+    enum aarch64_range_result r =
+        aarch64_user_range_precheck(user_addr, n, write, skip_permission,
+                                    &mm, &root_pa);
+    if (r == AARCH64_RANGE_DENIED)
         goto fault;
-    /* A nested copy is refused and the outer window is preserved. */
-    if (g_window.present)
-        goto fault;
+
+    if (r == AARCH64_RANGE_PERMISSION) {
+        /* Only an authorized formal copy may instantiate anonymous
+         * pages.  The adapter refuses (without switching roots) when
+         * this is not a returning native dispatch or a demand fault;
+         * -ENOMEM is preserved for the caller. */
+        int prc = aarch64_user_vm_prepare_copy(mm, user_addr, n, write);
+        if (prc == -ENOMEM) {
+            arch_local_irq_restore(state);
+            return user_copy_fault_ret(on_fault, arg, -ENOMEM);
+        }
+        if (prc != 0)
+            goto fault;
+
+        /* The transaction reinstalled the root: re-check the live
+         * published root and the complete page permissions before the
+         * exact window is opened. */
+        mm = NULL;
+        root_pa = 0;
+        if (aarch64_user_range_precheck(user_addr, n, write, false,
+                                        &mm, &root_pa) != AARCH64_RANGE_OK)
+            goto fault;
+    }
 
     g_window = (struct aarch64_uaccess_window){
         .present = true,
@@ -193,7 +238,7 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
     struct mm_struct *mm = NULL;
     uint64_t root_pa = 0;
     return aarch64_user_range_precheck(addr, (size_t)len, writable, false,
-                                       &mm, &root_pa);
+                                       &mm, &root_pa) == AARCH64_RANGE_OK;
 }
 
 #if AARCH64_EL0_TEST

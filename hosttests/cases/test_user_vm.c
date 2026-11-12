@@ -22,9 +22,12 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include <arch/aarch64/user_vm.h>
+#include <intr/dispatch.h>
 #include <memory/user_vm.h>
 #include <memory/vm_area.h>
 #include <memory/vma.h>
+#include <uapi/syscall.h>
 
 #ifndef OS01_KERNEL_SRC
 #error "Define OS01_KERNEL_SRC to the kernel source root"
@@ -460,6 +463,264 @@ TEST_FUNC(test_mmap_argument_contract)
     destroy_mm(mm);
 }
 
+/* ── Task 3: transaction layer + fault classification ────────── */
+
+#define ESR_LOWER_DATA(fsc, write, extra) \
+    ((UINT64_C(0x24) << AARCH64_ESR_EC_SHIFT) | \
+     ((uint64_t)(fsc) & AARCH64_ESR_ISS_FSC_MASK) | \
+     ((write) ? AARCH64_ESR_ISS_WNR : 0) | (extra))
+
+static void tx_setup(mm_t *mm)
+{
+    user_vm_test_set_current_mm(mm);
+    user_vm_test_set_frame_valid(1);
+    user_vm_test_set_ttbr0((uint64_t)(uintptr_t)mm->pgdir);
+    user_vm_test_set_published(1);
+}
+
+static struct intr_event make_fault_event(uint64_t esr)
+{
+    struct intr_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.kind = INTR_SYNC;
+    ev.origin = INTR_ORIGIN_USER;
+    ev.reason = INTR_REASON_MEMORY;
+    ev.native_status = esr;
+    ev.fault_addr_valid = true;
+    ev.fault_addr = HEAP_BASE;
+    ev.native_address = HEAP_BASE;
+    return ev;
+}
+
+TEST_FUNC(test_fault_classification_pure)
+{
+    bool write = true;
+
+    assert_true(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x04, false, 0), true, &write));
+    assert_false(write);
+
+    assert_true(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x07, true, 0), true, &write));
+    assert_true(write);
+
+    /* Access-flag and permission faults are not demand-fillable. */
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x08, false, 0), true, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x0c, true, 0), true, NULL));
+
+    /* S1PTW / CM / invalid FAR are rejected. */
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x04, false, AARCH64_ESR_ISS_S1PTW), true, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x04, false, AARCH64_ESR_ISS_CM), true, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x04, false, 0), false, NULL));
+
+    /* Instruction abort and a same-EL data abort are not EL0 demand
+     * faults. */
+    assert_false(aarch64_user_vm_fault_classify(
+        (UINT64_C(0x20) << AARCH64_ESR_EC_SHIFT) | 0x04, true, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        (UINT64_C(0x25) << AARCH64_ESR_EC_SHIFT) | 0x04, true, NULL));
+}
+
+TEST_FUNC(test_transaction_native_success_restores_state)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(HEAP_BASE + 0x1000),
+              user_vm_brk(mm, HEAP_BASE + 0x1000));
+    tx_setup(mm);
+    user_vm_test_set_tls(0x1111, 0x2222);
+    user_vm_test_set_irq(1);
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    aarch64_vm_native_enter(&regs, SYS_brk);
+
+    uint64_t args[6] = { HEAP_BASE + 0x2000, 0, 0, 0, 0, 0 };
+    assert_eq((int64_t)(HEAP_BASE + 0x2000),
+              arch_syscall_user_vm(SYS_brk, args));
+
+    /* One detach and one reinstall; the original root came back and
+     * both TLS registers plus the entry IRQ state were restored. */
+    assert_eq(1, user_vm_test_root_switches());
+    assert_eq(1, user_vm_test_tls_restores());
+    assert_eq((uint64_t)(uintptr_t)mm->pgdir,
+              user_vm_test_installed_root());
+    assert_eq(0x1111, user_vm_test_live_tls(0));
+    assert_eq(0x2222, user_vm_test_live_tls(1));
+    assert_eq(1, user_vm_test_irq_masked());
+
+    aarch64_vm_native_leave();
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_transaction_refuses_unverified_contexts)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    mm_t *other = new_mm(HEAP_BASE);
+    tx_setup(mm);
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    uint64_t args[6] = { HEAP_BASE + 0x1000, 0, 0, 0, 0, 0 };
+
+    /* Wrong/unverified formal frame. */
+    user_vm_test_set_frame_valid(0);
+    aarch64_vm_native_enter(&regs, SYS_brk);
+    assert_eq(-EPERM, arch_syscall_user_vm(SYS_brk, args));
+
+    /* Verified frame, but the current mm is no longer the authorised
+     * mm. */
+    user_vm_test_set_frame_valid(1);
+    aarch64_vm_native_enter(&regs, SYS_brk);
+    user_vm_test_set_current_mm(other);
+    assert_eq(-EPERM, arch_syscall_user_vm(SYS_brk, args));
+
+    /* TTBR0 no longer holds the mm root: no authorization at all. */
+    user_vm_test_set_current_mm(mm);
+    user_vm_test_set_ttbr0(0xdead000);
+    aarch64_vm_native_enter(&regs, SYS_brk);
+    assert_eq(-EPERM, arch_syscall_user_vm(SYS_brk, args));
+
+    /* Published-root check failure. */
+    user_vm_test_set_ttbr0((uint64_t)(uintptr_t)mm->pgdir);
+    user_vm_test_set_published(0);
+    aarch64_vm_native_enter(&regs, SYS_brk);
+    assert_eq(-EPERM, arch_syscall_user_vm(SYS_brk, args));
+
+    /* SYS_exit never authorizes (non-returning). */
+    user_vm_test_set_published(1);
+    aarch64_vm_native_enter(&regs, SYS_exit);
+    assert_eq(-EPERM, arch_syscall_user_vm(SYS_brk, args));
+
+    /* A number without a handler never authorizes. */
+    aarch64_vm_native_enter(&regs, SYS_read);
+    assert_eq(-EPERM, arch_syscall_user_vm(SYS_brk, args));
+
+    assert_eq(0, user_vm_test_root_switches());
+    assert_eq(0, user_vm_test_tls_restores());
+    assert_eq(1, user_vm_test_irq_masked());
+
+    aarch64_vm_native_leave();
+    user_vm_destroy(other);
+    destroy_mm(mm);
+    free(other);
+}
+
+TEST_FUNC(test_transaction_irq_depth_and_nesting_refused)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    tx_setup(mm);
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    uint64_t args[6] = { HEAP_BASE + 0x1000, 0, 0, 0, 0, 0 };
+    aarch64_vm_native_enter(&regs, SYS_brk);
+
+    /* An IRQ handler on the same BSP may not borrow the SVC
+     * authorization. */
+    aarch64_vm_irq_enter();
+    assert_eq(-EBUSY, arch_syscall_user_vm(SYS_brk, args));
+    aarch64_vm_irq_leave();
+    assert_eq(0, user_vm_test_root_switches());
+
+    /* A second transaction while the first is detached is refused. */
+    assert_eq(0, aarch64_vm_edit_begin(mm));
+    assert_eq(-EBUSY, aarch64_vm_edit_begin(mm));
+    assert_eq(-EBUSY, arch_syscall_user_vm(SYS_brk, args));
+    aarch64_vm_edit_end();
+    assert_eq(1, user_vm_test_root_switches());
+    assert_eq(1, user_vm_test_tls_restores());
+
+    aarch64_vm_native_leave();
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_transaction_policy_error_still_restores)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(HEAP_BASE + 0x1000),
+              user_vm_brk(mm, HEAP_BASE + 0x1000));
+    tx_setup(mm);
+    user_vm_test_set_tls(0xa1a1, 0xb2b2);
+    user_vm_test_set_irq(0);            /* entry IRQs enabled */
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    aarch64_vm_native_enter(&regs, SYS_clock_gettime);
+
+    user_vm_test_fail_page_after(0);
+    assert_eq(-ENOMEM, aarch64_user_vm_prepare_copy(mm, HEAP_BASE, 0x1000,
+                                                    true));
+    assert_eq(0, user_vm_test_leaf_count());
+
+    /* The failed policy call still went through detach/restore. */
+    assert_eq(1, user_vm_test_root_switches());
+    assert_eq((uint64_t)(uintptr_t)mm->pgdir,
+              user_vm_test_installed_root());
+    assert_eq(0xa1a1, user_vm_test_live_tls(0));
+    assert_eq(0xb2b2, user_vm_test_live_tls(1));
+    assert_eq(0, user_vm_test_irq_masked());   /* entry state enabled */
+
+    /* Not left detached: another transaction is allowed. */
+    assert_eq(0, aarch64_vm_edit_begin(mm));
+    aarch64_vm_edit_end();
+
+    aarch64_vm_native_leave();
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_fault_entry_fills_and_refuses)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(HEAP_BASE + 0x2000),
+              user_vm_brk(mm, HEAP_BASE + 0x2000));
+    tx_setup(mm);
+    user_vm_test_set_tls(0x3300, 0x4400);
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    regs.elr_el1 = 0x1234;
+
+    struct intr_event ev = make_fault_event(ESR_LOWER_DATA(0x07, true, 0));
+    assert_eq(0, aarch64_user_vm_fault(&regs, &ev));
+    assert_eq(1, user_vm_test_leaf_state(HEAP_BASE));
+    assert_eq(0x1234, regs.elr_el1);     /* same PC is retried */
+    assert_eq(0x3300, user_vm_test_live_tls(0));
+    assert_eq(0x4400, user_vm_test_live_tls(1));
+
+    int switches = user_vm_test_root_switches();
+
+    /* Access-flag/permission/invalid-FAR faults keep the old exit. */
+    struct intr_event bad = make_fault_event(ESR_LOWER_DATA(0x08, false, 0));
+    assert_eq(-EFAULT, aarch64_user_vm_fault(&regs, &bad));
+    bad = make_fault_event(ESR_LOWER_DATA(0x0c, true, 0));
+    assert_eq(-EFAULT, aarch64_user_vm_fault(&regs, &bad));
+    bad = make_fault_event(ESR_LOWER_DATA(0x04, false, 0));
+    bad.fault_addr_valid = false;
+    assert_eq(-EFAULT, aarch64_user_vm_fault(&regs, &bad));
+    assert_eq(switches, user_vm_test_root_switches());
+
+    /* A policy OOM reports -ENOMEM, never -EFAULT. */
+    user_vm_test_fail_page_after(0);
+    struct intr_event oom =
+        make_fault_event(ESR_LOWER_DATA(0x04, true, 0));
+    oom.fault_addr = HEAP_BASE + 0x1000;
+    oom.native_address = oom.fault_addr;
+    assert_eq(-ENOMEM, aarch64_user_vm_fault(&regs, &oom));
+    assert_eq(0x3300, user_vm_test_live_tls(0));
+
+    destroy_mm(mm);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -474,6 +735,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_brk_shrink_zeroes_tail_and_releases_pages),
     TEST_ENTRY(test_mprotect_updates_resident_and_untouched_pages),
     TEST_ENTRY(test_mmap_argument_contract),
+    TEST_ENTRY(test_fault_classification_pure),
+    TEST_ENTRY(test_transaction_native_success_restores_state),
+    TEST_ENTRY(test_transaction_refuses_unverified_contexts),
+    TEST_ENTRY(test_transaction_irq_depth_and_nesting_refused),
+    TEST_ENTRY(test_transaction_policy_error_still_restores),
+    TEST_ENTRY(test_fault_entry_fills_and_refuses),
 TEST_LIST_END
 
 int main(void)

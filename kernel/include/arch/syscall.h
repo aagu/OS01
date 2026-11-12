@@ -11,6 +11,12 @@ __attribute__((noreturn)) void arch_syscall_exit(uint64_t status);
 /* Frame-dependent process operations: only architecture code interprets
  * arch_frame. Exec parameters have already been copied into kernel memory.
  * Sigreturn returns zero after restoring the frame, or a negative error. */
+/* AArch64 subset: the four anonymous-VM syscalls (brk/mmap/mprotect/
+ * munmap) are executed inside an authorized, detached-root edit
+ * transaction.  Defined in arch/aarch64/memory/user_vm.c; only the
+ * aarch64 branch of sys_mm.c calls it. */
+int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6]);
+
 int64_t arch_syscall_fork(void *arch_frame);
 int64_t arch_syscall_exec(void *arch_frame, const char *path,
                           const char *const *argv, const char *const *envp);

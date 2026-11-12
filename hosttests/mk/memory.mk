@@ -709,7 +709,8 @@ $(TEST_BLD)/user_vm_production.o: \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
 		$(TESTS_DIR)/kernel/include/log/log.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
+		-DOS01_USER_VM_LEAF_ADAPTER_ONLY=1 -c $< -o $@
 
 $(TEST_BLD)/test_aarch64_backend_4k.o: $(TEST_CASES)/test_aarch64_backend_4k.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
@@ -755,16 +756,21 @@ $(TEST_BLD)/vm_area_user_vm_production.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
 
-# The REAL AArch64 leaf adapter, compiled with the aarch64 page-table
-# host flags and linked against the fake M3 backend in the runtime.
+# The REAL AArch64 leaf adapter + transaction state machine.  The
+# runtime shim replaces only the hardware boundary (IRQ save/restore,
+# frame admission, TTBR0, published root, root switch, TLS); the
+# wrapper and state machine are the production implementation.
 $(TEST_BLD)/user_vm_leaf_adapter.o: \
 		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm.c \
 		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_task.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
-		$(TESTS_DIR)/kernel/include/memory/vmm.h
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TEST_MOCK)/user_vm_runtime.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/user_vm_runtime.o: $(TEST_MOCK)/user_vm_runtime.c \
 		$(TEST_MOCK)/user_vm_runtime.h

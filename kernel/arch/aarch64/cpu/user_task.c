@@ -28,6 +28,7 @@
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/user_image.h>
 #include <arch/aarch64/user_task.h>
+#include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/cpu.h>
 #include <arch/syscall.h>
@@ -222,6 +223,39 @@ void aarch64_user_runtime_init(void)
     __asm__ volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
 }
 
+/* ── M4 user-VM hardware boundary ───────────────────────────────
+ * The transaction layer in memory/user_vm.c calls these; the host
+ * state-machine suite replaces them with tracked stubs. */
+
+uint64_t aarch64_user_vm_read_ttbr0(void)
+{
+    uint64_t ttbr0;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+    return ttbr0 & AARCH64_TTBR_BASE_MASK;
+}
+
+bool aarch64_user_vm_root_published(uint64_t root_pa)
+{
+    if (!root_pa)
+        return false;
+    return aarch64_pt_root_is_published(&root_pa);
+}
+
+void aarch64_user_vm_save_tls(uint64_t *tpidr_el0, uint64_t *tpidrro_el0)
+{
+    if (!tpidr_el0 || !tpidrro_el0)
+        return;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(*tpidr_el0));
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(*tpidrro_el0));
+}
+
+void aarch64_user_vm_restore_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0)
+{
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(tpidr_el0) : "memory");
+    __asm__ volatile("msr tpidrro_el0, %0\n\tisb"
+                     :: "r"(tpidrro_el0) : "memory");
+}
+
 void aarch64_user_install_root(uint64_t root_pa)
 {
     if (!root_pa || root_pa == g_live_root_pa)
@@ -364,10 +398,16 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
 #endif
 
     if (ec != A64_EC_SVC_LOWER) {
-        /* Not an SVC: the task took a synchronous fault.  The current
-         * task dies with -EFAULT; the ESR and the fault address (only
-         * when the event says the address is valid) are recorded. */
-        uint64_t status = (uint64_t)-EFAULT;
+        /* Not an SVC: an eligible EL0 demand fault is filled and the
+         * same PC is retried; every other fault keeps the old
+         * termination path.  Policy exhaustion reports -ENOMEM. */
+        int frc = aarch64_user_vm_fault(regs, event);
+        if (frc == 0)
+            return;
+
+        uint64_t status = ((uint64_t)frc == (uint64_t)-ENOMEM)
+                              ? (uint64_t)-ENOMEM
+                              : (uint64_t)-EFAULT;
         /* The aarch64 logger prints %lx with its own 0x prefix. */
         if (event->fault_addr_valid)
             log_err("[user-task] sync fault esr=%lx far=%lx\n",

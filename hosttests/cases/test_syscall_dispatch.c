@@ -77,12 +77,14 @@ int main(void)
 
 #ifdef OS01_SYSCALL_A64_SUBSET
     /* ── AArch64 subset ─────────────────────────────────────────
-     * The AArch64 port compiles the SAME table with only the four
-     * shared native entries visible.  Every other number must be
-     * absent: a leftover entry would let an unsupported number reach
-     * user mode through the AArch64 SVC path. */
+     * The AArch64 port compiles the SAME table with the four shared
+     * native entries plus the four anonymous-VM numbers (brk/mmap/
+     * mprotect/munmap).  Every other number must be absent: a
+     * leftover entry would let an unsupported number reach user mode
+     * through the AArch64 SVC path. */
     static const uint64_t shared[] = {
         SYS_exit, SYS_getpid, SYS_getppid, SYS_clock_gettime,
+        SYS_brk, SYS_mmap, SYS_mprotect, SYS_munmap,
     };
     for (unsigned i = 0; i < sizeof(shared) / sizeof(shared[0]); i++) {
         if (!syscall_has_handler(shared[i])) {
@@ -110,16 +112,18 @@ int main(void)
     }
 
     /* Numbers the AArch64 port does not serve: a plain read, the
-     * unimplemented getpeername slot, an out-of-range number, and a
-     * high-bit polluted number. */
+     * unimplemented getpeername slot, futex (x86-only block), an
+     * out-of-range number, and a high-bit polluted number. */
     if (syscall_has_handler(SYS_read) || syscall_has_handler(SYS_getpeername) ||
+        syscall_has_handler(SYS_futex) ||
         syscall_has_handler(UINT64_MAX) ||
         syscall_has_handler((1ULL << 32) | SYS_getpid)) {
         fprintf(stderr, "AArch64 subset exposes an unsupported syscall\n");
         return 1;
     }
     const uint64_t hidden[] = {
-        SYS_read, SYS_getpeername, UINT64_MAX, (1ULL << 32) | SYS_getpid,
+        SYS_read, SYS_getpeername, SYS_futex, UINT64_MAX,
+        (1ULL << 32) | SYS_getpid,
     };
     for (unsigned i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {
         ctx.nr = hidden[i];

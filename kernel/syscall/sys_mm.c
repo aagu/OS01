@@ -1,13 +1,31 @@
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
 #include <errno.h>
+#ifdef OS01_SYSCALL_A64_SUBSET
+#include <arch/syscall.h>
+#else
 #include <sched/task.h>
 #include <memory/vma.h>
 #include <uapi/futex.h>
 #include <sync/futex.h>
+#endif
 
 int64_t sys_mm_dispatch(syscall_ctx_t *ctx)
 {
+#ifdef OS01_SYSCALL_A64_SUBSET
+    /* The AArch64 port serves exactly these four VM numbers.  The
+     * architecture adapter owns authorization, root detachment and
+     * the policy call; nothing here touches vma.c/mm_set_brk (x86). */
+    switch (ctx->nr) {
+    case SYS_brk:
+    case SYS_mmap:
+    case SYS_mprotect:
+    case SYS_munmap:
+        return arch_syscall_user_vm(ctx->nr, ctx->args);
+    default:
+        return -EINVAL;
+    }
+#else
     int64_t syscall_result = -EINVAL;
     switch (ctx->nr) {
     case SYS_brk: {
@@ -82,4 +100,5 @@ int64_t sys_mm_dispatch(syscall_ctx_t *ctx)
         break;
     }
     return syscall_result;
+#endif /* !OS01_SYSCALL_A64_SUBSET */
 }
