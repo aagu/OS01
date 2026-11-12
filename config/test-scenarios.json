@@ -945,6 +945,32 @@
    }
   },
   {
+   "id": "display.fb.mtrr",
+   "component": "display",
+   "behavior": "fb",
+   "trigger": "host runner invokes test_fb_mtrr.elf",
+   "assertions": [
+    "test_fb_mtrr passes all internal assertions",
+    "MTRR range decoding follows the SDM for disabled MTRRs, DISABLED variable ranges and the WC/WB encodings",
+    "the decoder under test is the production kernel/arch/x86_64/memory/fb_mtrr.c object"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_fb_mtrr",
+    "framebuffer range decoded with the wrong memory type, leaving stale framebuffer reads"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_fb_mtrr.c",
+    "selector": "test_fb_mtrr",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole test decoding raw MTRR/MSR state into the framebuffer memory type; resolution_hooks covers the mapping but never the cache-policy derivation"
+   }
+  },
+  {
    "id": "display.fb.resolution_hooks",
    "component": "display",
    "behavior": "fb",
