@@ -226,6 +226,7 @@ int aarch64_copy_to_user(uint64_t dst, const void *src, size_t len)
  * the window.  A kernel-buffer ordinary load/store, a fault outside
  * the window and any task/mm/root disagreement stay fatal.
  */
+__attribute__((no_stack_protector))
 bool aarch64_uaccess_fixup(pt_regs_t *regs, uint64_t esr, uint64_t far)
 {
 #if AARCH64_EL0_TEST

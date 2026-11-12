@@ -194,6 +194,9 @@ uint64_t aarch64_user_sync_frame(void)
     return aarch64_user_task_frame(t);
 }
 
+/* Early-chain helper of the EL1 copy fixup: no stack canary (the guard
+ * reload is not available before main.c reseeds it). */
+__attribute__((no_stack_protector))
 struct mm_struct *aarch64_user_current_mm(void)
 {
     task_t *t = arch_current_task();
