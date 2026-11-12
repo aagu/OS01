@@ -40,6 +40,14 @@ extern volatile struct aarch64_sched_entry_record
 void test_aarch64_scheduler_run(void);
 void aarch64_sched_observe_resource(const void *ptr, unsigned kind, bool alloc);
 void aarch64_sched_observe_reap(task_t *prev, bool next_stack);
+
+/* Test-only reap observer.  It runs at the ENTRY of
+ * aarch64_sched_observe_reap() — before the reclaim-batch gate and
+ * before task_finish_switch() releases anything — so a case can inspect
+ * a specific (PID-filtered) task while PF_SELF_REAP and exit_code are
+ * still live.  NULL disarms it. */
+typedef void (*aarch64_sched_reap_observer_t)(task_t *prev);
+void aarch64_sched_set_reap_observer(aarch64_sched_reap_observer_t cb);
 void aarch64_sched_before_block_switch(task_t *task);
 void aarch64_sched_observe_block_enqueue(task_t *task);
 void aarch64_sched_observe_scan_wake(task_t *task);

@@ -535,8 +535,21 @@ void aarch64_sched_observe_switch_tasks(task_t *prev, task_t *next)
         blocker_scan_switch_seen = 1;
 }
 
+static aarch64_sched_reap_observer_t reap_test_observer;
+
+void aarch64_sched_set_reap_observer(aarch64_sched_reap_observer_t cb)
+{
+    reap_test_observer = cb;
+}
+
 void aarch64_sched_observe_reap(task_t *prev, bool next_stack)
 {
+    /* M4 acceptance hook: runs at the entry, BEFORE the reclaim-batch
+     * gate, so the case can check a specific task while it is still
+     * alive and still carries PF_SELF_REAP / exit_code. */
+    if (reap_test_observer)
+        reap_test_observer(prev);
+
     if (!reclaim_batch_active || !prev)
         return;
     void *raw = prev->stack_alloc_base;
@@ -1058,6 +1071,9 @@ void test_aarch64_scheduler_run(void)
     extern int test_aarch64_user_task(void);
     selftest_record_late("aarch64_user_task_lifecycle",
                          test_aarch64_user_task());
+    extern int test_aarch64_user_svc_uaccess(void);
+    selftest_record_late("aarch64_user_svc_uaccess",
+                         test_aarch64_user_svc_uaccess());
 #endif
 }
 

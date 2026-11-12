@@ -106,9 +106,10 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c \
                    fs/elf_layout.c
 ifeq ($(AARCH64_EL0_TEST),1)
-# The M4 user-task acceptance case and its static fixture images exist
-# only in the EL0 test variant.
+# The M4 user-task and formal SVC/uaccess acceptance cases and their
+# static fixture images exist only in the EL0 test variant.
 KERNEL_C_SOURCES += selftest/test_aarch64_user_task.c
+KERNEL_C_SOURCES += selftest/test_aarch64_user_svc_uaccess.c
 endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
@@ -295,6 +296,7 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_el0_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_a_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_b_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_c_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_svc_uaccess_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -706,6 +708,21 @@ $(BUILD_DIR)/generated/aarch64_user_task_b_image.o: $(BUILD_DIR)/generated/aarch
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 
 $(BUILD_DIR)/generated/aarch64_user_task_c_image.o: $(BUILD_DIR)/generated/aarch64_user_task_c.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+# ── M4 formal SVC + uaccess fixture ─────────────────────────────
+# One image: a text page, a two-page RW segment and an unmapped page
+# right after it, so the payload can drive the cross-page copy and the
+# two -EFAULT shapes (read-only code page, write across the gap).
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_svc_uaccess.o: selftest/fixtures/aarch64_user_svc_uaccess.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_svc_uaccess.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_svc_uaccess.o selftest/fixtures/aarch64_user_svc_uaccess.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_svc_uaccess_image.o: $(BUILD_DIR)/generated/aarch64_user_svc_uaccess.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 

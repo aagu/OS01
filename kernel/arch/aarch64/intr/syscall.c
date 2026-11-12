@@ -13,6 +13,9 @@
 #include <errno.h>
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
+#if AARCH64_EL0_TEST
+#include <selftest/aarch64_user_svc_uaccess.h>
+#endif
 
 void aarch64_user_syscall(pt_regs_t *regs)
 {
@@ -23,6 +26,13 @@ void aarch64_user_syscall(pt_regs_t *regs)
         regs->x0 = (uint64_t)-ENOSYS;
         return;
     }
+
+#if AARCH64_EL0_TEST
+    /* M4 acceptance observation point: records the fixture's x19/x20
+     * from the saved frame and runs the kernel copy self-test once, on
+     * the fixture's first clock_gettime.  Test variant only. */
+    aarch64_user_svc_uaccess_test_hook(regs, nr);
+#endif
 
     syscall_ctx_t ctx = {
         .nr = nr,

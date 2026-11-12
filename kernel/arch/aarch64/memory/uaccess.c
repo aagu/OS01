@@ -32,6 +32,7 @@
 #include <limits.h>
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/el0.h>
+#include <selftest/aarch64_user_svc_uaccess.h>
 #endif
 
 extern const char aarch64_uaccess_load[], aarch64_uaccess_store[];
@@ -54,7 +55,7 @@ static struct aarch64_uaccess_window g_window;
  * the page-table walker finish before the caller touches user memory.
  */
 static bool aarch64_user_range_precheck(uint64_t addr, size_t len,
-                                        bool writable,
+                                        bool writable, bool skip_permission,
                                         struct mm_struct **out_mm,
                                         uint64_t *out_root_pa)
 {
@@ -76,7 +77,10 @@ static bool aarch64_user_range_precheck(uint64_t addr, size_t len,
     if ((ttbr0 & AARCH64_TTBR_BASE_MASK) != root_pa)
         return false;
 
-    if (!arch_user_range_accessible((void *)Phy_To_Virt(root_pa),
+    /* The M4 acceptance bypass skips ONLY this page-permission walk; the
+     * range, task, mm and root checks above still gate the window. */
+    if (!skip_permission &&
+        !arch_user_range_accessible((void *)Phy_To_Virt(root_pa),
                                     addr, (uint64_t)len, writable))
         return false;
 
@@ -102,7 +106,7 @@ static ssize_t user_copy_fault(void (*on_fault)(void *), void *arg)
  * IRQ state is restored, and only then does a failure callback run.
  */
 static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
-                                bool write,
+                                bool write, bool skip_permission,
                                 void (*on_fault)(void *), void *arg)
 {
     if (n == 0)
@@ -115,7 +119,8 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
     struct mm_struct *mm = NULL;
     uint64_t root_pa = 0;
 
-    if (!aarch64_user_range_precheck(user_addr, n, write, &mm, &root_pa))
+    if (!aarch64_user_range_precheck(user_addr, n, write, skip_permission,
+                                     &mm, &root_pa))
         goto fault;
     /* A nested copy is refused and the outer window is preserved. */
     if (g_window.present)
@@ -151,15 +156,27 @@ ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
                             void (*on_fault)(void *), void *arg)
 {
     return copy_user_common((uint64_t)(uintptr_t)dst, src, n, true,
-                            on_fault, arg);
+                            false, on_fault, arg);
 }
 
 ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
                               void (*on_fault)(void *), void *arg)
 {
     return copy_user_common((uint64_t)(uintptr_t)src, dst, n, false,
-                            on_fault, arg);
+                            false, on_fault, arg);
 }
+
+#if AARCH64_EL0_TEST
+/* The M4 acceptance bypass: the SAME implementation with only the
+ * page-permission precheck skipped, so a real hardware abort reaches
+ * the registered window and the EL1 fixup.  There is no production
+ * entry to this shape. */
+ssize_t aarch64_uaccess_test_copy(bool write, uint64_t user_addr, void *kern,
+                                  size_t n, void (*on_fault)(void *), void *arg)
+{
+    return copy_user_common(user_addr, kern, n, write, true, on_fault, arg);
+}
+#endif /* AARCH64_EL0_TEST */
 
 /* ── Syscall entry-point range check ────────────────────────────
  *
@@ -175,7 +192,7 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
 
     struct mm_struct *mm = NULL;
     uint64_t root_pa = 0;
-    return aarch64_user_range_precheck(addr, (size_t)len, writable,
+    return aarch64_user_range_precheck(addr, (size_t)len, writable, false,
                                        &mm, &root_pa);
 }
 
