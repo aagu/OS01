@@ -522,7 +522,8 @@ _X86_PF_CHAIN = ("arch_intr_dispatch", "arch_intr_handle_sync",
                  "x86_handle_page_fault")
 
 _A64_EARLY_CHAIN = ("arch_intr_dispatch", "aarch64_intr_decode_sync",
-                    "aarch64_el1_sync", "arch_intr_handle_sync",
+                    "aarch64_el1_sync", "aarch64_uaccess_fixup",
+                    "aarch64_user_current_mm", "arch_intr_handle_sync",
                     "arch_intr_bad_event")
 
 _A64_DISASM_SYMS = (
@@ -532,6 +533,24 @@ _A64_DISASM_SYMS = (
      "arch_intr_bad_event"]
     + ["el0_sync_entry", "el0_irq_entry",
        "aarch64_el0_sync_route", "aarch64_el0_irq"]
+    + ["aarch64_uaccess_fixup", "aarch64_user_current_mm",
+       "aarch64_user_task_sync", "aarch64_user_syscall"]
+    + ["aarch64_uaccess_load", "aarch64_uaccess_store",
+       "aarch64_uaccess_fault"]
+)
+
+# The formal user-copy surface a production image must link: the two
+# unprivileged copy loops, the -EFAULT trampoline, the two shared
+# fault-tolerant entry points and the syscall range check.
+_A64_UACCESS_SYMS = (
+    "aarch64_copy_from_user_raw",
+    "aarch64_copy_to_user_raw",
+    "aarch64_uaccess_load",
+    "aarch64_uaccess_store",
+    "aarch64_uaccess_fault",
+    "copy_from_user_ft_res",
+    "copy_to_user_ft_res",
+    "syscall_check_user_range",
 )
 
 
@@ -1099,6 +1118,10 @@ _A64_FORBIDDEN_PROBE_SYMS = (
     "aarch64_el0_swap",
     "aarch64_el0_probe_active",
     "aarch64_el0_probe_sync",
+    # The legacy probe's checked copy wrappers: the formal path uses the
+    # raw loops + the registration window instead.
+    "aarch64_copy_from_user",
+    "aarch64_copy_to_user",
 )
 
 # The test-only observation / fault-injection hooks.
@@ -1113,6 +1136,9 @@ _A64_FORBIDDEN_TEST_SYMS = (
     "aarch64_user_task_test_pid",
     "aarch64_user_task_test_switch_count",
     "aarch64_user_image_test_arm_fail",
+    # The M4 acceptance-only copy probe and SVC hook.
+    "aarch64_uaccess_test_copy",
+    "aarch64_user_svc_uaccess_test_hook",
 )
 
 # An embedded test ELF is linked as ``_binary_<name>_start`` /
@@ -1239,6 +1265,82 @@ def _audit_aarch64_no_probe_leak(symtab, errors, notes):
                      "symbol in the production aarch64 image")
 
 
+def _audit_aarch64_formal_path(symtab, blocks, errors, notes):
+    """The formal user-copy + native-syscall surface of a production image.
+
+    The unprivileged copy loops and the -EFAULT trampoline are ordinary
+    production code now (the legacy probe's checked wrappers are not),
+    and the native SVC entry must reuse the shared syscall table.
+    """
+    for name in _A64_UACCESS_SYMS:
+        strong = symtab.strong_defs(name)
+        weak = symtab.weak_defs(name)
+        if len(strong) != 1:
+            errors.append(f"formal uaccess: {name} must have exactly one "
+                          f"strong definition (found {len(strong)})")
+        elif weak:
+            errors.append(f"formal uaccess: {name} has a weak definition")
+        else:
+            notes.append(f"formal uaccess {name} @ 0x{strong[0][0]:x} — "
+                         "unique, no weak")
+
+    # The fixup matches the faulting PC against these two exact labels: a
+    # label sitting on any other instruction would let a kernel-side
+    # fault be "recovered" as a user copy.  Pin the instruction shape.
+    for label, mnemonic in (("aarch64_uaccess_load", "ldtrb"),
+                            ("aarch64_uaccess_store", "sttrb")):
+        instrs = _block(blocks, label, errors, "user-copy instruction label")
+        if instrs is None:
+            continue
+        if not instrs or not instrs[0].text.startswith(mnemonic):
+            got = instrs[0].text if instrs else "<empty>"
+            errors.append(
+                f"formal uaccess: label {label} does not point at the "
+                f"expected unprivileged {mnemonic.upper()} instruction "
+                f"(found {got!r})")
+        else:
+            notes.append(f"formal uaccess label {label} -> {instrs[0].text}")
+
+    trap = _block(blocks, "aarch64_uaccess_fault", errors,
+                  "user-copy -EFAULT trampoline")
+    if trap is not None:
+        texts = [i.text for i in trap]
+        if not (texts and texts[0].startswith("mov")
+                and "-0xe" in texts[0]
+                and any(t == "ret" for t in texts)):
+            errors.append(
+                "formal uaccess: aarch64_uaccess_fault is no longer a "
+                "mov w0, #-EFAULT / ret trampoline")
+        else:
+            notes.append("formal uaccess trampoline: mov w0, #-EFAULT; ret")
+
+    sync = _block(blocks, "aarch64_user_task_sync", errors,
+                  "formal user-task handler")
+    if sync is not None:
+        if not any(e.kind in ("call", "branch")
+                   and e.target == "aarch64_user_syscall"
+                   for e in a64_edges(sync, symtab)):
+            errors.append(
+                "edge aarch64_user_task_sync -> aarch64_user_syscall: not "
+                "proven — the native SVC path must reach the syscall entry")
+        else:
+            notes.append("edge aarch64_user_task_sync -> "
+                         "aarch64_user_syscall (call/tail)")
+
+    entry = _block(blocks, "aarch64_user_syscall", errors,
+                   "native syscall entry")
+    if entry is not None:
+        if not any(e.kind in ("call", "branch")
+                   and e.target == "syscall_dispatch"
+                   for e in a64_edges(entry, symtab)):
+            errors.append(
+                "edge aarch64_user_syscall -> syscall_dispatch: not proven "
+                "— the AArch64 entry must reuse the shared syscall table")
+        else:
+            notes.append("edge aarch64_user_syscall -> syscall_dispatch "
+                         "(call/tail)")
+
+
 def _audit_aarch64(symtab, blocks, order, repo: Path,
                    errors, notes) -> None:
     # 1. vector-table geometry: 2 KiB alignment, 16 slots, 128-byte
@@ -1300,8 +1402,19 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
             errors.append(
                 "edge el1_sync_entry: the OLD sync assembly call target "
                 "aarch64_el1_sync_fatal is still in use")
+        # The recovery edge: a matched user-copy abort makes the C
+        # adapter return, and the entry must then resume through the
+        # shared restore path instead of parking on the old fallback.
+        if not any(e.kind == "branch" and e.target == "restore_pt_regs"
+                   for e in edges):
+            errors.append(
+                "edge el1_sync_entry -> restore_pt_regs: not proven — a "
+                "matched user-copy abort must resume through the shared "
+                "restore path")
+        else:
+            notes.append("edge el1_sync_entry -> restore_pt_regs (branch)")
 
-    # 3. adapter → decoder + dispatcher + bad-event.
+    # 3. adapter → copy fixup + decoder + dispatcher + bad-event.
     adapter = _block(blocks, "aarch64_el1_sync", errors, "sync adapter")
     if adapter is not None:
         edges = a64_edges(adapter, symtab)
@@ -1310,7 +1423,7 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
                 errors.append(f"edge aarch64_el1_sync: unresolvable "
                               f"{e.kind} edge ({e.detail})")
         targets = {e.target for e in edges if e.kind == "call"}
-        for required in ("aarch64_intr_decode_sync",
+        for required in ("aarch64_uaccess_fixup", "aarch64_intr_decode_sync",
                          "arch_intr_dispatch", "arch_intr_bad_event"):
             if required not in targets:
                 errors.append(f"edge aarch64_el1_sync -> {required}: "
@@ -1422,6 +1535,10 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
 
     # 11. no legacy probe / test-only / embedded test ELF leaks.
     _audit_aarch64_no_probe_leak(symtab, errors, notes)
+
+    # 12. the formal copy surface is linked and the native SVC entry
+    #     reuses the shared syscall table.
+    _audit_aarch64_formal_path(symtab, blocks, errors, notes)
 
 
 # ─────────────────────────────────────────────────────────────────

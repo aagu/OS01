@@ -34,10 +34,10 @@
 #include <arch/regs.h>
 #include <arch/intr.h>
 #include <arch/aarch64/sync_fault.h>
+#include <arch/aarch64/uaccess.h>
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/timer.h>
-#include <arch/aarch64/uaccess.h>
 #endif
 #include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/intr_dispatch.h>
@@ -95,18 +95,17 @@ void aarch64_el0_irq(pt_regs_t *regs)
 
 /* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。
  *
- * 未被 M4 探针恢复的异常：后端终点是原 fatal 诊断或 bad-event；共同入口按整体定义
- * 可返回，若它意外返回则立即执行 bad-event 停机（spec §6.2），汇编的
- * DAIF+WFI 兜底保持不可达但保留。
+ * 正式用户复制的 same-EL abort 由 aarch64_uaccess_fixup() 精确恢复：
+ * 只有命中注册窗口与用户访存指令时它才返回 true（并把 ELR 改到
+ * -EFAULT 跳板），此时汇编恢复异常帧回到复制调用者。其他异常经后端
+ * 进入原 fatal 诊断或 bad-event，均不返回。
  *
  * 早期可达链：no_stack_protector（canary prologue 依赖的 guard reload
  * 在 per-CPU 初始化前不可用）。 */
 void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
 {
-#if AARCH64_EL0_TEST
     if (aarch64_uaccess_fixup(regs, esr, far))
         return;
-#endif
     struct intr_event ev;
 
     aarch64_intr_decode_sync(&ev, regs, esr, far);

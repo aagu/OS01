@@ -90,6 +90,8 @@ $(TEST_BLD)/aarch64_intr_decode_production.o: \
 $(TEST_BLD)/test_intr_decode_aarch64.o: \
 		$(TEST_CASES)/test_intr_decode_aarch64.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/uaccess.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
 		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h

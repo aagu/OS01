@@ -24,11 +24,13 @@
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/el0.h>
+#include <arch/aarch64/syscall.h>
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/user_image.h>
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/cpu.h>
+#include <arch/syscall.h>
 #include <arch/irq.h>
 #include <errno.h>
 #include <intr/dispatch.h>
@@ -338,6 +340,15 @@ bool aarch64_el0_sync_route(pt_regs_t *regs, uint64_t esr, uint64_t far)
 static void aarch64_user_task_exec(pt_regs_t *regs);
 __attribute__((noreturn)) static void aarch64_user_task_exit(uint64_t status);
 
+/* The shared native exit handler hands the already-encoded status
+ * (user code in the high byte) to the architecture.  The AArch64
+ * implementation is the formal task teardown below. */
+__attribute__((noreturn))
+void arch_syscall_exit(uint64_t status)
+{
+    aarch64_user_task_exit(status);
+}
+
 void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
 {
     uint64_t esr = event->native_status;
@@ -366,6 +377,12 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
     }
 
     switch (imm) {
+    case 0:
+        /* Native syscall: `svc #0` with the number in the full x8.
+         * The shared table owns the ABI; this entry only marshals the
+         * frame and never moves the saved return PC. */
+        aarch64_user_syscall(regs);
+        return;
     case AARCH64_USER_SVC_YIELD:
         /* Cooperative yield: give the CPU up first, then report
          * success in x0.  Every other register keeps its value. */

@@ -361,6 +361,19 @@ ffff0000400971f4 T gic_dev_current
 ffff0000400978d4 T gic_dev_dispatch
 ffff0000400a0a80 T arch_early_putc
 ffff0000400a0a84 T arch_early_puts
+ffff0000400970c0 T aarch64_uaccess_fixup
+ffff000040097180 T aarch64_user_current_mm
+ffff000040097200 T aarch64_user_syscall
+ffff000040097300 T syscall_dispatch
+ffff000040097380 T syscall_has_handler
+ffff000040097400 T aarch64_copy_from_user_raw
+ffff000040097440 T aarch64_copy_to_user_raw
+ffff000040097480 T aarch64_uaccess_load
+ffff0000400974c0 T aarch64_uaccess_store
+ffff000040097500 T aarch64_uaccess_fault
+ffff000040097540 T copy_from_user_ft_res
+ffff000040097580 T copy_to_user_ft_res
+ffff0000400975c0 T syscall_check_user_range
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -398,13 +411,40 @@ ffff0000400a3900 <el1_sync_entry>:
 ffff0000400a3900: d10443ff     	sub	sp, sp, #0x110
 ffff0000400a3904: a90007e0     	stp	x0, x1, [sp]
 ffff0000400a3960: 94000980     	bl	0xffff000040097ca4 <aarch64_el1_sync>
-ffff0000400a3964: d50342df     	msr	DAIFSet, #0xf
-ffff0000400a3968: d503207f     	wfi
+ffff0000400a3964: 17ffffc0     	b	0xffff0000400a3864 <restore_pt_regs>
 
 ffff000040097ca4 <aarch64_el1_sync>:
+ffff000040097cb0: 94000d04     	bl	0xffff0000400970c0 <aarch64_uaccess_fixup>
 ffff000040097cc8: 97ffff32     	bl	0xffff000040097990 <aarch64_intr_decode_sync>
 ffff000040097cd4: 97fff10c     	bl	0xffff000040094104 <arch_intr_dispatch>
 ffff000040097ce0: 94002bb1     	bl	0xffff0000400a2ba4 <arch_intr_bad_event>
+
+ffff0000400970c0 <aarch64_uaccess_fixup>:
+ffff0000400970e0: 94000028     	bl	0xffff000040097180 <aarch64_user_current_mm>
+ffff0000400970e4: d65f03c0     	ret
+
+ffff000040097180 <aarch64_user_current_mm>:
+ffff000040097184: d65f03c0     	ret
+
+ffff000040097480 <aarch64_uaccess_load>:
+ffff000040097480: 38400823     	ldtrb	w3, [x1]
+ffff000040097484: d65f03c0     	ret
+
+ffff0000400974c0 <aarch64_uaccess_store>:
+ffff0000400974c0: 38000803     	sttrb	w3, [x0]
+ffff0000400974c4: d65f03c0     	ret
+
+ffff000040097500 <aarch64_uaccess_fault>:
+ffff000040097500: 128001a0     	mov	w0, #-0xe       // =-14
+ffff000040097504: d65f03c0     	ret
+
+ffff000040097200 <aarch64_user_syscall>:
+ffff000040097230: 94000034     	bl	0xffff000040097300 <syscall_dispatch>
+ffff000040097234: d65f03c0     	ret
+
+ffff0000400a3e00 <aarch64_user_task_sync>:
+ffff0000400a3e40: 17fffff0     	b	0xffff000040097200 <aarch64_user_syscall>
+ffff0000400a3e44: d65f03c0     	ret
 
 ffff000040094104 <arch_intr_dispatch>:
 ffff000040094104: b4000100     	cbz	x0, 0xffff000040094124 <arch_intr_dispatch+0x20>
@@ -1285,6 +1325,112 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("formal EL0 entry" in e and
                             "aarch64_user_task_spawn" in e
+                            for e in errors), errors)
+
+    # ── Formal uaccess + native SVC wiring (M4 task 3) ───────────
+
+    def test_formal_copy_and_syscall_wiring_is_resolved(self):
+        # The positive side of the new edges: the recovery path, the
+        # copy fixup, the native SVC entry and the shared table must all
+        # be resolved by name and reported with their shape.
+        self.stage_a64()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        for expected in (
+                "edge el1_sync_entry -> restore_pt_regs (branch)",
+                "edge aarch64_el1_sync -> aarch64_uaccess_fixup (bl)",
+                "edge aarch64_user_task_sync -> aarch64_user_syscall "
+                "(call/tail)",
+                "edge aarch64_user_syscall -> syscall_dispatch (call/tail)",
+                "formal uaccess aarch64_uaccess_load",
+                "formal uaccess aarch64_uaccess_fault"):
+            self.assertTrue(any(expected in n for n in notes),
+                            (expected, notes))
+
+    def test_sync_recovery_edge_missing_fails(self):
+        # el1_sync_entry no longer resumes through restore_pt_regs: a
+        # matched user-copy abort would not return to its caller.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3964,
+            "b\t0xffff0000400a3864 <restore_pt_regs>",
+            "b\t0xffff0000400a3a00 <el0_irq_entry>"))
+        errors = self.audit()
+        self.assertTrue(any("el1_sync_entry" in e and
+                            "restore_pt_regs" in e
+                            for e in errors), errors)
+
+    def test_copy_fixup_edge_missing_fails(self):
+        # The EL1 sync adapter no longer tries the copy fixup first:
+        # a user-copy abort would fall into the fatal path.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097CB0,
+            "bl\t0xffff0000400970c0 <aarch64_uaccess_fixup>",
+            "bl\t0xffff000040097990 <aarch64_intr_decode_sync>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_el1_sync" in e and
+                            "aarch64_uaccess_fixup" in e
+                            for e in errors), errors)
+
+    def test_native_syscall_edge_missing_fails(self):
+        # The formal SVC handler no longer reaches the native entry.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3E40,
+            "b\t0xffff000040097200 <aarch64_user_syscall>",
+            "b\t0xffff0000400a2bd0 <aarch64_el1_sync_fatal>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_user_task_sync" in e and
+                            "aarch64_user_syscall" in e
+                            for e in errors), errors)
+
+    def test_shared_syscall_dispatch_edge_missing_fails(self):
+        # The native entry no longer reuses the shared table.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097230,
+            "bl\t0xffff000040097300 <syscall_dispatch>",
+            "bl\t0xffff000040097380 <syscall_has_handler>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_user_syscall" in e and
+                            "syscall_dispatch" in e
+                            for e in errors), errors)
+
+    def test_probe_copy_wrapper_leak_fails(self):
+        # The legacy probe's checked copy wrapper is linked into a
+        # production image; the formal path uses the raw loops + window.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5400 T aarch64_copy_from_user\n")
+        errors = self.audit()
+        self.assertTrue(any("probe leak" in e and
+                            "aarch64_copy_from_user" in e
+                            for e in errors), errors)
+
+    def test_copy_test_hook_leak_fails(self):
+        # The M4 acceptance-only copy probe is linked into a production
+        # image.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5500 T aarch64_uaccess_test_copy\n")
+        errors = self.audit()
+        self.assertTrue(any("test symbol leak" in e and
+                            "aarch64_uaccess_test_copy" in e
+                            for e in errors), errors)
+
+    def test_missing_formal_copy_symbol_fails(self):
+        # The unprivileged load label is not linked: the fixup could
+        # never match the formal copy instruction.
+        self.stage_a64(nm_text=A64_NM.replace(
+            "ffff000040097480 T aarch64_uaccess_load\n", ""))
+        errors = self.audit()
+        self.assertTrue(any("formal uaccess" in e and
+                            "aarch64_uaccess_load" in e
+                            for e in errors), errors)
+
+    def test_copy_label_on_the_wrong_instruction_fails(self):
+        # The load label now sits on a privileged LDRB: the fixup would
+        # match a kernel-side access.  The instruction shape is pinned.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097480,
+            "ldtrb\tw3, [x1]", "ldrb\tw3, [x1]"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_uaccess_load" in e and "LDTRB" in e
                             for e in errors), errors)
 
 

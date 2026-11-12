@@ -26,6 +26,7 @@
 #include <arch/regs.h>
 #include <intr/dispatch.h>
 #include <arch/aarch64/intr_decode.h>
+#include <arch/aarch64/uaccess.h>
 
 /* ── Independent expectation tables ────────────────────────────── */
 
@@ -420,6 +421,195 @@ static void case_a64_irq_fields(void)
     }
 }
 
+/* ── Case: a64_uaccess_abort_match ────────────────────────────── */
+
+/* The PURE formal EL1 copy-fixup predicate
+ * (kernel/include/arch/aarch64/uaccess.h).  It compares INPUTS only:
+ * the exception snapshot, the registered window and the live
+ * task/mm/root/TTBR0 facts are all plain values here, so no case
+ * fabricates hardware recovery evidence — every assertion is the
+ * predicate's own boolean. */
+#define A64_FIX_LOAD_PC   0x00000000A0001000ULL
+#define A64_FIX_STORE_PC  0x00000000A0002000ULL
+#define A64_FIX_WIN_LO    0x0000000010000000ULL
+#define A64_FIX_WIN_HI    0x0000000010001000ULL
+#define A64_FIX_FAR       0x0000000010000080ULL
+#define A64_FIX_TASK      0x0000000000011100ULL
+#define A64_FIX_MM        0x0000000000022200ULL
+#define A64_FIX_ROOT      0x0000000000003000ULL
+
+struct a64_fix_fixture {
+    struct aarch64_uaccess_abort  ab;
+    struct aarch64_uaccess_window win;
+    struct aarch64_uaccess_live   live;
+};
+
+static void fix_fixture(struct a64_fix_fixture *f, bool write)
+{
+    uint64_t iss = 0x05ULL | (write ? (1u << A64_ESR_ISS_WNR) : 0);
+
+    f->ab = (struct aarch64_uaccess_abort){
+        .esr       = ((uint64_t)A64_EC_DATA_SAME << A64_ESR_EC_SHIFT) | iss,
+        .spsr      = 0x3c5ULL,      /* EL1h with D/A/F/I set */
+        .pc        = write ? A64_FIX_STORE_PC : A64_FIX_LOAD_PC,
+        .far       = A64_FIX_FAR,
+        .read_ptr  = A64_FIX_FAR,   /* x1 at the LDTRB */
+        .write_ptr = A64_FIX_FAR,   /* x0 at the STTRB */
+    };
+    f->win = (struct aarch64_uaccess_window){
+        .present = true,
+        .write   = write,
+        .lo      = A64_FIX_WIN_LO,
+        .hi      = A64_FIX_WIN_HI,
+        .task    = (const void *)(uintptr_t)A64_FIX_TASK,
+        .mm      = (const void *)(uintptr_t)A64_FIX_MM,
+        .root_pa = A64_FIX_ROOT,
+    };
+    f->live = (struct aarch64_uaccess_live){
+        .task     = (const void *)(uintptr_t)A64_FIX_TASK,
+        .mm       = (const void *)(uintptr_t)A64_FIX_MM,
+        .root_pa  = A64_FIX_ROOT,
+        .ttbr0_pa = A64_FIX_ROOT,
+    };
+}
+
+static bool fix_matches(const struct a64_fix_fixture *f)
+{
+    return aarch64_uaccess_abort_matches(&f->ab, &f->win, &f->live,
+                                         A64_FIX_LOAD_PC, A64_FIX_STORE_PC);
+}
+
+static void case_a64_uaccess_abort_match(void)
+{
+    struct a64_fix_fixture f;
+
+    TEST_SUITE("a64_uaccess_abort_match");
+
+    /* The two positive shapes: a recoverable read and a recoverable
+     * write abort of the exact unprivileged instruction, at the exact
+     * user pointer, inside the registered window. */
+    fix_fixture(&f, false);
+    assert_true(fix_matches(&f));
+    fix_fixture(&f, true);
+    assert_true(fix_matches(&f));
+
+    /* The complete M[4:0] must be EL1h.  Extra PSTATE bits are
+     * allowed; a different mode is not. */
+    fix_fixture(&f, false);
+    f.ab.spsr = 0x05ULL;
+    assert_true(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.spsr = 0x00ULL;                    /* EL0t */
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.spsr = 0x04ULL;                    /* EL1t */
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.spsr = 0x0dULL;                    /* SVC/other mode */
+    assert_false(fix_matches(&f));
+
+    /* EC: only the same-EL data abort is a copy fault. */
+    fix_fixture(&f, false);
+    f.ab.esr = ((uint64_t)A64_EC_DATA_LOWER << A64_ESR_EC_SHIFT) | 0x05ULL;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.esr = ((uint64_t)A64_EC_INSN_SAME << A64_ESR_EC_SHIFT) | 0x05ULL;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.esr = ((uint64_t)A64_EC_SVC_LOWER << A64_ESR_EC_SHIFT);
+    assert_false(fix_matches(&f));
+
+    /* FSC outside translation/access/permission faults. */
+    fix_fixture(&f, false);
+    f.ab.esr = ((uint64_t)A64_EC_DATA_SAME << A64_ESR_EC_SHIFT) | 0x03ULL;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.esr = ((uint64_t)A64_EC_DATA_SAME << A64_ESR_EC_SHIFT) | 0x10ULL;
+    assert_false(fix_matches(&f));
+
+    /* Real syndrome bits: S1PTW (bit 7), CM (bit 8) and FnV (bit 10)
+     * each make the abort unrecoverable on their own. */
+    fix_fixture(&f, false);
+    f.ab.esr |= (1u << A64_ESR_ISS_S1PTW);
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.esr |= (1u << A64_ESR_ISS_CM);
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.esr |= (1u << A64_ESR_ISS_FNV);
+    assert_false(fix_matches(&f));
+
+    /* WnR must agree with the registered direction. */
+    fix_fixture(&f, true);
+    f.ab.esr &= ~(1u << A64_ESR_ISS_WNR);         /* read abort, write window */
+    f.ab.pc = A64_FIX_LOAD_PC;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.esr |= (1u << A64_ESR_ISS_WNR);          /* write abort, read window */
+    f.ab.pc = A64_FIX_STORE_PC;
+    assert_false(fix_matches(&f));
+
+    /* The faulting PC must be exactly the direction's user instruction. */
+    fix_fixture(&f, false);
+    f.ab.pc = A64_FIX_STORE_PC;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, true);
+    f.ab.pc = A64_FIX_LOAD_PC;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.pc += 4;
+    assert_false(fix_matches(&f));
+
+    /* FAR must equal the user pointer the instruction still holds. */
+    fix_fixture(&f, false);
+    f.ab.far = A64_FIX_FAR + 1;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, true);
+    f.ab.far = A64_FIX_FAR + 1;
+    assert_false(fix_matches(&f));
+
+    /* FAR must lie inside the registered half-open window. */
+    fix_fixture(&f, false);
+    f.ab.far = A64_FIX_WIN_LO - 1;
+    f.ab.read_ptr = f.ab.far;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.ab.far = A64_FIX_WIN_HI;
+    f.ab.read_ptr = f.ab.far;
+    assert_false(fix_matches(&f));
+
+    /* No window: the fixup never invents one. */
+    fix_fixture(&f, false);
+    f.win.present = false;
+    assert_false(fix_matches(&f));
+
+    /* The window's own identity fields must be present. */
+    fix_fixture(&f, false);
+    f.win.task = NULL;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.win.mm = NULL;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.win.root_pa = 0;
+    assert_false(fix_matches(&f));
+
+    /* A different task, mm or root — live vs registered — is never a
+     * match.  Both the mm root AND the actual TTBR0 must agree. */
+    fix_fixture(&f, false);
+    f.live.task = (const void *)(uintptr_t)(A64_FIX_TASK + 0x100);
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.live.mm = (const void *)(uintptr_t)(A64_FIX_MM + 0x100);
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.live.root_pa = A64_FIX_ROOT + 0x1000;
+    assert_false(fix_matches(&f));
+    fix_fixture(&f, false);
+    f.live.ttbr0_pa = A64_FIX_ROOT + 0x1000;
+    assert_false(fix_matches(&f));
+}
+
 int main(void)
 {
     case_a64_modes_and_classes();
@@ -427,6 +617,7 @@ int main(void)
     case_a64_far_validity();
     case_a64_abort_access();
     case_a64_irq_fields();
+    case_a64_uaccess_abort_match();
     TEST_RESULTS();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_intr_decode_aarch64",

@@ -25,11 +25,10 @@
 
 /* entry.S el1_sync_entry's C landing point (slot 0x200).  Builds the
  * normalized event from the raw ESR/FAR snapshot and dispatches it.
- * The M4 probe can return after a recognized user-copy abort; all
- * other exceptions reach fatal dispatch or arch_intr_bad_event(). */
-#if !AARCH64_EL0_TEST
-__attribute__((noreturn))
-#endif
+ * It returns ONLY after aarch64_uaccess_fixup() recognised a formal
+ * user-copy abort and redirected the frame's ELR to the -EFAULT
+ * trampoline; every other exception reaches the fatal path or
+ * arch_intr_bad_event(), neither of which returns. */
 __attribute__((no_stack_protector))
 void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far);
 

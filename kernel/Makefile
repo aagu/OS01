@@ -78,6 +78,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    sched/fair.c sched/balance.c \
                    sched/accounting.c \
                    intr/dispatch.c \
+                   syscall/dispatch.c syscall/sys_native.c \
                    core/stack_chk.c \
                    core/printk.c \
                    core/boot_failure.c \
@@ -474,6 +475,10 @@ ifeq ($(ARCH),aarch64)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ALL_CFLAGS += -DAARCH64_SYNC_FAULT_TEST=1
 endif
+# The AArch64 port links the SAME fixed-number syscall table as the
+# other architectures, hiding every entry it does not serve: only the
+# four shared native entries (exit/getpid/getppid/clock_gettime) remain.
+ALL_CFLAGS += -DOS01_SYSCALL_A64_SUBSET=1
 endif
 
 ifneq ($(strip $(AARCH64_M1_TEST)),)

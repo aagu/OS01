@@ -212,8 +212,9 @@ aarch64_el0_restore:
  * AAPCS64 参数：(x0=sp → &regs, x1=esr, x2=far)。ESR_EL1/FAR_EL1 在
  * 调用 C 前用 caller-saved 通用寄存器暂存，再分别送入 x1/x2。
  *
- * M4 探针仅在 uaccess 修复后返回到 restore_pt_regs；其他异常
- * 经共同分派进入 fatal/bad-event。普通镜像保留 WFI 兜底。
+ * aarch64_el1_sync() 只在命中正式用户复制的精确恢复点时返回（它把
+ * ELR 改成 -EFAULT 跳板）；其他异常经共同分派进入 fatal/bad-event，
+ * 永不返回。返回路径与 IRQ 一致：恢复保存的帧并 eret。
  * ────────────────────────────────────────────────────────────── */
 .balign 0x80
 .globl el1_sync_entry
@@ -225,14 +226,7 @@ el1_sync_entry:
     mrs     x2, far_el1
     mov     x0, sp                       /* x0 = &regs */
     bl      aarch64_el1_sync
-#if AARCH64_EL0_TEST
     b       restore_pt_regs
-#else
-    /* noreturn fallback：禁用中断 + 永久 WFI，杜绝 eret。 */
-0:  msr     daifset, #0xf
-    wfi
-    b       0b
-#endif
 
 /* Lower-EL IRQ saves the same frame as the EL1h IRQ.  The GIC
  * dispatcher owns IAR/EOI; the frame is returned through the shared
