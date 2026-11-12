@@ -97,7 +97,7 @@ endif
 # unchanged engine does not rebuild.
 $(DOOM_SOURCE_STAMP): $(DOOM_MANIFEST) $(DOOM_SOURCES_MK) $(DOOM_PATCHES) FORCE
 	@mkdir -p $(dir $@)
-	@+$(SHELL) -ec '\
+	@$(SHELL) -ec '\
 	  upstream="$(DOOM_UPSTREAM)"; \
 	  private="$(DOOM_PRIVATE_DIR)"; \
 	  test -e "$$upstream/.git" || { \
@@ -122,7 +122,7 @@ $(DOOM_SOURCE_STAMP): $(DOOM_MANIFEST) $(DOOM_SOURCES_MK) $(DOOM_PATCHES) FORCE
 	    for p in $(DOOM_PATCHES); do sha256sum "$$p"; done; \
 	    printf "revision: %s\n" "$$head"; \
 	    printf "defs: %s\n" "$(DOOM_ENGINE_DEFS)"; \
-	    printf "units: %s\n" "$(DOOM_GENERIC_UNITS)"; \
+	    printf "units: %s\n" "$(DOOMGENERIC_UNITS)"; \
 	    printf "cflags: %s\n" "$(DOOM_ENGINE_CFLAGS)"; \
 	    printf "toolchain: %s\n" "$$($(EFFECTIVE_CC) --version 2>/dev/null | head -1)"; \
 	  } | sha256sum | cut -d" " -f1 ); \
@@ -134,7 +134,7 @@ $(DOOM_SOURCE_STAMP): $(DOOM_MANIFEST) $(DOOM_SOURCES_MK) $(DOOM_PATCHES) FORCE
 	    echo "  [doom] engine inputs changed, refreshing the private copy"; \
 	    mkdir -p "$$private"; \
 	    cp -a "$$upstream/." "$$private/"; \
-	    rm -f "$$private/.git"; \
+	    rm -rf "$$private/.git"; \
 	    for p in $(DOOM_PATCHES); do \
 	      echo "  [doom] applying $$(basename $$p)"; \
 	      patch -p1 -d "$$private" --batch --forward --fuzz=0 < "$$p" || { \
@@ -160,6 +160,21 @@ DOOM_OBJECTS := $(patsubst %.c,$(DOOM_OBJ_DIR)/%.o,$(DOOMGENERIC_UNITS))
 # prerequisite (not an order-only one) so the .d machinery resolves the
 # unit to the right translation unit instead of inventing a "<unit>.d.o"
 # intermediate.
+#
+# The exact unit rules below make the sources *makeable*.  Without them a
+# parallel make (-j) evaluates the object patterns before the stamp has
+# run, sees a prerequisite with no rule, and fails the whole archive with
+# "No rule to make target .../<unit>.c".  .SECONDARY keeps make from
+# deleting the materialized sources as intermediate files when it exits.
+DOOM_SOURCES := $(patsubst %,$(DOOM_PRIVATE_DIR)/doomgeneric/%,$(DOOMGENERIC_UNITS))
+
+$(DOOM_SOURCES): $(DOOM_SOURCE_STAMP)
+	@test -f $@ || { \
+	    echo "ERROR: the doomgeneric private copy is missing $@"; \
+	    exit 1; }
+
+.SECONDARY: $(DOOM_SOURCES)
+
 $(DOOM_OBJ_DIR)/%.o: $(DOOM_SOURCE_STAMP) $(DOOM_PRIVATE_DIR)/doomgeneric/%.c
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(DOOM_ENGINE_CFLAGS) -MMD -MP -c $(DOOM_PRIVATE_DIR)/doomgeneric/$*.c -o $@
