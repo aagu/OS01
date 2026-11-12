@@ -346,7 +346,16 @@ ffff0000400a2ba4 T arch_intr_bad_event
 ffff0000400a2bd0 T aarch64_el1_sync_fatal
 ffff0000400a3000 T exception_vectors
 ffff0000400a3800 T el1_irq_entry
+ffff0000400a3864 t restore_pt_regs
 ffff0000400a3900 T el1_sync_entry
+ffff0000400a3a00 t el0_irq_entry
+ffff0000400a3b00 t el0_sync_entry
+ffff0000400a3c00 T aarch64_el0_irq
+ffff0000400a3d00 T aarch64_el0_sync_route
+ffff0000400a3e00 T aarch64_user_task_sync
+ffff0000400a3f00 T aarch64_user_image_load
+ffff0000400a4000 T aarch64_user_task_spawn
+ffff0000400a4100 T aarch64_pt_root_unpublish_local
 ffff0000400971f4 T gic_dev_current
 ffff0000400978d4 T gic_dev_dispatch
 ffff0000400a0a80 T arch_early_putc
@@ -354,7 +363,9 @@ ffff0000400a0a84 T arch_early_puts
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
-# 5 (+0x280, EL1h IRQ) branch to the real entries, the rest self-loop.
+# 5 (+0x280, EL1h IRQ) branch to the real entries, slots 8 (+0x400, EL0
+# sync) and 9 (+0x480, EL0 IRQ) to the lower-EL entries, the rest
+# self-loop.
 _SLOTS = []
 for _i in range(16):
     _addr = 0xFFFF0000400A3000 + _i * 0x80
@@ -364,6 +375,12 @@ for _i in range(16):
     elif _i == 5:
         _line = (f"ffff0000{0x400a3000 + 0x280:08x}: 14000160     \t"
                  f"b\t0xffff0000400a3800 <el1_irq_entry>")
+    elif _i == 8:
+        _line = (f"ffff0000{0x400a3000 + 0x400:08x}: 14000180     \t"
+                 f"b\t0xffff0000400a3b00 <el0_sync_entry>")
+    elif _i == 9:
+        _line = (f"ffff0000{0x400a3000 + 0x480:08x}: 14000140     \t"
+                 f"b\t0xffff0000400a3a00 <el0_irq_entry>")
     else:
         _line = (f"ffff0000{0x400a3000 + _i * 0x80:08x}: 14000000     \t"
                  f"b\t0xffff0000{0x400a3000 + _i * 0x80:08x} "
@@ -419,6 +436,63 @@ ffff0000400a2bb4: d5034fdf     	msr	DAIFSet, #0xf
 ffff0000400a2bbc: 97fff7b2     	bl	0xffff0000400a0a84 <arch_early_puts>
 ffff0000400a2bc4: 97fff7af     	bl	0xffff0000400a0a80 <arch_early_putc>
 ffff0000400a2bc8: d503207f     	wfi
+
+ffff0000400a3a00 <el0_irq_entry>:
+ffff0000400a3a00: d10443ff     	sub	sp, sp, #0x110
+ffff0000400a3a04: a90007e0     	stp	x0, x1, [sp]
+ffff0000400a3a5c: 910003e0     	mov	x0, sp
+ffff0000400a3a60: 97ffbfbe     	bl	0xffff0000400a3c00 <aarch64_el0_irq>
+ffff0000400a3a64: 17ffffa0     	b	0xffff0000400a3864 <restore_pt_regs>
+
+ffff0000400a3b00 <el0_sync_entry>:
+ffff0000400a3b00: d10443ff     	sub	sp, sp, #0x110
+ffff0000400a3b04: a90007e0     	stp	x0, x1, [sp]
+ffff0000400a3b5c: 910003e0     	mov	x0, sp
+ffff0000400a3b60: d5385201     	mrs	x1, ESR_EL1
+ffff0000400a3b64: d5386002     	mrs	x2, FAR_EL1
+ffff0000400a3b68: 97ffe532     	bl	0xffff0000400a3d00 <aarch64_el0_sync_route>
+ffff0000400a3b6c: 35ffefc0     	cbnz	w0, 0xffff0000400a3864 <restore_pt_regs>
+ffff0000400a3b70: d5034fdf     	msr	DAIFSet, #0xf
+ffff0000400a3b74: d503207f     	wfi
+
+ffff0000400a3c00 <aarch64_el0_irq>:
+ffff0000400a3c00: d10183ff     	sub	sp, sp, #0x60
+ffff0000400a3c04: f9002bf3     	str	x19, [sp, #0x50]
+ffff0000400a3c08: aa0003f3     	mov	x19, x0
+ffff0000400a3c0c: 910023e0     	add	x0, sp, #0x8
+ffff0000400a3c10: aa1303e1     	mov	x1, x19
+ffff0000400a3c14: a9047bfd     	stp	x29, x30, [sp, #0x40]
+ffff0000400a3c18: 910103fd     	add	x29, sp, #0x40
+ffff0000400a3c1c: 97ffff60     	bl	0xffff000040097a74 <aarch64_intr_decode_irq>
+ffff0000400a3c20: 52809008     	mov	w8, #0x480      // =1152
+ffff0000400a3c24: 910023e0     	add	x0, sp, #0x8
+ffff0000400a3c28: aa1303e1     	mov	x1, x19
+ffff0000400a3c2c: f90017e8     	str	x8, [sp, #0x28]
+ffff0000400a3c30: 97ffe506     	bl	0xffff000040094104 <arch_intr_dispatch>
+ffff0000400a3c34: a9447bfd     	ldp	x29, x30, [sp, #0x40]
+ffff0000400a3c38: f9402bf3     	ldr	x19, [sp, #0x50]
+ffff0000400a3c3c: 910183ff     	add	sp, sp, #0x60
+ffff0000400a3c40: d65f03c0     	ret
+
+ffff0000400a3d00 <aarch64_el0_sync_route>:
+ffff0000400a3d00: a9bd7bfd     	stp	x29, x30, [sp, #-0x30]!
+ffff0000400a3d04: f9000bf5     	str	x21, [sp, #0x10]
+ffff0000400a3d08: aa0003f5     	mov	x21, x0
+ffff0000400a3d0c: 910003fd     	mov	x29, sp
+ffff0000400a3d10: a9024ff4     	stp	x20, x19, [sp, #0x20]
+ffff0000400a3d14: aa0203f3     	mov	x19, x2
+ffff0000400a3d18: aa0103f4     	mov	x20, x1
+ffff0000400a3d1c: b4000460     	cbz	x0, 0xffff0000400a3d90 <aarch64_el0_sync_route+0x90>
+ffff0000400a3d50: aa1503e0     	mov	x0, x21
+ffff0000400a3d54: aa1403e1     	mov	x1, x20
+ffff0000400a3d58: aa1303e2     	mov	x2, x19
+ffff0000400a3d5c: 9400000a     	bl	0xffff0000400a3e00 <aarch64_user_task_sync>
+ffff0000400a3d60: 52800020     	mov	w0, #0x1        // =1
+ffff0000400a3d64: d65f03c0     	ret
+ffff0000400a3d90: aa1503e0     	mov	x0, x21
+ffff0000400a3d94: aa1403e1     	mov	x1, x20
+ffff0000400a3d98: aa1303e2     	mov	x2, x19
+ffff0000400a3d9c: 94001698     	bl	0xffff0000400a2bd0 <aarch64_el1_sync_fatal>
 """
 
 
@@ -681,7 +755,9 @@ class IntrDispatchAuditToolTests(IntrDispatchAuditFixture):
         syms = obj_calls[0][1].split("=", 1)[1].split(",")
         for sym in ("exception_vectors", "el1_sync_entry",
                     "aarch64_el1_sync", "arch_intr_dispatch",
-                    "arch_intr_handle_irq"):
+                    "arch_intr_handle_irq", "el0_sync_entry",
+                    "el0_irq_entry", "aarch64_el0_sync_route",
+                    "aarch64_el0_irq"):
             self.assertIn(sym, syms)
 
     def test_unknown_profile_is_rejected(self):
@@ -1038,6 +1114,159 @@ class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
             with self.subTest(addr=hex(addr)):
                 self.stage_x86(disasm_text=_mutate(X86_DISASM, addr, before, after))
                 self.assertTrue(any("selector" in e for e in self.audit()))
+
+
+# ────────────────────────────────────────────────────────────────────
+# The M4 formal EL0 user task: vector slots, low-EL routing, the
+# formal entry points and the probe/test symbol exclusion.
+# ────────────────────────────────────────────────────────────────────
+
+
+class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
+    """The lower-EL (EL0) side of the production aarch64 image.
+
+    This class owns the M4 wiring: the ``+0x400`` / ``+0x480`` vector
+    slots, the low-EL routing chain (``el0_sync_entry`` →
+    ``aarch64_el0_sync_route`` → ``aarch64_user_task_sync`` and
+    ``el0_irq_entry`` → ``aarch64_el0_irq`` → ``arch_intr_dispatch``),
+    the three formal entry points and the exclusion of the legacy
+    probe / test-only / embedded-test-ELF symbols.
+    """
+
+    def test_expected_world_passes(self):
+        self.stage_a64()
+        self.assertEqual(self.audit(), [])
+
+    def test_el0_wiring_is_resolved_to_the_expected_symbols(self):
+        # The positive side: the audit must *resolve* every new edge to
+        # its expected symbol and report it by name and shape — not
+        # merely report no violation.
+        self.stage_a64()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        for expected in ("vector slot +0x400 -> el0_sync_entry",
+                         "vector slot +0x480 -> el0_irq_entry",
+                         "edge el0_sync_entry -> aarch64_el0_sync_route (bl)",
+                         "edge el0_irq_entry -> aarch64_el0_irq (bl)",
+                         "edge aarch64_el0_sync_route -> "
+                         "aarch64_user_task_sync (bl)",
+                         "edge aarch64_el0_irq -> arch_intr_dispatch (bl)",
+                         "formal EL0 entry aarch64_user_image_load",
+                         "formal EL0 entry aarch64_user_task_spawn",
+                         "formal EL0 entry aarch64_pt_root_unpublish_local"):
+            self.assertTrue(any(expected in n for n in notes),
+                            (expected, notes))
+
+    def test_el0_vector_slot_branches_to_wrong_entry_fails(self):
+        # The +0x400 (EL0 sync) slot no longer targets el0_sync_entry:
+        # the lower-EL sync vector is mis-wired.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3400,
+            "b\t0xffff0000400a3b00 <el0_sync_entry>",
+            "b\t0xffff0000400a3800 <el1_irq_entry>"))
+        errors = self.audit()
+        self.assertTrue(any("+0x400" in e and "el0_sync_entry" in e
+                            for e in errors), errors)
+
+    def test_el0_irq_vector_slot_branches_to_wrong_entry_fails(self):
+        # The +0x480 (EL0 IRQ) slot no longer targets el0_irq_entry.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3480,
+            "b\t0xffff0000400a3a00 <el0_irq_entry>",
+            "b\t0xffff0000400a3900 <el1_sync_entry>"))
+        errors = self.audit()
+        self.assertTrue(any("+0x480" in e and "el0_irq_entry" in e
+                            for e in errors), errors)
+
+    def test_el0_sync_entry_routes_to_the_wrong_handler_fails(self):
+        # el0_sync_entry's bl no longer reaches aarch64_el0_sync_route:
+        # the lower-EL sync vector bypasses the low-EL route.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3B68,
+            "bl\t0xffff0000400a3d00 <aarch64_el0_sync_route>",
+            "bl\t0xffff0000400a3e00 <aarch64_user_task_sync>"))
+        errors = self.audit()
+        self.assertTrue(any("el0_sync_entry" in e and
+                            "aarch64_el0_sync_route" in e
+                            for e in errors), errors)
+
+    def test_el0_sync_route_missing_the_user_task_handler_fails(self):
+        # aarch64_el0_sync_route no longer calls aarch64_user_task_sync:
+        # the formal user-task handler is unreachable.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3D5C,
+            "bl\t0xffff0000400a3e00 <aarch64_user_task_sync>",
+            "bl\t0xffff0000400a2bd0 <aarch64_el1_sync_fatal>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_el0_sync_route" in e and
+                            "aarch64_user_task_sync" in e
+                            for e in errors), errors)
+
+    def test_el0_irq_adapter_bypassing_the_dispatcher_fails(self):
+        # aarch64_el0_irq no longer calls arch_intr_dispatch: the
+        # lower-EL IRQ path skips the common dispatcher.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3C30,
+            "bl\t0xffff000040094104 <arch_intr_dispatch>",
+            "bl\t0xffff0000400a2ba4 <arch_intr_bad_event>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_el0_irq" in e and
+                            "arch_intr_dispatch" in e
+                            for e in errors), errors)
+
+    def test_probe_symbol_in_the_production_image_fails(self):
+        # The legacy M4 probe entry point is linked into a production
+        # image: the probe scaffolding leaked.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5000 T aarch64_el0_enter\n")
+        errors = self.audit()
+        self.assertTrue(any("probe leak" in e and
+                            "aarch64_el0_enter" in e
+                            for e in errors), errors)
+
+    def test_test_only_hook_in_the_production_image_fails(self):
+        # A test observation hook is linked into a production image.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5200 T aarch64_user_task_test_pid\n")
+        errors = self.audit()
+        self.assertTrue(any("test symbol leak" in e and
+                            "aarch64_user_task_test_pid" in e
+                            for e in errors), errors)
+
+    def test_embedded_test_elf_in_the_production_image_fails(self):
+        # The embedded aarch64 test ELF is linked into a production
+        # image.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5100 D _binary_aarch64_el0_elf_start\n")
+        errors = self.audit()
+        self.assertTrue(any("embedded test ELF leak" in e and
+                            "_binary_aarch64_el0_elf_start" in e
+                            for e in errors), errors)
+
+    def test_production_font_blob_is_not_a_test_elf_leak(self):
+        # The production font blob is an embedded binary, but it is NOT
+        # a test ELF: it must not trip the exclusion rule.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400c0738 D _binary_kernel_font_psf_start\n")
+        self.assertEqual(self.audit(), [])
+
+    def test_missing_formal_user_task_entry_fails(self):
+        # The formal user-task spawn is not linked at all.
+        self.stage_a64(nm_text=A64_NM.replace(
+            "ffff0000400a4000 T aarch64_user_task_spawn\n", ""))
+        errors = self.audit()
+        self.assertTrue(any("formal EL0 entry" in e and
+                            "aarch64_user_task_spawn" in e
+                            for e in errors), errors)
+
+    def test_duplicate_formal_user_task_entry_fails(self):
+        # The formal user-task spawn is linked twice.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5300 T aarch64_user_task_spawn\n")
+        errors = self.audit()
+        self.assertTrue(any("formal EL0 entry" in e and
+                            "aarch64_user_task_spawn" in e
+                            for e in errors), errors)
 
 
 # ────────────────────────────────────────────────────────────────────

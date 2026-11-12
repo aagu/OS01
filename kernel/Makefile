@@ -104,6 +104,11 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_sched_tick.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c \
                    fs/elf_layout.c
+ifeq ($(AARCH64_EL0_TEST),1)
+# The M4 user-task acceptance case and its static fixture images exist
+# only in the EL0 test variant.
+KERNEL_C_SOURCES += selftest/test_aarch64_user_task.c
+endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
 # AARCH64_EL0_TEST alike), so it is NOT gated on the EL0 test variant.
@@ -286,6 +291,9 @@ ASM_OBJECTS     := $(patsubst %.S,$(BUILD_DIR)/%.o,$(ALL_S_SOURCES))
 KERNEL_EXTRA_OBJECTS ?=
 ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_el0_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_a_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_b_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_c_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -653,6 +661,46 @@ $(BUILD_DIR)/generated/aarch64_el0.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_e
 	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
 
 $(BUILD_DIR)/generated/aarch64_el0_image.o: $(BUILD_DIR)/generated/aarch64_el0.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+# ── M4 user-task fixtures ───────────────────────────────────────
+# One source, three images: the fixture id, the data value and the
+# payload mode are compile-time constants, so A, B and the replacement
+# image share the SAME VA layout and differ only in their data.
+# A: exec sequence after the yields.  B: guard access.  C: leave.
+AARCH64_USER_TASK_FIXTURES := a b c
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_task_a.o: selftest/fixtures/aarch64_user_task.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FIXTURE_ID=1 -DUSER_FIXTURE_VALUE=0xa1a1 -DUSER_FIXTURE_MODE=0 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_task_b.o: selftest/fixtures/aarch64_user_task.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FIXTURE_ID=2 -DUSER_FIXTURE_VALUE=0xb2b2 -DUSER_FIXTURE_MODE=1 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_task_c.o: selftest/fixtures/aarch64_user_task.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FIXTURE_ID=3 -DUSER_FIXTURE_VALUE=0xc3c3 -DUSER_FIXTURE_MODE=2 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_task_a.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_task_a.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_task_b.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_task_b.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_task_c.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_task_c.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_task_a_image.o: $(BUILD_DIR)/generated/aarch64_user_task_a.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_task_b_image.o: $(BUILD_DIR)/generated/aarch64_user_task_b.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_task_c_image.o: $(BUILD_DIR)/generated/aarch64_user_task_c.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 

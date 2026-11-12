@@ -48,7 +48,15 @@ aarch64:
      ``gic_*`` target) — the handler table itself is deliberately not
      statically parsed (controller boundary, spec §9.1);
   5. strong definition uniqueness, early-chain forbiddances and
-     cross-ISA rules as on x86; ``PT_REGS_SIZE`` stays 34*8.
+     cross-ISA rules as on x86; ``PT_REGS_SIZE`` stays 34*8;
+  6. the lower-EL (EL0) vector slots (+0x400 / +0x480) branch to
+     ``el0_sync_entry`` / ``el0_irq_entry``; the low-EL sync route
+     reaches the formal user-task handler (``aarch64_user_task_sync``)
+     and the low-EL IRQ adapter reaches the common dispatcher;
+  7. the formal EL0 entry points (user-image loader, user-task spawn,
+     runtime root revocation) are linked exactly once, and none of the
+     legacy M4 probe, test-only or embedded-test-ELF symbols may
+     appear in a production image.
 """
 
 from __future__ import annotations
@@ -520,6 +528,8 @@ _A64_DISASM_SYMS = (
      "aarch64_intr_decode_sync", "arch_intr_dispatch",
      "arch_intr_handle_sync", "arch_intr_handle_irq",
      "arch_intr_bad_event"]
+    + ["el0_sync_entry", "el0_irq_entry",
+       "aarch64_el0_sync_route", "aarch64_el0_irq"]
 )
 
 
@@ -1062,6 +1072,166 @@ _PT_REGS_RE = re.compile(
     r"#define\s+PT_REGS_SIZE\s+\(34\s*\*\s*8\)")
 
 
+# ─────────────────────────────────────────────────────────────────
+# M4: the formal EL0 user task (production aarch64 image)
+# ─────────────────────────────────────────────────────────────────
+
+# The formal EL0 entry points a production image must link exactly
+# once: the user-image loader, the user-task spawn and the runtime
+# revocation of a published page-table root.
+_A64_REQUIRED_EXACT = (
+    "aarch64_user_image_load",
+    "aarch64_user_task_spawn",
+    "aarch64_pt_root_unpublish_local",
+)
+
+# The legacy M4 probe entry points.  Every one of them lives behind
+# ``#if AARCH64_EL0_TEST``; a production image must not carry them.
+_A64_FORBIDDEN_PROBE_SYMS = (
+    "aarch64_el0_enter",
+    "aarch64_user_elf_load",
+    "aarch64_user_elf_destroy",
+    "aarch64_el0_run",
+    "aarch64_el0_run_kthread",
+    "aarch64_el0_run_pair",
+    "aarch64_el0_swap",
+    "aarch64_el0_probe_active",
+    "aarch64_el0_probe_sync",
+)
+
+# The test-only observation / fault-injection hooks.
+_A64_FORBIDDEN_TEST_SYMS = (
+    "aarch64_user_task_test_stats",
+    "aarch64_user_task_test_reset_stats",
+    "aarch64_user_task_test_note_switch",
+    "aarch64_user_task_test_note_el0_irq",
+    "aarch64_user_task_test_note_image",
+    "aarch64_user_task_test_set_arm_tick",
+    "aarch64_user_task_test_mark",
+    "aarch64_user_task_test_pid",
+    "aarch64_user_task_test_switch_count",
+    "aarch64_user_image_test_arm_fail",
+)
+
+# An embedded test ELF is linked as ``_binary_<name>_start`` /
+# ``_end`` / ``_size``.  Only the *aarch64 test* ELFs are forbidden:
+# the production font blob (``_binary_kernel_font_psf_*``) is a
+# legitimate asset and must never be flagged.
+_A64_FORBIDDEN_ELF_PREFIXES = ("_binary_aarch64_",)
+
+# The low-EL (EL0) routing chain the formal user task depends on:
+#   VBAR +0x400 → el0_sync_entry → aarch64_el0_sync_route
+#                                  → aarch64_user_task_sync
+#   VBAR +0x480 → el0_irq_entry  → aarch64_el0_irq
+#                                  → arch_intr_dispatch
+_A64_EL0_ROUTES = (
+    ("el0_sync_entry", "aarch64_el0_sync_route",
+     "the lower-EL sync entry must route through aarch64_el0_sync_route"),
+    ("el0_irq_entry", "aarch64_el0_irq",
+     "the lower-EL IRQ entry must route through aarch64_el0_irq"),
+    ("aarch64_el0_sync_route", "aarch64_user_task_sync",
+     "the low-EL sync route must reach the formal user-task handler "
+     "aarch64_user_task_sync"),
+    ("aarch64_el0_irq", "arch_intr_dispatch",
+     "the low-EL IRQ adapter must reach the common dispatcher "
+     "arch_intr_dispatch"),
+)
+
+
+def _audit_aarch64_el0_routes(blocks, symtab, errors, notes):
+    """Prove the low-EL (EL0) routing chain is really linked.
+
+    Each edge must be a direct ``bl`` that resolves — through the ELF
+    symbol table — to the expected production symbol.  A missing or
+    unresolvable target is a failure: an unprovable edge is never a
+    success.
+    """
+    for source, target, why in _A64_EL0_ROUTES:
+        instrs = _block(blocks, source, errors, "low-EL routing chain")
+        if instrs is None:
+            continue
+        edges = a64_edges(instrs, symtab)
+        calls = {e.target for e in edges if e.kind == "call" and e.target}
+        if target not in calls:
+            errors.append(f"edge {source} -> {target}: not proven — {why} "
+                          f"(found {sorted(calls) or 'no resolvable bl target'})")
+        else:
+            notes.append(f"edge {source} -> {target} (bl)")
+
+
+def _audit_aarch64_formal_entries(symtab, errors, notes):
+    """The formal EL0 entry points must be linked exactly once.
+
+    Same semantics as the backend-uniqueness rule: exactly one strong
+    definition (any type outside ``_WEAK_TYPES`` / ``_UNDEF_TYPES`` —
+    T/t/D/B) and no weak alias.
+    """
+    for name in _A64_REQUIRED_EXACT:
+        strong = symtab.strong_defs(name)
+        weak = symtab.weak_defs(name)
+        if not strong:
+            errors.append(f"formal EL0 entry: {name} has no strong "
+                          "definition in the production aarch64 image")
+        elif len(strong) > 1:
+            errors.append(f"formal EL0 entry: {name} has {len(strong)} "
+                          f"strong definitions "
+                          f"({[hex(a) for a, _ in strong]})")
+        elif weak:
+            errors.append(f"formal EL0 entry: {name} has {len(weak)} weak "
+                          "definition(s)")
+        else:
+            notes.append(f"formal EL0 entry {name} @ 0x{strong[0][0]:x} "
+                         f"(type {strong[0][1]}) — unique, no weak")
+
+
+def _audit_aarch64_no_probe_leak(symtab, errors, notes):
+    """No legacy probe, test-only hook or embedded test ELF may be linked.
+
+    Presence is judged on the ELF's *strong* definitions: a ``T``/``t``
+    text symbol or a ``D``/``B`` data symbol means the code or the
+    object really is in the image.  A weak definition (``V``/``v``/
+    ``W``/``w``) is **not** counted — the script's own ``_WEAK_TYPES``
+    semantics treat it as a non-definition (``strong_defs()`` skips
+    it, exactly as ``_check_backend_uniqueness`` does) and a weak alias
+    carries no implementation of its own.  An undefined entry
+    (``U``/``u``) is a reference, not a definition, and is skipped for
+    the same reason.
+    """
+    leaks = 0
+    for name in _A64_FORBIDDEN_PROBE_SYMS:
+        strong = symtab.strong_defs(name)
+        if strong:
+            leaks += 1
+            errors.append(f"probe leak: {name} is defined in the "
+                          f"production aarch64 image "
+                          f"({[hex(a) for a, _ in strong]}) — the legacy "
+                          "M4 probe entry points are gated by "
+                          "#if AARCH64_EL0_TEST and must not be linked")
+    for name in _A64_FORBIDDEN_TEST_SYMS:
+        strong = symtab.strong_defs(name)
+        if strong:
+            leaks += 1
+            errors.append(f"test symbol leak: {name} is defined in the "
+                          f"production aarch64 image "
+                          f"({[hex(a) for a, _ in strong]}) — the test "
+                          "observation / fault-injection hooks are gated "
+                          "by #if AARCH64_EL0_TEST and must not be linked")
+    for name in sorted(symtab.entries):
+        if not any(name.startswith(prefix)
+                   for prefix in _A64_FORBIDDEN_ELF_PREFIXES):
+            continue
+        strong = symtab.strong_defs(name)
+        if strong:
+            leaks += 1
+            errors.append(f"embedded test ELF leak: {name} is defined in "
+                          f"the production aarch64 image "
+                          f"({[hex(a) for a, _ in strong]}) — the embedded "
+                          "aarch64 test ELF must not be linked")
+    if not leaks:
+        notes.append("no legacy probe / test-only / embedded test ELF "
+                     "symbol in the production aarch64 image")
+
+
 def _audit_aarch64(symtab, blocks, order, repo: Path,
                    errors, notes) -> None:
     # 1. vector-table geometry: 2 KiB alignment, 16 slots, 128-byte
@@ -1087,7 +1257,9 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
                               f"+0x{i * 0x80:x} (16 slots at 128-byte "
                               "stride required)")
         for off, want in ((0x200, "el1_sync_entry"),
-                          (0x280, "el1_irq_entry")):
+                          (0x280, "el1_irq_entry"),
+                          (0x400, "el0_sync_entry"),
+                          (0x480, "el0_irq_entry")):
             ins = by_addr.get(vec + off)
             if ins is None:
                 continue
@@ -1232,6 +1404,17 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
         notes.append("source: PT_REGS_SIZE (34*8), .balign 0x800 and "
                      "the el1_sync_entry -> aarch64_el1_sync call "
                      "pinned")
+
+    # 9. the lower-EL (EL0) routing chain: the EL0 vector slots are
+    #    wired in section 1; the route itself must reach the formal
+    #    user-task handler and the common dispatcher.
+    _audit_aarch64_el0_routes(blocks, symtab, errors, notes)
+
+    # 10. the formal EL0 entry points are linked exactly once.
+    _audit_aarch64_formal_entries(symtab, errors, notes)
+
+    # 11. no legacy probe / test-only / embedded test ELF leaks.
+    _audit_aarch64_no_probe_leak(symtab, errors, notes)
 
 
 # ─────────────────────────────────────────────────────────────────
