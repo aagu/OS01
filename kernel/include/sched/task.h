@@ -99,6 +99,12 @@ typedef struct mm_struct
     list_t   vma_list;    // sorted by vm_start
     uint64_t mmap_base;   // start search address for mmap
     spinlock_T lock;      // guards munmap/MAP_FIXED/mprotect vs getrandom write
+
+    // ── AArch64 anonymous-VM residency (M4) ─────────────
+    // Sparse user_vm_page_t chain sorted by va, one node per
+    // committed anonymous page.  Zero-initialised (NULL links, not a
+    // circular list); the x86 build leaves it empty forever.
+    list_t   resident_list;
 } mm_t;
 
 // thread_t is architecture-specific and lives in the per-arch context

@@ -91,6 +91,7 @@ int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,
     out->ehdr = (elf64_ehdr_t){0};
     out->phdrs = NULL;
     out->phnum = 0;
+    out->heap_base = 0;
 
     if (!bytes || size < sizeof(elf64_ehdr_t))
         return -ENOEXEC;
@@ -126,6 +127,7 @@ int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,
         aarch64_elf_view_release(out);
         return -ENOEXEC;
     }
+    out->heap_base = layout.heap_base;
     return 0;
 }
 
@@ -137,6 +139,7 @@ void aarch64_elf_view_release(struct aarch64_elf_view *view)
         kfree(view->phdrs);
     view->phdrs = NULL;
     view->phnum = 0;
+    view->heap_base = 0;
 }
 
 #if AARCH64_EL0_TEST

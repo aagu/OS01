@@ -25,6 +25,7 @@
 #include <memory/memory.h>                /* PAGE_4K_SIZE */
 #include <memory/pmm.h>                   /* alloc/free 4k pages */
 #include <memory/slab.h>                  /* kmalloc / kfree */
+#include <memory/user_vm.h>               /* policy metadata predicate */
 #include <sched/task.h>                   /* mm_t layout + init_mm */
 
 typedef struct user_mm_record {
@@ -209,6 +210,13 @@ int aarch64_user_mm_destroy(mm_t *mm)
      * registration and mm untouched (a partially-scanned empty subtree
      * in front of the leaf stays intact). */
     if (user_mm_scan_no_leaves(root, 0))
+        return -EBUSY;
+
+    /* A leaf-free root may still carry anonymous-VM metadata (a VMA
+     * or a resident record).  The image destroy path releases that
+     * before calling here; refusing keeps the ownership split honest
+     * instead of silently dropping a page record. */
+    if (user_vm_has_metadata(mm))
         return -EBUSY;
 
     /* Scan passed: revoke the registration. */

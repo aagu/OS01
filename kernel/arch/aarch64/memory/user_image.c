@@ -24,6 +24,7 @@
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/slab.h>
+#include <memory/user_vm.h>
 #include <memory/vmm.h>
 #include <sched/task.h>                     /* mm_t layout */
 
@@ -105,6 +106,13 @@ int aarch64_user_image_load(const void *bytes, size_t size,
     }
     image->root_pa = (uint64_t)(uintptr_t)image->mm->pgdir;
     image->entry = view.ehdr.e_entry;
+
+    /* Install the empty heap VMA before the first ELF leaf exists:
+     * the brk window is part of the image contract, and a failure
+     * here must take the same full-image rollback as a bad segment. */
+    rc = user_vm_init_heap(image->mm, view.heap_base);
+    if (rc)
+        goto fail;
 
     /* The M3 entries take the direct-map root pointer; mm->pgdir holds
      * the root PA. */
@@ -209,6 +217,11 @@ void aarch64_user_image_destroy(struct aarch64_user_image *image)
             vmm_gate_violation("user image root is still busy");
             return;
         }
+
+        /* Anonymous pages and their VMA metadata go first: they are
+         * policy-owned, while the ELF/stack leaves below belong to
+         * this manifest.  The root is already detached. */
+        user_vm_destroy(mm);
 
         for (unsigned i = image->map_count; i > 0; i--) {
             uint64_t pa = 0;

@@ -68,6 +68,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_aarch64_pt_locks.elf \
     $(TEST_BLD)/test_aarch64_pt_2m_block.elf \
     $(TEST_BLD)/test_aarch64_backend_4k.elf \
+    $(TEST_BLD)/test_user_vm.elf \
     $(TEST_BLD)/test_vmm_replace_protocol.elf \
     $(TEST_BLD)/test_vmm_prot_none.elf \
     $(TEST_BLD)/test_vmm_ack_wraparound.elf \
@@ -730,6 +731,65 @@ $(TEST_BLD)/test_aarch64_backend_4k.elf: \
 
 .PHONY: test_aarch64_backend_4k
 test_aarch64_backend_4k: $(TEST_BLD)/test_aarch64_backend_4k.elf
+	$<
+
+# ── AArch64 M4 anonymous-VM policy (real policy + vm_area + adapter) ──
+USER_VM_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                       -I$(TEST_MOCK)/page_table_aarch64_include \
+                       -I$(TESTS_DIR)/kernel/include \
+                       -include $(TEST_MOCK)/user_vm_runtime.h \
+                       -I$(TEST_MOCK) -I$(TEST_INC)
+
+$(TEST_BLD)/user_vm_policy_production.o: $(TESTS_DIR)/kernel/memory/user_vm.c \
+		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/vm_area_user_vm_production.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
+
+# The REAL AArch64 leaf adapter, compiled with the aarch64 page-table
+# host flags and linked against the fake M3 backend in the runtime.
+$(TEST_BLD)/user_vm_leaf_adapter.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm.c \
+		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/user_vm_runtime.o: $(TEST_MOCK)/user_vm_runtime.c \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_user_vm.o: $(TEST_CASES)/test_user_vm.c \
+		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) \
+		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
+		$(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_user_vm.elf: \
+		$(TEST_BLD)/test_user_vm.o \
+		$(TEST_BLD)/user_vm_policy_production.o \
+		$(TEST_BLD)/vm_area_user_vm_production.o \
+		$(TEST_BLD)/user_vm_leaf_adapter.o \
+		$(TEST_BLD)/user_vm_runtime.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-user-vm
+test-user-vm: $(TEST_BLD)/test_user_vm.elf
 	$<
 
 $(TEST_BLD)/test_vmm_replace_protocol.o: $(TEST_CASES)/test_vmm_replace_protocol.c \
