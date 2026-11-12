@@ -7,7 +7,8 @@ HOST_TEST_JOBS ?= 1
 EXIT_STATUS_FLAGS := $(foreach b,$(TEST_EXIT_STATUS_BINS),--exit-status $(basename $(notdir $(b))))
 
 .PHONY: run check-test-bins-dup
-run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) check-test-bins-dup check-registry-unique
+run: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) $(LIBC_HOST_ORACLES) \
+		check-test-bins-dup check-registry-unique
 	@echo ""
 	@echo "=============================================="
 	@echo "  OS01 Host-Based Test Suite"

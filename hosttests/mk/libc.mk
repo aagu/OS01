@@ -1,5 +1,18 @@
 # ── Libc Subsystem Host Tests (spec §5) ────────────────────────
 
+# Shared host oracle binaries.  These are separate host programs built
+# with the HOST compiler and no OS01 code; the strtox/floatscan/scanf/
+# time tests execute them through *_ORACLE_PATH and compare the result
+# with the OS01 implementation.  They are NOT TEST_BINS (the runner must
+# not execute them as tests), so the aggregate `all`/`run` goals must
+# list them explicitly -- otherwise a clean-tree `make test-host` fails
+# every oracle-backed test with "oracle produced only 0 of N rows".
+LIBC_HOST_ORACLES := \
+    $(TEST_BLD)/strtox_oracle \
+    $(TEST_BLD)/floatscan_oracle \
+    $(TEST_BLD)/scanf_oracle \
+    $(TEST_BLD)/time_oracle
+
 $(eval $(call register_host_test,test_libc_string,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_list,libc,protocol-or-legacy))
 $(eval $(call register_host_test,test_libc_vsprintf,libc,protocol-or-legacy))
