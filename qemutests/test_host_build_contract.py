@@ -189,15 +189,51 @@ class HostBuildContractTests(unittest.TestCase):
                          f"expected exactly one sub-make call, got {len(calls)}")
         self.assertIn("test-libc-api", calls[0])
 
+    def _hosttests_dry_run(self, extra_flags=()):
+        """Run the hosttests default goal under `make -n -B` on a PRISTINE build tree.
+
+        The tree is pristine on purpose: CI always starts from an empty
+        build directory, so a dry run must neither execute recipes nor
+        depend on a pre-populated Doom private copy.
+        """
+        build_dir = Path(tempfile.mkdtemp(prefix="host-dry-run-", dir=self.root))
+        cmd = ["make", "-n", "-B", *extra_flags, "-C", "hosttests",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               "BUILD_DIR=" + str(build_dir)]
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR") if k in os.environ}
+        return subprocess.run(cmd, cwd=ROOT, env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=120)
+
     def test_default_goal_builds_full_set(self):
         """Default goal of hosttests builds all protocol and exit-status binaries, but not expected-failure."""
-        # Query hosttests/Makefile default goal via make -n -B
-        cmd = ["make", "-n", "-B", "-C", "hosttests", "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"), "PROFILE=x86_64-clang"]
-        result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        result = self._hosttests_dry_run()
         self.assertEqual(result.returncode, 0, result.stdout)
-        
+
         # Expected-failure must NOT be built by default goal
         self.assertNotIn("test_framework_contract.elf", result.stdout)
+
+    def test_default_goal_parallel_dry_run(self):
+        """A parallel dry run must not report 'No rule to make target' for generated Doom sources."""
+        result = self._hosttests_dry_run(["-j4"])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("No rule to make target", result.stdout)
+
+    def test_default_goal_builds_libc_oracles(self):
+        """The default goal must build the host oracle helpers the libc tests execute.
+
+        The oracles are separate host binaries, not TEST_BINS, so a clean
+        `make test-host` fails every oracle-backed test unless the
+        aggregate goal depends on them explicitly.
+        """
+        result = self._hosttests_dry_run()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for oracle in ("strtox_oracle", "floatscan_oracle",
+                       "scanf_oracle", "time_oracle"):
+            self.assertIn(
+                f"hosttests/oracle/{oracle}.c", result.stdout,
+                f"default hosttests goal does not build {oracle}")
 
     def test_duplicate_id_rejected(self):
         """Duplicate test IDs must be rejected by the registry / check-test-bins-dup."""
