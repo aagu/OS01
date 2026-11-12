@@ -135,7 +135,7 @@ class ApHandoffSourceContract(unittest.TestCase):
         body = src(KTHREAD_C)
         # The aarch64 arch hook relaxes the CPU0-only rejection in T3;
         # the COMMON constructor still validates online + scheduler_ok.
-        self.assertIn('__atomic_load_n(&percpu_data[target_cpu].scheduler_ok',
+        self.assertIn('__atomic_load_n(&percpu_data[cpu].scheduler_ok',
                       body)
 
 
