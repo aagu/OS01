@@ -14,6 +14,11 @@
 #include <stddef.h>
 #include <string.h>
 
+/* The SDM (Table 11-6) defines the combined memory type for up to
+ * three overlapping variable ranges; more is undefined and rejected by
+ * fb_mtrr_decode_range(). */
+#define FB_MTRR_MAX_OVERLAPS 3u
+
 bool fb_mtrr_type_valid(uint64_t type)
 {
     switch (type & 0xFFu) {
@@ -206,16 +211,23 @@ void fb_mtrr_decode_range(const struct fb_mtrr_raw *raw, uint64_t pa, uint64_t s
 
     uint64_t phys_mask = fb_mtrr_phys_mask(raw);
 
-    /* ── Collect the enabled variable ranges that touch the query ── */
+    /* ── Collect the enabled variable ranges that touch the query ──
+     * The SDM defines the outcome for at most FB_MTRR_MAX_OVERLAPS
+     * (three) ranges; a fourth match is rejected below.  One slot past
+     * the defined maximum is therefore enough to collect the matching
+     * ranges and detect the undefined case, where a FB_MTRR_MAX_RANGES
+     * (16) sized array only wastes stack. */
     struct {
         uint64_t lo;
         uint64_t hi;
         uint64_t type;
         uint8_t  idx;
-    } rel[FB_MTRR_MAX_RANGES];
+    } rel[FB_MTRR_MAX_OVERLAPS + 1u];
     unsigned nrel = 0;
 
-    uint64_t cuts[2 * FB_MTRR_MAX_RANGES + 2];
+    /* Two boundaries per collected range, plus the query endpoints
+     * appended after the collection loop. */
+    uint64_t cuts[2u * (FB_MTRR_MAX_OVERLAPS + 1u) + 2u];
     unsigned ncuts = 0;
 
     for (unsigned i = 0; i < raw->range_count; i++) {
@@ -283,7 +295,7 @@ void fb_mtrr_decode_range(const struct fb_mtrr_raw *raw, uint64_t pa, uint64_t s
         rel[nrel].idx = (uint8_t)i;
         nrel++;
 
-        if (nrel > 3u) {
+        if (nrel > FB_MTRR_MAX_OVERLAPS) {
             /* The SDM defines the outcome for up to three overlapping
              * ranges (Table 11-6); for more the result is undefined. */
             out->reason = "more than three variable MTRR ranges overlap "
