@@ -156,7 +156,10 @@ static const struct scan_case scan_cases[] = {
     { "e_empty",     "",        "%d",     { SK_PLAIN, 0, 0, 0 } },
     { "e_mismatch",  "abc",     "%d",     { SK_PLAIN, 0, 0, 0 } },
     { "e_ws_only",   "   ",     "%d",     { SK_PLAIN, 0, 0, 0 } },
-    { "e_c_short",   "ab",      "%3c",    { SK_PLAIN, 0, 0, 0 } },
+    /* NOTE: a %c whose width exceeds the remaining input is NOT listed
+     * here: glibc does not fix that answer across versions (2.39
+     * returns 1, 2.42 returns -1).  OS01's strict answer is asserted
+     * directly in test_libc_scan.c instead. */
 };
 
 #define SCAN_CASE_COUNT ((int)(sizeof(scan_cases) / sizeof(scan_cases[0])))
