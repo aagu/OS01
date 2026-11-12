@@ -35,7 +35,7 @@ include mk/gui.mk
 include mk/doom.mk
 
 .PHONY: all clean
-all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS)
+all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) $(LIBC_HOST_ORACLES)
 
 clean:
 	rm -rf $(TEST_BLD)
