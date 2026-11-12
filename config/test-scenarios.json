@@ -2980,6 +2980,31 @@
    }
   },
   {
+   "id": "sched.syscall.a64_subset",
+   "component": "sched",
+   "behavior": "syscall",
+   "trigger": "host runner invokes test_syscall_dispatch_subset.elf",
+   "assertions": [
+    "test_syscall_dispatch_subset passes all internal assertions",
+    "the OS01_SYSCALL_A64_SUBSET build exposes exactly the four shared native syscall entries"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_syscall_dispatch_subset",
+    "the AArch64 dispatcher table exposes an entry outside the agreed subset"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_syscall_dispatch.c",
+    "selector": "test_syscall_dispatch_subset",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole test of the OS01_SYSCALL_A64_SUBSET configuration: it compiles the same production dispatcher with the AArch64 subset table, while test_syscall_dispatch proves the full table"
+   }
+  },
+  {
    "id": "terminal.terminal.core",
    "component": "terminal",
    "behavior": "terminal",
