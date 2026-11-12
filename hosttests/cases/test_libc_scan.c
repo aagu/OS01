@@ -443,6 +443,19 @@ TEST_FUNC(test_char_and_string_rules) {
     assert_eq('c', buf[2]);
     assert_eq(POISON, buf[3] & 0xff);
 
+    /* A %c whose width exceeds the remaining input is an input failure
+     * in OS01: the characters read so far are stored, but the directive
+     * never completes, so the conversion count is EOF.  glibc does not
+     * fix this answer across versions (2.39 counts the conversion,
+     * 2.42 returns EOF), so it cannot live in the shared oracle table
+     * and is pinned here instead. */
+    memset(buf, POISON, sizeof(buf));
+    n = sscanf("ab", "%3c", buf);
+    assert_eq(-1, n);
+    assert_eq('a', buf[0]);
+    assert_eq('b', buf[1]);
+    assert_eq(POISON, buf[2] & 0xff);
+
     /* %s stops at the whitespace and leaves the NUL behind */
     memset(buf, POISON, sizeof(buf));
     n = sscanf("hello world", "%s", buf);
