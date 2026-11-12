@@ -106,7 +106,13 @@ static void fb_x86_log_page_table_state(uint64_t first_leaf, uint64_t last_leaf,
     uint64_t cr0 = 0;
     __asm__ __volatile__("movq %%cr0, %0" : "=r"(cr0));
 
-    struct fb_mtrr_raw raw;
+    /* The raw MTRR snapshot is ~360 bytes.  This diagnostic is inlined
+     * into fb_x86_map_checked(), where the whole struct would push the
+     * mapping function's stack frame past the 512-byte stack-frame
+     * audit limit.  Keep the scratch snapshot in .bss instead: the
+     * diagnostic runs once, single-threaded, on the boot path, exactly
+     * like the s_records rollback scratch. */
+    static struct fb_mtrr_raw raw;
     fb_mtrr_read_raw(fb_x86_read_msr, NULL, max_phys, mtrr_capable, &raw);
 
     log_info("fb: leaf_first=0x%lx leaf_last=0x%lx pages=%lu pa=0x%lx size=0x%lx\n",

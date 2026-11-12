@@ -427,6 +427,59 @@ static void test_real_machine_state(void)
 
 /* ── The raw readout never invents a value ────────────────────────── */
 
+static void test_three_overlapping_ranges_are_decoded(void)
+{
+    printf("\n--- test_three_overlapping_ranges_are_decoded ---\n");
+    struct mock_msr m;
+    mock_init(&m);
+
+    m.regs[FB_IA32_MTRR_DEF_TYPE] = FB_MTRR_DEF_TYPE_E | FB_MTRR_TYPE_UC;
+    mock_set_vcnt(&m, 3);
+
+    /* Three ENABLED ranges over BAR0: the SDM defines the combined
+     * type for up to three overlapping variable ranges (Table 11-6),
+     * so the decoder must still produce a real answer here. */
+    unsigned var_bits = 24;
+    for (unsigned i = 0; i < 3; i++) {
+        m.regs[FB_IA32_MTRR_BASE(i)] = mock_base(&m, MOCK_BAR0_PA, var_bits,
+                                                  FB_MTRR_TYPE_WB);
+        m.regs[FB_IA32_MTRR_MASK(i)] = mock_mask(&m, var_bits);
+    }
+
+    struct fb_mtrr_decode dec;
+    mock_decode(&m, MOCK_BAR0_PA, MOCK_BAR0_SIZE, &dec);
+
+    CHECK_EQ(FB_MTRR_DECODE_UNIFORM, dec.status);
+    CHECK_EQ(FB_MTRR_TYPE_WB, dec.type);
+    CHECK_EQ(3, dec.covering);
+}
+
+static void test_more_than_three_overlapping_ranges_is_unknown(void)
+{
+    printf("\n--- test_more_than_three_overlapping_ranges_is_unknown ---\n");
+    struct mock_msr m;
+    mock_init(&m);
+
+    m.regs[FB_IA32_MTRR_DEF_TYPE] = FB_MTRR_DEF_TYPE_E | FB_MTRR_TYPE_WB;
+    mock_set_vcnt(&m, 4);
+
+    /* A fourth overlapping range is outside the SDM table and must be
+     * rejected as UNKNOWN instead of overrunning the decoder's
+     * collected-range slots. */
+    unsigned var_bits = 24;
+    for (unsigned i = 0; i < 4; i++) {
+        m.regs[FB_IA32_MTRR_BASE(i)] = mock_base(&m, MOCK_BAR0_PA, var_bits,
+                                                  FB_MTRR_TYPE_WB);
+        m.regs[FB_IA32_MTRR_MASK(i)] = mock_mask(&m, var_bits);
+    }
+
+    struct fb_mtrr_decode dec;
+    mock_decode(&m, MOCK_BAR0_PA, MOCK_BAR0_SIZE, &dec);
+
+    CHECK_EQ(FB_MTRR_DECODE_UNKNOWN, dec.status);
+    CHECK_TRUE(dec.reason != NULL && strstr(dec.reason, "more than three") != NULL);
+}
+
 static void test_raw_readout_records_failures(void)
 {
     printf("\n--- test_raw_readout_records_failures ---\n");
@@ -466,6 +519,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_high_address_bits_are_not_truncated),
     TEST_ENTRY(test_failed_reads_are_unknown),
     TEST_ENTRY(test_range_must_be_uniform),
+    TEST_ENTRY(test_three_overlapping_ranges_are_decoded),
+    TEST_ENTRY(test_more_than_three_overlapping_ranges_is_unknown),
     TEST_ENTRY(test_real_machine_state),
     TEST_ENTRY(test_raw_readout_records_failures),
 TEST_LIST_END
