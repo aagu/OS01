@@ -42,6 +42,27 @@ $(DOOM_HOST_DIR)/.private.stamp: doom-engine-private
 	    exit 1; }
 	@touch $@
 
+# The private sources are materialized by doom-engine-private above.
+# Declare the units the fixtures compile as makeable targets: without
+# these rules a parallel make (-j) sees a prerequisite with no rule
+# before the sub-make has produced the copy and fails with
+# "No rule to make target .../<unit>.c".  .SECONDARY stops make from
+# deleting the SHARED private copy as intermediate files when it exits.
+# Extend the list when a fixture starts compiling another engine unit.
+DOOM_ENGINE_UNITS := \
+    $(DOOM_ENGINE_SRC)/i_system.c \
+    $(DOOM_ENGINE_SRC)/m_config.c \
+    $(DOOM_ENGINE_SRC)/m_misc.c \
+    $(DOOM_ENGINE_SRC)/i_input.c \
+    $(DOOM_ENGINE_SRC)/d_event.c
+
+$(DOOM_ENGINE_UNITS): doom-engine-private
+	@test -f $@ || { \
+	    echo "ERROR: the private doomgeneric copy is missing $@"; \
+	    exit 1; }
+
+.SECONDARY: $(DOOM_ENGINE_UNITS)
+
 # The engine sources are compiled for the HOST with the same feature
 # state as the shipped archive (no ORIGCODE, no sound, 320x200) so the
 # host fixture observes the production code paths.
