@@ -46,7 +46,13 @@ bool aarch64_user_mm_root_busy(const uint64_t *root)
     return false;
 }
 
-int aarch64_user_mm_runtime_check(void)
+/* vmm_gate.c now defines this gate too, and some host tests link the
+ * production object alongside this stub.  Keep the stub weak so a test
+ * that links both resolves to the production definition, while
+ * stub-only links (vmm_backend.c calls it from its user-root branch)
+ * still get the "gate always open" default these kernel_map tests rely
+ * on. */
+__attribute__((weak)) int aarch64_user_mm_runtime_check(void)
 {
     return 0;
 }
