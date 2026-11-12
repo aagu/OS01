@@ -7,6 +7,11 @@
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/ap_work.h>
 #include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_init/start */
+#include <arch/aarch64/user_task.h>  /* aarch64_user_runtime_init */
+#include <arch/aarch64/user_image.h>
+#if AARCH64_EL0_TEST
+#include <selftest/aarch64_user_task.h>
+#endif
 #include <arch/aarch64/ipi.h>   /* P2: need-slot offset cross-check */
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
@@ -354,6 +359,25 @@ void arch_task_switch(task_t *prev, task_t *next)
         aarch64_sched_fault_target_switches++;
 #endif
     arch_task_check_prev(prev);
+    /* Install the address space of the task that is about to run.  The
+     * call happens BEFORE the switch: the next task's switch tail and
+     * its first instruction must already see the right TTBR0_EL1.
+     * Local interrupts are masked across the whole switch. */
+    aarch64_user_switch_mm(next);
+#if AARCH64_EL0_TEST
+    /* Observation point: the acceptance case records the real switches
+     * and the root each user task ran on. */
+    {
+        bool to_user = aarch64_user_task_is_user(next);
+        uint64_t root = 0;
+        if (to_user) {
+            const struct aarch64_user_task *owner = next->thread->user_task;
+            root = aarch64_user_image_root_pa(owner->image);
+        }
+        aarch64_user_task_test_note_switch((int)prev->pid, (int)next->pid,
+                                            root, to_user);
+    }
+#endif
     aarch64_switch_context(prev, prev->thread, next->thread);
 }
 
@@ -468,6 +492,11 @@ void arch_aarch64_bsp_handoff(void)
         fatal_context(11, (uintptr_t)__builtin_frame_address(0),
                       (uintptr_t)&init_task_union, (uintptr_t)&init_task_union + STACK_SIZE);
     sched_boot_publish_idle();
+    /* Remember the kernel root and disable the FP trap BEFORE the
+     * scheduler publishes its readiness: from here on a real user
+     * task may install its own root into TTBR0_EL1, and the kernel
+     * root must be known so it can be restored. */
+    aarch64_user_runtime_init();
     /* Start the BSP's LOCAL scheduler tick now: the idle metadata and
      * sched_boot_publish_idle() are in place and IRQs are still
      * disabled.  The BSP's counter was already armed during the early

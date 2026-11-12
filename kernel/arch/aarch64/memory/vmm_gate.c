@@ -55,7 +55,6 @@ bool aarch64_pt_root_publish(uint64_t root_pa)
     return false;
 }
 
-#if AARCH64_EL0_TEST
 void aarch64_pt_root_unpublish_local(uint64_t root_pa)
 {
     spin_lock(&published_roots_lock);
@@ -67,7 +66,6 @@ void aarch64_pt_root_unpublish_local(uint64_t root_pa)
     }
     spin_unlock(&published_roots_lock);
 }
-#endif
 
 bool aarch64_pt_root_is_published(const uint64_t *root)
 {
@@ -83,6 +81,19 @@ bool aarch64_pt_root_is_published(const uint64_t *root)
     }
     spin_unlock(&published_roots_lock);
     return false;
+}
+
+unsigned aarch64_pt_published_root_count(void)
+{
+    unsigned count = 0;
+
+    spin_lock(&published_roots_lock);
+    for (unsigned i = 0; i < AARCH64_PT_MAX_PUBLISHED_ROOTS; i++) {
+        if (published_roots[i])
+            count++;
+    }
+    spin_unlock(&published_roots_lock);
+    return count;
 }
 
 /* ── SMP bring-up gate state ─────────────────────────────────────── */

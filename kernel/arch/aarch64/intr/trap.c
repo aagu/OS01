@@ -42,6 +42,9 @@
 #include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/gic.h>
+#if AARCH64_EL0_TEST
+#include <selftest/aarch64_user_task.h>
+#endif
 #include <arch/mmu.h>
 #include <arch/atomic.h>
 #include <arch/cpu.h>
@@ -62,7 +65,6 @@ void el1_irq(struct pt_regs *regs)
     arch_intr_dispatch(&ev, regs);
 }
 
-#if AARCH64_EL0_TEST
 void aarch64_el0_irq(pt_regs_t *regs)
 {
     struct intr_event ev;
@@ -70,14 +72,26 @@ void aarch64_el0_irq(pt_regs_t *regs)
     aarch64_intr_decode_irq(&ev, regs);
     /* Report the actual entry; the backend cross-checks the saved mode. */
     ev.native_vector = AARCH64_EL0_IRQ_SLOT;
+#if AARCH64_EL0_TEST
     uint64_t ticks = aarch64_el0_timer_ticks();
+    /* The IRQ path must never schedule: the PID and the switch count
+     * have to be the same before and after the dispatch. */
+    int pid_before = aarch64_user_task_test_pid();
+    uint64_t switches_before = aarch64_user_task_test_mark();
+#endif
     arch_intr_dispatch(&ev, regs);
+#if AARCH64_EL0_TEST
+    aarch64_user_task_test_note_el0_irq(
+        aarch64_user_task_test_pid() == pid_before,
+        aarch64_user_task_test_mark() == switches_before);
     /* Only CNTP advances this counter, on the same IRQ-masked BSP.
-     * Wait until dispatch has issued EOI before replacing the frame. */
+     * Wait until dispatch has issued EOI before replacing the frame.
+     * The legacy probe's timer continuation stays behind the test
+     * macro; a normal image has no probe to continue. */
     if (aarch64_el0_timer_ticks() != ticks)
         aarch64_el0_timer_return(regs);
-}
 #endif
+}
 
 /* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。
  *

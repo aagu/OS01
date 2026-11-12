@@ -210,6 +210,17 @@ void task_switch_complete(task_t *actual_prev);
 int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
                               const char *name, unsigned target_cpu,
                               bool pinned, task_t **out_task, int *out_pid);
+/* The generic publisher and the shared self-reap tail live in the same
+ * production TU; <sched/internal.h> is skipped in this fixture, so their
+ * prototypes are provided here (they must stay in sync with the real
+ * header). */
+int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
+                                  const char *name,
+                                  int (*prepare)(task_t *, void *),
+                                  void (*discard)(task_t *, void *),
+                                  void *arg,
+                                  task_t **out_task, int *out_pid);
+_Noreturn void task_exit_self_reap(uint64_t status);
 int kernel_thread(uint64_t (*fn)(uint64_t), uint64_t arg, uint64_t flags);
 int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu);
 struct task_struct *create_kthread(uint64_t (*fn)(uint64_t), uint64_t arg,

@@ -73,6 +73,47 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
                                const char *name, unsigned target_cpu,
                                bool pinned, task_t **out_task, int *out_pid);
 
+/* ── Generic task publisher (kthread.c) ───────────────────────────
+ * The shared half of the kernel-thread constructor: allocate the task
+ * union and the thread context, initialise the identity, let the
+ * caller attach the architecture resources through `prepare`, then
+ * publish under task_list_lock -> rq_lock.
+ *
+ * prepare(tsk, arg): attach the task's architecture resources.  It
+ *   runs after the identity exists and BEFORE the task becomes visible
+ *   to another CPU.  A non-zero return aborts the publication and the
+ *   hook owns the cleanup of whatever it already acquired.
+ * discard(tsk, arg): undo what prepare attached.  It runs ONLY when
+ *   prepare succeeded but the locked eligibility re-check refused the
+ *   publication.
+ *
+ * flags carries the task flags (PF_KTHREAD for a kernel thread,
+ * PF_PROCESS for a real user task).  Only the kernel-thread path can
+ * reach the boot-phase CPU0 fallback: it requires an unpinned task,
+ * and a user task is always pinned to its CPU.
+ *
+ * out_task receives the non-owning task pointer, out_pid the PID.
+ * Both are captured BEFORE publication; a caller must not dereference
+ * out_task after the task has self-reaped. */
+int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
+                                  const char *name,
+                                  int (*prepare)(task_t *, void *),
+                                  void (*discard)(task_t *, void *),
+                                  void *arg,
+                                  task_t **out_task, int *out_pid);
+
+/* ── Shared self-reap exit tail (kthread.c) ───────────────────────
+ * Records the exit status, detaches the task from the global task
+ * list, marks it PF_SELF_REAP + TASK_ZOMBIE and switches out
+ * permanently.  The next task's switch tail releases the thread
+ * context and the kernel stack.
+ *
+ * The caller is responsible for whatever must happen BEFORE the task
+ * leaves the list (kernel threads release their copied file table
+ * here; a user task releases its address space here).  This function
+ * never returns. */
+_Noreturn void task_exit_self_reap(uint64_t status);
+
 /* ── Kernel-thread exit path (kthread.c) ──────────────────────────
  * Terminates a kernel thread: releases the thread's copied file-table
  * reference, removes it from the global task list, marks it

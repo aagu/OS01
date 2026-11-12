@@ -92,19 +92,11 @@ exception_vectors:
 
 /* ───── Synchronous exception, EL0 (AArch64) ───── */
 .balign 0x80
-#if AARCH64_EL0_TEST
     b   el0_sync_entry
-#else
-9:  b   .
-#endif
 
 /* ───── IRQ, EL0 ───── */
 .balign 0x80
-#if AARCH64_EL0_TEST
     b   el0_irq_entry
-#else
-10: b   .
-#endif
 
 /* ───── FIQ, EL0 ───── */
 .balign 0x80
@@ -194,6 +186,23 @@ restore_pt_regs:
     eret
 
 /* ──────────────────────────────────────────────────────────────
+ * aarch64_el0_restore — hand a prepared frame to the shared restore
+ * path.
+ *
+ * The frame address arrives in x0.  Moving the stack pointer onto the
+ * frame and branching into restore_pt_regs makes the frame the live
+ * EL0 context: restore_pt_regs restores the saved PSTATE and ERETs.
+ * The kernel-side frames below the frame are abandoned on purpose —
+ * this is the "return to user" path.
+ * ────────────────────────────────────────────────────────────── */
+.globl aarch64_el0_restore
+.type aarch64_el0_restore, %function
+aarch64_el0_restore:
+    mov     sp, x0
+    b       restore_pt_regs
+.size aarch64_el0_restore, . - aarch64_el0_restore
+
+/* ──────────────────────────────────────────────────────────────
  * el1_sync_entry — EL1h sync 异常诊断入口（spec §3, Task 1）
  *
  * 现场保存序与 el1_irq_entry 一致：pt_regs_t 字段序 = 入栈序 =
@@ -225,29 +234,43 @@ el1_sync_entry:
     b       0b
 #endif
 
-#if AARCH64_EL0_TEST
+/* Lower-EL IRQ saves the same frame as the EL1h IRQ.  The GIC
+ * dispatcher owns IAR/EOI; the frame is returned through the shared
+ * restore path. */
+.balign 0x80
 el0_irq_entry:
     save_pt_regs
     mov     x0, sp
     bl      aarch64_el0_irq
     b       restore_pt_regs
 
-/* Lower-EL sync saves the same frame as IRQ. The handler selects
- * whether to resume EL0 or return to the masked EL1 caller. */
+/* Lower-EL sync saves the same frame as IRQ. The route selects whether
+ * to resume EL0 or to unwind the legacy probe's stack frame. */
 .balign 0x80
 el0_sync_entry:
     save_pt_regs
     mov     x0, sp
     mrs     x1, esr_el1
     mrs     x2, far_el1
-    bl      aarch64_el0_sync
+    bl      aarch64_el0_sync_route
     cbnz    w0, restore_pt_regs
+#if AARCH64_EL0_TEST
+    /* The legacy probe ended its run: unwind its stack frame. */
     adr     x1, .Lel0_done
     str     x1, [sp, #PT_REGS_ELR_EL1]
     mov     x1, #0x3c5                  /* DAIF masked, EL1h */
     str     x1, [sp, #PT_REGS_SPSR_EL1]
     b       restore_pt_regs
+#else
+    /* A normal image has no legacy probe, so no frame may ask for the
+     * probe's continuation: stop instead of resuming EL0 with a frame
+     * nobody owns. */
+    msr     daifset, #0xf
+0:  wfi
+    b       0b
+#endif
 
+#if AARCH64_EL0_TEST
 /* Save the EL1 caller across the user run. The exception exit unwinds
  * its own pt_regs before ERET, so the continuation sees this frame. */
 .globl aarch64_el0_enter

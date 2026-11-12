@@ -48,6 +48,7 @@
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/user_task.h>
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/el0.h>
 #endif
@@ -119,6 +120,32 @@ void arch_intr_handle_sync(const struct intr_event *event, pt_regs_t *regs)
     aarch64_el1_sync_fatal(regs, esr, far);
 }
 
+/* Admission of a lower-EL IRQ frame.
+ *
+ * Two producers exist for an EL0t frame:
+ *   - the legacy M4 probe, which owns a private root while it runs;
+ *   - a real EL0 user task, whose root is the one actually installed
+ *     in TTBR0_EL1.
+ *
+ * The formal branch reuses the CPU, the scheduler-readiness, the
+ * current-user-task, the EL0t and the actual-TTBR0 checks.  A frame
+ * that matches neither producer is an unrecognised source and is
+ * rejected. */
+static bool aarch64_el0_irq_frame_is_valid(const struct intr_event *event,
+                                            const pt_regs_t *regs)
+{
+    if (event->origin != INTR_ORIGIN_USER)
+        return false;
+    if ((regs->spsr_el1 & A64_SPSR_MODE_MASK) != 0)
+        return false;
+#if AARCH64_EL0_TEST
+    /* The legacy probe owns the root while it runs. */
+    if (aarch64_el0_active_root())
+        return true;
+#endif
+    return aarch64_user_frame_is_valid(regs);
+}
+
 void arch_intr_handle_irq(const struct intr_event *event, pt_regs_t *regs)
 {
     struct intr_event redecoded;
@@ -131,11 +158,7 @@ void arch_intr_handle_irq(const struct intr_event *event, pt_regs_t *regs)
     }
 
     bool valid = aarch64_frame_is_el1h(event, regs);
-#if AARCH64_EL0_TEST
-    valid |= event->origin == INTR_ORIGIN_USER &&
-             (regs->spsr_el1 & A64_SPSR_MODE_MASK) == 0 &&
-             aarch64_el0_active_root();
-#endif
+    valid |= aarch64_el0_irq_frame_is_valid(event, regs);
     if (!valid)
         arch_intr_bad_event(event, regs);
 

@@ -23,13 +23,21 @@
 #define AARCH64_THREAD_STACK_BASE_OFF  (14 * 8)
 #define AARCH64_THREAD_STACK_TOP_OFF   (15 * 8)
 #define AARCH64_THREAD_USABLE_LOW_OFF  (16 * 8)
-#define AARCH64_THREAD_SIZE           (17 * 8)
+#define AARCH64_THREAD_USER_TASK_OFF   (17 * 8)
+#define AARCH64_THREAD_SIZE           (18 * 8)
 #define AARCH64_STACK_SIZE            (32 * 1024)
 
 #ifndef __ASSEMBLER__
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* Owner of a real EL0 user task.  The owner record holds the image,
+ * the catalog reference and the private per-task state; it is NULL for
+ * every kernel thread.  Only the pointer lives in the thread context —
+ * the record itself is owned by the task's creator and the task's exit
+ * path. */
+struct aarch64_user_task;
 
 typedef struct thread_struct {
     uint64_t x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, x29;
@@ -39,6 +47,7 @@ typedef struct thread_struct {
     uint64_t stack_base; /* task_union base */
     uint64_t stack_top;  /* task_union base + STACK_SIZE */
     uint64_t usable_low; /* align_up(base + sizeof(task_t) + 256, 16) */
+    struct aarch64_user_task *user_task; /* EL0 user-task owner, or NULL */
 } thread_t;
 
 /* ── Layout pin: Phase 3 assembly strides these exact offsets ── */
@@ -59,6 +68,7 @@ _Static_assert(offsetof(thread_t, sched_flags) == AARCH64_THREAD_SCHED_FLAGS_OFF
 _Static_assert(offsetof(thread_t, stack_base)  == AARCH64_THREAD_STACK_BASE_OFF,  "aarch64 thread_t stack_base offset drift");
 _Static_assert(offsetof(thread_t, stack_top)   == AARCH64_THREAD_STACK_TOP_OFF,   "aarch64 thread_t stack_top offset drift");
 _Static_assert(offsetof(thread_t, usable_low)  == AARCH64_THREAD_USABLE_LOW_OFF,  "aarch64 thread_t usable_low offset drift");
+_Static_assert(offsetof(thread_t, user_task)  == AARCH64_THREAD_USER_TASK_OFF,   "aarch64 thread_t user_task offset drift");
 _Static_assert(sizeof(thread_t) == AARCH64_THREAD_SIZE, "aarch64 thread_t size drift");
 _Static_assert(STACK_SIZE == AARCH64_STACK_SIZE, "aarch64 assembly stack size drift");
 

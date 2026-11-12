@@ -1,0 +1,571 @@
+/* kernel/arch/aarch64/cpu/user_task.c
+ *
+ * AArch64 M4 real user tasks: creation, first entry and the address
+ * space switch.
+ *
+ * A user task is an ordinary PF_PROCESS scheduler task with three
+ * things a kernel thread does not have:
+ *
+ *   - a private mm (the image's user root) that is installed into
+ *     TTBR0_EL1 while the task runs,
+ *   - a live EL0 exception frame at the top of its kernel stack,
+ *   - an owner record that ties the image and the catalog reference to
+ *     the task.
+ *
+ * The kernel half of the address space never moves: TTBR1_EL1 keeps
+ * the M1 root and the direct map, so installing a user root in TTBR0
+ * does not disturb the kernel code that runs on the same stack.
+ */
+
+#include <arch/context.h>          /* STACK_SIZE + the aarch64 thread_t */
+#include <arch/aarch64/page_table.h>
+#include <arch/aarch64/regs.h>
+#include <arch/aarch64/sync_fault.h>
+#include <arch/aarch64/intr_dispatch.h>
+#include <arch/aarch64/el0.h>
+#include <arch/aarch64/task_arch.h>
+#include <arch/aarch64/user_image.h>
+#include <arch/aarch64/user_task.h>
+#include <arch/aarch64/vmm_gate.h>
+#include <arch/cpu.h>
+#include <arch/irq.h>
+#include <errno.h>
+#include <log/log.h>
+#include <memory/slab.h>
+#include <percpu/percpu.h>
+#include <sched/internal.h>
+#include <sched/task.h>
+
+#if AARCH64_EL0_TEST
+#include <arch/aarch64/reg.h>
+#include <arch/aarch64/timer.h>
+#include <selftest/aarch64_user_task.h>
+
+/* ── Test observation state ─────────────────────────────────────
+ * The counters below are written by the production paths and read by
+ * the acceptance case.  They live here so every producer and the
+ * consumer agree on one definition. */
+static struct aarch64_user_task_stats g_stats;
+static bool g_arm_tick;
+
+void aarch64_user_task_test_set_arm_tick(bool on) { g_arm_tick = on; }
+
+void aarch64_user_task_test_stats(struct aarch64_user_task_stats *out)
+{
+    if (!out)
+        return;
+    *out = g_stats;
+    out->el0_ticks = aarch64_el0_timer_ticks();
+}
+
+void aarch64_user_task_test_reset_stats(void)
+{
+    g_stats = (struct aarch64_user_task_stats){0};
+}
+
+void aarch64_user_task_test_note_switch(int prev_pid, int next_pid,
+                                         uint64_t root, bool to_user)
+{
+    g_stats.switches++;
+    if (to_user)
+        g_stats.switches_to_user++;
+    g_stats.last_switch_pid = next_pid;
+    g_stats.last_switch_from = prev_pid;
+    g_stats.last_switch_root = root;
+}
+
+uint64_t aarch64_user_task_test_switch_count(void)
+{
+    return g_stats.switches;
+}
+
+uint64_t aarch64_user_task_test_mark(void)
+{
+    return g_stats.switches;
+}
+
+int aarch64_user_task_test_pid(void)
+{
+    task_t *t = arch_current_task();
+    return t ? (int)t->pid : -1;
+}
+
+void aarch64_user_task_test_note_el0_irq(bool pid_stable, bool switches_stable)
+{
+    g_stats.el0_irqs++;
+    if (!pid_stable)
+        g_stats.el0_irq_pid_violations++;
+    if (!switches_stable)
+        g_stats.el0_irq_switch_violations++;
+}
+
+void aarch64_user_task_test_note_image(bool ok)
+{
+    g_stats.image_loads++;
+    if (!ok)
+        g_stats.image_failures++;
+}
+#endif /* AARCH64_EL0_TEST */
+
+/* The root the BSP booted with: the kernel root a kernel task or the
+ * idle task gets back when a user task gives the CPU up. */
+static uint64_t g_kernel_root_pa;
+/* The root currently installed in TTBR0_EL1. */
+static uint64_t g_live_root_pa;
+/* Whether g_live_root_pa is a user root: only a user root is published
+ * in the M3 registry and only a user root is revocable. */
+static bool g_live_root_is_user;
+
+void aarch64_user_clear_tls(void)
+{
+    /* The first increment has no TLS: every user entry starts from a
+     * clean slate. */
+    __asm__ volatile("msr tpidr_el0, xzr\n\tmsr tpidrro_el0, xzr" ::: "memory");
+}
+
+bool aarch64_user_task_is_user(const struct task_struct *tsk)
+{
+    return tsk && tsk->thread && tsk->thread->user_task != NULL;
+}
+
+uint64_t aarch64_user_task_frame(const struct task_struct *tsk){
+    if (!tsk || !tsk->thread)
+        return 0;
+    /* The exception path pushes exactly one pt_regs frame below
+     * SP_EL1, and SP_EL1 is stack_top whenever the task runs in EL0:
+     * the live frame therefore always sits at stack_top - PT_REGS_SIZE. */
+    return tsk->thread->stack_top - PT_REGS_SIZE;
+}
+
+bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
+{
+    if (!regs)
+        return false;
+    /* The BSP owns the single-core user-task runtime. */
+    if (cpu_id() != 0)
+        return false;
+    /* The scheduler must be ready: a user task only exists after the
+     * scheduler published its readiness. */
+    if (!__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE))
+        return false;
+    /* The frame must come from EL0t. */
+    if ((regs->spsr_el1 & 0x1f) != 0)
+        return false;
+    /* The current task must be a real user task ... */
+    task_t *t = arch_current_task();
+    if (!aarch64_user_task_is_user(t))
+        return false;
+    /* ... and the root actually installed must be that task's root. */
+    const struct aarch64_user_task *owner = t->thread->user_task;
+    uint64_t want = aarch64_user_image_root_pa(owner->image);
+    if (!want)
+        return false;
+    uint64_t ttbr0;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+    return (ttbr0 & AARCH64_TTBR_BASE_MASK) == want;
+}
+
+void aarch64_user_runtime_init(void)
+{
+    uint64_t ttbr0;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+    g_kernel_root_pa = ttbr0 & AARCH64_TTBR_BASE_MASK;
+    g_live_root_pa = g_kernel_root_pa;
+    g_live_root_is_user = false;
+
+    /* FP/SIMD is not available to user code in this increment: clear
+     * CPACR_EL1.FPEN so a user FP instruction traps to EL1 instead of
+     * silently touching a kernel-owned FP context. */
+    uint64_t cpacr;
+    __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
+    cpacr &= ~(UINT64_C(3) << 20);
+    __asm__ volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
+}
+
+void aarch64_user_install_root(uint64_t root_pa)
+{
+    if (!root_pa || root_pa == g_live_root_pa)
+        return;
+
+    /* Publish BEFORE the install: a root that is not published may not
+     * be installed. */
+    if (!aarch64_pt_root_publish(root_pa))
+        vmm_gate_violation("aarch64_user_install_root: root publish failed");
+
+    __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
+                     "tlbi vmalle1\n\tdsb ish\n\tisb"
+                     :: "r"(root_pa) : "memory");
+
+    /* The old user root is revoked only AFTER the new one is
+     * installed: a normal single-core switch keeps at most two user
+     * roots published at a time. */
+    if (g_live_root_is_user)
+        aarch64_pt_root_unpublish_local(g_live_root_pa);
+
+    g_live_root_pa = root_pa;
+    g_live_root_is_user = true;
+    aarch64_user_clear_tls();
+}
+
+void aarch64_user_restore_kernel_root(void)
+{
+    if (g_live_root_pa == g_kernel_root_pa && !g_live_root_is_user)
+        return;
+
+    __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
+                     "tlbi vmalle1\n\tdsb ish\n\tisb"
+                     :: "r"(g_kernel_root_pa) : "memory");
+
+    if (g_live_root_is_user)
+        aarch64_pt_root_unpublish_local(g_live_root_pa);
+
+    g_live_root_pa = g_kernel_root_pa;
+    g_live_root_is_user = false;
+}
+
+void aarch64_user_switch_mm(const struct task_struct *next)
+{
+    uint64_t next_root = g_kernel_root_pa;
+    bool next_is_user = false;
+
+    if (aarch64_user_task_is_user(next)) {
+        const struct aarch64_user_task *owner = next->thread->user_task;
+        next_root = aarch64_user_image_root_pa(owner->image);
+        next_is_user = true;
+    }
+
+    /* Same root: nothing to install. */
+    if (next_root == g_live_root_pa)
+        return;
+
+    if (next_is_user) {
+        aarch64_user_install_root(next_root);
+        return;
+    }
+    /* A kernel task or the idle task gets the kernel root back. */
+    aarch64_user_restore_kernel_root();
+}
+
+/* ── First entry ────────────────────────────────────────────────
+ * A user task starts in EL1 like every other task; the first entry
+ * marks the running state and then hands the prepared frame to the
+ * shared restore path, which ERETs into EL0. */
+__attribute__((noreturn))
+void aarch64_user_first_entry(void)
+{
+    arch_aarch64_entry_prepare();
+
+    task_t *t = arch_current_task();
+    uint64_t frame = aarch64_user_task_frame(t);
+
+    aarch64_el0_restore(frame);
+}
+
+/* ── Low-EL synchronous routing ─────────────────────────────────
+ *
+ * Every lower-EL synchronous exception arrives here.  Two producers
+ * exist for such a frame:
+ *
+ *   - the legacy M4 probe, which runs a private root on a kernel
+ *     thread's stack and owns the frame while it is active;
+ *   - a real EL0 user task, whose frame belongs to the scheduler.
+ *
+ * A frame that matches neither is an unrecognised entry and stops the
+ * kernel.  It must never borrow the probe's continuation: that
+ * continuation unwinds the probe's stack frame and returns to a kernel
+ * caller that does not exist in a real user task. */
+
+bool aarch64_el0_sync_route(pt_regs_t *regs, uint64_t esr, uint64_t far)
+{
+#if AARCH64_EL0_TEST
+    /* The legacy probe owns the frame while it is active. */
+    if (aarch64_el0_probe_active())
+        return aarch64_el0_probe_sync(regs, esr, far);
+#endif
+    /* The formal branch: the CPU and the scheduler state must be
+     * readable, and the frame must belong to a real user task that
+     * owns the root actually installed in TTBR0_EL1. */
+    if (!aarch64_user_frame_is_valid(regs))
+        aarch64_el1_sync_fatal(regs, esr, far);
+
+    aarch64_user_task_sync(regs, esr, far);
+    return true;
+}
+
+/* ── The user-task SVC and fault handler ──────────────────────── */
+
+static void aarch64_user_task_exec(pt_regs_t *regs);
+__attribute__((noreturn)) static void aarch64_user_task_exit(uint64_t status);
+
+void aarch64_user_task_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
+{
+    uint64_t ec = (esr & AARCH64_ESR_EC_MASK) >> AARCH64_ESR_EC_SHIFT;
+    uint64_t imm = esr & 0xffff;
+
+#if AARCH64_EL0_TEST
+    g_stats.svcs++;
+    g_stats.last_svc_imm = imm;
+#endif
+
+    if (ec != A64_EC_SVC_LOWER) {
+        /* Not an SVC: the task took a synchronous fault.  The current
+         * task dies with -EFAULT; the ESR and the FAR (only when the
+         * ESR says the FAR is valid) are recorded. */
+        uint64_t status = (uint64_t)-EFAULT;
+        if (aarch64_sync_far_valid(esr))
+            log_err("[user-task] sync fault esr=0x%lx far=0x%lx\n",
+                    (unsigned long)esr, (unsigned long)far);
+        else
+            log_err("[user-task] sync fault esr=0x%lx far=invalid\n",
+                    (unsigned long)esr);
+        aarch64_user_task_exit(status);
+        return;
+    }
+
+    switch (imm) {
+    case AARCH64_USER_SVC_YIELD:
+        /* Cooperative yield: give the CPU up first, then report
+         * success in x0.  Every other register keeps its value. */
+        schedule();
+#if AARCH64_EL0_TEST
+        if (g_arm_tick) {
+            /* Re-arm the real CNTP for one tick in the IRQ-masked
+             * state, right before EL0 is restored: the tick then
+             * counts into the vruntime while the task runs in EL0. */
+            cntp_tval_el0_write(1);
+            cntp_isb();
+        }
+#endif
+        regs->x0 = 0;
+        return;
+    case AARCH64_USER_SVC_EXEC:
+        aarch64_user_task_exec(regs);
+        return;
+    case AARCH64_USER_SVC_EXIT:
+        aarch64_user_task_exit(regs->x0);
+        return;
+    default:
+        regs->x0 = (uint64_t)-ENOSYS;
+        return;
+    }
+}
+
+/* ── Replace the image of the running task ────────────────────── */
+
+static void aarch64_user_task_exec(pt_regs_t *regs)
+{
+    task_t *t = arch_current_task();
+    struct aarch64_user_task *owner = t->thread->user_task;
+    uint64_t index = regs->x0;
+
+    /* The whole index range is checked before anything is built. */
+    if (!owner || index >= owner->catalog_count) {
+        regs->x0 = (uint64_t)-EINVAL;
+        return;
+    }
+
+    /* The image is constructed with interrupts enabled: the M3 write
+     * entries require that.  The window contains no scheduling point,
+     * so the task keeps running while the new image is built. */
+    arch_local_irq_enable();
+    struct aarch64_user_image *image = NULL;
+    int rc = aarch64_user_image_load(owner->catalog[index].bytes,
+                                      owner->catalog[index].size, &image);
+    arch_local_irq_disable();
+
+    if (rc) {
+        /* Only the old frame's x0 changes: the old image stays
+         * installed and the task continues where it was. */
+        regs->x0 = (uint64_t)rc;
+#if AARCH64_EL0_TEST
+        g_stats.execs++;
+        g_stats.last_exec_index = index;
+        g_stats.last_exec_rc = rc;
+#endif
+        return;
+    }
+
+    /* ── Commit region ──
+     * Nothing below is recoverable: the new root is published and
+     * installed, the old one is revoked, and the task metadata and the
+     * exception frame follow.  An IRQ can never observe a state in
+     * which the hardware root and the task metadata disagree. */
+    struct aarch64_user_image *old_image = owner->image;
+
+    aarch64_user_install_root(aarch64_user_image_root_pa(image));
+
+    owner->image = image;
+    owner->catalog_index = index;
+    t->mm = aarch64_user_image_mm(image);
+
+    /* The task continues at the new entry with a new stack and a fresh
+     * register file. */
+    aarch64_user_image_init_regs(image, regs);
+    aarch64_user_clear_tls();
+
+#if AARCH64_EL0_TEST
+    g_stats.execs++;
+    g_stats.last_exec_index = index;
+    g_stats.last_exec_rc = 0;
+#endif
+
+    /* The old image is released outside the commit region, with
+     * interrupts enabled. */
+    arch_local_irq_enable();
+    aarch64_user_image_destroy(old_image);
+    arch_local_irq_disable();
+}
+
+/* ── Terminate the running task ───────────────────────────────── */
+
+__attribute__((noreturn))
+static void aarch64_user_task_exit(uint64_t status)
+{
+    task_t *t = arch_current_task();
+    struct aarch64_user_task *owner = t->thread->user_task;
+    struct aarch64_user_image *image = owner ? owner->image : NULL;
+
+    /* Switch back to the kernel root and revoke the user root BEFORE
+     * anything is released: a page that is still mapped must never be
+     * freed. */
+    arch_local_irq_disable();
+    aarch64_user_restore_kernel_root();
+
+    if (owner) {
+        owner->image = NULL;
+        t->mm = NULL;
+        t->thread->user_task = NULL;
+    }
+
+    /* The image and the private state are released with interrupts
+     * enabled. */
+    arch_local_irq_enable();
+    aarch64_user_image_destroy(image);
+    if (owner)
+        kfree(owner);
+    arch_local_irq_disable();
+
+#if AARCH64_EL0_TEST
+    g_stats.exits++;
+    g_stats.last_exit_pid = (int)t->pid;
+    g_stats.last_exit_status = status;
+    if (g_stats.exits_recorded < 4) {
+        g_stats.exit_pid[g_stats.exits_recorded] = (int)t->pid;
+        g_stats.exit_status[g_stats.exits_recorded] = status;
+        g_stats.exits_recorded++;
+    }
+#endif
+
+    /* The exit tail never returns to EL0: the next task's switch tail
+     * reclaims the thread context and the kernel stack. */
+    task_exit_self_reap(status);
+}
+
+/* ── Creation ─────────────────────────────────────────────────── */
+
+struct user_task_prepare_ctx {
+    struct aarch64_user_task *owner;
+};
+
+static int user_task_prepare(task_t *tsk, void *arg)
+{
+    struct user_task_prepare_ctx *ctx = arg;
+    struct aarch64_user_task *owner = ctx->owner;
+
+    /* The task owns a private mm: the image's user root.  The kernel
+     * half of the address space stays in TTBR1. */
+    tsk->mm = aarch64_user_image_mm(owner->image);
+    tsk->files = NULL;
+    tsk->fpu_save = NULL;
+
+    /* The parent is the resident BSP idle task: the thread that
+     * created this task may exit on its own. */
+    tsk->parent = percpu_data[0].idle;
+
+    /* Kernel-stack geometry, mirroring arch_kthread_prepare(). */
+    uintptr_t base = (uintptr_t)tsk;
+    uintptr_t top = base + STACK_SIZE;
+    uintptr_t low = (base + sizeof(*tsk) + 256 + 15) & ~(uintptr_t)15;
+
+    thread_t *ctx_thread = tsk->thread;
+    ctx_thread->stack_base = base;
+    ctx_thread->stack_top = top;
+    ctx_thread->usable_low = low;
+    ctx_thread->sched_flags = 0;
+    ctx_thread->x19 = 0;
+    ctx_thread->x20 = 0;
+    ctx_thread->x21 = (uint64_t)(uintptr_t)ctx_thread;
+    ctx_thread->x30 = (uint64_t)(uintptr_t)aarch64_user_first_entry;
+
+    /* The first EL0 frame lives at the top of the kernel stack. */
+    uint64_t frame = top - PT_REGS_SIZE;
+    aarch64_user_image_init_regs(owner->image, (pt_regs_t *)frame);
+    ctx_thread->sp = frame;
+
+    ctx_thread->user_task = owner;
+    return 0;
+}
+
+static void user_task_discard(task_t *tsk, void *arg)
+{
+    (void)arg;
+    /* The image and the owner record belong to the creator, which
+     * releases them once the publication failed.  Only the task-side
+     * linkage is undone here. */
+    tsk->mm = NULL;
+    if (tsk->thread)
+        tsk->thread->user_task = NULL;
+}
+
+int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
+                            size_t count, size_t index, const char *name)
+{
+    /* The whole index range is checked before anything is built. */
+    if (!catalog || !count || index >= count)
+        return -EINVAL;
+    if (!catalog[index].bytes || !catalog[index].size)
+        return -EINVAL;
+
+    /* Single-core runtime gate: the user-mm primitives refuse to run
+     * on a multi-core or non-BSP configuration. */
+    int rc = aarch64_user_mm_runtime_check();
+    if (rc)
+        return rc;
+
+    /* The scheduler must be ready: a user task is published into a
+     * live runqueue. */
+    if (!__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE))
+        return -EINVAL;
+
+    struct aarch64_user_image *image = NULL;
+    rc = aarch64_user_image_load(catalog[index].bytes, catalog[index].size,
+                                  &image);
+    if (rc)
+        return rc;
+
+    struct aarch64_user_task *owner = kmalloc(sizeof(*owner));
+    if (!owner) {
+        aarch64_user_image_destroy(image);
+        return -ENOMEM;
+    }
+    owner->image = image;
+    owner->catalog = catalog;
+    owner->catalog_count = count;
+    owner->catalog_index = index;
+
+    struct user_task_prepare_ctx pctx = { .owner = owner };
+
+    task_t *tsk = NULL;
+    int pid = 0;
+    rc = sched_alloc_and_publish_task(0, true /* pinned to the BSP */,
+                                      PF_PROCESS, name,
+                                      user_task_prepare, user_task_discard,
+                                      &pctx, &tsk, &pid);
+    if (rc) {
+        /* The creator still owns the image and the owner record. */
+        kfree(owner);
+        aarch64_user_image_destroy(image);
+        return rc;
+    }
+    return pid;
+}

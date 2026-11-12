@@ -178,4 +178,24 @@ bool aarch64_el0_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
     }
     return active_handler(regs, esr, far, active_arg);
 }
+
+/* ── Legacy probe accessors for the lower-EL sync route ───────────
+ * The route asks whether the legacy probe owns the frame before it
+ * looks at the real user-task branch.  The probe's continuation (the
+ * "end the run" answer) is only ever produced here, by a probe that
+ * is actually active. */
+
+bool aarch64_el0_probe_active(void)
+{
+    return active_handler != NULL;
+}
+
+bool aarch64_el0_probe_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
+{
+    if (!active_handler || (regs->spsr_el1 & 0xf) != 0) {
+        vmm_gate_violation("unexpected EL0 sync");
+        return false;
+    }
+    return active_handler(regs, esr, far, active_arg);
+}
 #endif

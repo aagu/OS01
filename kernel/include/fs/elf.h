@@ -79,6 +79,8 @@ typedef struct {
 #define PT_DYNAMIC 2
 #define PT_INTERP  3
 #define PT_NOTE    4
+#define PT_PHDR    6
+#define PT_TLS     7
 
 /* Note types */
 #define NT_GNU_ABI_TAG 1

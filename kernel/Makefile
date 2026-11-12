@@ -102,10 +102,11 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    selftest/test_aarch64_ap_scheduler.c \
                    selftest/test_aarch64_ap_wake.c \
                    selftest/test_aarch64_sched_tick.c \
-                   ../libc/list/list.c ../libc/rbtree/rbtree.c
-ifeq ($(AARCH64_EL0_TEST),1)
-KERNEL_C_SOURCES += fs/elf_layout.c
-endif
+                   ../libc/list/list.c ../libc/rbtree/rbtree.c \
+                   fs/elf_layout.c
+# fs/elf_layout.c is shared ELF-layout validation: the M4 production
+# user-image constructor links it in every aarch64 build (normal and
+# AARCH64_EL0_TEST alike), so it is NOT gated on the EL0 test variant.
 # NOTE: boot/shootdown_probe.c (M3.5 Task 25) is picked up by the
 # ARCH_C_SOURCES wildcard of arch/aarch64/boot/ below.
 # intr/dispatch.c is the arch-neutral common dispatcher (intr-dispatch

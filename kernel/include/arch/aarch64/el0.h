@@ -51,4 +51,13 @@ void aarch64_el0_timer_return(pt_regs_t *regs);
 /* Private root while the probe or one of its handlers is executing. */
 uint64_t *aarch64_el0_active_root(void);
 
+#if AARCH64_EL0_TEST
+/* ── Legacy probe accessors for the lower-EL sync route ───────────
+ * The route asks whether the legacy probe owns the frame before it
+ * looks at the real user-task branch.  Only an active probe may
+ * produce the probe's "end the run" continuation. */
+bool aarch64_el0_probe_active(void);
+bool aarch64_el0_probe_sync(pt_regs_t *regs, uint64_t esr, uint64_t far);
+#endif
+
 #endif

@@ -39,14 +39,21 @@
  * returns false; a full registry is a violation (and returns false). */
 bool aarch64_pt_root_publish(uint64_t root_pa);
 
-#if AARCH64_EL0_TEST
-/* For roots private to the BSP, after TTBR0 restore and local TLBI. */
+/* Revoke a published root.  Used for roots private to the BSP: the
+ * caller has already restored the kernel TTBR0 and flushed the local
+ * TLB.  Runtime interface (the M4 user-task switch path uses it). */
 void aarch64_pt_root_unpublish_local(uint64_t root_pa);
+
+#if AARCH64_EL0_TEST
 bool aarch64_vmm_pre_smp(void);
 #endif
 
 /* True iff *root is a published root PA. *root == 0 → false. */
 bool aarch64_pt_root_is_published(const uint64_t *root);
+
+/* The number of roots currently published in the registry.  Used by the
+ * acceptance case to prove that every user root was revoked. */
+unsigned aarch64_pt_published_root_count(void);
 
 /* One-way latch: SMP bring-up has started. A second call is a violation. */
 void smp_starting_enter(void);

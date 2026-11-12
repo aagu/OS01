@@ -7,9 +7,7 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/ipi.h>    /* aarch64_resched_sgi_handler (P2) */
 #include <percpu/percpu.h>
-#if AARCH64_EL0_TEST
 #include <arch/mmu.h>
-#endif
 
 static struct gic_dev g_gic;
 struct gic_dev *gic_dev_current(void) { return &g_gic; }
@@ -57,12 +55,12 @@ void gic_init(void)
 {
     uintptr_t gicd = dtb_gicd_base();
     uintptr_t gicc = dtb_gicc_base();
-#if AARCH64_EL0_TEST
-    /* QEMU virt Device window, also mapped in TTBR1 by M1. The probe
-     * replaces TTBR0 and cannot rely on the boot identity map. */
+    /* QEMU virt Device window, also mapped in TTBR1 by M1.  The high
+     * alias is the only alias that survives a private user root in
+     * TTBR0_EL1: the low identity map belongs to TTBR0 and disappears
+     * with the user root. */
     gicd += ARCH_PAGE_OFFSET;
     gicc += ARCH_PAGE_OFFSET;
-#endif
     if (gic_dev_init(&g_gic, (volatile uint32_t *)gicd,
                      (volatile uint32_t *)gicc) != 0) {
         log_err("[gic] FATAL: GICD IIDR=0\n");

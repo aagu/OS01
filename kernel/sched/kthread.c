@@ -81,16 +81,31 @@ static int kthread_place_unpinned(unsigned *out_cpu)
     return 0;
 }
 
-/* ── The common constructor ────────────────────────────────────
- * Allocates, initialises and publishes a PF_KTHREAD task.
+/* ── The generic task publisher ────────────────────────────────
+ * Allocates, initialises and publishes a task.
+ *
+ * The architecture half of the resource set is delegated to the
+ * caller through two hooks:
+ *
+ *   prepare(tsk, arg)  attach the task's architecture resources.  It
+ *                      runs after the identity exists and before the
+ *                      task becomes visible to another CPU.  A
+ *                      non-zero return aborts the publication and the
+ *                      hook owns the cleanup of what it acquired.
+ *   discard(tsk, arg)  undo what prepare attached.  It runs ONLY when
+ *                      prepare succeeded but the locked eligibility
+ *                      re-check refused the publication.
  *
  * Order matters and is part of the contract: every fallible step
  * happens BEFORE the task becomes visible to another CPU, and the
  * publication order is task_list_lock then rq_lock.
  */
-int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
-                               const char *name, unsigned target_cpu,
-                               bool pinned, task_t **out_task, int *out_pid)
+int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
+                                  const char *name,
+                                  int (*prepare)(task_t *, void *),
+                                  void (*discard)(task_t *, void *),
+                                  void *arg,
+                                  task_t **out_task, int *out_pid)
 {
     if (out_task)
         *out_task = NULL;
@@ -98,20 +113,21 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
         *out_pid = 0;
 
     /* 1. Validate.  Everything before this point is a no-op. */
-    if (!fn)
+    if (!prepare)
         return -EINVAL;
-    if (target_cpu >= NR_CPUS || target_cpu >= num_cpus)
+    if (cpu >= NR_CPUS || cpu >= num_cpus)
         return -EINVAL;
-    if (!__atomic_load_n(&percpu_data[target_cpu].online, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE))
         return -EINVAL;
-    if (!__atomic_load_n(&percpu_data[target_cpu].scheduler_ok,
+    if (!__atomic_load_n(&percpu_data[cpu].scheduler_ok,
                          __ATOMIC_ACQUIRE)) {
         /* The boot-phase exception: an unpinned task may land on CPU0
          * while the BSP boot window is open (CPU0 is online but has
          * not published scheduler_ok yet).  A pinned task never gets
          * the exception, and once the window is closed no CPU0
-         * fallback exists at all. */
-        bool boot_fallback = !pinned && target_cpu == 0 &&
+         * fallback exists at all.  A real user task is always pinned,
+         * so only a kernel thread can ever take this path. */
+        bool boot_fallback = !pinned && cpu == 0 &&
                              sched_boot_creation_open();
         if (!boot_fallback)
             return -EINVAL;
@@ -165,7 +181,7 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     tsk->signal     = 0;
     tsk->blocked    = current->blocked;
     tsk->exit_code  = 0;
-    tsk->cpu        = target_cpu;
+    tsk->cpu        = cpu;
 
     /* Signal handlers are value-copied from the parent (the kernel
      * thread inherits the parent's handler table, like every other
@@ -185,48 +201,37 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     /* EEVDF fair start: the new task joins the target CPU's timeline
      * no later than its current task, so a fresh kernel thread cannot
      * run ahead of the task that created it. */
-    uint64_t fair_start = percpu_data[target_cpu].min_vruntime;
+    uint64_t fair_start = percpu_data[cpu].min_vruntime;
     tsk->vruntime = current->vruntime < fair_start ? current->vruntime
                                                    : fair_start;
     tsk->deadline = tsk->vruntime + EEVDF_MIN_SLICE;
 
-    /* Affinity: a pinned kernel thread owns exactly one CPU; an
-     * unpinned one keeps the arch default reach. */
-    tsk->allowed_cpus = pinned ? (1ULL << target_cpu)
+    /* Affinity: a pinned task owns exactly one CPU; an unpinned one
+     * keeps the arch default reach. */
+    tsk->allowed_cpus = pinned ? (1ULL << cpu)
                                : arch_kthread_default_mask();
 
-    /* 5. Flags: a kernel thread, and ONLY a kernel thread.  PF_SELF_REAP
-     *    and the on-CPU / on-runqueue / in-schedule flags are never
+    /* 5. Flags: exactly what the caller asked for.  PF_SELF_REAP and
+     *    the on-CPU / on-runqueue / in-schedule flags are never
      *    inherited. */
-    tsk->flags = PF_KTHREAD;
+    tsk->flags = flags;
 
     /* 6. Architecture resources: the inherited mm/CR3, the copied file
      *    table, the FPU save area and the first-entry frame.  The hook
      *    cleans up and NULLs whatever it acquired when it fails, so
      *    the common rollback only has to free the thread struct and the
      *    raw stack. */
-    int rc = arch_kthread_prepare(tsk, fn, arg);
+    int rc = prepare(tsk, arg);
     if (rc) {
         kthread_observe_free(thd, 2);
         kthread_observe_free(raw, 1);
         return rc;
     }
-#if defined(OS01_SELFTEST) && defined(__aarch64__)
-    /* FPU ledger leg, alloc side.  The arch layer owns whether a save
-     * area exists (x86 allocates one in arch_kthread_prepare; aarch64
-     * currently produces NULL).  Observing whatever it produced HERE
-     * keeps fpu_live a real allocation observation — a future aarch64
-     * FPU allocation flows through the same ledger as stack/thread,
-     * paired with the free-side observation in task_switch_complete.
-     * observe_resource() ignores NULL, so today's NULL is recorded as
-     * "no allocation", not as a hardcoded zero. */
-    aarch64_sched_observe_resource(tsk->fpu_save, 3, true);
-#endif
 
     /* 7. Publish atomically.  task_list_lock is taken first and the
      *    destination runqueue lock second; both are released in reverse
      *    order.  No fallible operation follows insertion. */
-    percpu_t *rq = &percpu_data[target_cpu];
+    percpu_t *rq = &percpu_data[cpu];
     uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
     uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
 
@@ -234,17 +239,14 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
      * publishes the task: the target CPU must still be usable. */
     if (!__atomic_load_n(&rq->online, __ATOMIC_ACQUIRE) ||
         (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE) &&
-         !(target_cpu == 0 && !pinned && sched_boot_creation_open()))) {
+         !(cpu == 0 && !pinned && sched_boot_creation_open()))) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
-        /* arch_kthread_prepare acquired FPU after the copied file table;
-         * unwind in reverse order when the locked eligibility recheck
-         * rejects publication. */
-        if (tsk->fpu_save) {
-            kthread_observe_free(tsk->fpu_save, 3);
-            tsk->fpu_save = NULL;
-        }
-        arch_kthread_drop_files(tsk);
+        /* The prepare hook acquired its resources before the locked
+         * re-check; unwind them in reverse order when that re-check
+         * rejects the publication. */
+        if (discard)
+            discard(tsk, arg);
         kthread_observe_free(thd, 2);
         kthread_observe_free(raw, 1);
         return -EINVAL;
@@ -273,10 +275,72 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
     spin_unlock_irqrestore(&task_list_lock, tl_flags);
 
-    /* target_cpu is a value captured before publication. A newly visible
+    /* cpu is a value captured before publication. A newly visible
      * self-reaping task may be reclaimed as soon as the locks drop. */
-    sched_notify_remote_cpu(target_cpu);
+    sched_notify_remote_cpu(cpu);
     return 0;
+}
+
+/* ── The kernel-thread flavour of the publisher ─────────────────
+ * A kernel thread owns the shared init_mm, a copied file table and an
+ * FPU save area; the arch hook acquires them and builds the first-entry
+ * context.  The hook owns the cleanup of whatever it acquired, so the
+ * failure path above only has to release the thread struct and the raw
+ * stack. */
+
+struct kthread_prepare_ctx {
+    uint64_t (*fn)(uint64_t);
+    uint64_t arg;
+};
+
+static int kthread_prepare(task_t *tsk, void *arg)
+{
+    struct kthread_prepare_ctx *ctx = arg;
+    int rc = arch_kthread_prepare(tsk, ctx->fn, ctx->arg);
+    if (rc)
+        return rc;
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+    /* FPU ledger leg, alloc side.  The arch layer owns whether a save
+     * area exists (x86 allocates one in arch_kthread_prepare; aarch64
+     * currently produces NULL).  Observing whatever it produced HERE
+     * keeps fpu_live a real allocation observation — a future aarch64
+     * FPU allocation flows through the same ledger as stack/thread,
+     * paired with the free-side observation in task_switch_complete.
+     * observe_resource() ignores NULL, so today's NULL is recorded as
+     * "no allocation", not as a hardcoded zero. */
+    aarch64_sched_observe_resource(tsk->fpu_save, 3, true);
+#endif
+    return 0;
+}
+
+static void kthread_discard(task_t *tsk, void *arg)
+{
+    (void)arg;
+    /* arch_kthread_prepare acquired FPU after the copied file table;
+     * unwind in reverse order. */
+    if (tsk->fpu_save) {
+        kthread_observe_free(tsk->fpu_save, 3);
+        tsk->fpu_save = NULL;
+    }
+    arch_kthread_drop_files(tsk);
+}
+
+int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
+                               const char *name, unsigned target_cpu,
+                               bool pinned, task_t **out_task, int *out_pid)
+{
+    if (out_task)
+        *out_task = NULL;
+    if (out_pid)
+        *out_pid = 0;
+
+    if (!fn)
+        return -EINVAL;
+
+    struct kthread_prepare_ctx ctx = { .fn = fn, .arg = arg };
+    return sched_alloc_and_publish_task(target_cpu, pinned, PF_KTHREAD, name,
+                                         kthread_prepare, kthread_discard,
+                                         &ctx, out_task, out_pid);
 }
 
 /* ── Public kernel-thread API ─────────────────────────────────
@@ -357,31 +421,19 @@ void kthread_yield(void)
     arch_local_irq_restore(flags);
 }
 
-/* ── Kernel-thread exit ───────────────────────────────────────
- * Terminates a kernel thread.  Only kernel threads may call this;
- * the idle task and user tasks are rejected.
+/* ── The shared self-reap exit tail ────────────────────────────
+ * Record the status, detach from the global task list, mark for
+ * self-reclaim and switch out permanently.  The next task's switch
+ * tail frees the thread context, the FPU area and the raw stack.
  *
- * The shared init_mm is NOT touched: no VMA is freed and no page table
- * is destroyed here (spec §8.3).  The thread's copied file-table
- * reference is released through the arch hook, using the existing pin
- * protocol (detach under task_list_lock, unpin outside it). */
-void kthread_exit(uint64_t code)
+ * Everything that must happen while the task is still a normal list
+ * member — a kernel thread's copied file table, a user task's address
+ * space — belongs to the caller, BEFORE this tail runs. */
+_Noreturn void task_exit_self_reap(uint64_t status)
 {
     task_t *self = current;
 
-    if (!self || !(self->flags & PF_KTHREAD) ||
-        self == percpu_data[self->cpu].idle) {
-        /* Not a kernel thread: refuse.  The idle task must never exit
-         * and a user task must go through the user exit path. */
-        for (;;)
-            arch_cpu_halt();
-    }
-
-    /* Release the copied file table (x86) before switching out.  The
-     * hook detaches under task_list_lock and unpins outside it. */
-    arch_kthread_drop_files(self);
-
-    self->exit_code = code;
+    self->exit_code = status;
 
     /* On-CPU: our kernel stack is in use until the switch tail clears
      * on_cpu.  A waiter must not free us after we set ZOMBIE below
@@ -413,6 +465,33 @@ void kthread_exit(uint64_t code)
      * double-list_del our already-NULL'd list node. */
     for (;;)
         arch_cpu_halt();
+}
+
+/* ── Kernel-thread exit ───────────────────────────────────────
+ * Terminates a kernel thread.  Only kernel threads may call this;
+ * the idle task and user tasks are rejected.
+ *
+ * The shared init_mm is NOT touched: no VMA is freed and no page table
+ * is destroyed here (spec §8.3).  The thread's copied file-table
+ * reference is released through the arch hook, using the existing pin
+ * protocol (detach under task_list_lock, unpin outside it). */
+void kthread_exit(uint64_t code)
+{
+    task_t *self = current;
+
+    if (!self || !(self->flags & PF_KTHREAD) ||
+        self == percpu_data[self->cpu].idle) {
+        /* Not a kernel thread: refuse.  The idle task must never exit
+         * and a user task must go through the user exit path. */
+        for (;;)
+            arch_cpu_halt();
+    }
+
+    /* Release the copied file table (x86) before switching out.  The
+     * hook detaches under task_list_lock and unpins outside it. */
+    arch_kthread_drop_files(self);
+
+    task_exit_self_reap(code);
 }
 
 /* Runs on the *next* task's stack. Captures the self-reap decision and
