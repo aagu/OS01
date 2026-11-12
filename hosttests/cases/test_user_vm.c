@@ -430,7 +430,11 @@ TEST_FUNC(test_mmap_argument_contract)
                                MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS));
     assert_eq(-EINVAL, test_mmap_call(mm, 0, 0x1000, PROT_RW,
                                MAP_ANONYMOUS | 0x8000));
-    /* Legally parsed but unsupported requests. */
+    /* Legally parsed but unsupported requests: shared-alone is
+     * syntactically valid (exactly one of the pair) and must report
+     * -EOPNOTSUPP, not -EINVAL. */
+    assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,
+                                   MAP_SHARED | MAP_ANONYMOUS));
     assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,
                                    MAP_PRIVATE));
     assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,

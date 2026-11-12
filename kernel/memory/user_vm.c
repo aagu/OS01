@@ -428,10 +428,14 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     uint64_t fd    = args[4];
     uint64_t off   = args[5];
 
-    /* Flag syntax first: unknown bits and the private/shared pair. */
+    /* Flag syntax first: unknown bits and the private/shared pair.
+     * EXACTLY ONE of the pair is legal syntax; shared-alone is a
+     * syntactically valid request for an unsupported mapping (below),
+     * while both-set or neither-set is a syntax error. */
     if (flags & ~(uint64_t)USER_VM_MAP_KNOWN)
         return -EINVAL;
-    if ((flags & (MAP_SHARED | MAP_PRIVATE)) != MAP_PRIVATE)
+    uint64_t map_type = flags & (MAP_SHARED | MAP_PRIVATE);
+    if (map_type != MAP_PRIVATE && map_type != MAP_SHARED)
         return -EINVAL;
 
     uint64_t vma_flags = 0;
@@ -439,8 +443,11 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     if (rc)
         return rc;
 
-    /* Legally parsed but out of scope for anonymous-private v1. */
-    if (!(flags & MAP_ANONYMOUS) || (flags & MAP_FIXED))
+    /* Legally parsed but out of scope for anonymous-private v1:
+     * shared, file-backed and fixed mappings all fail here, before the
+     * private-anonymous fd/off validation. */
+    if (map_type != MAP_PRIVATE || !(flags & MAP_ANONYMOUS) ||
+        (flags & MAP_FIXED))
         return -EOPNOTSUPP;
 
     /* Raw 64-bit fd/off, before any mapping metadata is touched. */
