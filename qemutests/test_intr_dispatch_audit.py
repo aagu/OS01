@@ -374,6 +374,9 @@ ffff000040097500 T aarch64_uaccess_fault
 ffff000040097540 T copy_from_user_ft_res
 ffff000040097580 T copy_to_user_ft_res
 ffff0000400975c0 T syscall_check_user_range
+ffff000040097600 T aarch64_user_vm_fault
+ffff000040097640 T arch_syscall_user_vm
+ffff000040097680 T sys_mm_dispatch
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -443,8 +446,18 @@ ffff000040097230: 94000034     	bl	0xffff000040097300 <syscall_dispatch>
 ffff000040097234: d65f03c0     	ret
 
 ffff0000400a3e00 <aarch64_user_task_sync>:
+ffff0000400a3e38: 94000df2     	bl	0xffff000040097600 <aarch64_user_vm_fault>
 ffff0000400a3e40: 17fffff0     	b	0xffff000040097200 <aarch64_user_syscall>
 ffff0000400a3e44: d65f03c0     	ret
+
+ffff000040097600 <aarch64_user_vm_fault>:
+ffff000040097604: d65f03c0     	ret
+
+ffff000040097640 <arch_syscall_user_vm>:
+ffff000040097644: d65f03c0     	ret
+
+ffff000040097680 <sys_mm_dispatch>:
+ffff000040097684: 17ffffef     	b	0xffff000040097640 <arch_syscall_user_vm>
 
 ffff000040094104 <arch_intr_dispatch>:
 ffff000040094104: b4000100     	cbz	x0, 0xffff000040094124 <arch_intr_dispatch+0x20>
@@ -1391,6 +1404,57 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
         errors = self.audit()
         self.assertTrue(any("aarch64_user_syscall" in e and
                             "syscall_dispatch" in e
+                            for e in errors), errors)
+
+    # ── Anonymous-VM SVC/fault wiring (M4 task 4) ───────────────
+
+    def test_vm_wiring_is_resolved(self):
+        self.stage_a64()
+        errors, notes = self.audit_with_notes()
+        self.assertEqual(errors, [])
+        for expected in (
+                "edge sys_mm_dispatch -> arch_syscall_user_vm (call/tail)",
+                "edge aarch64_user_task_sync -> aarch64_user_vm_fault "
+                "(call/tail)",
+                "anonymous-VM: no futex definition"):
+            self.assertTrue(any(expected in n for n in notes),
+                            (expected, notes))
+
+    def test_vm_adapter_edge_missing_fails(self):
+        # The AArch64 subset dispatcher no longer reaches the VM adapter.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097684,
+            "b\t0xffff000040097640 <arch_syscall_user_vm>",
+            "b\t0xffff000040097200 <aarch64_user_syscall>"))
+        errors = self.audit()
+        self.assertTrue(any("sys_mm_dispatch" in e and
+                            "arch_syscall_user_vm" in e
+                            for e in errors), errors)
+
+    def test_demand_fault_edge_missing_fails(self):
+        # A formal EL0 sync fault bypasses the demand-fill entry.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400A3E38,
+            "bl\t0xffff000040097600 <aarch64_user_vm_fault>",
+            "bl\t0xffff000040097990 <aarch64_intr_decode_sync>"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_user_task_sync" in e and
+                            "aarch64_user_vm_fault" in e
+                            for e in errors), errors)
+
+    def test_vm_test_hook_leak_fails(self):
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5600 T aarch64_user_vm_test_fault\n")
+        errors = self.audit()
+        self.assertTrue(any("test symbol leak" in e and
+                            "aarch64_user_vm_test_fault" in e
+                            for e in errors), errors)
+
+    def test_futex_in_aarch64_production_fails(self):
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5700 T do_futex_wait\n")
+        errors = self.audit()
+        self.assertTrue(any("do_futex_wait" in e and "x86-only" in e
                             for e in errors), errors)
 
     def test_probe_copy_wrapper_leak_fails(self):

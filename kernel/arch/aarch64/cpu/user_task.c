@@ -45,6 +45,7 @@
 #include <arch/aarch64/reg.h>
 #include <arch/aarch64/timer.h>
 #include <selftest/aarch64_user_task.h>
+#include <selftest/aarch64_user_vm.h>
 
 /* ── Test observation state ─────────────────────────────────────
  * The counters below are written by the production paths and read by
@@ -402,6 +403,11 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
          * same PC is retried; every other fault keeps the old
          * termination path.  Policy exhaustion reports -ENOMEM. */
         int frc = aarch64_user_vm_fault(regs, event);
+#if AARCH64_EL0_TEST
+        aarch64_user_vm_test_fault(
+            esr, event->fault_addr_valid ? event->fault_addr : 0,
+            regs->elr_el1, frc);
+#endif
         if (frc == 0)
             return;
 
@@ -481,6 +487,10 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
          * installed and the task continues where it was. */
         regs->x0 = (uint64_t)rc;
 #if AARCH64_EL0_TEST
+        aarch64_user_vm_test_exec(rc,
+                                  aarch64_user_image_root_pa(owner->image));
+#endif
+#if AARCH64_EL0_TEST
         g_stats.execs++;
         g_stats.last_exec_index = index;
         g_stats.last_exec_rc = rc;
@@ -494,6 +504,9 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
      * exception frame follow.  An IRQ can never observe a state in
      * which the hardware root and the task metadata disagree. */
     struct aarch64_user_image *old_image = owner->image;
+#if AARCH64_EL0_TEST
+    uint64_t old_root_pa = aarch64_user_image_root_pa(old_image);
+#endif
 
     aarch64_user_install_root(aarch64_user_image_root_pa(image));
 
@@ -516,6 +529,9 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
      * interrupts enabled. */
     arch_local_irq_enable();
     aarch64_user_image_destroy(old_image);
+#if AARCH64_EL0_TEST
+    aarch64_user_vm_test_exec(0, old_root_pa);
+#endif
     arch_local_irq_disable();
 }
 

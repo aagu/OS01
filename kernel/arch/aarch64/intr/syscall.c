@@ -16,6 +16,7 @@
 #include <uapi/syscall.h>
 #if AARCH64_EL0_TEST
 #include <selftest/aarch64_user_svc_uaccess.h>
+#include <selftest/aarch64_user_vm.h>
 #endif
 
 void aarch64_user_syscall(pt_regs_t *regs)
@@ -51,6 +52,13 @@ void aarch64_user_syscall(pt_regs_t *regs)
     aarch64_vm_native_enter(regs, nr);
 
     int64_t ret = syscall_dispatch(&ctx);
+
+#if AARCH64_EL0_TEST
+    /* Acceptance observation: mmap/brk must not have instantiated a
+     * leaf, and the two clock_gettime -EFAULT targets are inspected
+     * here while the user root is still installed. */
+    aarch64_user_vm_test_syscall(regs, nr, ret);
+#endif
 
     aarch64_vm_native_leave();
 

@@ -58,7 +58,7 @@ static uint64_t *vm_root(mm_t *mm)
     return (uint64_t *)Phy_To_Virt((uintptr_t)mm->pgdir);
 }
 
-static bool vma_is_policy_mmap(const vma_t *v)
+static bool policy_vma_is_mmap(const vma_t *v)
 {
     return (v->vm_flags & VMA_ANON) &&
            !(v->vm_flags & (VMA_HEAP | VMA_IO)) &&
@@ -255,7 +255,7 @@ static int authorize_absent(mm_t *mm, uint64_t va, bool write,
         return -EFAULT;
 
     bool heap = (v->vm_flags & VMA_HEAP) != 0;
-    bool anon_mmap = vma_is_policy_mmap(v) && va >= USER_VM_MMAP_BASE;
+    bool anon_mmap = policy_vma_is_mmap(v) && va >= USER_VM_MMAP_BASE;
     if (!heap && !anon_mmap)
         return -EFAULT;
     if (heap && va >= USER_VM_HEAP_LIMIT)
@@ -274,7 +274,7 @@ static int authorize_absent(mm_t *mm, uint64_t va, bool write,
 
 /* Split v at `at` using the caller's preallocated right node.  The
  * caller has already verified `v->vm_start < at < v->vm_end`. */
-static void vma_split_at(mm_t *mm, vma_t *v, uint64_t at, vma_t *right)
+static void split_policy_vma(mm_t *mm, vma_t *v, uint64_t at, vma_t *right)
 {
     list_init(&right->list);
     right->vm_start     = at;
@@ -529,7 +529,7 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
     uint64_t p = addr;
     while (p < end) {
         vma_t *v = vm_area_lookup(mm, p);
-        if (!v || !vma_is_policy_mmap(v) || v->vm_end <= p)
+        if (!v || !policy_vma_is_mmap(v) || v->vm_end <= p)
             return -ENOMEM;
         p = v->vm_end;
     }
@@ -566,10 +566,10 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
     /* Commit. */
     int si = 0;
     if (need_start)
-        vma_split_at(mm, first, addr, split[si++]);
+        split_policy_vma(mm, first, addr, split[si++]);
     last = last_overlap(mm, addr, end);
     if (need_end)
-        vma_split_at(mm, last, end, split[si++]);
+        split_policy_vma(mm, last, end, split[si++]);
 
     for (list_t *lp = mm->vma_list.next; lp != &mm->vma_list;
          lp = lp->next) {
@@ -648,10 +648,10 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len)
     int si = 0;
     first = first_overlap(mm, addr, end);
     if (first && first->vm_start < addr)
-        vma_split_at(mm, first, addr, split[si++]);
+        split_policy_vma(mm, first, addr, split[si++]);
     last = last_overlap(mm, addr, end);
     if (last && last->vm_end > end)
-        vma_split_at(mm, last, end, split[si++]);
+        split_policy_vma(mm, last, end, split[si++]);
 
     lp = mm->vma_list.next;
     while (lp != &mm->vma_list) {

@@ -112,6 +112,7 @@ ifeq ($(AARCH64_EL0_TEST),1)
 # static fixture images exist only in the EL0 test variant.
 KERNEL_C_SOURCES += selftest/test_aarch64_user_task.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_svc_uaccess.c
+KERNEL_C_SOURCES += selftest/test_aarch64_user_vm.c
 endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
@@ -299,6 +300,12 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_a_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_b_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_task_c_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_svc_uaccess_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_normal_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_rw_only_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_none_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_unmapped_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_replace_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_leave_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -725,6 +732,62 @@ $(BUILD_DIR)/generated/aarch64_user_svc_uaccess.elf: $(BUILD_DIR)/selftest/fixtu
 	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
 
 $(BUILD_DIR)/generated/aarch64_user_svc_uaccess_image.o: $(BUILD_DIR)/generated/aarch64_user_svc_uaccess.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+# ── M4 anonymous-VM fixtures ────────────────────────────────────
+# One source, six images: the compile-time USER_VM_MODE selects the
+# payload.  The LEAVE image is the replacement target of REPLACE.
+AARCH64_USER_VM_LD := selftest/fixtures/aarch64_user_task.ld
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_normal.o: selftest/fixtures/aarch64_user_vm.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_VM_MODE=0 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_rw_only.o: selftest/fixtures/aarch64_user_vm.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_VM_MODE=1 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_none.o: selftest/fixtures/aarch64_user_vm.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_VM_MODE=2 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_unmapped.o: selftest/fixtures/aarch64_user_vm.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_VM_MODE=3 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_replace.o: selftest/fixtures/aarch64_user_vm.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_VM_MODE=4 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_leave.o: selftest/fixtures/aarch64_user_vm.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_VM_MODE=5 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_vm_normal.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_normal.o $(AARCH64_USER_VM_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_rw_only.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_rw_only.o $(AARCH64_USER_VM_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_none.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_none.o $(AARCH64_USER_VM_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_unmapped.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_unmapped.o $(AARCH64_USER_VM_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_replace.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_replace.o $(AARCH64_USER_VM_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_leave.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_vm_leave.o $(AARCH64_USER_VM_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_vm_normal_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_normal.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_rw_only_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_rw_only.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_none_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_none.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_unmapped_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_unmapped.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_replace_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_replace.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_vm_leave_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_leave.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 

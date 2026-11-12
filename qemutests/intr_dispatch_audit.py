@@ -537,6 +537,9 @@ _A64_DISASM_SYMS = (
        "aarch64_user_task_sync", "aarch64_user_syscall"]
     + ["aarch64_uaccess_load", "aarch64_uaccess_store",
        "aarch64_uaccess_fault"]
+    + ["sys_mm_dispatch", "arch_syscall_user_vm",
+       "aarch64_user_vm_fault", "aarch64_vm_native_enter",
+       "aarch64_vm_native_leave", "aarch64_user_vm_prepare_copy"]
 )
 
 # The formal user-copy surface a production image must link: the two
@@ -1139,6 +1142,14 @@ _A64_FORBIDDEN_TEST_SYMS = (
     # The M4 acceptance-only copy probe and SVC hook.
     "aarch64_uaccess_test_copy",
     "aarch64_user_svc_uaccess_test_hook",
+    # The M4 anonymous-VM acceptance observations.
+    "aarch64_user_vm_test_reset",
+    "aarch64_user_vm_test_stats",
+    "aarch64_user_vm_test_syscall",
+    "aarch64_user_vm_test_fault",
+    "aarch64_user_vm_test_exec",
+    "aarch64_user_vm_test_watch_clock",
+    "aarch64_user_vm_test_arm_replace_fail",
 )
 
 # An embedded test ELF is linked as ``_binary_<name>_start`` /
@@ -1341,6 +1352,45 @@ def _audit_aarch64_formal_path(symtab, blocks, errors, notes):
                          "(call/tail)")
 
 
+# The M4 anonymous-VM wiring a production image must carry: the four
+# AArch64 subset VM entries delegate to the arch adapter, and a formal
+# EL0 sync fault reaches the demand-fill entry.  SYS_futex and the
+# acceptance-only observations stay out of the production image.
+_A64_VM_EDGES = (
+    ("sys_mm_dispatch", "arch_syscall_user_vm",
+     "the AArch64 subset sys_mm dispatcher must delegate to the VM "
+     "adapter"),
+    ("aarch64_user_task_sync", "aarch64_user_vm_fault",
+     "a formal EL0 sync fault must reach the demand-fill entry"),
+)
+
+_A64_VM_FORBIDDEN_STRONG = ("do_futex_wait", "do_futex_wake")
+
+
+def _audit_aarch64_vm_wiring(symtab, blocks, errors, notes):
+    for source, target, why in _A64_VM_EDGES:
+        instrs = _block(blocks, source, errors, "anonymous-VM wiring")
+        if instrs is None:
+            continue
+        if not any(e.kind in ("call", "branch") and e.target == target
+                   for e in a64_edges(instrs, symtab)):
+            errors.append(f"edge {source} -> {target}: not proven — {why}")
+        else:
+            notes.append(f"edge {source} -> {target} (call/tail)")
+
+    leaked = False
+    for name in _A64_VM_FORBIDDEN_STRONG:
+        if symtab.strong_defs(name):
+            leaked = True
+            errors.append(
+                f"anonymous-VM: {name} is strongly defined in the "
+                "production aarch64 image — SYS_futex must stay in the "
+                "x86-only block")
+    if not leaked:
+        notes.append("anonymous-VM: no futex definition in the "
+                     "production aarch64 image")
+
+
 def _audit_aarch64(symtab, blocks, order, repo: Path,
                    errors, notes) -> None:
     # 1. vector-table geometry: 2 KiB alignment, 16 slots, 128-byte
@@ -1539,6 +1589,10 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
     # 12. the formal copy surface is linked and the native SVC entry
     #     reuses the shared syscall table.
     _audit_aarch64_formal_path(symtab, blocks, errors, notes)
+
+    # 13. the anonymous-VM SVC/fault wiring, with SYS_futex and the
+    #     acceptance observations excluded from the production image.
+    _audit_aarch64_vm_wiring(symtab, blocks, errors, notes)
 
 
 # ─────────────────────────────────────────────────────────────────
