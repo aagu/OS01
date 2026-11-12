@@ -23,6 +23,7 @@
  * was taken through (spec §5.1). */
 #define AARCH64_EL1H_SYNC_SLOT 0x200ULL
 #define AARCH64_EL1H_IRQ_SLOT  0x280ULL
+#define AARCH64_EL0_SYNC_SLOT  0x400ULL
 #define AARCH64_EL0_IRQ_SLOT   0x480ULL
 
 /* `regs` must not be NULL; `out` receives a fully initialized event

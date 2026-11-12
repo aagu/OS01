@@ -22,6 +22,7 @@
 #include <arch/aarch64/regs.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/intr_dispatch.h>
+#include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/user_image.h>
@@ -30,6 +31,7 @@
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <errno.h>
+#include <intr/dispatch.h>
 #include <log/log.h>
 #include <memory/slab.h>
 #include <percpu/percpu.h>
@@ -137,32 +139,65 @@ uint64_t aarch64_user_task_frame(const struct task_struct *tsk){
     return tsk->thread->stack_top - PT_REGS_SIZE;
 }
 
+__attribute__((no_stack_protector))
 bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
 {
     if (!regs)
         return false;
-    /* The BSP owns the single-core user-task runtime. */
-    if (cpu_id() != 0)
+    /* The BSP owns the single-core user-task runtime.  The per-CPU
+     * pointer must be installed: an unset architecture pointer is not
+     * a supported BSP check. */
+    if (!this_cpu() || cpu_id() != 0)
         return false;
     /* The scheduler must be ready: a user task only exists after the
      * scheduler published its readiness. */
     if (!__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE))
         return false;
-    /* The frame must come from EL0t. */
-    if ((regs->spsr_el1 & 0x1f) != 0)
-        return false;
     /* The current task must be a real user task ... */
     task_t *t = arch_current_task();
     if (!aarch64_user_task_is_user(t))
         return false;
-    /* ... and the root actually installed must be that task's root. */
-    const struct aarch64_user_task *owner = t->thread->user_task;
-    uint64_t want = aarch64_user_image_root_pa(owner->image);
-    if (!want)
+    /* ... a real process ... */
+    if (!(t->flags & PF_PROCESS))
         return false;
-    uint64_t ttbr0;
-    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-    return (ttbr0 & AARCH64_TTBR_BASE_MASK) == want;
+    /* ... with a private mm that is the image's own mm ... */
+    const struct aarch64_user_task *owner = t->thread->user_task;
+    if (!owner || !owner->image)
+        return false;
+    struct mm_struct *mm = t->mm;
+    if (!mm || mm != aarch64_user_image_mm(owner->image))
+        return false;
+    /* ... and the root actually installed must be that task's root.
+     * The mm root, the image root and the installed root must all be
+     * the same non-zero PA. */
+    uint64_t installed;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(installed));
+    installed &= AARCH64_TTBR_BASE_MASK;
+    return aarch64_user_frame_matches(regs, aarch64_user_sync_frame(),
+                                       (uint64_t)(uintptr_t)mm->pgdir,
+                                       aarch64_user_image_root_pa(owner->image),
+                                       installed);
+}
+
+__attribute__((no_stack_protector))
+uint64_t aarch64_user_sync_frame(void)
+{
+    task_t *t = arch_current_task();
+    if (!aarch64_user_task_is_user(t))
+        return 0;
+    /* The lower-EL entry pushes exactly one pt_regs frame below
+     * SP_EL1, and SP_EL1 is stack_top while the task runs in EL0 (the
+     * restore path raises it again before ERET).  The exception frame
+     * therefore sits exactly at aarch64_user_task_frame(). */
+    return aarch64_user_task_frame(t);
+}
+
+struct mm_struct *aarch64_user_current_mm(void)
+{
+    task_t *t = arch_current_task();
+    if (!aarch64_user_task_is_user(t))
+        return NULL;
+    return t->mm;
 }
 
 void aarch64_user_runtime_init(void)
@@ -270,25 +305,31 @@ void aarch64_user_first_entry(void)
  *     thread's stack and owns the frame while it is active;
  *   - a real EL0 user task, whose frame belongs to the scheduler.
  *
- * A frame that matches neither is an unrecognised entry and stops the
- * kernel.  It must never borrow the probe's continuation: that
- * continuation unwinds the probe's stack frame and returns to a kernel
- * caller that does not exist in a real user task. */
+ * The formal branch builds the normalized event and hands it to the
+ * COMMON dispatcher: the backend re-decodes it, checks the abort EC
+ * against the saved mode and validates the formal frame before the
+ * formal handler runs.  A frame that matches neither producer is an
+ * unrecognised entry and stops the kernel.  It must never borrow the
+ * probe's continuation: that continuation unwinds the probe's stack
+ * frame and returns to a kernel caller that does not exist in a real
+ * user task.
+ */
 
 bool aarch64_el0_sync_route(pt_regs_t *regs, uint64_t esr, uint64_t far)
 {
 #if AARCH64_EL0_TEST
-    /* The legacy probe owns the frame while it is active. */
+    /* The legacy probe owns the frame while it is active.  ONLY this
+     * branch may use the probe's continuation. */
     if (aarch64_el0_probe_active())
         return aarch64_el0_probe_sync(regs, esr, far);
 #endif
-    /* The formal branch: the CPU and the scheduler state must be
-     * readable, and the frame must belong to a real user task that
-     * owns the root actually installed in TTBR0_EL1. */
-    if (!aarch64_user_frame_is_valid(regs))
-        aarch64_el1_sync_fatal(regs, esr, far);
+    /* The formal branch goes through the common dispatcher. */
+    struct intr_event ev;
 
-    aarch64_user_task_sync(regs, esr, far);
+    aarch64_intr_decode_sync(&ev, regs, esr, far);
+    /* Report the real entry: the lower-EL sync slot. */
+    ev.native_vector = AARCH64_EL0_SYNC_SLOT;
+    arch_intr_dispatch(&ev, regs);
     return true;
 }
 
@@ -297,8 +338,9 @@ bool aarch64_el0_sync_route(pt_regs_t *regs, uint64_t esr, uint64_t far)
 static void aarch64_user_task_exec(pt_regs_t *regs);
 __attribute__((noreturn)) static void aarch64_user_task_exit(uint64_t status);
 
-void aarch64_user_task_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
+void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
 {
+    uint64_t esr = event->native_status;
     uint64_t ec = (esr & AARCH64_ESR_EC_MASK) >> AARCH64_ESR_EC_SHIFT;
     uint64_t imm = esr & 0xffff;
 
@@ -309,14 +351,15 @@ void aarch64_user_task_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
 
     if (ec != A64_EC_SVC_LOWER) {
         /* Not an SVC: the task took a synchronous fault.  The current
-         * task dies with -EFAULT; the ESR and the FAR (only when the
-         * ESR says the FAR is valid) are recorded. */
+         * task dies with -EFAULT; the ESR and the fault address (only
+         * when the event says the address is valid) are recorded. */
         uint64_t status = (uint64_t)-EFAULT;
-        if (aarch64_sync_far_valid(esr))
-            log_err("[user-task] sync fault esr=0x%lx far=0x%lx\n",
-                    (unsigned long)esr, (unsigned long)far);
+        /* The aarch64 logger prints %lx with its own 0x prefix. */
+        if (event->fault_addr_valid)
+            log_err("[user-task] sync fault esr=%lx far=%lx\n",
+                    (unsigned long)esr, (unsigned long)event->fault_addr);
         else
-            log_err("[user-task] sync fault esr=0x%lx far=invalid\n",
+            log_err("[user-task] sync fault esr=%lx far=invalid\n",
                     (unsigned long)esr);
         aarch64_user_task_exit(status);
         return;

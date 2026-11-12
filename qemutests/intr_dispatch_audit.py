@@ -51,8 +51,10 @@ aarch64:
      cross-ISA rules as on x86; ``PT_REGS_SIZE`` stays 34*8;
   6. the lower-EL (EL0) vector slots (+0x400 / +0x480) branch to
      ``el0_sync_entry`` / ``el0_irq_entry``; the low-EL sync route
-     reaches the formal user-task handler (``aarch64_user_task_sync``)
-     and the low-EL IRQ adapter reaches the common dispatcher;
+     reaches the COMMON dispatcher, which reaches the sync backend,
+     and only that backend reaches the formal user-task handler
+     (``aarch64_user_task_sync``); the low-EL IRQ adapter reaches the
+     common dispatcher;
   7. the formal EL0 entry points (user-image loader, user-task spawn,
      runtime root revocation) are linked exactly once, and none of the
      legacy M4 probe, test-only or embedded-test-ELF symbols may
@@ -1121,6 +1123,8 @@ _A64_FORBIDDEN_ELF_PREFIXES = ("_binary_aarch64_",)
 
 # The low-EL (EL0) routing chain the formal user task depends on:
 #   VBAR +0x400 → el0_sync_entry → aarch64_el0_sync_route
+#                                  → arch_intr_dispatch
+#                                  → arch_intr_handle_sync
 #                                  → aarch64_user_task_sync
 #   VBAR +0x480 → el0_irq_entry  → aarch64_el0_irq
 #                                  → arch_intr_dispatch
@@ -1129,12 +1133,15 @@ _A64_EL0_ROUTES = (
      "the lower-EL sync entry must route through aarch64_el0_sync_route"),
     ("el0_irq_entry", "aarch64_el0_irq",
      "the lower-EL IRQ entry must route through aarch64_el0_irq"),
-    ("aarch64_el0_sync_route", "aarch64_user_task_sync",
-     "the low-EL sync route must reach the formal user-task handler "
-     "aarch64_user_task_sync"),
+    ("aarch64_el0_sync_route", "arch_intr_dispatch",
+     "the low-EL sync route must reach the common dispatcher "
+     "arch_intr_dispatch"),
     ("aarch64_el0_irq", "arch_intr_dispatch",
      "the low-EL IRQ adapter must reach the common dispatcher "
      "arch_intr_dispatch"),
+    ("arch_intr_handle_sync", "aarch64_user_task_sync",
+     "the sync backend must reach the formal user-task handler "
+     "aarch64_user_task_sync"),
 )
 
 

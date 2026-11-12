@@ -110,6 +110,10 @@ void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
     struct intr_event ev;
 
     aarch64_intr_decode_sync(&ev, regs, esr, far);
+    /* Report the real entry: the EL1h sync slot.  A frame whose saved
+     * mode is not EL1h re-decodes to the lower-EL slot, so the backend
+     * rejects it instead of silently claiming an EL0 path. */
+    ev.native_vector = AARCH64_EL1H_SYNC_SLOT;
     arch_intr_dispatch(&ev, regs);
 
     /* Unreachable in practice: the sync backend never returns, and a

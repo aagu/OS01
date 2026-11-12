@@ -44,11 +44,13 @@
 #include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/user_task.h>
 
 /* ── Independent literal expectations ────────────────────────────────── */
 
 #define A64_SYNC_SLOT_LIT   0x200ULL      /* VBAR slot: Sync  SP_ELx    */
 #define A64_IRQ_SLOT_LIT    0x280ULL      /* VBAR slot: IRQ   SP_ELx    */
+#define A64_EL0_SYNC_LIT    0x400ULL      /* VBAR slot: Sync  from EL0  */
 
 #define SPSR_EL1H_LIT       0x5ULL        /* M[4:0] = 0b00101           */
 #define SPSR_EL0T_LIT       0x0ULL        /* M[4:0] = 0b00000 → USER    */
@@ -66,6 +68,10 @@
 #define FAR_FNV_LIT         0x00000000DEAD0000ULL
 #define ELR_LIT             0x00000000DEADBEEFULL
 #define X0_LIT              0x00000000CAFEBABEULL
+
+/* The roots the admission stub feeds into the REAL pure matcher. */
+#define ROOT_LIT            0x0000000000001000ULL
+#define OTHER_ROOT_LIT      0x0000000000002000ULL
 
 /* ── Spy state ───────────────────────────────────────────────────────── */
 
@@ -87,6 +93,44 @@ static pt_regs_t              *g_bad_regs;
 
 static jmp_buf g_fatal_jb;
 static jmp_buf g_bad_jb;
+
+/* ── The formal EL0 admission and the formal handler ─────────────────── */
+
+/* The facts the admission stub feeds into the REAL pure matcher.  The
+ * stub is the only thing the host replaces: the RULE it applies is the
+ * production one (kernel/include/arch/aarch64/user_task.h). */
+static uint64_t g_expected_frame;
+static uint64_t g_mm_root;
+static uint64_t g_image_root;
+static uint64_t g_installed_root;
+
+static int g_admission_calls;
+static const struct pt_regs *g_admission_regs;
+
+static int g_user_sync_calls;
+static pt_regs_t *g_user_sync_regs;
+static const struct intr_event *g_user_sync_event;
+
+/* The admission stub: it hands the controlled facts to the REAL pure
+ * matcher, so a wrong frame or a wrong root is rejected by the
+ * production rule and not by a test-local imitation of it. */
+bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
+{
+    g_admission_calls++;
+    g_admission_regs = regs;
+    return aarch64_user_frame_matches(regs, g_expected_frame, g_mm_root,
+                                       g_image_root, g_installed_root);
+}
+
+/* The formal user-task handler spy: it counts the calls and keeps the
+ * event it was handed.  The real handler lives in
+ * kernel/arch/aarch64/cpu/user_task.c and is NOT linked here. */
+void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
+{
+    g_user_sync_calls++;
+    g_user_sync_regs = regs;
+    g_user_sync_event = event;
+}
 
 /* ── Spy terminal ends ───────────────────────────────────────────────── */
 
@@ -147,6 +191,19 @@ static void reset_spies(void)
     g_gic_regs    = NULL;
     g_bad_event   = NULL;
     g_bad_regs    = NULL;
+
+    g_admission_calls = 0;
+    g_admission_regs  = NULL;
+    g_user_sync_calls = 0;
+    g_user_sync_regs  = NULL;
+    g_user_sync_event = NULL;
+
+    /* The default facts admit a frame that lives at its own address and
+     * runs on one root. */
+    g_expected_frame = 0;
+    g_mm_root        = ROOT_LIT;
+    g_image_root     = ROOT_LIT;
+    g_installed_root = ROOT_LIT;
 }
 
 /* Member-by-member expected-event check for a decoded EL1h sync event.
@@ -298,6 +355,8 @@ static void expect_bad_event(struct intr_event *ev, pt_regs_t *regs)
     assert_true(g_bad_regs   == regs);
     assert_eq(0, g_fatal_calls);
     assert_eq(0, g_gic_calls);
+    /* The formal user-task handler must never have run. */
+    assert_eq(0, g_user_sync_calls);
 }
 
 TEST_FUNC(bad_mode_or_payload)
@@ -357,10 +416,126 @@ TEST_FUNC(bad_mode_or_payload)
     expect_bad_event(&ev, &regs);
 }
 
+/* ── Case: el0_sync_formal_frame ────────────────────────────────────── */
+
+/* A legal lower-EL synchronous frame reaches the formal user-task
+ * handler exactly once — and only after the backend re-decoded the
+ * event and the admission accepted the frame. */
+TEST_FUNC(el0_sync_formal_frame)
+{
+    static struct intr_event ev;
+    static pt_regs_t regs;
+
+    TEST_SUITE("el0_sync_formal_frame");
+
+    reset_spies();
+    fill_regs(&regs, SPSR_EL0T_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_LOWER_LIT, FAR_LIT);
+    /* The lower-EL sync entry states the real slot it was taken
+     * through. */
+    ev.native_vector = A64_EL0_SYNC_LIT;
+    /* The frame the running user task owns IS this frame. */
+    g_expected_frame = (uint64_t)(uintptr_t)&regs;
+
+    arch_intr_dispatch(&ev, &regs);
+
+    assert_eq(1, g_admission_calls);
+    assert_true(g_admission_regs == &regs);
+    assert_eq(1, g_user_sync_calls);
+    assert_true(g_user_sync_regs == &regs);
+    assert_true(g_user_sync_event == &ev);
+    assert_eq(0, g_fatal_calls);
+    assert_eq(0, g_bad_calls);
+    assert_eq(0, g_gic_calls);
+}
+
+/* ── Case: el0_sync_rejects ─────────────────────────────────────────── */
+
+/* Every way a formal lower-EL frame can be refused: a wrong slot, a
+ * wrong mode, a frame the task does not own, a root disagreement and
+ * an abort EC that contradicts the saved mode.  None of them may reach
+ * the formal handler. */
+TEST_FUNC(el0_sync_rejects)
+{
+    static struct intr_event ev;
+    static pt_regs_t regs;
+
+    TEST_SUITE("el0_sync_rejects");
+
+    /* (a) wrong slot: the event claims the EL1h sync slot while the
+     *     frame was taken at EL0 — the re-decode disagrees. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL0T_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_LOWER_LIT, FAR_LIT);
+    ev.native_vector = A64_SYNC_SLOT_LIT;          /* tampered */
+    g_expected_frame = (uint64_t)(uintptr_t)&regs;
+    expect_bad_event(&ev, &regs);
+
+    /* (b) wrong mode: the frame says EL1h but the event claims the
+     *     lower-EL slot. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL1H_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_SAME_LIT, FAR_LIT);
+    ev.native_vector = A64_EL0_SYNC_LIT;           /* tampered */
+    expect_bad_event(&ev, &regs);
+
+    /* (c) wrong frame: the frame is on the same stack, but not the one
+     *     the running user task owns. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL0T_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_LOWER_LIT, FAR_LIT);
+    ev.native_vector = A64_EL0_SYNC_LIT;
+    g_expected_frame = (uint64_t)(uintptr_t)&regs + 0x100;
+    expect_bad_event(&ev, &regs);
+
+    /* (d) the mm root and the image root disagree. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL0T_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_LOWER_LIT, FAR_LIT);
+    ev.native_vector = A64_EL0_SYNC_LIT;
+    g_expected_frame = (uint64_t)(uintptr_t)&regs;
+    g_image_root = OTHER_ROOT_LIT;
+    expect_bad_event(&ev, &regs);
+
+    /* (e) the root actually installed in TTBR0 is not the mm root. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL0T_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_LOWER_LIT, FAR_LIT);
+    ev.native_vector = A64_EL0_SYNC_LIT;
+    g_expected_frame = (uint64_t)(uintptr_t)&regs;
+    g_installed_root = OTHER_ROOT_LIT;
+    expect_bad_event(&ev, &regs);
+
+    /* (f) a same-EL abort EC contradicts a saved EL0t frame. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL0T_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_SAME_LIT, FAR_LIT);
+    ev.native_vector = A64_EL0_SYNC_LIT;
+    g_expected_frame = (uint64_t)(uintptr_t)&regs;
+    expect_bad_event(&ev, &regs);
+
+    /* (g) an ordinary EL1h frame keeps the frozen fatal path and never
+     *     reaches the formal user-task handler. */
+    reset_spies();
+    fill_regs(&regs, SPSR_EL1H_LIT);
+    aarch64_intr_decode_sync(&ev, &regs, ESR_DA_SAME_LIT, FAR_LIT);
+    ev.native_vector = A64_SYNC_SLOT_LIT;
+    if (setjmp(g_fatal_jb) == 0) {
+        arch_intr_dispatch(&ev, &regs);
+        assert_true(false);        /* the fatal terminal end never returns */
+    }
+    assert_eq(1, g_fatal_calls);
+    assert_eq(0, g_user_sync_calls);
+    assert_eq(0, g_admission_calls);
+    assert_eq(0, g_bad_calls);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(sync_fatal_preserves_raw),
     TEST_ENTRY(irq_gic_once),
     TEST_ENTRY(bad_mode_or_payload),
+    TEST_ENTRY(el0_sync_formal_frame),
+    TEST_ENTRY(el0_sync_rejects),
 TEST_LIST_END
 
 int main(void)

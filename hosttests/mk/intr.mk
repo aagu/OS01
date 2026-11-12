@@ -136,6 +136,7 @@ $(TEST_BLD)/aarch64_intr_backend_production.o: \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_task.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/sync_fault.h \
@@ -158,6 +159,7 @@ $(TEST_BLD)/test_intr_backend_aarch64.o: \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_decode.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/intr_dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_task.h \
 		$(TESTS_DIR)/kernel/include/arch/intr.h \
 		$(TESTS_DIR)/kernel/include/intr/dispatch.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \

@@ -80,18 +80,24 @@ static const struct a64_data_access_expect k_a64_data_access_table[] = {
     { 0x0f, 0,         true,  INTR_ACCESS_WRITE,   "permission fault L3"        },
     { 0x10, 0,         false, INTR_ACCESS_UNKNOWN, "alignment fault FSC"        },
     { 0x1f, 0,         false, INTR_ACCESS_UNKNOWN, "exception identification"   },
+    { 0x05, (1u << 7), false, INTR_ACCESS_UNKNOWN, "stage-1 walk (S1PTW=1)"     },
     { 0x05, (1u << 8), false, INTR_ACCESS_UNKNOWN, "cache maintenance (CM=1)"   },
-    { 0x05, (1u << 9), false, INTR_ACCESS_UNKNOWN, "S1PTW=1"                    },
+    /* ISS[9] is reserved: on its own it changes nothing, so the
+     * syndrome is still classified by WnR. */
+    { 0x05, (1u << 9), false, INTR_ACCESS_READ,    "reserved ISS[9] alone"      },
+    { 0x05, (1u << 9), true,  INTR_ACCESS_WRITE,   "reserved ISS[9] with WnR"   },
 };
 
 /* Constants of the contract, spelled out here so the test does not
  * depend on any production decoder symbol. */
 #define A64_ESR_EC_SHIFT   26
 #define A64_ESR_ISS_WNR     6u    /* WnR (data abort)          */
+#define A64_ESR_ISS_S1PTW   7u    /* stage-1 page-table walk   */
 #define A64_ESR_ISS_CM      8u    /* cache maintenance         */
-#define A64_ESR_ISS_S1PTW   9u    /* stage-1 page-table walk   */
+#define A64_ESR_ISS_RES9    9u    /* reserved — no effect      */
 #define A64_ESR_ISS_FNV    10u    /* FAR not valid             */
 
+#define A64_EC_SVC_LOWER   0x15u
 #define A64_EC_INSN_LOWER 0x20u
 #define A64_EC_INSN_SAME  0x21u
 #define A64_EC_PC_ALIGN   0x22u
@@ -104,8 +110,9 @@ static const struct a64_data_access_expect k_a64_data_access_table[] = {
 #define A64_FAR_RAW   0x12345678ULL
 #define A64_FAR_ZERO  0ULL
 
-#define A64_SLOT_SYNC 0x200ULL
-#define A64_SLOT_IRQ  0x280ULL
+#define A64_SLOT_SYNC     0x200ULL
+#define A64_SLOT_IRQ      0x280ULL
+#define A64_SLOT_EL0_SYNC 0x400ULL
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -186,6 +193,56 @@ static void case_a64_modes_and_classes(void)
         assert_eq(INTR_SYNC, ev.kind);
         assert_eq(e->origin, ev.origin);
     }
+}
+
+/* ── Case: a64_el0_slots ────────────────────────────────────────── */
+
+/* The decoder derives the VBAR slot from the SAVED mode: an EL0t
+ * frame was taken through the lower-EL sync slot (0x400), an EL1h
+ * frame through the EL1h sync slot (0x200).  The entry adapter states
+ * the slot it was really taken through and the backend re-decodes and
+ * compares — a frame that claims one slot and arrives through another
+ * is rejected. */
+static void case_a64_el0_slots(void)
+{
+    pt_regs_t regs;
+    struct intr_event ev;
+
+    TEST_SUITE("a64_el0_slots");
+
+    /* An EL0t sync frame: the lower-EL sync slot. */
+    fill_regs(&regs, A64_MODE_EL0T);
+    aarch64_intr_decode_sync(&ev, &regs, mk_esr(A64_EC_DATA_LOWER, 0x05u),
+                             A64_FAR_RAW);
+
+    assert_eq(INTR_SYNC,            ev.kind);
+    assert_eq(INTR_ORIGIN_USER,     ev.origin);
+    assert_eq(A64_SLOT_EL0_SYNC,    ev.native_vector);
+    assert_eq(INTR_REASON_MEMORY,   ev.reason);
+    assert_eq(INTR_ACCESS_READ,     ev.access);
+    assert_eq(true,                 ev.fault_addr_valid);
+    assert_eq(A64_FAR_RAW,          ev.fault_addr);
+
+    /* An EL1h sync frame keeps the EL1h slot. */
+    fill_regs(&regs, A64_MODE_EL1H);
+    aarch64_intr_decode_sync(&ev, &regs, mk_esr(A64_EC_DATA_SAME, 0x05u),
+                             A64_FAR_RAW);
+    assert_eq(A64_SLOT_SYNC, ev.native_vector);
+
+    /* An SVC carries no FAR at all: the address is invalid and
+     * zeroed, while the raw FAR stays in the diagnostic payload. */
+    fill_regs(&regs, A64_MODE_EL0T);
+    aarch64_intr_decode_sync(&ev, &regs, mk_esr(A64_EC_SVC_LOWER, 0x4d40u),
+                             A64_FAR_RAW);
+
+    assert_eq(INTR_SYNC,            ev.kind);
+    assert_eq(INTR_ORIGIN_USER,     ev.origin);
+    assert_eq(A64_SLOT_EL0_SYNC,    ev.native_vector);
+    assert_eq(INTR_REASON_OTHER,    ev.reason);
+    assert_eq(INTR_ACCESS_UNKNOWN,  ev.access);
+    assert_eq(false,                ev.fault_addr_valid);
+    assert_eq(0,                    ev.fault_addr);
+    assert_eq(A64_FAR_RAW,          ev.native_address);
 }
 
 /* ── Case: a64_far_validity ───────────────────────────────────── */
@@ -366,6 +423,7 @@ static void case_a64_irq_fields(void)
 int main(void)
 {
     case_a64_modes_and_classes();
+    case_a64_el0_slots();
     case_a64_far_validity();
     case_a64_abort_access();
     case_a64_irq_fields();

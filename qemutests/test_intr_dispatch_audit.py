@@ -353,6 +353,7 @@ ffff0000400a3b00 t el0_sync_entry
 ffff0000400a3c00 T aarch64_el0_irq
 ffff0000400a3d00 T aarch64_el0_sync_route
 ffff0000400a3e00 T aarch64_user_task_sync
+ffff0000400a3e80 T aarch64_user_frame_is_valid
 ffff0000400a3f00 T aarch64_user_image_load
 ffff0000400a4000 T aarch64_user_task_spawn
 ffff0000400a4100 T aarch64_pt_root_unpublish_local
@@ -421,7 +422,9 @@ ffff00004009412c: 94003a9e     	bl	0xffff0000400a2ba4 <arch_intr_bad_event>
 ffff000040097004 <arch_intr_handle_sync>:
 ffff000040097030: 94000258     	bl	0xffff000040097990 <aarch64_intr_decode_sync>
 ffff000040097040: 54000561     	b.ne	0xffff0000400970f4 <arch_intr_handle_sync+0xf0>
+ffff0000400970e8: 9400000a     	bl	0xffff0000400a3e80 <aarch64_user_frame_is_valid>
 ffff0000400970f4: 94002eac     	bl	0xffff0000400a2ba4 <arch_intr_bad_event>
+ffff0000400970fc: 9400000a     	bl	0xffff0000400a3e00 <aarch64_user_task_sync>
 ffff000040097104: 94002eb3     	bl	0xffff0000400a2bd0 <aarch64_el1_sync_fatal>
 
 ffff000040097108 <arch_intr_handle_irq>:
@@ -486,7 +489,7 @@ ffff0000400a3d1c: b4000460     	cbz	x0, 0xffff0000400a3d90 <aarch64_el0_sync_rou
 ffff0000400a3d50: aa1503e0     	mov	x0, x21
 ffff0000400a3d54: aa1403e1     	mov	x1, x20
 ffff0000400a3d58: aa1303e2     	mov	x2, x19
-ffff0000400a3d5c: 9400000a     	bl	0xffff0000400a3e00 <aarch64_user_task_sync>
+ffff0000400a3d5c: 9400000a     	bl	0xffff000040094104 <arch_intr_dispatch>
 ffff0000400a3d60: 52800020     	mov	w0, #0x1        // =1
 ffff0000400a3d64: d65f03c0     	ret
 ffff0000400a3d90: aa1503e0     	mov	x0, x21
@@ -1127,7 +1130,8 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
 
     This class owns the M4 wiring: the ``+0x400`` / ``+0x480`` vector
     slots, the low-EL routing chain (``el0_sync_entry`` →
-    ``aarch64_el0_sync_route`` → ``aarch64_user_task_sync`` and
+    ``aarch64_el0_sync_route`` → ``arch_intr_dispatch`` →
+    ``arch_intr_handle_sync`` → ``aarch64_user_task_sync`` and
     ``el0_irq_entry`` → ``aarch64_el0_irq`` → ``arch_intr_dispatch``),
     the three formal entry points and the exclusion of the legacy
     probe / test-only / embedded-test-ELF symbols.
@@ -1149,6 +1153,8 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
                          "edge el0_sync_entry -> aarch64_el0_sync_route (bl)",
                          "edge el0_irq_entry -> aarch64_el0_irq (bl)",
                          "edge aarch64_el0_sync_route -> "
+                         "arch_intr_dispatch (bl)",
+                         "edge arch_intr_handle_sync -> "
                          "aarch64_user_task_sync (bl)",
                          "edge aarch64_el0_irq -> arch_intr_dispatch (bl)",
                          "formal EL0 entry aarch64_user_image_load",
@@ -1190,15 +1196,28 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
                             "aarch64_el0_sync_route" in e
                             for e in errors), errors)
 
-    def test_el0_sync_route_missing_the_user_task_handler_fails(self):
-        # aarch64_el0_sync_route no longer calls aarch64_user_task_sync:
-        # the formal user-task handler is unreachable.
+    def test_el0_sync_route_bypassing_the_dispatcher_fails(self):
+        # aarch64_el0_sync_route no longer calls arch_intr_dispatch:
+        # the lower-EL sync path skips the common dispatcher and the
+        # formal frame validation it performs.
         self.stage_a64(disasm_text=_mutate(
             A64_DISASM, 0xFFFF0000400A3D5C,
-            "bl\t0xffff0000400a3e00 <aarch64_user_task_sync>",
+            "bl\t0xffff000040094104 <arch_intr_dispatch>",
             "bl\t0xffff0000400a2bd0 <aarch64_el1_sync_fatal>"))
         errors = self.audit()
         self.assertTrue(any("aarch64_el0_sync_route" in e and
+                            "arch_intr_dispatch" in e
+                            for e in errors), errors)
+
+    def test_sync_backend_missing_the_user_task_handler_fails(self):
+        # arch_intr_handle_sync no longer calls aarch64_user_task_sync:
+        # the formal user-task handler is unreachable.
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400970FC,
+            "bl\t0xffff0000400a3e00 <aarch64_user_task_sync>",
+            "bl\t0xffff0000400a2bd0 <aarch64_el1_sync_fatal>"))
+        errors = self.audit()
+        self.assertTrue(any("arch_intr_handle_sync" in e and
                             "aarch64_user_task_sync" in e
                             for e in errors), errors)
 

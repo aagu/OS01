@@ -19,9 +19,11 @@
 #include <stdbool.h>
 
 #include <arch/regs.h>
+#include <arch/aarch64/sync_fault.h>
 
 struct task_struct;
 struct aarch64_user_image;
+struct intr_event;
 
 /* One entry of the kernel-provided, immutable image catalog.  The bytes
  * and the length stay valid for the whole life of the task; the
@@ -71,6 +73,47 @@ bool aarch64_user_task_is_user(const struct task_struct *tsk);
  * task's root. */
 bool aarch64_user_frame_is_valid(const struct pt_regs *regs);
 
+/* The PURE admission rule of a formal EL0 frame.
+ *
+ * The function reads no runtime state: the caller supplies the facts,
+ * so a host case can drive it with crafted values — and can replace it —
+ * without linking the scheduler.  A frame is admitted only when
+ *
+ *   - the saved mode is EL0t,
+ *   - the frame is EXACTLY the one the running user task owns, and
+ *   - the mm root, the image root and the root installed in TTBR0_EL1
+ *     are the same non-zero PA.
+ */
+static inline bool aarch64_user_frame_matches(const struct pt_regs *regs,
+                                               uint64_t expected_frame,
+                                               uint64_t mm_root_pa,
+                                               uint64_t image_root_pa,
+                                               uint64_t installed_root_pa)
+{
+    if (!regs || !expected_frame)
+        return false;
+    /* The saved mode must be EL0t. */
+    if ((regs->spsr_el1 & AARCH64_SPSR_MODE_MASK) != AARCH64_SPSR_MODE_EL0T)
+        return false;
+    /* The frame must be exactly the one the task owns. */
+    if ((uint64_t)(uintptr_t)regs != expected_frame)
+        return false;
+    /* All three roots must be the same non-zero PA. */
+    if (!mm_root_pa || !image_root_pa || !installed_root_pa)
+        return false;
+    return mm_root_pa == image_root_pa && image_root_pa == installed_root_pa;
+}
+
+/* The address the running formal user task's lower-EL exception frame
+ * must have: the lower-EL entry pushes exactly one pt_regs frame below
+ * SP_EL1, and SP_EL1 is stack_top while the task runs in EL0.  0 when
+ * there is no such task. */
+uint64_t aarch64_user_sync_frame(void);
+
+/* The mm of the running formal user task, or NULL when the current task
+ * is not one. */
+struct mm_struct *aarch64_user_current_mm(void);
+
 /* The address of the live EL0 exception frame of a user task: the top
  * of its kernel stack minus one pt_regs frame. */
 uint64_t aarch64_user_task_frame(const struct task_struct *tsk);
@@ -108,9 +151,11 @@ __attribute__((noreturn)) void aarch64_el0_restore(uint64_t frame_addr);
  * probe's continuation. */
 bool aarch64_el0_sync_route(pt_regs_t *regs, uint64_t esr, uint64_t far);
 
-/* The user-task SVC/fault handler.  A normal return hands the frame
- * back to the shared restore path; the exit branch never returns. */
-void aarch64_user_task_sync(pt_regs_t *regs, uint64_t esr, uint64_t far);
+/* The user-task SVC/fault handler.  `event` is the normalized event of
+ * the fault; its lifetime is the dispatch call, so the handler must not
+ * keep the pointer.  A normal return hands the frame back to the shared
+ * restore path; the exit branch never returns. */
+void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event);
 
 /* Publish, install and track a user root.  The previous user root is
  * revoked only after the new one is installed. */

@@ -1,6 +1,7 @@
 #if AARCH64_EL0_TEST
 
 #include <arch/aarch64/el0.h>
+#include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/uaccess.h>
 #include <arch/mmu.h>
 #include <errno.h>
@@ -26,24 +27,25 @@ extern const char aarch64_uaccess_fault[];
 
 bool aarch64_uaccess_fixup(pt_regs_t *regs, uint64_t esr, uint64_t far)
 {
-    enum {
-        EC_MASK = 0x3f, EC_SHIFT = 26, DATA_ABORT_EL1 = 0x25,
-        DFSC_MASK = 0x3f, WNR = 1 << 6, S1PTW = 1 << 7,
-        CM = 1 << 8, FNV = 1 << 10,
-    };
+    /* The syndrome layout comes from the shared sync_fault.h truth
+     * source: the copy fixup and the normalized event decoder must
+     * agree bit for bit. */
+    uint64_t ec = (esr & AARCH64_ESR_EC_MASK) >> AARCH64_ESR_EC_SHIFT;
+    uint64_t fsc = esr & AARCH64_ESR_ISS_FSC_MASK;
 
     /* A kernel-side load/store (or another kernel fault) must never be
      * swallowed. Only normal translation/access/permission aborts on
      * the two unprivileged instructions are recoverable. */
-    if ((regs->spsr_el1 & 0xf) != 5 ||
-        ((esr >> EC_SHIFT) & EC_MASK) != DATA_ABORT_EL1 ||
-        (esr & (FNV | CM | S1PTW)) ||
-        (esr & DFSC_MASK) < 4 || (esr & DFSC_MASK) > 15 ||
+    if ((regs->spsr_el1 & AARCH64_SPSR_MODE_MASK) != AARCH64_SPSR_MODE_EL1H ||
+        ec != AARCH64_EC_DATA_ABORT_SAME ||
+        (esr & (AARCH64_ESR_FNV_BIT | AARCH64_ESR_ISS_CM |
+                AARCH64_ESR_ISS_S1PTW)) ||
+        fsc < AARCH64_FSC_ACCESS_FIRST || fsc > AARCH64_FSC_ACCESS_LAST ||
         far < AARCH64_USER_MIN || far >= AARCH64_USER_LIMIT ||
         !aarch64_el0_active_root())
         return false;
 
-    bool write = (esr & WNR) != 0;
+    bool write = (esr & AARCH64_ESR_ISS_WNR) != 0;
     uintptr_t pc = write ? (uintptr_t)aarch64_uaccess_store
                          : (uintptr_t)aarch64_uaccess_load;
     if (regs->elr_el1 != pc || far != (write ? regs->x0 : regs->x1))
