@@ -73,6 +73,22 @@ For each pending signal (iterating 1..NSIG-1):
 
 Blocked signals are skipped (unless SIGKILL or SIGSTOP). During handler execution, the delivered signal and `sa_mask` are added to `task_t.blocked`.
 
+### SIGWINCH：显式派发到前台进程组
+
+上表的 SIGWINCH「ignore-by-default」只描述**没有显式派发时**的默认动作。内核有一条
+显式派发路径：PTY master 上的 `TIOCSWINSZ` 改变窗口尺寸时，
+`kernel/tty/pty.c` 的 ioctl 分支比较 `ws_row`/`ws_col`/`ws_xpixel`/`ws_ypixel`，
+确认尺寸确实变化且前台进程组有效（`pgrp > 0`）后调用
+`signal_pgrp(pgrp, SIGWINCH)`，把信号送到**前台进程组**。
+
+- 这条路径自 2026-10-06 的 PTY master 窗口尺寸通知起可用（`6942a005`）。
+- 运行期证据：`user/test_resolution.c` 的 `pty-watch` 观察者安装 `SIGWINCH` handler，
+  `qemutests/test_resolution_switcher.py` 的 `pty-watch` 场景断言前台进程确实收到信号，
+  并核对了四个 winsize 字段。
+- 尚未覆盖：控制台 TTY 自身的尺寸变化不派发 SIGWINCH（`kernel/tty/tty.c` 的
+  `TIOCGWINSZ` 只返回固定的 25×80）；SIGTSTP / SIGCONT 的完整作业控制（bg/fg/jobs）
+  仍未实现。规划项见 [roadmap.md](../roadmap.md) P5。
+
 ### Signal frame layout on user stack
 
 ```

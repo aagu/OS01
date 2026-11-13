@@ -274,18 +274,75 @@ To isolate user heap allocations from the ELF image, prevent accidental over-map
 
 ---
 
+## AArch64 COW / 匿名 VMA（2026-11-11 ~ 2026-11-13 闭环）
+
+> 本节描述 aarch64 侧的模型。上文的 COW 叙述是 x86_64 的 PTE-flag 语义；
+> aarch64 **不把 COW 编码进页表**，两者的所有权表达不同。
+
+### 1. 所有权模型：驻留记录 = COW 所有权，PTE = 硬件权限
+
+aarch64 的用户页由**驻留记录**（resident record）拥有，记录携带来源、逻辑权限与
+独占/共享状态；ELF 与栈装载器改走 `user_vm_map_image_page()`，不再自持 VA/PA 清单。
+
+- **逻辑权限与硬件权限分离**：`PROT_NONE` 与共享页在硬件上保持 RO/NX，逻辑权限随 VMA 提交。
+  共享只读页与 stash（驻留但未实例化）共用同一引用契约，因此 `mprotect` 恢复写权限时
+  仍能判定是否仍需复制。
+- **引用计数在 PMM 一侧**：`pmm_cow_acquire()` / `pmm_cow_release()` 负责分配位、槽位、
+  模式与 `UINT16_MAX` 检查；驻留销毁时**丢弃共享引用**而不是释放仍被拥有的页。
+- **换 PA 走受检入口**：aarch64 侧 `aarch64_user_vm_replace_cow()` 是 M4 专用的 COW
+  替换后端入口（受管根写闸、RO/NX 旧叶、BBM 换 PA、旧 PA 所有权保留）。
+
+### 2. 匿名 VMA 与按需缺页
+
+arch-neutral 的匿名 VM 策略在 `kernel/memory/user_vm.c`，aarch64 的叶适配层在
+`kernel/arch/aarch64/memory/user_vm.c`，共享 VMA 原语在 `kernel/memory/vm_area.c`。
+
+- **只提交元数据**：`mmap`/`brk` 返回后目标页仍无叶子；首次合法访问才分配清零的 4 KiB 页。
+- **切离编辑**：修改 VMA/叶前先切离用户根（撤销 root）、IRQ 屏蔽下运行策略、再恢复原根与
+  TLS；活动根上的写操作一律拒绝（沿用 M3 契约），TLB 完成点固定在切离与重装两个边界。
+- **stash**：`PROT_NONE` 与解映射保留驻留记录，页可被释放后按需重新实例化。
+
+### 3. fork 与写时复制
+
+- **clone 事务**：`user_vm_clone_fork()` 复制布局与 VMA，把每个驻留页借给子根，逐页提交
+  一次受检 PMM COW 引用（私有 0→2、共享 +1），把父的可写叶降为 RO/NX，**最后一步才发布
+  子任务**；任一步失败精确回滚已完成步骤。**child PA 从不被释放** —— 回滚的是引用。
+- **写故障路径**：EL0 故障分类器把翻译故障与 level-3 写权限故障（FSC `0x0f`、WnR、
+  未置 CM/S1PTW）分开，后者走 `user_vm_cow_fault()`：多引用共享页经受检替换入口复制并丢弃
+  旧引用，唯一引用就地升级并释放其计数。
+- **`brk` 收缩**在清零或释放任何页之前先私有化保留尾页，OOM 时恢复原状。
+- **`prepare_copy`** 接受逻辑 RW 的共享 COW 目标，在触碰任何 COW 叶或计数前预分配私有副本与
+  临时空叶，失败时双向回滚源。
+
+### 4. 边界
+
+验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）。未覆盖：VFS `/bin/init`、
+waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、SMP 用户调度、IRQ 返回抢占。
+规划项见 [roadmap.md](../roadmap.md) P2；现状叙述见 [arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-13-闭环)。
+
+---
+
 ## Key files
 
 | File | Role |
 |------|------|
-| `kernel/memory/pmm.c` | `subpage_pool`, `alloc_4k_page`, `free_4k_page`, `page_cow_get/put/refs` |
+| `kernel/memory/pmm.c` | `subpage_pool`, `alloc_4k_page`, `free_4k_page`, `page_cow_get/put/refs`, `pmm_cow_acquire/release` |
 | `kernel/memory/vma.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `vma_insert/remove/free_all`, `mm_init_user_heap`, `mm_set_brk`, `mm_user_range_protected` |
 | `kernel/memory/vmm.c` | `vmm_unmap_4k_page` (COW‑aware), `vmm_map_4k_page`, `vmm_pt_walk`, `vmm_alloc_map` |
+| `kernel/memory/user_vm.c` | arch-neutral 匿名 VM 策略：按需缺页、stash、`user_vm_clone_fork`、`user_vm_cow_fault`、`prepare_copy` |
+| `kernel/memory/vm_area.c` | 双架构共享的 VMA 列表原语 |
+| `kernel/memory/mm.c` | 双架构共享的 `mm_alloc` |
+| `kernel/arch/aarch64/memory/user_vm.c` | aarch64 叶适配层 + `user_vm_cow_fault` 的 arch 侧实现 |
+| `kernel/arch/aarch64/memory/user_mm.c` | `aarch64_user_mm_create` / `aarch64_user_mm_destroy`：mm 拥有的私有用户根 |
+| `kernel/arch/aarch64/memory/vmm_backend.c` | `aarch64_user_vm_replace_cow`：受检 COW 换 PA 后端入口 |
 | `kernel/fs/elf.c` | 4KB per-page ELF image loader and `elf_layout_validate` |
 | `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork`, staged spawn/exec image lifecycle |
 | `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution and heap guard, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap/brk` |
 | `kernel/include/memory/vmm.h` | `PAGE_COW`, `PAGE_PROTNONE`, page table flag constants |
 | `kernel/include/memory/vma.h` | `vma_t`, `mm_init_user_heap`, `mm_set_brk`, `mm_user_range_protected` |
+| `kernel/include/memory/user_vm.h` | 匿名 VM 策略接口（按需缺页 / clone / COW 故障 / copy 预备） |
+| `kernel/include/arch/aarch64/user_vm.h` | aarch64 用户 VM 事务层：授权、切离、恢复 |
+| `kernel/include/arch/aarch64/user_mm.h` | `aarch64_user_mm_create` / `aarch64_user_mm_destroy` 与根归属契约 |
 | `kernel/include/sched/task.h` | `mm_t` (VMA list, `mmap_base`, `pgdir`, `lock`), `task_t` |
 | `kernel/include/uapi/syscall.h` | `SYS_mmap` (44), `SYS_mprotect` (45), `SYS_munmap` (46), `SYS_brk` (12) |
 | `libc/unistd/mmap.c` | User‑space `mmap()`/`munmap()` wrappers using `syscall6`/`syscall` |

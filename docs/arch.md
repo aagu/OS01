@@ -111,6 +111,10 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 ## 距离单一 kernel_main 还差多远（v25 后）
 
 > **2026-11-07 更新：Spec C（统一 kernel_main）已闭环**，双架构共用单一 `kernel/core/main.c::kernel_main()` 入口，`aarch64_main` 已删除。剩余差距集中在用户态与抢占语义（M4 用户地址空间、EL0/SVC 异常、IRQ 返回抢占、统一 SMP），粗估仍为 4–8 周（一个人全职）。设计与实施记录见 [spec](superpowers/specs/2026-11-07-unified-kernel-main-design.md) / [plan](superpowers/plans/2026-11-07-unified-kernel-main.md)，闭环摘要见 `docs/changelog.md` 2026-11-07 条目。
+>
+> **2026-11-13 更新：M4 用户态五块已闭环**（单核 BSP 上跑通正式 EL0 用户任务，见下文 §aarch64 用户态现状），
+> 剩余差距收窄为**产品接入 + 抢占/多核语义**（产品 `/bin/init` 链路与 VFS 门、waitpid/信号/文件映射、
+> IRQ 返回抢占、统一 SMP 启动与多核上下文切换、ASID），粗估 **3–5 周**（一个人全职）。
 
 ~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
@@ -123,6 +127,42 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 **v25 已统一**：页表层级名（PGD/PUD/PMD/PTE，bit-position 仍 per-arch）、bootinfo ABI（解析层仍 per-arch，但输出 v2 已 arch-neutral）、intr dispatch hook 化、driver 自注册 initcall、kernel_thread_entry arch-neutral、RTC 拆分（核心 arch-neutral + per-arch CMOS/PIE）。
 
 **2026-11-07 已统一**：启动入口 —— 单一 `kernel/core/main.c::kernel_main()` + `arch/boot.h` 强覆盖启动钩子 + `arch/features.h` 编译期特性门；`aarch64_main` 符号删除，入口唯一性由 readelf 符号审计门禁强制。
+
+---
+
+## aarch64 用户态现状（M4，2026-11-11 ~ 2026-11-13 闭环）
+
+M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来的正式 EL0 用户任务」。
+五块按顺序交付，编号口径与 [build.md](build/build.md) 一致：
+
+| 块 | 交付 | 验收用例 |
+|----|------|---------|
+| M4.1~M4.7 | 隔离 EL0 探针：私有 TTBR0、SVC 跨页复制与 `-EFAULT`、静态 ELF 装载、真实 CNTP IRQ 返回 EL0、双上下文协作/中断切换、内核线程代跑 | `aarch64_el0` / `aarch64_el0_irq` / `aarch64_el0_switch` / `aarch64_el0_preempt` / `aarch64_el0_task` |
+| 第 1 块 | 用户页表与 `mm` 生命周期：运行期私有用户根、M3 4 KiB 入口、销毁回收 | `aarch64_user_mm` |
+| 第 2 块 | 正式 EL0 用户任务：`PF_PROCESS`、私有 `mm`、专有内核栈、EL0 帧住在栈顶、调度器装 `TTBR0` | `aarch64_user_task_lifecycle` |
+| 第 3 块 | 正式 SVC 与 uaccess：共享 syscall 表、低 EL 同步事件接入公共分派、用户复制 abort 恢复为 `-EFAULT` | `aarch64_user_svc_uaccess` |
+| 第 4 块 | 匿名 VMA 与按需缺页：`mmap`/`brk`/`mprotect`/`munmap`、stash、逻辑权限与硬件权限分离 | `aarch64_user_vm` |
+| 第 5 块 | 原生 `SYS_fork` 与写时复制：clone 事务、驻留记录所有权、COW 写故障、父子回收 | `aarch64_user_fork_cow` |
+
+**跨架构 syscall 表**：AArch64 不维护第二张分派表，而是用 `OS01_SYSCALL_A64_SUBSET=1`
+编译 `kernel/syscall/dispatch.c` 的**同一张** `syscall_table`，只隐藏未编入的表项。
+当前 aarch64 服务 9 项：`exit` / `getpid` / `getppid` / `clock_gettime` /
+`brk` / `mmap` / `mprotect` / `munmap` / `fork`。详见
+[syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12)。
+
+**当前边界（如实记录）**：
+
+- 验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）；普通 AArch64 镜像的
+  `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 仍为 0，产品启动路径仍进 idle。
+- ASID 恒为 0；无 TLS、无 FP/SIMD 上下文；用户映像是内存中的静态 ELF。
+- 未覆盖：VFS `/bin/init`、waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、
+  SMP 用户调度、IRQ 返回抢占。
+- 用户态进入/返回**尚未纳入 `arch/context.h` 门面**：x86 走 `iretq`、aarch64 走 `eret`，各自实现。
+
+**剩余差距**：产品用户态接入 + IRQ 返回抢占 + 统一 SMP 启动与多核上下文切换 + ASID，
+粗估 3–5 周（一个人全职，较 2026-11-11 的 4–8 周收窄）。规划项见 [roadmap.md](roadmap.md) P2。
+闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-13 各条目；COW/VM 细节见
+[cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环)。
 
 ---
 

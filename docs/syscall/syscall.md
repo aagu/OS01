@@ -119,6 +119,46 @@ The adapter writes the handler result to `rax` unless `sigreturn` successfully r
 
 Unimplemented and out-of-range numbers return `-EINVAL`, including defined-but-unimplemented `SYS_getpeername` (62). The UAPI table covers 0..76; 76 numbers have handlers. Changing the Linux ABI translation table, its signed 8-bit representation, or unknown-number conventions is deferred to ARCH-2.
 
+## 跨架构共享 syscall 表（2026-11-12）
+
+`kernel/syscall/dispatch.c` 只有**一张** `syscall_table`。AArch64 不维护第二张分派表，
+而是用 `OS01_SYSCALL_A64_SUBSET=1` 编译**同一张表**，只隐藏未编入的表项：
+
+```c
+static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
+    /* 共享区（两个架构都服务） */
+    [SYS_exit]         = { sys_native_exit,         "exit" },
+    [SYS_getpid]       = { sys_native_getpid,       "getpid" },
+    [SYS_getppid]      = { sys_native_getppid,      "getppid" },
+    [SYS_clock_gettime]= { sys_native_clock_gettime,"clock_gettime" },
+    [SYS_brk]          = { sys_mm_dispatch,         "brk" },
+    [SYS_mmap]         = { sys_mm_dispatch,         "mmap" },
+    [SYS_mprotect]     = { sys_mm_dispatch,         "mprotect" },
+    [SYS_munmap]       = { sys_mm_dispatch,         "munmap" },
+    [SYS_fork]         = { sys_native_fork,         "fork" },
+#ifndef OS01_SYSCALL_A64_SUBSET
+    /* x86_64 独有 */
+    ...
+#endif
+};
+```
+
+- **当前 aarch64 服务 9 项**：`exit` / `getpid` / `getppid` / `clock_gettime` /
+  `brk` / `mmap` / `mprotect` / `munmap` / `fork`。
+- **arch-neutral 的 native handler**：`exit` / `getpid` / `getppid` / `clock_gettime`
+  抽到 `kernel/syscall/sys_native.c`，它们不访问寄存器帧（参数由 `syscall_ctx_t` 携带），
+  因此两个架构可共用。`clock_gettime` 复用既有的 clock-id 检查与 `copy_to_user_ft()` 语义。
+- **`SYS_fork`** 由 `sys_native.c` 提供，COW 写路径与 clone 事务跨架构共享。
+- **退出走架构门面**：`kernel/include/arch/syscall.h` 声明 `arch_syscall_exit(status)`；
+  x86_64 实现写 `current->exit_code` 后调用 `do_exit()`，若 `do_exit()` 意外返回则屏蔽 IRQ
+  并停机，绝不返回用户态。aarch64 的实现随 SVC 接线落地。
+- **VM 四项**：`sys_mm_dispatch` 的 x86 分支保留既有 `do_*` / `mm_set_brk` 路径，
+  aarch64 分支委派给 `arch_syscall_user_vm()`；`SYS_futex` 留在 x86 独有区。
+
+宿主用例 `test_syscall_dispatch` 从**同一份源码**同时证明 x86 全表与 AArch64 子集两种配置。
+闭环记录见 `docs/changelog.md` 2026-11-12 条目；aarch64 用户态整体现状见
+[arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-13-闭环)。
+
 ## Known bug
 
 `SYS_putchar` → `color_printk` shares a static 4KB buffer with `serial_printk`. Repeated spawn of programs using framebuffer I/O (like `/init.elf` with `printf`) can corrupt the buffer during concurrent use, causing crashes on the 3rd–4th spawn. See [[spawn-ud-crash-syscall-prefault]].
