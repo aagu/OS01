@@ -156,7 +156,8 @@ static void test_heap_vma_vm_page_prot(void)
 
     vma_t *v = vma_list_get(&fixture_mm.vma_list, 0);
     assert_not_null(v);
-    uint64_t expected = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    /* PTE permissions plan: heap data pages are NX. */
+    uint64_t expected = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC;
     assert_eq(expected, v->vm_page_prot);
 }
 
@@ -898,13 +899,16 @@ static void test_mprotect_split_range(void)
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v0->vm_flags);
     assert_eq((uint64_t)VMA_PROT_READ, v1->vm_flags);
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v2->vm_flags);
+    /* The middle segment gains the new policy's NX (R pages are
+     * never executable); the untouched neighbours keep their
+     * original vm_page_prot. */
     assert_eq((uint64_t)PAGE_USER_PTE, v0->vm_page_prot);
-    assert_eq((uint64_t)PAGE_USER_PTE_RO, v1->vm_page_prot);
+    assert_eq((uint64_t)(PAGE_USER_PTE_RO | PAGE_NO_EXEC), v1->vm_page_prot);
     assert_eq((uint64_t)PAGE_USER_PTE, v2->vm_page_prot);
 
     /* Only the middle leaf changed; PA is never reallocated. */
     assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MPROTECT_BASE));
-    assert_eq(p1 | PAGE_USER_PTE_RO,
+    assert_eq(p1 | PAGE_USER_PTE_RO | PAGE_NO_EXEC,
               *lifecycle_pte_get(MPROTECT_BASE + 0x1000UL));
     assert_eq(p2 | PAGE_USER_PTE,
               *lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));
@@ -922,7 +926,7 @@ static void test_mprotect_split_range(void)
     uint64_t snap = lifecycle_flush_snapshot(MPROTECT_BASE + 0x1000UL,
                                              &valid);
     assert_eq(1, valid);
-    assert_eq(p1 | PAGE_USER_PTE_RO, snap);
+    assert_eq(p1 | PAGE_USER_PTE_RO | PAGE_NO_EXEC, snap);
 
     /* ── Argument / contract rejections ── */
     /* Unaligned start. */
@@ -1064,27 +1068,30 @@ static void test_mprotect_cow_stash_restore(void)
     assert_eq(0, lifecycle_state.cow_put_calls);
     assert_eq(allocs_before, lifecycle_state.total_allocs);
 
-    /* PROT_READ: present again, hardware read-only, COW kept. */
+    /* PROT_READ: present again, hardware read-only, COW kept,
+     * and NX per the new policy (R pages are never executable). */
     assert_eq(0, do_mprotect(MPROTECT_BASE, 0x3000UL, PROT_READ));
-    assert_eq(cow_phys | PAGE_USER | PAGE_VALID | PAGE_COW, *cow_pte);
-    assert_eq(norm_phys | PAGE_USER | PAGE_VALID, *norm_pte);
+    assert_eq(cow_phys | PAGE_USER | PAGE_VALID | PAGE_COW | PAGE_NO_EXEC,
+              *cow_pte);
+    assert_eq(norm_phys | PAGE_USER | PAGE_VALID | PAGE_NO_EXEC, *norm_pte);
     assert_eq(0, lifecycle_state.cow_put_calls);
 
     /* PROT_READ|PROT_WRITE: the COW leaf stays hardware read-only
      * with its COW marker; the ordinary leaf becomes writable. */
     assert_eq(0, do_mprotect(MPROTECT_BASE, 0x3000UL,
                              PROT_READ | PROT_WRITE));
-    assert_eq(cow_phys | PAGE_USER | PAGE_VALID | PAGE_COW, *cow_pte);
+    assert_eq(cow_phys | PAGE_USER | PAGE_VALID | PAGE_COW | PAGE_NO_EXEC,
+              *cow_pte);
     assert_false(*cow_pte & PAGE_WRITE);
     assert_true(*cow_pte & PAGE_VALID);
-    assert_eq(norm_phys | PAGE_USER_PTE, *norm_pte);
+    assert_eq(norm_phys | PAGE_USER_PTE | PAGE_NO_EXEC, *norm_pte);
     assert_eq(0, lifecycle_state.cow_put_calls);
     assert_eq(allocs_before, lifecycle_state.total_allocs);
 
     /* The VMA's logical permissions are restored even though the
      * shared leaf stays read-only in hardware. */
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v->vm_flags);
-    assert_eq((uint64_t)PAGE_USER_PTE, v->vm_page_prot);
+    assert_eq((uint64_t)(PAGE_USER_PTE | PAGE_NO_EXEC), v->vm_page_prot);
 
     /* The never-faulted slot is still empty. */
     assert_null(lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));

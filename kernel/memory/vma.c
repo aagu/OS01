@@ -119,7 +119,8 @@ vma_t *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
 //   - mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096)
 //   - ONE heap VMA inserted at [start_brk, start_brk) — zero-length
 //   - vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP
-//   - vm_page_prot = PAGE_USER  | PAGE_WRITE | PAGE_VALID
+//   - vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC
+//     (heap data pages are never executable — PTE permissions plan)
 //   - vma_find() does NOT match this VMA (zero-length invariant)
 //
 // Failure handling: if the VMA allocation fails, mm is left
@@ -142,7 +143,7 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
     hv->vm_start     = heap_base;
     hv->vm_end       = heap_base;          /* zero-length on purpose */
     hv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP;
-    hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC;
     hv->vm_pgoff     = 0;
     hv->vm_file      = NULL;
 
@@ -456,20 +457,24 @@ static int prot_to_page_flags(uint64_t prot, uint64_t *page_prot,
     if (prot & PROT_EXEC)
         prot |= PROT_READ;
 
+    /* PTE permissions plan: the logical permission becomes the
+     * hardware leaf permission.  R and RW pages are NX; only an
+     * explicit PROT_EXEC grants fetch. */
     if (prot == PROT_NONE) {
         *page_prot = PAGE_USER;
         *vm_flags = 0;
     } else if (prot == PROT_READ) {
-        *page_prot = PAGE_USER_PTE_RO;
+        *page_prot = PAGE_USER_PTE_RO | PAGE_NO_EXEC;   /* R/NX  */
         *vm_flags = VMA_PROT_READ;
     } else if (prot == (PROT_READ | PROT_WRITE)) {
-        *page_prot = PAGE_USER_PTE;
+        *page_prot = PAGE_USER_PTE | PAGE_NO_EXEC;      /* RW/NX */
         *vm_flags = VMA_PROT_READ | VMA_PROT_WRITE;
-    } else if (prot == (PROT_READ | PROT_EXEC) ||
-               prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        *page_prot = PAGE_USER_PTE;  // no NX support yet
-        *vm_flags = VMA_PROT_READ | VMA_PROT_EXEC
-                  | ((prot & PROT_WRITE) ? VMA_PROT_WRITE : 0);
+    } else if (prot == (PROT_READ | PROT_EXEC)) {
+        *page_prot = PAGE_USER_PTE_RO;                  /* RX    */
+        *vm_flags = VMA_PROT_READ | VMA_PROT_EXEC;
+    } else if (prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        *page_prot = PAGE_USER_PTE;                     /* RWX   */
+        *vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC;
     } else {
         return -EINVAL;
     }
@@ -1236,11 +1241,18 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
             if (!(*pte & (PAGE_VALID | PAGE_PROTNONE))) continue;
 
             uint64_t phys = x86_pte_4k_pa(*pte);
+            /* Preserve the leaf's cache attributes across the
+             * permission update, the stash and the restore alike
+             * (PTE permissions plan: mprotect keeps cache bits). */
+            uint64_t cache = x86_pte_4k_flags(*pte) &
+                             (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH |
+                              PAGE_PAT_4K);
 
             if (prot == PROT_NONE) {
                 // Stash the PA for later restore.  Keep the COW
-                // marker and our reference — no private copy here.
-                uint64_t stash = phys | PAGE_USER | PAGE_PROTNONE;
+                // marker, the cache bits and our reference — no
+                // private copy here.
+                uint64_t stash = phys | PAGE_USER | PAGE_PROTNONE | cache;
                 if (*pte & PAGE_COW)
                     stash |= PAGE_COW;
                 *pte = stash;
@@ -1249,9 +1261,9 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
                 // regardless of the logical write grant.  The first
                 // write privatizes through the #PF path.
                 *pte = x86_pte_4k_make(
-                    phys, (new_page_prot & ~PAGE_WRITE) | PAGE_COW);
+                    phys, (new_page_prot & ~PAGE_WRITE) | PAGE_COW | cache);
             } else {
-                *pte = x86_pte_4k_make(phys, new_page_prot);
+                *pte = x86_pte_4k_make(phys, new_page_prot | cache);
             }
         }
     }

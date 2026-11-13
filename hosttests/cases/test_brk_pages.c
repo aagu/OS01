@@ -252,9 +252,10 @@ static void test_brk_multipage_growth_each_page_zeroed(void)
             assert_eq(0, (int)p[j]);
         }
     }
-    /* PTE flags: user R/W present. */
+    /* PTE flags: user R/W present, never executable
+     * (PTE permissions plan: heap data pages are NX). */
     brk_pte_record_t *m = brk_find_mapping(fixture_mm.start_brk);
-    assert_eq(PAGE_USER | PAGE_WRITE | PAGE_VALID, m->flags);
+    assert_eq(PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC, m->flags);
 }
 
 static void test_brk_multipage_growth_flushes_tlb(void)

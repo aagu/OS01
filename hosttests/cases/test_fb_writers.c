@@ -493,7 +493,9 @@ static void test_mmap_partial_failure(void)
 
     vma_t vma;
     memset(&vma, 0, sizeof(vma));
-    vma.vm_flags = VMA_SHARED;
+    /* PTE permissions plan: fb_mmap accepts R or RW only — give the
+     * harness VMA a real prot instead of the old bare-SHARED shape. */
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
     vma.vm_start = 0x10000;
     vma.vm_end   = 0x14000; /* 4 pages = 16KB */
     vma.vm_file  = NULL;
@@ -588,8 +590,50 @@ static void test_fb_fixed_failure_keeps_old_mapping(void)
     CHECK_EQ(0xE0000000ULL, g_mock_commit_first_pa);
     CHECK_EQ((uint64_t)PAGE_USER_PTE_RO,
              g_mock_commit_flags & ~(uint64_t)(PAGE_CACHE_DISABLE |
-                                                 PAGE_WRITE_THROUGH));
+                                                 PAGE_WRITE_THROUGH |
+                                                 PAGE_NO_EXEC));
+    CHECK_EQ((uint64_t)PAGE_NO_EXEC,
+             g_mock_commit_flags & (uint64_t)PAGE_NO_EXEC);
     CHECK_EQ(true, fb_has_raw_mmap_seen());
+}
+
+/* PTE permissions plan: the framebuffer accepts R or RW only.
+ * PROT_NONE / PROT_EXEC / unknown prots are rejected in the prepare
+ * phase with -EINVAL and the old mapping stays untouched. */
+static void test_fb_mmap_prot_rejection(void)
+{
+    printf("\n--- test_fb_mmap_prot_rejection ---\n");
+    setup_test_environment();
+
+    vma_t vma;
+    memset(&vma, 0, sizeof(vma));
+    vma.vm_start = 0x10000;
+    vma.vm_end   = 0x14000;
+
+    /* 1. EXEC (with or without R/W) → -EINVAL. */
+    uint64_t exec_variants[] = {
+        VMA_SHARED | VMA_PROT_EXEC,
+        VMA_SHARED | VMA_PROT_READ | VMA_PROT_EXEC,
+        VMA_SHARED | VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC,
+    };
+    for (size_t i = 0; i < sizeof(exec_variants) / sizeof(exec_variants[0]);
+         i++) {
+        vma.vm_flags = exec_variants[i];
+        int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+        CHECK_EQ(-EINVAL, rc);
+        CHECK_EQ(0, g_mock_commit_calls);
+    }
+
+    /* 2. PROT_NONE (no R/W/E at all) → -EINVAL. */
+    vma.vm_flags = VMA_SHARED;
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+    CHECK_EQ(-EINVAL, rc);
+    CHECK_EQ(0, g_mock_commit_calls);
+
+    /* 3. The refusals published no PTEs and no raw-mmap state. */
+    CHECK_EQ(0, g_installed_count);
+    CHECK_EQ(false, fb_has_raw_mmap_seen());
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
 }
 
 /* ── Extra tests: fb_write_row_leased & console_notify_resize_locked ── */
@@ -826,6 +870,8 @@ static void test_raw_mmap_ownership_boundaries(void)
 #define EXPECT_USER_PTE_RO      0x05ULL
 #define EXPECT_USER_PTE_W       0x07ULL
 #define EXPECT_CACHE_BITS_MASK  0x18ULL
+/* PTE permissions plan: the /dev/fb user alias is always NX. */
+#define EXPECT_NO_EXEC          PAGE_NO_EXEC
 
 static void test_raw_mmap_cache_policy(void)
 {
@@ -849,8 +895,9 @@ static void test_raw_mmap_cache_policy(void)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~(EXPECT_CACHE_BITS_MASK | EXPECT_NO_EXEC));
         CHECK_EQ(0, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_NO_EXEC, g_installed_flags[i] & EXPECT_NO_EXEC);
     }
 
     /* 2. Same policy, writable alias (test build only). */
@@ -865,8 +912,9 @@ static void test_raw_mmap_cache_policy(void)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(EXPECT_USER_PTE_W, g_installed_flags[i] & ~EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_USER_PTE_W, g_installed_flags[i] & ~(EXPECT_CACHE_BITS_MASK | EXPECT_NO_EXEC));
         CHECK_EQ(0, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_NO_EXEC, g_installed_flags[i] & EXPECT_NO_EXEC);
     }
 
     /* 3. Uncacheable policy: the alias must be uncacheable too -- the
@@ -882,8 +930,9 @@ static void test_raw_mmap_cache_policy(void)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~(EXPECT_CACHE_BITS_MASK | EXPECT_NO_EXEC));
         CHECK_EQ(EXPECT_CACHE_BITS_MASK, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
+        CHECK_EQ(EXPECT_NO_EXEC, g_installed_flags[i] & EXPECT_NO_EXEC);
     }
 
     /* Restore the default policy for the remaining tests. */
@@ -904,6 +953,7 @@ int main(void)
     test_kpanic_trylock_no_deadlock();
     test_raw_mmap_ownership_boundaries();
     test_raw_mmap_cache_policy();
+    test_fb_mmap_prot_rejection();
 
     printf("\n  ---\n  Total: %u | Passed: %u | Failed: %d\n",
            __test_stats.total, __test_stats.passed, g_failed);

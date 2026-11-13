@@ -96,8 +96,11 @@ static inline uint64_t fb_x86_kernel_pmd_flags(fb_cache_policy_t policy)
 static inline uint64_t fb_x86_user_pte_flags(fb_cache_policy_t policy,
                                              bool writable)
 {
+    /* The /dev/fb alias is data, never code: always NX (PTE
+     * permissions plan — the framebuffer accepts R or RW only). */
     return (writable ? PAGE_USER_PTE : PAGE_USER_PTE_RO)
-           | fb_x86_cache_bits(policy);
+           | fb_x86_cache_bits(policy)
+           | PAGE_NO_EXEC;
 }
 
 #define PAGE_PROTNONE       (1UL << 9)   // software bit: PROT_NONE stash marker

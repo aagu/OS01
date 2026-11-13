@@ -735,8 +735,11 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 			return;
 		}
 
-		// Write protection violation (P=1, W=1)
-		if ((error_code & 0x03) == 0x03 && !(vma->vm_flags & VMA_PROT_WRITE)) {
+		// Write protection violation (W=1, regardless of P): an
+		// unauthorized first write must be rejected BEFORE the
+		// demand path allocates a leaf — a P=0 write fault on a
+		// read-only VMA never gets a page (PTE permissions plan).
+		if ((error_code & 0x02) && !(vma->vm_flags & VMA_PROT_WRITE)) {
 			log_debug("PF: pid=%d cr2=%p write to RO page\n",
 			          t->pid, cr2);
 			kill_current_user_task(regs, SIGSEGV);

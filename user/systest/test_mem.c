@@ -1027,3 +1027,165 @@ void test_cow_kernel_outputs(void)
     }
 }
 
+
+// ── mmap execute protection (PTE permissions plan Task 2) ──
+// x86 leaf permissions must match the logical VMA permissions:
+//   RW pages are NX (fetch → SIGSEGV), RX pages reject writes
+//   (first write → SIGSEGV), explicit RWX stays executable.
+// Both resident leaves and first-fault (demand) paths are covered:
+// the file-backed cases fault on a leaf that was never touched, so
+// the #PF handler must reject the unauthorized access BEFORE it
+// allocates.  The stack case pins the real 2 MiB stack leaf NX.
+static const unsigned char exec_probe_code[] = {
+    0xB8, 0x2A, 0x00, 0x00, 0x00,       /* mov $42, %eax */
+    0xC3,                               /* ret           */
+};
+#define EXEC_PROBE_RET 42
+
+typedef int (*exec_probe_fn)(void);
+
+/* Fork a child that runs `probe` and _exits with its return value.
+ * The parent checks the child's wait status.  If the access is
+ * rejected the child dies of SIGSEGV; if it executes, the child
+ * exits with EXEC_PROBE_RET (or whatever the bytes evaluate to). */
+static void exec_probe_fork_wait(exec_probe_fn probe, const char *name,
+                                 int want_signal)
+{
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("%s: fork failed errno=%d", name, errno);
+        return;
+    }
+    if (pid == 0)
+        _exit(probe());
+
+    int st = 0;
+    int64_t waited = waitpid(pid, &st, 0);
+    if (waited != pid) {
+        FAIL("%s: waitpid=%ld", name, (long)waited);
+        return;
+    }
+    if (want_signal) {
+        CHECKF(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV, name,
+               "status=%#x", "want SIGSEGV, got status=%#x (exit=%d)",
+               st, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    } else {
+        CHECKF(WIFEXITED(st) && WEXITSTATUS(st) == EXEC_PROBE_RET, name,
+               "status=%#x", "want exit 42, got status=%#x", st);
+    }
+}
+
+void test_mmap_execute_protection(void)
+{
+    /* ── A. Resident RW anon leaf: fetch must be NX → SIGSEGV ── */
+    unsigned char *p = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        FAIL("mmap_exec_protection", "anon mmap failed errno=%d", errno);
+        return;
+    }
+    memcpy(p, exec_probe_code, sizeof(exec_probe_code));
+    exec_probe_fork_wait((exec_probe_fn)p, "mmap_exec_rw_fetch_sigsegv", 1);
+
+    /* ── B. Same leaf switched to RX: parent executes → 42,
+     *       child writes the same page → SIGSEGV ── */
+    if (mprotect(p, 0x1000, PROT_READ | PROT_EXEC) != 0) {
+        FAIL("mmap_exec_protection", "mprotect RX failed errno=%d", errno);
+        munmap(p, 0x1000);
+        return;
+    }
+    int ret = ((exec_probe_fn)p)();
+    CHECK3(ret == EXEC_PROBE_RET, "mmap_exec_rx_parent_exec",
+           "parent executed RX page");
+    /* The child WRITES the RX page — a write fault, not a fetch. */
+    {
+        int64_t pid = fork();
+        if (pid == 0) {
+            p[0] = 0x90;                /* first write to the RX leaf */
+            _exit(0);
+        }
+        int st = 0;
+        int64_t waited = waitpid(pid, &st, 0);
+        CHECKF(waited == pid && WIFSIGNALED(st) &&
+               WTERMSIG(st) == SIGSEGV, "mmap_exec_rx_write_sigsegv",
+               "status=%#x", "want SIGSEGV on RX write, got status=%#x "
+               "(exit=%d)", st, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    }
+
+    /* ── C. Explicit RWX stays executable ── */
+    if (mprotect(p, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        FAIL("mmap_exec_protection", "mprotect RWX failed errno=%d", errno);
+        munmap(p, 0x1000);
+        return;
+    }
+    ret = ((exec_probe_fn)p)();
+    CHECK3(ret == EXEC_PROBE_RET, "mmap_exec_rwx_parent_exec",
+           "parent executed RWX page");
+    CHECK3(munmap(p, 0x1000) == 0, "mmap_exec_release", "anon released");
+
+    /* ── D. File-backed RX, never-resident leaf: first write →
+     *       SIGSEGV before the page is even allocated ── */
+    const char *path = "/tmp/t_exec_probe";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0) {
+        FAIL("mmap_exec_protection", "create probe file failed");
+        return;
+    }
+    if (write(fd, exec_probe_code, sizeof(exec_probe_code))
+        != (int64_t)sizeof(exec_probe_code)) {
+        FAIL("mmap_exec_protection", "write probe file failed");
+        close(fd);
+        unlink(path);
+        return;
+    }
+
+    unsigned char *rx = mmap(NULL, 0x1000, PROT_READ | PROT_EXEC,
+                             MAP_PRIVATE, fd, 0);
+    if (rx == MAP_FAILED) {
+        FAIL("mmap_exec_protection", "file RX mmap failed errno=%d", errno);
+        close(fd);
+        unlink(path);
+        return;
+    }
+    /* RX file page first write: the child write-faults on an absent
+     * leaf — the handler must refuse before allocation. */
+    {
+        int64_t pid = fork();
+        if (pid == 0) {
+            rx[0] = 0x90;               /* first write, leaf not resident */
+            _exit(0);
+        }
+        int st = 0;
+        int64_t waited = waitpid(pid, &st, 0);
+        CHECKF(waited == pid && WIFSIGNALED(st) &&
+               WTERMSIG(st) == SIGSEGV, "mmap_exec_file_rx_first_write",
+               "status=%#x", "want SIGSEGV on first RX write, got %#x", st);
+    }
+
+    /* ── E. File-backed RW, never-resident leaf: first fetch →
+     *       SIGSEGV.  The page content is real code, so only the
+     *       NX policy (not the bytes) decides the outcome. ── */
+    unsigned char *rw = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE, fd, 0);
+    if (rw == MAP_FAILED) {
+        FAIL("mmap_exec_protection", "file RW mmap failed errno=%d", errno);
+        munmap(rx, 0x1000);
+        close(fd);
+        unlink(path);
+        return;
+    }
+    exec_probe_fork_wait((exec_probe_fn)rw, "mmap_exec_file_rw_fetch_sigsegv",
+                         1);
+
+    munmap(rx, 0x1000);
+    munmap(rw, 0x1000);
+    close(fd);
+    unlink(path);
+
+    /* ── F. Real 2 MiB stack leaf: code on the stack never executes ── */
+    unsigned char stack_code[16];
+    memcpy(stack_code, exec_probe_code, sizeof(exec_probe_code));
+    exec_probe_fork_wait((exec_probe_fn)stack_code,
+                         "mmap_exec_stack_fetch_sigsegv", 1);
+}

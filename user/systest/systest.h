@@ -110,6 +110,7 @@ void test_libc_time(void);
 void test_linux_abi_compat(void);
 void test_lseek(void);
 void test_mkdir_rmdir(void);
+void test_mmap_execute_protection(void);
 void test_mprotect_subrange_cow(void);
 void test_nanosleep(void);
 void test_nanosleep_eintr(void);

@@ -600,10 +600,13 @@ TEST_FUNC(test_fb_cache_policy_alias_matches_kernel_mapping)
     uint64_t user_w  = fb_x86_user_pte_flags(FB_CACHE_POLICY_WRITEBACK, true);
     uint64_t user_ro = fb_x86_user_pte_flags(FB_CACHE_POLICY_WRITEBACK, false);
 
-    CHECK_EQ(EXPECT_PTE_USER_W,  user_w  & ~EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(EXPECT_PTE_USER_RO, user_ro & ~EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(EXPECT_PTE_USER_W,  user_w  & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
+    CHECK_EQ(EXPECT_PTE_USER_RO, user_ro & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
     CHECK_EQ(0, user_w  & EXPECT_CACHE_BITS_MASK);
     CHECK_EQ(0, user_ro & EXPECT_CACHE_BITS_MASK);
+    /* PTE permissions plan: the user alias is always NX. */
+    CHECK_EQ(PAGE_NO_EXEC, user_w  & PAGE_NO_EXEC);
+    CHECK_EQ(PAGE_NO_EXEC, user_ro & PAGE_NO_EXEC);
 
     /* Alias consistency: the alias and the kernel mapping must agree on
      * the memory type of the shared physical pages. */
@@ -615,8 +618,8 @@ TEST_FUNC(test_fb_cache_policy_alias_matches_kernel_mapping)
     uint64_t uc_ro = fb_x86_user_pte_flags(FB_CACHE_POLICY_UNCACHEABLE, false);
     CHECK_EQ(EXPECT_CACHE_BITS_MASK, uc_w  & EXPECT_CACHE_BITS_MASK);
     CHECK_EQ(EXPECT_CACHE_BITS_MASK, uc_ro & EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(EXPECT_PTE_USER_W,  uc_w  & ~EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(EXPECT_PTE_USER_RO, uc_ro & ~EXPECT_CACHE_BITS_MASK);
+    CHECK_EQ(EXPECT_PTE_USER_W,  uc_w  & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
+    CHECK_EQ(EXPECT_PTE_USER_RO, uc_ro & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
 
     fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
 }

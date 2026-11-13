@@ -136,6 +136,18 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_,
         return -EINVAL;
     }
 
+    /* PTE permissions plan: the framebuffer accepts R or RW only.
+     * PROT_NONE, PROT_EXEC or unknown combinations are rejected in
+     * the prepare phase — the old mapping stays untouched. */
+    if (vma->vm_flags & VMA_PROT_EXEC) {
+        fb_control_unlock();
+        return -EINVAL;
+    }
+    if (!(vma->vm_flags & (VMA_PROT_READ | VMA_PROT_WRITE))) {
+        fb_control_unlock();
+        return -EINVAL;
+    }
+
     bool is_writable = (vma->vm_flags & VMA_PROT_WRITE) != 0;
     if (is_writable) {
         if (!fb_is_raw_writable_allowed()) {

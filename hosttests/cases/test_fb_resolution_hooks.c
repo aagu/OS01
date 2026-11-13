@@ -40,6 +40,7 @@
 #include <uapi/fb.h>
 #include <uapi/fb_test.h>
 #include <driver/fb.h>
+#include <arch/x86_64/pte.h>   /* PAGE_NO_EXEC (fb alias NX pin) */
 #include <driver/fb_state.h>
 #include <driver/fb_cache.h>
 #include <arch/x86_64/fb_map.h>
@@ -846,6 +847,8 @@ static void test_consumed_token_identifies_the_armed_fault(void)
 #define HOOK_EXPECT_PTE_RO       0x05ULL
 #define HOOK_EXPECT_PTE_W        0x07ULL
 #define HOOK_EXPECT_CACHE_MASK   0x18ULL
+/* PTE permissions plan: the /dev/fb user alias is always NX. */
+#define HOOK_EXPECT_NO_EXEC      PAGE_NO_EXEC
 
 /* Independent walk of the mock page table (shifts 39/30/21 re-derived
  * here, not taken from the mapper under test). */
@@ -928,8 +931,9 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
         CHECK_EQ(HOOK_EXPECT_CACHE_MASK, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
     }
 
     fb_set_raw_writable_allowed_for_test(true);
@@ -940,8 +944,9 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
         CHECK_EQ(HOOK_EXPECT_CACHE_MASK, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
     }
     fb_set_raw_writable_allowed_for_test(false);
 
@@ -994,8 +999,9 @@ static void check_alias_cache_bits(unsigned expected_cache_bits)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
         CHECK_EQ(expected_cache_bits, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
     }
 
     fb_set_raw_writable_allowed_for_test(true);
@@ -1007,8 +1013,9 @@ static void check_alias_cache_bits(unsigned expected_cache_bits)
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
         CHECK_EQ(expected_cache_bits, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
+        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
     }
     fb_set_raw_writable_allowed_for_test(false);
 }
