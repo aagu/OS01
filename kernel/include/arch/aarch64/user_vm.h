@@ -39,19 +39,30 @@ struct intr_event;
 #define AARCH64_FSC_TRANSLATION_FIRST 0x04ULL
 #define AARCH64_FSC_TRANSLATION_LAST  0x07ULL
 
-/* ── Pure demand-fault classification ───────────────────────────
+/* ── Pure EL0 fault classification ──────────────────────────────
  *
- * Eligible: an EL0 Data Abort with a valid FAR, a translation FSC
- * (0x04..0x07), and neither S1PTW, CM nor FnV set.  Access-flag
- * (0x08..0x0b) and permission (0x0c..0x0f) faults are NOT demand
- * faults here — they keep the original termination path.  WnR
- * selects write over read.
+ * Two eligible shapes, both an EL0 Data Abort with a valid FAR and
+ * neither S1PTW nor CM set:
+ *
+ *   - translation fault (FSC 0x04..0x07): a demand-fillable page;
+ *     WnR selects write over read;  *cow_out = false.
+ *   - write permission fault (FSC exactly 0x0f — level 3): a COW
+ *     candidate; WnR MUST be set;  *cow_out = true.
+ *
+ * Everything else keeps the original termination path: access-flag
+ * faults (0x08..0x0b), higher-level permission faults (0x0c..0x0e)
+ * and read permission faults are never demand-filled and never COW.
  *
  * Inputs only: no runtime state, no system register. */
 static inline bool aarch64_user_vm_fault_classify(uint64_t esr,
                                                   bool far_valid,
-                                                  bool *write_out)
+                                                  bool *write_out,
+                                                  bool *cow_out)
 {
+    if (write_out)
+        *write_out = false;
+    if (cow_out)
+        *cow_out = false;
     if (!far_valid)
         return false;
     if (esr & (AARCH64_ESR_ISS_S1PTW | AARCH64_ESR_ISS_CM |
@@ -62,13 +73,25 @@ static inline bool aarch64_user_vm_fault_classify(uint64_t esr,
         return false;
 
     uint64_t fsc = esr & AARCH64_ESR_ISS_FSC_MASK;
-    if (fsc < AARCH64_FSC_TRANSLATION_FIRST ||
-        fsc > AARCH64_FSC_TRANSLATION_LAST)
-        return false;
+    bool write = (esr & AARCH64_ESR_ISS_WNR) != 0;
 
-    if (write_out)
-        *write_out = (esr & AARCH64_ESR_ISS_WNR) != 0;
-    return true;
+    if (fsc >= AARCH64_FSC_TRANSLATION_FIRST &&
+        fsc <= AARCH64_FSC_TRANSLATION_LAST) {
+        if (write_out)
+            *write_out = write;
+        return true;
+    }
+
+    /* Level-3 permission fault on a write: the only COW shape. */
+    if (fsc == 0x0fULL && write) {
+        if (write_out)
+            *write_out = true;
+        if (cow_out)
+            *cow_out = true;
+        return true;
+    }
+
+    return false;
 }
 
 /* ── Native SVC authorization ───────────────────────────────────

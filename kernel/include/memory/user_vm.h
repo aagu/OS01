@@ -199,6 +199,19 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len);
  * allocation failure. */
 int user_vm_fault(mm_t *mm, uint64_t far, bool write);
 
+/* CoW write fault on a shared resident page (EL0 FSC 0x0f, WnR=1).
+ *
+ * Requires a shared record with logical write permission and a
+ * present RO/NX leaf at that PA.  A page with more than one reference
+ * is copied into a fresh page, the leaf is replaced through the
+ * checked COW entry and the old reference dropped; a page holding the
+ * only reference is upgraded in place to RW/NX and its exclusive
+ * reference released without freeing the PA.  Returns 0 (retry the
+ * PC), -EFAULT for a state that is not a legal COW target, or -ENOMEM
+ * when the private copy cannot be allocated.  Nothing changes on
+ * failure. */
+int user_vm_cow_fault(mm_t *mm, uint64_t far);
+
 /* Pre-instantiate every absent page of [addr, addr+len) that is
  * authorised by a heap or anonymous VMA.  Validation is a complete
  * read-only pass first: any hole, PROT_NONE page or insufficient

@@ -21,11 +21,11 @@ int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
 
 /* The fixed UAPI number and trace name live beside their handler.
  *
- * The four shared native entries (exit, getpid, getppid,
- * clock_gettime) sit OUTSIDE the full-set block: they are the entries
- * every architecture serves, so the AArch64 port compiles this very
- * table with OS01_SYSCALL_A64_SUBSET=1 and hides every other entry
- * instead of carrying a second, divergent table. */
+ * The shared native entries (exit, getpid, getppid, clock_gettime,
+ * fork) and the four VM numbers sit OUTSIDE the full-set block: they
+ * are the entries every architecture serves, so the AArch64 port
+ * compiles this very table with OS01_SYSCALL_A64_SUBSET=1 and hides
+ * every other entry instead of carrying a second, divergent table. */
 static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_exit] = { sys_native_exit, "exit" },
     [SYS_getpid] = { sys_native_getpid, "getpid" },
@@ -40,6 +40,10 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_mmap] = { sys_mm_dispatch, "mmap" },
     [SYS_mprotect] = { sys_mm_dispatch, "mprotect" },
     [SYS_munmap] = { sys_mm_dispatch, "munmap" },
+
+    /* Fork is the one process number the AArch64 port serves: the
+     * handler and the COW write paths that make it safe are shared. */
+    [SYS_fork] = { sys_native_fork, "fork" },
 #ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
@@ -99,10 +103,6 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
     [SYS_exec] = { sys_proc_dispatch, "exec" },
-    /* Fork's shared handler; it stays in the full-set block until the
-     * COW write paths land (M4 Task 3), which moves it to the shared
-     * region and opens the number on AArch64. */
-    [SYS_fork] = { sys_native_fork, "fork" },
     [SYS_waitpid] = { sys_proc_dispatch, "waitpid" },
     [SYS_umask] = { sys_proc_dispatch, "umask" },
     [SYS_kill] = { sys_proc_dispatch, "kill" },

@@ -275,8 +275,10 @@ int aarch64_user_vm_fault(pt_regs_t *regs, const struct intr_event *event)
         return -EFAULT;
 
     bool write = false;
+    bool cow = false;
     if (!aarch64_user_vm_fault_classify(event->native_status,
-                                        event->fault_addr_valid, &write))
+                                        event->fault_addr_valid,
+                                        &write, &cow))
         return -EFAULT;
 
     mm_t *mm = aarch64_user_current_mm();
@@ -296,7 +298,8 @@ int aarch64_user_vm_fault(pt_regs_t *regs, const struct intr_event *event)
 
     int rc = aarch64_vm_edit_begin(mm);
     if (rc == 0) {
-        rc = user_vm_fault(mm, event->fault_addr, write);
+        rc = cow ? user_vm_cow_fault(mm, event->fault_addr)
+                 : user_vm_fault(mm, event->fault_addr, write);
         aarch64_vm_edit_end();
     }
 

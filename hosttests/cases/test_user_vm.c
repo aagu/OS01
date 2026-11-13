@@ -501,35 +501,54 @@ static struct intr_event make_fault_event(uint64_t esr)
 TEST_FUNC(test_fault_classification_pure)
 {
     bool write = true;
+    bool cow = true;
 
     assert_true(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x04, false, 0), true, &write));
+        ESR_LOWER_DATA(0x04, false, 0), true, &write, &cow));
     assert_false(write);
+    assert_false(cow);
 
     assert_true(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x07, true, 0), true, &write));
+        ESR_LOWER_DATA(0x07, true, 0), true, &write, &cow));
     assert_true(write);
+    assert_false(cow);
 
-    /* Access-flag and permission faults are not demand-fillable. */
-    assert_false(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x08, false, 0), true, NULL));
-    assert_false(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x0c, true, 0), true, NULL));
+    /* A level-3 write permission fault is the only COW shape. */
+    assert_true(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x0f, true, 0), true, &write, &cow));
+    assert_true(write);
+    assert_true(cow);
 
-    /* S1PTW / CM / invalid FAR are rejected. */
+    /* Higher-level permission and read permission faults are neither
+     * demand-filled nor COW. */
     assert_false(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x04, false, AARCH64_ESR_ISS_S1PTW), true, NULL));
+        ESR_LOWER_DATA(0x0f, false, 0), true, NULL, NULL));
     assert_false(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x04, false, AARCH64_ESR_ISS_CM), true, NULL));
+        ESR_LOWER_DATA(0x0c, true, 0), true, NULL, NULL));
     assert_false(aarch64_user_vm_fault_classify(
-        ESR_LOWER_DATA(0x04, false, 0), false, NULL));
+        ESR_LOWER_DATA(0x0d, true, 0), true, NULL, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x0e, true, 0), true, NULL, NULL));
 
-    /* Instruction abort and a same-EL data abort are not EL0 demand
-     * faults. */
+    /* Access-flag faults keep the old path. */
     assert_false(aarch64_user_vm_fault_classify(
-        (UINT64_C(0x20) << AARCH64_ESR_EC_SHIFT) | 0x04, true, NULL));
+        ESR_LOWER_DATA(0x08, false, 0), true, NULL, NULL));
+
+    /* S1PTW / CM / invalid FAR are rejected for both shapes. */
     assert_false(aarch64_user_vm_fault_classify(
-        (UINT64_C(0x25) << AARCH64_ESR_EC_SHIFT) | 0x04, true, NULL));
+        ESR_LOWER_DATA(0x04, false, AARCH64_ESR_ISS_S1PTW), true, NULL, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x04, false, AARCH64_ESR_ISS_CM), true, NULL, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x04, false, 0), false, NULL, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        ESR_LOWER_DATA(0x0f, true, AARCH64_ESR_ISS_S1PTW), true, NULL, NULL));
+
+    /* Instruction abort and a same-EL data abort are not EL0 faults. */
+    assert_false(aarch64_user_vm_fault_classify(
+        (UINT64_C(0x20) << AARCH64_ESR_EC_SHIFT) | 0x04, true, NULL, NULL));
+    assert_false(aarch64_user_vm_fault_classify(
+        (UINT64_C(0x25) << AARCH64_ESR_EC_SHIFT) | 0x04, true, NULL, NULL));
 }
 
 TEST_FUNC(test_transaction_native_success_restores_state)
@@ -1177,6 +1196,409 @@ TEST_FUNC(test_clone_fork_twice_2_3_2)
     assert_eq(1, user_vm_test_free_count());
 }
 
+/* ── COW write fault, mprotect/brk sharing, copy staging (Task 3) ─ */
+
+static uint64_t fault_mmap_page(mm_t *mm, uint64_t va)
+{
+    assert_eq(0, user_vm_fault(mm, va, true));
+    user_vm_page_t *r = resident_at(mm, va);
+    assert_not_null(r);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    return r->pa;
+}
+
+/* Put a resident page into the post-fork shared state: RO/NX hardware
+ * for a logical-RW page, the requested hardware word otherwise, and
+ * `refs` PMM COW references. */
+static user_vm_page_t *make_shared_page(mm_t *mm, uint64_t va, uint16_t refs,
+                                        uint32_t logical)
+{
+    user_vm_page_t *r = resident_at(mm, va);
+    assert_not_null(r);
+    r->share = USER_VM_PAGE_SHARED;
+    r->logical = logical;
+
+    uint32_t hw = logical;
+    if (logical == VM_PROTNONE)
+        hw = VM_PROTNONE;
+    else if (logical & VM_WRITE)
+        hw = VM_USER_RO | VM_NO_EXEC;
+    assert_eq(0, arch_vmm_update_4k(mm->pgdir, r->pa, va, hw, NULL, NULL));
+    user_vm_test_set_cow_refs(r->pa, refs);
+    return r;
+}
+
+static int resident_count(mm_t *mm)
+{
+    int n = 0;
+    for (list_t *p = mm->resident_list.next; p; p = p->next)
+        n++;
+    return n;
+}
+
+TEST_FUNC(test_cow_write_fault_copies_multi_ref_page)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    uint64_t old_pa = fault_private_page(mm, HEAP_BASE);
+    memset(Phy_To_Virt(old_pa), 0x5a, PAGE_4K_SIZE);
+    user_vm_page_t *r = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+
+    assert_eq(0, user_vm_cow_fault(mm, HEAP_BASE + 0x40));
+
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    assert_true(r->pa != old_pa);
+    assert_eq(1, user_vm_test_cow_refs(old_pa));
+    assert_eq(0, user_vm_test_cow_refs(r->pa));
+    assert_eq(r->pa, user_vm_test_leaf_pa(HEAP_BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(0, user_vm_test_free_count());   /* old page still owned */
+    assert_mem_eq(Phy_To_Virt(old_pa), Phy_To_Virt(r->pa), PAGE_4K_SIZE);
+
+    destroy_mm(mm);
+    assert_eq(1, user_vm_test_free_count());   /* only the private copy */
+    free_4k_page(old_pa);
+}
+
+TEST_FUNC(test_cow_write_fault_upgrades_unique_ref)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    uint64_t pa = fault_private_page(mm, HEAP_BASE);
+    user_vm_page_t *r = make_shared_page(mm, HEAP_BASE, 1,
+                                         VM_USER_RW | VM_NO_EXEC);
+
+    assert_eq(0, user_vm_cow_fault(mm, HEAP_BASE));
+
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    assert_eq(pa, r->pa);
+    assert_eq(pa, user_vm_test_leaf_pa(HEAP_BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(0, user_vm_test_cow_refs(pa));
+    assert_eq(0, user_vm_test_free_count());
+
+    destroy_mm(mm);
+    assert_eq(1, user_vm_test_free_count());
+}
+
+TEST_FUNC(test_cow_write_fault_rejections)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    uint64_t pa = fault_private_page(mm, HEAP_BASE);
+    user_vm_page_t *r = resident_at(mm, HEAP_BASE);
+    assert_not_null(r);
+
+    /* A private page is not a COW target. */
+    assert_eq(-EFAULT, user_vm_cow_fault(mm, HEAP_BASE));
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+
+    /* A shared page without logical write permission is refused. */
+    r = make_shared_page(mm, HEAP_BASE, 2, VM_USER_RO | VM_NO_EXEC);
+    assert_eq(-EFAULT, user_vm_cow_fault(mm, HEAP_BASE));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(2, user_vm_test_cow_refs(pa));
+
+    /* A shared writable leaf (hardware not RO/NX) is refused. */
+    r->logical = VM_USER_RW | VM_NO_EXEC;
+    assert_eq(0, arch_vmm_update_4k(mm->pgdir, pa, HEAP_BASE,
+                                    VM_USER_RW | VM_NO_EXEC, NULL, NULL));
+    assert_eq(-EFAULT, user_vm_cow_fault(mm, HEAP_BASE));
+
+    /* No record at the address. */
+    assert_eq(-EFAULT, user_vm_cow_fault(mm, HEAP_BASE + PAGE_4K_SIZE));
+
+    /* A multi-reference OOM preserves the whole shared state. */
+    assert_eq(0, arch_vmm_update_4k(mm->pgdir, pa, HEAP_BASE,
+                                    VM_USER_RO | VM_NO_EXEC, NULL, NULL));
+    user_vm_test_fail_page_after(0);
+    assert_eq(-ENOMEM, user_vm_cow_fault(mm, HEAP_BASE));
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, r->share);
+    assert_eq(pa, user_vm_test_leaf_pa(HEAP_BASE));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(2, user_vm_test_cow_refs(pa));
+
+    /* Leave the mock reference count at zero so destroy frees the page. */
+    user_vm_test_set_cow_refs(pa, 1);
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_mprotect_shared_keeps_hardware_readonly)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(mm, 0, 0x1000, PROT_RW, MAP_ANON_PRIVATE));
+    fault_mmap_page(mm, BASE);
+    user_vm_page_t *r = make_shared_page(mm, BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+
+    /* RW mprotect keeps the shared leaf hardware RO/NX. */
+    assert_eq(0, user_vm_mprotect(mm, BASE, 0x1000, PROT_RW));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC), r->logical);
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(BASE));
+    assert_eq(2, user_vm_test_cow_refs(r->pa));
+
+    /* NONE still stashes, and the reference survives. */
+    assert_eq(0, user_vm_mprotect(mm, BASE, 0x1000, PROT_NONE));
+    assert_eq(2, user_vm_test_leaf_state(BASE));
+    assert_eq((uint32_t)VM_PROTNONE, r->logical);
+    assert_eq(2, user_vm_test_cow_refs(r->pa));
+
+    /* Restoring RW re-establishes logical write but stays RO/NX. */
+    assert_eq(0, user_vm_mprotect(mm, BASE, 0x1000, PROT_RW));
+    assert_eq(1, user_vm_test_leaf_state(BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC), r->logical);
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(BASE));
+    assert_eq(2, user_vm_test_cow_refs(r->pa));
+
+    /* The first write then makes it private. */
+    uint64_t old_pa = r->pa;
+    assert_eq(0, user_vm_cow_fault(mm, BASE));
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    assert_true(r->pa != old_pa);
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(BASE));
+
+    user_vm_test_set_cow_refs(old_pa, 1);
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_brk_shrink_privatizes_shared_tail)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE + PAGE_4K_SIZE);
+
+    user_vm_page_t *tail = resident_at(mm, HEAP_BASE);
+    assert_not_null(tail);
+    uint64_t old_pa = make_shared_page(mm, HEAP_BASE, 2,
+                                       VM_USER_RW | VM_NO_EXEC)->pa;
+    memset(Phy_To_Virt(old_pa), 0xA5, PAGE_4K_SIZE);
+
+    assert_eq((int64_t)(HEAP_BASE + 0x800),
+              user_vm_brk(mm, HEAP_BASE + 0x800));
+
+    /* The retained tail is a private copy with the head preserved and
+     * the tail beyond the new break zeroed. */
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, tail->share);
+    assert_true(tail->pa != old_pa);
+    assert_eq(1, user_vm_test_cow_refs(old_pa));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+
+    unsigned char *head = Phy_To_Virt(tail->pa);
+    for (size_t i = 0; i < 0x800; i++)
+        if (head[i] != 0xA5) { assert_true(0); break; }
+    for (size_t i = 0x800; i < PAGE_4K_SIZE; i++)
+        if (head[i] != 0x00) { assert_true(0); break; }
+
+    /* The peer's page was never modified. */
+    unsigned char *peer = Phy_To_Virt(old_pa);
+    for (size_t i = 0; i < PAGE_4K_SIZE; i++)
+        if (peer[i] != 0xA5) { assert_true(0); break; }
+
+    /* The fully-outside page was released. */
+    assert_eq(0, user_vm_test_leaf_state(HEAP_BASE + PAGE_4K_SIZE));
+    assert_eq(1, user_vm_test_free_count());
+
+    user_vm_test_set_cow_refs(old_pa, 1);
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_brk_shrink_shared_tail_oom_preserves_state)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE + PAGE_4K_SIZE);
+
+    user_vm_page_t *tail = resident_at(mm, HEAP_BASE);
+    assert_not_null(tail);
+    uint64_t old_pa = make_shared_page(mm, HEAP_BASE, 2,
+                                       VM_USER_RW | VM_NO_EXEC)->pa;
+    memset(Phy_To_Virt(old_pa), 0xA5, PAGE_4K_SIZE);
+    uint64_t old_end = mm->end_brk;
+
+    user_vm_test_fail_page_after(0);
+    assert_eq(-ENOMEM, user_vm_brk(mm, HEAP_BASE + 0x800));
+
+    assert_eq(old_end, mm->end_brk);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, tail->share);
+    assert_eq(old_pa, tail->pa);
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(2, user_vm_test_cow_refs(old_pa));
+    assert_eq(1, user_vm_test_leaf_state(HEAP_BASE + PAGE_4K_SIZE));
+    unsigned char *peer = Phy_To_Virt(old_pa);
+    for (size_t i = 0; i < PAGE_4K_SIZE; i++)
+        if (peer[i] != 0xA5) { assert_true(0); break; }
+    assert_eq(0, user_vm_test_free_count());
+
+    user_vm_test_set_cow_refs(old_pa, 1);
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_prepare_copy_rejects_hole_without_allocating)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(HEAP_BASE + PAGE_4K_SIZE),
+              user_vm_brk(mm, HEAP_BASE + PAGE_4K_SIZE));
+
+    /* The second page lies outside the heap VMA: the read-only
+     * validation rejects the whole range before any allocation. */
+    assert_eq(-EFAULT, user_vm_prepare_copy(mm, HEAP_BASE,
+                                            PAGE_4K_SIZE * 2, true));
+    assert_eq(0, user_vm_test_page_allocs());
+    assert_eq(0, user_vm_test_leaf_count());
+    assert_eq(0, resident_count(mm));
+
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_prepare_copy_map_failure_preserves_three_sources)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(HEAP_BASE + PAGE_4K_SIZE * 4),
+              user_vm_brk(mm, HEAP_BASE + PAGE_4K_SIZE * 4));
+
+    /* A: multi-reference COW; B: unique-reference COW; C/D: absent. */
+    fault_private_page(mm, HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE + PAGE_4K_SIZE);
+    user_vm_page_t *a = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+    user_vm_page_t *b = make_shared_page(mm, HEAP_BASE + PAGE_4K_SIZE, 1,
+                                         VM_USER_RW | VM_NO_EXEC);
+    uint64_t a_pa = a->pa;
+    uint64_t b_pa = b->pa;
+
+    /* The first absent leaf maps, the second map fails. */
+    user_vm_test_fail_map_after(1);
+    assert_eq(-ENOMEM, user_vm_prepare_copy(mm, HEAP_BASE,
+                                            PAGE_4K_SIZE * 4, true));
+
+    /* The multi-reference COW source is untouched. */
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, a->share);
+    assert_eq(a_pa, a->pa);
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(2, user_vm_test_cow_refs(a_pa));
+
+    /* The unique-reference COW source is untouched. */
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, b->share);
+    assert_eq(b_pa, b->pa);
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE + PAGE_4K_SIZE));
+    assert_eq(1, user_vm_test_cow_refs(b_pa));
+
+    /* Every temporary absent leaf/record is gone. */
+    assert_eq(0, user_vm_test_leaf_state(HEAP_BASE + PAGE_4K_SIZE * 2));
+    assert_eq(0, user_vm_test_leaf_state(HEAP_BASE + PAGE_4K_SIZE * 3));
+    assert_eq(2, resident_count(mm));
+    assert_eq(2, user_vm_test_leaf_count());
+    assert_eq(0, user_vm_test_double_frees());
+    /* Two setup pages + COW copy + first absent page + failed map page. */
+    assert_eq(5, user_vm_test_page_allocs());
+    assert_eq(3, user_vm_test_free_count());
+
+    user_vm_test_set_cow_refs(a_pa, 1);
+    user_vm_destroy(mm);
+    free(mm);
+}
+
+TEST_FUNC(test_prepare_copy_success_commits_cow_and_absent)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(HEAP_BASE + PAGE_4K_SIZE * 4),
+              user_vm_brk(mm, HEAP_BASE + PAGE_4K_SIZE * 4));
+
+    fault_private_page(mm, HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE + PAGE_4K_SIZE);
+    user_vm_page_t *a = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+    user_vm_page_t *b = make_shared_page(mm, HEAP_BASE + PAGE_4K_SIZE, 1,
+                                         VM_USER_RW | VM_NO_EXEC);
+    uint64_t a_old = a->pa;
+    uint64_t b_old = b->pa;
+
+    assert_eq(0, user_vm_prepare_copy(mm, HEAP_BASE, PAGE_4K_SIZE * 4,
+                                      true));
+
+    /* Multi-reference page: a private copy, old ref dropped. */
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, a->share);
+    assert_true(a->pa != a_old);
+    assert_eq(1, user_vm_test_cow_refs(a_old));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+
+    /* Unique-reference page: same PA, upgraded in place. */
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, b->share);
+    assert_eq(b_old, b->pa);
+    assert_eq(0, user_vm_test_cow_refs(b_old));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE + PAGE_4K_SIZE));
+
+    /* The two absent pages now have private leaves and records. */
+    for (int i = 2; i < 4; i++) {
+        uint64_t va = HEAP_BASE + (uint64_t)i * PAGE_4K_SIZE;
+        assert_eq(1, user_vm_test_leaf_state(va));
+        assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+                  user_vm_test_leaf_vm(va));
+        user_vm_page_t *r = resident_at(mm, va);
+        assert_not_null(r);
+        assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    }
+    assert_eq(4, resident_count(mm));
+    assert_eq(4, user_vm_test_leaf_count());
+
+    user_vm_test_set_cow_refs(a_old, 1);
+    user_vm_destroy(mm);
+    assert_eq(4, user_vm_test_free_count());
+    free(mm);
+    free_4k_page(a_old);
+}
+
+TEST_FUNC(test_fault_entry_cow_write)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    uint64_t old_pa = fault_private_page(mm, HEAP_BASE);
+    user_vm_page_t *r = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+    tx_setup(mm);
+    user_vm_test_set_irq(0);              /* entry IRQs enabled */
+    user_vm_test_set_tls(0x5500, 0x6600);
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    regs.elr_el1 = 0x2000;
+
+    struct intr_event ev = make_fault_event(ESR_LOWER_DATA(0x0f, true, 0));
+    assert_eq(0, aarch64_user_vm_fault(&regs, &ev));
+    assert_eq(0x2000, regs.elr_el1);          /* same PC retried */
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    assert_true(r->pa != old_pa);
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_eq(0x5500, user_vm_test_live_tls(0));
+    assert_eq(0x6600, user_vm_test_live_tls(1));
+    assert_eq(0, user_vm_test_irq_masked());
+
+    user_vm_test_set_cow_refs(old_pa, 1);
+    destroy_mm(mm);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -1206,6 +1628,16 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_clone_fork_publish_failure_mixed_refs),
     TEST_ENTRY(test_clone_fork_overflow_fails_preflight),
     TEST_ENTRY(test_clone_fork_twice_2_3_2),
+    TEST_ENTRY(test_cow_write_fault_copies_multi_ref_page),
+    TEST_ENTRY(test_cow_write_fault_upgrades_unique_ref),
+    TEST_ENTRY(test_cow_write_fault_rejections),
+    TEST_ENTRY(test_mprotect_shared_keeps_hardware_readonly),
+    TEST_ENTRY(test_brk_shrink_privatizes_shared_tail),
+    TEST_ENTRY(test_brk_shrink_shared_tail_oom_preserves_state),
+    TEST_ENTRY(test_prepare_copy_rejects_hole_without_allocating),
+    TEST_ENTRY(test_prepare_copy_map_failure_preserves_three_sources),
+    TEST_ENTRY(test_prepare_copy_success_commits_cow_and_absent),
+    TEST_ENTRY(test_fault_entry_cow_write),
 TEST_LIST_END
 
 int main(void)

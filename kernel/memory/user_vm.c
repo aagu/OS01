@@ -206,6 +206,98 @@ static void resident_remove_leaf(mm_t *mm, user_vm_page_t *r, uint64_t *root)
     kfree(r);
 }
 
+/* ── COW privatization ─────────────────────────────────────────── */
+
+/* Bring one shared resident page back to exclusive ownership.
+ *
+ * Preconditions (all checked here, nothing changes on failure): the
+ * record is shared with logical write permission, and its leaf is
+ * present at exactly r->pa with hardware RO/NX.
+ *
+ *   refs > 1 : allocate a private copy, copy the whole page, replace
+ *              the leaf through the checked COW entry, drop the old
+ *              reference (not the last one, so the PA stays alive for
+ *              the other owner).
+ *   refs == 1: upgrade the same PA to RW/NX and release the unique
+ *              reference; the PA becomes exclusively ours and is not
+ *              freed.
+ *
+ * Returns 0, -ENOMEM when the private copy cannot be allocated, or
+ * -EFAULT for a state that is not a legal COW target.  The caller
+ * must hold the detached root. */
+static int cow_private_page(mm_t *mm, user_vm_page_t *r, uint64_t *root)
+{
+    (void)mm;
+    if (!r || r->share != USER_VM_PAGE_SHARED ||
+        !(r->logical & VM_WRITE))
+        return -EFAULT;
+
+    struct user_vm_leaf leaf;
+    if (arch_user_vm_query(root, r->va, &leaf) != 0 ||
+        leaf.state != USER_VM_PRESENT || leaf.pa != r->pa ||
+        leaf.flags != (VM_USER_RO | VM_NO_EXEC))
+        return -EFAULT;
+
+    uint16_t refs = page_cow_refs(r->pa);
+    if (refs == 0)
+        arch_user_vm_invariant("shared record without a reference");
+
+    if (refs == 1) {
+        uint64_t old_pa = 0;
+        uint32_t old_vm = 0;
+        int rc = arch_vmm_update_4k(root, r->pa, r->va,
+                                    VM_USER_RW | VM_NO_EXEC,
+                                    &old_pa, &old_vm);
+        if (rc != 0 || old_pa != r->pa ||
+            old_vm != (VM_USER_RO | VM_NO_EXEC))
+            arch_user_vm_invariant("cow upgrade mismatch");
+
+        bool last = false;
+        if (pmm_cow_release(r->pa, &last) != 0 || !last)
+            arch_user_vm_invariant("cow unique release mismatch");
+        r->share = USER_VM_PAGE_PRIVATE;
+        return 0;
+    }
+
+    uint64_t new_pa = alloc_4k_page();
+    if (!new_pa)
+        return -ENOMEM;
+    memcpy(Phy_To_Virt(new_pa), Phy_To_Virt(r->pa), PAGE_4K_SIZE);
+
+    int rc = arch_user_vm_replace_cow(root, r->va, r->pa, new_pa);
+    if (rc != 0) {
+        free_4k_page(new_pa);
+        return (rc == -ENOMEM) ? -ENOMEM : -EFAULT;
+    }
+
+    bool last = false;
+    if (pmm_cow_release(r->pa, &last) != 0 || last)
+        arch_user_vm_invariant("cow copy release mismatch");
+
+    r->pa = new_pa;
+    r->share = USER_VM_PAGE_PRIVATE;
+    return 0;
+}
+
+int user_vm_cow_fault(mm_t *mm, uint64_t far)
+{
+    if (!mm)
+        return -EFAULT;
+
+    uint64_t va = far & ~((uint64_t)PAGE_4K_SIZE - 1);
+    if (va < AARCH64_USER_MIN || va >= AARCH64_USER_LIMIT)
+        return -EFAULT;
+
+    user_vm_page_t *r = resident_lookup(mm, va);
+    if (!r)
+        return -EFAULT;
+
+    /* cow_private_page performs the remaining checks (shared, logical
+     * RW, same-PA RO/NX leaf) and returns -EFAULT for a non-COW
+     * fault, -ENOMEM for copy exhaustion. */
+    return cow_private_page(mm, r, vm_root(mm));
+}
+
 /* ── Permission translation ────────────────────────────────────── */
 
 static int prot_to_vma_flags(uint64_t prot, uint64_t *out)
@@ -756,6 +848,20 @@ int64_t user_vm_brk(mm_t *mm, uint64_t addr)
     uint64_t aligned_old = page_align_up(old_end);
     uint64_t *root = vm_root(mm);
 
+    /* The retained tail must be exclusively ours before it is zeroed:
+     * writing a shared page would corrupt the peer.  This is the first
+     * fallible step and it runs BEFORE the break, any released page or
+     * the tail bytes change; failure leaves the whole shrink undone. */
+    user_vm_page_t *tail = NULL;
+    if (addr != aligned_new) {
+        tail = resident_lookup(mm, aligned_new - (uint64_t)PAGE_4K_SIZE);
+        if (tail && tail->share == USER_VM_PAGE_SHARED) {
+            int prc = cow_private_page(mm, tail, root);
+            if (prc)
+                return prc;
+        }
+    }
+
     list_t *p = mm->resident_list.next;
     while (p) {
         list_t *next = p->next;
@@ -765,15 +871,12 @@ int64_t user_vm_brk(mm_t *mm, uint64_t addr)
         p = next;
     }
 
-    if (addr != aligned_new) {
-        uint64_t tail_va = aligned_new - (uint64_t)PAGE_4K_SIZE;
-        user_vm_page_t *r = resident_lookup(mm, tail_va);
-        if (r) {
-            resident_verify(mm, root, r);
-            size_t off = (size_t)(addr - tail_va);
-            memset((unsigned char *)Phy_To_Virt(r->pa) + off, 0,
-                   (size_t)((uint64_t)PAGE_4K_SIZE - off));
-        }
+    if (tail) {
+        resident_verify(mm, root, tail);
+        size_t off = (size_t)(addr -
+                              (aligned_new - (uint64_t)PAGE_4K_SIZE));
+        memset((unsigned char *)Phy_To_Virt(tail->pa) + off, 0,
+               (size_t)((uint64_t)PAGE_4K_SIZE - off));
     }
 
     mm->end_brk  = addr;
@@ -954,14 +1057,26 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
         v->vm_flags |= new_flags;
     }
 
-    uint32_t tvm = target_vm(prot);
+    /* The logical permission is committed with the VMA: a PROT_NONE
+     * request keeps the PA in a stash, a read-only request is RO/NX,
+     * and a restored write permission on a still-shared page keeps the
+     * hardware RO/NX — the first real write does the COW.  A private
+     * page takes the requested hardware word directly. */
+    uint32_t logical = target_vm(prot);
     for (list_t *lp = mm->resident_list.next; lp; lp = lp->next) {
         user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
         if (r->va < addr) continue;
         if (r->va >= end) break;
-        if (arch_vmm_update_4k(root, r->pa, r->va, tvm,
+
+        uint32_t hw = logical;
+        if (r->share == USER_VM_PAGE_SHARED && prot != PROT_NONE &&
+            (prot & PROT_WRITE))
+            hw = VM_USER_RO | VM_NO_EXEC;
+
+        if (arch_vmm_update_4k(root, r->pa, r->va, hw,
                                NULL, NULL) != 0)
             arch_user_vm_invariant("mprotect leaf update failed");
+        r->logical = logical;
     }
     return 0;
 }
@@ -1128,6 +1243,12 @@ static void staged_rollback(uint64_t *root, list_t *head)
     }
 }
 
+struct copy_cow_stage {
+    user_vm_page_t *rec;
+    uint64_t        old_pa;
+    uint64_t        new_pa;   /* 0: unique-reference same-PA upgrade */
+};
+
 int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
 {
     if (!mm)
@@ -1142,19 +1263,34 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
     uint64_t start = addr & ~((uint64_t)PAGE_4K_SIZE - 1);
     uint64_t end   = page_align_up(addr + (uint64_t)len);
     uint64_t *root = vm_root(mm);
+    int rc;
 
-    /* Pass 1 — complete read-only validation.  Nothing is created
-     * until every page is known to be legal. */
+    /* Pass 1 — complete read-only validation.  A write range accepts
+     * a writable leaf, a legal absent page, or a shared logically-RW
+     * page whose hardware leaf is RO/NX (the COW target).  Logical RO
+     * and every non-leaf-level shape are rejected before anything is
+     * allocated or changed. */
+    size_t cow_count = 0;
     for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
         struct user_vm_leaf leaf;
         if (arch_user_vm_query(root, va, &leaf) != 0)
             return -EFAULT;
 
         if (leaf.state == USER_VM_PRESENT) {
-            bool ok = write ? leaf_writable(leaf.flags)
-                            : leaf_readable(leaf.flags);
-            if (!ok)
+            if (!write) {
+                if (!leaf_readable(leaf.flags))
+                    return -EFAULT;
+                continue;
+            }
+            if (leaf_writable(leaf.flags))
+                continue;
+            if (leaf.flags != (VM_USER_RO | VM_NO_EXEC))
                 return -EFAULT;
+            user_vm_page_t *r = resident_lookup(mm, va);
+            if (!r || r->share != USER_VM_PAGE_SHARED ||
+                !(r->logical & VM_WRITE) || r->pa != leaf.pa)
+                return -EFAULT;
+            cow_count++;
         } else if (leaf.state == USER_VM_STASHED) {
             return -EFAULT;
         } else if (authorize_absent(mm, va, write, NULL) != 0) {
@@ -1162,43 +1298,91 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
         }
     }
 
-    /* Pass 2 — create the absent pages on a private chain. */
+    if (cow_count > SIZE_MAX / sizeof(struct copy_cow_stage))
+        return -ENOMEM;
+    struct copy_cow_stage *cow = NULL;
+    if (cow_count) {
+        cow = kmalloc(cow_count * sizeof(*cow));
+        if (!cow)
+            return -ENOMEM;
+    }
+
+    /* Pass 2 — preallocate every multi-reference private copy and log
+     * the unique-reference upgrades.  The COW leaves and their counts
+     * are untouched until the whole range is ready to commit. */
+    size_t ncow = 0;
+    for (uint64_t va = start; write && va < end; va += PAGE_4K_SIZE) {
+        struct user_vm_leaf leaf;
+        if (arch_user_vm_query(root, va, &leaf) != 0) {
+            rc = -EFAULT;
+            goto fail;
+        }
+        if (leaf.state != USER_VM_PRESENT || leaf_writable(leaf.flags))
+            continue;
+
+        user_vm_page_t *r = resident_lookup(mm, va);
+        if (!r || r->share != USER_VM_PAGE_SHARED ||
+            !(r->logical & VM_WRITE) || r->pa != leaf.pa ||
+            leaf.flags != (VM_USER_RO | VM_NO_EXEC)) {
+            rc = -EFAULT;
+            goto fail;
+        }
+
+        uint16_t refs = page_cow_refs(r->pa);
+        if (refs == 0)
+            arch_user_vm_invariant("copy COW without a reference");
+
+        uint64_t new_pa = 0;
+        if (refs > 1) {
+            new_pa = alloc_4k_page();
+            if (!new_pa) {
+                rc = -ENOMEM;
+                goto fail;
+            }
+            memcpy(Phy_To_Virt(new_pa), Phy_To_Virt(r->pa), PAGE_4K_SIZE);
+        }
+        cow[ncow++] = (struct copy_cow_stage){ r, r->pa, new_pa };
+    }
+
+    /* Pass 3 — create the absent pages on an independent rollback
+     * chain.  A map failure removes every temporary leaf and page but
+     * leaves intermediate tables for mm destroy to reclaim. */
     list_t staged = { .prev = NULL, .next = NULL };
 
     for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
         struct user_vm_leaf leaf;
         if (arch_user_vm_query(root, va, &leaf) != 0) {
-            staged_rollback(root, &staged);
-            return -EFAULT;
+            rc = -EFAULT;
+            goto fail;
         }
         if (leaf.state != USER_VM_ABSENT)
             continue;
 
         uint32_t map_vm = 0;
         if (authorize_absent(mm, va, write, &map_vm) != 0) {
-            staged_rollback(root, &staged);
-            return -EFAULT;
+            rc = -EFAULT;
+            goto fail;
         }
 
         user_vm_page_t *rec = kmalloc(sizeof(*rec));
         if (!rec) {
-            staged_rollback(root, &staged);
-            return -ENOMEM;
+            rc = -ENOMEM;
+            goto fail;
         }
 
         uint64_t pa = alloc_4k_page();
         if (!pa) {
             kfree(rec);
-            staged_rollback(root, &staged);
-            return -ENOMEM;
+            rc = -ENOMEM;
+            goto fail;
         }
         memset(Phy_To_Virt(pa), 0, PAGE_4K_SIZE);
 
         if (arch_vmm_map_4k_new(root, pa, va, map_vm) != 0) {
             free_4k_page(pa);
             kfree(rec);
-            staged_rollback(root, &staged);
-            return -ENOMEM;
+            rc = -ENOMEM;
+            goto fail;
         }
 
         rec->va = va;
@@ -1207,6 +1391,36 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
         rec->logical = map_vm;
         rec->share   = USER_VM_PAGE_PRIVATE;
         staged_append(&staged, rec);
+    }
+
+    /* Pass 4 — commit the COW leaves and the reference accounting.  A
+     * commit-time mismatch is an invariant failure, never a repair. */
+    for (size_t i = 0; i < ncow; i++) {
+        user_vm_page_t *r = cow[i].rec;
+
+        if (cow[i].new_pa) {
+            if (arch_user_vm_replace_cow(root, r->va, cow[i].old_pa,
+                                         cow[i].new_pa) != 0)
+                arch_user_vm_invariant("copy replace mismatch");
+            bool last = false;
+            if (pmm_cow_release(cow[i].old_pa, &last) != 0 || last)
+                arch_user_vm_invariant("copy replace release mismatch");
+            r->pa = cow[i].new_pa;
+            r->share = USER_VM_PAGE_PRIVATE;
+        } else {
+            uint64_t old_pa = 0;
+            uint32_t old_vm = 0;
+            if (arch_vmm_update_4k(root, r->pa, r->va,
+                                   VM_USER_RW | VM_NO_EXEC,
+                                   &old_pa, &old_vm) != 0 ||
+                old_pa != r->pa ||
+                old_vm != (VM_USER_RO | VM_NO_EXEC))
+                arch_user_vm_invariant("copy upgrade mismatch");
+            bool last = false;
+            if (pmm_cow_release(r->pa, &last) != 0 || !last)
+                arch_user_vm_invariant("copy unique release mismatch");
+            r->share = USER_VM_PAGE_PRIVATE;
+        }
     }
 
     /* Success: attach the staged records to the mm chain. */
@@ -1220,5 +1434,16 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
             staged.prev = NULL;
         resident_insert(mm, r);
     }
+    kfree(cow);
     return 0;
+
+fail:
+    /* Free only this call's preallocated copies and temporary leaves;
+     * the original COW leaves and counts are exactly as they were. */
+    for (size_t i = 0; i < ncow; i++)
+        if (cow[i].new_pa)
+            free_4k_page(cow[i].new_pa);
+    staged_rollback(root, &staged);
+    kfree(cow);
+    return rc;
 }

@@ -85,13 +85,14 @@ int main(void)
 
 #ifdef OS01_SYSCALL_A64_SUBSET
     /* ── AArch64 subset ─────────────────────────────────────────
-     * The AArch64 port compiles the SAME table with the four shared
-     * native entries plus the four anonymous-VM numbers (brk/mmap/
-     * mprotect/munmap).  Every other number must be absent: a
-     * leftover entry would let an unsupported number reach user mode
-     * through the AArch64 SVC path. */
+     * The AArch64 port compiles the SAME table with the five shared
+     * native entries (including fork, the one process number M4
+     * opens) plus the four anonymous-VM numbers (brk/mmap/mprotect/
+     * munmap).  Every other number must be absent: a leftover entry
+     * would let an unsupported number reach user mode through the
+     * AArch64 SVC path. */
     static const uint64_t shared[] = {
-        SYS_exit, SYS_getpid, SYS_getppid, SYS_clock_gettime,
+        SYS_exit, SYS_getpid, SYS_getppid, SYS_clock_gettime, SYS_fork,
         SYS_brk, SYS_mmap, SYS_mprotect, SYS_munmap,
     };
     for (unsigned i = 0; i < sizeof(shared) / sizeof(shared[0]); i++) {
