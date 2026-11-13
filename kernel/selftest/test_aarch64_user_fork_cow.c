@@ -102,6 +102,7 @@ static volatile uint64_t g_illegal_status;
 static bool     g_child_frame_checked;
 static bool     g_parent_A_checked, g_parent_F_checked, g_child_B_checked;
 static bool     g_child_D_checked, g_E_checked, g_ppid_checked;
+static bool     g_parent_ppid_checked;
 static uint64_t g_fork_elr, g_fork_sp, g_parent_root;
 static uint64_t g_child_expected_elr;
 static uint64_t g_parent_A_pa, g_parent_F_pa, g_parent_E_pa;
@@ -138,6 +139,7 @@ void aarch64_user_fork_cow_test_reset(void)
     g_child_frame_checked = false;
     g_parent_A_checked = g_parent_F_checked = g_child_B_checked = false;
     g_child_D_checked = g_E_checked = g_ppid_checked = false;
+    g_parent_ppid_checked = false;
     g_fork_elr = g_fork_sp = g_parent_root = 0;
     g_child_expected_elr = 0;
     g_parent_A_pa = g_parent_F_pa = g_parent_E_pa = 0;
@@ -275,13 +277,22 @@ void aarch64_user_fork_cow_test_syscall_ret(struct pt_regs *regs,
             fc_stage(3);
         }
         if (nr == SYS_getppid) {
-            int idle = percpu_data[0].idle
-                           ? (int)percpu_data[0].idle->pid : -1;
-            if ((int)rc != idle)
-                fc_fail("the child PPID is not the BSP idle task");
-            else
-                g_ppid_checked = true;
-            fc_stage(7);
+            if (!g_parent_reaped) {
+                /* While the parent is alive, getppid must name the
+                 * real parent task, not the idle task. */
+                if ((int)rc != g_parent_pid)
+                    fc_fail("the child PPID is not the live parent");
+                else
+                    g_parent_ppid_checked = true;
+            } else {
+                int idle = percpu_data[0].idle
+                               ? (int)percpu_data[0].idle->pid : -1;
+                if ((int)rc != idle)
+                    fc_fail("the child PPID is not the BSP idle task");
+                else
+                    g_ppid_checked = true;
+                fc_stage(7);
+            }
         }
     }
 
@@ -503,6 +514,8 @@ static uint64_t fc_worker(uint64_t arg)
         fc_fail("the child's unique-reference upgrade was not observed");
     if (!g_E_checked)
         fc_fail("the independent lazy page was not observed");
+    if (!g_parent_ppid_checked)
+        fc_fail("the child's live-parent PPID was not observed");
     if (!g_ppid_checked)
         fc_fail("the child's idle PPID was not observed");
     if (g_stage < 7)

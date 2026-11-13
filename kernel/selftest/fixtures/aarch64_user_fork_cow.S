@@ -258,6 +258,8 @@ _start:
     /* ── Child ────────────────────────────────────────────────── */
 .Lchild:
     cbnz    x23, .Lfail
+    /* While the parent is still alive, getppid must name it. */
+    FC_SYSCALL SYS_getppid
     /* A must still hold the pre-fork value: the parent's write went
      * to its private copy. */
     ldr     w1, [x20]

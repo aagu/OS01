@@ -1599,6 +1599,127 @@ TEST_FUNC(test_fault_entry_cow_write)
     destroy_mm(mm);
 }
 
+/* ── Clone with a stashed page (review: mixed present/stash/shared) ─ */
+
+TEST_FUNC(test_clone_fork_stash_mixed_success_and_second_fork)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(parent, 0, PAGE_4K_SIZE * 2, PROT_RW,
+                             MAP_ANON_PRIVATE));
+
+    /* Page A: stashed (PROT_NONE) before the fork. */
+    fault_mmap_page(parent, BASE);
+    assert_eq(0, user_vm_mprotect(parent, BASE, PAGE_4K_SIZE, PROT_NONE));
+    user_vm_page_t *stash = resident_at(parent, BASE);
+    assert_not_null(stash);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, stash->share);
+    assert_eq((uint32_t)VM_PROTNONE, stash->logical);
+    assert_eq(2, user_vm_test_leaf_state(BASE));
+
+    /* Page B: already shared present.  Page C: private present. */
+    fault_mmap_page(parent, BASE + PAGE_4K_SIZE);
+    /* One reference: the parent's own shared state, so the fork takes
+     * it 1→2 and a second fork 2→3→2. */
+    user_vm_page_t *shared = make_shared_page(parent, BASE + PAGE_4K_SIZE, 1,
+                                              VM_USER_RW | VM_NO_EXEC);
+    uint64_t private_pa = fault_private_page(parent, HEAP_BASE);
+
+    mm_t *child1 = new_child_mm(0x9000);
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(parent, child1, clone_publish_ok, &probe));
+
+    /* The stashed page is copied as a stash at the same PA. */
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, stash->share);
+    assert_eq(2, user_vm_test_cow_refs(stash->pa));
+    assert_eq(2, user_vm_test_leaf_state(BASE));
+    assert_eq(2, user_vm_test_leaf_state_in(child1->pgdir, BASE));
+    assert_eq(stash->pa, user_vm_test_leaf_pa_in(child1->pgdir, BASE));
+    user_vm_page_t *cstash = resident_at(child1, BASE);
+    assert_not_null(cstash);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, cstash->share);
+    assert_eq((uint32_t)VM_PROTNONE, cstash->logical);
+
+    assert_eq(2, user_vm_test_cow_refs(shared->pa));
+    assert_eq(2, user_vm_test_cow_refs(private_pa));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+
+    /* A second fork with a publish failure: every existing shared
+     * entry, present and stashed alike, goes 2→3→2. */
+    mm_t *child2 = new_child_mm(0xa000);
+    probe = (struct clone_publish_probe){ 0, 0 };
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child2, clone_publish_fail,
+                                          &probe));
+    assert_eq(1, probe.calls);
+    assert_eq(2, user_vm_test_cow_refs(stash->pa));
+    assert_eq(2, user_vm_test_cow_refs(shared->pa));
+    assert_eq(2, user_vm_test_cow_refs(private_pa));
+    assert_eq(2, user_vm_test_leaf_state(BASE));
+    assert_eq(0, user_vm_test_leaf_state_in(child2->pgdir, BASE));
+    assert_eq(0, user_vm_test_leaf_state_in(child2->pgdir, HEAP_BASE));
+    assert_null(child2->resident_list.next);
+
+    user_vm_destroy(child2);
+    free(child2);
+
+    /* The first child releases one reference per page on destruction;
+     * the stashed leaf is removed and its PA is not freed yet. */
+    user_vm_destroy(child1);
+    assert_eq(1, user_vm_test_cow_refs(stash->pa));
+    assert_eq(1, user_vm_test_cow_refs(shared->pa));
+    assert_eq(1, user_vm_test_cow_refs(private_pa));
+    assert_eq(3, user_vm_test_leaf_count());
+    assert_eq(0, user_vm_test_free_count());
+    assert_false(user_vm_has_metadata(child1));
+    free(child1);
+
+    destroy_mm(parent);
+    assert_eq(0, user_vm_test_cow_refs(stash->pa));
+    assert_eq(3, user_vm_test_free_count());
+    assert_eq(0, user_vm_test_double_frees());
+}
+
+TEST_FUNC(test_clone_fork_stash_rollback_unmaps_stashed_child)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(parent, 0, PAGE_4K_SIZE, PROT_RW,
+                             MAP_ANON_PRIVATE));
+
+    /* The stashed page is first in VA order, so it maps before the
+     * injected failure and the rollback must remove a STASHED child
+     * leaf. */
+    fault_mmap_page(parent, BASE);
+    assert_eq(0, user_vm_mprotect(parent, BASE, PAGE_4K_SIZE, PROT_NONE));
+    user_vm_page_t *stash = resident_at(parent, BASE);
+    assert_not_null(stash);
+
+    uint64_t private_pa = fault_private_page(parent, HEAP_BASE);
+    mm_t *child = new_child_mm(0x9000);
+    struct clone_publish_probe probe = { 0, 0 };
+
+    user_vm_test_fail_map_after(1);
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child, clone_publish_ok,
+                                          &probe));
+    assert_eq(0, probe.calls);
+
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, BASE));
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, HEAP_BASE));
+    assert_null(child->resident_list.next);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, stash->share);
+    assert_eq(0, user_vm_test_cow_refs(stash->pa));
+    assert_eq(2, user_vm_test_leaf_state(BASE));
+    assert_eq(0, user_vm_test_cow_refs(private_pa));
+    assert_eq(0, user_vm_test_free_count());
+
+    user_vm_destroy(child);
+    free(child);
+    destroy_mm(parent);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -1628,6 +1749,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_clone_fork_publish_failure_mixed_refs),
     TEST_ENTRY(test_clone_fork_overflow_fails_preflight),
     TEST_ENTRY(test_clone_fork_twice_2_3_2),
+    TEST_ENTRY(test_clone_fork_stash_mixed_success_and_second_fork),
+    TEST_ENTRY(test_clone_fork_stash_rollback_unmaps_stashed_child),
     TEST_ENTRY(test_cow_write_fault_copies_multi_ref_page),
     TEST_ENTRY(test_cow_write_fault_upgrades_unique_ref),
     TEST_ENTRY(test_cow_write_fault_rejections),
