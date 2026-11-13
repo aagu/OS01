@@ -1520,6 +1520,7 @@ static uint64_t g_dev_first_pa = 0x30000000UL;
 static uint64_t g_dev_flags = PAGE_USER_PTE_RO;
 static int      g_dev_calls;
 static int      g_dev_inject_rc;
+static int      g_dev_race_insert;
 
 static int fake_dev_mmap(struct vfs_node *node, struct vma *vma,
                          vfs_mmap_commit_fn commit, void *ctx)
@@ -1528,6 +1529,21 @@ static int fake_dev_mmap(struct vfs_node *node, struct vma *vma,
     g_dev_calls++;
     if (g_dev_inject_rc)
         return g_dev_inject_rc;
+    if (g_dev_race_insert) {
+        /* Simulate another editor taking the selected gap after
+         * do_mmap chose it (single-owner mm makes this unreachable in
+         * production; the transaction must still not build an
+         * overlapping VMA). */
+        vma_t *tv = (vma_t *)vma;
+        vma_t *race = (vma_t *)kmalloc(sizeof(vma_t));
+        memset(race, 0, sizeof(*race));
+        list_init(&race->list);
+        race->vm_start = tv->vm_start;
+        race->vm_end   = tv->vm_end;
+        race->vm_flags = VMA_PROT_READ | VMA_ANON;
+        race->vm_page_prot = PAGE_USER_PTE_RO;
+        vma_insert(&fixture_mm, race);
+    }
     return commit(ctx, g_dev_first_pa, g_dev_flags);
 }
 
@@ -1549,6 +1565,7 @@ static void install_fake_device(void)
 
     g_dev_calls = 0;
     g_dev_inject_rc = 0;
+    g_dev_race_insert = 0;
     g_dev_flags = PAGE_USER_PTE_RO;
 }
 
@@ -1748,6 +1765,54 @@ static void test_device_map_auto_select(void)
     }
 }
 
+static void test_munmap_huge_block_split_rejected(void)
+{
+    TEST_SUITE("do_munmap — huge block split across VMA fragments rejected");
+
+    /* A fully covered 2 MiB leaf can only be withdrawn from a single
+     * fragment.  Two adjacent 1 MiB VMAs covering the block must be
+     * rejected rather than retiring the VMAs while the leaf stays. */
+    setup_munmap();
+    lifecycle_set_has_2m(MUNMAP_BASE);
+    install_anon_vma(MUNMAP_BASE, 0x100000);
+    install_anon_vma(MUNMAP_BASE + 0x100000UL, 0x100000);
+    int frees_before = lifecycle_state.total_frees;
+    assert_eq(-EINVAL, do_munmap(MUNMAP_BASE, 0x200000UL));
+    assert_eq(2, vma_list_count(&fixture_mm.vma_list));
+    assert_eq(frees_before, lifecycle_state.total_frees);
+
+    /* One VMA covering the whole block is accepted. */
+    setup_munmap();
+    lifecycle_set_has_2m(MUNMAP_BASE);
+    install_anon_vma(MUNMAP_BASE, 0x200000);
+    assert_eq(0, do_munmap(MUNMAP_BASE, 0x200000UL));
+    assert_eq(0, vma_list_count(&fixture_mm.vma_list));
+    lifecycle_set_has_2m(0);
+}
+
+static void test_device_map_auto_select_conflict(void)
+{
+    TEST_SUITE("device mmap — lost auto-selected gap is not published");
+
+    setup_munmap();
+    install_fake_device();
+    g_dev_race_insert = 1;
+
+    int64_t rc = do_mmap(0, 0x1000UL, PROT_READ, MAP_SHARED, 0, 0);
+    assert_eq(-ENOMEM, rc);
+    assert_eq(1, g_dev_calls);
+    /* Only the racing VMA exists; the device mapping was not published
+     * and no device leaf was installed. */
+    assert_eq(1, vma_list_count(&fixture_mm.vma_list));
+    vma_t *race = vma_list_get(&fixture_mm.vma_list, 0);
+    assert_not_null(race);
+    if (race) {
+        uint64_t *pte = lifecycle_pte_get(race->vm_start);
+        assert_true(pte == NULL || *pte == 0);
+        assert_false(race->vm_flags & VMA_IO);
+    }
+}
+
 /* ── Test list ─────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -1782,6 +1847,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_device_map_fixed_borrowed_leaf),
     TEST_ENTRY(test_device_map_fixed_prepare_failure),
     TEST_ENTRY(test_device_map_auto_select),
+    TEST_ENTRY(test_munmap_huge_block_split_rejected),
+    TEST_ENTRY(test_device_map_auto_select_conflict),
 TEST_LIST_END
 
 int main(void)

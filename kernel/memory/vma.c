@@ -562,8 +562,17 @@ static int prepare_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
     for (uint64_t block = start & PAGE_2M_MASK; block < end;
          block += PAGE_2M_SIZE) {
         uint64_t block_end = block + PAGE_2M_SIZE;
-        if ((start > block || end < block_end) &&
-            x86_vmm_has_2m(root, block))
+        if (!x86_vmm_has_2m(root, block))
+            continue;
+        if (start > block || end < block_end)
+            return -EINVAL;     // partial coverage of a borrowed block
+        // A fully covered block can only be withdrawn by ONE VMA
+        // fragment enclosing it.  If a VMA boundary falls inside the
+        // block, unmap_vma_leaves would leave the huge translation
+        // live while the VMA metadata retires -> reject up front.
+        vma_t *owner = vma_find(mm, block);
+        if (!owner || owner->vm_start > block ||
+            owner->vm_end < block_end)
             return -EINVAL;
     }
 
@@ -715,6 +724,7 @@ typedef struct {
     uint64_t  end;
     vma_t    *vma;        // preallocated VMA_IO template
     list_t    retired;    // old nodes retired by the commit
+    bool      fixed;      // MAP_FIXED replaces; non-fixed must be free
 } mmap_dev_ctx_t;
 
 static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
@@ -730,6 +740,20 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
     uint64_t *root = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
 
     spin_lock(&mm->lock);
+
+    // A non-fixed mapping selected its gap before the device callback
+    // ran.  Re-check under mm->lock so a lost gap cannot silently
+    // produce overlapping VMAs (defensive: single-owner mm today).
+    if (!ctx->fixed) {
+        for (list_t *p = mm->vma_list.next; p != &mm->vma_list;
+             p = p->next) {
+            vma_t *v = container_of(p, vma_t, list);
+            if (v->vm_end <= start) continue;
+            if (v->vm_start >= end) break;
+            spin_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+    }
 
     // Every existing leaf in the target range must have a VMA owner:
     // its old-page ownership decides whether the commit reclaims or
@@ -957,6 +981,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             .start = addr,
             .end   = addr + length,
             .vma   = dv,
+            .fixed = (flags & MAP_FIXED) != 0,
         };
         list_init(&ctx.retired);
 

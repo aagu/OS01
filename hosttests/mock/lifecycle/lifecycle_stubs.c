@@ -113,6 +113,9 @@ static int event_count;
 /* Forced -ENOMEM/-EINVAL from the table preparer (0 = succeed). */
 static int prepare_fail_rc;
 
+/* Modeled 2 MiB user block (0 = none). */
+static uint64_t has_2m_block;
+
 void lifecycle_pte_reset(void)
 {
     memset(pte_slots, 0, sizeof(pte_slots));
@@ -184,8 +187,13 @@ void x86_vmm_release_owned_4k(uint64_t old_pte)
 
 bool x86_vmm_has_2m(uint64_t *root, uint64_t va)
 {
-    (void)root; (void)va;
-    return false;
+    (void)root;
+    return has_2m_block != 0 && (va & PAGE_2M_MASK) == has_2m_block;
+}
+
+void lifecycle_set_has_2m(uint64_t block)
+{
+    has_2m_block = block & PAGE_2M_MASK;
 }
 
 uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va)
@@ -321,6 +329,7 @@ void lifecycle_stubs_reset(void)
     lifecycle_files_reset();
     event_count = 0;
     prepare_fail_rc = 0;
+    has_2m_block = 0;
 }
 
 lifecycle_page_record_t *lifecycle_find_page(uint64_t phys)

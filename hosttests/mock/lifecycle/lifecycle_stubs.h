@@ -116,6 +116,11 @@ int lifecycle_flush_free_count(void);
  * failure path. */
 void lifecycle_set_prepare_fail(int rc);
 
+/* Model one user 2 MiB block leaf at `block` (2 MiB aligned), or
+ * disable with block = 0.  Used by the fully-covered huge-block
+ * withdrawal checks. */
+void lifecycle_set_has_2m(uint64_t block);
+
 /* ── Fake descriptor table (MAP_FIXED fd path) ───────────────
  * do_mmap pins the descriptor with files_get_file(), then takes the
  * node reference.  The harness provides a one-table stub so the
