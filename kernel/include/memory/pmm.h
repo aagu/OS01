@@ -98,6 +98,19 @@ void     page_cow_get(uint64_t phys);
 bool     page_cow_put(uint64_t phys);   // returns true when count reaches 0
 uint16_t page_cow_refs(uint64_t phys);
 
+// Checked COW reference contract used by the AArch64 M4 sharing paths.
+// Both reject a zero/misaligned/out-of-pool address, the reserved pool
+// metadata slot and an unallocated slot with -EINVAL; the count is
+// maintained under subpage_lock.  acquire(first_share=true) requires a
+// private page (count 0) and establishes the two references in one
+// step; acquire(false) adds one reference to an already-shared page.
+// A count at UINT16_MAX is -EOVERFLOW and is left unchanged.  release
+// decrements and reports through *last whether the count reached zero;
+// a zero count is -EINVAL.  The caller's policy decides whether a
+// last-reference page is freed or returned to exclusive ownership.
+int      pmm_cow_acquire(uint64_t phys, bool first_share);
+int      pmm_cow_release(uint64_t phys, bool *last);
+
 bool pmm_4k_page_allocated(uint64_t phys);
 #if AARCH64_EL0_TEST
 uint64_t pmm_probe_4k_allocated_count(void);

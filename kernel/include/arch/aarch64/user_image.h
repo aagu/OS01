@@ -7,8 +7,9 @@
  * The image owns:
  *   - one mm_t with its own user root (the mm's pgdir field holds the
  *     root PA, per the M4 representation contract),
- *   - every leaf page it mapped, recorded as a VA/PA manifest so a
- *     later teardown can prove which physical page it is releasing.
+ *   - nothing else: every ELF and stack leaf is owned by the mm's
+ *     resident chain (user_vm_map_image_page), and the teardown
+ *     releases each page after verifying its PA.
  *
  * The construction and the teardown both run from an EL1 thread
  * context with local interrupts enabled: the M3 arch_vmm_* write

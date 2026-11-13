@@ -58,20 +58,66 @@ int arch_user_vm_remove(uint64_t *root, uint64_t va, struct user_vm_leaf *out);
 
 /* ── Sparse resident-page record ────────────────────────────────
  *
- * One node per committed anonymous page, in mm->resident_list,
- * sorted by va.  The chain head is zero-initialised (calloc'd mm_t),
- * so the links are NULL-terminated rather than circular: a head with
+ * One node per committed user page, in mm->resident_list, sorted by
+ * va.  The chain head is zero-initialised (calloc'd mm_t), so the
+ * links are NULL-terminated rather than circular: a head with
  * `next == NULL` is empty.  Nodes are always the policy's own
  * kmalloc'd records; ports never share them with another owner.
  *
  * A resident record is the OWNER of its PA: every destroy/unmap path
- * frees the page exactly once, after verifying the PA the adapter
- * handed back. */
+ * removes and verifies its leaf, then releases the PA exactly once.
+ * The record also carries the three facts a hardware leaf cannot
+ * express:
+ *
+ *   - source  — image (ELF/stack) or anonymous (heap/mmap);
+ *   - logical — the permission the user asked for, even while a
+ *               shared leaf is hardware RO/NX;
+ *   - share   — exclusive ownership, or a counted reference held in
+ *               the PMM COW map.
+ *
+ * The ELF and stack leaves enter the same chain through
+ * user_vm_map_image_page(); there is no separate image manifest. */
+
+enum user_vm_page_source {
+    USER_VM_PAGE_ANON = 0,  /* heap / private anonymous mmap */
+    USER_VM_PAGE_ELF,       /* image ELF segment leaf */
+    USER_VM_PAGE_STACK,     /* image user stack leaf */
+};
+
+enum user_vm_page_share {
+    USER_VM_PAGE_PRIVATE = 0, /* owns its PA; PMM COW count is zero */
+    USER_VM_PAGE_SHARED,      /* holds one counted reference */
+};
+
 typedef struct user_vm_page {
     list_t   list;
     uint64_t va;
     uint64_t pa;
+    uint32_t source;   /* enum user_vm_page_source */
+    uint32_t logical;  /* logical VM_* permission */
+    uint32_t share;    /* enum user_vm_page_share */
 } user_vm_page_t;
+
+/* Take ownership of one already-populated image page and map it at va
+ * with the exact VM_* permission `flags` (RO/X, RO/NX or RW/NX).
+ *
+ * The record is allocated first, then the leaf mapped; on failure
+ * nothing is recorded and `pa` is still the caller's to free.  On
+ * success the mm owns both the record and the PA: user_vm_destroy()
+ * removes the leaf, verifies the returned PA and frees it exactly
+ * once.  Callers must have a detached root and an initialised heap
+ * VMA (the same contract as user_vm_init_heap). */
+int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa,
+                           uint32_t flags);
+
+/* Checked replacement of one shared COW leaf with a private copy.
+ * Implemented by the AArch64 leaf adapter on top of the M3 backend:
+ * requires a detached managed user root, a present RO/NX leaf at va
+ * whose PA is exactly old_pa, and a different allocated new_pa; the
+ * new leaf is RW/NX.  The M3 break-before-make branch does the PA
+ * change and the caller keeps ownership of old_pa (nothing is freed). */
+int arch_user_vm_replace_cow(uint64_t *root, uint64_t va, uint64_t old_pa,
+                             uint64_t new_pa);
 
 /* ── Anonymous-VM policy ──────────────────────────────────────
  *
@@ -84,8 +130,9 @@ typedef struct user_vm_page {
  * Address windows (AArch64 first version):
  *   heap  [heap_base, 0x203ff000)       brk-owned, VMA_HEAP
  *   mmap  [0x40000000, AARCH64_USER_LIMIT)
- * ELF and stack pages stay owned by the image manifest; they are
- * never recorded in resident_list. */
+ * ELF and stack leaves are recorded too (through
+ * user_vm_map_image_page) so the mm owns every user page, but the
+ * heap/mmap policy entries keep operating only on their own windows. */
 
 /* Install the zero-length heap VMA and start/end_brk.  heap_base is
  * rounded up to 4 KiB.  Fails with -ENOMEM if the VMA cannot be

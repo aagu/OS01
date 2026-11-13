@@ -586,6 +586,71 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     return AARCH64_PT_OK;
 }
 
+/* ── M4 checked COW replacement ──────────────────────────────────── */
+
+/* Replace a shared RO/NX leaf with a private RW/NX leaf at a NEW PA.
+ * This is the only backend entry that may change a user leaf's PA:
+ * arch_vmm_update_4k keeps its same-PA contract.  The call keeps every
+ * guarantee of the user-root write gate (ownership, runtime check,
+ * busy rejection, IRQ-enabled M3 access) and additionally requires:
+ *
+ *   - a 4 KiB-aligned user VA and two distinct aligned PAs;
+ *   - both the old and the new PA allocated in the 4 KiB pool;
+ *   - the old leaf PRESENT (not a stash), PA == old_pa, and exactly
+ *     RO/NX (no write, no exec, no software COW bit).
+ *
+ * The replacement goes through aarch64_pt_replace_4k, which classifies
+ * the PA change as a break-before-make.  The old PA's ownership does
+ * NOT move: the caller frees it (or not) according to its own COW
+ * reference accounting. */
+int aarch64_user_vm_replace_cow(uint64_t *pgdir, uint64_t virt,
+                                uint64_t old_pa, uint64_t new_pa)
+{
+    bool user = false;
+    int rc = prepare_4k_root(pgdir, true, &user);
+    if (rc) return rc;
+    if (!user)
+        return -EINVAL;          /* kernel_map is not a COW-replaceable root */
+
+    rc = user_check_va(virt);
+    if (!rc) rc = user_check_pa(old_pa);
+    if (!rc) rc = user_check_pa(new_pa);
+    if (rc) return rc;
+
+    if (old_pa == new_pa) return -EINVAL;
+    if (!pmm_4k_page_allocated(old_pa)) return -EINVAL;
+    if (!pmm_4k_page_allocated(new_pa)) return -EINVAL;
+
+    uint64_t pa = 0;
+    uint32_t perm = 0;
+    uint64_t sw = 0;
+    rc = aarch64_pt_query_4k_ext(pgdir, virt, &pa, &perm, &sw);
+    if (rc == AARCH64_PT_EPROT_NONE)
+        return -EINVAL;          /* a PROT_NONE stash is not a COW source */
+    if (rc != AARCH64_PT_OK)
+        return pt_err_to_linux(rc);
+
+    if (pa != old_pa)
+        return -EINVAL;
+    /* Exactly RO/NX: AARCH64_PT_USER_RO has no EXEC bit and no AP[2]
+     * write bit; any software stash bit also disqualifies. */
+    if (perm != AARCH64_PT_USER_RO || sw != 0)
+        return -EINVAL;
+
+    uint64_t prev_pa = 0;
+    uint32_t prev_perm = 0;
+    uint64_t prev_sw = 0;
+    rc = aarch64_pt_replace_4k(pgdir, virt, new_pa, AARCH64_PT_USER_RW, 0,
+                               &prev_pa, &prev_perm, &prev_sw);
+    if (rc != AARCH64_PT_OK)
+        return pt_err_to_linux(rc);
+    /* Serialized by the detached-root holder: the pre-queried leaf is
+     * the one the replacement consumed. */
+    if (prev_pa != old_pa)
+        return -EINVAL;
+    return 0;
+}
+
 /* ── 2 MiB block map / unmap / split ─────────────────────────────── */
 
 /* Full block + split land in Task 18 (aarch64 M3.3 split follow-up)

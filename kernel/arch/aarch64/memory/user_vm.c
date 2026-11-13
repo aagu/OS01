@@ -88,6 +88,15 @@ int arch_user_vm_remove(uint64_t *root, uint64_t va, struct user_vm_leaf *out)
     return normalize_leaf(rc, pa, vm, out);
 }
 
+/* Checked COW replacement: the policy names this adapter entry; the
+ * M3 backend owns the root gate, the old-leaf check and the actual
+ * break-before-make replacement. */
+int arch_user_vm_replace_cow(uint64_t *root, uint64_t va, uint64_t old_pa,
+                             uint64_t new_pa)
+{
+    return aarch64_user_vm_replace_cow(root, va, old_pa, new_pa);
+}
+
 _Noreturn void arch_user_vm_invariant(const char *reason)
 {
     log_err("[user-vm] invariant violated: %s\n",

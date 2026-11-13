@@ -28,6 +28,7 @@
  * Phy_To_Virt image of the pool page's recorded phys address.
  */
 #include "test_framework.h"
+#include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -160,7 +161,10 @@ static struct Zone zone;
 /* Backing store for the subpage-pool metadata alloc_4k_page builds
  * inside the "2MB pool page" (sizeof(struct subpage_pool) ≈ 1.1KB;
  * 8KB is comfortably above it and stays out of the asserted math). */
-static uint64_t pool_backing[1024];
+/* 4 KiB-aligned: the pool's base phys is derived from this buffer, and
+ * the COW contract rejects misaligned physical addresses, so the fake
+ * slots must be genuinely page-aligned like production allocations. */
+static uint64_t pool_backing[1024] __attribute__((aligned(PAGE_4K_SIZE)));
 
 /* Reset the hand-built PMMngr to one zone of `n` entirely free pages
  * (T = n × 2MB, U = 0, F = n × 2MB). */
@@ -296,6 +300,58 @@ TEST_FUNC(pool_4k_alloc_free_does_not_lower_U)
     assert_eq(pooled.reserved_bytes, second.reserved_bytes);
     assert_eq(pooled.free_bytes,     second.free_bytes);
 
+    /* ── M4 COW reference contract on the same real pool ──────────
+     * slot1/slot2 are allocated, so the checked acquire/release path
+     * must accept them and the metadata slot 0 plus the untouched
+     * slot 3 must not.  pages[0].phy_address is this fixture pool's
+     * base phys, so slot0/slot3 are fixed. */
+    uint64_t base = pages[0].phy_address;
+
+    /* Invalid addresses: zero, misaligned, out of every pool. */
+    assert_eq(-EINVAL, pmm_cow_acquire(0, true));
+    assert_eq(-EINVAL, pmm_cow_acquire(slot1 + 1, true));
+    assert_eq(-EINVAL, pmm_cow_acquire(0x1000ULL, true));
+    /* Metadata slot 0 and an unallocated slot are not COW-capable. */
+    assert_eq(-EINVAL, pmm_cow_acquire(base, true));
+    assert_eq(-EINVAL, pmm_cow_acquire(base + 3 * PAGE_4K_SIZE, true));
+
+    /* A private page starts at zero: releasing it is a zero-count
+     * error, and "already shared" cannot be acquired as a first share. */
+    assert_eq((uint16_t)0, page_cow_refs(slot1));
+    assert_eq(-EINVAL, pmm_cow_release(slot1, NULL));
+    assert_eq(-EINVAL, pmm_cow_acquire(slot1, false));
+
+    /* 0 → 2 → 3 → 2 → 1 → 0.  first_share establishes both sides. */
+    bool last = true;
+    assert_eq(0, pmm_cow_acquire(slot1, true));
+    assert_eq((uint16_t)2, page_cow_refs(slot1));
+    assert_eq(-EINVAL, pmm_cow_acquire(slot1, true));   /* mode mismatch */
+    assert_eq(0, pmm_cow_acquire(slot1, false));
+    assert_eq((uint16_t)3, page_cow_refs(slot1));
+    assert_eq(0, pmm_cow_release(slot1, &last));
+    assert_eq((uint16_t)2, page_cow_refs(slot1));
+    assert_false(last);
+    assert_eq(0, pmm_cow_release(slot1, &last));
+    assert_eq((uint16_t)1, page_cow_refs(slot1));
+    assert_false(last);
+    assert_eq(0, pmm_cow_release(slot1, &last));
+    assert_eq((uint16_t)0, page_cow_refs(slot1));
+    assert_true(last);
+
+    /* Overflow is -EOVERFLOW and leaves the count untouched.  Both
+     * loops are bounded so a broken acquire cannot spin the suite. */
+    assert_eq(0, pmm_cow_acquire(slot2, true));
+    assert_eq((uint16_t)2, page_cow_refs(slot2));
+    for (uint32_t i = 2; i < UINT16_MAX; i++)
+        assert_eq(0, pmm_cow_acquire(slot2, false));
+    assert_eq((uint16_t)UINT16_MAX, page_cow_refs(slot2));
+    assert_eq(-EOVERFLOW, pmm_cow_acquire(slot2, false));
+    assert_eq((uint16_t)UINT16_MAX, page_cow_refs(slot2));
+    for (uint32_t i = UINT16_MAX; i > 0; i--)
+        assert_eq(0, pmm_cow_release(slot2, &last));
+    assert_true(last);
+    assert_eq((uint16_t)0, page_cow_refs(slot2));
+
     /* In-pool frees: U must NOT come back down (spec §4.2 — the pool
      * is not returned to the PMM; a dropping MemUsed here would not
      * prove a leak either way). */
@@ -306,6 +362,9 @@ TEST_FUNC(pool_4k_alloc_free_does_not_lower_U)
     assert_eq(second.free_bytes,     after_one.free_bytes);
 
     free_4k_page(slot2);
+    /* A released slot is no longer a valid COW target. */
+    assert_eq(-EINVAL, pmm_cow_acquire(slot1, true));
+    assert_eq(-EINVAL, pmm_cow_release(slot1, NULL));
     struct pmm_stats after_all;
     pmm_get_stats(&after_all);
     assert_eq(pooled.reserved_bytes, after_all.reserved_bytes);

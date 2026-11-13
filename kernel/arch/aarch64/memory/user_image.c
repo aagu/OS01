@@ -4,8 +4,10 @@
  *
  * Builds a private, mm-owned address space out of a memory-resident
  * ET_EXEC file: one mm_t with its own root, one 4 KiB leaf per loaded
- * page plus one RW/NX stack page, and a manifest that lets the
- * teardown prove which physical page it releases.
+ * page plus one RW/NX stack page.  Every leaf, ELF and stack alike,
+ * is handed to the mm's resident chain through
+ * user_vm_map_image_page(); the mm owns the PA and the teardown
+ * releases each page exactly once after verifying the leaf's PA.
  *
  * Construction happens on an unpublished root: the new mm is created
  * first, the leaves are mapped into it, and only a later, explicit
@@ -43,19 +45,10 @@ void aarch64_user_image_test_arm_fail(int pid)
 }
 #endif
 
-/* Loaded leaves plus the single stack page.  The load-page cap is
- * independent of the stack page (M4 design §映像构造与所有权). */
-#define AARCH64_USER_IMAGE_MAX_MAPS (AARCH64_ELF_MAX_PAGES + 1)
-
 struct aarch64_user_image {
     mm_t *mm;
     uint64_t root_pa;
     uint64_t entry;
-    struct {
-        uint64_t va;
-        uint64_t pa;
-    } maps[AARCH64_USER_IMAGE_MAX_MAPS];
-    unsigned map_count;
 };
 
 /* Exact semantic permission masks accepted by the M3 user-root branch:
@@ -114,10 +107,12 @@ int aarch64_user_image_load(const void *bytes, size_t size,
     if (rc)
         goto fail;
 
-    /* The M3 entries take the direct-map root pointer; mm->pgdir holds
-     * the root PA. */
-    uint64_t *root = (uint64_t *)Phy_To_Virt(image->root_pa);
     const unsigned char *src = (const unsigned char *)bytes;
+#if AARCH64_EL0_TEST
+    /* The injected failure lands right after the first ELF leaf is
+     * owned by the mm, so the rollback has a real page to release. */
+    unsigned elf_pages_mapped = 0;
+#endif
 
     for (unsigned i = 0; i < view.phnum; i++) {
         const elf64_phdr_t *ph = &view.phdrs[i];
@@ -143,19 +138,17 @@ int aarch64_user_image_load(const void *bytes, size_t size,
             if (executable)
                 aarch64_elf_clean_code_page(page);
 
-            int map_rc = arch_vmm_map_4k_new(root, pa, ph->p_vaddr + off, perm);
+            int map_rc = user_vm_map_image_page(image->mm, ph->p_vaddr + off,
+                                                pa, perm);
             if (map_rc) {
+                /* The mm rejected ownership: the PA is still ours. */
                 free_4k_page(pa);
                 rc = (map_rc == -ENOMEM) ? -ENOMEM : -ENOEXEC;
                 goto fail;
             }
-            image->maps[image->map_count].va = ph->p_vaddr + off;
-            image->maps[image->map_count].pa = pa;
-            image->map_count++;
 #if AARCH64_EL0_TEST
-            /* The injected failure lands right after the first leaf is
-             * mapped, so the rollback has a real page to release. */
-            if (g_fail_pid >= 0 && image->map_count == 1 &&
+            elf_pages_mapped++;
+            if (g_fail_pid >= 0 && elf_pages_mapped == 1 &&
                 (int)current->pid == g_fail_pid) {
                 g_fail_pid = -1;
                 rc = -ENOMEM;
@@ -173,16 +166,13 @@ int aarch64_user_image_load(const void *bytes, size_t size,
         goto fail;
     }
     __builtin_memset((unsigned char *)Phy_To_Virt(stack_pa), 0, PAGE_4K_SIZE);
-    int map_rc = arch_vmm_map_4k_new(root, stack_pa, AARCH64_USER_STACK_BASE,
-                                     VM_USER_RW | VM_NO_EXEC);
+    int map_rc = user_vm_map_image_page(image->mm, AARCH64_USER_STACK_BASE,
+                                        stack_pa, VM_USER_RW | VM_NO_EXEC);
     if (map_rc) {
         free_4k_page(stack_pa);
         rc = (map_rc == -ENOMEM) ? -ENOMEM : -ENOEXEC;
         goto fail;
     }
-    image->maps[image->map_count].va = AARCH64_USER_STACK_BASE;
-    image->maps[image->map_count].pa = stack_pa;
-    image->map_count++;
 
     aarch64_elf_sync_icache();
     aarch64_elf_view_release(&view);
@@ -218,23 +208,10 @@ void aarch64_user_image_destroy(struct aarch64_user_image *image)
             return;
         }
 
-        /* Anonymous pages and their VMA metadata go first: they are
-         * policy-owned, while the ELF/stack leaves below belong to
-         * this manifest.  The root is already detached. */
+        /* Every user page — anonymous, ELF and stack — is owned by
+         * the mm's resident chain now; one pass removes each leaf,
+         * verifies its PA and frees the page exactly once. */
         user_vm_destroy(mm);
-
-        for (unsigned i = image->map_count; i > 0; i--) {
-            uint64_t pa = 0;
-            uint32_t old_vm = 0;
-            int rc = arch_vmm_unmap_4k(root, image->maps[i - 1].va,
-                                       &pa, &old_vm);
-            if (rc || pa != image->maps[i - 1].pa) {
-                vmm_gate_violation("user image leaf does not match the manifest");
-                return;
-            }
-            free_4k_page(pa);
-        }
-        image->map_count = 0;
 
         if (aarch64_user_mm_destroy(mm) != 0)
             vmm_gate_violation("user image mm destroy refused");

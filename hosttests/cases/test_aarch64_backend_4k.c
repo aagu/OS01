@@ -699,6 +699,7 @@ TEST_FUNC(test_backend_unmap_2m_empty_slot_linux_enoent)
 /* Stub-side helpers (defined in mock/vmm_gate_test_stubs.c). */
 void vmm_test_user_mm_set_owned_root(uint64_t *root);
 void vmm_test_user_mm_set_busy(int busy);
+bool pmm_4k_page_allocated(uint64_t pa);   /* mock/vmm_gate_test_stubs.c */
 void vmm_test_pmm_reset(void);
 void vmm_test_pmm_mark(uint64_t pa);
 void vmm_test_pmm_unmark(uint64_t pa);
@@ -1027,6 +1028,97 @@ TEST_FUNC(test_user_vm_leaf_adapter_states)
     vmm_test_pmm_reset();
 }
 
+/* ── M4 Task 1: checked COW replacement (aarch64_user_vm_replace_cow) ──
+ *
+ * The entry is the only way to change a user leaf's PA: it requires a
+ * managed, detached user root, a present RO/NX leaf of the expected
+ * PA and a different allocated RW/NX target.  A successful PA change
+ * must take the existing M3 break-before-make branch, and the old PA
+ * stays owned by the caller. */
+
+static int g_bbm_count;
+void aarch64_pt_test_note_bbm_replace(void) { g_bbm_count++; }
+
+TEST_FUNC(test_user_vm_replace_cow_contract)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+    g_bbm_count = 0;
+
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    uint64_t old_pa = 0x5000ULL;
+    uint64_t new_pa = 0x7000ULL;
+    vmm_test_pmm_mark(old_pa);
+    vmm_test_pmm_mark(new_pa);
+
+    assert_eq(0, arch_vmm_map_4k_new(root, old_pa, TEST_USER_VA,
+                                     VM_USER_RO | VM_NO_EXEC));
+
+    /* kernel_map never takes the managed-user-root branch. */
+    kernel_map = (ptbl_t)root;
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA,
+                                                   old_pa, new_pa));
+    kernel_map = NULL;
+
+    /* A busy (published/installed) root refuses the write. */
+    vmm_test_user_mm_set_busy(1);
+    assert_eq(-EBUSY, aarch64_user_vm_replace_cow(root, TEST_USER_VA,
+                                                  old_pa, new_pa));
+    vmm_test_user_mm_set_busy(0);
+
+    /* Argument and old-leaf mismatches. */
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA + 1,
+                                                   old_pa, new_pa));
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA,
+                                                   new_pa, old_pa));
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA,
+                                                   old_pa, old_pa));
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA,
+                                                   old_pa, 0xb000ULL));
+
+    /* A writable old leaf is not a COW source. */
+    vmm_test_pmm_mark(0x6000ULL);
+    assert_eq(0, arch_vmm_map_4k_new(root, 0x6000ULL, TEST_USER_VA + 0x1000,
+                                     VM_USER_RW | VM_NO_EXEC));
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA + 0x1000,
+                                                   0x6000ULL, new_pa));
+
+    /* A stashed old leaf is not a COW source either. */
+    assert_eq(0, arch_vmm_map_4k_new(root, old_pa, TEST_USER_VA + 0x2000,
+                                     VM_USER_RO | VM_NO_EXEC));
+    assert_eq(0, arch_vmm_update_4k(root, old_pa, TEST_USER_VA + 0x2000,
+                                    VM_PROTNONE, NULL, NULL));
+    assert_eq(-EINVAL, aarch64_user_vm_replace_cow(root, TEST_USER_VA + 0x2000,
+                                                   old_pa, new_pa));
+
+    /* Success: PA changes, permissions become RW/NX, and the M3 module
+     * took the break-before-make branch.  (The PROTNONE stash above is
+     * itself a row-4 BBM, so measure the delta from here.) */
+    g_bbm_count = 0;
+    assert_eq(0, aarch64_user_vm_replace_cow(root, TEST_USER_VA,
+                                             old_pa, new_pa));
+    assert_eq(1, g_bbm_count);
+
+    uint64_t qpa = 0;
+    uint32_t qvm = 0;
+    assert_eq(0, arch_vmm_query_4k(root, TEST_USER_VA, &qpa, &qvm));
+    assert_eq(new_pa, qpa);
+    assert_true((qvm & VM_PRESENT) != 0);
+    assert_true((qvm & VM_USER)    != 0);
+    assert_true((qvm & VM_WRITE)   != 0);
+    assert_true((qvm & VM_NO_EXEC) != 0);
+
+    /* Replacement never releases the old PA: both frames are still
+     * allocated in the fixture's PMM. */
+    assert_true(pmm_4k_page_allocated(old_pa));
+    assert_true(pmm_4k_page_allocated(new_pa));
+
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_4k_kernel_rw_normal),
     TEST_ENTRY(test_backend_4k_kernel_ro_normal),
@@ -1057,6 +1149,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_user_root_map_new_rejects_none),
     TEST_ENTRY(test_backend_user_root_busy_rejects_writes),
     TEST_ENTRY(test_user_vm_leaf_adapter_states),
+    TEST_ENTRY(test_user_vm_replace_cow_contract),
 TEST_LIST_END
 
 int main(void)

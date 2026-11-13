@@ -24,6 +24,7 @@
  */
 
 #include <arch/mmu.h>           /* AARCH64_USER_MIN / AARCH64_USER_LIMIT */
+#include <arch/aarch64/user_image.h>  /* AARCH64_USER_STACK_BASE */
 #include <errno.h>
 #include <kernel.h>             /* container_of */
 #include <memory/memory.h>      /* Phy_To_Virt */
@@ -317,6 +318,53 @@ int user_vm_init_heap(mm_t *mm, uint64_t heap_base)
     mm->start_brk = base;
     mm->end_brk   = base;
     return vm_area_insert_sorted(mm, hv);
+}
+
+/* The only permission words an image leaf may carry: RO/X, RO/NX,
+ * RW/NX.  W+X is rejected by the ELF segment validator before this
+ * entry is reached. */
+static bool image_perm_legal(uint32_t flags)
+{
+    return flags == VM_USER_RO ||
+           flags == (VM_USER_RO | VM_NO_EXEC) ||
+           flags == (VM_USER_RW | VM_NO_EXEC);
+}
+
+int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa, uint32_t flags)
+{
+    if (!mm)
+        return -EINVAL;
+    if (va < AARCH64_USER_MIN || va >= AARCH64_USER_LIMIT ||
+        (va & ((uint64_t)PAGE_4K_SIZE - 1)) != 0)
+        return -EINVAL;
+    if (!pa || (pa & ((uint64_t)PAGE_4K_SIZE - 1)) != 0)
+        return -EINVAL;
+    if (!image_perm_legal(flags))
+        return -EINVAL;
+    if (resident_lookup(mm, va))
+        return -EEXIST;
+
+    /* Record first: a map failure leaves the PA with the caller. */
+    user_vm_page_t *rec = kmalloc(sizeof(*rec));
+    if (!rec)
+        return -ENOMEM;
+    rec->va      = va;
+    rec->pa      = pa;
+    rec->source  = (va == AARCH64_USER_STACK_BASE)
+                       ? USER_VM_PAGE_STACK : USER_VM_PAGE_ELF;
+    rec->logical = flags;
+    rec->share   = USER_VM_PAGE_PRIVATE;
+    rec->list.prev = NULL;
+    rec->list.next = NULL;
+
+    int rc = arch_vmm_map_4k_new(vm_root(mm), pa, va, flags);
+    if (rc) {
+        kfree(rec);             /* PA still belongs to the caller */
+        return rc;
+    }
+
+    resident_insert(mm, rec);
+    return 0;
 }
 
 bool user_vm_has_metadata(const mm_t *mm)
@@ -717,6 +765,9 @@ int user_vm_fault(mm_t *mm, uint64_t far, bool write)
 
     rec->va = va;
     rec->pa = pa;
+    rec->source  = USER_VM_PAGE_ANON;
+    rec->logical = map_vm;
+    rec->share   = USER_VM_PAGE_PRIVATE;
     rec->list.prev = NULL;
     rec->list.next = NULL;
     resident_insert(mm, rec);
@@ -833,6 +884,9 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
 
         rec->va = va;
         rec->pa = pa;
+        rec->source  = USER_VM_PAGE_ANON;
+        rec->logical = map_vm;
+        rec->share   = USER_VM_PAGE_PRIVATE;
         staged_append(&staged, rec);
     }
 

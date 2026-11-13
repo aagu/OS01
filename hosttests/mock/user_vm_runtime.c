@@ -55,7 +55,8 @@ static int g_page_allocs;
 static int g_map_calls;
 
 #define MAX_LIVE_PAGES 256
-static uint64_t g_live[MAX_LIVE_PAGES];
+static uint64_t g_live[MAX_LIVE_PAGES];       /* page-aligned fake PAs */
+static void    *g_live_raw[MAX_LIVE_PAGES];   /* malloc base behind each */
 static int      g_live_count;
 
 #define MAX_FREES 256
@@ -82,22 +83,33 @@ uint64_t alloc_4k_page(void)
     g_page_allocs++;
     if (budget_fail(&g_page_budget))
         return 0;
-    void *p = calloc(1, PAGE_4K_SIZE);
-    if (!p)
+    /* Fake physical pages must be 4 KiB aligned: the M4 COW contract
+     * validates PA alignment before touching a leaf.  Allocate one
+     * extra page and align inside it; the malloc base is remembered so
+     * free_4k_page() can release it correctly. */
+    if (g_live_count >= MAX_LIVE_PAGES)
         return 0;
-    if (g_live_count < MAX_LIVE_PAGES)
-        g_live[g_live_count++] = (uint64_t)(uintptr_t)p;
-    return (uint64_t)(uintptr_t)p;
+    void *raw = malloc(PAGE_4K_SIZE + PAGE_4K_SIZE);
+    if (!raw)
+        return 0;
+    uintptr_t aligned = ((uintptr_t)raw + PAGE_4K_SIZE - 1) &
+                        ~(uintptr_t)(PAGE_4K_SIZE - 1);
+    memset((void *)aligned, 0, PAGE_4K_SIZE);
+    g_live_raw[g_live_count] = raw;
+    g_live[g_live_count++] = (uint64_t)aligned;
+    return (uint64_t)aligned;
 }
 
 void free_4k_page(uint64_t pa)
 {
     for (int i = 0; i < g_live_count; i++) {
         if (g_live[i] == pa) {
-            g_live[i] = g_live[--g_live_count];
+            void *raw = g_live_raw[i];
+            g_live[i]     = g_live[--g_live_count];
+            g_live_raw[i] = g_live_raw[g_live_count];
             if (g_free_count < MAX_FREES)
                 g_freed[g_free_count++] = pa;
-            free((void *)(uintptr_t)pa);
+            free(raw);
             return;
         }
     }
@@ -122,15 +134,30 @@ uint64_t user_vm_test_free_pa_at(int index)
 #define MAX_LEAVES 256
 
 struct fake_leaf {
-    int      used;
-    uint64_t va;
-    uint64_t pa;
-    uint32_t vm;
+    int       used;
+    uint64_t *root;   /* the pgdir the M3 call was addressed to */
+    uint64_t  va;
+    uint64_t  pa;
+    uint32_t  vm;
 };
 
 static struct fake_leaf g_leaves[MAX_LEAVES];
 static int g_leaf_count;
+static int g_replace_cow_calls;
 
+/* One tree = (root, VA).  Parent and child fake roots therefore hold
+ * independent leaves at the same VA, which is what the fork tests
+ * assert. */
+static struct fake_leaf *leaf_find_root(uint64_t *root, uint64_t va)
+{
+    for (int i = 0; i < MAX_LEAVES; i++)
+        if (g_leaves[i].used && g_leaves[i].root == root &&
+            g_leaves[i].va == va)
+            return &g_leaves[i];
+    return NULL;
+}
+
+/* Root-agnostic lookup for the single-root policy suites. */
 static struct fake_leaf *leaf_find(uint64_t va)
 {
     for (int i = 0; i < MAX_LEAVES; i++)
@@ -150,16 +177,16 @@ static struct fake_leaf *leaf_free_slot(void)
 int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                         uint32_t vm_flags)
 {
-    (void)pgdir;
     g_map_calls++;
     if (budget_fail(&g_map_budget))
         return -ENOMEM;
-    if (leaf_find(virt))
+    if (leaf_find_root(pgdir, virt))
         return -EEXIST;
     struct fake_leaf *l = leaf_free_slot();
     if (!l)
         return -ENOMEM;
     l->used = 1;
+    l->root = pgdir;
     l->va = virt;
     l->pa = phys;
     l->vm = vm_flags;
@@ -171,8 +198,7 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                        uint32_t vm_flags, uint64_t *old_phys_out,
                        uint32_t *old_vm_out)
 {
-    (void)pgdir;
-    struct fake_leaf *l = leaf_find(virt);
+    struct fake_leaf *l = leaf_find_root(pgdir, virt);
     if (!l)
         return -ENOENT;
     if (l->pa != phys)
@@ -186,8 +212,7 @@ int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
 int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *old_vm_out)
 {
-    (void)pgdir;
-    struct fake_leaf *l = leaf_find(virt);
+    struct fake_leaf *l = leaf_find_root(pgdir, virt);
     if (!l)
         return -ENOENT;
     uint32_t vm = l->vm;
@@ -201,8 +226,7 @@ int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *vm_out)
 {
-    (void)pgdir;
-    struct fake_leaf *l = leaf_find(virt);
+    struct fake_leaf *l = leaf_find_root(pgdir, virt);
     if (!l)
         return -ENOENT;
     if (phys_out) *phys_out = l->pa;
@@ -210,7 +234,37 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
     return (l->vm == (uint32_t)VM_PROTNONE) ? AARCH64_PT_EPROT_NONE : 0;
 }
 
+/* Fake M3 COW replacement.  The REAL adapter forwards
+ * arch_user_vm_replace_cow() here, so the policy-facing contract is
+ * exercised end-to-end.  Only a present RO/NX leaf of the expected PA
+ * may be replaced by a different, aligned PA; the new leaf is RW/NX.
+ * The old PA's ownership stays with the caller (nothing is freed). */
+int aarch64_user_vm_replace_cow(uint64_t *root, uint64_t va,
+                                uint64_t old_pa, uint64_t new_pa)
+{
+    g_replace_cow_calls++;
+    if (!root)
+        return -EINVAL;
+    if ((va & ((uint64_t)PAGE_4K_SIZE - 1)) ||
+        (old_pa & ((uint64_t)PAGE_4K_SIZE - 1)) ||
+        (new_pa & ((uint64_t)PAGE_4K_SIZE - 1)) || old_pa == new_pa)
+        return -EINVAL;
+
+    struct fake_leaf *l = leaf_find_root(root, va);
+    if (!l)
+        return -ENOENT;
+    if (l->pa != old_pa)
+        return -EINVAL;
+    if (l->vm != (uint32_t)(VM_USER_RO | VM_NO_EXEC))
+        return -EINVAL;
+
+    l->pa = new_pa;
+    l->vm = VM_USER_RW | VM_NO_EXEC;
+    return 0;
+}
+
 int      user_vm_test_leaf_count(void) { return g_leaf_count; }
+int      user_vm_test_replace_cow_calls(void) { return g_replace_cow_calls; }
 
 int user_vm_test_leaf_state(uint64_t va)
 {
@@ -229,6 +283,26 @@ uint64_t user_vm_test_leaf_pa(uint64_t va)
 uint32_t user_vm_test_leaf_vm(uint64_t va)
 {
     struct fake_leaf *l = leaf_find(va);
+    return l ? l->vm : 0;
+}
+
+int user_vm_test_leaf_state_in(uint64_t *root, uint64_t va)
+{
+    struct fake_leaf *l = leaf_find_root(root, va);
+    if (!l)
+        return 0;
+    return (l->vm == (uint32_t)VM_PROTNONE) ? 2 : 1;
+}
+
+uint64_t user_vm_test_leaf_pa_in(uint64_t *root, uint64_t va)
+{
+    struct fake_leaf *l = leaf_find_root(root, va);
+    return l ? l->pa : 0;
+}
+
+uint32_t user_vm_test_leaf_vm_in(uint64_t *root, uint64_t va)
+{
+    struct fake_leaf *l = leaf_find_root(root, va);
     return l ? l->vm : 0;
 }
 
@@ -361,6 +435,7 @@ void user_vm_test_reset(void)
 {
     memset(g_leaves, 0, sizeof(g_leaves));
     g_leaf_count = 0;
+    g_replace_cow_calls = 0;
     g_node_budget = -1;
     g_page_budget = -1;
     g_map_budget  = -1;
@@ -370,7 +445,7 @@ void user_vm_test_reset(void)
     g_free_count  = 0;
     g_double_frees = 0;
     for (int i = 0; i < g_live_count; i++)
-        free((void *)(uintptr_t)g_live[i]);
+        free(g_live_raw[i]);
     g_live_count = 0;
 
     g_current_mm   = NULL;

@@ -41,4 +41,18 @@
 // page-table layer and must not leak through the backend.
 #define AARCH64_PT_EPROT_NONE  (-1111)
 
+/* M4 checked COW replacement on a managed user root.
+ *
+ * The only backend entry that may change a user leaf's PA.  Requires a
+ * detached, unpublished managed user root (the same write gate as the
+ * other 4 KiB user entries), a present RO/NX leaf at `virt` whose PA
+ * is exactly old_pa, and a different allocated new_pa.  The new leaf
+ * is RW/NX and the replacement goes through the M3
+ * aarch64_pt_replace_4k break-before-make path.  Ownership of old_pa
+ * stays with the caller — this entry never frees a page.  A kernel_map
+ * call, a stash, a permission mismatch or an unallocated/new==old PA
+ * is -EINVAL.  Returns 0 on success. */
+int aarch64_user_vm_replace_cow(uint64_t *pgdir, uint64_t virt,
+                                uint64_t old_pa, uint64_t new_pa);
+
 #endif

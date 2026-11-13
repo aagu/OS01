@@ -142,11 +142,21 @@ int      user_vm_test_free_count(void);
 uint64_t user_vm_test_free_pa_at(int index);
 int      user_vm_test_double_frees(void);
 
-/* Fake M3 leaf store.  state: 0 absent, 1 present, 2 stashed. */
+/* Fake M3 leaf store.  state: 0 absent, 1 present, 2 stashed.
+ *
+ * The store is keyed by (root, VA): the fork policy needs two fake
+ * roots (parent and child) that evolve independently.  The root-aware
+ * accessors address one tree; the older root-agnostic helpers return
+ * the first matching VA across every tree (single-root suites). */
 int      user_vm_test_leaf_state(uint64_t va);
 uint64_t user_vm_test_leaf_pa(uint64_t va);
 uint32_t user_vm_test_leaf_vm(uint64_t va);
 int      user_vm_test_leaf_count(void);
+
+int      user_vm_test_leaf_state_in(uint64_t *root, uint64_t va);
+uint64_t user_vm_test_leaf_pa_in(uint64_t *root, uint64_t va);
+uint32_t user_vm_test_leaf_vm_in(uint64_t *root, uint64_t va);
+int      user_vm_test_replace_cow_calls(void);
 
 /* ── Transaction-layer boundary controls (M4 Task 3) ──────── */
 void user_vm_test_set_current_mm(mm_t *mm);

@@ -22,11 +22,13 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include <arch/aarch64/user_image.h>
 #include <arch/aarch64/user_vm.h>
 #include <intr/dispatch.h>
 #include <memory/user_vm.h>
 #include <memory/vm_area.h>
 #include <memory/vma.h>
+#include <memory/vmm.h>
 #include <uapi/syscall.h>
 
 #ifndef OS01_KERNEL_SRC
@@ -725,6 +727,160 @@ TEST_FUNC(test_fault_entry_fills_and_refuses)
     destroy_mm(mm);
 }
 
+/* ── Image-page ownership (M4 Task 1) ───────────────────────────
+ *
+ * The ELF/stack loader hands each leaf to the mm through the resident
+ * chain; the record carries its source, logical permission and the
+ * exclusive/share state, and destroy releases it exactly once. */
+
+static user_vm_page_t *resident_at(mm_t *mm, uint64_t va)
+{
+    for (list_t *p = mm->resident_list.next; p; p = p->next) {
+        user_vm_page_t *r = (user_vm_page_t *)p;   /* list is first */
+        if (r->va == va)
+            return r;
+    }
+    return NULL;
+}
+
+TEST_FUNC(test_map_image_page_records_source_and_ownership)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    uint64_t elf_pa = alloc_4k_page();
+    uint64_t stk_pa = alloc_4k_page();
+    assert_true(elf_pa != 0 && stk_pa != 0);
+
+    assert_eq(0, user_vm_map_image_page(mm, 0x400000, elf_pa,
+                                        VM_USER_RO | VM_NO_EXEC));
+    assert_eq(0, user_vm_map_image_page(mm, AARCH64_USER_STACK_BASE, stk_pa,
+                                        VM_USER_RW | VM_NO_EXEC));
+
+    assert_eq(2, user_vm_test_leaf_count());
+    assert_eq(elf_pa, user_vm_test_leaf_pa(0x400000));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(0x400000));
+    assert_eq(stk_pa, user_vm_test_leaf_pa(AARCH64_USER_STACK_BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(AARCH64_USER_STACK_BASE));
+
+    user_vm_page_t *elf = resident_at(mm, 0x400000);
+    assert_not_null(elf);
+    assert_eq((uint32_t)USER_VM_PAGE_ELF, elf->source);
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC), elf->logical);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, elf->share);
+
+    user_vm_page_t *stk = resident_at(mm, AARCH64_USER_STACK_BASE);
+    assert_not_null(stk);
+    assert_eq((uint32_t)USER_VM_PAGE_STACK, stk->source);
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC), stk->logical);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, stk->share);
+
+    /* mm destroy releases every record once, in VA order. */
+    user_vm_destroy(mm);
+    assert_eq(0, user_vm_test_leaf_count());
+    assert_eq(2, user_vm_test_free_count());
+    assert_eq(elf_pa, user_vm_test_free_pa_at(0));
+    assert_eq(stk_pa, user_vm_test_free_pa_at(1));
+    assert_false(user_vm_has_metadata(mm));
+    free(mm);
+}
+
+TEST_FUNC(test_map_image_page_failure_keeps_pa_with_caller)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    uint64_t pa = alloc_4k_page();
+    assert_true(pa != 0);
+
+    /* Record allocation failure: nothing mapped, PA untouched. */
+    user_vm_test_fail_node_after(0);
+    assert_eq(-ENOMEM, user_vm_map_image_page(mm, 0x400000, pa,
+                                              VM_USER_RW | VM_NO_EXEC));
+    assert_eq(0, user_vm_test_leaf_count());
+    assert_eq(0, user_vm_test_free_count());
+
+    /* Leaf-map failure: the record is released, PA still the caller's. */
+    user_vm_test_fail_map_after(0);
+    assert_eq(-ENOMEM, user_vm_map_image_page(mm, 0x400000, pa,
+                                              VM_USER_RW | VM_NO_EXEC));
+    assert_eq(0, user_vm_test_leaf_count());
+    assert_eq(0, user_vm_test_free_count());
+
+    /* Arguments are checked before anything is allocated or mapped. */
+    assert_eq(-EINVAL, user_vm_map_image_page(mm, 0x400000, pa, 0));
+    assert_eq(-EINVAL, user_vm_map_image_page(mm, 0x400001, pa,
+                                              VM_USER_RW | VM_NO_EXEC));
+    assert_eq(-EINVAL, user_vm_map_image_page(mm, 0x400000, 0,
+                                              VM_USER_RW | VM_NO_EXEC));
+    assert_eq(-EINVAL, user_vm_map_image_page(mm, 0x400000, pa + 1,
+                                              VM_USER_RW | VM_NO_EXEC));
+
+    assert_eq(0, user_vm_map_image_page(mm, 0x400000, pa,
+                                        VM_USER_RW | VM_NO_EXEC));
+    assert_eq(1, user_vm_test_leaf_count());
+
+    destroy_mm(mm);
+    assert_eq(1, user_vm_test_free_count());
+    assert_eq(pa, user_vm_test_free_pa_at(0));
+}
+
+/* ── Checked COW replacement forwarding (M4 Task 1) ─────────────
+ *
+ * The policy calls arch_user_vm_replace_cow(); the real adapter
+ * forwards to the M3 backend.  The fake backend is keyed by (root,
+ * VA), so the parent and child trees are independent — exactly what
+ * fork needs. */
+
+TEST_FUNC(test_replace_cow_forwarding_parent_child_roots)
+{
+    user_vm_test_reset();
+
+    uint64_t *parent = (uint64_t *)(uintptr_t)0x8000;
+    uint64_t *child  = (uint64_t *)(uintptr_t)0x9000;
+    uint64_t old_pa = alloc_4k_page();
+    uint64_t new_pa = alloc_4k_page();
+    assert_true(old_pa != 0 && new_pa != 0);
+
+    /* The parent leaf is the post-fork RO/NX shared copy. */
+    assert_eq(0, arch_vmm_map_4k_new(parent, old_pa, BASE,
+                                     VM_USER_RO | VM_NO_EXEC));
+
+    /* The child tree has no leaf at the same VA. */
+    assert_eq(-ENOENT, arch_user_vm_replace_cow(child, BASE, old_pa, new_pa));
+    /* Wrong old PA, same PA and a misaligned VA are rejected. */
+    assert_eq(-EINVAL, arch_user_vm_replace_cow(parent, BASE, new_pa, old_pa));
+    assert_eq(-EINVAL, arch_user_vm_replace_cow(parent, BASE, old_pa, old_pa));
+    assert_eq(-EINVAL, arch_user_vm_replace_cow(parent, BASE + 1,
+                                                old_pa, new_pa));
+    /* A writable leaf and a stash are not valid COW sources. */
+    assert_eq(0, arch_vmm_map_4k_new(parent, old_pa, BASE + 0x1000,
+                                     VM_USER_RW | VM_NO_EXEC));
+    assert_eq(-EINVAL, arch_user_vm_replace_cow(parent, BASE + 0x1000,
+                                                old_pa, new_pa));
+    assert_eq(0, arch_vmm_map_4k_new(parent, old_pa, BASE + 0x2000,
+                                     VM_USER_RO | VM_NO_EXEC));
+    assert_eq(0, arch_vmm_update_4k(parent, old_pa, BASE + 0x2000,
+                                    VM_PROTNONE, NULL, NULL));
+    assert_eq(-EINVAL, arch_user_vm_replace_cow(parent, BASE + 0x2000,
+                                                old_pa, new_pa));
+
+    /* Success: only the parent tree changes, to the new PA and RW/NX. */
+    assert_eq(0, arch_user_vm_replace_cow(parent, BASE, old_pa, new_pa));
+    assert_eq(new_pa, user_vm_test_leaf_pa_in(parent, BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(parent, BASE));
+    assert_eq(0, user_vm_test_leaf_state_in(child, BASE));
+
+    /* The old PA is still owned by the caller — replacement never
+     * frees it. */
+    assert_eq(1, user_vm_test_leaf_state_in(parent, BASE));
+    free_4k_page(old_pa);
+    free_4k_page(new_pa);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -745,6 +901,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_transaction_irq_depth_and_nesting_refused),
     TEST_ENTRY(test_transaction_policy_error_still_restores),
     TEST_ENTRY(test_fault_entry_fills_and_refuses),
+    TEST_ENTRY(test_map_image_page_records_source_and_ownership),
+    TEST_ENTRY(test_map_image_page_failure_keeps_pa_with_caller),
+    TEST_ENTRY(test_replace_cow_forwarding_parent_child_roots),
 TEST_LIST_END
 
 int main(void)

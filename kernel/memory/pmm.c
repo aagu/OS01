@@ -526,6 +526,102 @@ uint16_t page_cow_refs(uint64_t phys)
     return refs;
 }
 
+/* Resolve phys to an allocated, non-metadata subpage slot.  Called with
+ * subpage_lock held; returns -EINVAL for a zero/misaligned address, an
+ * address outside every managed pool, the reserved slot 0 or a slot
+ * whose allocation bit is clear.  Pool membership is the physical-range
+ * bound — the host fixture maps host memory into the pool the same way
+ * the real allocator records Phy_To_Virt-able pages. */
+static int cow_slot_locked(uint64_t phys, struct subpage_pool **pool_out,
+                           uint32_t *slot_out)
+{
+    if (!phys || (phys & (PAGE_4K_SIZE - 1)))
+        return -EINVAL;
+
+    struct subpage_pool *pool = find_pool_locked(phys);
+    if (!pool)
+        return -EINVAL;
+
+    uint32_t slot = (uint32_t)((phys - pool->base_phys) >> PAGE_4K_SHIFT);
+    /* Slot 0 stores the pool metadata and is never a user page. */
+    if (slot == 0 || slot >= SUBPAGE_4K_COUNT)
+        return -EINVAL;
+    if ((pool->bitmap[slot / 64] & (UINT64_C(1) << (slot % 64))) == 0)
+        return -EINVAL;
+
+    *pool_out = pool;
+    *slot_out = slot;
+    return 0;
+}
+
+int pmm_cow_acquire(uint64_t phys, bool first_share)
+{
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+
+    struct subpage_pool *pool;
+    uint32_t slot;
+    int rc = cow_slot_locked(phys, &pool, &slot);
+    if (rc) {
+        spin_unlock_irqrestore(&subpage_lock, flags);
+        return rc;
+    }
+
+    uint16_t count = pool->cow_count[slot];
+    if (first_share) {
+        /* A first share must start from exclusive ownership. */
+        if (count != 0) {
+            spin_unlock_irqrestore(&subpage_lock, flags);
+            return -EINVAL;
+        }
+        pool->cow_count[slot] = 2;
+    } else {
+        /* An already-shared page (even down to one reference) gains
+         * exactly one reference; a private page must use first_share. */
+        if (count == 0) {
+            spin_unlock_irqrestore(&subpage_lock, flags);
+            return -EINVAL;
+        }
+        if (count == UINT16_MAX) {
+            spin_unlock_irqrestore(&subpage_lock, flags);
+            return -EOVERFLOW;
+        }
+        pool->cow_count[slot] = (uint16_t)(count + 1);
+    }
+
+    spin_unlock_irqrestore(&subpage_lock, flags);
+    return 0;
+}
+
+int pmm_cow_release(uint64_t phys, bool *last)
+{
+    if (last)
+        *last = false;
+
+    uint64_t flags = spin_lock_irqsave(&subpage_lock);
+
+    struct subpage_pool *pool;
+    uint32_t slot;
+    int rc = cow_slot_locked(phys, &pool, &slot);
+    if (rc) {
+        spin_unlock_irqrestore(&subpage_lock, flags);
+        return rc;
+    }
+
+    uint16_t count = pool->cow_count[slot];
+    if (count == 0) {
+        spin_unlock_irqrestore(&subpage_lock, flags);
+        return -EINVAL;
+    }
+
+    count--;
+    pool->cow_count[slot] = count;
+    if (last)
+        *last = (count == 0);
+
+    spin_unlock_irqrestore(&subpage_lock, flags);
+    return 0;
+}
+
 bool pmm_4k_page_allocated(uint64_t phys)
 {
     if (!phys || (phys & (PAGE_4K_SIZE-1))) return false;
