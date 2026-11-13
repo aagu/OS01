@@ -474,6 +474,95 @@ static void test_fork_rejections_and_vma_copy_order(void)
     (void)end;
 }
 
+/* ── Source scan: retirement and fatal-signal ordering contracts
+ * (unmap/TLB ownership plan Task 3) ────────────────────────────── */
+static const char *task_c_path(void);
+static char *slurp_kernel_source(const char *relpath)
+{
+    /* Reuse task_c_path()'s repo-root discovery by deriving the
+     * repo prefix from a fork.c probe, then swapping the tail. */
+    const char *fork_path = task_c_path();
+    if (!fork_path) return NULL;
+    const char *tail = strstr(fork_path, "kernel/sched/fork.c");
+    if (!tail) return NULL;
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "%.*s%s",
+                     (int)(tail - fork_path), fork_path, relpath);
+    if (n <= 0 || (size_t)n >= sizeof(buf)) return NULL;
+    int fd = open(buf, 0 /* O_RDONLY */, 0);
+    if (fd < 0) return NULL;
+    size_t cap = 16384, len = 0;
+    char *out = (char *)malloc(cap);
+    if (!out) { close(fd); return NULL; }
+    for (;;) {
+        if (len + 4096 > cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(out, cap);
+            if (!nb) { free(out); close(fd); return NULL; }
+            out = nb;
+        }
+        ssize_t r = read(fd, out + len, 4096);
+        if (r < 0) { free(out); close(fd); return NULL; }
+        if (r == 0) break;
+        len += (size_t)r;
+    }
+    close(fd);
+    out[len] = '\0';
+    return out;
+}
+
+static void test_retirement_and_signal_source_contract(void)
+{
+    TEST_SUITE("source — retirement precedes release; CPL0 pending; ring3 IF");
+
+    /* exit.c: the old root is destroyed only after the IRQ-off
+     * retirement window (detach published + CR3 switched). */
+    {
+        size_t len;
+        char *src = slurp_kernel_source("kernel/sched/exit.c");
+        assert_not_null(src);
+        const char *retire = strstr(src,
+            "Retire the old user root before any teardown");
+        assert_not_null(retire);
+        const char *release = find_from(retire, src + len,
+                                        "vmm_free_user_map");
+        assert_not_null(release);
+        /* The CR3 switch (retirement) is textually before the first
+         * release point. */
+        const char *switch_mm = find_from(retire, src + len,
+                                          "arch_switch_mm(init_mm.pgdir)");
+        assert_not_null(switch_mm);
+        assert_true(switch_mm < release);
+        /* The parent-comparison sharing guess is gone. */
+        assert_null(strstr(src, "mm_is_shared"));
+        free(src);
+    }
+
+    /* trap.c: CPL0 keeps pending signals; the NULL-frame path never
+     * exits on a fatal signal; ring3 fatal restores the saved user
+     * IF before entering do_exit. */
+    {
+        size_t len;
+        char *src = slurp_kernel_source("kernel/arch/x86_64/intr/trap.c");
+        assert_not_null(src);
+        const char *nullpath = strstr(src, "NULL regs path");
+        assert_not_null(nullpath);
+        const char *nullpath_end = find_from(nullpath, src + len,
+                                             "for (int sig = 1; sig < NSIG; sig++)");
+        assert_not_null(nullpath_end);
+        /* No do_exit between the NULL-path comment and its loop: the
+         * fatal case stays pending there. */
+        assert_null(find_from(nullpath, nullpath_end, "do_exit"));
+        /* ring3 fatal restores the user IF flag first. */
+        const char *sti = strstr(src, "regs->rflags & 0x200ULL");
+        assert_not_null(sti);
+        const char *fatal_exit = find_from(sti, src + len, "do_exit((uint64_t)sig)");
+        assert_not_null(fatal_exit);
+        assert_true(sti < fatal_exit);
+        free(src);
+    }
+}
+
 static void test_vma_free_all_vmio_skips_unmap(void)
 {
     TEST_SUITE("vma_free_all — VMA_IO borrowed leaves revoked, never released");
@@ -1245,6 +1334,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_fork_mm_copy_huge_leaf_codec_callsites),
     TEST_ENTRY(test_fork_vma_clone_oom_keeps_parent),
     TEST_ENTRY(test_fork_rejections_and_vma_copy_order),
+    TEST_ENTRY(test_retirement_and_signal_source_contract),
     TEST_ENTRY(test_fork_mm_copy_no_pmd_share_fallback),
     TEST_ENTRY(test_fork_mm_copy_elf_leaf_private_copy),
     TEST_ENTRY(test_fork_mm_copy_writable_leaf_uses_cow),

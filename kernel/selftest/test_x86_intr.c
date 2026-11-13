@@ -8,6 +8,9 @@
 #include <percpu/percpu.h>
 #include <intr/ipi.h>
 #include <memory/vmm.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
+#include <arch/x86_64/pte.h>
 #include <sched/task.h>
 #include <time/timer.h>
 #include <core/printk.h>
@@ -444,10 +447,204 @@ static int idt_snapshot(void)
     serial_printk("[selftest] x86_intr: runtime IDT %u/%u PASS\n", count, count);
     return 0;
 }
+/* ── SMP root transfer (unmap/TLB ownership plan Task 3) ────────
+ * A cloned test root owns a low-half leaf at 0x50000000 so the real
+ * x86_vmm_take_4k entry runs.  The AP installs the root, reads A,
+ * and leaves; the BSP (holding the root) withdraws A with the real
+ * take, reloads CR3, releases A, maps B into the same leaf and
+ * restores; the AP reinstalls the root and can only observe B.
+ * Static storage everywhere: a failure quarantines the pages until
+ * reboot (a delayed AP could still hold the CR3). */
+static uint64_t xfer_root[512] __attribute__((aligned(4096)));
+static uint64_t xfer_pdpt[512] __attribute__((aligned(4096)));
+static uint64_t xfer_pd[512]   __attribute__((aligned(4096)));
+static uint64_t xfer_pt[512]   __attribute__((aligned(4096)));
+#define XFER_VA 0x50000000ULL
+#define XFER_A_SENTINEL 0xA5A5A5A5A5A5A5A5ULL
+#define XFER_B_SENTINEL 0x5A5A5A5A5A5A5A5AULL
+/* Atomic phase markers: at most one CPU ever holds the root. */
+#define XFER_PHASE_IDLE     0
+#define XFER_PHASE_AP_OUT   1   /* AP installed, read A, left the root */
+#define XFER_PHASE_BSP_DONE 2   /* BSP withdrew A, released, mapped B */
+#define XFER_PHASE_AP_VERIFIED 3
+static int xfer_phase;
+static int xfer_ap_first_read;   /* sentinel the AP saw with A mapped */
+static int xfer_ap_second_read;  /* sentinel the AP saw after remap */
+static int xfer_release_worker, xfer_restored, xfer_worker_result;
+static uint64_t xfer_pa_a, xfer_pa_b;
+static int xfer_released_a, xfer_nonglobal_ok;
+
+static uint64_t xfer_worker(uint64_t arg)
+{
+    (void)arg;
+    uint64_t flags = arch_local_irq_save();
+    uint64_t *old_root = arch_get_page_table();
+    uint32_t guard = current->in_schedule;
+    current->in_schedule = 1;
+    arch_switch_mm((uint64_t *)((uint64_t)xfer_root - ARCH_PAGE_OFFSET));
+    uint64_t v = *(volatile uint64_t *)XFER_VA;
+    xfer_ap_first_read = (int)v;
+    /* Leave the root: the BSP may now hold it exclusively. */
+    arch_switch_mm(old_root);
+    current->in_schedule = guard;
+    __atomic_store_n(&xfer_phase, XFER_PHASE_AP_OUT, __ATOMIC_RELEASE);
+
+    /* Wait for the BSP to finish the withdraw + release + remap. */
+    arch_local_irq_enable();
+    uint64_t start = arch_cycle_counter();
+    while (x86_intr_wait_state(
+               __atomic_load_n(&xfer_phase, __ATOMIC_ACQUIRE) >=
+                   XFER_PHASE_BSP_DONE,
+               arch_cycle_counter(), start, BUDGET) == 0)
+        arch_cpu_pause();
+    arch_local_irq_disable();
+
+    if (__atomic_load_n(&xfer_phase, __ATOMIC_ACQUIRE) >=
+        XFER_PHASE_BSP_DONE) {
+        /* Reinstall the root: only B can be visible now — the A
+         * translation died with the withdraw + local reload on the
+         * holding CPU, and this CPU never kept a stale entry (it
+         * left the root before the withdraw). */
+        uint32_t guard2 = current->in_schedule;
+        current->in_schedule = 1;
+        arch_switch_mm((uint64_t *)((uint64_t)xfer_root - ARCH_PAGE_OFFSET));
+        uint64_t v2 = *(volatile uint64_t *)XFER_VA;
+        xfer_ap_second_read = (int)v2;
+        arch_switch_mm(old_root);
+        current->in_schedule = guard2;
+        xfer_worker_result =
+            (xfer_ap_second_read == (int)XFER_B_SENTINEL) ? 0 : -1;
+    } else {
+        xfer_worker_result = -1;
+    }
+    __atomic_store_n(&xfer_phase, XFER_PHASE_AP_VERIFIED, __ATOMIC_RELEASE);
+    __atomic_store_n(&xfer_restored, 1, __ATOMIC_RELEASE);
+    arch_local_irq_restore(flags);
+    return 0;
+}
+
+static int root_transfer(void)
+{
+    int rc = -1;
+    uint64_t flags = arch_local_irq_save();
+    unsigned self = cpu_id();
+    unsigned target = NR_CPUS;
+    for (unsigned i = 0; i < num_cpus; ++i)
+        if (i != self &&
+            __atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&percpu_data[i].ipi_ready, __ATOMIC_ACQUIRE)) {
+            target = i;
+            break;
+        }
+    if (target == NR_CPUS) {
+        serial_printk("[selftest] x86_intr: transfer: no target cpu\n");
+        goto out;
+    }
+    if (__atomic_load_n(&xfer_phase, __ATOMIC_ACQUIRE) !=
+        XFER_PHASE_IDLE) {
+        serial_printk("[selftest] x86_intr: transfer: already run\n");
+        goto out;
+    }
+
+    /* Clone the current root, add the low-half leaf.  Static storage:
+     * quarantined until reboot on any failure. */
+    uint64_t *root = (uint64_t *)((uint64_t)arch_get_page_table() + ARCH_PAGE_OFFSET);
+    memcpy(xfer_root, root, sizeof(xfer_root));
+    xfer_root[(XFER_VA >> 39) & 511] = ((uint64_t)xfer_pdpt - ARCH_PAGE_OFFSET) | 3;
+    xfer_pdpt[(XFER_VA >> 30) & 511] = ((uint64_t)xfer_pd - ARCH_PAGE_OFFSET) | 3;
+    xfer_pd[(XFER_VA >> 21) & 511]   = ((uint64_t)xfer_pt - ARCH_PAGE_OFFSET) | 3;
+    xfer_pt[(XFER_VA >> 12) & 511]   = 0;   /* no leaf yet */
+
+    /* Two distinct PMM pages with distinct sentinels. */
+    xfer_pa_a = alloc_4k_page();
+    xfer_pa_b = alloc_4k_page();
+    if (!xfer_pa_a || !xfer_pa_b || xfer_pa_a == xfer_pa_b) {
+        serial_printk("[selftest] x86_intr: transfer: page alloc failed\n");
+        goto out;
+    }
+    *(volatile uint64_t *)Phy_To_Virt(xfer_pa_a) = XFER_A_SENTINEL;
+    *(volatile uint64_t *)Phy_To_Virt(xfer_pa_b) = XFER_B_SENTINEL;
+    xfer_pt[(XFER_VA >> 12) & 511] = xfer_pa_a | 3;
+    /* User leaves must be non-global: a global bit here would make
+     * the AP's stale translation survive a foreign CR3 reload. */
+    xfer_nonglobal_ok = (xfer_pt[(XFER_VA >> 12) & 511] & PAGE_GLOBAL) == 0;
+
+    if (kernel_thread_on_cpu(xfer_worker, 0, target) < 0) {
+        serial_printk("[selftest] x86_intr: transfer: worker spawn failed\n");
+        goto out;
+    }
+    arch_local_irq_enable();
+    if (!wait_event_irqs_enabled(&xfer_phase) ||
+        __atomic_load_n(&xfer_phase, __ATOMIC_ACQUIRE) != XFER_PHASE_AP_OUT) {
+        serial_printk("[selftest] x86_intr: transfer: AP phase timeout\n");
+        goto cleanup;
+    }
+
+    /* BSP holds the root: withdraw A through the real take entry,
+     * reload CR3 locally, and only then release A. */
+    {
+        uint32_t guard = current->in_schedule;
+        current->in_schedule = 1;
+        uint64_t *bsp_old = arch_get_page_table();
+        arch_switch_mm((uint64_t *)((uint64_t)xfer_root - ARCH_PAGE_OFFSET));
+        uint64_t old = x86_vmm_take_4k(xfer_root, XFER_VA);
+        arch_switch_mm(bsp_old);
+        current->in_schedule = guard;
+        if (old && x86_pte_4k_pa(old) == xfer_pa_a) {
+            x86_vmm_release_owned_4k(old);   /* A is dead: PA freed */
+            xfer_released_a = 1;
+        }
+        /* Remap the same VA to B. */
+        xfer_pt[(XFER_VA >> 12) & 511] = xfer_pa_b | 3;
+        __atomic_store_n(&xfer_phase, XFER_PHASE_BSP_DONE, __ATOMIC_RELEASE);
+    }
+
+    if (!wait_event_irqs_enabled(&xfer_restored) ||
+        __atomic_load_n(&xfer_phase, __ATOMIC_ACQUIRE) !=
+            XFER_PHASE_AP_VERIFIED) {
+        serial_printk("[selftest] x86_intr: transfer: AP verify timeout\n");
+        goto cleanup;
+    }
+    if (!xfer_nonglobal_ok) {
+        serial_printk("[selftest] x86_intr: transfer: user leaf is GLOBAL\n");
+        goto cleanup;
+    }
+    if (xfer_worker_result != 0) {
+        serial_printk("[selftest] x86_intr: transfer: AP saw %d after remap "
+                      "(want B) FAIL\n", xfer_ap_second_read);
+        goto cleanup;
+    }
+    /* Success: B's page is no longer referenced by anyone — free it.
+     * A's PA was already released through the protocol under test. */
+    free_4k_page(xfer_pa_b);
+    serial_printk("[selftest] x86_intr: transfer: AP first=%x second=%x "
+                  "released_a=%d PASS\n", xfer_ap_first_read,
+                  xfer_ap_second_read, xfer_released_a);
+    rc = 0;
+    goto out;
+
+cleanup:
+    /* Failure: wait for the AP to confirm it left the root before
+     * this CPU proceeds.  The test pages are NOT freed — they stay
+     * quarantined until reboot (the delayed AP may still hold the
+     * CR3). */
+    __atomic_store_n(&xfer_release_worker, 1, __ATOMIC_RELEASE);
+    if (!wait_event_irqs_enabled(&xfer_restored)) {
+        serial_printk("[selftest] x86_intr: transfer: AP restore timeout; "
+                      "pages quarantined\n");
+    }
+    rc = -1;
+out:
+    arch_local_irq_restore(flags);
+    return rc;
+}
+
 int test_x86_intr(void)
 {
-    if (idt_snapshot() || spurious() || live_remote()) return -1;
-    serial_printk("[selftest] x86_intr: live BSP/AP timer, remote TLB and resched PASS\n");
+    if (idt_snapshot() || spurious() || live_remote() || root_transfer())
+        return -1;
+    serial_printk("[selftest] x86_intr: live BSP/AP timer, remote TLB, resched "
+                  "and SMP root transfer PASS\n");
     return 0;
 }
 #endif

@@ -392,6 +392,7 @@ static const test_case_t tests[] = {
     {"kill_deliver",      "kill deliver",      test_kill_signal_deliver,     1, 0},
     {"sync",              "sync flush",        test_sync,                    1, 0},
     {"sigprocmask",       "sigprocmask block", test_sigprocmask,             1, 0},
+    {"fatal_signal_exit", "fatal signal retirement", test_fatal_signal_exit, 1, 0},
     {"sigreturn_saved_frame", "sigreturn saved frame", test_sigreturn_saved_frame, 1, 0},
     {"ext2_write",        "ext2 write",        test_ext2_write,              1, 0},
     {"boot_fat_mount",    "boot fat mount",    test_boot_fat_mount,          1, 0},

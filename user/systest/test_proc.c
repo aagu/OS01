@@ -472,34 +472,64 @@ void test_setpgid_auto_fg_pgrp(void) {
 // ── 72: kill(-pid) → signal_pgrp ─────────────────
 void test_signal_pgrp_basic(void) {
     signal(SIGUSR1, SIG_IGN);  // 父不响应
+    /* The child announces readiness AFTER it re-armed SIG_DFL and
+     * joined its own pgrp — the IRQ-return delivery (correct since
+     * the TASK_SIGNAL_OFFSET fix) would otherwise legally race the
+     * kill against the inherited SIG_IGN and clear the signal. */
+    int pfd[2];
+    if (pipe(pfd) < 0) { FAIL("signal_pgrp_basic", "pipe"); return; }
     int64_t pid = fork();
     if (pid < 0) { FAIL("signal_pgrp_basic", "fork"); return; }
     if (pid == 0) {
+        close(pfd[0]);
         // fork 继承父的 SIG_IGN；child 必须恢复 SIG_DFL 才能被 SIGUSR1 杀掉
         signal(SIGUSR1, SIG_DFL);
         setpgid(0, 0);
+        char ready = 'R';
+        if (write(pfd[1], &ready, 1) != 1)
+            _exit(6);
         struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
-        nanosleep(&ts, NULL);   // 阻塞直到信号打断（本 libc 无 pause()）
-        _exit(0);
+        int64_t nr = nanosleep(&ts, NULL);   // 阻塞直到信号打断
+        /* Probe: 3 = woken by -EINTR, 4 = slept out, 5 = other. */
+        _exit(nr == -EINTR ? 3 : (nr == 0 ? 4 : 5));
     }
+    close(pfd[1]);
     setpgid(pid, pid);
+    {
+        char ready = 0;
+        if (read(pfd[0], &ready, 1) != 1 || ready != 'R') {
+            FAIL("signal_pgrp_basic", "ready handshake");
+            close(pfd[0]);
+            return;
+        }
+        close(pfd[0]);
+    }
     int64_t r = syscall(SYS_kill, (int64_t)(-(int64_t)pid),
                         (uint64_t)SIGUSR1, 0);
     CHECK3(r == 0, "signal_pgrp_basic", "kill(-pid,SIGUSR1) returns 0");
     int status; waitpid(pid, &status, 0);
-    CHECK3(WIFSIGNALED(status) && WTERMSIG(status) == SIGUSR1,
-           "signal_pgrp_basic", "child got SIGUSR1");
+    CHECKF(WIFSIGNALED(status) && WTERMSIG(status) == SIGUSR1,
+           "signal_pgrp_basic", "child status=%#x",
+           "child got SIGUSR1 (status=%#x)", status);
 }
 
 
 // ── 73: kill(-pgid) hits whole group ─────────────
 void test_kill_neg_pid_pgrp(void) {
     signal(SIGUSR2, SIG_IGN);
+    /* Readiness handshake: each child announces after it re-armed
+     * SIG_DFL and joined the pgrp — see signal_pgrp_basic. */
+    int pfd[2];
+    if (pipe(pfd) < 0) { FAIL("kill_pgrp", "pipe"); return; }
     int64_t c1 = fork();
     if (c1 < 0) { FAIL("kill_pgrp", "fork1"); return; }
     if (c1 == 0) {
+        close(pfd[0]);
         signal(SIGUSR2, SIG_DFL);
         setpgid(0, 0);
+        char ready = 'R';
+        if (write(pfd[1], &ready, 1) != 1)
+            _exit(6);
         struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
         nanosleep(&ts, NULL);
         _exit(0);
@@ -509,13 +539,35 @@ void test_kill_neg_pid_pgrp(void) {
     int64_t c2 = fork();
     if (c2 < 0) { FAIL("kill_pgrp", "fork2"); return; }
     if (c2 == 0) {
+        close(pfd[0]);
         signal(SIGUSR2, SIG_DFL);
         setpgid(0, c1);
+        char ready = 'R';
+        if (write(pfd[1], &ready, 1) != 1)
+            _exit(6);
         struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
         nanosleep(&ts, NULL);
         _exit(0);
     }
+    close(pfd[1]);
     setpgid(c2, c1);
+    {
+        /* Two 1-byte atomic writes: reads may return short — loop
+         * until both children have announced. */
+        char ready[2] = { 0, 0 };
+        size_t got = 0;
+        while (got < 2) {
+            ssize_t n = read(pfd[0], ready + got, 2 - got);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        if (got != 2 || ready[0] != 'R' || ready[1] != 'R') {
+            FAIL("kill_pgrp", "ready handshake got=%zu", got);
+            close(pfd[0]);
+            return;
+        }
+        close(pfd[0]);
+    }
     int64_t r = syscall(SYS_kill, (int64_t)(-(int64_t)c1),
                         (uint64_t)SIGUSR2, 0);
     CHECK3(r == 0, "kill_pgrp", "kill(-pgid,sig) returns 0");
@@ -524,8 +576,8 @@ void test_kill_neg_pid_pgrp(void) {
     waitpid(c2, &s2, 0);
     CHECK3(WIFSIGNALED(s1) && WTERMSIG(s1) == SIGUSR2,
            "kill_pgrp", "c1 got SIGUSR2");
-    CHECK3(WIFSIGNALED(s2) && WTERMSIG(s2) == SIGUSR2,
-           "kill_pgrp", "c2 got SIGUSR2");
+    CHECKF(WIFSIGNALED(s2) && WTERMSIG(s2) == SIGUSR2,
+           "kill_pgrp", "c2 status=%#x", "c2 got SIGUSR2 (status=%#x)", s2);
 }
 
 
@@ -1069,3 +1121,85 @@ static void h11_sig_handler(int sig)
     h11_sig_called = 1;
 }
 
+
+// ── Fatal signal retirement (unmap/TLB ownership plan Task 3) ──
+// A ring3 child busy-waits after announcing readiness; the parent
+// sends a default-fatal SIGKILL.  The child must die by signal (the
+// exit path retires its old user root and the cleanup completes),
+// and the parent must stay fully functional afterwards (mmap, fork,
+// exec still work — a botched retirement wedges the system instead).
+void test_fatal_signal_exit(void)
+{
+    int pfd[2];
+    if (pipe(pfd) < 0) {
+        FAIL("fatal_signal_exit", "pipe failed errno=%d", errno);
+        return;
+    }
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("fatal_signal_exit", "fork failed errno=%d", errno);
+        close(pfd[0]);
+        close(pfd[1]);
+        return;
+    }
+    if (pid == 0) {
+        close(pfd[0]);
+        /* Announce readiness, then spin in ring3 until the fatal
+         * signal lands (delivery may happen at the write's syscall
+         * return or on the IRQ return path — both must kill). */
+        char ready = 'R';
+        if (write(pfd[1], &ready, 1) != 1)
+            _exit(9);
+        for (volatile int i = 0;; i++) {
+            if (i < 0)
+                _exit(8);   /* unreachable; defeats hoisting */
+        }
+    }
+    close(pfd[1]);
+
+    char ready = 0;
+    ssize_t got = read(pfd[0], &ready, 1);
+    close(pfd[0]);
+    if (got != 1 || ready != 'R') {
+        FAIL("fatal_signal_exit", "ready handshake failed (got=%zd)", got);
+        return;
+    }
+
+    if (kill((int)pid, SIGKILL) != 0) {
+        FAIL("fatal_signal_exit", "kill SIGKILL failed errno=%d", errno);
+        return;
+    }
+
+    int st = 0;
+    int64_t waited = waitpid(pid, &st, 0);
+    CHECKF(waited == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL,
+           "fatal_signal_exit_child",
+           "status=%#x", "want SIGKILL death, got waited=%ld status=%#x",
+           (long)waited, st);
+
+    /* The parent (and the whole system) keeps working: mmap, fork
+     * and exec after the child's root retirement. */
+    void *p = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK3(p != MAP_FAILED, "fatal_signal_exit_mmap",
+           "parent mmap after child death");
+    if (p != MAP_FAILED) {
+        ((volatile char *)p)[0] = 0x5A;
+        CHECK3(((volatile char *)p)[0] == 0x5A, "fatal_signal_exit_mmap_rw",
+               "parent mmap writable after child death");
+        munmap(p, 0x1000);
+    }
+
+    int64_t pid2 = fork();
+    if (pid2 == 0) {
+        const char *argv[] = { "/bin/spin", NULL };
+        exec("/bin/spin", (char *const *)argv, NULL);
+        _exit(7);
+    }
+    int st2 = 0;
+    int64_t waited2 = waitpid(pid2, &st2, 0);
+    CHECK3(pid2 > 0 && waited2 == pid2 && WIFEXITED(st2) &&
+           WEXITSTATUS(st2) == 42, "fatal_signal_exit_fork_exec",
+           "parent fork+exec after child death");
+}

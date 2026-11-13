@@ -695,8 +695,9 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					    x86_pte_4k_flags(*upte) |
 					    PAGE_WRITE;
 					new_flags &= ~(uint64_t)PAGE_COW;
-					bool free_old = false;
-					if (page_cow_refs(old_phys) > 1) {
+					bool privatized =
+					    page_cow_refs(old_phys) > 1;
+					if (privatized) {
 						uint64_t nphys =
 						    alloc_4k_page();
 						if (!nphys) {
@@ -710,16 +711,19 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 						    PAGE_4K_SIZE);
 						*upte = nphys | new_flags;
 					} else {
+						/* In-place upgrade: the leaf
+						 * keeps this PA, so the put
+						 * must NEVER free it. */
 						*upte = old_phys | new_flags;
 					}
 					flush_tlb();
 					/* The put runs after the sync so
 					 * another owner's reference is
-					 * visible until then; the last
-					 * holder frees the PA after the
-					 * flush. */
-					free_old = page_cow_put(old_phys);
-					if (free_old)
+					 * visible until then; only the
+					 * privatized leaf's OLD PA is
+					 * released after the flush. */
+					bool last = page_cow_put(old_phys);
+					if (privatized && last)
 						free_4k_page(old_phys);
 					return;
 				}
@@ -790,8 +794,8 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 				uint64_t old_phys = x86_pte_4k_pa(*pte);
 				uint64_t new_phys = 0;
 				int resolved = 0;
-				bool free_old = false;
-				if (page_cow_refs(old_phys) > 1) {
+				bool privatized = page_cow_refs(old_phys) > 1;
+				if (privatized) {
 					new_phys = alloc_4k_page();
 					if (!new_phys) {
 						if (heap_vma)
@@ -807,6 +811,8 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					*pte = x86_pte_4k_make(new_phys, vma->vm_page_prot);
 					resolved = 1;
 				} else {
+					/* In-place upgrade: the leaf keeps
+					 * this PA — put without free. */
 					*pte = x86_pte_4k_make(old_phys, vma->vm_page_prot);
 					resolved = 1;
 				}
@@ -818,8 +824,8 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					flush_tlb();
 				/* The put runs after the sync (see the
 				 * no-VMA branch above). */
-				free_old = page_cow_put(old_phys);
-				if (free_old)
+				bool last = page_cow_put(old_phys);
+				if (privatized && last)
 					free_4k_page(old_phys);
 				return;
 			}

@@ -143,6 +143,7 @@ void test_setpgid_auto_fg_pgrp(void);
 void test_setpgid_getpgid(void);
 void test_setsid(void);
 void test_signal_handler_sync(void);
+void test_fatal_signal_exit(void);
 void test_signal_pgrp_basic(void);
 void test_signal_register(void);
 void test_sigprocmask(void);

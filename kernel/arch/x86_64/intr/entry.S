@@ -93,9 +93,11 @@ do_resched:
 	callq	schedule
 	jmp	check_signal
 
-#define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
-
-#define TASK_SIGNAL_OFFSET  72   /* offsetof(task_t, signal) — keep in sync with task.h */
+/* offsetof(task_t, signal): list 16 + state 8 + flags 8 + mm 8 +
+ * thread 8 + addr_limit 8 + pid 8 + pgrp 4 + session 4 + counter 8
+ * = 80.  The historical value 72 read `counter` and silently broke
+ * IRQ-return signal delivery (unmap/TLB ownership plan Task 3). */
+#define TASK_SIGNAL_OFFSET  80
 
 check_signal:
     # Deliver pending signals — arch_do_signal_delivery returns:
