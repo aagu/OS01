@@ -102,6 +102,13 @@ size_t   kfree(void *ptr);
 uint64_t alloc_4k_page(void);
 void     free_4k_page(uint64_t pa);
 
+/* PMM COW reference contract (production: kernel/memory/pmm.c).  The
+ * mock keeps one count per fake PA so the clone policy's acquire /
+ * release / preflight logic is exercised against real semantics. */
+uint16_t page_cow_refs(uint64_t pa);
+int      pmm_cow_acquire(uint64_t pa, bool first_share);
+int      pmm_cow_release(uint64_t pa, bool *last);
+
 /* ── CPU / IRQ boundary replaced by the host runtime ──────── */
 static inline void arch_cpu_halt(void)
 {
@@ -135,6 +142,8 @@ void user_vm_test_fail_page_after(int ok_count);
 void user_vm_test_fail_map_after(int ok_count);
 
 /* Accounting visible to assertions. */
+uint16_t user_vm_test_cow_refs(uint64_t pa);
+void     user_vm_test_set_cow_refs(uint64_t pa, uint16_t refs);
 int      user_vm_test_node_allocs(void);
 int      user_vm_test_page_allocs(void);
 int      user_vm_test_map_calls(void);

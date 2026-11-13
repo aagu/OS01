@@ -26,6 +26,7 @@ int64_t sys_resource_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBAD
  * a table entry wired to the wrong handler cannot hide behind a sibling's
  * value. */
 #define NATIVE_EXIT_MARK          (-1001)
+#define NATIVE_FORK_MARK          (-1005)
 #define NATIVE_GETPID_MARK        (-1002)
 #define NATIVE_GETPPID_MARK       (-1003)
 #define NATIVE_CLOCK_GETTIME_MARK (-1004)
@@ -34,6 +35,12 @@ int64_t sys_native_exit(syscall_ctx_t *ctx)
 {
     received = ctx;
     return NATIVE_EXIT_MARK;
+}
+
+int64_t sys_native_fork(syscall_ctx_t *ctx)
+{
+    received = ctx;
+    return NATIVE_FORK_MARK;
 }
 
 int64_t sys_native_getpid(syscall_ctx_t *ctx)
@@ -60,6 +67,7 @@ static int64_t expected_return(uint64_t nr)
 {
     switch (nr) {
     case SYS_exit:          return NATIVE_EXIT_MARK;
+    case SYS_fork:          return NATIVE_FORK_MARK;
     case SYS_getpid:        return NATIVE_GETPID_MARK;
     case SYS_getppid:       return NATIVE_GETPPID_MARK;
     case SYS_clock_gettime: return NATIVE_CLOCK_GETTIME_MARK;

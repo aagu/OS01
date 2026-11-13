@@ -881,6 +881,302 @@ TEST_FUNC(test_replace_cow_forwarding_parent_child_roots)
     free_4k_page(new_pa);
 }
 
+/* ── fork cloning (M4 Task 2) ───────────────────────────────────
+ *
+ * user_vm_clone_fork() runs the whole borrow → acquire → publish
+ * transaction.  The fake M3 store is keyed by (root, VA), so the
+ * parent and child trees are inspected independently. */
+
+static mm_t *new_child_mm(uint64_t root)
+{
+    mm_t *mm = calloc(1, sizeof(*mm));
+    assert_not_null(mm);
+    list_init(&mm->vma_list);
+    mm->pgdir = (uint64_t *)(uintptr_t)root;
+    return mm;
+}
+
+struct clone_publish_probe {
+    int calls;
+    int pid;
+};
+
+static int clone_publish_ok(void *arg)
+{
+    struct clone_publish_probe *p = arg;
+    p->calls++;
+    p->pid = 1234;
+    return 0;
+}
+
+static int clone_publish_fail(void *arg)
+{
+    struct clone_publish_probe *p = arg;
+    p->calls++;
+    return -ENOMEM;
+}
+
+static uint64_t fault_private_page(mm_t *mm, uint64_t va)
+{
+    if (mm->end_brk < va + PAGE_4K_SIZE)
+        assert_eq((int64_t)(va + PAGE_4K_SIZE),
+                  user_vm_brk(mm, va + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_fault(mm, va, true));
+    user_vm_page_t *r = resident_at(mm, va);
+    assert_not_null(r);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    return r->pa;
+}
+
+TEST_FUNC(test_clone_fork_shares_and_downgrades)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child  = new_child_mm(0x9000);
+
+    uint64_t rw_pa = fault_private_page(parent, HEAP_BASE);
+    uint64_t ro_pa = alloc_4k_page();
+    assert_true(ro_pa != 0);
+    assert_eq(0, user_vm_map_image_page(parent, 0x400000, ro_pa,
+                                        VM_USER_RO | VM_NO_EXEC));
+
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(parent, child, clone_publish_ok, &probe));
+    assert_eq(1, probe.calls);
+    assert_eq(1234, probe.pid);
+
+    /* Parent: the writable leaf was lowered, both records are shared,
+     * and both pages hold two references. */
+    user_vm_page_t *pr = resident_at(parent, HEAP_BASE);
+    assert_not_null(pr);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, pr->share);
+    assert_eq(2, user_vm_test_cow_refs(rw_pa));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+
+    user_vm_page_t *pro = resident_at(parent, 0x400000);
+    assert_not_null(pro);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, pro->share);
+    assert_eq(2, user_vm_test_cow_refs(ro_pa));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(0x400000));
+
+    /* Child: independent root, same PAs, read-only leaves, shared
+     * records and copied metadata. */
+    assert_eq(rw_pa, user_vm_test_leaf_pa_in(child->pgdir, HEAP_BASE));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(child->pgdir, HEAP_BASE));
+    user_vm_page_t *cr = resident_at(child, HEAP_BASE);
+    assert_not_null(cr);
+    assert_eq(rw_pa, cr->pa);
+    assert_eq((uint32_t)USER_VM_PAGE_ANON, cr->source);
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC), cr->logical);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, cr->share);
+    assert_eq(ro_pa, user_vm_test_leaf_pa_in(child->pgdir, 0x400000));
+
+    assert_eq(vma_count(parent), vma_count(child));
+    assert_eq(parent->start_brk, child->start_brk);
+    assert_eq(parent->end_brk, child->end_brk);
+    assert_eq(parent->mmap_base, child->mmap_base);
+    assert_eq(parent->start_stack, child->start_stack);
+
+    /* Destroying the child drops its references but frees no page. */
+    user_vm_destroy(child);
+    assert_eq(1, user_vm_test_cow_refs(rw_pa));
+    assert_eq(1, user_vm_test_cow_refs(ro_pa));
+    assert_eq(2, user_vm_test_leaf_count());   /* only the parent's */
+    assert_eq(0, user_vm_test_free_count());
+    assert_false(user_vm_has_metadata(child));
+    free(child);
+
+    /* The parent's destroy drops the last reference and frees both. */
+    destroy_mm(parent);
+    assert_eq(0, user_vm_test_cow_refs(rw_pa));
+    assert_eq(0, user_vm_test_cow_refs(ro_pa));
+    assert_eq(2, user_vm_test_free_count());
+    assert_eq(0, user_vm_test_double_frees());
+}
+
+TEST_FUNC(test_clone_fork_first_leaf_failure_leaves_parent)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child  = new_child_mm(0x9000);
+
+    uint64_t pa = fault_private_page(parent, HEAP_BASE);
+    struct clone_publish_probe probe = { 0, 0 };
+
+    user_vm_test_fail_map_after(0);
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child, clone_publish_ok,
+                                          &probe));
+    assert_eq(0, probe.calls);
+
+    /* Parent untouched: still private, RW, unreferenced. */
+    user_vm_page_t *pr = resident_at(parent, HEAP_BASE);
+    assert_not_null(pr);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, pr->share);
+    assert_eq(0, user_vm_test_cow_refs(pa));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+
+    /* Child empty and handed back to the caller. */
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, HEAP_BASE));
+    assert_null(child->resident_list.next);
+    assert_eq(0, vma_count(child));
+    assert_eq((uint64_t)0, child->start_brk);
+    assert_eq(0, user_vm_test_free_count());
+
+    user_vm_destroy(child);
+    free(child);
+    destroy_mm(parent);
+}
+
+TEST_FUNC(test_clone_fork_second_leaf_failure_removes_first)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child  = new_child_mm(0x9000);
+
+    uint64_t pa1 = fault_private_page(parent, HEAP_BASE);
+    uint64_t pa2 = fault_private_page(parent, HEAP_BASE + PAGE_4K_SIZE);
+    struct clone_publish_probe probe = { 0, 0 };
+
+    /* The first child leaf maps, the second fails. */
+    user_vm_test_fail_map_after(1);
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child, clone_publish_ok,
+                                          &probe));
+    assert_eq(0, probe.calls);
+
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, HEAP_BASE));
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir,
+                                            HEAP_BASE + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_test_cow_refs(pa1));
+    assert_eq(0, user_vm_test_cow_refs(pa2));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_null(child->resident_list.next);
+
+    user_vm_destroy(child);
+    free(child);
+    destroy_mm(parent);
+}
+
+TEST_FUNC(test_clone_fork_publish_failure_mixed_refs)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child  = new_child_mm(0x9000);
+
+    /* One private page (first share) and one already-shared page. */
+    uint64_t private_pa = fault_private_page(parent, HEAP_BASE);
+    uint64_t shared_pa = alloc_4k_page();
+    assert_true(shared_pa != 0);
+    assert_eq(0, user_vm_map_image_page(parent, 0x400000, shared_pa,
+                                        VM_USER_RO | VM_NO_EXEC));
+    user_vm_page_t *shared = resident_at(parent, 0x400000);
+    assert_not_null(shared);
+    shared->share = USER_VM_PAGE_SHARED;
+    user_vm_test_set_cow_refs(shared_pa, 2);
+
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child, clone_publish_fail,
+                                          &probe));
+    assert_eq(1, probe.calls);
+
+    /* First-share page: 0→2→0, exclusive again, PA not freed. */
+    user_vm_page_t *priv = resident_at(parent, HEAP_BASE);
+    assert_not_null(priv);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, priv->share);
+    assert_eq(0, user_vm_test_cow_refs(private_pa));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+
+    /* Already-shared page: 2→3→2 and its RO/NX leaf is untouched. */
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, shared->share);
+    assert_eq(2, user_vm_test_cow_refs(shared_pa));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(0x400000));
+
+    /* No child leaf, record, VMA or freed page survives. */
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, HEAP_BASE));
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, 0x400000));
+    assert_null(child->resident_list.next);
+    assert_eq(0, vma_count(child));
+    assert_eq(0, user_vm_test_free_count());
+    assert_eq(0, user_vm_test_double_frees());
+
+    user_vm_destroy(child);
+    free(child);
+    user_vm_destroy(parent);
+    free(parent);
+}
+
+TEST_FUNC(test_clone_fork_overflow_fails_preflight)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child  = new_child_mm(0x9000);
+
+    uint64_t pa = fault_private_page(parent, HEAP_BASE);
+    user_vm_page_t *pr = resident_at(parent, HEAP_BASE);
+    assert_not_null(pr);
+    pr->share = USER_VM_PAGE_SHARED;
+    assert_eq(0, arch_vmm_update_4k(parent->pgdir, pa, HEAP_BASE,
+                                    VM_USER_RO | VM_NO_EXEC, NULL, NULL));
+    user_vm_test_set_cow_refs(pa, UINT16_MAX);
+
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(-EOVERFLOW, user_vm_clone_fork(parent, child, clone_publish_ok,
+                                             &probe));
+    assert_eq(0, probe.calls);
+    assert_eq((uint16_t)UINT16_MAX, user_vm_test_cow_refs(pa));
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, pr->share);
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir, HEAP_BASE));
+    assert_null(child->resident_list.next);
+
+    user_vm_destroy(child);
+    free(child);
+    user_vm_destroy(parent);
+    free(parent);
+}
+
+TEST_FUNC(test_clone_fork_twice_2_3_2)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child1 = new_child_mm(0x9000);
+    mm_t *child2 = new_child_mm(0xa000);
+
+    uint64_t pa = fault_private_page(parent, HEAP_BASE);
+    struct clone_publish_probe probe = { 0, 0 };
+
+    assert_eq(0, user_vm_clone_fork(parent, child1, clone_publish_ok, &probe));
+    assert_eq(2, user_vm_test_cow_refs(pa));
+
+    /* Second fork shares the already-shared page: 2→3→2 on failure. */
+    probe = (struct clone_publish_probe){ 0, 0 };
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child2, clone_publish_fail,
+                                          &probe));
+    assert_eq(1, probe.calls);
+    assert_eq(2, user_vm_test_cow_refs(pa));
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm(HEAP_BASE));
+    assert_null(child2->resident_list.next);
+
+    user_vm_destroy(child2);
+    free(child2);
+
+    /* The first child still holds its reference. */
+    assert_eq(2, user_vm_test_cow_refs(pa));
+    user_vm_destroy(child1);
+    free(child1);
+    assert_eq(1, user_vm_test_cow_refs(pa));
+
+    destroy_mm(parent);
+    assert_eq(0, user_vm_test_cow_refs(pa));
+    assert_eq(1, user_vm_test_free_count());
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -904,6 +1200,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_map_image_page_records_source_and_ownership),
     TEST_ENTRY(test_map_image_page_failure_keeps_pa_with_caller),
     TEST_ENTRY(test_replace_cow_forwarding_parent_child_roots),
+    TEST_ENTRY(test_clone_fork_shares_and_downgrades),
+    TEST_ENTRY(test_clone_fork_first_leaf_failure_leaves_parent),
+    TEST_ENTRY(test_clone_fork_second_leaf_failure_removes_first),
+    TEST_ENTRY(test_clone_fork_publish_failure_mixed_refs),
+    TEST_ENTRY(test_clone_fork_overflow_fails_preflight),
+    TEST_ENTRY(test_clone_fork_twice_2_3_2),
 TEST_LIST_END
 
 int main(void)

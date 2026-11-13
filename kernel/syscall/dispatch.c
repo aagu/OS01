@@ -13,6 +13,7 @@ int64_t sys_net_dispatch(syscall_ctx_t *ctx);
 int64_t sys_proc_dispatch(syscall_ctx_t *ctx);
 int64_t sys_resource_dispatch(syscall_ctx_t *ctx);
 int64_t sys_native_exit(syscall_ctx_t *ctx);
+int64_t sys_native_fork(syscall_ctx_t *ctx);
 int64_t sys_native_getpid(syscall_ctx_t *ctx);
 int64_t sys_native_getppid(syscall_ctx_t *ctx);
 int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
@@ -98,7 +99,10 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
     [SYS_exec] = { sys_proc_dispatch, "exec" },
-    [SYS_fork] = { sys_proc_dispatch, "fork" },
+    /* Fork's shared handler; it stays in the full-set block until the
+     * COW write paths land (M4 Task 3), which moves it to the shared
+     * region and opens the number on AArch64. */
+    [SYS_fork] = { sys_native_fork, "fork" },
     [SYS_waitpid] = { sys_proc_dispatch, "waitpid" },
     [SYS_umask] = { sys_proc_dispatch, "umask" },
     [SYS_kill] = { sys_proc_dispatch, "kill" },

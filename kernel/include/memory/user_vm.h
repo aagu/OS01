@@ -139,6 +139,30 @@ int arch_user_vm_replace_cow(uint64_t *root, uint64_t va, uint64_t old_pa,
  * allocated and leaves the mm unchanged. */
 int user_vm_init_heap(mm_t *mm, uint64_t heap_base);
 
+/* ── fork cloning (M4 Task 2) ────────────────────────────────────
+ *
+ * Build a child address space from a parent whose root is already
+ * detached, then publish the child task as the LAST fallible step.
+ *
+ * The parent's brk/layout and every VMA node are copied, and every
+ * resident page is shared: each child leaf borrows the parent's PA
+ * (no reference yet), then the commit acquires one checked PMM COW
+ * reference per page (private 0→2, already-shared +1), lowers a
+ * writable parent leaf to RO/NX, and finally calls publish(arg).
+ *
+ * Any failure before publish leaves the parent's leaves, records and
+ * counts exactly as they were, removes only the child leaves and
+ * metadata, and returns the error; the caller destroys the (now
+ * empty) child mm to reclaim intermediate tables.  A publish failure
+ * rolls the whole commit back the same way.  A commit-time mismatch
+ * between a record, its leaf and the PMM count is an invariant
+ * failure (the kernel stops).
+ *
+ * The child mm must be fresh: unpublished, with an empty resident
+ * chain and no VMA nodes.  It keeps its own root. */
+int user_vm_clone_fork(mm_t *parent, mm_t *child,
+                       int (*publish)(void *), void *arg);
+
 /* Release every anonymous resident page, then every policy-owned
  * VMA.  The root must already be detached; the caller then hands the
  * empty mm to aarch64_user_mm_destroy(). */

@@ -50,6 +50,13 @@ struct aarch64_user_image;
 int aarch64_user_image_load(const void *bytes, size_t size,
                              struct aarch64_user_image **out);
 
+/* Build the empty fork shell: a new image record that copies the
+ * parent's entry and owns a fresh, unpublished, empty mm (no VMA, no
+ * resident record, no leaf).  user_vm_clone_fork() fills the mm.  On
+ * failure *out is NULL and nothing is owned. */
+int aarch64_user_image_fork_shell(const struct aarch64_user_image *parent,
+                                  struct aarch64_user_image **out);
+
 /* Tear an image down: the leaves are unmapped in reverse order, each
  * returned PA is verified against the manifest before the page is
  * released, and only then is the empty mm destroyed.  A root that is

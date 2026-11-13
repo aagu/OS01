@@ -6,6 +6,7 @@
 #include <memory/uaccess.h>
 #include <arch/clocksource.h>
 #include <arch/syscall.h>
+#include <log/log.h>
 
 /* ── Shared native syscall handlers ────────────────────────────
  *
@@ -26,6 +27,16 @@ int64_t sys_native_exit(syscall_ctx_t *ctx)
     uint64_t status = (ctx->args[0] & 0xff) << 8;
     arch_syscall_exit(status);
     __builtin_unreachable();
+}
+
+int64_t sys_native_fork(syscall_ctx_t *ctx)
+{
+    // fork() → child PID in the parent, 0 in the child's saved frame.
+    // The architecture owns the frame fix-up; this handler keeps the
+    // historical x86 trace line and return value.
+    int64_t pid = arch_syscall_fork(ctx ? ctx->arch_frame : NULL);
+    log_info("fork: pid=%d returned %d\n", (int)current->pid, (int)pid);
+    return pid;
 }
 
 int64_t sys_native_getpid(syscall_ctx_t *ctx)

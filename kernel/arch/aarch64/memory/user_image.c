@@ -191,6 +191,29 @@ fail:
     return rc;
 }
 
+int aarch64_user_image_fork_shell(const struct aarch64_user_image *parent,
+                                  struct aarch64_user_image **out)
+{
+    if (!parent || !parent->mm || !out)
+        return -EINVAL;
+    *out = NULL;
+
+    struct aarch64_user_image *image = kmalloc(sizeof(*image));
+    if (!image)
+        return -ENOMEM;
+    __builtin_memset(image, 0, sizeof(*image));
+
+    int rc = aarch64_user_mm_create(&image->mm);
+    if (rc) {
+        kfree(image);
+        return rc;
+    }
+    image->root_pa = (uint64_t)(uintptr_t)image->mm->pgdir;
+    image->entry = parent->entry;
+    *out = image;
+    return 0;
+}
+
 void aarch64_user_image_destroy(struct aarch64_user_image *image)
 {
     if (!image)

@@ -33,10 +33,13 @@
 #include <arch/cpu.h>
 #include <arch/syscall.h>
 #include <arch/irq.h>
+#include <arch/spinlock.h>
 #include <errno.h>
 #include <intr/dispatch.h>
+#include <kernel.h>               /* container_of */
 #include <log/log.h>
 #include <memory/slab.h>
+#include <memory/user_vm.h>       /* user_vm_clone_fork */
 #include <percpu/percpu.h>
 #include <sched/internal.h>
 #include <sched/task.h>
@@ -575,6 +578,22 @@ static void aarch64_user_task_exit(uint64_t status)
     }
 #endif
 
+    /* Re-parent every surviving child to the resident BSP idle task
+     * under the task-list lock.  There is no scheduling point between
+     * this scan and the self-reap below, so a child can never observe
+     * a dangling parent pointer. */
+    task_t *idle = percpu_data[0].idle;
+    if (idle) {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        for (list_t *p = init_task_union.task.list.next;
+             p != &init_task_union.task.list; p = p->next) {
+            task_t *child = container_of(p, task_t, list);
+            if (child->parent == t)
+                child->parent = idle;
+        }
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
+
     /* The exit tail never returns to EL0: the next task's switch tail
      * reclaims the thread context and the kernel stack. */
     task_exit_self_reap(status);
@@ -584,6 +603,8 @@ static void aarch64_user_task_exit(uint64_t status)
 
 struct user_task_prepare_ctx {
     struct aarch64_user_task *owner;
+    task_t          *parent;   /* NULL: resident BSP idle (spawn) */
+    const pt_regs_t *frame;    /* NULL: fresh image frame (spawn) */
 };
 
 static int user_task_prepare(task_t *tsk, void *arg)
@@ -597,9 +618,10 @@ static int user_task_prepare(task_t *tsk, void *arg)
     tsk->files = NULL;
     tsk->fpu_save = NULL;
 
-    /* The parent is the resident BSP idle task: the thread that
-     * created this task may exit on its own. */
-    tsk->parent = percpu_data[0].idle;
+    /* Spawn is parented to the resident BSP idle task (the creator may
+     * exit on its own); fork is parented to the real parent so
+     * getppid() and exit re-parenting observe the true tree. */
+    tsk->parent = ctx->parent ? ctx->parent : percpu_data[0].idle;
 
     /* Kernel-stack geometry, mirroring arch_kthread_prepare(). */
     uintptr_t base = (uintptr_t)tsk;
@@ -616,9 +638,17 @@ static int user_task_prepare(task_t *tsk, void *arg)
     ctx_thread->x21 = (uint64_t)(uintptr_t)ctx_thread;
     ctx_thread->x30 = (uint64_t)(uintptr_t)aarch64_user_first_entry;
 
-    /* The first EL0 frame lives at the top of the kernel stack. */
+    /* The first EL0 frame lives at the top of the kernel stack.  A
+     * fork copies the parent's SVC frame so both resume at the same
+     * instruction, with the child's x0 set to 0. */
     uint64_t frame = top - PT_REGS_SIZE;
-    aarch64_user_image_init_regs(owner->image, (pt_regs_t *)frame);
+    if (ctx->frame) {
+        pt_regs_t *child_frame = (pt_regs_t *)frame;
+        *child_frame = *ctx->frame;
+        child_frame->x0 = 0;
+    } else {
+        aarch64_user_image_init_regs(owner->image, (pt_regs_t *)frame);
+    }
     ctx_thread->sp = frame;
 
     ctx_thread->user_task = owner;
@@ -634,6 +664,108 @@ static void user_task_discard(task_t *tsk, void *arg)
     tsk->mm = NULL;
     if (tsk->thread)
         tsk->thread->user_task = NULL;
+}
+
+/* ── fork: clone the address space, then publish the child ──────
+ *
+ * The transaction order is fixed: the clone (user_vm_clone_fork)
+ * borrows every parent page, commits the checked COW references and
+ * lowers the parent's writable leaves, and only then publishes the
+ * child task.  Publication is the last fallible step.  Any failure
+ * rolls the clone back and releases the empty child image/owner while
+ * the parent root is detached (IRQs enabled); the parent root is
+ * restored exactly once by aarch64_vm_edit_end(). */
+
+struct user_task_fork_ctx {
+    struct aarch64_user_task *owner;
+    task_t          *parent;
+    const pt_regs_t *frame;
+    int              pid;
+};
+
+static int user_task_fork_publish(void *arg)
+{
+    struct user_task_fork_ctx *ctx = arg;
+    struct user_task_prepare_ctx pctx = {
+        .owner  = ctx->owner,
+        .parent = ctx->parent,
+        .frame  = ctx->frame,
+    };
+
+    task_t *tsk = NULL;
+    int pid = 0;
+    int rc = sched_alloc_and_publish_task(0, true /* pinned to BSP */,
+                                          PF_PROCESS, ctx->parent->comm,
+                                          user_task_prepare, user_task_discard,
+                                          &pctx, &tsk, &pid);
+    if (rc)
+        return rc;
+    ctx->pid = pid;
+    return 0;
+}
+
+int64_t arch_syscall_fork(void *arch_frame)
+{
+    pt_regs_t *regs = (pt_regs_t *)arch_frame;
+    if (!regs || !aarch64_user_frame_is_valid(regs))
+        return -EFAULT;
+
+    task_t *parent_task = arch_current_task();
+    if (!aarch64_user_task_is_user(parent_task))
+        return -EINVAL;
+    struct aarch64_user_task *parent_owner = parent_task->thread->user_task;
+    struct mm_struct *parent_mm = parent_task->mm;
+    if (!parent_owner || !parent_owner->image || !parent_mm)
+        return -EINVAL;
+
+    struct aarch64_user_image *child_image = NULL;
+    int rc = aarch64_user_image_fork_shell(parent_owner->image, &child_image);
+    if (rc)
+        return rc;
+
+    struct aarch64_user_task *child_owner = kmalloc(sizeof(*child_owner));
+    if (!child_owner) {
+        aarch64_user_image_destroy(child_image);
+        return -ENOMEM;
+    }
+    child_owner->image         = child_image;
+    child_owner->catalog       = parent_owner->catalog;
+    child_owner->catalog_count = parent_owner->catalog_count;
+    child_owner->catalog_index = parent_owner->catalog_index;
+
+    struct user_task_fork_ctx fctx = {
+        .owner  = child_owner,
+        .parent = parent_task,
+        .frame  = regs,
+        .pid    = 0,
+    };
+
+    rc = aarch64_vm_edit_begin(parent_mm);
+    if (rc) {
+        aarch64_user_image_destroy(child_image);
+        kfree(child_owner);
+        return rc;
+    }
+
+    rc = user_vm_clone_fork(parent_mm, aarch64_user_image_mm(child_image),
+                            user_task_fork_publish, &fctx);
+    if (rc) {
+        /* The clone already removed its child leaves/records/VMAs;
+         * this reclaims the empty child root's intermediate tables
+         * while the transaction still runs with IRQs enabled. */
+        aarch64_user_image_destroy(child_image);
+        child_image = NULL;
+    }
+
+    /* Exactly one end for every successful begin.  It reinstalls the
+     * parent root and restores the entry IRQ state. */
+    aarch64_vm_edit_end();
+
+    if (rc) {
+        kfree(child_owner);
+        return rc;
+    }
+    return fctx.pid;
 }
 
 int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
@@ -672,7 +804,11 @@ int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
     owner->catalog_count = count;
     owner->catalog_index = index;
 
-    struct user_task_prepare_ctx pctx = { .owner = owner };
+    struct user_task_prepare_ctx pctx = {
+        .owner  = owner,
+        .parent = NULL,
+        .frame  = NULL,
+    };
 
     task_t *tsk = NULL;
     int pid = 0;

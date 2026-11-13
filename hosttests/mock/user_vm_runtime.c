@@ -128,6 +128,81 @@ uint64_t user_vm_test_free_pa_at(int index)
 }
 
 /* ══════════════════════════════════════════════════════════════
+ * PMM COW reference contract (production: kernel/memory/pmm.c)
+ * ══════════════════════════════════════════════════════════════ */
+
+#define MAX_COW_PAGES 256
+static struct {
+    uint64_t pa;
+    uint16_t refs;
+} g_cow[MAX_COW_PAGES];
+static int g_cow_n;
+
+static int cow_index(uint64_t pa)
+{
+    for (int i = 0; i < g_cow_n; i++)
+        if (g_cow[i].pa == pa)
+            return i;
+    return -1;
+}
+
+uint16_t page_cow_refs(uint64_t pa)
+{
+    int i = cow_index(pa);
+    return i < 0 ? 0 : g_cow[i].refs;
+}
+
+void user_vm_test_set_cow_refs(uint64_t pa, uint16_t refs)
+{
+    int i = cow_index(pa);
+    if (i < 0) {
+        if (g_cow_n >= MAX_COW_PAGES)
+            abort();
+        i = g_cow_n++;
+        g_cow[i].pa = pa;
+    }
+    g_cow[i].refs = refs;
+}
+
+uint16_t user_vm_test_cow_refs(uint64_t pa) { return page_cow_refs(pa); }
+
+int pmm_cow_acquire(uint64_t pa, bool first_share)
+{
+    if (!pa || (pa & ((uint64_t)PAGE_4K_SIZE - 1)))
+        return -EINVAL;
+    int i = cow_index(pa);
+    uint16_t refs = (i < 0) ? 0 : g_cow[i].refs;
+
+    if (first_share) {
+        if (refs != 0)
+            return -EINVAL;
+        user_vm_test_set_cow_refs(pa, 2);
+    } else {
+        if (refs == 0)
+            return -EINVAL;
+        if (refs == UINT16_MAX)
+            return -EOVERFLOW;
+        user_vm_test_set_cow_refs(pa, (uint16_t)(refs + 1));
+    }
+    return 0;
+}
+
+int pmm_cow_release(uint64_t pa, bool *last)
+{
+    if (last)
+        *last = false;
+    if (!pa || (pa & ((uint64_t)PAGE_4K_SIZE - 1)))
+        return -EINVAL;
+    int i = cow_index(pa);
+    if (i < 0 || g_cow[i].refs == 0)
+        return -EINVAL;
+    g_cow[i].refs--;
+    if (last)
+        *last = (g_cow[i].refs == 0);
+    return 0;
+}
+
+/* ══════════════════════════════════════════════════════════════
  * Fake M3 leaf store
  * ══════════════════════════════════════════════════════════════ */
 
@@ -436,6 +511,7 @@ void user_vm_test_reset(void)
     memset(g_leaves, 0, sizeof(g_leaves));
     g_leaf_count = 0;
     g_replace_cow_calls = 0;
+    g_cow_n = 0;
     g_node_budget = -1;
     g_page_budget = -1;
     g_map_budget  = -1;

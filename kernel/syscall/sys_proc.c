@@ -252,15 +252,6 @@ int64_t sys_proc_dispatch(syscall_ctx_t *ctx)
         kfree(path_copy);
         break;
     }
-    case SYS_fork: {
-        // fork() → child PID in parent, 0 in child
-        int64_t pid = arch_syscall_fork(ctx->arch_frame);
-        // Parent path: ret = child PID
-        // Child return value is zero in its saved frame.
-        ret = pid;
-        log_info("fork: pid=%d returned %d\n", (int)current->pid, (int)pid);
-        break;
-    }
     case SYS_waitpid: {
         // waitpid(pid, *status, options) → child PID or error
         int64_t pid = (int64_t)(int)ctx->args[0];
