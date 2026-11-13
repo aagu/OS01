@@ -92,29 +92,27 @@ uint64_t do_exit(uint64_t exit_code)
      * Resolve and notify it inside one task-list lifetime transaction. */
     task_signal_parent(current, 1ULL << SIGCHLD);
 
-    // Stop using this address space before any of its pages can be reused.
-    // Keep the saved CR3 in sync with hardware while preemption is disabled:
-    // otherwise a later switch-in could reload the freed user PGD.
+    // Retire the old user root before any teardown (unmap/TLB
+    // ownership plan Task 1).  One IRQ-off critical section — with
+    // the existing task_list_lock publication order — saves the old
+    // mm, publishes the detachment, and switches BOTH the saved CR3
+    // and the hardware CR3 to init_mm.  User roots are single-task
+    // owned, so once this task has switched away nothing can ever
+    // install the old root again; only then is it destroyed.
     if (!(current->flags & PF_KTHREAD) && current->mm) {
-        arch_irq_state_t irq_flags = arch_local_irq_save();
+        mm_t *dead_mm = current->mm;
+        uint64_t flags = spin_lock_irqsave(&task_list_lock);
+        current->mm = NULL;   /* publish detachment first */
         current->thread->cr3 = (uint64_t)init_mm.pgdir;
         arch_switch_mm(init_mm.pgdir);
-        arch_local_irq_restore(irq_flags);
-    }
-
-    // Free VMA-managed pages (anon + file-backed unmaps, not 2MB ELF pages)
-    vma_free_all(current->mm);
-
-    if (!(current->flags & PF_KTHREAD) && current->mm) {
-        uint64_t flags = spin_lock_irqsave(&task_list_lock);
-        mm_t *dead_mm = current->mm;
-        task_t *parent = current->parent;
-        bool mm_is_shared = parent && parent->mm == dead_mm;
-        current->mm = NULL; /* Publish detachment before freeing, under the same lock. */
         spin_unlock_irqrestore(&task_list_lock, flags);
-        uint64_t *pgd_virt = (uint64_t *)Phy_To_Virt((uint64_t)dead_mm->pgdir);
-        if (!mm_is_shared && dead_mm->pgdir)
-            vmm_free_user_map(pgd_virt);
+
+        // Free VMA-managed pages (anon + file-backed unmaps, not 2MB
+        // ELF pages), then the page tables themselves.
+        vma_free_all(dead_mm);
+        if (dead_mm->pgdir)
+            vmm_free_user_map(
+                (uint64_t *)Phy_To_Virt((uint64_t)dead_mm->pgdir));
         kfree(dead_mm);
     }
 

@@ -88,16 +88,20 @@ void vma_free_all(mm_t *mm)
     list_init(&mm->vma_list);
 }
 
-// Deep-copy parent's VMA list to child.
-vma_t *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
+// Deep-copy parent's VMA list to child (unmap/TLB ownership plan
+// Task 1).  Every node must copy for the caller to proceed to the
+// child page-table build; on the first allocation failure the
+// partial child metadata is destroyed here and -ENOMEM returned.
+// The parent's nodes and references are never touched. */
+int fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
 {
-    if (!child_mm || !parent_mm) return NULL;
+    if (!child_mm || !parent_mm) return -EINVAL;
 
     list_t *pos = parent_mm->vma_list.next;
     while (pos != &parent_mm->vma_list) {
         vma_t *pv = container_of(pos, vma_t, list);
         vma_t *cv = (vma_t *)kmalloc(sizeof(vma_t));
-        if (!cv) { pos = pos->next; continue; }
+        if (!cv) goto fail;
 
         memcpy(cv, pv, sizeof(vma_t));
         list_init(&cv->list);
@@ -107,7 +111,17 @@ vma_t *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
 
         pos = pos->next;
     }
-    return NULL; // caller doesn't use return value
+    return 0;
+
+fail:
+    /* Destroy the partial child metadata: unlink each node, drop
+     * the file reference this call took, free the node.  The net
+     * vfs_node_get/put balance returns to zero. */
+    while (child_mm->vma_list.next != &child_mm->vma_list) {
+        vma_t *v = container_of(child_mm->vma_list.next, vma_t, list);
+        vma_remove(child_mm, v);
+    }
+    return -ENOMEM;
 }
 
 // mm_init_user_heap — install the unique heap VMA and set mm's break

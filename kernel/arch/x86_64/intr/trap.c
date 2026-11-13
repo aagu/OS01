@@ -1089,9 +1089,11 @@ int arch_do_signal_delivery(pt_regs_t *regs)
 
     // ── NULL regs path (tty.c inline signal clear) ─────────
     // tty.c calls arch_do_signal_delivery(NULL) when a direct
-    // switch bypassed ret_from_intr.  Only non-fatal signals
-    // can be pending here.  Handle SIG_IGN + non-fatal SIG_DFL;
-    // registered handlers are left pending.
+    // switch bypassed ret_from_intr.  A CPL0 return keeps pending
+    // signals pending (unmap/TLB ownership plan Task 1): here we
+    // ONLY clear SIG_IGN and non-fatal SIG_DFL signals.  Fatal
+    // signals stay pending and are delivered on the normal return
+    // to ring3, where the fatal path below runs.
     if (!regs) {
         for (int sig = 1; sig < NSIG; sig++) {
             if (!(pending & (1ULL << sig)))
@@ -1108,14 +1110,12 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                     current->signal &= ~(1ULL << sig);
                     break;
                 default:
-                    // PID 1 is special: ignore fatal signals
-                    if (current->pid == 1) {
+                    // Fatal on a NULL frame: keep pending for the
+                    // normal ring3 return (PID 1 also just clears,
+                    // matching the init contract).
+                    if (current->pid == 1)
                         current->signal &= ~(1ULL << sig);
-                        break;
-                    }
-                    current->signal &= ~(1ULL << sig);
-                    do_exit((uint64_t)sig);
-                    return 1;  // unreachable
+                    break;
                 }
             }
         }
@@ -1155,6 +1155,13 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                     break;   // ignore for init
                 log_err("task %d killed by signal %d (default)\n",
                         (int)current->pid, sig);
+                /* do_exit can block; the IRQ-return path may reach
+                 * here with interrupts disabled.  Restore the IF
+                 * flag the user frame saved before entering the
+                 * exit path (unmap/TLB ownership plan Task 1). */
+                if (regs->rflags & 0x200ULL) {
+                    __asm__ __volatile__("sti" ::: "memory");
+                }
                 do_exit((uint64_t)sig);
                 return 1;  // unreachable — do_exit switches away
             }

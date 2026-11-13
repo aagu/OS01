@@ -63,6 +63,23 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
         return NULL;
     }
 
+    /* Unmap/TLB ownership plan Task 1: every failable metadata phase
+     * runs BEFORE any leaf work or parent PTE mutation.  Explicit
+     * layout-field copy first, then the full VMA metadata copy — a
+     * failure here leaves the child root unpublished and the caller
+     * only sees NULL.  Copying the VMAs first also guarantees the
+     * child's device (VMA_IO) leaves always have VMA metadata by
+     * the time the child root is published. */
+    memcpy(child_mm, parent_mm, sizeof(mm_t));
+    list_init(&child_mm->vma_list);
+    spin_init(&child_mm->lock);
+    if (fork_vma_copy(child_mm, parent_mm) != 0) {
+        kfree(child_mm);
+        kfree(child_pgd);
+        if (cr3_out) *cr3_out = 0;
+        return NULL;
+    }
+
     uint64_t *parent_pgd = (uint64_t *)Phy_To_Virt((uint64_t)parent_mm->pgdir);
     uint64_t *kernel_pgd = (uint64_t *)Phy_To_Virt((uint64_t)init_mm.pgdir);
 
@@ -236,11 +253,9 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
         }
     }
 
-    memcpy(child_mm, parent_mm, sizeof(mm_t));
-    /* vma_list must NOT be shared — fork_vma_copy fills the
-     * child's own list (called by do_fork). */
-    list_init(&child_mm->vma_list);
-    spin_init(&child_mm->lock);   /* memcpy copied parent's lock value */
+    /* Layout fields and VMA metadata were copied (and the VMA list
+     * built) at the top, before any leaf work.  Only the root
+     * pointer is published here. */
     child_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)child_pgd);
     *cr3_out = (uint64_t)child_mm->pgdir;
 
@@ -342,7 +357,16 @@ fail:
         }
         kfree(child_pgd);
     }
-    if (child_mm) kfree(child_mm);
+    if (child_mm) {
+        /* Leaf rollback above handled the page tables; the child's
+         * VMA metadata is destroyed separately: unlink, drop the
+         * copied file references, free the nodes. */
+        while (child_mm->vma_list.next != &child_mm->vma_list) {
+            vma_t *v = container_of(child_mm->vma_list.next, vma_t, list);
+            vma_remove(child_mm, v);
+        }
+        kfree(child_mm);
+    }
     if (cr3_out)  *cr3_out = 0;
     return NULL;
 }
@@ -460,6 +484,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
 
     // Inherit address space (shared initially, replaced for user tasks)
     tsk->mm = current->mm;
+    int fork_err = -ENOMEM;   /* failure code for fail_unpublished */
 
     // ── Inherit fd table (deep copy — refcount++) ──────────
     if (current->files)
@@ -467,60 +492,38 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
 
     thd->cr3 = current->thread->cr3;
 
+    if ((regs->cs & 3) != 3) {
+        /* Unmap/TLB ownership plan Task 1: ring0 fork is rejected —
+         * kernel threads are built by kthread constructors, never by
+         * fork.  The unpublished-task rollback below releases the
+         * task-list link and every resource allocated so far. */
+        debug_task("fork: pid=%d rejected — ring0 fork\n",
+                   (int)current->pid);
+        fork_err = -EINVAL;
+        goto fail_unpublished;
+    }
+
     if ((regs->cs & 3) == 3) {
         tsk->flags &= ~PF_KTHREAD;
         tsk->addr_limit = 0x00007FFFFFFFFFFF;
-        if (current->mm && current->mm->pgdir) {
-            tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
-            if (!tsk->mm) {
-                /* Task 6: hard OOM.  The pre-existing
-                 *   tsk->mm = current->mm; thd->cr3 = current->thread->cr3;
-                 * fallback used to "share the parent's mm" on
-                 * fork_mm_copy failure — that exposed the parent's
-                 * pgdir to the child (and the child's COW refs
-                 * would silently leak into the parent).  Brief:
-                 * "remove the fork: ... falling back to shared mm
-                 *  fallback in do_fork" + "do_fork releases task
-                 *  resources on fork_mm_copy failure and returns
-                 *  -ENOMEM".
-                 *
-                 * Release every unpublished resource this function
-                 * allocated (raw_alloc + thd + fpu_save + files +
-                 * the not-yet-runnable task list link) and return
-                 * -ENOMEM to the caller.  The child is never
-                 * published, so init's waitpid loop never sees it. */
-                debug_task("fork: pid=%d fork_mm_copy OOM, releasing task\n",
-                    (int)current->pid);
-
-                /* Remove the not-yet-runnable child from the
-                 * global task list so init's waitpid loop cannot
-                 * reach it. */
-                {
-                    uint64_t tl_flags2 =
-                        spin_lock_irqsave(&task_list_lock);
-                    list_del(&tsk->list);
-                    spin_unlock_irqrestore(&task_list_lock, tl_flags2);
-                }
-                /* Files table reference (if any). */
-                if (tsk->files) {
-                    files_unpin(tsk->files);
-                    tsk->files = NULL;
-                }
-                /* FPU save area. */
-                if (tsk->fpu_save) {
-                    kfree(tsk->fpu_save);
-                    tsk->fpu_save = NULL;
-                }
-                /* Thread struct + kernel stack / task union. */
-                kfree(thd);
-                kfree(tsk->stack_alloc_base);
-                return -ENOMEM;
-            }
-            if (tsk->mm)
-                fork_vma_copy(tsk->mm, current->mm);
-        } else if (current->mm) {
-            debug_task("fork: pid=%d parent_mm->pgdir is NULL, sharing mm\n",
-                (int)current->pid);
+        if (!current->mm || !current->mm->pgdir) {
+            /* A user fork requires a valid, exclusive parent root —
+             * there is no shared-mm fallback anymore. */
+            debug_task("fork: pid=%d rejected — no valid user root\n",
+                       (int)current->pid);
+            fork_err = -EINVAL;
+            goto fail_unpublished;
+        }
+        /* fork_mm_copy's own fail path destroys the partial child
+         * leaf tree and the copied VMA metadata; a NULL return means
+         * the child root was never published.  The shared
+         * fail_unpublished rollback below releases the task
+         * resources. */
+        tsk->mm = fork_mm_copy(current->mm, &thd->cr3);
+        if (!tsk->mm) {
+            debug_task("fork: pid=%d fork_mm_copy OOM, releasing task\n",
+                       (int)current->pid);
+            goto fail_unpublished;
         }
     }
 
@@ -551,6 +554,30 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     }
     sched_notify_remote(tsk);
     return tsk->pid;   // parent sees child PID
+
+fail_unpublished:
+    /* The child was never made runnable: remove its task-list link
+     * so init's waitpid loop cannot reach it, then release every
+     * resource do_fork allocated (files, FPU area, thread struct,
+     * kernel stack / task union).  If a child mm was built, its
+     * leaf rollback and VMA-metadata destroy already ran inside
+     * fork_mm_copy. */
+    {
+        uint64_t tl_flags2 = spin_lock_irqsave(&task_list_lock);
+        list_del(&tsk->list);
+        spin_unlock_irqrestore(&task_list_lock, tl_flags2);
+    }
+    if (tsk->files) {
+        files_unpin(tsk->files);
+        tsk->files = NULL;
+    }
+    if (tsk->fpu_save) {
+        kfree(tsk->fpu_save);
+        tsk->fpu_save = NULL;
+    }
+    kfree(thd);
+    kfree(tsk->stack_alloc_base);
+    return (uint64_t)fork_err;
 }
 
 // ── Kernel-thread API ───────────────────────────────────────

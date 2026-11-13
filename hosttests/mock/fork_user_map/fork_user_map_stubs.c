@@ -55,6 +55,8 @@ static void fk_page_pool_init(void)
     }
 }
 
+static int fk_kmalloc_calls = 0;
+static int fk_kmalloc_fail_at = 0;
 void fk_stubs_reset(void)
 {
     fk_page_pool_init();
@@ -67,6 +69,8 @@ void fk_stubs_reset(void)
     node_get_count = 0;
     node_put_count = 0;
     fk_fork_tlb_shootdown_calls = 0;
+    fk_kmalloc_calls = 0;
+    fk_kmalloc_fail_at = 0;
 }
 
 fk_page_record_t *fk_find_page(uint64_t phys)
@@ -92,9 +96,19 @@ int fk_in_use_count(void)
 static task_t fk_stub_task = {0};
 task_t *fk_current_task(void) { return &fk_stub_task; }
 
-/* ── kmalloc / kfree: thin libc wrappers ───────────────────
- * Production vma.c sees normal kmalloc/kfree symbols. */
-void *kmalloc(size_t size) { return malloc(size); }
+/* ── kmalloc / kfree: thin libc wrappers + fail injection ──
+ * Production vma.c sees normal kmalloc/kfree symbols.  The fork
+ * tests inject VMA-node allocation failures through the counter
+ * below (1-based; 0 = never fail). */
+void fk_set_kmalloc_fail_at(int n) { fk_kmalloc_fail_at = n; }
+int  fk_kmalloc_call_count(void)   { return fk_kmalloc_calls; }
+void *kmalloc(size_t size)
+{
+    fk_kmalloc_calls++;
+    if (fk_kmalloc_fail_at > 0 && fk_kmalloc_calls == fk_kmalloc_fail_at)
+        return NULL;
+    return malloc(size);
+}
 size_t kfree(void *ptr)    { free(ptr); return 1; }
 
 /* ── vfs_node_get / vfs_node_put — counter-backed ─────────

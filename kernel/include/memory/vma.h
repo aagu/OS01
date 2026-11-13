@@ -54,7 +54,7 @@ vma_t    *vma_find(mm_t *mm, uint64_t addr);
 int       vma_insert(mm_t *mm, vma_t *vma);
 void      vma_remove(mm_t *mm, vma_t *vma);
 void      vma_free_all(mm_t *mm);
-vma_t    *fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
+int       fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
 
 // ── mm_init_user_heap — heap-VMA initializer ────────────────
 // Must be called after a successful elf_load() on the new mm.

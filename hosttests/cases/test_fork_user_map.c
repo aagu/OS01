@@ -347,6 +347,133 @@ static void test_vma_free_all_cow_pages_ref(void)
     (void)cow_gets_before;
 }
 
+/* ── fork_vma_clone OOM: the child root is never published and the
+ * parent is untouched (unmap/TLB ownership plan Task 1) ────────── */
+static void test_fork_vma_clone_oom_keeps_parent(void)
+{
+    TEST_SUITE("fork_vma_clone OOM — injected 1st/2nd VMA alloc failure");
+
+    /* Parent: zero-length heap VMA + one anon VMA + one file-backed
+     * VMA (fake_node) — three nodes, so both the 1st and the 2nd
+     * kmalloc can be injected. */
+    setup_parent(USER_CODE_ADDR + 0x1000);
+    vma_t *heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
+    heap->vm_end = heap->vm_start + 0x1000;
+
+    vma_t *anon = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(anon);
+    list_init(&anon->list);
+    anon->vm_start = 0x10000000UL;
+    anon->vm_end   = 0x10001000UL;
+    anon->vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
+    vma_insert(&parent_mm, anon);
+
+    vma_t *fil = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(fil);
+    list_init(&fil->list);
+    fil->vm_start = 0x10002000UL;
+    fil->vm_end   = 0x10003000UL;
+    fil->vm_flags = VMA_PROT_READ;
+    fil->vm_file  = &fake_node;
+    vma_insert(&parent_mm, fil);
+
+    for (int fail_at = 1; fail_at <= 2; fail_at++) {
+        setup_child();
+        int gets_before  = fk_node_get_count();
+        int puts_before  = fk_node_put_count();
+        int cow_before   = fk_state.total_cow_gets;
+        int puts_pg_before = fk_state.total_cow_puts;
+        int frees_before = fk_state.total_frees;
+        int parent_vmas  = vma_count_for(&parent_mm);
+        assert_eq(3, parent_vmas);
+
+        /* fail_at is relative to the calls made so far (setup
+         * already used the allocator). */
+        fk_set_kmalloc_fail_at(fk_kmalloc_call_count() + fail_at);
+        int rc = fork_vma_copy(&child_mm, &parent_mm);
+        fk_set_kmalloc_fail_at(0);
+
+        /* The clone failed; the parent's metadata, refs and pages
+         * are byte-for-byte untouched. */
+        assert_true(rc < 0);
+        assert_eq(parent_vmas, vma_count_for(&parent_mm));
+        assert_eq(cow_before,     fk_state.total_cow_gets);
+        assert_eq(puts_pg_before, fk_state.total_cow_puts);
+        assert_eq(frees_before,   fk_state.total_frees);
+
+        /* The partial child metadata was destroyed: the child list
+         * is empty and the file-reference balance is net zero. */
+        assert_eq(0, vma_count_for(&child_mm));
+        assert_eq(gets_before, fk_node_get_count());
+        assert_eq(puts_before, fk_node_put_count());
+    }
+
+    /* Sanity: without injection the same clone succeeds. */
+    setup_child();
+    assert_eq(0, fork_vma_copy(&child_mm, &parent_mm));
+    assert_eq(3, vma_count_for(&child_mm));
+    assert_eq(1, fk_node_get_count());   /* the file-backed copy */
+}
+
+/* ── Source scan: fork rejections and metadata-before-tables order
+ * (unmap/TLB ownership plan Task 1) ─────────────────────────────── */
+static char *slurp_task_c(size_t *out_len);
+static const char *find_from(const char *start, const char *end,
+                             const char *needle);
+static void test_fork_rejections_and_vma_copy_order(void)
+{
+    TEST_SUITE("do_fork source — ring0/no-root rejected, VMA copy before tables");
+
+    size_t len;
+    char *src = slurp_task_c(&len);
+    assert_not_null(src);
+    const char *end = src + len;
+
+    const char *fn = strstr(src,
+        "static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)");
+    assert_not_null(fn);
+    const char *fn_end = strstr(fn, "\n}\n");
+    assert_not_null(fn_end);
+
+    /* fork_mm_copy copies the VMA metadata BEFORE pass 1 — the
+     * failable metadata phases all run before any leaf work or
+     * parent PTE mutation. */
+    const char *vma_copy = find_from(fn, fn_end,
+                                     "fork_vma_copy(child_mm, parent_mm)");
+    assert_not_null(vma_copy);
+    const char *pass1 = find_from(fn, fn_end, "Pass 1");
+    assert_not_null(pass1);
+    assert_true(vma_copy < pass1);
+
+    /* The layout copy precedes the VMA copy. */
+    const char *layout = find_from(fn, fn_end,
+                                   "memcpy(child_mm, parent_mm, sizeof(mm_t));");
+    assert_not_null(layout);
+    assert_true(layout < vma_copy);
+
+    /* do_fork: no post-hoc VMA copy (the old call site is gone). */
+    const char *dofork = strstr(src, "uint64_t do_fork(");
+    assert_not_null(dofork);
+    const char *dofork_end = find_from(dofork, end,
+        "\n// ── Kernel-thread API");
+    assert_not_null(dofork_end);
+    assert_null(find_from(dofork, dofork_end, "fork_vma_copy("));
+
+    /* ring0 fork rejected; user fork without a valid parent root
+     * rejected — both land in the shared unpublished-task rollback. */
+    assert_not_null(find_from(dofork, dofork_end,
+                              "rejected — ring0 fork"));
+    assert_not_null(find_from(dofork, dofork_end,
+                              "rejected — no valid user root"));
+    assert_not_null(find_from(dofork, dofork_end, "fail_unpublished:"));
+
+    /* No shared-mm fallback wording left in do_fork. */
+    assert_null(find_from(dofork, dofork_end, "sharing mm"));
+
+    free(src);
+    (void)end;
+}
+
 static void test_vma_free_all_vmio_skips_unmap(void)
 {
     TEST_SUITE("vma_free_all — VMA_IO VMA skips unmap");
@@ -839,29 +966,19 @@ static void test_do_fork_releases_task_on_oom(void)
     assert_not_null(fn_end);
 
     /* The brief mandates: "child OOM returns NULL → do_fork
-     * releases task resources → returns -ENOMEM".  Observable
-     * textually: in the `if (!tsk->mm)` branch, do_fork frees
+     * releases task resources → returns -ENOMEM".  The rollback is
+     * the shared fail_unpublished path: every rejection (ring0,
+     * root-less parent, fork_mm_copy OOM) lands there, and it frees
      * the task union / kernel stack (raw_alloc = ... = tsk->
-     * stack_alloc_base) and the thread struct (thd), then
-     * returns -ENOMEM.  do_fork MUST NOT touch tsk->mm =
-     * current->mm on the failure path. */
+     * stack_alloc_base) and the thread struct (thd), then returns
+     * the negative error.  do_fork MUST NOT touch tsk->mm =
+     * current->mm after the fork_mm_copy call point. */
 
-    /* The failure branch is the `if (!tsk->mm)` block; bound the
-     * search to the block (see test_do_fork_no_whole_mm_share_
-     * fallback for the brace-match heuristic). */
-    const char *null_branch = find_from(fn, fn_end, "if (!tsk->mm)");
+    /* The rollback is bounded from the fail_unpublished label to
+     * the end of do_fork. */
+    const char *null_branch = find_from(fn, fn_end, "fail_unpublished:");
     assert_not_null(null_branch);
-    const char *candidates[] = {
-        "\n            }\n",
-        "\n        }\n",
-        "\n                    }\n",
-    };
-    const char *null_branch_end = NULL;
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        null_branch_end = find_from(null_branch, fn_end, candidates[i]);
-        if (null_branch_end) break;
-    }
-    if (!null_branch_end) null_branch_end = fn_end;
+    const char *null_branch_end = fn_end;
 
     /* The branch must free every resource do_fork allocated:
      * tsk->stack_alloc_base (the raw_alloc buffer holding the
@@ -878,8 +995,11 @@ static void test_do_fork_releases_task_on_oom(void)
      * init's waitpid loop cannot reach it). */
     assert_not_null(find_from(null_branch, null_branch_end, "list_del"));
 
-    /* -ENOMEM returned on the failure path. */
-    assert_not_null(find_from(null_branch, null_branch_end, "-ENOMEM"));
+    /* The negative error is returned on the failure path (fork_err
+     * carries -EINVAL for the rejections, -ENOMEM for OOM). */
+    assert_not_null(find_from(null_branch, null_branch_end,
+                              "return (uint64_t)fork_err;"));
+    assert_not_null(find_from(fn, null_branch, "int fork_err = -ENOMEM;"));
 
     /* The branch MUST NOT silently fall back to a shared parent
      * mm (already covered by test_do_fork_no_whole_mm_share_
@@ -1101,6 +1221,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_vma_free_all_then_user_map_no_double_free),
     TEST_ENTRY(test_fork_mm_copy_source_layout),
     TEST_ENTRY(test_fork_mm_copy_huge_leaf_codec_callsites),
+    TEST_ENTRY(test_fork_vma_clone_oom_keeps_parent),
+    TEST_ENTRY(test_fork_rejections_and_vma_copy_order),
     TEST_ENTRY(test_fork_mm_copy_no_pmd_share_fallback),
     TEST_ENTRY(test_fork_mm_copy_elf_leaf_private_copy),
     TEST_ENTRY(test_fork_mm_copy_writable_leaf_uses_cow),

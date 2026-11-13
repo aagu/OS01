@@ -120,4 +120,9 @@ void        vfs_node_put(vfs_node_t *node);
 int fk_node_get_count(void);
 int fk_node_put_count(void);
 
+/* kmalloc fail injection for the VMA-clone OOM tests (1-based; 0 =
+ * never).  The call counter is reset by fk_stubs_reset(). */
+void fk_set_kmalloc_fail_at(int n);
+int  fk_kmalloc_call_count(void);
+
 #endif /* OS01_FORK_USER_MAP_STUBS_H */

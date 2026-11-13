@@ -87,10 +87,13 @@ void arch_task_init_platform(void)
  * rollback only has to free the thread struct and the raw stack. */
 int arch_kthread_prepare(task_t *t, uint64_t (*fn)(uint64_t), uint64_t arg)
 {
-    /* Inherited address space and CR3: a kernel thread runs in the
-     * kernel address space of the task that created it. */
-    t->mm = current->mm;
-    t->thread->cr3 = current->thread->cr3;
+    /* Address space and CR3: a kernel thread runs ONLY in the shared
+     * kernel address space (init_mm).  Inheriting the creator's user
+     * root would keep a retired user root alive after exit/exec
+     * destroyed it (unmap/TLB ownership plan Task 1 — the CR3
+     * ownership audit). */
+    t->mm = &init_mm;
+    t->thread->cr3 = (uint64_t)init_mm.pgdir;
 
     /* Copied file table.  The copy is what keeps the creator's open
      * files alive independently of the creator. */
