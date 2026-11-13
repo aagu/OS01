@@ -1092,6 +1092,14 @@ void x86_handle_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 // Registered handlers clear the pending bit but don't yet
 // deliver to user space (future work).
 
+/* entry.S:check_signal reads current->signal from the stack-top
+ * task pointer at TASK_SIGNAL_OFFSET (80).  The historical value 72
+ * silently read `counter` instead, disabling ALL IRQ-return signal
+ * delivery; this pin turns a future field insertion into a build
+ * failure. */
+_Static_assert(__builtin_offsetof(task_t, signal) == 80,
+               "entry.S TASK_SIGNAL_OFFSET must match offsetof(task_t, signal)");
+
 int arch_do_signal_delivery(pt_regs_t *regs)
 {
     uint64_t pending = current->signal;
@@ -1164,6 +1172,17 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                 // signals it wants to receive (SIGUSR1, SIGUSR2, SIGTERM).
                 if (current->pid == 1)
                     break;   // ignore for init
+                /* Fatal delivery runs ONLY on ring3 frames (spec:
+                 * "IRQ 返回仅在 ring3 交付致命信号").  A CPL0
+                 * IRQ-return frame — the task was interrupted inside
+                 * a syscall — keeps the signal pending: it dies at
+                 * the syscall return, where the delivery runs with
+                 * the user frame and no kernel locks are abandoned
+                 * mid-syscall. */
+                if (!(regs->cs & 3)) {
+                    current->signal |= (1ULL << sig);
+                    break;
+                }
                 log_err("task %d killed by signal %d (default)\n",
                         (int)current->pid, sig);
                 /* do_exit can block; the IRQ-return path may reach

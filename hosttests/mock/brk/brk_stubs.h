@@ -101,6 +101,11 @@ int       vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
                            uint64_t virt, uint64_t flags);
 void      vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 
+/* Sync-time COW refcount snapshot (see brk_stubs.c). */
+void brk_mark_sync_check(uint64_t phys);
+extern uint64_t brk_sync_check_phys;
+extern int      brk_refs_at_sync;
+
 /* arch_flush_tlb_all / flush_tlb counters */
 /* The production vmm.h defines flush_tlb() as arch_flush_tlb_all()
  * (a static inline in arch/mmu.h, gated by __x86_64__).  We do NOT

@@ -22,6 +22,8 @@
  * without disturbing the caller mm on failure).
  */
 #include "test_framework.h"
+#include <fcntl.h>
+#include <unistd.h>
 #include "elf_load_stubs.h"
 
 #include <errno.h>
@@ -810,6 +812,94 @@ TEST_FUNC(test_detect_abi_interp_ignored) {
 
 /* ── Test registration ──────────────────────────────────── */
 
+/* Source-access helpers for the over-cap defense contract (the
+ * branch is unreachable for validated ELFs, so it is pinned by
+ * source inspection — same convention as the fork tests). */
+static const char *elf_c_path(void)
+{
+    static char buf[1024];
+    char full[1024];
+    const char *f = __FILE__;
+    if (f[0] != '/') {
+        char cwd[512];
+        if (getcwd(cwd, sizeof(cwd)) == NULL) cwd[0] = '\0';
+        snprintf(full, sizeof(full), "%s/%s", cwd, f);
+    } else {
+        snprintf(full, sizeof(full), "%s", f);
+    }
+    const char *marker = strstr(full, "/hosttests/");
+    if (marker) {
+        snprintf(buf, sizeof(buf), "%.*s/kernel/fs/elf.c",
+                 (int)(marker - full), full);
+        return buf;
+    }
+    if (strncmp(full, "hosttests/", 10) == 0)
+        return "kernel/fs/elf.c";
+    return NULL;
+}
+
+static char *slurp_elf_c(size_t *out_len)
+{
+    const char *path = elf_c_path();
+    if (!path) return NULL;
+    int fd = open(path, 0 /* O_RDONLY */, 0);
+    if (fd < 0) return NULL;
+    size_t cap = 16384, len = 0;
+    char *out = (char *)malloc(cap);
+    if (!out) { close(fd); return NULL; }
+    for (;;) {
+        if (len + 4096 > cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(out, cap);
+            if (!nb) { free(out); close(fd); return NULL; }
+            out = nb;
+        }
+        ssize_t r = read(fd, out + len, 4096);
+        if (r < 0) { free(out); close(fd); return NULL; }
+        if (r == 0) break;
+        len += (size_t)r;
+    }
+    close(fd);
+    out[len] = '\0';
+    *out_len = len;
+    return out;
+}
+
+static const char *elf_find_from(const char *start, const char *end,
+                                 const char *needle)
+{
+    size_t n = strlen(needle);
+    for (const char *p = start; p + n <= end; p++)
+        if (memcmp(p, needle, n) == 0) return p;
+    return NULL;
+}
+
+/* Review fix 4: the MAX_LOAD_LEAVES over-cap defense withdraws and
+ * releases the leaf exactly once — no trailing free_4k_page (the
+ * release_owned_4k already freed it; a second free is a latent
+ * double-free in a defense branch). */
+static void test_elf_overcap_single_free(void)
+{
+    TEST_SUITE("elf_load — over-cap branch frees the leaf exactly once");
+
+    size_t len;
+    char *src = slurp_elf_c(&len);
+    assert_not_null(src);
+
+    const char *cap = strstr(src, "MAX_LOAD_LEAVES) {");
+    assert_not_null(cap);
+    const char *cap_end = elf_find_from(cap, src + len, "goto rollback;");
+    assert_not_null(cap_end);
+
+    assert_not_null(elf_find_from(cap, cap_end, "x86_vmm_take_4k"));
+    assert_not_null(elf_find_from(cap, cap_end, "x86_vmm_release_owned_4k"));
+    /* The trailing explicit free is BANNED: release_owned_4k already
+     * handed the PA back. */
+    assert_null(elf_find_from(cap, cap_end, "free_4k_page(page_phys)"));
+
+    free(src);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_load_single_4k_text),
     TEST_ENTRY(test_load_across_4k_boundary),
@@ -821,6 +911,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_load_rollback_on_alloc_failure),
     TEST_ENTRY(test_load_rollback_on_read_failure),
     TEST_ENTRY(test_load_rollback_on_map_failure),
+    TEST_ENTRY(test_elf_overcap_single_free),
     TEST_ENTRY(test_load_shared_page_no_double_alloc),
     TEST_ENTRY(test_load_incompatible_shared_rejected),
     TEST_ENTRY(test_load_rejects_zero_pt_loads),

@@ -308,6 +308,49 @@ static void test_brk_shrink_release_after_flush(void)
     assert_true(first_release > first_sync);
 }
 
+/* Review fix 2: the shrink retained-tail privatize must put the
+ * COW ref only AFTER the TLB sync — at sync time the other owner's
+ * reference must still be visible. */
+static void test_brk_shrink_tail_ref_until_sync(void)
+{
+    TEST_SUITE("mm_set_brk — shrink tail: COW ref retained until sync");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    uint64_t base = fixture_mm.start_brk;
+    uint64_t result;
+    assert_eq(0, mm_set_brk(&fixture_mm, base + 2 * PAGE_4K_SIZE, &result));
+
+    /* Mark the retained-tail page (base+0x1000) as COW with two
+     * owners, as fork would. */
+    uint64_t tail_phys = 0;
+    {
+        brk_pte_record_t *rec = brk_find_mapping(base + PAGE_4K_SIZE);
+        assert_not_null(rec);
+        tail_phys = rec->phys;
+        /* Two owners, as fork would set up (parent + child). */
+        page_cow_get(tail_phys);
+        page_cow_get(tail_phys);
+        rec->pte |= PAGE_COW;
+        rec->pte &= ~(uint64_t)PAGE_WRITE;
+        rec->flags |= PAGE_COW;
+    }
+    brk_mark_sync_check(tail_phys);
+
+    /* Shrink INTO the tail page: [base+0x1800, base+0x2000) is the
+     * retained tail of page base+0x1000. */
+    assert_eq(0, mm_set_brk(&fixture_mm, base + 0x1800, &result));
+
+    /* At sync time BOTH references were still held. */
+    assert_eq(2, brk_refs_at_sync);
+    /* After the call one put dropped it to the other owner's ref;
+     * the page is still alive. */
+    brk_page_record_t *pg = brk_find_page(tail_phys);
+    assert_not_null(pg);
+    assert_eq(1, pg->cow_refs);
+    assert_eq(1, pg->in_use);
+}
+
 static void test_brk_oom_on_second_page_rolls_back(void)
 {
     TEST_SUITE("mm_set_brk — OOM on second new page → no commit");
@@ -890,6 +933,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_brk_multipage_growth_each_page_zeroed),
     TEST_ENTRY(test_brk_multipage_growth_flushes_tlb),
     TEST_ENTRY(test_brk_shrink_release_after_flush),
+    TEST_ENTRY(test_brk_shrink_tail_ref_until_sync),
     TEST_ENTRY(test_brk_oom_on_second_page_rolls_back),
     TEST_ENTRY(test_brk_shrink_across_page_releases_leaves),
     TEST_ENTRY(test_brk_shrink_partial_tail_zeros),

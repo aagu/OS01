@@ -559,6 +559,17 @@ static void test_retirement_and_signal_source_contract(void)
         const char *fatal_exit = find_from(sti, src + len, "do_exit((uint64_t)sig)");
         assert_not_null(fatal_exit);
         assert_true(sti < fatal_exit);
+        /* Review fix 1: fatal delivery runs ONLY on ring3 frames —
+         * a CPL0 IRQ-return frame keeps the signal pending for the
+         * syscall return path (spec: IRQ 返回仅在 ring3 交付).
+         * The guard sits at the top of the fatal branch, before the
+         * IF restore. */
+        const char *guard = strstr(src,
+            "Fatal delivery runs ONLY on ring3 frames");
+        assert_not_null(guard);
+        assert_true(guard < sti);
+        assert_not_null(find_from(guard, fatal_exit,
+                                  "regs->cs & 3"));
         free(src);
     }
 }

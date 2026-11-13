@@ -255,7 +255,9 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
                     uint64_t old = x86_vmm_take_4k(pgd, pg);
                     if (old)
                         x86_vmm_release_owned_4k(old);
-                    free_4k_page(page_phys);
+                    /* release_owned_4k already handed the PA back —
+                     * a trailing free_4k_page here was a latent
+                     * double free in this defense branch. */
                     rc = -ENOMEM;
                     goto rollback;
                 }

@@ -413,8 +413,13 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
     uint64_t aligned_old = (end_brk   + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
 
     /* 1. Retained tail within [requested, aligned_new).  If
-     *    requested is page-aligned, there is no retained tail. */
+     *    requested is page-aligned, there is no retained tail.
+     *    The COW puts are DEFERRED to after the flush (they are
+     *    recorded below and run once the replaced leaf's stale
+     *    translation is gone). */
     uint64_t free_old_phys = 0;
+    uint64_t tail_put_phys = 0;
+    bool tail_put_privatized = false;
     if (requested < aligned_new) {
         /* The page containing 'requested' is the aligned_new page
          * (which lies at start_brk + k*PAGE_4K_SIZE for some k).
@@ -425,6 +430,10 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         if (pte && (*pte & PAGE_VALID)) {
             uint64_t old_phys = x86_pte_4k_pa(*pte);
             if (*pte & PAGE_COW) {
+                /* Replace first; the put happens after the flush,
+                 * so another owner's reference stays visible until
+                 * the stale translation is gone (same protocol as
+                 * uaccess/trap COW). */
                 if (page_cow_refs(old_phys) > 1) {
                     uint64_t new_phys = alloc_4k_page();
                     if (!new_phys) {
@@ -435,12 +444,15 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
                            (void *)Phy_To_Virt(old_phys),
                            PAGE_4K_SIZE);
                     *pte = x86_pte_4k_make(new_phys, page_prot);
-                    if (page_cow_put(old_phys))
-                        free_old_phys = old_phys;
+                    tail_put_phys = old_phys;
+                    tail_put_privatized = true;
                     old_phys = new_phys;
                 } else {
-                    (void)page_cow_put(old_phys);
+                    /* In-place upgrade: the leaf keeps this PA — the
+                     * put drops the COW bookkeeping but must NEVER
+                     * free the page. */
                     *pte = x86_pte_4k_make(old_phys, page_prot);
+                    tail_put_phys = old_phys;
                 }
             }
             /* Zero the retained-tail range [requested - tail_va,
@@ -476,6 +488,15 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
     mm->end_brk       = requested;
     heap_vma->vm_end  = requested;
     flush_tlb();
+    /* The deferred tail put runs only after the flush (review fix:
+     * replace → sync → release, matching uaccess/trap COW).  Only
+     * the privatized leaf's OLD PA is releasable — the in-place
+     * upgrade keeps mapping it. */
+    if (tail_put_phys) {
+        bool last = page_cow_put(tail_put_phys);
+        if (tail_put_privatized && last)
+            free_old_phys = tail_put_phys;
+    }
     if (free_old_phys)
         free_4k_page(free_old_phys);
     if (result) *result = requested;

@@ -64,7 +64,8 @@ extern unsigned long brk_arch_flushes;
 /* Clear/flush/put/free event log: 'c' take, 'F' sync, 'P' put,
  * 'f' free. */
 void brk_record_event(char c);
-static inline void arch_flush_tlb_all(void) { brk_arch_flushes++; brk_record_event('F'); }
+void brk_record_sync_snapshot(void);
+static inline void arch_flush_tlb_all(void) { brk_arch_flushes++; brk_record_event('F'); brk_record_sync_snapshot(); }
 const char *brk_event_log(void);
 int  brk_event_count(void);
 void brk_events_reset(void);

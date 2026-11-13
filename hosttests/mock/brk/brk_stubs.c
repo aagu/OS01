@@ -68,6 +68,8 @@ void brk_stubs_reset(void)
     memset(&brk_state, 0, sizeof(brk_state));
     brk_arch_flushes = 0;
     brk_events_reset();
+    brk_sync_check_phys = 0;
+    brk_refs_at_sync = -1;
     for (int i = 0; i < BRK_PAGE_POOL_SIZE; i++) {
         brk_page_pool[i].in_use   = 0;
         brk_page_pool[i].cow_refs = 0;
@@ -133,6 +135,23 @@ __attribute__((weak)) int prepare_user_write_range_locked(mm_t *mm, uint64_t add
 void tlb_shootdown(void) { brk_state.total_tlb_shootdowns++; brk_record_event('S'); }
 
 unsigned long brk_arch_flushes = 0;
+
+/* Sync-time COW refcount snapshot (review fix 2): when a test marks
+ * a phys, the flush hook records the page's COW refcount AT SYNC
+ * TIME — proving the ref was retained until the sync ran. */
+uint64_t brk_sync_check_phys = 0;
+int      brk_refs_at_sync    = -1;
+void brk_mark_sync_check(uint64_t phys)
+{
+    brk_sync_check_phys = phys;
+    brk_refs_at_sync = -1;
+}
+void brk_record_sync_snapshot(void)
+{
+    if (!brk_sync_check_phys) return;
+    brk_page_record_t *rec = brk_find_page(brk_sync_check_phys);
+    brk_refs_at_sync = rec ? rec->cow_refs : -1;
+}
 
 /* ── clear/flush/put/free event log ──────────────────────────── */
 static char brk_event_buf[256];
