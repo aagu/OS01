@@ -148,4 +148,22 @@ void     x86_vmm_release_owned_4k(uint64_t old_pte);
 bool     x86_vmm_has_2m(uint64_t *root, uint64_t va);
 uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va);
 
+/* ── Intermediate-table preparation for a range (device MAP_FIXED) ──
+ *
+ * Allocate every missing PGD/PUD/PMD/PT table covering the 4 KiB
+ * aligned [start, end) range WITHOUT writing a leaf.  Every published
+ * table gets an undo record allocated first; on any allocation
+ * failure the parent slots are restored in reverse publish order, the
+ * local sync runs, and then the new tables are freed.  Huge-leaf
+ * conflicts and addresses outside the user half return -EINVAL before
+ * any allocation.  After success every 4 KiB slot is writable without
+ * further allocation.
+ *
+ * x86_vmm_local_sync is the local CR3 reload used by that rollback.
+ * It is weak in the kernel so host harnesses can observe the
+ * clear -> sync -> free order without executing privileged asm. */
+int  x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start,
+                              uint64_t end);
+void x86_vmm_local_sync(void);
+
 #endif

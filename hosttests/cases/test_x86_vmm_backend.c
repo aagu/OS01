@@ -31,21 +31,81 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   /* PAGE_* x86 hardware PTE bits */
 
-/* ── calloc wrap (--wrap=calloc) ────────────────────────────
- * Allocated once per intermediate table.  The test pre-fills the
- * chain outside calloc, so this wrap is only here so vmm.c link
- * resolves.  Returns NULL — any unexpected calloc means a real path
- * is missing the pre-fill (assert via NULL-OOM). */
+/* ── Table allocation harness ────────────────────────────────
+ * x86_vmm_prepare_4k_range allocates intermediate tables (calloc)
+ * and one undo record per published table (kmalloc).  The counters
+ * inject a failure at EVERY allocation site and let the tests prove
+ * the rollback order: parent slots restored -> local sync -> tables
+ * freed. */
+static int  g_alloc_calls;
+static int  g_alloc_fail_at;        /* 1-based; 0 = never */
+static int  g_table_allocs;
+static int  g_table_frees;
+static int  g_free_calls;
+static int  g_sync_calls;
+static int  g_table_frees_at_sync;
+static int  g_sync_seen;
+static void *g_tables[32];
+static int  g_table_n;
+
+extern int posix_memalign(void **memptr, size_t alignment, size_t size);
+
 void *__wrap_calloc(size_t n, size_t size)
 {
     (void)n; (void)size;
-    return NULL;
+    g_alloc_calls++;
+    if (g_alloc_fail_at > 0 && g_alloc_calls == g_alloc_fail_at)
+        return NULL;
+    void *p = NULL;
+    if (posix_memalign(&p, 4096, 4096) != 0 || !p)
+        return NULL;
+    memset(p, 0, 4096);
+    if (g_table_n < (int)(sizeof(g_tables) / sizeof(g_tables[0])))
+        g_tables[g_table_n++] = p;
+    g_table_allocs++;
+    return p;
 }
+
+void *kmalloc(size_t size)
+{
+    g_alloc_calls++;
+    if (g_alloc_fail_at > 0 && g_alloc_calls == g_alloc_fail_at)
+        return NULL;
+    return malloc(size);
+}
+
+size_t kfree(void *p)
+{
+    g_free_calls++;
+    for (int i = 0; i < g_table_n; i++) {
+        if (g_tables[i] == p) {
+            g_tables[i] = NULL;
+            g_table_frees++;
+            break;
+        }
+    }
+    free(p);
+    return 1;
+}
+
+/* Strong override of vmm.c's weak local-sync hook. */
+void x86_vmm_local_sync(void)
+{
+    g_sync_calls++;
+    g_table_frees_at_sync = g_table_frees;
+    /* Any parent slot this call published must already be restored. */
+    g_sync_seen = 1;
+}
+
+/* RED declaration: the range preparer lands with the device
+ * transaction (munmap plan task 2). */
+int  x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start, uint64_t end);
 
 /* ── Counter-backed mocks for the free/COW ownership path ──── */
 static int g_cow_put_calls;
@@ -186,12 +246,196 @@ TEST_FUNC(test_query_returns_pte_state)
     assert_eq(0, g_free_calls);
 }
 
+/* ── x86_vmm_prepare_4k_range (device MAP_FIXED transaction) ── */
+
+static void reset_alloc(void)
+{
+    for (int i = 0; i < g_table_n; i++)
+        if (g_tables[i]) free(g_tables[i]);
+    memset(g_tables, 0, sizeof(g_tables));
+    g_table_n = 0;
+    g_alloc_calls = 0;
+    g_alloc_fail_at = 0;
+    g_table_allocs = 0;
+    g_table_frees = 0;
+    g_free_calls = 0;
+    g_sync_calls = 0;
+    g_table_frees_at_sync = 0;
+    g_sync_seen = 0;
+}
+
+static void clear_chain(void)
+{
+    memset(pgd_root, 0, sizeof(pgd_root));
+    memset(pud_tbl,  0, sizeof(pud_tbl));
+    memset(pmd_tbl,  0, sizeof(pmd_tbl));
+    memset(pt_tbl,   0, sizeof(pt_tbl));
+}
+
+static int parent_entries_nonzero(void)
+{
+    int nz = 0;
+    for (int i = 0; i < 512; i++)
+        nz |= (pgd_root[i] | pud_tbl[i] | pmd_tbl[i]) != 0;
+    return nz;
+}
+
+TEST_FUNC(test_prepare_4k_range_reuses_existing_tables)
+{
+    reset_chain();
+    reset_alloc();
+    uint64_t pgd0 = pgd_root[0], pud0 = pud_tbl[0], pmd2 = pmd_tbl[2];
+
+    int rc = x86_vmm_prepare_4k_range(pgd_root, TEST_VA_A,
+                                      TEST_VA_C + 0x1000);
+    assert_eq(0, rc);
+    assert_eq(0, g_alloc_calls);
+    assert_eq(0, g_table_frees);
+    assert_eq(pgd0, pgd_root[0]);
+    assert_eq(pud0, pud_tbl[0]);
+    assert_eq(pmd2, pmd_tbl[2]);
+    assert_not_null(vmm_pt_walk(pgd_root, TEST_VA_A, 0, 0));
+}
+
+TEST_FUNC(test_prepare_4k_range_allocates_missing_tables)
+{
+    clear_chain();
+    reset_alloc();
+
+    int rc = x86_vmm_prepare_4k_range(pgd_root, TEST_VA_A,
+                                      TEST_VA_B + 0x1000);
+    assert_eq(0, rc);
+    assert_eq(3, g_table_allocs);       /* PGD, PUD, PT */
+    assert_eq(0, g_table_frees);        /* success keeps the tables */
+    assert_true(pgd_root[0] & PAGE_VALID);
+    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd_root[0] & PAGE_4K_MASK);
+    assert_true(pud[0] & PAGE_VALID);
+    assert_false(pud[0] & PAGE_HUGE);
+    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[0] & PAGE_4K_MASK);
+    assert_true(pmd[TEST_PMD_IDX] & PAGE_VALID);
+    assert_false(pmd[TEST_PMD_IDX] & PAGE_HUGE);
+    assert_not_null(vmm_pt_walk(pgd_root, TEST_VA_A, 0, 0));
+}
+
+TEST_FUNC(test_prepare_4k_range_rolls_back_every_site)
+{
+    static const struct { uint64_t lo, hi; } ranges[] = {
+        { 0x5FF000UL,     0x601000UL     },   /* 2 MiB boundary  */
+        { 0x3FFFF000UL,   0x40001000UL   },   /* 1 GiB boundary  */
+    };
+
+    for (size_t r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++) {
+        clear_chain();
+        reset_alloc();
+        int rc = x86_vmm_prepare_4k_range(pgd_root, ranges[r].lo,
+                                          ranges[r].hi);
+        assert_eq(0, rc);
+        int sites = g_alloc_calls;
+        assert_true(sites >= 6);
+
+        for (int fail = 1; fail <= sites; fail++) {
+            clear_chain();
+            reset_alloc();
+            g_alloc_fail_at = fail;
+
+            rc = x86_vmm_prepare_4k_range(pgd_root, ranges[r].lo,
+                                          ranges[r].hi);
+            assert_eq(-ENOMEM, rc);
+            /* Every parent slot this call published is restored. */
+            assert_eq(0, parent_entries_nonzero());
+            /* No data page is freed for a table-rollback; tables are
+             * freed only AFTER the local sync. */
+            assert_eq(0, g_table_frees_at_sync);
+            if (fail <= 2) {
+                /* The first table was never published. */
+                assert_eq(0, g_sync_calls);
+                assert_eq(0, g_table_frees);
+            } else {
+                assert_eq(1, g_sync_calls);
+                assert_true(g_table_frees > 0);
+            }
+            g_alloc_fail_at = 0;
+        }
+    }
+}
+
+TEST_FUNC(test_prepare_4k_range_preserves_existing_leaf)
+{
+    /* Pre-fill PGD/PUD/PMD and one old leaf; the right page crosses a
+     * PMD boundary, so its PT allocation must fail after the left
+     * leaf's chain was left untouched. */
+    reset_chain();
+    reset_alloc();
+    pt_tbl[0] = 0x9000UL | PAGE_VALID | PAGE_USER | PAGE_WRITE;
+    uint64_t pgd0 = pgd_root[0], pud0 = pud_tbl[0], pmd2 = pmd_tbl[2];
+
+    /* Count the sites for [VA_A, 0x600000 + 0x1000): the second page
+     * needs a new PMD slot + PT. */
+    uint64_t lo = TEST_VA_A;
+    uint64_t hi = 0x601000UL;
+    int rc = x86_vmm_prepare_4k_range(pgd_root, lo, hi);
+    assert_eq(0, rc);
+    int sites = g_alloc_calls;
+
+    for (int fail = 1; fail <= sites; fail++) {
+        reset_chain();
+        reset_alloc();
+        pt_tbl[0] = 0x9000UL | PAGE_VALID | PAGE_USER | PAGE_WRITE;
+        g_alloc_fail_at = fail;
+        rc = x86_vmm_prepare_4k_range(pgd_root, lo, hi);
+        assert_eq(-ENOMEM, rc);
+        assert_eq(pgd0, pgd_root[0]);
+        assert_eq(pud0, pud_tbl[0]);
+        assert_eq(pmd2, pmd_tbl[2]);
+        assert_eq(0x9000UL | PAGE_VALID | PAGE_USER | PAGE_WRITE,
+                  pt_tbl[0]);
+        g_alloc_fail_at = 0;
+    }
+}
+
+TEST_FUNC(test_prepare_4k_range_rejects_huge_and_kernel_half)
+{
+    /* User 2 MiB leaf in the range: -EINVAL, nothing allocated. */
+    reset_chain();
+    reset_alloc();
+    pmd_tbl[TEST_PMD_IDX] = 0x200000UL | PAGE_USER_PMD;
+    int rc = x86_vmm_prepare_4k_range(pgd_root, TEST_VA_A,
+                                      TEST_VA_A + 0x1000);
+    assert_eq(-EINVAL, rc);
+    assert_eq(0, g_alloc_calls);
+    assert_eq(0, g_sync_calls);
+
+    /* 1 GiB leaf at the PUD: -EINVAL. */
+    clear_chain();
+    reset_alloc();
+    pgd_root[0] = (uint64_t)(uintptr_t)pud_tbl | PAGE_USER_PGD;
+    pud_tbl[1] = 0x40000000UL | PAGE_HUGE | PAGE_USER | PAGE_VALID;
+    rc = x86_vmm_prepare_4k_range(pgd_root, 0x3FFFF000UL, 0x40001000UL);
+    assert_eq(-EINVAL, rc);
+    assert_eq(0, g_alloc_calls);
+
+    /* Crossing the user/kernel half (l0=255 -> 256): -EINVAL, no
+     * allocation, no kernel-table write. */
+    clear_chain();
+    reset_alloc();
+    rc = x86_vmm_prepare_4k_range(pgd_root, 0x7FFFFFF000UL,
+                                  0x80001000UL);
+    assert_eq(-EINVAL, rc);
+    assert_eq(0, g_alloc_calls);
+    assert_eq(0, pgd_root[0]);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_x86_vmm_backend_api_exists),
     TEST_ENTRY(test_cow_shared_page_does_not_free),
     TEST_ENTRY(test_cow_last_ref_frees_phys),
     TEST_ENTRY(test_plain_page_frees_phys),
     TEST_ENTRY(test_query_returns_pte_state),
+    TEST_ENTRY(test_prepare_4k_range_reuses_existing_tables),
+    TEST_ENTRY(test_prepare_4k_range_allocates_missing_tables),
+    TEST_ENTRY(test_prepare_4k_range_rolls_back_every_site),
+    TEST_ENTRY(test_prepare_4k_range_preserves_existing_leaf),
+    TEST_ENTRY(test_prepare_4k_range_rejects_huge_and_kernel_half),
 TEST_LIST_END
 
 int main(void)

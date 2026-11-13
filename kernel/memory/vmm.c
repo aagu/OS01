@@ -462,6 +462,145 @@ uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va)
     return old;
 }
 
+// ── Intermediate-table preparation for a range ─────────────────
+// Device MAP_FIXED prepares every missing table before it touches a
+// leaf, so the commit itself has no fallible allocation left.
+
+typedef struct pt_undo {
+    uint64_t       *slot;   // parent entry that was published
+    uint64_t        old;    // its pre-publish value
+    void           *table;  // the newly allocated table
+    struct pt_undo *next;
+} pt_undo_t;
+
+// Local CR3 reload used by the rollback.  Weak so host harnesses can
+// observe the clear -> sync -> free order without privileged asm.
+__attribute__((weak)) void x86_vmm_local_sync(void)
+{
+    arch_flush_tlb_all();
+}
+
+// Pre-check the whole range: user half only, no huge leaves in the
+// way.  Runs before the first allocation so a rejection publishes
+// nothing.
+static int pt_range_precheck(uint64_t *root, uint64_t start, uint64_t end)
+{
+    for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
+        size_t l0 = (size_t)(va >> PAGE_PGD_SHIFT) & 0x1ff;
+        size_t l1 = (size_t)(va >> PAGE_1G_SHIFT)  & 0x1ff;
+        size_t l2 = (size_t)(va >> PAGE_2M_SHIFT)  & 0x1ff;
+
+        if (l0 >= 256)
+            return -EINVAL;             // kernel half is never edited
+
+        uint64_t pgde = root[l0];
+        if (!(pgde & PAGE_VALID))
+            continue;
+        uint64_t *pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+
+        uint64_t pude = pud[l1];
+        if (!(pude & PAGE_VALID))
+            continue;
+        if (pude & PAGE_HUGE)
+            return -EINVAL;             // 1 GiB leaf
+
+        uint64_t *pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+        if ((pmd[l2] & PAGE_VALID) && (pmd[l2] & PAGE_HUGE))
+            return -EINVAL;             // 2 MiB leaf
+    }
+    return 0;
+}
+
+// Return the next-level table for *slot, publishing a fresh one (with
+// its undo record allocated first) when the slot is empty.
+static uint64_t *pt_get_next(uint64_t *slot, uint64_t flags,
+                             pt_undo_t **undo, int *rc)
+{
+    if (*slot & PAGE_VALID) {
+        if (*slot & PAGE_HUGE) {
+            *rc = -EINVAL;
+            return NULL;
+        }
+        return (uint64_t *)Phy_To_Virt(*slot & PAGE_4K_MASK);
+    }
+
+    // Undo record BEFORE the table is published: rollback never has
+    // to allocate.
+    pt_undo_t *u = (pt_undo_t *)kmalloc(sizeof(*u));
+    if (!u) {
+        *rc = -ENOMEM;
+        return NULL;
+    }
+    void *t = calloc(1, PAGE_4K_SIZE);
+    if (!t) {
+        kfree(u);
+        *rc = -ENOMEM;
+        return NULL;
+    }
+    u->slot  = slot;
+    u->old   = *slot;
+    u->table = t;
+    u->next  = *undo;
+    *undo    = u;
+
+    *slot = Virt_To_Phy((uint64_t)t) | flags;
+    return (uint64_t *)t;
+}
+
+int x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start, uint64_t end)
+{
+    if (!root)
+        return -EINVAL;
+    if ((start | end) & (PAGE_4K_SIZE - 1))     // 4 KiB aligned range
+        return -EINVAL;
+    if (end < start)
+        return -EINVAL;
+    if (start == end)
+        return 0;
+
+    int rc = pt_range_precheck(root, start, end);
+    if (rc)
+        return rc;
+
+    pt_undo_t *undo = NULL;
+    for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
+        size_t l0 = (size_t)(va >> PAGE_PGD_SHIFT) & 0x1ff;
+        size_t l1 = (size_t)(va >> PAGE_1G_SHIFT)  & 0x1ff;
+        size_t l2 = (size_t)(va >> PAGE_2M_SHIFT)  & 0x1ff;
+
+        uint64_t *pud = pt_get_next(&root[l0], PAGE_USER_PGD, &undo, &rc);
+        if (!pud) break;
+        uint64_t *pmd = pt_get_next(&pud[l1], PAGE_USER_PUD, &undo, &rc);
+        if (!pmd) break;
+        uint64_t *pt  = pt_get_next(&pmd[l2], PAGE_USER_PUD, &undo, &rc);
+        if (!pt) break;
+    }
+
+    if (rc != 0) {
+        // Restore the published parent slots (reverse publish order),
+        // then reload CR3, and only then release the new tables.
+        for (pt_undo_t *u = undo; u; u = u->next)
+            *u->slot = u->old;
+        if (undo)
+            x86_vmm_local_sync();
+        while (undo) {
+            pt_undo_t *n = undo->next;
+            kfree(undo->table);
+            kfree(undo);
+            undo = n;
+        }
+        return rc;
+    }
+
+    // Success: the tables stay published; only the undo records go.
+    while (undo) {
+        pt_undo_t *n = undo->next;
+        kfree(undo);
+        undo = n;
+    }
+    return 0;
+}
+
 // Arch-neutral semantic facade: query 4KB PTE mapping.
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *vm_out)
