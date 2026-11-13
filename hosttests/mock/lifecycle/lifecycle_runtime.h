@@ -22,6 +22,48 @@
 #ifndef OS01_LIFECYCLE_RUNTIME_H
 #define OS01_LIFECYCLE_RUNTIME_H
 
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* ── Recording spinlock surface (mprotect commit-order tests) ──
+ * test_platform.h provides a no-op spinlock.  The mprotect tests must
+ * observe that the PTE commit happens BEFORE the TLB sync and that the
+ * sync happens BEFORE mm->lock is released, so this harness replaces
+ * the no-op surface with one that logs acquire/release.  Defining the
+ * guard first keeps test_platform.h from redefining it. */
+#ifndef OS01_HOST_SPINLOCK_T_PROVIDED
+#define OS01_HOST_SPINLOCK_T_PROVIDED
+typedef struct { unsigned long lock; } spinlock_T;
+
+void lifecycle_sync_lock(void);
+void lifecycle_sync_unlock(void);
+
+static inline void spin_init(spinlock_T *l) { l->lock = 1; }
+static inline void spin_lock(spinlock_T *l)
+{
+    (void)l;
+    lifecycle_sync_lock();
+}
+static inline void spin_unlock(spinlock_T *l)
+{
+    (void)l;
+    lifecycle_sync_unlock();
+}
+static inline uint64_t spin_lock_irqsave(spinlock_T *l)
+{
+    (void)l;
+    lifecycle_sync_lock();
+    return 0;
+}
+static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f)
+{
+    (void)l;
+    (void)f;
+    lifecycle_sync_unlock();
+}
+#endif /* OS01_HOST_SPINLOCK_T_PROVIDED */
+
 #include "test_platform.h"
 
 /* ── Skip heavy production headers (mirror elf_load pattern) ──
@@ -42,6 +84,42 @@
 #ifndef _KERNEL_PERCPU_H
 #define _KERNEL_PERCPU_H
 #endif
+
+/* ── Host replacement for <arch/mmu.h> ──────────────────────
+ * The production header installs x86 CR3 inline asm
+ * (arch_flush_tlb_all), which crashes a user-space host process.
+ * vma.c needs only flush_tlb() == arch_flush_tlb_all() plus the
+ * address-space constants, so skip the production header entirely
+ * and route the flush through the lifecycle event log.  The
+ * mprotect commit-order test reads that log AND the PTE snapshot
+ * taken at flush time. */
+#ifndef _ARCH_MMU_H
+#define _ARCH_MMU_H
+#define ARCH_PAGE_OFFSET 0xffff800000000000ULL
+
+void lifecycle_sync_flush(void);
+
+static inline void arch_flush_tlb_all(void)
+{
+    lifecycle_sync_flush();
+}
+static inline void arch_flush_tlb_page(uintptr_t vaddr) { (void)vaddr; }
+static inline uint64_t *arch_get_page_table(void) { return (uint64_t *)0; }
+static inline void arch_switch_mm(uint64_t *pgdir) { (void)pgdir; }
+static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
+{
+    (void)pgtbl;
+    return va;
+}
+/* Only consumed by uaccess.c, which the lifecycle suite does not link;
+ * kept so the header surface matches the production one. */
+static inline bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
+                                              uint64_t len, bool writable)
+{
+    (void)pgtbl; (void)addr; (void)len; (void)writable;
+    return true;
+}
+#endif /* _ARCH_MMU_H */
 
 /* list_t for mm_t.vma_list — provided by libc/include/list.h. */
 #include <list.h>

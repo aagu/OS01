@@ -43,13 +43,65 @@ typedef struct {
 
 extern lifecycle_page_record_t lifecycle_page_pool[LIFECYCLE_PAGE_POOL_SIZE];
 
-/* alloc/free counters (test assertions) */
+/* alloc/free/ref/sync counters (test assertions).
+ *
+ * The mprotect range tests drive the production do_mprotect through
+ * this harness, so they need to observe more than the page pool:
+ *   - vfs_get_calls / vfs_put_calls: file references taken by VMA
+ *     splits and dropped by vma_remove;
+ *   - cow_put_calls: proves the new mprotect path never drops a COW
+ *     reference (COW privatization is deferred to first write);
+ *   - flush_count / lock_count / unlock_count: commit ordering. */
 typedef struct {
     int total_allocs;
     int total_frees;
+    int vfs_get_calls;
+    int vfs_put_calls;
+    int cow_put_calls;
+    int flush_count;
+    int lock_count;
+    int unlock_count;
 } lifecycle_state_t;
 
 extern lifecycle_state_t lifecycle_state;
+
+/* ── Fake 4 KiB page table for do_mprotect ────────────────────
+ * vmm_pt_walk() returns the registered slot for a virtual address
+ * (or NULL, i.e. an empty slot).  Only registered VAs are visible,
+ * so the tests never have to build a real four-level tree. */
+#define LIFECYCLE_PTE_SLOTS 32
+
+void      lifecycle_pte_reset(void);
+void      lifecycle_pte_set(uint64_t va, uint64_t value);
+uint64_t *lifecycle_pte_get(uint64_t va);       /* NULL = empty slot */
+
+/* ── COW reference table ─────────────────────────────────────
+ * page_cow_refs() returns the registered count (1 for an unknown
+ * page, preserving the old stub contract) and page_cow_put()
+ * decrements it, counting every call. */
+#define LIFECYCLE_COW_SLOTS 16
+
+void lifecycle_cow_reset(void);
+void lifecycle_cow_set(uint64_t phys, uint16_t refs);
+
+/* ── Sync event log ──────────────────────────────────────────
+ * The order of LOCK / UNLOCK / FLUSH events proves the commit
+ * order required by the spec: PTEs are updated before the flush,
+ * and the flush happens before mm->lock is released. */
+enum {
+    LIFECYCLE_EV_LOCK = 1,
+    LIFECYCLE_EV_UNLOCK = 2,
+    LIFECYCLE_EV_FLUSH = 3,
+};
+
+#define LIFECYCLE_EVENT_SLOTS 64
+
+int  lifecycle_event_count(void);
+int  lifecycle_event_at(int index);
+
+/* PTE value captured when the flush hook fired (0 with *valid = 0
+ * when the VA was not registered at that moment). */
+uint64_t lifecycle_flush_snapshot(uint64_t va, int *valid);
 
 /* Reset all counters + page pool to initial state. */
 void lifecycle_stubs_reset(void);

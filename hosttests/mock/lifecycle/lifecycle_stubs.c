@@ -75,14 +75,13 @@ void *kmalloc(size_t size)        { return malloc(size); }
 size_t kfree(void *ptr)           { free(ptr); return 1; }
 
 /* ── vmm_unmap_4k_page / vmm_pt_walk / vmm_map_4k_page ─────
- * Stubs so vma.c's link succeeds.  The lifecycle test does not
- * invoke do_mmap / do_munmap / do_mprotect — only mm_init_user_heap
- * and vma_free_all.  vma_free_all calls vmm_unmap_4k_page once per
- * 4 KiB page in each VMA range; the heap VMA is zero-length so the
- * loop body never runs.  Provide no-ops anyway.  vmm_map_4k_page and
- * tlb_shootdown are referenced by mm_set_brk (Task 4); the lifecycle
- * test never calls mm_set_brk, but the production vma.c still needs
- * the symbols at link time. */
+ * Stubs so vma.c's link succeeds.  The lifecycle suite drives the
+ * real do_mprotect, so vmm_pt_walk points at a small registry of
+ * fake PTE slots (see the PTE registry below); unregistered VAs are
+ * empty slots and return NULL.  vmm_map_4k_page and tlb_shootdown
+ * are referenced by mm_set_brk (Task 4), which the lifecycle test
+ * never calls, but the production vma.c still needs the symbols at
+ * link time. */
 void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
 {
     (void)pgdir; (void)virt;
@@ -93,11 +92,64 @@ int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     (void)pgdir; (void)phys; (void)virt; (void)flags;
     return 0;
 }
+
+/* ── Fake 4 KiB PTE registry ────────────────────────────────
+ * The mprotect tests only need "a leaf exists at this VA with this
+ * value" and "an absent leaf stays absent", so a flat registry
+ * replaces the four-level walk. */
+typedef struct {
+    uint64_t va;
+    uint64_t value;
+    int      in_use;
+} lifecycle_pte_slot_t;
+
+static lifecycle_pte_slot_t pte_slots[LIFECYCLE_PTE_SLOTS];
+static uint64_t flush_snapshot[LIFECYCLE_PTE_SLOTS];
+static int      flush_snapshot_valid[LIFECYCLE_PTE_SLOTS];
+
+/* Event-log size, reset by lifecycle_stubs_reset(). */
+static int event_count;
+
+void lifecycle_pte_reset(void)
+{
+    memset(pte_slots, 0, sizeof(pte_slots));
+    memset(flush_snapshot, 0, sizeof(flush_snapshot));
+    memset(flush_snapshot_valid, 0, sizeof(flush_snapshot_valid));
+}
+
+void lifecycle_pte_set(uint64_t va, uint64_t value)
+{
+    for (int i = 0; i < LIFECYCLE_PTE_SLOTS; i++) {
+        if (pte_slots[i].in_use && pte_slots[i].va == va) {
+            pte_slots[i].value = value;
+            return;
+        }
+    }
+    for (int i = 0; i < LIFECYCLE_PTE_SLOTS; i++) {
+        if (!pte_slots[i].in_use) {
+            pte_slots[i].in_use = 1;
+            pte_slots[i].va = va;
+            pte_slots[i].value = value;
+            return;
+        }
+    }
+    abort();    /* test bug: registry exhausted */
+}
+
+uint64_t *lifecycle_pte_get(uint64_t va)
+{
+    for (int i = 0; i < LIFECYCLE_PTE_SLOTS; i++) {
+        if (pte_slots[i].in_use && pte_slots[i].va == va)
+            return &pte_slots[i].value;
+    }
+    return NULL;
+}
+
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate)
 {
-    (void)pgdir; (void)virt; (void)flags; (void)allocate;
-    return NULL;
+    (void)pgdir; (void)flags; (void)allocate;
+    return lifecycle_pte_get(virt);
 }
 
 /* mm_set_brk (Task 4) references tlb_shootdown; the lifecycle test
@@ -200,6 +252,9 @@ void lifecycle_stubs_reset(void)
     for (int i = 0; i < LIFECYCLE_PAGE_POOL_SIZE; i++) {
         lifecycle_page_pool[i].in_use = 0;
     }
+    lifecycle_pte_reset();
+    lifecycle_cow_reset();
+    event_count = 0;
 }
 
 lifecycle_page_record_t *lifecycle_find_page(uint64_t phys)
@@ -246,19 +301,124 @@ void free_4k_page(uint64_t phys)
     lifecycle_state.total_frees++;
 }
 
-/* ── vfs_node_get / vfs_node_put — no-op reference counting ──
- * The lifecycle test never inserts a VMA with vm_file != NULL,
- * so the production vma_remove path that calls vfs_node_put is
- * never exercised.  Provide stubs so the link succeeds. */
-vfs_node_t *vfs_node_get(vfs_node_t *node) { return node; }
-void        vfs_node_put(vfs_node_t *node) { (void)node; }
+/* ── vfs_node_get / vfs_node_put — counted no-op references ──
+ * VMAs created by the mprotect split tests carry a fake file node,
+ * so each split's vfs_node_get (and each vma_remove's
+ * vfs_node_put) must be observable.  The node itself is opaque. */
+vfs_node_t *vfs_node_get(vfs_node_t *node)
+{
+    lifecycle_state.vfs_get_calls++;
+    return node;
+}
+void        vfs_node_put(vfs_node_t *node)
+{
+    (void)node;
+    lifecycle_state.vfs_put_calls++;
+}
 
-/* ── page_cow_refs / page_cow_put — no-op ───────────────────
- * The lifecycle test does not exercise do_mprotect, which is the
- * only vma.c path that touches page_cow_refs/put.  Provide stubs
- * so the link succeeds; the test never invokes them. */
-bool     page_cow_put(uint64_t phys)   { (void)phys; return true; }
-uint16_t page_cow_refs(uint64_t phys)  { (void)phys; return 1; }
+/* ── page_cow_refs / page_cow_put — counted COW table ───────
+ * mprotect must NOT allocate or drop COW references any more, so
+ * the tests assert cow_put_calls stays zero while refs are read
+ * (or preserved) across PROT_NONE / PROT_READ / PROT_READ|WRITE
+ * transitions.  Unknown phys keeps the historical "1 reference"
+ * answer so unrelated lifecycle tests are unaffected. */
+typedef struct {
+    uint64_t phys;
+    uint16_t refs;
+    int      in_use;
+} lifecycle_cow_slot_t;
+
+static lifecycle_cow_slot_t cow_slots[LIFECYCLE_COW_SLOTS];
+
+void lifecycle_cow_reset(void)
+{
+    memset(cow_slots, 0, sizeof(cow_slots));
+}
+
+void lifecycle_cow_set(uint64_t phys, uint16_t refs)
+{
+    for (int i = 0; i < LIFECYCLE_COW_SLOTS; i++) {
+        if (cow_slots[i].in_use && cow_slots[i].phys == phys) {
+            cow_slots[i].refs = refs;
+            return;
+        }
+    }
+    for (int i = 0; i < LIFECYCLE_COW_SLOTS; i++) {
+        if (!cow_slots[i].in_use) {
+            cow_slots[i].in_use = 1;
+            cow_slots[i].phys = phys;
+            cow_slots[i].refs = refs;
+            return;
+        }
+    }
+    abort();    /* test bug: COW table exhausted */
+}
+
+bool page_cow_put(uint64_t phys)
+{
+    lifecycle_state.cow_put_calls++;
+    for (int i = 0; i < LIFECYCLE_COW_SLOTS; i++) {
+        if (cow_slots[i].in_use && cow_slots[i].phys == phys) {
+            if (cow_slots[i].refs > 0)
+                cow_slots[i].refs--;
+            return cow_slots[i].refs == 0;
+        }
+    }
+    return true;    /* historical stub answer for an unregistered page */
+}
+
+uint16_t page_cow_refs(uint64_t phys)
+{
+    for (int i = 0; i < LIFECYCLE_COW_SLOTS; i++)
+        if (cow_slots[i].in_use && cow_slots[i].phys == phys)
+            return cow_slots[i].refs;
+    return 1;
+}
+
+/* ── Sync event log (mprotect commit ordering) ──────────────
+ * spin_lock/spin_unlock/arch_flush_tlb_all are redirected here by
+ * lifecycle_runtime.h.  The flush hook also snapshots every
+ * registered PTE, so a test can prove the PTE writes preceded the
+ * TLB sync and that the sync preceded the unlock. */
+static int event_log[LIFECYCLE_EVENT_SLOTS];
+
+static void record_event(int kind)
+{
+    if (event_count < LIFECYCLE_EVENT_SLOTS)
+        event_log[event_count++] = kind;
+}
+
+void lifecycle_sync_lock(void)   { lifecycle_state.lock_count++;   record_event(LIFECYCLE_EV_LOCK); }
+void lifecycle_sync_unlock(void) { lifecycle_state.unlock_count++; record_event(LIFECYCLE_EV_UNLOCK); }
+
+void lifecycle_sync_flush(void)
+{
+    lifecycle_state.flush_count++;
+    for (int i = 0; i < LIFECYCLE_PTE_SLOTS; i++) {
+        flush_snapshot_valid[i] = pte_slots[i].in_use;
+        flush_snapshot[i] = pte_slots[i].in_use ? pte_slots[i].value : 0;
+    }
+    record_event(LIFECYCLE_EV_FLUSH);
+}
+
+int lifecycle_event_count(void) { return event_count; }
+int lifecycle_event_at(int index)
+{
+    if (index < 0 || index >= event_count) return 0;
+    return event_log[index];
+}
+
+uint64_t lifecycle_flush_snapshot(uint64_t va, int *valid)
+{
+    for (int i = 0; i < LIFECYCLE_PTE_SLOTS; i++) {
+        if (pte_slots[i].in_use && pte_slots[i].va == va) {
+            if (valid) *valid = flush_snapshot_valid[i];
+            return flush_snapshot[i];
+        }
+    }
+    if (valid) *valid = 0;
+    return 0;
+}
 
 /* ── prepare_user_write_range_locked — WEAK fallback ──────────
  * Task 7: vma.c's user_write_range_begin now delegates to

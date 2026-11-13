@@ -798,6 +798,300 @@ static void test_do_mprotect_vma_io_rejected(void)
     list_del(&io_vma.list);
 }
 
+/* ── do_mprotect subrange / atomicity / COW-stash tests ──────
+ * Plan: docs/superpowers/plans/2026-11-13-x86-mprotect-range.md.
+ *
+ * The production do_mprotect must:
+ *   - only change permissions inside the requested half-open range;
+ *   - split interior boundaries, keeping each neighbour's original
+ *     permissions and advancing the file segment's vm_pgoff;
+ *   - refuse every failure BEFORE the first visible modification
+ *     (VMA nodes, PTEs, file references);
+ *   - keep a COW leaf's PA, COW marker and hardware read-only state
+ *     across PROT_NONE -> R -> RW (no eager private copy). */
+
+#define MPROTECT_BASE       0x50000000UL
+#define MPROTECT_ADDR_LIMIT 0x60000000UL
+
+static int fake_file_node;
+
+static void setup_mprotect(void)
+{
+    setup_mm();
+    current_task_for_host_test()->mm = &fixture_mm;
+    current_task_for_host_test()->addr_limit = MPROTECT_ADDR_LIMIT;
+    lifecycle_pte_reset();
+    lifecycle_cow_reset();
+    kmalloc_calls = 0;
+    kmalloc_fail_after = 0;
+}
+
+/* Install a [start, start+len) file-backed VMA with pgoff.  The
+ * mapping takes the file reference a real do_mmap would hold. */
+static vma_t *install_mprotect_vma(uint64_t start, uint64_t len,
+                                   uint64_t pgoff)
+{
+    vma_t *v = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(v);
+    memset(v, 0, sizeof(*v));
+    list_init(&v->list);
+    v->vm_start     = start;
+    v->vm_end       = start + len;
+    v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE;
+    v->vm_page_prot = PAGE_USER_PTE;
+    v->vm_pgoff     = pgoff;
+    v->vm_file      = (vfs_node_t *)&fake_file_node;
+    vfs_node_get(v->vm_file);
+    assert_eq(0, vma_insert(&fixture_mm, v));
+    return v;
+}
+
+static void test_mprotect_split_range(void)
+{
+    TEST_SUITE("do_mprotect — subrange split keeps neighbours and pgoff");
+
+    setup_mprotect();
+    uint64_t p0 = alloc_4k_page();
+    uint64_t p1 = alloc_4k_page();
+    uint64_t p2 = alloc_4k_page();
+    assert_true(p0 && p1 && p2);
+    lifecycle_pte_set(MPROTECT_BASE,            p0 | PAGE_USER_PTE);
+    lifecycle_pte_set(MPROTECT_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+    lifecycle_pte_set(MPROTECT_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+
+    vma_t *orig = install_mprotect_vma(MPROTECT_BASE, 0x3000, 7);
+    int allocs_before = lifecycle_state.total_allocs;
+    int gets_before   = lifecycle_state.vfs_get_calls;
+    int cow_before    = lifecycle_state.cow_put_calls;
+
+    /* Protect only the middle page. */
+    assert_eq(0, do_mprotect(MPROTECT_BASE + 0x1000UL, 0x1000UL,
+                             PROT_READ));
+
+    /* Three contiguous segments, pgoff 7/8/9, original refs kept. */
+    assert_eq(3, vma_list_count(&fixture_mm.vma_list));
+    vma_t *v0 = vma_list_get(&fixture_mm.vma_list, 0);
+    vma_t *v1 = vma_list_get(&fixture_mm.vma_list, 1);
+    vma_t *v2 = vma_list_get(&fixture_mm.vma_list, 2);
+    assert_not_null(v0);
+    assert_not_null(v1);
+    assert_not_null(v2);
+    /* A missing segment must fail the test, not crash the suite. */
+    if (!v0 || !v1 || !v2) return;
+    assert_true(v0 == orig);
+    assert_eq(MPROTECT_BASE, v0->vm_start);
+    assert_eq(MPROTECT_BASE + 0x1000UL, v0->vm_end);
+    assert_eq(MPROTECT_BASE + 0x1000UL, v1->vm_start);
+    assert_eq(MPROTECT_BASE + 0x2000UL, v1->vm_end);
+    assert_eq(MPROTECT_BASE + 0x2000UL, v2->vm_start);
+    assert_eq(MPROTECT_BASE + 0x3000UL, v2->vm_end);
+    assert_eq(7, v0->vm_pgoff);
+    assert_eq(8, v1->vm_pgoff);
+    assert_eq(9, v2->vm_pgoff);
+    assert_not_null(v0->vm_file);
+    assert_not_null(v1->vm_file);
+    assert_not_null(v2->vm_file);
+    /* One reference for the original mapping + one per split segment. */
+    assert_eq(gets_before + 2, lifecycle_state.vfs_get_calls);
+
+    /* Only the middle segment's logical permissions changed. */
+    assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v0->vm_flags);
+    assert_eq((uint64_t)VMA_PROT_READ, v1->vm_flags);
+    assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v2->vm_flags);
+    assert_eq((uint64_t)PAGE_USER_PTE, v0->vm_page_prot);
+    assert_eq((uint64_t)PAGE_USER_PTE_RO, v1->vm_page_prot);
+    assert_eq((uint64_t)PAGE_USER_PTE, v2->vm_page_prot);
+
+    /* Only the middle leaf changed; PA is never reallocated. */
+    assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MPROTECT_BASE));
+    assert_eq(p1 | PAGE_USER_PTE_RO,
+              *lifecycle_pte_get(MPROTECT_BASE + 0x1000UL));
+    assert_eq(p2 | PAGE_USER_PTE,
+              *lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));
+    assert_eq(allocs_before, lifecycle_state.total_allocs);
+    assert_eq(cow_before, lifecycle_state.cow_put_calls);
+
+    /* Commit order: PTE writes -> TLB sync -> unlock.  The flush
+     * snapshot proves the leaf already held its final value when
+     * arch_flush_tlb_all() ran. */
+    int n = lifecycle_event_count();
+    assert_true(n >= 3);
+    assert_eq(LIFECYCLE_EV_FLUSH, lifecycle_event_at(n - 2));
+    assert_eq(LIFECYCLE_EV_UNLOCK, lifecycle_event_at(n - 1));
+    int valid = 0;
+    uint64_t snap = lifecycle_flush_snapshot(MPROTECT_BASE + 0x1000UL,
+                                             &valid);
+    assert_eq(1, valid);
+    assert_eq(p1 | PAGE_USER_PTE_RO, snap);
+
+    /* ── Argument / contract rejections ── */
+    /* Unaligned start. */
+    assert_eq(-EINVAL, do_mprotect(MPROTECT_BASE + 1, 0x1000UL,
+                                   PROT_READ));
+    /* Length rounding overflow (UINT64_MAX rounds to zero). */
+    assert_eq(-EINVAL, do_mprotect(MPROTECT_BASE, UINT64_MAX, PROT_READ));
+    /* Range end beyond the exclusive addr_limit. */
+    current_task_for_host_test()->addr_limit = MPROTECT_BASE + 0x2000UL;
+    assert_eq(-EINVAL, do_mprotect(MPROTECT_BASE + 0x1000UL, 0x2000UL,
+                                   PROT_READ));
+    current_task_for_host_test()->addr_limit = MPROTECT_ADDR_LIMIT;
+    /* Unknown high prot bits. */
+    assert_eq(-EINVAL, do_mprotect(MPROTECT_BASE, 0x1000UL,
+                                   (1ULL << 32) | PROT_READ));
+    /* Reserved window (start_brk makes the predicate active). */
+    fixture_mm.start_brk = 0x800000UL;
+    assert_eq(-EINVAL, do_mprotect(USER_CODE_ADDR, 0x1000UL, PROT_READ));
+    fixture_mm.start_brk = 0;
+    /* Hole inside the user range. */
+    assert_eq(-ENOMEM, do_mprotect(0x51000000UL, 0x1000UL, PROT_READ));
+    /* VMA_IO mapping. */
+    vma_t io_vma;
+    memset(&io_vma, 0, sizeof(io_vma));
+    io_vma.vm_start = 0x52000000UL;
+    io_vma.vm_end   = 0x52001000UL;
+    io_vma.vm_flags = VMA_IO | VMA_PROT_READ;
+    io_vma.vm_page_prot = PAGE_USER | PAGE_VALID;
+    list_init(&io_vma.list);
+    list_add_to_before(&fixture_mm.vma_list, &io_vma.list);
+    assert_eq(-EPERM, do_mprotect(0x52000000UL, 0x1000UL, PROT_READ));
+    assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
+    list_del(&io_vma.list);
+
+    vma_remove(&fixture_mm, v0);
+    vma_remove(&fixture_mm, v1);
+    vma_remove(&fixture_mm, v2);
+
+    /* A file VMA whose offset window is not representable is rejected
+     * before any split, and its state stays byte-for-byte intact. */
+    setup_mprotect();
+    vma_t *bad = install_mprotect_vma(MPROTECT_BASE, 0x3000, 7);
+    uint64_t bad_pgoff = (UINT64_MAX >> PAGE_4K_SHIFT) + 1;
+    bad->vm_pgoff = bad_pgoff;
+    int gets = lifecycle_state.vfs_get_calls;
+    assert_eq(-EINVAL,
+              do_mprotect(MPROTECT_BASE + 0x1000UL, 0x1000UL, PROT_READ));
+    assert_eq(1, vma_list_count(&fixture_mm.vma_list));
+    assert_eq(bad_pgoff, bad->vm_pgoff);
+    assert_eq(MPROTECT_BASE + 0x3000UL, bad->vm_end);
+    assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), bad->vm_flags);
+    assert_eq(gets, lifecycle_state.vfs_get_calls);
+    assert_eq(0, lifecycle_state.flush_count);
+    vma_remove(&fixture_mm, bad);
+}
+
+static void test_mprotect_split_oom(void)
+{
+    TEST_SUITE("do_mprotect — split allocation failure is atomic");
+
+    /* The interior-split case needs two new nodes: fail the first
+     * and the second allocation in turn. */
+    for (int fail_after = 1; fail_after <= 2; fail_after++) {
+        setup_mprotect();
+        uint64_t p0 = alloc_4k_page();
+        uint64_t p1 = alloc_4k_page();
+        uint64_t p2 = alloc_4k_page();
+        assert_true(p0 && p1 && p2);
+        lifecycle_pte_set(MPROTECT_BASE,            p0 | PAGE_USER_PTE);
+        lifecycle_pte_set(MPROTECT_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+        lifecycle_pte_set(MPROTECT_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+
+        vma_t *orig = install_mprotect_vma(MPROTECT_BASE, 0x3000, 7);
+        uint64_t orig_end    = orig->vm_end;
+        uint64_t orig_flags  = orig->vm_flags;
+        uint64_t orig_prot   = orig->vm_page_prot;
+        uint64_t orig_pgoff  = orig->vm_pgoff;
+        int gets_before  = lifecycle_state.vfs_get_calls;
+        int puts_before  = lifecycle_state.vfs_put_calls;
+        int allocs_before = lifecycle_state.total_allocs;
+
+        kmalloc_calls = 0;
+        kmalloc_fail_after = fail_after;
+        int64_t rc = do_mprotect(MPROTECT_BASE + 0x1000UL, 0x1000UL,
+                                 PROT_READ);
+        kmalloc_fail_after = 0;
+
+        assert_eq(-ENOMEM, rc);
+        /* VMA list, node identity and metadata untouched. */
+        assert_eq(1, vma_list_count(&fixture_mm.vma_list));
+        assert_true(vma_list_get(&fixture_mm.vma_list, 0) == orig);
+        assert_eq(orig_end, orig->vm_end);
+        assert_eq(orig_flags, orig->vm_flags);
+        assert_eq(orig_prot, orig->vm_page_prot);
+        assert_eq(orig_pgoff, orig->vm_pgoff);
+        /* PTEs, references and pages untouched; no commit happened. */
+        assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MPROTECT_BASE));
+        assert_eq(p1 | PAGE_USER_PTE,
+                  *lifecycle_pte_get(MPROTECT_BASE + 0x1000UL));
+        assert_eq(p2 | PAGE_USER_PTE,
+                  *lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));
+        assert_eq(gets_before, lifecycle_state.vfs_get_calls);
+        assert_eq(puts_before, lifecycle_state.vfs_put_calls);
+        assert_eq(allocs_before, lifecycle_state.total_allocs);
+        assert_eq(0, lifecycle_state.flush_count);
+        assert_eq(0, lifecycle_state.cow_put_calls);
+
+        vma_remove(&fixture_mm, orig);
+    }
+}
+
+static void test_mprotect_cow_stash_restore(void)
+{
+    TEST_SUITE("do_mprotect — COW leaves keep PA, COW and hardware RO");
+
+    setup_mprotect();
+    uint64_t cow_phys  = alloc_4k_page();
+    uint64_t norm_phys = alloc_4k_page();
+    assert_true(cow_phys && norm_phys);
+    lifecycle_cow_set(cow_phys, 2);     /* shared with one other owner */
+    lifecycle_pte_set(MPROTECT_BASE, cow_phys | PAGE_USER_PTE | PAGE_COW);
+    lifecycle_pte_set(MPROTECT_BASE + 0x1000UL, norm_phys | PAGE_USER_PTE);
+    /* The third page stays an empty (never faulted) slot. */
+
+    vma_t *v = install_mprotect_vma(MPROTECT_BASE, 0x3000, 0);
+    int allocs_before = lifecycle_state.total_allocs;
+
+    uint64_t *cow_pte  = lifecycle_pte_get(MPROTECT_BASE);
+    uint64_t *norm_pte = lifecycle_pte_get(MPROTECT_BASE + 0x1000UL);
+    assert_not_null(cow_pte);
+    assert_not_null(norm_pte);
+
+    /* PROT_NONE: stash the PA, keep the COW marker, clear present. */
+    assert_eq(0, do_mprotect(MPROTECT_BASE, 0x3000UL, PROT_NONE));
+    assert_eq(cow_phys | PAGE_USER | PAGE_PROTNONE | PAGE_COW, *cow_pte);
+    assert_eq(norm_phys | PAGE_USER | PAGE_PROTNONE, *norm_pte);
+    assert_false(*cow_pte & PAGE_VALID);
+    assert_false(*norm_pte & PAGE_VALID);
+    assert_eq(0, lifecycle_state.cow_put_calls);
+    assert_eq(allocs_before, lifecycle_state.total_allocs);
+
+    /* PROT_READ: present again, hardware read-only, COW kept. */
+    assert_eq(0, do_mprotect(MPROTECT_BASE, 0x3000UL, PROT_READ));
+    assert_eq(cow_phys | PAGE_USER | PAGE_VALID | PAGE_COW, *cow_pte);
+    assert_eq(norm_phys | PAGE_USER | PAGE_VALID, *norm_pte);
+    assert_eq(0, lifecycle_state.cow_put_calls);
+
+    /* PROT_READ|PROT_WRITE: the COW leaf stays hardware read-only
+     * with its COW marker; the ordinary leaf becomes writable. */
+    assert_eq(0, do_mprotect(MPROTECT_BASE, 0x3000UL,
+                             PROT_READ | PROT_WRITE));
+    assert_eq(cow_phys | PAGE_USER | PAGE_VALID | PAGE_COW, *cow_pte);
+    assert_false(*cow_pte & PAGE_WRITE);
+    assert_true(*cow_pte & PAGE_VALID);
+    assert_eq(norm_phys | PAGE_USER_PTE, *norm_pte);
+    assert_eq(0, lifecycle_state.cow_put_calls);
+    assert_eq(allocs_before, lifecycle_state.total_allocs);
+
+    /* The VMA's logical permissions are restored even though the
+     * shared leaf stays read-only in hardware. */
+    assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v->vm_flags);
+    assert_eq((uint64_t)PAGE_USER_PTE, v->vm_page_prot);
+
+    /* The never-faulted slot is still empty. */
+    assert_null(lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));
+
+    vma_remove(&fixture_mm, v);
+}
+
 /* ── Test list ─────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -821,6 +1115,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_sys_exec_old_mm_retained_until_switch),
     TEST_ENTRY(test_sys_exec_uses_destroy_helper),
     TEST_ENTRY(test_do_mprotect_vma_io_rejected),
+    TEST_ENTRY(test_mprotect_split_range),
+    TEST_ENTRY(test_mprotect_split_oom),
+    TEST_ENTRY(test_mprotect_cow_stash_restore),
 TEST_LIST_END
 
 int main(void)

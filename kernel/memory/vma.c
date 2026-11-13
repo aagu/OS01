@@ -437,11 +437,15 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
 }
 
 // ── Helper: convert prot/flags to vm_page_prot flags ──────────
-static int prot_to_page_flags(int prot, uint64_t *page_prot, uint64_t *vm_flags)
+// The raw value stays uint64_t end-to-end: the syscall entry accepts
+// any 64-bit word, and narrowing to int first would silently accept
+// the unknown high bits the contract rejects ((1ULL<<32)|PROT_READ).
+static int prot_to_page_flags(uint64_t prot, uint64_t *page_prot,
+                              uint64_t *vm_flags)
 {
     *vm_flags = 0;
 
-    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+    if (prot & ~(uint64_t)(PROT_READ | PROT_WRITE | PROT_EXEC))
         return -EINVAL;
 
     // x86: reject pure PROT_WRITE first (hardware can't do write-only)
@@ -615,6 +619,12 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     length = PAGE_4K_ALIGN(length);
     if (!length) return -EINVAL;
 
+    // The page-aligned file window must stay representable in
+    // uint64_t: the demand-fault path (and a later split) computes
+    // file offsets from offset + rounded length.
+    if (!(flags & MAP_ANONYMOUS) && offset > UINT64_MAX - length)
+        return -EINVAL;
+
     uint64_t search = current->mm->mmap_base;
     vma_t *prev = NULL;
     list_t *pos = current->mm->vma_list.next;
@@ -660,7 +670,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
 
     // ── 3. prot → page flags ───────────────────────────
     uint64_t page_prot, vm_flags_base;
-    int rc = prot_to_page_flags((int)prot, &page_prot, &vm_flags_base);
+    int rc = prot_to_page_flags(prot, &page_prot, &vm_flags_base);
     if (rc) return rc;
     map_flags_to_vm((int)flags, &vm_flags_base);
 
@@ -741,17 +751,77 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     return (int64_t)addr;
 }
 
+// ── do_mprotect helpers ───────────────────────────────────────
+
+// A file-backed VMA's offset window must be representable in uint64_t
+// before the mapping is split: the right segment derives its pgoff
+// from the original start, and the demand-fault path turns that pgoff
+// back into a byte offset.
+static bool vma_file_window_valid(const vma_t *v)
+{
+    if (!v->vm_file)
+        return true;
+    if (v->vm_pgoff > (UINT64_MAX >> PAGE_4K_SHIFT))
+        return false;
+    uint64_t off = v->vm_pgoff << PAGE_4K_SHIFT;
+    uint64_t len = v->vm_end - v->vm_start;
+    return off <= UINT64_MAX - len;
+}
+
+// Split `left` at `at` (left->vm_start < at < left->vm_end).
+// `right` is preallocated by the caller; on success it joins mm and
+// owns one file reference.  This routine allocates nothing and cannot
+// fail, so the caller may run both boundary splits only AFTER every
+// fallible preparation step succeeded.
+static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
+                             vma_t *right)
+{
+    memcpy(right, left, sizeof(vma_t));
+    list_init(&right->list);
+    right->vm_start = at;
+    right->vm_end   = left->vm_end;
+    if (left->vm_file) {
+        right->vm_pgoff = left->vm_pgoff +
+                          ((at - left->vm_start) >> PAGE_4K_SHIFT);
+        vfs_node_get(right->vm_file);
+    }
+    left->vm_end = at;
+    vma_insert(mm, right);
+}
+
 // ── do_mprotect ───────────────────────────────────────────────
+// Half-open range [addr, addr+length).  Only VMAs/leaves inside the
+// range change; interior boundaries are split so neighbours keep
+// their original permissions.  Every fallible step (argument checks,
+// coverage, node allocation, file-window validation) precedes the
+// first visible modification, so a failure leaves VMA nodes, file
+// references, PTEs, PAs, COW counts and contents untouched.
+//
+// COW leaves keep their PA and COW marker.  A logical write grant
+// still leaves the shared leaf hardware read-only: the first write
+// takes the existing #PF (or kernel write-preparation) privatization
+// path.  mprotect itself never allocates a private copy and never
+// drops a COW reference.
 int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 {
-    addr   = PAGE_4K_ALIGN(addr);
-    length = PAGE_4K_ALIGN(length);
+    // ── Argument validation (no mutation before all pass) ──
+    if (addr & (PAGE_4K_SIZE - 1))          // start must be 4 KiB aligned
+        return -EINVAL;
     if (length == 0)
         return -EINVAL;
-    if (addr + length < addr)  // overflow
+    uint64_t rounded = PAGE_4K_ALIGN(length);
+    if (rounded < length)                   // rounding overflow
         return -EINVAL;
+    if (addr > UINT64_MAX - rounded)        // end overflow
+        return -EINVAL;
+    uint64_t end = addr + rounded;
 
-    uint64_t end = addr + length;
+    if (addr < USER_MIN_ADDR)
+        return -EINVAL;
+    if (!current->mm)
+        return -EINVAL;
+    if (end > current->addr_limit)
+        return -EINVAL;
 
     // Task 5: reject before any VMA flag / prot / PTE change —
     // mprotect must never be able to strip protections from the
@@ -760,25 +830,26 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         return -EINVAL;
 
     uint64_t new_page_prot, new_vm_flags;
-    int rc = prot_to_page_flags((int)prot, &new_page_prot, &new_vm_flags);
+    int rc = prot_to_page_flags(prot, &new_page_prot, &new_vm_flags);
     if (rc) return rc;
 
-    spin_lock(&current->mm->lock);
+    mm_t *mm = current->mm;
+    spin_lock(&mm->lock);
 
-    // Pre-scan: verify no holes and no VMA_IO across the whole target range
-    // before modifying any VMA or PTE.
+    // Pre-scan: verify no holes and no VMA_IO across the whole target
+    // range before modifying any VMA or PTE.
     uint64_t scan_addr = addr;
-    list_t *scan_pos = current->mm->vma_list.next;
-    while (scan_pos != &current->mm->vma_list) {
+    list_t *scan_pos = mm->vma_list.next;
+    while (scan_pos != &mm->vma_list) {
         vma_t *v = container_of(scan_pos, vma_t, list);
         if (v->vm_end <= scan_addr) { scan_pos = scan_pos->next; continue; }
         if (v->vm_start >= end) break;
         if (v->vm_start > scan_addr) {
-            spin_unlock(&current->mm->lock);
+            spin_unlock(&mm->lock);
             return -ENOMEM;
         }
         if (v->vm_flags & VMA_IO) {
-            spin_unlock(&current->mm->lock);
+            spin_unlock(&mm->lock);
             return -EPERM;
         }
         scan_addr = v->vm_end;
@@ -786,88 +857,101 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         scan_pos = scan_pos->next;
     }
     if (scan_addr < end) {
-        spin_unlock(&current->mm->lock);
+        spin_unlock(&mm->lock);
         return -ENOMEM;
     }
 
-    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
-    uint64_t deferred_free_head = 0;
+    // ── Fallible preparation (nothing visible yet) ──
+    // At most two new boundary nodes.  A node holding both requested
+    // boundaries is split at addr first; the resulting right segment
+    // is then split again at end.
+    vma_t *first = vma_find(mm, addr);
+    vma_t *last  = vma_find(mm, end - 1);
+    bool need_start = first && first->vm_start < addr;
+    bool need_end   = last && last->vm_end > end;
 
-    list_t *pos = current->mm->vma_list.next;
-    while (pos != &current->mm->vma_list) {
+    // Existing file mappings must have a representable offset window
+    // before they can be split.  A node that owns both boundaries is
+    // validated once by each condition (harmless duplicate).
+    if (need_start && !vma_file_window_valid(first)) {
+        spin_unlock(&mm->lock);
+        return -EINVAL;
+    }
+    if (need_end && !vma_file_window_valid(last)) {
+        spin_unlock(&mm->lock);
+        return -EINVAL;
+    }
+
+    vma_t *start_node = need_start ? (vma_t *)kmalloc(sizeof(vma_t)) : NULL;
+    if (need_start && !start_node) {
+        spin_unlock(&mm->lock);
+        return -ENOMEM;
+    }
+    vma_t *end_node = need_end ? (vma_t *)kmalloc(sizeof(vma_t)) : NULL;
+    if (need_end && !end_node) {
+        if (start_node) kfree(start_node);
+        spin_unlock(&mm->lock);
+        return -ENOMEM;
+    }
+
+    // ── Commit: splits, then VMA/PTE permissions ──
+    if (need_start)
+        split_vma_locked(mm, first, addr, start_node);
+    if (need_end) {
+        vma_t *tail = vma_find(mm, end - 1);
+        if (tail && tail->vm_end > end)
+            split_vma_locked(mm, tail, end, end_node);
+        else
+            kfree(end_node);     // defensive: coverage scan said otherwise
+    }
+
+    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+
+    list_t *pos = mm->vma_list.next;
+    while (pos != &mm->vma_list) {
         vma_t *v = container_of(pos, vma_t, list);
-        if (v->vm_end <= addr)   { pos = pos->next; continue; }
-        if (v->vm_start >= end)  break;
+        pos = pos->next;
+        if (v->vm_end <= addr)  continue;
+        if (v->vm_start >= end) break;
 
-        // Update VMA
+        // The boundary splits above guarantee every overlapping VMA
+        // now lies entirely inside [addr, end).
         v->vm_flags     &= ~(VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC);
         v->vm_flags     |= new_vm_flags;
         v->vm_page_prot  = new_page_prot;
 
-        // Update existing PTEs
-        uint64_t va_start = (addr > v->vm_start) ? addr : v->vm_start;
-        uint64_t va_end   = (end < v->vm_end) ? end : v->vm_end;
-        for (uint64_t va = va_start; va < va_end; va += PAGE_4K_SIZE) {
+        for (uint64_t va = v->vm_start; va < v->vm_end;
+             va += PAGE_4K_SIZE) {
             uint64_t *pte = vmm_pt_walk(user_pgd, va, 0, 0);
-            if (!pte) continue;
+            if (!pte) continue;                      // empty slot stays empty
             if (!(*pte & (PAGE_VALID | PAGE_PROTNONE))) continue;
 
             uint64_t phys = *pte & PAGE_4K_MASK;
 
             if (prot == PROT_NONE) {
-                // Stash phys for later restore.
-                // Preserve PAGE_COW if set — we keep our COW reference.
+                // Stash the PA for later restore.  Keep the COW
+                // marker and our reference — no private copy here.
                 uint64_t stash = phys | PAGE_USER | PAGE_PROTNONE;
                 if (*pte & PAGE_COW)
                     stash |= PAGE_COW;
                 *pte = stash;
+            } else if (*pte & PAGE_COW) {
+                // Shared leaf: keep COW and force hardware read-only,
+                // regardless of the logical write grant.  The first
+                // write privatizes through the #PF path.
+                *pte = phys | (new_page_prot & ~PAGE_WRITE) | PAGE_COW;
             } else {
-                // Restoring from PROTNONE or changing existing mapping.
-                // Check COW before blindly applying new_page_prot.
-                if (*pte & PAGE_COW) {
-                    if (page_cow_refs(phys) > 1) {
-                        // Multiple sharers: allocate private copy
-                        uint64_t new_phys = alloc_4k_page();
-                        if (!new_phys) continue; // OOM: skip this page
-                        memcpy((void *)Phy_To_Virt(new_phys),
-                               (void *)Phy_To_Virt(phys), PAGE_4K_SIZE);
-                        bool last = page_cow_put(phys);
-                        *pte = new_phys | new_page_prot;
-                        if (last) {
-                            *(uint64_t *)Phy_To_Virt(phys) = deferred_free_head;
-                            deferred_free_head = phys;
-                        }
-                    } else {
-                        // Last sharer: promote in-place
-                        (void)page_cow_put(phys);
-                        *pte = phys | new_page_prot;
-                    }
-                } else if (*pte & PAGE_PROTNONE) {
-                    // Non-COW PROTNONE restore
-                    *pte = phys | new_page_prot;
-                } else {
-                    *pte = phys | new_page_prot;
-                }
+                *pte = phys | new_page_prot;
             }
         }
-
-        addr = v->vm_end;
-        if (addr >= end) break;
-        pos = pos->next;
     }
 
-    spin_unlock(&current->mm->lock);
-
+    // Synchronize before releasing mm->lock: all PTE writes are
+    // visible and stale translations are gone before the new VMA
+    // permissions can be observed.
     flush_tlb();
-    while (deferred_free_head) {
-        uint64_t next = *(uint64_t *)Phy_To_Virt(deferred_free_head);
-        free_4k_page(deferred_free_head);
-        deferred_free_head = next;
-    }
 
-    if (addr < end)
-        return -ENOMEM;
-
+    spin_unlock(&mm->lock);
     return 0;
 }
 

@@ -869,8 +869,13 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					kill_current_user_task(regs, SIGSEGV);
 					return;
 				}
+				/* File reads are page-granular: the page
+				 * base VA (cr2 aligned down) minus the
+				 * VMA start, never the faulting byte
+				 * offset — otherwise the whole page is
+				 * loaded shifted by (cr2 & 0xFFF). */
 				uint64_t file_off =
-				    (cr2 - vma->vm_start)
+				    ((cr2 & PAGE_4K_MASK) - vma->vm_start)
 				    + (vma->vm_pgoff << PAGE_4K_SHIFT);
 				int n = vfs_read(vma->vm_file, file_off,
 						  PAGE_4K_SIZE,
