@@ -654,6 +654,141 @@ void test_fork_mmap_cow_isolation(void)
     munmap(m1, 0x1000);
 }
 
+// ── mprotect 子区间 + COW 保留（2026-11-13 plan 任务 2）─────
+// 三页 RW 匿名映射只预触中页。fork 后子进程把中页设为只读：
+//   * getrandom 走内核代写路径，必须按 VMA 逻辑权限拒绝（EFAULT）；
+//   * 左右两页（fork 时仍未驻留）的首次写入仍成功 —— 证明拆分没有
+//     把邻居 VMA 一起改成只读；
+//   * 中页 NONE -> RW 后再写，父进程仍看到 fork 前的字节 —— 证明
+//     mprotect 保留 COW 引用，私有化延迟到第一次真正写入。
+// 随后用四页文件映射验证拆分后的文件段偏移：保护第 2 页造成右段
+// 起点前移，右段首次缺页读必须按页首 VA 计算文件偏移（页内 +37
+// 读到原文件对应字节，而不是整体错位 37 字节）。
+void test_mprotect_subrange_cow(void)
+{
+    /* ── A. 匿名三页：中页 COW 语义 ── */
+    unsigned char *p = mmap(NULL, 0x3000, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        FAIL("mprotect_subrange", "setup mmap failed errno=%d", errno);
+        return;
+    }
+    p[0x1000] = 0x5A;           /* 只预触中页 */
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("mprotect_subrange", "fork failed errno=%d", errno);
+        munmap(p, 0x3000);
+        return;
+    }
+    if (pid == 0) {
+        /* 子进程：错误路径直接 _exit，父进程只等状态，不读管道。 */
+        if (mprotect(p + 0x1000, 0x1000, PROT_READ) != 0)
+            _exit(10);
+        errno = 0;
+        ssize_t g = getrandom(p + 0x1000, 1, 0);
+        if (g != -1 || errno != EFAULT)
+            _exit(11);
+        /* 左右页在 fork 时未驻留；首次写入必须仍然成功。 */
+        p[0] = 0x4C;
+        p[0x2000] = 0x52;
+        if (p[0] != 0x4C || p[0x2000] != 0x52)
+            _exit(12);
+        /* 中页 NONE -> RW 后写入：COW 必须在首次写时私有化。 */
+        if (mprotect(p + 0x1000, 0x1000, PROT_NONE) != 0)
+            _exit(13);
+        if (mprotect(p + 0x1000, 0x1000,
+                     PROT_READ | PROT_WRITE) != 0)
+            _exit(14);
+        p[0x1000] = 0xC7;
+        if (p[0x1000] != 0xC7)
+            _exit(15);
+        _exit(0);
+    }
+
+    int st = 0;
+    int64_t waited = waitpid(pid, &st, 0);
+    CHECKF(waited == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+           "mprotect_subrange_child", "pid=%ld waited=%ld status=%#x",
+           "want waited==pid && WIFEXITED&&0, pid=%ld waited=%ld status=%#x",
+           (long)pid, (long)waited, st);
+
+    /* 父进程保持映射，等子进程退出后再读。 */
+    CHECKF(p[0x1000] == 0x5A, "mprotect_subrange_parent_mid",
+           "parent middle byte=%#x", "want 0x5a, got %#x", p[0x1000]);
+    /* 左右页父进程从未写过：应为按需零页，而不是子进程的字节。 */
+    CHECKF(p[0] == 0 && p[0x2000] == 0,
+           "mprotect_subrange_parent_absent",
+           "parent absent pages zero", "got left=%#x right=%#x",
+           p[0], p[0x2000]);
+    CHECK3(munmap(p, 0x3000) == 0, "mprotect_subrange_release",
+           "anon range released");
+
+    /* ── B. 四页文件：拆分后右段首次读 +37 ── */
+    const char *path = "/tmp/t_mprot_range";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        FAIL("mprotect_file", "create file failed errno=%d", errno);
+        return;
+    }
+    unsigned char page[4096];
+    int wrote = 1;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4096; j++)
+            page[j] = (unsigned char)(i * 64 + (j & 0x3F));
+        if (write(fd, page, 4096) != 4096) {
+            wrote = 0;
+            break;
+        }
+    }
+    close(fd);
+    if (!wrote) {
+        FAIL("mprotect_file", "write file failed");
+        unlink(path);
+        return;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        FAIL("mprotect_file", "re-open file failed errno=%d", errno);
+        unlink(path);
+        return;
+    }
+    unsigned char *f = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (f == MAP_FAILED) {
+        FAIL("mprotect_file", "file mmap failed errno=%d", errno);
+        unlink(path);
+        return;
+    }
+
+    /* 保护第 2 页：左段 [p0,p1) 保持 pgoff 0，右段 [p2,p4) 变 pgoff 2。 */
+    int ok_split = (mprotect(f + 0x1000, 0x1000, PROT_READ) == 0);
+    CHECK3(ok_split, "mprotect_file_split",
+           "middle page split off and set read-only");
+
+    /* 右段首次读：页 3、页内 +37。拆分后 vm_start=p2，pgoff=2；
+     * 只有在缺页路径按页首 VA 计算偏移时才读到原文件 0x3000+37。 */
+    unsigned char got_right = f[0x3000 + 37];
+    unsigned char want_right = (unsigned char)(3 * 64 + (37 & 0x3F));
+    CHECKF(got_right == want_right, "mprotect_file_right_offset",
+           "right segment byte=%#x", "want %#x, got %#x (page shifted?)",
+           want_right, got_right);
+
+    /* 左段同样保持原偏移。 */
+    unsigned char got_left = f[37];
+    unsigned char want_left = (unsigned char)(37 & 0x3F);
+    CHECKF(got_left == want_left, "mprotect_file_left_offset",
+           "left segment byte=%#x", "want %#x, got %#x",
+           want_left, got_left);
+
+    CHECK3(munmap(f, 0x4000) == 0, "mprotect_file_release",
+           "file range released");
+    unlink(path);
+}
+
 static unsigned char cow_elf_output[4096] __attribute__((aligned(4096)));
 
 

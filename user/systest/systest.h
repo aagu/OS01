@@ -60,7 +60,7 @@ extern char **g_argv;
 /* Startup probe runner: defined in systest.c, called by test_libc_env in test_libc.c */
 int run_startup_probe_case(char **argv, char **envp, int expect_code);
 
-/* ── Test case function declarations (119 test cases) ── */
+/* ── Test case function declarations (120 test cases) ── */
 void test_41_exec_via_symlink(void);
 void test_42_getdents_dt_lnk(void);
 void test_access(void);
@@ -108,6 +108,7 @@ void test_libc_time(void);
 void test_linux_abi_compat(void);
 void test_lseek(void);
 void test_mkdir_rmdir(void);
+void test_mprotect_subrange_cow(void);
 void test_nanosleep(void);
 void test_nanosleep_eintr(void);
 void test_open_close(void);

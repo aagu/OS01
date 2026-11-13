@@ -450,6 +450,7 @@ static const test_case_t tests[] = {
     {"54c_user_fault_write_ro", "user fault write ro → SIGSEGV", test_user_fault_write_ro,  1, 0},
     {"54d_user_fault_ud2",     "user fault ud2 → SIGILL",      test_user_fault_ud2,        1, 0},
     {"54e_user_fault_gp",      "user fault cli #GP → SIGSEGV", test_user_fault_gp,        1, 0},
+    {"mprotect_subrange_cow",  "mprotect subrange cow", test_mprotect_subrange_cow,    1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────
