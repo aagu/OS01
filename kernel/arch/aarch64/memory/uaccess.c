@@ -93,8 +93,14 @@ aarch64_user_range_precheck(uint64_t addr, size_t len,
      * range, task, mm and root checks above still gate the window. */
     if (!skip_permission &&
         !arch_user_range_accessible((void *)Phy_To_Virt(root_pa),
-                                    addr, (uint64_t)len, writable))
+                                    addr, (uint64_t)len, writable)) {
+        /* The caller needs the mm/root of a permission-mismatch
+         * snapshot: that is exactly the range whose demand/COW
+         * preparation has to run next. */
+        *out_mm = mm;
+        *out_root_pa = root_pa;
         return AARCH64_RANGE_PERMISSION;
+    }
 
     *out_mm = mm;
     *out_root_pa = root_pa;

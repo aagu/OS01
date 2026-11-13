@@ -15,6 +15,7 @@
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
 #if AARCH64_EL0_TEST
+#include <selftest/aarch64_user_fork_cow.h>
 #include <selftest/aarch64_user_svc_uaccess.h>
 #include <selftest/aarch64_user_vm.h>
 #endif
@@ -34,6 +35,7 @@ void aarch64_user_syscall(pt_regs_t *regs)
      * from the saved frame and runs the kernel copy self-test once, on
      * the fixture's first clock_gettime.  Test variant only. */
     aarch64_user_svc_uaccess_test_hook(regs, nr);
+    aarch64_user_fork_cow_test_syscall_enter(regs, nr);
 #endif
 
     syscall_ctx_t ctx = {
@@ -58,6 +60,7 @@ void aarch64_user_syscall(pt_regs_t *regs)
      * leaf, and the two clock_gettime -EFAULT targets are inspected
      * here while the user root is still installed. */
     aarch64_user_vm_test_syscall(regs, nr, ret);
+    aarch64_user_fork_cow_test_syscall_ret(regs, nr, ret);
 #endif
 
     aarch64_vm_native_leave();

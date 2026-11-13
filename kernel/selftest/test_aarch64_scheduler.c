@@ -1076,6 +1076,9 @@ void test_aarch64_scheduler_run(void)
                          test_aarch64_user_svc_uaccess());
     extern int test_aarch64_user_vm(void);
     selftest_record_late("aarch64_user_vm", test_aarch64_user_vm());
+    extern int test_aarch64_user_fork_cow(void);
+    selftest_record_late("aarch64_user_fork_cow",
+                         test_aarch64_user_fork_cow());
 #endif
 }
 

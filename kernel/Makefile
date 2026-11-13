@@ -113,6 +113,7 @@ ifeq ($(AARCH64_EL0_TEST),1)
 KERNEL_C_SOURCES += selftest/test_aarch64_user_task.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_svc_uaccess.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_vm.c
+KERNEL_C_SOURCES += selftest/test_aarch64_user_fork_cow.c
 endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
@@ -306,6 +307,10 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_none_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_unmapped_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_replace_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_vm_leave_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_main_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_cleanup_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_illegal_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_short_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -788,6 +793,46 @@ $(BUILD_DIR)/generated/aarch64_user_vm_unmapped_image.o: $(BUILD_DIR)/generated/
 $(BUILD_DIR)/generated/aarch64_user_vm_replace_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_replace.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 $(BUILD_DIR)/generated/aarch64_user_vm_leave_image.o: $(BUILD_DIR)/generated/aarch64_user_vm_leave.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+# ── M4 fork + COW fixtures ──────────────────────────────────────
+# One source, four images: MAIN, the exec CLEANUP target, the
+# ILLEGAL read-only write and the SHORT second fork.
+AARCH64_USER_FORK_COW_LD := selftest/fixtures/aarch64_user_task.ld
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_main.o: selftest/fixtures/aarch64_user_fork_cow.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FORK_COW_MODE=0 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_cleanup.o: selftest/fixtures/aarch64_user_fork_cow.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FORK_COW_MODE=1 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_illegal.o: selftest/fixtures/aarch64_user_fork_cow.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FORK_COW_MODE=2 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_short.o: selftest/fixtures/aarch64_user_fork_cow.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_FORK_COW_MODE=3 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_main.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_main.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_cleanup.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_cleanup.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_illegal.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_illegal.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_short.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_fork_cow_short.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_main_image.o: $(BUILD_DIR)/generated/aarch64_user_fork_cow_main.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_cleanup_image.o: $(BUILD_DIR)/generated/aarch64_user_fork_cow_cleanup.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_illegal_image.o: $(BUILD_DIR)/generated/aarch64_user_fork_cow_illegal.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_fork_cow_short_image.o: $(BUILD_DIR)/generated/aarch64_user_fork_cow_short.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 

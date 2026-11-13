@@ -540,6 +540,8 @@ _A64_DISASM_SYMS = (
     + ["sys_mm_dispatch", "arch_syscall_user_vm",
        "aarch64_user_vm_fault", "aarch64_vm_native_enter",
        "aarch64_vm_native_leave", "aarch64_user_vm_prepare_copy"]
+    + ["sys_native_fork", "arch_syscall_fork", "user_vm_cow_fault",
+       "user_vm_prepare_copy", "arch_user_vm_replace_cow"]
 )
 
 # The formal user-copy surface a production image must link: the two
@@ -1150,6 +1152,14 @@ _A64_FORBIDDEN_TEST_SYMS = (
     "aarch64_user_vm_test_exec",
     "aarch64_user_vm_test_watch_clock",
     "aarch64_user_vm_test_arm_replace_fail",
+    # The M4 fork + COW runtime acceptance observations and its stage
+    # SVC.  They exist only in the AARCH64_EL0_TEST variant.
+    "aarch64_user_fork_cow_test_reset",
+    "aarch64_user_fork_cow_test_syscall_enter",
+    "aarch64_user_fork_cow_test_syscall_ret",
+    "aarch64_user_fork_cow_test_fault",
+    "aarch64_user_fork_cow_test_reap",
+    "aarch64_user_fork_cow_test_stage_query",
 )
 
 # An embedded test ELF is linked as ``_binary_<name>_start`` /
@@ -1362,6 +1372,15 @@ _A64_VM_EDGES = (
      "adapter"),
     ("aarch64_user_task_sync", "aarch64_user_vm_fault",
      "a formal EL0 sync fault must reach the demand-fill entry"),
+    # M4 Task 3+4: the shared fork handler reaches the architecture
+    # fork, the formal fault entry reaches the COW policy, and the
+    # copy-to-user preparation reaches the checked COW replacement.
+    ("sys_native_fork", "arch_syscall_fork",
+     "the shared fork handler must reach the architecture fork entry"),
+    ("aarch64_user_vm_fault", "user_vm_cow_fault",
+     "a formal write-permission fault must reach the COW policy"),
+    ("user_vm_prepare_copy", "arch_user_vm_replace_cow",
+     "copy-to-user preparation must reach the checked COW replacement"),
 )
 
 _A64_VM_FORBIDDEN_STRONG = ("do_futex_wait", "do_futex_wake")

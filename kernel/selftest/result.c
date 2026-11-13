@@ -19,7 +19,7 @@
  * selection before the slab is fully wired).  A compile-time overflow
  * is surfaced as a protocol failure, never a dropped case. */
 #define SELFTEST_MAX_EARLY 48
-#define SELFTEST_MAX_LATE  16
+#define SELFTEST_MAX_LATE  24
 
 typedef struct {
     const char *id;

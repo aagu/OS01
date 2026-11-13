@@ -377,6 +377,11 @@ ffff0000400975c0 T syscall_check_user_range
 ffff000040097600 T aarch64_user_vm_fault
 ffff000040097640 T arch_syscall_user_vm
 ffff000040097680 T sys_mm_dispatch
+ffff0000400976a0 T sys_native_fork
+ffff0000400976e0 T arch_syscall_fork
+ffff000040097720 T user_vm_cow_fault
+ffff000040097760 T user_vm_prepare_copy
+ffff0000400977a0 T arch_user_vm_replace_cow
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -451,13 +456,31 @@ ffff0000400a3e40: 17fffff0     	b	0xffff000040097200 <aarch64_user_syscall>
 ffff0000400a3e44: d65f03c0     	ret
 
 ffff000040097600 <aarch64_user_vm_fault>:
-ffff000040097604: d65f03c0     	ret
+ffff000040097604: 94000047     	bl	0xffff000040097720 <user_vm_cow_fault>
+ffff000040097608: d65f03c0     	ret
 
 ffff000040097640 <arch_syscall_user_vm>:
 ffff000040097644: d65f03c0     	ret
 
 ffff000040097680 <sys_mm_dispatch>:
 ffff000040097684: 17ffffef     	b	0xffff000040097640 <arch_syscall_user_vm>
+
+ffff0000400976a0 <sys_native_fork>:
+ffff0000400976a4: 9400000f     	bl	0xffff0000400976e0 <arch_syscall_fork>
+ffff0000400976a8: d65f03c0     	ret
+
+ffff0000400976e0 <arch_syscall_fork>:
+ffff0000400976e4: d65f03c0     	ret
+
+ffff000040097720 <user_vm_cow_fault>:
+ffff000040097724: d65f03c0     	ret
+
+ffff000040097760 <user_vm_prepare_copy>:
+ffff000040097764: 9400000f     	bl	0xffff0000400977a0 <arch_user_vm_replace_cow>
+ffff000040097768: d65f03c0     	ret
+
+ffff0000400977a0 <arch_user_vm_replace_cow>:
+ffff0000400977a4: d65f03c0     	ret
 
 ffff000040094104 <arch_intr_dispatch>:
 ffff000040094104: b4000100     	cbz	x0, 0xffff000040094124 <arch_intr_dispatch+0x20>
@@ -1476,6 +1499,43 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
         self.assertTrue(any("test symbol leak" in e and
                             "aarch64_uaccess_test_copy" in e
                             for e in errors), errors)
+
+    def test_fork_cow_test_hook_leak_fails(self):
+        # The fork + COW acceptance observation is linked into a
+        # production image.
+        self.stage_a64(nm_text=A64_NM +
+                       "ffff0000400a5800 T aarch64_user_fork_cow_test_fault\n")
+        errors = self.audit()
+        self.assertTrue(any("test symbol leak" in e and
+                            "aarch64_user_fork_cow_test_fault" in e
+                            for e in errors), errors)
+
+    def test_aarch64_user_vm_fault_to_cow_edge_missing_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097604,
+            "bl\t0xffff000040097720 <user_vm_cow_fault>", "ret"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_user_vm_fault" in e and
+                            "user_vm_cow_fault" in e for e in errors),
+                        errors)
+
+    def test_sys_native_fork_edge_missing_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400976A4,
+            "bl\t0xffff0000400976e0 <arch_syscall_fork>", "ret"))
+        errors = self.audit()
+        self.assertTrue(any("sys_native_fork" in e and
+                            "arch_syscall_fork" in e for e in errors),
+                        errors)
+
+    def test_copy_prepare_to_cow_edge_missing_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097764,
+            "bl\t0xffff0000400977a0 <arch_user_vm_replace_cow>", "ret"))
+        errors = self.audit()
+        self.assertTrue(any("user_vm_prepare_copy" in e and
+                            "arch_user_vm_replace_cow" in e for e in errors),
+                        errors)
 
     def test_missing_formal_copy_symbol_fails(self):
         # The unprivileged load label is not linked: the fixup could

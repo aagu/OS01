@@ -487,8 +487,8 @@ bool user_vm_has_metadata(const mm_t *mm)
 /* One staged page: the parent snapshot and the child record/mapping.
  * The flags below are the log of what this call actually completed,
  * so rollback undoes exactly that much — never more. */
-struct fork_stage {
-    struct fork_stage *next;
+struct clone_stage {
+    struct clone_stage *next;
     user_vm_page_t    *parent;
     user_vm_page_t    *child;
     struct user_vm_leaf parent_leaf;   /* PRESENT/STASHED snapshot */
@@ -500,10 +500,10 @@ struct fork_stage {
     bool               child_inserted;
 };
 
-static void fork_stages_free(struct fork_stage *s)
+static void clone_stages_free(struct clone_stage *s)
 {
     while (s) {
-        struct fork_stage *next = s->next;
+        struct clone_stage *next = s->next;
         if (s->child && !s->child_inserted)
             kfree(s->child);
         kfree(s);
@@ -511,7 +511,7 @@ static void fork_stages_free(struct fork_stage *s)
     }
 }
 
-static void fork_child_vmas_free(mm_t *child)
+static void clone_child_vmas_free(mm_t *child)
 {
     while (child->vma_list.next != &child->vma_list) {
         vma_t *v = container_of(child->vma_list.next, vma_t, list);
@@ -522,7 +522,7 @@ static void fork_child_vmas_free(mm_t *child)
 
 /* Borrowed child leaves: remove them and verify the PA.  The PA is
  * never freed here — the parent still owns it. */
-static void fork_unmap_children(struct fork_stage *s, uint64_t *child_root)
+static void clone_unmap_children(struct clone_stage *s, uint64_t *child_root)
 {
     for (; s; s = s->next) {
         if (!s->child_mapped)
@@ -539,7 +539,7 @@ static void fork_unmap_children(struct fork_stage *s, uint64_t *child_root)
 /* Undo the committed references.  A first share established BOTH
  * references, so it is released twice; an already-shared page only
  * loses the one this fork added. */
-static void fork_release_refs(struct fork_stage *s)
+static void clone_release_refs(struct clone_stage *s)
 {
     for (; s; s = s->next) {
         if (!s->acquired)
@@ -560,7 +560,7 @@ static void fork_release_refs(struct fork_stage *s)
 }
 
 /* Restore every parent leaf this fork lowered to RO/NX. */
-static void fork_restore_parent_leaves(struct fork_stage *s,
+static void clone_restore_parent_leaves(struct clone_stage *s,
                                        uint64_t *parent_root)
 {
     for (; s; s = s->next) {
@@ -578,7 +578,7 @@ static void fork_restore_parent_leaves(struct fork_stage *s,
     }
 }
 
-static void fork_remove_child_records(mm_t *child, struct fork_stage *s)
+static void clone_remove_child_records(mm_t *child, struct clone_stage *s)
 {
     for (; s; s = s->next) {
         if (!s->child_inserted)
@@ -594,7 +594,7 @@ static void fork_remove_child_records(mm_t *child, struct fork_stage *s)
  * temporarily valid word (map_new refuses VM_PROTNONE and the entry is
  * an update-only state); a logical-RW page starts read-only; RO and
  * RX keep their exact flags.  Non-resident pages are never filled. */
-static uint32_t fork_child_vm(const struct user_vm_leaf *leaf)
+static uint32_t clone_child_vm(const struct user_vm_leaf *leaf)
 {
     if (leaf->state == USER_VM_STASHED)
         return VM_USER_RO | VM_NO_EXEC;
@@ -603,9 +603,9 @@ static uint32_t fork_child_vm(const struct user_vm_leaf *leaf)
     return VM_USER_RO | VM_NO_EXEC;
 }
 
-static void fork_child_clear(mm_t *child)
+static void clone_child_clear(mm_t *child)
 {
-    fork_child_vmas_free(child);
+    clone_child_vmas_free(child);
     child->resident_list.next = NULL;
     child->resident_list.prev = NULL;
     child->start_code   = child->end_code   = 0;
@@ -630,6 +630,11 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
     uint64_t *parent_root = vm_root(parent);
     uint64_t *child_root  = vm_root(child);
     int rc = 0;
+
+    /* Declared before the first fallible step: every failure path below
+     * rolls back through this log, including a VMA-copy failure. */
+    struct clone_stage *stages = NULL;
+    struct clone_stage **tail = &stages;
 
     /* Copy the address layout, then every VMA node. */
     child->start_code   = parent->start_code;
@@ -658,13 +663,10 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
 
     /* Borrow phase: snapshot each parent leaf and map the child leaf
      * at the same PA.  No PMM reference exists yet. */
-    struct fork_stage *stages = NULL;
-    struct fork_stage **tail = &stages;
-
     for (list_t *p = parent->resident_list.next; p; p = p->next) {
         user_vm_page_t *pr = container_of(p, user_vm_page_t, list);
 
-        struct fork_stage *st = kmalloc(sizeof(*st));
+        struct clone_stage *st = kmalloc(sizeof(*st));
         user_vm_page_t *cr = kmalloc(sizeof(*cr));
         if (!st || !cr) {
             kfree(st);
@@ -720,7 +722,7 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
         }
 
         rc = arch_vmm_map_4k_new(child_root, pr->pa, pr->va,
-                                 fork_child_vm(&st->parent_leaf));
+                                 clone_child_vm(&st->parent_leaf));
         if (rc)
             goto fail;
         st->child_mapped = true;
@@ -735,7 +737,7 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
 
     /* Commit: one checked reference per page, then lower each parent
      * writable leaf.  A commit-time mismatch halts the kernel. */
-    for (struct fork_stage *st = stages; st; st = st->next) {
+    for (struct clone_stage *st = stages; st; st = st->next) {
         rc = pmm_cow_acquire(st->parent->pa, st->first_share);
         if (rc)
             goto fail;
@@ -760,7 +762,7 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
 
     /* The child mm is complete; task publication is the last fallible
      * step. */
-    for (struct fork_stage *st = stages; st; st = st->next) {
+    for (struct clone_stage *st = stages; st; st = st->next) {
         resident_insert(child, st->child);
         st->child_inserted = true;
     }
@@ -769,7 +771,7 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
     if (rc)
         goto fail;
 
-    fork_stages_free(stages);
+    clone_stages_free(stages);
     return 0;
 
 fail:
@@ -777,12 +779,12 @@ fail:
      * borrowed, so removing them frees no PA; the references, parent
      * permissions and child records follow; the child mm goes back
      * empty for the caller to destroy. */
-    fork_unmap_children(stages, child_root);
-    fork_release_refs(stages);
-    fork_restore_parent_leaves(stages, parent_root);
-    fork_remove_child_records(child, stages);
-    fork_child_clear(child);
-    fork_stages_free(stages);
+    clone_unmap_children(stages, child_root);
+    clone_release_refs(stages);
+    clone_restore_parent_leaves(stages, parent_root);
+    clone_remove_child_records(child, stages);
+    clone_child_clear(child);
+    clone_stages_free(stages);
     return rc;
 }
 

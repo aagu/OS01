@@ -49,6 +49,7 @@
 #include <arch/aarch64/timer.h>
 #include <selftest/aarch64_user_task.h>
 #include <selftest/aarch64_user_vm.h>
+#include <selftest/aarch64_user_fork_cow.h>
 
 /* ── Test observation state ─────────────────────────────────────
  * The counters below are written by the production paths and read by
@@ -410,6 +411,9 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
         aarch64_user_vm_test_fault(
             esr, event->fault_addr_valid ? event->fault_addr : 0,
             regs->elr_el1, frc);
+        aarch64_user_fork_cow_test_fault(
+            regs, esr, event->fault_addr_valid ? event->fault_addr : 0,
+            frc);
 #endif
         if (frc == 0)
             return;
@@ -456,6 +460,16 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
     case AARCH64_USER_SVC_EXIT:
         aarch64_user_task_exit(regs->x0);
         return;
+#if AARCH64_EL0_TEST
+    case AARCH64_USER_SVC_STAGE: {
+        /* The fork/COW acceptance fixture's monotonic stage query.
+         * Only a registered fixture PID gets an answer; every other
+         * task keeps the ordinary unknown-immediate result. */
+        int64_t stage = aarch64_user_fork_cow_test_stage_query();
+        regs->x0 = (stage >= 0) ? (uint64_t)stage : (uint64_t)-ENOSYS;
+        return;
+    }
+#endif
     default:
         regs->x0 = (uint64_t)-ENOSYS;
         return;

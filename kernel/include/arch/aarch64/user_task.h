@@ -133,6 +133,10 @@ __attribute__((noreturn)) void aarch64_el0_restore(uint64_t frame_addr);
 #define AARCH64_USER_SVC_YIELD 0x4d40
 #define AARCH64_USER_SVC_EXEC  0x4d41
 #define AARCH64_USER_SVC_EXIT  0x4d42
+/* AARCH64_EL0_TEST only: query the fork/COW acceptance stage.  The
+ * handler answers only registered fixture PIDs; every other task keeps
+ * the ordinary "unknown immediate" answer. */
+#define AARCH64_USER_SVC_STAGE 0x4d43
 
 /* ESR_EL1.EC of an SVC taken from AArch64 EL0. */
 #define A64_EC_SVC_LOWER 0x15
