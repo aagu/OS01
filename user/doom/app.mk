@@ -10,5 +10,12 @@ APP_SOURCES += diag.c
 APP_CFLAGS += -DOS01_DOOM_DIAG
 endif
 
-# Adapter objects depend on upstream source stamp
-$(OBJ_DIR)/doom/%.o: $(DOOM_SOURCE_STAMP)
+# Adapter objects depend on the upstream source stamp: their compile
+# flags point into the private copy, which the stamp recipe materializes.
+# The rule must be EXPLICIT (one target per object): a pattern rule that
+# has only prerequisites and no recipe is ignored by GNU make, so a
+# clean-tree parallel build could compile these sources before the
+# private copy (and doomgeneric.h) existed.
+DOOM_ADAPTER_OBJECTS := $(addprefix $(OBJ_DIR)/doom/, \
+    $(patsubst %.c,%.o,$(filter %.c,$(APP_SOURCES))))
+$(DOOM_ADAPTER_OBJECTS): $(DOOM_SOURCE_STAMP)
