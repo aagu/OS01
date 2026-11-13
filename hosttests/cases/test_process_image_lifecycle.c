@@ -1092,6 +1092,405 @@ static void test_mprotect_cow_stash_restore(void)
     vma_remove(&fixture_mm, v);
 }
 
+/* ── do_munmap / MAP_FIXED transaction tests (2026-11-13) ──────
+ * Plan: docs/superpowers/plans/2026-11-13-x86-munmap-fixed-transaction.md.
+ *
+ * munmap must prepare before it mutates: retained file fragments keep
+ * a representable vm_pgoff window, the single right-hand node is
+ * preallocated, leaves are withdrawn before the TLB sync, and data is
+ * reclaimed only after it.  MAP_FIXED must run the same transaction
+ * only after every fallible check/allocation succeeded. */
+
+#define MUNMAP_BASE       0x50000000UL
+#define MUNMAP_ADDR_LIMIT 0x60000000UL
+
+static void setup_munmap(void)
+{
+    setup_mm();
+    current_task_for_host_test()->mm = &fixture_mm;
+    current_task_for_host_test()->files = lifecycle_files_table();
+    current_task_for_host_test()->addr_limit = MUNMAP_ADDR_LIMIT;
+    lifecycle_files_reset();
+    lifecycle_pte_reset();
+    lifecycle_cow_reset();
+    kmalloc_calls = 0;
+    kmalloc_fail_after = 0;
+}
+
+/* Remove a node only if it is still linked: a failed case must not
+ * turn its cleanup into a double free that hides later cases. */
+static void remove_if_present(vma_t *v)
+{
+    for (list_t *p = fixture_mm.vma_list.next;
+         p != &fixture_mm.vma_list; p = p->next) {
+        if (container_of(p, vma_t, list) == v) {
+            vma_remove(&fixture_mm, v);
+            return;
+        }
+    }
+}
+
+static vma_t *install_anon_vma(uint64_t start, uint64_t len)
+{
+    vma_t *v = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(v);
+    memset(v, 0, sizeof(*v));
+    list_init(&v->list);
+    v->vm_start     = start;
+    v->vm_end       = start + len;
+    v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
+    v->vm_page_prot = PAGE_USER_PTE;
+    v->vm_pgoff     = 0;
+    v->vm_file      = NULL;
+    assert_eq(0, vma_insert(&fixture_mm, v));
+    return v;
+}
+
+typedef struct {
+    int      list_count;
+    vma_t   *node;
+    uint64_t start, end, flags, prot, pgoff;
+    uint64_t pte[4];
+    int      vfs_gets, vfs_puts, allocs, frees, cow_puts;
+    int      files_puts;
+} map_snapshot_t;
+
+static void take_snapshot(map_snapshot_t *s, vma_t *v)
+{
+    s->list_count = vma_list_count(&fixture_mm.vma_list);
+    s->node    = v;
+    s->start   = v->vm_start;
+    s->end     = v->vm_end;
+    s->flags   = v->vm_flags;
+    s->prot    = v->vm_page_prot;
+    s->pgoff   = v->vm_pgoff;
+    for (int i = 0; i < 4; i++) {
+        uint64_t *p = lifecycle_pte_get(MUNMAP_BASE + (uint64_t)i * 0x1000UL);
+        s->pte[i] = p ? *p : 0;
+    }
+    s->vfs_gets   = lifecycle_state.vfs_get_calls;
+    s->vfs_puts   = lifecycle_state.vfs_put_calls;
+    s->allocs     = lifecycle_state.total_allocs;
+    s->frees      = lifecycle_state.total_frees;
+    s->cow_puts   = lifecycle_state.cow_put_calls;
+    s->files_puts = lifecycle_state.files_put_calls;
+}
+
+static void assert_snapshot_unchanged(const map_snapshot_t *s, vma_t *v)
+{
+    assert_eq(s->list_count, vma_list_count(&fixture_mm.vma_list));
+    assert_true(vma_list_get(&fixture_mm.vma_list, 0) == s->node);
+    assert_eq(s->start, v->vm_start);
+    assert_eq(s->end, v->vm_end);
+    assert_eq(s->flags, v->vm_flags);
+    assert_eq(s->prot, v->vm_page_prot);
+    assert_eq(s->pgoff, v->vm_pgoff);
+    for (int i = 0; i < 4; i++) {
+        uint64_t *p = lifecycle_pte_get(MUNMAP_BASE + (uint64_t)i * 0x1000UL);
+        assert_eq(s->pte[i], p ? *p : 0);
+    }
+    assert_eq(s->vfs_gets, lifecycle_state.vfs_get_calls);
+    assert_eq(s->vfs_puts, lifecycle_state.vfs_put_calls);
+    assert_eq(s->allocs, lifecycle_state.total_allocs);
+    assert_eq(s->frees, lifecycle_state.total_frees);
+    assert_eq(s->cow_puts, lifecycle_state.cow_put_calls);
+    assert_eq(s->files_puts, lifecycle_state.files_put_calls);
+}
+
+static void test_munmap_preserves_file_offsets(void)
+{
+    TEST_SUITE("do_munmap — retained file fragments advance vm_pgoff");
+
+    setup_munmap();
+    uint64_t p0 = alloc_4k_page();
+    uint64_t p1 = alloc_4k_page();
+    uint64_t p2 = alloc_4k_page();
+    uint64_t p3 = alloc_4k_page();
+    assert_true(p0 && p1 && p2 && p3);
+    lifecycle_pte_set(MUNMAP_BASE,            p0 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x3000UL, p3 | PAGE_USER_PTE);
+
+    vma_t *v = install_mprotect_vma(MUNMAP_BASE, 0x4000, 7);
+    int gets_before  = lifecycle_state.vfs_get_calls;
+    int puts_before  = lifecycle_state.vfs_put_calls;
+    int frees_before = lifecycle_state.total_frees;
+
+    /* Punch page 1 out of the middle: left pgoff 7, right pgoff 9. */
+    assert_eq(0, do_munmap(MUNMAP_BASE + 0x1000UL, 0x1000UL));
+    assert_eq(2, vma_list_count(&fixture_mm.vma_list));
+    vma_t *left  = vma_list_get(&fixture_mm.vma_list, 0);
+    vma_t *right = vma_list_get(&fixture_mm.vma_list, 1);
+    assert_not_null(left);
+    assert_not_null(right);
+    if (!left || !right) return;
+    assert_true(left == v);
+    assert_eq(MUNMAP_BASE, left->vm_start);
+    assert_eq(MUNMAP_BASE + 0x1000UL, left->vm_end);
+    assert_eq(7, left->vm_pgoff);
+    assert_eq(MUNMAP_BASE + 0x2000UL, right->vm_start);
+    assert_eq(MUNMAP_BASE + 0x4000UL, right->vm_end);
+    assert_eq(9, right->vm_pgoff);
+    assert_not_null(right->vm_file);
+    /* One new segment holds one new node reference. */
+    assert_eq(gets_before + 1, lifecycle_state.vfs_get_calls);
+    assert_eq(puts_before, lifecycle_state.vfs_put_calls);
+
+    /* Only the removed leaf was withdrawn and reclaimed — after sync. */
+    assert_eq(0, *lifecycle_pte_get(MUNMAP_BASE + 0x1000UL));
+    assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MUNMAP_BASE));
+    assert_eq(p2 | PAGE_USER_PTE,
+              *lifecycle_pte_get(MUNMAP_BASE + 0x2000UL));
+    assert_eq(p3 | PAGE_USER_PTE,
+              *lifecycle_pte_get(MUNMAP_BASE + 0x3000UL));
+    assert_eq(frees_before, lifecycle_flush_free_count());
+    assert_eq(frees_before + 1, lifecycle_state.total_frees);
+
+    /* Left-truncate the right segment: pgoff 9 -> 10, no new node. */
+    int gets_mid = lifecycle_state.vfs_get_calls;
+    assert_eq(0, do_munmap(MUNMAP_BASE + 0x2000UL, 0x1000UL));
+    assert_eq(2, vma_list_count(&fixture_mm.vma_list));
+    right = vma_list_get(&fixture_mm.vma_list, 1);
+    assert_not_null(right);
+    if (right) {
+        assert_eq(MUNMAP_BASE + 0x3000UL, right->vm_start);
+        assert_eq(MUNMAP_BASE + 0x4000UL, right->vm_end);
+        assert_eq(10, right->vm_pgoff);
+    }
+    assert_eq(gets_mid, lifecycle_state.vfs_get_calls);
+    assert_eq(0, *lifecycle_pte_get(MUNMAP_BASE + 0x2000UL));
+    assert_eq(p3 | PAGE_USER_PTE,
+              *lifecycle_pte_get(MUNMAP_BASE + 0x3000UL));
+
+    remove_if_present(left);
+    remove_if_present(right);
+
+    /* Holes are allowed and fully-covered nodes retire. */
+    setup_munmap();
+    vma_t *a = install_mprotect_vma(MUNMAP_BASE, 0x1000, 3);
+    vma_t *b = install_mprotect_vma(MUNMAP_BASE + 0x2000UL, 0x2000, 5);
+    int puts2 = lifecycle_state.vfs_put_calls;
+    assert_eq(0, do_munmap(MUNMAP_BASE, 0x4000));
+    assert_eq(0, vma_list_count(&fixture_mm.vma_list));
+    assert_eq(puts2 + 2, lifecycle_state.vfs_put_calls);
+    (void)a;
+    (void)b;
+
+    /* Argument validation. */
+    setup_munmap();
+    install_mprotect_vma(MUNMAP_BASE, 0x4000, 7);
+    assert_eq(-EINVAL, do_munmap(MUNMAP_BASE + 1, 0x1000UL));
+    assert_eq(-EINVAL, do_munmap(MUNMAP_BASE, UINT64_MAX));
+    current_task_for_host_test()->addr_limit = MUNMAP_BASE + 0x800UL;
+    assert_eq(-EINVAL, do_munmap(MUNMAP_BASE, 0x1000UL));
+    current_task_for_host_test()->addr_limit = MUNMAP_ADDR_LIMIT;
+    fixture_mm.start_brk = 0x800000UL;
+    assert_eq(-EINVAL, do_munmap(USER_CODE_ADDR, 0x1000UL));
+    fixture_mm.start_brk = 0;
+}
+
+static void test_munmap_invalid_file_window(void)
+{
+    TEST_SUITE("do_munmap — unrepresentable file window rejects retained fragments");
+
+    setup_munmap();
+    vma_t *v = install_mprotect_vma(MUNMAP_BASE, 0x4000, 7);
+    v->vm_pgoff = (UINT64_MAX >> PAGE_4K_SHIFT) + 1;
+    lifecycle_pte_set(MUNMAP_BASE, 0x12345000UL | PAGE_USER_PTE);
+    map_snapshot_t snap;
+    take_snapshot(&snap, v);
+
+    /* Interior hole: a right fragment is retained -> reject. */
+    assert_eq(-EINVAL, do_munmap(MUNMAP_BASE + 0x1000UL, 0x1000UL));
+    assert_snapshot_unchanged(&snap, v);
+
+    /* Left truncation: the right fragment is retained -> reject. */
+    assert_eq(-EINVAL, do_munmap(MUNMAP_BASE, 0x1000UL));
+    assert_snapshot_unchanged(&snap, v);
+
+    /* Full removal retains nothing -> allowed. */
+    assert_eq(0, do_munmap(MUNMAP_BASE, 0x4000UL));
+    assert_eq(0, vma_list_count(&fixture_mm.vma_list));
+}
+
+static void test_munmap_borrowed_and_stashed_leaves(void)
+{
+    TEST_SUITE("do_munmap — borrowed IO leaves clear without release");
+
+    setup_munmap();
+    uint64_t borrowed = alloc_4k_page();
+    assert_true(borrowed != 0);
+    lifecycle_pte_set(MUNMAP_BASE, borrowed | PAGE_USER_PTE);
+    vma_t *io = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(io);
+    if (!io) return;
+    memset(io, 0, sizeof(*io));
+    list_init(&io->list);
+    io->vm_start     = MUNMAP_BASE;
+    io->vm_end       = MUNMAP_BASE + 0x1000UL;
+    io->vm_flags     = VMA_IO | VMA_PROT_READ;
+    io->vm_page_prot = PAGE_USER_PTE_RO;
+    vma_insert(&fixture_mm, io);
+
+    int frees_before = lifecycle_state.total_frees;
+    int cow_before   = lifecycle_state.cow_put_calls;
+    assert_eq(0, do_munmap(MUNMAP_BASE, 0x1000UL));
+    assert_eq(0, *lifecycle_pte_get(MUNMAP_BASE));
+    assert_eq(frees_before, lifecycle_state.total_frees);
+    assert_eq(cow_before, lifecycle_state.cow_put_calls);
+    remove_if_present(io);
+
+    /* Stashed COW leaf: one put, free only for the last holder. */
+    setup_munmap();
+    uint64_t cow_phys = alloc_4k_page();
+    assert_true(cow_phys != 0);
+    lifecycle_cow_set(cow_phys, 2);
+    lifecycle_pte_set(MUNMAP_BASE,
+                      cow_phys | PAGE_USER | PAGE_PROTNONE | PAGE_COW);
+    install_anon_vma(MUNMAP_BASE, 0x1000);
+    int frees0 = lifecycle_state.total_frees;
+    assert_eq(0, do_munmap(MUNMAP_BASE, 0x1000UL));
+    assert_eq(0, *lifecycle_pte_get(MUNMAP_BASE));
+    assert_eq(1, lifecycle_state.cow_put_calls);
+    assert_eq(frees0, lifecycle_state.total_frees);
+
+    setup_munmap();
+    uint64_t last = alloc_4k_page();
+    assert_true(last != 0);
+    lifecycle_cow_set(last, 1);
+    lifecycle_pte_set(MUNMAP_BASE, last | PAGE_USER_PTE | PAGE_COW);
+    install_anon_vma(MUNMAP_BASE, 0x1000);
+    frees0 = lifecycle_state.total_frees;
+    assert_eq(0, do_munmap(MUNMAP_BASE, 0x1000UL));
+    assert_eq(1, lifecycle_state.cow_put_calls);
+    assert_eq(frees0 + 1, lifecycle_state.total_frees);
+}
+
+static void test_munmap_fixed_failure_preserves_state(void)
+{
+    TEST_SUITE("MAP_FIXED — failures leave the old mapping untouched");
+
+    /* A file-backed descriptor for the bad-fd / big-offset cases. */
+    static file_t fake_file;
+    memset(&fake_file, 0, sizeof(fake_file));
+    fake_file.type = FD_VFS;
+    fake_file.node = (vfs_node_t *)&fake_file_node;
+    fake_file.refcount = 1;
+
+    for (int fail_after = 1; fail_after <= 2; fail_after++) {
+        setup_munmap();
+        lifecycle_files_install(0, &fake_file);
+        uint64_t p0 = alloc_4k_page();
+        uint64_t p1 = alloc_4k_page();
+        uint64_t p2 = alloc_4k_page();
+        uint64_t p3 = alloc_4k_page();
+        assert_true(p0 && p1 && p2 && p3);
+        lifecycle_pte_set(MUNMAP_BASE,            p0 | PAGE_USER_PTE);
+        lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+        lifecycle_pte_set(MUNMAP_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+        lifecycle_pte_set(MUNMAP_BASE + 0x3000UL, p3 | PAGE_USER_PTE);
+        vma_t *v = install_anon_vma(MUNMAP_BASE, 0x4000);
+
+        map_snapshot_t snap;
+        take_snapshot(&snap, v);
+
+        kmalloc_calls = 0;
+        kmalloc_fail_after = fail_after;
+        int64_t rc = do_mmap(MUNMAP_BASE + 0x1000UL, 0x2000UL, PROT_READ,
+                             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
+                             (uint64_t)-1, 0);
+        kmalloc_fail_after = 0;
+        assert_eq(-ENOMEM, rc);
+        assert_snapshot_unchanged(&snap, v);
+    }
+
+    /* Invalid prot: rejected before the old map is touched. */
+    setup_munmap();
+    lifecycle_files_install(0, &fake_file);
+    uint64_t q0 = alloc_4k_page();
+    uint64_t q1 = alloc_4k_page();
+    assert_true(q0 && q1);
+    lifecycle_pte_set(MUNMAP_BASE, q0 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, q1 | PAGE_USER_PTE);
+    vma_t *v = install_anon_vma(MUNMAP_BASE, 0x2000);
+    map_snapshot_t snap;
+    take_snapshot(&snap, v);
+    assert_eq(-EINVAL,
+              do_mmap(MUNMAP_BASE, 0x1000UL,
+                      (1ULL << 32) | PROT_READ,
+                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
+                      (uint64_t)-1, 0));
+    assert_snapshot_unchanged(&snap, v);
+
+    /* Bad fd. */
+    assert_eq(-EBADF,
+              do_mmap(MUNMAP_BASE, 0x1000UL, PROT_READ,
+                      MAP_FIXED | MAP_PRIVATE, 5, 0));
+    assert_snapshot_unchanged(&snap, v);
+
+    /* End beyond the exclusive addr_limit -> -ENOMEM. */
+    current_task_for_host_test()->addr_limit = MUNMAP_BASE + 0x1000UL;
+    assert_eq(-ENOMEM,
+              do_mmap(MUNMAP_BASE, 0x2000UL, PROT_READ,
+                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
+                      (uint64_t)-1, 0));
+    assert_snapshot_unchanged(&snap, v);
+    current_task_for_host_test()->addr_limit = MUNMAP_ADDR_LIMIT;
+
+    /* Unrepresentable file window at the requested offset. */
+    assert_eq(-EINVAL,
+              do_mmap(MUNMAP_BASE, 0x2000UL, PROT_READ,
+                      MAP_FIXED | MAP_PRIVATE, 0,
+                      UINT64_MAX & ~(uint64_t)(PAGE_4K_SIZE - 1)));
+    assert_snapshot_unchanged(&snap, v);
+
+    /* Successful MAP_FIXED replacement of the two middle pages. */
+    setup_munmap();
+    lifecycle_files_install(0, &fake_file);
+    uint64_t r0 = alloc_4k_page();
+    uint64_t r1 = alloc_4k_page();
+    uint64_t r2 = alloc_4k_page();
+    uint64_t r3 = alloc_4k_page();
+    assert_true(r0 && r1 && r2 && r3);
+    lifecycle_pte_set(MUNMAP_BASE,            r0 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, r1 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x2000UL, r2 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x3000UL, r3 | PAGE_USER_PTE);
+    v = install_anon_vma(MUNMAP_BASE, 0x4000);
+    int frees_before = lifecycle_state.total_frees;
+    assert_eq((int64_t)(MUNMAP_BASE + 0x1000UL),
+              do_mmap(MUNMAP_BASE + 0x1000UL, 0x2000UL, PROT_READ,
+                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
+                      (uint64_t)-1, 0));
+    assert_eq(3, vma_list_count(&fixture_mm.vma_list));
+    vma_t *l = vma_list_get(&fixture_mm.vma_list, 0);
+    vma_t *m = vma_list_get(&fixture_mm.vma_list, 1);
+    vma_t *r = vma_list_get(&fixture_mm.vma_list, 2);
+    assert_not_null(l);
+    assert_not_null(m);
+    assert_not_null(r);
+    if (l && m && r) {
+        assert_eq(MUNMAP_BASE, l->vm_start);
+        assert_eq(MUNMAP_BASE + 0x1000UL, l->vm_end);
+        assert_eq(MUNMAP_BASE + 0x1000UL, m->vm_start);
+        assert_eq(MUNMAP_BASE + 0x3000UL, m->vm_end);
+        assert_eq(MUNMAP_BASE + 0x3000UL, r->vm_start);
+        assert_eq(MUNMAP_BASE + 0x4000UL, r->vm_end);
+        assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON), l->vm_flags);
+        assert_eq((uint64_t)(VMA_PROT_READ | VMA_ANON), m->vm_flags);
+        assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON), r->vm_flags);
+        assert_eq(0, *lifecycle_pte_get(MUNMAP_BASE + 0x1000UL));
+        assert_eq(0, *lifecycle_pte_get(MUNMAP_BASE + 0x2000UL));
+        assert_eq(r0 | PAGE_USER_PTE,
+                  *lifecycle_pte_get(MUNMAP_BASE));
+        assert_eq(r3 | PAGE_USER_PTE,
+                  *lifecycle_pte_get(MUNMAP_BASE + 0x3000UL));
+        assert_eq(frees_before + 2, lifecycle_state.total_frees);
+        assert_eq(frees_before, lifecycle_flush_free_count());
+    }
+}
+
 /* ── Test list ─────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -1118,6 +1517,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_mprotect_split_range),
     TEST_ENTRY(test_mprotect_split_oom),
     TEST_ENTRY(test_mprotect_cow_stash_restore),
+    TEST_ENTRY(test_munmap_preserves_file_offsets),
+    TEST_ENTRY(test_munmap_invalid_file_window),
+    TEST_ENTRY(test_munmap_borrowed_and_stashed_leaves),
+    TEST_ENTRY(test_munmap_fixed_failure_preserves_state),
 TEST_LIST_END
 
 int main(void)

@@ -483,103 +483,269 @@ static void map_flags_to_vm(int flags, uint64_t *vm_flags)
     if (flags & MAP_ANONYMOUS) *vm_flags |= VMA_ANON;
 }
 
-// ── do_munmap ─────────────────────────────────────────────────
-// do_munmap_locked — unmaps WITHOUT taking mm->lock (caller holds it).
-// Defined before do_mmap because do_mmap(MAP_FIXED) calls it.
-static int64_t do_munmap_locked(uint64_t addr, uint64_t length)
+// ── munmap / MAP_FIXED transaction helpers ───────────────────
+// Defined later in this file (mprotect section) but needed here.
+static bool vma_file_window_valid(const vma_t *v);
+static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
+                             vma_t *right);
+
+#define UNMAP_LEAF_BATCH 32
+
+// Withdraw the leaves of one VMA fragment, synchronize, then release.
+// Withdraw = save the old descriptor and clear the slot; neither step
+// allocates or frees.  Owned leaves are released only after the flush
+// that made their old translations unreachable.  VMA_IO leaves are
+// borrowed from the device: the slot is cleared, nothing is released.
+// A fully covered user 2 MiB block is taken as a block (its pages stay
+// with their owner); partial coverage is rejected by the preparer.
+static void unmap_vma_leaves(uint64_t *root, const vma_t *vma,
+                             uint64_t start, uint64_t end, bool active)
 {
-    addr   = PAGE_4K_ALIGN(addr);
-    length = PAGE_4K_ALIGN(length);
-    if (length == 0)
-        return -EINVAL;
+    bool borrowed = (vma->vm_flags & VMA_IO) != 0;
+    uint64_t old_ptes[UNMAP_LEAF_BATCH];
+    int n = 0;
+    bool changed = false;
 
-    uint64_t end = addr + length;
-
-    // Task 5: reject any unmap that touches the reserved window
-    // (ELF envelope / heap reserve / guard / stack) BEFORE any PTE
-    // unmap or VMA split happens — a rejected request must leave
-    // every existing mapping untouched.
-    if (mm_user_range_protected(current->mm, addr, end))
-        return -EINVAL;
-
-    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
-
-    list_t *pos = current->mm->vma_list.next;
-    while (pos != &current->mm->vma_list) {
-        vma_t *v = container_of(pos, vma_t, list);
-        pos = pos->next;
-
-        if (v->vm_end <= addr)   continue;
-        if (v->vm_start >= end)  break;
-
-        uint64_t u_start = (addr > v->vm_start) ? addr : v->vm_start;
-        uint64_t u_end   = (end  < v->vm_end)   ? end  : v->vm_end;
-        for (uint64_t va = u_start; va < u_end; va += PAGE_4K_SIZE)
-            vmm_unmap_4k_page(user_pgd, va);
-
-        uint64_t orig_start = v->vm_start;
-        uint64_t orig_end   = v->vm_end;
-
-        if (u_start <= orig_start && u_end >= orig_end) {
-            vma_remove(current->mm, v);
-            continue;
+    uint64_t va = start;
+    while (va < end) {
+        if ((va & (PAGE_2M_SIZE - 1)) == 0 &&
+            va + PAGE_2M_SIZE <= end) {
+            uint64_t old2m = x86_vmm_take_2m(root, va);
+            if (old2m) {
+                changed = true;
+                va += PAGE_2M_SIZE;
+                continue;
+            }
         }
 
-        if (u_start > orig_start && u_end < orig_end) {
-            // Split: left + right
-            v->vm_end = u_start;
-
-            vma_t *right = (vma_t *)kmalloc(sizeof(vma_t));
-            if (right) {
-                memcpy(right, v, sizeof(vma_t));
-                list_init(&right->list);
-                right->vm_start = u_end;
-                right->vm_end   = orig_end;
-                if (right->vm_file)
-                    vfs_node_get(right->vm_file);
-                vma_insert(current->mm, right);
+        uint64_t old = x86_vmm_take_4k(root, va);
+        if (old) {
+            changed = true;
+            if (!borrowed) {
+                old_ptes[n++] = old;
+                if (n == UNMAP_LEAF_BATCH) {
+                    if (active)
+                        flush_tlb();
+                    for (int i = 0; i < n; i++)
+                        x86_vmm_release_owned_4k(old_ptes[i]);
+                    n = 0;
+                }
             }
-        } else if (u_start > orig_start) {
-            // Truncate right side
-            v->vm_end = u_start;
+        }
+        va += PAGE_4K_SIZE;
+    }
+
+    if (active && changed)
+        flush_tlb();
+    for (int i = 0; i < n; i++)
+        x86_vmm_release_owned_4k(old_ptes[i]);
+}
+
+// prepare_unmap_locked — all fallible work for one munmap/MAP_FIXED
+// range, before the first visible change.  Returns the preallocated
+// right-hand boundary node this commit needs (NULL when no VMA is
+// split in the middle), or a negative errno with *right untouched.
+//
+// Rejections:
+//   - a retained file fragment whose existing offset window cannot be
+//     represented in uint64_t (spec: only *retained* fragments matter);
+//   - a partially covered user 2 MiB block (borrowed huge PMD);
+//   - -ENOMEM when the one possible new node cannot be allocated.
+static int prepare_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
+                                vma_t **right)
+{
+    *right = NULL;
+
+    // Borrowed 2 MiB blocks must be covered completely: taking part of
+    // a stack/device huge leaf is not a supported edit.
+    uint64_t *root = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+    for (uint64_t block = start & PAGE_2M_MASK; block < end;
+         block += PAGE_2M_SIZE) {
+        uint64_t block_end = block + PAGE_2M_SIZE;
+        if ((start > block || end < block_end) &&
+            x86_vmm_has_2m(root, block))
+            return -EINVAL;
+    }
+
+    bool need_right = false;
+    list_t *pos = mm->vma_list.next;
+    while (pos != &mm->vma_list) {
+        vma_t *v = container_of(pos, vma_t, list);
+        if (v->vm_end <= start) { pos = pos->next; continue; }
+        if (v->vm_start >= end) break;
+
+        bool full = (start <= v->vm_start && end >= v->vm_end);
+        if (!full) {
+            // At least one fragment (left or right) is retained.
+            if (v->vm_file && !vma_file_window_valid(v))
+                return -EINVAL;
+            if (start > v->vm_start && end < v->vm_end)
+                need_right = true;      // interior hole: one new node
+        }
+        pos = pos->next;
+    }
+
+    if (need_right) {
+        *right = (vma_t *)kmalloc(sizeof(vma_t));
+        if (!*right)
+            return -ENOMEM;
+    }
+    return 0;
+}
+
+// commit_unmap_locked — no failure paths.  Leaves are withdrawn (and
+// reclaimed after their sync) before the VMA metadata is adjusted.
+// Fully covered nodes are unlinked into `retired`; their file
+// references are dropped by the caller after mm->lock is released.
+// The one new right-hand node is inserted as the last commit step.
+static void commit_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
+                                vma_t *right, list_t *retired)
+{
+    uint64_t *root = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+    vma_t *interior = NULL;
+    uint64_t interior_start = 0, interior_end = 0;
+
+    list_t *pos = mm->vma_list.next;
+    while (pos != &mm->vma_list) {
+        vma_t *v = container_of(pos, vma_t, list);
+        pos = pos->next;
+        if (v->vm_end <= start) continue;
+        if (v->vm_start >= end) break;
+
+        uint64_t u_start = (start > v->vm_start) ? start : v->vm_start;
+        uint64_t u_end   = (end   < v->vm_end)   ? end   : v->vm_end;
+
+        unmap_vma_leaves(root, v, u_start, u_end, true);
+
+        if (u_start <= v->vm_start && u_end >= v->vm_end) {
+            // Fully covered: retire the node (released after unlock).
+            vm_area_unlink(v);
+            list_add_to_before(retired, &v->list);
+        } else if (u_start > v->vm_start && u_end < v->vm_end) {
+            interior = v;
+            interior_start = u_start;
+            interior_end = u_end;
+        } else if (u_start > v->vm_start) {
+            v->vm_end = u_start;            // left truncation
         } else {
-            // Truncate left side
+            // Right truncation: the retained segment now starts at
+            // u_end, so its file offset advances with it.
+            v->vm_pgoff += (u_end - v->vm_start) >> PAGE_4K_SHIFT;
             v->vm_start = u_end;
         }
     }
 
-    flush_tlb();
+    if (interior) {
+        // split_vma_locked turns the original node into the left
+        // fragment and appends the right fragment; trim the hole.
+        split_vma_locked(mm, interior, interior_end, right);
+        interior->vm_end = interior_start;
+    } else if (right) {
+        kfree(right);       // defensive: preparer said no split
+    }
+}
+
+// Release VMA nodes retired by a commit.  Must run with no lock held:
+// vfs_node_put may block in VFS eviction.
+static void release_retired_vmas(list_t *retired)
+{
+    while (!list_is_empty(retired)) {
+        vma_t *v = container_of(retired->next, vma_t, list);
+        vm_area_unlink(v);
+        if (v->vm_file)
+            vfs_node_put(v->vm_file);
+        kfree(v);
+    }
+}
+
+// do_munmap — half-open [addr, addr+length).  Holes inside the range
+// are allowed; only existing VMAs are edited.
+int64_t do_munmap(uint64_t addr, uint64_t length)
+{
+    if (addr & (PAGE_4K_SIZE - 1))          // start must be 4 KiB aligned
+        return -EINVAL;
+    if (length == 0)
+        return -EINVAL;
+    uint64_t rounded = PAGE_4K_ALIGN(length);
+    if (rounded < length)                   // rounding overflow
+        return -EINVAL;
+    if (addr > UINT64_MAX - rounded)        // end overflow
+        return -EINVAL;
+    uint64_t end = addr + rounded;
+
+    if (addr < USER_MIN_ADDR)
+        return -EINVAL;
+    if (!current->mm)
+        return -EINVAL;
+    if (end > current->addr_limit)
+        return -EINVAL;
+    if (mm_user_range_protected(current->mm, addr, end))
+        return -EINVAL;
+
+    mm_t *mm = current->mm;
+    spin_lock(&mm->lock);
+
+    vma_t *right = NULL;
+    int rc = prepare_unmap_locked(mm, addr, end, &right);
+    if (rc != 0) {
+        spin_unlock(&mm->lock);
+        return rc;
+    }
+
+    list_t retired;
+    list_init(&retired);
+    commit_unmap_locked(mm, addr, end, right, &retired);
+    spin_unlock(&mm->lock);
+
+    release_retired_vmas(&retired);
     return 0;
 }
 
-// do_munmap — public entry: take mm->lock, then unmap.
-int64_t do_munmap(uint64_t addr, uint64_t length)
+// ── do_mmap ───────────────────────────────────────────────────
+// First-fit gap search above mmap_base.  Callers hold mm->lock when
+// using the result for a commit.
+static uint64_t mmap_find_gap(mm_t *mm, uint64_t length)
 {
-    spin_lock(&current->mm->lock);
-    int64_t rc = do_munmap_locked(addr, length);
-    spin_unlock(&current->mm->lock);
-    return rc;
+    uint64_t search = mm->mmap_base;
+    vma_t *prev = NULL;
+    list_t *pos = mm->vma_list.next;
+    while (pos != &mm->vma_list) {
+        vma_t *v = container_of(pos, vma_t, list);
+        uint64_t gap_start = prev ? prev->vm_end : search;
+        if (gap_start < search) gap_start = search;
+        if (gap_start <= UINT64_MAX - length &&
+            gap_start + length <= v->vm_start)
+            return gap_start;
+        prev = v;
+        pos = pos->next;
+    }
+    uint64_t cand = prev ? prev->vm_end : search;
+    if (cand < search) cand = search;
+    return cand;
 }
 
-// ── do_mmap ───────────────────────────────────────────────────
+// do_mmap — MAP_FIXED validates the whole request and preallocates
+// before any mutation; the ordinary path selects and commits inside
+// ONE mm->lock region.  The descriptor is pinned with files_get_file()
+// before the node reference, so fd_close cannot free the node between
+// resolution and installation.  The device branch keeps its existing
+// two-phase shape in this task (the device transaction takes over in
+// the next task); final reference drops still happen after unlock.
 int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                 uint64_t flags, uint64_t fd, uint64_t offset)
 {
-    // ── 1. Argument validation ──────────────────────────
+    // ── 1. Argument validation (no mutation) ────────────
     if (length == 0)
         return -EINVAL;
 
     // Keep the "nothing below 0x400000 mapped" invariant: any explicit
     // address (MAP_FIXED or otherwise) below USER_MIN_ADDR is rejected
-    // here.  Without this guard a buggy or hostile caller could map at
-    // 0x1000 and later trigger kernel faults on what looks like a NULL
-    // deref — see design §3 invariant.  addr == 0 (let the kernel pick)
-    // is unaffected.
+    // here.  addr == 0 (let the kernel pick) is unaffected.
     if (addr != 0 && addr < USER_MIN_ADDR)
         return -EINVAL;
 
-    uint64_t end = PAGE_4K_ALIGN(addr + length);
-    if (end < addr)  // overflow
+    uint64_t raw_end = PAGE_4K_ALIGN(addr + length);
+    if (raw_end < addr)                     // addr+length overflow
         return -EINVAL;
 
     if (offset & (PAGE_4K_SIZE - 1))
@@ -588,156 +754,174 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (flags & MAP_ANONYMOUS) {
         if ((int64_t)fd != -1)
             return -EINVAL;
-    } else {
-        file_t *file = NULL;
-        if (fd < NOFILE && current->files)
-            file = current->files->fd[fd];
-        if (!file || !file->node)
-            return -EBADF;
     }
 
-    if (flags & MAP_FIXED) {
-        if (addr & (PAGE_4K_SIZE - 1))
-            return -EINVAL;
-        if (addr >= current->addr_limit)
-            return -ENOMEM;
-    }
-
-    // ── 1b. Reserved-window check (Task 5) ──────────────
-    // A MAP_FIXED request that touches the ELF envelope, the heap
-    // reserve, the guard page or the user stack is rejected BEFORE
-    // any do_munmap_locked / VMA split / PTE change / device mmap
-    // callback, so a rejected request leaves every existing
-    // mapping byte-for-byte intact.  (Overflow and user bounds
-    // were validated above, per the predicate's contract.)
-    // The non-fixed path re-checks its computed candidate below.
-    if ((flags & MAP_FIXED) &&
-        mm_user_range_protected(current->mm, addr, end))
-        return -EINVAL;
-
-    // ── 2. Address computation ──────────────────────────
     length = PAGE_4K_ALIGN(length);
     if (!length) return -EINVAL;
 
     // The page-aligned file window must stay representable in
-    // uint64_t: the demand-fault path (and a later split) computes
-    // file offsets from offset + rounded length.
+    // uint64_t: the demand-fault path (and a split) computes file
+    // offsets from offset + rounded length.
     if (!(flags & MAP_ANONYMOUS) && offset > UINT64_MAX - length)
         return -EINVAL;
 
-    uint64_t search = current->mm->mmap_base;
-    vma_t *prev = NULL;
-    list_t *pos = current->mm->vma_list.next;
-
-    // NOTE (Task 5): `addr` must keep its parameter value on the
-    // MAP_FIXED path — the old unconditional `addr = 0;` here
-    // clobbered the fixed address, so MAP_FIXED silently mapped at
-    // 0 and ran do_munmap_locked over [0, length).  Zeroing now
-    // happens only on the auto-search path, where 0 means "no
-    // candidate found yet".
-    if (!(flags & MAP_FIXED)) {
-        addr = 0;
-        while (pos != &current->mm->vma_list) {
-            vma_t *v = container_of(pos, vma_t, list);
-            uint64_t gap_start = prev ? prev->vm_end : search;
-            if (gap_start < search) gap_start = search;
-            if (gap_start + length <= v->vm_start) {
-                addr = gap_start;
-                break;
-            }
-            prev = v;
-            pos = pos->next;
-        }
-        if (!addr) addr = prev ? prev->vm_end : search;
-        if (addr < search) addr = search;
-
-        // Task 5: the auto-search must never return a candidate
-        // inside the reserved window.  mmap_base (0x40000000) is
-        // already far above it, so this is a defensive skip: jump
-        // the candidate past the ENTIRE window.
-        if (mm_user_range_protected(current->mm, addr, addr + length))
-            addr = USER_STACK_BASE + 0x200000UL;
-    } else {
-        spin_lock(&current->mm->lock);
-        do_munmap_locked(addr, length);
-        spin_unlock(&current->mm->lock);
-    }
-
-    if (addr + length > current->addr_limit)
-        return -ENOMEM;
-    if (addr >= current->addr_limit)
-        return -ENOMEM;
-
-    // ── 3. prot → page flags ───────────────────────────
+    // ── 2. prot → page flags (before any visible change) ──
     uint64_t page_prot, vm_flags_base;
     int rc = prot_to_page_flags(prot, &page_prot, &vm_flags_base);
     if (rc) return rc;
     map_flags_to_vm((int)flags, &vm_flags_base);
 
-    // ── 4. Check for device/file mmap ──────────────────
-    vfs_node_t *file_node = NULL;
-    if (!(flags & MAP_ANONYMOUS)) {
-        file_t *file = current->files->fd[fd];
-        if (!file || !file->node) {
-            if ((int64_t)fd != -1) return -EBADF;
+    if (!current->mm)
+        return -EINVAL;
+
+    // ── 3. MAP_FIXED bounds / reserved window ───────────
+    if (flags & MAP_FIXED) {
+        if (addr & (PAGE_4K_SIZE - 1))
             return -EINVAL;
+        if (addr >= current->addr_limit ||
+            addr > UINT64_MAX - length ||
+            addr + length > current->addr_limit)
+            return -ENOMEM;
+        if (mm_user_range_protected(current->mm, addr, addr + length))
+            return -EINVAL;
+    }
+
+    // ── 4. File resolution: pin the descriptor, then the node ──
+    file_t *file = NULL;
+    vfs_node_t *file_node = NULL;
+    int (*_dev_mmap)(struct vfs_node *, struct vma *) = NULL;
+    if (!(flags & MAP_ANONYMOUS)) {
+        if (fd < NOFILE && current->files)
+            file = files_get_file(current->files, (int)fd);
+        if (!file || !file->node) {
+            if (file) files_put_file(file);
+            return -EBADF;
         }
         file_node = vfs_node_get(file->node);
 
-        // Device node with mmap handler → device path.
-        int (*_dev_mmap)(struct vfs_node *, struct vma *) =
-            (file_node && file_node->f_ops &&
-             (uint64_t)file_node->f_ops >= 0xffff800000000000ULL &&
-             file_node->f_ops->mmap &&
-             (uint64_t)file_node->f_ops->mmap >= 0xffff800000000000ULL)
-            ? file_node->f_ops->mmap : NULL;
-
-        if (_dev_mmap) {
-            if (!(flags & MAP_SHARED))
-                { vfs_node_put(file_node); return -EINVAL; }
-
-            // Task 5: never hand a protected range to a device mmap
-            // handler — the handler fills PTEs eagerly, so the check
-            // MUST precede the callback (defence in depth on top of
-            // the §1b / post-search checks above).
-            if (mm_user_range_protected(current->mm, addr, addr + length)) {
-                vfs_node_put(file_node);
-                return -EINVAL;
-            }
-
-            // Pre-allocate VMA for the device handler to fill PTEs
-            vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
-            if (!vma) { vfs_node_put(file_node); return -ENOMEM; }
-            list_init(&vma->list);
-            vma->vm_start     = addr;
-            vma->vm_end       = addr + length;
-            vma->vm_flags     = vm_flags_base | VMA_IO;
-            vma->vm_page_prot = page_prot;
-            vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
-            vma->vm_file      = file_node;  // handler may clear this
-
-            int mmap_rc = _dev_mmap(file_node, (struct vma *)vma);
-
-            if (mmap_rc < 0) {
-                // Handler failed — vma not inserted, clean up
-                vfs_node_put(file_node);
-                kfree(vma);
-                return mmap_rc;
-            }
-            // Handler filled PTEs (e.g. fb_mmap eager-fills + flush_tlb +
-            //   vfs_node_put(vma->vm_file); vma->vm_file = NULL)
-            vma_insert(current->mm, vma);
-            return (int64_t)vma->vm_start;
-        }
-        // Normal file mapping → fall through to step 5
+        // Device node with an mmap handler → device path.
+        if (file_node->f_ops &&
+            (uint64_t)file_node->f_ops >= 0xffff800000000000ULL &&
+            file_node->f_ops->mmap &&
+            (uint64_t)file_node->f_ops->mmap >= 0xffff800000000000ULL)
+            _dev_mmap = file_node->f_ops->mmap;
     }
 
-    // ── 5. Allocate VMA ────────────────────────────────
-    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
-    if (!vma) {
+    if (_dev_mmap) {
+        if (!(flags & MAP_SHARED)) {
+            vfs_node_put(file_node);
+            files_put_file(file);
+            return -EINVAL;
+        }
+
+        if (!(flags & MAP_FIXED)) {
+            // Selection is outside mm->lock because the callback runs
+            // there; the device transaction will move this under the
+            // display-mutex → mm->lock order in the next task.
+            spin_lock(&current->mm->lock);
+            addr = mmap_find_gap(current->mm, length);
+            spin_unlock(&current->mm->lock);
+            if (mm_user_range_protected(current->mm, addr,
+                                        addr + length))
+                addr = USER_STACK_BASE + 0x200000UL;
+        } else {
+            // Task 1 keeps the existing replace-then-callback shape:
+            // the device transaction owns the atomic replacement in
+            // the next task.
+            int urc = (int)do_munmap(addr, length);
+            if (urc != 0) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return urc;
+            }
+        }
+
+        if (addr >= current->addr_limit ||
+            addr > UINT64_MAX - length ||
+            addr + length > current->addr_limit) {
+            vfs_node_put(file_node);
+            files_put_file(file);
+            return -ENOMEM;
+        }
+        if (mm_user_range_protected(current->mm, addr, addr + length)) {
+            vfs_node_put(file_node);
+            files_put_file(file);
+            return -EINVAL;
+        }
+
+        // Pre-allocate the VMA for the device handler to fill PTEs.
+        vma_t *dv = (vma_t *)kmalloc(sizeof(vma_t));
+        if (!dv) {
+            vfs_node_put(file_node);
+            files_put_file(file);
+            return -ENOMEM;
+        }
+        list_init(&dv->list);
+        dv->vm_start     = addr;
+        dv->vm_end       = addr + length;
+        dv->vm_flags     = vm_flags_base | VMA_IO;
+        dv->vm_page_prot = page_prot;
+        dv->vm_pgoff     = offset >> PAGE_4K_SHIFT;
+        dv->vm_file      = file_node;   // handler may clear this
+
+        int mmap_rc = _dev_mmap(file_node, (struct vma *)dv);
+        if (mmap_rc < 0) {
+            vfs_node_put(file_node);
+            kfree(dv);
+            files_put_file(file);
+            return mmap_rc;
+        }
+        spin_lock(&current->mm->lock);
+        vma_insert(current->mm, dv);
+        spin_unlock(&current->mm->lock);
+        files_put_file(file);
+        return (int64_t)dv->vm_start;
+    }
+
+    // ── 5. Ordinary mapping: select + commit under one lock ──
+    mm_t *mm = current->mm;
+    spin_lock(&mm->lock);
+
+    if (!(flags & MAP_FIXED)) {
+        addr = mmap_find_gap(mm, length);
+        if (mm_user_range_protected(mm, addr, addr + length))
+            addr = USER_STACK_BASE + 0x200000UL;
+    }
+
+    if (addr >= current->addr_limit ||
+        addr > UINT64_MAX - length ||
+        addr + length > current->addr_limit) {
+        spin_unlock(&mm->lock);
         if (file_node) vfs_node_put(file_node);
+        if (file) files_put_file(file);
         return -ENOMEM;
     }
+
+    vma_t *right = NULL;
+    if (flags & MAP_FIXED) {
+        rc = prepare_unmap_locked(mm, addr, addr + length, &right);
+        if (rc != 0) {
+            spin_unlock(&mm->lock);
+            if (file_node) vfs_node_put(file_node);
+            if (file) files_put_file(file);
+            return rc;
+        }
+    }
+
+    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!vma) {
+        if (right) kfree(right);
+        spin_unlock(&mm->lock);
+        if (file_node) vfs_node_put(file_node);
+        if (file) files_put_file(file);
+        return -ENOMEM;
+    }
+
+    list_t retired;
+    list_init(&retired);
+    if (flags & MAP_FIXED)
+        commit_unmap_locked(mm, addr, addr + length, right, &retired);
+
     list_init(&vma->list);
     vma->vm_start     = addr;
     vma->vm_end       = addr + length;
@@ -745,9 +929,12 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     vma->vm_page_prot = page_prot;
     vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
     vma->vm_file      = file_node;
+    vma_insert(mm, vma);
 
-    vma_insert(current->mm, vma);
+    spin_unlock(&mm->lock);
 
+    release_retired_vmas(&retired);
+    if (file) files_put_file(file);
     return (int64_t)addr;
 }
 

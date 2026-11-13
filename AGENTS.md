@@ -11,7 +11,7 @@ make clean               # Clean build artifacts (header deps tracked via depfil
 make test-qemu SUITE=phase-0    # QEMU E2E boot (also: systest, inittab-phase, network)
 make test-host           # Host-side hosttests + PMM boot reservation
 make test-static         # Static audits: runtime, layout, canary, link-order
-make OS01_SYSTEST=1 test-qemu SUITE=systest   # 120-case syscall suite
+make OS01_SYSTEST=1 test-qemu SUITE=systest   # 121-case syscall suite
 make KERNEL_SELFTEST=1 test-kernel-selftest    # Built-in kernel selftests
 ```
 

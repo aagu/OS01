@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
+#include <fs/file.h>           // file_t / files_t for the MAP_FIXED fd path
 
 /* Forward-declared vfs_node_t so we don't pull in the heavy
  * production <fs/vfs.h> from this header (the host harness only
@@ -61,6 +62,8 @@ typedef struct {
     int flush_count;
     int lock_count;
     int unlock_count;
+    int files_get_calls;
+    int files_put_calls;
 } lifecycle_state_t;
 
 extern lifecycle_state_t lifecycle_state;
@@ -102,6 +105,19 @@ int  lifecycle_event_at(int index);
 /* PTE value captured when the flush hook fired (0 with *valid = 0
  * when the VA was not registered at that moment). */
 uint64_t lifecycle_flush_snapshot(uint64_t va, int *valid);
+
+/* total_frees at the moment of the last TLB flush: proves data pages
+ * are reclaimed only AFTER the page-table commit is synchronized. */
+int lifecycle_flush_free_count(void);
+
+/* ── Fake descriptor table (MAP_FIXED fd path) ───────────────
+ * do_mmap pins the descriptor with files_get_file(), then takes the
+ * node reference.  The harness provides a one-table stub so the
+ * lifecycle tests can drive that path; the real fd table is covered
+ * by the QEMU systest. */
+void     lifecycle_files_reset(void);
+files_t *lifecycle_files_table(void);
+int      lifecycle_files_install(int fd, file_t *f);
 
 /* Reset all counters + page pool to initial state. */
 void lifecycle_stubs_reset(void);

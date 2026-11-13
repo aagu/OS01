@@ -789,6 +789,97 @@ void test_mprotect_subrange_cow(void)
     unlink(path);
 }
 
+// ── munmap hole + MAP_FIXED replace（2026-11-13 munmap plan 任务 1）──
+// 四页文件映射中间挖洞后，右段必须从原文件页继续读取（拆分后的
+// vm_pgoff 递增）。随后用匿名 MAP_FIXED 替换中页：返回请求地址、
+// 新页可用、左右两段原文件数据不变。
+void test_fixed_file_replace(void)
+{
+    const char *path = "/tmp/t_fixed_replace";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        FAIL("fixed_file_replace", "create file failed errno=%d", errno);
+        return;
+    }
+    unsigned char page[4096];
+    int wrote = 1;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4096; j++)
+            page[j] = (unsigned char)(i * 64 + (j & 0x3F));
+        if (write(fd, page, 4096) != 4096) {
+            wrote = 0;
+            break;
+        }
+    }
+    close(fd);
+    if (!wrote) {
+        FAIL("fixed_file_replace", "write file failed");
+        unlink(path);
+        return;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        FAIL("fixed_file_replace", "re-open file failed errno=%d", errno);
+        unlink(path);
+        return;
+    }
+    unsigned char *f = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (f == MAP_FAILED) {
+        FAIL("fixed_file_replace", "file mmap failed errno=%d", errno);
+        unlink(path);
+        return;
+    }
+
+    /* 中间挖洞：右段起点前移，pgoff 必须跟着递增。 */
+    errno = 0;
+    int ok_unmap = (munmap(f + 0x1000, 0x1000) == 0);
+    CHECKF(ok_unmap, "fixed_file_hole", "hole at page 1",
+           "munmap failed errno=%d", errno);
+
+    /* 右段首次读：页 3、页内 +37。 */
+    unsigned char got_right = f[0x3000 + 37];
+    unsigned char want_right = (unsigned char)(3 * 64 + (37 & 0x3F));
+    CHECKF(got_right == want_right, "fixed_file_right_after_hole",
+           "right segment byte=%#x", "want %#x, got %#x (stale pgoff?)",
+           want_right, got_right);
+    unsigned char got_left = f[37];
+    unsigned char want_left = (unsigned char)(37 & 0x3F);
+    CHECKF(got_left == want_left, "fixed_file_left_after_hole",
+           "left segment byte=%#x", "want %#x, got %#x",
+           want_left, got_left);
+
+    /* MAP_FIXED 匿名中页替换：必须返回请求地址并可用。 */
+    errno = 0;
+    void *r = mmap(f + 0x1000, 0x1000, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECKF(r == (void *)(f + 0x1000), "fixed_file_replace_va",
+           "MAP_FIXED returned requested VA",
+           "want %p, got %p errno=%d", (void *)(f + 0x1000), r, errno);
+    if (r == (void *)(f + 0x1000)) {
+        unsigned char *m = (unsigned char *)r;
+        m[0] = 0xAB;
+        m[4095] = 0xCD;
+        CHECKF(m[0] == 0xAB && m[4095] == 0xCD,
+               "fixed_file_replace_writable",
+               "replacement page writable",
+               "sentinel readback %#x/%#x", m[0], m[4095]);
+    }
+
+    /* 两端的原文件数据保持不变。 */
+    CHECKF(f[37] == want_left && f[0x3000 + 37] == want_right,
+           "fixed_file_neighbours_intact",
+           "left/right file data intact",
+           "left=%#x right=%#x", f[37], f[0x3000 + 37]);
+
+    CHECK3(munmap(f, 0x4000) == 0, "fixed_file_release",
+           "file range released (hole + replacement VMA)");
+    unlink(path);
+}
+
 static unsigned char cow_elf_output[4096] __attribute__((aligned(4096)));
 
 

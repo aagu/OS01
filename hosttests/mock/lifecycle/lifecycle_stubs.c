@@ -152,6 +152,45 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
     return lifecycle_pte_get(virt);
 }
 
+/* ── Allocation-free leaf withdraw / release ──────────────────
+ * The production implementations live in kernel/memory/vmm.c; the
+ * lifecycle harness models the same semantics over its PTE registry
+ * and page pool so the munmap transaction is observable. */
+uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
+{
+    (void)root;
+    uint64_t *pte = lifecycle_pte_get(va);
+    if (!pte) return 0;
+    uint64_t old = *pte;
+    *pte = 0;
+    if (!(old & (PAGE_VALID | PAGE_PROTNONE))) return 0;
+    return old;
+}
+
+void x86_vmm_release_owned_4k(uint64_t old_pte)
+{
+    if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE))) return;
+    uint64_t phys = old_pte & PAGE_4K_MASK;
+    if (old_pte & PAGE_COW) {
+        if (page_cow_put(phys))
+            free_4k_page(phys);
+    } else {
+        free_4k_page(phys);
+    }
+}
+
+bool x86_vmm_has_2m(uint64_t *root, uint64_t va)
+{
+    (void)root; (void)va;
+    return false;
+}
+
+uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va)
+{
+    (void)root; (void)va;
+    return 0;
+}
+
 /* mm_set_brk (Task 4) references tlb_shootdown; the lifecycle test
  * never calls mm_set_brk, but the link needs the symbol. */
 void tlb_shootdown(void) { (void)0; }
@@ -254,6 +293,7 @@ void lifecycle_stubs_reset(void)
     }
     lifecycle_pte_reset();
     lifecycle_cow_reset();
+    lifecycle_files_reset();
     event_count = 0;
 }
 
@@ -314,6 +354,45 @@ void        vfs_node_put(vfs_node_t *node)
 {
     (void)node;
     lifecycle_state.vfs_put_calls++;
+}
+
+/* ── Fake files_t / fd path (MAP_FIXED) ─────────────────────
+ * Production do_mmap pins a file descriptor with files_get_file()
+ * before taking the node reference.  The harness models one static
+ * descriptor table; file_t objects are owned by the test. */
+static files_t lifecycle_fake_files;
+
+void lifecycle_files_reset(void)
+{
+    memset(&lifecycle_fake_files, 0, sizeof(lifecycle_fake_files));
+    spin_init(&lifecycle_fake_files.lock);
+}
+
+files_t *lifecycle_files_table(void)
+{
+    return &lifecycle_fake_files;
+}
+
+int lifecycle_files_install(int fd, file_t *f)
+{
+    if (fd < 0 || fd >= NOFILE) return -EINVAL;
+    lifecycle_fake_files.fd[fd] = f;
+    return 0;
+}
+
+file_t *files_get_file(files_t *fs, int fd)
+{
+    lifecycle_state.files_get_calls++;
+    if (!fs || fd < 0 || fd >= NOFILE) return NULL;
+    file_t *f = fs->fd[fd];
+    if (f) f->refcount++;
+    return f;
+}
+
+void files_put_file(file_t *f)
+{
+    lifecycle_state.files_put_calls++;
+    if (f && f->refcount > 0) f->refcount--;
 }
 
 /* ── page_cow_refs / page_cow_put — counted COW table ───────
@@ -391,14 +470,22 @@ static void record_event(int kind)
 void lifecycle_sync_lock(void)   { lifecycle_state.lock_count++;   record_event(LIFECYCLE_EV_LOCK); }
 void lifecycle_sync_unlock(void) { lifecycle_state.unlock_count++; record_event(LIFECYCLE_EV_UNLOCK); }
 
+static int flush_free_snapshot;
+
 void lifecycle_sync_flush(void)
 {
     lifecycle_state.flush_count++;
+    flush_free_snapshot = lifecycle_state.total_frees;
     for (int i = 0; i < LIFECYCLE_PTE_SLOTS; i++) {
         flush_snapshot_valid[i] = pte_slots[i].in_use;
         flush_snapshot[i] = pte_slots[i].in_use ? pte_slots[i].value : 0;
     }
     record_event(LIFECYCLE_EV_FLUSH);
+}
+
+int lifecycle_flush_free_count(void)
+{
+    return flush_free_snapshot;
 }
 
 int lifecycle_event_count(void) { return event_count; }

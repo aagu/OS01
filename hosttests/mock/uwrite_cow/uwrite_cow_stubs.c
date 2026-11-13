@@ -262,6 +262,42 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     uw_state.total_unmaps++;
 }
 
+/* ── files_get_file / files_put_file — fd pin (link parity) ──
+ * do_mmap resolves file-backed mappings through the fd table; these
+ * harnesses never drive a file mmap, so the pin is a no-op. */
+struct file *files_get_file(files_t *fs, int fd)
+{
+    (void)fs; (void)fd;
+    return 0;
+}
+void files_put_file(struct file *f) { (void)f; }
+
+/* ── Allocation-free leaf withdraw / release (munmap transaction) ── */
+uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
+{
+    uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
+    if (!pte) return 0;
+    uint64_t old = *pte;
+    *pte = 0;
+    if (!(old & (PAGE_VALID | PAGE_PROTNONE))) return 0;
+    uw_state.total_unmaps++;
+    return old;
+}
+void x86_vmm_release_owned_4k(uint64_t old_pte)
+{
+    if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE))) return;
+    uint64_t phys = old_pte & PAGE_4K_MASK;
+    if (old_pte & PAGE_COW) {
+        if (page_cow_put(phys))
+            free_4k_page(phys);
+    } else {
+        free_4k_page(phys);
+    }
+}
+bool x86_vmm_has_2m(uint64_t *root, uint64_t va) { (void)root; (void)va; return false; }
+uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va) { (void)root; (void)va; return 0; }
+
+
 /* ── tlb_shootdown — counter ────────────────────────────────────────── */
 void tlb_shootdown(void) { uw_state.total_tlb_shootdowns++; }
 

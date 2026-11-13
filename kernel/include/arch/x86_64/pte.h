@@ -128,4 +128,24 @@ int  x86_vmm_unmap_4k_page_with_free(uint64_t *pgdir, uint64_t virt);
 int  x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
                            uint64_t *phys_out, uint64_t *flags_out);
 
+/* ── Allocation-free leaf withdraw / release (munmap transaction) ──
+ *
+ * x86_vmm_take_4k saves the full old descriptor (PRESENT or PROTNONE)
+ * and clears the slot.  It NEVER frees the data page or changes a COW
+ * count — the caller must synchronize the TLB first and then call
+ * x86_vmm_release_owned_4k for leaves it owns.
+ *
+ * x86_vmm_release_owned_4k performs the ownership transfer for one
+ * old descriptor: non-COW pages are freed once; COW pages are put
+ * once and freed only by the last holder.  Borrowed device leaves
+ * must never reach this function.
+ *
+ * x86_vmm_has_2m reports a user 2 MiB block leaf covering va;
+ * x86_vmm_take_2m (2 MiB-aligned va only) clears and returns it.
+ * The 2 MiB pages themselves stay with their current owner. */
+uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va);
+void     x86_vmm_release_owned_4k(uint64_t old_pte);
+bool     x86_vmm_has_2m(uint64_t *root, uint64_t va);
+uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va);
+
 #endif

@@ -392,6 +392,76 @@ int x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
     return 0;
 }
 
+// ── Allocation-free leaf withdraw / release (munmap transaction) ──
+//
+// take: save the full descriptor (PRESENT or PROTNONE), clear the
+// slot, and touch nothing else.  The caller owns the returned
+// descriptor and must synchronize the TLB before release.
+uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
+{
+    uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
+    if (!pte)
+        return 0;
+    uint64_t old = *pte;
+    *pte = 0;
+    if (!(old & (PAGE_VALID | PAGE_PROTNONE)))
+        return 0;               // empty slot: nothing was installed
+    return old;
+}
+
+// release: ownership transfer for one withdrawn descriptor.  This is
+// the ONLY place a munmap-style withdraw hands a page back.
+void x86_vmm_release_owned_4k(uint64_t old_pte)
+{
+    if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE)))
+        return;
+    uint64_t phys = old_pte & PAGE_4K_MASK;
+    if (old_pte & PAGE_COW) {
+        if (page_cow_put(phys))
+            free_4k_page(phys);
+    } else {
+        free_4k_page(phys);
+    }
+}
+
+// PMD slot for va (2 MiB-aligned callers).  NULL when any level is
+// missing, the top level is kernel-only, or the PUD is a 1 GiB leaf.
+static uint64_t *x86_vmm_pmd_slot(uint64_t *root, uint64_t va)
+{
+    size_t l0 = (size_t)(va >> PAGE_PGD_SHIFT) & 0x1ff;
+    size_t l1 = (size_t)(va >> PAGE_1G_SHIFT)  & 0x1ff;
+    size_t l2 = (size_t)(va >> PAGE_2M_SHIFT)  & 0x1ff;
+
+    if (l0 >= 256) return NULL;
+    if (!(root[l0] & PAGE_VALID)) return NULL;
+    uint64_t *pud = (uint64_t *)Phy_To_Virt(root[l0] & PAGE_4K_MASK);
+    if (!(pud[l1] & PAGE_VALID) || (pud[l1] & PAGE_HUGE)) return NULL;
+    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l1] & PAGE_4K_MASK);
+    return &pmd[l2];
+}
+
+bool x86_vmm_has_2m(uint64_t *root, uint64_t va)
+{
+    uint64_t *pmd = x86_vmm_pmd_slot(root, va & PAGE_2M_MASK);
+    if (!pmd) return false;
+    return (*pmd & (PAGE_VALID | PAGE_HUGE | PAGE_USER)) ==
+           (PAGE_VALID | PAGE_HUGE | PAGE_USER);
+}
+
+// Clear a fully-covered user 2 MiB leaf.  The physical block stays
+// with its owner (stack/device borrow); the caller never releases it.
+uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va)
+{
+    if (va & (PAGE_2M_SIZE - 1)) return 0;
+    uint64_t *pmd = x86_vmm_pmd_slot(root, va);
+    if (!pmd) return 0;
+    uint64_t old = *pmd;
+    if ((old & (PAGE_VALID | PAGE_HUGE | PAGE_USER)) !=
+        (PAGE_VALID | PAGE_HUGE | PAGE_USER)) return 0;
+    *pmd = 0;
+    return old;
+}
+
 // Arch-neutral semantic facade: query 4KB PTE mapping.
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *vm_out)

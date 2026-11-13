@@ -735,21 +735,21 @@ static void test_wiring_order_in_vma_c(void)
     assert_not_null(src);
     const char *end = src + len;
 
-    /* do_munmap_locked: predicate before the first PTE unmap. */
-    const char *fn = strstr(src, "static int64_t do_munmap_locked(");
+    /* do_munmap: predicate before the prepare/commit transaction. */
+    const char *fn = strstr(src, "int64_t do_munmap(uint64_t addr");
     assert_not_null(fn);
-    const char *first_unmap = find_from(fn, end, "vmm_unmap_4k_page(");
-    assert_not_null(first_unmap);
-    const char *chk = find_from(fn, first_unmap, "mm_user_range_protected(");
+    const char *txn = find_from(fn, end, "prepare_unmap_locked(");
+    assert_not_null(txn);
+    const char *chk = find_from(fn, txn, "mm_user_range_protected(");
     assert_not_null(chk);
 
-    /* do_mmap: predicate before the MAP_FIXED do_munmap_locked call
-     * and before the device callback invocation. */
+    /* do_mmap: predicate before the MAP_FIXED transaction and before
+     * the device callback invocation. */
     fn = strstr(src, "int64_t do_mmap(uint64_t addr");
     assert_not_null(fn);
-    const char *fixed_unmap = find_from(fn, end, "do_munmap_locked(addr, length)");
-    assert_not_null(fixed_unmap);
-    chk = find_from(fn, fixed_unmap, "mm_user_range_protected(");
+    const char *fixed_prep = find_from(fn, end, "prepare_unmap_locked(");
+    assert_not_null(fixed_prep);
+    chk = find_from(fn, fixed_prep, "mm_user_range_protected(");
     assert_not_null(chk);
 
     const char *dev_call = find_from(fn, end, "_dev_mmap(file_node");
