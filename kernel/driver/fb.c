@@ -99,12 +99,17 @@ static int fb_write(struct vfs_node *node, uint64_t offset,
 }
 
 // ── fb_mmap: map framebuffer into user space ─────────────────
-// Validates SHARED and bounds under control mutex, then eagerly fills
-// the user PTEs with the framebuffer cache policy published by the
-// identified framebuffer backend (the same policy the kernel mapping
-// uses -- see <driver/fb_cache.h>). If an intermediate mapping fails,
-// rollbacks installed PTEs, syncs TLB, and sets sticky if unmap failed.
-static int fb_mmap(struct vfs_node *node, struct vma *vma_)
+// Two-phase device mapping.  Under the framebuffer control mutex the
+// device validates the request and computes the first PA + user PTE
+// flags (the cache policy published by the identified backend, so the
+// user alias carries the same memory type as the kernel mapping).
+// The MM transaction then owns the range, the old-leaf withdraw and
+// the VMA; it takes mm->lock after the display mutex, which is the
+// global order.  Raw mmap state is published only after the commit
+// succeeded and before the control lock is released, so a failed
+// prepare leaves both the old mapping and the raw state untouched.
+static int fb_mmap(struct vfs_node *node, struct vma *vma_,
+                   vfs_mmap_commit_fn commit, void *ctx)
 {
     (void)node;
     vma_t *vma = (vma_t *)vma_;
@@ -143,71 +148,29 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_)
         }
     }
 
-    // Eagerly fill PTEs for the user alias of the framebuffer pages.
-    // The physical framebuffer pages start at Pos.Phy_addr.
-    uint64_t *user_pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
-    uint64_t fb_phys = (uint64_t)Pos.Phy_addr;
+    if (!commit) {
+        fb_control_unlock();
+        return -EINVAL;
+    }
 
-    /* The user alias maps the SAME physical pages as the kernel's
-     * framebuffer mapping, so it MUST carry the same memory type:
-     * x86 forbids accessing one physical page under two different
-     * memory types (IA32_PAT: avoid memory-type aliasing).  The policy
-     * is the one published by the identified framebuffer backend, i.e.
-     * exactly the policy fb_x86_map_checked() installed the kernel
-     * mapping with.  Both the read-only and the (test-only) writable
-     * raw mmap path go through here. */
+    /* Both the read-only and the (test-only) raw writable path go
+     * through the same flags; the user alias maps the SAME physical
+     * pages as the kernel mapping. */
     uint64_t page_flags = fb_x86_user_pte_flags(fb_cache_policy_get(),
                                                  is_writable);
+    uint64_t fb_phys = (uint64_t)Pos.Phy_addr;
 
-    uint64_t installed_end = vma->vm_start;
-    bool map_failed = false;
-
-    for (uint64_t va = vma->vm_start; va < vma->vm_end; va += PAGE_4K_SIZE) {
-        uint64_t phys = fb_phys + (va - vma->vm_start);
-        int mrc = vmm_map_4k_page(user_pgd, phys, va, page_flags);
-        if (mrc < 0) {
-            map_failed = true;
-            break;
-        }
-        installed_end = va + PAGE_4K_SIZE;
-    }
-
-    if (map_failed) {
-        for (uint64_t va = vma->vm_start; va < installed_end; va += PAGE_4K_SIZE) {
-            vmm_unmap_4k_page(user_pgd, va);
-        }
-        flush_tlb();
-        bool has_residual = false;
-        for (uint64_t va = vma->vm_start; va < installed_end; va += PAGE_4K_SIZE) {
-            if (arch_vmm_query_4k(user_pgd, va, NULL, NULL) == 0) {
-                has_residual = true;
-                break;
-            }
-        }
-        if (has_residual) {
-            // Cannot reliably unmap: mark sticky for safety
-            fb_mark_raw_mmap_seen();
-            if (is_writable) {
-                fb_mark_raw_writable_mmap_seen();
-            }
-        }
+    rc = commit(ctx, fb_phys, page_flags);
+    if (rc < 0) {
+        /* The MM kept the old mapping and reported the failure. */
         fb_control_unlock();
-        return -ENOMEM;
+        return rc;
     }
 
-    flush_tlb();
+    // Commit succeeded: publish raw mmap state, then release the lock.
     fb_mark_raw_mmap_seen();
-    if (is_writable) {
+    if (is_writable)
         fb_mark_raw_writable_mmap_seen();
-    }
-
-    // Safety: clear vm_file to prevent do_page_fault from calling
-    // vfs_read on this VMA.  Fork will skip these PTEs (VMA_IO guard),
-    // so page fault on an MMIO page should never happen.
-    if (vma->vm_file) {
-        vfs_node_put(vma->vm_file);
-        vma->vm_file = NULL;
-    }
 
     fb_control_unlock();
     return 0;

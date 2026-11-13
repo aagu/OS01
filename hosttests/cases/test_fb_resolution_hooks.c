@@ -252,6 +252,19 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt) { (void)pgdir; (void)virt
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out)
 { (void)pgdir; (void)virt; (void)phys_out; (void)vm_out; return -ENOENT; }
 
+/* MM commit mock: fb_mmap hands the range to the MM transaction; this
+ * records the device PA/flags by mapping through the same mock. */
+static int hook_commit(void *ctx, uint64_t first_pa, uint64_t pte_flags)
+{
+    vma_t *v = (vma_t *)ctx;
+    for (uint64_t va = v->vm_start; va < v->vm_end; va += PAGE_4K_SIZE) {
+        uint64_t phys = first_pa + (va - v->vm_start);
+        if (vmm_map_4k_page(NULL, phys, va, pte_flags) != 0)
+            return -ENOMEM;
+    }
+    return 0;
+}
+
 /* devfs registration spy */
 static char g_reg_names[8][DEVFS_NAME_MAX];
 static int g_reg_count = 0;
@@ -911,7 +924,7 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
     memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
     g_hook_pte_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
@@ -923,7 +936,7 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
     g_hook_pte_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
@@ -950,7 +963,7 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
     memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
     g_hook_pte_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
         CHECK_EQ(0, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
@@ -977,7 +990,7 @@ static void check_alias_cache_bits(unsigned expected_cache_bits)
     memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
     memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
     g_hook_pte_count = 0;
-    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {
@@ -990,7 +1003,7 @@ static void check_alias_cache_bits(unsigned expected_cache_bits)
     memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
     memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
     g_hook_pte_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_hook_pte_count);
     for (size_t i = 0; i < g_hook_pte_count; i++) {

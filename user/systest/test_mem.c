@@ -880,6 +880,70 @@ void test_fixed_file_replace(void)
     unlink(path);
 }
 
+// ── framebuffer MAP_FIXED 替换（2026-11-13 munmap plan 任务 2）──
+// 哨兵匿名区间的中页先被只读设备映射替换：私有映射必须被拒绝且
+// 三个哨兵保持；共享只读替换返回请求 VA、设备页可读、两端哨兵
+// 保持。设备部分在 fork 子进程中执行，父进程只检查退出状态。
+void test_fb_fixed_replace(void)
+{
+    unsigned char *p = mmap(NULL, 0x3000, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        FAIL("fb_fixed_replace", "setup mmap failed errno=%d", errno);
+        return;
+    }
+    p[0] = 0x11;
+    p[0x1000] = 0x22;
+    p[0x2000] = 0x33;
+
+    int64_t pid = fork();
+    if (pid == 0) {
+        int fd = open("/dev/fb", O_RDONLY);
+        if (fd < 0)
+            _exit(20);
+
+        /* Private MAP_FIXED must be rejected and leave all sentinels. */
+        errno = 0;
+        void *bad = mmap(p + 0x1000, 0x1000, PROT_READ,
+                         MAP_FIXED | MAP_PRIVATE, fd, 0);
+        if (bad != MAP_FAILED || errno != EINVAL)
+            _exit(21);
+        if (p[0] != 0x11 || p[0x1000] != 0x22 || p[0x2000] != 0x33)
+            _exit(22);
+
+        /* Shared read-only replacement of the middle page. */
+        errno = 0;
+        void *m = mmap(p + 0x1000, 0x1000, PROT_READ,
+                       MAP_FIXED | MAP_SHARED, fd, 0);
+        if (m != (void *)(p + 0x1000))
+            _exit(23);
+        volatile unsigned char dev_byte =
+            ((volatile unsigned char *)m)[0];
+        (void)dev_byte;
+        if (p[0] != 0x11 || p[0x2000] != 0x33)
+            _exit(24);
+
+        if (munmap(p + 0x1000, 0x1000) != 0)
+            _exit(25);
+        close(fd);
+        _exit(0);
+    }
+    if (pid < 0) {
+        FAIL("fb_fixed_replace", "fork failed errno=%d", errno);
+        munmap(p, 0x3000);
+        return;
+    }
+
+    int st = 0;
+    int64_t waited = waitpid(pid, &st, 0);
+    CHECKF(waited == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+           "fb_fixed_replace_child", "pid=%ld waited=%ld status=%#x",
+           "want awaited==pid && WIFEXITED&&0, pid=%ld waited=%ld status=%#x",
+           (long)pid, (long)waited, st);
+    CHECK3(munmap(p, 0x3000) == 0, "fb_fixed_replace_release",
+           "sentinel range released");
+}
+
 static unsigned char cow_elf_output[4096] __attribute__((aligned(4096)));
 
 

@@ -248,6 +248,13 @@ void x86_vmm_release_owned_4k(uint64_t old_pte)
 bool x86_vmm_has_2m(uint64_t *root, uint64_t va) { (void)root; (void)va; return false; }
 uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va) { (void)root; (void)va; return 0; }
 
+/* The device transaction is not exercised by this harness. */
+int x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start, uint64_t end)
+{
+    (void)root; (void)start; (void)end;
+    return 0;
+}
+
 
 /* ── prepare_user_write_range_locked — WEAK fallback ──────────
  * Task 7: vma.c's user_write_range_begin delegates to

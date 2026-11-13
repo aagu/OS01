@@ -146,6 +146,34 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32
     return -ENOENT;
 }
 
+/* ── MM commit callback mock ─────────────────────────────────
+ * fb_mmap now validates and then hands the range to the MM
+ * transaction; this callback records what the device supplied and
+ * emulates the transaction's leaf install over the mock PTE table. */
+static int      g_mock_commit_calls;
+static int      g_mock_commit_rc;
+static uint64_t g_mock_commit_first_pa;
+static uint64_t g_mock_commit_flags;
+
+static int mock_commit(void *ctx, uint64_t first_pa, uint64_t pte_flags)
+{
+    g_mock_commit_calls++;
+    g_mock_commit_first_pa = first_pa;
+    g_mock_commit_flags = pte_flags;
+    if (g_mock_commit_rc)
+        return g_mock_commit_rc;
+    vma_t *v = (vma_t *)ctx;
+    size_t before = g_installed_count;
+    for (uint64_t va = v->vm_start; va < v->vm_end; va += PAGE_4K_SIZE) {
+        uint64_t phys = first_pa + (va - v->vm_start);
+        if (vmm_map_4k_page(NULL, phys, va, pte_flags) != 0) {
+            g_installed_count = before;   /* own-call rollback */
+            return -ENOMEM;
+        }
+    }
+    return 0;
+}
+
 /* ── Fault-Tolerant Copy / User Range Mocks ── */
 static int g_inject_copy_fail_row = -1;
 static int g_current_copy_row = 0;
@@ -283,6 +311,10 @@ static void setup_test_environment(void)
     g_current_map_page = 0;
     g_inject_copy_fail_row = -1;
     g_current_copy_row = 0;
+    g_mock_commit_calls = 0;
+    g_mock_commit_rc = 0;
+    g_mock_commit_first_pa = 0;
+    g_mock_commit_flags = 0;
 
     Pos.XResolution = TEST_FB_WIDTH;
     Pos.YResolution = TEST_FB_HEIGHT;
@@ -466,43 +498,97 @@ static void test_mmap_partial_failure(void)
     vma.vm_end   = 0x14000; /* 4 pages = 16KB */
     vma.vm_file  = NULL;
 
-    /* Subcase 4a: intermediate mapping failure on page 2 (0-indexed 1) */
+    /* Subcase 4a: the MM transaction fails to install page 2.  It
+     * rolls back its own leaves; fb_mmap publishes no raw state. */
     g_current_map_page = 0;
     g_inject_map_fail_page = 1;
-    g_inject_unmap_fail_page = -1;
     g_installed_count = 0;
 
-    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-ENOMEM, rc);
-
-    /* Assert all installed PTEs revoked */
+    CHECK_EQ(1, g_mock_commit_calls);
     CHECK_EQ(0, g_installed_count);
-    /* Clean rollback: raw_mmap_seen remains false */
     CHECK_EQ(false, fb_has_raw_mmap_seen());
 
-    /* Subcase 4b: rollback unmap fails -> untrusted cleanup sets sticky=true */
-    g_current_map_page = 0;
-    g_inject_map_fail_page = 1;
-    g_inject_unmap_fail_page = 0; /* unmap of page 0 fails! */
-    g_installed_count = 0;
-
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
-    CHECK_EQ(-ENOMEM, rc);
-    /* Untrusted unmap: sticky set to true for safety! */
-    CHECK_EQ(true, fb_has_raw_mmap_seen());
-
-    /* Subcase 4c: successful mmap sets sticky=true */
+    /* Subcase 4b: a failed commit (device-side denial) publishes
+     * neither leaves nor raw state. */
     setup_test_environment();
+    g_installed_count = 0;
+    g_mock_commit_rc = -EPERM;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+    CHECK_EQ(-EPERM, rc);
+    CHECK_EQ(0, g_installed_count);
     CHECK_EQ(false, fb_has_raw_mmap_seen());
 
+    /* Subcase 4c: successful commit sets raw state and maps all pages. */
+    setup_test_environment();
     g_current_map_page = 0;
     g_inject_map_fail_page = -1;
-    g_inject_unmap_fail_page = -1;
     g_installed_count = 0;
 
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
+    CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(true, fb_has_raw_mmap_seen());
+}
+
+/* A failed MAP_FIXED replacement must leave the old four-page mapping
+ * byte-for-byte intact: permission denial happens before the commit,
+ * and a transaction failure reports without touching the old leaves. */
+static void test_fb_fixed_failure_keeps_old_mapping(void)
+{
+    printf("\n--- test_fb_fixed_failure_keeps_old_mapping ---\n");
+    setup_test_environment();
+
+    vma_t vma;
+    memset(&vma, 0, sizeof(vma));
+    vma.vm_start = 0x10000;
+    vma.vm_end   = 0x14000;
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+
+    /* Establish the old mapping in the mock page table. */
+    for (int i = 0; i < 4; i++)
+        vmm_map_4k_page(NULL, 0x5000 + (uint64_t)i * 0x1000,
+                        vma.vm_start + (uint64_t)i * 0x1000,
+                        PAGE_USER_PTE_RO);
+    uint64_t old_ptes[MAX_TRACKED_PAGES], old_flags[MAX_TRACKED_PAGES];
+    size_t old_count = g_installed_count;
+    memcpy(old_ptes, g_installed_ptes, sizeof(old_ptes));
+    memcpy(old_flags, g_installed_flags, sizeof(old_flags));
+
+    /* 1. Permission denial under the control lock: writable raw mmap
+     *    is not allowed in normal mode. */
+    vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE;
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+    CHECK_EQ(-EPERM, rc);
+    CHECK_EQ(0, g_mock_commit_calls);
+    CHECK_EQ(old_count, g_installed_count);
+    CHECK_EQ(0, memcmp(old_ptes, g_installed_ptes, sizeof(old_ptes)));
+    CHECK_EQ(0, memcmp(old_flags, g_installed_flags, sizeof(old_flags)));
+    CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
+
+    /* 2. Transaction OOM after validation: fb_mmap relays the error,
+     *    publishes nothing and the old mapping is untouched. */
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    g_mock_commit_rc = -ENOMEM;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+    CHECK_EQ(-ENOMEM, rc);
+    CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(old_count, g_installed_count);
+    CHECK_EQ(0, memcmp(old_ptes, g_installed_ptes, sizeof(old_ptes)));
+    CHECK_EQ(0, memcmp(old_flags, g_installed_flags, sizeof(old_flags)));
+    CHECK_EQ(false, fb_has_raw_mmap_seen());
+
+    /* 3. A successful commit maps the requested range with the device
+     *    PA/flags and publishes the raw state. */
+    g_mock_commit_rc = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+    CHECK_EQ(0, rc);
+    CHECK_EQ(0xE0000000ULL, g_mock_commit_first_pa);
+    CHECK_EQ((uint64_t)PAGE_USER_PTE_RO,
+             g_mock_commit_flags & ~(uint64_t)(PAGE_CACHE_DISABLE |
+                                                 PAGE_WRITE_THROUGH));
     CHECK_EQ(true, fb_has_raw_mmap_seen());
 }
 
@@ -650,7 +736,7 @@ static void test_raw_mmap_ownership_boundaries(void)
 
     /* 1. Normal mode: writable mmap rejected with -EPERM */
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
-    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-EPERM, rc);
     CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
     CHECK_EQ(false, fb_has_raw_mmap_seen());
@@ -662,7 +748,7 @@ static void test_raw_mmap_ownership_boundaries(void)
     g_inject_map_fail_page = -1;
     g_inject_unmap_fail_page = -1;
     g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     CHECK_EQ(true, fb_has_raw_mmap_seen());
@@ -684,7 +770,7 @@ static void test_raw_mmap_ownership_boundaries(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     g_current_map_page = 0;
     g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-EBUSY, rc);
     CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
     fb_owner_release(owner_cookie);
@@ -694,7 +780,7 @@ static void test_raw_mmap_ownership_boundaries(void)
     CHECK_EQ(0, rc);
     g_current_map_page = 0;
     g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-EBUSY, rc);
     CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
     fb_owner_detach(owner_cookie);
@@ -703,36 +789,20 @@ static void test_raw_mmap_ownership_boundaries(void)
      * causing subsequent acquire and register_fallback to return -EBUSY */
     g_current_map_page = 0;
     g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(true, fb_has_raw_writable_mmap_seen());
     CHECK_EQ(-EBUSY, fb_owner_acquire(owner_cookie, 0));
     CHECK_EQ(-EBUSY, fb_owner_register_fallback(owner_cookie, 0));
 
-    /* 4. Partial map failure + unmap failure sets sticky, causing subsequent acquire/register to return EBUSY */
+    /* 4. A failed commit (device-side prepare OOM) publishes no raw
+     *    state: a rejected replace leaves old owners admissible. */
     setup_test_environment();
     fb_set_raw_writable_allowed_for_test(true);
-    g_current_map_page = 0;
-    g_inject_map_fail_page = 1;
-    g_inject_unmap_fail_page = 0; /* unmap page 0 fails! dirty residual */
-    g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
-    CHECK_EQ(-ENOMEM, rc);
-    CHECK_EQ(true, fb_has_raw_writable_mmap_seen());
-    CHECK_EQ(-EBUSY, fb_owner_acquire(owner_cookie, 0));
-    CHECK_EQ(-EBUSY, fb_owner_register_fallback(owner_cookie, 0));
-
-    /* 5. Partial map failure + unmap success (clean rollback) leaves NO sticky */
-    setup_test_environment();
-    fb_set_raw_writable_allowed_for_test(true);
-    g_current_map_page = 0;
-    g_inject_map_fail_page = 1;
-    g_inject_unmap_fail_page = -1; /* unmap succeeds cleanly */
-    g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    g_mock_commit_rc = -ENOMEM;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-ENOMEM, rc);
     CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
-    /* Owner acquire and register_fallback both succeed! */
     CHECK_EQ(0, fb_owner_acquire(owner_cookie, 0));
     fb_owner_release(owner_cookie);
     CHECK_EQ(0, fb_owner_register_fallback(owner_cookie, 0));
@@ -775,7 +845,7 @@ static void test_raw_mmap_cache_policy(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
     g_current_map_page = 0;
     g_installed_count = 0;
-    int rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     for (size_t i = 0; i < g_installed_count; i++) {
@@ -791,7 +861,7 @@ static void test_raw_mmap_cache_policy(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     g_current_map_page = 0;
     g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     for (size_t i = 0; i < g_installed_count; i++) {
@@ -808,7 +878,7 @@ static void test_raw_mmap_cache_policy(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
     g_current_map_page = 0;
     g_installed_count = 0;
-    rc = fb_ops.mmap(NULL, (struct vma *)&vma);
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(4, g_installed_count);
     for (size_t i = 0; i < g_installed_count; i++) {
@@ -829,6 +899,7 @@ int main(void)
     test_view_aba_stale();
     test_console_transition_serial_only();
     test_mmap_partial_failure();
+    test_fb_fixed_failure_keeps_old_mapping();
     test_write_row_leased_and_resize();
     test_kpanic_trylock_no_deadlock();
     test_raw_mmap_ownership_boundaries();

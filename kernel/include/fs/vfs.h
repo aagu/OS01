@@ -78,6 +78,18 @@ typedef struct vfs_inode_ops {
     int              (*readlink)(struct vfs_node *node, char *buf, size_t size);
 } vfs_inode_ops_t;
 
+/* Device mmap commit callback (spec: x86 munmap/MAP_FIXED item 2).
+ *
+ * The device validates cache type, bounds and permissions first and
+ * then calls this while it still holds its control lock.  The MM
+ * transaction owns the range [vma->vm_start, vma->vm_end); the device
+ * supplies only the first page's physical address and the final user
+ * PTE flags.  Return 0 after the new mapping is committed; a negative
+ * errno must leave the old VMA, leaves, references and raw device
+ * state untouched. */
+typedef int (*vfs_mmap_commit_fn)(void *ctx, uint64_t first_pa,
+                                  uint64_t pte_flags);
+
 typedef struct vfs_file_ops {
     int     (*read)(struct vfs_node *node, uint64_t offset,
                     uint64_t size, void *buffer);
@@ -85,7 +97,8 @@ typedef struct vfs_file_ops {
                      uint64_t size, void *buffer);
     int     (*readdir)(struct vfs_node *node, uint64_t index,
                        struct vfs_dirent *entry);
-    int     (*mmap)(struct vfs_node *node, struct vma *vma);
+    int     (*mmap)(struct vfs_node *node, struct vma *vma,
+                    vfs_mmap_commit_fn commit, void *ctx);
 
     // Optional atomic-append hook.
     //

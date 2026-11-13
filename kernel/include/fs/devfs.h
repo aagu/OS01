@@ -54,7 +54,8 @@ struct devfs_ops {
     int (*write)(struct vfs_node *, uint64_t, uint64_t, void *);
     uint32_t (*poll)(void *priv, uint32_t requested,
                      struct poll_table *pt);
-    int (*mmap)(struct vfs_node *, struct vma *);
+    int (*mmap)(struct vfs_node *, struct vma *,
+                vfs_mmap_commit_fn, void *ctx);
     int (*ioctl)(struct vfs_node *, int cmd, void *arg);
     int (*ioctl_file)(struct file *, int cmd, void *arg);
     void (*release_file)(struct file *);

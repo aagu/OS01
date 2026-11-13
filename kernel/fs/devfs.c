@@ -375,7 +375,8 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
 }
 
 // ── devfs_mmap — dispatch mmap for device-backed mmap ────────
-static int devfs_mmap(vfs_node_t *node, struct vma *vma)
+static int devfs_mmap(vfs_node_t *node, struct vma *vma,
+                      vfs_mmap_commit_fn commit, void *ctx)
 {
     devfs_node_t *dev = devfs_device_from_node(node);
     if (!dev)
@@ -385,7 +386,7 @@ static int devfs_mmap(vfs_node_t *node, struct vma *vma)
         dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
 #endif
         dev->ops && dev->ops->mmap)
-        return dev->ops->mmap(node, vma);
+        return dev->ops->mmap(node, vma, commit, ctx);
     return -ENODEV;
 }
 

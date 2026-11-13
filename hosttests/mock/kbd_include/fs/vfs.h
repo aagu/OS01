@@ -10,4 +10,8 @@
 
 typedef struct vfs_node vfs_node_t;
 
+/* Device mmap commit callback (mirror of the real header). */
+typedef int (*vfs_mmap_commit_fn)(void *ctx, uint64_t first_pa,
+                                  uint64_t pte_flags);
+
 #endif /* _FS_VFS_H */

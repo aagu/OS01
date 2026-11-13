@@ -1176,6 +1176,26 @@ static void take_snapshot(map_snapshot_t *s, vma_t *v)
     s->files_puts = lifecycle_state.files_put_calls;
 }
 
+/* Mapping-only comparison for attempts that legitimately pin and
+ * unpin the fd/node (balanced references are asserted separately). */
+static void assert_mapping_unchanged(const map_snapshot_t *s, vma_t *v)
+{
+    assert_eq(s->list_count, vma_list_count(&fixture_mm.vma_list));
+    assert_true(vma_list_get(&fixture_mm.vma_list, 0) == s->node);
+    assert_eq(s->start, v->vm_start);
+    assert_eq(s->end, v->vm_end);
+    assert_eq(s->flags, v->vm_flags);
+    assert_eq(s->prot, v->vm_page_prot);
+    assert_eq(s->pgoff, v->vm_pgoff);
+    for (int i = 0; i < 4; i++) {
+        uint64_t *p = lifecycle_pte_get(MUNMAP_BASE + (uint64_t)i * 0x1000UL);
+        assert_eq(s->pte[i], p ? *p : 0);
+    }
+    assert_eq(s->allocs, lifecycle_state.total_allocs);
+    assert_eq(s->frees, lifecycle_state.total_frees);
+    assert_eq(s->cow_puts, lifecycle_state.cow_put_calls);
+}
+
 static void assert_snapshot_unchanged(const map_snapshot_t *s, vma_t *v)
 {
     assert_eq(s->list_count, vma_list_count(&fixture_mm.vma_list));
@@ -1491,6 +1511,243 @@ static void test_munmap_fixed_failure_preserves_state(void)
     }
 }
 
+/* ── Device MAP_FIXED transaction (munmap plan task 2) ────────
+ * A fake device node exposes the real f_ops->mmap path into vma.c's
+ * transaction; the device callback validates, then calls the commit
+ * callback with one first PA + PTE flags, exactly like fb_mmap. */
+
+static uint64_t g_dev_first_pa = 0x30000000UL;
+static uint64_t g_dev_flags = PAGE_USER_PTE_RO;
+static int      g_dev_calls;
+static int      g_dev_inject_rc;
+
+static int fake_dev_mmap(struct vfs_node *node, struct vma *vma,
+                         vfs_mmap_commit_fn commit, void *ctx)
+{
+    (void)node; (void)vma;
+    g_dev_calls++;
+    if (g_dev_inject_rc)
+        return g_dev_inject_rc;
+    return commit(ctx, g_dev_first_pa, g_dev_flags);
+}
+
+static const vfs_file_ops_t fake_dev_ops = { .mmap = fake_dev_mmap };
+static vfs_node_t fake_dev_node;
+static file_t     fake_dev_file;
+
+static void install_fake_device(void)
+{
+    memset(&fake_dev_node, 0, sizeof(fake_dev_node));
+    fake_dev_node.type  = VFS_CHRDEV;
+    fake_dev_node.f_ops = &fake_dev_ops;
+
+    memset(&fake_dev_file, 0, sizeof(fake_dev_file));
+    fake_dev_file.type     = FD_DEV;
+    fake_dev_file.node     = &fake_dev_node;
+    fake_dev_file.refcount = 1;
+    lifecycle_files_install(0, &fake_dev_file);
+
+    g_dev_calls = 0;
+    g_dev_inject_rc = 0;
+    g_dev_flags = PAGE_USER_PTE_RO;
+}
+
+static void test_device_map_fixed_commit(void)
+{
+    TEST_SUITE("device MAP_FIXED — prepared transaction and leaf ownership");
+
+    setup_munmap();
+    install_fake_device();
+    uint64_t p0 = alloc_4k_page();
+    uint64_t p1 = alloc_4k_page();
+    uint64_t p2 = alloc_4k_page();
+    uint64_t p3 = alloc_4k_page();
+    assert_true(p0 && p1 && p2 && p3);
+    lifecycle_pte_set(MUNMAP_BASE,            p0 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x3000UL, p3 | PAGE_USER_PTE);
+    install_anon_vma(MUNMAP_BASE, 0x4000);
+
+    int frees_before = lifecycle_state.total_frees;
+    int vgets = lifecycle_state.vfs_get_calls;
+    int vputs = lifecycle_state.vfs_put_calls;
+    int fgets = lifecycle_state.files_get_calls;
+    int fputs = lifecycle_state.files_put_calls;
+
+    assert_eq((int64_t)(MUNMAP_BASE + 0x1000UL),
+              do_mmap(MUNMAP_BASE + 0x1000UL, 0x2000UL, PROT_READ,
+                      MAP_FIXED | MAP_SHARED, 0, 0));
+    assert_eq(1, g_dev_calls);
+
+    assert_eq(3, vma_list_count(&fixture_mm.vma_list));
+    vma_t *l = vma_list_get(&fixture_mm.vma_list, 0);
+    vma_t *m = vma_list_get(&fixture_mm.vma_list, 1);
+    vma_t *r = vma_list_get(&fixture_mm.vma_list, 2);
+    assert_not_null(l);
+    assert_not_null(m);
+    assert_not_null(r);
+    if (!l || !m || !r) return;
+
+    assert_eq(MUNMAP_BASE + 0x1000UL, m->vm_start);
+    assert_eq(MUNMAP_BASE + 0x3000UL, m->vm_end);
+    assert_true(m->vm_flags & VMA_IO);
+    assert_true(m->vm_flags & VMA_PROT_READ);
+    assert_null(m->vm_file);          /* node ref stays with do_mmap */
+
+    /* New device leaves carry first_pa + page offset and the device
+     * flags; the two neighbour leaves are untouched. */
+    assert_eq(g_dev_first_pa | (g_dev_flags & ~PAGE_4K_MASK),
+              *lifecycle_pte_get(MUNMAP_BASE + 0x1000UL));
+    assert_eq((g_dev_first_pa + 0x1000UL) | (g_dev_flags & ~PAGE_4K_MASK),
+              *lifecycle_pte_get(MUNMAP_BASE + 0x2000UL));
+    assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MUNMAP_BASE));
+    assert_eq(p3 | PAGE_USER_PTE,
+              *lifecycle_pte_get(MUNMAP_BASE + 0x3000UL));
+
+    /* Owned old middle pages were reclaimed exactly once. */
+    assert_eq(frees_before + 2, lifecycle_state.total_frees);
+    /* The device node reference and the fd pin are both balanced. */
+    assert_eq(vgets + 1, lifecycle_state.vfs_get_calls);
+    assert_eq(vputs + 1, lifecycle_state.vfs_put_calls);
+    assert_eq(fgets + 1, lifecycle_state.files_get_calls);
+    assert_eq(fputs + 1, lifecycle_state.files_put_calls);
+}
+
+static void test_device_map_fixed_borrowed_leaf(void)
+{
+    TEST_SUITE("device MAP_FIXED — borrowed VMA_IO leaf is only withdrawn");
+
+    setup_munmap();
+    install_fake_device();
+    uint64_t borrowed = alloc_4k_page();
+    assert_true(borrowed != 0);
+    lifecycle_pte_set(MUNMAP_BASE,            borrowed | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, borrowed + 0x1000UL | PAGE_USER_PTE);
+
+    vma_t *old = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(old);
+    if (!old) return;
+    memset(old, 0, sizeof(*old));
+    list_init(&old->list);
+    old->vm_start = MUNMAP_BASE;
+    old->vm_end   = MUNMAP_BASE + 0x2000UL;
+    old->vm_flags = VMA_IO | VMA_SHARED | VMA_PROT_READ;
+    old->vm_page_prot = PAGE_USER_PTE_RO;
+    vma_insert(&fixture_mm, old);
+
+    int frees_before = lifecycle_state.total_frees;
+    int cow_before   = lifecycle_state.cow_put_calls;
+
+    assert_eq((int64_t)MUNMAP_BASE,
+              do_mmap(MUNMAP_BASE, 0x2000UL, PROT_READ,
+                      MAP_FIXED | MAP_SHARED, 0, 0));
+
+    /* The whole old mapping was retired; its borrowed pages were not
+     * freed or COW-put. */
+    assert_eq(frees_before, lifecycle_state.total_frees);
+    assert_eq(cow_before, lifecycle_state.cow_put_calls);
+    assert_eq(1, vma_list_count(&fixture_mm.vma_list));
+    vma_t *m = vma_list_get(&fixture_mm.vma_list, 0);
+    assert_not_null(m);
+    if (m) {
+        assert_true(m->vm_flags & VMA_IO);
+        assert_eq(MUNMAP_BASE, m->vm_start);
+        assert_eq(MUNMAP_BASE + 0x2000UL, m->vm_end);
+    }
+}
+
+static void test_device_map_fixed_prepare_failure(void)
+{
+    TEST_SUITE("device MAP_FIXED — prepare failures keep the old mapping");
+
+    setup_munmap();
+    install_fake_device();
+    uint64_t p0 = alloc_4k_page();
+    uint64_t p1 = alloc_4k_page();
+    uint64_t p2 = alloc_4k_page();
+    assert_true(p0 && p1 && p2);
+    lifecycle_pte_set(MUNMAP_BASE,            p0 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+    lifecycle_pte_set(MUNMAP_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+    vma_t *v = install_anon_vma(MUNMAP_BASE, 0x3000);
+
+    map_snapshot_t snap;
+    take_snapshot(&snap, v);
+
+    /* Table/right-node preparation failure. */
+    lifecycle_set_prepare_fail(-ENOMEM);
+    assert_eq(-ENOMEM,
+              do_mmap(MUNMAP_BASE + 0x1000UL, 0x1000UL, PROT_READ,
+                      MAP_FIXED | MAP_SHARED, 0, 0));
+    lifecycle_set_prepare_fail(0);
+    assert_mapping_unchanged(&snap, v);
+    assert_eq(lifecycle_state.vfs_get_calls,
+              lifecycle_state.vfs_put_calls);
+    assert_eq(lifecycle_state.files_get_calls,
+              lifecycle_state.files_put_calls);
+
+    /* Second allocation (the boundary right node) fails. */
+    kmalloc_calls = 0;
+    kmalloc_fail_after = 2;
+    assert_eq(-ENOMEM,
+              do_mmap(MUNMAP_BASE + 0x1000UL, 0x1000UL, PROT_READ,
+                      MAP_FIXED | MAP_SHARED, 0, 0));
+    kmalloc_fail_after = 0;
+    assert_mapping_unchanged(&snap, v);
+    assert_eq(lifecycle_state.vfs_get_calls,
+              lifecycle_state.vfs_put_calls);
+    assert_eq(lifecycle_state.files_get_calls,
+              lifecycle_state.files_put_calls);
+
+    /* Device-side rejection. */
+    g_dev_inject_rc = -EPERM;
+    assert_eq(-EPERM,
+              do_mmap(MUNMAP_BASE + 0x1000UL, 0x1000UL, PROT_READ,
+                      MAP_FIXED | MAP_SHARED, 0, 0));
+    g_dev_inject_rc = 0;
+    assert_mapping_unchanged(&snap, v);
+    assert_eq(lifecycle_state.vfs_get_calls,
+              lifecycle_state.vfs_put_calls);
+    assert_eq(lifecycle_state.files_get_calls,
+              lifecycle_state.files_put_calls);
+
+    /* A leaf with no VMA owner is rejected before any change. */
+    setup_munmap();
+    install_fake_device();
+    lifecycle_pte_set(MUNMAP_BASE, 0x40000000UL | PAGE_USER_PTE);
+    int frees0 = lifecycle_state.total_frees;
+    assert_eq(-EINVAL,
+              do_mmap(MUNMAP_BASE, 0x1000UL, PROT_READ,
+                      MAP_FIXED | MAP_SHARED, 0, 0));
+    assert_eq(0x40000000UL | PAGE_USER_PTE,
+              *lifecycle_pte_get(MUNMAP_BASE));
+    assert_eq(0, vma_list_count(&fixture_mm.vma_list));
+    assert_eq(frees0, lifecycle_state.total_frees);
+}
+
+static void test_device_map_auto_select(void)
+{
+    TEST_SUITE("device mmap — non-fixed selection and publish");
+
+    setup_munmap();
+    install_fake_device();
+
+    int64_t rc = do_mmap(0, 0x1000UL, PROT_READ, MAP_SHARED, 0, 0);
+    assert_true(rc >= (int64_t)fixture_mm.mmap_base);
+    assert_eq(1, g_dev_calls);
+
+    vma_t *v = vma_find(&fixture_mm, (uint64_t)rc);
+    assert_not_null(v);
+    if (v) {
+        assert_eq((uint64_t)rc, v->vm_start);
+        assert_eq((uint64_t)rc + 0x1000UL, v->vm_end);
+        assert_true(v->vm_flags & VMA_IO);
+        assert_eq(g_dev_first_pa | (g_dev_flags & ~PAGE_4K_MASK),
+                  *lifecycle_pte_get((uint64_t)rc));
+    }
+}
+
 /* ── Test list ─────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
@@ -1521,6 +1778,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_munmap_invalid_file_window),
     TEST_ENTRY(test_munmap_borrowed_and_stashed_leaves),
     TEST_ENTRY(test_munmap_fixed_failure_preserves_state),
+    TEST_ENTRY(test_device_map_fixed_commit),
+    TEST_ENTRY(test_device_map_fixed_borrowed_leaf),
+    TEST_ENTRY(test_device_map_fixed_prepare_failure),
+    TEST_ENTRY(test_device_map_auto_select),
 TEST_LIST_END
 
 int main(void)

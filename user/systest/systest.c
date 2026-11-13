@@ -452,6 +452,7 @@ static const test_case_t tests[] = {
     {"54e_user_fault_gp",      "user fault cli #GP → SIGSEGV", test_user_fault_gp,        1, 0},
     {"mprotect_subrange_cow",  "mprotect subrange cow", test_mprotect_subrange_cow,    1, 0},
     {"fixed_file_replace",     "munmap hole + MAP_FIXED file", test_fixed_file_replace, 1, 0},
+    {"fb_fixed_replace",       "framebuffer MAP_FIXED replace", test_fb_fixed_replace, 1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────

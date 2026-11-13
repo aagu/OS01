@@ -110,6 +110,9 @@ static int      flush_snapshot_valid[LIFECYCLE_PTE_SLOTS];
 /* Event-log size, reset by lifecycle_stubs_reset(). */
 static int event_count;
 
+/* Forced -ENOMEM/-EINVAL from the table preparer (0 = succeed). */
+static int prepare_fail_rc;
+
 void lifecycle_pte_reset(void)
 {
     memset(pte_slots, 0, sizeof(pte_slots));
@@ -190,6 +193,28 @@ uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va)
     (void)root; (void)va;
     return 0;
 }
+
+/* Model intermediate-table preparation by registering an empty slot
+ * for every VA in the range; the transaction's later direct PTE write
+ * then finds one. */
+void lifecycle_set_prepare_fail(int rc)
+{
+    prepare_fail_rc = rc;
+}
+
+int x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start, uint64_t end)
+{
+    (void)root;
+    if (prepare_fail_rc)
+        return prepare_fail_rc;
+    for (uint64_t va = start; va < end; va += PAGE_4K_SIZE)
+        if (!lifecycle_pte_get(va))
+            lifecycle_pte_set(va, 0);
+    return 0;
+}
+
+/* Not reached: the stub above never rolls back. */
+void x86_vmm_local_sync(void) { }
 
 /* mm_set_brk (Task 4) references tlb_shootdown; the lifecycle test
  * never calls mm_set_brk, but the link needs the symbol. */
@@ -295,6 +320,7 @@ void lifecycle_stubs_reset(void)
     lifecycle_cow_reset();
     lifecycle_files_reset();
     event_count = 0;
+    prepare_fail_rc = 0;
 }
 
 lifecycle_page_record_t *lifecycle_find_page(uint64_t phys)

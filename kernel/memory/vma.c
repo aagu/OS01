@@ -701,6 +701,97 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
     return 0;
 }
 
+// ── Device MAP_FIXED transaction (fb / VMA_IO) ───────────────
+// The device callback runs under its control mutex and calls us with
+// the first PA + final PTE flags.  Everything fallible (ownership
+// check, boundary node, intermediate tables) happens before any old
+// leaf is withdrawn; the commit then replaces the range and publishes
+// the VMA_IO node as the last step.  The retired old nodes are handed
+// back to do_mmap, which drops their references only after BOTH locks
+// are released.
+typedef struct {
+    mm_t     *mm;
+    uint64_t  start;
+    uint64_t  end;
+    vma_t    *vma;        // preallocated VMA_IO template
+    list_t    retired;    // old nodes retired by the commit
+} mmap_dev_ctx_t;
+
+static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
+                           uint64_t pte_flags)
+{
+    mmap_dev_ctx_t *ctx = (mmap_dev_ctx_t *)ctxp;
+    mm_t *mm = ctx->mm;
+    uint64_t start = ctx->start, end = ctx->end;
+
+    if (!mm || !ctx->vma || start >= end)
+        return -EINVAL;
+
+    uint64_t *root = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+
+    spin_lock(&mm->lock);
+
+    // Every existing leaf in the target range must have a VMA owner:
+    // its old-page ownership decides whether the commit reclaims or
+    // merely withdraws it.  Huge leaves are a conflict.
+    for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
+        if (x86_vmm_has_2m(root, va & PAGE_2M_MASK)) {
+            spin_unlock(&mm->lock);
+            return -EINVAL;
+        }
+        uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
+        if (pte && (*pte & (PAGE_VALID | PAGE_PROTNONE)) &&
+            !vma_find(mm, va)) {
+            spin_unlock(&mm->lock);
+            return -EINVAL;
+        }
+    }
+
+    // Boundary node + retained-file-window validation.
+    vma_t *right = NULL;
+    int rc = prepare_unmap_locked(mm, start, end, &right);
+    if (rc != 0) {
+        spin_unlock(&mm->lock);
+        return rc;
+    }
+
+    // Every table the replacement needs, before the first leaf moves.
+    rc = x86_vmm_prepare_4k_range(root, start, end);
+    if (rc != 0) {
+        if (right) kfree(right);
+        spin_unlock(&mm->lock);
+        return rc;
+    }
+
+    // Withdraw old leaves (owned pages are reclaimed after their
+    // sync; VMA_IO leaves are borrowed and only withdrawn), adjust or
+    // retire the old VMAs, and insert the residual right node.
+    commit_unmap_locked(mm, start, end, right, &ctx->retired);
+
+    // Install the device leaves.  The prepared tables make this
+    // allocation-free; the old mapping is already fully withdrawn.
+    for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
+        uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
+        if (!pte) continue;     // defensive: preparer covered the range
+        uint64_t phys = first_pa + (va - start);
+        *pte = (phys & PAGE_4K_MASK) | (pte_flags & ~PAGE_4K_MASK);
+    }
+
+    // Make the new leaves visible before publishing the VMA.
+    flush_tlb();
+
+    vma_t *dv = ctx->vma;
+    dv->vm_start     = start;
+    dv->vm_end       = end;
+    dv->vm_flags    |= VMA_IO;
+    dv->vm_page_prot = pte_flags;
+    dv->vm_file      = NULL;   // the node reference stays with do_mmap
+    vma_insert(mm, dv);
+
+    spin_unlock(&mm->lock);
+    return 0;
+}
+
 // ── do_mmap ───────────────────────────────────────────────────
 // First-fit gap search above mmap_base.  Callers hold mm->lock when
 // using the result for a commit.
@@ -789,7 +880,8 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     // ── 4. File resolution: pin the descriptor, then the node ──
     file_t *file = NULL;
     vfs_node_t *file_node = NULL;
-    int (*_dev_mmap)(struct vfs_node *, struct vma *) = NULL;
+    int (*_dev_mmap)(struct vfs_node *, struct vma *,
+                     vfs_mmap_commit_fn, void *) = NULL;
     if (!(flags & MAP_ANONYMOUS)) {
         if (fd < NOFILE && current->files)
             file = files_get_file(current->files, (int)fd);
@@ -799,11 +891,18 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         }
         file_node = vfs_node_get(file->node);
 
-        // Device node with an mmap handler → device path.
+        // Device node with an mmap handler → device path.  The
+        // kernel-half pointer probe is skipped under OS01_HOST_TEST so
+        // host harnesses can install a normal function pointer.
         if (file_node->f_ops &&
+#ifndef OS01_HOST_TEST
             (uint64_t)file_node->f_ops >= 0xffff800000000000ULL &&
-            file_node->f_ops->mmap &&
-            (uint64_t)file_node->f_ops->mmap >= 0xffff800000000000ULL)
+#endif
+            file_node->f_ops->mmap
+#ifndef OS01_HOST_TEST
+            && (uint64_t)file_node->f_ops->mmap >= 0xffff800000000000ULL
+#endif
+            )
             _dev_mmap = file_node->f_ops->mmap;
     }
 
@@ -815,25 +914,14 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         }
 
         if (!(flags & MAP_FIXED)) {
-            // Selection is outside mm->lock because the callback runs
-            // there; the device transaction will move this under the
-            // display-mutex → mm->lock order in the next task.
+            // Select the target under mm->lock; the callback commits
+            // it under display_mutex → mm->lock (single-owner mm).
             spin_lock(&current->mm->lock);
             addr = mmap_find_gap(current->mm, length);
             spin_unlock(&current->mm->lock);
             if (mm_user_range_protected(current->mm, addr,
                                         addr + length))
                 addr = USER_STACK_BASE + 0x200000UL;
-        } else {
-            // Task 1 keeps the existing replace-then-callback shape:
-            // the device transaction owns the atomic replacement in
-            // the next task.
-            int urc = (int)do_munmap(addr, length);
-            if (urc != 0) {
-                vfs_node_put(file_node);
-                files_put_file(file);
-                return urc;
-            }
         }
 
         if (addr >= current->addr_limit ||
@@ -849,7 +937,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             return -EINVAL;
         }
 
-        // Pre-allocate the VMA for the device handler to fill PTEs.
+        // Template VMA: the MM transaction fills it and inserts it.
         vma_t *dv = (vma_t *)kmalloc(sizeof(vma_t));
         if (!dv) {
             vfs_node_put(file_node);
@@ -862,19 +950,28 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         dv->vm_flags     = vm_flags_base | VMA_IO;
         dv->vm_page_prot = page_prot;
         dv->vm_pgoff     = offset >> PAGE_4K_SHIFT;
-        dv->vm_file      = file_node;   // handler may clear this
+        dv->vm_file      = NULL;    // published VMA owns no node ref
 
-        int mmap_rc = _dev_mmap(file_node, (struct vma *)dv);
+        mmap_dev_ctx_t ctx = {
+            .mm    = current->mm,
+            .start = addr,
+            .end   = addr + length,
+            .vma   = dv,
+        };
+        list_init(&ctx.retired);
+
+        int mmap_rc = _dev_mmap(file_node, (struct vma *)dv,
+                                mmap_dev_commit, &ctx);
+
+        // Both the display mutex and mm->lock are released: now it is
+        // safe to drop old VMA nodes and this call's references.
+        release_retired_vmas(&ctx.retired);
+        vfs_node_put(file_node);
+        files_put_file(file);
         if (mmap_rc < 0) {
-            vfs_node_put(file_node);
             kfree(dv);
-            files_put_file(file);
             return mmap_rc;
         }
-        spin_lock(&current->mm->lock);
-        vma_insert(current->mm, dv);
-        spin_unlock(&current->mm->lock);
-        files_put_file(file);
         return (int64_t)dv->vm_start;
     }
 

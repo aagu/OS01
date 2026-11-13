@@ -110,6 +110,12 @@ uint64_t lifecycle_flush_snapshot(uint64_t va, int *valid);
  * are reclaimed only AFTER the page-table commit is synchronized. */
 int lifecycle_flush_free_count(void);
 
+/* Force the intermediate-table preparer to fail (0 = succeed).  The
+ * real preparer is covered by test_x86_vmm_backend; the lifecycle
+ * fixture uses this knob to drive the device transaction's prepare
+ * failure path. */
+void lifecycle_set_prepare_fail(int rc);
+
 /* ── Fake descriptor table (MAP_FIXED fd path) ───────────────
  * do_mmap pins the descriptor with files_get_file(), then takes the
  * node reference.  The harness provides a one-table stub so the
