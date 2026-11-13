@@ -17,7 +17,8 @@
 #include <errno.h>
 
 #include <memory/vmm.h>
-#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_COW, PAGE_PROTNONE ... */
+#include <arch/x86_64/pte.h>
+#include <arch/x86_64/pte_bits.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_COW, PAGE_PROTNONE ... */
 
 /* posix_memalign (POSIX 1003.1-2001). */
 extern int posix_memalign(void **memptr, size_t alignment, size_t size);
@@ -91,7 +92,19 @@ vfs_node_t *vfs_node_get(vfs_node_t *node) { return node; }
 void        vfs_node_put(vfs_node_t *node) { (void)node; }
 
 /* ── tlb_shootdown (mm_set_brk references it; not driven here) ─ */
-void tlb_shootdown(void) { pr_state.total_tlb_shootdowns++; }
+void tlb_shootdown(void) { pr_state.total_tlb_shootdowns++; pr_record_event('S'); }
+
+/* ── clear/flush/put/free event log ──────────────────────────── */
+static char pr_event_buf[256];
+static int  pr_event_n;
+void pr_record_event(char c)
+{
+    if (pr_event_n < (int)sizeof(pr_event_buf))
+        pr_event_buf[pr_event_n++] = c;
+}
+const char *pr_event_log(void) { return pr_event_buf; }
+int  pr_event_count(void)      { return pr_event_n; }
+void pr_events_reset(void)     { pr_event_n = 0; memset(pr_event_buf, 0, sizeof(pr_event_buf)); }
 
 /* ── mm_user_range_protected — WEAK RED fallback ──────────────
  * Returns false for everything until the production strong
@@ -123,6 +136,7 @@ uint64_t alloc_4k_page(void)
 void free_4k_page(uint64_t phys)
 {
     pr_page_pool_init();
+    pr_record_event('f');
     pr_page_record_t *rec = pr_find_page(phys);
     if (!rec) return;
     if (!rec->in_use) return;
@@ -157,6 +171,7 @@ void page_cow_get(uint64_t phys)
 
 bool page_cow_put(uint64_t phys)
 {
+    pr_record_event('P');
     pr_page_record_t *rec = pr_find_page(phys);
     if (rec && rec->cow_refs > 0) rec->cow_refs--;
     return true;
@@ -186,7 +201,7 @@ int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     if (idx < 0) return -1;
     if (phys & ~PAGE_4K_MASK) return -1;
     pr_pte_record_t *rec = &pr_state.ptes[idx];
-    rec->pte   = (phys & PAGE_4K_MASK) | (flags & ~PAGE_4K_MASK);
+    rec->pte   = x86_pte_4k_make(phys, flags);
     rec->phys  = phys;
     rec->flags = flags;
     pr_state.total_maps++;
@@ -200,7 +215,7 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     if (idx < 0) return;
     pr_pte_record_t *rec = &pr_state.ptes[idx];
     if (!(rec->pte & (PAGE_VALID | PAGE_PROTNONE))) return;
-    uint64_t phys = rec->pte & PAGE_4K_MASK;
+    uint64_t phys = x86_pte_4k_pa(rec->pte);
     if (rec->pte & PAGE_COW) {
         if (page_cow_put(phys))
             free_4k_page(phys);
@@ -232,12 +247,13 @@ uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
     *pte = 0;
     if (!(old & (PAGE_VALID | PAGE_PROTNONE))) return 0;
     pr_state.total_unmaps++;
+    pr_record_event('c');
     return old;
 }
 void x86_vmm_release_owned_4k(uint64_t old_pte)
 {
     if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE))) return;
-    uint64_t phys = old_pte & PAGE_4K_MASK;
+    uint64_t phys = x86_pte_4k_pa(old_pte);
     if (old_pte & PAGE_COW) {
         if (page_cow_put(phys))
             free_4k_page(phys);

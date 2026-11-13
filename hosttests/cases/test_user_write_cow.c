@@ -176,7 +176,7 @@ static void test_prepare_noop_on_writable_leaf(void)
     assert_eq(phys_a, rec->pte & PAGE_4K_MASK);
     /* TLB shootdown fired (the contract: every successful prepare
      * ends with tlb_shootdown even when no pages were touched). */
-    assert_eq(0, uw_state.total_tlb_shootdowns);
+    assert_eq(0, ((int)uw_arch_flush_tlb_all_calls));
     assert_eq(0, fixture_mm.lock.lock);
 
     uw_clear_current();
@@ -210,7 +210,7 @@ static void test_prepare_cow_refs_one_promotes_inplace(void)
     assert_eq((uint64_t)PAGE_USER_PTE, rec->pte & (PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_COW));
     /* Last ref released (was 1 → 0) */
     assert_eq(1, uw_state.total_cow_puts);
-    assert_eq(1, uw_state.total_tlb_shootdowns);
+    assert_eq(1, ((int)uw_arch_flush_tlb_all_calls));
 
     uw_clear_current();
 }
@@ -325,6 +325,42 @@ static void test_prepare_cow_nx_survives_privatize_copy(void)
     assert_true(rec->pte & PAGE_WRITE);
     assert_false(rec->pte & PAGE_COW);
     assert_true(rec->pte & PAGE_NO_EXEC);   /* NX copied to the new leaf */
+
+    uw_clear_current();
+}
+
+static void test_cow_ref_retained_until_sync(void)
+{
+    /* Unmap/TLB ownership plan Task 2: for a cross-mm COW
+     * replacement the put must happen AFTER the TLB sync — at sync
+     * time the other owner (B) must still see its reference.  The
+     * flush hook snapshots the old page's refcount at sync time. */
+    TEST_SUITE("prepare_user_write_range — COW ref retained until sync");
+
+    uw_stubs_reset();
+    memset(&fixture_mm, 0, sizeof(fixture_mm));
+    list_init(&fixture_mm.vma_list);
+    fixture_mm.pgdir = fixture_pgd;
+    fixture_mm.mmap_base = 0x40000000UL;
+    uw_set_current(&fixture_mm, PROD_ADDR_LIMIT);
+
+    uint64_t va = 0x405000UL;
+    build_anon_vma(va, va + 0x1000);
+    uint64_t phys_orig = commit_leaf(va, PAGE_USER_PTE);
+    mark_cow(va, 2);                       /* A + B share the leaf */
+    uw_mark_sync_check(phys_orig);
+
+    int rc = prepare_user_write_range(&fixture_mm, va, 0x1000);
+    assert_eq(0, rc);
+
+    /* At sync time BOTH references were still held. */
+    assert_eq(2, uw_refs_at_sync);
+    /* After the call A's put dropped the count to B's single ref;
+     * the page is still alive for B and was not freed. */
+    uw_page_record_t *pg_old = uw_find_page(phys_orig);
+    assert_not_null(pg_old);
+    assert_eq(1, pg_old->cow_refs);
+    assert_eq(1, pg_old->in_use);
 
     uw_clear_current();
 }
@@ -451,7 +487,7 @@ static void test_prepare_rejects_vmio(void)
     int rc = prepare_user_write_range(&fixture_mm, va, 0x1000);
     assert_eq(-EFAULT, rc);
     /* PTEs untouched. */
-    assert_eq(0, uw_state.total_tlb_shootdowns);
+    assert_eq(0, ((int)uw_arch_flush_tlb_all_calls));
     /* Lock released. */
     assert_eq(0, fixture_mm.lock.lock);
 
@@ -848,7 +884,7 @@ static void test_writable_elf_without_vma(void)
     commit_leaf(0x400000, PAGE_USER_PTE);
     assert_eq(0, prepare_user_write_range(&fixture_mm, 0x400000, 32));
     assert_eq(0, fixture_mm.lock.lock);
-    assert_eq(0, uw_state.total_tlb_shootdowns);
+    assert_eq(0, ((int)uw_arch_flush_tlb_all_calls));
 }
 
 static void test_cow_requires_writable_vma(void)
@@ -942,6 +978,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_prepare_cow_refs_many_privatizes),
     TEST_ENTRY(test_prepare_cow_nx_survives_inplace_upgrade),
     TEST_ENTRY(test_prepare_cow_nx_survives_privatize_copy),
+    TEST_ENTRY(test_cow_ref_retained_until_sync),
     TEST_ENTRY(test_prepare_span_two_cow_pages),
     TEST_ENTRY(test_prepare_oom_on_page_two_rolls_back),
     TEST_ENTRY(test_prepare_rejects_vmio),

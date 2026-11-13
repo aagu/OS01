@@ -248,9 +248,13 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
                 if (rollback_count >= MAX_LOAD_LEAVES) {
                     /* Defense in depth: any well-formed ELF that
                      * passes elf_layout_validate fits well below
-                     * this cap. */
+                     * this cap.  The leaf is withdrawn and released
+                     * exactly once (it is not on the rollback list
+                     * yet). */
                     debug_fs("elf_load: too many leaves (>MAX_LOAD_LEAVES)\n");
-                    vmm_unmap_4k_page(pgd, pg);
+                    uint64_t old = x86_vmm_take_4k(pgd, pg);
+                    if (old)
+                        x86_vmm_release_owned_4k(old);
                     free_4k_page(page_phys);
                     rc = -ENOMEM;
                     goto rollback;
@@ -305,13 +309,13 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
 rollback:
     /* Single rollback owner — every leaf the loader created in
      * this call is freed exactly once, and every PTE it installed
-     * is cleared.  The caller's mm is left empty (no ELF PTE, no
-     * start_code/end_code residue beyond what they were at entry —
-     * we don't touch them here; the caller re-uses or frees the
-     * mm itself). */
+     * is cleared.  The loader root was never installed (unpublished
+     * exec target), so no TLB sync is needed: withdraw + release
+     * per leaf (unmap/TLB ownership plan Task 2). */
     for (int j = 0; j < rollback_count; j++) {
-        vmm_unmap_4k_page(pgd, rollback_vaddr[j]);
-        free_4k_page(rollback_phys[j]);
+        uint64_t old = x86_vmm_take_4k(pgd, rollback_vaddr[j]);
+        if (old)
+            x86_vmm_release_owned_4k(old);
     }
     kfree(rollback_vaddr);
     kfree(rollback_phys);

@@ -67,18 +67,28 @@ void vma_free_all(mm_t *mm)
     while (mm->vma_list.next != &mm->vma_list) {
         vma_t *v = container_of(mm->vma_list.next, vma_t, list);
 
-        if (v->vm_flags & VMA_IO) {
-            vma_remove(mm, v);
-            continue;
-        }
-
-        // If we have a valid pgd, unmap the physical pages.
-        // If pgd is NULL (shouldn't happen), skip unmap but still
-        // free the VMA node + vfs_node_put to avoid leaks.
+        /* Retired or never-installed root: no TLB sync is needed
+         * (nothing can install this root again — user leaves are
+         * non-global and no PCID is used, so stale entries on other
+         * CPUs are unreachable).  Revoke every leaf through the
+         * allocation-free take; borrowed (VMA_IO) leaves — 4 KiB
+         * and full 2 MiB PMD blocks alike — are cleared but NEVER
+         * released: the device keeps owning their pages. */
         if (user_pgd) {
-            for (uint64_t va = v->vm_start; va < v->vm_end;
-                 va += PAGE_4K_SIZE) {
-                vmm_unmap_4k_page(user_pgd, va);
+            bool borrowed = (v->vm_flags & VMA_IO) != 0;
+            uint64_t va = v->vm_start;
+            while (va < v->vm_end) {
+                if ((va & (PAGE_2M_SIZE - 1)) == 0 &&
+                    va + PAGE_2M_SIZE <= v->vm_end &&
+                    x86_vmm_has_2m(user_pgd, va)) {
+                    x86_vmm_take_2m(user_pgd, va);   /* clear only */
+                    va += PAGE_2M_SIZE;
+                    continue;
+                }
+                uint64_t old = x86_vmm_take_4k(user_pgd, va);
+                if (old && !borrowed)
+                    x86_vmm_release_owned_4k(old);
+                va += PAGE_4K_SIZE;
             }
         }
 
@@ -220,7 +230,7 @@ bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end)
 // On shrink across a page boundary, the retained tail is
 // privatized if COW with refs > 1 (alloc new phys, copy, replace
 // PTE, drop cow_ref), then zeroed, then the released leaves are
-// unmapped through the COW-aware vmm_unmap_4k_page path.  SMP
+// unmapped through the COW-aware withdraw + release path.  SMP
 // TLBs are synchronized via tlb_shootdown().  On any failure
 // during grow, only this call's leaves (and any empty intermediate
 // tables) are rolled back; the old state is restored.
@@ -322,8 +332,11 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
             (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
         uint64_t *staged_phys =
             (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
+        uint64_t *staged_old =
+            (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
         int staged_count = 0;
-        if (!staged_va || !staged_phys) {
+        if (!staged_va || !staged_phys || !staged_old) {
+            if (staged_old) kfree(staged_old);
             if (staged_phys) kfree(staged_phys);
             if (staged_va) kfree(staged_va);
             spin_unlock(&mm->lock);
@@ -362,13 +375,17 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         }
 
         if (rc != 0) {
-            /* Roll back only THIS call's leaves.  vmm_unmap_4k_page
-             * frees the phys (it does not own the COW reference
-             * since we never set PAGE_COW here). */
+            /* Roll back only THIS call's leaves: withdraw (no
+             * allocation), sync the active root, then release the
+             * withdrawn descriptors (unmap/TLB ownership plan). */
             for (int i = 0; i < staged_count; i++)
-                vmm_unmap_4k_page(pgd, staged_va[i]);
+                staged_old[i] = x86_vmm_take_4k(pgd, staged_va[i]);
+            flush_tlb();
+            for (int i = 0; i < staged_count; i++)
+                x86_vmm_release_owned_4k(staged_old[i]);
             kfree(staged_va);
             kfree(staged_phys);
+            kfree(staged_old);
             /* *result unchanged on failure (caller's contract). */
             spin_unlock(&mm->lock);
             return rc;
@@ -379,10 +396,10 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         /* Commit the new break + heap VMA end. */
         mm->end_brk       = requested;
         heap_vma->vm_end  = requested;
-        /* Synchronize SMP TLBs (the brief requires this even
-         * though the user page table is per-process — future
-         * schedulers may run the same process on multiple CPUs). */
-        tlb_shootdown();
+        /* The user root is single-task owned and active only on
+         * this CPU — a local CR3 reload is the complete sync
+         * (unmap/TLB ownership plan). */
+        flush_tlb();
         if (result) *result = requested;
         spin_unlock(&mm->lock);
         return 0;
@@ -436,14 +453,29 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         }
     }
 
-    /* 2. Unmap released leaves [aligned_new, aligned_old). */
-    for (uint64_t va = aligned_new; va < aligned_old; va += PAGE_4K_SIZE)
-        vmm_unmap_4k_page(pgd, va);
+    /* 2. Unmap released leaves [aligned_new, aligned_old): fixed
+     * batches of withdrawn descriptors — clear the batch, sync the
+     * active root, then release (unmap/TLB ownership plan). */
+    {
+        uint64_t batch[32];
+        uint64_t va = aligned_new;
+        while (va < aligned_old) {
+            int n = 0;
+            for (; va < aligned_old && n < 32; va += PAGE_4K_SIZE) {
+                uint64_t old = x86_vmm_take_4k(pgd, va);
+                if (old)
+                    batch[n++] = old;
+            }
+            flush_tlb();
+            for (int i = 0; i < n; i++)
+                x86_vmm_release_owned_4k(batch[i]);
+        }
+    }
 
     /* 3. Commit the smaller break + heap VMA end. */
     mm->end_brk       = requested;
     heap_vma->vm_end  = requested;
-    tlb_shootdown();
+    flush_tlb();
     if (free_old_phys)
         free_4k_page(free_old_phys);
     if (result) *result = requested;

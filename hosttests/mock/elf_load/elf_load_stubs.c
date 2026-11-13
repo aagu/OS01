@@ -120,6 +120,9 @@ uint64_t alloc_4k_page(void)
     return 0;
 }
 
+/* Link surface: ELF leaves are never COW, but release_owned_4k
+ * needs the symbol. */
+bool page_cow_put(uint64_t phys) { (void)phys; return false; }
 void free_4k_page(uint64_t phys)
 {
     pool_init_once();
@@ -222,4 +225,32 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     rec->phys = 0;
     rec->flags = 0;
     elf_load_state.total_unmaps++;
+}
+
+/* ── Allocation-free leaf withdraw / release (plan Task 2) ────
+ * take saves the full descriptor and clears the slot; release is
+ * the only place a withdrawn leaf hands its page back. */
+uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
+{
+    (void)root;
+    int idx = stubs_pte_index_for(va);
+    if (idx < 0) return 0;
+    elf_load_pte_record_t *rec = &elf_load_state.ptes[idx];
+    uint64_t old = rec->pte;
+    rec->pte = 0;
+    if (!(old & (PAGE_VALID | PAGE_PROTNONE))) return 0;
+    elf_load_state.total_unmaps++;
+    return old;
+}
+
+void x86_vmm_release_owned_4k(uint64_t old_pte)
+{
+    if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE))) return;
+    uint64_t phys = x86_pte_4k_pa(old_pte);
+    if (old_pte & PAGE_COW) {
+        if (page_cow_put(phys))
+            free_4k_page(phys);
+    } else {
+        free_4k_page(phys);
+    }
 }

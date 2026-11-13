@@ -31,7 +31,8 @@
 #include <assert.h>
 
 #include <memory/vmm.h>
-#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, PAGE_COW, PAGE_PROTNONE */
+#include <arch/x86_64/pte.h>
+#include <arch/x86_64/pte_bits.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, PAGE_COW, PAGE_PROTNONE */
 
 /* posix_memalign (POSIX 1003.1-2001) — elf_load_stubs.c has the
  * same rationale for declaring it explicitly. */
@@ -65,6 +66,8 @@ void brk_stubs_reset(void)
 {
     brk_page_pool_init();
     memset(&brk_state, 0, sizeof(brk_state));
+    brk_arch_flushes = 0;
+    brk_events_reset();
     for (int i = 0; i < BRK_PAGE_POOL_SIZE; i++) {
         brk_page_pool[i].in_use   = 0;
         brk_page_pool[i].cow_refs = 0;
@@ -127,7 +130,21 @@ __attribute__((weak)) int prepare_user_write_range_locked(mm_t *mm, uint64_t add
  * and leaf-unmap operations to honour the "synchronize SMP TLBs"
  * contract — see the brief.  The counter increments every call
  * so the test verifies mm_set_brk does the synchronization. */
-void tlb_shootdown(void) { brk_state.total_tlb_shootdowns++; }
+void tlb_shootdown(void) { brk_state.total_tlb_shootdowns++; brk_record_event('S'); }
+
+unsigned long brk_arch_flushes = 0;
+
+/* ── clear/flush/put/free event log ──────────────────────────── */
+static char brk_event_buf[256];
+static int  brk_event_n;
+void brk_record_event(char c)
+{
+    if (brk_event_n < (int)sizeof(brk_event_buf))
+        brk_event_buf[brk_event_n++] = c;
+}
+const char *brk_event_log(void) { return brk_event_buf; }
+int  brk_event_count(void)      { return brk_event_n; }
+void brk_events_reset(void)     { brk_event_n = 0; memset(brk_event_buf, 0, sizeof(brk_event_buf)); }
 
 /* ── alloc_4k_page / free_4k_page ────────────────────────── */
 uint64_t alloc_4k_page(void)
@@ -156,6 +173,7 @@ uint64_t alloc_4k_page(void)
 
 void free_4k_page(uint64_t phys)
 {
+    brk_record_event('f');
     brk_page_pool_init();
     brk_page_record_t *rec = brk_find_page(phys);
     if (!rec) return;
@@ -201,6 +219,7 @@ void page_cow_get(uint64_t phys)
 
 bool page_cow_put(uint64_t phys)
 {
+    brk_record_event('P');
     brk_page_pool_init();
     brk_page_record_t *rec = brk_find_page(phys);
     if (!rec) return true;
@@ -304,6 +323,7 @@ uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
     *pte = 0;
     if (!(old & (PAGE_VALID | PAGE_PROTNONE))) return 0;
     brk_state.total_unmaps++;
+    brk_record_event('c');
     return old;
 }
 void x86_vmm_release_owned_4k(uint64_t old_pte)

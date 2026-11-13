@@ -709,12 +709,16 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 						    (void *)Phy_To_Virt(old_phys),
 						    PAGE_4K_SIZE);
 						*upte = nphys | new_flags;
-						free_old = page_cow_put(old_phys);
 					} else {
-						(void)page_cow_put(old_phys);
 						*upte = old_phys | new_flags;
 					}
 					flush_tlb();
+					/* The put runs after the sync so
+					 * another owner's reference is
+					 * visible until then; the last
+					 * holder frees the PA after the
+					 * flush. */
+					free_old = page_cow_put(old_phys);
 					if (free_old)
 						free_4k_page(old_phys);
 					return;
@@ -801,10 +805,8 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					       (void *)Phy_To_Virt(old_phys),
 					       PAGE_4K_SIZE);
 					*pte = x86_pte_4k_make(new_phys, vma->vm_page_prot);
-					free_old = page_cow_put(old_phys);
 					resolved = 1;
 				} else {
-					(void)page_cow_put(old_phys);
 					*pte = x86_pte_4k_make(old_phys, vma->vm_page_prot);
 					resolved = 1;
 				}
@@ -814,6 +816,9 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					    &t->mm->lock, lock_flags);
 				if (resolved)
 					flush_tlb();
+				/* The put runs after the sync (see the
+				 * no-VMA branch above). */
+				free_old = page_cow_put(old_phys);
 				if (free_old)
 					free_4k_page(old_phys);
 				return;

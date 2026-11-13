@@ -476,35 +476,57 @@ static void test_fork_rejections_and_vma_copy_order(void)
 
 static void test_vma_free_all_vmio_skips_unmap(void)
 {
-    TEST_SUITE("vma_free_all — VMA_IO VMA skips unmap");
+    TEST_SUITE("vma_free_all — VMA_IO borrowed leaves revoked, never released");
 
     setup_parent(USER_CODE_ADDR + 0x1000);
 
-    /* Insert a VMA_IO VMA — production vma_free_all removes it
-     * without unmaping pages (the kernel-half heuristic). */
+    /* VMA_IO VMA over two borrowed leaves.  The second PA
+     * DELIBERATELY points at an in-use mock-pool slot: if the
+     * teardown ever released a borrowed leaf, that live slot
+     * would be freed (the spec's borrow-vs-own trap). */
     vma_t *iov = (vma_t *)malloc(sizeof(vma_t));
     assert_not_null(iov);
     list_init(&iov->list);
     iov->vm_start     = 0x40000000UL;
-    iov->vm_end       = 0x40001000UL;
+    iov->vm_end       = 0x40002000UL;
     iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     iov->vm_file      = NULL;
     vma_insert(&parent_mm, iov);
 
-    int unmaps_before = fk_state.total_unmaps;
-    int puts_before   = fk_node_put_count();
+    uint64_t borrowed_outside = alloc_4k_page();   /* pool slot marked in_use */
+    assert_true(borrowed_outside);
+    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, borrowed_outside,
+                                 0x40000000UL,
+                                 PAGE_USER | PAGE_WRITE | PAGE_VALID));
+    /* Second leaf maps a DIFFERENT in-use slot so a put/free on
+     * either leaf is observable. */
+    uint64_t borrowed_live = alloc_4k_page();
+    assert_true(borrowed_live);
+    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, borrowed_live,
+                                 0x40001000UL,
+                                 PAGE_USER | PAGE_WRITE | PAGE_VALID));
+
+    int frees_before = fk_state.total_frees;
+    int puts_before  = fk_state.total_cow_puts;
+    int puts_node_before = fk_node_put_count();
 
     vma_free_all(&parent_mm);
 
-    /* VMA_IO VMA removed without a single PTE unmap (no phys was
-     * ever committed to the test PTE table — there is nothing to
-     * free).  vma_remove() calls vfs_node_put(vm_file=NULL),
-     * which our harness counts as a no-op put.  Note: vma_free_all
-     * already called vma_remove → kfree(iov), so the test does NOT
-     * free(iov) again — that would be a double-free. */
-    assert_eq(unmaps_before, fk_state.total_unmaps);
-    assert_eq(puts_before,   fk_node_put_count());
+    /* Both borrowed leaves are REVOKED (slot cleared) but never
+     * released: no free_4k_page, no page_cow_put, and both live
+     * pool slots stay in_use. */
+    assert_null(fk_find_mapping(0x40000000UL));
+    assert_null(fk_find_mapping(0x40001000UL));
+    assert_eq(frees_before, fk_state.total_frees);
+    assert_eq(puts_before,  fk_state.total_cow_puts);
+    fk_page_record_t *r1 = fk_find_page(borrowed_outside);
+    fk_page_record_t *r2 = fk_find_page(borrowed_live);
+    assert_not_null(r1);
+    assert_not_null(r2);
+    assert_eq(1, r1->in_use);
+    assert_eq(1, r2->in_use);
+    assert_eq(puts_node_before, fk_node_put_count());
     assert_eq(0, vma_count_for(&parent_mm));
 }
 
@@ -836,16 +858,17 @@ static void test_fork_mm_copy_staged_ordering(void)
      *    Flush affected TLB entries."
      *
      * Operational proxies:
-     *   - tlb_shootdown() must be called inside fork_mm_copy,
-     *     AFTER the parent PTE changes (the brief names
-     *     "Flush affected TLB entries" as the closing step).
+     *   - The local CR3 reload (flush_tlb) must run inside
+     *     fork_mm_copy, AFTER the parent PTE changes (the
+     *     parent root is single-task owned — a local reload is
+     *     the complete sync; unmap/TLB ownership plan).
      *   - The body's first call to page_cow_get (which mutates
      *     the parent refcount) must come AFTER at least one
      *     child allocation (calloc for PTE tables / PUD / PMD,
      *     or alloc_4k_page for 4 KiB leaves, or alloc_pages
      *     for the eager huge-page).  All "child phys" allocs
      *     come before any parent PTE mutation / COW ref bump. */
-    const char *tlb = strstr(fn, "tlb_shootdown");
+    const char *tlb = strstr(fn, "flush_tlb");
     assert_not_null(tlb);
     assert_true(tlb < fn_end);
 
@@ -866,10 +889,9 @@ static void test_fork_mm_copy_staged_ordering(void)
                 first_4k != NULL ||
                 first_2m != NULL);
 
-    /* tlb_shootdown is called AFTER any parent PTE mutation
+    /* The flush runs AFTER any parent PTE mutation
      * (page_cow_get on the parent's PTE — i.e. after the
-     * "commit parent changes" phase, flushing the affected
-     * TLB entries). */
+     * "commit parent changes" phase, reloading CR3 locally). */
     assert_true(first_cow_get < tlb);
 
     free(src);

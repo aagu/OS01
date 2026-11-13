@@ -259,12 +259,11 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     child_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)child_pgd);
     *cr3_out = (uint64_t)child_mm->pgdir;
 
-    /* TLB shootdown: parent's in-memory PTEs were modified (R/W →
-     * R/O+COW).  With SMP load balancing the parent may run on any
-     * CPU — must invalidate ALL cores' TLBs, not just the local
-     * one.  Called from the END so the parent's commit phase is
-     * fully visible before any CPU re-tlbs. */
-    tlb_shootdown();
+    /* Local CR3 reload: the parent's in-memory PTEs were modified
+     * (R/W → R/O+COW) and the parent root is single-task owned —
+     * it is active on THIS CPU only, so a local reload is the
+     * complete sync (unmap/TLB ownership plan; no IPI wait). */
+    flush_tlb();
 
     return child_mm;
 

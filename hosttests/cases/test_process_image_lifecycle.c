@@ -369,6 +369,60 @@ static void test_destroy_unpublished_user_mm_handles_empty_list(void)
  *   5. Assert the page-pool counter advanced by exactly one free
  *      (not zero, not two — single-owner invariant).
  */
+/* Unmap/TLB ownership plan Task 2: a fork-shared VMA_IO 2 MiB
+ * borrowed PMD is revoked (slot cleared) at root teardown and is
+ * never handed to the page allocator — the residual-root destroy
+ * must not free the borrowed block. */
+static void test_vma_free_all_vmio_2m_borrowed_pmd_revoked(void)
+{
+    TEST_SUITE("vma_free_all — VMA_IO 2 MiB borrowed PMD revoked, never freed");
+
+    setup_mm();
+
+    /* Build the fake user root (same shape as the stack test). */
+    mm_t trigger_mm;
+    memset(&trigger_mm, 0, sizeof(trigger_mm));
+    vmm_free_user_map((uint64_t *)&trigger_mm);   /* allocate tables */
+
+    memset(test_user_pgd,        0, LIFECYCLE_PGD_SIZE * sizeof(uint64_t));
+    memset(test_user_pud_page,   0, LIFECYCLE_PUD_SIZE * sizeof(uint64_t));
+    memset(test_user_pmd_lo,     0, LIFECYCLE_PMD_SIZE * sizeof(uint64_t));
+    memset(test_user_pmd_stack,  0, LIFECYCLE_PMD_SIZE * sizeof(uint64_t));
+    test_user_pgd[0] = (uint64_t)(uintptr_t)test_user_pud_page | PAGE_VALID;
+    test_user_pud_page[0] = (uint64_t)(uintptr_t)test_user_pmd_lo | PAGE_VALID;
+    test_user_pud_page[1] = (uint64_t)(uintptr_t)test_user_pmd_stack | PAGE_VALID;
+
+    /* Borrowed 2 MiB block at PMD index 0 of the [2 MiB, 4 MiB)
+     * window — a device PA, NOT a PMM-owned block. */
+    const uint64_t borrowed_block = 0x30000000UL;
+    test_user_pmd_stack[0] = borrowed_block | PAGE_USER_PMD;
+    /* The mock's has_2m/take_2m pair is driven by this registry. */
+    lifecycle_set_has_2m(0x200000UL);
+
+    /* VMA_IO VMA covering the borrowed PMD. */
+    vma_t *iov = (vma_t *)__real_kmalloc(sizeof(vma_t));
+    list_init(&iov->list);
+    iov->vm_start     = 0x200000UL;
+    iov->vm_end       = 0x400000UL;
+    iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
+    iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    iov->vm_pgoff     = 0;
+    iov->vm_file      = NULL;
+    vma_insert(&fixture_mm, iov);
+    fixture_mm.pgdir = test_user_pgd;
+
+    int frees_before = lifecycle_state.total_frees;
+    vma_free_all(&fixture_mm);
+
+    /* The borrowed PMD slot is cleared... */
+    assert_eq(0, test_user_pmd_stack[0]);
+    /* ...and the residual-root destroy does not free the borrowed
+     * block (the page-pool free counter must not move). */
+    vmm_free_user_map(test_user_pgd);
+    assert_eq(frees_before, lifecycle_state.total_frees);
+    assert_eq(0, vma_list_count(&fixture_mm.vma_list));
+}
+
 static void test_stack_page_failure_exactly_one_free(void)
 {
     TEST_SUITE("stack-page failure — exactly one free");
@@ -1836,6 +1890,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_destroy_unpublished_user_mm_releases_vmas),
     TEST_ENTRY(test_destroy_unpublished_user_mm_handles_empty_list),
     TEST_ENTRY(test_stack_page_failure_exactly_one_free),
+    TEST_ENTRY(test_vma_free_all_vmio_2m_borrowed_pmd_revoked),
     TEST_ENTRY(test_spawn_user_task_calls_mm_init_user_heap),
     TEST_ENTRY(test_spawn_user_task_no_early_task_list_insert),
     TEST_ENTRY(test_spawn_user_task_uses_destroy_helper),

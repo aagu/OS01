@@ -264,13 +264,48 @@ static void test_brk_multipage_growth_flushes_tlb(void)
 
     setup_mm(USER_CODE_ADDR + 0x1000);
 
-    int tlb_before = brk_state.total_tlb_shootdowns;
+    int tlb_before = (int)brk_arch_flushes;
     uint64_t new_brk = fixture_mm.start_brk + 2 * PAGE_4K_SIZE;
     uint64_t result;
     int rc = mm_set_brk(&fixture_mm, new_brk, &result);
     assert_eq(0, rc);
     /* At least one TLB flush after multi-page growth. */
-    assert_true(brk_state.total_tlb_shootdowns > tlb_before);
+    assert_true(brk_arch_flushes > (unsigned long)tlb_before);
+}
+
+/* Unmap/TLB ownership plan Task 2: the shrink path withdraws the
+ * released leaves, syncs the (active) root, and only then releases
+ * the withdrawn descriptors — a release may never precede the
+ * sync. */
+static void test_brk_shrink_release_after_flush(void)
+{
+    TEST_SUITE("mm_set_brk — shrink: clear -> flush -> release order");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    /* Commit two pages first. */
+    uint64_t base = fixture_mm.start_brk;
+    uint64_t result;
+    assert_eq(0, mm_set_brk(&fixture_mm, base + 2 * PAGE_4K_SIZE, &result));
+
+    /* Shrink back to one page: the leaf at base+0x1000 is released. */
+    brk_events_reset();
+    assert_eq(0, mm_set_brk(&fixture_mm, base + PAGE_4K_SIZE, &result));
+
+    const char *ev = brk_event_log();
+    int n = brk_event_count();
+    assert_true(n >= 3);
+    int first_c = -1, first_sync = -1, first_release = -1;
+    for (int i = 0; i < n; i++) {
+        if (ev[i] == 'c' && first_c < 0) first_c = i;
+        if ((ev[i] == 'F' || ev[i] == 'S') && first_sync < 0)
+            first_sync = i;
+        if ((ev[i] == 'f' || ev[i] == 'P') && first_release < 0)
+            first_release = i;
+    }
+    assert_true(first_c >= 0);
+    assert_true(first_sync > first_c);
+    assert_true(first_release > first_sync);
 }
 
 static void test_brk_oom_on_second_page_rolls_back(void)
@@ -325,7 +360,7 @@ static void test_brk_shrink_across_page_releases_leaves(void)
     assert_eq(4, count_mapped_pages(fixture_mm.start_brk, 8));
 
     /* Now shrink by 2 pages (release the last 2 mapped leaves). */
-    int tlb_before = brk_state.total_tlb_shootdowns;
+    int tlb_before = (int)brk_arch_flushes;
     uint64_t new_brk = old_brk - 2 * PAGE_4K_SIZE;
     rc = mm_set_brk(&fixture_mm, new_brk, &result);
     assert_eq(0, rc);
@@ -339,7 +374,7 @@ static void test_brk_shrink_across_page_releases_leaves(void)
     assert_eq(2, brk_state.total_unmaps);
     assert_eq(2, brk_state.total_frees);
     /* TLB flushed at least once after the shrink. */
-    assert_true(brk_state.total_tlb_shootdowns > tlb_before);
+    assert_true(brk_arch_flushes > (unsigned long)tlb_before);
 }
 
 static void test_brk_shrink_partial_tail_zeros(void)
@@ -854,6 +889,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_brk_same_page_growth_no_new_pte),
     TEST_ENTRY(test_brk_multipage_growth_each_page_zeroed),
     TEST_ENTRY(test_brk_multipage_growth_flushes_tlb),
+    TEST_ENTRY(test_brk_shrink_release_after_flush),
     TEST_ENTRY(test_brk_oom_on_second_page_rolls_back),
     TEST_ENTRY(test_brk_shrink_across_page_releases_leaves),
     TEST_ENTRY(test_brk_shrink_partial_tail_zeros),

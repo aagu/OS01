@@ -70,9 +70,17 @@
  * rejected request must not reach the flush at the end). */
 extern unsigned long pr_arch_tlb_flushes;
 
+/* Clear/replace → flush → put/free event log (unmap/TLB ownership
+ * plan Task 2).  'c' leaf withdrawn (take), 'F' TLB sync, 'P' COW
+ * put, 'f' phys freed. */
+void pr_record_event(char c);
+const char *pr_event_log(void);
+int  pr_event_count(void);
+void pr_events_reset(void);
+
 static inline uint64_t *arch_get_page_table(void) { return NULL; }
-static inline void arch_flush_tlb_all(void)       { pr_arch_tlb_flushes++; }
-static inline void arch_flush_tlb_page(uintptr_t v) { (void)v; pr_arch_tlb_flushes++; }
+static inline void arch_flush_tlb_all(void)       { pr_arch_tlb_flushes++; pr_record_event('F'); }
+static inline void arch_flush_tlb_page(uintptr_t v) { (void)v; pr_arch_tlb_flushes++; pr_record_event('F'); }
 static inline void arch_switch_mm(uint64_t *pgdir) { (void)pgdir; }
 static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
 {

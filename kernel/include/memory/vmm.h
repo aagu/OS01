@@ -90,7 +90,6 @@ ptbl_t vmm_alloc_map(void);
 // 4KB PTE-level map helpers (x86 backend; raw pgdir)
 int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
                          uint64_t virt, uint64_t flags);
-void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 
 /* ── Boot-initializer checked table allocation (aarch64 M1 plan
  * Task 5) ─────────────────────────────────────────────────────

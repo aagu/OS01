@@ -46,12 +46,28 @@
 #ifndef _MEMORY_UACCESS_H
 #define _MEMORY_UACCESS_H
 #endif
+#ifndef _ARCH_MMU_H           /* privileged CR3/invlpg inline asm */
+#define _ARCH_MMU_H
+#endif
 #ifndef _FS_FILE_H
 #define _FS_FILE_H
 #endif
 /* Don't block _FS_VFS_H — vma.c needs the production typedef. */
 
 #include <list.h>
+
+/* ── arch/mmu.h replacements (counter-backed, no privileged asm) ──
+ * mm_set_brk's active-root paths use the local CR3 reload after the
+ * unmap/TLB ownership plan migration. */
+extern unsigned long brk_arch_flushes;
+
+/* Clear/flush/put/free event log: 'c' take, 'F' sync, 'P' put,
+ * 'f' free. */
+void brk_record_event(char c);
+static inline void arch_flush_tlb_all(void) { brk_arch_flushes++; brk_record_event('F'); }
+const char *brk_event_log(void);
+int  brk_event_count(void);
+void brk_events_reset(void);
 
 /* ── mm_struct: only the fields vma.c dereferences ───────── */
 typedef struct mm_struct {

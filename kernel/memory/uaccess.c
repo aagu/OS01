@@ -215,21 +215,28 @@ int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len)
         staged[used++] = (user_write_cow_t){pte, *pte, new_phys, false};
     }
 
+    // Replace the leaves first — no COW ref is touched yet, so an
+    // owner on another CPU still sees a consistent refcount while
+    // the stale translations die.
     for (size_t i = 0; i < used; ++i) {
         uint64_t old_phys = x86_pte_4k_pa(staged[i].old_pte);
         uint64_t phys = staged[i].new_phys ? staged[i].new_phys : old_phys;
         uint64_t flags = (x86_pte_4k_flags(staged[i].old_pte) & ~PAGE_COW) |
                          PAGE_WRITE;
         *staged[i].pte = x86_pte_4k_make(phys, flags);
-        bool last = page_cow_put(old_phys);
-        staged[i].free_old = last && staged[i].new_phys;
     }
-    tlb_shootdown();
-    // Another owner may exit during staging. Free its final old page only
-    // after the changed PTEs are visible and stale translations are gone.
-    for (size_t i = 0; i < used; ++i)
-        if (staged[i].free_old)
-            free_4k_page(x86_pte_4k_pa(staged[i].old_pte));
+    // The active root is single-task owned: a local CR3 reload is
+    // the complete sync.  The COW put runs only after the sync so
+    // another owner's reference is visible until then; the last
+    // holder frees the PA after the flush (unmap/TLB ownership
+    // plan — a freed PA is never reachable through a stale TLB).
+    flush_tlb();
+    for (size_t i = 0; i < used; ++i) {
+        uint64_t old_phys = x86_pte_4k_pa(staged[i].old_pte);
+        bool last = page_cow_put(old_phys);
+        if (last && staged[i].new_phys)
+            free_4k_page(old_phys);
+    }
     kfree(staged);
     return 0;
 

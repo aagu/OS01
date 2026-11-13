@@ -167,27 +167,33 @@ TEST_FUNC(test_x86_vmm_backend_api_exists)
      * headers (memory/vmm.h for map/unmap + arch/x86_64/pte.h for
      * the new helpers — see Task 15 commit). */
     int  (*m)(uint64_t *, uint64_t, uint64_t, uint64_t) = x86_vmm_map_4k_page;
-    int  (*u)(uint64_t *, uint64_t)                    = x86_vmm_unmap_4k_page_with_free;
+    uint64_t (*t)(uint64_t *, uint64_t)                = x86_vmm_take_4k;
+    void  (*r)(uint64_t)                               = x86_vmm_release_owned_4k;
     int  (*q)(uint64_t *, uint64_t, uint64_t *,
               uint64_t *)                              = x86_vmm_query_4k_page;
-    (void)m; (void)u; (void)q;
+    (void)m; (void)t; (void)r; (void)q;
     assert_true(1);  /* compiles = passes */
 }
 
 TEST_FUNC(test_cow_shared_page_does_not_free)
 {
     /* COW shared: page_cow_put returns false (refs > 0) → exactly
-     * one page_cow_put, ZERO free_4k_page (Task 15 v1 review item 9
-     * "single free per branch" — shared = no free). */
+     * one page_cow_put, ZERO free_4k_page ("single free per
+     * branch" — shared = no free).  The release contract lives in
+     * x86_vmm_release_owned_4k; withdraw first via take. */
     reset_chain();
     g_cow_put_should_return_true = 0;
     pt_tbl[0] = 0x1000UL | PAGE_VALID | PAGE_COW | PAGE_USER;
 
-    int rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_A);
-    assert_eq(0, rc);
+    uint64_t old = x86_vmm_take_4k(pgd_root, TEST_VA_A);
+    assert_true(old);
+    assert_eq(0, g_cow_put_calls);
+    x86_vmm_release_owned_4k(old);
     assert_eq(1, g_cow_put_calls);
     assert_eq(0, g_free_calls);
     assert_eq(0x1000UL, g_last_phys);
+    /* The slot was cleared by the take. */
+    assert_eq(0, pt_tbl[0]);
 }
 
 TEST_FUNC(test_cow_last_ref_frees_phys)
@@ -198,8 +204,9 @@ TEST_FUNC(test_cow_last_ref_frees_phys)
     g_cow_put_should_return_true = 1;
     pt_tbl[1] = 0x2000UL | PAGE_VALID | PAGE_COW | PAGE_USER;
 
-    int rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_B);
-    assert_eq(0, rc);
+    uint64_t old = x86_vmm_take_4k(pgd_root, TEST_VA_B);
+    assert_true(old);
+    x86_vmm_release_owned_4k(old);
     assert_eq(1, g_cow_put_calls);
     assert_eq(1, g_free_calls);
     assert_eq(0x2000UL, g_last_phys);
@@ -212,8 +219,9 @@ TEST_FUNC(test_plain_page_frees_phys)
     reset_chain();
     pt_tbl[2] = 0x3000UL | PAGE_VALID | PAGE_USER | PAGE_WRITE;
 
-    int rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_C);
-    assert_eq(0, rc);
+    uint64_t old = x86_vmm_take_4k(pgd_root, TEST_VA_C);
+    assert_true(old);
+    x86_vmm_release_owned_4k(old);
     assert_eq(0, g_cow_put_calls);
     assert_eq(1, g_free_calls);
     assert_eq(0x3000UL, g_last_phys);
@@ -460,8 +468,11 @@ TEST_FUNC(test_x86_nx_cow_stash_roundtrip)
     assert_true(flags & PAGE_COW);
 
     g_cow_put_should_return_true = 1;
-    rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_A);
-    assert_eq(0, rc);
+    {
+        uint64_t old = x86_vmm_take_4k(pgd_root, TEST_VA_A);
+        assert_true(old);
+        x86_vmm_release_owned_4k(old);
+    }
     assert_eq(1, g_cow_put_calls);
     assert_eq(1, g_free_calls);
     assert_eq(ROUNDTRIP_PA, g_last_phys);   /* release gets a pure PA */
@@ -478,8 +489,11 @@ TEST_FUNC(test_x86_nx_cow_stash_roundtrip)
     assert_true(vm & VM_COW);
 
     g_cow_put_should_return_true = 1;
-    rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_B);
-    assert_eq(0, rc);
+    {
+        uint64_t old = x86_vmm_take_4k(pgd_root, TEST_VA_B);
+        assert_true(old);
+        x86_vmm_release_owned_4k(old);
+    }
     assert_eq(ROUNDTRIP_PA, g_last_phys);
 
     /* The raw mapper must preserve NX on the leaf it writes. */

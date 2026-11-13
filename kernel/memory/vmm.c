@@ -310,18 +310,10 @@ int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     return x86_vmm_map_4k_page(pgdir, phys, virt, flags);
 }
 
-// Unmap a 4KB page at virt.  Frees the physical page via free_4k_page.
-// Safe to call on unmapped/never-faulted pages (no-op).
-// PTE table reclamation is deferred (V1: pages freed, tables remain).
-void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
-{
-    (void)x86_vmm_unmap_4k_page_with_free(pgdir, virt);
-}
-
 /* x86 4KB PTE backend helpers (aarch64 M3.2 Task 15) — see
  * arch/x86_64/pte.h for the public contract.  These own the
  * PAGE_* hardware bit layout and the free/COW ownership semantics.
- * The public vmm_map_4k_page / vmm_unmap_4k_page wrappers in vmm.c
+ * The public vmm_map_4k_page wrapper in vmm.c
  * delegate here, so external API behavior is unchanged. */
 
 // x86 4KB map — allocates intermediate tables via vmm_pt_walk; returns
@@ -334,40 +326,6 @@ int x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
         return -ENOMEM;
 
     *pte = x86_pte_4k_make(phys, flags);
-    return 0;
-}
-
-// x86 4KB unmap with free/COW ownership.  Returns 0 on a real unmap
-// (PTE was present); -ENOENT if the PTE was missing/not-present (the
-// caller's "nothing to do" sentinel — historically silent on vmm.c's
-// void-returning vmm_unmap_4k_page).
-//
-// Free/COW logic (v1 review item 9: ONE free call per branch):
-//   - PAGE_COW + non-last ref (page_cow_put returns false): ZERO free
-//   - PAGE_COW + last ref     (page_cow_put returns true):  ONE free
-//   - non-COW:                                              ONE free
-int x86_vmm_unmap_4k_page_with_free(uint64_t *pgdir, uint64_t virt)
-{
-    uint64_t *pte = vmm_pt_walk(pgdir, virt, 0, 0);
-    if (!pte)
-        return -ENOENT;
-
-    // Must check both Valid and PROTNONE -- PROTNONE pages have
-    // Valid=0 but valid phys that must be freed.
-    if (!(*pte & (PAGE_VALID | PAGE_PROTNONE)))
-        return -ENOENT;
-
-    uint64_t phys = x86_pte_4k_pa(*pte);
-
-    if (*pte & PAGE_COW) {
-        // COW-shared page: decrement refcount, free only when count hits 0
-        if (page_cow_put(phys))
-            free_4k_page(phys);
-    } else {
-        // Plain (non-COW) page: free unconditionally
-        free_4k_page(phys);
-    }
-    *pte = 0;
     return 0;
 }
 

@@ -198,7 +198,17 @@ void lifecycle_set_has_2m(uint64_t block)
 
 uint64_t x86_vmm_take_2m(uint64_t *root, uint64_t va)
 {
-    (void)root; (void)va;
+    (void)root;
+    if (has_2m_block != 0 && (va & PAGE_2M_MASK) == has_2m_block) {
+        /* Emulate the production take on the mocked [2 MiB, 4 MiB)
+         * window: clear the leaf at its block base and hand back
+         * the old descriptor. */
+        if (test_user_pmd_stack && (va & PAGE_2M_MASK) == 0x200000UL) {
+            uint64_t old = test_user_pmd_stack[0];
+            test_user_pmd_stack[0] = 0;
+            return old;
+        }
+    }
     return 0;
 }
 

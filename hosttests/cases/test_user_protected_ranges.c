@@ -247,6 +247,101 @@ static void test_predicate_guard_page(void)
                                          0x200000, 0x300000));
 }
 
+/* ── Unmap/TLB ownership plan Task 2 ──────────────────────────── */
+static void test_active_leaf_release_order(void)
+{
+    /* Active root: every withdrawn descriptor is released only
+     * after the TLB sync.  Covers present, NX and stashed
+     * (PROTNONE) leaves through the real do_munmap path. */
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    uint64_t base = 0x30000000UL;   /* above the heap reserve */
+    assert_eq(base, (uint64_t)fixed_mmap(base, 0x3000));
+
+    uint64_t p0 = alloc_4k_page();
+    uint64_t p1 = alloc_4k_page();
+    assert_true(p0 && p1);
+    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, p0, base,
+                                 PAGE_USER_PTE));
+    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, p1, base + 0x1000,
+                                 PAGE_USER_PTE | PAGE_NO_EXEC));
+    /* Stashed leaf: PROTNONE, no PRESENT. */
+    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, p0, base + 0x2000,
+                                 PAGE_USER | PAGE_PROTNONE));
+
+    pr_events_reset();
+    assert_eq(0, (int)do_munmap(base, 0x3000));
+
+    const char *ev = pr_event_log();
+    int n = pr_event_count();
+    assert_true(n >= 7);
+    int last_c = -1, first_sync = -1, first_release = -1;
+    for (int i = 0; i < n; i++) {
+        if (ev[i] == 'c') last_c = i;
+        if ((ev[i] == 'F' || ev[i] == 'S') && first_sync < 0)
+            first_sync = i;
+        if ((ev[i] == 'f' || ev[i] == 'P') && first_release < 0)
+            first_release = i;
+    }
+    /* All takes happen first, then one sync, then the releases. */
+    assert_true(last_c >= 0);
+    assert_true(first_sync > last_c);
+    assert_true(first_release > first_sync);
+
+    /* Leaves are gone. */
+    assert_null(pr_find_mapping(base));
+    assert_null(pr_find_mapping(base + 0x1000));
+    assert_null(pr_find_mapping(base + 0x2000));
+}
+
+static void test_borrowed_leaf_never_released(void)
+{
+    /* Borrowed device leaves are only withdrawn: even when the PA
+     * deliberately points at an allocated mock-pool slot, the
+     * teardown must not put/free it. */
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    uint64_t base = 0x30000000UL;   /* above the heap reserve */
+    vma_t *iov = (vma_t *)malloc(sizeof(vma_t));
+    assert_not_null(iov);
+    list_init(&iov->list);
+    iov->vm_start     = base;
+    iov->vm_end       = base + 0x2000;
+    iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
+    iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
+    iov->vm_pgoff     = 0;
+    iov->vm_file      = NULL;
+    vma_insert(&fixture_mm, iov);
+
+    /* Both borrowed PAs are live mock-pool slots. */
+    uint64_t b0 = alloc_4k_page();
+    uint64_t b1 = alloc_4k_page();
+    assert_true(b0 && b1);
+    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, b0, base,
+                                 PAGE_USER_PTE));
+    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, b1, base + 0x1000,
+                                 PAGE_USER_PTE));
+
+    int frees_before = pr_state.total_frees;
+    pr_events_reset();
+    assert_eq(0, (int)do_munmap(base, 0x2000));
+
+    /* Leaves revoked... */
+    assert_null(pr_find_mapping(base));
+    assert_null(pr_find_mapping(base + 0x1000));
+    /* ...but never released: no free, no put event, both slots
+     * still allocated. */
+    assert_eq(frees_before, pr_state.total_frees);
+    for (int i = 0; i < pr_event_count(); i++)
+        assert_true(pr_event_log()[i] != 'f' && pr_event_log()[i] != 'P');
+    pr_page_record_t *r0 = pr_find_page(b0);
+    pr_page_record_t *r1 = pr_find_page(b1);
+    assert_not_null(r0);
+    assert_not_null(r1);
+    assert_eq(1, r0->in_use);
+    assert_eq(1, r1->in_use);
+}
+
 static void test_predicate_user_stack(void)
 {
     TEST_SUITE("predicate — user stack [USER_STACK_BASE, USER_STACK_END)");
@@ -800,6 +895,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_predicate_heap_reserve),
     TEST_ENTRY(test_predicate_guard_page),
     TEST_ENTRY(test_predicate_user_stack),
+    TEST_ENTRY(test_active_leaf_release_order),
+    TEST_ENTRY(test_borrowed_leaf_never_released),
     TEST_ENTRY(test_predicate_degenerate_inputs),
     TEST_ENTRY(test_mmap_fixed_rejects_protected_ranges),
     TEST_ENTRY(test_mmap_fixed_partial_overlap_preserves_mapping),

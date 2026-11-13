@@ -87,7 +87,8 @@ static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; 
 extern unsigned long uw_arch_flush_tlb_all_calls;
 
 static inline uint64_t *arch_get_page_table(void) { return NULL; }
-static inline void arch_flush_tlb_all(void)       { uw_arch_flush_tlb_all_calls++; }
+void uw_record_sync_snapshot(void);
+static inline void arch_flush_tlb_all(void)       { uw_arch_flush_tlb_all_calls++; uw_record_sync_snapshot(); }
 static inline void arch_flush_tlb_page(uintptr_t v) { (void)v; uw_arch_flush_tlb_all_calls++; }
 static inline void arch_switch_mm(uint64_t *pgdir) { (void)pgdir; }
 static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)

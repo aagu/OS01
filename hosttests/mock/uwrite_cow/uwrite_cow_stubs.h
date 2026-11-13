@@ -122,5 +122,8 @@ bool uw_arch_range_accessible(uint64_t addr, uint64_t len, bool writable);
 
 /* tlb_shootdown counter (also bumped by mm_set_brk etc.) */
 extern unsigned long uw_arch_flush_tlb_all_calls;
+void uw_mark_sync_check(uint64_t phys);
+extern uint64_t uw_sync_check_phys;
+extern int      uw_refs_at_sync;
 
 #endif /* OS01_UWRITE_COW_STUBS_H */

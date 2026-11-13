@@ -40,6 +40,19 @@ uw_state_t uw_state;
 uw_page_record_t uw_page_pool[UW_PAGE_POOL_SIZE];
 unsigned long uw_arch_flush_tlb_all_calls = 0;
 
+/* Sync-time snapshot (unmap/TLB ownership plan Task 2): when a test
+ * marks a phys, the flush hook records the page's COW refcount AT
+ * SYNC TIME — proving the ref was retained until the sync ran. */
+uint64_t uw_sync_check_phys = 0;
+int      uw_refs_at_sync    = -1;
+void uw_mark_sync_check(uint64_t phys) { uw_sync_check_phys = phys; uw_refs_at_sync = -1; }
+void uw_record_sync_snapshot(void)
+{
+    if (!uw_sync_check_phys) return;
+    uw_page_record_t *rec = uw_find_page(uw_sync_check_phys);
+    uw_refs_at_sync = rec ? rec->cow_refs : -1;
+}
+
 static int pool_initialised = 0;
 
 static void uw_page_pool_init(void)
@@ -89,6 +102,8 @@ void uw_stubs_reset(void)
         uw_page_pool[i].cow_refs = 0;
     }
     uw_arch_flush_tlb_all_calls = 0;
+    uw_sync_check_phys = 0;
+    uw_refs_at_sync = -1;
 }
 
 uw_page_record_t *uw_find_page(uint64_t phys)
