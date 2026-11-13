@@ -235,6 +235,39 @@ class HostBuildContractTests(unittest.TestCase):
                 f"hosttests/oracle/{oracle}.c", result.stdout,
                 f"default hosttests goal does not build {oracle}")
 
+    def test_doom_adapter_objects_depend_on_the_engine_stamp(self):
+        """Every /bin/doom adapter object must depend on the Doom source stamp.
+
+        The adapters compile with -I into the private Doom copy, which the
+        stamp recipe materializes.  A pattern rule with prerequisites but
+        no recipe is ignored by GNU make, so the dependency has to be
+        explicit: otherwise a clean-tree parallel build compiles
+        doom_os01.c before doomgeneric.h exists.
+        """
+        build_dir = Path(tempfile.mkdtemp(prefix="doom-stamp-dep-", dir=self.root))
+        obj_dir = build_dir / "obj" / "doom"
+        cmd = ["make", "-p", "-n", "-C", "user",
+               "OS01_PROFILE_FILE=" + str(ROOT / "mk/profiles/x86_64-clang.mk"),
+               "PROFILE=x86_64-clang",
+               "BUILD_DIR=" + str(build_dir),
+               # -n never reads the sysroot, but the profile's libc
+               # prerequisite must not abort the database dump.
+               "SYSROOT_DIR=/nonexistent",
+               "all"]
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR") if k in os.environ}
+        result = subprocess.run(cmd, cwd=ROOT, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=60)
+        for adapter in ("doom_os01.o", "doom_video.o",
+                        "doom_input.o", "doom_runtime.o"):
+            obj = str(obj_dir / adapter)
+            prereq_lines = [line for line in result.stdout.splitlines()
+                            if line.startswith(obj + ":")]
+            self.assertTrue(
+                any(".doom-source.stamp" in line for line in prereq_lines),
+                f"{adapter} does not depend on the Doom source stamp:\n"
+                + "\n".join(prereq_lines))
+
     def test_duplicate_id_rejected(self):
         """Duplicate test IDs must be rejected by the registry / check-test-bins-dup."""
         cmd = ["make", "-n", "-C", "hosttests",
