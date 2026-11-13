@@ -254,7 +254,7 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, fb_cache_policy_t policy,
         records[i].written = false;
 
         uint64_t flags = pmd_flags;
-        pmd[pmd_idx] = (pa & PAGE_2M_MASK) | flags;
+        pmd[pmd_idx] = x86_pte_2m_make(pa, flags);
         records[i].written = true;
 
 #ifdef OS01_HOST_TEST
@@ -271,7 +271,7 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, fb_cache_policy_t policy,
     /* ── Verification phase: verify every PMD's phys and cache flags ── */
     for (i = 0; i < num_pages; i++) {
         uint64_t pa = phys + ((uint64_t)i * PAGE_2M_SIZE);
-        uint64_t expected = (pa & PAGE_2M_MASK) | pmd_flags;
+        uint64_t expected = x86_pte_2m_make(pa, pmd_flags);
 
         uint64_t actual = records[i].pmd[records[i].pmd_idx];
         if (actual != expected) {

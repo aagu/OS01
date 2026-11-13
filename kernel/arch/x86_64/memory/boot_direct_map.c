@@ -43,15 +43,15 @@ static bool mapped(void)
             uint64_t d = kernel_map[(va >> 39) & 511];
             if (!(d & PAGE_VALID) || (d & PAGE_HUGE))
                 return false;
-            uint64_t *pud = (uint64_t *)Phy_To_Virt(d & PAGE_4K_MASK);
+            uint64_t *pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(d));
             d = pud[(va >> 30) & 511];
             if (!(d & PAGE_VALID) || (d & PAGE_HUGE))
                 return false;
-            uint64_t *pmd = (uint64_t *)Phy_To_Virt(d & PAGE_4K_MASK);
+            uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(d));
             d = pmd[(va >> 21) & 511];
             if ((d & (PAGE_VALID | PAGE_HUGE | PAGE_WRITE | PAGE_USER)) !=
                     (PAGE_VALID | PAGE_HUGE | PAGE_WRITE) ||
-                (d & PAGE_2M_MASK) != pa)
+                x86_pte_2m_pa(d) != pa)
                 return false;
         }
     }

@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <driver/fb_cache.h>   /* fb_cache_policy_t: framebuffer cache policy */
+#include <arch/x86_64/pte_bits.h>  /* descriptor PA/flags codecs, PAT bits */
 
 //page table attribute
 

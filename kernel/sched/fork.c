@@ -74,7 +74,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
         uint64_t pgde = parent_pgd[l4];
         if (!(pgde & PAGE_VALID)) continue;
 
-        uint64_t *parent_pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+        uint64_t *parent_pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgde));
         uint64_t *child_pud  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
         if (!child_pud) goto fail;
         child_pgd[l4] = Virt_To_Phy((uint64_t)child_pud) | PAGE_USER_PGD;
@@ -83,7 +83,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
             uint64_t pude = parent_pud[l3];
             if (!(pude & PAGE_VALID)) continue;
 
-            uint64_t *parent_pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+            uint64_t *parent_pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pude));
             uint64_t *child_pmd  = (uint64_t *)calloc(1, PAGE_4K_SIZE);
             if (!child_pmd) goto fail;
             child_pud[l3] = Virt_To_Phy((uint64_t)child_pmd) | PAGE_USER_PUD;
@@ -109,12 +109,10 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     struct Page *s = alloc_pages(ZONE_NORMAL, 1, 0);
                     if (!s) goto fail;
                     uint64_t dst = (uint64_t)Phy_To_Virt(s->phy_address);
-                    /* Strip PAGE_NO_EXEC (bit 63) before Phy_To_Virt —
-                     * PAGE_NO_EXEC lives in the high bit and PAGE_2M_MASK
-                     * preserves it, which would corrupt the kernel VA
-                     * (non-canonical addr → GP on rep movsb). */
+                    /* x86_pte_2m_pa extracts the PA at 2 MiB granularity,
+                     * so NX (bit 63) never reaches Phy_To_Virt. */
                     uint64_t src = (uint64_t)Phy_To_Virt(
-                        (pmde & PAGE_2M_MASK) & ~PAGE_NO_EXEC);
+                        x86_pte_2m_pa(pmde));
                     uint64_t sz  = PAGE_2M_SIZE;
                     __asm__ __volatile__(
                         "cld\n\t"
@@ -123,14 +121,14 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         :
                         : "memory"
                     );
-                    child_pmd[l2] = s->phy_address
-                                   | (pmde & ~PAGE_2M_MASK);
+                    child_pmd[l2] = x86_pte_2m_make(s->phy_address,
+                                                    x86_pte_2m_flags(pmde));
                     continue;
                 }
 
                 /* 4 KiB PTE table path. */
                 uint64_t *parent_pte =
-                    (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                    (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pmde));
                 uint64_t *child_pte =
                     (uint64_t *)calloc(1, PAGE_4K_SIZE);
                 if (!child_pte) goto fail;
@@ -160,7 +158,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     if (vma && (pte & PAGE_COW)) {
                         /* Already COW-shared (fork-of-fork):
                          * add a ref for the child, share the PTE. */
-                        page_cow_get(pte & PAGE_4K_MASK);
+                        page_cow_get(x86_pte_4k_pa(pte));
                         child_pte[l1] = pte;
                     } else if (vma && (vma->vm_flags & VMA_PROT_WRITE) &&
                                (pte & PAGE_WRITE)) {
@@ -179,11 +177,12 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                         uint64_t new_phys = alloc_4k_page();
                         if (!new_phys) goto fail;
                         memcpy((void *)Phy_To_Virt(new_phys),
-                               (void *)Phy_To_Virt(pte & PAGE_4K_MASK),
+                               (void *)Phy_To_Virt(x86_pte_4k_pa(pte)),
                                PAGE_4K_SIZE);
-                        /* Preserve flags except PAGE_COW (the
-                         * new phys has no COW reference). */
-                        child_pte[l1] = new_phys | (pte & 0xfff & ~PAGE_COW);
+                        /* Preserve flags (NX included) except PAGE_COW
+                         * (the new phys has no COW reference). */
+                        child_pte[l1] = x86_pte_4k_make(
+                            new_phys, x86_pte_4k_flags(pte) & ~PAGE_COW);
                     }
                 }
             }
@@ -195,16 +194,16 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
     for (int l4 = 0; l4 < 256; l4++) {
         uint64_t cpgde = child_pgd[l4];
         if (!(cpgde & PAGE_VALID)) continue;
-        uint64_t *child_pud = (uint64_t *)Phy_To_Virt(cpgde & PAGE_4K_MASK);
+        uint64_t *child_pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(cpgde));
         uint64_t *parent_pud =
-            (uint64_t *)Phy_To_Virt(parent_pgd[l4] & PAGE_4K_MASK);
+            (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(parent_pgd[l4]));
 
         for (int l3 = 0; l3 < 512; l3++) {
             uint64_t cpude = child_pud[l3];
             if (!(cpude & PAGE_VALID)) continue;
-            uint64_t *child_pmd = (uint64_t *)Phy_To_Virt(cpude & PAGE_4K_MASK);
+            uint64_t *child_pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(cpude));
             uint64_t *parent_pmd =
-                (uint64_t *)Phy_To_Virt(parent_pud[l3] & PAGE_4K_MASK);
+                (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(parent_pud[l3]));
 
             for (int l2 = 0; l2 < 512; l2++) {
                 uint64_t cpmde = child_pmd[l2];
@@ -212,9 +211,9 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                 if (cpmde & PAGE_HUGE) continue;
 
                 uint64_t *child_pte =
-                    (uint64_t *)Phy_To_Virt(cpmde & PAGE_4K_MASK);
+                    (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(cpmde));
                 uint64_t *parent_pte =
-                    (uint64_t *)Phy_To_Virt(parent_pmd[l2] & PAGE_4K_MASK);
+                    (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(parent_pmd[l2]));
 
                 for (int l1 = 0; l1 < 512; l1++) {
                     /* Placeholder = PAGE_VALID only.  Any other
@@ -222,7 +221,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                      * already settled by pass 1. */
                     if (child_pte[l1] != PAGE_VALID) continue;
                     uint64_t ppte = parent_pte[l1];
-                    uint64_t paddr = ppte & PAGE_4K_MASK;
+                    uint64_t paddr = x86_pte_4k_pa(ppte);
                     /* Bump refcount twice: parent keeps one ref
                      * (its PTE still owns the phys) and child
                      * gets one ref (its PTE will own it too). */
@@ -267,11 +266,11 @@ fail:
         for (int l4 = 0; l4 < 256; l4++) {
             uint64_t pgde = child_pgd[l4];
             if (!(pgde & PAGE_VALID)) continue;
-            uint64_t *pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+            uint64_t *pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgde));
             for (int l3 = 0; l3 < 512; l3++) {
                 uint64_t pude = pud[l3];
                 if (!(pude & PAGE_VALID)) continue;
-                uint64_t *pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+                uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pude));
                 for (int l2 = 0; l2 < 512; l2++) {
                     uint64_t pmde = pmd[l2];
                     if (!(pmde & PAGE_VALID)) continue;
@@ -292,12 +291,12 @@ fail:
                         if (vm && (vm->vm_flags & VMA_IO)) {
                             /* Shared MMIO PMD — not ours. */
                         } else {
-                            uint64_t phys = pmde & PAGE_2M_MASK;
+                            uint64_t phys = x86_pte_2m_pa(pmde);
                             struct Page *p = Phy_to_2M_Page(phys);
                             free_pages(p, 1);
                         }
                     } else {
-                        uint64_t *pt = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                        uint64_t *pt = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pmde));
                         for (int l1 = 0; l1 < 512; l1++) {
                             uint64_t pte = pt[l1];
                             uint64_t vaddr = ((uint64_t)l4 << 39)
@@ -324,13 +323,13 @@ fail:
                              *     The shared phys stays alive for
                              *     parent + any other siblings. */
                             if ((pte & (PAGE_VALID | PAGE_PROTNONE)) &&
-                                (pte & PAGE_4K_MASK) &&
+                                x86_pte_4k_pa(pte) &&
                                 !is_placeholder &&
                                 !is_vmio) {
                                 if (is_cow) {
-                                    page_cow_put(pte & PAGE_4K_MASK);
+                                    page_cow_put(x86_pte_4k_pa(pte));
                                 } else {
-                                    free_4k_page(pte & PAGE_4K_MASK);
+                                    free_4k_page(x86_pte_4k_pa(pte));
                                 }
                             }
                         }

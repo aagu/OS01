@@ -41,7 +41,7 @@ ptbl_t get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
         current_level[entry] = Virt_To_Phy((uint64_t)calloc(1, PAGE_4K_SIZE));
         current_level[entry] |= flags;
     }
-    return (uint64_t *)Phy_To_Virt((uint64_t)(current_level[entry] & PAGE_4K_MASK));
+    return (uint64_t *)Phy_To_Virt((uint64_t)x86_pte_4k_pa(current_level[entry]));
 }
 
 /* Get next Level of map — boot-initializer variant. Walks the same
@@ -62,7 +62,7 @@ int vmm_get_next_level_checked(uint64_t *current_level, size_t entry,
         if (rc != 0) return rc;
         current_level[entry] = pa | flags;
     }
-    if (out_pa) *out_pa = current_level[entry] & PAGE_4K_MASK;
+    if (out_pa) *out_pa = x86_pte_4k_pa(current_level[entry]);
     return 0;
 }
 
@@ -82,7 +82,7 @@ void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual
     uint64_t pud_flags = (flags & PAGE_USER) ? PAGE_USER_PUD : PAGE_KERNEL_PUD;
     pud = get_next_level(pgd, pgd_idx, pgd_flags);
     pmd = get_next_level(pud, pud_idx, pud_flags);
-    pmd[pmd_idx] = (physical_address & PAGE_2M_MASK) | flags;
+    pmd[pmd_idx] = x86_pte_2m_make(physical_address, flags);
 
     // If modifying the shared kernel page table after APs are online,
     // broadcast TLB invalidation so other cores drop stale PMD/TLB entries.
@@ -103,12 +103,12 @@ uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address)
     pgd = pgdir;
     if (!(pgd[pgd_idx] & PAGE_VALID))
         return 0;
-    pud = (uint64_t *)Phy_To_Virt(pgd[pgd_idx] & PAGE_4K_MASK);
+    pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgd[pgd_idx]));
     if (!(pud[pud_idx] & PAGE_VALID))
         return 0;
-    pmd = (uint64_t *)Phy_To_Virt(pud[pud_idx] & PAGE_4K_MASK);
+    pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pud[pud_idx]));
 
-    uintptr_t phys = pmd[pmd_idx] & (PAGE_2M_MASK & ~PAGE_NO_EXEC);
+    uintptr_t phys = x86_pte_2m_pa(pmd[pmd_idx]);
     pmd[pmd_idx] = 0;
     return phys;
 }
@@ -154,7 +154,7 @@ int vmm_init()
             if (rc != 0) return rc;
             uint64_t *pmd = (uint64_t *)Phy_To_Virt(pa);
             pmd[((size_t)((uintptr_t)Phy_To_Virt(p->phy_address) >> PAGE_2M_SHIFT)) & 0x1ff] =
-                (p->phy_address & PAGE_2M_MASK) | PAGE_KERNEL_PMD;
+                x86_pte_2m_make(p->phy_address, PAGE_KERNEL_PMD);
             #ifdef DEBUG
             if(j % 50 == 0)
             {
@@ -198,7 +198,7 @@ void vmm_free_user_map(ptbl_t pgdir)
         if (!(pgde & PAGE_VALID))
             continue;
 
-        uint64_t *pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+        uint64_t *pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgde));
 
         // Walk PUD entries (pointers to PMD pages)
         for (int l1 = 0; l1 < 512; l1++) {
@@ -206,7 +206,7 @@ void vmm_free_user_map(ptbl_t pgdir)
             if (!(pude & PAGE_VALID))
                 continue;
 
-            uint64_t *pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+            uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pude));
 
             // Walk PMD entries (2MB pages via PAGE_HUGE)
             for (int l2 = 0; l2 < 512; l2++) {
@@ -215,17 +215,17 @@ void vmm_free_user_map(ptbl_t pgdir)
                     continue;
 
                 if (pmde & PAGE_HUGE) {
-                    uintptr_t phys = pmde & (PAGE_2M_MASK & ~PAGE_NO_EXEC);
+                    uintptr_t phys = x86_pte_2m_pa(pmde);
                     struct Page *page = Phy_to_2M_Page(phys);
                     page_clean(page);
                     free_pages(page, 1);
                 } else {
-                    uint64_t *pt = (uint64_t *)Phy_To_Virt(pmde & PAGE_4K_MASK);
+                    uint64_t *pt = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pmde));
                     for (int l3 = 0; l3 < 512; l3++) {
                         uint64_t pte = pt[l3];
                         if (!(pte & (PAGE_VALID | PAGE_PROTNONE)))
                             continue;
-                        uintptr_t phys = pte & PAGE_4K_MASK;
+                        uintptr_t phys = x86_pte_4k_pa(pte);
                         if (pte & PAGE_COW) {
                             if (page_cow_put(phys))
                                 free_4k_page(phys);
@@ -274,7 +274,7 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
         if (!t) return NULL;  // OOM check before Virt_To_Phy(0)
         pgd[l0] = Virt_To_Phy((uint64_t)t) | pgd_flags;
     }
-    uint64_t *pud = (uint64_t *)Phy_To_Virt(pgd[l0] & PAGE_4K_MASK);
+    uint64_t *pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgd[l0]));
 
     // PUD -> PMD
     if (!(pud[l1] & PAGE_VALID)) {
@@ -283,7 +283,7 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
         if (!t) return NULL;
         pud[l1] = Virt_To_Phy((uint64_t)t) | pud_flags;
     }
-    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l1] & PAGE_4K_MASK);
+    uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pud[l1]));
 
     // PMD -> PTE table (4KB leaf).
     // Guard: if PMD[l2] is a 2MB huge page (PAGE_HUGE), return NULL.
@@ -297,7 +297,7 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
         if (!t) return NULL;
         pmd[l2] = Virt_To_Phy((uint64_t)t) | pud_flags;
     }
-    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(pmd[l2] & PAGE_4K_MASK);
+    uint64_t *pte_table = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pmd[l2]));
 
     return &pte_table[l3];
 }
@@ -333,7 +333,7 @@ int x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     if (!pte)
         return -ENOMEM;
 
-    *pte = (phys & PAGE_4K_MASK) | (flags & ~PAGE_4K_MASK);
+    *pte = x86_pte_4k_make(phys, flags);
     return 0;
 }
 
@@ -357,7 +357,7 @@ int x86_vmm_unmap_4k_page_with_free(uint64_t *pgdir, uint64_t virt)
     if (!(*pte & (PAGE_VALID | PAGE_PROTNONE)))
         return -ENOENT;
 
-    uint64_t phys = *pte & PAGE_4K_MASK;
+    uint64_t phys = x86_pte_4k_pa(*pte);
 
     if (*pte & PAGE_COW) {
         // COW-shared page: decrement refcount, free only when count hits 0
@@ -386,9 +386,9 @@ int x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
         return -ENOENT;
 
     if (phys_out)
-        *phys_out = *pte & PAGE_4K_MASK;
+        *phys_out = x86_pte_4k_pa(*pte);
     if (flags_out)
-        *flags_out = *pte & ~PAGE_4K_MASK;
+        *flags_out = x86_pte_4k_flags(*pte);
     return 0;
 }
 
@@ -415,7 +415,7 @@ void x86_vmm_release_owned_4k(uint64_t old_pte)
 {
     if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE)))
         return;
-    uint64_t phys = old_pte & PAGE_4K_MASK;
+    uint64_t phys = x86_pte_4k_pa(old_pte);
     if (old_pte & PAGE_COW) {
         if (page_cow_put(phys))
             free_4k_page(phys);
@@ -434,9 +434,9 @@ static uint64_t *x86_vmm_pmd_slot(uint64_t *root, uint64_t va)
 
     if (l0 >= 256) return NULL;
     if (!(root[l0] & PAGE_VALID)) return NULL;
-    uint64_t *pud = (uint64_t *)Phy_To_Virt(root[l0] & PAGE_4K_MASK);
+    uint64_t *pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(root[l0]));
     if (!(pud[l1] & PAGE_VALID) || (pud[l1] & PAGE_HUGE)) return NULL;
-    uint64_t *pmd = (uint64_t *)Phy_To_Virt(pud[l1] & PAGE_4K_MASK);
+    uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pud[l1]));
     return &pmd[l2];
 }
 
@@ -496,7 +496,7 @@ static int pt_range_precheck(uint64_t *root, uint64_t start, uint64_t end)
         uint64_t pgde = root[l0];
         if (!(pgde & PAGE_VALID))
             continue;
-        uint64_t *pud = (uint64_t *)Phy_To_Virt(pgde & PAGE_4K_MASK);
+        uint64_t *pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgde));
 
         uint64_t pude = pud[l1];
         if (!(pude & PAGE_VALID))
@@ -504,7 +504,7 @@ static int pt_range_precheck(uint64_t *root, uint64_t start, uint64_t end)
         if (pude & PAGE_HUGE)
             return -EINVAL;             // 1 GiB leaf
 
-        uint64_t *pmd = (uint64_t *)Phy_To_Virt(pude & PAGE_4K_MASK);
+        uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pude));
         if ((pmd[l2] & PAGE_VALID) && (pmd[l2] & PAGE_HUGE))
             return -EINVAL;             // 2 MiB leaf
     }
@@ -521,7 +521,7 @@ static uint64_t *pt_get_next(uint64_t *slot, uint64_t flags,
             *rc = -EINVAL;
             return NULL;
         }
-        return (uint64_t *)Phy_To_Virt(*slot & PAGE_4K_MASK);
+        return (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(*slot));
     }
 
     // Undo record BEFORE the table is published: rollback never has
@@ -611,9 +611,12 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
         return rc;
     if (vm_out) {
         *vm_out = 0;
-        if (flags & PAGE_PRESENT) *vm_out |= VM_PRESENT;
-        if (flags & PAGE_RW)      *vm_out |= VM_WRITE;
-        if (flags & PAGE_USER)    *vm_out |= VM_USER;
+        if (flags & PAGE_PRESENT)  *vm_out |= VM_PRESENT;
+        if (flags & PAGE_RW)       *vm_out |= VM_WRITE;
+        if (flags & PAGE_USER)     *vm_out |= VM_USER;
+        if (flags & PAGE_NO_EXEC)  *vm_out |= VM_NO_EXEC;
+        if (flags & PAGE_PROTNONE) *vm_out |= VM_PROTNONE;
+        if (flags & PAGE_COW)      *vm_out |= VM_COW;
     }
     return 0;
 }

@@ -34,8 +34,8 @@ void frame_buffer_early_init()
     for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
     {
         size_t level2 = (size_t)((VIRT_FRAMEBUFFER_EARLY + i) >> PAGE_2M_SHIFT) & 0x1FF;
-        pmd[level2] = (((uint64_t)Pos.Phy_addr + i) & PAGE_2M_MASK)
-            | (PAGE_KERNEL_PMD | cache_bits);
+        pmd[level2] = x86_pte_2m_make((uint64_t)Pos.Phy_addr + i,
+                                      PAGE_KERNEL_PMD | cache_bits);
     }
     Pos.FB_addr = (uint32_t *)VIRT_FRAMEBUFFER_EARLY;
     flush_tlb();

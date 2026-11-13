@@ -36,6 +36,7 @@
 
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   /* PAGE_* x86 hardware PTE bits */
+#include <arch/mmu.h>          /* arch_virt_to_phys — the real walker */
 
 /* ── Table allocation harness ────────────────────────────────
  * x86_vmm_prepare_4k_range allocates intermediate tables (calloc)
@@ -425,6 +426,132 @@ TEST_FUNC(test_prepare_4k_range_rejects_huge_and_kernel_half)
     assert_eq(0, pgd_root[0]);
 }
 
+/* ── NX / COW / PROTNONE descriptor round-trip (PTE permissions plan T1) ──
+ * The descriptor address field must be extracted per granularity
+ * (4 KiB bits 51:12) so NX (bit 63) and the software bits (COW 10,
+ * PROTNONE 9) never mix into the PA, and the map/query/release paths
+ * must preserve NX end to end. */
+
+#define ROUNDTRIP_PA 0x12345678000UL   /* 4 KiB-aligned, bits up to 45 */
+
+TEST_FUNC(test_x86_nx_cow_stash_roundtrip)
+{
+    /* Raw NX + USER + PRESENT + COW mapping: query PA and semantic
+     * flags, then release and check the freed PA. */
+    reset_chain();
+    pt_tbl[0] = ROUNDTRIP_PA | PAGE_VALID | PAGE_USER | PAGE_NO_EXEC |
+                PAGE_COW;
+
+    uint64_t phys = 0;
+    uint32_t vm = 0;
+    int rc = arch_vmm_query_4k(pgd_root, TEST_VA_A, &phys, &vm);
+    assert_eq(0, rc);
+    assert_eq(ROUNDTRIP_PA, phys);          /* NX must not leak into PA */
+    assert_true(vm & VM_PRESENT);
+    assert_true(vm & VM_USER);
+    assert_true(vm & VM_NO_EXEC);           /* x86 semantic query flags */
+    assert_true(vm & VM_COW);
+
+    uint64_t flags = 0;
+    rc = x86_vmm_query_4k_page(pgd_root, TEST_VA_A, &phys, &flags);
+    assert_eq(0, rc);
+    assert_eq(ROUNDTRIP_PA, phys);
+    assert_true(flags & PAGE_NO_EXEC);
+    assert_true(flags & PAGE_COW);
+
+    g_cow_put_should_return_true = 1;
+    rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_A);
+    assert_eq(0, rc);
+    assert_eq(1, g_cow_put_calls);
+    assert_eq(1, g_free_calls);
+    assert_eq(ROUNDTRIP_PA, g_last_phys);   /* release gets a pure PA */
+
+    /* Raw PROTNONE + COW stash: phys stays valid, no PRESENT bit. */
+    reset_chain();
+    pt_tbl[1] = ROUNDTRIP_PA | PAGE_USER | PAGE_PROTNONE | PAGE_COW;
+    vm = 0;
+    rc = arch_vmm_query_4k(pgd_root, TEST_VA_B, &phys, &vm);
+    assert_eq(0, rc);
+    assert_eq(ROUNDTRIP_PA, phys);
+    assert_false(vm & VM_PRESENT);
+    assert_true(vm & VM_PROTNONE);
+    assert_true(vm & VM_COW);
+
+    g_cow_put_should_return_true = 1;
+    rc = x86_vmm_unmap_4k_page_with_free(pgd_root, TEST_VA_B);
+    assert_eq(0, rc);
+    assert_eq(ROUNDTRIP_PA, g_last_phys);
+
+    /* The raw mapper must preserve NX on the leaf it writes. */
+    reset_chain();
+    rc = x86_vmm_map_4k_page(pgd_root, ROUNDTRIP_PA, TEST_VA_C,
+                             PAGE_VALID | PAGE_USER | PAGE_NO_EXEC);
+    assert_eq(0, rc);
+    assert_eq(ROUNDTRIP_PA | PAGE_VALID | PAGE_USER | PAGE_NO_EXEC,
+              pt_tbl[2]);
+
+    flags = 0;
+    rc = x86_vmm_query_4k_page(pgd_root, TEST_VA_C, &phys, &flags);
+    assert_eq(0, rc);
+    assert_eq(ROUNDTRIP_PA, phys);
+    assert_true(flags & PAGE_NO_EXEC);
+}
+
+TEST_FUNC(test_x86_walker_leaf_pa_per_granularity)
+{
+    /* The real walker (arch_virt_to_phys) must extract PA at the
+     * leaf's granularity: 1 GiB bits 51:30, 2 MiB bits 51:21,
+     * 4 KiB bits 51:12 — NX and PAT never mix into the PA, and the
+     * in-page offset is preserved. */
+
+    /* 1 GiB leaf with NX. */
+    const uint64_t PA1G = 0x1200000000UL;   /* 1 GiB-aligned */
+    reset_chain();
+    pud_tbl[1] = PA1G | PAGE_HUGE | PAGE_USER | PAGE_VALID | PAGE_NO_EXEC;
+    assert_eq(PA1G + 0xABCD, (uint64_t)arch_virt_to_phys(
+                                 pgd_root, 0x40000000UL + 0xABCD));
+
+    /* 2 MiB leaf with NX + PAT (bit 12). */
+    const uint64_t PA2M = 0x1234000000UL;   /* 2 MiB-aligned */
+    reset_chain();
+    pmd_tbl[TEST_PMD_IDX] = PA2M | PAGE_HUGE | PAGE_USER | PAGE_VALID |
+                            PAGE_NO_EXEC | PAGE_PAT_LARGE;
+    assert_eq(PA2M + 0x123, (uint64_t)arch_virt_to_phys(
+                                pgd_root, TEST_VA_A + 0x123));
+
+    /* 4 KiB leaf with NX: bit 63 must NOT ride along with the PA. */
+    reset_chain();
+    pt_tbl[0] = ROUNDTRIP_PA | PAGE_VALID | PAGE_USER | PAGE_NO_EXEC;
+    assert_eq(ROUNDTRIP_PA + 0x321, (uint64_t)arch_virt_to_phys(
+                                        pgd_root, TEST_VA_A + 0x321));
+}
+
+TEST_FUNC(test_x86_large_leaf_pa)
+{
+    /* The fork huge-copy idiom, exercised through the real codecs:
+     * copy a 2 MiB leaf (NX bit 63 + large-PAT bit 12 set) to a new
+     * PA with x86_pte_2m_make(new_pa, x86_pte_2m_flags(old)) — both
+     * attribute bits must survive — and the rollback path must see
+     * only the new PA. */
+    const uint64_t OLD_PA = 0x1234000000UL;   /* 2 MiB-aligned */
+    const uint64_t NEW_PA = 0x4560000000UL;   /* 2 MiB-aligned */
+    const uint64_t old_entry = OLD_PA | PAGE_HUGE | PAGE_USER |
+                               PAGE_VALID | PAGE_NO_EXEC |
+                               PAGE_PAT_LARGE;
+
+    uint64_t child = x86_pte_2m_make(NEW_PA,
+                                     x86_pte_2m_flags(old_entry));
+    assert_eq(NEW_PA, x86_pte_2m_pa(child));
+    assert_true(child & PAGE_NO_EXEC);
+    assert_true(child & PAGE_PAT_LARGE);
+    assert_true(child & PAGE_HUGE);
+    assert_true(child & PAGE_USER);
+
+    /* Rollback extracts the child's PA — never the old one, never
+     * polluted by NX/PAT. */
+    assert_eq(NEW_PA, x86_pte_2m_pa(child));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_x86_vmm_backend_api_exists),
     TEST_ENTRY(test_cow_shared_page_does_not_free),
@@ -436,6 +563,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_prepare_4k_range_rolls_back_every_site),
     TEST_ENTRY(test_prepare_4k_range_preserves_existing_leaf),
     TEST_ENTRY(test_prepare_4k_range_rejects_huge_and_kernel_half),
+    TEST_ENTRY(test_x86_nx_cow_stash_roundtrip),
+    TEST_ENTRY(test_x86_walker_leaf_pa_per_granularity),
+    TEST_ENTRY(test_x86_large_leaf_pa),
 TEST_LIST_END
 
 int main(void)

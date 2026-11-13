@@ -213,7 +213,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
 
             if (pte && (*pte & PAGE_FLAGS_VALID_BIT)) {
                 /* Already mapped: reuse the existing phys. */
-                page_phys = *pte & PAGE_4K_MASK;
+                page_phys = x86_pte_4k_pa(*pte);
 
                 /* Check permission compatibility.  Incompatibility
                  * means the page was previously mapped with stricter

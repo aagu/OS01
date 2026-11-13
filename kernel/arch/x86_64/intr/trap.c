@@ -690,9 +690,9 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 				if (upte && (*upte & PAGE_VALID) &&
 				    (*upte & PAGE_COW)) {
 					uint64_t old_phys =
-					    *upte & PAGE_4K_MASK;
+					    x86_pte_4k_pa(*upte);
 					uint64_t new_flags =
-					    (*upte & ~PAGE_4K_MASK) |
+					    x86_pte_4k_flags(*upte) |
 					    PAGE_WRITE;
 					new_flags &= ~(uint64_t)PAGE_COW;
 					bool free_old = false;
@@ -780,7 +780,7 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					}
 				}
 
-				uint64_t old_phys = *pte & PAGE_4K_MASK;
+				uint64_t old_phys = x86_pte_4k_pa(*pte);
 				uint64_t new_phys = 0;
 				int resolved = 0;
 				bool free_old = false;
@@ -797,12 +797,12 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					memcpy((void *)Phy_To_Virt(new_phys),
 					       (void *)Phy_To_Virt(old_phys),
 					       PAGE_4K_SIZE);
-					*pte = new_phys | vma->vm_page_prot;
+					*pte = x86_pte_4k_make(new_phys, vma->vm_page_prot);
 					free_old = page_cow_put(old_phys);
 					resolved = 1;
 				} else {
 					(void)page_cow_put(old_phys);
-					*pte = old_phys | vma->vm_page_prot;
+					*pte = x86_pte_4k_make(old_phys, vma->vm_page_prot);
 					resolved = 1;
 				}
 

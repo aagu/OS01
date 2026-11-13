@@ -589,7 +589,8 @@ test_vmm_caller_audit: $(TEST_BLD)/test_vmm_caller_audit.elf
 $(TEST_BLD)/test_vmm_semantic_header.o: \
 		$(TEST_CASES)/test_vmm_semantic_header.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
-		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte_bits.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) \
 		-c $< -o $@
@@ -604,16 +605,22 @@ test_vmm_semantic_header: $(TEST_BLD)/test_vmm_semantic_header.elf
 # x86 VMM backend
 $(TEST_BLD)/x86_vmm_backend_production.o: $(TESTS_DIR)/kernel/memory/vmm.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
-		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte_bits.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(LIBC_INC) \
+		-DARCH_PAGE_OFFSET=0 \
 		-ffunction-sections -fdata-sections -c $< -o $@
 
 $(TEST_BLD)/test_x86_vmm_backend.o: $(TEST_CASES)/test_x86_vmm_backend.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
-		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte_bits.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+		-DARCH_PAGE_OFFSET=0 \
 		-c $< -o $@
 
 $(TEST_BLD)/test_x86_vmm_backend.elf: \

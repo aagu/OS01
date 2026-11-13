@@ -557,6 +557,40 @@ static void test_fork_mm_copy_no_pmd_share_fallback(void)
     free(src);
 }
 
+static void test_fork_mm_copy_huge_leaf_codec_callsites(void)
+{
+    TEST_SUITE("fork_mm_copy — 2 MiB copy/rollback go through x86_pte_2m codecs");
+
+    size_t len;
+    char *src = slurp_task_c(&len);
+    assert_not_null(src);
+    const char *end = src + len;
+
+    const char *fn = strstr(src,
+        "static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)");
+    assert_not_null(fn);
+    const char *fn_end = strstr(fn, "\n}\n");
+    assert_not_null(fn_end);
+
+    /* PTE permissions plan Task 1: the huge-page eager copy must
+     * build the child leaf with the 2 MiB codec (PA + full attribute
+     * half, NX/PAT preserved), and the rollback path must extract
+     * the child leaf's PA with x86_pte_2m_pa — never PAGE_2M_MASK,
+     * which lets NX (bit 63) ride along with the PA. */
+    assert_not_null(find_from(fn, fn_end,
+                              "x86_pte_2m_make(s->phy_address"));
+    assert_not_null(find_from(fn, fn_end,
+                              "x86_pte_2m_flags(pmde)"));
+    assert_not_null(find_from(fn, fn_end,
+                              "uint64_t phys = x86_pte_2m_pa(pmde);"));
+    /* The raw-mask forms are banned inside fork_mm_copy. */
+    assert_null(find_from(fn, fn_end, "pmde & PAGE_2M_MASK"));
+    assert_null(find_from(fn, fn_end, "pmde & ~PAGE_2M_MASK"));
+
+    (void)end;
+    free(src);
+}
+
 static void test_fork_mm_copy_elf_leaf_private_copy(void)
 {
     TEST_SUITE("fork_mm_copy — ELF/RO 4 KiB leaf path: alloc + copy (no COW)");
@@ -1066,6 +1100,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_vma_free_all_vmio_skips_unmap),
     TEST_ENTRY(test_vma_free_all_then_user_map_no_double_free),
     TEST_ENTRY(test_fork_mm_copy_source_layout),
+    TEST_ENTRY(test_fork_mm_copy_huge_leaf_codec_callsites),
     TEST_ENTRY(test_fork_mm_copy_no_pmd_share_fallback),
     TEST_ENTRY(test_fork_mm_copy_elf_leaf_private_copy),
     TEST_ENTRY(test_fork_mm_copy_writable_leaf_uses_cow),

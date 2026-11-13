@@ -176,7 +176,7 @@ uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
 void x86_vmm_release_owned_4k(uint64_t old_pte)
 {
     if (!(old_pte & (PAGE_VALID | PAGE_PROTNONE))) return;
-    uint64_t phys = old_pte & PAGE_4K_MASK;
+    uint64_t phys = x86_pte_4k_pa(old_pte);
     if (old_pte & PAGE_COW) {
         if (page_cow_put(phys))
             free_4k_page(phys);
@@ -274,15 +274,13 @@ void vmm_free_user_map(uint64_t *pgdir)
             uint64_t pmde = pmd[l2];
             if (!(pmde & PAGE_VALID)) continue;
             if (!(pmde & PAGE_HUGE)) continue;
-            /* Production extracts phys via PAGE_2M_MASK (2 MiB-aligned).
-             * For the host harness we want the exact phys the test
-             * recorded (a host-heap pointer, not 2 MiB-aligned), so
-             * we mask off only the PAGE_NO_EXEC bit (bit 63) and the
-             * flag bits.  The test puts `stack_phys | PAGE_USER_PMD`
-             * into the PMD entry, and PAGE_USER_PMD overlaps only the
-             * valid/user/write/huge bits (low 8 bits + bit 63), so
-             * masking `pmde & ~(PAGE_NO_EXEC | 0xFF)` recovers the
-             * original phys cleanly. */
+            /* Production extracts the 2 MiB leaf PA via x86_pte_2m_pa
+             * (bits 51:21).  The host harness records a host-heap
+             * pointer that is NOT 2 MiB-aligned, so the codec's PA
+             * field would truncate it; the mock instead masks off only
+             * the NX bit (bit 63) and the flag bits (low 8) — the test
+             * puts `stack_phys | PAGE_USER_PMD` into the PMD entry, so
+             * that recovers the recorded phys exactly. */
             uint64_t phys = pmde & ~((uint64_t)PAGE_NO_EXEC | 0xFFULL);
             free_4k_page(phys);
             /* Clear the entry so a second walk (e.g. an idempotent

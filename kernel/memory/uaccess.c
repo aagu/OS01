@@ -202,7 +202,7 @@ int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len)
         }
         va += PAGE_4K_SIZE;
         if (!(*pte & PAGE_COW)) continue;
-        uint64_t phys = *pte & PAGE_4K_MASK;
+        uint64_t phys = x86_pte_4k_pa(*pte);
         uint16_t refs = page_cow_refs(phys);
         if (refs == 0) goto rollback;
         uint64_t new_phys = 0;
@@ -216,11 +216,11 @@ int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len)
     }
 
     for (size_t i = 0; i < used; ++i) {
-        uint64_t old_phys = staged[i].old_pte & PAGE_4K_MASK;
+        uint64_t old_phys = x86_pte_4k_pa(staged[i].old_pte);
         uint64_t phys = staged[i].new_phys ? staged[i].new_phys : old_phys;
-        uint64_t flags = (staged[i].old_pte & ~PAGE_4K_MASK & ~PAGE_COW) |
+        uint64_t flags = (x86_pte_4k_flags(staged[i].old_pte) & ~PAGE_COW) |
                          PAGE_WRITE;
-        *staged[i].pte = phys | flags;
+        *staged[i].pte = x86_pte_4k_make(phys, flags);
         bool last = page_cow_put(old_phys);
         staged[i].free_old = last && staged[i].new_phys;
     }
@@ -229,7 +229,7 @@ int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len)
     // after the changed PTEs are visible and stale translations are gone.
     for (size_t i = 0; i < used; ++i)
         if (staged[i].free_old)
-            free_4k_page(staged[i].old_pte & PAGE_4K_MASK);
+            free_4k_page(x86_pte_4k_pa(staged[i].old_pte));
     kfree(staged);
     return 0;
 

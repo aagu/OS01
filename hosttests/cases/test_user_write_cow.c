@@ -130,8 +130,12 @@ static void mark_cow(uint64_t va, uint16_t refs)
     uw_pte_record_t *rec = uw_find_mapping(va);
     if (!rec) abort();
     uint64_t old_phys = rec->phys;
-    rec->pte = old_phys | PAGE_USER | PAGE_COW | PAGE_VALID;
-    rec->flags = PAGE_USER | PAGE_COW | PAGE_VALID;
+    /* Preserve the attribute half (NX included) via the codec; only
+     * the COW / USER / VALID bits are forced here. */
+    rec->pte = x86_pte_4k_make(old_phys,
+                               x86_pte_4k_flags(rec->pte) |
+                               PAGE_USER | PAGE_COW | PAGE_VALID);
+    rec->flags = x86_pte_4k_flags(rec->pte);
     uw_page_record_t *pg = uw_find_page(old_phys);
     if (!pg) abort();
     pg->cow_refs = refs;
@@ -252,6 +256,75 @@ static void test_prepare_cow_refs_many_privatizes(void)
     uw_page_record_t *pg_old = uw_find_page(phys_orig);
     assert_not_null(pg_old);
     assert_eq(2, pg_old->cow_refs);
+
+    uw_clear_current();
+}
+
+static void test_prepare_cow_nx_survives_inplace_upgrade(void)
+{
+    /* PTE permissions plan Task 1: the production uaccess COW path
+     * must preserve NX (bit 63) through the flag half of the
+     * descriptor.  In-place upgrade (refs==1): same phys, COW
+     * cleared, WRITE granted, NX kept. */
+    TEST_SUITE("prepare_user_write_range — COW refs==1 in-place upgrade keeps NX");
+
+    uw_stubs_reset();
+    memset(&fixture_mm, 0, sizeof(fixture_mm));
+    list_init(&fixture_mm.vma_list);
+    fixture_mm.pgdir = fixture_pgd;
+    fixture_mm.mmap_base = 0x40000000UL;
+    uw_set_current(&fixture_mm, PROD_ADDR_LIMIT);
+
+    uint64_t va = 0x403000UL;
+    build_anon_vma(va, va + 0x1000);
+    uint64_t phys = commit_leaf(va, PAGE_USER_PTE | PAGE_NO_EXEC);
+    mark_cow(va, 1);
+
+    int rc = prepare_user_write_range(&fixture_mm, va, 0x1000);
+    assert_eq(0, rc);
+
+    uw_pte_record_t *rec = uw_find_mapping(va);
+    assert_not_null(rec);
+    assert_eq(phys, x86_pte_4k_pa(rec->pte));
+    assert_true(rec->pte & PAGE_VALID);
+    assert_true(rec->pte & PAGE_USER);
+    assert_true(rec->pte & PAGE_WRITE);
+    assert_false(rec->pte & PAGE_COW);
+    assert_true(rec->pte & PAGE_NO_EXEC);   /* NX must survive */
+
+    uw_clear_current();
+}
+
+static void test_prepare_cow_nx_survives_privatize_copy(void)
+{
+    /* Privatization copy (refs>1): the new leaf must carry the old
+     * leaf's attribute half — NX included — on the new PA. */
+    TEST_SUITE("prepare_user_write_range — COW refs>1 privatize copy keeps NX");
+
+    uw_stubs_reset();
+    memset(&fixture_mm, 0, sizeof(fixture_mm));
+    list_init(&fixture_mm.vma_list);
+    fixture_mm.pgdir = fixture_pgd;
+    fixture_mm.mmap_base = 0x40000000UL;
+    uw_set_current(&fixture_mm, PROD_ADDR_LIMIT);
+
+    uint64_t va = 0x404000UL;
+    build_anon_vma(va, va + 0x1000);
+    uint64_t phys_orig = commit_leaf(va, PAGE_USER_PTE | PAGE_NO_EXEC);
+    mark_cow(va, 3);
+
+    int rc = prepare_user_write_range(&fixture_mm, va, 0x1000);
+    assert_eq(0, rc);
+
+    uw_pte_record_t *rec = uw_find_mapping(va);
+    assert_not_null(rec);
+    uint64_t new_phys = x86_pte_4k_pa(rec->pte);
+    assert_true(new_phys != phys_orig);
+    assert_true(rec->pte & PAGE_VALID);
+    assert_true(rec->pte & PAGE_USER);
+    assert_true(rec->pte & PAGE_WRITE);
+    assert_false(rec->pte & PAGE_COW);
+    assert_true(rec->pte & PAGE_NO_EXEC);   /* NX copied to the new leaf */
 
     uw_clear_current();
 }
@@ -867,6 +940,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_prepare_noop_on_writable_leaf),
     TEST_ENTRY(test_prepare_cow_refs_one_promotes_inplace),
     TEST_ENTRY(test_prepare_cow_refs_many_privatizes),
+    TEST_ENTRY(test_prepare_cow_nx_survives_inplace_upgrade),
+    TEST_ENTRY(test_prepare_cow_nx_survives_privatize_copy),
     TEST_ENTRY(test_prepare_span_two_cow_pages),
     TEST_ENTRY(test_prepare_oom_on_page_two_rolls_back),
     TEST_ENTRY(test_prepare_rejects_vmio),

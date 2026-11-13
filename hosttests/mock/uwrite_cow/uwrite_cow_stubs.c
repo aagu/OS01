@@ -234,7 +234,7 @@ int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     if (idx < 0) return -1;
     if (phys & ~PAGE_4K_MASK) return -1;
     uw_pte_record_t *rec = &uw_state.ptes[idx];
-    rec->pte   = (phys & PAGE_4K_MASK) | (flags & ~PAGE_4K_MASK);
+    rec->pte   = x86_pte_4k_make(phys, flags);
     rec->phys  = phys;
     rec->flags = flags;
     uw_state.total_maps++;
@@ -249,7 +249,7 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     uw_pte_record_t *rec = &uw_state.ptes[idx];
     if (!(rec->pte & (PAGE_VALID | PAGE_PROTNONE)))
         return;
-    uint64_t phys = rec->pte & PAGE_4K_MASK;
+    uint64_t phys = x86_pte_4k_pa(rec->pte);
     if (rec->pte & PAGE_COW) {
         if (page_cow_put(phys))
             free_4k_page(phys);

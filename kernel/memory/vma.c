@@ -391,7 +391,7 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         uint64_t tail_va = aligned_new - PAGE_4K_SIZE;
         uint64_t *pte = vmm_pt_walk(pgd, tail_va, 0, 0);
         if (pte && (*pte & PAGE_VALID)) {
-            uint64_t old_phys = *pte & PAGE_4K_MASK;
+            uint64_t old_phys = x86_pte_4k_pa(*pte);
             if (*pte & PAGE_COW) {
                 if (page_cow_refs(old_phys) > 1) {
                     uint64_t new_phys = alloc_4k_page();
@@ -402,13 +402,13 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
                     memcpy((void *)Phy_To_Virt(new_phys),
                            (void *)Phy_To_Virt(old_phys),
                            PAGE_4K_SIZE);
-                    *pte = new_phys | page_prot;
+                    *pte = x86_pte_4k_make(new_phys, page_prot);
                     if (page_cow_put(old_phys))
                         free_old_phys = old_phys;
                     old_phys = new_phys;
                 } else {
                     (void)page_cow_put(old_phys);
-                    *pte = old_phys | page_prot;
+                    *pte = x86_pte_4k_make(old_phys, page_prot);
                 }
             }
             /* Zero the retained-tail range [requested - tail_va,
@@ -798,7 +798,7 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
         uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
         if (!pte) continue;     // defensive: preparer covered the range
         uint64_t phys = first_pa + (va - start);
-        *pte = (phys & PAGE_4K_MASK) | (pte_flags & ~PAGE_4K_MASK);
+        *pte = x86_pte_4k_make(phys, pte_flags);
     }
 
     // Make the new leaves visible before publishing the VMA.
@@ -1235,7 +1235,7 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
             if (!pte) continue;                      // empty slot stays empty
             if (!(*pte & (PAGE_VALID | PAGE_PROTNONE))) continue;
 
-            uint64_t phys = *pte & PAGE_4K_MASK;
+            uint64_t phys = x86_pte_4k_pa(*pte);
 
             if (prot == PROT_NONE) {
                 // Stash the PA for later restore.  Keep the COW
@@ -1248,9 +1248,10 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
                 // Shared leaf: keep COW and force hardware read-only,
                 // regardless of the logical write grant.  The first
                 // write privatizes through the #PF path.
-                *pte = phys | (new_page_prot & ~PAGE_WRITE) | PAGE_COW;
+                *pte = x86_pte_4k_make(
+                    phys, (new_page_prot & ~PAGE_WRITE) | PAGE_COW);
             } else {
-                *pte = phys | new_page_prot;
+                *pte = x86_pte_4k_make(phys, new_page_prot);
             }
         }
     }
