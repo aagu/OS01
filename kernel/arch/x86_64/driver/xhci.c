@@ -13,6 +13,7 @@
 #ifndef OS01_HOST_TEST
 #include <arch/x86_64/pte.h>
 #include <memory/vmm.h>
+#include <fs/vfs.h>
 #endif
 
 #define XHCI_TIMEOUT_LOOPS 500000
@@ -20,6 +21,66 @@
 #define XHCI_MAX_CONTROLLERS 4
 static struct xhci_controller *s_xhci_controllers[XHCI_MAX_CONTROLLERS];
 static uint8_t s_xhci_controller_count = 0;
+
+static inline void xhci_dma_wmb(void)
+{
+    __sync_synchronize();
+}
+
+static inline bool xhci_lock(struct xhci_controller *ctrl)
+{
+    if (!ctrl) return false;
+    bool take = vfs_sched_ready();
+    if (take) {
+        if (!ctrl->io_lock_init) {
+            mutex_init(&ctrl->io_lock);
+            ctrl->io_lock_init = true;
+        }
+        mutex_lock(&ctrl->io_lock);
+    }
+    return take;
+}
+
+static inline void xhci_unlock(struct xhci_controller *ctrl, bool locked)
+{
+    if (locked && ctrl) {
+        mutex_unlock(&ctrl->io_lock);
+    }
+}
+
+static int xhci_ring_enqueue_trb(struct xhci_trb *ring_virt, uint64_t ring_phys,
+                                 uint32_t *enqueue, uint8_t *cycle,
+                                 const struct xhci_trb *trb, uint64_t *out_trb_phys)
+{
+    if (!ring_virt || !enqueue || !cycle || !trb) return -EINVAL;
+
+    if (*enqueue == XHCI_TRB_RING_SIZE - 1) {
+        struct xhci_trb *link = &ring_virt[XHCI_TRB_RING_SIZE - 1];
+        link->control &= ~(1U << 4); /* Link CH=0 */
+        if (*cycle) {
+            link->control |= XHCI_TRB_CYCLE_BIT;
+        } else {
+            link->control &= ~XHCI_TRB_CYCLE_BIT;
+        }
+        xhci_dma_wmb();
+        *cycle ^= 1;
+        *enqueue = 0;
+    }
+
+    uint32_t idx = *enqueue;
+    struct xhci_trb *dst = &ring_virt[idx];
+    dst->parameter = trb->parameter;
+    dst->status = trb->status;
+    xhci_dma_wmb();
+    dst->control = (trb->control & ~XHCI_TRB_CYCLE_BIT) |
+                   (*cycle ? XHCI_TRB_CYCLE_BIT : 0);
+
+    if (out_trb_phys) {
+        *out_trb_phys = ring_phys + (uint64_t)idx * sizeof(struct xhci_trb);
+    }
+    *enqueue = idx + 1;
+    return 0;
+}
 
 uint8_t xhci_controller_count(void)
 {
@@ -47,7 +108,10 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
     uint32_t hcsparams2 = xhci_read32(ctrl->mmio_virt + XHCI_CAP_HCSPARAMS2);
     ctrl->max_scratchpads = (((hcsparams2 >> 21) & 0x1F) << 5) | ((hcsparams2 >> 27) & 0x1F);
 
-    ctrl->csz = (xhci_read32(ctrl->mmio_virt + XHCI_CAP_HCCPARAMS1) >> 2) & 1;
+    uint32_t hccparams1 = xhci_read32(ctrl->mmio_virt + XHCI_CAP_HCCPARAMS1);
+    ctrl->csz = (hccparams1 >> 2) & 1;
+    ctrl->ac64 = (hccparams1 & 1U) != 0;
+    ctrl->ac64_valid = true;
 
     ctrl->dboff = xhci_read32(ctrl->mmio_virt + XHCI_CAP_DBOFF) & ~0x03U;
     ctrl->rtsoff = xhci_read32(ctrl->mmio_virt + XHCI_CAP_RTSOFF) & ~0x1FU;
@@ -200,6 +264,8 @@ void xhci_delay_ms(uint32_t ms)
 
 static int xhci_poll_event_internal(struct xhci_controller *ctrl, uint32_t target_type,
                                     uint64_t expect_param, uint8_t expect_slot,
+                                    uint8_t expect_dci, const uint64_t *expect_trbs,
+                                    size_t expect_count, size_t *out_match_idx,
                                     struct xhci_trb *out_evt, uint32_t timeout_loops)
 {
     if (!ctrl || !ctrl->event_ring_virt || !ctrl->rt_regs) return -EINVAL;
@@ -238,6 +304,30 @@ static int xhci_poll_event_internal(struct xhci_controller *ctrl, uint32_t targe
                      (unsigned)((evt.control >> 24) & 0xFF), expect_slot);
             matched = false;
         }
+        if (matched && expect_dci && ((evt.control >> 16) & 0x1F) != expect_dci) {
+            log_warn("[xhci] dropping transfer event for DCI %u (waiting for DCI %u)\n",
+                     (unsigned)((evt.control >> 16) & 0x1F), expect_dci);
+            matched = false;
+        }
+        if (matched && expect_trbs && expect_count > 0) {
+            if ((evt.control & (1U << 2)) != 0) {
+                matched = false; /* Event Data (ED=1) does not carry a TRB pointer */
+            } else {
+                bool found = false;
+                for (size_t k = 0; k < expect_count; k++) {
+                    if (evt.parameter == expect_trbs[k]) {
+                        if (out_match_idx) *out_match_idx = k;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    log_warn("[xhci] dropping transfer event with unexpected TRB %llx\n",
+                             (unsigned long long)evt.parameter);
+                    matched = false;
+                }
+            }
+        }
         if (matched) {
             if (out_evt) *out_evt = evt;
             return 0;
@@ -259,20 +349,31 @@ static int xhci_poll_event_internal(struct xhci_controller *ctrl, uint32_t targe
 int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
                              struct xhci_trb *out_evt, uint32_t timeout_loops)
 {
-    return xhci_poll_event_internal(ctrl, target_type, 0, 0, out_evt, timeout_loops);
+    return xhci_poll_event_internal(ctrl, target_type, 0, 0, 0, NULL, 0, NULL,
+                                    out_evt, timeout_loops);
 }
 
 int xhci_poll_cmd_completion(struct xhci_controller *ctrl, uint64_t expect_trb_phys,
                              struct xhci_trb *out_evt, uint32_t timeout_loops)
 {
-    return xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, expect_trb_phys, 0,
-                                    out_evt, timeout_loops);
+    return xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, expect_trb_phys,
+                                    0, 0, NULL, 0, NULL, out_evt, timeout_loops);
 }
 
 int xhci_poll_transfer(struct xhci_controller *ctrl, uint8_t slot_id,
                        struct xhci_trb *out_evt, uint32_t timeout_loops)
 {
     return xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_TRANSFER_EVT, 0, slot_id,
+                                    0, NULL, 0, NULL, out_evt, timeout_loops);
+}
+
+static int xhci_poll_transfer_matched(struct xhci_controller *ctrl, uint8_t slot_id,
+                                      uint8_t dci, const uint64_t *expect_trbs,
+                                      size_t expect_count, struct xhci_trb *out_evt,
+                                      size_t *out_match_idx, uint32_t timeout_loops)
+{
+    return xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_TRANSFER_EVT, 0, slot_id,
+                                    dci, expect_trbs, expect_count, out_match_idx,
                                     out_evt, timeout_loops);
 }
 
@@ -331,39 +432,98 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
     return 0;
 }
 
+static int xhci_submit_cmd_locked(struct xhci_controller *ctrl, const struct xhci_trb *trb,
+                                  struct xhci_trb *out_evt)
+{
+    if (!ctrl || !ctrl->cmd_ring_virt || !ctrl->db_regs || !trb) return -EINVAL;
+    if (ctrl->poisoned) return -EIO;
+
+    uint64_t expect_trb = ctrl->cmd_ring_phys +
+                          (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
+
+    int rc = xhci_cmd_ring_enqueue(ctrl, trb);
+    if (rc != 0) return rc;
+    xhci_dma_wmb();
+    xhci_write32(ctrl->db_regs, 0);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
+    if (rc == -ETIMEDOUT) {
+        ctrl->poisoned = true;
+        ctrl->dma_retained = true;
+        log_err("[xhci] command timed out (trb=%llx): controller poisoned\n",
+                (unsigned long long)expect_trb);
+        return -ETIMEDOUT;
+    }
+    if (rc != 0) return rc;
+    if (out_evt) *out_evt = evt;
+    return 0;
+}
+
+static int xhci_disable_slot_locked(struct xhci_controller *ctrl, uint8_t slot_id)
+{
+    if (!ctrl || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
+        return -EINVAL;
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (slot->disabled) return 0;
+    if (ctrl->poisoned || !ctrl->cmd_ring_virt || !ctrl->db_regs) return -EIO;
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.control = ((uint32_t)slot_id << 24) | (XHCI_TRB_TYPE_DISABLE_SLOT << 10) |
+                  ctrl->cmd_ring_cycle;
+
+    struct xhci_trb evt;
+    int rc = xhci_submit_cmd_locked(ctrl, &trb, &evt);
+    if (rc != 0) return rc;
+    if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] disable slot %u failed (cc=%u)\n",
+                slot_id, (unsigned)((evt.status >> 24) & 0xFF));
+        return -EIO;
+    }
+    slot->disabled = true;
+    return 0;
+}
+
 int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t speed,
                      uint8_t *out_slot_id)
 {
     if (!ctrl || !ctrl->cmd_ring_virt || !ctrl->db_regs) return -EINVAL;
+    bool locked = xhci_lock(ctrl);
+    if (ctrl->poisoned) {
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
 
     struct xhci_trb trb;
     memset(&trb, 0, sizeof(trb));
     trb.control = (XHCI_TRB_TYPE_ENABLE_SLOT << 10) | ctrl->cmd_ring_cycle;
 
-    /* Command Completion events echo the command TRB's physical address:
-     * match on it so a completion left by an earlier timed-out command
-     * cannot be misattributed to this one. */
-    uint64_t expect_trb = ctrl->cmd_ring_phys +
-                          (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
-
-    int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
-    if (rc != 0) return rc;
-    xhci_write32(ctrl->db_regs, 0);
-
     struct xhci_trb evt;
-    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
-    if (rc != 0) return rc;
+    int rc = xhci_submit_cmd_locked(ctrl, &trb, &evt);
+    if (rc != 0) {
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
     if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
         log_err("[xhci] enable slot command failed (cc=%u)\n",
                 (unsigned)((evt.status >> 24) & 0xFF));
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
 
     uint8_t slot_id = (evt.control >> 24) & 0xFF;
-    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) return -ERANGE;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) {
+        xhci_unlock(ctrl, locked);
+        return -ERANGE;
+    }
 
     struct xhci_slot *slot = (struct xhci_slot *)kmalloc(sizeof(struct xhci_slot));
-    if (!slot) return -ENOMEM;
+    if (!slot) {
+        xhci_unlock(ctrl, locked);
+        return -ENOMEM;
+    }
     memset(slot, 0, sizeof(*slot));
     slot->slot_id = slot_id;
     slot->port_num = port_num;
@@ -373,6 +533,7 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
 
     log_info("[xhci] slot %u allocated (port %u)\n", slot_id, port_num);
     if (out_slot_id) *out_slot_id = slot_id;
+    xhci_unlock(ctrl, locked);
     return 0;
 }
 
@@ -382,7 +543,12 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
         return -EINVAL;
 
+    bool locked = xhci_lock(ctrl);
     struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (ctrl->poisoned || slot->poisoned || slot->disabled) {
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
 
     /* rc is used by every error path below, including the ones taken before
      * the command is issued: seed it with the allocation failure code. */
@@ -459,25 +625,47 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
                           (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
 
     rc = xhci_cmd_ring_enqueue(ctrl, &trb);
-    if (rc != 0) goto err_cmd;
+    if (rc != 0) goto err_unexposed;
+
+    /* Once doorbell 0 is rung, xHC may own DCBAA[slot_id] and all context/ring pages. */
+    slot->ctx_published = true;
+    xhci_dma_wmb();
     xhci_write32(ctrl->db_regs, 0);
 
     struct xhci_trb evt;
     rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
-    if (rc != 0) goto err_cmd;
-    if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
-        log_err("[xhci] address device command failed (cc=%u)\n",
-                (unsigned)((evt.status >> 24) & 0xFF));
-        goto err_cmd;
+    if (rc == -ETIMEDOUT) {
+        ctrl->poisoned = true;
+        ctrl->dma_retained = true;
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        log_err("[xhci] slot %u: address device timed out; retaining DMA\n", slot_id);
+        xhci_unlock(ctrl, locked);
+        return -ETIMEDOUT;
+    }
+    if (rc != 0 || ((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
+        if (rc == 0) {
+            log_err("[xhci] address device command failed (cc=%u)\n",
+                    (unsigned)((evt.status >> 24) & 0xFF));
+            rc = -EIO;
+        }
+        /* Require Disable Slot before clearing DCBAA or freeing context pages. */
+        if (xhci_disable_slot_locked(ctrl, slot_id) != 0) {
+            slot->poisoned = true;
+            slot->dma_retained = true;
+            xhci_unlock(ctrl, locked);
+            return rc;
+        }
+        slot->ctx_published = false;
+        goto err_unexposed;
     }
 
     log_info("[xhci] slot %u addressed successfully\n", slot_id);
+    xhci_unlock(ctrl, locked);
     return 0;
 
-err_cmd:
+err_unexposed:
     ctrl->dcbaa_virt[slot_id] = 0;
-    /* fallthrough: release pages, keep the slot struct for the caller's
-     * xhci_free_slot teardown. */
 err_dma:
     if (slot->dma_buf_phys) {
         free_4k_page(slot->dma_buf_phys);
@@ -502,6 +690,7 @@ err_input:
         slot->input_ctx_phys = 0;
         slot->input_ctx_virt = NULL;
     }
+    xhci_unlock(ctrl, locked);
     return rc != 0 ? rc : -EIO;
 }
 
@@ -530,6 +719,48 @@ void xhci_free_endpoint_rings(struct xhci_slot *slot)
     slot->max_dci = 0;
 }
 
+static void xhci_free_64k_staging(struct xhci_slot *slot)
+{
+    if (!slot) return;
+#ifdef OS01_HOST_TEST
+    if (slot->bulk_staging_page) {
+        free(slot->bulk_staging_page);
+    } else if (slot->bulk_staging_virt) {
+        free(slot->bulk_staging_virt);
+    }
+#else
+    if (slot->bulk_staging_page) {
+        free_pages((struct Page *)slot->bulk_staging_page, 1);
+    }
+#endif
+    slot->bulk_staging_page = NULL;
+    slot->bulk_staging_virt = NULL;
+    slot->bulk_staging_phys = 0;
+}
+
+static int xhci_alloc_64k_staging(struct xhci_slot *slot)
+{
+    if (!slot) return -EINVAL;
+    if (slot->bulk_staging_virt) return 0;
+
+#ifdef OS01_HOST_TEST
+    void *p = aligned_alloc(65536, 65536);
+    if (!p) return -ENOMEM;
+    memset(p, 0, 65536);
+    slot->bulk_staging_page = p;
+    slot->bulk_staging_virt = p;
+    slot->bulk_staging_phys = (uint64_t)(uintptr_t)p;
+#else
+    struct Page *p = alloc_pages(ZONE_NORMAL, 1, PG_Kernel);
+    if (!p) return -ENOMEM;
+    slot->bulk_staging_page = p;
+    slot->bulk_staging_phys = p->phy_address;
+    slot->bulk_staging_virt = (void *)Phy_To_Virt(p->phy_address);
+    memset(slot->bulk_staging_virt, 0, 65536);
+#endif
+    return 0;
+}
+
 void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
 {
     if (!ctrl || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) return;
@@ -537,11 +768,26 @@ void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
     struct xhci_slot *slot = ctrl->slots[slot_id];
     if (!slot) return;
 
+    /* Once xHC may know a slot/context, require successful Disable Slot or
+     * confirmed controller halt before clearing DCBAA or freeing DMA. */
+    if (slot->ctx_published && !ctrl->halted_confirmed && !slot->disabled) {
+        if (ctrl->running && !ctrl->poisoned && !slot->poisoned && ctrl->cmd_ring_virt) {
+            xhci_disable_slot_locked(ctrl, slot_id);
+        }
+        if (!slot->disabled && (ctrl->running || slot->poisoned || slot->dma_retained)) {
+            slot->poisoned = true;
+            slot->dma_retained = true;
+            log_warn("[xhci] slot %u: DMA ownership unproven; retaining slot/contexts\n", slot_id);
+            return;
+        }
+    }
+
     if (ctrl->dcbaa_virt) ctrl->dcbaa_virt[slot_id] = 0;
 
     /* Release the dynamically allocated endpoint rings before the base DMA
      * contexts: the endpoint rings are indexed by slot->max_dci. */
     xhci_free_endpoint_rings(slot);
+    xhci_free_64k_staging(slot);
 
     if (slot->input_ctx_phys) free_4k_page(slot->input_ctx_phys);
     if (slot->dev_ctx_phys) free_4k_page(slot->dev_ctx_phys);
@@ -561,29 +807,13 @@ void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
 int xhci_ep0_ring_enqueue(struct xhci_slot *slot, const struct xhci_trb *trb)
 {
     if (!slot || !slot->ep0_ring_virt) return -EINVAL;
-
-    if (slot->ep0_ring_enqueue == XHCI_TRB_RING_SIZE - 1) {
-        /* Enqueue pointer sits on the Link TRB: make it valid for the
-         * controller, toggle the cycle, and wrap to index 0. */
-        struct xhci_trb *link = &slot->ep0_ring_virt[XHCI_TRB_RING_SIZE - 1];
-        if (slot->ep0_ring_cycle) {
-            link->control |= XHCI_TRB_CYCLE_BIT;
-        } else {
-            link->control &= ~XHCI_TRB_CYCLE_BIT;
-        }
-        slot->ep0_ring_cycle ^= 1;
-        slot->ep0_ring_enqueue = 0;
-    }
-
-    struct xhci_trb *dst = &slot->ep0_ring_virt[slot->ep0_ring_enqueue];
-    dst->parameter = trb->parameter;
-    dst->status = trb->status;
-    dst->control = (trb->control & ~XHCI_TRB_CYCLE_BIT) |
-                   (slot->ep0_ring_cycle ? XHCI_TRB_CYCLE_BIT : 0);
-    slot->ep0_ring_enqueue++;
-
-    return 0;
+    return xhci_ring_enqueue_trb(slot->ep0_ring_virt, slot->ep0_ring_phys,
+                                 &slot->ep0_ring_enqueue, &slot->ep0_ring_cycle,
+                                 trb, NULL);
 }
+
+static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slot *slot,
+                                   uint8_t desc_type, uint16_t length);
 
 int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
                                struct usb_device_descriptor *out_desc)
@@ -592,51 +822,23 @@ int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
         !ctrl->slots[slot_id] || !out_desc)
         return -EINVAL;
 
+    bool locked = xhci_lock(ctrl);
     struct xhci_slot *slot = ctrl->slots[slot_id];
-
-    /* Setup Stage: GET_DESCRIPTOR(DEVICE), 8-byte request as immediate data. */
-    struct xhci_trb setup;
-    memset(&setup, 0, sizeof(setup));
-    setup.parameter = 0x0012000001000680ULL;
-    setup.status = 8;
-    setup.control = (3U << 16) | (1U << 6) | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
-
-    /* Data Stage: IN, 18 bytes into the slot DMA buffer. */
-    struct xhci_trb data;
-    memset(&data, 0, sizeof(data));
-    data.parameter = slot->dma_buf_phys;
-    data.status = 18;
-    data.control = (1U << 16) | (XHCI_TRB_TYPE_DATA_STAGE << 10);
-
-    /* Status Stage: OUT handshake, interrupt on completion. */
-    struct xhci_trb status;
-    memset(&status, 0, sizeof(status));
-    status.control = (1U << 5) | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
-
-    int rc = xhci_ep0_ring_enqueue(slot, &setup);
-    if (rc != 0) return rc;
-    rc = xhci_ep0_ring_enqueue(slot, &data);
-    if (rc != 0) return rc;
-    rc = xhci_ep0_ring_enqueue(slot, &status);
-    if (rc != 0) return rc;
-
-    /* Ring the slot doorbell: Target = 1 (EP0). */
-    xhci_write32(ctrl->db_regs + slot_id * 4, 1);
-
-    struct xhci_trb evt;
-    rc = xhci_poll_transfer(ctrl, slot_id, &evt, XHCI_TIMEOUT_LOOPS);
-    if (rc != 0) return rc;
-
-    uint32_t cc = (evt.status >> 24) & 0xFF;
-    if (cc != XHCI_COMP_SUCCESS && cc != XHCI_COMP_SHORT_TX) {
-        log_err("[xhci] slot %u: control transfer failed (cc=%u)\n", slot_id, cc);
+    if (ctrl->poisoned || slot->poisoned || slot->disabled) {
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
 
-    uint32_t residual = evt.status & 0xFFFFFF;
-    uint32_t actual = (residual <= 18) ? (18 - residual) : 0;
+    int rc = xhci_ep0_get_descriptor(ctrl, slot, USB_DESC_TYPE_DEVICE, 18);
+    if (rc < 0) {
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
+
+    uint32_t actual = (uint32_t)rc;
     if (actual < 8) {
         log_err("[xhci] slot %u: short descriptor read (%u bytes)\n", slot_id, actual);
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
 
@@ -651,6 +853,7 @@ int xhci_get_device_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
              slot_id, slot->desc.idVendor, slot->desc.idProduct,
              slot->desc.bDeviceClass, slot->desc.bDeviceSubClass,
              slot->desc.bMaxPacketSize0);
+    xhci_unlock(ctrl, locked);
     return 0;
 }
 
@@ -999,9 +1202,18 @@ oom:
  * transfer.  A controller that only reported the Status Stage TRB would
  * always announce a zero residual and the short-packet guard below could
  * never fire. */
+static int xhci_ep0_cc_to_errno(uint32_t cc)
+{
+    if (cc == XHCI_COMP_STALL) return -EPIPE;
+    return -EIO;
+}
+
 static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slot *slot,
                                    uint8_t desc_type, uint16_t length)
 {
+    if (!ctrl || !slot || !slot->ep0_ring_virt || !ctrl->db_regs) return -EINVAL;
+    if (ctrl->poisoned || slot->poisoned || slot->disabled) return -EIO;
+
     /* Setup Stage: GET_DESCRIPTOR(desc_type), 8-byte setup packet as
      * immediate data.  Layout: wLength[63:48] wIndex[47:32]
      * wValue[31:16] bRequest[15:8] bmRequestType[7:0]. */
@@ -1013,43 +1225,59 @@ static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slo
     setup.status = 8;
     setup.control = (3U << 16) | XHCI_TRB_C_IDT | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
 
-    /* Data Stage: IN, `length` bytes into the slot DMA buffer.
-     *
-     * The completion event is requested on the Data Stage TRB: that is the
-     * TRB whose Transfer Event Length carries the residual of a short
-     * transfer, so the driver can tell how many bytes the device really
-     * sent.  A controller that only reported the Status Stage would always
-     * announce a zero residual. */
+    /* Data Stage: IN, `length` bytes into the slot DMA buffer, IOC=1 so its
+     * Transfer Event supplies the actual/residual count. */
     struct xhci_trb data;
     memset(&data, 0, sizeof(data));
     data.parameter = slot->dma_buf_phys;
     data.status = length;
     data.control = XHCI_TRB_C_DIR | XHCI_TRB_C_IOC | (XHCI_TRB_TYPE_DATA_STAGE << 10);
 
-    /* Status Stage: OUT handshake. */
+    /* Status Stage: OUT handshake, IOC=1 to retire the request. */
     struct xhci_trb status;
     memset(&status, 0, sizeof(status));
-    status.control = (XHCI_TRB_TYPE_STATUS_STAGE << 10);
+    status.control = XHCI_TRB_C_IOC | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
 
-    int rc = xhci_ep0_ring_enqueue(slot, &setup);
+    uint64_t trbs[3] = { 0, 0, 0 };
+    int rc = xhci_ring_enqueue_trb(slot->ep0_ring_virt, slot->ep0_ring_phys,
+                                   &slot->ep0_ring_enqueue, &slot->ep0_ring_cycle,
+                                   &setup, &trbs[0]);
     if (rc != 0) return rc;
-    rc = xhci_ep0_ring_enqueue(slot, &data);
+    rc = xhci_ring_enqueue_trb(slot->ep0_ring_virt, slot->ep0_ring_phys,
+                               &slot->ep0_ring_enqueue, &slot->ep0_ring_cycle,
+                               &data, &trbs[1]);
     if (rc != 0) return rc;
-    rc = xhci_ep0_ring_enqueue(slot, &status);
+    rc = xhci_ring_enqueue_trb(slot->ep0_ring_virt, slot->ep0_ring_phys,
+                               &slot->ep0_ring_enqueue, &slot->ep0_ring_cycle,
+                               &status, &trbs[2]);
     if (rc != 0) return rc;
 
     /* Ring the slot doorbell: Target = 1 (EP0). */
+    xhci_dma_wmb();
     xhci_write32(ctrl->db_regs + slot->slot_id * 4, 1);
 
+    /* Wait for Data Stage completion (or Setup/Status error). */
     struct xhci_trb evt;
-    rc = xhci_poll_transfer(ctrl, slot->slot_id, &evt, XHCI_TIMEOUT_LOOPS);
+    size_t match_idx = 0;
+    rc = xhci_poll_transfer_matched(ctrl, slot->slot_id, 1, trbs, 3, &evt,
+                                    &match_idx, XHCI_TIMEOUT_LOOPS);
+    if (rc == -ETIMEDOUT) {
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        return -ETIMEDOUT;
+    }
     if (rc != 0) return rc;
 
     uint32_t cc = (evt.status >> 24) & 0xFF;
+    if (match_idx != 1) {
+        log_err("[xhci] slot %u: GET_DESCRIPTOR(0x%02x) stage %u error (cc=%u)\n",
+                slot->slot_id, desc_type, (unsigned)match_idx, cc);
+        return xhci_ep0_cc_to_errno(cc);
+    }
     if (cc != XHCI_COMP_SUCCESS && cc != XHCI_COMP_SHORT_TX) {
-        log_err("[xhci] slot %u: GET_DESCRIPTOR(0x%02x) failed (cc=%u)\n",
+        log_err("[xhci] slot %u: GET_DESCRIPTOR(0x%02x) data failed (cc=%u)\n",
                 slot->slot_id, desc_type, cc);
-        return -EIO;
+        return xhci_ep0_cc_to_errno(cc);
     }
 
     uint32_t residual = evt.status & 0xFFFFFF;
@@ -1058,8 +1286,26 @@ static int xhci_ep0_get_descriptor(struct xhci_controller *ctrl, struct xhci_slo
                 slot->slot_id, desc_type, residual, length);
         return -EIO;
     }
+    int actual = (int)(length - residual);
 
-    return (int)(length - residual);
+    /* Wait for Status Stage retirement before returning or copying data. */
+    rc = xhci_poll_transfer_matched(ctrl, slot->slot_id, 1, trbs, 3, &evt,
+                                    &match_idx, XHCI_TIMEOUT_LOOPS);
+    if (rc == -ETIMEDOUT) {
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        return -ETIMEDOUT;
+    }
+    if (rc != 0) return rc;
+
+    cc = (evt.status >> 24) & 0xFF;
+    if (match_idx != 2 || cc != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] slot %u: GET_DESCRIPTOR(0x%02x) status failed (stage=%u, cc=%u)\n",
+                slot->slot_id, desc_type, (unsigned)match_idx, cc);
+        return xhci_ep0_cc_to_errno(cc);
+    }
+
+    return actual;
 }
 
 int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
@@ -1069,16 +1315,28 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
         !ctrl->slots[slot_id])
         return -EINVAL;
 
+    bool locked = xhci_lock(ctrl);
     struct xhci_slot *slot = ctrl->slots[slot_id];
-    if (!slot->ep0_ring_virt || !slot->dma_buf_virt) return -EINVAL;
+    if (!slot->ep0_ring_virt || !slot->dma_buf_virt) {
+        xhci_unlock(ctrl, locked);
+        return -EINVAL;
+    }
+    if (ctrl->poisoned || slot->poisoned || slot->disabled) {
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
 
     /* Stage 1: the 9-byte header carries wTotalLength of the whole
      * configuration descriptor hierarchy. */
     int rc = xhci_ep0_get_descriptor(ctrl, slot, USB_DESC_TYPE_CONFIGURATION, 9);
-    if (rc < 0) return rc;
+    if (rc < 0) {
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
     if (rc < (int)sizeof(struct usb_config_descriptor)) {
         log_err("[xhci] slot %u: short configuration descriptor header (%d bytes)\n",
                 slot_id, rc);
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
 
@@ -1089,24 +1347,30 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
         temp_cfg.bDescriptorType != USB_DESC_TYPE_CONFIGURATION) {
         log_err("[xhci] slot %u: invalid configuration descriptor header "
                 "(len=%u type=%u)\n", slot_id, temp_cfg.bLength, temp_cfg.bDescriptorType);
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
     if (temp_cfg.wTotalLength < sizeof(struct usb_config_descriptor) ||
         temp_cfg.wTotalLength > 4096) {
         log_err("[xhci] slot %u: configuration descriptor wTotalLength out of range (%u)\n",
                 slot_id, temp_cfg.wTotalLength);
+        xhci_unlock(ctrl, locked);
         return -EINVAL;
     }
 
     /* Stage 2: read the whole hierarchy into the DMA buffer. */
     rc = xhci_ep0_get_descriptor(ctrl, slot, USB_DESC_TYPE_CONFIGURATION,
                                  temp_cfg.wTotalLength);
-    if (rc < 0) return rc;
+    if (rc < 0) {
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
 
     uint32_t actual = (uint32_t)rc;
     if (actual < sizeof(struct usb_config_descriptor)) {
         log_err("[xhci] slot %u: short configuration descriptor body (%u bytes)\n",
                 slot_id, actual);
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
 
@@ -1121,6 +1385,7 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
              slot_id, temp_cfg.bConfigurationValue, temp_cfg.wTotalLength,
              temp_cfg.bNumInterfaces);
 
+    xhci_unlock(ctrl, locked);
     return parse_len;
 }
 
@@ -1130,8 +1395,16 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
         slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
         return -EINVAL;
 
+    bool locked = xhci_lock(ctrl);
     struct xhci_slot *slot = ctrl->slots[slot_id];
-    if (!slot->input_ctx_virt || !slot->input_ctx_phys) return -EINVAL;
+    if (!slot->input_ctx_virt || !slot->input_ctx_phys) {
+        xhci_unlock(ctrl, locked);
+        return -EINVAL;
+    }
+    if (ctrl->poisoned || slot->poisoned || slot->disabled) {
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
 
     memset(slot->input_ctx_virt, 0, 4096);
 
@@ -1185,26 +1458,26 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
     trb.control = ((uint32_t)slot_id << 24) | (XHCI_TRB_TYPE_CONFIG_EP << 10) |
                   ctrl->cmd_ring_cycle;
 
-    uint64_t expect_trb = ctrl->cmd_ring_phys +
-                          (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
-
-    int rc = xhci_cmd_ring_enqueue(ctrl, &trb);
-    if (rc != 0) return rc;
-    xhci_write32(ctrl->db_regs, 0);
-
     struct xhci_trb evt;
-    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
-    if (rc != 0) return rc;
+    int rc = xhci_submit_cmd_locked(ctrl, &trb, &evt);
+    if (rc != 0) {
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
     if (((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
         log_err("[xhci] slot %u: configure endpoint command failed (cc=%u)\n",
                 slot_id, (unsigned)((evt.status >> 24) & 0xFF));
+        xhci_unlock(ctrl, locked);
         return -EIO;
     }
 
+    xhci_unlock(ctrl, locked);
     return 0;
 }
 
-int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id, uint8_t config_value)
+static int xhci_control_no_data_locked(struct xhci_controller *ctrl, uint8_t slot_id,
+                                       uint8_t type, uint8_t req, uint16_t value,
+                                       uint16_t index)
 {
     if (!ctrl || !ctrl->db_regs || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS ||
         !ctrl->slots[slot_id])
@@ -1212,40 +1485,80 @@ int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id, uint8_
 
     struct xhci_slot *slot = ctrl->slots[slot_id];
     if (!slot->ep0_ring_virt) return -EINVAL;
+    if (ctrl->poisoned || slot->poisoned || slot->disabled) return -EIO;
 
-    /* Setup Stage: SET_CONFIGURATION(config_value), no data stage.
-     * Layout: wLength[63:48] wIndex[47:32] wValue[31:16]
-     * bRequest[15:8] bmRequestType[7:0]. */
+    /* Setup Stage: 8-byte setup packet as immediate data, TRT = 0 (No Data). */
     struct xhci_trb setup;
     memset(&setup, 0, sizeof(setup));
-    setup.parameter = ((uint64_t)config_value << 16) | (0x09ULL << 8) | 0x00ULL;
+    setup.parameter = ((uint64_t)index << 32) |
+                      ((uint64_t)value << 16) |
+                      ((uint64_t)req << 8) |
+                      (uint64_t)type;
     setup.status = 8;
-    setup.control = (0U << 16) | (1U << 6) | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
+    setup.control = (0U << 16) | XHCI_TRB_C_IDT | (XHCI_TRB_TYPE_SETUP_STAGE << 10);
 
-    /* Status Stage: DIR = 1 (IN), interrupt on completion. */
+    /* Status Stage: DIR = 1 (IN), IOC = 1. */
     struct xhci_trb status;
     memset(&status, 0, sizeof(status));
-    status.control = (1U << 16) | (1U << 5) | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
+    status.control = XHCI_TRB_C_DIR | XHCI_TRB_C_IOC | (XHCI_TRB_TYPE_STATUS_STAGE << 10);
 
-    int rc = xhci_ep0_ring_enqueue(slot, &setup);
+    uint64_t trbs[2] = { 0, 0 };
+    int rc = xhci_ring_enqueue_trb(slot->ep0_ring_virt, slot->ep0_ring_phys,
+                                   &slot->ep0_ring_enqueue, &slot->ep0_ring_cycle,
+                                   &setup, &trbs[0]);
     if (rc != 0) return rc;
-    rc = xhci_ep0_ring_enqueue(slot, &status);
+    rc = xhci_ring_enqueue_trb(slot->ep0_ring_virt, slot->ep0_ring_phys,
+                               &slot->ep0_ring_enqueue, &slot->ep0_ring_cycle,
+                               &status, &trbs[1]);
     if (rc != 0) return rc;
 
     /* Ring the slot doorbell: Target = 1 (EP0). */
+    xhci_dma_wmb();
     xhci_write32(ctrl->db_regs + slot->slot_id * 4, 1);
 
     struct xhci_trb evt;
-    rc = xhci_poll_transfer(ctrl, slot->slot_id, &evt, XHCI_TIMEOUT_LOOPS);
+    size_t match_idx = 0;
+    rc = xhci_poll_transfer_matched(ctrl, slot->slot_id, 1, trbs, 2, &evt,
+                                    &match_idx, XHCI_TIMEOUT_LOOPS);
+    if (rc == -ETIMEDOUT) {
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        return -ETIMEDOUT;
+    }
     if (rc != 0) return rc;
 
     uint32_t cc = (evt.status >> 24) & 0xFF;
-    if (cc != XHCI_COMP_SUCCESS) {
-        log_err("[xhci] slot %u: SET_CONFIGURATION(%u) failed (cc=%u)\n",
-                slot_id, config_value, cc);
-        return -EIO;
+    if (match_idx != 1 || cc != XHCI_COMP_SUCCESS) {
+        log_err("[xhci] slot %u: control no-data (req=0x%02x) failed (stage=%u, cc=%u)\n",
+                slot_id, req, (unsigned)match_idx, cc);
+        return xhci_ep0_cc_to_errno(cc);
     }
 
+    return 0;
+}
+
+int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
+                         uint8_t req, uint16_t value, uint16_t index)
+{
+    if (!c) return -EINVAL;
+    bool locked = xhci_lock(c);
+    int rc = xhci_control_no_data_locked(c, slot, type, req, value, index);
+    xhci_unlock(c, locked);
+    return rc;
+}
+
+int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id, uint8_t config_value)
+{
+    if (!ctrl) return -EINVAL;
+    bool locked = xhci_lock(ctrl);
+
+    int rc = xhci_control_no_data_locked(ctrl, slot_id, 0x00, 0x09, config_value, 0);
+    if (rc != 0) {
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
+
+    struct xhci_slot *slot = ctrl->slots[slot_id];
     slot->configured = true;
     if (xhci_msc_rings_valid(slot, &slot->msc_candidate)) {
         slot->msc_iface = slot->msc_candidate;
@@ -1257,6 +1570,132 @@ int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id, uint8_
              slot_id, config_value, slot->iface.class_code, slot->iface.subclass_code,
              slot->iface.num_endpoints);
 
+    xhci_unlock(ctrl, locked);
+    return 0;
+}
+
+int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot_id, uint8_t dci,
+                       void *cpu_buf, size_t len, size_t *actual)
+{
+    if (actual) *actual = 0;
+    if (!c || !c->db_regs || !cpu_buf || len == 0 || len > 65536) return -EINVAL;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS) return -EINVAL;
+    if (dci < XHCI_MIN_ENDPOINT_DCI || dci > XHCI_MAX_ENDPOINT_DCI) return -EINVAL;
+
+    bool locked = xhci_lock(c);
+    if (c->poisoned) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+
+    struct xhci_slot *slot = c->slots[slot_id];
+    if (!slot || !slot->active || slot->poisoned || slot->disabled || !slot->configured) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+    if (!slot->ep_rings || dci > slot->max_dci ||
+        !slot->ep_rings[dci] || !slot->ep_rings[dci]->active) {
+        xhci_unlock(c, locked);
+        return -EINVAL;
+    }
+
+    struct xhci_ep_ring *ring = slot->ep_rings[dci];
+    if (ring->ep_type != XHCI_EP_TYPE_BULK_IN && ring->ep_type != XHCI_EP_TYPE_BULK_OUT) {
+        xhci_unlock(c, locked);
+        return -EINVAL;
+    }
+    bool is_in = (ring->ep_type == XHCI_EP_TYPE_BULK_IN);
+
+    if (!slot->bulk_staging_virt) {
+        int alloc_rc = xhci_alloc_64k_staging(slot);
+        if (alloc_rc != 0) {
+            xhci_unlock(c, locked);
+            return alloc_rc;
+        }
+    }
+
+    uint64_t staging_phys = slot->bulk_staging_phys;
+    if ((staging_phys & 0xFFFFULL) != 0) {
+        xhci_unlock(c, locked);
+        return -EINVAL;
+    }
+
+    bool ac64 = true;
+    if (c->mmio_virt) {
+        ac64 = (xhci_read32(c->mmio_virt + XHCI_CAP_HCCPARAMS1) & 1U) != 0;
+    } else if (c->ac64_valid) {
+        ac64 = c->ac64;
+    }
+    if (!ac64 && (staging_phys > 0xFFFFFFFFULL || staging_phys + 65535ULL > 0xFFFFFFFFULL)) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+
+    if (!is_in) {
+        memcpy(slot->bulk_staging_virt, cpu_buf, len);
+    }
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.parameter = staging_phys;
+    trb.status = (uint32_t)len; /* TD Size=0, Interrupter Target=0 */
+    trb.control = (XHCI_TRB_TYPE_NORMAL << 10) | XHCI_TRB_C_IOC |
+                  (is_in ? XHCI_TRB_C_ISP : 0);
+
+    uint64_t trb_phys = 0;
+    int rc = xhci_ring_enqueue_trb(ring->ring_virt, ring->ring_phys,
+                                   &ring->enqueue, &ring->cycle,
+                                   &trb, &trb_phys);
+    if (rc != 0) {
+        xhci_unlock(c, locked);
+        return rc;
+    }
+
+    xhci_dma_wmb();
+    xhci_write32(c->db_regs + slot_id * 4, dci);
+
+    struct xhci_trb evt;
+    rc = xhci_poll_transfer_matched(c, slot_id, dci, &trb_phys, 1, &evt,
+                                    NULL, XHCI_TIMEOUT_LOOPS);
+    if (rc == -ETIMEDOUT) {
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        xhci_unlock(c, locked);
+        return -ETIMEDOUT;
+    }
+    if (rc != 0) {
+        xhci_unlock(c, locked);
+        return rc;
+    }
+
+    uint32_t cc = (evt.status >> 24) & 0xFF;
+    if (cc == XHCI_COMP_STALL) {
+        xhci_unlock(c, locked);
+        return -EPIPE;
+    }
+    if (cc != XHCI_COMP_SUCCESS && !(is_in && cc == XHCI_COMP_SHORT_TX)) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+
+    uint32_t residual = evt.status & 0xFFFFFF;
+    if (residual > len) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+
+    size_t xferred = len - residual;
+    if (!is_in && xferred != len) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+
+    if (is_in && xferred > 0) {
+        memcpy(cpu_buf, slot->bulk_staging_virt, xferred);
+    }
+    if (actual) *actual = xferred;
+
+    xhci_unlock(c, locked);
     return 0;
 }
 
@@ -1350,6 +1789,10 @@ int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *t
 void xhci_free_dma(struct xhci_controller *ctrl)
 {
     if (!ctrl) return;
+    if ((ctrl->dma_retained || ctrl->poisoned) && !ctrl->halted_confirmed) {
+        log_warn("[xhci] controller halt unproven; retaining controller DMA\n");
+        return;
+    }
     if (ctrl->erst_phys) {
         free_4k_page(ctrl->erst_phys);
         ctrl->erst_phys = 0;
@@ -1399,9 +1842,18 @@ int xhci_start(struct xhci_controller *ctrl)
     int rc = xhci_wait_bit(op + XHCI_OP_USBSTS, XHCI_STS_HCH, false, op);
     if (rc != 0) {
         log_err("[xhci] start error: controller did not run (%d)\n", rc);
+        xhci_write32(op + XHCI_OP_USBCMD, cmd & ~XHCI_CMD_RS);
+        if (xhci_wait_bit(op + XHCI_OP_USBSTS, XHCI_STS_HCH, true, op) == 0) {
+            ctrl->halted_confirmed = true;
+        } else {
+            ctrl->halted_confirmed = false;
+            ctrl->poisoned = true;
+            ctrl->dma_retained = true;
+        }
         return rc;
     }
 
+    ctrl->halted_confirmed = false;
     ctrl->running = true;
     return 0;
 }
@@ -1445,6 +1897,9 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
         return -ENOMEM;
     }
     memset(ctrl, 0, sizeof(*ctrl));
+
+    mutex_init(&ctrl->io_lock);
+    ctrl->io_lock_init = true;
 
     ctrl->pdev = pdev;
     ctrl->mmio_phys = mmio_phys;
@@ -1492,8 +1947,10 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
     /* 7. Start controller */
     rc = xhci_start(ctrl);
     if (rc != 0) {
-        xhci_free_dma(ctrl);
-        kfree(ctrl);
+        if (!ctrl->dma_retained) {
+            xhci_free_dma(ctrl);
+            kfree(ctrl);
+        }
         pci_set_decode(pdev, false, false);
         pci_set_bus_master(pdev, false);
         return rc;
@@ -1520,19 +1977,25 @@ void xhci_remove(struct pci_device *pdev)
     struct xhci_controller *ctrl = (struct xhci_controller *)pdev->driver_data;
 
     /* Stop controller */
+    bool halt_ok = false;
     if (ctrl->op_regs) {
         uint32_t cmd = xhci_read32(ctrl->op_regs + XHCI_OP_USBCMD);
         xhci_write32(ctrl->op_regs + XHCI_OP_USBCMD, cmd & ~XHCI_CMD_RS);
-        xhci_wait_bit(ctrl->op_regs + XHCI_OP_USBSTS, XHCI_STS_HCH, true, ctrl->op_regs);
+        halt_ok = (xhci_wait_bit(ctrl->op_regs + XHCI_OP_USBSTS, XHCI_STS_HCH, true, ctrl->op_regs) == 0);
     }
     ctrl->running = false;
+    ctrl->halted_confirmed = halt_ok;
+    if (!halt_ok) {
+        ctrl->poisoned = true;
+        ctrl->dma_retained = true;
+    }
 
     /* Tear down any enumerated device slots */
     for (uint8_t s = 1; s <= XHCI_MAX_MANAGED_SLOTS; s++) {
         xhci_free_slot(ctrl, s);
     }
 
-    /* Free all DMA buffers */
+    /* Free all DMA buffers (no-op if halt_ok is false and dma_retained is true) */
     xhci_free_dma(ctrl);
 
     /* Unregister controller from global tracking */
@@ -1550,7 +2013,9 @@ void xhci_remove(struct pci_device *pdev)
     pci_set_decode(pdev, false, false);
     pci_set_bus_master(pdev, false);
 
-    kfree(ctrl);
+    if (halt_ok) {
+        kfree(ctrl);
+    }
     pdev->driver_data = NULL;
 }
 

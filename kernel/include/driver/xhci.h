@@ -4,8 +4,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
+#include <sync/mutex.h>
 
 /* Ring and TRB constants */
 #define XHCI_TRB_RING_SIZE          256
@@ -330,6 +332,16 @@ struct xhci_slot {
     uint64_t dma_buf_phys;
     void *dma_buf_virt;
 
+    /* Lazy 64 KiB DMA staging window for Bulk Transfers */
+    uint64_t bulk_staging_phys;
+    void *bulk_staging_virt;
+    void *bulk_staging_page;
+
+    bool ctx_published;
+    bool disabled;
+    bool poisoned;
+    bool dma_retained;
+
     /* Dynamically allocated endpoint ring table: array of pointers sized
      * (max_dci + 1).  Index 0 is unused, index 1 is EP0 (handled by the
      * dedicated EP0 ring), indexes 2..max_dci map to device endpoints. */
@@ -398,7 +410,14 @@ struct xhci_controller {
     /* Managed device slots, indexed by 1-based slot_id */
     struct xhci_slot *slots[XHCI_MAX_MANAGED_SLOTS + 1];
 
+    mutex_t io_lock;
+    bool io_lock_init;
     bool running;
+    bool halted_confirmed;
+    bool poisoned;
+    bool dma_retained;
+    bool ac64;
+    bool ac64_valid;
 };
 
 /* xHCI MMIO read/write accessors */
@@ -465,6 +484,10 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
 int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id);
 int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id,
                             uint8_t config_value);
+int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
+                         uint8_t req, uint16_t value, uint16_t index);
+int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot, uint8_t dci,
+                       void *cpu_buf, size_t len, size_t *actual);
 void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
 

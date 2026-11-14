@@ -40,6 +40,17 @@
 #ifndef _KERNEL_MEMORY_H
 #define _KERNEL_MEMORY_H 1
 #endif
+#ifndef _KERNEL_MUTEX_H
+#define _KERNEL_MUTEX_H 1
+typedef struct {
+    volatile int64_t owner;
+} mutex_t;
+static inline void mutex_init(mutex_t *m) { if (m) m->owner = 0; }
+static inline void mutex_lock(mutex_t *m) { if (m) m->owner = 1; }
+static inline void mutex_unlock(mutex_t *m) { if (m) m->owner = 0; }
+#endif
+
+__attribute__((weak)) bool vfs_sched_ready(void) { return false; }
 
 #undef Phy_To_Virt
 #define Phy_To_Virt(x) ((void*)(uintptr_t)(x))
@@ -51,5 +62,6 @@ uint64_t alloc_4k_page(void);
 void free_4k_page(uint64_t phys);
 void *kmalloc(size_t size);
 size_t kfree(void *ptr);
+void *aligned_alloc(size_t alignment, size_t size);
 
 #endif /* ARCH9_XHCI_RUNTIME_H */

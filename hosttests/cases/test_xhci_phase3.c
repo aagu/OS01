@@ -20,6 +20,7 @@
 static volatile uint32_t *s_mock_portsc_ptr = NULL;
 static struct xhci_controller *s_mock_db_ctrl = NULL;
 static int s_mock_ep0_db_count = 0;
+static int s_mock_evt_write_idx = 0;
 
 void mock_xhci_write32(volatile void *addr, uint32_t val)
 {
@@ -39,17 +40,53 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
     }
     if (s_mock_db_ctrl && addr == (volatile void *)(s_mock_db_ctrl->db_regs + 4) && val == 1) {
         s_mock_ep0_db_count++;
-        if (s_mock_ep0_db_count >= 2 && s_mock_db_ctrl->slots[1] &&
-            s_mock_db_ctrl->slots[1]->dma_buf_virt) {
-            uint8_t *buf = (uint8_t *)s_mock_db_ctrl->slots[1]->dma_buf_virt;
-            struct usb_config_descriptor cfg = {
-                .bLength = 9,
-                .bDescriptorType = USB_DESC_TYPE_CONFIGURATION,
-                .wTotalLength = 100,
-                .bNumInterfaces = 1,
-                .bConfigurationValue = 1,
-            };
-            memcpy(buf, &cfg, sizeof(cfg));
+        struct xhci_slot *s = s_mock_db_ctrl->slots[1];
+        if (s && s->ep0_ring_phys) {
+            uint32_t enq = s->ep0_ring_enqueue;
+            if (s_mock_ep0_db_count == 1) {
+                /* GET_DESCRIPTOR(DEVICE): Data @ enq-2, Status @ enq-1 */
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].parameter =
+                    s->ep0_ring_phys + (enq - 2) * sizeof(struct xhci_trb);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].status = (XHCI_COMP_SUCCESS << 24);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx++].control =
+                    (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].parameter =
+                    s->ep0_ring_phys + (enq - 1) * sizeof(struct xhci_trb);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].status = (XHCI_COMP_SUCCESS << 24);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx++].control =
+                    (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+            } else if (s_mock_ep0_db_count == 2 || s_mock_ep0_db_count == 3) {
+                if (s->dma_buf_virt) {
+                    struct usb_config_descriptor cfg = {
+                        .bLength = 9,
+                        .bDescriptorType = USB_DESC_TYPE_CONFIGURATION,
+                        .wTotalLength = 100,
+                        .bNumInterfaces = 1,
+                        .bConfigurationValue = 1,
+                    };
+                    memcpy(s->dma_buf_virt, &cfg, sizeof(cfg));
+                }
+                uint32_t data_st = (s_mock_ep0_db_count == 3)
+                    ? ((XHCI_COMP_SHORT_TX << 24) | 68) : (XHCI_COMP_SUCCESS << 24);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].parameter =
+                    s->ep0_ring_phys + (enq - 2) * sizeof(struct xhci_trb);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].status = data_st;
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx++].control =
+                    (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].parameter =
+                    s->ep0_ring_phys + (enq - 1) * sizeof(struct xhci_trb);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].status = (XHCI_COMP_SUCCESS << 24);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx++].control =
+                    (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+            } else if (s_mock_ep0_db_count == 4) {
+                /* SET_CONFIGURATION: Status @ enq-1 (skip index 8 used by Configure Endpoint) */
+                if (s_mock_evt_write_idx == 8) s_mock_evt_write_idx = 9;
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].parameter =
+                    s->ep0_ring_phys + (enq - 1) * sizeof(struct xhci_trb);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx].status = (XHCI_COMP_SUCCESS << 24);
+                s_mock_db_ctrl->event_ring_virt[s_mock_evt_write_idx++].control =
+                    (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+            }
         }
     }
     *(volatile uint32_t *)addr = val;
@@ -313,15 +350,23 @@ void test_xhci_get_config_descriptor_two_stage(void)
     };
     memcpy(dma_buf, &raw_cfg, 9);
 
-    /* Event 0: Transfer Event for Stage 1 (Status TRB @ 0x40000 + 2*16) */
-    event_ring[0].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
+    /* Event 0+1: Transfer Events for Stage 1 (Data TRB @ +1*16, Status TRB @ +2*16) */
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
-    /* Event 1: Transfer Event for Stage 2 (Status TRB @ 0x40000 + 5*16) */
-    event_ring[1].parameter = 0x40000 + 5 * sizeof(struct xhci_trb);
+    event_ring[1].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    /* Event 2+3: Transfer Events for Stage 2 (Data TRB @ +4*16, Status TRB @ +5*16) */
+    event_ring[2].parameter = 0x40000 + 4 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[3].parameter = 0x40000 + 5 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     struct usb_config_descriptor cfg;
     int bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
@@ -349,37 +394,52 @@ void test_xhci_get_config_descriptor_two_stage(void)
     assert_eq(ep0_ring[4].status & 0x1FFFF, 34);
 
     /* Boundary Test 1: Stage 2 SHORT_TX with residual = 4 (34 - 4 = 30 bytes) */
-    event_ring[2].parameter = 0x40000 + 8 * sizeof(struct xhci_trb);
-    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[4].parameter = 0x40000 + 7 * sizeof(struct xhci_trb);
+    event_ring[4].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[4].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[5].parameter = 0x40000 + 8 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
-    event_ring[3].parameter = 0x40000 + 11 * sizeof(struct xhci_trb);
-    event_ring[3].status = (XHCI_COMP_SHORT_TX << 24) | 4; /* Residual = 4 */
-    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[6].parameter = 0x40000 + 10 * sizeof(struct xhci_trb);
+    event_ring[6].status = (XHCI_COMP_SHORT_TX << 24) | 4; /* Residual = 4 */
+    event_ring[6].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[7].parameter = 0x40000 + 11 * sizeof(struct xhci_trb);
+    event_ring[7].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[7].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
     assert_eq(bytes_read, 30);
 
     /* Boundary Test 2: Stage 2 actual < 9 bytes (e.g. residual = 28 -> actual = 6) returns -EIO */
-    event_ring[4].parameter = 0x40000 + 14 * sizeof(struct xhci_trb);
-    event_ring[4].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[8].parameter = 0x40000 + 13 * sizeof(struct xhci_trb);
+    event_ring[8].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[8].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[9].parameter = 0x40000 + 14 * sizeof(struct xhci_trb);
+    event_ring[9].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[9].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
-    event_ring[5].parameter = 0x40000 + 17 * sizeof(struct xhci_trb);
-    event_ring[5].status = (XHCI_COMP_SHORT_TX << 24) | 28; /* Residual = 28 */
-    event_ring[5].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[10].parameter = 0x40000 + 16 * sizeof(struct xhci_trb);
+    event_ring[10].status = (XHCI_COMP_SHORT_TX << 24) | 28; /* Residual = 28 */
+    event_ring[10].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[11].parameter = 0x40000 + 17 * sizeof(struct xhci_trb);
+    event_ring[11].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[11].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
     assert_eq(bytes_read, -EIO);
 
     /* Boundary Test 3: Residual underflow (residual = 50 > 34) returns -EIO */
-    event_ring[6].parameter = 0x40000 + 20 * sizeof(struct xhci_trb);
-    event_ring[6].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[6].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[12].parameter = 0x40000 + 19 * sizeof(struct xhci_trb);
+    event_ring[12].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[12].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[13].parameter = 0x40000 + 20 * sizeof(struct xhci_trb);
+    event_ring[13].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[13].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
-    event_ring[7].parameter = 0x40000 + 23 * sizeof(struct xhci_trb);
-    event_ring[7].status = (XHCI_COMP_SUCCESS << 24) | 50;
-    event_ring[7].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[14].parameter = 0x40000 + 22 * sizeof(struct xhci_trb);
+    event_ring[14].status = (XHCI_COMP_SUCCESS << 24) | 50;
+    event_ring[14].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
     assert_eq(bytes_read, -EIO);
@@ -387,9 +447,12 @@ void test_xhci_get_config_descriptor_two_stage(void)
     /* Boundary Test 4: Header wTotalLength > 4096 returns -EINVAL */
     raw_cfg.wTotalLength = 5000;
     memcpy(dma_buf, &raw_cfg, 9);
-    event_ring[8].parameter = 0x40000 + 26 * sizeof(struct xhci_trb);
-    event_ring[8].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[8].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[15].parameter = 0x40000 + 25 * sizeof(struct xhci_trb);
+    event_ring[15].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[15].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[16].parameter = 0x40000 + 26 * sizeof(struct xhci_trb);
+    event_ring[16].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[16].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     bytes_read = xhci_get_config_descriptor(&ctrl, 1, &cfg);
     assert_eq(bytes_read, -EINVAL);
@@ -547,10 +610,10 @@ void test_xhci_set_configuration_2_stage_transfer(void)
     memset(db_regs, 0, sizeof(db_regs));
     ctrl.db_regs = db_regs;
 
-    /* Feed mock Transfer Event for Status TRB @ 0x40000 + 1*16 */
+    /* Feed mock Transfer Event for Status TRB @ 0x40000 + 1*16 (DCI=1) */
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     int rc = xhci_set_configuration(&ctrl, 1, 1);
     assert_eq(rc, 0);
@@ -637,7 +700,7 @@ void test_xhci_msc_alt_zero_pair(void)
     /* Failed SET_CONFIGURATION (STALL) must leave msc_iface inactive */
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_STALL << 24);
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     rc = xhci_set_configuration(&ctrl, 1, 1);
     assert_true(rc != 0);
     assert_false(slot.msc_iface.active);
@@ -646,7 +709,7 @@ void test_xhci_msc_alt_zero_pair(void)
     /* Successful SET_CONFIGURATION publishes msc_iface */
     event_ring[1].parameter = 0x40000 + 3 * sizeof(struct xhci_trb);
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     rc = xhci_set_configuration(&ctrl, 1, 1);
     assert_eq(rc, 0);
     assert_true(slot.msc_iface.active);
@@ -672,7 +735,7 @@ void test_xhci_msc_alt_zero_pair(void)
     assert_eq(xhci_setup_endpoint_rings(&slot, desc2, sizeof(desc2)), 0);
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
     assert_true(slot.msc_iface.active);
     assert_eq(slot.msc_iface.interface_num, 1);
@@ -697,7 +760,7 @@ void test_xhci_msc_alt_zero_pair(void)
     assert_eq(xhci_setup_endpoint_rings(&slot, desc3, sizeof(desc3)), 0);
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
     assert_true(slot.msc_iface.active);
     assert_eq(slot.msc_iface.interface_num, 2);
@@ -719,7 +782,7 @@ void test_xhci_msc_alt_zero_pair(void)
     assert_eq(xhci_setup_endpoint_rings(&slot, desc4, sizeof(desc4)), 0);
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
     assert_false(slot.msc_iface.active);
     xhci_free_endpoint_rings(&slot);
@@ -736,7 +799,7 @@ void test_xhci_msc_alt_zero_pair(void)
     assert_eq(xhci_setup_endpoint_rings(&slot, desc5_no_comp, sizeof(desc5_no_comp)), 0);
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
     assert_false(slot.msc_iface.active);
     xhci_free_endpoint_rings(&slot);
@@ -754,7 +817,7 @@ void test_xhci_msc_alt_zero_pair(void)
     assert_eq(xhci_setup_endpoint_rings(&slot, desc5_comp, sizeof(desc5_comp)), 0);
     event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
     assert_true(slot.msc_iface.active);
     assert_eq(slot.ep_rings[3]->max_burst, 3);
@@ -794,6 +857,7 @@ void test_xhci_msc_alt_zero_pair(void)
     s_mock_portsc_ptr = port1;
     s_mock_db_ctrl = &ctrl;
     s_mock_ep0_db_count = 0;
+    s_mock_evt_write_idx = 2;
 
     /* Event 0: Enable Slot -> slot_id = 1 */
     event_ring[0].parameter = 0x10000;
@@ -803,23 +867,14 @@ void test_xhci_msc_alt_zero_pair(void)
     event_ring[1].parameter = 0x10000 + sizeof(struct xhci_trb);
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
-    /* Event 2: GET_DESCRIPTOR(DEVICE) -> 18B (Status TRB) */
-    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    /* Event 3: GET_DESCRIPTOR(CONFIG 9B) -> 9B */
-    event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 0;
-    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    /* Event 4: GET_DESCRIPTOR(CONFIG 100B) -> truncated 32B (residual = 68) */
-    event_ring[4].status = (XHCI_COMP_SHORT_TX << 24) | 68;
-    event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    /* Event 5: Configure Endpoint */
-    event_ring[5].parameter = 0x10000 + 2 * sizeof(struct xhci_trb);
-    event_ring[5].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[5].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
-    /* Event 6: SET_CONFIGURATION */
-    event_ring[6].status = (XHCI_COMP_SUCCESS << 24);
-    event_ring[6].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-
+    /* Events 2..7 are filled dynamically on EP0 doorbell writes; Event 8 is Configure Endpoint */
+    event_ring[8].parameter = 0x10000 + 2 * sizeof(struct xhci_trb);
+    event_ring[8].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[8].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    s_mock_evt_write_idx = 2;
+    /* Note: when db_count==3 finishes, evt_write_idx is 8, so put Configure Endpoint at 8 and
+     * advance s_mock_evt_write_idx past 8 in mock, OR simply put Configure Endpoint at 8 and
+     * have SET_CONFIGURATION (db_count==4) write to 9! */
     xhci_probe_ports(&ctrl);
     s_mock_portsc_ptr = NULL;
     s_mock_db_ctrl = NULL;
@@ -827,6 +882,156 @@ void test_xhci_msc_alt_zero_pair(void)
     assert_true(ctrl.slots[1] != NULL);
     assert_eq(ctrl.slots[1]->raw_descriptors_len, sizeof(struct usb_device_descriptor) + 32);
     xhci_free_slot(&ctrl, 1);
+}
+
+void test_xhci_bulk_event_identity(void)
+{
+    TEST_CASE("bulk_event_identity: slot/DCI/TRB match, 64K short IN, invalid residual, short OUT, 65537/unaligned");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    slot.active = true;
+    slot.configured = true;
+
+    struct xhci_trb bulk_in_ring_trbs[XHCI_TRB_RING_SIZE];
+    struct xhci_trb bulk_out_ring_trbs[XHCI_TRB_RING_SIZE];
+    memset(bulk_in_ring_trbs, 0, sizeof(bulk_in_ring_trbs));
+    memset(bulk_out_ring_trbs, 0, sizeof(bulk_out_ring_trbs));
+
+    struct xhci_ep_ring in_ring = {
+        .ring_phys = 0x60000, .ring_virt = bulk_in_ring_trbs,
+        .enqueue = 0, .cycle = 1, .dci = 3, .ep_type = XHCI_EP_TYPE_BULK_IN,
+        .max_packet_size = 512, .active = true,
+    };
+    struct xhci_ep_ring out_ring = {
+        .ring_phys = 0x70000, .ring_virt = bulk_out_ring_trbs,
+        .enqueue = 0, .cycle = 1, .dci = 4, .ep_type = XHCI_EP_TYPE_BULK_OUT,
+        .max_packet_size = 512, .active = true,
+    };
+    struct xhci_ep_ring *rings[5] = { NULL, NULL, NULL, &in_ring, &out_ring };
+    slot.ep_rings = rings;
+    slot.max_dci = 4;
+
+    void *staging = aligned_alloc(65536, 65536);
+    assert_true(staging != NULL);
+    memset(staging, 0xA5, 65536);
+    slot.bulk_staging_virt = staging;
+    slot.bulk_staging_phys = (uint64_t)(uintptr_t)staging;
+
+    uint8_t *cpu_buf = malloc(65537);
+    assert_true(cpu_buf != NULL);
+
+    /* 1. Wrong slot (2), wrong DCI (4), wrong TRB ptr, then true event: len=65536, residual=512 -> 65024 */
+    event_ring[0].parameter = 0x60000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (2U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x60000;
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (4U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[2].parameter = 0xDEADBEEFULL;
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[3].parameter = 0x60000;
+    event_ring[3].status = (XHCI_COMP_SHORT_TX << 24) | 512;
+    event_ring[3].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    size_t actual = 1234;
+    int rc = xhci_bulk_transfer(&ctrl, 1, 3, cpu_buf, 65536, &actual);
+    assert_eq(rc, 0);
+    assert_eq(actual, 65024);
+    assert_eq(ctrl.event_ring_dequeue, 4);
+
+    /* 2. Invalid residual (> len) rejected */
+    event_ring[4].parameter = 0x60000 + 1 * sizeof(struct xhci_trb);
+    event_ring[4].status = (XHCI_COMP_SHORT_TX << 24) | 1000;
+    event_ring[4].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_bulk_transfer(&ctrl, 1, 3, cpu_buf, 512, &actual);
+    assert_true(rc < 0);
+    assert_eq(actual, 0);
+
+    /* 3. Short OUT rejected */
+    event_ring[5].parameter = 0x70000;
+    event_ring[5].status = (XHCI_COMP_SUCCESS << 24) | 16;
+    event_ring[5].control = (1U << 24) | (4U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_bulk_transfer(&ctrl, 1, 4, cpu_buf, 512, &actual);
+    assert_true(rc < 0);
+    assert_eq(actual, 0);
+
+    /* 4. len = 65537 rejected */
+    rc = xhci_bulk_transfer(&ctrl, 1, 3, cpu_buf, 65537, &actual);
+    assert_eq(rc, -EINVAL);
+
+    /* 5. Unaligned DMA staging window rejected */
+    slot.bulk_staging_phys += 4096;
+    rc = xhci_bulk_transfer(&ctrl, 1, 3, cpu_buf, 512, &actual);
+    assert_true(rc < 0);
+    slot.bulk_staging_phys -= 4096;
+
+    free(cpu_buf);
+    free(staging);
+}
+
+void test_xhci_bulk_wrap_and_boundary(void)
+{
+    TEST_CASE("bulk_wrap_and_boundary: index 254 -> Link/C=1 -> index 0/C=0");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    slot.active = true;
+    slot.configured = true;
+
+    struct xhci_trb bulk_ring_trbs[XHCI_TRB_RING_SIZE];
+    memset(bulk_ring_trbs, 0, sizeof(bulk_ring_trbs));
+    bulk_ring_trbs[255].parameter = 0x60000;
+    bulk_ring_trbs[255].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    struct xhci_ep_ring in_ring = {
+        .ring_phys = 0x60000, .ring_virt = bulk_ring_trbs,
+        .enqueue = 254, .cycle = 1, .dci = 3, .ep_type = XHCI_EP_TYPE_BULK_IN,
+        .max_packet_size = 512, .active = true,
+    };
+    struct xhci_ep_ring *rings[4] = { NULL, NULL, NULL, &in_ring };
+    slot.ep_rings = rings;
+    slot.max_dci = 3;
+
+    void *staging = aligned_alloc(65536, 65536);
+    assert_true(staging != NULL);
+    slot.bulk_staging_virt = staging;
+    slot.bulk_staging_phys = (uint64_t)(uintptr_t)staging;
+
+    uint8_t buf[512];
+    event_ring[0].parameter = 0x60000 + 254 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x60000 + 0 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    size_t actual = 0;
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, 512, &actual), 0);
+    assert_eq(in_ring.enqueue, 255);
+    assert_eq(in_ring.cycle, 1);
+    assert_eq(bulk_ring_trbs[254].control & XHCI_TRB_CYCLE_BIT, 1);
+
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, 512, &actual), 0);
+    assert_eq(bulk_ring_trbs[255].control & XHCI_TRB_CYCLE_BIT, 1);
+    assert_eq(in_ring.cycle, 0);
+    assert_eq(in_ring.enqueue, 1);
+    assert_eq(bulk_ring_trbs[0].control & XHCI_TRB_CYCLE_BIT, 0);
+
+    free(staging);
 }
 
 int main(void)
@@ -840,6 +1045,8 @@ int main(void)
     test_xhci_configure_endpoint_input_context();
     test_xhci_set_configuration_2_stage_transfer();
     test_xhci_msc_alt_zero_pair();
+    test_xhci_bulk_event_identity();
+    test_xhci_bulk_wrap_and_boundary();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
