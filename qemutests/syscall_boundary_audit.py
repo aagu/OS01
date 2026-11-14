@@ -31,8 +31,23 @@ if re.search(r"\bswitch\s*\(", entry) or re.search(r"\bcase\s+SYS_", entry):
 
 for path in sorted((ROOT / "kernel/syscall").glob("**/*.c")):
     source = path.read_text()
-    if re.search(r"^\s*#\s*include\s*[<\"]arch/(?:x86_64|aarch64)/", source, re.M):
+    # mm-architecture-boundaries Task 3: the x86 uaccess ownership
+    # header (strnlen_user / write-preparation pair) is a legitimate
+    # include for the x86-only handler files — it declares uaccess
+    # primitives, not register frames or arch entry plumbing.  sys_mm.c
+    # additionally includes arch/x86_64/vma.h inside its
+    # !OS01_SYSCALL_A64_SUBSET branch (the AArch64 subset branch never
+    # sees it — the shared facade still compiles for both arches).  All
+    # other per-architecture headers stay forbidden.
+    allowed_arch_inc = path.name == "sys_mm.c"
+    pattern = r"^\s*#\s*include\s*[<\"]arch/(?:x86_64|aarch64)/(?!uaccess\.h)"
+    if not allowed_arch_inc and re.search(pattern, source, re.M):
         fail(f"{path.relative_to(ROOT)} includes a per-architecture header")
+    if allowed_arch_inc and re.search(
+            r"^\s*#\s*include\s*[<\"]arch/(?:x86_64|aarch64)/(?!(?:uaccess|vma)\.h)",
+            source, re.M):
+        fail(f"{path.relative_to(ROOT)} includes a per-architecture header "
+             f"outside the uaccess/vma owner set")
     if re.search(r"\b(?:pt_regs_t|struct\s+pt_regs)\b", source):
         fail(f"{path.relative_to(ROOT)} depends on an architecture register-frame type")
     if re.search(r"\b(?:regs|frame|pt_regs|registers)\s*->\s*(?:rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r8|r9|r10|r11|r12|r13|r14|r15|rip|cs|ss|eflags|sp|pc|pstate)\b", source):
