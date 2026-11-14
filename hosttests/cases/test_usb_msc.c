@@ -71,6 +71,36 @@ static uint32_t get_le32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+void *kmalloc(size_t size)
+{
+    return calloc(1, size);
+}
+
+size_t kfree(void *ptr)
+{
+    free(ptr);
+    return 0;
+}
+
+static uint32_t get_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static uint16_t get_be16(const uint8_t *p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
+static void put_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)((v >> 24) & 0xffu);
+    p[1] = (uint8_t)((v >> 16) & 0xffu);
+    p[2] = (uint8_t)((v >> 8) & 0xffu);
+    p[3] = (uint8_t)(v & 0xffu);
+}
+
 static int fake_ctrl(void *ctx, uint8_t req_type, uint8_t req,
                      uint16_t val, uint16_t idx)
 {
@@ -461,9 +491,247 @@ TEST_FUNC(bot_recovery)
     assert_eq(-EIO, rc);
 }
 
+/* ── SCSI Disk Simulator for Task 2 / Task 3 ─────────────────────── */
+struct scsi_sim {
+    uint8_t *disk;
+    uint32_t last_lba;
+    uint32_t block_size;
+    int tur_fail_count;
+    size_t rc10_len;
+    bool short_next_read;
+    size_t short_next_read_bytes;
+    int fail_next_read_rc;
+
+    int phase; /* 0=expect CBW, 1=expect data, 2=expect CSW */
+    uint32_t cur_tag;
+    uint32_t cur_len;
+    uint8_t cur_dir;
+    uint8_t cur_cdb[16];
+    uint8_t cur_status;
+    uint32_t cur_residue;
+
+    size_t read_cdb_count;
+    uint32_t read_lbas[32];
+    uint16_t read_counts[32];
+};
+
+static int sim_ctrl(void *ctx, uint8_t req_type, uint8_t req, uint16_t val, uint16_t idx)
+{
+    (void)ctx;
+    (void)req_type;
+    (void)req;
+    (void)val;
+    (void)idx;
+    return 0;
+}
+
+static int sim_clear_halt(void *ctx, uint8_t ep)
+{
+    (void)ctx;
+    (void)ep;
+    return 0;
+}
+
+static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual)
+{
+    struct scsi_sim *s = ctx;
+    if (s->phase == 0) {
+        assert_eq(EP_OUT, ep);
+        assert_eq(31, len);
+        const uint8_t *cbw = buf;
+        s->cur_tag = get_le32(cbw + 4);
+        s->cur_len = get_le32(cbw + 8);
+        s->cur_dir = cbw[12];
+        memcpy(s->cur_cdb, cbw + 15, 16);
+        s->cur_status = 0;
+        s->cur_residue = 0;
+        if (s->cur_cdb[0] == 0x28 && s->read_cdb_count < 32) {
+            s->read_lbas[s->read_cdb_count] = get_be32(s->cur_cdb + 2);
+            s->read_counts[s->read_cdb_count] = get_be16(s->cur_cdb + 7);
+            s->read_cdb_count++;
+        }
+        s->phase = (s->cur_len > 0) ? 1 : 2;
+        if (actual)
+            *actual = 31;
+        return 0;
+    }
+
+    if (s->phase == 1) {
+        assert_eq(EP_IN, ep);
+        uint8_t op = s->cur_cdb[0];
+        if (op == 0x12) { /* INQUIRY */
+            uint8_t inq[36];
+            memset(inq, ' ', sizeof(inq));
+            inq[0] = 0x00;
+            memcpy(inq + 8, "OS01    ", 8);
+            memcpy(inq + 16, "USB DISK\x01\x7f      ", 16);
+            memcpy(inq + 32, "1.0 ", 4);
+            size_t cp = (len < 36) ? len : 36;
+            memcpy(buf, inq, cp);
+            if (actual)
+                *actual = cp;
+        } else if (op == 0x25) { /* READ CAPACITY(10) */
+            uint8_t rc10[8];
+            put_be32(rc10 + 0, s->last_lba);
+            put_be32(rc10 + 4, s->block_size);
+            size_t want = s->rc10_len ? s->rc10_len : 8;
+            size_t cp = (len < want) ? len : want;
+            memcpy(buf, rc10, cp);
+            s->cur_residue = (uint32_t)(len - cp);
+            if (actual)
+                *actual = cp;
+        } else if (op == 0x28) { /* READ(10) */
+            if (s->fail_next_read_rc != 0) {
+                int rc = s->fail_next_read_rc;
+                s->fail_next_read_rc = 0;
+                s->phase = 0;
+                if (actual)
+                    *actual = 0;
+                return rc;
+            }
+            uint32_t lba = get_be32(s->cur_cdb + 2);
+            uint16_t cnt = get_be16(s->cur_cdb + 7);
+            size_t want = (size_t)cnt * 512u;
+            size_t give = (want < len) ? want : len;
+            if (s->short_next_read) {
+                s->short_next_read = false;
+                if (s->short_next_read_bytes < give)
+                    give = s->short_next_read_bytes;
+            }
+            memcpy(buf, s->disk + (size_t)lba * 512u, give);
+            s->cur_residue = (uint32_t)(len - give);
+            if (actual)
+                *actual = give;
+        } else {
+            if (actual)
+                *actual = 0;
+        }
+        s->phase = 2;
+        return 0;
+    }
+
+    /* phase == 2: CSW */
+    assert_eq(EP_IN, ep);
+    if (s->cur_cdb[0] == 0x00 && s->tur_fail_count > 0) {
+        s->tur_fail_count--;
+        s->cur_status = 1;
+    }
+    uint8_t csw[13];
+    memset(csw, 0, sizeof(csw));
+    csw[0] = 0x55;
+    csw[1] = 0x53;
+    csw[2] = 0x42;
+    csw[3] = 0x53;
+    put_le32(csw + 4, s->cur_tag);
+    put_le32(csw + 8, s->cur_residue);
+    csw[12] = s->cur_status;
+    size_t cp = (len < 13) ? len : 13;
+    memcpy(buf, csw, cp);
+    s->phase = 0;
+    if (actual)
+        *actual = cp;
+    return 0;
+}
+
+static struct usb_msc_transport sim_transport(struct scsi_sim *s)
+{
+    struct usb_msc_transport t = {
+        .ctx = s,
+        .control_no_data = sim_ctrl,
+        .bulk = sim_bulk,
+        .clear_halt = sim_clear_halt,
+    };
+    return t;
+}
+
+TEST_FUNC(probe_publish_and_geometry)
+{
+    block_device_reset_for_test();
+
+    uint8_t *disk = calloc(256, 512);
+    for (uint32_t lba = 0; lba < 256; lba++) {
+        for (uint32_t i = 0; i < 512; i++)
+            disk[lba * 512 + i] = (uint8_t)((lba * 37u + i) & 0xffu);
+    }
+
+    struct scsi_sim sim;
+    struct usb_msc_transport t = sim_transport(&sim);
+    block_device_t *dev = (block_device_t *)(uintptr_t)0x1234;
+
+    /* 1. Reject truncated RC10 */
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 512;
+    sim.rc10_len = 4;
+    assert_true(usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev) < 0);
+    assert_eq(0, (long)(uintptr_t)dev);
+    assert_eq(0, block_device_count());
+
+    /* 2. Reject 4096-byte logical block */
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 4096;
+    assert_true(usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev) < 0);
+    assert_eq(0, (long)(uintptr_t)dev);
+    assert_eq(0, block_device_count());
+
+    /* 3. Reject 0xffffffff last LBA */
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 0xffffffffu;
+    sim.block_size = 512;
+    assert_true(usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev) < 0);
+    assert_eq(0, (long)(uintptr_t)dev);
+    assert_eq(0, block_device_count());
+
+    /* 4. TUR fail then pass -> publishes 256-sector read-only BLOCK_DISK */
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 512;
+    sim.tur_fail_count = 2;
+    assert_eq(0, usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev));
+    assert_true(dev != NULL);
+    assert_eq(1, block_device_count());
+    assert_str_eq("usba", dev->name);
+    assert_eq(256, dev->sector_count);
+    assert_eq(512, dev->sector_size);
+    assert_eq(BLOCK_DISK, dev->kind);
+    assert_true(dev->parent == NULL);
+    assert_true(dev->ops->read != NULL);
+    assert_true(dev->ops->write == NULL);
+    assert_true(dev->ops->flush == NULL);
+
+    /* 5. 129-sector read is split 128 + 1 with BE LBA/count */
+    uint8_t *rbuf = malloc(129 * 512);
+    assert_eq(0, dev->ops->read(dev, 10, 129, rbuf));
+    assert_eq(2, sim.read_cdb_count);
+    assert_eq(10u, sim.read_lbas[0]);
+    assert_eq(128u, sim.read_counts[0]);
+    assert_eq(138u, sim.read_lbas[1]);
+    assert_eq(1u, sim.read_counts[1]);
+    assert_eq(0, memcmp(rbuf, disk + 10 * 512, 129 * 512));
+
+    /* 6. Short direct READ returns -EIO */
+    sim.short_next_read = true;
+    sim.short_next_read_bytes = 512 * 3 + 100;
+    assert_eq(-EIO, dev->ops->read(dev, 0, 4, rbuf));
+
+    /* 7. Count 0 and out-of-range checks */
+    assert_eq(0, dev->ops->read(dev, 0, 0, rbuf));
+    assert_eq(-EINVAL, dev->ops->read(dev, 256, 1, rbuf));
+    assert_eq(-EINVAL, dev->ops->read(dev, 250, 7, rbuf));
+
+    free(rbuf);
+    free(disk);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(bot_wire_and_csw),
     TEST_ENTRY(bot_recovery),
+    TEST_ENTRY(probe_publish_and_geometry),
 TEST_LIST_END
 
 int main(void)

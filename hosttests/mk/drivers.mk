@@ -410,10 +410,22 @@ $(TEST_BLD)/usb_msc_bot_production.o: $(TESTS_DIR)/kernel/driver/usb_msc_bot.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(USB_MSC_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/usb_msc_production.o: $(TESTS_DIR)/kernel/driver/usb_msc.c \
+    $(TESTS_DIR)/kernel/include/driver/usb_msc.h \
+    $(TESTS_DIR)/kernel/include/driver/usb_msc_bot.h \
+    $(TESTS_DIR)/kernel/include/block/blockdev.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USB_MSC_HOST_CFLAGS) -c $< -o $@
+
 LINK_CFLAGS_usb-msc = $(USB_MSC_HOST_CFLAGS)
 LINK_LDFLAGS_usb-msc =
 LINK_GROUP_usb-msc := \
     $(TEST_BLD)/usb_msc_bot_production.o \
+    $(TEST_BLD)/usb_msc_production.o \
+    $(TEST_BLD)/blockdev_production.o \
+    $(TEST_BLD)/bcache_production.o \
+    $(TEST_BLD)/bcache_wait.o \
+    $(TEST_BLD)/arch6_bcache_runtime.o \
     $(LIBC_OBJS)
 
 .PHONY: test-usb-msc
