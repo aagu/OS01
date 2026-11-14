@@ -492,9 +492,10 @@ class QmpTransportTests(unittest.TestCase):
             sock.connect.side_effect = OSError("not listening")
             sockets.append(sock)
             return sock
-        with mock.patch.object(xif.socket, "socket", side_effect=create_socket), \
-             mock.patch.object(xif.time, "sleep"), \
-             mock.patch.object(xif.time, "monotonic", side_effect=(tick / 10 for tick in itertools.count())):
+        from qemutests.harness import qmp as qmp_mod
+        with mock.patch.object(qmp_mod.socket, "socket", side_effect=create_socket), \
+             mock.patch.object(qmp_mod.time, "sleep"), \
+             mock.patch.object(qmp_mod.time, "monotonic", side_effect=(tick / 10 for tick in itertools.count())):
             with self.assertRaises(RuntimeError):
                 xif.QmpClient("sock", timeout=1).connect()
         self.assertTrue(sockets)
@@ -515,8 +516,9 @@ class QmpTransportTests(unittest.TestCase):
                     return next(chunks)
                 sock.recv.side_effect = recv
                 client = xif.QmpClient("sock", timeout=15)
-                with mock.patch.object(xif.socket, "socket", return_value=sock), \
-                     mock.patch.object(xif.time, "monotonic", side_effect=lambda: clock[0]):
+                from qemutests.harness import qmp as qmp_mod
+                with mock.patch.object(qmp_mod.socket, "socket", return_value=sock), \
+                     mock.patch.object(qmp_mod.time, "monotonic", side_effect=lambda: clock[0]):
                     with self.assertRaises(TimeoutError):
                         client.connect(deadline=5.0)
                 sock.close.assert_called_once()
@@ -533,7 +535,8 @@ class QmpTransportTests(unittest.TestCase):
                 return next(ticks)
             except StopIteration:
                 raise AssertionError("total deadline was never enforced")
-        with mock.patch.object(xif.time, "monotonic", side_effect=now):
+        from qemutests.harness import qmp as qmp_mod
+        with mock.patch.object(qmp_mod.time, "monotonic", side_effect=now):
             # Bound old code's event stream to make RED finite.
             client.sock.recv.side_effect = [b'{"event":"STOP"}\n'] * 4 + [b'']
             with self.assertRaises(TimeoutError):

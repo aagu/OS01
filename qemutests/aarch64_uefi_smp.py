@@ -910,56 +910,25 @@ def _git_revision() -> tuple[str, bool]:
 def _write_suite_report(archive, *, argv, profile, cpu, memory_mib,
                         firmware, image, started_monotonic, status,
                         runner_exit_code, session, errors, extra=None) -> None:
-    """Persist a suite-unit RunReport; best-effort (never raises).
-
-    The AArch64 suites have no guest v1 cases, so ``count_unit`` is
-    always ``suite`` and ``declared_ids`` / ``observed_ids`` stay None —
-    an explicit adapter, never fabricated case records (spec §6.2)."""
-    if archive is None or RunReport is None:
-        return
-    try:
-        rev, dirty = _git_revision()
-        outcomes = [{"errors": list(errors)}]
-        if extra:
-            outcomes[0].update(extra)
-        report = RunReport(
-            schema_version=1,
-            run_id=archive.run_dir.name,
-            git_revision=rev,
-            git_dirty=dirty,
-            profile=profile,
-            suite=SUITE,
-            request=None,
-            declared_ids=None,
-            observed_ids=None,
-            argv=list(argv),
-            cpu_count=int(cpu),
-            memory_mib=int(memory_mib or 0),
-            tool_versions={},
-            firmware_path=firmware or None,
-            # Only the post-run hash is recorded: a ``*_before`` computed at
-            # report time would not be a real mutation check (same convention
-            # as ``run_kernel_selftest.py`` / ``run_hosttests.py``).
-            firmware_sha256_before=None,
-            firmware_sha256_after=_sha256_path(firmware),
-            image_path=image or None,
-            image_sha256_before=None,
-            image_sha256_after=_sha256_path(image),
-            utc_started_at=datetime.now(timezone.utc).isoformat(),
-            duration_s=max(0.0, time.monotonic() - started_monotonic),
-            runner_exit_code=runner_exit_code,
-            child_exit_code=(session.returncode if session is not None else None),
-            stopped_by_runner=bool(session is not None and session.stopped_by_runner),
-            status=status,
-            count_unit="suite",
-            outcomes=outcomes,
-            stdout_log=str(archive.run_dir / "stdout.log"),
-            stderr_log=str(archive.run_dir / "stderr.log"),
-        )
-        archive.write(report)
-    except Exception as exc:  # noqa: BLE001 — evidence must not mask the run
-        print(f"[{SUITE}] warning: failed to write RunReport: {exc}",
-              file=sys.stderr)
+    """Persist a suite-unit RunReport; best-effort (never raises)."""
+    from qemutests.boot_suite import write_suite_report
+    write_suite_report(
+        archive,
+        suite=SUITE,
+        argv=argv,
+        profile=profile,
+        session=session,
+        started_monotonic=started_monotonic,
+        status=status,
+        runner_exit_code=runner_exit_code,
+        errors=errors,
+        cpu=int(cpu),
+        memory_mib=int(memory_mib or 0),
+        firmware=firmware,
+        image=image,
+        extra=extra,
+        warn_only=True,
+    )
 
 
 def generate_diagnostic_dtb(qemu: str, log_dir: str, cpus: int, ram_mib: int = 512) -> str:

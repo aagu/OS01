@@ -71,7 +71,9 @@ except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
 
+from qemutests.boot_suite import write_suite_report as _shared_write_suite_report  # noqa: E402
 from qemutests.harness.qemu_cmd import build_qemu_x86  # noqa: E402
+from qemutests.harness.qmp import QmpClient  # noqa: E402
 
 
 # ── Suite identity ──────────────────────────────────────────────
@@ -333,97 +335,7 @@ def _make_nm_resolver(nm: str):
     return resolve
 
 
-# ── QMP ─────────────────────────────────────────────────────────
-
-
-class QmpClient:
-    """Minimal QMP client over a private unix socket.
-
-    Mirrors the client used by the terminal-present suite: connect,
-    read the greeting, send ``qmp_capabilities`` (the handshake), then
-    issue commands.  Only the ``inject-nmi`` command is needed here.
-    """
-
-    def __init__(self, path: str, timeout: float = QMP_TIMEOUT_S):
-        self.path = path
-        self.timeout = timeout
-        self.sock = None
-        self._buffer = b""
-
-    def connect(self, *, deadline: float | None = None) -> None:
-        if deadline is None:
-            deadline = time.monotonic() + self.timeout
-        err = None
-        while time.monotonic() < deadline:
-            attempt = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                attempt.settimeout(self._remaining(deadline))
-                attempt.connect(self.path)
-                self.sock = attempt
-                break
-            except OSError as exc:
-                attempt.close()
-                err = exc
-                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
-        if self.sock is None:
-            raise RuntimeError(f"QMP connect failed: {err}")
-        try:
-            greeting = self._read_message(deadline)
-            if "QMP" not in greeting:
-                raise RuntimeError("QMP greeting missing")
-            self.execute("qmp_capabilities", deadline=deadline)
-        except BaseException:
-            self.close()
-            raise
-
-    def _remaining(self, deadline: float) -> float:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("QMP total deadline expired")
-        return remaining
-
-    def _read_message(self, deadline: float) -> dict:
-        if self.sock is None:
-            raise RuntimeError("QMP not connected")
-        while True:
-            self.sock.settimeout(self._remaining(deadline))
-            if b"\n" not in self._buffer:
-                data = self.sock.recv(4096)
-                if not data:
-                    raise RuntimeError("QMP connection closed")
-                self._buffer += data
-                if len(self._buffer) > 1024 * 1024:
-                    raise RuntimeError("QMP message too large")
-                continue
-            line, self._buffer = self._buffer.split(b"\n", 1)
-            msg = json.loads(line)
-            if "event" not in msg:
-                return msg
-
-    def execute(self, cmd: str, args: dict | None = None, *,
-                deadline: float | None = None) -> dict:
-        if self.sock is None:
-            raise RuntimeError("QMP not connected")
-        if deadline is None:
-            deadline = time.monotonic() + self.timeout
-        request: dict = {"execute": cmd}
-        if args is not None:
-            request["arguments"] = args
-        self.sock.settimeout(self._remaining(deadline))
-        self.sock.sendall((json.dumps(request) + "\n").encode())
-        msg = self._read_message(deadline)
-        if "error" in msg:
-            raise RuntimeError(f"QMP error {cmd}: {msg['error']}")
-        if "return" not in msg:
-            raise RuntimeError(f"QMP response missing return: {msg}")
-        return msg["return"]
-
-    def close(self) -> None:
-        if self.sock is not None:
-            try:
-                self.sock.close()
-            finally:
-                self.sock = None
+# ── QMP (shared via qemutests.harness.qmp) ───────────────────────
 
 
 # ── QEMU command line ───────────────────────────────────────────
@@ -481,39 +393,21 @@ def _write_suite_report(archive, *, argv, profile, session, started_monotonic,
                         status, runner_exit_code, errors, firmware=None,
                         image=None, extra=None) -> bool:
     """Persist a suite-unit RunReport; the suite has no guest v1 cases."""
-    if archive is None or RunReport is None:
-        return True
-    try:
-        rev, dirty = _git_revision()
-        outcomes = [{"errors": list(errors)}]
-        if extra:
-            outcomes[0].update(extra)
-        report = RunReport(
-            schema_version=1, run_id=archive.run_dir.name,
-            git_revision=rev, git_dirty=dirty, profile=profile, suite=SUITE,
-            request=None, declared_ids=None, observed_ids=None,
-            argv=list(argv), cpu_count=1, memory_mib=512, tool_versions={},
-            firmware_path=firmware or None,
-            firmware_sha256_before=None,
-            firmware_sha256_after=_sha256_path(firmware),
-            image_path=image or None,
-            image_sha256_before=None,
-            image_sha256_after=_sha256_path(image),
-            utc_started_at=datetime.now(timezone.utc).isoformat(),
-            duration_s=max(0.0, time.monotonic() - started_monotonic),
-            runner_exit_code=runner_exit_code,
-            child_exit_code=(session.returncode if session is not None else None),
-            stopped_by_runner=bool(session is not None and session.stopped_by_runner),
-            status=status, count_unit="suite", outcomes=outcomes,
-            stdout_log=str(archive.run_dir / "stdout.log"),
-            stderr_log=str(archive.run_dir / "stderr.log"),
-        )
-        archive.write(report)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"[{SUITE}] ERROR: failed to write RunReport: {exc}",
-              file=sys.stderr)
-        return False
+    return _shared_write_suite_report(
+        archive,
+        suite=SUITE,
+        argv=argv,
+        profile=profile,
+        session=session,
+        started_monotonic=started_monotonic,
+        status=status,
+        runner_exit_code=runner_exit_code,
+        errors=errors,
+        cpu=1,
+        firmware=firmware,
+        image=image,
+        extra=extra,
+    )
 
 
 # ── The case driver ─────────────────────────────────────────────

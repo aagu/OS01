@@ -108,6 +108,7 @@ except ImportError:  # pragma: no cover
     RunReport = None  # type: ignore[assignment]
     parse_v1 = None  # type: ignore[assignment]
 
+from qemutests.harness.observe import panic_in as _panic_in, panic_window
 from qemutests.harness.qemu_cmd import build_qemu_x86
 
 
@@ -470,18 +471,18 @@ class TestRunner:
             self.serial_path = None
 
 
-def _panic_in(text):
-    """True if ``text`` contains a kernel-panic marker.
-
-    The kernel emits a bracketed ``[kernel panic]`` form AND a
-    ``Kernel panic: <reason>`` / ``Kernel panic - <reason>`` form
-    (the capitalised heading comes straight from ``panic()``).  Match
-    case-insensitively so a late fault in the 1-second observation
-    window is never missed regardless of which form it takes.  This is
-    the single shared detector used by every suite's observe-window
-    check (spec §5.3).
-    """
-    return "kernel panic" in text.lower()
+def _observe_panic(tester) -> bool:
+    """Run the 1-second post-marker panic window; return True if a panic fired."""
+    if tester.process is None:
+        return False
+    try:
+        panicked = panic_window(tester.process, 1.0)
+    except Exception:
+        panicked = False
+    if panicked:
+        print("FAIL: kernel panic in 1-second observation window")
+        return True
+    return False
 
 
 def test_boot(tester):
@@ -537,14 +538,8 @@ def test_boot(tester):
     # arrives within observe(1) after the prompt is treated as a
     # late fault — the run FAILs even though boot succeeded.  This
     # closes the "kernel crashes 100 ms after the prompt" hole.
-    if tester.process is not None:
-        try:
-            tail = tester.process.observe(1.0)
-        except Exception:
-            tail = ""
-        if _panic_in(tail):
-            print("FAIL: kernel panic in 1-second observation window")
-            return False
+    if _observe_panic(tester):
+        return False
 
     print("PASS: Kernel booted, boot markers verified, shell prompt appeared")
     return True
@@ -629,14 +624,8 @@ def test_systest(tester):
     # 1-second observation window (spec §5.3): a kernel panic that
     # arrives within observe(1) after the RESULT line FAILs the run
     # even though the protocol records say PASS.
-    if tester.process is not None:
-        try:
-            tail = tester.process.observe(1.0)
-        except Exception:
-            tail = ""
-        if _panic_in(tail):
-            print("FAIL: kernel panic in 1-second observation window")
-            return False
+    if _observe_panic(tester):
+        return False
 
     # Snapshot the trace only AFTER the observation window has drained
     # the session — ``_read_available()`` (serial-stdio mode) returns
@@ -701,14 +690,8 @@ def test_inittab_phase(tester):
     # 1-second observation window (spec §5.3): a kernel panic that
     # arrives within observe(1) after the phase checks is a late fault
     # and FAILs the run even though every phase marker was present.
-    if tester.process is not None:
-        try:
-            tail = tester.process.observe(1.0)
-        except Exception:
-            tail = ""
-        if _panic_in(tail):
-            print("FAIL: kernel panic in 1-second observation window")
-            return False
+    if _observe_panic(tester):
+        return False
 
     print("PASS: phase dispatch order verified, error paths exercised")
     return True
@@ -855,14 +838,8 @@ def test_network(tester):
         output = tester._read_available().decode('utf-8', errors='replace')
         # 1-second observation window (spec §5.3): a kernel panic in
         # the post-RESULT tail FAILs the run.
-        if tester.process is not None:
-            try:
-                tail = tester.process.observe(1.0)
-            except Exception:
-                tail = ""
-            if _panic_in(tail):
-                print("FAIL: kernel panic in 1-second observation window")
-                return False
+        if _observe_panic(tester):
+            return False
         # Anchor the RESULT on THIS run's own start evidence: nettest
         # performs a DHCP handshake (``[NET TEST] DHCP: PASS``) before
         # it prints the RESULT summary, so the current run's output up
@@ -1009,14 +986,8 @@ def test_gfx(tester):
     print("PASS: [DESKTOP] SMOKE PASS marker observed")
     # 1-second observation window (spec §5.3): a kernel panic in the
     # post-completion tail FAILs the run.
-    if tester.process is not None:
-        try:
-            tail = tester.process.observe(1.0)
-        except Exception:
-            tail = ""
-        if _panic_in(tail):
-            print("FAIL: kernel panic in 1-second observation window")
-            return False
+    if _observe_panic(tester):
+        return False
     return True
 
 

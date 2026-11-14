@@ -740,54 +740,26 @@ def _git_revision() -> tuple[str, bool]:
 def _write_suite_report(archive, *, argv, profile, cpu, memory_mib, firmware,
                         image, started_monotonic, status, runner_exit_code,
                         errors, extra=None) -> None:
-    """Persist a suite-unit RunReport; best-effort (never raises).
-
-    One archive per check, so the three boots never share a directory —
-    ProcessSession opens ``stdout.log`` with "w" and would truncate the
-    previous boot's evidence.
-    """
-    if archive is None or RunReport is None:
-        return
-    try:
-        revision, dirty = _git_revision()
-        outcomes = [{"errors": list(errors)}]
-        if extra:
-            outcomes[0].update(extra)
-        report = RunReport(
-            schema_version=1,
-            run_id=archive.run_dir.name,
-            git_revision=revision,
-            git_dirty=dirty,
-            profile=profile,
-            suite=SUITE,
-            request=None,
-            declared_ids=None,
-            observed_ids=None,
-            argv=list(argv),
-            cpu_count=int(cpu),
-            memory_mib=int(memory_mib or 0),
-            tool_versions={},
-            firmware_path=firmware or None,
-            firmware_sha256_before=None,
-            firmware_sha256_after=_sha256_path(firmware),
-            image_path=image or None,
-            image_sha256_before=None,
-            image_sha256_after=_sha256_path(image),
-            utc_started_at=datetime.now(timezone.utc).isoformat(),
-            duration_s=max(0.0, time.monotonic() - started_monotonic),
-            runner_exit_code=runner_exit_code,
-            child_exit_code=None,
-            stopped_by_runner=True,
-            status=status,
-            count_unit="suite",
-            outcomes=outcomes,
-            stdout_log=str(archive.run_dir / "stdout.log"),
-            stderr_log=str(archive.run_dir / "stderr.log"),
-        )
-        archive.write(report)
-    except Exception as exc:  # noqa: BLE001 — evidence must not mask the run
-        print(f"[{SUITE}] warning: failed to write RunReport: {exc}",
-              file=sys.stderr)
+    """Persist a suite-unit RunReport; best-effort (never raises)."""
+    from qemutests.boot_suite import write_suite_report
+    write_suite_report(
+        archive,
+        suite=SUITE,
+        argv=argv,
+        profile=profile,
+        session=None,
+        started_monotonic=started_monotonic,
+        status=status,
+        runner_exit_code=runner_exit_code,
+        errors=errors,
+        cpu=int(cpu),
+        memory_mib=int(memory_mib or 0),
+        firmware=firmware,
+        image=image,
+        stopped_by_runner=True,
+        extra=extra,
+        warn_only=True,
+    )
 
 
 # check -> (ramfb, wait markers, checker, secondary marker).  The wait

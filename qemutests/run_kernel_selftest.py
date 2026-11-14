@@ -109,15 +109,7 @@ def _completion_reached(text: str) -> bool:
     return all(marker in text for marker in COMPLETION_MARKERS)
 
 
-def _panic_in(text: str) -> bool:
-    """True if ``text`` contains a kernel-panic marker.
-
-    Shared detector with ``run_test.py`` (spec §5.3): the kernel emits
-    both a bracketed ``[kernel panic]`` form and a ``Kernel panic: ...``
-    heading, so match case-insensitively.
-    """
-    return "kernel panic" in text.lower()
-
+from qemutests.harness.observe import panic_in as _panic_in  # noqa: E402
 
 def _sha256_path(path: Optional[Path]) -> Optional[str]:
     """Return the hex SHA-256 of ``path``, or None if it is unreadable."""

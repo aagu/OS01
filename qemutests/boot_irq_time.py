@@ -61,6 +61,7 @@ except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
 
+from qemutests.boot_suite import write_suite_report as _shared_write_suite_report  # noqa: E402
 from qemutests.harness.qemu_cmd import build_qemu_x86  # noqa: E402
 
 
@@ -398,39 +399,20 @@ def _git_revision() -> tuple[str, bool]:
 def _write_suite_report(archive, command, args, session, started_monotonic,
                         status, runner_exit_code, errors) -> bool:
     """Persist a suite-unit RunReport; no guest v1 protocol cases."""
-    if archive is None or RunReport is None:
-        return True
-    try:
-        rev, dirty = _git_revision()
-        report = RunReport(
-            schema_version=1, run_id=archive.run_dir.name,
-            git_revision=rev, git_dirty=dirty, profile=args.profile,
-            suite=SUITE, request=None, declared_ids=None, observed_ids=None,
-            argv=list(command), cpu_count=args.cpus, memory_mib=512,
-            tool_versions={},
-            firmware_path=str(Path(args.firmware).resolve()),
-            firmware_sha256_before=None,
-            firmware_sha256_after=file_sha256(args.firmware),
-            image_path=str(Path(args.image).resolve()),
-            image_sha256_before=None,
-            image_sha256_after=file_sha256(args.image),
-            utc_started_at=datetime.now(timezone.utc).isoformat(),
-            duration_s=max(0.0, time.monotonic() - started_monotonic),
-            runner_exit_code=runner_exit_code,
-            child_exit_code=(session.returncode if session is not None
-                             else None),
-            stopped_by_runner=bool(session is not None
-                                   and session.stopped_by_runner),
-            status=status, count_unit="suite", outcomes=[{"errors": errors}],
-            stdout_log=str(archive.run_dir / "stdout.log"),
-            stderr_log=str(archive.run_dir / "stderr.log"),
-        )
-        archive.write(report)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"[{SUITE}] ERROR: failed to write RunReport: {exc}",
-              file=sys.stderr)
-        return False
+    return _shared_write_suite_report(
+        archive,
+        suite=SUITE,
+        argv=command,
+        profile=args.profile,
+        session=session,
+        started_monotonic=started_monotonic,
+        status=status,
+        runner_exit_code=runner_exit_code,
+        errors=errors,
+        cpu=args.cpus,
+        firmware=args.firmware,
+        image=args.image,
+    )
 
 
 def run_case(args, *, session_factory=None) -> int:

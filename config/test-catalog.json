@@ -1845,6 +1845,16 @@
       }
     },
     {
+      "id": "test_boot_suite",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_suite.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_boot_task_init",
       "layer": "host",

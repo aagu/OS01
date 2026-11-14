@@ -29,6 +29,13 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from qemutests.harness.ppm import read_ppm  # noqa: E402
 
 # ── The pixel contract (must match user/fb_pixel_test/fb_pixel_test.c) ──
 FRAME_OLD = 1
@@ -53,35 +60,6 @@ def expected_after_rect(x, y):
     if RECT_X <= x < RECT_X + RECT_W and RECT_Y <= y < RECT_Y + RECT_H:
         return pattern_pixel(FRAME_RECT, x, y)
     return pattern_pixel(FRAME_FULL, x, y)
-
-
-def read_ppm(path):
-    with open(path, "rb") as fh:
-        data = fh.read()
-    if not data.startswith(b"P6"):
-        raise ValueError("not a P6 PPM: %r" % data[:16])
-    # Header: P6 <w> <h> <maxval>, whitespace separated, '#' comments allowed.
-    idx = 2
-    fields = []
-    while len(fields) < 3:
-        while idx < len(data) and data[idx:idx + 1].isspace():
-            idx += 1
-        if data[idx:idx + 1] == b"#":
-            while idx < len(data) and data[idx:idx + 1] not in (b"\n", b"\r"):
-                idx += 1
-            continue
-        start = idx
-        while idx < len(data) and not data[idx:idx + 1].isspace():
-            idx += 1
-        fields.append(int(data[start:idx]))
-    idx += 1  # single whitespace after maxval
-    w, h, maxval = fields
-    if maxval != 255:
-        raise ValueError("unexpected maxval %d" % maxval)
-    body = data[idx:]
-    if len(body) < w * h * 3:
-        raise ValueError("truncated PPM: %d bytes for %dx%d" % (len(body), w, h))
-    return w, h, body
 
 
 def dump_and_compare(qmp, outdir, tag, stamp, expected_fn, tries=12, delay=0.5):
