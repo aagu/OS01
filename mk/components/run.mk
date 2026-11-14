@@ -743,13 +743,17 @@ print-host-test-inventory:
 check-registry-unique:
 	@$(call os01_submake,hosttests,check-registry-unique $(OS01_SUBMAKE_ARGS))
 
-.PHONY: regen-test-catalog check-test-catalog check-ci-schedule
+.PHONY: regen-test-catalog check-test-catalog check-ci-schedule test-flake-report
 regen-test-catalog:
 	python3 tools/tests/scan_tests.py --root $(OS01_ROOT) --bridge $(OS01_ROOT)/config/test-bridge.json --emit $(OS01_ROOT)
 check-test-catalog:
 	python3 tools/tests/scan_tests.py --root $(OS01_ROOT) --bridge $(OS01_ROOT)/config/test-bridge.json --check-drift
 check-ci-schedule:
 	python3 tools/tests/check_ci_schedule.py --root $(OS01_ROOT)
+# Flake ledger report (read-only, always exits 0; see qemutests/flake_report.py).
+# Pass FROM_CI=N to inspect the last N scheduled CI runs via `gh`.
+test-flake-report:
+	python3 qemutests/flake_report.py --root $(OS01_ROOT) $(if $(FROM_CI),--from-ci $(FROM_CI))
 
 .PHONY: print-harness-modules print-test-qemu-flavors print-test-qemu-images
 print-harness-modules:
@@ -2879,6 +2883,8 @@ help:
 		 'test-harness'         '(always)'   'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts); also runs test-framework-contract as a prereq';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-framework-contract' '(always)' 'Hostside negative contract: builds test_framework_contract.elf and asserts exit code 1 (assertion exit-code propagation / single-evaluation / TEST_RESULTS snapshot)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-flake-report'    '(always)'   'Flake ledger report from local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); always exits 0';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
 	@printf '  %-22s %-13s %s\n' \

@@ -2510,6 +2510,16 @@
       }
     },
     {
+      "id": "test_flake_report",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_flake_report.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_fork_user_map",
       "layer": "host",
