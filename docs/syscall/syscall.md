@@ -18,7 +18,7 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 9 | `SYS_dup` | rdi=fd | Duplicate fd |
 | 10 | `SYS_dup2` | rdi=oldfd, rsi=newfd | Duplicate to specific fd |
 | 11 | `SYS_fork` | — | Fork current process |
-| 12 | `SYS_waitpid` | rdi=pid, rsi=status, rdx=options | Wait for child |
+| 12 | `SYS_waitpid` | rdi=pid, rsi=status, rdx=options | Wait for child (shared native: x86_64 + AArch64) |
 | 13 | `SYS_pipe` | rdi=pipefd[2] | Create pipe |
 | 14 | `SYS_chdir` | rdi=path | Change directory |
 | 15 | `SYS_getcwd` | rdi=buf, rsi=size | Get cwd |

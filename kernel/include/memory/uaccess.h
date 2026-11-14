@@ -87,4 +87,10 @@ static inline ssize_t copy_from_user_ft(void *dst, const void *src, size_t n)
 // copy_to_user_ft or the owning architecture's locked write pair.
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 
+/* Prepare [addr, addr+len) for a subsequent kernel-to-user write (e.g.
+ * copy_to_user_ft).  x86_64 forwards to syscall_check_user_range;
+ * AArch64 also resolves lazy anonymous pages / COW splits before blocking.
+ * Returns 0 on success, -EFAULT or -ENOMEM on failure. */
+int syscall_prepare_user_write(uint64_t addr, uint64_t len);
+
 #endif // _KERNEL_UACCESS_H

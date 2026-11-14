@@ -295,3 +295,10 @@ void user_write_range_end(void)
     if (current->mm != NULL)
         spin_unlock(&current->mm->lock);
 }
+
+int syscall_prepare_user_write(uint64_t addr, uint64_t len)
+{
+    if (len == 0)
+        return 0;
+    return syscall_check_user_range(addr, len, true) ? 0 : -EFAULT;
+}

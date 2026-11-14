@@ -75,6 +75,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
                    sched/core.c sched/boot.c sched/kthread.c sched/diag.c \
+                   sched/wait.c \
                    sched/identity.c sched/resource.c \
                    sched/fair.c sched/balance.c \
                    sched/accounting.c \
@@ -655,6 +656,7 @@ SCHED_COMMON_COMPILE_TUS := \
     sched/core.c \
     sched/boot.c \
     sched/kthread.c \
+    sched/wait.c \
     sched/fair.c \
     sched/balance.c \
     sched/identity.c \

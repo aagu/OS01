@@ -74,3 +74,17 @@ int64_t sys_native_clock_gettime(syscall_ctx_t *ctx)
         return r;
     return 0;
 }
+
+int64_t sys_native_waitpid(syscall_ctx_t *ctx)
+{
+    int64_t pid = (int64_t)(int)ctx->args[0];
+    uint64_t status_addr = ctx->args[1];
+    int options = (int)ctx->args[2];
+
+    if (status_addr) {
+        int rc = syscall_prepare_user_write(status_addr, sizeof(int));
+        if (rc < 0)
+            return rc;
+    }
+    return do_waitpid(pid, (int *)(uintptr_t)status_addr, options);
+}

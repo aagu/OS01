@@ -345,3 +345,43 @@ bool aarch64_uaccess_fixup(pt_regs_t *regs, uint64_t esr, uint64_t far)
     regs->elr_el1 = (uintptr_t)aarch64_uaccess_fault;
     return true;
 }
+
+int syscall_prepare_user_write(uint64_t addr, uint64_t len)
+{
+    if (len == 0)
+        return 0;
+    if (len > (uint64_t)SSIZE_MAX)
+        return -EFAULT;
+
+    arch_irq_state_t state = arch_local_irq_save();
+    struct mm_struct *mm = NULL;
+    uint64_t root_pa = 0;
+    enum aarch64_range_result r =
+        aarch64_user_range_precheck(addr, (size_t)len, true, false,
+                                    &mm, &root_pa);
+    if (r == AARCH64_RANGE_OK) {
+        arch_local_irq_restore(state);
+        return 0;
+    }
+    if (r == AARCH64_RANGE_DENIED) {
+        arch_local_irq_restore(state);
+        return -EFAULT;
+    }
+
+    int prc = aarch64_user_vm_prepare_copy(mm, addr, (size_t)len, true);
+    if (prc == -ENOMEM) {
+        arch_local_irq_restore(state);
+        return -ENOMEM;
+    }
+    if (prc != 0) {
+        arch_local_irq_restore(state);
+        return -EFAULT;
+    }
+
+    mm = NULL;
+    root_pa = 0;
+    bool ok = (aarch64_user_range_precheck(addr, (size_t)len, true, false,
+                                           &mm, &root_pa) == AARCH64_RANGE_OK);
+    arch_local_irq_restore(state);
+    return ok ? 0 : -EFAULT;
+}

@@ -45,6 +45,7 @@ int64_t sys_proc_dispatch(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
  * unreachable from this case; they only have to satisfy the linker. */
 int64_t sys_native_exit(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_fork(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
+int64_t sys_native_waitpid(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_getpid(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_getppid(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_clock_gettime(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }

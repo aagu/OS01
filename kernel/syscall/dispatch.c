@@ -14,6 +14,7 @@ int64_t sys_proc_dispatch(syscall_ctx_t *ctx);
 int64_t sys_resource_dispatch(syscall_ctx_t *ctx);
 int64_t sys_native_exit(syscall_ctx_t *ctx);
 int64_t sys_native_fork(syscall_ctx_t *ctx);
+int64_t sys_native_waitpid(syscall_ctx_t *ctx);
 int64_t sys_native_getpid(syscall_ctx_t *ctx);
 int64_t sys_native_getppid(syscall_ctx_t *ctx);
 int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
@@ -41,9 +42,10 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_mprotect] = { sys_mm_dispatch, "mprotect" },
     [SYS_munmap] = { sys_mm_dispatch, "munmap" },
 
-    /* Fork is the one process number the AArch64 port serves: the
-     * handler and the COW write paths that make it safe are shared. */
+    /* Fork and waitpid are the process numbers the AArch64 port serves:
+     * the handlers, COW write paths, and ZOMBIE reaping are shared. */
     [SYS_fork] = { sys_native_fork, "fork" },
+    [SYS_waitpid] = { sys_native_waitpid, "waitpid" },
 #ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
@@ -103,7 +105,6 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
     [SYS_exec] = { sys_proc_dispatch, "exec" },
-    [SYS_waitpid] = { sys_proc_dispatch, "waitpid" },
     [SYS_umask] = { sys_proc_dispatch, "umask" },
     [SYS_kill] = { sys_proc_dispatch, "kill" },
     [SYS_signal] = { sys_proc_dispatch, "signal" },

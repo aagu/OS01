@@ -1,6 +1,7 @@
 #ifndef _ARCH_SYSCALL_H
 #define _ARCH_SYSCALL_H
 #include <stdint.h>
+#include <syscall/dispatch.h>
 int64_t arch_syscall_putchar(uint64_t ch);
 __attribute__((noreturn)) void arch_syscall_reboot(int cmd);
 /* Terminate the calling task with an already-encoded exit status.
@@ -21,4 +22,5 @@ int64_t arch_syscall_fork(void *arch_frame);
 int64_t arch_syscall_exec(void *arch_frame, const char *path,
                           const char *const *argv, const char *const *envp);
 int64_t arch_syscall_sigreturn(void *arch_frame);
+int64_t sys_native_waitpid(syscall_ctx_t *ctx);
 #endif

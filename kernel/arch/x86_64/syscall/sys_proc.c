@@ -254,24 +254,6 @@ int64_t sys_proc_dispatch(syscall_ctx_t *ctx)
         kfree(path_copy);
         break;
     }
-    case SYS_waitpid: {
-        // waitpid(pid, *status, options) → child PID or error
-        int64_t pid = (int64_t)(int)ctx->args[0];
-        int *status = (int *)ctx->args[1];
-        int options = (int)ctx->args[2];
-
-        // Validate status pointer (NULL legal → skip).
-        // check_user_range is a fast reject; the actual _ft copy in
-        // do_waitpid is the authority (handles racing munmap).
-        if (status &&
-            !syscall_check_user_range((uint64_t)status, sizeof(int), true)) {
-            ret = -EFAULT;
-            break;
-        }
-
-        ret = do_waitpid(pid, status, options);
-        break;
-    }
     case SYS_setpgid: {
         int pid = (int)(int64_t)ctx->args[0];
         int pgid = (int)(int64_t)ctx->args[1];

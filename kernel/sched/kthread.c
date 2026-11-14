@@ -41,6 +41,7 @@ static inline void kthread_observe_free(void *ptr, unsigned kind)
 #else
 static inline void kthread_observe_free(void *ptr, unsigned kind)
 {
+    (void)kind;
     kfree(ptr);
 }
 #endif

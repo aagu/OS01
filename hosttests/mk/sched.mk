@@ -1223,3 +1223,30 @@ $(TEST_BLD)/test_boot_contract_checks_a64.elf: \
 test_boot_contract_checks: $(TEST_BLD)/test_boot_contract_checks.elf $(TEST_BLD)/test_boot_contract_checks_a64.elf
 	$(TEST_BLD)/test_boot_contract_checks.elf
 	$(TEST_BLD)/test_boot_contract_checks_a64.elf
+
+# ── Shared waitpid + sys_native_waitpid (AArch64 M4.12) ────────────
+$(eval $(call register_host_test,test_waitpid,sched,protocol-or-legacy))
+
+TEST_BINS += $(TEST_BLD)/test_waitpid.elf
+
+$(TEST_BLD)/test_waitpid.o: $(TEST_CASES)/test_waitpid.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/wait_production.o: $(TESTS_DIR)/kernel/sched/wait.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/sys_native_production.o: $(TESTS_DIR)/kernel/syscall/sys_native.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
+
+$(TEST_BLD)/test_waitpid.elf: \
+		$(TEST_BLD)/test_waitpid.o \
+		$(TEST_BLD)/wait_production.o \
+		$(TEST_BLD)/sys_native_production.o
+	$(HOST_CC) -o $@ $^
+
+.PHONY: test-waitpid
+test-waitpid: $(TEST_BLD)/test_waitpid.elf
+	$<
