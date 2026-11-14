@@ -45,6 +45,8 @@ except ImportError:
     RunArchive = None
     RunReport = None
 
+from qemutests.harness.qemu_cmd import build_qemu_x86
+
 SUITE = "boot-failure"
 
 CASE_NORMAL = "normal"
@@ -326,24 +328,14 @@ def _elf_identity_ok(case: str, kernel_elf: str | Path) -> tuple[bool, str]:
 
 
 def qemu_command(args) -> list[str]:
-    cmd = [
-        str(args.qemu),
-        "-M", "q35",
-        "-drive", f"if=pflash,format=raw,readonly=on,file={args.firmware}",
-        "-drive", f"file={args.image},format=raw,if=none,id=disk",
-        "-device", "ahci,id=ahci",
-        "-device", "ide-hd,drive=disk,bus=ahci.0",
-        "-m", "512",
-        "-smp", str(args.cpus),
-        "-device", "virtio-rng-pci",
-        "-serial", "stdio",
-        "-display", "none",
-        "-no-reboot",
-        "-no-shutdown",
-    ]
-    if args.case == CASE_NORMAL:
-        cmd.append("-snapshot")
-    return cmd
+    return build_qemu_x86(
+        qemu=str(args.qemu),
+        firmware=str(args.firmware),
+        image=str(args.image),
+        smp=args.cpus,
+        serial="stdio",
+        snapshot=(args.case == CASE_NORMAL),
+    )
 
 
 def _git_revision() -> tuple[str, bool]:

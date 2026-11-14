@@ -34,6 +34,8 @@ try:
 except ImportError:
     ProcessSession = None
 
+from qemutests.harness.qemu_cmd import build_qemu_aarch64, build_qemu_x86
+
 ARCH_X86_64 = "x86_64"
 ARCH_AARCH64 = "aarch64"
 ARCHES = (ARCH_X86_64, ARCH_AARCH64)
@@ -303,45 +305,23 @@ def _elf_identity_ok(case: str, kernel_elf: str | Path) -> tuple[bool, str]:
 
 def qemu_command(args: argparse.Namespace, dtb: str | None = None) -> list[str]:
     if args.arch == ARCH_X86_64:
-        cmd = [
-            str(getattr(args, "qemu", None) or "qemu-system-x86_64"),
-            "-M", "q35",
-            "-drive", f"if=pflash,format=raw,readonly=on,file={args.firmware}",
-            "-drive", f"file={args.image},format=raw,if=none,id=disk",
-            "-device", "ahci,id=ahci",
-            "-device", "ide-hd,drive=disk,bus=ahci.0",
-            "-m", "512",
-            "-smp", str(args.cpus),
-            "-device", "virtio-rng-pci",
-            "-serial", "stdio",
-            "-display", "none",
-            "-no-reboot",
-            "-no-shutdown",
-        ]
-        if args.case == CASE_NORMAL:
-            cmd.append("-snapshot")
-        return cmd
+        return build_qemu_x86(
+            qemu=str(getattr(args, "qemu", None) or "qemu-system-x86_64"),
+            firmware=str(args.firmware),
+            image=str(args.image),
+            smp=args.cpus,
+            serial="stdio",
+            snapshot=(args.case == CASE_NORMAL),
+        )
     elif args.arch == ARCH_AARCH64:
-        machine = "virt,gic-version=2" + (",acpi=off" if dtb else "")
-        cmd = [
-            str(getattr(args, "qemu", None) or "qemu-system-aarch64"),
-            "-M", machine,
-            "-cpu", "cortex-a53",
-            "-smp", str(args.cpus),
-            "-m", "512",
-            "-drive", f"if=pflash,format=raw,file={args.firmware}",
-            "-drive", f"if=none,file={args.image},format=raw,readonly=on,id=disk",
-            "-device", "virtio-blk-device,drive=disk",
-            "-serial", "stdio",
-            "-display", "none",
-            "-no-reboot",
-            "-no-shutdown",
-        ]
-        if dtb:
-            cmd.extend(["-dtb", dtb])
-        if args.case == CASE_NORMAL:
-            cmd.append("-snapshot")
-        return cmd
+        return build_qemu_aarch64(
+            qemu=str(getattr(args, "qemu", None) or "qemu-system-aarch64"),
+            firmware=str(args.firmware),
+            image=str(args.image),
+            cpus=args.cpus,
+            dtb=dtb,
+            snapshot=(args.case == CASE_NORMAL),
+        )
     raise ValueError(f"Unknown arch: {args.arch}")
 
 

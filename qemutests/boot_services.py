@@ -33,6 +33,8 @@ try:
 except ImportError:
     ProcessSession = None
 
+from qemutests.harness.qemu_cmd import build_qemu_x86
+
 SUITE = "boot-services"
 
 CASE_NORMAL = "normal"
@@ -258,36 +260,23 @@ def _elf_identity_ok(case: str, kernel_elf: str | Path) -> tuple[bool, str]:
 
 
 def qemu_command(args: argparse.Namespace) -> list[str]:
-    cmd = [
-        str(getattr(args, "qemu", None) or "qemu-system-x86_64"),
-        "-M", "q35",
-        "-drive", f"if=pflash,format=raw,readonly=on,file={args.firmware}",
-        "-drive", f"file={args.image},format=raw,if=none,id=disk",
-        "-device", "ahci,id=ahci",
-        "-device", "ide-hd,drive=disk,bus=ahci.0",
-        "-m", "512",
-        "-smp", str(args.cpus),
-        "-device", "virtio-rng-pci",
-        "-serial", "stdio",
-        "-display", "none",
-        "-no-reboot",
-        "-no-shutdown",
-    ]
+    extra: list[str] = []
     if args.case == CASE_NO_NET:
-        cmd.extend(["-nic", "none", "-snapshot"])
-    elif args.case == CASE_NORMAL:
-        cmd.extend([
+        extra = ["-nic", "none"]
+    elif args.case in (CASE_NORMAL, CASE_OVERLAP):
+        extra = [
             "-netdev", "user,id=net0,dhcpstart=10.0.2.20",
             "-device", "e1000,netdev=net0",
-            "-snapshot",
-        ])
-    elif args.case == CASE_OVERLAP:
-        cmd.extend([
-            "-netdev", "user,id=net0,dhcpstart=10.0.2.20",
-            "-device", "e1000,netdev=net0",
-            "-snapshot",
-        ])
-    return cmd
+        ]
+    return build_qemu_x86(
+        qemu=str(getattr(args, "qemu", None) or "qemu-system-x86_64"),
+        firmware=str(args.firmware),
+        image=str(args.image),
+        smp=args.cpus,
+        serial="stdio",
+        snapshot=(args.case in (CASE_NO_NET, CASE_NORMAL, CASE_OVERLAP)),
+        extra=extra,
+    )
 
 
 def run_case(args: argparse.Namespace, *, session_factory=None) -> int:

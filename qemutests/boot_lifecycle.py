@@ -58,6 +58,8 @@ except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
 
+from qemutests.harness.qemu_cmd import build_qemu_x86  # noqa: E402
+
 
 # ── Suite identity ──────────────────────────────────────────────
 SUITE = "boot-lifecycle"
@@ -266,23 +268,14 @@ def check_evidence(text: str, case: str, cpus: int) -> tuple[bool, list[str]]:
 def qemu_command(args: argparse.Namespace) -> list[str]:
     """The QEMU command for one case.  Normal runs the normal image
     read-only (-snapshot); fault cases run their isolated image."""
-    cmd = [
-        args.qemu, "-M", "q35",
-        "-drive", f"if=pflash,format=raw,readonly=on,file={args.firmware}",
-        "-drive", f"file={args.image},format=raw,if=none,id=disk",
-        "-device", "ahci,id=ahci",
-        "-device", "ide-hd,drive=disk,bus=ahci.0",
-        # Entropy: every other suite passes a virtio-rng device; without
-        # it the CSPRNG pool never seeds and the guest stalls before PID 1.
-        "-object", "rng-random,filename=/dev/urandom,id=rng0",
-        "-device", "virtio-rng-pci,rng=rng0",
-        "-m", "512", "-smp", str(args.cpus),
-        "-serial", "stdio", "-display", "none",
-        "-no-reboot", "-no-shutdown",
-    ]
-    if args.case == CASE_NORMAL:
-        cmd.append("-snapshot")
-    return cmd
+    return build_qemu_x86(
+        qemu=str(args.qemu),
+        firmware=str(args.firmware),
+        image=str(args.image),
+        smp=args.cpus,
+        serial="stdio",
+        snapshot=(args.case == CASE_NORMAL),
+    )
 
 
 def file_sha256(path: str) -> str | None:

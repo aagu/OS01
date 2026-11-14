@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Unit tests for qemutests/harness/qemu_cmd.py."""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+TEST_MANIFEST = {
+    "id": "test_harness_qemu_cmd",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from qemutests.harness.qemu_cmd import build_qemu_aarch64, build_qemu_x86  # noqa: E402
+
+
+class BuildQemuX86Tests(unittest.TestCase):
+    def test_x86_typical_snapshot(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/disk.img",
+            smp=2,
+            serial="stdio",
+            snapshot=True,
+        )
+        self.assertEqual(
+            argv,
+            [
+                "qemu-system-x86_64",
+                "-M", "q35",
+                "-drive", "if=pflash,format=raw,readonly=on,file=/fw/OVMF.fd",
+                "-drive", "file=/img/disk.img,format=raw,if=none,id=disk",
+                "-device", "ahci,id=ahci",
+                "-device", "ide-hd,drive=disk,bus=ahci.0",
+                "-object", "rng-random,filename=/dev/urandom,id=rng0",
+                "-device", "virtio-rng-pci,rng=rng0",
+                "-m", "512",
+                "-smp", "2",
+                "-serial", "stdio",
+                "-display", "none",
+                "-no-reboot",
+                "-no-shutdown",
+                "-snapshot",
+            ],
+        )
+
+    def test_x86_serial_stdio_has_no_file_serial(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/disk.img",
+            smp=1,
+            serial="stdio",
+        )
+        self.assertIn("stdio", argv)
+        self.assertFalse(
+            any(a.startswith("file:") for a in argv),
+            f"unexpected file: serial arg in {argv!r}",
+        )
+        self.assertNotIn("-snapshot", argv)
+
+    def test_x86_serial_file(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/disk.img",
+            smp=2,
+            serial="file",
+            serial_path="/tmp/serial.log",
+        )
+        idx = argv.index("-serial")
+        self.assertEqual(argv[idx + 1], "file:/tmp/serial.log")
+
+    def test_x86_machine_pc_uses_virtio_blk_and_keeps_rng_pair(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/disk.img",
+            smp=2,
+            serial="stdio",
+            machine="pc",
+            extra=["-nic", "none"],
+        )
+        self.assertIn("pc", argv)
+        self.assertIn("virtio-blk-pci,drive=disk", argv)
+        self.assertNotIn("ahci,id=ahci", argv)
+        self._assert_rng_pair(argv)
+        self.assertEqual(argv[-2:], ["-nic", "none"])
+
+    def test_x86_rng_always_paired(self) -> None:
+        for machine in ("q35", "pc"):
+            argv = build_qemu_x86(
+                firmware="/fw/OVMF.fd",
+                image="/img/disk.img",
+                smp=1,
+                serial="stdio",
+                machine=machine,
+            )
+            self._assert_rng_pair(argv)
+
+    def _assert_rng_pair(self, argv: list[str]) -> None:
+        self.assertIn("rng-random,filename=/dev/urandom,id=rng0", argv)
+        self.assertIn("virtio-rng-pci,rng=rng0", argv)
+
+
+class BuildQemuAarch64Tests(unittest.TestCase):
+    def test_aarch64_typical_snapshot(self) -> None:
+        argv = build_qemu_aarch64(
+            firmware="/fw/AAVMF.fd",
+            image="/img/disk.img",
+            cpus=4,
+            dtb="/tmp/virt.dtb",
+            extra=["-snapshot"],
+        )
+        self.assertEqual(
+            argv,
+            [
+                "qemu-system-aarch64",
+                "-M", "virt,gic-version=2,acpi=off",
+                "-cpu", "cortex-a53",
+                "-smp", "4",
+                "-m", "512",
+                "-drive", "if=pflash,format=raw,file=/fw/AAVMF.fd",
+                "-drive", "if=none,file=/img/disk.img,format=raw,readonly=on,id=disk",
+                "-device", "virtio-blk-device,drive=disk",
+                "-object", "rng-random,filename=/dev/urandom,id=rng0",
+                "-device", "virtio-rng-pci,rng=rng0",
+                "-serial", "stdio",
+                "-display", "none",
+                "-no-reboot",
+                "-no-shutdown",
+                "-dtb", "/tmp/virt.dtb",
+                "-snapshot",
+            ],
+        )
+
+    def test_aarch64_without_dtb_and_rng_always_paired(self) -> None:
+        argv = build_qemu_aarch64(
+            firmware="/fw/AAVMF.fd",
+            image="/img/disk.img",
+            cpus=2,
+            dtb=None,
+        )
+        self.assertIn("virt,gic-version=2", argv)
+        self.assertNotIn("-dtb", argv)
+        self.assertIn("rng-random,filename=/dev/urandom,id=rng0", argv)
+        self.assertIn("virtio-rng-pci,rng=rng0", argv)
+
+
+if __name__ == "__main__":
+    unittest.main()

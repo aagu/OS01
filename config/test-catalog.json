@@ -2963,6 +2963,16 @@
       "source": "qemutests/test_harness_process.py"
     },
     {
+      "id": "test_harness_qemu_cmd",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_harness_qemu_cmd.py"
+    },
+    {
       "id": "test_harness_result",
       "layer": "harness",
       "subsystem": "test-framework",

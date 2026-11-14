@@ -108,6 +108,8 @@ except ImportError:  # pragma: no cover
     RunReport = None  # type: ignore[assignment]
     parse_v1 = None  # type: ignore[assignment]
 
+from qemutests.harness.qemu_cmd import build_qemu_x86
+
 
 def _sha256_path(path):
     """Return the hex SHA-256 of ``path``, or None if it is unreadable."""
@@ -213,9 +215,7 @@ class TestRunner:
         all_extra = list(self.extra_qemu_args)
         if extra_qemu_args:
             all_extra += list(extra_qemu_args)
-        if snapshot or self.snapshot:
-            if "-snapshot" not in all_extra:
-                all_extra.append("-snapshot")
+        use_snapshot = bool(snapshot or self.snapshot) and ("-snapshot" not in all_extra)
 
         # RunReport evidence (spec §7.2): snapshot the input image hash
         # and the wall-clock start time now, before QEMU can write the
@@ -251,43 +251,17 @@ class TestRunner:
                 prefix="os01_serial_", suffix=".log", delete=False)
             self.serial_path = serial_log.name
             serial_log.close()
-            serial_arg = f"file:{self.serial_path}"
         else:
-            serial_arg = "stdio"
             # ProcessSession owns stdout.log; expose it as serial_path
             # for legacy callers / fixture staging.
             self.serial_path = str(run_dir / "stdout.log")
         self._is_serial_stdio = bool(serial_stdio)
 
-        args = [
-            QEMU,
-            "-M", "q35",
-            "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_FIRMWARE}",
-            "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
-            "-device", "ahci,id=ahci",
-            "-device", "ide-hd,drive=disk,bus=ahci.0",
-            # Issue AAGU-2 §1: provide real entropy at boot so the
-            # kernel's CSPRNG can seed itself in QEMU (no RDRAND/
-            # RDSEED on default CPU). OVMF exposes this via
-            # EFI_RNG_PROTOCOL, which the UEFI bootloader fetches
-            # into boot_context.boot_entropy.
-            "-object", "rng-random,filename=/dev/urandom,id=rng0",
-            "-device", "virtio-rng-pci,rng=rng0",
-            "-m", "512",
-            "-smp", self._effective_smp,
-            "-serial", serial_arg,
-            "-display", "none",
-            "-no-reboot",
-            "-no-shutdown",
-        ]
         # -machine pc drops the on-board SATA function so the
         # ``no-ahci`` case can boot virtio-blk-pci as the root disk.
-        # The matrix harness detects ``-machine pc`` in
-        # extra_qemu_args and rebuilds the disk spec; for legacy
-        # callers the default q35 + ahci is preserved.
-        has_pc = any(a == "pc" for a in all_extra)
-        if has_pc:
-            # Strip -machine pc out of extras; we'll insert it next.
+        machine = "q35"
+        if any(a == "pc" for a in all_extra):
+            machine = "pc"
             cleaned = []
             skip = 0
             for i, a in enumerate(all_extra):
@@ -295,41 +269,28 @@ class TestRunner:
                     skip -= 1
                     continue
                 if a == "-machine" and i + 1 < len(all_extra) and \
-                        all_extra[i+1] == "pc":
+                        all_extra[i + 1] == "pc":
                     skip = 1
                     continue
                 cleaned.append(a)
-            # Replace the q35 with pc, drop the default ahci/ide-hd
-            # pair (we'll re-add virtio-blk-pci at the end).
-            args = [a for a in args if a != "q35" and
-                    a != "-device" and
-                    not (a.startswith("ahci") or
-                         a.startswith("ide-hd") or
-                         a.startswith("virtio-rng"))]
-            # Drop the pflash + first -drive to rebuild cleanly.
-            args = [
-                QEMU,
-                "-M", "pc",
-                "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_FIRMWARE}",
-                "-drive", f"file={self.disk_img},format=raw,if=none,id=disk",
-                "-device", "virtio-blk-pci,drive=disk",
-                "-m", "512",
-                "-smp", self._effective_smp,
-                "-serial", serial_arg,
-                "-display", "none",
-                "-no-reboot",
-                "-no-shutdown",
-            ]
             all_extra = cleaned
+        net_extra = []
         if network:
             nic = os.environ.get("NETWORK_NIC", "e1000")
             nic_dev = "virtio-net-pci,netdev=net0,disable-modern=on" if nic == "virtio" else "e1000,netdev=net0"
-            args += ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
-                     "-device", nic_dev]
-        # Append any caller-supplied tokens LAST (so the matrix harness
-        # can override machine, add NICs, etc.).
-        if all_extra:
-            args += all_extra
+            net_extra = ["-netdev", "user,id=net0,dhcpstart=10.0.2.20",
+                         "-device", nic_dev]
+        args = build_qemu_x86(
+            qemu=QEMU,
+            firmware=OVMF_FIRMWARE,
+            image=self.disk_img,
+            smp=self._effective_smp,
+            serial="stdio" if serial_stdio else "file",
+            serial_path=None if serial_stdio else self.serial_path,
+            snapshot=use_snapshot,
+            machine=machine,
+            extra=net_extra + all_extra,
+        )
 
         # Construct ProcessSession via the injected factory (or directly).
         if self._session_factory is None:

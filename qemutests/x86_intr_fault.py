@@ -71,6 +71,8 @@ except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
     RunReport = None  # type: ignore[assignment]
 
+from qemutests.harness.qemu_cmd import build_qemu_x86  # noqa: E402
+
 
 # ── Suite identity ──────────────────────────────────────────────
 SUITE = "intr-x86"
@@ -434,24 +436,15 @@ def qemu_command(args, qmp_socket: str) -> list[str]:
     gives the single-CPU boot spec §9.3 asks for, and ``-qmp`` opens the
     PRIVATE unix socket the NMI case injects through.
     """
-    return [
-        args.qemu,
-        "-M", "q35",
-        "-m", "512",
-        "-smp", "1",
-        "-drive", f"if=pflash,format=raw,readonly=on,file={args.firmware}",
-        "-drive", f"file={args.image},format=raw,if=none,id=disk",
-        "-device", "ahci,id=ahci",
-        "-device", "ide-hd,drive=disk,bus=ahci.0",
-        "-object", "rng-random,filename=/dev/urandom,id=rng0",
-        "-device", "virtio-rng-pci,rng=rng0",
-        "-snapshot",
-        "-display", "none",
-        "-serial", "stdio",
-        "-no-reboot",
-        "-no-shutdown",
-        "-qmp", f"unix:{qmp_socket},server,nowait",
-    ]
+    return build_qemu_x86(
+        qemu=str(args.qemu),
+        firmware=str(args.firmware),
+        image=str(args.image),
+        smp=1,
+        serial="stdio",
+        snapshot=True,
+        extra=["-qmp", f"unix:{qmp_socket},server,nowait"],
+    )
 
 
 def file_sha256(path: str) -> str:
