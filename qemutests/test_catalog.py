@@ -31,6 +31,7 @@ CATALOG_COLUMNS = [
     "entrypoint",
     "prepare_target",
     "run_target",
+    "timing",
 ]
 
 KNOWN_PROFILES = {"x86_64-clang", "aarch64-clang"}
@@ -38,6 +39,7 @@ KNOWN_CAPABILITIES = {"rootfs", "uefi"}
 KNOWN_IMAGE_POLICIES = {"read-only", "isolated"}
 KNOWN_RESOURCES = {"shared", "exclusive"}
 KNOWN_TIERS = {"pr", "nightly"}
+KNOWN_TIMINGS = {"strict", "tolerant"}
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class SuiteRecord:
     entrypoint: str
     prepare_target: str
     run_target: str
+    timing: str = "strict"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,12 +69,16 @@ def parse_tsv_line(line: str, line_no: int) -> tuple[dict[str, str] | None, list
     if not line or line.startswith("#"):
         return None, errors
     parts = line.split("\t")
-    if len(parts) != len(CATALOG_COLUMNS):
-        errors.append(
-            f"Line {line_no}: expected {len(CATALOG_COLUMNS)} columns, got {len(parts)} ({line!r})"
-        )
-        return None, errors
-    return dict(zip(CATALOG_COLUMNS, parts)), errors
+    if len(parts) == len(CATALOG_COLUMNS):
+        return dict(zip(CATALOG_COLUMNS, parts)), errors
+    if len(parts) == len(CATALOG_COLUMNS) - 1:
+        row = dict(zip(CATALOG_COLUMNS[:-1], parts))
+        row["timing"] = "strict"
+        return row, errors
+    errors.append(
+        f"Line {line_no}: expected {len(CATALOG_COLUMNS) - 1} or {len(CATALOG_COLUMNS)} columns, got {len(parts)} ({line!r})"
+    )
+    return None, errors
 
 
 def parse_catalog_tsv(text: str) -> tuple[list[SuiteRecord], list[str]]:
@@ -151,6 +158,10 @@ def parse_catalog_tsv(text: str) -> tuple[list[SuiteRecord], list[str]]:
         if not entrypoint:
             errors.append(f"Line {idx} ({suite_id}): empty entrypoint")
 
+        timing = raw.get("timing", "strict").strip() or "strict"
+        if timing not in KNOWN_TIMINGS:
+            errors.append(f"Line {idx} ({suite_id}): unknown timing '{timing}'")
+
         # Performance suite rule: suites testing performance/steady-state timing must be exclusive
         if "terminal-present" in suite_id and resource != "exclusive":
             errors.append(f"Line {idx} ({suite_id}): performance suite must declare resource 'exclusive'")
@@ -170,6 +181,7 @@ def parse_catalog_tsv(text: str) -> tuple[list[SuiteRecord], list[str]]:
                 entrypoint=entrypoint,
                 prepare_target=raw["prepare_target"].strip(),
                 run_target=raw["run_target"].strip(),
+                timing=timing,
             )
         )
 
@@ -208,7 +220,7 @@ def main() -> int:
             sys.stderr.write(f"ERROR: {err}\n")
         return 1
 
-    if args.check:
+    if args.check and args.format != "json":
         print(f"OK: catalog valid ({len(records)} suites)")
         return 0
 
@@ -236,6 +248,7 @@ def main() -> int:
                 r.entrypoint,
                 r.prepare_target or "-",
                 r.run_target or "-",
+                r.timing,
             ]
             print("\t".join(row))
 

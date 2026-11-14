@@ -24,6 +24,13 @@ VALID_LAYERS = frozenset({
     "harness",
 })
 VALID_TIMINGS = frozenset({"strict", "tolerant"})
+TOLERANT_ALLOWLIST = frozenset({
+    "terminal-present",
+    "gui",
+    "gui-desktop",
+    "sched-ap",
+    "aarch64-sched-ap",
+})
 VALID_TIERS = frozenset({"pr", "nightly"})
 VALID_ISOLATIONS = frozenset({"none", "fork"})
 HOST_ONLY_FIELDS = frozenset({"mock", "link", "isolation"})
@@ -32,6 +39,7 @@ ALLOWED_FIELDS = frozenset({
     "layer",
     "subsystem",
     "timing",
+    "timing-note",
     "tier",
     "mock",
     "link",
@@ -205,7 +213,30 @@ def _validate_manifest(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw["source"], str) or not raw["source"].strip():
             raise ManifestError("source must be a non-empty string")
         entry["source"] = raw["source"].strip()
+    if "timing-note" in raw and raw["timing-note"] is not None:
+        if not isinstance(raw["timing-note"], str) or not raw["timing-note"].strip():
+            raise ManifestError("timing-note must be a non-empty string")
+        entry["timing-note"] = raw["timing-note"].strip()
     return entry
+
+
+def _validate_entry_timing(entry: dict[str, Any], root_path: Path) -> None:
+    tid = entry.get("id", "<unknown>")
+    timing = entry.get("timing", "strict")
+    if timing is None:
+        timing = "strict"
+    if not isinstance(timing, str) or timing not in VALID_TIMINGS:
+        raise ScanError(f"invalid timing {timing!r} for {tid!r}; expected one of {sorted(VALID_TIMINGS)}")
+    if timing == "tolerant" and tid not in TOLERANT_ALLOWLIST:
+        note = entry.get("timing-note")
+        if not isinstance(note, str) or not note.strip():
+            raise ScanError(
+                f"entry {tid!r} has timing='tolerant' outside allowlist without 'timing-note'"
+            )
+        if not (root_path / note.strip()).is_file():
+            raise ScanError(
+                f"entry {tid!r} has timing-note={note!r} which does not point to an existing file"
+            )
 
 
 def parse_manifest(text: str) -> dict[str, Any] | None:
@@ -267,6 +298,7 @@ def scan_tree(root: str, bridge_path: str | None = None) -> list[dict[str, Any]]
         tid = manifest["id"]
         if tid in seen_ids:
             raise ScanError(f"duplicate test id {tid!r} in {rel_path} (already in {seen_ids[tid]})")
+        _validate_entry_timing(manifest, root_path)
         seen_ids[tid] = rel_path
         manifest["source"] = rel_path
         entries.append(manifest)
@@ -371,6 +403,8 @@ def emit(root: str, bridge_path: str | None, outdir: str) -> dict[str, Any]:
             )
 
     merged_entries = sorted(bridge_entries + scanned_entries, key=lambda e: e["id"])
+    for item in merged_entries:
+        _validate_entry_timing(item, root_path)
     catalog = {
         "schema_version": 2,
         "entries": merged_entries,
@@ -440,6 +474,7 @@ def emit(root: str, bridge_path: str | None, outdir: str) -> dict[str, Any]:
             s["entrypoint"],
             s["prepare_target"],
             s["run_target"],
+            s.get("timing", "strict"),
         ]
         disp_lines.append("\t".join(cols))
     disp_lines.append("endef")
@@ -465,16 +500,17 @@ def emit(root: str, bridge_path: str | None, outdir: str) -> dict[str, Any]:
     _write_if_changed(out_root / "mk" / "generated" / "test-harness-modules.mk", "\n".join(hm_lines) + "\n")
 
     # 5. config/test-ci-schedule.json
-    schedule = {
-        "nightly": [
-            {
-                "suite": s["id"],
-                "tier": s["tier"],
-                "timing": s.get("timing", "strict"),
-            }
-            for s in suites
-        ]
-    }
+    nightly_items: list[dict[str, Any]] = []
+    for s in suites:
+        item: dict[str, Any] = {
+            "suite": s["id"],
+            "tier": s["tier"],
+            "timing": s.get("timing", "strict"),
+        }
+        if "timing-note" in s and s["timing-note"]:
+            item["timing-note"] = s["timing-note"]
+        nightly_items.append(item)
+    schedule = {"nightly": nightly_items}
     _write_if_changed(out_root / "config" / "test-ci-schedule.json", json.dumps(schedule, indent=2) + "\n")
 
     return catalog

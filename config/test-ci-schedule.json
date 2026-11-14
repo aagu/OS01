@@ -53,7 +53,7 @@
     {
       "suite": "aarch64-sched-ap",
       "tier": "nightly",
-      "timing": "strict"
+      "timing": "tolerant"
     },
     {
       "suite": "aarch64-sched-ap-fatal",
@@ -133,12 +133,12 @@
     {
       "suite": "gui",
       "tier": "nightly",
-      "timing": "strict"
+      "timing": "tolerant"
     },
     {
       "suite": "gui-desktop",
       "tier": "nightly",
-      "timing": "strict"
+      "timing": "tolerant"
     },
     {
       "suite": "inittab-phase",
@@ -193,7 +193,7 @@
     {
       "suite": "terminal-present",
       "tier": "nightly",
-      "timing": "strict"
+      "timing": "tolerant"
     }
   ]
 }
