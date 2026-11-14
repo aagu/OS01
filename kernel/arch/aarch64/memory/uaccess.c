@@ -27,7 +27,10 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/mmu.h>
 #include <arch/irq.h>
+#include <limits.h>
 #include <memory/memory.h>
+#include <memory/pmm.h>
+#include <memory/uaccess.h>
 #include <sched/task.h>
 #include <errno.h>
 #include <limits.h>
@@ -384,4 +387,36 @@ int syscall_prepare_user_write(uint64_t addr, uint64_t len)
                                            &mm, &root_pa) == AARCH64_RANGE_OK);
     arch_local_irq_restore(state);
     return ok ? 0 : -EFAULT;
+}
+
+int syscall_strnlen_user(uint64_t addr, size_t max)
+{
+    if (addr < AARCH64_USER_MIN || addr >= AARCH64_USER_LIMIT)
+        return -EFAULT;
+    if (max == 0)
+        return 0;
+    if (max > (size_t)INT_MAX)
+        return -EFAULT;
+
+    char buf[64];
+    size_t scanned = 0;
+    while (scanned < max) {
+        uint64_t cur = addr + scanned;
+        if (cur < addr || cur >= AARCH64_USER_LIMIT)
+            return -EFAULT;
+        size_t page_rem = (size_t)(PAGE_4K_SIZE - (cur & (PAGE_4K_SIZE - 1UL)));
+        size_t chunk = max - scanned;
+        if (chunk > page_rem)
+            chunk = page_rem;
+        if (chunk > sizeof(buf))
+            chunk = sizeof(buf);
+        if (copy_from_user_ft(buf, (const void *)(uintptr_t)cur, chunk) < 0)
+            return -EFAULT;
+        for (size_t j = 0; j < chunk; j++) {
+            if (buf[j] == '\0')
+                return (int)(scanned + j);
+        }
+        scanned += chunk;
+    }
+    return (int)max;
 }

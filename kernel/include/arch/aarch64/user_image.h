@@ -36,6 +36,10 @@ struct aarch64_user_image;
 #define AARCH64_USER_STACK_TOP   UINT64_C(0x20401000)
 #define AARCH64_USER_STACK_GUARD UINT64_C(0x203ff000)
 
+/* Minimum free execution stack space below initial SP_EL0 after argv/envp
+ * strings and pointer tables are placed in the 4 KiB stack page. */
+#define AARCH64_USER_STACK_HEADROOM UINT64_C(512)
+
 /* Initial EL0 PSTATE: EL0t (M = 0) with D/A/F masked and I enabled.
  * User code runs with interrupts on; the FP/SIMD trap stays masked
  * because the kernel explicitly disables FPEN. */
@@ -75,8 +79,22 @@ uint64_t aarch64_user_image_root_pa(const struct aarch64_user_image *image);
 
 /* Fill an exception frame with the image's initial state: a zeroed
  * register file, the ELF entry as the return address, the user stack
- * top as SP_EL0 and AARCH64_USER_TASK_PSTATE as the saved PSTATE. */
+ * top (or initial_sp) as SP_EL0, AARCH64_USER_TASK_PSTATE as the
+ * saved PSTATE, and x0/x1/x2 = argc/argv/envp. */
 void aarch64_user_image_init_regs(const struct aarch64_user_image *image,
                                   pt_regs_t *regs);
+
+/* Validate that argv/envp counts and string bytes fit inside the 4 KiB
+ * user stack page while leaving at least AARCH64_USER_STACK_HEADROOM bytes
+ * below the 16-byte-aligned initial SP_EL0.  Returns 0 or -E2BIG. */
+int aarch64_user_image_check_stack_args(const char *const *argv,
+                                        const char *const *envp);
+
+/* Populate the image's user stack page with argv/envp strings, NULL-terminated
+ * pointer vectors, and argc at [initial_sp], and record initial_sp/argc/
+ * argv_ptr/envp_ptr on `image`.  Returns 0 or -E2BIG / -EINVAL. */
+int aarch64_user_image_setup_stack(struct aarch64_user_image *image,
+                                   const char *const *argv,
+                                   const char *const *envp);
 
 #endif /* OS01_AARCH64_USER_IMAGE_H */

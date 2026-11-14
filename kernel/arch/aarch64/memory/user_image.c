@@ -26,8 +26,10 @@
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/slab.h>
+#include <memory/uaccess.h>
 #include <memory/vmm.h>
 #include <sched/task.h>                     /* mm_t layout */
+#include <string.h>
 #include <arch/aarch64/user_vm_policy.h>
 
 #if AARCH64_EL0_TEST
@@ -49,6 +51,11 @@ struct aarch64_user_image {
     mm_t *mm;
     uint64_t root_pa;
     uint64_t entry;
+    uint64_t stack_pa;
+    uint64_t initial_sp;
+    uint64_t argc;
+    uint64_t argv_ptr;
+    uint64_t envp_ptr;
 };
 
 /* Exact semantic permission masks accepted by the M3 user-root branch:
@@ -173,6 +180,8 @@ int aarch64_user_image_load(const void *bytes, size_t size,
         rc = (map_rc == -ENOMEM) ? -ENOMEM : -ENOEXEC;
         goto fail;
     }
+    image->stack_pa = stack_pa;
+    image->initial_sp = AARCH64_USER_STACK_TOP;
 
     aarch64_elf_sync_icache();
     aarch64_elf_view_release(&view);
@@ -210,6 +219,7 @@ int aarch64_user_image_fork_shell(const struct aarch64_user_image *parent,
     }
     image->root_pa = (uint64_t)(uintptr_t)image->mm->pgdir;
     image->entry = parent->entry;
+    image->initial_sp = AARCH64_USER_STACK_TOP;
     *out = image;
     return 0;
 }
@@ -252,6 +262,115 @@ uint64_t aarch64_user_image_root_pa(const struct aarch64_user_image *image)
     return image ? image->root_pa : 0;
 }
 
+static int compute_stack_layout(const char *const *argv,
+                                const char *const *envp,
+                                size_t *out_argc, size_t *out_envc,
+                                uint64_t *out_initial_sp)
+{
+    size_t argc = 0;
+    size_t envc = 0;
+    if (argv) {
+        while (argv[argc]) {
+            if (argc >= MAX_ARGV)
+                return -E2BIG;
+            argc++;
+        }
+    }
+    if (envp) {
+        while (envp[envc]) {
+            if (envc >= MAX_ARGV)
+                return -E2BIG;
+            envc++;
+        }
+    }
+    if (argc + envc > MAX_ARGV)
+        return -E2BIG;
+
+    const size_t max_payload = PAGE_4K_SIZE - AARCH64_USER_STACK_HEADROOM;
+    size_t str_bytes = 0;
+    for (size_t i = 0; i < argc; i++) {
+        size_t len = strlen(argv[i]) + 1;
+        if (len > max_payload - str_bytes)
+            return -E2BIG;
+        str_bytes += len;
+    }
+    for (size_t j = 0; j < envc; j++) {
+        size_t len = strlen(envp[j]) + 1;
+        if (len > max_payload - str_bytes)
+            return -E2BIG;
+        str_bytes += len;
+    }
+
+    size_t str_aligned = (str_bytes + 7UL) & ~7UL;
+    size_t meta_bytes = (argc + envc + 3) * sizeof(uint64_t);
+    if (str_aligned > max_payload || meta_bytes > max_payload - str_aligned)
+        return -E2BIG;
+
+    uint64_t unaligned_sp = AARCH64_USER_STACK_TOP - str_aligned - meta_bytes;
+    uint64_t initial_sp = unaligned_sp & ~UINT64_C(0xf);
+    if (initial_sp < AARCH64_USER_STACK_BASE + AARCH64_USER_STACK_HEADROOM)
+        return -E2BIG;
+
+    *out_argc = argc;
+    *out_envc = envc;
+    *out_initial_sp = initial_sp;
+    return 0;
+}
+
+int aarch64_user_image_check_stack_args(const char *const *argv,
+                                        const char *const *envp)
+{
+    size_t argc = 0;
+    size_t envc = 0;
+    uint64_t initial_sp = 0;
+    return compute_stack_layout(argv, envp, &argc, &envc, &initial_sp);
+}
+
+int aarch64_user_image_setup_stack(struct aarch64_user_image *image,
+                                   const char *const *argv,
+                                   const char *const *envp)
+{
+    if (!image || !image->stack_pa)
+        return -EINVAL;
+
+    size_t argc = 0;
+    size_t envc = 0;
+    uint64_t initial_sp = 0;
+    int rc = compute_stack_layout(argv, envp, &argc, &envc, &initial_sp);
+    if (rc)
+        return rc;
+
+    uint8_t *stack_kva = (uint8_t *)Phy_To_Virt(image->stack_pa);
+    uint64_t *frame = (uint64_t *)(stack_kva +
+                                   (size_t)(initial_sp - AARCH64_USER_STACK_BASE));
+    size_t cursor = PAGE_4K_SIZE;
+
+    frame[0] = (uint64_t)argc;
+    frame[1 + argc] = 0;
+    frame[argc + 2 + envc] = 0;
+
+    for (size_t j = envc; j > 0; j--) {
+        const char *s = envp[j - 1];
+        size_t len = strlen(s) + 1;
+        cursor -= len;
+        __builtin_memcpy(stack_kva + cursor, s, len);
+        frame[argc + 2 + (j - 1)] = AARCH64_USER_STACK_BASE + cursor;
+    }
+    for (size_t i = argc; i > 0; i--) {
+        const char *s = argv[i - 1];
+        size_t len = strlen(s) + 1;
+        cursor -= len;
+        __builtin_memcpy(stack_kva + cursor, s, len);
+        frame[1 + (i - 1)] = AARCH64_USER_STACK_BASE + cursor;
+    }
+
+    image->initial_sp = initial_sp;
+    image->argc = (uint64_t)argc;
+    image->argv_ptr = initial_sp + sizeof(uint64_t);
+    image->envp_ptr = initial_sp + (argc + 2) * sizeof(uint64_t);
+    return 0;
+}
+
 void aarch64_user_image_init_regs(const struct aarch64_user_image *image,
                                   pt_regs_t *regs)
 {
@@ -259,6 +378,9 @@ void aarch64_user_image_init_regs(const struct aarch64_user_image *image,
         return;
     __builtin_memset(regs, 0, sizeof(*regs));
     regs->elr_el1 = image->entry;
-    regs->sp_el0 = AARCH64_USER_STACK_TOP;
+    regs->sp_el0 = image->initial_sp ? image->initial_sp : AARCH64_USER_STACK_TOP;
     regs->spsr_el1 = AARCH64_USER_TASK_PSTATE;
+    regs->x0 = image->argc;
+    regs->x1 = image->argv_ptr;
+    regs->x2 = image->envp_ptr;
 }

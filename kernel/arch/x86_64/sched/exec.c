@@ -783,6 +783,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     regs->es      = USER_DS;
     regs->rsp     = user_rsp;              // SysV initial stack (argc at lowest slot)
     regs->rip     = entry_point;
+    regs->rax     = 0;
     regs->rflags  = (1 << 9);              // IF=1
     regs->rdi     = (uint64_t)s_argc;      // argc
     regs->rsi     = user_arg_ptr;          // argv

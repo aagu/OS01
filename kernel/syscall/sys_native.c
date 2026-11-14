@@ -1,8 +1,10 @@
 #include <errno.h>
+#include <limits.h>
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
 #include <uapi/time.h>
 #include <sched/task.h>
+#include <memory/slab.h>
 #include <memory/uaccess.h>
 #include <arch/clocksource.h>
 #include <arch/syscall.h>
@@ -87,4 +89,196 @@ int64_t sys_native_waitpid(syscall_ctx_t *ctx)
             return rc;
     }
     return do_waitpid(pid, (int *)(uintptr_t)status_addr, options);
+}
+
+static void free_deep_argv(char **kargv, char **kenvp)
+{
+    if (kargv) {
+        for (size_t i = 0; kargv[i] != NULL; i++)
+            kfree(kargv[i]);
+        kfree(kargv);
+    }
+    if (kenvp) {
+        for (size_t i = 0; kenvp[i] != NULL; i++)
+            kfree(kenvp[i]);
+        kfree(kenvp);
+    }
+}
+
+static void free_partial_argv(char **arr, size_t filled)
+{
+    if (!arr)
+        return;
+    for (size_t i = 0; i < filled; i++)
+        kfree(arr[i]);
+    kfree(arr);
+}
+
+#ifdef OS01_SELFTEST
+int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
+#else
+static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
+#endif
+{
+    *out_arr = NULL;
+    if (user_arr == NULL)
+        return 0;
+
+    struct argv_scan {
+        const char *ptrs[MAX_ARGV + 1];
+        size_t lens[MAX_ARGV];
+    };
+    struct argv_scan *scan = (struct argv_scan *)kmalloc(sizeof(struct argv_scan));
+    if (!scan)
+        return -ENOMEM;
+
+    size_t count = 0;
+    bool null_found = false;
+    int64_t ret = 0;
+
+    for (size_t i = 0; i <= MAX_ARGV; i++) {
+        uint64_t slot_addr = (uint64_t)(uintptr_t)&user_arr[i];
+        if (syscall_strnlen_user(slot_addr, 0) < 0 ||
+            syscall_strnlen_user(slot_addr + sizeof(uint64_t) - 1, 0) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        uint64_t p = 0;
+        if (copy_from_user_ft(&p, &user_arr[i], sizeof(p)) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        if (p == 0) {
+            count = i;
+            null_found = true;
+            break;
+        }
+        if (syscall_strnlen_user(p, 0) < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        scan->ptrs[i] = (const char *)(uintptr_t)p;
+    }
+    if (!null_found) {
+        ret = -E2BIG;
+        goto out;
+    }
+
+    size_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        int n = syscall_strnlen_user((uint64_t)(uintptr_t)scan->ptrs[i],
+                                     MAX_ARG_STRLEN);
+        if (n < 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        if (n >= MAX_ARG_STRLEN) {
+            ret = -E2BIG;
+            goto out;
+        }
+        scan->lens[i] = (size_t)n + 1;
+        total += scan->lens[i];
+        if (total > MAX_ARG_TOTAL) {
+            ret = -E2BIG;
+            goto out;
+        }
+    }
+
+    char **arr = (char **)kmalloc((count + 1) * sizeof(char *));
+    if (!arr) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    size_t filled = 0;
+    for (size_t i = 0; i < count; i++) {
+        char *kstr = (char *)kmalloc(scan->lens[i]);
+        if (!kstr) {
+            free_partial_argv(arr, filled);
+            ret = -ENOMEM;
+            goto out;
+        }
+        if (copy_from_user_ft(kstr, scan->ptrs[i], scan->lens[i]) < 0) {
+            kfree(kstr);
+            free_partial_argv(arr, filled);
+            ret = -EFAULT;
+            goto out;
+        }
+        arr[filled++] = kstr;
+    }
+    arr[count] = NULL;
+    *out_arr = arr;
+    ret = 0;
+
+out:
+    kfree(scan);
+    return ret;
+}
+
+int64_t sys_native_exec(syscall_ctx_t *ctx)
+{
+    uint64_t u_path = ctx->args[0];
+    const char *const *argv = (const char *const *)(uintptr_t)ctx->args[1];
+    const char *const *envp = (const char *const *)(uintptr_t)ctx->args[2];
+
+    if (argv != NULL && syscall_strnlen_user((uint64_t)(uintptr_t)argv, 0) < 0)
+        return -EFAULT;
+    if (envp != NULL && syscall_strnlen_user((uint64_t)(uintptr_t)envp, 0) < 0)
+        return -EFAULT;
+
+    int plen = syscall_strnlen_user(u_path, PATH_MAX);
+    if (plen < 0)
+        return -EFAULT;
+    if (plen >= PATH_MAX)
+        return -ENAMETOOLONG;
+
+    char *path_copy = (char *)kmalloc((size_t)plen + 1);
+    if (!path_copy)
+        return -ENOMEM;
+    if (copy_from_user_ft(path_copy, (const void *)(uintptr_t)u_path,
+                          (size_t)plen + 1) < 0) {
+        kfree(path_copy);
+        return -EFAULT;
+    }
+
+    char **kargv = NULL;
+    char **kenvp = NULL;
+    if (argv != NULL) {
+        int64_t r = deep_copy_argv(argv, &kargv);
+        if (r < 0) {
+            kfree(path_copy);
+            return r;
+        }
+    }
+    if (envp != NULL) {
+        int64_t r = deep_copy_argv(envp, &kenvp);
+        if (r < 0) {
+            free_deep_argv(kargv, NULL);
+            kfree(path_copy);
+            return r;
+        }
+    }
+
+    if (argv != NULL && envp != NULL) {
+        size_t ac = 0;
+        size_t ec = 0;
+        while (kargv[ac])
+            ac++;
+        while (kenvp[ec])
+            ec++;
+        if (ac + ec > MAX_ARGV) {
+            free_deep_argv(kargv, kenvp);
+            kfree(path_copy);
+            return -E2BIG;
+        }
+    }
+
+    int64_t rc = arch_syscall_exec(ctx->arch_frame, path_copy,
+                                   (const char *const *)kargv,
+                                   (const char *const *)kenvp);
+    free_deep_argv(kargv, kenvp);
+    kfree(path_copy);
+
+    if (rc == 0)
+        ctx->suppress_writeback = true;
+    return rc;
 }

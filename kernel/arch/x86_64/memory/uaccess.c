@@ -23,6 +23,7 @@
 // definitions live here.
 
 #include <memory/uaccess.h>
+#include <limits.h>
 #include <arch/x86_64/uaccess.h>  // os01_jmp_buf, write-prep pair
 #include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR
 #include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
@@ -301,4 +302,22 @@ int syscall_prepare_user_write(uint64_t addr, uint64_t len)
     if (len == 0)
         return 0;
     return syscall_check_user_range(addr, len, true) ? 0 : -EFAULT;
+}
+
+int syscall_strnlen_user(uint64_t addr, size_t max)
+{
+    if (!current || addr < X86_USER_MIN_ADDR || addr >= current->addr_limit)
+        return -EFAULT;
+    if (max == 0)
+        return 0;
+    if (max > (size_t)INT_MAX)
+        return -EFAULT;
+    size_t avail = (size_t)(current->addr_limit - addr);
+    size_t limit = max < avail ? max : avail;
+    int n = strnlen_user((const void *)(uintptr_t)addr, limit);
+    if (n < 0)
+        return -EFAULT;
+    if ((size_t)n == limit && limit < max)
+        return -EFAULT;
+    return n;
 }

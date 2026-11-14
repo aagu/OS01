@@ -93,4 +93,10 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
  * Returns 0 on success, -EFAULT or -ENOMEM on failure. */
 int syscall_prepare_user_write(uint64_t addr, uint64_t len);
 
+/* Bounded user-string length scan (excluding NUL) within the architecture's
+ * user address window.  When max == 0, validates that addr lies in the user
+ * address window and returns 0 or -EFAULT.  When max > 0, returns 0..max
+ * (== max if no NUL within max bytes) or -EFAULT on fault / range violation. */
+int syscall_strnlen_user(uint64_t addr, size_t max);
+
 #endif // _KERNEL_UACCESS_H

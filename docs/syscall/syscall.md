@@ -11,7 +11,7 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 2 | `SYS_exit` | rdi=code | Terminate process |
 | 3 | `SYS_brk` | rdi=addr | Get/set program break |
 | 4 | `SYS_getpid` | — | Return PID |
-| 5 | `SYS_exec` | rdi=path, rsi=argv, rdx=envp | Replace process image |
+| 5 | `SYS_exec` | rdi=path, rsi=argv, rdx=envp | Replace process image (shared native: x86_64 + AArch64) |
 | 6 | `SYS_read` | rdi=fd, rsi=buf, rdx=size | Read from fd |
 | 7 | `SYS_open` | rdi=path, rsi=flags, rdx=mode | Open file |
 | 8 | `SYS_close` | rdi=fd | Close fd |

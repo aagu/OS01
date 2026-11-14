@@ -116,6 +116,7 @@ KERNEL_C_SOURCES += selftest/test_aarch64_user_svc_uaccess.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_vm.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_fork_cow.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_waitpid.c
+KERNEL_C_SOURCES += selftest/test_aarch64_user_exec.c
 endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
@@ -320,6 +321,8 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_cleanup_ima
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_illegal_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_short_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_waitpid_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_main_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_child_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -873,6 +876,25 @@ $(BUILD_DIR)/generated/aarch64_user_waitpid.elf: $(BUILD_DIR)/selftest/fixtures/
 	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
 
 $(BUILD_DIR)/generated/aarch64_user_waitpid_image.o: $(BUILD_DIR)/generated/aarch64_user_waitpid.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_exec_main.o: selftest/fixtures/aarch64_user_exec.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_EXEC_MODE=0 -MD -MP -c $< -o $@
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_exec_child.o: selftest/fixtures/aarch64_user_exec.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -DUSER_EXEC_MODE=1 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_exec_main.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_exec_main.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+$(BUILD_DIR)/generated/aarch64_user_exec_child.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_exec_child.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_exec_main_image.o: $(BUILD_DIR)/generated/aarch64_user_exec_main.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+$(BUILD_DIR)/generated/aarch64_user_exec_child_image.o: $(BUILD_DIR)/generated/aarch64_user_exec_child.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 

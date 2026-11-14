@@ -28,6 +28,7 @@ int64_t sys_resource_dispatch(syscall_ctx_t *ctx) { received = ctx; return -EBAD
 #define NATIVE_EXIT_MARK          (-1001)
 #define NATIVE_FORK_MARK          (-1005)
 #define NATIVE_WAITPID_MARK       (-1006)
+#define NATIVE_EXEC_MARK          (-1007)
 #define NATIVE_GETPID_MARK        (-1002)
 #define NATIVE_GETPPID_MARK       (-1003)
 #define NATIVE_CLOCK_GETTIME_MARK (-1004)
@@ -48,6 +49,12 @@ int64_t sys_native_waitpid(syscall_ctx_t *ctx)
 {
     received = ctx;
     return NATIVE_WAITPID_MARK;
+}
+
+int64_t sys_native_exec(syscall_ctx_t *ctx)
+{
+    received = ctx;
+    return NATIVE_EXEC_MARK;
 }
 
 int64_t sys_native_getpid(syscall_ctx_t *ctx)
@@ -76,6 +83,7 @@ static int64_t expected_return(uint64_t nr)
     case SYS_exit:          return NATIVE_EXIT_MARK;
     case SYS_fork:          return NATIVE_FORK_MARK;
     case SYS_waitpid:       return NATIVE_WAITPID_MARK;
+    case SYS_exec:          return NATIVE_EXEC_MARK;
     case SYS_getpid:        return NATIVE_GETPID_MARK;
     case SYS_getppid:       return NATIVE_GETPPID_MARK;
     case SYS_clock_gettime: return NATIVE_CLOCK_GETTIME_MARK;
@@ -101,7 +109,7 @@ int main(void)
      * AArch64 SVC path. */
     static const uint64_t shared[] = {
         SYS_exit, SYS_getpid, SYS_getppid, SYS_clock_gettime, SYS_fork,
-        SYS_waitpid, SYS_brk, SYS_mmap, SYS_mprotect, SYS_munmap,
+        SYS_waitpid, SYS_exec, SYS_brk, SYS_mmap, SYS_mprotect, SYS_munmap,
     };
     for (unsigned i = 0; i < sizeof(shared) / sizeof(shared[0]); i++) {
         if (!syscall_has_handler(shared[i])) {

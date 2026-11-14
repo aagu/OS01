@@ -1082,6 +1082,9 @@ void test_aarch64_scheduler_run(void)
     extern int test_aarch64_user_waitpid(void);
     selftest_record_late("aarch64_user_waitpid",
                          test_aarch64_user_waitpid());
+    extern int test_aarch64_user_exec(void);
+    selftest_record_late("aarch64_user_exec",
+                         test_aarch64_user_exec());
 #endif
 }
 

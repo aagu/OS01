@@ -42,6 +42,7 @@
 #include <percpu/percpu.h>
 #include <sched/internal.h>
 #include <sched/task.h>
+#include <string.h>
 #include <arch/aarch64/user_vm_policy.h>
 
 #if AARCH64_EL0_TEST
@@ -550,6 +551,93 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
     aarch64_user_vm_test_exec(0, old_root_pa);
 #endif
     arch_local_irq_disable();
+}
+
+int64_t arch_syscall_exec(void *arch_frame, const char *path,
+                          const char *const *argv, const char *const *envp)
+{
+    pt_regs_t *regs = (pt_regs_t *)arch_frame;
+    if (!aarch64_user_frame_is_valid(regs))
+        return -EFAULT;
+
+    task_t *t = arch_current_task();
+    if (!aarch64_user_task_is_user(t))
+        return -EINVAL;
+    struct aarch64_user_task *owner = t->thread->user_task;
+    if (!owner || !owner->catalog)
+        return -EINVAL;
+
+    if (!path)
+        return -EINVAL;
+    if (path[0] == '\0')
+        return -ENOENT;
+
+    size_t index = owner->catalog_count;
+    for (size_t i = 0; i < owner->catalog_count; i++) {
+        if (owner->catalog[i].path && strcmp(owner->catalog[i].path, path) == 0) {
+            index = i;
+            break;
+        }
+    }
+    if (index >= owner->catalog_count)
+        return -ENOENT;
+
+    int rc = aarch64_user_image_check_stack_args(argv, envp);
+    if (rc < 0)
+        return rc;
+
+    arch_local_irq_enable();
+    struct aarch64_user_image *image = NULL;
+    rc = aarch64_user_image_load(owner->catalog[index].bytes,
+                                 owner->catalog[index].size, &image);
+    if (rc == 0) {
+        rc = aarch64_user_image_setup_stack(image, argv, envp);
+        if (rc < 0) {
+            aarch64_user_image_destroy(image);
+            image = NULL;
+        }
+    }
+    arch_local_irq_disable();
+
+    if (rc < 0) {
+#if AARCH64_EL0_TEST
+        aarch64_user_vm_test_exec(rc,
+                                  aarch64_user_image_root_pa(owner->image));
+        g_stats.execs++;
+        g_stats.last_exec_index = index;
+        g_stats.last_exec_rc = rc;
+#endif
+        return rc;
+    }
+
+    struct aarch64_user_image *old_image = owner->image;
+#if AARCH64_EL0_TEST
+    uint64_t old_root_pa = aarch64_user_image_root_pa(old_image);
+#endif
+
+    aarch64_user_install_root(aarch64_user_image_root_pa(image));
+
+    owner->image = image;
+    owner->catalog_index = index;
+    t->mm = aarch64_user_image_mm(image);
+
+    task_comm_apply_exec(t, path);
+    aarch64_user_image_init_regs(image, regs);
+    aarch64_user_clear_tls();
+
+#if AARCH64_EL0_TEST
+    g_stats.execs++;
+    g_stats.last_exec_index = index;
+    g_stats.last_exec_rc = 0;
+#endif
+
+    arch_local_irq_enable();
+    aarch64_user_image_destroy(old_image);
+#if AARCH64_EL0_TEST
+    aarch64_user_vm_test_exec(0, old_root_pa);
+#endif
+    arch_local_irq_disable();
+    return 0;
 }
 
 /* ── Terminate the running task ───────────────────────────────── */

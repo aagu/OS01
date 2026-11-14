@@ -23,4 +23,5 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
                           const char *const *argv, const char *const *envp);
 int64_t arch_syscall_sigreturn(void *arch_frame);
 int64_t sys_native_waitpid(syscall_ctx_t *ctx);
+int64_t sys_native_exec(syscall_ctx_t *ctx);
 #endif

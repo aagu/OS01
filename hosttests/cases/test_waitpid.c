@@ -1,8 +1,10 @@
 #include "test_framework.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sched/task.h>
 #include <sched/internal.h>
@@ -101,7 +103,64 @@ int g_log_level = 0;
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 void _log_info_impl(const char *fmt, ...) { (void)fmt; }
 
+void *kmalloc(size_t size) { return malloc(size); }
+size_t kfree(void *address) { free(address); return 0; }
+
+static bool g_strnlen_force_fault = false;
+static uint64_t g_strnlen_fault_addr = 0;
+
+int syscall_strnlen_user(uint64_t addr, size_t max)
+{
+    if (g_strnlen_force_fault || addr == 0 || addr == g_strnlen_fault_addr)
+        return -EFAULT;
+    if (max == 0)
+        return 0;
+    const char *s = (const char *)(uintptr_t)addr;
+    size_t n = 0;
+    while (n < max && s[n] != '\0')
+        n++;
+    return (int)n;
+}
+
+static int g_exec_calls = 0;
+static int64_t g_exec_rc = 0;
+static void *g_exec_frame = NULL;
+static char g_exec_path[256];
+static int g_exec_argc = 0;
+static char g_exec_argv[8][64];
+static int g_exec_envc = 0;
+static char g_exec_envp[8][64];
+
+int64_t arch_syscall_exec(void *arch_frame, const char *path,
+                          const char *const *argv, const char *const *envp)
+{
+    g_exec_calls++;
+    g_exec_frame = arch_frame;
+    if (path)
+        snprintf(g_exec_path, sizeof(g_exec_path), "%s", path);
+    else
+        g_exec_path[0] = '\0';
+    g_exec_argc = 0;
+    if (argv) {
+        while (argv[g_exec_argc] && g_exec_argc < 8) {
+            snprintf(g_exec_argv[g_exec_argc], sizeof(g_exec_argv[0]), "%s",
+                     argv[g_exec_argc]);
+            g_exec_argc++;
+        }
+    }
+    g_exec_envc = 0;
+    if (envp) {
+        while (envp[g_exec_envc] && g_exec_envc < 8) {
+            snprintf(g_exec_envp[g_exec_envc], sizeof(g_exec_envp[0]), "%s",
+                     envp[g_exec_envc]);
+            g_exec_envc++;
+        }
+    }
+    return g_exec_rc;
+}
+
 extern int64_t sys_native_waitpid(syscall_ctx_t *ctx);
+extern int64_t sys_native_exec(syscall_ctx_t *ctx);
 
 static void reset_env(void)
 {
@@ -131,6 +190,17 @@ static void reset_env(void)
     g_blocker_last_sig = false;
     g_blocker_hook = NULL;
     memset(g_blocker_rcs, 0, sizeof(g_blocker_rcs));
+
+    g_strnlen_force_fault = false;
+    g_strnlen_fault_addr = 0;
+    g_exec_calls = 0;
+    g_exec_rc = 0;
+    g_exec_frame = NULL;
+    memset(g_exec_path, 0, sizeof(g_exec_path));
+    g_exec_argc = 0;
+    memset(g_exec_argv, 0, sizeof(g_exec_argv));
+    g_exec_envc = 0;
+    memset(g_exec_envp, 0, sizeof(g_exec_envp));
 }
 
 static void init_child(task_t *c, int64_t pid, int64_t exit_code, int64_t state,
@@ -325,6 +395,72 @@ static void test_waitpid_bad_status_preserves_zombie_and_rejects_without_childre
     assert_true(g_freed_tasks[0] == &c1);
 }
 
+static void test_sys_native_exec(void)
+{
+    TEST_SUITE("sys_native_exec marshals path/argv/envp and sets suppress_writeback");
+    reset_env();
+
+    /* NULL / bad path returns -EFAULT without suppress_writeback. */
+    syscall_ctx_t ctx = {
+        .nr = SYS_exec,
+        .args = { 0, 0, 0 },
+        .arch_frame = &ctx,
+        .suppress_writeback = false,
+    };
+    assert_eq(-EFAULT, sys_native_exec(&ctx));
+    assert_false(ctx.suppress_writeback);
+    assert_eq(0, g_exec_calls);
+
+    g_strnlen_fault_addr = 0xdeadbeefULL;
+    ctx.args[0] = 0xdeadbeefULL;
+    assert_eq(-EFAULT, sys_native_exec(&ctx));
+    assert_false(ctx.suppress_writeback);
+    assert_eq(0, g_exec_calls);
+    g_strnlen_fault_addr = 0;
+
+    /* Path >= PATH_MAX (256) returns -ENAMETOOLONG. */
+    char long_path[PATH_MAX + 8];
+    memset(long_path, 'a', sizeof(long_path) - 1);
+    long_path[sizeof(long_path) - 1] = '\0';
+    ctx.args[0] = (uint64_t)(uintptr_t)long_path;
+    assert_eq(-ENAMETOOLONG, sys_native_exec(&ctx));
+    assert_false(ctx.suppress_writeback);
+    assert_eq(0, g_exec_calls);
+
+    /* Valid path + argv + envp -> deep copied and passed to arch_syscall_exec. */
+    const char *argv[] = { "/bin/exec_child", "cow_arg", "tail", NULL };
+    const char *envp[] = { "K=V", NULL };
+    ctx = (syscall_ctx_t){
+        .nr = SYS_exec,
+        .args = {
+            (uint64_t)(uintptr_t)"/bin/exec_child",
+            (uint64_t)(uintptr_t)argv,
+            (uint64_t)(uintptr_t)envp,
+        },
+        .arch_frame = &ctx,
+        .suppress_writeback = false,
+    };
+    g_exec_rc = 0;
+    assert_eq(0, sys_native_exec(&ctx));
+    assert_true(ctx.suppress_writeback);
+    assert_eq(1, g_exec_calls);
+    assert_true(g_exec_frame == &ctx);
+    assert_true(strcmp(g_exec_path, "/bin/exec_child") == 0);
+    assert_eq(3, g_exec_argc);
+    assert_true(strcmp(g_exec_argv[0], "/bin/exec_child") == 0);
+    assert_true(strcmp(g_exec_argv[1], "cow_arg") == 0);
+    assert_true(strcmp(g_exec_argv[2], "tail") == 0);
+    assert_eq(1, g_exec_envc);
+    assert_true(strcmp(g_exec_envp[0], "K=V") == 0);
+
+    /* Failed arch_syscall_exec (-ENOENT) must NOT set suppress_writeback. */
+    ctx.suppress_writeback = false;
+    g_exec_rc = -ENOENT;
+    assert_eq(-ENOENT, sys_native_exec(&ctx));
+    assert_false(ctx.suppress_writeback);
+    assert_eq(2, g_exec_calls);
+}
+
 int main(void)
 {
     test_waitpid_reap_specific_and_any();
@@ -333,6 +469,7 @@ int main(void)
     test_waitpid_blocking_wakeup_and_eintr_retry();
     test_waitpid_echild_cases();
     test_waitpid_bad_status_preserves_zombie_and_rejects_without_children();
+    test_sys_native_exec();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_waitpid",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

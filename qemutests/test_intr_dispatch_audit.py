@@ -375,6 +375,7 @@ ffff000040097540 T copy_from_user_ft_res
 ffff000040097580 T copy_to_user_ft_res
 ffff0000400975c0 T syscall_check_user_range
 ffff0000400975e0 T syscall_prepare_user_write
+ffff0000400975f0 T syscall_strnlen_user
 ffff000040097600 T aarch64_user_vm_fault
 ffff000040097640 T arch_syscall_user_vm
 ffff000040097680 T sys_mm_dispatch
@@ -385,6 +386,8 @@ ffff000040097760 T user_vm_prepare_copy
 ffff0000400977a0 T arch_user_vm_replace_cow
 ffff0000400977c0 T sys_native_waitpid
 ffff000040097800 T do_waitpid
+ffff000040097820 T sys_native_exec
+ffff000040097860 T arch_syscall_exec
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -491,6 +494,13 @@ ffff0000400977c8: d65f03c0     	ret
 
 ffff000040097800 <do_waitpid>:
 ffff000040097804: d65f03c0     	ret
+
+ffff000040097820 <sys_native_exec>:
+ffff000040097824: 9400000f     	bl	0xffff000040097860 <arch_syscall_exec>
+ffff000040097828: d65f03c0     	ret
+
+ffff000040097860 <arch_syscall_exec>:
+ffff000040097864: d65f03c0     	ret
 
 ffff000040094104 <arch_intr_dispatch>:
 ffff000040094104: b4000100     	cbz	x0, 0xffff000040094124 <arch_intr_dispatch+0x20>
@@ -1714,6 +1724,21 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
             "ffff0000400975e0 T syscall_prepare_user_write\n", ""))
         errors = self.audit()
         self.assertTrue(any("syscall_prepare_user_write" in e for e in errors),
+                        errors)
+
+    def test_sys_native_exec_missing_arch_syscall_exec_edge_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097824,
+            "bl\t0xffff000040097860 <arch_syscall_exec>",
+            "nop"))
+        errors = self.audit()
+        self.assertTrue(any("arch_syscall_exec" in e for e in errors), errors)
+
+    def test_missing_syscall_strnlen_user_fails(self):
+        self.stage_a64(nm_text=A64_NM.replace(
+            "ffff0000400975f0 T syscall_strnlen_user\n", ""))
+        errors = self.audit()
+        self.assertTrue(any("syscall_strnlen_user" in e for e in errors),
                         errors)
 
     def test_gic_dispatch_called_twice_fails(self):

@@ -31,6 +31,7 @@ struct intr_event;
 struct aarch64_user_elf_source {
     const void *bytes;
     size_t size;
+    const char *path;
 };
 
 /* The per-task owner record.  It holds the image, the catalog
