@@ -2569,6 +2569,16 @@
       }
     },
     {
+      "id": "test_dispatch_generated",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_dispatch_generated.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_display_owner",
       "layer": "host",

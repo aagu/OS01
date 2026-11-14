@@ -780,7 +780,7 @@ print-test-qemu-images:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure qemutests.test_boot_contract qemutests.test_boot_services qemutests.test_doom_runner qemutests.test_doom_engine_notice qemutests.test_fb_pixel_verify_dimensions qemutests.test_scan_tools qemutests.test_bridge_export qemutests.test_catalog_gen
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure qemutests.test_boot_contract qemutests.test_boot_services qemutests.test_doom_runner qemutests.test_doom_engine_notice qemutests.test_fb_pixel_verify_dimensions qemutests.test_scan_tools qemutests.test_bridge_export qemutests.test_catalog_gen qemutests.test_dispatch_generated
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"
@@ -2161,100 +2161,15 @@ test-qemu-intr-x86:
 	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
 	  --log-dir "$(abspath $(BUILD_DIR))/test-results/intr-x86/nmi-$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
-# Per-SUITE lookups, used by test-qemu to pick the right variant build
-# flavor and the right image path. These are Make variables so they
-# resolve at parse time and survive across recipe lines.
-TEST_QEMU_FLAVOR_phase-0        =
-TEST_QEMU_FLAVOR_systest        = OS01_SYSTEST=1
-TEST_QEMU_FLAVOR_inittab-phase  = INITTAB_FILE=config/inittab.test
-TEST_QEMU_FLAVOR_network        = OS01_NETTEST=1
-TEST_QEMU_FLAVOR_gfx            =
-# resolution uses the profile's active image directly: production runs the
-# normal rootfs, while FB_RESOLUTION_TEST=1 (passed through from the top-level
-# invocation) resolves $(DISK_IMG) to the isolated resolution-test image.
-TEST_QEMU_FLAVOR_resolution     =
-# driver-model reuses the normal image path (matrix harness rebuilds
-# variant images itself); the build contract test and the matrix
-# python harness both produce fault variant images via
-# `make DRIVER_MODEL_FAULT=<fault>`.
-TEST_QEMU_FLAVOR_driver-model   =
-# monitor (monitor plan Task 9) runs the normal image directly: the test
-# helper /bin/test_monitor and /bin/monitor are both installed into the
-# normal rootfs by the shared program discovery, so no variant build is
-# needed.  The matrix boots the normal image read-only (-snapshot) at
-# 1/2/8 cores.
-TEST_QEMU_FLAVOR_monitor        =
-# terminal-present (Task 6 of partial-present plan) runs its OWN variant
-# image: /bin/test_gfx --present-rect-surface and /bin/monitor are both
-# installed into the rootfs by the shared program discovery, but the suite
-# also needs the terminal's per-second [term-present] records on the
-# serial port, and those are a user-space debug-level diagnostic
-# (USER_DEBUG=1).  The suite therefore builds the terminal-present image
-# + user variant (TERM_PRESENT_TEST=1) and runs against it; the normal
-# image keeps the serial port free of the per-second records.  The
-# single-suite driver launches its own QEMU (TCG, q35, 512 MiB, -smp 2,
-# -snapshot, -serial stdio, -display none) — the parent TestRunner does
-# NOT pre-spawn QEMU for this suite.
-TEST_QEMU_FLAVOR_terminal-present = TERM_PRESENT_TEST=1
-# intr-x86 (Task 5, spec §9.3) runs the two ISOLATED destructive
-# dispatch cases (kernel #BP and a QMP-injected hardware NMI).  Each
-# case builds its own kernel/image variant (intr-x86-fault-bp /
-# intr-x86-fault-nmi) inside the suite target, so no variant build is
-# requested here.
-TEST_QEMU_FLAVOR_intr-x86      =
-# gui (GUI-1 plan Task 7) runs the normal image directly: /bin/test_lvgl
-# and /bin/test_gui_fault are both installed into the normal rootfs by
-# the shared program discovery, so no variant build is needed. The matrix
-# boots the normal image read-only (-snapshot) at 1/2 cores with QMP.
-TEST_QEMU_FLAVOR_gui            =
-# gui-desktop (GUI-3 plan Task 7) runs the normal image directly:
-# /bin/desktop is installed into the normal rootfs by the shared program
-# discovery, so no variant build is needed.  The suite boots the normal
-# image read-only (-snapshot) at 1/2 cores with QMP, injects real PS/2
-# key events and compares QMP screendumps.
-TEST_QEMU_FLAVOR_gui-desktop    =
-TEST_QEMU_FLAVOR_doom           = DOOM_TEST=1
-TEST_QEMU_FLAVOR_arch10-capacity = CAPACITY_TEST=1
-# ARCH-6: image-variant switch only (no kernel fixture consumes the flag).
-TEST_QEMU_FLAVOR_arch6-fsstress = ARCH6_FSSTRESS_TEST=1
-# Default baseline log path for the terminal-present suite; the
-# task-6 brief calls this out explicitly.  The baseline pair lives in
-# the repo (qemutests/baselines/terminal-present/) so the suite works
-# on machines where the original /tmp evidence is gone (reboot,
-# nightly CI).  An explicit override is allowed (e.g. for re-capturing
-# the baseline elsewhere).
+# Per-SUITE lookups (TEST_QEMU_SUITE_IDS, TEST_QEMU_FLAVOR_*, TEST_QEMU_IMG_*)
+# and TEST_SUITE_CATALOG_DATA are generated into mk/generated/test-dispatch.mk.
 TERMINAL_PRESENT_BASELINE_LOG ?= $(OS01_ROOT)/qemutests/baselines/terminal-present/serial.log
 TEST_DOOM_IMAGE                = $(BUILD_DIR)/image/doom-test/disk.img
-TEST_QEMU_IMG_phase-0          = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_systest          = $(TEST_SYSTEST_IMAGE)
-TEST_QEMU_IMG_inittab-phase    = $(TEST_INITTAB_IMAGE)
-TEST_QEMU_IMG_network          = $(TEST_NETTEST_IMAGE)
-TEST_QEMU_IMG_gfx              = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_resolution       = $(DISK_IMG)
-TEST_QEMU_IMG_driver-model     = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_monitor          = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_terminal-present = $(TEST_TERMINAL_PRESENT_IMAGE)
-TEST_QEMU_IMG_gui              = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_gui-desktop      = $(NORMAL_IMAGE)
-TEST_QEMU_IMG_doom             = $(TEST_DOOM_IMAGE)
-TEST_QEMU_IMG_arch10-capacity  = $(TEST_ARCH10_CAPACITY_IMAGE)
-TEST_QEMU_IMG_arch6-fsstress  = $(TEST_ARCH6_FSSTRESS_IMAGE)
-# intr-x86 runs one image per destructive case; the suite target owns
-# the per-case paths (the value below is the informational echo only).
-TEST_QEMU_IMG_intr-x86         = $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
-# boot-lifecycle (BOOT-1 Task 3) runs the 8-group matrix itself (normal
-# reuses the normal image read-only; fault cases build isolated
-# boot-lifecycle-<case> variants inside the suite target).
-TEST_QEMU_FLAVOR_boot-lifecycle =
-TEST_QEMU_IMG_boot-lifecycle   = $(NORMAL_IMAGE)
-TEST_QEMU_FLAVOR_boot-irq-time =
-TEST_QEMU_IMG_boot-irq-time    = $(NORMAL_IMAGE)
-TEST_QEMU_FLAVOR_boot-failure  =
-TEST_QEMU_IMG_boot-failure     = $(NORMAL_IMAGE)
-TEST_QEMU_FLAVOR_boot-contract =
-TEST_QEMU_IMG_boot-contract    = $(NORMAL_IMAGE)
-TEST_QEMU_FLAVOR_boot-services =
-TEST_QEMU_IMG_boot-services    = $(NORMAL_IMAGE)
+TEST_DISPATCH_GEN := $(OS01_ROOT)/mk/generated/test-dispatch.mk
+ifeq ($(wildcard $(TEST_DISPATCH_GEN)),)
+$(error test-dispatch.mk missing; run 'make regen-test-catalog')
+endif
+include $(TEST_DISPATCH_GEN)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -2298,14 +2213,15 @@ SYSTEST_TIMEOUT ?= 120
 
 test-qemu: SUITE ?= phase-0
 test-qemu: SUITE := $(SUITE)
+ifneq ($(filter test-qemu,$(MAKECMDGOALS)),)
+ifeq ($(filter $(SUITE),$(TEST_QEMU_SUITE_IDS)),)
+$(error ERROR: SUITE must be one of: $(TEST_QEMU_SUITE_IDS), got '$(SUITE)')
+endif
+endif
 # Firmware remains a prerequisite for every suite. No image-path prereq:
 # the variant image is built by the recursive make below.
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	@case "$(SUITE)" in \
-	  phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress|doom) ;; \
-	  *) echo "SUITE must be phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|boot-lifecycle|boot-irq-time|boot-failure|boot-contract|boot-services|arch10-capacity|arch6-fsstress|doom, got '$(SUITE)'" >&2; exit 1;; \
-	esac
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
 	# The normal-image hash guard skips ``phase-0`` (the historical
 	# no-variant path), ``gfx`` (the ring-3 graphics suite) and
