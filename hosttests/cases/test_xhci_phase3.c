@@ -17,8 +17,41 @@
 /* The xHCI driver is compiled against the hosttest runtime mock, where every
  * MMIO store is redirected to mock_xhci_write32().  Phase 3 only touches the
  * doorbell array, so a plain 32-bit store is enough. */
+static volatile uint32_t *s_mock_portsc_ptr = NULL;
+static struct xhci_controller *s_mock_db_ctrl = NULL;
+static int s_mock_ep0_db_count = 0;
+
 void mock_xhci_write32(volatile void *addr, uint32_t val)
 {
+    if (s_mock_portsc_ptr && addr == s_mock_portsc_ptr) {
+        uint32_t cur = *s_mock_portsc_ptr;
+        uint32_t ro = XHCI_PORTSC_CCS | XHCI_PORTSC_SPEED_MASK;
+        uint32_t rw1c_cleared = cur & ~(val & XHCI_PORTSC_RW1C_MASK);
+        uint32_t updated = (cur & ro) |
+                           (val & ~XHCI_PORTSC_RW1C_MASK & ~ro) |
+                           (rw1c_cleared & XHCI_PORTSC_RW1C_MASK);
+        if (val & XHCI_PORTSC_PR) {
+            updated &= ~XHCI_PORTSC_PR;
+            updated |= XHCI_PORTSC_PRC | XHCI_PORTSC_PED;
+        }
+        *s_mock_portsc_ptr = updated;
+        return;
+    }
+    if (s_mock_db_ctrl && addr == (volatile void *)(s_mock_db_ctrl->db_regs + 4) && val == 1) {
+        s_mock_ep0_db_count++;
+        if (s_mock_ep0_db_count >= 2 && s_mock_db_ctrl->slots[1] &&
+            s_mock_db_ctrl->slots[1]->dma_buf_virt) {
+            uint8_t *buf = (uint8_t *)s_mock_db_ctrl->slots[1]->dma_buf_virt;
+            struct usb_config_descriptor cfg = {
+                .bLength = 9,
+                .bDescriptorType = USB_DESC_TYPE_CONFIGURATION,
+                .wTotalLength = 100,
+                .bNumInterfaces = 1,
+                .bConfigurationValue = 1,
+            };
+            memcpy(buf, &cfg, sizeof(cfg));
+        }
+    }
     *(volatile uint32_t *)addr = val;
 }
 
@@ -536,6 +569,266 @@ void test_xhci_set_configuration_2_stage_transfer(void)
     assert_true((ep0_ring[1].control & (1U << 5)) != 0);  /* IOC = 1 */
 }
 
+static void setup_mock_ep0_ctrl(struct xhci_controller *ctrl, struct xhci_slot *slot,
+                                struct xhci_trb *ep0_ring, struct xhci_trb *event_ring,
+                                uint8_t *rt_regs, uint8_t *db_regs)
+{
+    memset(ctrl, 0, sizeof(*ctrl));
+    memset(slot, 0, sizeof(*slot));
+    memset(ep0_ring, 0, sizeof(*ep0_ring) * XHCI_TRB_RING_SIZE);
+    memset(event_ring, 0, sizeof(*event_ring) * XHCI_TRB_RING_SIZE);
+    memset(rt_regs, 0, 0x100);
+    memset(db_regs, 0, 0x1000);
+
+    slot->slot_id = 1;
+    slot->speed = XHCI_PORT_SPEED_HIGH;
+    slot->ep0_ring_virt = ep0_ring;
+    slot->ep0_ring_phys = 0x40000;
+    slot->ep0_ring_cycle = 1;
+    slot->ep0_ring_enqueue = 0;
+
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    ctrl->slots[1] = slot;
+    ctrl->event_ring_virt = event_ring;
+    ctrl->event_ring_phys = 0x20000;
+    ctrl->event_ring_dequeue = 0;
+    ctrl->event_ring_cycle = 1;
+    ctrl->rt_regs = rt_regs;
+    ctrl->db_regs = db_regs;
+}
+
+void test_xhci_msc_alt_zero_pair(void)
+{
+    TEST_CASE("msc_alt_zero_pair: active alt 0 MSC bulk pair, guards, and SET_CONFIGURATION gating");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+
+    /* Case 1: Nonzero interface number (iface 0 = HID, iface 1 alt 0 = MSC 08/06/50)
+     * plus inactive alt 1 reusing DCI 3 (0x81) with MPS=64 instead of 512. */
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    uint8_t desc1[] = {
+        /* Config (9B): total=64, 2 ifaces */
+        9, USB_DESC_TYPE_CONFIGURATION, 64, 0, 2, 1, 0, 0x80, 50,
+        /* Interface 0 alt 0: HID */
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x83, 3, 8, 0, 10,
+        /* Interface 1 alt 0: MSC 08/06/50, Bulk IN 0x81 (MPS 512), Bulk OUT 0x02 (MPS 512) */
+        9, USB_DESC_TYPE_INTERFACE, 1, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 0x00, 0x02, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 2, 0x00, 0x02, 0,
+        /* Interface 1 alt 1 (inactive): reuses 0x81 with MPS=64 */
+        9, USB_DESC_TYPE_INTERFACE, 1, 1, 1, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 64, 0, 0,
+    };
+    int rc = xhci_setup_endpoint_rings(&slot, desc1, sizeof(desc1));
+    assert_eq(rc, 0);
+    /* Not published before SET_CONFIGURATION */
+    assert_false(slot.msc_iface.active);
+    /* Inactive alt 1 must NOT overwrite active DCI 3 MPS (512) */
+    assert_true(slot.ep_rings[3] != NULL);
+    assert_eq(slot.ep_rings[3]->max_packet_size, 512);
+
+    /* Failed SET_CONFIGURATION (STALL) must leave msc_iface inactive */
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_STALL << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_set_configuration(&ctrl, 1, 1);
+    assert_true(rc != 0);
+    assert_false(slot.msc_iface.active);
+    assert_false(slot.configured);
+
+    /* Successful SET_CONFIGURATION publishes msc_iface */
+    event_ring[1].parameter = 0x40000 + 3 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_set_configuration(&ctrl, 1, 1);
+    assert_eq(rc, 0);
+    assert_true(slot.msc_iface.active);
+    assert_eq(slot.msc_iface.interface_num, 1);
+    assert_eq(slot.msc_iface.in_addr, 0x81);
+    assert_eq(slot.msc_iface.in_dci, 3);
+    assert_eq(slot.msc_iface.out_addr, 0x02);
+    assert_eq(slot.msc_iface.out_dci, 4);
+    xhci_free_endpoint_rings(&slot);
+    assert_false(slot.msc_iface.active);
+
+    /* Case 2: Two complete MSC interfaces -> first complete wins */
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    uint8_t desc2[] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 55, 0, 2, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 1, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 0x00, 0x02, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 2, 0x00, 0x02, 0,
+        9, USB_DESC_TYPE_INTERFACE, 2, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x83, 2, 0x00, 0x02, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x04, 2, 0x00, 0x02, 0,
+    };
+    assert_eq(xhci_setup_endpoint_rings(&slot, desc2, sizeof(desc2)), 0);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
+    assert_true(slot.msc_iface.active);
+    assert_eq(slot.msc_iface.interface_num, 1);
+    assert_eq(slot.msc_iface.in_addr, 0x81);
+    assert_eq(slot.msc_iface.in_dci, 3);
+    assert_eq(slot.msc_iface.out_addr, 0x02);
+    assert_eq(slot.msc_iface.out_dci, 4);
+    xhci_free_endpoint_rings(&slot);
+
+    /* Case 3: Incomplete first MSC interface + complete second -> second wins */
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    uint8_t desc3[] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 48, 0, 2, 1, 0, 0x80, 50,
+        /* Interface 0: MSC with only IN */
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x84, 2, 0x00, 0x02, 0,
+        /* Interface 2: complete MSC */
+        9, USB_DESC_TYPE_INTERFACE, 2, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 0x00, 0x02, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 2, 0x00, 0x02, 0,
+    };
+    assert_eq(xhci_setup_endpoint_rings(&slot, desc3, sizeof(desc3)), 0);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
+    assert_true(slot.msc_iface.active);
+    assert_eq(slot.msc_iface.interface_num, 2);
+    assert_eq(slot.msc_iface.in_addr, 0x81);
+    assert_eq(slot.msc_iface.in_dci, 3);
+    assert_eq(slot.msc_iface.out_addr, 0x02);
+    assert_eq(slot.msc_iface.out_dci, 4);
+    xhci_free_endpoint_rings(&slot);
+
+    /* Case 4: IN/OUT split across two interfaces -> no cross-interface pair */
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    uint8_t desc4[] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 41, 0, 2, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 0x00, 0x02, 0,
+        9, USB_DESC_TYPE_INTERFACE, 1, 0, 1, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 2, 0x00, 0x02, 0,
+    };
+    assert_eq(xhci_setup_endpoint_rings(&slot, desc4, sizeof(desc4)), 0);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
+    assert_false(slot.msc_iface.active);
+    xhci_free_endpoint_rings(&slot);
+
+    /* Case 5: SuperSpeed missing companion -> ineligible; with valid companion -> eligible */
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    slot.speed = XHCI_PORT_SPEED_SUPER;
+    uint8_t desc5_no_comp[] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 32, 0, 1, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 0x00, 0x04, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 2, 0x00, 0x04, 0,
+    };
+    assert_eq(xhci_setup_endpoint_rings(&slot, desc5_no_comp, sizeof(desc5_no_comp)), 0);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
+    assert_false(slot.msc_iface.active);
+    xhci_free_endpoint_rings(&slot);
+
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    slot.speed = XHCI_PORT_SPEED_SUPER;
+    uint8_t desc5_comp[] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 44, 0, 1, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 2, 0x00, 0x04, 0,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 3, 0, 0, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 2, 0x00, 0x04, 0,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 3, 0, 0, 0,
+    };
+    assert_eq(xhci_setup_endpoint_rings(&slot, desc5_comp, sizeof(desc5_comp)), 0);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(xhci_set_configuration(&ctrl, 1, 1), 0);
+    assert_true(slot.msc_iface.active);
+    assert_eq(slot.ep_rings[3]->max_burst, 3);
+    assert_eq(slot.ep_rings[4]->max_burst, 3);
+    xhci_free_endpoint_rings(&slot);
+
+    /* Case 6: Truncated config descriptor reply in xhci_probe_ports bounds raw_descriptors_len */
+    uint8_t op_regs[0x500];
+    memset(op_regs, 0, sizeof(op_regs));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    uint64_t dcbaa[64];
+    memset(dcbaa, 0, sizeof(dcbaa));
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.op_regs = op_regs;
+    ctrl.max_ports = 1;
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_enqueue = 0;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+    ctrl.dcbaa_virt = dcbaa;
+    ctrl.dcbaa_phys = 0x30000;
+
+    volatile uint32_t *port1 = (volatile uint32_t *)(op_regs + 0x400);
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PP | (XHCI_PORT_SPEED_HIGH << 10);
+    s_mock_portsc_ptr = port1;
+    s_mock_db_ctrl = &ctrl;
+    s_mock_ep0_db_count = 0;
+
+    /* Event 0: Enable Slot -> slot_id = 1 */
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    /* Event 1: Address Device */
+    event_ring[1].parameter = 0x10000 + sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    /* Event 2: GET_DESCRIPTOR(DEVICE) -> 18B (Status TRB) */
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    /* Event 3: GET_DESCRIPTOR(CONFIG 9B) -> 9B */
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    /* Event 4: GET_DESCRIPTOR(CONFIG 100B) -> truncated 32B (residual = 68) */
+    event_ring[4].status = (XHCI_COMP_SHORT_TX << 24) | 68;
+    event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    /* Event 5: Configure Endpoint */
+    event_ring[5].parameter = 0x10000 + 2 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[5].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    /* Event 6: SET_CONFIGURATION */
+    event_ring[6].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[6].control = (1U << 24) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    xhci_probe_ports(&ctrl);
+    s_mock_portsc_ptr = NULL;
+    s_mock_db_ctrl = NULL;
+
+    assert_true(ctrl.slots[1] != NULL);
+    assert_eq(ctrl.slots[1]->raw_descriptors_len, sizeof(struct usb_device_descriptor) + 32);
+    xhci_free_slot(&ctrl, 1);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -546,6 +839,7 @@ int main(void)
     test_xhci_get_config_descriptor_two_stage();
     test_xhci_configure_endpoint_input_context();
     test_xhci_set_configuration_2_stage_transfer();
+    test_xhci_msc_alt_zero_pair();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

@@ -507,7 +507,12 @@ err_input:
 
 void xhci_free_endpoint_rings(struct xhci_slot *slot)
 {
-    if (!slot || !slot->ep_rings) return;
+    if (!slot) return;
+
+    memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
+    memset(&slot->msc_iface, 0, sizeof(slot->msc_iface));
+
+    if (!slot->ep_rings) return;
 
     for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
         if (slot->ep_rings[dci]) {
@@ -671,16 +676,66 @@ uint8_t xhci_calc_interval(uint8_t speed, uint8_t ep_type, uint8_t bInterval)
     return interval;
 }
 
+static bool xhci_parse_ss_companion(const uint8_t *buffer, uint32_t total,
+                                    uint32_t ep_offset, uint8_t ep_len,
+                                    uint8_t *out_max_burst)
+{
+    uint32_t comp_off = ep_offset + ep_len;
+    if (comp_off + 2 > total) return false;
+    uint8_t clen = buffer[comp_off];
+    uint8_t ctype = buffer[comp_off + 1];
+    if (clen < sizeof(struct usb_ss_ep_companion_descriptor) ||
+        comp_off + clen > total ||
+        ctype != USB_DESC_TYPE_SS_EP_COMPANION) {
+        return false;
+    }
+    const struct usb_ss_ep_companion_descriptor *comp =
+        (const struct usb_ss_ep_companion_descriptor *)(buffer + comp_off);
+    if (comp->bMaxBurst > 15) return false;
+    if (out_max_burst) *out_max_burst = comp->bMaxBurst;
+    return true;
+}
+
+static bool xhci_msc_rings_valid(const struct xhci_slot *slot,
+                                 const struct xhci_msc_iface *msc)
+{
+    if (!slot || !msc || !msc->active || !slot->ep_rings) return false;
+    if (msc->in_dci < XHCI_MIN_ENDPOINT_DCI || msc->in_dci > slot->max_dci) return false;
+    if (msc->out_dci < XHCI_MIN_ENDPOINT_DCI || msc->out_dci > slot->max_dci) return false;
+
+    const struct xhci_ep_ring *in_ring = slot->ep_rings[msc->in_dci];
+    const struct xhci_ep_ring *out_ring = slot->ep_rings[msc->out_dci];
+    if (!in_ring || !in_ring->active || in_ring->ep_type != XHCI_EP_TYPE_BULK_IN ||
+        in_ring->max_packet_size == 0)
+        return false;
+    if (!out_ring || !out_ring->active || out_ring->ep_type != XHCI_EP_TYPE_BULK_OUT ||
+        out_ring->max_packet_size == 0)
+        return false;
+    return true;
+}
+
 int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
                                   uint16_t length)
 {
     if (!slot || !buffer || length < 2) return 0;
+
+    memset(&slot->iface, 0, sizeof(slot->iface));
+    memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
+    memset(&slot->msc_iface, 0, sizeof(slot->msc_iface));
 
     /* 32-bit arithmetic: offset + len must not wrap around the 16-bit
      * boundary, or the bounds check below could be bypassed. */
     uint32_t offset = 0;
     uint32_t total = length;
     uint8_t max_dci = 1; /* EP0 always exists at DCI 1 */
+    bool in_iface = false;
+    bool iface_alt0 = false;
+
+    bool msc_found = false;
+    bool msc_cur_eligible = false;
+    uint8_t msc_cur_iface_num = 0;
+    uint8_t msc_cur_in_addr = 0, msc_cur_in_dci = 0;
+    uint8_t msc_cur_out_addr = 0, msc_cur_out_dci = 0;
 
     while (offset + 2 <= total) {
         uint8_t len = buffer[offset];
@@ -694,6 +749,9 @@ int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
             if (len < sizeof(struct usb_interface_descriptor)) break;
             const struct usb_interface_descriptor *iface =
                 (const struct usb_interface_descriptor *)(buffer + offset);
+            in_iface = true;
+            iface_alt0 = (iface->bAlternateSetting == 0);
+
             /* Only the primary interface of the active configuration. */
             if (iface->bInterfaceNumber == 0 && iface->bAlternateSetting == 0) {
                 slot->iface.interface_num = iface->bInterfaceNumber;
@@ -703,8 +761,29 @@ int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
                 slot->iface.num_endpoints = iface->bNumEndpoints;
                 slot->iface.active = true;
             }
+
+            if (!msc_found && iface_alt0 &&
+                iface->bInterfaceClass == 0x08 &&
+                iface->bInterfaceSubClass == 0x06 &&
+                iface->bInterfaceProtocol == 0x50) {
+                msc_cur_eligible = true;
+                msc_cur_iface_num = iface->bInterfaceNumber;
+                msc_cur_in_addr = 0;
+                msc_cur_in_dci = 0;
+                msc_cur_out_addr = 0;
+                msc_cur_out_dci = 0;
+            } else {
+                msc_cur_eligible = false;
+            }
         } else if (type == USB_DESC_TYPE_ENDPOINT) {
-            if (len < sizeof(struct usb_endpoint_descriptor)) break;
+            if (len < sizeof(struct usb_endpoint_descriptor)) {
+                msc_cur_eligible = false;
+                break;
+            }
+            if (!in_iface || !iface_alt0) {
+                offset += len;
+                continue;
+            }
             const struct usb_endpoint_descriptor *ep =
                 (const struct usb_endpoint_descriptor *)(buffer + offset);
             uint8_t ep_num = ep->bEndpointAddress & 0x0F;
@@ -720,7 +799,39 @@ int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
                 offset += len;
                 continue;
             }
+            uint8_t ep_xfer = ep->bmAttributes & 3;
+            uint16_t mps = ep->wMaxPacketSize & 0x7FF;
+            if (ep_xfer == 2 && (mps == 0 || mps > 1024)) {
+                msc_cur_eligible = false;
+                offset += len;
+                continue;
+            }
             if (dci > max_dci) max_dci = dci;
+
+            if (ep_xfer == 2 && msc_cur_eligible) {
+                if (slot->speed == XHCI_PORT_SPEED_SUPER &&
+                    !xhci_parse_ss_companion(buffer, total, offset, len, NULL)) {
+                    msc_cur_eligible = false;
+                } else {
+                    if (is_in && msc_cur_in_dci == 0) {
+                        msc_cur_in_addr = ep->bEndpointAddress;
+                        msc_cur_in_dci = dci;
+                    } else if (!is_in && msc_cur_out_dci == 0) {
+                        msc_cur_out_addr = ep->bEndpointAddress;
+                        msc_cur_out_dci = dci;
+                    }
+                    if (msc_cur_in_dci != 0 && msc_cur_out_dci != 0) {
+                        slot->msc_candidate.active = true;
+                        slot->msc_candidate.interface_num = msc_cur_iface_num;
+                        slot->msc_candidate.in_addr = msc_cur_in_addr;
+                        slot->msc_candidate.in_dci = msc_cur_in_dci;
+                        slot->msc_candidate.out_addr = msc_cur_out_addr;
+                        slot->msc_candidate.out_dci = msc_cur_out_dci;
+                        msc_found = true;
+                        msc_cur_eligible = false;
+                    }
+                }
+            }
         }
 
         offset += len;
@@ -740,23 +851,45 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
     xhci_free_endpoint_rings(slot);
 
     int max_dci = xhci_parse_config_descriptor(slot, buffer, length);
-    if (max_dci < XHCI_MIN_ENDPOINT_DCI) return 0; /* EP0 only: nothing to ring */
+    if (max_dci < XHCI_MIN_ENDPOINT_DCI) {
+        memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
+        return 0; /* EP0 only: nothing to ring */
+    }
 
     slot->ep_rings = kmalloc(sizeof(struct xhci_ep_ring *) * (max_dci + 1));
-    if (!slot->ep_rings) return -ENOMEM;
+    if (!slot->ep_rings) {
+        memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
+        return -ENOMEM;
+    }
     memset(slot->ep_rings, 0, sizeof(struct xhci_ep_ring *) * (max_dci + 1));
     slot->max_dci = (uint8_t)max_dci;
 
-    /* Second pass: instantiate one transfer ring per discovered endpoint. */
+    /* Second pass: instantiate one transfer ring per active alt-0 endpoint. */
     uint32_t offset = 0;
     uint32_t total = length;
+    bool in_iface = false;
+    bool iface_alt0 = false;
     while (offset + 2 <= total) {
         uint8_t len = buffer[offset];
         uint8_t type = buffer[offset + 1];
         if (len < 2 || offset + len > total) break;
 
+        if (type == USB_DESC_TYPE_INTERFACE) {
+            if (len < sizeof(struct usb_interface_descriptor)) break;
+            const struct usb_interface_descriptor *iface =
+                (const struct usb_interface_descriptor *)(buffer + offset);
+            in_iface = true;
+            iface_alt0 = (iface->bAlternateSetting == 0);
+            offset += len;
+            continue;
+        }
+
         if (type == USB_DESC_TYPE_ENDPOINT &&
             len >= sizeof(struct usb_endpoint_descriptor)) {
+            if (!in_iface || !iface_alt0) {
+                offset += len;
+                continue;
+            }
             const struct usb_endpoint_descriptor *ep =
                 (const struct usb_endpoint_descriptor *)(buffer + offset);
             uint8_t ep_num = ep->bEndpointAddress & 0x0F;
@@ -772,15 +905,27 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
                 continue;
             }
 
+            uint8_t ep_xfer = ep->bmAttributes & 3;
+            uint16_t mps = ep->wMaxPacketSize & 0x7FF;
+            if (ep_xfer == 2 && (mps == 0 || mps > 1024)) {
+                offset += len;
+                continue;
+            }
+
             /* Isochronous endpoints need a bandwidth allocation that this
              * driver does not model, and their Interval field follows a
              * different encoding: leave them unconfigured instead of
              * programming an endpoint context that cannot work. */
-            if ((ep->bmAttributes & 3) == 1) {
+            if (ep_xfer == 1) {
                 log_warn("[xhci] slot %u: isochronous endpoint DCI %u not supported\n",
                          slot->slot_id, (unsigned)dci);
                 offset += len;
                 continue;
+            }
+
+            uint8_t max_burst = 0;
+            if (ep_xfer == 2 && slot->speed == XHCI_PORT_SPEED_SUPER) {
+                xhci_parse_ss_companion(buffer, total, offset, len, &max_burst);
             }
 
             struct xhci_ep_ring *ring = kmalloc(sizeof(struct xhci_ep_ring));
@@ -805,7 +950,7 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             ring->enqueue = 0;
             ring->dci = dci;
 
-            switch (ep->bmAttributes & 3) {
+            switch (ep_xfer) {
             case 0: /* Control */
                 ring->ep_type = XHCI_EP_TYPE_CONTROL;
                 break;
@@ -818,7 +963,8 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             }
 
             ring->interval = xhci_calc_interval(slot->speed, ring->ep_type, ep->bInterval);
-            ring->max_packet_size = ep->wMaxPacketSize & 0x7FF;
+            ring->max_packet_size = mps;
+            ring->max_burst = max_burst;
             ring->active = true;
 
             slot->ep_rings[dci] = ring;
@@ -829,6 +975,10 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
         }
 
         offset += len;
+    }
+
+    if (slot->msc_candidate.active && !xhci_msc_rings_valid(slot, &slot->msc_candidate)) {
+        memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
     }
 
     return 0;
@@ -1018,9 +1168,10 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
             if (!ring || !ring->active) continue;
 
             uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, ctrl->csz, dci);
-            ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval */
+            ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval, MaxPStreams=0 */
             ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
-                        ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MPS */
+                        ((uint32_t)ring->max_burst << 8) |
+                        ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MaxBurst, MPS */
             ep_ctx[2] = (uint32_t)(ring->ring_phys & 0xFFFFFFF0ULL) | 1U; /* TR Dequeue Lo, DCS=1 */
             ep_ctx[3] = (uint32_t)(ring->ring_phys >> 32);                /* TR Dequeue Hi */
             ep_ctx[4] = (uint32_t)ring->max_packet_size;                  /* Average TRB Length */
@@ -1096,6 +1247,11 @@ int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id, uint8_
     }
 
     slot->configured = true;
+    if (xhci_msc_rings_valid(slot, &slot->msc_candidate)) {
+        slot->msc_iface = slot->msc_candidate;
+    } else {
+        memset(&slot->msc_iface, 0, sizeof(slot->msc_iface));
+    }
 
     log_info("[xhci] slot %u: configured with config %u (iface class %02x:%02x, ep_count=%u)\n",
              slot_id, config_value, slot->iface.class_code, slot->iface.subclass_code,
@@ -1135,10 +1291,11 @@ void xhci_probe_ports(struct xhci_controller *ctrl)
             xhci_free_slot(ctrl, slot_id);
             continue;
         }
+        uint16_t cfg_actual_len = (uint16_t)rc;
 
         struct xhci_slot *slot = ctrl->slots[slot_id];
         rc = xhci_setup_endpoint_rings(slot, (const uint8_t *)slot->dma_buf_virt,
-                                       (uint16_t)rc);
+                                       cfg_actual_len);
         if (rc != 0) {
             xhci_free_slot(ctrl, slot_id);
             continue;
@@ -1157,12 +1314,12 @@ void xhci_probe_ports(struct xhci_controller *ctrl)
         }
 
         /* Phase 4: Cache concatenated binary descriptors (Device + Config hierarchy) */
-        uint16_t total_len = sizeof(struct usb_device_descriptor) + slot->config_desc.wTotalLength;
+        uint16_t total_len = (uint16_t)(sizeof(struct usb_device_descriptor) + cfg_actual_len);
         slot->raw_descriptors = kmalloc(total_len);
         if (slot->raw_descriptors) {
             memcpy(slot->raw_descriptors, &slot->desc, sizeof(struct usb_device_descriptor));
             memcpy(slot->raw_descriptors + sizeof(struct usb_device_descriptor),
-                   slot->dma_buf_virt, slot->config_desc.wTotalLength);
+                   slot->dma_buf_virt, cfg_actual_len);
             slot->raw_descriptors_len = total_len;
         }
     }

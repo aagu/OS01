@@ -82,6 +82,7 @@
 #define USB_DESC_TYPE_ENDPOINT      5
 #define USB_DESC_TYPE_HID           0x21
 #define USB_DESC_TYPE_REPORT        0x22
+#define USB_DESC_TYPE_SS_EP_COMPANION 0x30
 
 /* xHCI endpoint types (Endpoint Context DW1 bits [5:3]) */
 #define XHCI_EP_TYPE_INVALID        0
@@ -217,6 +218,15 @@ struct usb_hid_descriptor {
     uint16_t wReportDescriptorLength;
 } __attribute__((packed));
 
+/* USB SuperSpeed Endpoint Companion Descriptor (USB 3.0 §9.6.7, 6 bytes) */
+struct usb_ss_ep_companion_descriptor {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint8_t  bMaxBurst;
+    uint8_t  bmAttributes;
+    uint16_t wBytesPerInterval;
+} __attribute__((packed));
+
 /* Per-endpoint transfer ring instance (dynamically allocated per DCI) */
 struct xhci_ep_ring {
     uint64_t ring_phys;             /* 4KB DMA page physical address */
@@ -227,6 +237,7 @@ struct xhci_ep_ring {
     uint8_t ep_type;                /* XHCI_EP_TYPE_* */
     uint16_t max_packet_size;       /* Endpoint max packet size */
     uint8_t interval;               /* Computed xHCI interval exponent */
+    uint8_t max_burst;              /* SuperSpeed Max Burst Size */
     bool active;
 };
 
@@ -238,6 +249,16 @@ struct xhci_interface_info {
     uint8_t protocol;
     uint8_t num_endpoints;
     bool active;
+};
+
+/* Active USB Mass Storage (BOT) interface and its bulk endpoint pair */
+struct xhci_msc_iface {
+    bool active;
+    uint8_t interface_num;
+    uint8_t in_addr;
+    uint8_t out_addr;
+    uint8_t in_dci;
+    uint8_t out_dci;
 };
 
 /* Context size helpers: HCCPARAMS1.CSZ selects 32B (csz=0) or 64B (csz=1)
@@ -321,6 +342,8 @@ struct xhci_slot {
     /* Cached Configuration Descriptor & parsed interface summary */
     struct usb_config_descriptor config_desc;
     struct xhci_interface_info iface;
+    struct xhci_msc_iface msc_candidate;
+    struct xhci_msc_iface msc_iface;
 
     bool configured;
 
