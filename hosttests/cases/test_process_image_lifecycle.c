@@ -40,6 +40,8 @@
 
 #include <fs/vfs.h>
 #include <memory/vma.h>
+#include <memory/vm_device.h>
+#include <arch/x86_64/vma.h>
 
 /* ── Layout constants (mirror kernel/include/sched/task.h) ── */
 #define USER_CODE_ADDR     0x400000UL
@@ -146,9 +148,9 @@ static void test_heap_vma_vm_flags(void)
     assert_eq(0x100UL, (uint64_t)VMA_HEAP);
 }
 
-static void test_heap_vma_vm_page_prot(void)
+static void test_heap_vma_leaf_conversion(void)
 {
-    TEST_SUITE("mm_init_user_heap — vm_page_prot");
+    TEST_SUITE("mm_init_user_heap — logical flags → leaf conversion");
 
     setup_mm();
     int rc = mm_init_user_heap(&fixture_mm, USER_CODE_ADDR + 0x1000);
@@ -156,9 +158,13 @@ static void test_heap_vma_vm_page_prot(void)
 
     vma_t *v = vma_list_get(&fixture_mm.vma_list, 0);
     assert_not_null(v);
-    /* PTE permissions plan: heap data pages are NX. */
+    /* PTE permissions plan: heap data pages are NX.  The VMA carries
+     * only the logical permission; the leaf word comes from the
+     * conversion. */
+    assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON |
+                         VMA_HEAP), v->vm_flags);
     uint64_t expected = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC;
-    assert_eq(expected, v->vm_page_prot);
+    assert_eq(expected, x86_vma_pte_flags(v->vm_flags));
 }
 
 static void test_mm_init_user_heap_sets_breaks(void)
@@ -222,7 +228,6 @@ static void test_vma_find_matches_other_vma_with_other_vm(void)
     other->vm_start     = USER_CODE_ADDR + 0x1000;
     other->vm_end       = USER_CODE_ADDR + 0x2000;
     other->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
-    other->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     other->vm_pgoff     = 0;
     other->vm_file      = NULL;
     vma_insert(&fixture_mm, other);
@@ -251,7 +256,6 @@ static void test_exactly_one_heap_vma_in_list(void)
         v->vm_start     = USER_CODE_ADDR + 0x1000 + i * 0x1000;
         v->vm_end       = v->vm_start + 0x1000;
         v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
-        v->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
         v->vm_pgoff     = 0;
         v->vm_file      = NULL;
         vma_insert(&fixture_mm, v);
@@ -316,7 +320,6 @@ static void test_destroy_unpublished_user_mm_releases_vmas(void)
     extra->vm_start     = USER_CODE_ADDR + 0x3000;
     extra->vm_end       = USER_CODE_ADDR + 0x4000;
     extra->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
-    extra->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     extra->vm_pgoff     = 0;
     extra->vm_file      = NULL;
     vma_insert(&fixture_mm, extra);
@@ -405,7 +408,6 @@ static void test_vma_free_all_vmio_2m_borrowed_pmd_revoked(void)
     iov->vm_start     = 0x200000UL;
     iov->vm_end       = 0x400000UL;
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
-    iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     iov->vm_pgoff     = 0;
     iov->vm_file      = NULL;
     vma_insert(&fixture_mm, iov);
@@ -815,7 +817,6 @@ static void test_do_mprotect_vma_io_rejected(void)
     io_vma.vm_start = 0x50000000UL;
     io_vma.vm_end   = 0x50002000UL;
     io_vma.vm_flags = VMA_IO | VMA_PROT_READ;
-    io_vma.vm_page_prot = PAGE_USER | PAGE_VALID;
     list_init(&io_vma.list);
     list_add_to_before(&fixture_mm.vma_list, &io_vma.list);
 
@@ -823,19 +824,16 @@ static void test_do_mprotect_vma_io_rejected(void)
     int rc = do_mprotect(0x50000000UL, 0x2000UL, 1 | 2 /* PROT_READ | PROT_WRITE */);
     assert_eq(-EPERM, rc);
     assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
-    assert_eq((uint64_t)(PAGE_USER | PAGE_VALID), io_vma.vm_page_prot);
 
     /* 2. Request PROT_EXEC -> rejected with -EPERM */
     rc = do_mprotect(0x50000000UL, 0x2000UL, 4 /* PROT_EXEC */);
     assert_eq(-EPERM, rc);
     assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
-    assert_eq((uint64_t)(PAGE_USER | PAGE_VALID), io_vma.vm_page_prot);
 
     /* 3. Request PROT_NONE -> rejected with -EPERM */
     rc = do_mprotect(0x50000000UL, 0x2000UL, 0 /* PROT_NONE */);
     assert_eq(-EPERM, rc);
     assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
-    assert_eq((uint64_t)(PAGE_USER | PAGE_VALID), io_vma.vm_page_prot);
 
     /* 4. Request across a range with a hole (using normal VMA) -> rejected with -ENOMEM */
     vma_t norm_vma;
@@ -843,7 +841,6 @@ static void test_do_mprotect_vma_io_rejected(void)
     norm_vma.vm_start = 0x60000000UL;
     norm_vma.vm_end   = 0x60002000UL;
     norm_vma.vm_flags = VMA_PROT_READ;
-    norm_vma.vm_page_prot = PAGE_USER | PAGE_VALID;
     list_init(&norm_vma.list);
     list_add_to_before(&fixture_mm.vma_list, &norm_vma.list);
     rc = do_mprotect(0x60000000UL, 0x4000UL, 1 /* PROT_READ */);
@@ -893,7 +890,6 @@ static vma_t *install_mprotect_vma(uint64_t start, uint64_t len,
     v->vm_start     = start;
     v->vm_end       = start + len;
     v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE;
-    v->vm_page_prot = PAGE_USER_PTE;
     v->vm_pgoff     = pgoff;
     v->vm_file      = (vfs_node_t *)&fake_file_node;
     vfs_node_get(v->vm_file);
@@ -953,12 +949,6 @@ static void test_mprotect_split_range(void)
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v0->vm_flags);
     assert_eq((uint64_t)VMA_PROT_READ, v1->vm_flags);
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v2->vm_flags);
-    /* The middle segment gains the new policy's NX (R pages are
-     * never executable); the untouched neighbours keep their
-     * original vm_page_prot. */
-    assert_eq((uint64_t)PAGE_USER_PTE, v0->vm_page_prot);
-    assert_eq((uint64_t)(PAGE_USER_PTE_RO | PAGE_NO_EXEC), v1->vm_page_prot);
-    assert_eq((uint64_t)PAGE_USER_PTE, v2->vm_page_prot);
 
     /* Only the middle leaf changed; PA is never reallocated. */
     assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MPROTECT_BASE));
@@ -1008,7 +998,6 @@ static void test_mprotect_split_range(void)
     io_vma.vm_start = 0x52000000UL;
     io_vma.vm_end   = 0x52001000UL;
     io_vma.vm_flags = VMA_IO | VMA_PROT_READ;
-    io_vma.vm_page_prot = PAGE_USER | PAGE_VALID;
     list_init(&io_vma.list);
     list_add_to_before(&fixture_mm.vma_list, &io_vma.list);
     assert_eq(-EPERM, do_mprotect(0x52000000UL, 0x1000UL, PROT_READ));
@@ -1056,7 +1045,6 @@ static void test_mprotect_split_oom(void)
         vma_t *orig = install_mprotect_vma(MPROTECT_BASE, 0x3000, 7);
         uint64_t orig_end    = orig->vm_end;
         uint64_t orig_flags  = orig->vm_flags;
-        uint64_t orig_prot   = orig->vm_page_prot;
         uint64_t orig_pgoff  = orig->vm_pgoff;
         int gets_before  = lifecycle_state.vfs_get_calls;
         int puts_before  = lifecycle_state.vfs_put_calls;
@@ -1074,7 +1062,6 @@ static void test_mprotect_split_oom(void)
         assert_true(vma_list_get(&fixture_mm.vma_list, 0) == orig);
         assert_eq(orig_end, orig->vm_end);
         assert_eq(orig_flags, orig->vm_flags);
-        assert_eq(orig_prot, orig->vm_page_prot);
         assert_eq(orig_pgoff, orig->vm_pgoff);
         /* PTEs, references and pages untouched; no commit happened. */
         assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MPROTECT_BASE));
@@ -1145,7 +1132,6 @@ static void test_mprotect_cow_stash_restore(void)
     /* The VMA's logical permissions are restored even though the
      * shared leaf stays read-only in hardware. */
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), v->vm_flags);
-    assert_eq((uint64_t)(PAGE_USER_PTE | PAGE_NO_EXEC), v->vm_page_prot);
 
     /* The never-faulted slot is still empty. */
     assert_null(lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));
@@ -1200,7 +1186,6 @@ static vma_t *install_anon_vma(uint64_t start, uint64_t len)
     v->vm_start     = start;
     v->vm_end       = start + len;
     v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
-    v->vm_page_prot = PAGE_USER_PTE;
     v->vm_pgoff     = 0;
     v->vm_file      = NULL;
     assert_eq(0, vma_insert(&fixture_mm, v));
@@ -1210,7 +1195,7 @@ static vma_t *install_anon_vma(uint64_t start, uint64_t len)
 typedef struct {
     int      list_count;
     vma_t   *node;
-    uint64_t start, end, flags, prot, pgoff;
+    uint64_t start, end, flags, pgoff;
     uint64_t pte[4];
     int      vfs_gets, vfs_puts, allocs, frees, cow_puts;
     int      files_puts;
@@ -1223,7 +1208,6 @@ static void take_snapshot(map_snapshot_t *s, vma_t *v)
     s->start   = v->vm_start;
     s->end     = v->vm_end;
     s->flags   = v->vm_flags;
-    s->prot    = v->vm_page_prot;
     s->pgoff   = v->vm_pgoff;
     for (int i = 0; i < 4; i++) {
         uint64_t *p = lifecycle_pte_get(MUNMAP_BASE + (uint64_t)i * 0x1000UL);
@@ -1246,7 +1230,6 @@ static void assert_mapping_unchanged(const map_snapshot_t *s, vma_t *v)
     assert_eq(s->start, v->vm_start);
     assert_eq(s->end, v->vm_end);
     assert_eq(s->flags, v->vm_flags);
-    assert_eq(s->prot, v->vm_page_prot);
     assert_eq(s->pgoff, v->vm_pgoff);
     for (int i = 0; i < 4; i++) {
         uint64_t *p = lifecycle_pte_get(MUNMAP_BASE + (uint64_t)i * 0x1000UL);
@@ -1264,7 +1247,6 @@ static void assert_snapshot_unchanged(const map_snapshot_t *s, vma_t *v)
     assert_eq(s->start, v->vm_start);
     assert_eq(s->end, v->vm_end);
     assert_eq(s->flags, v->vm_flags);
-    assert_eq(s->prot, v->vm_page_prot);
     assert_eq(s->pgoff, v->vm_pgoff);
     for (int i = 0; i < 4; i++) {
         uint64_t *p = lifecycle_pte_get(MUNMAP_BASE + (uint64_t)i * 0x1000UL);
@@ -1411,7 +1393,6 @@ static void test_munmap_borrowed_and_stashed_leaves(void)
     io->vm_start     = MUNMAP_BASE;
     io->vm_end       = MUNMAP_BASE + 0x1000UL;
     io->vm_flags     = VMA_IO | VMA_PROT_READ;
-    io->vm_page_prot = PAGE_USER_PTE_RO;
     vma_insert(&fixture_mm, io);
 
     int frees_before = lifecycle_state.total_frees;
@@ -1575,10 +1556,11 @@ static void test_munmap_fixed_failure_preserves_state(void)
 /* ── Device MAP_FIXED transaction (munmap plan task 2) ────────
  * A fake device node exposes the real f_ops->mmap path into vma.c's
  * transaction; the device callback validates, then calls the commit
- * callback with one first PA + PTE flags, exactly like fb_mmap. */
+ * callback with one first PA + a semantic cache request, exactly
+ * like fb_mmap (the MM derives the hardware bits). */
 
 static uint64_t g_dev_first_pa = 0x30000000UL;
-static uint64_t g_dev_flags = PAGE_USER_PTE_RO;
+static int      g_dev_cache = 0;    /* enum vm_device_cache (2 = invalid) */
 static int      g_dev_calls;
 static int      g_dev_inject_rc;
 static int      g_dev_race_insert;
@@ -1602,10 +1584,9 @@ static int fake_dev_mmap(struct vfs_node *node, struct vma *vma,
         race->vm_start = tv->vm_start;
         race->vm_end   = tv->vm_end;
         race->vm_flags = VMA_PROT_READ | VMA_ANON;
-        race->vm_page_prot = PAGE_USER_PTE_RO;
         vma_insert(&fixture_mm, race);
     }
-    return commit(ctx, g_dev_first_pa, g_dev_flags);
+    return commit(ctx, g_dev_first_pa, (enum vm_device_cache)g_dev_cache);
 }
 
 static const vfs_file_ops_t fake_dev_ops = { .mmap = fake_dev_mmap };
@@ -1627,7 +1608,7 @@ static void install_fake_device(void)
     g_dev_calls = 0;
     g_dev_inject_rc = 0;
     g_dev_race_insert = 0;
-    g_dev_flags = PAGE_USER_PTE_RO;
+    g_dev_cache = VM_DEVICE_CACHE_UC;
 }
 
 static void test_device_map_fixed_commit(void)
@@ -1673,11 +1654,14 @@ static void test_device_map_fixed_commit(void)
     assert_true(m->vm_flags & VMA_PROT_READ);
     assert_null(m->vm_file);          /* node ref stays with do_mmap */
 
-    /* New device leaves carry first_pa + page offset and the device
-     * flags; the two neighbour leaves are untouched. */
-    assert_eq(g_dev_first_pa | (g_dev_flags & ~PAGE_4K_MASK),
+    /* New device leaves carry first_pa + page offset and the leaf bits
+     * the MM derives from the VMA + cache request (USER+PRESENT+NX,
+     * UC request); the two neighbour leaves are untouched. */
+    assert_eq(g_dev_first_pa | PAGE_USER | PAGE_VALID | PAGE_NO_EXEC |
+              PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
               *lifecycle_pte_get(MUNMAP_BASE + 0x1000UL));
-    assert_eq((g_dev_first_pa + 0x1000UL) | (g_dev_flags & ~PAGE_4K_MASK),
+    assert_eq((g_dev_first_pa + 0x1000UL) | PAGE_USER | PAGE_VALID |
+              PAGE_NO_EXEC | PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
               *lifecycle_pte_get(MUNMAP_BASE + 0x2000UL));
     assert_eq(p0 | PAGE_USER_PTE, *lifecycle_pte_get(MUNMAP_BASE));
     assert_eq(p3 | PAGE_USER_PTE,
@@ -1711,7 +1695,6 @@ static void test_device_map_fixed_borrowed_leaf(void)
     old->vm_start = MUNMAP_BASE;
     old->vm_end   = MUNMAP_BASE + 0x2000UL;
     old->vm_flags = VMA_IO | VMA_SHARED | VMA_PROT_READ;
-    old->vm_page_prot = PAGE_USER_PTE_RO;
     vma_insert(&fixture_mm, old);
 
     int frees_before = lifecycle_state.total_frees;
@@ -1732,6 +1715,130 @@ static void test_device_map_fixed_borrowed_leaf(void)
         assert_true(m->vm_flags & VMA_IO);
         assert_eq(MUNMAP_BASE, m->vm_start);
         assert_eq(MUNMAP_BASE + 0x2000UL, m->vm_end);
+    }
+}
+
+/* ── Device commit cache contract (mm-architecture-boundaries) ──
+ * The device supplies a SEMANTIC cache request (UC/WB enum), never a
+ * PTE word.  The real do_mmap -> mmap_dev_commit path must turn it
+ * into leaves with USER+PRESENT, NX (the device driver admits no
+ * EXEC), WRITE from the VMA, and the cache bits of the request — for
+ * the UC/WB × R/RW matrix — and reject an unknown enum value with no
+ * visible change at all. */
+static void test_device_map_fixed_cache_contract(void)
+{
+    TEST_SUITE("device MAP_FIXED — UC/WB × R/RW cache contract");
+
+    struct {
+        enum vm_device_cache cache;
+        uint64_t cache_bits;
+        const char *name;
+    } caches[] = {
+        { VM_DEVICE_CACHE_UC, PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH, "UC" },
+        { VM_DEVICE_CACHE_WB, 0, "WB" },
+    };
+
+    for (size_t c = 0; c < sizeof(caches) / sizeof(caches[0]); c++) {
+        for (int rw = 0; rw < 2; rw++) {
+            setup_munmap();
+            install_fake_device();
+            g_dev_cache = (int)caches[c].cache;
+
+            uint64_t p0 = alloc_4k_page();
+            uint64_t p1 = alloc_4k_page();
+            uint64_t p2 = alloc_4k_page();
+            uint64_t p3 = alloc_4k_page();
+            assert_true(p0 && p1 && p2 && p3);
+            lifecycle_pte_set(MUNMAP_BASE,            p0 | PAGE_USER_PTE);
+            lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+            lifecycle_pte_set(MUNMAP_BASE + 0x2000UL, p2 | PAGE_USER_PTE);
+            lifecycle_pte_set(MUNMAP_BASE + 0x3000UL, p3 | PAGE_USER_PTE);
+            vma_t *old = install_anon_vma(MUNMAP_BASE, 0x4000);
+
+            map_snapshot_t snap;
+            take_snapshot(&snap, old);
+            int frees_before = lifecycle_state.total_frees;
+            int vgets = lifecycle_state.vfs_get_calls;
+            int vputs = lifecycle_state.vfs_put_calls;
+            int fgets = lifecycle_state.files_get_calls;
+            int fputs = lifecycle_state.files_put_calls;
+
+            uint64_t prot = rw ? (PROT_READ | PROT_WRITE) : PROT_READ;
+            assert_eq((int64_t)(MUNMAP_BASE + 0x1000UL),
+                      do_mmap(MUNMAP_BASE + 0x1000UL, 0x2000UL, prot,
+                              MAP_FIXED | MAP_SHARED, 0, 0));
+            assert_eq(1, g_dev_calls);
+
+            /* PA carries the page offset; the flag word is exactly
+             * USER + PRESENT + NX (+ WRITE for the RW VMA) plus the
+             * requested cache bits — nothing else. */
+            uint64_t expect = PAGE_USER | PAGE_VALID | PAGE_NO_EXEC |
+                              caches[c].cache_bits;
+            if (rw) expect |= PAGE_WRITE;
+            assert_eq(g_dev_first_pa | expect,
+                      *lifecycle_pte_get(MUNMAP_BASE + 0x1000UL));
+            assert_eq((g_dev_first_pa + 0x1000UL) | expect,
+                      *lifecycle_pte_get(MUNMAP_BASE + 0x2000UL));
+
+            /* The device VMA records the logical permission only. */
+            assert_eq(3, vma_list_count(&fixture_mm.vma_list));
+            vma_t *m = vma_list_get(&fixture_mm.vma_list, 1);
+            assert_not_null(m);
+            if (m) {
+                assert_true(m->vm_flags & VMA_IO);
+                uint64_t want = rw ? (VMA_PROT_READ | VMA_PROT_WRITE)
+                                   : VMA_PROT_READ;
+                assert_eq(want, m->vm_flags & (VMA_PROT_READ |
+                                               VMA_PROT_WRITE |
+                                               VMA_PROT_EXEC));
+            }
+
+            /* Owned old middle pages were reclaimed exactly once; the
+             * neighbour leaves are untouched. */
+            assert_eq(frees_before + 2, lifecycle_state.total_frees);
+            assert_eq(p0 | PAGE_USER_PTE,
+                      *lifecycle_pte_get(MUNMAP_BASE));
+            assert_eq(p3 | PAGE_USER_PTE,
+                      *lifecycle_pte_get(MUNMAP_BASE + 0x3000UL));
+            assert_eq(vgets + 1, lifecycle_state.vfs_get_calls);
+            assert_eq(vputs + 1, lifecycle_state.vfs_put_calls);
+            assert_eq(fgets + 1, lifecycle_state.files_get_calls);
+            assert_eq(fputs + 1, lifecycle_state.files_put_calls);
+        }
+    }
+
+    /* Unknown cache value: the commit rejects before any VMA/PTE/
+     * reference/sync change and the old mapping stays bit-identical. */
+    {
+        setup_munmap();
+        install_fake_device();
+        g_dev_cache = 2;    /* not a valid enum member */
+
+        uint64_t p0 = alloc_4k_page();
+        uint64_t p1 = alloc_4k_page();
+        assert_true(p0 && p1);
+        lifecycle_pte_set(MUNMAP_BASE,            p0 | PAGE_USER_PTE);
+        lifecycle_pte_set(MUNMAP_BASE + 0x1000UL, p1 | PAGE_USER_PTE);
+        vma_t *old = install_anon_vma(MUNMAP_BASE, 0x2000);
+
+        map_snapshot_t snap;
+        take_snapshot(&snap, old);
+        int frees_before = lifecycle_state.total_frees;
+        int vgets = lifecycle_state.vfs_get_calls;
+        int vputs = lifecycle_state.vfs_put_calls;
+        int fgets = lifecycle_state.files_get_calls;
+        int fputs = lifecycle_state.files_put_calls;
+
+        assert_eq(-EINVAL,
+                  do_mmap(MUNMAP_BASE, 0x1000UL, PROT_READ,
+                          MAP_FIXED | MAP_SHARED, 0, 0));
+        assert_eq(1, g_dev_calls);
+        assert_mapping_unchanged(&snap, old);
+        assert_eq(frees_before, lifecycle_state.total_frees);
+        assert_eq(vgets + 1, lifecycle_state.vfs_get_calls);
+        assert_eq(vputs + 1, lifecycle_state.vfs_put_calls);
+        assert_eq(fgets + 1, lifecycle_state.files_get_calls);
+        assert_eq(fputs + 1, lifecycle_state.files_put_calls);
     }
 }
 
@@ -1821,7 +1928,8 @@ static void test_device_map_auto_select(void)
         assert_eq((uint64_t)rc, v->vm_start);
         assert_eq((uint64_t)rc + 0x1000UL, v->vm_end);
         assert_true(v->vm_flags & VMA_IO);
-        assert_eq(g_dev_first_pa | (g_dev_flags & ~PAGE_4K_MASK),
+        assert_eq(g_dev_first_pa | PAGE_USER | PAGE_VALID | PAGE_NO_EXEC |
+                  PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
                   *lifecycle_pte_get((uint64_t)rc));
     }
 }
@@ -1879,7 +1987,7 @@ static void test_device_map_auto_select_conflict(void)
 TEST_LIST_BEGIN
     TEST_ENTRY(test_heap_vma_zero_length),
     TEST_ENTRY(test_heap_vma_vm_flags),
-    TEST_ENTRY(test_heap_vma_vm_page_prot),
+    TEST_ENTRY(test_heap_vma_leaf_conversion),
     TEST_ENTRY(test_mm_init_user_heap_sets_breaks),
     TEST_ENTRY(test_mm_init_user_heap_already_aligned),
     TEST_ENTRY(test_vma_find_does_not_match_zero_heap),
@@ -1907,6 +2015,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_munmap_fixed_failure_preserves_state),
     TEST_ENTRY(test_device_map_fixed_commit),
     TEST_ENTRY(test_device_map_fixed_borrowed_leaf),
+    TEST_ENTRY(test_device_map_fixed_cache_contract),
     TEST_ENTRY(test_device_map_fixed_prepare_failure),
     TEST_ENTRY(test_device_map_auto_select),
     TEST_ENTRY(test_munmap_huge_block_split_rejected),

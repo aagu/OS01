@@ -388,7 +388,6 @@ static void split_policy_vma(mm_t *mm, vma_t *v, uint64_t at, vma_t *right)
     right->vm_start     = at;
     right->vm_end       = v->vm_end;
     right->vm_flags     = v->vm_flags;
-    right->vm_page_prot = v->vm_page_prot;
     right->vm_pgoff     = v->vm_pgoff;
     right->vm_file      = NULL;
     v->vm_end = at;
@@ -418,7 +417,6 @@ int user_vm_init_heap(mm_t *mm, uint64_t heap_base)
     hv->vm_start     = base;
     hv->vm_end       = base;            /* zero-length until brk grows */
     hv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP;
-    hv->vm_page_prot = 0;
     hv->vm_pgoff     = 0;
     hv->vm_file      = NULL;
 
@@ -973,7 +971,6 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     v->vm_start     = cand;
     v->vm_end       = cand + alen;
     v->vm_flags     = vma_flags | VMA_ANON;
-    v->vm_page_prot = 0;
     v->vm_pgoff     = 0;
     v->vm_file      = NULL;
     vm_area_insert_sorted(mm, v);

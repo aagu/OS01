@@ -13,7 +13,6 @@
 #include <core/printk.h>      // Pos, frame_buffer
 #include <memory/vma.h>         // vma_t, VMA_IO, VMA_SHARED
 #include <memory/vmm.h>
-#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)         // vmm_map_4k_page, flush_tlb, PAGE_4K_SIZE
 #include <sched/task.h>        // current
 #include <memory/pmm.h>         // Phy_To_Virt
 #include <memory/memory.h>      // PAGE_OFFSET, Virt_To_Phy, Phy_To_Virt
@@ -165,14 +164,17 @@ static int fb_mmap(struct vfs_node *node, struct vma *vma_,
         return -EINVAL;
     }
 
-    /* Both the read-only and the (test-only) raw writable path go
-     * through the same flags; the user alias maps the SAME physical
-     * pages as the kernel mapping. */
-    uint64_t page_flags = fb_x86_user_pte_flags(fb_cache_policy_get(),
-                                                 is_writable);
+    /* The user alias maps the SAME physical pages as the kernel
+     * mapping, so it must carry the SAME memory type.  The request is
+     * SEMANTIC: only an explicit write-back policy becomes WB, every
+     * other policy stays conservatively UC.  The MM commit side derives
+     * the hardware leaf word from the validated VMA + this request. */
+    enum vm_device_cache cache =
+        (fb_cache_policy_get() == FB_CACHE_POLICY_WRITEBACK)
+            ? VM_DEVICE_CACHE_WB : VM_DEVICE_CACHE_UC;
     uint64_t fb_phys = (uint64_t)Pos.Phy_addr;
 
-    rc = commit(ctx, fb_phys, page_flags);
+    rc = commit(ctx, fb_phys, cache);
     if (rc < 0) {
         /* The MM kept the old mapping and reported the failure. */
         fb_control_unlock();

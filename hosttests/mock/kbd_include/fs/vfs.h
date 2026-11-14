@@ -10,8 +10,10 @@
 
 typedef struct vfs_node vfs_node_t;
 
-/* Device mmap commit callback (mirror of the real header). */
+/* Device mmap commit callback (mirror of the real headers
+ * <memory/vm_device.h> + <fs/vfs.h>). */
+enum vm_device_cache { VM_DEVICE_CACHE_UC = 0, VM_DEVICE_CACHE_WB = 1 };
 typedef int (*vfs_mmap_commit_fn)(void *ctx, uint64_t first_pa,
-                                  uint64_t pte_flags);
+                                  enum vm_device_cache cache);
 
 #endif /* _FS_VFS_H */

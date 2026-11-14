@@ -43,8 +43,10 @@ typedef struct vm_area_struct {
     uint64_t    vm_end;       // end VA (4KB aligned, exclusive)
     uint64_t    vm_flags;     // VMA_* flags (VMA_PROT_READ/WRITE/EXEC,
                               // VMA_SHARED/ANON/... — see VMA_* above;
-                              // NOT the vmm.h VM_* PTE-bit family)
-    uint64_t    vm_page_prot; // PAGE_* flags for PTE
+                              // NOT the vmm.h VM_* PTE-bit family).
+                              // The SOLE source of leaf permissions: the
+                              // owning architecture derives hardware PTE
+                              // bits on demand (x86_vma_pte_flags).
     uint64_t    vm_pgoff;     // file offset in 4KB pages
     vfs_node_t *vm_file;      // NULL = anonymous
 } vma_t;
@@ -60,8 +62,8 @@ int       fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
 // Must be called after a successful elf_load() on the new mm.
 // Sets mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096).
 // Inserts ONE zero-length heap VMA [start_brk, start_brk) with
-//   vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP,
-//   vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID.
+//   vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP
+// (heap data pages are NX; the leaf word is derived on demand).
 // Returns 0 on success, -ENOMEM if the VMA allocation fails.
 // On failure: mm is unchanged (caller owns it; will destroy via
 // destroy_unpublished_user_mm from kernel/sched/task.c).

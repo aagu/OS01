@@ -147,31 +147,23 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32
 }
 
 /* ── MM commit callback mock ─────────────────────────────────
- * fb_mmap now validates and then hands the range to the MM
- * transaction; this callback records what the device supplied and
- * emulates the transaction's leaf install over the mock PTE table. */
+ * fb_mmap validates and then hands the range to the MM transaction;
+ * this callback records the device PA and the SEMANTIC cache request
+ * and returns the configured result.  The driver test asserts the
+ * request only — the leaf-bit contract lives in the production MM
+ * commit test. */
 static int      g_mock_commit_calls;
 static int      g_mock_commit_rc;
 static uint64_t g_mock_commit_first_pa;
-static uint64_t g_mock_commit_flags;
+static enum vm_device_cache g_mock_commit_cache;
 
-static int mock_commit(void *ctx, uint64_t first_pa, uint64_t pte_flags)
+static int mock_commit(void *ctx, uint64_t first_pa, enum vm_device_cache cache)
 {
+    (void)ctx;
     g_mock_commit_calls++;
     g_mock_commit_first_pa = first_pa;
-    g_mock_commit_flags = pte_flags;
-    if (g_mock_commit_rc)
-        return g_mock_commit_rc;
-    vma_t *v = (vma_t *)ctx;
-    size_t before = g_installed_count;
-    for (uint64_t va = v->vm_start; va < v->vm_end; va += PAGE_4K_SIZE) {
-        uint64_t phys = first_pa + (va - v->vm_start);
-        if (vmm_map_4k_page(NULL, phys, va, pte_flags) != 0) {
-            g_installed_count = before;   /* own-call rollback */
-            return -ENOMEM;
-        }
-    }
-    return 0;
+    g_mock_commit_cache = cache;
+    return g_mock_commit_rc;
 }
 
 /* ── Fault-Tolerant Copy / User Range Mocks ── */
@@ -314,7 +306,7 @@ static void setup_test_environment(void)
     g_mock_commit_calls = 0;
     g_mock_commit_rc = 0;
     g_mock_commit_first_pa = 0;
-    g_mock_commit_flags = 0;
+    g_mock_commit_cache = VM_DEVICE_CACHE_UC;
 
     Pos.XResolution = TEST_FB_WIDTH;
     Pos.YResolution = TEST_FB_HEIGHT;
@@ -500,16 +492,16 @@ static void test_mmap_partial_failure(void)
     vma.vm_end   = 0x14000; /* 4 pages = 16KB */
     vma.vm_file  = NULL;
 
-    /* Subcase 4a: the MM transaction fails to install page 2.  It
-     * rolls back its own leaves; fb_mmap publishes no raw state. */
-    g_current_map_page = 0;
-    g_inject_map_fail_page = 1;
-    g_installed_count = 0;
+    /* Subcase 4a: the MM transaction reports an install failure.  It
+     * rolls back its own leaves (the leaf-level rollback lives in the
+     * production MM commit tests); fb_mmap relays the error and
+     * publishes no raw state. */
+    g_mock_commit_rc = -ENOMEM;
 
     int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-ENOMEM, rc);
     CHECK_EQ(1, g_mock_commit_calls);
-    CHECK_EQ(0, g_installed_count);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_mock_commit_cache);
     CHECK_EQ(false, fb_has_raw_mmap_seen());
 
     /* Subcase 4b: a failed commit (device-side denial) publishes
@@ -522,7 +514,8 @@ static void test_mmap_partial_failure(void)
     CHECK_EQ(0, g_installed_count);
     CHECK_EQ(false, fb_has_raw_mmap_seen());
 
-    /* Subcase 4c: successful commit sets raw state and maps all pages. */
+    /* Subcase 4c: successful commit sets raw state.  The driver never
+     * installs leaves itself — the MM transaction owns that. */
     setup_test_environment();
     g_current_map_page = 0;
     g_inject_map_fail_page = -1;
@@ -530,8 +523,8 @@ static void test_mmap_partial_failure(void)
 
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_installed_count);
     CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_mock_commit_cache);
     CHECK_EQ(true, fb_has_raw_mmap_seen());
 }
 
@@ -582,18 +575,28 @@ static void test_fb_fixed_failure_keeps_old_mapping(void)
     CHECK_EQ(0, memcmp(old_flags, g_installed_flags, sizeof(old_flags)));
     CHECK_EQ(false, fb_has_raw_mmap_seen());
 
-    /* 3. A successful commit maps the requested range with the device
-     *    PA/flags and publishes the raw state. */
+    /* 3. Transaction -EINVAL after validation: the error propagates
+     *    verbatim and neither raw marker moves. */
+    bool raw_before = fb_has_raw_mmap_seen();
+    bool raw_w_before = fb_has_raw_writable_mmap_seen();
+    g_mock_commit_rc = -EINVAL;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
+    CHECK_EQ(-EINVAL, rc);
+    CHECK_EQ(2, g_mock_commit_calls);
+    CHECK_EQ(old_count, g_installed_count);
+    CHECK_EQ(0, memcmp(old_ptes, g_installed_ptes, sizeof(old_ptes)));
+    CHECK_EQ(0, memcmp(old_flags, g_installed_flags, sizeof(old_flags)));
+    CHECK_EQ(raw_before, fb_has_raw_mmap_seen());
+    CHECK_EQ(raw_w_before, fb_has_raw_writable_mmap_seen());
+
+    /* 4. A successful commit hands the device PA and the semantic
+     *    cache request of the published policy (default: uncacheable)
+     *    to the MM transaction, and publishes the raw state. */
     g_mock_commit_rc = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(0xE0000000ULL, g_mock_commit_first_pa);
-    CHECK_EQ((uint64_t)PAGE_USER_PTE_RO,
-             g_mock_commit_flags & ~(uint64_t)(PAGE_CACHE_DISABLE |
-                                                 PAGE_WRITE_THROUGH |
-                                                 PAGE_NO_EXEC));
-    CHECK_EQ((uint64_t)PAGE_NO_EXEC,
-             g_mock_commit_flags & (uint64_t)PAGE_NO_EXEC);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_mock_commit_cache);
     CHECK_EQ(true, fb_has_raw_mmap_seen());
 }
 
@@ -786,7 +789,9 @@ static void test_raw_mmap_ownership_boundaries(void)
     CHECK_EQ(false, fb_has_raw_mmap_seen());
     CHECK_EQ(0, g_installed_count);
 
-    /* 2. Readonly mmap succeeds and PTEs do NOT have PAGE_WRITE */
+    /* 2. Readonly mmap succeeds: the commit request goes out once and
+     *    only the read-only raw marker is published (the writable
+     *    marker stays down — the RO/RW marker difference). */
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
     g_current_map_page = 0;
     g_inject_map_fail_page = -1;
@@ -794,12 +799,10 @@ static void test_raw_mmap_ownership_boundaries(void)
     g_installed_count = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_installed_count);
+    CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_mock_commit_cache);
     CHECK_EQ(true, fb_has_raw_mmap_seen());
     CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
-    for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(0, (g_installed_flags[i] & PAGE_WRITE));
-    }
 
     /* 3. Test mode writable mmap and ownership bidirectional EBUSY */
     setup_test_environment();
@@ -858,21 +861,10 @@ static void test_raw_mmap_ownership_boundaries(void)
  * The user alias maps the SAME physical pages as the kernel's
  * framebuffer mapping, so it must carry the same memory type: x86
  * forbids accessing one physical page under two different memory types
- * (IA32_PAT: avoid memory-type aliasing).
- *
- * The expectations are hand written bit patterns, NOT the
- * implementation's flag expressions:
- *   bit 0 P = 1, bit 1 RW = 1 (writable) / 0 (read-only), bit 2 U = 1
- *   bit 3 PWT, bit 4 PCD = the cache policy bits
- *   => read-only user PTE = 0x05, writable user PTE = 0x07
- *   => uncacheable adds PCD|PWT = 0x18
+ * (IA32_PAT: avoid memory-type aliasing).  The driver asserts the
+ * SEMANTIC cache request; the leaf-bit contract lives in the
+ * production MM commit test.
  */
-#define EXPECT_USER_PTE_RO      0x05ULL
-#define EXPECT_USER_PTE_W       0x07ULL
-#define EXPECT_CACHE_BITS_MASK  0x18ULL
-/* PTE permissions plan: the /dev/fb user alias is always NX. */
-#define EXPECT_NO_EXEC          PAGE_NO_EXEC
-
 static void test_raw_mmap_cache_policy(void)
 {
     printf("\n--- test_raw_mmap_cache_policy ---\n");
@@ -884,21 +876,16 @@ static void test_raw_mmap_cache_policy(void)
     vma.vm_file  = NULL;
 
     /* 1. Write-back policy (the QEMU VGA RAM backend publishes it):
-     *    the alias must be write-back -- no PCD, no PWT. */
+     *    the alias request must be write-back. */
     setup_test_environment();
     fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
-    g_current_map_page = 0;
-    g_installed_count = 0;
     int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_installed_count);
-    for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~(EXPECT_CACHE_BITS_MASK | EXPECT_NO_EXEC));
-        CHECK_EQ(0, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
-        CHECK_EQ(EXPECT_NO_EXEC, g_installed_flags[i] & EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_WB, g_mock_commit_cache);
+    CHECK_EQ(0xE0000000ULL, g_mock_commit_first_pa);
 
     /* 2. Same policy, writable alias (test build only). */
     setup_test_environment();
@@ -906,34 +893,23 @@ static void test_raw_mmap_cache_policy(void)
     fb_set_raw_writable_allowed_for_test(true);
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
-    g_current_map_page = 0;
-    g_installed_count = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_installed_count);
-    for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(EXPECT_USER_PTE_W, g_installed_flags[i] & ~(EXPECT_CACHE_BITS_MASK | EXPECT_NO_EXEC));
-        CHECK_EQ(0, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
-        CHECK_EQ(EXPECT_NO_EXEC, g_installed_flags[i] & EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_WB, g_mock_commit_cache);
+    CHECK_EQ(true, fb_has_raw_writable_mmap_seen());
 
-    /* 3. Uncacheable policy: the alias must be uncacheable too -- the
-     *    two mappings must never disagree about the memory type of the
-     *    shared physical pages. */
+    /* 3. Uncacheable policy: the alias request must be uncacheable --
+     *    the two mappings must never disagree about the memory type of
+     *    the shared physical pages. */
     setup_test_environment();
     fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
-    g_current_map_page = 0;
-    g_installed_count = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_installed_count);
-    for (size_t i = 0; i < g_installed_count; i++) {
-        CHECK_EQ(EXPECT_USER_PTE_RO, g_installed_flags[i] & ~(EXPECT_CACHE_BITS_MASK | EXPECT_NO_EXEC));
-        CHECK_EQ(EXPECT_CACHE_BITS_MASK, g_installed_flags[i] & EXPECT_CACHE_BITS_MASK);
-        CHECK_EQ(EXPECT_NO_EXEC, g_installed_flags[i] & EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_mock_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_mock_commit_cache);
 
     /* Restore the default policy for the remaining tests. */
     fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);

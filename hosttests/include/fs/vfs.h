@@ -39,9 +39,11 @@ typedef struct vfs_inode_ops {
     int              (*readlink)(struct vfs_node *node, char *buf, size_t size);
 } vfs_inode_ops_t;
 
-/* Device mmap commit callback (mirror of the kernel header). */
+/* Device mmap commit callback (mirror of the kernel headers
+ * <memory/vm_device.h> + <fs/vfs.h>). */
+enum vm_device_cache { VM_DEVICE_CACHE_UC = 0, VM_DEVICE_CACHE_WB = 1 };
 typedef int (*vfs_mmap_commit_fn)(void *ctx, uint64_t first_pa,
-                                  uint64_t pte_flags);
+                                  enum vm_device_cache cache);
 
 typedef struct vfs_file_ops {
     int     (*read)(struct vfs_node *node, uint64_t offset,

@@ -1,12 +1,15 @@
 // kernel/memory/vma.c — VMA linked-list management
 #include <memory/vma.h>
 #include <memory/vm_area.h>
+#include <memory/vm_device.h>
 #include <sched/task.h>
 #include <kernel.h>
 #include <memory/slab.h>
 #include <fs/file.h>
 #include <memory/pmm.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
+#include <arch/x86_64/vma.h>   // x86_vma_pte_flags: logical bits → leaf
+#include <arch/x86_64/fb_pte.h>  // x86_fb_cache_bits: device cache request → PCD/PWT
 #include <memory/memory.h>
 #include <memory/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
 #include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
@@ -142,9 +145,9 @@ fail:
 // Contract (docs/.../2026-10-01-user-heap-elf-isolation-design.md §4):
 //   - mm->start_brk = mm->end_brk = ALIGN_UP(elf_end, 4096)
 //   - ONE heap VMA inserted at [start_brk, start_brk) — zero-length
-//   - vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP
-//   - vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC
-//     (heap data pages are never executable — PTE permissions plan)
+//   - vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP
+//     (heap data pages are never executable — the leaf word is derived
+//     on demand via x86_vma_pte_flags)
 //   - vma_find() does NOT match this VMA (zero-length invariant)
 //
 // Failure handling: if the VMA allocation fails, mm is left
@@ -167,7 +170,6 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
     hv->vm_start     = heap_base;
     hv->vm_end       = heap_base;          /* zero-length on purpose */
     hv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP;
-    hv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC;
     hv->vm_pgoff     = 0;
     hv->vm_file      = NULL;
 
@@ -291,8 +293,8 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         return -ENOMEM;
     }
 
-    /* Heap VMA's leaf-prot flags (user R/W present). */
-    uint64_t page_prot = heap_vma->vm_page_prot;
+    /* Heap VMA's leaf permission word (user R/W present, NX). */
+    uint64_t page_prot = x86_vma_pte_flags(heap_vma->vm_flags);
     uint64_t *pgd      = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
 
     int64_t rc = 0;
@@ -504,12 +506,14 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
     return 0;
 }
 
-// ── Helper: convert prot/flags to vm_page_prot flags ──────────
+// ── Helper: convert prot/flags to VMA logical flags ───────────
 // The raw value stays uint64_t end-to-end: the syscall entry accepts
 // any 64-bit word, and narrowing to int first would silently accept
 // the unknown high bits the contract rejects ((1ULL<<32)|PROT_READ).
-static int prot_to_page_flags(uint64_t prot, uint64_t *page_prot,
-                              uint64_t *vm_flags)
+// The VMA's logical permission bits are the single source of truth;
+// the owning architecture derives the hardware leaf word on demand
+// (x86_vma_pte_flags).
+static int prot_to_vma_flags(uint64_t prot, uint64_t *vm_flags)
 {
     *vm_flags = 0;
 
@@ -524,28 +528,35 @@ static int prot_to_page_flags(uint64_t prot, uint64_t *page_prot,
     if (prot & PROT_EXEC)
         prot |= PROT_READ;
 
-    /* PTE permissions plan: the logical permission becomes the
-     * hardware leaf permission.  R and RW pages are NX; only an
-     * explicit PROT_EXEC grants fetch. */
     if (prot == PROT_NONE) {
-        *page_prot = PAGE_USER;
         *vm_flags = 0;
     } else if (prot == PROT_READ) {
-        *page_prot = PAGE_USER_PTE_RO | PAGE_NO_EXEC;   /* R/NX  */
         *vm_flags = VMA_PROT_READ;
     } else if (prot == (PROT_READ | PROT_WRITE)) {
-        *page_prot = PAGE_USER_PTE | PAGE_NO_EXEC;      /* RW/NX */
         *vm_flags = VMA_PROT_READ | VMA_PROT_WRITE;
     } else if (prot == (PROT_READ | PROT_EXEC)) {
-        *page_prot = PAGE_USER_PTE_RO;                  /* RX    */
         *vm_flags = VMA_PROT_READ | VMA_PROT_EXEC;
     } else if (prot == (PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        *page_prot = PAGE_USER_PTE;                     /* RWX   */
         *vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC;
     } else {
         return -EINVAL;
     }
     return 0;
+}
+
+// ── x86_vma_pte_flags — logical VMA bits → x86 user leaf word ──
+// See <arch/x86_64/vma.h>.  Only called on already-validated VMA
+// logical bits (prot_to_vma_flags normalization upstream).
+uint64_t x86_vma_pte_flags(uint64_t vm_flags)
+{
+    uint64_t f = PAGE_USER;
+    if (vm_flags & VMA_PROT_READ)
+        f |= PAGE_VALID;
+    if (vm_flags & VMA_PROT_WRITE)
+        f |= PAGE_WRITE;
+    if (!(vm_flags & VMA_PROT_EXEC))
+        f |= PAGE_NO_EXEC;
+    return f;
 }
 
 // ── Helper: convert mmap flags to vm_flags ────────────────────
@@ -784,10 +795,13 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
 
 // ── Device MAP_FIXED transaction (fb / VMA_IO) ───────────────
 // The device callback runs under its control mutex and calls us with
-// the first PA + final PTE flags.  Everything fallible (ownership
-// check, boundary node, intermediate tables) happens before any old
-// leaf is withdrawn; the commit then replaces the range and publishes
-// the VMA_IO node as the last step.  The retired old nodes are handed
+// the first PA + a semantic cache request.  The commit validates the
+// enum and derives the leaf word from the VMA's logical permission +
+// the requested memory class — no hardware encoding crosses the
+// boundary.  Everything fallible (cache enum check, ownership check,
+// boundary node, intermediate tables) happens before any old leaf is
+// withdrawn; the commit then replaces the range and publishes the
+// VMA_IO node as the last step.  The retired old nodes are handed
 // back to do_mmap, which drops their references only after BOTH locks
 // are released.
 typedef struct {
@@ -800,13 +814,18 @@ typedef struct {
 } mmap_dev_ctx_t;
 
 static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
-                           uint64_t pte_flags)
+                           enum vm_device_cache cache)
 {
     mmap_dev_ctx_t *ctx = (mmap_dev_ctx_t *)ctxp;
     mm_t *mm = ctx->mm;
     uint64_t start = ctx->start, end = ctx->end;
 
     if (!mm || !ctx->vma || start >= end)
+        return -EINVAL;
+
+    // Unknown cache request: reject before any page-table or VMA
+    // change (the old mapping stays fully intact).
+    if (cache != VM_DEVICE_CACHE_UC && cache != VM_DEVICE_CACHE_WB)
         return -EINVAL;
 
     uint64_t *root = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
@@ -866,6 +885,11 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
 
     // Install the device leaves.  The prepared tables make this
     // allocation-free; the old mapping is already fully withdrawn.
+    // The leaf word: USER + PRESENT + NX (the device driver admits no
+    // EXEC), WRITE from the VMA, memory type from the request — the
+    // same encoding the kernel and early aliases use.
+    uint64_t pte_flags = x86_vma_pte_flags(ctx->vma->vm_flags) |
+                         x86_fb_cache_bits(cache);
     for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
         uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
         if (!pte) continue;     // defensive: preparer covered the range
@@ -880,7 +904,6 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
     dv->vm_start     = start;
     dv->vm_end       = end;
     dv->vm_flags    |= VMA_IO;
-    dv->vm_page_prot = pte_flags;
     dv->vm_file      = NULL;   // the node reference stays with do_mmap
     vma_insert(mm, dv);
 
@@ -952,9 +975,9 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (!(flags & MAP_ANONYMOUS) && offset > UINT64_MAX - length)
         return -EINVAL;
 
-    // ── 2. prot → page flags (before any visible change) ──
-    uint64_t page_prot, vm_flags_base;
-    int rc = prot_to_page_flags(prot, &page_prot, &vm_flags_base);
+    // ── 2. prot → VMA logical flags (before any visible change) ──
+    uint64_t vm_flags_base;
+    int rc = prot_to_vma_flags(prot, &vm_flags_base);
     if (rc) return rc;
     map_flags_to_vm((int)flags, &vm_flags_base);
 
@@ -1044,7 +1067,6 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         dv->vm_start     = addr;
         dv->vm_end       = addr + length;
         dv->vm_flags     = vm_flags_base | VMA_IO;
-        dv->vm_page_prot = page_prot;
         dv->vm_pgoff     = offset >> PAGE_4K_SHIFT;
         dv->vm_file      = NULL;    // published VMA owns no node ref
 
@@ -1120,7 +1142,6 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     vma->vm_start     = addr;
     vma->vm_end       = addr + length;
     vma->vm_flags     = vm_flags_base;
-    vma->vm_page_prot = page_prot;
     vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
     vma->vm_file      = file_node;
     vma_insert(mm, vma);
@@ -1210,9 +1231,13 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
     if (mm_user_range_protected(current->mm, addr, end))
         return -EINVAL;
 
-    uint64_t new_page_prot, new_vm_flags;
-    int rc = prot_to_page_flags(prot, &new_page_prot, &new_vm_flags);
+    uint64_t new_vm_flags;
+    int rc = prot_to_vma_flags(prot, &new_vm_flags);
     if (rc) return rc;
+    /* The leaf word for every resident leaf of the range.  The cache
+     * bits and COW state of each old leaf are overlaid in place below
+     * (PTE permissions plan: mprotect keeps cache attributes). */
+    uint64_t new_page_prot = x86_vma_pte_flags(new_vm_flags);
 
     mm_t *mm = current->mm;
     spin_lock(&mm->lock);
@@ -1297,9 +1322,8 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 
         // The boundary splits above guarantee every overlapping VMA
         // now lies entirely inside [addr, end).
-        v->vm_flags     &= ~(VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC);
-        v->vm_flags     |= new_vm_flags;
-        v->vm_page_prot  = new_page_prot;
+        v->vm_flags &= ~(VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC);
+        v->vm_flags |= new_vm_flags;
 
         for (uint64_t va = v->vm_start; va < v->vm_end;
              va += PAGE_4K_SIZE) {

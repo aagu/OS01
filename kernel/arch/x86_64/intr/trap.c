@@ -31,6 +31,7 @@
 #include <memory/uaccess.h>
 #include <kernel.h>
 #include <memory/vma.h>
+#include <arch/x86_64/vma.h>   // x86_vma_pte_flags: logical bits -> leaf
 #include <intr/dispatch.h>       // arch_intr_dispatch + struct intr_event (intr-dispatch phase 1)
 #include <arch/intr.h>           // strong backend facade
 #include <arch/x86_64/intr_decode.h>   // production event decoder
@@ -808,12 +809,12 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					memcpy((void *)Phy_To_Virt(new_phys),
 					       (void *)Phy_To_Virt(old_phys),
 					       PAGE_4K_SIZE);
-					*pte = x86_pte_4k_make(new_phys, vma->vm_page_prot);
+					*pte = x86_pte_4k_make(new_phys, x86_vma_pte_flags(vma->vm_flags));
 					resolved = 1;
 				} else {
 					/* In-place upgrade: the leaf keeps
 					 * this PA — put without free. */
-					*pte = x86_pte_4k_make(old_phys, vma->vm_page_prot);
+					*pte = x86_pte_4k_make(old_phys, x86_vma_pte_flags(vma->vm_flags));
 					resolved = 1;
 				}
 
@@ -868,7 +869,8 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 				}
 				memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
 				int rc = vmm_map_4k_page(user_pgd, phys,
-							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
+							     cr2 & PAGE_4K_MASK,
+							     x86_vma_pte_flags(vma->vm_flags));
 				if (rc != 0) {
 					free_4k_page(phys);
 					kill_current_user_task(regs, SIGSEGV);
@@ -904,7 +906,8 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 				    memset((char *)Phy_To_Virt(phys) + n, 0,
 				           PAGE_4K_SIZE - (size_t)n);
 				int rc = vmm_map_4k_page(user_pgd, phys,
-							     cr2 & PAGE_4K_MASK, vma->vm_page_prot);
+							     cr2 & PAGE_4K_MASK,
+							     x86_vma_pte_flags(vma->vm_flags));
 				if (rc != 0) {
 					free_4k_page(phys);
 					kill_current_user_task(regs, SIGSEGV);

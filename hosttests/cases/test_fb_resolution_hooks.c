@@ -230,39 +230,34 @@ file_t *file_alloc(void) { return (file_t *)calloc(1, sizeof(file_t)); }
 void vfs_node_put(struct vfs_node *n) { (void)n; }
 void write_serial_unlocked(unsigned char c) { (void)c; }
 void write_serial(char c) { (void)c; }
-/* The user alias PTE attributes the REAL fb_mmap() installs are recorded
- * here: the framebuffer cache-policy regression compares them with the
- * kernel mapping's leaf PMD entry. */
-#define HOOK_MAX_PTE 64
-static uint64_t g_hook_pte_flags[HOOK_MAX_PTE];
-static uint64_t g_hook_pte_virt[HOOK_MAX_PTE];
-static size_t   g_hook_pte_count;
+/* The REAL fb_mmap() records the semantic cache request it hands the
+ * MM transaction here: the framebuffer cache-policy regression compares
+ * it with the kernel mapping's leaf PMD entry.  The driver test never
+ * manufactures PTE words — the leaf-bit contract lives in the
+ * production MM commit test. */
+static int g_hook_commit_calls;
+static enum vm_device_cache g_hook_commit_cache;
+static int g_hook_commit_rc;
 
 int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
 {
-    (void)pgdir; (void)phys;
-    if (g_hook_pte_count < HOOK_MAX_PTE) {
-        g_hook_pte_flags[g_hook_pte_count] = flags;
-        g_hook_pte_virt[g_hook_pte_count] = virt;
-        g_hook_pte_count++;
-    }
-    (void)virt; (void)flags;
+    (void)pgdir; (void)phys; (void)virt; (void)flags;
     return 0;
 }
 void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt) { (void)pgdir; (void)virt; }
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out)
 { (void)pgdir; (void)virt; (void)phys_out; (void)vm_out; return -ENOENT; }
 
-/* MM commit mock: fb_mmap hands the range to the MM transaction; this
- * records the device PA/flags by mapping through the same mock. */
-static int hook_commit(void *ctx, uint64_t first_pa, uint64_t pte_flags)
+/* MM commit mock: fb_mmap hands the range to the MM transaction; the
+ * hook records the device PA + cache request and lets the test decide
+ * the commit outcome. */
+static int hook_commit(void *ctx, uint64_t first_pa, enum vm_device_cache cache)
 {
-    vma_t *v = (vma_t *)ctx;
-    for (uint64_t va = v->vm_start; va < v->vm_end; va += PAGE_4K_SIZE) {
-        uint64_t phys = first_pa + (va - v->vm_start);
-        if (vmm_map_4k_page(NULL, phys, va, pte_flags) != 0)
-            return -ENOMEM;
-    }
+    (void)ctx;
+    g_hook_commit_calls++;
+    g_hook_commit_cache = cache;
+    if (g_hook_commit_rc)
+        return g_hook_commit_rc;
     return 0;
 }
 
@@ -842,13 +837,6 @@ static void test_consumed_token_identifies_the_armed_fault(void)
  * ═══════════════════════════════════════════════════════════════════ */
 #define HOOK_EXPECT_PMD_LEAF_UC  0x9BULL
 #define HOOK_EXPECT_PMD_LEAF_WB  0x83ULL
-/* The non-cache part of the user PTE: U|P (read-only) and U|RW|P
- * (writable).  The cache bits are asserted separately. */
-#define HOOK_EXPECT_PTE_RO       0x05ULL
-#define HOOK_EXPECT_PTE_W        0x07ULL
-#define HOOK_EXPECT_CACHE_MASK   0x18ULL
-/* PTE permissions plan: the /dev/fb user alias is always NX. */
-#define HOOK_EXPECT_NO_EXEC      PAGE_NO_EXEC
 
 /* Independent walk of the mock page table (shifts 39/30/21 re-derived
  * here, not taken from the mapper under test). */
@@ -924,30 +912,19 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     vma.vm_file  = NULL;
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
-    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
-    memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
-    g_hook_pte_count = 0;
+    g_hook_commit_calls = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_hook_pte_count);
-    for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
-        CHECK_EQ(HOOK_EXPECT_CACHE_MASK, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
-        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_hook_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_hook_commit_cache);
 
     fb_set_raw_writable_allowed_for_test(true);
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
-    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
-    g_hook_pte_count = 0;
+    g_hook_commit_calls = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_hook_pte_count);
-    for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
-        CHECK_EQ(HOOK_EXPECT_CACHE_MASK, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
-        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_hook_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_UC, g_hook_commit_cache);
     fb_set_raw_writable_allowed_for_test(false);
 
     /* 5. The same invariant for the SUCCESS path: a write-back mapping
@@ -966,19 +943,31 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     CHECK_EQ(HOOK_EXPECT_PMD_LEAF_WB, leaf & 0x1FFULL);
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
-    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
-    g_hook_pte_count = 0;
+    g_hook_commit_calls = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
-    for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(0, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
-    }
+    CHECK_EQ(1, g_hook_commit_calls);
+    CHECK_EQ(VM_DEVICE_CACHE_WB, g_hook_commit_cache);
+
+    /* 6. A transaction failure propagates verbatim and the raw-mmap
+     *    state stays exactly as it was before the call. */
+    bool raw_before = fb_has_raw_mmap_seen();
+    bool raw_w_before = fb_has_raw_writable_mmap_seen();
+    g_hook_commit_rc = -EINVAL;
+    vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
+    g_hook_commit_calls = 0;
+    rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
+    CHECK_EQ(-EINVAL, rc);
+    CHECK_EQ(1, g_hook_commit_calls);
+    CHECK_EQ(raw_before, fb_has_raw_mmap_seen());
+    CHECK_EQ(raw_w_before, fb_has_raw_writable_mmap_seen());
+    g_hook_commit_rc = 0;
 }
 
 /* Drive the REAL fb_ops.mmap() and check that the user alias carries the
- * expected memory type: the cache bits must match the kernel mapping, and
- * the read-only / writable PTE bit patterns must stay as expected. */
-static void check_alias_cache_bits(unsigned expected_cache_bits)
+ * expected memory type: the semantic cache request must match the kernel
+ * mapping's policy, for both the read-only and the writable alias. */
+static void check_alias_cache(enum vm_device_cache expected_cache)
 {
     struct mm_struct mm;
     memset(&mm, 0, sizeof(mm));
@@ -992,31 +981,19 @@ static void check_alias_cache_bits(unsigned expected_cache_bits)
     vma.vm_file  = NULL;
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_READ;
-    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
-    memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
-    g_hook_pte_count = 0;
+    g_hook_commit_calls = 0;
     int rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_hook_pte_count);
-    for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_RO, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
-        CHECK_EQ(expected_cache_bits, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
-        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_hook_commit_calls);
+    CHECK_EQ(expected_cache, g_hook_commit_cache);
 
     fb_set_raw_writable_allowed_for_test(true);
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
-    memset(g_hook_pte_flags, 0, sizeof(g_hook_pte_flags));
-    memset(g_hook_pte_virt, 0, sizeof(g_hook_pte_virt));
-    g_hook_pte_count = 0;
+    g_hook_commit_calls = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
-    CHECK_EQ(4, g_hook_pte_count);
-    for (size_t i = 0; i < g_hook_pte_count; i++) {
-        CHECK_EQ(HOOK_EXPECT_PTE_W, g_hook_pte_flags[i] & ~(HOOK_EXPECT_CACHE_MASK | HOOK_EXPECT_NO_EXEC));
-        CHECK_EQ(expected_cache_bits, g_hook_pte_flags[i] & HOOK_EXPECT_CACHE_MASK);
-        CHECK_EQ(HOOK_EXPECT_NO_EXEC, g_hook_pte_flags[i] & HOOK_EXPECT_NO_EXEC);
-    }
+    CHECK_EQ(1, g_hook_commit_calls);
+    CHECK_EQ(expected_cache, g_hook_commit_cache);
     fb_set_raw_writable_allowed_for_test(false);
 }
 
@@ -1076,7 +1053,7 @@ static void test_probe_allocation_failure_keeps_policy_and_alias_consistent(void
 
     /* 4. The REAL user alias must carry the same memory type as the
      *    kernel mapping -- read-only and writable. */
-    check_alias_cache_bits(HOOK_EXPECT_CACHE_MASK);
+    check_alias_cache(VM_DEVICE_CACHE_UC);
 }
 
 /* ── N3: the BACKEND-INSTALL failure point of the probe ────────────
@@ -1114,7 +1091,7 @@ static void test_probe_backend_install_failure_keeps_policy_and_alias_consistent
     CHECK_EQ(FB_CACHE_POLICY_WRITEBACK, fb_cache_policy_get());
 
     /* ... and the REAL user alias agrees with the kernel mapping. */
-    check_alias_cache_bits(0);
+    check_alias_cache(VM_DEVICE_CACHE_WB);
 }
 
 TEST_LIST_BEGIN

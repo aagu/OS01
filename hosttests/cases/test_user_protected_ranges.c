@@ -308,7 +308,6 @@ static void test_borrowed_leaf_never_released(void)
     iov->vm_start     = base;
     iov->vm_end       = base + 0x2000;
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
-    iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     iov->vm_pgoff     = 0;
     iov->vm_file      = NULL;
     vma_insert(&fixture_mm, iov);
@@ -547,7 +546,6 @@ static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
     sv->vm_start     = HEAP_LIMIT - 0x1000;
     sv->vm_end       = USER_STACK_BASE + 0x1000;
     sv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
-    sv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     sv->vm_pgoff     = 0;
     sv->vm_file      = NULL;
     assert_eq(0, vma_insert(&fixture_mm, sv));

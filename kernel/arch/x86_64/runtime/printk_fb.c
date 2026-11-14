@@ -12,6 +12,7 @@
 #include <memory/vmm.h>            /* vmm_map_page, kernel_map, tlb_shootdown */
 #include <memory/pmm.h>            /* PAGE_2M_SIZE / PAGE_2M_SHIFT / PAGE_2M_MASK */
 #include <arch/x86_64/pte.h>       /* PAGE_* x86 hardware PTE bits           */
+#include <arch/x86_64/fb_pte.h>     /* x86_fb_cache_bits: request -> PCD/PWT  */
 #include <arch/x86_64/fb_map.h>    /* fb_x86_revoke_early_alias              */
 #include <log/log.h>               /* log_info                               */
 
@@ -30,7 +31,10 @@ void frame_buffer_early_init()
     /* Same policy as every other framebuffer mapping.  At this point no
      * backend has been identified yet, so the policy is still the
      * conservative UNCACHEABLE default. */
-    uint64_t cache_bits = fb_x86_cache_bits(fb_cache_policy_get());
+    enum vm_device_cache cache =
+        (fb_cache_policy_get() == FB_CACHE_POLICY_WRITEBACK)
+            ? VM_DEVICE_CACHE_WB : VM_DEVICE_CACHE_UC;
+    uint64_t cache_bits = x86_fb_cache_bits(cache);
     for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
     {
         size_t level2 = (size_t)((VIRT_FRAMEBUFFER_EARLY + i) >> PAGE_2M_SHIFT) & 0x1FF;
@@ -47,7 +51,10 @@ void frame_buffer_early_init()
 // overlaps with the physical RAM direct mapping regardless of QEMU -m size.
 void frame_buffer_init()
 {
-    uint64_t cache_bits = fb_x86_cache_bits(fb_cache_policy_get());
+    enum vm_device_cache cache =
+        (fb_cache_policy_get() == FB_CACHE_POLICY_WRITEBACK)
+            ? VM_DEVICE_CACHE_WB : VM_DEVICE_CACHE_UC;
+    uint64_t cache_bits = x86_fb_cache_bits(cache);
     for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
     {
         vmm_map_page(kernel_map, i + (uint64_t)Pos.Phy_addr,

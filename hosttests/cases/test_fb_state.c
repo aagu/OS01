@@ -577,52 +577,10 @@ TEST_FUNC(test_fb_cache_policy_uc_leaf_bits)
     fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
 }
 
-/* ── Test 13: the /dev/fb alias carries the same memory type ─────────
- *
- * The user alias maps the SAME physical pages as the kernel mapping, so
- * it must not be uncacheable while the kernel mapping is write-back
- * (x86 forbids memory-type aliasing).  The expectation is again a hand
- * written bit pattern, not the implementation's expression. */
-TEST_FUNC(test_fb_cache_policy_alias_matches_kernel_mapping)
-{
-    fb_resolution_runtime_reset();
-    fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
-
-    uint64_t phys = 0xe0000000ULL;
-    uint32_t *out_addr = NULL;
-    int rc = fb_x86_map_checked(phys, 8 * 1024 * 1024, FB_CACHE_POLICY_WRITEBACK, &out_addr);
-    CHECK_EQ(0, rc);
-
-    uint64_t leaf = mock_pmd_leaf(TEST_FB_VA_BASE);
-    CHECK_EQ(EXPECT_PMD_LEAF_WB, leaf & ~EXPECT_PMD_PA_MASK);
-
-    /* The flags fb_mmap() installs for the user alias. */
-    uint64_t user_w  = fb_x86_user_pte_flags(FB_CACHE_POLICY_WRITEBACK, true);
-    uint64_t user_ro = fb_x86_user_pte_flags(FB_CACHE_POLICY_WRITEBACK, false);
-
-    CHECK_EQ(EXPECT_PTE_USER_W,  user_w  & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
-    CHECK_EQ(EXPECT_PTE_USER_RO, user_ro & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
-    CHECK_EQ(0, user_w  & EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(0, user_ro & EXPECT_CACHE_BITS_MASK);
-    /* PTE permissions plan: the user alias is always NX. */
-    CHECK_EQ(PAGE_NO_EXEC, user_w  & PAGE_NO_EXEC);
-    CHECK_EQ(PAGE_NO_EXEC, user_ro & PAGE_NO_EXEC);
-
-    /* Alias consistency: the alias and the kernel mapping must agree on
-     * the memory type of the shared physical pages. */
-    CHECK_EQ(leaf & EXPECT_CACHE_BITS_MASK, user_w & EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(leaf & EXPECT_CACHE_BITS_MASK, user_ro & EXPECT_CACHE_BITS_MASK);
-
-    /* And with the uncacheable policy the alias must be uncacheable too. */
-    uint64_t uc_w  = fb_x86_user_pte_flags(FB_CACHE_POLICY_UNCACHEABLE, true);
-    uint64_t uc_ro = fb_x86_user_pte_flags(FB_CACHE_POLICY_UNCACHEABLE, false);
-    CHECK_EQ(EXPECT_CACHE_BITS_MASK, uc_w  & EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(EXPECT_CACHE_BITS_MASK, uc_ro & EXPECT_CACHE_BITS_MASK);
-    CHECK_EQ(EXPECT_PTE_USER_W,  uc_w  & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
-    CHECK_EQ(EXPECT_PTE_USER_RO, uc_ro & ~(EXPECT_CACHE_BITS_MASK | PAGE_NO_EXEC));
-
-    fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
-}
+/* Test 13 (the /dev/fb alias memory-type contract) moved to the
+ * production MM commit test: the driver now supplies a semantic cache
+ * request, and the leaf-bit assertion lives where the leaves are
+ * really installed (test_device_map_fixed_cache_contract). */
 
 /* ── Test 14: a failed mapping restores the previous attributes ────── */
 TEST_FUNC(test_fb_cache_policy_rollback_preserves_attributes)
@@ -770,7 +728,6 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_test_set_generation_hook),
     TEST_ENTRY(test_fb_cache_policy_wb_leaf_bits),
     TEST_ENTRY(test_fb_cache_policy_uc_leaf_bits),
-    TEST_ENTRY(test_fb_cache_policy_alias_matches_kernel_mapping),
     TEST_ENTRY(test_fb_cache_policy_rollback_preserves_attributes),
     TEST_ENTRY(test_fb_early_alias_revocation),
     TEST_ENTRY(test_fb_publish_precedes_early_alias_revoke),

@@ -15,6 +15,7 @@
 #include <memory/pmm.h>
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>
+#include <arch/x86_64/fb_pte.h>   /* x86_fb_* cache encoding */
 #include <core/printk.h>
 #include <log/log.h>               /* log_info */
 #include <errno.h>
@@ -220,7 +221,12 @@ int fb_x86_map_checked(uint64_t phys, uint64_t size, fb_cache_policy_t policy,
      * The host regression asserts the resulting page-table bits against
      * its own hard-coded expectation; it does not reuse this
      * expression. */
-    uint64_t pmd_flags = fb_x86_kernel_pmd_flags(policy);
+    /* The candidate policy is normalized into the semantic cache request;
+     the encoding itself lives in <arch/x86_64/fb_pte.h>. */
+    enum vm_device_cache cache =
+        (policy == FB_CACHE_POLICY_WRITEBACK) ? VM_DEVICE_CACHE_WB
+                                              : VM_DEVICE_CACHE_UC;
+    uint64_t pmd_flags = x86_fb_kernel_pmd_flags(cache);
 
     struct fb_pmd_record *records = s_records;
     memset(records, 0, num_pages * sizeof(records[0]));

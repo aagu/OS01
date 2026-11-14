@@ -218,7 +218,6 @@ static void test_fork_vma_copy_file_backed_vma_refs(void)
     list_init(&fmv->list);
     fmv->vm_start     = 0x40000000UL;   /* auto-mmap region */
     fmv->vm_end       = 0x40001000UL;
-    fmv->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     fmv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE;
     fmv->vm_pgoff     = 0;
     fmv->vm_file      = &fake_node;
@@ -589,7 +588,6 @@ static void test_vma_free_all_vmio_skips_unmap(void)
     list_init(&iov->list);
     iov->vm_start     = 0x40000000UL;
     iov->vm_end       = 0x40002000UL;
-    iov->vm_page_prot = PAGE_USER | PAGE_WRITE | PAGE_VALID;
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     iov->vm_file      = NULL;
     vma_insert(&parent_mm, iov);

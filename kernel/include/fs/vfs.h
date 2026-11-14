@@ -8,6 +8,7 @@
 #include <block/blockdev.h>
 #include <sys/stat.h>
 #include <arch/spinlock.h>
+#include <memory/vm_device.h>
 
 typedef enum {
     VFS_FILE    = 1,
@@ -80,15 +81,16 @@ typedef struct vfs_inode_ops {
 
 /* Device mmap commit callback (spec: x86 munmap/MAP_FIXED item 2).
  *
- * The device validates cache type, bounds and permissions first and
- * then calls this while it still holds its control lock.  The MM
- * transaction owns the range [vma->vm_start, vma->vm_end); the device
- * supplies only the first page's physical address and the final user
- * PTE flags.  Return 0 after the new mapping is committed; a negative
+ * The device validates the request first and then calls this while it
+ * still holds its control lock.  The MM transaction owns the range
+ * [vma->vm_start, vma->vm_end); the device supplies only the first
+ * page's physical address and a SEMANTIC cache request — never a PTE
+ * word, so no hardware descriptor encoding crosses the device/VFS/MM
+ * boundary.  Return 0 after the new mapping is committed; a negative
  * errno must leave the old VMA, leaves, references and raw device
  * state untouched. */
 typedef int (*vfs_mmap_commit_fn)(void *ctx, uint64_t first_pa,
-                                  uint64_t pte_flags);
+                                  enum vm_device_cache cache);
 
 typedef struct vfs_file_ops {
     int     (*read)(struct vfs_node *node, uint64_t offset,
