@@ -2222,6 +2222,7 @@ include $(TEST_DISPATCH_GEN)
 # invalid until the bridge entry lands in M1b.
 USB_BOOT_CASE ?= readonly
 USB_BOOT_TIMEOUT ?= 120
+USB_BOOT_AHCI_IMAGE := $(abspath $(BUILD_DIR))/image/disk-ahci-usb-test.img
 # One job-private log directory per invocation.  A Make variable (not a
 # shell variable) so the same path is visible to every recipe line; the
 # PID of the parse-time shell keeps concurrent jobs from colliding.
@@ -2328,7 +2329,9 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	elif [ "$(SUITE)" = "boot-services" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-services || exit 1; \
 	elif [ "$(SUITE)" = "usb-boot" ]; then \
-	  $(MAKE) --no-print-directory test-qemu-usb-boot USB_BOOT_CASE=readonly || exit 1; \
+	  for c in readonly dual ahci; do \
+	    $(MAKE) --no-print-directory test-qemu-usb-boot USB_BOOT_CASE=$$c || exit 1; \
+	  done; \
 	elif [ "$(SUITE)" = "doom" ]; then \
 	  if [ "$(DOOM_ASSET_COUNT)" != "4" ]; then \
 	    echo "ERROR: SUITE=doom requires all four DOOM_IWAD variables to be provided" >&2; exit 1; \
@@ -2345,7 +2348,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  fi; \
 	fi
 	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ "$(SUITE)" != "usb-boot" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	fi
@@ -2386,19 +2389,29 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 # The recipe contains no `$(MAKE)`, so the -n dry-run contract is
 # preserved: the dry-run prints exactly one
 # `python3 qemutests/usb_boot.py` invocation and executes nothing.
+ifneq ($(filter rootfs,$(PROFILE_CAPABILITIES)),)
+$(USB_BOOT_AHCI_IMAGE): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
+	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
+	@mkdir -p $(dir $@) $(dir $@)tmp-ahci
+	@$(HOST_MKDISK) --output $@ --efi $(UEFI_EFI) \
+	  --temp-dir $(dir $@)tmp-ahci --rootfs-manifest $(ROOTFS_MANIFEST)
+endif
+
 .PHONY: test-qemu-usb-boot
-test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE) $(if $(filter dual ahci,$(USB_BOOT_CASE)),$(USB_BOOT_AHCI_IMAGE)))
 	$(call require_capability,rootfs)
 	@case "$(USB_BOOT_CASE)" in \
-	  firmware|readonly) ;; \
-	  *) echo "USB_BOOT_CASE must be firmware or readonly, got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
+	  firmware|readonly|dual|ahci) ;; \
+	  *) echo "USB_BOOT_CASE must be firmware, readonly, dual, or ahci, got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
 	esac
 	@set +e; \
 	mkdir -p "$(USB_BOOT_JOB_DIR)"; \
 	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.before"; \
 	python3 qemutests/usb_boot.py --case "$(USB_BOOT_CASE)" \
 	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
-	  --disk "$(NORMAL_IMAGE)" --smp "$(SMP)" \
+	  --disk "$(NORMAL_IMAGE)" \
+	  $(if $(filter dual ahci,$(USB_BOOT_CASE)),--ahci-disk "$(USB_BOOT_AHCI_IMAGE)") \
+	  --smp "$(SMP)" \
 	  --timeout "$(USB_BOOT_TIMEOUT)" \
 	  --log-dir "$(USB_BOOT_JOB_DIR)"; \
 	status=$$?; \

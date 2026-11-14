@@ -43,7 +43,9 @@ from qemutests.harness.qemu_cmd import build_qemu_x86
 
 CASE_FIRMWARE = "firmware"
 CASE_READONLY = "readonly"
-CASES = (CASE_FIRMWARE, CASE_READONLY)
+CASE_DUAL = "dual"
+CASE_AHCI = "ahci"
+CASES = (CASE_FIRMWARE, CASE_READONLY, CASE_DUAL, CASE_AHCI)
 DEFAULT_TIMEOUT = 120.0
 OBSERVE_SECONDS = 1.0
 POLL_SECONDS = 0.1
@@ -130,6 +132,98 @@ def readonly_evidence(serial: str, root_marker: str, esp_marker: str) -> bool:
         else:
             if _PROMPT_TEXT in raw_line:
                 return True
+    return False
+
+
+_UEFI_ESP_GUID_RE = re.compile(
+    r"UEFI:\s+ESP\s+GUID=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+_BOOT_SCAN_RE = re.compile(r"fs:\s+boot\s+scan\s+first_disk=(\S+)\s+candidates=\d+")
+_BOOT_SELECTED_RE = re.compile(
+    r"fs:\s+boot\s+disk\s+selected\s+by\s+GUID\s+\(([^)]+)\),\s+root=(\S+)\s+boot=(\S+)\s+\(/boot\s+ok\)"
+)
+
+
+def _guid_boot_evidence(
+    serial: str,
+    expected_guid: str,
+    expected_first_disk: str,
+    expected_selected_disk: str,
+    expected_root: str,
+    expected_boot: str,
+    root_marker: str,
+    esp_marker: str,
+) -> bool:
+    if not serial or not expected_guid or not root_marker or not esp_marker:
+        return False
+    target_guid = expected_guid.lower()
+    stage = 0
+    saw_root = False
+    saw_esp = False
+    for raw_line in serial.splitlines():
+        stripped = raw_line.strip()
+        if stage == 0:
+            m = _UEFI_ESP_GUID_RE.search(stripped)
+            if m and m.group(1).lower() == target_guid:
+                stage = 1
+        elif stage == 1:
+            m = _BOOT_SCAN_RE.search(stripped)
+            if m and m.group(1) == expected_first_disk:
+                stage = 2
+        elif stage == 2:
+            m = _BOOT_SELECTED_RE.search(stripped)
+            if (
+                m
+                and m.group(1) == expected_selected_disk
+                and m.group(2) == expected_root
+                and m.group(3) == expected_boot
+            ):
+                stage = 3
+        elif stage == 3:
+            if _PROMPT_TEXT in raw_line:
+                stage = 4
+        elif stage == 4:
+            if stripped == root_marker:
+                saw_root = True
+            elif stripped == esp_marker:
+                saw_esp = True
+            if saw_root and saw_esp:
+                stage = 5
+        else:
+            if _PROMPT_TEXT in raw_line:
+                return True
+    return False
+
+
+def dual_evidence(
+    serial: str, usb_guid: str, root_marker: str, esp_marker: str
+) -> bool:
+    """True iff serial proves firmware ESP GUID, AHCI-first scan, usba selection, and USB markers."""
+    return _guid_boot_evidence(
+        serial, usb_guid, "hda", "usba", "usba2", "usba1", root_marker, esp_marker
+    )
+
+
+def ahci_evidence(
+    serial: str, ahci_guid: str, root_marker: str, esp_marker: str
+) -> bool:
+    """True iff serial proves firmware ESP GUID, hda selection, and AHCI markers."""
+    return _guid_boot_evidence(
+        serial, ahci_guid, "hda", "hda", "hda2", "hda1", root_marker, esp_marker
+    )
+
+
+def _guid_prompt_ready(serial: str, selected_disk: str) -> bool:
+    if not serial:
+        return False
+    saw_selected = False
+    for line in serial.splitlines():
+        if not saw_selected:
+            m = _BOOT_SELECTED_RE.search(line)
+            if m and m.group(1) == selected_disk:
+                saw_selected = True
+        elif _PROMPT_TEXT in line:
+            return True
     return False
 
 
@@ -298,6 +392,37 @@ def usb_argv(
     )
 
 
+def dual_argv(
+    qemu: str, firmware: Path, usb_disk: Path, ahci_disk: Path, smp: int
+) -> list[str]:
+    """Build the dual-disk (USB bootindex=0, AHCI bootindex=1) QEMU command line."""
+    return build_qemu_x86(
+        qemu=str(qemu),
+        firmware=str(firmware),
+        image=str(usb_disk),
+        ahci_image=str(ahci_disk),
+        smp=smp,
+        serial="stdio",
+        memory=MEMORY_MIB,
+        storage="dual",
+    )
+
+
+def ahci_argv(
+    qemu: str, firmware: Path, ahci_disk: Path, smp: int
+) -> list[str]:
+    """Build the AHCI-only QEMU command line via the shared builder."""
+    return build_qemu_x86(
+        qemu=str(qemu),
+        firmware=str(firmware),
+        image=str(ahci_disk),
+        smp=smp,
+        serial="stdio",
+        memory=MEMORY_MIB,
+        storage="ahci",
+    )
+
+
 def _file_sha256(path: Path) -> str | None:
     try:
         digest = hashlib.sha256()
@@ -374,12 +499,40 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     private_disk: Path | None = None
+    private_ahci: Path | None = None
     esp_guid_str: str | None = None
+    ahci_guid_str: str | None = None
     root_marker = f"USB_ROOT_MARKER_{uuid.uuid4().hex[:12]}"
     esp_marker = f"USB_ESP_MARKER_{uuid.uuid4().hex[:12]}"
+    ahci_root_marker = f"AHCI_ROOT_MARKER_{uuid.uuid4().hex[:12]}"
+    ahci_esp_marker = f"AHCI_ESP_MARKER_{uuid.uuid4().hex[:12]}"
     boot_disk = disk
 
-    if case == CASE_READONLY:
+    if case in (CASE_DUAL, CASE_AHCI):
+        ahci_disk_raw = getattr(args, "ahci_disk", None)
+        if not ahci_disk_raw:
+            print(f"[usb-boot] ERROR: --case {case} requires --ahci-disk", file=sys.stderr)
+            return 2
+        ahci_disk = Path(ahci_disk_raw)
+        if not ahci_disk.is_file():
+            print(
+                f"[usb-boot] ERROR: ahci-disk input does not exist: {ahci_disk}",
+                file=sys.stderr,
+            )
+            return 2
+        private_ahci = run_dir / "ahci-prepared.img"
+        try:
+            ahci_guid = prepare_image(
+                ahci_disk, private_ahci, ahci_root_marker, ahci_esp_marker
+            )
+            ahci_guid_str = str(ahci_guid)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[usb-boot] ERROR: failed to prepare AHCI image: {exc}", file=sys.stderr)
+            if private_ahci.exists():
+                private_ahci.unlink(missing_ok=True)
+            return 2
+
+    if case in (CASE_READONLY, CASE_DUAL):
         private_disk = run_dir / "usb-readonly.img"
         try:
             esp_guid = prepare_image(disk, private_disk, root_marker, esp_marker)
@@ -389,9 +542,28 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
             print(f"[usb-boot] ERROR: failed to prepare USB image: {exc}", file=sys.stderr)
             if private_disk.exists():
                 private_disk.unlink(missing_ok=True)
+            if private_ahci is not None and private_ahci.exists():
+                private_ahci.unlink(missing_ok=True)
             return 2
 
-    argv = usb_argv(args.qemu, firmware, boot_disk, smp)
+    if case == CASE_DUAL:
+        if esp_guid_str == ahci_guid_str:
+            print(
+                f"[usb-boot] ERROR: USB and AHCI ESP GUIDs must be distinct ({esp_guid_str})",
+                file=sys.stderr,
+            )
+            if private_disk is not None:
+                private_disk.unlink(missing_ok=True)
+            if private_ahci is not None:
+                private_ahci.unlink(missing_ok=True)
+            return 2
+        assert private_ahci is not None
+        argv = dual_argv(args.qemu, firmware, boot_disk, private_ahci, smp)
+    elif case == CASE_AHCI:
+        assert private_ahci is not None
+        argv = ahci_argv(args.qemu, firmware, private_ahci, smp)
+    else:
+        argv = usb_argv(args.qemu, firmware, boot_disk, smp)
     _write_json(run_dir / "argv.json", argv)
 
     metadata: dict[str, Any] = {
@@ -407,10 +579,34 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         "serial_log": "serial.log",
         "observe_seconds": OBSERVE_SECONDS,
     }
-    if case == CASE_READONLY:
+    if case in (CASE_READONLY, CASE_DUAL):
         metadata["esp_guid"] = esp_guid_str
         metadata["root_marker"] = root_marker
         metadata["esp_marker"] = esp_marker
+    if case in (CASE_DUAL, CASE_AHCI):
+        metadata["ahci_guid"] = ahci_guid_str
+        metadata["ahci_root_marker"] = ahci_root_marker
+        metadata["ahci_esp_marker"] = ahci_esp_marker
+
+    def _case_prompt_ready(text: str) -> bool:
+        if case == CASE_READONLY:
+            return _readonly_prompt_ready(text)
+        if case == CASE_DUAL:
+            return _guid_prompt_ready(text, "usba")
+        if case == CASE_AHCI:
+            return _guid_prompt_ready(text, "hda")
+        return False
+
+    def _case_evidence(text: str) -> bool:
+        if case == CASE_FIRMWARE:
+            return firmware_evidence(text)
+        if case == CASE_READONLY:
+            return readonly_evidence(text, root_marker, esp_marker)
+        if case == CASE_DUAL:
+            assert esp_guid_str is not None
+            return dual_evidence(text, esp_guid_str, root_marker, esp_marker)
+        assert ahci_guid_str is not None
+        return ahci_evidence(text, ahci_guid_str, ahci_root_marker, ahci_esp_marker)
 
     session = None
     errors: list[str] = []
@@ -421,7 +617,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
             argv=argv,
             run_dir=run_dir,
             timeout_s=timeout,
-            writable_stdin=(case == CASE_READONLY),
+            writable_stdin=(case != CASE_FIRMWARE),
         )
         session.start()
         deadline = session.deadline
@@ -435,26 +631,20 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
                 break
             session.observe(min(POLL_SECONDS, remaining))
             if case == CASE_FIRMWARE:
-                if firmware_evidence(session.text):
+                if _case_evidence(session.text):
                     break
             else:
-                if not sent_command and _readonly_prompt_ready(session.text):
+                if not sent_command and _case_prompt_ready(session.text):
                     session.send(b"cat /usb-root.txt /boot/USBESP.TXT\n")
                     sent_command = True
-                if sent_command and readonly_evidence(
-                    session.text, root_marker, esp_marker
-                ):
+                if sent_command and _case_evidence(session.text):
                     break
             returncode = session.returncode
             if returncode is not None:
                 early_returncode = returncode
                 break
 
-        evidence_ok = (
-            firmware_evidence(session.text)
-            if case == CASE_FIRMWARE
-            else readonly_evidence(session.text, root_marker, esp_marker)
-        )
+        evidence_ok = _case_evidence(session.text)
 
         if timed_out:
             errors.append(f"timeout before {case} evidence")
@@ -485,6 +675,8 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
                 pass
         if private_disk is not None and private_disk.exists():
             private_disk.unlink(missing_ok=True)
+        if private_ahci is not None and private_ahci.exists():
+            private_ahci.unlink(missing_ok=True)
 
     serial = session.text if session is not None else ""
     (run_dir / "serial.log").write_text(serial)
@@ -504,11 +696,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     passed = (
         not errors
         and not timed_out
-        and (
-            firmware_evidence(serial)
-            if case == CASE_FIRMWARE
-            else readonly_evidence(serial, root_marker, esp_marker)
-        )
+        and _case_evidence(serial)
     )
 
     metadata.update(
@@ -546,6 +734,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--qemu", required=True)
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--disk", required=True)
+    parser.add_argument("--ahci-disk", default=None)
     parser.add_argument("--smp", required=True, type=int)
     parser.add_argument("--log-dir", required=True)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)

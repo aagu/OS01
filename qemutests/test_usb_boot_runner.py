@@ -598,5 +598,106 @@ class ReadonlyCaseTests(unittest.TestCase):
         )
 
 
+class DualCaseTests(unittest.TestCase):
+    def test_parse_args_accepts_dual_and_ahci_with_ahci_disk(self) -> None:
+        for case in ("dual", "ahci"):
+            args = ub.parse_args(
+                [
+                    "--case", case,
+                    "--qemu", "qemu-system-x86_64",
+                    "--firmware", "/fw/OVMF.fd",
+                    "--disk", "/img/usb.img",
+                    "--ahci-disk", "/img/ahci.img",
+                    "--smp", "2",
+                    "--log-dir", "/logs/run",
+                ]
+            )
+            self.assertEqual(args.case, case)
+            self.assertEqual(args.ahci_disk, "/img/ahci.img")
+
+    def test_dual_argv_topology(self) -> None:
+        argv = ub.dual_argv(
+            "qemu-system-x86_64",
+            Path("/tmp/OVMF.fd"),
+            Path("/tmp/usb.img"),
+            Path("/tmp/ahci.img"),
+            2,
+        )
+        self.assertIn(
+            "file=/tmp/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+        self.assertIn(
+            "file=/tmp/ahci.img,format=raw,if=none,id=ahcidisk", argv
+        )
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0", argv
+        )
+        self.assertIn("ide-hd,drive=ahcidisk,bus=ahci.0,bootindex=1", argv)
+        self.assertFalse(any(a.startswith("-boot") for a in argv))
+
+    def test_dual_requires_identity_and_content(self) -> None:
+        usb_guid = "11111111-2222-3333-4444-555555555555"
+        other_guid = "99999999-8888-7777-6666-555555555555"
+        root_marker = "USB_ROOT_MARKER_ALPHA"
+        esp_marker = "USB_ESP_MARKER_BETA"
+
+        valid = (
+            f"UEFI: ESP GUID={usb_guid}\n"
+            "fs: boot scan first_disk=hda candidates=2\n"
+            "fs: boot disk selected by GUID (usba), root=usba2 boot=usba1 (/boot ok)\n"
+            "# cat /usb-root.txt /boot/USBESP.TXT\n"
+            f"{root_marker}\n"
+            f"{esp_marker}\n"
+            "# "
+        )
+        self.assertTrue(ub.dual_evidence(valid, usb_guid, root_marker, esp_marker))
+
+        # Wrong ESP GUID fails
+        self.assertFalse(
+            ub.dual_evidence(
+                valid.replace(usb_guid, other_guid), usb_guid, root_marker, esp_marker
+            )
+        )
+        # Wrong first_disk (AHCI must be registered first) fails
+        self.assertFalse(
+            ub.dual_evidence(
+                valid.replace("first_disk=hda", "first_disk=usba"),
+                usb_guid,
+                root_marker,
+                esp_marker,
+            )
+        )
+        # Wrong selected disk fails
+        self.assertFalse(
+            ub.dual_evidence(
+                valid.replace(
+                    "selected by GUID (usba), root=usba2 boot=usba1",
+                    "selected by GUID (hda), root=hda2 boot=hda1",
+                ),
+                usb_guid,
+                root_marker,
+                esp_marker,
+            )
+        )
+        # /boot mount failure fails
+        self.assertFalse(
+            ub.dual_evidence(
+                valid.replace("(/boot ok)", "(/boot failed)"),
+                usb_guid,
+                root_marker,
+                esp_marker,
+            )
+        )
+        # Missing marker output fails
+        self.assertFalse(
+            ub.dual_evidence(
+                valid.replace(f"{root_marker}\n", "AHCI_ROOT_MARKER\n"),
+                usb_guid,
+                root_marker,
+                esp_marker,
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ def build_qemu_x86(
     qemu: str = "qemu-system-x86_64",
     extra: Sequence[str] = (),
     storage: str = "ahci",
+    ahci_image: str | None = None,
 ) -> list[str]:
     """Build an x86_64 QEMU argv list with the paired virtio-rng device.
 
@@ -41,11 +42,25 @@ def build_qemu_x86(
       virtio-blk disk.
     - ``"usb"``: a USB-only topology (qemu-xhci + usb-storage) with no
       implicit AHCI/IDE/virtio disk, used by the USB boot M0 gate.
+    - ``"dual"``: both USB (``bootindex=0``, readonly) and AHCI
+      (``bootindex=1``, writable ``ahci_image``) attached.
     """
     serial_arg = _resolve_serial(serial, serial_path)
-    if storage not in ("ahci", "usb"):
+    if storage not in ("ahci", "usb", "dual"):
         raise ValueError(f"Unsupported storage mode: {storage!r}")
-    if storage == "usb":
+    if storage == "dual":
+        if not ahci_image:
+            raise ValueError("storage='dual' requires ahci_image")
+        disk_args = [
+            "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
+            "-drive", f"file={image},format=raw,if=none,id=usbdisk,readonly=on",
+            "-drive", f"file={ahci_image},format=raw,if=none,id=ahcidisk",
+            "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
+            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
+            "-device", "ahci,id=ahci",
+            "-device", "ide-hd,drive=ahcidisk,bus=ahci.0,bootindex=1",
+        ]
+    elif storage == "usb":
         disk_args = [
             "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
             "-drive", f"file={image},format=raw,if=none,id=usbdisk,readonly=on",

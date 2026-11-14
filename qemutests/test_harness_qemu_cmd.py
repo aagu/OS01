@@ -133,6 +133,41 @@ class BuildQemuX86Tests(unittest.TestCase):
         )
         self._assert_rng_pair(argv)
 
+    def test_x86_dual_topology_usb_bootindex_0_ahci_bootindex_1(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/usb.img",
+            ahci_image="/img/ahci.img",
+            smp=2,
+            serial="stdio",
+            storage="dual",
+        )
+        self.assertIn("if=pflash,format=raw,readonly=on,file=/fw/OVMF.fd", argv)
+        self.assertIn(
+            "file=/img/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+        self.assertIn(
+            "file=/img/ahci.img,format=raw,if=none,id=ahcidisk", argv
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=4,p3=0", argv)
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0", argv
+        )
+        self.assertIn("ahci,id=ahci", argv)
+        self.assertIn("ide-hd,drive=ahcidisk,bus=ahci.0,bootindex=1", argv)
+        self.assertFalse(any(a.startswith("-boot") for a in argv))
+        self._assert_rng_pair(argv)
+
+    def test_x86_dual_requires_ahci_image(self) -> None:
+        with self.assertRaises(ValueError):
+            build_qemu_x86(
+                firmware="/fw/OVMF.fd",
+                image="/img/usb.img",
+                smp=2,
+                serial="stdio",
+                storage="dual",
+            )
+
     def test_x86_rejects_unknown_storage(self) -> None:
         with self.assertRaises(ValueError):
             build_qemu_x86(
