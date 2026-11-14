@@ -1,12 +1,23 @@
 #ifndef _ARCH_MMU_H
 #define _ARCH_MMU_H
 
+/*
+ * Arch MMU facade (mm-architecture-boundaries Task 2).
+ *
+ * Only two things are shared across architectures through this header:
+ *   - ARCH_PAGE_OFFSET: the direct physical-map base of each port;
+ *   - arch_flush_tlb_all(): each port's local full-TLB reload.
+ *
+ * Root/single-page primitives (arch_get_page_table, arch_switch_mm,
+ * arch_flush_tlb_page) and the permission walkers live in the per-arch
+ * <arch/<arch>/mmu.h>; direct callers include those.  This facade must
+ * not leak descriptor codecs, raw roots or page-table implementation
+ * details.
+ */
+
 #include <stdint.h>
-#include <stdbool.h>
 
 #ifdef __x86_64__
-
-#include <arch/x86_64/pte_bits.h>  /* descriptor PA/flags codecs */
 
 // Higher-half base address for direct physical memory mapping.
 // All physical RAM is mapped at this offset (256th PGD entry).
@@ -16,187 +27,25 @@
 #define ARCH_PAGE_OFFSET 0xffff800000000000ULL
 #endif
 
-// Return the current page table base (CR3 on x86_64, TTBR0_EL1 on aarch64).
-static inline uint64_t *arch_get_page_table(void) {
-    uint64_t cr3;
-    __asm__ __volatile__("movq %%cr3, %0" : "=r"(cr3));
-    return (uint64_t *)cr3;
-}
-
 // Reload CR3 to flush entire TLB
 static inline void arch_flush_tlb_all(void) {
     uint64_t cr3;
     __asm__ __volatile__("movq %%cr3, %0; movq %0, %%cr3" : "=r"(cr3) :: "memory");
 }
 
-// Invalidate a single 4KB page mapping
-static inline void arch_flush_tlb_page(uintptr_t vaddr) {
-    __asm__ __volatile__("invlpg (%0)" : : "r"(vaddr) : "memory");
-}
-
-// Switch address space (load page table base)
-static inline void arch_switch_mm(uint64_t *pgdir) {
-    __asm__ __volatile__("movq %0, %%cr3" : : "r"(pgdir) : "memory");
-}
-
-// Walk 4-level page table (PGD→PUD→PMD→PT), return full physical
-// address (page base + in-page offset), or 0 if unmapped.
-// Does NOT interpret PTE flags -- that stays in arch/x86_64/trap.c.
-// Descriptor PA extraction goes through the pte_bits.h codecs so NX
-// and software bits never ride along with the PA.
-static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va) {
-    uint64_t *pgd = (uint64_t *)pgtbl;
-    uint64_t l0 = (va >> 39) & 0x1FF;
-    if (!(pgd[l0] & 1)) return 0;
-    uint64_t *pud = (uint64_t *)(x86_pte_4k_pa(pgd[l0]) + ARCH_PAGE_OFFSET);
-    uint64_t l1 = (va >> 30) & 0x1FF;
-    if (!(pud[l1] & 1)) return 0;
-    if (pud[l1] & 0x80)  // 1GB huge page
-        return x86_pte_1g_pa(pud[l1]) | (va & 0x3FFFFFFF);
-    uint64_t *pmd = (uint64_t *)(x86_pte_4k_pa(pud[l1]) + ARCH_PAGE_OFFSET);
-    uint64_t l2 = (va >> 21) & 0x1FF;
-    if (!(pmd[l2] & 1)) return 0;
-    if (pmd[l2] & 0x80)  // 2MB huge page
-        return x86_pte_2m_pa(pmd[l2]) | (va & 0x1FFFFF);
-    uint64_t *pte = (uint64_t *)(x86_pte_4k_pa(pmd[l2]) + ARCH_PAGE_OFFSET);
-    uint64_t l3 = (va >> 12) & 0x1FF;
-    if (!(pte[l3] & 1)) return 0;
-    return x86_pte_4k_pa(pte[l3]) | (va & 0xFFF);
-}
-
-// Cross-level effective-permission walk: returns true iff every page in
-// [addr, addr+len) is valid + user-accessible + (writable ? RW or COW set),
-// ANDing perms across pgd→pud→pmd→pte (x86 semantics: any level
-// USER=0 → supervisor page, any level WRITE=0 → read-only, COW bit
-// 10 (x86_64 ignored) counts as a writable-eligible marker — see below).
-// Handles 4KB + 2MB pages (OS01 creates no 1GB pages, defensive false on 1GB
-// PUD entry).
-//
-// COW-eligibility (Task 7): when writable=true, a PTE that has
-// PAGE_VALID + PAGE_USER + PAGE_COW (bit 10) passes the check.  This is
-// the "pure syscall_check_user_range accepts eligible COW without
-// changing PTEs" contract — a kernel caller may fast-check the range,
-// and any actual write goes through prepare_user_write_range(_locked)
-// to privatize the COW leaf atomically.  CALLERS WHO ONLY WANT TO
-// VERIFY "is this range fully writable" SHOULD FOLLOW UP WITH
-// prepare_user_write_range (the FT path); this check is a snapshot,
-// not a pin — munmap can race the gap.
-//
-// 2MB huge pages do not carry PAGE_COW (huge pages are private from
-// allocation; fork copies them eagerly — see kernel/sched/task.c), so
-// the huge branch keeps its strict RW requirement.
-//
-// addr+len overflow is self-guarded here -- callers may legitimately pass
-// (addr=2, len=UINT64_MAX) for hostile-input filtering, so we cannot rely
-// on the caller to pre-check.
-//
-// `pgtbl` is parameterized (not read from CR3) so the selftest (Task 3)
-// can exercise the walker against synthetic page tables.
-static inline bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
-                                              uint64_t len, bool writable)
-{
-    uint64_t *pgd = (uint64_t *)pgtbl;
-    if (len == 0) return true;                       // empty range → trivially OK
-    if (addr + len < addr) return false;              // addr+len overflow
-    uint64_t end = addr + len;
-    for (uint64_t va = addr & ~(uint64_t)0xFFF; va < end; ) {
-        uint64_t l0 = (va >> 39) & 0x1FF;
-        if (!(pgd[l0] & 1)) return false;
-        bool user = !!(pgd[l0] & 4), rw = !!(pgd[l0] & 2);
-
-        uint64_t *pud = (uint64_t *)(x86_pte_4k_pa(pgd[l0]) + ARCH_PAGE_OFFSET);
-        uint64_t l1 = (va >> 30) & 0x1FF;
-        if (!(pud[l1] & 1)) return false;
-        user = user && !!(pud[l1] & 4);
-        rw   = rw   && !!(pud[l1] & 2);
-        if (pud[l1] & 0x80) return false;           // 1GB: defensive (not created)
-
-        uint64_t *pmd = (uint64_t *)(x86_pte_4k_pa(pud[l1]) + ARCH_PAGE_OFFSET);
-        uint64_t l2 = (va >> 21) & 0x1FF;
-        if (!(pmd[l2] & 1)) return false;
-        user = user && !!(pmd[l2] & 4);
-        rw   = rw   && !!(pmd[l2] & 2);
-        if (pmd[l2] & 0x80) {                       // 2MB huge page (PMD is leaf)
-            if (!user || (writable && !rw)) return false;
-            va = (va & ~(uint64_t)0x1FFFFF) + 0x200000ULL;
-            continue;
-        }
-
-        uint64_t *pte = (uint64_t *)(x86_pte_4k_pa(pmd[l2]) + ARCH_PAGE_OFFSET);
-        uint64_t l3 = (va >> 12) & 0x1FF;
-        if (!(pte[l3] & 1)) return false;
-        user = user && !!(pte[l3] & 4);
-        bool upper_rw = rw;
-        rw   = rw   && !!(pte[l3] & 2);
-        // PAGE_COW (bit 10) counts as writable-eligible: the kernel
-        // path that ACTUALLY writes to user memory must privatize the
-        // leaf via prepare_user_write_range first.
-        bool cow = !!(pte[l3] & (1UL << 10));
-        if (!user || (writable && !rw && !(upper_rw && cow))) return false;
-        va += 0x1000ULL;
-    }
-    return true;
-}
-
 #elif defined(__aarch64__)
 
+#ifndef ARCH_PAGE_OFFSET
 #define ARCH_PAGE_OFFSET 0xffff000000000000ULL
-#define AARCH64_USER_MIN 0x1000ULL
-#define AARCH64_USER_LIMIT (1ULL << 48)
-
-static inline uint64_t *arch_get_page_table(void)
-{
-    uint64_t ttbr0;
-    __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-    return (uint64_t *)ttbr0;
-}
+#endif
 
 static inline void arch_flush_tlb_all(void)
 {
     __asm__ __volatile__("tlbi vmalle1 \n\t dsb sy \n\t isb" ::: "memory");
 }
 
-static inline void arch_flush_tlb_page(uintptr_t vaddr)
-{
-    __asm__ __volatile__("tlbi vae1, %0 \n\t dsb sy \n\t isb" :: "r"(vaddr >> 12) : "memory");
-}
-
-static inline void arch_switch_mm(uint64_t *pgtbl)
-{
-    __asm__ __volatile__("msr ttbr0_el1, %0 \n\t isb" :: "r"(pgtbl) : "memory");
-}
-
-// Walk 4-level (48-bit VA) page table: PGD->PUD->PMD->PTE.
-// Uses ARCH_PAGE_OFFSET to convert physical entries to direct-mapped virtual.
-static inline uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
-{
-    uint64_t *pgd = (uint64_t *)pgtbl;
-    uint64_t l0 = (va >> 39) & 0x1FF;
-    if (!(pgd[l0] & 1)) return 0;
-    uint64_t *pud = (uint64_t *)((pgd[l0] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-    uint64_t l1 = (va >> 30) & 0x1FF;
-    if (!(pud[l1] & 1)) return 0;
-    // 1GB block (table entry bit 1 set)
-    if ((pud[l1] & 2) == 0)
-        return (pud[l1] & 0xFFFFFC0000000ULL) | (va & 0x3FFFFFFF);
-    uint64_t *pmd = (uint64_t *)((pud[l1] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-    uint64_t l2 = (va >> 21) & 0x1FF;
-    if (!(pmd[l2] & 1)) return 0;
-    // 2MB block
-    if ((pmd[l2] & 2) == 0)
-        return (pmd[l2] & 0xFFFFFFFE00000ULL) | (va & 0x1FFFFF);
-    uint64_t *pte = (uint64_t *)((pmd[l2] & ~(uint64_t)0xFFF) + ARCH_PAGE_OFFSET);
-    uint64_t l3 = (va >> 12) & 0x1FF;
-    if (!(pte[l3] & 1)) return 0;
-    return (pte[l3] & 0xFFFFFFFFFFFFF000ULL) | (va & 0xFFF);
-}
-
-/* Snapshot of a lower-address range in a direct-mapped AArch64 root. */
-bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
-                                uint64_t len, bool writable);
-
 #else
 #error "Unsupported architecture"
 #endif
 
-#endif
+#endif /* _ARCH_MMU_H */

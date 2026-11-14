@@ -51,6 +51,7 @@
 #include <arch/aarch64/boot_direct_map.h>
 #include <memory/pmm.h>
 #include <memory/vmm.h>
+#include <arch/aarch64/mmu.h>   /* AARCH64_USER_MIN/LIMIT */
 
 /* kernel_map — sole definer for the aarch64 build.  The x86 backend
  * owns its own definition in kernel/memory/vmm.c.  arch_vmm_init()

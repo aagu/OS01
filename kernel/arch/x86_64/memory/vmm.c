@@ -1,12 +1,12 @@
 #include <memory/memory.h>
-#include <memory/vmm.h>
+#include <memory/vmm.h>        // tlb_shootdown (shared broadcast)
+#include <arch/x86_64/vmm.h>   // raw x86 page-table API + kernel_map
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
 #include <percpu/percpu.h>
 #include <memory/pmm.h>
 #include <memory/slab.h>
 #include <core/debug.h>
 #include <core/printk.h>
-#include <arch/mmu.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -119,7 +119,7 @@ int vmm_init()
     uint64_t i, j;
     #ifdef DEBUG
     unsigned long * tmp = NULL;
-    tmp = (unsigned long *)(((unsigned long)Phy_To_Virt((unsigned long)get_cr3() & (~ 0xfffUL))) + 8 * 256);
+    tmp = (unsigned long *)(((unsigned long)Phy_To_Virt((unsigned long)arch_get_page_table() & (~ 0xfffUL))) + 8 * 256);
 
 	debug_mm("1:%#018lx,%#018lx\t\t\n",(unsigned long)tmp,*tmp);
 	tmp = Phy_To_Virt(*tmp & (~0xfffUL));
@@ -559,22 +559,104 @@ int x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start, uint64_t end)
     return 0;
 }
 
-// Arch-neutral semantic facade: query 4KB PTE mapping.
-int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
-                      uint32_t *vm_out)
+// ── Translation + permission walkers (moved from <arch/mmu.h>) ──
+// Contract: full-leaf translation for 4 KiB / 2 MiB / 1 GiB entries
+// (page base + in-page offset), no PTE-flag interpretation; and the
+// cross-level effective-permission snapshot for a user range.  The
+// algorithms are byte-identical to the former arch/mmu.h inline
+// bodies — only the linkage changed (inline → vmm TU function).
+
+uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
 {
-    uint64_t flags = 0;
-    int rc = x86_vmm_query_4k_page(pgdir, virt, phys_out, &flags);
-    if (rc < 0)
-        return rc;
-    if (vm_out) {
-        *vm_out = 0;
-        if (flags & PAGE_PRESENT)  *vm_out |= VM_PRESENT;
-        if (flags & PAGE_RW)       *vm_out |= VM_WRITE;
-        if (flags & PAGE_USER)     *vm_out |= VM_USER;
-        if (flags & PAGE_NO_EXEC)  *vm_out |= VM_NO_EXEC;
-        if (flags & PAGE_PROTNONE) *vm_out |= VM_PROTNONE;
-        if (flags & PAGE_COW)      *vm_out |= VM_COW;
+    uint64_t *pgd = (uint64_t *)pgtbl;
+    uint64_t l0 = (va >> 39) & 0x1FF;
+    if (!(pgd[l0] & 1)) return 0;
+    uint64_t *pud = (uint64_t *)(x86_pte_4k_pa(pgd[l0]) + ARCH_PAGE_OFFSET);
+    uint64_t l1 = (va >> 30) & 0x1FF;
+    if (!(pud[l1] & 1)) return 0;
+    if (pud[l1] & 0x80)  // 1GB huge page
+        return x86_pte_1g_pa(pud[l1]) | (va & 0x3FFFFFFF);
+    uint64_t *pmd = (uint64_t *)(x86_pte_4k_pa(pud[l1]) + ARCH_PAGE_OFFSET);
+    uint64_t l2 = (va >> 21) & 0x1FF;
+    if (!(pmd[l2] & 1)) return 0;
+    if (pmd[l2] & 0x80)  // 2MB huge page
+        return x86_pte_2m_pa(pmd[l2]) | (va & 0x1FFFFF);
+    uint64_t *pte = (uint64_t *)(x86_pte_4k_pa(pmd[l2]) + ARCH_PAGE_OFFSET);
+    uint64_t l3 = (va >> 12) & 0x1FF;
+    if (!(pte[l3] & 1)) return 0;
+    return x86_pte_4k_pa(pte[l3]) | (va & 0xFFF);
+}
+
+// Cross-level effective-permission walk: returns true iff every page in
+// [addr, addr+len) is valid + user-accessible + (writable ? RW or COW set),
+// ANDing perms across pgd→pud→pmd→pte (x86 semantics: any level
+// USER=0 → supervisor page, any level WRITE=0 → read-only, COW bit
+// 10 (x86_64 ignored) counts as a writable-eligible marker — see below).
+// Handles 4KB + 2MB pages (OS01 creates no 1GB pages, defensive false on 1GB
+// PUD entry).
+//
+// COW-eligibility (Task 7): when writable=true, a PTE that has
+// PAGE_VALID + PAGE_USER + PAGE_COW (bit 10) passes the check.  This is
+// the "pure syscall_check_user_range accepts eligible COW without
+// changing PTEs" contract — a kernel caller may fast-check the range,
+// and any actual write goes through prepare_user_write_range(_locked)
+// to privatize the COW leaf atomically.  CALLERS WHO ONLY WANT TO
+// VERIFY "is this range fully writable" SHOULD FOLLOW UP WITH
+// prepare_user_write_range (the FT path); this check is a snapshot,
+// not a pin — munmap can race the gap.
+//
+// 2MB huge pages do not carry PAGE_COW (huge pages are private from
+// allocation; fork copies them eagerly — see kernel/sched/task.c), so
+// the huge branch keeps its strict RW requirement.
+//
+// addr+len overflow is self-guarded here -- callers may legitimately pass
+// (addr=2, len=UINT64_MAX) for hostile-input filtering, so we cannot rely
+// on the caller to pre-check.
+//
+// `pgtbl` is parameterized (not read from CR3) so the selftest (Task 3)
+// can exercise the walker against synthetic page tables.
+bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
+                                uint64_t len, bool writable)
+{
+    uint64_t *pgd = (uint64_t *)pgtbl;
+    if (len == 0) return true;                       // empty range → trivially OK
+    if (addr + len < addr) return false;              // addr+len overflow
+    uint64_t end = addr + len;
+    for (uint64_t va = addr & ~(uint64_t)0xFFF; va < end; ) {
+        uint64_t l0 = (va >> 39) & 0x1FF;
+        if (!(pgd[l0] & 1)) return false;
+        bool user = !!(pgd[l0] & 4), rw = !!(pgd[l0] & 2);
+
+        uint64_t *pud = (uint64_t *)(x86_pte_4k_pa(pgd[l0]) + ARCH_PAGE_OFFSET);
+        uint64_t l1 = (va >> 30) & 0x1FF;
+        if (!(pud[l1] & 1)) return false;
+        user = user && !!(pud[l1] & 4);
+        rw   = rw   && !!(pud[l1] & 2);
+        if (pud[l1] & 0x80) return false;           // 1GB: defensive (not created)
+
+        uint64_t *pmd = (uint64_t *)(x86_pte_4k_pa(pud[l1]) + ARCH_PAGE_OFFSET);
+        uint64_t l2 = (va >> 21) & 0x1FF;
+        if (!(pmd[l2] & 1)) return false;
+        user = user && !!(pmd[l2] & 4);
+        rw   = rw   && !!(pmd[l2] & 2);
+        if (pmd[l2] & 0x80) {                       // 2MB huge page (PMD is leaf)
+            if (!user || (writable && !rw)) return false;
+            va = (va & ~(uint64_t)0x1FFFFF) + 0x200000ULL;
+            continue;
+        }
+
+        uint64_t *pte = (uint64_t *)(x86_pte_4k_pa(pmd[l2]) + ARCH_PAGE_OFFSET);
+        uint64_t l3 = (va >> 12) & 0x1FF;
+        if (!(pte[l3] & 1)) return false;
+        user = user && !!(pte[l3] & 4);
+        bool upper_rw = rw;
+        rw   = rw   && !!(pte[l3] & 2);
+        // PAGE_COW (bit 10) counts as writable-eligible: the kernel
+        // path that ACTUALLY writes to user memory must privatize the
+        // leaf via prepare_user_write_range first.
+        bool cow = !!(pte[l3] & (1UL << 10));
+        if (!user || (writable && !rw && !(upper_rw && cow))) return false;
+        va += 0x1000ULL;
     }
-    return 0;
+    return true;
 }

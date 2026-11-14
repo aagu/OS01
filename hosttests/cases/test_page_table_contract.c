@@ -1,3 +1,4 @@
+#include <arch/x86_64/vmm.h>
 /*
  * hosttests/cases/test_page_table_contract.c — common boot direct-map contract
  *                                            (aarch64 M1 plan Task 5).

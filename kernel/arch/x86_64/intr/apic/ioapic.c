@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <arch/x86_64/vmm.h>
 
 static bool s_ioapic_ready = false;
 static spinlock_T s_ioapic_locks[MAX_IOAPICS] = { {1}, {1}, {1}, {1} };

@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <arch/x86_64/vmm.h>
 
 #ifdef OS01_HOST_TEST
 #include "fb_resolution_runtime.h"

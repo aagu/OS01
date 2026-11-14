@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 #ifndef _KERNEL_MEMORY_USER_VM_H
 #define _KERNEL_MEMORY_USER_VM_H
 

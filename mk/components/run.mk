@@ -2625,6 +2625,8 @@ else
 # legal in unlinked objects.  The aarch64 product whitelist is unchanged
 # until Phase 3.
 SCHED_STATIC_CASES := sched-common-compile
+MM_HEADER_BOUNDARY_STATIC_CASES := mm-header-boundary
+STATIC_CASES_VALID := $(SCHED_STATIC_CASES) $(MM_HEADER_BOUNDARY_STATIC_CASES)
 
 # Per-case runner targets (pattern of _test-m1-host-run-*): each owns a
 # full recipe line so os01_submake's leading '+' stays a make prefix,
@@ -2634,10 +2636,19 @@ _test-static-case-sched-common-compile:
 	@echo "  [test-static] CASE=sched-common-compile: aarch64 common scheduler TU compile check"
 	$(call os01_submake,kernel,sched-compile-check ARCH=aarch64 $(OS01_SUBMAKE_ARGS))
 
+# mm-header-boundary (mm-architecture-boundaries Task 2): runs on BOTH
+# profiles.  The controlled sub-make passes ARCH explicitly (the root
+# make does not define ARCH); the x86 profile additionally needs the
+# sysroot published (the target libc stdint.h is force-included).
+.PHONY: _test-static-case-mm-header-boundary
+_test-static-case-mm-header-boundary: $(if $(filter x86_64-clang,$(PROFILE)),$(SYSROOT_STAMP))
+	@echo "  [test-static] CASE=mm-header-boundary: public memory header boundary ($(PROFILE))"
+	$(call os01_submake,kernel,mm-header-boundary ARCH=$(if $(filter aarch64-clang,$(PROFILE)),aarch64,x86_64) $(OS01_SUBMAKE_ARGS))
+
 test-static: _test-static-case-$(CASE)
 	@case "$(CASE)" in \
-	  sched-common-compile) echo "  [test-static] CASE=$(CASE) done" ;; \
-	  *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(SCHED_STATIC_CASES)" >&2; exit 1 ;; \
+	  sched-common-compile|mm-header-boundary) echo "  [test-static] CASE=$(CASE) done" ;; \
+	  *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(STATIC_CASES_VALID)" >&2; exit 1 ;; \
 	esac
 
 endif # CASE

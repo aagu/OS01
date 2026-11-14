@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 /* kernel/selftest/test_aarch64_user_fork_cow.c
  *
  * M4 fork + COW runtime acceptance case.

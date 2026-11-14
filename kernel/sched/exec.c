@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <kernel.h>
+#include <arch/x86_64/vmm.h>
 
 #define USER_CODE_ADDR   0x400000UL
 // Matches kernel/arch/x86_64/intr/trap.c — the user VA envelope is

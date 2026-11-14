@@ -30,6 +30,7 @@
 #include <arch/cpu.h>
 #include <log/log.h>
 #include <sched/task.h>             /* _text / _etext / _edata / _erodata
+#include <arch/x86_64/vmm.h>
                                        / _end externs                     */
 
 // Stage 2 of 3: physical-memory bookkeeping, PMM + VMM bring-up, and

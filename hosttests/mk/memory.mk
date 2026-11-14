@@ -486,7 +486,7 @@ test-page-table-contract-x86: $(TEST_BLD)/test_page_table_contract.elf $(TEST_BL
 	$(TEST_BLD)/test_page_table_vmm.elf
 
 # Page table VMM contract
-$(TEST_BLD)/page_table_vmm_production.o: $(TESTS_DIR)/kernel/memory/vmm.c
+$(TEST_BLD)/page_table_vmm_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vmm.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PT_CONTRACT_HOST_CFLAGS) $(LIBC_INC) -ffunction-sections -fdata-sections -c $< -o $@
 
@@ -568,7 +568,7 @@ VMM_AUDIT_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
 $(TEST_BLD)/test_vmm_caller_audit.o: \
 		$(TEST_CASES)/test_vmm_caller_audit.c \
 		$(TESTS_DIR)/kernel/memory/slab.c \
-		$(TESTS_DIR)/kernel/memory/vmm.c \
+		$(TESTS_DIR)/kernel/arch/x86_64/memory/vmm.c \
 		$(TESTS_DIR)/kernel/memory/tlb.c \
 		$(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
 		$(TESTS_DIR)/kernel/arch/aarch64/memory/page_table.c \
@@ -589,10 +589,16 @@ test_vmm_caller_audit: $(TEST_BLD)/test_vmm_caller_audit.elf
 $(TEST_BLD)/test_vmm_semantic_header.o: \
 		$(TEST_CASES)/test_vmm_semantic_header.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TESTS_DIR)/kernel/include/memory/memory.h \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/arch/mmu.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/vmm.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/mmu.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h \
-		$(TESTS_DIR)/kernel/include/arch/x86_64/pte_bits.h
+		$(TESTS_DIR)/kernel/include/arch/x86_64/pte_bits.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) \
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) $(KERNEL_INC) $(LIBC_INC) \
 		-c $< -o $@
 
 $(TEST_BLD)/test_vmm_semantic_header.elf: $(TEST_BLD)/test_vmm_semantic_header.o
@@ -603,7 +609,7 @@ test_vmm_semantic_header: $(TEST_BLD)/test_vmm_semantic_header.elf
 	$<
 
 # x86 VMM backend
-$(TEST_BLD)/x86_vmm_backend_production.o: $(TESTS_DIR)/kernel/memory/vmm.c \
+$(TEST_BLD)/x86_vmm_backend_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vmm.c \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/pte.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/pte_bits.h \

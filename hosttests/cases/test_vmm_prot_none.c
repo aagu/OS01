@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 /*
  * hosttests/cases/test_vmm_prot_none.c — aarch64 M3.3 Task 19
  * PROT_NONE three-state contract via the *backend* layer

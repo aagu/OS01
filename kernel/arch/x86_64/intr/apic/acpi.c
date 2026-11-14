@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <arch/x86_64/vmm.h>
 
 // ──────────────────────────────────────────────
 //  ACPI structures (packed — these come from firmware)

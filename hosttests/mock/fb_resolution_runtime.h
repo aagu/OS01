@@ -14,6 +14,7 @@
 #define _ARCH_CLOCKSOURCE_H 1
 #define KERNEL_TASK_H 1
 #define _ARCH_MMU_H 1
+#define _ARCH_X86_64_MMU_H  /* host mock owns the x86 MMU primitives */
 
 typedef struct { int dummy; } wait_queue_t;
 

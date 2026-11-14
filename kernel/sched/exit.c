@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <kernel.h>
+#include <arch/x86_64/vmm.h>
 
 // do_exit() frees user page tables and physical pages, then
 // marks the task ZOMBIE. thread_t and task_union are freed by

@@ -20,6 +20,7 @@
 #include <memory/slab.h>
 #include <string.h>
 #include <stdlib.h>
+#include <arch/x86_64/mmu.h>
 
 // Forward declaration from lapic_timer.c
 extern bool lapic_timer_start(uint32_t freq_hz);
@@ -293,7 +294,7 @@ void smp_boot_aps(void)
      * is registered (ipi_init above) and before any AP exists to target.
      * See ipi_ready_publish_bsp() in smp/boot.c. */
     ipi_ready_publish_bsp();
-    uint64_t bsp_cr3 = (uint64_t)get_cr3();
+    uint64_t bsp_cr3 = (uint64_t)arch_get_page_table();
 
     uintptr_t tramp_size = (uintptr_t)_binary_arch_x86_64_trampoline_bin_end
                          - (uintptr_t)_binary_arch_x86_64_trampoline_bin_start;

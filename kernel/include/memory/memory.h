@@ -9,8 +9,6 @@
 
 #define PAGE_OFFSET ARCH_PAGE_OFFSET
 
-#define PAGE_PGD_SHIFT 39   // top-level page-table index shift (39 on x86_64, etc.)
-
 #define Virt_To_Phy(addr) ((unsigned long)(addr) - PAGE_OFFSET)
 #define Phy_To_Virt(addr) ((unsigned long *)((unsigned long)(addr) + PAGE_OFFSET))
 
@@ -23,19 +21,9 @@
 
 extern struct Physical_Memory_Manager PMMngr;
 
-// Backward-compatible alias — returns current page table base.
-// New code should use arch_get_page_table() directly.
-#define get_cr3() arch_get_page_table()
-
 void pmm_init(const struct boot_context *ctx);
 // void free_pages(struct Page * page,int32_t number);
 // struct Page * alloc_pages(int32_t zone_select, int32_t number, uint64_t page_flags);
-/* vmm_init now returns int (was void). 0 on success; -ENOMEM if any
- * intermediate-table allocation fails (the boot-initializer checked
- * path is used to surface the failure instead of constructing a
- * NULL descriptor). The caller is expected to fatally halt on any
- * non-zero return — see kernel/arch/x86_64/memory/boot.c. */
-int  vmm_init(void);
 void mem_dump(const void * start, const void * end);
 
 #endif

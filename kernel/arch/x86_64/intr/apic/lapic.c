@@ -12,6 +12,7 @@
 #include <arch/thread.h>
 #include <errno.h>
 #include <stdint.h>
+#include <arch/x86_64/vmm.h>
 
 #ifdef OS01_HOST_TEST
 #undef Phy_To_Virt

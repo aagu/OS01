@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 #if AARCH64_EL0_TEST
 
 /* kernel/selftest/test_aarch64_user_mm.c — aarch64 M4 acceptance (plan

@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <arch/x86_64/vmm.h>
 
 /* ── Page-size constants used directly (avoid pulling more headers
  *    just for the masks) ─────────────────────────────────────── */

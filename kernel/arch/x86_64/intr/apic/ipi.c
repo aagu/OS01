@@ -9,6 +9,7 @@
 #include <arch/irq.h>
 #include <arch/cpu.h>
 #include <arch/x86_64/gate.h>
+#include <arch/x86_64/vmm.h>
 
 // ── File-scope: generate assembly stubs ──────────────────
 // MUST be outside any function so the stub code is not

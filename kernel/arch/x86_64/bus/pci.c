@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <arch/x86_64/vmm.h>
 
 #ifndef OS01_HOST_TEST
 #include <arch/io.h>

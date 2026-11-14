@@ -1,5 +1,7 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/mmu.h>
+#include <arch/aarch64/vmm_backend.h>
+#include <arch/aarch64/mmu.h>
 
 bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
                                 uint64_t len, bool writable)
@@ -15,7 +17,6 @@ bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
 #if AARCH64_EL0_TEST
 
 #include <arch/aarch64/el0.h>
-#include <arch/aarch64/vmm_backend.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>

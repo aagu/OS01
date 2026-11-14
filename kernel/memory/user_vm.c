@@ -38,6 +38,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <arch/aarch64/mmu.h>   /* AARCH64_USER_MIN/LIMIT */
+#include <arch/aarch64/vmm_backend.h>
 
 /* Fixed AArch64 layout (spec §地址布局和所有权). */
 #define USER_VM_HEAP_LIMIT UINT64_C(0x203ff000)

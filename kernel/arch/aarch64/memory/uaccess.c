@@ -31,6 +31,7 @@
 #include <sched/task.h>
 #include <errno.h>
 #include <limits.h>
+#include <arch/aarch64/mmu.h>
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/el0.h>
 #include <selftest/aarch64_user_svc_uaccess.h>

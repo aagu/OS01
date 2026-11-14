@@ -42,6 +42,8 @@
 #include <memory/vma.h>
 #include <memory/vm_device.h>
 #include <arch/x86_64/vma.h>
+#include <arch/x86_64/vmm.h>
+#include <arch/x86_64/mmu.h>
 
 /* ── Layout constants (mirror kernel/include/sched/task.h) ── */
 #define USER_CODE_ADDR     0x400000UL

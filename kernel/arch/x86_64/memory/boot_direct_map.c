@@ -4,6 +4,7 @@
 #include <memory/pmm.h>
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
+#include <arch/x86_64/vmm.h>
 
 enum { UNSTARTED, INITIALIZING, READY, FAILED };
 static int state;

@@ -111,5 +111,15 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 // Returns 0, -EFAULT (invalid range/permissions) or -ENOMEM (allocation).
 int prepare_user_write_range(mm_t *mm, uint64_t addr, size_t len);
 int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len);
+// Validate-and-lock a user write range before the kernel writes into it
+// (getrandom / devfs random read).  Returns 0 with current->mm->pgdir_lock
+// HELD on success — caller MUST call user_write_range_end().  Returns
+// -EFAULT (lock NOT held) on any bad address or non-writable page.
+// Kernel buffers (current->mm == NULL) are trusted and pass through
+// without lock/check.
+// (mm-architecture-boundaries Task 2: temporarily public here; the x86
+// uaccess owner header takes over in Task 3.)
+int  user_write_range_begin(uint64_t addr, size_t len);
+void user_write_range_end(void);
 
 #endif // _KERNEL_UACCESS_H

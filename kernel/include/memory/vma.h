@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <list.h>
-#include <memory/vmm.h>
 #include <memory/mm.h>   // mm_alloc (compat forward — moved out of this header)
 #include <fs/vfs.h>
 

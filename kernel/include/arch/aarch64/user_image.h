@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 #ifndef OS01_AARCH64_USER_IMAGE_H
 #define OS01_AARCH64_USER_IMAGE_H
 

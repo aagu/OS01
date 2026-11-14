@@ -1,3 +1,4 @@
+#include <arch/x86_64/vmm.h>
 /*
  * hosttests/cases/test_x86_vmm_backend.c — aarch64 M3.2 Task 15:
  * x86 vmm.c backend wrapper + free/COW logic preservation.
@@ -451,19 +452,12 @@ TEST_FUNC(test_x86_nx_cow_stash_roundtrip)
                 PAGE_COW;
 
     uint64_t phys = 0;
-    uint32_t vm = 0;
-    int rc = arch_vmm_query_4k(pgd_root, TEST_VA_A, &phys, &vm);
+    uint64_t flags = 0;
+    int rc = x86_vmm_query_4k_page(pgd_root, TEST_VA_A, &phys, &flags);
     assert_eq(0, rc);
     assert_eq(ROUNDTRIP_PA, phys);          /* NX must not leak into PA */
-    assert_true(vm & VM_PRESENT);
-    assert_true(vm & VM_USER);
-    assert_true(vm & VM_NO_EXEC);           /* x86 semantic query flags */
-    assert_true(vm & VM_COW);
-
-    uint64_t flags = 0;
-    rc = x86_vmm_query_4k_page(pgd_root, TEST_VA_A, &phys, &flags);
-    assert_eq(0, rc);
-    assert_eq(ROUNDTRIP_PA, phys);
+    assert_true(flags & PAGE_VALID);        /* present leaf: raw flags */
+    assert_true(flags & PAGE_USER);
     assert_true(flags & PAGE_NO_EXEC);
     assert_true(flags & PAGE_COW);
 
@@ -480,13 +474,19 @@ TEST_FUNC(test_x86_nx_cow_stash_roundtrip)
     /* Raw PROTNONE + COW stash: phys stays valid, no PRESENT bit. */
     reset_chain();
     pt_tbl[1] = ROUNDTRIP_PA | PAGE_USER | PAGE_PROTNONE | PAGE_COW;
-    vm = 0;
-    rc = arch_vmm_query_4k(pgd_root, TEST_VA_B, &phys, &vm);
+    flags = 0;
+    rc = x86_vmm_query_4k_page(pgd_root, TEST_VA_B, &phys, &flags);
     assert_eq(0, rc);
     assert_eq(ROUNDTRIP_PA, phys);
-    assert_false(vm & VM_PRESENT);
-    assert_true(vm & VM_PROTNONE);
-    assert_true(vm & VM_COW);
+    /* Stash vs absent: a stash is rc=0 with a valid PA and the
+     * PROTNONE software bit, but NO PRESENT. */
+    assert_false(flags & PAGE_VALID);
+    assert_true(flags & PAGE_PROTNONE);
+    assert_true(flags & PAGE_COW);
+
+    /* Absent slot: the raw query reports -ENOENT. */
+    rc = x86_vmm_query_4k_page(pgd_root, TEST_VA_C, &phys, &flags);
+    assert_eq(-ENOENT, rc);
 
     g_cow_put_should_return_true = 1;
     {

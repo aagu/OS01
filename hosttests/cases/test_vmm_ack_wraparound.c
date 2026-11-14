@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 /*
  * hosttests/cases/test_vmm_ack_wraparound.c — aarch64 M3.3 Task 19
  * Ack-generation algebraic wraparound contract (spec §6.4 step 4).

@@ -133,19 +133,6 @@ void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
     }
 }
 
-int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out)
-{
-    (void)pgdir;
-    for (size_t i = 0; i < g_installed_count; i++) {
-        if (g_installed_ptes[i] == virt) {
-            if (phys_out) *phys_out = 0;
-            if (vm_out) *vm_out = VM_PRESENT;
-            return 0;
-        }
-    }
-    return -ENOENT;
-}
-
 /* ── MM commit callback mock ─────────────────────────────────
  * fb_mmap validates and then hands the range to the MM transaction;
  * this callback records the device PA and the SEMANTIC cache request

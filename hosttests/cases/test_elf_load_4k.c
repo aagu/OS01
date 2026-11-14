@@ -1,3 +1,4 @@
+#include <arch/x86_64/vmm.h>
 /*
  * test/cases/test_elf_load_4k.c — Host tests for the per-4 KiB ELF
  * loader (kernel/fs/elf.c, Task 2 of the user heap/ELF isolation

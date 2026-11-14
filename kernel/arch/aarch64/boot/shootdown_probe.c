@@ -43,6 +43,8 @@
 #include <memory/vmm.h>                 /* arch_vmm_* + kernel_map + tlb_shootdown */
 #include <percpu/percpu.h>              /* percpu_data[].ipi_ready */
 #include <log/log.h>
+#include <arch/aarch64/vmm_backend.h>
+#include <arch/mmu.h>   /* ARCH_PAGE_OFFSET */
 
 /* ── Thin production ops adapters ────────────────────────────────
  * The ops struct types are explicit (uint32_t / int / bool / etc.)

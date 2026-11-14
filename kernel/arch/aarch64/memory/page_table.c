@@ -40,6 +40,7 @@
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <memory/pmm.h>
+#include <arch/aarch64/mmu.h>
 
 /* ── Constants private to this TU ──────────────────────────────── */
 

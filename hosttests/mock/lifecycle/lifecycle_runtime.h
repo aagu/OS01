@@ -95,6 +95,7 @@ static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f)
  * taken at flush time. */
 #ifndef _ARCH_MMU_H
 #define _ARCH_MMU_H
+#define _ARCH_X86_64_MMU_H  /* host mock owns the x86 MMU primitives */
 #define ARCH_PAGE_OFFSET 0xffff800000000000ULL
 
 void lifecycle_sync_flush(void);

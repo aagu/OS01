@@ -1,3 +1,4 @@
+#include <arch/x86_64/vmm.h>
 #include "page_table_test_runner.h"
 #include <errno.h>
 #include <stdint.h>

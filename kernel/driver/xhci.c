@@ -8,6 +8,7 @@
 #include <bus/pci/driver.h>
 #include <errno.h>
 #include <string.h>
+#include <arch/x86_64/vmm.h>
 
 #ifndef OS01_HOST_TEST
 #include <arch/x86_64/pte.h>

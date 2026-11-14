@@ -56,7 +56,7 @@
 #endif
 
 #define SLAB_C        OS01_KERNEL_SRC "/kernel/memory/slab.c"
-#define VMM_C         OS01_KERNEL_SRC "/kernel/memory/vmm.c"
+#define VMM_C         OS01_KERNEL_SRC "/kernel/arch/x86_64/memory/vmm.c"
 #define EARLY_ARENA_C OS01_KERNEL_SRC "/kernel/arch/aarch64/memory/early_arena.c"
 #define PAGE_TABLE_C  OS01_KERNEL_SRC "/kernel/arch/aarch64/memory/page_table.c"
 #define TLB_C         OS01_KERNEL_SRC "/kernel/memory/tlb.c"

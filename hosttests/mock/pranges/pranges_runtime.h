@@ -59,6 +59,8 @@
 #ifndef _ARCH_MMU_H          /* privileged CR3/invlpg inline asm */
 #define _ARCH_MMU_H
 #endif
+#define _ARCH_X86_64_MMU_H  /* host mock owns the x86 MMU primitives */
+
 /* Don't block _FS_VFS_H — vma.c needs the production typedef. */
 
 #include <list.h>

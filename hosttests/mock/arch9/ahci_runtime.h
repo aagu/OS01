@@ -114,6 +114,11 @@ static inline void vmm_map_page(void *map, uint64_t paddr, uintptr_t vaddr, uint
 
 static inline void flush_tlb(void) {}
 
+/* Claim the x86 private VMM/MMU header guards: this host mock owns
+ * the mocked primitives (vmm_map_page / flush_tlb / kernel_map), so
+ * the production private headers must stay no-ops. */
+#define _ARCH_X86_64_MMU_H
+#define _ARCH_X86_64_VMM_H
 #define kernel_map NULL
 
 /* Percpu and clocksource */

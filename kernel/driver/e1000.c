@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <arch/x86_64/vmm.h>
 
 #ifndef OS01_HOST_TEST
 #include "lwip/netif.h"

@@ -15,6 +15,7 @@
 #include <arch/x86_64/fb_pte.h>     /* x86_fb_cache_bits: request -> PCD/PWT  */
 #include <arch/x86_64/fb_map.h>    /* fb_x86_revoke_early_alias              */
 #include <log/log.h>               /* log_info                               */
+#include <arch/x86_64/vmm.h>
 
 /* The boot-time PMD table that holds the early framebuffer alias
  * (PUD[0]'s PMD table, physical 0x103000).  vmm_init() adopts the boot

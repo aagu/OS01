@@ -1,3 +1,5 @@
+#include <arch/aarch64/vmm_backend.h>
+#include <arch/mmu.h>   /* ARCH_PAGE_OFFSET */
 /* kernel/arch/aarch64/boot/shootdown_probe.h — M3.5 Task 25 shootdown probe
  * (spec §7.3).
  *

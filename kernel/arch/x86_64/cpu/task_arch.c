@@ -27,6 +27,7 @@
 #include <memory/slab.h>
 #include <errno.h>
 #include <string.h>
+#include <arch/x86_64/mmu.h>
 
 /* The x86 first-entry trampoline (kernel/arch/x86_64/cpu/thread_entry.S):
  * pops the pt_regs frame, calls fn(arg), then do_exit(). */

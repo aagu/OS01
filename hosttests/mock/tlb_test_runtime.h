@@ -37,6 +37,7 @@
 #define _ARCH_SPINLOCK_H
 #define __SPINLOCK_H__
 #define _ARCH_MMU_H
+#define _ARCH_X86_64_MMU_H  /* host mock owns the x86 MMU primitives */
 #define _ARCH_CPU_H
 #define _KERNEL_IPI_H
 #define _KERNEL_DEBUG_H

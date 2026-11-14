@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 /* kernel/include/arch/aarch64/page_table.h
  *
  * AArch64 stage-1 translation-table primitive layer.

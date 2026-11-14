@@ -110,6 +110,11 @@ static inline void virtio_test_spin_unlock_irqrestore(spinlock_T *l, uint64_t fl
 #define ZONE_NORMAL 0
 #define PAGE_KERNEL_PMD_NOCACHE 0
 #define PAGE_2M_MASK (~(0x200000ULL - 1))
+/* Claim the x86 private VMM/MMU header guards: this host mock owns
+ * the mocked primitives (vmm_map_page / flush_tlb / kernel_map), so
+ * the production private headers must stay no-ops. */
+#define _ARCH_X86_64_MMU_H
+#define _ARCH_X86_64_VMM_H
 #define kernel_map NULL
 
 static inline void vmm_map_page(void *map, uint64_t paddr, uintptr_t vaddr, uint64_t flags)

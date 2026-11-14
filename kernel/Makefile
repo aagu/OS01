@@ -669,6 +669,25 @@ $(BUILD_DIR)/sched-compile-check/%.o: sched/%.c $(FLAGS_STAMP)
 sched-compile-check: $(SCHED_COMPILE_CHECK_OBJS)
 	@echo "  [sched-compile-check] $(ARCH): $(words $(SCHED_COMPILE_CHECK_OBJS)) common scheduler TUs -> $(BUILD_DIR)/sched-compile-check/"
 
+# ── Public MM header boundary compile check ───────────────────
+# mm-architecture-boundaries Task 2: compile each public memory header
+# as an independent TU with the REAL target configuration (no host
+# overlay) and prove the public boundary — qemutests/
+# mm_header_boundary.py owns the positive + forbidden-macro +
+# undeclared-symbol probes.  Invoked from the root as
+#   make PROFILE=<profile> test-static CASE=mm-header-boundary
+# (run.mk routes the selector here with ARCH=x86_64 or ARCH=aarch64).
+# Task 3 adds the public uaccess header to the script's header list.
+.PHONY: mm-header-boundary
+mm-header-boundary:
+	@mkdir -p $(BUILD_DIR)/mm-header-boundary
+	@python3 $(OS01_ROOT)/qemutests/mm_header_boundary.py \
+	    --arch $(ARCH) \
+	    --out-dir "$(BUILD_DIR)/mm-header-boundary" \
+	    --compiler $(EFFECTIVE_CC) \
+	    --repo-root "$(OS01_ROOT)" \
+	    --cc-flags $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS)
+
 # ── lwIP compilation ──────────────────────────────────────────
 # lwIP sources live outside kernel/ under thirdpart/lwip/src
 $(BUILD_DIR)/lwip/%.o: $(LWIP_SRC_DIR)/%.c $(FLAGS_STAMP)

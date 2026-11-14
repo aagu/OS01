@@ -1,3 +1,4 @@
+#include <arch/x86_64/mmu.h>
 /* Live IDT/IRQ probes. No symbols or observations in production builds. */
 #if defined(OS01_SELFTEST) && defined(__x86_64__)
 #include <selftest/x86_intr.h>

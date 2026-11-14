@@ -33,6 +33,7 @@
 #include <memory/slab.h>       // kmalloc, kfree
 #include <errno.h>
 #include <string.h>            // memcpy (kernel-side stage copy)
+#include <arch/x86_64/vmm.h>
 
 // ── Fault-tolerant user copy with optional on-fault cleanup ──
 // Longjmp value MUST be a compile-time constant (Clang constraint).

@@ -15,6 +15,7 @@
 #include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
 #include <string.h>
 #include <errno.h>
+#include <arch/x86_64/vmm.h>
 
 // User-VA layout (must mirror kernel/arch/x86_64/intr/trap.c
 // USER_CODE_ADDR/USER_ENVELOPE_SIZE and kernel/include/sched/task.h

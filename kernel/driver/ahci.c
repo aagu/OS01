@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <log/log.h>
+#include <arch/x86_64/vmm.h>
 
 // ── Offsets within per-port 2MB DMA page ──────────────────
 #define DMA_OFF_CMD_LIST    0x0000    // 1 KB (32 headers × 32 B)

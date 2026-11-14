@@ -1,3 +1,4 @@
+#include <arch/aarch64/vmm_backend.h>
 /*
  * hosttests/cases/test_vmm_replace_protocol.c — aarch64 M3.3 Task 19
  * 4-class replace protocol matrix (spec §4.4.3) with descriptor-level

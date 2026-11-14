@@ -1,5 +1,11 @@
+/* Claim the production facade + private aarch64 MMU header guards:
+ * this host shadow owns the primitives and the host ARCH_PAGE_OFFSET,
+ * so the real <arch/mmu.h> and <arch/aarch64/mmu.h> must stay no-ops
+ * even when a TU includes both. */
 #ifndef AARCH64_HOST_MMU_H
 #define AARCH64_HOST_MMU_H
+#define _ARCH_MMU_H
+#define _ARCH_AARCH64_MMU_H
 #include <stdint.h>
 #include <stddef.h>
 /* Use a host-userspace-friendly address for the "direct map" base so

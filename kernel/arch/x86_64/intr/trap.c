@@ -37,6 +37,7 @@
 #include <arch/x86_64/intr_decode.h>   // production event decoder
 #include <arch/x86_64/intr_dispatch.h>
 #include <arch/x86_64/intr_vectors.h> // private business handler handoff
+#include <arch/x86_64/vmm.h>
 // ── Helper: find the current task from TSS.rsp0 ──────────────
 // Safe to call from IST exception stacks where get_current_task()
 // (RSP masking) returns garbage.

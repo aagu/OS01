@@ -31,6 +31,8 @@
 #include <sched/task.h>           /* init_task_union / STACK_SIZE */
 #include <selftest/boot_contract_fixture.h>
 #include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
+#include <arch/aarch64/vmm_backend.h>
+#include <arch/aarch64/mmu.h>
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
                               * transitively; does NOT pull in <arch/subsys.h>. */
