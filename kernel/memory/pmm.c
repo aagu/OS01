@@ -809,41 +809,27 @@ struct Page *pmm_claim_free_frame(uint64_t start_pa, uint64_t end_pa,
     /* Match alloc_pages' bitmap convention: rel_idx = (page - pages_struct),
      * word = rel_idx >> 6, mask = 1UL << (rel_idx % 64). Skip frames whose
      * zone_struct is NULL — those are holes, NOT free RAM — so we never
-     * hand out a Page whose PA falls outside represented RAM. */
-    if (from_end) {
-        for (uint64_t i = PMMngr.pages_size; i > 0; i--) {
-            struct Page *p = PMMngr.pages_struct + (i - 1);
-            if (!p->zone_struct) continue;
-            uint64_t pa = p->phy_address;
-            if (pa < start_pa || pa >= end_pa) continue;
-            uint64_t rel_idx = i - 1;
-            uint64_t word = rel_idx >> 6;
-            uint64_t mask = 1UL << (rel_idx % 64);
-            if (PMMngr.bits_map[word] & mask) continue;  /* in use */
-            PMMngr.bits_map[word] |= mask;
-            p->zone_struct->page_using_count++;
-            p->zone_struct->page_free_count--;
-            p->attribute = PG_PTable_Mapped;
-            result = p;
-            break;
-        }
-    } else {
-        for (uint64_t i = 0; i < PMMngr.pages_size; i++) {
-            struct Page *p = PMMngr.pages_struct + i;
-            if (!p->zone_struct) continue;
-            uint64_t pa = p->phy_address;
-            if (pa < start_pa || pa >= end_pa) continue;
-            uint64_t rel_idx = i;
-            uint64_t word = rel_idx >> 6;
-            uint64_t mask = 1UL << (rel_idx % 64);
-            if (PMMngr.bits_map[word] & mask) continue;  /* in use */
-            PMMngr.bits_map[word] |= mask;
-            p->zone_struct->page_using_count++;
-            p->zone_struct->page_free_count--;
-            p->attribute = PG_PTable_Mapped;
-            result = p;
-            break;
-        }
+     * hand out a Page whose PA falls outside represented RAM.
+     *
+     * One scan serves both directions: the step index runs 0..pages_size
+     * and rel_idx is derived per step (from_end maps step 0 onto the
+     * LAST frame), computed only inside the loop so a zero pages_size
+     * can never produce an underflowed index. */
+    for (uint64_t step = 0; step < PMMngr.pages_size; step++) {
+        uint64_t rel_idx = from_end ? PMMngr.pages_size - 1 - step : step;
+        struct Page *p = PMMngr.pages_struct + rel_idx;
+        if (!p->zone_struct) continue;
+        uint64_t pa = p->phy_address;
+        if (pa < start_pa || pa >= end_pa) continue;
+        uint64_t word = rel_idx >> 6;
+        uint64_t mask = 1UL << (rel_idx % 64);
+        if (PMMngr.bits_map[word] & mask) continue;  /* in use */
+        PMMngr.bits_map[word] |= mask;
+        p->zone_struct->page_using_count++;
+        p->zone_struct->page_free_count--;
+        p->attribute = PG_PTable_Mapped;
+        result = p;
+        break;
     }
 
     spin_unlock_irqrestore(&pmm_lock, flags);
