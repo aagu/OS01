@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Export the six legacy test lists into config/test-bridge.json."""
+"""ONE-SHOT MIGRATION SCRIPT — DO NOT RE-RUN.
+
+config/test-bridge.json was exported once in Task 2 and is now a manually
+maintained shrink-only bridge file (entries are removed as tests migrate to
+@os01-test / TEST_MANIFEST metadata). Re-running this script would overwrite
+manual edits or collide with migrated entries.
+
+Export the six legacy test lists into config/test-bridge.json."""
 
 from __future__ import annotations
 

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Tests for catalog & Make fragment generation and drift gate (tools/tests/scan_tests.py)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS_TESTS = ROOT / "tools" / "tests"
+if str(TOOLS_TESTS) not in sys.path:
+    sys.path.insert(0, str(TOOLS_TESTS))
+
+import scan_tests  # noqa: E402
+
+TEST_MANIFEST = {
+    "id": "test_catalog_gen",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
+
+def _extract_catalog_mk_lines(catalog_mk: Path) -> list[str]:
+    lines: list[str] = []
+    in_define = False
+    for raw in catalog_mk.read_text(encoding="utf-8").splitlines():
+        s = raw.strip()
+        if s.startswith("define TEST_SUITE_CATALOG_DATA"):
+            in_define = True
+            continue
+        if s == "endef":
+            in_define = False
+            continue
+        if in_define and s:
+            lines.append(s)
+    return lines
+
+
+class CatalogGenTests(unittest.TestCase):
+    def test_bridge_plus_empty_scan_matches_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_data = {
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "kind": "host_test",
+                        "id": "test_alpha",
+                        "layer": "host",
+                        "subsystem": "memory",
+                        "timing": "strict",
+                        "tier": "nightly",
+                        "isolation": "none",
+                        "scenarios": [],
+                        "acceptance": "protocol-or-legacy",
+                        "source": "hosttests/cases/test_alpha.c",
+                    },
+                    {
+                        "kind": "harness_module",
+                        "id": "qemutests.test_beta",
+                        "layer": "harness",
+                        "subsystem": "test-framework",
+                        "timing": "strict",
+                        "tier": "pr",
+                        "scenarios": [],
+                        "source": "qemutests/test_beta.py",
+                    },
+                ],
+                "ignored": [],
+            }
+            (root / "config").mkdir(parents=True)
+            bridge_path = root / "config" / "test-bridge.json"
+            bridge_path.write_text(json.dumps(bridge_data), encoding="utf-8")
+            (root / "hosttests" / "cases").mkdir(parents=True)
+            (root / "hosttests" / "cases" / "test_alpha.c").write_text("int main(void){return 0;}\n")
+            (root / "qemutests").mkdir(parents=True)
+            (root / "qemutests" / "test_beta.py").write_text("import unittest\n")
+
+            out_dir = root / "out"
+            catalog = scan_tests.emit(str(root), str(bridge_path), str(out_dir))
+            self.assertEqual([e["id"] for e in catalog["entries"]], ["qemutests.test_beta", "test_alpha"])
+
+    def test_scan_id_conflict_with_bridge_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_data = {
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "kind": "host_test",
+                        "id": "test_dup",
+                        "layer": "host",
+                        "subsystem": "memory",
+                        "timing": "strict",
+                        "tier": "nightly",
+                        "isolation": "none",
+                        "scenarios": [],
+                        "acceptance": "protocol-or-legacy",
+                        "source": "hosttests/cases/test_dup.c",
+                    }
+                ],
+                "ignored": [],
+            }
+            (root / "config").mkdir(parents=True)
+            bridge_path = root / "config" / "test-bridge.json"
+            bridge_path.write_text(json.dumps(bridge_data), encoding="utf-8")
+            (root / "hosttests" / "cases").mkdir(parents=True)
+            (root / "hosttests" / "cases" / "test_dup.c").write_text(
+                "/* @os01-test\n * id: test_dup\n * layer: host\n * subsystem: memory\n */\n"
+            )
+            with self.assertRaises(scan_tests.ScanError):
+                scan_tests.emit(str(root), str(bridge_path), str(root / "out"))
+
+    def test_real_repo_emit_matches_inventory_and_catalog_mk(self) -> None:
+        bridge = json.loads((ROOT / "config" / "test-bridge.json").read_text(encoding="utf-8"))
+        expected_inv_lines = {
+            f"{e['id']}:{e['subsystem']}:{e['acceptance']}"
+            for e in bridge["entries"]
+            if e["kind"] == "host_test"
+        }
+        expected_tsv_lines = set(_extract_catalog_mk_lines(ROOT / "mk" / "tests" / "catalog.mk"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_tests.emit(str(ROOT), str(ROOT / "config" / "test-bridge.json"), tmp)
+            reg_text = (Path(tmp) / "mk" / "generated" / "test-registry.mk").read_text(encoding="utf-8")
+            gen_inv_lines = {
+                line.split("+=", 1)[1].strip()
+                for line in reg_text.splitlines()
+                if line.startswith("HOST_TEST_INVENTORY +=")
+            }
+            self.assertEqual(gen_inv_lines, expected_inv_lines)
+
+            disp_text = (Path(tmp) / "mk" / "generated" / "test-dispatch.mk").read_text(encoding="utf-8")
+            gen_tsv_lines: set[str] = set()
+            in_define = False
+            for raw in disp_text.splitlines():
+                s = raw.strip()
+                if s.startswith("define TEST_SUITE_CATALOG_DATA"):
+                    in_define = True
+                    continue
+                if s == "endef":
+                    in_define = False
+                    continue
+                if in_define and s:
+                    gen_tsv_lines.add(s)
+            self.assertEqual(gen_tsv_lines, expected_tsv_lines)
+
+    def test_drift_gate_fails_on_modified_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            scan_tests.emit(str(ROOT), str(ROOT / "config" / "test-bridge.json"), str(out))
+            self.assertEqual(
+                scan_tests.check_drift(str(ROOT), str(ROOT / "config" / "test-bridge.json"), str(out)),
+                [],
+            )
+            cat_file = out / "config" / "test-catalog.json"
+            cat_file.write_text(cat_file.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
+            drifted = scan_tests.check_drift(str(ROOT), str(ROOT / "config" / "test-bridge.json"), str(out))
+            self.assertIn("config/test-catalog.json", drifted)
+
+
+if __name__ == "__main__":
+    unittest.main()

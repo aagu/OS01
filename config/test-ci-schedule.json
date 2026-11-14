@@ -1,0 +1,199 @@
+{
+  "nightly": [
+    {
+      "suite": "aarch64-boot-contract",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-gic-spi",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-m1-ap-bad-root",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-m1-arena-exhaust",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-m1-ram",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-m1-sparse",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-m1-table-exhaust",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-m3-probe",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-no-ack",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-sched",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-sched-ap",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-sched-ap-fatal",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-sched-tick",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-sched-wake",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-smp",
+      "tier": "pr",
+      "timing": "strict"
+    },
+    {
+      "suite": "aarch64-sync-fault",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "arch10-capacity",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "arch6-fsstress",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "boot-contract",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "boot-failure",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "boot-irq-time",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "boot-lifecycle",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "boot-services",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "doom",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "driver-model",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "gfx",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "gui",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "gui-desktop",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "inittab-phase",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "intr-x86",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "kernel-selftest",
+      "tier": "pr",
+      "timing": "strict"
+    },
+    {
+      "suite": "monitor",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "network",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "phase-0",
+      "tier": "pr",
+      "timing": "strict"
+    },
+    {
+      "suite": "resolution",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "resolution-fault",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "systest",
+      "tier": "pr",
+      "timing": "strict"
+    },
+    {
+      "suite": "systest-repeat",
+      "tier": "nightly",
+      "timing": "strict"
+    },
+    {
+      "suite": "terminal-present",
+      "tier": "nightly",
+      "timing": "strict"
+    }
+  ]
+}

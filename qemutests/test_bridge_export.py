@@ -6,15 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
-import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS_TESTS = ROOT / "tools" / "tests"
-if str(TOOLS_TESTS) not in sys.path:
-    sys.path.insert(0, str(TOOLS_TESTS))
-
-import export_legacy_bridge  # noqa: E402
 
 TEST_MANIFEST = {
     "id": "test_bridge_export",
@@ -39,28 +33,25 @@ SPECIAL_ZERO_BIN_IDS = frozenset({
 class BridgeExportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.exported = export_legacy_bridge.build_bridge(str(ROOT))
-        cls.entries = cls.exported["entries"]
+        bridge_file = ROOT / "config" / "test-bridge.json"
+        cls.bridge = json.loads(bridge_file.read_text(encoding="utf-8"))
+        cls.entries = cls.bridge["entries"]
         cls.by_kind: dict[str, list[dict]] = {}
         for item in cls.entries:
             cls.by_kind.setdefault(item["kind"], []).append(item)
 
-    def test_schema_and_host_test_reconciliation(self) -> None:
-        self.assertEqual(self.exported["schema_version"], 1)
+    def test_schema_uniqueness_and_sources(self) -> None:
+        self.assertEqual(self.bridge["schema_version"], 1)
+        seen_ids: set[str] = set()
+        for entry in self.entries:
+            tid = entry["id"]
+            self.assertNotIn(tid, seen_ids, msg=f"duplicate id in bridge: {tid}")
+            seen_ids.add(tid)
+            src = entry["source"]
+            self.assertTrue((ROOT / src).is_file(), msg=f"missing source for {tid}: {src}")
 
-        inv_proc = subprocess.run(
-            ["make", "-s", "--no-print-directory", "print-host-test-inventory"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        inv_ids = {line.split("\t")[0] for line in inv_proc.stdout.splitlines() if line.strip()}
-        self.assertEqual(len(inv_ids), 224)
-
+    def test_host_test_anomalies_recorded(self) -> None:
         host_entries = {e["id"]: e for e in self.by_kind["host_test"]}
-        expected_ids = inv_ids | {"test_user_vm"} | SPECIAL_ZERO_BIN_IDS
-        self.assertEqual(set(host_entries.keys()), expected_ids)
         self.assertEqual(len(host_entries), 232)
 
         # (a) test_user_vm backfilled
@@ -112,12 +103,7 @@ class BridgeExportTests(unittest.TestCase):
         harness_ids = {e["id"] for e in harness_entries}
         self.assertNotIn("qemutests.test_scan_tools", harness_ids)
         self.assertNotIn("qemutests.test_bridge_export", harness_ids)
-
-    def test_committed_bridge_matches_live_export_if_present(self) -> None:
-        bridge_file = ROOT / "config" / "test-bridge.json"
-        if bridge_file.is_file():
-            committed = json.loads(bridge_file.read_text(encoding="utf-8"))
-            self.assertEqual(committed, self.exported)
+        self.assertNotIn("qemutests.test_catalog_gen", harness_ids)
 
 
 if __name__ == "__main__":
