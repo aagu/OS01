@@ -390,9 +390,9 @@ void aarch64_user_fork_cow_test_fault(struct pt_regs *regs, uint64_t esr,
 void aarch64_user_fork_cow_test_reap(struct task_struct *prev)
 {
     /* The switch-tail observer runs for every switched-out task; only
-     * a PF_SELF_REAP task has reached its exit tail and a meaningful
+     * a TASK_ZOMBIE task has reached its exit tail and a meaningful
      * exit_code.  A mid-run yield must never look like a reap. */
-    if (!prev || !(prev->flags & PF_SELF_REAP))
+    if (!prev || prev->state != TASK_ZOMBIE)
         return;
 
     int pid = (int)prev->pid;
