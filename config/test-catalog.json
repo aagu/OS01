@@ -2767,6 +2767,19 @@
       }
     },
     {
+      "id": "test_gpt_bootdev",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "fs.gpt.bootdev"
+      ],
+      "link": "gpt-bootdev",
+      "source": "hosttests/cases/test_gpt_bootdev.c"
+    },
+    {
       "id": "test_gui_build_audit",
       "layer": "harness",
       "subsystem": "test-framework",

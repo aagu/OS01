@@ -691,3 +691,21 @@ $(TEST_BLD)/test_boot_services_vfs.elf: \
 .PHONY: test_boot_services_vfs
 test_boot_services_vfs: $(TEST_BLD)/test_boot_services_vfs.elf
 	$<
+
+# GPT metadata / boot device selection
+GPT_BOOTDEV_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) \
+    $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/boot_runtime.h -DOS01_HOST_TEST
+
+$(TEST_BLD)/gpt_bootdev_production.o: $(TESTS_DIR)/kernel/fs/gpt.c \
+		$(TESTS_DIR)/kernel/include/fs/gpt.h \
+		$(TESTS_DIR)/kernel/include/block/blockdev.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GPT_BOOTDEV_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_gpt-bootdev = $(GPT_BOOTDEV_HOST_CFLAGS)
+LINK_GROUP_gpt-bootdev := $(TEST_BLD)/gpt_bootdev_production.o $(LIBC_OBJS)
+
+.PHONY: test-gpt-bootdev
+test-gpt-bootdev: $(TEST_BLD)/test_gpt_bootdev.elf
+	$<

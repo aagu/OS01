@@ -115,6 +115,22 @@ static block_device_t *block_device_create_partition(
 
 
 // ── GPT helpers ──────────────────────────────────────────
+static uint32_t gpt_read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static uint64_t gpt_read_le64(const uint8_t *p)
+{
+    uint64_t val = 0;
+    for (int i = 0; i < 8; i++)
+        val |= (uint64_t)p[i] << (8 * i);
+    return val;
+}
+
 static int guid_is_zero(const uint8_t *guid)
 {
     for (int i = 0; i < 16; i++)
@@ -137,129 +153,277 @@ static void gpt_extract_name(const uint8_t *entry, int entry_size,
     out[pos] = '\0';
 }
 
-// ── gpt_scan — main entry point ──────────────────────────
-gpt_info_t *gpt_scan(block_device_t *disk)
-{
-    if (!disk || !disk->present || disk->sector_size != 512) return NULL;
+struct gpt_table {
+    block_device_t *disk;
+    uint8_t        *entries;
+    uint32_t        num_entries;
+    uint32_t        entry_size;
+    uint32_t       *valid_slots;
+    size_t          valid_count;
+};
 
-    // Phase 1: Read GPT header (LBA 1)
+static int gpt_read_table_internal(block_device_t *disk, bool strict_entries,
+                                   struct gpt_table **out)
+{
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!disk || !disk->present)
+        return -EINVAL;
+    if (disk->sector_size != 512)
+        return -E2BIG;
+    if (disk->sector_count < 2)
+        return -ENOENT;
+
     uint8_t *hdr = kmalloc(512);
-    if (!hdr) return NULL;
+    if (!hdr)
+        return -ENOMEM;
 
     if (block_device_read(disk, 1, 1, hdr) != 0) {
         debug_block("gpt: failed to read header\n");
         kfree(hdr);
-        return NULL;
+        return -EIO;
     }
     if (memcmp(hdr, "EFI PART", 8) != 0) {
         debug_block("gpt: no EFI PART signature\n");
         kfree(hdr);
-        return NULL;
+        return -ENOENT;
     }
-    uint32_t revision = *(uint32_t *)(hdr + 8);
-    if (revision != 0x00010000) {
+
+    uint32_t revision = gpt_read_le32(hdr + 8);
+    if (revision != 0x00010000u) {
         debug_block("gpt: unsupported revision %#x\n", revision);
         kfree(hdr);
-        return NULL;
+        return -E2BIG;
     }
 
-    // Phase 2: Dynamic parameters from header (don't hardcode LBA 2 / 128 / 128!)
-    uint32_t header_size    = *(uint32_t *)(hdr + 12);
-    uint64_t entry_lba      = *(uint64_t *)(hdr + 72);
-    uint32_t num_entries    = *(uint32_t *)(hdr + 80);
-    uint32_t entry_size     = *(uint32_t *)(hdr + 84);
-    uint32_t hdr_crc_stored = *(uint32_t *)(hdr + 16);
+    uint32_t header_size        = gpt_read_le32(hdr + 12);
+    uint32_t hdr_crc_stored     = gpt_read_le32(hdr + 16);
+    uint64_t entry_lba          = gpt_read_le64(hdr + 72);
+    uint32_t num_entries        = gpt_read_le32(hdr + 80);
+    uint32_t entry_size         = gpt_read_le32(hdr + 84);
+    uint32_t entries_crc_stored = gpt_read_le32(hdr + 88);
 
-    if (header_size < 92 || entry_size < 128) {
+    if (header_size < 92u || header_size > 512u ||
+        num_entries == 0u || entry_size < 128u) {
         debug_block("gpt: bad header/entry size\n");
         kfree(hdr);
-        return NULL;
+        return -EINVAL;
     }
-    uint64_t array_size = (uint64_t)num_entries * entry_size;
-    if (array_size > 1024 * 1024) {  // sanity: reject > 1MB partition table
+
+    uint64_t array_size = (uint64_t)num_entries * (uint64_t)entry_size;
+    if (array_size > 1024u * 1024u) {
         debug_block("gpt: partition table too large\n");
         kfree(hdr);
-        return NULL;
+        return -E2BIG;
     }
 
-    // Phase 3: Validate header CRC32
-    uint32_t crc_saved = hdr_crc_stored;
-    memset(hdr + 16, 0, 4);  // zero out CRC field for computation
+    uint64_t array_sectors = (array_size + 511u) / 512u;
+    if (entry_lba < 2u ||
+        entry_lba + array_sectors < entry_lba ||
+        entry_lba + array_sectors > disk->sector_count) {
+        debug_block("gpt: entry array out of disk bounds\n");
+        kfree(hdr);
+        return -EINVAL;
+    }
+
+    memset(hdr + 16, 0, 4);
     uint32_t crc_computed = gpt_crc32(hdr, header_size);
-    if (crc_computed != crc_saved) {
+    kfree(hdr);
+    if (crc_computed != hdr_crc_stored) {
         debug_block("gpt: header CRC mismatch\n");
-        kfree(hdr);
-        return NULL;
+        return -EINVAL;
     }
 
-    // Phase 4: Read + validate partition entry array
-    uint32_t array_sectors = (uint32_t)((array_size + 511) / 512);
-    uint8_t *entries = kmalloc(array_sectors * 512);
-    if (!entries) {
-        kfree(hdr);
-        return NULL;
-    }
-    if (block_device_read(disk, entry_lba, array_sectors, entries) != 0) {
+    uint8_t *entries = kmalloc((size_t)(array_sectors * 512u));
+    if (!entries)
+        return -ENOMEM;
+
+    if (block_device_read(disk, entry_lba, (uint32_t)array_sectors, entries) != 0) {
         debug_block("gpt: failed to read partition entries\n");
         kfree(entries);
-        kfree(hdr);
-        return NULL;
+        return -EIO;
     }
-    uint32_t entries_crc_stored = *(uint32_t *)(hdr + 88);
-    kfree(hdr);
 
-    uint32_t entries_crc_computed = gpt_crc32(entries, (uint32_t)array_size);
+    uint32_t entries_crc_computed = gpt_crc32(entries, (size_t)array_size);
     if (entries_crc_computed != entries_crc_stored) {
         debug_block("gpt: partition entries CRC mismatch\n");
-        kfree(entries); return NULL;
+        kfree(entries);
+        return -EINVAL;
     }
 
-    // Phase 5: Allocate result + enumerate partitions
-    gpt_info_t *info = calloc(1, sizeof(gpt_info_t));
-    if (!info) { kfree(entries); return NULL; }
+    size_t valid_count = 0;
+    for (uint32_t i = 0; i < num_entries; i++) {
+        const uint8_t *entry = entries + (size_t)i * entry_size;
+        if (guid_is_zero(entry))
+            continue;
 
-    int part_idx = 1;  // 1-based partition index for naming
-    for (uint32_t i = 0; i < num_entries && info->count < GPT_PARTITION_MAX; i++) {
-        uint8_t *entry = entries + (uint64_t)i * entry_size;
-        if (guid_is_zero(entry)) continue;
+        uint64_t start_lba = gpt_read_le64(entry + 32);
+        uint64_t end_lba   = gpt_read_le64(entry + 40);
+        if (end_lba < start_lba || end_lba >= disk->sector_count) {
+            if (strict_entries) {
+                kfree(entries);
+                return -EINVAL;
+            }
+            continue;
+        }
+        valid_count++;
+    }
 
-        uint64_t start_lba = *(uint64_t *)(entry + 32);
-        uint64_t end_lba   = *(uint64_t *)(entry + 40);
-        if (end_lba < start_lba || end_lba >= disk->sector_count) continue;
+    struct gpt_table *t = kmalloc(sizeof(*t));
+    if (!t) {
+        kfree(entries);
+        return -ENOMEM;
+    }
 
-        uint64_t length = end_lba - start_lba + 1;
-        gpt_partition_t *part = &info->partitions[info->count];
+    uint32_t *slots = NULL;
+    if (valid_count > 0) {
+        slots = kmalloc(valid_count * sizeof(uint32_t));
+        if (!slots) {
+            kfree(t);
+            kfree(entries);
+            return -ENOMEM;
+        }
+        size_t pos = 0;
+        for (uint32_t i = 0; i < num_entries; i++) {
+            const uint8_t *entry = entries + (size_t)i * entry_size;
+            if (guid_is_zero(entry))
+                continue;
+            uint64_t start_lba = gpt_read_le64(entry + 32);
+            uint64_t end_lba   = gpt_read_le64(entry + 40);
+            if (end_lba < start_lba || end_lba >= disk->sector_count)
+                continue;
+            slots[pos++] = i;
+        }
+    }
 
-        memcpy(part->type_guid, entry, 16);
-        part->start_lba = start_lba;
-        part->end_lba   = end_lba;
-        part->parent    = disk;
-        gpt_extract_name(entry, (int)entry_size, part->name, sizeof(part->name));
+    t->disk = disk;
+    t->entries = entries;
+    t->num_entries = num_entries;
+    t->entry_size = entry_size;
+    t->valid_slots = slots;
+    t->valid_count = valid_count;
+    *out = t;
+    return 0;
+}
 
-        part->dev = block_device_create_partition(disk, start_lba, length, part_idx++);
-        if (!part->dev) {
+int gpt_read_table(block_device_t *disk, struct gpt_table **out)
+{
+    return gpt_read_table_internal(disk, true, out);
+}
+
+void gpt_free_table(struct gpt_table *t)
+{
+    if (!t)
+        return;
+    kfree(t->valid_slots);
+    kfree(t->entries);
+    kfree(t);
+}
+
+size_t gpt_table_count(const struct gpt_table *t)
+{
+    return t ? t->valid_count : 0;
+}
+
+bool gpt_table_entry(const struct gpt_table *t, size_t ordinal,
+                     gpt_partition_t *out)
+{
+    if (!t || !out || ordinal >= t->valid_count)
+        return false;
+
+    uint32_t slot = t->valid_slots[ordinal];
+    const uint8_t *entry = t->entries + (size_t)slot * t->entry_size;
+
+    memset(out, 0, sizeof(*out));
+    memcpy(out->type_guid, entry, 16);
+    memcpy(out->unique_guid, entry + 16, 16);
+    out->entry_number = slot + 1u;
+    out->start_lba = gpt_read_le64(entry + 32);
+    out->end_lba = gpt_read_le64(entry + 40);
+    out->parent = t->disk;
+    out->dev = NULL;
+    gpt_extract_name(entry, (int)t->entry_size, out->name, sizeof(out->name));
+    return true;
+}
+
+static void gpt_rollback_published(gpt_info_t *info)
+{
+    for (int i = 0; i < info->count; i++) {
+        block_device_t *dev = info->partitions[i].dev;
+        if (dev) {
+            void *ctx = dev->private_data;
+            block_device_unregister_boot(dev);
+            kfree(ctx);
+            info->partitions[i].dev = NULL;
+        }
+    }
+    info->count = 0;
+}
+
+gpt_info_t *gpt_publish_table(const struct gpt_table *t, bool strict)
+{
+    if (!t || !t->disk)
+        return NULL;
+
+    gpt_info_t *info = kmalloc(sizeof(gpt_info_t));
+    if (!info)
+        return NULL;
+    memset(info, 0, sizeof(*info));
+
+    int part_idx = 1;
+    for (size_t i = 0; i < t->valid_count && info->count < GPT_PARTITION_MAX; i++) {
+        gpt_partition_t part;
+        if (!gpt_table_entry(t, i, &part))
+            continue;
+
+        uint64_t length = part.end_lba - part.start_lba + 1u;
+        part.dev = block_device_create_partition(t->disk, part.start_lba,
+                                                 length, part_idx++);
+        if (!part.dev) {
             debug_block("gpt: failed to create partition device\n");
+            if (strict) {
+                gpt_rollback_published(info);
+                kfree(info);
+                return NULL;
+            }
             continue;
         }
 
-        int ret = devfs_register_blkdev(part->dev->name, part->dev);
-        if (ret != 0 && ret != -EEXIST) {
+        int ret = devfs_register_blkdev(part.dev->name, part.dev);
+        if (ret != 0 && (strict || ret != -EEXIST)) {
             log_err("gpt: failed to register partition '%s' in devfs (%d)\n",
-                    part->dev->name, ret);
-            void *ctx = part->dev->private_data;
-            block_device_unregister_boot(part->dev);
+                    part.dev->name, ret);
+            void *ctx = part.dev->private_data;
+            block_device_unregister_boot(part.dev);
             kfree(ctx);
-            part->dev = NULL;
+            part.dev = NULL;
+            if (strict) {
+                gpt_rollback_published(info);
+                kfree(info);
+                return NULL;
+            }
             continue;
         }
 
         debug_block("gpt: partition '%s' LBA %lu-%lu (%lu sectors)\n",
-                    part->name, start_lba, end_lba, length);
-        info->count++;
+                    part.name, part.start_lba, part.end_lba, length);
+        info->partitions[info->count++] = part;
     }
 
-    kfree(entries);
     debug_block("gpt: found %d partitions\n", info->count);
+    return info;
+}
+
+// ── gpt_scan — compatibility entry point ─────────────────
+gpt_info_t *gpt_scan(block_device_t *disk)
+{
+    struct gpt_table *t = NULL;
+    if (gpt_read_table_internal(disk, false, &t) != 0)
+        return NULL;
+
+    gpt_info_t *info = gpt_publish_table(t, false);
+    gpt_free_table(t);
     return info;
 }
 

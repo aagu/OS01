@@ -18,6 +18,12 @@ $(TEST_BLD)/test_fixture_v2.o: $(TEST_CASES)/test_fixture_v2.c
 $(TEST_BLD)/test_fixture_v2.elf: $(TEST_BLD)/test_fixture_v2.o
 	$(HOST_CC) -o $@ $^
 
+$(TEST_BLD)/test_gpt_bootdev.o: $(TEST_CASES)/test_gpt_bootdev.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_gpt-bootdev)),$(LINK_CFLAGS_gpt-bootdev),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_gpt_bootdev.elf: $(TEST_BLD)/test_gpt_bootdev.o $(LINK_GROUP_gpt-bootdev)
+	$(HOST_CC) $(LINK_LDFLAGS_gpt-bootdev) -o $@ $^
+
 $(TEST_BLD)/test_usb_msc.o: $(TEST_CASES)/test_usb_msc.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_usb-msc)),$(LINK_CFLAGS_usb-msc),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
