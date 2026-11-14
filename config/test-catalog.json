@@ -1595,6 +1595,19 @@
       }
     },
     {
+      "id": "test_boot_devpath",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.uefi.devpath"
+      ],
+      "link": "boot-devpath",
+      "source": "hosttests/cases/test_boot_devpath.c"
+    },
+    {
       "id": "test_boot_facade_headers",
       "layer": "harness",
       "subsystem": "test-framework",

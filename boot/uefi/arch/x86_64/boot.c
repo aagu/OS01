@@ -2,7 +2,7 @@
  *
  * Kernel: raw kernel.bin at fixed 0x100000 (no ELF).
  * Handoff: boot_context at 0x60000 in a 4-page allocation:
- *   0x60000 boot_context (104 B)
+ *   0x60000 boot_context v3 (176 B)
  *   0x61000 raw UEFI descriptor scratch (8 KB, ~170 x 48 B entries)
  *   0x63000 E820 output array (4 KB, ~200 x 20 B entries)
  * Memory map: E820 (BOOT_MEMORY_FORMAT_E820).
@@ -19,6 +19,9 @@
 #define X86_E820_BASE         UINT64_C(0x63000)
 #define X86_E820_CAPACITY     UINT64_C(0x1000)
 #define X86_E820_ENTRY_COUNT  (X86_E820_CAPACITY / sizeof(struct E820_ENTRY))
+
+_Static_assert(sizeof(struct boot_context) <= 0x1000,
+               "boot_context exceeds first handoff page");
 
 static int x86_kernel_reserved;       /* pages at 0x100000 allocated */
 static uintn_t x86_kernel_pages;
@@ -363,9 +366,24 @@ void arch_release(void)
 
 void arch_puts(const char *s)
 {
-    /* Uppercase %S: under UEFI_NO_UTF8 the wide printf reads a narrow
-     * UTF-8 char* vararg (%s would read a wide char_t* and garble). */
-    printf(CL("%S"), s);
+    wchar_t buf[128];
+    size_t n = 0;
+
+    if (!s || !ST || !ST->ConOut || !ST->ConOut->OutputString)
+        return;
+
+    while (*s) {
+        buf[n++] = (wchar_t)(unsigned char)*s++;
+        if (n == (sizeof(buf) / sizeof(buf[0])) - 1u) {
+            buf[n] = L'\0';
+            ST->ConOut->OutputString(ST->ConOut, buf);
+            n = 0;
+        }
+    }
+    if (n > 0) {
+        buf[n] = L'\0';
+        ST->ConOut->OutputString(ST->ConOut, buf);
+    }
 }
 
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,

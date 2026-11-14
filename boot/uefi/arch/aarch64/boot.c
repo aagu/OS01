@@ -27,6 +27,9 @@
 #define AARCH64_FDT_MAGIC          UINT32_C(0xd00dfeed)
 #define AARCH64_FDT_HEADER_SIZE    UINT32_C(40)
 
+_Static_assert(sizeof(struct boot_context) <= AARCH64_PAGE_SIZE,
+               "boot_context exceeds first handoff page");
+
 /* UEFI Device Tree Table GUID: b1b621d5-f19c-41a5-830b-d9152c69aae0. */
 static const efi_guid_t fdt_table_guid = {
     0xb1b621d5U, 0xf19cU, 0x41a5U,

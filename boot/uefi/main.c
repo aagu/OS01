@@ -6,6 +6,13 @@
  */
 #include <uefi.h>
 #include "arch/arch.h"
+#include "boot_device.h"
+
+_Static_assert(BOOT_CONTEXT_VERSION == 3u, "boot_context v3");
+_Static_assert(sizeof(struct boot_device_info) == 40, "boot_device_info ABI");
+_Static_assert(offsetof(struct boot_context, boot_device) == 136,
+               "boot_device offset");
+_Static_assert(sizeof(struct boot_context) == 176, "boot_context v3 ABI");
 
 #ifndef UINT32_MAX
 #define UINT32_MAX UINT32_C(0xffffffff)
@@ -125,6 +132,119 @@ efi_status_t capture_entropy(struct boot_context *ctx)
     return EFI_SUCCESS;
 }
 
+#define OS01_DEVPATH_MAX_BYTES 4096u
+#define OS01_EFI_DEVICE_PATH_UTILITIES_PROTOCOL_GUID \
+    { 0x0379be4eU, 0xd706U, 0x437dU, { 0xb0U, 0x37U, 0xedU, 0xb8U, 0x2fU, 0xb7U, 0x72U, 0xa4U } }
+
+typedef uintn_t (EFIAPI *os01_get_device_path_size_t)(
+    const efi_device_path_t *DevicePath);
+
+typedef struct {
+    os01_get_device_path_size_t GetDevicePathSize;
+} os01_efi_dpu_protocol_t;
+
+static size_t bounded_devpath_size(const uint8_t *dp, size_t max_bytes)
+{
+    size_t offset = 0;
+
+    while (offset + 4u <= max_bytes) {
+        uint8_t type = dp[offset];
+        uint8_t subtype = dp[offset + 1u];
+        size_t node_len = (size_t)dp[offset + 2u] |
+                          ((size_t)dp[offset + 3u] << 8);
+
+        if (node_len < 4u || node_len > max_bytes - offset)
+            return 0;
+        offset += node_len;
+        if (type == 0x7fu && subtype == 0xffu)
+            return (node_len == 4u) ? offset : 0;
+    }
+    return 0;
+}
+
+static void put_hex_byte(char *dst, uint8_t b)
+{
+    static const char hex[] = "0123456789abcdef";
+    dst[0] = hex[(b >> 4) & 0xfu];
+    dst[1] = hex[b & 0xfu];
+}
+
+static void format_efi_guid(const uint8_t g[16], char out[37])
+{
+    static const uint8_t order[16] = {
+        3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15
+    };
+    size_t pos = 0;
+
+    for (size_t i = 0; i < 16u; i++) {
+        if (i == 4u || i == 6u || i == 8u || i == 10u)
+            out[pos++] = '-';
+        put_hex_byte(out + pos, g[order[i]]);
+        pos += 2u;
+    }
+    out[pos] = '\0';
+}
+
+static void capture_boot_device(struct boot_context *ctx)
+{
+    efi_guid_t dp_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+    efi_guid_t dpu_guid = OS01_EFI_DEVICE_PATH_UTILITIES_PROTOCOL_GUID;
+    efi_device_path_t *dp = NULL;
+    os01_efi_dpu_protocol_t *dpu = NULL;
+    struct boot_device_info info;
+    size_t dp_size = 0;
+    EFI_STATUS status;
+
+    if (!ctx)
+        return;
+
+    ctx->flags &= ~BOOT_CONTEXT_HAS_BOOT_DEVICE;
+
+    if (!LIP || !LIP->DeviceHandle) {
+        arch_puts("UEFI: boot device absent (no device handle)\r\n");
+        return;
+    }
+
+    status = BS->HandleProtocol(LIP->DeviceHandle, &dp_guid, (void **)&dp);
+    if (EFI_ERROR(status) || !dp) {
+        arch_puts("UEFI: boot device absent (no device path)\r\n");
+        return;
+    }
+
+    status = BS->LocateProtocol(&dpu_guid, NULL, (void **)&dpu);
+    if (!EFI_ERROR(status) && dpu && dpu->GetDevicePathSize) {
+        uintn_t raw_size = dpu->GetDevicePathSize(dp);
+        if (raw_size == 0 || raw_size > OS01_DEVPATH_MAX_BYTES) {
+            arch_puts("UEFI: boot device absent (devpath size out of range)\r\n");
+            return;
+        }
+        dp_size = (size_t)raw_size;
+    } else {
+        dp_size = bounded_devpath_size((const uint8_t *)dp,
+                                       OS01_DEVPATH_MAX_BYTES);
+        if (dp_size == 0) {
+            arch_puts("UEFI: boot device absent (devpath walk failed)\r\n");
+            return;
+        }
+    }
+
+    if (os01_bootdev_from_devpath((const uint8_t *)dp, dp_size, &info) != 0) {
+        arch_puts("UEFI: boot device absent (no valid GPT HD node)\r\n");
+        return;
+    }
+
+    ctx->boot_device = info;
+    ctx->flags |= BOOT_CONTEXT_HAS_BOOT_DEVICE;
+
+    {
+        char uuid[37];
+        format_efi_guid(info.partition_guid, uuid);
+        arch_puts("UEFI: ESP GUID=");
+        arch_puts(uuid);
+        arch_puts("\r\n");
+    }
+}
+
 /* Mask a status to its low bits; the CRT's `ret ? EFIERR(ret) : EFI_SUCCESS`
  * re-applies the error bit at the application entry boundary. */
 static int main_error_code(EFI_STATUS status)
@@ -170,6 +290,8 @@ int main(int argc, char_t **argv)
         arch_puts("UEFI: kernel load failed\r\n");
         goto fail;
     }
+
+    capture_boot_device(ctx);
 
     status = arch_setup_graphics(ctx);
     if (EFI_ERROR(status)) {

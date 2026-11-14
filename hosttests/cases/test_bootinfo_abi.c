@@ -4,13 +4,26 @@
 
 _Static_assert(BOOT_CONTEXT_MAGIC == UINT32_C(0x4f533031),
                "boot context magic");
-_Static_assert(BOOT_CONTEXT_VERSION == 2u, "boot context version");
+_Static_assert(BOOT_CONTEXT_VERSION == 3u, "boot context version");
+_Static_assert(BOOT_CONTEXT_HAS_BOOT_DEVICE == (1u << 6),
+               "boot device flag");
 _Static_assert(BOOT_MEMORY_FORMAT_UEFI_RAW == 3,
                "UEFI raw memory map format");
 _Static_assert(sizeof(struct BOOT_MEMORY_MAP) == 24, "memory map ABI");
 _Static_assert(offsetof(struct BOOT_MEMORY_MAP, descriptor_version) == 20,
                "UEFI descriptor version offset");
 _Static_assert(sizeof(struct BOOT_FIRMWARE) == 16, "firmware ABI");
+_Static_assert(sizeof(struct boot_device_info) == 40, "boot device info ABI");
+_Static_assert(offsetof(struct boot_device_info, partition_guid) == 0,
+               "partition_guid offset");
+_Static_assert(offsetof(struct boot_device_info, partition_start_lba) == 16,
+               "partition_start_lba offset");
+_Static_assert(offsetof(struct boot_device_info, partition_size_lba) == 24,
+               "partition_size_lba offset");
+_Static_assert(offsetof(struct boot_device_info, partition_number) == 32,
+               "partition_number offset");
+_Static_assert(offsetof(struct boot_device_info, signature_type) == 36,
+               "signature_type offset");
 _Static_assert(offsetof(struct boot_context, magic) == 0,
                "magic leading offset");
 _Static_assert(offsetof(struct boot_context, version) == 4,
@@ -23,7 +36,9 @@ _Static_assert(offsetof(struct boot_context, memory) == 56,
                "memory offset");
 _Static_assert(offsetof(struct boot_context, firmware) == 80,
                "firmware offset");
-_Static_assert(sizeof(struct boot_context) == 136, "boot context ABI");
+_Static_assert(offsetof(struct boot_context, boot_device) == 136,
+               "boot_device offset");
+_Static_assert(sizeof(struct boot_context) == 176, "boot context ABI");
 
 int main(void)
 {
@@ -40,6 +55,13 @@ int main(void)
     if (boot_context_valid(&ctx))
         return 1;
     ctx.magic = BOOT_CONTEXT_MAGIC;
+
+    ctx.version = 2u;
+    ctx.size = 136u;
+    if (boot_context_valid(&ctx))
+        return 1;
+    ctx.version = BOOT_CONTEXT_VERSION;
+    ctx.size = sizeof(ctx);
 
     ctx.version ^= 1u;
     if (boot_context_valid(&ctx))

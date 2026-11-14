@@ -434,3 +434,17 @@ LINK_GROUP_usb-msc := \
 test-usb-msc: $(TEST_BLD)/test_usb_msc.elf
 	$<
 
+# UEFI boot device path parser
+$(TEST_BLD)/uefi_boot_device.o: $(TESTS_DIR)/boot/uefi/boot_device.c \
+    $(TESTS_DIR)/boot/uefi/boot_device.h \
+    $(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+LINK_CFLAGS_boot-devpath = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_boot-devpath := $(TEST_BLD)/uefi_boot_device.o
+
+.PHONY: test-boot-devpath
+test-boot-devpath: $(TEST_BLD)/test_boot_devpath.elf
+	$<
+

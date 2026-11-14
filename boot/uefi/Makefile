@@ -30,10 +30,12 @@ RUNTIME_DIR := $(UEFI_RUNTIME_DIR)
 ifeq ($(ARCH),x86_64)
 TARGET := BOOTX64.EFI
 SRCS := $(ROOT)/boot/uefi/main.c \
+        $(ROOT)/boot/uefi/boot_device.c \
         $(ROOT)/boot/uefi/arch/x86_64/boot.c
 else ifeq ($(ARCH),aarch64)
 TARGET := BOOTAA64.EFI
 SRCS := $(ROOT)/boot/uefi/main.c \
+        $(ROOT)/boot/uefi/boot_device.c \
         $(ROOT)/boot/uefi/arch/aarch64/boot.c \
         $(ROOT)/boot/uefi/arch/aarch64/elf.c \
         $(ROOT)/boot/uefi/arch/aarch64/handoff.S
@@ -104,6 +106,7 @@ UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=
 all: $(OUTDIR)/$(TARGET)
 
 $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
+		$(ROOT)/boot/uefi/boot_device.h \
 		$(ROOT)/kernel/include/core/bootinfo.h \
 		$(ROOT)/kernel/include/arch/aarch64/handoff_layout.h \
 		$(UEFI_RUNTIME_STAMP)

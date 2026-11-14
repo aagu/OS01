@@ -2,7 +2,7 @@
  *
  * Shared physical-address contract between the AArch64 UEFI bootloader
  * (boot/uefi/arch/aarch64) and the kernel. The loader builds the
- * `boot_context` v2 record inside the handoff window and copies the
+ * `boot_context` v3 record inside the handoff window and copies the
  * firmware FDT and raw UEFI memory map after it; the kernel reads
  * those bytes back. The trampoline page sits just below the end of
  * the window and carries the `aarch64_handoff_stub` the BSP jumps

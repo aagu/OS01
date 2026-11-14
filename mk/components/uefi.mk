@@ -72,12 +72,12 @@ UEFI_ARCH_FAMILY  := x86_64
 UEFI_TARGET_EFI   := BOOTX64.EFI
 UEFI_CLANG        ?= $(CLANG)
 UEFI_DIGEST_CLANG := $(UEFI_CLANG)
-UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/arch/x86_64/boot.c
+UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/x86_64/boot.c
 else
 UEFI_ARCH_FAMILY  := aarch64
 UEFI_TARGET_EFI   := BOOTAA64.EFI
 UEFI_DIGEST_CLANG := clang
-UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/arch/aarch64/boot.c \
+UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/aarch64/boot.c \
                      boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/handoff.S
 endif
 
@@ -91,6 +91,7 @@ UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 # only layout change still re-keys both the staged runtime receipt
 # and the EFI artifact.
 UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
+                    boot/uefi/boot_device.h \
                     kernel/include/core/bootinfo.h
 ifeq ($(UEFI_ARCH_FAMILY),aarch64)
 UEFI_BOOT_INPUTS += kernel/include/arch/aarch64/handoff_layout.h

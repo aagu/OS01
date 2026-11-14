@@ -10,7 +10,7 @@
 // different toolchain (clang --target=x86_64-pc-win32-coff) that
 // uses 4-byte 'unsigned long', while the kernel uses 8-byte.
 //
-// This header defines the boot_context v2 ABI handed off from the
+// This header defines the boot_context v3 ABI handed off from the
 // firmware-aware bootloader to the kernel. Pointers are physical
 // addresses. The boot_context itself is fully arch-neutral — no
 // architecture-specific data structure is defined here. x86_64-only
@@ -38,6 +38,7 @@ enum BOOT_CONTEXT_FLAGS {
      * RDSEED, so QEMU dev/test (no RDRAND) and aarch64 (RNDR stub)
      * have a real entropy source at boot. */
     BOOT_CONTEXT_HAS_BOOT_ENTROPY = 1u << 5,
+    BOOT_CONTEXT_HAS_BOOT_DEVICE  = 1u << 6,
 };
 
 // Memory-map format tags. Values are wire-level: each arch's bootloader
@@ -68,6 +69,14 @@ struct BOOT_FIRMWARE {
     uint64_t acpi_rsdp;      /* physical address, or zero */
 };
 
+struct boot_device_info {
+    uint8_t  partition_guid[16];  /* ESP GPT UniquePartitionGUID, raw on-disk bytes */
+    uint64_t partition_start_lba;
+    uint64_t partition_size_lba;
+    uint32_t partition_number;
+    uint32_t signature_type;      /* UEFI HD node: 1 = MBR, 2 = GPT */
+};
+
 struct boot_context {
     uint32_t magic;
     uint32_t version;
@@ -84,10 +93,11 @@ struct boot_context {
      * Sized to fit two ChaCha20 keys — kernel uses it as initial
      * seed material via generate-then-rekey (issue AAGU-2 §1). */
     uint8_t boot_entropy[32];
+    struct boot_device_info boot_device; /* valid iff flags & BOOT_CONTEXT_HAS_BOOT_DEVICE */
 };
 
 #define BOOT_CONTEXT_MAGIC UINT32_C(0x4f533031)
-#define BOOT_CONTEXT_VERSION 2u
+#define BOOT_CONTEXT_VERSION 3u
 
 /* Keep construction trivial and freestanding so early arch code need not
  * pull in libc or any generic kernel subsystem. */
