@@ -34,14 +34,14 @@
       "reason_class": "pending",
       "owner": "gui",
       "priority": "P1",
-      "notes": "Audits GUI build artifacts and user/gui sources"
+      "notes": "Sample replacement completed for public-header LVGL wording grep (replaced by compiler #ifdef LVGL_H + typedef probes); remaining sub-checks pending"
     },
     {
       "path": "qemutests/intr_dispatch_audit.py",
-      "reason_class": "pending",
+      "reason_class": "structural-invariant",
+      "policy_ref": "AGENTS.md#Critical gotchas (set_intr_gate_raw / DEFINE_INTR_STUB + REGISTER_INTR_HANDLER)",
       "owner": "intr",
-      "priority": "P1",
-      "notes": "Audits interrupt dispatch stubs and entry/handler linkage"
+      "notes": "Adjudicated batch 1: verifies arch interrupt stub/entry/handler linkage across ELF + asm/C dispatch tables"
     },
     {
       "path": "qemutests/kernel_runtime_link_test.py",

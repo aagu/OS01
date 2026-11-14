@@ -2019,13 +2019,7 @@ def audit_sysroot_and_build(
             if not hdr.is_file():
                 continue
             content = hdr.read_text()
-            # A prose mention of LVGL in a comment is documentation, not a
-            # dependency: the CODE of a public header must not mention LVGL
-            # at all.  Both the word check and the symbol check run on the
-            # comment-stripped text.
             code = _strip_c_comments(content)
-            if "lvgl" in code.lower():
-                errors.append(f"Public header {hdr.name} contains reference to 'lvgl'")
             if re.search(r"\blv_\w+", code):
                 errors.append(f"Public header {hdr.name} contains reference to 'lv_' symbols")
             if "OS01_HOST_TEST" in content:
@@ -2062,6 +2056,13 @@ def audit_sysroot_and_build(
                 "#include <gui/gui_event.h>\n"
                 "#include <gui/gui_layout.h>\n"
                 "#include <gui/gui_focus.h>\n"
+                "/* Compiler-level LVGL isolation probe: public GUI headers must\n"
+                " * neither include lvgl.h nor expose lv_obj_t / lv_display_t. */\n"
+                "#ifdef LVGL_H\n"
+                "#error \"Public GUI header leaks LVGL_H\"\n"
+                "#endif\n"
+                "typedef int lv_obj_t;\n"
+                "typedef int lv_display_t;\n"
                 "int test_consumer(void) {\n"
                 "    gui_config_t cfg = {0};\n"
                 "    gui_widget_t widget = GUI_WIDGET_NONE;\n"
