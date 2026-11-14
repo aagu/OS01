@@ -2220,7 +2220,7 @@ include $(TEST_DISPATCH_GEN)
 # suite until M1b: the expected-failure M0 checkpoint stays out of the
 # automated bucket, so `test-qemu SUITE=usb-boot` is intentionally
 # invalid until the bridge entry lands in M1b.
-USB_BOOT_CASE ?= firmware
+USB_BOOT_CASE ?= readonly
 USB_BOOT_TIMEOUT ?= 120
 # One job-private log directory per invocation.  A Make variable (not a
 # shell variable) so the same path is visible to every recipe line; the
@@ -2327,6 +2327,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  $(MAKE) --no-print-directory test-qemu-boot-contract || exit 1; \
 	elif [ "$(SUITE)" = "boot-services" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-services || exit 1; \
+	elif [ "$(SUITE)" = "usb-boot" ]; then \
+	  $(MAKE) --no-print-directory test-qemu-usb-boot USB_BOOT_CASE=readonly || exit 1; \
 	elif [ "$(SUITE)" = "doom" ]; then \
 	  if [ "$(DOOM_ASSET_COUNT)" != "4" ]; then \
 	    echo "ERROR: SUITE=doom requires all four DOOM_IWAD variables to be provided" >&2; exit 1; \
@@ -2354,7 +2356,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# python harness inside ``test-qemu-driver-model`` and must NOT
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
-	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ] && [ "$(SUITE)" != "boot-services" ]; then \
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ] && [ "$(SUITE)" != "boot-services" ] && [ "$(SUITE)" != "usb-boot" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
@@ -2388,8 +2390,8 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@case "$(USB_BOOT_CASE)" in \
-	  firmware) ;; \
-	  *) echo "USB_BOOT_CASE must be firmware (M0), got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
+	  firmware|readonly) ;; \
+	  *) echo "USB_BOOT_CASE must be firmware or readonly, got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
 	esac
 	@set +e; \
 	mkdir -p "$(USB_BOOT_JOB_DIR)"; \

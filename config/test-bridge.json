@@ -4408,6 +4408,35 @@
       "flavor": "TERM_PRESENT_TEST=1",
       "image_var": "$(TEST_TERMINAL_PRESENT_IMAGE)",
       "runner_module": "qemutests.terminal_present_test"
+    },
+    {
+      "kind": "suite",
+      "id": "usb-boot",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [
+        "drivers.usb.boot.readonly"
+      ],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=usb-boot",
+      "prepare_target": "",
+      "run_target": "",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.usb_boot"
     }
   ],
   "ignored": [

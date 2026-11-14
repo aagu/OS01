@@ -194,6 +194,11 @@
       "suite": "terminal-present",
       "tier": "nightly",
       "timing": "tolerant"
+    },
+    {
+      "suite": "usb-boot",
+      "tier": "nightly",
+      "timing": "strict"
     }
   ]
 }

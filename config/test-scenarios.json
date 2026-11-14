@@ -4759,6 +4759,31 @@
    }
   },
   {
+   "id": "drivers.usb.boot.readonly",
+   "owner": "qemu_e2e",
+   "component": "drivers",
+   "behavior": "usb_boot",
+   "trigger": "QEMU boots normal image over qemu-xhci usb-storage only and reads /usb-root.txt and /boot/USBESP.TXT",
+   "assertions": [
+    "usb_msc publishes usba with 512-byte blocks",
+    "shell prompt appears and cat /usb-root.txt /boot/USBESP.TXT outputs both standalone markers followed by fresh prompt"
+   ],
+   "failure_modes": [
+    "missing usba publication, missing prompt, missing or echoed marker lines, or timeout"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/usb_boot.py",
+    "selector": "usb-boot",
+    "evidence": "runner exit 0 plus archived metadata.json and serial.log"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary QEMU E2E suite verifying USB-only boot and both root/ESP filesystem mounts"
+   }
+  },
+  {
    "id": "drivers.usb.devfs",
    "owner": "host",
    "component": "drivers",

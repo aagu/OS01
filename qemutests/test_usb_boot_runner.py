@@ -239,6 +239,9 @@ class FakeSession:
             self.returncode = self._exited_after
         return ""
 
+    def send(self, data: bytes) -> None:
+        pass
+
     def stop(self) -> int | None:
         self.stopped = True
         if self.returncode is None:
@@ -508,8 +511,91 @@ class CliTests(unittest.TestCase):
                 "--log-dir", "/logs/run",
             ]
         )
-        self.assertEqual(args.case, "firmware")
+        self.assertEqual(args.case, "readonly")
         self.assertEqual(args.timeout, 120.0)
+
+
+class ReadonlyCaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="usb-boot-ro-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_gpt_partition_offset_calculation(self) -> None:
+        import struct
+        import uuid
+
+        img = self.tmp / "gpt.img"
+        data = bytearray(4096 * 512)
+        # Protective MBR + GPT header at LBA 1
+        esp_guid = uuid.UUID("11111111-2222-3333-4444-555555555555")
+        root_guid = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        esp_type = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+        linux_type = uuid.UUID("0FC63DAF-8483-4772-8E79-3D69D8477DE4")
+
+        # Write GPT header at LBA 1 (offset 512)
+        hdr = bytearray(92)
+        hdr[0:8] = b"EFI PART"
+        struct.pack_into("<II", hdr, 8, 0x00010000, 92)
+        struct.pack_into("<QQQQ", hdr, 24, 1, 4095, 34, 4062)
+        struct.pack_into("<QIII", hdr, 72, 2, 128, 128, 0)
+        data[512 : 512 + 92] = hdr
+
+        # Entry 0 (ESP): LBA 2048..3071
+        e0 = bytearray(128)
+        e0[0:16] = esp_type.bytes_le
+        e0[16:32] = esp_guid.bytes_le
+        struct.pack_into("<QQ", e0, 32, 2048, 3071)
+        data[1024 : 1024 + 128] = e0
+
+        # Entry 1 (root): LBA 3072..4061
+        e1 = bytearray(128)
+        e1[0:16] = linux_type.bytes_le
+        e1[16:32] = root_guid.bytes_le
+        struct.pack_into("<QQ", e1, 32, 3072, 4061)
+        data[1024 + 128 : 1024 + 256] = e1
+
+        img.write_bytes(data)
+        info = ub.read_gpt_info(img)
+        self.assertEqual(info["esp_guid"], esp_guid)
+        self.assertEqual(info["esp_offset"], 2048 * 512)
+        self.assertEqual(info["esp_size"], (3071 - 2048 + 1) * 512)
+        self.assertEqual(info["root_offset"], 3072 * 512)
+        self.assertEqual(info["root_size"], (4061 - 3072 + 1) * 512)
+
+    def test_readonly_requires_partition_content(self) -> None:
+        root_marker = "USB_ROOT_MARKER_ALPHA"
+        esp_marker = "USB_ESP_MARKER_BETA"
+
+        # 1. Prompt without both standalone marker lines fails
+        stream_no_markers = (
+            "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
+            "# "
+        )
+        self.assertFalse(
+            ub.readonly_evidence(stream_no_markers, root_marker, esp_marker)
+        )
+
+        # 2. Input echo containing markers on the command line fails
+        stream_echo_only = (
+            "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
+            "# echo USB_ROOT_MARKER_ALPHA USB_ESP_MARKER_BETA\n"
+            "# "
+        )
+        self.assertFalse(
+            ub.readonly_evidence(stream_echo_only, root_marker, esp_marker)
+        )
+
+        # 3. Valid sequence: usba log -> prompt -> both standalone marker lines -> fresh prompt
+        stream_valid = (
+            "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
+            "# cat /usb-root.txt /boot/USBESP.TXT\n"
+            "USB_ROOT_MARKER_ALPHA\n"
+            "USB_ESP_MARKER_BETA\n"
+            "# "
+        )
+        self.assertTrue(
+            ub.readonly_evidence(stream_valid, root_marker, esp_marker)
+        )
 
 
 if __name__ == "__main__":

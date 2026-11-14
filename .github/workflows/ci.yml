@@ -422,6 +422,7 @@ jobs:
           make test-qemu SUITE=boot-failure
           make test-qemu SUITE=boot-contract
           make test-qemu SUITE=boot-services
+          make test-qemu SUITE=usb-boot
           ( tolerant_suite make test-qemu SUITE=gui ) || true
           ( tolerant_suite make test-qemu SUITE=gui-desktop ) || true
           make test-syscall-repeat
