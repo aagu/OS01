@@ -389,13 +389,13 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     // released — a waker holding task_list_lock can then complete the
     // whole cleanup (clear blocker -> wake) before we sleep, and the
     // double-check below closes the lost-wakeup window.
-    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    uint64_t entry_flags = spin_lock_irqsave(&task_list_lock);
 
     // Step 1: Check condition first — if already met, don't block at all.
     // This is the critical part that prevents lost-wakeup: even if the
     // caller already checked, we re-check here atomically before sleeping.
     if (check(self)) {
-        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+        spin_unlock_irqrestore(&task_list_lock, entry_flags);
         return 0;
     }
 
@@ -427,11 +427,11 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
             self->state = TASK_RUNNING;
             spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         }
-        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+        spin_unlock_irqrestore(&task_list_lock, entry_flags);
         return 0;
     }
 
-    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    spin_unlock_irqrestore(&task_list_lock, entry_flags);
 
     // Step 5: Give up CPU. schedule() will run sched_unblock_blocked()
     // which finds us and wakes us when the condition is met.
@@ -440,10 +440,10 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     aarch64_sched_before_block_switch(self);
 #endif
     schedule();
-    arch_local_irq_enable();
+    arch_local_irq_restore(entry_flags);
     // Woke up — clear blocker and check why (back under
     // task_list_lock: the waker cleared it under the same lock).
-    tl_flags = spin_lock_irqsave(&task_list_lock);
+    uint64_t resume_flags = spin_lock_irqsave(&task_list_lock);
     self->blocker.type = BLOCKER_NONE;
     self->blocker.check = NULL;
     {
@@ -457,7 +457,7 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
      * until the interruption decision is complete, without holding rq_lock. */
     bool interrupted = signal_can_wake && (self->signal & ~self->blocked) &&
                        !check(self);
-    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    spin_unlock_irqrestore(&task_list_lock, resume_flags);
     return interrupted ? -EINTR : 0;
 
 }

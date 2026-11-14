@@ -446,6 +446,44 @@ static void suite_exit_masks_before_cpu_lookup(void)
     assert_eq(0,mock_irq_state);
 }
 
+static void suite_blocker_preserves_entry_irq_state(void)
+{
+    TEST_SUITE("blocker_wait preserves caller entry IRQ mask across schedule");
+
+    /* 1. Caller enters with IRQs enabled (mock_irq_state == 0). */
+    sched_notify_reset();
+    cb_calls = 0;
+    cb_return = 0;
+    task_t sleeper;
+    memset(&sleeper, 0, sizeof(sleeper));
+    sleeper.state = TASK_RUNNING;
+    sleeper.pid = 21;
+    sleeper.cpu = 0;
+    sleeper.allowed_cpus = 1;
+    sleeper.thread = &init_thread;
+    mock_sched_current = &sleeper;
+    mock_irq_state = 0;
+
+    assert_eq(0, blocker_wait(check_cb, BLOCKER_WAITPID, false));
+    assert_eq(0, (int)mock_irq_state);
+
+    /* 2. Caller enters with IRQs masked (mock_irq_state == 1, e.g. AArch64 SVC). */
+    sched_notify_reset();
+    cb_calls = 0;
+    cb_return = 0;
+    memset(&sleeper, 0, sizeof(sleeper));
+    sleeper.state = TASK_RUNNING;
+    sleeper.pid = 22;
+    sleeper.cpu = 0;
+    sleeper.allowed_cpus = 1;
+    sleeper.thread = &init_thread;
+    mock_sched_current = &sleeper;
+    mock_irq_state = 1;
+
+    assert_eq(0, blocker_wait(check_cb, BLOCKER_WAITPID, false));
+    assert_eq(1, (int)mock_irq_state);
+}
+
 int main(void)
 {
     suite_already_true();
@@ -460,6 +498,7 @@ int main(void)
     suite_guarded_lifetime();
     suite_parent_lifetime();
     suite_exit_masks_before_cpu_lookup();
+    suite_blocker_preserves_entry_irq_state();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_blocker_remote_wake",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

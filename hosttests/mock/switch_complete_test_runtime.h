@@ -656,6 +656,7 @@ void switch_tail_reset(void)
  * needs beyond that is arch_cpu_halt. */
 void schedule(void);
 static inline void arch_cpu_halt(void) { }
+void sched_free_reaped_task(task_t *child);
 
 #endif /* TEST_PLATFORM_H */
 

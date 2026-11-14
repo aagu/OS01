@@ -125,4 +125,8 @@ _Noreturn void task_exit_self_reap(uint64_t status);
  * rejected. */
 void kthread_exit(uint64_t code);
 
+/* Release slab-backed kernel resources (thread, fpu_save, stack_alloc_base)
+ * of a detached zombie task after its on_cpu has cleared. */
+void sched_free_reaped_task(task_t *child);
+
 #endif /* KERNEL_SCHED_INTERNAL_H */

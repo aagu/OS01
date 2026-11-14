@@ -549,3 +549,15 @@ void task_switch_complete(task_t *actual_prev)
         }
     }
 }
+
+void sched_free_reaped_task(task_t *child)
+{
+    if (!child)
+        return;
+    if (child->thread)
+        kthread_observe_free(child->thread, 2);
+    if (child->fpu_save)
+        kthread_observe_free(child->fpu_save, 3);
+    if (child->stack_alloc_base)
+        kthread_observe_free(child->stack_alloc_base, 1);
+}
