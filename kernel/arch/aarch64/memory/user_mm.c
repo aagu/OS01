@@ -25,7 +25,6 @@
 #include <memory/memory.h>                /* PAGE_4K_SIZE */
 #include <memory/pmm.h>                   /* alloc/free 4k pages */
 #include <memory/slab.h>                  /* kmalloc / kfree */
-#include <memory/user_vm.h>               /* policy metadata predicate */
 #include <sched/task.h>                   /* mm_t layout + init_mm */
 #include <arch/aarch64/user_vm_policy.h>
 

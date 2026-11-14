@@ -7,9 +7,9 @@
  * kernel/arch/aarch64/memory/user_vm_policy.c (formerly
  * kernel/memory/user_vm.c).  The policy hard-codes this port's address
  * window and relies on the managed user root; the transaction entry
- * points and the leaf adapter remain in
- * kernel/arch/aarch64/memory/user_vm.c (declared in
- * <memory/user_vm.h>).  The two VM policies are deliberately NOT
+ * points remain in kernel/arch/aarch64/memory/user_vm.c and the leaf
+ * adapter in kernel/arch/aarch64/memory/user_vm_leaf.c (declared in
+ * <arch/aarch64/user_vm_leaf.h>).  The two VM policies are deliberately NOT
  * merged and mm_t keeps its layout.
  *
  * Unified ownership of ELF / stack / anonymous residency: the sparse

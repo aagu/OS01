@@ -53,7 +53,7 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/vmm_backend.h>
 #include <memory/vmm.h>
-#include <memory/user_vm.h>
+#include <arch/aarch64/user_vm_leaf.h>
 
 #ifndef OS01_KERNEL_SRC
 #error "Define OS01_KERNEL_SRC to the kernel source root (-DOS01_KERNEL_SRC=...)"
@@ -944,6 +944,17 @@ TEST_FUNC(test_backend_user_root_busy_rejects_writes)
                                          NULL, NULL));
     assert_eq(-EBUSY, arch_vmm_unmap_4k(root, TEST_USER_VA, NULL, NULL));
 
+    /* Busy gate wins over the VA check: a published user root with an
+     * unaligned VA and non-NULL sentinel outputs must return -EBUSY
+     * and leave BOTH outputs untouched (root admission precedes the
+     * VA check in the public entry). */
+    uint64_t busy_pa = 0xDEADBEEFDEADBEEFULL;
+    uint32_t busy_vm = 0xDEADBEEFu;
+    assert_eq(-EBUSY, arch_vmm_unmap_4k(root, TEST_USER_VA + 1,
+                                        &busy_pa, &busy_vm));
+    assert_eq((uint64_t)0xDEADBEEFDEADBEEFULL, busy_pa);
+    assert_eq((uint32_t)0xDEADBEEFu, busy_vm);
+
     /* Query is read-only and remains available. */
     uint64_t qpa = 0;
     uint32_t qvm = 0;
@@ -953,6 +964,45 @@ TEST_FUNC(test_backend_user_root_busy_rejects_writes)
     assert_true((qvm & VM_PRESENT) != 0);
 
     vmm_test_user_mm_set_busy(0);
+    vmm_test_user_mm_set_owned_root(NULL);
+    vmm_test_pmm_reset();
+}
+
+TEST_FUNC(test_backend_detached_root_invalid_va_and_absent)
+{
+    mock_pool_reset();
+    vmm_test_pmm_reset();
+
+    /* A detached managed user root: admission passes, the VA check and
+     * the primitive decide.  Both outputs stay sentinel-valued on
+     * every rejection (the exporter never writes on an error). */
+    uint64_t *root = fresh_managed_user_root();
+    assert_not_null(root);
+
+    /* Unaligned VA → -EINVAL before the primitive; outputs untouched. */
+    uint64_t s_pa = 0xA110A110A110A110ULL;
+    uint32_t s_vm = 0xA110A110u;
+    assert_eq(-EINVAL, arch_vmm_query_4k(root, TEST_USER_VA + 1,
+                                         &s_pa, &s_vm));
+    assert_eq((uint64_t)0xA110A110A110A110ULL, s_pa);
+    assert_eq((uint32_t)0xA110A110u, s_vm);
+    s_pa = 0xA110A110A110A110ULL; s_vm = 0xA110A110u;
+    assert_eq(-EINVAL, arch_vmm_unmap_4k(root, TEST_USER_VA + 1,
+                                         &s_pa, &s_vm));
+    assert_eq((uint64_t)0xA110A110A110A110ULL, s_pa);
+    assert_eq((uint32_t)0xA110A110u, s_vm);
+
+    /* Valid but absent VA → -ENOENT from the primitive; outputs
+     * untouched (no PA is fabricated for an absent leaf). */
+    s_pa = 0xA110A110A110A110ULL; s_vm = 0xA110A110u;
+    assert_eq(-ENOENT, arch_vmm_query_4k(root, TEST_USER_VA, &s_pa, &s_vm));
+    assert_eq((uint64_t)0xA110A110A110A110ULL, s_pa);
+    assert_eq((uint32_t)0xA110A110u, s_vm);
+    s_pa = 0xA110A110A110A110ULL; s_vm = 0xA110A110u;
+    assert_eq(-ENOENT, arch_vmm_unmap_4k(root, TEST_USER_VA, &s_pa, &s_vm));
+    assert_eq((uint64_t)0xA110A110A110A110ULL, s_pa);
+    assert_eq((uint32_t)0xA110A110u, s_vm);
+
     vmm_test_user_mm_set_owned_root(NULL);
     vmm_test_pmm_reset();
 }
@@ -1146,6 +1196,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_backend_user_root_rejects_kernel_va_and_bare_rw),
     TEST_ENTRY(test_backend_user_root_rw_to_none_to_rw),
     TEST_ENTRY(test_backend_user_root_none_unmap_returns_pa),
+    TEST_ENTRY(test_backend_detached_root_invalid_va_and_absent),
     TEST_ENTRY(test_backend_user_root_map_new_rejects_none),
     TEST_ENTRY(test_backend_user_root_busy_rejects_writes),
     TEST_ENTRY(test_user_vm_leaf_adapter_states),

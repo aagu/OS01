@@ -50,7 +50,7 @@
 #include <log/log.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
-#include <memory/user_vm.h>
+#include <arch/aarch64/user_vm_leaf.h>
 #include <percpu/percpu.h>
 #include <sched/internal.h>
 #include <sched/task.h>

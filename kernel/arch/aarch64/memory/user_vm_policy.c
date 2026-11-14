@@ -30,7 +30,7 @@
 #include <memory/memory.h>      /* Phy_To_Virt */
 #include <memory/pmm.h>         /* alloc_4k_page / free_4k_page / PAGE_4K_* */
 #include <memory/slab.h>        /* kmalloc / kfree */
-#include <memory/user_vm.h>            /* leaf adapter (arch_user_vm_*) */
+#include <arch/aarch64/user_vm_leaf.h>    /* leaf adapter (arch_user_vm_*) */
 #include <arch/aarch64/user_vm_policy.h>  /* this TU's policy API */
 #include <memory/vm_area.h>
 #include <memory/vma.h>         /* vma_t, VMA_*, MAP_*, PROT_* */

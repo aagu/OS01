@@ -25,7 +25,7 @@
 #include <arch/aarch64/user_image.h>
 #include <arch/aarch64/user_vm.h>
 #include <intr/dispatch.h>
-#include <memory/user_vm.h>
+#include <arch/aarch64/user_vm_leaf.h>
 #include <memory/vm_area.h>
 #include <memory/vma.h>
 #include <memory/vmm.h>

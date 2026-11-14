@@ -39,7 +39,6 @@
 #include <kernel.h>               /* container_of */
 #include <log/log.h>
 #include <memory/slab.h>
-#include <memory/user_vm.h>       /* user_vm_clone_fork */
 #include <percpu/percpu.h>
 #include <sched/internal.h>
 #include <sched/task.h>

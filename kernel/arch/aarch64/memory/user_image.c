@@ -26,7 +26,6 @@
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/slab.h>
-#include <memory/user_vm.h>
 #include <memory/vmm.h>
 #include <sched/task.h>                     /* mm_t layout */
 #include <arch/aarch64/user_vm_policy.h>

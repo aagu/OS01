@@ -74,7 +74,7 @@
 /* Don't block _FS_VFS_H — <memory/vma.h> needs vfs_node_t. */
 
 #include <list.h>
-#include <memory/user_vm.h>
+#include <arch/aarch64/user_vm_leaf.h>
 #include <arch/aarch64/user_vm_policy.h>
 
 #ifndef PAGE_4K_ALIGN

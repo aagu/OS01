@@ -60,6 +60,7 @@ FORBIDDEN_MACROS = [
     "_ARCH_X86_64_USER_LAYOUT_H", "_ARCH_X86_64_VMA_H",
     "_ARCH_X86_64_UACCESS_H",
     "_ARCH_AARCH64_MMU_H", "_ARCH_AARCH64_VMM_BACKEND_H",
+    "_ARCH_AARCH64_USER_VM_LEAF_H",
 ]
 
 # Private-layer symbols that must be undeclared behind the public
@@ -72,6 +73,8 @@ FORBIDDEN_SYMBOLS = [
     "do_mmap", "fork_vma_copy",
     # x86 uaccess ownership (arch/x86_64/uaccess.h only)
     "strnlen_user", "user_write_range_begin",
+    # AArch64 leaf adapter (arch/aarch64/user_vm_leaf.h only)
+    "arch_user_vm_query", "arch_user_vm_remove", "arch_user_vm_replace_cow",
 ]
 
 

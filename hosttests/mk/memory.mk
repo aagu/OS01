@@ -760,22 +760,21 @@ $(TEST_BLD)/vmm_backend_production.o: \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/user_vm_production.o: \
-		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm.c \
-		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+$(TEST_BLD)/user_vm_leaf_backend_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm_leaf.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
 		$(TESTS_DIR)/kernel/include/log/log.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
-		-DOS01_USER_VM_LEAF_ADAPTER_ONLY=1 -c $< -o $@
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_aarch64_backend_4k.o: $(TEST_CASES)/test_aarch64_backend_4k.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
-		$(TESTS_DIR)/kernel/include/memory/vmm.h \
-		$(TESTS_DIR)/kernel/include/memory/user_vm.h
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) \
 		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
@@ -785,7 +784,7 @@ $(TEST_BLD)/test_aarch64_backend_4k.elf: \
 		$(TEST_BLD)/test_aarch64_backend_4k.o \
 		$(TEST_BLD)/aarch64_pt_production.o \
 		$(TEST_BLD)/vmm_backend_production.o \
-		$(TEST_BLD)/user_vm_production.o \
+		$(TEST_BLD)/user_vm_leaf_backend_production.o \
 		$(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 
@@ -801,7 +800,8 @@ USER_VM_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                        -I$(TEST_MOCK) -I$(TEST_INC)
 
 $(TEST_BLD)/user_vm_policy_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm_policy.c \
-		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_policy.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
 		$(TEST_MOCK)/user_vm_runtime.h
@@ -815,15 +815,28 @@ $(TEST_BLD)/vm_area_user_vm_production.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
 
-# The REAL AArch64 leaf adapter + transaction state machine.  The
+# The REAL AArch64 transaction state machine + leaf adapter.  The
 # runtime shim replaces only the hardware boundary (IRQ save/restore,
 # frame admission, TTBR0, published root, root switch, TLS); the
-# wrapper and state machine are the production implementation.
-$(TEST_BLD)/user_vm_leaf_adapter.o: \
+# wrapper, state machine and leaf adapter are the production
+# implementation.  Both objects compile under USER_VM_HOST_CFLAGS and
+# link into the same elf — the leaf object is separate from the
+# AARCH64_PT_SW_HOST_CFLAGS one used by test_aarch64_backend_4k.
+$(TEST_BLD)/user_vm_transaction_production.o: \
 		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm.c \
-		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_policy.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/user_task.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/vmm.h \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/user_vm_leaf_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm_leaf.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
@@ -837,7 +850,7 @@ $(TEST_BLD)/user_vm_runtime.o: $(TEST_MOCK)/user_vm_runtime.c \
 	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_user_vm.o: $(TEST_CASES)/test_user_vm.c \
-		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TEST_MOCK)/user_vm_runtime.h
 	@mkdir -p $(TEST_BLD)
@@ -849,7 +862,8 @@ $(TEST_BLD)/test_user_vm.elf: \
 		$(TEST_BLD)/test_user_vm.o \
 		$(TEST_BLD)/user_vm_policy_production.o \
 		$(TEST_BLD)/vm_area_user_vm_production.o \
-		$(TEST_BLD)/user_vm_leaf_adapter.o \
+		$(TEST_BLD)/user_vm_transaction_production.o \
+		$(TEST_BLD)/user_vm_leaf_production.o \
 		$(TEST_BLD)/user_vm_runtime.o
 	$(HOST_CC) -o $@ $^
 

@@ -1,30 +1,30 @@
-#include <arch/aarch64/vmm_backend.h>
-#ifndef _KERNEL_MEMORY_USER_VM_H
-#define _KERNEL_MEMORY_USER_VM_H
+#ifndef _ARCH_AARCH64_USER_VM_LEAF_H
+#define _ARCH_AARCH64_USER_VM_LEAF_H
 
-/* AArch64 M4 anonymous-VM leaf adapter.
+/*
+ * AArch64 anonymous-VM leaf adapter (private header).
  *
  * The anonymous policy (kernel/arch/aarch64/memory/user_vm_policy.c)
- * reasons about a user leaf in three semantic states.
- * The M3 backend exposes them as three different return shapes:
+ * reasons about a user leaf in three semantic states.  The M3 backend
+ * exposes them as three different return shapes:
  *
  *   0                       → PRESENT (valid descriptor, PA valid)
  *   -ENOENT                 → ABSENT  (no leaf at the VA)
  *   AARCH64_PT_EPROT_NONE   → STASHED (PA preserved, VALID clear)
  *
- * The adapter below is the only place that translates those shapes;
- * the policy never reads ESR, a descriptor or an M3 sentinel.  The
- * caller owns the root and must have detached it from TTBR0 before
- * calling a mutating entry (same contract as the M3 user-root branch).
+ * The adapter in kernel/arch/aarch64/memory/user_vm_leaf.c is the only
+ * place that translates those shapes; the policy never reads ESR, a
+ * descriptor or an M3 sentinel.  The caller owns the root and must
+ * have detached it from TTBR0 before calling a mutating entry (same
+ * contract as the M3 user-root branch).
+ *
+ * This header does NOT pull in the backend header: consumers name the
+ * leaf states without dragging the M3 surface along.
  */
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <list.h>
-
-struct mm_struct;
-typedef struct mm_struct mm_t;
 
 /* Tri-state of one user virtual-address leaf. */
 enum user_vm_leaf_state {
@@ -66,4 +66,4 @@ int arch_user_vm_remove(uint64_t *root, uint64_t va, struct user_vm_leaf *out);
 int arch_user_vm_replace_cow(uint64_t *root, uint64_t va, uint64_t old_pa,
                              uint64_t new_pa);
 
-#endif /* _KERNEL_MEMORY_USER_VM_H */
+#endif /* _ARCH_AARCH64_USER_VM_LEAF_H */

@@ -12,8 +12,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <arch/mmu.h>   /* ARCH_PAGE_OFFSET (facade: per-port direct map) */
 
-#define ARCH_PAGE_OFFSET 0xffff000000000000ULL
 #define AARCH64_USER_MIN 0x1000ULL
 #define AARCH64_USER_LIMIT (1ULL << 48)
 

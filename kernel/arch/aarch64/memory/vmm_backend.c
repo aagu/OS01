@@ -354,46 +354,27 @@ static int user_map_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     return pt_err_to_linux(aarch64_pt_map_4k_ext(pgdir, virt, phys, perm, 0));
 }
 
-static int user_query_4k(uint64_t *pgdir, uint64_t virt,
-                         uint64_t *phys_out, uint32_t *vm_out)
+/* Shared output encoding for one query/unmap backend result.  The
+ * caller runs the root admission + (for a user root) the VA check,
+ * invokes its actual primitive with zero-initialised locals, and
+ * hands the raw outcome here by value:
+ *   AARCH64_PT_OK        → PA + perm_to_vm;
+ *   AARCH64_PT_EPROT_NONE → PA + the exact VM_PROTNONE stash word;
+ *   anything else        → pt_err_to_linux, outputs untouched. */
+static int export_4k_result(int rc, uint64_t pa, uint32_t perm, uint64_t sw,
+                            uint64_t *phys_out, uint32_t *vm_out)
 {
-    int rc = user_check_va(virt);
-    if (rc) return rc;
-
-    uint64_t pa = 0;
-    uint32_t perm = 0;
-    uint64_t sw = 0;
-    rc = aarch64_pt_query_4k_ext(pgdir, virt, &pa, &perm, &sw);
+    if (rc == AARCH64_PT_OK) {
+        if (phys_out) *phys_out = pa;
+        if (vm_out)   *vm_out   = perm_to_vm(perm, sw);
+        return AARCH64_PT_OK;
+    }
     if (rc == AARCH64_PT_EPROT_NONE) {
         if (phys_out) *phys_out = pa;
         if (vm_out)   *vm_out   = VM_PROTNONE;
         return AARCH64_PT_EPROT_NONE;
     }
-    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
-    if (phys_out) *phys_out = pa;
-    if (vm_out)   *vm_out   = perm_to_vm(perm, sw);
-    return AARCH64_PT_OK;
-}
-
-static int user_unmap_4k(uint64_t *pgdir, uint64_t virt,
-                         uint64_t *phys_out, uint32_t *old_vm_out)
-{
-    int rc = user_check_va(virt);
-    if (rc) return rc;
-
-    uint64_t pa = 0;
-    uint32_t perm = 0;
-    uint64_t sw = 0;
-    rc = aarch64_pt_unmap_4k_ext(pgdir, virt, &pa, &perm, &sw);
-    if (rc == AARCH64_PT_EPROT_NONE) {
-        if (phys_out)   *phys_out   = pa;
-        if (old_vm_out) *old_vm_out = VM_PROTNONE;
-        return AARCH64_PT_EPROT_NONE;
-    }
-    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
-    if (phys_out)   *phys_out   = pa;
-    if (old_vm_out) *old_vm_out = perm_to_vm(perm, sw);
-    return AARCH64_PT_OK;
+    return pt_err_to_linux(rc);
 }
 
 static int user_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
@@ -506,23 +487,18 @@ int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
     bool user = false;
     int rc = prepare_4k_root(pgdir, false, &user);
     if (rc) return rc;
-    if (user) return user_query_4k(pgdir, virt, phys_out, vm_out);
+    if (user) {
+        rc = user_check_va(virt);
+        if (rc) return rc;
+    }
 
     uint64_t pa = 0;
     uint32_t perm = 0;
     uint64_t sw = 0;
     rc = aarch64_pt_query_4k_ext(pgdir, virt, &pa, &perm, &sw);
-    if (rc == AARCH64_PT_EPROT_NONE) {
-        if (phys_out) *phys_out = pa;
-        if (vm_out)   *vm_out   = VM_PROTNONE;
-        return AARCH64_PT_EPROT_NONE;
-    }
-    /* Normalize to Linux errno per spec §4.3 (pt_err_to_linux keeps
-     * the EPROT_NONE sentinel untouched — handled above). */
-    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
-    if (phys_out) *phys_out = pa;
-    if (vm_out)   *vm_out   = perm_to_vm(perm, sw);
-    return AARCH64_PT_OK;
+    /* Normalize per spec §4.3 (pt_err_to_linux keeps the EPROT_NONE
+     * sentinel untouched — handled by the exporter). */
+    return export_4k_result(rc, pa, perm, sw, phys_out, vm_out);
 }
 
 int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
@@ -531,23 +507,17 @@ int arch_vmm_unmap_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
     bool user = false;
     int rc = prepare_4k_root(pgdir, true, &user);
     if (rc) return rc;
-    if (user) return user_unmap_4k(pgdir, virt, phys_out, old_vm_out);
+    if (user) {
+        rc = user_check_va(virt);
+        if (rc) return rc;
+    }
 
     uint64_t pa = 0;
     uint32_t perm = 0;
     uint64_t sw = 0;
     rc = aarch64_pt_unmap_4k_ext(pgdir, virt, &pa, &perm, &sw);
-    if (rc == AARCH64_PT_EPROT_NONE) {
-        if (phys_out)   *phys_out   = pa;
-        if (old_vm_out) *old_vm_out = VM_PROTNONE;
-        return AARCH64_PT_EPROT_NONE;
-    }
-    /* Normalize to Linux errno per spec §4.3 (EPROT_NONE handled
-     * above). */
-    if (rc != AARCH64_PT_OK) return pt_err_to_linux(rc);
-    if (phys_out)   *phys_out   = pa;
-    if (old_vm_out) *old_vm_out = perm_to_vm(perm, sw);
-    return AARCH64_PT_OK;
+    /* Normalize per spec §4.3 (EPROT_NONE handled by the exporter). */
+    return export_4k_result(rc, pa, perm, sw, phys_out, old_vm_out);
 }
 
 int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
