@@ -3539,6 +3539,29 @@
       "source": "qemutests/test_make_qemu_failure.py"
     },
     {
+      "id": "test_mock_core",
+      "layer": "host",
+      "subsystem": "framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "framework.mock.core"
+      ],
+      "mock": "core",
+      "source": "hosttests/cases/test_mock_core.c"
+    },
+    {
+      "id": "test_mock_core_dup",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_mock_core_dup.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_monitor_accounting",
       "layer": "host",

@@ -530,6 +530,30 @@
    }
   },
   {
+   "id": "framework.mock.core",
+   "owner": "host",
+   "component": "framework",
+   "behavior": "mock-core",
+   "trigger": "host runner invokes test_mock_core.elf",
+   "assertions": [
+    "test_mock_core passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_mock_core"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_mock_core.c",
+    "selector": "test_mock_core",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying shared libmock-core.a knob and stub behavior"
+   }
+  },
+  {
    "id": "memory.brk.pages",
    "owner": "host",
    "component": "memory",

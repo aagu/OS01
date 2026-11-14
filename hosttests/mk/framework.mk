@@ -68,3 +68,31 @@ $(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c \
 
 $(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o
 	$(HOST_CC) -o $@ $^
+
+# Shared core mock archive (Task 10 — opt-in only)
+MOCK_CORE_DIR := $(TEST_BLD)/mock-core
+MOCK_CORE_SRCS := \
+	$(TEST_MOCK)/core/mock_core.c \
+	$(TEST_MOCK)/core/mock_alloc.c \
+	$(TEST_MOCK)/core/mock_printk.c
+MOCK_CORE_OBJS := \
+	$(MOCK_CORE_DIR)/mock_core.o \
+	$(MOCK_CORE_DIR)/mock_alloc.o \
+	$(MOCK_CORE_DIR)/mock_printk.o
+HOST_AR := $(if $(strip $(TARGET_AR)),$(TARGET_AR),ar)
+
+$(MOCK_CORE_DIR)/%.o: $(TEST_MOCK)/core/%.c $(TEST_INC)/mock_core.h
+	@mkdir -p $(MOCK_CORE_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/libmock-core.a: $(MOCK_CORE_OBJS)
+	@mkdir -p $(TEST_BLD)
+	rm -f $@
+	$(HOST_AR) rcs $@ $^
+
+$(TEST_BLD)/test_mock_core.o: $(TEST_CASES)/test_mock_core.c $(TEST_INC)/test_framework.h $(TEST_INC)/mock_core.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_mock_core.elf: $(TEST_BLD)/test_mock_core.o $(TEST_BLD)/libmock-core.a
+	$(HOST_CC) -o $@ $^
