@@ -17,6 +17,7 @@
 
 #define USB_MSC_SECTOR_SIZE        512u
 #define USB_MSC_MAX_IO_SECTORS     128u
+#define USB_MSC_CACHE_SIZE         (USB_MSC_MAX_IO_SECTORS * USB_MSC_SECTOR_SIZE)
 #define USB_MSC_TUR_RETRIES        5
 
 #define SCSI_OP_TEST_UNIT_READY    0x00u
@@ -29,6 +30,11 @@ struct usb_msc_dev {
     uint64_t sector_count;
     mutex_t lock;
     block_device_t *bdev;
+    uint8_t *cache_buf;
+    uint8_t *scratch_buf;
+    uint64_t cache_lba;
+    uint32_t cache_count;
+    bool cache_valid;
 };
 
 static uint32_t get_be32(const uint8_t *p)
@@ -153,6 +159,60 @@ static int scsi_read_10(struct usb_msc_dev *m, uint32_t lba, uint16_t count,
                                true, actual);
 }
 
+static int msc_refill_window(struct usb_msc_dev *m, uint64_t start_lba, uint32_t min_sectors)
+{
+    uint64_t avail = m->sector_count - start_lba;
+    uint16_t want = (avail > USB_MSC_MAX_IO_SECTORS)
+                        ? USB_MSC_MAX_IO_SECTORS
+                        : (uint16_t)avail;
+    size_t actual = 0;
+
+    int rc = scsi_read_10(m, (uint32_t)start_lba, want, m->scratch_buf, &actual);
+    if (rc != 0)
+        return rc;
+
+    uint32_t full_sectors = (uint32_t)(actual / USB_MSC_SECTOR_SIZE);
+    if (full_sectors > want)
+        full_sectors = want;
+    if (full_sectors == 0)
+        return -EIO;
+
+    memcpy(m->cache_buf, m->scratch_buf, (size_t)full_sectors * USB_MSC_SECTOR_SIZE);
+    m->cache_lba = start_lba;
+    m->cache_count = full_sectors;
+    m->cache_valid = true;
+
+    if (full_sectors < want && full_sectors < min_sectors)
+        return -EIO;
+    return 0;
+}
+
+static int msc_read_direct(struct usb_msc_dev *m, uint64_t lba, uint32_t count, uint8_t *dst)
+{
+    uint64_t cur_lba = lba;
+    uint32_t rem = count;
+
+    while (rem > 0) {
+        uint16_t chunk = (rem > USB_MSC_MAX_IO_SECTORS)
+                             ? USB_MSC_MAX_IO_SECTORS
+                             : (uint16_t)rem;
+        size_t want_bytes = (size_t)chunk * USB_MSC_SECTOR_SIZE;
+        size_t actual = 0;
+
+        int rc = scsi_read_10(m, (uint32_t)cur_lba, chunk, dst, &actual);
+        if (rc != 0)
+            return rc;
+        if (actual != want_bytes)
+            return -EIO;
+
+        dst += want_bytes;
+        cur_lba += chunk;
+        rem -= chunk;
+    }
+
+    return 0;
+}
+
 static int usb_msc_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf)
 {
     if (!dev || !dev->private_data)
@@ -172,29 +232,46 @@ static int usb_msc_read(block_device_t *dev, uint64_t lba, uint32_t count, void 
 
     int rc = 0;
     uint8_t *dst = buf;
-    uint64_t cur_lba = lba;
-    uint32_t rem = count;
 
-    while (rem > 0) {
-        uint16_t chunk = (rem > USB_MSC_MAX_IO_SECTORS)
-                             ? USB_MSC_MAX_IO_SECTORS
-                             : (uint16_t)rem;
-        size_t want_bytes = (size_t)chunk * USB_MSC_SECTOR_SIZE;
-        size_t actual = 0;
-
-        rc = scsi_read_10(m, (uint32_t)cur_lba, chunk, dst, &actual);
-        if (rc != 0)
-            break;
-        if (actual != want_bytes) {
-            rc = -EIO;
-            break;
+    if (count == 1) {
+        if (!m->cache_valid || lba < m->cache_lba || lba >= m->cache_lba + m->cache_count) {
+            rc = msc_refill_window(m, lba, 1);
+            if (rc != 0)
+                goto out;
         }
-
-        dst += want_bytes;
-        cur_lba += chunk;
-        rem -= chunk;
+        memcpy(dst, m->cache_buf + (lba - m->cache_lba) * USB_MSC_SECTOR_SIZE,
+               USB_MSC_SECTOR_SIZE);
+        goto out;
     }
 
+    if (m->cache_valid && lba >= m->cache_lba && lba < m->cache_lba + m->cache_count) {
+        uint64_t cur_lba = lba;
+        uint32_t rem = count;
+        uint64_t cached_avail = (m->cache_lba + m->cache_count) - cur_lba;
+        uint32_t take = (rem < cached_avail) ? rem : (uint32_t)cached_avail;
+
+        memcpy(dst, m->cache_buf + (cur_lba - m->cache_lba) * USB_MSC_SECTOR_SIZE,
+               (size_t)take * USB_MSC_SECTOR_SIZE);
+        dst += (size_t)take * USB_MSC_SECTOR_SIZE;
+        cur_lba += take;
+        rem -= take;
+
+        while (rem > 0) {
+            rc = msc_refill_window(m, cur_lba, rem);
+            if (rc != 0)
+                goto out;
+            take = (rem < m->cache_count) ? rem : m->cache_count;
+            memcpy(dst, m->cache_buf, (size_t)take * USB_MSC_SECTOR_SIZE);
+            dst += (size_t)take * USB_MSC_SECTOR_SIZE;
+            cur_lba += take;
+            rem -= take;
+        }
+        goto out;
+    }
+
+    rc = msc_read_direct(m, lba, count, dst);
+
+out:
     if (locked)
         mutex_unlock(&m->lock);
     return rc;
@@ -205,6 +282,17 @@ static const struct block_device_ops usb_msc_ops = {
     .write = NULL,
     .flush = NULL,
 };
+
+static void msc_free_dev(struct usb_msc_dev *m)
+{
+    if (!m)
+        return;
+    if (m->scratch_buf)
+        kfree(m->scratch_buf);
+    if (m->cache_buf)
+        kfree(m->cache_buf);
+    kfree(m);
+}
 
 int usb_msc_probe(const struct usb_msc_transport *transport,
                   uint8_t interface_num, uint8_t in_addr, uint8_t out_addr,
@@ -225,6 +313,13 @@ int usb_msc_probe(const struct usb_msc_transport *transport,
         return -ENOMEM;
     memset(m, 0, sizeof(*m));
 
+    m->cache_buf = kmalloc(USB_MSC_CACHE_SIZE);
+    m->scratch_buf = kmalloc(USB_MSC_CACHE_SIZE);
+    if (!m->cache_buf || !m->scratch_buf) {
+        msc_free_dev(m);
+        return -ENOMEM;
+    }
+
     m->bot.transport = *transport;
     m->bot.interface_num = interface_num;
     m->bot.in_addr = in_addr;
@@ -234,7 +329,7 @@ int usb_msc_probe(const struct usb_msc_transport *transport,
     int rc = scsi_test_unit_ready(m);
     if (rc != 0) {
         log_warn("usb_msc: %s: TEST UNIT READY failed (rc=%d)\n", name, rc);
-        kfree(m);
+        msc_free_dev(m);
         return rc;
     }
 
@@ -242,14 +337,14 @@ int usb_msc_probe(const struct usb_msc_transport *transport,
     rc = scsi_inquiry(m, vendor, product, rev);
     if (rc != 0) {
         log_warn("usb_msc: %s: INQUIRY failed (rc=%d)\n", name, rc);
-        kfree(m);
+        msc_free_dev(m);
         return rc;
     }
 
     rc = scsi_read_capacity_10(m, &m->sector_count);
     if (rc != 0) {
         log_warn("usb_msc: %s: READ CAPACITY(10) failed (rc=%d)\n", name, rc);
-        kfree(m);
+        msc_free_dev(m);
         return rc;
     }
 
@@ -267,7 +362,7 @@ int usb_msc_probe(const struct usb_msc_transport *transport,
     rc = block_device_register(&desc, &bdev);
     if (rc != 0) {
         log_err("usb_msc: %s: block_device_register failed (rc=%d)\n", name, rc);
-        kfree(m);
+        msc_free_dev(m);
         return rc;
     }
 

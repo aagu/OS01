@@ -16,6 +16,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* Host pthread prototypes (avoiding shadow from libc/include/pthread.h) */
+typedef unsigned long host_pthread_t;
+extern int pthread_create(host_pthread_t *thread, const void *attr,
+                          void *(*start_routine)(void *), void *arg);
+extern int pthread_join(host_pthread_t thread, void **retval);
+extern int usleep(unsigned int usec);
+
+static volatile int s_sched_ready = 0;
+bool vfs_sched_ready(void)
+{
+    return __atomic_load_n(&s_sched_ready, __ATOMIC_ACQUIRE) != 0;
+}
 
 #define EP_IN  0x81
 #define EP_OUT 0x02
@@ -501,6 +515,7 @@ struct scsi_sim {
     bool short_next_read;
     size_t short_next_read_bytes;
     int fail_next_read_rc;
+    int fail_read_count;
 
     int phase; /* 0=expect CBW, 1=expect data, 2=expect CSW */
     uint32_t cur_tag;
@@ -513,6 +528,13 @@ struct scsi_sim {
     size_t read_cdb_count;
     uint32_t read_lbas[32];
     uint16_t read_counts[32];
+
+    /* Concurrency barrier fields */
+    volatile int block_first_read;
+    volatile int first_read_entered;
+    volatile int release_first_read;
+    volatile int in_flight_bot;
+    volatile int max_in_flight_bot;
 };
 
 static int sim_ctrl(void *ctx, uint8_t req_type, uint8_t req, uint16_t val, uint16_t idx)
@@ -538,6 +560,11 @@ static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual
     if (s->phase == 0) {
         assert_eq(EP_OUT, ep);
         assert_eq(31, len);
+        int cur = __atomic_add_fetch(&s->in_flight_bot, 1, __ATOMIC_SEQ_CST);
+        int prev_max = __atomic_load_n(&s->max_in_flight_bot, __ATOMIC_SEQ_CST);
+        if (cur > prev_max)
+            __atomic_store_n(&s->max_in_flight_bot, cur, __ATOMIC_SEQ_CST);
+
         const uint8_t *cbw = buf;
         s->cur_tag = get_le32(cbw + 4);
         s->cur_len = get_le32(cbw + 8);
@@ -583,11 +610,22 @@ static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual
         } else if (op == 0x28) { /* READ(10) */
             if (s->fail_next_read_rc != 0) {
                 int rc = s->fail_next_read_rc;
-                s->fail_next_read_rc = 0;
+                if (s->fail_read_count > 1) {
+                    s->fail_read_count--;
+                } else {
+                    s->fail_next_read_rc = 0;
+                    s->fail_read_count = 0;
+                }
                 s->phase = 0;
+                __atomic_sub_fetch(&s->in_flight_bot, 1, __ATOMIC_SEQ_CST);
                 if (actual)
                     *actual = 0;
                 return rc;
+            }
+            if (__atomic_exchange_n(&s->block_first_read, 0, __ATOMIC_SEQ_CST)) {
+                __atomic_store_n(&s->first_read_entered, 1, __ATOMIC_RELEASE);
+                while (!__atomic_load_n(&s->release_first_read, __ATOMIC_ACQUIRE))
+                    usleep(100);
             }
             uint32_t lba = get_be32(s->cur_cdb + 2);
             uint16_t cnt = get_be16(s->cur_cdb + 7);
@@ -628,6 +666,7 @@ static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual
     size_t cp = (len < 13) ? len : 13;
     memcpy(buf, csw, cp);
     s->phase = 0;
+    __atomic_sub_fetch(&s->in_flight_bot, 1, __ATOMIC_SEQ_CST);
     if (actual)
         *actual = cp;
     return 0;
@@ -728,10 +767,178 @@ TEST_FUNC(probe_publish_and_geometry)
     free(disk);
 }
 
+TEST_FUNC(read_ahead_window)
+{
+    block_device_reset_for_test();
+    __atomic_store_n(&s_sched_ready, 0, __ATOMIC_RELEASE);
+
+    uint8_t *disk = calloc(256, 512);
+    for (uint32_t lba = 0; lba < 256; lba++) {
+        for (uint32_t i = 0; i < 512; i++)
+            disk[lba * 512 + i] = (uint8_t)((lba * 17u + i) & 0xffu);
+    }
+
+    struct scsi_sim sim;
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 512;
+    struct usb_msc_transport t = sim_transport(&sim);
+    block_device_t *dev = NULL;
+    assert_eq(0, usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev));
+    assert_true(dev != NULL);
+
+    /* 1. 200 one-sector calls from LBA 0 -> exactly 2 READ CDBs (0..127 and 128..255) */
+    uint8_t sec[512];
+    for (uint32_t lba = 0; lba < 200; lba++) {
+        assert_eq(0, dev->ops->read(dev, lba, 1, sec));
+        assert_eq(0, memcmp(sec, disk + lba * 512, 512));
+    }
+    assert_eq(2, sim.read_cdb_count);
+    assert_eq(0u, sim.read_lbas[0]);
+    assert_eq(128u, sim.read_counts[0]);
+    assert_eq(128u, sim.read_lbas[1]);
+    assert_eq(128u, sim.read_counts[1]);
+
+    /* 2. LBA 255 of a 256-sector disk sends count=1 (tail clamp) */
+    sim.read_cdb_count = 0;
+    /* Invalidate/miss by reading LBA 255 after reading LBA 0.. (window is 128..255, so miss at 10 first) */
+    assert_eq(0, dev->ops->read(dev, 10, 1, sec)); /* window now [10, 138) */
+    assert_eq(0, dev->ops->read(dev, 255, 1, sec));
+    assert_eq(0, memcmp(sec, disk + 255 * 512, 512));
+    assert_eq(2, sim.read_cdb_count);
+    assert_eq(255u, sim.read_lbas[1]);
+    assert_eq(1u, sim.read_counts[1]);
+
+    /* 3. Crossing request: window [0, 128), read 4 sectors at LBA 126..129 */
+    sim.read_cdb_count = 0;
+    assert_eq(0, dev->ops->read(dev, 0, 1, sec)); /* window [0, 128) */
+    uint8_t cross[4 * 512];
+    assert_eq(0, dev->ops->read(dev, 126, 4, cross));
+    assert_eq(0, memcmp(cross, disk + 126 * 512, 4 * 512));
+    assert_eq(2, sim.read_cdb_count);
+    assert_eq(128u, sim.read_lbas[1]);
+    assert_eq(128u, sim.read_counts[1]);
+
+    /* 4. Crossing request with short refill covering suffix (2 full sectors = 1024 bytes) succeeds */
+    sim.read_cdb_count = 0;
+    assert_eq(0, dev->ops->read(dev, 0, 1, sec)); /* window [0, 128) */
+    sim.short_next_read = true;
+    sim.short_next_read_bytes = 1024;
+    assert_eq(0, dev->ops->read(dev, 126, 4, cross));
+    assert_eq(0, memcmp(cross, disk + 126 * 512, 4 * 512));
+
+    /* 5. Crossing request with short refill NOT covering suffix (1023 bytes = 1 full sector) fails -EIO */
+    assert_eq(0, dev->ops->read(dev, 0, 1, sec)); /* window [0, 128) */
+    sim.short_next_read = true;
+    sim.short_next_read_bytes = 1023;
+    assert_eq(-EIO, dev->ops->read(dev, 126, 4, cross));
+
+    /* 6. Partial prefetch of 1023 bytes exposes at most 1 sector */
+    sim.read_cdb_count = 0;
+    sim.short_next_read = true;
+    sim.short_next_read_bytes = 1023;
+    assert_eq(0, dev->ops->read(dev, 200, 1, sec));
+    assert_eq(0, memcmp(sec, disk + 200 * 512, 512));
+    assert_eq(1, sim.read_cdb_count);
+    /* LBA 201 must miss and issue a new READ */
+    assert_eq(0, dev->ops->read(dev, 201, 1, sec));
+    assert_eq(2, sim.read_cdb_count);
+
+    /* 7. Partial prefetch of 511 bytes returns -EIO and leaves previous window valid */
+    sim.read_cdb_count = 0;
+    sim.short_next_read = true;
+    sim.short_next_read_bytes = 511;
+    assert_eq(-EIO, dev->ops->read(dev, 10, 1, sec));
+    assert_eq(1, sim.read_cdb_count);
+    /* Previous window [201, ...) must still be valid (0 new READs) */
+    assert_eq(0, dev->ops->read(dev, 201, 1, sec));
+    assert_eq(0, memcmp(sec, disk + 201 * 512, 512));
+    assert_eq(1, sim.read_cdb_count);
+
+    /* 8. Failed refill (-EIO) leaves previous window valid */
+    sim.read_cdb_count = 0;
+    sim.fail_next_read_rc = -EIO;
+    sim.fail_read_count = 2;
+    assert_eq(-EIO, dev->ops->read(dev, 10, 1, sec));
+    assert_eq(0, dev->ops->read(dev, 202, 1, sec));
+    assert_eq(0, memcmp(sec, disk + 202 * 512, 512));
+    assert_eq(2, sim.read_cdb_count); /* initial attempt + 1 BOT retry, 0 for cache hit at 202 */
+
+    free(disk);
+}
+
+struct reader_arg {
+    block_device_t *dev;
+    uint64_t lba;
+    uint8_t buf[512];
+    int rc;
+};
+
+static void *reader_thread(void *arg)
+{
+    struct reader_arg *r = arg;
+    r->rc = r->dev->ops->read(r->dev, r->lba, 1, r->buf);
+    return NULL;
+}
+
+TEST_FUNC(read_ahead_concurrent)
+{
+    block_device_reset_for_test();
+    __atomic_store_n(&s_sched_ready, 1, __ATOMIC_RELEASE);
+
+    uint8_t *disk = calloc(256, 512);
+    for (uint32_t lba = 0; lba < 256; lba++) {
+        for (uint32_t i = 0; i < 512; i++)
+            disk[lba * 512 + i] = (uint8_t)((lba * 53u + i) & 0xffu);
+    }
+
+    struct scsi_sim sim;
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 512;
+    struct usb_msc_transport t = sim_transport(&sim);
+    block_device_t *dev = NULL;
+    assert_eq(0, usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev));
+    assert_true(dev != NULL);
+
+    sim.block_first_read = 1;
+    struct reader_arg a = { .dev = dev, .lba = 5, .rc = -1 };
+    struct reader_arg b = { .dev = dev, .lba = 180, .rc = -1 };
+
+    host_pthread_t ta, tb;
+    assert_eq(0, pthread_create(&ta, NULL, reader_thread, &a));
+
+    while (!__atomic_load_n(&sim.first_read_entered, __ATOMIC_ACQUIRE))
+        usleep(100);
+
+    /* Launch second reader while first reader is inside BOT I/O */
+    assert_eq(0, pthread_create(&tb, NULL, reader_thread, &b));
+    usleep(2000);
+
+    /* Release first reader */
+    __atomic_store_n(&sim.release_first_read, 1, __ATOMIC_RELEASE);
+
+    pthread_join(ta, NULL);
+    pthread_join(tb, NULL);
+
+    assert_eq(0, a.rc);
+    assert_eq(0, b.rc);
+    assert_eq(0, memcmp(a.buf, disk + 5 * 512, 512));
+    assert_eq(0, memcmp(b.buf, disk + 180 * 512, 512));
+    assert_eq(1, sim.max_in_flight_bot);
+
+    __atomic_store_n(&s_sched_ready, 0, __ATOMIC_RELEASE);
+    free(disk);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(bot_wire_and_csw),
     TEST_ENTRY(bot_recovery),
     TEST_ENTRY(probe_publish_and_geometry),
+    TEST_ENTRY(read_ahead_window),
+    TEST_ENTRY(read_ahead_concurrent),
 TEST_LIST_END
 
 int main(void)

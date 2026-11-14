@@ -402,6 +402,7 @@ test-usb-devfs: $(TEST_BLD)/test_usb_devfs.elf
 
 # USB Mass Storage (BOT + SCSI + read-ahead)
 USB_MSC_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/usb_msc_mutex.h \
     -include $(TEST_MOCK)/arch9/xhci_runtime.h -DOS01_HOST_TEST
 
 $(TEST_BLD)/usb_msc_bot_production.o: $(TESTS_DIR)/kernel/driver/usb_msc_bot.c \
@@ -417,8 +418,9 @@ $(TEST_BLD)/usb_msc_production.o: $(TESTS_DIR)/kernel/driver/usb_msc.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(USB_MSC_HOST_CFLAGS) -c $< -o $@
 
-LINK_CFLAGS_usb-msc = $(USB_MSC_HOST_CFLAGS)
-LINK_LDFLAGS_usb-msc =
+LINK_CFLAGS_usb-msc = $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
+    -include $(TEST_MOCK)/arch9/usb_msc_mutex.h -DOS01_HOST_TEST
+LINK_LDFLAGS_usb-msc = -lpthread
 LINK_GROUP_usb-msc := \
     $(TEST_BLD)/usb_msc_bot_production.o \
     $(TEST_BLD)/usb_msc_production.o \
