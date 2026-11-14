@@ -413,12 +413,22 @@ static int xhci_poll_event_internal(struct xhci_controller *ctrl, uint32_t targe
 {
     if (!ctrl || !ctrl->event_ring_virt || !ctrl->rt_regs) return -EINVAL;
 
-    for (uint32_t i = 0; i < timeout_loops; i++) {
+    uint64_t start_ns = arch_clocksource_read_ns();
+    for (uint32_t i = 0; ; i++) {
         volatile struct xhci_trb *trb = &ctrl->event_ring_virt[ctrl->event_ring_dequeue];
         uint32_t ctrl_word = *(volatile uint32_t *)&trb->control;
 
         /* Cycle bit not written by the controller yet: no fresh event. */
         if ((ctrl_word & XHCI_TRB_CYCLE_BIT) != ctrl->event_ring_cycle) {
+            uint64_t now_ns = arch_clocksource_read_ns();
+            if (now_ns != start_ns) {
+                if ((uint64_t)(now_ns - start_ns) >= 5000000000ULL)
+                    break;
+                if (i >= 1000)
+                    __asm__ volatile("pause");
+            } else if (i + 1 >= timeout_loops) {
+                break;
+            }
             continue;
         }
 
@@ -2411,12 +2421,14 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
 
     ctrl->pdev = pdev;
     ctrl->mmio_phys = mmio_phys;
-    ctrl->mmio_len = 0x1000;
 
 #ifndef OS01_HOST_TEST
     uint64_t bar_page = mmio_phys & PAGE_2M_MASK;
     x86_vmm_map_2m(kernel_map, bar_page, (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
     flush_tlb();
+    ctrl->mmio_len = (bar_page + 0x200000ULL) - mmio_phys;
+#else
+    ctrl->mmio_len = 0x10000;
 #endif
 
     ctrl->mmio_virt = (volatile uint8_t *)Phy_To_Virt(mmio_phys);

@@ -178,6 +178,49 @@ class BuildQemuX86Tests(unittest.TestCase):
                 storage="scsi",
             )
 
+    def test_x86_usb_superspeed(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/usb.img",
+            smp=2,
+            serial="stdio",
+            storage="usb",
+            usb_speed="3.0",
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=0,p3=4", argv)
+        self.assertNotIn("qemu-xhci,id=xhci,p2=4,p3=0", argv)
+        self.assertIn(
+            "file=/img/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0", argv
+        )
+
+    def test_x86_usb_writable(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/usb.img",
+            smp=2,
+            serial="stdio",
+            storage="usb",
+            usb_readonly=False,
+        )
+        self.assertIn("file=/img/usb.img,format=raw,if=none,id=usbdisk", argv)
+        self.assertNotIn(
+            "file=/img/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+
+    def test_x86_rejects_unknown_usb_speed(self) -> None:
+        with self.assertRaises(ValueError):
+            build_qemu_x86(
+                firmware="/fw/OVMF.fd",
+                image="/img/usb.img",
+                smp=1,
+                serial="stdio",
+                storage="usb",
+                usb_speed="1.1",
+            )
+
     def _assert_rng_pair(self, argv: list[str]) -> None:
         self.assertIn("rng-random,filename=/dev/urandom,id=rng0", argv)
         self.assertIn("virtio-rng-pci,rng=rng0", argv)

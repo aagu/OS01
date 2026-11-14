@@ -34,6 +34,8 @@ def build_qemu_x86(
     extra: Sequence[str] = (),
     storage: str = "ahci",
     ahci_image: str | None = None,
+    usb_speed: str = "2.0",
+    usb_readonly: bool = True,
 ) -> list[str]:
     """Build an x86_64 QEMU argv list with the paired virtio-rng device.
 
@@ -48,14 +50,24 @@ def build_qemu_x86(
     serial_arg = _resolve_serial(serial, serial_path)
     if storage not in ("ahci", "usb", "dual"):
         raise ValueError(f"Unsupported storage mode: {storage!r}")
+    if usb_speed not in ("2.0", "3.0"):
+        raise ValueError(f"Unsupported USB speed: {usb_speed!r}")
+    xhci_props = (
+        "qemu-xhci,id=xhci,p2=4,p3=0"
+        if usb_speed == "2.0"
+        else "qemu-xhci,id=xhci,p2=0,p3=4"
+    )
+    usb_drive_spec = f"file={image},format=raw,if=none,id=usbdisk"
+    if usb_readonly:
+        usb_drive_spec += ",readonly=on"
     if storage == "dual":
         if not ahci_image:
             raise ValueError("storage='dual' requires ahci_image")
         disk_args = [
             "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
-            "-drive", f"file={image},format=raw,if=none,id=usbdisk,readonly=on",
+            "-drive", usb_drive_spec,
             "-drive", f"file={ahci_image},format=raw,if=none,id=ahcidisk",
-            "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
+            "-device", xhci_props,
             "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
             "-device", "ahci,id=ahci",
             "-device", "ide-hd,drive=ahcidisk,bus=ahci.0,bootindex=1",
@@ -63,8 +75,8 @@ def build_qemu_x86(
     elif storage == "usb":
         disk_args = [
             "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
-            "-drive", f"file={image},format=raw,if=none,id=usbdisk,readonly=on",
-            "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
+            "-drive", usb_drive_spec,
+            "-device", xhci_props,
             "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
         ]
     elif machine == "pc":

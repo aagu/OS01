@@ -45,7 +45,16 @@ CASE_FIRMWARE = "firmware"
 CASE_READONLY = "readonly"
 CASE_DUAL = "dual"
 CASE_AHCI = "ahci"
-CASES = (CASE_FIRMWARE, CASE_READONLY, CASE_DUAL, CASE_AHCI)
+CASE_PERSISTENCE = "persistence"
+CASE_SUPERSPEED = "superspeed"
+CASES = (
+    CASE_FIRMWARE,
+    CASE_READONLY,
+    CASE_DUAL,
+    CASE_AHCI,
+    CASE_PERSISTENCE,
+    CASE_SUPERSPEED,
+)
 DEFAULT_TIMEOUT = 120.0
 OBSERVE_SECONDS = 1.0
 POLL_SECONDS = 0.1
@@ -72,6 +81,94 @@ _MSC_USBA_RE = re.compile(
     r"usb_msc: usba: \d+ sectors, 512-byte blocks(?:\s|$)"
 )
 _PROMPT_TEXT = "# "
+
+# ── M3 SuperSpeed & persistence evidence ────────────────────────────
+_XHCI_SS_SPEED_RE = re.compile(
+    r"\[xhci\] port \d+: (?:USB 3 already enabled in U0|connected, (?:warm )?reset complete), speed=4(?:\s|$)"
+)
+_SCSI_REQ_RE = re.compile(
+    r"scsi_disk_new_request Command: lun=(\d+) tag=(0x[0-9a-fA-F]+) data=(?:0x)?([0-9a-fA-F]+)"
+)
+_USB_MSD_STATUS_RE = re.compile(
+    r"usb_msd_send_status status (\d+), tag (0x[0-9a-fA-F]+),"
+)
+
+
+def superspeed_evidence(serial: str, root_marker: str, esp_marker: str) -> bool:
+    """True iff serial proves SuperSpeed (speed=4) and both mount sentinels."""
+    if not serial or not _XHCI_SS_SPEED_RE.search(serial):
+        return False
+    return readonly_evidence(serial, root_marker, esp_marker)
+
+
+def persistence_boot1_evidence(serial: str) -> bool:
+    """True iff boot1 serial proves probe emitted USB_WRITE_SYNC_OK and prompt."""
+    if not serial:
+        return False
+    saw_ok = False
+    for raw_line in serial.splitlines():
+        stripped = raw_line.strip()
+        if not saw_ok:
+            if stripped == "USB_WRITE_SYNC_OK":
+                saw_ok = True
+        elif _PROMPT_TEXT in raw_line:
+            return True
+    return False
+
+
+def persistence_boot2_evidence(serial: str, marker: str) -> bool:
+    """True iff boot2 serial proves cat /usb-persist.txt output standalone marker and prompt."""
+    if not serial or not marker:
+        return False
+    stage = 0
+    for raw_line in serial.splitlines():
+        stripped = raw_line.strip()
+        if stage == 0:
+            if "cat /usb-persist.txt" in raw_line:
+                stage = 1
+        elif stage == 1:
+            if stripped == marker:
+                stage = 2
+        else:
+            if _PROMPT_TEXT in raw_line:
+                return True
+    return False
+
+
+def persistence_trace_evidence(trace_text: str) -> bool:
+    """True iff QEMU trace proves WRITE(10) (0x2a) then SYNCHRONIZE CACHE(10) (0x35) on LUN 0 with status=0 CSWs."""
+    if not trace_text:
+        return False
+    write_tag: str | None = None
+    write_csw_ok = False
+    sync_tag: str | None = None
+    sync_csw_ok = False
+
+    for line in trace_text.splitlines():
+        req_m = _SCSI_REQ_RE.search(line)
+        if req_m:
+            lun = int(req_m.group(1))
+            tag = req_m.group(2).lower()
+            opcode = int(req_m.group(3), 16)
+            if lun == 0:
+                if not write_csw_ok and opcode == 0x2A:
+                    write_tag = tag
+                elif write_csw_ok and not sync_csw_ok and opcode == 0x35:
+                    sync_tag = tag
+            continue
+
+        csw_m = _USB_MSD_STATUS_RE.search(line)
+        if csw_m:
+            status = int(csw_m.group(1))
+            tag = csw_m.group(2).lower()
+            if status == 0:
+                if write_tag is not None and not write_csw_ok and tag == write_tag:
+                    write_csw_ok = True
+                elif sync_tag is not None and not sync_csw_ok and tag == sync_tag:
+                    sync_csw_ok = True
+                    return True
+
+    return write_csw_ok and sync_csw_ok
 
 
 def firmware_evidence(serial: str) -> bool:
@@ -377,8 +474,68 @@ def prepare_image(
     return info["esp_guid"]
 
 
+def prepare_persistence_image(
+    source: Path,
+    destination: Path,
+    root_marker: str,
+    esp_marker: str,
+    probe_elf: Path,
+) -> uuid.UUID:
+    """Prepare a writable USB image with /bin/usb-boot-probe (0100755) and no /usb-persist.txt."""
+    esp_guid = prepare_image(source, destination, root_marker, esp_marker)
+    info = read_gpt_info(destination)
+    with tempfile.TemporaryDirectory(prefix="usb-boot-probe-") as tmpdir:
+        root_img = Path(tmpdir) / "root.ext2"
+        with destination.open("rb") as src_f:
+            src_f.seek(info["root_offset"])
+            remaining = info["root_size"]
+            with root_img.open("wb") as out_f:
+                while remaining > 0:
+                    chunk = src_f.read(min(1 << 20, remaining))
+                    if not chunk:
+                        raise RuntimeError("unexpected EOF extracting ext2 partition")
+                    out_f.write(chunk)
+                    remaining -= len(chunk)
+
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", "rm /usb-persist.txt"],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", "rm /bin/usb-boot-probe"],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", f"write {probe_elf} /bin/usb-boot-probe"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", "set_inode_field /bin/usb-boot-probe mode 0100755"],
+            check=True,
+            capture_output=True,
+        )
+
+        if root_img.stat().st_size != info["root_size"]:
+            raise RuntimeError("ext2 partition size changed unexpectedly")
+
+        with root_img.open("rb") as in_f, destination.open("r+b") as dst_f:
+            dst_f.seek(info["root_offset"])
+            remaining = info["root_size"]
+            while remaining > 0:
+                chunk = in_f.read(min(1 << 20, remaining))
+                if not chunk:
+                    raise RuntimeError("unexpected EOF reinserting ext2 partition")
+                dst_f.write(chunk)
+                remaining -= len(chunk)
+
+    return esp_guid
+
+
 def usb_argv(
-    qemu: str, firmware: Path, disk: Path, smp: int
+    qemu: str, firmware: Path, disk: Path, smp: int, *, readonly: bool = True
 ) -> list[str]:
     """Build the USB-only QEMU command line via the shared builder."""
     return build_qemu_x86(
@@ -389,6 +546,24 @@ def usb_argv(
         serial="stdio",
         memory=MEMORY_MIB,
         storage="usb",
+        usb_readonly=readonly,
+    )
+
+
+def superspeed_argv(
+    qemu: str, firmware: Path, disk: Path, smp: int
+) -> list[str]:
+    """Build the USB 3.0 SuperSpeed QEMU command line via the shared builder."""
+    return build_qemu_x86(
+        qemu=str(qemu),
+        firmware=str(firmware),
+        image=str(disk),
+        smp=smp,
+        serial="stdio",
+        memory=MEMORY_MIB,
+        storage="usb",
+        usb_speed="3.0",
+        usb_readonly=True,
     )
 
 
@@ -462,6 +637,263 @@ def _parse_positive_timeout(value: Any) -> float | None:
     return parsed
 
 
+def _run_session_until(
+    *,
+    session_factory,
+    argv: list[str],
+    run_dir: Path,
+    timeout: float,
+    prompt_ready,
+    command: bytes,
+    evidence_fn,
+    case_label: str,
+) -> tuple[str, list[str], bool, bool, Exception | None]:
+    """Run one QEMU session, send command on prompt, and wait for evidence."""
+    session = None
+    errors: list[str] = []
+    timed_out = False
+    stopped_by_runner = False
+    spawn_error: Exception | None = None
+    try:
+        session = session_factory(
+            argv=argv,
+            run_dir=run_dir,
+            timeout_s=timeout,
+            writable_stdin=True,
+        )
+        session.start()
+        deadline = session.deadline
+        early_returncode: int | None = None
+        sent_command = False
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            session.observe(min(POLL_SECONDS, remaining))
+            if not sent_command and prompt_ready(session.text):
+                session.send(command)
+                sent_command = True
+            if sent_command and evidence_fn(session.text):
+                break
+            returncode = session.returncode
+            if returncode is not None:
+                early_returncode = returncode
+                break
+
+        evidence_ok = evidence_fn(session.text)
+        if timed_out:
+            errors.append(f"timeout before {case_label} evidence")
+        elif early_returncode is not None:
+            errors.append(
+                f"QEMU exited early (rc={early_returncode}) without {case_label} evidence"
+            )
+        elif not evidence_ok:
+            errors.append(f"{case_label} evidence missing")
+        elif deadline - time.monotonic() < OBSERVE_SECONDS:
+            errors.append("timeout: insufficient observation budget")
+        else:
+            session.observe(OBSERVE_SECONDS)
+            if deadline - time.monotonic() < 0:
+                errors.append("overall deadline expired")
+    except Exception as exc:  # noqa: BLE001
+        spawn_error = exc
+    finally:
+        if session is not None:
+            try:
+                session.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            stopped_by_runner = bool(getattr(session, "stopped_by_runner", False))
+
+    serial = session.text if session is not None else ""
+    return serial, errors, timed_out, stopped_by_runner, spawn_error
+
+
+def _run_persistence_case(
+    *,
+    args: argparse.Namespace,
+    firmware: Path,
+    disk: Path,
+    smp: int,
+    timeout: float,
+    run_dir: Path,
+    session_factory,
+    started: float,
+) -> int:
+    probe_raw = getattr(args, "probe_elf", None)
+    if not probe_raw:
+        print("[usb-boot] ERROR: --case persistence requires --probe-elf", file=sys.stderr)
+        return 2
+    probe_elf = Path(probe_raw)
+    if not probe_elf.is_file():
+        print(f"[usb-boot] ERROR: probe-elf does not exist: {probe_elf}", file=sys.stderr)
+        return 2
+
+    root_marker = f"USB_ROOT_MARKER_{uuid.uuid4().hex[:12]}"
+    esp_marker = f"USB_ESP_MARKER_{uuid.uuid4().hex[:12]}"
+    persist_marker = f"USB_PERSIST_MARKER_{uuid.uuid4().hex[:12]}"
+    private_disk = run_dir / "usb-persist.img"
+
+    try:
+        esp_guid = prepare_persistence_image(
+            disk, private_disk, root_marker, esp_marker, probe_elf
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[usb-boot] ERROR: failed to prepare persistence image: {exc}", file=sys.stderr)
+        if private_disk.exists():
+            private_disk.unlink(missing_ok=True)
+        return 2
+
+    events_file = run_dir / "trace-events.txt"
+    events_file.write_text("scsi_disk_new_request\nusb_msd_send_status\n")
+    trace_file = run_dir / "trace-boot1.log"
+
+    argv1 = usb_argv(args.qemu, firmware, private_disk, smp, readonly=False) + [
+        "-trace",
+        f"events={events_file},file={trace_file}",
+    ]
+    argv2 = usb_argv(args.qemu, firmware, private_disk, smp, readonly=True)
+    _write_json(run_dir / "argv-boot1.json", argv1)
+    _write_json(run_dir / "argv-boot2.json", argv2)
+
+    metadata: dict[str, Any] = {
+        "case": CASE_PERSISTENCE,
+        "qemu": str(args.qemu),
+        "firmware": str(firmware.resolve()),
+        "firmware_sha256": _file_sha256(firmware),
+        "disk": str(disk.resolve()),
+        "disk_sha256": _file_sha256(disk),
+        "probe_elf": str(probe_elf.resolve()),
+        "probe_elf_sha256": _file_sha256(probe_elf),
+        "esp_guid": str(esp_guid),
+        "root_marker": root_marker,
+        "esp_marker": esp_marker,
+        "persist_marker": persist_marker,
+        "smp": smp,
+        "timeout_seconds": timeout,
+        "argv_boot1": argv1,
+        "argv_boot2": argv2,
+        "serial_boot1_log": "serial-boot1.log",
+        "serial_boot2_log": "serial-boot2.log",
+        "trace_boot1_log": "trace-boot1.log",
+        "observe_seconds": OBSERVE_SECONDS,
+    }
+
+    errors: list[str] = []
+    timed_out = False
+    boot1_serial = ""
+    boot2_serial = ""
+    spawn_error: Exception | None = None
+
+    try:
+        boot1_serial, err1, to1, stop1, se1 = _run_session_until(
+            session_factory=session_factory,
+            argv=argv1,
+            run_dir=run_dir,
+            timeout=timeout,
+            prompt_ready=_readonly_prompt_ready,
+            command=f"/bin/usb-boot-probe {persist_marker}\n".encode("ascii"),
+            evidence_fn=persistence_boot1_evidence,
+            case_label="persistence-boot1",
+        )
+        (run_dir / "serial-boot1.log").write_text(boot1_serial)
+        if se1 is not None:
+            spawn_error = se1
+            raise se1
+        errors.extend(err1)
+        timed_out = timed_out or to1
+        metadata["boot1"] = {
+            "timed_out": to1,
+            "stopped_by_runner": stop1,
+            "serial_bytes": len(boot1_serial),
+            "errors": err1,
+        }
+
+        trace_text = trace_file.read_text(errors="replace") if trace_file.is_file() else ""
+        trace_ok = persistence_trace_evidence(trace_text)
+        metadata["trace_ok"] = trace_ok
+        if not trace_file.is_file():
+            errors.append("missing boot1 QEMU trace file")
+        elif not trace_ok:
+            errors.append("boot1 QEMU trace missing WRITE(10)->SYNCHRONIZE CACHE(10) LUN 0 status=0 CSWs")
+
+        if not errors:
+            boot2_serial, err2, to2, stop2, se2 = _run_session_until(
+                session_factory=session_factory,
+                argv=argv2,
+                run_dir=run_dir,
+                timeout=timeout,
+                prompt_ready=_readonly_prompt_ready,
+                command=b"cat /usb-persist.txt\n",
+                evidence_fn=lambda text: persistence_boot2_evidence(text, persist_marker),
+                case_label="persistence-boot2",
+            )
+            (run_dir / "serial-boot2.log").write_text(boot2_serial)
+            if se2 is not None:
+                spawn_error = se2
+                raise se2
+            errors.extend(err2)
+            timed_out = timed_out or to2
+            metadata["boot2"] = {
+                "timed_out": to2,
+                "stopped_by_runner": stop2,
+                "serial_bytes": len(boot2_serial),
+                "errors": err2,
+            }
+    except Exception:
+        pass
+    finally:
+        if private_disk.exists():
+            private_disk.unlink(missing_ok=True)
+
+    (run_dir / "serial.log").write_text(
+        f"=== BOOT 1 ===\n{boot1_serial}\n=== BOOT 2 ===\n{boot2_serial}\n"
+    )
+
+    if spawn_error is not None:
+        print(f"[usb-boot] spawn error: {spawn_error}", file=sys.stderr)
+        metadata.update(
+            {
+                "elapsed_seconds": time.monotonic() - started,
+                "result": "ERROR",
+                "errors": [f"spawn error: {spawn_error}"],
+            }
+        )
+        _write_json(run_dir / "metadata.json", metadata)
+        return 2
+
+    passed = (
+        not errors
+        and not timed_out
+        and persistence_boot1_evidence(boot1_serial)
+        and persistence_boot2_evidence(boot2_serial, persist_marker)
+    )
+    metadata.update(
+        {
+            "elapsed_seconds": time.monotonic() - started,
+            "timed_out": timed_out,
+            "result": "PASS" if passed else "FAIL",
+            "errors": errors,
+        }
+    )
+    _write_json(run_dir / "metadata.json", metadata)
+
+    for error in errors:
+        print(f"[usb-boot] FAIL: {error}")
+    print(
+        f"[usb-boot] case={CASE_PERSISTENCE} result={'PASS' if passed else 'FAIL'} "
+        f"firmware_sha256={metadata['firmware_sha256']} "
+        f"disk_sha256={metadata['disk_sha256']} log_dir={run_dir}"
+    )
+    return 0 if passed else 1
+
+
 def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     """Run one case and judge it.
 
@@ -498,6 +930,18 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     run_dir = Path(args.log_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    if case == CASE_PERSISTENCE:
+        return _run_persistence_case(
+            args=args,
+            firmware=firmware,
+            disk=disk,
+            smp=smp,
+            timeout=timeout,
+            run_dir=run_dir,
+            session_factory=session_factory,
+            started=started,
+        )
+
     private_disk: Path | None = None
     private_ahci: Path | None = None
     esp_guid_str: str | None = None
@@ -532,7 +976,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
                 private_ahci.unlink(missing_ok=True)
             return 2
 
-    if case in (CASE_READONLY, CASE_DUAL):
+    if case in (CASE_READONLY, CASE_DUAL, CASE_SUPERSPEED):
         private_disk = run_dir / "usb-readonly.img"
         try:
             esp_guid = prepare_image(disk, private_disk, root_marker, esp_marker)
@@ -562,6 +1006,8 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     elif case == CASE_AHCI:
         assert private_ahci is not None
         argv = ahci_argv(args.qemu, firmware, private_ahci, smp)
+    elif case == CASE_SUPERSPEED:
+        argv = superspeed_argv(args.qemu, firmware, boot_disk, smp)
     else:
         argv = usb_argv(args.qemu, firmware, boot_disk, smp)
     _write_json(run_dir / "argv.json", argv)
@@ -579,7 +1025,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         "serial_log": "serial.log",
         "observe_seconds": OBSERVE_SECONDS,
     }
-    if case in (CASE_READONLY, CASE_DUAL):
+    if case in (CASE_READONLY, CASE_DUAL, CASE_SUPERSPEED):
         metadata["esp_guid"] = esp_guid_str
         metadata["root_marker"] = root_marker
         metadata["esp_marker"] = esp_marker
@@ -589,7 +1035,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         metadata["ahci_esp_marker"] = ahci_esp_marker
 
     def _case_prompt_ready(text: str) -> bool:
-        if case == CASE_READONLY:
+        if case in (CASE_READONLY, CASE_SUPERSPEED):
             return _readonly_prompt_ready(text)
         if case == CASE_DUAL:
             return _guid_prompt_ready(text, "usba")
@@ -602,6 +1048,8 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
             return firmware_evidence(text)
         if case == CASE_READONLY:
             return readonly_evidence(text, root_marker, esp_marker)
+        if case == CASE_SUPERSPEED:
+            return superspeed_evidence(text, root_marker, esp_marker)
         if case == CASE_DUAL:
             assert esp_guid_str is not None
             return dual_evidence(text, esp_guid_str, root_marker, esp_marker)
@@ -735,6 +1183,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--disk", required=True)
     parser.add_argument("--ahci-disk", default=None)
+    parser.add_argument("--probe-elf", default=None)
     parser.add_argument("--smp", required=True, type=int)
     parser.add_argument("--log-dir", required=True)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)

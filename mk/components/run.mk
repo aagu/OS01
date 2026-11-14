@@ -2329,7 +2329,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	elif [ "$(SUITE)" = "boot-services" ]; then \
 	  $(MAKE) --no-print-directory test-qemu-boot-services || exit 1; \
 	elif [ "$(SUITE)" = "usb-boot" ]; then \
-	  for c in readonly dual ahci; do \
+	  for c in readonly dual ahci persistence superspeed; do \
 	    $(MAKE) --no-print-directory test-qemu-usb-boot USB_BOOT_CASE=$$c || exit 1; \
 	  done; \
 	elif [ "$(SUITE)" = "doom" ]; then \
@@ -2398,11 +2398,11 @@ $(USB_BOOT_AHCI_IMAGE): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
 endif
 
 .PHONY: test-qemu-usb-boot
-test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE) $(if $(filter dual ahci,$(USB_BOOT_CASE)),$(USB_BOOT_AHCI_IMAGE)))
+test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE) $(if $(filter dual ahci,$(USB_BOOT_CASE)),$(USB_BOOT_AHCI_IMAGE)) $(if $(filter persistence,$(USB_BOOT_CASE)),$(USER_ARTIFACT_DIR)/usb_boot_probe.elf))
 	$(call require_capability,rootfs)
 	@case "$(USB_BOOT_CASE)" in \
-	  firmware|readonly|dual|ahci) ;; \
-	  *) echo "USB_BOOT_CASE must be firmware, readonly, dual, or ahci, got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
+	  firmware|readonly|dual|ahci|persistence|superspeed) ;; \
+	  *) echo "USB_BOOT_CASE must be firmware, readonly, dual, ahci, persistence, or superspeed, got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
 	esac
 	@set +e; \
 	mkdir -p "$(USB_BOOT_JOB_DIR)"; \
@@ -2411,6 +2411,7 @@ test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE
 	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
 	  --disk "$(NORMAL_IMAGE)" \
 	  $(if $(filter dual ahci,$(USB_BOOT_CASE)),--ahci-disk "$(USB_BOOT_AHCI_IMAGE)") \
+	  $(if $(filter persistence,$(USB_BOOT_CASE)),--probe-elf "$(USER_ARTIFACT_DIR)/usb_boot_probe.elf") \
 	  --smp "$(SMP)" \
 	  --timeout "$(USB_BOOT_TIMEOUT)" \
 	  --log-dir "$(USB_BOOT_JOB_DIR)"; \

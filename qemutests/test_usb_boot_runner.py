@@ -699,5 +699,126 @@ class DualCaseTests(unittest.TestCase):
         )
 
 
+class SuperspeedAndPersistenceTests(unittest.TestCase):
+    def test_superspeed_argv(self) -> None:
+        self.assertIn("superspeed", ub.CASES)
+        argv = ub.superspeed_argv(
+            "qemu-system-x86_64",
+            Path("/tmp/OVMF.fd"),
+            Path("/tmp/usb.img"),
+            2,
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=0,p3=4", argv)
+        self.assertNotIn("qemu-xhci,id=xhci,p2=4,p3=0", argv)
+        self.assertIn(
+            "file=/tmp/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0", argv
+        )
+
+        root_marker = "USB_ROOT_MARKER_SS"
+        esp_marker = "USB_ESP_MARKER_SS"
+        valid_ss = (
+            "[xhci] port 1: connected, reset complete, speed=4\n"
+            "[xhci] slot 1: configured with config 1 (iface class 08:06, ep_count=2)\n"
+            "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
+            "vfs: mounted ext2 on / (usba2)\n"
+            "vfs: mounted fat32 on /boot (usba1)\n"
+            "# cat /usb-root.txt /boot/USBESP.TXT\n"
+            f"{root_marker}\n"
+            f"{esp_marker}\n"
+            "# "
+        )
+        self.assertTrue(ub.superspeed_evidence(valid_ss, root_marker, esp_marker))
+        self.assertTrue(
+            ub.superspeed_evidence(
+                valid_ss.replace(
+                    "connected, reset complete, speed=4",
+                    "USB 3 already enabled in U0, speed=4",
+                ),
+                root_marker,
+                esp_marker,
+            )
+        )
+        # speed=3 must be rejected in SuperSpeed test
+        self.assertFalse(
+            ub.superspeed_evidence(
+                valid_ss.replace("speed=4", "speed=3"), root_marker, esp_marker
+            )
+        )
+
+    def test_persistence_evidence(self) -> None:
+        self.assertIn("persistence", ub.CASES)
+        marker = "USB_PERSIST_MARKER_123456"
+
+        boot1_ok = (
+            f"# /bin/usb-boot-probe {marker}\n"
+            "USB_WRITE_SYNC_OK\n"
+            "# "
+        )
+        self.assertTrue(ub.persistence_boot1_evidence(boot1_ok))
+        # Missing write/flush acknowledgement fails
+        self.assertFalse(
+            ub.persistence_boot1_evidence(f"# /bin/usb-boot-probe {marker}\n# ")
+        )
+
+        boot2_ok = (
+            "# cat /usb-persist.txt\n"
+            f"{marker}\n"
+            "# "
+        )
+        self.assertTrue(ub.persistence_boot2_evidence(boot2_ok, marker))
+        # Echoed command string alone is never evidence
+        self.assertFalse(
+            ub.persistence_boot2_evidence(
+                f"# /bin/usb-boot-probe {marker}\n# ", marker
+            )
+        )
+        self.assertFalse(
+            ub.persistence_boot2_evidence(
+                f"# echo {marker}\n# ", marker
+            )
+        )
+
+        valid_trace = (
+            "100@1.0:scsi_disk_new_request Command: lun=0 tag=0x11 data=0x2a 0x00 0x00 0x00 0x00 0x10 0x00\n"
+            "100@1.1:usb_msd_send_status status 0, tag 0x11, len 13\n"
+            "100@1.2:scsi_disk_new_request Command: lun=0 tag=0x12 data=0x35 0x00 0x00 0x00 0x00 0x00 0x00\n"
+            "100@1.3:usb_msd_send_status status 0, tag 0x12, len 13\n"
+        )
+        self.assertTrue(ub.persistence_trace_evidence(valid_trace))
+        # Out of order (0x35 before 0x2a) fails
+        out_of_order = (
+            "100@1.0:scsi_disk_new_request Command: lun=0 tag=0x12 data=0x35 0x00 0x00 0x00 0x00 0x00 0x00\n"
+            "100@1.1:usb_msd_send_status status 0, tag 0x12, len 13\n"
+            "100@1.2:scsi_disk_new_request Command: lun=0 tag=0x11 data=0x2a 0x00 0x00 0x00 0x00 0x10 0x00\n"
+            "100@1.3:usb_msd_send_status status 0, tag 0x11, len 13\n"
+        )
+        self.assertFalse(ub.persistence_trace_evidence(out_of_order))
+        # Missing 0x35 fails
+        no_sync = (
+            "100@1.0:scsi_disk_new_request Command: lun=0 tag=0x11 data=0x2a 0x00 0x00 0x00 0x00 0x10 0x00\n"
+            "100@1.1:usb_msd_send_status status 0, tag 0x11, len 13\n"
+        )
+        self.assertFalse(ub.persistence_trace_evidence(no_sync))
+        # Non-zero status fails
+        bad_status = (
+            "100@1.0:scsi_disk_new_request Command: lun=0 tag=0x11 data=0x2a 0x00 0x00 0x00 0x00 0x10 0x00\n"
+            "100@1.1:usb_msd_send_status status 1, tag 0x11, len 13\n"
+            "100@1.2:scsi_disk_new_request Command: lun=0 tag=0x12 data=0x35 0x00 0x00 0x00 0x00 0x00 0x00\n"
+            "100@1.3:usb_msd_send_status status 0, tag 0x12, len 13\n"
+        )
+        self.assertFalse(ub.persistence_trace_evidence(bad_status))
+        # Non-zero LUN fails
+        bad_lun = (
+            "100@1.0:scsi_disk_new_request Command: lun=1 tag=0x11 data=0x2a 0x00 0x00 0x00 0x00 0x10 0x00\n"
+            "100@1.1:usb_msd_send_status status 0, tag 0x11, len 13\n"
+            "100@1.2:scsi_disk_new_request Command: lun=0 tag=0x12 data=0x35 0x00 0x00 0x00 0x00 0x00 0x00\n"
+            "100@1.3:usb_msd_send_status status 0, tag 0x12, len 13\n"
+        )
+        self.assertFalse(ub.persistence_trace_evidence(bad_lun))
+
+
 if __name__ == "__main__":
     unittest.main()
