@@ -1,3 +1,13 @@
+/* @os01-test
+ * id: test_brk_pages
+ * layer: host
+ * subsystem: memory
+ * timing: strict
+ * tier: nightly
+ * mock: mm-brk
+ * isolation: none
+ * scenarios: []
+ */
 /*
  * test/cases/test_brk_pages.c — Host tests for the brk-page
  * ownership contract (Task 4, user heap/ELF isolation plan).
@@ -24,6 +34,7 @@
  */
 #include "test_framework.h"
 #include "brk_stubs.h"
+#include <mock_core.h>
 
 #include <errno.h>
 #include <stdint.h>
@@ -59,30 +70,6 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result);
 #define PAGE_COW_BIT    (1UL << 10)
 #define PAGE_PROTNONE_BIT (1UL << 9)
 
-/* Production wraps (--wrap=kmalloc,kfree) for OOM injection. */
-extern void *__real_kmalloc(size_t size);
-extern void  __real_kfree(void *ptr);
-
-static int kmalloc_calls = 0;
-static int kmalloc_fail_after = 0;  /* 0 = never fail */
-static int kmalloc_ok = 0;          /* successful allocations */
-static int kfree_calls = 0;         /* actual returns */
-
-void *__wrap_kmalloc(size_t size)
-{
-    kmalloc_calls++;
-    if (kmalloc_fail_after > 0 && kmalloc_calls == kmalloc_fail_after)
-        return NULL;
-    kmalloc_ok++;
-    return __real_kmalloc(size);
-}
-
-void __wrap_kfree(void *ptr)
-{
-    kfree_calls++;
-    __real_kfree(ptr);
-}
-
 /* ── Per-test fixture ─────────────────────────────────────── */
 
 static mm_t fixture_mm;
@@ -91,8 +78,7 @@ static vma_t *heap_vma;
 static void setup_mm(uint64_t elf_end)
 {
     brk_stubs_reset();
-    kmalloc_calls = 0;
-    kmalloc_fail_after = 0;
+    mock_reset_all();
     memset(&fixture_mm, 0, sizeof(fixture_mm));
     list_init(&fixture_mm.vma_list);
     /* Identity pgdir: any non-NULL pointer (the host walker uses
@@ -233,7 +219,7 @@ static void test_brk_multipage_growth_each_page_zeroed(void)
     setup_mm(USER_CODE_ADDR + 0x1000);
 
     /* Move break forward by 3 pages. */
-    int ok0 = kmalloc_ok, fr0 = kfree_calls;
+    long ok0 = mock_calls("kmalloc"), fr0 = mock_calls("kfree");
     uint64_t new_brk = fixture_mm.start_brk + 3 * PAGE_4K_SIZE;
     uint64_t result;
     int ret = mm_set_brk(&fixture_mm, new_brk, &result);
@@ -268,7 +254,7 @@ static void test_brk_multipage_growth_each_page_zeroed(void)
      * the call ended — a successful grow may not leak its staging
      * bookkeeping.  Deltas only: the fixture's own heap VMA is
      * deliberately never freed, so cumulative counts never balance. */
-    assert_eq(kmalloc_ok - ok0, kfree_calls - fr0);
+    assert_eq(mock_calls("kmalloc") - ok0, mock_calls("kfree") - fr0);
 }
 
 static void test_brk_multipage_growth_flushes_tlb(void)
@@ -412,7 +398,7 @@ static void test_brk_log_alloc_fail_returns_enomem(void)
     setup_mm(USER_CODE_ADDR + 0x1000);
 
     /* Fail the very next kmalloc (the grow log). */
-    kmalloc_fail_after = kmalloc_calls + 1;
+    mock_fail_next("kmalloc", 1);
 
     uint64_t result = 0xDEADBEEF;
     uint64_t new_brk = fixture_mm.start_brk + 2 * PAGE_4K_SIZE;
@@ -1030,29 +1016,29 @@ out:
 /* ── Test list ─────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
-    TEST_ENTRY(test_brk_query_returns_current),
-    TEST_ENTRY(test_brk_query_with_null_result_pointer),
-    TEST_ENTRY(test_brk_lower_bound_returns_einval),
-    TEST_ENTRY(test_brk_upper_bound_returns_enomem),
-    TEST_ENTRY(test_brk_same_page_growth_no_new_pte),
-    TEST_ENTRY(test_brk_multipage_growth_each_page_zeroed),
-    TEST_ENTRY(test_brk_multipage_growth_flushes_tlb),
-    TEST_ENTRY(test_brk_shrink_release_after_flush),
-    TEST_ENTRY(test_brk_shrink_tail_ref_until_sync),
-    TEST_ENTRY(test_brk_oom_on_second_page_rolls_back),
-    TEST_ENTRY(test_brk_log_alloc_fail_returns_enomem),
-    TEST_ENTRY(test_brk_partial_new_leaf_fail_preserves_old_leaf),
-    TEST_ENTRY(test_brk_shrink_across_page_releases_leaves),
-    TEST_ENTRY(test_brk_shrink_partial_tail_zeros),
-    TEST_ENTRY(test_brk_shrink_partial_tail_privatizes_cow),
-    TEST_ENTRY(test_brk_shrink_release_cow_last_ref_frees),
-    TEST_ENTRY(test_brk_regrowth_returns_zeroed_pages),
-    TEST_ENTRY(test_brk_grow_then_shrink_preserves_cow_refs),
-    TEST_ENTRY(test_brk_result_set_on_success),
-    TEST_ENTRY(test_sys_brk_calls_mm_set_brk),
-    TEST_ENTRY(test_sys_brk_returns_result_on_success),
-    TEST_ENTRY(test_heap_fault_does_not_demand_map),
-    TEST_ENTRY(test_heap_fault_resolves_cow_for_committed_range),
+    TEST_ENTRY_EX(test_brk_query_returns_current, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_query_with_null_result_pointer, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_lower_bound_returns_einval, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_upper_bound_returns_enomem, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_same_page_growth_no_new_pte, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_multipage_growth_each_page_zeroed, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_multipage_growth_flushes_tlb, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_shrink_release_after_flush, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_shrink_tail_ref_until_sync, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_oom_on_second_page_rolls_back, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_log_alloc_fail_returns_enomem, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_partial_new_leaf_fail_preserves_old_leaf, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_shrink_across_page_releases_leaves, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_shrink_partial_tail_zeros, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_shrink_partial_tail_privatizes_cow, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_shrink_release_cow_last_ref_frees, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_regrowth_returns_zeroed_pages, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_grow_then_shrink_preserves_cow_refs, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_result_set_on_success, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_sys_brk_calls_mm_set_brk, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_sys_brk_returns_result_on_success, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_heap_fault_does_not_demand_map, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_heap_fault_resolves_cow_for_committed_range, mock_reset_all, NULL),
 TEST_LIST_END
 
 /* NOTE: we intentionally do NOT call setbuf(stdout, NULL) — the

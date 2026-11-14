@@ -1,3 +1,13 @@
+/* @os01-test
+ * id: test_user_protected_ranges
+ * layer: host
+ * subsystem: memory
+ * timing: strict
+ * tier: nightly
+ * mock: mm-pranges
+ * isolation: none
+ * scenarios: []
+ */
 /*
  * test/cases/test_user_protected_ranges.c — Host tests for the
  * reserved-window predicate mm_user_range_protected and its wiring
@@ -33,6 +43,7 @@
  */
 #include "test_framework.h"
 #include "pranges_stubs.h"
+#include <mock_core.h>
 
 #include <errno.h>
 #include <stdint.h>
@@ -890,22 +901,22 @@ static void test_wiring_order_in_vma_c(void)
 /* ── Test list ──────────────────────────────────────────────── */
 
 TEST_LIST_BEGIN
-    TEST_ENTRY(test_predicate_elf_envelope),
-    TEST_ENTRY(test_predicate_heap_reserve),
-    TEST_ENTRY(test_predicate_guard_page),
-    TEST_ENTRY(test_predicate_user_stack),
-    TEST_ENTRY(test_active_leaf_release_order),
-    TEST_ENTRY(test_borrowed_leaf_never_released),
-    TEST_ENTRY(test_predicate_degenerate_inputs),
-    TEST_ENTRY(test_mmap_fixed_rejects_protected_ranges),
-    TEST_ENTRY(test_mmap_fixed_partial_overlap_preserves_mapping),
-    TEST_ENTRY(test_mmap_fixed_partial_overlap_managed_stack_top),
-    TEST_ENTRY(test_mmap_fixed_partial_overlap_managed_guard_straddle),
-    TEST_ENTRY(test_mmap_auto_and_hint_avoid_reserve),
-    TEST_ENTRY(test_mmap_overflow_and_above_limit_no_mutation),
-    TEST_ENTRY(test_munmap_rejects_protected_ranges),
-    TEST_ENTRY(test_mprotect_rejects_protected_ranges),
-    TEST_ENTRY(test_wiring_order_in_vma_c),
+    TEST_ENTRY_EX(test_predicate_elf_envelope, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_predicate_heap_reserve, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_predicate_guard_page, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_predicate_user_stack, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_active_leaf_release_order, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_borrowed_leaf_never_released, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_predicate_degenerate_inputs, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mmap_fixed_rejects_protected_ranges, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mmap_fixed_partial_overlap_preserves_mapping, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mmap_fixed_partial_overlap_managed_stack_top, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mmap_fixed_partial_overlap_managed_guard_straddle, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mmap_auto_and_hint_avoid_reserve, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mmap_overflow_and_above_limit_no_mutation, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_munmap_rejects_protected_ranges, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_mprotect_rejects_protected_ranges, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_wiring_order_in_vma_c, mock_reset_all, NULL),
 TEST_LIST_END
 
 int main(void)

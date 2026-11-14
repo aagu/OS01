@@ -111,15 +111,16 @@ $(TEST_BLD)/brk_stubs.o: $(TEST_MOCK)/brk/brk_stubs.c \
 	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_brk_pages.o: $(TEST_CASES)/test_brk_pages.c \
-		$(TEST_MOCK)/brk/brk_stubs.h
+		$(TEST_MOCK)/brk/brk_stubs.h \
+		$(TEST_INC)/mock_core.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BRK_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_brk_pages.elf: $(TEST_BLD)/test_brk_pages.o \
 		$(TEST_BLD)/brk_brk_production.o \
 		$(TEST_BLD)/vm_area_brk_production.o \
-		$(TEST_BLD)/brk_stubs.o
-	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
+		$(MOCK_PROFILE_mm-brk)
+	$(HOST_CC) -o $@ $^
 
 # Protected ranges
 PRANGES_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
@@ -165,7 +166,8 @@ $(TEST_BLD)/pranges_stubs.o: $(TEST_MOCK)/pranges/pranges_stubs.c \
 	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_user_protected_ranges.o: $(TEST_CASES)/test_user_protected_ranges.c \
-		$(TEST_MOCK)/pranges/pranges_stubs.h
+		$(TEST_MOCK)/pranges/pranges_stubs.h \
+		$(TEST_INC)/mock_core.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PRANGES_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
@@ -174,7 +176,7 @@ $(TEST_BLD)/test_user_protected_ranges.elf: $(TEST_BLD)/test_user_protected_rang
 		$(TEST_BLD)/mmap_pranges_production.o \
 		$(TEST_BLD)/vma_pranges_production.o \
 		$(TEST_BLD)/vm_area_pranges_production.o \
-		$(TEST_BLD)/pranges_stubs.o
+		$(MOCK_PROFILE_mm-pranges)
 	$(HOST_CC) -o $@ $^
 
 # User write COW
@@ -204,14 +206,15 @@ $(TEST_BLD)/uwrite_cow_stubs.o: $(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.c \
 	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_user_write_cow.o: $(TEST_CASES)/test_user_write_cow.c \
-		$(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.h
+		$(TEST_MOCK)/uwrite_cow/uwrite_cow_stubs.h \
+		$(TEST_INC)/mock_core.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_user_write_cow.elf: $(TEST_BLD)/test_user_write_cow.o \
 		$(TEST_BLD)/uaccess_uwrite_cow_production.o \
 		$(TEST_BLD)/vm_area_uwrite_cow_production.o \
-		$(TEST_BLD)/uwrite_cow_stubs.o
+		$(MOCK_PROFILE_mm-uwrite-cow)
 	$(HOST_CC) -o $@ $^
 
 # PMM boot layout calculator

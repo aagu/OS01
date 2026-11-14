@@ -89,11 +89,7 @@ brk_page_record_t *brk_find_page(uint64_t phys)
 static task_t brk_stub_task = {0};
 task_t *brk_stub_current(void) { return &brk_stub_task; }
 
-/* ── kmalloc / kfree: thin libc wrappers ───────────────────
- * The test may use --wrap=kmalloc/kfree for OOM injection.  The
- * production vma.c sees normal kmalloc/kfree symbols. */
-void *kmalloc(size_t size) { return malloc(size); }
-size_t kfree(void *ptr)    { free(ptr); return 1; }
+/* kmalloc / kfree are provided by libmock-core.a (mock_alloc.c). */
 
 /* ── VFS stub (do_mmap/do_munmap never reach here, but vma.c
  * transitively references the symbols) ─────────────────────── */

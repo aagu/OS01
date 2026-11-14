@@ -17,6 +17,7 @@ include $(OS01_PROFILE_FILE)
 .DEFAULT_GOAL := all
 
 include mk/common.mk
+include mock/profiles.mk
 include mk/registry.mk
 
 # Subsystem host tests

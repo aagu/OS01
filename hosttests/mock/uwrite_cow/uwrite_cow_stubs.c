@@ -142,9 +142,7 @@ void uw_clear_current(void)
     memset(&uw_task, 0, sizeof(uw_task));
 }
 
-/* ── kmalloc / kfree: thin libc wrappers ────────────────────── */
-void *kmalloc(size_t size) { return uw_state.inject_kmalloc_fail ? NULL : malloc(size); }
-size_t kfree(void *ptr)    { free(ptr); return 1; }
+/* kmalloc / kfree are provided by libmock-core.a (mock_alloc.c). */
 
 /* ── VFS stub (vma.c transitively references) ──────────────── */
 #include <fs/vfs.h>

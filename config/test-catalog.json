@@ -1900,7 +1900,6 @@
       "source": "qemutests/test_bridge_export.py"
     },
     {
-      "kind": "host_test",
       "id": "test_brk_pages",
       "layer": "host",
       "subsystem": "memory",
@@ -1908,11 +1907,8 @@
       "tier": "nightly",
       "isolation": "none",
       "scenarios": [],
-      "acceptance": "protocol-or-legacy",
-      "source": "hosttests/cases/test_brk_pages.c",
-      "origin": {
-        "from": "hosttests/inventory"
-      }
+      "mock": "mm-brk",
+      "source": "hosttests/cases/test_brk_pages.c"
     },
     {
       "id": "test_brk_source_scan",
@@ -4695,7 +4691,6 @@
       }
     },
     {
-      "kind": "host_test",
       "id": "test_user_protected_ranges",
       "layer": "host",
       "subsystem": "memory",
@@ -4703,11 +4698,8 @@
       "tier": "nightly",
       "isolation": "none",
       "scenarios": [],
-      "acceptance": "protocol-or-legacy",
-      "source": "hosttests/cases/test_user_protected_ranges.c",
-      "origin": {
-        "from": "hosttests/inventory"
-      }
+      "mock": "mm-pranges",
+      "source": "hosttests/cases/test_user_protected_ranges.c"
     },
     {
       "kind": "host_test",
@@ -4725,7 +4717,6 @@
       }
     },
     {
-      "kind": "host_test",
       "id": "test_user_write_cow",
       "layer": "host",
       "subsystem": "memory",
@@ -4733,11 +4724,8 @@
       "tier": "nightly",
       "isolation": "none",
       "scenarios": [],
-      "acceptance": "protocol-or-legacy",
-      "source": "hosttests/cases/test_user_write_cow.c",
-      "origin": {
-        "from": "hosttests/inventory"
-      }
+      "mock": "mm-uwrite-cow",
+      "source": "hosttests/cases/test_user_write_cow.c"
     },
     {
       "kind": "host_test",

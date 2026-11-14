@@ -78,8 +78,6 @@ typedef struct {
     int total_cow_gets;
     int total_tlb_shootdowns;
 
-    int inject_kmalloc_fail;
-
     /* Failure injection for alloc_4k_page: 0 disables; when set, the
      * Nth alloc_4k_page call returns 0 (OOM). */
     int inject_alloc_fail_at;

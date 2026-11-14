@@ -1,3 +1,13 @@
+/* @os01-test
+ * id: test_user_write_cow
+ * layer: host
+ * subsystem: memory
+ * timing: strict
+ * tier: nightly
+ * mock: mm-uwrite-cow
+ * isolation: none
+ * scenarios: []
+ */
 /*
  * test/cases/test_user_write_cow.c — Host tests for the kernel-side
  * COW privatization primitive introduced by Task 7 of the user
@@ -25,6 +35,7 @@
  */
 #include "test_framework.h"
 #include "uwrite_cow_stubs.h"
+#include <mock_core.h>
 
 #include <errno.h>
 #include <stdint.h>
@@ -934,18 +945,18 @@ static void test_staging_oom_and_non_cow_fast_path(void)
     fixture_mm.pgdir = fixture_pgd;
     uw_set_current(&fixture_mm, PROD_ADDR_LIMIT);
     commit_leaf(0x400000, PAGE_USER_PTE);
-    uw_state.inject_kmalloc_fail = 1;
+    mock_fail_next("kmalloc", 1);
     assert_eq(0, prepare_user_write_range(&fixture_mm, 0x400000, 32));
-    uw_state.inject_kmalloc_fail = 0;
+    mock_fail_next("kmalloc", 0);
     build_anon_vma(0x400000, 0x401000);
     mark_cow(0x400000, 2);
     uint64_t before = uw_find_mapping(0x400000)->pte;
-    uw_state.inject_kmalloc_fail = 1;
+    mock_fail_next("kmalloc", 1);
     assert_eq(-ENOMEM, prepare_user_write_range(&fixture_mm, 0x400000, 32));
     assert_eq(before, uw_find_mapping(0x400000)->pte);
     assert_eq(2, uw_find_page(0x400000)->cow_refs);
     assert_eq(0, fixture_mm.lock.lock);
-    uw_state.inject_kmalloc_fail = 0;
+    mock_fail_next("kmalloc", 0);
 }
 
 static void test_begin_end_owns_lock(void)
@@ -968,39 +979,36 @@ static void test_begin_end_owns_lock(void)
 }
 
 TEST_LIST_BEGIN
-    TEST_ENTRY(test_staging_oom_and_non_cow_fast_path),
-    TEST_ENTRY(test_begin_end_owns_lock),
-    TEST_ENTRY(test_writable_elf_without_vma),
-    TEST_ENTRY(test_cow_requires_writable_vma),
-    TEST_ENTRY(test_invalid_second_page_preserves_first),
-    TEST_ENTRY(test_prepare_noop_on_writable_leaf),
-    TEST_ENTRY(test_prepare_cow_refs_one_promotes_inplace),
-    TEST_ENTRY(test_prepare_cow_refs_many_privatizes),
-    TEST_ENTRY(test_prepare_cow_nx_survives_inplace_upgrade),
-    TEST_ENTRY(test_prepare_cow_nx_survives_privatize_copy),
-    TEST_ENTRY(test_cow_ref_retained_until_sync),
-    TEST_ENTRY(test_prepare_span_two_cow_pages),
-    TEST_ENTRY(test_prepare_oom_on_page_two_rolls_back),
-    TEST_ENTRY(test_prepare_rejects_vmio),
-    TEST_ENTRY(test_prepare_rejects_unmapped),
-    TEST_ENTRY(test_prepare_rejects_below_user_min),
-    TEST_ENTRY(test_prepare_efault_does_not_invalidate_pte),
-    TEST_ENTRY(test_locked_retains_lock_on_success),
-    TEST_ENTRY(test_locked_retains_lock_on_failure),
-    TEST_ENTRY(test_pure_check_accepts_cow),
-    TEST_ENTRY(test_pure_check_rejects_unmapped),
-    TEST_ENTRY(test_pure_check_rejects_readonly),
-    TEST_ENTRY(test_ft_res_callback_fires_once_on_enomem),
-    TEST_ENTRY(test_ft_res_callback_fires_once_on_efault),
-    TEST_ENTRY(test_ft_res_no_callback_on_success),
-    TEST_ENTRY(test_ft_res_no_callback_with_null_on_fault),
+    TEST_ENTRY_EX(test_staging_oom_and_non_cow_fast_path, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_begin_end_owns_lock, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_writable_elf_without_vma, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_cow_requires_writable_vma, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_invalid_second_page_preserves_first, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_noop_on_writable_leaf, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_cow_refs_one_promotes_inplace, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_cow_refs_many_privatizes, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_cow_nx_survives_inplace_upgrade, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_cow_nx_survives_privatize_copy, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_cow_ref_retained_until_sync, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_span_two_cow_pages, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_oom_on_page_two_rolls_back, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_rejects_vmio, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_rejects_unmapped, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_rejects_below_user_min, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_prepare_efault_does_not_invalidate_pte, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_locked_retains_lock_on_success, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_locked_retains_lock_on_failure, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_pure_check_accepts_cow, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_pure_check_rejects_unmapped, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_pure_check_rejects_readonly, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_ft_res_callback_fires_once_on_enomem, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_ft_res_callback_fires_once_on_efault, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_ft_res_no_callback_on_success, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_ft_res_no_callback_with_null_on_fault, mock_reset_all, NULL),
 TEST_LIST_END
 
 int main(void)
 {
-    for (int i = 0; i < __test_table_size; i++)
-        __test_table[i].fn();
-    int failed = __test_stats.failed;
-    TEST_RESULTS();
-    return failed != 0;
+    RUN_ALL_TESTS();
+    return __test_stats.failed != 0;
 }

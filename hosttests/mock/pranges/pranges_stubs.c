@@ -83,9 +83,7 @@ void pr_clear_current(void)
     memset(&pr_task, 0, sizeof(pr_task));
 }
 
-/* ── kmalloc / kfree: thin libc wrappers ────────────────────── */
-void *kmalloc(size_t size) { return malloc(size); }
-size_t kfree(void *ptr)    { free(ptr); return 1; }
+/* kmalloc / kfree are provided by libmock-core.a (mock_alloc.c). */
 
 /* ── VFS stub ───────────────────────────────────────────────── */
 vfs_node_t *vfs_node_get(vfs_node_t *node) { return node; }
