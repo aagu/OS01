@@ -54,6 +54,7 @@ extern void host_exit(int status) __asm__("_exit");
 #include <memory/memory_map.h>
 #include <memory/pmm.h>
 #include <memory/pmm_boot.h>
+#include <memory/pmm_arch.h>   /* pmm_arch_boot_reservations (Task 4) */
 #include <memory/slab.h>
 #include <arch/aarch64/early_arena.h>
 #include <arch/mmu.h>
@@ -160,6 +161,15 @@ TEST_FUNC(test_getter_returns_null_before_prepare)
 {
     const struct aarch64_early_arena *a = aarch64_early_arena_get();
     assert_null((void *)a);
+    /* mm-architecture-boundaries Task 4: before a successful prepare,
+     * the ARM reservation hook must REFUSE (-EINVAL) instead of
+     * falling back to another port's prefix reservation. */
+    struct pmm_layout dummy;
+    memset(&dummy, 0, sizeof(dummy));
+    struct pmm_phys_range ranges[1];
+    size_t count = 0;
+    assert_eq(-EINVAL, pmm_arch_boot_reservations(&dummy, ranges, 1,
+                                                  &count));
 }
 
 /* ── Happy paths ────────────────────────────────────────────── */
@@ -480,6 +490,20 @@ TEST_FUNC(test_prepare_success_sets_start_brk)
     if (a != NULL) {
         assert_eq((uint64_t)(ARCH_PAGE_OFFSET + a->base_pa),
                   PMMngr.start_brk);
+    }
+    /* mm-architecture-boundaries Task 4: after prepare succeeds, the
+     * ARM reservation hook reports EXACTLY the published arena range
+     * and nothing else. */
+    if (a != NULL) {
+        struct pmm_layout dummy;
+        memset(&dummy, 0, sizeof(dummy));
+        struct pmm_phys_range ranges[1];
+        size_t count = 0;
+        assert_eq(0, pmm_arch_boot_reservations(&dummy, ranges, 1,
+                                                &count));
+        assert_eq(1, (int)count);
+        assert_eq(a->base_pa, ranges[0].start);
+        assert_eq(a->end_pa, ranges[0].end);
     }
 }
 

@@ -98,9 +98,34 @@ $(TEST_BLD)/pmm_production.o: $(TESTS_DIR)/kernel/memory/pmm.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/pmm_arch_default.o: $(TESTS_DIR)/kernel/memory/pmm_arch.c
+# mm-architecture-boundaries Task 4: the weak pmm_arch.c default is
+# gone — every pmm_arch_* hook is a per-arch strong definition.  Host
+# fixtures link combinations of REAL production strategy objects and
+# narrowly-scoped fixture stubs:
+#   pmm_reserve_production.o     real x86 legacy-prefix reservation
+#   pmm_arch_arm_production.o    real ARM normalize + zone split
+#   pmm_arch_normalize_stub.o    fixture: normalize -> 0 (fatal)
+#   pmm_arch_zone_stub.o         fixture: zone_split -> UINT64_MAX
+#   aarch64_ram_map_stub.o       fixture: NULL unpublished RAM map
+$(TEST_BLD)/pmm_reserve_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/pmm_reserve.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/pmm_arch_arm_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/pmm_arch.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/pmm_arch_normalize_stub.o: $(TEST_MOCK)/pmm_arch_fixture.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -DPMM_FIXTURE_NORMALIZE -c $< -o $@
+
+$(TEST_BLD)/pmm_arch_zone_stub.o: $(TEST_MOCK)/pmm_arch_fixture.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) -DPMM_FIXTURE_ZONE_SPLIT -c $< -o $@
+
+$(TEST_BLD)/aarch64_ram_map_stub.o: $(TEST_MOCK)/aarch64_ram_map_stub.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
 
 $(TEST_BLD)/test_pmm_ram_rel_index.o: $(TEST_CASES)/test_pmm_ram_rel_index.c \
 		$(TESTS_DIR)/kernel/include/memory/pmm.h
@@ -108,7 +133,10 @@ $(TEST_BLD)/test_pmm_ram_rel_index.o: $(TEST_CASES)/test_pmm_ram_rel_index.c \
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
 
 $(TEST_BLD)/test_pmm_ram_rel_index.elf: $(TEST_BLD)/test_pmm_ram_rel_index.o \
-		$(TEST_BLD)/pmm_production.o $(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_production.o \
+		$(TEST_BLD)/pmm_reserve_production.o \
+		$(TEST_BLD)/pmm_arch_normalize_stub.o \
+		$(TEST_BLD)/pmm_arch_zone_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
@@ -297,7 +325,9 @@ $(TEST_BLD)/test_page_table_reservation.o: $(TEST_CASES)/test_page_table_reserva
 
 $(TEST_BLD)/test_page_table_reservation.elf: $(TEST_BLD)/test_page_table_reservation.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_reserve_production.o \
+		$(TEST_BLD)/pmm_arch_normalize_stub.o \
+		$(TEST_BLD)/pmm_arch_zone_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
@@ -328,7 +358,8 @@ $(TEST_BLD)/test_early_arena.o: $(TEST_CASES)/test_early_arena.c \
 $(TEST_BLD)/test_early_arena.elf: $(TEST_BLD)/test_early_arena.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_arch_arm_production.o \
+		$(TEST_BLD)/aarch64_ram_map_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
@@ -370,7 +401,8 @@ $(TEST_BLD)/test_arena_layout_chain.o: $(TEST_CASES)/test_arena_layout_chain.c \
 $(TEST_BLD)/test_arena_layout_chain.elf: $(TEST_BLD)/test_arena_layout_chain.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_arch_arm_production.o \
+		$(TEST_BLD)/aarch64_ram_map_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
@@ -386,7 +418,8 @@ $(TEST_BLD)/test_arena_2gib_boundary.o: $(TEST_CASES)/test_arena_2gib_boundary.c
 $(TEST_BLD)/test_arena_2gib_boundary.elf: $(TEST_BLD)/test_arena_2gib_boundary.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_arch_arm_production.o \
+		$(TEST_BLD)/aarch64_ram_map_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
@@ -402,7 +435,8 @@ $(TEST_BLD)/test_arena_candidate_slab_bytes.o: $(TEST_CASES)/test_arena_candidat
 $(TEST_BLD)/test_arena_candidate_slab_bytes.elf: $(TEST_BLD)/test_arena_candidate_slab_bytes.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_arch_arm_production.o \
+		$(TEST_BLD)/aarch64_ram_map_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
@@ -419,7 +453,8 @@ $(TEST_BLD)/test_arena_table_base_shift.o: $(TEST_CASES)/test_arena_table_base_s
 $(TEST_BLD)/test_arena_table_base_shift.elf: $(TEST_BLD)/test_arena_table_base_shift.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_arch_arm_production.o \
+		$(TEST_BLD)/aarch64_ram_map_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o \
 		$(TEST_BLD)/runtime_tree_production.o
 	$(HOST_CC) -o $@ $^
@@ -1000,7 +1035,9 @@ $(TEST_BLD)/test_slab_idempotent_reservation.elf: $(TEST_BLD)/test_slab_idempote
 		$(TEST_BLD)/slab_production.o \
 		$(TEST_BLD)/slab_color_stub.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_reserve_production.o \
+		$(TEST_BLD)/pmm_arch_normalize_stub.o \
+		$(TEST_BLD)/pmm_arch_zone_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o \
 		$(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
@@ -1016,7 +1053,9 @@ $(TEST_BLD)/test_slab_basic_x86_count.elf: $(TEST_BLD)/test_slab_basic_x86_count
 		$(TEST_BLD)/slab_production.o \
 		$(TEST_BLD)/slab_color_stub.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_reserve_production.o \
+		$(TEST_BLD)/pmm_arch_normalize_stub.o \
+		$(TEST_BLD)/pmm_arch_zone_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o \
 		$(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^

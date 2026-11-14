@@ -65,7 +65,7 @@ extern uint32_t ZONE_DMA_INDEX;
  * provides color_printk / kmalloc / kfree / kpanic (host libc wrappers)
  * so we MUST NOT re-define those here (would clash with the link of
  * mock_kernel.o). pmm_layout_calculate / pmm_arch_normalize /
- * pmm_arch_zone_split are satisfied by pmm_arch_default.o +
+ * pmm_arch_zone_split are satisfied by the pmm_arch fixture stubs +
  * pmm_boot_production.o via the Makefile.
  *
  * `percpu_data[]` storage lives in the slab shadow header

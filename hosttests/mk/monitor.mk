@@ -97,9 +97,11 @@ $(TEST_BLD)/test_monitor_pmm.o: $(TEST_CASES)/test_monitor_pmm.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
 
+# The monitor fixture defines its own normalize + boot reservations
+# (mm-architecture-boundaries Task 4): it links ONLY the zone stub.
 $(TEST_BLD)/test_monitor_pmm.elf: $(TEST_BLD)/test_monitor_pmm.o \
 		$(TEST_BLD)/pmm_production.o \
-		$(TEST_BLD)/pmm_arch_default.o \
+		$(TEST_BLD)/pmm_arch_zone_stub.o \
 		$(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 

@@ -28,3 +28,12 @@ size_t pmm_arch_normalize(const struct boot_context *ctx,
     }
     return m->count;
 }
+
+/* Zone partition threshold (mm-architecture-boundaries Task 4): the
+ * AArch64 port has no unmapped-zone split — the threshold is
+ * explicitly "none" (UINT64_MAX), mirroring the former weak default
+ * instead of silently reusing the x86 4 GiB boundary. */
+uint64_t pmm_arch_zone_split(void)
+{
+    return UINT64_MAX;
+}

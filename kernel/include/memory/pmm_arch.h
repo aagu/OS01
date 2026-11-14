@@ -11,14 +11,17 @@
  * all boot metadata to live below the lowest RAM frame (always true
  * for UEFI on x86_64, never true for aarch64 with DRAM at 0x40000000+).
  *
- * Task 2 splits the responsibility:
+ * Responsibility split (Task 2, tightened by Task 4 — no weak
+ * defaults):
  *
  *   - pmm_arch_boot_reservations(strategy) returns the set of PA ranges
- *     that must be reserved during pmm_init. The default weak impl in
- *     kernel/memory/pmm_arch.c returns the legacy prefix [0,
- *     ceil2M(metadata_end_pa)). aarch64 (Task 3) overrides this with a
- *     strong symbol that returns two ranges: a low prefix and the
- *     arena window inside its representative zone.
+ *     that must be reserved during pmm_init. Each architecture defines
+ *     ALL THREE hooks strongly (mm-architecture-boundaries Task 4;
+ *     there is no weak default any more): x86_64 keeps the legacy
+ *     prefix [0, ceil2M(metadata_end_pa)) in
+ *     kernel/arch/x86_64/memory/pmm_reserve.c; aarch64 returns the
+ *     single published early-arena range (kernel/arch/aarch64/memory/
+ *     early_arena.c) and refuses with -EINVAL before prepare.
  *
  *   - pmm_reserve_boot_ranges(helper) walks pages_struct once, marks
  *     every represented frame whose PA falls in the given ranges, and

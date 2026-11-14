@@ -12,6 +12,17 @@ extern size_t pmm_arch_normalize(const struct boot_context *,
                                   struct MEMORY_RANGE *);
 extern uint64_t pmm_arch_zone_split(void);
 
+/* Runner-specific architecture selector (mm-architecture-boundaries
+ * Task 4): the driver defines OS01_PMM_ARCH_TEST_ARM=1 when it links
+ * the production ARM pmm_arch.c, and leaves it undefined for the x86
+ * runner.  Compiler architecture macros are NOT faked — the ARM
+ * strategy hooks are plain C and run natively on the host. */
+#if defined(OS01_PMM_ARCH_TEST_ARM)
+#define PMM_ARCH_TEST_ARM 1
+#else
+#define PMM_ARCH_TEST_ARM 0
+#endif
+
 #define CHECK(cond) do { if (!(cond)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
     return 1; } } while (0)
@@ -34,10 +45,8 @@ int main(void)
               0xFFFFFFFFFFE00000ULL);
     }
 
-#if !defined(__aarch64__)
-    /* x86_64-only: aarch64 adapter ignores ctx and reads the
-     * already-published map (aarch64_ram_map_get), so a zeroed
-     * boot_context has no defined meaning on aarch64. */
+#if !PMM_ARCH_TEST_ARM
+    /* x86 runner: the E820 adapter reads ctx. */
     {
         struct boot_context ctx = {0};
         CHECK(pmm_arch_normalize(&ctx, out) == 0);
@@ -108,10 +117,17 @@ int main(void)
     }
 #endif
 
-#if defined(__x86_64__)
+#if PMM_ARCH_TEST_ARM
+    /* ARM runner: the production strategy was linked with an
+     * UNPUBLISHED RAM map (the stub returns NULL), so the documented
+     * ordering-violation path is normalize == 0, and the zone
+     * threshold is explicitly "none" — UINT64_MAX, never the x86 4
+     * GiB boundary (weak-default regression: the old weak default
+     * returned SIZE_MAX via a weak symbol that no longer exists). */
+    CHECK(pmm_arch_normalize(NULL, out) == 0);
+    CHECK(pmm_arch_zone_split() == UINT64_MAX);
+#else
     CHECK(pmm_arch_zone_split() == 0x100000000ULL);
-#elif defined(__aarch64__)
-    CHECK(pmm_arch_zone_split() == SIZE_MAX);
 #endif
 
     return 0;

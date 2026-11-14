@@ -2,10 +2,14 @@
 """Host test driver for the arch-neutral PMM adapter layer.
 
 Profile-aware Python driver that mirrors ``qemutests/aarch64_ram_test.py``.
-Compiles the production ``kernel/memory/pmm_arch.c`` together with the
-per-arch strong override (when the profile picks an arch with a real
-override) plus ``qemutests/arch_runner/pmm_arch_test_runner.c`` and runs
-the result.
+Compiles the production per-arch strategy hooks together with
+``qemutests/arch_runner/pmm_arch_test_runner.c`` and runs the result.
+Both runners execute on the host: the ARM hooks
+(``kernel/arch/aarch64/memory/pmm_arch.c``) are plain C with no ARM
+instructions, so they are compiled and run natively with a NULL
+``aarch64_ram_map_get`` stub (the "caller violated ordering" input)
+and the runner-specific ``-DOS01_PMM_ARCH_TEST_ARM=1`` selector — a
+missing cross-compiler is never a reason to skip.
 
 This driver is intentionally a *compile-and-link smoke test*. It verifies
 that all TUs compile, all TUs link, and the runner exits 0 with the
@@ -38,20 +42,8 @@ defines are file-scoped (the kernel TU
 values 0x60000 / 0x64000). The host smoke test is robust to
 both of those quirks by design.
 
-For aarch64, the runner's only assertion is
-``pmm_arch_zone_split() == SIZE_MAX`` (the weak default), so the
-driver only links ``kernel/memory/pmm_arch.c``. Linking the real
-per-arch aarch64 files (``ram.c`` + ``ram_core.c`` + the per-arch
-``pmm_arch.c`` strong override) is not required for the host-side
-contract and is intentionally skipped: the strong override reads the
-already-published ``aarch64_ram_map``, which would require a
-synthetic init sequence that adds no coverage beyond what the QEMU
-harness in ``qemutests/aarch64_uefi_smp.py`` provides.
-
 Profile is selected via the ``PROFILE`` env var (default
-``x86_64-clang``). The aarch64 host path requires the host ``cc`` to
-target aarch64-none-elf; if it cannot, the driver prints a clear
-``skipped`` message and exits 0 instead of failing the run.
+``x86_64-clang``).
 """
 import os
 from pathlib import Path
@@ -99,14 +91,19 @@ char _binary_arch_x86_64_trampoline_bin_end[1]   = {0};
 
 
 # ── aarch64 stub TU ─────────────────────────────────────────────
-# The runner's aarch64 path is intentionally minimal: it only
-# validates the weak-default ``pmm_arch_zone_split() == SIZE_MAX``
-# invariant. The aarch64 strong override and aarch64_ram_map publish
-# flow are exercised by the QEMU harness, not by the host driver.
+# The production ARM strategy TU reads the published RAM map through
+# aarch64_ram_map_get(); the host runner has not published one, so
+# this stub supplies the documented "no map" input (NULL).  It does
+# NOT replace any production strategy: normalize + zone_split come
+# from the real kernel/arch/aarch64/memory/pmm_arch.c.
 AARCH64_STUB_C = r"""
-/* aarch64 host test stub. The runner's aarch64 assertions are
- * gated to the weak-default zone_split() return; no per-arch
- * symbols need to be provided here. */
+#include <stddef.h>
+#include <arch/aarch64/ram.h>
+
+const struct aarch64_ram_map *aarch64_ram_map_get(void)
+{
+    return NULL;
+}
 """
 
 
@@ -128,8 +125,8 @@ def _build_x86_64(tmp, cc, runner_c):
         "-I", ".",
         "-I", "kernel/include",
         "-Wl,--defsym=_text=0x200000",
-        str(ROOT / "kernel" / "memory" / "pmm_arch.c"),
         str(ROOT / "kernel" / "arch" / "x86_64" / "memory" / "pmm_arch.c"),
+        str(ROOT / "kernel" / "arch" / "x86_64" / "memory" / "pmm_reserve.c"),
         str(stub_c),
         str(runner_c),
         "-o", str(executable),
@@ -139,30 +136,24 @@ def _build_x86_64(tmp, cc, runner_c):
 
 
 def _build_aarch64(tmp, cc, runner_c):
-    """Try to compile the aarch64 host runner. Returns the path on
-    success, or ``None`` if the host ``cc`` cannot target aarch64."""
+    """Compile the ARM-strategy host runner natively.  The production
+    ``kernel/arch/aarch64/memory/pmm_arch.c`` is plain C without any
+    ARM instructions, so no cross-compiler is needed and the run is
+    never skipped (mm-architecture-boundaries Task 4)."""
     stub_c = tmp / "aarch64_stub.c"
     stub_c.write_text(AARCH64_STUB_C)
     executable = tmp / "pmm_arch_runner"
     cmd = [
         cc, "-std=c11", "-Wall", "-Wextra",
-        "-arch", "aarch64",
-        "-ffreestanding", "-nostdlib",
         "-I", ".",
         "-I", "kernel/include",
-        str(ROOT / "kernel" / "memory" / "pmm_arch.c"),
+        "-DOS01_PMM_ARCH_TEST_ARM=1",
+        str(ROOT / "kernel" / "arch" / "aarch64" / "memory" / "pmm_arch.c"),
         str(stub_c),
         str(runner_c),
         "-o", str(executable),
     ]
-    try:
-        subprocess.run(cmd, cwd=ROOT, check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as exc:
-        sys.stderr.write(exc.stderr.decode() if exc.stderr else "")
-        return None
-    except FileNotFoundError:
-        return None
+    subprocess.run(cmd, cwd=ROOT, check=True)
     return executable
 
 
@@ -179,12 +170,6 @@ def main():
             executable = _build_x86_64(tmp, cc, runner_c)
         elif profile in ("aarch64-clang", "aarch64"):
             executable = _build_aarch64(tmp, cc, runner_c)
-            if executable is None:
-                print(f"pmm_arch_test: host cc cannot target aarch64 (PROFILE={profile}); "
-                      "skipping aarch64 host path. Use the QEMU harness "
-                      "(make PROFILE=aarch64-clang test-aarch64-uefi-smp) for the "
-                      "on-target validation.")
-                return 0
         else:
             raise SystemExit(f"pmm_arch_test: unsupported PROFILE={profile!r}; "
                              "expected one of x86_64-clang, aarch64-clang")
