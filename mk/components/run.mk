@@ -741,6 +741,14 @@ test-pmm-boot-reservation:
 print-host-test-inventory:
 	@$(call os01_submake,hosttests,print-inventory $(OS01_SUBMAKE_ARGS))
 
+.PHONY: print-harness-modules print-test-qemu-flavors print-test-qemu-images
+print-harness-modules:
+	@printf '%s\n' $(TEST_HARNESS_MODULES)
+print-test-qemu-flavors:
+	@$(foreach v,$(sort $(filter TEST_QEMU_FLAVOR_%,$(.VARIABLES))),printf '%s\t%s\n' '$(patsubst TEST_QEMU_FLAVOR_%,%,$(v))' '$(value $(v))';)
+print-test-qemu-images:
+	@$(foreach v,$(sort $(filter TEST_QEMU_IMG_%,$(.VARIABLES))),printf '%s\t%s\n' '$(patsubst TEST_QEMU_IMG_%,%,$(v))' '$(value $(v))';)
+
 # ── Test framework regression (no QEMU, always) ──────────────
 # Explicit Python unittest entry for the test framework itself.
 # The list is append-only across tasks: Task 2 established
@@ -764,7 +772,7 @@ print-host-test-inventory:
 # The recipe is a single `python3 -m unittest` call against the explicit
 # list — never auto-discovery, never an implicit search for `test_*.py`.
 # Fixtures use fakes or host-only contract probes; no QEMU process starts.
-TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure qemutests.test_boot_contract qemutests.test_boot_services qemutests.test_doom_runner qemutests.test_doom_engine_notice qemutests.test_fb_pixel_verify_dimensions qemutests.test_scan_tools
+TEST_HARNESS_MODULES := qemutests.test_brk_source_scan qemutests.test_gfx_runner qemutests.test_harness_process qemutests.test_harness_result qemutests.test_run_test_harness qemutests.test_make_qemu_failure qemutests.test_kernel_selftest_result qemutests.test_run_hosttests qemutests.test_systest_protocol qemutests.test_aarch64_harness qemutests.test_systest_repeat_harness qemutests.test_harness_static qemutests.test_driver_model_matrix qemutests.test_driver_model_boundary_audit qemutests.test_resolution_switcher qemutests.test_ci_workflow qemutests.test_ci_artifact qemutests.test_qemu_isolation qemutests.test_monitor_runner qemutests.test_terminal_present_runner qemutests.test_gui_runner qemutests.test_gui_desktop_runner qemutests.test_monitor_host_dispatch qemutests.test_intr_dispatch_audit qemutests.test_x86_intr_fault qemutests.test_gui_build_audit qemutests.test_framework_runner qemutests.test_host_build_contract qemutests.test_inventory qemutests.test_scenario_catalog qemutests.test_suite_catalog qemutests.test_aarch64_ap_boot_contract qemutests.test_timing qemutests.test_arch10_capacity_audit qemutests.test_arch10_capacity_runner qemutests.test_aarch64_sched_tick qemutests.test_stack_frame_audit qemutests.test_arch6_fsstress qemutests.test_boot_facade_headers qemutests.test_audit_symbol_contract qemutests.test_boot_lifecycle qemutests.test_boot_irq_time qemutests.test_boot_failure qemutests.test_boot_contract qemutests.test_boot_services qemutests.test_doom_runner qemutests.test_doom_engine_notice qemutests.test_fb_pixel_verify_dimensions qemutests.test_scan_tools qemutests.test_bridge_export
 .PHONY: test-harness test-framework-contract
 test-harness: test-framework-contract
 	@echo "  [test-harness] running $(words $(TEST_HARNESS_MODULES)) unittest module(s): $(TEST_HARNESS_MODULES)"

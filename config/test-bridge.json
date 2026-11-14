@@ -1,0 +1,5147 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_arch_vmm_init",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_arch_vmm_init.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_backend_4k",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_backend_4k.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_color_printk_abi",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_color_printk_abi.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_gic_target_probe",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_gic_target_probe.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_idle_wakeup",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_idle_wakeup.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_ipi_broadcast",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_ipi_broadcast.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_pt_2m_block",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_pt_2m_block.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_pt_locks",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_pt_locks.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_pt_root_publish",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_pt_root_publish.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_pt_software_bits",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_pt_software_bits.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_pt_split",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_pt_split.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_resched_sgi",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_resched_sgi.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_sched_charge",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_sched_charge.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      },
+      "binaries": [
+        "test_aarch64_sched_charge_aarch64",
+        "test_aarch64_sched_charge_x86"
+      ]
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_sched_observer",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_sched_observer.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_sched_tick",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_sched_tick.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_scratch_probe_logic",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_scratch_probe_logic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_aarch64_sync_fault",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_aarch64_sync_fault.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_ahci_lifecycle",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_ahci_lifecycle.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_ap_work_protocol",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_ap_work_protocol.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_arena_2gib_boundary",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_arena_2gib_boundary.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_arena_candidate_slab_bytes",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_arena_candidate_slab_bytes.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_arena_layout_chain",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_arena_layout_chain.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_arena_table_base_shift",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_arena_table_base_shift.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_bcache",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_bcache.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_bga_non_x86",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_bga_non_x86.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_bga_resolution",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_bga_resolution.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_block_device_ops",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_block_device_ops.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_blocker_remote_wake",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_blocker_remote_wake.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_contract_checks",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_contract_checks.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_contract_cpu_prepare",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_contract_cpu_prepare.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_contract_sequence",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_contract_sequence.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_contract_softirq",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_contract_softirq.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_contract_subsys",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_contract_subsys.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_cpu_lifecycle",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_cpu_lifecycle.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_failure_log",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_failure_log.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_failure_mounts",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_failure_mounts.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_failure_subsys",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_failure_subsys.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_failure_terminal",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_failure_terminal.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_irq_context",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_irq_context.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_irq_registration",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_irq_registration.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_services_late",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_services_late.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_services_mechanisms",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_services_mechanisms.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_services_sequence",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_services_sequence.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_services_services",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_services_services.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_services_spawn",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_services_spawn.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_services_vfs",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_services_vfs.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_spawn_failure",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_spawn_failure.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_stdio",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_stdio.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_task_init",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_task_init.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_boot_tick_handoff",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_boot_tick_handoff.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_bootinfo_abi",
+      "layer": "host",
+      "subsystem": "framework",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_bootinfo_abi.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_brk_pages",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_brk_pages.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_canon",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_canon.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_clocksource",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_clocksource.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_compat_linux",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_compat_linux.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_desktop_audit",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_desktop_audit.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_desktop_shell",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_desktop_shell.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_desktop_state",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_desktop_state.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_devfs_capacity",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_devfs_capacity.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_devfs_hierarchy",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_devfs_hierarchy.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_devfs_input_dispatch",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_devfs_input_dispatch.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_device_boot",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_device_boot.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_display_owner",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_display_owner.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_config",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_config.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_diag",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_diag.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_engine_exit",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_engine_exit.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_input",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_input.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_input_engine",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_input_engine.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_runtime",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_runtime.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_doom_video",
+      "layer": "host",
+      "subsystem": "doom",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_doom_video.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_double_state_publish",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_double_state_publish.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_e1000_instances",
+      "layer": "host",
+      "subsystem": "net",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_e1000_instances.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_early_arena",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_early_arena.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_early_arena_exhaust",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_early_arena_exhaust.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_elf_layout",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_elf_layout.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_elf_load_4k",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_elf_load_4k.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_elf_validate",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_elf_validate.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_ext2_bmap",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_ext2_bmap.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fat32_basic",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fat32_basic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fb_mtrr",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fb_mtrr.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fb_resolution_hooks",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fb_resolution_hooks.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fb_resolution_ioctl",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fb_resolution_ioctl.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fb_state",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fb_state.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fb_uapi",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fb_uapi.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fb_writers",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fb_writers.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_fork_user_map",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_fork_user_map.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_foundational_primitives",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_foundational_primitives.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_framework_contract",
+      "layer": "host",
+      "subsystem": "framework",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "expected-failure",
+      "source": "hosttests/cases/test_framework_contract.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gfx_client",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gfx_client.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gfx_device",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gfx_device.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gfx_fault_bridge",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gfx_fault_bridge.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gfx_file_lifecycle",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gfx_file_lifecycle.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gfx_input",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gfx_input.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gfx_primitives",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gfx_primitives.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gic_driver",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gic_driver.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gic_marker_lines",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gic_marker_lines.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gic_probe",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gic_probe.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_input_decode",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_input_decode.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_input_lvgl",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_input_lvgl.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_input_nonce",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_input_nonce.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_input_platform",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_input_platform.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_lvgl_integration",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_lvgl_integration.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_platform",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_platform.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_theme",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_theme.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_theme_apply",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_theme_apply.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_widget",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_gui_widget.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_i8042_demux",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_i8042_demux.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_input_ps2_frame",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_input_ps2_frame.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_input_route",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_input_route.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_intr_backend_aarch64",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_intr_backend_aarch64.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_intr_backend_x86",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_intr_backend_x86.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_intr_decode_aarch64",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_intr_decode_aarch64.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_intr_decode_x86",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_intr_decode_x86.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_intr_dispatch",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_intr_dispatch.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_intr_irq_x86",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_intr_irq_x86.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_irq_capacity",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_irq_capacity.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_kthread_ctor",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_kthread_ctor.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_lapic_nmi",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_lapic_nmi.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_alloc",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_alloc.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_api",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_api.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_dir",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_dir.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_environ",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_environ.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_fflush",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_fflush.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_float_parse",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_float_parse.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_fread_fwrite_validate",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_fread_fwrite_validate.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_getopt",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_getopt.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_integer",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_integer.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_line",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_line.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_list",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_list.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_path",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_path.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_scan",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_scan.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_shutdown",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_shutdown.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_stdio_format",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_stdio_format.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_stdio_io",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_stdio_io.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_stdio_registry",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_stdio_registry.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_stream_state",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_stream_state.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_string",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_string.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_time",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_time.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_libc_vsprintf",
+      "layer": "host",
+      "subsystem": "libc",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_libc_vsprintf.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_lwip_rand",
+      "layer": "host",
+      "subsystem": "net",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_lwip_rand.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_accounting",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_monitor_accounting.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_collect",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_monitor_collect.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_file",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_monitor_file.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_model",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_monitor_model.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_pmm",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_monitor_pmm.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_render",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_monitor_render.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_mouse_init",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_mouse_init.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_mouse_proto",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_mouse_proto.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_mutex_handshake",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_mutex_handshake.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_net_device",
+      "layer": "host",
+      "subsystem": "net",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_net_device.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_net_lwip",
+      "layer": "host",
+      "subsystem": "net",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_net_lwip.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_nofile_limits",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_nofile_limits.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_cleanup",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_cleanup.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_contract",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_contract.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_install",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_install.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_layout",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_layout.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_publish",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_publish.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_reservation",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_reservation.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_runner",
+      "layer": "host",
+      "subsystem": "framework",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "exit-status",
+      "source": "hosttests/cases/test_page_table_runner.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_tree",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_tree.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_page_table_vmm",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_page_table_vmm.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pci_backend_irq",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_pci_backend_irq.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pci_devfs",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_pci_devfs.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pci_driver_model",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_pci_driver_model.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_percpu_layout",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_percpu_layout.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pmm_basic",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_pmm_basic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pmm_ram_rel_index",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_pmm_ram_rel_index.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_poll_capacity",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_poll_capacity.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_poll_nofile64",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_poll_capacity.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_poll_requested",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_poll_requested.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_poll_waitqueue_handshake",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_poll_waitqueue_handshake.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_process_image_lifecycle",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_process_image_lifecycle.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pty_winsize",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_pty_winsize.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_rtc_pie_calibration",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_rtc_pie_calibration.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_runtime_udivti3",
+      "layer": "host",
+      "subsystem": "framework",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "exit-status",
+      "source": "runtime/selftest/test_udivti3.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_sched_layout_offsets",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_sched_layout_offsets.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_sched_notify",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_sched_notify.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_sched_notify_aarch64_backend",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_sched_notify_aarch64_backend.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_sched_notify_x86_backend",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_sched_notify_x86_backend.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_setres",
+      "layer": "host",
+      "subsystem": "display",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_setres.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_slab_basic",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_slab_basic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_slab_basic_x86_count",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_slab_basic_x86_count.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_slab_idempotent_reservation",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_slab_idempotent_reservation.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_slab_layout_compute",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_slab_layout_compute.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_slab_lock_path",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_slab_lock_path.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_smp_starting_gate",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_smp_starting_gate.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_switch_complete",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_switch_complete.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_sync_primitives",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_sync_primitives.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_syscall_dispatch",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_syscall_dispatch.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_syscall_dispatch_subset",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_syscall_dispatch.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_terminal_core",
+      "layer": "host",
+      "subsystem": "terminal",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_terminal_core.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_terminal_display",
+      "layer": "host",
+      "subsystem": "terminal",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_terminal_display.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_terminal_render",
+      "layer": "host",
+      "subsystem": "terminal",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_terminal_render.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_tetris_logic",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_tetris_logic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_thermal_affinity",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_thermal_affinity.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_thermal_decode",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_thermal_decode.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_thermal_fixup",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_thermal_fixup.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_tlb_serial_protocol",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_tlb_serial_protocol.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_usb_devfs",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_usb_devfs.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_user_log",
+      "layer": "host",
+      "subsystem": "terminal",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_user_log.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_user_log_off",
+      "layer": "host",
+      "subsystem": "terminal",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_user_log.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_user_protected_ranges",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_user_protected_ranges.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_user_write_cow",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_user_write_cow.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vfs_append",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vfs_append.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vfs_basic",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vfs_basic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vfs_dcache",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vfs_dcache.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vfs_fs_registry",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vfs_fs_registry.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vfs_iops_fops",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vfs_iops_fops.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vfs_mount_tree",
+      "layer": "host",
+      "subsystem": "fs",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vfs_mount_tree.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_virtio_net_instances",
+      "layer": "host",
+      "subsystem": "net",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_virtio_net_instances.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vmm_ack_wraparound",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vmm_ack_wraparound.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vmm_caller_audit",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vmm_caller_audit.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vmm_prot_none",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vmm_prot_none.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vmm_replace_protocol",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vmm_replace_protocol.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_vmm_semantic_header",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_vmm_semantic_header.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_wait_basic",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_wait_basic.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_waitpid",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_waitpid.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_x86_intr_probe",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_x86_intr_probe.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_x86_ipi_ready_publish",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_x86_ipi_ready_publish.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_x86_smp_boot_sync",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_x86_smp_boot_sync.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_x86_vmm_backend",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_x86_vmm_backend.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_xhci_init",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_xhci_init.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_xhci_phase2",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_xhci_phase2.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_xhci_phase3",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_xhci_phase3.c",
+      "origin": {
+        "from": "hosttests/inventory"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_user_vm",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "source": "hosttests/cases/test_user_vm.c",
+      "origin": {
+        "from": "hosttests/TEST_BINS_backfill"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_focus",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_gui_focus.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_widget_appearance",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_gui_widget_appearance.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_widget_event",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_gui_widget_event.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_gui_widget_layout",
+      "layer": "host",
+      "subsystem": "gui",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_gui_widget_layout.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_monitor_procfs",
+      "layer": "host",
+      "subsystem": "monitor",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_monitor_procfs.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_pmm_boot_reservation",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_pmm_boot_reservation.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "host_test",
+      "id": "test_socket_net_readiness",
+      "layer": "host",
+      "subsystem": "net",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "acceptance": "protocol-or-legacy",
+      "binaries": [],
+      "source": "hosttests/cases/test_socket_net_readiness.c",
+      "origin": {
+        "from": "hosttests/special_target"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-boot-contract",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "boot-contract",
+      "cpus": "1,2,4",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-aarch64 MODE=boot-contract",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-gic-spi",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "selftest",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=gic-spi",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-m1-ap-bad-root",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "m1-ap-bad-root",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=m1-ap-bad-root",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-m1-arena-exhaust",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "m1-arena-exhaust",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=m1-arena-exhaust",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-m1-ram",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "m1-ram",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=m1-ram",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-m1-sparse",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "m1-sparse",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=m1-sparse",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-m1-table-exhaust",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "m1-table-exhaust",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=m1-table-exhaust",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-m3-probe",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "selftest",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=m3-probe",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-no-ack",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "no-ack",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=no-ack",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-sched",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "sched",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=sched",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-sched-ap",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "sched-ap",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=sched-ap",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-sched-ap-fatal",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "sched-ap-fatal-owner",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-sched-tick",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "sched-tick",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=sched-tick",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-sched-wake",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "sched-wake",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=sched-wake",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-smp",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "selftest",
+      "cpus": "1,2,4",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=smp",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "aarch64-sync-fault",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "aarch64-clang",
+      "capability": "uefi",
+      "variant": "sync-fault",
+      "cpus": "2",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-aarch64 MODE=sync-fault",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "arch10-capacity",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "arch10-capacity",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "CAPACITY_TEST=1",
+      "image_var": "$(TEST_ARCH10_CAPACITY_IMAGE)",
+      "runner_module": "qemutests.arch10_capacity"
+    },
+    {
+      "kind": "suite",
+      "id": "arch6-fsstress",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "arch6-fsstress",
+      "cpus": "4",
+      "memory_mib": 512,
+      "timeout_s": 180,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "ARCH6_FSSTRESS_TEST=1",
+      "image_var": "$(TEST_ARCH6_FSSTRESS_IMAGE)",
+      "runner_module": "qemutests.arch6_fsstress"
+    },
+    {
+      "kind": "suite",
+      "id": "boot-contract",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "boot-contract",
+      "cpus": "1,2,4",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=boot-contract",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)"
+    },
+    {
+      "kind": "suite",
+      "id": "boot-failure",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "boot-failure",
+      "cpus": "1,2,4",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=boot-failure",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)"
+    },
+    {
+      "kind": "suite",
+      "id": "boot-irq-time",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "boot-irq-time",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=boot-irq-time",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)"
+    },
+    {
+      "kind": "suite",
+      "id": "boot-lifecycle",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "boot-lifecycle",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=boot-lifecycle",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)"
+    },
+    {
+      "kind": "suite",
+      "id": "boot-services",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "boot-services",
+      "cpus": "1,2,4,8",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=boot-services",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)"
+    },
+    {
+      "kind": "suite",
+      "id": "doom",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "doom-test",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 240,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=doom",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "DOOM_TEST=1",
+      "image_var": "$(TEST_DOOM_IMAGE)",
+      "runner_module": "qemutests.doom_test"
+    },
+    {
+      "kind": "suite",
+      "id": "driver-model",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "driver-model",
+      "cpus": "1,2,4",
+      "memory_mib": 512,
+      "timeout_s": 180,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=driver-model",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)"
+    },
+    {
+      "kind": "suite",
+      "id": "gfx",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=gfx",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.run_test"
+    },
+    {
+      "kind": "suite",
+      "id": "gui",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=gui",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.gui_test"
+    },
+    {
+      "kind": "suite",
+      "id": "gui-desktop",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=gui-desktop",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.gui_desktop_test"
+    },
+    {
+      "kind": "suite",
+      "id": "inittab-phase",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "inittab-test",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=inittab-phase",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "INITTAB_FILE=config/inittab.test",
+      "image_var": "$(TEST_INITTAB_IMAGE)",
+      "runner_module": "qemutests.run_test"
+    },
+    {
+      "kind": "suite",
+      "id": "intr-x86",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "intr-x86",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=intr-x86",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(BUILD_DIR)/image/intr-x86-fault-bp/disk.img"
+    },
+    {
+      "kind": "suite",
+      "id": "kernel-selftest",
+      "layer": "kernel_selftest",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "selftest",
+      "cpus": "8",
+      "memory_mib": 512,
+      "timeout_s": 75,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-kernel-selftest",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "monitor",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1,2,8",
+      "memory_mib": 512,
+      "timeout_s": 90,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=monitor",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.monitor_test"
+    },
+    {
+      "kind": "suite",
+      "id": "network",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "nettest",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=network",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "OS01_NETTEST=1",
+      "image_var": "$(TEST_NETTEST_IMAGE)",
+      "runner_module": "qemutests.run_test"
+    },
+    {
+      "kind": "suite",
+      "id": "phase-0",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=phase-0",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.run_test"
+    },
+    {
+      "kind": "suite",
+      "id": "resolution",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=resolution",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(DISK_IMG)",
+      "runner_module": "test_resolution_switcher"
+    },
+    {
+      "kind": "suite",
+      "id": "resolution-fault",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "resolution-test",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "systest",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "systest",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 120,
+      "image_policy": "isolated",
+      "resource": "shared",
+      "entrypoint": "test-qemu SUITE=systest",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "OS01_SYSTEST=1",
+      "image_var": "$(TEST_SYSTEST_IMAGE)",
+      "runner_module": "qemutests.run_test"
+    },
+    {
+      "kind": "suite",
+      "id": "systest-repeat",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 180,
+      "image_policy": "read-only",
+      "resource": "shared",
+      "entrypoint": "test-syscall-repeat",
+      "prepare_target": "-",
+      "run_target": "-",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      }
+    },
+    {
+      "kind": "suite",
+      "id": "terminal-present",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "terminal-present",
+      "cpus": "1",
+      "memory_mib": 512,
+      "timeout_s": 60,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=terminal-present",
+      "prepare_target": "_test-suite-prepare",
+      "run_target": "_test-suite-run",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "TERM_PRESENT_TEST=1",
+      "image_var": "$(TEST_TERMINAL_PRESENT_IMAGE)",
+      "runner_module": "qemutests.terminal_present_test"
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_aarch64_ap_boot_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_ap_boot_contract.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_aarch64_harness",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_harness.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_aarch64_sched_tick",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_sched_tick.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_arch10_capacity_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_arch10_capacity_audit.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_arch10_capacity_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_arch10_capacity_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_arch6_fsstress",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_arch6_fsstress.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_audit_symbol_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_audit_symbol_contract.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_boot_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_boot_contract.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_boot_facade_headers",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_boot_facade_headers.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_boot_failure",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_boot_failure.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_boot_irq_time",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_boot_irq_time.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_boot_lifecycle",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_boot_lifecycle.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_boot_services",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_boot_services.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_brk_source_scan",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_brk_source_scan.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_ci_artifact",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_ci_artifact.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_ci_workflow",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_ci_workflow.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_doom_engine_notice",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_doom_engine_notice.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_doom_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_doom_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_driver_model_boundary_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_driver_model_boundary_audit.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_driver_model_matrix",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_driver_model_matrix.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_fb_pixel_verify_dimensions",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_fb_pixel_verify_dimensions.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_framework_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_framework_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_gfx_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_gfx_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_gui_build_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_gui_build_audit.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_gui_desktop_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_gui_desktop_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_gui_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_gui_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_harness_process",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_harness_process.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_harness_result",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_harness_result.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_harness_static",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_harness_static.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_host_build_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_host_build_contract.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_intr_dispatch_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_intr_dispatch_audit.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_inventory",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_inventory.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_kernel_selftest_result",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_kernel_selftest_result.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_make_qemu_failure",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_make_qemu_failure.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_monitor_host_dispatch",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_monitor_host_dispatch.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_monitor_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_monitor_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_qemu_isolation",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_qemu_isolation.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_resolution_switcher",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_resolution_switcher.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_run_hosttests",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_run_hosttests.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_run_test_harness",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_run_test_harness.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_scenario_catalog",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_scenario_catalog.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_stack_frame_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_stack_frame_audit.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_suite_catalog",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_suite_catalog.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_systest_protocol",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_systest_protocol.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_systest_repeat_harness",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_systest_repeat_harness.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_terminal_present_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_terminal_present_runner.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_timing",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_timing.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    },
+    {
+      "kind": "harness_module",
+      "id": "qemutests.test_x86_intr_fault",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "scenarios": [],
+      "source": "qemutests/test_x86_intr_fault.py",
+      "origin": {
+        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
+      }
+    }
+  ],
+  "ignored": [
+    {
+      "source": "qemutests/test_aarch64_ap_scheduler.py",
+      "reason": "standalone aarch64 AP scheduler test script"
+    },
+    {
+      "source": "qemutests/test_arch9_build_contract.py",
+      "reason": "requires prepared sysroot; owned by test-contract bucket"
+    },
+    {
+      "source": "qemutests/test_build_incremental.py",
+      "reason": "standalone incremental build contract script"
+    },
+    {
+      "source": "qemutests/test_catalog.py",
+      "reason": "standalone catalog verification script"
+    },
+    {
+      "source": "qemutests/test_display_owner.py",
+      "reason": "standalone display owner test script"
+    },
+    {
+      "source": "qemutests/test_doom_assets.py",
+      "reason": "standalone doom assets verification script"
+    },
+    {
+      "source": "qemutests/test_doom_build_contract.py",
+      "reason": "standalone doom build contract script"
+    },
+    {
+      "source": "qemutests/test_dry_run_contract.py",
+      "reason": "standalone dry-run contract script"
+    },
+    {
+      "source": "qemutests/test_lvgl_runner.py",
+      "reason": "executable QEMU driver script, not a unittest module"
+    }
+  ]
+}
