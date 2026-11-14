@@ -72,8 +72,18 @@ RUN_QEMU_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=disk \
   -object rng-random,filename=/dev/urandom,id=rng0 \
   -device virtio-rng-pci,rng=rng0 \
   -m $(MEMORY) -display $(DISPLAY) -serial stdio
+# USB-only storage topology (USB boot design §5.9).  One usb-storage
+# drive on qemu-xhci, and nothing else: no AHCI, no implicit IDE/virtio
+# disk, no `-boot order` (it cannot be mixed with bootindex anyway).
+# `run-usb` consumes this variable; the automated `test-qemu-usb-boot`
+# runner builds its own USB-only argv via the shared qemu_cmd builder.
+QEMU_USB_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=usbdisk,readonly=on \
+  -device qemu-xhci,id=xhci,p2=4,p3=0 \
+  -device usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0 \
+  -object rng-random,filename=/dev/urandom,id=rng0 \
+  -device virtio-rng-pci,rng=rng0
 
-.PHONY: run run-kvm run-virtio debug
+.PHONY: run run-kvm run-virtio run-usb debug
 # Flags before the common network/disk section, followed by the original
 # final reboot flag only on run and run-kvm.
 RUN_QEMU_FLAGS_run-kvm    = -accel kvm
@@ -91,6 +101,17 @@ run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0 $(RUN_QEMU_DISK)
+# M0 firmware-only checkpoint (USB boot plan Task 1, design §5.9): the
+# same interactive display/SMP/network settings as `run`, but the USB
+# disk topology instead of RUN_QEMU_DISK.  The stock kernel has no USB
+# MSC driver, so the expected outcome is
+#   `[boot-3] FATAL stage=fs component=root rc=-19 phase=-1 cpu=-1`.
+# The automated gate is `make test-qemu-usb-boot`; this target is
+# for manual diagnosis (e.g. the OVMF boot menu).  The drive is
+# read-only so an M0 run can never modify the profile image.
+run-usb:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+	$(call require_capability,rootfs)
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(QEMU_USB_DISK) -m $(MEMORY) -display $(DISPLAY) -serial stdio -no-reboot
 debug: QEMU_IMAGE = $(DISK_IMG)
 debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
@@ -2189,6 +2210,17 @@ $(error test-dispatch.mk missing; run 'make regen-test-catalog')
 endif
 include $(TEST_DISPATCH_GEN)
 
+# USB boot M0 firmware gate.  This is a dedicated target, not a catalog
+# suite until M1b: the expected-failure M0 checkpoint stays out of the
+# automated bucket, so `test-qemu SUITE=usb-boot` is intentionally
+# invalid until the bridge entry lands in M1b.
+USB_BOOT_CASE ?= firmware
+USB_BOOT_TIMEOUT ?= 120
+# One job-private log directory per invocation.  A Make variable (not a
+# shell variable) so the same path is visible to every recipe line; the
+# PID of the parse-time shell keeps concurrent jobs from colliding.
+USB_BOOT_JOB_DIR := $(abspath $(BUILD_DIR))/test-results/usb-boot/$(shell date -u +%Y%m%dT%H%M%S)-$(shell echo $$$$)
+
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
 # informational — it is NOT used as a prerequisite, because the
@@ -2329,6 +2361,45 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  SYSTEST_TIMEOUT="$(SYSTEST_TIMEOUT)" \
 	  python3 qemutests/run_test.py $(SUITE); \
 	fi
+
+# ── USB boot M0 firmware gate (dedicated target) ──────────────
+# Invoke directly as `make test-qemu-usb-boot` (the suite is
+# deliberately NOT in the generated catalog until M1b): the runner owns
+# its private USB-only QEMU topology, proves the profile OVMF loaded
+# BOOTX64.EFI + kernel.bin from USB, and expects the stock kernel
+# (no USB MSC driver) to stop at fs_boot_mounts with rc=-19.
+#
+# The source image is normal, read-only input: hash it after its build
+# and again after the run and refuse to report a pass if QEMU touched
+# it.  The whole sandwich is one shell line so the after-hash and cmp
+# also run when the runner reports FAIL (make would otherwise stop).
+# `$status` preserves the runner verdict as the target's exit status.
+#
+# The recipe contains no `$(MAKE)`, so the -n dry-run contract is
+# preserved: the dry-run prints exactly one
+# `python3 qemutests/test_usb_boot.py` invocation and executes nothing.
+.PHONY: test-qemu-usb-boot
+test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
+	$(call require_capability,rootfs)
+	@case "$(USB_BOOT_CASE)" in \
+	  firmware) ;; \
+	  *) echo "USB_BOOT_CASE must be firmware (M0), got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
+	esac
+	@set +e; \
+	mkdir -p "$(USB_BOOT_JOB_DIR)"; \
+	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.before"; \
+	python3 qemutests/test_usb_boot.py --case "$(USB_BOOT_CASE)" \
+	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
+	  --disk "$(NORMAL_IMAGE)" --smp "$(SMP)" \
+	  --timeout "$(USB_BOOT_TIMEOUT)" \
+	  --log-dir "$(USB_BOOT_JOB_DIR)"; \
+	status=$$?; \
+	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.after"; \
+	if ! cmp -s "$(USB_BOOT_JOB_DIR)/image.before" "$(USB_BOOT_JOB_DIR)/image.after"; then \
+	  echo "ERROR: test-qemu-usb-boot modified the source image $(NORMAL_IMAGE)" >&2; \
+	  exit 1; \
+	fi; \
+	exit $$status
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 
@@ -2852,6 +2923,8 @@ help:
 	@printf '  %-22s %-13s %s\n' \
 		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000)';
 	@printf '  %-22s %-13s %s\n' \
+		 'run-usb'           '(rootfs)'     'QEMU USB-only topology (usb-storage on qemu-xhci); M0 firmware checkpoint, expects fs/root rc=-19';
+	@printf '  %-22s %-13s %s\n' \
 		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
 	@echo ''
 	@echo 'aarch64 UEFI bring-up (uefi):'
@@ -2879,6 +2952,8 @@ help:
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' \
 		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress>, CASE=<id> selects one systest case)';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-qemu-usb-boot'  '(rootfs)'     'M0 USB-only firmware gate (USB_BOOT_CASE=firmware; expects fs/root rc=-19)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
 	@printf '  %-22s %-13s %s\n' \

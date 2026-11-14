@@ -27,7 +27,7 @@ make PROFILE=aarch64-clang run
 make: *** PROFILE='aarch64-clang' lacks capability 'rootfs'.  Stop.
 ```
 
-- `run` / `run-kvm` / `run-virtio` / `debug` / `test-*`（x86 E2E）需要 `rootfs`。
+- `run` / `run-kvm` / `run-virtio` / `run-usb` / `debug` / `test-*`（x86 E2E）需要 `rootfs`。
 - `aarch64-uefi` / `aarch64-uefi-kernel` / `run-aarch64-uefi` 需要 `uefi`。
 - `lib` / `user` 需要 `userland`。
 - `validate`（x86 内核 + UEFI 产物检查）与 `make test`（宿主测试）不依赖 rootfs。
@@ -52,7 +52,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 | Bucket | Purpose | Default |
 | --- | --- | --- |
-| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants) | `phase-0` |
+| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|usb-boot\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`/`usb-boot`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants). `usb-boot` is the opt-in M0 USB firmware gate (`USB_BOOT_CASE=firmware`, expected `fs/root rc=-19`); it is not in the automated catalog until M1b | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (16 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*` | AArch64 PSCI / GIC / sync-fault / scheduler / boot-contract acceptance harness | `smp` |
@@ -363,6 +363,7 @@ make test-host
 | 目标 | Variant 镜像 | 套件 |
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0` | 普通 `build/<profile>/image/disk.img` | 启动 + shell 提示符 |
+| `make test-qemu SUITE=usb-boot USB_BOOT_CASE=firmware` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot M0 固件门禁（见下方 `usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin` 并进入设备初始化；当前内核无 USB MSC 驱动，预期停在 `[boot-3] FATAL stage=fs component=root rc=-19`。**opt-in，不在自动化 catalog/CI 中**，M1b 转为成功门禁后再登记 nightly |
 | `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `build/<profile>/image/systest/disk.img` | syscall E2E（`OS01_SYSTEST=1`） |
 | `make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase` | `build/<profile>/image/inittab-test/disk.img` | inittab 阶段派发（`INITTAB_FILE=config/inittab.test`） |
 | `make OS01_NETTEST=1 test-qemu SUITE=network` | `build/<profile>/image/nettest/disk.img` | 网络回归（`OS01_NETTEST=1`） |
@@ -381,6 +382,38 @@ make test-host
 | `make test-qemu SUITE=boot-contract` / `make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract` | normal 组用普通镜像只读（`-snapshot`），变体组各自隔离 `build/<profile>/image/boot-contract-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-4 跨架构阶段契约与依赖拓扑 14 组矩阵（双架构各 7 组：normal 1/2/4、reverse 1/2、missing 1、cycle 1）。选择器 `BOOT_CONTRACT_TEST=none\|reverse\|missing\|cycle`。判定验证三检查点 `[boot-4] checkpoint=<devices\|pre-smp\|runtime> status=ok` 全序、依赖预检与拓扑保序、missing/cycle 真实拒绝。运行器：`qemutests/boot_contract.py`（归档在 `build/<profile>/logs/tests/boot-contract/`） |
 | `make test-qemu SUITE=boot-services` | normal 组用普通镜像只读（`-snapshot`），变体组各自隔离 `build/<profile>/image/boot-services-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-5 调度启动与服务解耦 8 组矩阵：normal 1/2/4/8、no-net 1/2、overlap 2/4。选择器 `BOOT_SERVICES_TEST=none\|overlap`。判定验证标桩全序 `[boot-5] vfs-runtime` → `[boot-5] init-created pid=1` → `[boot-5] runtime-ready window=closed`，PID 1 优先分配与并发发布安全。运行器：`qemutests/boot_services.py`（归档在 `build/<profile>/logs/tests/boot-services/`） |
 | `make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity` | `build/<profile>/image/arch10-capacity/disk.img` | 隔离容量验收变体（`CAPACITY_TEST=1`）：12 假块设备 + 40 devfs 节点 + poll32/64 入睡/唤醒 + RLIMIT_NOFILE (64) |
+
+### `usb-boot`：USB boot M0 固件门禁（opt-in）
+
+`make PROFILE=x86_64-clang test-qemu SUITE=usb-boot USB_BOOT_CASE=firmware`
+是 USB 启动计划的 **M0 固件检查点**，验收目标只有一个：profile OVMF 能从
+**USB-only** 拓扑（单块 `usb-storage` 挂在 `qemu-xhci` 上，`p2=4,p3=0`，
+`port=1,bootindex=0`）加载 ESP 上的 `BOOTX64.EFI` 与 `kernel.bin`，并让内核
+进入设备初始化。它不证明内核能读 U 盘——当前内核还没有 USB MSC 驱动。
+
+- **预期证据**（按顺序，缺一不可）：xHCI 端口 `speed=3`（high speed）→
+  `[xhci] slot N: configured with config X (iface class 08:06, ep_count=2)` →
+  以 `[boot-3] FATAL stage=fs component=root rc=-19` 开头的行。
+  `boot_failure_stop()` 会在该行后追加 `phase=... cpu=...`，runner 只匹配稳定前缀；
+  其它 rc、OVMF 横幅单独出现、标记乱序都不算通过。
+- **拓扑独立**：`qemutests/run_test.py` 的 argv 总会追加 AHCI 根盘，因此本套件
+  由 `qemutests/test_usb_boot.py::usb_argv()` 自行构造命令行；唯一非 pflash 盘就是
+  `usbdisk`，没有 AHCI/virtio/隐式盘，也没有 `-boot order`。
+- **超时与清理**：使用现有 `ProcessSession`（绝对单调截止时间，SIGTERM →
+  SIGKILL 有界清理），QEMU 输出再多也不会延长期限；串口全文、argv 与 metadata
+  保存在 `build/<profile>/test-results/usb-boot/<UTC>-<pid>/`。
+- **镜像只读**：`test-qemu-usb-boot` 在运行前后对普通镜像做 sha256 比对，
+  任何改动都会使目标失败；专用目标不构建镜像变体，因此被排除在通用
+  pre/post normal-image guard 之外。
+- **opt-in**：该套件目前是预期失败（M0）门禁，**不在** `mk/tests/catalog.mk`
+  或自动化 bucket 中；M1b 把它变成成功门禁后才登记 nightly。手动诊断可用
+  `make run-usb`（同样的 USB 拓扑 + 交互式 display/SMP/网络设置，或 OVMF 启动菜单）。
+- **profile 覆盖**：`PROFILE=<name>` 决定固件与镜像来源；只有具备 `rootfs` 能力的
+  x86 profile（默认 `x86_64-clang`）可用。`make PROFILE=aarch64-clang -n run-usb`
+  必须解析期失败 `lacks capability 'rootfs'`。固件来源由
+  `OVMF_FIRMWARE_SOURCE` 决定（默认 edk2-nightly HTTPS），可用绝对本地路径覆盖；
+  本地覆盖仅用于诊断，不能作为默认来源的验收证据。门禁报告需记录实际启动固件的
+  来源与 SHA-256（runner 将其写入 `metadata.json`）。
 
 ### `arch10-capacity`：隔离容量与工程完整性验收（ARCH-10 / Task 10）
 
@@ -481,7 +514,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | Bucket | 规范名 | 能力 | 用途 |
 | --- | --- | --- | --- |
 | Build artifact | `disk.img`、`kernel.bin`、`lib`、`user`、`image`、`sysroot` | profile-specific | 产生单个命名产物 |
-| Run / Debug | `run`、`run-kvm`、`run-virtio`、`debug` | `rootfs` | 对已有镜像启动 QEMU |
+| Run / Debug | `run`、`run-kvm`、`run-virtio`、`run-usb`、`debug` | `rootfs` | 对已有镜像启动 QEMU（`run-usb` 用 USB-only 拓扑，见下方 `usb-boot` 小节） |
 | Bring-up | `aarch64-uefi`、`aarch64-uefi-kernel`、`run-aarch64-uefi` | `uefi` | AArch64 UEFI 启动链 |
 | Validate | `validate`、`validate-kernel`、`validate-uefi`、`validate-profile` | `rootfs`（最后一个：`always`） | x86 产物健全性检查 + profile 检查 |
 | Test | `test-qemu`、`test-host`、`test-static`、`test-kernel-selftest`、`test-aarch64`、`test-contract`、`test-harness`（框架回归；不带任何 profile 能力；不启动 QEMU）（7 个 bucket；见 §3） | varies | 端到端和审计套件 |
@@ -494,7 +527,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
-| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86`、`doom` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui`/`doom` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体 |
+| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86`、`boot-lifecycle`、`boot-irq-time`、`boot-failure`、`boot-contract`、`boot-services`、`usb-boot`、`arch10-capacity`、`arch6-fsstress`、`doom` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui`/`doom` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体；`usb-boot` 走专属目标 `test-qemu-usb-boot` → `qemutests/test_usb_boot.py`，自建 USB-only 拓扑（不经 `run_test.py`，它总会追加 AHCI 根盘） |
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
@@ -733,7 +766,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | Flag/变量 | 用途 |
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
-| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`doom`） |
+| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`usb-boot`、`doom`；`usb-boot` 另接受 `USB_BOOT_CASE=firmware`，默认即 `firmware`） |
 | `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
 | `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
