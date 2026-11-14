@@ -544,6 +544,10 @@ _A64_DISASM_SYMS = (
        "user_vm_prepare_copy", "arch_user_vm_replace_cow"]
     + ["sys_native_waitpid", "do_waitpid"]
     + ["sys_native_exec", "arch_syscall_exec"]
+    + ["sys_native_kill", "task_send_signal", "signal_pgrp",
+       "sys_native_signal", "sys_native_sigprocmask",
+       "sys_native_sigreturn", "arch_syscall_sigreturn",
+       "aarch64_do_signal_delivery"]
 )
 
 # The formal user-copy surface a production image must link: the two
@@ -1389,6 +1393,12 @@ _A64_VM_EDGES = (
      "the shared waitpid handler must reach do_waitpid"),
     ("sys_native_exec", "arch_syscall_exec",
      "the shared exec handler must reach the architecture exec entry"),
+    ("sys_native_kill", "task_send_signal",
+     "the shared kill handler must reach task_send_signal"),
+    ("sys_native_sigreturn", "arch_syscall_sigreturn",
+     "the shared sigreturn handler must reach the architecture sigreturn entry"),
+    ("aarch64_user_syscall", "aarch64_do_signal_delivery",
+     "the AArch64 native syscall exit path must deliver pending signals"),
 )
 
 _A64_VM_FORBIDDEN_STRONG = ("do_futex_wait", "do_futex_wake")

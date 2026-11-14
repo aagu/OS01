@@ -388,6 +388,14 @@ ffff0000400977c0 T sys_native_waitpid
 ffff000040097800 T do_waitpid
 ffff000040097820 T sys_native_exec
 ffff000040097860 T arch_syscall_exec
+ffff000040097b00 T sys_native_kill
+ffff000040097b40 T task_send_signal
+ffff000040097b80 T signal_pgrp
+ffff000040097bc0 T sys_native_signal
+ffff000040097c00 T sys_native_sigprocmask
+ffff000040097c40 T sys_native_sigreturn
+ffff000040097c80 T arch_syscall_sigreturn
+ffff000040097cc0 T aarch64_do_signal_delivery
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -454,7 +462,8 @@ ffff000040097504: d65f03c0     	ret
 
 ffff000040097200 <aarch64_user_syscall>:
 ffff000040097230: 94000034     	bl	0xffff000040097300 <syscall_dispatch>
-ffff000040097234: d65f03c0     	ret
+ffff000040097234: 940002a3     	bl	0xffff000040097cc0 <aarch64_do_signal_delivery>
+ffff000040097238: d65f03c0     	ret
 
 ffff0000400a3e00 <aarch64_user_task_sync>:
 ffff0000400a3e38: 94000df2     	bl	0xffff000040097600 <aarch64_user_vm_fault>
@@ -501,6 +510,32 @@ ffff000040097828: d65f03c0     	ret
 
 ffff000040097860 <arch_syscall_exec>:
 ffff000040097864: d65f03c0     	ret
+
+ffff000040097b00 <sys_native_kill>:
+ffff000040097b04: 9400000f     	bl	0xffff000040097b40 <task_send_signal>
+ffff000040097b08: d65f03c0     	ret
+
+ffff000040097b40 <task_send_signal>:
+ffff000040097b44: d65f03c0     	ret
+
+ffff000040097b80 <signal_pgrp>:
+ffff000040097b84: d65f03c0     	ret
+
+ffff000040097bc0 <sys_native_signal>:
+ffff000040097bc4: d65f03c0     	ret
+
+ffff000040097c00 <sys_native_sigprocmask>:
+ffff000040097c04: d65f03c0     	ret
+
+ffff000040097c40 <sys_native_sigreturn>:
+ffff000040097c44: 9400000f     	bl	0xffff000040097c80 <arch_syscall_sigreturn>
+ffff000040097c48: d65f03c0     	ret
+
+ffff000040097c80 <arch_syscall_sigreturn>:
+ffff000040097c84: d65f03c0     	ret
+
+ffff000040097cc0 <aarch64_do_signal_delivery>:
+ffff000040097cc4: d65f03c0     	ret
 
 ffff000040094104 <arch_intr_dispatch>:
 ffff000040094104: b4000100     	cbz	x0, 0xffff000040094124 <arch_intr_dispatch+0x20>
@@ -1733,6 +1768,22 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
             "nop"))
         errors = self.audit()
         self.assertTrue(any("arch_syscall_exec" in e for e in errors), errors)
+
+    def test_sys_native_sigreturn_missing_arch_syscall_sigreturn_edge_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097c44,
+            "bl\t0xffff000040097c80 <arch_syscall_sigreturn>",
+            "nop"))
+        errors = self.audit()
+        self.assertTrue(any("arch_syscall_sigreturn" in e for e in errors), errors)
+
+    def test_aarch64_user_syscall_missing_signal_delivery_edge_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF000040097234,
+            "bl\t0xffff000040097cc0 <aarch64_do_signal_delivery>",
+            "nop"))
+        errors = self.audit()
+        self.assertTrue(any("aarch64_do_signal_delivery" in e for e in errors), errors)
 
     def test_missing_syscall_strnlen_user_fails(self):
         self.stage_a64(nm_text=A64_NM.replace(

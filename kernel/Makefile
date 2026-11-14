@@ -75,7 +75,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
                    sched/core.c sched/boot.c sched/kthread.c sched/diag.c \
-                   sched/wait.c \
+                   sched/wait.c sched/signal.c \
                    sched/identity.c sched/resource.c \
                    sched/fair.c sched/balance.c \
                    sched/accounting.c \
@@ -117,6 +117,7 @@ KERNEL_C_SOURCES += selftest/test_aarch64_user_vm.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_fork_cow.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_waitpid.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_exec.c
+KERNEL_C_SOURCES += selftest/test_aarch64_user_signal.c
 endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
@@ -323,6 +324,7 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_fork_cow_short_image
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_waitpid_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_main_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_child_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_signal_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -662,6 +664,7 @@ SCHED_COMMON_COMPILE_TUS := \
     sched/boot.c \
     sched/kthread.c \
     sched/wait.c \
+    sched/signal.c \
     sched/fair.c \
     sched/balance.c \
     sched/identity.c \
@@ -895,6 +898,17 @@ $(BUILD_DIR)/generated/aarch64_user_exec_child.elf: $(BUILD_DIR)/selftest/fixtur
 $(BUILD_DIR)/generated/aarch64_user_exec_main_image.o: $(BUILD_DIR)/generated/aarch64_user_exec_main.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 $(BUILD_DIR)/generated/aarch64_user_exec_child_image.o: $(BUILD_DIR)/generated/aarch64_user_exec_child.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_signal.o: selftest/fixtures/aarch64_user_signal.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_signal.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_signal.o $(AARCH64_USER_FORK_COW_LD)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_signal_image.o: $(BUILD_DIR)/generated/aarch64_user_signal.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 

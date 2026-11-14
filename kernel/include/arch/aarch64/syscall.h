@@ -23,4 +23,17 @@
  * aarch64_user_task_sync() SVC path only. */
 void aarch64_user_syscall(pt_regs_t *regs);
 
+/* User-stack signal trampoline frame pushed before entering sa_handler
+ * and consumed by SYS_sigreturn (arch_syscall_sigreturn). */
+struct aarch64_sigframe {
+    pt_regs_t regs;
+    uint64_t  blocked;
+};
+
+_Static_assert(sizeof(struct aarch64_sigframe) == 280,
+               "aarch64_sigframe must be 280 bytes");
+
+/* Deliver pending unblocked signal(s) before returning to EL0. */
+void aarch64_do_signal_delivery(pt_regs_t *regs);
+
 #endif /* OS01_AARCH64_SYSCALL_H */

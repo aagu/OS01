@@ -7,8 +7,16 @@
 #include <memory/slab.h>
 #include <memory/uaccess.h>
 #include <arch/clocksource.h>
+#include <arch/spinlock.h>
 #include <arch/syscall.h>
+#include <kernel.h>
 #include <log/log.h>
+
+#ifndef SIG_BLOCK
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
+#endif
 
 /* ── Shared native syscall handlers ────────────────────────────
  *
@@ -281,4 +289,132 @@ int64_t sys_native_exec(syscall_ctx_t *ctx)
     if (rc == 0)
         ctx->suppress_writeback = true;
     return rc;
+}
+
+int64_t sys_native_kill(syscall_ctx_t *ctx)
+{
+    int pid = (int)(int64_t)ctx->args[0];
+    int sig = (int)ctx->args[1];
+
+    if (sig < 1 || sig >= NSIG)
+        return -EINVAL;
+
+    if (pid > 0)
+        return task_send_signal(pid, sig);
+    if (pid == 0)
+        return signal_pgrp(current->pgrp, sig);
+    if (pid == -1) {
+        uint64_t f = spin_lock_irqsave(&task_list_lock);
+        int matched = 0;
+        list_t *pos = init_task_union.task.list.next;
+        while (pos != &init_task_union.task.list) {
+            task_t *t = container_of(pos, task_t, list);
+            pos = task_list_next(pos);
+            if (t == current)
+                continue;
+            if (t->flags & PF_KTHREAD)
+                continue;
+            if (t->pid == 1)
+                continue;
+            t->signal |= (1ULL << sig);
+            if (t->state == TASK_INTERRUPTIBLE)
+                task_wake(t);
+            matched++;
+        }
+        spin_unlock_irqrestore(&task_list_lock, f);
+        return matched > 0 ? 0 : -ESRCH;
+    }
+    return signal_pgrp(-pid, sig);
+}
+
+int64_t sys_native_signal(syscall_ctx_t *ctx)
+{
+    int signum = (int)ctx->args[0];
+    const struct sigaction *act = (const struct sigaction *)(uintptr_t)ctx->args[1];
+    struct sigaction *oldact = (struct sigaction *)(uintptr_t)ctx->args[2];
+
+    if (signum < 1 || signum >= NSIG)
+        return -EINVAL;
+
+    struct sigaction kact;
+    if (act != NULL) {
+        if (!syscall_check_user_range((uint64_t)(uintptr_t)act, sizeof(kact), false))
+            return -EFAULT;
+        if (copy_from_user_ft(&kact, act, sizeof(kact)) < 0)
+            return -EFAULT;
+    }
+
+    if (oldact != NULL) {
+        int rc = syscall_prepare_user_write((uint64_t)(uintptr_t)oldact, sizeof(struct sigaction));
+        if (rc < 0)
+            return rc;
+        struct sigaction kold = {
+            .sa_handler  = current->sighand[signum].sa_handler,
+            .sa_flags    = current->sighand[signum].sa_flags,
+            .sa_restorer = current->sighand[signum].sa_restorer,
+            .sa_mask     = current->sighand[signum].sa_mask,
+        };
+        ssize_t user_copy_rc = copy_to_user_ft(oldact, &kold, sizeof(kold));
+        if (user_copy_rc < 0)
+            return user_copy_rc;
+    }
+
+    if (act != NULL && signum != SIGKILL && signum != SIGSTOP) {
+        if ((uint64_t)(uintptr_t)kact.sa_restorer >= current->addr_limit ||
+            (uint64_t)(uintptr_t)kact.sa_handler  >= current->addr_limit)
+            return -EINVAL;
+        current->sighand[signum].sa_handler  = kact.sa_handler;
+        current->sighand[signum].sa_flags    = kact.sa_flags;
+        current->sighand[signum].sa_restorer = kact.sa_restorer;
+        current->sighand[signum].sa_mask     = kact.sa_mask;
+    }
+    return 0;
+}
+
+int64_t sys_native_sigprocmask(syscall_ctx_t *ctx)
+{
+    int how = (int)ctx->args[0];
+    const uint64_t *set = (const uint64_t *)(uintptr_t)ctx->args[1];
+    uint64_t *oldset = (uint64_t *)(uintptr_t)ctx->args[2];
+
+    if (oldset != NULL) {
+        int rc = syscall_prepare_user_write((uint64_t)(uintptr_t)oldset, sizeof(uint64_t));
+        if (rc < 0)
+            return rc;
+        uint64_t kold = (uint64_t)current->blocked;
+        ssize_t user_copy_rc = copy_to_user_ft(oldset, &kold, sizeof(kold));
+        if (user_copy_rc < 0)
+            return user_copy_rc;
+    }
+
+    if (set != NULL) {
+        if (!syscall_check_user_range((uint64_t)(uintptr_t)set, sizeof(uint64_t), false))
+            return -EFAULT;
+        uint64_t kset = 0;
+        if (copy_from_user_ft(&kset, set, sizeof(kset)) < 0)
+            return -EFAULT;
+        switch (how) {
+        case SIG_BLOCK:
+            current->blocked |= (int64_t)kset;
+            break;
+        case SIG_UNBLOCK:
+            current->blocked &= ~(int64_t)kset;
+            break;
+        case SIG_SETMASK:
+            current->blocked = (int64_t)kset;
+            break;
+        default:
+            return -EINVAL;
+        }
+        current->blocked &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    }
+    return 0;
+}
+
+int64_t sys_native_sigreturn(syscall_ctx_t *ctx)
+{
+    int64_t result = arch_syscall_sigreturn(ctx->arch_frame);
+    if (result == 0)
+        ctx->suppress_writeback = true;
+    return result;
 }

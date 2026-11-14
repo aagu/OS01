@@ -47,6 +47,10 @@ int64_t sys_native_exit(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_fork(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_waitpid(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_exec(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
+int64_t sys_native_kill(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
+int64_t sys_native_signal(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
+int64_t sys_native_sigprocmask(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
+int64_t sys_native_sigreturn(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_getpid(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_getppid(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }
 int64_t sys_native_clock_gettime(syscall_ctx_t *ctx) { (void)ctx; return -ENOSYS; }

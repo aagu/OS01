@@ -136,6 +136,12 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_mprotect]     = { sys_mm_dispatch,         "mprotect" },
     [SYS_munmap]       = { sys_mm_dispatch,         "munmap" },
     [SYS_fork]         = { sys_native_fork,         "fork" },
+    [SYS_waitpid]      = { sys_native_waitpid,      "waitpid" },
+    [SYS_exec]         = { sys_native_exec,         "exec" },
+    [SYS_kill]         = { sys_native_kill,         "kill" },
+    [SYS_signal]       = { sys_native_signal,       "signal" },
+    [SYS_sigprocmask]  = { sys_native_sigprocmask,  "sigprocmask" },
+    [SYS_sigreturn]    = { sys_native_sigreturn,    "sigreturn" },
 #ifndef OS01_SYSCALL_A64_SUBSET
     /* x86_64 独有 */
     ...
@@ -143,8 +149,9 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
 };
 ```
 
-- **当前 aarch64 服务 9 项**：`exit` / `getpid` / `getppid` / `clock_gettime` /
-  `brk` / `mmap` / `mprotect` / `munmap` / `fork`。
+- **当前 aarch64 服务 15 项**：`exit` / `getpid` / `getppid` / `clock_gettime` /
+  `brk` / `mmap` / `mprotect` / `munmap` / `fork` / `waitpid` / `exec` /
+  `kill` / `signal` / `sigprocmask` / `sigreturn`。
 - **arch-neutral 的 native handler**：`exit` / `getpid` / `getppid` / `clock_gettime`
   抽到 `kernel/syscall/sys_native.c`，它们不访问寄存器帧（参数由 `syscall_ctx_t` 携带），
   因此两个架构可共用。`clock_gettime` 复用既有的 clock-id 检查与 `copy_to_user_ft()` 语义。

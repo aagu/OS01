@@ -31,11 +31,27 @@ static int g_prepare_calls = 0;
 static uint64_t g_prepare_last_addr = 0;
 static uint64_t g_prepare_last_len = 0;
 
+static enum {
+    UACCESS_OK = 0,
+    UACCESS_FAIL_PREPARE = 1,
+} g_uaccess_mode = UACCESS_OK;
+
+bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
+{
+    (void)len;
+    (void)writable;
+    if (addr == 0 || g_uaccess_mode == UACCESS_FAIL_PREPARE)
+        return false;
+    return true;
+}
+
 int syscall_prepare_user_write(uint64_t addr, uint64_t len)
 {
     g_prepare_calls++;
     g_prepare_last_addr = addr;
     g_prepare_last_len = len;
+    if (g_uaccess_mode == UACCESS_FAIL_PREPARE)
+        return -EFAULT;
     return g_prepare_rc;
 }
 
@@ -99,6 +115,48 @@ __attribute__((noreturn)) void arch_syscall_exit(uint64_t status)
 }
 int64_t arch_syscall_fork(void *arch_frame) { (void)arch_frame; return -ENOSYS; }
 uint64_t arch_clocksource_read_ns(void) { return 0; }
+
+static int g_wake_calls = 0;
+void task_wake(task_t *t)
+{
+    if (t)
+        t->state = TASK_RUNNING;
+    g_wake_calls++;
+}
+
+static int g_send_sig_calls = 0;
+static int g_send_sig_last_pid = 0;
+static int g_send_sig_last_sig = 0;
+static int g_send_sig_rc = 0;
+int task_send_signal(int pid, int sig)
+{
+    g_send_sig_calls++;
+    g_send_sig_last_pid = pid;
+    g_send_sig_last_sig = sig;
+    return g_send_sig_rc;
+}
+
+static int g_pgrp_sig_calls = 0;
+static pid_t g_pgrp_sig_last_pgrp = 0;
+static int g_pgrp_sig_last_sig = 0;
+static int g_pgrp_sig_rc = 0;
+int signal_pgrp(pid_t pgrp, int sig)
+{
+    g_pgrp_sig_calls++;
+    g_pgrp_sig_last_pgrp = pgrp;
+    g_pgrp_sig_last_sig = sig;
+    return g_pgrp_sig_rc;
+}
+
+static int g_sigreturn_calls = 0;
+static void *g_sigreturn_last_frame = NULL;
+static int64_t g_sigreturn_rc = 0;
+int64_t arch_syscall_sigreturn(void *arch_frame)
+{
+    g_sigreturn_calls++;
+    g_sigreturn_last_frame = arch_frame;
+    return g_sigreturn_rc;
+}
 int g_log_level = 0;
 void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 void _log_info_impl(const char *fmt, ...) { (void)fmt; }
@@ -161,6 +219,10 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
 
 extern int64_t sys_native_waitpid(syscall_ctx_t *ctx);
 extern int64_t sys_native_exec(syscall_ctx_t *ctx);
+extern int64_t sys_native_kill(syscall_ctx_t *ctx);
+extern int64_t sys_native_signal(syscall_ctx_t *ctx);
+extern int64_t sys_native_sigprocmask(syscall_ctx_t *ctx);
+extern int64_t sys_native_sigreturn(syscall_ctx_t *ctx);
 
 static void reset_env(void)
 {
@@ -170,9 +232,25 @@ static void reset_env(void)
 
     memset(&g_parent, 0, sizeof(g_parent));
     g_parent.pid = 10;
+    g_parent.pgrp = 10;
+    g_parent.addr_limit = 0x0000800000000000ULL;
     g_parent.state = TASK_RUNNING;
     g_parent.flags = PF_PROCESS;
     list_add_to_before(&init_task_union.task.list, &g_parent.list);
+
+    g_uaccess_mode = UACCESS_OK;
+    g_wake_calls = 0;
+    g_send_sig_calls = 0;
+    g_send_sig_last_pid = 0;
+    g_send_sig_last_sig = 0;
+    g_send_sig_rc = 0;
+    g_pgrp_sig_calls = 0;
+    g_pgrp_sig_last_pgrp = 0;
+    g_pgrp_sig_last_sig = 0;
+    g_pgrp_sig_rc = 0;
+    g_sigreturn_calls = 0;
+    g_sigreturn_last_frame = NULL;
+    g_sigreturn_rc = 0;
 
     g_prepare_rc = 0;
     g_prepare_calls = 0;
@@ -461,6 +539,136 @@ static void test_sys_native_exec(void)
     assert_eq(2, g_exec_calls);
 }
 
+static void dummy_sig_handler(int sig) { (void)sig; }
+static void dummy_sig_restorer(void) {}
+
+static void test_sys_native_signal_syscalls(void)
+{
+    TEST_SUITE("sys_native_kill / signal / sigprocmask / sigreturn");
+    reset_env();
+
+    /* 1. sys_native_kill */
+    syscall_ctx_t ctx = { .nr = SYS_kill, .args = { 123, 0, 0 } };
+    assert_eq(-EINVAL, sys_native_kill(&ctx));
+    ctx.args[1] = NSIG;
+    assert_eq(-EINVAL, sys_native_kill(&ctx));
+
+    /* pid > 0 -> task_send_signal */
+    g_send_sig_rc = 0;
+    ctx = (syscall_ctx_t){ .nr = SYS_kill, .args = { 42, SIGUSR1 } };
+    assert_eq(0, sys_native_kill(&ctx));
+    assert_eq(1, g_send_sig_calls);
+    assert_eq(42, g_send_sig_last_pid);
+    assert_eq(SIGUSR1, g_send_sig_last_sig);
+
+    /* pid == 0 -> signal_pgrp(current->pgrp) */
+    g_pgrp_sig_rc = 0;
+    ctx = (syscall_ctx_t){ .nr = SYS_kill, .args = { 0, SIGTERM } };
+    assert_eq(0, sys_native_kill(&ctx));
+    assert_eq(1, g_pgrp_sig_calls);
+    assert_eq(10, g_pgrp_sig_last_pgrp);
+    assert_eq(SIGTERM, g_pgrp_sig_last_sig);
+
+    /* pid < -1 -> signal_pgrp(-pid) */
+    ctx = (syscall_ctx_t){ .nr = SYS_kill, .args = { (uint64_t)(int64_t)-77, SIGINT } };
+    assert_eq(0, sys_native_kill(&ctx));
+    assert_eq(2, g_pgrp_sig_calls);
+    assert_eq(77, g_pgrp_sig_last_pgrp);
+    assert_eq(SIGINT, g_pgrp_sig_last_sig);
+
+    /* pid == -1 -> broadcast skips current, PF_KTHREAD, pid==1 */
+    task_t t_init, t_kth, t_sleep, t_run;
+    init_child(&t_init, 1, 0, TASK_RUNNING, 0);
+    init_child(&t_kth, 20, 0, TASK_INTERRUPTIBLE, 0);
+    t_kth.flags = PF_KTHREAD;
+    init_child(&t_sleep, 21, 0, TASK_INTERRUPTIBLE, 0);
+    init_child(&t_run, 22, 0, TASK_RUNNING, 0);
+
+    ctx = (syscall_ctx_t){ .nr = SYS_kill, .args = { (uint64_t)(int64_t)-1, SIGUSR1 } };
+    assert_eq(0, sys_native_kill(&ctx));
+    assert_eq(0ULL, (uint64_t)g_parent.signal);
+    assert_eq(0ULL, (uint64_t)t_init.signal);
+    assert_eq(0ULL, (uint64_t)t_kth.signal);
+    assert_eq(1ULL << SIGUSR1, (uint64_t)t_sleep.signal);
+    assert_eq(1ULL << SIGUSR1, (uint64_t)t_run.signal);
+    assert_eq(1, g_wake_calls);
+    assert_eq(TASK_RUNNING, t_sleep.state);
+
+    /* 2. sys_native_signal */
+    struct sigaction bad_act = {
+        .sa_handler = (void (*)(int))(uintptr_t)g_parent.addr_limit,
+        .sa_restorer = dummy_sig_restorer,
+    };
+    ctx = (syscall_ctx_t){ .nr = SYS_signal, .args = { SIGUSR1, (uint64_t)(uintptr_t)&bad_act, 0 } };
+    assert_eq(-EINVAL, sys_native_signal(&ctx));
+
+    struct sigaction act = {
+        .sa_handler = dummy_sig_handler,
+        .sa_restorer = dummy_sig_restorer,
+        .sa_mask = 0x55,
+    };
+    struct sigaction oldact;
+    memset(&oldact, 0xff, sizeof(oldact));
+    ctx = (syscall_ctx_t){
+        .nr = SYS_signal,
+        .args = { SIGUSR1, (uint64_t)(uintptr_t)&act, (uint64_t)(uintptr_t)&oldact },
+    };
+    assert_eq(0, sys_native_signal(&ctx));
+    assert_true(oldact.sa_handler == SIG_DFL);
+    assert_true(g_parent.sighand[SIGUSR1].sa_handler == dummy_sig_handler);
+    assert_true(g_parent.sighand[SIGUSR1].sa_restorer == dummy_sig_restorer);
+
+    /* SIGKILL cannot be caught, returns 0 and leaves sighand[SIGKILL] untouched */
+    ctx = (syscall_ctx_t){ .nr = SYS_signal, .args = { SIGKILL, (uint64_t)(uintptr_t)&act, 0 } };
+    assert_eq(0, sys_native_signal(&ctx));
+    assert_true(g_parent.sighand[SIGKILL].sa_handler == SIG_DFL);
+
+    /* 3. sys_native_sigprocmask */
+    uint64_t set = (1ULL << (SIGUSR1 - 1)) | (1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1));
+    uint64_t oldset = 0;
+    ctx = (syscall_ctx_t){
+        .nr = SYS_sigprocmask,
+        .args = { 0 /* SIG_BLOCK */, (uint64_t)(uintptr_t)&set, (uint64_t)(uintptr_t)&oldset },
+    };
+    assert_eq(0, sys_native_sigprocmask(&ctx));
+    assert_eq(0ULL, oldset);
+    assert_eq(1ULL << (SIGUSR1 - 1), (uint64_t)g_parent.blocked);
+
+    uint64_t set2 = (1ULL << (SIGTERM - 1));
+    ctx = (syscall_ctx_t){
+        .nr = SYS_sigprocmask,
+        .args = { 2 /* SIG_SETMASK */, (uint64_t)(uintptr_t)&set2, (uint64_t)(uintptr_t)&oldset },
+    };
+    assert_eq(0, sys_native_sigprocmask(&ctx));
+    assert_eq(1ULL << (SIGUSR1 - 1), oldset);
+    assert_eq(1ULL << (SIGTERM - 1), (uint64_t)g_parent.blocked);
+
+    ctx = (syscall_ctx_t){
+        .nr = SYS_sigprocmask,
+        .args = { 1 /* SIG_UNBLOCK */, (uint64_t)(uintptr_t)&set2, 0 },
+    };
+    assert_eq(0, sys_native_sigprocmask(&ctx));
+    assert_eq(0ULL, (uint64_t)g_parent.blocked);
+
+    /* 4. sys_native_sigreturn */
+    int dummy_frame = 0;
+    g_sigreturn_rc = 0;
+    ctx = (syscall_ctx_t){
+        .nr = SYS_sigreturn,
+        .arch_frame = &dummy_frame,
+        .suppress_writeback = false,
+    };
+    assert_eq(0, sys_native_sigreturn(&ctx));
+    assert_eq(1, g_sigreturn_calls);
+    assert_true(ctx.suppress_writeback);
+    assert_true(g_sigreturn_last_frame == &dummy_frame);
+
+    g_sigreturn_rc = -EINVAL;
+    ctx.suppress_writeback = false;
+    assert_eq(-EINVAL, sys_native_sigreturn(&ctx));
+    assert_false(ctx.suppress_writeback);
+}
+
 int main(void)
 {
     test_waitpid_reap_specific_and_any();
@@ -470,6 +678,7 @@ int main(void)
     test_waitpid_echild_cases();
     test_waitpid_bad_status_preserves_zombie_and_rejects_without_children();
     test_sys_native_exec();
+    test_sys_native_signal_syscalls();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_waitpid",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

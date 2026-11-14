@@ -24,4 +24,8 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
 int64_t arch_syscall_sigreturn(void *arch_frame);
 int64_t sys_native_waitpid(syscall_ctx_t *ctx);
 int64_t sys_native_exec(syscall_ctx_t *ctx);
+int64_t sys_native_kill(syscall_ctx_t *ctx);
+int64_t sys_native_signal(syscall_ctx_t *ctx);
+int64_t sys_native_sigprocmask(syscall_ctx_t *ctx);
+int64_t sys_native_sigreturn(syscall_ctx_t *ctx);
 #endif

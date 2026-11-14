@@ -16,6 +16,10 @@ int64_t sys_native_exit(syscall_ctx_t *ctx);
 int64_t sys_native_fork(syscall_ctx_t *ctx);
 int64_t sys_native_waitpid(syscall_ctx_t *ctx);
 int64_t sys_native_exec(syscall_ctx_t *ctx);
+int64_t sys_native_kill(syscall_ctx_t *ctx);
+int64_t sys_native_signal(syscall_ctx_t *ctx);
+int64_t sys_native_sigprocmask(syscall_ctx_t *ctx);
+int64_t sys_native_sigreturn(syscall_ctx_t *ctx);
 int64_t sys_native_getpid(syscall_ctx_t *ctx);
 int64_t sys_native_getppid(syscall_ctx_t *ctx);
 int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
@@ -48,6 +52,10 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_fork] = { sys_native_fork, "fork" },
     [SYS_waitpid] = { sys_native_waitpid, "waitpid" },
     [SYS_exec] = { sys_native_exec, "exec" },
+    [SYS_kill] = { sys_native_kill, "kill" },
+    [SYS_signal] = { sys_native_signal, "signal" },
+    [SYS_sigprocmask] = { sys_native_sigprocmask, "sigprocmask" },
+    [SYS_sigreturn] = { sys_native_sigreturn, "sigreturn" },
 #ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
@@ -107,10 +115,6 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
     [SYS_umask] = { sys_proc_dispatch, "umask" },
-    [SYS_kill] = { sys_proc_dispatch, "kill" },
-    [SYS_signal] = { sys_proc_dispatch, "signal" },
-    [SYS_sigprocmask] = { sys_proc_dispatch, "sigprocmask" },
-    [SYS_sigreturn] = { sys_proc_dispatch, "sigreturn" },
     [SYS_setpgid] = { sys_proc_dispatch, "setpgid" },
     [SYS_getpgid] = { sys_proc_dispatch, "getpgid" },
     [SYS_setsid] = { sys_proc_dispatch, "setsid" },

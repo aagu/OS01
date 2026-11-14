@@ -19,6 +19,7 @@
 
 #include <arch/context.h>          /* STACK_SIZE + the aarch64 thread_t */
 #include <arch/aarch64/page_table.h>
+#include <arch/aarch64/mmu.h>
 #include <arch/aarch64/regs.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/intr_dispatch.h>
@@ -39,10 +40,12 @@
 #include <kernel.h>               /* container_of */
 #include <log/log.h>
 #include <memory/slab.h>
+#include <memory/uaccess.h>
 #include <percpu/percpu.h>
 #include <sched/internal.h>
 #include <sched/task.h>
 #include <string.h>
+#include <uapi/syscall.h>
 #include <arch/aarch64/user_vm_policy.h>
 
 #if AARCH64_EL0_TEST
@@ -338,6 +341,7 @@ void aarch64_user_first_entry(void)
     task_t *t = arch_current_task();
     uint64_t frame = aarch64_user_task_frame(t);
 
+    aarch64_do_signal_delivery((pt_regs_t *)frame);
     aarch64_el0_restore(frame);
 }
 
@@ -444,6 +448,8 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
         /* Cooperative yield: give the CPU up first, then report
          * success in x0.  Every other register keeps its value. */
         schedule();
+        regs->x0 = 0;
+        aarch64_do_signal_delivery(regs);
 #if AARCH64_EL0_TEST
         if (g_arm_tick) {
             /* Re-arm the real CNTP for one tick in the IRQ-masked
@@ -453,7 +459,6 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
             cntp_isb();
         }
 #endif
-        regs->x0 = 0;
         return;
     case AARCH64_USER_SVC_EXEC:
         aarch64_user_task_exec(regs);
@@ -531,6 +536,7 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
     owner->image = image;
     owner->catalog_index = index;
     t->mm = aarch64_user_image_mm(image);
+    memset(t->sighand, 0, sizeof(t->sighand));
 
     /* The task continues at the new entry with a new stack and a fresh
      * register file. */
@@ -620,6 +626,7 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     owner->image = image;
     owner->catalog_index = index;
     t->mm = aarch64_user_image_mm(image);
+    memset(t->sighand, 0, sizeof(t->sighand));
 
     task_comm_apply_exec(t, path);
     aarch64_user_image_init_regs(image, regs);
@@ -742,6 +749,117 @@ static void aarch64_user_task_exit(uint64_t status)
         arch_cpu_halt();
 }
 
+/* ── Signal delivery and sigreturn ────────────────────────────── */
+
+static bool aarch64_sig_default_ignore(int sig)
+{
+    return sig == SIGCHLD || sig == SIGCONT || sig == SIGURG ||
+           sig == SIGWINCH || sig == SIGTSTP || sig == SIGTTIN ||
+           sig == SIGTTOU;
+}
+
+void aarch64_do_signal_delivery(pt_regs_t *regs)
+{
+    if (!regs || (regs->spsr_el1 & AARCH64_SPSR_MODE_MASK) != AARCH64_SPSR_MODE_EL0T)
+        return;
+
+    task_t *cur = arch_current_task();
+    if (!aarch64_user_task_is_user(cur))
+        return;
+
+    for (;;) {
+        uint64_t sig_bits = (uint64_t)__atomic_load_n(&cur->signal, __ATOMIC_ACQUIRE);
+        uint64_t unblocked_mask = ~(((uint64_t)cur->blocked) << 1) |
+                                  (1ULL << SIGKILL) | (1ULL << SIGSTOP);
+        uint64_t deliverable = sig_bits & unblocked_mask & ((1ULL << NSIG) - 2ULL);
+        if (!deliverable)
+            return;
+
+        int sig = (deliverable & (1ULL << SIGKILL))
+                  ? SIGKILL
+                  : __builtin_ctzll(deliverable);
+        __atomic_fetch_and(&cur->signal, ~(1ULL << sig), __ATOMIC_SEQ_CST);
+
+        void (*handler)(int) = cur->sighand[sig].sa_handler;
+        if (handler == SIG_IGN)
+            continue;
+
+        if (handler == SIG_DFL) {
+            if (aarch64_sig_default_ignore(sig))
+                continue;
+            if (cur->pid == 1)
+                continue;
+            log_info("signal: task %d killed by signal %d (default)\n",
+                     (int)cur->pid, sig);
+            aarch64_vm_native_leave();
+            arch_syscall_exit((uint64_t)sig);
+        }
+
+        void (*restorer)(void) = cur->sighand[sig].sa_restorer;
+        if (!restorer) {
+            if (cur->pid == 1)
+                continue;
+            log_warn("signal: task %d sig %d has no restorer, killing\n",
+                     (int)cur->pid, sig);
+            aarch64_vm_native_leave();
+            arch_syscall_exit((uint64_t)sig);
+        }
+
+        struct aarch64_sigframe frame = {
+            .regs    = *regs,
+            .blocked = (uint64_t)cur->blocked,
+        };
+        uint64_t new_sp = (regs->sp_el0 - sizeof(struct aarch64_sigframe)) & ~UINT64_C(0xf);
+
+        aarch64_vm_native_enter(regs, SYS_sigreturn);
+        ssize_t copy_rc = copy_to_user_ft((void *)(uintptr_t)new_sp, &frame, sizeof(frame));
+        aarch64_vm_native_leave();
+        if (copy_rc < 0) {
+            __atomic_fetch_or(&cur->signal, (1ULL << sig), __ATOMIC_SEQ_CST);
+            return;
+        }
+
+        uint64_t add_mask = (1ULL << (sig - 1)) | (uint64_t)cur->sighand[sig].sa_mask;
+        add_mask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+        cur->blocked |= (int64_t)add_mask;
+
+        regs->x0       = (uint64_t)sig;
+        regs->x30      = (uint64_t)(uintptr_t)restorer;
+        regs->sp_el0   = new_sp;
+        regs->elr_el1  = (uint64_t)(uintptr_t)handler;
+        regs->spsr_el1 = AARCH64_USER_TASK_PSTATE;
+        return;
+    }
+}
+
+int64_t arch_syscall_sigreturn(void *arch_frame)
+{
+    pt_regs_t *regs = (pt_regs_t *)arch_frame;
+    if (!aarch64_user_frame_is_valid(regs))
+        return -EFAULT;
+
+    if ((regs->sp_el0 & UINT64_C(0xf)) != 0)
+        return -EFAULT;
+
+    struct aarch64_sigframe frame;
+    if (!syscall_check_user_range(regs->sp_el0, sizeof(frame), false))
+        return -EFAULT;
+    if (copy_from_user_ft(&frame, (const void *)(uintptr_t)regs->sp_el0,
+                          sizeof(frame)) < 0)
+        return -EFAULT;
+
+    /* Require exact AARCH64_USER_TASK_PSTATE (0x340: EL0t with D/A/F masked
+     * and I enabled) in all non-NZCV bits; reject forged EL1 modes or DAIF edits. */
+    if ((frame.regs.spsr_el1 & ~UINT64_C(0xf0000000)) != AARCH64_USER_TASK_PSTATE)
+        return -EINVAL;
+
+    *regs = frame.regs;
+    task_t *cur = arch_current_task();
+    cur->blocked = (int64_t)(frame.blocked &
+                             ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1))));
+    return 0;
+}
+
 /* ── Creation ─────────────────────────────────────────────────── */
 
 struct user_task_prepare_ctx {
@@ -758,6 +876,7 @@ static int user_task_prepare(task_t *tsk, void *arg)
     /* The task owns a private mm: the image's user root.  The kernel
      * half of the address space stays in TTBR1. */
     tsk->mm = aarch64_user_image_mm(owner->image);
+    tsk->addr_limit = AARCH64_USER_LIMIT;
     tsk->files = NULL;
     tsk->fpu_save = NULL;
 
