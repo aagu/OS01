@@ -200,7 +200,7 @@ In-memory filesystem (~430 lines). `tmpfs_init()` allocates a root `tmpfs_node_t
 
 ---
 
-## devfs (`kernel/fs/devfs.c`, `kernel/include/fs/devfs.h`)
+## devfs (`kernel/arch/x86_64/fs/devfs.c`, `kernel/include/fs/devfs.h`)
 
 Virtual filesystem for device nodes, mounted at `/dev`. Maintains an internal table of up to `DEVFS_MAX_DEVICES` devices:
 

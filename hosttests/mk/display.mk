@@ -32,7 +32,7 @@ TEST_BINS += \
     $(TEST_BLD)/test_setres.elf \
     $(TEST_BLD)/test_display_owner.elf
 
-# kernel/fs/devfs.c + kernel/fs/file.c against gfx_test_runtime.h,
+# kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c against gfx_test_runtime.h,
 # which shadows the heavyweight kernel headers (sched/task.h,
 # tty/tty.h, tty/pty.h, driver/serial.h, ...) so the production
 # sources compile unmodified.  The test TU provides the stub
@@ -45,7 +45,7 @@ GFX_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
     -include $(TEST_MOCK)/gfx_test_runtime.h \
     -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
-$(TEST_BLD)/gfx_devfs_production.o: $(TESTS_DIR)/kernel/fs/devfs.c \
+$(TEST_BLD)/gfx_devfs_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/devfs.c \
 		$(TEST_MOCK)/gfx_test_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GFX_HOST_CFLAGS) -c $< -o $@
@@ -73,7 +73,7 @@ test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
 	$<
 
 
-# kernel/driver/gfx.c against gfx_test_runtime.h, which provides the
+# kernel/arch/x86_64/driver/gfx.c against gfx_test_runtime.h, which provides the
 # heavy stubs the lifecycle test already declares (kmalloc/kfree,
 # current, schedule, vfs_node_get/put, lwip, ...).  kernel/driver/fb.c
 # is NOT compiled (VMA/VMM/scheduler headers are out of scope for
@@ -81,7 +81,7 @@ test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
 # a host-heap fb buffer so the gfx device's present contract is
 # observed end-to-end.  Tested production symbols: gfx_ops (open,
 # ioctl_file, release_file).
-$(TEST_BLD)/gfx_gfx_production.o: $(TESTS_DIR)/kernel/driver/gfx.c \
+$(TEST_BLD)/gfx_gfx_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/gfx.c \
 		$(TESTS_DIR)/kernel/include/driver/gfx.h \
 		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
 		$(TEST_MOCK)/gfx_test_runtime.h
@@ -376,7 +376,7 @@ test-fb-mtrr: $(TEST_BLD)/test_fb_mtrr.elf
 # Framebuffer writer admission, leases, and raw mmap rollback test (QEMU resolution switcher Task 3)
 FB_WRITERS_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK) -include $(TEST_MOCK)/fb_resolution_runtime.h $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
-$(TEST_BLD)/gfx_production.o: $(TESTS_DIR)/kernel/driver/gfx.c
+$(TEST_BLD)/gfx_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/gfx.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) -c $< -o $@
 
@@ -410,11 +410,11 @@ test-display-owner: $(TEST_BLD)/test_display_owner.elf
 	$<
 
 # PCI BGA backend probe and hardware transaction test (QEMU resolution switcher Task 4)
-$(TEST_BLD)/bga_production.o: $(TESTS_DIR)/kernel/driver/bga.c
+$(TEST_BLD)/bga_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/bga.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/bga_non_x86.o: $(TESTS_DIR)/kernel/driver/bga.c
+$(TEST_BLD)/bga_non_x86.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/bga.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -DOS01_HOST_TEST_NON_X86 -c $< -o $@
 
@@ -460,7 +460,7 @@ $(TEST_BLD)/fb_state_hooks.o: $(TESTS_DIR)/kernel/driver/fb_state.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/bga_hooks.o: $(TESTS_DIR)/kernel/driver/bga.c
+$(TEST_BLD)/bga_hooks.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/bga.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_HOOKS_HOST_CFLAGS) -c $< -o $@
 

@@ -253,9 +253,9 @@ To isolate user heap allocations from the ELF image, prevent accidental over-map
 
 ### 1. 4KB ELF Segment Loading and Envelope
 
-- ELF segments are loaded strictly in 4KB pages via `elf_load_image()` in `kernel/fs/elf.c` (no 2MB huge PMD in user text/data).
+- ELF segments are loaded strictly in 4KB pages via `elf_load_image()` in `kernel/arch/x86_64/fs/elf.c` (no 2MB huge PMD in user text/data).
 - The user address space envelope is `USER_ENVELOPE_SIZE` (512 MiB, from `USER_CODE_ADDR = 0x400000` to `0x20400000`).
-- Validated at load time via pure validator `elf_layout_validate()` (`kernel/fs/elf.c`).
+- Validated at load time via pure validator `elf_layout_validate()` (`kernel/arch/x86_64/fs/elf.c`).
 
 ### 2. Heap VMA & Dynamic `brk` Management
 
@@ -353,7 +353,7 @@ waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、SM
 | `kernel/arch/aarch64/memory/user_vm.c` | aarch64 叶适配层（`arch_user_vm_*` 三态适配、BBM 换 PA 入口） |
 | `kernel/arch/aarch64/memory/user_mm.c` | `aarch64_user_mm_create` / `aarch64_user_mm_destroy`：mm 拥有的私有用户根 |
 | `kernel/arch/aarch64/memory/vmm_backend.c` | `aarch64_user_vm_replace_cow`：受检 COW 换 PA 后端入口 |
-| `kernel/fs/elf.c` | 4KB per-page ELF image loader and `elf_layout_validate` |
+| `kernel/arch/x86_64/fs/elf.c` | 4KB per-page ELF image loader and `elf_layout_validate` (x86-only) |
 | `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork`, staged spawn/exec image lifecycle |
 | `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution and heap guard, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap/brk` |
 | `kernel/include/arch/x86_64/pte.h` | `PAGE_COW`, `PAGE_PROTNONE`, x86 PTE 描述符位 |

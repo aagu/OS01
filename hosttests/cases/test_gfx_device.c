@@ -27,7 +27,7 @@
  *   - release_file (Task 1) returns the slot and frees the view.
  *
  * Build:
- *   - Production kernel/driver/gfx.c compiled via GFX_HOST_CFLAGS
+ *   - Production kernel/arch/x86_64/driver/gfx.c compiled via GFX_HOST_CFLAGS
  *     against hosttests/mock/gfx_test_runtime.h.  kernel/driver/fb.c
  *     is NOT compiled (the heavy header chain it pulls in — VMA,
  *     VMM, scheduler — is not part of this test's scope); fb_get_info

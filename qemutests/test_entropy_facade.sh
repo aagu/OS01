@@ -28,7 +28,7 @@
 #        STRONG 路径 → `dd if=/dev/random` 必须返回非空数据（HEX 字节 ≠ 00）
 #        WEAK/NONE 路径 → 阻塞读应返回数据但**全 0**（pool not ready → memset 0）。
 #          spec §5.2 进一步要求 WEAK/NONE 时 non-blocking 读返 -EAGAIN；
-#          当前 kernel/fs/devfs.c::random_read **尚未** 实现该 non-blocking 拦截，
+#          当前 kernel/arch/x86_64/fs/devfs.c::random_read **尚未** 实现该 non-blocking 拦截，
 #          因此该路径记录为已知 gap（spec 合同 vs 实现差距，AAGU-6+ 跟进）。
 #
 # 用法：
@@ -267,7 +267,7 @@ run_tier() {
             fi
             # WEAK/NONE 路径下用户态 shell 不可用（AAGU-5.7 STRONG-only AT_RANDOM
             # 使 init fail-closed），所以**不能**用 user-space 命令直接测 /dev/random。
-            # spec §5.2 non-blocking EAGAIN 契约当前 kernel/fs/devfs.c::random_read
+            # spec §5.2 non-blocking EAGAIN 契约当前 kernel/arch/x86_64/fs/devfs.c::random_read
             # 未实现，harness 在此无法 repro；详见 docs §4（已知违约，留给后续 issue）。
             # 本 tier 只通过"无 init spawn + CSPRNG pool-seeded log 类型"满足。
             pass "$name: $expected_q + init fail-closed（AAGU-5.7 契约）"

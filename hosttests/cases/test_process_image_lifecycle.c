@@ -517,8 +517,8 @@ static const char *task_c_path(void)
 {
     static char path[1024];
     const char *marker = strstr(__FILE__, "/hosttests/");
-    if (!marker) return "../kernel/sched/exec.c";
-    snprintf(path, sizeof(path), "%.*s/kernel/sched/exec.c",
+    if (!marker) return "../kernel/arch/x86_64/sched/exec.c";
+    snprintf(path, sizeof(path), "%.*s/kernel/arch/x86_64/sched/exec.c",
              (int)(marker - __FILE__), __FILE__);
     return path;
 }

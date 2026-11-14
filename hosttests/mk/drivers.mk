@@ -274,11 +274,11 @@ test-backend: $(TEST_BLD)/test_pci_backend_irq.elf
 AHCI_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
     -include $(TEST_MOCK)/arch9/ahci_runtime.h -DOS01_HOST_TEST
 
-$(TEST_BLD)/ahci_lifecycle_production.o: $(TESTS_DIR)/kernel/driver/ahci_lifecycle.c
+$(TEST_BLD)/ahci_lifecycle_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/ahci_lifecycle.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/ahci_production.o: $(TESTS_DIR)/kernel/driver/ahci.c
+$(TEST_BLD)/ahci_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/ahci.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AHCI_HOST_CFLAGS) -c $< -o $@
 
@@ -342,7 +342,7 @@ test-device-boot: $(TEST_BLD)/test_device_boot.elf
 XHCI_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
     -include $(TEST_MOCK)/arch9/xhci_runtime.h -DOS01_HOST_TEST
 
-$(TEST_BLD)/xhci_production.o: $(TESTS_DIR)/kernel/driver/xhci.c
+$(TEST_BLD)/xhci_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
 

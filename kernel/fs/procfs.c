@@ -14,7 +14,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <arch/x86_64/vma.h>
 
 // ── State char for /proc/<pid>/status ───────────────────────
 // (Moved to fs/procfs_snap.c in monitor plan Task 4 — the statistics

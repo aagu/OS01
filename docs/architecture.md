@@ -203,7 +203,7 @@ effective layout change or rollback), and the writer-admission state
 (`transitioning` / `active_writers` / `raw_mmap_seen`). `Pos` is only a
 compatibility mirror and never a second mode source.
 
-- **Backend** — `kernel/driver/bga.c` probes the PCI `1234:1111` Standard VGA via
+- **Backend** — `kernel/arch/x86_64/driver/bga.c` probes the PCI `1234:1111` Standard VGA via
   the existing `PCI_DRIVER_DECLARE` binder (BAR sizing + BGA ID5 handshake +
   `VIDEO_MEMORY_64K`), verifies the current 32bpp/XRGB8888 layout, and maps the
   aperture through the checked fb mapping path. Non-x86 builds compile a port-free

@@ -1,7 +1,7 @@
 #include <arch/x86_64/vmm.h>
 /*
  * test/cases/test_elf_load_4k.c — Host tests for the per-4 KiB ELF
- * loader (kernel/fs/elf.c, Task 2 of the user heap/ELF isolation
+ * loader (kernel/arch/x86_64/fs/elf.c, Task 2 of the user heap/ELF isolation
  * plan).
  *
  * Each test:
@@ -830,12 +830,12 @@ static const char *elf_c_path(void)
     }
     const char *marker = strstr(full, "/hosttests/");
     if (marker) {
-        snprintf(buf, sizeof(buf), "%.*s/kernel/fs/elf.c",
+        snprintf(buf, sizeof(buf), "%.*s/kernel/arch/x86_64/fs/elf.c",
                  (int)(marker - full), full);
         return buf;
     }
     if (strncmp(full, "hosttests/", 10) == 0)
-        return "kernel/fs/elf.c";
+        return "kernel/arch/x86_64/fs/elf.c";
     return NULL;
 }
 

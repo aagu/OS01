@@ -24,7 +24,7 @@
  *   - libgfx mirrors the ioctl: gfx_bind_input() / gfx_unbind_input().
  *
  * Build:
- *   - The REAL kernel/driver/gfx.c (the ioctl), the REAL
+ *   - The REAL kernel/arch/x86_64/driver/gfx.c (the ioctl), the REAL
  *     kernel/driver/fb_state.c (the owner / lease coordinator) and the
  *     REAL kernel/driver/input_route.c (the lease itself) are
  *     host-compiled and linked into this binary, so the assertions are

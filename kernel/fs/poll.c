@@ -18,7 +18,7 @@
 #include <fs/vfs.h>
 #include <percpu/percpu.h>
 #include <tty/pty.h>
-#include <arch/x86_64/clocksource.h>  // clocksource_read_ns()
+#include <arch/clocksource.h>   /* arch_clocksource_read_ns: neutral facade */
 #include <net/socket.h>     // SOCK_CONNECTED, SOCK_LISTENING
 #include <string.h>          // memset
 #include <stddef.h>
@@ -418,7 +418,7 @@ void poll_timeout_tick(void)
     if (!poll_timeout_head) return;
     uint64_t flags = spin_lock_irqsave(&poll_timeout_lock);
     for (poll_timeout_node_t *n = poll_timeout_head; n; n = n->next)
-        if (clocksource_read_ns() >= n->deadline)
+        if (arch_clocksource_read_ns() >= n->deadline)
             wait_queue_wake_all(n->wq);
     spin_unlock_irqrestore(&poll_timeout_lock, flags);
 }
@@ -509,8 +509,8 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
     uint64_t deadline = 0;
     bool timed = (timeout_val > 0);
     if (timed) {
-        // Convert ms to ns on the clocksource_read_ns() timeline.
-        deadline = clocksource_read_ns() + (uint64_t)timeout_val * 1000000ULL;
+        // Convert ms to ns on the arch_clocksource_read_ns() timeline.
+        deadline = arch_clocksource_read_ns() + (uint64_t)timeout_val * 1000000ULL;
         poll_tmo_register(pt, deadline);
     }
 
@@ -572,7 +572,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         }
 
         // ── Deadline already reached before sleep: 0 ─────────
-        if (timed && clocksource_read_ns() >= deadline) {
+        if (timed && arch_clocksource_read_ns() >= deadline) {
             poll_core_release(pt, true, timed);
             return 0;
         }
@@ -598,7 +598,7 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         poll_core_release(pt, true, false);
 
         // ── Timeout check (post-sleep) ──────────────────────────
-        if (timed && clocksource_read_ns() >= deadline) {
+        if (timed && arch_clocksource_read_ns() >= deadline) {
             poll_core_release(pt, false, timed);
             return poll_scan(kfds, nfds, NULL);
         }

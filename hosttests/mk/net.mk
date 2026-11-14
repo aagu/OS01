@@ -101,7 +101,7 @@ test-socket: $(TEST_BLD)/test_socket_net_readiness.elf
 E1000_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
     -include $(TEST_MOCK)/arch9/e1000_runtime.h -DOS01_HOST_TEST
 
-$(TEST_BLD)/e1000_production.o: $(TESTS_DIR)/kernel/driver/e1000.c
+$(TEST_BLD)/e1000_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/e1000.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(E1000_HOST_CFLAGS) -c $< -o $@
 

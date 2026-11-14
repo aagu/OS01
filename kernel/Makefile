@@ -181,9 +181,15 @@ endif
 endif
 
 # Architecture C and asm sources: explicit, one-level responsibility groups.
+# The x86_64 override additionally collects sched/fs/sync/syscall/driver:
+# those subdirs own the x86-only implementations that used to sit in the
+# arch-neutral directories (mm-architecture-boundaries follow-up) —
+# fork/exec/exit, elf/devfs, futex, the x86 syscall handlers and the x86
+# MMIO/display device drivers.  The neutral directories keep only code
+# that compiles for BOTH architectures.
 ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime
 ifeq ($(ARCH),x86_64)
-ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime
+ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime sched fs sync syscall driver
 endif
 # Caller-supplied extra flags (via OS01_SUBMAKE_ALLOWED). Test/debug knob —
 # also the contract-test handle for the CFLAGS-stamp invalidation below.

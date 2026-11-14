@@ -29,7 +29,12 @@ entry = trap[entry_start:entry_end]
 if re.search(r"\bswitch\s*\(", entry) or re.search(r"\bcase\s+SYS_", entry):
     fail("x86 syscall entry still contains a business switch or SYS_* case")
 
-for path in sorted((ROOT / "kernel/syscall").glob("**/*.c")):
+# mm-architecture-boundaries follow-up: the x86-only handler files
+# (sys_fs / sys_misc / sys_proc) live in kernel/arch/x86_64/syscall/ —
+# they obey the same handler hygiene rules as the shared facade.
+SYSCALL_SCAN_DIRS = [ROOT / "kernel/syscall", ROOT / "kernel/arch/x86_64/syscall"]
+_handler_files = sorted(set(p for d in SYSCALL_SCAN_DIRS for p in d.glob("**/*.c")))
+for path in _handler_files:
     source = path.read_text()
     # mm-architecture-boundaries Task 3: the x86 uaccess ownership
     # header (strnlen_user / write-preparation pair) is a legitimate

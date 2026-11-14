@@ -101,7 +101,7 @@ struct task_struct {
     int64_t pid;
     struct mm_struct *mm;
     struct files_struct *files;
-    /* uaccess fault recovery slots (production kernel/driver/gfx.c
+    /* uaccess fault recovery slots (production kernel/arch/x86_64/driver/gfx.c
      * arms current->fault_jmp across the per-row memcpy loop).  The
      * fb writers/host tests never trip the fault path, but the
      * production gfx.c references these fields regardless of the

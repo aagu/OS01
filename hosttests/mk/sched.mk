@@ -954,7 +954,7 @@ $(TEST_BLD)/test_boot_stdio.elf: \
 test_boot_stdio: $(TEST_BLD)/test_boot_stdio.elf
 	$<
 
-$(TEST_BLD)/boot3_exec_production.o: $(TESTS_DIR)/kernel/sched/exec.c
+$(TEST_BLD)/boot3_exec_production.o: $(TESTS_DIR)/kernel/arch/x86_64/sched/exec.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
 

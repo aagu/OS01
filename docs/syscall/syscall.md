@@ -232,7 +232,7 @@ OS01 provides an isolated compatibility layer for executing Linux x86_64 binarie
 - **Single standard**: OS01 native syscall ABI (`kernel/include/uapi/syscall.h`) is the sole authoritative standard. Linux syscalls are dynamically remapped into OS01 syscalls.
 - **Safety**: Mapping table uses `int16_t` (`compat_syscall_nr_t`) with `_Static_assert` compile-time overflow protection.
 - **Unmapped / Unsupported**: Any out-of-range, unmapped or unsupported Linux syscall number strictly returns `-ENOSYS` (-38) rather than falling through to native handlers.
-- **ABI activation**: Triggered by `elf_detect_abi()` in `kernel/fs/elf.c` inspecting `PT_NOTE` (`NT_GNU_ABI_TAG`, OS=0). Strictly avoids inspecting `PT_INTERP` so that native dynamic linking is decoupled from Linux ABI compatibility.
+- **ABI activation**: Triggered by `elf_detect_abi()` in `kernel/arch/x86_64/fs/elf.c` inspecting `PT_NOTE` (`NT_GNU_ABI_TAG`, OS=0). Strictly avoids inspecting `PT_INTERP` so that native dynamic linking is decoupled from Linux ABI compatibility.
 - **File structure**:
   - `kernel/include/syscall/compat.h`: Public facade header.
   - `kernel/syscall/compat/dispatch.c`: Dispatch router & `-ENOSYS` sentinels.

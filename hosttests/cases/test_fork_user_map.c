@@ -483,7 +483,7 @@ static char *slurp_kernel_source(const char *relpath)
      * repo prefix from a fork.c probe, then swapping the tail. */
     const char *fork_path = task_c_path();
     if (!fork_path) return NULL;
-    const char *tail = strstr(fork_path, "kernel/sched/fork.c");
+    const char *tail = strstr(fork_path, "kernel/arch/x86_64/sched/fork.c");
     if (!tail) return NULL;
     char buf[1024];
     int n = snprintf(buf, sizeof(buf), "%.*s%s",
@@ -519,7 +519,7 @@ static void test_retirement_and_signal_source_contract(void)
      * retirement window (detach published + CR3 switched). */
     {
         size_t len;
-        char *src = slurp_kernel_source("kernel/sched/exit.c");
+        char *src = slurp_kernel_source("kernel/arch/x86_64/sched/exit.c");
         assert_not_null(src);
         const char *retire = strstr(src,
             "Retire the old user root before any teardown");
@@ -700,12 +700,12 @@ static const char *task_c_path(void)
     marker = strstr(full, "/hosttests/");
     if (marker) {
         snprintf(buf, sizeof(buf),
-                 "%.*s/kernel/sched/fork.c",
+                 "%.*s/kernel/arch/x86_64/sched/fork.c",
                  (int)(marker - full), full);
         return buf;
     }
     if (strncmp(full, "hosttests/", 10) == 0)
-        return "kernel/sched/fork.c";
+        return "kernel/arch/x86_64/sched/fork.c";
     return NULL;
 }
 

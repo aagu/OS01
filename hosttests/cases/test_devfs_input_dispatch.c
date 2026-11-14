@@ -18,7 +18,7 @@
  *
  * Build (the same real file/devfs compile isolation the gfx file
  * lifecycle test uses, extended with the poll entry point):
- *   - the REAL kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
+ *   - the REAL kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
  *     are host-compiled through POLL_HOST_CFLAGS (poll_test_runtime.h
  *     shadows the heavyweight kernel headers) and linked against the
  *     narrow mocks of the layers below that this TU provides;

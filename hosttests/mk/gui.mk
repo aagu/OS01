@@ -645,7 +645,7 @@ test-gui-widget: gui-widget-public-types $(TEST_BLD)/test_gui_widget.elf
 	    $(TEST_BLD)/test_gui_widget.elf
 
 # GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Host-compiles
-# the REAL kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
+# the REAL kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
 # GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  The framer
 # is pure (no locks, no device IO, no TTY, no display), so the test needs
 # no device mock at all: it host-compiles the REAL
@@ -721,7 +721,7 @@ $(TEST_BLD)/test_input_route.elf: $(TEST_BLD)/test_input_route.o \
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # GUI-2 plan Task 4: the gfx input-lease UAPI.  The fixture host-
-# compiles the REAL kernel/driver/gfx.c (the GFX_BIND_INPUT /
+# compiles the REAL kernel/arch/x86_64/driver/gfx.c (the GFX_BIND_INPUT /
 # GFX_UNBIND_INPUT ioctls), the REAL kernel/driver/fb_state.c (the
 # owner / lease coordinator) and the REAL kernel/driver/input_route.c
 # (the lease itself) and asserts the spec §4.1 contract: the 32-byte

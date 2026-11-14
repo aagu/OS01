@@ -1,6 +1,6 @@
 /*
  * test/mock/elf_load/elf_load_stubs.c — Stubs for compiling and
- * running the production kernel/fs/elf.c against the host harness.
+ * running the production kernel/arch/x86_64/fs/elf.c against the host harness.
  *
  * The PTE table is real (flat, indexed by user page index), so the
  * loader's PT_LOAD traversal, BSS preservation, shared-page merge

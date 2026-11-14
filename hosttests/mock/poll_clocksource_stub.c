@@ -73,3 +73,15 @@ __attribute__((weak)) void wait_queue_disarm(void)
 bool     clocksource_active = false;
 uint32_t clocksource_mult   = 0;
 uint32_t clocksource_shift  = 0;
+
+/* poll.c's arch-neutral facade now resolves through the extern
+ * arch_clocksource_read_ns (mm-architecture-boundaries follow-up).
+ * The harness does not link the real clocksource TU; with the
+ * inactive clocksource globals above, mirror the production
+ * jiffies-fallback timeline here. */
+uint64_t arch_clocksource_read_ns(void)
+{
+    extern volatile uint64_t jiffies;
+    /* production fallback: jiffies tick = 10 ms */
+    return (uint64_t)jiffies * 10000000ULL;
+}

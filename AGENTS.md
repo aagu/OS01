@@ -147,13 +147,13 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
 | `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
 | `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
-| `kernel/sched/` | core.c, fork.c, exec.c, exit.c, signal.c, fair.c, balance.c — EEVDF, fork/exec, lifecycle |
+| `kernel/sched/` | core.c, signal.c, fair.c, balance.c — EEVDF 共享调度核心（fork/exec/exit 生命周期是 x86-only，位于 `kernel/arch/x86_64/sched/`） |
 | `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |
 | `kernel/tty/tty.c` | Console TTY: fg_pgrp field, VINTR/VQUIT line discipline (ISIG), TIOCSPGRP/TIOCGPGRP, cooked readline |
 | `kernel/tty/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |
 | `user/terminal/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
 | `kernel/subsys/subsys.c` | Subsystem registration framework |
-| `kernel/sync/futex.c` | Futex hash table (SYS_futex=47) |
+| `kernel/arch/x86_64/sync/futex.c` | Futex hash table (SYS_futex=47; x86-only) |
 | `kernel/include/core/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
 | `kernel/include/uapi/syscall.h` | Syscall numbers (0..76) |
 | `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |

@@ -1,6 +1,6 @@
 /*
  * test/mock/elf_load/elf_load_runtime.h — Host runtime stub for
- * compiling the REAL kernel/fs/elf.c against the host harness
+ * compiling the REAL kernel/arch/x86_64/fs/elf.c against the host harness
  * (test_elf_load_4k).
  *
  * elf.c includes the production <fs/vfs.h>, <sched/task.h>,

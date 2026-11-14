@@ -1,9 +1,9 @@
 /*
  * test/mock/elf_load/elf_load_stubs.h — Host stubs that let the
- * production kernel/fs/elf.c compile and run for the per-4 KiB
+ * production kernel/arch/x86_64/fs/elf.c compile and run for the per-4 KiB
  * loader test (hosttests/cases/test_elf_load_4k.c).
  *
- * The host harness links the REAL kernel/fs/elf.c (not a duplicate
+ * The host harness links the REAL kernel/arch/x86_64/fs/elf.c (not a duplicate
  * formula) so the loader's branch coverage and rollback discipline
  * are exercised against an observable, scriptable PTE state machine.
  *

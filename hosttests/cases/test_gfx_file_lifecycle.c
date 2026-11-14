@@ -13,7 +13,7 @@
  *   - the node refcount returns to baseline after the last release.
  *
  * Build:
- *   - Production kernel/fs/devfs.c + kernel/fs/file.c compiled via
+ *   - Production kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c compiled via
  *     GFX_HOST_CFLAGS against hosttests/mock/gfx_test_runtime.h.
  *   - This TU defines the stub surface the production sources need
  *     (kmalloc/kfree, current, schedule, tty_*, keyboard_*, ...).

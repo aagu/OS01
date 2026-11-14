@@ -17,7 +17,7 @@
  *     returns -EFAULT and leaves f->offset unchanged.
  *
  * Build:
- *   - Production kernel/fs/file.c + kernel/fs/devfs.c compiled via
+ *   - Production kernel/fs/file.c + kernel/arch/x86_64/fs/devfs.c compiled via
  *     GFX_HOST_CFLAGS against hosttests/mock/gfx_test_runtime.h
  *     (reuses the gfx file-lifecycle harness's production objects).
  *   - This TU defines the stub surface plus the fake snapshot

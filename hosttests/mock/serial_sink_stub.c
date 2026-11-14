@@ -1,7 +1,7 @@
 /*
  * hosttests/mock/serial_sink_stub.c — the host-side console sink.
  *
- * The production console path (kernel/fs/devfs.c serial_write) emits a
+ * The production console path (kernel/arch/x86_64/fs/devfs.c serial_write) emits a
  * WHOLE buffer under the console lock (serial_lock) through
  * write_serial_unlocked(), so that a console write reaches the wire
  * contiguously and another console writer cannot inject bytes in the
