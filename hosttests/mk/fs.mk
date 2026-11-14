@@ -703,8 +703,16 @@ $(TEST_BLD)/gpt_bootdev_production.o: $(TESTS_DIR)/kernel/fs/gpt.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GPT_BOOTDEV_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/gpt_bootdev_fs_boot.o: $(TESTS_DIR)/kernel/fs/boot.c \
+		$(TESTS_DIR)/kernel/include/fs/boot.h \
+		$(TESTS_DIR)/kernel/include/fs/gpt.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GPT_BOOTDEV_HOST_CFLAGS) -c $< -o $@
+
 LINK_CFLAGS_gpt-bootdev = $(GPT_BOOTDEV_HOST_CFLAGS)
-LINK_GROUP_gpt-bootdev := $(TEST_BLD)/gpt_bootdev_production.o $(LIBC_OBJS)
+LINK_GROUP_gpt-bootdev := $(TEST_BLD)/gpt_bootdev_production.o \
+    $(TEST_BLD)/gpt_bootdev_fs_boot.o $(LIBC_OBJS)
 
 .PHONY: test-gpt-bootdev
 test-gpt-bootdev: $(TEST_BLD)/test_gpt_bootdev.elf

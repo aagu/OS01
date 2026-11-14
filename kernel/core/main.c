@@ -133,7 +133,7 @@ int kernel_main(const struct boot_context *bootctx)
     if (arch_boot_device_nodes() != 0)
         kpanic("arch_boot_device_nodes failed\n");
 
-    fs_boot_mounts();
+    fs_boot_mounts(boot_context_valid(bootctx) ? bootctx : NULL);
 
     // ═══ 7. Console TTY + /dev smoke probe ════════════════════
     int tty_rc = tty_boot_init();

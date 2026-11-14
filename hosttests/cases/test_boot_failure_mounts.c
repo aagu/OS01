@@ -69,6 +69,7 @@ void _log_debug_impl(const char *f, ...) { (void)f; }
 void kpanic(const char *fmt, ...) { (void)fmt; abort(); }
 
 /* Mocks for block device & VFS */
+void *kmalloc(size_t size) { return malloc(size ? size : 1); }
 void kfree(void *ptr) { (void)ptr; }
 static block_device_t mock_disk;
 static int mock_disk_count = 0;
@@ -95,6 +96,41 @@ gpt_info_t *gpt_scan(block_device_t *disk)
 {
     (void)disk;
     return mock_gpt;
+}
+
+int gpt_read_table(block_device_t *disk, struct gpt_table **out)
+{
+    (void)disk;
+    if (out) *out = NULL;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_read_table");
+    return -ENOSYS;
+}
+
+void gpt_free_table(struct gpt_table *t)
+{
+    (void)t;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_free_table");
+}
+
+size_t gpt_table_count(const struct gpt_table *t)
+{
+    (void)t;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_table_count");
+    return 0;
+}
+
+bool gpt_table_entry(const struct gpt_table *t, size_t ordinal, gpt_partition_t *out)
+{
+    (void)t; (void)ordinal; (void)out;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_table_entry");
+    return false;
+}
+
+gpt_info_t *gpt_publish_table(const struct gpt_table *t, bool strict)
+{
+    (void)t; (void)strict;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_publish_table");
+    return NULL;
 }
 
 int vfs_mount_fs(const char *type_name, const char *path,
@@ -168,7 +204,7 @@ static void test_root_missing_disk(void)
     mock_disk_count = 0;
 
     if (setjmp(stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     }
 
     assert_eq(1, stop_calls);
@@ -191,7 +227,7 @@ static void test_root_gpt_insufficient_partitions(void)
     mock_gpt = &fake_gpt;
 
     if (setjmp(stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     }
 
     assert_eq(1, stop_calls);
@@ -215,7 +251,7 @@ static void test_root_ext2_mount_fails(void)
     mock_ext2_mount_rc = -EIO;
 
     if (setjmp(stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     }
 
     assert_eq(1, stop_calls);
@@ -240,7 +276,7 @@ static void test_boot_mount_fails_root_continues(void)
     mock_vfat_mount_rc = -EIO; /* /boot fails */
 
     if (setjmp(stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     }
 
     assert_eq(0, stop_calls);
@@ -268,7 +304,7 @@ static void test_tmpfs_fails_procfs_still_runs(void)
     mock_procfs_init_rc = 0;
 
     if (setjmp(stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     }
 
     assert_eq(0, stop_calls);
@@ -296,7 +332,7 @@ static void test_procfs_fails_warns(void)
     mock_procfs_init_rc = -ENOMEM; /* procfs fails */
 
     if (setjmp(stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     }
 
     assert_eq(0, stop_calls);

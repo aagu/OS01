@@ -9,8 +9,11 @@
  */
 #include "test_framework.h"
 #include <block/blockdev.h>
+#include <core/bootinfo.h>
+#include <fs/boot.h>
 #include <fs/gpt.h>
 #include <errno.h>
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,6 +49,26 @@ static int s_blk_unreg_calls = 0;
 static int s_devfs_reg_calls = 0;
 static int s_devfs_fail_on_call = -1;
 static int s_devfs_fail_rc = -EEXIST;
+static char s_devfs_fail_name[32];
+
+/* ── VFS / boot_failure mocks for fs_boot_mounts ──────────────── */
+static bool s_stop_armed = false;
+static jmp_buf s_stop_jmp;
+static int s_stop_calls = 0;
+static int64_t s_stop_rc = 0;
+static int s_warn_calls = 0;
+
+struct mount_rec {
+    char type[16];
+    char path[32];
+    char dev_name[16];
+};
+static struct mount_rec s_mounts[8];
+static int s_mount_count = 0;
+static int s_fail_root_mount_rc = 0;
+static int s_fail_boot_mount_rc = 0;
+static int s_tmpfs_calls = 0;
+static int s_procfs_calls = 0;
 
 static void reset_fake_registry(void)
 {
@@ -56,8 +79,87 @@ static void reset_fake_registry(void)
     s_devfs_reg_calls = 0;
     s_devfs_fail_on_call = -1;
     s_devfs_fail_rc = -EEXIST;
+    s_devfs_fail_name[0] = '\0';
     s_kmalloc_fail_after = -1;
     s_kmalloc_calls = 0;
+    s_stop_armed = false;
+    s_stop_calls = 0;
+    s_stop_rc = 0;
+    s_warn_calls = 0;
+    memset(s_mounts, 0, sizeof(s_mounts));
+    s_mount_count = 0;
+    s_fail_root_mount_rc = 0;
+    s_fail_boot_mount_rc = 0;
+    s_tmpfs_calls = 0;
+    s_procfs_calls = 0;
+}
+
+int block_device_count(void)
+{
+    return s_fake_dev_count;
+}
+
+block_device_t *block_device_get(int index)
+{
+    if (index < 0 || index >= s_fake_dev_count)
+        return NULL;
+    return &s_fake_devs[index];
+}
+
+__attribute__((noreturn))
+void boot_failure_stop(const char *stage, const char *component,
+                       int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)phase; (void)cpu;
+    s_stop_calls++;
+    s_stop_rc = rc;
+    if (s_stop_armed)
+        longjmp(s_stop_jmp, 1);
+    abort();
+}
+
+void boot_failure_warn(const char *stage, const char *component,
+                       int64_t rc, int phase, int cpu)
+{
+    (void)stage; (void)component; (void)rc; (void)phase; (void)cpu;
+    s_warn_calls++;
+}
+
+void kpanic(const char *fmt, ...)
+{
+    (void)fmt;
+    abort();
+}
+
+bool boot3_test_fail_site(const char *site) { (void)site; return false; }
+void boot3_test_sentinel(const char *name) { (void)name; }
+void vfs_init(void) {}
+int devfs_init(void) { return 0; }
+void vfs_debug_list(const char *path) { (void)path; }
+void *vfs_lookup(const char *path) { (void)path; return NULL; }
+int vfs_read(void *node, uint64_t off, size_t len, void *buf)
+{ (void)node; (void)off; (void)len; (void)buf; return 0; }
+int vfs_write(void *node, uint64_t off, size_t len, const void *buf)
+{ (void)node; (void)off; (void)len; (void)buf; return 0; }
+void vfs_node_put(void *node) { (void)node; }
+int tmpfs_init(void) { s_tmpfs_calls++; return 0; }
+int procfs_init(void) { s_procfs_calls++; return 0; }
+
+int vfs_mount_fs(const char *type_name, const char *path,
+                 block_device_t *dev, void *data)
+{
+    (void)data;
+    if (strcmp(path, "/") == 0 && s_fail_root_mount_rc != 0)
+        return s_fail_root_mount_rc;
+    if (strcmp(path, "/boot") == 0 && s_fail_boot_mount_rc != 0)
+        return s_fail_boot_mount_rc;
+    if (s_mount_count < 8) {
+        snprintf(s_mounts[s_mount_count].type, 16, "%s", type_name);
+        snprintf(s_mounts[s_mount_count].path, 32, "%s", path);
+        snprintf(s_mounts[s_mount_count].dev_name, 16, "%s", dev ? dev->name : "(null)");
+        s_mount_count++;
+    }
+    return 0;
 }
 
 int block_device_register(const struct block_device_desc *desc,
@@ -91,9 +193,10 @@ int block_device_unregister_boot(block_device_t *dev)
 
 int devfs_register_blkdev(const char *name, block_device_t *dev)
 {
-    (void)name;
     (void)dev;
     int idx = s_devfs_reg_calls++;
+    if (s_devfs_fail_name[0] && name && strcmp(name, s_devfs_fail_name) == 0)
+        return s_devfs_fail_rc;
     if (s_devfs_fail_on_call >= 0 && idx == s_devfs_fail_on_call)
         return s_devfs_fail_rc;
     return 0;
@@ -445,9 +548,216 @@ static void gpt_bounds(void)
     free(img);
 }
 
+static int run_mounts_expect_stop(const struct boot_context *ctx)
+{
+    s_stop_armed = true;
+    if (setjmp(s_stop_jmp) == 0) {
+        fs_boot_mounts(ctx);
+        s_stop_armed = false;
+        return 0; /* did not stop */
+    }
+    s_stop_armed = false;
+    return 1; /* stopped */
+}
+
+static void register_test_disk(const char *name, uint64_t sectors,
+                               uint32_t sector_size,
+                               struct fake_disk_backing *b, uint8_t *buf)
+{
+    block_device_t tmp;
+    init_disk(&tmp, b, name, sectors, sector_size, buf);
+    struct block_device_desc desc = {
+        .name = name,
+        .sector_count = sectors,
+        .sector_size = sector_size,
+        .ops = &s_fake_disk_ops,
+        .private_data = b,
+        .parent = NULL,
+        .kind = BLOCK_DISK,
+    };
+    block_device_t *out = NULL;
+    assert_eq(0, block_device_register(&desc, &out));
+}
+
+static void guid_mount_selection(void)
+{
+    uint8_t *ahci_img = calloc(256, 512);
+    uint8_t *usb_img = calloc(256, 512);
+    assert_not_null(ahci_img);
+    assert_not_null(usb_img);
+
+    uint8_t ahci_esp[16] = { 0xaa,1,2,3,4,5,6,7,8,9,10,11,12,13,14,1 };
+    uint8_t ahci_root[16] = { 0xaa,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2 };
+    uint8_t usb_esp[16] = { 0xbb,1,2,3,4,5,6,7,8,9,10,11,12,13,14,1 };
+    uint8_t usb_root[16] = { 0xbb,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2 };
+    uint8_t misc_type[16] = { 0x11,0x22,0x33,0x44,5,6,7,8,9,10,11,12,13,14,15,16 };
+    uint8_t misc_guid[16] = { 0xcc,1,2,3,4,5,6,7,8,9,10,11,12,13,14,3 };
+
+    struct fake_disk_backing b_ahci, b_usb;
+    struct boot_context ctx;
+    boot_context_init(&ctx);
+    ctx.flags |= BOOT_CONTEXT_HAS_BOOT_DEVICE;
+    memcpy(ctx.boot_device.partition_guid, usb_esp, 16);
+    ctx.boot_device.signature_type = 2;
+
+    /* 1. AHCI first, USB second; USB ESP at slot 2 (gap) + geometry mismatch warns only */
+    reset_fake_registry();
+    memset(ahci_img, 0, 256 * 512);
+    write_gpt_entry(ahci_img + 2 * 512, 0, 128, k_esp_type_guid, ahci_esp, 10, 20);
+    write_gpt_entry(ahci_img + 2 * 512, 1, 128, k_linux_type_guid, ahci_root, 21, 100);
+    finalize_gpt_header(ahci_img + 512, 92, 2, 32, 128, 250, ahci_img + 2 * 512);
+
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 2, 128, k_esp_type_guid, usb_esp, 10, 20);
+    write_gpt_entry(usb_img + 2 * 512, 5, 128, k_linux_type_guid, usb_root, 21, 100);
+    write_gpt_entry(usb_img + 2 * 512, 7, 128, misc_type, misc_guid, 101, 150);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+
+    ctx.boot_device.partition_number = 99; /* slot gap mismatch */
+    ctx.boot_device.partition_start_lba = 999; /* geometry mismatch */
+    ctx.boot_device.partition_size_lba = 999;
+
+    register_test_disk("hda", 256, 512, &b_ahci, ahci_img);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    s_blk_reg_calls = 0;
+
+    fs_boot_mounts(&ctx);
+    assert_eq(0, s_stop_calls);
+    assert_eq(2, s_mount_count);
+    assert_str_eq("ext2", s_mounts[0].type);
+    assert_str_eq("/", s_mounts[0].path);
+    assert_str_eq("usba2", s_mounts[0].dev_name);
+    assert_str_eq("vfat", s_mounts[1].type);
+    assert_str_eq("/boot", s_mounts[1].path);
+    assert_str_eq("usba1", s_mounts[1].dev_name);
+    assert_eq(3, s_blk_reg_calls); /* only usba's 3 partitions published, 0 on hda */
+    assert_eq(2, b_ahci.read_calls); /* 1 header + 1 entries */
+    assert_eq(2, b_usb.read_calls);  /* 1 header + 1 entries */
+
+    /* 2. Unique non-ESP fallback (0 Linux-data, 1 non-ESP) */
+    reset_fake_registry();
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 0, 128, k_esp_type_guid, usb_esp, 10, 20);
+    write_gpt_entry(usb_img + 2 * 512, 1, 128, misc_type, usb_root, 21, 100);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    fs_boot_mounts(&ctx);
+    assert_eq(0, s_stop_calls);
+    assert_eq(2, s_mount_count);
+    assert_str_eq("usba2", s_mounts[0].dev_name);
+
+    /* 3. Ambiguous Linux-data stops with no mounts */
+    reset_fake_registry();
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 0, 128, k_esp_type_guid, usb_esp, 10, 20);
+    write_gpt_entry(usb_img + 2 * 512, 1, 128, k_linux_type_guid, usb_root, 21, 50);
+    write_gpt_entry(usb_img + 2 * 512, 2, 128, k_linux_type_guid, misc_guid, 51, 100);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+    register_test_disk("hda", 256, 512, &b_ahci, ahci_img);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 4. ESP-only stops */
+    reset_fake_registry();
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 0, 128, k_esp_type_guid, usb_esp, 10, 20);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 5. Duplicate ESP GUID after entry 16 stops */
+    reset_fake_registry();
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 0, 128, k_esp_type_guid, usb_esp, 10, 20);
+    write_gpt_entry(usb_img + 2 * 512, 1, 128, k_linux_type_guid, usb_root, 21, 50);
+    write_gpt_entry(usb_img + 2 * 512, 18, 128, k_esp_type_guid, usb_esp, 51, 60);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 6. No match stops without AHCI fallback */
+    reset_fake_registry();
+    register_test_disk("hda", 256, 512, &b_ahci, ahci_img);
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 7. I/O error on candidate stops */
+    reset_fake_registry();
+    register_test_disk("hda", 256, 512, &b_ahci, ahci_img);
+    b_ahci.fail_lba = 1;
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    b_ahci.fail_lba = -1;
+
+    /* 8. Unsupported candidate (4096-byte sector) stops */
+    reset_fake_registry();
+    register_test_disk("nvme0", 256, 4096, &b_ahci, ahci_img);
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+
+    /* 9. 16-slot publication cap excludes required partition -> stops */
+    reset_fake_registry();
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 0, 128, k_esp_type_guid, usb_esp, 10, 11);
+    for (int i = 1; i <= 16; i++) {
+        uint8_t mg[16] = { 0x55, (uint8_t)i };
+        write_gpt_entry(usb_img + 2 * 512, (uint32_t)i, 128, misc_type, mg,
+                        (uint64_t)(20 + i * 2), (uint64_t)(21 + i * 2));
+    }
+    write_gpt_entry(usb_img + 2 * 512, 17, 128, k_linux_type_guid, usb_root, 80, 100);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 10. Colliding devfs name (-EEXIST) on selected disk stops */
+    reset_fake_registry();
+    memset(usb_img, 0, 256 * 512);
+    write_gpt_entry(usb_img + 2 * 512, 0, 128, k_esp_type_guid, usb_esp, 10, 20);
+    write_gpt_entry(usb_img + 2 * 512, 1, 128, k_linux_type_guid, usb_root, 21, 100);
+    finalize_gpt_header(usb_img + 512, 92, 2, 32, 128, 250, usb_img + 2 * 512);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    snprintf(s_devfs_fail_name, sizeof(s_devfs_fail_name), "usba2");
+    s_devfs_fail_rc = -EEXIST;
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 11. Root mount failure stops */
+    reset_fake_registry();
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    s_fail_root_mount_rc = -EIO;
+    assert_eq(1, run_mounts_expect_stop(&ctx));
+    assert_eq(0, s_mount_count);
+
+    /* 12. /boot mount failure warns without remounting root */
+    reset_fake_registry();
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    s_fail_boot_mount_rc = -EIO;
+    fs_boot_mounts(&ctx);
+    assert_eq(0, s_stop_calls);
+    assert_eq(1, s_warn_calls);
+    assert_eq(1, s_mount_count);
+    assert_str_eq("/", s_mounts[0].path);
+
+    /* 13. No flag preserves legacy first-disk behavior */
+    reset_fake_registry();
+    register_test_disk("hda", 256, 512, &b_ahci, ahci_img);
+    register_test_disk("usba", 256, 512, &b_usb, usb_img);
+    fs_boot_mounts(NULL);
+    assert_eq(0, s_stop_calls);
+    assert_eq(2, s_mount_count);
+    assert_str_eq("hda2", s_mounts[0].dev_name);
+    assert_str_eq("hda1", s_mounts[1].dev_name);
+
+    free(ahci_img);
+    free(usb_img);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(gpt_metadata_has_no_side_effects),
     TEST_ENTRY(gpt_bounds),
+    TEST_ENTRY(guid_mount_selection),
 TEST_LIST_END
 
 int main(void)

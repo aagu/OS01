@@ -174,8 +174,9 @@ int arch_boot_device_nodes(void)
     return 0;
 }
 
-void fs_boot_mounts(void)
+void fs_boot_mounts(const struct boot_context *bootctx)
 {
+    (void)bootctx;
     trace_record("fs_boot_mounts");
 }
 

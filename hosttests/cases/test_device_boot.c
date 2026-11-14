@@ -118,6 +118,41 @@ gpt_info_t *gpt_scan(block_device_t *disk)
     return s_mock_gpt;
 }
 
+int gpt_read_table(block_device_t *disk, struct gpt_table **out)
+{
+    (void)disk;
+    if (out) *out = NULL;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_read_table");
+    return -ENOSYS;
+}
+
+void gpt_free_table(struct gpt_table *t)
+{
+    (void)t;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_free_table");
+}
+
+size_t gpt_table_count(const struct gpt_table *t)
+{
+    (void)t;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_table_count");
+    return 0;
+}
+
+bool gpt_table_entry(const struct gpt_table *t, size_t ordinal, gpt_partition_t *out)
+{
+    (void)t; (void)ordinal; (void)out;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_table_entry");
+    return false;
+}
+
+gpt_info_t *gpt_publish_table(const struct gpt_table *t, bool strict)
+{
+    (void)t; (void)strict;
+    assert_true(false && "legacy fs_boot_mounts(NULL) must not call gpt_publish_table");
+    return NULL;
+}
+
 int ext2_init(block_device_t *dev, ext2_fs_t **fs)
 {
     (void)dev;
@@ -591,7 +626,7 @@ static void test_root_requirement(void)
     /* Subtest A: No block devices -> fs_boot_mounts halts via boot_failure_stop */
     s_boot_stop_jmp_armed = true;
     if (setjmp(s_boot_stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
         assert_true(false); /* Should not be reached */
     }
     s_boot_stop_jmp_armed = false;
@@ -623,7 +658,7 @@ static void test_root_requirement(void)
 
     s_panic_jmp_armed = true;
     if (setjmp(s_panic_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     } else {
         assert_true(false); /* Should not panic */
     }
@@ -643,7 +678,7 @@ static void test_root_requirement(void)
 
     s_panic_jmp_armed = true;
     if (setjmp(s_panic_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     } else {
         assert_true(false); /* Should not panic */
     }
@@ -665,7 +700,7 @@ static void test_root_requirement(void)
 
     s_boot_stop_jmp_armed = true;
     if (setjmp(s_boot_stop_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
         assert_true(false); /* Should not reach */
     }
     s_boot_stop_jmp_armed = false;
@@ -688,7 +723,7 @@ static void test_root_requirement(void)
 
     s_panic_jmp_armed = true;
     if (setjmp(s_panic_jmp) == 0) {
-        fs_boot_mounts();
+        fs_boot_mounts(NULL);
     } else {
         assert_true(false); /* Should not panic */
     }
