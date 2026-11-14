@@ -801,6 +801,7 @@ USER_VM_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
 
 $(TEST_BLD)/user_vm_policy_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm_policy.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_policy.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_internal.h \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \
@@ -844,6 +845,18 @@ $(TEST_BLD)/user_vm_leaf_production.o: \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/user_vm_fork_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm_fork.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_policy.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_internal.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/vmm_backend.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/user_vm_runtime.o: $(TEST_MOCK)/user_vm_runtime.c \
 		$(TEST_MOCK)/user_vm_runtime.h
 	@mkdir -p $(TEST_BLD)
@@ -861,6 +874,7 @@ $(TEST_BLD)/test_user_vm.o: $(TEST_CASES)/test_user_vm.c \
 $(TEST_BLD)/test_user_vm.elf: \
 		$(TEST_BLD)/test_user_vm.o \
 		$(TEST_BLD)/user_vm_policy_production.o \
+		$(TEST_BLD)/user_vm_fork_production.o \
 		$(TEST_BLD)/vm_area_user_vm_production.o \
 		$(TEST_BLD)/user_vm_transaction_production.o \
 		$(TEST_BLD)/user_vm_leaf_production.o \

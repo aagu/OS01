@@ -1,7 +1,7 @@
 /*
  * hosttests/cases/test_user_vm.c — AArch64 M4 anonymous-VM policy.
  *
- * Links the REAL kernel/memory/user_vm.c policy, the REAL shared
+ * Links the REAL kernel/arch/aarch64/memory/user_vm_policy.c policy, the REAL shared
  * vm_area.c list primitives and the REAL AArch64 leaf adapter
  * (kernel/arch/aarch64/memory/user_vm.c) against a fake M3 backend
  * and heap-backed page/record allocators.  Fault injection is
@@ -1569,6 +1569,71 @@ TEST_FUNC(test_prepare_copy_success_commits_cow_and_absent)
     free_4k_page(a_old);
 }
 
+/* Pass-2 preallocation failure on the SECOND multi-reference COW leaf:
+ * the first temporary copy is returned exactly once, both original
+ * leaves (PA, refs, content, records) are untouched, and no absent
+ * leaf or chain edit happens. */
+TEST_FUNC(test_prepare_copy_second_cow_alloc_failure)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    fault_private_page(mm, HEAP_BASE);
+    fault_private_page(mm, HEAP_BASE + PAGE_4K_SIZE);
+    user_vm_page_t *a = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+    user_vm_page_t *b = make_shared_page(mm, HEAP_BASE + PAGE_4K_SIZE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+    uint64_t a_pa = a->pa, b_pa = b->pa;
+    write_page(a_pa, 0xA5);
+    write_page(b_pa, 0x5A);
+
+    assert_eq(2, resident_count(mm));
+    assert_eq(2, user_vm_test_leaf_count());
+    int frees0 = user_vm_test_free_count();
+    int allocs0 = user_vm_test_page_allocs();
+
+    /* First temporary page succeeds, second fails. */
+    user_vm_test_fail_page_after(1);
+    assert_eq(-ENOMEM, user_vm_prepare_copy(mm, HEAP_BASE,
+                                            PAGE_4K_SIZE * 2, true));
+
+    /* Two alloc calls (the second one failed — the counter counts
+     * calls, not successes), exactly one net free: the first
+     * temporary copy.  No double free. */
+    assert_eq(allocs0 + 2, user_vm_test_page_allocs());
+    assert_eq(frees0 + 1, user_vm_test_free_count());
+    assert_eq(0, user_vm_test_double_frees());
+
+    /* Both original pages and records retained. */
+    assert_eq(2, resident_count(mm));
+    assert_eq(2, user_vm_test_leaf_count());
+    assert_eq(a_pa, a->pa);
+    assert_eq(b_pa, b->pa);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, a->share);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, b->share);
+    assert_eq(2, user_vm_test_cow_refs(a_pa));
+    assert_eq(2, user_vm_test_cow_refs(b_pa));
+    assert_eq((unsigned char)0xA5,
+              ((unsigned char *)Phy_To_Virt(a_pa))[0]);
+    assert_eq((unsigned char)0x5A,
+              ((unsigned char *)Phy_To_Virt(b_pa))[0]);
+    /* Hardware leaves unchanged: still RO/NX (no COW replace ran). */
+    uint64_t qpa = 0;
+    uint32_t qvm = 0;
+    assert_eq(0, arch_vmm_query_4k(mm->pgdir, HEAP_BASE, &qpa, &qvm));
+    assert_eq(a_pa, qpa);
+    assert_true((qvm & VM_WRITE) == 0);
+
+    user_vm_test_set_cow_refs(a_pa, 1);
+    user_vm_test_set_cow_refs(b_pa, 1);
+    user_vm_destroy(mm);
+    assert_eq(0, user_vm_test_double_frees());
+    free(mm);
+    free_4k_page(a_pa);
+    free_4k_page(b_pa);
+}
+
 TEST_FUNC(test_fault_entry_cow_write)
 {
     user_vm_test_reset();
@@ -1759,6 +1824,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_brk_shrink_shared_tail_oom_preserves_state),
     TEST_ENTRY(test_prepare_copy_rejects_hole_without_allocating),
     TEST_ENTRY(test_prepare_copy_map_failure_preserves_three_sources),
+    TEST_ENTRY(test_prepare_copy_second_cow_alloc_failure),
     TEST_ENTRY(test_prepare_copy_success_commits_cow_and_absent),
     TEST_ENTRY(test_fault_entry_cow_write),
 TEST_LIST_END

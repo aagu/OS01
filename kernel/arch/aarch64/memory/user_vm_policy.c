@@ -32,6 +32,7 @@
 #include <memory/slab.h>        /* kmalloc / kfree */
 #include <arch/aarch64/user_vm_leaf.h>    /* leaf adapter (arch_user_vm_*) */
 #include <arch/aarch64/user_vm_policy.h>  /* this TU's policy API */
+#include <arch/aarch64/user_vm_internal.h> /* shared fork internals */
 #include <memory/vm_area.h>
 #include <memory/vma.h>         /* vma_t, VMA_*, MAP_*, PROT_* */
 #include <memory/vmm.h>         /* VM_*, arch_vmm_* */
@@ -57,7 +58,7 @@ static uint64_t page_align_up(uint64_t x)
 
 /* mm->pgdir holds the root PA; the M3 entries take the direct-map
  * pointer. */
-static uint64_t *vm_root(mm_t *mm)
+uint64_t *aarch64_user_vm_root_va(mm_t *mm)
 {
     return (uint64_t *)Phy_To_Virt((uintptr_t)mm->pgdir);
 }
@@ -113,7 +114,7 @@ static user_vm_page_t *resident_lookup(mm_t *mm, uint64_t va)
     return NULL;
 }
 
-static void resident_insert(mm_t *mm, user_vm_page_t *node)
+void aarch64_user_vm_resident_insert(mm_t *mm, user_vm_page_t *node)
 {
     list_t *prev = NULL;
     list_t *p = mm->resident_list.next;
@@ -136,7 +137,7 @@ static void resident_insert(mm_t *mm, user_vm_page_t *node)
         mm->resident_list.prev = &node->list;
 }
 
-static void resident_unlink(mm_t *mm, user_vm_page_t *node)
+void aarch64_user_vm_resident_unlink(mm_t *mm, user_vm_page_t *node)
 {
     list_t *prev = node->list.prev;
     list_t *next = node->list.next;
@@ -157,6 +158,19 @@ static void resident_unlink(mm_t *mm, user_vm_page_t *node)
 /* Internal corruption check: the record and the page table must
  * agree on the PA.  A query failure is as fatal as a mismatch — the
  * policy never proceeds past a broken invariant. */
+/* Shared no-file VMA drain (fork rollback + destroy): unlink every
+ * VMA node and free it.  The nodes carry no file references on this
+ * port, so the drain is pure metadata; the caller keeps ownership of
+ * any break/stack field cleanup it still needs. */
+void aarch64_user_vm_free_vmas(mm_t *mm)
+{
+    while (mm->vma_list.next != &mm->vma_list) {
+        vma_t *v = container_of(mm->vma_list.next, vma_t, list);
+        vm_area_unlink(v);
+        kfree(v);
+    }
+}
+
 static void resident_verify(mm_t *mm, uint64_t *root, user_vm_page_t *r)
 {
     struct user_vm_leaf leaf;
@@ -189,7 +203,7 @@ static void resident_remove_leaf(mm_t *mm, user_vm_page_t *r, uint64_t *root)
     if (rc != 0 || leaf.state == USER_VM_ABSENT || leaf.pa != r->pa)
         arch_user_vm_invariant("resident remove mismatch");
     resident_drop_pa(leaf.pa, r->share);
-    resident_unlink(mm, r);
+    aarch64_user_vm_resident_unlink(mm, r);
     kfree(r);
 }
 
@@ -282,7 +296,7 @@ int user_vm_cow_fault(mm_t *mm, uint64_t far)
     /* cow_private_page performs the remaining checks (shared, logical
      * RW, same-PA RO/NX leaf) and returns -EFAULT for a non-COW
      * fault, -ENOMEM for copy exhaustion. */
-    return cow_private_page(mm, r, vm_root(mm));
+    return cow_private_page(mm, r, aarch64_user_vm_root_va(mm));
 }
 
 /* ── Permission translation ────────────────────────────────────── */
@@ -449,13 +463,13 @@ int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa, uint32_t flags)
     rec->list.prev = NULL;
     rec->list.next = NULL;
 
-    int rc = arch_vmm_map_4k_new(vm_root(mm), pa, va, flags);
+    int rc = arch_vmm_map_4k_new(aarch64_user_vm_root_va(mm), pa, va, flags);
     if (rc) {
         kfree(rec);             /* PA still belongs to the caller */
         return rc;
     }
 
-    resident_insert(mm, rec);
+    aarch64_user_vm_resident_insert(mm, rec);
     return 0;
 }
 
@@ -467,318 +481,12 @@ bool user_vm_has_metadata(const mm_t *mm)
            mm->vma_list.next != &mm->vma_list;
 }
 
-/* ── fork clone transaction ─────────────────────────────────────── */
-
-/* One staged page: the parent snapshot and the child record/mapping.
- * The flags below are the log of what this call actually completed,
- * so rollback undoes exactly that much — never more. */
-struct clone_stage {
-    struct clone_stage *next;
-    user_vm_page_t    *parent;
-    user_vm_page_t    *child;
-    struct user_vm_leaf parent_leaf;   /* PRESENT/STASHED snapshot */
-    uint16_t           old_refs;
-    bool               first_share;
-    bool               acquired;
-    bool               parent_downgraded;
-    bool               child_mapped;
-    bool               child_inserted;
-};
-
-static void clone_stages_free(struct clone_stage *s)
-{
-    while (s) {
-        struct clone_stage *next = s->next;
-        if (s->child && !s->child_inserted)
-            kfree(s->child);
-        kfree(s);
-        s = next;
-    }
-}
-
-static void clone_child_vmas_free(mm_t *child)
-{
-    while (child->vma_list.next != &child->vma_list) {
-        vma_t *v = container_of(child->vma_list.next, vma_t, list);
-        vm_area_unlink(v);
-        kfree(v);
-    }
-}
-
-/* Borrowed child leaves: remove them and verify the PA.  The PA is
- * never freed here — the parent still owns it. */
-static void clone_unmap_children(struct clone_stage *s, uint64_t *child_root)
-{
-    for (; s; s = s->next) {
-        if (!s->child_mapped)
-            continue;
-        struct user_vm_leaf leaf;
-        int rc = arch_user_vm_remove(child_root, s->child->va, &leaf);
-        if (rc != 0 || leaf.state == USER_VM_ABSENT ||
-            leaf.pa != s->child->pa)
-            arch_user_vm_invariant("fork rollback child leaf mismatch");
-        s->child_mapped = false;
-    }
-}
-
-/* Undo the committed references.  A first share established BOTH
- * references, so it is released twice; an already-shared page only
- * loses the one this fork added. */
-static void clone_release_refs(struct clone_stage *s)
-{
-    for (; s; s = s->next) {
-        if (!s->acquired)
-            continue;
-        bool last = false;
-        if (s->first_share) {
-            if (pmm_cow_release(s->parent->pa, &last) != 0 || last)
-                arch_user_vm_invariant("fork rollback first share");
-            if (pmm_cow_release(s->parent->pa, &last) != 0 || !last)
-                arch_user_vm_invariant("fork rollback first share");
-            s->parent->share = USER_VM_PAGE_PRIVATE;
-        } else {
-            if (pmm_cow_release(s->parent->pa, &last) != 0)
-                arch_user_vm_invariant("fork rollback shared");
-        }
-        s->acquired = false;
-    }
-}
-
-/* Restore every parent leaf this fork lowered to RO/NX. */
-static void clone_restore_parent_leaves(struct clone_stage *s,
-                                       uint64_t *parent_root)
-{
-    for (; s; s = s->next) {
-        if (!s->parent_downgraded)
-            continue;
-        uint64_t old_pa = 0;
-        uint32_t old_vm = 0;
-        int rc = arch_vmm_update_4k(parent_root, s->parent->pa,
-                                    s->parent->va, VM_USER_RW | VM_NO_EXEC,
-                                    &old_pa, &old_vm);
-        if (rc != 0 || old_pa != s->parent->pa ||
-            old_vm != (VM_USER_RO | VM_NO_EXEC))
-            arch_user_vm_invariant("fork rollback parent restore mismatch");
-        s->parent_downgraded = false;
-    }
-}
-
-static void clone_remove_child_records(mm_t *child, struct clone_stage *s)
-{
-    for (; s; s = s->next) {
-        if (!s->child_inserted)
-            continue;
-        resident_unlink(child, s->child);
-        s->child_inserted = false;
-        kfree(s->child);
-        s->child = NULL;
-    }
-}
-
-/* Permission word for the child's first mapping.  A stash needs a
- * temporarily valid word (map_new refuses VM_PROTNONE and the entry is
- * an update-only state); a logical-RW page starts read-only; RO and
- * RX keep their exact flags.  Non-resident pages are never filled. */
-static uint32_t clone_child_vm(const struct user_vm_leaf *leaf)
-{
-    if (leaf->state == USER_VM_STASHED)
-        return VM_USER_RO | VM_NO_EXEC;
-    if (!(leaf->flags & VM_WRITE))
-        return leaf->flags;
-    return VM_USER_RO | VM_NO_EXEC;
-}
-
-static void clone_child_clear(mm_t *child)
-{
-    clone_child_vmas_free(child);
-    child->resident_list.next = NULL;
-    child->resident_list.prev = NULL;
-    child->start_code   = child->end_code   = 0;
-    child->start_data   = child->end_data   = 0;
-    child->start_rodata = child->end_rodata = 0;
-    child->start_brk    = child->end_brk    = 0;
-    child->start_stack  = 0;
-    child->mmap_base    = 0;
-}
-
-int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
-                       void *arg)
-{
-    if (!parent || !child || !publish || parent == child)
-        return -EINVAL;
-    if (!parent->pgdir || !child->pgdir)
-        return -EINVAL;
-    if (child->resident_list.next != NULL ||
-        !list_is_empty(&child->vma_list))
-        return -EINVAL;
-
-    uint64_t *parent_root = vm_root(parent);
-    uint64_t *child_root  = vm_root(child);
-    int rc = 0;
-
-    /* Declared before the first fallible step: every failure path below
-     * rolls back through this log, including a VMA-copy failure. */
-    struct clone_stage *stages = NULL;
-    struct clone_stage **tail = &stages;
-
-    /* Copy the address layout, then every VMA node. */
-    child->start_code   = parent->start_code;
-    child->end_code     = parent->end_code;
-    child->start_data   = parent->start_data;
-    child->end_data     = parent->end_data;
-    child->start_rodata = parent->start_rodata;
-    child->end_rodata   = parent->end_rodata;
-    child->start_brk    = parent->start_brk;
-    child->end_brk      = parent->end_brk;
-    child->start_stack  = parent->start_stack;
-    child->mmap_base    = parent->mmap_base;
-
-    for (list_t *p = parent->vma_list.next; p != &parent->vma_list;
-         p = p->next) {
-        vma_t *pv = container_of(p, vma_t, list);
-        vma_t *cv = kmalloc(sizeof(*cv));
-        if (!cv) {
-            rc = -ENOMEM;
-            goto fail;
-        }
-        *cv = *pv;
-        list_init(&cv->list);
-        vm_area_insert_sorted(child, cv);
-    }
-
-    /* Borrow phase: snapshot each parent leaf and map the child leaf
-     * at the same PA.  No PMM reference exists yet. */
-    for (list_t *p = parent->resident_list.next; p; p = p->next) {
-        user_vm_page_t *pr = container_of(p, user_vm_page_t, list);
-
-        struct clone_stage *st = kmalloc(sizeof(*st));
-        user_vm_page_t *cr = kmalloc(sizeof(*cr));
-        if (!st || !cr) {
-            kfree(st);
-            kfree(cr);
-            rc = -ENOMEM;
-            goto fail;
-        }
-        __builtin_memset(st, 0, sizeof(*st));
-        st->parent = pr;
-        st->child = cr;
-        cr->va        = pr->va;
-        cr->pa        = pr->pa;
-        cr->source    = pr->source;
-        cr->logical   = pr->logical;
-        cr->share     = USER_VM_PAGE_PRIVATE;   /* until commit */
-        cr->list.prev = NULL;
-        cr->list.next = NULL;
-        *tail = st;
-        tail = &st->next;
-
-        if (arch_user_vm_query(parent_root, pr->va, &st->parent_leaf) != 0 ||
-            st->parent_leaf.state == USER_VM_ABSENT ||
-            st->parent_leaf.pa != pr->pa) {
-            rc = -EINVAL;
-            goto fail;
-        }
-
-        st->old_refs = page_cow_refs(pr->pa);
-        if (pr->share == USER_VM_PAGE_PRIVATE) {
-            if (st->old_refs != 0) {
-                rc = -EINVAL;
-                goto fail;
-            }
-            st->first_share = true;
-        } else if (pr->share == USER_VM_PAGE_SHARED) {
-            if (st->old_refs == 0) {
-                rc = -EINVAL;
-                goto fail;
-            }
-            if (st->old_refs == UINT16_MAX) {
-                rc = -EOVERFLOW;
-                goto fail;
-            }
-            /* A shared writable leaf violates the hardware contract. */
-            if (st->parent_leaf.state == USER_VM_PRESENT &&
-                (st->parent_leaf.flags & VM_WRITE)) {
-                rc = -EINVAL;
-                goto fail;
-            }
-        } else {
-            rc = -EINVAL;
-            goto fail;
-        }
-
-        rc = arch_vmm_map_4k_new(child_root, pr->pa, pr->va,
-                                 clone_child_vm(&st->parent_leaf));
-        if (rc)
-            goto fail;
-        st->child_mapped = true;
-
-        if (st->parent_leaf.state == USER_VM_STASHED) {
-            rc = arch_vmm_update_4k(child_root, pr->pa, pr->va,
-                                    VM_PROTNONE, NULL, NULL);
-            if (rc)
-                goto fail;
-        }
-    }
-
-    /* Commit: one checked reference per page, then lower each parent
-     * writable leaf.  A commit-time mismatch halts the kernel. */
-    for (struct clone_stage *st = stages; st; st = st->next) {
-        rc = pmm_cow_acquire(st->parent->pa, st->first_share);
-        if (rc)
-            goto fail;
-        st->acquired = true;
-        st->parent->share = USER_VM_PAGE_SHARED;
-        st->child->share  = USER_VM_PAGE_SHARED;
-
-        if (st->parent_leaf.state == USER_VM_PRESENT &&
-            (st->parent_leaf.flags & VM_WRITE)) {
-            uint64_t old_pa = 0;
-            uint32_t old_vm = 0;
-            int urc = arch_vmm_update_4k(parent_root, st->parent->pa,
-                                         st->parent->va,
-                                         VM_USER_RO | VM_NO_EXEC,
-                                         &old_pa, &old_vm);
-            if (urc != 0 || old_pa != st->parent->pa ||
-                old_vm != (VM_USER_RW | VM_NO_EXEC))
-                arch_user_vm_invariant("fork parent downgrade mismatch");
-            st->parent_downgraded = true;
-        }
-    }
-
-    /* The child mm is complete; task publication is the last fallible
-     * step. */
-    for (struct clone_stage *st = stages; st; st = st->next) {
-        resident_insert(child, st->child);
-        st->child_inserted = true;
-    }
-
-    rc = publish(arg);
-    if (rc)
-        goto fail;
-
-    clone_stages_free(stages);
-    return 0;
-
-fail:
-    /* Undo exactly what this call completed.  The child leaves are
-     * borrowed, so removing them frees no PA; the references, parent
-     * permissions and child records follow; the child mm goes back
-     * empty for the caller to destroy. */
-    clone_unmap_children(stages, child_root);
-    clone_release_refs(stages);
-    clone_restore_parent_leaves(stages, parent_root);
-    clone_remove_child_records(child, stages);
-    clone_child_clear(child);
-    clone_stages_free(stages);
-    return rc;
-}
-
 void user_vm_destroy(mm_t *mm)
 {
     if (!mm)
         return;
 
-    uint64_t *root = vm_root(mm);
+    uint64_t *root = aarch64_user_vm_root_va(mm);
 
     list_t *p = mm->resident_list.next;
     while (p) {
@@ -790,11 +498,7 @@ void user_vm_destroy(mm_t *mm)
     mm->resident_list.next = NULL;
     mm->resident_list.prev = NULL;
 
-    while (mm->vma_list.next != &mm->vma_list) {
-        vma_t *v = container_of(mm->vma_list.next, vma_t, list);
-        vm_area_unlink(v);
-        kfree(v);
-    }
+    aarch64_user_vm_free_vmas(mm);
 
     mm->start_brk = 0;
     mm->end_brk   = 0;
@@ -833,7 +537,7 @@ int64_t user_vm_brk(mm_t *mm, uint64_t addr)
      * and has its tail zeroed through the direct-map alias. */
     uint64_t aligned_new = page_align_up(addr);
     uint64_t aligned_old = page_align_up(old_end);
-    uint64_t *root = vm_root(mm);
+    uint64_t *root = aarch64_user_vm_root_va(mm);
 
     /* The retained tail must be exclusively ours before it is zeroed:
      * writing a shared page would corrupt the peer.  This is the first
@@ -1018,7 +722,7 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
 
     /* Every resident record inside the range must already agree with
      * its leaf before the first mutation. */
-    uint64_t *root = vm_root(mm);
+    uint64_t *root = aarch64_user_vm_root_va(mm);
     for (list_t *lp = mm->resident_list.next; lp; lp = lp->next) {
         user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
         if (r->va < addr) continue;
@@ -1101,7 +805,7 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len)
         }
     }
 
-    uint64_t *root = vm_root(mm);
+    uint64_t *root = aarch64_user_vm_root_va(mm);
     for (list_t *lp = mm->resident_list.next; lp; lp = lp->next) {
         user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
         if (r->va < addr) continue;
@@ -1143,29 +847,15 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len)
 
 /* ── Demand paging ─────────────────────────────────────────────── */
 
-int user_vm_fault(mm_t *mm, uint64_t far, bool write)
+/* Allocate, zero and install one anonymous leaf, in the fixed order
+ * record alloc → page alloc → clear → map_new → fill record.  Any
+ * failure reclaims exactly this call's resources; *out is written
+ * only on success and the record is NOT on any chain yet (the fault
+ * path inserts it into the resident chain, copy pre-instantiation
+ * hangs it on the rollback chain). */
+static int map_anon_leaf(uint64_t *root, uint64_t va, uint32_t map_vm,
+                         user_vm_page_t **out)
 {
-    if (!mm)
-        return -EFAULT;
-
-    uint64_t va = far & ~((uint64_t)PAGE_4K_SIZE - 1);
-    if (va < AARCH64_USER_MIN || va >= AARCH64_USER_LIMIT)
-        return -EFAULT;
-
-    uint32_t map_vm = 0;
-    if (authorize_absent(mm, va, write, &map_vm) != 0)
-        return -EFAULT;
-
-    uint64_t *root = vm_root(mm);
-
-    /* Only a truly absent leaf may be instantiated: a present leaf
-     * means the hardware abort was not a demand fault, and a stash is
-     * PROT_NONE (the old termination path owns both). */
-    struct user_vm_leaf leaf;
-    if (arch_user_vm_query(root, va, &leaf) != 0 ||
-        leaf.state != USER_VM_ABSENT)
-        return -EFAULT;
-
     user_vm_page_t *rec = kmalloc(sizeof(*rec));
     if (!rec)
         return -ENOMEM;
@@ -1190,7 +880,38 @@ int user_vm_fault(mm_t *mm, uint64_t far, bool write)
     rec->share   = USER_VM_PAGE_PRIVATE;
     rec->list.prev = NULL;
     rec->list.next = NULL;
-    resident_insert(mm, rec);
+    *out = rec;
+    return 0;
+}
+
+int user_vm_fault(mm_t *mm, uint64_t far, bool write)
+{
+    if (!mm)
+        return -EFAULT;
+
+    uint64_t va = far & ~((uint64_t)PAGE_4K_SIZE - 1);
+    if (va < AARCH64_USER_MIN || va >= AARCH64_USER_LIMIT)
+        return -EFAULT;
+
+    uint32_t map_vm = 0;
+    if (authorize_absent(mm, va, write, &map_vm) != 0)
+        return -EFAULT;
+
+    uint64_t *root = aarch64_user_vm_root_va(mm);
+
+    /* Only a truly absent leaf may be instantiated: a present leaf
+     * means the hardware abort was not a demand fault, and a stash is
+     * PROT_NONE (the old termination path owns both). */
+    struct user_vm_leaf leaf;
+    if (arch_user_vm_query(root, va, &leaf) != 0 ||
+        leaf.state != USER_VM_ABSENT)
+        return -EFAULT;
+
+    user_vm_page_t *rec = NULL;
+    if (map_anon_leaf(root, va, map_vm, &rec) != 0)
+        return -ENOMEM;
+
+    aarch64_user_vm_resident_insert(mm, rec);
     return 0;
 }
 
@@ -1248,7 +969,7 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
 
     uint64_t start = addr & ~((uint64_t)PAGE_4K_SIZE - 1);
     uint64_t end   = page_align_up(addr + (uint64_t)len);
-    uint64_t *root = vm_root(mm);
+    uint64_t *root = aarch64_user_vm_root_va(mm);
     int rc;
 
     /* Pass 1 — complete read-only validation.  A write range accepts
@@ -1293,6 +1014,12 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
             return -ENOMEM;
     }
 
+    /* The rollback chain's NULL-terminated head exists from before
+     * the first `goto fail` below: pass 2's allocation failures must
+     * reach the fail label with an EMPTY chain, never an
+     * uninitialized one. */
+    list_t staged = { .prev = NULL, .next = NULL };
+
     /* Pass 2 — preallocate every multi-reference private copy and log
      * the unique-reference upgrades.  The COW leaves and their counts
      * are untouched until the whole range is ready to commit. */
@@ -1330,11 +1057,10 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
         cow[ncow++] = (struct copy_cow_stage){ r, r->pa, new_pa };
     }
 
-    /* Pass 3 — create the absent pages on an independent rollback
-     * chain.  A map failure removes every temporary leaf and page but
-     * leaves intermediate tables for mm destroy to reclaim. */
-    list_t staged = { .prev = NULL, .next = NULL };
-
+    /* Pass 3 — create the absent pages on the rollback chain
+     * initialized before pass 2.  A map failure removes every
+     * temporary leaf and page but leaves intermediate tables for mm
+     * destroy to reclaim. */
     for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
         struct user_vm_leaf leaf;
         if (arch_user_vm_query(root, va, &leaf) != 0) {
@@ -1350,32 +1076,11 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
             goto fail;
         }
 
-        user_vm_page_t *rec = kmalloc(sizeof(*rec));
-        if (!rec) {
+        user_vm_page_t *rec = NULL;
+        if (map_anon_leaf(root, va, map_vm, &rec) != 0) {
             rc = -ENOMEM;
             goto fail;
         }
-
-        uint64_t pa = alloc_4k_page();
-        if (!pa) {
-            kfree(rec);
-            rc = -ENOMEM;
-            goto fail;
-        }
-        memset(Phy_To_Virt(pa), 0, PAGE_4K_SIZE);
-
-        if (arch_vmm_map_4k_new(root, pa, va, map_vm) != 0) {
-            free_4k_page(pa);
-            kfree(rec);
-            rc = -ENOMEM;
-            goto fail;
-        }
-
-        rec->va = va;
-        rec->pa = pa;
-        rec->source  = USER_VM_PAGE_ANON;
-        rec->logical = map_vm;
-        rec->share   = USER_VM_PAGE_PRIVATE;
         staged_append(&staged, rec);
     }
 
@@ -1418,7 +1123,7 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
             staged.next->prev = NULL;
         else
             staged.prev = NULL;
-        resident_insert(mm, r);
+        aarch64_user_vm_resident_insert(mm, r);
     }
     kfree(cow);
     return 0;
