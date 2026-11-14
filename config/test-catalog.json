@@ -1400,6 +1400,16 @@
       }
     },
     {
+      "id": "test_assertion_policy_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_assertion_policy_audit.py"
+    },
+    {
       "id": "test_audit_symbol_contract",
       "layer": "harness",
       "subsystem": "test-framework",

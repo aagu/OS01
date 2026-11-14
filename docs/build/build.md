@@ -54,7 +54,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants) | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
-| `make test-static` | runtime / layout / canary / link-order audits (15 audits) | — |
+| `make test-static` | runtime / layout / canary / link-order audits (16 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*` | AArch64 PSCI / GIC / sync-fault / scheduler / boot-contract acceptance harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
@@ -496,7 +496,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
-| `test-static` | — | — | 15 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、arch10-capacity-audit、user-canary） |
+| `test-static` | — | — | 16 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、arch10-capacity-audit、assertion-policy、user-canary） |
 | `test-kernel-selftest` | — | — | 启动 selftest 镜像 variant（`KERNEL_SELFTEST=1`）并解析 `[selftest]` 标记 |
 | `test-harness` | — | — | Python `unittest` 框架回归（`TEST_HARNESS_MODULES` 列表；不启动 QEMU，含场景与契约校验） |
 
@@ -705,7 +705,7 @@ make PROFILE=x86_64-clang test-libc-host LIBC_CASE=api     # libc 补全宿主�
 make PROFILE=x86_64-clang test-libc-api-audit              # libc 归档导出审计（用户 libc + libk）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity # ARCH-10 隔离容量与工程完整性验收
-make test-static                    # 15 项静态审计
+make test-static                    # 16 项静态审计
 make test-kernel-selftest           # 内核 selftest
 make test-aarch64 MODE=smp          # aarch64 PSCI/SMP
 make PROFILE=aarch64-clang test-aarch64 MODE=sched  # EL1 调度器验收（正例矩阵 + 四个故障注入变体）

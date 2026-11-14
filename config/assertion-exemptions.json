@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "exemptions": [
+    {
+      "path": "qemutests/aarch64_boot_logo.py",
+      "reason_class": "pending",
+      "owner": "drivers/fb",
+      "priority": "P2",
+      "notes": "Reads kernel/driver/logo.c and PSF2 font to derive expected wordmark glyph counts"
+    },
+    {
+      "path": "qemutests/aarch64_smp_test.py",
+      "reason_class": "pending",
+      "owner": "arch/aarch64",
+      "priority": "P1",
+      "notes": "Checks sync_entry source order in kernel/arch/aarch64/"
+    },
+    {
+      "path": "qemutests/arch10_capacity_audit.py",
+      "reason_class": "pending",
+      "owner": "sched/mm",
+      "priority": "P1",
+      "notes": "Scans kernel source for capacity/SMP constants"
+    },
+    {
+      "path": "qemutests/driver_model_boundary_audit.py",
+      "reason_class": "pending",
+      "owner": "drivers",
+      "priority": "P1",
+      "notes": "Scans kernel/ for driver-model boundary violations"
+    },
+    {
+      "path": "qemutests/gui_build_audit.py",
+      "reason_class": "pending",
+      "owner": "gui",
+      "priority": "P1",
+      "notes": "Audits GUI build artifacts and user/gui sources"
+    },
+    {
+      "path": "qemutests/intr_dispatch_audit.py",
+      "reason_class": "pending",
+      "owner": "intr",
+      "priority": "P1",
+      "notes": "Audits interrupt dispatch stubs and entry/handler linkage"
+    },
+    {
+      "path": "qemutests/kernel_runtime_link_test.py",
+      "reason_class": "pending",
+      "owner": "runtime",
+      "priority": "P2",
+      "notes": "Checks runtime link receipt and compiler-rt references"
+    },
+    {
+      "path": "qemutests/syscall_boundary_audit.py",
+      "reason_class": "pending",
+      "owner": "syscall",
+      "priority": "P1",
+      "notes": "Audits uapi/syscall boundary headers and implementations"
+    },
+    {
+      "path": "qemutests/test_arch10_capacity_runner.py",
+      "reason_class": "pending",
+      "owner": "test-framework",
+      "priority": "P2",
+      "notes": "Harness unit test for arch10 capacity runner"
+    },
+    {
+      "path": "qemutests/test_brk_source_scan.py",
+      "reason_class": "pending",
+      "owner": "memory",
+      "priority": "P1",
+      "notes": "Exercises hosttests/cases/test_brk_pages.c source scan against kernel/syscall/sys_mm.c and trap.c"
+    },
+    {
+      "path": "qemutests/test_build_incremental.py",
+      "reason_class": "pending",
+      "owner": "build",
+      "priority": "P2",
+      "notes": "Incremental build test touching/reading source files"
+    },
+    {
+      "path": "qemutests/test_doom_build_contract.py",
+      "reason_class": "pending",
+      "owner": "user/doom",
+      "priority": "P2",
+      "notes": "Verifies Doom build contract and source rules"
+    },
+    {
+      "path": "qemutests/test_intr_dispatch_audit.py",
+      "reason_class": "pending",
+      "owner": "intr",
+      "priority": "P2",
+      "notes": "Unit tests for intr_dispatch_audit.py"
+    },
+    {
+      "path": "qemutests/test_monitor_runner.py",
+      "reason_class": "pending",
+      "owner": "test-framework",
+      "priority": "P2",
+      "notes": "Pins terminal diagnostic log formats against user/terminal/*.c"
+    },
+    {
+      "path": "qemutests/test_x86_intr_fault.py",
+      "reason_class": "pending",
+      "owner": "arch/x86_64",
+      "priority": "P1",
+      "notes": "Checks AP NMI ordering in smp.c and trampoline.S"
+    },
+    {
+      "path": "tools/tests/scan_tests.py",
+      "reason_class": "pending",
+      "owner": "test-framework",
+      "priority": "P2",
+      "notes": "Scans hosttests/kernel/selftest/user/systest @os01-test metadata blocks"
+    },
+    {
+      "path": "tools/tests/test_kernel_headers.py",
+      "reason_class": "pending",
+      "owner": "build",
+      "priority": "P2",
+      "notes": "Header dependency/include check under kernel/include"
+    }
+  ]
+}

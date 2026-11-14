@@ -2493,6 +2493,7 @@ STATIC_AUDIT_TARGETS = \
   test-gui-build-audit \
   test-intr-dispatch-audit \
   test-arch10-capacity-audit \
+  test-assertion-policy \
   test-user-canary
 
 .PHONY: $(STATIC_AUDIT_TARGETS) test-static test-static-prereqs
@@ -2553,6 +2554,12 @@ test-arch10-capacity-audit:
 	$(RUN_STATIC_AUDIT) arch10-capacity-audit -- \
 	  python3 qemutests/arch10_capacity_audit.py \
 	    --repo-root "$(OS01_ROOT)"
+
+test-assertion-policy:
+	$(RUN_STATIC_AUDIT) assertion-policy -- \
+	  python3 qemutests/assertion_policy_audit.py \
+	    --repo-root "$(OS01_ROOT)" \
+	    --exemptions "$(OS01_ROOT)/config/assertion-exemptions.json"
 
 test-static: test-static-prereqs
 	+$(MAKE) --no-print-directory $(STATIC_AUDIT_TARGETS)

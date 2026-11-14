@@ -86,3 +86,52 @@ OS01 实行多层防护策略，每一层有明确的证明目标与局限性，
 - **跨层引用与 `supporting` 规则**：若测试目录 (`config/test-catalog.json`) 中某测试声明 `scenarios: [S]` 且该测试的 `layer != S.owner`，则场景 `S` 的 `supporting` 列表中必须包含对应 `layer` 且附带非空 `distinct_risk` 的条目，说明该层防范的独特失效风险；否则 `scenario_catalog.py --check` 失败。引用不存在的场景 ID 同样失败。
 - 所有宿主测试、静态审计工具、框架测试模块以及 guest suite 必须在目录中有对应的映射记录。
 - 目录由 `python3 qemutests/scenario_catalog.py --check` 进行持续校验，作为 CI 与构建合规性门禁。
+
+---
+
+## 7. 断言分层与源码断言治理 (Assertion Policy)
+
+### 7.1 三类断言边界
+
+1. **允许钉 (Allowed Pins)**：
+   - 对编译产物、ELF 符号表与节区布局（`llvm-nm`、`llvm-readelf`、`llvm-objdump`）、链接回执（link receipt）的断言。
+   - 对独立编译探针（如 `#ifdef` 禁止宏、`sizeof` 未声明符号 compile-fail 探针）的断言。
+   - 对运行时真实输出协议（QEMU serial、QMP、hosttest/systest 标准输出与退出码）及配置/目录元数据（`config/*.json`、`Makefile` 构建规则）的断言。
+2. **禁止钉 (Forbidden Pins)**：
+   - Python 测试或审计脚本通过 `open()` / `read_text()` / `read_bytes()` 读取**生产源码路径**（`kernel/**`、`boot/**`、`user/**`、`libc/**`、`runtime/**`、`include/**`）并对源码文本执行 `re.search`、`re.match`、`re.findall`、`in`、`assertIn` 或 `assertRegex` 等文本匹配断言。
+   - 禁止通过源码字符串匹配来验证函数内部实现细节、变量命名、注释或特定语句写法。
+3. **结构不变量 (Structural Invariants)**：
+   - 仅当某个全局架构约束（例如跨子系统头文件包含边界、特定节区/宏放置规范、编译期无法直接表达的汇编/引导序列顺序）确实无法通过单次编译、链接或运行时测试等价证明时，方可作为结构不变量保留源码扫描。
+   - 每一项结构不变量必须指向明确的规范依据（`AGENTS.md` 章节或 `docs/` 设计文档）。
+
+### 7.2 「最弱充分断言」原则
+
+选择断言方式时遵循**最弱充分断言 (Weakest Sufficient Assertion)** 原则：只要更接近真实语义的验证载体足以证明目标不变量，就禁止退化为更脆弱的源码文本匹配：
+1. **运行时行为验证**（`host` / `kernel_selftest` / `systest` / `qemu_e2e`）优先于静态产物检查；
+2. **编译期与链接期符号/类型检查**（`clang -c`、`llvm-nm`、`llvm-readelf`）优先于构建脚本或源码检查；
+3. **构建元数据与依赖图契约**优先于源码文本扫描。
+
+### 7.3 豁免清单格式与门禁 (`config/assertion-exemptions.json`)
+
+由 `qemutests/assertion_policy_audit.py`（挂载为 `make test-assertion-policy` 并纳入 `make test-static`）强制执行 fail-closed 检查：
+- 任何命中「读取生产源码 + 文本正则/`in` 断言」模式的 Python 文件若未在 `config/assertion-exemptions.json` 中登记有效豁免，审计立即退出 `1` 并输出 `file:line`。
+- 豁免条目 schema：
+  ```json
+  {
+    "schema_version": 1,
+    "exemptions": [
+      {
+        "path": "qemutests/example_audit.py",
+        "reason_class": "structural-invariant",
+        "policy_ref": "AGENTS.md#... 或 docs/...#...",
+        "owner": "subsystem-owner",
+        "notes": "可选说明"
+      }
+    ]
+  }
+  ```
+- 字段约束：
+  - `path`：相对于仓库根目录的 POSIX 路径。
+  - `reason_class`：仅允许 `"structural-invariant"` 或 `"pending"`。
+  - `policy_ref`：当 `reason_class == "structural-invariant"` 时**必须提供且非空**；缺失或为空时审计必须退出 `1`（fail-closed）。
+  - `"pending"` 仅用于存量历史条目的过渡登记，需配合 `docs/testing/audit-dispositions.md` 逐步完成替换、豁免裁决或降级清理。
