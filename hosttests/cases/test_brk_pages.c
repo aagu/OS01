@@ -67,8 +67,6 @@ static int kmalloc_calls = 0;
 static int kmalloc_fail_after = 0;  /* 0 = never fail */
 static int kmalloc_ok = 0;          /* successful allocations */
 static int kfree_calls = 0;         /* actual returns */
-static int kmalloc_ok_baseline = 0;
-static int kfree_calls_baseline = 0;
 
 void *__wrap_kmalloc(size_t size)
 {
@@ -114,11 +112,6 @@ static void setup_mm(uint64_t elf_end)
         if (v->vm_flags & VMA_HEAP) { heap_vma = v; break; }
     }
     assert_not_null(heap_vma);
-    /* Baseline for the temp-array alloc/return balance checks: taken
-     * AFTER the heap VMA allocation so only mm_set_brk's own temporaries
-     * are counted inside a test body. */
-    kmalloc_ok_baseline = kmalloc_ok;
-    kfree_calls_baseline = kfree_calls;
 }
 
 /* ── Helpers ──────────────────────────────────────────────── */
@@ -433,9 +426,10 @@ static void test_brk_log_alloc_fail_returns_enomem(void)
 }
 
 /* Partial grow failure with a pre-existing valid leaf: the second
- * grow call maps one new leaf successfully, then the NEXT map fails.
- * Only THIS call's installed leaf may be withdrawn; the old leaf's
- * PA, flags and content must survive byte-for-byte. */
+ * grow call installs one new leaf (map #2), then its SECOND new-leaf
+ * map attempt fails (map #3).  Only THIS call's installed leaf may be
+ * withdrawn through the two-round rollback; the old leaf's PA, flags
+ * and content must survive byte-for-byte. */
 static void test_brk_partial_new_leaf_fail_preserves_old_leaf(void)
 {
     TEST_SUITE("mm_set_brk — map fail after one new leaf: only this call's leaf withdrawn");
@@ -455,11 +449,14 @@ static void test_brk_partial_new_leaf_fail_preserves_old_leaf(void)
     assert_not_null(old_rec);
     memset(old_rec->backing, 0x5A, 4096);
 
-    /* Second grow of two pages: the first new map succeeds, the
-     * second fails (maps so far: 1 → inject at map #2). */
-    brk_state.inject_map_fail_at = 2;
+    /* Second grow of two pages: the first new map (#2) succeeds and
+     * installs a leaf, the second new map (#3) fails — the two-round
+     * rollback runs with a NON-empty log.  (Maps so far: 1 from the
+     * first grow → inject at map #3.) */
+    brk_state.inject_map_fail_at = 3;
     int allocs_before = brk_state.total_allocs;
     int frees_before  = brk_state.total_frees;
+    int maps_before   = brk_state.total_maps;
 
     uint64_t new_brk = fixture_mm.start_brk + 3 * PAGE_4K_SIZE;
     result = 0xDEADBEEF;
@@ -469,10 +466,15 @@ static void test_brk_partial_new_leaf_fail_preserves_old_leaf(void)
     assert_eq(fixture_mm.start_brk + PAGE_4K_SIZE, fixture_mm.end_brk);
     assert_eq(heap_vma->vm_end, fixture_mm.end_brk);
 
-    /* Only THIS call's installed leaf was withdrawn: net allocs = 1
-     * (the staged new leaf), net frees = 1 (its PA returned). */
-    assert_eq(allocs_before + 1, brk_state.total_allocs);
-    assert_eq(frees_before + 1,  brk_state.total_frees);
+    /* Exactly one new leaf was installed and withdrawn: net maps +1,
+     * net allocs +2 (leaf 1's PA, leaf 2's PA), net frees +2 (leaf 2's
+     * un-installed PA returned on the map failure, leaf 1's withdrawn
+     * PA released after the local sync).  These deltas are what make
+     * the non-empty-log rollback observable — an empty-log path would
+     * show +1/+1. */
+    assert_eq(maps_before + 1,    brk_state.total_maps);
+    assert_eq(allocs_before + 2,  brk_state.total_allocs);
+    assert_eq(frees_before + 2,   brk_state.total_frees);
 
     /* The old leaf is still mapped, same PA, same flags. */
     brk_pte_record_t *old_after = brk_find_mapping(fixture_mm.start_brk);
@@ -480,7 +482,8 @@ static void test_brk_partial_new_leaf_fail_preserves_old_leaf(void)
     assert_eq(old_phys, x86_pte_4k_pa(old_after->pte));
     assert_eq(old_pte, old_after->pte);
 
-    /* The next page of the heap was NOT committed. */
+    /* THIS call's installed leaf was withdrawn; the next page of the
+     * heap was NOT committed. */
     assert_null(brk_find_mapping(fixture_mm.start_brk + PAGE_4K_SIZE));
 
     /* Old leaf content unchanged. */
