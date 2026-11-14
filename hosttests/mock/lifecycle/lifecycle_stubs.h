@@ -49,7 +49,7 @@ extern lifecycle_page_record_t lifecycle_page_pool[LIFECYCLE_PAGE_POOL_SIZE];
  * The mprotect range tests drive the production do_mprotect through
  * this harness, so they need to observe more than the page pool:
  *   - vfs_get_calls / vfs_put_calls: file references taken by VMA
- *     splits and dropped by vma_remove;
+ *     splits and dropped by x86_vma_destroy_node;
  *   - cow_put_calls: proves the new mprotect path never drops a COW
  *     reference (COW privatization is deferred to first write);
  *   - flush_count / lock_count / unlock_count: commit ordering. */

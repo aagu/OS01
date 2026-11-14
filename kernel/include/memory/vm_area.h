@@ -33,4 +33,10 @@ int vm_area_insert_sorted(mm_t *mm, vma_t *vma);
  * does not drop vm_file — both stay with the owning implementation. */
 void vm_area_unlink(vma_t *vma);
 
+/* Find the heap VMA: the first node carrying VMA_HEAP whose
+ * vm_start equals mm->start_brk.  Unlike vm_area_lookup this DOES
+ * match a zero-length VMA (the heap starts empty); a non-heap node
+ * sharing start_brk is skipped.  Empty mm returns NULL. */
+vma_t *vm_area_find_heap(mm_t *mm);
+
 #endif /* _KERNEL_MEMORY_VM_AREA_H */

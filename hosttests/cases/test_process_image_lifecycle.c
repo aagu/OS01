@@ -9,7 +9,7 @@
  *      against a focused stub harness (hosttests/mock/lifecycle/).
  *      The host harness uses identity Phy_To_Virt and a host-heap
  *      4 KiB-aligned page pool, so mm_init_user_heap /
- *      vma_insert / vma_find / vma_free_all / mm_alloc are
+ *      vm_area_insert_sorted / vm_area_lookup / vma_free_all / mm_alloc are
  *      exercised against observable state. Failure injection
  *      (-Wl,--wrap=kmalloc) lets the test prove that
  *      mm_init_user_heap returns -ENOMEM and leaves mm unchanged
@@ -196,33 +196,76 @@ static void test_mm_init_user_heap_already_aligned(void)
     assert_eq(elf_end, fixture_mm.end_brk);
 }
 
-static void test_vma_find_does_not_match_zero_heap(void)
+static void test_vm_area_lookup_does_not_match_zero_heap(void)
 {
-    TEST_SUITE("mm_init_user_heap — vma_find skips zero-length heap");
+    TEST_SUITE("mm_init_user_heap — vm_area_lookup skips zero-length heap");
+
+    setup_mm();
+
+    /* Empty mm: the heap finder must return NULL (nothing inserted). */
+    assert_null(vm_area_find_heap(&fixture_mm));
+
+    int rc = mm_init_user_heap(&fixture_mm, USER_CODE_ADDR + 0x2000);
+    assert_eq(0, rc);
+
+    /* The heap VMA is [0x600000, 0x600000).  vm_area_lookup(start)
+     * must return NULL — that is the spec §4 invariant the brief calls
+     * out: 普通地址 lookup 不命中零长度堆. */
+    vma_t *found = vm_area_lookup(&fixture_mm, fixture_mm.start_brk);
+    assert_null(found);
+
+    /* The heap finder DOES return the zero-length heap VMA. */
+    vma_t *heap = vm_area_find_heap(&fixture_mm);
+    assert_not_null(heap);
+    assert_eq(fixture_mm.start_brk, heap->vm_start);
+    assert_eq(heap->vm_end, heap->vm_start);
+    assert_true((heap->vm_flags & VMA_HEAP) != 0);
+
+    /* vm_area_lookup just below and just above the heap range must
+     * likewise miss (no other VMA exists). */
+    assert_null(vm_area_lookup(&fixture_mm, fixture_mm.start_brk - 1));
+    assert_null(vm_area_lookup(&fixture_mm, fixture_mm.start_brk + 0x1000));
+}
+
+static void test_vm_area_find_heap_skips_same_start_normal_node(void)
+{
+    TEST_SUITE("mm_init_user_heap — find_heap keeps insertion order at same start");
 
     setup_mm();
     int rc = mm_init_user_heap(&fixture_mm, USER_CODE_ADDR + 0x2000);
     assert_eq(0, rc);
 
-    /* The heap VMA is [0x600000, 0x600000).  vma_find(start) must
-     * return NULL — that is the spec §4 invariant the brief calls
-     * out: vma_find 不会命中此袋. */
-    vma_t *found = vma_find(&fixture_mm, fixture_mm.start_brk);
-    assert_null(found);
+    /* A non-heap VMA sharing the heap's start address is inserted
+     * AFTER the zero-length heap node (insertion order).  The heap
+     * finder must still return the heap node, and the ordinary
+     * address lookup must match the normal node (nonzero length). */
+    vma_t *other = (vma_t *)__real_kmalloc(sizeof(vma_t));
+    assert_not_null(other);
+    list_init(&other->list);
+    other->vm_start     = fixture_mm.start_brk;
+    other->vm_end       = fixture_mm.start_brk + 0x2000;
+    other->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
+    other->vm_pgoff     = 0;
+    other->vm_file      = NULL;
+    vm_area_insert_sorted(&fixture_mm, other);
 
-    /* vma_find just below and just above the heap range must
-     * likewise miss (no other VMA exists). */
-    assert_null(vma_find(&fixture_mm, fixture_mm.start_brk - 1));
-    assert_null(vma_find(&fixture_mm, fixture_mm.start_brk + 0x1000));
+    vma_t *heap = vm_area_find_heap(&fixture_mm);
+    assert_not_null(heap);
+    assert_true((heap->vm_flags & VMA_HEAP) != 0);
+    assert_eq(fixture_mm.start_brk, heap->vm_start);
+
+    vma_t *found = vm_area_lookup(&fixture_mm, fixture_mm.start_brk);
+    assert_not_null(found);
+    assert_eq((uint64_t)other, (uint64_t)found);
 }
 
-static void test_vma_find_matches_other_vma_with_other_vm(void)
+static void test_vm_area_lookup_matches_other_vma_with_other_vm(void)
 {
-    TEST_SUITE("mm_init_user_heap — vma_find still works for other VMAs");
+    TEST_SUITE("mm_init_user_heap — vm_area_lookup still works for other VMAs");
 
     setup_mm();
     /* Insert a non-heap VMA first; then init_user_heap adds the
-     * zero-length heap VMA after it.  vma_find must still match
+     * zero-length heap VMA after it.  vm_area_lookup must still match
      * the non-heap VMA by address. */
     vma_t *other = (vma_t *)__real_kmalloc(sizeof(vma_t));
     assert_not_null(other);
@@ -232,18 +275,18 @@ static void test_vma_find_matches_other_vma_with_other_vm(void)
     other->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     other->vm_pgoff     = 0;
     other->vm_file      = NULL;
-    vma_insert(&fixture_mm, other);
+    vm_area_insert_sorted(&fixture_mm, other);
 
     int rc = mm_init_user_heap(&fixture_mm, USER_CODE_ADDR + 0x3000);
     assert_eq(0, rc);
 
     /* The non-heap VMA is still findable. */
-    vma_t *found = vma_find(&fixture_mm, USER_CODE_ADDR + 0x1500);
+    vma_t *found = vm_area_lookup(&fixture_mm, USER_CODE_ADDR + 0x1500);
     assert_not_null(found);
     assert_eq((uint64_t)other, (uint64_t)found);
 
     /* The heap VMA is still NOT findable. */
-    assert_null(vma_find(&fixture_mm, fixture_mm.start_brk));
+    assert_null(vm_area_lookup(&fixture_mm, fixture_mm.start_brk));
 }
 
 static void test_exactly_one_heap_vma_in_list(void)
@@ -260,7 +303,7 @@ static void test_exactly_one_heap_vma_in_list(void)
         v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
         v->vm_pgoff     = 0;
         v->vm_file      = NULL;
-        vma_insert(&fixture_mm, v);
+        vm_area_insert_sorted(&fixture_mm, v);
     }
     int rc = mm_init_user_heap(&fixture_mm, USER_CODE_ADDR + 0x4000);
     assert_eq(0, rc);
@@ -324,7 +367,7 @@ static void test_destroy_unpublished_user_mm_releases_vmas(void)
     extra->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     extra->vm_pgoff     = 0;
     extra->vm_file      = NULL;
-    vma_insert(&fixture_mm, extra);
+    vm_area_insert_sorted(&fixture_mm, extra);
 
     int vma_count_before = vma_list_count(&fixture_mm.vma_list);
     assert_eq(2, vma_count_before);
@@ -412,7 +455,7 @@ static void test_vma_free_all_vmio_2m_borrowed_pmd_revoked(void)
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     iov->vm_pgoff     = 0;
     iov->vm_file      = NULL;
-    vma_insert(&fixture_mm, iov);
+    vm_area_insert_sorted(&fixture_mm, iov);
     fixture_mm.pgdir = test_user_pgd;
 
     int frees_before = lifecycle_state.total_frees;
@@ -895,7 +938,7 @@ static vma_t *install_mprotect_vma(uint64_t start, uint64_t len,
     v->vm_pgoff     = pgoff;
     v->vm_file      = (vfs_node_t *)&fake_file_node;
     vfs_node_get(v->vm_file);
-    assert_eq(0, vma_insert(&fixture_mm, v));
+    assert_eq(0, vm_area_insert_sorted(&fixture_mm, v));
     return v;
 }
 
@@ -1006,9 +1049,9 @@ static void test_mprotect_split_range(void)
     assert_eq((uint64_t)(VMA_IO | VMA_PROT_READ), io_vma.vm_flags);
     list_del(&io_vma.list);
 
-    vma_remove(&fixture_mm, v0);
-    vma_remove(&fixture_mm, v1);
-    vma_remove(&fixture_mm, v2);
+    x86_vma_destroy_node(v0);
+    x86_vma_destroy_node(v1);
+    x86_vma_destroy_node(v2);
 
     /* A file VMA whose offset window is not representable is rejected
      * before any split, and its state stays byte-for-byte intact. */
@@ -1025,7 +1068,7 @@ static void test_mprotect_split_range(void)
     assert_eq((uint64_t)(VMA_PROT_READ | VMA_PROT_WRITE), bad->vm_flags);
     assert_eq(gets, lifecycle_state.vfs_get_calls);
     assert_eq(0, lifecycle_state.flush_count);
-    vma_remove(&fixture_mm, bad);
+    x86_vma_destroy_node(bad);
 }
 
 static void test_mprotect_split_oom(void)
@@ -1077,7 +1120,7 @@ static void test_mprotect_split_oom(void)
         assert_eq(0, lifecycle_state.flush_count);
         assert_eq(0, lifecycle_state.cow_put_calls);
 
-        vma_remove(&fixture_mm, orig);
+        x86_vma_destroy_node(orig);
     }
 }
 
@@ -1138,7 +1181,7 @@ static void test_mprotect_cow_stash_restore(void)
     /* The never-faulted slot is still empty. */
     assert_null(lifecycle_pte_get(MPROTECT_BASE + 0x2000UL));
 
-    vma_remove(&fixture_mm, v);
+    x86_vma_destroy_node(v);
 }
 
 /* ── do_munmap / MAP_FIXED transaction tests (2026-11-13) ──────
@@ -1173,7 +1216,7 @@ static void remove_if_present(vma_t *v)
     for (list_t *p = fixture_mm.vma_list.next;
          p != &fixture_mm.vma_list; p = p->next) {
         if (container_of(p, vma_t, list) == v) {
-            vma_remove(&fixture_mm, v);
+            x86_vma_destroy_node(v);
             return;
         }
     }
@@ -1190,7 +1233,7 @@ static vma_t *install_anon_vma(uint64_t start, uint64_t len)
     v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     v->vm_pgoff     = 0;
     v->vm_file      = NULL;
-    assert_eq(0, vma_insert(&fixture_mm, v));
+    assert_eq(0, vm_area_insert_sorted(&fixture_mm, v));
     return v;
 }
 
@@ -1395,7 +1438,7 @@ static void test_munmap_borrowed_and_stashed_leaves(void)
     io->vm_start     = MUNMAP_BASE;
     io->vm_end       = MUNMAP_BASE + 0x1000UL;
     io->vm_flags     = VMA_IO | VMA_PROT_READ;
-    vma_insert(&fixture_mm, io);
+    vm_area_insert_sorted(&fixture_mm, io);
 
     int frees_before = lifecycle_state.total_frees;
     int cow_before   = lifecycle_state.cow_put_calls;
@@ -1586,7 +1629,7 @@ static int fake_dev_mmap(struct vfs_node *node, struct vma *vma,
         race->vm_start = tv->vm_start;
         race->vm_end   = tv->vm_end;
         race->vm_flags = VMA_PROT_READ | VMA_ANON;
-        vma_insert(&fixture_mm, race);
+        vm_area_insert_sorted(&fixture_mm, race);
     }
     return commit(ctx, g_dev_first_pa, (enum vm_device_cache)g_dev_cache);
 }
@@ -1697,7 +1740,7 @@ static void test_device_map_fixed_borrowed_leaf(void)
     old->vm_start = MUNMAP_BASE;
     old->vm_end   = MUNMAP_BASE + 0x2000UL;
     old->vm_flags = VMA_IO | VMA_SHARED | VMA_PROT_READ;
-    vma_insert(&fixture_mm, old);
+    vm_area_insert_sorted(&fixture_mm, old);
 
     int frees_before = lifecycle_state.total_frees;
     int cow_before   = lifecycle_state.cow_put_calls;
@@ -1924,7 +1967,7 @@ static void test_device_map_auto_select(void)
     assert_true(rc >= (int64_t)fixture_mm.mmap_base);
     assert_eq(1, g_dev_calls);
 
-    vma_t *v = vma_find(&fixture_mm, (uint64_t)rc);
+    vma_t *v = vm_area_lookup(&fixture_mm, (uint64_t)rc);
     assert_not_null(v);
     if (v) {
         assert_eq((uint64_t)rc, v->vm_start);
@@ -1992,8 +2035,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_heap_vma_leaf_conversion),
     TEST_ENTRY(test_mm_init_user_heap_sets_breaks),
     TEST_ENTRY(test_mm_init_user_heap_already_aligned),
-    TEST_ENTRY(test_vma_find_does_not_match_zero_heap),
-    TEST_ENTRY(test_vma_find_matches_other_vma_with_other_vm),
+    TEST_ENTRY(test_vm_area_lookup_does_not_match_zero_heap),
+    TEST_ENTRY(test_vm_area_find_heap_skips_same_start_normal_node),
+    TEST_ENTRY(test_vm_area_lookup_matches_other_vma_with_other_vm),
     TEST_ENTRY(test_exactly_one_heap_vma_in_list),
     TEST_ENTRY(test_mm_init_user_heap_alloc_fail_returns_enomem),
     TEST_ENTRY(test_mm_init_user_heap_alloc_fail_leaves_mm_unchanged),

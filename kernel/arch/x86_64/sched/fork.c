@@ -120,7 +120,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                     uint64_t vaddr_2m = ((uint64_t)l4 << 39)
                                        | ((uint64_t)l3 << 30)
                                        | ((uint64_t)l2 << 21);
-                    vma_t *vm = vma_find(parent_mm, vaddr_2m);
+                    vma_t *vm = vm_area_lookup(parent_mm, vaddr_2m);
                     if (vm && (vm->vm_flags & VMA_IO)) {
                         child_pmd[l2] = pmde;
                         continue;
@@ -163,7 +163,7 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                                    | ((uint64_t)l3 << 30)
                                    | ((uint64_t)l2 << 21)
                                    | ((uint64_t)l1 << 12);
-                    vma_t *vma = vma_find(parent_mm, vaddr);
+                    vma_t *vma = vm_area_lookup(parent_mm, vaddr);
                     if (vma && (vma->vm_flags & VMA_IO)) {
                         /* MMIO: share parent's phys (no COW, no
                          * copy).  Pass 2 must not touch this leaf. */
@@ -297,13 +297,13 @@ fail:
                          * that case child_pmd[l2] == parent's PMD
                          * and the phys is the parent's MMIO phys,
                          * never ours to free.  Check the parent's
-                         * 2 MiB VA against vma_find (same lookup
+                         * 2 MiB VA against vm_area_lookup (same lookup
                          * pattern pass 1 uses) and skip the
                          * free_pages for VMA_IO. */
                         uint64_t vaddr_2m = ((uint64_t)l4 << 39)
                                            | ((uint64_t)l3 << 30)
                                            | ((uint64_t)l2 << 21);
-                        vma_t *vm = vma_find(parent_mm, vaddr_2m);
+                        vma_t *vm = vm_area_lookup(parent_mm, vaddr_2m);
                         if (vm && (vm->vm_flags & VMA_IO)) {
                             /* Shared MMIO PMD — not ours. */
                         } else {
@@ -319,7 +319,7 @@ fail:
                                            | ((uint64_t)l3 << 30)
                                            | ((uint64_t)l2 << 21)
                                            | ((uint64_t)l1 << 12);
-                            vma_t *vma = vma_find(parent_mm, vaddr);
+                            vma_t *vma = vm_area_lookup(parent_mm, vaddr);
                             int is_vmio = (vma &&
                                            (vma->vm_flags & VMA_IO));
                             int is_placeholder = (pte == PAGE_VALID);
@@ -364,7 +364,7 @@ fail:
          * copied file references, free the nodes. */
         while (child_mm->vma_list.next != &child_mm->vma_list) {
             vma_t *v = container_of(child_mm->vma_list.next, vma_t, list);
-            vma_remove(child_mm, v);
+            x86_vma_destroy_node(v);
         }
         kfree(child_mm);
     }

@@ -69,16 +69,6 @@ static bool policy_vma_is_mmap(const vma_t *v)
            v->vm_file == NULL;
 }
 
-static vma_t *heap_vma(mm_t *mm)
-{
-    for (list_t *p = mm->vma_list.next; p != &mm->vma_list; p = p->next) {
-        vma_t *v = container_of(p, vma_t, list);
-        if ((v->vm_flags & VMA_HEAP) && v->vm_start == mm->start_brk)
-            return v;
-    }
-    return NULL;
-}
-
 static vma_t *first_overlap(mm_t *mm, uint64_t start, uint64_t end)
 {
     for (list_t *p = mm->vma_list.next; p != &mm->vma_list; p = p->next) {
@@ -103,13 +93,7 @@ static vma_t *last_overlap(mm_t *mm, uint64_t start, uint64_t end)
 
 static bool range_free(mm_t *mm, uint64_t start, uint64_t end)
 {
-    for (list_t *p = mm->vma_list.next; p != &mm->vma_list; p = p->next) {
-        vma_t *v = container_of(p, vma_t, list);
-        if (v->vm_end <= start) continue;
-        if (v->vm_start >= end) break;
-        return false;
-    }
-    return true;
+    return first_overlap(mm, start, end) == NULL;
 }
 
 /* ── Sparse resident chain (NULL-terminated, sorted by VA) ───────
@@ -833,7 +817,7 @@ int64_t user_vm_brk(mm_t *mm, uint64_t addr)
     if (addr == old_end)
         return (int64_t)addr;
 
-    vma_t *heap = heap_vma(mm);
+    vma_t *heap = vm_area_find_heap(mm);
     if (!heap)
         return -ENOMEM;
 

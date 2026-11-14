@@ -29,27 +29,12 @@
 #define USER_STACK_BASE    0x20400000UL
 #define HEAP_LIMIT         (USER_CODE_ADDR + USER_ENVELOPE_SIZE - 0x1000UL)
 
-// Find the VMA containing addr, or NULL.
-// Thin x86 wrapper over the shared arch-neutral primitive.
-vma_t *vma_find(mm_t *mm, uint64_t addr)
+// Destroy a single VMA node: unlink it from whatever list it is on,
+// drop its file reference and free the node.  Does NOT free pages.
+// Safe on NULL.  Used by the live-root teardown, the fork rollback and
+// the retired-node drain alike (callers hold no mm->lock here).
+void x86_vma_destroy_node(vma_t *vma)
 {
-    return vm_area_lookup(mm, addr);
-}
-
-// Insert vma into mm->vma_list sorted by vm_start.
-// Does NOT merge adjacent VMAs (simpler; VMA count < 20 for busybox).
-// Returns 0 on success.
-int vma_insert(mm_t *mm, vma_t *vma)
-{
-    return vm_area_insert_sorted(mm, vma);
-}
-
-// Remove and free a single VMA node (does NOT free pages).
-// The file reference and the node stay x86-owned: only the list
-// unlinking is shared with the AArch64 policy.
-void vma_remove(mm_t *mm, vma_t *vma)
-{
-    (void)mm;
     if (!vma) return;
     vm_area_unlink(vma);
     if (vma->vm_file)
@@ -98,7 +83,7 @@ void vma_free_all(mm_t *mm)
             }
         }
 
-        vma_remove(mm, v);
+        x86_vma_destroy_node(v);
     }
 
     list_init(&mm->vma_list);
@@ -123,7 +108,7 @@ int fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
         list_init(&cv->list);
         if (cv->vm_file)
             vfs_node_get(cv->vm_file);
-        vma_insert(child_mm, cv);
+        vm_area_insert_sorted(child_mm, cv);
 
         pos = pos->next;
     }
@@ -135,7 +120,7 @@ fail:
      * vfs_node_get/put balance returns to zero. */
     while (child_mm->vma_list.next != &child_mm->vma_list) {
         vma_t *v = container_of(child_mm->vma_list.next, vma_t, list);
-        vma_remove(child_mm, v);
+        x86_vma_destroy_node(v);
     }
     return -ENOMEM;
 }
@@ -151,7 +136,7 @@ fail:
 //   - vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP
 //     (heap data pages are never executable — the leaf word is derived
 //     on demand via x86_vma_pte_flags)
-//   - vma_find() does NOT match this VMA (zero-length invariant)
+//   - vm_area_lookup() does NOT match this VMA (zero-length invariant)
 //
 // Failure handling: if the VMA allocation fails, mm is left
 // unchanged.  The caller (spawn_user_task / sys_exec) destroys the
@@ -181,7 +166,7 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
      * untouched, VMA list untouched). */
     mm->start_brk = heap_base;
     mm->end_brk   = heap_base;
-    vma_insert(mm, hv);
+    vm_area_insert_sorted(mm, hv);
     return 0;
 }
 
@@ -280,17 +265,7 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
      * locate it for the commit step.  There is exactly one
      * VMA_HEAP VMA, inserted by mm_init_user_heap; its length
      * matches the page-aligned portion of end_brk. */
-    vma_t *heap_vma = NULL;
-    {
-        list_t *pos;
-        for (pos = mm->vma_list.next; pos != &mm->vma_list; pos = pos->next) {
-            vma_t *v = container_of(pos, vma_t, list);
-            if ((v->vm_flags & VMA_HEAP) && v->vm_start == start_brk) {
-                heap_vma = v;
-                break;
-            }
-        }
-    }
+    vma_t *heap_vma = vm_area_find_heap(mm);
     if (!heap_vma) {
         spin_unlock(&mm->lock);
         return -ENOMEM;
@@ -585,7 +560,7 @@ static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
 // A fully covered user 2 MiB block is taken as a block (its pages stay
 // with their owner); partial coverage is rejected by the preparer.
 static void unmap_vma_leaves(uint64_t *root, const vma_t *vma,
-                             uint64_t start, uint64_t end, bool active)
+                             uint64_t start, uint64_t end)
 {
     bool borrowed = (vma->vm_flags & VMA_IO) != 0;
     uint64_t old_ptes[UNMAP_LEAF_BATCH];
@@ -610,8 +585,7 @@ static void unmap_vma_leaves(uint64_t *root, const vma_t *vma,
             if (!borrowed) {
                 old_ptes[n++] = old;
                 if (n == UNMAP_LEAF_BATCH) {
-                    if (active)
-                        flush_tlb();
+                    flush_tlb();
                     for (int i = 0; i < n; i++)
                         x86_vmm_release_owned_4k(old_ptes[i]);
                     n = 0;
@@ -621,7 +595,7 @@ static void unmap_vma_leaves(uint64_t *root, const vma_t *vma,
         va += PAGE_4K_SIZE;
     }
 
-    if (active && changed)
+    if (changed)
         flush_tlb();
     for (int i = 0; i < n; i++)
         x86_vmm_release_owned_4k(old_ptes[i]);
@@ -656,7 +630,7 @@ static int prepare_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
         // fragment enclosing it.  If a VMA boundary falls inside the
         // block, unmap_vma_leaves would leave the huge translation
         // live while the VMA metadata retires -> reject up front.
-        vma_t *owner = vma_find(mm, block);
+        vma_t *owner = vm_area_lookup(mm, block);
         if (!owner || owner->vm_start > block ||
             owner->vm_end < block_end)
             return -EINVAL;
@@ -710,7 +684,7 @@ static void commit_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
         uint64_t u_start = (start > v->vm_start) ? start : v->vm_start;
         uint64_t u_end   = (end   < v->vm_end)   ? end   : v->vm_end;
 
-        unmap_vma_leaves(root, v, u_start, u_end, true);
+        unmap_vma_leaves(root, v, u_start, u_end);
 
         if (u_start <= v->vm_start && u_end >= v->vm_end) {
             // Fully covered: retire the node (released after unlock).
@@ -745,11 +719,7 @@ static void commit_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
 static void release_retired_vmas(list_t *retired)
 {
     while (!list_is_empty(retired)) {
-        vma_t *v = container_of(retired->next, vma_t, list);
-        vm_area_unlink(v);
-        if (v->vm_file)
-            vfs_node_put(v->vm_file);
-        kfree(v);
+        x86_vma_destroy_node(container_of(retired->next, vma_t, list));
     }
 }
 
@@ -859,7 +829,7 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
         }
         uint64_t *pte = vmm_pt_walk(root, va, 0, 0);
         if (pte && (*pte & (PAGE_VALID | PAGE_PROTNONE)) &&
-            !vma_find(mm, va)) {
+            !vm_area_lookup(mm, va)) {
             spin_unlock(&mm->lock);
             return -EINVAL;
         }
@@ -908,7 +878,7 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
     dv->vm_end       = end;
     dv->vm_flags    |= VMA_IO;
     dv->vm_file      = NULL;   // the node reference stays with do_mmap
-    vma_insert(mm, dv);
+    vm_area_insert_sorted(mm, dv);
 
     spin_unlock(&mm->lock);
     return 0;
@@ -1147,7 +1117,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     vma->vm_flags     = vm_flags_base;
     vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
     vma->vm_file      = file_node;
-    vma_insert(mm, vma);
+    vm_area_insert_sorted(mm, vma);
 
     spin_unlock(&mm->lock);
 
@@ -1191,7 +1161,7 @@ static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
         vfs_node_get(right->vm_file);
     }
     left->vm_end = at;
-    vma_insert(mm, right);
+    vm_area_insert_sorted(mm, right);
 }
 
 // ── do_mprotect ───────────────────────────────────────────────
@@ -1274,8 +1244,8 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
     // At most two new boundary nodes.  A node holding both requested
     // boundaries is split at addr first; the resulting right segment
     // is then split again at end.
-    vma_t *first = vma_find(mm, addr);
-    vma_t *last  = vma_find(mm, end - 1);
+    vma_t *first = vm_area_lookup(mm, addr);
+    vma_t *last  = vm_area_lookup(mm, end - 1);
     bool need_start = first && first->vm_start < addr;
     bool need_end   = last && last->vm_end > end;
 
@@ -1307,7 +1277,7 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
     if (need_start)
         split_vma_locked(mm, first, addr, start_node);
     if (need_end) {
-        vma_t *tail = vma_find(mm, end - 1);
+        vma_t *tail = vm_area_lookup(mm, end - 1);
         if (tail && tail->vm_end > end)
             split_vma_locked(mm, tail, end, end_node);
         else

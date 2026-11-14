@@ -13,7 +13,7 @@
  * equivalents here.
  *
  * The host harness links the REAL kernel/memory/vma.c, so the
- * mm_init_user_heap / vma_find / vma_insert / vma_free_all
+ * mm_init_user_heap / vm_area_lookup / vm_area_insert_sorted / vma_free_all
  * contracts are exercised against observable state.
  *
  * Force-include this header (via LIFECYCLE_HOST_CFLAGS) BEFORE any

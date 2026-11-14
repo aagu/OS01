@@ -386,7 +386,7 @@ void free_4k_page(uint64_t phys)
 
 /* ── vfs_node_get / vfs_node_put — counted no-op references ──
  * VMAs created by the mprotect split tests carry a fake file node,
- * so each split's vfs_node_get (and each vma_remove's
+ * so each split's vfs_node_get (and each x86_vma_destroy_node's
  * vfs_node_put) must be observable.  The node itself is opaque. */
 vfs_node_t *vfs_node_get(vfs_node_t *node)
 {

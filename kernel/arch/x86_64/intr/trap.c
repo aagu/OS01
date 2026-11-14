@@ -672,12 +672,12 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 			return;
 		}
 
-		vma_t *vma = vma_find(t->mm, cr2);
+		vma_t *vma = vm_area_lookup(t->mm, cr2);
 		if (!vma) {
 			// Forked-image COW write: the ELF loader installs
 			// page-table entries for the image but NO VMA for
 			// them (no demand paging for the image), so
-			// vma_find() legitimately returns NULL here.  When
+			// vm_area_lookup() legitimately returns NULL here.  When
 			// such a process is forked, the parent's writable
 			// image PTEs become R/O + PAGE_COW — a write fault
 			// (P=1, W=1) on that PTE must privatize the page,

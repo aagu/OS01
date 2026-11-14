@@ -75,7 +75,7 @@ static vma_t *build_anon_vma(uint64_t start, uint64_t end)
     v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     v->vm_pgoff     = 0;
     v->vm_file      = NULL;
-    vma_insert(&fixture_mm, v);
+    vm_area_insert_sorted(&fixture_mm, v);
     return v;
 }
 
@@ -95,7 +95,7 @@ static vma_t *build_vmio_vma(uint64_t start, uint64_t end)
     v->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     v->vm_pgoff     = 0;
     v->vm_file      = &fake_io_node;
-    vma_insert(&fixture_mm, v);
+    vm_area_insert_sorted(&fixture_mm, v);
     return v;
 }
 

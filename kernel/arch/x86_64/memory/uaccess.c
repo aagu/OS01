@@ -27,7 +27,7 @@
 #include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
 #include <memory/memory.h>     // Phy_To_Virt
 #include <memory/vma.h>        // vma_t, VMA_* logical flags
-#include <arch/x86_64/vma.h>   // vma_find, fork_vma_copy
+#include <arch/x86_64/vma.h>   // fork_vma_copy
 #include <memory/vmm.h>
 #include <fs/vfs.h>            // VFS_NAME_MAX (strnlen limit)
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)        // vmm_pt_walk, PAGE_VALID, PAGE_USER, PAGE_WRITE,
@@ -152,7 +152,7 @@ static bool user_write_range_valid(mm_t *mm, uint64_t addr, size_t len,
             continue;
         }
         if (*pte & PAGE_COW) {
-            vma_t *vma = vma_find(mm, va);
+            vma_t *vma = vm_area_lookup(mm, va);
             if (!vma || !(vma->vm_flags & VMA_PROT_WRITE) ||
                 (vma->vm_flags & VMA_IO)) return false;
             ++*cow_count;

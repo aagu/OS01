@@ -109,7 +109,7 @@ static int gen_fd_target(file_t *f, char *buf, int bufsz)
 //
 // Concurrency: find_task_by_pid should be called with a lock, but
 // procfs_read does not hold one.  Two TOCTOU windows exist:
-//   1. vma_list traversal while another CPU vma_remove()s
+//   1. vma_list traversal while another CPU x86_vma_destroy_node()s
 //   2. mm teardown after the t->mm NULL check
 // Accepted risk — same as existing gen_status().  Proper mm locking
 // depends on rwlock (roadmap P1).

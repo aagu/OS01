@@ -175,7 +175,7 @@ static void test_fork_vma_copy_grown_heap_vma_survives(void)
     setup_parent(elf_end);
 
     /* Add a positive-length heap VMA to simulate a grown break.
-     * Insert via vma_insert + open-coded growth to avoid pulling
+     * Insert via vm_area_insert_sorted + open-coded growth to avoid pulling
      * in mm_set_brk (the heap VMA length grows with the parent's
      * end_brk in production). */
     vma_t *parent_heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
@@ -222,7 +222,7 @@ static void test_fork_vma_copy_file_backed_vma_refs(void)
     fmv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE;
     fmv->vm_pgoff     = 0;
     fmv->vm_file      = &fake_node;
-    vma_insert(&parent_mm, fmv);
+    vm_area_insert_sorted(&parent_mm, fmv);
 
     int child_vmas_before = vma_count_for(&child_mm);
     int parent_gets_before = fk_node_get_count();
@@ -274,7 +274,7 @@ static void test_vma_free_all_unmaps_vma_owned_pages(void)
     TEST_SUITE("vma_free_all — owned 4 KiB leaves unmapped (VMA → unmap → page table free order)");
 
     /* Heap page at 0x401000 (zero-length VMA grown via the
-     * vma_remove trick).  Hand-fill a PTE so vma_free_all has
+     * x86_vma_destroy_node trick).  Hand-fill a PTE so vma_free_all has
      * something to unmap. */
     setup_parent(USER_CODE_ADDR + 0x1000);
     vma_t *heap = find_vma_with_flag(&parent_mm, VMA_HEAP);
@@ -366,7 +366,7 @@ static void test_fork_vma_clone_oom_keeps_parent(void)
     anon->vm_start = 0x10000000UL;
     anon->vm_end   = 0x10001000UL;
     anon->vm_flags = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
-    vma_insert(&parent_mm, anon);
+    vm_area_insert_sorted(&parent_mm, anon);
 
     vma_t *fil = (vma_t *)kmalloc(sizeof(vma_t));
     assert_not_null(fil);
@@ -375,7 +375,7 @@ static void test_fork_vma_clone_oom_keeps_parent(void)
     fil->vm_end   = 0x10003000UL;
     fil->vm_flags = VMA_PROT_READ;
     fil->vm_file  = &fake_node;
-    vma_insert(&parent_mm, fil);
+    vm_area_insert_sorted(&parent_mm, fil);
 
     for (int fail_at = 1; fail_at <= 2; fail_at++) {
         setup_child();
@@ -591,7 +591,7 @@ static void test_vma_free_all_vmio_skips_unmap(void)
     iov->vm_end       = 0x40002000UL;
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     iov->vm_file      = NULL;
-    vma_insert(&parent_mm, iov);
+    vm_area_insert_sorted(&parent_mm, iov);
 
     uint64_t borrowed_outside = alloc_4k_page();   /* pool slot marked in_use */
     assert_true(borrowed_outside);
@@ -1196,7 +1196,7 @@ static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
      * must not free that phys.
      *
      * Concrete check (textual, in the rollback's huge-page
-     * branch): vma_find must be called, and the VMA_IO check
+     * branch): vm_area_lookup must be called, and the VMA_IO check
      * must appear BEFORE the free_pages call. */
     const char *huge = find_from(fail_label, fail_block_end,
         "if (pmde & PAGE_HUGE) {");
@@ -1204,10 +1204,10 @@ static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
     const char *free_pages_call = find_from(huge, fail_block_end,
         "free_pages(p, 1)");
     assert_not_null(free_pages_call);
-    /* vma_find must appear inside the huge-page branch and
+    /* vm_area_lookup must appear inside the huge-page branch and
      * BEFORE the free_pages call. */
     const char *vm_find = find_from(huge, free_pages_call,
-        "vma_find(parent_mm, vaddr_2m)");
+        "vm_area_lookup(parent_mm, vaddr_2m)");
     assert_not_null(vm_find);
     /* VMA_IO must be checked BEFORE the free_pages call too. */
     const char *vm_io_check = find_from(huge, free_pages_call,
@@ -1226,13 +1226,13 @@ static void test_fork_mm_copy_fail_keeps_vmio_huge_intact(void)
      *     if (pmde & PAGE_HUGE) {
      *         free_pages(p, 1);    <-- this is OK only when guarded
      *     }
-     * We accept the call as long as the vma_find + VMA_IO check
+     * We accept the call as long as the vm_area_lookup + VMA_IO check
      * precede it (already checked above). */
 
     /* Also: the parent's 2 MiB VA computation
      * `vaddr_2m = ((uint64_t)l4 << 39) | ((uint64_t)l3 << 30) |
      * ((uint64_t)l2 << 21)` must appear inside the huge-page
-     * branch so the vma_find lookup targets the right VA. */
+     * branch so the vm_area_lookup lookup targets the right VA. */
     const char *vaddr_calc = find_from(huge, free_pages_call,
         "vaddr_2m = ((uint64_t)l4 << 39)");
     assert_not_null(vaddr_calc);

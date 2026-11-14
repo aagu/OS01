@@ -115,7 +115,7 @@ size_t kfree(void *ptr)    { free(ptr); return 1; }
 /* ── vfs_node_get / vfs_node_put — counter-backed ─────────
  * Production semantics: vfs_node_get increments the refcount,
  * vfs_node_put decrements.  The file-backed VMA teardown path
- * (vma_remove → vfs_node_put) is observable here. */
+ * (x86_vma_destroy_node → vfs_node_put) is observable here. */
 vfs_node_t *vfs_node_get(vfs_node_t *node)
 {
     (void)node;

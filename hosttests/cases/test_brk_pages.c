@@ -99,7 +99,7 @@ static void setup_mm(uint64_t elf_end)
     int rc = mm_init_user_heap(&fixture_mm, elf_end);
     assert_eq(0, rc);
 
-    /* Find the heap VMA.  vma_find won't match it (zero-length),
+    /* Find the heap VMA.  vm_area_lookup won't match it (zero-length),
      * so we walk the list directly. */
     heap_vma = NULL;
     for (list_t *p = fixture_mm.vma_list.next;

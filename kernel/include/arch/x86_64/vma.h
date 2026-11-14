@@ -27,12 +27,12 @@
  *   - WRITE            → from the VMA. */
 uint64_t x86_vma_pte_flags(uint64_t vm_flags);
 
-// ── VMA list operations (thin x86 wrappers over the shared
-//    vm_area.h primitives; the file reference and node stay
-//    x86-owned) ──────────────────────────────────────────────
-vma_t    *vma_find(mm_t *mm, uint64_t addr);
-int       vma_insert(mm_t *mm, vma_t *vma);
-void      vma_remove(mm_t *mm, vma_t *vma);
+// ── x86 VMA node lifecycle ───────────────────────────────────
+// Destroy one VMA node (unlink + file-reference drop + node free).
+// The file reference and the node stay x86-owned; the list unlinking
+// is the shared vm_area_unlink() primitive.  Address lookups and
+// inserts use the shared vm_area_lookup()/vm_area_insert_sorted().
+void      x86_vma_destroy_node(vma_t *vma);
 void      vma_free_all(mm_t *mm);
 int       fork_vma_copy(mm_t *child_mm, mm_t *parent_mm);
 

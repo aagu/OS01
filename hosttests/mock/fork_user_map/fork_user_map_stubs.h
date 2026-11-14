@@ -16,7 +16,7 @@
  *     refcounting so vmm_unmap_4k_page's COW-aware branch is
  *     observable (decrement + free-on-zero).
  *   - vfs_node_get / vfs_node_put: refcount counting — the
- *     file-backed VMA test exercises vma_remove's
+ *     file-backed VMA test exercises x86_vma_destroy_node's
  *     vfs_node_put on the LAST reference.
  *   - tlb_shootdown: counter (mm_set_brk / production vma.c
  *     transitively reference it).

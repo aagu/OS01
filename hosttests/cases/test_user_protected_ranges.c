@@ -311,7 +311,7 @@ static void test_borrowed_leaf_never_released(void)
     iov->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_IO;
     iov->vm_pgoff     = 0;
     iov->vm_file      = NULL;
-    vma_insert(&fixture_mm, iov);
+    vm_area_insert_sorted(&fixture_mm, iov);
 
     /* Both borrowed PAs are live mock-pool slots. */
     uint64_t b0 = alloc_4k_page();
@@ -538,7 +538,7 @@ static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
 
     /* Simulate the managed range a pre-Task-5 world could hold: a
      * VMA straddling heap→guard→stack at [HEAP_LIMIT - 0x1000, USER_STACK_BASE + 0x1000),
-     * inserted through the production vma_insert + hand-filled
+     * inserted through the production vm_area_insert_sorted + hand-filled
      * PTEs.  Post-Task-5 the mapping APIs can no longer create
      * this shape — the test proves they cannot DESTROY it either. */
     vma_t *sv = (vma_t *)kmalloc(sizeof(vma_t));
@@ -549,7 +549,7 @@ static void test_mmap_fixed_partial_overlap_managed_guard_straddle(void)
     sv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON;
     sv->vm_pgoff     = 0;
     sv->vm_file      = NULL;
-    assert_eq(0, vma_insert(&fixture_mm, sv));
+    assert_eq(0, vm_area_insert_sorted(&fixture_mm, sv));
     if (fill_pte(HEAP_LIMIT - 0x1000, 0x31) != 0 ||
         fill_pte(HEAP_LIMIT, 0x32) != 0 ||
         fill_pte(USER_STACK_BASE, 0x33) != 0) {

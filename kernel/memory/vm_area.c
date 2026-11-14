@@ -51,3 +51,17 @@ void vm_area_unlink(vma_t *vma)
     if (vma)
         list_del(&vma->list);
 }
+
+vma_t *vm_area_find_heap(mm_t *mm)
+{
+    if (!mm)
+        return NULL;
+    list_t *pos = mm->vma_list.next;
+    while (pos != &mm->vma_list) {
+        vma_t *v = container_of(pos, vma_t, list);
+        if ((v->vm_flags & VMA_HEAP) && v->vm_start == mm->start_brk)
+            return v;
+        pos = pos->next;
+    }
+    return NULL;
+}

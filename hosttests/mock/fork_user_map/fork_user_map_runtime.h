@@ -9,7 +9,7 @@
  *
  * Differences vs pranges: the fork test does NOT drive do_mmap /
  * do_munmap / do_mprotect — it only calls the VMA-list primitives
- * (fork_vma_copy, vma_free_all, vma_find, vma_insert, mm_alloc,
+ * (fork_vma_copy, vma_free_all, vm_area_lookup, vm_area_insert_sorted, mm_alloc,
  * mm_init_user_heap) and inspects kernel/sched/task.c via
  * source-level reads.  Page-table mutation is observed via the
  * hand-rolled flat PTE table + alloc/free pool, not via

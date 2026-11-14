@@ -151,7 +151,7 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	    echo "AUDIT GATE FAIL: obsolete symbol aarch64_main found in ELF" >&2; exit 1; \
 	fi
 	@echo "  [audit] aarch64 kernel.elf: no vma_*/uaccess_*/fork_* or sched-split x86-subsystem T/t symbols"
-	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_|spawn_user_task|files_(alloc|dup|unpin)|vfs_lookup|vmm_free_user_map|do_fork)')"; \
+	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_|x86_vma_destroy_node|spawn_user_task|files_(alloc|dup|unpin)|vfs_lookup|vmm_free_user_map|do_fork)')"; \
 	  if [ -n "$$bad" ]; then \
 	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
 	  fi
@@ -172,7 +172,7 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 # x86 kernel.elf must hit symbols (proves the filter works):
 #   make PROFILE=x86_64-clang kernel.bin
 #   llvm-nm build/x86_64-clang/kernel/kernel.elf | awk '$2=="T"||$2=="t"{print $3}' \
-#     | grep -E '^(vma_|uaccess_|fork_)'   # expect: vma_find, fork_vma_copy, ...
+#     | grep -E '^(vma_|uaccess_|fork_|x86_vma_destroy_node)'  # expect: fork_vma_copy, x86_vma_destroy_node, ...
 
 .PHONY: run-aarch64-uefi
 run-aarch64-uefi: aarch64-uefi
