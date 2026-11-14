@@ -155,12 +155,59 @@ static void suite_kthread_yield_irq_restore(void)
     assert_eq(1, mock_irq_state);
 }
 
+/* ── Case 5: the PF_SELF_REAP stack-reclaim counter ────────────
+ *
+ * The counter is the measurement the kernel selftest
+ * (kernel/selftest/test_kthread_self_reap.c) relies on: it counts the
+ * stacks THIS path reclaimed, so an unrelated 64 KiB allocation (a
+ * user-space exec/fork racing the selftest) cannot make it look like
+ * a leak.  The three properties pinned here are exactly the ones the
+ * selftest depends on:
+ *   a. an unrelated allocation/free of the same slab size does not
+ *      move the counter;
+ *   b. a switch that is NOT self-reap does not move it;
+ *   c. a self-reap switch that frees a stack moves it by exactly one. */
+static void suite_self_reap_stack_counter(void)
+{
+    TEST_SUITE("self-reap stack counter");
+    switch_tail_reset();
+
+    uint64_t before = sched_self_reap_stack_count();
+
+    /* (a) noise from an unrelated 64 KiB allocation — the exact
+     * interference that made the CI selftest report a phantom leak. */
+    void *noise = kmalloc(65536);
+    assert_not_null(noise);
+    kfree(noise);
+    assert_true(sched_self_reap_stack_count() == before);
+
+    /* (b) a plain switch reclaims nothing. */
+    prev_task.flags = 0;
+    prev_task.thread = &thd_obj;
+    prev_task.fpu_save = fpu_buf;
+    prev_task.stack_alloc_base = stk_buf;
+    task_switch_complete(&prev_task);
+    assert_true(sched_self_reap_stack_count() == before);
+
+    /* (c) a self-reap switch that frees a stack counts exactly one. */
+    prev_task.flags = PF_SELF_REAP;
+    task_switch_complete(&prev_task);
+    assert_true(sched_self_reap_stack_count() == before + 1);
+
+    /* A self-reap switch WITHOUT a stack frees no stack, so it must
+     * not bump the counter either. */
+    prev_task.stack_alloc_base = NULL;
+    task_switch_complete(&prev_task);
+    assert_true(sched_self_reap_stack_count() == before + 1);
+}
+
 int main(void)
 {
     suite_self_reap_capture();
     suite_non_self_reap();
     suite_self_switch_noop();
     suite_self_reap_null_thread();
+    suite_self_reap_stack_counter();
     suite_kthread_yield_irq_restore();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_switch_complete",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

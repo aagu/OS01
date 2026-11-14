@@ -207,6 +207,7 @@ extern union task_union init_task_union;
  * declared here for BOTH modes because those headers are skipped via
  * their include guards below). */
 void task_switch_complete(task_t *actual_prev);
+uint64_t sched_self_reap_stack_count(void);
 int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
                               const char *name, unsigned target_cpu,
                               bool pinned, task_t **out_task, int *out_pid);

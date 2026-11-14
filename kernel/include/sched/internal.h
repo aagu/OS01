@@ -50,6 +50,22 @@ void *fpu_area_alloc(void);
  * (actual_prev == current) returns without finish or free. */
 void task_switch_complete(task_t *actual_prev);
 
+/* ── PF_SELF_REAP stack-reclaim counter (kthread.c) ─────────────
+ * Number of kernel stacks reclaimed through the PF_SELF_REAP path
+ * (task_switch_complete()).
+ *
+ * This is a per-path EVENT counter, deliberately NOT a slab-occupancy
+ * reading: a kthread stack is sizeof(union task_union)+STACK_SIZE
+ * (64 KiB), the same size a user-space task union, so the 64 KiB slab
+ * cache is shared.  A concurrent user-space exec/fork during a
+ * measurement window therefore moves any global "objects in use"
+ * number, and a leak check built on that number reports a phantom
+ * "leaked stack" for a reclaim that actually happened.  Counting the
+ * reclaims of THIS path is immune to unrelated allocations and still
+ * detects a real leak (a stack that is never freed never bumps the
+ * counter). */
+uint64_t sched_self_reap_stack_count(void);
+
 /* Notify a destination CPU without retaining a task pointer across
  * publication unlock/reclamation. */
 void sched_notify_remote_cpu(unsigned cpu);

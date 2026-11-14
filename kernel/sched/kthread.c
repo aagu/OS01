@@ -495,6 +495,19 @@ void kthread_exit(uint64_t code)
     task_exit_self_reap(code);
 }
 
+/* ── PF_SELF_REAP stack-reclaim counter ─────────────────────────
+ * Counts the kernel stacks this path reclaimed (see
+ * sched_self_reap_stack_count() in <sched/internal.h> for why a
+ * per-path counter is used instead of a global slab-occupancy
+ * reading).  Bumped from task_switch_complete() on whichever CPU runs
+ * the next task's switch tail, hence the atomic. */
+static volatile uint64_t g_self_reap_stacks;
+
+uint64_t sched_self_reap_stack_count(void)
+{
+    return __atomic_load_n(&g_self_reap_stacks, __ATOMIC_ACQUIRE);
+}
+
 /* Runs on the *next* task's stack. Captures the self-reap decision and
  * the objects to release BEFORE task_finish_switch() clears on_cpu:
  * after that a waiter may free prev, and reading prev afterwards is a
@@ -544,6 +557,7 @@ void task_switch_complete(task_t *actual_prev)
         }
         if (stk) {
             kfree(stk);
+            __atomic_add_fetch(&g_self_reap_stacks, 1, __ATOMIC_ACQ_REL);
 #if defined(OS01_SELFTEST) && defined(__aarch64__)
             aarch64_sched_observe_free_complete(stk_tok);
 #endif
