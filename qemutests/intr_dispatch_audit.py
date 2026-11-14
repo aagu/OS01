@@ -542,6 +542,7 @@ _A64_DISASM_SYMS = (
        "aarch64_vm_native_leave", "aarch64_user_vm_prepare_copy"]
     + ["sys_native_fork", "arch_syscall_fork", "user_vm_cow_fault",
        "user_vm_prepare_copy", "arch_user_vm_replace_cow"]
+    + ["sys_native_waitpid", "do_waitpid"]
 )
 
 # The formal user-copy surface a production image must link: the two
@@ -556,6 +557,7 @@ _A64_UACCESS_SYMS = (
     "copy_from_user_ft_res",
     "copy_to_user_ft_res",
     "syscall_check_user_range",
+    "syscall_prepare_user_write",
 )
 
 
@@ -1381,6 +1383,8 @@ _A64_VM_EDGES = (
      "a formal write-permission fault must reach the COW policy"),
     ("user_vm_prepare_copy", "arch_user_vm_replace_cow",
      "copy-to-user preparation must reach the checked COW replacement"),
+    ("sys_native_waitpid", "do_waitpid",
+     "the shared waitpid handler must reach do_waitpid"),
 )
 
 _A64_VM_FORBIDDEN_STRONG = ("do_futex_wait", "do_futex_wake")

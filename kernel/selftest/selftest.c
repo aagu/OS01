@@ -242,6 +242,7 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("aarch64_user_svc_uaccess");
     selftest_register_late("aarch64_user_vm");
     selftest_register_late("aarch64_user_fork_cow");
+    selftest_register_late("aarch64_user_waitpid");
 #endif
 #endif
 #if !defined(__aarch64__)

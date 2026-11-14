@@ -374,6 +374,7 @@ ffff000040097500 T aarch64_uaccess_fault
 ffff000040097540 T copy_from_user_ft_res
 ffff000040097580 T copy_to_user_ft_res
 ffff0000400975c0 T syscall_check_user_range
+ffff0000400975e0 T syscall_prepare_user_write
 ffff000040097600 T aarch64_user_vm_fault
 ffff000040097640 T arch_syscall_user_vm
 ffff000040097680 T sys_mm_dispatch
@@ -382,6 +383,8 @@ ffff0000400976e0 T arch_syscall_fork
 ffff000040097720 T user_vm_cow_fault
 ffff000040097760 T user_vm_prepare_copy
 ffff0000400977a0 T arch_user_vm_replace_cow
+ffff0000400977c0 T sys_native_waitpid
+ffff000040097800 T do_waitpid
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -481,6 +484,13 @@ ffff000040097768: d65f03c0     	ret
 
 ffff0000400977a0 <arch_user_vm_replace_cow>:
 ffff0000400977a4: d65f03c0     	ret
+
+ffff0000400977c0 <sys_native_waitpid>:
+ffff0000400977c4: 9400000f     	bl	0xffff000040097800 <do_waitpid>
+ffff0000400977c8: d65f03c0     	ret
+
+ffff000040097800 <do_waitpid>:
+ffff000040097804: d65f03c0     	ret
 
 ffff000040094104 <arch_intr_dispatch>:
 ffff000040094104: b4000100     	cbz	x0, 0xffff000040094124 <arch_intr_dispatch+0x20>
@@ -1689,6 +1699,21 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
                            "# imm = 0xFFFF800000105000"))
         errors = self.audit()
         self.assertTrue(any("arch_intr_handle_irq" in e for e in errors),
+                        errors)
+
+    def test_sys_native_waitpid_missing_do_waitpid_edge_fails(self):
+        self.stage_a64(disasm_text=_mutate(
+            A64_DISASM, 0xFFFF0000400977C4,
+            "bl\t0xffff000040097800 <do_waitpid>",
+            "nop"))
+        errors = self.audit()
+        self.assertTrue(any("do_waitpid" in e for e in errors), errors)
+
+    def test_missing_syscall_prepare_user_write_fails(self):
+        self.stage_a64(nm_text=A64_NM.replace(
+            "ffff0000400975e0 T syscall_prepare_user_write\n", ""))
+        errors = self.audit()
+        self.assertTrue(any("syscall_prepare_user_write" in e for e in errors),
                         errors)
 
     def test_gic_dispatch_called_twice_fails(self):

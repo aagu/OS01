@@ -209,7 +209,8 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 | aarch64 M4.9 正式 SVC 与 uaccess 故障恢复（`aarch64_user_svc_uaccess`）+ 低 EL 同步事件接入公共分派 | 2026-11-12 | [syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12) · [changelog](changelog.md#2026-11-12) |
 | aarch64 M4.10 匿名 VMA 与按需缺页（`aarch64_user_vm`） | 2026-11-12 | [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环) · [changelog](changelog.md#2026-11-12) |
 | aarch64 M4.11 原生 `SYS_fork` 与写时复制（`aarch64_user_fork_cow`）+ 用户页所有权统一 | 2026-11-13 | [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环) · [changelog](changelog.md#2026-11-13) |
-| 跨架构共享 syscall 表（aarch64 由同一张表服务 exit/getpid/getppid/clock_gettime/brk/mmap/mprotect/munmap/fork） | 2026-11-12 | [syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12) · [changelog](changelog.md#2026-11-12) |
+| aarch64 M4.12 原生 `SYS_waitpid` 与父子退出 / ZOMBIE 回收闭环（`aarch64_user_waitpid`） | 2026-11-14 | [syscall.md](syscall/syscall.md) |
+| 跨架构共享 syscall 表（aarch64 由同一张表服务 exit/getpid/getppid/clock_gettime/brk/mmap/mprotect/munmap/fork/waitpid） | 2026-11-12 | [syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12) · [changelog](changelog.md#2026-11-12) |
 
 ---
 
