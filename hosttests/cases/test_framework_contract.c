@@ -77,6 +77,24 @@ int main(void)
     /* Second summary must report the same totals as the first. */
     TEST_RESULTS();
 
+    /* %-safe assertion formatting: expression with '%' must record 1 failure. */
+    assert_eq(100 % 7, 99);
+    if (__test_stats.total != 4 || __test_stats.failed != 4) {
+        printf("  [CONTRACT] %%-safe assert_eq corrupted stats: "
+               "total=%d failed=%d (expected 4/4)\n",
+               __test_stats.total, __test_stats.failed);
+        return 4;
+    }
+
+    /* TEST_RESET() explicitly clears stats; re-arm one failure for exit 1. */
+    TEST_RESET();
+    if (__test_stats.total != 0 || __test_stats.failed != 0) {
+        return 5;
+    }
+    test_entry_t ex_probe = TEST_ENTRY_EX(NULL, NULL, NULL);
+    (void)ex_probe;
+    assert_true(0);
+
     /* Contract binary is green exactly when the framework is broken. */
     return __test_stats.failed > 0 ? 1 : 0;
 }

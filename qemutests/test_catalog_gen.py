@@ -119,11 +119,11 @@ class CatalogGenTests(unittest.TestCase):
                 scan_tests.emit(str(root), str(bridge_path), str(root / "out"))
 
     def test_real_repo_emit_matches_inventory_and_catalog_mk(self) -> None:
-        bridge = json.loads((ROOT / "config" / "test-bridge.json").read_text(encoding="utf-8"))
+        catalog = json.loads((ROOT / "config" / "test-catalog.json").read_text(encoding="utf-8"))
         expected_inv_lines = {
-            f"{e['id']}:{e['subsystem']}:{e['acceptance']}"
-            for e in bridge["entries"]
-            if e["kind"] == "host_test"
+            f"{e['id']}:{e['subsystem']}:{e.get('acceptance', 'protocol-or-legacy')}"
+            for e in catalog["entries"]
+            if e.get("layer") == "host"
         }
         expected_tsv_lines = set(_extract_catalog_mk_lines(ROOT / "mk" / "generated" / "test-dispatch.mk"))
 

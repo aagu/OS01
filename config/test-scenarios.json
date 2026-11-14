@@ -554,6 +554,30 @@
    }
   },
   {
+   "id": "framework.fixture.v2",
+   "owner": "host",
+   "component": "framework",
+   "behavior": "fixture-v2",
+   "trigger": "host runner invokes test_fixture_v2.elf",
+   "assertions": [
+    "test_fixture_v2 passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_fixture_v2"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_fixture_v2.c",
+    "selector": "test_fixture_v2",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying fixture v2 setup/teardown, fork isolation, and %-safe assertion output"
+   }
+  },
+  {
    "id": "memory.brk.pages",
    "owner": "host",
    "component": "memory",

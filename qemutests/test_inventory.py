@@ -116,9 +116,9 @@ class InventorySnapshotUnitTests(unittest.TestCase):
 class InventoryReconciliationTests(unittest.TestCase):
     @staticmethod
     def _load_bridge_host_tests() -> List[Dict[str, Any]]:
-        bridge_path = ROOT / "config" / "test-bridge.json"
-        data = json.loads(bridge_path.read_text(encoding="utf-8"))
-        return [e for e in data.get("entries", []) if e.get("kind") == "host_test"]
+        catalog_path = ROOT / "config" / "test-catalog.json"
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        return [e for e in data.get("entries", []) if e.get("layer") == "host"]
 
     def test_inventory_matches_bridge_host_tests(self):
         inv = get_inventory(ROOT)

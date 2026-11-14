@@ -2510,6 +2510,18 @@
       }
     },
     {
+      "id": "test_fixture_v2",
+      "layer": "host",
+      "subsystem": "framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "fork",
+      "scenarios": [
+        "framework.fixture.v2"
+      ],
+      "source": "hosttests/cases/test_fixture_v2.c"
+    },
+    {
       "id": "test_flake_report",
       "layer": "harness",
       "subsystem": "test-framework",

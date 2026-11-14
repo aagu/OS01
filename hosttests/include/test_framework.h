@@ -6,6 +6,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#if defined(TEST_ISOLATION_FORK) && TEST_ISOLATION_FORK
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* ── Test result tracking ──────────────────────────── */
 typedef struct {
@@ -43,8 +48,8 @@ static test_stats_t __test_stats;
     __test_stats.total++; \
     if (__e != __a) { \
         __test_stats.failed++; \
-        printf("  [FAIL] %s:%d: assert_eq(" #expected "=%ld, " #actual "=%ld)\n", \
-               __FILE__, __LINE__, __e, __a); \
+        printf("  [FAIL] %s:%d: assert_eq(%s=%ld, %s=%ld)\n", \
+               __FILE__, __LINE__, #expected, __e, #actual, __a); \
     } else { \
         __test_stats.passed++; \
     } \
@@ -135,12 +140,15 @@ static test_stats_t __test_stats;
 typedef struct {
     const char *name;
     void (*fn)(void);
+    void (*setup)(void);
+    void (*teardown)(void);
 } test_entry_t;
 
 #define TEST_LIST_BEGIN \
     static test_entry_t __test_table[] = {
 
-#define TEST_ENTRY(fn) { #fn, fn }
+#define TEST_ENTRY(fn) { #fn, fn, NULL, NULL }
+#define TEST_ENTRY_EX(fn, setup_fn, teardown_fn) { #fn, fn, setup_fn, teardown_fn }
 
 #define TEST_LIST_END \
     }; \
@@ -168,6 +176,71 @@ typedef struct {
  * are mandatory).  No SKIP record is ever emitted from this path. */
 #define HOSTTEST_SUITE_ID "hosttests"
 
+#if defined(TEST_ISOLATION_FORK) && TEST_ISOLATION_FORK
+#define __RUN_ONE_TEST_CASE(__entry, __case_passed, __case_failed) \
+    do { \
+        fflush(stdout); \
+        fflush(stderr); \
+        pid_t __pid = fork(); \
+        if (__pid == 0) { \
+            int __before_failed = __test_stats.failed; \
+            if ((__entry).setup) (__entry).setup(); \
+            (__entry).fn(); \
+            if ((__entry).teardown) (__entry).teardown(); \
+            fflush(stdout); \
+            fflush(stderr); \
+            _exit((__test_stats.failed - __before_failed) > 0 ? 1 : 0); \
+        } \
+        int __status = 0; \
+        pid_t __w = (__pid > 0) ? waitpid(__pid, &__status, 0) : -1; \
+        printf("[TEST] BEGIN %s\n", (__entry).name); \
+        __test_stats.total++; \
+        if (__pid < 0 || __w != __pid) { \
+            (__case_failed)++; \
+            __test_stats.failed++; \
+            printf("[TEST] FAIL %s reason=fork_wait_error\n", (__entry).name); \
+        } else if (WIFEXITED(__status)) { \
+            int __rc = WEXITSTATUS(__status); \
+            if (__rc == 0) { \
+                (__case_passed)++; \
+                __test_stats.passed++; \
+                printf("[TEST] PASS %s\n", (__entry).name); \
+            } else { \
+                (__case_failed)++; \
+                __test_stats.failed++; \
+                printf("[TEST] FAIL %s reason=exit_%d\n", (__entry).name, __rc); \
+            } \
+        } else if (WIFSIGNALED(__status)) { \
+            int __sig = WTERMSIG(__status); \
+            (__case_failed)++; \
+            __test_stats.failed++; \
+            printf("[TEST] FAIL %s reason=signal_%d\n", (__entry).name, __sig); \
+        } else { \
+            (__case_failed)++; \
+            __test_stats.failed++; \
+            printf("[TEST] FAIL %s reason=wait_status_%d\n", (__entry).name, __status); \
+        } \
+    } while(0)
+#else
+#define __RUN_ONE_TEST_CASE(__entry, __case_passed, __case_failed) \
+    do { \
+        int __before_failed = __test_stats.failed; \
+        if ((__entry).setup) (__entry).setup(); \
+        (__entry).fn(); \
+        if ((__entry).teardown) (__entry).teardown(); \
+        int __case_delta = __test_stats.failed - __before_failed; \
+        printf("[TEST] BEGIN %s\n", (__entry).name); \
+        if (__case_delta == 0) { \
+            (__case_passed)++; \
+            printf("[TEST] PASS %s\n", (__entry).name); \
+        } else { \
+            (__case_failed)++; \
+            printf("[TEST] FAIL %s reason=assertion_failures_%d\n", \
+                   (__entry).name, __case_delta); \
+        } \
+    } while(0)
+#endif
+
 #define RUN_ALL_TESTS() \
     do { \
         printf("=== Test Runner ===\n"); \
@@ -182,18 +255,7 @@ typedef struct {
         } \
         for (int __i = 0; __i < __table_size; __i++) { \
             printf("\n--- %s ---\n", __test_table[__i].name); \
-            int __before_failed = __test_stats.failed; \
-            __test_table[__i].fn(); \
-            int __case_delta = __test_stats.failed - __before_failed; \
-            printf("[TEST] BEGIN %s\n", __test_table[__i].name); \
-            if (__case_delta == 0) { \
-                __case_passed++; \
-                printf("[TEST] PASS %s\n", __test_table[__i].name); \
-            } else { \
-                __case_failed++; \
-                printf("[TEST] FAIL %s reason=assertion_failures_%d\n", \
-                       __test_table[__i].name, __case_delta); \
-            } \
+            __RUN_ONE_TEST_CASE(__test_table[__i], __case_passed, __case_failed); \
         } \
         TEST_RESULTS(); \
         printf("[TEST] END suite=%s total=%d passed=%d failed=%d skipped=%d\n", \
