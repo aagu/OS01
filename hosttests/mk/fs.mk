@@ -21,6 +21,17 @@ $(eval $(call register_host_test,test_devfs_hierarchy,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
 $(eval $(call register_host_test,test_pci_devfs,fs,protocol-or-legacy))
 
+# ── ext2 logical→physical block mapping ─────────────────────────
+#
+# test_ext2_bmap drives the REAL kernel/fs/ext2.c (the same
+# ext2_production.o the other filesystem host tests link) against a RAM
+# disk that holds a hand-built ext2 image whose file spans the direct,
+# single-indirect AND double-indirect block ranges.  The driver used to
+# return "no mapping" for every logical block past the single-indirect
+# range ("double/triple indirect not implemented"), so the tail of any
+# file larger than 4 MiB read back as a zero-filled hole.
+$(eval $(call register_host_test,test_ext2_bmap,fs,protocol-or-legacy))
+
 TEST_BINS += \
     $(TEST_BLD)/test_vfs_basic.elf \
     $(TEST_BLD)/test_vfs_fs_registry.elf \
@@ -41,7 +52,8 @@ TEST_BINS += \
     $(TEST_BLD)/test_devfs_capacity.elf \
     $(TEST_BLD)/test_devfs_hierarchy.elf \
     $(TEST_BLD)/test_nofile_limits.elf \
-    $(TEST_BLD)/test_pci_devfs.elf
+    $(TEST_BLD)/test_pci_devfs.elf \
+    $(TEST_BLD)/test_ext2_bmap.elf
 
 
 # ── libc-completion T6: kernel atomic append ──────────────────
@@ -637,6 +649,31 @@ $(TEST_BLD)/test_pci_devfs.elf: $(TEST_BLD)/test_pci_devfs.o \
 		$(TEST_BLD)/rwlock.o \
 		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+# ── ext2 block-mapping test (direct / single- / double-indirect) ──
+#
+# The production ext2 object plus the VFS/dcache objects it links
+# against; the test TU supplies the RAM disk, the hand-built image and
+# the block-device dispatch.
+$(TEST_BLD)/test_ext2_bmap.o: $(TEST_CASES)/test_ext2_bmap.c \
+		$(TESTS_DIR)/kernel/include/fs/ext2.h \
+		$(TESTS_DIR)/kernel/include/fs/vfs.h \
+		$(TEST_MOCK)/vfs_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_ext2_bmap.elf: $(TEST_BLD)/test_ext2_bmap.o \
+		$(TEST_BLD)/vfs_production.o \
+		$(TEST_BLD)/dcache_production.o \
+		$(TEST_BLD)/ext2_production.o \
+		$(TEST_BLD)/serial_sink_stub.o \
+		$(TEST_BLD)/rwlock.o \
+		$(LIBC_OBJS) $(MOCK_OBJS)
+	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+
+.PHONY: test-ext2-bmap
+test-ext2-bmap: $(TEST_BLD)/test_ext2_bmap.elf
+	$<
 
 # ── BOOT-3 mounts & terminal host tests ───────────────────────────
 $(eval $(call register_host_test,test_boot_failure_mounts,fs,protocol-or-legacy))

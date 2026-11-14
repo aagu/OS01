@@ -945,6 +945,40 @@
    }
   },
   {
+   "id": "fs.ext2.block_mapping",
+   "component": "fs",
+   "behavior": "ext2 block mapping",
+   "trigger": "host runner invokes test_ext2_bmap.elf",
+   "assertions": [
+    "test_ext2_bmap passes all internal assertions",
+    "direct, single-indirect and double-indirect logical blocks map to the physical blocks the on-disk ext2 layout names",
+    "a read straddling the single- to double-indirect boundary returns both sides' bytes"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_ext2_bmap",
+    "the driver reports no mapping for a logical block inside the double-indirect range, so the file tail reads back as a zero-filled hole"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_ext2_bmap.c",
+    "selector": "test_ext2_bmap",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "qemu_e2e",
+     "source": "user/test_lvgl/test_lvgl.c",
+     "selector": "test_lvgl",
+     "evidence": "[TEST PASS] LVGL compatibility smoke test succeeded.",
+     "distinct_risk": "The host test drives the driver against a synthetic image; only a real guest run proves that the ext2 image the kernel mounts plus the ELF loader deliver the file bytes the running binary needs"
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the ext2 logical-to-physical block mapping across the indirect-block levels"
+   }
+  },
+  {
    "id": "display.fb.mtrr",
    "component": "display",
    "behavior": "fb",

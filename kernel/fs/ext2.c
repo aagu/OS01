@@ -28,6 +28,11 @@ static inline void ext2_unlock(ext2_fs_t *fs)
         mutex_unlock(&fs->lock);
 }
 
+// Forward declarations for the index-chain helpers defined further
+// down (the "Indirect index tables" section): the orphan-reclaim path
+// frees a whole chain and sits above their definition.
+static void ext2_free_tree(ext2_fs_t *fs, uint32_t tbl, uint32_t depth);
+
 #ifdef OS01_SELFTEST
 static ext2_fs_t *ext2_selftest_fs;  // set by ext2_init, used by selftests
 #endif
@@ -433,6 +438,18 @@ static int ext2_reclaim_orphan_inode_locked(ext2_fs_t *fs, uint32_t target_ino)
             free_block(fs, inode.i_block[12]);
             inode.i_block[12] = 0;
         }
+        // Double indirect (block 13) and triple indirect (block 14):
+        // the whole chain below them is released as well, so a file
+        // whose tail lives past the single-indirect range does not leak
+        // its blocks when the inode is reclaimed.
+        if (inode.i_block[13] != 0) {
+            ext2_free_tree(fs, inode.i_block[13], 2);
+            inode.i_block[13] = 0;
+        }
+        if (inode.i_block[14] != 0) {
+            ext2_free_tree(fs, inode.i_block[14], 3);
+            inode.i_block[14] = 0;
+        }
     }
 
     inode.i_blocks = 0;
@@ -447,7 +464,72 @@ static int ext2_reclaim_orphan_inode_locked(ext2_fs_t *fs, uint32_t target_ino)
     return 0;
 }
 
-// ── Map logical block → physical (direct + single indirect) ─
+// ── Indirect index tables ─────────────────────────────────────
+//
+// An ext2 index table is one block holding `ptrs_per_block` block
+// numbers (1024 with 4 KiB blocks).  A file's blocks live in a chain
+// of such tables:
+//
+//   i_block[0..11]   direct          -> data block
+//   i_block[12]      single indirect -> data block
+//   i_block[13]      double indirect -> single table -> data block
+//   i_block[14]      triple indirect -> double table -> single table -> data block
+//
+// The logical-block ranges that follow from that (4 KiB blocks):
+//
+//   direct             logical        0 ..         11
+//   single indirect    logical       12 ..       1035
+//   double indirect    logical     1036 ..    1048579
+//   triple indirect    logical  1048580 .. 1073741823
+//
+// Every level is walked with the same helpers below, so the read, the
+// allocating write and the free path cannot drift apart.
+//
+// A freshly allocated index table must be zero-filled on disk BEFORE it
+// is referenced: an uninitialised table would read back as garbage
+// pointers.  alloc_block() already hands out a zero-filled block, so
+// the allocating path can use it directly.
+
+// Read entry `idx` of the index table `tbl`.  Returns 0 for a hole or
+// when the table cannot be read.
+static __attribute__((noinline)) uint32_t ext2_table_read(ext2_fs_t *fs, uint32_t tbl,
+                                uint32_t idx)
+{
+    uint32_t *buf = kmalloc(4096);
+    if (!buf) return 0;
+    uint32_t result = 0;
+    if (ext2_read_block(fs, tbl, buf) == 0)
+        result = buf[idx];
+    kfree(buf);
+    return result;
+}
+
+// Return entry `idx` of the index table `tbl`, allocating a zeroed
+// block for it when the entry is empty and `create` is set.  `*created`
+// reports whether a block was allocated — the caller accounts it in
+// inode->i_blocks.
+static __attribute__((noinline)) uint32_t ext2_table_entry(ext2_fs_t *fs, uint32_t tbl,
+                                uint32_t idx, bool create, bool *created)
+{
+    uint32_t *buf = kmalloc(4096);
+    if (!buf) return 0;
+    uint32_t result = 0;
+    if (ext2_read_block(fs, tbl, buf) == 0) {
+        result = buf[idx];
+        if (result == 0 && create) {
+            result = alloc_block(fs);
+            if (result != 0) {
+                buf[idx] = result;
+                ext2_write_block(fs, tbl, buf);
+                if (created) *created = true;
+            }
+        }
+    }
+    kfree(buf);
+    return result;
+}
+
+// ── Map logical block → physical (direct + single + double + triple indirect) ─
 static __attribute__((noinline)) uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t *inode,
                           uint32_t logical_block)
 {
@@ -455,7 +537,9 @@ static __attribute__((noinline)) uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t 
         return inode->i_block[logical_block];
 
     uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-    if (logical_block < 12 + ptrs_per_block) {
+    uint64_t single_end = 12 + (uint64_t)ptrs_per_block;
+
+    if (logical_block < single_end) {
         uint32_t indirect_blk = inode->i_block[12];
         if (indirect_blk == 0) return 0;
 
@@ -468,7 +552,43 @@ static __attribute__((noinline)) uint32_t ext2_bmap(ext2_fs_t *fs, ext2_inode_t 
         return result;
     }
 
-    return 0;  // double/triple indirect not implemented
+    // Double indirect (block 13): the table's entries are single-indirect
+    // tables, each of which points at a data block.
+    uint64_t double_end = single_end + (uint64_t)ptrs_per_block * ptrs_per_block;
+    if (logical_block < double_end) {
+        uint32_t dind_blk = inode->i_block[13];
+        if (dind_blk == 0) return 0;
+
+        uint32_t off = (uint32_t)(logical_block - single_end);
+        uint32_t l1 = off / ptrs_per_block;
+        uint32_t l2 = off % ptrs_per_block;
+
+        uint32_t ind_blk = ext2_table_read(fs, dind_blk, l1);
+        if (ind_blk == 0) return 0;
+        return ext2_table_read(fs, ind_blk, l2);
+    }
+
+    // Triple indirect (block 14): the table's entries are double-indirect
+    // tables, each of which points at a single-indirect table.
+    uint64_t triple_end = double_end +
+                          (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block;
+    if (logical_block < triple_end) {
+        uint32_t tind_blk = inode->i_block[14];
+        if (tind_blk == 0) return 0;
+
+        uint64_t off = logical_block - double_end;
+        uint32_t l1 = (uint32_t)(off / ((uint64_t)ptrs_per_block * ptrs_per_block));
+        uint32_t l2 = (uint32_t)((off / ptrs_per_block) % ptrs_per_block);
+        uint32_t l3 = (uint32_t)(off % ptrs_per_block);
+
+        uint32_t dind_blk = ext2_table_read(fs, tind_blk, l1);
+        if (dind_blk == 0) return 0;
+        uint32_t ind_blk = ext2_table_read(fs, dind_blk, l2);
+        if (ind_blk == 0) return 0;
+        return ext2_table_read(fs, ind_blk, l3);
+    }
+
+    return 0;  // beyond the ext2 32-bit logical-block space
 }
 
 // ── Map logical block → physical (allocating variant) ──
@@ -490,7 +610,8 @@ static __attribute__((noinline)) uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_in
 
     // Single indirect (block 12)
     uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-    if (logical_block < 12 + ptrs_per_block) {
+    uint64_t single_end = 12 + (uint64_t)ptrs_per_block;
+    if (logical_block < single_end) {
         if (inode->i_block[12] == 0) {
             uint32_t indirect_blk = alloc_block(fs);
             if (indirect_blk == 0) return 0;
@@ -518,7 +639,206 @@ static __attribute__((noinline)) uint32_t ext2_bmap_alloc(ext2_fs_t *fs, ext2_in
         return result;
     }
 
-    return 0;  // double/triple indirect not supported
+    // Double indirect (block 13): the table's entries are single-indirect
+    // tables, each of which points at a data block.
+    uint64_t double_end = single_end + (uint64_t)ptrs_per_block * ptrs_per_block;
+    if (logical_block < double_end) {
+        if (inode->i_block[13] == 0) {
+            uint32_t dind_blk = alloc_block(fs);
+            if (dind_blk == 0) return 0;
+            inode->i_block[13] = dind_blk;
+            inode->i_blocks += fs->block_size / 512;
+        }
+
+        uint32_t off = (uint32_t)(logical_block - single_end);
+        uint32_t l1 = off / ptrs_per_block;
+        uint32_t l2 = off % ptrs_per_block;
+
+        bool table_created = false;
+        uint32_t ind_blk = ext2_table_entry(fs, inode->i_block[13], l1, true,
+                                            &table_created);
+        if (ind_blk == 0) return 0;
+        if (table_created) inode->i_blocks += fs->block_size / 512;
+
+        bool data_created = false;
+        uint32_t result = ext2_table_entry(fs, ind_blk, l2, true, &data_created);
+        if (result == 0) return 0;
+        if (data_created) inode->i_blocks += fs->block_size / 512;
+        return result;
+    }
+
+    // Triple indirect (block 14): the table's entries are double-indirect
+    // tables, each of which points at a single-indirect table.
+    uint64_t triple_end = double_end +
+                          (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block;
+    if (logical_block < triple_end) {
+        if (inode->i_block[14] == 0) {
+            uint32_t tind_blk = alloc_block(fs);
+            if (tind_blk == 0) return 0;
+            inode->i_block[14] = tind_blk;
+            inode->i_blocks += fs->block_size / 512;
+        }
+
+        uint64_t off = logical_block - double_end;
+        uint32_t l1 = (uint32_t)(off / ((uint64_t)ptrs_per_block * ptrs_per_block));
+        uint32_t l2 = (uint32_t)((off / ptrs_per_block) % ptrs_per_block);
+        uint32_t l3 = (uint32_t)(off % ptrs_per_block);
+
+        bool c1 = false, c2 = false, c3 = false;
+        uint32_t dind_blk = ext2_table_entry(fs, inode->i_block[14], l1, true, &c1);
+        if (dind_blk == 0) return 0;
+        if (c1) inode->i_blocks += fs->block_size / 512;
+
+        uint32_t ind_blk = ext2_table_entry(fs, dind_blk, l2, true, &c2);
+        if (ind_blk == 0) return 0;
+        if (c2) inode->i_blocks += fs->block_size / 512;
+
+        uint32_t result = ext2_table_entry(fs, ind_blk, l3, true, &c3);
+        if (result == 0) return 0;
+        if (c3) inode->i_blocks += fs->block_size / 512;
+        return result;
+    }
+
+    return 0;  // beyond the ext2 32-bit logical-block space
+}
+
+// ── Free one logical block's mapping ────────────────────────────
+//
+// `tables[i]` is the index table at level i (level 0 = the table
+// named by i_block[12]/[13]/[14]) and `path[i]` the entry index inside
+// it; `depth` is the number of levels the chain spans.  The data block
+// is freed and every pointer along the way is cleared.  An index table
+// that becomes empty is freed too.
+//
+// `*removed` reports whether a data block was actually freed.
+// The return value reports whether the LEVEL-0 table is now empty —
+// the caller then frees it and clears the inode entry that named it.
+static __attribute__((noinline)) bool ext2_free_chain(ext2_fs_t *fs, uint32_t *tables,
+                                uint32_t *path, uint32_t depth, bool *removed)
+{
+    uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+    uint32_t *buf = kmalloc(4096);
+    if (!buf) return false;
+
+    bool empty = true;
+    if (ext2_read_block(fs, tables[0], buf) == 0) {
+        uint32_t child = buf[path[0]];
+        if (child != 0) {
+            if (depth == 1) {
+                free_block(fs, child);
+                buf[path[0]] = 0;
+                if (removed) *removed = true;
+            } else {
+                tables[1] = child;
+                bool inner_removed = false;
+                if (ext2_free_chain(fs, tables + 1, path + 1, depth - 1,
+                                    &inner_removed)) {
+                    /* the nested table is empty now — release it */
+                    free_block(fs, child);
+                    buf[path[0]] = 0;
+                }
+                if (inner_removed && removed) *removed = true;
+            }
+        }
+        for (uint32_t k = 0; k < ptrs_per_block; k++) {
+            if (buf[k] != 0) { empty = false; break; }
+        }
+        ext2_write_block(fs, tables[0], buf);
+    }
+    kfree(buf);
+    return empty;
+}
+
+// Remove the mapping of one logical block: free the data block it
+// pointed at and clear the pointer.  Returns true when a mapping was
+// removed.
+static __attribute__((noinline)) bool ext2_bmap_free(ext2_fs_t *fs, ext2_inode_t *inode,
+                                uint32_t logical_block)
+{
+    if (logical_block < 12) {
+        if (inode->i_block[logical_block] == 0) return false;
+        free_block(fs, inode->i_block[logical_block]);
+        inode->i_block[logical_block] = 0;
+        return true;
+    }
+
+    uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+    uint64_t single_end = 12 + (uint64_t)ptrs_per_block;
+    uint64_t double_end = single_end + (uint64_t)ptrs_per_block * ptrs_per_block;
+    uint64_t triple_end = double_end +
+                          (uint64_t)ptrs_per_block * ptrs_per_block * ptrs_per_block;
+
+    uint32_t tables[3] = {0, 0, 0};
+    uint32_t path[3] = {0, 0, 0};
+    uint32_t depth;
+
+    if (logical_block < single_end) {
+        tables[0] = inode->i_block[12];
+        path[0] = logical_block - 12;
+        depth = 1;
+    } else if (logical_block < double_end) {
+        tables[0] = inode->i_block[13];
+        path[0] = (uint32_t)((logical_block - single_end) / ptrs_per_block);
+        path[1] = (uint32_t)((logical_block - single_end) % ptrs_per_block);
+        depth = 2;
+    } else if (logical_block < triple_end) {
+        uint64_t off = logical_block - double_end;
+        tables[0] = inode->i_block[14];
+        path[0] = (uint32_t)(off / ((uint64_t)ptrs_per_block * ptrs_per_block));
+        path[1] = (uint32_t)((off / ptrs_per_block) % ptrs_per_block);
+        path[2] = (uint32_t)(off % ptrs_per_block);
+        depth = 3;
+    } else {
+        return false;
+    }
+
+    if (tables[0] == 0) return false;
+
+    bool removed = false;
+    bool empty = ext2_free_chain(fs, tables, path, depth, &removed);
+    if (!removed) return false;
+
+    /* The level-0 table is empty: release it and clear the inode entry. */
+    if (empty) {
+        free_block(fs, tables[0]);
+        if (depth == 1) {
+            inode->i_block[12] = 0;
+        } else if (depth == 2) {
+            inode->i_block[13] = 0;
+        } else {
+            inode->i_block[14] = 0;
+        }
+        inode->i_blocks -= fs->block_size / 512;
+    }
+    return true;
+}
+
+// Free every data block reachable through an index chain and then the
+// chain's own tables.  `tbl` is the outermost table and `depth` the
+// number of table levels below it (1 = single, 2 = double, 3 = triple).
+static __attribute__((noinline)) void ext2_free_tree(ext2_fs_t *fs, uint32_t tbl,
+                                uint32_t depth)
+{
+    if (tbl == 0) return;
+    uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
+    uint32_t *buf = kmalloc(4096);
+    if (!buf) {
+        /* Without a buffer the children cannot be enumerated: release
+         * the table itself and leak its children rather than risk a
+         * double free. */
+        free_block(fs, tbl);
+        return;
+    }
+    if (ext2_read_block(fs, tbl, buf) == 0) {
+        for (uint32_t i = 0; i < ptrs_per_block; i++) {
+            uint32_t child = buf[i];
+            if (child == 0) continue;
+            if (depth <= 1) free_block(fs, child);
+            else ext2_free_tree(fs, child, depth - 1);
+        }
+    }
+    kfree(buf);
+    free_block(fs, tbl);
 }
 
 // ── Find a directory entry by name ──────────────────────
@@ -959,36 +1279,18 @@ static __attribute__((noinline)) int ext2_vfs_truncate(struct vfs_node *node, ui
             uint32_t phys = ext2_bmap(fs, &inode, lb);
             if (phys == 0) continue;
 
-            free_block(fs, phys);
-
-            // Clear the block pointer
-            if (lb < 12) {
-                inode.i_block[lb] = 0;
-            } else {
-                uint32_t ptrs_per_block = fs->block_size / sizeof(uint32_t);
-                uint32_t idx = lb - 12;
-                if (inode.i_block[12] != 0) {
-                    uint32_t *indirect = kmalloc(4096);
-                    if (!indirect) { ext2_unlock(fs); return -ENOMEM; }
-                    if (ext2_read_block(fs, inode.i_block[12], indirect) != 0) {
-                        kfree(indirect);
-                        ext2_unlock(fs); return -EIO;
-                    }
-                    indirect[idx] = 0;
-                    ext2_write_block(fs, inode.i_block[12], indirect);
-
-                    // Check if indirect block is now empty
-                    int empty = 1;
-                    for (uint32_t k = 0; k < ptrs_per_block; k++) {
-                        if (indirect[k] != 0) { empty = 0; break; }
-                    }
-                    if (empty) {
-                        free_block(fs, inode.i_block[12]);
-                        inode.i_block[12] = 0;
-                        inode.i_blocks -= fs->block_size / 512;
-                    }
-                    kfree(indirect);
-                }
+            // Free the data block and clear its pointer.  ext2_bmap_free()
+            // walks the SAME index chain the read and write paths use, so
+            // the double- and triple-indirect levels are handled too — the
+            // previous single-indirect-only code indexed the table with
+            // `lb - 12`, which ran past the end of the table for any
+            // logical block in the double-indirect range.
+            if (!ext2_bmap_free(fs, &inode, lb)) {
+                /* The chain could not be updated.  Releasing the block
+                 * here would leave the inode pointing at it, so abort
+                 * the truncate instead and keep the file intact. */
+                ext2_unlock(fs);
+                return -EIO;
             }
             inode.i_blocks -= fs->block_size / 512;
         }
