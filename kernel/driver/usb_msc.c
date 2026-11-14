@@ -24,6 +24,8 @@
 #define SCSI_OP_INQUIRY            0x12u
 #define SCSI_OP_READ_CAPACITY_10   0x25u
 #define SCSI_OP_READ_10            0x28u
+#define SCSI_OP_WRITE_10           0x2au
+#define SCSI_OP_SYNCHRONIZE_CACHE  0x35u
 
 struct usb_msc_dev {
     struct usb_msc_bot bot;
@@ -159,6 +161,33 @@ static int scsi_read_10(struct usb_msc_dev *m, uint32_t lba, uint16_t count,
                                true, actual);
 }
 
+static int scsi_write_10(struct usb_msc_dev *m, uint32_t lba, uint16_t count,
+                         const void *buf, size_t *actual)
+{
+    uint8_t cdb[10];
+    memset(cdb, 0, sizeof(cdb));
+    cdb[0] = SCSI_OP_WRITE_10;
+    put_be32(cdb + 2, lba);
+    put_be16(cdb + 7, count);
+
+    return usb_msc_bot_command(&m->bot, cdb, sizeof(cdb), USB_MSC_OUT,
+                               (void *)buf, (uint32_t)count * USB_MSC_SECTOR_SIZE,
+                               false, actual);
+}
+
+static void msc_invalidate_overlap(struct usb_msc_dev *m, uint64_t lba, uint32_t count)
+{
+    if (!m->cache_valid)
+        return;
+
+    uint64_t cache_end = m->cache_lba + m->cache_count;
+    uint64_t write_end = lba + count;
+    if (lba < cache_end && write_end > m->cache_lba) {
+        m->cache_valid = false;
+        m->cache_count = 0;
+    }
+}
+
 static int msc_refill_window(struct usb_msc_dev *m, uint64_t start_lba, uint32_t min_sectors)
 {
     uint64_t avail = m->sector_count - start_lba;
@@ -277,10 +306,85 @@ out:
     return rc;
 }
 
+static int usb_msc_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *buf)
+{
+    if (!dev || !dev->private_data)
+        return -EINVAL;
+    if (count == 0)
+        return 0;
+    if (!buf)
+        return -EINVAL;
+
+    struct usb_msc_dev *m = dev->private_data;
+    if (lba >= m->sector_count || (uint64_t)count > m->sector_count - lba)
+        return -EINVAL;
+
+    bool locked = vfs_sched_ready();
+    if (locked)
+        mutex_lock(&m->lock);
+
+    int rc = 0;
+    const uint8_t *src = buf;
+    uint64_t cur_lba = lba;
+    uint32_t rem = count;
+
+    while (rem > 0) {
+        uint16_t chunk = (rem > USB_MSC_MAX_IO_SECTORS)
+                             ? USB_MSC_MAX_IO_SECTORS
+                             : (uint16_t)rem;
+        size_t want_bytes = (size_t)chunk * USB_MSC_SECTOR_SIZE;
+        size_t actual = 0;
+
+        /* Invalidate overlapping read-ahead before sending WRITE(10) so an
+         * uncertain/failed write that modifies media cannot leave stale data. */
+        msc_invalidate_overlap(m, cur_lba, chunk);
+
+        rc = scsi_write_10(m, (uint32_t)cur_lba, chunk, src, &actual);
+        if (rc != 0)
+            goto out;
+        if (actual != want_bytes) {
+            rc = -EIO;
+            goto out;
+        }
+
+        src += want_bytes;
+        cur_lba += chunk;
+        rem -= chunk;
+    }
+
+out:
+    if (locked)
+        mutex_unlock(&m->lock);
+    return rc;
+}
+
+static int usb_msc_flush(block_device_t *dev)
+{
+    if (!dev || !dev->private_data)
+        return -EINVAL;
+
+    struct usb_msc_dev *m = dev->private_data;
+    uint8_t cdb[10];
+    memset(cdb, 0, sizeof(cdb));
+    cdb[0] = SCSI_OP_SYNCHRONIZE_CACHE;
+
+    bool locked = vfs_sched_ready();
+    if (locked)
+        mutex_lock(&m->lock);
+
+    size_t actual = 0;
+    int rc = usb_msc_bot_command(&m->bot, cdb, sizeof(cdb), USB_MSC_NONE,
+                                 NULL, 0, false, &actual);
+
+    if (locked)
+        mutex_unlock(&m->lock);
+    return rc;
+}
+
 static const struct block_device_ops usb_msc_ops = {
     .read = usb_msc_read,
-    .write = NULL,
-    .flush = NULL,
+    .write = usb_msc_write,
+    .flush = usb_msc_flush,
 };
 
 static void msc_free_dev(struct usb_msc_dev *m)

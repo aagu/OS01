@@ -529,6 +529,20 @@ struct scsi_sim {
     uint32_t read_lbas[32];
     uint16_t read_counts[32];
 
+    size_t write_cdb_count;
+    uint32_t write_lbas[32];
+    uint16_t write_counts[32];
+    uint8_t write_cdbs[32][16];
+    bool write_short_out;
+    size_t write_short_out_bytes;
+    uint32_t write_nonzero_residue;
+    int fail_next_write_rc;
+    bool write_corrupt_csw_after_media;
+
+    size_t sync_cdb_count;
+    uint8_t sync_cdbs[16][16];
+    bool sync_bad_csw;
+
     /* Concurrency barrier fields */
     volatile int block_first_read;
     volatile int first_read_entered;
@@ -576,6 +590,14 @@ static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual
             s->read_lbas[s->read_cdb_count] = get_be32(s->cur_cdb + 2);
             s->read_counts[s->read_cdb_count] = get_be16(s->cur_cdb + 7);
             s->read_cdb_count++;
+        } else if (s->cur_cdb[0] == 0x2a && s->write_cdb_count < 32) {
+            memcpy(s->write_cdbs[s->write_cdb_count], s->cur_cdb, 16);
+            s->write_lbas[s->write_cdb_count] = get_be32(s->cur_cdb + 2);
+            s->write_counts[s->write_cdb_count] = get_be16(s->cur_cdb + 7);
+            s->write_cdb_count++;
+        } else if (s->cur_cdb[0] == 0x35 && s->sync_cdb_count < 16) {
+            memcpy(s->sync_cdbs[s->sync_cdb_count], s->cur_cdb, 16);
+            s->sync_cdb_count++;
         }
         s->phase = (s->cur_len > 0) ? 1 : 2;
         if (actual)
@@ -584,8 +606,36 @@ static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual
     }
 
     if (s->phase == 1) {
-        assert_eq(EP_IN, ep);
         uint8_t op = s->cur_cdb[0];
+        if (op == 0x2a) { /* WRITE(10) */
+            assert_eq(EP_OUT, ep);
+            if (s->fail_next_write_rc != 0) {
+                int rc = s->fail_next_write_rc;
+                s->fail_next_write_rc = 0;
+                s->phase = 0;
+                __atomic_sub_fetch(&s->in_flight_bot, 1, __ATOMIC_SEQ_CST);
+                if (actual)
+                    *actual = 0;
+                return rc;
+            }
+            uint32_t lba = get_be32(s->cur_cdb + 2);
+            uint16_t cnt = get_be16(s->cur_cdb + 7);
+            size_t want = (size_t)cnt * 512u;
+            size_t give = (want < len) ? want : len;
+            if (s->write_short_out) {
+                s->write_short_out = false;
+                if (s->write_short_out_bytes < give)
+                    give = s->write_short_out_bytes;
+            }
+            memcpy(s->disk + (size_t)lba * 512u, buf, give);
+            s->cur_residue = s->write_nonzero_residue;
+            s->write_nonzero_residue = 0;
+            if (actual)
+                *actual = give;
+            s->phase = 2;
+            return 0;
+        }
+        assert_eq(EP_IN, ep);
         if (op == 0x12) { /* INQUIRY */
             uint8_t inq[36];
             memset(inq, ' ', sizeof(inq));
@@ -650,6 +700,16 @@ static int sim_bulk(void *ctx, uint8_t ep, void *buf, size_t len, size_t *actual
 
     /* phase == 2: CSW */
     assert_eq(EP_IN, ep);
+    if ((s->cur_cdb[0] == 0x2a && s->write_corrupt_csw_after_media) ||
+        (s->cur_cdb[0] == 0x35 && s->sync_bad_csw)) {
+        s->write_corrupt_csw_after_media = false;
+        s->sync_bad_csw = false;
+        s->phase = 0;
+        __atomic_sub_fetch(&s->in_flight_bot, 1, __ATOMIC_SEQ_CST);
+        if (actual)
+            *actual = 0;
+        return -EIO;
+    }
     if (s->cur_cdb[0] == 0x00 && s->tur_fail_count > 0) {
         s->tur_fail_count--;
         s->cur_status = 1;
@@ -740,8 +800,8 @@ TEST_FUNC(probe_publish_and_geometry)
     assert_eq(BLOCK_DISK, dev->kind);
     assert_true(dev->parent == NULL);
     assert_true(dev->ops->read != NULL);
-    assert_true(dev->ops->write == NULL);
-    assert_true(dev->ops->flush == NULL);
+    assert_true(dev->ops->write != NULL);
+    assert_true(dev->ops->flush != NULL);
 
     /* 5. 129-sector read is split 128 + 1 with BE LBA/count */
     uint8_t *rbuf = malloc(129 * 512);
@@ -933,12 +993,137 @@ TEST_FUNC(read_ahead_concurrent)
     free(disk);
 }
 
+TEST_FUNC(write10_payload_and_flush)
+{
+    block_device_reset_for_test();
+    __atomic_store_n(&s_sched_ready, 0, __ATOMIC_RELEASE);
+
+    uint8_t *disk = calloc(256, 512);
+    struct scsi_sim sim;
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 512;
+    struct usb_msc_transport t = sim_transport(&sim);
+    block_device_t *dev = NULL;
+    assert_eq(0, usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev));
+    assert_true(dev != NULL);
+    assert_true(dev->ops->write != NULL);
+    assert_true(dev->ops->flush != NULL);
+
+    /* 1. 129-sector WRITE(10) splits into 128 + 1 with BE LBA/count and exact payload */
+    uint8_t *wbuf = malloc(129 * 512);
+    for (size_t i = 0; i < 129 * 512; i++)
+        wbuf[i] = (uint8_t)((i * 7u + 0x5au) & 0xffu);
+
+    assert_eq(0, dev->ops->write(dev, 10, 129, wbuf));
+    assert_eq(2, sim.write_cdb_count);
+    assert_eq(0x2a, sim.write_cdbs[0][0]);
+    assert_eq(10u, sim.write_lbas[0]);
+    assert_eq(128u, sim.write_counts[0]);
+    assert_eq(0x2a, sim.write_cdbs[1][0]);
+    assert_eq(138u, sim.write_lbas[1]);
+    assert_eq(1u, sim.write_counts[1]);
+    assert_eq(0, memcmp(disk + 10 * 512, wbuf, 129 * 512));
+
+    /* 2. Zero count, NULL buf, overflow, out-of-range produce no command */
+    sim.write_cdb_count = 0;
+    assert_eq(0, dev->ops->write(dev, 0, 0, wbuf));
+    assert_eq(-EINVAL, dev->ops->write(dev, 0, 1, NULL));
+    assert_eq(-EINVAL, dev->ops->write(dev, 256, 1, wbuf));
+    assert_eq(-EINVAL, dev->ops->write(dev, 250, 7, wbuf));
+    assert_eq(-EINVAL, dev->ops->write(dev, UINT64_MAX, 1, wbuf));
+    assert_eq(0, sim.write_cdb_count);
+
+    /* 3. Short OUT and nonzero WRITE residue are rejected */
+    sim.write_short_out = true;
+    sim.write_short_out_bytes = 511;
+    assert_eq(-EIO, dev->ops->write(dev, 0, 1, wbuf));
+    assert_eq(1, sim.write_cdb_count);
+
+    sim.write_nonzero_residue = 4;
+    assert_eq(-EIO, dev->ops->write(dev, 0, 1, wbuf));
+    assert_eq(2, sim.write_cdb_count);
+
+    /* 4. SYNCHRONIZE CACHE(10) 0x35 with zero payload and no IMMED */
+    assert_eq(0, dev->ops->flush(dev));
+    assert_eq(1, sim.sync_cdb_count);
+    assert_eq(0x35, sim.sync_cdbs[0][0]);
+    assert_eq(0, sim.sync_cdbs[0][1] & 0x02u); /* no IMMED */
+    for (size_t i = 1; i < 10; i++)
+        assert_eq(0, sim.sync_cdbs[0][i]);
+
+    free(wbuf);
+    free(disk);
+}
+
+TEST_FUNC(write_uncertain_invalidates_window)
+{
+    block_device_reset_for_test();
+    __atomic_store_n(&s_sched_ready, 0, __ATOMIC_RELEASE);
+
+    uint8_t *disk = calloc(256, 512);
+    for (uint32_t lba = 0; lba < 256; lba++)
+        memset(disk + lba * 512, (int)(lba & 0xffu), 512);
+
+    struct scsi_sim sim;
+    memset(&sim, 0, sizeof(sim));
+    sim.disk = disk;
+    sim.last_lba = 255;
+    sim.block_size = 512;
+    struct usb_msc_transport t = sim_transport(&sim);
+    block_device_t *dev = NULL;
+    assert_eq(0, usb_msc_probe(&t, 0, EP_IN, EP_OUT, "usba", &dev));
+    assert_true(dev != NULL);
+
+    uint8_t sec[512];
+    uint8_t wsec[512];
+    memset(wsec, 0xa5, sizeof(wsec));
+
+    /* 1. Fill read-ahead window [0, 128), then fail overlapping WRITE after media update */
+    assert_eq(0, dev->ops->read(dev, 0, 1, sec));
+    assert_eq(1, sim.read_cdb_count);
+    sim.read_cdb_count = 0;
+
+    sim.write_corrupt_csw_after_media = true;
+    assert_true(dev->ops->write(dev, 5, 1, wsec) < 0);
+    /* Must NOT replay WRITE */
+    assert_eq(1, sim.write_cdb_count);
+    /* Overlapping read-ahead window must be invalidated -> fresh READ(10) sees updated media */
+    assert_eq(0, dev->ops->read(dev, 5, 1, sec));
+    assert_eq(1, sim.read_cdb_count);
+    assert_eq(0, memcmp(sec, wsec, 512));
+
+    /* 2. Transport error on WRITE also does not replay */
+    sim.write_cdb_count = 0;
+    sim.fail_next_write_rc = -EIO;
+    assert_true(dev->ops->write(dev, 10, 1, wsec) < 0);
+    assert_eq(1, sim.write_cdb_count);
+
+    /* 3. Non-overlapping WRITE does NOT invalidate unrelated read-ahead window [0, 128) */
+    assert_eq(0, dev->ops->read(dev, 0, 1, sec));
+    sim.read_cdb_count = 0;
+    assert_eq(0, dev->ops->write(dev, 200, 1, wsec));
+    assert_eq(0, dev->ops->read(dev, 15, 1, sec));
+    assert_eq(0, sim.read_cdb_count);
+
+    /* 4. Failed FLUSH does NOT replay SYNCHRONIZE CACHE */
+    sim.sync_cdb_count = 0;
+    sim.sync_bad_csw = true;
+    assert_true(dev->ops->flush(dev) < 0);
+    assert_eq(1, sim.sync_cdb_count);
+
+    free(disk);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(bot_wire_and_csw),
     TEST_ENTRY(bot_recovery),
     TEST_ENTRY(probe_publish_and_geometry),
     TEST_ENTRY(read_ahead_window),
     TEST_ENTRY(read_ahead_concurrent),
+    TEST_ENTRY(write10_payload_and_flush),
+    TEST_ENTRY(write_uncertain_invalidates_window),
 TEST_LIST_END
 
 int main(void)
