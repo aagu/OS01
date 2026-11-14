@@ -172,9 +172,10 @@ BRK_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                    -I$(TEST_MOCK) -I$(TEST_INC) \
                    -I$(TEST_MOCK)/brk
 
-$(TEST_BLD)/vma_brk_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
+$(TEST_BLD)/brk_brk_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/brk.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/vma.h \
 		$(TEST_MOCK)/brk/brk_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BRK_HOST_CFLAGS) -c $< -o $@
@@ -198,7 +199,7 @@ $(TEST_BLD)/test_brk_pages.o: $(TEST_CASES)/test_brk_pages.c \
 	$(HOST_CC) $(BRK_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_brk_pages.elf: $(TEST_BLD)/test_brk_pages.o \
-		$(TEST_BLD)/vma_brk_production.o \
+		$(TEST_BLD)/brk_brk_production.o \
 		$(TEST_BLD)/vm_area_brk_production.o \
 		$(TEST_BLD)/brk_stubs.o
 	$(HOST_CC) -Wl,--wrap=kmalloc,--wrap=kfree -o $@ $^
@@ -209,6 +210,22 @@ PRANGES_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                        -include $(TEST_MOCK)/pranges/pranges_runtime.h \
                        -I$(TEST_MOCK) -I$(TEST_INC) \
                        -I$(TEST_MOCK)/pranges
+
+$(TEST_BLD)/brk_pranges_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/brk.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/vma.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/mmap_pranges_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/mmap.c \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/vma.h \
+		$(TEST_MOCK)/pranges/pranges_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(PRANGES_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/vma_pranges_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
@@ -236,6 +253,8 @@ $(TEST_BLD)/test_user_protected_ranges.o: $(TEST_CASES)/test_user_protected_rang
 	$(HOST_CC) $(PRANGES_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_user_protected_ranges.elf: $(TEST_BLD)/test_user_protected_ranges.o \
+		$(TEST_BLD)/brk_pranges_production.o \
+		$(TEST_BLD)/mmap_pranges_production.o \
 		$(TEST_BLD)/vma_pranges_production.o \
 		$(TEST_BLD)/vm_area_pranges_production.o \
 		$(TEST_BLD)/pranges_stubs.o
@@ -250,13 +269,6 @@ UWRITE_COW_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
 
 $(TEST_BLD)/uaccess_uwrite_cow_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/uaccess.c \
 		$(TESTS_DIR)/kernel/include/memory/uaccess.h \
-		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
-
-$(TEST_BLD)/vma_uwrite_cow_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
-		$(TESTS_DIR)/kernel/include/memory/vma.h \
-		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
@@ -281,7 +293,6 @@ $(TEST_BLD)/test_user_write_cow.o: $(TEST_CASES)/test_user_write_cow.c \
 
 $(TEST_BLD)/test_user_write_cow.elf: $(TEST_BLD)/test_user_write_cow.o \
 		$(TEST_BLD)/uaccess_uwrite_cow_production.o \
-		$(TEST_BLD)/vma_uwrite_cow_production.o \
 		$(TEST_BLD)/vm_area_uwrite_cow_production.o \
 		$(TEST_BLD)/uwrite_cow_stubs.o
 	$(HOST_CC) -o $@ $^

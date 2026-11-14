@@ -115,7 +115,7 @@ int do_futex_wake(int *uaddr, int val)
     // path that doesn't dereference user memory (just hashes uaddr
     // and wakes wakers), so the check is purely a hardening
     // measurement.
-    if ((uint64_t)uaddr < USER_MIN_ADDR ||
+    if ((uint64_t)uaddr < X86_USER_MIN_ADDR ||
         (uint64_t)uaddr >= current->addr_limit)
         return -EFAULT;
 

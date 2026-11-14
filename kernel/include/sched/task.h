@@ -329,15 +329,17 @@ int kernel_thread_on_cpu(uint64_t (*fn)(uint64_t), uint64_t arg, unsigned cpu);
  * The 2MB page at 0x600000 is left unmapped as a stack guard —
  * overflow past the stack bottom triggers #PF instead of silent
  * corruption of code/data below. */
-// User stack lives ABOVE the user VA range defined by USER_CODE_ADDR +
-// USER_ENVELOPE_SIZE (kernel/arch/x86_64/intr/trap.c) so that heap growth
-// can never collide with the stack.  USER_STACK_BASE is 2 MiB-aligned
-// (required by vmm_map_page's PMD mapping) and immediately follows
-// the heap region; the implicit guard is the gap between
-// mm->end_brk ≤ 0x203FF000 and USER_STACK_BASE = 0x20400000 (heap
-// growth via SYS_brk is rejected past 0x203FF000).
-#define USER_STACK_BASE 0x20400000UL
-#define USER_STACK_TOP  (USER_STACK_BASE + 0x200000UL - 16)
+// User stack lives ABOVE the user envelope so heap growth can never
+// collide with the stack.  The x86_64 constants come from
+// <arch/x86_64/user_layout.h> (X86_USER_STACK_BASE is 2 MiB-aligned,
+// required by the PMD mapping; X86_USER_HEAP_LIMIT sits one page below
+// the stack base — heap growth via SYS_brk is rejected past it).
+// aarch64 keeps its own stack window in <arch/aarch64/user_image.h>.
+#ifdef __x86_64__
+#include <arch/x86_64/user_layout.h>
+#define USER_STACK_BASE X86_USER_STACK_BASE
+#define USER_STACK_TOP  X86_USER_STACK_TOP
+#endif
 
 /* ── EEVDF scheduler ─────────────────────────── */
 void task_wake(struct task_struct *t);

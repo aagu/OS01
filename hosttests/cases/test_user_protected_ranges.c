@@ -13,7 +13,7 @@
  *   [0x13ff000,       0x1400000)       heap→stack guard page
  *   [0x1400000,       0x1600000)       user stack (2 MiB)
  *
- * PRODUCTION-LINKED: compiles the REAL kernel/memory/vma.c against
+ * PRODUCTION-LINKED: compiles the REAL kernel/arch/x86_64/memory/{mmap,brk}.c against
  * hosttests/mock/pranges/ (flat indexed PTE table, 4 KiB page pool,
  * counter-backed TLB flush).  do_mmap / do_munmap / do_mprotect are
  * driven through the harness's `current`; every alloc/free/map/
@@ -25,7 +25,7 @@
  * heuristic), which no host-heap pointer satisfies.  The
  * "rejected request must skip the device callback" contract is
  * therefore covered by SOURCE-LEVEL INSPECTION of
- * kernel/memory/vma.c (same strategy the brk/lifecycle tests use
+ * kernel/arch/x86_64/memory/mmap.c (same strategy the brk/lifecycle tests use
  * for trap.c/task.c), asserting the predicate check textually
  * precedes the _dev_mmap invocation, the MAP_FIXED
  * do_munmap_locked call, the first VMA-flag write in do_mprotect
@@ -54,7 +54,7 @@
  * the production prototype in <memory/vma.h> matches it exactly. */
 bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end);
 
-/* ── Layout constants (mirror kernel/memory/vma.c) ─────────── */
+/* ── Layout constants (mirror kernel/arch/x86_64/user_layout.h) ── */
 #define USER_CODE_ADDR     0x400000UL
 #define USER_ENVELOPE_SIZE 0x20000000UL
 #define USER_PAGE_SIZE     USER_ENVELOPE_SIZE
@@ -756,7 +756,7 @@ static void test_mprotect_rejects_protected_ranges(void)
     }
 }
 
-/* ── Source-level inspection: wiring order inside vma.c ─────── */
+/* ── Source-level inspection: wiring order inside mmap.c ────── */
 
 static const char *vma_c_path(void)
 {
@@ -776,12 +776,12 @@ static const char *vma_c_path(void)
     marker = strstr(full, "/hosttests/");
     if (marker) {
         snprintf(buf, sizeof(buf),
-                 "%.*s/kernel/arch/x86_64/memory/vma.c",
+                 "%.*s/kernel/arch/x86_64/memory/mmap.c",
                  (int)(marker - full), full);
         return buf;
     }
     if (strncmp(full, "hosttests/", 10) == 0)
-        return "kernel/arch/x86_64/memory/vma.c";
+        return "kernel/arch/x86_64/memory/mmap.c";
     return NULL;
 }
 
@@ -822,7 +822,7 @@ static const char *find_from(const char *start, const char *end,
 
 static void test_wiring_order_in_vma_c(void)
 {
-    TEST_SUITE("vma.c source — predicate precedes every mutation/callback");
+    TEST_SUITE("mmap.c source — predicate precedes every mutation/callback");
 
     size_t len;
     char *src = slurp(vma_c_path(), &len);

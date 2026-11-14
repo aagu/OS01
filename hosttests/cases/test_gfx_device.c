@@ -53,7 +53,7 @@
 #include <fs/file.h>
 #include <fs/devfs.h>
 #include <core/printk.h>          // position Pos (host-test fake)
-#include <memory/uaccess.h>       // USER_MIN_ADDR (simulator matches it)
+#include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR (simulator matches it)
 #include <lwip/err.h>
 #include <lwip/api.h>
 #include <arch/x86_64/uaccess.h>
@@ -243,11 +243,11 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
     if (len == 0) return true;
     if (!g_user_sim.range_check_ok) return false;
     // Mirrors the production check from memory/uaccess.h:64-71 —
-    // reject anything below USER_MIN_ADDR (kernel range) so the
+    // reject anything below X86_USER_MIN_ADDR (kernel range) so the
     // "kernel-range pointer" test can pass a 0x100000 pointer and
     // expect -EFAULT.  No upper bound: the test passes host-heap
-    // and host-stack pointers which are both far above USER_MIN_ADDR.
-    if (addr < USER_MIN_ADDR) return false;
+    // and host-stack pointers which are both far above X86_USER_MIN_ADDR.
+    if (addr < X86_USER_MIN_ADDR) return false;
     if (addr + len < addr) return false;            // overflow guard
     return true;
 }
@@ -1104,7 +1104,7 @@ TEST_FUNC(test_present_user_pointer_in_kernel_range) {
     assert_eq(0, do_get_info(f, &info));
 
     /* pixels points into kernel virtual memory (lower-half / below
-     * USER_MIN_ADDR).  syscall_check_user_range rejects it. */
+     * X86_USER_MIN_ADDR).  syscall_check_user_range rejects it. */
     gfx_present_req_t req = { 0x100000ULL, info.stride, 0 };
     assert_eq(-EFAULT, do_present(f, &req));
     /* fb untouched */
@@ -1704,7 +1704,7 @@ TEST_FUNC(test_present_rect_invalid_geometry) {
     };
     assert_eq(-EFAULT, do_present_rect(f, &zero_pixels));
 
-    /* Kernel-range pointer (below USER_MIN_ADDR) → -EFAULT. */
+    /* Kernel-range pointer (below X86_USER_MIN_ADDR) → -EFAULT. */
     gfx_present_rect_req_t kr_pixels = {
         .pixels = 0x100000ULL, .stride = info.stride,
         .reserved = 0, .x = 0, .y = 0, .w = 1, .h = 1,

@@ -1077,12 +1077,6 @@ void x86_handle_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
     }
 }
 
-#define USER_CODE_ADDR 0x400000UL
-// User VA range (code + data + heap envelope): [USER_CODE_ADDR, USER_CODE_ADDR + USER_ENVELOPE_SIZE).
-// Envelope expanded to 512 MiB.
-// The user stack page is relocated above this region in kernel/include/sched/task.h (USER_STACK_BASE).
-#define USER_ENVELOPE_SIZE 0x20000000UL  // 512 MiB
-#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE  // Compatibility alias
 
 // ── Signal delivery ──────────────────────────────────────────
 // Dispatch pending signals for current.  Called from:

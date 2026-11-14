@@ -566,7 +566,7 @@ int selftest_uaccess(void)
 
     // ── Step 2: address-math (boot ctx: init_mm.pgdir unset, fail-closed) ─
     SELFTEST_ASSERT(!syscall_check_user_range(0, 4, true));                  // NULL
-    SELFTEST_ASSERT(!syscall_check_user_range(0x1, 4, true));                // < USER_MIN_ADDR
+    SELFTEST_ASSERT(!syscall_check_user_range(0x1, 4, true));                // < X86_USER_MIN_ADDR
     SELFTEST_ASSERT(!syscall_check_user_range(0xffff800000000000ULL, 4, true)); // kernel
     SELFTEST_ASSERT(!syscall_check_user_range(0x400000, (1ULL<<40), true));  // overflow
     SELFTEST_ASSERT(syscall_check_user_range(0x400000, 0, true));            // len==0

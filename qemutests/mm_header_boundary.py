@@ -51,9 +51,14 @@ FORBIDDEN_MACROS = [
     "PAGE_PGD_SHIFT", "get_cr3", "flush_tlb", "switch_tlb",
     # x86 uaccess ownership (arch/x86_64/uaccess.h only)
     "USER_MIN_ADDR",
+    # x86 user layout (arch/x86_64/user_layout.h only)
+    "X86_USER_MIN_ADDR", "X86_USER_STACK_BASE", "X86_USER_STACK_SIZE",
+    "X86_USER_STACK_END", "X86_USER_STACK_TOP", "X86_USER_HEAP_LIMIT",
     # private include guards (the arch facade _ARCH_MMU_H is allowed:
     # memory/mmu.h pulls it for ARCH_PAGE_OFFSET)
     "_ARCH_X86_64_MMU_H", "_ARCH_X86_64_VMM_H", "_ARCH_X86_64_PTE_H",
+    "_ARCH_X86_64_USER_LAYOUT_H", "_ARCH_X86_64_VMA_H",
+    "_ARCH_X86_64_UACCESS_H",
     "_ARCH_AARCH64_MMU_H", "_ARCH_AARCH64_VMM_BACKEND_H",
 ]
 

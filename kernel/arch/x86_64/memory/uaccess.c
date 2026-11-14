@@ -23,7 +23,8 @@
 // definitions live here.
 
 #include <memory/uaccess.h>
-#include <arch/x86_64/uaccess.h>  // USER_MIN_ADDR, os01_jmp_buf, write-prep pair
+#include <arch/x86_64/uaccess.h>  // os01_jmp_buf, write-prep pair
+#include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR
 #include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
 #include <memory/memory.h>     // Phy_To_Virt
 #include <memory/vma.h>        // vma_t, VMA_* logical flags
@@ -137,7 +138,7 @@ static bool user_write_range_valid(mm_t *mm, uint64_t addr, size_t len,
 {
     *cow_count = 0;
     if (len == 0) return true;
-    if (!mm || !mm->pgdir || addr < USER_MIN_ADDR ||
+    if (!mm || !mm->pgdir || addr < X86_USER_MIN_ADDR ||
         addr >= current->addr_limit || len > current->addr_limit - addr)
         return false;
     uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
@@ -167,7 +168,7 @@ static bool user_write_range_valid(mm_t *mm, uint64_t addr, size_t len,
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
 {
     if (len == 0) return true;
-    if (addr < USER_MIN_ADDR || addr >= current->addr_limit ||
+    if (addr < X86_USER_MIN_ADDR || addr >= current->addr_limit ||
         len > current->addr_limit - addr ||
         !current->mm || !current->mm->pgdir) return false;
     if (writable) {
@@ -259,4 +260,38 @@ int prepare_user_write_range(mm_t *mm, uint64_t addr, size_t len)
     int rc = prepare_user_write_range_locked(mm, addr, len);
     spin_unlock(&mm->lock);
     return rc;
+}
+
+// ── user_write_range_begin/end — validate + lock a kernel→user write ──
+// Closes the TOCTOU between "check the pages are mapped+writable" and
+// "write them": the caller holds current->mm->lock for the whole fill, and
+// munmap/MAP_FIXED/mprotect take the same lock, so no concurrent call can
+// tear down or narrow a page mid-write (which would fault into the
+// do_page_fault hlt hang — there is no kernel-side demand paging).
+//
+// On success returns 0 with mm->lock HELD; failure returns -EFAULT/-ENOMEM
+// and the lock is NOT held.  current->mm == NULL (kthread reading
+// /dev/urandom) skips the check/lock entirely — its buffer is a trusted
+// kernel buffer.
+//
+// COW preparation happens while holding mm->lock; after a successful begin,
+// callers perform only nonblocking writes and then call user_write_range_end.
+int user_write_range_begin(uint64_t addr, size_t len)
+{
+    if (current->mm == NULL)
+        return 0;
+
+    spin_lock(&current->mm->lock);
+    int rc = prepare_user_write_range_locked(current->mm, addr, len);
+    if (rc != 0) {
+        spin_unlock(&current->mm->lock);
+        return rc;
+    }
+    return 0;   // lock held
+}
+
+void user_write_range_end(void)
+{
+    if (current->mm != NULL)
+        spin_unlock(&current->mm->lock);
 }

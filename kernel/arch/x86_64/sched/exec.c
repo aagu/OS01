@@ -33,11 +33,8 @@
 #include <arch/x86_64/vmm.h>
 #include <arch/x86_64/vma.h>
 
-#define USER_CODE_ADDR   0x400000UL
+#include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR / stack window
 // Matches kernel/arch/x86_64/intr/trap.c — the user VA envelope is
-// [USER_CODE_ADDR, USER_CODE_ADDR + USER_ENVELOPE_SIZE).
-#define USER_ENVELOPE_SIZE 0x20000000UL  // 512 MiB
-#define USER_PAGE_SIZE     USER_ENVELOPE_SIZE  // Compatibility alias
 
 // ── FPU helper ──────────────────────────────────────────────
 // Alloc a 512+15 byte buffer for FXSAVE/FXRSTOR.  The returned
@@ -103,10 +100,10 @@ static int startup_args_count(char *const argv[], char *const envp[],
  *   - per-string length     ≤ MAX_ARG_STRLEN    (4 KiB incl. NUL)
  *   - combined string bytes ≤ MAX_ARG_TOTAL     (64 KiB)
  *   - element count         ≤ STARTUP_STR_MAX   (128, checked upstream)
- *   - total builder output  ≤ USER_STACK_SIZE - 16 KiB headroom
+ *   - total builder output  ≤ X86_USER_STACK_SIZE - 16 KiB headroom
  *     (headroom reserves space below the stack top for ELF loader
  *      brk/auxv expansion; setup_user_stack reserves the upper 16 B
- *      via the USER_STACK_TOP - 16 anchor in <sched/task.h>.)
+ *      via the X86_USER_STACK_TOP - 16 anchor in <sched/task.h>.)
  *
  * Returns 0 on success, -E2BIG on any cap violation, -EFAULT if an
  * element pointer is NULL mid-array (caller's bug — startup_args_count
@@ -142,7 +139,7 @@ static int setup_user_stack_check_capacity(char *const argv[], char *const envp[
      * by STARTUP_STR_MAX × 8 bytes for pointer tables + ~96 bytes
      * for auxv, so we approximate it conservatively.
      *
-     * USER_STACK_SIZE = 2 MiB (USER_STACK_TOP - USER_STACK_BASE,
+     * X86_USER_STACK_SIZE = 2 MiB (X86_USER_STACK_TOP - X86_USER_STACK_BASE,
      * minus the 16-B anchor at the top). The constant is inlined
      * here rather than #include'd because the matching header
      * (kernel/include/sched/task.h) doesn't expose it — keeping the
@@ -152,7 +149,7 @@ static int setup_user_stack_check_capacity(char *const argv[], char *const envp[
     const size_t meta_overhead =
         (size_t)(argc + envc + 3) * 8 +    /* argc + argv + envp ptrs */
         96 +                                /* auxv (3 pairs) + AT_RANDOM + pad */
-        16;                                 /* USER_STACK_TOP - 16 anchor */
+        16;                                 /* X86_USER_STACK_TOP - 16 anchor */
     if (str_bytes + meta_overhead > user_stack_size) return -E2BIG;
 
     return 0;
@@ -174,12 +171,12 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
                             uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
                             uint64_t *out_rsp)
 {
-#define KSTACK(va) (kstack + ((va) - USER_STACK_BASE))
+#define KSTACK(va) (kstack + ((va) - X86_USER_STACK_BASE))
     ASSERT(s_argc + s_envc <= STARTUP_STR_MAX);
     uint64_t *str_offset = (uint64_t *)kmalloc(STARTUP_STR_MAX * sizeof(uint64_t));
     if (!str_offset) return -1;
     int si = 0;
-    uint64_t rsp = USER_STACK_TOP;
+    uint64_t rsp = X86_USER_STACK_TOP;
 
     /* strings, descending */
     for (int i = 0; i < s_argc; i++) {
@@ -526,8 +523,8 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         return -1;
     }
     vmm_map_page(user_pgd, stack_page->phy_address,
-                 USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
-    mm->start_stack = USER_STACK_BASE;
+                 X86_USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
+    mm->start_stack = X86_USER_STACK_BASE;
 
     // ── 6.5 Construct the SysV initial stack (argc/argv/envp/auxv) ──
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
@@ -716,8 +713,8 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         return -ENOMEM;
     }
     vmm_map_page(new_pgd, stack_page->phy_address,
-                 USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
-    new_mm->start_stack = USER_STACK_BASE;
+                 X86_USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
+    new_mm->start_stack = X86_USER_STACK_BASE;
 
     // ── 6.5 Construct the SysV initial stack (argc/argv/envp/auxv) ──
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
@@ -799,7 +796,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
 
 #ifdef OS01_SELFTEST
 /* ── selftest 专用 auxv 探针（spec 2026-09-17 §7 Layer 2）──────────
- * 在静态 2MB 镜像缓冲里构建完整初始栈（KSTACK 偏移以 USER_STACK_TOP
+ * 在静态 2MB 镜像缓冲里构建完整初始栈（KSTACK 偏移以 X86_USER_STACK_TOP
  * =0x9FFFF0 计，缓冲必须整幅），walk auxv 并把 AT_RANDOM / AT_PLATFORM
  * 的 a_val 换算成缓冲内内核地址一并返回。仅 selftest 变体存在。 */
 static uint8_t task_selftest_stack_img[0x200000] __attribute__((aligned(16)));
@@ -825,17 +822,17 @@ int task_selftest_auxv_probe(char *const argv[], char *const envp[],
 
     /* auxv 紧跟 envp[] 终结 NULL 之后（csu.c walk 契约） */
     const uint64_t *auxv_k = (const uint64_t *)(task_selftest_stack_img
-        + (envpp + (uint64_t)(envc + 1) * 8 - USER_STACK_BASE));
+        + (envpp + (uint64_t)(envc + 1) * 8 - X86_USER_STACK_BASE));
 
     uint64_t rnd_k = 0, plat_k = 0;
     for (int i = 0; i < 64; i++) {
         if (auxv_k[2 * i] == AT_NULL) break;
         if (auxv_k[2 * i] == AT_RANDOM && !rnd_k)
             rnd_k = (uint64_t)(task_selftest_stack_img
-                + (auxv_k[2 * i + 1] - USER_STACK_BASE));
+                + (auxv_k[2 * i + 1] - X86_USER_STACK_BASE));
         if (auxv_k[2 * i] == AT_PLATFORM && !plat_k)
             plat_k = (uint64_t)(task_selftest_stack_img
-                + (auxv_k[2 * i + 1] - USER_STACK_BASE));
+                + (auxv_k[2 * i + 1] - X86_USER_STACK_BASE));
     }
     if (out_rsp)                *out_rsp = rsp;
     if (out_auxv_kptr)          *out_auxv_kptr = (uint64_t)auxv_k;

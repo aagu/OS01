@@ -12,15 +12,11 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR (user window)
 
 // Forward declaration (avoids circular task.h ↔ vma.h)
 struct mm_struct;
 typedef struct mm_struct mm_t;
-
-// ── User address-layout constants ──────────────────────────
-// Lowest legitimate user address; the current user stack starts at 0x20400000.
-// do_mmap preserves the unmapped range below USER_CODE_ADDR.
-#define USER_MIN_ADDR     0x400000UL
 
 // ── Clang __builtin_setjmp/__builtin_longjmp buffer ────────
 // 8 × 8 B = 64 B.  Clang emits callee-saved (RBX/RBP/R12-R15) + RSP +

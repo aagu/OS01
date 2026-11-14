@@ -15,8 +15,9 @@
 #include <stdbool.h>
 #include <memory/vma.h>
 #include <memory/vm_area.h>
+#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (private)
 
-// ── x86 leaf conversion (Task 1) ─────────────────────────────
+// ── x86 leaf conversion ──────────────────────────────────────
 /* Convert validated VMA logical permission bits into an x86 user 4 KiB
  * PTE flag word:
  *   - zero permission  → USER-only template (no PRESENT; the PROTNONE
@@ -24,8 +25,21 @@
  *   - R / RW           → NX (PTE permissions plan);
  *   - RX / RWX         → executable (prot_to_vma_flags already granted
  *                        EXEC its implicit READ);
- *   - WRITE            → from the VMA. */
-uint64_t x86_vma_pte_flags(uint64_t vm_flags);
+ *   - WRITE            → from the VMA.
+ *
+ * Static inline so brk.c, mmap.c and trap.c share one conversion body
+ * without a cross-file symbol (the conversion is trivially pure). */
+static inline uint64_t x86_vma_pte_flags(uint64_t vm_flags)
+{
+    uint64_t f = PAGE_USER;
+    if (vm_flags & VMA_PROT_READ)
+        f |= PAGE_VALID;
+    if (vm_flags & VMA_PROT_WRITE)
+        f |= PAGE_WRITE;
+    if (!(vm_flags & VMA_PROT_EXEC))
+        f |= PAGE_NO_EXEC;
+    return f;
+}
 
 // ── x86 VMA node lifecycle ───────────────────────────────────
 // Destroy one VMA node (unlink + file-reference drop + node free).
@@ -66,14 +80,14 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end);
 // Caller must NOT hold mm->lock; mm_set_brk takes it.
 int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result);
 
-// ── mm_user_range_protected — reserved-window predicate (Task 5) ──
+// ── mm_user_range_protected — reserved-window predicate ─────
 //
 // Returns true iff the HALF-OPEN page range [start, end) intersects
 // ANY of the four reserved user ranges:
-//   [0x400000, mm->start_brk)                    ELF reserve envelope
-//   [mm->start_brk, HEAP_LIMIT)                  heap reserve
-//   [HEAP_LIMIT, USER_STACK_BASE)                guard page
-//   [USER_STACK_BASE, +0x200000)                 the 2 MiB user stack
+//   [X86_USER_MIN_ADDR, mm->start_brk)           ELF reserve envelope
+//   [mm->start_brk, X86_USER_HEAP_LIMIT)         heap reserve
+//   [X86_USER_HEAP_LIMIT, X86_USER_STACK_BASE)   guard page
+//   [X86_USER_STACK_BASE, X86_USER_STACK_END)    the 2 MiB user stack
 //
 // Caller MUST pass a page-aligned half-open interval and validate
 // overflow / user bounds first; on true the caller rejects the whole

@@ -6,7 +6,7 @@
 #include <log/log.h>
 #include <random/random.h>
 #include <memory/vmm.h>
-#include <memory/uaccess.h>   // USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
+#include <memory/uaccess.h>   // X86_USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
 #include <arch/cpu.h>
 #include <memory/slab.h>
 #include <driver/serial.h>
@@ -271,7 +271,7 @@ static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     if (!buffer || size == 0) return 0;
     if (size > RANDOM_MAX_LEN) size = RANDOM_MAX_LEN;
 
-    bool in_user = ((uint64_t)buffer >= USER_MIN_ADDR &&
+    bool in_user = ((uint64_t)buffer >= X86_USER_MIN_ADDR &&
                     (uint64_t)buffer < current->addr_limit);
     int rc = 0;
     if (in_user) {

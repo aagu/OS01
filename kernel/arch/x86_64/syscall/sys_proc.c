@@ -29,7 +29,7 @@
 //   * total bytes across all strings <= MAX_ARG_TOTAL
 //
 // On any fault or bound violation:
-//   * array element pointer < USER_MIN_ADDR or >= addr_limit → -EFAULT
+//   * array element pointer < X86_USER_MIN_ADDR or >= addr_limit → -EFAULT
 //   * strnlen_user fault → -EFAULT
 //   * strnlen_user returns MAX_ARG_STRLEN (no NUL within cap) → -E2BIG
 //   * element count > MAX_ARGV → -E2BIG
@@ -100,8 +100,8 @@ static int64_t deep_copy_argv(const char *const *user_arr, char ***out_arr)
             null_found = true;
             break;
         }
-        // Bad element pointer: kernel address or below USER_MIN_ADDR.
-        if (p < USER_MIN_ADDR || p >= addr_limit) {
+        // Bad element pointer: kernel address or below X86_USER_MIN_ADDR.
+        if (p < X86_USER_MIN_ADDR || p >= addr_limit) {
             ret = -EFAULT;
             goto out;
         }

@@ -550,16 +550,3 @@ uint64_t lifecycle_flush_snapshot(uint64_t va, int *valid)
     return 0;
 }
 
-/* ── prepare_user_write_range_locked — WEAK fallback ──────────
- * Task 7: vma.c's user_write_range_begin now delegates to
- * prepare_user_write_range_locked.  The lifecycle test never
- * drives user_write_range_begin (it tests spawn/exec image
- * lifecycle via source-level inspection of task.c), so the
- * production symbol is never called from this build.  The weak
- * fallback exists only so the link succeeds. */
-__attribute__((weak)) int prepare_user_write_range_locked(mm_t *mm, uint64_t addr,
-                                                          size_t len)
-{
-    (void)mm; (void)addr; (void)len;
-    return -EFAULT;
-}

@@ -8,7 +8,7 @@
 #include <random/random.h>   /* random_is_ready / kernel_random_get_strong /
                               * kernel_random_test_set_pool_quality */
 #include <arch/random.h>     /* ARCH_ENTROPY_STRONG + arch_entropy_source_t */
-#include <sched/task.h>       /* USER_STACK_BASE/TOP + task_selftest_auxv_probe */
+#include <sched/task.h>       /* X86_USER_STACK_BASE/TOP + task_selftest_auxv_probe */
 #include <sys/auxv.h>
 #include <string.h>
 #include <stdint.h>
@@ -46,7 +46,7 @@ static int at_random_selftest_walk(uint64_t rsp, uint64_t auxv,
         if (t == AT_NULL) { has_null = 1; break; }
         if (t == AT_PLATFORM) {
             has_platform = 1;
-            if (v < USER_STACK_BASE || v >= USER_STACK_TOP) {
+            if (v < X86_USER_STACK_BASE || v >= X86_USER_STACK_TOP) {
                 serial_printk("[selftest] at_random: AT_PLATFORM a_val=%#lx out of stack\n",
                               (unsigned long)v);
                 return -1;
@@ -54,7 +54,7 @@ static int at_random_selftest_walk(uint64_t rsp, uint64_t auxv,
         }
         if (t == AT_RANDOM) {
             has_random = 1;
-            if (v < USER_STACK_BASE || v >= USER_STACK_TOP || (v & 0xF) != 0) {
+            if (v < X86_USER_STACK_BASE || v >= X86_USER_STACK_TOP || (v & 0xF) != 0) {
                 serial_printk("[selftest] at_random: a_val=%#lx misranged/misaligned\n",
                               (unsigned long)v);
                 return -1;

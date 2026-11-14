@@ -65,17 +65,23 @@ extern void  __real_kfree(void *ptr);
 
 static int kmalloc_calls = 0;
 static int kmalloc_fail_after = 0;  /* 0 = never fail */
+static int kmalloc_ok = 0;          /* successful allocations */
+static int kfree_calls = 0;         /* actual returns */
+static int kmalloc_ok_baseline = 0;
+static int kfree_calls_baseline = 0;
 
 void *__wrap_kmalloc(size_t size)
 {
     kmalloc_calls++;
     if (kmalloc_fail_after > 0 && kmalloc_calls == kmalloc_fail_after)
         return NULL;
+    kmalloc_ok++;
     return __real_kmalloc(size);
 }
 
 void __wrap_kfree(void *ptr)
 {
+    kfree_calls++;
     __real_kfree(ptr);
 }
 
@@ -108,6 +114,11 @@ static void setup_mm(uint64_t elf_end)
         if (v->vm_flags & VMA_HEAP) { heap_vma = v; break; }
     }
     assert_not_null(heap_vma);
+    /* Baseline for the temp-array alloc/return balance checks: taken
+     * AFTER the heap VMA allocation so only mm_set_brk's own temporaries
+     * are counted inside a test body. */
+    kmalloc_ok_baseline = kmalloc_ok;
+    kfree_calls_baseline = kfree_calls;
 }
 
 /* ── Helpers ──────────────────────────────────────────────── */
@@ -229,6 +240,7 @@ static void test_brk_multipage_growth_each_page_zeroed(void)
     setup_mm(USER_CODE_ADDR + 0x1000);
 
     /* Move break forward by 3 pages. */
+    int ok0 = kmalloc_ok, fr0 = kfree_calls;
     uint64_t new_brk = fixture_mm.start_brk + 3 * PAGE_4K_SIZE;
     uint64_t result;
     int ret = mm_set_brk(&fixture_mm, new_brk, &result);
@@ -257,6 +269,13 @@ static void test_brk_multipage_growth_each_page_zeroed(void)
      * (PTE permissions plan: heap data pages are NX). */
     brk_pte_record_t *m = brk_find_mapping(fixture_mm.start_brk);
     assert_eq(PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_NO_EXEC, m->flags);
+
+    /* Temp-array balance: every kmalloc mm_set_brk made for this
+     * growth (the success log) must have been returned by the time
+     * the call ended — a successful grow may not leak its staging
+     * bookkeeping.  Deltas only: the fixture's own heap VMA is
+     * deliberately never freed, so cumulative counts never balance. */
+    assert_eq(kmalloc_ok - ok0, kfree_calls - fr0);
 }
 
 static void test_brk_multipage_growth_flushes_tlb(void)
@@ -388,6 +407,88 @@ static void test_brk_oom_on_second_page_rolls_back(void)
     assert_eq(saved_frees  + 1, brk_state.total_frees);
     /* No PTE entries in the [start_brk, new_brk) range. */
     assert_eq(0, count_mapped_pages(fixture_mm.start_brk, 4));
+}
+
+/* Log-array allocation failure: mm_set_brk must return -ENOMEM with
+ * break, heap VMA end, PTEs and *result untouched when its own
+ * bookkeeping kmalloc fails (the log alloc precedes any leaf change). */
+static void test_brk_log_alloc_fail_returns_enomem(void)
+{
+    TEST_SUITE("mm_set_brk — log-array alloc failure → -ENOMEM, no commit");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    /* Fail the very next kmalloc (the grow log). */
+    kmalloc_fail_after = kmalloc_calls + 1;
+
+    uint64_t result = 0xDEADBEEF;
+    uint64_t new_brk = fixture_mm.start_brk + 2 * PAGE_4K_SIZE;
+    int rc = mm_set_brk(&fixture_mm, new_brk, &result);
+    assert_eq(-ENOMEM, rc);
+    assert_eq((uint64_t)0xDEADBEEF, result);
+    assert_eq(fixture_mm.start_brk, fixture_mm.end_brk);
+    assert_eq(heap_vma->vm_end, fixture_mm.end_brk);
+    assert_eq(0, brk_state.total_maps);
+    assert_eq(0, brk_state.total_allocs);
+}
+
+/* Partial grow failure with a pre-existing valid leaf: the second
+ * grow call maps one new leaf successfully, then the NEXT map fails.
+ * Only THIS call's installed leaf may be withdrawn; the old leaf's
+ * PA, flags and content must survive byte-for-byte. */
+static void test_brk_partial_new_leaf_fail_preserves_old_leaf(void)
+{
+    TEST_SUITE("mm_set_brk — map fail after one new leaf: only this call's leaf withdrawn");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    /* First grow: one valid old leaf. */
+    uint64_t result;
+    assert_eq(0, mm_set_brk(&fixture_mm, fixture_mm.start_brk + PAGE_4K_SIZE,
+                            &result));
+    brk_pte_record_t *old_m = brk_find_mapping(fixture_mm.start_brk);
+    assert_not_null(old_m);
+    uint64_t old_phys = old_m->phys;
+    uint64_t old_pte = old_m->pte;      /* full word: phys | flag bits */
+    /* Dirty the old leaf so content can be checked after the rollback. */
+    brk_page_record_t *old_rec = brk_find_page(old_phys);
+    assert_not_null(old_rec);
+    memset(old_rec->backing, 0x5A, 4096);
+
+    /* Second grow of two pages: the first new map succeeds, the
+     * second fails (maps so far: 1 → inject at map #2). */
+    brk_state.inject_map_fail_at = 2;
+    int allocs_before = brk_state.total_allocs;
+    int frees_before  = brk_state.total_frees;
+
+    uint64_t new_brk = fixture_mm.start_brk + 3 * PAGE_4K_SIZE;
+    result = 0xDEADBEEF;
+    int rc = mm_set_brk(&fixture_mm, new_brk, &result);
+    assert_eq(-ENOMEM, rc);
+    assert_eq((uint64_t)0xDEADBEEF, result);
+    assert_eq(fixture_mm.start_brk + PAGE_4K_SIZE, fixture_mm.end_brk);
+    assert_eq(heap_vma->vm_end, fixture_mm.end_brk);
+
+    /* Only THIS call's installed leaf was withdrawn: net allocs = 1
+     * (the staged new leaf), net frees = 1 (its PA returned). */
+    assert_eq(allocs_before + 1, brk_state.total_allocs);
+    assert_eq(frees_before + 1,  brk_state.total_frees);
+
+    /* The old leaf is still mapped, same PA, same flags. */
+    brk_pte_record_t *old_after = brk_find_mapping(fixture_mm.start_brk);
+    assert_not_null(old_after);
+    assert_eq(old_phys, x86_pte_4k_pa(old_after->pte));
+    assert_eq(old_pte, old_after->pte);
+
+    /* The next page of the heap was NOT committed. */
+    assert_null(brk_find_mapping(fixture_mm.start_brk + PAGE_4K_SIZE));
+
+    /* Old leaf content unchanged. */
+    brk_page_record_t *rec_after = brk_find_page(old_phys);
+    assert_not_null(rec_after);
+    unsigned char *p = (unsigned char *)rec_after->backing;
+    for (int j = 0; j < 64; j++)
+        assert_eq(0x5A, (int)p[j]);
 }
 
 static void test_brk_shrink_across_page_releases_leaves(void)
@@ -936,6 +1037,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_brk_shrink_release_after_flush),
     TEST_ENTRY(test_brk_shrink_tail_ref_until_sync),
     TEST_ENTRY(test_brk_oom_on_second_page_rolls_back),
+    TEST_ENTRY(test_brk_log_alloc_fail_returns_enomem),
+    TEST_ENTRY(test_brk_partial_new_leaf_fail_preserves_old_leaf),
     TEST_ENTRY(test_brk_shrink_across_page_releases_leaves),
     TEST_ENTRY(test_brk_shrink_partial_tail_zeros),
     TEST_ENTRY(test_brk_shrink_partial_tail_privatizes_cow),

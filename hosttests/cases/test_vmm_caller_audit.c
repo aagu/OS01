@@ -340,10 +340,16 @@ static void audit_kernel_mk_aarch64_whitelist(void)
     /* IN: the shared TLB + slab cores */
     assert_true(contains(branch, "memory/slab.c"));
     assert_true(contains(branch, "memory/tlb.c"));
-    /* OUT: every x86-only tlb_shootdown / vmm-change caller */
+    /* OUT: every x86-only tlb_shootdown / vmm-change caller — both
+     * the pre-facade memory/ paths and the moved arch/x86_64/ TUs
+     * (vma node lifecycle, brk, mmap, uaccess write prep). */
     assert_false(contains(branch, "memory/vmm.c"));
     assert_false(contains(branch, "memory/vma.c"));
     assert_false(contains(branch, "memory/uaccess.c"));
+    assert_false(contains(branch, "arch/x86_64/memory/vma.c"));
+    assert_false(contains(branch, "arch/x86_64/memory/brk.c"));
+    assert_false(contains(branch, "arch/x86_64/memory/mmap.c"));
+    assert_false(contains(branch, "arch/x86_64/memory/uaccess.c"));
     assert_false(contains(branch, "sched/task.c"));
     /* core/printk.c is the shared console (7ebc9d0a) and has no
      * vmm-change calls — it belongs IN the aarch64 list. */
