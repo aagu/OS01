@@ -32,6 +32,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <arch/x86_64/mmu.h>
+#include <arch/x86_64/uaccess.h>
 
 // Page-flag alias (kernel header uses PAGE_USER; the brief uses PAGE_USER).
 #ifndef PAGE_USER

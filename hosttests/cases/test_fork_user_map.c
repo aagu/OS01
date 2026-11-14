@@ -45,6 +45,7 @@
 #include <memory/vma.h>
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
+#include <arch/x86_64/vma.h>
 
 /* ── Layout constants (mirror kernel/memory/vma.c) ───────────── */
 #define USER_CODE_ADDR     0x400000UL

@@ -144,7 +144,7 @@ BRK_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                    -I$(TEST_MOCK) -I$(TEST_INC) \
                    -I$(TEST_MOCK)/brk
 
-$(TEST_BLD)/vma_brk_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+$(TEST_BLD)/vma_brk_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TEST_MOCK)/brk/brk_runtime.h
@@ -182,7 +182,7 @@ PRANGES_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                        -I$(TEST_MOCK) -I$(TEST_INC) \
                        -I$(TEST_MOCK)/pranges
 
-$(TEST_BLD)/vma_pranges_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+$(TEST_BLD)/vma_pranges_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TEST_MOCK)/pranges/pranges_runtime.h
@@ -220,13 +220,13 @@ UWRITE_COW_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                               -I$(TEST_MOCK) -I$(TEST_INC) \
                               -I$(TEST_MOCK)/uwrite_cow
 
-$(TEST_BLD)/uaccess_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/uaccess.c \
+$(TEST_BLD)/uaccess_uwrite_cow_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/uaccess.c \
 		$(TESTS_DIR)/kernel/include/memory/uaccess.h \
 		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(UWRITE_COW_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/vma_uwrite_cow_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+$(TEST_BLD)/vma_uwrite_cow_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TEST_MOCK)/uwrite_cow/uwrite_cow_runtime.h
@@ -754,7 +754,7 @@ USER_VM_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                        -include $(TEST_MOCK)/user_vm_runtime.h \
                        -I$(TEST_MOCK) -I$(TEST_INC)
 
-$(TEST_BLD)/user_vm_policy_production.o: $(TESTS_DIR)/kernel/memory/user_vm.c \
+$(TEST_BLD)/user_vm_policy_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/user_vm_policy.c \
 		$(TESTS_DIR)/kernel/include/memory/user_vm.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TESTS_DIR)/kernel/include/memory/vmm.h \

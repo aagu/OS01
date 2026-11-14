@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arch/x86_64/uaccess.h>
 
 static task_t s_test_task = {
     .pid = 1,

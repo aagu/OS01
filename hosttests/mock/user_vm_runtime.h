@@ -75,6 +75,7 @@
 
 #include <list.h>
 #include <memory/user_vm.h>
+#include <arch/aarch64/user_vm_policy.h>
 
 #ifndef PAGE_4K_ALIGN
 #define PAGE_4K_ALIGN(addr) \

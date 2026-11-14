@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <log/log.h>
+#include <arch/x86_64/uaccess.h>
 
 // ── COPY_USER_STR macro (Task 7, symlink support) ───────────
 // Returns the string length (>=0) on success.

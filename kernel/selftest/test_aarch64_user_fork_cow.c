@@ -1,4 +1,5 @@
 #include <arch/aarch64/vmm_backend.h>
+#include <arch/aarch64/user_vm_policy.h>
 /* kernel/selftest/test_aarch64_user_fork_cow.c
  *
  * M4 fork + COW runtime acceptance case.

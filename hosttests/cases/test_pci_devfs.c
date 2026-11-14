@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arch/x86_64/uaccess.h>
 
 /* ── Host runtime stubs (same set as test_devfs_hierarchy.c) ── */
 

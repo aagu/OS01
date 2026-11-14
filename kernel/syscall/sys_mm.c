@@ -4,8 +4,12 @@
 #ifdef OS01_SYSCALL_A64_SUBSET
 #include <arch/syscall.h>
 #else
+/* x86-only includes (mm_set_brk / do_mmap / do_mprotect / do_munmap
+ * are x86 VMA-owner declarations — mm-architecture-boundaries
+ * Task 3): guarded so the AArch64 A64-subset build never sees them. */
 #include <sched/task.h>
 #include <memory/vma.h>
+#include <arch/x86_64/vma.h>
 #include <uapi/futex.h>
 #include <sync/futex.h>
 #endif

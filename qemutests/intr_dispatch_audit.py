@@ -814,7 +814,7 @@ def _audit_x86(symtab, blocks, order, repo: Path,
     if "%%cr2" in pf:
         errors.append("source: x86_handle_page_fault re-reads CR2 — "
                       "the private handler must consume the snapshot")
-    uac = _read(repo / "kernel/memory/uaccess.c")
+    uac = _read(repo / "kernel/arch/x86_64/memory/uaccess.c")
     res = _function_body(uac, "copy_from_user_ft_res")
     if "fault_cleanup" not in res or "-EFAULT" not in res:
         errors.append("source: copy_from_user_ft_res no longer shows "

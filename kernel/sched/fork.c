@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <kernel.h>
 #include <arch/x86_64/vmm.h>
+#include <arch/x86_64/vma.h>
 
 // The pinned-kernel-service pre-publication channel moved to
 // kernel_thread_on_cpu() in kernel/sched/kthread.c: the common

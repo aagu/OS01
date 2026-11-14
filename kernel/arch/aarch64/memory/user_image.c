@@ -29,6 +29,7 @@
 #include <memory/user_vm.h>
 #include <memory/vmm.h>
 #include <sched/task.h>                     /* mm_t layout */
+#include <arch/aarch64/user_vm_policy.h>
 
 #if AARCH64_EL0_TEST
 #include <selftest/aarch64_user_task.h>

@@ -43,6 +43,7 @@
 #include <percpu/percpu.h>
 #include <sched/internal.h>
 #include <sched/task.h>
+#include <arch/aarch64/user_vm_policy.h>
 
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/reg.h>

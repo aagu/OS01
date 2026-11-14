@@ -18,9 +18,9 @@
  *     split nodes before touching any leaf or VMA; a commit-time
  *     mismatch is an invariant failure, never a partial repair.
  *
- * x86 compiles its own memory/*.c wildcard with this file explicitly
- * excluded (kernel/Makefile): the policy needs the AArch64 leaf
- * adapter and has no x86 counterpart yet.
+ * The AArch64 build collects this TU through the arch memory wildcard
+ * (kernel/Makefile ARCH_SOURCE_DIRS): the policy needs the AArch64
+ * leaf adapter and has no x86 counterpart.
  */
 
 #include <arch/mmu.h>           /* AARCH64_USER_MIN / AARCH64_USER_LIMIT */
@@ -30,7 +30,8 @@
 #include <memory/memory.h>      /* Phy_To_Virt */
 #include <memory/pmm.h>         /* alloc_4k_page / free_4k_page / PAGE_4K_* */
 #include <memory/slab.h>        /* kmalloc / kfree */
-#include <memory/user_vm.h>
+#include <memory/user_vm.h>            /* leaf adapter (arch_user_vm_*) */
+#include <arch/aarch64/user_vm_policy.h>  /* this TU's policy API */
 #include <memory/vm_area.h>
 #include <memory/vma.h>         /* vma_t, VMA_*, MAP_*, PROT_* */
 #include <memory/vmm.h>         /* VM_*, arch_vmm_* */

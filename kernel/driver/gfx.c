@@ -57,6 +57,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>              // free — file_alloc uses calloc, not kmalloc
+#include <arch/x86_64/uaccess.h>
 
 // ── The input device ops ─────────────────────────────────────
 // The keyboard / mouse device ops live in the x86-only PS/2 drivers

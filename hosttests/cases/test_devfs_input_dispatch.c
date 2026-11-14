@@ -44,6 +44,7 @@
 #include <block/blockdev.h>
 #include <lwip/api.h>
 #include <lwip/err.h>
+#include <arch/x86_64/uaccess.h>
 
 /* ── Task + files plumbing (declared in poll_test_runtime.h) ── */
 

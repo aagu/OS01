@@ -2,6 +2,7 @@
 #include <memory/vma.h>
 #include <memory/vm_area.h>
 #include <memory/vm_device.h>
+#include <arch/x86_64/vma.h>   // owner surface (declares this TU's API)
 #include <sched/task.h>
 #include <kernel.h>
 #include <memory/slab.h>
@@ -11,7 +12,8 @@
 #include <arch/x86_64/vma.h>   // x86_vma_pte_flags: logical bits → leaf
 #include <arch/x86_64/fb_pte.h>  // x86_fb_cache_bits: device cache request → PCD/PWT
 #include <memory/memory.h>
-#include <memory/uaccess.h>          // USER_MIN_ADDR, arch_user_range_accessible
+#include <memory/uaccess.h>          // syscall_check_user_range
+#include <arch/x86_64/uaccess.h>     // USER_MIN_ADDR, prepare_user_write_range_locked
 #include <arch/spinlock.h>   // mm->lock: guards munmap/MAP_FIXED/mprotect
 #include <string.h>
 #include <errno.h>

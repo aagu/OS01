@@ -14,6 +14,7 @@
 #include <list.h>
 #include <errno.h>
 #include <arch/x86_64/mmu.h>
+#include <arch/x86_64/uaccess.h>
 
 #define FUTEX_BUCKETS 64
 

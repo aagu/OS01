@@ -11,6 +11,7 @@
 #include <string.h>
 #include <block/blockdev.h>
 #include <log/log.h>
+#include <arch/x86_64/uaccess.h>
 
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
 {

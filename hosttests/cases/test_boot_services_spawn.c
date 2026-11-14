@@ -28,6 +28,7 @@
 #include <fs/file.h>
 #include <errno.h>
 #include <string.h>
+#include <arch/x86_64/vma.h>
 
 /* Mock / Real externs */
 extern uint32_t num_cpus;
@@ -132,9 +133,9 @@ void vma_free_all(mm_t *mm)
     (void)mm;
     vma_free_all_calls++;
 }
-int mm_init_user_heap(mm_t *mm, uint64_t start, uint64_t end)
+int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
 {
-    (void)mm; (void)start; (void)end;
+    (void)mm; (void)elf_end;
     return 0;
 }
 

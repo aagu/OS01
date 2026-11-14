@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <log/log.h>
 #include <kernel.h>
+#include <arch/x86_64/uaccess.h>
+#include <fs/vfs.h>
 
 #ifndef SIG_BLOCK
 #define SIG_BLOCK 0

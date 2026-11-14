@@ -33,9 +33,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The public memory headers whose boundary this case pins.  Task 3
-# appends memory/uaccess.h with its own probes.
-PUBLIC_HEADERS = ["vmm", "memory", "vma"]
+# The public memory headers whose boundary this case pins (Task 3
+# appended memory/uaccess.h with its own probes).
+PUBLIC_HEADERS = ["vmm", "memory", "vma", "uaccess"]
 
 # Names that must not be visible after including only the public
 # headers.  Macros are checked with #ifdef/#error (compile must
@@ -49,6 +49,8 @@ FORBIDDEN_MACROS = [
     "PAGE_COW", "PAGE_PROTNONE",
     # root/shift aliases (x86 private VMM header only)
     "PAGE_PGD_SHIFT", "get_cr3", "flush_tlb", "switch_tlb",
+    # x86 uaccess ownership (arch/x86_64/uaccess.h only)
+    "USER_MIN_ADDR",
     # private include guards (the arch facade _ARCH_MMU_H is allowed:
     # memory/mmu.h pulls it for ARCH_PAGE_OFFSET)
     "_ARCH_X86_64_MMU_H", "_ARCH_X86_64_VMM_H", "_ARCH_X86_64_PTE_H",
@@ -61,6 +63,10 @@ FORBIDDEN_SYMBOLS = [
     "arch_vmm_query_4k",   # ARM semantic query
     "vmm_pt_walk",         # x86 raw walker
     "arch_get_page_table", # per-arch root primitive
+    # x86 VMA owner API (arch/x86_64/vma.h only)
+    "do_mmap", "fork_vma_copy",
+    # x86 uaccess ownership (arch/x86_64/uaccess.h only)
+    "strnlen_user", "user_write_range_begin",
 ]
 
 
@@ -121,6 +127,23 @@ int positive_probe(void) {{ return 0; }}
 uintptr_t sym_probe(void) {{ return (uintptr_t)sizeof(&{sym}); }}
 """, expect_ok=False,
            what=f"'{sym}' undeclared behind the public boundary")
+
+    # 3b. Undeclared-type probes: x86-only types (typedefs) must not be
+    # provided by the public headers.
+    for typ in ["os01_jmp_buf"]:
+        tu(f"type_{typ}", f"""{include_lines}
+uintptr_t type_probe(void) {{ return (uintptr_t)sizeof({typ}); }}
+""", expect_ok=False,
+           what=f"'{typ}' undeclared behind the public boundary")
+
+    # 4. Positive: the shared surface the public headers still own.
+    tu("positive_shared", f"""{include_lines}
+#include <stdint.h>
+uintptr_t copy_probe(void) {{ return (uintptr_t)sizeof(&copy_to_user_ft_res); }}
+uintptr_t check_probe(void) {{ return (uintptr_t)sizeof(&syscall_check_user_range); }}
+int type_probe(void) {{ return (int)sizeof(vma_t); }}
+""", expect_ok=True,
+       what="public surface: copy_*_ft_res / syscall_check_user_range / vma_t")
 
     if failures:
         print(f"mm-header-boundary[{args.arch}]: {len(failures)} failure(s)")

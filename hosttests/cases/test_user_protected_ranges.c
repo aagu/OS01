@@ -47,6 +47,7 @@
 #include <memory/vma.h>
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
+#include <arch/x86_64/vma.h>
 
 /* Forward declaration — before Task 5 lands this lives only as the
  * weak RED fallback in pranges_stubs.c (returns false); afterwards
@@ -775,12 +776,12 @@ static const char *vma_c_path(void)
     marker = strstr(full, "/hosttests/");
     if (marker) {
         snprintf(buf, sizeof(buf),
-                 "%.*s/kernel/memory/vma.c",
+                 "%.*s/kernel/arch/x86_64/memory/vma.c",
                  (int)(marker - full), full);
         return buf;
     }
     if (strncmp(full, "hosttests/", 10) == 0)
-        return "kernel/memory/vma.c";
+        return "kernel/arch/x86_64/memory/vma.c";
     return NULL;
 }
 

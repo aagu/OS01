@@ -278,7 +278,7 @@ LIFECYCLE_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                          -I$(TEST_MOCK) -I$(TEST_INC) \
                          -I$(TEST_MOCK)/lifecycle
 
-$(TEST_BLD)/vma_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+$(TEST_BLD)/vma_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TESTS_DIR)/kernel/include/sched/task.h \
@@ -328,7 +328,7 @@ FORK_USER_MAP_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                               -I$(TEST_MOCK) -I$(TEST_INC) \
                               -I$(TEST_MOCK)/fork_user_map
 
-$(TEST_BLD)/vma_fork_user_map_production.o: $(TESTS_DIR)/kernel/memory/vma.c \
+$(TEST_BLD)/vma_fork_user_map_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/vma.c \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
 		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
 		$(TEST_MOCK)/fork_user_map/fork_user_map_runtime.h

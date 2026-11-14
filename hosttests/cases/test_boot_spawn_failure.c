@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <arch/x86_64/vma.h>
 
 /* Trackers */
 static int task_add_to_list_calls = 0;
@@ -108,7 +109,7 @@ void *arch_this_cpu_ptr(void) { return &percpu_data[0]; }
 void *kmalloc(size_t sz) { return malloc(sz); }
 void kfree(void *p) { free(p); }
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
-int mm_init_user_heap(mm_t *mm, uint64_t start, uint64_t end) { (void)mm; (void)start; (void)end; return 0; }
+int mm_init_user_heap(mm_t *mm, uint64_t elf_end) { (void)mm; (void)elf_end; return 0; }
 void ret_from_intr(void) {}
 union task_union init_task_union;
 percpu_t percpu_data[NR_CPUS];

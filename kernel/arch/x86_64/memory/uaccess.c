@@ -23,10 +23,13 @@
 // definitions live here.
 
 #include <memory/uaccess.h>
+#include <arch/x86_64/uaccess.h>  // USER_MIN_ADDR, os01_jmp_buf, write-prep pair
 #include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
 #include <memory/memory.h>     // Phy_To_Virt
-#include <memory/vma.h>        // vma_find, VMA_PROT_WRITE / VMA_IO / VMA_HEAP / VMA_ANON / VMA_PROT_READ
+#include <memory/vma.h>        // vma_t, VMA_* logical flags
+#include <arch/x86_64/vma.h>   // vma_find, fork_vma_copy
 #include <memory/vmm.h>
+#include <fs/vfs.h>            // VFS_NAME_MAX (strnlen limit)
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)        // vmm_pt_walk, PAGE_VALID, PAGE_USER, PAGE_WRITE,
                                // PAGE_COW, PAGE_4K_SIZE, PAGE_4K_MASK
 #include <memory/pmm.h>        // alloc_4k_page, free_4k_page, page_cow_put, tlb_shootdown

@@ -70,7 +70,7 @@ endif
 ifeq ($(ARCH),aarch64)
 KERNEL_C_SOURCES := memory/pmm.c memory/pmm_arch.c memory/pmm_boot.c \
                    memory/slab.c memory/tlb.c memory/mm.c \
-                   memory/vm_area.c memory/user_vm.c \
+                   memory/vm_area.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
                    intr/softirq.c \
@@ -137,7 +137,7 @@ KERNEL_C_SOURCES := \
     $(wildcard random/*.c) \
     $(wildcard log/*.c) \
     $(wildcard net/*.c) \
-    $(filter-out memory/user_vm.c,$(wildcard memory/*.c)) \
+    $(wildcard memory/*.c) \
     $(wildcard fs/*.c) \
     $(wildcard sched/*.c) \
     $(wildcard sync/*.c) \

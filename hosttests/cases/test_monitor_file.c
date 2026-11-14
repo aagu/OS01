@@ -40,6 +40,7 @@
 #include <fs/devfs.h>
 #include <lwip/err.h>
 #include <lwip/api.h>
+#include <arch/x86_64/uaccess.h>
 
 /* ── Task + files plumbing (declared in gfx_test_runtime.h) ── */
 

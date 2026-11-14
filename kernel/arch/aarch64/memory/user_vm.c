@@ -31,6 +31,7 @@
 #include <sched/task.h>
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
+#include <arch/aarch64/user_vm_policy.h>  /* policy entry points */
 #endif
 
 /* Normalize one backend result into *out.  Only the three documented

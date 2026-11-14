@@ -38,6 +38,7 @@
 #include <memory/vma.h>
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
+#include <arch/x86_64/vma.h>
 
 /* Forward-declare mm_set_brk so the test builds RED before the
  * production declaration lands in kernel/include/memory/vma.h.

@@ -3,27 +3,27 @@
 
 // kernel/include/memory/uaccess.h — syscall-boundary DoS hardening
 //
-// Public surface of the uaccess subsystem.  All user-pointer dereferences
-// on the syscall / signal-delivery path MUST go through the primitives
-// declared here (or through user_write_range_begin/end for the non-blocking
-// kernel→user write case).  See docs/superpowers/specs/2026-08-23-syscall-
-// boundary-audit-design.md for the full design rationale.
+// Public surface of the uaccess subsystem: the fault-tolerant user
+// copy primitives and the fast syscall-entry range check.  All
+// user-pointer dereferences on the syscall / signal-delivery path MUST
+// go through the primitives declared here (or through the owning
+// architecture's write-preparation API — x86:
+// <arch/x86_64/uaccess.h>).  See docs/superpowers/specs/2026-08-23-
+// syscall-boundary-audit-design.md for the full design rationale.
+//
+// (mm-architecture-boundaries Task 3: the x86 address window, jmp
+// buffer, strnlen_user and the locked write-preparation pair moved to
+// <arch/x86_64/uaccess.h>; this header carries no MMU or VFS include
+// any more.)
 
 #include <stdint.h>
 #include <stddef.h>      // size_t
 #include <sys/types.h>   // ssize_t (libc + sysroot both typedef long)
 #include <stdbool.h>
-#include <arch/mmu.h>   // arch_user_range_accessible (cross-level walker)
-#include <fs/vfs.h>            // VFS_NAME_MAX
 
 // Forward declarations (avoid circular task.h ↔ vma.h)
 struct mm_struct;
 typedef struct mm_struct mm_t;
-
-// ── User address-layout constants ──────────────────────────
-// Lowest legitimate user address; the current user stack starts at 0x20400000.
-// do_mmap preserves the unmapped range below USER_CODE_ADDR.
-#define USER_MIN_ADDR     0x400000UL
 
 // ── Bounce-buffer block size for Cat C syscalls (read/write/sendto/
 //    recvfrom).  VFS/FS callbacks write into this kernel buffer; the user
@@ -39,13 +39,6 @@ typedef struct mm_struct mm_t;
 #define MAX_ARGV          128
 #define MAX_ARG_STRLEN    4096
 #define MAX_ARG_TOTAL     65536
-
-// ── Clang __builtin_setjmp/__builtin_longjmp buffer ────────
-// 8 × 8 B = 64 B.  Clang emits callee-saved (RBX/RBP/R12-R15) + RSP +
-// return PC; `longjmp` value argument MUST be a compile-time constant
-// (kernel hooks always use 1).  See setjmp-frame-pointer-bug.md for why
-// we use the builtin instead of libc setjmp.
-typedef void *os01_jmp_buf[8];
 
 // ── Fault-tolerant user-memory primitives ──────────────────
 //
@@ -73,15 +66,6 @@ static inline ssize_t copy_from_user_ft(void *dst, const void *src, size_t n)
     return copy_from_user_ft_res(dst, src, n, NULL, NULL);
 }
 
-// Bounded user string length.  Returns:
-//   >= 0: strlen(user_addr), bounded by max
-//   <  0: -EFAULT on fault (no NUL within [user_addr, user_addr+max))
-//
-// max is the buffer capacity (excluding the trailing NUL); the returned
-// length is the number of non-NUL bytes — i.e. caller writes a NUL at
-// buf[ret] to NUL-terminate.  fault path leaves buf untouched.
-int strnlen_user(const void *user_addr, size_t max);
-
 // ── Syscall entry-point check (used by every handler with user ptrs) ──
 //
 // Returns true iff [addr, addr+len) is fully mapped into the current task
@@ -95,31 +79,12 @@ int strnlen_user(const void *user_addr, size_t max);
 //   1. addr != 0 && len > 0           (len==0 → true no-op)
 //   2. addr >= USER_MIN_ADDR
 //   3. addr < addr_limit && len <= addr_limit - addr (overflow-safe)
-//   4. arch_user_range_accessible(mm->pgdir, addr, len, writable)
+//   4. the owning architecture's range-accessible walker
+//      (x86: arch/x86_64/mmu.h)
 //
 // Writable prechecks accept COW only when its VMA permits writing and is
 // not VMA_IO. They do not allocate or change PTEs; actual output must use
-// copy_to_user_ft or the user_write_range_begin/end pair.
+// copy_to_user_ft or the owning architecture's locked write pair.
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
-
-// Prepare kernel output to user memory. The locked form requires mm->lock
-// and leaves ownership of that lock with the caller on every return. The
-// self-locking form releases its lock before returning on every path.
-// Writable ordinary leaves (including ELF/stack) need no VMA. COW leaves
-// require a writable, non-VMA_IO VMA. All allocations precede PTE/refcount
-// changes; failure leaves the entire range unchanged.
-// Returns 0, -EFAULT (invalid range/permissions) or -ENOMEM (allocation).
-int prepare_user_write_range(mm_t *mm, uint64_t addr, size_t len);
-int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len);
-// Validate-and-lock a user write range before the kernel writes into it
-// (getrandom / devfs random read).  Returns 0 with current->mm->pgdir_lock
-// HELD on success — caller MUST call user_write_range_end().  Returns
-// -EFAULT (lock NOT held) on any bad address or non-writable page.
-// Kernel buffers (current->mm == NULL) are trusted and pass through
-// without lock/check.
-// (mm-architecture-boundaries Task 2: temporarily public here; the x86
-// uaccess owner header takes over in Task 3.)
-int  user_write_range_begin(uint64_t addr, size_t len);
-void user_write_range_end(void);
 
 #endif // _KERNEL_UACCESS_H

@@ -26,6 +26,7 @@
 #include <fs/devfs.h>
 #include <tty/pty.h>
 #include <sys/ioctl.h>
+#include <arch/x86_64/uaccess.h>
 
 /* Host pthread declarations without relying on host/libc header mix */
 typedef unsigned long host_pthread_t;

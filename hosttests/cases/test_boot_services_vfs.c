@@ -22,6 +22,7 @@
 #include <fs/vfs.h>
 #include <errno.h>
 #include <string.h>
+#include <arch/x86_64/vma.h>
 
 /* Host pthread prototypes (avoiding shadow from libc headers) */
 typedef unsigned long host_pthread_t;
@@ -116,9 +117,9 @@ int vma_init(mm_t *mm, uint64_t start, uint64_t end, uint32_t flags)
     return 0;
 }
 void vma_free_all(mm_t *mm) { (void)mm; }
-int mm_init_user_heap(mm_t *mm, uint64_t start, uint64_t end)
+int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
 {
-    (void)mm; (void)start; (void)end;
+    (void)mm; (void)elf_end;
     return 0;
 }
 uint64_t alloc_pages(int type, int order) { (void)type; (void)order; return 0x2000000; }

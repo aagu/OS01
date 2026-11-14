@@ -19,6 +19,8 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <arch/x86_64/uaccess.h>
+#include <arch/x86_64/vma.h>
 
 // ── Internal device tree ────────────────────────────────────
 //

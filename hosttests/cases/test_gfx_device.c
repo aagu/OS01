@@ -56,6 +56,7 @@
 #include <memory/uaccess.h>       // USER_MIN_ADDR (simulator matches it)
 #include <lwip/err.h>
 #include <lwip/api.h>
+#include <arch/x86_64/uaccess.h>
 
 /* Test-side instrumentation globals (declared early so the
  * mocks below can reference them). */
