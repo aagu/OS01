@@ -1034,6 +1034,155 @@ void test_xhci_bulk_wrap_and_boundary(void)
     free(staging);
 }
 
+void test_xhci_clear_halt_state_drives_command_sequence(void)
+{
+    TEST_CASE("clear_halt_state_drives_command_sequence: Halted vs Running/Stopped, wrapped DCS=0, errors");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    uint8_t input_ctx[4096];
+    uint8_t dev_ctx[4096];
+
+    void *staging = aligned_alloc(65536, 65536);
+    assert_true(staging != NULL);
+
+    /* Case 1: Halted pipe (DCI 3, ep_addr 0x81) with wrapped producer (enqueue=255, cycle=1 -> next TRB 0, DCS=0) */
+    setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs);
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(input_ctx, 0, sizeof(input_ctx));
+    memset(dev_ctx, 0, sizeof(dev_ctx));
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_enqueue = 0;
+    ctrl.cmd_ring_cycle = 1;
+    slot.active = true;
+    slot.configured = true;
+    slot.speed = XHCI_PORT_SPEED_HIGH;
+    slot.port_num = 1;
+    slot.input_ctx_virt = input_ctx;
+    slot.input_ctx_phys = 0x35000;
+    slot.dev_ctx_virt = dev_ctx;
+    slot.dev_ctx_phys = 0x36000;
+    slot.bulk_staging_virt = staging;
+    slot.bulk_staging_phys = (uint64_t)(uintptr_t)staging;
+
+    struct xhci_trb bulk_in_trbs[XHCI_TRB_RING_SIZE];
+    struct xhci_trb bulk_out_trbs[XHCI_TRB_RING_SIZE];
+    memset(bulk_in_trbs, 0, sizeof(bulk_in_trbs));
+    memset(bulk_out_trbs, 0, sizeof(bulk_out_trbs));
+    bulk_in_trbs[255].parameter = 0x60000;
+    bulk_in_trbs[255].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    struct xhci_ep_ring in_ring = {
+        .ring_phys = 0x60000, .ring_virt = bulk_in_trbs,
+        .enqueue = 255, .cycle = 1, .dci = 3, .ep_type = XHCI_EP_TYPE_BULK_IN,
+        .max_packet_size = 512, .active = true,
+    };
+    struct xhci_ep_ring out_ring = {
+        .ring_phys = 0x70000, .ring_virt = bulk_out_trbs,
+        .enqueue = 0, .cycle = 1, .dci = 4, .ep_type = XHCI_EP_TYPE_BULK_OUT,
+        .max_packet_size = 512, .active = true,
+    };
+    struct xhci_ep_ring *rings[5] = { NULL, NULL, NULL, &in_ring, &out_ring };
+    slot.ep_rings = rings;
+    slot.max_dci = 4;
+
+    /* Output Slot Context: Context Entries = 4; Output EP3 Context: State = Halted (2) */
+    uint32_t *out_slot_ctx = (uint32_t *)xhci_dev_slot_ctx(dev_ctx, ctrl.csz);
+    out_slot_ctx[0] = (XHCI_PORT_SPEED_HIGH << 20) | (4U << 27);
+    out_slot_ctx[1] = (1U << 16);
+    uint32_t *out_ep3_ctx = (uint32_t *)xhci_dev_ep_ctx(dev_ctx, ctrl.csz, 3);
+    out_ep3_ctx[0] = XHCI_EP_STATE_HALTED;
+
+    /* Events: Cmd0 (Reset EP @ 0x10000), EP0 Status (@ 0x40000 + 1*16), Cmd1 (Set TR Deq @ 0x10010) */
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[2].parameter = 0x10000 + sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    int rc = xhci_clear_halt(&ctrl, 1, 0x81);
+    assert_eq(rc, 0);
+
+    /* Verify Reset Endpoint (type 14, TSP=0, slot=1, ep_id=3) */
+    assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_RESET_EP);
+    assert_eq((cmd_ring[0].control >> 9) & 1, 0); /* TSP=0 */
+    assert_eq((cmd_ring[0].control >> 16) & 0x1F, 3);
+    assert_eq((cmd_ring[0].control >> 24) & 0xFF, 1);
+
+    /* Verify EP0 CLEAR_FEATURE(ENDPOINT_HALT): 02/01/0/0x81 */
+    assert_eq(ep0_ring[0].parameter, ((uint64_t)0x81 << 32) | (0x01ULL << 8) | 0x02ULL);
+
+    /* Verify Set TR Dequeue Pointer (type 16, slot=1, ep_id=3, param=0x60000 | DCS=0) */
+    assert_eq((cmd_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_SET_TR_DEQ);
+    assert_eq((cmd_ring[1].control >> 16) & 0x1F, 3);
+    assert_eq((cmd_ring[1].control >> 24) & 0xFF, 1);
+    assert_eq(cmd_ring[1].parameter, 0x60000ULL); /* DCS=0 */
+    assert_eq(in_ring.enqueue, 0);
+    assert_eq(in_ring.cycle, 0);
+
+    /* Case 2: Idle Running pipe (DCI 4, ep_addr 0x02) -> EP0 clear + Configure Endpoint (no Reset EP) */
+    uint32_t *out_ep4_ctx = (uint32_t *)xhci_dev_ep_ctx(dev_ctx, ctrl.csz, 4);
+    out_ep4_ctx[0] = XHCI_EP_STATE_RUNNING;
+
+    /* Event 3: EP0 Status (@ 0x40000 + 3*16), Event 4: Configure Endpoint (@ 0x10020) */
+    event_ring[3].parameter = 0x40000 + 3 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[4].parameter = 0x10000 + 2 * sizeof(struct xhci_trb);
+    event_ring[4].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    rc = xhci_clear_halt(&ctrl, 1, 0x02);
+    assert_eq(rc, 0);
+    assert_eq((cmd_ring[2].control >> 10) & 0x3F, XHCI_TRB_TYPE_CONFIG_EP);
+    uint32_t *in_ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(input_ctx, ctrl.csz);
+    assert_eq(in_ctrl_ctx[0], (1U << 4));              /* D4=1, D0=0, D1=0 */
+    assert_eq(in_ctrl_ctx[1], (1U << 0) | (1U << 4));  /* A0=1, A4=1, A1=0 */
+    uint32_t *in_slot_ctx = (uint32_t *)xhci_input_slot_ctx(input_ctx, ctrl.csz);
+    assert_eq((in_slot_ctx[0] >> 27) & 0x1F, 4);       /* Retained Context Entries */
+
+    /* Case 3: Stopped pipe (DCI 4, ep_addr 0x02) also uses EP0 clear + Configure Endpoint */
+    out_ep4_ctx[0] = XHCI_EP_STATE_STOPPED;
+    event_ring[5].parameter = 0x40000 + 5 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[6].parameter = 0x10000 + 3 * sizeof(struct xhci_trb);
+    event_ring[6].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[6].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    rc = xhci_clear_halt(&ctrl, 1, 0x02);
+    assert_eq(rc, 0);
+    assert_eq((cmd_ring[3].control >> 10) & 0x3F, XHCI_TRB_TYPE_CONFIG_EP);
+
+    /* Case 4: EP0 STALL during clear_halt quarantines slot */
+    event_ring[7].parameter = 0x40000 + 7 * sizeof(struct xhci_trb);
+    event_ring[7].status = (XHCI_COMP_STALL << 24);
+    event_ring[7].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_clear_halt(&ctrl, 1, 0x02);
+    assert_eq(rc, -EPIPE);
+    assert_true(slot.poisoned);
+    uint8_t dummy[64];
+    size_t actual = 0;
+    *(volatile uint32_t *)(db_regs + 4) = 0;
+    assert_true(xhci_bulk_transfer(&ctrl, 1, 3, dummy, sizeof(dummy), &actual) != 0);
+    assert_eq(*(volatile uint32_t *)(db_regs + 4), 0);
+
+    free(staging);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -1047,6 +1196,7 @@ int main(void)
     test_xhci_msc_alt_zero_pair();
     test_xhci_bulk_event_identity();
     test_xhci_bulk_wrap_and_boundary();
+    test_xhci_clear_halt_state_drives_command_sequence();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

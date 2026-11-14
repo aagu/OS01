@@ -21,6 +21,8 @@
 #define XHCI_TRB_TYPE_DISABLE_SLOT  10
 #define XHCI_TRB_TYPE_ADDRESS_DEV   11
 #define XHCI_TRB_TYPE_CONFIG_EP     12
+#define XHCI_TRB_TYPE_RESET_EP      14
+#define XHCI_TRB_TYPE_SET_TR_DEQ    16
 #define XHCI_TRB_TYPE_TRANSFER_EVT   32
 #define XHCI_TRB_TYPE_CMD_CMPL_EVT   33
 #define XHCI_TRB_TYPE_PORT_STATUS_EVT 34
@@ -95,6 +97,13 @@
 #define XHCI_EP_TYPE_ISOCH_IN       5
 #define XHCI_EP_TYPE_BULK_IN        6
 #define XHCI_EP_TYPE_INTR_IN        7
+
+/* xHCI endpoint states (Output Endpoint Context DW0 bits [2:0]) */
+#define XHCI_EP_STATE_DISABLED      0
+#define XHCI_EP_STATE_RUNNING       1
+#define XHCI_EP_STATE_HALTED        2
+#define XHCI_EP_STATE_STOPPED       3
+#define XHCI_EP_STATE_ERROR         4
 
 /* Device Context Index bounds: EP0 is DCI 1, DCI 0 is the Slot Context */
 #define XHCI_MIN_ENDPOINT_DCI       2
@@ -488,6 +497,7 @@ int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
                          uint8_t req, uint16_t value, uint16_t index);
 int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot, uint8_t dci,
                        void *cpu_buf, size_t len, size_t *actual);
+int xhci_clear_halt(struct xhci_controller *c, uint8_t slot, uint8_t ep_addr);
 void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
 
