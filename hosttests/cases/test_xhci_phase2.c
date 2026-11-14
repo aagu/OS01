@@ -772,7 +772,22 @@ void test_xhci_timeout_owns_dma(void)
     assert_true(ctrl.slots[1] != NULL);
     assert_eq(s_mock_page_count, pages_before + 4);
 
-    /* 2. Controller remove with HCH not established keeps controller & slot DMA alive */
+    /* 2. Controller remove with HCH not established keeps controller & slot DMA alive,
+     * including a healthy ctx_published slot (not previously poisoned). */
+    struct xhci_slot *healthy_slot = kmalloc(sizeof(struct xhci_slot));
+    assert_true(healthy_slot != NULL);
+    memset(healthy_slot, 0, sizeof(*healthy_slot));
+    healthy_slot->slot_id = 2;
+    healthy_slot->active = true;
+    healthy_slot->ctx_published = true;
+    healthy_slot->input_ctx_phys = alloc_4k_page();
+    healthy_slot->dev_ctx_phys = alloc_4k_page();
+    healthy_slot->ep0_ring_phys = alloc_4k_page();
+    healthy_slot->dma_buf_phys = alloc_4k_page();
+    dcbaa[2] = healthy_slot->dev_ctx_phys;
+    ctrl.slots[2] = healthy_slot;
+    int pages_with_healthy = s_mock_page_count;
+
     uint8_t op_regs[0x100];
     memset(op_regs, 0, sizeof(op_regs));
     ctrl.op_regs = op_regs;
@@ -781,9 +796,16 @@ void test_xhci_timeout_owns_dma(void)
     memset(&pdev, 0, sizeof(pdev));
     pdev.driver_data = &ctrl;
     xhci_remove(&pdev);
-    assert_eq(s_mock_page_count, pages_before + 4); /* Still retained! */
+    assert_eq(s_mock_page_count, pages_with_healthy); /* Both poisoned & healthy retained! */
+    assert_true(ctrl.slots[2] != NULL);
+    assert_true(dcbaa[2] != 0);
 
     /* Cleanup mock pages manually so test doesn't leak host pages */
+    free_4k_page(healthy_slot->input_ctx_phys);
+    free_4k_page(healthy_slot->dev_ctx_phys);
+    free_4k_page(healthy_slot->ep0_ring_phys);
+    free_4k_page(healthy_slot->dma_buf_phys);
+    kfree(healthy_slot);
     free_4k_page(slot.input_ctx_phys);
     free_4k_page(slot.dev_ctx_phys);
     free_4k_page(slot.ep0_ring_phys);

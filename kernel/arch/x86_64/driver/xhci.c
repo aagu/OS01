@@ -774,7 +774,8 @@ void xhci_free_slot(struct xhci_controller *ctrl, uint8_t slot_id)
         if (ctrl->running && !ctrl->poisoned && !slot->poisoned && ctrl->cmd_ring_virt) {
             xhci_disable_slot_locked(ctrl, slot_id);
         }
-        if (!slot->disabled && (ctrl->running || slot->poisoned || slot->dma_retained)) {
+        if (!slot->disabled &&
+            (ctrl->running || ctrl->poisoned || ctrl->dma_retained || slot->poisoned || slot->dma_retained)) {
             slot->poisoned = true;
             slot->dma_retained = true;
             log_warn("[xhci] slot %u: DMA ownership unproven; retaining slot/contexts\n", slot_id);
@@ -1389,6 +1390,18 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
     return parse_len;
 }
 
+static void xhci_fill_input_ep_ctx(uint32_t *ep_ctx, const struct xhci_ep_ring *ring,
+                                   uint64_t deq_phys, uint8_t dcs)
+{
+    ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval, MaxPStreams=0 */
+    ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
+                ((uint32_t)ring->max_burst << 8) |
+                ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MaxBurst, MPS */
+    ep_ctx[2] = (uint32_t)(deq_phys & 0xFFFFFFF0ULL) | (uint32_t)(dcs & 1U); /* TR Dequeue Lo, DCS */
+    ep_ctx[3] = (uint32_t)(deq_phys >> 32);                        /* TR Dequeue Hi */
+    ep_ctx[4] = (uint32_t)ring->max_packet_size;                   /* Average TRB Length */
+}
+
 int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
 {
     if (!ctrl || !ctrl->cmd_ring_virt || !ctrl->db_regs ||
@@ -1441,13 +1454,7 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
             if (!ring || !ring->active) continue;
 
             uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, ctrl->csz, dci);
-            ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval, MaxPStreams=0 */
-            ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
-                        ((uint32_t)ring->max_burst << 8) |
-                        ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MaxBurst, MPS */
-            ep_ctx[2] = (uint32_t)(ring->ring_phys & 0xFFFFFFF0ULL) | 1U; /* TR Dequeue Lo, DCS=1 */
-            ep_ctx[3] = (uint32_t)(ring->ring_phys >> 32);                /* TR Dequeue Hi */
-            ep_ctx[4] = (uint32_t)ring->max_packet_size;                  /* Average TRB Length */
+            xhci_fill_input_ep_ctx(ep_ctx, ring, ring->ring_phys, 1U);
         }
     }
 
@@ -1811,13 +1818,7 @@ int xhci_clear_halt(struct xhci_controller *c, uint8_t slot_id, uint8_t ep_addr)
         slot_ctx[1] = ((uint32_t)slot->port_num << 16);
 
         uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, c->csz, dci);
-        ep_ctx[0] = (uint32_t)ring->interval << 16;
-        ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
-                    ((uint32_t)ring->max_burst << 8) |
-                    ((uint32_t)ring->max_packet_size << 16);
-        ep_ctx[2] = (uint32_t)(next_deq & 0xFFFFFFF0ULL) | next_dcs;
-        ep_ctx[3] = (uint32_t)(next_deq >> 32);
-        ep_ctx[4] = (uint32_t)ring->max_packet_size;
+        xhci_fill_input_ep_ctx(ep_ctx, ring, next_deq, next_dcs);
 
         rc = xhci_submit_ep_cmd_locked(c, XHCI_TRB_TYPE_CONFIG_EP, slot_id, 0,
                                        slot->input_ctx_phys);
