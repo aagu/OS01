@@ -103,8 +103,8 @@ def _parse_py_dict_manifest(text: str) -> dict[str, Any] | None:
         return None
     try:
         tree = ast.parse(text)
-    except SyntaxError:
-        return None
+    except SyntaxError as exc:
+        raise ManifestError(f"syntax error while parsing TEST_MANIFEST: {exc}") from exc
     for node in tree.body:
         value_node = None
         if isinstance(node, ast.Assign):
@@ -341,6 +341,8 @@ def _load_bridge_raw(root_path: Path, bridge_path: str | None) -> dict[str, Any]
 
 def _write_if_changed(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return
     path.write_text(content, encoding="utf-8")
 
 
@@ -430,8 +432,14 @@ def emit(root: str, bridge_path: str | None, outdir: str) -> dict[str, Any]:
     _write_if_changed(out_root / "mk" / "generated" / "test-dispatch.mk", "\n".join(disp_lines) + "\n")
 
     # 4. mk/generated/test-harness-modules.mk
+    def _harness_module_name(entry: dict[str, Any]) -> str:
+        src = entry.get("source", "")
+        if isinstance(src, str) and src.endswith(".py"):
+            return src[:-3].replace("/", ".")
+        return entry["id"]
+
     harness_mods = sorted(
-        e["id"]
+        _harness_module_name(e)
         for e in merged_entries
         if e.get("kind") == "harness_module" or e.get("layer") == "harness"
     )

@@ -152,6 +152,18 @@ class CatalogGenTests(unittest.TestCase):
                     gen_tsv_lines.add(s)
             self.assertEqual(gen_tsv_lines, expected_tsv_lines)
 
+            hm_text = (Path(tmp) / "mk" / "generated" / "test-harness-modules.mk").read_text(encoding="utf-8")
+            hm_line = next(
+                line for line in hm_text.splitlines() if line.startswith("TEST_HARNESS_MODULES_LEGACY :=")
+            )
+            hm_mods = hm_line.split(":=", 1)[1].strip().split()
+            self.assertEqual(len(hm_mods), 51)
+            for mod in hm_mods:
+                self.assertTrue(mod.startswith("qemutests."), msg=f"expected dotted module path, got {mod!r}")
+            self.assertIn("qemutests.test_scan_tools", hm_mods)
+            self.assertIn("qemutests.test_bridge_export", hm_mods)
+            self.assertIn("qemutests.test_catalog_gen", hm_mods)
+
     def test_drift_gate_fails_on_modified_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
