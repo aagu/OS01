@@ -3605,6 +3605,38 @@
    }
   },
   {
+   "id": "sched.wait.waitpid",
+   "component": "sched",
+   "behavior": "wait",
+   "trigger": "host runner invokes test_waitpid.elf",
+   "assertions": [
+    "test_waitpid passes all internal assertions",
+    "do_waitpid/sys_native_waitpid reaping semantics and native exec argument marshaling are asserted"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_waitpid"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_waitpid.c",
+    "selector": "test_waitpid",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [
+    {
+     "layer": "kernel_selftest",
+     "source": "kernel/selftest/test_aarch64_user_exec.c",
+     "selector": "aarch64_user_exec",
+     "evidence": "PASS_MARKER",
+     "distinct_risk": "Host unit test cannot catch a real guest exec path losing the SysV user stack argument marshaling on aarch64"
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying sched module waitpid reaping behavior"
+   }
+  },
+  {
    "id": "intr.x86.intr_probe",
    "component": "intr",
    "behavior": "x86",
