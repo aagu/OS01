@@ -477,7 +477,7 @@ TEST_FUNC(test_load_rollback_on_read_failure) {
     teardown_fixture();
 }
 
-/* 10. Rollback on vmm_map_4k_page failure. */
+/* 10. Rollback on x86_vmm_map_4k failure. */
 TEST_FUNC(test_load_rollback_on_map_failure) {
     uint8_t a[0x100];
     memset(a, 0xAA, sizeof(a));

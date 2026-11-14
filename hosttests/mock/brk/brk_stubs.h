@@ -6,7 +6,7 @@
  * What is stubbed (and why):
  *   - alloc_4k_page / free_4k_page: 4 KiB-aligned host-heap pool
  *     so the test can observe every alloc/free of a fresh heap leaf.
- *   - vmm_pt_walk / vmm_map_4k_page / vmm_unmap_4k_page: a flat
+ *   - vmm_pt_walk / x86_vmm_map_4k / vmm_unmap_4k_page: a flat
  *     indexed PTE table that supports PAGE_VALID + PAGE_COW +
  *     PAGE_PROTNONE flag bits (no PAGE_HUGE — brk must never
  *     touch a 2 MiB leaf).
@@ -65,7 +65,7 @@ typedef struct {
     brk_pte_record_t ptes[BRK_PTE_TABLE_SIZE];
 
     /* Per-call counters (test assertions) */
-    int total_maps;         /* successful vmm_map_4k_page calls */
+    int total_maps;         /* successful x86_vmm_map_4k calls */
     int total_unmaps;       /* successful vmm_unmap_4k_page calls */
     int total_allocs;       /* successful alloc_4k_page calls */
     int total_frees;        /* successful free_4k_page calls */
@@ -76,7 +76,7 @@ typedef struct {
     /* Failure injection: when the matching counter reaches this
      * value, the NEXT call returns failure instead.  0 disables. */
     int inject_alloc_fail_at;  /* inject failure on Nth successful alloc_4k_page */
-    int inject_map_fail_at;    /* inject failure on Nth successful vmm_map_4k_page */
+    int inject_map_fail_at;    /* inject failure on Nth successful x86_vmm_map_4k */
 } brk_state_t;
 
 extern brk_state_t brk_state;
@@ -97,7 +97,7 @@ void      free_4k_page(uint64_t phys);
 
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
-int       vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int       x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                            uint64_t virt, uint64_t flags);
 void      vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 

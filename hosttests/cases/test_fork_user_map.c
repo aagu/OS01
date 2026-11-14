@@ -284,11 +284,11 @@ static void test_vma_free_all_unmaps_vma_owned_pages(void)
     uint64_t phys2 = alloc_4k_page();
     uint64_t phys3 = alloc_4k_page();
     assert_true(phys1 && phys2 && phys3);
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, phys1, 0x401000,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, phys1, 0x401000,
                                   PAGE_USER | PAGE_WRITE | PAGE_VALID));
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, phys2, 0x402000,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, phys2, 0x402000,
                                   PAGE_USER | PAGE_WRITE | PAGE_VALID));
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, phys3, 0x403000,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, phys3, 0x403000,
                                   PAGE_USER | PAGE_WRITE | PAGE_VALID));
     int allocs_before = fk_state.total_allocs;
     int unmaps_before = fk_state.total_unmaps;
@@ -324,7 +324,7 @@ static void test_vma_free_all_cow_pages_ref(void)
 
     uint64_t phys = alloc_4k_page();
     assert_true(phys);
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, phys, 0x401000,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, phys, 0x401000,
                                   PAGE_USER | PAGE_VALID | PAGE_COW));
     /* COW refcount > 0 simulates a fork-shared leaf. */
     page_cow_get(phys);
@@ -595,14 +595,14 @@ static void test_vma_free_all_vmio_skips_unmap(void)
 
     uint64_t borrowed_outside = alloc_4k_page();   /* pool slot marked in_use */
     assert_true(borrowed_outside);
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, borrowed_outside,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, borrowed_outside,
                                  0x40000000UL,
                                  PAGE_USER | PAGE_WRITE | PAGE_VALID));
     /* Second leaf maps a DIFFERENT in-use slot so a put/free on
      * either leaf is observable. */
     uint64_t borrowed_live = alloc_4k_page();
     assert_true(borrowed_live);
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, borrowed_live,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, borrowed_live,
                                  0x40001000UL,
                                  PAGE_USER | PAGE_WRITE | PAGE_VALID));
 
@@ -648,9 +648,9 @@ static void test_vma_free_all_then_user_map_no_double_free(void)
 
     uint64_t phys1 = alloc_4k_page();
     uint64_t phys2 = alloc_4k_page();
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, phys1, 0x401000,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, phys1, 0x401000,
                                   PAGE_USER | PAGE_WRITE | PAGE_VALID));
-    assert_eq(0, vmm_map_4k_page(parent_mm.pgdir, phys2, 0x402000,
+    assert_eq(0, x86_vmm_map_4k(parent_mm.pgdir, phys2, 0x402000,
                                   PAGE_USER | PAGE_WRITE | PAGE_VALID));
     int allocs_before = fk_state.total_allocs;
 

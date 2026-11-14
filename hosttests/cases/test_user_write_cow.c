@@ -113,7 +113,7 @@ static uint64_t commit_leaf(uint64_t va, uint64_t page_prot)
         uw_page_pool[idx].in_use = 1;
         uw_state.total_allocs++;
     }
-    int rc = vmm_map_4k_page(NULL, va, va, page_prot);
+    int rc = x86_vmm_map_4k(NULL, va, va, page_prot);
     if (rc) abort();
     return va;
 }

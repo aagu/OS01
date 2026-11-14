@@ -136,10 +136,10 @@ static void ensure_mapped(uint64_t phys_addr)
     if (base >= 32UL * 1024 * 1024) {
         uintptr_t virt = (uintptr_t)Phy_To_Virt(base);
         // Check if already mapped (non-zero PDE entry)
-        // We just call vmm_map_page unconditionally; it's idempotent for the
+        // We just call x86_vmm_map_2m unconditionally; it's idempotent for the
         // same physical->virtual mapping since get_next_level reuses existing
         // table entries.
-        vmm_map_page(kernel_map, base, virt, PAGE_KERNEL_PMD_NOCACHE);
+        x86_vmm_map_2m(kernel_map, base, virt, PAGE_KERNEL_PMD_NOCACHE);
     }
 }
 

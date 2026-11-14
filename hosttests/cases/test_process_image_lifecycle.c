@@ -411,7 +411,7 @@ static void test_destroy_unpublished_user_mm_handles_empty_list(void)
  *   1. Allocate one stack page via the lifecycle stub alloc_4k_page.
  *   2. Build the fake user PGD with a single PAGE_HUGE PMD entry
  *      at USER_STACK_BASE → stack_phys (mirrors kernel/sched/task.c:
- *      1539 vmm_map_page(... PAGE_USER_PMD ... USER_STACK_BASE ...)).
+ *      1539 x86_vmm_map_2m(... PAGE_USER_PMD ... USER_STACK_BASE ...)).
  *   3. Wire mm->pgdir to the fake PGD.
  *   4. Run vma_free_all + vmm_free_user_map (the helper's body).
  *   5. Assert the page-pool counter advanced by exactly one free

@@ -223,7 +223,7 @@ ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
 void write_serial_unlocked(unsigned char c) { (void)c; }
 void write_serial(char c) { (void)c; }
 void vfs_node_put(struct vfs_node *n) { (void)n; }
-int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags) { (void)pgdir; (void)phys; (void)virt; (void)flags; return 0; }
+int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags) { (void)pgdir; (void)phys; (void)virt; (void)flags; return 0; }
 void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt) { (void)pgdir; (void)virt; }
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out) { (void)pgdir; (void)virt; (void)phys_out; (void)vm_out; return -ENOENT; }
 

@@ -14,7 +14,7 @@
  *     host-heap pool.  alloc returns 0 on inject-fail, free
  *     records every release so tests can verify rollback frees
  *     each created leaf exactly once.
- *   - vmm_pt_walk / vmm_map_4k_page / vmm_unmap_4k_page: a real,
+ *   - vmm_pt_walk / x86_vmm_map_4k / vmm_unmap_4k_page: a real,
  *     index-keyed PTE table that lets the test observe flags and
  *     verify no PAGE_HUGE leaf was ever created.
  *
@@ -56,7 +56,7 @@ extern page_pool_record_t elf_load_page_pool[ELF_LOAD_PAGE_POOL_SIZE];
  * >> 12, sized to cover the entire user VA window
  * [USER_CODE_ADDR, USER_CODE_ADDR + USER_PAGE_SIZE).  Each slot is
  * one PTE-shaped uint64_t: present bit + phys + flags.  The mock
- * vmm_pt_walk / vmm_map_4k_page / vmm_unmap_4k_page operate on this
+ * vmm_pt_walk / x86_vmm_map_4k / vmm_unmap_4k_page operate on this
  * table; the production loader never sees a PAGE_HUGE bit because
  * the table is flat (no PMD leaves).  PAGE_HUGE bit is asserted to
  * be unset on every recorded mapping via the test.
@@ -76,7 +76,7 @@ typedef struct {
     elf_load_pte_record_t ptes[ELF_LOAD_PTE_TABLE_SIZE];
 
     /* Per-leaf lifecycle counters. */
-    int total_maps;        /* total successful vmm_map_4k_page calls */
+    int total_maps;        /* total successful x86_vmm_map_4k calls */
     int total_unmaps;      /* total successful vmm_unmap_4k_page calls */
     int total_allocs;      /* total successful alloc_4k_page calls */
     int total_frees;       /* total successful free_4k_page calls */
@@ -87,7 +87,7 @@ typedef struct {
      * failure instead.  0 disables injection. */
     int inject_alloc_fail_at;  /* inject failure on Nth successful alloc_4k_page (after N succeed) */
     int inject_read_fail_at;  /* inject failure on Nth successful vfs_read */
-    int inject_map_fail_at;    /* inject failure on Nth successful vmm_map_4k_page */
+    int inject_map_fail_at;    /* inject failure on Nth successful x86_vmm_map_4k */
 } elf_load_state_t;
 
 /* Global state — single-instance test (no threading). */
@@ -121,7 +121,7 @@ void      free_4k_page(uint64_t phys);
 
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
-int       vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int       x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                            uint64_t virt, uint64_t flags);
 void      vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 

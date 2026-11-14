@@ -106,7 +106,7 @@ mm_t *mm_alloc(void) { return calloc(1, sizeof(mm_t)); }
 static uint64_t fake_pgd[512];
 uint64_t vmm_alloc_map(void) { return (uint64_t)&fake_pgd[0]; }
 void vmm_free_user_map(uint64_t *pgdir) { (void)pgdir; }
-int vmm_map_page(uint64_t *pgd, uint64_t vaddr, uint64_t paddr, uint32_t flags)
+int x86_vmm_map_2m(uint64_t *pgd, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
     (void)pgd; (void)vaddr; (void)paddr; (void)flags;
     return 0;

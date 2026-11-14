@@ -74,11 +74,11 @@ task_t *current_task_for_host_test(void) { return &stub_current_task; }
 void *kmalloc(size_t size)        { return malloc(size); }
 size_t kfree(void *ptr)           { free(ptr); return 1; }
 
-/* ── vmm_unmap_4k_page / vmm_pt_walk / vmm_map_4k_page ─────
+/* ── vmm_unmap_4k_page / vmm_pt_walk / x86_vmm_map_4k ─────
  * Stubs so vma.c's link succeeds.  The lifecycle suite drives the
  * real do_mprotect, so vmm_pt_walk points at a small registry of
  * fake PTE slots (see the PTE registry below); unregistered VAs are
- * empty slots and return NULL.  vmm_map_4k_page and tlb_shootdown
+ * empty slots and return NULL.  x86_vmm_map_4k and tlb_shootdown
  * are referenced by mm_set_brk (Task 4), which the lifecycle test
  * never calls, but the production vma.c still needs the symbols at
  * link time. */
@@ -86,7 +86,7 @@ void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
 {
     (void)pgdir; (void)virt;
 }
-int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int      x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                          uint64_t virt, uint64_t flags)
 {
     (void)pgdir; (void)phys; (void)virt; (void)flags;

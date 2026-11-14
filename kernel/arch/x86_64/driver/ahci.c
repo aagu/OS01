@@ -658,7 +658,7 @@ int ahci_probe(struct pci_device *pdev, const struct pci_device_id *id)
 
 #ifndef OS01_HOST_TEST
     uint64_t abar_page = abar_phys & PAGE_2M_MASK;
-    vmm_map_page(kernel_map, abar_page, (uintptr_t)Phy_To_Virt(abar_page), PAGE_KERNEL_PMD_NOCACHE);
+    x86_vmm_map_2m(kernel_map, abar_page, (uintptr_t)Phy_To_Virt(abar_page), PAGE_KERNEL_PMD_NOCACHE);
     flush_tlb();
 #endif
 

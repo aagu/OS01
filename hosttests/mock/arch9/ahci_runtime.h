@@ -107,7 +107,7 @@ struct Page *alloc_pages(int zone, int order, int flags);
 void free_pages(struct Page *page, int order);
 struct Page *Virt_To_Page(void *virt);
 
-static inline void vmm_map_page(void *map, uint64_t paddr, uintptr_t vaddr, uint64_t flags)
+static inline void x86_vmm_map_2m(void *map, uint64_t paddr, uintptr_t vaddr, uint64_t flags)
 {
     (void)map; (void)paddr; (void)vaddr; (void)flags;
 }
@@ -115,7 +115,7 @@ static inline void vmm_map_page(void *map, uint64_t paddr, uintptr_t vaddr, uint
 static inline void flush_tlb(void) {}
 
 /* Claim the x86 private VMM/MMU header guards: this host mock owns
- * the mocked primitives (vmm_map_page / flush_tlb / kernel_map), so
+ * the mocked primitives (x86_vmm_map_2m / flush_tlb / kernel_map), so
  * the production private headers must stay no-ops. */
 #define _ARCH_X86_64_MMU_H
 #define _ARCH_X86_64_VMM_H

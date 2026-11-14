@@ -7,7 +7,7 @@
  *   - alloc_4k_page / free_4k_page: host-heap 4 KiB-aligned pool so
  *     the test can hand-fill PTEs for "preexisting mapping" checks
  *     and observe every alloc/free.
- *   - vmm_pt_walk / vmm_map_4k_page / vmm_unmap_4k_page: a flat
+ *   - vmm_pt_walk / x86_vmm_map_4k / vmm_unmap_4k_page: a flat
  *     indexed PTE table covering [0x400000, 0x400000 + 16 MiB).
  *   - page_cow_get / page_cow_put / page_cow_refs: no-op-ish
  *     refcount stubs (do_mprotect's COW branch is out of scope for
@@ -81,7 +81,7 @@ void     free_4k_page(uint64_t phys);
 
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
-int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int      x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                          uint64_t virt, uint64_t flags);
 void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 

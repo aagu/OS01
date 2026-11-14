@@ -239,7 +239,7 @@ static int g_hook_commit_calls;
 static enum vm_device_cache g_hook_commit_cache;
 static int g_hook_commit_rc;
 
-int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
+int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
 {
     (void)pgdir; (void)phys; (void)virt; (void)flags;
     return 0;

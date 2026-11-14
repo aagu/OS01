@@ -118,7 +118,7 @@ void vmm_free_user_map(uint64_t *pgdir)
     vmm_free_user_map_calls++;
     record_lock_ev(LOCK_EV_CLEANUP);
 }
-int vmm_map_page(uint64_t *pgd, uint64_t vaddr, uint64_t paddr, uint32_t flags)
+int x86_vmm_map_2m(uint64_t *pgd, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
     (void)pgd; (void)vaddr; (void)paddr; (void)flags;
     return 0;

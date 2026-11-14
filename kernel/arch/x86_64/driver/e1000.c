@@ -5,7 +5,7 @@
 #include <net/device.h>
 #include <device/test_fault.h>
 #include <ipc/mbox.h>
-#include <memory/vmm.h>       // vmm_map_page, kernel_map
+#include <memory/vmm.h>       // x86_vmm_map_2m, kernel_map
 #include <arch/x86_64/pte.h>  // PAGE_KERNEL_PMD_NOCACHE
 #include <memory/pmm.h>       // PAGE_2M_MASK, alloc_pages, alloc_4k_page, free_pages, free_4k_page
 #include <memory/memory.h>    // Phy_To_Virt
@@ -428,7 +428,7 @@ int e1000_probe(struct pci_device *pdev, const struct pci_device_id *id)
 
 #ifndef OS01_HOST_TEST
     uint64_t bar_page = mmio_phys & PAGE_2M_MASK;
-    vmm_map_page(kernel_map, bar_page, (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
+    x86_vmm_map_2m(kernel_map, bar_page, (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
 #endif
     inst->mmio = (volatile uint8_t *)Phy_To_Virt(mmio_phys);
 
@@ -687,7 +687,7 @@ int e1000_legacy_init(struct pci_device *pdev, uint64_t bar, uint8_t gsi, int us
 
 #ifndef OS01_HOST_TEST
     uint64_t bar_page = bar & PAGE_2M_MASK;
-    vmm_map_page(kernel_map, bar_page, (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
+    x86_vmm_map_2m(kernel_map, bar_page, (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
 #endif
     inst->mmio = (volatile uint8_t *)Phy_To_Virt(bar);
 

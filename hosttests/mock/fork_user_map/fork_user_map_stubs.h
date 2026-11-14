@@ -8,7 +8,7 @@
  *   - alloc_4k_page / free_4k_page: 4 KiB-aligned host-heap pool
  *     keyed by phys — every alloc/free is counted so the test
  *     observes vma_free_all + fork_vma_copy's leaf handling.
- *   - vmm_pt_walk / vmm_map_4k_page / vmm_unmap_4k_page: flat
+ *   - vmm_pt_walk / x86_vmm_map_4k / vmm_unmap_4k_page: flat
  *     indexed PTE table covering [0x400000, 0x42100000). The fork
  *     test hand-fills PTEs to model "parent has ELF/heap/mmap
  *     leaves committed before fork".
@@ -68,7 +68,7 @@ typedef struct {
     fk_pte_record_t ptes[FK_PTE_TABLE_SIZE];
 
     /* Per-call counters (test assertions) */
-    int total_maps;         /* successful vmm_map_4k_page calls */
+    int total_maps;         /* successful x86_vmm_map_4k calls */
     int total_unmaps;       /* successful vmm_unmap_4k_page calls */
     int total_allocs;       /* successful alloc_4k_page calls */
     int total_frees;        /* successful free_4k_page calls */
@@ -96,7 +96,7 @@ void      free_4k_page(uint64_t phys);
 
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
-int       vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int       x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                            uint64_t virt, uint64_t flags);
 void      vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 

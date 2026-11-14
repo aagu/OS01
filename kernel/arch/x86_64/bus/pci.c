@@ -13,7 +13,7 @@
 #include <arch/spinlock.h>
 #include <memory/memory.h>   // Phy_To_Virt
 #include <memory/pmm.h>      // PAGE_2M_MASK
-#include <memory/vmm.h>      // vmm_map_page
+#include <memory/vmm.h>      // x86_vmm_map_2m
 #include <arch/x86_64/pte.h> // PAGE_KERNEL_PMD_NOCACHE
 #endif
 
@@ -147,7 +147,7 @@ int arch_pci_msix_map(const struct pci_device *pdev, uint64_t table_phys, void *
         return -EINVAL;
     }
     uint64_t table_page = table_phys & PAGE_2M_MASK;
-    vmm_map_page(kernel_map, table_page,
+    x86_vmm_map_2m(kernel_map, table_page,
                  (uintptr_t)Phy_To_Virt(table_page),
                  PAGE_KERNEL_PMD_NOCACHE);
     *out_virt = (void *)Phy_To_Virt(table_phys);

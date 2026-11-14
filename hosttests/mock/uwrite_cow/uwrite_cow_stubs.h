@@ -84,7 +84,7 @@ typedef struct {
      * Nth alloc_4k_page call returns 0 (OOM). */
     int inject_alloc_fail_at;
 
-    /* Failure injection for vmm_map_4k_page (intermediate-table OOM). */
+    /* Failure injection for x86_vmm_map_4k (intermediate-table OOM). */
     int inject_map_fail_at;
 } uw_state_t;
 
@@ -99,7 +99,7 @@ void      free_4k_page(uint64_t phys);
 
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
-int       vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int       x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                            uint64_t virt, uint64_t flags);
 void      vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 

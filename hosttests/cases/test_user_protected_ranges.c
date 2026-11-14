@@ -141,7 +141,7 @@ static int fill_pte(uint64_t va, unsigned char pattern)
 {
     uint64_t phys = alloc_4k_page();
     if (phys == 0) return -1;
-    if (vmm_map_4k_page(fixture_mm.pgdir, phys, va,
+    if (x86_vmm_map_4k(fixture_mm.pgdir, phys, va,
                         PAGE_USER | PAGE_WRITE | PAGE_VALID) != 0)
         return -1;
     pr_page_record_t *rec = pr_find_page(phys);
@@ -262,12 +262,12 @@ static void test_active_leaf_release_order(void)
     uint64_t p0 = alloc_4k_page();
     uint64_t p1 = alloc_4k_page();
     assert_true(p0 && p1);
-    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, p0, base,
+    assert_eq(0, x86_vmm_map_4k(fixture_mm.pgdir, p0, base,
                                  PAGE_USER_PTE));
-    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, p1, base + 0x1000,
+    assert_eq(0, x86_vmm_map_4k(fixture_mm.pgdir, p1, base + 0x1000,
                                  PAGE_USER_PTE | PAGE_NO_EXEC));
     /* Stashed leaf: PROTNONE, no PRESENT. */
-    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, p0, base + 0x2000,
+    assert_eq(0, x86_vmm_map_4k(fixture_mm.pgdir, p0, base + 0x2000,
                                  PAGE_USER | PAGE_PROTNONE));
 
     pr_events_reset();
@@ -317,9 +317,9 @@ static void test_borrowed_leaf_never_released(void)
     uint64_t b0 = alloc_4k_page();
     uint64_t b1 = alloc_4k_page();
     assert_true(b0 && b1);
-    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, b0, base,
+    assert_eq(0, x86_vmm_map_4k(fixture_mm.pgdir, b0, base,
                                  PAGE_USER_PTE));
-    assert_eq(0, vmm_map_4k_page(fixture_mm.pgdir, b1, base + 0x1000,
+    assert_eq(0, x86_vmm_map_4k(fixture_mm.pgdir, b1, base + 0x1000,
                                  PAGE_USER_PTE));
 
     int frees_before = pr_state.total_frees;

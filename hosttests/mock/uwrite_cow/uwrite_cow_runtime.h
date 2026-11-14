@@ -159,7 +159,7 @@ bool     page_cow_put(uint64_t phys);
 uint16_t page_cow_refs(uint64_t phys);
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                        uint64_t flags, int allocate);
-int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int      x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                           uint64_t virt, uint64_t flags);
 void     vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt);
 void     tlb_shootdown(void);

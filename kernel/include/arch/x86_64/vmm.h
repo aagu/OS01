@@ -35,9 +35,8 @@ extern ptbl_t kernel_map;
 
 // ── Raw page-table API (implementation: arch/x86_64/memory/vmm.c) ──
 
-void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address,
-                  uintptr_t virtual_address, uint64_t flags);
-uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address);
+void x86_vmm_map_2m(uint64_t *pgdir, uintptr_t physical_address,
+                    uintptr_t virtual_address, uint64_t flags);
 ptbl_t vmm_alloc_map(void);
 void vmm_free_user_map(ptbl_t pgdir);
 
@@ -55,35 +54,24 @@ int vmm_init(void);
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate);
 
-// 4KB PTE-level map helper (raw pgdir).
-int      vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
-                         uint64_t virt, uint64_t flags);
-
 /* ── Boot-initializer checked table allocation (aarch64 M1 plan
  * Task 5) ─────────────────────────────────────────────────────
- * vmm_boot_alloc_table: allocate one 4 KiB PGD/PUD/PMD table page
- * through the kernel's calloc. Returns 0 on success with *out_pa
- * set to the new page's PA; returns -ENOMEM if the allocation
- * fails (no descriptor is constructed — a NULL descriptor would be
- * a PA=0 entry that the hardware reads as "not present" but the
- * code would still try to use as a PUD/PMD pointer).
- *
- * vmm_get_next_level_checked: same semantics as get_next_level but
- * goes through vmm_boot_alloc_table for the missing intermediate
- * table, returning -ENOMEM instead of constructing a NULL entry.
- * On success *out_pa (if non-NULL) is set to the resolved table
- * page PA (whether the slot was filled or already present). */
-int  vmm_boot_alloc_table(uint64_t *out_pa);
+ * vmm_get_next_level_checked: same semantics as the internal
+ * get_next_level but allocates the missing intermediate table
+ * (one 4 KiB PGD/PUD/PMD page through the kernel's calloc) with a
+ * checked result, returning -ENOMEM instead of constructing a NULL
+ * entry.  On success *out_pa (if non-NULL) is set to the resolved
+ * table page PA (whether the slot was filled or already present). */
 int  vmm_get_next_level_checked(uint64_t *current_level, size_t entry,
                                 uint64_t flags, uint64_t *out_pa);
 
-/* ── x86 4KB PTE backend helpers (aarch64 M3.2 Task 15).  These own
+/* ── x86 4 KiB PTE backend helpers (aarch64 M3.2 Task 15).  These own
  * the PAGE_* hardware bit layout and the free/COW ownership
  * semantics.  Leaf release ownership lives in
  * x86_vmm_release_owned_4k: withdraw with x86_vmm_take_4k, sync,
  * then release — never free inline. */
-int  x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
-                         uint64_t virt, uint64_t flags);
+int  x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
+                    uint64_t virt, uint64_t flags);
 int  x86_vmm_query_4k_page(uint64_t *pgdir, uint64_t virt,
                            uint64_t *phys_out, uint64_t *flags_out);
 

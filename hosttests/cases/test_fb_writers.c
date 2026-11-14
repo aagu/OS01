@@ -97,7 +97,7 @@ static int      g_inject_map_fail_page = -1;
 static int      g_inject_unmap_fail_page = -1;
 static int      g_current_map_page = 0;
 
-int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
+int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags)
 {
     (void)pgdir;
     if (g_current_map_page == g_inject_map_fail_page) {
@@ -531,7 +531,7 @@ static void test_fb_fixed_failure_keeps_old_mapping(void)
 
     /* Establish the old mapping in the mock page table. */
     for (int i = 0; i < 4; i++)
-        vmm_map_4k_page(NULL, 0x5000 + (uint64_t)i * 0x1000,
+        x86_vmm_map_4k(NULL, 0x5000 + (uint64_t)i * 0x1000,
                         vma.vm_start + (uint64_t)i * 0x1000,
                         PAGE_USER_PTE_RO);
     uint64_t old_ptes[MAX_TRACKED_PAGES], old_flags[MAX_TRACKED_PAGES];

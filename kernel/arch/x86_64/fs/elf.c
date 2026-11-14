@@ -239,8 +239,8 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
                 /* Zero in case the allocator didn't already. */
                 memset((void *)Phy_To_Virt(page_phys), 0, PAGE_4K_SIZE);
 
-                if (vmm_map_4k_page(pgd, page_phys, pg, seg_flags) != 0) {
-                    debug_fs("elf_load: vmm_map_4k_page failed at %p\n",
+                if (x86_vmm_map_4k(pgd, page_phys, pg, seg_flags) != 0) {
+                    debug_fs("elf_load: x86_vmm_map_4k failed at %p\n",
                                   (void *)pg);
                     free_4k_page(page_phys);
                     rc = -ENOMEM;

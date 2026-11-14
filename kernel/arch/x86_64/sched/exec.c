@@ -291,7 +291,7 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
 //
 // Order matters: vma_free_all walks the VMA list and unmaps the
 // 4 KiB pages tracked by each VMA.  The user stack page was
-// mapped via vmm_map_page (PMD entry, separate 2 MiB page) and
+// mapped via x86_vmm_map_2m (PMD entry, separate 2 MiB page) and
 // is NOT covered by any VMA — but vmm_free_user_map walks the
 // entire user page table and releases every leaf it finds,
 // including the stack page.  So we deliberately do NOT call
@@ -334,7 +334,7 @@ static void destroy_unpublished_user_mm(mm_t *mm)
 //                   (must NOT be called under task_list_lock / rq_lock —
 //                   see kernel/include/fs/file.h:140-142)
 //   - fpu_save:     tsk->fpu_save owns one malloc; release via kfree
-//   - stack_page:   mapped via vmm_map_page (PMD); released by
+//   - stack_page:   mapped via x86_vmm_map_2m (PMD); released by
 //                   vmm_free_user_map walking the user page table.
 //                   destroy_unpublished_user_mm owns this path — do
 //                   NOT also free_pages(stack_page).
@@ -522,7 +522,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         kfree(raw_alloc);
         return -1;
     }
-    vmm_map_page(user_pgd, stack_page->phy_address,
+    x86_vmm_map_2m(user_pgd, stack_page->phy_address,
                  X86_USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
     mm->start_stack = X86_USER_STACK_BASE;
 
@@ -712,7 +712,7 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         kfree(new_mm);
         return -ENOMEM;
     }
-    vmm_map_page(new_pgd, stack_page->phy_address,
+    x86_vmm_map_2m(new_pgd, stack_page->phy_address,
                  X86_USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
     new_mm->start_stack = X86_USER_STACK_BASE;
 

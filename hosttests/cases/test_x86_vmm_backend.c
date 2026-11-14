@@ -5,7 +5,7 @@
  *
  * The brief asks for the x86 backend to expose three raw PTE-level
  * helpers:
- *   - x86_vmm_map_4k_page:               maps phys at virt with PAGE_* flags
+ *   - x86_vmm_map_4k:               maps phys at virt with PAGE_* flags
  *   - x86_vmm_unmap_4k_page_with_free:   unmaps + owns the free/COW logic
  *   - x86_vmm_query_4k_page:             reads back phys + flags
  *
@@ -21,7 +21,7 @@
  *     the leaf (no calloc needed on the unmap path).
  *   - Mock page_cow_put / free_4k_page with call counters.
  *
- * The existing public API (vmm_map_4k_page / vmm_unmap_4k_page) is
+ * The existing public API (x86_vmm_map_4k / vmm_unmap_4k_page) is
  * exercised by test_fork_user_map.elf + test_user_write_cow.elf —
  * those tests stay green as long as the delegation preserves behavior
  * (the vmm.c refactor is structural, not semantic).
@@ -167,7 +167,7 @@ TEST_FUNC(test_x86_vmm_backend_api_exists)
      * compile if the prototypes are not declared in the public
      * headers (memory/vmm.h for map/unmap + arch/x86_64/pte.h for
      * the new helpers — see Task 15 commit). */
-    int  (*m)(uint64_t *, uint64_t, uint64_t, uint64_t) = x86_vmm_map_4k_page;
+    int  (*m)(uint64_t *, uint64_t, uint64_t, uint64_t) = x86_vmm_map_4k;
     uint64_t (*t)(uint64_t *, uint64_t)                = x86_vmm_take_4k;
     void  (*r)(uint64_t)                               = x86_vmm_release_owned_4k;
     int  (*q)(uint64_t *, uint64_t, uint64_t *,
@@ -498,7 +498,7 @@ TEST_FUNC(test_x86_nx_cow_stash_roundtrip)
 
     /* The raw mapper must preserve NX on the leaf it writes. */
     reset_chain();
-    rc = x86_vmm_map_4k_page(pgd_root, ROUNDTRIP_PA, TEST_VA_C,
+    rc = x86_vmm_map_4k(pgd_root, ROUNDTRIP_PA, TEST_VA_C,
                              PAGE_VALID | PAGE_USER | PAGE_NO_EXEC);
     assert_eq(0, rc);
     assert_eq(ROUNDTRIP_PA | PAGE_VALID | PAGE_USER | PAGE_NO_EXEC,

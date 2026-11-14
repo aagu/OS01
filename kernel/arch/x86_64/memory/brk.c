@@ -74,7 +74,7 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
 //
 // Sets the program break end_brk and the matching heap VMA endpoint.
 // All committed 4 KiB leaves are owned by this call: each new leaf
-// is staged (alloc_4k_page + memset 0 + vmm_map_4k_page) BEFORE the
+// is staged (alloc_4k_page + memset 0 + x86_vmm_map_4k) BEFORE the
 // break/VMA endpoint is published, so any OOM leaves old break, old
 // heap VMA end, and old PTEs intact.
 //
@@ -197,7 +197,7 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
              * is defensive for paths that swap in a non-subpage
              * phys in tests). */
             memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
-            int map_rc = vmm_map_4k_page(pgd, phys, va, page_prot);
+            int map_rc = x86_vmm_map_4k(pgd, phys, va, page_prot);
             if (map_rc != 0) {
                 /* Map failed (intermediate-table OOM).  The PA is
                  * not installed anywhere, so it is returned here,

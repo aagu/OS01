@@ -9,7 +9,7 @@
 #include <driver/fb_state.h>       /* fb_publish_initial_mapping             */
 #include <driver/fb_cache.h>       /* fb_cache_policy_get                    */
 #include <memory/memory.h>         /* flush_tlb                              */
-#include <memory/vmm.h>            /* vmm_map_page, kernel_map, tlb_shootdown */
+#include <memory/vmm.h>            /* x86_vmm_map_2m, kernel_map, tlb_shootdown */
 #include <memory/pmm.h>            /* PAGE_2M_SIZE / PAGE_2M_SHIFT / PAGE_2M_MASK */
 #include <arch/x86_64/pte.h>       /* PAGE_* x86 hardware PTE bits           */
 #include <arch/x86_64/fb_pte.h>     /* x86_fb_cache_bits: request -> PCD/PWT  */
@@ -47,7 +47,7 @@ void frame_buffer_early_init()
     fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
 }
 
-// Permanent framebuffer map via vmm_map_page, after PMM/VMM are available.
+// Permanent framebuffer map via x86_vmm_map_2m, after PMM/VMM are available.
 // Remaps to VIRT_FRAMEBUFFER_OFFSET in a separate PGD entry that never
 // overlaps with the physical RAM direct mapping regardless of QEMU -m size.
 void frame_buffer_init()
@@ -58,7 +58,7 @@ void frame_buffer_init()
     uint64_t cache_bits = x86_fb_cache_bits(cache);
     for (uintptr_t i = 0; i < Pos.FB_length; i += PAGE_2M_SIZE)
     {
-        vmm_map_page(kernel_map, i + (uint64_t)Pos.Phy_addr,
+        x86_vmm_map_2m(kernel_map, i + (uint64_t)Pos.Phy_addr,
             VIRT_FRAMEBUFFER_OFFSET + i,
             PAGE_KERNEL_PMD | cache_bits);
     }

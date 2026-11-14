@@ -869,7 +869,7 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 					return;
 				}
 				memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
-				int rc = vmm_map_4k_page(user_pgd, phys,
+				int rc = x86_vmm_map_4k(user_pgd, phys,
 							     cr2 & PAGE_4K_MASK,
 							     x86_vma_pte_flags(vma->vm_flags));
 				if (rc != 0) {
@@ -906,7 +906,7 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 				if ((size_t)n < PAGE_4K_SIZE)
 				    memset((char *)Phy_To_Virt(phys) + n, 0,
 				           PAGE_4K_SIZE - (size_t)n);
-				int rc = vmm_map_4k_page(user_pgd, phys,
+				int rc = x86_vmm_map_4k(user_pgd, phys,
 							     cr2 & PAGE_4K_MASK,
 							     x86_vma_pte_flags(vma->vm_flags));
 				if (rc != 0) {

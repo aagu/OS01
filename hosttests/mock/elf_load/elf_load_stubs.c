@@ -186,7 +186,7 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
     return &rec->pte;
 }
 
-int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
+int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
                     uint64_t virt, uint64_t flags)
 {
     (void)pgdir;
@@ -203,7 +203,7 @@ int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     elf_load_pte_record_t *rec = &elf_load_state.ptes[idx];
 
     /* Preserve any prior content; reject overwrite of an already-mapped
-     // slot (production vmm_map_4k_page is unconditional; the loader
+     // slot (production x86_vmm_map_4k is unconditional; the loader
      // is responsible for not double-mapping).  We mirror that by
      // overwriting and recording — the loader's "map only if absent"
      // invariant is exercised by the test's PTE flags/phys inspection. */

@@ -13,7 +13,7 @@
 #include <arch/x86_64/gate.h>
 
 uint64_t *kernel_map = NULL;
-void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags)
+void x86_vmm_map_2m(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags)
 {
     (void)pgdir; (void)physical_address; (void)virtual_address; (void)flags;
 }

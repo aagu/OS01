@@ -23,9 +23,9 @@ ptbl_t kernel_map;
  * cleanly back to the boot facade as -ENOMEM instead of constructing
  * a NULL descriptor (PA=0).
  *
- * Runtime callers (vmm_pt_walk, vmm_map_page) keep their inline
+ * Runtime callers (vmm_pt_walk, x86_vmm_map_2m) keep their inline
  * calloc pattern — this helper is only invoked from the boot path. */
-int vmm_boot_alloc_table(uint64_t *out_pa)
+static int vmm_boot_alloc_table(uint64_t *out_pa)
 {
     void *va = calloc(1, PAGE_4K_SIZE);
     if (va == NULL) return -ENOMEM;
@@ -34,7 +34,7 @@ int vmm_boot_alloc_table(uint64_t *out_pa)
 }
 
 // get next Level of map
-ptbl_t get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
+static ptbl_t get_next_level(uint64_t *current_level, size_t entry, uint64_t flags)
 {
     if (!(current_level[entry] & 1))
     {
@@ -66,8 +66,10 @@ int vmm_get_next_level_checked(uint64_t *current_level, size_t entry,
     return 0;
 }
 
-// map virtual page to physical address
-void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags)
+// Map one 2 MiB PMD leaf at `va`.  When editing the shared kernel map
+// after APs are online, a TLB shootdown broadcasts the change; callers
+// that edit their own root do their own local flush.
+void x86_vmm_map_2m(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags)
 {
     uint64_t *pgd, *pud, *pmd;
     size_t pgd_idx, pud_idx, pmd_idx;
@@ -88,29 +90,6 @@ void vmm_map_page(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtual
     // broadcast TLB invalidation so other cores drop stale PMD/TLB entries.
     if (pgdir == kernel_map && num_cpus > 1)
         tlb_shootdown();
-}
-
-// unmap virtual page to physical address, return the physical address
-uintptr_t vmm_unmap_page(uint64_t *pgdir, uintptr_t virtual_address)
-{
-    uint64_t *pgd, *pud, *pmd;
-    size_t pgd_idx, pud_idx, pmd_idx;
-
-    pgd_idx = (size_t) (virtual_address >> PAGE_PGD_SHIFT) & 0x1ff;
-    pud_idx = (size_t) (virtual_address >> PAGE_1G_SHIFT)  & 0x1ff;
-    pmd_idx = (size_t) (virtual_address >> PAGE_2M_SHIFT)  & 0x1ff;
-
-    pgd = pgdir;
-    if (!(pgd[pgd_idx] & PAGE_VALID))
-        return 0;
-    pud = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pgd[pgd_idx]));
-    if (!(pud[pud_idx] & PAGE_VALID))
-        return 0;
-    pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pud[pud_idx]));
-
-    uintptr_t phys = x86_pte_2m_pa(pmd[pmd_idx]);
-    pmd[pmd_idx] = 0;
-    return phys;
 }
 
 int vmm_init()
@@ -208,7 +187,7 @@ void vmm_free_user_map(ptbl_t pgdir)
 
             uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pude));
 
-            // Walk PMD entries (2MB pages via PAGE_HUGE)
+            // Walk PMD entries (2 MiB pages via PAGE_HUGE)
             for (int l2 = 0; l2 < 512; l2++) {
                 uint64_t pmde = pmd[l2];
                 if (!(pmde & PAGE_VALID))
@@ -285,9 +264,9 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
     }
     uint64_t *pmd = (uint64_t *)Phy_To_Virt(x86_pte_4k_pa(pud[l1]));
 
-    // PMD -> PTE table (4KB leaf).
-    // Guard: if PMD[l2] is a 2MB huge page (PAGE_HUGE), return NULL.
-    // 4KB operations must not walk into a 2MB PMD as if it were a PTE table.
+    // PMD -> PTE table (4 KiB leaf).
+    // Guard: if PMD[l2] is a 2 MiB huge page (PAGE_HUGE), return NULL.
+    // 4 KiB operations must not walk into a 2 MiB PMD as if it were a PTE table.
     if (pmd[l2] & PAGE_HUGE)
         return NULL;
 
@@ -302,24 +281,15 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
     return &pte_table[l3];
 }
 
-// Map a 4KB physical page at virt.  Returns 0 on success, -ENOMEM if
-// PTE table allocation fails.  Caller must free phys on failure.
-int vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
-                    uint64_t virt, uint64_t flags)
-{
-    return x86_vmm_map_4k_page(pgdir, phys, virt, flags);
-}
-
-/* x86 4KB PTE backend helpers (aarch64 M3.2 Task 15) — see
+/* x86 4 KiB PTE backend helpers (aarch64 M3.2 Task 15) — see
  * arch/x86_64/pte.h for the public contract.  These own the
  * PAGE_* hardware bit layout and the free/COW ownership semantics.
- * The public vmm_map_4k_page wrapper in vmm.c
- * delegate here, so external API behavior is unchanged. */
+ */
 
-// x86 4KB map — allocates intermediate tables via vmm_pt_walk; returns
-// -ENOMEM if any table allocation fails.
-int x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
-                        uint64_t virt, uint64_t flags)
+// x86 4 KiB map — allocates intermediate tables via vmm_pt_walk;
+// returns -ENOMEM if any table allocation fails.
+int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
+                   uint64_t virt, uint64_t flags)
 {
     uint64_t *pte = vmm_pt_walk(pgdir, virt, flags, 1);
     if (!pte)
@@ -329,7 +299,7 @@ int x86_vmm_map_4k_page(uint64_t *pgdir, uint64_t phys,
     return 0;
 }
 
-// x86 4KB query — read back phys + flags without modifying the PTE.
+// x86 4 KiB query — read back phys + flags without modifying the PTE.
 // Returns 0 on success; -ENOENT if the slot is not present
 // (PAGE_VALID | PAGE_PROTNONE both clear). phys_out/flags_out may be
 // NULL if the caller only needs the presence check.
@@ -574,12 +544,12 @@ uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
     uint64_t *pud = (uint64_t *)(x86_pte_4k_pa(pgd[l0]) + ARCH_PAGE_OFFSET);
     uint64_t l1 = (va >> 30) & 0x1FF;
     if (!(pud[l1] & 1)) return 0;
-    if (pud[l1] & 0x80)  // 1GB huge page
+    if (pud[l1] & 0x80)  // 1 GiB huge page
         return x86_pte_1g_pa(pud[l1]) | (va & 0x3FFFFFFF);
     uint64_t *pmd = (uint64_t *)(x86_pte_4k_pa(pud[l1]) + ARCH_PAGE_OFFSET);
     uint64_t l2 = (va >> 21) & 0x1FF;
     if (!(pmd[l2] & 1)) return 0;
-    if (pmd[l2] & 0x80)  // 2MB huge page
+    if (pmd[l2] & 0x80)  // 2 MiB huge page
         return x86_pte_2m_pa(pmd[l2]) | (va & 0x1FFFFF);
     uint64_t *pte = (uint64_t *)(x86_pte_4k_pa(pmd[l2]) + ARCH_PAGE_OFFSET);
     uint64_t l3 = (va >> 12) & 0x1FF;
@@ -592,7 +562,7 @@ uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
 // ANDing perms across pgd→pud→pmd→pte (x86 semantics: any level
 // USER=0 → supervisor page, any level WRITE=0 → read-only, COW bit
 // 10 (x86_64 ignored) counts as a writable-eligible marker — see below).
-// Handles 4KB + 2MB pages (OS01 creates no 1GB pages, defensive false on 1GB
+// Handles 4 KiB + 2 MiB pages (OS01 creates no 1 GiB pages, defensive false on 1 GiB
 // PUD entry).
 //
 // COW-eligibility (Task 7): when writable=true, a PTE that has
@@ -605,7 +575,7 @@ uintptr_t arch_virt_to_phys(void *pgtbl, uintptr_t va)
 // prepare_user_write_range (the FT path); this check is a snapshot,
 // not a pin — munmap can race the gap.
 //
-// 2MB huge pages do not carry PAGE_COW (huge pages are private from
+// 2 MiB huge pages do not carry PAGE_COW (huge pages are private from
 // allocation; fork copies them eagerly — see kernel/sched/task.c), so
 // the huge branch keeps its strict RW requirement.
 //
@@ -632,14 +602,14 @@ bool arch_user_range_accessible(void *pgtbl, uint64_t addr,
         if (!(pud[l1] & 1)) return false;
         user = user && !!(pud[l1] & 4);
         rw   = rw   && !!(pud[l1] & 2);
-        if (pud[l1] & 0x80) return false;           // 1GB: defensive (not created)
+        if (pud[l1] & 0x80) return false;           // 1 GiB: defensive (not created)
 
         uint64_t *pmd = (uint64_t *)(x86_pte_4k_pa(pud[l1]) + ARCH_PAGE_OFFSET);
         uint64_t l2 = (va >> 21) & 0x1FF;
         if (!(pmd[l2] & 1)) return false;
         user = user && !!(pmd[l2] & 4);
         rw   = rw   && !!(pmd[l2] & 2);
-        if (pmd[l2] & 0x80) {                       // 2MB huge page (PMD is leaf)
+        if (pmd[l2] & 0x80) {                       // 2 MiB huge page (PMD is leaf)
             if (!user || (writable && !rw)) return false;
             va = (va & ~(uint64_t)0x1FFFFF) + 0x200000ULL;
             continue;

@@ -95,7 +95,7 @@ typedef struct mm_struct {
  *
  *   - kmalloc/kfree:           hosttests/mock/mock_kernel.c
  *   - vfs_read / alloc_4k_page / free_4k_page /
- *     vmm_pt_walk / vmm_map_4k_page / vmm_unmap_4k_page:
+ *     vmm_pt_walk / x86_vmm_map_4k / vmm_unmap_4k_page:
  *                               hosttests/mock/elf_load/elf_load_stubs.c
  *
  * Remaining declarations (task_wake, schedule, current, ...) are
