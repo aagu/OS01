@@ -78,9 +78,7 @@ DOOM_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
 # The fixture host-compiles the REAL patched i_system.c and intercepts the
 # libc exit() at link time (--wrap=exit): the production source is never
 # modified and no test entry point is installed in the engine.
-$(eval $(call register_host_test,test_doom_engine_exit,doom,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_doom_engine_exit.elf
 
 $(DOOM_HOST_DIR)/i_system.o: $(DOOM_ENGINE_SRC)/i_system.c $(DOOM_HOST_DIR)/.private.stamp
 	@mkdir -p $(dir $@)
@@ -112,9 +110,7 @@ test-doom-engine-exit: $(TEST_BLD)/test_doom_engine_exit.elf
 # test) together with the upstream m_misc.c it needs for
 # M_StringJoin/M_MakeDirectory, and drives them through the public
 # configuration interface only.
-$(eval $(call register_host_test,test_doom_config,doom,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_doom_config.elf
 
 $(DOOM_HOST_DIR)/m_config.o: $(DOOM_ENGINE_SRC)/m_config.c $(DOOM_HOST_DIR)/.private.stamp
 	@mkdir -p $(dir $@)
@@ -142,9 +138,7 @@ test-doom-config: $(TEST_BLD)/test_doom_config.elf
 	    $<
 
 # ── D04 T1: video presentation & integer scaling ─────────────────────
-$(eval $(call register_host_test,test_doom_video,doom,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_doom_video.elf
 
 DOOM_VIDEO_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -I$(TESTS_DIR)/user/doom \
@@ -182,10 +176,7 @@ test-doom-video: $(TEST_BLD)/test_doom_video.elf
 	    $<
 
 # ── D04 T2: leased PS/2 input & Doom key edges ───────────────────────
-$(eval $(call register_host_test,test_doom_input,doom,protocol-or-legacy))
-$(eval $(call register_host_test,test_doom_input_engine,doom,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_doom_input.elf $(TEST_BLD)/test_doom_input_engine.elf
 
 DOOM_INPUT_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -I$(TESTS_DIR)/user/doom \
@@ -247,9 +238,7 @@ test-doom-input: $(TEST_BLD)/test_doom_input.elf $(TEST_BLD)/test_doom_input_eng
 	    $^
 
 # ── D04 T3: runtime lifetime and cooperative shutdown ────────────────
-$(eval $(call register_host_test,test_doom_runtime,doom,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_doom_runtime.elf
 
 DOOM_RUNTIME_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -I$(TESTS_DIR)/user/doom \
@@ -295,9 +284,7 @@ test-doom-runtime: $(TEST_BLD)/test_doom_runtime.elf
 	    $<
 
 # ── D06: diagnostic observation fixture ──────────────────────────────
-$(eval $(call register_host_test,test_doom_diag,doom,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_doom_diag.elf
 
 $(DOOM_HOST_DIR)/diag.o: $(TESTS_DIR)/user/doom/diag.c
 	@mkdir -p $(dir $@)

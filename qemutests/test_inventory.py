@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
@@ -101,6 +102,67 @@ class InventorySnapshotUnitTests(unittest.TestCase):
         }
         self.assertEqual(snap["schema_version"], 1)
         self.assertEqual(snap["inventory_count"], 1)
+
+
+class InventoryReconciliationTests(unittest.TestCase):
+    @staticmethod
+    def _load_bridge_host_tests() -> List[Dict[str, Any]]:
+        bridge_path = ROOT / "config" / "test-bridge.json"
+        data = json.loads(bridge_path.read_text(encoding="utf-8"))
+        return [e for e in data.get("entries", []) if e.get("kind") == "host_test"]
+
+    def test_inventory_matches_bridge_host_tests(self):
+        inv = get_inventory(ROOT)
+        inv_ids = {item["id"] for item in inv}
+        bridge_hosts = self._load_bridge_host_tests()
+        bridge_ids = {item["id"] for item in bridge_hosts}
+        self.assertEqual(inv_ids, bridge_ids)
+        self.assertEqual(len(inv), len(bridge_hosts))
+
+    def test_make_test_host_bins_match_bridge_expansion(self):
+        res = subprocess.run(
+            ["make", "-n", "test-host"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(res.returncode, 0, f"make -n test-host failed:\n{res.stderr}")
+        m = re.search(
+            r"run_hosttests\.py.*?all host test binaries passed",
+            res.stdout,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(m, "run_hosttests.py invocation not found in make -n test-host")
+        cmd_block = m.group(0)
+        actual_bins = sorted(re.findall(r"[^\s]+/([a-zA-Z0-9_]+)\.elf", cmd_block))
+        actual_exit = sorted(re.findall(r"--exit-status\s+(\S+)", cmd_block))
+
+        expected_protocol = []
+        expected_exit = []
+        for entry in self._load_bridge_host_tests():
+            acc = entry.get("acceptance", "protocol-or-legacy")
+            if acc == "expected-failure":
+                continue
+            bins = entry["binaries"] if "binaries" in entry else [entry["id"]]
+            bin_names = [Path(b).name for b in bins]
+            if acc == "exit-status":
+                expected_exit.extend(bin_names)
+            elif acc == "protocol-or-legacy":
+                expected_protocol.extend(bin_names)
+
+        self.assertEqual(actual_bins, sorted(expected_protocol + expected_exit))
+        self.assertEqual(actual_exit, sorted(expected_exit))
+
+    def test_check_registry_unique_passes(self):
+        res = subprocess.run(
+            ["make", "check-registry-unique"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(res.returncode, 0, f"check-registry-unique failed:\n{res.stdout}\n{res.stderr}")
 
 
 if __name__ == "__main__":

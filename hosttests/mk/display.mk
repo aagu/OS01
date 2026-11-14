@@ -1,36 +1,5 @@
 # Display subsystem host tests
-$(eval $(call register_host_test,test_bga_non_x86,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_bga_resolution,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_display_owner,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_fb_resolution_hooks,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_fb_resolution_ioctl,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_fb_state,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_fb_mtrr,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_fb_uapi,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_fb_writers,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_gfx_client,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_gfx_device,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_gfx_fault_bridge,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_gfx_file_lifecycle,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_gfx_primitives,display,protocol-or-legacy))
-$(eval $(call register_host_test,test_setres,display,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_gfx_file_lifecycle.elf \
-    $(TEST_BLD)/test_gfx_fault_bridge.elf \
-    $(TEST_BLD)/test_gfx_device.elf \
-    $(TEST_BLD)/test_gfx_client.elf \
-    $(TEST_BLD)/test_gfx_primitives.elf \
-    $(TEST_BLD)/test_fb_uapi.elf \
-    $(TEST_BLD)/test_fb_state.elf \
-    $(TEST_BLD)/test_fb_mtrr.elf \
-    $(TEST_BLD)/test_fb_writers.elf \
-    $(TEST_BLD)/test_bga_resolution.elf \
-    $(TEST_BLD)/test_bga_non_x86.elf \
-    $(TEST_BLD)/test_fb_resolution_ioctl.elf \
-    $(TEST_BLD)/test_fb_resolution_hooks.elf \
-    $(TEST_BLD)/test_setres.elf \
-    $(TEST_BLD)/test_display_owner.elf
 
 # kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c against gfx_test_runtime.h,
 # which shadows the heavyweight kernel headers (sched/task.h,

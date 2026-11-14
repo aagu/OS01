@@ -4267,7 +4267,10 @@
       "source": "hosttests/cases/test_poll_capacity.c",
       "origin": {
         "from": "hosttests/inventory"
-      }
+      },
+      "binaries": [
+        "nofile64/test_poll_nofile64"
+      ]
     },
     {
       "kind": "host_test",

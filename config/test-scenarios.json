@@ -6015,6 +6015,190 @@
     "action": "unique",
     "reason": "Primary host unit test verifying Doom diagnostic logging and state observation fixture"
    }
+  },
+  {
+   "id": "memory.user_vm.host",
+   "component": "memory",
+   "behavior": "user_vm",
+   "trigger": "host target invokes test_user_vm",
+   "assertions": [
+    "test_user_vm passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_user_vm"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_user_vm.c",
+    "selector": "test_user_vm",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_user_vm pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "gui.widget.focus",
+   "component": "gui",
+   "behavior": "widget_focus",
+   "trigger": "host target invokes test_gui_focus",
+   "assertions": [
+    "test_gui_focus passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_gui_focus"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_gui_focus.c",
+    "selector": "test_gui_focus",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_gui_focus pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "gui.widget.appearance",
+   "component": "gui",
+   "behavior": "widget_appearance",
+   "trigger": "host target invokes test_gui_widget_appearance",
+   "assertions": [
+    "test_gui_widget_appearance passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_gui_widget_appearance"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_gui_widget_appearance.c",
+    "selector": "test_gui_widget_appearance",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_gui_widget_appearance pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "gui.widget.event",
+   "component": "gui",
+   "behavior": "widget_event",
+   "trigger": "host target invokes test_gui_widget_event",
+   "assertions": [
+    "test_gui_widget_event passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_gui_widget_event"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_gui_widget_event.c",
+    "selector": "test_gui_widget_event",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_gui_widget_event pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "gui.widget.layout",
+   "component": "gui",
+   "behavior": "widget_layout",
+   "trigger": "host target invokes test_gui_widget_layout",
+   "assertions": [
+    "test_gui_widget_layout passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_gui_widget_layout"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_gui_widget_layout.c",
+    "selector": "test_gui_widget_layout",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_gui_widget_layout pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "monitor.procfs.host",
+   "component": "monitor",
+   "behavior": "procfs_host",
+   "trigger": "host target invokes test_monitor_procfs",
+   "assertions": [
+    "test_monitor_procfs passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_monitor_procfs"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_monitor_procfs.c",
+    "selector": "test_monitor_procfs",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_monitor_procfs pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "memory.pmm.boot_reservation",
+   "component": "memory",
+   "behavior": "pmm_boot_reservation",
+   "trigger": "host target invokes test_pmm_boot_reservation",
+   "assertions": [
+    "test_pmm_boot_reservation passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_pmm_boot_reservation"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_pmm_boot_reservation.c",
+    "selector": "test_pmm_boot_reservation",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_pmm_boot_reservation pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "net.socket.readiness",
+   "component": "net",
+   "behavior": "socket_readiness",
+   "trigger": "host target invokes test_socket_net_readiness",
+   "assertions": [
+    "test_socket_net_readiness passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_socket_net_readiness"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_socket_net_readiness.c",
+    "selector": "test_socket_net_readiness",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Placeholder scenario for test_socket_net_readiness pending Task 7 owner backfill"
+   }
   }
  ]
 }

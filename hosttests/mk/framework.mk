@@ -1,16 +1,7 @@
 # ── Framework Subsystem Host Tests (spec §5) ───────────────────
 
-$(eval $(call register_host_test,test_framework_contract,framework,expected-failure))
-$(eval $(call register_host_test,test_runtime_udivti3,framework,exit-status))
-$(eval $(call register_host_test,test_page_table_runner,framework,exit-status))
-$(eval $(call register_host_test,test_bootinfo_abi,framework,protocol-or-legacy))
 
-TEST_EXIT_STATUS_BINS += \
-    $(TEST_BLD)/test_runtime_udivti3.elf \
-    $(TEST_BLD)/test_page_table_runner.elf
 
-TEST_BINS += \
-    $(TEST_BLD)/test_bootinfo_abi.elf
 
 # Negative-contract binary: framework exit-code integrity
 $(TEST_BLD)/test_framework_contract.elf: $(TEST_CASES)/test_framework_contract.c

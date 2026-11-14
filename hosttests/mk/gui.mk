@@ -1,38 +1,5 @@
 # GUI subsystem host tests
-$(eval $(call register_host_test,test_desktop_audit,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_desktop_shell,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_desktop_state,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gfx_input,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_input_decode,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_input_lvgl,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_input_nonce,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_input_platform,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_lvgl_integration,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_platform,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_theme,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_theme_apply,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_gui_widget,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_input_ps2_frame,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_input_route,gui,protocol-or-legacy))
-$(eval $(call register_host_test,test_tetris_logic,gui,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_tetris_logic.elf \
-    $(TEST_BLD)/test_desktop_state.elf \
-    $(TEST_BLD)/test_gui_platform.elf \
-    $(TEST_BLD)/test_gui_lvgl_integration.elf \
-    $(TEST_BLD)/test_input_ps2_frame.elf \
-    $(TEST_BLD)/test_input_route.elf \
-    $(TEST_BLD)/test_gfx_input.elf \
-    $(TEST_BLD)/test_gui_input_decode.elf \
-    $(TEST_BLD)/test_gui_input_nonce.elf \
-    $(TEST_BLD)/test_gui_input_platform.elf \
-    $(TEST_BLD)/test_gui_input_lvgl.elf \
-    $(TEST_BLD)/test_gui_theme.elf \
-    $(TEST_BLD)/test_gui_theme_apply.elf \
-    $(TEST_BLD)/test_desktop_shell.elf \
-    $(TEST_BLD)/test_desktop_audit.elf \
-    $(TEST_BLD)/test_gui_widget.elf
 
 
 # Tetris logic test — compiles REAL user/tetris/tetris_logic.c (pure C)

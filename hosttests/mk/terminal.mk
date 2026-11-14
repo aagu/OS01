@@ -1,16 +1,5 @@
 # Terminal subsystem host tests
-$(eval $(call register_host_test,test_terminal_core,terminal,protocol-or-legacy))
-$(eval $(call register_host_test,test_terminal_display,terminal,protocol-or-legacy))
-$(eval $(call register_host_test,test_terminal_render,terminal,protocol-or-legacy))
-$(eval $(call register_host_test,test_user_log,terminal,protocol-or-legacy))
-$(eval $(call register_host_test,test_user_log_off,terminal,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_terminal_core.elf \
-    $(TEST_BLD)/test_terminal_render.elf \
-    $(TEST_BLD)/test_terminal_display.elf \
-    $(TEST_BLD)/test_user_log.elf \
-    $(TEST_BLD)/test_user_log_off.elf
 
 # Terminal core test — compiles REAL user/terminal/terminal_core.c (pure logic)
 $(TEST_BLD)/terminal_core.o: $(TESTS_DIR)/user/terminal/terminal_core.c

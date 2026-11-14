@@ -4,12 +4,7 @@
 # percpu.c, mock/x86_smp_boot_sync_runtime.h for boot_sync.c) — the
 # construction and bounded-wait algorithms under test are never
 # reimplemented in the tests.
-$(eval $(call register_host_test,test_boot_cpu_lifecycle,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_x86_smp_boot_sync,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_cpu_lifecycle.elf \
-    $(TEST_BLD)/test_x86_smp_boot_sync.elf
 
 # Private object names: no other suite may own the production compile of
 # these sources, and a shared name would clobber that object.
@@ -70,31 +65,6 @@ test_boot_lifecycle_all: test_boot_lifecycle_construction test_boot_lifecycle_wa
 
 # ── Sched Subsystem Host Tests (spec §5) ────────────────────────
 
-$(eval $(call register_host_test,test_syscall_dispatch,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_compat_linux,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_wait_basic,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_sync_primitives,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_mutex_handshake,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_ap_work_protocol,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_double_state_publish,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_clocksource,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_process_image_lifecycle,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_fork_user_map,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_percpu_layout,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_smp_starting_gate,sched,protocol-or-legacy))
-TEST_BINS += \
-    $(TEST_BLD)/test_syscall_dispatch.elf \
-    $(TEST_BLD)/test_compat_linux.elf \
-    $(TEST_BLD)/test_wait_basic.elf \
-    $(TEST_BLD)/test_sync_primitives.elf \
-    $(TEST_BLD)/test_mutex_handshake.elf \
-    $(TEST_BLD)/test_ap_work_protocol.elf \
-    $(TEST_BLD)/test_double_state_publish.elf \
-    $(TEST_BLD)/test_clocksource.elf \
-    $(TEST_BLD)/test_process_image_lifecycle.elf \
-    $(TEST_BLD)/test_fork_user_map.elf \
-    $(TEST_BLD)/test_percpu_layout.elf \
-    $(TEST_BLD)/test_smp_starting_gate.elf
 
 # Focused boundary test links the production dispatcher.
 $(TEST_BLD)/syscall_dispatch_production.o: $(TESTS_DIR)/kernel/syscall/dispatch.c
@@ -121,10 +91,7 @@ test-syscall-dispatch: $(TEST_BLD)/test_syscall_dispatch.elf \
 # visible.  The case source is shared with the full-table binary — the
 # subset assertions live behind OS01_SYSCALL_A64_SUBSET in the case
 # itself, so both configurations are proven by one source of truth.
-$(eval $(call register_host_test,test_syscall_dispatch_subset,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_syscall_dispatch_subset.elf
 
 $(TEST_BLD)/syscall_dispatch_a64_subset_production.o: \
 		$(TESTS_DIR)/kernel/syscall/dispatch.c
@@ -466,14 +433,7 @@ test_smp_starting_gate: $(TEST_BLD)/test_smp_starting_gate.elf
 	$<
 
 # EL1 scheduler context, constructor and layout regression tests.
-$(eval $(call register_host_test,test_switch_complete,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_kthread_ctor,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_sched_layout_offsets,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_switch_complete.elf \
-    $(TEST_BLD)/test_kthread_ctor.elf \
-    $(TEST_BLD)/test_sched_layout_offsets.elf
 
 # aarch64 EL1 scheduler plan Phase 5 Task 4 (spec §10.1 items 1-2):
 # host-compiles the REAL <arch/context.h> facade so the kernel's own
@@ -562,14 +522,7 @@ test-kthread-ctor: $(TEST_BLD)/test_kthread_ctor.elf
 # The common binary links the REAL core.c + balance.c with controllable
 # arch-hook spies; two backend binaries link the REAL per-arch
 # sched_notify.c objects (plain freestanding C, host-compilable).
-$(eval $(call register_host_test,test_sched_notify,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_sched_notify_x86_backend,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_sched_notify_aarch64_backend,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_sched_notify.elf \
-    $(TEST_BLD)/test_sched_notify_x86_backend.elf \
-    $(TEST_BLD)/test_sched_notify_aarch64_backend.elf
 
 SCHED_NOTIFY_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 SCHED_NOTIFY_PROD_CFLAGS := $(SCHED_NOTIFY_CFLAGS) \
@@ -641,9 +594,7 @@ test-sched-notify: $(TEST_BLD)/test_sched_notify.elf \
 # ── P1 Task 2: concurrency-safe scheduler observer ──────────────
 # Compiles the REAL kernel/selftest/aarch64_sched_observer.c against a
 # pthread-backed spin surface and drives it from real host threads.
-$(eval $(call register_host_test,test_aarch64_sched_observer,sched,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_aarch64_sched_observer.elf
 
 # No LIBC_INC: the OS01 libc ships a pthread.h stub that would shadow
 # the host glibc header (same reason test_sync_primitives omits it).
@@ -679,9 +630,7 @@ test-aarch64-sched-observer: $(TEST_BLD)/test_aarch64_sched_observer.elf
 # Compiles the REAL core.c against the blocker mock; every case drives
 # the production blocker_wait / blocker_wake / task_wake /
 # task_finish_switch — never a reimplementation.
-$(eval $(call register_host_test,test_blocker_remote_wake,sched,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_blocker_remote_wake.elf
 
 BLOCKER_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 BLOCKER_PROD_CFLAGS := $(BLOCKER_CFLAGS) \
@@ -725,9 +674,7 @@ test-blocker-remote-wake: $(TEST_BLD)/test_blocker_remote_wake.elf
 # ENABLE-clearing failure path, the ready / started / admission gates
 # and the exact busy/idle accounting increments are the PRODUCTION
 # algorithm — the mock never re-implements them.
-$(eval $(call register_host_test,test_aarch64_sched_tick,sched,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_aarch64_sched_tick.elf
 
 # No LIBC_INC: the fixture captures the log lines through the host's
 # vsnprintf and the OS01 libc headers would shadow <stdio.h>.
@@ -811,11 +758,7 @@ test-aarch64-sched-tick-host: $(TEST_BLD)/test_aarch64_sched_tick.elf
 #   - the x86_64 view: schedule() still charges it.
 # The host system ABI macros are preserved (-U__x86_64__ would break
 # the host libc) and the machine headers are masked by the preinclude.
-$(eval $(call register_host_test,test_aarch64_sched_charge,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_aarch64_sched_charge_aarch64.elf \
-    $(TEST_BLD)/test_aarch64_sched_charge_x86.elf
 
 CHARGE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 CHARGE_AARCH64_CFLAGS := $(CHARGE_HOST_CFLAGS) -D__aarch64__ \
@@ -901,12 +844,7 @@ test-aarch64-sched-charge-host: \
 	$(TEST_BLD)/test_aarch64_sched_charge_x86.elf
 
 # ── BOOT-3 failure policy host tests ─────────────────────────────
-$(eval $(call register_host_test,test_boot_failure_subsys,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_failure_log,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_failure_subsys.elf \
-    $(TEST_BLD)/test_boot_failure_log.elf
 
 BOOT3_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure -I$(TEST_MOCK)/include $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
@@ -949,14 +887,7 @@ $(TEST_BLD)/test_boot_failure_log.elf: \
 test_boot_failure_log: $(TEST_BLD)/test_boot_failure_log.elf
 	$<
 
-$(eval $(call register_host_test,test_boot_stdio,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_spawn_failure,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_task_init,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_stdio.elf \
-    $(TEST_BLD)/test_boot_spawn_failure.elf \
-    $(TEST_BLD)/test_boot_task_init.elf
 
 $(TEST_BLD)/boot3_stdio_production.o: $(TESTS_DIR)/kernel/sched/boot_stdio.c
 	@mkdir -p $(TEST_BLD)
@@ -1012,18 +943,7 @@ $(TEST_BLD)/test_boot_task_init.elf: \
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 # ── BOOT-5 Task 2: initial spawn placement & publication ─────────
-$(eval $(call register_host_test,test_boot_services_spawn,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_services_sequence,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_services_services,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_services_late,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_services_mechanisms,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_services_spawn.elf \
-    $(TEST_BLD)/test_boot_services_sequence.elf \
-    $(TEST_BLD)/test_boot_services_services.elf \
-    $(TEST_BLD)/test_boot_services_late.elf \
-    $(TEST_BLD)/test_boot_services_mechanisms.elf
 
 $(TEST_BLD)/boot5_balance_production.o: $(TESTS_DIR)/kernel/sched/balance.c
 	@mkdir -p $(TEST_BLD)
@@ -1118,18 +1038,7 @@ test_boot_task_init: $(TEST_BLD)/test_boot_task_init.elf
 	$<
 
 # ── BOOT-4 stage contract host tests ─────────────────────────────
-$(eval $(call register_host_test,test_boot_contract_subsys,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_contract_cpu_prepare,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_contract_softirq,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_contract_sequence,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_contract_checks,sched,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_contract_subsys.elf \
-    $(TEST_BLD)/test_boot_contract_cpu_prepare.elf \
-    $(TEST_BLD)/test_boot_contract_softirq.elf \
-    $(TEST_BLD)/test_boot_contract_sequence.elf \
-    $(TEST_BLD)/test_boot_contract_checks.elf
 
 BOOT4_HOST_CFLAGS := -I$(TEST_MOCK)/boot_failure -I$(TEST_MOCK)/include $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
@@ -1225,9 +1134,7 @@ test_boot_contract_checks: $(TEST_BLD)/test_boot_contract_checks.elf $(TEST_BLD)
 	$(TEST_BLD)/test_boot_contract_checks_a64.elf
 
 # ── Shared waitpid + sys_native_waitpid (AArch64 M4.12) ────────────
-$(eval $(call register_host_test,test_waitpid,sched,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_waitpid.elf
 
 $(TEST_BLD)/test_waitpid.o: $(TEST_CASES)/test_waitpid.c
 	@mkdir -p $(TEST_BLD)

@@ -1,41 +1,6 @@
 # ── Intr Subsystem Host Tests (spec §5) ──────────────────────────
 
-$(eval $(call register_host_test,test_lapic_nmi,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_gic_driver,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_aarch64_ipi_broadcast,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_aarch64_gic_target_probe,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_gic_marker_lines,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_gic_probe,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_aarch64_sync_fault,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_tlb_serial_protocol,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_x86_ipi_ready_publish,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_intr_decode_x86,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_intr_decode_aarch64,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_intr_dispatch,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_intr_backend_aarch64,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_intr_backend_x86,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_intr_irq_x86,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_x86_intr_probe,intr,protocol-or-legacy))
-$(eval $(call register_host_test,test_irq_capacity,intr,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_lapic_nmi.elf \
-    $(TEST_BLD)/test_gic_driver.elf \
-    $(TEST_BLD)/test_aarch64_ipi_broadcast.elf \
-    $(TEST_BLD)/test_aarch64_gic_target_probe.elf \
-    $(TEST_BLD)/test_gic_marker_lines.elf \
-    $(TEST_BLD)/test_gic_probe.elf \
-    $(TEST_BLD)/test_aarch64_sync_fault.elf \
-    $(TEST_BLD)/test_tlb_serial_protocol.elf \
-    $(TEST_BLD)/test_x86_ipi_ready_publish.elf \
-    $(TEST_BLD)/test_intr_decode_x86.elf \
-    $(TEST_BLD)/test_intr_decode_aarch64.elf \
-    $(TEST_BLD)/test_intr_dispatch.elf \
-    $(TEST_BLD)/test_intr_backend_aarch64.elf \
-    $(TEST_BLD)/test_intr_backend_x86.elf \
-    $(TEST_BLD)/test_intr_irq_x86.elf \
-    $(TEST_BLD)/test_x86_intr_probe.elf \
-    $(TEST_BLD)/test_irq_capacity.elf
 
 # aarch64 EL1h sync diagnostic helper (Task 1)
 $(TEST_BLD)/test_aarch64_sync_fault.o: $(TEST_CASES)/test_aarch64_sync_fault.c \
@@ -346,9 +311,7 @@ test_gic_probe: $(TEST_BLD)/test_gic_probe.elf
 # Compiles the REAL kernel/intr/irq.c and the REAL 8259A controller
 # against the boot_irq_time port-IMR/IF mock.  Private object dir keeps
 # the production compile isolated from the IRQ_CHAIN suite.
-$(eval $(call register_host_test,test_boot_irq_registration,intr,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_boot_irq_registration.elf
 
 BOOT2_REG_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
     -DOS01_HOST_TEST -I$(TEST_MOCK)/boot_irq_time -I$(TEST_INC) $(KERNEL_INC)
@@ -395,10 +358,7 @@ test_boot_irq_time_registration: test_boot_irq_registration
 # rtc, the REAL rtc_pie.c transaction and time.c frequency cache; for
 # context, the REAL orchestrator (platform/boot.c) and BOOT-1 percpu
 # constructor (smp/boot.c) against the boot_irq_time machine mocks.
-$(eval $(call register_host_test,test_boot_irq_context,sched,protocol-or-legacy))
-$(eval $(call register_host_test,test_rtc_pie_calibration,sched,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_boot_irq_context.elf $(TEST_BLD)/test_rtc_pie_calibration.elf
 
 BOOT2_CORE_SOURCES := intr/irq.c \
     arch/x86_64/intr/irq_route.c arch/x86_64/intr/irq_hooks.c \
@@ -449,8 +409,6 @@ $(TEST_BLD)/test_rtc_pie_calibration.elf: $(addprefix $(TEST_BLD)/boot2-rtc/,$(B
 		$(TEST_BLD)/boot2-rtc/runtime.o $(TEST_BLD)/test_rtc_pie_calibration.o
 	$(HOST_CC) -Wl,--wrap=arch_irq_select_controller -Wl,--gc-sections -o $@ $^
 
-$(eval $(call register_host_test,test_boot_tick_handoff,sched,protocol-or-legacy))
-TEST_BINS += $(TEST_BLD)/test_boot_tick_handoff.elf
 
 $(TEST_BLD)/test_boot_tick_handoff.o: $(TEST_CASES)/test_boot_tick_handoff.c
 	@mkdir -p $(TEST_BLD)
@@ -538,9 +496,7 @@ test-lapic-nmi: $(TEST_BLD)/test_lapic_nmi.elf
 # ── P2 Task 1: resched SGI4 transport ───────────────────────────
 # Compiles the REAL ipi.c + gic_driver.c with mock MMIO; the handler's
 # need_resched slot resolves through the host seam.
-$(eval $(call register_host_test,test_aarch64_resched_sgi,intr,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_aarch64_resched_sgi.elf
 
 $(TEST_BLD)/test_aarch64_resched_sgi.o: $(TEST_CASES)/test_aarch64_resched_sgi.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/ipi.h \
@@ -564,9 +520,7 @@ test-aarch64-resched-sgi: $(TEST_BLD)/test_aarch64_resched_sgi.elf
 # ── P2 Task 3: masked-WFI idle step ─────────────────────────────
 # Compiles the REAL idle.c against the idle mock; the wait helper is a
 # mock here (the real `dsb sy; wfi; ret` ELF is audited by the harness).
-$(eval $(call register_host_test,test_aarch64_idle_wakeup,intr,protocol-or-legacy))
 
-TEST_BINS += $(TEST_BLD)/test_aarch64_idle_wakeup.elf
 
 IDLE_WAKE_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 IDLE_WAKE_PROD_CFLAGS := $(IDLE_WAKE_CFLAGS) \

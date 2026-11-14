@@ -15,6 +15,8 @@ make OS01_SYSTEST=1 test-qemu SUITE=systest   # 122-case syscall suite
 make KERNEL_SELFTEST=1 test-kernel-selftest    # Built-in kernel selftests
 ```
 
+Adding a host test: write `hosttests/cases/test_<name>.c` with an `@os01-test` metadata block, add its link rule in `hosttests/mk/<subsys>.mk`, run `make regen-test-catalog`, and commit the regenerated files (manual `register_host_test` / `TEST_BINS` edits are retired).
+
 See [`docs/build/build.md`](docs/build/build.md) for the full
 target taxonomy and flag conventions.
 

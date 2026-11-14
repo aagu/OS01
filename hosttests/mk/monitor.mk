@@ -1,24 +1,5 @@
 # Monitor subsystem host tests
-$(eval $(call register_host_test,test_monitor_accounting,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_monitor_collect,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_monitor_file,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_monitor_model,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_monitor_pmm,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_monitor_render,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_thermal_affinity,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_thermal_decode,monitor,protocol-or-legacy))
-$(eval $(call register_host_test,test_thermal_fixup,monitor,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_monitor_file.elf \
-    $(TEST_BLD)/test_monitor_accounting.elf \
-    $(TEST_BLD)/test_monitor_pmm.elf \
-    $(TEST_BLD)/test_monitor_collect.elf \
-    $(TEST_BLD)/test_monitor_model.elf \
-    $(TEST_BLD)/test_monitor_render.elf \
-    $(TEST_BLD)/test_thermal_fixup.elf \
-    $(TEST_BLD)/test_thermal_affinity.elf \
-    $(TEST_BLD)/test_thermal_decode.elf
 
 # Monitor plan Task 1: VFS per-file snapshot lifecycle hooks.  Reuses
 # the gfx harness's production objects (kernel/fs/file.c + devfs.c via

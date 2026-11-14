@@ -1,17 +1,6 @@
 # ── Net Subsystem Host Tests (spec §5) ───────────────────────────
 
-$(eval $(call register_host_test,test_lwip_rand,net,protocol-or-legacy))
-$(eval $(call register_host_test,test_net_device,net,protocol-or-legacy))
-$(eval $(call register_host_test,test_net_lwip,net,protocol-or-legacy))
-$(eval $(call register_host_test,test_e1000_instances,net,protocol-or-legacy))
-$(eval $(call register_host_test,test_virtio_net_instances,net,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_lwip_rand.elf \
-    $(TEST_BLD)/test_net_device.elf \
-    $(TEST_BLD)/test_net_lwip.elf \
-    $(TEST_BLD)/test_e1000_instances.elf \
-    $(TEST_BLD)/test_virtio_net_instances.elf
 
 # LWIP_RAND white-box fixture
 LWIP_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)

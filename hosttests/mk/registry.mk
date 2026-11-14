@@ -1,15 +1,12 @@
 # ── Host Test Registry (spec §5) ──────────────────────────────
-# Metadata registry, uniqueness verification, and inventory export.
+# Consumes generated inventory and bucketed binary lists from
+# mk/generated/test-registry.mk; uniqueness verification and inventory export.
 
-HOST_TEST_INVENTORY :=
-
-# register_host_test(id, group, acceptance)
-#   id: test binary name without .elf
-#   group: one of {framework, libc, memory, sched, fs, intr, drivers, net, display, terminal, monitor, gui, doom}
-#   acceptance: one of {protocol-or-legacy, exit-status, expected-failure}
-define register_host_test
-HOST_TEST_INVENTORY += $(strip $(1)):$(strip $(2)):$(strip $(3))
-endef
+REGISTRY_GEN := $(TESTS_DIR)/mk/generated/test-registry.mk
+ifeq ($(wildcard $(REGISTRY_GEN)),)
+$(error test-registry.mk missing; run 'make regen-test-catalog' at repo root)
+endif
+include $(REGISTRY_GEN)
 
 .PHONY: print-inventory check-registry-unique
 print-inventory:

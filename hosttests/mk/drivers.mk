@@ -1,33 +1,6 @@
 # ── Drivers Subsystem Host Tests (spec §5) ───────────────────────
 
-$(eval $(call register_host_test,test_i8042_demux,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_mouse_init,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_mouse_proto,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_block_device_ops,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_bcache,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_pci_driver_model,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_pci_backend_irq,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_ahci_lifecycle,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_device_boot,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_xhci_init,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_xhci_phase2,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_xhci_phase3,drivers,protocol-or-legacy))
-$(eval $(call register_host_test,test_usb_devfs,drivers,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_i8042_demux.elf \
-    $(TEST_BLD)/test_mouse_init.elf \
-    $(TEST_BLD)/test_mouse_proto.elf \
-    $(TEST_BLD)/test_block_device_ops.elf \
-    $(TEST_BLD)/test_bcache.elf \
-    $(TEST_BLD)/test_pci_driver_model.elf \
-    $(TEST_BLD)/test_pci_backend_irq.elf \
-    $(TEST_BLD)/test_ahci_lifecycle.elf \
-    $(TEST_BLD)/test_device_boot.elf \
-    $(TEST_BLD)/test_xhci_init.elf \
-    $(TEST_BLD)/test_xhci_phase2.elf \
-    $(TEST_BLD)/test_xhci_phase3.elf \
-    $(TEST_BLD)/test_usb_devfs.elf
 
 # PS/2 Mouse & Keyboard over i8042
 I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \

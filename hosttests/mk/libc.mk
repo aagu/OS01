@@ -13,52 +13,7 @@ LIBC_HOST_ORACLES := \
     $(TEST_BLD)/scanf_oracle \
     $(TEST_BLD)/time_oracle
 
-$(eval $(call register_host_test,test_libc_string,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_list,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_vsprintf,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_fflush,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_stdio_registry,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_fread_fwrite_validate,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_getopt,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_aarch64_color_printk_abi,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_api,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_alloc,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_environ,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_shutdown,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_stream_state,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_stdio_io,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_line,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_stdio_format,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_integer,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_float_parse,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_path,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_scan,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_time,libc,protocol-or-legacy))
-$(eval $(call register_host_test,test_libc_dir,libc,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_libc_string.elf \
-    $(TEST_BLD)/test_libc_list.elf \
-    $(TEST_BLD)/test_libc_vsprintf.elf \
-    $(TEST_BLD)/test_libc_fflush.elf \
-    $(TEST_BLD)/test_libc_stdio_registry.elf \
-    $(TEST_BLD)/test_libc_fread_fwrite_validate.elf \
-    $(TEST_BLD)/test_libc_getopt.elf \
-    $(TEST_BLD)/test_aarch64_color_printk_abi.elf \
-    $(TEST_BLD)/test_libc_api.elf \
-    $(TEST_BLD)/test_libc_alloc.elf \
-    $(TEST_BLD)/test_libc_environ.elf \
-    $(TEST_BLD)/test_libc_shutdown.elf \
-    $(TEST_BLD)/test_libc_stream_state.elf \
-    $(TEST_BLD)/test_libc_stdio_io.elf \
-    $(TEST_BLD)/test_libc_line.elf \
-    $(TEST_BLD)/test_libc_stdio_format.elf \
-    $(TEST_BLD)/test_libc_integer.elf \
-    $(TEST_BLD)/test_libc_float_parse.elf \
-    $(TEST_BLD)/test_libc_path.elf \
-    $(TEST_BLD)/test_libc_scan.elf \
-    $(TEST_BLD)/test_libc_time.elf \
-    $(TEST_BLD)/test_libc_dir.elf
 
 # getopt test links against libc_getopt.o whose globals are declared by <getopt.h>; build with -fcommon
 $(TEST_BLD)/test_libc_getopt.o: $(TEST_CASES)/test_libc_getopt.c

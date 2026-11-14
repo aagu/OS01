@@ -737,9 +737,11 @@ test-host:
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
 
-.PHONY: print-host-test-inventory
+.PHONY: print-host-test-inventory check-registry-unique
 print-host-test-inventory:
 	@$(call os01_submake,hosttests,print-inventory $(OS01_SUBMAKE_ARGS))
+check-registry-unique:
+	@$(call os01_submake,hosttests,check-registry-unique $(OS01_SUBMAKE_ARGS))
 
 .PHONY: regen-test-catalog check-test-catalog
 regen-test-catalog:

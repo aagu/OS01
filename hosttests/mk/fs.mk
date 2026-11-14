@@ -1,25 +1,5 @@
 # ── FS Subsystem Host Tests (spec §5) ───────────────────────────
 
-$(eval $(call register_host_test,test_vfs_basic,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_vfs_fs_registry,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_vfs_iops_fops,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_vfs_mount_tree,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_vfs_dcache,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_fat32_basic,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_elf_validate,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_elf_layout,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_elf_load_4k,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_canon,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_poll_requested,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_poll_waitqueue_handshake,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_poll_capacity,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_poll_nofile64,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_pty_winsize,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_devfs_input_dispatch,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_devfs_capacity,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_devfs_hierarchy,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_nofile_limits,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_pci_devfs,fs,protocol-or-legacy))
 
 # ── ext2 logical→physical block mapping ─────────────────────────
 #
@@ -30,30 +10,7 @@ $(eval $(call register_host_test,test_pci_devfs,fs,protocol-or-legacy))
 # return "no mapping" for every logical block past the single-indirect
 # range ("double/triple indirect not implemented"), so the tail of any
 # file larger than 4 MiB read back as a zero-filled hole.
-$(eval $(call register_host_test,test_ext2_bmap,fs,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_vfs_basic.elf \
-    $(TEST_BLD)/test_vfs_fs_registry.elf \
-    $(TEST_BLD)/test_vfs_iops_fops.elf \
-    $(TEST_BLD)/test_vfs_mount_tree.elf \
-    $(TEST_BLD)/test_vfs_dcache.elf \
-    $(TEST_BLD)/test_fat32_basic.elf \
-    $(TEST_BLD)/test_elf_validate.elf \
-    $(TEST_BLD)/test_canon.elf \
-    $(TEST_BLD)/test_poll_requested.elf \
-    $(TEST_BLD)/test_poll_waitqueue_handshake.elf \
-    $(TEST_BLD)/test_poll_capacity.elf \
-    $(TEST_BLD)/nofile64/test_poll_nofile64.elf \
-    $(TEST_BLD)/test_elf_layout.elf \
-    $(TEST_BLD)/test_elf_load_4k.elf \
-    $(TEST_BLD)/test_pty_winsize.elf \
-    $(TEST_BLD)/test_devfs_input_dispatch.elf \
-    $(TEST_BLD)/test_devfs_capacity.elf \
-    $(TEST_BLD)/test_devfs_hierarchy.elf \
-    $(TEST_BLD)/test_nofile_limits.elf \
-    $(TEST_BLD)/test_pci_devfs.elf \
-    $(TEST_BLD)/test_ext2_bmap.elf
 
 
 # ── libc-completion T6: kernel atomic append ──────────────────
@@ -66,8 +23,6 @@ TEST_BINS += \
 # fault injection) on top of the VFS runtime.  This binary must NOT
 # link mock_kernel.o: vfs_append_runtime.c owns kmalloc (fault
 # injection) and the printk/panic stubs.
-$(eval $(call register_host_test,test_vfs_append,fs,protocol-or-legacy))
-TEST_BINS += $(TEST_BLD)/test_vfs_append.elf
 
 APPEND_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
     -Wno-unused-function -D__SPINLOCK_H__ -DOS01_HOST_TEST \
@@ -676,12 +631,7 @@ test-ext2-bmap: $(TEST_BLD)/test_ext2_bmap.elf
 	$<
 
 # ── BOOT-3 mounts & terminal host tests ───────────────────────────
-$(eval $(call register_host_test,test_boot_failure_mounts,fs,protocol-or-legacy))
-$(eval $(call register_host_test,test_boot_failure_terminal,fs,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_failure_mounts.elf \
-    $(TEST_BLD)/test_boot_failure_terminal.elf
 
 $(TEST_BLD)/boot3_fs_boot_production.o: $(TESTS_DIR)/kernel/fs/boot.c
 	@mkdir -p $(TEST_BLD)
@@ -723,10 +673,7 @@ test_boot_failure_terminal: $(TEST_BLD)/test_boot_failure_terminal.elf
 	$<
 
 # BOOT-5 Task 1: VFS bootstrap end contract test
-$(eval $(call register_host_test,test_boot_services_vfs,fs,protocol-or-legacy))
 
-TEST_BINS += \
-    $(TEST_BLD)/test_boot_services_vfs.elf
 
 $(TEST_BLD)/test_boot_services_vfs.o: $(TEST_CASES)/test_boot_services_vfs.c \
 		$(TESTS_DIR)/kernel/include/fs/vfs.h \
