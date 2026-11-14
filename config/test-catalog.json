@@ -4587,6 +4587,16 @@
       }
     },
     {
+      "id": "test_test_doctor",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_test_doctor.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_tetris_logic",
       "layer": "host",

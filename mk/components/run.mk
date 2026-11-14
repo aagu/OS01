@@ -743,7 +743,7 @@ print-host-test-inventory:
 check-registry-unique:
 	@$(call os01_submake,hosttests,check-registry-unique $(OS01_SUBMAKE_ARGS))
 
-.PHONY: regen-test-catalog check-test-catalog check-ci-schedule test-flake-report
+.PHONY: regen-test-catalog check-test-catalog check-ci-schedule test-flake-report test-doctor
 regen-test-catalog:
 	python3 tools/tests/scan_tests.py --root $(OS01_ROOT) --bridge $(OS01_ROOT)/config/test-bridge.json --emit $(OS01_ROOT)
 check-test-catalog:
@@ -754,6 +754,9 @@ check-ci-schedule:
 # Pass FROM_CI=N to inspect the last N scheduled CI runs via `gh`.
 test-flake-report:
 	python3 qemutests/flake_report.py --root $(OS01_ROOT) $(if $(FROM_CI),--from-ci $(FROM_CI))
+# Environment doctor: compare local toolchain versions against ci/Dockerfile pins.
+test-doctor:
+	python3 tools/tests/test_doctor.py --root $(OS01_ROOT)
 
 .PHONY: print-harness-modules print-test-qemu-flavors print-test-qemu-images
 print-harness-modules:
@@ -2892,6 +2895,8 @@ help:
 		 'test-framework-contract' '(always)' 'Hostside negative contract: builds test_framework_contract.elf and asserts exit code 1 (assertion exit-code propagation / single-evaluation / TEST_RESULTS snapshot)';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-flake-report'    '(always)'   'Flake ledger report from local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); always exits 0';
+	@printf '  %-22s %-13s %s\n' \
+		 'test-doctor'          '(always)'   'Compare local clang/ld.lld/qemu versions against ci/Dockerfile pins (exits 2 only if a tool cannot execute)';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
 	@printf '  %-22s %-13s %s\n' \
