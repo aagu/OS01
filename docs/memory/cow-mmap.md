@@ -84,12 +84,12 @@ if (pte && (*pte & PAGE_COW)) {
         // Multiple sharers: allocate new page, copy content, decrement count
         uint64_t new_phys = alloc_4k_page();
         memcpy(Phy_To_Virt(new_phys), Phy_To_Virt(old_phys), PAGE_4K_SIZE);
-        *pte = new_phys | vma->vm_page_prot;
+        *pte = x86_pte_4k_make(new_phys, x86_vma_pte_flags(vma->vm_flags));
         page_cow_put(old_phys);
     } else {
         // Last sharer: promote in-place
         page_cow_put(old_phys);
-        *pte = old_phys | vma->vm_page_prot;
+        *pte = x86_pte_4k_make(old_phys, x86_vma_pte_flags(vma->vm_flags));
     }
     flush_tlb();
 }
@@ -149,8 +149,9 @@ typedef struct mm_struct {
 typedef struct vma {
     list_t      list;
     uint64_t    vm_start, vm_end;
-    uint64_t    vm_flags;       // VM_READ, VM_WRITE, VM_EXEC, VM_SHARED, VM_ANON
-    uint64_t    vm_page_prot;   // PTE flags (PAGE_USER_4K, etc.)
+    uint64_t    vm_flags;       // VMA_PROT_READ/WRITE/EXEC, VMA_SHARED/ANON...
+                                    // (唯一权限来源：叶子位由 owning arch
+                                    //  按需推导，x86 用 x86_vma_pte_flags)
     uint64_t    vm_pgoff;       // file offset in 4KB units
     vfs_node_t *vm_file;        // mapped file (NULL for anonymous)
 } vma_t;
@@ -189,7 +190,7 @@ access via `do_page_fault` (anonymous: `alloc_4k_page`, file‑backed: `vfs_read
 
 ### `do_mprotect(addr, len, prot)` — `arch/x86_64/memory/vma.c`
 
-1. Walks overlapping VMAs, updates `vm_flags` and `vm_page_prot`.
+1. Walks overlapping VMAs, updates `vm_flags`（逻辑权限的唯一来源）。
 2. Iterates all 4KB PTEs in the range, updates permissions.
 3. COW‑aware: if `PAGE_COW` is set, either allocates a private copy or promotes
    in‑place depending on `cow_count`.
