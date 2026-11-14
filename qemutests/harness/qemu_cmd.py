@@ -32,10 +32,27 @@ def build_qemu_x86(
     memory: int | str = "512",
     qemu: str = "qemu-system-x86_64",
     extra: Sequence[str] = (),
+    storage: str = "ahci",
 ) -> list[str]:
-    """Build an x86_64 QEMU argv list with the paired virtio-rng device."""
+    """Build an x86_64 QEMU argv list with the paired virtio-rng device.
+
+    ``storage`` selects the root-disk topology:
+    - ``"ahci"`` (default): the historical q35 AHCI or ``-machine pc``
+      virtio-blk disk.
+    - ``"usb"``: a USB-only topology (qemu-xhci + usb-storage) with no
+      implicit AHCI/IDE/virtio disk, used by the USB boot M0 gate.
+    """
     serial_arg = _resolve_serial(serial, serial_path)
-    if machine == "pc":
+    if storage not in ("ahci", "usb"):
+        raise ValueError(f"Unsupported storage mode: {storage!r}")
+    if storage == "usb":
+        disk_args = [
+            "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
+            "-drive", f"file={image},format=raw,if=none,id=usbdisk,readonly=on",
+            "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
+            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
+        ]
+    elif machine == "pc":
         disk_args = [
             "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
             "-drive", f"file={image},format=raw,if=none,id=disk",

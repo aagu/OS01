@@ -8,13 +8,13 @@ initialisation.  The stock kernel has no USB MSC driver yet, so it stops
 at ``fs_boot_mounts`` with ``rc=-19`` (-ENODEV) — that FATAL line is the
 expected pass evidence for M0, not a failure.
 
-This runner deliberately does not reuse ``qemutests/run_test.py``'s argv
-builder: that builder unconditionally adds an AHCI root disk, which would
-make the USB boot unprovable.  ``usb_argv()`` is the whole topology.
+This runner uses the shared QEMU command builder with ``storage="usb"``:
+the builder's default AHCI root disk would make USB boot unprovable, so
+the USB topology is a first-class storage mode rather than a private argv.
 
-CLI (the Make entry point is ``test-qemu SUITE=usb-boot``)::
+CLI (the Make entry point is ``test-qemu-usb-boot``)::
 
-    python3 qemutests/test_usb_boot.py --case firmware \
+    python3 qemutests/usb_boot.py --case firmware \
         --qemu PATH --firmware FILE --disk FILE \
         --smp N --log-dir DIR [--timeout 120]
 
@@ -41,6 +41,8 @@ try:
     from qemutests.harness.process import ProcessSession
 except ImportError:  # pragma: no cover - exercised only on broken installs
     ProcessSession = None
+
+from qemutests.harness.qemu_cmd import build_qemu_x86
 
 
 CASE_FIRMWARE = "firmware"
@@ -95,27 +97,20 @@ def firmware_evidence(serial: str) -> bool:
 def usb_argv(
     qemu: str, firmware: Path, disk: Path, smp: int
 ) -> list[str]:
-    """Build the USB-only QEMU command line.
+    """Build the USB-only QEMU command line via the shared builder.
 
     Exactly one non-pflash drive (the usb-storage backed image) is
     present: no AHCI, no implicit IDE/virtio disk and no ``-boot order``.
     """
-    return [
-        str(qemu),
-        "-M", "q35",
-        "-m", str(MEMORY_MIB),
-        "-smp", str(smp),
-        "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
-        "-drive", f"file={disk},format=raw,if=none,id=usbdisk,readonly=on",
-        "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
-        "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
-        "-object", "rng-random,filename=/dev/urandom,id=rng0",
-        "-device", "virtio-rng-pci,rng=rng0",
-        "-display", "none",
-        "-serial", "stdio",
-        "-no-reboot",
-        "-no-shutdown",
-    ]
+    return build_qemu_x86(
+        qemu=str(qemu),
+        firmware=str(firmware),
+        image=str(disk),
+        smp=smp,
+        serial="stdio",
+        memory=MEMORY_MIB,
+        storage="usb",
+    )
 
 
 def _file_sha256(path: Path) -> str | None:

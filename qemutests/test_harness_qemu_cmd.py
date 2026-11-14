@@ -104,6 +104,45 @@ class BuildQemuX86Tests(unittest.TestCase):
             )
             self._assert_rng_pair(argv)
 
+    def test_x86_usb_only_topology(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/disk.img",
+            smp=1,
+            serial="stdio",
+            storage="usb",
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=4,p3=0", argv)
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0", argv
+        )
+        self.assertIn(
+            "file=/img/disk.img,format=raw,if=none,id=usbdisk,readonly=on",
+            argv,
+        )
+        self.assertNotIn("ahci,id=ahci", argv)
+        self.assertFalse(any("virtio-blk" in a or "ide-hd" in a for a in argv))
+        self.assertFalse(any(a.startswith("-boot") for a in argv))
+        drives = [
+            a for a in argv
+            if a.startswith("file=") or a.startswith("if=pflash")
+        ]
+        self.assertEqual(len(drives), 2)
+        self.assertEqual(
+            sum(1 for a in drives if not a.startswith("if=pflash")), 1
+        )
+        self._assert_rng_pair(argv)
+
+    def test_x86_rejects_unknown_storage(self) -> None:
+        with self.assertRaises(ValueError):
+            build_qemu_x86(
+                firmware="/fw/OVMF.fd",
+                image="/img/disk.img",
+                smp=1,
+                serial="stdio",
+                storage="scsi",
+            )
+
     def _assert_rng_pair(self, argv: list[str]) -> None:
         self.assertIn("rng-random,filename=/dev/urandom,id=rng0", argv)
         self.assertIn("virtio-rng-pci,rng=rng0", argv)

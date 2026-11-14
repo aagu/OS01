@@ -2377,7 +2377,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 #
 # The recipe contains no `$(MAKE)`, so the -n dry-run contract is
 # preserved: the dry-run prints exactly one
-# `python3 qemutests/test_usb_boot.py` invocation and executes nothing.
+# `python3 qemutests/usb_boot.py` invocation and executes nothing.
 .PHONY: test-qemu-usb-boot
 test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
@@ -2388,7 +2388,7 @@ test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE
 	@set +e; \
 	mkdir -p "$(USB_BOOT_JOB_DIR)"; \
 	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.before"; \
-	python3 qemutests/test_usb_boot.py --case "$(USB_BOOT_CASE)" \
+	python3 qemutests/usb_boot.py --case "$(USB_BOOT_CASE)" \
 	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
 	  --disk "$(NORMAL_IMAGE)" --smp "$(SMP)" \
 	  --timeout "$(USB_BOOT_TIMEOUT)" \

@@ -52,7 +52,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 
 | Bucket | Purpose | Default |
 | --- | --- | --- |
-| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|usb-boot\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`/`usb-boot`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants). `usb-boot` is the opt-in M0 USB firmware gate (`USB_BOOT_CASE=firmware`, expected `fs/root rc=-19`); it is not in the automated catalog until M1b | `phase-0` |
+| `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants). | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (16 audits) | — |
 | `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*` | AArch64 PSCI / GIC / sync-fault / scheduler / boot-contract acceptance harness | `smp` |
@@ -61,6 +61,8 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-harness` | Python unittest framework regression (no QEMU, never discovers QEMU scripts) | — |
 | `make test-doctor` | Compare local `clang`/`ld.lld`/`qemu` versions against `ci/Dockerfile` pins (reports `OK`/`DRIFT`/`SKIPPED(no ci pin)`, exits 2 only if a tool cannot execute) | — |
 | `make ci-local SUITE=<name>` | Run `test-qemu SUITE=<name>` (or `MAKE_ARGS=...`) inside `ghcr.io/aagu/os01-ci:latest` via `docker`/`podman` (no auto-pull) | — |
+
+`make test-qemu-usb-boot` 是 USB boot M0 的专用固件门禁（`USB_BOOT_CASE=firmware`，预期 `fs/root rc=-19`）。它使用共享的 `qemutests/harness/qemu_cmd.py` 的 `storage="usb"` 拓扑，不是 `test-qemu SUITE=` 的目录套件；M1b 转为成功门禁时才登记到生成的 suite catalog。
 
 AArch64 EL1 调度器验收（`MODE=sched`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched [SCHED_CASE=<v>]`。该 MODE 通过受控子构建产出隔离的 `KERNEL_SELFTEST` 调度器镜像变体：`SCHED_CASE=positive`（默认组成部分）构建 `kernel/sched` + `image/sched`（正例：严格 14 用例协议 + 全部冻结 `[sched-evidence]` 字段证据矩阵），四个故障值 `sp-top`/`sp-low`/`pc-low`/`pc-data` 各构建 `kernel/sched-fault-<v>` + `image/sched-fault-<v>`（编译期选中的 `aarch64_sched_fault_inject` 注入钩子损坏保存 SP/PC，验收要求 fatal 发生在**切栈前**且受害者零提交切换）。`SCHED_CASE` 省略时为 `all`（正例矩阵 + 全部四个负例）。选择器 `AARCH64_SCHED_TEST` 与 `SCHED_CASE` 在解析期拒绝非法值；`MODE=sched`（即使未带选择器）与 `AARCH64_SYNC_FAULT_TEST`/`AARCH64_M1_TEST`/`KERNEL_TEST_FORCE_NO_RNDRRS`/`KERNEL_CANARY_SELFTEST`/`OS01_SYSTEST`/非零 `AARCH64_SMP_TEST_NO_ACK_CPU` 的任意组合均解析期报错。runner（`qemutests/aarch64_scheduler.py`）只消费 make 传入的显式镜像/固件/ELF 路径，绝不隐式重建；每次 QEMU 有 120 s 绝对期限（tick 不延长），完成后 1 s 排空窗口，崩溃/超时永远 FAIL；`llvm-nm` 符号审计要求普通 normal/selftest/positive ELF 不含注入符号而每个 fault ELF 含有。普通镜像 BSP idle 冒烟仍是同一 runner 的 `--idle-smoke` 模式（`--cpus 1 2 4 8`）。
 
@@ -363,7 +365,7 @@ make test-host
 | 目标 | Variant 镜像 | 套件 |
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0` | 普通 `build/<profile>/image/disk.img` | 启动 + shell 提示符 |
-| `make test-qemu SUITE=usb-boot USB_BOOT_CASE=firmware` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot M0 固件门禁（见下方 `usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin` 并进入设备初始化；当前内核无 USB MSC 驱动，预期停在 `[boot-3] FATAL stage=fs component=root rc=-19`。**opt-in，不在自动化 catalog/CI 中**，M1b 转为成功门禁后再登记 nightly |
+| `make test-qemu-usb-boot` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot M0 固件门禁（见下方 `test-qemu-usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin` 并进入设备初始化；当前内核无 USB MSC 驱动，预期停在 `[boot-3] FATAL stage=fs component=root rc=-19`。**opt-in 专用目标，不是生成的 catalog suite**，M1b 转为成功门禁后再登记 nightly |
 | `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `build/<profile>/image/systest/disk.img` | syscall E2E（`OS01_SYSTEST=1`） |
 | `make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase` | `build/<profile>/image/inittab-test/disk.img` | inittab 阶段派发（`INITTAB_FILE=config/inittab.test`） |
 | `make OS01_NETTEST=1 test-qemu SUITE=network` | `build/<profile>/image/nettest/disk.img` | 网络回归（`OS01_NETTEST=1`） |
@@ -383,9 +385,9 @@ make test-host
 | `make test-qemu SUITE=boot-services` | normal 组用普通镜像只读（`-snapshot`），变体组各自隔离 `build/<profile>/image/boot-services-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-5 调度启动与服务解耦 8 组矩阵：normal 1/2/4/8、no-net 1/2、overlap 2/4。选择器 `BOOT_SERVICES_TEST=none\|overlap`。判定验证标桩全序 `[boot-5] vfs-runtime` → `[boot-5] init-created pid=1` → `[boot-5] runtime-ready window=closed`，PID 1 优先分配与并发发布安全。运行器：`qemutests/boot_services.py`（归档在 `build/<profile>/logs/tests/boot-services/`） |
 | `make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity` | `build/<profile>/image/arch10-capacity/disk.img` | 隔离容量验收变体（`CAPACITY_TEST=1`）：12 假块设备 + 40 devfs 节点 + poll32/64 入睡/唤醒 + RLIMIT_NOFILE (64) |
 
-### `usb-boot`：USB boot M0 固件门禁（opt-in）
+### `test-qemu-usb-boot`：USB boot M0 固件门禁（opt-in）
 
-`make PROFILE=x86_64-clang test-qemu SUITE=usb-boot USB_BOOT_CASE=firmware`
+`make PROFILE=x86_64-clang test-qemu-usb-boot USB_BOOT_CASE=firmware`
 是 USB 启动计划的 **M0 固件检查点**，验收目标只有一个：profile OVMF 能从
 **USB-only** 拓扑（单块 `usb-storage` 挂在 `qemu-xhci` 上，`p2=4,p3=0`，
 `port=1,bootindex=0`）加载 ESP 上的 `BOOTX64.EFI` 与 `kernel.bin`，并让内核
@@ -396,17 +398,19 @@ make test-host
   以 `[boot-3] FATAL stage=fs component=root rc=-19` 开头的行。
   `boot_failure_stop()` 会在该行后追加 `phase=... cpu=...`，runner 只匹配稳定前缀；
   其它 rc、OVMF 横幅单独出现、标记乱序都不算通过。
-- **拓扑独立**：`qemutests/run_test.py` 的 argv 总会追加 AHCI 根盘，因此本套件
-  由 `qemutests/test_usb_boot.py::usb_argv()` 自行构造命令行；唯一非 pflash 盘就是
-  `usbdisk`，没有 AHCI/virtio/隐式盘，也没有 `-boot order`。
+- **拓扑独立**：`qemutests/run_test.py` 的默认 argv 总会追加 AHCI 根盘，因此 runner
+  通过共享构造器 `qemutests/harness/qemu_cmd.py::build_qemu_x86(storage="usb")`
+  显式选择 USB 拓扑；唯一非 pflash 盘就是 `usbdisk`，没有 AHCI/virtio/隐式盘，
+  也没有 `-boot order`。
 - **超时与清理**：使用现有 `ProcessSession`（绝对单调截止时间，SIGTERM →
   SIGKILL 有界清理），QEMU 输出再多也不会延长期限；串口全文、argv 与 metadata
   保存在 `build/<profile>/test-results/usb-boot/<UTC>-<pid>/`。
 - **镜像只读**：`test-qemu-usb-boot` 在运行前后对普通镜像做 sha256 比对，
   任何改动都会使目标失败；专用目标不构建镜像变体，因此被排除在通用
   pre/post normal-image guard 之外。
-- **opt-in**：该套件目前是预期失败（M0）门禁，**不在** `mk/tests/catalog.mk`
-  或自动化 bucket 中；M1b 把它变成成功门禁后才登记 nightly。手动诊断可用
+- **opt-in**：该套件目前是预期失败（M0）门禁，**不在**生成的 suite catalog
+  （`config/test-bridge.json` → `mk/generated/test-dispatch.mk`）或自动化 bucket 中；
+  M1b 把它变成成功门禁后才登记 nightly。手动诊断可用
   `make run-usb`（同样的 USB 拓扑 + 交互式 display/SMP/网络设置，或 OVMF 启动菜单）。
 - **profile 覆盖**：`PROFILE=<name>` 决定固件与镜像来源；只有具备 `rootfs` 能力的
   x86 profile（默认 `x86_64-clang`）可用。`make PROFILE=aarch64-clang -n run-usb`
@@ -527,7 +531,8 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 | Bucket | Flag | 取值 | 运行内容 |
 | --- | --- | --- | --- |
-| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86`、`boot-lifecycle`、`boot-irq-time`、`boot-failure`、`boot-contract`、`boot-services`、`usb-boot`、`arch10-capacity`、`arch6-fsstress`、`doom` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui`/`doom` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体；`usb-boot` 走专属目标 `test-qemu-usb-boot` → `qemutests/test_usb_boot.py`，自建 USB-only 拓扑（不经 `run_test.py`，它总会追加 AHCI 根盘） |
+| `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86`、`boot-lifecycle`、`boot-irq-time`、`boot-failure`、`boot-contract`、`boot-services`、`arch10-capacity`、`arch6-fsstress`、`doom` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui`/`doom` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体 |
+| `test-qemu-usb-boot` | `USB_BOOT_CASE=` | `firmware` | `qemutests/usb_boot.py` 自建 USB-only 拓扑（`qemu_cmd` 的 `storage="usb"`；不经 `run_test.py`，它总会追加 AHCI 根盘）；M0 专用，未登记到生成的 suite catalog |
 | `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
@@ -766,7 +771,8 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | Flag/变量 | 用途 |
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
-| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`usb-boot`、`doom`；`usb-boot` 另接受 `USB_BOOT_CASE=firmware`，默认即 `firmware`） |
+| `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`doom`） |
+| `USB_BOOT_CASE=<name>` | `test-qemu-usb-boot` 的 case（目前只有 `firmware`，默认即 `firmware`） |
 | `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
 | `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |

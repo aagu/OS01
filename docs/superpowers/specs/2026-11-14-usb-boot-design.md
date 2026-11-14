@@ -102,7 +102,7 @@ boot/uefi/main.c                     # capture_boot_device()
 mk/components/uefi.mk                # 两个 EFI profile 的源与 receipt 输入
 kernel/arch/x86_64/driver/xhci_msc.c  # 传输适配与可选存储子系统注册
 mk/components/run.mk                 # run-usb / QEMU 摆法
-qemutests/test_usb_boot.py           # 端到端用例
+qemutests/usb_boot.py                # 端到端用例
 hosttests/cases/test_usb_msc.c       # BOT/SCSI 状态机
 hosttests/cases/test_boot_devpath.c  # HD 节点解析
 hosttests/cases/test_gpt_bootdev.c   # GUID 匹配/启动盘选择
@@ -264,7 +264,7 @@ int os01_bootdev_from_devpath(const uint8_t *dp, size_t max_len,
 
 ### 5.9 QEMU 验证摆法
 
-新增 `make run-usb` 和 `make test-qemu SUITE=usb-boot`，仅对 x86_64 用户态 profile 可用；将 suite 接到现有 dispatcher 并登记在 `docs/build/build.md`。使用 profile 的 OVMF、镜像和环境；保留 q35、512 MiB、SMP、串口收发和 `virtio-rng-pci` 接 `/dev/urandom`。USB-only 不添加隐式 IDE/AHCI/virtio 磁盘，USB 2.0 root port 直连示例：
+新增 `make run-usb` 和 `make test-qemu-usb-boot`（M0 专用目标；M1b 起该 suite 登记到生成的 suite catalog，届时也可用 `make test-qemu SUITE=usb-boot`），仅对 x86_64 用户态 profile 可用；将 suite 接到现有 dispatcher 并登记在 `docs/build/build.md`。使用 profile 的 OVMF、镜像和环境；保留 q35、512 MiB、SMP、串口收发和 `virtio-rng-pci` 接 `/dev/urandom`。USB-only 不添加隐式 IDE/AHCI/virtio 磁盘，USB 2.0 root port 直连示例：
 
 ```
 -drive file=<USB image>,format=raw,if=none,id=usbdisk
@@ -272,7 +272,7 @@ int os01_bootdev_from_devpath(const uint8_t *dp, size_t max_len,
 -device usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0
 ```
 
-`test_usb_boot.py` 自行构造存储拓扑（共享 `run_test.py` 的 argv 始终添加另一块磁盘）；可复用串口/prompt 辅助逻辑。自动门禁固定 bootindex，AHCI 盘设较低优先级（例如 bootindex=1）。固件若不按预期启动，菜单可用于 M0 手工诊断；`-boot order` 不能与 bootindex 混用，两者都不能替代自动门禁。
+`usb_boot.py` 通过共享的 `qemutests/harness/qemu_cmd.py` 选择 `storage="usb"` 存储拓扑（共享 `run_test.py` 的 argv 始终添加另一块磁盘）；可复用串口/prompt 辅助逻辑。自动门禁固定 bootindex，AHCI 盘设较低优先级（例如 bootindex=1）。固件若不按预期启动，菜单可用于 M0 手工诊断；`-boot order` 不能与 bootindex 混用，两者都不能替代自动门禁。
 
 - M0：仅 USB。证明固件加载了 EFI 与 kernel 并进入 `kernel_main`；此时旧内核找不到块盘并停止，属于预期。
 - M1：仅 USB，断言 `usb_msc: usba: ... sectors, 512-byte blocks`，到 shell 后读取 USB 镜像预置的 ext2 和 ESP 文件，各得到对应内容。此阶段无 v3/GUID 日志要求。

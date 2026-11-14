@@ -4702,6 +4702,16 @@
       }
     },
     {
+      "id": "test_usb_boot_runner",
+      "layer": "harness",
+      "subsystem": "usb",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_usb_boot_runner.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_usb_devfs",
       "layer": "host",

@@ -22,11 +22,20 @@ import sys
 import tempfile
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_usb_boot_runner",
+    "layer": "harness",
+    "subsystem": "usb",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qemutests import test_usb_boot as ub
+from qemutests import usb_boot as ub
 
 
 # ── Serial fragments as the guest actually prints them ──────────────
@@ -195,9 +204,11 @@ class FakeSession:
     def start(self) -> None:
         self.started = True
         self._cursor = 0
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        (Path(self.run_dir) / "stdout.log").write_text(self._stream)
-        (Path(self.run_dir) / "stderr.log").write_text("")
+        assert self.run_dir is not None
+        run_dir = self.run_dir
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "stdout.log").write_text(self._stream)
+        (run_dir / "stderr.log").write_text("")
 
     def wait_for(self, predicate) -> str:
         self.text = self._stream
