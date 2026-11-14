@@ -18,6 +18,8 @@
  * MMIO store is redirected to mock_xhci_write32().  Phase 3 only touches the
  * doorbell array, so a plain 32-bit store is enough. */
 static volatile uint32_t *s_mock_portsc_ptr = NULL;
+static bool s_port_pr_seen = false;
+static bool s_port_wpr_seen = false;
 static struct xhci_controller *s_mock_db_ctrl = NULL;
 static int s_mock_ep0_db_count = 0;
 static int s_mock_evt_write_idx = 0;
@@ -32,8 +34,16 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
                            (val & ~XHCI_PORTSC_RW1C_MASK & ~ro) |
                            (rw1c_cleared & XHCI_PORTSC_RW1C_MASK);
         if (val & XHCI_PORTSC_PR) {
+            s_port_pr_seen = true;
             updated &= ~XHCI_PORTSC_PR;
             updated |= XHCI_PORTSC_PRC | XHCI_PORTSC_PED;
+            updated = (updated & ~XHCI_PORTSC_PLS_MASK) | (XHCI_PLS_U0 << 5);
+        }
+        if (val & XHCI_PORTSC_WPR) {
+            s_port_wpr_seen = true;
+            updated &= ~XHCI_PORTSC_WPR;
+            updated |= XHCI_PORTSC_WRC | XHCI_PORTSC_PED;
+            updated = (updated & ~XHCI_PORTSC_PLS_MASK) | (XHCI_PLS_U0 << 5);
         }
         *s_mock_portsc_ptr = updated;
         return;
@@ -1377,6 +1387,94 @@ void test_xhci_stop_endpoint_recovery(void)
     free(staging);
 }
 
+void test_xhci_port_protocol_reset(void)
+{
+    TEST_CASE("xhci_port_protocol_reset: USB2 PR, USB3 U0 no-reset, USB3 Inactive WPR, unknown speed, SS bMaxBurst");
+    uint8_t mmio[0x1000];
+    struct xhci_controller ctrl;
+    uint8_t speed = 0;
+
+    /* 1. Supported Protocol parsing: port 1 = USB2, port 2 = USB3 */
+    memset(mmio, 0, sizeof(mmio));
+    mmio[XHCI_CAP_CAPLENGTH] = 0x20;
+    *(uint32_t *)(mmio + XHCI_CAP_HCSPARAMS1) = (2U << 24) | (1U << 8) | 16U;
+    *(uint32_t *)(mmio + XHCI_CAP_HCCPARAMS1) = ((0x800U >> 2) << 16) | 1U;
+    *(uint32_t *)(mmio + XHCI_CAP_DBOFF) = 0x400;
+    *(uint32_t *)(mmio + XHCI_CAP_RTSOFF) = 0x600;
+    /* Cap 1 @ 0x800: USB 2.0, next=4 dwords (0x810), port_off=1, port_cnt=1 */
+    *(uint32_t *)(mmio + 0x800) = XHCI_EXT_CAP_PROTOCOL | (4U << 8) | (2U << 24);
+    *(uint32_t *)(mmio + 0x808) = (1U << 8) | 1U;
+    /* Cap 2 @ 0x810: USB 3.0, next=0, port_off=2, port_cnt=1 */
+    *(uint32_t *)(mmio + 0x810) = XHCI_EXT_CAP_PROTOCOL | (3U << 24);
+    *(uint32_t *)(mmio + 0x818) = (1U << 8) | 2U;
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = mmio;
+    ctrl.mmio_len = sizeof(mmio);
+    assert_eq(xhci_parse_capabilities(&ctrl), 0);
+    assert_eq(ctrl.port_proto[1], 2);
+    assert_eq(ctrl.port_proto[2], 3);
+
+    /* 1a. USB 2 port 1 uses PR */
+    volatile uint32_t *port1 = (volatile uint32_t *)(ctrl.op_regs + 0x400);
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PP | (XHCI_PORT_SPEED_HIGH << 10);
+    s_mock_portsc_ptr = port1;
+    s_port_pr_seen = false;
+    s_port_wpr_seen = false;
+    assert_eq(xhci_port_reset(&ctrl, 1, &speed), 0);
+    assert_true(s_port_pr_seen);
+    assert_false(s_port_wpr_seen);
+    assert_eq(speed, XHCI_PORT_SPEED_HIGH);
+
+    /* 2. Enabled USB 3 port 2 in U0 requires NO reset */
+    volatile uint32_t *port2 = (volatile uint32_t *)(ctrl.op_regs + 0x410);
+    *port2 = XHCI_PORTSC_CCS | XHCI_PORTSC_PED | XHCI_PORTSC_PP |
+             (XHCI_PLS_U0 << 5) | (XHCI_PORT_SPEED_SUPER << 10);
+    s_mock_portsc_ptr = port2;
+    s_port_pr_seen = false;
+    s_port_wpr_seen = false;
+    assert_eq(xhci_port_reset(&ctrl, 2, &speed), 0);
+    assert_false(s_port_pr_seen);
+    assert_false(s_port_wpr_seen);
+    assert_eq(speed, XHCI_PORT_SPEED_SUPER);
+
+    /* 3. Inactive USB 3 port 2 uses WPR (not PR) */
+    *port2 = XHCI_PORTSC_CCS | XHCI_PORTSC_PP |
+             (XHCI_PLS_INACTIVE << 5) | (XHCI_PORT_SPEED_SUPER << 10);
+    s_port_pr_seen = false;
+    s_port_wpr_seen = false;
+    assert_eq(xhci_port_reset(&ctrl, 2, &speed), 0);
+    assert_false(s_port_pr_seen);
+    assert_true(s_port_wpr_seen);
+    assert_eq(speed, XHCI_PORT_SPEED_SUPER);
+
+    /* 4. Unknown speed ID (e.g. 5) is rejected */
+    *port2 = XHCI_PORTSC_CCS | XHCI_PORTSC_PED | XHCI_PORTSC_PP |
+             (XHCI_PLS_U0 << 5) | (5U << 10);
+    assert_true(xhci_port_reset(&ctrl, 2, &speed) < 0);
+    s_mock_portsc_ptr = NULL;
+
+    /* 5. SuperSpeed MSC bulk endpoints get bMaxBurst from SS Companion with no streams */
+    uint8_t ss_cfg[] = {
+        9, USB_DESC_TYPE_CONFIGURATION, 44, 0, 1, 1, 0, 0x80, 50,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 2, 0x08, 0x06, 0x50, 0,
+        7, USB_DESC_TYPE_ENDPOINT, 0x81, 0x02, 0x00, 0x04, 0,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 7, 0, 0, 0, /* bMaxBurst=7, no streams */
+        7, USB_DESC_TYPE_ENDPOINT, 0x02, 0x02, 0x00, 0x04, 0,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 5, 0, 0, 0, /* bMaxBurst=5, no streams */
+    };
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.slot_id = 1;
+    slot.speed = XHCI_PORT_SPEED_SUPER;
+    slot.active = true;
+    assert_eq(xhci_setup_endpoint_rings(&slot, ss_cfg, sizeof(ss_cfg)), 0);
+    assert_true(slot.msc_candidate.active);
+    assert_eq(slot.ep_rings[3]->max_burst, 7);
+    assert_eq(slot.ep_rings[4]->max_burst, 5);
+    xhci_free_endpoint_rings(&slot);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -1392,6 +1490,7 @@ int main(void)
     test_xhci_bulk_wrap_and_boundary();
     test_xhci_clear_halt_state_drives_command_sequence();
     test_xhci_stop_endpoint_recovery();
+    test_xhci_port_protocol_reset();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

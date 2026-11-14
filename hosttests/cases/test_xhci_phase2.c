@@ -18,12 +18,79 @@
 static uint8_t s_mock_mmio[MOCK_MMIO_SIZE];
 
 static bool s_inject_port_ped_fail = false;
+static bool s_legacy_bios_stuck = false;
+static bool s_hcrst_seen = false;
+static bool s_legsup_os_seen_before_hcrst = false;
+static uint32_t s_last_legctl_written = 0;
+static uint64_t s_mock_clock_ns = 0;
+static uint64_t s_mock_clock_step_ns = 0;
+
+static uint32_t s_mock_pci_cmd = 0;
+static int mock_pci_read32(uint16_t d, uint8_t b, uint8_t s, uint8_t f, uint16_t off, uint32_t *val, enum pci_error_scope *scope)
+{
+    (void)d; (void)b; (void)s; (void)f; (void)scope;
+    *val = (off == 0x04) ? s_mock_pci_cmd : 0;
+    return 0;
+}
+static int mock_pci_write32(uint16_t d, uint8_t b, uint8_t s, uint8_t f, uint16_t off, uint32_t val, enum pci_error_scope *scope)
+{
+    (void)d; (void)b; (void)s; (void)f; (void)scope;
+    if (off == 0x04) s_mock_pci_cmd = val;
+    return 0;
+}
+static const struct pci_backend s_mock_pci_backend = {
+    .read32 = mock_pci_read32,
+    .write32 = mock_pci_write32,
+};
+const struct pci_backend *arch_pci_backend(void)
+{
+    return &s_mock_pci_backend;
+}
+
+uint64_t arch_clocksource_read_ns(void)
+{
+    uint64_t v = s_mock_clock_ns;
+    s_mock_clock_ns += s_mock_clock_step_ns;
+    return v;
+}
 
 #define XHCI_PORTSC_RO_MASK (XHCI_PORTSC_CCS | XHCI_PORTSC_SPEED_MASK)
 
 void mock_xhci_write32(volatile void *addr, uint32_t val)
 {
     uintptr_t offset = (uintptr_t)addr - (uintptr_t)s_mock_mmio;
+
+    if ((const uint8_t *)addr >= s_mock_mmio &&
+        (const uint8_t *)addr < s_mock_mmio + MOCK_MMIO_SIZE) {
+        if (offset == 0x20 + XHCI_OP_USBCMD) {
+            if (val & XHCI_CMD_HCRST) {
+                s_hcrst_seen = true;
+                val &= ~XHCI_CMD_HCRST;
+                *(volatile uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_USBSTS) |= XHCI_STS_HCH;
+            }
+            if (val & XHCI_CMD_RS) {
+                *(volatile uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_USBSTS) &= ~XHCI_STS_HCH;
+            } else {
+                *(volatile uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_USBSTS) |= XHCI_STS_HCH;
+            }
+            *(volatile uint32_t *)addr = val;
+            return;
+        }
+        if (offset == 0x800) { /* Mock USBLEGSUP */
+            if ((val & XHCI_LEGSUP_OS_OWNED) && !s_hcrst_seen)
+                s_legsup_os_seen_before_hcrst = true;
+            if (!s_legacy_bios_stuck && (val & XHCI_LEGSUP_OS_OWNED))
+                val &= ~XHCI_LEGSUP_BIOS_OWNED;
+            *(volatile uint32_t *)addr = val;
+            return;
+        }
+        if (offset == 0x804) { /* Mock USBLEGCTLSTS */
+            s_last_legctl_written = val;
+            uint32_t rw1c = val & XHCI_LEGCTL_RW1C;
+            *(volatile uint32_t *)addr = (val & ~XHCI_LEGCTL_RW1C) & ~rw1c;
+            return;
+        }
+    }
 
     /* Operational registers start at 0x20. Port registers start at 0x20 + 0x400 = 0x420 */
     if ((const uint8_t *)addr >= s_mock_mmio &&
@@ -57,9 +124,19 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
 #define MAX_MOCK_PAGES 32
 static void *s_mock_page_ptrs[MAX_MOCK_PAGES];
 static int s_mock_page_count = 0;
+static uint64_t s_inject_phys[8];
+static int s_inject_phys_head = 0;
+static int s_inject_phys_tail = 0;
+
+static void push_inject_phys(uint64_t phys)
+{
+    s_inject_phys[s_inject_phys_tail++ % 8] = phys;
+}
 
 uint64_t alloc_4k_page(void)
 {
+    if (s_inject_phys_head < s_inject_phys_tail)
+        return s_inject_phys[s_inject_phys_head++ % 8];
     if (s_mock_page_count >= MAX_MOCK_PAGES) return 0;
     void *p = calloc(1, 4096);
     if (!p) return 0;
@@ -812,6 +889,141 @@ void test_xhci_timeout_owns_dma(void)
     free_4k_page(slot.dma_buf_phys);
 }
 
+void test_xhci_ownership_and_dma(void)
+{
+    TEST_CASE("xhci_ownership_and_dma: AC64=0 bounds, xECP aperture/PSI, BIOS legacy handoff");
+    struct xhci_controller ctrl;
+
+    /* 1. AC64=0 rejects 4 GiB+ DMA in xhci_alloc_dma before Phy_To_Virt/memset */
+    memset(s_mock_mmio, 0, MOCK_MMIO_SIZE);
+    s_mock_mmio[XHCI_CAP_CAPLENGTH] = 0x20;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS1) = (4U << 24) | (1U << 8) | 16U;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = 0; /* AC64=0 */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_DBOFF) = 0x400;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_RTSOFF) = 0x600;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = 0x1000;
+    assert_eq(xhci_parse_capabilities(&ctrl), 0);
+    assert_false(ctrl.ac64);
+
+    s_inject_phys_head = s_inject_phys_tail = 0;
+    push_inject_phys(0x100000000ULL);
+    assert_true(xhci_alloc_dma(&ctrl) < 0);
+    assert_eq(ctrl.dcbaa_phys, 0);
+
+    /* 2. AC64=0 rejects high DMA in late slot allocation (xhci_address_device) without publishing */
+    uint64_t dcbaa[33];
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    uint8_t db_regs[0x100];
+    struct xhci_slot slot;
+    memset(dcbaa, 0, sizeof(dcbaa));
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(db_regs, 0, sizeof(db_regs));
+    memset(&slot, 0, sizeof(slot));
+    ctrl.dcbaa_virt = dcbaa;
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.db_regs = db_regs;
+    slot.slot_id = 1;
+    slot.port_num = 1;
+    slot.speed = XHCI_PORT_SPEED_HIGH;
+    slot.active = true;
+    ctrl.slots[1] = &slot;
+
+    s_inject_phys_head = s_inject_phys_tail = 0;
+    push_inject_phys(0x100000000ULL);
+    assert_true(xhci_address_device(&ctrl, 1) < 0);
+    assert_eq(dcbaa[1], 0);
+    assert_eq(*(volatile uint32_t *)db_regs, 0);
+
+    /* 3. AC64=0 rejects bulk staging straddling 4 GiB */
+    struct xhci_trb ep_trbs[XHCI_TRB_RING_SIZE];
+    struct xhci_ep_ring in_ring = {
+        .ring_phys = 0x60000, .ring_virt = ep_trbs,
+        .enqueue = 0, .cycle = 1, .dci = 3, .ep_type = XHCI_EP_TYPE_BULK_IN,
+        .max_packet_size = 512, .active = true,
+    };
+    struct xhci_ep_ring *rings[4] = { NULL, NULL, NULL, &in_ring };
+    slot.configured = true;
+    slot.ep_rings = rings;
+    slot.max_dci = 3;
+    slot.bulk_staging_virt = (void *)(uintptr_t)0x1000; /* non-NULL dummy */
+    slot.bulk_staging_phys = 0xFFFF0000ULL; /* 0xFFFF0000 + 65536 = 0x100000000 (ends at 4 GiB, ok? Wait: 0xFFFF0000..0xFFFFFFFF is 64 KiB ending at 4 GiB -> OK; 0xFFFFF000 + 65536 straddles!) */
+    slot.bulk_staging_phys = 0xFFFFF000ULL; /* unaligned + straddles 4 GiB */
+    uint8_t dummy[64];
+    size_t actual = 0;
+    assert_true(xhci_bulk_transfer(&ctrl, 1, 3, dummy, sizeof(dummy), &actual) < 0);
+    assert_eq(*(volatile uint32_t *)(db_regs + 4), 0);
+
+    /* 4. xECP bounds & Supported Protocol PSIC checks */
+    /* 4a. xECP outside 0x1000 aperture (0x400 dwords = 0x1000) */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = (0x400U << 16);
+    assert_true(xhci_parse_capabilities(&ctrl) < 0);
+
+    /* 4b. Legacy cap truncated at 0xFFC (needs 8 bytes) */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0xFFCU >> 2) << 16);
+    *(uint32_t *)(s_mock_mmio + 0xFFC) = XHCI_EXT_CAP_LEGACY;
+    assert_true(xhci_parse_capabilities(&ctrl) < 0);
+
+    /* 4c. Supported Protocol truncated at 0xFF4 (needs 16 bytes) */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0xFF4U >> 2) << 16);
+    *(uint32_t *)(s_mock_mmio + 0xFF4) = XHCI_EXT_CAP_PROTOCOL | (2U << 24);
+    assert_true(xhci_parse_capabilities(&ctrl) < 0);
+
+    /* 4d. Supported Protocol with PSIC=1 (custom PSI) rejected */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0x800U >> 2) << 16);
+    *(uint32_t *)(s_mock_mmio + 0x800) = XHCI_EXT_CAP_PROTOCOL | (2U << 24);
+    *(uint32_t *)(s_mock_mmio + 0x808) = (1U << 28) | (1U << 8) | 1U; /* PSIC=1 */
+    assert_true(xhci_parse_capabilities(&ctrl) < 0);
+
+    /* 4e. Port registers beyond 0x1000 aperture rejected (caplength=0x20, max_ports=250 -> 0x420+250*16 > 0x1000) */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = 0;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS1) = (250U << 24) | (1U << 8) | 16U;
+    assert_true(xhci_parse_capabilities(&ctrl) < 0);
+
+    /* 5. BIOS legacy ownership release before HCRST, and stuck semaphore fails without HCRST */
+    memset(s_mock_mmio, 0, MOCK_MMIO_SIZE);
+    s_mock_mmio[XHCI_CAP_CAPLENGTH] = 0x20;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS1) = (1U << 24) | (1U << 8) | 16U;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0x800U >> 2) << 16) | 1U; /* AC64=1, xECP=0x800 */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_DBOFF) = 0x400;
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_RTSOFF) = 0x600;
+    *(uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_USBSTS) = XHCI_STS_HCH;
+    *(uint32_t *)(s_mock_mmio + 0x800) = XHCI_EXT_CAP_LEGACY | XHCI_LEGSUP_BIOS_OWNED;
+    *(uint32_t *)(s_mock_mmio + 0x804) = XHCI_LEGCTL_SMI_ENABLES | XHCI_LEGCTL_RW1C;
+
+    struct pci_device pdev;
+    memset(&pdev, 0, sizeof(pdev));
+    pdev.bars[0].valid = true;
+    pdev.bars[0].kind = PCI_BAR_MMIO32;
+    pdev.bars[0].address = (uint64_t)(uintptr_t)s_mock_mmio;
+
+    /* 5a. Stuck BIOS semaphore fails without HCRST */
+    s_legacy_bios_stuck = true;
+    s_hcrst_seen = false;
+    s_mock_clock_ns = 0xFFFFFFFFFFFF0000ULL; /* test wrap-safe elapsed time! */
+    s_mock_clock_step_ns = 500000000ULL;    /* 500ms per call -> >1s in 3 calls */
+    assert_true(xhci_probe(&pdev, &xhci_pci_driver.id_table[0]) < 0);
+    assert_false(s_hcrst_seen);
+    assert_true(pdev.driver_data == NULL);
+
+    /* 5b. BIOS releases ownership before HCRST and SMI bits are cleared */
+    s_legacy_bios_stuck = false;
+    s_hcrst_seen = false;
+    s_legsup_os_seen_before_hcrst = false;
+    s_last_legctl_written = 0;
+    s_mock_clock_ns = 0;
+    s_mock_clock_step_ns = 1000ULL;
+    assert_eq(xhci_probe(&pdev, &xhci_pci_driver.id_table[0]), 0);
+    assert_true(s_legsup_os_seen_before_hcrst);
+    assert_true(s_hcrst_seen);
+    assert_eq(s_last_legctl_written & XHCI_LEGCTL_SMI_ENABLES, 0);
+    assert_eq(s_last_legctl_written & XHCI_LEGCTL_RW1C, XHCI_LEGCTL_RW1C);
+    xhci_remove(&pdev);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -827,6 +1039,7 @@ int main(void)
     test_xhci_transfer_event_slot_match();
     test_xhci_ep0_no_data_error();
     test_xhci_timeout_owns_dma();
+    test_xhci_ownership_and_dma();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

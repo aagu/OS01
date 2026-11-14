@@ -156,6 +156,8 @@ static void init_mock_mmio_defaults(void)
     *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS1) = 64 | (1 << 8) | (4 << 24);
     /* HCSPARAMS2: Max Scratchpads = 0 */
     *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS2) = 0;
+    /* HCCPARAMS1: AC64 = 1 (host calloc pointers are > 4 GiB) */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = 1U;
     /* DBOFF = 0x400, RTSOFF = 0x600 */
     *(uint32_t *)(s_mock_mmio + XHCI_CAP_DBOFF) = 0x400;
     *(uint32_t *)(s_mock_mmio + XHCI_CAP_RTSOFF) = 0x600;

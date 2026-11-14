@@ -413,6 +413,7 @@ make test-host
   （`config/test-bridge.json` → `mk/generated/test-dispatch.mk`）或自动化 bucket 中；
   M1b 把它变成成功门禁后才登记 nightly。手动诊断可用
   `make run-usb`（同样的 USB 拓扑 + 交互式 display/SMP/网络设置，或 OVMF 启动菜单）。
+- **xHCI 硬件支持范围（M3）**：仅支持直连 root port、BOT/SCSI LUN 0、512 字节逻辑扇区的 U 盘；要求控制器报告 **0 scratchpad**（`max_scratchpads == 0`）、基础映射窗口（`0x1000` 字节）足以覆盖所有端口寄存器与扩展能力（USB Legacy Support / Supported Protocol），且 Supported Protocol 使用默认已知速度编码（`PSIC == 0`，速度 ID 1..4）。`HCCPARAMS1.AC64 == 0` 时所有 DMA 分配均须严格位于 4 GiB 以下；不满足条件或 firmware legacy ownership 交接超时时跳过该控制器，不强行 HCRST。
 - **profile 覆盖**：`PROFILE=<name>` 决定固件与镜像来源；只有具备 `rootfs` 能力的
   x86 profile（默认 `x86_64-clang`）可用。`make PROFILE=aarch64-clang -n run-usb`
   必须解析期失败 `lacks capability 'rootfs'`。固件来源由

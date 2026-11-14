@@ -1,5 +1,6 @@
 /* kernel/driver/xhci.c — xHCI Host Controller Driver (Phase 1) */
 #include <driver/xhci.h>
+#include <arch/clocksource.h>
 #include <log/log.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
@@ -14,6 +15,8 @@
 #include <arch/x86_64/pte.h>
 #include <memory/vmm.h>
 #include <fs/vfs.h>
+#else
+__attribute__((weak)) uint64_t arch_clocksource_read_ns(void) { return 0; }
 #endif
 
 #define XHCI_TIMEOUT_LOOPS 500000
@@ -93,9 +96,30 @@ struct xhci_controller *xhci_controller_get(uint8_t index)
     return s_xhci_controllers[index];
 }
 
+static bool xhci_dma_range_ok(const struct xhci_controller *c, uint64_t phys, size_t bytes)
+{
+    if (!c || phys == 0 || bytes == 0)
+        return false;
+    if ((uint64_t)(bytes - 1) > UINT64_MAX - phys)
+        return false;
+    uint64_t end = phys + (uint64_t)(bytes - 1);
+
+    bool ac64 = true;
+    if (c->mmio_virt) {
+        ac64 = (xhci_read32(c->mmio_virt + XHCI_CAP_HCCPARAMS1) & 1U) != 0;
+    } else if (c->ac64_valid) {
+        ac64 = c->ac64;
+    }
+    if (!ac64 && end > 0xFFFFFFFFULL)
+        return false;
+    return true;
+}
+
 int xhci_parse_capabilities(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->mmio_virt) return -EINVAL;
+    if (ctrl->mmio_len == 0)
+        ctrl->mmio_len = 0x1000;
 
     ctrl->cap_length = ctrl->mmio_virt[XHCI_CAP_CAPLENGTH];
     ctrl->hci_version = *(volatile uint16_t *)(ctrl->mmio_virt + XHCI_CAP_HCIVERSION);
@@ -116,15 +140,114 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
     ctrl->dboff = xhci_read32(ctrl->mmio_virt + XHCI_CAP_DBOFF) & ~0x03U;
     ctrl->rtsoff = xhci_read32(ctrl->mmio_virt + XHCI_CAP_RTSOFF) & ~0x1FU;
 
+    if (ctrl->cap_length < 0x20 ||
+        (uint64_t)ctrl->cap_length + 0x400ULL + (uint64_t)ctrl->max_ports * 0x10ULL > ctrl->mmio_len) {
+        log_err("[xhci] operational/port registers exceed mapped aperture (%llu)\n",
+                (unsigned long long)ctrl->mmio_len);
+        return -EIO;
+    }
+    if (ctrl->rtsoff < 0x20 || (uint64_t)ctrl->rtsoff + 0x40ULL > ctrl->mmio_len ||
+        ctrl->dboff < 0x20 || (uint64_t)ctrl->dboff + 4ULL > ctrl->mmio_len) {
+        log_err("[xhci] runtime/doorbell registers exceed mapped aperture\n");
+        return -EIO;
+    }
+
     ctrl->op_regs = ctrl->mmio_virt + ctrl->cap_length;
     ctrl->rt_regs = ctrl->mmio_virt + ctrl->rtsoff;
     ctrl->db_regs = ctrl->mmio_virt + ctrl->dboff;
 
     if (ctrl->max_scratchpads > 0) {
-        log_warn("[xhci] scratchpad buffers requested (%u), unsupported in Phase 1\n", ctrl->max_scratchpads);
+        log_warn("[xhci] scratchpad buffers requested (%u), unsupported\n", ctrl->max_scratchpads);
         return -ENOTSUP;
     }
 
+    ctrl->has_legsup = false;
+    ctrl->legsup_offset = 0;
+    memset(ctrl->port_proto, 0, sizeof(ctrl->port_proto));
+
+    uint32_t xecp = (hccparams1 >> 16) & 0xFFFFU;
+    if (xecp != 0) {
+        uint64_t off = (uint64_t)xecp << 2;
+        uint64_t max_steps = ctrl->mmio_len / 4;
+        while (off != 0) {
+            if (max_steps-- == 0 || off + 4 > ctrl->mmio_len) {
+                log_err("[xhci] xECP capability offset 0x%llx outside aperture\n",
+                        (unsigned long long)off);
+                return -EIO;
+            }
+            uint32_t cap = xhci_read32(ctrl->mmio_virt + off);
+            uint8_t cap_id = cap & 0xFFU;
+            uint8_t next_dw = (cap >> 8) & 0xFFU;
+
+            if (cap_id == XHCI_EXT_CAP_LEGACY) {
+                if (off + 8 > ctrl->mmio_len)
+                    return -EIO;
+                ctrl->has_legsup = true;
+                ctrl->legsup_offset = (uint32_t)off;
+            } else if (cap_id == XHCI_EXT_CAP_PROTOCOL) {
+                if (off + 16 > ctrl->mmio_len)
+                    return -EIO;
+                uint8_t rev_major = (cap >> 24) & 0xFFU;
+                uint32_t dw2 = xhci_read32(ctrl->mmio_virt + off + 8);
+                uint8_t port_off = dw2 & 0xFFU;
+                uint8_t port_cnt = (dw2 >> 8) & 0xFFU;
+                uint8_t psic = (dw2 >> 28) & 0x0FU;
+                if (off + 16 + (uint64_t)psic * 4ULL > ctrl->mmio_len)
+                    return -EIO;
+                if (psic != 0) {
+                    log_warn("[xhci] custom PSI table (PSIC=%u) unsupported\n", psic);
+                    return -ENOTSUP;
+                }
+                if (port_cnt > 0) {
+                    if (port_off == 0 || (uint32_t)port_off + port_cnt - 1 > ctrl->max_ports)
+                        return -EIO;
+                    if (rev_major == 2 || rev_major == 3) {
+                        for (uint32_t p = port_off; p < (uint32_t)port_off + port_cnt; p++)
+                            ctrl->port_proto[p] = rev_major;
+                    }
+                }
+            }
+
+            if (next_dw == 0)
+                break;
+            uint64_t next_off = off + ((uint64_t)next_dw << 2);
+            if (next_off <= off || next_off + 4 > ctrl->mmio_len)
+                return -EIO;
+            off = next_off;
+        }
+    }
+
+    return 0;
+}
+
+static int xhci_claim_legacy(struct xhci_controller *c)
+{
+    if (!c || !c->mmio_virt) return -EINVAL;
+    if (!c->has_legsup) return 0;
+
+    volatile uint8_t *leg = c->mmio_virt + c->legsup_offset;
+    uint32_t legsup = xhci_read32(leg + 0);
+    if (legsup & XHCI_LEGSUP_BIOS_OWNED) {
+        xhci_write32(leg + 0, legsup | XHCI_LEGSUP_OS_OWNED);
+        uint64_t start_ns = arch_clocksource_read_ns();
+        bool bios_cleared = false;
+        for (uint32_t i = 0; i < 1000000U; i++) {
+            if ((xhci_read32(leg + 0) & XHCI_LEGSUP_BIOS_OWNED) == 0) {
+                bios_cleared = true;
+                break;
+            }
+            uint64_t now_ns = arch_clocksource_read_ns();
+            if ((uint64_t)(now_ns - start_ns) >= 1000000000ULL)
+                break;
+        }
+        if (!bios_cleared) {
+            log_warn("[xhci] BIOS did not release legacy ownership within 1s\n");
+            return -ETIMEDOUT;
+        }
+    }
+
+    uint32_t ctl = xhci_read32(leg + 4);
+    xhci_write32(leg + 4, (ctl & ~XHCI_LEGCTL_SMI_ENABLES) | XHCI_LEGCTL_RW1C);
     return 0;
 }
 
@@ -199,12 +322,22 @@ int xhci_alloc_dma(struct xhci_controller *ctrl)
     /* 1. DCBAA (Device Context Base Address Array) */
     ctrl->dcbaa_phys = alloc_4k_page();
     if (!ctrl->dcbaa_phys) return -ENOMEM;
+    if (!xhci_dma_range_ok(ctrl, ctrl->dcbaa_phys, 4096)) {
+        free_4k_page(ctrl->dcbaa_phys);
+        ctrl->dcbaa_phys = 0;
+        return -EIO;
+    }
     ctrl->dcbaa_virt = (uint64_t *)Phy_To_Virt(ctrl->dcbaa_phys);
     memset(ctrl->dcbaa_virt, 0, 4096);
 
     /* 2. Command Ring (256 TRBs) */
     ctrl->cmd_ring_phys = alloc_4k_page();
     if (!ctrl->cmd_ring_phys) return -ENOMEM;
+    if (!xhci_dma_range_ok(ctrl, ctrl->cmd_ring_phys, 4096)) {
+        free_4k_page(ctrl->cmd_ring_phys);
+        ctrl->cmd_ring_phys = 0;
+        return -EIO;
+    }
     ctrl->cmd_ring_virt = (struct xhci_trb *)Phy_To_Virt(ctrl->cmd_ring_phys);
     memset(ctrl->cmd_ring_virt, 0, 4096);
     ctrl->cmd_ring_enqueue = 0;
@@ -219,6 +352,11 @@ int xhci_alloc_dma(struct xhci_controller *ctrl)
     /* 3. Event Ring (256 TRBs) */
     ctrl->event_ring_phys = alloc_4k_page();
     if (!ctrl->event_ring_phys) return -ENOMEM;
+    if (!xhci_dma_range_ok(ctrl, ctrl->event_ring_phys, 4096)) {
+        free_4k_page(ctrl->event_ring_phys);
+        ctrl->event_ring_phys = 0;
+        return -EIO;
+    }
     ctrl->event_ring_virt = (struct xhci_trb *)Phy_To_Virt(ctrl->event_ring_phys);
     memset(ctrl->event_ring_virt, 0, 4096);
     ctrl->event_ring_dequeue = 0;
@@ -227,6 +365,11 @@ int xhci_alloc_dma(struct xhci_controller *ctrl)
     /* 4. Event Ring Segment Table (ERST) */
     ctrl->erst_phys = alloc_4k_page();
     if (!ctrl->erst_phys) return -ENOMEM;
+    if (!xhci_dma_range_ok(ctrl, ctrl->erst_phys, 4096)) {
+        free_4k_page(ctrl->erst_phys);
+        ctrl->erst_phys = 0;
+        return -EIO;
+    }
     ctrl->erst_virt = (struct xhci_erst_entry *)Phy_To_Virt(ctrl->erst_phys);
     memset(ctrl->erst_virt, 0, 4096);
     ctrl->erst_virt[0].ring_segment_base_address = ctrl->event_ring_phys;
@@ -396,26 +539,65 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
         portsc = xhci_read32(port_reg);
     }
 
-    /* Issue reset, preserving RW1C bits and read-only state. */
-    xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PR);
+    bool is_usb3 = (port_num < 256 && ctrl->port_proto[port_num] == 3);
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> 5;
 
-    /* Wait for reset completion: PR self-clears and PRC (or PED) reports it. */
-    int rc = -ETIMEDOUT;
-    for (uint32_t i = 0; i < XHCI_TIMEOUT_LOOPS; i++) {
-        portsc = xhci_read32(port_reg);
-        if (!(portsc & XHCI_PORTSC_PR) &&
-            ((portsc & XHCI_PORTSC_PRC) || (portsc & XHCI_PORTSC_PED))) {
-            rc = 0;
-            break;
+    if (is_usb3 && (portsc & XHCI_PORTSC_PED) && pls == XHCI_PLS_U0) {
+        uint8_t speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
+        if (speed < XHCI_PORT_SPEED_FULL || speed > XHCI_PORT_SPEED_SUPER) {
+            log_warn("[xhci] port %u: unknown speed ID %u\n", port_num, speed);
+            return -ENOTSUP;
         }
-    }
-    if (rc != 0) {
-        log_err("[xhci] port %u: reset did not complete\n", port_num);
-        return rc;
+        if (out_speed) *out_speed = speed;
+        log_info("[xhci] port %u: USB 3 already enabled in U0, speed=%u\n",
+                 port_num, (unsigned)speed);
+        return 0;
     }
 
-    /* Acknowledge the reset change flag. */
-    xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PRC);
+    if (is_usb3 && (pls == XHCI_PLS_INACTIVE || pls == XHCI_PLS_COMPLIANCE)) {
+        xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_WPR);
+        int rc = -ETIMEDOUT;
+        uint64_t start_ns = arch_clocksource_read_ns();
+        for (uint32_t i = 0; i < XHCI_TIMEOUT_LOOPS; i++) {
+            portsc = xhci_read32(port_reg);
+            if (!(portsc & XHCI_PORTSC_WPR) &&
+                ((portsc & XHCI_PORTSC_WRC) || (portsc & XHCI_PORTSC_PED))) {
+                rc = 0;
+                break;
+            }
+            if ((uint64_t)(arch_clocksource_read_ns() - start_ns) >= 1000000000ULL)
+                break;
+        }
+        if (rc != 0) {
+            log_err("[xhci] port %u: warm reset did not complete\n", port_num);
+            return rc;
+        }
+        xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_WRC);
+    } else {
+        /* Issue hot/USB2 reset, preserving RW1C bits and read-only state. */
+        xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PR);
+
+        /* Wait for reset completion: PR self-clears and PRC (or PED) reports it. */
+        int rc = -ETIMEDOUT;
+        uint64_t start_ns = arch_clocksource_read_ns();
+        for (uint32_t i = 0; i < XHCI_TIMEOUT_LOOPS; i++) {
+            portsc = xhci_read32(port_reg);
+            if (!(portsc & XHCI_PORTSC_PR) &&
+                ((portsc & XHCI_PORTSC_PRC) || (portsc & XHCI_PORTSC_PED))) {
+                rc = 0;
+                break;
+            }
+            if ((uint64_t)(arch_clocksource_read_ns() - start_ns) >= 1000000000ULL)
+                break;
+        }
+        if (rc != 0) {
+            log_err("[xhci] port %u: reset did not complete\n", port_num);
+            return rc;
+        }
+
+        /* Acknowledge the reset change flag. */
+        xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PRC);
+    }
 
     portsc = xhci_read32(port_reg);
     if (!(portsc & XHCI_PORTSC_PED)) {
@@ -426,9 +608,14 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
     /* USB 2.0 reset recovery (T_RSTRCY >= 10ms). */
     xhci_delay_ms(10);
 
-    if (out_speed) *out_speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
+    uint8_t speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
+    if (speed < XHCI_PORT_SPEED_FULL || speed > XHCI_PORT_SPEED_SUPER) {
+        log_warn("[xhci] port %u: unknown speed ID %u\n", port_num, speed);
+        return -ENOTSUP;
+    }
+    if (out_speed) *out_speed = speed;
     log_info("[xhci] port %u: connected, reset complete, speed=%u\n",
-             port_num, (unsigned)((portsc & XHCI_PORTSC_SPEED_MASK) >> 10));
+             port_num, (unsigned)speed);
     return 0;
 }
 
@@ -525,6 +712,7 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
         return -ENOMEM;
     }
     memset(slot, 0, sizeof(*slot));
+    slot->ctrl = ctrl;
     slot->slot_id = slot_id;
     slot->port_num = port_num;
     slot->speed = speed;
@@ -557,18 +745,42 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     /* Strict allocation order with rollback unwind. */
     slot->input_ctx_phys = alloc_4k_page();
     if (!slot->input_ctx_phys) goto err_input;
+    if (!xhci_dma_range_ok(ctrl, slot->input_ctx_phys, 4096)) {
+        free_4k_page(slot->input_ctx_phys);
+        slot->input_ctx_phys = 0;
+        rc = -EIO;
+        goto err_input;
+    }
     slot->input_ctx_virt = (void *)Phy_To_Virt(slot->input_ctx_phys);
 
     slot->dev_ctx_phys = alloc_4k_page();
     if (!slot->dev_ctx_phys) goto err_dev;
+    if (!xhci_dma_range_ok(ctrl, slot->dev_ctx_phys, 4096)) {
+        free_4k_page(slot->dev_ctx_phys);
+        slot->dev_ctx_phys = 0;
+        rc = -EIO;
+        goto err_dev;
+    }
     slot->dev_ctx_virt = (void *)Phy_To_Virt(slot->dev_ctx_phys);
 
     slot->ep0_ring_phys = alloc_4k_page();
     if (!slot->ep0_ring_phys) goto err_ep0;
+    if (!xhci_dma_range_ok(ctrl, slot->ep0_ring_phys, 4096)) {
+        free_4k_page(slot->ep0_ring_phys);
+        slot->ep0_ring_phys = 0;
+        rc = -EIO;
+        goto err_ep0;
+    }
     slot->ep0_ring_virt = (struct xhci_trb *)Phy_To_Virt(slot->ep0_ring_phys);
 
     slot->dma_buf_phys = alloc_4k_page();
     if (!slot->dma_buf_phys) goto err_dma;
+    if (!xhci_dma_range_ok(ctrl, slot->dma_buf_phys, 4096)) {
+        free_4k_page(slot->dma_buf_phys);
+        slot->dma_buf_phys = 0;
+        rc = -EIO;
+        goto err_dma;
+    }
     slot->dma_buf_virt = (void *)Phy_To_Virt(slot->dma_buf_phys);
 
     memset(slot->input_ctx_virt, 0, 4096);
@@ -1141,6 +1353,12 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
                 kfree(ring);
                 goto oom;
             }
+            if (slot->ctrl && !xhci_dma_range_ok(slot->ctrl, ring->ring_phys, 4096)) {
+                free_4k_page(ring->ring_phys);
+                kfree(ring);
+                xhci_free_endpoint_rings(slot);
+                return -EIO;
+            }
             ring->ring_virt = (struct xhci_trb *)Phy_To_Virt(ring->ring_phys);
             memset(ring->ring_virt, 0, 4096);
 
@@ -1623,18 +1841,7 @@ int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot_id, uint8_t dci,
     }
 
     uint64_t staging_phys = slot->bulk_staging_phys;
-    if ((staging_phys & 0xFFFFULL) != 0) {
-        xhci_unlock(c, locked);
-        return -EINVAL;
-    }
-
-    bool ac64 = true;
-    if (c->mmio_virt) {
-        ac64 = (xhci_read32(c->mmio_virt + XHCI_CAP_HCCPARAMS1) & 1U) != 0;
-    } else if (c->ac64_valid) {
-        ac64 = c->ac64;
-    }
-    if (!ac64 && (staging_phys > 0xFFFFFFFFULL || staging_phys + 65535ULL > 0xFFFFFFFFULL)) {
+    if ((staging_phys & 0xFFFFULL) != 0 || !xhci_dma_range_ok(c, staging_phys, 65536)) {
         xhci_unlock(c, locked);
         return -EIO;
     }
@@ -2216,6 +2423,15 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
 
     /* 3. Parse capabilities */
     rc = xhci_parse_capabilities(ctrl);
+    if (rc != 0) {
+        kfree(ctrl);
+        pci_set_decode(pdev, false, false);
+        pci_set_bus_master(pdev, false);
+        return rc;
+    }
+
+    /* 3b. Claim BIOS/OS legacy ownership before HCRST */
+    rc = xhci_claim_legacy(ctrl);
     if (rc != 0) {
         kfree(ctrl);
         pci_set_decode(pdev, false, false);

@@ -80,6 +80,26 @@
 #define XHCI_PORT_SPEED_HIGH        3
 #define XHCI_PORT_SPEED_SUPER       4
 
+/* Port Link State (PORTSC bits [8:5]) */
+#define XHCI_PLS_U0                 0
+#define XHCI_PLS_DISABLED           4
+#define XHCI_PLS_RXDETECT           5
+#define XHCI_PLS_INACTIVE           6
+#define XHCI_PLS_POLLING            7
+#define XHCI_PLS_RECOVERY           8
+#define XHCI_PLS_HOT_RESET          9
+#define XHCI_PLS_COMPLIANCE         10
+#define XHCI_PLS_RESUME             15
+
+/* xHCI Extended Capabilities */
+#define XHCI_EXT_CAP_LEGACY         1
+#define XHCI_EXT_CAP_PROTOCOL       2
+#define XHCI_LEGSUP_BIOS_OWNED      (1U << 16)
+#define XHCI_LEGSUP_OS_OWNED        (1U << 24)
+#define XHCI_LEGCTL_SMI_ENABLES     ((1U << 0) | (1U << 1) | (1U << 4) | \
+                                     (1U << 13) | (1U << 14) | (1U << 15))
+#define XHCI_LEGCTL_RW1C            ((1U << 29) | (1U << 30) | (1U << 31))
+
 /* Slots managed by the driver (1-based; array is sized [MAX + 1]) */
 #define XHCI_MAX_MANAGED_SLOTS      32
 
@@ -322,7 +342,9 @@ static inline void *xhci_dev_ep_ctx(void *base, uint8_t csz, uint8_t dci)
 }
 
 /* Per-slot driver state (slot_id is 1-based) */
+struct xhci_controller;
 struct xhci_slot {
+    struct xhci_controller *ctrl;
     uint8_t slot_id;
     uint8_t port_num;
     uint8_t speed;
@@ -434,6 +456,9 @@ struct xhci_controller {
     bool dma_retained;
     bool ac64;
     bool ac64_valid;
+    bool has_legsup;
+    uint32_t legsup_offset;
+    uint8_t port_proto[256];
 };
 
 /* xHCI MMIO read/write accessors */

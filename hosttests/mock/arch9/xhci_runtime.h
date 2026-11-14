@@ -64,4 +64,6 @@ void *kmalloc(size_t size);
 size_t kfree(void *ptr);
 void *aligned_alloc(size_t alignment, size_t size);
 
+uint64_t arch_clocksource_read_ns(void);
+
 #endif /* ARCH9_XHCI_RUNTIME_H */
