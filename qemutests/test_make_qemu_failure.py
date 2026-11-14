@@ -167,16 +167,14 @@ class TestQemuRecipeShapeTests(unittest.TestCase):
                          "test-qemu target must be present in mk/components/run.mk")
 
     def test_recipe_rejects_unknown_suite_at_parse_time(self) -> None:
-        """The recipe must enumerate the known SUITE list explicitly
+        """The recipe must validate SUITE against TEST_QEMU_SUITE_IDS
         so an unknown suite aborts BEFORE any build / runner."""
-        m = re.search(
-            r"case \"\$\(SUITE\)\" in\s+(?P<n>.+?)esac",
-            self.text,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(m,
-                             "test-qemu must contain a SUITE case/esac block")
-        body = m.group("n")
+        self.assertIn("$(filter $(SUITE),$(TEST_QEMU_SUITE_IDS))", self.text,
+                      "test-qemu must validate SUITE against TEST_QEMU_SUITE_IDS")
+        dispatch_text = (ROOT / "mk" / "generated" / "test-dispatch.mk").read_text(encoding="utf-8")
+        m = re.search(r"(?m)^TEST_QEMU_SUITE_IDS\s*:=\s*(.+)$", dispatch_text)
+        self.assertIsNotNone(m, "TEST_QEMU_SUITE_IDS must be defined in test-dispatch.mk")
+        body = m.group(1)
         for suite in ("phase-0", "systest", "inittab-phase",
                        "network", "gfx", "resolution", "driver-model",
                        "monitor", "terminal-present", "gui", "gui-desktop"):

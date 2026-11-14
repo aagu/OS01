@@ -99,7 +99,7 @@ class BridgeExportTests(unittest.TestCase):
 
     def test_harness_modules_skip_manifest_files(self) -> None:
         harness_entries = self.by_kind["harness_module"]
-        self.assertEqual(len(harness_entries), 48)
+        self.assertEqual(len(harness_entries), 47)
         harness_ids = {e["id"] for e in harness_entries}
         self.assertNotIn("qemutests.test_scan_tools", harness_ids)
         self.assertNotIn("qemutests.test_bridge_export", harness_ids)

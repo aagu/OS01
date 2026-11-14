@@ -254,12 +254,15 @@ class MakeVariantTests(unittest.TestCase):
         self.assertEqual(entry.timeout_s, 180)
 
     def test_ci_runs_four_cpu_variant(self):
-        from qemutests.test_ci_workflow import _job_blocks, _step_run_commands, _make_commands
+        import sys
         root = Path(__file__).resolve().parents[1]
+        tools_tests = str(root / "tools" / "tests")
+        if tools_tests not in sys.path:
+            sys.path.insert(0, tools_tests)
+        import check_ci_schedule
         workflow = (root / ".github/workflows/ci.yml").read_text()
-        commands = [line for block in _job_blocks(workflow).values()
-                    for script in _step_run_commands(block)
-                    for line in _make_commands(script)
+        commands = [line for step in check_ci_schedule._parse_ci_steps(workflow)
+                    for line in step["lines"]
                     if "SUITE=arch6-fsstress" in line]
         self.assertTrue(commands, "ARCH-6 must run in a real CI step")
         for command in commands:

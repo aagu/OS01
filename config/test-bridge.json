@@ -4681,19 +4681,6 @@
     },
     {
       "kind": "harness_module",
-      "id": "qemutests.test_ci_workflow",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_ci_workflow.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
       "id": "qemutests.test_doom_engine_notice",
       "layer": "harness",
       "subsystem": "test-framework",

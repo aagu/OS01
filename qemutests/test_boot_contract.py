@@ -439,7 +439,7 @@ class BuildContractStatic(unittest.TestCase):
         self.assertIn("boot-contract-$(BOOT_CONTRACT_CASE)", arm_text)
 
     def test_catalog_and_scenario_registered(self) -> None:
-        catalog_text = _read("mk/tests/catalog.mk")
+        catalog_text = _read("mk/generated/test-dispatch.mk")
         self.assertIn("boot-contract", catalog_text)
         scenarios_text = _read("config/test-scenarios.json")
         self.assertIn("boot-contract", scenarios_text)

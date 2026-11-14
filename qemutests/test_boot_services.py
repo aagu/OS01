@@ -334,7 +334,7 @@ class BuildContractStatic(unittest.TestCase):
         self.assertIn("BOOT_SERVICES_TEST is x86-only", arm_text)
 
     def test_catalog_and_scenario_registered(self) -> None:
-        catalog_text = _read("mk/tests/catalog.mk")
+        catalog_text = _read("mk/generated/test-dispatch.mk")
         self.assertIn("boot-services", catalog_text)
         scenarios_text = _read("config/test-scenarios.json")
         self.assertIn("boot.services.x86", scenarios_text)

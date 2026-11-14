@@ -84,6 +84,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
+      - name: CI schedule drift check
+        run: make check-ci-schedule
+
       - name: Framework regression (no QEMU)
         # test_gui_runner takes ~292s of the default 300s per-module
         # budget on a good runner; give the QEMU-booting fixtures real
@@ -462,7 +465,7 @@ jobs:
           # loop with the other MODEs: it needs its own clean → build
           # injected → run → clean sequence (the recipe documented at
           # the test-aarch64 no-ack gate).
-          for mode in smp gic-spi sync-fault m3-probe; do
+          for mode in smp gic-spi sync-fault m3-probe sched; do
             echo "== aarch64 MODE=${mode} =="
             make PROFILE=aarch64-clang test-aarch64 MODE="${mode}" || exit 1
           done

@@ -470,7 +470,7 @@ class BuildContractStatic(unittest.TestCase):
         self.assertIn("X86_BOOT_IRQ_TIME_TEST", text)
 
     def test_catalog_and_scenarios_registered(self) -> None:
-        self.assertRegex(_read("mk/tests/catalog.mk"),
+        self.assertRegex(_read("mk/generated/test-dispatch.mk"),
                          r"(?m)^boot-irq-time\tx86_64-clang\trootfs\t")
         self.assertIn('"boot-irq-time"', _read("qemutests/test_suite_catalog.py"))
         data = json.loads((_ROOT / "config/test-scenarios.json").read_text())

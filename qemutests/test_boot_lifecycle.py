@@ -562,7 +562,7 @@ class BuildContractStatic(unittest.TestCase):
         self.assertIn("test-qemu-boot-lifecycle", text)
 
     def test_catalog_entry_registered(self) -> None:
-        text = _read("mk/tests/catalog.mk")
+        text = _read("mk/generated/test-dispatch.mk")
         self.assertRegex(text, r"(?m)^boot-lifecycle\tx86_64-clang\trootfs\t",
                          "boot-lifecycle must be in the suite catalog")
 

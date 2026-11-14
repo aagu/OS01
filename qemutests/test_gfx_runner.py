@@ -373,24 +373,26 @@ class GfxMakeDryRunTests(unittest.TestCase):
     test that only needs to lock down the contract."""
 
     MAKEFILE = ROOT / "mk/components/run.mk"
+    DISPATCH_MK = ROOT / "mk/generated/test-dispatch.mk"
 
     def setUp(self) -> None:
         self.text = self.MAKEFILE.read_text(encoding="utf-8")
+        self.dispatch_text = self.DISPATCH_MK.read_text(encoding="utf-8")
 
     def test_gfx_flavor_is_empty_for_normal_image(self) -> None:
         # The lookup TEST_QEMU_FLAVOR_gfx must be empty.
-        self.assertRegex(self.text,
+        self.assertRegex(self.dispatch_text,
                          r"(?m)^TEST_QEMU_FLAVOR_gfx\s*=\s*$",
                          "TEST_QEMU_FLAVOR_gfx must be empty (gfx uses normal image)")
 
     def test_gfx_image_is_normal_image(self) -> None:
-        self.assertRegex(self.text,
+        self.assertRegex(self.dispatch_text,
                          r"(?m)^TEST_QEMU_IMG_gfx\s*=\s*\$\(NORMAL_IMAGE\)\s*$",
                          "TEST_QEMU_IMG_gfx must resolve to $(NORMAL_IMAGE)")
 
     def test_suite_allowlist_includes_gfx(self) -> None:
-        # test-qemu's case branch must list gfx alongside the others.
-        m = self.text
+        # test-dispatch.mk's TEST_QEMU_SUITE_IDS must list gfx alongside the others.
+        m = self.dispatch_text
         # find the case block (it must contain phase-0, systest, inittab-phase,
         # network, gfx).
         for suite in ("phase-0", "systest", "inittab-phase", "network", "gfx"):

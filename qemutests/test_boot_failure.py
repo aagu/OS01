@@ -423,7 +423,7 @@ class BuildContractStatic(unittest.TestCase):
         self.assertIn("BOOT_FAILURE_TEST", text)
 
     def test_catalog_registered(self) -> None:
-        self.assertRegex(_read("mk/tests/catalog.mk"),
+        self.assertRegex(_read("mk/generated/test-dispatch.mk"),
                          r"(?m)^boot-failure\tx86_64-clang\trootfs\t")
         self.assertIn('"boot-failure"', _read("qemutests/test_suite_catalog.py"))
 
