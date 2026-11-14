@@ -4735,6 +4735,30 @@
    }
   },
   {
+   "id": "drivers.usb.msc",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "usb_msc",
+   "trigger": "host runner invokes test_usb_msc.elf",
+   "assertions": [
+    "test_usb_msc passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_usb_msc"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_usb_msc.c",
+    "selector": "test_usb_msc",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying USB MSC BOT framing, recovery, SCSI probe, and read-ahead cache"
+   }
+  },
+  {
    "id": "drivers.usb.devfs",
    "owner": "host",
    "component": "drivers",

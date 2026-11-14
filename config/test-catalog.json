@@ -4727,6 +4727,19 @@
       }
     },
     {
+      "id": "test_usb_msc",
+      "layer": "host",
+      "subsystem": "usb",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "drivers.usb.msc"
+      ],
+      "link": "usb-msc",
+      "source": "hosttests/cases/test_usb_msc.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_user_log",
       "layer": "host",
