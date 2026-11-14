@@ -60,7 +60,7 @@ extern char **g_argv;
 /* Startup probe runner: defined in systest.c, called by test_libc_env in test_libc.c */
 int run_startup_probe_case(char **argv, char **envp, int expect_code);
 
-/* ── Test case function declarations (122 test cases) ── */
+/* ── Test case function declarations (124 test cases) ── */
 void test_41_exec_via_symlink(void);
 void test_42_getdents_dt_lnk(void);
 void test_access(void);

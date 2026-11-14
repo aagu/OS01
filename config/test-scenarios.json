@@ -2963,8 +2963,9 @@
    },
    "supporting": [],
    "overlap_decision": {
-    "action": "unique",
-    "reason": "Primary host unit test verifying memory module basic behavior"
+    "action": "remove",
+    "reason": "Shadow slab reimplementation in hosttests/cases/test_slab_basic.c retired; covered by production-linked test_slab_* host tests and in-kernel slab_alloc_free selftest",
+    "replacement": "memory.slab.basic_x86_count"
    }
   },
   {
@@ -6455,6 +6456,1734 @@
    "overlap_decision": {
     "action": "unique",
     "reason": "Placeholder scenario for test_socket_net_readiness pending Task 7 owner backfill"
+   }
+  },
+  {
+   "id": "memory.slab.selftest_alloc_free",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "slab",
+   "trigger": "kernel selftest executes case slab_alloc_free",
+   "assertions": [
+    "kernel_selftest slab_alloc_free reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest slab_alloc_free fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_slab_selftest.c",
+    "selector": "slab_alloc_free",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (slab_alloc_free)"
+   }
+  },
+  {
+   "id": "memory.slab.selftest_many_sizes",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "slab",
+   "trigger": "kernel selftest executes case slab_many_sizes",
+   "assertions": [
+    "kernel_selftest slab_many_sizes reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest slab_many_sizes fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_slab_selftest.c",
+    "selector": "slab_many_sizes",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (slab_many_sizes)"
+   }
+  },
+  {
+   "id": "memory.slab.selftest_16_caches",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "slab",
+   "trigger": "kernel selftest executes case slab_16_caches",
+   "assertions": [
+    "kernel_selftest slab_16_caches reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest slab_16_caches fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_slab_selftest.c",
+    "selector": "slab_16_caches",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (slab_16_caches)"
+   }
+  },
+  {
+   "id": "memory.aarch64.pt_vmm_selftest",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_pt_vmm",
+   "assertions": [
+    "kernel_selftest aarch64_pt_vmm reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_pt_vmm fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_page_table_selftest.c",
+    "selector": "aarch64_pt_vmm",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (aarch64_pt_vmm)"
+   }
+  },
+  {
+   "id": "memory.uaccess.selftest",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "uaccess",
+   "trigger": "kernel selftest executes case uaccess",
+   "assertions": [
+    "kernel_selftest uaccess reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest uaccess fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_uaccess.c",
+    "selector": "uaccess",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (uaccess)"
+   }
+  },
+  {
+   "id": "memory.aarch64.user_mm",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_mm",
+   "assertions": [
+    "kernel_selftest aarch64_user_mm reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_mm fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_mm.c",
+    "selector": "aarch64_user_mm",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (aarch64_user_mm)"
+   }
+  },
+  {
+   "id": "memory.aarch64.user_vm",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_vm",
+   "assertions": [
+    "kernel_selftest aarch64_user_vm reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_vm fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_vm.c",
+    "selector": "aarch64_user_vm",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (aarch64_user_vm)"
+   }
+  },
+  {
+   "id": "memory.aarch64.user_fork_cow",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_fork_cow",
+   "assertions": [
+    "kernel_selftest aarch64_user_fork_cow reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_fork_cow fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_fork_cow.c",
+    "selector": "aarch64_user_fork_cow",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (aarch64_user_fork_cow)"
+   }
+  },
+  {
+   "id": "memory.aarch64.user_svc_uaccess",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_svc_uaccess",
+   "assertions": [
+    "kernel_selftest aarch64_user_svc_uaccess reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_svc_uaccess fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_svc_uaccess.c",
+    "selector": "aarch64_user_svc_uaccess",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for memory (aarch64_user_svc_uaccess)"
+   }
+  },
+  {
+   "id": "sched.kthread.self_reap",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "kthread",
+   "trigger": "kernel selftest executes case kthread_self_reap",
+   "assertions": [
+    "kernel_selftest kthread_self_reap reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest kthread_self_reap fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_kthread_self_reap.c",
+    "selector": "kthread_self_reap",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (kthread_self_reap)"
+   }
+  },
+  {
+   "id": "sched.boot.probe",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "boot",
+   "trigger": "kernel selftest executes case sched_boot_probe",
+   "assertions": [
+    "kernel_selftest sched_boot_probe reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest sched_boot_probe fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_sched_boot_probe.c",
+    "selector": "sched_boot_probe",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (sched_boot_probe)"
+   }
+  },
+  {
+   "id": "sched.init.pid_contract",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "init",
+   "trigger": "kernel selftest executes case init_pid",
+   "assertions": [
+    "kernel_selftest init_pid reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest init_pid fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/selftest.c",
+    "selector": "init_pid",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (init_pid)"
+   }
+  },
+  {
+   "id": "sched.signal.pgrp_selftest",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "signal",
+   "trigger": "kernel selftest executes case pgrp_signal",
+   "assertions": [
+    "kernel_selftest pgrp_signal reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest pgrp_signal fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_pgrp_signal.c",
+    "selector": "pgrp_signal",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (pgrp_signal)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_yield",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_yield",
+   "assertions": [
+    "kernel_selftest aarch64_sched_yield reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_yield fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_yield",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_yield)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_regs",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_regs",
+   "assertions": [
+    "kernel_selftest aarch64_sched_regs reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_regs fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_regs",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_regs)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_entry",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_entry",
+   "assertions": [
+    "kernel_selftest aarch64_sched_entry reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_entry fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_entry",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_entry)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_irq",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_irq",
+   "assertions": [
+    "kernel_selftest aarch64_sched_irq reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_irq fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_irq",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_irq)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_blocker",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_blocker",
+   "assertions": [
+    "kernel_selftest aarch64_sched_blocker reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_blocker fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_blocker",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_blocker)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_reclaim",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_reclaim",
+   "assertions": [
+    "kernel_selftest aarch64_sched_reclaim reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_reclaim fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_reclaim",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_reclaim)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_idle",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_idle",
+   "assertions": [
+    "kernel_selftest aarch64_sched_idle reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_idle fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_idle",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_idle)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_timer",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_timer",
+   "assertions": [
+    "kernel_selftest aarch64_sched_timer reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_timer fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_timer",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_timer)"
+   }
+  },
+  {
+   "id": "sched.aarch64.sched_ap",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_sched_ap",
+   "assertions": [
+    "kernel_selftest aarch64_sched_ap reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_sched_ap fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_scheduler.c",
+    "selector": "aarch64_sched_ap",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_sched_ap)"
+   }
+  },
+  {
+   "id": "sched.aarch64.el0",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_el0",
+   "assertions": [
+    "kernel_selftest aarch64_el0 reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_el0 fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_el0.c",
+    "selector": "aarch64_el0",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_el0)"
+   }
+  },
+  {
+   "id": "sched.aarch64.el0_switch",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_el0_switch",
+   "assertions": [
+    "kernel_selftest aarch64_el0_switch reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_el0_switch fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_el0.c",
+    "selector": "aarch64_el0_switch",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_el0_switch)"
+   }
+  },
+  {
+   "id": "sched.aarch64.el0_irq",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_el0_irq",
+   "assertions": [
+    "kernel_selftest aarch64_el0_irq reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_el0_irq fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_el0.c",
+    "selector": "aarch64_el0_irq",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_el0_irq)"
+   }
+  },
+  {
+   "id": "sched.aarch64.el0_preempt",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_el0_preempt",
+   "assertions": [
+    "kernel_selftest aarch64_el0_preempt reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_el0_preempt fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_el0.c",
+    "selector": "aarch64_el0_preempt",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_el0_preempt)"
+   }
+  },
+  {
+   "id": "sched.aarch64.el0_task",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_el0_task",
+   "assertions": [
+    "kernel_selftest aarch64_el0_task reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_el0_task fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_el0.c",
+    "selector": "aarch64_el0_task",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_el0_task)"
+   }
+  },
+  {
+   "id": "sched.aarch64.user_task_lifecycle",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_task_lifecycle",
+   "assertions": [
+    "kernel_selftest aarch64_user_task_lifecycle reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_task_lifecycle fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_task.c",
+    "selector": "aarch64_user_task_lifecycle",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_user_task_lifecycle)"
+   }
+  },
+  {
+   "id": "sched.aarch64.user_waitpid",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_waitpid",
+   "assertions": [
+    "kernel_selftest aarch64_user_waitpid reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_waitpid fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_waitpid.c",
+    "selector": "aarch64_user_waitpid",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_user_waitpid)"
+   }
+  },
+  {
+   "id": "sched.aarch64.user_exec",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_exec",
+   "assertions": [
+    "kernel_selftest aarch64_user_exec reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_exec fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_exec.c",
+    "selector": "aarch64_user_exec",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_user_exec)"
+   }
+  },
+  {
+   "id": "sched.aarch64.user_signal",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "aarch64",
+   "trigger": "kernel selftest executes case aarch64_user_signal",
+   "assertions": [
+    "kernel_selftest aarch64_user_signal reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest aarch64_user_signal fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_user_signal.c",
+    "selector": "aarch64_user_signal",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (aarch64_user_signal)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_entry",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case entry",
+   "assertions": [
+    "kernel_selftest entry reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest entry fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "entry",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (entry)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_yield",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case yield",
+   "assertions": [
+    "kernel_selftest yield reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest yield fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "yield",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (yield)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_reap",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case reap",
+   "assertions": [
+    "kernel_selftest reap reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest reap fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "reap",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (reap)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_work",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case work",
+   "assertions": [
+    "kernel_selftest work reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest work fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "work",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (work)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_admission",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case admission",
+   "assertions": [
+    "kernel_selftest admission reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest admission fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "admission",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (admission)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_default_mask",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case default-mask",
+   "assertions": [
+    "kernel_selftest default-mask reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest default-mask fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "default-mask",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (default-mask)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_ready",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case ready",
+   "assertions": [
+    "kernel_selftest ready reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest ready fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_scheduler.c",
+    "selector": "ready",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (ready)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_remote",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case remote-wake",
+   "assertions": [
+    "kernel_selftest remote-wake reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest remote-wake fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_wake.c",
+    "selector": "remote-wake",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (remote-wake)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_switch",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case wake-switch",
+   "assertions": [
+    "kernel_selftest wake-switch reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest wake-switch fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_wake.c",
+    "selector": "wake-switch",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (wake-switch)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_idle_race",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case idle-race",
+   "assertions": [
+    "kernel_selftest idle-race reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest idle-race fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_wake.c",
+    "selector": "idle-race",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (idle-race)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_sgi",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case sgi",
+   "assertions": [
+    "kernel_selftest sgi reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest sgi fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_wake.c",
+    "selector": "sgi",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (sgi)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_work_sleep",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case work-sleep",
+   "assertions": [
+    "kernel_selftest work-sleep reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest work-sleep fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_wake.c",
+    "selector": "work-sleep",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (work-sleep)"
+   }
+  },
+  {
+   "id": "sched.ap.wake_scan_fallback",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "ap",
+   "trigger": "kernel selftest executes case scan-fallback",
+   "assertions": [
+    "kernel_selftest scan-fallback reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest scan-fallback fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_ap_wake.c",
+    "selector": "scan-fallback",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (scan-fallback)"
+   }
+  },
+  {
+   "id": "sched.tick.ready",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-ready",
+   "assertions": [
+    "kernel_selftest tick-ready reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-ready fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-ready",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-ready)"
+   }
+  },
+  {
+   "id": "sched.tick.idle",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-idle",
+   "assertions": [
+    "kernel_selftest tick-idle reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-idle fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-idle",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-idle)"
+   }
+  },
+  {
+   "id": "sched.tick.busy",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-busy",
+   "assertions": [
+    "kernel_selftest tick-busy reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-busy fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-busy",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-busy)"
+   }
+  },
+  {
+   "id": "sched.tick.yield",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-yield",
+   "assertions": [
+    "kernel_selftest tick-yield reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-yield fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-yield",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-yield)"
+   }
+  },
+  {
+   "id": "sched.tick.deadline",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-deadline",
+   "assertions": [
+    "kernel_selftest tick-deadline reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-deadline fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-deadline",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-deadline)"
+   }
+  },
+  {
+   "id": "sched.tick.global",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-global",
+   "assertions": [
+    "kernel_selftest tick-global reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-global fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-global",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-global)"
+   }
+  },
+  {
+   "id": "sched.tick.remote",
+   "owner": "kernel_selftest",
+   "component": "sched",
+   "behavior": "tick",
+   "trigger": "kernel selftest executes case tick-remote",
+   "assertions": [
+    "kernel_selftest tick-remote reports PASS"
+   ],
+   "failure_modes": [
+    "kernel_selftest tick-remote fails or panics"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aarch64_sched_tick.c",
+    "selector": "tick-remote",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level kernel_selftest scenario for sched (tick-remote)"
+   }
+  },
+  {
+   "id": "memory.brk.syscall",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "brk",
+   "trigger": "systest executes case brk",
+   "assertions": [
+    "systest brk reports PASS"
+   ],
+   "failure_modes": [
+    "systest brk fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "brk",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (brk)"
+   }
+  },
+  {
+   "id": "memory.brk.read_fresh_page",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "brk",
+   "trigger": "systest executes case 49_brk_read_fresh_page",
+   "assertions": [
+    "systest 49_brk_read_fresh_page reports PASS"
+   ],
+   "failure_modes": [
+    "systest 49_brk_read_fresh_page fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "49_brk_read_fresh_page",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (49_brk_read_fresh_page)"
+   }
+  },
+  {
+   "id": "memory.brk.fork_isolation",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "brk",
+   "trigger": "systest executes case 51_fork_brk_isolation",
+   "assertions": [
+    "systest 51_fork_brk_isolation reports PASS"
+   ],
+   "failure_modes": [
+    "systest 51_fork_brk_isolation fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "51_fork_brk_isolation",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (51_fork_brk_isolation)"
+   }
+  },
+  {
+   "id": "memory.cow.fork_mmap_isolation",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "cow",
+   "trigger": "systest executes case 52_fork_mmap_cow_isolation",
+   "assertions": [
+    "systest 52_fork_mmap_cow_isolation reports PASS"
+   ],
+   "failure_modes": [
+    "systest 52_fork_mmap_cow_isolation fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "52_fork_mmap_cow_isolation",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (52_fork_mmap_cow_isolation)"
+   }
+  },
+  {
+   "id": "memory.cow.kernel_outputs",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "cow",
+   "trigger": "systest executes case 53_cow_kernel_outputs",
+   "assertions": [
+    "systest 53_cow_kernel_outputs reports PASS"
+   ],
+   "failure_modes": [
+    "systest 53_cow_kernel_outputs fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "53_cow_kernel_outputs",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (53_cow_kernel_outputs)"
+   }
+  },
+  {
+   "id": "memory.mprotect.subrange_cow",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "mprotect",
+   "trigger": "systest executes case mprotect_subrange_cow",
+   "assertions": [
+    "systest mprotect_subrange_cow reports PASS"
+   ],
+   "failure_modes": [
+    "systest mprotect_subrange_cow fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "mprotect_subrange_cow",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (mprotect_subrange_cow)"
+   }
+  },
+  {
+   "id": "memory.mmap.exec_protection",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "mmap",
+   "trigger": "systest executes case mmap_exec_protection",
+   "assertions": [
+    "systest mmap_exec_protection reports PASS"
+   ],
+   "failure_modes": [
+    "systest mmap_exec_protection fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "mmap_exec_protection",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (mmap_exec_protection)"
+   }
+  },
+  {
+   "id": "memory.mmap.fixed_file_replace",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "mmap",
+   "trigger": "systest executes case fixed_file_replace",
+   "assertions": [
+    "systest fixed_file_replace reports PASS"
+   ],
+   "failure_modes": [
+    "systest fixed_file_replace fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "fixed_file_replace",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for memory (fixed_file_replace)"
+   }
+  },
+  {
+   "id": "sched.pid.getpid_getppid",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "pid",
+   "trigger": "systest executes case getpid_getppid",
+   "assertions": [
+    "systest getpid_getppid reports PASS"
+   ],
+   "failure_modes": [
+    "systest getpid_getppid fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "getpid_getppid",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (getpid_getppid)"
+   }
+  },
+  {
+   "id": "sched.exec.fork_waitpid",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "exec",
+   "trigger": "systest executes case fork_exec_waitpid",
+   "assertions": [
+    "systest fork_exec_waitpid reports PASS"
+   ],
+   "failure_modes": [
+    "systest fork_exec_waitpid fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "fork_exec_waitpid",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (fork_exec_waitpid)"
+   }
+  },
+  {
+   "id": "sched.exec.hostile_argv",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "exec",
+   "trigger": "systest executes case exec_hostile_argv",
+   "assertions": [
+    "systest exec_hostile_argv reports PASS"
+   ],
+   "failure_modes": [
+    "systest exec_hostile_argv fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "exec_hostile_argv",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (exec_hostile_argv)"
+   }
+  },
+  {
+   "id": "sched.exec.hostile_envp",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "exec",
+   "trigger": "systest executes case exec_hostile_envp",
+   "assertions": [
+    "systest exec_hostile_envp reports PASS"
+   ],
+   "failure_modes": [
+    "systest exec_hostile_envp fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "exec_hostile_envp",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (exec_hostile_envp)"
+   }
+  },
+  {
+   "id": "sched.signal.sigaction",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "signal",
+   "trigger": "systest executes case sigaction",
+   "assertions": [
+    "systest sigaction reports PASS"
+   ],
+   "failure_modes": [
+    "systest sigaction fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "sigaction",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (sigaction)"
+   }
+  },
+  {
+   "id": "sched.signal.kill_deliver",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "signal",
+   "trigger": "systest executes case kill_deliver",
+   "assertions": [
+    "systest kill_deliver reports PASS"
+   ],
+   "failure_modes": [
+    "systest kill_deliver fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "kill_deliver",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (kill_deliver)"
+   }
+  },
+  {
+   "id": "sched.signal.fatal_exit",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "signal",
+   "trigger": "systest executes case fatal_signal_exit",
+   "assertions": [
+    "systest fatal_signal_exit reports PASS"
+   ],
+   "failure_modes": [
+    "systest fatal_signal_exit fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "fatal_signal_exit",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (fatal_signal_exit)"
+   }
+  },
+  {
+   "id": "sched.eevdf.fork_child",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "eevdf",
+   "trigger": "systest executes case eevdf_fork_child",
+   "assertions": [
+    "systest eevdf_fork_child reports PASS"
+   ],
+   "failure_modes": [
+    "systest eevdf_fork_child fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "eevdf_fork_child",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (eevdf_fork_child)"
+   }
+  },
+  {
+   "id": "sched.pgrp.setpgid_auto_fg",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "pgrp",
+   "trigger": "systest executes case setpgid_auto_fg",
+   "assertions": [
+    "systest setpgid_auto_fg reports PASS"
+   ],
+   "failure_modes": [
+    "systest setpgid_auto_fg fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "setpgid_auto_fg",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (setpgid_auto_fg)"
+   }
+  },
+  {
+   "id": "sched.pgrp.signal_basic",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "pgrp",
+   "trigger": "systest executes case signal_pgrp_basic",
+   "assertions": [
+    "systest signal_pgrp_basic reports PASS"
+   ],
+   "failure_modes": [
+    "systest signal_pgrp_basic fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "signal_pgrp_basic",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (signal_pgrp_basic)"
+   }
+  },
+  {
+   "id": "sched.pgrp.kill_neg_pid",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "pgrp",
+   "trigger": "systest executes case kill_pgrp",
+   "assertions": [
+    "systest kill_pgrp reports PASS"
+   ],
+   "failure_modes": [
+    "systest kill_pgrp fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_proc.c",
+    "selector": "kill_pgrp",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (kill_pgrp)"
+   }
+  },
+  {
+   "id": "sched.sleep.nanosleep",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "sleep",
+   "trigger": "systest executes case nanosleep",
+   "assertions": [
+    "systest nanosleep reports PASS"
+   ],
+   "failure_modes": [
+    "systest nanosleep fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_time_poll.c",
+    "selector": "nanosleep",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (nanosleep)"
+   }
+  },
+  {
+   "id": "sched.sleep.nanosleep_eintr",
+   "owner": "systest",
+   "component": "sched",
+   "behavior": "sleep",
+   "trigger": "systest executes case nanosleep_eintr",
+   "assertions": [
+    "systest nanosleep_eintr reports PASS"
+   ],
+   "failure_modes": [
+    "systest nanosleep_eintr fails or times out"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_time_poll.c",
+    "selector": "nanosleep_eintr",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Case-level systest scenario for sched (nanosleep_eintr)"
    }
   }
  ]

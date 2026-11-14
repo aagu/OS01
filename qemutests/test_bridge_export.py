@@ -52,7 +52,7 @@ class BridgeExportTests(unittest.TestCase):
 
     def test_host_test_anomalies_recorded(self) -> None:
         host_entries = {e["id"]: e for e in self.by_kind["host_test"]}
-        self.assertEqual(len(host_entries), 232)
+        self.assertEqual(len(host_entries), 231)
 
         # (a) test_user_vm backfilled
         self.assertIn("test_user_vm", host_entries)

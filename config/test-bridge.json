@@ -2710,21 +2710,6 @@
     },
     {
       "kind": "host_test",
-      "id": "test_slab_basic",
-      "layer": "host",
-      "subsystem": "memory",
-      "timing": "strict",
-      "tier": "nightly",
-      "isolation": "none",
-      "scenarios": [],
-      "acceptance": "protocol-or-legacy",
-      "source": "hosttests/cases/test_slab_basic.c",
-      "origin": {
-        "from": "hosttests/inventory"
-      }
-    },
-    {
-      "kind": "host_test",
       "id": "test_slab_basic_x86_count",
       "layer": "host",
       "subsystem": "memory",

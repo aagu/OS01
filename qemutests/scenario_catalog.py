@@ -105,8 +105,10 @@ def validate_catalog(data: Any, root: Path, test_catalog: Any = None) -> List[st
             if not isinstance(source, str) or not source.strip():
                 errors.append(f"{sc_desc}: primary 'source' must be a non-empty string")
             else:
+                decision = sc.get("overlap_decision")
+                action = decision.get("action") if isinstance(decision, dict) else None
                 source_path = root / source
-                if not source_path.exists():
+                if action not in {"remove", "merge"} and not source_path.exists():
                     errors.append(f"{sc_desc}: primary source file does not exist: '{source}'")
 
             for req in ("selector", "evidence"):

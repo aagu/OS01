@@ -4179,6 +4179,16 @@
       "source": "qemutests/test_scenario_owner.py"
     },
     {
+      "id": "test_scenario_pilot",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_scenario_pilot.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_sched_layout_offsets",
       "layer": "host",
@@ -4249,21 +4259,6 @@
       "scenarios": [],
       "acceptance": "protocol-or-legacy",
       "source": "hosttests/cases/test_setres.c",
-      "origin": {
-        "from": "hosttests/inventory"
-      }
-    },
-    {
-      "kind": "host_test",
-      "id": "test_slab_basic",
-      "layer": "host",
-      "subsystem": "memory",
-      "timing": "strict",
-      "tier": "nightly",
-      "isolation": "none",
-      "scenarios": [],
-      "acceptance": "protocol-or-legacy",
-      "source": "hosttests/cases/test_slab_basic.c",
       "origin": {
         "from": "hosttests/inventory"
       }

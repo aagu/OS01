@@ -2,11 +2,8 @@
 
 
 
-# Basic PMM and Slab tests
+# Basic PMM tests
 $(TEST_BLD)/test_pmm_basic.elf: $(TEST_BLD)/test_pmm_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
-	$(HOST_CC) -o $@ $^
-
-$(TEST_BLD)/test_slab_basic.elf: $(TEST_BLD)/test_slab_basic.o $(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^
 
 # PMM RAM-relative index
