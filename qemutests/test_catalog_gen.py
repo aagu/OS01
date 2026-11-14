@@ -157,7 +157,7 @@ class CatalogGenTests(unittest.TestCase):
                 line for line in hm_text.splitlines() if line.startswith("TEST_HARNESS_MODULES_LEGACY :=")
             )
             hm_mods = hm_line.split(":=", 1)[1].strip().split()
-            self.assertEqual(len(hm_mods), 52)
+            self.assertEqual(len(hm_mods), 53)
             for mod in hm_mods:
                 self.assertTrue(mod.startswith("qemutests."), msg=f"expected dotted module path, got {mod!r}")
             self.assertIn("qemutests.test_scan_tools", hm_mods)

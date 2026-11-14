@@ -1,8 +1,9 @@
 {
- "schema_version": 1,
+ "schema_version": 2,
  "scenarios": [
   {
    "id": "memory.aarch64.arch_vmm_init",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_arch_vmm_init.elf",
@@ -26,6 +27,7 @@
   },
   {
    "id": "memory.aarch64.backend_4k",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_backend_4k.elf",
@@ -49,6 +51,7 @@
   },
   {
    "id": "libc.aarch64.color_printk_abi",
+   "owner": "host",
    "component": "libc",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_color_printk_abi.elf",
@@ -72,6 +75,7 @@
   },
   {
    "id": "intr.aarch64.gic_target_probe",
+   "owner": "host",
    "component": "intr",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_gic_target_probe.elf",
@@ -95,6 +99,7 @@
   },
   {
    "id": "intr.aarch64.ipi_broadcast",
+   "owner": "host",
    "component": "intr",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_ipi_broadcast.elf",
@@ -118,6 +123,7 @@
   },
   {
    "id": "memory.aarch64.pt_2m_block",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_pt_2m_block.elf",
@@ -141,6 +147,7 @@
   },
   {
    "id": "memory.aarch64.pt_locks",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_pt_locks.elf",
@@ -164,6 +171,7 @@
   },
   {
    "id": "memory.aarch64.pt_root_publish",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_pt_root_publish.elf",
@@ -187,6 +195,7 @@
   },
   {
    "id": "memory.aarch64.pt_software_bits",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_pt_software_bits.elf",
@@ -210,6 +219,7 @@
   },
   {
    "id": "memory.aarch64.pt_split",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_pt_split.elf",
@@ -233,6 +243,7 @@
   },
   {
    "id": "memory.aarch64.scratch_probe_logic",
+   "owner": "host",
    "component": "memory",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_scratch_probe_logic.elf",
@@ -256,6 +267,7 @@
   },
   {
    "id": "intr.aarch64.sync_fault",
+   "owner": "host",
    "component": "intr",
    "behavior": "aarch64",
    "trigger": "host runner invokes test_aarch64_sync_fault.elf",
@@ -279,6 +291,7 @@
   },
   {
    "id": "drivers.ahci.lifecycle",
+   "owner": "host",
    "component": "drivers",
    "behavior": "ahci",
    "trigger": "host runner invokes test_ahci_lifecycle.elf",
@@ -302,6 +315,7 @@
   },
   {
    "id": "sched.ap.work_protocol",
+   "owner": "host",
    "component": "sched",
    "behavior": "ap",
    "trigger": "host runner invokes test_ap_work_protocol.elf",
@@ -325,6 +339,7 @@
   },
   {
    "id": "memory.arena.2gib_boundary",
+   "owner": "host",
    "component": "memory",
    "behavior": "arena",
    "trigger": "host runner invokes test_arena_2gib_boundary.elf",
@@ -348,6 +363,7 @@
   },
   {
    "id": "memory.arena.candidate_slab_bytes",
+   "owner": "host",
    "component": "memory",
    "behavior": "arena",
    "trigger": "host runner invokes test_arena_candidate_slab_bytes.elf",
@@ -371,6 +387,7 @@
   },
   {
    "id": "memory.arena.layout_chain",
+   "owner": "host",
    "component": "memory",
    "behavior": "arena",
    "trigger": "host runner invokes test_arena_layout_chain.elf",
@@ -394,6 +411,7 @@
   },
   {
    "id": "memory.arena.table_base_shift",
+   "owner": "host",
    "component": "memory",
    "behavior": "arena",
    "trigger": "host runner invokes test_arena_table_base_shift.elf",
@@ -417,6 +435,7 @@
   },
   {
    "id": "display.bga.non_x86",
+   "owner": "host",
    "component": "display",
    "behavior": "bga",
    "trigger": "host runner invokes test_bga_non_x86.elf",
@@ -440,6 +459,7 @@
   },
   {
    "id": "display.bga.resolution",
+   "owner": "host",
    "component": "display",
    "behavior": "bga",
    "trigger": "host runner invokes test_bga_resolution.elf",
@@ -463,6 +483,7 @@
   },
   {
    "id": "drivers.block.device_ops",
+   "owner": "host",
    "component": "drivers",
    "behavior": "block",
    "trigger": "host runner invokes test_block_device_ops.elf",
@@ -486,6 +507,7 @@
   },
   {
    "id": "framework.bootinfo.abi",
+   "owner": "host",
    "component": "framework",
    "behavior": "bootinfo",
    "trigger": "host runner invokes test_bootinfo_abi.elf",
@@ -509,6 +531,7 @@
   },
   {
    "id": "memory.brk.pages",
+   "owner": "host",
    "component": "memory",
    "behavior": "brk",
    "trigger": "host runner invokes test_brk_pages.elf",
@@ -532,6 +555,7 @@
   },
   {
    "id": "fs.canon.contract",
+   "owner": "host",
    "component": "fs",
    "behavior": "canon",
    "trigger": "host runner invokes test_canon.elf",
@@ -555,6 +579,7 @@
   },
   {
    "id": "sched.clocksource.contract",
+   "owner": "host",
    "component": "sched",
    "behavior": "clocksource",
    "trigger": "host runner invokes test_clocksource.elf",
@@ -578,6 +603,7 @@
   },
   {
    "id": "sched.compat.linux",
+   "owner": "host",
    "component": "sched",
    "behavior": "compat",
    "trigger": "host runner invokes test_compat_linux.elf",
@@ -601,6 +627,7 @@
   },
   {
    "id": "gui.desktop.audit",
+   "owner": "host",
    "component": "gui",
    "behavior": "desktop",
    "trigger": "host runner invokes test_desktop_audit.elf",
@@ -624,6 +651,7 @@
   },
   {
    "id": "gui.desktop.shell",
+   "owner": "host",
    "component": "gui",
    "behavior": "desktop",
    "trigger": "host runner invokes test_desktop_shell.elf",
@@ -647,6 +675,7 @@
   },
   {
    "id": "gui.desktop.state",
+   "owner": "host",
    "component": "gui",
    "behavior": "desktop",
    "trigger": "host runner invokes test_desktop_state.elf",
@@ -670,6 +699,7 @@
   },
   {
    "id": "fs.devfs.input_dispatch",
+   "owner": "host",
    "component": "fs",
    "behavior": "devfs",
    "trigger": "host runner invokes test_devfs_input_dispatch.elf",
@@ -693,6 +723,7 @@
   },
   {
    "id": "fs.devfs.capacity",
+   "owner": "host",
    "component": "fs",
    "behavior": "devfs",
    "trigger": "host runner invokes test_devfs_capacity.elf",
@@ -716,6 +747,7 @@
   },
   {
    "id": "drivers.device.boot",
+   "owner": "host",
    "component": "drivers",
    "behavior": "device",
    "trigger": "host runner invokes test_device_boot.elf",
@@ -739,6 +771,7 @@
   },
   {
    "id": "display.display.owner",
+   "owner": "host",
    "component": "display",
    "behavior": "display",
    "trigger": "host runner invokes test_display_owner.elf",
@@ -762,6 +795,7 @@
   },
   {
    "id": "sched.double.state_publish",
+   "owner": "host",
    "component": "sched",
    "behavior": "double",
    "trigger": "host runner invokes test_double_state_publish.elf",
@@ -785,6 +819,7 @@
   },
   {
    "id": "net.e1000.instances",
+   "owner": "host",
    "component": "net",
    "behavior": "e1000",
    "trigger": "host runner invokes test_e1000_instances.elf",
@@ -808,6 +843,7 @@
   },
   {
    "id": "memory.early.arena",
+   "owner": "host",
    "component": "memory",
    "behavior": "early",
    "trigger": "host runner invokes test_early_arena.elf",
@@ -831,6 +867,7 @@
   },
   {
    "id": "memory.early.arena_exhaust",
+   "owner": "host",
    "component": "memory",
    "behavior": "early",
    "trigger": "host runner invokes test_early_arena_exhaust.elf",
@@ -854,6 +891,7 @@
   },
   {
    "id": "fs.elf.layout",
+   "owner": "host",
    "component": "fs",
    "behavior": "elf",
    "trigger": "host runner invokes test_elf_layout.elf",
@@ -877,6 +915,7 @@
   },
   {
    "id": "fs.elf.load_4k",
+   "owner": "host",
    "component": "fs",
    "behavior": "elf",
    "trigger": "host runner invokes test_elf_load_4k.elf",
@@ -900,6 +939,7 @@
   },
   {
    "id": "fs.elf.validate",
+   "owner": "host",
    "component": "fs",
    "behavior": "elf",
    "trigger": "host runner invokes test_elf_validate.elf",
@@ -923,6 +963,7 @@
   },
   {
    "id": "fs.fat32.basic",
+   "owner": "host",
    "component": "fs",
    "behavior": "fat32",
    "trigger": "host runner invokes test_fat32_basic.elf",
@@ -946,6 +987,7 @@
   },
   {
    "id": "fs.ext2.block_mapping",
+   "owner": "host",
    "component": "fs",
    "behavior": "ext2 block mapping",
    "trigger": "host runner invokes test_ext2_bmap.elf",
@@ -980,6 +1022,7 @@
   },
   {
    "id": "display.fb.mtrr",
+   "owner": "host",
    "component": "display",
    "behavior": "fb",
    "trigger": "host runner invokes test_fb_mtrr.elf",
@@ -1006,6 +1049,7 @@
   },
   {
    "id": "display.fb.resolution_hooks",
+   "owner": "host",
    "component": "display",
    "behavior": "fb",
    "trigger": "host runner invokes test_fb_resolution_hooks.elf",
@@ -1029,6 +1073,7 @@
   },
   {
    "id": "display.fb.resolution_ioctl",
+   "owner": "host",
    "component": "display",
    "behavior": "fb",
    "trigger": "host runner invokes test_fb_resolution_ioctl.elf",
@@ -1052,6 +1097,7 @@
   },
   {
    "id": "display.fb.state",
+   "owner": "host",
    "component": "display",
    "behavior": "fb",
    "trigger": "host runner invokes test_fb_state.elf",
@@ -1075,6 +1121,7 @@
   },
   {
    "id": "display.fb.uapi",
+   "owner": "host",
    "component": "display",
    "behavior": "fb",
    "trigger": "host runner invokes test_fb_uapi.elf",
@@ -1098,6 +1145,7 @@
   },
   {
    "id": "display.fb.writers",
+   "owner": "host",
    "component": "display",
    "behavior": "fb",
    "trigger": "host runner invokes test_fb_writers.elf",
@@ -1121,6 +1169,7 @@
   },
   {
    "id": "sched.fork.user_map",
+   "owner": "host",
    "component": "sched",
    "behavior": "fork",
    "trigger": "host runner invokes test_fork_user_map.elf",
@@ -1144,6 +1193,7 @@
   },
   {
    "id": "memory.foundational.primitives",
+   "owner": "host",
    "component": "memory",
    "behavior": "foundational",
    "trigger": "host runner invokes test_foundational_primitives.elf",
@@ -1167,6 +1217,7 @@
   },
   {
    "id": "framework.framework.contract",
+   "owner": "host",
    "component": "framework",
    "behavior": "framework",
    "trigger": "host runner invokes test_framework_contract.elf",
@@ -1190,6 +1241,7 @@
   },
   {
    "id": "display.gfx.client",
+   "owner": "host",
    "component": "display",
    "behavior": "gfx",
    "trigger": "host runner invokes test_gfx_client.elf",
@@ -1213,6 +1265,7 @@
   },
   {
    "id": "display.gfx.device",
+   "owner": "host",
    "component": "display",
    "behavior": "gfx",
    "trigger": "host runner invokes test_gfx_device.elf",
@@ -1236,6 +1289,7 @@
   },
   {
    "id": "display.gfx.fault_bridge",
+   "owner": "host",
    "component": "display",
    "behavior": "gfx",
    "trigger": "host runner invokes test_gfx_fault_bridge.elf",
@@ -1259,6 +1313,7 @@
   },
   {
    "id": "display.gfx.file_lifecycle",
+   "owner": "host",
    "component": "display",
    "behavior": "gfx",
    "trigger": "host runner invokes test_gfx_file_lifecycle.elf",
@@ -1282,6 +1337,7 @@
   },
   {
    "id": "gui.gfx.input",
+   "owner": "host",
    "component": "gui",
    "behavior": "gfx",
    "trigger": "host runner invokes test_gfx_input.elf",
@@ -1305,6 +1361,7 @@
   },
   {
    "id": "display.gfx.primitives",
+   "owner": "host",
    "component": "display",
    "behavior": "gfx",
    "trigger": "host runner invokes test_gfx_primitives.elf",
@@ -1328,6 +1385,7 @@
   },
   {
    "id": "intr.gic.driver",
+   "owner": "host",
    "component": "intr",
    "behavior": "gic",
    "trigger": "host runner invokes test_gic_driver.elf",
@@ -1351,6 +1409,7 @@
   },
   {
    "id": "intr.gic.marker_lines",
+   "owner": "host",
    "component": "intr",
    "behavior": "gic",
    "trigger": "host runner invokes test_gic_marker_lines.elf",
@@ -1374,6 +1433,7 @@
   },
   {
    "id": "intr.gic.probe",
+   "owner": "host",
    "component": "intr",
    "behavior": "gic",
    "trigger": "host runner invokes test_gic_probe.elf",
@@ -1397,6 +1457,7 @@
   },
   {
    "id": "gui.gui.input_decode",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_input_decode.elf",
@@ -1420,6 +1481,7 @@
   },
   {
    "id": "gui.gui.input_lvgl",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_input_lvgl.elf",
@@ -1443,6 +1505,7 @@
   },
   {
    "id": "gui.gui.input_nonce",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_input_nonce.elf",
@@ -1466,6 +1529,7 @@
   },
   {
    "id": "gui.gui.input_platform",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_input_platform.elf",
@@ -1489,6 +1553,7 @@
   },
   {
    "id": "gui.gui.lvgl_integration",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_lvgl_integration.elf",
@@ -1512,6 +1577,7 @@
   },
   {
    "id": "gui.gui.platform",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_platform.elf",
@@ -1535,6 +1601,7 @@
   },
   {
    "id": "gui.gui.theme",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_theme.elf",
@@ -1558,6 +1625,7 @@
   },
   {
    "id": "gui.gui.theme_apply",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_theme_apply.elf",
@@ -1581,6 +1649,7 @@
   },
   {
    "id": "gui.gui.widget",
+   "owner": "host",
    "component": "gui",
    "behavior": "gui",
    "trigger": "host runner invokes test_gui_widget.elf",
@@ -1604,6 +1673,7 @@
   },
   {
    "id": "drivers.i8042.demux",
+   "owner": "host",
    "component": "drivers",
    "behavior": "i8042",
    "trigger": "host runner invokes test_i8042_demux.elf",
@@ -1627,6 +1697,7 @@
   },
   {
    "id": "gui.input.ps2_frame",
+   "owner": "host",
    "component": "gui",
    "behavior": "input",
    "trigger": "host runner invokes test_input_ps2_frame.elf",
@@ -1650,6 +1721,7 @@
   },
   {
    "id": "gui.input.route",
+   "owner": "host",
    "component": "gui",
    "behavior": "input",
    "trigger": "host runner invokes test_input_route.elf",
@@ -1673,6 +1745,7 @@
   },
   {
    "id": "intr.intr.backend_aarch64",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_intr_backend_aarch64.elf",
@@ -1696,6 +1769,7 @@
   },
   {
    "id": "intr.intr.backend_x86",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_intr_backend_x86.elf",
@@ -1719,6 +1793,7 @@
   },
   {
    "id": "intr.intr.decode_aarch64",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_intr_decode_aarch64.elf",
@@ -1742,6 +1817,7 @@
   },
   {
    "id": "intr.intr.decode_x86",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_intr_decode_x86.elf",
@@ -1765,6 +1841,7 @@
   },
   {
    "id": "intr.intr.dispatch",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_intr_dispatch.elf",
@@ -1788,6 +1865,7 @@
   },
   {
    "id": "intr.intr.irq_x86",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_intr_irq_x86.elf",
@@ -1811,6 +1889,7 @@
   },
   {
    "id": "intr.lapic.nmi",
+   "owner": "host",
    "component": "intr",
    "behavior": "lapic",
    "trigger": "host runner invokes test_lapic_nmi.elf",
@@ -1834,6 +1913,7 @@
   },
   {
    "id": "libc.libc.fflush",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_fflush.elf",
@@ -1857,6 +1937,7 @@
   },
   {
    "id": "libc.libc.fread_fwrite_validate",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_fread_fwrite_validate.elf",
@@ -1880,6 +1961,7 @@
   },
   {
    "id": "libc.libc.getopt",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_getopt.elf",
@@ -1903,6 +1985,7 @@
   },
   {
    "id": "libc.libc.list",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_list.elf",
@@ -1926,6 +2009,7 @@
   },
   {
    "id": "libc.libc.stdio_registry",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_stdio_registry.elf",
@@ -1949,6 +2033,7 @@
   },
   {
    "id": "libc.libc.string",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_string.elf",
@@ -1972,6 +2057,7 @@
   },
   {
    "id": "libc.libc.vsprintf",
+   "owner": "host",
    "component": "libc",
    "behavior": "libc",
    "trigger": "host runner invokes test_libc_vsprintf.elf",
@@ -1995,6 +2081,7 @@
   },
   {
    "id": "net.lwip.rand",
+   "owner": "host",
    "component": "net",
    "behavior": "lwip",
    "trigger": "host runner invokes test_lwip_rand.elf",
@@ -2018,6 +2105,7 @@
   },
   {
    "id": "monitor.monitor.accounting",
+   "owner": "host",
    "component": "monitor",
    "behavior": "monitor",
    "trigger": "host runner invokes test_monitor_accounting.elf",
@@ -2041,6 +2129,7 @@
   },
   {
    "id": "monitor.monitor.collect",
+   "owner": "host",
    "component": "monitor",
    "behavior": "monitor",
    "trigger": "host runner invokes test_monitor_collect.elf",
@@ -2064,6 +2153,7 @@
   },
   {
    "id": "monitor.monitor.file",
+   "owner": "host",
    "component": "monitor",
    "behavior": "monitor",
    "trigger": "host runner invokes test_monitor_file.elf",
@@ -2087,6 +2177,7 @@
   },
   {
    "id": "monitor.monitor.model",
+   "owner": "host",
    "component": "monitor",
    "behavior": "monitor",
    "trigger": "host runner invokes test_monitor_model.elf",
@@ -2110,6 +2201,7 @@
   },
   {
    "id": "monitor.monitor.pmm",
+   "owner": "host",
    "component": "monitor",
    "behavior": "monitor",
    "trigger": "host runner invokes test_monitor_pmm.elf",
@@ -2133,6 +2225,7 @@
   },
   {
    "id": "monitor.monitor.render",
+   "owner": "host",
    "component": "monitor",
    "behavior": "monitor",
    "trigger": "host runner invokes test_monitor_render.elf",
@@ -2156,6 +2249,7 @@
   },
   {
    "id": "drivers.mouse.init",
+   "owner": "host",
    "component": "drivers",
    "behavior": "mouse",
    "trigger": "host runner invokes test_mouse_init.elf",
@@ -2179,6 +2273,7 @@
   },
   {
    "id": "drivers.mouse.proto",
+   "owner": "host",
    "component": "drivers",
    "behavior": "mouse",
    "trigger": "host runner invokes test_mouse_proto.elf",
@@ -2202,6 +2297,7 @@
   },
   {
    "id": "sched.mutex.handshake",
+   "owner": "host",
    "component": "sched",
    "behavior": "mutex",
    "trigger": "host runner invokes test_mutex_handshake.elf",
@@ -2225,6 +2321,7 @@
   },
   {
    "id": "net.net.device",
+   "owner": "host",
    "component": "net",
    "behavior": "net",
    "trigger": "host runner invokes test_net_device.elf",
@@ -2248,6 +2345,7 @@
   },
   {
    "id": "net.net.lwip",
+   "owner": "host",
    "component": "net",
    "behavior": "net",
    "trigger": "host runner invokes test_net_lwip.elf",
@@ -2271,6 +2369,7 @@
   },
   {
    "id": "memory.page.table_cleanup",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_cleanup.elf",
@@ -2294,6 +2393,7 @@
   },
   {
    "id": "memory.page.table_contract",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_contract.elf",
@@ -2317,6 +2417,7 @@
   },
   {
    "id": "memory.page.table_install",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_install.elf",
@@ -2340,6 +2441,7 @@
   },
   {
    "id": "memory.page.table_layout",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_layout.elf",
@@ -2363,6 +2465,7 @@
   },
   {
    "id": "memory.page.table_publish",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_publish.elf",
@@ -2386,6 +2489,7 @@
   },
   {
    "id": "memory.page.table_reservation",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_reservation.elf",
@@ -2409,6 +2513,7 @@
   },
   {
    "id": "framework.page.table_runner",
+   "owner": "host",
    "component": "framework",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_runner.elf",
@@ -2432,6 +2537,7 @@
   },
   {
    "id": "memory.page.table_tree",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_tree.elf",
@@ -2455,6 +2561,7 @@
   },
   {
    "id": "memory.page.table_vmm",
+   "owner": "host",
    "component": "memory",
    "behavior": "page",
    "trigger": "host runner invokes test_page_table_vmm.elf",
@@ -2478,6 +2585,7 @@
   },
   {
    "id": "drivers.pci.backend_irq",
+   "owner": "host",
    "component": "drivers",
    "behavior": "pci",
    "trigger": "host runner invokes test_pci_backend_irq.elf",
@@ -2501,6 +2609,7 @@
   },
   {
    "id": "drivers.pci.driver_model",
+   "owner": "host",
    "component": "drivers",
    "behavior": "pci",
    "trigger": "host runner invokes test_pci_driver_model.elf",
@@ -2524,6 +2633,7 @@
   },
   {
    "id": "sched.percpu.layout",
+   "owner": "host",
    "component": "sched",
    "behavior": "percpu",
    "trigger": "host runner invokes test_percpu_layout.elf",
@@ -2547,6 +2657,7 @@
   },
   {
    "id": "memory.pmm.basic",
+   "owner": "host",
    "component": "memory",
    "behavior": "pmm",
    "trigger": "host runner invokes test_pmm_basic.elf",
@@ -2570,6 +2681,7 @@
   },
   {
    "id": "memory.pmm.ram_rel_index",
+   "owner": "host",
    "component": "memory",
    "behavior": "pmm",
    "trigger": "host runner invokes test_pmm_ram_rel_index.elf",
@@ -2593,6 +2705,7 @@
   },
   {
    "id": "fs.poll.requested",
+   "owner": "host",
    "component": "fs",
    "behavior": "poll",
    "trigger": "host runner invokes test_poll_requested.elf",
@@ -2616,6 +2729,7 @@
   },
   {
    "id": "fs.poll.waitqueue_handshake",
+   "owner": "host",
    "component": "fs",
    "behavior": "poll",
    "trigger": "host runner invokes test_poll_waitqueue_handshake.elf",
@@ -2639,6 +2753,7 @@
   },
   {
    "id": "intr.intr.irq_capacity",
+   "owner": "host",
    "component": "intr",
    "behavior": "intr",
    "trigger": "host runner invokes test_irq_capacity.elf",
@@ -2662,6 +2777,7 @@
   },
   {
    "id": "fs.resource.nofile_limits",
+   "owner": "host",
    "component": "fs",
    "behavior": "resource",
    "trigger": "host runner invokes test_nofile_limits.elf",
@@ -2685,6 +2801,7 @@
   },
   {
    "id": "fs.poll.capacity",
+   "owner": "host",
    "component": "fs",
    "behavior": "poll",
    "trigger": "host runner invokes test_poll_capacity.elf",
@@ -2708,6 +2825,7 @@
   },
   {
    "id": "fs.poll.nofile64",
+   "owner": "host",
    "component": "fs",
    "behavior": "poll",
    "trigger": "host runner invokes test_poll_nofile64.elf (the NOFILE=64 build of the same production poll code)",
@@ -2731,6 +2849,7 @@
   },
   {
    "id": "sched.process.image_lifecycle",
+   "owner": "host",
    "component": "sched",
    "behavior": "process",
    "trigger": "host runner invokes test_process_image_lifecycle.elf",
@@ -2754,6 +2873,7 @@
   },
   {
    "id": "fs.pty.winsize",
+   "owner": "host",
    "component": "fs",
    "behavior": "pty",
    "trigger": "host runner invokes test_pty_winsize.elf",
@@ -2777,6 +2897,7 @@
   },
   {
    "id": "framework.runtime.udivti3",
+   "owner": "host",
    "component": "framework",
    "behavior": "runtime",
    "trigger": "host runner invokes test_runtime_udivti3.elf",
@@ -2800,6 +2921,7 @@
   },
   {
    "id": "display.setres.contract",
+   "owner": "host",
    "component": "display",
    "behavior": "setres",
    "trigger": "host runner invokes test_setres.elf",
@@ -2823,6 +2945,7 @@
   },
   {
    "id": "memory.slab.basic",
+   "owner": "host",
    "component": "memory",
    "behavior": "slab",
    "trigger": "host runner invokes test_slab_basic.elf",
@@ -2846,6 +2969,7 @@
   },
   {
    "id": "memory.slab.basic_x86_count",
+   "owner": "host",
    "component": "memory",
    "behavior": "slab",
    "trigger": "host runner invokes test_slab_basic_x86_count.elf",
@@ -2869,6 +2993,7 @@
   },
   {
    "id": "memory.slab.idempotent_reservation",
+   "owner": "host",
    "component": "memory",
    "behavior": "slab",
    "trigger": "host runner invokes test_slab_idempotent_reservation.elf",
@@ -2892,6 +3017,7 @@
   },
   {
    "id": "memory.slab.layout_compute",
+   "owner": "host",
    "component": "memory",
    "behavior": "slab",
    "trigger": "host runner invokes test_slab_layout_compute.elf",
@@ -2915,6 +3041,7 @@
   },
   {
    "id": "memory.slab.lock_path",
+   "owner": "host",
    "component": "memory",
    "behavior": "slab",
    "trigger": "host runner invokes test_slab_lock_path.elf",
@@ -2938,6 +3065,7 @@
   },
   {
    "id": "sched.smp.starting_gate",
+   "owner": "host",
    "component": "sched",
    "behavior": "smp",
    "trigger": "host runner invokes test_smp_starting_gate.elf",
@@ -2961,6 +3089,7 @@
   },
   {
    "id": "sched.sync.primitives",
+   "owner": "host",
    "component": "sched",
    "behavior": "sync",
    "trigger": "host runner invokes test_sync_primitives.elf",
@@ -2984,6 +3113,7 @@
   },
   {
    "id": "sched.syscall.dispatch",
+   "owner": "host",
    "component": "sched",
    "behavior": "syscall",
    "trigger": "host runner invokes test_syscall_dispatch.elf",
@@ -3015,6 +3145,7 @@
   },
   {
    "id": "sched.syscall.a64_subset",
+   "owner": "host",
    "component": "sched",
    "behavior": "syscall",
    "trigger": "host runner invokes test_syscall_dispatch_subset.elf",
@@ -3040,6 +3171,7 @@
   },
   {
    "id": "terminal.terminal.core",
+   "owner": "host",
    "component": "terminal",
    "behavior": "terminal",
    "trigger": "host runner invokes test_terminal_core.elf",
@@ -3071,6 +3203,7 @@
   },
   {
    "id": "terminal.terminal.display",
+   "owner": "host",
    "component": "terminal",
    "behavior": "terminal",
    "trigger": "host runner invokes test_terminal_display.elf",
@@ -3102,6 +3235,7 @@
   },
   {
    "id": "terminal.terminal.render",
+   "owner": "host",
    "component": "terminal",
    "behavior": "terminal",
    "trigger": "host runner invokes test_terminal_render.elf",
@@ -3133,6 +3267,7 @@
   },
   {
    "id": "gui.tetris.logic",
+   "owner": "host",
    "component": "gui",
    "behavior": "tetris",
    "trigger": "host runner invokes test_tetris_logic.elf",
@@ -3156,6 +3291,7 @@
   },
   {
    "id": "monitor.thermal.affinity",
+   "owner": "host",
    "component": "monitor",
    "behavior": "thermal",
    "trigger": "host runner invokes test_thermal_affinity.elf",
@@ -3179,6 +3315,7 @@
   },
   {
    "id": "monitor.thermal.decode",
+   "owner": "host",
    "component": "monitor",
    "behavior": "thermal",
    "trigger": "host runner invokes test_thermal_decode.elf",
@@ -3202,6 +3339,7 @@
   },
   {
    "id": "monitor.thermal.fixup",
+   "owner": "host",
    "component": "monitor",
    "behavior": "thermal",
    "trigger": "host runner invokes test_thermal_fixup.elf",
@@ -3225,6 +3363,7 @@
   },
   {
    "id": "intr.tlb.serial_protocol",
+   "owner": "host",
    "component": "intr",
    "behavior": "tlb",
    "trigger": "host runner invokes test_tlb_serial_protocol.elf",
@@ -3248,6 +3387,7 @@
   },
   {
    "id": "terminal.user.log",
+   "owner": "host",
    "component": "terminal",
    "behavior": "user",
    "trigger": "host runner invokes test_user_log.elf",
@@ -3279,6 +3419,7 @@
   },
   {
    "id": "terminal.user.log_off",
+   "owner": "host",
    "component": "terminal",
    "behavior": "user",
    "trigger": "host runner invokes test_user_log_off.elf",
@@ -3310,6 +3451,7 @@
   },
   {
    "id": "memory.user.protected_ranges",
+   "owner": "host",
    "component": "memory",
    "behavior": "user",
    "trigger": "host runner invokes test_user_protected_ranges.elf",
@@ -3333,6 +3475,7 @@
   },
   {
    "id": "memory.user.write_cow",
+   "owner": "host",
    "component": "memory",
    "behavior": "user",
    "trigger": "host runner invokes test_user_write_cow.elf",
@@ -3364,6 +3507,7 @@
   },
   {
    "id": "fs.vfs.basic",
+   "owner": "host",
    "component": "fs",
    "behavior": "vfs",
    "trigger": "host runner invokes test_vfs_basic.elf",
@@ -3387,6 +3531,7 @@
   },
   {
    "id": "fs.vfs.dcache",
+   "owner": "host",
    "component": "fs",
    "behavior": "vfs",
    "trigger": "host runner invokes test_vfs_dcache.elf",
@@ -3410,6 +3555,7 @@
   },
   {
    "id": "fs.vfs.fs_registry",
+   "owner": "host",
    "component": "fs",
    "behavior": "vfs",
    "trigger": "host runner invokes test_vfs_fs_registry.elf",
@@ -3433,6 +3579,7 @@
   },
   {
    "id": "fs.vfs.iops_fops",
+   "owner": "host",
    "component": "fs",
    "behavior": "vfs",
    "trigger": "host runner invokes test_vfs_iops_fops.elf",
@@ -3456,6 +3603,7 @@
   },
   {
    "id": "fs.vfs.mount_tree",
+   "owner": "host",
    "component": "fs",
    "behavior": "vfs",
    "trigger": "host runner invokes test_vfs_mount_tree.elf",
@@ -3479,6 +3627,7 @@
   },
   {
    "id": "net.virtio.net_instances",
+   "owner": "host",
    "component": "net",
    "behavior": "virtio",
    "trigger": "host runner invokes test_virtio_net_instances.elf",
@@ -3502,6 +3651,7 @@
   },
   {
    "id": "memory.vmm.ack_wraparound",
+   "owner": "host",
    "component": "memory",
    "behavior": "vmm",
    "trigger": "host runner invokes test_vmm_ack_wraparound.elf",
@@ -3525,6 +3675,7 @@
   },
   {
    "id": "memory.vmm.caller_audit",
+   "owner": "host",
    "component": "memory",
    "behavior": "vmm",
    "trigger": "host runner invokes test_vmm_caller_audit.elf",
@@ -3548,6 +3699,7 @@
   },
   {
    "id": "memory.vmm.prot_none",
+   "owner": "host",
    "component": "memory",
    "behavior": "vmm",
    "trigger": "host runner invokes test_vmm_prot_none.elf",
@@ -3571,6 +3723,7 @@
   },
   {
    "id": "memory.vmm.replace_protocol",
+   "owner": "host",
    "component": "memory",
    "behavior": "vmm",
    "trigger": "host runner invokes test_vmm_replace_protocol.elf",
@@ -3594,6 +3747,7 @@
   },
   {
    "id": "memory.vmm.semantic_header",
+   "owner": "host",
    "component": "memory",
    "behavior": "vmm",
    "trigger": "host runner invokes test_vmm_semantic_header.elf",
@@ -3617,6 +3771,7 @@
   },
   {
    "id": "sched.wait.basic",
+   "owner": "host",
    "component": "sched",
    "behavior": "wait",
    "trigger": "host runner invokes test_wait_basic.elf",
@@ -3640,6 +3795,7 @@
   },
   {
    "id": "sched.wait.waitpid",
+   "owner": "host",
    "component": "sched",
    "behavior": "wait",
    "trigger": "host runner invokes test_waitpid.elf",
@@ -3672,6 +3828,7 @@
   },
   {
    "id": "intr.x86.intr_probe",
+   "owner": "host",
    "component": "intr",
    "behavior": "x86",
    "trigger": "host runner invokes test_x86_intr_probe.elf",
@@ -3695,6 +3852,7 @@
   },
   {
    "id": "intr.x86.ipi_ready_publish",
+   "owner": "host",
    "component": "intr",
    "behavior": "x86",
    "trigger": "host runner invokes test_x86_ipi_ready_publish.elf",
@@ -3718,6 +3876,7 @@
   },
   {
    "id": "memory.x86.vmm_backend",
+   "owner": "host",
    "component": "memory",
    "behavior": "x86",
    "trigger": "host runner invokes test_x86_vmm_backend.elf",
@@ -3741,6 +3900,7 @@
   },
   {
    "id": "audit.kernel.layout",
+   "owner": "static",
    "component": "audit",
    "behavior": "kernel_layout",
    "trigger": "python3 qemutests/x86_64_kernel_layout_test.py",
@@ -3764,6 +3924,7 @@
   },
   {
    "id": "audit.canary.contract",
+   "owner": "static",
    "component": "audit",
    "behavior": "canary_contract",
    "trigger": "python3 qemutests/kernel_canary_contract_test.py",
@@ -3787,6 +3948,7 @@
   },
   {
    "id": "audit.syscall.boundary",
+   "owner": "static",
    "component": "audit",
    "behavior": "syscall_boundary",
    "trigger": "python3 qemutests/syscall_boundary_audit.py",
@@ -3810,6 +3972,7 @@
   },
   {
    "id": "audit.header.objects",
+   "owner": "static",
    "component": "audit",
    "behavior": "header_objects",
    "trigger": "python3 qemutests/header_object_audit.py",
@@ -3833,6 +3996,7 @@
   },
   {
    "id": "audit.canary.stack",
+   "owner": "static",
    "component": "audit",
    "behavior": "canary_stack",
    "trigger": "python3 qemutests/stack_canary_audit.py",
@@ -3856,6 +4020,7 @@
   },
   {
    "id": "harness.supervisor.process_cleanup",
+   "owner": "harness",
    "component": "harness",
    "behavior": "supervisor",
    "trigger": "python3 -m unittest qemutests.run_framework_tests",
@@ -3879,6 +4044,7 @@
   },
   {
    "id": "harness.runner.framework_timeout",
+   "owner": "harness",
    "component": "harness",
    "behavior": "runner",
    "trigger": "python3 -m unittest qemutests.test_framework_runner",
@@ -3902,6 +4068,7 @@
   },
   {
    "id": "harness.inventory.uniqueness",
+   "owner": "harness",
    "component": "harness",
    "behavior": "inventory",
    "trigger": "python3 -m unittest qemutests.test_host_build_contract",
@@ -3925,6 +4092,7 @@
   },
   {
    "id": "harness.catalog.validation",
+   "owner": "harness",
    "component": "harness",
    "behavior": "catalog",
    "trigger": "python3 -m unittest qemutests.test_scenario_catalog",
@@ -3948,6 +4116,7 @@
   },
   {
    "id": "qemu.boot.phase0",
+   "owner": "qemu_e2e",
    "component": "qemu",
    "behavior": "boot",
    "trigger": "make test-qemu SUITE=boot",
@@ -3971,6 +4140,7 @@
   },
   {
    "id": "qemu.syscall.systest",
+   "owner": "qemu_e2e",
    "component": "qemu",
    "behavior": "syscall",
    "trigger": "make test-qemu SUITE=syscall",
@@ -3994,6 +4164,7 @@
   },
   {
    "id": "kernel.selftest.core",
+   "owner": "kernel_selftest",
    "component": "kernel",
    "behavior": "selftest",
    "trigger": "make test-qemu SUITE=selftest",
@@ -4017,6 +4188,7 @@
   },
   {
    "id": "sched.switch.reclaim_ownership",
+   "owner": "host",
    "component": "sched",
    "behavior": "switch completion and reclamation",
    "trigger": "host runner invokes test_switch_complete.elf",
@@ -4042,6 +4214,7 @@
   },
   {
    "id": "sched.kthread.constructor_rollback",
+   "owner": "host",
    "component": "sched",
    "behavior": "kernel-thread construction and publication",
    "trigger": "host runner invokes test_kthread_ctor.elf",
@@ -4067,6 +4240,7 @@
   },
   {
    "id": "sched.context.x86_layout",
+   "owner": "host",
    "component": "sched",
    "behavior": "architecture context ABI layout",
    "trigger": "host runner invokes test_sched_layout_offsets.elf",
@@ -4090,6 +4264,7 @@
   },
   {
    "id": "sched.notify.contracts",
+   "owner": "host",
    "component": "sched",
    "behavior": "cross-CPU notification admission and arch backends",
    "trigger": "host runner invokes test_sched_notify.elf, test_sched_notify_x86_backend.elf and test_sched_notify_aarch64_backend.elf",
@@ -4118,6 +4293,7 @@
   },
   {
    "id": "sched.observer.concurrent",
+   "owner": "host",
    "component": "sched",
    "behavior": "concurrency-safe resource observation",
    "trigger": "host runner invokes test_aarch64_sched_observer.elf",
@@ -4145,6 +4321,7 @@
   },
   {
    "id": "sched.tick.local_accounting",
+   "owner": "host",
    "component": "sched",
    "behavior": "aarch64 per-CPU local tick accounting",
    "trigger": "host runner invokes test_aarch64_sched_tick.elf",
@@ -4189,6 +4366,7 @@
   },
   {
    "id": "sched.tick.product_evidence",
+   "owner": "kernel_selftest",
    "component": "sched",
    "behavior": "per_cpu_tick_evidence",
    "trigger": "make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick",
@@ -4235,6 +4413,7 @@
   },
   {
    "id": "sched.tick.schedule_charge",
+   "owner": "host",
    "component": "sched",
    "behavior": "aarch64 schedule() no longer charges the vruntime",
    "trigger": "host runner invokes test_aarch64_sched_charge.elf",
@@ -4261,6 +4440,7 @@
   },
   {
    "id": "sched.notify.x86_backend",
+   "owner": "host",
    "component": "sched",
    "behavior": "x86 notify backend",
    "trigger": "host runner invokes test_sched_notify_x86_backend.elf",
@@ -4285,6 +4465,7 @@
   },
   {
    "id": "sched.notify.aarch64_backend",
+   "owner": "host",
    "component": "sched",
    "behavior": "aarch64 notify backend (P1 polling)",
    "trigger": "host runner invokes test_sched_notify_aarch64_backend.elf",
@@ -4309,6 +4490,7 @@
   },
   {
    "id": "sched.p2.aarch64_idle_wakeup",
+   "owner": "host",
    "component": "sched",
    "behavior": "masked idle wait",
    "trigger": "Host runner invokes test_aarch64_idle_wakeup.elf",
@@ -4333,6 +4515,7 @@
   },
   {
    "id": "sched.p2.blocker_remote_wake",
+   "owner": "host",
    "component": "sched",
    "behavior": "blocker publication and remote wake",
    "trigger": "Host runner invokes test_blocker_remote_wake.elf",
@@ -4358,6 +4541,7 @@
   },
   {
    "id": "sched.p2.aarch64_resched_sgi",
+   "owner": "host",
    "component": "sched",
    "behavior": "SGI4 transport",
    "trigger": "Host runner invokes test_aarch64_resched_sgi.elf",
@@ -4383,6 +4567,7 @@
   },
   {
    "id": "fs.devfs.hierarchy",
+   "owner": "host",
    "component": "fs",
    "behavior": "devfs",
    "trigger": "host runner invokes test_devfs_hierarchy.elf",
@@ -4406,6 +4591,7 @@
   },
   {
    "id": "fs.pci.devfs",
+   "owner": "host",
    "component": "fs",
    "behavior": "devfs",
    "trigger": "host runner invokes test_pci_devfs.elf",
@@ -4429,6 +4615,7 @@
   },
   {
    "id": "drivers.xhci.init",
+   "owner": "host",
    "component": "drivers",
    "behavior": "xhci",
    "trigger": "host runner invokes test_xhci_init.elf",
@@ -4452,6 +4639,7 @@
   },
   {
    "id": "drivers.xhci.phase2",
+   "owner": "host",
    "component": "drivers",
    "behavior": "xhci",
    "trigger": "host runner invokes test_xhci_phase2.elf",
@@ -4475,6 +4663,7 @@
   },
   {
    "id": "drivers.xhci.phase3",
+   "owner": "host",
    "component": "drivers",
    "behavior": "xhci",
    "trigger": "host runner invokes test_xhci_phase3.elf",
@@ -4498,6 +4687,7 @@
   },
   {
    "id": "drivers.usb.devfs",
+   "owner": "host",
    "component": "drivers",
    "behavior": "usb",
    "trigger": "host runner invokes test_usb_devfs.elf",
@@ -4521,6 +4711,7 @@
   },
   {
    "id": "drivers.block.bcache",
+   "owner": "host",
    "component": "drivers",
    "behavior": "block",
    "trigger": "host runner invokes test_bcache.elf",
@@ -4544,6 +4735,7 @@
   },
   {
    "id": "smp.boot1.normal",
+   "owner": "qemu_e2e",
    "component": "smp",
    "behavior": "boot1-normal",
    "trigger": "make test-qemu SUITE=boot-lifecycle runs qemutests/boot_lifecycle.py --case normal at 1/2/4/8 CPUs",
@@ -4570,6 +4762,7 @@
   },
   {
    "id": "smp.boot1.delay-online",
+   "owner": "qemu_e2e",
    "component": "smp",
    "behavior": "boot1_delay-online",
    "trigger": "make test-qemu SUITE=boot-lifecycle runs qemutests/boot_lifecycle.py --case delay-online at 2/4 CPUs",
@@ -4596,6 +4789,7 @@
   },
   {
    "id": "smp.boot1.fatal",
+   "owner": "qemu_e2e",
    "component": "smp",
    "behavior": "boot1_fatal",
    "trigger": "make test-qemu SUITE=boot-lifecycle runs qemutests/boot_lifecycle.py --case no-online / no-scheduler at 2 CPUs",
@@ -4622,6 +4816,7 @@
   },
   {
    "id": "smp.boot1.construction_host",
+   "owner": "host",
    "component": "smp",
    "behavior": "boot1-lifecycle",
    "trigger": "host runner invokes test_boot_cpu_lifecycle.elf",
@@ -4645,6 +4840,7 @@
   },
   {
    "id": "smp.boot1.wait_helper_host",
+   "owner": "host",
    "component": "smp",
    "behavior": "boot1-lifecycle",
    "trigger": "host runner invokes test_x86_smp_boot_sync.elf",
@@ -4668,6 +4864,7 @@
   },
   {
    "id": "smp.boot2.normal",
+   "owner": "qemu_e2e",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "make test-qemu SUITE=boot-irq-time --case normal 1/2/4/8",
@@ -4691,6 +4888,7 @@
   },
   {
    "id": "smp.boot2.force_rtc",
+   "owner": "qemu_e2e",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "make test-qemu SUITE=boot-irq-time --case force-rtc 2",
@@ -4714,6 +4912,7 @@
   },
   {
    "id": "smp.boot2.fatal",
+   "owner": "qemu_e2e",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "make test-qemu SUITE=boot-irq-time --case unsafe-open 1",
@@ -4737,6 +4936,7 @@
   },
   {
    "id": "smp.boot2.registration_host",
+   "owner": "host",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "host runner invokes test_boot_irq_registration.elf",
@@ -4760,6 +4960,7 @@
   },
   {
    "id": "smp.boot2.context_host",
+   "owner": "host",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "host runner invokes test_boot_irq_context.elf",
@@ -4783,6 +4984,7 @@
   },
   {
    "id": "smp.boot2.rtc_host",
+   "owner": "host",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "host runner invokes test_rtc_pie_calibration.elf",
@@ -4806,6 +5008,7 @@
   },
   {
    "id": "smp.boot2.handoff_host",
+   "owner": "host",
    "component": "smp",
    "behavior": "boot2-irq-time",
    "trigger": "host runner invokes test_boot_tick_handoff.elf",
@@ -4829,6 +5032,7 @@
   },
   {
    "id": "boot.failure.normal",
+   "owner": "qemu_e2e",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "make test-qemu SUITE=boot-failure --case normal 1/2/4",
@@ -4852,6 +5056,7 @@
   },
   {
    "id": "boot.failure.fatal",
+   "owner": "qemu_e2e",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "make test-qemu SUITE=boot-failure --case required-subsys|registration|root|tty|pty|stdio|init|child-fds",
@@ -4875,6 +5080,7 @@
   },
   {
    "id": "boot.failure.optional",
+   "owner": "qemu_e2e",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "make test-qemu SUITE=boot-failure --case optional-subsys 1/2",
@@ -4898,6 +5104,7 @@
   },
   {
    "id": "boot.failure.subsys_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_failure_subsys.elf",
@@ -4921,6 +5128,7 @@
   },
   {
    "id": "boot.failure.log_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_failure_log.elf",
@@ -4944,6 +5152,7 @@
   },
   {
    "id": "boot.failure.mounts_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_failure_mounts.elf",
@@ -4967,6 +5176,7 @@
   },
   {
    "id": "boot.failure.terminal_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_failure_terminal.elf",
@@ -4990,6 +5200,7 @@
   },
   {
    "id": "boot.failure.stdio_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_stdio.elf",
@@ -5013,6 +5224,7 @@
   },
   {
    "id": "boot.failure.spawn_failure_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_spawn_failure.elf",
@@ -5036,6 +5248,7 @@
   },
   {
    "id": "boot.failure.task_init_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-failure-policy",
    "trigger": "host runner invokes test_boot_task_init.elf",
@@ -5059,6 +5272,7 @@
   },
   {
    "id": "boot.contract.subsys_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "host runner invokes test_boot_contract_subsys.elf",
@@ -5082,6 +5296,7 @@
   },
   {
    "id": "boot.contract.cpu_prepare_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "host runner invokes test_boot_contract_cpu_prepare.elf",
@@ -5105,6 +5320,7 @@
   },
   {
    "id": "boot.contract.softirq_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "host runner invokes test_boot_contract_softirq.elf",
@@ -5128,6 +5344,7 @@
   },
   {
    "id": "boot.contract.sequence_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "host runner invokes test_boot_contract_sequence.elf",
@@ -5151,6 +5368,7 @@
   },
   {
    "id": "boot.contract.checks_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "host runner invokes test_boot_contract_checks.elf",
@@ -5174,6 +5392,7 @@
   },
   {
    "id": "boot.contract.x86",
+   "owner": "qemu_e2e",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "make test-qemu SUITE=boot-contract",
@@ -5197,6 +5416,7 @@
   },
   {
    "id": "boot.contract.aarch64",
+   "owner": "qemu_e2e",
    "component": "boot",
    "behavior": "boot-stage-contracts",
    "trigger": "make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract",
@@ -5220,6 +5440,7 @@
   },
   {
    "id": "boot.services.vfs_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "host runner invokes test_boot_services_vfs.elf",
@@ -5243,6 +5464,7 @@
   },
   {
    "id": "boot.services.spawn_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "host runner invokes test_boot_services_spawn.elf",
@@ -5266,6 +5488,7 @@
   },
   {
    "id": "boot.services.sequence_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "host runner invokes test_boot_services_sequence.elf",
@@ -5289,6 +5512,7 @@
   },
   {
    "id": "boot.services.services_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "host runner invokes test_boot_services_services.elf",
@@ -5312,6 +5536,7 @@
   },
   {
    "id": "boot.services.late_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "host runner invokes test_boot_services_late.elf",
@@ -5335,6 +5560,7 @@
   },
   {
    "id": "boot.services.mechanisms_host",
+   "owner": "host",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "host runner invokes test_boot_services_mechanisms.elf",
@@ -5358,6 +5584,7 @@
   },
   {
    "id": "boot.services.x86",
+   "owner": "qemu_e2e",
    "component": "boot",
    "behavior": "scheduler-services",
    "trigger": "make test-qemu SUITE=boot-services",
@@ -5381,6 +5608,7 @@
   },
   {
    "id": "fs.vfs.atomic_append",
+   "owner": "host",
    "component": "fs",
    "behavior": "vfs",
    "trigger": "host runner invokes test_vfs_append.elf",
@@ -5408,6 +5636,7 @@
   },
   {
    "id": "libc.stdio.stream_io",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdio",
    "trigger": "host runner invokes test_libc_stdio_io.elf",
@@ -5437,6 +5666,7 @@
   },
   {
    "id": "libc.stdio.dynamic_lines",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdio",
    "trigger": "host runner invokes test_libc_line.elf",
@@ -5464,6 +5694,7 @@
   },
   {
    "id": "libc.stdio.format_and_seek",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdio",
    "trigger": "host runner invokes test_libc_stdio_format.elf",
@@ -5491,6 +5722,7 @@
   },
   {
    "id": "libc.stdlib.integer_conversions",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdlib",
    "trigger": "host runner invokes test_libc_integer.elf",
@@ -5518,6 +5750,7 @@
   },
   {
    "id": "libc.stdlib.float_parse",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdlib",
    "trigger": "host runner invokes test_libc_float_parse.elf",
@@ -5544,6 +5777,7 @@
   },
   {
    "id": "libc.stdio.scan_parse",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdio",
    "trigger": "host runner invokes test_libc_scan.elf",
@@ -5572,6 +5806,7 @@
   },
   {
    "id": "libc.time.calendar_tz_format",
+   "owner": "host",
    "component": "libc",
    "behavior": "time",
    "trigger": "host runner invokes test_libc_time.elf",
@@ -5603,6 +5838,7 @@
   },
   {
    "id": "libc.path.realpath_exec",
+   "owner": "host",
    "component": "libc",
    "behavior": "path",
    "trigger": "host runner invokes test_libc_path.elf",
@@ -5634,6 +5870,7 @@
   },
   {
    "id": "libc.dir.scan",
+   "owner": "host",
    "component": "libc",
    "behavior": "dir",
    "trigger": "host runner invokes test_libc_dir.elf",
@@ -5674,6 +5911,7 @@
   },
   {
    "id": "libc.api.header_contract",
+   "owner": "host",
    "component": "libc",
    "behavior": "api",
    "trigger": "host runner invokes test_libc_api.elf",
@@ -5710,6 +5948,7 @@
   },
   {
    "id": "libc.stdlib.alloc_contracts",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdlib",
    "trigger": "host runner invokes test_libc_alloc.elf",
@@ -5747,6 +5986,7 @@
   },
   {
    "id": "libc.stdlib.env_ownership",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdlib",
    "trigger": "host runner invokes test_libc_environ.elf",
@@ -5786,6 +6026,7 @@
   },
   {
    "id": "libc.unistd.shutdown_syscall",
+   "owner": "host",
    "component": "libc",
    "behavior": "unistd",
    "trigger": "host runner invokes test_libc_shutdown.elf",
@@ -5819,6 +6060,7 @@
   },
   {
    "id": "libc.stdio.stream_state",
+   "owner": "host",
    "component": "libc",
    "behavior": "stdio",
    "trigger": "host runner invokes test_libc_stream_state.elf",
@@ -5857,6 +6099,7 @@
   },
   {
    "id": "doom.engine.exit",
+   "owner": "host",
    "component": "doom",
    "behavior": "engine",
    "trigger": "host runner invokes test_doom_engine_exit.elf",
@@ -5880,6 +6123,7 @@
   },
   {
    "id": "doom.engine.config",
+   "owner": "host",
    "component": "doom",
    "behavior": "engine",
    "trigger": "host runner invokes test_doom_config.elf",
@@ -5903,6 +6147,7 @@
   },
   {
    "id": "doom.platform.video",
+   "owner": "host",
    "component": "doom",
    "behavior": "video",
    "trigger": "host runner invokes test_doom_video.elf",
@@ -5926,6 +6171,7 @@
   },
   {
    "id": "doom.platform.input",
+   "owner": "host",
    "component": "doom",
    "behavior": "input",
    "trigger": "host runner invokes test_doom_input.elf",
@@ -5949,6 +6195,7 @@
   },
   {
    "id": "doom.platform.input_engine",
+   "owner": "host",
    "component": "doom",
    "behavior": "input",
    "trigger": "host runner invokes test_doom_input_engine.elf",
@@ -5972,6 +6219,7 @@
   },
   {
    "id": "doom.platform.runtime",
+   "owner": "host",
    "component": "doom",
    "behavior": "runtime",
    "trigger": "host runner invokes test_doom_runtime.elf",
@@ -5995,6 +6243,7 @@
   },
   {
    "id": "doom.diag.observation",
+   "owner": "host",
    "component": "doom",
    "behavior": "diag",
    "trigger": "host runner invokes test_doom_diag.elf",
@@ -6018,6 +6267,7 @@
   },
   {
    "id": "memory.user_vm.host",
+   "owner": "host",
    "component": "memory",
    "behavior": "user_vm",
    "trigger": "host target invokes test_user_vm",
@@ -6041,6 +6291,7 @@
   },
   {
    "id": "gui.widget.focus",
+   "owner": "host",
    "component": "gui",
    "behavior": "widget_focus",
    "trigger": "host target invokes test_gui_focus",
@@ -6064,6 +6315,7 @@
   },
   {
    "id": "gui.widget.appearance",
+   "owner": "host",
    "component": "gui",
    "behavior": "widget_appearance",
    "trigger": "host target invokes test_gui_widget_appearance",
@@ -6087,6 +6339,7 @@
   },
   {
    "id": "gui.widget.event",
+   "owner": "host",
    "component": "gui",
    "behavior": "widget_event",
    "trigger": "host target invokes test_gui_widget_event",
@@ -6110,6 +6363,7 @@
   },
   {
    "id": "gui.widget.layout",
+   "owner": "host",
    "component": "gui",
    "behavior": "widget_layout",
    "trigger": "host target invokes test_gui_widget_layout",
@@ -6133,6 +6387,7 @@
   },
   {
    "id": "monitor.procfs.host",
+   "owner": "host",
    "component": "monitor",
    "behavior": "procfs_host",
    "trigger": "host target invokes test_monitor_procfs",
@@ -6156,6 +6411,7 @@
   },
   {
    "id": "memory.pmm.boot_reservation",
+   "owner": "host",
    "component": "memory",
    "behavior": "pmm_boot_reservation",
    "trigger": "host target invokes test_pmm_boot_reservation",
@@ -6179,6 +6435,7 @@
   },
   {
    "id": "net.socket.readiness",
+   "owner": "host",
    "component": "net",
    "behavior": "socket_readiness",
    "trigger": "host target invokes test_socket_net_readiness",

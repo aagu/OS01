@@ -4380,6 +4380,16 @@
       "source": "qemutests/test_scan_tools.py"
     },
     {
+      "id": "test_scenario_owner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_scenario_owner.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_sched_layout_offsets",
       "layer": "host",

@@ -14,6 +14,7 @@ OS01 实行多层防护策略，每一层有明确的证明目标与局限性，
 | **`static` / `contract`** | ABI 结构体布局、跨边界符号、依赖隔离、头文件闭包、构建系统命令快照与 dry-run 幂等性 | 代码逻辑在运行时的功能正确性、真实 guest 用户空间行为 | `tools/audit/*.py`、`qemutests/test_*contract.py` |
 | **`harness`** | 框架执行器、进程组清理、协议解析、超时防护、输出归档与失败传播链路 | fake/mock 输出所描述的底层内核行为正确性 | `qemutests/test_*runner.py`、`test_harness_*.py` |
 | **`kernel_selftest`** | 在真实内核态上下文中验证内部数据结构、锁、调度器机制、MSR 安全与异常处理 | 完整用户态系统调用链、VFS 设备树集成与真实 shell 交互 | `kernel/selftest/*.c` |
+| **`systest`** | 在真实用户态进程中端到端验证 syscall ABI、fork/exec/wait、信号与文件描述符语义 | 内核内部不变量（无 syscall 边界暴露）与多机/GUI 交互 | `user/systest/*.c` |
 | **`qemu_e2e`** | 完整启动引导、UEFI 握手、ACPI/PCI 枚举、设备中断驱动、文件系统与终端交互端到端走通 | 边缘场景和内部异常路径的穷举覆盖（由 host / selftest 分担） | `qemutests/run_test.py`、`qemutests/tests/*.py` |
 
 ---
@@ -80,6 +81,8 @@ OS01 实行多层防护策略，每一层有明确的证明目标与局限性，
 
 ## 6. 场景目录 (`config/test-scenarios.json`) 维护契约
 
-- 场景目录记录全系统测试场景的设计映射（schema_version=1）。
-- 所有 157 个宿主测试二进制、静态审计工具、框架测试模块以及 guest suite 必须在目录中有对应的映射记录。
+- 场景目录记录全系统测试场景的设计映射（`schema_version=2`）。
+- 每条场景必须声明 `owner` 字段（合法层级之一，默认等于 `primary.layer`），确立该场景的唯一主责层。
+- **跨层引用与 `supporting` 规则**：若测试目录 (`config/test-catalog.json`) 中某测试声明 `scenarios: [S]` 且该测试的 `layer != S.owner`，则场景 `S` 的 `supporting` 列表中必须包含对应 `layer` 且附带非空 `distinct_risk` 的条目，说明该层防范的独特失效风险；否则 `scenario_catalog.py --check` 失败。引用不存在的场景 ID 同样失败。
+- 所有宿主测试、静态审计工具、框架测试模块以及 guest suite 必须在目录中有对应的映射记录。
 - 目录由 `python3 qemutests/scenario_catalog.py --check` 进行持续校验，作为 CI 与构建合规性门禁。
