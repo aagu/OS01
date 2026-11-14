@@ -757,6 +757,10 @@ test-flake-report:
 # Environment doctor: compare local toolchain versions against ci/Dockerfile pins.
 test-doctor:
 	python3 tools/tests/test_doctor.py --root $(OS01_ROOT)
+# Local CI container parity entry (docker/podman; no auto-pull).
+.PHONY: ci-local
+ci-local:
+	$(if $(SUITE),bash tools/tests/ci_local.sh $(PROFILE) test-qemu SUITE=$(SUITE),$(if $(MAKE_ARGS),bash tools/tests/ci_local.sh $(PROFILE) $(MAKE_ARGS),$(error ERROR: ci-local requires SUITE=<name> or MAKE_ARGS='<targets>' (e.g. make ci-local SUITE=phase-0))))
 
 .PHONY: print-harness-modules print-test-qemu-flavors print-test-qemu-images
 print-harness-modules:
@@ -2897,6 +2901,8 @@ help:
 		 'test-flake-report'    '(always)'   'Flake ledger report from local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); always exits 0';
 	@printf '  %-22s %-13s %s\n' \
 		 'test-doctor'          '(always)'   'Compare local clang/ld.lld/qemu versions against ci/Dockerfile pins (exits 2 only if a tool cannot execute)';
+	@printf '  %-22s %-13s %s\n' \
+		 'ci-local'             '(always)'   'Run test suite inside ghcr.io/aagu/os01-ci:latest via docker/podman (SUITE=<name> or MAKE_ARGS=...)';
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
 	@printf '  %-22s %-13s %s\n' \

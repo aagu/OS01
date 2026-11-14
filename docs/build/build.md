@@ -59,6 +59,8 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
 | `make test-harness` | Python unittest framework regression (no QEMU, never discovers QEMU scripts) | — |
+| `make test-doctor` | Compare local `clang`/`ld.lld`/`qemu` versions against `ci/Dockerfile` pins (reports `OK`/`DRIFT`/`SKIPPED(no ci pin)`, exits 2 only if a tool cannot execute) | — |
+| `make ci-local SUITE=<name>` | Run `test-qemu SUITE=<name>` (or `MAKE_ARGS=...`) inside `ghcr.io/aagu/os01-ci:latest` via `docker`/`podman` (no auto-pull) | — |
 
 AArch64 EL1 调度器验收（`MODE=sched`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched [SCHED_CASE=<v>]`。该 MODE 通过受控子构建产出隔离的 `KERNEL_SELFTEST` 调度器镜像变体：`SCHED_CASE=positive`（默认组成部分）构建 `kernel/sched` + `image/sched`（正例：严格 14 用例协议 + 全部冻结 `[sched-evidence]` 字段证据矩阵），四个故障值 `sp-top`/`sp-low`/`pc-low`/`pc-data` 各构建 `kernel/sched-fault-<v>` + `image/sched-fault-<v>`（编译期选中的 `aarch64_sched_fault_inject` 注入钩子损坏保存 SP/PC，验收要求 fatal 发生在**切栈前**且受害者零提交切换）。`SCHED_CASE` 省略时为 `all`（正例矩阵 + 全部四个负例）。选择器 `AARCH64_SCHED_TEST` 与 `SCHED_CASE` 在解析期拒绝非法值；`MODE=sched`（即使未带选择器）与 `AARCH64_SYNC_FAULT_TEST`/`AARCH64_M1_TEST`/`KERNEL_TEST_FORCE_NO_RNDRRS`/`KERNEL_CANARY_SELFTEST`/`OS01_SYSTEST`/非零 `AARCH64_SMP_TEST_NO_ACK_CPU` 的任意组合均解析期报错。runner（`qemutests/aarch64_scheduler.py`）只消费 make 传入的显式镜像/固件/ELF 路径，绝不隐式重建；每次 QEMU 有 120 s 绝对期限（tick 不延长），完成后 1 s 排空窗口，崩溃/超时永远 FAIL；`llvm-nm` 符号审计要求普通 normal/selftest/positive ELF 不含注入符号而每个 fault ELF 含有。普通镜像 BSP idle 冒烟仍是同一 runner 的 `--idle-smoke` 模式（`--cpus 1 2 4 8`）。
 
@@ -714,6 +716,8 @@ make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner 
 make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick  # 每核 tick 记账验收（1/2/4/8 核各两次）
 make test-contract                  # CI 契约检查
 make test-harness                   # Python unittest 框架回归（TEST_HARNESS_MODULES 列表；不启动 QEMU）
+make test-doctor                    # 环境体检：比对本地 clang/ld.lld/qemu 与 ci/Dockerfile 钉值
+make ci-local SUITE=phase-0         # 在本地 ghcr.io/aagu/os01-ci:latest 容器中运行套件（不自动 pull）
 
 # 检查
 make PROFILE=x86_64-clang print-run-paths  # 打印 firmware= / image= 路径

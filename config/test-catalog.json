@@ -1976,6 +1976,16 @@
       "source": "qemutests/test_ci_artifact.py"
     },
     {
+      "id": "test_ci_local",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_ci_local.py"
+    },
+    {
       "id": "test_ci_schedule_check",
       "layer": "harness",
       "subsystem": "test-framework",
