@@ -40,6 +40,7 @@ enum fake_op_kind {
     OP_CLEAR_HALT = 2,
     OP_BULK_OUT   = 3,
     OP_BULK_IN    = 4,
+    OP_RECOVER_TIMEOUT = 5,
 };
 
 struct fake_step {
@@ -144,6 +145,21 @@ static int fake_clear_halt(void *ctx, uint8_t ep_addr)
     assert_eq(OP_CLEAR_HALT, s->kind);
     assert_eq(s->ep, ep_addr);
     f->log_kind[f->log_count] = OP_CLEAR_HALT;
+    f->log_ep[f->log_count] = ep_addr;
+    f->log_count++;
+    return s->rc;
+}
+
+static int fake_recover_timeout(void *ctx, uint8_t ep_addr)
+{
+    struct fake_bot_ctx *f = ctx;
+    assert_true(f->step_idx < f->step_count);
+    if (f->step_idx >= f->step_count)
+        return -EIO;
+    struct fake_step *s = &f->steps[f->step_idx++];
+    assert_eq(OP_RECOVER_TIMEOUT, s->kind);
+    assert_eq(s->ep, ep_addr);
+    f->log_kind[f->log_count] = OP_RECOVER_TIMEOUT;
     f->log_ep[f->log_count] = ep_addr;
     f->log_count++;
     return s->rc;
@@ -297,6 +313,15 @@ static void push_clear_halt(struct fake_bot_ctx *f, uint8_t ep, int rc)
     struct fake_step *s = &f->steps[f->step_count++];
     memset(s, 0, sizeof(*s));
     s->kind = OP_CLEAR_HALT;
+    s->ep = ep;
+    s->rc = rc;
+}
+
+static void push_recover_timeout(struct fake_bot_ctx *f, uint8_t ep, int rc)
+{
+    struct fake_step *s = &f->steps[f->step_count++];
+    memset(s, 0, sizeof(*s));
+    s->kind = OP_RECOVER_TIMEOUT;
     s->ep = ep;
     s->rc = rc;
 }
@@ -1116,6 +1141,84 @@ TEST_FUNC(write_uncertain_invalidates_window)
     free(disk);
 }
 
+TEST_FUNC(stop_endpoint_recovery)
+{
+    struct usb_msc_bot b;
+    struct fake_bot_ctx f;
+    uint8_t cdb[6] = { 0x12, 0, 0, 0, 36, 0 };
+    uint8_t data[4] = { 1, 2, 3, 4 };
+    uint8_t buf[36];
+    size_t actual = 0;
+
+    /* 1. Recovered bulk timeout -> full BOT reset + 2 cleared pipes + 1 safe retry with fresh tag */
+    init_bot(&b, &f);
+    b.transport.recover_timeout = fake_recover_timeout;
+    push_cbw(&f, 0, 31);
+    push_in(&f, -ETIMEDOUT, 0, NULL, 0);
+    push_recover_timeout(&f, EP_IN, 0);
+    push_reset_recovery(&f, 0, 0, 0);
+    push_cbw(&f, 0, 31);
+    push_in(&f, 0, 4, data, 4);
+    push_csw_auto(&f, 0, 0);
+    int rc = usb_msc_bot_command(&b, cdb, 6, USB_MSC_IN, buf, 4, true, &actual);
+    assert_eq(0, rc);
+    assert_eq(4, actual);
+    assert_false(b.dead);
+    assert_eq(2, f.cbw_count);
+    assert_true(f.seen_tags[1] > f.seen_tags[0]);
+    assert_eq(f.step_count, f.step_idx);
+
+    /* 2. WRITE/FLUSH (retry_safe=false): recovered timeout resets BOT, NEVER replays */
+    init_bot(&b, &f);
+    b.transport.recover_timeout = fake_recover_timeout;
+    uint8_t wcdb[10] = { 0x2a, 0, 0, 0, 0, 1, 0, 0, 1, 0 };
+    push_cbw(&f, 0, 31);
+    push_out(&f, -ETIMEDOUT, 0);
+    push_recover_timeout(&f, EP_OUT, 0);
+    push_reset_recovery(&f, 0, 0, 0);
+    rc = usb_msc_bot_command(&b, wcdb, 10, USB_MSC_OUT, buf, 16, false, &actual);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_eq(1, f.cbw_count);
+    assert_eq(f.step_count, f.step_idx);
+
+    /* 3. Unrecovered bulk timeout (recover_timeout < 0): no BOT reset, marks dead */
+    init_bot(&b, &f);
+    b.transport.recover_timeout = fake_recover_timeout;
+    push_cbw(&f, 0, 31);
+    push_in(&f, -ETIMEDOUT, 0, NULL, 0);
+    push_recover_timeout(&f, EP_IN, -EIO);
+    rc = usb_msc_bot_command(&b, cdb, 6, USB_MSC_IN, buf, 4, true, &actual);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_true(b.dead);
+    assert_eq(1, f.cbw_count);
+    assert_eq(f.step_count, f.step_idx);
+
+    /* 4. EP0/command timeout during reset recovery remains terminal without recover_timeout */
+    init_bot(&b, &f);
+    b.transport.recover_timeout = fake_recover_timeout;
+    push_cbw(&f, -EIO, 0);
+    push_reset_recovery(&f, -ETIMEDOUT, 0, 0);
+    rc = usb_msc_bot_command(&b, cdb, 6, USB_MSC_IN, buf, 4, true, &actual);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_true(b.dead);
+    assert_eq(f.step_count, f.step_idx);
+
+    /* 5. Second timeout after safe replay does NOT attempt another Stop/replay; marks dead */
+    init_bot(&b, &f);
+    b.transport.recover_timeout = fake_recover_timeout;
+    push_cbw(&f, 0, 31);
+    push_in(&f, -ETIMEDOUT, 0, NULL, 0);
+    push_recover_timeout(&f, EP_IN, 0);
+    push_reset_recovery(&f, 0, 0, 0);
+    push_cbw(&f, 0, 31);
+    push_in(&f, -ETIMEDOUT, 0, NULL, 0);
+    rc = usb_msc_bot_command(&b, cdb, 6, USB_MSC_IN, buf, 4, true, &actual);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_true(b.dead);
+    assert_eq(2, f.cbw_count);
+    assert_eq(f.step_count, f.step_idx);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(bot_wire_and_csw),
     TEST_ENTRY(bot_recovery),
@@ -1124,6 +1227,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(read_ahead_concurrent),
     TEST_ENTRY(write10_payload_and_flush),
     TEST_ENTRY(write_uncertain_invalidates_window),
+    TEST_ENTRY(stop_endpoint_recovery),
 TEST_LIST_END
 
 int main(void)

@@ -1183,6 +1183,200 @@ void test_xhci_clear_halt_state_drives_command_sequence(void)
     free(staging);
 }
 
+void test_xhci_stop_endpoint_recovery(void)
+{
+    TEST_CASE("stop_endpoint_recovery: Stopped->SetDeq, FSE after late normal, ContextStateErr+Halted, missing FSE");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    uint8_t input_ctx[4096];
+    uint8_t dev_ctx[4096];
+
+    void *staging = aligned_alloc(65536, 65536);
+    assert_true(staging != NULL);
+
+    struct xhci_trb bulk_in_trbs[XHCI_TRB_RING_SIZE];
+    struct xhci_ep_ring in_ring;
+    struct xhci_ep_ring *rings[4] = { NULL, NULL, NULL, &in_ring };
+    uint8_t buf[64];
+    size_t actual = 0;
+
+    /* Helper macro-like setup for each sub-case */
+    #define INIT_RECOVERY_CASE() do { \
+        setup_mock_ep0_ctrl(&ctrl, &slot, ep0_ring, event_ring, rt_regs, db_regs); \
+        memset(cmd_ring, 0, sizeof(cmd_ring)); \
+        memset(input_ctx, 0, sizeof(input_ctx)); \
+        memset(dev_ctx, 0, sizeof(dev_ctx)); \
+        memset(bulk_in_trbs, 0, sizeof(bulk_in_trbs)); \
+        ctrl.cmd_ring_virt = cmd_ring; \
+        ctrl.cmd_ring_phys = 0x10000; \
+        ctrl.cmd_ring_enqueue = 0; \
+        ctrl.cmd_ring_cycle = 1; \
+        slot.active = true; \
+        slot.configured = true; \
+        slot.speed = XHCI_PORT_SPEED_HIGH; \
+        slot.port_num = 1; \
+        slot.input_ctx_virt = input_ctx; \
+        slot.input_ctx_phys = 0x35000; \
+        slot.dev_ctx_virt = dev_ctx; \
+        slot.dev_ctx_phys = 0x36000; \
+        slot.bulk_staging_virt = staging; \
+        slot.bulk_staging_phys = (uint64_t)(uintptr_t)staging; \
+        memset(&in_ring, 0, sizeof(in_ring)); \
+        in_ring.ring_phys = 0x60000; \
+        in_ring.ring_virt = bulk_in_trbs; \
+        in_ring.enqueue = 0; \
+        in_ring.cycle = 1; \
+        in_ring.dci = 3; \
+        in_ring.ep_type = XHCI_EP_TYPE_BULK_IN; \
+        in_ring.max_packet_size = 512; \
+        in_ring.active = true; \
+        slot.ep_rings = rings; \
+        slot.max_dci = 3; \
+        uint32_t *out_ep3 = (uint32_t *)xhci_dev_ep_ctx(dev_ctx, ctrl.csz, 3); \
+        out_ep3[0] = XHCI_EP_STATE_RUNNING; \
+    } while (0)
+
+    /* Case 1: Bulk timeout -> Stopped Transfer Event -> Stop EP Success -> Set TR Dequeue (no Reset) */
+    INIT_RECOVERY_CASE();
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual), -ETIMEDOUT);
+    assert_true(slot.poisoned);
+    assert_true(slot.dma_retained);
+    assert_eq(slot.pending_bulk_dci, 3);
+
+    /* Ordinary I/O cannot run against pending DMA */
+    *(volatile uint32_t *)(db_regs + 4) = 0;
+    assert_true(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual) != 0);
+    assert_eq(*(volatile uint32_t *)(db_regs + 4), 0);
+
+    /* Inject Stopped Transfer Event (DCI 3) then Stop EP Cmd Completion (cmd[0] @ 0x10000),
+     * then Set TR Deq Cmd Completion (cmd[1] @ 0x10010) */
+    event_ring[0].parameter = 0x60000;
+    event_ring[0].status = (XHCI_COMP_STOPPED << 24);
+    event_ring[0].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x10000;
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[2].parameter = 0x10010;
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    assert_eq(xhci_recover_bulk_timeout(&ctrl, 1, 3), 0);
+    assert_false(slot.poisoned);
+    assert_eq(slot.pending_bulk_dci, 0);
+    assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_STOP_EP);
+    assert_eq((cmd_ring[0].control >> 23) & 1, 0); /* SP=0 */
+    assert_eq((cmd_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_SET_TR_DEQ);
+    assert_eq(cmd_ring[1].parameter, 0x60010ULL | 1ULL);
+
+    /* Case 2: Old normal completion (SUCCESS) then FSE (Stopped @ next deq) -> Stop EP Success -> Set TR Deq */
+    INIT_RECOVERY_CASE();
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual), -ETIMEDOUT);
+
+    event_ring[0].parameter = 0x60000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x60010; /* FSE pointing to next dequeue */
+    event_ring[1].status = (XHCI_COMP_STOPPED_LENGTH_INVALID << 24);
+    event_ring[1].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[2].parameter = 0x10000;
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[3].parameter = 0x10010;
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    assert_eq(xhci_recover_bulk_timeout(&ctrl, 1, 3), 0);
+    assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_STOP_EP);
+    assert_eq((cmd_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_SET_TR_DEQ);
+
+    /* Case 3: Stop returns Context State Error + Halted output context -> Reset(TSP=0) -> ClearFeature -> Set Deq */
+    INIT_RECOVERY_CASE();
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual), -ETIMEDOUT);
+    uint32_t *out_ep3 = (uint32_t *)xhci_dev_ep_ctx(dev_ctx, ctrl.csz, 3);
+    out_ep3[0] = XHCI_EP_STATE_HALTED;
+
+    /* Event 0: Stop EP Context State Error (@ 0x10000)
+     * Event 1: Reset EP Success (@ 0x10010)
+     * Event 2: EP0 CLEAR_FEATURE Status (@ 0x40000 + 1*16)
+     * Event 3: Set TR Deq Success (@ 0x10020) */
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_CONTEXT_STATE_ERR << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x10010;
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[2].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[3].parameter = 0x10020;
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[3].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    assert_eq(xhci_recover_bulk_timeout(&ctrl, 1, 3), 0);
+    assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_STOP_EP);
+    assert_eq((cmd_ring[1].control >> 10) & 0x3F, XHCI_TRB_TYPE_RESET_EP);
+    assert_eq((cmd_ring[1].control >> 9) & 1, 0); /* TSP=0 */
+    assert_eq(ep0_ring[0].parameter, ((uint64_t)0x81 << 32) | (0x01ULL << 8) | 0x02ULL);
+    assert_eq((cmd_ring[2].control >> 10) & 0x3F, XHCI_TRB_TYPE_SET_TR_DEQ);
+
+    /* Case 4: Missing FSE (only normal completion or unrelated DCI Stopped before Stop EP Success) -> stays poisoned */
+    INIT_RECOVERY_CASE();
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual), -ETIMEDOUT);
+
+    event_ring[0].parameter = 0x60000;
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24); /* normal completion, NOT FSE */
+    event_ring[0].control = (1U << 24) | (3U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = 0x70000;
+    event_ring[1].status = (XHCI_COMP_STOPPED << 24); /* unrelated DCI 4 */
+    event_ring[1].control = (1U << 24) | (4U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[2].parameter = 0x10000;
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    assert_true(xhci_recover_bulk_timeout(&ctrl, 1, 3) < 0);
+    assert_true(slot.poisoned);
+    assert_true(slot.dma_retained);
+    assert_eq((cmd_ring[1].control >> 10) & 0x3F, 0); /* no Set TR Deq */
+    *(volatile uint32_t *)(db_regs + 4) = 0;
+    assert_true(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual) != 0);
+    assert_eq(*(volatile uint32_t *)(db_regs + 4), 0);
+
+    /* Case 5: Context State Error + EP Error state (not Halted) -> stays poisoned */
+    INIT_RECOVERY_CASE();
+    assert_eq(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual), -ETIMEDOUT);
+    out_ep3 = (uint32_t *)xhci_dev_ep_ctx(dev_ctx, ctrl.csz, 3);
+    out_ep3[0] = XHCI_EP_STATE_ERROR;
+
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_CONTEXT_STATE_ERR << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    assert_true(xhci_recover_bulk_timeout(&ctrl, 1, 3) < 0);
+    assert_true(slot.poisoned);
+    assert_true(slot.dma_retained);
+    *(volatile uint32_t *)(db_regs + 4) = 0;
+    assert_true(xhci_bulk_transfer(&ctrl, 1, 3, buf, sizeof(buf), &actual) != 0);
+    assert_eq(*(volatile uint32_t *)(db_regs + 4), 0);
+
+    #undef INIT_RECOVERY_CASE
+    free(staging);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -1197,6 +1391,7 @@ int main(void)
     test_xhci_bulk_event_identity();
     test_xhci_bulk_wrap_and_boundary();
     test_xhci_clear_halt_state_drives_command_sequence();
+    test_xhci_stop_endpoint_recovery();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

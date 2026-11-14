@@ -56,6 +56,23 @@ static int xhci_msc_clear_halt(void *ctx, uint8_t ep_addr)
     return xhci_clear_halt(c->ctrl, c->slot_id, ep_addr);
 }
 
+static int xhci_msc_recover_timeout(void *ctx, uint8_t ep_addr)
+{
+    struct xhci_msc_ctx *c = ctx;
+    if (!c || !c->ctrl)
+        return -EINVAL;
+
+    uint8_t dci;
+    if (ep_addr == c->in_addr)
+        dci = c->in_dci;
+    else if (ep_addr == c->out_addr)
+        dci = c->out_dci;
+    else
+        return -EINVAL;
+
+    return xhci_recover_bulk_timeout(c->ctrl, c->slot_id, dci);
+}
+
 static int xhci_msc_init(void)
 {
     uint8_t next_disk = 0;
@@ -90,6 +107,7 @@ static int xhci_msc_init(void)
                 .control_no_data = xhci_msc_control_no_data,
                 .bulk = xhci_msc_bulk,
                 .clear_halt = xhci_msc_clear_halt,
+                .recover_timeout = xhci_msc_recover_timeout,
             };
 
             char name[5] = { 'u', 's', 'b', (char)('a' + next_disk), '\0' };

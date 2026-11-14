@@ -58,6 +58,30 @@ static int bot_reset_recovery(struct usb_msc_bot *b)
     return 0;
 }
 
+static int bot_handle_bulk_timeout(struct usb_msc_bot *b, uint8_t ep_addr,
+                                   int attempt, bool retry_safe, bool *should_retry)
+{
+    *should_retry = false;
+    if (attempt > 0 || !b->transport.recover_timeout) {
+        b->dead = true;
+        return -ETIMEDOUT;
+    }
+
+    int rec_rc = b->transport.recover_timeout(b->transport.ctx, ep_addr);
+    if (rec_rc != 0) {
+        b->dead = true;
+        return -ETIMEDOUT;
+    }
+
+    int rst_rc = bot_reset_recovery(b);
+    if (rst_rc != 0)
+        return rst_rc;
+
+    if (retry_safe)
+        *should_retry = true;
+    return -ETIMEDOUT;
+}
+
 static int bot_validate_args(const struct usb_msc_bot *b, const uint8_t *cdb,
                              uint8_t cdb_len, enum usb_msc_dir dir,
                              const void *buf, uint32_t len)
@@ -119,8 +143,11 @@ int usb_msc_bot_command(struct usb_msc_bot *b, const uint8_t *cdb, uint8_t cdb_l
 
         rc = b->transport.bulk(b->transport.ctx, b->out_addr, cbw, BOT_CBW_SIZE, &cbw_actual);
         if (rc == -ETIMEDOUT) {
-            b->dead = true;
-            return -ETIMEDOUT;
+            bool should_retry = false;
+            int trc = bot_handle_bulk_timeout(b, b->out_addr, attempt, retry_safe, &should_retry);
+            if (should_retry)
+                continue;
+            return trc;
         }
         if (rc != 0 || cbw_actual != BOT_CBW_SIZE) {
             need_reset = true;
@@ -131,8 +158,11 @@ int usb_msc_bot_command(struct usb_msc_bot *b, const uint8_t *cdb, uint8_t cdb_l
             uint8_t data_ep = (dir == USB_MSC_IN) ? b->in_addr : b->out_addr;
             rc = b->transport.bulk(b->transport.ctx, data_ep, buf, len, &data_actual);
             if (rc == -ETIMEDOUT) {
-                b->dead = true;
-                return -ETIMEDOUT;
+                bool should_retry = false;
+                int trc = bot_handle_bulk_timeout(b, data_ep, attempt, retry_safe, &should_retry);
+                if (should_retry)
+                    continue;
+                return trc;
             }
             if (rc == -EPIPE) {
                 if (data_actual > len)
@@ -153,8 +183,11 @@ int usb_msc_bot_command(struct usb_msc_bot *b, const uint8_t *cdb, uint8_t cdb_l
 
         rc = b->transport.bulk(b->transport.ctx, b->in_addr, csw, BOT_CSW_SIZE, &csw_actual);
         if (rc == -ETIMEDOUT) {
-            b->dead = true;
-            return -ETIMEDOUT;
+            bool should_retry = false;
+            int trc = bot_handle_bulk_timeout(b, b->in_addr, attempt, retry_safe, &should_retry);
+            if (should_retry)
+                continue;
+            return trc;
         }
         if (rc == -EPIPE) {
             int clr_rc = b->transport.clear_halt(b->transport.ctx, b->in_addr);
@@ -165,8 +198,11 @@ int usb_msc_bot_command(struct usb_msc_bot *b, const uint8_t *cdb, uint8_t cdb_l
             csw_actual = 0;
             rc = b->transport.bulk(b->transport.ctx, b->in_addr, csw, BOT_CSW_SIZE, &csw_actual);
             if (rc == -ETIMEDOUT) {
-                b->dead = true;
-                return -ETIMEDOUT;
+                bool should_retry = false;
+                int trc = bot_handle_bulk_timeout(b, b->in_addr, attempt, retry_safe, &should_retry);
+                if (should_retry)
+                    continue;
+                return trc;
             }
             if (rc != 0) {
                 need_reset = true;

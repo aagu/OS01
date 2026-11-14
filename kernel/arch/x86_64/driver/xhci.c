@@ -1596,7 +1596,8 @@ int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot_id, uint8_t dci,
     }
 
     struct xhci_slot *slot = c->slots[slot_id];
-    if (!slot || !slot->active || slot->poisoned || slot->disabled || !slot->configured) {
+    if (!slot || !slot->active || slot->poisoned || slot->disabled ||
+        !slot->configured || slot->pending_bulk_dci != 0) {
         xhci_unlock(c, locked);
         return -EIO;
     }
@@ -1665,6 +1666,8 @@ int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot_id, uint8_t dci,
     rc = xhci_poll_transfer_matched(c, slot_id, dci, &trb_phys, 1, &evt,
                                     NULL, XHCI_TIMEOUT_LOOPS);
     if (rc == -ETIMEDOUT) {
+        slot->pending_bulk_dci = dci;
+        slot->pending_bulk_trb_phys = trb_phys;
         slot->poisoned = true;
         slot->dma_retained = true;
         xhci_unlock(c, locked);
@@ -1828,6 +1831,165 @@ int xhci_clear_halt(struct xhci_controller *c, uint8_t slot_id, uint8_t ep_addr)
         goto err_quarantine;
     }
 
+    xhci_unlock(c, locked);
+    return 0;
+
+err_quarantine:
+    slot->poisoned = true;
+    slot->dma_retained = true;
+    xhci_unlock(c, locked);
+    return rc;
+}
+
+int xhci_recover_bulk_timeout(struct xhci_controller *c, uint8_t slot_id, uint8_t dci)
+{
+    if (!c || !c->db_regs || !c->cmd_ring_virt || !c->event_ring_virt || !c->rt_regs)
+        return -EINVAL;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS)
+        return -EINVAL;
+    if (dci < XHCI_MIN_ENDPOINT_DCI || dci > XHCI_MAX_ENDPOINT_DCI)
+        return -EINVAL;
+
+    bool locked = xhci_lock(c);
+    if (c->poisoned) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+
+    struct xhci_slot *slot = c->slots[slot_id];
+    if (!slot || !slot->active || slot->disabled || !slot->configured ||
+        !slot->dev_ctx_virt || slot->pending_bulk_dci != dci ||
+        slot->pending_bulk_trb_phys == 0) {
+        xhci_unlock(c, locked);
+        return -EIO;
+    }
+    if (!slot->ep_rings || dci > slot->max_dci ||
+        !slot->ep_rings[dci] || !slot->ep_rings[dci]->active) {
+        xhci_unlock(c, locked);
+        return -EINVAL;
+    }
+
+    struct xhci_ep_ring *ring = slot->ep_rings[dci];
+    if (ring->ep_type != XHCI_EP_TYPE_BULK_IN && ring->ep_type != XHCI_EP_TYPE_BULK_OUT) {
+        xhci_unlock(c, locked);
+        return -EINVAL;
+    }
+
+    uint64_t expect_cmd_trb = c->cmd_ring_phys +
+                              (uint64_t)c->cmd_ring_enqueue * sizeof(struct xhci_trb);
+    struct xhci_trb stop_trb;
+    memset(&stop_trb, 0, sizeof(stop_trb));
+    stop_trb.control = ((uint32_t)slot_id << 24) | ((uint32_t)dci << 16) |
+                       (XHCI_TRB_TYPE_STOP_EP << 10) | c->cmd_ring_cycle;
+
+    int rc = xhci_cmd_ring_enqueue(c, &stop_trb);
+    if (rc != 0) {
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        xhci_unlock(c, locked);
+        return rc;
+    }
+    xhci_dma_wmb();
+    xhci_write32(c->db_regs, 0);
+
+    bool saw_stopped = false;
+    bool got_cmd = false;
+    struct xhci_trb cmd_evt;
+    memset(&cmd_evt, 0, sizeof(cmd_evt));
+
+    for (uint32_t i = 0; i < XHCI_TIMEOUT_LOOPS; i++) {
+        volatile struct xhci_trb *trb = &c->event_ring_virt[c->event_ring_dequeue];
+        uint32_t ctrl_word = *(volatile uint32_t *)&trb->control;
+        if ((ctrl_word & XHCI_TRB_CYCLE_BIT) != c->event_ring_cycle)
+            continue;
+
+        struct xhci_trb evt = *trb;
+        c->event_ring_dequeue = (c->event_ring_dequeue + 1) % XHCI_TRB_RING_SIZE;
+        if (c->event_ring_dequeue == 0)
+            c->event_ring_cycle ^= 1;
+
+        uint64_t erdp = c->event_ring_phys + c->event_ring_dequeue * sizeof(struct xhci_trb);
+        xhci_write64(c->rt_regs + 0x20 + XHCI_INTR_ERDP, erdp | XHCI_ERDP_EHB);
+
+        uint32_t evt_type = (evt.control >> 10) & 0x3F;
+        if (evt_type == XHCI_TRB_TYPE_TRANSFER_EVT) {
+            uint8_t evt_slot = (evt.control >> 24) & 0xFF;
+            uint8_t evt_dci = (evt.control >> 16) & 0x1F;
+            uint32_t evt_cc = (evt.status >> 24) & 0xFF;
+            if (evt_slot == slot_id && evt_dci == dci &&
+                (evt_cc == XHCI_COMP_STOPPED ||
+                 evt_cc == XHCI_COMP_STOPPED_LENGTH_INVALID ||
+                 evt_cc == XHCI_COMP_STOPPED_SHORT_PACKET)) {
+                saw_stopped = true;
+            }
+        } else if (evt_type == XHCI_TRB_TYPE_CMD_CMPL_EVT) {
+            if (evt.parameter == expect_cmd_trb) {
+                cmd_evt = evt;
+                got_cmd = true;
+                break;
+            }
+        }
+    }
+
+    if (!got_cmd) {
+        c->poisoned = true;
+        c->dma_retained = true;
+        slot->poisoned = true;
+        slot->dma_retained = true;
+        xhci_unlock(c, locked);
+        return -ETIMEDOUT;
+    }
+
+    uint32_t cmd_cc = (cmd_evt.status >> 24) & 0xFF;
+    if (cmd_cc == XHCI_COMP_SUCCESS) {
+        if (!saw_stopped) {
+            slot->poisoned = true;
+            slot->dma_retained = true;
+            xhci_unlock(c, locked);
+            return -EIO;
+        }
+        xhci_ring_normalize_link(ring);
+        uint64_t next_deq = ring->ring_phys + (uint64_t)ring->enqueue * sizeof(struct xhci_trb);
+        uint8_t next_dcs = ring->cycle & 1U;
+        rc = xhci_submit_ep_cmd_locked(c, XHCI_TRB_TYPE_SET_TR_DEQ, slot_id, dci,
+                                       (next_deq & ~0xFULL) | next_dcs);
+        if (rc != 0)
+            goto err_quarantine;
+    } else if (cmd_cc == XHCI_COMP_CONTEXT_STATE_ERR) {
+        volatile uint32_t *out_ep_ctx =
+            (volatile uint32_t *)xhci_dev_ep_ctx(slot->dev_ctx_virt, c->csz, dci);
+        uint32_t ep_state = out_ep_ctx[0] & 0x7U;
+        if (ep_state != XHCI_EP_STATE_HALTED) {
+            rc = -EIO;
+            goto err_quarantine;
+        }
+        rc = xhci_submit_ep_cmd_locked(c, XHCI_TRB_TYPE_RESET_EP, slot_id, dci, 0);
+        if (rc != 0)
+            goto err_quarantine;
+
+        uint8_t ep_addr = (uint8_t)((dci >> 1) |
+                                    ((ring->ep_type == XHCI_EP_TYPE_BULK_IN) ? 0x80u : 0x00u));
+        slot->poisoned = false;
+        rc = xhci_control_no_data_locked(c, slot_id, 0x02, 0x01, 0, ep_addr);
+        if (rc != 0)
+            goto err_quarantine;
+
+        xhci_ring_normalize_link(ring);
+        uint64_t next_deq = ring->ring_phys + (uint64_t)ring->enqueue * sizeof(struct xhci_trb);
+        uint8_t next_dcs = ring->cycle & 1U;
+        rc = xhci_submit_ep_cmd_locked(c, XHCI_TRB_TYPE_SET_TR_DEQ, slot_id, dci,
+                                       (next_deq & ~0xFULL) | next_dcs);
+        if (rc != 0)
+            goto err_quarantine;
+    } else {
+        rc = -EIO;
+        goto err_quarantine;
+    }
+
+    slot->pending_bulk_dci = 0;
+    slot->pending_bulk_trb_phys = 0;
+    slot->poisoned = false;
+    slot->dma_retained = false;
     xhci_unlock(c, locked);
     return 0;
 

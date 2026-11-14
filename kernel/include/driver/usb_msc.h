@@ -12,6 +12,7 @@ struct usb_msc_transport {
                            uint16_t value, uint16_t index);
     int (*bulk)(void *ctx, uint8_t ep_addr, void *buf, size_t len, size_t *actual);
     int (*clear_halt)(void *ctx, uint8_t ep_addr);
+    int (*recover_timeout)(void *ctx, uint8_t ep_addr);
 };
 
 int usb_msc_probe(const struct usb_msc_transport *transport,

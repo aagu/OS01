@@ -22,6 +22,7 @@
 #define XHCI_TRB_TYPE_ADDRESS_DEV   11
 #define XHCI_TRB_TYPE_CONFIG_EP     12
 #define XHCI_TRB_TYPE_RESET_EP      14
+#define XHCI_TRB_TYPE_STOP_EP       15
 #define XHCI_TRB_TYPE_SET_TR_DEQ    16
 #define XHCI_TRB_TYPE_TRANSFER_EVT   32
 #define XHCI_TRB_TYPE_CMD_CMPL_EVT   33
@@ -44,6 +45,10 @@
 #define XHCI_COMP_TRB_ERR           5
 #define XHCI_COMP_STALL             6
 #define XHCI_COMP_SHORT_TX          13
+#define XHCI_COMP_CONTEXT_STATE_ERR 19
+#define XHCI_COMP_STOPPED           26
+#define XHCI_COMP_STOPPED_LENGTH_INVALID 27
+#define XHCI_COMP_STOPPED_SHORT_PACKET   28
 
 /* PORTSC (Port Status and Control) bits */
 #define XHCI_PORTSC_CCS             (1U << 0)   /* Current Connect Status (RO) */
@@ -350,6 +355,8 @@ struct xhci_slot {
     bool disabled;
     bool poisoned;
     bool dma_retained;
+    uint8_t pending_bulk_dci;
+    uint64_t pending_bulk_trb_phys;
 
     /* Dynamically allocated endpoint ring table: array of pointers sized
      * (max_dci + 1).  Index 0 is unused, index 1 is EP0 (handled by the
@@ -498,6 +505,7 @@ int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
 int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot, uint8_t dci,
                        void *cpu_buf, size_t len, size_t *actual);
 int xhci_clear_halt(struct xhci_controller *c, uint8_t slot, uint8_t ep_addr);
+int xhci_recover_bulk_timeout(struct xhci_controller *c, uint8_t slot, uint8_t dci);
 void xhci_probe_ports(struct xhci_controller *ctrl);
 void xhci_delay_ms(uint32_t ms);
 
