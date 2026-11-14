@@ -17,10 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 TEST_MANIFEST = {
     "id": "test_usb_boot_runner",
@@ -175,18 +178,22 @@ class UsbArgvTests(unittest.TestCase):
 
 
 class FakeSession:
-    """ProcessSession stand-in for runner contract tests."""
+    """ProcessSession stand-in that mirrors the real EOF/deadline contract.
+
+    ``wait_for`` on EOF without a predicate match does NOT return early in
+    the real session — it keeps polling until the absolute deadline and
+    then sets ``timed_out``.  ``observe`` is the API that returns as soon
+    as an exited child has been reaped, exposing ``returncode``.
+    """
 
     def __init__(
         self,
         stream: str = "",
         *,
-        timed_out: bool = False,
-        early_exit: int | None = None,
+        exited_after: int | None = None,
     ) -> None:
         self._stream = stream
-        self._timed_out = timed_out
-        self._early_exit = early_exit
+        self._exited_after = exited_after
         self.argv: list[str] = []
         self.run_dir: Path | None = None
         self.timeout_s = 0.0
@@ -204,29 +211,32 @@ class FakeSession:
     def start(self) -> None:
         self.started = True
         self._cursor = 0
+        self.text = ""
         assert self.run_dir is not None
         run_dir = self.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "stdout.log").write_text(self._stream)
         (run_dir / "stderr.log").write_text("")
+        self.deadline = time.monotonic() + self.timeout_s
 
     def wait_for(self, predicate) -> str:
         self.text = self._stream
-        if self._timed_out:
-            self.timed_out = True
-            return ""
         if predicate(self.text[self._cursor :]):
             self._cursor = len(self.text)
             return self.text
-        if self._early_exit is not None:
-            self.returncode = self._early_exit
-            self._cursor = len(self.text)
-            return ""
+        # Real ProcessSession.wait_for keeps polling until the deadline
+        # when EOF arrives without a match.  The fake cannot sleep, so it
+        # models the end state directly.
         self.timed_out = True
         return ""
 
     def observe(self, seconds: float) -> str:
         self.observe_log.append(seconds)
+        self.text = self._stream
+        # The real observe() returns immediately and reaps the child once
+        # it has exited, making returncode available.
+        if self._exited_after is not None and self.returncode is None:
+            self.returncode = self._exited_after
         return ""
 
     def stop(self) -> int | None:
@@ -276,14 +286,11 @@ class RunnerTests(unittest.TestCase):
         self,
         stream: str,
         *,
-        timed_out: bool = False,
-        early_exit: int | None = None,
+        exited_after: int | None = None,
         **kwargs,
     ):
         args = _write_runner_args(self.tmp, **kwargs)
-        session = FakeSession(
-            stream, timed_out=timed_out, early_exit=early_exit
-        )
+        session = FakeSession(stream, exited_after=exited_after)
         calls: list[dict] = []
 
         def factory(**call_kwargs):
@@ -303,7 +310,11 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(session.stopped)
         self.assertTrue(session.closed)
-        self.assertEqual(session.observe_log, [ub.OBSERVE_SECONDS])
+        # Poll slices precede the single full observation window.
+        self.assertEqual(session.observe_log[-1], ub.OBSERVE_SECONDS)
+        self.assertTrue(
+            all(s <= ub.POLL_SECONDS for s in session.observe_log[:-1])
+        )
         run_dir = Path(args.log_dir)
         self.assertEqual((run_dir / "serial.log").read_text(), stream)
         self.assertEqual(
@@ -316,36 +327,76 @@ class RunnerTests(unittest.TestCase):
 
     def test_timeout_with_noisy_child_fails_without_extending_deadline(self) -> None:
         noise = "".join(f"spam line {i}\n" for i in range(20000))
-        rc, session, args, _ = self._run(noise, timed_out=True)
+        started = time.monotonic()
+        rc, session, args, _ = self._run(noise, timeout=0.05)
+        elapsed = time.monotonic() - started
         self.assertEqual(rc, 1)
-        # The observation window must not run after a timeout.
-        self.assertEqual(session.observe_log, [])
-        self.assertEqual(session.timeout_s, 5.0)
+        # The absolute deadline is authoritative: 20k noisy lines cannot
+        # extend it, and the full observation window must not run.
+        self.assertLess(elapsed, 1.0)
+        self.assertNotIn(ub.OBSERVE_SECONDS, session.observe_log)
+        self.assertEqual(session.timeout_s, 0.05)
         run_dir = Path(args.log_dir)
         self.assertEqual((run_dir / "serial.log").read_text(), noise)
         meta = json.loads((run_dir / "metadata.json").read_text())
         self.assertEqual(meta["result"], "FAIL")
+        self.assertTrue(meta["timed_out"])
         self.assertTrue(
             any("timeout" in err.lower() or "deadline" in err.lower()
                 for err in meta["errors"]),
             meta["errors"],
         )
 
-    def test_early_exit_without_evidence_fails(self) -> None:
-        rc, session, args, _ = self._run(SPEED, early_exit=0)
+    def test_early_exit_without_evidence_fails_before_deadline(self) -> None:
+        started = time.monotonic()
+        rc, session, args, _ = self._run(SPEED, exited_after=0, timeout=5.0)
+        elapsed = time.monotonic() - started
         self.assertEqual(rc, 1)
+        # Production behavior: observe() reaps the exited child and
+        # exposes returncode, so the diagnosis happens long before the
+        # 5 s deadline (the old wait_for path burned the whole budget).
+        self.assertLess(elapsed, 2.0)
         self.assertTrue(session.stopped)
         self.assertEqual(session.returncode, 0)
+        self.assertFalse(session.timed_out)
         meta = json.loads((Path(args.log_dir) / "metadata.json").read_text())
         self.assertEqual(meta["result"], "FAIL")
+        self.assertFalse(meta["timed_out"])
         self.assertTrue(
-            any("exit" in err.lower() for err in meta["errors"]),
+            any("exited early" in err.lower() for err in meta["errors"]),
             meta["errors"],
+        )
+
+    def test_real_process_session_detects_early_exit_before_deadline(self) -> None:
+        """Exercise the real ProcessSession contract, not a fake.
+
+        The runner's own argv is patched to an immediately-exiting child;
+        the default session factory (the real ProcessSession) must reap it
+        and produce the early-exit diagnosis well before the 5 s budget.
+        """
+        args = _write_runner_args(self.tmp, timeout=5.0)
+        started = time.monotonic()
+        with mock.patch.object(
+            ub, "usb_argv", return_value=[sys.executable, "-c", "pass"]
+        ):
+            rc = ub.run_case(args)
+        elapsed = time.monotonic() - started
+        self.assertEqual(rc, 1)
+        self.assertLess(elapsed, 2.0)
+        meta = json.loads((Path(args.log_dir) / "metadata.json").read_text())
+        self.assertEqual(meta["result"], "FAIL")
+        self.assertFalse(meta["timed_out"])
+        self.assertTrue(
+            any("exited early" in err.lower() for err in meta["errors"]),
+            meta["errors"],
+        )
+        self.assertEqual(
+            (Path(args.log_dir) / "serial.log").read_text(), ""
         )
 
     def test_serial_is_retained_on_failure_and_child_is_reaped(self) -> None:
         stream = "kernel started but no USB evidence\n"
-        rc, session, args, _ = self._run(stream, early_exit=1)
+        rc, session, args, _ = self._run(stream, exited_after=1)
         self.assertEqual(rc, 1)
         self.assertTrue(session.stopped)
         self.assertIsNotNone(session.returncode)
@@ -373,6 +424,61 @@ class RunnerTests(unittest.TestCase):
         rc = ub.run_case(args, session_factory=lambda **kw: calls.append(kw))
         self.assertEqual(rc, 2)
         self.assertEqual(calls, [])
+
+    def _assert_pre_spawn_error(self, mutate) -> None:
+        args = _write_runner_args(self.tmp)
+        mutate(args)
+        calls: list[dict] = []
+        rc = ub.run_case(args, session_factory=lambda **kw: calls.append(kw))
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
+
+    def test_bad_smp_fails_before_spawn(self) -> None:
+        for value in (0, -1, "two", None):
+            with self.subTest(smp=value):
+                self._assert_pre_spawn_error(
+                    lambda args, v=value: setattr(args, "smp", v)
+                )
+
+    def test_bad_timeout_fails_before_spawn(self) -> None:
+        for value in (0, -1.0, "soon", None, float("inf"), float("nan")):
+            with self.subTest(timeout=value):
+                self._assert_pre_spawn_error(
+                    lambda args, v=value: setattr(args, "timeout", v)
+                )
+
+
+class MakeTopologyDriftTests(unittest.TestCase):
+    """`run-usb` (Make) and the gate runner must not drift apart."""
+
+    def test_qemu_usb_disk_matches_shared_builder(self) -> None:
+        text = (_ROOT / "mk/components/run.mk").read_text()
+        match = re.search(
+            r"^QEMU_USB_DISK = (.*?)(?:\n\n|\n\.PHONY)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "QEMU_USB_DISK assignment not found")
+        make_tokens = set(match.group(1).replace("\\\n", " ").split())
+
+        argv = ub.usb_argv(
+            "qemu-system-x86_64", Path("/fw/OVMF.fd"), Path("/img/disk.img"), 2
+        )
+        argv_tokens = set(argv)
+
+        for token in (
+            "qemu-xhci,id=xhci,p2=4,p3=0",
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
+            "rng-random,filename=/dev/urandom,id=rng0",
+            "virtio-rng-pci,rng=rng0",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, make_tokens)
+                self.assertIn(token, argv_tokens)
+
+        self.assertTrue(any("id=usbdisk" in t for t in make_tokens))
+        self.assertTrue(any("id=usbdisk" in t for t in argv_tokens))
+        self.assertTrue(any("readonly=on" in t for t in make_tokens))
 
 
 class CliTests(unittest.TestCase):

@@ -76,7 +76,13 @@ RUN_QEMU_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=disk \
 # drive on qemu-xhci, and nothing else: no AHCI, no implicit IDE/virtio
 # disk, no `-boot order` (it cannot be mixed with bootindex anyway).
 # `run-usb` consumes this variable; the automated `test-qemu-usb-boot`
-# runner builds its own USB-only argv via the shared qemu_cmd builder.
+# runner obtains the same topology from the shared
+# `build_qemu_x86(storage="usb")` builder.
+# DRIFT WARNING: this interactive Make expansion is a hand-maintained
+# mirror of that builder (interactive display/SMP/network flags are
+# inserted by the recipe).  test_usb_boot_runner.py::
+# MakeTopologyDriftTests extracts the tokens below and compares them to
+# build_qemu_x86(storage="usb"); update both sides together.
 QEMU_USB_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=usbdisk,readonly=on \
   -device qemu-xhci,id=xhci,p2=4,p3=0 \
   -device usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0 \

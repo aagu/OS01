@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -49,6 +50,7 @@ CASE_FIRMWARE = "firmware"
 CASES = (CASE_FIRMWARE,)
 DEFAULT_TIMEOUT = 120.0
 OBSERVE_SECONDS = 1.0
+POLL_SECONDS = 0.1
 MEMORY_MIB = 512
 
 # ── M0 evidence ─────────────────────────────────────────────────────
@@ -128,6 +130,32 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
+def _parse_positive_int(value: Any, label: str) -> int | None:
+    """Parse an API-supplied positive integer; None means ERROR (exit 2)."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        print(f"[usb-boot] ERROR: invalid {label} {value!r}", file=sys.stderr)
+        return None
+    if isinstance(value, bool) or parsed <= 0:
+        print(f"[usb-boot] ERROR: invalid {label} {value!r}", file=sys.stderr)
+        return None
+    return parsed
+
+
+def _parse_positive_timeout(value: Any) -> float | None:
+    """Parse an API-supplied positive finite timeout; None means ERROR."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        print(f"[usb-boot] ERROR: invalid timeout {value!r}", file=sys.stderr)
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        print(f"[usb-boot] ERROR: invalid timeout {value!r}", file=sys.stderr)
+        return None
+    return parsed
+
+
 def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     """Run one case and judge it.
 
@@ -136,28 +164,29 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     started = time.monotonic()
     case = getattr(args, "case", None)
     if case not in CASES:
-        print(f"[usb-boot] ERROR: unknown case {case!r}")
+        print(f"[usb-boot] ERROR: unknown case {case!r}", file=sys.stderr)
         return 2
-    smp = getattr(args, "smp", 0)
-    if not isinstance(smp, int) or smp <= 0:
-        print(f"[usb-boot] ERROR: invalid smp {smp!r}")
+    smp = _parse_positive_int(getattr(args, "smp", None), "smp")
+    if smp is None:
         return 2
-    timeout = getattr(args, "timeout", DEFAULT_TIMEOUT)
-    if timeout is None or timeout <= 0:
-        print(f"[usb-boot] ERROR: invalid timeout {timeout!r}")
+    timeout = _parse_positive_timeout(getattr(args, "timeout", DEFAULT_TIMEOUT))
+    if timeout is None:
         return 2
 
     firmware = Path(args.firmware)
     disk = Path(args.disk)
     for label, path in (("firmware", firmware), ("disk", disk)):
         if not path.is_file():
-            print(f"[usb-boot] ERROR: {label} input does not exist: {path}")
+            print(
+                f"[usb-boot] ERROR: {label} input does not exist: {path}",
+                file=sys.stderr,
+            )
             return 2
 
     if session_factory is None:
         session_factory = ProcessSession
     if session_factory is None:
-        print("[usb-boot] ERROR: ProcessSession is unavailable")
+        print("[usb-boot] ERROR: ProcessSession is unavailable", file=sys.stderr)
         return 2
 
     run_dir = Path(args.log_dir)
@@ -181,36 +210,52 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
 
     session = None
     errors: list[str] = []
+    timed_out = False
     spawn_error: Exception | None = None
     try:
         session = session_factory(
             argv=argv, run_dir=run_dir, timeout_s=timeout
         )
         session.start()
-        # Absolute monotonic deadline owned by the session: every wait
-        # below consumes it; nothing resets or extends it.
+        # Absolute monotonic deadline owned by the session.  It is read
+        # once and never reset or extended.
         deadline = session.deadline
 
-        session.wait_for(firmware_evidence)
-
-        if session.timed_out:
-            errors.append("timeout before M0 firmware evidence")
-        elif firmware_evidence(session.text):
-            if deadline - time.monotonic() < OBSERVE_SECONDS:
-                errors.append("timeout: insufficient observation budget")
-            else:
-                session.observe(OBSERVE_SECONDS)
-                if deadline - time.monotonic() < 0:
-                    errors.append("overall deadline expired")
-        else:
+        # ProcessSession.wait_for() deliberately keeps polling until the
+        # deadline when the child exits without a predicate match, so it
+        # cannot distinguish "QEMU crashed" from "no evidence yet".  Poll
+        # with observe() instead: the real session returns immediately
+        # when the child exits, reaps it and exposes returncode.  The
+        # absolute deadline remains authoritative for the timeout verdict.
+        early_returncode: int | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            session.observe(min(POLL_SECONDS, remaining))
+            if firmware_evidence(session.text):
+                break
             returncode = session.returncode
             if returncode is not None:
-                errors.append(
-                    "QEMU exited early "
-                    f"(rc={returncode}) without M0 firmware evidence"
-                )
-            else:
-                errors.append("M0 firmware evidence missing")
+                early_returncode = returncode
+                break
+
+        if timed_out:
+            errors.append("timeout before M0 firmware evidence")
+        elif early_returncode is not None:
+            errors.append(
+                "QEMU exited early "
+                f"(rc={early_returncode}) without M0 firmware evidence"
+            )
+        elif not firmware_evidence(session.text):
+            errors.append("M0 firmware evidence missing")
+        elif deadline - time.monotonic() < OBSERVE_SECONDS:
+            errors.append("timeout: insufficient observation budget")
+        else:
+            session.observe(OBSERVE_SECONDS)
+            if deadline - time.monotonic() < 0:
+                errors.append("overall deadline expired")
     except Exception as exc:  # noqa: BLE001 - surface spawn failures as ERROR
         spawn_error = exc
     finally:
@@ -230,7 +275,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     (run_dir / "serial.log").write_text(serial)
 
     if spawn_error is not None:
-        print(f"[usb-boot] spawn error: {spawn_error}")
+        print(f"[usb-boot] spawn error: {spawn_error}", file=sys.stderr)
         metadata.update(
             {
                 "elapsed_seconds": time.monotonic() - started,
@@ -241,7 +286,6 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         _write_json(run_dir / "metadata.json", metadata)
         return 2
 
-    timed_out = bool(session is not None and session.timed_out)
     passed = (
         not errors
         and not timed_out
