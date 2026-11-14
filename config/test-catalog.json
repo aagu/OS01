@@ -2376,7 +2376,6 @@
       }
     },
     {
-      "kind": "host_test",
       "id": "test_ext2_bmap",
       "layer": "host",
       "subsystem": "fs",
@@ -2384,11 +2383,8 @@
       "tier": "nightly",
       "isolation": "none",
       "scenarios": [],
-      "acceptance": "protocol-or-legacy",
-      "source": "hosttests/cases/test_ext2_bmap.c",
-      "origin": {
-        "from": "hosttests/inventory"
-      }
+      "link": "fs-prod",
+      "source": "hosttests/cases/test_ext2_bmap.c"
     },
     {
       "kind": "host_test",
@@ -3520,6 +3516,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_link_rules",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_link_rules.py"
     },
     {
       "kind": "host_test",

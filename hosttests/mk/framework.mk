@@ -97,10 +97,4 @@ $(TEST_BLD)/test_mock_core.o: $(TEST_CASES)/test_mock_core.c $(TEST_INC)/test_fr
 $(TEST_BLD)/test_mock_core.elf: $(TEST_BLD)/test_mock_core.o $(TEST_BLD)/libmock-core.a
 	$(HOST_CC) -o $@ $^
 
-# Fixture v2 (Task 11 — manual rule with -DTEST_ISOLATION_FORK=1; Task 13 replaces with generated rule)
-$(TEST_BLD)/test_fixture_v2.o: $(TEST_CASES)/test_fixture_v2.c $(TEST_INC)/test_framework.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(HOST_CFLAGS) -DTEST_ISOLATION_FORK=1 $(FRAMEWORK_INC) -c $< -o $@
-
-$(TEST_BLD)/test_fixture_v2.elf: $(TEST_BLD)/test_fixture_v2.o
-	$(HOST_CC) -o $@ $^
+# Fixture v2 (test_fixture_v2.o / .elf rules generated in mk/generated/test-link-rules.mk)

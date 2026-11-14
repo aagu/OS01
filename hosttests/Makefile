@@ -34,6 +34,7 @@ include mk/terminal.mk
 include mk/monitor.mk
 include mk/gui.mk
 include mk/doom.mk
+include $(TESTS_DIR)/mk/generated/test-link-rules.mk
 
 .PHONY: all clean
 all: $(TEST_BINS) $(TEST_EXIT_STATUS_BINS) $(LIBC_HOST_ORACLES)

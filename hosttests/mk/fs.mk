@@ -607,24 +607,17 @@ $(TEST_BLD)/test_pci_devfs.elf: $(TEST_BLD)/test_pci_devfs.o \
 
 # ── ext2 block-mapping test (direct / single- / double-indirect) ──
 #
-# The production ext2 object plus the VFS/dcache objects it links
-# against; the test TU supplies the RAM disk, the hand-built image and
-# the block-device dispatch.
-$(TEST_BLD)/test_ext2_bmap.o: $(TEST_CASES)/test_ext2_bmap.c \
-		$(TESTS_DIR)/kernel/include/fs/ext2.h \
-		$(TESTS_DIR)/kernel/include/fs/vfs.h \
-		$(TEST_MOCK)/vfs_test_runtime.h
-	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(VFS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
-
-$(TEST_BLD)/test_ext2_bmap.elf: $(TEST_BLD)/test_ext2_bmap.o \
-		$(TEST_BLD)/vfs_production.o \
-		$(TEST_BLD)/dcache_production.o \
-		$(TEST_BLD)/ext2_production.o \
-		$(TEST_BLD)/serial_sink_stub.o \
-		$(TEST_BLD)/rwlock.o \
-		$(LIBC_OBJS) $(MOCK_OBJS)
-	$(HOST_CC) -Wl,--gc-sections -o $@ $^
+# Production link group for FS hosttests (consumed by generated rules in
+# mk/generated/test-link-rules.mk for entries with `link: fs-prod`).
+LINK_CFLAGS_fs-prod = $(VFS_HOST_CFLAGS)
+LINK_LDFLAGS_fs-prod = -Wl,--gc-sections
+LINK_GROUP_fs-prod := \
+	$(TEST_BLD)/vfs_production.o \
+	$(TEST_BLD)/dcache_production.o \
+	$(TEST_BLD)/ext2_production.o \
+	$(TEST_BLD)/serial_sink_stub.o \
+	$(TEST_BLD)/rwlock.o \
+	$(LIBC_OBJS) $(MOCK_OBJS)
 
 .PHONY: test-ext2-bmap
 test-ext2-bmap: $(TEST_BLD)/test_ext2_bmap.elf

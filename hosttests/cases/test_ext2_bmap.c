@@ -1,3 +1,12 @@
+/* @os01-test
+ * id: test_ext2_bmap
+ * layer: host
+ * subsystem: fs
+ * timing: strict
+ * tier: nightly
+ * link: fs-prod
+ * scenarios: []
+ */
 /*
  * test_ext2_bmap.c — ext2 logical→physical block mapping (host test).
  *
