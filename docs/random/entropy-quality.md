@@ -111,7 +111,7 @@ typedef enum {
 | 任何 KDF / 密钥派生（HMAC 输入、PBKDF2、HKDF） | **当前 OS01 不存在**（grep `crypto_*` / `kdf_*` / `*_secret` / `*_cookie` 在 kernel / libc / user 零命中）—— 本规范作 forward-looking | **STRONG only** | 不接受 WEAK：密钥派生输出若可预测即完全失效 |
 | 任何 nonce / IV 生成 | 同上 forward-looking | **STRONG only** | nonce 重用即丧失语义安全；WEAK 不可接受 |
 | cookie / token / CSRF / session ID 生成 | 同上 forward-looking | **STRONG only** | 同 nonce |
-| mmap ASLR seed（OS01 当前**未实现**） | `kernel/memory/vma.c:127` `mm->mmap_base = 0x40000000`（**固定值，零 ASLR**） | STRONG only（**未来实现时**） | 待 OS01 落地 ASLR 后由本规范约束种子源 |
+| mmap ASLR seed（OS01 当前**未实现**） | `kernel/arch/x86_64/memory/mmap.c` 的固定 `mm->mmap_base = 0x40000000`（**固定值，零 ASLR**） | STRONG only（**未来实现时**） | 待 OS01 落地 ASLR 后由本规范约束种子源 |
 
 **判定标准**（违例 = 满足任一条）：
 

@@ -96,9 +96,9 @@ GDT layout:
 - Slab address stores virtual address via `Phy_To_Virt`
 - Framebuffer hole skipped
 
-## Virtual memory manager (`kernel/memory/vmm.c`)
+## Virtual memory manager (`kernel/arch/x86_64/memory/vmm.c`)
 
-- `vmm_map_page`/`vmm_unmap_page` with `get_next_level` allocating PT pages
+- `x86_vmm_map_2m`/`x86_vmm_map_4k` granularity-named entry points; static `get_next_level` allocating PT pages
 - `vmm_alloc_map`: new PML4, copies kernel entries (slots 256-511)
 - `vmm_free_user_map`: tears down user page tables
 - TLB shootdown via `tlb_shootdown()` (IPI broadcast to online CPUs)

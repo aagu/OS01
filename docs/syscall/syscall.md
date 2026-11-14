@@ -180,7 +180,7 @@ int     strnlen_user(const void *user_addr, size_t max);
 // Returns strlen(user_addr) bounded by max, or -EFAULT on fault.
 
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
-// Fast-reject gate: checks addr != 0, addr >= USER_MIN_ADDR, plus pml4
+// Fast-reject gate: checks addr != 0, addr >= X86_USER_MIN_ADDR, plus pml4
 // walk for full user-range accessibility with effective permissions.
 // Returns true iff the range is safe to dereference; _ft is still the
 // authority (the walker is a snapshot — munmap can race the gap).
@@ -196,7 +196,7 @@ bool arch_user_range_accessible(void *pml4, uint64_t addr, uint64_t len,
 | Case | Kernel returns to user |
 |------|------------------------|
 | NULL pointer (`addr == 0`) | `-EFAULT` |
-| Below `USER_MIN_ADDR` (0x400000) | `-EFAULT` |
+| Below `X86_USER_MIN_ADDR` (0x400000) | `-EFAULT` |
 | Out of range vs `addr_limit` | `-EFAULT` |
 | Range wraps the address space (`addr + len < addr`) | `-EFAULT` |
 | Page not present / wrong effective permissions | `-EFAULT` (not -EACCES) |

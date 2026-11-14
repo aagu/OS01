@@ -224,7 +224,7 @@ Target CPU (ipi_tlb_handler):
 Fast path when `num_cpus ≤ 1`: falls through to local `flush_tlb()` only.
 
 Injection points:
-- `vmm_map_page()` — when `pagemap == kernel_map && num_cpus > 1`
+- `x86_vmm_map_2m()` — when `pagemap == kernel_map && num_cpus > 1`
 - `vmm_init()` — unconditionally (safe: num_cpus still 0 during init)
 - `frame_buffer_init()` — unconditionally
 

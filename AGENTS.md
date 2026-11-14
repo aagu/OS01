@@ -145,7 +145,7 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
 | `kernel/driver/logo.c` | OS01 启动字标（arch-neutral，经 `arch/fb_write.h` 取帧缓冲） |
 | `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
-| `kernel/memory/` | pmm.c, slab.c, vmm.c, vma.c, tlb.c — full memory stack |
+| `kernel/memory/` | pmm.c, slab.c, tlb.c, vm_area.c, mm.c — arch-neutral memory stack (x86 vmm/vma/brk/mmap/uaccess live under `kernel/arch/x86_64/memory/`) |
 | `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
 | `kernel/sched/` | core.c, signal.c, fair.c, balance.c — EEVDF 共享调度核心（fork/exec/exit 生命周期是 x86-only，位于 `kernel/arch/x86_64/sched/`） |
 | `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |

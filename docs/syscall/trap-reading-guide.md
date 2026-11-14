@@ -27,7 +27,7 @@
    - switch (regs->rax) 75 个 case → `case SYS_exec` (L1344) 值得细读（地址空间切换）
 
 **第 2 遍·缺页异常**（`do_page_fault` L435，~290 行）：
-按 error code 位拆解：present? user? write? → 走 vma_find → COW 判定（配合 docs/cow-mmap.md）→ mmap 匿名缺页 → 合法性拒绝（SIGSEGV）。读完这条你就能解释"fork 后写一下为什么会 copy page"。
+按 error code 位拆解：present? user? write? → 走 vm_area_lookup → COW 判定（配合 docs/cow-mmap.md）→ mmap 匿名缺页 → 合法性拒绝（SIGSEGV）。读完这条你就能解释"fork 后写一下为什么会 copy page"。
 
 **第 3 遍·信号投递**：`arch_do_signal_delivery` (L798)——检查 pending、构造用户态 trampoline 栈帧（配合 docs/signal.md 和 user/sigreturn_trampoline.S）。
 

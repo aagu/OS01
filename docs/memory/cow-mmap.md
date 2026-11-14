@@ -116,7 +116,7 @@ A COW page is only freed when the last COW reference (`cow_count`) drops to 0.
 Without this check, unmapping a COW page in a child would free shared physical
 memory still mapped by the parent.
 
-### `do_mprotect` COW awareness (`kernel/arch/x86_64/memory/vma.c`)
+### `do_mprotect` COW awareness (`kernel/arch/x86_64/memory/mmap.c`)
 
 - **`PROT_NONE` stash:** preserves `PAGE_COW` when storing the physical address
   as `PROTNONE` — the COW reference is kept alive.
@@ -127,7 +127,7 @@ memory still mapped by the parent.
 
 ## VMA (Virtual Memory Area) subsystem
 
-**Files:** `kernel/arch/x86_64/memory/vma.c`, `kernel/include/sched/task.h` (`mm_t`)
+**Files:** `kernel/arch/x86_64/memory/mmap.c`, `kernel/include/sched/task.h` (`mm_t`)
 
 ### Data structures
 
@@ -161,11 +161,12 @@ typedef struct vma {
 
 | Function | Purpose |
 |----------|---------|
-| `vma_insert(mm, vma)` | Insert VMA into sorted VMA list by `vm_start`. No merge (VMA count < 20). |
-| `vma_remove(mm, vma)` | Remove VMA node, release file ref. Does NOT free pages. |
-| `vma_free_all(mm)` | Unmap all 4KB pages in every VMA via `vmm_unmap_4k_page`, then remove and free all VMA nodes. Called by exec/exit. |
+| `vm_area_lookup` / `vm_area_insert_sorted` (`kernel/memory/vm_area.c`) | Shared sorted-list primitives; both ends' VMA edits call them directly. No merge (VMA count < 20). A zero-length VMA never matches an address lookup. |
+| `vm_area_find_heap(mm)` | Shared heap finder: first `VMA_HEAP` node at `mm->start_brk`; zero-length allowed. |
+| `x86_vma_destroy_node(vma)` | Destroy one VMA node: unlink + file-ref drop + node free. Does NOT free pages. Used by teardown, fork rollback and the retired-node drain. |
+| `vma_free_all(mm)` | Withdraw every leaf in every VMA (borrowed `VMA_IO` leaves cleared, never released), then destroy all nodes. Called by exec/exit on retired/unpublished roots. |
 
-### `do_mmap(addr, len, prot, flags, fd, offset)` — `arch/x86_64/memory/vma.c`
+### `do_mmap(addr, len, prot, flags, fd, offset)` — `arch/x86_64/memory/mmap.c`
 
 1. **Validate** arguments (overflow, alignment, file existence for non‑anonymous).
 2. **Find a hole** in the VMA space starting from `mm->mmap_base`.  Walks the
@@ -177,7 +178,7 @@ typedef struct vma {
 No physical pages are allocated at `mmap` time — they are demand‑paged on first
 access via `do_page_fault` (anonymous: `alloc_4k_page`, file‑backed: `vfs_read`).
 
-### `do_munmap(addr, len)` — `arch/x86_64/memory/vma.c`
+### `do_munmap(addr, len)` — `arch/x86_64/memory/mmap.c`
 
 1. Aligns to 4KB boundaries.
 2. Walks the VMA list, finds overlapping VMAs.
@@ -188,7 +189,7 @@ access via `do_page_fault` (anonymous: `alloc_4k_page`, file‑backed: `vfs_read
    - **Middle overlap** → split into two VMAs (left + right).
 5. `flush_tlb()`.
 
-### `do_mprotect(addr, len, prot)` — `arch/x86_64/memory/vma.c`
+### `do_mprotect(addr, len, prot)` — `arch/x86_64/memory/mmap.c`
 
 1. Walks overlapping VMAs, updates `vm_flags`（逻辑权限的唯一来源）。
 2. Iterates all 4KB PTEs in the range, updates permissions.
@@ -254,7 +255,7 @@ To isolate user heap allocations from the ELF image, prevent accidental over-map
 ### 1. 4KB ELF Segment Loading and Envelope
 
 - ELF segments are loaded strictly in 4KB pages via `elf_load_image()` in `kernel/arch/x86_64/fs/elf.c` (no 2MB huge PMD in user text/data).
-- The user address space envelope is `USER_ENVELOPE_SIZE` (512 MiB, from `USER_CODE_ADDR = 0x400000` to `0x20400000`).
+- The user address space envelope is defined in `kernel/include/arch/x86_64/user_layout.h`: `X86_USER_MIN_ADDR = 0x400000`, heap capped at `X86_USER_HEAP_LIMIT = 0x203ff000`, the 2 MiB stack at `[X86_USER_STACK_BASE, X86_USER_STACK_END) = [0x20400000, 0x20600000)`.
 - Validated at load time via pure validator `elf_layout_validate()` (`kernel/arch/x86_64/fs/elf.c`).
 
 ### 2. Heap VMA & Dynamic `brk` Management
@@ -297,11 +298,15 @@ aarch64 的用户页由**驻留记录**（resident record）拥有，记录携�
 
 aarch64 的匿名 VM 策略在 `kernel/arch/aarch64/memory/user_vm_policy.c`
 （策略头 `kernel/include/arch/aarch64/user_vm_policy.h`），叶适配层在
-`kernel/arch/aarch64/memory/user_vm.c`（`arch_user_vm_*`，声明在
-`kernel/include/memory/user_vm.h`），共享 VMA 原语在
-`kernel/memory/vm_area.c`。x86 的 mmap/heap/fork/teardown 事务层在
-`kernel/arch/x86_64/memory/vma.c`（声明在
-`kernel/include/arch/x86_64/vma.h`）。两个 VM 策略不合并，`mm_t` 布局不变。
+`kernel/arch/aarch64/memory/user_vm_leaf.c`（`arch_user_vm_*`，声明在
+`kernel/include/arch/aarch64/user_vm_leaf.h`），fork 事务在
+`kernel/arch/aarch64/memory/user_vm_fork.c`（与策略共享
+`kernel/include/arch/aarch64/user_vm_internal.h` 的内部访问器），
+共享 VMA 原语在 `kernel/memory/vm_area.c`。x86 的用户 VM 按生命周期拆分：
+`brk.c`（堆 VMA + brk 提交/回滚）、`mmap.c`（mmap/munmap/mprotect 事务）、
+`vma.c`（节点销毁 + fork 元数据 + 退休根清理）、`uaccess.c`（内核→用户
+写入预备对），声明统一在 `kernel/include/arch/x86_64/vma.h`。两个 VM
+策略不合并，`mm_t` 布局不变。
 
 - **只提交元数据**：`mmap`/`brk` 返回后目标页仍无叶子；首次合法访问才分配清零的 4 KiB 页。
 - **切离编辑**：修改 VMA/叶前先切离用户根（撤销 root）、IRQ 屏蔽下运行策略、再恢复原根与
@@ -345,12 +350,16 @@ waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、SM
 | File | Role |
 |------|------|
 | `kernel/memory/pmm.c` | `subpage_pool`, `alloc_4k_page`, `free_4k_page`, `page_cow_get/put/refs`, `pmm_cow_acquire/release` |
-| `kernel/arch/x86_64/memory/vma.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `vma_insert/remove/free_all`, `mm_init_user_heap`, `mm_set_brk`, `mm_user_range_protected` |
+| `kernel/arch/x86_64/memory/vma.c` | x86 VMA 节点销毁（`x86_vma_destroy_node`）、fork 元数据复制（`fork_vma_copy`）、退休/未安装根清理（`vma_free_all`） |
+| `kernel/arch/x86_64/memory/brk.c` | `mm_init_user_heap`、`mm_set_brk`（成功安装 VA 日志；失败两轮撤销：就地取旧描述符 → 本地同步 → 释放） |
+| `kernel/arch/x86_64/memory/mmap.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `mm_user_range_protected` 及其预检/分裂/文件偏移 helper |
 | `kernel/arch/x86_64/memory/vmm.c` | x86 raw 页表 API + COW-aware teardown + 双 walker（`arch_virt_to_phys` / `arch_user_range_accessible`） |
 | `kernel/arch/aarch64/memory/user_vm_policy.c` | aarch64 匿名 VM 策略：按需缺页、stash、`user_vm_clone_fork`、`user_vm_cow_fault`、`prepare_copy` |
 | `kernel/memory/vm_area.c` | 双架构共享的 VMA 列表原语 |
 | `kernel/memory/mm.c` | 双架构共享的 `mm_alloc` |
-| `kernel/arch/aarch64/memory/user_vm.c` | aarch64 叶适配层（`arch_user_vm_*` 三态适配、BBM 换 PA 入口） |
+| `kernel/arch/aarch64/memory/user_vm.c` | aarch64 事务层：授权、IRQ/TLS 登记、根切离与恢复 |
+| `kernel/arch/aarch64/memory/user_vm_leaf.c` | aarch64 叶适配层（`arch_user_vm_*` 三态适配） |
+| `kernel/arch/aarch64/memory/user_vm_fork.c` | aarch64 fork 事务（clone 阶段与精确回滚） |
 | `kernel/arch/aarch64/memory/user_mm.c` | `aarch64_user_mm_create` / `aarch64_user_mm_destroy`：mm 拥有的私有用户根 |
 | `kernel/arch/aarch64/memory/vmm_backend.c` | `aarch64_user_vm_replace_cow`：受检 COW 换 PA 后端入口 |
 | `kernel/arch/x86_64/fs/elf.c` | 4KB per-page ELF image loader and `elf_layout_validate` (x86-only) |
@@ -358,13 +367,14 @@ waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、SM
 | `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution and heap guard, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap/brk` |
 | `kernel/include/arch/x86_64/pte.h` | `PAGE_COW`, `PAGE_PROTNONE`, x86 PTE 描述符位 |
 | `kernel/include/memory/vma.h` | 公共 `vma_t`、`VMA_*` 逻辑标志、`MAP_`/`PROT_*` 常量（无操作声明） |
-| `kernel/include/arch/x86_64/vma.h` | x86 VMA 事务层声明：`do_mmap/mprotect/munmap`、heap/保护区 helpers、`x86_vma_pte_flags` |
+| `kernel/include/arch/x86_64/vma.h` | x86 VMA 事务层声明：`do_mmap/mprotect/munmap`、heap/保护区 helpers、内联 `x86_vma_pte_flags` |
 | `kernel/include/memory/vmm.h` | 仅 `tlb_shootdown(void)`（共享 TLB 广播协议） |
 | `kernel/include/arch/x86_64/vmm.h` / `arch/x86_64/mmu.h` | x86 raw 页表 API、`ptbl_t/kernel_map`、根与单页原语、walker 声明 |
 | `kernel/include/memory/uaccess.h` | 公共容错拷贝 `copy_*_ft(_res)` 与 `syscall_check_user_range` |
-| `kernel/include/arch/x86_64/uaccess.h` | x86 `USER_MIN_ADDR`、`os01_jmp_buf`、`strnlen_user`、写入预备对 |
+| `kernel/include/arch/x86_64/uaccess.h` | x86 `os01_jmp_buf`、`strnlen_user`、写入预备对 |
+| `kernel/include/arch/x86_64/user_layout.h` | x86 用户布局常量（`X86_USER_MIN_ADDR`、栈窗口、`X86_USER_HEAP_LIMIT`） |
 | `kernel/include/arch/aarch64/user_vm_policy.h` | 匿名 VM 策略接口（按需缺页 / clone / COW 故障 / copy 预备） |
-| `kernel/include/memory/user_vm.h` | aarch64 叶适配器声明（`arch_user_vm_*` 三态） |
+| `kernel/include/arch/aarch64/user_vm_leaf.h` | aarch64 叶适配器声明（`arch_user_vm_*` 三态） |
 | `kernel/include/arch/aarch64/user_vm.h` | aarch64 用户 VM 事务层：授权、切离、恢复 |
 | `kernel/include/arch/aarch64/user_mm.h` | `aarch64_user_mm_create` / `aarch64_user_mm_destroy` 与根归属契约 |
 | `kernel/include/sched/task.h` | `mm_t` (VMA list, `mmap_base`, `pgdir`, `lock`), `task_t` |

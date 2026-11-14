@@ -24,7 +24,7 @@
 * `arch/x86_64/` — 处理器体系架构相关（head.S, trap.c, entry.S, smp.c, subsys.c, subsys_percpu.c）
 * `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci, fb, e1000, virtio-net）
 * `include/` — 头文件，会和 lib 一起安装到 sysroot 中
-* `memory/` — 内存管理相关（pmm.c, vmm.c, slab.c, vma.c, tlb.c, dump.c）
+* `memory/` — 架构中立内存管理（pmm.c, slab.c, tlb.c, vm_area.c, mm.c）；x86 实现位于 `arch/x86_64/memory/`（vmm.c, brk.c, mmap.c, vma.c, uaccess.c）
 * `time/` — 时间子系统（clocksource.c, tick.c, timer.c：时钟源/节拍/软件定时器）
 * `intr/apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
 * `intr/pic/` — 8259A PIC 控制器（APIC 已完全实现，位于 intr/apic/）
@@ -81,8 +81,8 @@
 * `dump.c` - 内存转储功能
 * `pmm.c` - 物理内存管理（alloc_pages, free_pages）
 * `slab.c` - 内存 slab 分配器（kmalloc, kfree）
-* `vmm.c` - 虚拟内存管理（vmm_map_page, vmm_unmap_page）
-* `vma.c` - 虚拟内存区域管理
+* `vmm.c` - 虚拟内存管理（x86_vmm_map_2m / x86_vmm_map_4k）
+* `vm_area.c` - 共享 VMA 列表原语（查找/有序插入/堆查找）
 * `tlb.c` - TLB 刷新技术
 
 #### pic 子目录

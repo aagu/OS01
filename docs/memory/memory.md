@@ -187,7 +187,7 @@ uint64_t set_page_attribute(struct Page * page, uint64_t flags);
 #### 虚拟地址到物理地址的映射
 
 ```c
-void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags);
+void x86_vmm_map_2m(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtual_address, uint64_t flags);
 ```
 
 参数说明：
@@ -195,16 +195,6 @@ void vmm_map_page(uint64_t *pagemap, uintptr_t physical_address, uintptr_t virtu
 * `physical_address` - 物理地址
 * `virtual_address` - 虚拟地址
 * `flags` - 页表项标志
-
-#### 虚拟地址解除映射
-
-```c
-void vmm_unmap_page(uint64_t *pagemap, uintptr_t virtual_address);
-```
-
-参数说明：
-* `pagemap` - 页表基地址
-* `virtual_address` - 虚拟地址
 
 ### 虚拟内存初始化
 
@@ -230,11 +220,13 @@ Slab 分配器用于小内存分配，初始化函数为 `slab_init`，位于 `k
 
 ## VMA (Virtual Memory Area)
 
-`kernel/memory/vma.c` 实现 VMA 管理：
-- `mmap` 分配 VMA，`munmap` 释放 VMA
-- `mprotect` 修改 VMA 权限
-- VMA 列表 (`mm_t.vma_list`) 按 `vm_start` 排序
-- `mmap_base` 控制 mmap 搜索起始地址
+x86 用户 VM 按生命周期拆分：`kernel/arch/x86_64/memory/mmap.c` 负责
+`do_mmap`/`do_munmap`/`do_mprotect` 事务，`brk.c` 负责
+`mm_init_user_heap`/`mm_set_brk`，`vma.c` 负责节点销毁与 fork 元数据，
+`uaccess.c` 负责内核→用户写入预备。VMA 列表 (`mm_t.vma_list`) 按
+`vm_start` 排序，共享原语 `vm_area_lookup`/`vm_area_insert_sorted` 在
+`kernel/memory/vm_area.c`（零长度 VMA 不参与地址查找，堆 VMA 由
+`vm_area_find_heap` 查找）。`mmap_base` 控制 mmap 搜索起始地址。
 
 ## 内存初始化流程
 
@@ -274,8 +266,9 @@ Slab 分配器用于小内存分配，初始化函数为 `slab_init`，位于 `k
 
 ### 虚拟内存管理
 
-* `kernel/memory/vmm.c` - 虚拟内存管理实现
-* `kernel/include/memory/vmm.h` - 虚拟内存管理头文件
+* `kernel/arch/x86_64/memory/vmm.c` - x86 虚拟内存管理实现（`x86_vmm_map_2m`/`x86_vmm_map_4k` 粒度命名入口）
+* `kernel/include/memory/vmm.h` - 共享语义层头文件（仅 `tlb_shootdown`）
+* `kernel/include/arch/x86_64/vmm.h` - x86 私有页表 API 头文件
 
 ### 内存分配器
 
@@ -317,14 +310,13 @@ free_pages(page, 1);
 
 ```c
 // 映射虚拟地址到物理地址
-vmm_map_page(kernel_map, physical_address, virtual_address, PAGE_KERNEL_Page);
+x86_vmm_map_2m(kernel_map, physical_address, virtual_address, PAGE_KERNEL_Page);
 
 // 刷新 TLB
 flush_tlb();
 
-// 解除映射
-vmm_unmap_page(kernel_map, virtual_address);
 ```
+
 
 ## 性能优化
 
@@ -400,11 +392,10 @@ kernel.elf 中不得出现 `vma_*`/`uaccess_*`/`fork_*` 的 T/t 符号）共同�
 
 | 调用点 | 持锁 | 调 vmm 变更? | 结论 |
 |---|---|---|---|
-| `memory/vmm.c:vmm_map_page`（kernel_map 共享 PMD 路径） | 无 | 是 (`tlb_shootdown`) | OK |
-| `memory/vmm.c:vmm_unmap_page` | 无 | 是 (`tlb_shootdown`) | OK |
-| `memory/vma.c:mm_set_brk`（grow 提交） | `mm->lock` (plain spin, 非 irqsave) | 是 (`tlb_shootdown`) | OK — 见排序规则 R1 |
-| `memory/vma.c:mm_set_brk`（shrink 提交） | `mm->lock` (plain spin) | 是 (`tlb_shootdown` + `vmm_unmap_4k_page`) | OK — 见 R1 |
-| `memory/uaccess.c:prepare_user_write_range_locked`（COW 写授权提交） | `mm->lock` (调用方 `prepare_user_write_range` 持锁) | 是 (`tlb_shootdown`) | OK — 见 R1 |
+| `arch/x86_64/memory/vmm.c:x86_vmm_map_2m`（kernel_map 共享 PMD 路径） | 无 | 是 (`tlb_shootdown`) | OK |
+| `arch/x86_64/memory/brk.c:mm_set_brk`（grow 提交） | `mm->lock` (plain spin, 非 irqsave) | 是（本地 `flush_tlb`；用户根单任务拥有） | OK — 见排序规则 R1 |
+| `arch/x86_64/memory/brk.c:mm_set_brk`（shrink 提交） | `mm->lock` (plain spin) | 是（本地 `flush_tlb` + COW-aware 释放） | OK — 见 R1 |
+| `arch/x86_64/memory/uaccess.c:prepare_user_write_range_locked`（COW 写授权提交） | `mm->lock` (调用方 `prepare_user_write_range` 持锁) | 是 (`tlb_shootdown`) | OK — 见 R1 |
 | `sched/task.c:fork_mm_copy`（fork COW 防护提交） | 无（PTE 改动后、无锁尾部调用） | 是 (`tlb_shootdown`) | OK |
 | `core/printk.c:frame_buffer_init`（boot 期一次性映射） | 无 | 是 (`tlb_shootdown`) | OK（boot 期单 CPU） |
 | `arch/x86_64/intr/trap.c:659`（heap COW #PF 解析） | `mm->lock` (**irqsave**，仅 heap VMA COW 路径) | 否（锁内只改 PTE；`flush_tlb()` 在解锁**之后**） | OK（本行自身不违 I1）——但见下方 R1 例外与死锁场景 |

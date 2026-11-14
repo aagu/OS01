@@ -38,7 +38,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 | ASLR-B：ET_DYN/PIE | 单独实施可重定位 ELF 的加载偏移、静态 PIE 重定位及用户程序构建迁移（含 BusyBox） | ASLR-A 验收；当前 ELF loader 仅支持 ET_EXEC（`kernel/include/fs/elf.h` 只定义 `ET_EXEC`）、用户构建使用 `-fno-pie -no-pie`（`mk/components/run.mk`）；需设计重定位、linker script、启动 ABI/auxv 与回退测试 | |
 | UBSan + KASan | 内核编译期 instrument | 独立（构建体系当前无 `-fsanitize` 接入） | ArvernOS |
 | 堆加固 | malloc double-free/溢出检测 | 独立（`libc/stdlib/malloc.c` 现无 free-list 校验/poison 机制） | |
-| NX 页 | 栈/堆不可执行 + mmap `PROT_EXEC` 审计 | 独立（`kernel/memory/vma.c` 已支持 `PROT_EXEC` 语义，**但栈/堆不可执行尚未审计**） | |
+| NX 页 | 栈/堆不可执行 + mmap `PROT_EXEC` 审计 | 独立（`kernel/arch/x86_64/memory/mmap.c` 已支持 `PROT_EXEC` 语义，**但栈/堆不可执行尚未审计**） | |
 
 ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 `USER_STACK_BASE=0x1400000`；栈随机化另列后续范围，完成 A/B 后也不能称为完整用户态 ASLR。aarch64 已有 EL0 用户态（M4 五块，见 P2），但 ASLR 本项先不扩大到 aarch64。
 
