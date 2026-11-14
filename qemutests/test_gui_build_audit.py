@@ -29,6 +29,15 @@ from qemutests.gui_build_audit import (
     audit_published_headers,
 )
 
+TEST_MANIFEST = {
+    "id": "test_gui_build_audit",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 class GuiBuildAuditNegativeTests(unittest.TestCase):
     def setUp(self):

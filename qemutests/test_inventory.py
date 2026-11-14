@@ -16,6 +16,15 @@ import sys
 from typing import Any, Dict, List, Optional
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_inventory",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

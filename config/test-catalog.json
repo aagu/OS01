@@ -862,615 +862,14 @@
       "runner_module": "qemutests.run_test"
     },
     {
-      "kind": "harness_module",
-      "id": "qemutests.test_aarch64_ap_boot_contract",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_aarch64_ap_boot_contract.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_aarch64_harness",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_aarch64_harness.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
       "id": "qemutests.test_aarch64_sched_tick",
       "layer": "harness",
       "subsystem": "test-framework",
       "timing": "strict",
       "tier": "pr",
+      "isolation": "none",
       "scenarios": [],
-      "source": "qemutests/test_aarch64_sched_tick.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_arch10_capacity_audit",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_arch10_capacity_audit.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_arch10_capacity_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_arch10_capacity_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_arch6_fsstress",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_arch6_fsstress.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_audit_symbol_contract",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_audit_symbol_contract.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_boot_contract",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_boot_contract.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_boot_facade_headers",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_boot_facade_headers.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_boot_failure",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_boot_failure.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_boot_irq_time",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_boot_irq_time.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_boot_lifecycle",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_boot_lifecycle.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_boot_services",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_boot_services.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_brk_source_scan",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_brk_source_scan.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_ci_artifact",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_ci_artifact.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_doom_engine_notice",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_doom_engine_notice.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_doom_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_doom_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_driver_model_boundary_audit",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_driver_model_boundary_audit.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_driver_model_matrix",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_driver_model_matrix.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_fb_pixel_verify_dimensions",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_fb_pixel_verify_dimensions.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_framework_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_framework_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_gfx_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_gfx_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_gui_build_audit",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_gui_build_audit.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_gui_desktop_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_gui_desktop_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_gui_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_gui_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_harness_process",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_harness_process.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_harness_result",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_harness_result.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_harness_static",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_harness_static.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_host_build_contract",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_host_build_contract.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_intr_dispatch_audit",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_intr_dispatch_audit.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_inventory",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_inventory.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_kernel_selftest_result",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_kernel_selftest_result.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_make_qemu_failure",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_make_qemu_failure.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_monitor_host_dispatch",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_monitor_host_dispatch.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_monitor_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_monitor_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_qemu_isolation",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_qemu_isolation.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_resolution_switcher",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_resolution_switcher.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_run_hosttests",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_run_hosttests.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_run_test_harness",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_run_test_harness.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_scenario_catalog",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_scenario_catalog.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_stack_frame_audit",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_stack_frame_audit.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_suite_catalog",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_suite_catalog.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_systest_protocol",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_systest_protocol.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_systest_repeat_harness",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_systest_repeat_harness.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_terminal_present_runner",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_terminal_present_runner.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_timing",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_timing.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
-    },
-    {
-      "kind": "harness_module",
-      "id": "qemutests.test_x86_intr_fault",
-      "layer": "harness",
-      "subsystem": "test-framework",
-      "timing": "strict",
-      "tier": "pr",
-      "scenarios": [],
-      "source": "qemutests/test_x86_intr_fault.py",
-      "origin": {
-        "from": "mk/components/run.mk:TEST_HARNESS_MODULES"
-      }
+      "source": "qemutests/test_aarch64_sched_tick.py"
     },
     {
       "kind": "suite",
@@ -1602,6 +1001,16 @@
       "runner_module": "qemutests.terminal_present_test"
     },
     {
+      "id": "test_aarch64_ap_boot_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_ap_boot_contract.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_arch_vmm_init",
       "layer": "host",
@@ -1660,6 +1069,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_aarch64_harness",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_harness.py"
     },
     {
       "kind": "host_test",
@@ -1891,6 +1310,36 @@
       }
     },
     {
+      "id": "test_arch10_capacity_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_arch10_capacity_audit.py"
+    },
+    {
+      "id": "test_arch10_capacity_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_arch10_capacity_runner.py"
+    },
+    {
+      "id": "test_arch6_fsstress",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_arch6_fsstress.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_arena_2gib_boundary",
       "layer": "host",
@@ -1949,6 +1398,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_audit_symbol_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_audit_symbol_contract.py"
     },
     {
       "kind": "host_test",
@@ -2024,6 +1483,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_boot_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_contract.py"
     },
     {
       "kind": "host_test",
@@ -2116,6 +1585,26 @@
       }
     },
     {
+      "id": "test_boot_facade_headers",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_facade_headers.py"
+    },
+    {
+      "id": "test_boot_failure",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_failure.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_boot_failure_log",
       "layer": "host",
@@ -2204,6 +1693,36 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_boot_irq_time",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_irq_time.py"
+    },
+    {
+      "id": "test_boot_lifecycle",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_lifecycle.py"
+    },
+    {
+      "id": "test_boot_services",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_boot_services.py"
     },
     {
       "kind": "host_test",
@@ -2396,6 +1915,16 @@
       }
     },
     {
+      "id": "test_brk_source_scan",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_brk_source_scan.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_canon",
       "layer": "host",
@@ -2419,6 +1948,16 @@
       "isolation": "none",
       "scenarios": [],
       "source": "qemutests/test_catalog_gen.py"
+    },
+    {
+      "id": "test_ci_artifact",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_ci_artifact.py"
     },
     {
       "id": "test_ci_schedule_check",
@@ -2636,6 +2175,16 @@
       }
     },
     {
+      "id": "test_doom_engine_notice",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_doom_engine_notice.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_doom_input",
       "layer": "host",
@@ -2664,6 +2213,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_doom_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_doom_runner.py"
     },
     {
       "kind": "host_test",
@@ -2709,6 +2268,26 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_driver_model_boundary_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_driver_model_boundary_audit.py"
+    },
+    {
+      "id": "test_driver_model_matrix",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_driver_model_matrix.py"
     },
     {
       "kind": "host_test",
@@ -2846,6 +2425,16 @@
       }
     },
     {
+      "id": "test_fb_pixel_verify_dimensions",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_fb_pixel_verify_dimensions.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_fb_resolution_hooks",
       "layer": "host",
@@ -2966,6 +2555,16 @@
       }
     },
     {
+      "id": "test_framework_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_framework_runner.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_gfx_client",
       "layer": "host",
@@ -3056,6 +2655,16 @@
       }
     },
     {
+      "id": "test_gfx_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_gfx_runner.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_gic_driver",
       "layer": "host",
@@ -3099,6 +2708,26 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_gui_build_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_gui_build_audit.py"
+    },
+    {
+      "id": "test_gui_desktop_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_gui_desktop_runner.py"
     },
     {
       "kind": "host_test",
@@ -3207,6 +2836,16 @@
       }
     },
     {
+      "id": "test_gui_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_gui_runner.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_gui_theme",
       "layer": "host",
@@ -3298,6 +2937,46 @@
       "origin": {
         "from": "hosttests/special_target"
       }
+    },
+    {
+      "id": "test_harness_process",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_harness_process.py"
+    },
+    {
+      "id": "test_harness_result",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_harness_result.py"
+    },
+    {
+      "id": "test_harness_static",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_harness_static.py"
+    },
+    {
+      "id": "test_host_build_contract",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_host_build_contract.py"
     },
     {
       "kind": "host_test",
@@ -3420,6 +3099,16 @@
       }
     },
     {
+      "id": "test_intr_dispatch_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_intr_dispatch_audit.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_intr_irq_x86",
       "layer": "host",
@@ -3435,6 +3124,16 @@
       }
     },
     {
+      "id": "test_inventory",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_inventory.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_irq_capacity",
       "layer": "host",
@@ -3448,6 +3147,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_kernel_selftest_result",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_kernel_selftest_result.py"
     },
     {
       "kind": "host_test",
@@ -3810,6 +3519,16 @@
       }
     },
     {
+      "id": "test_make_qemu_failure",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_make_qemu_failure.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_monitor_accounting",
       "layer": "host",
@@ -3853,6 +3572,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_monitor_host_dispatch",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_monitor_host_dispatch.py"
     },
     {
       "kind": "host_test",
@@ -3914,6 +3643,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_monitor_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_monitor_runner.py"
     },
     {
       "kind": "host_test",
@@ -4340,6 +4079,26 @@
       }
     },
     {
+      "id": "test_qemu_isolation",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_qemu_isolation.py"
+    },
+    {
+      "id": "test_resolution_switcher",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_resolution_switcher.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_rtc_pie_calibration",
       "layer": "host",
@@ -4353,6 +4112,26 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_run_hosttests",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_run_hosttests.py"
+    },
+    {
+      "id": "test_run_test_harness",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_run_test_harness.py"
     },
     {
       "kind": "host_test",
@@ -4378,6 +4157,16 @@
       "isolation": "none",
       "scenarios": [],
       "source": "qemutests/test_scan_tools.py"
+    },
+    {
+      "id": "test_scenario_catalog",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_scenario_catalog.py"
     },
     {
       "id": "test_scenario_owner",
@@ -4571,6 +4360,26 @@
       }
     },
     {
+      "id": "test_stack_frame_audit",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_stack_frame_audit.py"
+    },
+    {
+      "id": "test_suite_catalog",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_suite_catalog.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_switch_complete",
       "layer": "host",
@@ -4631,6 +4440,26 @@
       }
     },
     {
+      "id": "test_systest_protocol",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_systest_protocol.py"
+    },
+    {
+      "id": "test_systest_repeat_harness",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_systest_repeat_harness.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_terminal_core",
       "layer": "host",
@@ -4659,6 +4488,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_terminal_present_runner",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_terminal_present_runner.py"
     },
     {
       "kind": "host_test",
@@ -4734,6 +4573,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_timing",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_timing.py"
     },
     {
       "kind": "host_test",
@@ -5049,6 +4898,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_x86_intr_fault",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_x86_intr_fault.py"
     },
     {
       "kind": "host_test",

@@ -37,6 +37,15 @@ import time
 import unittest
 from pathlib import Path
 
+TEST_MANIFEST = {
+    "id": "test_gui_desktop_runner",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 

@@ -19,6 +19,15 @@ from types import SimpleNamespace
 
 from qemutests.arch6_fsstress import parse_fsstress_log, resolve_smp, test_arch6_fsstress
 
+TEST_MANIFEST = {
+    "id": "test_arch6_fsstress",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 def _worker_markers(workers=(1, 2, 3, 4),
                     fs=("ext2", "tmpfs", "vfat")) -> str:

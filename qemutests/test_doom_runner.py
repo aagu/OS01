@@ -18,6 +18,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+TEST_MANIFEST = {
+    "id": "test_doom_runner",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

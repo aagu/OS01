@@ -10,6 +10,15 @@ import unittest
 
 from qemutests import boot_services as bs
 
+TEST_MANIFEST = {
+    "id": "test_boot_services",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 def make_normal_stream(cpus: int = 1) -> str:
     lines = [

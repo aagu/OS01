@@ -12,6 +12,15 @@ import time
 import unittest
 from pathlib import Path
 
+TEST_MANIFEST = {
+    "id": "test_framework_runner",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_SCRIPT = ROOT / "qemutests" / "run_framework_tests.py"
 

@@ -13,6 +13,15 @@ import subprocess
 import tempfile
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_monitor_host_dispatch",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ('file', 'accounting', 'pmm', 'procfs', 'collect', 'model', 'render')
 

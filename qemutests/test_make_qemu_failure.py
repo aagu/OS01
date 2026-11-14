@@ -58,6 +58,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+TEST_MANIFEST = {
+    "id": "test_make_qemu_failure",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 # Repo root so we can locate mk/components/run.mk.
 ROOT = Path(__file__).resolve().parents[1]

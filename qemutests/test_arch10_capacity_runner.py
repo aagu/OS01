@@ -29,6 +29,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+TEST_MANIFEST = {
+    "id": "test_arch10_capacity_runner",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

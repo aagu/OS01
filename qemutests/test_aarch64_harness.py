@@ -49,6 +49,15 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+TEST_MANIFEST = {
+    "id": "test_aarch64_harness",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

@@ -154,7 +154,7 @@ class CatalogGenTests(unittest.TestCase):
 
             hm_text = (Path(tmp) / "mk" / "generated" / "test-harness-modules.mk").read_text(encoding="utf-8")
             hm_line = next(
-                line for line in hm_text.splitlines() if line.startswith("TEST_HARNESS_MODULES_LEGACY :=")
+                line for line in hm_text.splitlines() if line.startswith("TEST_HARNESS_MODULES :=")
             )
             hm_mods = hm_line.split(":=", 1)[1].strip().split()
             self.assertEqual(len(hm_mods), 53)
@@ -163,6 +163,51 @@ class CatalogGenTests(unittest.TestCase):
             self.assertIn("qemutests.test_scan_tools", hm_mods)
             self.assertIn("qemutests.test_bridge_export", hm_mods)
             self.assertIn("qemutests.test_catalog_gen", hm_mods)
+            self.assertIn("qemutests.test_scenario_owner", hm_mods)
+
+    def test_bridge_has_zero_harness_modules_and_run_mk_includes_generated(self) -> None:
+        bridge = json.loads((ROOT / "config" / "test-bridge.json").read_text(encoding="utf-8"))
+        harness_in_bridge = [e for e in bridge["entries"] if e.get("kind") == "harness_module"]
+        self.assertEqual(len(harness_in_bridge), 0)
+        run_mk = (ROOT / "mk" / "components" / "run.mk").read_text(encoding="utf-8")
+        self.assertIn("test-harness-modules.mk", run_mk)
+        for line in run_mk.splitlines():
+            self.assertFalse(
+                line.strip().startswith("TEST_HARNESS_MODULES :="),
+                "mk/components/run.mk must not hardcode TEST_HARNESS_MODULES :=",
+            )
+
+    def test_deleting_harness_module_shrinks_list_and_triggers_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir(parents=True)
+            bridge_data = {"schema_version": 1, "entries": [], "ignored": []}
+            bridge_path = root / "config" / "test-bridge.json"
+            bridge_path.write_text(json.dumps(bridge_data), encoding="utf-8")
+            (root / "qemutests").mkdir(parents=True)
+            mod_a = root / "qemutests" / "test_alpha.py"
+            mod_b = root / "qemutests" / "test_beta.py"
+            mod_a.write_text(
+                'TEST_MANIFEST = {"id": "test_alpha", "layer": "harness", "subsystem": "test-framework", "timing": "strict", "tier": "pr", "scenarios": []}\n',
+                encoding="utf-8",
+            )
+            mod_b.write_text(
+                'TEST_MANIFEST = {"id": "test_beta", "layer": "harness", "subsystem": "test-framework", "timing": "strict", "tier": "pr", "scenarios": []}\n',
+                encoding="utf-8",
+            )
+            scan_tests.emit(str(root), str(bridge_path), str(root))
+            hm_before = (root / "mk" / "generated" / "test-harness-modules.mk").read_text(encoding="utf-8")
+            self.assertIn("qemutests.test_alpha", hm_before)
+            self.assertIn("qemutests.test_beta", hm_before)
+
+            mod_b.unlink()
+            drift = scan_tests.check_drift(str(root), str(bridge_path), str(root))
+            self.assertTrue(drift, "Expected drift after deleting harness module")
+
+            scan_tests.emit(str(root), str(bridge_path), str(root))
+            hm_after = (root / "mk" / "generated" / "test-harness-modules.mk").read_text(encoding="utf-8")
+            self.assertIn("qemutests.test_alpha", hm_after)
+            self.assertNotIn("qemutests.test_beta", hm_after)
 
     def test_drift_gate_fails_on_modified_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

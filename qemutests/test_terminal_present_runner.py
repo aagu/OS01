@@ -64,6 +64,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 from unittest.mock import patch
 
+TEST_MANIFEST = {
+    "id": "test_terminal_present_runner",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 # Repo root for ``import qemutests.terminal_present_test`` once it
 # exists.  Idempotent across reloads.
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

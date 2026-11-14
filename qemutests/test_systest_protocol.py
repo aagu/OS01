@@ -41,6 +41,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+TEST_MANIFEST = {
+    "id": "test_systest_protocol",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

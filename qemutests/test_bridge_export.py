@@ -97,13 +97,9 @@ class BridgeExportTests(unittest.TestCase):
             self.assertEqual(suite_entries[sid]["tier"], row[9])
             self.assertEqual(suite_entries[sid]["timeout_s"], int(row[6]))
 
-    def test_harness_modules_skip_manifest_files(self) -> None:
-        harness_entries = self.by_kind["harness_module"]
-        self.assertEqual(len(harness_entries), 47)
-        harness_ids = {e["id"] for e in harness_entries}
-        self.assertNotIn("qemutests.test_scan_tools", harness_ids)
-        self.assertNotIn("qemutests.test_bridge_export", harness_ids)
-        self.assertNotIn("qemutests.test_catalog_gen", harness_ids)
+    def test_harness_modules_migrated_to_manifests(self) -> None:
+        harness_entries = self.by_kind.get("harness_module", [])
+        self.assertEqual(len(harness_entries), 0)
 
 
 if __name__ == "__main__":

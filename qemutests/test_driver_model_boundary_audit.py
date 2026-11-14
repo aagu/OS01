@@ -39,6 +39,15 @@ import textwrap
 import unittest
 from pathlib import Path
 
+TEST_MANIFEST = {
+    "id": "test_driver_model_boundary_audit",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 WORKTREE_ROOT = Path(__file__).resolve().parent.parent
 AUDIT_SCRIPT = WORKTREE_ROOT / "qemutests" / "driver_model_boundary_audit.py"
 

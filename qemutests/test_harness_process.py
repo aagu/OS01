@@ -26,6 +26,15 @@ import unittest
 from pathlib import Path
 from typing import List
 
+TEST_MANIFEST = {
+    "id": "test_harness_process",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 # Repo root so we can `import qemutests.harness.process` without installing.
 ROOT = Path(__file__).resolve().parents[1]

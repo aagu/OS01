@@ -45,6 +45,15 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+TEST_MANIFEST = {
+    "id": "test_harness_result",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 # Repo root so we can `import qemutests.harness.result` without installing.
 ROOT = Path(__file__).resolve().parents[1]

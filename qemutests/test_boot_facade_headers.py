@@ -9,6 +9,15 @@ import subprocess
 import sys
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_boot_facade_headers",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 INCLUDE_DIR = ROOT / "kernel" / "include"
 

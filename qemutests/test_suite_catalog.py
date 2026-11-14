@@ -8,6 +8,15 @@ from pathlib import Path
 
 from qemutests.test_catalog import load_catalog, parse_catalog_tsv
 
+TEST_MANIFEST = {
+    "id": "test_suite_catalog",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

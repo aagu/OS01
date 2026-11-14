@@ -10,6 +10,15 @@ import subprocess
 import sys
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_boot_contract",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))

@@ -29,6 +29,15 @@ import re
 import sys
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_driver_model_matrix",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 # Test target directory
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKTREE_ROOT = os.path.dirname(HERE)

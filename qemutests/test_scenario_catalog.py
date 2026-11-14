@@ -7,6 +7,15 @@ import unittest
 
 from qemutests.scenario_catalog import validate_catalog
 
+TEST_MANIFEST = {
+    "id": "test_scenario_catalog",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

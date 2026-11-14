@@ -46,6 +46,15 @@ import unittest
 from pathlib import Path
 from typing import List, Optional
 
+TEST_MANIFEST = {
+    "id": "test_kernel_selftest_result",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 # Repo root so ``import qemutests.*`` works both as a script and via -m.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

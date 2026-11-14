@@ -17,6 +17,15 @@ from pathlib import Path
 
 from qemutests import monitor_test as mt
 
+TEST_MANIFEST = {
+    "id": "test_monitor_runner",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 ROOT = Path(__file__).resolve().parents[1]
 

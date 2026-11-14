@@ -4,6 +4,15 @@ import subprocess
 import tempfile
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_brk_source_scan",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 SYS_MM = 'kernel/syscall/sys_mm.c'
 TRAP = 'kernel/arch/x86_64/intr/trap.c'

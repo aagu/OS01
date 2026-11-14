@@ -25,6 +25,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+TEST_MANIFEST = {
+    "id": "test_doom_engine_notice",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "prepare_doom_engine_notice.py"
 MANIFEST = ROOT / "thirdpart" / "doomgeneric.manifest"

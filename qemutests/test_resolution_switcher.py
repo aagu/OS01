@@ -41,6 +41,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
+TEST_MANIFEST = {
+    "id": "test_resolution_switcher",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 # This module is imported *bare* by run_test.py's script-mode main()
 # (``from test_resolution_switcher import test_resolution``), which puts
 # the *qemutests* directory on ``sys.path[0]`` — not the repo root — so

@@ -31,6 +31,15 @@ import sys
 import tempfile
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_fb_pixel_verify_dimensions",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERIFY = ROOT / "qemutests" / "fb_pixel_verify.py"
 

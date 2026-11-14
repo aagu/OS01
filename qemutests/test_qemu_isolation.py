@@ -19,6 +19,15 @@ from unittest import mock
 
 from qemutests import run_suite_matrix
 
+TEST_MANIFEST = {
+    "id": "test_qemu_isolation",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 class QemuIsolationContractTests(unittest.TestCase):
     def setUp(self) -> None:

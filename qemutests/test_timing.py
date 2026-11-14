@@ -18,6 +18,15 @@ from qemutests.harness.timing import (
 )
 from qemutests.summarize_results import calculate_p95, summarize_batch, write_summary
 
+TEST_MANIFEST = {
+    "id": "test_timing",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

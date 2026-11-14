@@ -13,6 +13,15 @@ import subprocess
 import tempfile
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_host_build_contract",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 VALID_GROUPS = {

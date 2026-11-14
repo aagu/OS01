@@ -12,6 +12,15 @@ import unittest
 
 from qemutests import arch10_capacity_audit
 
+TEST_MANIFEST = {
+    "id": "test_arch10_capacity_audit",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

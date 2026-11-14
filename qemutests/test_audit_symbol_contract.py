@@ -7,6 +7,15 @@ import re
 import subprocess
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_audit_symbol_contract",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 def audit_symbol_output(syms: str) -> tuple[bool, str]:
     """Verify readelf -Ws output for kernel_main and absence of aarch64_main."""

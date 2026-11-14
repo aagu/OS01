@@ -9,6 +9,15 @@ from pathlib import Path
 import tempfile
 import unittest
 
+TEST_MANIFEST = {
+    "id": "test_aarch64_ap_boot_contract",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 
 AP_SCHED_C = 'kernel/arch/aarch64/cpu/ap_sched.c'

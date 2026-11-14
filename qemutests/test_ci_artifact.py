@@ -12,6 +12,15 @@ from pathlib import Path
 
 from qemutests import ci_artifact
 
+TEST_MANIFEST = {
+    "id": "test_ci_artifact",
+    "layer": "harness",
+    "subsystem": "test-framework",
+    "timing": "strict",
+    "tier": "pr",
+    "scenarios": [],
+}
+
 
 class CIArtifactContractTests(unittest.TestCase):
     def setUp(self) -> None:
