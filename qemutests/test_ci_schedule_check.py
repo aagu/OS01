@@ -46,9 +46,11 @@ class CiScheduleCheckTests(unittest.TestCase):
             tmp_root = self._copy_minimal_repo(Path(tmp))
             ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
             ci_text = ci_path.read_text(encoding="utf-8")
-            self.assertIn("suite make test-qemu SUITE=network", ci_text)
+            self.assertIn("make test-qemu SUITE=network", ci_text)
             ci_path.write_text(
-                ci_text.replace("suite make test-qemu SUITE=network\n", ""),
+                ci_text.replace("          suite make test-qemu SUITE=network\n", "").replace(
+                    "          make test-qemu SUITE=network\n", ""
+                ),
                 encoding="utf-8",
             )
             self.assertEqual(check_ci_schedule.main(tmp_root), 1)
@@ -65,6 +67,41 @@ class CiScheduleCheckTests(unittest.TestCase):
                     item["timing"] = "tolerant"
             sched_path.write_text(json.dumps(sched, indent=2) + "\n", encoding="utf-8")
             self.assertEqual(check_ci_schedule.main(tmp_root), 1)
+
+    def test_strict_suite_with_retry_wrapper_fails(self):
+        import check_ci_schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = self._copy_minimal_repo(Path(tmp))
+            ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
+            ci_text = ci_path.read_text(encoding="utf-8")
+            ci_path.write_text(
+                ci_text.replace(
+                    "make test-qemu SUITE=network",
+                    "( tolerant_suite make test-qemu SUITE=network ) || true",
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(check_ci_schedule.main(tmp_root), 1)
+
+    def test_full_matrix_log_upload_missing_always_fails(self):
+        import check_ci_schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = self._copy_minimal_repo(Path(tmp))
+            ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
+            ci_text = ci_path.read_text(encoding="utf-8")
+            # Force full-matrix log upload back to if: failure()
+            marker = "      - name: Upload run logs\n        if: always()"
+            if marker not in ci_text:
+                # Current baseline still has Upload run logs on failure / if: failure()
+                self.assertEqual(check_ci_schedule.main(tmp_root), 1)
+            else:
+                ci_path.write_text(
+                    ci_text.replace(marker, "      - name: Upload run logs\n        if: failure()"),
+                    encoding="utf-8",
+                )
+                self.assertEqual(check_ci_schedule.main(tmp_root), 1)
 
 
 if __name__ == "__main__":

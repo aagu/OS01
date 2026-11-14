@@ -105,6 +105,10 @@ def _normalize_suite_calls(run_lines: list[str]) -> tuple[set[str], dict[str, bo
     if buf:
         joined_lines.append(buf)
 
+    subshell_depth = 0
+    subshell_suites: list[str] = []
+    subshell_has_warning = False
+
     for idx, cmd in enumerate(joined_lines):
         # Track `for mode in ...; do`
         m_for = re.match(r"^for\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\s+(.+?);\s*do\b", cmd)
@@ -115,10 +119,35 @@ def _normalize_suite_calls(run_lines: list[str]) -> tuple[set[str], dict[str, bo
             for_loops.clear()
             continue
 
-        is_tolerated = "::warning::" in cmd or (
-            cmd.startswith("(") and "||" in cmd
-        ) or (
-            idx + 1 < len(joined_lines) and "::warning::" in joined_lines[idx + 1] and cmd.endswith("||")
+        if cmd == "(":
+            subshell_depth += 1
+            subshell_suites = []
+            subshell_has_warning = False
+            continue
+        if subshell_depth > 0:
+            if "::warning::" in cmd or "tolerant_suite" in cmd:
+                subshell_has_warning = True
+            if cmd.startswith(")"):
+                subshell_depth -= 1
+                if subshell_depth == 0:
+                    if subshell_has_warning or "|| true" in cmd or "||" in cmd:
+                        for sid in subshell_suites:
+                            tolerated[sid] = True
+                    subshell_suites = []
+                    subshell_has_warning = False
+                continue
+
+        is_tolerated = (
+            "::warning::" in cmd
+            or "tolerant_suite" in cmd
+            or re.match(r"^(?:\(\s*)?suite\s+", cmd) is not None
+            or (cmd.startswith("(") and "||" in cmd)
+            or "|| true" in cmd
+            or (
+                idx + 1 < len(joined_lines)
+                and "::warning::" in joined_lines[idx + 1]
+                and cmd.endswith("||")
+            )
         )
 
         # 1. test-qemu SUITE=...
@@ -129,23 +158,29 @@ def _normalize_suite_calls(run_lines: list[str]) -> tuple[set[str], dict[str, bo
                 sid = "resolution-fault"
             suites.add(sid)
             tolerated[sid] = tolerated.get(sid, False) or is_tolerated
+            if subshell_depth > 0:
+                subshell_suites.append(sid)
             continue
 
         # 2. test-syscall-repeat -> systest-repeat
         if "test-syscall-repeat" in cmd:
             suites.add("systest-repeat")
             tolerated["systest-repeat"] = tolerated.get("systest-repeat", False) or is_tolerated
+            if subshell_depth > 0:
+                subshell_suites.append("systest-repeat")
             continue
 
         # 3. test-kernel-selftest -> kernel-selftest
         if "test-kernel-selftest" in cmd:
             suites.add("kernel-selftest")
             tolerated["kernel-selftest"] = tolerated.get("kernel-selftest", False) or is_tolerated
+            if subshell_depth > 0:
+                subshell_suites.append("kernel-selftest")
             continue
 
         # 4. test-aarch64 MODE=...
         if "test-aarch64" in cmd:
-            m_mode = re.search(r"\bMODE=([^\s]+)", cmd)
+            m_mode = re.search(r"\bMODE=([^\s;]+)", cmd)
             if m_mode:
                 mode_val = m_mode.group(1).strip('"\'')
                 m_var = re.match(r"^\$\{?([a-zA-Z_][a-zA-Z0-9_]*)\}?$", mode_val)
@@ -154,6 +189,8 @@ def _normalize_suite_calls(run_lines: list[str]) -> tuple[set[str], dict[str, bo
                         sid = f"aarch64-{item}"
                         suites.add(sid)
                         tolerated[sid] = tolerated.get(sid, False) or is_tolerated
+                        if subshell_depth > 0:
+                            subshell_suites.append(sid)
                 else:
                     if mode_val == "sched-ap" and "AP_SCHED_CASE=fatal-owner" in cmd:
                         sid = "aarch64-sched-ap-fatal"
@@ -161,6 +198,8 @@ def _normalize_suite_calls(run_lines: list[str]) -> tuple[set[str], dict[str, bo
                         sid = f"aarch64-{mode_val}"
                     suites.add(sid)
                     tolerated[sid] = tolerated.get(sid, False) or is_tolerated
+                    if subshell_depth > 0:
+                        subshell_suites.append(sid)
             continue
 
     return suites, tolerated
@@ -238,18 +277,68 @@ def check(root: str | Path) -> list[str]:
     if extra:
         errors.append(f"unexpected nightly suites in ci.yml: {', '.join(extra)}")
 
-    # 5. Timing field validation / consistency
+    # 5. Timing field validation / consistency (bidirectional)
+    schedule_tolerant: set[str] = set()
     for item in sched_data.get("nightly", []):
         sid = item.get("suite", "")
         timing = item.get("timing", "strict")
         if timing not in ("strict", "tolerant"):
             errors.append(f"invalid timing {timing!r} for suite {sid!r}")
-        elif timing == "tolerant" and sid in actual_nightly and not actual_tolerated.get(sid, False):
+        elif timing == "tolerant":
+            schedule_tolerant.add(sid)
+            if sid in actual_nightly and not actual_tolerated.get(sid, False):
+                errors.append(
+                    f"suite {sid!r} has timing='tolerant' in schedule but is invoked strictly in ci.yml"
+                )
+        elif timing == "strict" and actual_tolerated.get(sid, False):
             errors.append(
-                f"suite {sid!r} has timing='tolerant' in schedule but is invoked strictly in ci.yml"
+                f"suite {sid!r} has timing='strict' in schedule but is tolerated/retried in ci.yml"
             )
 
+    ci_tolerant = {sid for sid, is_tol in actual_tolerated.items() if is_tol}
+    if ci_tolerant != schedule_tolerant:
+        errors.append(
+            f"tolerated suite set mismatch: ci.yml={sorted(ci_tolerant)} != schedule={sorted(schedule_tolerant)}"
+        )
+
+    # 6. full-matrix log upload step must use `if: always()` (flake ledger data source)
+    if not _has_full_matrix_always_log_upload(ci_text):
+        errors.append("full-matrix log upload step missing 'if: always()'")
+
     return errors
+
+
+def _has_full_matrix_always_log_upload(ci_text: str) -> bool:
+    lines = ci_text.splitlines()
+    in_full_matrix = False
+    current_step_lines: list[str] = []
+
+    def _step_is_always_log_upload(step_lines: list[str]) -> bool:
+        joined = "\n".join(step_lines)
+        if "full-matrix-test-logs" not in joined:
+            return False
+        return any(re.match(r"^\s*if:\s*always\(\)\s*(?:#.*)?$", l) for l in step_lines)
+
+    for line in lines:
+        m_job = re.match(r"^  ([a-zA-Z0-9_-]+):\s*(?:#.*)?$", line)
+        if m_job:
+            if in_full_matrix and _step_is_always_log_upload(current_step_lines):
+                return True
+            in_full_matrix = m_job.group(1) == "full-matrix"
+            current_step_lines = []
+            continue
+        if not in_full_matrix:
+            continue
+        if re.match(r"^\s*-\s*name:\s*", line):
+            if _step_is_always_log_upload(current_step_lines):
+                return True
+            current_step_lines = [line]
+        elif current_step_lines:
+            current_step_lines.append(line)
+
+    if in_full_matrix and _step_is_always_log_upload(current_step_lines):
+        return True
+    return False
 
 
 def main(root: str | Path = ".") -> int:

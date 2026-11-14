@@ -387,75 +387,44 @@ jobs:
 
       - name: x86 guest nightly suites
         run: |
-          # One retry per suite: today's CI-only stall/pixel-race family
-          # (systest @ 8 CPUs, gfx TERM SCREEN snapshot) fails on loaded
-          # runners and passes on retry and on the dev box; the first
-          # failure stays loud via ::warning, the second one fails the
-          # step. Persistent regressions therefore still gate the matrix.
-          suite() {
-            echo "== $* =="
+          # Strict suites run directly with zero retry (fail fast).
+          # Only timing='tolerant' suites (closed allowlist in config/test-ci-schedule.json)
+          # use tolerant_suite() with one retry + || true subshell and ::warning:: ledger pointer.
+          tolerant_suite() {
+            echo "== tolerant: $* =="
             if ! "$@"; then
-              echo "::warning::suite '$*' failed once — retrying (runner-weather protocol, see docs/debug/2026-11-04-terminal-present-surface-pixels.md)"
+              echo "::warning::tolerant suite '$*' failed once — retrying (record in flake ledger via make test-flake-report)"
               sleep 10
-              "$@" || { echo "SUITE '$*' failed twice" ; exit 1 ; }
+              if ! "$@"; then
+                echo "::warning::tolerant suite '$*' failed twice — swallowed by tolerant gate (record in flake ledger via make test-flake-report)"
+                true
+              fi
             fi
           }
-          suite make test-qemu SUITE=inittab-phase
-          suite make test-qemu SUITE=network
-          suite make test-qemu SUITE=gfx
-          suite make test-qemu SUITE=resolution
-          # `env` keeps the flavor assignment process-local: a prefix
-          # assignment on a bash FUNCTION call persists after the call.
-          suite env FB_RESOLUTION_TEST=1 make test-qemu SUITE=resolution
-          suite env ARCH10_CAPACITY_TEST=1 make test-qemu SUITE=arch10-capacity
-          suite env QEMU_SMP=4 make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress
-          suite make test-qemu SUITE=driver-model
-          suite make test-qemu SUITE=monitor
-          # terminal-present runs but does not block: the perf gate and
-          # idle-window phases pass, but the surface-pixel phase has a
-          # pre-existing unresolved gfx anomaly (small-view
-          # GFX_PRESENT_RECT pixels never reach the visible surface
-          # while a subsequent full GFX_PRESENT does) — see
-          # docs/debug/2026-11-04-terminal-present-surface-pixels.md.
-          # The matrix is serial; a hard failure here would starve the
-          # aarch64 nightly steps below of coverage.
-          # The tolerated suites call suite() inside a subshell so its
-          # double-failure `exit` only abandons that suite (the `||`
-          # annotation still runs); blocking suites let the exit fail
-          # the step.
-          ( suite make test-qemu SUITE=terminal-present ) || \
-            echo "::warning::terminal-present known-failing (surface pixel contract, see docs/debug/2026-11-04-terminal-present-surface-pixels.md)"
-          suite make test-qemu SUITE=intr-x86
-          # BOOT-1 fault matrix: the target itself runs the whole 8-group
-          # matrix serially (normal 1/2/4/8, delay 2/4, fatal 2/2); the
-          # 90 s per-case timeout is a per-QEMU-run bound, NOT the matrix
-          # budget — the nightly job's 240-minute budget above covers it.
-          suite make test-qemu SUITE=boot-lifecycle
+          make test-qemu SUITE=inittab-phase
+          make test-qemu SUITE=network
+          make test-qemu SUITE=gfx
+          make test-qemu SUITE=resolution
+          # `env` keeps the flavor assignment process-local.
+          env FB_RESOLUTION_TEST=1 make test-qemu SUITE=resolution
+          env ARCH10_CAPACITY_TEST=1 make test-qemu SUITE=arch10-capacity
+          env QEMU_SMP=4 make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress
+          make test-qemu SUITE=driver-model
+          make test-qemu SUITE=monitor
+          ( tolerant_suite make test-qemu SUITE=terminal-present ) || true
+          make test-qemu SUITE=intr-x86
+          make test-qemu SUITE=boot-lifecycle
           # Doom E2E suite (nightly/manual): requires external IWAD asset bridge
           if [ -n "$DOOM_IWAD_PATH" ]; then
-            suite make DOOM_TEST=1 test-qemu SUITE=doom
+            make DOOM_TEST=1 test-qemu SUITE=doom
           fi
-          # BOOT-2 early-IRQ/time matrix: 10 serial groups (normal
-          # 1/2/4/8, force-rtc 2, rtc-timeout 1, bsp-lapic-fail 1/2/4,
-          # unsafe-open 1); the 90 s per-case timeout is per-QEMU-run.
-          # Worst case ~10 groups x ~2-5 min wall clock (builds + boots)
-          # — well inside this nightly job's 240-minute budget.
-          suite make test-qemu SUITE=boot-irq-time
-          suite make test-qemu SUITE=boot-failure
-          suite make test-qemu SUITE=boot-contract
-          suite make test-qemu SUITE=boot-services
-          # gui and gui-desktop run non-blocking for the same reason as
-          # terminal-present: on 1-vCPU CI runners the guest's terminal
-          # wedges around display-ownership transitions (input_interaction's
-          # 'wait <pid>' never returns after the probe exits; SMP=2 passes),
-          # starving ash — see docs/debug/
-          # 2026-11-04-terminal-present-surface-pixels.md ("gui input
-          # interaction stall"). Everything else in the matrix stays hard.
-          ( suite make test-qemu SUITE=gui ) || \
-            echo "::warning::gui known-failing on 1-vCPU CI (input_interaction stall, see docs/debug/2026-11-04-terminal-present-surface-pixels.md)"
-          ( suite make test-qemu SUITE=gui-desktop ) || \
-            echo "::warning::gui-desktop tolerated (same 1-vCPU terminal-stall family, see docs/debug/2026-11-04-terminal-present-surface-pixels.md)"
-          suite make test-syscall-repeat
+          make test-qemu SUITE=boot-irq-time
+          make test-qemu SUITE=boot-failure
+          make test-qemu SUITE=boot-contract
+          make test-qemu SUITE=boot-services
+          ( tolerant_suite make test-qemu SUITE=gui ) || true
+          ( tolerant_suite make test-qemu SUITE=gui-desktop ) || true
+          make test-syscall-repeat
 
       - name: AArch64 fault / SMP MODEs
         run: |
@@ -477,14 +446,16 @@ jobs:
 
       - name: AArch64 AP cooperative scheduler P1
         run: |
-          # The positive case's repeat-2 at 4/8 CPUs intermittently fails
-          # 'expected exactly one START phase=ap line' on loaded CI runners
-          # while run-1 and every 1/2-CPU run pass (dev box: always green).
-          # Non-blocking until the aarch64 AP scheduler harness's repeat-2
-          # evidence capture is root-caused (same runner-weather family as
-          # the x86 nightly stalls above).
-          make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap || \
-            echo "::warning::sched-ap flaky at 4/8-CPU repeat-2 on CI runners"
+          (
+            if ! make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap; then
+              echo "::warning::tolerant suite 'aarch64-sched-ap' failed once — retrying (record in flake ledger via make test-flake-report)"
+              sleep 10
+              make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap || {
+                echo "::warning::tolerant suite 'aarch64-sched-ap' failed twice — swallowed by tolerant gate (record in flake ledger via make test-flake-report)"
+                true
+              }
+            fi
+          ) || true
           make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner || exit 1
 
       - name: AArch64 AP scheduler P2 wakeup
@@ -506,8 +477,8 @@ jobs:
       - name: AArch64 boot stage contracts
         run: make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract
 
-      - name: Upload run logs on failure
-        if: failure()
+      - name: Upload run logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: full-matrix-test-logs
