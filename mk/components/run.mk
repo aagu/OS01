@@ -855,176 +855,62 @@ test-harness: test-framework-contract check-ci-schedule
 test-framework-contract:
 	$(call os01_submake,hosttests,test-framework-contract $(OS01_SUBMAKE_ARGS))
 
-# ── BOOT-3 failure policy host tests ───────────────────────────
-.PHONY: test-boot-failure-host _test-boot-failure-host-run-subsys _test-boot-failure-host-run-log _test-boot-failure-host-run-mounts _test-boot-failure-host-run-terminal _test-boot-failure-host-run-stdio _test-boot-failure-host-run-spawn _test-boot-failure-host-run-task-init _test-boot-failure-host-run-all
-_test-boot-failure-host-run-all:
-	@echo "  [test-boot-failure-host] all (subsys log mounts terminal stdio spawn task-init)"
-	$(call os01_submake,hosttests,test_boot_failure_subsys test_boot_failure_log test_boot_failure_mounts test_boot_failure_terminal test_boot_stdio test_boot_spawn_failure test_boot_task_init $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-subsys:
-	@echo "  [test-boot-failure-host] subsys"
-	$(call os01_submake,hosttests,test_boot_failure_subsys $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-log:
-	@echo "  [test-boot-failure-host] log"
-	$(call os01_submake,hosttests,test_boot_failure_log $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-mounts:
-	@echo "  [test-boot-failure-host] mounts"
-	$(call os01_submake,hosttests,test_boot_failure_mounts $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-terminal:
-	@echo "  [test-boot-failure-host] terminal"
-	$(call os01_submake,hosttests,test_boot_failure_terminal $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-stdio:
-	@echo "  [test-boot-failure-host] stdio"
-	$(call os01_submake,hosttests,test_boot_stdio $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-spawn:
-	@echo "  [test-boot-failure-host] spawn"
-	$(call os01_submake,hosttests,test_boot_spawn_failure $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-task-init:
-	@echo "  [test-boot-failure-host] task-init"
-	$(call os01_submake,hosttests,test_boot_task_init $(OS01_SUBMAKE_ARGS))
-_test-boot-failure-host-run-%:
-	@echo "ERROR: unknown CASE='$*'; valid: subsys log mounts terminal stdio spawn task-init all" >&2; exit 1
-test-boot-failure-host: CASE ?=
-test-boot-failure-host: CASE := $(CASE)
-test-boot-failure-host: $(if $(CASE),_test-boot-failure-host-run-$(CASE),_test-boot-failure-host-run-all)
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    ""|subsys|log|mounts|terminal|stdio|spawn|task-init|all) echo "  [test-boot-failure-host] CASE=${CASE:-all}";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: subsys log mounts terminal stdio spawn task-init all" >&2; exit 1;; \
-	esac
+# ── Focused host-test dispatch groups (shared generator) ────────
+# Every "focused host tests" umbrella shares one skeleton: per-case runner
+# rules (echo + controlled hosttests sub-make), an _run-all rule, a
+# catch-all that rejects unknown cases with the valid set, and a
+# capability-gated umbrella dispatching on the group's case variable.
+# They are all generated here — new groups/cases append one eval call.
+#
+# NOTE: each case's runner rule is a concrete rule, so a case name that is
+# a prefix of another (e.g. theme / theme-apply) is fine; explicit rules
+# placed AFTER an eval call override the catch-all for special cases
+# (resolution hooks, doom build).
+#
+# $(call host_case_group,target,cases,capability,case-var,all-targets,mapping)
+#   target       umbrella target (e.g. test-gui-host); echo prefix too
+#   cases        case list — drives _run-all, the catch-all message and
+#                (with all-targets empty) the _run-all prerequisites
+#   capability   require_capability argument (prereqs are only wired for
+#                capable profiles so an incapable profile fails at the gate)
+#   case-var     the per-invocation selector (CASE / RES_CASE / DOOM_CASE /
+#                LIBC_CASE); empty selector runs _run-all
+#   all-targets  _run-all recipe = one os01_submake with these hosttests
+#                targets (empty = depend on the per-case runner rules)
+#   mapping      "case:hosttests-target ..." — a case missing here needs
+#                an explicit rule after the eval call
+define _host_case_rule
+.PHONY: _$(1)-run-$(2)
+_$(1)-run-$(2):
+	@echo "  [$(3)] $(2)"
+	$$(call os01_submake,hosttests,$(4) $$(OS01_SUBMAKE_ARGS))
+endef
 
-# ── BOOT-4 stage contract host tests ───────────────────────────
-.PHONY: test-boot-contract-host _test-boot-contract-host-run-subsys _test-boot-contract-host-run-cpu-prepare _test-boot-contract-host-run-sequence _test-boot-contract-host-run-checks _test-boot-contract-host-run-softirq _test-boot-contract-host-run-all
-_test-boot-contract-host-run-all:
-	@echo "  [test-boot-contract-host] all (subsys cpu-prepare softirq sequence checks)"
-	$(call os01_submake,hosttests,test_boot_contract_subsys $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_contract_cpu_prepare $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_contract_softirq $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_contract_sequence $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_contract_checks $(OS01_SUBMAKE_ARGS))
-_test-boot-contract-host-run-subsys:
-	@echo "  [test-boot-contract-host] subsys"
-	$(call os01_submake,hosttests,test_boot_contract_subsys $(OS01_SUBMAKE_ARGS))
-_test-boot-contract-host-run-cpu-prepare:
-	@echo "  [test-boot-contract-host] cpu-prepare"
-	$(call os01_submake,hosttests,test_boot_contract_cpu_prepare $(OS01_SUBMAKE_ARGS))
-_test-boot-contract-host-run-sequence:
-	@echo "  [test-boot-contract-host] sequence"
-	$(call os01_submake,hosttests,test_boot_contract_sequence $(OS01_SUBMAKE_ARGS))
-_test-boot-contract-host-run-checks:
-	@echo "  [test-boot-contract-host] checks"
-	$(call os01_submake,hosttests,test_boot_contract_checks $(OS01_SUBMAKE_ARGS))
-_test-boot-contract-host-run-softirq:
-	@echo "  [test-boot-contract-host] softirq"
-	$(call os01_submake,hosttests,test_boot_contract_softirq $(OS01_SUBMAKE_ARGS))
-_test-boot-contract-host-run-%:
-	@echo "ERROR: unknown CASE='$*'; valid: subsys cpu-prepare sequence checks softirq all" >&2; exit 1
-test-boot-contract-host: CASE ?=
-test-boot-contract-host: CASE := $(CASE)
-test-boot-contract-host: $(if $(CASE),_test-boot-contract-host-run-$(CASE),_test-boot-contract-host-run-all)
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    ""|subsys|cpu-prepare|sequence|checks|softirq|all) echo "  [test-boot-contract-host] CASE=${CASE:-all}";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: subsys cpu-prepare sequence checks softirq all" >&2; exit 1;; \
-	esac
+define host_case_group
+$(foreach kv,$(6),$(eval $(call _host_case_rule,$(1),$(word 1,$(subst :, ,$(kv))),$(1),$(word 2,$(subst :, ,$(kv))))))
+.PHONY: $(1) _$(1)-run-all
+$(if $(5),_$(1)-run-all:
+	@echo "  [$(1)] all"
+	$$(call os01_submake,hosttests,$(5) $$(OS01_SUBMAKE_ARGS))
+,_$(1)-run-all: $(foreach c,$(2),_$(1)-run-$(c))
+	@echo "  [$(1)] full group: $(2)")
+_$(1)-run-%:
+	@echo "ERROR: unknown $(4)='$$*'; valid: $(2), all" >&2
+	@exit 1
+$(1): $(if $(filter $(3),$(PROFILE_CAPABILITIES)),$(if $($(4)),_$(1)-run-$($(4)),_$(1)-run-all))
+	$(call require_capability,$(3))
+	@echo "  [$(1)] $(if $($(4)),$(4)=$($(4)),full group: $(2))"
+endef
 
-# ── BOOT-5 scheduler and services host tests ───────────────────
-.PHONY: test-boot-services-host _test-boot-services-host-run-vfs _test-boot-services-host-run-spawn _test-boot-services-host-run-sequence _test-boot-services-host-run-services _test-boot-services-host-run-late _test-boot-services-host-run-mechanisms _test-boot-services-host-run-all
-_test-boot-services-host-run-all:
-	@echo "  [test-boot-services-host] all (vfs spawn sequence services late mechanisms)"
-	$(call os01_submake,hosttests,test_boot_services_vfs $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_services_spawn $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_services_sequence $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_services_services $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_services_late $(OS01_SUBMAKE_ARGS))
-	$(call os01_submake,hosttests,test_boot_services_mechanisms $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-vfs:
-	@echo "  [test-boot-services-host] vfs"
-	$(call os01_submake,hosttests,test_boot_services_vfs $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-spawn:
-	@echo "  [test-boot-services-host] spawn"
-	$(call os01_submake,hosttests,test_boot_services_spawn $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-sequence:
-	@echo "  [test-boot-services-host] sequence"
-	$(call os01_submake,hosttests,test_boot_services_sequence $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-services:
-	@echo "  [test-boot-services-host] services"
-	$(call os01_submake,hosttests,test_boot_services_services $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-late:
-	@echo "  [test-boot-services-host] late"
-	$(call os01_submake,hosttests,test_boot_services_late $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-mechanisms:
-	@echo "  [test-boot-services-host] mechanisms"
-	$(call os01_submake,hosttests,test_boot_services_mechanisms $(OS01_SUBMAKE_ARGS))
-_test-boot-services-host-run-%:
-	@echo "ERROR: unknown CASE='$*'; valid: vfs spawn sequence services late mechanisms all" >&2; exit 1
-test-boot-services-host: CASE ?=
-test-boot-services-host: CASE := $(CASE)
-test-boot-services-host: $(if $(CASE),_test-boot-services-host-run-$(CASE),_test-boot-services-host-run-all)
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    ""|vfs|spawn|sequence|services|late|mechanisms|all) echo "  [test-boot-services-host] CASE=${CASE:-all}";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: vfs spawn sequence services late mechanisms all" >&2; exit 1;; \
-	esac
+$(eval $(call host_case_group,test-boot-failure-host,subsys log mounts terminal stdio spawn task-init,rootfs,CASE,test_boot_failure_subsys test_boot_failure_log test_boot_failure_mounts test_boot_failure_terminal test_boot_stdio test_boot_spawn_failure test_boot_task_init,subsys:test_boot_failure_subsys log:test_boot_failure_log mounts:test_boot_failure_mounts terminal:test_boot_failure_terminal stdio:test_boot_stdio spawn:test_boot_spawn_failure task-init:test_boot_task_init))
 
+$(eval $(call host_case_group,test-boot-contract-host,subsys cpu-prepare softirq sequence checks,rootfs,CASE,test_boot_contract_subsys test_boot_contract_cpu_prepare test_boot_contract_softirq test_boot_contract_sequence test_boot_contract_checks,subsys:test_boot_contract_subsys cpu-prepare:test_boot_contract_cpu_prepare softirq:test_boot_contract_softirq sequence:test_boot_contract_sequence checks:test_boot_contract_checks))
 
-# Focused BOOT-2 early-IRQ/time host tests.  Each CASE forwards to the
-# matching hosttests target through the controlled sub-make boundary;
-# CASE omitted runs `all`.  Unknown non-empty CASE aborts non-zero.  The
-# full group set is registration|context|rtc|handoff (context/rtc/
-# handoff targets are added by their own BOOT-2 tasks; until then a
-# missing group target fails structurally without blocking the shipped
-# groups).
-.PHONY: test-boot-irq-time-host _test-boot-irq-time-host-run-registration _test-boot-irq-time-host-run-context _test-boot-irq-time-host-run-rtc _test-boot-irq-time-host-run-all
-_test-boot-irq-time-host-run-all:
-	@echo "  [test-boot-irq-time-host] all (registration context rtc handoff)"
-	$(call os01_submake,hosttests,test_boot_irq_time_registration test_boot_irq_time_context test_boot_irq_time_rtc test_boot_irq_time_handoff $(OS01_SUBMAKE_ARGS))
-_test-boot-irq-time-host-run-registration:
-	@echo "  [test-boot-irq-time-host] registration"
-	$(call os01_submake,hosttests,test_boot_irq_time_registration $(OS01_SUBMAKE_ARGS))
-_test-boot-irq-time-host-run-context:
-	@echo "  [test-boot-irq-time-host] context"
-	$(call os01_submake,hosttests,test_boot_irq_time_context $(OS01_SUBMAKE_ARGS))
-_test-boot-irq-time-host-run-rtc:
-	@echo "  [test-boot-irq-time-host] rtc"
-	$(call os01_submake,hosttests,test_boot_irq_time_rtc $(OS01_SUBMAKE_ARGS))
-_test-boot-irq-time-host-run-handoff:
-	@echo "  [test-boot-irq-time-host] handoff"
-	$(call os01_submake,hosttests,test_boot_irq_time_handoff $(OS01_SUBMAKE_ARGS))
-test-boot-irq-time-host: CASE ?=
-test-boot-irq-time-host: CASE := $(CASE)
-test-boot-irq-time-host: $(if $(CASE),_test-boot-irq-time-host-run-$(CASE),_test-boot-irq-time-host-run-registration)
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    ""|registration|context|rtc|handoff|all) echo "  [test-boot-irq-time-host] CASE=${CASE:-registration}";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: registration context rtc handoff all" >&2; exit 1;; \
-	esac
+$(eval $(call host_case_group,test-boot-services-host,vfs spawn sequence services late mechanisms,rootfs,CASE,test_boot_services_vfs test_boot_services_spawn test_boot_services_sequence test_boot_services_services test_boot_services_late test_boot_services_mechanisms,vfs:test_boot_services_vfs spawn:test_boot_services_spawn sequence:test_boot_services_sequence services:test_boot_services_services late:test_boot_services_late mechanisms:test_boot_services_mechanisms))
 
-# Focused BOOT-1 CPU-lifecycle host tests.  Each CASE forwards to the
-# matching hosttests target through the controlled sub-make boundary:
-#   construction — real percpu construction test + existing
-#                  layout/publish tests (no wait-object dependency)
-#   wait         — only the real bounded-wait helper test
-#   all          — both groups (default when CASE is omitted)
-# Unknown non-empty CASE aborts non-zero (missing per-case rule) and the
-# trailing case re-checks the dispatch so the error names the valid set.
-.PHONY: test-boot-lifecycle-host _test-boot-lifecycle-host-run-construction _test-boot-lifecycle-host-run-wait _test-boot-lifecycle-host-run-all
-_test-boot-lifecycle-host-run-construction:
-	@echo "  [test-boot-lifecycle-host] construction"
-	$(call os01_submake,hosttests,test_boot_lifecycle_construction $(OS01_SUBMAKE_ARGS))
-_test-boot-lifecycle-host-run-wait:
-	@echo "  [test-boot-lifecycle-host] wait"
-	$(call os01_submake,hosttests,test_boot_lifecycle_wait $(OS01_SUBMAKE_ARGS))
-_test-boot-lifecycle-host-run-all:
-	@echo "  [test-boot-lifecycle-host] all"
-	$(call os01_submake,hosttests,test_boot_lifecycle_all $(OS01_SUBMAKE_ARGS))
-test-boot-lifecycle-host: CASE ?=
-test-boot-lifecycle-host: CASE := $(CASE)
-test-boot-lifecycle-host: $(if $(CASE),_test-boot-lifecycle-host-run-$(CASE),_test-boot-lifecycle-host-run-all)
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    ""|construction|wait|all) echo "  [test-boot-lifecycle-host] CASE=${CASE:-all}";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: construction wait all" >&2; exit 1;; \
-	esac
+$(eval $(call host_case_group,test-boot-irq-time-host,registration context rtc handoff,rootfs,CASE,test_boot_irq_time_registration test_boot_irq_time_context test_boot_irq_time_rtc test_boot_irq_time_handoff,registration:test_boot_irq_time_registration context:test_boot_irq_time_context rtc:test_boot_irq_time_rtc handoff:test_boot_irq_time_handoff))
+
+$(eval $(call host_case_group,test-boot-lifecycle-host,construction wait,rootfs,CASE,test_boot_lifecycle_all,construction:test_boot_lifecycle_construction wait:test_boot_lifecycle_wait))
 
 # Focused aarch64 per-CPU tick accounting hosttest (Task 1).  The
 # binary is the REAL kernel/arch/aarch64/platform/time.c host-compiled
@@ -1036,483 +922,53 @@ test-boot-lifecycle-host: $(if $(CASE),_test-boot-lifecycle-host-run-$(CASE),_te
 test-aarch64-sched-tick-host:
 	$(call os01_submake,hosttests,test-aarch64-sched-tick-host $(OS01_SUBMAKE_ARGS))
 
-# Focused M1 host tests (aarch64 M1 plan). Each CASE runs the matching
-# focused TEST_BINS entry under hosttests/.  Unknown non-empty CASE
-# aborts non-zero. With CASE omitted the umbrella runs the full M1
-# group (currently: layout). The target builds only the focused
-# TEST_BINS entry, not the entire hosttest build, so `make ... CASE=...`
-# is cheap when iterating on a single calculator.
-#
-# The x86_64-clang profile forwards to hosttests; aarch64-clang also
-# routes through hosttests (the M1 host tests are arch-neutral C).
-#
-# Implementation note: os01_submake expands to a `+env -i ...` line,
-# which only parses as a Make recipe prefix when the call sits at the
-# start of its OWN recipe line. We therefore give each M1 case its own
-# .PHONY runner and let test-m1-host select among them via CASE.
-.PHONY: test-m1-host _test-m1-host-run-m1-layout _test-m1-host-run-m1-reservation _test-m1-host-run-m1-arena _test-m1-host-run-m1-tree _test-m1-host-run-m1-contract-x86
-M1_CASES := m1-layout m1-reservation m1-arena m1-tree m1-contract-x86 m1-install m1-publish
-_test-m1-host-run-m1-layout:
-	@echo "  [test-m1-host] m1-layout"
-	$(call os01_submake,hosttests,test-m1-layout $(OS01_SUBMAKE_ARGS))
-_test-m1-host-run-m1-reservation:
-	@echo "  [test-m1-host] m1-reservation"
-	$(call os01_submake,hosttests,test-m1-reservation $(OS01_SUBMAKE_ARGS))
-_test-m1-host-run-m1-arena:
-	@echo "  [test-m1-host] m1-arena"
-	$(call os01_submake,hosttests,test-m1-arena $(OS01_SUBMAKE_ARGS))
-_test-m1-host-run-m1-tree:
-	@echo "  [test-m1-host] m1-tree"
-	$(call os01_submake,hosttests,test-m1-tree $(OS01_SUBMAKE_ARGS))
-_test-m1-host-run-m1-contract-x86:
-	@echo "  [test-m1-host] m1-contract-x86"
-	$(call os01_submake,hosttests,test-m1-contract-x86 $(OS01_SUBMAKE_ARGS))
-_test-m1-host-run-m1-install:
-	$(call os01_submake,hosttests,test-m1-install $(OS01_SUBMAKE_ARGS))
-_test-m1-host-run-m1-publish:
-	$(call os01_submake,hosttests,test-m1-publish $(OS01_SUBMAKE_ARGS))
-test-m1-host: CASE ?=
-test-m1-host: CASE := $(CASE)
-# Umbrella: with empty CASE, depend on every per-case runner; otherwise
-# depend on the single matching one. The dispatch is purely structural
-# so make schedules the right os01_submake invocations.
-test-m1-host: $(if $(CASE),_test-m1-host-run-$(CASE),$(foreach c,$(M1_CASES),_test-m1-host-run-$(c)))
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    "") echo "  [test-m1-host] full M1 group: $(M1_CASES)";; \
-	    m1-layout) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    m1-reservation) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    m1-arena) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    m1-tree) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    m1-publish) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    m1-install) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    m1-contract-x86) echo "  [test-m1-host] CASE=$(CASE)";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(M1_CASES)" >&2; exit 1;; \
-	  esac
+# Focused M1 host tests (aarch64 M1 plan).  The M1 host tests are
+# arch-neutral C; both profiles route through hosttests.  Each case is a
+# focused TEST_BINS entry, so `make test-m1-host CASE=...` is cheap when
+# iterating on a single calculator; CASE omitted runs the full group.
+$(eval $(call host_case_group,test-m1-host,m1-layout m1-reservation m1-arena m1-tree m1-contract-x86 m1-install m1-publish,rootfs,CASE,,m1-layout:test-m1-layout m1-reservation:test-m1-reservation m1-arena:test-m1-arena m1-tree:test-m1-tree m1-contract-x86:test-m1-contract-x86 m1-install:test-m1-install m1-publish:test-m1-publish))
 
 # ARCH-9 driver model host tests.
-.PHONY: test-arch9-host _test-arch9-host-run-block _test-arch9-host-run-pci _test-arch9-host-run-backend _test-arch9-host-run-ahci _test-arch9-host-run-device-boot _test-arch9-host-run-net _test-arch9-host-run-lwip _test-arch9-host-run-e1000 _test-arch9-host-run-virtio _test-arch9-host-run-socket
-ARCH9_CASES := block pci backend ahci device-boot net lwip e1000 virtio socket
-_test-arch9-host-run-block:
-	@echo "  [test-arch9-host] block"
-	$(call os01_submake,hosttests,test-block $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-pci:
-	@echo "  [test-arch9-host] pci"
-	$(call os01_submake,hosttests,test-pci $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-backend:
-	@echo "  [test-arch9-host] backend"
-	$(call os01_submake,hosttests,test-backend $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-ahci:
-	@echo "  [test-arch9-host] ahci"
-	$(call os01_submake,hosttests,test-ahci $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-device-boot:
-	@echo "  [test-arch9-host] device-boot"
-	$(call os01_submake,hosttests,test-device-boot $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-net:
-	@echo "  [test-arch9-host] net"
-	$(call os01_submake,hosttests,test-net $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-lwip:
-	@echo "  [test-arch9-host] lwip"
-	$(call os01_submake,hosttests,test-lwip $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-e1000:
-	@echo "  [test-arch9-host] e1000"
-	$(call os01_submake,hosttests,test-e1000 $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-virtio:
-	@echo "  [test-arch9-host] virtio"
-	$(call os01_submake,hosttests,test-virtio $(OS01_SUBMAKE_ARGS))
-_test-arch9-host-run-socket:
-	@echo "  [test-arch9-host] socket"
-	$(call os01_submake,hosttests,test-socket $(OS01_SUBMAKE_ARGS))
-test-arch9-host: CASE ?=
-test-arch9-host: CASE := $(CASE)
-test-arch9-host: $(if $(CASE),_test-arch9-host-run-$(CASE),$(foreach c,$(ARCH9_CASES),_test-arch9-host-run-$(c)))
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    "") echo "  [test-arch9-host] full ARCH-9 group: $(ARCH9_CASES)";; \
-	    block) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    pci) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    backend) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    ahci) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    device-boot) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    net) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    lwip) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    e1000) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    virtio) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    socket) echo "  [test-arch9-host] CASE=$(CASE)";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(ARCH9_CASES)" >&2; exit 1;; \
-	  esac
+$(eval $(call host_case_group,test-arch9-host,block pci backend ahci device-boot net lwip e1000 virtio socket,rootfs,CASE,,block:test-block pci:test-pci backend:test-backend ahci:test-ahci device-boot:test-device-boot net:test-net lwip:test-lwip e1000:test-e1000 virtio:test-virtio socket:test-socket))
 
 # ── Resolution Switcher host tests ───────────────────────────
-# Focused host tests for the QEMU resolution switcher plan.
 # RES_CASE accepts uapi, state, writers, bga, ioctl, pty, terminal,
-# clients, hooks, or all.
-# With RES_CASE omitted or all, the umbrella runs all currently registered cases.
-# Unregistered cases and unknown cases abort non-zero.
-.PHONY: test-resolution-host _test-resolution-host-run-uapi _test-resolution-host-run-state _test-resolution-host-run-writers _test-resolution-host-run-bga _test-resolution-host-run-ioctl _test-resolution-host-run-pty _test-resolution-host-run-terminal _test-resolution-host-run-clients _test-resolution-host-run-hooks
-RESOLUTION_HOST_ALL_CASES := uapi state writers bga ioctl pty terminal clients hooks
-RESOLUTION_HOST_REGISTERED_CASES := uapi state writers bga ioctl pty terminal clients hooks
+# clients, hooks, or all (default).  Unregistered/unknown cases abort
+# non-zero via the generated catch-all.  hooks is an explicit rule: it
+# also runs the python resolution-profile harness.
+$(eval $(call host_case_group,test-resolution-host,uapi state writers bga ioctl pty terminal clients hooks,rootfs,RES_CASE,,uapi:test-fb-uapi state:test-fb-state writers:test-fb-writers bga:test-bga ioctl:test-fb-ioctl pty:test-pty-winsize terminal:test-terminal-display clients:test-clients))
 
-_test-resolution-host-run-uapi:
-	@echo "  [test-resolution-host] uapi"
-	$(call os01_submake,hosttests,test-fb-uapi $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-state:
-	@echo "  [test-resolution-host] state"
-	$(call os01_submake,hosttests,test-fb-state $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-writers:
-	@echo "  [test-resolution-host] writers"
-	$(call os01_submake,hosttests,test-fb-writers $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-bga:
-	@echo "  [test-resolution-host] bga"
-	$(call os01_submake,hosttests,test-bga $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-ioctl:
-	@echo "  [test-resolution-host] ioctl"
-	$(call os01_submake,hosttests,test-fb-ioctl $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-pty:
-	@echo "  [test-resolution-host] pty"
-	$(call os01_submake,hosttests,test-pty-winsize $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-terminal:
-	@echo "  [test-resolution-host] terminal"
-	$(call os01_submake,hosttests,test-terminal-display $(OS01_SUBMAKE_ARGS))
-
-_test-resolution-host-run-clients:
-	@echo "  [test-resolution-host] clients"
-	$(call os01_submake,hosttests,test-clients $(OS01_SUBMAKE_ARGS))
-
-# hooks: the Task-9 controlled fault-injection surface.  The C harness
-# links the REAL fb_test.c + fb_state.c/bga.c/fb.c built with
-# FB_RESOLUTION_TEST; the python harness asserts the build profile is
-# isolated (resolution-test image dir, parse-time rejection of unknown
-# values / conflicting variants / non-x86 targets).
+.PHONY: _test-resolution-host-run-hooks
 _test-resolution-host-run-hooks:
 	@echo "  [test-resolution-host] hooks"
 	$(call os01_submake,hosttests,test-fb-hooks $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/fb_resolution_profile_test.py
 
-_test-resolution-host-run-%:
-	@echo "ERROR: unknown or unregistered RES_CASE='$*'; valid: $(RESOLUTION_HOST_ALL_CASES) all (registered: $(RESOLUTION_HOST_REGISTERED_CASES))" >&2
-	@exit 1
-
-RES_CASE ?= all
-RES_CASE_EFFECTIVE = $(if $(strip $(RES_CASE)),$(RES_CASE),all)
-test-resolution-host: RES_CASE := $(RES_CASE)
-test-resolution-host: $(if $(filter all,$(RES_CASE_EFFECTIVE)),$(foreach c,$(RESOLUTION_HOST_REGISTERED_CASES),_test-resolution-host-run-$(c)),_test-resolution-host-run-$(RES_CASE_EFFECTIVE))
-	$(call require_capability,rootfs)
-	@case "$(RES_CASE_EFFECTIVE)" in \
-	    all) echo "  [test-resolution-host] full registered group: $(RESOLUTION_HOST_REGISTERED_CASES)";; \
-	    *) echo "  [test-resolution-host] RES_CASE=$(RES_CASE_EFFECTIVE)";; \
-	  esac
-
 # ── GUI host tests ───────────────────────────────────────────
-# Focused host tests for the GUI plans: the GUI-1 LVGL platform backend,
-# the GUI-2 input-focus chain and the GUI-3 Material design system.
-# CASE accepts any registered case (platform, lvgl, devfs-input,
-# input-frame, input-route, input-decode, input-platform, theme) or all
-# (default: all).
-# Unknown CASE aborts non-zero before invoking submake.
-.PHONY: test-gui-host _test-gui-host-run-platform _test-gui-host-run-lvgl _test-gui-host-run-devfs-input _test-gui-host-run-input-frame _test-gui-host-run-input-route _test-gui-host-run-input-decode _test-gui-host-run-input-nonce _test-gui-host-run-input-platform _test-gui-host-run-input-lvgl _test-gui-host-run-theme _test-gui-host-run-theme-apply _test-gui-host-run-desktop-state _test-gui-host-run-desktop-shell _test-gui-host-run-desktop-audit _test-gui-host-run-widget _test-gui-host-run-widget-layout _test-gui-host-run-widget-appearance _test-gui-host-run-widget-event _test-gui-host-run-focus
-GUI_HOST_REGISTERED_CASES := platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit widget widget-layout widget-appearance widget-event focus
-
-_test-gui-host-run-platform:
-	@echo "  [test-gui-host] platform"
-	$(call os01_submake,hosttests,test-gui-platform $(OS01_SUBMAKE_ARGS))
-
-_test-gui-host-run-lvgl:
-	@echo "  [test-gui-host] lvgl"
-	$(call os01_submake,hosttests,test-gui-lvgl $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Runs
-# test_devfs_input_dispatch.elf, which host-compiles the REAL
-# kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c and asserts the
-# spec §4.3 devfs contract: the file identity reaches the device, the
-# legacy node read/poll stay the fallback for devices without the new
-# hooks, a read_file error is not downgraded to the node read, and
-# poll_file returning 0 stays "not ready".
-_test-gui-host-run-devfs-input:
-	@echo "  [test-gui-host] devfs-input"
-	$(call os01_submake,hosttests,test-gui-devfs-input $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  Runs
-# test_input_ps2_frame.elf, which host-compiles the REAL
-# kernel/driver/input_ps2.c and asserts the spec §4.3/§6.1 framing
-# contract: a complete sequence is the routing unit (the E0 prefix
-# never publishes a half sequence), PrintScreen/Pause frame as ONE
-# special sequence, start_epoch is the epoch of the FIRST byte, and a
-# corrupt sequence recovers to a boundary without emitting a fake Shift.
-_test-gui-host-run-input-frame:
-	@echo "  [test-gui-host] input-frame"
-	$(call os01_submake,hosttests,test-gui-input-frame $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 3: the exclusive physical-input lease.  Runs
-# test_input_route.elf, which host-compiles the REAL
-# kernel/driver/input_route.c (+ the REAL kernel/driver/input_ps2.c
-# framer) against the recording runtime in
-# hosttests/mock/input_route_test_runtime.{c,h} and asserts the spec
-# §4.3 lease contract: the device is NORMAL before the lease, the
-# owner's file reads the ACTIVE queue while every other file gets
-# EBUSY / POLLERR, an empty ACTIVE queue is EAGAIN, only the FINAL
-# close revokes, closing any bound file revokes the whole lease, a
-# recycled file address does not release a new lease, a sequence that
-# does not fit and the 65th mouse event are EOVERFLOW / POLLERR, a
-# sequence is never published in halves, a make that crosses an epoch
-# is isolated until its break, the Caps typematic does not flip, the
-# mouse button isolation keeps the movement, the lock order is
-# route → NORMAL queue/poll, and a publish injected at the
-# check-empty → register-waiter boundary is not lost.
-#
-# GUI-2 plan Task 4 adds the second binary of this case:
-# test_gfx_input.elf, which host-compiles the REAL kernel/driver/gfx.c
-# (the GFX_BIND_INPUT / GFX_UNBIND_INPUT ioctls), the REAL
-# kernel/driver/fb_state.c (the owner / lease coordinator) and the REAL
-# kernel/driver/input_route.c (the lease), and asserts the spec §4.1
-# contract: the 32-byte INOUT struct, EFAULT / EBADF / EINVAL / EACCES
-# / ESTALE / EBUSY, the exclusive lease, the copy-out rollback that
-# must not revoke a newer generation, and the libgfx wrapper.
-_test-gui-host-run-input-route:
-	@echo "  [test-gui-host] input-route"
-	$(call os01_submake,hosttests,test-gui-input-route $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 5: the native input API surface (libgui/include/gui/
-# gui_input.h) and the pure userspace PS/2 decoder (libgui/src/
-# input_ps2.c).  Runs test_gui_input_decode.elf, which host-compiles
-# the REAL production decoder and asserts the spec §5.1 / §6.1
-# contract: the US ASCII layout (letters use Shift XOR Caps, digits
-# and punctuation use Shift only), the frozen DOWN/UP/REPEAT values and
-# modifier bit layout, the distinct left/right Shift/Ctrl/Alt physical
-# identities, the UP identity with codepoint == 0, the typematic make
-# that produces no event and does not flip Caps again, the swallowed
-# PrintScreen / Pause sequences (no event, no latched Shift or Ctrl),
-# every fragment point of an E0 sequence, the 100 ms truncated-prefix
-# expiry, the unknown scan code without a character, KP slash / KP
-# Enter, and the keys that report their physical identity only.
-_test-gui-host-run-input-decode:
-	@echo "  [test-gui-host] input-decode"
-	$(call os01_submake,hosttests,test-gui-input-decode $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 10 (fix round 1): the guest input probe's nonce rule.
-# Runs test_gui_input_nonce.elf, which host-compiles the REAL rule
-# (user/test_gui_input/gui_input_nonce.h) and asserts that a nonce is hex,
-# that a path escape is impossible by construction and that the control
-# path is exactly /tmp/gui-input-<hex>.ctl.
-_test-gui-host-run-input-nonce:
-	@echo "  [test-gui-host] input-nonce"
-	$(call os01_submake,hosttests,test-gui-input-nonce $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 6: the bounded input lifecycle, the FIFO, the fair pump
-# and the platform error convergence.  Runs test_gui_input_platform.elf,
-# which host-compiles the REAL libgui input unit (libgui/src/input.c +
-# libgui/src/input_lvgl.c), the REAL platform and the REAL PS/2 decoder
-# against the recording runtime in
-# hosttests/mock/gui_test_runtime.{c,h} and the REAL LVGL archive, and
-# asserts the spec §5.1 / §5.2 contract: the fixed creation order and
-# its reverse rollback with the first errno, the fd / lease / mapping net
-# counts, the keyboard-only degradation (ENOENT/ENODEV only), the EBUSY
-# second create, the Caps-only decoder seeding, the mouse EIO on a short
-# record, the carried-over keyboard prefix, the EINTR/EAGAIN/legacy-empty
-# reads, the POLLERR/POLLHUP/POLLNVAL error mapping, the 512-item FIFO
-# capacity, the per-device pump budgets, the 256-item delivery budget,
-# the un-merged down/up pair and the owner check that stops the delivery
-# of a static view.
-_test-gui-host-run-input-platform:
-	@echo "  [test-gui-host] input-platform"
-	$(call os01_submake,hosttests,test-gui-input-platform $(OS01_SUBMAKE_ARGS))
-
-# GUI-2 plan Task 7: the keyboard half of the LVGL adapter — keypad indev
-# behaviour, the software repeat policy, native shortcut delivery and the
-# in-process focus group with Tab navigation.  Runs
-# test_gui_input_lvgl.elf, which host-compiles the REAL libgui input unit
-# (input.c + input_lvgl.c + input_focus.c), the REAL platform and the REAL
-# PS/2 decoder, and asserts the spec §6.2 / §7.2 contract against the REAL
-# LVGL keypad indev and focus group (nothing under test is mocked).
-_test-gui-host-run-input-lvgl:
-	@echo "  [test-gui-host] input-lvgl"
-	$(call os01_submake,hosttests,test-gui-input-lvgl $(OS01_SUBMAKE_ARGS))
-
-# GUI-3 plan Task 1: the Material design token table.  Runs
-# test_gui_theme.elf, which host-compiles the REAL libgui/src/theme.c
-# (pure C, no LVGL dependency) and asserts the spec §9.1 contract:
-# well-formed color roles, on_*/base pairing, strictly decreasing font
-# scale, strictly increasing space and radius scales, monotonic
-# elevation shadows, the elevation surface sequence, and -1 for every
-# out-of-range enum.
-_test-gui-host-run-theme:
-	@echo "  [test-gui-host] theme"
-	$(call os01_submake,hosttests,test-gui-theme $(OS01_SUBMAKE_ARGS))
-
-# GUI-3 plan Task 2: the Material theme applied to LVGL.  Runs
-# test_gui_theme_apply.elf, which links the REAL token table + theme
-# apply + platform + LVGL archive and asserts the spec §9.1 apply
-# contract (theme attached and idempotent, widget styles sourced from
-# the token table, 2px primary focus ring, NULL platform → EINVAL).
-_test-gui-host-run-theme-apply:
-	@echo "  [test-gui-host] theme-apply"
-	$(call os01_submake,hosttests,test-gui-theme-apply $(OS01_SUBMAKE_ARGS))
-
-# GUI-3 plan Task 3: the desktop surface state machine.  Runs
-# test_desktop_state.elf, which host-compiles the REAL
-# user/desktop/desktop_state.c (pure C, no LVGL dependency) and
-# exhausts the (state x intent) matrix against the spec §9.2 contract.
-_test-gui-host-run-desktop-state:
-	@echo "  [test-gui-host] desktop-state"
-	$(call os01_submake,hosttests,test-gui-desktop-state $(OS01_SUBMAKE_ARGS))
-
-# GUI-3 plan Task 4: the desktop shell.  Runs test_desktop_shell.elf,
-# which links the REAL desktop shell + registry + state machine against
-# the REAL LVGL and the REAL offscreen platform, and asserts the pixel
-# contract (wallpaper / status bar / card / launcher each render their
-# token colour, and a surface transition leaves no residue).
-_test-gui-host-run-desktop-shell:
-	@echo "  [test-gui-host] desktop-shell"
-	$(call os01_submake,hosttests,test-gui-desktop-shell $(OS01_SUBMAKE_ARGS))
-
-# GUI-3 plan Task 5: the desktop source audit.  Runs
-# test_desktop_audit.elf, which reads the real user/desktop sources and
-# asserts the design-system discipline (no colour literals, no font
-# sizes), the input discipline (no direct device access, no private
-# libgui headers), and the "no window system" promise (no window
-# decoration identifiers).
-_test-gui-host-run-desktop-audit:
-	@echo "  [test-gui-host] desktop-audit"
-	$(call os01_submake,hosttests,test-gui-desktop-audit $(OS01_SUBMAKE_ARGS))
-
-# GUI-2b plan Task 1: the public widget handle types, the private fixed
-# registry and the reusable host fixture.  Runs test_gui_widget.elf, which
-# host-compiles the REAL libgui/src/widget.c against the REAL platform and
-# the REAL LVGL archive, and asserts the public contract: the value handle
-# (never a pointer), the three kinds with their invalid sentinel, the
-# zero-valued NONE, and an empty registry that rejects unknown identities.
-# The case also runs the publication-boundary syntax checks: a pure type
-# consumer must compile as C11 and as C++17, and the negative control (a
-# value handle passed where a void* is expected) must NOT compile.
-_test-gui-host-run-widget:
-	@echo "  [test-gui-host] widget"
-	$(call os01_submake,hosttests,test-gui-widget $(OS01_SUBMAKE_ARGS))
-
-# GUI-2b Task 4: the typed geometry / layout / text-mode contract.  Runs
-# test_gui_widget_layout.elf, which links the REAL platform + widget
-# registry + layout unit and asserts the public contract through the
-# public API only.
-_test-gui-host-run-widget-layout:
-	@echo "  [test-gui-host] widget-layout"
-	$(call os01_submake,hosttests,test-gui-widget-layout $(OS01_SUBMAKE_ARGS))
-
-# GUI-2b Task 5: the Material appearance contract.  Runs
-# test_gui_widget_appearance.elf, which links the REAL platform + widget
-# registry + appearance unit and asserts the public contract through the
-# public API and pixel observations only.
-_test-gui-host-run-widget-appearance:
-	@echo "  [test-gui-host] widget-appearance"
-	$(call os01_submake,hosttests,test-gui-widget-appearance $(OS01_SUBMAKE_ARGS))
-
-# GUI-2b Task 6: the native event bridge and the platform statistics.  Runs
-# test_gui_widget_event.elf, which links the REAL platform + widget
-# registry + event bridge and drives real mouse clicks through the input
-# path.
-_test-gui-host-run-widget-event:
-	@echo "  [test-gui-host] widget-event"
-	$(call os01_submake,hosttests,test-gui-widget-event $(OS01_SUBMAKE_ARGS))
-
-# GUI-2b Task 7: the single focus engine (native + diagnostic registration).
-_test-gui-host-run-focus:
-	@echo "  [test-gui-host] focus"
-	$(call os01_submake,hosttests,test-gui-focus $(OS01_SUBMAKE_ARGS))
-
-_test-gui-host-run-%:
-	@echo "ERROR: unknown CASE='$*'; valid: $(GUI_HOST_REGISTERED_CASES), all" >&2
-	@exit 1
-GUI_CASE_RAW := $(CASE)
-GUI_CASE_EFFECTIVE = $(if $(strip $(GUI_CASE_RAW)),$(GUI_CASE_RAW),all)
-test-gui-host: $(if $(filter all,$(GUI_CASE_EFFECTIVE)),$(foreach c,$(GUI_HOST_REGISTERED_CASES),_test-gui-host-run-$(c)),_test-gui-host-run-$(GUI_CASE_EFFECTIVE))
-	$(call require_capability,rootfs)
-	@case "$(GUI_CASE_EFFECTIVE)" in \
-	    all) echo "  [test-gui-host] full registered group: $(GUI_HOST_REGISTERED_CASES)";; \
-	    *) echo "  [test-gui-host] CASE=$(GUI_CASE_EFFECTIVE)";; \
-	  esac
+# Focused host tests for the GUI plans (GUI-1 LVGL platform backend,
+# GUI-2 input chain, GUI-2b widget system, GUI-3 Material design).
+# CASE accepts any registered case or all (default); unknown cases abort
+# non-zero before invoking submake.  The per-case spec contracts live in
+# the matching hosttests/cases/test_gui_* sources and plan docs, not here.
+$(eval $(call host_case_group,test-gui-host,platform lvgl devfs-input input-frame input-route input-decode input-nonce input-platform input-lvgl theme theme-apply desktop-state desktop-shell desktop-audit widget widget-layout widget-appearance widget-event focus,rootfs,CASE,,platform:test-gui-platform lvgl:test-gui-lvgl devfs-input:test-gui-devfs-input input-frame:test-gui-input-frame input-route:test-gui-input-route input-decode:test-gui-input-decode input-nonce:test-gui-input-nonce input-platform:test-gui-input-platform input-lvgl:test-gui-input-lvgl theme:test-gui-theme theme-apply:test-gui-theme-apply desktop-state:test-gui-desktop-state desktop-shell:test-gui-desktop-shell desktop-audit:test-gui-desktop-audit widget:test-gui-widget widget-layout:test-gui-widget-layout widget-appearance:test-gui-widget-appearance widget-event:test-gui-widget-event focus:test-gui-focus))
 
 # ── D03: the Doom engine work package ───────────────────────────
-#
-# Focused host entry for the Doom work package:
-#   make test-doom-host DOOM_CASE=build    the engine build contract
-#                                         and the exit behaviour group
-#   make test-doom-host DOOM_CASE=config   the configuration round-trip
-#   make test-doom-host DOOM_CASE=all      every delivered group
-#
-# An unknown case is rejected with a locating message and a non-zero
-# exit status.
-DOOM_HOST_REGISTERED_CASES := build config video input runtime diag
-DOOM_CASE_RAW := $(DOOM_CASE)
-DOOM_CASE_EFFECTIVE = $(if $(strip $(DOOM_CASE_RAW)),$(DOOM_CASE_RAW),all)
+# make test-doom-host DOOM_CASE=build|config|video|input|runtime|diag|all.
+# build is an explicit rule (it drives the python build-contract unittest
+# AND the engine-exit hosttest binary); unknown cases abort non-zero.
+$(eval $(call host_case_group,test-doom-host,build config video input runtime diag,rootfs,DOOM_CASE,,config:test-doom-config video:test-doom-video input:test-doom-input runtime:test-doom-runtime diag:test-doom-diag))
 
-_test-doom-host-run-%:
-	@echo "ERROR: unknown DOOM_CASE='$*'; valid: $(DOOM_HOST_REGISTERED_CASES), all" >&2
-	@exit 1
-
-.PHONY: test-doom-host _test-doom-host-run-build _test-doom-host-run-config _test-doom-host-run-video _test-doom-host-run-input _test-doom-host-run-runtime _test-doom-host-run-diag
-test-doom-host: $(if $(filter all,$(DOOM_CASE_EFFECTIVE)),$(foreach c,$(DOOM_HOST_REGISTERED_CASES),_test-doom-host-run-$(c)),_test-doom-host-run-$(DOOM_CASE_EFFECTIVE))
-	$(call require_capability,rootfs)
-	@case "$(DOOM_CASE_EFFECTIVE)" in \
-	    all) echo "  [test-doom-host] full registered group: $(DOOM_HOST_REGISTERED_CASES)";; \
-	    *) echo "  [test-doom-host] DOOM_CASE=$(DOOM_CASE_EFFECTIVE)";; \
-	  esac
-
-# The build contract: the pinned upstream, the fixed 80-unit list, the
-# profile gate, the patch application, the rebuild trigger and the
-# "no system/fscanf dependency" property of the production objects.
-# It is a build contract, so it runs the unittest module directly.
-#
-# The exit behaviour (T2) belongs to the same group: it drives the REAL
-# patched i_system.c on the host, so it runs as a host test binary.
+.PHONY: _test-doom-host-run-build
 _test-doom-host-run-build:
 	@echo "  [test-doom-host] build"
 	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_build_contract -v
 	$(call os01_submake,hosttests,test-doom-engine-exit $(OS01_SUBMAKE_ARGS))
-
-# The configuration round-trip (T3): it drives the REAL patched
-# m_config.c on the host through the public configuration interface.
-_test-doom-host-run-config:
-	@echo "  [test-doom-host] config"
-	$(call os01_submake,hosttests,test-doom-config $(OS01_SUBMAKE_ARGS))
-
-# D04 T1: the video presentation and integer scaling
-_test-doom-host-run-video:
-	@echo "  [test-doom-host] video"
-	$(call os01_submake,hosttests,test-doom-video $(OS01_SUBMAKE_ARGS))
-
-# D04 T2: leased PS/2 input and Doom key edges
-_test-doom-host-run-input:
-	@echo "  [test-doom-host] input"
-	$(call os01_submake,hosttests,test-doom-input $(OS01_SUBMAKE_ARGS))
-
-# D04 T3: runtime lifetime and cooperative shutdown
-_test-doom-host-run-runtime:
-	@echo "  [test-doom-host] runtime"
-	$(call os01_submake,hosttests,test-doom-runtime $(OS01_SUBMAKE_ARGS))
-
-# D06 T3: diagnostic observation fixture
-_test-doom-host-run-diag:
-	@echo "  [test-doom-host] diag"
-	$(call os01_submake,hosttests,test-doom-diag $(OS01_SUBMAKE_ARGS))
 
 # D05: Doom asset validation and packaging contract
 .PHONY: test-doom-assets
 test-doom-assets:
 	$(call require_capability,rootfs)
 	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_assets -v
-
-.PHONY: test-gui-widget test-gui-focus
-test-gui-widget:
-	$(call require_capability,rootfs)
-	@$(MAKE) --no-print-directory test-gui-host CASE=widget
-
-test-gui-focus:
-	$(call require_capability,rootfs)
-	@$(MAKE) --no-print-directory test-gui-host CASE=focus
-
 
 # Focused hosttest for the gfx 2D API plan Task 1 — per-file device
 # ioctl/release lifecycle.  Runs the single TEST_BINS entry
@@ -1594,43 +1050,9 @@ test-display-owner:
 	@$(call os01_submake,hosttests,test-display-owner $(OS01_SUBMAKE_ARGS))
 
 # ── Terminal monitor host tests (2026-10-11 monitor plan) ────
-# Focused host tests, one per monitor-plan task.  The CASE whitelist
-# grows task by task; an unknown CASE must abort, never silently pass.
-# With CASE omitted the umbrella runs the whole registered group.
-# Implementation mirrors test-m1-host: each case gets its own .PHONY
-# runner because os01_submake must start its own recipe line.
-.PHONY: test-monitor-host _test-monitor-host-run-file _test-monitor-host-run-accounting _test-monitor-host-run-pmm _test-monitor-host-run-procfs _test-monitor-host-run-collect _test-monitor-host-run-model _test-monitor-host-run-render
-MONITOR_CASES := file accounting pmm procfs collect model render
-_test-monitor-host-run-file:
-	@echo "  [test-monitor-host] file"
-	$(call os01_submake,hosttests,test-monitor-file $(OS01_SUBMAKE_ARGS))
-_test-monitor-host-run-accounting:
-	@echo "  [test-monitor-host] accounting"
-	$(call os01_submake,hosttests,test-monitor-accounting $(OS01_SUBMAKE_ARGS))
-_test-monitor-host-run-pmm:
-	@echo "  [test-monitor-host] pmm"
-	$(call os01_submake,hosttests,test-monitor-pmm $(OS01_SUBMAKE_ARGS))
-_test-monitor-host-run-procfs:
-	@echo "  [test-monitor-host] procfs"
-	$(call os01_submake,hosttests,test-monitor-procfs $(OS01_SUBMAKE_ARGS))
-_test-monitor-host-run-collect:
-	@echo "  [test-monitor-host] collect"
-	$(call os01_submake,hosttests,test-monitor-collect $(OS01_SUBMAKE_ARGS))
-_test-monitor-host-run-model:
-	@echo "  [test-monitor-host] model"
-	$(call os01_submake,hosttests,test-monitor-model $(OS01_SUBMAKE_ARGS))
-_test-monitor-host-run-render:
-	@echo "  [test-monitor-host] render"
-	$(call os01_submake,hosttests,test-monitor-render $(OS01_SUBMAKE_ARGS))
-# Prerequisites run before recipes, even before require_capability. Only
-# populate the graph for capable profiles and one exact registered CASE.
-# Keep errors in the recipe so other targets can use their own CASE values.
-MONITOR_CASE := $(strip $(CASE))
-MONITOR_CASE_VALID := $(if $(MONITOR_CASE),$(if $(filter 1,$(words $(MONITOR_CASE))),$(filter $(MONITOR_CASES),$(MONITOR_CASE))),yes)
-test-monitor-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(MONITOR_CASE_VALID)),$(foreach c,$(if $(MONITOR_CASE),$(MONITOR_CASE),$(MONITOR_CASES)),_test-monitor-host-run-$(c)))
-	$(call require_capability,rootfs)
-	$(if $(MONITOR_CASE_VALID),,$(error unknown CASE='$(MONITOR_CASE)'; valid: $(MONITOR_CASES)))
-	@echo "  [test-monitor-host] $(if $(MONITOR_CASE),CASE=$(MONITOR_CASE),full monitor group: $(MONITOR_CASES))"
+# Focused host tests, one per monitor-plan task.  An unknown CASE aborts;
+# with CASE omitted the umbrella runs the whole registered group.
+$(eval $(call host_case_group,test-monitor-host,file accounting pmm procfs collect model render,rootfs,CASE,,file:test-monitor-file accounting:test-monitor-accounting pmm:test-monitor-pmm procfs:test-monitor-procfs collect:test-monitor-collect model:test-monitor-model render:test-monitor-render))
 
 # ── User runtime consumer gate (monitor plan Task 5) ─────────
 # Builds the user runtime consumer (mk/components/runtime.mk: independent
@@ -1643,35 +1065,8 @@ test-monitor-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(MONITOR
 # a target-artifact contract, not a host fixture.
 # ── monitor thermal plan, Task 1 umbrellas ──
 # Each test-thermal-host case corresponds to a per-fixture runner in
-# hosttests/Makefile.  Initial Task 1 commits only register `fixup`;
-# Tasks 2/3 add `affinity` and `decode` respectively.
-.PHONY: test-thermal-host _test-thermal-host-run-fixup _test-thermal-host-run-affinity _test-thermal-host-run-decode
-_test-thermal-host-run-fixup:
-	@echo "  [test-thermal-host] fixup"
-	$(call os01_submake,hosttests,test-thermal-fixup $(OS01_SUBMAKE_ARGS))
-
-_test-thermal-host-run-affinity:
-	@echo "  [test-thermal-host] affinity"
-	$(call os01_submake,hosttests,test-thermal-affinity $(OS01_SUBMAKE_ARGS))
-
-_test-thermal-host-run-decode:
-	@echo "  [test-thermal-host] decode"
-	$(call os01_submake,hosttests,test-thermal-decode $(OS01_SUBMAKE_ARGS))
-
-THERMAL_CASES := fixup affinity decode
-test-thermal-host: CASE ?=
-test-thermal-host: CASE := $(CASE)
-# Umbrella: with empty CASE, depend on every per-case runner; otherwise
-# dispatch to the single-case runner.
-test-thermal-host: $(if $(CASE),_test-thermal-host-run-$(CASE),$(foreach c,$(THERMAL_CASES),_test-thermal-host-run-$(c)))
-	$(call require_capability,rootfs)
-	@case "$(CASE)" in \
-	    "") echo "  [test-thermal-host] full thermal group: $(THERMAL_CASES)";; \
-	    fixup) echo "  [test-thermal-host] CASE=$(CASE)";; \
-	    affinity) echo "  [test-thermal-host] CASE=$(CASE)";; \
-	    decode) echo "  [test-thermal-host] CASE=$(CASE)";; \
-	    *) echo "ERROR: unknown CASE='$(CASE)'; valid: $(THERMAL_CASES)" >&2; exit 1;; \
-	esac
+# hosttests/Makefile.
+$(eval $(call host_case_group,test-thermal-host,fixup affinity decode,rootfs,CASE,,fixup:test-thermal-fixup affinity:test-thermal-affinity decode:test-thermal-decode))
 
 .PHONY: test-monitor-runtime
 # $(KERNEL_RUNTIME_PREREQ) guarantees the kernel variant receipt exists even
@@ -2951,85 +2346,18 @@ test-irq-capacity:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-irq-capacity $(OS01_SUBMAKE_ARGS))
 
-# ── libc completion focused host tests (T1) ───────────────────────
+# ── libc completion focused host tests (T1) ──────────────────────
 # make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<case>
 #
-# LIBC_HOST_CASES is the FIXED case list of the libc completion plan; a
-# value outside it is invalid and fails non-zero.  LIBC_HOST_DELIVERED_CASES
-# is the subset delivered so far: "all" (and the default) runs exactly
-# those, and a registered-but-undelivered case fails non-zero with a clear
-# message instead of silently reporting a pass for a group that does not
-# exist yet.  Each completion task appends its case to the delivered list
-# and adds the matching _test-libc-host-run-<case> rule.
-LIBC_HOST_CASES := api alloc env shutdown stream append io line format integer float scan time path dir regex
-LIBC_HOST_DELIVERED_CASES := api alloc env shutdown stream append io line format integer float path scan time dir
+# LIBC_HOST_MAPPING is the delivered case set; LIBC_HOST_CASES is the full
+# registered set (a value outside it is invalid).  Each completion task
+# appends its mapping entry; `all` (default) runs the delivered groups.
+# The generated catch-all rejects unknown cases non-zero.
+LIBC_HOST_MAPPING := api:test-libc-api alloc:test-libc-alloc env:test-libc-environ shutdown:test-libc-shutdown stream:test-libc-stream-state append:test-vfs-append io:test-libc-stdio-io line:test-libc-line format:test-libc-stdio-format integer:test-libc-integer float:test-libc-float-parse scan:test-libc-scan time:test-libc-time dir:test-libc-dir path:test-libc-path
+LIBC_HOST_DELIVERED_CASES := $(foreach kv,$(LIBC_HOST_MAPPING),$(word 1,$(subst :, ,$(kv))))
+LIBC_HOST_CASES := $(LIBC_HOST_DELIVERED_CASES) regex
 
-.PHONY: test-libc-host _test-libc-host-run-all
-# Every delivered case's run target is phony, derived from the delivered list
-# so a task that appends to LIBC_HOST_DELIVERED_CASES cannot forget it.  A
-# non-phony run target would be satisfied by a stray file of the same name in
-# the repository root, and the group would silently be skipped while
-# test-libc-host still exited 0 — a green run that ran nothing.
-.PHONY: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
-_test-libc-host-run-api:
-	@echo "  [test-libc-host] api"
-	$(call os01_submake,hosttests,test-libc-api $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-alloc:
-	@echo "  [test-libc-host] alloc"
-	$(call os01_submake,hosttests,test-libc-alloc $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-env:
-	@echo "  [test-libc-host] env"
-	$(call os01_submake,hosttests,test-libc-environ $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-shutdown:
-	@echo "  [test-libc-host] shutdown"
-	$(call os01_submake,hosttests,test-libc-shutdown $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-stream:
-	@echo "  [test-libc-host] stream"
-	$(call os01_submake,hosttests,test-libc-stream-state $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-append:
-	@echo "  [test-libc-host] append"
-	$(call os01_submake,hosttests,test-vfs-append $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-io:
-	@echo "  [test-libc-host] io"
-	$(call os01_submake,hosttests,test-libc-stdio-io $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-line:
-	@echo "  [test-libc-host] line"
-	$(call os01_submake,hosttests,test-libc-line $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-format:
-	@echo "  [test-libc-host] format"
-	$(call os01_submake,hosttests,test-libc-stdio-format $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-integer:
-	@echo "  [test-libc-host] integer"
-	$(call os01_submake,hosttests,test-libc-integer $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-float:
-	@echo "  [test-libc-host] float"
-	$(call os01_submake,hosttests,test-libc-float-parse $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-scan:
-	@echo "  [test-libc-host] scan"
-	$(call os01_submake,hosttests,test-libc-scan $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-time:
-	@echo "  [test-libc-host] time"
-	$(call os01_submake,hosttests,test-libc-time $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-dir:
-	@echo "  [test-libc-host] dir"
-	$(call os01_submake,hosttests,test-libc-dir $(OS01_SUBMAKE_ARGS))
-
-_test-libc-host-run-path:
-	@echo "  [test-libc-host] path"
-	$(call os01_submake,hosttests,test-libc-path $(OS01_SUBMAKE_ARGS))
+$(eval $(call host_case_group,test-libc-host,$(LIBC_HOST_DELIVERED_CASES),rootfs,LIBC_CASE,,$(LIBC_HOST_MAPPING)))
 
 # The RED build of the path group (T14 evidence).  It is NOT part of
 # LIBC_HOST_CASES: a RED build must never be reachable through the
@@ -3157,27 +2485,6 @@ test-libc-dir-red:
 	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
 	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
 	  exit 1
-
-_test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
-	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"
-
-# Catch-all: a registered case that no task has delivered yet.
-_test-libc-host-run-%:
-	@echo "ERROR: LIBC_CASE='$*' is registered but not delivered in this stage." >&2
-	@echo "       Delivered groups: $(LIBC_HOST_DELIVERED_CASES)" >&2
-	@echo "       See docs/superpowers/plans/2026-11-08-libc-completion.md" >&2
-	@exit 1
-
-LIBC_CASE_RAW := $(strip $(LIBC_CASE))
-LIBC_CASE_EFFECTIVE := $(if $(LIBC_CASE_RAW),$(LIBC_CASE_RAW),all)
-LIBC_CASE_VALID := $(if $(filter 1,$(words $(LIBC_CASE_EFFECTIVE))),$(filter all $(LIBC_HOST_CASES),$(LIBC_CASE_EFFECTIVE)))
-
-# Prerequisites run before recipes, even before require_capability, so the
-# graph is only populated for a capable profile and one exact valid CASE.
-test-libc-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(LIBC_CASE_VALID)),_test-libc-host-run-$(LIBC_CASE_EFFECTIVE))
-	$(call require_capability,rootfs)
-	$(if $(LIBC_CASE_VALID),,$(error unknown LIBC_CASE='$(LIBC_CASE_RAW)'; valid: $(LIBC_HOST_CASES), all))
-	@echo "  [test-libc-host] LIBC_CASE=$(LIBC_CASE_EFFECTIVE)"
 
 # ── libc completion archive audit (T1) ────────────────────────────
 # make PROFILE=x86_64-clang test-libc-api-audit
