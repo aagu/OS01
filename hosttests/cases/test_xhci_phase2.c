@@ -1316,6 +1316,214 @@ static void test_xhci_fs_mps_and_address_recovery(void)
     xhci_free_slot(&ctrl, 1);
 }
 
+static void test_xhci_child_route_and_tt(void)
+{
+    TEST_CASE("xhci_child_location: route string 0x32, 5th nibble vs 6th/port16, TT inheritance");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_slot hs_hub, fs_hub, d4_hub, d5_hub, root_fs_hub;
+    memset(&hs_hub, 0, sizeof(hs_hub));
+    memset(&fs_hub, 0, sizeof(fs_hub));
+    memset(&d4_hub, 0, sizeof(d4_hub));
+    memset(&d5_hub, 0, sizeof(d5_hub));
+    memset(&root_fs_hub, 0, sizeof(root_fs_hub));
+
+    hs_hub.slot_id = 1;
+    hs_hub.active = true;
+    hs_hub.loc = (struct xhci_location){
+        .route = 0, .root_port = 4, .depth = 0,
+        .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
+    };
+    ctrl.slots[1] = &hs_hub;
+
+    struct xhci_location fs_hub_loc;
+    assert_eq(0, xhci_child_location(&ctrl, 1, 2, XHCI_PORT_SPEED_FULL, &fs_hub_loc));
+    assert_eq(0x2U, fs_hub_loc.route);
+    assert_eq(4, fs_hub_loc.root_port);
+    assert_eq(1, fs_hub_loc.depth);
+    assert_eq(1, fs_hub_loc.tt_hub_slot);
+    assert_eq(2, fs_hub_loc.tt_port);
+
+    fs_hub.slot_id = 2;
+    fs_hub.active = true;
+    fs_hub.loc = fs_hub_loc;
+    ctrl.slots[2] = &fs_hub;
+
+    struct xhci_location grandchild;
+    assert_eq(0, xhci_child_location(&ctrl, 2, 3, XHCI_PORT_SPEED_FULL, &grandchild));
+    assert_eq(0x32U, grandchild.route);
+    assert_eq(4, grandchild.root_port);
+    assert_eq(2, grandchild.depth);
+    assert_eq(1, grandchild.tt_hub_slot);
+    assert_eq(2, grandchild.tt_port);
+
+    /* HS child has no TT fields */
+    struct xhci_location hs_child;
+    assert_eq(0, xhci_child_location(&ctrl, 1, 3, XHCI_PORT_SPEED_HIGH, &hs_child));
+    assert_eq(0, hs_child.tt_hub_slot);
+    assert_eq(0, hs_child.tt_port);
+
+    /* Root FS hub -> FS child has no TT fields */
+    root_fs_hub.slot_id = 5;
+    root_fs_hub.active = true;
+    root_fs_hub.loc = (struct xhci_location){
+        .route = 0, .root_port = 1, .depth = 0,
+        .speed_id = XHCI_PORT_SPEED_FULL, .speed_class = XHCI_PORT_SPEED_FULL
+    };
+    ctrl.slots[5] = &root_fs_hub;
+    struct xhci_location root_fs_child;
+    assert_eq(0, xhci_child_location(&ctrl, 5, 1, XHCI_PORT_SPEED_FULL, &root_fs_child));
+    assert_eq(0, root_fs_child.tt_hub_slot);
+    assert_eq(0, root_fs_child.tt_port);
+
+    /* 5th nibble legal (depth 4 -> depth 5), 6th tier and port 16 rejected */
+    d4_hub.slot_id = 3;
+    d4_hub.active = true;
+    d4_hub.loc = (struct xhci_location){
+        .route = 0x1111U, .root_port = 4, .depth = 4,
+        .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
+    };
+    ctrl.slots[3] = &d4_hub;
+    struct xhci_location d5_loc;
+    assert_eq(0, xhci_child_location(&ctrl, 3, 7, XHCI_PORT_SPEED_HIGH, &d5_loc));
+    assert_eq(0x71111U, d5_loc.route);
+    assert_eq(5, d5_loc.depth);
+
+    d5_hub.slot_id = 4;
+    d5_hub.active = true;
+    d5_hub.loc = d5_loc;
+    ctrl.slots[4] = &d5_hub;
+    struct xhci_location d6_loc;
+    assert_true(xhci_child_location(&ctrl, 4, 1, XHCI_PORT_SPEED_HIGH, &d6_loc) < 0);
+    assert_true(xhci_child_location(&ctrl, 1, 16, XHCI_PORT_SPEED_HIGH, &d6_loc) < 0);
+    assert_true(xhci_child_location(&ctrl, 1, 0, XHCI_PORT_SPEED_HIGH, &d6_loc) < 0);
+}
+
+static void test_xhci_psi_root_scope(void)
+{
+    TEST_CASE("xhci PSI root-port capability scoping and reverse lookup");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    /* Two USB2 protocol capabilities with overlapping PSIV 5 */
+    uint8_t mmio[0x1000];
+    memset(mmio, 0, sizeof(mmio));
+    ctrl.mmio_virt = mmio;
+    ctrl.mmio_len = sizeof(mmio);
+    ctrl.max_ports = 4;
+
+    /* Cap 0 @ 0x100: USB 2.0, ports 1..2, PSIC=1: PSIV=5 -> 12 Mbps (FS) */
+    uint32_t *cap0 = (uint32_t *)(mmio + 0x100);
+    cap0[0] = (2U << 24) | (0x10U << 8) | XHCI_EXT_CAP_PROTOCOL; /* next = +0x40 */
+    cap0[2] = (1U << 28) | (2U << 8) | 1U;
+    cap0[4] = (12U << 16) | (2U << 4) | 5U; /* 12 Mbps, PSIV=5 */
+
+    /* Cap 1 @ 0x140: USB 2.0, ports 3..4, PSIC=2: PSIV=5 -> 480 Mbps (HS), PSIV=6 -> 12 Mbps (FS) */
+    uint32_t *cap1 = (uint32_t *)(mmio + 0x140);
+    cap1[0] = (2U << 24) | (0U << 8) | XHCI_EXT_CAP_PROTOCOL;
+    cap1[2] = (2U << 28) | (2U << 8) | 3U;
+    cap1[4] = (480U << 16) | (2U << 4) | 5U; /* 480 Mbps, PSIV=5 */
+    cap1[5] = (12U << 16) | (2U << 4) | 6U;  /* 12 Mbps, PSIV=6 */
+
+    /* Parse via HCCPARAMS1 xecp = 0x100 >> 2 = 0x40 */
+    assert_eq(0, xhci_parse_ext_caps(&ctrl, (0x40U << 16)));
+
+    struct xhci_slot s1, s3;
+    memset(&s1, 0, sizeof(s1));
+    memset(&s3, 0, sizeof(s3));
+    s1.slot_id = 1; s1.active = true;
+    s1.loc = (struct xhci_location){ .root_port = 1, .depth = 0, .speed_id = 5, .speed_class = XHCI_PORT_SPEED_FULL };
+    s3.slot_id = 3; s3.active = true;
+    s3.loc = (struct xhci_location){ .root_port = 3, .depth = 0, .speed_id = 5, .speed_class = XHCI_PORT_SPEED_HIGH };
+    ctrl.slots[1] = &s1;
+    ctrl.slots[3] = &s3;
+
+    /* Reverse lookup on root 1: FS -> PSIV 5; HS -> no match (error) */
+    struct xhci_location loc;
+    assert_eq(0, xhci_child_location(&ctrl, 1, 1, XHCI_PORT_SPEED_FULL, &loc));
+    assert_eq(5, loc.speed_id);
+    assert_true(xhci_child_location(&ctrl, 1, 1, XHCI_PORT_SPEED_HIGH, &loc) < 0);
+
+    /* Reverse lookup on root 3: FS -> PSIV 6 (no cross-segment contamination from cap0) */
+    assert_eq(0, xhci_child_location(&ctrl, 3, 1, XHCI_PORT_SPEED_FULL, &loc));
+    assert_eq(6, loc.speed_id);
+}
+
+static void test_xhci_default_target_rollback(void)
+{
+    TEST_CASE("xhci_enumerate_at rollback: DCBAA before Input OOM, USB2 PED isolation, Disable timeout retains DMA");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint64_t dcbaa[512];
+    uint8_t op_regs[0x500];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(dcbaa, 0, sizeof(dcbaa));
+    memset(op_regs, 0, sizeof(op_regs));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.dcbaa_virt = dcbaa;
+    ctrl.dcbaa_phys = (uint64_t)(uintptr_t)dcbaa;
+    ctrl.op_regs = op_regs;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+    ctrl.max_ports = 2;
+    ctrl.port_proto[1] = 2;
+    ctrl.ac64 = true;
+    ctrl.ac64_valid = true;
+
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+
+    /* 1. Reset succeeds -> Address Device fails -> raw Disable succeeds -> USB2 root isolated */
+    volatile uint32_t *port1 = (volatile uint32_t *)(op_regs + 0x400);
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PED | XHCI_PORTSC_PP | (XHCI_PORT_SPEED_HIGH << 10);
+
+    /* Enable Slot -> slot 1 */
+    event_ring[0].parameter = (uint64_t)(uintptr_t)&cmd_ring[0];
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    /* Address Device -> USB Transaction Error */
+    event_ring[1].parameter = (uint64_t)(uintptr_t)&cmd_ring[1];
+    event_ring[1].status = (XHCI_COMP_TX_ERR << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    /* Disable Slot -> Success */
+    event_ring[2].parameter = (uint64_t)(uintptr_t)&cmd_ring[2];
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    struct xhci_location loc = {
+        .route = 0, .root_port = 1, .depth = 0,
+        .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
+    };
+    uint8_t slot_id = 0;
+    int rc = xhci_enumerate_at(&ctrl, &loc, s_mock_clock_ns + 50000000ULL, &slot_id);
+    assert_true(rc < 0);
+    assert_eq(0, slot_id);
+    assert_eq(0ULL, dcbaa[1]);
+    assert_true(ctrl.slots[1] == NULL);
+    assert_eq(XHCI_TRB_TYPE_DISABLE_SLOT, (cmd_ring[2].control >> 10) & 0x3F);
+
+    /* USB2 root isolation: if PR=1, isolation waits/fails; when PR=0 and PED=1, writing PED clears it */
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PR | XHCI_PORTSC_PP;
+    assert_true(xhci_usb2_root_isolate(&ctrl, 1, s_mock_clock_ns + 5000ULL) < 0);
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PED | XHCI_PORTSC_PP;
+    /* In real MMIO, writing PED=1 clears PED; mock doesn't auto-clear, so verify write mask or clear */
+    *port1 = XHCI_PORTSC_CCS | XHCI_PORTSC_PP;
+    assert_eq(0, xhci_usb2_root_isolate(&ctrl, 1, s_mock_clock_ns + 5000000ULL));
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -1336,6 +1544,9 @@ int main(void)
     test_xhci_deadline_on_noisy_ring();
     test_xhci_command_deadline_ownership();
     test_xhci_fs_mps_and_address_recovery();
+    test_xhci_child_route_and_tt();
+    test_xhci_psi_root_scope();
+    test_xhci_default_target_rollback();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

@@ -46,6 +46,8 @@
 #define XHCI_COMP_TRB_ERR           5
 #define XHCI_COMP_STALL             6
 #define XHCI_COMP_SHORT_TX          13
+#define XHCI_COMP_NO_SLOTS          9
+#define XHCI_COMP_SLOT_NOT_ENABLED  11
 #define XHCI_COMP_CONTEXT_STATE_ERR 19
 #define XHCI_COMP_STOPPED           26
 #define XHCI_COMP_STOPPED_LENGTH_INVALID 27
@@ -344,13 +346,33 @@ static inline void *xhci_dev_ep_ctx(void *base, uint8_t csz, uint8_t dci)
 
 /* Per-slot driver state (slot_id is 1-based) */
 struct xhci_controller;
+struct xhci_location {
+    uint32_t route;
+    uint8_t root_port;
+    uint8_t parent_slot;
+    uint8_t parent_port;
+    uint8_t depth;
+    uint8_t speed_id;
+    uint8_t speed_class;
+    uint8_t tt_hub_slot;
+    uint8_t tt_port;
+};
+
+struct xhci_slot_alloc_result {
+    uint8_t id;
+    bool disable_confirmed;
+    bool uncertain;
+};
+
 struct xhci_slot {
     struct xhci_controller *ctrl;
     uint8_t slot_id;
     uint8_t port_num;
     uint8_t speed;
+    struct xhci_location loc;
     uint16_t max_packet_size;
     bool active;
+    bool addr_completed;
 
     /* DMA Allocations (each 4KB page) */
     uint64_t input_ctx_phys;
@@ -403,6 +425,25 @@ struct xhci_slot {
     uint16_t raw_descriptors_len;
 };
 
+#define XHCI_MAX_PROTO_CAPS 16
+
+struct xhci_psi_entry {
+    uint8_t valid;
+    uint8_t speed_class;
+    uint8_t psie;
+    uint16_t psim;
+    uint8_t plt;
+};
+
+struct xhci_proto_cap {
+    uint8_t rev_major;
+    uint8_t rev_minor;
+    uint8_t port_off;
+    uint8_t port_cnt;
+    uint8_t psic;
+    struct xhci_psi_entry psi[16];
+};
+
 /* xHCI Controller Instance State */
 struct xhci_controller {
     struct pci_device *pdev;
@@ -419,6 +460,7 @@ struct xhci_controller {
     uint32_t cap_length;
     uint32_t hci_version;
     uint32_t max_slots;
+    uint32_t max_slots_en;
     uint32_t max_ports;
     uint32_t max_intrs;
     uint32_t max_scratchpads;
@@ -461,6 +503,9 @@ struct xhci_controller {
     bool halted_confirmed;
     bool poisoned;
     bool dma_retained;
+    bool default_addr_busy;
+    bool default_addr_locked_out;
+    uint8_t default_addr_root_port;
     bool ac64;
     bool ac64_valid;
     bool has_legsup;
@@ -469,6 +514,9 @@ struct xhci_controller {
     /* Canonical speed class (XHCI_PORT_SPEED_*) indexed by [proto_idx][psiv],
      * where proto_idx: 0 = USB2, 1 = USB3.  0 means unmapped. */
     uint8_t psi_speed_class[2][16];
+    struct xhci_proto_cap proto_caps[XHCI_MAX_PROTO_CAPS];
+    uint8_t num_proto_caps;
+    uint8_t port_cap_idx[256];
 };
 
 /* xHCI MMIO read/write accessors */
@@ -564,6 +612,15 @@ int xhci_submit_cmd_until_locked(struct xhci_controller *ctrl,
                                  const struct xhci_trb *trb,
                                  uint64_t deadline_ns,
                                  struct xhci_cmd_result *out_res);
+
+int xhci_child_location(const struct xhci_controller *ctrl, uint8_t parent_slot,
+                        uint8_t port, uint8_t speed_class,
+                        struct xhci_location *out_loc);
+int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *loc,
+                      uint64_t deadline_ns, uint8_t *slot_id);
+int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
+                           uint64_t cleanup_deadline_ns);
+int xhci_parse_ext_caps(struct xhci_controller *ctrl, uint32_t hccparams1);
 
 int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
                          uint8_t req, uint16_t value, uint16_t index);

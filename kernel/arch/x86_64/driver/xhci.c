@@ -162,79 +162,117 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
         return -ENOTSUP;
     }
 
+    return xhci_parse_ext_caps(ctrl, hccparams1);
+}
+
+int xhci_parse_ext_caps(struct xhci_controller *ctrl, uint32_t hccparams1)
+{
+    if (!ctrl || !ctrl->mmio_virt) return -EINVAL;
+
     ctrl->has_legsup = false;
     ctrl->legsup_offset = 0;
     memset(ctrl->port_proto, 0, sizeof(ctrl->port_proto));
     memset(ctrl->psi_speed_class, 0, sizeof(ctrl->psi_speed_class));
+    memset(ctrl->proto_caps, 0, sizeof(ctrl->proto_caps));
+    ctrl->num_proto_caps = 0;
+    memset(ctrl->port_cap_idx, 0, sizeof(ctrl->port_cap_idx));
 
     uint32_t xecp = (hccparams1 >> 16) & 0xFFFFU;
-    if (xecp != 0) {
-        uint64_t off = (uint64_t)xecp << 2;
-        uint64_t max_steps = ctrl->mmio_len / 4;
-        while (off != 0) {
-            if (max_steps-- == 0 || off + 4 > ctrl->mmio_len) {
-                log_err("[xhci] xECP capability offset 0x%llx outside aperture\n",
-                        (unsigned long long)off);
-                return -EIO;
-            }
-            uint32_t cap = xhci_read32(ctrl->mmio_virt + off);
-            uint8_t cap_id = cap & 0xFFU;
-            uint8_t next_dw = (cap >> 8) & 0xFFU;
+    if (xecp == 0)
+        return 0;
 
-            if (cap_id == XHCI_EXT_CAP_LEGACY) {
-                if (off + 8 > ctrl->mmio_len)
-                    return -EIO;
-                ctrl->has_legsup = true;
-                ctrl->legsup_offset = (uint32_t)off;
-            } else if (cap_id == XHCI_EXT_CAP_PROTOCOL) {
-                if (off + 16 > ctrl->mmio_len)
-                    return -EIO;
-                uint8_t rev_major = (cap >> 24) & 0xFFU;
-                uint32_t dw2 = xhci_read32(ctrl->mmio_virt + off + 8);
-                uint8_t port_off = dw2 & 0xFFU;
-                uint8_t port_cnt = (dw2 >> 8) & 0xFFU;
-                uint8_t psic = (dw2 >> 28) & 0x0FU;
-                if (off + 16 + (uint64_t)psic * 4ULL > ctrl->mmio_len)
-                    return -EIO;
-                for (uint32_t i = 0; i < psic; i++) {
-                    uint32_t psi = xhci_read32(ctrl->mmio_virt + off + 16 + (uint64_t)i * 4ULL);
-                    uint8_t psiv = psi & 0x0FU;
-                    uint8_t psie = (psi >> 4) & 0x03U;
-                    uint64_t psim = (psi >> 16) & 0xFFFFU;
-                    if (psiv == 0 || (rev_major != 2 && rev_major != 3))
-                        continue;
-                    uint64_t kbps = 0;
-                    switch (psie) {
-                    case 0: kbps = psim / 1000ULL; break;       /* bps -> Kbps */
-                    case 1: kbps = psim; break;                 /* Kbps */
-                    case 2: kbps = psim * 1000ULL; break;       /* Mbps -> Kbps */
-                    case 3: kbps = psim * 1000000ULL; break;    /* Gbps -> Kbps */
-                    }
-                    uint8_t cls = 0;
-                    if (kbps > 1000000ULL)      cls = XHCI_PORT_SPEED_SUPER;
-                    else if (kbps > 20000ULL)   cls = XHCI_PORT_SPEED_HIGH;
-                    else if (kbps > 2000ULL)    cls = XHCI_PORT_SPEED_FULL;
-                    else if (kbps > 0)          cls = XHCI_PORT_SPEED_LOW;
-                    if (cls != 0)
-                        ctrl->psi_speed_class[rev_major == 3 ? 1 : 0][psiv] = cls;
-                }
-                if (port_cnt > 0) {
-                    if (port_off == 0 || (uint32_t)port_off + port_cnt - 1 > ctrl->max_ports)
-                        return -EIO;
-                    if (rev_major == 2 || rev_major == 3) {
-                        for (uint32_t p = port_off; p < (uint32_t)port_off + port_cnt; p++)
-                            ctrl->port_proto[p] = rev_major;
-                    }
-                }
-            }
-
-            if (next_dw == 0)
-                break;
-            uint64_t next_off = off + ((uint64_t)next_dw << 2);
-            if (next_off <= off || next_off + 4 > ctrl->mmio_len)
-                return -EIO;
-            off = next_off;
+    uint64_t off = (uint64_t)xecp << 2;
+    uint64_t max_steps = ctrl->mmio_len / 4;
+    while (off != 0) {
+        if (max_steps-- == 0 || off + 4 > ctrl->mmio_len) {
+            log_err("[xhci] xECP capability offset 0x%llx outside aperture\n",
+                    (unsigned long long)off);
+            return -EIO;
         }
+        uint32_t cap = xhci_read32(ctrl->mmio_virt + off);
+        uint8_t cap_id = cap & 0xFFU;
+        uint8_t next_dw = (cap >> 8) & 0xFFU;
+
+        if (cap_id == XHCI_EXT_CAP_LEGACY) {
+            if (off + 8 > ctrl->mmio_len)
+                return -EIO;
+            ctrl->has_legsup = true;
+            ctrl->legsup_offset = (uint32_t)off;
+        } else if (cap_id == XHCI_EXT_CAP_PROTOCOL) {
+            if (off + 16 > ctrl->mmio_len)
+                return -EIO;
+            uint8_t rev_major = (cap >> 24) & 0xFFU;
+            uint8_t rev_minor = (cap >> 16) & 0xFFU;
+            uint32_t dw2 = xhci_read32(ctrl->mmio_virt + off + 8);
+            uint8_t port_off = dw2 & 0xFFU;
+            uint8_t port_cnt = (dw2 >> 8) & 0xFFU;
+            uint8_t psic = (dw2 >> 28) & 0x0FU;
+            if (off + 16 + (uint64_t)psic * 4ULL > ctrl->mmio_len)
+                return -EIO;
+
+            struct xhci_proto_cap *pcap = NULL;
+            uint8_t cap_idx = 0;
+            if (ctrl->num_proto_caps < XHCI_MAX_PROTO_CAPS) {
+                pcap = &ctrl->proto_caps[ctrl->num_proto_caps];
+                pcap->rev_major = rev_major;
+                pcap->rev_minor = rev_minor;
+                pcap->port_off = port_off;
+                pcap->port_cnt = port_cnt;
+                pcap->psic = psic;
+                cap_idx = (uint8_t)(ctrl->num_proto_caps + 1);
+                ctrl->num_proto_caps++;
+            }
+
+            for (uint32_t i = 0; i < psic; i++) {
+                uint32_t psi = xhci_read32(ctrl->mmio_virt + off + 16 + (uint64_t)i * 4ULL);
+                uint8_t psiv = psi & 0x0FU;
+                uint8_t psie = (psi >> 4) & 0x03U;
+                uint8_t plt = (psi >> 6) & 0x03U;
+                uint16_t psim = (uint16_t)((psi >> 16) & 0xFFFFU);
+                if (psiv == 0 || (rev_major != 2 && rev_major != 3))
+                    continue;
+                uint64_t kbps = 0;
+                switch (psie) {
+                case 0: kbps = (uint64_t)psim / 1000ULL; break;
+                case 1: kbps = (uint64_t)psim; break;
+                case 2: kbps = (uint64_t)psim * 1000ULL; break;
+                case 3: kbps = (uint64_t)psim * 1000000ULL; break;
+                }
+                uint8_t cls = 0;
+                if (kbps > 1000000ULL)      cls = XHCI_PORT_SPEED_SUPER;
+                else if (kbps > 20000ULL)   cls = XHCI_PORT_SPEED_HIGH;
+                else if (kbps > 2000ULL)    cls = XHCI_PORT_SPEED_FULL;
+                else if (kbps > 0)          cls = XHCI_PORT_SPEED_LOW;
+                if (cls != 0) {
+                    ctrl->psi_speed_class[rev_major == 3 ? 1 : 0][psiv] = cls;
+                    if (pcap) {
+                        pcap->psi[psiv].valid = 1;
+                        pcap->psi[psiv].speed_class = cls;
+                        pcap->psi[psiv].psie = psie;
+                        pcap->psi[psiv].psim = psim;
+                        pcap->psi[psiv].plt = plt;
+                    }
+                }
+            }
+            if (port_cnt > 0) {
+                if (port_off == 0 || (uint32_t)port_off + port_cnt - 1 > ctrl->max_ports)
+                    return -EIO;
+                if (rev_major == 2 || rev_major == 3) {
+                    for (uint32_t p = port_off; p < (uint32_t)port_off + port_cnt; p++) {
+                        ctrl->port_proto[p] = rev_major;
+                        if (cap_idx && p < 256)
+                            ctrl->port_cap_idx[p] = cap_idx;
+                    }
+                }
+            }
+        }
+
+        if (next_dw == 0)
+            break;
+        uint64_t next_off = off + ((uint64_t)next_dw << 2);
+        if (next_off <= off || next_off + 4 > ctrl->mmio_len)
+            return -EIO;
+        off = next_off;
     }
 
     return 0;
@@ -666,15 +704,91 @@ static uint8_t xhci_speed_class(const struct xhci_controller *ctrl,
     if (speed == 0 || speed >= 16)
         return 0;
     if (ctrl && port_num < 256) {
-        uint8_t proto = ctrl->port_proto[port_num];
-        if (proto == 2 || proto == 3) {
-            uint8_t cls = ctrl->psi_speed_class[proto == 3 ? 1 : 0][speed];
-            if (cls != 0)
-                return cls;
+        if (ctrl->port_cap_idx[port_num] != 0) {
+            const struct xhci_proto_cap *cap =
+                &ctrl->proto_caps[ctrl->port_cap_idx[port_num] - 1];
+            if (cap->psic > 0)
+                return cap->psi[speed].valid ? cap->psi[speed].speed_class : 0;
+        } else {
+            uint8_t proto = ctrl->port_proto[port_num];
+            if (proto == 2 || proto == 3) {
+                uint8_t cls = ctrl->psi_speed_class[proto == 3 ? 1 : 0][speed];
+                if (cls != 0)
+                    return cls;
+            }
         }
     }
     if (speed >= XHCI_PORT_SPEED_FULL && speed <= XHCI_PORT_SPEED_SUPER)
         return speed;
+    return 0;
+}
+
+static int xhci_psiv_for_speed_class(const struct xhci_controller *ctrl,
+                                     uint8_t root_port, uint8_t speed_class)
+{
+    if (speed_class < XHCI_PORT_SPEED_FULL || speed_class > XHCI_PORT_SPEED_SUPER)
+        return -EINVAL;
+    if (ctrl && root_port < 256 && ctrl->port_cap_idx[root_port] != 0) {
+        const struct xhci_proto_cap *cap =
+            &ctrl->proto_caps[ctrl->port_cap_idx[root_port] - 1];
+        if (cap->psic > 0) {
+            int match = -ENOENT;
+            int count = 0;
+            for (uint8_t psiv = 1; psiv < 16; psiv++) {
+                if (cap->psi[psiv].valid && cap->psi[psiv].speed_class == speed_class) {
+                    match = (int)psiv;
+                    count++;
+                }
+            }
+            if (count == 0)
+                return -ENOENT;
+            if (count > 1)
+                return -EINVAL;
+            return match;
+        }
+    }
+    return (int)speed_class;
+}
+
+int xhci_child_location(const struct xhci_controller *ctrl, uint8_t parent_slot,
+                        uint8_t port, uint8_t speed_class,
+                        struct xhci_location *out_loc)
+{
+    if (!ctrl || !out_loc)
+        return -EINVAL;
+    if (parent_slot < 1 || parent_slot > XHCI_MAX_MANAGED_SLOTS ||
+        !ctrl->slots[parent_slot])
+        return -EINVAL;
+    const struct xhci_slot *parent = ctrl->slots[parent_slot];
+    if (!parent->active || parent->disabled || parent->poisoned)
+        return -EINVAL;
+    if (port < 1 || port > 15)
+        return -ERANGE;
+    if (parent->loc.depth >= 5)
+        return -ERANGE;
+
+    int psiv = xhci_psiv_for_speed_class(ctrl, parent->loc.root_port, speed_class);
+    if (psiv < 0)
+        return psiv;
+
+    memset(out_loc, 0, sizeof(*out_loc));
+    out_loc->root_port = parent->loc.root_port ? parent->loc.root_port : parent->port_num;
+    out_loc->parent_slot = parent_slot;
+    out_loc->parent_port = port;
+    out_loc->depth = (uint8_t)(parent->loc.depth + 1);
+    out_loc->route = parent->loc.route | ((uint32_t)port << (parent->loc.depth * 4));
+    out_loc->speed_id = (uint8_t)psiv;
+    out_loc->speed_class = speed_class;
+
+    if (speed_class == XHCI_PORT_SPEED_LOW || speed_class == XHCI_PORT_SPEED_FULL) {
+        if (parent->loc.speed_class == XHCI_PORT_SPEED_HIGH) {
+            out_loc->tt_hub_slot = parent_slot;
+            out_loc->tt_port = port;
+        } else if (parent->loc.tt_hub_slot != 0) {
+            out_loc->tt_hub_slot = parent->loc.tt_hub_slot;
+            out_loc->tt_port = parent->loc.tt_port;
+        }
+    }
     return 0;
 }
 
@@ -939,6 +1053,9 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
     slot->slot_id = slot_id;
     slot->port_num = port_num;
     slot->speed = speed;
+    slot->loc.root_port = port_num;
+    slot->loc.speed_id = speed;
+    slot->loc.speed_class = xhci_speed_class(ctrl, port_num, speed);
     slot->active = true;
     ctrl->slots[slot_id] = slot;
 
@@ -948,66 +1065,86 @@ int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t spe
     return 0;
 }
 
-int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
+static void xhci_fill_input_slot_ctx(const struct xhci_controller *ctrl,
+                                     struct xhci_slot *slot, uint32_t context_entries)
 {
-    if (!ctrl || !ctrl->dcbaa_virt) return -EINVAL;
-    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
-        return -EINVAL;
+    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, ctrl->csz);
+    uint8_t speed_id = slot->loc.speed_id ? slot->loc.speed_id : slot->speed;
+    uint8_t root_port = slot->loc.root_port ? slot->loc.root_port : slot->port_num;
+    uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
+                                              : xhci_speed_class(ctrl, root_port, speed_id);
 
-    bool locked = xhci_lock(ctrl);
-    struct xhci_slot *slot = ctrl->slots[slot_id];
-    if (ctrl->poisoned || slot->poisoned || slot->disabled) {
-        xhci_unlock(ctrl, locked);
-        return -EIO;
+    slot_ctx[0] = ((uint32_t)speed_id << 20) |
+                  ((context_entries & 0x1FU) << 27) |
+                  (slot->loc.route & 0xFFFFFU);
+    slot_ctx[1] = ((uint32_t)root_port << 16);
+    if ((speed_cls == XHCI_PORT_SPEED_LOW || speed_cls == XHCI_PORT_SPEED_FULL) &&
+        slot->loc.tt_hub_slot != 0) {
+        slot_ctx[2] = ((uint32_t)slot->loc.tt_port << 8) |
+                      (uint32_t)slot->loc.tt_hub_slot;
+    } else {
+        slot_ctx[2] = 0;
     }
+}
 
-    /* rc is used by every error path below, including the ones taken before
-     * the command is issued: seed it with the allocation failure code. */
+static int xhci_address_device_until_locked(struct xhci_controller *ctrl,
+                                            uint8_t slot_id, uint64_t deadline_ns)
+{
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (ctrl->poisoned || slot->poisoned || slot->disabled)
+        return -EIO;
+
     int rc = -ENOMEM;
 
-    /* Strict allocation order with rollback unwind. */
-    slot->input_ctx_phys = alloc_4k_page();
-    if (!slot->input_ctx_phys) goto err_input;
-    if (!xhci_dma_range_ok(ctrl, slot->input_ctx_phys, 4096)) {
-        free_4k_page(slot->input_ctx_phys);
-        slot->input_ctx_phys = 0;
-        rc = -EIO;
-        goto err_input;
+    if (!slot->dev_ctx_phys) {
+        slot->dev_ctx_phys = alloc_4k_page();
+        if (!slot->dev_ctx_phys) return -ENOMEM;
+        if (!xhci_dma_range_ok(ctrl, slot->dev_ctx_phys, 4096)) {
+            free_4k_page(slot->dev_ctx_phys);
+            slot->dev_ctx_phys = 0;
+            return -EIO;
+        }
+        slot->dev_ctx_virt = (void *)Phy_To_Virt(slot->dev_ctx_phys);
+        memset(slot->dev_ctx_virt, 0, 4096);
     }
-    slot->input_ctx_virt = (void *)Phy_To_Virt(slot->input_ctx_phys);
 
-    slot->dev_ctx_phys = alloc_4k_page();
-    if (!slot->dev_ctx_phys) goto err_dev;
-    if (!xhci_dma_range_ok(ctrl, slot->dev_ctx_phys, 4096)) {
-        free_4k_page(slot->dev_ctx_phys);
-        slot->dev_ctx_phys = 0;
-        rc = -EIO;
-        goto err_dev;
+    if (!slot->input_ctx_phys) {
+        slot->input_ctx_phys = alloc_4k_page();
+        if (!slot->input_ctx_phys) goto err_input;
+        if (!xhci_dma_range_ok(ctrl, slot->input_ctx_phys, 4096)) {
+            free_4k_page(slot->input_ctx_phys);
+            slot->input_ctx_phys = 0;
+            rc = -EIO;
+            goto err_input;
+        }
+        slot->input_ctx_virt = (void *)Phy_To_Virt(slot->input_ctx_phys);
     }
-    slot->dev_ctx_virt = (void *)Phy_To_Virt(slot->dev_ctx_phys);
 
-    slot->ep0_ring_phys = alloc_4k_page();
-    if (!slot->ep0_ring_phys) goto err_ep0;
-    if (!xhci_dma_range_ok(ctrl, slot->ep0_ring_phys, 4096)) {
-        free_4k_page(slot->ep0_ring_phys);
-        slot->ep0_ring_phys = 0;
-        rc = -EIO;
-        goto err_ep0;
+    if (!slot->ep0_ring_phys) {
+        slot->ep0_ring_phys = alloc_4k_page();
+        if (!slot->ep0_ring_phys) goto err_ep0;
+        if (!xhci_dma_range_ok(ctrl, slot->ep0_ring_phys, 4096)) {
+            free_4k_page(slot->ep0_ring_phys);
+            slot->ep0_ring_phys = 0;
+            rc = -EIO;
+            goto err_ep0;
+        }
+        slot->ep0_ring_virt = (struct xhci_trb *)Phy_To_Virt(slot->ep0_ring_phys);
     }
-    slot->ep0_ring_virt = (struct xhci_trb *)Phy_To_Virt(slot->ep0_ring_phys);
 
-    slot->dma_buf_phys = alloc_4k_page();
-    if (!slot->dma_buf_phys) goto err_dma;
-    if (!xhci_dma_range_ok(ctrl, slot->dma_buf_phys, 4096)) {
-        free_4k_page(slot->dma_buf_phys);
-        slot->dma_buf_phys = 0;
-        rc = -EIO;
-        goto err_dma;
+    if (!slot->dma_buf_phys) {
+        slot->dma_buf_phys = alloc_4k_page();
+        if (!slot->dma_buf_phys) goto err_dma;
+        if (!xhci_dma_range_ok(ctrl, slot->dma_buf_phys, 4096)) {
+            free_4k_page(slot->dma_buf_phys);
+            slot->dma_buf_phys = 0;
+            rc = -EIO;
+            goto err_dma;
+        }
+        slot->dma_buf_virt = (void *)Phy_To_Virt(slot->dma_buf_phys);
     }
-    slot->dma_buf_virt = (void *)Phy_To_Virt(slot->dma_buf_phys);
 
     memset(slot->input_ctx_virt, 0, 4096);
-    memset(slot->dev_ctx_virt, 0, 4096);
     memset(slot->ep0_ring_virt, 0, 4096);
     memset(slot->dma_buf_virt, 0, 4096);
 
@@ -1023,7 +1160,10 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     slot->ep0_ring_enqueue = 0;
 
     uint16_t max_packet_size;
-    uint8_t speed_cls = xhci_speed_class(ctrl, slot->port_num, slot->speed);
+    uint8_t root_port = slot->loc.root_port ? slot->loc.root_port : slot->port_num;
+    uint8_t speed_id = slot->loc.speed_id ? slot->loc.speed_id : slot->speed;
+    uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
+                                              : xhci_speed_class(ctrl, root_port, speed_id);
     switch (speed_cls) {
     case XHCI_PORT_SPEED_LOW:
     case XHCI_PORT_SPEED_FULL:
@@ -1043,9 +1183,7 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     ctrl_ctx[0] = 0;                        /* Drop Flags */
     ctrl_ctx[1] = (1U << 0) | (1U << 1);    /* Add Flags: Slot + EP0 */
 
-    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, ctrl->csz);
-    slot_ctx[0] = ((uint32_t)slot->speed << 20) | (1U << 27); /* Speed, Context Entries=1 */
-    slot_ctx[1] = ((uint32_t)slot->port_num << 16);           /* Root Hub Port Number */
+    xhci_fill_input_slot_ctx(ctrl, slot, 1);
 
     uint32_t *ep0_ctx = (uint32_t *)xhci_input_ep0_ctx(slot->input_ctx_virt, ctrl->csz);
     ep0_ctx[0] = 0;                                              /* EP State */
@@ -1053,6 +1191,11 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     ep0_ctx[2] = (uint32_t)(slot->ep0_ring_phys & 0xFFFFFFF0ULL) | 1U;      /* TR Dequeue Lo, DCS=1 */
     ep0_ctx[3] = (uint32_t)(slot->ep0_ring_phys >> 32);                     /* TR Dequeue Hi */
     ep0_ctx[4] = 8U;                                             /* Average TRB Length */
+
+    if (deadline_ns != 0 && (int64_t)(arch_clocksource_read_ns() - deadline_ns) >= 0) {
+        rc = -ETIMEDOUT;
+        goto err_dma;
+    }
 
     struct xhci_trb trb;
     memset(&trb, 0, sizeof(trb));
@@ -1063,7 +1206,7 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
                           (uint64_t)ctrl->cmd_ring_enqueue * sizeof(struct xhci_trb);
 
     rc = xhci_cmd_ring_enqueue(ctrl, &trb);
-    if (rc != 0) goto err_unexposed;
+    if (rc != 0) goto err_dma;
 
     /* Once doorbell 0 is rung, xHC may own DCBAA[slot_id] and all context/ring pages. */
     slot->ctx_published = true;
@@ -1071,14 +1214,15 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     xhci_write32(ctrl->db_regs, 0);
 
     struct xhci_trb evt;
-    rc = xhci_poll_cmd_completion(ctrl, expect_trb, &evt, XHCI_TIMEOUT_LOOPS);
+    rc = xhci_poll_event_internal(ctrl, XHCI_TRB_TYPE_CMD_CMPL_EVT, expect_trb,
+                                  0, 0, NULL, 0, NULL, &evt,
+                                  XHCI_TIMEOUT_LOOPS, deadline_ns);
     if (rc == -ETIMEDOUT) {
         ctrl->poisoned = true;
         ctrl->dma_retained = true;
         slot->poisoned = true;
         slot->dma_retained = true;
         log_err("[xhci] slot %u: address device timed out; retaining DMA\n", slot_id);
-        xhci_unlock(ctrl, locked);
         return -ETIMEDOUT;
     }
     if (rc != 0 || ((evt.status >> 24) & 0xFF) != XHCI_COMP_SUCCESS) {
@@ -1091,25 +1235,24 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
         if (xhci_disable_slot_locked(ctrl, slot_id) != 0) {
             slot->poisoned = true;
             slot->dma_retained = true;
-            xhci_unlock(ctrl, locked);
             return rc;
         }
         slot->ctx_published = false;
-        goto err_unexposed;
+        ctrl->dcbaa_virt[slot_id] = 0;
+        goto err_dma;
     }
 
+    slot->addr_completed = true;
     if (speed_cls == XHCI_PORT_SPEED_LOW ||
         speed_cls == XHCI_PORT_SPEED_FULL ||
         speed_cls == XHCI_PORT_SPEED_HIGH) {
-        (void)xhci_wait_min_ns(2000000ULL, 0);
+        int wrc = xhci_wait_min_ns(2000000ULL, deadline_ns);
+        if (wrc != 0) return wrc;
     }
 
     log_info("[xhci] slot %u addressed successfully\n", slot_id);
-    xhci_unlock(ctrl, locked);
     return 0;
 
-err_unexposed:
-    ctrl->dcbaa_virt[slot_id] = 0;
 err_dma:
     if (slot->dma_buf_phys) {
         free_4k_page(slot->dma_buf_phys);
@@ -1122,20 +1265,33 @@ err_ep0:
         slot->ep0_ring_phys = 0;
         slot->ep0_ring_virt = NULL;
     }
-err_dev:
-    if (slot->dev_ctx_phys) {
-        free_4k_page(slot->dev_ctx_phys);
-        slot->dev_ctx_phys = 0;
-        slot->dev_ctx_virt = NULL;
-    }
 err_input:
     if (slot->input_ctx_phys) {
         free_4k_page(slot->input_ctx_phys);
         slot->input_ctx_phys = 0;
         slot->input_ctx_virt = NULL;
     }
-    xhci_unlock(ctrl, locked);
+    if (!slot->ctx_published) {
+        ctrl->dcbaa_virt[slot_id] = 0;
+        if (slot->dev_ctx_phys) {
+            free_4k_page(slot->dev_ctx_phys);
+            slot->dev_ctx_phys = 0;
+            slot->dev_ctx_virt = NULL;
+        }
+    }
     return rc != 0 ? rc : -EIO;
+}
+
+int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
+{
+    if (!ctrl || !ctrl->dcbaa_virt) return -EINVAL;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS || !ctrl->slots[slot_id])
+        return -EINVAL;
+
+    bool locked = xhci_lock(ctrl);
+    int rc = xhci_address_device_until_locked(ctrl, slot_id, 0);
+    xhci_unlock(ctrl, locked);
+    return rc;
 }
 
 void xhci_free_endpoint_rings(struct xhci_slot *slot)
@@ -2038,10 +2194,8 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
     ctrl_ctx[0] = 0; /* Drop Flags */
     ctrl_ctx[1] = add_flags;
 
-    /* Slot Context: speed, Context Entries and root hub port number. */
-    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, ctrl->csz);
-    slot_ctx[0] = ((uint32_t)slot->speed << 20) | (context_entries << 27);
-    slot_ctx[1] = ((uint32_t)slot->port_num << 16);
+    /* Slot Context: speed, Context Entries, Route String, Root Hub Port, and TT. */
+    xhci_fill_input_slot_ctx(ctrl, slot, context_entries);
 
     /* Endpoint Contexts. */
     if (slot->ep_rings) {
@@ -2429,9 +2583,7 @@ int xhci_clear_halt(struct xhci_controller *c, uint8_t slot_id, uint8_t ep_addr)
             ctx_entries = (slot->max_dci >= dci) ? slot->max_dci : dci;
         }
 
-        uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(slot->input_ctx_virt, c->csz);
-        slot_ctx[0] = ((uint32_t)slot->speed << 20) | (ctx_entries << 27);
-        slot_ctx[1] = ((uint32_t)slot->port_num << 16);
+        xhci_fill_input_slot_ctx(c, slot, ctx_entries);
 
         uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, c->csz, dci);
         xhci_fill_input_ep_ctx(ep_ctx, ring, next_deq, next_dcs);
@@ -2738,7 +2890,8 @@ int xhci_start(struct xhci_controller *ctrl)
 
     /* 1. Set MaxSlotsEn */
     uint32_t max_slots_en = ctrl->max_slots;
-    if (max_slots_en > 16) max_slots_en = 16;
+    if (max_slots_en > XHCI_MAX_MANAGED_SLOTS) max_slots_en = XHCI_MAX_MANAGED_SLOTS;
+    ctrl->max_slots_en = max_slots_en;
     xhci_write32(op + XHCI_OP_CONFIG, max_slots_en);
 
     /* 2. Program DCBAAP */
@@ -2955,6 +3108,217 @@ static const struct pci_device_id xhci_ids[] = {
         .class_mask  = 0xFFFFFF,
     },
 };
+
+static int xhci_raw_disable_slot_locked(struct xhci_controller *ctrl, uint8_t slot_id,
+                                        uint64_t cleanup_deadline_ns,
+                                        struct xhci_slot_alloc_result *out_res)
+{
+    if (out_res) {
+        out_res->id = slot_id;
+        out_res->disable_confirmed = false;
+        out_res->uncertain = false;
+    }
+    if (!ctrl || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS)
+        return -EINVAL;
+    if (ctrl->halted_confirmed) {
+        if (out_res) out_res->disable_confirmed = true;
+        return 0;
+    }
+    if (ctrl->poisoned || !ctrl->cmd_ring_virt || !ctrl->db_regs) {
+        if (out_res) out_res->uncertain = true;
+        return -EIO;
+    }
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.control = ((uint32_t)slot_id << 24) |
+                  (XHCI_TRB_TYPE_DISABLE_SLOT << 10) |
+                  ctrl->cmd_ring_cycle;
+
+    struct xhci_cmd_result res;
+    int rc = xhci_submit_cmd_until_locked(ctrl, &trb, cleanup_deadline_ns, &res);
+    if (rc != 0 || res.state != XHCI_CMD_COMPLETED) {
+        if (out_res) out_res->uncertain = true;
+        return rc != 0 ? rc : -EIO;
+    }
+
+    uint32_t cc = (res.event.status >> 24) & 0xFF;
+    if (cc == XHCI_COMP_SUCCESS || cc == XHCI_COMP_SLOT_NOT_ENABLED) {
+        if (out_res) out_res->disable_confirmed = true;
+        return 0;
+    }
+    if (out_res) out_res->uncertain = true;
+    return -EIO;
+}
+
+int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
+                           uint64_t cleanup_deadline_ns)
+{
+    if (!ctrl || !ctrl->op_regs || port_num < 1 || port_num > ctrl->max_ports)
+        return -EINVAL;
+
+    volatile uint8_t *port_reg = ctrl->op_regs + 0x400 + (uint32_t)(port_num - 1) * 0x10;
+    uint32_t portsc = xhci_read32(port_reg);
+    if (!(portsc & XHCI_PORTSC_CCS))
+        return 0;
+
+    /* Wait for any in-progress Port Reset to finish before trusting PED=0. */
+    uint32_t frozen = 0;
+    uint64_t start = arch_clocksource_read_ns();
+    while (portsc & XHCI_PORTSC_PR) {
+        uint64_t now = arch_clocksource_read_ns();
+        if (cleanup_deadline_ns != 0 && (int64_t)(now - cleanup_deadline_ns) >= 0)
+            return -ETIMEDOUT;
+        if (now == start && ++frozen >= 10000U)
+            return -ETIMEDOUT;
+        __asm__ volatile("pause");
+        portsc = xhci_read32(port_reg);
+        if (!(portsc & XHCI_PORTSC_CCS))
+            return 0;
+    }
+
+    if (portsc & XHCI_PORTSC_PED) {
+        uint32_t wr = (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PED;
+        xhci_write32(port_reg, wr);
+        for (uint32_t i = 0; i < 1000U; i++) {
+            portsc = xhci_read32(port_reg);
+            if (!(portsc & XHCI_PORTSC_CCS))
+                return 0;
+            if ((portsc & XHCI_PORTSC_PR) == 0 && (portsc & XHCI_PORTSC_PED) == 0)
+                return 0;
+            if (cleanup_deadline_ns != 0 &&
+                (int64_t)(arch_clocksource_read_ns() - cleanup_deadline_ns) >= 0)
+                return -ETIMEDOUT;
+            __asm__ volatile("pause");
+        }
+        return -ETIMEDOUT;
+    }
+
+    return 0;
+}
+
+int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *loc,
+                      uint64_t deadline_ns, uint8_t *slot_id_out)
+{
+    if (slot_id_out) *slot_id_out = 0;
+    if (!ctrl || !loc || !ctrl->cmd_ring_virt || !ctrl->db_regs || !ctrl->dcbaa_virt)
+        return -EINVAL;
+
+    bool locked = xhci_lock(ctrl);
+    if (ctrl->poisoned || ctrl->default_addr_locked_out || ctrl->default_addr_busy) {
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
+
+    /* Pre-allocate slot object and zeroed Output Device Context before Enable Slot. */
+    struct xhci_slot *slot = (struct xhci_slot *)kmalloc(sizeof(struct xhci_slot));
+    if (!slot) {
+        xhci_unlock(ctrl, locked);
+        return -ENOMEM;
+    }
+    memset(slot, 0, sizeof(*slot));
+
+    uint64_t dev_ctx_phys = alloc_4k_page();
+    if (!dev_ctx_phys) {
+        kfree(slot);
+        xhci_unlock(ctrl, locked);
+        return -ENOMEM;
+    }
+    if (!xhci_dma_range_ok(ctrl, dev_ctx_phys, 4096)) {
+        free_4k_page(dev_ctx_phys);
+        kfree(slot);
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
+    void *dev_ctx_virt = (void *)Phy_To_Virt(dev_ctx_phys);
+    memset(dev_ctx_virt, 0, 4096);
+
+    struct xhci_trb en_trb;
+    memset(&en_trb, 0, sizeof(en_trb));
+    en_trb.control = (XHCI_TRB_TYPE_ENABLE_SLOT << 10) | ctrl->cmd_ring_cycle;
+
+    struct xhci_cmd_result cmd_res;
+    int rc = xhci_submit_cmd_until_locked(ctrl, &en_trb, deadline_ns, &cmd_res);
+    if (rc != 0 || cmd_res.state != XHCI_CMD_COMPLETED) {
+        free_4k_page(dev_ctx_phys);
+        kfree(slot);
+        xhci_unlock(ctrl, locked);
+        return rc != 0 ? rc : -EIO;
+    }
+
+    uint32_t cc = (cmd_res.event.status >> 24) & 0xFF;
+    if (cc != XHCI_COMP_SUCCESS) {
+        free_4k_page(dev_ctx_phys);
+        kfree(slot);
+        xhci_unlock(ctrl, locked);
+        return (cc == XHCI_COMP_NO_SLOTS) ? -ENOSPC : -EIO;
+    }
+
+    uint8_t slot_id = (cmd_res.event.control >> 24) & 0xFF;
+    if (slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS ||
+        ctrl->slots[slot_id] != NULL || ctrl->dcbaa_virt[slot_id] != 0) {
+        ctrl->poisoned = true;
+        free_4k_page(dev_ctx_phys);
+        kfree(slot);
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
+
+    /* Publish DCBAA before any further allocation or target-slot command. */
+    ctrl->dcbaa_virt[slot_id] = dev_ctx_phys;
+    xhci_dma_wmb();
+
+    slot->ctrl = ctrl;
+    slot->slot_id = slot_id;
+    slot->loc = *loc;
+    slot->port_num = loc->root_port;
+    slot->speed = loc->speed_id;
+    slot->dev_ctx_phys = dev_ctx_phys;
+    slot->dev_ctx_virt = dev_ctx_virt;
+    slot->ctx_published = true;
+    slot->active = true;
+    ctrl->slots[slot_id] = slot;
+
+    ctrl->default_addr_busy = true;
+    ctrl->default_addr_root_port = loc->root_port;
+
+    rc = xhci_address_device_until_locked(ctrl, slot_id, deadline_ns);
+    if (rc != 0) {
+        uint64_t cleanup_deadline = arch_clocksource_read_ns() + 500000000ULL;
+        if (!slot->disabled && !slot->poisoned && !ctrl->poisoned) {
+            struct xhci_slot_alloc_result dres;
+            if (xhci_raw_disable_slot_locked(ctrl, slot_id, cleanup_deadline, &dres) == 0 &&
+                dres.disable_confirmed) {
+                slot->disabled = true;
+                slot->ctx_published = false;
+                ctrl->dcbaa_virt[slot_id] = 0;
+            } else {
+                slot->poisoned = true;
+                slot->dma_retained = true;
+            }
+        }
+        if (!slot->dma_retained && !slot->ctx_published) {
+            ctrl->slots[slot_id] = NULL;
+            if (slot->dev_ctx_phys) {
+                free_4k_page(slot->dev_ctx_phys);
+                slot->dev_ctx_phys = 0;
+            }
+            kfree(slot);
+        }
+        if (loc->depth == 0 && loc->root_port < 256 && ctrl->port_proto[loc->root_port] == 2) {
+            if (xhci_usb2_root_isolate(ctrl, loc->root_port, cleanup_deadline) != 0)
+                ctrl->default_addr_locked_out = true;
+        }
+        ctrl->default_addr_busy = false;
+        xhci_unlock(ctrl, locked);
+        return rc;
+    }
+
+    ctrl->default_addr_busy = false;
+    if (slot_id_out) *slot_id_out = slot_id;
+    xhci_unlock(ctrl, locked);
+    return 0;
+}
 
 const struct pci_driver xhci_pci_driver = {
     .name     = "xhci",
