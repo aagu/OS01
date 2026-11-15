@@ -538,7 +538,11 @@ static int hub_probe_location(struct xhci_controller *ctrl,
 {
     uint8_t slot_id = 0;
     int rc = xhci_enumerate_at(ctrl, loc, NULL, deadline_ns, &slot_id);
-    if (rc != 0) return rc;
+    if (rc != 0) {
+        log_warn("[xhci-hub] root=%u route=0x%05x: enumerate failed (rc=%d)\n",
+                 (unsigned)loc->root_port, (unsigned)loc->route, rc);
+        return rc;
+    }
 
     struct xhci_slot *slot = ctrl->slots[slot_id];
     struct usb_device_descriptor desc;
@@ -679,7 +683,11 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             if (rc == 0)
                 rc = xhci_enumerate_at(ctrl, loc, &seed, deadline_ns, &slot_id);
             kfree(id_copy);
-            if (rc != 0) return rc;
+            if (rc != 0) {
+                log_warn("[xhci-hub] root=%u route=0x%05x: hub rebuild failed (rc=%d)\n",
+                         (unsigned)loc->root_port, (unsigned)loc->route, rc);
+                return rc;
+            }
             slot = ctrl->slots[slot_id];
         } else if (rc != 0) {
             log_warn("[xhci-hub] slot %u: configure_hub_slot failed (rc=%d)\n", slot_id, rc);
@@ -725,7 +733,6 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
 
     uint8_t hub_queue[XHCI_MAX_MANAGED_SLOTS];
     uint8_t q_head = 0, q_tail = 0;
-    uint64_t tree_deadline = arch_clocksource_read_ns() + 10000000000ULL;
 
     /* Tier 0: root ports */
     for (uint32_t p = 1; p <= ctrl->max_ports; p++) {
@@ -746,7 +753,8 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
             .tt_hub_slot = 0,
             .tt_port = 0
         };
-        hub_probe_location(ctrl, &loc, tree_deadline, NULL, hub_queue, &q_tail);
+        uint64_t dev_deadline = arch_clocksource_read_ns() + 5000000000ULL;
+        hub_probe_location(ctrl, &loc, dev_deadline, NULL, hub_queue, &q_tail);
     }
 
     /* Tiered BFS over downstream hubs */
@@ -762,19 +770,33 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
             if (!hub_slot || !hub_slot->is_hub || hub_slot->loc.depth >= 5)
                 continue;
 
+            uint64_t hub_deadline = arch_clocksource_read_ns() + 5000000000ULL;
             struct xhci_hub_info hub_info = {
                 .nports = hub_slot->hub_nports,
                 .pwr_good_2ms = 50,
                 .ttt = hub_slot->hub_ttt,
                 .superspeed = hub_slot->hub_ss
             };
-            if (xhci_hub_read_info(ctrl, hub_slot_id, tree_deadline, &hub_info) != 0)
+            int hrc = xhci_hub_read_info(ctrl, hub_slot_id, hub_deadline, &hub_info);
+            if (hrc != 0) {
+                log_warn("[xhci-hub] slot %u: bfs read_info failed (rc=%d)\n",
+                         (unsigned)hub_slot_id, hrc);
                 continue;
+            }
 
             uint16_t cand_mask = 0;
-            if (xhci_hub_prepare_ports(ctrl, hub_slot_id, &hub_info,
-                                       tree_deadline, &cand_mask) != 0)
+            hrc = xhci_hub_prepare_ports(ctrl, hub_slot_id, &hub_info,
+                                         hub_deadline, &cand_mask);
+            if (hrc != 0) {
+                log_warn("[xhci-hub] slot %u: prepare_ports failed (rc=%d)\n",
+                         (unsigned)hub_slot_id, hrc);
                 continue;
+            }
+            if (cand_mask == 0) {
+                log_info("[xhci-hub] slot %u: no downstream ports connected\n",
+                         (unsigned)hub_slot_id);
+                continue;
+            }
 
             for (uint8_t port = 1; port <= hub_info.nports; port++) {
                 if (!(cand_mask & (uint16_t)(1U << port)))
@@ -782,11 +804,14 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
                 if (ctrl->poisoned || ctrl->default_addr_locked_out)
                     return;
 
+                uint64_t port_deadline = arch_clocksource_read_ns() + 5000000000ULL;
                 uint8_t child_sc = 0;
                 bool reset_issued = false;
                 int rc = xhci_hub_reset_port(ctrl, hub_slot_id, &hub_info, port,
-                                             tree_deadline, &child_sc, &reset_issued);
+                                             port_deadline, &child_sc, &reset_issued);
                 if (rc != 0) {
+                    log_warn("[xhci-hub] slot %u port %u: reset failed (rc=%d, issued=%d)\n",
+                             (unsigned)hub_slot_id, (unsigned)port, rc, (int)reset_issued);
                     if (reset_issued) {
                         uint64_t iso_dl = arch_clocksource_read_ns() + 1000000000ULL;
                         if (xhci_hub_isolate_usb2(ctrl, hub_slot_id, port, iso_dl) != 0) {
@@ -798,7 +823,10 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
                 }
 
                 struct xhci_location child_loc;
-                if (xhci_child_location(ctrl, hub_slot_id, port, child_sc, &child_loc) != 0) {
+                rc = xhci_child_location(ctrl, hub_slot_id, port, child_sc, &child_loc);
+                if (rc != 0) {
+                    log_warn("[xhci-hub] slot %u port %u: child_location failed (rc=%d)\n",
+                             (unsigned)hub_slot_id, (unsigned)port, rc);
                     uint64_t iso_dl = arch_clocksource_read_ns() + 1000000000ULL;
                     if (xhci_hub_isolate_usb2(ctrl, hub_slot_id, port, iso_dl) != 0) {
                         ctrl->default_addr_locked_out = true;
@@ -806,7 +834,7 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
                     }
                     continue;
                 }
-                hub_probe_location(ctrl, &child_loc, tree_deadline, &hub_info,
+                hub_probe_location(ctrl, &child_loc, port_deadline, &hub_info,
                                    hub_queue, &q_tail);
             }
         }

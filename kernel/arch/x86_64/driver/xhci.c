@@ -3759,6 +3759,9 @@ int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *
     struct xhci_cmd_result cmd_res;
     int rc = xhci_submit_cmd_until_locked(ctrl, &en_trb, deadline_ns, &cmd_res);
     if (rc != 0 || cmd_res.state != XHCI_CMD_COMPLETED) {
+        log_warn("[xhci] root=%u route=0x%05x: enable slot failed (rc=%d, state=%d)\n",
+                 (unsigned)loc->root_port, (unsigned)loc->route,
+                 rc, (int)cmd_res.state);
         free_4k_page(dev_ctx_phys);
         kfree(slot);
         xhci_unlock(ctrl, locked);
@@ -3767,6 +3770,8 @@ int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *
 
     uint32_t cc = (cmd_res.event.status >> 24) & 0xFF;
     if (cc != XHCI_COMP_SUCCESS) {
+        log_warn("[xhci] root=%u route=0x%05x: enable slot cc=%u\n",
+                 (unsigned)loc->root_port, (unsigned)loc->route, (unsigned)cc);
         free_4k_page(dev_ctx_phys);
         kfree(slot);
         xhci_unlock(ctrl, locked);
