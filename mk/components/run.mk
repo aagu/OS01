@@ -616,11 +616,6 @@ test-aarch64:
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
 	$(MAKE) --no-print-directory _test-aarch64-run-$(MODE)
 
-# Convenience alias: `make PROFILE=aarch64-clang test-aarch64-m3-probe`
-# == `make PROFILE=aarch64-clang test-aarch64 MODE=m3-probe`.
-.PHONY: test-aarch64-m3-probe
-test-aarch64-m3-probe:
-	$(MAKE) --no-print-directory test-aarch64 MODE=m3-probe
 
 # ── aarch64 boot logo (framebuffer wordmark) ─────────────────
 # Boots the aarch64 image with `-device ramfb` (edk2's RamfbDxe turns it into
@@ -2200,7 +2195,7 @@ unlock-profile:
 # + image/driver-model-<fault>/); never touches libc, user, firmware,
 # or normal artifacts.  Used between fault runs so the matrix harness
 # can switch faults without `make clean` of the whole profile.
-.PHONY: clean-driver-model-fixture clean-arch9-fixture
+.PHONY: clean-driver-model-fixture
 # Parse-time validation: DRIVER_MODEL_FAULT must be a known non-none slug.
 # project.mk's enum gate covers all values; this target refuses empty,
 # "none", or any non-driver-model variant (defence in depth).
@@ -2219,7 +2214,6 @@ clean-driver-model-fixture:
 	rm -rf "$(BUILD_DIR)/artifacts/kernel/driver-model-$(DRIVER_MODEL_FAULT)"
 	rm -rf "$(BUILD_DIR)/image/driver-model-$(DRIVER_MODEL_FAULT)"
 endif
-clean-arch9-fixture: clean-driver-model-fixture
 
 # M1 uses distinct immutable build/image variants; outer flags never choose
 # the matrix's normal/selftest artifact implicitly.

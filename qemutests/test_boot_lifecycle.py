@@ -567,7 +567,7 @@ class BuildContractStatic(unittest.TestCase):
 
     def test_run_mk_registers_suite(self) -> None:
         text = _read("mk/components/run.mk")
-        self.assertIn("boot-lifecycle", text)
+        # The target-name check implies the suite-id substring.
         self.assertIn("test-qemu-boot-lifecycle", text)
 
     def test_catalog_entry_registered(self) -> None:
