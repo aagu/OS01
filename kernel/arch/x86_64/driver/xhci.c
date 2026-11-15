@@ -1,5 +1,6 @@
 /* kernel/driver/xhci.c — xHCI Host Controller Driver (Phase 1) */
 #include <driver/xhci.h>
+#include <driver/xhci_hub.h>
 #include <arch/clocksource.h>
 #include <log/log.h>
 #include <memory/memory.h>
@@ -698,8 +699,8 @@ static int xhci_poll_transfer_matched(struct xhci_controller *ctrl, uint8_t slot
  * canonical xHCI speed class (XHCI_PORT_SPEED_FULL/LOW/HIGH/SUPER),
  * consulting any custom PSI table parsed from XHCI_EXT_CAP_PROTOCOL.
  * Returns 0 if unknown/invalid. */
-static uint8_t xhci_speed_class(const struct xhci_controller *ctrl,
-                                uint32_t port_num, uint8_t speed)
+uint8_t xhci_speed_class(const struct xhci_controller *ctrl,
+                         uint32_t port_num, uint8_t speed)
 {
     if (speed == 0 || speed >= 16)
         return 0;
@@ -1362,6 +1363,15 @@ static void xhci_fill_input_slot_ctx(const struct xhci_controller *ctrl,
                       (uint32_t)slot->loc.tt_hub_slot;
     } else {
         slot_ctx[2] = 0;
+    }
+    if (slot->is_hub) {
+        slot_ctx[0] |= (1U << 26);
+        slot_ctx[1] = (slot_ctx[1] & ~(0xFFU << 24)) |
+                      ((uint32_t)slot->hub_nports << 24);
+        if (speed_cls == XHCI_PORT_SPEED_HIGH) {
+            slot_ctx[2] = (slot_ctx[2] & ~(0x3U << 16)) |
+                          (((uint32_t)slot->hub_ttt & 0x3U) << 16);
+        }
     }
 }
 
@@ -2100,9 +2110,14 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
 
             uint8_t ep_xfer = ep->bmAttributes & 3;
             uint16_t mps = ep->wMaxPacketSize & 0x7FF;
+            uint8_t tx_per_uframe = (ep->wMaxPacketSize >> 11) & 0x3U;
             if (ep_xfer == 2 && (mps == 0 || mps > 1024)) {
                 offset += len;
                 continue;
+            }
+            if (ep_xfer == 3 && (tx_per_uframe == 3U || mps == 0 || mps > 1024)) {
+                xhci_free_endpoint_rings(slot);
+                return -EINVAL;
             }
 
             /* Isochronous endpoints need a bandwidth allocation that this
@@ -2117,9 +2132,12 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             }
 
             uint8_t max_burst = 0;
-            uint8_t speed_cls = xhci_speed_class(slot->ctrl, slot->port_num, slot->speed);
+            uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
+                                                      : xhci_speed_class(slot->ctrl, slot->port_num, slot->speed);
             if (ep_xfer == 2 && speed_cls == XHCI_PORT_SPEED_SUPER) {
                 xhci_parse_ss_companion(buffer, total, offset, len, &max_burst);
+            } else if (ep_xfer == 3 && speed_cls == XHCI_PORT_SPEED_HIGH) {
+                max_burst = tx_per_uframe;
             }
 
             struct xhci_ep_ring *ring = kmalloc(sizeof(struct xhci_ep_ring));
@@ -2447,7 +2465,7 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
 }
 
 static void xhci_fill_input_ep_ctx(uint32_t *ep_ctx, const struct xhci_ep_ring *ring,
-                                   uint64_t deq_phys, uint8_t dcs)
+                                   uint64_t deq_phys, uint8_t dcs, bool is_hub)
 {
     ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval, MaxPStreams=0 */
     ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
@@ -2455,7 +2473,13 @@ static void xhci_fill_input_ep_ctx(uint32_t *ep_ctx, const struct xhci_ep_ring *
                 ((uint32_t)ring->max_packet_size << 16);          /* CErr, EP Type, MaxBurst, MPS */
     ep_ctx[2] = (uint32_t)(deq_phys & 0xFFFFFFF0ULL) | (uint32_t)(dcs & 1U); /* TR Dequeue Lo, DCS */
     ep_ctx[3] = (uint32_t)(deq_phys >> 32);                        /* TR Dequeue Hi */
-    ep_ctx[4] = (uint32_t)ring->max_packet_size;                   /* Average TRB Length */
+    uint32_t max_esit_lo = 0;
+    if (is_hub && (ring->ep_type == XHCI_EP_TYPE_INTR_IN ||
+                   ring->ep_type == XHCI_EP_TYPE_INTR_OUT)) {
+        uint32_t esit = (uint32_t)ring->max_packet_size * ((uint32_t)ring->max_burst + 1U);
+        max_esit_lo = (esit & 0xFFFFU) << 16;
+    }
+    ep_ctx[4] = max_esit_lo | (uint32_t)ring->max_packet_size;     /* Max ESIT Payload Lo + Avg TRB Length */
 }
 
 int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
@@ -2508,7 +2532,7 @@ int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id)
             if (!ring || !ring->active) continue;
 
             uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, ctrl->csz, dci);
-            xhci_fill_input_ep_ctx(ep_ctx, ring, ring->ring_phys, 1U);
+            xhci_fill_input_ep_ctx(ep_ctx, ring, ring->ring_phys, 1U, slot->is_hub);
         }
     }
 
@@ -2998,7 +3022,7 @@ int xhci_clear_halt(struct xhci_controller *c, uint8_t slot_id, uint8_t ep_addr)
         xhci_fill_input_slot_ctx(c, slot, ctx_entries);
 
         uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(slot->input_ctx_virt, c->csz, dci);
-        xhci_fill_input_ep_ctx(ep_ctx, ring, next_deq, next_dcs);
+        xhci_fill_input_ep_ctx(ep_ctx, ring, next_deq, next_dcs, slot->is_hub);
 
         rc = xhci_submit_ep_cmd_locked(c, XHCI_TRB_TYPE_CONFIG_EP, slot_id, 0,
                                        slot->input_ctx_phys);
@@ -3207,66 +3231,7 @@ err_quarantine:
 void xhci_probe_ports(struct xhci_controller *ctrl)
 {
     if (!ctrl || !ctrl->op_regs) return;
-
-    for (uint32_t p = 1; p <= ctrl->max_ports; p++) {
-        uint8_t speed = 0;
-        if (xhci_port_reset(ctrl, p, &speed) != 0) continue;
-
-        uint8_t slot_id = 0;
-        if (xhci_enable_slot(ctrl, (uint8_t)p, speed, &slot_id) != 0) continue;
-
-        if (xhci_address_device(ctrl, slot_id) != 0) {
-            xhci_free_slot(ctrl, slot_id);
-            continue;
-        }
-
-        struct usb_device_descriptor desc;
-        if (xhci_get_device_descriptor(ctrl, slot_id, &desc) != 0) {
-            xhci_free_slot(ctrl, slot_id);
-            continue;
-        }
-
-        /* Phase 3: read the configuration descriptor hierarchy, build the
-         * endpoint rings, program the endpoint contexts and move the device
-         * into the Configured state. */
-        struct usb_config_descriptor cfg;
-        int rc = xhci_get_config_descriptor(ctrl, slot_id, &cfg);
-        if (rc <= 0) {
-            xhci_free_slot(ctrl, slot_id);
-            continue;
-        }
-        uint16_t cfg_actual_len = (uint16_t)rc;
-
-        struct xhci_slot *slot = ctrl->slots[slot_id];
-        rc = xhci_setup_endpoint_rings(slot, (const uint8_t *)slot->dma_buf_virt,
-                                       cfg_actual_len);
-        if (rc != 0) {
-            xhci_free_slot(ctrl, slot_id);
-            continue;
-        }
-
-        rc = xhci_configure_endpoints(ctrl, slot_id);
-        if (rc != 0) {
-            xhci_free_slot(ctrl, slot_id);
-            continue;
-        }
-
-        rc = xhci_set_configuration(ctrl, slot_id, cfg.bConfigurationValue);
-        if (rc != 0) {
-            xhci_free_slot(ctrl, slot_id);
-            continue;
-        }
-
-        /* Phase 4: Cache concatenated binary descriptors (Device + Config hierarchy) */
-        uint16_t total_len = (uint16_t)(sizeof(struct usb_device_descriptor) + cfg_actual_len);
-        slot->raw_descriptors = kmalloc(total_len);
-        if (slot->raw_descriptors) {
-            memcpy(slot->raw_descriptors, &slot->desc, sizeof(struct usb_device_descriptor));
-            memcpy(slot->raw_descriptors + sizeof(struct usb_device_descriptor),
-                   slot->dma_buf_virt, cfg_actual_len);
-            slot->raw_descriptors_len = total_len;
-        }
-    }
+    xhci_hub_probe_tree(ctrl);
 }
 
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb)
@@ -3636,7 +3601,98 @@ int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
     return 0;
 }
 
+int xhci_configure_hub_slot(struct xhci_controller *ctrl, uint8_t slot_id,
+                            const struct xhci_hub_info *info,
+                            uint64_t deadline_ns)
+{
+    if (!ctrl || !info || !ctrl->cmd_ring_virt || !ctrl->db_regs ||
+        slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS)
+        return -EINVAL;
+
+    bool locked = xhci_lock(ctrl);
+    struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (!slot || !slot->active || slot->disabled || slot->poisoned ||
+        ctrl->poisoned || !slot->input_ctx_virt || !slot->input_ctx_phys ||
+        !slot->dev_ctx_virt) {
+        xhci_unlock(ctrl, locked);
+        return -EIO;
+    }
+
+    if (arch_clocksource_read_ns() >= deadline_ns) {
+        xhci_unlock(ctrl, locked);
+        return -ETIMEDOUT;
+    }
+
+    uint32_t *out_slot = (uint32_t *)xhci_dev_slot_ctx(slot->dev_ctx_virt, ctrl->csz);
+    uint32_t orig_ctx_entries = (out_slot[0] >> 27) & 0x1FU;
+    if (orig_ctx_entries == 0)
+        orig_ctx_entries = slot->max_dci ? slot->max_dci : 1U;
+
+    bool was_hub = slot->is_hub;
+    bool was_ss = slot->hub_ss;
+    uint8_t prev_nports = slot->hub_nports;
+    uint8_t prev_ttt = slot->hub_ttt;
+
+    slot->is_hub = true;
+    slot->hub_ss = info->superspeed;
+    slot->hub_nports = info->nports;
+    slot->hub_ttt = info->ttt;
+
+    memset(slot->input_ctx_virt, 0, 4096);
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(slot->input_ctx_virt, ctrl->csz);
+    ctrl_ctx[0] = 0;
+    ctrl_ctx[1] = (1U << 0); /* A0-only: do not modify endpoints */
+    xhci_fill_input_slot_ctx(ctrl, slot, orig_ctx_entries);
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.parameter = slot->input_ctx_phys;
+    trb.control = ((uint32_t)slot_id << 24) | (XHCI_TRB_TYPE_CONFIG_EP << 10) |
+                  ctrl->cmd_ring_cycle;
+
+    struct xhci_cmd_result cmd_res;
+    int rc = xhci_submit_cmd_until_locked(ctrl, &trb, deadline_ns, &cmd_res);
+    if (rc != 0 || cmd_res.state != XHCI_CMD_COMPLETED) {
+        slot->is_hub = was_hub;
+        slot->hub_ss = was_ss;
+        slot->hub_nports = prev_nports;
+        slot->hub_ttt = prev_ttt;
+        xhci_unlock(ctrl, locked);
+        return rc != 0 ? rc : -EIO;
+    }
+
+    uint32_t cc = (cmd_res.event.status >> 24) & 0xFFU;
+    if (cc != XHCI_COMP_SUCCESS) {
+        slot->is_hub = was_hub;
+        slot->hub_ss = was_ss;
+        slot->hub_nports = prev_nports;
+        slot->hub_ttt = prev_ttt;
+        xhci_unlock(ctrl, locked);
+        return -EAGAIN;
+    }
+
+    uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
+                                              : xhci_speed_class(ctrl, slot->port_num, slot->speed);
+    bool ok = ((out_slot[0] & (1U << 26)) != 0) &&
+              (((out_slot[1] >> 24) & 0xFFU) == info->nports);
+    if (ok && speed_cls == XHCI_PORT_SPEED_HIGH) {
+        ok = (((out_slot[2] >> 16) & 0x3U) == (info->ttt & 0x3U));
+    }
+    if (!ok) {
+        slot->is_hub = was_hub;
+        slot->hub_ss = was_ss;
+        slot->hub_nports = prev_nports;
+        slot->hub_ttt = prev_ttt;
+        xhci_unlock(ctrl, locked);
+        return -EAGAIN;
+    }
+
+    xhci_unlock(ctrl, locked);
+    return 0;
+}
+
 int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *loc,
+                      const struct xhci_enum_seed *seed,
                       uint64_t deadline_ns, uint8_t *slot_id_out)
 {
     if (slot_id_out) *slot_id_out = 0;
@@ -3754,8 +3810,67 @@ int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *
     }
 
     ctrl->default_addr_busy = false;
-    if (slot_id_out) *slot_id_out = slot_id;
     xhci_unlock(ctrl, locked);
+
+    if (seed) {
+        struct usb_device_descriptor desc;
+        rc = xhci_get_device_descriptor(ctrl, slot_id, &desc);
+        if (rc != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            return rc;
+        }
+        struct usb_config_descriptor cfg;
+        rc = xhci_get_config_descriptor(ctrl, slot_id, &cfg);
+        if (rc <= 0) {
+            xhci_free_slot(ctrl, slot_id);
+            return rc < 0 ? rc : -EIO;
+        }
+        uint16_t cfg_actual_len = (uint16_t)rc;
+        if (!seed->identity ||
+            seed->identity_len != sizeof(desc) + cfg_actual_len ||
+            memcmp(&desc, seed->identity, sizeof(desc)) != 0 ||
+            memcmp(slot->dma_buf_virt, seed->identity + sizeof(desc), cfg_actual_len) != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            return -EIO;
+        }
+        rc = xhci_setup_endpoint_rings(slot, (const uint8_t *)slot->dma_buf_virt,
+                                       cfg_actual_len);
+        if (rc != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            return rc;
+        }
+        slot->is_hub = true;
+        slot->hub_ss = seed->hub.superspeed;
+        slot->hub_nports = seed->hub.nports;
+        slot->hub_ttt = seed->hub.ttt;
+
+        rc = xhci_configure_endpoints(ctrl, slot_id);
+        if (rc != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            return rc;
+        }
+        rc = xhci_set_configuration(ctrl, slot_id, cfg.bConfigurationValue);
+        if (rc != 0) {
+            xhci_free_slot(ctrl, slot_id);
+            return rc;
+        }
+        struct xhci_hub_info verify_hub;
+        rc = xhci_hub_read_info(ctrl, slot_id, deadline_ns, &verify_hub);
+        if (rc != 0 || verify_hub.nports != seed->hub.nports ||
+            verify_hub.ttt != seed->hub.ttt) {
+            xhci_free_slot(ctrl, slot_id);
+            return rc != 0 ? rc : -EIO;
+        }
+        uint16_t total_len = (uint16_t)(sizeof(desc) + cfg_actual_len);
+        slot->raw_descriptors = kmalloc(total_len);
+        if (slot->raw_descriptors) {
+            memcpy(slot->raw_descriptors, &desc, sizeof(desc));
+            memcpy(slot->raw_descriptors + sizeof(desc), slot->dma_buf_virt, cfg_actual_len);
+            slot->raw_descriptors_len = total_len;
+        }
+    }
+
+    if (slot_id_out) *slot_id_out = slot_id;
     return 0;
 }
 

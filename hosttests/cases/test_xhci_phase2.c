@@ -4,6 +4,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <driver/xhci.h>
+#include <driver/xhci_hub.h>
 #include <arch/pci.h>
 #include <errno.h>
 #include <string.h>
@@ -1508,7 +1509,7 @@ static void test_xhci_default_target_rollback(void)
         .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
     };
     uint8_t slot_id = 0;
-    int rc = xhci_enumerate_at(&ctrl, &loc, s_mock_clock_ns + 50000000ULL, &slot_id);
+    int rc = xhci_enumerate_at(&ctrl, &loc, NULL, s_mock_clock_ns + 50000000ULL, &slot_id);
     assert_true(rc < 0);
     assert_eq(0, slot_id);
     assert_eq(0ULL, dcbaa[1]);
@@ -1628,7 +1629,7 @@ static void test_xhci_split_address_failure(void)
         .tt_hub_slot = 1, .tt_port = 2
     };
     uint8_t slot_id = 0;
-    int rc = xhci_enumerate_at(&ctrl, &child_loc, s_mock_clock_ns + 50000000ULL, &slot_id);
+    int rc = xhci_enumerate_at(&ctrl, &child_loc, NULL, s_mock_clock_ns + 50000000ULL, &slot_id);
     assert_true(rc < 0);
     assert_eq(XHCI_TT_READY, hs_hub.tt_state);
     assert_true(xhci_slot_transport_usable(&ctrl, 2));
@@ -1737,6 +1738,184 @@ static void test_xhci_split_ep0_terminal(void)
     assert_eq(0x0000000180500823ULL, hub_ep0[2].parameter);
 }
 
+static void test_hub_usb2_controls(void)
+{
+    TEST_CASE("hub USB2 controls: 0x29 desc, alt0 single-TT, MPS/ESIT, ganged power, global OC");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+
+    struct xhci_slot hub;
+    struct xhci_trb hub_ep0[XHCI_TRB_RING_SIZE];
+    uint8_t hub_dma[4096], hub_dev_ctx[4096], hub_in_ctx[4096];
+    memset(&hub, 0, sizeof(hub));
+    memset(hub_ep0, 0, sizeof(hub_ep0));
+    memset(hub_dev_ctx, 0, sizeof(hub_dev_ctx));
+    memset(hub_in_ctx, 0, sizeof(hub_in_ctx));
+
+    hub.ctrl = &ctrl; hub.slot_id = 1; hub.active = true;
+    hub.ep0_ring_virt = hub_ep0; hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hub.ep0_ring_cycle = 1;
+    hub.dma_buf_virt = hub_dma; hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hub.dev_ctx_virt = hub_dev_ctx; hub.dev_ctx_phys = (uint64_t)(uintptr_t)hub_dev_ctx;
+    hub.input_ctx_virt = hub_in_ctx; hub.input_ctx_phys = (uint64_t)(uintptr_t)hub_in_ctx;
+    hub.loc = (struct xhci_location){ .root_port = 1, .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH };
+    hub.speed = XHCI_PORT_SPEED_HIGH;
+    hub.port_num = 1;
+    ctrl.slots[1] = &hub;
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+
+    /* 1. Valid 0x29 Hub Descriptor (8 ports -> 7 + 2*2 = 11 bytes) */
+    memset(hub_dma, 0, 64);
+    hub_dma[0] = 11; hub_dma[1] = 0x29; hub_dma[2] = 8;
+    hub_dma[3] = 0x00; hub_dma[4] = 0x00; /* ganged power, global OC, TTT=0 */
+    hub_dma[5] = 25; /* 2 * 25ms = 50ms */
+    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[1].parameter = hub.ep0_ring_phys + 2 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct xhci_hub_info info;
+    memset(&info, 0, sizeof(info));
+    assert_eq(0, xhci_hub_read_info(&ctrl, 1, s_mock_clock_ns + 50000000ULL, &info));
+    assert_eq(8, info.nports);
+    assert_eq(25, info.pwr_good_2ms);
+    assert_true(info.global_overcurrent);
+
+    /* Reject truncated 0x29 descriptor (9 bytes is too short for 9 ports, needs >= 11) */
+    hub_dma[0] = 9;
+    hub_dma[2] = 9;
+    event_ring[2].parameter = hub.ep0_ring_phys + 4 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[3].parameter = hub.ep0_ring_phys + 5 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_true(xhci_hub_read_info(&ctrl, 1, s_mock_clock_ns + 50000000ULL, &info) < 0);
+
+    /* 2. Config validation: FS interrupt MPS=8 -> MaxBurst=0, ESIT=8; HS 2x64 -> MaxBurst=1, ESIT=128 */
+    static const uint8_t fs_hub_cfg[] = {
+        9, 2, 25, 0, 1, 1, 0, 0xE0, 0,
+        9, 4, 0, 0, 1, 0x09, 0x00, 0x00, 0,
+        7, 5, 0x81, 0x03, 0x08, 0x00, 0xFF
+    };
+    hub.loc.speed_class = XHCI_PORT_SPEED_FULL;
+    hub.speed = XHCI_PORT_SPEED_FULL;
+    assert_eq(0, xhci_hub_validate_config(&hub, fs_hub_cfg, sizeof(fs_hub_cfg)));
+    assert_eq(0, xhci_setup_endpoint_rings(&hub, fs_hub_cfg, sizeof(fs_hub_cfg)));
+    assert_eq(0, hub.ep_rings[3]->max_burst);
+    assert_eq(8, hub.ep_rings[3]->max_packet_size);
+    xhci_free_endpoint_rings(&hub);
+
+    static const uint8_t hs_hub_cfg[] = {
+        9, 2, 25, 0, 1, 1, 0, 0xE0, 0,
+        9, 4, 0, 0, 1, 0x09, 0x00, 0x01, 0,
+        7, 5, 0x81, 0x03, 0x40, 0x08, 0x0C /* 2 tx x 64 = 0x0840, bInterval=12 */
+    };
+    hub.loc.speed_class = XHCI_PORT_SPEED_HIGH;
+    hub.speed = XHCI_PORT_SPEED_HIGH;
+    assert_eq(0, xhci_hub_validate_config(&hub, hs_hub_cfg, sizeof(hs_hub_cfg)));
+    assert_eq(0, xhci_setup_endpoint_rings(&hub, hs_hub_cfg, sizeof(hs_hub_cfg)));
+    assert_eq(1, hub.ep_rings[3]->max_burst);
+    assert_eq(64, hub.ep_rings[3]->max_packet_size);
+    xhci_free_endpoint_rings(&hub);
+
+    /* Reject illegal high-bandwidth code 3 (0x1840) and illegal bInterval=0 */
+    uint8_t bad_hb_cfg[sizeof(hs_hub_cfg)];
+    memcpy(bad_hb_cfg, hs_hub_cfg, sizeof(hs_hub_cfg));
+    bad_hb_cfg[18 + 5] = 0x18; /* bits 12..11 = 3 */
+    assert_true(xhci_hub_validate_config(&hub, bad_hb_cfg, sizeof(bad_hb_cfg)) < 0);
+
+    memcpy(bad_hb_cfg, hs_hub_cfg, sizeof(hs_hub_cfg));
+    bad_hb_cfg[18 + 6] = 0x00; /* bInterval=0 illegal */
+    assert_true(xhci_hub_validate_config(&hub, bad_hb_cfg, sizeof(bad_hb_cfg)) < 0);
+
+    /* 3. Global overcurrent rejects prepare_ports */
+    info = (struct xhci_hub_info){ .nports = 2, .pwr_good_2ms = 25, .global_overcurrent = true };
+    hub_dma[0] = 0x02; hub_dma[1] = 0x00; hub_dma[2] = 0x02; hub_dma[3] = 0x00; /* HUB OC */
+    event_ring[4].parameter = hub.ep0_ring_phys + 7 * sizeof(struct xhci_trb);
+    event_ring[4].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[4].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[5].parameter = hub.ep0_ring_phys + 8 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    uint16_t mask = 0;
+    assert_true(xhci_hub_prepare_ports(&ctrl, 1, &info, s_mock_clock_ns + 500000000ULL, &mask) < 0);
+}
+
+static void test_hub_usb2_reset_and_isolation(void)
+{
+    TEST_CASE("hub USB2 reset & isolation: C_RESET order, RESET=1 guard, isolate readback");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+
+    struct xhci_slot hub;
+    struct xhci_trb hub_ep0[XHCI_TRB_RING_SIZE];
+    uint8_t hub_dma[4096];
+    memset(&hub, 0, sizeof(hub));
+    memset(hub_ep0, 0, sizeof(hub_ep0));
+    memset(hub_dma, 0, sizeof(hub_dma));
+
+    hub.ctrl = &ctrl; hub.slot_id = 1; hub.active = true;
+    hub.ep0_ring_virt = hub_ep0; hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hub.ep0_ring_cycle = 1;
+    hub.dma_buf_virt = hub_dma; hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hub.loc = (struct xhci_location){ .root_port = 1, .speed_class = XHCI_PORT_SPEED_HIGH };
+    ctrl.slots[1] = &hub;
+
+    /* Isolate USB2: still connected + PED=1 -> CLEAR_FEATURE(PORT_ENABLE) -> readback PED=0 */
+    hub_dma[0] = 0x03; hub_dma[1] = 0x01; hub_dma[2] = 0x00; hub_dma[3] = 0x00; /* CCS|PED|PP */
+    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb); /* CLEAR_FEATURE(ENABLE) */
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    /* Readback still fails if PED=1 */
+    event_ring[2].parameter = hub.ep0_ring_phys + 6 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_true(xhci_hub_isolate_usb2(&ctrl, 1, 2, s_mock_clock_ns + 50000000ULL) < 0);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -1762,6 +1941,8 @@ int main(void)
     test_xhci_default_target_rollback();
     test_xhci_split_address_failure();
     test_xhci_split_ep0_terminal();
+    test_hub_usb2_controls();
+    test_hub_usb2_reset_and_isolation();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

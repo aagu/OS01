@@ -383,6 +383,10 @@ struct xhci_slot {
     bool active;
     bool addr_completed;
     enum xhci_tt_state tt_state;
+    bool is_hub;
+    bool hub_ss;
+    uint8_t hub_nports;
+    uint8_t hub_ttt;
 
     /* DMA Allocations (each 4KB page) */
     uint64_t input_ctx_phys;
@@ -623,11 +627,20 @@ int xhci_submit_cmd_until_locked(struct xhci_controller *ctrl,
                                  uint64_t deadline_ns,
                                  struct xhci_cmd_result *out_res);
 
+struct xhci_hub_info;
+struct xhci_enum_seed;
+
+uint8_t xhci_speed_class(const struct xhci_controller *ctrl,
+                         uint32_t port_num, uint8_t speed);
 int xhci_child_location(const struct xhci_controller *ctrl, uint8_t parent_slot,
                         uint8_t port, uint8_t speed_class,
                         struct xhci_location *out_loc);
 int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *loc,
+                      const struct xhci_enum_seed *seed,
                       uint64_t deadline_ns, uint8_t *slot_id);
+int xhci_configure_hub_slot(struct xhci_controller *ctrl, uint8_t slot_id,
+                            const struct xhci_hub_info *info,
+                            uint64_t deadline_ns);
 int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
                            uint64_t cleanup_deadline_ns);
 int xhci_parse_ext_caps(struct xhci_controller *ctrl, uint32_t hccparams1);

@@ -4,6 +4,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <driver/xhci.h>
+#include <driver/xhci_hub.h>
 #include <arch/pci.h>
 #include <errno.h>
 #include <string.h>
@@ -1735,6 +1736,81 @@ static void test_xhci_msc_skip_unusable_path(void)
     assert_eq(1, next_disk);
 }
 
+static void test_hub_tier_and_rebuild(void)
+{
+    TEST_CASE("hub tier & rebuild: A0-only configure_hub_slot, -EAGAIN on reject/mismatch, timeout not retried");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+
+    struct xhci_slot hub;
+    uint8_t dev_ctx[4096], in_ctx[4096];
+    memset(&hub, 0, sizeof(hub));
+    memset(dev_ctx, 0, sizeof(dev_ctx));
+    memset(in_ctx, 0, sizeof(in_ctx));
+
+    hub.ctrl = &ctrl; hub.slot_id = 1; hub.active = true; hub.max_dci = 3;
+    hub.dev_ctx_virt = dev_ctx; hub.dev_ctx_phys = (uint64_t)(uintptr_t)dev_ctx;
+    hub.input_ctx_virt = in_ctx; hub.input_ctx_phys = (uint64_t)(uintptr_t)in_ctx;
+    hub.loc = (struct xhci_location){ .root_port = 1, .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH };
+    ctrl.slots[1] = &hub;
+
+    /* Existing output slot context has Context Entries = 3 */
+    uint32_t *out_slot = (uint32_t *)xhci_dev_slot_ctx(dev_ctx, 0);
+    out_slot[0] = (3U << 27);
+
+    struct xhci_hub_info info = { .nports = 4, .pwr_good_2ms = 25, .ttt = 2 };
+
+    /* 1. Completed command rejected -> -EAGAIN, A0-only, preserves Context Entries=3 */
+    event_ring[0].parameter = (uint64_t)(uintptr_t)&cmd_ring[0];
+    event_ring[0].status = (XHCI_COMP_TRB_ERR << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    int rc = xhci_configure_hub_slot(&ctrl, 1, &info, 100000000ULL);
+    assert_eq(-EAGAIN, rc);
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(in_ctx, 0);
+    assert_eq(0U, ctrl_ctx[0]);
+    assert_eq(1U, ctrl_ctx[1]); /* A0-only */
+    uint32_t *in_slot = (uint32_t *)xhci_input_slot_ctx(in_ctx, 0);
+    assert_eq(3U, (in_slot[0] >> 27) & 0x1FU);
+    assert_true((in_slot[0] & (1U << 26)) != 0); /* Hub bit */
+    assert_eq(4U, (in_slot[1] >> 24) & 0xFFU); /* nports */
+    assert_eq(2U, (in_slot[2] >> 16) & 0x3U);  /* TTT */
+
+    /* 2. Command succeeds, but output readback has Hub=0 -> -EAGAIN */
+    event_ring[1].parameter = (uint64_t)(uintptr_t)&cmd_ring[1];
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    rc = xhci_configure_hub_slot(&ctrl, 1, &info, 100000000ULL);
+    assert_eq(-EAGAIN, rc);
+
+    /* 3. Command succeeds AND output readback matches -> 0 */
+    out_slot[0] = (3U << 27) | (1U << 26);
+    out_slot[1] = (4U << 24);
+    out_slot[2] = (2U << 16);
+    event_ring[2].parameter = (uint64_t)(uintptr_t)&cmd_ring[2];
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    rc = xhci_configure_hub_slot(&ctrl, 1, &info, 100000000ULL);
+    assert_eq(0, rc);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -1754,6 +1830,7 @@ int main(void)
     test_xhci_split_bulk_cleanup_order();
     test_xhci_split_timeout_terminal();
     test_xhci_msc_skip_unusable_path();
+    test_hub_tier_and_rebuild();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
