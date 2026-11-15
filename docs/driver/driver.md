@@ -424,6 +424,23 @@ page flip / 双缓冲）；且 PTE 位不等于最终有效内存类型 —— P
 [changelog](../changelog.md) 2026-11-11 条目与
 [fix-report-3](../../.superpowers/sdd/2026-11-11-gfx-uc-wb-probe/fix-report-3.md)。
 
+#### 真机整屏写入 A/B
+
+从仓库根目录构建诊断镜像：
+
+```sh
+make PROFILE=x86_64-clang IMAGE_VARIANT=gfx-present-ab \
+  KERNEL_EXTRA_CFLAGS=-DOS01_TEST_GFX_PRESENT_AB \
+  "$PWD/build/x86_64-clang/image/gfx-present-ab/disk.img"
+```
+
+用该镜像启动，在 ash 运行 `/bin/test_gfx --present-ab`。它按 ABBA×2 提交同一帧：
+A 走现有拷贝，B 使用 32 位顺序写，两组不改变 framebuffer 映射。每次输出
+`total_ns`（ioctl）、`copy_ns`（用户缓冲区到内核 RAM）和 `fb_ns`（写入
+framebuffer 的逐行阶段）。像素抽查在计时区间外进行。普通内核不接受诊断 ioctl。
+QEMU 可通过 `qemutests/run_test.py --disk <诊断镜像的副本> gfx-present-ab` 验证，
+需设置 `OVMF_FIRMWARE` 为配置对应的固件路径。
+
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
 受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。

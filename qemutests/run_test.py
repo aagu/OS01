@@ -1017,6 +1017,19 @@ def main():
             result = test_network(tester)
         elif args.test_name == "gfx":
             result = test_gfx(tester)
+        elif args.test_name == "gfx-present-ab":
+            tester.start_qemu(serial_stdio=True)
+            result = bool(tester.read_until("# ", timeout=tester.timeout))
+            if result:
+                tester.send_line("/bin/test_gfx --present-ab")
+                marker = tester.read_until(
+                    re.compile(r"\[FB AB\] PASS|\[GFX TEST\] FAIL:[^\r\n]+[\r\n]"),
+                    timeout=tester.timeout,
+                )
+                result = marker is not None and marker.group(0) == "[FB AB] PASS"
+                if marker is not None and not result:
+                    print(marker.group(0).rstrip())
+            print("PASS: gfx-present-ab" if result else "FAIL: gfx-present-ab")
         elif args.test_name == "resolution":
             # Imported lazily: test_resolution_switcher.py has no import-time
             # OVMF/QEMU coupling, but keeping the import here mirrors the

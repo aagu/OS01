@@ -67,10 +67,12 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <gfx.h>
 #include <uapi/fb.h>
+#include <uapi/gfx.h>
 
 /* ── Colors (0xAARRGGBB, host-endian RGB32) ────────────────────── */
 #define COLOR_RED    0x00FF0000u
@@ -583,8 +585,90 @@ static void present_rect_surface_mode(void)
     exit(0);
 }
 
+/* One full-screen frame, submitted in two ABBA blocks. Poison the sample
+ * pixels before each run so readback also catches a writer that did nothing. */
+static int present_ab(void)
+{
+    uint32_t *fb;
+    struct fb_info info;
+    int fb_fd = fb_open_and_map(&fb, &info);
+    uint32_t w = info.width, h = info.height;
+    size_t count = (size_t)w * h;
+    uint32_t *pixels = calloc(count, sizeof(*pixels));
+    if (!pixels)
+        FAIL("present-ab frame allocation failed");
+    for (size_t i = 0; i < count; ++i)
+        pixels[i] = (uint32_t)(i * 0x010307u) & 0x00ffffffu;
+
+    int fd = open("/dev/gfx0", O_RDWR);
+    gfx_view_desc_t view = { .w = w, .h = h };
+    if (fd < 0 || ioctl(fd, GFX_CREATE_VIEW, &view) != 0 ||
+        ioctl(fd, GFX_ACQUIRE, (uint64_t)0) != 0)
+        FAIL("present-ab view acquisition errno=%d", errno);
+
+    gfx_test_present_ab_t req = {
+        .present = { .pixels = (uintptr_t)pixels, .stride = w * 4u },
+        .wide = 2,
+    };
+    if (ioctl(fd, GFX_TEST_PRESENT_AB, &req) != -1 || errno != EINVAL)
+        FAIL("present-ab invalid mode: expected EINVAL (errno=%d; use the diagnostic kernel)", errno);
+    printf("[FB AB] %ux%u pitch=%u bytes=%llu\n", w, h, info.stride,
+           (unsigned long long)(count * sizeof(*pixels)));
+
+    const uint32_t xs[] = { 0, w / 2, w - 1 };
+    const uint32_t ys[] = { 0, h / 2, h - 1 };
+    const uint32_t order[] = { 0, 1, 1, 0, 0, 1, 1, 0 };
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); ++i) {
+        for (size_t j = 0; j < sizeof(xs) / sizeof(xs[0]); ++j) {
+            size_t idx = (size_t)ys[j] * w + xs[j];
+            gfx_present_rect_req_t rect = {
+                .pixels = (uintptr_t)pixels, .stride = w * 4u,
+                .x = xs[j], .y = ys[j], .w = 1, .h = 1,
+            };
+            pixels[idx] ^= 0x00ffffffu;
+            if (ioctl(fd, GFX_PRESENT_RECT, &rect) != 0)
+                FAIL("present-ab sentinel write errno=%d", errno);
+            if (fb_read(fb, info.stride, xs[j], ys[j]) != pixels[idx])
+                FAIL("present-ab sentinel mismatch at %u,%u", xs[j], ys[j]);
+            pixels[idx] ^= 0x00ffffffu;
+        }
+        req.wide = order[i];
+        struct timespec start, end;
+        if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+            FAIL("present-ab start clock errno=%d", errno);
+        int rc = ioctl(fd, GFX_TEST_PRESENT_AB, &req);
+        if (rc != 0)
+            FAIL("present-ab mode=%u errno=%d", req.wide, errno);
+        if (clock_gettime(CLOCK_MONOTONIC, &end) != 0)
+            FAIL("present-ab end clock errno=%d", errno);
+        for (size_t j = 0; j < sizeof(xs) / sizeof(xs[0]); ++j) {
+            if (fb_read(fb, info.stride, xs[j], ys[j]) != pixels[(size_t)ys[j] * w + xs[j]])
+                FAIL("present-ab mode=%u pixel mismatch at %u,%u", req.wide, xs[j], ys[j]);
+        }
+        int64_t total_ns = ((int64_t)end.tv_sec - start.tv_sec) * 1000000000LL
+                         + ((int64_t)end.tv_nsec - start.tv_nsec);
+        if (total_ns <= 0 || !req.copy_ns || !req.fb_ns ||
+            req.copy_ns > (uint64_t)total_ns ||
+            req.fb_ns > (uint64_t)total_ns - req.copy_ns)
+            FAIL("present-ab mode=%u invalid stage timing", req.wide);
+        printf("[FB AB] %c total_ns=%lld copy_ns=%llu fb_ns=%llu rc=0\n",
+               req.wide ? 'B' : 'A', (long long)total_ns,
+               (unsigned long long)req.copy_ns, (unsigned long long)req.fb_ns);
+    }
+    if (ioctl(fd, GFX_RELEASE, (uint64_t)0) != 0)
+        FAIL("present-ab display release errno=%d", errno);
+    close(fd);
+    free(pixels);
+    munmap(fb, (size_t)h * info.stride);
+    close(fb_fd);
+    printf("[FB AB] PASS\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--present-ab") == 0)
+        return present_ab();
     if (argc >= 2 && strcmp(argv[1], "--present-rect-surface") == 0) {
         present_rect_surface_mode();
         /* not reached: present_rect_surface_mode _exit(0)s on PASS */

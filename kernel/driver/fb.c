@@ -292,8 +292,8 @@ int fb_get_info(struct fb_info *out)
 }
 
 // ── fb_write_row_leased: copy row under an active lease ─────
-int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
-                        const void *pixels, uint32_t bytes)
+static int fb_write_row(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                        const void *pixels, uint32_t bytes, bool wide)
 {
     /* Terminal-CPU investigation (commit tty-cpu-probe-v1). Per-row
      * wall time is needed to understand how much of gfx_ioctl_present
@@ -324,7 +324,21 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
     if (byte_offset + (uint64_t)bytes > lease->snapshot.mapped_size) return -EINVAL;
 
     uint8_t *dst = (uint8_t *)lease->snapshot.addr + byte_offset;
-    memcpy(dst, pixels, bytes);
+#ifdef OS01_TEST_GFX_PRESENT_AB
+    if (wide) {
+        if (((uintptr_t)dst | (uintptr_t)pixels | bytes) & 3u)
+            return -EINVAL;
+        volatile uint32_t *out = (volatile uint32_t *)dst;
+        const uint32_t *in = pixels;
+        for (uint32_t i = 0; i < bytes / 4u; ++i)
+            out[i] = in[i];
+    } else
+#else
+    (void)wide;
+#endif
+    {
+        memcpy(dst, pixels, bytes);
+    }
 
     {
         static uint64_t s_row_ns;
@@ -343,6 +357,20 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
     }
     return 0;
 }
+
+int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                        const void *pixels, uint32_t bytes)
+{
+    return fb_write_row(lease, x, y, pixels, bytes, false);
+}
+
+#ifdef OS01_TEST_GFX_PRESENT_AB
+int fb_write_row_wide_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                             const void *pixels, uint32_t bytes)
+{
+    return fb_write_row(lease, x, y, pixels, bytes, true);
+}
+#endif
 
 // ── fb_write_row was removed ────────────────────────────────
 //

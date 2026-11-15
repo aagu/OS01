@@ -100,6 +100,20 @@ typedef struct {
 _Static_assert(sizeof(gfx_present_req_t) == 16,
                "gfx_present_req_t must be 16 bytes (ABI)");
 
+/* Diagnostic only: enabled by -DOS01_TEST_GFX_PRESENT_AB in the kernel.
+ * wide=0 uses the normal writer; wide=1 uses aligned 32-bit stores.
+ * Timings are outputs and cover the two per-row stages, summed over a frame. */
+#define GFX_TEST_PRESENT_AB 0x470C
+typedef struct {
+    gfx_present_req_t present;
+    uint32_t wide;
+    uint32_t reserved;
+    uint64_t copy_ns;
+    uint64_t fb_ns;
+} gfx_test_present_ab_t;
+
+_Static_assert(sizeof(gfx_test_present_ab_t) == 40, "gfx_test_present_ab_t ABI");
+
 /* GFX_PRESENT_RECT — input; partial-rectangle present (spec §4).
  * Coordinates are VIEW-LOCAL pixels; the framebuffer destination is
  * view origin + (x, y).  pixels is the FULL view private buffer

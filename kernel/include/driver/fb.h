@@ -15,6 +15,11 @@ int fb_get_info(struct fb_info *out);
 int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                         const void *pixels, uint32_t bytes);
 
+#ifdef OS01_TEST_GFX_PRESENT_AB
+int fb_write_row_wide_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                             const void *pixels, uint32_t bytes);
+#endif
+
 // NOTE: there is deliberately no lease-less `fb_write_row()` wrapper any
 // more.  Every production writer goes through fb_write_row_leased() under
 // an explicit lease (gfx.c holds one for the whole frame); the old

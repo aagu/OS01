@@ -360,7 +360,8 @@ static void stats_log_maybe(uint64_t now_ns)
 //
 // On any fault, kfree the row buffer, release the lease, and return
 // -EFAULT — earlier rows may already be visible on the fb (spec §4).
-static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
+static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq,
+                             gfx_test_present_ab_t *probe)
 {
     /* ── Terminal-CPU probe (Phase 1 instrumentation) ───────────────
      * Wall-time cost of a successful present, accumulated and dumped
@@ -373,15 +374,26 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
     uint64_t t_present0 = arch_clocksource_read_ns();
 
     gfx_view_t *v = (gfx_view_t *)f->dev_private;
-    if (!v || !ureq) return -EINVAL;
+    if (!v) return -EINVAL;
 
     // Stage 1: validate + copy the request struct.
-    if (!syscall_check_user_range((uint64_t)ureq,
-                                  sizeof(gfx_present_req_t), false))
-        return -EFAULT;
     gfx_present_req_t kreq;
-    if (copy_from_user_ft(&kreq, ureq, sizeof(kreq)) < 0)
-        return -EFAULT;
+#ifdef OS01_TEST_GFX_PRESENT_AB
+    if (probe) {
+        kreq = probe->present;
+        probe->copy_ns = 0;
+        probe->fb_ns = 0;
+    } else
+#else
+    (void)probe;
+#endif
+    {
+        if (!ureq) return -EINVAL;
+        if (!syscall_check_user_range((uint64_t)ureq, sizeof(kreq), false))
+            return -EFAULT;
+        if (copy_from_user_ft(&kreq, ureq, sizeof(kreq)) < 0)
+            return -EFAULT;
+    }
 
     // Stage 2: snapshot the view rectangle and mode_seq under the table lock.
     // The lock is dropped before any user-range check or copy_*_ft
@@ -466,6 +478,9 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
         rc = 0;
         for (uint32_t row = 0; row < v_h; row++) {
             uint64_t row_addr = kreq.pixels + (uint64_t)row * (uint64_t)kreq.stride;
+#ifdef OS01_TEST_GFX_PRESENT_AB
+            uint64_t before_copy = probe ? arch_clocksource_read_ns() : 0;
+#endif
 #ifdef OS01_HOST_TEST
             if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
                                   (size_t)kreq.stride) < 0) {
@@ -476,8 +491,19 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq)
             __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
                              (size_t)kreq.stride);
 #endif
-            int wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf,
-                                          (uint32_t)kreq.stride);
+            int wrc;
+#ifdef OS01_TEST_GFX_PRESENT_AB
+            if (probe) {
+                uint64_t before_fb = arch_clocksource_read_ns();
+                wrc = probe->wide
+                    ? fb_write_row_wide_leased(&lease, v_x, v_y + row, row_buf, kreq.stride)
+                    : fb_write_row_leased(&lease, v_x, v_y + row, row_buf, kreq.stride);
+                uint64_t after_fb = arch_clocksource_read_ns();
+                probe->copy_ns += before_fb - before_copy;
+                probe->fb_ns += after_fb - before_fb;
+            } else
+#endif
+                wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf, kreq.stride);
             if (wrc < 0) { rc = wrc; break; }
         }
     } else {
@@ -768,8 +794,22 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
     case GFX_PRESENT: {
         // gfx_ioctl_present itself does syscall_check_user_range +
         // copy_from_user_ft on the request struct.
-        return gfx_ioctl_present(f, (gfx_present_req_t *)arg);
+        return gfx_ioctl_present(f, (gfx_present_req_t *)arg, NULL);
     }
+#ifdef OS01_TEST_GFX_PRESENT_AB
+    case GFX_TEST_PRESENT_AB: {
+        gfx_test_present_ab_t probe;
+        if (!syscall_check_user_range((uintptr_t)arg, sizeof(probe), true) ||
+            copy_from_user_ft(&probe, arg, sizeof(probe)) < 0)
+            return -EFAULT;
+        if (probe.wide > 1 || probe.reserved)
+            return -EINVAL;
+        int rc = gfx_ioctl_present(f, NULL, &probe);
+        if (rc < 0)
+            return rc;
+        return copy_to_user_ft(arg, &probe, sizeof(probe)) < 0 ? -EFAULT : 0;
+    }
+#endif
     case GFX_PRESENT_RECT: {
         // Same staging pattern as GFX_PRESENT — the rect handler
         // itself does syscall_check_user_range + copy_from_user_ft
