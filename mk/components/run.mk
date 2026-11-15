@@ -72,17 +72,13 @@ RUN_QEMU_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=disk \
   -object rng-random,filename=/dev/urandom,id=rng0 \
   -device virtio-rng-pci,rng=rng0 \
   -m $(MEMORY) -display $(DISPLAY) -serial stdio
-# USB-only storage topology (USB boot design §5.9).  One usb-storage
-# drive on qemu-xhci, and nothing else: no AHCI, no implicit IDE/virtio
-# disk, no `-boot order` (it cannot be mixed with bootindex anyway).
-# `run-usb` consumes this variable; the automated `test-qemu-usb-boot`
-# runner obtains the same topology from the shared
-# `build_qemu_x86(storage="usb")` builder.
-# DRIFT WARNING: this interactive Make expansion is a hand-maintained
-# mirror of that builder (interactive display/SMP/network flags are
-# inserted by the recipe).  test_usb_boot_runner.py::
-# MakeTopologyDriftTests extracts the tokens below and compares them to
-# build_qemu_x86(storage="usb"); update both sides together.
+# USB-only storage topology (USB boot design §5.9): one usb-storage
+# drive on qemu-xhci and nothing else (no AHCI/IDE/virtio, no
+# `-boot order` — it cannot mix with bootindex).  Consumed by `run-usb`.
+# DRIFT WARNING: hand-maintained mirror of build_qemu_x86(storage="usb")
+# (display/SMP/network flags are inserted by the recipe);
+# test_usb_boot_runner.py::MakeTopologyDriftTests compares the tokens —
+# update both sides together.
 QEMU_USB_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=usbdisk,readonly=on \
   -device qemu-xhci,id=xhci,p2=4,p3=0 \
   -device usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0 \
@@ -152,15 +148,13 @@ aarch64-uefi-kernel: $(BUILD_DIR)/artifacts/kernel.elf
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 
-# M3.1 audit gate (Task 13): nm half. The compiled aarch64 kernel must
-# carry NO x86-only VMM symbols — no T/t symbol named vma_* / uaccess_* /
-# fork_* (vmm_* / arch_vmm_* are deliberately excluded: aarch64 has its
-# own page_table/vmm_gate surface). The source-scan twin of this gate is
-# hosttests/cases/test_vmm_caller_audit.c; the full chain-by-chain table
-# lives in docs/memory/memory.md ("vmm 变更调用链审计（M3.1 验收）").
-# llvm-nm host tool (same LLVM install that provides this profile's
-# llvm-ar / llvm-objcopy; the aarch64 profile does not define LLVM_NM,
-# which belongs to the x86 clang toolchain discovery).
+# M3.1 audit gate (Task 13): the compiled aarch64 kernel must carry NO
+# x86-only VMM symbols (vma_*/uaccess_*/fork_*; vmm_*/arch_vmm_* are
+# deliberately excluded — aarch64 has its own page_table/vmm_gate
+# surface).  Source-scan twin: hosttests/cases/test_vmm_caller_audit.c;
+# chain table: docs/memory/memory.md ("vmm 变更调用链审计（M3.1 验收）").
+# llvm-nm host tool (the aarch64 profile defines no LLVM_NM — that
+# belongs to the x86 toolchain discovery).
 AARCH64_NM     ?= llvm-nm
 # The aarch64 profile defines no x86 toolchain variables (no LLVM_NM /
 # LLVM_OBJDUMP): the intr-dispatch wiring audit needs a disassembler for
@@ -235,31 +229,24 @@ run-aarch64-uefi: aarch64-uefi
 	  $$extra_dtb \
 	  -serial stdio -display $(DISPLAY) -no-reboot
 
-# The AArch64 PSCI SMP acceptance suite intentionally runs the production
-# firmware/image with multiple vCPU counts.  Its Python parser is host-only
-# and asserts structured kernel diagnostics; it does not mistake a UEFI
-# banner or arbitrary firmware "FAIL" text for kernel test results.
+# The AArch64 PSCI SMP acceptance suite runs the production firmware/image
+# with multiple vCPU counts; the host-only python parser asserts structured
+# kernel diagnostics (never a UEFI banner / firmware FAIL text).
 #
-# The prebuilt edk2 firmware for QEMU virt does not expose the device tree
-# through the EFI configuration table, so the kernel prints
-# `[dtb] FATAL: UEFI handoff has no DTB` and never reaches SMP. The harness
-# accepts --diagnostic-dtb=auto to materialize a packed QEMU-generated DTB
-# per case and pass it via `-dtb` (with `acpi=off`). Set
-# AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to require the production firmware path.
+# DTB constraint: the prebuilt edk2 firmware does not expose the device
+# tree through the EFI configuration table, so the suites default to
+# --diagnostic-dtb=auto (packed QEMU-generated DTB via `-dtb`, acpi=off);
+# AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 requires the production firmware path.
 #
-# This target only consumes an already injected image. Switching the
-# compiled value requires the following profile-clean sequence:
-# make PROFILE=aarch64-clang clean
-# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
-# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64 MODE=no-ack
-# make PROFILE=aarch64-clang clean
-# make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
-# Then run a normal two-core recovery case with the rebuilt image paths.
-#
-# PL011 RX -> GIC SPI injection test (spec §7.4, Task 2.3b). Reuses the
-# SMP suite's firmware / image / DTB mechanism; harness injects one byte
-# into the PL011 socket and expects the kernel-side "handled count=1"
-# marker once the RX handler fires.
+# no-ack mode only consumes an already injected image; switching the
+# compiled value needs the profile-clean sequence:
+#   make PROFILE=aarch64-clang clean
+#   make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
+#   make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64 MODE=no-ack
+#   make PROFILE=aarch64-clang clean
+#   make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+# gic-spi (spec §7.4, Task 2.3b) reuses the SMP suite's firmware/image/DTB
+# mechanism and asserts the PL011 "handled count=1" marker.
 .PHONY: test-aarch64
 # The contract harness expects invalid no-ack injection to fail even under
 # `make -n`. Keep this as a parse-time check.
@@ -350,8 +337,6 @@ endif
 # sub-make (AARCH64_SCHED_TICK_TEST=1); the runner drives the frozen
 # 1/2/4/8 x 2 matrix.
 .PHONY: _test-aarch64-prep-sched-wake _test-aarch64-run-sched-wake
-_test-aarch64-prep-sched-wake:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_AP_SCHED_TEST=wake aarch64-uefi
 _test-aarch64-run-sched-wake:
 	python3 qemutests/aarch64_ap_scheduler.py \
 	  --phase wake --case positive \
@@ -363,8 +348,6 @@ _test-aarch64-run-sched-wake:
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-wake/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 .PHONY: _test-aarch64-prep-sched-tick _test-aarch64-run-sched-tick
-_test-aarch64-prep-sched-tick:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TICK_TEST=1 aarch64-uefi
 _test-aarch64-run-sched-tick:
 	python3 qemutests/aarch64_sched_tick.py \
 	  --image "$(call aarch64_variant_disk,sched-tick)" \
@@ -385,30 +368,27 @@ TEST_AARCH64_EXTRA_gic-spi    := --diagnostic-dtb=auto
 # sync-fault has no DTB-mode knob — it runs the EL1h sync fault probe on
 # the existing UEFI/DTB mechanism but with an isolated image/firmware tree.
 
-# Pre-build helpers (one per MODE) put the $(MAKE) sub-invocation on its
-# own recipe line so `make -n` honors the dry-run contract. A single
-# multi-branch recipe (the v2 approach with `if [ "$(MODE)" = ... ]`)
-# put $(MAKE) inside an `if/fi` block on one recipe line and would
-# execute under -n.
-.PHONY: _test-aarch64-prep-smp _test-aarch64-prep-no-ack _test-aarch64-prep-gic-spi _test-aarch64-prep-sync-fault
-_test-aarch64-prep-smp:
-	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
+# prep helpers (one per MODE) put the $(MAKE) sub-invocation on its own
+# recipe line so `make -n` honors the dry-run contract.  The uniform
+# selftest-variant preps (one sub-make, optional compile selector) are
+# generated; no-ack/ordinary/boot-contract/sched-ap keep explicit rules.
+define _aarch64_prep
+.PHONY: _test-aarch64-prep-$(1)
+_test-aarch64-prep-$(1):
+	$$(MAKE) KERNEL_SELFTEST=$(2) $(3) aarch64-uefi
+endef
+$(eval $(call _aarch64_prep,smp,1,))
+$(eval $(call _aarch64_prep,gic-spi,1,))
+$(eval $(call _aarch64_prep,sync-fault,1,AARCH64_SYNC_FAULT_TEST=1))
+$(eval $(call _aarch64_prep,sched-wake,1,AARCH64_AP_SCHED_TEST=wake))
+$(eval $(call _aarch64_prep,sched-tick,1,AARCH64_SCHED_TICK_TEST=1))
+$(eval $(call _aarch64_prep,m3-probe,,))
+
 _test-aarch64-prep-no-ack:
 	@test "$(AARCH64_SMP_TEST_NO_ACK_CPU)" = 1 \
 	  || { echo "AARCH64_SMP_TEST_NO_ACK_CPU must be 1; clean and rebuild" >&2; exit 1; }
 	@test -f "$(AARCH64_UEFI_DISK)" -a -f "$(AARCH64_UEFI_FIRMWARE)" \
 	  || { echo "Build the injected aarch64-uefi image first" >&2; exit 1; }
-_test-aarch64-prep-gic-spi:
-	$(MAKE) KERNEL_SELFTEST=1 aarch64-uefi
-# AAGU-EL1-sync (spec §5): the sync-fault variant builds the dedicated
-# kernel/image/firmware tree (KERNEL_VARIANT=sync-fault) and propagates
-# the fault injection flag through the controlled sub-make boundary. The
-# recipe mirrors _test-aarch64-prep-smp so the dry-run contract still
-# honours `make -n`; Task 3's harness target consumes the produced
-# sync-fault image via $(call aarch64_variant_disk,sync-fault).
-_test-aarch64-prep-sync-fault:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SYNC_FAULT_TEST=1 aarch64-uefi
-
 # Run helpers (one per MODE) keep the python harness on its own recipe
 # line, after the pre-build. The python call therefore is NOT executed
 # under `-n` (per the dry-run contract).
@@ -549,8 +529,6 @@ endif
 # dtb_cpu_count() >= 2 so single-CPU boots skip it (the 0-AP FAIL
 # contract is pinned by the hosttest instead).
 .PHONY: _test-aarch64-prep-m3-probe _test-aarch64-run-m3-probe
-_test-aarch64-prep-m3-probe:
-	$(MAKE) aarch64-uefi
 _test-aarch64-run-m3-probe:
 	python3 qemutests/aarch64_m3_probe.py \
 	  --diagnostic-dtb=auto \
@@ -675,19 +653,13 @@ validate-profile:
 	@printf 'profile=%s triple=%s sysroot=%s capabilities=%s\n' "$(PROFILE)" "$(TARGET_TRIPLE)" "$(SYSROOT)" "$(PROFILE_CAPABILITIES)"
 
 # ── Test ────────────────────────────────────────────────────
-# Each x86 E2E test builds its image VARIANT in an isolated dir
-# (build/<profile>/image/<variant>/disk.img) and runs qemutests/run_test.py
-# against that exact image (DISK_IMG env). Variant builds NEVER delete or
-# write the normal image: when the normal image exists, its sha256 is
-# recorded before and after the variant build (image/normal.before /
-# normal.after) and compared. The normal image itself is built by the normal
-# build flow (make / make disk.img); if it does not exist the integrity
-# comparison is skipped, not faked.
-#
-# Recipe-line structure matters for dry runs: GNU make EXECUTES a recipe
-# line that contains $(MAKE) even under -n, so the sha256 sandwich and the
-# python3 run sit on their own recipe lines (printed only under -n) and the
-# variant sub-make on its own line (the standard recursive-make behavior).
+# Each x86 E2E test builds its image VARIANT in an isolated dir and runs
+# qemutests/run_test.py against that exact image.  Variant builds never
+# write the normal image: its sha256 is recorded before/after the variant
+# build (image/normal.before / normal.after) and compared — skipped, not
+# faked, when the normal image does not exist.  Recipe lines containing
+# $(MAKE) execute even under -n: the sha256 sandwich and the python run
+# stay on their own recipe lines (the dry-run contract).
 
 # Explicit variant image paths (mirror the IMAGE_DIR computation the variant
 # sub-make performs, so the suite runs against the exact image just built).
@@ -695,10 +667,8 @@ TEST_SYSTEST_IMAGE  := $(BUILD_DIR)/image/systest/disk.img
 TEST_NETTEST_IMAGE  := $(BUILD_DIR)/image/nettest/disk.img
 TEST_INITTAB_IMAGE  := $(BUILD_DIR)/image/inittab-test/disk.img
 TEST_SELFTEST_IMAGE := $(BUILD_DIR)/image/selftest/disk.img
-# The terminal-present suite needs the terminal's per-second
-# [term-present] records on the serial port.  Those records are a
-# user-space debug-level diagnostic (USER_DEBUG=1), so the suite builds
-# its own image + user variant and runs against it — the normal image
+# terminal-present needs the per-second [term-present] serial records
+# (USER_DEBUG=1) — it builds its own image variant so the normal image
 # keeps the serial port clean.
 TEST_TERMINAL_PRESENT_IMAGE := $(BUILD_DIR)/image/terminal-present/disk.img
 TEST_ARCH10_CAPACITY_IMAGE := $(BUILD_DIR)/image/arch10-capacity/disk.img
@@ -756,29 +726,16 @@ print-test-qemu-images:
 	@$(foreach v,$(sort $(filter TEST_QEMU_IMG_%,$(.VARIABLES))),printf '%s\t%s\n' '$(patsubst TEST_QEMU_IMG_%,%,$(v))' '$(value $(v))';)
 
 # ── Test framework regression (no QEMU, always) ──────────────
-# Explicit Python unittest entry for the test framework itself.
-# The list is append-only across tasks: Task 2 established
-# `qemutests.test_gfx_runner` as the first module; later tasks that add
-# a new `qemutests/test_*.py` module append its name here in the same
-# commit (Ruling 3), so a single `make test-harness` validates the
-# framework end-to-end before any real QEMU run.  Task 13 (final
-# acceptance) also folded in the pre-existing host-only runner
-# self-tests that no other target ran (`test_driver_model_matrix`,
-# `test_driver_model_boundary_audit`, `test_resolution_switcher`) plus
-# `test_ci_workflow` (a static contract check over
-# .github/workflows/ci.yml).  `test_lvgl_runner` is deliberately NOT
-# listed: it is an executable QEMU driver script, not a unittest module.
-# `test_arch9_build_contract` is also deliberately NOT listed: its
-# fixtures drive real `make -n kernel.bin`, which needs a prepared
-# sysroot, so it cannot run in this zero-environment-dependency gate
-# (the CI `harness` job builds nothing before `make test-harness`).  It
-# IS owned by the `test-contract` bucket instead: that target *does*
-# build a sysroot, and its x86_64-clang branch runs this module after
-# the `build_contract.sh` mode loop.
-# The recipe is a single `python3 -m unittest` call against the explicit
-# list — never auto-discovery, never an implicit search for `test_*.py`.
-# Fixtures use fakes or host-only contract probes; no QEMU process starts.
-# Generated from @os01-test / TEST_MANIFEST (layer: harness) in qemutests/test_*.py
+# The module list is GENERATED (test-harness-modules.mk from @os01-test /
+# TEST_MANIFEST, layer: harness) and append-only across tasks (Ruling 3):
+# a new qemutests/test_*.py unittest module joins in the same commit, so
+# `make test-harness` validates the framework before any QEMU run.  The
+# recipe is one unittest call against the explicit list — never
+# auto-discovery; fixtures use fakes / host-only probes, no QEMU.
+# Deliberately NOT in the list: test_lvgl_runner (executable QEMU driver,
+# not a unittest) and test_arch9_build_contract (drives real
+# `make -n kernel.bin`, needs a prepared sysroot — owned by the
+# test-contract bucket instead, which builds one first).
 TEST_HARNESS_MODULES_GEN := $(OS01_ROOT)/mk/generated/test-harness-modules.mk
 ifeq ($(wildcard $(TEST_HARNESS_MODULES_GEN)),)
 $(error test-harness-modules.mk missing; run 'make regen-test-catalog')
@@ -790,13 +747,10 @@ test-harness: test-framework-contract check-ci-schedule
 	python3 qemutests/run_framework_tests.py $(if $(HARNESS_MODULE_TIMEOUT),--module-timeout $(HARNESS_MODULE_TIMEOUT)) $(if $(HARNESS_TOTAL_TIMEOUT),--total-timeout $(HARNESS_TOTAL_TIMEOUT)) $(TEST_HARNESS_MODULES)
 
 # Negative-contract hosttest: builds test_framework_contract.elf and
-# asserts its exit code is exactly 1.  Pins three test-framework
-# contracts (assertion exit-code propagation, macro single-evaluation,
-# TEST_RESULTS() not resetting stats — see
-# hosttests/cases/test_framework_contract.c header for the spec and
-# commit 2d594ce0 for the original fix).  Wired into `make test-harness`
-# so CI catches regressions; safe to run standalone (no QEMU, no
-# kernel, single-file compile).
+# asserts exit code exactly 1 (assertion exit-code propagation, macro
+# single-evaluation, TEST_RESULTS() not resetting stats — see the
+# hosttests/cases/test_framework_contract.c header).  Runs standalone
+# (no QEMU, single-file compile); wired into `make test-harness`.
 test-framework-contract:
 	$(call os01_submake,hosttests,test-framework-contract $(OS01_SUBMAKE_ARGS))
 
@@ -915,74 +869,31 @@ test-doom-assets:
 	$(call require_capability,rootfs)
 	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_assets -v
 
-# Focused hosttest for the gfx 2D API plan Task 1 — per-file device
-# ioctl/release lifecycle.  Runs the single TEST_BINS entry
-# (test_gfx_file_lifecycle.elf) and asserts the contract spelled out
-# in spec §3 (devfs_open_node attaches a node ref, devfs_ioctl_file
-# prefers ioctl_file and falls through to ioctl on -ENOTTY,
-# devfs_release_file fires release_file exactly once on the last
-# file_put, and the legacy node-only ioctl / no-op release paths
-# still work for devices without file callbacks).
+# gfx 2D API plan Task 1: per-file device ioctl/release lifecycle
+# (spec §3; full contract in hosttests/cases/test_gfx_file_lifecycle.c).
 test-gfx-file-lifecycle:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-file-lifecycle $(OS01_SUBMAKE_ARGS))
-# Focused hosttest for the gfx 2D API plan Task 2 — bounded /dev/gfx0
-# framebuffer present device.  Runs test_gfx_device.elf which
-# host-compiles the REAL kernel/driver/gfx.c against the same
-# gfx_test_runtime the lifecycle test uses, and asserts the spec §3+§4
-# contract: GFX_CREATE_VIEW size/overflow validation, reconfigure
-# rejection, 16-slot limit, GFX_GET_INFO local dims, independent
-# views, release/reopen, GFX_PRESENT happy path + sentinels outside
-# the view + row padding + overlapping views + invalid stride/reserved
-# + kernel-range pointer + missing-range-check detection + mid-fault
-# partial visibility, unconfigured-view rejection, and unknown-cmd
-# ENOTTY.  fb_get_info / fb_write_row are mocked in the test TU
-# (kernel/driver/fb.c's heavy VMA/VMM/scheduler chain is out of
-# scope for this test; the helpers are tested by the QEMU suite
-# as part of the integration tests).
+# gfx 2D API plan Task 2: bounded /dev/gfx0 present device (spec §3+§4;
+# fb_get_info/fb_write_row mocked — the VMA/VMM chain is covered by the
+# QEMU integration suites).  Full contract: hosttests/cases/test_gfx_device.c.
 test-gfx-device:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-device $(OS01_SUBMAKE_ARGS))
-# Partial-present Task 1 Step 2: host SIGSEGV bridge self-test. Links
-# ONLY the bridge + the bridge test TU (no production kernel objects).
-# Pin install/restore round-trip, PROT_NONE fault longjmps inside the
-# protected region, NULL get_jump does not fake EFAULT, and restore
-# returns the host SIGSEGV mask to the pre-install value. Must pass
-# before test-gfx-device depends on the bridge for the new rect tests.
+# Partial-present Task 1 Step 2: host SIGSEGV bridge self-test (bridge +
+# test TU only).  Must pass before test-gfx-device depends on the bridge.
 test-gfx-fault-bridge:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-fault-bridge $(OS01_SUBMAKE_ARGS))
-# Focused hosttest for the gfx 2D API plan Task 3 — libgfx client
-# lifecycle.  Runs test_gfx_client.elf which host-compiles the REAL
-# libgfx/gfx.c (open/close/get_info/set_clip/present) with HOST_CC
-# and links it through -Wl,--wrap=open,--wrap=close,--wrap=ioctl,
-# --wrap=malloc,--wrap=free so the test TU observes libgfx's libc
-# call pattern.  Asserts the spec §3+§4+§5 contract: call order in
-# gfx_open (open → CREATE_VIEW → GET_INFO → 2x malloc), ENOENT
-# normalized to ENODEV, cleanup at every failure point (handle
-# allocated before CREATE_VIEW is freed on CREATE_VIEW failure,
-# GET_INFO failure, and pixel-alloc failure), gfx_get_info(NULL)
-# returns zero with errno=EINVAL, gfx_set_clip never issues an
-# ioctl (clip is library-local state per spec §4), gfx_present
-# issues exactly one ioctl and propagates the ioctl wrapper's
-# errno.  gfx_present's request struct carries the buffer pointer
-# from the handle and the configured stride.  Kernel-side mocks
-# (gfx_test_runtime.h) are NOT in scope here — libgfx has no
-# kernel dependencies.
+# gfx 2D API plan Task 3: libgfx client lifecycle (spec §3+§4+§5; the
+# REAL libgfx/gfx.c wrapped at libc boundaries — no kernel deps).
+# Full contract: hosttests/cases/test_gfx_client.c.
 test-gfx-client:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-client $(OS01_SUBMAKE_ARGS))
-# Focused hosttest for the gfx 2D API plan Task 4 — libgfx 2D
-# primitives (pixel / line / rect / sprite).  Runs
-# test_gfx_primitives.elf which host-compiles the REAL libgfx/line.c
-# + libgfx/sprite.c and asserts spec §4: pixel/line/rect colour
-# correctness, clipping at every boundary (negative / oversized /
-# partial / fully-outside / library-local clip rectangle), Bresenham
-# in all 8 octants with both endpoints, INT32_MIN/MAX endpoints
-# that must not overflow or loop, sprite opaque / color-key=0
-# (black also transparent) / mask MSB-first / padded source and
-# mask stride.  libgfx/gfx.c is NOT compiled (the primitives test
-# exercises in-memory drawing only — no fd, no syscall).
+# gfx 2D API plan Task 4: libgfx 2D primitives (pixel/line/rect/sprite,
+# spec §4 — in-memory drawing only, no fd/no syscall).
+# Full contract: hosttests/cases/test_gfx_primitives.c.
 test-gfx-primitives:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-gfx-primitives $(OS01_SUBMAKE_ARGS))
@@ -1015,14 +926,11 @@ test-monitor-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(MONITOR
 	@echo "  [test-monitor-host] $(if $(MONITOR_CASE),CASE=$(MONITOR_CASE),full monitor group: $(MONITOR_CASES))"
 
 # ── User runtime consumer gate (monitor plan Task 5) ─────────
-# Builds the user runtime consumer (mk/components/runtime.mk: independent
-# consumer=user archive + receipt) and the user link probe, then runs
-# qemutests/monitor_runtime_test.py against the REAL target artifacts:
-# receipt.consumer=user, kernel/user variant paths differ, the probe ELF has
-# no unresolved runtime symbols (no host-symbol backfill), and unsupported
-# user providers are rejected.  hosttests passing is not a substitute for
-# this gate.  Separate from the test-monitor-host group on purpose: this is
-# a target-artifact contract, not a host fixture.
+# Target-artifact contract (NOT a host fixture; separate from
+# test-monitor-host on purpose): runs monitor_runtime_test.py against
+# the REAL consumer=user archive/receipt + link probe — no unresolved
+# runtime symbols, kernel/user variant paths differ, unsupported
+# providers rejected.
 # ── monitor thermal plan, Task 1 umbrellas ──
 # Each test-thermal-host case corresponds to a per-fixture runner in
 # hosttests/Makefile.
@@ -1194,24 +1102,13 @@ $(eval $(call boot_matrix_suite,boot-services,qemutests/boot_services.py,BOOT_SE
 
 # ── intr-x86: isolated destructive #BP / NMI acceptance ─────────
 # Task 5 (spec §9.3): the two fatal entries that cannot be exercised
-# through the ordinary boot or the kernel-selftest image get their OWN
-# kernel/image variant and their OWN single-CPU boot:
-#
-#   bp  — the kernel #BP trap (int3); the saved RIP must equal the
-#         resume label resolved from the VARIANT ELF;
-#   nmi — a REAL hardware NMI injected over QMP `inject-nmi`.
-#
-# The suite never uses the normal image and never uses the ordinary
-# kernel-selftest path.  Each case is built through the controlled
-# sub-make boundary — the probe-selection macro travels in
-# KERNEL_EXTRA_CFLAGS, an OS01_SUBMAKE_ALLOWED channel — and is judged
-# by qemutests/x86_intr_fault.py, whose parser is the only success
-# criterion (a timeout is never a pass).
-#
-# The pre-build and the run each sit on their OWN recipe line: a
-# recipe line that contains $(MAKE) is executed even under `make -n`,
-# so the python invocation must NOT share a line with it (see the
-# fix/ci-test-qemu-dryrun note in the test-qemu recipe below).
+# through the ordinary boot get their OWN kernel/image variant and
+# single-CPU boot: bp (kernel #BP; saved RIP must equal the resume label
+# resolved from the VARIANT ELF) and nmi (REAL hardware NMI over QMP
+# `inject-nmi`).  Built via the controlled sub-make (probe-selection
+# macro in KERNEL_EXTRA_CFLAGS); qemutests/x86_intr_fault.py's parser is
+# the only success criterion.  Pre-build and run stay on their OWN
+# recipe lines ($(MAKE) executes under -n; see test-qemu's note).
 INTR_X86_TIMEOUT ?= 120
 # The isolated variant paths.  The slug must match the one the profile
 # builds (mk/profiles/x86_64-clang.mk) — the build-contract bucket
@@ -1321,38 +1218,22 @@ endif
 test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	@echo "  [test-qemu] SUITE=$(SUITE) flavor=$(TEST_QEMU_FLAVOR_$(SUITE)) img=$(TEST_QEMU_IMG_$(SUITE))"
-	# The normal-image hash guard skips ``phase-0`` (the historical
-	# no-variant path), ``gfx`` (the ring-3 graphics suite) and
-	# ``resolution`` (its runner only ever copies the image into a private
-	# per-run directory and asserts the source sha256 itself, so it never
-	# writes the active image).  Every other suite runs against an isolated
-	# variant build and must therefore not modify the normal image.
-	# driver-model runs against the canonical (no-fault) image so the
-	# normal-image hash guard is skipped too; fault variant builds land
-	# under image/driver-model-<fault>/ (Task 11).
-	# terminal-present builds and runs against its own image variant
-	# (image/terminal-present/, TERM_PRESENT_TEST=1 -> USER_DEBUG=1, the
-	# suite needs the per-second [term-present] records) and uses its own
-	# QEMU launch via the dispatcher; it does not modify the normal image,
-	# so the hash guard is skipped too.
-	# gui runs against the normal image read-only (-snapshot) across SMP=1/2.
-	# intr-x86 is NOT in the skip list: the suite builds its own isolated
-	# fault variants (image/intr-x86-fault-<case>/) and never writes the
-	# normal image, so the hash guard must run and prove exactly that.
+	# Normal-image hash guard.  Skipped for suites that never write the
+	# normal image: phase-0 (no-variant path), gfx/gui/gui-desktop (run it
+	# read-only via -snapshot), resolution (copies into a private per-run
+	# dir and asserts the source sha256 itself), driver-model (canonical
+	# no-fault image; fault variants land under image/driver-model-<fault>/),
+	# monitor and terminal-present (own image variant).  intr-x86 is NOT
+	# skipped: it builds isolated fault variants and the guard proves it.
 	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ -f "$(NORMAL_IMAGE)" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.before"; \
 	fi
 	# Build step. THIS RECIPE LINE CONTAINS ``$(MAKE)`` AND IS DELIBERATELY
-	# KEPT ON ITS OWN LOGICAL LINE: GNU Make executes any recipe line that
-	# contains ``$(MAKE)`` even under ``make -n`` (so the recursive make
-	# runs and gets the ``-n`` flag propagated). Keeping ``python3
-	# qemutests/run_test.py`` off this line is what lets ``make -n
-	# test-qemu SUITE=*`` continue to dry-run cleanly — the build
-	# contract (``build_contract.sh targets``) and the
-	# MakeFailureDryRunTests fixtures both rely on the dry-run printing
-	# the recipe structure without actually launching QEMU. If you
-	# refactor this block, keep ``$(MAKE)`` and the python invocation on
-	# SEPARATE recipe lines; see commit fix/ci-test-qemu-dryrun.
+	# KEPT ON ITS OWN LOGICAL LINE: GNU make executes such lines even under
+	# ``make -n``, while ``python3 qemutests/run_test.py`` (a later line)
+	# is only printed — that split is what keeps the dry-run contract of
+	# build_contract.sh ``targets`` and MakeFailureDryRunTests intact.
+	# Keep the two on SEPARATE recipe lines; see fix/ci-test-qemu-dryrun.
 	@if [ "$(SUITE)" = "driver-model" ]; then \
 	  DRIVER_MODEL_DRIVER_CASE="$(DRIVER_MODEL_DRIVER_CASE)" \
 	  DRIVER_MATRIX_DRIVER_SMP="$(DRIVER_MATRIX_DRIVER_SMP)" \
@@ -1415,21 +1296,15 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	fi
 
 # ── USB boot M0 firmware gate (dedicated target) ──────────────
-# Invoke directly as `make test-qemu-usb-boot` (the suite is
-# deliberately NOT in the generated catalog until M1b): the runner owns
-# its private USB-only QEMU topology, proves the profile OVMF loaded
-# BOOTX64.EFI + kernel.bin from USB, and expects the stock kernel
-# (no USB MSC driver) to stop at fs_boot_mounts with rc=-19.
-#
-# The source image is normal, read-only input: hash it after its build
-# and again after the run and refuse to report a pass if QEMU touched
-# it.  The whole sandwich is one shell line so the after-hash and cmp
-# also run when the runner reports FAIL (make would otherwise stop).
-# `$status` preserves the runner verdict as the target's exit status.
-#
-# The recipe contains no `$(MAKE)`, so the -n dry-run contract is
-# preserved: the dry-run prints exactly one
-# `python3 qemutests/usb_boot.py` invocation and executes nothing.
+# Direct invocation only (deliberately NOT in the generated catalog
+# until M1b): the runner owns its private USB-only QEMU topology, proves
+# OVMF loaded BOOTX64.EFI + kernel.bin from USB, and expects the stock
+# kernel (no USB MSC driver) to stop at fs_boot_mounts rc=-19.  The
+# source image is read-only input — the hash sandwich is one shell line
+# so the after-hash and cmp run even when the runner reports FAIL, and
+# `$status` preserves the runner verdict as the exit status.  No
+# $(MAKE) in the recipe — the -n dry-run prints exactly one
+# `python3 qemutests/usb_boot.py` invocation.
 ifneq ($(filter rootfs,$(PROFILE_CAPABILITIES)),)
 $(USB_BOOT_AHCI_IMAGE): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
@@ -1573,50 +1448,9 @@ RUN_STATIC_AUDIT = python3 qemutests/run_static_audit.py --build-dir "$(BUILD_DI
 VALIDATE_KERNEL_AUDIT_TIMEOUT ?= 600
 RUN_STATIC_AUDIT_VALIDATE = python3 qemutests/run_static_audit.py --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" --timeout $(VALIDATE_KERNEL_AUDIT_TIMEOUT) --suite
 
-# The seven user-canary checks, verbatim from the pre-Task-12 recipe, kept as
-# one shell program so every check still runs exactly as before.  The adapter
-# runs it with `sh -c` (one audit command, one archived result);
-# `$(subst ','\'',...)` single-quotes the program for `sh -c`, escaping the
-# single quotes its `awk` programs contain.
-define USER_CANARY_AUDIT_BODY
-set -e; \
-echo "[user-canary] 1/7 libc.a defines guard+fail"; \
-test -n "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libc.a | awk '$$1=="__stack_chk_guard" && ($$2=="B" || $$2=="D")')" \
-  || { echo "ERROR: __stack_chk_guard not defined (B/D) in $(SYSROOT)/usr/lib/libc.a"; exit 1; }; \
-test -n "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libc.a | awk '$$1=="__stack_chk_fail" && $$2=="T"')" \
-  || { echo "ERROR: __stack_chk_fail not defined (T) in $(SYSROOT)/usr/lib/libc.a"; exit 1; }; \
-echo "[user-canary] 2/7 libk.a does NOT define them (kernel owns its own)"; \
-test -z "$$($(LLVM_NM) -P $(SYSROOT)/usr/lib/libk.a | awk '$$1=="__stack_chk_guard" || $$1=="__stack_chk_fail"')" \
-  || { echo "ERROR: libk.a must not carry SSP symbols"; exit 1; }; \
-echo "[user-canary] 3/7 user ELFs link SSP in (T __stack_chk_fail)"; \
-for e in systest canary_dump canary_smash; do \
-  $(LLVM_NM) -P $(USER_ARTIFACT_DIR)/$$e.elf \
-    | awk '$$1=="__stack_chk_fail" && $$2=="T" {f=1} END {exit !f}' \
-    || { echo "ERROR: $$e.elf has no resolved __stack_chk_fail"; exit 1; }; \
-done; \
-echo "[user-canary] 4/7 busybox.elf links SSP in"; \
-$(LLVM_NM) -P $(USER_ARTIFACT_DIR)/busybox.elf \
-  | awk '$$1=="__stack_chk_fail" && $$2=="T" {f=1} END {exit !f}' \
-  || { echo "ERROR: busybox.elf has no resolved __stack_chk_fail"; exit 1; }; \
-echo "[user-canary] 5/7 SSP flags in all three compile switches"; \
-for f in libc/Makefile user/Makefile config/busybox.config.in; do \
-  grep -q -- "-fstack-protector-strong" $$f \
-    || { echo "ERROR: $$f lacks -fstack-protector-strong"; exit 1; }; \
-done; \
-if grep -v "^LIBK_CFLAGS" libc/Makefile | grep -q -- "-fno-stack-protector"; then \
-  echo "ERROR: stray -fno-stack-protector in libc/Makefile (non-LIBK line)"; exit 1; \
-fi; \
-echo "[user-canary] 6/7 probe programs staged in rootfs manifest"; \
-for b in canary_dump canary_smash; do \
-  grep -q "/bin/$$b" $(ROOTFS_MANIFEST) \
-    || { echo "ERROR: /bin/$$b missing from $(ROOTFS_MANIFEST)"; exit 1; }; \
-done; \
-echo "[user-canary] 7/7 crt0 overlay byte-identity invariant"; \
-cmp -s user/crt0.S config/busybox.overlay/applets/crt0.S \
-  || { echo "ERROR: user/crt0.S and busybox overlay crt0.S diverged"; exit 1; }; \
-echo "[user-canary] audit passed"
-endef
-
+# The seven user-canary checks live in scripts/user_canary_audit.sh
+# (verbatim from the pre-Task-12 recipe body; the adapter runs it as one
+# audit command so every check still runs exactly as before).
 # The focused scheduler compile selector must bypass rootfs-only audits.
 ifeq ($(strip $(CASE)),)
 
@@ -1637,68 +1471,39 @@ STATIC_AUDIT_TARGETS = \
 
 .PHONY: $(STATIC_AUDIT_TARGETS) test-static test-static-prereqs
 
+# The eight standalone audits without their own retained rules are
+# table-driven: one STATIC_AUDIT_ARG_<name>
+# command line + one _static_audit_rule eval per audit (capability gate
+# and prereqs vary per audit; test-runtime and test-user-canary stay
+# explicit below — five audits / the user-canary script respectively).
+# The stored rule text keeps the "$(RUN_STATIC_AUDIT) <name> --" shape
+# that test_harness_static derives the audit list from.
+define _static_audit_rule
+.PHONY: test-$(1)
+test-$(1): $(3)
+	$$(call require_capability_opt,$(2))
+	$$(RUN_STATIC_AUDIT) $(1) -- $$(STATIC_AUDIT_ARG_$(1))
+endef
+
+STATIC_AUDIT_ARG_syscall-boundary = python3 qemutests/syscall_boundary_audit.py
+STATIC_AUDIT_ARG_header-object-audit = python3 qemutests/header_object_audit.py --include-dir "kernel/include" --sysroot "$(SYSROOT)" --runtime-inc "runtime/include" --llvm-nm "$(LLVM_NM)" --clang "$(CLANG)"
+STATIC_AUDIT_ARG_stack-frame-audit = python3 qemutests/stack_frame_audit.py --elf "$(if $(wildcard $(BUILD_DIR)/artifacts/kernel.elf),$(BUILD_DIR)/artifacts/kernel.elf,$(KERNEL_BUILD_DIR)/kernel.elf)" --llvm-objdump "$(or $(LLVM_OBJDUMP),$(AARCH64_OBJDUMP),llvm-objdump)" --limit 512
+STATIC_AUDIT_ARG_driver-model-boundary = python3 qemutests/driver_model_boundary_audit.py
+STATIC_AUDIT_ARG_gui-build-audit = python3 qemutests/gui_build_audit.py --sysroot "$(SYSROOT)" --build-dir "$(BUILD_DIR)" --repo-root "$(OS01_ROOT)" --profile "$(PROFILE)"
+STATIC_AUDIT_ARG_intr-dispatch-audit = python3 qemutests/intr_dispatch_audit.py --profile "$(PROFILE)" --elf "$(KERNEL_BUILD_DIR)/kernel.elf" --llvm-nm "$(LLVM_NM)" --llvm-objdump "$(LLVM_OBJDUMP)" --repo-root "$(OS01_ROOT)"
+STATIC_AUDIT_ARG_arch10-capacity-audit = python3 qemutests/arch10_capacity_audit.py --repo-root "$(OS01_ROOT)"
+STATIC_AUDIT_ARG_assertion-policy = python3 qemutests/assertion_policy_audit.py --repo-root "$(OS01_ROOT)" --exemptions "$(OS01_ROOT)/config/assertion-exemptions.json"
+$(eval $(call _static_audit_rule,syscall-boundary,rootfs,))
+$(eval $(call _static_audit_rule,header-object-audit,rootfs,))
+$(eval $(call _static_audit_rule,stack-frame-audit,kernel,))
+$(eval $(call _static_audit_rule,driver-model-boundary,rootfs,))
+$(eval $(call _static_audit_rule,gui-build-audit,rootfs,))
+$(eval $(call _static_audit_rule,intr-dispatch-audit,rootfs,))
+$(eval $(call _static_audit_rule,arch10-capacity-audit,rootfs,))
+$(eval $(call _static_audit_rule,assertion-policy,,))
 test-static-prereqs:
 	$(call require_capability,rootfs)
 	$(MAKE) --no-print-directory $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(KERNEL_ARTIFACT)) $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf $(ROOTFS_MANIFEST))
-
-test-syscall-boundary:
-	$(call require_capability,rootfs)
-	$(RUN_STATIC_AUDIT) syscall-boundary -- \
-	  python3 qemutests/syscall_boundary_audit.py
-
-test-header-object-audit:
-	$(call require_capability,rootfs)
-	$(RUN_STATIC_AUDIT) header-object-audit -- \
-	  python3 qemutests/header_object_audit.py \
-	  --include-dir "kernel/include" \
-	  --sysroot "$(SYSROOT)" \
-	  --runtime-inc "runtime/include" \
-	  --llvm-nm "$(LLVM_NM)" \
-	  --clang "$(CLANG)"
-
-test-stack-frame-audit:
-	$(call require_capability,kernel)
-	$(RUN_STATIC_AUDIT) stack-frame-audit -- \
-	  python3 qemutests/stack_frame_audit.py \
-	  --elf "$(if $(wildcard $(BUILD_DIR)/artifacts/kernel.elf),$(BUILD_DIR)/artifacts/kernel.elf,$(KERNEL_BUILD_DIR)/kernel.elf)" \
-	  --llvm-objdump "$(or $(LLVM_OBJDUMP),$(AARCH64_OBJDUMP),llvm-objdump)" \
-	  --limit 512
-
-test-driver-model-boundary:
-	$(call require_capability,rootfs)
-	$(RUN_STATIC_AUDIT) driver-model-boundary -- \
-	  python3 qemutests/driver_model_boundary_audit.py
-
-test-gui-build-audit:
-	$(call require_capability,rootfs)
-	$(RUN_STATIC_AUDIT) gui-build-audit -- \
-	  python3 qemutests/gui_build_audit.py \
-	    --sysroot "$(SYSROOT)" \
-	    --build-dir "$(BUILD_DIR)" \
-	    --repo-root "$(OS01_ROOT)" \
-	    --profile "$(PROFILE)"
-
-test-intr-dispatch-audit:
-	$(call require_capability,rootfs)
-	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
-	  python3 qemutests/intr_dispatch_audit.py \
-	    --profile "$(PROFILE)" \
-	    --elf "$(KERNEL_BUILD_DIR)/kernel.elf" \
-	    --llvm-nm "$(LLVM_NM)" \
-	    --llvm-objdump "$(LLVM_OBJDUMP)" \
-	    --repo-root "$(OS01_ROOT)"
-
-test-arch10-capacity-audit:
-	$(call require_capability,rootfs)
-	$(RUN_STATIC_AUDIT) arch10-capacity-audit -- \
-	  python3 qemutests/arch10_capacity_audit.py \
-	    --repo-root "$(OS01_ROOT)"
-
-test-assertion-policy:
-	$(RUN_STATIC_AUDIT) assertion-policy -- \
-	  python3 qemutests/assertion_policy_audit.py \
-	    --repo-root "$(OS01_ROOT)" \
-	    --exemptions "$(OS01_ROOT)/config/assertion-exemptions.json"
 
 test-static: test-static-prereqs
 	+$(MAKE) --no-print-directory $(STATIC_AUDIT_TARGETS)
@@ -1743,24 +1548,13 @@ test-static: _test-static-case-$(CASE)
 endif # CASE
 
 # ── test-gui-incremental: the GUI library's incremental contract ──
-#
-# The INCREMENTAL modes of the audit never spawn make: this recipe owns
-# every build step and the audit only records and compares snapshots
-# (--incremental-snapshot / --incremental-compare).  The audit's --sysroot
-# mode does spawn make exactly once, read-only, to read the profile's
-# build variables (make -f …/user_build_probe.mk --no-print-directory
-# gui-audit-profile-vars).
-#
-# The four phases mirror the four assertions:
-#
-#   noop    a repeated build with no source change must not recompile
-#   touch   touching gui_input.h must rebuild the dependents and relink
-#   install install must clear orphaned files under staging/gui
-#   publish a new generation must be clean, the old ones preserved
-#
-# It is deliberately NOT part of test-static: the publish phase allocates a
-# new sysroot generation, so running it inside a static-audit bucket would
-# contend with the publisher's lock.
+# The INCREMENTAL audit modes never spawn make: this recipe owns every
+# build step; the audit only records/compares snapshots.  Phases:
+# noop (rebuild without recompile) / touch (public-header edits rebuild
+# dependents) / install (staging orphans cleared) / publish (new
+# generation clean, old preserved) / ps2rekey (phase 5 below).
+# Deliberately NOT in test-static: publish allocates a new sysroot
+# generation and would contend with the publisher's lock.
 GUI_INCREMENTAL_AUDIT = python3 qemutests/gui_build_audit.py \
 	--build-dir "$(BUILD_DIR)" --repo-root "$(OS01_ROOT)" --profile "$(PROFILE)"
 
@@ -1806,28 +1600,16 @@ test-gui-incremental: $(SYSROOT_STAMP)
 	$(MAKE) --no-print-directory sysroot
 	$(GUI_INCREMENTAL_AUDIT) --incremental-compare "$(BUILD_DIR)/incr-publish.json" --incremental-phase publish
 	# Phase 5 edits the PUBLISHED decoder header, republishes and checks
-	# that the new generation carries the edit.  Two properties make this
-	# phase repeatable instead of history-dependent:
-	#
-	# 1. The probe edit carries a per-run nonce.  A constant marker made
-	#    every run publish byte-identical header content, so the audit's
-	#    "the new generation must publish content that no earlier
-	#    generation published" check collided with the generations of the
-	#    earlier runs and failed from the second run onwards.  A unique
-	#    edit is also what a real header edit looks like.
-	# 2. The EXIT trap restores the source header AND republishes the
-	#    sysroot.  It then verifies that the source, the staging tree and
-	#    the CURRENT sysroot hold the same header content; only then may
-	#    the phase report success.  A failed restore, a failed republish
-	#    or a mismatch makes the phase fail (non-zero) and prints the
-	#    republish log path — the probe content must never survive in the
-	#    active build state.  (Historical generations keep the probe
-	#    marker on purpose: they are immutable evidence.)
-	# 3. The phase is SERIAL only: it mutates the shared source header and
-	#    uses a fixed backup path, so concurrent runs are not supported.
-	#    The nonce comes from /proc/sys/kernel/random/uuid; if that
-	#    source is unavailable the phase fails explicitly instead of
-	#    falling back to a wall-clock read that may repeat.
+	# that the new generation carries the edit.  Repeatability contract:
+	# (1) the probe edit carries a per-run nonce — a constant marker
+	# collides with earlier generations' content from the second run on;
+	# (2) the EXIT trap restores the source header AND republishes the
+	# sysroot, then verifies source/staging/current-sysroot agree — a
+	# mismatch fails the phase and prints the republish log (the probe
+	# content must never survive in the active build state; historical
+	# generations keep it as immutable evidence); (3) SERIAL only — the
+	# phase mutates the shared source header via a fixed backup path, and
+	# a missing /proc/sys/kernel/random/uuid fails explicitly.
 	@echo "  [test-gui-incremental] phase 5/5: modifying the published PS2 header must rekey the generation and rebuild the consumers"
 	@+$(SHELL) -ec '\
 	  hdr=libgui/include/gui/gui_input_ps2.h; \
@@ -1904,7 +1686,9 @@ test-kernel-canary-contract:
 test-user-canary: $(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf $(ROOTFS_MANIFEST))
 	$(call require_capability,rootfs)
 	@$(RUN_STATIC_AUDIT) user-canary -- \
-	  sh -c '$(subst ','\'',$(USER_CANARY_AUDIT_BODY))'
+	  env LLVM_NM="$(LLVM_NM)" SYSROOT="$(SYSROOT)" \
+	      USER_ARTIFACT_DIR="$(USER_ARTIFACT_DIR)" ROOTFS_MANIFEST="$(ROOTFS_MANIFEST)" \
+	    bash $(OS01_ROOT)/scripts/user_canary_audit.sh
 
 # This target builds and boots only the selftest-scoped image.  In particular
 # it never uses the ordinary image, and it refuses a combined syscall/selftest
@@ -2290,110 +2074,44 @@ test-libc-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(LIBC_CASE_
 	$(if $(LIBC_CASE_VALID),,$(error unknown LIBC_CASE='$(LIBC_CASE_RAW)'; valid: $(LIBC_HOST_CASES), all))
 	@echo "  [test-libc-host] LIBC_CASE=$(LIBC_CASE_EFFECTIVE)"
 
-# RED build of the path group (T14 evidence): expected to fail — that
-# failure is the transcript.  RED-1 compiles the path group against the
-# pre-T14 realpath stub; RED-2 reproduces the pre-T14 link hole
-# (execl/execlp/execle undefined) against a libc.a copy with the T14
-# member deleted, with a CONTROL link against the pristine archive.
-# Full narrative: docs/superpowers/plans/2026-11-08-libc-completion.md.
+# RED builds of the libc completion groups (T14/T15 evidence): expected
+# to fail — that failure is the transcript.  RED-1 compiles the group
+# against the pre-task source; RED-2 reproduces the pre-task link hole
+# through the shared scripts/libc_red_link.sh pipeline (delete the task's
+# archive members, CONTROL link against the pristine archive, RED link
+# against the hole).  Full narrative:
+# docs/superpowers/plans/2026-11-08-libc-completion.md.
 .PHONY: test-libc-path-red
 test-libc-path-red:
 	@echo "=== RED-1 (behaviour): realpath was a stub that answered NULL ==="
-	@set +e; \
-	  $(call os01_submake_cmd,hosttests,test-libc-path-red $(OS01_SUBMAKE_ARGS)); \
-	  rc_run=$$?; \
+	@$(call os01_submake_cmd,hosttests,test-libc-path-red $(OS01_SUBMAKE_ARGS)); rc_run=$$?; \
 	  echo "RED-1 exit code: $$rc_run"; \
 	  echo "=== RED-2 (link): execl/execlp/execle had NO definition before T14 ==="; \
-	  tmp=$$(mktemp -d); \
-	  cp $(SYSROOT)/usr/lib/libc.a $$tmp/libc.a || exit 1; \
-	  echo "--- the pre-T14 tree had no libc/unistd/execl.c at all:"; \
-	  git -C $(OS01_ROOT) ls-tree b7c33ba6 libc/unistd/ | \
-	    awk '{print $$4}' | grep -c '^execl\.c$$'; \
-	  echo "--- deleting the archive member that T14 added (execl.o):"; \
-	  $(LLVM_AR) d $$tmp/libc.a execl.o; \
-	  echo "--- execl/execlp/execle left in the archive (expected: none):"; \
-	  $(LLVM_NM) -P $$tmp/libc.a | \
-	    awk '$$1=="execl" || $$1=="execlp" || $$1=="execle"'; \
-	  printf '%s\n' '#include <unistd.h>' \
-	    'int main(void) { execl("/bin/sh", "sh", (char *)0); return 0; }' > $$tmp/probe.c; \
-	  $(EFFECTIVE_CC) --sysroot=$(SYSROOT) -ffreestanding -fno-pic -fno-pie \
-	    -I$(SYSROOT)/usr/include -c $$tmp/probe.c -o $$tmp/probe.o || exit 1; \
-	  echo "--- CONTROL: link the probe against the PRISTINE archive:"; \
-	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
-	    -L$(SYSROOT)/usr/lib -o $$tmp/probe_ctrl.elf \
-	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
-	    $$tmp/probe.o -lc; \
-	  rc_ctrl=$$?; \
-	  echo "CONTROL exit code: $$rc_ctrl"; \
-	  echo "--- RED-2: link the probe against the archive WITHOUT execl.o:"; \
-	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
-	    -L$$tmp -o $$tmp/probe_red.elf \
-	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
-	    $$tmp/probe.o -lc; \
-	  rc_link=$$?; \
-	  echo "RED-2 exit code: $$rc_link"; \
-	  rm -rf $$tmp; \
-	  if [ $$rc_run -eq 0 ]; then \
-	    echo "ERROR: the behavioural RED run passed"; exit 1; fi; \
-	  if [ $$rc_ctrl -ne 0 ]; then \
-	    echo "ERROR: the CONTROL link failed — the RED proves nothing"; exit 1; fi; \
-	  if [ $$rc_link -eq 0 ]; then \
-	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
-	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
-	  exit 1
+	  env SYSROOT="$(SYSROOT)" OS01_ROOT="$(OS01_ROOT)" \
+	      LLVM_AR="$(LLVM_AR)" LLVM_NM="$(LLVM_NM)" \
+	      EFFECTIVE_CC="$(EFFECTIVE_CC)" TARGET_LD="$(TARGET_LD)" \
+	      USER_BUILD_DIR="$(USER_BUILD_DIR)" \
+	    bash $(OS01_ROOT)/scripts/libc_red_link.sh \
+	      "$$rc_run" b7c33ba6 libc/unistd execl.c \
+	      "execl.o" 'execl|execlp|execle' \
+	      '#include <unistd.h>' \
+	      'int main(void) { execl("/bin/sh", "sh", (char *)0); return 0; }'
 
-# RED build of the dir group (T15 evidence), same protocol as the path
-# group: RED-1 compiles against the pre-T15 dirent.c (no type check, no
-# errno, no d_off); RED-2 deletes the T15 archive members (scandir.o,
-# dirent.o) and links a probe, with a CONTROL link against the pristine
-# archive.
 .PHONY: test-libc-dir-red
 test-libc-dir-red:
 	@echo "=== RED-1 (behaviour): the pre-T15 dirent.c has no type check, no errno and no d_off ==="
-	@set +e; \
-	  $(call os01_submake_cmd,hosttests,test-libc-dir-red $(OS01_SUBMAKE_ARGS)); \
-	  rc_run=$$?; \
+	@$(call os01_submake_cmd,hosttests,test-libc-dir-red $(OS01_SUBMAKE_ARGS)); rc_run=$$?; \
 	  echo "RED-1 (sub-make) exit code: $$rc_run"; \
 	  echo "=== RED-2 (link): dirfd/fdopendir/scandir/alphasort had NO definition before T15 ==="; \
-	  tmp=$$(mktemp -d); \
-	  cp $(SYSROOT)/usr/lib/libc.a $$tmp/libc.a || exit 1; \
-	  echo "--- the pre-T15 tree had no libc/stdlib/scandir.c at all:"; \
-	  git -C $(OS01_ROOT) ls-tree 7aeb732a libc/stdlib/ | \
-	    awk '{print $$4}' | grep -c '^scandir\.c$$'; \
-	  echo "--- deleting the archive members that T15 added (scandir.o, dirent.o):"; \
-	  $(LLVM_AR) d $$tmp/libc.a scandir.o dirent.o; \
-	  echo "--- dirfd/fdopendir/scandir/alphasort left in the archive (expected: none):"; \
-	  $(LLVM_NM) -P $$tmp/libc.a | \
-	    awk '$$1=="dirfd" || $$1=="fdopendir" || $$1=="scandir" || $$1=="alphasort"'; \
-	  printf '%s\n' '#include <dirent.h>' \
-	    'int main(void) { DIR *d = 0; struct dirent **l = 0;' \
-	    '  (void)dirfd(d); (void)fdopendir(0);' \
-	    '  (void)scandir("/", &l, 0, alphasort); return 0; }' > $$tmp/probe.c; \
-	  $(EFFECTIVE_CC) --sysroot=$(SYSROOT) -ffreestanding -fno-pic -fno-pie \
-	    -I$(SYSROOT)/usr/include -c $$tmp/probe.c -o $$tmp/probe.o || exit 1; \
-	  echo "--- CONTROL: link the probe against the PRISTINE archive:"; \
-	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
-	    -L$(SYSROOT)/usr/lib -o $$tmp/probe_ctrl.elf \
-	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
-	    $$tmp/probe.o -lc; \
-	  rc_ctrl=$$?; \
-	  echo "CONTROL exit code: $$rc_ctrl"; \
-	  echo "--- RED-2: link the probe against the archive WITHOUT the T15 members:"; \
-	  $(TARGET_LD) -m elf_x86_64 -static -no-pie -T user/linker.ld \
-	    -L$$tmp -o $$tmp/probe_red.elf \
-	    $(USER_BUILD_DIR)/obj/crt0.o $(USER_BUILD_DIR)/obj/sigreturn_trampoline.o \
-	    $$tmp/probe.o -lc; \
-	  rc_link=$$?; \
-	  echo "RED-2 exit code: $$rc_link"; \
-	  rm -rf $$tmp; \
-	  if [ $$rc_run -eq 0 ]; then \
-	    echo "ERROR: the behavioural RED run passed"; exit 1; fi; \
-	  if [ $$rc_ctrl -ne 0 ]; then \
-	    echo "ERROR: the CONTROL link failed — the RED proves nothing"; exit 1; fi; \
-	  if [ $$rc_link -eq 0 ]; then \
-	    echo "ERROR: the link RED passed — the hole is not reproduced"; exit 1; fi; \
-	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
-	  exit 1
+	  env SYSROOT="$(SYSROOT)" OS01_ROOT="$(OS01_ROOT)" \
+	      LLVM_AR="$(LLVM_AR)" LLVM_NM="$(LLVM_NM)" \
+	      EFFECTIVE_CC="$(EFFECTIVE_CC)" TARGET_LD="$(TARGET_LD)" \
+	      USER_BUILD_DIR="$(USER_BUILD_DIR)" \
+	    bash $(OS01_ROOT)/scripts/libc_red_link.sh \
+	      "$$rc_run" 7aeb732a libc/stdlib scandir.c \
+	      "scandir.o dirent.o" 'dirfd|fdopendir|scandir|alphasort' \
+	      '#include <dirent.h>' \
+	      'int main(void) { DIR *d = 0; struct dirent **l = 0; (void)dirfd(d); (void)fdopendir(0); (void)scandir("/", &l, 0, alphasort); return 0; }'
 
 # ── libc completion archive audit (T1) ────────────────────────────
 # make PROFILE=x86_64-clang test-libc-api-audit

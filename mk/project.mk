@@ -491,6 +491,12 @@ define require_capability
 $(if $(filter $(1),$(PROFILE_CAPABILITIES)),,$(error PROFILE='$(PROFILE)' lacks capability '$(1)'))
 endef
 
+# Same gate but a no-op when the capability name is empty (generated
+# rules that pass an optional capability).
+define require_capability_opt
+$(if $(1),$(call require_capability,$(1)))
+endef
+
 # ── Controlled recursive Make ──────────────────────────────────
 # GNU Make's MFLAGS contains only options, never command-line variable
 # definitions.  Using it directly avoids trying to parse MAKEFLAGS ourselves:

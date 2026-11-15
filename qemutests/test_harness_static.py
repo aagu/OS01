@@ -369,8 +369,13 @@ class MakefileWiringTests(unittest.TestCase):
 # keeps working when an audit is added or renamed.
 # ───────────────────────────────────────────────────────────────────
 
+# Explicit audits appear as "$(RUN_STATIC_AUDIT) <name> --" in run.mk;
+# the table-driven standalone audits appear as STATIC_AUDIT_ARG_<name>
+# variable definitions feeding the generated rules.  Both spellings are
+# the audit list.
 _AUDIT_SUITE_RE = re.compile(
     r"\$\(RUN_STATIC_AUDIT(?:_VALIDATE)?\)\s+([A-Za-z0-9_-]+)\s+--")
+_TABLE_AUDIT_RE = re.compile(r"(?m)^STATIC_AUDIT_ARG_([A-Za-z0-9_-]+)\s*=")
 _DOC_COUNT_PATTERNS = (r"\((\d+) audits\)", r"(\d+) 项静态审计")
 
 
@@ -383,7 +388,9 @@ class StaticAuditDocTests(unittest.TestCase):
             encoding="utf-8")
         cls.doc = (ROOT / "docs" / "build" / "build.md").read_text(
             encoding="utf-8")
-        cls.audits = sorted(set(_AUDIT_SUITE_RE.findall(cls.mk)))
+        cls.audits = sorted(
+            set(_AUDIT_SUITE_RE.findall(cls.mk))
+            | set(_TABLE_AUDIT_RE.findall(cls.mk)))
 
     def test_the_bucket_runs_more_than_one_audit(self) -> None:
         # Guards the derivation itself: if the Makefile wiring changed so
