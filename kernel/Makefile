@@ -585,7 +585,7 @@ endif
 # Helper: non-empty → 1, empty → 0
 bool = $(if $1,1,0)
 
-LOG_TARGET ?= serial
+LOG_TARGET ?= both
 ALL_CFLAGS += -DLOG_TARGET_SERIAL=$(call bool,$(filter serial both,$(LOG_TARGET)))
 ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
 

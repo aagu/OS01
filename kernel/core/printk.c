@@ -143,56 +143,42 @@ void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor,
     putchar_at_snap(NULL, col, row, FRcolor, BKcolor, c);
 }
 
-int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
+/* Render `len` bytes from `str` to the framebuffer under `Pos.lock`.
+ * Caller MUST hold `Pos.lock`.  Returns 0 on success, or a negative
+ * errno if no framebuffer writer lease is available (e.g. not yet
+ * mapped, transitioning, or surrendered to userspace). */
+static int color_write_fb_locked(unsigned int FRcolor, unsigned int BKcolor,
+				 const char *str, int len)
 {
-	int i = 0;
 	int count = 0;
 	int line = 0;
-	va_list args;
-	uint64_t flags = spin_lock_irqsave(&Pos.lock);
-
-	va_start(args, fmt);
-	i = vsprintf(buf_color, fmt, args);
-	va_end(args);
-
 	const struct fb_snapshot *snap = NULL;
 #if PRINTK_FB_WRITER_LEASE
 	fb_lease_t lease;
 	int lrc = fb_writer_begin(&lease, 0);
 	if (lrc < 0) {
-		// No framebuffer writer lease (transitioning, not yet mapped,
-		// or failed): continue on serial only, leaving the screen
-		// cursor untouched.  Drop Pos.lock BEFORE taking serial_lock
-		// to prevent AB-BA deadlock.
-		spin_unlock_irqrestore(&Pos.lock, flags);
-		uint64_t sf = spin_lock_irqsave(&serial_lock);
-		for(count = 0; count < i; count++)
-		{
-			write_serial_unlocked((unsigned char)*(buf_color + count));
-		}
-		spin_unlock_irqrestore(&serial_lock, sf);
-		return i;
+		return lrc;
 	}
 	snap = &lease.snapshot;
 #endif
 
-	for(count = 0;count < i || line;count++)
+	for(count = 0; count < len || line; count++)
 	{
 		if(line > 0)
 		{
 			count--;
 			goto Label_tab;
 		}
-		if((unsigned char)*(buf_color + count) == '\n')
+		if((unsigned char)*(str + count) == '\n')
 		{
 			Pos.YPosition++;
 			Pos.XPosition = 0;
 		}
-		else if((unsigned char)*(buf_color + count) == '\r')
+		else if((unsigned char)*(str + count) == '\r')
 		{
 			Pos.XPosition = 0;
 		}
-		else if((unsigned char)*(buf_color + count) == '\b')
+		else if((unsigned char)*(str + count) == '\b')
 		{
 			Pos.XPosition--;
 			if(Pos.XPosition < 0)
@@ -204,7 +190,7 @@ int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
 			}
 			putchark_snap(snap, FRcolor , BKcolor , ' ');
 		}
-		else if((unsigned char)*(buf_color + count) == '\t')
+		else if((unsigned char)*(str + count) == '\t')
 		{
 			line = ((Pos.XPosition + 8) & ~(8 - 1)) - Pos.XPosition;
 
@@ -215,7 +201,7 @@ Label_tab:
 		}
 		else
 		{
-			putchark_snap(snap, FRcolor , BKcolor , (unsigned char)*(buf_color + count));
+			putchark_snap(snap, FRcolor , BKcolor , (unsigned char)*(str + count));
 			Pos.XPosition++;
 		}
 
@@ -245,7 +231,46 @@ Label_tab:
 #if PRINTK_FB_WRITER_LEASE
 	fb_writer_end(&lease);
 #endif
+	return 0;
+}
+
+int printk_fb_write(unsigned int FRcolor, unsigned int BKcolor,
+		    const char *buf, int len)
+{
+	if (!buf || len <= 0)
+		return 0;
+	uint64_t flags = spin_lock_irqsave(&Pos.lock);
+	int rc = color_write_fb_locked(FRcolor, BKcolor, buf, len);
 	spin_unlock_irqrestore(&Pos.lock, flags);
+	return rc;
+}
+
+int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...)
+{
+	int i = 0;
+	int count = 0;
+	va_list args;
+	uint64_t flags = spin_lock_irqsave(&Pos.lock);
+
+	va_start(args, fmt);
+	i = vsprintf(buf_color, fmt, args);
+	va_end(args);
+
+	int rc = color_write_fb_locked(FRcolor, BKcolor, buf_color, i);
+	spin_unlock_irqrestore(&Pos.lock, flags);
+
+	if (rc < 0) {
+		// No framebuffer writer lease (transitioning, not yet mapped,
+		// or failed): continue on serial only, leaving the screen
+		// cursor untouched.  Drop Pos.lock BEFORE taking serial_lock
+		// to prevent AB-BA deadlock.
+		uint64_t sf = spin_lock_irqsave(&serial_lock);
+		for(count = 0; count < i; count++)
+		{
+			write_serial_unlocked((unsigned char)*(buf_color + count));
+		}
+		spin_unlock_irqrestore(&serial_lock, sf);
+	}
 
 	return i;
 }

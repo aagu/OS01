@@ -50,7 +50,7 @@ MEMORY=512M
 SMP ?= 2
 
 # ── Log output target (serial | fb | both) ───────────────
-LOG_TARGET ?= serial
+LOG_TARGET ?= both
 DEBUG      ?=
 KERNEL_SELFTEST ?=
 export KERNEL_SELFTEST

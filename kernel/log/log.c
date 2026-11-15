@@ -51,11 +51,15 @@ static int level_to_color(int level)
 // serial_lock across the whole buffer to prevent IRQ handlers
 // from interleaving their own write_serial() calls into the
 // log line.
-#if LOG_TARGET_SERIAL
-static void write_serial_buf_locked(const char *buf, int len)
+#if LOG_TARGET_SERIAL || LOG_TARGET_FB
+static void write_serial_buf(const char *buf, int len)
 {
+    // Hold serial_lock across the whole log line so IRQ handlers can't
+    // interleave their own bytes into it.
+    uint64_t sf = spin_lock_irqsave(&serial_lock);
     for (int i = 0; i < len; i++)
         write_serial_unlocked((unsigned char)buf[i]);
+    spin_unlock_irqrestore(&serial_lock, sf);
 }
 #endif
 
@@ -80,18 +84,18 @@ void _log_writev(int level, const char *fmt, va_list args)
         len = (int)sizeof(log_buf) - 1;
 
 #if LOG_TARGET_SERIAL
-    {
-        // Hold serial_lock across the whole log line so IRQ
-        // handlers can't interleave their own bytes into it.
-        // write_serial_buf_locked() uses write_serial_unlocked
-        // to avoid re-locking deadlock.
-        uint64_t sf = spin_lock_irqsave(&serial_lock);
-        write_serial_buf_locked(log_buf, len);
-        spin_unlock_irqrestore(&serial_lock, sf);
-    }
+    write_serial_buf(log_buf, len);
 #endif
 #if LOG_TARGET_FB
-    color_printk(level_to_color(level), BLACK, "%s", log_buf);
+    {
+        int fb_rc = printk_fb_write(level_to_color(level), BLACK, log_buf, len);
+#if !LOG_TARGET_SERIAL
+        if (fb_rc < 0)
+            write_serial_buf(log_buf, len);
+#else
+        (void)fb_rc;
+#endif
+    }
 #endif
 
     spin_unlock_irqrestore(&log_lock, flags);
