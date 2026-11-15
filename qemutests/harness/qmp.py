@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
 import json
 import socket
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from qemutests.harness.ppm import Surface, parse_ppm
 
@@ -20,6 +21,7 @@ class QmpClient:
         self.timeout = timeout
         self.sock: Optional[socket.socket] = None
         self._buffer = b""
+        self._events: deque[dict] = deque(maxlen=64)
         self.transcript: Optional[Path] = None
         self._transcript_fp = None
 
@@ -55,7 +57,7 @@ class QmpClient:
             raise TimeoutError("QMP total deadline expired")
         return remaining
 
-    def _read_message(self, deadline: float) -> dict:
+    def _next_json_message(self, deadline: float) -> dict:
         if self.sock is None:
             raise RuntimeError("QMP not connected")
         while True:
@@ -69,9 +71,35 @@ class QmpClient:
                     raise RuntimeError("QMP message too large")
                 continue
             line, self._buffer = self._buffer.split(b"\n", 1)
-            msg = json.loads(line)
+            return json.loads(line)
+
+    def _read_message(self, deadline: float) -> dict:
+        while True:
+            msg = self._next_json_message(deadline)
             if "event" not in msg:
                 return msg
+            self._events.append(msg)
+
+    def wait_event(
+        self,
+        name: str,
+        match: Optional[Callable[[dict], bool]] = None,
+        *,
+        deadline: float | None = None,
+    ) -> dict:
+        """Wait for a QMP async event matching ``name`` and optional ``match(event)``."""
+        if deadline is None:
+            deadline = time.monotonic() + self.timeout
+        for idx, ev in enumerate(self._events):
+            if ev.get("event") == name and (match is None or match(ev)):
+                del self._events[idx]
+                return ev
+        while True:
+            msg = self._next_json_message(deadline)
+            if "event" in msg:
+                if msg.get("event") == name and (match is None or match(msg)):
+                    return msg
+                self._events.append(msg)
 
     def execute(self, cmd: str, args: Optional[dict] = None, *,
                 deadline: float | None = None) -> dict:
@@ -101,9 +129,14 @@ class QmpClient:
         data = Path(path).read_bytes()
         return parse_ppm(data)
 
-    def input_events(self, events: List[dict]) -> None:
+    def input_events(
+        self, events: List[dict], *, deadline: float | None = None
+    ) -> None:
         self._record_transcript(events)
-        self.execute("input-send-event", {"events": events})
+        if deadline is not None:
+            self.execute("input-send-event", {"events": events}, deadline=deadline)
+        else:
+            self.execute("input-send-event", {"events": events})
 
     def set_transcript(self, path: Path) -> None:
         self.close_transcript()

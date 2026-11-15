@@ -542,6 +542,82 @@ def prepare_image(
     return info["esp_guid"]
 
 
+def inject_root_probe(image: Path, probe_elf: Path, guest_basename: str) -> None:
+    """Inject ``probe_elf`` into ``image``'s ext2 root at ``/bin/<guest_basename>`` (0100755) and verify readback."""
+    if not guest_basename or guest_basename in (".", "..") or not re.fullmatch(
+        r"[A-Za-z0-9._-]+", guest_basename
+    ):
+        raise ValueError(f"invalid guest_basename: {guest_basename!r}")
+    if not probe_elf.is_file():
+        raise FileNotFoundError(f"probe_elf does not exist: {probe_elf}")
+    probe_bytes = probe_elf.read_bytes()
+    if not probe_bytes:
+        raise ValueError(f"probe_elf is empty: {probe_elf}")
+
+    info = read_gpt_info(image)
+    img_size = image.stat().st_size
+    root_offset = int(info["root_offset"])
+    root_size = int(info["root_size"])
+    if root_offset < 0 or root_size <= 0 or root_offset + root_size > img_size:
+        raise ValueError(
+            f"root partition bounds invalid: offset={root_offset} size={root_size} img_size={img_size}"
+        )
+    if len(probe_bytes) >= root_size:
+        raise ValueError(
+            f"probe_elf ({len(probe_bytes)} bytes) exceeds root partition size ({root_size} bytes)"
+        )
+
+    guest_path = f"/bin/{guest_basename}"
+    with tempfile.TemporaryDirectory(prefix="usb-probe-inject-") as tmpdir:
+        root_img = Path(tmpdir) / "root.ext2"
+        with image.open("rb") as src_f:
+            src_f.seek(root_offset)
+            remaining = root_size
+            with root_img.open("wb") as out_f:
+                while remaining > 0:
+                    chunk = src_f.read(min(1 << 20, remaining))
+                    if not chunk:
+                        raise RuntimeError("unexpected EOF extracting ext2 partition")
+                    out_f.write(chunk)
+                    remaining -= len(chunk)
+
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", f"rm {guest_path}"],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", f"write {probe_elf} {guest_path}"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["debugfs", "-w", str(root_img), "-R", f"set_inode_field {guest_path} mode 0100755"],
+            check=True,
+            capture_output=True,
+        )
+        verify = subprocess.run(
+            ["debugfs", str(root_img), "-R", f"cat {guest_path}"],
+            check=True,
+            capture_output=True,
+        )
+        if verify.stdout != probe_bytes:
+            raise RuntimeError(f"{guest_path} readback mismatch")
+
+        if root_img.stat().st_size != root_size:
+            raise RuntimeError("ext2 partition size changed unexpectedly")
+
+        with root_img.open("rb") as in_f, image.open("r+b") as dst_f:
+            dst_f.seek(root_offset)
+            remaining = root_size
+            while remaining > 0:
+                chunk = in_f.read(min(1 << 20, remaining))
+                if not chunk:
+                    raise RuntimeError("unexpected EOF reinserting ext2 partition")
+                dst_f.write(chunk)
+                remaining -= len(chunk)
+
+
 def prepare_persistence_image(
     source: Path,
     destination: Path,
@@ -570,21 +646,6 @@ def prepare_persistence_image(
             check=False,
             capture_output=True,
         )
-        subprocess.run(
-            ["debugfs", "-w", str(root_img), "-R", "rm /bin/usb-boot-probe"],
-            check=False,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["debugfs", "-w", str(root_img), "-R", f"write {probe_elf} /bin/usb-boot-probe"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["debugfs", "-w", str(root_img), "-R", "set_inode_field /bin/usb-boot-probe mode 0100755"],
-            check=True,
-            capture_output=True,
-        )
 
         if root_img.stat().st_size != info["root_size"]:
             raise RuntimeError("ext2 partition size changed unexpectedly")
@@ -599,6 +660,7 @@ def prepare_persistence_image(
                 dst_f.write(chunk)
                 remaining -= len(chunk)
 
+    inject_root_probe(destination, probe_elf, "usb-boot-probe")
     return esp_guid
 
 

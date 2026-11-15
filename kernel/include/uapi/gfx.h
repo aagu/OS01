@@ -158,7 +158,7 @@ _Static_assert(offsetof(gfx_present_rect_req_t, h)       == 28, "h offset");
  *   EBUSY           a lease already exists.
  *   EAGAIN          the display is not initialised yet.
  *   EIO             the display backend has failed.
- *   ENODEV          this kernel has no input route (no PS/2 chain). */
+ *   ENODEV          this kernel has no input route. */
 typedef struct {
     int32_t  keyboard_fd;
     int32_t  mouse_fd;

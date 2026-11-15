@@ -13,9 +13,9 @@ struct boot_context;
 // route through devfs.  Lives under arch/x86_64 because the drivers
 // themselves are x86-only (port-I/O keyboard, PS/2 mouse, x86 framebuffer).
 //
-// The mouse branch is gated on subsys_status("mouse") == 1 because the
-// mouse probe only succeeds when the i8042 controller is functional —
-// QEMU configurations without a PS/2 mouse leave the subsystem unset.
+// The mouse branch is gated on subsys_status("mouse") == 1 or
+// xhci_hid_mouse_bound() so USB-only mice still get /dev/mouse when i8042
+// has no PS/2 mouse port.
 //
 // Call order in kernel_main:  fs_boot_prepare(); pty_init();
 //                             x86_64_boot_device_nodes(); fs_boot_mounts();

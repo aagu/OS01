@@ -1176,7 +1176,238 @@ static void test_bind_isolates_held_modifiers_until_fresh_press(void)
     }
 }
 
+static input_ps2_frame_t make_usb_frame(uint16_t key, uint8_t is_make)
+{
+    input_ps2_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.physical_key = key;
+    f.is_make = is_make;
+    if (key & INPUT_PS2_KEY_E0) {
+        f.bytes[0] = 0xE0;
+        f.bytes[1] = (uint8_t)((key & 0x7Fu) | (is_make ? 0x00u : 0x80u));
+        f.length = 2;
+    } else {
+        f.bytes[0] = (uint8_t)((key & 0x7Fu) | (is_make ? 0x00u : 0x80u));
+        f.length = 1;
+    }
+    return f;
+}
+
+static input_ps2_frame_t make_usb_printscreen_frame(uint8_t is_make)
+{
+    input_ps2_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.is_make = is_make;
+    f.is_special = 1;
+    f.length = 4;
+    if (is_make) {
+        f.bytes[0] = 0xE0; f.bytes[1] = 0x2A;
+        f.bytes[2] = 0xE0; f.bytes[3] = 0x37;
+    } else {
+        f.bytes[0] = 0xE0; f.bytes[1] = 0xB7;
+        f.bytes[2] = 0xE0; f.bytes[3] = 0xAA;
+    }
+    return f;
+}
+
+static void test_usb_batch_ps2_partial(void)
+{
+    uint8_t buf[16];
+    input_ps2_frame_t usb_a = make_usb_frame(0x1E, 1);
+
+    /* PS/2 starts E0, USB submits complete 1E, PS/2 finishes 1D. */
+    route_reset();
+    feed1(0xE0);
+    input_route_keyboard_usb_frames(&usb_a, 1);
+    assert_eq(1, input_route_test_normal_kbd_bytes());
+    feed1(0x1D);
+    assert_eq(3, input_route_test_normal_kbd_bytes());
+    assert_eq(3, input_route_test_normal_read_kbd(buf, sizeof(buf)));
+    assert_eq(0x1E, buf[0]);
+    assert_eq(0xE0, buf[1]);
+    assert_eq(0x1D, buf[2]);
+    assert_eq(INPUT_ROUTE_MOD_CTRL, input_route_test_normal_kbd_modifiers());
+
+    /* Lease switch: PS/2 partial sequence across bind triggers DESYNC,
+     * and USB batch does not clear PS/2's existing DESYNC. */
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    feed1(0xE0);
+    assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
+    input_route_keyboard_usb_frames(&usb_a, 1);
+    assert_eq(0, input_route__test_desync_active());
+    assert_eq(1, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(0x1E, buf[0]);
+    feed1(0x1D);
+    assert_eq(1, input_route__test_desync_active());
+    assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
+    input_ps2_frame_t usb_a_rel = make_usb_frame(0x1E, 0);
+    input_route_keyboard_usb_frames(&usb_a_rel, 1);
+    assert_eq(1, input_route__test_desync_active());
+    assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
+}
+
+static void test_dual_owners(void)
+{
+    uint8_t buf[16];
+    mouse_event_t mev;
+
+    /* 1. PS/2 Ctrl + USB Ctrl: 1 make, first release silent, last release 1 break. */
+    route_reset();
+    input_ps2_frame_t usb_ctrl_make = make_usb_frame(0x1D, 1);
+    input_ps2_frame_t usb_ctrl_break = make_usb_frame(0x1D, 0);
+    feed1(0x1D);
+    assert_eq(1, input_route_test_normal_kbd_bytes());
+    input_route_keyboard_usb_frames(&usb_ctrl_make, 1);
+    assert_eq(1, input_route_test_normal_kbd_bytes());
+    feed1(0x9D);
+    assert_eq(1, input_route_test_normal_kbd_bytes());
+    assert_eq(INPUT_ROUTE_MOD_CTRL, input_route_test_normal_kbd_modifiers());
+    input_route_keyboard_usb_frames(&usb_ctrl_break, 1);
+    assert_eq(2, input_route_test_normal_kbd_bytes());
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    assert_eq(2, input_route_test_normal_read_kbd(buf, sizeof(buf)));
+    assert_eq(0x1D, buf[0]);
+    assert_eq(0x9D, buf[1]);
+
+    /* 2. PS/2 typematic repeat still goes to NORMAL. */
+    feed1(0x1E);
+    feed1(0x1E);
+    assert_eq(2, input_route_test_normal_kbd_bytes());
+    assert_eq(2, input_route_test_normal_read_kbd(buf, sizeof(buf)));
+    feed1(0x9E);
+    assert_eq(1, input_route_test_normal_read_kbd(buf, sizeof(buf)));
+
+    /* 3. Caps Lock flips only on aggregate 0 -> 1. */
+    input_ps2_frame_t usb_caps_make = make_usb_frame(0x3A, 1);
+    input_ps2_frame_t usb_caps_break = make_usb_frame(0x3A, 0);
+    feed1(0x3A);
+    assert_eq(INPUT_ROUTE_MOD_CAPS, input_route_test_normal_kbd_modifiers());
+    input_route_keyboard_usb_frames(&usb_caps_make, 1);
+    assert_eq(INPUT_ROUTE_MOD_CAPS, input_route_test_normal_kbd_modifiers());
+    feed1(0xBA); /* PS/2 release while USB holds Caps */
+    assert_eq(INPUT_ROUTE_MOD_CAPS, input_route_test_normal_kbd_modifiers());
+    feed1(0x3A); /* PS/2 re-press while USB holds Caps: 1->1, no flip */
+    assert_eq(INPUT_ROUTE_MOD_CAPS, input_route_test_normal_kbd_modifiers());
+    feed1(0xBA);
+    input_route_keyboard_usb_frames(&usb_caps_break, 1); /* 1->0 */
+    input_route_keyboard_usb_frames(&usb_caps_make, 1);  /* 0->1 flips off */
+    assert_eq(0, input_route_test_normal_kbd_modifiers());
+    input_route_keyboard_usb_frames(&usb_caps_break, 1);
+
+    /* 4. Held key, PrintScreen, and mouse button at bind cannot be bypassed by other source. */
+    route_reset();
+    file_t *kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    file_t *mouse = route_open(INPUT_DEVICE_MOUSE);
+    feed1(0x1E);
+    static const uint8_t ps_make[] = {0xE0, 0x2A, 0xE0, 0x37};
+    static const uint8_t ps_break[] = {0xE0, 0xB7, 0xE0, 0xAA};
+    feed(ps_make, sizeof(ps_make));
+    mouse_event_t ps2_btn1 = {.buttons = 1};
+    input_route_mouse_event(&ps2_btn1);
+
+    assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
+
+    input_ps2_frame_t usb_a_make = make_usb_frame(0x1E, 1);
+    input_ps2_frame_t usb_a_break = make_usb_frame(0x1E, 0);
+    input_ps2_frame_t usb_ps_make = make_usb_printscreen_frame(1);
+    input_ps2_frame_t usb_ps_break = make_usb_printscreen_frame(0);
+    input_route_keyboard_usb_frames(&usb_a_make, 1);
+    input_route_keyboard_usb_frames(&usb_ps_make, 1);
+    assert_eq(-EAGAIN, drain_bytes(kbd, buf, sizeof(buf)));
+
+    mouse_event_t usb_btn1_move = {.dx = 5, .buttons = 1};
+    input_route_mouse_usb_event(&usb_btn1_move);
+    assert_eq(1, drain_events(mouse, &mev, 1));
+    assert_eq(5, mev.dx);
+    assert_eq(0, mev.buttons);
+
+    /* PS/2 releases while USB still holds: stays isolated. */
+    feed1(0x9E);
+    feed(ps_break, sizeof(ps_break));
+    mouse_event_t ps2_btn0 = {.buttons = 0};
+    input_route_mouse_event(&ps2_btn0);
+    assert_eq(-EAGAIN, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(1, drain_events(mouse, &mev, 1));
+    assert_eq(0, mev.buttons);
+
+    /* USB releases: aggregate 1->0 clears isolation. */
+    input_route_keyboard_usb_frames(&usb_a_break, 1);
+    input_route_keyboard_usb_frames(&usb_ps_break, 1);
+    mouse_event_t usb_btn0 = {.buttons = 0};
+    input_route_mouse_usb_event(&usb_btn0);
+    assert_eq(-EAGAIN, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(1, drain_events(mouse, &mev, 1));
+    assert_eq(0, mev.buttons);
+
+    /* Fresh press from USB now succeeds. */
+    input_route_keyboard_usb_frames(&usb_a_make, 1);
+    input_route_keyboard_usb_frames(&usb_ps_make, 1);
+    assert_eq(5, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(0x1E, buf[0]);
+    assert_eq(0xE0, buf[1]);
+    input_route_mouse_usb_event(&usb_btn1_move);
+    assert_eq(1, drain_events(mouse, &mev, 1));
+    assert_eq(1, mev.buttons);
+
+    /* 5. USB release batch preserves PS/2 Ctrl/buttons, emits break for USB-only Shift/buttons. */
+    route_reset();
+    feed1(0x1D);
+    input_route_mouse_event(&ps2_btn1);
+    input_route_test_normal_reset();
+
+    input_ps2_frame_t usb_shift_make = make_usb_frame(0x2A, 1);
+    input_ps2_frame_t usb_shift_break = make_usb_frame(0x2A, 0);
+    input_ps2_frame_t usb_hold[2] = {usb_ctrl_make, usb_shift_make};
+    input_route_keyboard_usb_frames(usb_hold, 2);
+    mouse_event_t usb_btn12 = {.buttons = 3};
+    input_route_mouse_usb_event(&usb_btn12);
+    input_route_test_normal_reset();
+
+    input_ps2_frame_t usb_rel[2] = {usb_ctrl_break, usb_shift_break};
+    input_route_keyboard_usb_frames(usb_rel, 2);
+    assert_eq(1, input_route_test_normal_read_kbd(buf, sizeof(buf)));
+    assert_eq(0xAA, buf[0]);
+    input_route_mouse_usb_event(&usb_btn0);
+    assert_eq(sizeof(mev), input_route_test_normal_read_mouse(&mev, sizeof(mev)));
+    assert_eq(1, mev.buttons);
+
+    /* 6. Cross-epoch PS/2 break while USB holds same key: keep isolation + DESYNC;
+     * subsequent PS/2 press/repeat does not leak. */
+    route_reset();
+    kbd = route_open(INPUT_DEVICE_KEYBOARD);
+    input_ps2_frame_t usb_rctrl_make = make_usb_frame(INPUT_PS2_KEY_E0 | 0x1D, 1);
+    input_route_keyboard_usb_frames(&usb_rctrl_make, 1);
+    feed1(0xE0); feed1(0x1D);
+    feed1(0xE0); /* begin E0 9D break in epoch 1 */
+    assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
+    feed1(0x9D); /* cross-epoch PS/2 break while USB still holds 0x11D */
+    assert_eq(1, input_route__test_desync_active());
+    assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
+    /* Unbind back to NORMAL; USB still holds 0x11D so isolation remains. */
+    input_route_unbind(view(), 0, 0);
+    input_route_test_normal_reset();
+    feed1(0xE0); feed1(0x1D); /* PS/2 re-press */
+    feed1(0xE0); feed1(0x1D); /* PS/2 repeat */
+    assert_eq(0, input_route_test_normal_kbd_bytes());
+
+    /* 7. Mouse PS/2 wheel does not re-emit on USB movement. */
+    route_reset();
+    mouse_event_t ps2_wheel = {.dx = 0, .dy = 0, .wheel = 1, .buttons = 0};
+    input_route_mouse_event(&ps2_wheel);
+    assert_eq(sizeof(mev), input_route_test_normal_read_mouse(&mev, sizeof(mev)));
+    assert_eq(1, mev.wheel);
+    mouse_event_t usb_move = {.dx = 4, .dy = -3, .wheel = 0, .buttons = 0};
+    input_route_mouse_usb_event(&usb_move);
+    assert_eq(sizeof(mev), input_route_test_normal_read_mouse(&mev, sizeof(mev)));
+    assert_eq(4, mev.dx);
+    assert_eq(-3, mev.dy);
+    assert_eq(0, mev.wheel);
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_usb_batch_ps2_partial),
+    TEST_ENTRY(test_dual_owners),
     TEST_ENTRY(test_bind_isolates_held_modifiers_until_fresh_press),
     TEST_ENTRY(test_isolated_modifier_cannot_resurrect_its_other_side),
     TEST_ENTRY(test_partial_sequence_across_bind_and_revoke_stays_isolated),

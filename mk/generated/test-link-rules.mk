@@ -24,8 +24,32 @@ $(TEST_BLD)/test_gpt_bootdev.o: $(TEST_CASES)/test_gpt_bootdev.c
 $(TEST_BLD)/test_gpt_bootdev.elf: $(TEST_BLD)/test_gpt_bootdev.o $(LINK_GROUP_gpt-bootdev)
 	$(HOST_CC) $(LINK_LDFLAGS_gpt-bootdev) -o $@ $^
 
+$(TEST_BLD)/test_usb_hid_report.o: $(TEST_CASES)/test_usb_hid_report.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_usb-hid-report)),$(LINK_CFLAGS_usb-hid-report),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_usb_hid_report.elf: $(TEST_BLD)/test_usb_hid_report.o $(LINK_GROUP_usb-hid-report)
+	$(HOST_CC) $(LINK_LDFLAGS_usb-hid-report) -o $@ $^
+
 $(TEST_BLD)/test_usb_msc.o: $(TEST_CASES)/test_usb_msc.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_usb-msc)),$(LINK_CFLAGS_usb-msc),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
 $(TEST_BLD)/test_usb_msc.elf: $(TEST_BLD)/test_usb_msc.o $(LINK_GROUP_usb-msc)
 	$(HOST_CC) $(LINK_LDFLAGS_usb-msc) -o $@ $^
+
+$(TEST_BLD)/test_xhci_hid_desc.o: $(TEST_CASES)/test_xhci_hid_desc.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-hid-desc)),$(LINK_CFLAGS_xhci-hid-desc),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_xhci_hid_desc.elf: $(TEST_BLD)/test_xhci_hid_desc.o $(LINK_GROUP_xhci-hid-desc)
+	$(HOST_CC) $(LINK_LDFLAGS_xhci-hid-desc) -o $@ $^
+
+$(TEST_BLD)/test_xhci_hid_service.o: $(TEST_CASES)/test_xhci_hid_service.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-hid-service)),$(LINK_CFLAGS_xhci-hid-service),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_xhci_hid_service.elf: $(TEST_BLD)/test_xhci_hid_service.o $(LINK_GROUP_xhci-hid-service)
+	$(HOST_CC) $(LINK_LDFLAGS_xhci-hid-service) -o $@ $^
+
+$(TEST_BLD)/test_xhci_intr_in.o: $(TEST_CASES)/test_xhci_intr_in.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-intr-in)),$(LINK_CFLAGS_xhci-intr-in),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_xhci_intr_in.elf: $(TEST_BLD)/test_xhci_intr_in.o $(LINK_GROUP_xhci-intr-in)
+	$(HOST_CC) $(LINK_LDFLAGS_xhci-intr-in) -o $@ $^

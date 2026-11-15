@@ -171,8 +171,11 @@ KERNEL_C_SOURCES := \
 # driver/input_ps2.c (the pure Set 1 framer) and driver/input_route.c (the
 # input lease) are x86-selected for the same reason: only the x86 PS/2
 # driver chain consumes them.
-KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c driver/input_ps2.c driver/input_route.c,$(KERNEL_C_SOURCES))
+KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/i8042.c driver/keyboard.c driver/mouse.c driver/input_ps2.c driver/input_route.c driver/usb_hid_report.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
+ifeq ($(ARCH),x86_64)
+KERNEL_C_SOURCES += driver/usb_hid_report.c
+endif
 # Monitor plan Task 4: arch-neutral thermal facade (weak defaults + the
 # per-CPU sample cache procfs/thermal reads).  Listed EXPLICITLY, never
 # via a wildcard: kernel/arch/*.c is NOT covered by the ARCHDIR wildcard
@@ -1120,7 +1123,8 @@ endif
 	@# path).  Publishing them would put the kernel's framing state in front
 	@# of every user program, so they are excluded from the staged headers.
 	@# driver/input_route.h is excluded with them: it is the only includer.
-	rm -f $(INSTALL_ROOT)/usr/include/driver/input_ps2.h $(INSTALL_ROOT)/usr/include/driver/input_route.h
+	@# driver/usb_hid_report.h and driver/xhci_hid.h are also kernel-private.
+	rm -f $(INSTALL_ROOT)/usr/include/driver/input_ps2.h $(INSTALL_ROOT)/usr/include/driver/input_route.h $(INSTALL_ROOT)/usr/include/driver/usb_hid_report.h $(INSTALL_ROOT)/usr/include/driver/xhci_hid.h
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 # ── Clean ───────────────────────────────────────────────────

@@ -4735,6 +4735,78 @@
    }
   },
   {
+   "id": "drivers.xhci.hid_desc",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "xhci",
+   "trigger": "host runner invokes test_xhci_hid_desc.elf",
+   "assertions": [
+    "test_xhci_hid_desc passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_xhci_hid_desc"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_xhci_hid_desc.c",
+    "selector": "test_xhci_hid_desc",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying xHCI Boot HID interface filtering and endpoint context configuration"
+   }
+  },
+  {
+   "id": "drivers.xhci.intr_in",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "xhci",
+   "trigger": "host runner invokes test_xhci_intr_in.elf",
+   "assertions": [
+    "test_xhci_intr_in passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_xhci_intr_in"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_xhci_intr_in.c",
+    "selector": "test_xhci_intr_in",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying xHCI interrupt IN transfer ring ring-doorbell and completion dispatch"
+   }
+  },
+  {
+   "id": "drivers.xhci.hid_service",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "xhci",
+   "trigger": "host runner invokes test_xhci_hid_service.elf",
+   "assertions": [
+    "test_xhci_hid_service passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_xhci_hid_service"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_xhci_hid_service.c",
+    "selector": "test_xhci_hid_service",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying xHCI HID driver binding, runtime service loop, and disconnect release"
+   }
+  },
+  {
    "id": "drivers.usb.msc",
    "owner": "host",
    "component": "drivers",
@@ -4781,6 +4853,56 @@
    "overlap_decision": {
     "action": "unique",
     "reason": "Primary QEMU E2E suite verifying USB-only boot and both root/ESP filesystem mounts"
+   }
+  },
+  {
+   "id": "drivers.usb.hid.input",
+   "owner": "qemu_e2e",
+   "component": "drivers",
+   "behavior": "usb_hid",
+   "trigger": "QEMU boots x86_64 with i8042=off and USB Boot HID keyboard/mouse (direct xHCI and shared USB 2.0 Hub with USB storage)",
+   "assertions": [
+    "QMP info usb and guest xhci-hid bindings match direct (480 Mb/s) and hub (12 Mb/s) topologies",
+    "Leased /dev/keyboard and /dev/mouse receive raw E0/button/rel frames with PTY slave fd0 isolation and post-unbind TTY recovery",
+    "Shared Hub storage completes concurrent and post-detach BOT WRITE(10)->SYNCHRONIZE CACHE(10) without interference, and device_del triggers synthetic key/button release"
+   ],
+   "failure_modes": [
+    "topology/speed mismatch, missing lease or raw frame edge, PTY leak, shell hang, missing DEVICE_DELETED or synthetic release, missing BOT trace, or source image mutation"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/usb_hid.py",
+    "selector": "usb-hid",
+    "evidence": "runner exit 0 across direct/hub x SMP=1/2 plus archived verdict.json, serial.log, and qmp-transcript.jsonl"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary QEMU E2E suite verifying USB-only Boot HID input, lease/PTY isolation, detach synthetic release, and shared Hub storage"
+   }
+  },
+  {
+   "id": "drivers.usb.hid_report",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "usb_hid",
+   "trigger": "host runner invokes test_usb_hid_report.elf",
+   "assertions": [
+    "test_usb_hid_report passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_usb_hid_report"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_usb_hid_report.c",
+    "selector": "test_usb_hid_report",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying USB Boot HID keyboard report diff, Set 1 translation, and mouse boot decoding"
    }
   },
   {

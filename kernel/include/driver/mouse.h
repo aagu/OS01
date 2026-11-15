@@ -5,8 +5,15 @@
 #include <fs/vfs.h>
 #include <fs/poll.h>
 
+/* Idempotent NORMAL sink / route initialization (no i8042 access). */
+void mouse_input_init(void);
+
 /* Phase 6 PS/2 aux initialization. */
 int mouse_init(void);
+
+#ifdef OS01_HOST_TEST
+void mouse__test_reset(void);
+#endif
 int mouse_ready(void);
 int mouse_devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer);
 uint32_t mouse_poll_dev(void *priv, uint32_t requested, poll_table_t *pt);

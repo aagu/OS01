@@ -9,6 +9,11 @@
 
 extern int arch_thermal_start_worker(void);
 
+__attribute__((weak)) int arch_usb_hid_start_worker(void)
+{
+    return 0;
+}
+
 void boot_services_prepare(void)
 {
     net_lwip_init();
@@ -19,5 +24,10 @@ void boot_services_start(void)
     int wrc = arch_thermal_start_worker();
     if (wrc != 0) {
         log_warn("[sched] thermal worker start returned %d (cached in thermal cache as READ_ERROR/WORKER_START)\n", wrc);
+    }
+
+    int hrc = arch_usb_hid_start_worker();
+    if (hrc != 0) {
+        log_warn("[sched] usb-hid worker start returned %d (optional service failed)\n", hrc);
     }
 }

@@ -10,7 +10,7 @@ I8042_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
 KBD_SHADOW_INC := -I$(TEST_MOCK)/kbd_include
 KBD_HOST_CFLAGS := $(HOST_CFLAGS) $(KBD_SHADOW_INC) $(KERNEL_INC) \
     $(LIBC_INC) -I$(TEST_INC) \
-    -D_ARCH_IO_H -D_ARCH_SPINLOCK_H -D_ARCH_CPU_H \
+    -DOS01_HOST_TEST -D_ARCH_IO_H -D_ARCH_SPINLOCK_H -D_ARCH_CPU_H \
     -include $(TEST_MOCK)/i8042_test_runtime.h
 
 $(TEST_BLD)/i8042_production.o: $(TESTS_DIR)/kernel/driver/i8042.c \
@@ -323,6 +323,10 @@ $(TEST_BLD)/xhci_hub_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/xhci_hid_desc_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_hid_desc.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_xhci_init.o: $(TEST_CASES)/test_xhci_init.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
@@ -330,6 +334,7 @@ $(TEST_BLD)/test_xhci_init.o: $(TEST_CASES)/test_xhci_init.c
 $(TEST_BLD)/test_xhci_init.elf: $(TEST_BLD)/test_xhci_init.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -348,6 +353,7 @@ $(TEST_BLD)/test_xhci_phase2.o: $(TEST_CASES)/test_xhci_phase2.c
 $(TEST_BLD)/test_xhci_phase2.elf: $(TEST_BLD)/test_xhci_phase2.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -370,6 +376,7 @@ $(TEST_BLD)/test_xhci_phase3.o: $(TEST_CASES)/test_xhci_phase3.c
 $(TEST_BLD)/test_xhci_phase3.elf: $(TEST_BLD)/test_xhci_phase3.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/xhci_msc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
@@ -402,6 +409,7 @@ $(TEST_BLD)/test_usb_devfs.elf: $(TEST_BLD)/test_usb_devfs.o \
     $(TEST_BLD)/lsusb_production.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -460,4 +468,76 @@ LINK_GROUP_boot-devpath := $(TEST_BLD)/uefi_boot_device.o
 .PHONY: test-boot-devpath
 test-boot-devpath: $(TEST_BLD)/test_boot_devpath.elf
 	$<
+
+# USB Boot HID report decoder
+$(TEST_BLD)/usb_hid_report_production.o: $(TESTS_DIR)/kernel/driver/usb_hid_report.c \
+    $(TESTS_DIR)/kernel/include/driver/usb_hid_report.h \
+    $(TESTS_DIR)/kernel/include/driver/input_ps2.h \
+    $(TESTS_DIR)/kernel/include/uapi/mouse.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+LINK_CFLAGS_usb-hid-report = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_usb-hid-report := $(TEST_BLD)/usb_hid_report_production.o
+
+.PHONY: test-usb-hid-report test_usb_hid_report
+test-usb-hid-report test_usb_hid_report: $(TEST_BLD)/test_usb_hid_report.elf
+	$<
+
+# xHCI Boot HID config descriptor scanner & endpoint selection
+LINK_CFLAGS_xhci-hid-desc = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_xhci-hid-desc := \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-xhci-hid-desc test_xhci_hid_desc
+test-xhci-hid-desc test_xhci_hid_desc: $(TEST_BLD)/test_xhci_hid_desc.elf
+	$<
+
+# xHCI shared completion events & asynchronous Interrupt IN
+LINK_CFLAGS_xhci-intr-in = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_xhci-intr-in := \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-xhci-intr-in test_xhci_intr_in
+test-xhci-intr-in test_xhci_intr_in: $(TEST_BLD)/test_xhci_intr_in.elf
+	$<
+
+# xHCI Boot HID runtime service (binding, monitor, disconnect, teardown)
+$(TEST_BLD)/xhci_hid_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_hid.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_xhci-hid-service = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_xhci-hid-service := \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
+    $(TEST_BLD)/xhci_hid_production.o \
+    $(TEST_BLD)/usb_hid_report_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-xhci-hid-service test_xhci_hid_service
+test-xhci-hid-service test_xhci_hid_service: $(TEST_BLD)/test_xhci_hid_service.elf
+	$<
+
+
+
 

@@ -475,19 +475,36 @@ static int keyboard_enable_irq(void)
     return 0;
 }
 
-int keyboard_init(void)
+static bool kbd_input_initialized;
+
+void keyboard_input_init(void)
 {
+    if (kbd_input_initialized)
+        return;
+
     ring_head = 0;
     ring_tail = 0;
     list_init(&kbd_poll);
     spin_init(&kbd_poll_lock);
 
-    // The input route owns the physical key state and the lease.  It
-    // must be initialised BEFORE the byte consumer is installed and
-    // before IRQ1 is enabled, so the very first byte is framed by a
-    // zero-initialised framer.
-    input_route_init();
+    // Ensure the input route is ready and register the NORMAL sink.
     input_route_set_normal_sinks(&keyboard_route_sink, NULL);
+    kbd_input_initialized = true;
+}
+
+#ifdef OS01_HOST_TEST
+void keyboard__test_reset(void)
+{
+    kbd_input_initialized = false;
+    input_route_init();
+}
+#endif
+
+int keyboard_init(void)
+{
+    // Initialise the route and NORMAL sink first (idempotent) so USB
+    // keyboard input remains usable even if i8042 probing fails.
+    keyboard_input_init();
 
     // Shared controller layer first, then claim the keyboard bytes.
     i8042_init();

@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
+#include <driver/xhci_hid.h>
 #include <sync/mutex.h>
 
 /* Ring and TRB constants */
@@ -282,6 +283,16 @@ struct xhci_ep_ring {
     bool td_barred;                 /* Endpoint barred from new TDs until settled */
     bool recovery_half_done;        /* Reset/Stop + TT clear already completed */
     int recovery_rc;                /* Latest settled timeout/recovery status */
+
+    /* Asynchronous Interrupt IN state (one in-flight TD / one result) */
+    bool intr_bound;
+    bool intr_retired;
+    bool intr_pending;
+    bool intr_result_valid;
+    uint64_t intr_buf_phys;
+    void *intr_buf_virt;
+    uint64_t intr_pending_trb_phys;
+    struct xhci_intr_in_result intr_result;
 };
 
 /* Summary of the primary interface parsed from the descriptor hierarchy */
@@ -432,6 +443,8 @@ struct xhci_slot {
     struct xhci_interface_info iface;
     struct xhci_msc_iface msc_candidate;
     struct xhci_msc_iface msc_iface;
+    struct xhci_hid_candidate hid_candidates[XHCI_HID_KINDS];
+    uint8_t hub_status_dci;
 
     bool configured;
 
@@ -667,6 +680,14 @@ void xhci_delay_ms(uint32_t ms);
 
 uint8_t xhci_controller_count(void);
 struct xhci_controller *xhci_controller_get(uint8_t index);
+
+/* Asynchronous Interrupt IN lifecycle (caller holds ctrl->io_lock at runtime) */
+int xhci_intr_in_prepare_locked(struct xhci_controller *ctrl, uint8_t slot, uint8_t dci);
+int xhci_intr_in_submit_locked(struct xhci_controller *ctrl, uint8_t slot, uint8_t dci);
+int xhci_intr_in_take_locked(struct xhci_controller *ctrl, uint8_t slot, uint8_t dci,
+                             uint8_t *dst, size_t cap, struct xhci_intr_in_result *out);
+void xhci_intr_in_retire_locked(struct xhci_controller *ctrl, uint8_t slot, uint8_t dci);
+unsigned xhci_intr_in_pump_locked(struct xhci_controller *ctrl, unsigned budget);
 
 extern const struct pci_driver xhci_pci_driver;
 
