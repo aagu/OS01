@@ -5,7 +5,7 @@
  * timing: strict
  * tier: nightly
  * link: xhci-hid-desc
- * scenarios: []
+ * scenarios: [drivers.xhci.hid_desc]
  */
 #include "test_framework.h"
 #include <device/device.h>

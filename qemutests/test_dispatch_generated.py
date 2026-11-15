@@ -31,8 +31,8 @@ class DispatchGeneratedTests(unittest.TestCase):
         suites = self._load_bridge_suites()
         expected_flavors = {s["id"]: s["flavor"] for s in suites if "flavor" in s}
         expected_images = {s["id"]: s["image_var"] for s in suites if "image_var" in s}
-        self.assertEqual(len(expected_flavors), 20)
-        self.assertEqual(len(expected_images), 20)
+        self.assertEqual(len(expected_flavors), 22)
+        self.assertEqual(len(expected_images), 22)
 
         res_f = subprocess.run(
             ["make", "-s", "print-test-qemu-flavors"],

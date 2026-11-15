@@ -4735,6 +4735,78 @@
    }
   },
   {
+   "id": "drivers.xhci.hid_desc",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "xhci",
+   "trigger": "host runner invokes test_xhci_hid_desc.elf",
+   "assertions": [
+    "test_xhci_hid_desc passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_xhci_hid_desc"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_xhci_hid_desc.c",
+    "selector": "test_xhci_hid_desc",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying xHCI Boot HID interface filtering and endpoint context configuration"
+   }
+  },
+  {
+   "id": "drivers.xhci.intr_in",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "xhci",
+   "trigger": "host runner invokes test_xhci_intr_in.elf",
+   "assertions": [
+    "test_xhci_intr_in passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_xhci_intr_in"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_xhci_intr_in.c",
+    "selector": "test_xhci_intr_in",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying xHCI interrupt IN transfer ring ring-doorbell and completion dispatch"
+   }
+  },
+  {
+   "id": "drivers.xhci.hid_service",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "xhci",
+   "trigger": "host runner invokes test_xhci_hid_service.elf",
+   "assertions": [
+    "test_xhci_hid_service passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_xhci_hid_service"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_xhci_hid_service.c",
+    "selector": "test_xhci_hid_service",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying xHCI HID driver binding, runtime service loop, and disconnect release"
+   }
+  },
+  {
    "id": "drivers.usb.msc",
    "owner": "host",
    "component": "drivers",
@@ -4807,6 +4879,30 @@
    "overlap_decision": {
     "action": "unique",
     "reason": "Primary QEMU E2E suite verifying USB-only Boot HID input, lease/PTY isolation, detach synthetic release, and shared Hub storage"
+   }
+  },
+  {
+   "id": "drivers.usb.hid_report",
+   "owner": "host",
+   "component": "drivers",
+   "behavior": "usb_hid",
+   "trigger": "host runner invokes test_usb_hid_report.elf",
+   "assertions": [
+    "test_usb_hid_report passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_usb_hid_report"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_usb_hid_report.c",
+    "selector": "test_usb_hid_report",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying USB Boot HID keyboard report diff, Set 1 translation, and mouse boot decoding"
    }
   },
   {

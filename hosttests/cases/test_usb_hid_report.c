@@ -5,7 +5,7 @@
  * timing: strict
  * tier: nightly
  * link: usb-hid-report
- * scenarios: []
+ * scenarios: [drivers.usb.hid_report]
  */
 #include "test_framework.h"
 #include <driver/usb_hid_report.h>

@@ -5,7 +5,7 @@
  * timing: strict
  * tier: nightly
  * link: xhci-intr-in
- * scenarios: []
+ * scenarios: [drivers.xhci.intr_in]
  */
 #include "test_framework.h"
 #include <device/device.h>

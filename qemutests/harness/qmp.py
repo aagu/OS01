@@ -133,7 +133,10 @@ class QmpClient:
         self, events: List[dict], *, deadline: float | None = None
     ) -> None:
         self._record_transcript(events)
-        self.execute("input-send-event", {"events": events}, deadline=deadline)
+        if deadline is not None:
+            self.execute("input-send-event", {"events": events}, deadline=deadline)
+        else:
+            self.execute("input-send-event", {"events": events})
 
     def set_transcript(self, path: Path) -> None:
         self.close_transcript()

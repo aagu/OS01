@@ -4759,7 +4759,9 @@
       "timing": "strict",
       "tier": "nightly",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "drivers.usb.hid_report"
+      ],
       "link": "usb-hid-report",
       "source": "hosttests/cases/test_usb_hid_report.c"
     },
@@ -5140,7 +5142,9 @@
       "timing": "strict",
       "tier": "nightly",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "drivers.xhci.hid_desc"
+      ],
       "link": "xhci-hid-desc",
       "source": "hosttests/cases/test_xhci_hid_desc.c"
     },
@@ -5151,7 +5155,9 @@
       "timing": "strict",
       "tier": "nightly",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "drivers.xhci.hid_service"
+      ],
       "link": "xhci-hid-service",
       "source": "hosttests/cases/test_xhci_hid_service.c"
     },
@@ -5177,7 +5183,9 @@
       "timing": "strict",
       "tier": "nightly",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "drivers.xhci.intr_in"
+      ],
       "link": "xhci-intr-in",
       "source": "hosttests/cases/test_xhci_intr_in.c"
     },
