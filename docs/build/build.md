@@ -413,7 +413,7 @@ make test-host
   （`config/test-bridge.json` → `mk/generated/test-dispatch.mk`）或自动化 bucket 中；
   M1b 把它变成成功门禁后才登记 nightly。手动诊断可用
   `make run-usb`（同样的 USB 拓扑 + 交互式 display/SMP/网络设置，或 OVMF 启动菜单）。
-- **xHCI 硬件支持范围（M3）**：仅支持直连 root port、BOT/SCSI LUN 0、512 字节逻辑扇区的 U 盘；要求控制器报告 **0 scratchpad**（`max_scratchpads == 0`）、基础映射窗口（`0x1000` 字节）足以覆盖所有端口寄存器与扩展能力（USB Legacy Support / Supported Protocol），且 Supported Protocol 使用默认已知速度编码（`PSIC == 0`，速度 ID 1..4）。`HCCPARAMS1.AC64 == 0` 时所有 DMA 分配均须严格位于 4 GiB 以下；不满足条件或 firmware legacy ownership 交接超时时跳过该控制器，不强行 HCRST。
+- **xHCI 硬件支持范围（Hub 引导扩展）**：支持根端口直连与外置 USB Hub 级联枚举（深度 0–4、每 Hub 端口 1–15），目标盘为 BOT/SCSI LUN 0、512 字节逻辑扇区的 U 盘。支持 USB 2.0（FS / HS 单 TT，拒收 multi-TT alt0）与经核验的 SuperSpeed Gen1×1 Hub（校验协议段对称 5 Gb/s PSI 与标准 BOS 含 `0x0a` SuperSpeed Capability 且无 `0x0b` SuperSpeedPlus Capability；`0x2a` Hub 描述符后下发 `SET_HUB_DEPTH`；USB 2.0 同伴 Hub 独立枚举）。`HCCPARAMS1.AC64 == 0` 时所有 DMA 分配须位于 4 GiB 以下。关键诊断日志：`[xhci-hub] ready bdf=... root=... route=... slot=... protocol=usb2|usb3 ports=... ttt=...`、`[xhci] device bdf=... root=... route=... slot=... parent=... port=... speed=... speed_id=... iface=...`、`[xhci-msc] probing disk=...` / `[xhci-msc] disk=...` / `[xhci-msc] no-bot-interface` / `[xhci-msc] probe failed`。QEMU `hub` 用例（`usb-hub` 12 Mb/s）与 `superspeed`（直连）不能替代真机 HS TT 与 SS Hub 验收。
 - **profile 覆盖**：`PROFILE=<name>` 决定固件与镜像来源；只有具备 `rootfs` 能力的
   x86 profile（默认 `x86_64-clang`）可用。`make PROFILE=aarch64-clang -n run-usb`
   必须解析期失败 `lacks capability 'rootfs'`。固件来源由
@@ -774,7 +774,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | --- | --- |
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
 | `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`doom`） |
-| `USB_BOOT_CASE=<name>` | `test-qemu-usb-boot` 的 case（目前只有 `firmware`，默认即 `firmware`） |
+| `USB_BOOT_CASE=<name>` | `test-qemu-usb-boot` 的 case（`readonly` / `dual` / `ahci` / `persistence` / `superspeed` / `hub` / `firmware`，默认 `firmware`） |
 | `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
 | `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
