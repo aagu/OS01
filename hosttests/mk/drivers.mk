@@ -516,5 +516,28 @@ LINK_GROUP_xhci-intr-in := \
 test-xhci-intr-in test_xhci_intr_in: $(TEST_BLD)/test_xhci_intr_in.elf
 	$<
 
+# xHCI Boot HID runtime service (binding, monitor, disconnect, teardown)
+$(TEST_BLD)/xhci_hid_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_hid.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_xhci-hid-service = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_xhci-hid-service := \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
+    $(TEST_BLD)/xhci_hid_production.o \
+    $(TEST_BLD)/usb_hid_report_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-xhci-hid-service test_xhci_hid_service
+test-xhci-hid-service test_xhci_hid_service: $(TEST_BLD)/test_xhci_hid_service.elf
+	$<
+
+
 
 

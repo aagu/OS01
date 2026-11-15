@@ -5135,6 +5135,17 @@
       "source": "hosttests/cases/test_xhci_hid_desc.c"
     },
     {
+      "id": "test_xhci_hid_service",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "link": "xhci-hid-service",
+      "source": "hosttests/cases/test_xhci_hid_service.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_xhci_init",
       "layer": "host",

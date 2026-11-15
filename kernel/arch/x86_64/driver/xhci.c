@@ -82,11 +82,17 @@ static int xhci_ring_enqueue_trb(struct xhci_trb *ring_virt, uint64_t ring_phys,
     return 0;
 }
 
+#ifdef OS01_HOST_TEST
+__attribute__((weak))
+#endif
 uint8_t xhci_controller_count(void)
 {
     return s_xhci_controller_count;
 }
 
+#ifdef OS01_HOST_TEST
+__attribute__((weak))
+#endif
 struct xhci_controller *xhci_controller_get(uint8_t index)
 {
     if (index >= s_xhci_controller_count) return NULL;
@@ -878,6 +884,12 @@ static int xhci_port_reset_impl(struct xhci_controller *ctrl, uint32_t port_num,
     if (!(portsc & XHCI_PORTSC_PP)) {
         xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_PP);
         xhci_delay_ms(20);
+        portsc = xhci_read32(port_reg);
+    }
+
+    /* Clear initial CSC before reset without writing PED (RW1C). */
+    if (portsc & XHCI_PORTSC_CSC) {
+        xhci_write32(port_reg, (portsc & ~XHCI_PORTSC_RW1C_MASK) | XHCI_PORTSC_CSC);
         portsc = xhci_read32(port_reg);
     }
 
@@ -3621,11 +3633,21 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
     return 0;
 }
 
+#ifdef OS01_HOST_TEST
+__attribute__((weak)) void xhci_hid_detach_controller(struct xhci_controller *ctrl)
+{
+    (void)ctrl;
+}
+#endif
+
 void xhci_remove(struct pci_device *pdev)
 {
     if (!pdev || !pdev->driver_data) return;
 
     struct xhci_controller *ctrl = (struct xhci_controller *)pdev->driver_data;
+
+    /* Detach any bound USB HID service state before halting/freeing controller. */
+    xhci_hid_detach_controller(ctrl);
 
     /* Stop controller */
     bool halt_ok = false;

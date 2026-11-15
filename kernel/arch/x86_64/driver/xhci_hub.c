@@ -437,6 +437,9 @@ int xhci_hub_reset_port(struct xhci_controller *ctrl, uint8_t slot,
         (warm && !(chg & USB_PORT_STAT_C_BH_PORT_RESET)))
         return (st & USB_PORT_STAT_CONNECTION) ? -EIO : -ENODEV;
 
+    if (chg & USB_PORT_STAT_C_CONNECTION)
+        return -EIO;
+
     if (chg & USB_PORT_STAT_C_RESET) {
         rc = hub_port_feature(ctrl, slot, USB_REQ_CLEAR_FEATURE,
                               USB_PORT_FEAT_C_RESET, port, deadline_ns);
@@ -475,6 +478,8 @@ int xhci_hub_reset_port(struct xhci_controller *ctrl, uint8_t slot,
         if (rc != 0) return rc;
         if (!(st2 & USB_PORT_STAT_CONNECTION))
             return -ENODEV;
+        if (chg2 & USB_PORT_STAT_C_CONNECTION)
+            return -EIO;
         if (!(st2 & USB_PORT_STAT_ENABLE))
             return -EIO;
         st = st2;

@@ -66,6 +66,7 @@
 
 #include <driver/keyboard.h>
 #include <driver/mouse.h>
+#include <driver/xhci_hid.h>
 #include <driver/fb.h>
 #include <driver/fb_state.h>
 #include <log/log.h>
@@ -195,18 +196,19 @@ void x86_64_boot_devices(const struct boot_context *bootctx)
 // hooks (open / read_file / poll_file / release_file) reach the input
 // route from there, so this boot path only registers them.
 //
-// /dev/mouse is gated on subsys_status because the i8042 controller may
-// not have a mouse port.
+// /dev/mouse is gated on PS/2 mouse availability or a bound USB Boot mouse.
 
 int x86_64_boot_device_nodes(void)
 {
+    keyboard_input_init();
     int ret = devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
     if (ret != 0 && ret != -EEXIST) {
         log_err("keyboard: failed to register /dev/keyboard (%d)\n", ret);
         return ret;
     }
 
-    if (subsys_status("mouse") == 1) {
+    if (subsys_status("mouse") == 1 || xhci_hid_mouse_bound()) {
+        mouse_input_init();
         ret = devfs_register_chrdev("mouse", NULL, &mouse_ops);
         if (ret != 0 && ret != -EEXIST)
             log_err("mouse: failed to register /dev/mouse (%d)\n", ret);

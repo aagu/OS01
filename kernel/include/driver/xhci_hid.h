@@ -31,8 +31,15 @@ struct xhci_intr_in_result {
     bool bad_length;
 };
 
+struct xhci_controller;
+
 int xhci_hid_scan_config(const uint8_t *cfg, uint16_t len, uint8_t speed_class,
                          struct xhci_hid_candidate out[XHCI_HID_KINDS],
                          uint32_t *hid_skip_dcis);
+
+bool xhci_hid_mouse_bound(void);
+int arch_usb_hid_start_worker(void);
+void xhci_hid_detach_controller(struct xhci_controller *ctrl);
+void xhci_hid_service_once(uint64_t now_ns);
 
 #endif /* _KERNEL_DRIVER_XHCI_HID_H */
