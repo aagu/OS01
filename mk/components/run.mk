@@ -90,6 +90,19 @@ QEMU_USB_DISK = -drive file=$(QEMU_IMAGE),format=raw,if=none,id=usbdisk,readonly
   -device virtio-rng-pci,rng=rng0
 
 .PHONY: run run-kvm run-virtio run-usb debug
+# Boot storage selection for `run` / `run-kvm` / `run-virtio`:
+#   BOOT_METHOD=hdd (default) — AHCI ide-hd
+#   BOOT_METHOD=usb — USB-only (usb-storage on qemu-xhci, same as run-usb)
+BOOT_METHOD ?= hdd
+ifeq ($(filter $(BOOT_METHOD),hdd usb),)
+$(error ERROR: invalid BOOT_METHOD='$(BOOT_METHOD)' (expected 'hdd' or 'usb'))
+endif
+ifeq ($(BOOT_METHOD),usb)
+RUN_SELECTED_DISK = $(QEMU_USB_DISK) -m $(MEMORY) -display $(DISPLAY) -serial stdio
+else
+RUN_SELECTED_DISK = $(RUN_QEMU_DISK)
+endif
+
 # Flags before the common network/disk section, followed by the original
 # final reboot flag only on run and run-kvm.
 RUN_QEMU_FLAGS_run-kvm    = -accel kvm
@@ -100,13 +113,13 @@ RUN_QEMU_FLAGS_debug      = -S -s
 # so a clean workspace still gets the disk image + firmware built first.
 run:        $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
 run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK) -no-reboot
+	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0 $(RUN_QEMU_DISK)
+	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0 $(RUN_SELECTED_DISK)
 # M0 firmware-only checkpoint (USB boot plan Task 1, design §5.9): the
 # same interactive display/SMP/network settings as `run`, but the USB
 # disk topology instead of RUN_QEMU_DISK.  The stock kernel has no USB
@@ -2939,13 +2952,13 @@ help:
 	@echo ''
 	@echo 'Run / Debug (x86, rootfs):'
 	@printf '  %-22s %-13s %s\n' \
-		 'run'               '(rootfs)'     'QEMU q35 + e1000 + serial stdio';
+		 'run'               '(rootfs)'     'QEMU q35 + e1000 + serial stdio (BOOT_METHOD=hdd|usb, default hdd)';
 	@printf '  %-22s %-13s %s\n' \
 		 'run-kvm'           '(rootfs)'     'QEMU with KVM acceleration';
 	@printf '  %-22s %-13s %s\n' \
 		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000)';
 	@printf '  %-22s %-13s %s\n' \
-		 'run-usb'           '(rootfs)'     'QEMU USB-only topology (usb-storage on qemu-xhci); M0 firmware checkpoint, expects fs/root rc=-19';
+		 'run-usb'           '(rootfs)'     'QEMU USB-only topology (usb-storage on qemu-xhci; alias for run BOOT_METHOD=usb)';
 	@printf '  %-22s %-13s %s\n' \
 		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
 	@echo ''
