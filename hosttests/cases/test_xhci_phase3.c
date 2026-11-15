@@ -1397,6 +1397,7 @@ void test_xhci_port_protocol_reset(void)
 
     /* 1. Supported Protocol parsing: port 1 = USB2, port 2 = USB3 */
     memset(mmio, 0, sizeof(mmio));
+    mmio[XHCI_CAP_HCCPARAMS1 / 4] = 1U;
     mmio[XHCI_CAP_CAPLENGTH] = 0x20;
     *(uint32_t *)(mmio + XHCI_CAP_HCSPARAMS1) = (2U << 24) | (1U << 8) | 16U;
     *(uint32_t *)(mmio + XHCI_CAP_HCCPARAMS1) = ((0x800U >> 2) << 16) | 1U;
@@ -1811,6 +1812,98 @@ static void test_hub_tier_and_rebuild(void)
     assert_eq(0, rc);
 }
 
+static void test_hub_ss_context(void)
+{
+    uint32_t in_ctx[1024] __attribute__((aligned(4096)));
+    uint32_t dev_ctx[1024] __attribute__((aligned(4096)));
+    struct xhci_trb cmd_ring[64] __attribute__((aligned(4096)));
+    struct xhci_trb event_ring[64] __attribute__((aligned(4096)));
+    uint32_t mmio[0x100];
+
+    memset(in_ctx, 0, sizeof(in_ctx));
+    memset(dev_ctx, 0, sizeof(dev_ctx));
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(mmio, 0, sizeof(mmio));
+    mmio[XHCI_CAP_HCCPARAMS1 / 4] = 1U;
+
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = (volatile uint8_t *)mmio;
+    ctrl.op_regs = ctrl.mmio_virt;
+    ctrl.db_regs = ctrl.mmio_virt + 0x100;
+    ctrl.rt_regs = ctrl.mmio_virt + 0x200;
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+
+    struct xhci_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    slot.active = true;
+    slot.slot_id = 1;
+    slot.ctrl = &ctrl;
+    slot.speed = XHCI_PORT_SPEED_SUPER;
+    slot.loc = (struct xhci_location){
+        .root_port = 1, .speed_id = XHCI_PORT_SPEED_SUPER, .speed_class = XHCI_PORT_SPEED_SUPER
+    };
+    slot.desc.bDeviceClass = USB_CLASS_HUB;
+    slot.input_ctx_virt = (uint8_t *)in_ctx;
+    slot.input_ctx_phys = (uint64_t)(uintptr_t)in_ctx;
+    slot.dev_ctx_virt = (uint8_t *)dev_ctx;
+    slot.dev_ctx_phys = (uint64_t)(uintptr_t)dev_ctx;
+    ctrl.slots[1] = &slot;
+
+    /* 1. Valid SS Hub Interrupt IN MPS=8, companion bMaxBurst=1, wBytesPerInterval=12 */
+    const uint8_t valid_cfg[] = {
+        9, 2, 31, 0, 1, 1, 0, 0xE0, 0,
+        9, 4, 0, 0, 1, USB_CLASS_HUB, 0, 0, 0,
+        7, 5, 0x81, 0x03, 0x08, 0x00, 0x08,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 1, 0, 12, 0
+    };
+    assert_eq(0, xhci_setup_endpoint_rings(&slot, valid_cfg, sizeof(valid_cfg)));
+    assert_true(slot.ep_rings != NULL);
+    if (!slot.ep_rings || !slot.ep_rings[3]) return;
+    assert_eq(1U, slot.ep_rings[3]->max_burst);
+
+    event_ring[0].parameter = (uint64_t)(uintptr_t)&cmd_ring[0];
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    assert_eq(0, xhci_configure_endpoints(&ctrl, 1));
+    uint32_t *ep_ctx = (uint32_t *)xhci_input_ep_ctx(in_ctx, 0, 3);
+    assert_eq(1U, (ep_ctx[1] >> 8) & 0xFFU);   /* MaxBurst = 1 */
+    assert_eq(12U, (ep_ctx[4] >> 16) & 0xFFFFU); /* Max ESIT Payload Lo = 12 */
+
+    /* 2. Missing companion descriptor -> rejected */
+    const uint8_t no_comp_cfg[] = {
+        9, 2, 25, 0, 1, 1, 0, 0xE0, 0,
+        9, 4, 0, 0, 1, USB_CLASS_HUB, 0, 0, 0,
+        7, 5, 0x81, 0x03, 0x08, 0x00, 0x08
+    };
+    assert_true(xhci_setup_endpoint_rings(&slot, no_comp_cfg, sizeof(no_comp_cfg)) < 0);
+
+    /* 3. wBytesPerInterval == 0 or > 16 -> rejected */
+    const uint8_t zero_esit_cfg[] = {
+        9, 2, 31, 0, 1, 1, 0, 0xE0, 0,
+        9, 4, 0, 0, 1, USB_CLASS_HUB, 0, 0, 0,
+        7, 5, 0x81, 0x03, 0x08, 0x00, 0x08,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 1, 0, 0, 0
+    };
+    assert_true(xhci_setup_endpoint_rings(&slot, zero_esit_cfg, sizeof(zero_esit_cfg)) < 0);
+
+    const uint8_t big_esit_cfg[] = {
+        9, 2, 31, 0, 1, 1, 0, 0xE0, 0,
+        9, 4, 0, 0, 1, USB_CLASS_HUB, 0, 0, 0,
+        7, 5, 0x81, 0x03, 0x08, 0x00, 0x08,
+        6, USB_DESC_TYPE_SS_EP_COMPANION, 1, 0, 17, 0
+    };
+    assert_true(xhci_setup_endpoint_rings(&slot, big_esit_cfg, sizeof(big_esit_cfg)) < 0);
+
+    xhci_free_endpoint_rings(&slot);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase3");
@@ -1831,6 +1924,7 @@ int main(void)
     test_xhci_split_timeout_terminal();
     test_xhci_msc_skip_unusable_path();
     test_hub_tier_and_rebuild();
+    test_hub_ss_context();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

@@ -793,7 +793,8 @@ int xhci_child_location(const struct xhci_controller *ctrl, uint8_t parent_slot,
     return 0;
 }
 
-int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed)
+static int xhci_port_reset_impl(struct xhci_controller *ctrl, uint32_t port_num,
+                                uint8_t *out_speed, bool force_reset)
 {
     if (!ctrl || !ctrl->op_regs || port_num < 1 || port_num > ctrl->max_ports)
         return -EINVAL;
@@ -815,7 +816,7 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
     bool is_usb3 = (port_num < 256 && ctrl->port_proto[port_num] == 3);
     uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> 5;
 
-    if (is_usb3 && (portsc & XHCI_PORTSC_PED) && pls == XHCI_PLS_U0) {
+    if (!force_reset && is_usb3 && (portsc & XHCI_PORTSC_PED) && pls == XHCI_PLS_U0) {
         uint8_t speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
         if (xhci_speed_class(ctrl, port_num, speed) == 0) {
             log_warn("[xhci] port %u: unknown speed ID %u\n", port_num, speed);
@@ -890,6 +891,16 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
     log_info("[xhci] port %u: connected, reset complete, speed=%u\n",
              port_num, (unsigned)speed);
     return 0;
+}
+
+int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed)
+{
+    return xhci_port_reset_impl(ctrl, port_num, out_speed, false);
+}
+
+int xhci_port_reset_force(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed)
+{
+    return xhci_port_reset_impl(ctrl, port_num, out_speed, true);
 }
 
 int xhci_wait_min_ns(uint64_t duration_ns, uint64_t deadline_ns)
@@ -1881,7 +1892,8 @@ uint8_t xhci_calc_interval(uint8_t speed, uint8_t ep_type, uint8_t bInterval)
 
 static bool xhci_parse_ss_companion(const uint8_t *buffer, uint32_t total,
                                     uint32_t ep_offset, uint8_t ep_len,
-                                    uint8_t *out_max_burst)
+                                    uint8_t *out_max_burst,
+                                    uint16_t *out_bytes_per_interval)
 {
     uint32_t comp_off = ep_offset + ep_len;
     if (comp_off + 2 > total) return false;
@@ -1896,6 +1908,7 @@ static bool xhci_parse_ss_companion(const uint8_t *buffer, uint32_t total,
         (const struct usb_ss_ep_companion_descriptor *)(buffer + comp_off);
     if (comp->bMaxBurst > 15) return false;
     if (out_max_burst) *out_max_burst = comp->bMaxBurst;
+    if (out_bytes_per_interval) *out_bytes_per_interval = comp->wBytesPerInterval;
     return true;
 }
 
@@ -2013,7 +2026,7 @@ int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
 
             if (ep_xfer == 2 && msc_cur_eligible) {
                 if (xhci_speed_class(slot->ctrl, slot->port_num, slot->speed) == XHCI_PORT_SPEED_SUPER &&
-                    !xhci_parse_ss_companion(buffer, total, offset, len, NULL)) {
+                    !xhci_parse_ss_companion(buffer, total, offset, len, NULL, NULL)) {
                     msc_cur_eligible = false;
                 } else {
                     if (is_in && msc_cur_in_dci == 0) {
@@ -2132,10 +2145,18 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             }
 
             uint8_t max_burst = 0;
+            uint16_t max_esit_payload = 0;
             uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
                                                       : xhci_speed_class(slot->ctrl, slot->port_num, slot->speed);
             if (ep_xfer == 2 && speed_cls == XHCI_PORT_SPEED_SUPER) {
-                xhci_parse_ss_companion(buffer, total, offset, len, &max_burst);
+                xhci_parse_ss_companion(buffer, total, offset, len, &max_burst, NULL);
+            } else if (ep_xfer == 3 && speed_cls == XHCI_PORT_SPEED_SUPER) {
+                if (!xhci_parse_ss_companion(buffer, total, offset, len, &max_burst,
+                                             &max_esit_payload) ||
+                    max_esit_payload == 0 || max_esit_payload > 16) {
+                    xhci_free_endpoint_rings(slot);
+                    return -EINVAL;
+                }
             } else if (ep_xfer == 3 && speed_cls == XHCI_PORT_SPEED_HIGH) {
                 max_burst = tx_per_uframe;
             }
@@ -2184,6 +2205,7 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
                                                 ring->ep_type, ep->bInterval);
             ring->max_packet_size = mps;
             ring->max_burst = max_burst;
+            ring->max_esit_payload = max_esit_payload;
             ring->active = true;
 
             slot->ep_rings[dci] = ring;
@@ -2474,8 +2496,10 @@ static void xhci_fill_input_ep_ctx(uint32_t *ep_ctx, const struct xhci_ep_ring *
     ep_ctx[2] = (uint32_t)(deq_phys & 0xFFFFFFF0ULL) | (uint32_t)(dcs & 1U); /* TR Dequeue Lo, DCS */
     ep_ctx[3] = (uint32_t)(deq_phys >> 32);                        /* TR Dequeue Hi */
     uint32_t max_esit_lo = 0;
-    if (is_hub && (ring->ep_type == XHCI_EP_TYPE_INTR_IN ||
-                   ring->ep_type == XHCI_EP_TYPE_INTR_OUT)) {
+    if (ring->max_esit_payload != 0) {
+        max_esit_lo = ((uint32_t)ring->max_esit_payload & 0xFFFFU) << 16;
+    } else if (is_hub && (ring->ep_type == XHCI_EP_TYPE_INTR_IN ||
+                          ring->ep_type == XHCI_EP_TYPE_INTR_OUT)) {
         uint32_t esit = (uint32_t)ring->max_packet_size * ((uint32_t)ring->max_burst + 1U);
         max_esit_lo = (esit & 0xFFFFU) << 16;
     }

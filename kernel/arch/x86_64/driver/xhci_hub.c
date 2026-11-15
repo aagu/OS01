@@ -77,9 +77,14 @@ int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_bu
                            iface->bInterfaceClass == USB_CLASS_HUB &&
                            iface->bInterfaceSubClass == 0);
             if (in_hub_alt0) {
-                /* Accept FS (proto 0) or HS single-TT (proto 0 or 1); reject multi-TT alt0 (proto 2). */
-                if (iface->bInterfaceProtocol > 1 || iface->bNumEndpoints != 1)
-                    return -EINVAL;
+                /* Accept FS/SS (proto 0) or HS single-TT (proto 0 or 1); reject multi-TT alt0 (proto 2). */
+                if (speed_cls == XHCI_PORT_SPEED_SUPER) {
+                    if (iface->bInterfaceProtocol != 0 || iface->bNumEndpoints != 1)
+                        return -EINVAL;
+                } else {
+                    if (iface->bInterfaceProtocol > 1 || iface->bNumEndpoints != 1)
+                        return -EINVAL;
+                }
                 found_hub_iface = true;
             }
         } else if (type == USB_DESC_TYPE_ENDPOINT && in_hub_alt0) {
@@ -97,7 +102,24 @@ int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_bu
                 return -EINVAL;
             if (tx_per_uframe == 3U || mps == 0 || mps > 1024)
                 return -EINVAL;
-            if (speed_cls == XHCI_PORT_SPEED_HIGH) {
+            if (speed_cls == XHCI_PORT_SPEED_SUPER) {
+                if (tx_per_uframe != 0 || ep->bInterval < 1 || ep->bInterval > 16)
+                    return -EINVAL;
+                uint32_t comp_off = offset + len;
+                if (comp_off + sizeof(struct usb_ss_ep_companion_descriptor) > cfg_len)
+                    return -EINVAL;
+                uint8_t clen = cfg_buf[comp_off];
+                uint8_t ctype = cfg_buf[comp_off + 1];
+                if (clen < sizeof(struct usb_ss_ep_companion_descriptor) ||
+                    comp_off + clen > cfg_len ||
+                    ctype != USB_DESC_TYPE_SS_EP_COMPANION)
+                    return -EINVAL;
+                const struct usb_ss_ep_companion_descriptor *comp =
+                    (const struct usb_ss_ep_companion_descriptor *)(cfg_buf + comp_off);
+                if (comp->bMaxBurst > 15 || comp->wBytesPerInterval == 0 ||
+                    comp->wBytesPerInterval > 16)
+                    return -EINVAL;
+            } else if (speed_cls == XHCI_PORT_SPEED_HIGH) {
                 if (ep->bInterval < 1 || ep->bInterval > 16)
                     return -EINVAL;
             } else {
@@ -112,32 +134,144 @@ int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_bu
     return (found_hub_iface && found_intr_in && ep_count == 1) ? 0 : -EINVAL;
 }
 
+static bool hub_psi_is_gen1_x1(const struct xhci_controller *ctrl,
+                               const struct xhci_slot *slot)
+{
+    if (!ctrl || !slot || slot->loc.speed_class != XHCI_PORT_SPEED_SUPER)
+        return false;
+    uint8_t root_port = slot->loc.root_port;
+    uint8_t speed_id = slot->loc.speed_id;
+    if (speed_id == 0 || speed_id >= 16)
+        return false;
+
+    if (root_port < 256 && ctrl->port_cap_idx[root_port] != 0) {
+        const struct xhci_proto_cap *cap =
+            &ctrl->proto_caps[ctrl->port_cap_idx[root_port] - 1];
+        if (cap->rev_major != 3)
+            return false;
+        if (cap->psic > 0) {
+            const struct xhci_psi_entry *psi = &cap->psi[speed_id];
+            if (!psi->valid || psi->speed_class != XHCI_PORT_SPEED_SUPER ||
+                psi->plt != 0)
+                return false;
+            uint64_t kbps = 0;
+            switch (psi->psie) {
+            case 0: kbps = (uint64_t)psi->psim / 1000ULL; break;
+            case 1: kbps = (uint64_t)psi->psim; break;
+            case 2: kbps = (uint64_t)psi->psim * 1000ULL; break;
+            case 3: kbps = (uint64_t)psi->psim * 1000000ULL; break;
+            }
+            return kbps == 5000000ULL;
+        }
+        return speed_id == XHCI_PORT_SPEED_SUPER;
+    }
+    return speed_id == XHCI_PORT_SPEED_SUPER;
+}
+
+int xhci_hub_check_gen1(const struct xhci_controller *ctrl, uint8_t slot_id,
+                        const uint8_t *bos, size_t actual)
+{
+    if (!ctrl || !bos || slot_id < 1 || slot_id > XHCI_MAX_MANAGED_SLOTS ||
+        !ctrl->slots[slot_id])
+        return -EINVAL;
+    const struct xhci_slot *slot = ctrl->slots[slot_id];
+    if (!hub_psi_is_gen1_x1(ctrl, slot))
+        return -ENOTSUP;
+    if (actual < 5 || bos[0] != 5 || bos[1] != USB_DT_BOS)
+        return -EINVAL;
+
+    uint16_t total_len = le16_at(bos + 2);
+    uint8_t num_caps = bos[4];
+    if (total_len < 5 || total_len > actual)
+        return -EINVAL;
+
+    uint32_t offset = 5;
+    uint8_t caps_seen = 0;
+    bool saw_ss_cap = false;
+
+    while (offset < total_len) {
+        if (offset + 3 > total_len)
+            return -EINVAL;
+        uint8_t cap_len = bos[offset];
+        uint8_t cap_type = bos[offset + 1];
+        uint8_t dev_cap_type = bos[offset + 2];
+        if (cap_len < 3 || cap_type != USB_DT_DEVICE_CAPABILITY ||
+            offset + cap_len > total_len)
+            return -EINVAL;
+
+        if (dev_cap_type == USB_CAP_TYPE_SUPERSPEED_USB) {
+            if (cap_len < 10)
+                return -EINVAL;
+            uint16_t speeds = le16_at(bos + offset + 4);
+            if ((speeds & 0x0008U) == 0)
+                return -ENOTSUP;
+            saw_ss_cap = true;
+        } else if (dev_cap_type == USB_CAP_TYPE_SUPERSPEEDPLUS_USB) {
+            return -ENOTSUP;
+        }
+
+        caps_seen++;
+        offset += cap_len;
+    }
+
+    if (offset != total_len || caps_seen != num_caps || !saw_ss_cap)
+        return -EINVAL;
+    return 0;
+}
+
+int xhci_hub_set_depth(struct xhci_controller *ctrl, uint8_t slot,
+                       uint8_t depth, uint64_t deadline_ns)
+{
+    if (!ctrl || slot < 1 || slot > XHCI_MAX_MANAGED_SLOTS || depth > 4)
+        return -EINVAL;
+    struct xhci_setup setup = {
+        .type = USB_RT_HUB_OUT,
+        .request = USB_REQ_SET_HUB_DEPTH,
+        .value = depth,
+        .index = 0,
+        .length = 0
+    };
+    return xhci_control_no_data_until(ctrl, slot, &setup, deadline_ns);
+}
+
 int xhci_hub_read_info(struct xhci_controller *ctrl, uint8_t slot,
                        uint64_t deadline_ns, struct xhci_hub_info *out_info)
 {
     if (!ctrl || !out_info || slot < 1 || slot > XHCI_MAX_MANAGED_SLOTS)
         return -EINVAL;
 
+    const struct xhci_slot *slot_ptr = ctrl->slots[slot];
+    bool is_ss = false;
+    if (slot_ptr) {
+        uint8_t sc = slot_ptr->loc.speed_class ? slot_ptr->loc.speed_class
+                                               : slot_ptr->speed;
+        is_ss = slot_ptr->hub_ss || (sc == XHCI_PORT_SPEED_SUPER);
+    }
+
+    uint8_t want_type = is_ss ? USB_DT_SS_HUB : USB_DT_HUB;
+    uint16_t want_len = is_ss ? 12U : 15U;
     struct xhci_setup setup = {
         .type = USB_RT_HUB_IN,
         .request = USB_REQ_GET_DESCRIPTOR,
-        .value = ((uint16_t)USB_DT_HUB << 8),
+        .value = (uint16_t)((uint16_t)want_type << 8),
         .index = 0,
-        .length = 15
+        .length = want_len
     };
     uint8_t buf[15];
     memset(buf, 0, sizeof(buf));
-    int rc = xhci_control_in(ctrl, slot, &setup, buf, sizeof(buf), deadline_ns);
-    if (rc < 9) return rc < 0 ? rc : -EIO;
+    int rc = xhci_control_in(ctrl, slot, &setup, buf, want_len, deadline_ns);
+    int min_rc = is_ss ? 11 : 9;
+    if (rc < min_rc) return rc < 0 ? rc : -EIO;
 
     uint8_t desc_len = buf[0];
     uint8_t desc_type = buf[1];
     uint8_t nports = buf[2];
-    if (desc_type != USB_DT_HUB || nports == 0 || nports > 15)
+    if (desc_type != want_type || nports == 0 || nports > 15)
         return -EINVAL;
 
     uint8_t bitmap_bytes = (uint8_t)((nports + 7U) / 8U);
-    uint8_t min_len = (uint8_t)(7U + 2U * bitmap_bytes);
+    uint8_t min_len = is_ss ? (uint8_t)(10U + bitmap_bytes)
+                            : (uint8_t)(7U + 2U * bitmap_bytes);
     if (desc_len < min_len || rc < (int)min_len)
         return -EINVAL;
 
@@ -146,8 +280,8 @@ int xhci_hub_read_info(struct xhci_controller *ctrl, uint8_t slot,
     out_info->nports = nports;
     out_info->characteristics = chars;
     out_info->pwr_good_2ms = buf[5];
-    out_info->ttt = (uint8_t)((chars >> 5) & 0x3U);
-    out_info->superspeed = false;
+    out_info->ttt = is_ss ? 0U : (uint8_t)((chars >> 5) & 0x3U);
+    out_info->superspeed = is_ss;
     out_info->global_overcurrent = (((chars >> 3) & 0x3U) == 0U);
     return 0;
 }
@@ -167,11 +301,12 @@ int xhci_hub_prepare_ports(struct xhci_controller *ctrl, uint8_t slot,
         return -EIO;
 
     bool powered_any = false;
+    uint16_t pwr_bit = info->superspeed ? USB_SS_PORT_STAT_POWER : USB_PORT_STAT_POWER;
     for (uint8_t p = 1; p <= info->nports; p++) {
         uint16_t st = 0, chg = 0;
         rc = hub_get_status(ctrl, slot, USB_RT_PORT_IN, p, deadline_ns, &st, &chg);
         if (rc != 0) return rc;
-        if (!(st & USB_PORT_STAT_POWER)) {
+        if (!(st & pwr_bit)) {
             rc = hub_port_feature(ctrl, slot, USB_REQ_SET_FEATURE,
                                   USB_PORT_FEAT_POWER, p, deadline_ns);
             if (rc != 0) return rc;
@@ -248,6 +383,11 @@ int xhci_hub_reset_port(struct xhci_controller *ctrl, uint8_t slot,
                               USB_PORT_FEAT_C_RESET, port, deadline_ns);
         if (rc != 0) return rc;
     }
+    if (info->superspeed && (chg & USB_PORT_STAT_C_BH_PORT_RESET)) {
+        rc = hub_port_feature(ctrl, slot, USB_REQ_CLEAR_FEATURE,
+                              USB_PORT_FEAT_C_BH_PORT_RESET, port, deadline_ns);
+        if (rc != 0) return rc;
+    }
     while (st & USB_PORT_STAT_RESET) {
         rc = xhci_wait_min_ns(10000000ULL, deadline_ns);
         if (rc != 0) return rc;
@@ -255,8 +395,13 @@ int xhci_hub_reset_port(struct xhci_controller *ctrl, uint8_t slot,
         if (rc != 0) return rc;
     }
 
+    uint8_t init_pls = (uint8_t)((st >> 5) & 0x0FU);
+    bool warm = info->superspeed &&
+                (init_pls == XHCI_PLS_INACTIVE || init_pls == XHCI_PLS_COMPLIANCE);
+    uint16_t reset_feat = warm ? USB_PORT_FEAT_BH_PORT_RESET : USB_PORT_FEAT_RESET;
+
     rc = hub_port_feature(ctrl, slot, USB_REQ_SET_FEATURE,
-                          USB_PORT_FEAT_RESET, port, deadline_ns);
+                          reset_feat, port, deadline_ns);
     if (rc != 0) return rc;
     if (reset_issued) *reset_issued = true;
 
@@ -265,21 +410,47 @@ int xhci_hub_reset_port(struct xhci_controller *ctrl, uint8_t slot,
         if (rc != 0) return rc;
         rc = hub_get_status(ctrl, slot, USB_RT_PORT_IN, port, deadline_ns, &st, &chg);
         if (rc != 0) return rc;
-        if (!(st & USB_PORT_STAT_RESET) && (chg & USB_PORT_STAT_C_RESET))
+        if (!(st & USB_PORT_STAT_RESET) && (chg & USB_PORT_STAT_C_RESET) &&
+            (!warm || (chg & USB_PORT_STAT_C_BH_PORT_RESET)))
             break;
         if (!(st & USB_PORT_STAT_CONNECTION) && !(st & USB_PORT_STAT_RESET))
             break;
     }
+
+    if ((st & USB_PORT_STAT_RESET) || !(chg & USB_PORT_STAT_C_RESET) ||
+        (warm && !(chg & USB_PORT_STAT_C_BH_PORT_RESET)))
+        return (st & USB_PORT_STAT_CONNECTION) ? -EIO : -ENODEV;
 
     if (chg & USB_PORT_STAT_C_RESET) {
         rc = hub_port_feature(ctrl, slot, USB_REQ_CLEAR_FEATURE,
                               USB_PORT_FEAT_C_RESET, port, deadline_ns);
         if (rc != 0) return rc;
     }
+    if (info->superspeed && (chg & USB_PORT_STAT_C_BH_PORT_RESET)) {
+        rc = hub_port_feature(ctrl, slot, USB_REQ_CLEAR_FEATURE,
+                              USB_PORT_FEAT_C_BH_PORT_RESET, port, deadline_ns);
+        if (rc != 0) return rc;
+    }
     if (chg & USB_PORT_STAT_C_ENABLE) {
         rc = hub_port_feature(ctrl, slot, USB_REQ_CLEAR_FEATURE,
                               USB_PORT_FEAT_C_ENABLE, port, deadline_ns);
         if (rc != 0) return rc;
+    }
+
+    if (info->superspeed) {
+        uint16_t st2 = 0, chg2 = 0;
+        rc = hub_get_status(ctrl, slot, USB_RT_PORT_IN, port, deadline_ns, &st2, &chg2);
+        if (rc != 0) return rc;
+        if ((chg2 & USB_PORT_STAT_C_RESET) ||
+            (warm && (chg2 & USB_PORT_STAT_C_BH_PORT_RESET)))
+            return -EIO;
+        if (!(st2 & USB_PORT_STAT_CONNECTION))
+            return -ENODEV;
+        uint8_t pls = (uint8_t)((st2 >> 5) & 0x0FU);
+        if (!(st2 & USB_PORT_STAT_ENABLE) || pls != XHCI_PLS_U0)
+            return -EIO;
+        if (speed_class) *speed_class = XHCI_PORT_SPEED_SUPER;
+        return 0;
     }
 
     if (!(st & USB_PORT_STAT_CONNECTION) || !(st & USB_PORT_STAT_ENABLE)) {
@@ -423,6 +594,48 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     }
 
     if (desc.bDeviceClass == USB_CLASS_HUB) {
+        if (slot->loc.speed_class == XHCI_PORT_SPEED_SUPER) {
+            uint8_t bos_hdr[5];
+            struct xhci_setup bos_setup = {
+                .type = 0x80,
+                .request = USB_REQ_GET_DESCRIPTOR,
+                .value = ((uint16_t)USB_DT_BOS << 8),
+                .index = 0,
+                .length = 5
+            };
+            rc = xhci_control_in(ctrl, slot_id, &bos_setup, bos_hdr, sizeof(bos_hdr),
+                                 deadline_ns);
+            if (rc < 5 || bos_hdr[0] != 5 || bos_hdr[1] != USB_DT_BOS) {
+                log_warn("[xhci-hub] slot %u: BOS header read failed (rc=%d)\n", slot_id, rc);
+                xhci_free_slot(ctrl, slot_id);
+                return rc < 0 ? rc : -EINVAL;
+            }
+            uint16_t bos_total = le16_at(bos_hdr + 2);
+            if (bos_total < 5 || bos_total > 512) {
+                log_warn("[xhci-hub] slot %u: BOS length %u out of bounds\n",
+                         slot_id, (unsigned)bos_total);
+                xhci_free_slot(ctrl, slot_id);
+                return -EINVAL;
+            }
+            uint8_t *bos_buf = kmalloc(bos_total);
+            if (!bos_buf) {
+                xhci_free_slot(ctrl, slot_id);
+                return -ENOMEM;
+            }
+            bos_setup.length = bos_total;
+            rc = xhci_control_in(ctrl, slot_id, &bos_setup, bos_buf, bos_total,
+                                 deadline_ns);
+            if (rc >= 0)
+                rc = xhci_hub_check_gen1(ctrl, slot_id, bos_buf, (size_t)rc);
+            kfree(bos_buf);
+            if (rc != 0) {
+                log_warn("[xhci-hub] slot %u: SS Gen1x1 verification failed (rc=%d)\n",
+                         slot_id, rc);
+                xhci_free_slot(ctrl, slot_id);
+                return rc;
+            }
+        }
+
         struct xhci_hub_info hub_info;
         rc = xhci_hub_read_info(ctrl, slot_id, deadline_ns, &hub_info);
         if (rc != 0) {
@@ -453,7 +666,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
 
             if (loc->depth == 0) {
                 uint8_t dummy_speed = 0;
-                rc = xhci_port_reset(ctrl, loc->root_port, &dummy_speed);
+                rc = xhci_port_reset_force(ctrl, loc->root_port, &dummy_speed);
             } else if (parent_hub) {
                 uint8_t dummy_sc = 0;
                 bool dummy_ri = false;
@@ -474,15 +687,28 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             return rc;
         }
 
+        if (hub_info.superspeed) {
+            if (loc->depth > 4) {
+                xhci_free_slot(ctrl, slot_id);
+                return -ENOTSUP;
+            }
+            rc = xhci_hub_set_depth(ctrl, slot_id, loc->depth, deadline_ns);
+            if (rc != 0) {
+                log_warn("[xhci-hub] slot %u: SET_HUB_DEPTH failed (rc=%d)\n", slot_id, rc);
+                xhci_free_slot(ctrl, slot_id);
+                return rc;
+            }
+        }
+
         uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
         uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
         uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
         (void)bus; (void)dev; (void)fn;
-        log_info("[xhci-hub] ready bdf=%02x:%02x.%u root=%u route=0x%05x slot=%u protocol=usb2 ports=%u ttt=%u\n",
+        log_info("[xhci-hub] ready bdf=%02x:%02x.%u root=%u route=0x%05x slot=%u protocol=%s ports=%u ttt=%u\n",
                  (unsigned)bus, (unsigned)dev, (unsigned)fn,
                  (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
-                 (unsigned)slot->slot_id, (unsigned)hub_info.nports,
-                 (unsigned)hub_info.ttt);
+                 (unsigned)slot->slot_id, hub_info.superspeed ? "usb3" : "usb2",
+                 (unsigned)hub_info.nports, (unsigned)hub_info.ttt);
 
         if (loc->depth < 5 && *q_tail < XHCI_MAX_MANAGED_SLOTS) {
             hub_queue[(*q_tail)++] = slot_id;

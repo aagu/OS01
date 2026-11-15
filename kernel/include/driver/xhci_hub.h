@@ -8,9 +8,16 @@
 #include <driver/xhci.h>
 
 #define USB_CLASS_HUB               0x09
+#define USB_DT_BOS                  0x0F
+#define USB_DT_DEVICE_CAPABILITY    0x10
+#define USB_CAP_TYPE_SUPERSPEED_USB 0x0A
+#define USB_CAP_TYPE_SUPERSPEEDPLUS_USB 0x0B
 #define USB_DT_HUB                  0x29
+#define USB_DT_SS_HUB               0x2A
+#define USB_REQ_SET_HUB_DEPTH       12
 
 /* Hub class requests */
+#define USB_RT_HUB_OUT              0x20
 #define USB_RT_HUB_IN               0xA0
 #define USB_RT_PORT_IN              0xA3
 #define USB_RT_PORT_OUT             0x23
@@ -30,6 +37,7 @@
 #define USB_PORT_STAT_OVERCURRENT   0x0008U
 #define USB_PORT_STAT_RESET         0x0010U
 #define USB_PORT_STAT_POWER         0x0100U
+#define USB_SS_PORT_STAT_POWER      0x0200U
 #define USB_PORT_STAT_LOW_SPEED     0x0200U
 #define USB_PORT_STAT_HIGH_SPEED    0x0400U
 
@@ -39,10 +47,13 @@
 #define USB_PORT_STAT_C_SUSPEND     0x0004U
 #define USB_PORT_STAT_C_OVERCURRENT 0x0008U
 #define USB_PORT_STAT_C_RESET       0x0010U
+#define USB_PORT_STAT_C_BH_PORT_RESET 0x0020U
 
 /* Port feature selectors */
 #define USB_PORT_FEAT_ENABLE        1U
 #define USB_PORT_FEAT_RESET         4U
+#define USB_PORT_FEAT_BH_PORT_RESET 28U
+#define USB_PORT_FEAT_C_BH_PORT_RESET 29U
 #define USB_PORT_FEAT_POWER         8U
 #define USB_PORT_FEAT_C_CONNECTION  16U
 #define USB_PORT_FEAT_C_ENABLE      17U
@@ -76,6 +87,10 @@ int xhci_hub_reset_port(struct xhci_controller *ctrl, uint8_t slot,
                         const struct xhci_hub_info *info, uint8_t port,
                         uint64_t deadline_ns, uint8_t *speed_class,
                         bool *reset_issued);
+int xhci_hub_check_gen1(const struct xhci_controller *ctrl, uint8_t slot,
+                        const uint8_t *bos, size_t actual);
+int xhci_hub_set_depth(struct xhci_controller *ctrl, uint8_t slot,
+                       uint8_t depth, uint64_t deadline_ns);
 int xhci_hub_isolate_usb2(struct xhci_controller *ctrl, uint8_t slot,
                           uint8_t port, uint64_t cleanup_deadline_ns);
 void xhci_hub_probe_tree(struct xhci_controller *ctrl);

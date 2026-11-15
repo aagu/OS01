@@ -277,6 +277,7 @@ struct xhci_ep_ring {
     uint16_t max_packet_size;       /* Endpoint max packet size */
     uint8_t interval;               /* Computed xHCI interval exponent */
     uint8_t max_burst;              /* SuperSpeed Max Burst Size */
+    uint16_t max_esit_payload;      /* SS periodic companion wBytesPerInterval */
     bool active;
     bool td_barred;                 /* Endpoint barred from new TDs until settled */
     bool recovery_half_done;        /* Reset/Stop + TT clear already completed */
@@ -579,6 +580,7 @@ int xhci_poll_cmd_completion(struct xhci_controller *ctrl, uint64_t expect_trb_p
 int xhci_poll_transfer(struct xhci_controller *ctrl, uint8_t slot_id,
                        struct xhci_trb *out_evt, uint32_t timeout_loops);
 int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed);
+int xhci_port_reset_force(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed);
 int xhci_enable_slot(struct xhci_controller *ctrl, uint8_t port_num, uint8_t speed,
                      uint8_t *out_slot_id);
 int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id);

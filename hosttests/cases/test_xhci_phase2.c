@@ -1916,6 +1916,204 @@ static void test_hub_usb2_reset_and_isolation(void)
     assert_true(xhci_hub_isolate_usb2(&ctrl, 1, 2, s_mock_clock_ns + 50000000ULL) < 0);
 }
 
+static void test_hub_ss_gen1_boundary(void)
+{
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE] __attribute__((aligned(4096)));
+    struct xhci_trb event_ring[64] __attribute__((aligned(4096)));
+    uint8_t hub_dma[4096] __attribute__((aligned(4096)));
+    uint32_t hub_dev_ctx[1024] __attribute__((aligned(4096)));
+    uint32_t hub_in_ctx[1024] __attribute__((aligned(4096)));
+    uint32_t mmio[0x100];
+
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(hub_dma, 0, sizeof(hub_dma));
+    memset(hub_dev_ctx, 0, sizeof(hub_dev_ctx));
+    memset(hub_in_ctx, 0, sizeof(hub_in_ctx));
+    memset(mmio, 0, sizeof(mmio));
+
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = (volatile uint8_t *)mmio;
+    ctrl.op_regs = ctrl.mmio_virt;
+    ctrl.db_regs = ctrl.mmio_virt + 0x100;
+    ctrl.rt_regs = ctrl.mmio_virt + 0x200;
+    ctrl.max_ports = 4;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.port_proto[1] = 3;
+    ctrl.port_cap_idx[1] = 1;
+    ctrl.proto_caps[0].rev_major = 3;
+    ctrl.proto_caps[0].psic = 1;
+    ctrl.proto_caps[0].psi[4] = (struct xhci_psi_entry){
+        .valid = 1, .speed_class = XHCI_PORT_SPEED_SUPER,
+        .psie = 3, .psim = 5, .plt = 0
+    };
+
+    struct xhci_slot hub;
+    memset(&hub, 0, sizeof(hub));
+    hub.active = true;
+    hub.slot_id = 1;
+    hub.ctrl = &ctrl;
+    hub.ep0_ring_virt = ep0_ring;
+    hub.ep0_ring_phys = (uint64_t)(uintptr_t)ep0_ring;
+    hub.ep0_ring_cycle = 1;
+    hub.dma_buf_virt = hub_dma;
+    hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hub.dev_ctx_virt = hub_dev_ctx;
+    hub.dev_ctx_phys = (uint64_t)(uintptr_t)hub_dev_ctx;
+    hub.input_ctx_virt = hub_in_ctx;
+    hub.input_ctx_phys = (uint64_t)(uintptr_t)hub_in_ctx;
+    hub.loc = (struct xhci_location){
+        .root_port = 1, .speed_id = 4, .speed_class = XHCI_PORT_SPEED_SUPER
+    };
+    hub.speed = 4;
+    hub.port_num = 1;
+    ctrl.slots[1] = &hub;
+
+    /* 1. Valid BOS with SS USB Device Cap (0x0a) and no SSP (0x0b) */
+    const uint8_t valid_bos[] = {
+        5, 0x0F, 15, 0, 1, /* BOS: total_len=15, num_caps=1 */
+        10, 0x10, 0x0A, 0x00, 0x08, 0x00, 0x01, 0x0A, 0x64, 0x00 /* SS Cap, 5Gbps supported */
+    };
+    assert_eq(0, xhci_hub_check_gen1(&ctrl, 1, valid_bos, sizeof(valid_bos)));
+
+    /* 2. Truncated BOS / bad cap length / missing SS cap / SSP declared -> rejected */
+    assert_true(xhci_hub_check_gen1(&ctrl, 1, valid_bos, 14) < 0);
+    const uint8_t bad_cap_len[] = {
+        5, 0x0F, 12, 0, 1,
+        7, 0x10, 0x0A, 0x00, 0x08, 0x00, 0x01 /* SS Cap len < 10 */
+    };
+    assert_true(xhci_hub_check_gen1(&ctrl, 1, bad_cap_len, sizeof(bad_cap_len)) < 0);
+    const uint8_t ssp_bos[] = {
+        5, 0x0F, 27, 0, 2,
+        10, 0x10, 0x0A, 0x00, 0x08, 0x00, 0x01, 0x0A, 0x64, 0x00,
+        12, 0x10, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    assert_true(xhci_hub_check_gen1(&ctrl, 1, ssp_bos, sizeof(ssp_bos)) < 0);
+
+    /* 3. Asymmetric or 10G PSI rejected even if speed_class == SUPER */
+    ctrl.proto_caps[0].psi[4].plt = 2; /* Asymmetric Rx */
+    assert_true(xhci_hub_check_gen1(&ctrl, 1, valid_bos, sizeof(valid_bos)) < 0);
+    ctrl.proto_caps[0].psi[4].plt = 0;
+    ctrl.proto_caps[0].psi[4].psim = 10; /* 10 Gb/s SSP */
+    assert_true(xhci_hub_check_gen1(&ctrl, 1, valid_bos, sizeof(valid_bos)) < 0);
+
+    /* Restore valid PSI, verify 0x2a SS Hub descriptor parsing */
+    ctrl.proto_caps[0].psi[4].psim = 5;
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+    memset(hub_dma, 0, 64);
+    hub_dma[0] = 12; hub_dma[1] = 0x2A; hub_dma[2] = 4;
+    hub_dma[3] = 0x01; hub_dma[4] = 0x00;
+    hub_dma[5] = 50;
+    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[1].parameter = hub.ep0_ring_phys + 2 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct xhci_hub_info info;
+    assert_eq(0, xhci_hub_read_info(&ctrl, 1, s_mock_clock_ns + 50000000ULL, &info));
+    assert_true(info.superspeed);
+    assert_eq(4, info.nports);
+    assert_eq(0, info.ttt);
+}
+
+static void test_hub_ss_depth_and_reset(void)
+{
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE] __attribute__((aligned(4096)));
+    struct xhci_trb event_ring[64] __attribute__((aligned(4096)));
+    uint8_t hub_dma[4096] __attribute__((aligned(4096)));
+    uint32_t mmio[0x100];
+
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(hub_dma, 0, sizeof(hub_dma));
+    memset(mmio, 0, sizeof(mmio));
+
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = (volatile uint8_t *)mmio;
+    ctrl.op_regs = ctrl.mmio_virt;
+    ctrl.db_regs = ctrl.mmio_virt + 0x100;
+    ctrl.rt_regs = ctrl.mmio_virt + 0x200;
+    ctrl.max_ports = 4;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+
+    struct xhci_slot hub;
+    memset(&hub, 0, sizeof(hub));
+    hub.active = true;
+    hub.slot_id = 1;
+    hub.ctrl = &ctrl;
+    hub.ep0_ring_virt = ep0_ring;
+    hub.ep0_ring_phys = (uint64_t)(uintptr_t)ep0_ring;
+    hub.ep0_ring_cycle = 1;
+    hub.dma_buf_virt = hub_dma;
+    hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hub.loc = (struct xhci_location){
+        .root_port = 1, .speed_id = 4, .speed_class = XHCI_PORT_SPEED_SUPER
+    };
+    hub.speed = 4;
+    hub.hub_ss = true;
+    ctrl.slots[1] = &hub;
+
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+
+    /* 1. SET_HUB_DEPTH depth=0 sends {0x20, 12, 0, 0, 0}; depth=4 ok; depth=5 rejected without TRB */
+    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(0, xhci_hub_set_depth(&ctrl, 1, 0, s_mock_clock_ns + 50000000ULL));
+    assert_eq(0x0000000000000C20ULL, ep0_ring[0].parameter);
+
+    event_ring[1].parameter = hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_eq(0, xhci_hub_set_depth(&ctrl, 1, 4, s_mock_clock_ns + 50000000ULL));
+    assert_eq(0x0000000000040C20ULL, ep0_ring[2].parameter);
+
+    uint32_t enq_before = hub.ep0_ring_enqueue;
+    assert_true(xhci_hub_set_depth(&ctrl, 1, 5, s_mock_clock_ns + 50000000ULL) < 0);
+    assert_eq(enq_before, hub.ep0_ring_enqueue);
+
+    /* 2. Warm reset missing C_BH_PORT_RESET fails; BH_PORT_RESET (feature 28) is issued */
+    struct xhci_hub_info info = { .nports = 4, .pwr_good_2ms = 25, .superspeed = true };
+    memset(ep0_ring, 0, sizeof(ep0_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    hub.ep0_ring_enqueue = 0;
+    hub.ep0_ring_cycle = 1;
+    ctrl.event_ring_dequeue = 0;
+    ctrl.event_ring_cycle = 1;
+
+    hub_dma[0] = 0xC1; hub_dma[1] = 0x02; /* PLS=6 (Inactive), CCS=1, PP=0x0200 */
+    hub_dma[2] = 0x10; hub_dma[3] = 0x00; /* C_RESET only, missing C_BH_PORT_RESET (0x20) */
+    /* req0 GET_STATUS (TRBs 0,1,2 -> evts 1,2)
+     * req1 CLEAR C_RESET (TRBs 3,4 -> evt 4)
+     * req2 BH_PORT_RESET (TRBs 5,6 -> evt 6)
+     * req3..5 poll GET_STATUS (TRBs 7,8,9 -> evts 8,9; 10,11,12 -> evts 11,12) */
+    uint32_t ev_trbs[] = { 1, 2, 4, 6, 8, 9, 11, 12 };
+    for (int i = 0; i < 8; i++) {
+        event_ring[i].parameter = hub.ep0_ring_phys + ev_trbs[i] * sizeof(struct xhci_trb);
+        event_ring[i].status = (XHCI_COMP_SUCCESS << 24);
+        event_ring[i].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    }
+    uint8_t sc = 0;
+    bool reset_issued = false;
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 50000000ULL;
+    int rc = xhci_hub_reset_port(&ctrl, 1, &info, 1, s_mock_clock_ns + 2000000000ULL, &sc, &reset_issued);
+    assert_true(rc < 0);
+    assert_true(reset_issued);
+    /* Verify BH_PORT_RESET (feature 28 = 0x1C) was issued at req2 (TRB 5) */
+    assert_eq(0x00000001001C0323ULL, ep0_ring[5].parameter);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -1943,6 +2141,8 @@ int main(void)
     test_xhci_split_ep0_terminal();
     test_hub_usb2_controls();
     test_hub_usb2_reset_and_isolation();
+    test_hub_ss_gen1_boundary();
+    test_hub_ss_depth_and_reset();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
