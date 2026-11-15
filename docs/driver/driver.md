@@ -739,3 +739,4 @@ void example_init()
 
 - **范围**：x86_64 下 USB Boot Protocol 键盘与鼠标（支持直连 xHCI root port 与单层 USB 2.0 Hub），通过 `input_route` 与 PS/2 共用消费租约与 `/dev/keyboard`、`/dev/mouse`、TTY 路由；无 i8042 时仍自动初始化 `/dev/mouse` 与控制台输入。
 - **验收套件**：`make PROFILE=x86_64-clang test-qemu SUITE=usb-hid`（覆盖 `direct`/`hub` × `SMP=1`/`2` 四组，`i8042=off`，使用 QMP `input-send-event` 与 `device_del`，并验证共享 Hub 上 USB BOT 存储并发与 detach 后持久化）。
+- **回归与实机记录**：见 [docs/driver/usb-hid-qualification.md](usb-hid-qualification.md)（`test-host`、`test-static`、`SUITE=phase-0`、`SUITE=gui`、`SUITE=usb-boot` 6/6 子用例及 `aarch64-clang MODE=smp` 均 exit 0；`test-harness` 因 4 项目录/mock 同步问题 exit 2；物理实机与 HS Hub Split/TT 在纯 QEMU 环境下未验证）。
