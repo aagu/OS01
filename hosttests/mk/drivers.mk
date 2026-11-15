@@ -461,3 +461,19 @@ LINK_GROUP_boot-devpath := $(TEST_BLD)/uefi_boot_device.o
 test-boot-devpath: $(TEST_BLD)/test_boot_devpath.elf
 	$<
 
+# USB Boot HID report decoder
+$(TEST_BLD)/usb_hid_report_production.o: $(TESTS_DIR)/kernel/driver/usb_hid_report.c \
+    $(TESTS_DIR)/kernel/include/driver/usb_hid_report.h \
+    $(TESTS_DIR)/kernel/include/driver/input_ps2.h \
+    $(TESTS_DIR)/kernel/include/uapi/mouse.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+LINK_CFLAGS_usb-hid-report = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_usb-hid-report := $(TEST_BLD)/usb_hid_report_production.o
+
+.PHONY: test-usb-hid-report test_usb_hid_report
+test-usb-hid-report test_usb_hid_report: $(TEST_BLD)/test_usb_hid_report.elf
+	$<
+
+
