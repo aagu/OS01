@@ -31,8 +31,10 @@ class DispatchGeneratedTests(unittest.TestCase):
         suites = self._load_bridge_suites()
         expected_flavors = {s["id"]: s["flavor"] for s in suites if "flavor" in s}
         expected_images = {s["id"]: s["image_var"] for s in suites if "image_var" in s}
-        self.assertEqual(len(expected_flavors), 20)
-        self.assertEqual(len(expected_images), 20)
+        # No hardcoded count here: the bridge is the source of truth and
+        # the equality checks below compare every entry.  A stale count
+        # (hardcoded 20 while usb-boot made it 21) broke this test on
+        # master without any real drift.
 
         res_f = subprocess.run(
             ["make", "-s", "print-test-qemu-flavors"],

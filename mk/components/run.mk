@@ -103,11 +103,6 @@ else
 RUN_SELECTED_DISK = $(RUN_QEMU_DISK)
 endif
 
-# Flags before the common network/disk section, followed by the original
-# final reboot flag only on run and run-kvm.
-RUN_QEMU_FLAGS_run-kvm    = -accel kvm
-RUN_QEMU_FLAGS_debug      = -S -s
-
 # Capability-gated prerequisites reproduce the original
 # `$(if $(filter rootfs,...),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))` pattern
 # so a clean workspace still gets the disk image + firmware built first.
@@ -116,7 +111,7 @@ run:        $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF
 	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
 run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_run-kvm) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
+	$(RUN_QEMU_BASE) -accel kvm -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
 run-virtio: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(RUN_QEMU_BASE) -netdev user,id=net0 -device virtio-net-pci,disable-modern=on,netdev=net0 $(RUN_SELECTED_DISK)
@@ -134,7 +129,7 @@ run-usb:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF
 debug: QEMU_IMAGE = $(DISK_IMG)
 debug:      $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(DISK_IMG) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
-	$(RUN_QEMU_BASE) $(RUN_QEMU_FLAGS_debug) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK)
+	$(RUN_QEMU_BASE) -S -s -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_QEMU_DISK)
 
 # ── aarch64 UEFI bring-up (uefi capability) ────────────
 # Targets are always defined so `make aarch64-uefi` under the default x86
@@ -1460,8 +1455,6 @@ test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE
 	exit $$status
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
-
-# Exercise repeated exec/exit through the normal terminal and ash path.
 .PHONY: test-syscall-repeat
 ifneq ($(filter test-syscall-repeat,$(MAKECMDGOALS)),)
 ifneq ($(filter 1,$(OS01_SYSTEST) $(KERNEL_SELFTEST)),)
@@ -1955,118 +1948,97 @@ print-user-paths:
 # instead of a hard error. AGENTS.md Quick start and the docs are the canonical
 # recipes; this is the discoverability surface for `make` itself.
 .PHONY: help
+# help is table-driven: one HELP_SEC_* variable per section, each entry a
+# pre-quoted 'target' 'capability' 'purpose' triple (printf repeats the row
+# format per triple). Keep make help in sync with new targets.
+HELP_SEC_BUILD := \
+	'disk.img' '(rootfs)' 'Build the normal disk image (default goal)' \
+	'kernel.bin' '(rootfs)' 'Project-root kernel copy (cmp-guarded)' \
+	'lib' '(userland)' 'Build the sysroot (libc, mbedtls, etc.)' \
+	'user' '(userland)' 'Build userland ELFs (incl. busybox.elf)' \
+	'image' '(rootfs)' 'Active profile disk image (variant-resolved)' \
+	'sysroot' '(userland)' 'Project-root sysroot/ symlink for clangd (editor)'
+HELP_SEC_RUN := \
+	'run' '(rootfs)' 'QEMU q35 + e1000 + serial stdio (BOOT_METHOD=hdd|usb, default hdd)' \
+	'run-kvm' '(rootfs)' 'QEMU with KVM acceleration' \
+	'run-virtio' '(rootfs)' 'QEMU with virtio-net-pci (instead of e1000)' \
+	'run-usb' '(rootfs)' 'QEMU USB-only topology (usb-storage on qemu-xhci; alias for run BOOT_METHOD=usb)' \
+	'debug' '(rootfs)' 'QEMU paused, GDB :1234 (-S -s)'
+HELP_SEC_AARCH64 := \
+	'aarch64-uefi' '(uefi)' 'Build aarch64 disk + firmware' \
+	'aarch64-uefi-kernel' '(uefi)' 'Build aarch64 kernel.elf only' \
+	'run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
+HELP_SEC_VALIDATE := \
+	'validate' '(rootfs)' 'kernel ELF + UEFI COFF + profile info' \
+	'validate-kernel' '(rootfs)' 'kernel ELF sanity (no undef, EM_X86_64, exports)' \
+	'validate-uefi' '(rootfs)' 'EFI app COFF exports parseable' \
+	'validate-profile' '(always)' 'Print profile / triple / sysroot / capabilities' \
+	'print-run-paths' '(rootfs)' 'Print absolute firmware + active image path'
+HELP_SEC_TEST := \
+	'test-qemu' '(rootfs)' 'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress>, CASE=<id> selects one systest case)' \
+	'test-qemu-usb-boot' '(rootfs)' 'M0 USB-only firmware gate (USB_BOOT_CASE=firmware; expects fs/root rc=-19)' \
+	'test-host' '(rootfs)' 'os01_submake hosttests + pmm_boot_reservation_test.py' \
+	'test-static' '(rootfs)' 'All static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, intr-dispatch, arch10-capacity, user-canary)' \
+	'test-gui-incremental' '(rootfs)' 'GUI library incremental contract (no-op rebuild, header-touch rebuild, staging orphan, generation publish)' \
+	'test-kernel-selftest' '(rootfs)' 'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)' \
+	'test-aarch64' '(uefi)' 'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-*>)' \
+	'test-contract' '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)'
+HELP_SEC_FRAMEWORK := \
+	'test-harness' '(always)' 'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts); also runs test-framework-contract as a prereq' \
+	'test-framework-contract' '(always)' 'Hostside negative contract: builds test_framework_contract.elf and asserts exit code 1 (assertion exit-code propagation / single-evaluation / TEST_RESULTS snapshot)' \
+	'test-flake-report' '(always)' 'Flake ledger report from local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); always exits 0' \
+	'test-doctor' '(always)' 'Compare local clang/ld.lld/qemu versions against ci/Dockerfile pins (exits 2 only if a tool cannot execute)' \
+	'ci-local' '(always)' 'Run test suite inside ghcr.io/aagu/os01-ci:latest via docker/podman (SUITE=<name> or MAKE_ARGS=...)'
+HELP_SEC_STANDALONE := \
+	'test-syscall' '(rootfs)' 'RETAINED ALIAS — see docs/build/build.md section 4 (AGENTS.md exact-target requirement; use OS01_SYSTEST=1 test-qemu SUITE=systest in new code)' \
+	'test-syscall-repeat' '(rootfs)' 'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)' \
+	'test-user-canary' '(rootfs)' '7-step SSP / crt0 user-stack canary audit (spec 2026-09-17)' \
+	'test-pmm-boot-reservation' '(rootfs)' 'PMM boot-time memory reservation guard (host-only)'
+HELP_SEC_FOCUSED := \
+	'test-kernel-layout' '(rootfs)' 'x86_64 kernel.elf layout audit (post-_end reserved)' \
+	'test-kernel-canary-contract' '(rootfs)' 'Kernel canary compile-flag contract' \
+	'test-resolution-host' '(rootfs)' 'Resolution switcher host tests (RES_CASE=<uapi|...|all>)'
+HELP_SEC_MAINT := \
+	'clean' '(always)' 'Remove build/<profile> + root compat copies (lock-checked)' \
+	'unlock-profile' '(always)' 'Diagnose stale publish lock (FORCE_UNLOCK=1 to remove)'
+
 help:
 	@echo 'OS01 build — profile=$(PROFILE) capabilities=$(PROFILE_CAPABILITIES)'
-	@echo ''
 	@printf '  %-22s %-13s %s\n' 'TARGET' 'CAPABILITY' 'PURPOSE'
 	@echo '  --------------------- ------------- ------------------------------'
-	@printf '  %-22s %-13s %s\n' \
-		 'disk.img'          '(rootfs)'     'Build the normal disk image (default goal)';
-	@printf '  %-22s %-13s %s\n' \
-		 'kernel.bin'        '(rootfs)'     'Project-root kernel copy (cmp-guarded)';
-	@printf '  %-22s %-13s %s\n' \
-		 'lib'               '(userland)'   'Build the sysroot (libc, mbedtls, etc.)';
-	@printf '  %-22s %-13s %s\n' \
-		 'user'              '(userland)'   'Build userland ELFs (incl. busybox.elf)';
-	@printf '  %-22s %-13s %s\n' \
-		 'image'             '(rootfs)'     'Current profile'"'"'s disk image (variant-resolved)';
-	@printf '  %-22s %-13s %s\n' \
-		 'sysroot'           '(userland)'   'Project-root sysroot/ symlink for clangd (editor)';
+	@echo ''
+	@echo 'Build / aliases:'
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_BUILD)
 	@echo ''
 	@echo 'Run / Debug (x86, rootfs):'
-	@printf '  %-22s %-13s %s\n' \
-		 'run'               '(rootfs)'     'QEMU q35 + e1000 + serial stdio (BOOT_METHOD=hdd|usb, default hdd)';
-	@printf '  %-22s %-13s %s\n' \
-		 'run-kvm'           '(rootfs)'     'QEMU with KVM acceleration';
-	@printf '  %-22s %-13s %s\n' \
-		 'run-virtio'        '(rootfs)'     'QEMU with virtio-net-pci (instead of e1000)';
-	@printf '  %-22s %-13s %s\n' \
-		 'run-usb'           '(rootfs)'     'QEMU USB-only topology (usb-storage on qemu-xhci; alias for run BOOT_METHOD=usb)';
-	@printf '  %-22s %-13s %s\n' \
-		 'debug'             '(rootfs)'     'QEMU paused, GDB :1234 (-S -s)';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_RUN)
 	@echo ''
 	@echo 'aarch64 UEFI bring-up (uefi):'
-	@printf '  %-22s %-13s %s\n' \
-		 'aarch64-uefi'           '(uefi)' 'Build aarch64 disk + firmware';
-	@printf '  %-22s %-13s %s\n' \
-		 'aarch64-uefi-kernel'    '(uefi)' 'Build aarch64 kernel.elf only';
-	@printf '  %-22s %-13s %s\n' \
-		 'run-aarch64-uefi'       '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_AARCH64)
 	@echo ''
 	@echo 'Validation (x86 rootfs):'
-	@printf '  %-22s %-13s %s\n' \
-		 'validate'          '(rootfs)'     'kernel ELF + UEFI COFF + profile info';
-	@printf '  %-22s %-13s %s\n' \
-		 'validate-kernel'   '(rootfs)'     'kernel ELF sanity (no undef, EM_X86_64, exports)';
-	@printf '  %-22s %-13s %s\n' \
-		 'validate-uefi'     '(rootfs)'     'EFI app COFF exports parseable';
-	@printf '  %-22s %-13s %s\n' \
-		 'validate-profile'  '(always)'     'Print profile / triple / sysroot / capabilities';
-	@echo ''
-	@echo 'Inspection:'
-	@printf '  %-22s %-13s %s\n' \
-		 'print-run-paths'   '(rootfs)'     'Print absolute firmware + active image path';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_VALIDATE)
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
-	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu'           '(rootfs)'     'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress>, CASE=<id> selects one systest case)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-qemu-usb-boot'  '(rootfs)'     'M0 USB-only firmware gate (USB_BOOT_CASE=firmware; expects fs/root rc=-19)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-host'           '(rootfs)'     'os01_submake hosttests + pmm_boot_reservation_test.py';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-static'         '(rootfs)'     'All static audits (runtime, stack-canary, validate-kernel, runtime-link-order, kernel-runtime-link, syscall-boundary, kernel-layout, kernel-canary-contract, header-object, stack-frame, driver-model-boundary, gui-build, intr-dispatch, arch10-capacity, user-canary)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-gui-incremental' '(rootfs)'    'GUI library incremental contract (no-op rebuild, header-touch rebuild, staging orphan, generation publish)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-kernel-selftest' '(rootfs)'   'QEMU built-in selftests (isolated selftest image, KERNEL_SELFTEST=1)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-aarch64'        '(uefi)'       'aarch64 UEFI test (MODE=<smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|m1-*>)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-contract'       '(rootfs|uefi)' 'Full build contract (PROFILE=<x86_64-clang|aarch64-clang>)';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_TEST)
 	@echo ''
 	@echo 'Framework regression (no QEMU; always):'
-	@printf '  %-22s %-13s %s\n' \
-		 'test-harness'         '(always)'   'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts); also runs test-framework-contract as a prereq';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-framework-contract' '(always)' 'Hostside negative contract: builds test_framework_contract.elf and asserts exit code 1 (assertion exit-code propagation / single-evaluation / TEST_RESULTS snapshot)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-flake-report'    '(always)'   'Flake ledger report from local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); always exits 0';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-doctor'          '(always)'   'Compare local clang/ld.lld/qemu versions against ci/Dockerfile pins (exits 2 only if a tool cannot execute)';
-	@printf '  %-22s %-13s %s\n' \
-		 'ci-local'             '(always)'   'Run test suite inside ghcr.io/aagu/os01-ci:latest via docker/podman (SUITE=<name> or MAKE_ARGS=...)';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_FRAMEWORK)
 	@echo ''
 	@echo 'Standalone test targets (distinct harness / image variant):'
-	@printf '  %-22s %-13s %s\n' \
-		 'test-syscall'          '(rootfs)'   'RETAINED ALIAS — see docs/build/build.md §4 (AGENTS.md exact-target requirement; use OS01_SYSTEST=1 test-qemu SUITE=systest in new code)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-syscall-repeat'   '(rootfs)'   'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-user-canary'      '(rootfs)'   '7-step SSP / crt0 user-stack canary audit (spec 2026-09-17)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-pmm-boot-reservation' '(rootfs)' 'PMM boot-time memory reservation guard (host-only)';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_STANDALONE)
 	@echo ''
-	@echo 'Focused compatibility checks (retained; see docs/build/build.md §3 alias policy):'
-	@printf '  %-22s %-13s %s\n' \
-		 'test-kernel-layout'    '(rootfs)'   'x86_64 kernel.elf layout audit (post-_end reserved)';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-kernel-canary-contract' '(rootfs)' 'Kernel canary compile-flag contract';
-	@printf '  %-22s %-13s %s\n' \
-		 'test-resolution-host'  '(rootfs)'   'Resolution switcher host tests (RES_CASE=<uapi|...|all>)';
+	@echo 'Focused compatibility checks (retained; see docs/build/build.md alias policy):'
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_FOCUSED)
 	@echo ''
 	@echo 'Maintenance:'
-	@printf '  %-22s %-13s %s\n' \
-		 'clean'             '(always)'     'Remove build/<profile> + root compat copies (lock-checked)';
-	@printf '  %-22s %-13s %s\n' \
-		 'unlock-profile'    '(always)'     'Diagnose stale publish lock (FORCE_UNLOCK=1 to remove)';
+	@printf '  %-22s %-13s %s\n' $(HELP_SEC_MAINT)
 	@echo ''
 	@echo 'Common flags: PROFILE=<name>, DEBUG_CHANNELS=<a,b>, OS01_SYSTEST=1,'
 	@echo '              OS01_NETTEST=1, INITTAB_FILE=<path>, KERNEL_SELFTEST=1,'
 	@echo '              NDEBUG=1, LOG_TARGET=serial|both.'
 	@echo 'See AGENTS.md Quick start and docs/build/build.md for recipes.'
-	@echo 'See docs/build/build.md §3 alias policy for the retained focused checks (test-runtime, test-kernel-layout, test-kernel-canary-contract, test-user-canary, test-pmm-boot-reservation).'
-
+	@echo 'See docs/build/build.md alias policy for the retained focused checks (test-runtime, test-kernel-layout, test-kernel-canary-contract, test-user-canary, test-pmm-boot-reservation).'
 # ── Image alias ─────────────────────────────────────────────
 # `make image` builds the current profile's disk image — variant-resolved
 # (OS01_SYSTEST=1 / OS01_NETTEST=1 / INITTAB_FILE=config/inittab.test select
@@ -2293,22 +2265,12 @@ LIBC_HOST_CASES := $(LIBC_HOST_DELIVERED_CASES) regex
 
 $(eval $(call host_case_group,test-libc-host,$(LIBC_HOST_DELIVERED_CASES),rootfs,LIBC_CASE,,$(LIBC_HOST_MAPPING)))
 
-# The RED build of the path group (T14 evidence).  It is NOT part of
-# LIBC_HOST_CASES: a RED build must never be reachable through the
-# delivered-case namespace, and it is EXPECTED to fail — that failure is
-# the transcript.
-#
-# RED-1 (behavioural): the path group is built against the pre-T14
-#   realpath (an empty stub that answered NULL) — every realpath case
-#   fails as an ASSERTION.
-# RED-2 (link): the exec wrappers.  Before T14, execl/execlp/execle had
-#   NO definition in OS01's own libc archive, so a user program calling
-#   them failed to link.  The host's glibc defines them, so the hole is
-#   invisible in a host link — it is reproduced here against the real
-#   archive: the member T14 added is deleted from a copy of libc.a and
-#   a probe program is linked against the result.  A CONTROL link
-#   against the pristine archive must succeed, so the only difference
-#   between the two links is the exec wrappers.
+# RED build of the path group (T14 evidence): expected to fail — that
+# failure is the transcript.  RED-1 compiles the path group against the
+# pre-T14 realpath stub; RED-2 reproduces the pre-T14 link hole
+# (execl/execlp/execle undefined) against a libc.a copy with the T14
+# member deleted, with a CONTROL link against the pristine archive.
+# Full narrative: docs/superpowers/plans/2026-11-08-libc-completion.md.
 .PHONY: test-libc-path-red
 test-libc-path-red:
 	@echo "=== RED-1 (behaviour): realpath was a stub that answered NULL ==="
@@ -2355,23 +2317,11 @@ test-libc-path-red:
 	  echo "RED reproduced: RED-1 exit $$rc_run, CONTROL exit $$rc_ctrl, RED-2 exit $$rc_link"; \
 	  exit 1
 
-# The RED build of the dir group (T15 evidence).  It is NOT part of
-# LIBC_HOST_CASES: a RED build must never be reachable through the
-# delivered-case namespace, and it is EXPECTED to fail — that failure is
-# the transcript.
-#
-# RED-1 (behavioural): the dir group is built against the PRE-T15
-#   dirent.c (opendir() did not check the type, readdir() did not set
-#   errno and did not copy the kernel's d_off), with the new-API cases
-#   compiled out — those symbols had no definition before T15.
-# RED-2 (link): the directory descriptor and the sorted scan (dirfd,
-#   fdopendir, scandir, alphasort) had NO definition before T15, so a user
-#   program calling them failed to link.  The host's glibc defines them,
-#   so the hole is invisible in a host link — it is reproduced here against
-#   the real archive: the members T15 added are deleted from a copy of
-#   libc.a and a probe program is linked against the result.  A CONTROL
-#   link against the pristine archive must succeed, so the only difference
-#   between the two links is the T15 members.
+# RED build of the dir group (T15 evidence), same protocol as the path
+# group: RED-1 compiles against the pre-T15 dirent.c (no type check, no
+# errno, no d_off); RED-2 deletes the T15 archive members (scandir.o,
+# dirent.o) and links a probe, with a CONTROL link against the pristine
+# archive.
 .PHONY: test-libc-dir-red
 test-libc-dir-red:
 	@echo "=== RED-1 (behaviour): the pre-T15 dirent.c has no type check, no errno and no d_off ==="
