@@ -3288,6 +3288,11 @@ test-xhci-hid-desc:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-xhci-hid-desc $(OS01_SUBMAKE_ARGS))
 
+.PHONY: test-xhci-intr-in
+test-xhci-intr-in:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-xhci-intr-in $(OS01_SUBMAKE_ARGS))
+
 
 # ── libc completion focused host tests (T1) ───────────────────────
 # make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<case>

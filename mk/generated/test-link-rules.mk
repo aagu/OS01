@@ -41,3 +41,9 @@ $(TEST_BLD)/test_xhci_hid_desc.o: $(TEST_CASES)/test_xhci_hid_desc.c
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-hid-desc)),$(LINK_CFLAGS_xhci-hid-desc),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
 $(TEST_BLD)/test_xhci_hid_desc.elf: $(TEST_BLD)/test_xhci_hid_desc.o $(LINK_GROUP_xhci-hid-desc)
 	$(HOST_CC) $(LINK_LDFLAGS_xhci-hid-desc) -o $@ $^
+
+$(TEST_BLD)/test_xhci_intr_in.o: $(TEST_CASES)/test_xhci_intr_in.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-intr-in)),$(LINK_CFLAGS_xhci-intr-in),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_xhci_intr_in.elf: $(TEST_BLD)/test_xhci_intr_in.o $(LINK_GROUP_xhci-intr-in)
+	$(HOST_CC) $(LINK_LDFLAGS_xhci-intr-in) -o $@ $^

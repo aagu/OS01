@@ -25,6 +25,12 @@ struct xhci_hid_candidate {
     uint16_t mps;
 };
 
+struct xhci_intr_in_result {
+    uint32_t cc;
+    uint16_t actual;
+    bool bad_length;
+};
+
 int xhci_hid_scan_config(const uint8_t *cfg, uint16_t len, uint8_t speed_class,
                          struct xhci_hid_candidate out[XHCI_HID_KINDS],
                          uint32_t *hid_skip_dcis);

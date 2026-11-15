@@ -5150,6 +5150,17 @@
       }
     },
     {
+      "id": "test_xhci_intr_in",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "link": "xhci-intr-in",
+      "source": "hosttests/cases/test_xhci_intr_in.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_xhci_phase2",
       "layer": "host",
