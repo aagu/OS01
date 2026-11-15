@@ -243,17 +243,34 @@ int main(int argc, char **argv)
             gfx_close(gfx);
             return 1;
         }
-        /* One real gfx_present ships the buffer to the kernel. */
-        if (gfx_present(gfx) != 0) {
-            gfx_release(gfx);
-            gfx_close(gfx);
-            return 1;
-        }
+        /* Measure only the synchronous present, with a pre-rendered buffer. */
+        struct timespec start, end;
+        int start_rc = clock_gettime(CLOCK_MONOTONIC, &start);
+        int present_rc = gfx_present(gfx);
+        int end_rc = clock_gettime(CLOCK_MONOTONIC, &end);
         gfx_release(gfx);
         gfx_close(gfx);
-        /* The marker line — single line, no extra banners.  Goes
-         * to stdout (fd 1), which under -serial stdio is the QEMU
-         * serial port the runner reads. */
+
+        char timing[160];
+        unsigned long long bytes =
+            (unsigned long long)fb_info.width * fb_info.height * sizeof(uint32_t);
+        int len;
+        if (start_rc == 0 && end_rc == 0) {
+            int64_t elapsed_ns = ((int64_t)end.tv_sec - start.tv_sec) * 1000000000LL
+                               + ((int64_t)end.tv_nsec - start.tv_nsec);
+            len = snprintf(timing, sizeof(timing),
+                           "[TETRIS] PRESENT %ux%u pitch=%u bytes=%llu elapsed_ns=%lld rc=%d\n",
+                           fb_info.width, fb_info.height, fb_info.stride, bytes,
+                           (long long)elapsed_ns, present_rc);
+        } else {
+            len = snprintf(timing, sizeof(timing),
+                           "[TETRIS] PRESENT clock_gettime failed rc=%d\n", present_rc);
+        }
+        if (len < 0 || (size_t)len >= sizeof(timing) ||
+            write(1, timing, (size_t)len) != len || present_rc != 0)
+            return 1;
+
+        /* Preserve the success marker consumed by the QEMU runner. */
         static const char msg[] = "[TETRIS] SMOKE PASS\n";
         if (write(1, msg, sizeof(msg) - 1) !=
             (ssize_t)(sizeof(msg) - 1))
