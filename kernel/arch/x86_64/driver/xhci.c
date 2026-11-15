@@ -156,8 +156,9 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
     ctrl->rt_regs = ctrl->mmio_virt + ctrl->rtsoff;
     ctrl->db_regs = ctrl->mmio_virt + ctrl->dboff;
 
-    if (ctrl->max_scratchpads > 0) {
-        log_warn("[xhci] scratchpad buffers requested (%u), unsupported\n", ctrl->max_scratchpads);
+    if (ctrl->max_scratchpads > (4096U / sizeof(uint64_t))) {
+        log_warn("[xhci] scratchpad buffers requested (%u) exceed 1-page array limit\n",
+                 ctrl->max_scratchpads);
         return -ENOTSUP;
     }
 
@@ -315,6 +316,86 @@ int xhci_reset(struct xhci_controller *ctrl)
     return 0;
 }
 
+static void xhci_free_scratchpads(struct xhci_controller *ctrl)
+{
+    if (!ctrl) return;
+    if (ctrl->scratchpad_pages_phys) {
+        for (uint32_t i = 0; i < ctrl->scratchpad_count; i++) {
+            if (ctrl->scratchpad_pages_phys[i]) {
+                free_4k_page(ctrl->scratchpad_pages_phys[i]);
+                ctrl->scratchpad_pages_phys[i] = 0;
+            }
+        }
+        kfree(ctrl->scratchpad_pages_phys);
+        ctrl->scratchpad_pages_phys = NULL;
+    }
+    ctrl->scratchpad_count = 0;
+    if (ctrl->scratchpad_array_phys) {
+        free_4k_page(ctrl->scratchpad_array_phys);
+        ctrl->scratchpad_array_phys = 0;
+        ctrl->scratchpad_array_virt = NULL;
+    }
+    if (ctrl->dcbaa_virt)
+        ctrl->dcbaa_virt[0] = 0;
+}
+
+static int xhci_alloc_scratchpads(struct xhci_controller *ctrl)
+{
+    if (ctrl->max_scratchpads == 0)
+        return 0;
+
+    if (ctrl->max_scratchpads > (4096U / sizeof(uint64_t)))
+        return -ENOTSUP;
+
+    if (ctrl->op_regs) {
+        uint32_t pagesize = xhci_read32(ctrl->op_regs + XHCI_OP_PAGESIZE) & 0xFFFFU;
+        if ((pagesize & 1U) == 0) {
+            log_warn("[xhci] controller PAGESIZE=0x%x does not support 4KB scratchpads\n",
+                     pagesize);
+            return -ENOTSUP;
+        }
+    }
+
+    ctrl->scratchpad_array_phys = alloc_4k_page();
+    if (!ctrl->scratchpad_array_phys)
+        return -ENOMEM;
+    if (!xhci_dma_range_ok(ctrl, ctrl->scratchpad_array_phys, 4096)) {
+        free_4k_page(ctrl->scratchpad_array_phys);
+        ctrl->scratchpad_array_phys = 0;
+        return -EIO;
+    }
+    ctrl->scratchpad_array_virt = (uint64_t *)Phy_To_Virt(ctrl->scratchpad_array_phys);
+    memset(ctrl->scratchpad_array_virt, 0, 4096);
+
+    ctrl->scratchpad_pages_phys = (uint64_t *)kmalloc((size_t)ctrl->max_scratchpads * sizeof(uint64_t));
+    if (!ctrl->scratchpad_pages_phys) {
+        xhci_free_scratchpads(ctrl);
+        return -ENOMEM;
+    }
+    memset(ctrl->scratchpad_pages_phys, 0, (size_t)ctrl->max_scratchpads * sizeof(uint64_t));
+    ctrl->scratchpad_count = 0;
+
+    for (uint32_t i = 0; i < ctrl->max_scratchpads; i++) {
+        uint64_t page = alloc_4k_page();
+        if (!page) {
+            xhci_free_scratchpads(ctrl);
+            return -ENOMEM;
+        }
+        if (!xhci_dma_range_ok(ctrl, page, 4096)) {
+            free_4k_page(page);
+            xhci_free_scratchpads(ctrl);
+            return -EIO;
+        }
+        memset(Phy_To_Virt(page), 0, 4096);
+        ctrl->scratchpad_pages_phys[i] = page;
+        ctrl->scratchpad_array_virt[i] = page;
+        ctrl->scratchpad_count = i + 1;
+    }
+
+    ctrl->dcbaa_virt[0] = ctrl->scratchpad_array_phys;
+    return 0;
+}
+
 int xhci_alloc_dma(struct xhci_controller *ctrl)
 {
     if (!ctrl) return -EINVAL;
@@ -329,6 +410,11 @@ int xhci_alloc_dma(struct xhci_controller *ctrl)
     }
     ctrl->dcbaa_virt = (uint64_t *)Phy_To_Virt(ctrl->dcbaa_phys);
     memset(ctrl->dcbaa_virt, 0, 4096);
+
+    /* 1b. Scratchpad Buffers (DCBAA[0] -> Scratchpad Buffer Array) */
+    int sp_rc = xhci_alloc_scratchpads(ctrl);
+    if (sp_rc < 0)
+        return sp_rc;
 
     /* 2. Command Ring (256 TRBs) */
     ctrl->cmd_ring_phys = alloc_4k_page();
@@ -2326,6 +2412,7 @@ void xhci_free_dma(struct xhci_controller *ctrl)
         ctrl->cmd_ring_phys = 0;
         ctrl->cmd_ring_virt = NULL;
     }
+    xhci_free_scratchpads(ctrl);
     if (ctrl->dcbaa_phys) {
         free_4k_page(ctrl->dcbaa_phys);
         ctrl->dcbaa_phys = 0;

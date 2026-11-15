@@ -429,6 +429,12 @@ struct xhci_controller {
     uint64_t dcbaa_phys;
     uint64_t *dcbaa_virt;
 
+    /* Scratchpad Buffers */
+    uint64_t scratchpad_array_phys;
+    uint64_t *scratchpad_array_virt;
+    uint64_t *scratchpad_pages_phys;
+    uint32_t scratchpad_count;
+
     /* Command Ring */
     uint64_t cmd_ring_phys;
     struct xhci_trb *cmd_ring_virt;

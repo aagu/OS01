@@ -163,6 +163,7 @@ static void init_mock_mmio_defaults(void)
     *(uint32_t *)(s_mock_mmio + XHCI_CAP_RTSOFF) = 0x600;
 
     /* Operational registers: base = 0x20 */
+    *(uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_PAGESIZE) = 1U; /* 4KB */
     /* USBSTS: initial state: HCH=1 (halted), CNR=0 (ready) */
     *(uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_USBSTS) = XHCI_STS_HCH;
 }
@@ -191,21 +192,104 @@ static void test_xhci_cap_parsing(void)
     assert_true(ctrl.db_regs == s_mock_mmio + 0x400);
 }
 
-static void test_xhci_scratchpad_rejection(void)
+static void test_xhci_scratchpad_buffers(void)
 {
-    TEST_CASE("xhci scratchpad buffers rejection (>0 returns -ENOTSUP)");
+    TEST_CASE("xhci scratchpad buffers allocation and >512 rejection");
     init_mock_mmio_defaults();
+    reset_mock_pages();
 
     /* Set scratchpad count = 4 in HCSPARAMS2 (bits 31:27 = 4) */
-    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS2) = (4 << 27);
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS2) = (4U << 27);
+    *(uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_PAGESIZE) = 1U; /* 4KB */
 
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
+    ctrl.ac64 = true;
+    ctrl.ac64_valid = true;
 
     int rc = xhci_parse_capabilities(&ctrl);
-    assert_eq(-ENOTSUP, rc);
+    assert_eq(0, rc);
     assert_eq(4, ctrl.max_scratchpads);
+
+    rc = xhci_alloc_dma(&ctrl);
+    assert_eq(0, rc);
+    assert_true(ctrl.scratchpad_array_phys != 0);
+    assert_true(ctrl.scratchpad_array_virt != NULL);
+    assert_true(ctrl.scratchpad_pages_phys != NULL);
+    assert_eq(4, ctrl.scratchpad_count);
+    assert_eq(ctrl.scratchpad_array_phys, ctrl.dcbaa_virt[0]);
+    for (uint32_t i = 0; i < 4; i++) {
+        assert_true(ctrl.scratchpad_pages_phys[i] != 0);
+        assert_eq(ctrl.scratchpad_pages_phys[i], ctrl.scratchpad_array_virt[i]);
+    }
+
+    /* Retain scratchpads when dma_retained && !halted_confirmed */
+    ctrl.halted_confirmed = false;
+    ctrl.dma_retained = true;
+    xhci_free_dma(&ctrl);
+    assert_true(ctrl.scratchpad_array_phys != 0);
+    assert_eq(4, ctrl.scratchpad_count);
+    assert_eq(9, s_mock_page_count); /* dcbaa + array + 4 buffers + cmd + event + erst */
+
+    ctrl.halted_confirmed = true;
+    xhci_free_dma(&ctrl);
+    assert_eq(0, ctrl.scratchpad_array_phys);
+    assert_eq(0, ctrl.scratchpad_count);
+    assert_true(ctrl.scratchpad_pages_phys == NULL);
+    assert_eq(0, s_mock_page_count);
+
+    /* Partial-allocation rollback (dcbaa=1, array=2, buf0=3, buf1=4, fail at 5) */
+    s_mock_page_alloc_limit = 4;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
+    ctrl.ac64 = true;
+    ctrl.ac64_valid = true;
+    assert_eq(0, xhci_parse_capabilities(&ctrl));
+    assert_eq(-ENOMEM, xhci_alloc_dma(&ctrl));
+    assert_eq(0, ctrl.scratchpad_array_phys);
+    assert_eq(0, ctrl.scratchpad_count);
+    assert_true(ctrl.scratchpad_pages_phys == NULL);
+    ctrl.halted_confirmed = true;
+    xhci_free_dma(&ctrl);
+    assert_eq(0, s_mock_page_count);
+    s_mock_page_alloc_limit = -1;
+
+    /* PAGESIZE != 4KB (and 0) returns -ENOTSUP */
+    *(uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_PAGESIZE) = 2U;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
+    ctrl.ac64 = true;
+    ctrl.ac64_valid = true;
+    assert_eq(0, xhci_parse_capabilities(&ctrl));
+    assert_eq(-ENOTSUP, xhci_alloc_dma(&ctrl));
+    ctrl.halted_confirmed = true;
+    xhci_free_dma(&ctrl);
+    assert_eq(0, s_mock_page_count);
+
+    *(uint32_t *)(s_mock_mmio + 0x20 + XHCI_OP_PAGESIZE) = 0U;
+    assert_eq(-ENOTSUP, xhci_alloc_dma(&ctrl));
+    ctrl.halted_confirmed = true;
+    xhci_free_dma(&ctrl);
+    assert_eq(0, s_mock_page_count);
+
+    /* ==512 scratchpad buffers boundary (16 << 5 = 512) succeeds cap parse */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS2) = (16U << 21);
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
+    assert_eq(0, xhci_parse_capabilities(&ctrl));
+    assert_eq(512, ctrl.max_scratchpads);
+
+    /* >512 scratchpad buffers (exceeds 1-page array limit) returns -ENOTSUP */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCSPARAMS2) = (17U << 21); /* 17 << 5 = 544 */
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
+    assert_eq(-ENOTSUP, xhci_parse_capabilities(&ctrl));
 }
 
 static void test_xhci_reset_success(void)
@@ -498,7 +582,7 @@ int main(void)
 
     test_xhci_driver_registration();
     test_xhci_cap_parsing();
-    test_xhci_scratchpad_rejection();
+    test_xhci_scratchpad_buffers();
     test_xhci_reset_success();
     test_xhci_reset_running_controller();
     test_xhci_reset_timeout_and_hse();
