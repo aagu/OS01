@@ -589,6 +589,9 @@ LOG_TARGET ?= both
 ALL_CFLAGS += -DLOG_TARGET_SERIAL=$(call bool,$(filter serial both,$(LOG_TARGET)))
 ALL_CFLAGS += -DLOG_TARGET_FB=$(call bool,$(filter fb both,$(LOG_TARGET)))
 
+FB_SHADOW ?= 0
+ALL_CFLAGS += -DFB_SHADOW=$(call bool,$(filter 1 yes true,$(FB_SHADOW)))
+
 # ── CFLAGS fingerprint stamp ───────────────────────────────
 # make tracks file timestamps, not compile commands: a CFLAGS-only change
 # (DEBUG channels, LOG_TARGET, KERNEL_EXTRA_CFLAGS probes, the sysroot

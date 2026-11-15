@@ -25,7 +25,7 @@
 #include <driver/font.h>
 #include <core/printk.h>
 
-#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST) && defined(FB_SHADOW) && FB_SHADOW
 #include <memory/pmm.h>
 #include <memory/memory.h>
 

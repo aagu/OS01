@@ -28,7 +28,7 @@ static void console_scroll_snap(const fb_snapshot_t *snap)
     int row_bytes = (int)(pitch * font->height);
     uint8_t *fb = (uint8_t *)(snap && snap->addr ? snap->addr : Pos.FB_addr);
     if (!fb) return;
-#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST) && defined(FB_SHADOW) && FB_SHADOW
     printk_fb_shadow_scroll(fb, xres, yres, (uint32_t)row_bytes, rows);
 #else
     memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
@@ -121,7 +121,7 @@ void console_surrender_fb(void)
 {
     uint64_t flags = spin_lock_irqsave(&Pos.lock);
     console_fb_active = false;
-#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST) && defined(FB_SHADOW) && FB_SHADOW
     printk_fb_shadow_release();
 #endif
     spin_unlock_irqrestore(&Pos.lock, flags);
