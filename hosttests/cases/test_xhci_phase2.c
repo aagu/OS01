@@ -972,11 +972,22 @@ void test_xhci_ownership_and_dma(void)
     *(uint32_t *)(s_mock_mmio + 0xFF4) = XHCI_EXT_CAP_PROTOCOL | (2U << 24);
     assert_true(xhci_parse_capabilities(&ctrl) < 0);
 
-    /* 4d. Supported Protocol with PSIC=1 (custom PSI) rejected */
-    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0x800U >> 2) << 16);
-    *(uint32_t *)(s_mock_mmio + 0x800) = XHCI_EXT_CAP_PROTOCOL | (2U << 24);
-    *(uint32_t *)(s_mock_mmio + 0x808) = (1U << 28) | (1U << 8) | 1U; /* PSIC=1 */
+    /* 4d. Supported Protocol with PSIC=1 truncated past 0x1000 aperture rejected */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0xFF0U >> 2) << 16);
+    *(uint32_t *)(s_mock_mmio + 0xFF0) = XHCI_EXT_CAP_PROTOCOL | (3U << 24);
+    *(uint32_t *)(s_mock_mmio + 0xFF8) = (1U << 28) | (1U << 8) | 1U; /* PSIC=1 -> needs 20B */
     assert_true(xhci_parse_capabilities(&ctrl) < 0);
+
+    /* 4d2. Supported Protocol with valid PSIC=2 (5Gbps PSIV=4, 10Gbps PSIV=5) accepted */
+    *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = ((0x800U >> 2) << 16);
+    *(uint32_t *)(s_mock_mmio + 0x800) = XHCI_EXT_CAP_PROTOCOL | (3U << 24);
+    *(uint32_t *)(s_mock_mmio + 0x808) = (2U << 28) | (1U << 8) | 1U; /* PSIC=2, port 1..1 */
+    *(uint32_t *)(s_mock_mmio + 0x810) = (5U << 16) | (3U << 4) | 4U;  /* PSIV=4, 5Gbps */
+    *(uint32_t *)(s_mock_mmio + 0x814) = (10U << 16) | (3U << 4) | 5U; /* PSIV=5, 10Gbps */
+    assert_eq(0, xhci_parse_capabilities(&ctrl));
+    assert_eq(3, ctrl.port_proto[1]);
+    assert_eq(XHCI_PORT_SPEED_SUPER, ctrl.psi_speed_class[1][4]);
+    assert_eq(XHCI_PORT_SPEED_SUPER, ctrl.psi_speed_class[1][5]);
 
     /* 4e. Port registers beyond 0x1000 aperture rejected (caplength=0x20, max_ports=250 -> 0x420+250*16 > 0x1000) */
     *(uint32_t *)(s_mock_mmio + XHCI_CAP_HCCPARAMS1) = 0;

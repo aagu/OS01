@@ -465,6 +465,9 @@ struct xhci_controller {
     bool has_legsup;
     uint32_t legsup_offset;
     uint8_t port_proto[256];
+    /* Canonical speed class (XHCI_PORT_SPEED_*) indexed by [proto_idx][psiv],
+     * where proto_idx: 0 = USB2, 1 = USB3.  0 means unmapped. */
+    uint8_t psi_speed_class[2][16];
 };
 
 /* xHCI MMIO read/write accessors */

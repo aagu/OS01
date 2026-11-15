@@ -165,6 +165,7 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
     ctrl->has_legsup = false;
     ctrl->legsup_offset = 0;
     memset(ctrl->port_proto, 0, sizeof(ctrl->port_proto));
+    memset(ctrl->psi_speed_class, 0, sizeof(ctrl->psi_speed_class));
 
     uint32_t xecp = (hccparams1 >> 16) & 0xFFFFU;
     if (xecp != 0) {
@@ -195,9 +196,27 @@ int xhci_parse_capabilities(struct xhci_controller *ctrl)
                 uint8_t psic = (dw2 >> 28) & 0x0FU;
                 if (off + 16 + (uint64_t)psic * 4ULL > ctrl->mmio_len)
                     return -EIO;
-                if (psic != 0) {
-                    log_warn("[xhci] custom PSI table (PSIC=%u) unsupported\n", psic);
-                    return -ENOTSUP;
+                for (uint32_t i = 0; i < psic; i++) {
+                    uint32_t psi = xhci_read32(ctrl->mmio_virt + off + 16 + (uint64_t)i * 4ULL);
+                    uint8_t psiv = psi & 0x0FU;
+                    uint8_t psie = (psi >> 4) & 0x03U;
+                    uint64_t psim = (psi >> 16) & 0xFFFFU;
+                    if (psiv == 0 || (rev_major != 2 && rev_major != 3))
+                        continue;
+                    uint64_t kbps = 0;
+                    switch (psie) {
+                    case 0: kbps = psim / 1000ULL; break;       /* bps -> Kbps */
+                    case 1: kbps = psim; break;                 /* Kbps */
+                    case 2: kbps = psim * 1000ULL; break;       /* Mbps -> Kbps */
+                    case 3: kbps = psim * 1000000ULL; break;    /* Gbps -> Kbps */
+                    }
+                    uint8_t cls = 0;
+                    if (kbps > 1000000ULL)      cls = XHCI_PORT_SPEED_SUPER;
+                    else if (kbps > 20000ULL)   cls = XHCI_PORT_SPEED_HIGH;
+                    else if (kbps > 2000ULL)    cls = XHCI_PORT_SPEED_FULL;
+                    else if (kbps > 0)          cls = XHCI_PORT_SPEED_LOW;
+                    if (cls != 0)
+                        ctrl->psi_speed_class[rev_major == 3 ? 1 : 0][psiv] = cls;
                 }
                 if (port_cnt > 0) {
                     if (port_off == 0 || (uint32_t)port_off + port_cnt - 1 > ctrl->max_ports)
@@ -616,6 +635,28 @@ static int xhci_poll_transfer_matched(struct xhci_controller *ctrl, uint8_t slot
                                     out_evt, timeout_loops);
 }
 
+/* Map a hardware PORTSC.PortSpeed (PSIV) value on `port_num` to the
+ * canonical xHCI speed class (XHCI_PORT_SPEED_FULL/LOW/HIGH/SUPER),
+ * consulting any custom PSI table parsed from XHCI_EXT_CAP_PROTOCOL.
+ * Returns 0 if unknown/invalid. */
+static uint8_t xhci_speed_class(const struct xhci_controller *ctrl,
+                                uint32_t port_num, uint8_t speed)
+{
+    if (speed == 0 || speed >= 16)
+        return 0;
+    if (ctrl && port_num < 256) {
+        uint8_t proto = ctrl->port_proto[port_num];
+        if (proto == 2 || proto == 3) {
+            uint8_t cls = ctrl->psi_speed_class[proto == 3 ? 1 : 0][speed];
+            if (cls != 0)
+                return cls;
+        }
+    }
+    if (speed >= XHCI_PORT_SPEED_FULL && speed <= XHCI_PORT_SPEED_SUPER)
+        return speed;
+    return 0;
+}
+
 int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *out_speed)
 {
     if (!ctrl || !ctrl->op_regs || port_num < 1 || port_num > ctrl->max_ports)
@@ -640,7 +681,7 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
 
     if (is_usb3 && (portsc & XHCI_PORTSC_PED) && pls == XHCI_PLS_U0) {
         uint8_t speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
-        if (speed < XHCI_PORT_SPEED_FULL || speed > XHCI_PORT_SPEED_SUPER) {
+        if (xhci_speed_class(ctrl, port_num, speed) == 0) {
             log_warn("[xhci] port %u: unknown speed ID %u\n", port_num, speed);
             return -ENOTSUP;
         }
@@ -705,7 +746,7 @@ int xhci_port_reset(struct xhci_controller *ctrl, uint32_t port_num, uint8_t *ou
     xhci_delay_ms(10);
 
     uint8_t speed = (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
-    if (speed < XHCI_PORT_SPEED_FULL || speed > XHCI_PORT_SPEED_SUPER) {
+    if (xhci_speed_class(ctrl, port_num, speed) == 0) {
         log_warn("[xhci] port %u: unknown speed ID %u\n", port_num, speed);
         return -ENOTSUP;
     }
@@ -896,7 +937,7 @@ int xhci_address_device(struct xhci_controller *ctrl, uint8_t slot_id)
     slot->ep0_ring_enqueue = 0;
 
     uint16_t max_packet_size;
-    switch (slot->speed) {
+    switch (xhci_speed_class(ctrl, slot->port_num, slot->speed)) {
     case XHCI_PORT_SPEED_LOW:
         max_packet_size = 8;
         break;
@@ -1175,7 +1216,7 @@ uint8_t xhci_calc_interval(uint8_t speed, uint8_t ep_type, uint8_t bInterval)
 
     if (bInterval == 0) return 3;
 
-    if (speed == XHCI_PORT_SPEED_HIGH || speed == XHCI_PORT_SPEED_SUPER) {
+    if (speed == XHCI_PORT_SPEED_HIGH || speed >= XHCI_PORT_SPEED_SUPER) {
         return (bInterval <= 16) ? (uint8_t)(bInterval - 1) : 15;
     }
 
@@ -1321,7 +1362,7 @@ int xhci_parse_config_descriptor(struct xhci_slot *slot, const uint8_t *buffer,
             if (dci > max_dci) max_dci = dci;
 
             if (ep_xfer == 2 && msc_cur_eligible) {
-                if (slot->speed == XHCI_PORT_SPEED_SUPER &&
+                if (xhci_speed_class(slot->ctrl, slot->port_num, slot->speed) == XHCI_PORT_SPEED_SUPER &&
                     !xhci_parse_ss_companion(buffer, total, offset, len, NULL)) {
                     msc_cur_eligible = false;
                 } else {
@@ -1436,7 +1477,8 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             }
 
             uint8_t max_burst = 0;
-            if (ep_xfer == 2 && slot->speed == XHCI_PORT_SPEED_SUPER) {
+            uint8_t speed_cls = xhci_speed_class(slot->ctrl, slot->port_num, slot->speed);
+            if (ep_xfer == 2 && speed_cls == XHCI_PORT_SPEED_SUPER) {
                 xhci_parse_ss_companion(buffer, total, offset, len, &max_burst);
             }
 
@@ -1480,7 +1522,8 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
                 break;
             }
 
-            ring->interval = xhci_calc_interval(slot->speed, ring->ep_type, ep->bInterval);
+            ring->interval = xhci_calc_interval(speed_cls ? speed_cls : slot->speed,
+                                                ring->ep_type, ep->bInterval);
             ring->max_packet_size = mps;
             ring->max_burst = max_burst;
             ring->active = true;
