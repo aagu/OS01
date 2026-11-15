@@ -286,36 +286,24 @@ endif
 # mode owns its sched-ap variant trees through the controlled sub-make
 # boundary and refuses every other compile-affecting selector — the
 # outer make rejects, never just the profile's sub-make parse.
-ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
-ifeq ($(MODE),sched-tick)
-ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
-$(error MODE=sched-tick cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
-endif
-ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
-$(error MODE=sched-tick cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_AP_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
-endif
-endif
-endif
-ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
-ifeq ($(MODE),sched-wake)
-ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
-$(error MODE=sched-wake cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
-endif
-ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
-$(error MODE=sched-wake cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
-endif
-endif
-endif
-ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
-ifeq ($(MODE),sched-ap)
-ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
-$(error MODE=sched-ap cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST)
-endif
-ifneq ($(strip $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_SELFTEST)),)
-$(error MODE=sched-ap cannot be combined with AARCH64_M1_TEST/AARCH64_SCHED_TEST/AARCH64_SMP_TEST_NO_ACK_CPU/KERNEL_SELFTEST overrides — it sets its own)
-endif
-endif
-endif
+# sched-tick/sched-wake/sched-ap share one parse-time conflict gate: the
+# mode owns its compile selector(s) and rejects every other
+# compile-affecting override (sched has extra NO_ACK=0 leniency and keeps
+# its own gate below).  tick owns AARCH64_SCHED_TICK_TEST and rejects
+# both sched selectors; wake owns AARCH64_AP_SCHED_TEST=wake; ap owns
+# AARCH64_AP_SCHED_TEST — so each rejects the others' selectors.
+empty_for_gates :=
+space_for_gates := $(empty_for_gates) $(empty_for_gates)
+define _aarch64_mode_gate
+$(if $(filter test-aarch64,$(MAKECMDGOALS)),
+$(if $(filter $(MODE),$(1)),
+$(if $(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),$(error MODE=$(1) cannot be combined with sync-fault/weak-selftest/canary/OS01_SYSTEST),)
+$(if $(strip $(foreach v,$(2),$($(v))) $(KERNEL_SELFTEST)),$(error MODE=$(1) cannot be combined with $(subst $(space_for_gates),/,$(2))/KERNEL_SELFTEST overrides — it sets its own),)
+,),)
+endef
+$(eval $(call _aarch64_mode_gate,sched-tick,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
+$(eval $(call _aarch64_mode_gate,sched-wake,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
+$(eval $(call _aarch64_mode_gate,sched-ap,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),sched)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
@@ -483,25 +471,19 @@ _test-aarch64-run-sync-fault:
 # uses the per-CPU diagnostic DTB (the prebuilt edk2 firmware does not
 # expose FDT through the EFI configuration table on current QEMU; see
 # docs/build/build.md "MODE=sched").
-.PHONY: _test-aarch64-prep-sched _test-aarch64-prep-sched-positive _test-aarch64-prep-sched-sp-top _test-aarch64-prep-sched-sp-low _test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data _test-aarch64-prep-sched-all
+AARCH64_SCHED_CASES := positive sp-top sp-low pc-low pc-data
+define _aarch64_sched_prep
+.PHONY: _test-aarch64-prep-sched-$(1)
+_test-aarch64-prep-sched-$(1):
+	$$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=$(1) aarch64-uefi
+endef
+$(foreach c,$(AARCH64_SCHED_CASES),$(eval $(call _aarch64_sched_prep,$(c))))
+.PHONY: _test-aarch64-prep-sched _test-aarch64-prep-sched-all
 _test-aarch64-prep-sched: _test-aarch64-prep-sched-$(SCHED_CASE)
-_test-aarch64-prep-sched-positive:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=positive aarch64-uefi
-_test-aarch64-prep-sched-sp-top:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=sp-top aarch64-uefi
-_test-aarch64-prep-sched-sp-low:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=sp-low aarch64-uefi
-_test-aarch64-prep-sched-pc-low:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-low aarch64-uefi
-_test-aarch64-prep-sched-pc-data:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=pc-data aarch64-uefi
 # The `all` runner also audits the ordinary normal + ordinary selftest
 # ELFs (`label=ordinary-*`), so `SCHED_CASE=all` must build them too —
 # a clean tree otherwise fails the audit with "ELF not found".
-_test-aarch64-prep-sched-all: _test-aarch64-prep-sched-positive \
-	_test-aarch64-prep-sched-sp-top _test-aarch64-prep-sched-sp-low \
-	_test-aarch64-prep-sched-pc-low _test-aarch64-prep-sched-pc-data \
-	_test-aarch64-prep-sched-ordinary
+_test-aarch64-prep-sched-all: $(foreach c,$(AARCH64_SCHED_CASES),_test-aarch64-prep-sched-$(c)) _test-aarch64-prep-sched-ordinary
 .PHONY: _test-aarch64-prep-sched-ordinary
 _test-aarch64-prep-sched-ordinary:
 	$(MAKE) AARCH64_SCHED_TEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= \
@@ -509,47 +491,20 @@ _test-aarch64-prep-sched-ordinary:
 	$(MAKE) AARCH64_SCHED_TEST= AARCH64_M1_TEST= AARCH64_SYNC_FAULT_TEST= \
 	  AARCH64_SMP_TEST_NO_ACK_CPU=0 KERNEL_SELFTEST=1 aarch64-uefi
 
-# Per-SCHED_CASE explicit path maps for one runner invocation. The
-# runner's --variant schema is fixed: variant name + image + firmware +
-# ELF. `all` passes all five maps (positive matrix + every fault case).
-AARCH64_SCHED_RUN_ARGS_positive = --case positive \
-  --variant positive --image "$(call aarch64_variant_disk,sched)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" --elf "$(call aarch64_variant_kernel,sched)"
-AARCH64_SCHED_RUN_ARGS_sp-top = --case sp-top \
-  --variant sp-top --image "$(call aarch64_variant_disk,sched-fault-sp-top)" \
+# Per-variant runner args: the runner's --variant schema is fixed —
+# variant name + image + firmware + ELF; the positive case uses the
+# plain sched variant, every fault case its sched-fault-<case> variant.
+# `SCHED_CASE=all` passes --case all + every variant map.
+define _aarch64_sched_variant_args
+--variant $(1) --image "$(call aarch64_variant_disk,$(2))" \
   --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-sp-top)"
-AARCH64_SCHED_RUN_ARGS_sp-low = --case sp-low \
-  --variant sp-low --image "$(call aarch64_variant_disk,sched-fault-sp-low)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-sp-low)"
-AARCH64_SCHED_RUN_ARGS_pc-low = --case pc-low \
-  --variant pc-low --image "$(call aarch64_variant_disk,sched-fault-pc-low)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-pc-low)"
-AARCH64_SCHED_RUN_ARGS_pc-data = --case pc-data \
-  --variant pc-data --image "$(call aarch64_variant_disk,sched-fault-pc-data)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-pc-data)"
-AARCH64_SCHED_RUN_ARGS_all = --case all \
-  --variant positive --image "$(call aarch64_variant_disk,sched)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" --elf "$(call aarch64_variant_kernel,sched)" \
-  --variant sp-top --image "$(call aarch64_variant_disk,sched-fault-sp-top)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-sp-top)" \
-  --variant sp-low --image "$(call aarch64_variant_disk,sched-fault-sp-low)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-sp-low)" \
-  --variant pc-low --image "$(call aarch64_variant_disk,sched-fault-pc-low)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-pc-low)" \
-  --variant pc-data --image "$(call aarch64_variant_disk,sched-fault-pc-data)" \
-  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-  --elf "$(call aarch64_variant_kernel,sched-fault-pc-data)"
+  --elf "$(call aarch64_variant_kernel,$(2))"
+endef
+AARCH64_SCHED_VARIANT = $(if $(filter $(1),positive),sched,sched-fault-$(1))
 .PHONY: _test-aarch64-run-sched
 _test-aarch64-run-sched:
 	python3 qemutests/aarch64_scheduler.py \
-	  $(AARCH64_SCHED_RUN_ARGS_$(SCHED_CASE)) \
+	  $(if $(filter all,$(SCHED_CASE)),--case all $(foreach c,$(AARCH64_SCHED_CASES),$(call _aarch64_sched_variant_args,$(c),$(call AARCH64_SCHED_VARIANT,$(c)))),--case $(SCHED_CASE) $(call _aarch64_sched_variant_args,$(SCHED_CASE),$(call AARCH64_SCHED_VARIANT,$(SCHED_CASE)))) \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
@@ -898,8 +853,8 @@ _$(1)-run-%:
 	@echo "ERROR: unknown $(4)='$$*'; valid: $(2), all" >&2
 	@exit 1
 $(1): $(if $(filter $(3),$(PROFILE_CAPABILITIES)),$(if $($(4)),_$(1)-run-$($(4)),_$(1)-run-all))
-	$(call require_capability,$(3))
-	@echo "  [$(1)] $(if $($(4)),$(4)=$($(4)),full group: $(2))"
+	$$(call require_capability,$(3))
+	@echo "  [$(1)] $$(if $$($(4)),$(4)=$$($(4)),full group: $(2))"
 endef
 
 $(eval $(call host_case_group,test-boot-failure-host,subsys log mounts terminal stdio spawn task-init,rootfs,CASE,test_boot_failure_subsys test_boot_failure_log test_boot_failure_mounts test_boot_failure_terminal test_boot_stdio test_boot_spawn_failure test_boot_task_init,subsys:test_boot_failure_subsys log:test_boot_failure_log mounts:test_boot_failure_mounts terminal:test_boot_failure_terminal stdio:test_boot_stdio spawn:test_boot_spawn_failure task-init:test_boot_task_init))
@@ -2296,45 +2251,24 @@ _test-aarch64-run-m1-ram:
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/m1-ram"
 
-.PHONY: _test-aarch64-prep-m1-sparse _test-aarch64-run-m1-sparse
-_test-aarch64-prep-m1-sparse:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=sparse AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
-_test-aarch64-run-m1-sparse:
-	python3 qemutests/aarch64_m1_matrix.py --variant sparse \
-	  --image "$(call aarch64_variant_disk,m1-sparse)" \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/m1-sparse"
-
-.PHONY: _test-aarch64-prep-m1-arena-exhaust _test-aarch64-run-m1-arena-exhaust
-_test-aarch64-prep-m1-arena-exhaust:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=arena-exhaust AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
-_test-aarch64-run-m1-arena-exhaust:
-	python3 qemutests/aarch64_m1_matrix.py --variant arena-exhaust \
-	  --image "$(call aarch64_variant_disk,m1-arena-exhaust)" \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/m1-arena-exhaust"
-
-.PHONY: _test-aarch64-prep-m1-table-exhaust _test-aarch64-run-m1-table-exhaust
-_test-aarch64-prep-m1-table-exhaust:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=table-exhaust AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
-_test-aarch64-run-m1-table-exhaust:
-	python3 qemutests/aarch64_m1_matrix.py --variant table-exhaust \
-	  --image "$(call aarch64_variant_disk,m1-table-exhaust)" \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/m1-table-exhaust"
-
-.PHONY: _test-aarch64-prep-m1-ap-bad-root _test-aarch64-run-m1-ap-bad-root
-_test-aarch64-prep-m1-ap-bad-root:
-	$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=ap-bad-root AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
-_test-aarch64-run-m1-ap-bad-root:
-	python3 qemutests/aarch64_m1_matrix.py --variant ap-bad-root \
-	  --image "$(call aarch64_variant_disk,m1-ap-bad-root)" \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/m1-ap-bad-root"
+# M1 fault cases share one prep/run pair shape: prep drives the
+# controlled sub-make with KERNEL_SELFTEST=1 + AARCH64_M1_TEST=<variant>;
+# run consumes the m1-<variant> disk through aarch64_m1_matrix.py.
+# m1-ram above is deliberately explicit (it needs the normal AND the
+# selftest image).
+AARCH64_M1_FAULT_CASES := m1-sparse:sparse m1-arena-exhaust:arena-exhaust m1-table-exhaust:table-exhaust m1-ap-bad-root:ap-bad-root
+define _aarch64_m1_pair
+.PHONY: _test-aarch64-prep-$(1) _test-aarch64-run-$(1)
+_test-aarch64-prep-$(1):
+	$$(MAKE) KERNEL_SELFTEST=1 AARCH64_M1_TEST=$(2) AARCH64_SYNC_FAULT_TEST= AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+_test-aarch64-run-$(1):
+	python3 qemutests/aarch64_m1_matrix.py --variant $(2) \
+	  --image "$$(call aarch64_variant_disk,$(1))" \
+	  --firmware "$$(AARCH64_UEFI_FIRMWARE)" --qemu "$$(AARCH64_QEMU)" \
+	  --build-dir "$$(BUILD_DIR)" --profile "$$(PROFILE)" \
+	  --log-dir "$$(OS01_ROOT)/test-results/$(1)"
+endef
+$(foreach p,$(AARCH64_M1_FAULT_CASES),$(eval $(call _aarch64_m1_pair,$(word 1,$(subst :, ,$(p))),$(word 2,$(subst :, ,$(p))))))
 
 .PHONY: test-intr-irq-x86
 test-intr-irq-x86:
