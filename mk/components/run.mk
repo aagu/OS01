@@ -1723,446 +1723,119 @@ _test-driver-model-run:
 test-qemu-driver-model: _test-driver-model-prep _test-driver-model-run
 	@true
 
-# ── boot-lifecycle: BOOT-1 x86 CPU-lifecycle fault matrix ───────
-# Task 3 (spec §8.2): eight serially-run groups — normal 1/2/4/8 CPUs,
-# delay-online 2/4, and the two fatal cases at 2 CPUs (CPU1 always the
-# fault target).  Normal groups run the NORMAL image read-only
-# (-snapshot); fault groups build their isolated boot-lifecycle-<case>
-# kernel/image variants through the controlled sub-make boundary
-# (KERNEL_EXTRA_CFLAGS carries the X86_SMP_BOOT_TEST_* macro).  The
-# normal image hash is taken BEFORE the first fault build and re-checked
-# after every fault build, so the matrix proves it never wrote the
-# normal image.  Each group is judged by qemutests/boot_lifecycle.py,
-# whose parser is the only success criterion (a timeout is never a
-# pass).  The whole target must stay within ONE CI job budget (>= 20
-# min); the per-case timeout (90 s) is a per-QEMU-run bound, NOT the
-# matrix budget.
+# ── x86 boot-* QEMU fault matrices (shared generator) ───────────
+# The five SUITE=boot-* matrices share one skeleton: build the normal
+# image and hash it (<slug>.normal.before), run the normal CPU matrix,
+# build each fault variant through the controlled sub-make and run it
+# against its isolated per-case image paths, then re-hash the normal
+# image and cmp against the before-hash (each matrix proves it never
+# wrote the normal image).  The per-suite python runner is the only
+# success criterion — a timeout is never a pass.
+#
+# $(call boot_matrix_suite,slug,runner.py,timeout-var,variant-flag,
+#                           normal-flag,log-root,log-tmpl,extra-flags,cases)
+#   slug          catalog/echo id (e.g. boot-lifecycle)
+#   timeout-var   per-suite ?= timeout variable (defined next to the call)
+#   variant-flag  $(MAKE) <flag>=<case> image for the variant builds
+#   normal-flag   extra flags on the normal build (empty, or
+#                 "BOOT_*_TEST=none KERNEL_SELFTEST=")
+#   log-root/-tmpl --log-dir root + suffix template with @CASE@/@CPUS@
+#                 (empty tmpl = runner takes no --log-dir; the runners
+#                 create the directory with exist_ok, so reruns of one
+#                 matrix reuse the same per-case directory)
+#   extra-flags   fixed runner flags (e.g. --build-dir/--profile)
+#   cases         "kind:case:cpus" (plus-separated cpus, e.g. 1+2+4); kind:
+#                 normal | variant (variant build + run) | plain (reuses
+#                 the normal image without a variant build)
+#
+# Generator pitfalls (each was a real bug during the 2026-11-15 slim-down):
+#   - GNU make filter patterns support only ONE '%' — case specs are
+#     therefore kind-first so "normal:%" etc. work;
+#   - a define body stores backslash-newlines verbatim and eval
+#     mis-parses them — every RHS/foreach here is ONE line;
+#   - a recipe fragment containing real newlines cannot be materialized
+#     into an assignment at eval time ("recipe before first target") —
+#     the *_LINES values store ESCAPED $(call ...) text (@NL@ markers)
+#     and only expand at recipe-execution time.
+empty :=
+space := $(empty) $(empty)
+
+# One newline (the join separator between generated recipe fragments).
+define _boot_matrix_nl
+
+
+endef
+
+# One (case, cpus) run — echo + python in one shell command.  Expanded
+# at recipe-execution time, so the per-suite timeout keeps honoring
+# command-line overrides.
+# $(1)=slug $(2)=case $(3)=cpus $(4)=runner.py $(5)=timeout-var
+# $(6)=log-root $(7)=log-tmpl (@CASE@/@CPUS@) $(8)=extra flags
+define _boot_matrix_run_line
+	@echo "  [test-qemu] SUITE=$(1): case=$(2) cpus=$(3)" && python3 $(4) --case $(2) --cpus $(3) --timeout $($(5)) --firmware "$(OVMF_FIRMWARE)" --image "$(TEST_BOOT_$(1)_IMAGE_$(2))" --kernel-elf "$(TEST_BOOT_$(1)_ELF_$(2))" --qemu "$(QEMU_BIN)" $(8) $(if $(7),--log-dir "$(6)/$(subst @CASE@,$(2),$(subst @CPUS@,$(3),$(7)))")
+endef
+
+# $(1)=slug $(2)=case $(3)=kind
+define _boot_matrix_case_vars
+TEST_BOOT_$(1)_IMAGE_$(2) := $(if $(filter variant,$(3)),$(BUILD_DIR)/image/$(1)-$(2)/disk.img,$(NORMAL_IMAGE))
+TEST_BOOT_$(1)_ELF_$(2)   := $(if $(filter variant,$(3)),$(BUILD_DIR)/kernel/$(1)-$(2)/kernel.elf,$(BUILD_DIR)/kernel/kernel.elf)
+endef
+
+# Variant case: the deferred run-line list plus the build-then-run rule.
+# $(1)=slug $(2)=case $(3)=cpus $(4)=runner.py $(5)=timeout-var
+# $(6)=variant-flag $(7)=log-root $(8)=log-tmpl $(9)=extra flags
+define _boot_matrix_variant
+TEST_$(1)_VARIANT_$(2)_LINES = $$(subst @NL@,$$(_boot_matrix_nl),$$(foreach cpu,$(subst +,$(space),$(3)),@NL@$$(call _boot_matrix_run_line,$(1),$(2),$$(cpu),$(4),$(5),$(7),$(8),$(9))))
+.PHONY: _test-$(1)-variant-$(2)
+_test-$(1)-variant-$(2):
+	@echo "  [test-qemu] SUITE=$(1): building the $(2) variant"
+	$$(MAKE) --no-print-directory $(6)=$(2) KERNEL_SELFTEST= image
+	$$(TEST_$(1)_VARIANT_$(2)_LINES)
+endef
+
+# $(1)=slug $(2)=runner.py $(3)=timeout-var $(4)=variant-flag
+# $(5)=normal-flag $(6)=log-root $(7)=log-tmpl $(8)=extra flags $(9)=cases
+define boot_matrix_suite
+$(foreach spec,$(9),$(eval $(call _boot_matrix_case_vars,$(1),$(word 2,$(subst :, ,$(spec))),$(word 1,$(subst :, ,$(spec))))))
+TEST_$(1)_NORMAL_LINES = $$(subst @NL@,$$(_boot_matrix_nl),$$(foreach spec,$(filter normal:% plain:%,$(9)),$$(foreach cpu,$$(subst +,$$(space),$$(word 3,$$(subst :, ,$$(spec)))),@NL@$$(call _boot_matrix_run_line,$(1),$$(word 2,$$(subst :, ,$$(spec))),$$(cpu),$(2),$(3),$(6),$(7),$(8)))))
+$(foreach spec,$(filter variant:%,$(9)),$(call _boot_matrix_variant,$(1),$(word 2,$(subst :, ,$(spec))),$(word 3,$(subst :, ,$(spec))),$(2),$(3),$(4),$(6),$(7),$(8)))
+.PHONY: _test-$(1)-normal-image _test-$(1)-normal-cases _test-$(1)-normal-hash-check
+_test-$(1)-normal-image:
+	@echo "  [test-qemu] SUITE=$(1): building the normal image"
+	$$(MAKE) --no-print-directory $(5) image
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/$(1).normal.before"
+_test-$(1)-normal-hash-check:
+	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/$(1).normal.after"
+	cmp "$(NORMAL_IMAGE_DIR)/$(1).normal.before" "$(NORMAL_IMAGE_DIR)/$(1).normal.after"
+.PHONY: _test-$(1)-normal-cases
+_test-$(1)-normal-cases:
+	$$(TEST_$(1)_NORMAL_LINES)
+# Prereq order is deliberate: normal image + hash FIRST, then the normal
+# matrix, then each fault variant (build + run), the hash re-check last.
+# Serial make only — the matrix depends on this strict ordering.
+.PHONY: test-qemu-$(1)
+test-qemu-$(1): _test-$(1)-normal-image _test-$(1)-normal-cases $(foreach spec,$(filter variant:%,$(9)),_test-$(1)-variant-$(word 2,$(subst :, ,$(spec)))) _test-$(1)-normal-hash-check
+	@true
+endef
+
 BOOT_LIFECYCLE_TIMEOUT ?= 90
-TEST_BOOT_LIFECYCLE_IMAGE_normal      := $(NORMAL_IMAGE)
-TEST_BOOT_LIFECYCLE_ELF_normal        := $(BUILD_DIR)/kernel/kernel.elf
-TEST_BOOT_LIFECYCLE_IMAGE_delay-online  := $(BUILD_DIR)/image/boot-lifecycle-delay-online/disk.img
-TEST_BOOT_LIFECYCLE_ELF_delay-online    := $(BUILD_DIR)/kernel/boot-lifecycle-delay-online/kernel.elf
-TEST_BOOT_LIFECYCLE_IMAGE_no-online     := $(BUILD_DIR)/image/boot-lifecycle-no-online/disk.img
-TEST_BOOT_LIFECYCLE_ELF_no-online       := $(BUILD_DIR)/kernel/boot-lifecycle-no-online/kernel.elf
-TEST_BOOT_LIFECYCLE_IMAGE_no-scheduler   := $(BUILD_DIR)/image/boot-lifecycle-no-scheduler/disk.img
-TEST_BOOT_LIFECYCLE_ELF_no-scheduler     := $(BUILD_DIR)/kernel/boot-lifecycle-no-scheduler/kernel.elf
-TEST_BOOT_LIFECYCLE_LOG_DIR := $(abspath $(BUILD_DIR))/test-results/boot-lifecycle
+$(eval $(call boot_matrix_suite,boot-lifecycle,qemutests/boot_lifecycle.py,BOOT_LIFECYCLE_TIMEOUT,X86_SMP_BOOT_TEST,,$(abspath $(BUILD_DIR))/test-results/boot-lifecycle,@CASE@-@CPUS@,--build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)",normal:normal:1+2+4+8 variant:delay-online:2+4 variant:no-online:2 variant:no-scheduler:2))
 
-# Each case invocation is written out explicitly (a define/foreach
-# expansion glues recipe lines together); the two normal/fault loops
-# shell-iterate over the CPU counts.
-define _boot_lifecycle_run
-	@echo "  [test-qemu] SUITE=boot-lifecycle: case=$(1) cpus=$(2)"
-	python3 qemutests/boot_lifecycle.py --case $(1) --cpus $(2) \
-	  --timeout $(BOOT_LIFECYCLE_TIMEOUT) \
-	  --firmware "$(OVMF_FIRMWARE)" \
-	  --image "$(TEST_BOOT_LIFECYCLE_IMAGE_$(1))" \
-	  --kernel-elf "$(TEST_BOOT_LIFECYCLE_ELF_$(1))" \
-	  --qemu "$(QEMU_BIN)" \
-	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
-	  --log-dir "$(TEST_BOOT_LIFECYCLE_LOG_DIR)/$(1)-$(2)-$$$$"
-endef
-
-.PHONY: _test-boot-lifecycle-normal-image
-_test-boot-lifecycle-normal-image:
-	@echo "  [test-qemu] SUITE=boot-lifecycle: building the normal image"
-	$(MAKE) --no-print-directory image
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.before"
-
-.PHONY: _test-boot-lifecycle-normal-cases
-_test-boot-lifecycle-normal-cases:
-	$(call _boot_lifecycle_run,normal,1)
-	$(call _boot_lifecycle_run,normal,2)
-	$(call _boot_lifecycle_run,normal,4)
-	$(call _boot_lifecycle_run,normal,8)
-
-.PHONY: _test-boot-lifecycle-fault-delay
-_test-boot-lifecycle-fault-delay:
-	@echo "  [test-qemu] SUITE=boot-lifecycle: building the delay-online variant"
-	$(MAKE) --no-print-directory X86_SMP_BOOT_TEST=delay-online KERNEL_SELFTEST= image
-	$(call _boot_lifecycle_run,delay-online,2)
-	$(call _boot_lifecycle_run,delay-online,4)
-
-.PHONY: _test-boot-lifecycle-fault-no-online
-_test-boot-lifecycle-fault-no-online:
-	@echo "  [test-qemu] SUITE=boot-lifecycle: building the no-online variant"
-	$(MAKE) --no-print-directory X86_SMP_BOOT_TEST=no-online KERNEL_SELFTEST= image
-	$(call _boot_lifecycle_run,no-online,2)
-
-.PHONY: _test-boot-lifecycle-fault-no-scheduler
-_test-boot-lifecycle-fault-no-scheduler:
-	@echo "  [test-qemu] SUITE=boot-lifecycle: building the no-scheduler variant"
-	$(MAKE) --no-print-directory X86_SMP_BOOT_TEST=no-scheduler KERNEL_SELFTEST= image
-	$(call _boot_lifecycle_run,no-scheduler,2)
-
-.PHONY: _test-boot-lifecycle-normal-hash-check
-_test-boot-lifecycle-normal-hash-check:
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.after"
-	cmp "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.before" "$(NORMAL_IMAGE_DIR)/boot-lifecycle.normal.after"
-
-# The dispatch order is deliberate: the NORMAL image is built and hashed
-# FIRST, then the normal matrix, then each fault variant builds and runs,
-# and the normal-image hash is re-checked at the very end.
-.PHONY: test-qemu-boot-lifecycle
-# ── boot-irq-time: BOOT-2 early-IRQ/time fault matrix ───────────
-# Ten serially-run groups (spec §7.2): normal 1/2/4/8 CPUs (normal
-# image, -snapshot), force-rtc 2, rtc-timeout 1, bsp-lapic-fail 1/2/4,
-# unsafe-open 1 — each fault case against its own isolated
-# boot-irq-time-<case> kernel/image variant.  Normal-image hash taken
-# before the first fault build and re-checked at the end.  Per-case
-# timeout 90 s is a per-QEMU-run bound; the whole matrix needs a CI
-# job budget of at least 25 minutes.
 BOOT_IRQ_TIME_TIMEOUT ?= 90
-TEST_BOOT_IRQ_TIME_IMAGE_normal      := $(NORMAL_IMAGE)
-TEST_BOOT_IRQ_TIME_ELF_normal        := $(BUILD_DIR)/kernel/kernel.elf
-TEST_BOOT_IRQ_TIME_IMAGE_force-rtc     := $(BUILD_DIR)/image/boot-irq-time-force-rtc/disk.img
-TEST_BOOT_IRQ_TIME_ELF_force-rtc       := $(BUILD_DIR)/kernel/boot-irq-time-force-rtc/kernel.elf
-TEST_BOOT_IRQ_TIME_IMAGE_rtc-timeout    := $(BUILD_DIR)/image/boot-irq-time-rtc-timeout/disk.img
-TEST_BOOT_IRQ_TIME_ELF_rtc-timeout      := $(BUILD_DIR)/kernel/boot-irq-time-rtc-timeout/kernel.elf
-TEST_BOOT_IRQ_TIME_IMAGE_bsp-lapic-fail  := $(BUILD_DIR)/image/boot-irq-time-bsp-lapic-fail/disk.img
-TEST_BOOT_IRQ_TIME_ELF_bsp-lapic-fail    := $(BUILD_DIR)/kernel/boot-irq-time-bsp-lapic-fail/kernel.elf
-TEST_BOOT_IRQ_TIME_IMAGE_unsafe-open     := $(BUILD_DIR)/image/boot-irq-time-unsafe-open/disk.img
-TEST_BOOT_IRQ_TIME_ELF_unsafe-open       := $(BUILD_DIR)/kernel/boot-irq-time-unsafe-open/kernel.elf
-TEST_BOOT_IRQ_TIME_LOG_DIR := $(abspath $(BUILD_DIR))/test-results/boot-irq-time
+$(eval $(call boot_matrix_suite,boot-irq-time,qemutests/boot_irq_time.py,BOOT_IRQ_TIME_TIMEOUT,X86_BOOT_IRQ_TIME_TEST,,$(abspath $(BUILD_DIR))/test-results/boot-irq-time,@CASE@-@CPUS@,--build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)",normal:normal:1+2+4+8 variant:force-rtc:2 variant:rtc-timeout:1 variant:bsp-lapic-fail:1+2+4 variant:unsafe-open:1))
 
-define _boot_irq_time_run
-	@echo "  [test-qemu] SUITE=boot-irq-time: case=$(1) cpus=$(2)"
-	python3 qemutests/boot_irq_time.py --case $(1) --cpus $(2) \
-	  --timeout $(BOOT_IRQ_TIME_TIMEOUT) \
-	  --firmware "$(OVMF_FIRMWARE)" \
-	  --image "$(TEST_BOOT_IRQ_TIME_IMAGE_$(1))" \
-	  --kernel-elf "$(TEST_BOOT_IRQ_TIME_ELF_$(1))" \
-	  --qemu "$(QEMU_BIN)" \
-	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
-	  --log-dir "$(TEST_BOOT_IRQ_TIME_LOG_DIR)/$(1)-$(2)-$$$$"
-endef
-
-.PHONY: _test-boot-irq-time-normal-image
-_test-boot-irq-time-normal-image:
-	@echo "  [test-qemu] SUITE=boot-irq-time: building the normal image"
-	$(MAKE) --no-print-directory image
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-irq-time.normal.before"
-
-.PHONY: _test-boot-irq-time-normal-cases
-_test-boot-irq-time-normal-cases:
-	$(call _boot_irq_time_run,normal,1)
-	$(call _boot_irq_time_run,normal,2)
-	$(call _boot_irq_time_run,normal,4)
-	$(call _boot_irq_time_run,normal,8)
-
-.PHONY: _test-boot-irq-time-fault-force-rtc
-_test-boot-irq-time-fault-force-rtc:
-	@echo "  [test-qemu] SUITE=boot-irq-time: building the force-rtc variant"
-	$(MAKE) --no-print-directory X86_BOOT_IRQ_TIME_TEST=force-rtc KERNEL_SELFTEST= image
-	$(call _boot_irq_time_run,force-rtc,2)
-
-.PHONY: _test-boot-irq-time-fault-rtc-timeout
-_test-boot-irq-time-fault-rtc-timeout:
-	@echo "  [test-qemu] SUITE=boot-irq-time: building the rtc-timeout variant"
-	$(MAKE) --no-print-directory X86_BOOT_IRQ_TIME_TEST=rtc-timeout KERNEL_SELFTEST= image
-	$(call _boot_irq_time_run,rtc-timeout,1)
-
-.PHONY: _test-boot-irq-time-fault-bsp-lapic-fail
-_test-boot-irq-time-fault-bsp-lapic-fail:
-	@echo "  [test-qemu] SUITE=boot-irq-time: building the bsp-lapic-fail variant"
-	$(MAKE) --no-print-directory X86_BOOT_IRQ_TIME_TEST=bsp-lapic-fail KERNEL_SELFTEST= image
-	$(call _boot_irq_time_run,bsp-lapic-fail,1)
-	$(call _boot_irq_time_run,bsp-lapic-fail,2)
-	$(call _boot_irq_time_run,bsp-lapic-fail,4)
-
-.PHONY: _test-boot-irq-time-fault-unsafe-open
-_test-boot-irq-time-fault-unsafe-open:
-	@echo "  [test-qemu] SUITE=boot-irq-time: building the unsafe-open variant"
-	$(MAKE) --no-print-directory X86_BOOT_IRQ_TIME_TEST=unsafe-open KERNEL_SELFTEST= image
-	$(call _boot_irq_time_run,unsafe-open,1)
-
-.PHONY: _test-boot-irq-time-normal-hash-check
-_test-boot-irq-time-normal-hash-check:
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-irq-time.normal.after"
-	cmp "$(NORMAL_IMAGE_DIR)/boot-irq-time.normal.before" "$(NORMAL_IMAGE_DIR)/boot-irq-time.normal.after"
-
-.PHONY: test-qemu-boot-irq-time
-test-qemu-boot-irq-time: _test-boot-irq-time-normal-image \
-	_test-boot-irq-time-normal-cases \
-	_test-boot-irq-time-fault-force-rtc \
-	_test-boot-irq-time-fault-rtc-timeout \
-	_test-boot-irq-time-fault-bsp-lapic-fail \
-	_test-boot-irq-time-fault-unsafe-open \
-	_test-boot-irq-time-normal-hash-check
-	@true
-
-# ── boot-failure: BOOT-3 startup failure policy matrix ─────────
-# 17 serially-run groups:
-#   - normal (1, 2, 4 cpus)
-#   - required-subsys (1, 2 cpus)
-#   - optional-subsys (1, 2 cpus)
-#   - registration (1 cpu)
-#   - root (1 cpu)
-#   - tty (1 cpu)
-#   - pty (1 cpu)
-#   - stdio (1, 2 cpus)
-#   - init (1, 2 cpus)
-#   - child-fds (1, 2 cpus)
 BOOT_FAILURE_TIMEOUT ?= 90
-TEST_BOOT_FAILURE_IMAGE_normal           := $(NORMAL_IMAGE)
-TEST_BOOT_FAILURE_ELF_normal             := $(BUILD_DIR)/kernel/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_required-subsys  := $(BUILD_DIR)/image/boot-failure-required-subsys/disk.img
-TEST_BOOT_FAILURE_ELF_required-subsys    := $(BUILD_DIR)/kernel/boot-failure-required-subsys/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_optional-subsys  := $(BUILD_DIR)/image/boot-failure-optional-subsys/disk.img
-TEST_BOOT_FAILURE_ELF_optional-subsys    := $(BUILD_DIR)/kernel/boot-failure-optional-subsys/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_registration     := $(BUILD_DIR)/image/boot-failure-registration/disk.img
-TEST_BOOT_FAILURE_ELF_registration       := $(BUILD_DIR)/kernel/boot-failure-registration/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_root             := $(BUILD_DIR)/image/boot-failure-root/disk.img
-TEST_BOOT_FAILURE_ELF_root               := $(BUILD_DIR)/kernel/boot-failure-root/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_tty              := $(BUILD_DIR)/image/boot-failure-tty/disk.img
-TEST_BOOT_FAILURE_ELF_tty                := $(BUILD_DIR)/kernel/boot-failure-tty/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_pty              := $(BUILD_DIR)/image/boot-failure-pty/disk.img
-TEST_BOOT_FAILURE_ELF_pty                := $(BUILD_DIR)/kernel/boot-failure-pty/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_stdio            := $(BUILD_DIR)/image/boot-failure-stdio/disk.img
-TEST_BOOT_FAILURE_ELF_stdio              := $(BUILD_DIR)/kernel/boot-failure-stdio/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_init             := $(BUILD_DIR)/image/boot-failure-init/disk.img
-TEST_BOOT_FAILURE_ELF_init               := $(BUILD_DIR)/kernel/boot-failure-init/kernel.elf
-TEST_BOOT_FAILURE_IMAGE_child-fds        := $(BUILD_DIR)/image/boot-failure-child-fds/disk.img
-TEST_BOOT_FAILURE_ELF_child-fds          := $(BUILD_DIR)/kernel/boot-failure-child-fds/kernel.elf
-TEST_BOOT_FAILURE_LOG_DIR := $(abspath $(BUILD_DIR))/test-results/boot-failure
+$(eval $(call boot_matrix_suite,boot-failure,qemutests/boot_failure.py,BOOT_FAILURE_TIMEOUT,BOOT_FAILURE_TEST,,,,--build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)",normal:normal:1+2+4 variant:required-subsys:1+2 variant:optional-subsys:1+2 variant:registration:1 variant:root:1 variant:tty:1 variant:pty:1 variant:stdio:1+2 variant:init:1+2 variant:child-fds:1+2))
 
-define _boot_failure_run
-	@echo "  [test-qemu] SUITE=boot-failure: case=$(1) cpus=$(2)"
-	python3 qemutests/boot_failure.py --case $(1) --cpus $(2) \
-	  --timeout $(BOOT_FAILURE_TIMEOUT) \
-	  --firmware "$(OVMF_FIRMWARE)" \
-	  --image "$(TEST_BOOT_FAILURE_IMAGE_$(1))" \
-	  --kernel-elf "$(TEST_BOOT_FAILURE_ELF_$(1))" \
-	  --qemu "$(QEMU_BIN)" \
-	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)"
-endef
-
-.PHONY: _test-boot-failure-normal-image
-_test-boot-failure-normal-image:
-	@echo "  [test-qemu] SUITE=boot-failure: building the normal image"
-	$(MAKE) --no-print-directory image
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-failure.normal.before"
-
-.PHONY: _test-boot-failure-normal-cases
-_test-boot-failure-normal-cases:
-	$(call _boot_failure_run,normal,1)
-	$(call _boot_failure_run,normal,2)
-	$(call _boot_failure_run,normal,4)
-
-.PHONY: _test-boot-failure-fault-required-subsys
-_test-boot-failure-fault-required-subsys:
-	@echo "  [test-qemu] SUITE=boot-failure: building the required-subsys variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=required-subsys KERNEL_SELFTEST= image
-	$(call _boot_failure_run,required-subsys,1)
-	$(call _boot_failure_run,required-subsys,2)
-
-.PHONY: _test-boot-failure-fault-optional-subsys
-_test-boot-failure-fault-optional-subsys:
-	@echo "  [test-qemu] SUITE=boot-failure: building the optional-subsys variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=optional-subsys KERNEL_SELFTEST= image
-	$(call _boot_failure_run,optional-subsys,1)
-	$(call _boot_failure_run,optional-subsys,2)
-
-.PHONY: _test-boot-failure-fault-registration
-_test-boot-failure-fault-registration:
-	@echo "  [test-qemu] SUITE=boot-failure: building the registration variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=registration KERNEL_SELFTEST= image
-	$(call _boot_failure_run,registration,1)
-
-.PHONY: _test-boot-failure-fault-root
-_test-boot-failure-fault-root:
-	@echo "  [test-qemu] SUITE=boot-failure: building the root variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=root KERNEL_SELFTEST= image
-	$(call _boot_failure_run,root,1)
-
-.PHONY: _test-boot-failure-fault-tty
-_test-boot-failure-fault-tty:
-	@echo "  [test-qemu] SUITE=boot-failure: building the tty variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=tty KERNEL_SELFTEST= image
-	$(call _boot_failure_run,tty,1)
-
-.PHONY: _test-boot-failure-fault-pty
-_test-boot-failure-fault-pty:
-	@echo "  [test-qemu] SUITE=boot-failure: building the pty variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=pty KERNEL_SELFTEST= image
-	$(call _boot_failure_run,pty,1)
-
-.PHONY: _test-boot-failure-fault-stdio
-_test-boot-failure-fault-stdio:
-	@echo "  [test-qemu] SUITE=boot-failure: building the stdio variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=stdio KERNEL_SELFTEST= image
-	$(call _boot_failure_run,stdio,1)
-	$(call _boot_failure_run,stdio,2)
-
-.PHONY: _test-boot-failure-fault-init
-_test-boot-failure-fault-init:
-	@echo "  [test-qemu] SUITE=boot-failure: building the init variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=init KERNEL_SELFTEST= image
-	$(call _boot_failure_run,init,1)
-	$(call _boot_failure_run,init,2)
-
-.PHONY: _test-boot-failure-fault-child-fds
-_test-boot-failure-fault-child-fds:
-	@echo "  [test-qemu] SUITE=boot-failure: building the child-fds variant"
-	$(MAKE) --no-print-directory BOOT_FAILURE_TEST=child-fds KERNEL_SELFTEST= image
-	$(call _boot_failure_run,child-fds,1)
-	$(call _boot_failure_run,child-fds,2)
-
-.PHONY: _test-boot-failure-normal-hash-check
-_test-boot-failure-normal-hash-check:
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-failure.normal.after"
-	cmp "$(NORMAL_IMAGE_DIR)/boot-failure.normal.before" "$(NORMAL_IMAGE_DIR)/boot-failure.normal.after"
-
-.PHONY: test-qemu-boot-failure
-test-qemu-boot-failure: _test-boot-failure-normal-image \
-	_test-boot-failure-normal-cases \
-	_test-boot-failure-fault-required-subsys \
-	_test-boot-failure-fault-optional-subsys \
-	_test-boot-failure-fault-registration \
-	_test-boot-failure-fault-root \
-	_test-boot-failure-fault-tty \
-	_test-boot-failure-fault-pty \
-	_test-boot-failure-fault-stdio \
-	_test-boot-failure-fault-init \
-	_test-boot-failure-fault-child-fds \
-	_test-boot-failure-normal-hash-check
-	@true
-
-# ── BOOT-4 stage contracts matrix (x86_64 7-run orchestration) ──────
 BOOT_CONTRACT_TIMEOUT ?= 120
-TEST_BOOT_CONTRACT_IMAGE_normal  := $(BUILD_DIR)/image/disk.img
-TEST_BOOT_CONTRACT_ELF_normal    := $(BUILD_DIR)/kernel/kernel.elf
-TEST_BOOT_CONTRACT_IMAGE_reverse := $(BUILD_DIR)/image/boot-contract-reverse/disk.img
-TEST_BOOT_CONTRACT_ELF_reverse   := $(BUILD_DIR)/kernel/boot-contract-reverse/kernel.elf
-TEST_BOOT_CONTRACT_IMAGE_missing := $(BUILD_DIR)/image/boot-contract-missing/disk.img
-TEST_BOOT_CONTRACT_ELF_missing   := $(BUILD_DIR)/kernel/boot-contract-missing/kernel.elf
-TEST_BOOT_CONTRACT_IMAGE_cycle   := $(BUILD_DIR)/image/boot-contract-cycle/disk.img
-TEST_BOOT_CONTRACT_ELF_cycle     := $(BUILD_DIR)/kernel/boot-contract-cycle/kernel.elf
-TEST_BOOT_CONTRACT_LOG_DIR       := $(abspath $(BUILD_DIR))/test-results/boot-contract
+$(eval $(call boot_matrix_suite,boot-contract,qemutests/boot_contract.py,BOOT_CONTRACT_TIMEOUT,BOOT_CONTRACT_TEST,BOOT_CONTRACT_TEST=none KERNEL_SELFTEST=,$(abspath $(BUILD_DIR))/test-results/boot-contract,x86_64-@CASE@-@CPUS@cpu,,normal:normal:1+2+4 variant:reverse:1+2 variant:missing:1 variant:cycle:1))
 
-define _boot_contract_x86_run
-	@echo "  [test-qemu] SUITE=boot-contract: case=$(1) cpus=$(2)"
-	python3 qemutests/boot_contract.py --arch x86_64 --case $(1) --cpus $(2) \
-	  --timeout $(BOOT_CONTRACT_TIMEOUT) \
-	  --firmware "$(OVMF_FIRMWARE)" \
-	  --image "$(TEST_BOOT_CONTRACT_IMAGE_$(1))" \
-	  --kernel-elf "$(TEST_BOOT_CONTRACT_ELF_$(1))" \
-	  --qemu "$(QEMU_BIN)" \
-	  --log-dir "$(TEST_BOOT_CONTRACT_LOG_DIR)/x86_64-$(1)-$(2)cpu"
-endef
-
-.PHONY: _test-boot-contract-normal-image
-_test-boot-contract-normal-image:
-	@echo "  [test-qemu] SUITE=boot-contract: building the normal image"
-	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=none KERNEL_SELFTEST= image
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-contract.normal.before"
-
-.PHONY: _test-boot-contract-normal-cases
-_test-boot-contract-normal-cases:
-	$(call _boot_contract_x86_run,normal,1)
-	$(call _boot_contract_x86_run,normal,2)
-	$(call _boot_contract_x86_run,normal,4)
-
-.PHONY: _test-boot-contract-variant-reverse
-_test-boot-contract-variant-reverse:
-	@echo "  [test-qemu] SUITE=boot-contract: building the reverse variant"
-	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=reverse KERNEL_SELFTEST= image
-	$(call _boot_contract_x86_run,reverse,1)
-	$(call _boot_contract_x86_run,reverse,2)
-
-.PHONY: _test-boot-contract-variant-missing
-_test-boot-contract-variant-missing:
-	@echo "  [test-qemu] SUITE=boot-contract: building the missing variant"
-	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=missing KERNEL_SELFTEST= image
-	$(call _boot_contract_x86_run,missing,1)
-
-.PHONY: _test-boot-contract-variant-cycle
-_test-boot-contract-variant-cycle:
-	@echo "  [test-qemu] SUITE=boot-contract: building the cycle variant"
-	$(MAKE) --no-print-directory BOOT_CONTRACT_TEST=cycle KERNEL_SELFTEST= image
-	$(call _boot_contract_x86_run,cycle,1)
-
-.PHONY: _test-boot-contract-normal-hash-check
-_test-boot-contract-normal-hash-check:
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-contract.normal.after"
-	cmp "$(NORMAL_IMAGE_DIR)/boot-contract.normal.before" "$(NORMAL_IMAGE_DIR)/boot-contract.normal.after"
-
-.PHONY: test-qemu-boot-contract
-test-qemu-boot-contract: _test-boot-contract-normal-image \
-	_test-boot-contract-normal-cases \
-	_test-boot-contract-variant-reverse \
-	_test-boot-contract-variant-missing \
-	_test-boot-contract-variant-cycle \
-	_test-boot-contract-normal-hash-check
-	@true
-
-# ── BOOT-5 scheduler and services test ──────────────────────────────
 BOOT_SERVICES_TIMEOUT ?= 120
-TEST_BOOT_SERVICES_IMAGE_normal  := $(NORMAL_IMAGE)
-TEST_BOOT_SERVICES_ELF_normal    := $(BUILD_DIR)/kernel/kernel.elf
-TEST_BOOT_SERVICES_IMAGE_no-net  := $(NORMAL_IMAGE)
-TEST_BOOT_SERVICES_ELF_no-net    := $(BUILD_DIR)/kernel/kernel.elf
-TEST_BOOT_SERVICES_IMAGE_overlap := $(BUILD_DIR)/image/boot-services-overlap/disk.img
-TEST_BOOT_SERVICES_ELF_overlap   := $(BUILD_DIR)/kernel/boot-services-overlap/kernel.elf
-TEST_BOOT_SERVICES_LOG_DIR       := $(abspath $(BUILD_DIR))/test-results/boot-services
+$(eval $(call boot_matrix_suite,boot-services,qemutests/boot_services.py,BOOT_SERVICES_TIMEOUT,BOOT_SERVICES_TEST,BOOT_SERVICES_TEST=none KERNEL_SELFTEST=,$(abspath $(BUILD_DIR))/test-results/boot-services,@CASE@-@CPUS@cpu,--build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)",normal:normal:1+2+4+8 plain:no-net:1+2 variant:overlap:2+4))
 
-define _boot_services_x86_run
-	@echo "  [test-qemu] SUITE=boot-services: case=$(1) cpus=$(2)"
-	python3 qemutests/boot_services.py --case $(1) --cpus $(2) \
-	  --timeout $(BOOT_SERVICES_TIMEOUT) \
-	  --firmware "$(OVMF_FIRMWARE)" \
-	  --image "$(TEST_BOOT_SERVICES_IMAGE_$(1))" \
-	  --kernel-elf "$(TEST_BOOT_SERVICES_ELF_$(1))" \
-	  --qemu "$(QEMU_BIN)" \
-	  --build-dir "$(abspath $(BUILD_DIR))" --profile "$(PROFILE)" \
-	  --log-dir "$(TEST_BOOT_SERVICES_LOG_DIR)/$(1)-$(2)cpu-$$$$"
-endef
 
-.PHONY: _test-boot-services-normal-image
-_test-boot-services-normal-image:
-	@echo "  [test-qemu] SUITE=boot-services: building the normal image"
-	$(MAKE) --no-print-directory BOOT_SERVICES_TEST=none KERNEL_SELFTEST= image
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-services.normal.before"
 
-.PHONY: _test-boot-services-normal-cases
-_test-boot-services-normal-cases:
-	$(call _boot_services_x86_run,normal,1)
-	$(call _boot_services_x86_run,normal,2)
-	$(call _boot_services_x86_run,normal,4)
-	$(call _boot_services_x86_run,normal,8)
 
-.PHONY: _test-boot-services-no-net-cases
-_test-boot-services-no-net-cases:
-	$(call _boot_services_x86_run,no-net,1)
-	$(call _boot_services_x86_run,no-net,2)
-
-.PHONY: _test-boot-services-variant-overlap
-_test-boot-services-variant-overlap:
-	@echo "  [test-qemu] SUITE=boot-services: building the overlap variant"
-	$(MAKE) --no-print-directory BOOT_SERVICES_TEST=overlap KERNEL_SELFTEST= image
-	$(call _boot_services_x86_run,overlap,2)
-	$(call _boot_services_x86_run,overlap,4)
-
-.PHONY: _test-boot-services-normal-hash-check
-_test-boot-services-normal-hash-check:
-	sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/boot-services.normal.after"
-	cmp "$(NORMAL_IMAGE_DIR)/boot-services.normal.before" "$(NORMAL_IMAGE_DIR)/boot-services.normal.after"
-
-.PHONY: test-qemu-boot-services
-test-qemu-boot-services: _test-boot-services-normal-image \
-	_test-boot-services-normal-cases \
-	_test-boot-services-no-net-cases \
-	_test-boot-services-variant-overlap \
-	_test-boot-services-normal-hash-check
-	@true
-
-test-qemu-boot-lifecycle: _test-boot-lifecycle-normal-image \
-	_test-boot-lifecycle-normal-cases \
-	_test-boot-lifecycle-fault-delay \
-	_test-boot-lifecycle-fault-no-online \
-	_test-boot-lifecycle-fault-no-scheduler \
-	_test-boot-lifecycle-normal-hash-check
-	@true
 
 # ── intr-x86: isolated destructive #BP / NMI acceptance ─────────
 # Task 5 (spec §9.3): the two fatal entries that cannot be exercised
