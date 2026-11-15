@@ -78,6 +78,8 @@ struct xhci_enum_seed {
 
 int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_buf,
                              uint16_t cfg_len);
+int xhci_hub_validate_config_dci(const struct xhci_slot *slot, const uint8_t *cfg_buf,
+                                 uint16_t cfg_len, uint8_t *out_status_dci);
 int xhci_hub_read_info(struct xhci_controller *ctrl, uint8_t slot,
                        uint64_t deadline_ns, struct xhci_hub_info *out_info);
 int xhci_hub_prepare_ports(struct xhci_controller *ctrl, uint8_t slot,

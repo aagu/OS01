@@ -49,9 +49,11 @@ static int hub_port_feature(struct xhci_controller *ctrl, uint8_t slot_id,
     return xhci_control_no_data_until(ctrl, slot_id, &setup, deadline_ns);
 }
 
-int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_buf,
-                             uint16_t cfg_len)
+int xhci_hub_validate_config_dci(const struct xhci_slot *slot, const uint8_t *cfg_buf,
+                                 uint16_t cfg_len, uint8_t *out_status_dci)
 {
+    if (out_status_dci)
+        *out_status_dci = 0;
     if (!slot || !cfg_buf || cfg_len < sizeof(struct usb_config_descriptor))
         return -EINVAL;
 
@@ -61,6 +63,7 @@ int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_bu
     bool found_hub_iface = false;
     bool found_intr_in = false;
     uint8_t ep_count = 0;
+    uint8_t status_dci = 0;
 
     while (offset + 2 <= cfg_len) {
         uint8_t len = cfg_buf[offset];
@@ -93,12 +96,13 @@ int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_bu
             const struct usb_endpoint_descriptor *ep =
                 (const struct usb_endpoint_descriptor *)(cfg_buf + offset);
             uint8_t ep_xfer = ep->bmAttributes & 3U;
+            uint8_t ep_num = ep->bEndpointAddress & 0x0FU;
             bool is_in = (ep->bEndpointAddress & 0x80U) != 0;
             uint16_t mps = ep->wMaxPacketSize & 0x7FFU;
             uint8_t tx_per_uframe = (ep->wMaxPacketSize >> 11) & 0x3U;
 
             ep_count++;
-            if (!is_in || ep_xfer != 3U || ep_count > 1)
+            if (!is_in || ep_num == 0 || ep_xfer != 3U || ep_count > 1)
                 return -EINVAL;
             if (tx_per_uframe == 3U || mps == 0 || mps > 1024)
                 return -EINVAL;
@@ -126,12 +130,24 @@ int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_bu
                 if (tx_per_uframe != 0 || mps > 64 || ep->bInterval == 0)
                     return -EINVAL;
             }
+            status_dci = (uint8_t)(ep_num * 2U + 1U);
             found_intr_in = true;
         }
         offset += len;
     }
 
-    return (found_hub_iface && found_intr_in && ep_count == 1) ? 0 : -EINVAL;
+    if (found_hub_iface && found_intr_in && ep_count == 1) {
+        if (out_status_dci)
+            *out_status_dci = status_dci;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+int xhci_hub_validate_config(const struct xhci_slot *slot, const uint8_t *cfg_buf,
+                             uint16_t cfg_len)
+{
+    return xhci_hub_validate_config_dci(slot, cfg_buf, cfg_len, NULL);
 }
 
 static bool hub_psi_is_gen1_x1(const struct xhci_controller *ctrl,
@@ -560,9 +576,10 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     }
     uint16_t cfg_actual_len = (uint16_t)rc;
 
+    uint8_t hub_status_dci = 0;
     if (desc.bDeviceClass == USB_CLASS_HUB) {
-        rc = xhci_hub_validate_config(slot, (const uint8_t *)slot->dma_buf_virt,
-                                      cfg_actual_len);
+        rc = xhci_hub_validate_config_dci(slot, (const uint8_t *)slot->dma_buf_virt,
+                                          cfg_actual_len, &hub_status_dci);
         if (rc != 0) {
             xhci_free_slot(ctrl, slot_id);
             return rc;
@@ -574,6 +591,9 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     if (rc != 0) {
         xhci_free_slot(ctrl, slot_id);
         return rc;
+    }
+    if (desc.bDeviceClass == USB_CLASS_HUB) {
+        slot->hub_status_dci = hub_status_dci;
     }
 
     rc = xhci_configure_endpoints(ctrl, slot_id);

@@ -323,6 +323,10 @@ $(TEST_BLD)/xhci_hub_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/xhci_hid_desc_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_hid_desc.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_xhci_init.o: $(TEST_CASES)/test_xhci_init.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
@@ -330,6 +334,7 @@ $(TEST_BLD)/test_xhci_init.o: $(TEST_CASES)/test_xhci_init.c
 $(TEST_BLD)/test_xhci_init.elf: $(TEST_BLD)/test_xhci_init.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -348,6 +353,7 @@ $(TEST_BLD)/test_xhci_phase2.o: $(TEST_CASES)/test_xhci_phase2.c
 $(TEST_BLD)/test_xhci_phase2.elf: $(TEST_BLD)/test_xhci_phase2.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -370,6 +376,7 @@ $(TEST_BLD)/test_xhci_phase3.o: $(TEST_CASES)/test_xhci_phase3.c
 $(TEST_BLD)/test_xhci_phase3.elf: $(TEST_BLD)/test_xhci_phase3.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/xhci_msc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
@@ -402,6 +409,7 @@ $(TEST_BLD)/test_usb_devfs.elf: $(TEST_BLD)/test_usb_devfs.o \
     $(TEST_BLD)/lsusb_production.o \
     $(TEST_BLD)/xhci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
@@ -474,6 +482,22 @@ LINK_GROUP_usb-hid-report := $(TEST_BLD)/usb_hid_report_production.o
 
 .PHONY: test-usb-hid-report test_usb_hid_report
 test-usb-hid-report test_usb_hid_report: $(TEST_BLD)/test_usb_hid_report.elf
+	$<
+
+# xHCI Boot HID config descriptor scanner & endpoint selection
+LINK_CFLAGS_xhci-hid-desc = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_xhci-hid-desc := \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-xhci-hid-desc test_xhci_hid_desc
+test-xhci-hid-desc test_xhci_hid_desc: $(TEST_BLD)/test_xhci_hid_desc.elf
 	$<
 
 

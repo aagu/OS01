@@ -1123,8 +1123,8 @@ endif
 	@# path).  Publishing them would put the kernel's framing state in front
 	@# of every user program, so they are excluded from the staged headers.
 	@# driver/input_route.h is excluded with them: it is the only includer.
-	@# driver/usb_hid_report.h is also kernel-private.
-	rm -f $(INSTALL_ROOT)/usr/include/driver/input_ps2.h $(INSTALL_ROOT)/usr/include/driver/input_route.h $(INSTALL_ROOT)/usr/include/driver/usb_hid_report.h
+	@# driver/usb_hid_report.h and driver/xhci_hid.h are also kernel-private.
+	rm -f $(INSTALL_ROOT)/usr/include/driver/input_ps2.h $(INSTALL_ROOT)/usr/include/driver/input_route.h $(INSTALL_ROOT)/usr/include/driver/usb_hid_report.h $(INSTALL_ROOT)/usr/include/driver/xhci_hid.h
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 # ── Clean ───────────────────────────────────────────────────

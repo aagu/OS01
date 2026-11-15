@@ -213,7 +213,7 @@ void test_xhci_parse_config_descriptor_hierarchy(void)
         /* Config */
         9, USB_DESC_TYPE_CONFIGURATION, 34, 0, 1, 1, 0, 0x80, 50,
         /* Interface */
-        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 1, 1, 0,
         /* HID */
         9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
         /* Endpoint */
@@ -267,9 +267,10 @@ void test_xhci_parse_corrupt_descriptor_guards(void)
     assert_eq(max_dci, 1);
 
     /* Guard 3: OOM during ring allocation rolls back without leak */
+    slot.speed = XHCI_PORT_SPEED_FULL;
     uint8_t valid_desc[34] = {
         9, USB_DESC_TYPE_CONFIGURATION, 34, 0, 1, 1, 0, 0x80, 50,
-        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 1, 1, 0,
         9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
         7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10
     };
@@ -284,7 +285,7 @@ void test_xhci_parse_corrupt_descriptor_guards(void)
     /* Guard 4: a duplicated endpoint descriptor must not create a second ring */
     uint8_t dup_desc[41] = {
         9, USB_DESC_TYPE_CONFIGURATION, 41, 0, 1, 1, 0, 0x80, 50,
-        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 3, 0, 0, 0,
+        9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, 0xFF, 0, 0, 0,
         9, USB_DESC_TYPE_HID, 0x10, 0x01, 0, 1, 0x22, 68, 0,
         7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10,
         7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 10
@@ -549,7 +550,7 @@ void test_xhci_configure_endpoint_input_context(void)
     assert_eq(ep_ctx[2] & 1U, 1U);          /* DCS = 1 */
     assert_eq(ep_ctx[2] & 0xFFFFFFF0U, 0x48000); /* Base phys lo */
     assert_eq(ep_ctx[3], 0);                /* TR Dequeue Hi */
-    assert_eq(ep_ctx[4], 8);                /* Average TRB Length */
+    assert_eq(ep_ctx[4], (8U << 16) | 8U);  /* Max ESIT Payload Lo = 8, Avg TRB Length = 8 */
 
     /* Verify Command Ring submission: Type 12 */
     assert_eq((cmd_ring[0].control >> 10) & 0x3F, XHCI_TRB_TYPE_CONFIG_EP);

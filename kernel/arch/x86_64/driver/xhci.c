@@ -1609,6 +1609,8 @@ void xhci_free_endpoint_rings(struct xhci_slot *slot)
 
     memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
     memset(&slot->msc_iface, 0, sizeof(slot->msc_iface));
+    memset(slot->hid_candidates, 0, sizeof(slot->hid_candidates));
+    slot->hub_status_dci = 0;
 
     if (!slot->ep_rings) return;
 
@@ -2092,6 +2094,16 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
      * reused with a different max_dci. */
     xhci_free_endpoint_rings(slot);
 
+    uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
+                                              : xhci_speed_class(slot->ctrl, slot->port_num, slot->speed);
+    struct xhci_hid_candidate hid_cands[XHCI_HID_KINDS];
+    uint32_t hid_skip_dcis = 0;
+    int hid_rc = xhci_hid_scan_config(buffer, length, speed_cls, hid_cands, &hid_skip_dcis);
+    if (hid_rc < 0) {
+        memset(hid_cands, 0, sizeof(hid_cands));
+        hid_skip_dcis = ~0U;
+    }
+
     int max_dci = xhci_parse_config_descriptor(slot, buffer, length);
     if (max_dci < XHCI_MIN_ENDPOINT_DCI) {
         memset(&slot->msc_candidate, 0, sizeof(slot->msc_candidate));
@@ -2105,12 +2117,15 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
     }
     memset(slot->ep_rings, 0, sizeof(struct xhci_ep_ring *) * (max_dci + 1));
     slot->max_dci = (uint8_t)max_dci;
+    memcpy(slot->hid_candidates, hid_cands, sizeof(slot->hid_candidates));
 
     /* Second pass: instantiate one transfer ring per active alt-0 endpoint. */
     uint32_t offset = 0;
     uint32_t total = length;
     bool in_iface = false;
     bool iface_alt0 = false;
+    uint8_t cur_iface_num = 0;
+    uint8_t cur_iface_class = 0;
     while (offset + 2 <= total) {
         uint8_t len = buffer[offset];
         uint8_t type = buffer[offset + 1];
@@ -2122,6 +2137,8 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
                 (const struct usb_interface_descriptor *)(buffer + offset);
             in_iface = true;
             iface_alt0 = (iface->bAlternateSetting == 0);
+            cur_iface_num = iface->bInterfaceNumber;
+            cur_iface_class = iface->bInterfaceClass;
             offset += len;
             continue;
         }
@@ -2145,6 +2162,24 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
             if (dci < XHCI_MIN_ENDPOINT_DCI || dci > max_dci || slot->ep_rings[dci]) {
                 offset += len;
                 continue;
+            }
+
+            if (cur_iface_class == USB_CLASS_HID) {
+                bool hid_selected = false;
+                if ((hid_skip_dcis & (1U << dci)) == 0) {
+                    for (int k = 0; k < XHCI_HID_KINDS; k++) {
+                        if (slot->hid_candidates[k].valid &&
+                            slot->hid_candidates[k].iface == cur_iface_num &&
+                            slot->hid_candidates[k].dci == dci) {
+                            hid_selected = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hid_selected) {
+                    offset += len;
+                    continue;
+                }
             }
 
             uint8_t ep_xfer = ep->bmAttributes & 3;
@@ -2172,8 +2207,6 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
 
             uint8_t max_burst = 0;
             uint16_t max_esit_payload = 0;
-            uint8_t speed_cls = slot->loc.speed_class ? slot->loc.speed_class
-                                                      : xhci_speed_class(slot->ctrl, slot->port_num, slot->speed);
             if (ep_xfer == 2 && speed_cls == XHCI_PORT_SPEED_SUPER) {
                 xhci_parse_ss_companion(buffer, total, offset, len, &max_burst, NULL);
             } else if (ep_xfer == 3 && speed_cls == XHCI_PORT_SPEED_SUPER) {
@@ -2242,6 +2275,24 @@ int xhci_setup_endpoint_rings(struct xhci_slot *slot, const uint8_t *buffer,
         }
 
         offset += len;
+    }
+
+    uint8_t active_max_dci = 0;
+    for (uint8_t dci = XHCI_MIN_ENDPOINT_DCI; dci <= slot->max_dci; dci++) {
+        if (slot->ep_rings[dci] && slot->ep_rings[dci]->active) {
+            active_max_dci = dci;
+        }
+    }
+    slot->max_dci = active_max_dci;
+
+    for (int k = 0; k < XHCI_HID_KINDS; k++) {
+        if (slot->hid_candidates[k].valid) {
+            uint8_t dci = slot->hid_candidates[k].dci;
+            if (dci < XHCI_MIN_ENDPOINT_DCI || dci > slot->max_dci ||
+                !slot->ep_rings[dci] || !slot->ep_rings[dci]->active) {
+                memset(&slot->hid_candidates[k], 0, sizeof(slot->hid_candidates[k]));
+            }
+        }
     }
 
     if (slot->msc_candidate.active && !xhci_msc_rings_valid(slot, &slot->msc_candidate)) {
@@ -2519,6 +2570,7 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
 static void xhci_fill_input_ep_ctx(uint32_t *ep_ctx, const struct xhci_ep_ring *ring,
                                    uint64_t deq_phys, uint8_t dcs, bool is_hub)
 {
+    (void)is_hub;
     ep_ctx[0] = (uint32_t)ring->interval << 16;                    /* Interval, MaxPStreams=0 */
     ep_ctx[1] = (3U << 1) | ((uint32_t)ring->ep_type << 3) |
                 ((uint32_t)ring->max_burst << 8) |
@@ -2528,8 +2580,8 @@ static void xhci_fill_input_ep_ctx(uint32_t *ep_ctx, const struct xhci_ep_ring *
     uint32_t max_esit_lo = 0;
     if (ring->max_esit_payload != 0) {
         max_esit_lo = ((uint32_t)ring->max_esit_payload & 0xFFFFU) << 16;
-    } else if (is_hub && (ring->ep_type == XHCI_EP_TYPE_INTR_IN ||
-                          ring->ep_type == XHCI_EP_TYPE_INTR_OUT)) {
+    } else if (ring->ep_type == XHCI_EP_TYPE_INTR_IN ||
+               ring->ep_type == XHCI_EP_TYPE_INTR_OUT) {
         uint32_t esit = (uint32_t)ring->max_packet_size * ((uint32_t)ring->max_burst + 1U);
         max_esit_lo = (esit & 0xFFFFU) << 16;
     }

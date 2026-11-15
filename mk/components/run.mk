@@ -3283,6 +3283,11 @@ test-usb-hid-report:
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,test-usb-hid-report $(OS01_SUBMAKE_ARGS))
 
+.PHONY: test-xhci-hid-desc
+test-xhci-hid-desc:
+	$(call require_capability,rootfs)
+	@$(call os01_submake,hosttests,test-xhci-hid-desc $(OS01_SUBMAKE_ARGS))
+
 
 # ── libc completion focused host tests (T1) ───────────────────────
 # make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<case>

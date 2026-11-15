@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
+#include <driver/xhci_hid.h>
 #include <sync/mutex.h>
 
 /* Ring and TRB constants */
@@ -432,6 +433,8 @@ struct xhci_slot {
     struct xhci_interface_info iface;
     struct xhci_msc_iface msc_candidate;
     struct xhci_msc_iface msc_iface;
+    struct xhci_hid_candidate hid_candidates[XHCI_HID_KINDS];
+    uint8_t hub_status_dci;
 
     bool configured;
 
