@@ -516,6 +516,8 @@ static void test_bind_and_fail_closed(void)
 
     assert_false(hw.rings[1][3].intr_bound);
     assert_false(hw.rings[1][5].intr_bound);
+    assert_false(xhci_slot_transport_usable(&hw.ctrl, 1));
+    assert_true(hw.slots[1].dma_retained);
     assert_true(hw.rings[2][3].intr_bound);
     assert_true(xhci_hid_mouse_bound());
 
@@ -551,6 +553,27 @@ static void test_bind_and_fail_closed(void)
     s1->hid_candidates[XHCI_HID_MOUSE] = (struct xhci_hid_candidate){
         .valid = true, .iface = 0, .dci = 3, .ep_addr = 0x81, .interval = 10, .mps = 4
     };
+    assert_eq(0, xhci_hid__test_init());
+    assert_false(xhci_hid_mouse_bound());
+    free_mock_hw(&hw);
+
+    /* Hub monitor MPS < ceil((nports+1)/8) -> fail-closed */
+    reset_test_globals();
+    init_mock_hw(&hw, 0, 0x14, 0);
+    struct xhci_slot *hub = setup_mock_slot(&hw, 1, 1);
+    hub->is_hub = true;
+    hub->hub_ss = false;
+    hub->hub_nports = 8; /* min_bytes = 2 */
+    hub->hub_status_dci = 3;
+    setup_intr_ep(&hw, 1, 3, 1); /* MPS 1 < 2 */
+    struct xhci_slot *dev = setup_mock_slot(&hw, 2, 1);
+    dev->loc.depth = 1;
+    dev->loc.parent_slot = 1;
+    dev->loc.parent_port = 1;
+    dev->hid_candidates[XHCI_HID_MOUSE] = (struct xhci_hid_candidate){
+        .valid = true, .iface = 0, .dci = 3, .ep_addr = 0x81, .interval = 10, .mps = 4
+    };
+    setup_intr_ep(&hw, 2, 3, 4);
     assert_eq(0, xhci_hid__test_init());
     assert_false(xhci_hid_mouse_bound());
     free_mock_hw(&hw);

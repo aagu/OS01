@@ -68,7 +68,6 @@ struct xhci_hid_hub_mon {
 
 struct xhci_hid_ctrl_state {
     struct xhci_controller *ctrl;
-    bool saturated;
 };
 
 struct xhci_hid_pending_report {
@@ -205,7 +204,6 @@ static void xhci_hid_register_ctrl_state(struct xhci_controller *ctrl)
     for (unsigned i = 0; i < XHCI_HID_MAX_CONTROLLERS; i++) {
         if (!s_ctrl_states[i].ctrl) {
             s_ctrl_states[i].ctrl = ctrl;
-            s_ctrl_states[i].saturated = false;
             return;
         }
     }
@@ -411,7 +409,6 @@ void xhci_hid_service_once(uint64_t now_ns)
                                                pending_rel, &pending_rel_cnt);
             }
             s_ctrl_states[ci].ctrl = NULL;
-            s_ctrl_states[ci].saturated = false;
             xhci_hid_emit_pending_releases(pending_rel, pending_rel_cnt);
             continue;
         }
@@ -430,13 +427,11 @@ void xhci_hid_service_once(uint64_t now_ns)
         unsigned drained = xhci_intr_in_pump_locked(ctrl, XHCI_HID_EVENT_BUDGET);
         if (drained >= XHCI_HID_EVENT_BUDGET) {
             /* Saturated: keep cached results, do not take/publish/re-arm until empty ring */
-            s_ctrl_states[ci].saturated = true;
             if (io_locked)
                 mutex_unlock(&ctrl->io_lock);
             xhci_hid_emit_pending_releases(pending_rel, pending_rel_cnt);
             continue;
         }
-        s_ctrl_states[ci].saturated = false;
 
         /* 3. Process Hub monitors first */
         xhci_hid_process_monitors_locked(ctrl, now_ns, pending_rel, &pending_rel_cnt);
@@ -565,7 +560,6 @@ void xhci_hid_detach_controller(struct xhci_controller *ctrl)
     for (unsigned i = 0; i < XHCI_HID_MAX_CONTROLLERS; i++) {
         if (s_ctrl_states[i].ctrl == ctrl) {
             s_ctrl_states[i].ctrl = NULL;
-            s_ctrl_states[i].saturated = false;
         }
     }
 
@@ -600,6 +594,9 @@ static int xhci_hid_bind_slot(struct xhci_controller *ctrl, struct xhci_slot *sl
             slot->loc.parent_port < 1 || slot->loc.parent_port > hub->hub_nports)
             return -ENOTSUP;
         if (!xhci_hid_ring_valid(hub, hub->hub_status_dci, XHCI_HID_MON_BUF_CAP))
+            return -EINVAL;
+        uint16_t min_mon_bytes = (uint16_t)((hub->hub_nports + 1U + 7U) / 8U);
+        if (hub->ep_rings[hub->hub_status_dci]->max_packet_size < min_mon_bytes)
             return -EINVAL;
     }
 
@@ -663,8 +660,20 @@ static int xhci_hid_bind_slot(struct xhci_controller *ctrl, struct xhci_slot *sl
         };
         uint64_t deadline = arch_clocksource_read_ns() + XHCI_HID_SET_PROTOCOL_DEADLINE_NS;
         int rc = xhci_control_no_data_until(ctrl, slot->slot_id, &setup, deadline);
-        if (rc != 0)
+        if (rc != 0) {
+            if (slot->loc.tt_hub_slot == 0) {
+                bool io_locked = false;
+                if (ctrl->io_lock_init && xhci_hid_can_lock()) {
+                    mutex_lock(&ctrl->io_lock);
+                    io_locked = true;
+                }
+                slot->poisoned = true;
+                slot->dma_retained = true;
+                if (io_locked)
+                    mutex_unlock(&ctrl->io_lock);
+            }
             goto fail_rollback;
+        }
 
         rc = xhci_intr_in_prepare_locked(ctrl, slot->slot_id, cands[i]->dci);
         if (rc != 0)
