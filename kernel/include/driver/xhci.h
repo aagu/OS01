@@ -278,6 +278,9 @@ struct xhci_ep_ring {
     uint8_t interval;               /* Computed xHCI interval exponent */
     uint8_t max_burst;              /* SuperSpeed Max Burst Size */
     bool active;
+    bool td_barred;                 /* Endpoint barred from new TDs until settled */
+    bool recovery_half_done;        /* Reset/Stop + TT clear already completed */
+    int recovery_rc;                /* Latest settled timeout/recovery status */
 };
 
 /* Summary of the primary interface parsed from the descriptor hierarchy */
@@ -358,6 +361,12 @@ struct xhci_location {
     uint8_t tt_port;
 };
 
+enum xhci_tt_state {
+    XHCI_TT_READY = 0,
+    XHCI_TT_CLEARING,
+    XHCI_TT_QUARANTINED
+};
+
 struct xhci_slot_alloc_result {
     uint8_t id;
     bool disable_confirmed;
@@ -373,6 +382,7 @@ struct xhci_slot {
     uint16_t max_packet_size;
     bool active;
     bool addr_completed;
+    enum xhci_tt_state tt_state;
 
     /* DMA Allocations (each 4KB page) */
     uint64_t input_ctx_phys;
@@ -621,6 +631,15 @@ int xhci_enumerate_at(struct xhci_controller *ctrl, const struct xhci_location *
 int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
                            uint64_t cleanup_deadline_ns);
 int xhci_parse_ext_caps(struct xhci_controller *ctrl, uint32_t hccparams1);
+
+int xhci_tt_clear_locked(struct xhci_controller *ctrl, const struct xhci_location *loc,
+                         uint8_t dev_addr, uint8_t ep_addr, uint8_t ep_type,
+                         uint64_t cleanup_deadline_ns);
+bool xhci_slot_transport_usable(const struct xhci_controller *ctrl, uint8_t slot_id);
+
+#ifdef OS01_HOST_TEST
+void xhci_msc_probe_controller(struct xhci_controller *ctrl, uint8_t *next_disk);
+#endif
 
 int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
                          uint8_t req, uint16_t value, uint16_t index);

@@ -73,53 +73,62 @@ static int xhci_msc_recover_timeout(void *ctx, uint8_t ep_addr)
     return xhci_recover_bulk_timeout(c->ctrl, c->slot_id, dci);
 }
 
+void xhci_msc_probe_controller(struct xhci_controller *ctrl, uint8_t *next_disk)
+{
+    if (!ctrl || !ctrl->running || ctrl->poisoned || !next_disk)
+        return;
+
+    for (uint8_t si = 1; si <= XHCI_MAX_MANAGED_SLOTS; si++) {
+        struct xhci_slot *slot = ctrl->slots[si];
+        if (!slot || !slot->active || !slot->configured ||
+            slot->disabled || slot->poisoned || !slot->msc_iface.active)
+            continue;
+        if (!xhci_slot_transport_usable(ctrl, slot->slot_id))
+            continue;
+
+        if (*next_disk >= XHCI_MSC_MAX_DISKS) {
+            log_warn("xhci_msc: disk name limit (usba..usbz) reached\n");
+            return;
+        }
+
+        struct xhci_msc_ctx *ctx = &s_msc_ctxs[*next_disk];
+        ctx->ctrl = ctrl;
+        ctx->slot_id = slot->slot_id;
+        ctx->in_addr = slot->msc_iface.in_addr;
+        ctx->out_addr = slot->msc_iface.out_addr;
+        ctx->in_dci = slot->msc_iface.in_dci;
+        ctx->out_dci = slot->msc_iface.out_dci;
+
+        struct usb_msc_transport transport = {
+            .ctx = ctx,
+            .control_no_data = xhci_msc_control_no_data,
+            .bulk = xhci_msc_bulk,
+            .clear_halt = xhci_msc_clear_halt,
+            .recover_timeout = xhci_msc_recover_timeout,
+        };
+
+        char name[5] = { 'u', 's', 'b', (char)('a' + *next_disk), '\0' };
+        int rc = usb_msc_probe(&transport,
+                               slot->msc_iface.interface_num,
+                               slot->msc_iface.in_addr,
+                               slot->msc_iface.out_addr,
+                               name,
+                               NULL);
+        if (rc == 0)
+            (*next_disk)++;
+    }
+}
+
+#ifndef OS01_HOST_TEST
 static int xhci_msc_init(void)
 {
     uint8_t next_disk = 0;
     uint8_t nctrl = xhci_controller_count();
 
     for (uint8_t ci = 0; ci < nctrl; ci++) {
-        struct xhci_controller *ctrl = xhci_controller_get(ci);
-        if (!ctrl || !ctrl->running || ctrl->poisoned)
-            continue;
-
-        for (uint8_t si = 1; si <= XHCI_MAX_MANAGED_SLOTS; si++) {
-            struct xhci_slot *slot = ctrl->slots[si];
-            if (!slot || !slot->active || !slot->configured ||
-                slot->disabled || slot->poisoned || !slot->msc_iface.active)
-                continue;
-
-            if (next_disk >= XHCI_MSC_MAX_DISKS) {
-                log_warn("xhci_msc: disk name limit (usba..usbz) reached\n");
-                return 0;
-            }
-
-            struct xhci_msc_ctx *ctx = &s_msc_ctxs[next_disk];
-            ctx->ctrl = ctrl;
-            ctx->slot_id = slot->slot_id;
-            ctx->in_addr = slot->msc_iface.in_addr;
-            ctx->out_addr = slot->msc_iface.out_addr;
-            ctx->in_dci = slot->msc_iface.in_dci;
-            ctx->out_dci = slot->msc_iface.out_dci;
-
-            struct usb_msc_transport transport = {
-                .ctx = ctx,
-                .control_no_data = xhci_msc_control_no_data,
-                .bulk = xhci_msc_bulk,
-                .clear_halt = xhci_msc_clear_halt,
-                .recover_timeout = xhci_msc_recover_timeout,
-            };
-
-            char name[5] = { 'u', 's', 'b', (char)('a' + next_disk), '\0' };
-            int rc = usb_msc_probe(&transport,
-                                   slot->msc_iface.interface_num,
-                                   slot->msc_iface.in_addr,
-                                   slot->msc_iface.out_addr,
-                                   name,
-                                   NULL);
-            if (rc == 0)
-                next_disk++;
-        }
+        xhci_msc_probe_controller(xhci_controller_get(ci), &next_disk);
+        if (next_disk >= XHCI_MSC_MAX_DISKS)
+            break;
     }
 
     return 0;
@@ -134,3 +143,4 @@ static int xhci_msc_register(void)
                                 xhci_msc_requires, 1);
 }
 SUBSYS_INITCALL(xhci_msc_register);
+#endif

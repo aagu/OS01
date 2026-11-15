@@ -353,12 +353,17 @@ $(TEST_BLD)/test_xhci_phase2.elf: $(TEST_BLD)/test_xhci_phase2.o \
 test-xhci-phase2: $(TEST_BLD)/test_xhci_phase2.elf
 	$<
 
+$(TEST_BLD)/xhci_msc_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_msc.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_xhci_phase3.o: $(TEST_CASES)/test_xhci_phase3.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_xhci_phase3.elf: $(TEST_BLD)/test_xhci_phase3.o \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_msc_production.o \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \

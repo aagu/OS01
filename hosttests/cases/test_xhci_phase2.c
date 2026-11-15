@@ -1524,6 +1524,219 @@ static void test_xhci_default_target_rollback(void)
     assert_eq(0, xhci_usb2_root_isolate(&ctrl, 1, s_mock_clock_ns + 5000000ULL));
 }
 
+static void test_xhci_split_address_failure(void)
+{
+    TEST_CASE("split Address Device TX_ERR clears TT for addr=0 EP0 OUT+IN, quarantines on failure");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint64_t dcbaa[512];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(dcbaa, 0, sizeof(dcbaa));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.dcbaa_virt = dcbaa;
+    ctrl.dcbaa_phys = (uint64_t)(uintptr_t)dcbaa;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+    ctrl.ac64 = true;
+    ctrl.ac64_valid = true;
+
+    /* Slot 1: HS Hub on root port 1 */
+    struct xhci_slot hs_hub, sibling_fs, sibling_hs;
+    struct xhci_trb hub_ep0[XHCI_TRB_RING_SIZE];
+    uint8_t hub_dma[4096];
+    memset(&hs_hub, 0, sizeof(hs_hub));
+    memset(&sibling_fs, 0, sizeof(sibling_fs));
+    memset(&sibling_hs, 0, sizeof(sibling_hs));
+    memset(hub_ep0, 0, sizeof(hub_ep0));
+    hs_hub.ctrl = &ctrl;
+    hs_hub.slot_id = 1;
+    hs_hub.active = true;
+    hs_hub.ep0_ring_virt = hub_ep0;
+    hs_hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hs_hub.ep0_ring_cycle = 1;
+    hs_hub.dma_buf_virt = hub_dma;
+    hs_hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hs_hub.loc = (struct xhci_location){
+        .route = 0, .root_port = 1, .depth = 0,
+        .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
+    };
+    ctrl.slots[1] = &hs_hub;
+
+    /* Slot 2: FS sibling sharing TT on HS hub port 2 */
+    sibling_fs.ctrl = &ctrl;
+    sibling_fs.slot_id = 2;
+    sibling_fs.active = true;
+    sibling_fs.loc = (struct xhci_location){
+        .route = 0x2U, .root_port = 1, .parent_slot = 1, .parent_port = 2, .depth = 1,
+        .speed_id = XHCI_PORT_SPEED_FULL, .speed_class = XHCI_PORT_SPEED_FULL,
+        .tt_hub_slot = 1, .tt_port = 2
+    };
+    ctrl.slots[2] = &sibling_fs;
+
+    /* Slot 3: HS non-split sibling on HS hub port 3 */
+    sibling_hs.ctrl = &ctrl;
+    sibling_hs.slot_id = 3;
+    sibling_hs.active = true;
+    sibling_hs.loc = (struct xhci_location){
+        .route = 0x3U, .root_port = 1, .parent_slot = 1, .parent_port = 3, .depth = 1,
+        .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
+    };
+    ctrl.slots[3] = &sibling_hs;
+
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+
+    /* Enable Slot -> slot 4; Address Device -> TX_ERR; CLEAR_TT OUT (ep0[0..1]); CLEAR_TT IN (ep0[2..3]); Disable Slot -> slot 4 */
+    event_ring[0].parameter = (uint64_t)(uintptr_t)&cmd_ring[0];
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (4U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[1].parameter = (uint64_t)(uintptr_t)&cmd_ring[1];
+    event_ring[1].status = (XHCI_COMP_TX_ERR << 24);
+    event_ring[1].control = (4U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    /* CLEAR_TT OUT status */
+    event_ring[2].parameter = hs_hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    /* CLEAR_TT IN status */
+    event_ring[3].parameter = hs_hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    /* Disable Slot */
+    event_ring[4].parameter = (uint64_t)(uintptr_t)&cmd_ring[2];
+    event_ring[4].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[4].control = (4U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    struct xhci_location child_loc = {
+        .route = 0x2U, .root_port = 1, .parent_slot = 1, .parent_port = 2, .depth = 1,
+        .speed_id = XHCI_PORT_SPEED_FULL, .speed_class = XHCI_PORT_SPEED_FULL,
+        .tt_hub_slot = 1, .tt_port = 2
+    };
+    uint8_t slot_id = 0;
+    int rc = xhci_enumerate_at(&ctrl, &child_loc, s_mock_clock_ns + 50000000ULL, &slot_id);
+    assert_true(rc < 0);
+    assert_eq(XHCI_TT_READY, hs_hub.tt_state);
+    assert_true(xhci_slot_transport_usable(&ctrl, 2));
+    assert_true(xhci_slot_transport_usable(&ctrl, 3));
+    /* Verify {0x23, 8, 0x0000, 2, 0} and {0x23, 8, 0x8000, 2, 0} sent to HS hub */
+    assert_eq(0x0000000200000823ULL, hub_ep0[0].parameter);
+    assert_eq(0x0000000280000823ULL, hub_ep0[2].parameter);
+
+    /* Now test TT clear failure -> QUARANTINED gates sibling_fs, but sibling_hs stays usable */
+    event_ring[5].parameter = hs_hub.ep0_ring_phys + 5 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_STALL << 24);
+    event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    assert_true(xhci_tt_clear_locked(&ctrl, &child_loc, 0, 0x00, 0, s_mock_clock_ns + 5000000ULL) < 0);
+    assert_eq(XHCI_TT_QUARANTINED, hs_hub.tt_state);
+    assert_false(xhci_slot_transport_usable(&ctrl, 2));
+    assert_true(xhci_slot_transport_usable(&ctrl, 3));
+}
+
+static void test_xhci_split_ep0_terminal(void)
+{
+    TEST_CASE("split EP0 terminal: Halted uses Reset Endpoint (no Stop) -> TT clear; Running uses Stop");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+
+    struct xhci_slot hs_hub, child;
+    struct xhci_trb hub_ep0[XHCI_TRB_RING_SIZE], child_ep0[XHCI_TRB_RING_SIZE];
+    uint8_t hub_dma[4096], child_dma[4096], child_dev_ctx[4096];
+    memset(&hs_hub, 0, sizeof(hs_hub));
+    memset(&child, 0, sizeof(child));
+    memset(hub_ep0, 0, sizeof(hub_ep0));
+    memset(child_ep0, 0, sizeof(child_ep0));
+    memset(child_dev_ctx, 0, sizeof(child_dev_ctx));
+
+    hs_hub.ctrl = &ctrl; hs_hub.slot_id = 1; hs_hub.active = true;
+    hs_hub.ep0_ring_virt = hub_ep0; hs_hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hs_hub.ep0_ring_cycle = 1;
+    hs_hub.dma_buf_virt = hub_dma; hs_hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hs_hub.loc = (struct xhci_location){ .root_port = 1, .speed_class = XHCI_PORT_SPEED_HIGH };
+
+    child.ctrl = &ctrl; child.slot_id = 2; child.active = true;
+    child.ep0_ring_virt = child_ep0; child.ep0_ring_phys = (uint64_t)(uintptr_t)child_ep0;
+    child.ep0_ring_cycle = 1;
+    child.dma_buf_virt = child_dma; child.dma_buf_phys = (uint64_t)(uintptr_t)child_dma;
+    child.dev_ctx_virt = child_dev_ctx; child.dev_ctx_phys = (uint64_t)(uintptr_t)child_dev_ctx;
+    child.loc = (struct xhci_location){
+        .route = 0x1U, .root_port = 1, .parent_slot = 1, .parent_port = 1, .depth = 1,
+        .speed_id = XHCI_PORT_SPEED_FULL, .speed_class = XHCI_PORT_SPEED_FULL,
+        .tt_hub_slot = 1, .tt_port = 1
+    };
+    /* Output Slot Context USB Device Address = 5; Output EP0 Context state = HALTED (2) */
+    uint32_t *out_slot_ctx = (uint32_t *)xhci_dev_slot_ctx(child_dev_ctx, 0);
+    out_slot_ctx[3] = 5U;
+    uint32_t *out_ep0_ctx = (uint32_t *)xhci_dev_ep_ctx(child_dev_ctx, 0, 1);
+    out_ep0_ctx[0] = XHCI_EP_STATE_HALTED;
+
+    ctrl.slots[1] = &hs_hub;
+    ctrl.slots[2] = &child;
+
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+
+    /* Child EP0 IN fails with TX_ERR -> Reset Endpoint (cmd[0]) -> CLEAR_TT OUT+IN (hub_ep0[0..3]) */
+    event_ring[0].parameter = child.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_TX_ERR << 24);
+    event_ring[0].control = (2U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[1].parameter = (uint64_t)(uintptr_t)&cmd_ring[0];
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (2U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    event_ring[2].parameter = hs_hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    event_ring[3].parameter = hs_hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct xhci_setup st = { .type = 0x80, .request = 0x06, .value = 0x0100, .index = 0, .length = 8 };
+    uint8_t dst[8];
+    int rc = xhci_control_in(&ctrl, 2, &st, dst, sizeof(dst), s_mock_clock_ns + 50000000ULL);
+    assert_true(rc < 0);
+    /* Must send Reset Endpoint (NOT Stop Endpoint), and must poison abandoned EP0 */
+    assert_eq(XHCI_TRB_TYPE_RESET_EP, (cmd_ring[0].control >> 10) & 0x3F);
+    assert_eq(XHCI_TT_READY, hs_hub.tt_state);
+    assert_true(child.poisoned);
+    /* addr=5, EP0 OUT -> 0x0050, IN -> 0x8050 */
+    assert_eq(0x0000000100500823ULL, hub_ep0[0].parameter);
+    assert_eq(0x0000000180500823ULL, hub_ep0[2].parameter);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -1547,6 +1760,8 @@ int main(void)
     test_xhci_child_route_and_tt();
     test_xhci_psi_root_scope();
     test_xhci_default_target_rollback();
+    test_xhci_split_address_failure();
+    test_xhci_split_ep0_terminal();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }
