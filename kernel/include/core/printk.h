@@ -58,6 +58,10 @@ void putchar_at_snap(const struct fb_snapshot *snap, int col, int row, unsigned 
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...);
 int printk_fb_write(unsigned int FRcolor, unsigned int BKcolor, const char *buf, int len);
 int serial_printk(const char *fmt,...);
+uint8_t *printk_fb_shadow_get(const void *hw_fb, uint32_t xres, uint32_t yres);
+void printk_fb_shadow_scroll(void *hw_fb, uint32_t xres, uint32_t yres,
+                             uint32_t row_bytes, int rows);
+void printk_fb_shadow_release(void);
 void frame_buffer_init();
 void frame_buffer_early_init();
 

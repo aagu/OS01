@@ -25,6 +25,101 @@
 #include <driver/font.h>
 #include <core/printk.h>
 
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+#include <memory/pmm.h>
+#include <memory/memory.h>
+
+static struct {
+    struct Page *pages;
+    uint64_t     n_pages;
+    uint8_t     *virt;
+    const void  *hw_fb;
+    uint32_t     xres;
+    uint32_t     yres;
+    bool         failed;
+} g_fb_shadow;
+
+void printk_fb_shadow_release(void)
+{
+    if (g_fb_shadow.pages) {
+        free_pages(g_fb_shadow.pages, (int32_t)g_fb_shadow.n_pages);
+        g_fb_shadow.pages = NULL;
+        g_fb_shadow.n_pages = 0;
+        g_fb_shadow.virt = NULL;
+    }
+    g_fb_shadow.hw_fb = NULL;
+    g_fb_shadow.xres = 0;
+    g_fb_shadow.yres = 0;
+    g_fb_shadow.failed = false;
+}
+
+uint8_t *printk_fb_shadow_get(const void *hw_fb, uint32_t xres, uint32_t yres)
+{
+    if (!hw_fb || xres == 0 || yres == 0)
+        return NULL;
+    if (g_fb_shadow.virt && g_fb_shadow.hw_fb == hw_fb &&
+        g_fb_shadow.xres == xres && g_fb_shadow.yres == yres)
+        return g_fb_shadow.virt;
+
+    if (g_fb_shadow.virt)
+        printk_fb_shadow_release();
+    if (g_fb_shadow.failed)
+        return NULL;
+    struct pmm_stats st = {0};
+    pmm_get_stats(&st);
+    if (st.managed_bytes == 0 || st.free_bytes == 0)
+        return NULL;
+
+    size_t need_bytes = (size_t)xres * (size_t)yres * sizeof(uint32_t);
+    uint64_t n_pages = (need_bytes + PAGE_2M_SIZE - 1) / PAGE_2M_SIZE;
+    if (n_pages == 0 || st.free_bytes <= (n_pages + 8) * PAGE_2M_SIZE) {
+        g_fb_shadow.failed = true;
+        return NULL;
+    }
+    struct Page *p = alloc_pages(ZONE_NORMAL, n_pages, 0);
+    if (!p) {
+        g_fb_shadow.failed = true;
+        return NULL;
+    }
+
+    uint8_t *virt = (uint8_t *)Phy_To_Virt(p->phy_address);
+    memcpy(virt, hw_fb, need_bytes);
+    g_fb_shadow.pages = p;
+    g_fb_shadow.n_pages = n_pages;
+    g_fb_shadow.virt = virt;
+    g_fb_shadow.hw_fb = hw_fb;
+    g_fb_shadow.xres = xres;
+    g_fb_shadow.yres = yres;
+    return virt;
+}
+#else
+void printk_fb_shadow_release(void) {}
+uint8_t *printk_fb_shadow_get(const void *hw_fb, uint32_t xres, uint32_t yres)
+{
+    (void)hw_fb; (void)xres; (void)yres;
+    return NULL;
+}
+#endif
+
+void printk_fb_shadow_scroll(void *hw_fb, uint32_t xres, uint32_t yres,
+                             uint32_t row_bytes, int rows)
+{
+    if (!hw_fb || rows <= 0 || row_bytes == 0) return;
+    size_t keep_bytes = (size_t)row_bytes * (size_t)(rows - 1);
+    uint8_t *shadow = printk_fb_shadow_get(hw_fb, xres, yres);
+    if (shadow) {
+        if (keep_bytes > 0)
+            memmove(shadow, shadow + row_bytes, keep_bytes);
+        memset(shadow + keep_bytes, 0, row_bytes);
+        memcpy(hw_fb, shadow, (size_t)row_bytes * (size_t)rows);
+        return;
+    }
+    uint8_t *fb = (uint8_t *)hw_fb;
+    if (keep_bytes > 0)
+        memmove(fb, fb + row_bytes, keep_bytes);
+    memset(fb + keep_bytes, 0, row_bytes);
+}
+
 /* The framebuffer writer-lease / snapshot subsystem (driver/fb_state.c,
  * fb_writer_begin/fb_writer_end) is built for x86_64 only — aarch64 keeps
  * PL011 serial as its console and maps the framebuffer directly through
@@ -74,18 +169,20 @@ void putchark_snap(const struct fb_snapshot *snap, unsigned int FRcolor, unsigne
             (c > 0 && c < font->numglyph ? c : 0) * font->bytesperglyph;
 
     uint32_t xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
+    uint32_t yres = (snap && snap->state.info.height) ? snap->state.info.height : Pos.YResolution;
+    uint32_t *shadow = (uint32_t *)printk_fb_shadow_get(fb_base, xres, yres);
     for (i = 0; i < font->height; i++)
     {
-        addr = (uint32_t *)fb_base + xres * (Pos.YPosition * font->height + i) + Pos.XPosition * font->width;
+        uint32_t off = xres * (Pos.YPosition * font->height + i) + Pos.XPosition * font->width;
+        addr = (uint32_t *)fb_base + off;
+        uint32_t *saddr = shadow ? (shadow + off) : NULL;
         testval = 0x100;
         for (j = 0; j < font->width; j++)
         {
             testval = testval >> 1;
-            if (*glyph & testval)
-                *addr = FRcolor;
-            else
-                *addr = BKcolor;
-            addr++;
+            uint32_t px = (*glyph & testval) ? FRcolor : BKcolor;
+            *addr++ = px;
+            if (saddr) *saddr++ = px;
         }
         glyph++;
     }
@@ -122,16 +219,17 @@ void putchar_at_snap(const struct fb_snapshot *snap, int col, int row,
     if (row < 0 || row >= max_rows) return;
     if (col < 0 || col >= max_cols) return;
 
+    uint32_t *shadow = (uint32_t *)printk_fb_shadow_get(fb_base, xres, yres);
     for (i = 0; i < (int)font->height; i++) {
-        addr = (uint32_t *)fb_base + xres * (pixel_row_start + i) + pixel_col_start;
+        uint32_t off = xres * (pixel_row_start + i) + pixel_col_start;
+        addr = (uint32_t *)fb_base + off;
+        uint32_t *saddr = shadow ? (shadow + off) : NULL;
         testval = 0x100;
         for (j = 0; j < (int)font->width; j++) {
             testval = testval >> 1;
-            if (*glyph & testval)
-                *addr = FRcolor;
-            else
-                *addr = BKcolor;
-            addr++;
+            uint32_t px = (*glyph & testval) ? FRcolor : BKcolor;
+            *addr++ = px;
+            if (saddr) *saddr++ = px;
         }
         glyph++;
     }
@@ -218,12 +316,9 @@ Label_tab:
 			// Scroll framebuffer up by one character row.
 			int rows = (int)(cur_yres / font->height);
 			uint32_t pitch = cur_xres * sizeof(uint32_t);
-			int row_bytes = (int)(pitch * font->height);
+			uint32_t row_bytes = pitch * font->height;
 			uint8_t *fb = (uint8_t *)((snap && snap->addr) ? snap->addr : Pos.FB_addr);
-			if (fb) {
-				memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
-				memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
-			}
+			printk_fb_shadow_scroll(fb, cur_xres, cur_yres, row_bytes, rows);
 			Pos.YPosition = rows - 1;
 		}
 
