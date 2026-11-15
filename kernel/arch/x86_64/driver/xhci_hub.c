@@ -719,6 +719,9 @@ static int hub_probe_location(struct xhci_controller *ctrl,
                 return rc;
             }
             slot = ctrl->slots[slot_id];
+            if (slot && hub_status_dci != 0) {
+                slot->hub_status_dci = hub_status_dci;
+            }
             deadline_ns = arch_clocksource_read_ns() + 5000000000ULL;
         } else if (rc != 0) {
             log_warn("[xhci-hub] slot %u: configure_hub_slot failed (rc=%d)\n", slot_id, rc);

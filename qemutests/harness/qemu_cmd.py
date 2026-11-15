@@ -37,6 +37,7 @@ def build_qemu_x86(
     usb_speed: str = "2.0",
     usb_readonly: bool = True,
     usb_hub: bool = False,
+    usb_input: str = "off",
 ) -> list[str]:
     """Build an x86_64 QEMU argv list with the paired virtio-rng device.
 
@@ -55,6 +56,12 @@ def build_qemu_x86(
         raise ValueError(f"Unsupported USB speed: {usb_speed!r}")
     if usb_hub and (storage != "usb" or usb_speed != "2.0"):
         raise ValueError("usb_hub=True requires storage='usb' and usb_speed='2.0'")
+    if usb_input not in ("off", "direct", "hub"):
+        raise ValueError(f"Unsupported usb_input mode: {usb_input!r}")
+    if usb_input == "hub" and (storage != "usb" or not usb_hub):
+        raise ValueError("usb_input='hub' requires storage='usb' and usb_hub=True")
+    if usb_input != "off" and "i8042=off" not in machine.split(","):
+        machine = f"{machine},i8042=off"
     xhci_props = (
         "qemu-xhci,id=xhci,p2=4,p3=0"
         if usb_speed == "2.0"
@@ -104,6 +111,19 @@ def build_qemu_x86(
             "-device", "ahci,id=ahci",
             "-device", "ide-hd,drive=disk,bus=ahci.0",
         ]
+
+    if usb_input == "direct":
+        if storage == "ahci":
+            disk_args.extend(["-device", xhci_props])
+        disk_args.extend([
+            "-device", "usb-kbd,id=kbd,bus=xhci.0,port=2,usb_version=2",
+            "-device", "usb-mouse,id=mouse,bus=xhci.0,port=3,usb_version=2",
+        ])
+    elif usb_input == "hub":
+        disk_args.extend([
+            "-device", "usb-kbd,id=kbd,bus=xhci.0,port=1.3,usb_version=1",
+            "-device", "usb-mouse,id=mouse,bus=xhci.0,port=1.4,usb_version=1",
+        ])
 
     cmd = [
         str(qemu),

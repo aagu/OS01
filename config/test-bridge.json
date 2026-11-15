@@ -4437,6 +4437,35 @@
       "flavor": "",
       "image_var": "$(NORMAL_IMAGE)",
       "runner_module": "qemutests.usb_boot"
+    },
+    {
+      "kind": "suite",
+      "id": "usb-hid",
+      "layer": "qemu_e2e",
+      "subsystem": "general",
+      "timing": "strict",
+      "tier": "nightly",
+      "scenarios": [
+        "drivers.usb.hid.input"
+      ],
+      "profile": "x86_64-clang",
+      "capability": "rootfs",
+      "variant": "none",
+      "cpus": "1,2",
+      "memory_mib": 512,
+      "timeout_s": 180,
+      "image_policy": "isolated",
+      "resource": "exclusive",
+      "entrypoint": "test-qemu SUITE=usb-hid",
+      "prepare_target": "",
+      "run_target": "",
+      "source": "mk/tests/catalog.mk",
+      "origin": {
+        "from": "mk/tests/catalog.mk"
+      },
+      "flavor": "",
+      "image_var": "$(NORMAL_IMAGE)",
+      "runner_module": "qemutests.usb_hid"
     }
   ],
   "ignored": [

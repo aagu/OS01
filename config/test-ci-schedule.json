@@ -199,6 +199,11 @@
       "suite": "usb-boot",
       "tier": "nightly",
       "timing": "strict"
+    },
+    {
+      "suite": "usb-hid",
+      "tier": "nightly",
+      "timing": "strict"
     }
   ]
 }

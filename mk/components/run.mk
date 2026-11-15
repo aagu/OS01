@@ -2240,6 +2240,9 @@ USB_BOOT_AHCI_IMAGE := $(abspath $(BUILD_DIR))/image/disk-ahci-usb-test.img
 # shell variable) so the same path is visible to every recipe line; the
 # PID of the parse-time shell keeps concurrent jobs from colliding.
 USB_BOOT_JOB_DIR := $(abspath $(BUILD_DIR))/test-results/usb-boot/$(shell date -u +%Y%m%dT%H%M%S)-$(shell echo $$$$)
+USB_HID_CASE ?= direct
+USB_HID_TIMEOUT ?= 180
+USB_HID_JOB_DIR := $(abspath $(BUILD_DIR))/test-results/usb-hid/$(USB_HID_CASE)-smp$(SMP)-$(shell date -u +%Y%m%dT%H%M%S)-$(shell echo $$$$)
 
 .PHONY: test-qemu
 # Use the per-SUITE Make variables from Step 1. The image path is
@@ -2345,6 +2348,12 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  for c in readonly dual ahci persistence superspeed hub; do \
 	    $(MAKE) --no-print-directory test-qemu-usb-boot USB_BOOT_CASE=$$c || exit 1; \
 	  done; \
+	elif [ "$(SUITE)" = "usb-hid" ]; then \
+	  for c in direct hub; do \
+	    for s in 1 2; do \
+	      $(MAKE) --no-print-directory test-qemu-usb-hid USB_HID_CASE=$$c SMP=$$s || exit 1; \
+	    done; \
+	  done; \
 	elif [ "$(SUITE)" = "doom" ]; then \
 	  if [ "$(DOOM_ASSET_COUNT)" != "4" ]; then \
 	    echo "ERROR: SUITE=doom requires all four DOOM_IWAD variables to be provided" >&2; exit 1; \
@@ -2361,7 +2370,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	  fi; \
 	fi
 	# Hash guard AFTER the build (own recipe line, no ``$(MAKE)``).
-	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ "$(SUITE)" != "usb-boot" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
+	@if [ "$(SUITE)" != "phase-0" ] && [ "$(SUITE)" != "gfx" ] && [ "$(SUITE)" != "resolution" ] && [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "monitor" ] && [ "$(SUITE)" != "terminal-present" ] && [ "$(SUITE)" != "gui" ] && [ "$(SUITE)" != "gui-desktop" ] && [ "$(SUITE)" != "usb-boot" ] && [ "$(SUITE)" != "usb-hid" ] && [ -f "$(NORMAL_IMAGE_DIR)/normal.before" ]; then \
 	  sha256sum "$(NORMAL_IMAGE)" > "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	  cmp "$(NORMAL_IMAGE_DIR)/normal.before" "$(NORMAL_IMAGE_DIR)/normal.after" || exit 1; \
 	fi
@@ -2372,7 +2381,7 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# python harness inside ``test-qemu-driver-model`` and must NOT
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
-	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ] && [ "$(SUITE)" != "boot-services" ] && [ "$(SUITE)" != "usb-boot" ]; then \
+	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ] && [ "$(SUITE)" != "boot-services" ] && [ "$(SUITE)" != "usb-boot" ] && [ "$(SUITE)" != "usb-hid" ]; then \
 	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
 	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
 	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
@@ -2432,6 +2441,31 @@ test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE
 	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.after"; \
 	if ! cmp -s "$(USB_BOOT_JOB_DIR)/image.before" "$(USB_BOOT_JOB_DIR)/image.after"; then \
 	  echo "ERROR: test-qemu-usb-boot modified the source image $(NORMAL_IMAGE)" >&2; \
+	  exit 1; \
+	fi; \
+	exit $$status
+
+.PHONY: test-qemu-usb-hid
+test-qemu-usb-hid: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE) $(USER_ARTIFACT_DIR)/usb_hid_probe.elf)
+	$(call require_capability,rootfs)
+	@case "$(USB_HID_CASE)" in \
+	  direct|hub) ;; \
+	  *) echo "USB_HID_CASE must be direct or hub, got '$(USB_HID_CASE)'" >&2; exit 2;; \
+	esac
+	@set +e; \
+	mkdir -p "$(USB_HID_JOB_DIR)"; \
+	sha256sum "$(NORMAL_IMAGE)" > "$(USB_HID_JOB_DIR)/image.before"; \
+	python3 qemutests/usb_hid.py --case "$(USB_HID_CASE)" \
+	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
+	  --disk "$(NORMAL_IMAGE)" \
+	  --probe-elf "$(USER_ARTIFACT_DIR)/usb_hid_probe.elf" \
+	  --smp "$(SMP)" \
+	  --timeout "$(USB_HID_TIMEOUT)" \
+	  --log-dir "$(USB_HID_JOB_DIR)"; \
+	status=$$?; \
+	sha256sum "$(NORMAL_IMAGE)" > "$(USB_HID_JOB_DIR)/image.after"; \
+	if ! cmp -s "$(USB_HID_JOB_DIR)/image.before" "$(USB_HID_JOB_DIR)/image.after"; then \
+	  echo "ERROR: test-qemu-usb-hid modified the source image $(NORMAL_IMAGE)" >&2; \
 	  exit 1; \
 	fi; \
 	exit $$status

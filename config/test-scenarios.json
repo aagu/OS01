@@ -4784,6 +4784,32 @@
    }
   },
   {
+   "id": "drivers.usb.hid.input",
+   "owner": "qemu_e2e",
+   "component": "drivers",
+   "behavior": "usb_hid",
+   "trigger": "QEMU boots x86_64 with i8042=off and USB Boot HID keyboard/mouse (direct xHCI and shared USB 2.0 Hub with USB storage)",
+   "assertions": [
+    "QMP info usb and guest xhci-hid bindings match direct (480 Mb/s) and hub (12 Mb/s) topologies",
+    "Leased /dev/keyboard and /dev/mouse receive raw E0/button/rel frames with PTY slave fd0 isolation and post-unbind TTY recovery",
+    "Shared Hub storage completes concurrent and post-detach BOT WRITE(10)->SYNCHRONIZE CACHE(10) without interference, and device_del triggers synthetic key/button release"
+   ],
+   "failure_modes": [
+    "topology/speed mismatch, missing lease or raw frame edge, PTY leak, shell hang, missing DEVICE_DELETED or synthetic release, missing BOT trace, or source image mutation"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/usb_hid.py",
+    "selector": "usb-hid",
+    "evidence": "runner exit 0 across direct/hub x SMP=1/2 plus archived verdict.json, serial.log, and qmp-transcript.jsonl"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary QEMU E2E suite verifying USB-only Boot HID input, lease/PTY isolation, detach synthetic release, and shared Hub storage"
+   }
+  },
+  {
    "id": "drivers.usb.devfs",
    "owner": "host",
    "component": "drivers",
