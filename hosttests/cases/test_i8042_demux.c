@@ -23,6 +23,7 @@
 
 #include "test_framework.h"
 #include <driver/i8042.h>
+#include <driver/keyboard.h>
 #include <driver/input_route.h>
 
 /* ═══════════════════════════════════════════════════════════
@@ -546,6 +547,7 @@ static int kbd_subsys_index(const char *name)
 static void kbd_fixture_reset(void)
 {
     fixture_reset();
+    keyboard__test_reset();
     resp_armed = 1;                 /* controller answers 0x20 */
     resp_byte  = 0x61;              /* arbitrary command byte  */
     num_cpus = 1;                   /* GS "installed" by default */
@@ -681,6 +683,7 @@ static void test_kbd_wake_before_gs_installed(void)
 static void test_keyboard_init_fails_on_controller_timeout(void)
 {
     fixture_reset();
+    keyboard__test_reset();
     kbd_reg_n = 0;
     kbd_tty_n = 0;
     keyboard_set_tty(&kbd_mock_tty);
@@ -708,6 +711,7 @@ static void test_keyboard_init_fails_on_controller_timeout(void)
 static void test_keyboard_init_fails_on_register_irq(void)
 {
     fixture_reset();
+    keyboard__test_reset();
     resp_armed = 1;
     resp_byte  = 0x61;
     keyboard_set_tty(NULL);
@@ -744,6 +748,7 @@ static void test_keyboard_init_fails_on_register_irq(void)
 static void test_keyboard_init_success(void)
 {
     fixture_reset();
+    keyboard__test_reset();
     resp_armed = 1;
     resp_byte  = 0x61;
     keyboard_set_tty(NULL);
@@ -761,6 +766,44 @@ static void test_keyboard_init_success(void)
         if (out_w[i].port == 0x60 && out_w[i].val == 0x65)
             found = 1;
     assert_eq(1, found);
+}
+
+/* PS/2 keyboard_init() failure leaves no hardware callbacks installed,
+ * yet USB frames routed via input_route_keyboard_usb_frames() still
+ * deliver to /dev/keyboard and the TTY; keyboard_input_init() is
+ * idempotent and does not wipe pending ring data. */
+static void test_keyboard_init_fails_still_allows_usb_input(void)
+{
+    fixture_reset();
+    keyboard__test_reset();
+    kbd_reg_n = 0;
+    kbd_tty_n = 0;
+    keyboard_set_tty(&kbd_mock_tty);
+    ibf_block = 1;
+
+    assert_true(keyboard_init() != 0);
+    assert_eq(0, kbd_reg_n);
+
+    obf_push(0x1E, 0);
+    assert_eq(0, i8042_pump());
+    assert_eq(0, kbd_tty_n);
+
+    keyboard_input_init(); /* idempotent after keyboard_init() */
+    input_ps2_frame_t usb_a = {
+        .bytes = { 0x1E },
+        .length = 1,
+        .physical_key = 0x1E,
+        .is_make = 1,
+    };
+    input_route_keyboard_usb_frames(&usb_a, 1);
+
+    /* A second keyboard_input_init() must not wipe the ring. */
+    keyboard_input_init();
+    uint8_t b = 0;
+    assert_eq(1, keyboard_read_scancodes(&b, 1));
+    assert_eq(0x1E, b);
+    assert_eq(1, kbd_tty_n);
+    assert_eq('a', kbd_tty_chars[0]);
 }
 
 /* ═══════════════════════════════════════════════════════════ */
@@ -785,6 +828,7 @@ TEST_ENTRY(test_kbd_wake_before_gs_installed),
 TEST_ENTRY(test_keyboard_init_fails_on_controller_timeout),
 TEST_ENTRY(test_keyboard_init_fails_on_register_irq),
 TEST_ENTRY(test_keyboard_init_success),
+TEST_ENTRY(test_keyboard_init_fails_still_allows_usb_input),
 TEST_LIST_END
 
 int main(void)

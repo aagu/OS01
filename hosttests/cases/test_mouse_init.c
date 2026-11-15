@@ -153,6 +153,7 @@ static void reset_case(uint8_t cb)
    * (phase 5, before the mouse probe in phase 6); this fixture starts
    * the mouse on its own, so it initialises the route here. */
   input_route_init();
+  mouse__test_reset();
   original_command_byte = command_byte = cb; cmd_writes = aux_writes = 0;
   fail_aux_at = resend_at = resend_left = bad_source_at = bad_bat = bad_id = probe_reject = 0;
   wheel_id = 3; reporting = consumer_active = packet_events = 0;
@@ -317,9 +318,31 @@ static void test_knock_sequence_is_the_intellimouse_wheel_knock(void)
   assert_eq(100, aux_log[5]);
 }
 
+static void test_mouse_init_fails_still_allows_usb_input(void)
+{
+  reset_case(0x41);
+  keyboard_ok = 0;
+  assert_true(mouse_init() != 0);
+  check_rollback();
+  assert_eq(0, consumer_active);
+
+  mouse_input_init(); /* idempotent after mouse_init() */
+  mouse_event_t ev = { .dx = 7, .dy = -2, .buttons = 1 };
+  input_route_mouse_usb_event(&ev);
+
+  /* Second mouse_input_init() must not wipe queued events. */
+  mouse_input_init();
+  mouse_event_t out = {0};
+  assert_eq((int)sizeof(out), mouse_devfs_read(0, 0, sizeof(out), &out));
+  assert_eq(7, out.dx);
+  assert_eq(-2, out.dy);
+  assert_eq(1, out.buttons);
+}
+
 int main(void)
 { TEST_SUITE("mouse initialization"); test_event_io_and_poll(); test_success(0x41); test_success(0x63);
   test_knock_sequence_is_the_intellimouse_wheel_knock();
+  test_mouse_init_fails_still_allows_usb_input();
   test_payload_values_not_filtered();
   test_stale_drain_must_succeed();
   test_f4_timeout_still_sends_f5();

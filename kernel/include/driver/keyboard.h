@@ -5,12 +5,19 @@
 #include <fs/vfs.h>
 #include <tty/tty.h>
 
+// Initialize the keyboard input sink and NORMAL path (idempotent, no i8042 access).
+void keyboard_input_init(void);
+
 // Initialize the keyboard driver: brings up the shared i8042 layer,
 // installs the keyboard byte consumer, enables IRQ1 in the PS/2
 // command byte and registers the IRQ1 handler.  Returns 0 on success,
 // negative when a controller transaction or register_irq(1) failed
 // (propagated to subsys_status("keyboard") != 1).
 int keyboard_init(void);
+
+#ifdef OS01_HOST_TEST
+void keyboard__test_reset(void);
+#endif
 
 // Set the TTY that receives translated ASCII input.
 void keyboard_set_tty(tty_t *tty);

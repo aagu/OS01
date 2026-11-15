@@ -74,8 +74,14 @@
 #define ROUTE_MOUSE_QUEUE_SLOTS 64
 
 /* The physical key bitmap covers the bare Set 1 codes (0x00-0xFF) and
- * the E0-prefixed ones (0x100|code). */
-#define ROUTE_KEY_SLOTS 512
+ * the E0-prefixed ones (0x100|code).  Slot 0x1FF is unused by any
+ * ordinary Set 1 code and is reserved internally for 4-byte PrintScreen. */
+#define ROUTE_KEY_SLOTS      512
+#define KBD_PRINTSCREEN_SLOT 0x1FFu
+
+/* Dual-source physical ownership bits (keyboard keys and mouse buttons). */
+#define INPUT_SRC_PS2 (1u << 0)
+#define INPUT_SRC_USB (1u << 1)
 
 /* Set 1 codes the route reasons about. */
 #define KBD_SHIFT_L 0x2A
@@ -99,6 +105,7 @@ struct route_endpoint {
 
 static struct {
     spinlock_T lock;
+    int        initialized;
 
     /* The lease.  The view and the endpoint pointers are WEAK: the
      * route never holds a reference that could keep the final close
@@ -113,8 +120,9 @@ static struct {
     struct route_endpoint *mouse_ep;
 
     /* The physical state.  It survives a lease change: a key that is
-     * really held is still held when the lease ends. */
-    uint8_t  phys_down[ROUTE_KEY_SLOTS];
+     * really held is still held when the lease ends.  Each slot stores
+     * a 2-bit source ownership mask (INPUT_SRC_PS2 | INPUT_SRC_USB). */
+    uint8_t  phys_owners[ROUTE_KEY_SLOTS];
     uint8_t  isolated[ROUTE_KEY_SLOTS]; /* the keys whose events are swallowed */
     uint8_t  caps_on;                    /* the Caps Lock latch */
     uint8_t  logical_down[ROUTE_KEY_SLOTS]; /* accepted keys in this epoch */
@@ -138,9 +146,10 @@ static struct {
     unsigned      mouse_head, mouse_tail, mouse_count;
     int           mouse_overflow;
 
-    /* The mouse buttons: the physical state and the ones isolated
+    /* The mouse buttons: per-source physical state and the ones isolated
      * because they were already held when the lease started. */
-    uint8_t mouse_buttons;
+    uint8_t mouse_buttons_ps2;
+    uint8_t mouse_buttons_usb;
     uint8_t mouse_isolated;
 
     /* The poll waiters of the ACTIVE queues. */
@@ -159,11 +168,11 @@ static uint32_t route_physical_modifiers_locked(void)
 {
     uint32_t mods = 0;
 
-    if (route.phys_down[KBD_SHIFT_L] || route.phys_down[KBD_SHIFT_R])
+    if (route.phys_owners[KBD_SHIFT_L] || route.phys_owners[KBD_SHIFT_R])
         mods |= INPUT_ROUTE_MOD_SHIFT;
-    if (route.phys_down[KBD_CTRL_L] || route.phys_down[KBD_CTRL_R])
+    if (route.phys_owners[KBD_CTRL_L] || route.phys_owners[KBD_CTRL_R])
         mods |= INPUT_ROUTE_MOD_CTRL;
-    if (route.phys_down[KBD_ALT_L] || route.phys_down[KBD_ALT_R])
+    if (route.phys_owners[KBD_ALT_L] || route.phys_owners[KBD_ALT_R])
         mods |= INPUT_ROUTE_MOD_ALT;
     if (route.caps_on)
         mods |= INPUT_ROUTE_MOD_CAPS;
@@ -414,10 +423,11 @@ static void route_revoke_locked(int reason)
     /* A new NORMAL consumer has seen none of the held presses.  Keep
      * typematic and releases quarantined until each physical release. */
     for (int i = 0; i < ROUTE_KEY_SLOTS; i++)
-        if (route.phys_down[i])
+        if (route.phys_owners[i])
             route.isolated[i] = 1;
     if (route.mouse_ep)
-        route.mouse_isolated |= route.mouse_buttons;
+        route.mouse_isolated |= (uint8_t)(route.mouse_buttons_ps2 |
+                                          route.mouse_buttons_usb);
 
     route.lease_active = 0;
     route.view = NULL;          /* never dereference a freed view */
@@ -444,6 +454,9 @@ static void route_revoke_locked(int reason)
 void input_route_set_normal_sinks(const input_route_kbd_sink_t *kbd,
                                   const input_route_mouse_sink_t *mouse)
 {
+    if (!route.initialized)
+        input_route_init();
+
     uint64_t flags = spin_lock_irqsave(&route.lock);
 
     if (kbd)
@@ -472,6 +485,7 @@ void input_route_init(void)
     list_init(&route.poll);
     input_ps2_frame_reset(&route.framer);
     route.epoch = 1;
+    route.initialized = 1;
 }
 
 int input_route_open(input_device_t device, struct file **out)
@@ -609,7 +623,7 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
      * Only the Caps latch crosses the UAPI; a held modifier cannot
      * supply a fresh press or a phantom release to this lease. */
     for (i = 0; i < ROUTE_KEY_SLOTS; i++)
-        if (route.phys_down[i])
+        if (route.phys_owners[i])
             route.isolated[i] = 1;
 
     /* A new lease starts from a known-consistent state: the DESYNC flag
@@ -621,7 +635,8 @@ int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
      * held.  The movement is never lost.  A keyboard-only lease does
      * not own the mouse, so its buttons are left alone. */
     if (mouse_ep)
-        route.mouse_isolated = route.mouse_buttons;
+        route.mouse_isolated = (uint8_t)(route.mouse_buttons_ps2 |
+                                         route.mouse_buttons_usb);
 
     /* The transient modifier state starts clean. */
     memset(route.logical_down, 0, sizeof(route.logical_down));
@@ -786,64 +801,101 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
 
 /* ── The producer ─────────────────────────────────────────────── */
 
-/* Publish one COMPLETE sequence.  The route lock is held. */
-static void route_publish_frame_locked(const input_ps2_frame_t *frame)
+static int route_frame_track_slot(const input_ps2_frame_t *frame,
+                                  uint16_t *slot_out)
 {
-    uint16_t key = frame->physical_key;
-    int ordinary = (!frame->is_special && key < ROUTE_KEY_SLOTS);
+    if (!frame->is_special) {
+        if (frame->physical_key < ROUTE_KEY_SLOTS &&
+            frame->physical_key != KBD_PRINTSCREEN_SLOT) {
+            *slot_out = frame->physical_key;
+            return 1;
+        }
+        return 0;
+    }
+    /* 4-byte PrintScreen gets its own internal slot; 6-byte Pause
+     * remains untracked. */
+    if (frame->length == 4) {
+        *slot_out = KBD_PRINTSCREEN_SLOT;
+        return 1;
+    }
+    return 0;
+}
 
-    /* 1. The physical state always advances, even for a sequence that
-     *    is swallowed below: the key really is held. */
-    if (ordinary) {
-        if (frame->is_make) {
-            if (!route.phys_down[key]) {
-                route.phys_down[key] = 1;
-                /* The Caps latch flips on the UP → DOWN transition only,
-                 * so the auto-repeat of a held Caps key never flips it
-                 * again. */
-                if (key == KBD_CAPS)
-                    route.caps_on = !route.caps_on;
-            }
-        } else {
-            route.phys_down[key] = 0;
+/* Publish one COMPLETE sequence from `source` (INPUT_SRC_PS2 or
+ * INPUT_SRC_USB).  The route lock is held. */
+static void route_publish_frame_locked(const input_ps2_frame_t *frame,
+                                       uint8_t source)
+{
+    uint16_t slot = 0;
+    int tracked = route_frame_track_slot(frame, &slot);
+    uint8_t prev_owners = 0, new_owners = 0;
+    int prev_down = 0, new_down = 0;
+
+    /* 1. Update this source's physical ownership and aggregate state
+     *    first, even for cross-epoch or isolated sequences. */
+    if (tracked) {
+        prev_owners = route.phys_owners[slot];
+        prev_down = (prev_owners != 0);
+        if (frame->is_make)
+            new_owners = (uint8_t)(prev_owners | source);
+        else
+            new_owners = (uint8_t)(prev_owners & (uint8_t)~source);
+        new_down = (new_owners != 0);
+
+        route.phys_owners[slot] = new_owners;
+
+        if (!prev_down && new_down) {
+            /* Caps Lock flips only on aggregate 0 -> 1. */
+            if (!frame->is_special && slot == KBD_CAPS)
+                route.caps_on = !route.caps_on;
         }
     }
 
     /* 2. A sequence that crosses an epoch boundary started in another
-     *    lease's era: it is isolated, so the consumer never sees a
-     *    half-truth.  The key stays isolated until its break.
-     *
-     *    The consumer's key state may now have diverged from the
-     *    physical one (it never saw this sequence), so the ACTIVE path
-     *    goes DESYNC and says so OUT OF BAND: the byte stream stays raw
-     *    Set 1 payload, the flag is reported by the read (-EOVERFLOW)
-     *    and by the poll (POLLERR). */
+     *    lease's era: always mark DESYNC when leased (never silently
+     *    swallow cross-epoch due to aggregate edge filtering), set
+     *    isolation only on a new aggregate make (0 -> 1), and clear
+     *    isolation only on aggregate 1 -> 0. */
     if (frame->start_epoch != route.epoch) {
         if (route.lease_active)
             route.kbd_desync = 1;
-        if (ordinary) {
-            if (frame->is_make)
-                route.isolated[key] = 1;
-            else
-                route.isolated[key] = 0;
+        if (tracked) {
+            if (frame->is_make) {
+                if (!prev_down && new_down)
+                    route.isolated[slot] = 1;
+            } else {
+                if (prev_down && !new_down)
+                    route.isolated[slot] = 0;
+            }
         }
         return;
     }
 
-    /* 3. An isolated key is swallowed until its break. */
-    if (ordinary && route.isolated[key]) {
-        if (!frame->is_make)
-            route.isolated[key] = 0;
+    /* 3. An isolated key is swallowed until aggregate 1 -> 0. */
+    if (tracked && route.isolated[slot]) {
+        if (prev_down && !new_down)
+            route.isolated[slot] = 0;
         return;
     }
 
-    /* Only accepted frames advance the consumer's logical state.  Keep
-     * left/right keys independent, so releasing one side cannot clear
-     * the other side or resurrect an isolated physical modifier. */
-    if (ordinary)
-        route.logical_down[key] = frame->is_make ? 1 : 0;
+    /* 4. Dual-source aggregate edge filtering (preserving PS/2
+     *    typematic repeat when PS/2 already owns the key). */
+    if (tracked) {
+        if (frame->is_make) {
+            if (prev_down) {
+                if (!(source == INPUT_SRC_PS2 && (prev_owners & INPUT_SRC_PS2)))
+                    return;
+            }
+        } else {
+            if (new_down)
+                return;
+        }
 
-    /* 4. Publish the whole sequence. */
+        if (!frame->is_special)
+            route.logical_down[slot] = frame->is_make ? 1 : 0;
+    }
+
+    /* 5. Publish the whole sequence. */
     if (route.lease_active) {
         route_kbd_push_locked(frame->bytes, frame->length);
     } else if (route.kbd_sink && route.kbd_sink->publish) {
@@ -862,7 +914,7 @@ void input_route_keyboard_byte(uint8_t byte)
      * stable address for every byte of one sequence. */
     rc = input_ps2_frame_feed(&route.framer, byte, route.epoch, &route.frame);
     if (rc == 1)
-        route_publish_frame_locked(&route.frame);
+        route_publish_frame_locked(&route.frame, INPUT_SRC_PS2);
     /* rc == 0: the sequence is still incomplete — nothing is published.
      * rc < 0:  -EINVAL means the sequence is LOST (no state update, no
      * publication, no resumption) and -EILSEQ means the byte stream is
@@ -871,27 +923,46 @@ void input_route_keyboard_byte(uint8_t byte)
     spin_unlock_irqrestore(&route.lock, flags);
 }
 
-void input_route_mouse_event(const mouse_event_t *event)
+void input_route_keyboard_usb_frames(const input_ps2_frame_t *frames,
+                                     size_t count)
 {
     uint64_t flags;
-    mouse_event_t out;
+    size_t i;
 
-    if (!event)
+    if (!frames || !count)
         return;
 
     flags = spin_lock_irqsave(&route.lock);
+    for (i = 0; i < count; i++) {
+        input_ps2_frame_t f = frames[i];
+        f.start_epoch = route.epoch;
+        route_publish_frame_locked(&f, INPUT_SRC_USB);
+    }
+    spin_unlock_irqrestore(&route.lock, flags);
+}
+
+static void route_publish_mouse_locked(const mouse_event_t *event,
+                                       uint8_t source)
+{
+    mouse_event_t out;
+    uint8_t new_agg;
+
+    if (source == INPUT_SRC_PS2)
+        route.mouse_buttons_ps2 = event->buttons;
+    else
+        route.mouse_buttons_usb = event->buttons;
+
+    new_agg = (uint8_t)(route.mouse_buttons_ps2 | route.mouse_buttons_usb);
 
     out = *event;
     if (route.mouse_isolated) {
-        /* The isolated buttons are masked out of the published state:
-         * the consumer never saw their press, so it must never see
-         * them held.  The MOVEMENT is never lost. */
-        out.buttons = (uint8_t)(event->buttons & (uint8_t)~route.mouse_isolated);
-        /* A button that was isolated and is now released leaves the
-         * isolation set. */
-        route.mouse_isolated = (uint8_t)(route.mouse_isolated & event->buttons);
+        /* Isolated buttons are masked out until all sources release
+         * them.  Movement and wheel come only from the current event. */
+        out.buttons = (uint8_t)(new_agg & (uint8_t)~route.mouse_isolated);
+        route.mouse_isolated = (uint8_t)(route.mouse_isolated & new_agg);
+    } else {
+        out.buttons = new_agg;
     }
-    route.mouse_buttons = event->buttons;
 
     if (route.lease_active && route.mouse_ep) {
         /* The mouse is leased: the event belongs to the lease. */
@@ -901,7 +972,29 @@ void input_route_mouse_event(const mouse_event_t *event)
          * on the NORMAL path. */
         route.mouse_sink->publish(&out);
     }
+}
 
+void input_route_mouse_event(const mouse_event_t *event)
+{
+    uint64_t flags;
+
+    if (!event)
+        return;
+
+    flags = spin_lock_irqsave(&route.lock);
+    route_publish_mouse_locked(event, INPUT_SRC_PS2);
+    spin_unlock_irqrestore(&route.lock, flags);
+}
+
+void input_route_mouse_usb_event(const mouse_event_t *event)
+{
+    uint64_t flags;
+
+    if (!event)
+        return;
+
+    flags = spin_lock_irqsave(&route.lock);
+    route_publish_mouse_locked(event, INPUT_SRC_USB);
     spin_unlock_irqrestore(&route.lock, flags);
 }
 

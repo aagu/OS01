@@ -1,6 +1,7 @@
 #ifndef __INPUT_ROUTE_H__
 #define __INPUT_ROUTE_H__
 
+#include <stddef.h>
 #include <stdint.h>
 #include <driver/input_ps2.h>
 #include <uapi/mouse.h>
@@ -182,9 +183,19 @@ uint32_t input_route_poll(struct file *f, uint32_t requested,
  * COMPLETE sequence to the NORMAL or the ACTIVE path. */
 void input_route_keyboard_byte(uint8_t byte);
 
-/* Feed one mouse event.  The route decides NORMAL or ACTIVE; the
+/* Feed a batch of complete USB HID keyboard frames.  Borrows the
+ * current epoch and publishes each frame through the shared
+ * dual-source ownership/isolation state machine. */
+void input_route_keyboard_usb_frames(const input_ps2_frame_t *frames,
+                                     size_t count);
+
+/* Feed one PS/2 mouse event.  The route decides NORMAL or ACTIVE; the
  * mouse driver must call this BEFORE it takes its own event lock. */
 void input_route_mouse_event(const mouse_event_t *event);
+
+/* Feed one USB mouse event through the shared dual-source button
+ * ownership/isolation state machine. */
+void input_route_mouse_usb_event(const mouse_event_t *event);
 
 #ifdef OS01_HOST_TEST
 /* Host-only: the DESYNC flag's value.  The flag has NO other observable

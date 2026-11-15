@@ -252,6 +252,30 @@ const struct devfs_ops mouse_ops = {
     .poll_file    = input_route_poll,
 };
 
+static bool mouse_input_initialized;
+
+void mouse_input_init(void)
+{
+    if (mouse_input_initialized)
+        return;
+
+    spin_init(&event_lock);
+    list_init(&event_poll);
+    event_head = event_count = 0;
+    dropped_events = 0;
+    /* The input route publishes the mouse events into the NORMAL ring
+     * until a lease takes them over. */
+    input_route_set_normal_sinks(NULL, &mouse_route_sink);
+    mouse_input_initialized = true;
+}
+
+#ifdef OS01_HOST_TEST
+void mouse__test_reset(void)
+{
+    mouse_input_initialized = false;
+}
+#endif
+
 int mouse_init(void)
 {
     uint8_t original = 0;
@@ -260,18 +284,12 @@ int mouse_init(void)
     bool wheel = false;
     int rc;
 
-    spin_init(&event_lock);
-    list_init(&event_poll);
-    event_head = event_count = 0;
-    dropped_events = 0;
+    mouse_input_init();
     ready = false;
     command_mode = true;
     stream_after_ack = false;
     reply_head = reply_tail = 0;
     mouse_proto_reset(&packet, false);
-    /* The input route publishes the mouse events into the NORMAL ring
-     * until a lease takes them over. */
-    input_route_set_normal_sinks(NULL, &mouse_route_sink);
     if (subsys_status("keyboard") != 1)
         goto fail;
     freq_hz = clocksource_freq_hz();
