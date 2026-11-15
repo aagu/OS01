@@ -598,6 +598,9 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     }
 
     if (desc.bDeviceClass == USB_CLASS_HUB) {
+        /* Enumeration above may have spent several seconds logging (e.g. fb scroll);
+         * give hub descriptor / BOS / configuration steps a fresh 5s window. */
+        deadline_ns = arch_clocksource_read_ns() + 5000000000ULL;
         if (slot->loc.speed_class == XHCI_PORT_SPEED_SUPER) {
             uint8_t bos_hdr[5];
             struct xhci_setup bos_setup = {
@@ -680,8 +683,10 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             } else {
                 rc = -EIO;
             }
-            if (rc == 0)
+            if (rc == 0) {
+                deadline_ns = arch_clocksource_read_ns() + 5000000000ULL;
                 rc = xhci_enumerate_at(ctrl, loc, &seed, deadline_ns, &slot_id);
+            }
             kfree(id_copy);
             if (rc != 0) {
                 log_warn("[xhci-hub] root=%u route=0x%05x: hub rebuild failed (rc=%d)\n",
@@ -689,6 +694,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
                 return rc;
             }
             slot = ctrl->slots[slot_id];
+            deadline_ns = arch_clocksource_read_ns() + 5000000000ULL;
         } else if (rc != 0) {
             log_warn("[xhci-hub] slot %u: configure_hub_slot failed (rc=%d)\n", slot_id, rc);
             xhci_free_slot(ctrl, slot_id);
@@ -784,6 +790,7 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
                 continue;
             }
 
+            hub_deadline = arch_clocksource_read_ns() + 5000000000ULL;
             uint16_t cand_mask = 0;
             hrc = xhci_hub_prepare_ports(ctrl, hub_slot_id, &hub_info,
                                          hub_deadline, &cand_mask);
@@ -834,6 +841,7 @@ void xhci_hub_probe_tree(struct xhci_controller *ctrl)
                     }
                     continue;
                 }
+                port_deadline = arch_clocksource_read_ns() + 5000000000ULL;
                 hub_probe_location(ctrl, &child_loc, port_deadline, &hub_info,
                                    hub_queue, &q_tail);
             }

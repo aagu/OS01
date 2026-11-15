@@ -1722,6 +1722,32 @@ int xhci_ep0_ring_enqueue(struct xhci_slot *slot, const struct xhci_trb *trb)
                                  trb, NULL);
 }
 
+static void xhci_log_ctrl_in_timeout(const struct xhci_controller *ctrl,
+                                     const struct xhci_slot *slot,
+                                     const char *stage, uint64_t deadline_ns)
+{
+    uint32_t sts = ctrl->op_regs ? xhci_read32(ctrl->op_regs + XHCI_OP_USBSTS) : 0;
+    uint32_t slot_st = 0, ep0_st = 0;
+    if (slot->dev_ctx_virt) {
+        volatile uint32_t *sc = (volatile uint32_t *)xhci_dev_slot_ctx(slot->dev_ctx_virt, ctrl->csz);
+        volatile uint32_t *ec = (volatile uint32_t *)xhci_dev_ep_ctx(slot->dev_ctx_virt, ctrl->csz, 1);
+        slot_st = (sc[3] >> 27) & 0x1F;
+        ep0_st = ec[0] & 0x7;
+    }
+    uint32_t evt_ctrl = ctrl->event_ring_virt
+        ? *(volatile uint32_t *)&ctrl->event_ring_virt[ctrl->event_ring_dequeue].control
+        : 0;
+    uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
+    uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
+    uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
+    log_warn("[xhci] ctrl-in timeout bdf=%02x:%02x.%u slot=%u stage=%s sts=0x%x sst=%u ep0=%u ev=(%u,c=%u,w=0x%x) now_ms=%llu dl_ms=%llu\n",
+             (unsigned)bus, (unsigned)dev, (unsigned)fn, (unsigned)slot->slot_id, stage,
+             sts, slot_st, ep0_st, (unsigned)ctrl->event_ring_dequeue,
+             (unsigned)ctrl->event_ring_cycle, evt_ctrl,
+             (unsigned long long)(arch_clocksource_read_ns() / 1000000ULL),
+             (unsigned long long)(deadline_ns / 1000000ULL));
+}
+
 static int xhci_control_in_locked(struct xhci_controller *ctrl, uint8_t slot_id,
                                   const struct xhci_setup *setup, void *dst,
                                   size_t capacity, uint64_t deadline_ns);
@@ -2265,8 +2291,10 @@ static int xhci_control_in_locked(struct xhci_controller *ctrl, uint8_t slot_id,
         !xhci_slot_transport_usable(ctrl, slot_id))
         return -EIO;
 
-    if (deadline_ns != 0 && (int64_t)(arch_clocksource_read_ns() - deadline_ns) >= 0)
+    if (deadline_ns != 0 && (int64_t)(arch_clocksource_read_ns() - deadline_ns) >= 0) {
+        xhci_log_ctrl_in_timeout(ctrl, slot, "pre", deadline_ns);
         return -ETIMEDOUT;
+    }
 
     /* Setup Stage: 8-byte setup packet as immediate data, TRT = 3 (IN). */
     struct xhci_trb setup_trb;
@@ -2315,6 +2343,7 @@ static int xhci_control_in_locked(struct xhci_controller *ctrl, uint8_t slot_id,
     rc = xhci_poll_transfer_matched_until(ctrl, slot->slot_id, 1, trbs, 3, &evt,
                                           &match_idx, XHCI_TIMEOUT_LOOPS, deadline_ns);
     if (rc == -ETIMEDOUT) {
+        xhci_log_ctrl_in_timeout(ctrl, slot, "data", deadline_ns);
         slot->poisoned = true;
         slot->dma_retained = true;
         if (slot->loc.tt_hub_slot != 0)
@@ -2354,6 +2383,7 @@ static int xhci_control_in_locked(struct xhci_controller *ctrl, uint8_t slot_id,
     rc = xhci_poll_transfer_matched_until(ctrl, slot->slot_id, 1, trbs, 3, &evt,
                                           &match_idx, XHCI_TIMEOUT_LOOPS, deadline_ns);
     if (rc == -ETIMEDOUT) {
+        xhci_log_ctrl_in_timeout(ctrl, slot, "status", deadline_ns);
         slot->poisoned = true;
         slot->dma_retained = true;
         if (slot->loc.tt_hub_slot != 0)
@@ -3469,8 +3499,9 @@ int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
     } else {
         log_warn("[xhci] controller limit (%u) reached\n", XHCI_MAX_CONTROLLERS);
     }
-    log_info("[xhci] controller initialized and running (slots=%u, ports=%u)\n",
-             ctrl->max_slots, ctrl->max_ports);
+    log_info("[xhci] controller bdf=%02x:%02x.%u initialized and running (slots=%u, ports=%u, csz=%u)\n",
+             pdev->bus, pdev->slot, pdev->fn,
+             ctrl->max_slots, ctrl->max_ports, (unsigned)ctrl->csz);
 
     xhci_probe_ports(ctrl);
 
