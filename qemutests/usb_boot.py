@@ -47,6 +47,7 @@ CASE_DUAL = "dual"
 CASE_AHCI = "ahci"
 CASE_PERSISTENCE = "persistence"
 CASE_SUPERSPEED = "superspeed"
+CASE_HUB = "hub"
 CASES = (
     CASE_FIRMWARE,
     CASE_READONLY,
@@ -54,6 +55,7 @@ CASES = (
     CASE_AHCI,
     CASE_PERSISTENCE,
     CASE_SUPERSPEED,
+    CASE_HUB,
 )
 DEFAULT_TIMEOUT = 120.0
 OBSERVE_SECONDS = 1.0
@@ -86,6 +88,18 @@ _PROMPT_TEXT = "# "
 _XHCI_SS_SPEED_RE = re.compile(
     r"\[xhci\] port \d+: (?:USB 3 already enabled in U0|connected, (?:warm )?reset complete), speed=4(?:\s|$)"
 )
+_XHCI_HUB_READY_RE = re.compile(
+    r"\[xhci-hub\] ready bdf=([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.\d+) "
+    r"root=(\d+) route=0x([0-9a-fA-F]{5}) slot=(\d+) protocol=usb2\b"
+)
+_XHCI_HUB_DEV_RE = re.compile(
+    r"\[xhci\] device bdf=([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.\d+) "
+    r"root=(\d+) route=0x([0-9a-fA-F]{5}) slot=(\d+) parent=(\d+) port=(\d+) "
+    r"speed=\d+ speed_id=\d+ iface=08:06:50\b"
+)
+_XHCI_MSC_DISK_RE = re.compile(
+    r"\[xhci-msc\] disk=usba bdf=([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.\d+) slot=(\d+)\b"
+)
 _SCSI_REQ_RE = re.compile(
     r"scsi_disk_new_request Command: lun=(\d+) tag=(0x[0-9a-fA-F]+) data=(?:0x)?([0-9a-fA-F]+)"
 )
@@ -99,6 +113,60 @@ def superspeed_evidence(serial: str, root_marker: str, esp_marker: str) -> bool:
     if not serial or not _XHCI_SS_SPEED_RE.search(serial):
         return False
     return readonly_evidence(serial, root_marker, esp_marker)
+
+
+def hub_evidence(
+    serial: str, expected_guid: str, root_marker: str, esp_marker: str
+) -> bool:
+    """True iff serial proves ordered UEFI GUID -> USB2 hub -> BOT child -> usba -> markers."""
+    if not serial or not expected_guid or not root_marker or not esp_marker:
+        return False
+    if "FATAL stage=" in serial:
+        return False
+    target_guid = expected_guid.lower()
+    stage = 0
+    hub_bdf = ""
+    hub_root = ""
+    hub_slot = ""
+    dev_slot = ""
+    for raw_line in serial.splitlines():
+        stripped = raw_line.strip()
+        if stage == 0:
+            m = _UEFI_ESP_GUID_RE.search(stripped)
+            if m and m.group(1).lower() == target_guid:
+                stage = 1
+        elif stage == 1:
+            m = _XHCI_HUB_READY_RE.search(stripped)
+            if m:
+                hub_bdf = m.group(1).lower()
+                hub_root = m.group(2)
+                hub_slot = m.group(4)
+                stage = 2
+        elif stage == 2:
+            m = _XHCI_HUB_DEV_RE.search(stripped)
+            if (
+                m
+                and m.group(1).lower() == hub_bdf
+                and m.group(2) == hub_root
+                and m.group(3) != "00000"
+                and m.group(5) == hub_slot
+                and int(m.group(6)) >= 1
+            ):
+                dev_slot = m.group(4)
+                stage = 3
+        elif stage == 3:
+            if _MSC_USBA_RE.search(stripped):
+                stage = 4
+        elif stage == 4:
+            m = _XHCI_MSC_DISK_RE.search(stripped)
+            if m and m.group(1).lower() == hub_bdf and m.group(2) == dev_slot:
+                stage = 5
+                break
+    if stage != 5:
+        return False
+    return _guid_boot_evidence(
+        serial, expected_guid, "usba", "usba", "usba2", "usba1", root_marker, esp_marker
+    )
 
 
 def persistence_boot1_evidence(serial: str) -> bool:
@@ -567,6 +635,24 @@ def superspeed_argv(
     )
 
 
+def hub_argv(
+    qemu: str, firmware: Path, disk: Path, smp: int
+) -> list[str]:
+    """Build the USB 2.0 Hub QEMU command line via the shared builder."""
+    return build_qemu_x86(
+        qemu=str(qemu),
+        firmware=str(firmware),
+        image=str(disk),
+        smp=smp,
+        serial="stdio",
+        memory=MEMORY_MIB,
+        storage="usb",
+        usb_speed="2.0",
+        usb_readonly=True,
+        usb_hub=True,
+    )
+
+
 def dual_argv(
     qemu: str, firmware: Path, usb_disk: Path, ahci_disk: Path, smp: int
 ) -> list[str]:
@@ -976,7 +1062,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
                 private_ahci.unlink(missing_ok=True)
             return 2
 
-    if case in (CASE_READONLY, CASE_DUAL, CASE_SUPERSPEED):
+    if case in (CASE_READONLY, CASE_DUAL, CASE_SUPERSPEED, CASE_HUB):
         private_disk = run_dir / "usb-readonly.img"
         try:
             esp_guid = prepare_image(disk, private_disk, root_marker, esp_marker)
@@ -1008,6 +1094,8 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         argv = ahci_argv(args.qemu, firmware, private_ahci, smp)
     elif case == CASE_SUPERSPEED:
         argv = superspeed_argv(args.qemu, firmware, boot_disk, smp)
+    elif case == CASE_HUB:
+        argv = hub_argv(args.qemu, firmware, boot_disk, smp)
     else:
         argv = usb_argv(args.qemu, firmware, boot_disk, smp)
     _write_json(run_dir / "argv.json", argv)
@@ -1025,7 +1113,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         "serial_log": "serial.log",
         "observe_seconds": OBSERVE_SECONDS,
     }
-    if case in (CASE_READONLY, CASE_DUAL, CASE_SUPERSPEED):
+    if case in (CASE_READONLY, CASE_DUAL, CASE_SUPERSPEED, CASE_HUB):
         metadata["esp_guid"] = esp_guid_str
         metadata["root_marker"] = root_marker
         metadata["esp_marker"] = esp_marker
@@ -1037,7 +1125,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
     def _case_prompt_ready(text: str) -> bool:
         if case in (CASE_READONLY, CASE_SUPERSPEED):
             return _readonly_prompt_ready(text)
-        if case == CASE_DUAL:
+        if case in (CASE_DUAL, CASE_HUB):
             return _guid_prompt_ready(text, "usba")
         if case == CASE_AHCI:
             return _guid_prompt_ready(text, "hda")
@@ -1050,6 +1138,9 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
             return readonly_evidence(text, root_marker, esp_marker)
         if case == CASE_SUPERSPEED:
             return superspeed_evidence(text, root_marker, esp_marker)
+        if case == CASE_HUB:
+            assert esp_guid_str is not None
+            return hub_evidence(text, esp_guid_str, root_marker, esp_marker)
         if case == CASE_DUAL:
             assert esp_guid_str is not None
             return dual_evidence(text, esp_guid_str, root_marker, esp_marker)

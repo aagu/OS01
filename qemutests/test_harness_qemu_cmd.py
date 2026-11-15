@@ -215,10 +215,49 @@ class BuildQemuX86Tests(unittest.TestCase):
             build_qemu_x86(
                 firmware="/fw/OVMF.fd",
                 image="/img/usb.img",
-                smp=1,
+                smp=2,
                 serial="stdio",
                 storage="usb",
-                usb_speed="1.1",
+                usb_speed="9.9",
+            )
+
+    def test_x86_usb_hub(self) -> None:
+        argv = build_qemu_x86(
+            firmware="/fw/OVMF.fd",
+            image="/img/usb.img",
+            smp=2,
+            serial="stdio",
+            storage="usb",
+            usb_hub=True,
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=4,p3=0", argv)
+        self.assertIn("usb-hub,bus=xhci.0,port=1", argv)
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1.2,bootindex=0", argv
+        )
+        self.assertIn(
+            "file=/img/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+        joined = " ".join(argv)
+        self.assertNotIn("ide-hd", joined)
+        self.assertNotIn("virtio-blk", joined)
+        with self.assertRaises(ValueError):
+            build_qemu_x86(
+                firmware="/fw/OVMF.fd",
+                image="/img/usb.img",
+                smp=2,
+                storage="usb",
+                usb_speed="3.0",
+                usb_hub=True,
+            )
+        with self.assertRaises(ValueError):
+            build_qemu_x86(
+                firmware="/fw/OVMF.fd",
+                image="/img/usb.img",
+                ahci_image="/img/ahci.img",
+                smp=2,
+                storage="dual",
+                usb_hub=True,
             )
 
     def _assert_rng_pair(self, argv: list[str]) -> None:

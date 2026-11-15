@@ -81,8 +81,22 @@ void xhci_msc_probe_controller(struct xhci_controller *ctrl, uint8_t *next_disk)
     for (uint8_t si = 1; si <= XHCI_MAX_MANAGED_SLOTS; si++) {
         struct xhci_slot *slot = ctrl->slots[si];
         if (!slot || !slot->active || !slot->configured ||
-            slot->disabled || slot->poisoned || !slot->msc_iface.active)
+            slot->disabled || slot->poisoned)
             continue;
+        if (!slot->msc_iface.active) {
+            if (slot->iface.active && slot->iface.class_code == 0x08) {
+                uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
+                uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
+                uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
+                log_warn("[xhci-msc] no-bot-interface bdf=%02x:%02x.%u slot=%u iface=%02x:%02x:%02x\n",
+                         (unsigned)bus, (unsigned)dev, (unsigned)fn,
+                         (unsigned)slot->slot_id,
+                         (unsigned)slot->iface.class_code,
+                         (unsigned)slot->iface.subclass_code,
+                         (unsigned)slot->iface.protocol);
+            }
+            continue;
+        }
         if (!xhci_slot_transport_usable(ctrl, slot->slot_id))
             continue;
 
@@ -108,14 +122,28 @@ void xhci_msc_probe_controller(struct xhci_controller *ctrl, uint8_t *next_disk)
         };
 
         char name[5] = { 'u', 's', 'b', (char)('a' + *next_disk), '\0' };
+        uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
+        uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
+        uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
+        log_info("[xhci-msc] probing disk=%s bdf=%02x:%02x.%u slot=%u\n",
+                 name, (unsigned)bus, (unsigned)dev, (unsigned)fn,
+                 (unsigned)slot->slot_id);
         int rc = usb_msc_probe(&transport,
                                slot->msc_iface.interface_num,
                                slot->msc_iface.in_addr,
                                slot->msc_iface.out_addr,
                                name,
                                NULL);
-        if (rc == 0)
+        if (rc == 0) {
+            log_info("[xhci-msc] disk=%s bdf=%02x:%02x.%u slot=%u\n",
+                     name, (unsigned)bus, (unsigned)dev, (unsigned)fn,
+                     (unsigned)slot->slot_id);
             (*next_disk)++;
+        } else {
+            log_warn("[xhci-msc] probe failed disk=%s bdf=%02x:%02x.%u slot=%u rc=%d\n",
+                     name, (unsigned)bus, (unsigned)dev, (unsigned)fn,
+                     (unsigned)slot->slot_id, rc);
+        }
     }
 }
 

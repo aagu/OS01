@@ -820,5 +820,67 @@ class SuperspeedAndPersistenceTests(unittest.TestCase):
         self.assertFalse(ub.persistence_trace_evidence(bad_lun))
 
 
+class HubBootTests(unittest.TestCase):
+    def test_hub_argv_usb_only(self) -> None:
+        self.assertIn("hub", ub.CASES)
+        argv = ub.hub_argv(
+            "qemu-system-x86_64",
+            Path("/tmp/OVMF.fd"),
+            Path("/tmp/usb.img"),
+            2,
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=4,p3=0", argv)
+        self.assertIn("usb-hub,bus=xhci.0,port=1", argv)
+        self.assertIn(
+            "usb-storage,drive=usbdisk,bus=xhci.0,port=1.2,bootindex=0", argv
+        )
+        self.assertIn(
+            "file=/tmp/usb.img,format=raw,if=none,id=usbdisk,readonly=on", argv
+        )
+        joined = " ".join(argv)
+        self.assertNotIn("ide-hd", joined)
+        self.assertNotIn("virtio-blk", joined)
+
+    def test_hub_evidence_chain(self) -> None:
+        guid = "11111111-2222-3333-4444-555555555555"
+        root_marker = "USB_HUB_ROOT_OK"
+        esp_marker = "USB_HUB_ESP_OK"
+        lines = [
+            f"UEFI: ESP GUID={guid}",
+            "[xhci-hub] ready bdf=00:03.0 root=1 route=0x00000 slot=1 protocol=usb2 ports=8 ttt=0",
+            "[xhci] device bdf=00:03.0 root=1 route=0x00002 slot=2 parent=1 port=2 speed=1 speed_id=1 iface=08:06:50",
+            "usb_msc: usba: 395264 sectors, 512-byte blocks",
+            "[xhci-msc] disk=usba bdf=00:03.0 slot=2",
+            "fs: boot scan first_disk=usba candidates=1",
+            "fs: boot disk selected by GUID (usba), root=usba2 boot=usba1 (/boot ok)",
+            "# ",
+            "# cat /usb-root.txt /boot/USBESP.TXT",
+            root_marker,
+            esp_marker,
+            "# ",
+        ]
+        self.assertTrue(ub.hub_evidence("\n".join(lines) + "\n", guid, root_marker, esp_marker))
+
+        # Missing any stage
+        for idx in (0, 1, 2, 3, 4, 6):
+            broken = lines[:idx] + lines[idx + 1 :]
+            self.assertFalse(
+                ub.hub_evidence("\n".join(broken) + "\n", guid, root_marker, esp_marker),
+                f"expected False when line {idx} removed",
+            )
+        # Swapped hub-ready and device order
+        swapped = list(lines)
+        swapped[1], swapped[2] = swapped[2], swapped[1]
+        self.assertFalse(ub.hub_evidence("\n".join(swapped) + "\n", guid, root_marker, esp_marker))
+        # Same slot, different BDF
+        bad_bdf = "\n".join(lines).replace("[xhci-msc] disk=usba bdf=00:03.0 slot=2", "[xhci-msc] disk=usba bdf=00:04.0 slot=2")
+        self.assertFalse(ub.hub_evidence(bad_bdf + "\n", guid, root_marker, esp_marker))
+        # Wrong parent/port or forged direct route
+        self.assertFalse(ub.hub_evidence("\n".join(lines).replace("parent=1 port=2", "parent=9 port=2") + "\n", guid, root_marker, esp_marker))
+        self.assertFalse(ub.hub_evidence("\n".join(lines).replace("route=0x00002", "route=0x00000") + "\n", guid, root_marker, esp_marker))
+        # FATAL rejected
+        self.assertFalse(ub.hub_evidence("\n".join(lines) + "\n[boot-3] FATAL stage=fs component=root rc=-19\n", guid, root_marker, esp_marker))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,7 @@ def build_qemu_x86(
     ahci_image: str | None = None,
     usb_speed: str = "2.0",
     usb_readonly: bool = True,
+    usb_hub: bool = False,
 ) -> list[str]:
     """Build an x86_64 QEMU argv list with the paired virtio-rng device.
 
@@ -52,6 +53,8 @@ def build_qemu_x86(
         raise ValueError(f"Unsupported storage mode: {storage!r}")
     if usb_speed not in ("2.0", "3.0"):
         raise ValueError(f"Unsupported USB speed: {usb_speed!r}")
+    if usb_hub and (storage != "usb" or usb_speed != "2.0"):
+        raise ValueError("usb_hub=True requires storage='usb' and usb_speed='2.0'")
     xhci_props = (
         "qemu-xhci,id=xhci,p2=4,p3=0"
         if usb_speed == "2.0"
@@ -73,11 +76,20 @@ def build_qemu_x86(
             "-device", "ide-hd,drive=ahcidisk,bus=ahci.0,bootindex=1",
         ]
     elif storage == "usb":
+        if usb_hub:
+            usb_devs = [
+                "-device", "usb-hub,bus=xhci.0,port=1",
+                "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1.2,bootindex=0",
+            ]
+        else:
+            usb_devs = [
+                "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
+            ]
         disk_args = [
             "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
             "-drive", usb_drive_spec,
             "-device", xhci_props,
-            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1,bootindex=0",
+            *usb_devs,
         ]
     elif machine == "pc":
         disk_args = [
