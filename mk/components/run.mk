@@ -1000,9 +1000,24 @@ test-display-owner:
 	@$(call os01_submake,hosttests,test-display-owner $(OS01_SUBMAKE_ARGS))
 
 # ── Terminal monitor host tests (2026-10-11 monitor plan) ────
-# Focused host tests, one per monitor-plan task.  An unknown CASE aborts;
-# with CASE omitted the umbrella runs the whole registered group.
-$(eval $(call host_case_group,test-monitor-host,file accounting pmm procfs collect model render,rootfs,CASE,,file:test-monitor-file accounting:test-monitor-accounting pmm:test-monitor-pmm procfs:test-monitor-procfs collect:test-monitor-collect model:test-monitor-model render:test-monitor-render))
+# Focused host tests, one per monitor-plan task.  Strict dispatch: an
+# unknown / multi-word / "all" CASE is rejected at parse time (fails even
+# under -n/-j) BEFORE any submake; CASE omitted runs the whole group.
+# Prerequisites run before recipes, even before require_capability, so
+# the graph is only populated for a capable profile + one valid CASE.
+MONITOR_CASES := file accounting pmm procfs collect model render
+MONITOR_MAPPING := file:test-monitor-file accounting:test-monitor-accounting pmm:test-monitor-pmm procfs:test-monitor-procfs collect:test-monitor-collect model:test-monitor-model render:test-monitor-render
+$(foreach kv,$(MONITOR_MAPPING),$(eval $(call _host_case_rule,test-monitor-host,$(word 1,$(subst :, ,$(kv))),test-monitor-host,$(word 2,$(subst :, ,$(kv))))))
+.PHONY: test-monitor-host _test-monitor-host-run-%
+_test-monitor-host-run-%:
+	@echo "ERROR: unknown CASE='$*'; valid: $(MONITOR_CASES)" >&2
+	@exit 1
+MONITOR_CASE := $(strip $(CASE))
+MONITOR_CASE_VALID := $(if $(MONITOR_CASE),$(if $(filter 1,$(words $(MONITOR_CASE))),$(filter $(MONITOR_CASES),$(MONITOR_CASE))),yes)
+test-monitor-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(MONITOR_CASE_VALID)),$(foreach c,$(if $(MONITOR_CASE),$(MONITOR_CASE),$(MONITOR_CASES)),_test-monitor-host-run-$(c)))
+	$(call require_capability,rootfs)
+	$(if $(MONITOR_CASE_VALID),,$(error unknown CASE='$(MONITOR_CASE)'; valid: $(MONITOR_CASES)))
+	@echo "  [test-monitor-host] $(if $(MONITOR_CASE),CASE=$(MONITOR_CASE),full monitor group: $(MONITOR_CASES))"
 
 # ── User runtime consumer gate (monitor plan Task 5) ─────────
 # Builds the user runtime consumer (mk/components/runtime.mk: independent
@@ -2256,14 +2271,30 @@ test-irq-capacity:
 # make PROFILE=x86_64-clang test-libc-host LIBC_CASE=<case>
 #
 # LIBC_HOST_MAPPING is the delivered case set; LIBC_HOST_CASES is the full
-# registered set (a value outside it is invalid).  Each completion task
-# appends its mapping entry; `all` (default) runs the delivered groups.
-# The generated catch-all rejects unknown cases non-zero.
+# registered set (a value outside it is invalid and fails non-zero at
+# parse time, before any submake).  A registered-but-undelivered case
+# falls to the catch-all — it must never be reported as a pass.  Each
+# completion task appends its mapping entry; `all` (default) runs the
+# delivered groups.
 LIBC_HOST_MAPPING := api:test-libc-api alloc:test-libc-alloc env:test-libc-environ shutdown:test-libc-shutdown stream:test-libc-stream-state append:test-vfs-append io:test-libc-stdio-io line:test-libc-line format:test-libc-stdio-format integer:test-libc-integer float:test-libc-float-parse scan:test-libc-scan time:test-libc-time dir:test-libc-dir path:test-libc-path
 LIBC_HOST_DELIVERED_CASES := $(foreach kv,$(LIBC_HOST_MAPPING),$(word 1,$(subst :, ,$(kv))))
 LIBC_HOST_CASES := $(LIBC_HOST_DELIVERED_CASES) regex
 
-$(eval $(call host_case_group,test-libc-host,$(LIBC_HOST_DELIVERED_CASES),rootfs,LIBC_CASE,,$(LIBC_HOST_MAPPING)))
+$(foreach kv,$(LIBC_HOST_MAPPING),$(eval $(call _host_case_rule,test-libc-host,$(word 1,$(subst :, ,$(kv))),test-libc-host,$(word 2,$(subst :, ,$(kv))))))
+.PHONY: test-libc-host _test-libc-host-run-all _test-libc-host-run-%
+_test-libc-host-run-all: $(foreach c,$(LIBC_HOST_DELIVERED_CASES),_test-libc-host-run-$(c))
+	@echo "  [test-libc-host] all delivered groups: $(LIBC_HOST_DELIVERED_CASES)"
+_test-libc-host-run-%:
+	@echo "ERROR: LIBC_CASE='$*' is registered but not delivered in this stage." >&2
+	@echo "       Delivered groups: $(LIBC_HOST_DELIVERED_CASES)" >&2
+	@exit 1
+LIBC_CASE_RAW := $(strip $(LIBC_CASE))
+LIBC_CASE_EFFECTIVE := $(if $(LIBC_CASE_RAW),$(LIBC_CASE_RAW),all)
+LIBC_CASE_VALID := $(if $(filter 1,$(words $(LIBC_CASE_EFFECTIVE))),$(filter all $(LIBC_HOST_CASES),$(LIBC_CASE_EFFECTIVE)))
+test-libc-host: $(if $(and $(filter rootfs,$(PROFILE_CAPABILITIES)),$(LIBC_CASE_VALID)),_test-libc-host-run-$(LIBC_CASE_EFFECTIVE))
+	$(call require_capability,rootfs)
+	$(if $(LIBC_CASE_VALID),,$(error unknown LIBC_CASE='$(LIBC_CASE_RAW)'; valid: $(LIBC_HOST_CASES), all))
+	@echo "  [test-libc-host] LIBC_CASE=$(LIBC_CASE_EFFECTIVE)"
 
 # RED build of the path group (T14 evidence): expected to fail — that
 # failure is the transcript.  RED-1 compiles the path group against the
