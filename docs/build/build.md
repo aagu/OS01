@@ -578,7 +578,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 #### GUI 聚焦 CASE（`test-gui-host CASE=`）
 
-GUI-2 plan（2026-10-20）引入 `make PROFILE=x86_64-clang test-gui-host CASE=<name>`。合法取值由 `mk/components/run.mk` 的**单一列表** `GUI_HOST_REGISTERED_CASES` 定义：
+GUI-2 plan（2026-10-20）引入 `make PROFILE=x86_64-clang test-gui-host CASE=<name>`。合法取值由 `mk/components/run.mk` 中 `test-gui-host` 的 `host_case_group` 生成调用（`test-gui-host` 的 case 列表 + `case:hosttests-target` 映射，二者即单一事实来源）定义：
 
 | CASE | 内容 |
 | --- | --- |
@@ -742,7 +742,7 @@ make test-qemu SUITE=resolution     # 分辨率切换 surface/session 验收
 make test-qemu SUITE=monitor        # 终端 monitor 1/2/8 核矩阵 + 终端生命周期
 make test-qemu SUITE=terminal-present  # GFX_PRESENT_RECT 像素正确性 + 30s 稳态字节/ns 性能门控（spec §8）；baseline 通过 TERMINAL_PRESENT_BASELINE_LOG 覆盖
 make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与焦点验收（SMP 1/2 矩阵）
-make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（单一列表 GUI_HOST_REGISTERED_CASES）
+make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（host_case_group 映射）
 make PROFILE=x86_64-clang test-libc-host LIBC_CASE=api     # libc 补全宿主聚焦 CASE（LIBC_HOST_CASES / LIBC_HOST_DELIVERED_CASES）
 make PROFILE=x86_64-clang test-libc-api-audit              # libc 归档导出审计（用户 libc + libk）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
