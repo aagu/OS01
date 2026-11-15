@@ -1035,6 +1035,287 @@ void test_xhci_ownership_and_dma(void)
     xhci_remove(&pdev);
 }
 
+static void init_ep0_fixture(struct xhci_controller *ctrl, struct xhci_slot *slot,
+                             struct xhci_trb *ep0_ring, uint8_t *dma_buf,
+                             struct xhci_trb *event_ring, uint8_t *rt_regs,
+                             uint8_t *db_regs)
+{
+    memset(ctrl, 0, sizeof(*ctrl));
+    memset(slot, 0, sizeof(*slot));
+    memset(ep0_ring, 0, sizeof(struct xhci_trb) * XHCI_TRB_RING_SIZE);
+    memset(dma_buf, 0, 4096);
+    memset(event_ring, 0, sizeof(struct xhci_trb) * XHCI_TRB_RING_SIZE);
+    memset(rt_regs, 0, 0x100);
+    memset(db_regs, 0, 0x1000);
+
+    slot->slot_id = 1;
+    slot->ep0_ring_virt = ep0_ring;
+    slot->ep0_ring_phys = 0x40000;
+    slot->ep0_ring_cycle = 1;
+    slot->ep0_ring_enqueue = 0;
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
+    ep0_ring[XHCI_TRB_RING_SIZE - 1].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
+
+    slot->dma_buf_virt = dma_buf;
+    slot->dma_buf_phys = 0x50000;
+    ctrl->slots[1] = slot;
+
+    ctrl->event_ring_virt = event_ring;
+    ctrl->event_ring_phys = 0x20000;
+    ctrl->event_ring_dequeue = 0;
+    ctrl->event_ring_cycle = 1;
+    ctrl->rt_regs = rt_regs;
+    ctrl->db_regs = db_regs;
+}
+
+static void test_ep0_class_in_until(void)
+{
+    TEST_CASE("EP0 xhci_control_in: class IN, short read, bad residual/status, timeout DMA");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t dma_buf[4096];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+
+    init_ep0_fixture(&ctrl, &slot, ep0_ring, dma_buf, event_ring, rt_regs, db_regs);
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+
+    /* 1. Normal 4-byte class IN {0xa3, 0, 0, 3, 4} */
+    uint8_t payload[4] = { 0x11, 0x22, 0x33, 0x44 };
+    memcpy(dma_buf, payload, 4);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[1].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct xhci_setup st = { .type = 0xa3, .request = 0, .value = 0, .index = 3, .length = 4 };
+    uint8_t dst[4] = {0};
+    int rc = xhci_control_in(&ctrl, 1, &st, dst, sizeof(dst), s_mock_clock_ns + 50000000ULL);
+    assert_eq(4, rc);
+    assert_eq(0, memcmp(dst, payload, 4));
+    assert_eq(0x00040003000000a3ULL, ep0_ring[0].parameter);
+
+    /* 2. Short read 2 returns 2 */
+    init_ep0_fixture(&ctrl, &slot, ep0_ring, dma_buf, event_ring, rt_regs, db_regs);
+    dma_buf[0] = 0xAA; dma_buf[1] = 0xBB;
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SHORT_TX << 24) | 2;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[1].parameter = 0x40000 + 2 * sizeof(struct xhci_trb);
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    memset(dst, 0, sizeof(dst));
+    rc = xhci_control_in(&ctrl, 1, &st, dst, sizeof(dst), s_mock_clock_ns + 50000000ULL);
+    assert_eq(2, rc);
+    assert_eq(0xAA, dst[0]);
+    assert_eq(0xBB, dst[1]);
+
+    /* 3. Excess residual (> length) rejected */
+    init_ep0_fixture(&ctrl, &slot, ep0_ring, dma_buf, event_ring, rt_regs, db_regs);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SHORT_TX << 24) | 5;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    rc = xhci_control_in(&ctrl, 1, &st, dst, sizeof(dst), s_mock_clock_ns + 50000000ULL);
+    assert_true(rc < 0);
+
+    /* 4. Missing Status stage times out and retains DMA */
+    init_ep0_fixture(&ctrl, &slot, ep0_ring, dma_buf, event_ring, rt_regs, db_regs);
+    event_ring[0].parameter = 0x40000 + 1 * sizeof(struct xhci_trb);
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    memset(dst, 0x5A, sizeof(dst));
+    rc = xhci_control_in(&ctrl, 1, &st, dst, sizeof(dst), s_mock_clock_ns + 50000ULL);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_true(slot.poisoned);
+    assert_true(slot.dma_retained);
+    assert_eq(0x5A, dst[0]); /* Not copied on Status failure */
+}
+
+static void test_xhci_deadline_on_noisy_ring(void)
+{
+    TEST_CASE("xhci deadline expires even on continuously noisy event ring");
+    struct xhci_controller ctrl;
+    struct xhci_slot slot;
+    struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t dma_buf[4096];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+
+    init_ep0_fixture(&ctrl, &slot, ep0_ring, dma_buf, event_ring, rt_regs, db_regs);
+    /* Fill ring with continuous unrelated Port Status Change events */
+    for (int i = 0; i < 64; i++) {
+        event_ring[i].control = (1U << 24) | (XHCI_TRB_TYPE_PORT_STATUS_EVT << 10) | 1;
+    }
+
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 1000000ULL; /* 1ms per clock read */
+    struct xhci_setup st = { .type = 0xa3, .request = 0, .value = 0, .index = 1, .length = 4 };
+    uint8_t dst[4];
+    int rc = xhci_control_in(&ctrl, 1, &st, dst, sizeof(dst), s_mock_clock_ns + 5000000ULL);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_true(ctrl.event_ring_dequeue > 0);
+}
+
+static void test_xhci_command_deadline_ownership(void)
+{
+    TEST_CASE("xhci_submit_cmd_until_locked: expired pre-submit vs in-flight timeout vs CC error");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_cycle = 1;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+
+    struct xhci_trb trb;
+    memset(&trb, 0, sizeof(trb));
+    trb.control = (XHCI_TRB_TYPE_ENABLE_SLOT << 10) | 1;
+
+    /* 1. Already expired: no enqueue, no doorbell, no poison */
+    s_mock_clock_ns = 5000000ULL;
+    s_mock_clock_step_ns = 1000ULL;
+    struct xhci_cmd_result res;
+    int rc = xhci_submit_cmd_until_locked(&ctrl, &trb, 4000000ULL, &res);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_eq(XHCI_CMD_NOT_SUBMITTED, res.state);
+    assert_eq(0, ctrl.cmd_ring_enqueue);
+    assert_false(ctrl.poisoned);
+
+    /* 2. Valid completion with non-success CC: COMPLETED, returns 0, preserves CC */
+    event_ring[0].parameter = 0x10000;
+    event_ring[0].status = (XHCI_COMP_TRB_ERR << 24);
+    event_ring[0].control = (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+    rc = xhci_submit_cmd_until_locked(&ctrl, &trb, s_mock_clock_ns + 10000000ULL, &res);
+    assert_eq(0, rc);
+    assert_eq(XHCI_CMD_COMPLETED, res.state);
+    assert_eq(XHCI_COMP_TRB_ERR, (res.event.status >> 24) & 0xFF);
+    assert_false(ctrl.poisoned);
+
+    /* 3. Timeout after ringing doorbell: IN_FLIGHT_UNKNOWN, controller poisoned */
+    rc = xhci_submit_cmd_until_locked(&ctrl, &trb, s_mock_clock_ns + 5000ULL, &res);
+    assert_eq(-ETIMEDOUT, rc);
+    assert_eq(XHCI_CMD_IN_FLIGHT_UNKNOWN, res.state);
+    assert_true(ctrl.poisoned);
+    assert_true(ctrl.dma_retained);
+}
+
+static void test_xhci_fs_mps_and_address_recovery(void)
+{
+    TEST_CASE("xhci FS EP0 starts at MPS=8, evaluates to 32, and enforces 2ms recovery");
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
+    struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
+    uint64_t dcbaa[512];
+    uint8_t rt_regs[0x100];
+    uint8_t db_regs[0x1000];
+    memset(cmd_ring, 0, sizeof(cmd_ring));
+    memset(event_ring, 0, sizeof(event_ring));
+    memset(dcbaa, 0, sizeof(dcbaa));
+    memset(rt_regs, 0, sizeof(rt_regs));
+    memset(db_regs, 0, sizeof(db_regs));
+
+    ctrl.cmd_ring_virt = cmd_ring;
+    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_cycle = 1;
+    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_cycle = 1;
+    ctrl.dcbaa_virt = dcbaa;
+    ctrl.dcbaa_phys = (uint64_t)(uintptr_t)dcbaa;
+    ctrl.rt_regs = rt_regs;
+    ctrl.db_regs = db_regs;
+    ctrl.ac64 = true;
+    ctrl.ac64_valid = true;
+
+    /* Enable Slot (cmd[0]) -> slot 1 */
+    event_ring[0].parameter = (uint64_t)(uintptr_t)&cmd_ring[0];
+    event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[0].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    s_mock_clock_ns = 1000000ULL;
+    s_mock_clock_step_ns = 100000ULL; /* 0.1 ms per read */
+    uint8_t slot_id = 0;
+    assert_eq(0, xhci_enable_slot(&ctrl, 1, XHCI_PORT_SPEED_FULL, &slot_id));
+    assert_eq(1, slot_id);
+
+    /* Address Device (cmd[1]) */
+    event_ring[1].parameter = (uint64_t)(uintptr_t)&cmd_ring[1];
+    event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[1].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    uint64_t t_before_addr = s_mock_clock_ns;
+    assert_eq(0, xhci_address_device(&ctrl, 1));
+    uint64_t t_after_addr = s_mock_clock_ns;
+    struct xhci_slot *slot = ctrl.slots[1];
+    assert_true(slot != NULL);
+    /* FS must initialize EP0 MPS to 8 (not 64) */
+    assert_eq(8, slot->max_packet_size);
+    /* USB 2.0 SetAddress recovery >= 2ms */
+    assert_true((t_after_addr - t_before_addr) >= 2000000ULL);
+
+    /* Feed 8-byte initial device desc read (bMaxPacketSize0=32), Evaluate Context, then 18-byte read */
+    struct usb_device_descriptor raw = {
+        .bLength = 18, .bDescriptorType = 1, .bcdUSB = 0x0200,
+        .bMaxPacketSize0 = 32, .idVendor = 0x1234, .idProduct = 0x5678,
+        .bNumConfigurations = 1,
+    };
+    memcpy(slot->dma_buf_virt, &raw, 18);
+
+    /* 1st GET_DESCRIPTOR(8): Data TRB (ep0[1]) + Status TRB (ep0[2]) */
+    event_ring[2].parameter = slot->ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[3].parameter = slot->ep0_ring_phys + 2 * sizeof(struct xhci_trb);
+    event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    /* EVAL_CTX (cmd[2]) */
+    event_ring[4].parameter = (uint64_t)(uintptr_t)&cmd_ring[2];
+    event_ring[4].status = (XHCI_COMP_SUCCESS << 24);
+    event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
+
+    /* 2nd GET_DESCRIPTOR(18): Data TRB (ep0[4]) + Status TRB (ep0[5]) */
+    event_ring[5].parameter = slot->ep0_ring_phys + 4 * sizeof(struct xhci_trb);
+    event_ring[5].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+    event_ring[6].parameter = slot->ep0_ring_phys + 5 * sizeof(struct xhci_trb);
+    event_ring[6].status = (XHCI_COMP_SUCCESS << 24) | 0;
+    event_ring[6].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
+
+    struct usb_device_descriptor out_desc;
+    assert_eq(0, xhci_get_device_descriptor(&ctrl, 1, &out_desc));
+    assert_eq(32, slot->max_packet_size);
+    assert_eq(0x1234, out_desc.idVendor);
+    /* Verify EVAL_CTX was issued with Add Flags = A1 only */
+    assert_eq(XHCI_TRB_TYPE_EVAL_CTX, (cmd_ring[2].control >> 10) & 0x3F);
+    uint32_t *ctrl_ctx = (uint32_t *)slot->input_ctx_virt;
+    assert_eq(0U, ctrl_ctx[0]);
+    assert_eq((1U << 1), ctrl_ctx[1]);
+
+    slot->disabled = true;
+    xhci_free_slot(&ctrl, 1);
+}
+
 int main(void)
 {
     TEST_SUITE("xhci_phase2");
@@ -1051,6 +1332,10 @@ int main(void)
     test_xhci_ep0_no_data_error();
     test_xhci_timeout_owns_dma();
     test_xhci_ownership_and_dma();
+    test_ep0_class_in_until();
+    test_xhci_deadline_on_noisy_ring();
+    test_xhci_command_deadline_ownership();
+    test_xhci_fs_mps_and_address_recovery();
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;
 }

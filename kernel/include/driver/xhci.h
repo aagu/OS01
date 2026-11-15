@@ -21,6 +21,7 @@
 #define XHCI_TRB_TYPE_DISABLE_SLOT  10
 #define XHCI_TRB_TYPE_ADDRESS_DEV   11
 #define XHCI_TRB_TYPE_CONFIG_EP     12
+#define XHCI_TRB_TYPE_EVAL_CTX      13
 #define XHCI_TRB_TYPE_RESET_EP      14
 #define XHCI_TRB_TYPE_STOP_EP       15
 #define XHCI_TRB_TYPE_SET_TR_DEQ    16
@@ -534,6 +535,36 @@ int xhci_get_config_descriptor(struct xhci_controller *ctrl, uint8_t slot_id,
 int xhci_configure_endpoints(struct xhci_controller *ctrl, uint8_t slot_id);
 int xhci_set_configuration(struct xhci_controller *ctrl, uint8_t slot_id,
                             uint8_t config_value);
+struct xhci_setup {
+    uint8_t type;
+    uint8_t request;
+    uint16_t value;
+    uint16_t index;
+    uint16_t length;
+};
+
+enum xhci_cmd_state {
+    XHCI_CMD_NOT_SUBMITTED = 0,
+    XHCI_CMD_COMPLETED,
+    XHCI_CMD_IN_FLIGHT_UNKNOWN
+};
+
+struct xhci_cmd_result {
+    enum xhci_cmd_state state;
+    struct xhci_trb event;
+};
+
+int xhci_control_in(struct xhci_controller *ctrl, uint8_t slot_id,
+                    const struct xhci_setup *setup, void *dst,
+                    size_t capacity, uint64_t deadline_ns);
+int xhci_control_no_data_until(struct xhci_controller *ctrl, uint8_t slot_id,
+                               const struct xhci_setup *setup, uint64_t deadline_ns);
+int xhci_wait_min_ns(uint64_t duration_ns, uint64_t deadline_ns);
+int xhci_submit_cmd_until_locked(struct xhci_controller *ctrl,
+                                 const struct xhci_trb *trb,
+                                 uint64_t deadline_ns,
+                                 struct xhci_cmd_result *out_res);
+
 int xhci_control_no_data(struct xhci_controller *c, uint8_t slot, uint8_t type,
                          uint8_t req, uint16_t value, uint16_t index);
 int xhci_bulk_transfer(struct xhci_controller *c, uint8_t slot, uint8_t dci,
