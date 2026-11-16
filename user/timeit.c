@@ -38,6 +38,23 @@
  *   it runs no atexit handler and flushes no stdio buffer.  Using
  *   exit() there would flush the buffers this process inherited from
  *   its parent and could duplicate output.
+ * * The PATH search is the libc's execvp() (libc/unistd/execve.c) —
+ *   it is NOT reimplemented here.  execvp() already implements the
+ *   POSIX rules that matter: a name containing '/' is not searched
+ *   for, an unset PATH falls back to the libc default ("/bin"), an
+ *   empty PATH means the current directory, an empty PATH segment
+ *   means the current directory, EACCES wins over the ENOENT of the
+ *   other candidates, and a candidate that exists but is not a
+ *   binary is executed through /bin/sh.  That last rule is why
+ *   `timeit myscript` — a BARE name that the PATH search finds —
+ *   measures a SHELL SCRIPT instead of failing with ENOEXEC.
+ *
+ *   The scope of that rule matters: the /bin/sh fallback belongs to
+ *   the PATH SEARCH, so a name that CONTAINS A SLASH (`timeit
+ *   ./script.sh`, `timeit /tmp/script.sh`) is executed directly and
+ *   fails with ENOEXEC, exactly as execve() and glibc behave.  OS01's
+ *   kernel has no "#!" (shebang) support either, so a script named
+ *   by an absolute path is not started by the kernel.
  * * The child's stdout/stderr are inherited untouched: the timing line
  *   goes to fd 2 or to the -o file, never into the command's output.
  */
@@ -58,19 +75,6 @@
  */
 #define TIMEIT_EXIT_NOT_FOUND 127
 #define TIMEIT_EXIT_CANNOT_EXEC 126
-
-/* Searched when the environment carries no PATH.  The OS01 rootfs
- * publishes the user programs and the BusyBox applet links under /bin
- * (see config/rootfs.mk); /usr/bin is the conventional second entry. */
-#define TIMEIT_DEFAULT_PATH "/bin:/usr/bin"
-
-/* Searched AFTER the environment PATH.  BusyBox ash resolves its
- * applets internally, so the guest PATH need not contain /bin even
- * though /bin/echo exists; without this fallback `timeit echo hi`
- * would fail where `echo hi` works. */
-#define TIMEIT_FALLBACK_PATH "/bin:/usr/bin"
-
-#define TIMEIT_PATH_MAX 256
 
 static void usage(const char *why)
 {
@@ -96,72 +100,6 @@ static const char *errno_text(int e)
     case ELOOP:   return "too many symbolic links";
     default:      return "cannot execute";
     }
-}
-
-/* execve() `prog` by searching the colon-separated `path`.
- *
- * Returns only on failure; the errno of the LAST candidate is stored
- * in `*out_errno`.  ENOENT/ENOTDIR mean "not in this directory" and
- * are not remembered; any other errno means the candidate exists but
- * could not be started and IS remembered, so that a later directory
- * holding the same name cannot mask it. */
-static void exec_search(const char *path, const char *prog,
-                         char *const argv[], char *const envp[],
-                         int *out_errno)
-{
-    char dir[TIMEIT_PATH_MAX];
-    char cand[TIMEIT_PATH_MAX];
-    int saved = ENOENT;
-
-    for (const char *seg = path;;) {
-        const char *end = strchr(seg, ':');
-        size_t dlen = end ? (size_t)(end - seg) : strlen(seg);
-
-        if (dlen == 0) {
-            /* An empty PATH entry means the current directory. */
-            dir[0] = '.';
-            dir[1] = '\0';
-        } else {
-            if (dlen >= sizeof(dir))
-                dlen = sizeof(dir) - 1;
-            memcpy(dir, seg, dlen);
-            dir[dlen] = '\0';
-        }
-
-        int n = snprintf(cand, sizeof(cand), "%s/%s", dir, prog);
-        if (n < 0 || (size_t)n >= sizeof(cand)) {
-            saved = ENAMETOOLONG;
-        } else {
-            execve(cand, argv, envp);
-            if (errno != ENOENT && errno != ENOTDIR)
-                saved = errno;
-        }
-
-        if (!end)
-            break;
-        seg = end + 1;
-    }
-
-    *out_errno = saved;
-}
-
-/* Start the measured command.  Only returns on failure. */
-static void exec_program(const char *prog, char *const argv[], char *const envp[],
-                          int *out_errno)
-{
-    if (strchr(prog, '/')) {
-        execve(prog, argv, envp);
-        *out_errno = errno;
-        return;
-    }
-
-    const char *path = getenv("PATH");
-    if (!path || !*path)
-        path = TIMEIT_DEFAULT_PATH;
-
-    exec_search(path, prog, argv, envp, out_errno);
-    if (*out_errno == ENOENT)
-        exec_search(TIMEIT_FALLBACK_PATH, prog, argv, envp, out_errno);
 }
 
 int main(int argc, char **argv)
@@ -232,7 +170,14 @@ int main(int argc, char **argv)
     if (pid == 0) {
         /* ── child ── */
         int e = 0;
-        exec_program(argv[argi], &argv[argi], environ, &e);
+
+        /* execvp() does the PATH search: a name with a '/' is executed
+         * directly, an unset PATH falls back to the libc default
+         * ("/bin"), an empty PATH means the current directory, and a
+         * candidate that exists but is not a binary is run through
+         * /bin/sh.  It also passes `environ` to execve() itself. */
+        execvp(argv[argi], &argv[argi]);
+        e = errno;
 
         /* exec failed.  Report on stderr and leave with the shell's
          * convention: 127 = not found, 126 = found but not runnable. */
