@@ -340,8 +340,55 @@ aarch64 的匿名 VM 策略在 `kernel/arch/aarch64/memory/user_vm_policy.c`
 ### 4. 边界
 
 验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）。未覆盖：VFS `/bin/init`、
-waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、SMP 用户调度、IRQ 返回抢占。
-规划项见 [roadmap.md](../roadmap.md) P2；现状叙述见 [arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-13-闭环)。
+文件映射、`MAP_FIXED`、共享映射、设备映射、SMP 用户调度、IRQ 返回抢占。
+**waitpid / exec / 信号三块已于 2026-11-14 闭环（M4.12 ~ M4.14）**，不再是未覆盖项。
+规划项见 [roadmap.md](../roadmap.md) P2；现状叙述见 [arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-14-闭环)。
+
+---
+
+## x86 NX 按 VMA 策略强制执行（2026-11-13）
+
+> commit `cce539d1`「feat(mm): enforce x86 PTE execute permissions per VMA policy」，
+> 配套 spec [2026-11-13-x86-pte-permissions-design.md](../superpowers/specs/2026-11-13-x86-pte-permissions-design.md)。
+> 闭环记录见 `docs/changelog.md` 2026-11-13 条目。
+
+**原则**：叶权限的**唯一来源**是 VMA 的逻辑权限位，硬件 PTE 位不写进 VMA，而是由拥有者架构
+在需要装叶时按需换算（`kernel/include/arch/x86_64/vma.h`）：
+
+```c
+static inline uint64_t x86_vma_pte_flags(uint64_t vm_flags)
+{
+    uint64_t f = PAGE_USER;
+    if (vm_flags & VMA_PROT_READ)  f |= PAGE_VALID;
+    if (vm_flags & VMA_PROT_WRITE) f |= PAGE_WRITE;
+    if (!(vm_flags & VMA_PROT_EXEC)) f |= PAGE_NO_EXEC;   /* ← NX */
+    return f;
+}
+```
+
+`PAGE_NO_EXEC` 是 x86 PTE bit 63（`kernel/include/arch/x86_64/pte.h:20`）。
+
+**覆盖面**：
+
+| 区域 | 权限 | 位置 |
+|------|------|------|
+| 用户栈（两条 exec 路径） | `PAGE_USER_PMD \| PAGE_NO_EXEC` | `kernel/arch/x86_64/sched/exec.c:526`、`:716` |
+| 用户堆 | VMA 为 `R\|W\|ANON\|HEAP`，**无 EXEC** ⇒ 叶子 RW/NX | `kernel/arch/x86_64/memory/brk.c:61` |
+| `mmap` / `mprotect` | `prot_to_vma_flags()` 把 `PROT_*` 映射成逻辑位（`PROT_EXEC` 隐含 READ），叶子按 VMA 换算 | `kernel/arch/x86_64/memory/mmap.c:73-97`、`:772` |
+| 设备映射 | 设备驱动不授予 EXEC ⇒ 叶子带 NX | `kernel/arch/x86_64/memory/mmap.c:422-426` |
+| 硬件 | 启动期打开 `EFER.NXE` | `kernel/arch/x86_64/platform/boot.c:115-117` |
+
+**故障期强制**：首次触碰就按 VMA 校验——未授权写、PROT_NONE 访问、未授权**取指**
+分别以 `SIGSEGV` 终止当前用户任务（`kernel/arch/x86_64/intr/trap.c:742-763`）；
+后续按需填充与 COW 解析路径一律用 `x86_vma_pte_flags(vma->vm_flags)` 装叶，
+因此逻辑权限始终是权威。
+
+**运行期证据**：systest 用例 `mmap_exec_protection`（RW 段取指 → SIGSEGV；RX 段写 → SIGSEGV；
+RX/RWX 段可执行；文件映射 RX 首写 → SIGSEGV；RW 段取指 → SIGSEGV；真实 2 MiB 栈叶不可执行）。
+宿主断言见 `hosttests/cases/test_process_image_lifecycle.c`（堆叶 `PAGE_USER|PAGE_WRITE|PAGE_VALID|PAGE_NO_EXEC`）。
+
+**剩余**：**ELF 分段 NX 细化**——装载器显式不细化分段 NX，`.data`/`.bss`/`.rodata` 叶子仍是 RWX
+（`kernel/arch/x86_64/fs/elf.c:63-69`）。该子项留在 [roadmap.md](../roadmap.md) P1。
 
 ---
 

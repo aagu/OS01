@@ -97,7 +97,7 @@ keyboard IRQ → console TTY (tty_push_input) → terminal.elf reads /dev/tty �
 ```
 
 - **Ctrl-C path**: `tty_push_input` (console TTY) does the VINTR line discipline → `signal_pgrp(tty->fg_pgrp, SIGINT)`. With job control disabled (busybox `CONFIG_ASH_JOB_CONTROL=n`), init/terminal/ash/cat all share pgrp 1, so the broadcast hits all of them: terminal.elf survives (must `signal(SIGINT, SIG_IGN)` — see below), ash survives (busybox handler), the foreground job (e.g. `cat`) dies.
-- **`terminal.elf` MUST ignore SIGINT**: exec() resets ALL sighand to `SIG_DFL` (kernel/sched/task.c, deliberate — it also clears inherited SIG_IGN). Without `signal(SIGINT, SIG_IGN)` in `user/terminal/terminal.c` main(), every ^C kills the terminal emulator and init respawns it. terminal.elf already handles ^C itself (`kill(ash_pid, SIGINT)`).
+- **`terminal.elf` MUST ignore SIGINT**: exec() resets ALL sighand to `SIG_DFL` (kernel/arch/x86_64/sched/exec.c:769, deliberate — it also clears inherited SIG_IGN). Without `signal(SIGINT, SIG_IGN)` in `user/terminal/terminal.c` main(), every ^C kills the terminal emulator and init respawns it. terminal.elf already handles ^C itself (`kill(ash_pid, SIGINT)`).
 - **Console TTY default termios is `c_lflag = ISIG`** (signal-aware half-raw, not raw 0) so Ctrl-C works out of the box. Tests asserting the old raw default will fail.
 
 **Headless interactive test (inject commands via serial stdio):**
@@ -147,10 +147,10 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
 | `kernel/driver/logo.c` | OS01 启动字标（arch-neutral，经 `arch/fb_write.h` 取帧缓冲） |
 | `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
-| `kernel/memory/` | pmm.c, slab.c, tlb.c, vm_area.c, mm.c — arch-neutral memory stack (x86 vmm/vma/brk/mmap/uaccess live under `kernel/arch/x86_64/memory/`) |
+| `kernel/memory/` | pmm.c, pmm_boot.c, slab.c, tlb.c, vm_area.c, mm.c, dump.c — arch-neutral memory stack (x86 vmm/vma/brk/mmap/uaccess live under `kernel/arch/x86_64/memory/`) |
 | `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
-| `kernel/sched/` | core.c, signal.c, fair.c, balance.c — EEVDF 共享调度核心（fork/exec/exit 生命周期是 x86-only，位于 `kernel/arch/x86_64/sched/`） |
-| `kernel/fs/` | vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, poll.c, select.c |
+| `kernel/sched/` | core.c, signal.c, fair.c, balance.c, wait.c, kthread.c, accounting.c — EEVDF 共享调度核心（fork/exec/exit 生命周期是 x86-only，位于 `kernel/arch/x86_64/sched/`） |
+| `kernel/fs/` | vfs.c, fat.c, ext2.c, procfs.c, tmpfs.c, gpt.c, dcache.c, elf_layout.c, file.c, poll.c, select.c（devfs.c 与 elf.c 是 x86-only，位于 `kernel/arch/x86_64/fs/`） |
 | `kernel/tty/tty.c` | Console TTY: fg_pgrp field, VINTR/VQUIT line discipline (ISIG), TIOCSPGRP/TIOCGPGRP, cooked readline |
 | `kernel/tty/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |
 | `user/terminal/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
@@ -177,3 +177,5 @@ IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
 | [docs/signal/signal.md](docs/signal/signal.md) | Signal delivery, handler, sigreturn, Ctrl-C→SIGINT |
 | [docs/log/log.md](docs/log/log.md) | Log levels, DEBUG_CHANNELS, LOG_TARGET, NDEBUG |
 | [docs/subsys/subsys.md](docs/subsys/subsys.md) | Subsystem registration framework |
+| [docs/driver/driver.md](docs/driver/driver.md) | Drivers (keyboard, serial, ahci, pci, e1000, fb, mouse, gfx0, logo, xHCI, USB MSC/BOT, USB HID) + framebuffer cache policy |
+| [docs/testing/testing-policy.md](docs/testing/testing-policy.md) | Test layering, scenario catalog, assertion policy, generated test catalog |

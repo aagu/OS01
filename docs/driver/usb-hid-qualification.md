@@ -19,7 +19,7 @@
 |---|------|--------|------|---------------------|
 | 1 | `make PROFILE=x86_64-clang test-host` | `0` | PASS | `build/x86_64-clang/logs/tests/hosttests/`（含 `61` + `7` + `2` + `12` 项 Python/宿主测试） |
 | 2 | `make PROFILE=x86_64-clang test-static` | `0` | PASS | `build/x86_64-clang/logs/tests/{validate-kernel,runtime-link-order,kernel-runtime-link,syscall-boundary,kernel-layout,kernel-canary-contract,header-object-audit,stack-frame-audit,driver-model-boundary,gui-build-audit,intr-dispatch-audit,arch10-capacity-audit,assertion-policy,user-canary}/` |
-| 3 | `make PROFILE=x86_64-clang test-harness` | `2` | FAIL（4/65 模块） | 见第 3 节详情 |
+| 3 | `make PROFILE=x86_64-clang test-harness` | `0` | PASS（原为 `2`，见第 3 节） | `build/x86_64-clang/logs/tests/tests/` |
 | 4 | `make PROFILE=x86_64-clang test-qemu SUITE=phase-0` | `0` | PASS | `build/x86_64-clang/logs/tests/phase-0/20261115T115507Z-a1795e35603440e78185a6092c6c39dc` |
 | 5 | `make PROFILE=x86_64-clang test-qemu SUITE=gui` | `0` | PASS（SMP=1, 2） | `build/x86_64-clang/logs/tests/gui/20261115T115519Z-d0d96f09a42244d68ca98e9b25434817` |
 | 6 | `make PROFILE=x86_64-clang test-qemu SUITE=usb-boot` | `0` | PASS（6/6 子用例） | `build/x86_64-clang/test-results/usb-boot/`（见第 4 节） |
@@ -27,7 +27,17 @@
 
 > 注：`SUITE=usb-hid`（Task 6 专项 E2E，`direct`/`hub` × `SMP=1`/`2`）最近一次产物位于 `build/x86_64-clang/test-results/usb-hid/`（`direct-smp1-20261115T113940-513325`、`direct-smp2-20261115T113953-515200`、`hub-smp1-20261115T114006-517074`、`hub-smp2-20261115T114020-518950`）。
 
-## 3. `test-harness` 失败明细（exit 2）
+## 3. `test-harness` 失败明细（历史，已闭环）
+
+> **当前状态：已修复，`make PROFILE=x86_64-clang test-harness` 全模块 PASS（exit 0，65/65）。**
+> 下面是 2026-11-15 验证当时记录的四项失败，修复见 commit `433c630d`（`fix: resolve test-harness catalog and QMP compatibility issues`）：
+> 生成目录 `config/test-catalog.json` 与场景目录 `config/test-scenarios.json` 补齐新增条目、
+> QMP 客户端 `execute()` 签名接受 `deadline` 关键字参数、`test_dispatch_generated` 的硬编码
+> flavor 数量改为跟随桥接清单。复验：`qemutests.test_dispatch_generated`、
+> `qemutests.test_gui_runner`、`qemutests.test_host_build_contract`、
+> `qemutests.test_scenario_catalog` 四个模块均 PASS。
+
+**以下是 2026-11-15 当时的原始记录（历史事实，保留备查）**：
 
 65 个 unittest 模块中 61 个通过（含 `qemutests.test_usb_hid_runner` 14 项和 `qemutests.test_usb_boot_runner`），4 个模块失败：
 

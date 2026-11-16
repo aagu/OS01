@@ -308,7 +308,7 @@ rtc_write_datetime(&new_dt);
 
 ### AHCI SATA 驱动
 
-位于 `kernel/driver/ahci.c`：
+位于 `kernel/arch/x86_64/driver/ahci.c`：
 
 * `ahci_init` - PCI 扫描 SATA 控制器，启用总线主控和 MMIO
 * `ahci_port_init` - 初始化端口（命令列表、FIS、命令表），发送 IDENTIFY
@@ -331,7 +331,7 @@ rtc_write_datetime(&new_dt);
 
 ### xHCI USB 主机控制器驱动（ARCH-14）
 
-位于 `kernel/driver/xhci.c`，头文件 `kernel/include/driver/xhci.h`：
+位于 `kernel/arch/x86_64/driver/xhci.c`，头文件 `kernel/include/driver/xhci.h`：
 
 * **驱动模型接入**：基于 ARCH-9 统一驱动框架，定义 `xhci_pci_driver`（`class = 0x0c0330`，串行总线控制器 / USB / xHCI），通过 `PCI_DRIVER_DECLARE()` 写入 `.pci_drivers` 链接段由 PCI 核心自动探测绑定。
 * **MMIO 映射与寄存器解析**：读取 PCI BAR0，映射 MMIO 地址空间；解析 Capability 寄存器（`CAPLENGTH`、`HCIVERSION`、`HCSPARAMS1..3`、`HCCPARAMS1`、`DBOFF`、`RTSOFF`）以及 Operational 寄存器基址。
@@ -358,6 +358,61 @@ rtc_write_datetime(&new_dt);
   - 构建 Input Context 激活工作端点（Interrupt/Bulk 等），入队 Configure Endpoint TRB；提交 `SET_CONFIGURATION` 标准 USB 请求，设备迁移进入 Configured 状态。
 * **全局控制器跟踪注册表**：维护全局控制器跟踪表 `s_xhci_controllers`，暴露 `xhci_controller_count()` 与 `xhci_controller_get()` 供上层驱动或子系统调用。
 
+#### Phase 5 扩展：Hub / Scratchpad / PSIC（2026-11-15 闭环）
+
+* **Scratchpad Buffers**：`HCSPARAMS2` 的 `MAXSP` 字段解出上限（`kernel/arch/x86_64/driver/xhci.c:136`），由 `xhci_alloc_scratchpads()` 分配、`xhci_free_scratchpads()` 释放，覆盖 DMA 生命周期。
+* **PSIC（自定义速度类）**：协议能力端口描述符 `dw2[31:28]` 读出 PSIC 值，逐项解析 PSI 表（PSIV / PSIE / PLT / PSIM），`xhci_speed_class()` 按 PSIC 把端口速度映射到速度类，`xhci_psiv_for_speed_class()` 反查匹配。
+* **USB 2.0 Hub 分层枚举**（`kernel/arch/x86_64/driver/xhci_hub.c`）：`xhci_hub_probe_tree()` 分层下探 Hub；`hub_prepare_ports()` 准备端口、`hub_reset_port()` 复位并协商速度、`hub_set_depth()` 设置深度、`hub_read_info()` 读 Hub 信息、`hub_isolate_usb2()` 隔离 USB2 侧；配置校验 `xhci_hub_validate_config_dci()` 要求 alt0 Hub 接口 + 单个 Interrupt IN 端点；`hub_check_gen1()` 校验 SuperSpeed Gen1×1 速率。
+* **共享 TT（Transaction Translator）**：Split 流量共享 TT 出错时先结清再释放，避免半开事务污染后续传输。
+* **设备路径表示**：Hub 下游设备用路径（port path）表示，失败的寻址被隔离，不影响同层其他设备。
+
+### USB 大容量存储 (MSC/BOT)
+
+> 2026-11-14 ~ 11-15 闭环。规范 [2026-11-14-usb-boot-design.md](../superpowers/specs/2026-11-14-usb-boot-design.md)，
+> 计划 [usb-boot-02-readonly-msc.md](../superpowers/plans/2026-11-14-usb-boot-02-readonly-msc.md) /
+> [usb-boot-04-write-and-hardware.md](../superpowers/plans/2026-11-14-usb-boot-04-write-and-hardware.md)。
+> 闭环记录见 `docs/changelog.md` 2026-11-14 / 2026-11-15 条目。
+
+**分层**：
+
+| 层 | 文件 | 职责 |
+|----|------|------|
+| BOT 分帧 | `kernel/driver/usb_msc_bot.c` | CBW 组帧（签名 `0x43425355`、tag、方向位 `cbw[12]`、CDB 长度 `cbw[14]`）、CSW 解析与校验（签名 `0x53425355`、tag 匹配、`csw[12] > 2` 判错）、残量（residue）处理；超时/管道错误走 `bot_reset_recovery()`（Mass Storage Reset + clear_halt）与 `bot_handle_bulk_timeout()` |
+| SCSI 命令集 | `kernel/driver/usb_msc.c` | `scsi_test_unit_ready()` / `scsi_inquiry()` / `scsi_read_capacity_10()` / `scsi_read_10()` / `scsi_write_10()` / `usb_msc_flush()`（SYNCHRONIZE CACHE 0x35） |
+| xHCI 适配 | `kernel/arch/x86_64/driver/xhci_msc.c` | `xhci_msc_probe_controller()` 扫描控制器；批量传输回调 `xhci_msc_bulk()` → `xhci_bulk_transfer()`；识别 MSC 接口（`bInterfaceClass == 0x08 && bInterfaceSubClass == 0x06 && bInterfaceProtocol == 0x50`）并取 bulk 端点 |
+| 块设备接入 | `kernel/driver/usb_msc.c` | `usb_msc_ops{read,write,flush}` 注册 `block_device_register(&desc, &bdev)`，`kind = BLOCK_DISK`，磁盘名 `usba`..`usbz` |
+
+**读路径带 64 KiB 读窗口缓存**（`msc_refill_window()`），单扇区读在窗口命中时直接返回；
+**写路径先失效重叠缓存**（`msc_invalidate_overlap()`）再发 WRITE(10)，写后 SYNCHRONIZE CACHE 保证持久化。
+
+**进入引导路径**：`usb-msc` 是 `SUBSYS_PHASE_STORAGE` 子系统，依赖 `device-boot`，在 `kernel/core/main.c` 的控制器阶段完成注册——**早于** `fs_boot_mounts()`。随后：
+
+- `register_block_devices()`（`kernel/fs/boot.c`）把磁盘发布到 devfs，节点为 `/dev/usba`、`/dev/usba1`、`/dev/usba2`（**不是 `/dev/sd*`**）。
+- `mount_disk_by_guid()` 遍历所有 `BLOCK_DISK`（含 USB 盘），按固件通过 `boot_context` v3 下发的 **ESP GUID** 匹配，命中后挂载 ext2 根与 FAT32 `/boot`。
+- GPT 只读元数据与分区发布分离（`kernel/fs/gpt.c`），固件启动身份在 UEFI 侧采集（`boot/uefi/boot_device.c`）。
+
+**已知边界（如实记录）**：仅 BOT（无 UAS）；仅 512 字节逻辑块、仅 32 位 LBA（`kernel/driver/usb_msc.c:137-144` 越界即 `-EINVAL`）；无热插拔重探测（`xhci_msc_probe_controller()` 仅在 init 调用一次）；无用户态挂载入口（仓库内无 `mount` syscall，挂载只由引导期 ESP GUID 选择决定）。
+
+**QEMU 验收**：`make PROFILE=x86_64-clang test-qemu SUITE=usb-boot`，6 个子用例 `readonly` / `dual` / `ahci` / `persistence` / `superspeed` / `hub` 全 PASS。其中 `persistence` 断言 trace 中 WRITE(10) opcode `0x2A` 之后紧跟 SYNCHRONIZE CACHE opcode `0x35` 且 CSW status=0，并在重启后回读标记文件。物理实机验证**未做**，见 [usb-hid-qualification.md](usb-hid-qualification.md) §1。
+
+### USB HID 引导输入
+
+> 2026-11-15 闭环。规范 [2026-11-15-usb-hid-input-design.md](../superpowers/specs/2026-11-15-usb-hid-input-design.md)，
+> 计划 [2026-11-15-usb-hid-input.md](../superpowers/plans/2026-11-15-usb-hid-input.md)。
+> 验收记录见 [usb-hid-qualification.md](usb-hid-qualification.md)。
+
+* **报告解码（架构无关）**：`kernel/driver/usb_hid_report.c`
+  - `usb_hid_keyboard_update()`：8 字节 Boot 键盘报告 → PS/2 Set-1 帧；含 rollover 处理与「普通键断 / 修饰键断 / 修饰键按 / 普通键按」四组发射序；`s_hid_map` 是 HID usage → Set1 映射表。
+  - `usb_hid_mouse_decode()`：`buttons = report[0] & 0x07`，`dx`/`dy` 取有符号 8 位增量。
+  - `usb_hid_keyboard_release()`：设备断开时释放所有按住的键，避免「幽灵按键」。
+* **xHCI 设备侧**：`kernel/arch/x86_64/driver/xhci_hid.c`
+  - 报告取自 **Interrupt IN 端点**（`xhci_intr_in_take_locked()`，取完重新挂 TD）。
+  - `SET_PROTOCOL(0)` 切 Boot Protocol；失败则该 slot 标记不可用。
+  - 解码后送入共享路由：`input_route_keyboard_usb_frames()` / `input_route_mouse_usb_event()`。
+  - 常驻工作线程轮询取报告；设备分离时释放按键。
+* **与 PS/2 并存，不替换**：PS/2 键盘走 `input_route_keyboard_byte()`（`kernel/driver/keyboard.c`），PS/2 鼠标走 `input_route_mouse_event()`（`kernel/driver/mouse.c`），三者共用 `input_route` 的独占租约、物理键态与 Caps 锁存。**无 i8042 时** USB 路径仍能初始化 `/dev/mouse` 与控制台输入。
+* **验收**：`make PROFILE=x86_64-clang test-qemu SUITE=usb-hid`（`direct`/`hub` × `SMP=1`/`2` 四组，`i8042=off`）。
+
 ### USB devfs 驱动（ARCH-14）
 
 位于 `kernel/driver/usb_devfs.c`，头文件 `kernel/include/driver/usb_devfs.h`：
@@ -378,7 +433,7 @@ rtc_write_datetime(&new_dt);
 
 #### 帧缓冲协调器与显示所有权（Display Ownership Coordinator，2026-10-11）
 
-为解决多客户端（如 terminal 终端模拟器与桌面/GUI 应用）并发写入屏幕造成的撕裂与覆盖，帧缓冲层引入了统一的**显示所有权协调器**（`kernel/driver/fb_state.c`，头文件 `kernel/include/driver/fb_state.h`，ioctl UAPI 定义在 `kernel/include/uapi/gfx.h` 并由 `kernel/driver/gfx.c` 分发）：
+为解决多客户端（如 terminal 终端模拟器与桌面/GUI 应用）并发写入屏幕造成的撕裂与覆盖，帧缓冲层引入了统一的**显示所有权协调器**（`kernel/driver/fb_state.c`，头文件 `kernel/include/driver/fb_state.h`，ioctl UAPI 定义在 `kernel/include/uapi/gfx.h` 并由 `kernel/arch/x86_64/driver/gfx.c` 分发）：
 
 * **所有权状态机**：
   * 全局维护主所有者 `g_owner` 与回退持有者 `g_fallback`（均为非所有权视图 cookie `const void *cookie`，非 `file_t *`）。
@@ -402,7 +457,7 @@ rtc_write_datetime(&new_dt);
   `fb_cache_policy_t`（`UNCACHEABLE` / `WRITEBACK`）+ `fb_cache_policy_get/set()`。
   **默认 UNCACHEABLE** —— 任何没有"自证是普通 RAM"的 backend（含 generic GOP fallback）
   保持保守选择；只有 QEMU Standard VGA RAM backend 发布 `WRITEBACK`。
-  "BAR0 是普通 RAM"这一假设从通用 gfx 层移到 backend 侧（`kernel/driver/bga.c`）。
+  "BAR0 是普通 RAM"这一假设从通用 gfx 层移到 backend 侧（`kernel/arch/x86_64/driver/bga.c`）。
 * **policy → 硬件位只有一个翻译点**：`kernel/include/arch/x86_64/pte.h` 的
   `fb_x86_cache_bits()` / `fb_x86_kernel_pmd_flags()` / `fb_x86_user_pte_flags()`。
   kernel 永久映射（`kernel/arch/x86_64/memory/fb_map.c`）、`/dev/fb` 用户别名（只读与可写
@@ -505,7 +560,7 @@ QEMU 测得的耗时不构成真机门槛。
 
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
-受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。
+受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/arch/x86_64/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。
 
 **职责**：
 
@@ -716,10 +771,16 @@ typedef struct hw_int_type {
 * `kernel/driver/serial.c` - 串口驱动
 * `kernel/driver/pit.c` - PIT 定时器驱动
 * `kernel/driver/rtc.c` - RTC 实时时钟驱动
-* `kernel/driver/ahci.c` - AHCI SATA 驱动
-* `kernel/driver/xhci.c` - xHCI USB 3.0 主机控制器驱动
+* `kernel/arch/x86_64/driver/ahci.c` - AHCI SATA 驱动
+* `kernel/driver/usb_msc.c` - USB 大容量存储 SCSI 命令集与块设备接入
+* `kernel/driver/usb_msc_bot.c` - USB 大容量存储 BOT 分帧与恢复
+* `kernel/driver/usb_hid_report.c` - USB HID Boot Protocol 报告解码（架构无关）
 * `kernel/driver/usb_devfs.c` - USB devfs 属性发布驱动
-* `kernel/driver/pci.c` - PCI 配置空间访问
+* `kernel/arch/x86_64/driver/pci.c` - PCI 配置空间访问
+* `kernel/arch/x86_64/driver/xhci.c` - xHCI USB 3.0 主机控制器驱动
+* `kernel/arch/x86_64/driver/xhci_hub.c` - xHCI USB 2.0 Hub 分层枚举
+* `kernel/arch/x86_64/driver/xhci_hid.c` - xHCI HID 中断端点取报告
+* `kernel/arch/x86_64/driver/xhci_msc.c` - xHCI ↔ MSC 批量传输适配
 
 ### 驱动程序头文件
 
@@ -734,6 +795,9 @@ typedef struct hw_int_type {
 * `kernel/include/driver/ahci.h` - AHCI SATA 驱动头文件
 * `kernel/include/driver/xhci.h` - xHCI 驱动头文件
 * `kernel/include/driver/usb_devfs.h` - USB devfs 驱动头文件
+* `kernel/include/driver/usb_msc.h` - USB 大容量存储 SCSI 层头文件
+* `kernel/include/driver/usb_msc_bot.h` - USB 大容量存储 BOT 分帧头文件
+* `kernel/include/driver/usb_hid_report.h` - USB HID 报告解码头文件
 * `kernel/include/driver/pci.h` - PCI 驱动头文件
 
 ### 设备相关头文件

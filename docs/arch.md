@@ -130,10 +130,10 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 
 ---
 
-## aarch64 用户态现状（M4，2026-11-11 ~ 2026-11-13 闭环）
+## aarch64 用户态现状（M4，2026-11-11 ~ 2026-11-14 闭环）
 
 M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来的正式 EL0 用户任务」。
-五块按顺序交付，编号口径与 [build.md](build/build.md) 一致：
+八块按顺序交付，编号口径与 [build.md](build/build.md) 一致：
 
 | 块 | 交付 | 验收用例 |
 |----|------|---------|
@@ -143,11 +143,15 @@ M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来�
 | 第 3 块 | 正式 SVC 与 uaccess：共享 syscall 表、低 EL 同步事件接入公共分派、用户复制 abort 恢复为 `-EFAULT` | `aarch64_user_svc_uaccess` |
 | 第 4 块 | 匿名 VMA 与按需缺页：`mmap`/`brk`/`mprotect`/`munmap`、stash、逻辑权限与硬件权限分离 | `aarch64_user_vm` |
 | 第 5 块 | 原生 `SYS_fork` 与写时复制：clone 事务、驻留记录所有权、COW 写故障、父子回收 | `aarch64_user_fork_cow` |
+| 第 6 块 | 原生 `SYS_waitpid` 与父子退出 / ZOMBIE 回收：共享 `do_waitpid`、孤儿僵尸无锁回收 | `aarch64_user_waitpid` |
+| 第 7 块 | 原生 `SYS_exec` 与 SysV 用户栈参数传递：argv/envp 拷贝、`-E2BIG` 合并计数上限、AAPCS 帧与寄存器初始化 | `aarch64_user_exec` |
+| 第 8 块 | 原生信号与 `sigreturn`：`kill`/`signal`/`sigprocmask`/`sigreturn`，sigframe 压栈、伪造帧防护 | `aarch64_user_signal` |
 
 **跨架构 syscall 表**：AArch64 不维护第二张分派表，而是用 `OS01_SYSCALL_A64_SUBSET=1`
 编译 `kernel/syscall/dispatch.c` 的**同一张** `syscall_table`，只隐藏未编入的表项。
-当前 aarch64 服务 9 项：`exit` / `getpid` / `getppid` / `clock_gettime` /
-`brk` / `mmap` / `mprotect` / `munmap` / `fork`。详见
+当前 aarch64 服务 **15 项**：`exit` / `getpid` / `getppid` / `clock_gettime` /
+`brk` / `mmap` / `mprotect` / `munmap` / `fork` / `waitpid` / `exec` /
+`kill` / `signal` / `sigprocmask` / `sigreturn`。详见
 [syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12)。
 
 **当前边界（如实记录）**：
@@ -155,13 +159,21 @@ M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来�
 - 验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）；普通 AArch64 镜像的
   `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 仍为 0，产品启动路径仍进 idle。
 - ASID 恒为 0；无 TLS、无 FP/SIMD 上下文；用户映像是内存中的静态 ELF。
-- 未覆盖：VFS `/bin/init`、waitpid、信号、文件映射、`MAP_FIXED`、共享映射、设备映射、
-  SMP 用户调度、IRQ 返回抢占。
+- 未覆盖：VFS `/bin/init`、文件映射、`MAP_FIXED`、共享映射、设备映射、
+  SMP 用户调度、IRQ 返回抢占。aarch64 侧的 `mmap` 策略对共享 / 文件 / 固定映射一律返回
+  `-EOPNOTSUPP`（`kernel/arch/aarch64/memory/user_vm_policy.c:610-612`），设备映射无实现。
+- **EL0 抢占只在单核探针里验证**：`aarch64_el0_preempt` 在多核启动下直接拒绝运行
+  （`kernel/selftest/test_aarch64_el0.c:414-416`），且 IRQ 路径明确不做调度
+  （`kernel/arch/aarch64/intr/trap.c:83-92`）；AP 侧仍是轮询 resched，尚无 resched SGI。
 - 用户态进入/返回**尚未纳入 `arch/context.h` 门面**：x86 走 `iretq`、aarch64 走 `eret`，各自实现。
+- `arch_smp_boot_aps()` 与 `arch_cpu_features()` 仓库内均无此接口（只有跨架构钩子
+  `arch_boot_aps()`）。
 
-**剩余差距**：产品用户态接入 + IRQ 返回抢占 + 统一 SMP 启动与多核上下文切换 + ASID，
-粗估 3–5 周（一个人全职，较 2026-11-11 的 4–8 周收窄）。规划项见 [roadmap.md](roadmap.md) P2。
-闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-13 各条目；COW/VM 细节见
+**剩余差距**：产品用户态接入（VFS 门 + `/bin/init` + 文件/共享/设备映射 + `MAP_FIXED`）
++ IRQ 返回抢占 + 统一 SMP 启动与多核上下文切换 + ASID，粗估 **3–4 周**
+（一个人全职，较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环）。
+规划项见 [roadmap.md](roadmap.md) P2。
+闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-14 各条目；COW/VM 细节见
 [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环)。
 
 ---

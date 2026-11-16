@@ -22,15 +22,15 @@
 * `intr/` — 中断处理相关（irq.c, softirq.c, dispatch.c）
 * `sync/` — 同步原语（mutex.c, completion.c, futex.c, wait.c）
 * `arch/x86_64/` — 处理器体系架构相关（head.S, trap.c, entry.S, smp.c, subsys.c, subsys_percpu.c）
-* `driver/` — 硬件驱动（keyboard, serial, pit, rtc, ahci, pci, fb, e1000, virtio-net）
+* `driver/` — 硬件驱动（keyboard, serial, pit, rtc, pci, fb, e1000, virtio-net, mouse, gfx0, logo, usb_devfs, usb_msc, usb_msc_bot, usb_hid_report, input_route）；x86-only 的 ahci / e1000 / xhci / gfx / bga 位于 `arch/x86_64/driver/`
 * `include/` — 头文件，会和 lib 一起安装到 sysroot 中
-* `memory/` — 架构中立内存管理（pmm.c, slab.c, tlb.c, vm_area.c, mm.c）；x86 实现位于 `arch/x86_64/memory/`（vmm.c, brk.c, mmap.c, vma.c, uaccess.c）
+* `memory/` — 架构中立内存管理（pmm.c, pmm_boot.c, slab.c, tlb.c, vm_area.c, mm.c, dump.c）；x86 实现位于 `arch/x86_64/memory/`（vmm.c, brk.c, mmap.c, vma.c, uaccess.c, pmm_arch.c, pmm_reserve.c, fb_map.c, fb_mtrr.c）；aarch64 实现在 `arch/aarch64/memory/`。公共面只保留 TLB 广播协议与逻辑 VMA 位，详见 `docs/memory/memory.md`
 * `time/` — 时间子系统（clocksource.c, tick.c, timer.c：时钟源/节拍/软件定时器）
 * `intr/apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
 * `intr/pic/` — 8259A PIC 控制器（APIC 已完全实现，位于 intr/apic/）
 * `block/` — 块设备层（blockdev.c）
-* `fs/` — 文件系统（vfs.c, fat.c, ext2.c, devfs.c, procfs.c, tmpfs.c, elf.c, file.c, gpt.c, poll.c, select.c）
-* `sched/` — 调度器 (task.c, deferred_free.c)
+* `fs/` — 文件系统（vfs.c, fat.c, ext2.c, procfs.c, tmpfs.c, file.c, gpt.c, dcache.c, elf_layout.c, poll.c, select.c）；x86-only 的 devfs.c 与 elf.c 位于 `arch/x86_64/fs/`
+* `sched/` — 调度器共享核心（core.c, signal.c, fair.c, balance.c, wait.c, kthread.c, accounting.c, resource.c, identity.c, diag.c, boot.c, boot_stdio.c）；x86-only 的 fork/exec/exit 生命周期位于 `arch/x86_64/sched/`
 * `subsys/` — 子系统注册框架（subsys.c）
 * `tty/` — 终端/TTY 子系统（tty.c, console.c, canon.c 行规程, pty.c PTY 主/从）
 * `net/` — 网络子系统（net.c, socket.c, sys_arch.c — lwIP 适配）
@@ -71,19 +71,29 @@
 
 #### driver 子目录
 * `keyboard.c` - 键盘驱动
+* `input_route.c` / `input_ps2.c` - 输入路由与独占租约（PS/2 与 USB HID 共用）
+* `i8042.c` - i8042 共享控制器层
+* `mouse.c` / `mouse_proto.c` - PS/2 鼠标驱动与包解析
 * `pit.c` - 可编程间隔定时器驱动
 * `rtc.c` - 实时时钟驱动
 * `serial.c` - 串口驱动
-* `ahci.c` - AHCI SATA 驱动
-* `pci.c` - PCI 配置空间访问
+* `fb.c` / `fb_state.c` / `fb_test.c` / `arch_fb_write.c` - 帧缓冲、显示所有权协调器与架构中立宽写 facade
+* `gfx0` — 见 `arch/x86_64/driver/gfx.c`
+* `usb_devfs.c` - USB devfs 属性发布
+* `usb_msc.c` / `usb_msc_bot.c` - USB 大容量存储（SCSI 命令集 + BOT 分帧）
+* `usb_hid_report.c` - USB HID Boot Protocol 报告解码（架构无关）
+* `pci.c` - PCI 配置空间访问（位于 `arch/x86_64/driver/`）
 
 #### memory 子目录
 * `dump.c` - 内存转储功能
-* `pmm.c` - 物理内存管理（alloc_pages, free_pages）
+* `pmm.c` / `pmm_boot.c` - 物理内存管理（alloc_pages, free_pages；启动期保留）
 * `slab.c` - 内存 slab 分配器（kmalloc, kfree）
-* `vmm.c` - 虚拟内存管理（x86_vmm_map_2m / x86_vmm_map_4k）
 * `vm_area.c` - 共享 VMA 列表原语（查找/有序插入/堆查找）
-* `tlb.c` - TLB 刷新技术
+* `mm.c` - 共享 `mm` 与 `mmap_base`
+* `tlb.c` - TLB 刷新与 shootdown 广播
+
+> 架构私有的 VMM / VMA / mmap / brk / uaccess 位于 `arch/<arch>/memory/`，
+> 公共面只导出 `tlb_shootdown()`；边界门禁见 `make mm-header-boundary`。
 
 #### pic 子目录
 * `8259A.c` - 8259A PIC 控制器驱动（为 PIT/键盘提供回退中断路由）
@@ -115,8 +125,15 @@
 * `select.c` - select/pselect6 系统调用（do_select_common 适配层）
 
 #### sched 子目录
-* `task.c` - 任务/线程管理 + EEVDF 调度器（O(log n) rbtree 可运行队列 + vruntime/deadline + SMP 负载均衡 + COW fork）
-* `deferred_free.c` - 异步 deferred-free kthread（跨 CPU 任务回收）
+* `core.c` - 任务/线程管理 + EEVDF 调度器（O(log n) rbtree 可运行队列 + vruntime/deadline + SMP 负载均衡）
+* `fair.c` - vruntime / deadline 计算
+* `balance.c` - SMP 负载均衡
+* `signal.c` - 信号投递与 handler
+* `wait.c` - `do_waitpid` 与父子回收（双架构共享）
+* `kthread.c` - 内核线程构造器
+* `accounting.c` / `resource.c` / `identity.c` / `diag.c` - 记账、资源、身份与诊断
+
+> x86-only 的 fork / exec / exit 生命周期位于 `arch/x86_64/sched/`。
 
 #### subsys 子目录
 * `subsys.c` - 子系统注册框架（register_subsys, subsys_init_all）
@@ -168,7 +185,7 @@
 * `libgfx/sprite.c` - RGB32 sprite blit + 1-bpp mask blit
 * `libgfx/internal.h` - 库私有 header（struct gfx_handle 布局 + clip state）— 不发布到 sysroot
 * `libgfx/Makefile` - 静态库构建（profile TARGET_CC；install 到 `STAGING_DIR/libgfx/usr/{include,lib}`）
-* 内核对应：`kernel/include/uapi/gfx.h`（UABI，唯一源）+ `kernel/driver/gfx.c`（`/dev/gfx0` 实现）
+* 内核对应：`kernel/include/uapi/gfx.h`（UABI，唯一源）+ `kernel/arch/x86_64/driver/gfx.c`（`/dev/gfx0` 实现）
 * 构建入口：`make lib`（仅 libgfx.a）/ `make user`（链 `-lgfx -lc` 的 tetris、test_gfx）
 * 测试入口：`make test-qemu SUITE=gfx`（ring-3 全屏 256×256 视图 E2E）
 

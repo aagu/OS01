@@ -182,10 +182,29 @@ Read-write filesystem driver for FAT32 partitions. `fat32_init(dev, &fs)` reads 
 
 Read-only filesystem driver for ext2. `ext2_init(dev, &fs)` reads the superblock from offset 1024, validates the ext2 magic (`0xEF53`), and builds block group descriptor metadata. Exposes `ext2_vfs_ops`:
 
-- **Inode reading**: Computes block group from inode number, reads the inode table within that group, supports the `i_block[15]` block map (12 direct + single indirect; double/triple indirect not implemented).
+- **Inode reading**: Computes block group from inode number, reads the inode table within that group, supports the `i_block[15]` block map (12 direct + single indirect + double/triple indirect, see below).
 - **Directory iteration**: Reads directory entries from inode blocks; each `ext2_dirent_t` is a variable-length record linked by `rec_len`.
 - **Read-only**: No write/create/unlink/rename/truncate operations.
 - **Mount point**: Mounted at `/` in the GPT dual-partition layout.
+
+### ext2 间接块映射
+
+> 2026-11-14 闭环（commit `37d9d735`「ext2: implement the double- and triple-indirect block mapping」）。
+> 闭环记录见 `docs/changelog.md` 2026-11-14 条目。
+
+`i_block[13]` 是二级间接、`i_block[14]` 是三级间接，逻辑块范围
+**1036..1048579**（二级）与 **1048580..1073741823**（三级）。四条路径都补齐：
+
+| 路径 | 函数 | 说明 |
+|------|------|------|
+| 读 | `ext2_bmap()`（`kernel/fs/ext2.c:533-592`） | 二级：`l1 = off / ptrs_per_block`、`l2 = off % ptrs_per_block`；三级：逐层下钻读表 |
+| 分配 | `ext2_bmap_alloc()`（`:597-703`） | 逐层建表并回写 `i_blocks`，每层用 `ext2_table_entry(..., create=true, &created)` |
+| 释放 | `ext2_bmap_free()`（`:755-814`）/ `ext2_free_chain()`（`:716-750`） | 按 `depth=2` / `depth=3` 递归释放，空表回收 |
+| 孤儿 inode 回收 | `ext2_free_tree()`（`:819+`） | 二级/三级间接点之下的**整条链**一并释放（`i_block[13]` → depth 2，`i_block[14]` → depth 3） |
+
+宿主测试覆盖：`hosttests/cases/test_ext2_bmap.c` 的
+`test_ext2_double_indirect_block_mapping`、`test_ext2_tail_of_double_indirect_file`、
+`test_ext2_write_builds_double_indirect_chain`（断言 `i_block[13] != 0 && i_block[14] == 0`）。
 
 ---
 

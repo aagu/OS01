@@ -28,7 +28,7 @@ docs/
 ├── signal/       [signal.md](signal/signal.md)                        ← 信号投递 / handler / sigreturn
 ├── time/         [timer.md](time/timer.md)                            ← clocksource / clockevent
 ├── fs/           [filesystem.md](fs/filesystem.md) + [io-multiplexing.md](fs/io-multiplexing.md)
-├── driver/       [driver.md](driver/driver.md)                        ← keyboard / serial / ahci / e1000 / fb
+├── driver/       [driver.md](driver/driver.md) + [usb-hid-qualification.md](driver/usb-hid-qualification.md)  ← keyboard / serial / ahci / e1000 / fb / xHCI / USB MSC / USB HID
 ├── net/          [network.md](net/network.md)                         ← lwIP + 驱动 + socket
 ├── gui/          [gui.md](gui/gui.md)                                 ← 2D 图形 + 终端 + 游戏
 ├── log/          [log.md](log/log.md)                                 ← 日志子系统 + DEBUG_CHANNELS
@@ -39,6 +39,7 @@ docs/
 ├── games/        [doom.md](games/doom.md)                             ← Doom 移植：构建 / IWAD 打包 / 运行参数 / 许可材料
 │
 ├── build/       [build.md](build/build.md) + [toolchain.md](build/toolchain.md)  ← 编译/运行/调试
+├── testing/     [testing-policy.md](testing/testing-policy.md) + [audit-dispositions.md](testing/audit-dispositions.md)  ← 测试分层 / 场景目录 / 断言政策 / 生成式目录
 ├── debug/       [debug.md](debug/debug.md)                            ← 调试方法（活跃）
 │
 ├── random/                                                              ← 熵源（facade 测试 / 质量治理 / x86_64 调研）

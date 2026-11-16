@@ -62,7 +62,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-doctor` | Compare local `clang`/`ld.lld`/`qemu` versions against `ci/Dockerfile` pins (reports `OK`/`DRIFT`/`SKIPPED(no ci pin)`, exits 2 only if a tool cannot execute) | — |
 | `make ci-local SUITE=<name>` | Run `test-qemu SUITE=<name>` (or `MAKE_ARGS=...`) inside `ghcr.io/aagu/os01-ci:latest` via `docker`/`podman` (no auto-pull) | — |
 
-`make test-qemu-usb-boot` 是 USB boot M0 的专用固件门禁（`USB_BOOT_CASE=firmware`，预期 `fs/root rc=-19`）。它使用共享的 `qemutests/harness/qemu_cmd.py` 的 `storage="usb"` 拓扑，不是 `test-qemu SUITE=` 的目录套件；M1b 转为成功门禁时才登记到生成的 suite catalog。
+`make test-qemu-usb-boot` 是 USB boot M0 的专用固件门禁（`USB_BOOT_CASE=firmware`，断言 `fs/root rc=-19`）。它使用共享的 `qemutests/harness/qemu_cmd.py` 的 `storage="usb"` 拓扑，不是 `test-qemu SUITE=` 的目录套件。**该用例已过期**：MSC 驱动落地后 USB-only 引导不再停在 `rc=-19`，而是走通到 shell，因此该用例现在超时失败——详见本节「现状」段与 `docs/roadmap.md` P4 的对应条目。
 
 AArch64 EL1 调度器验收（`MODE=sched`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched [SCHED_CASE=<v>]`。该 MODE 通过受控子构建产出隔离的 `KERNEL_SELFTEST` 调度器镜像变体：`SCHED_CASE=positive`（默认组成部分）构建 `kernel/sched` + `image/sched`（正例：严格 14 用例协议 + 全部冻结 `[sched-evidence]` 字段证据矩阵），四个故障值 `sp-top`/`sp-low`/`pc-low`/`pc-data` 各构建 `kernel/sched-fault-<v>` + `image/sched-fault-<v>`（编译期选中的 `aarch64_sched_fault_inject` 注入钩子损坏保存 SP/PC，验收要求 fatal 发生在**切栈前**且受害者零提交切换）。`SCHED_CASE` 省略时为 `all`（正例矩阵 + 全部四个负例）。选择器 `AARCH64_SCHED_TEST` 与 `SCHED_CASE` 在解析期拒绝非法值；`MODE=sched`（即使未带选择器）与 `AARCH64_SYNC_FAULT_TEST`/`AARCH64_M1_TEST`/`KERNEL_TEST_FORCE_NO_RNDRRS`/`KERNEL_CANARY_SELFTEST`/`OS01_SYSTEST`/非零 `AARCH64_SMP_TEST_NO_ACK_CPU` 的任意组合均解析期报错。runner（`qemutests/aarch64_scheduler.py`）只消费 make 传入的显式镜像/固件/ELF 路径，绝不隐式重建；每次 QEMU 有 120 s 绝对期限（tick 不延长），完成后 1 s 排空窗口，崩溃/超时永远 FAIL；`llvm-nm` 符号审计要求普通 normal/selftest/positive ELF 不含注入符号而每个 fault ELF 含有。普通镜像 BSP idle 冒烟仍是同一 runner 的 `--idle-smoke` 模式（`--cpus 1 2 4 8`）。
 
@@ -70,13 +70,13 @@ AArch64 AP 协作式调度验收 P1（`MODE=sched-ap`）：`make PROFILE=aarch64
 
 AArch64 每核调度 tick 记账验收（`MODE=sched-tick`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick` 构建隔离的 `kernel/sched-tick` + `image/sched-tick`（编译选择器 `AARCH64_SCHED_TICK_TEST=1`），1/2/4/8 核各两次 boot。镜像内产品 selftest 在每个已录用 CPU 上发布七个冻结 case 的证据行（tick-ready/tick-idle/tick-busy/tick-yield/tick-deadline/tick-global/tick-remote），整批证据先于对应的 `selftest_record_late()` 记录，`[sched-tick] END failed=0` 排在 selftest END 之后。runner（`qemutests/aarch64_sched_tick.py`）只消费 make 传入的显式镜像/固件/ELF 路径，按冻结字段与跨字段关系严格解析，缺字段/重复CPU/越界/AP global tick/缺END/未知ID一律拒绝，`accepted_mask` 必须等于 `(1<<N)-1`（不得用在线数冒充录用数），产物按内容审计（AArch64 ELF64 + 三个专用符号 + 同 variant 目录 + 专用符号不泄漏进普通产品 ELF），每次 QEMU 120 s 绝对期限（tick 不延长）。采样语义：**一计真实递送的 CNTP 中断 = 一个样本**，100 Hz 是名义值，不做墙钟补算。`MODE=sched-tick` 自己设置 `KERNEL_SELFTEST`，与旧 sched/AP sched/M1/no-ack/sync-fault/canary/weak/systest 的任意组合在外层 make 解析期拒绝；x86_64 profile 也直接拒绝该 aarch64 选择器。源码级合同与 runner 负向合同见 `qemutests/test_aarch64_sched_tick.py`（注册于 `make test-harness`）。
 
-AArch64 M4.1–M4.11 使用同一个 kernel-selftest 镜像。单核启动：
+AArch64 M4.1–M4.14 使用同一个 kernel-selftest 镜像。单核启动：
 
 ```bash
 make PROFILE=aarch64-clang KERNEL_SELFTEST=1 AARCH64_EL0_TEST=1 SMP=1 DISPLAY=none run-aarch64-uefi
 ```
 
-串口看到 `[TEST] PASS aarch64_el0` 、`[TEST] PASS aarch64_el0_irq`、`[TEST] PASS aarch64_el0_switch`、`[TEST] PASS aarch64_el0_preempt`、`[TEST] PASS aarch64_el0_task`、`[TEST] PASS aarch64_user_mm`、`[TEST] PASS aarch64_user_task_lifecycle`、`[TEST] PASS aarch64_user_svc_uaccess`、`[TEST] PASS aarch64_user_vm`、`[TEST] PASS aarch64_user_fork_cow`、`[TEST] PASS aarch64_user_waitpid` 和 `[TEST] END suite=kernel-selftest total=25 passed=25 failed=0 skipped=0` 后即可退出 QEMU。该选择器产出独立的 `kernel/m4-1` 和 `image/m4-1`，使用 BSP 启动栈的高地址别名，在 GIC、定时器和 AP 启动前验证私有 TTBR0、SVC 往返、权限故障和页回收。M4.2 在同一用例中验证 SVC 跨页读写、坏指针返回 `-EFAULT`，以及两条用户复制指令发生 EL1 data abort 后的恢复。M4.3 将探针编译为嵌入式静态 ELF，验证 ELF 入口、`.data` 初值、`.bss` 清零、坏入口拒绝和 4 KiB 页回收。M4.4 在单核定时器启动后、调度器接管前再次运行该 ELF：私有 TTBR0 保持安装，GIC/串口走 TTBR1 设备映射；自测要求至少两次来自 EL0 的 CNTP IRQ、寄存器和栈完好及 SVC 退出。M4.5 在 AP 启动前让两个私有地址空间通过 SVC 按 A → B → A → B 切换，验证相同虚拟地址的数据隔离、寄存器和栈恢复，以及退出后的页回收。M4.6 在单核定时器启动后复用两个私有地址空间，要求 A → B → A → B 三次切换均由来自 EL0 的 CNTP IRQ 触发，且在 GIC 应答后才替换返回帧；SVC 只查询状态和报告结果。M4.7 在 BSP 调度器启动后，由一个固定到 CPU0 的内核线程运行同一 ELF，验证 SVC 退出码、启动页表恢复、用户页和线程资源回收，以及后续内核线程仍能运行。M4 用户页表验收（`aarch64_user_mm`）在 BSP 调度器就绪后由 CPU0 内核线程创建 mm 私有用户根，全程经 M3 4 KiB 入口映射探针代码（复制后按 `dc cvau` + `ic iallu` 同步，RO/X 安装）、栈与数据页，三轮进入同一张页表：第一轮读写已知值并在 SVC 回调中验证 IRQ 屏蔽下 map/update/unmap 全部 `-EBUSY`；同一 VA 同一 PA 降为 RO/NX 后第二轮验证写入触发 EL0 权限异常且原数据不变；解映射并核对返回 PA 后第三轮验证访问触发翻译异常；每轮核对启动 `TTBR0` 恢复。线程上下文再验证重复映射 `-EEXIST`、内核 VA、裸 `VM_USER_RW`、未分配 PA、换 PA 更新 `-EINVAL`、空槽更新 `-ENOENT`，独立 L2 分支建表后解映射留下空表，仍有叶子时销毁 `-EBUSY`（前后 4 KiB 分配数不变、两侧仍可操作），清理全部叶子与数据页后销毁成功且 4 KiB 计数回到基线。M4.8 正式用户任务验收（`aarch64_user_task_lifecycle`）在 BSP 调度器就绪后由 CPU0 内核线程发布两个真正的 `PF_PROCESS` 用户任务：A 与 B 跑同一张 VA 布局的静态 ELF，只有数据初值不同，各自拥有私有 `mm`（独立用户根）、独立内核栈和独立 EL0 异常帧（帧固定在任务内核栈顶）。两个任务各做 64 次有界协作让出（`svc #0x4d40`），每次让出前内核在 IRQ 屏蔽态把 `CNTP_TVAL_EL0` 重装为 1，使真实 CNTP 在恢复 EL0 后计入 vruntime；自测核对真实切换次数、SVC 往返数、来自 EL0 的 CNTP tick 计数，以及 IRQ 分派前后 PID 与切换计数不变。随后 A 依次尝试三次映像替换：无效目录项必须返回 `-ENOEXEC`、一次性注入的分配失败必须返回 `-ENOMEM`（注入点在一页映射成功之后）、真实替换必须成功且 PID 不变、异常帧被清零重填；B 触碰用户栈下方的 guard 页，必须产生 Data Abort（翻译错误）并以 `-EFAULT` 终止，ESR 与 FAR 被记录。两个任务退出后核对各自原始退出状态、4 KiB 页计数回到基线、发布根只剩内核根，并跑一个内核见证线程确认内核仍可运行。M4.9 正式 SVC 与 uaccess 验收（`aarch64_user_svc_uaccess`）在同一镜像里发布一个 `PF_PROCESS` 用户任务运行新的静态 ELF：`svc #0` 的全 64 位 x8 经共享 syscall 表进入正式入口，`getpid`/`getppid` 结果存入 x19/x20 并由内核在首次 `clock_gettime` 时从保存帧读回、分别与该任务 PID 和常驻 BSP idle PID 比对；16 字节 `timespec` 写入跨两页 RW 段边界，向只读代码页和跨 RW 段末尾未映射页写回均返回 `-EFAULT` 且后者保留前缀哨兵；未知 immediate、未编入的编号和高 32 位污染 x8 均返回 `-ENOSYS`；任务用原生 `exit` 退出，回收观察点核对 `PF_SELF_REAP` 与编码后的 `exit_code`；内核复制自测在首个 `clock_gettime` 中验证跨页 copy-in、零长度、溢出，并分别在未映射读和只读代码页写上到达真实 EL1 修复（各一次 `-EFAULT`、一次回调），随后成功复制证明窗口已清空。M4.10 匿名 VMA 与按需缺页验收（`aarch64_user_vm`）按顺序运行六个独立静态 ELF：正常路径验证 mmap/brk 只提交元数据（返回后目标页仍无叶子）、首次读取补零页、`PROT_NONE` 保留并在恢复后读回旧数据、内层 mprotect 产生 VMA 拆分、brk 收缩清零保留尾页且再次增长不重新分配、munmap 释放已 stash 页；两次 16 字节 `clock_gettime` 从 RW 页末 8 字节越过空洞写回都必须返回 `-EFAULT`，第一次不得实例化首叶，第二次不得改写已驻留页的 8 字节哨兵。只读页写、`PROT_NONE` 读和 munmap 后读各由独立任务触发：只读写走权限异常、后两者走翻译异常，均由旧终止路径以 `-EFAULT` 结束，内核观察点记录 ESR/FAR/原 PC 与是否重试。替换夹具先建立 present + stash 页，由观察点在首个 VM syscall 上武装一次性映像失败，使第一次替换在首叶建立后返回 `-ENOMEM`；旧根、VMA 与数据保持不变，恢复 stash 后读回原数据并重新 stash，第二次替换成功并由新映像退出 `0x33`。munmap、退出与成功替换分别释放一个 stash 页，最终核对 4 KiB 分配基线与发布根计数。M4.11 原生 fork 与写时复制验收（`aarch64_user_fork_cow`）在同一次单核 BSP 自测启动中发布真实父任务并经 `SYS_fork` 建立子任务：子帧复制父 SVC 帧（x0=0）、继承 SP 并从同一后续指令继续，父子根不同；父在子仍持有引用时写共享页触发真实多引用 COW，子仍读到 fork 前的值；两侧独立补齐缺页页；stash 往返、共享堆尾在 brk 收缩前私有化、父子各自的 `clock_gettime` 写回 COW 均成功；父 munmap 后子写升级唯一引用且 PA 不变；父先退出后子在 switch tail 被回收观察，`getppid` 指向 BSP idle，随后以继承目录 exec 清理剩余映射并释放最后一个计数页。同一用例再做一次短 fork（子立即退出，父确认回收并读取共享页）和一次只读页非法写（以 `-EFAULT` 退出），最后按 PID 核对退出状态、用户根撤销与全局 4 KiB 基线。验收范围为单核自测启动的运行期链路。普通 AArch64 镜像同时编入正式装载器、spawn、fork/COW 与根撤销接口，GIC/PL011 走高地址别名，低 EL 同步（`VBAR+0x400`）与 IRQ（`VBAR+0x480`）向量在普通构建中可达；旧探针入口、测试观察／故障注入符号与嵌入测试 ELF 不进普通产物。EL0 执行期间屏蔽 IRQ；普通镜像继续关闭 AArch64 用户态。
+串口看到 `[TEST] PASS aarch64_el0` 、`[TEST] PASS aarch64_el0_irq`、`[TEST] PASS aarch64_el0_switch`、`[TEST] PASS aarch64_el0_preempt`、`[TEST] PASS aarch64_el0_task`、`[TEST] PASS aarch64_user_mm`、`[TEST] PASS aarch64_user_task_lifecycle`、`[TEST] PASS aarch64_user_svc_uaccess`、`[TEST] PASS aarch64_user_vm`、`[TEST] PASS aarch64_user_fork_cow`、`[TEST] PASS aarch64_user_waitpid`、`[TEST] PASS aarch64_user_exec`、`[TEST] PASS aarch64_user_signal` 和 `[TEST] END suite=kernel-selftest total=27 passed=27 failed=0 skipped=0` 后即可退出 QEMU（**2026-11-16 实测**；M4.13 / M4.14 各新增一个用例，计数由 25 升到 27）。该选择器产出独立的 `kernel/m4-1` 和 `image/m4-1`，使用 BSP 启动栈的高地址别名，在 GIC、定时器和 AP 启动前验证私有 TTBR0、SVC 往返、权限故障和页回收。M4.2 在同一用例中验证 SVC 跨页读写、坏指针返回 `-EFAULT`，以及两条用户复制指令发生 EL1 data abort 后的恢复。M4.3 将探针编译为嵌入式静态 ELF，验证 ELF 入口、`.data` 初值、`.bss` 清零、坏入口拒绝和 4 KiB 页回收。M4.4 在单核定时器启动后、调度器接管前再次运行该 ELF：私有 TTBR0 保持安装，GIC/串口走 TTBR1 设备映射；自测要求至少两次来自 EL0 的 CNTP IRQ、寄存器和栈完好及 SVC 退出。M4.5 在 AP 启动前让两个私有地址空间通过 SVC 按 A → B → A → B 切换，验证相同虚拟地址的数据隔离、寄存器和栈恢复，以及退出后的页回收。M4.6 在单核定时器启动后复用两个私有地址空间，要求 A → B → A → B 三次切换均由来自 EL0 的 CNTP IRQ 触发，且在 GIC 应答后才替换返回帧；SVC 只查询状态和报告结果。M4.7 在 BSP 调度器启动后，由一个固定到 CPU0 的内核线程运行同一 ELF，验证 SVC 退出码、启动页表恢复、用户页和线程资源回收，以及后续内核线程仍能运行。M4 用户页表验收（`aarch64_user_mm`）在 BSP 调度器就绪后由 CPU0 内核线程创建 mm 私有用户根，全程经 M3 4 KiB 入口映射探针代码（复制后按 `dc cvau` + `ic iallu` 同步，RO/X 安装）、栈与数据页，三轮进入同一张页表：第一轮读写已知值并在 SVC 回调中验证 IRQ 屏蔽下 map/update/unmap 全部 `-EBUSY`；同一 VA 同一 PA 降为 RO/NX 后第二轮验证写入触发 EL0 权限异常且原数据不变；解映射并核对返回 PA 后第三轮验证访问触发翻译异常；每轮核对启动 `TTBR0` 恢复。线程上下文再验证重复映射 `-EEXIST`、内核 VA、裸 `VM_USER_RW`、未分配 PA、换 PA 更新 `-EINVAL`、空槽更新 `-ENOENT`，独立 L2 分支建表后解映射留下空表，仍有叶子时销毁 `-EBUSY`（前后 4 KiB 分配数不变、两侧仍可操作），清理全部叶子与数据页后销毁成功且 4 KiB 计数回到基线。M4.8 正式用户任务验收（`aarch64_user_task_lifecycle`）在 BSP 调度器就绪后由 CPU0 内核线程发布两个真正的 `PF_PROCESS` 用户任务：A 与 B 跑同一张 VA 布局的静态 ELF，只有数据初值不同，各自拥有私有 `mm`（独立用户根）、独立内核栈和独立 EL0 异常帧（帧固定在任务内核栈顶）。两个任务各做 64 次有界协作让出（`svc #0x4d40`），每次让出前内核在 IRQ 屏蔽态把 `CNTP_TVAL_EL0` 重装为 1，使真实 CNTP 在恢复 EL0 后计入 vruntime；自测核对真实切换次数、SVC 往返数、来自 EL0 的 CNTP tick 计数，以及 IRQ 分派前后 PID 与切换计数不变。随后 A 依次尝试三次映像替换：无效目录项必须返回 `-ENOEXEC`、一次性注入的分配失败必须返回 `-ENOMEM`（注入点在一页映射成功之后）、真实替换必须成功且 PID 不变、异常帧被清零重填；B 触碰用户栈下方的 guard 页，必须产生 Data Abort（翻译错误）并以 `-EFAULT` 终止，ESR 与 FAR 被记录。两个任务退出后核对各自原始退出状态、4 KiB 页计数回到基线、发布根只剩内核根，并跑一个内核见证线程确认内核仍可运行。M4.9 正式 SVC 与 uaccess 验收（`aarch64_user_svc_uaccess`）在同一镜像里发布一个 `PF_PROCESS` 用户任务运行新的静态 ELF：`svc #0` 的全 64 位 x8 经共享 syscall 表进入正式入口，`getpid`/`getppid` 结果存入 x19/x20 并由内核在首次 `clock_gettime` 时从保存帧读回、分别与该任务 PID 和常驻 BSP idle PID 比对；16 字节 `timespec` 写入跨两页 RW 段边界，向只读代码页和跨 RW 段末尾未映射页写回均返回 `-EFAULT` 且后者保留前缀哨兵；未知 immediate、未编入的编号和高 32 位污染 x8 均返回 `-ENOSYS`；任务用原生 `exit` 退出，回收观察点核对 `PF_SELF_REAP` 与编码后的 `exit_code`；内核复制自测在首个 `clock_gettime` 中验证跨页 copy-in、零长度、溢出，并分别在未映射读和只读代码页写上到达真实 EL1 修复（各一次 `-EFAULT`、一次回调），随后成功复制证明窗口已清空。M4.10 匿名 VMA 与按需缺页验收（`aarch64_user_vm`）按顺序运行六个独立静态 ELF：正常路径验证 mmap/brk 只提交元数据（返回后目标页仍无叶子）、首次读取补零页、`PROT_NONE` 保留并在恢复后读回旧数据、内层 mprotect 产生 VMA 拆分、brk 收缩清零保留尾页且再次增长不重新分配、munmap 释放已 stash 页；两次 16 字节 `clock_gettime` 从 RW 页末 8 字节越过空洞写回都必须返回 `-EFAULT`，第一次不得实例化首叶，第二次不得改写已驻留页的 8 字节哨兵。只读页写、`PROT_NONE` 读和 munmap 后读各由独立任务触发：只读写走权限异常、后两者走翻译异常，均由旧终止路径以 `-EFAULT` 结束，内核观察点记录 ESR/FAR/原 PC 与是否重试。替换夹具先建立 present + stash 页，由观察点在首个 VM syscall 上武装一次性映像失败，使第一次替换在首叶建立后返回 `-ENOMEM`；旧根、VMA 与数据保持不变，恢复 stash 后读回原数据并重新 stash，第二次替换成功并由新映像退出 `0x33`。munmap、退出与成功替换分别释放一个 stash 页，最终核对 4 KiB 分配基线与发布根计数。M4.11 原生 fork 与写时复制验收（`aarch64_user_fork_cow`）在同一次单核 BSP 自测启动中发布真实父任务并经 `SYS_fork` 建立子任务：子帧复制父 SVC 帧（x0=0）、继承 SP 并从同一后续指令继续，父子根不同；父在子仍持有引用时写共享页触发真实多引用 COW，子仍读到 fork 前的值；两侧独立补齐缺页页；stash 往返、共享堆尾在 brk 收缩前私有化、父子各自的 `clock_gettime` 写回 COW 均成功；父 munmap 后子写升级唯一引用且 PA 不变；父先退出后子在 switch tail 被回收观察，`getppid` 指向 BSP idle，随后以继承目录 exec 清理剩余映射并释放最后一个计数页。同一用例再做一次短 fork（子立即退出，父确认回收并读取共享页）和一次只读页非法写（以 `-EFAULT` 退出），最后按 PID 核对退出状态、用户根撤销与全局 4 KiB 基线。M4.12 原生 waitpid 与 ZOMBIE 回收验收（`aarch64_user_waitpid`）在同一次单核 BSP 自测启动中发布父子任务：子进程退出后保留为 `TASK_ZOMBIE`，父进程经原生 `SYS_waitpid` 收取退出状态；父先退出时子重挂到 BSP idle，无父等待的孤儿僵尸由退出路径无锁回收。共享的 `do_waitpid()` 只在目标确为 `TASK_ZOMBIE` 且已离核时才收割。M4.13 原生 exec 与用户栈参数传递验收（`aarch64_user_exec`）在同一次启动中经 `SYS_exec` 替换映像：argv / envp 深拷贝后按 AAPCS 写初始栈帧（`argc`、指针表、NULL 终止、字符串降序），寄存器 `x0`/`x1`/`x2` 与 `elr_el1` / `sp_el0` / `spsr_el1` 就位；exec 重置全部 sighandler 为 `SIG_DFL`；参数总数超限返回 `-E2BIG`。M4.14 原生信号与 `sigreturn` 验收（`aarch64_user_signal`）在同一次启动中投递信号：`SYS_kill` / `SYS_signal` / `SYS_sigprocmask` 走共享表；handler 入口把 `sigframe` 压到用户栈并跳转，`SYS_sigreturn` 取回帧并恢复寄存器与屏蔽位，伪造帧（`spsr_el1` 不匹配）返回 `-EINVAL`。验收范围为单核自测启动的运行期链路。普通 AArch64 镜像同时编入正式装载器、spawn、fork/COW 与根撤销接口，GIC/PL011 走高地址别名，低 EL 同步（`VBAR+0x400`）与 IRQ（`VBAR+0x480`）向量在普通构建中可达；旧探针入口、测试观察／故障注入符号与嵌入测试 ELF 不进普通产物。EL0 执行期间屏蔽 IRQ；普通镜像继续关闭 AArch64 用户态。
 
 环境注意（2026-10-31 记录）：宿主 QEMU 11.1.3 + 当日 edk2-nightly 固件下，默认 FDT EFI-config-table 交付路径在 `[dtb] FATAL: UEFI handoff has no DTB` 处确定性失败（复现证据与评估见 `docs/superpowers/reports/2026-10-30-aarch64-el1-sched-validation.md`）。仓库全部 aarch64 QEMU 验收面已统一走诊断 DTB 机制（`smp`/`no-ack` 默认 `--diagnostic-dtb=auto`，`gic-spi`/`m3-probe`/M1/`sched`/idle-smoke 显式传入或自行生成 QEMU DTB 并配 `acpi=off`）；`AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0` 可强制要求生产固件路径。这是固件/宿主侧行为变化，不是仓库回归；未在本期改写固件管线。
 
@@ -103,7 +103,7 @@ Standalone (not bucketed): `test-syscall-repeat` (own harness),
 
 3. **运行和调试**
    * QEMU（`qemu-system-x86_64`；aarch64 用 `qemu-system-aarch64`）
-   * OVMF.fd（UEFI 固件；x86_64 profile 在首次使用时自动获取 profile 私有副本，见[固件与手动 QEMU](#固件与手动-qemuprint-run-paths)）
+   * OVMF.fd（UEFI 固件；x86_64 profile 在首次使用时自动获取 profile 私有副本，见[固件与手动 QEMU](#4-固件与手动-qemuprint-run-paths)）
 
 ### 安装依赖项
 
@@ -365,7 +365,7 @@ make test-host
 | 目标 | Variant 镜像 | 套件 |
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0` | 普通 `build/<profile>/image/disk.img` | 启动 + shell 提示符 |
-| `make test-qemu-usb-boot` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot M0 固件门禁（见下方 `test-qemu-usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin` 并进入设备初始化；当前内核无 USB MSC 驱动，预期停在 `[boot-3] FATAL stage=fs component=root rc=-19`。**opt-in 专用目标，不是生成的 catalog suite**，M1b 转为成功门禁后再登记 nightly |
+| `make test-qemu-usb-boot` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot M0 固件门禁（见下方 `test-qemu-usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin` 并进入设备初始化。**注意**：该 `firmware` 用例断言的是 **MSC 驱动落地之前**的预期失败（`[boot-3] FATAL stage=fs component=root rc=-19`）；MSC 驱动已于 2026-11-14 落地，USB-only 引导现在会一路走到 shell，**该用例因此已过期并会超时失败**——见下方小节的「现状」段与 `docs/roadmap.md` P4 |
 | `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `build/<profile>/image/systest/disk.img` | syscall E2E（`OS01_SYSTEST=1`） |
 | `make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase` | `build/<profile>/image/inittab-test/disk.img` | inittab 阶段派发（`INITTAB_FILE=config/inittab.test`） |
 | `make OS01_NETTEST=1 test-qemu SUITE=network` | `build/<profile>/image/nettest/disk.img` | 网络回归（`OS01_NETTEST=1`） |
@@ -389,17 +389,28 @@ make test-host
 
 ### `test-qemu-usb-boot`：USB boot M0 固件门禁（opt-in）
 
+> **现状（2026-11-16 实测，如实记录）**：`USB_BOOT_CASE=firmware` **已过期并会失败**。
+> 该用例断言的预期证据是 MSC 驱动落地**之前**的根挂载失败
+> （`[boot-3] FATAL stage=fs component=root rc=-19`）；MSC 驱动已于 2026-11-14 落地，
+> USB-only 引导现在一路走通到 shell：
+> `[xhci-msc] disk=usba` → `fs: boot disk selected by GUID (usba), root=usba2 boot=usba1 (/boot ok)`
+> → `init: running as PID 1` → BusyBox ash 提示符。
+> 预期证据因此不再出现，runner 报 `timeout before firmware evidence`（exit 2）。
+> **这不是回归，而是门禁断言落后于实现**——转换方案（改为成功门禁，或退役并由
+> `readonly` 用例覆盖）见 `docs/roadmap.md` P4。
+
 `make PROFILE=x86_64-clang test-qemu-usb-boot USB_BOOT_CASE=firmware`
 是 USB 启动计划的 **M0 固件检查点**，验收目标只有一个：profile OVMF 能从
 **USB-only** 拓扑（单块 `usb-storage` 挂在 `qemu-xhci` 上，`p2=4,p3=0`，
 `port=1,bootindex=0`）加载 ESP 上的 `BOOTX64.EFI` 与 `kernel.bin`，并让内核
-进入设备初始化。它不证明内核能读 U 盘——当前内核还没有 USB MSC 驱动。
+进入设备初始化。
 
 - **预期证据**（按顺序，缺一不可）：xHCI 端口 `speed=3`（high speed）→
   `[xhci] slot N: configured with config X (iface class 08:06, ep_count=2)` →
   以 `[boot-3] FATAL stage=fs component=root rc=-19` 开头的行。
   `boot_failure_stop()` 会在该行后追加 `phase=... cpu=...`，runner 只匹配稳定前缀；
   其它 rc、OVMF 横幅单独出现、标记乱序都不算通过。
+  **（以上证据链已于 MSC 驱动落地后失效，见上方「现状」段。）**
 - **拓扑独立**：`qemutests/run_test.py` 的默认 argv 总会追加 AHCI 根盘，因此 runner
   通过共享构造器 `qemutests/harness/qemu_cmd.py::build_qemu_x86(storage="usb")`
   显式选择 USB 拓扑；唯一非 pflash 盘就是 `usbdisk`，没有 AHCI/virtio/隐式盘，
@@ -700,6 +711,44 @@ Bucket 目标是规范名。**2026-09-26 cleanup 删除了所有转发别名**�
 4. 如果 recipe 含 `$(MAKE)` 调用（variant 构建、sub-make），放独立 recipe 行，使 `make -n` 遵守 dry-run 契约——见 `run.mk` 行 263-266 的现有注释。
 5. 在 `mk/components/run.mk` 的 `help` recipe 追加一行，匹配 bucket 的 printf 格式。
 6. 如果 bucket 获得新值，更新本文档和 `AGENTS.md`。
+
+### 5.1 生成式测试目录与派发表（2026-11-14 闭环）
+
+> 规范 [2026-11-14-test-framework-design.md](../superpowers/specs/2026-11-14-test-framework-design.md)，
+> 计划 [2026-11-14-test-framework-redesign.md](../superpowers/plans/2026-11-14-test-framework-redesign.md)。
+> 治理细则见 [docs/testing/testing-policy.md](../testing/testing-policy.md) §8。
+
+**测试清单不再手写**。每个测试源在 `hosttests/cases/test_<name>.c` 里带 `@os01-test`
+元数据块；`tools/tests/scan_tests.py` 扫描后生成并入库：
+
+| 产物 | 用途 |
+|------|------|
+| `config/test-catalog.json` | 全量测试条目（`host_test` / `suite` / legacy 桥 / `ignored`） |
+| `mk/generated/test-dispatch.mk` | SUITE ID 表 + 每个 SUITE 的 flavor 与镜像映射 |
+| `mk/generated/test-harness-modules.mk` | harness 模块清单 |
+| `mk/generated/test-link-rules.mk` | 宿主测试链接规则（按元数据驱动） |
+| `mk/generated/test-registry.mk` | 宿主测试注册表 |
+
+新增宿主测试的流程：`hosttests/mk/<subsys>.mk` 落链接规则 → `make regen-test-catalog`
+→ 提交生成物。手写 `register_host_test` / `TEST_BINS` **已退役**。
+
+```bash
+make regen-test-catalog    # 重新生成并写回
+make check-test-catalog    # 漂移门禁：生成物与源不一致即失败
+```
+
+> **缺口（如实记录）**：`check-test-catalog` **尚未挂进 `.github/workflows/ci.yml`**——
+> CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`。见 `docs/roadmap.md` P0。
+
+**六处并行维护已收敛为单一源**：SUITE 白名单原先同时维护在 `run.mk` 的 `case` 语句、
+`TEST_QEMU_FLAVOR` 表、`TEST_QEMU_IMG` 表、`catalog.mk` TSV、`ci.yml`、
+`run_test.py` 的 if-elif 链（另有一行手工 append 的 `TEST_HARNESS_MODULES`），
+现在全部由 `mk/generated/test-dispatch.mk` 供给；`run.mk` 改为对
+`TEST_QEMU_SUITE_IDS` 做 **parse-time 校验**，生成片段缺失即硬错误。
+
+**表驱动的目标生成**：聚焦宿主用例分组由 `host_case_group` 宏生成
+（`mk/components/run.mk:788`），五个 x86 `boot-*` QEMU 故障矩阵由 `boot_matrix_suite`
+宏生成（`:1061`）；RED / canary 管线脚本化提取，独立静态审计表驱动。
 
 ### 6. 变量参考
 

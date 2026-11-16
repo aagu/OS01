@@ -1,7 +1,186 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-13）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-16）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
+
+---
+
+## 2026-11-16
+
+- feat(user): **`timeit` 墙钟计时命令**（`user/timeit.c`，扁平程序，由 `user/apps.mk` 的通配发现自动编译，装机为 `/bin/timeit`）：
+
+  **做了什么**
+
+  - `timeit [-o FILE] PROG ARGS...` 用 `CLOCK_MONOTONIC` 测量被测命令的墙钟时间，输出 `real 0.001234`；OS01 没有 realtime clock，故只用单调钟。
+  - PATH 搜索改走 libc 的 `execvp()`（`66a586fe`）——先前的自实现路径搜索与 POSIX 语义有偏差（带 `/` 的名字不查 PATH），改用 libc 后行为与文档说明一致（`d8963ef4`、`33f8e2c0` 修订归属说明）。
+
+  **已知边界（如实记录）**
+
+  - **只输出 `real`，没有 `user`/`sys` 分项**：per-task CPU 时间累加器在 OS01 里不存在（`struct task_t` 不带 utime/stime），这是内核侧的缺口，不是命令侧可以绕过的问题。
+  - 命令本身**无自动化测试**，也无专项构建登记（依赖扁平通配发现），回归只能靠手工运行。
+
+- perf(fb): **x86 帧缓冲宽写**（计划 [plan](superpowers/plans/2026-11-15-x86-framebuffer-wide-write.md)）：
+
+  **做了什么**
+
+  - 架构中立的 `fb_copy_rgb32()` facade（`kernel/include/arch/fb_copy.h`）新增**弱默认**逐字节拷贝实现（`kernel/driver/arch_fb_write.c`），x86_64 提供**强覆盖**：地址与长度都 4 字节对齐时用 `volatile uint32_t` 顺序写，否则退回字节拷贝（`kernel/arch/x86_64/driver/fb_copy.c` + `kernel/include/arch/x86_64/fb_copy.h`）。
+  - `kernel/driver/fb.c` 与 `kernel/core/printk.c` 只依赖 facade，不引用任何 `arch/x86_64/` 头。
+
+  **边界**
+
+  - 宽写**不是通用 `memcpy` 替代**，也不引入内核 SIMD；真实硬件上整帧约 550 ms → 约 9 ms，但只降低拷贝时间，不提供无撕裂保证。
+
+---
+
+## 2026-11-15
+
+- feat(usb): **USB 大容量存储 MSC/BOT 写路径 + 固件 ESP GUID 选盘 + USB 引导身份交接 v3**：
+
+  **做了什么**
+
+  - **BOT 分帧与恢复**（`kernel/driver/usb_msc_bot.c`）：CBW 组帧（签名 `0x43425355`、tag、方向位、CDB 长度与拷贝）、CSW 解析与校验（签名 `0x53425355`、tag 匹配、`csw[12] > 2` 判错）、残量处理；超时 / 管道错误走 Mass Storage Reset + clear_halt 恢复路径。
+  - **SCSI 命令集**（`kernel/driver/usb_msc.c`）：INQUIRY / READ CAPACITY / READ10 / WRITE10 / SYNCHRONIZE CACHE；读路径带 64 KiB 读窗口缓存，写路径先失效重叠缓存再发 WRITE(10)，写后 SYNCHRONIZE CACHE 保证持久化（`cd866fed`）。
+  - **接入块设备驱动模型**：`usb_msc_ops{read,write,flush}` → `block_device_register()`，`kind = BLOCK_DISK`，磁盘名 `usba`..`usbz`；`register_block_devices()` 把它们发布到 devfs（`/dev/usba`、`/dev/usba1`……）。
+  - **固件 ESP GUID 选盘**（`f9aefc5c` + `098109f1` + `2decf074`）：UEFI 侧采集启动 ESP 身份 → `boot_context` v3 下发 → `mount_disk_by_guid()` 遍历所有 `BLOCK_DISK` 按 GUID 匹配后挂载 ext2 根与 FAT32 `/boot`；GPT 只读元数据与分区发布分离。**注意**：AHCI 先注册但内核按固件 ESP GUID 选盘，因此 AHCI 与 USB 同时在挂时也挂对盘（`a70e86a4`）。
+  - **性能**：单扇区读用私有窗口合并（`05fa2390`）。
+
+  **关键结论与架构决策**
+
+  - **USB 盘与 AHCI 盘共用同一条挂载路径**，差别只在「谁来发布」与「按什么 GUID 选」，不引入第二套挂载逻辑。
+  - **写路径必须显式 SYNCHRONIZE CACHE**：QEMU trace 里 WRITE(10) `0x2A` 之后必须跟 SYNCHRONIZE CACHE `0x35` 且 CSW status=0，才认作持久化成功。
+
+  **已知边界（如实记录）**
+
+  - 仅 **BOT**（协议 0x50），无 UAS；仅 **512 字节逻辑块**；仅 **32 位 LBA**（`>2 TiB` 与 4Kn 盘被 `-EINVAL` 拒绝）。
+  - **无热插拔重探测**：后插 U 盘不会成为可用块设备。
+  - **无用户态挂载入口**：仓库内没有 `mount` syscall，挂载只由引导期 ESP GUID 选择决定。
+
+  **验证**
+
+  - `make PROFILE=x86_64-clang test-qemu SUITE=usb-boot`：`readonly` / `dual` / `ahci` / `persistence` / `superspeed` / `hub` 六组全 PASS；`persistence` 断言 trace 中 WRITE(10) 后紧跟 SYNCHRONIZE CACHE 且重启后回读标记文件。
+
+- feat(usb): **USB HID 引导输入闭环**（设计 [spec](superpowers/specs/2026-11-15-usb-hid-input-design.md)，计划 [plan](superpowers/plans/2026-11-15-usb-hid-input.md)）：
+
+  **做了什么**
+
+  - **报告解码**（`kernel/driver/usb_hid_report.c`，架构无关）：8 字节 Boot 键盘报告 → PS/2 Set-1 帧（含 rollover 处理与四组发射序），Boot 鼠标报告 → 按钮 + 有符号增量；设备断开时释放所有按住的键，避免幽灵按键。
+  - **xHCI 设备侧**（`kernel/arch/x86_64/driver/xhci_hid.c`）：从 **Interrupt IN 端点**取报告（取完重新挂 TD），`SET_PROTOCOL(0)` 切 Boot Protocol（失败则该 slot 标记不可用），解码后送入共享输入路由。
+  - **与 PS/2 并存，不替换**：USB 与 PS/2 共用 `input_route` 的独占租约、物理键态与 Caps 锁存；**无 i8042 时** USB 路径仍能初始化 `/dev/mouse` 与控制台输入。
+  - **枚举期选择 HID 端点**（`8d0a8b6a`）+ **断开时释放输入租约**（`5fe8fe13`）。
+
+  **验证**
+
+  - `make PROFILE=x86_64-clang test-qemu SUITE=usb-hid`：`direct`/`hub` × `SMP=1`/`2` 四组（`i8042=off`，QMP `input-send-event` 注入、租约与 PTY 隔离、正常 unbind 后 TTY/shell 恢复、共享 Hub 上 USB BOT 并发读写、`device_del` 合成释放）。
+  - 回归与实机边界记录见 [docs/driver/usb-hid-qualification.md](driver/usb-hid-qualification.md)。
+
+- feat(xhci): **USB Hub 分层枚举 / Scratchpad Buffers / PSIC 速度类解析**：
+
+  **做了什么**
+
+  - **Hub 分层枚举**（`kernel/arch/x86_64/driver/xhci_hub.c`）：`xhci_hub_probe_tree()` 分层下探；端口准备、复位与速度协商、深度设置、Hub 信息读取、USB2 侧隔离；配置校验要求 alt0 Hub 接口 + 单个 Interrupt IN 端点；SuperSpeed Gen1×1 速率校验（`c210547f`）。
+  - **共享 TT 错误结清**（`1c5b2167`）：Split 流量共享 TT 出错时先结清再释放，避免半开事务污染后续传输。
+  - **设备路径表示**（`230f69b6`）：Hub 下游设备用路径表示，失败的寻址被隔离，不影响同层其他设备。
+  - **Scratchpad Buffers**（`5734f0f8`）：按 `HCSPARAMS2` 的 `MAXSP` 分配并纳入 DMA 生命周期。
+  - **PSIC**（`f775d4f9`）：协议能力端口描述符读出 PSIC 并逐项解析 PSI 表，速度按 PSIC 映射到速度类。
+
+  **验证**：`make PROFILE=x86_64-clang test-qemu SUITE=usb-boot` 的 `hub` 组覆盖 QEMU Hub 引导；`SUITE=usb-hid` 的 `hub` 组覆盖 Hub 上的 HID 与存储并发。
+
+- feat(log): **`LOG_TARGET` 默认改为 `both`**（`efcb9d32`）：日志同时输出到串口与帧缓冲，并避免串口上的重复输出。
+
+- feat(printk,console): **RAM shadow 帧缓冲用于快速滚动**（`d2083974` + `99aa620a`）：scroll 在 RAM 影子缓冲上完成再整块提交；**由 `FB_SHADOW=1` 门控，默认关闭**（`kernel/Makefile`、`kernel/core/printk.c`、`kernel/tty/console.c`）。默认关是为了不改变现有时序与内存占用预期。
+
+- test(gfx): **帧缓冲 present A/B 诊断**（`a3d605c9`）：新增 `GFX_TEST_PRESENT_AB` ioctl 与用户态 `present_ab()`，按模式交叉校验像素并给出分段耗时（`copy_ns` / `fb_ns`）；配套 `test(tetris): report smoke present latency` 在 Tetris smoke 上报 present 延迟。
+
+- refactor(build): **构建系统瘦身与表驱动**（`64416e01` + `d5cf4907` + `037e48b0` + `7b1b5163`）：
+
+  - RED / canary 管线**脚本化**提取，独立的静态审计改为**表驱动**。
+  - 裁撤两个无引用的 `run.mk` 别名与一处冗余文本钉。
+  - GUI 聚焦 CASE 清单的引用改为指向 `host_case_group` 映射。
+  - `FB_SHADOW` 加入 `OS01_SUBMAKE_ALLOWED` 白名单。
+
+- build(run): **新增 `BOOT_METHOD=hdd|usb` 参数**（`b756531d`）：`make run` 可直接选择从 HDD 或 USB 启动。
+
+- fix: **测试目录与 QMP 兼容性问题**（`433c630d`）：`config/test-catalog.json` 与 `config/test-scenarios.json` 补齐新增条目、QMP 客户端 `execute()` 接受 `deadline` 关键字参数、`test_dispatch_generated` 的硬编码 flavor 数量改为跟随桥接清单。
+
+  **验证**：这四项正是 [docs/driver/usb-hid-qualification.md](driver/usb-hid-qualification.md) §3 记录的历史失败项，现已全部 PASS；`make PROFILE=x86_64-clang test-harness` 全模块 PASS（exit 0）。
+
+- test: **USB 引导输入与共享 Hub 存储的验证**（`80b17c05`）+ **boot/usb 宿主测试组注册**（`512b31d3`）。
+
+- docs(build): **USB boot M0 固件门禁的断言已落后于实现（如实记录，非回归）**：
+  `make PROFILE=x86_64-clang test-qemu-usb-boot USB_BOOT_CASE=firmware` 现在**超时失败**
+  （`[usb-boot] FAIL: timeout before firmware evidence`，exit 2）。根因是 MSC 驱动已于
+  2026-11-14 落地，USB-only 引导不再停在 `[boot-3] FATAL stage=fs component=root rc=-19`，
+  而是一路走通：`[xhci-msc] disk=usba` →
+  `fs: boot disk selected by GUID (usba), root=usba2 boot=usba1 (/boot ok)` →
+  `init: running as PID 1` → BusyBox ash 提示符。
+  该用例断言的是 MSC **落地之前**的预期失败，因此它的证据链已过期。转换方案
+  （改为成功门禁，或退役并由 `readonly` 用例覆盖）已记入 `docs/roadmap.md` P4。
+
+---
+
+## 2026-11-14
+
+- feat(aarch64): **M4.12 / M4.13 / M4.14 —— 原生 waitpid、exec 与信号闭环**：
+
+  **M4.12 原生 `SYS_waitpid` 与父子退出 / ZOMBIE 回收**（设计 [spec](superpowers/specs/2026-11-14-aarch64-m4-waitpid-reap-design.md)，计划 [plan](superpowers/plans/2026-11-14-aarch64-m4-waitpid-reap.md)）
+
+  - `do_waitpid()` 抽到共享 TU（`kernel/sched/wait.c`），`sys_native_waitpid()`（`kernel/syscall/sys_native.c`）做 32 位 pid 符号扩展与用户 `status` 写准备。
+  - aarch64 退出路径（`kernel/arch/aarch64/cpu/user_task.c`）：父仍存活时子保留为 `TASK_ZOMBIE`；父先退出则子重挂到 BSP idle；无父等待的孤儿僵尸走**无锁**回收循环。
+  - 配套：`blocker_wait` 保留调用者 IRQ 掩码，抽出 `sched_free_reaped_task()`。
+
+  **M4.13 原生 `SYS_exec` 与 SysV 用户栈参数传递**（设计 [spec](superpowers/specs/2026-11-14-aarch64-m4-exec-design.md)，计划 [plan](superpowers/plans/2026-11-14-aarch64-m4-exec.md)）
+
+  - `sys_native_exec()` 深拷贝 argv / envp（`MAX_ARGV` / `MAX_ARG_STRLEN` / `MAX_ARG_TOTAL` 上限，超限 `-E2BIG`），再委派 `arch_syscall_exec()`。
+  - aarch64 侧按内存中的静态 ELF catalog 解析路径，`aarch64_user_image_setup_stack()` 按 AAPCS 写初始栈帧（`argc`、argv/envp 指针表、NULL 终止、字符串降序拷贝），`aarch64_user_image_init_regs()` 置 `x0/x1/x2` 与 `elr_el1` / `sp_el0` / `spsr_el1`；exec 重置全部 sighandler 为 `SIG_DFL`。
+
+  **M4.14 原生信号投递与 `sigreturn`**（设计 [spec](superpowers/specs/2026-11-14-aarch64-m4-signal-design.md)，计划 [plan](superpowers/plans/2026-11-14-aarch64-m4-signal.md)）
+
+  - 共享 `sys_native_kill()` / `sys_native_signal()` / `sys_native_sigprocmask()` / `sys_native_sigreturn()`；`aarch64_do_signal_delivery()` 只在 `spsr_el1` 为 EL0t 时生效，SIG_DFL 默认动作集齐后压 `aarch64_sigframe` 到用户栈并跳 handler；`arch_syscall_sigreturn()` 带**伪造帧防护**（`spsr_el1` 不匹配直接 `-EINVAL`）。
+
+  **验证**：新增 late selftest `aarch64_user_waitpid` / `aarch64_user_exec` / `aarch64_user_signal`；共享 syscall 表在 aarch64 侧从 9 项扩到 **15 项**。闭环记录另见 [docs/arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-14-闭环)。
+
+- feat(mm): **MEM-1 内存子系统架构边界清理**（设计 [spec](superpowers/specs/2026-11-14-mm-architecture-boundaries-design.md)，计划 [plan](superpowers/plans/2026-11-14-mm-architecture-boundaries.md)；配套 [冗余与命名清理 spec](superpowers/specs/2026-11-14-mm-redundancy-naming-layout-design.md)）：
+
+  **做了什么**
+
+  - **目录三分**：`kernel/memory/` 只留架构中立部分（PMM 核心、slab、TLB 广播、VMA 原语、`mm`、dump）；用户 VM / uaccess / VMM / 设备映射下沉到 `kernel/arch/x86_64/memory/` 与 `kernel/arch/aarch64/memory/`。同样的下沉应用到 `sched/`（fork/exec/exit）、`fs/`（elf/devfs）、`sync/`（futex）、`syscall/`（sys_fs/sys_misc/sys_proc）、`driver/`（ahci/e1000/xhci/gfx/bga）。
+  - **公共面收窄**：`kernel/include/memory/vmm.h` 只导出 `tlb_shootdown()`；`vma_t.vm_flags` 只保留逻辑权限位，硬件 PTE 位由拥有者架构按需换算；`kernel/include/memory/vm_device.h` 改为语义 cache 请求；`pmm_arch_*` 改为每架构**强实现、无弱默认**（缺实现即链接失败）。
+  - **x86 修正项**：设备 mmap 请求携带语义 cache 属性、MAP_FIXED 走「准备—提交」事务、munmap / MAP_FIXED 先准备后提交、mprotect 子区间分裂 VMA、大页撤回加固、CPL3 致命守卫、brk 尾页先私有化再释放等。
+
+  **关键结论与架构决策**
+
+  - **「谁拥有用户内存」是架构问题**：公共层不该知道 PTE 位怎么摆、页表根怎么切、uaccess 怎么走。
+  - **边界靠工具门禁而不是约定**：`qemutests/mm_header_boundary.py` 禁止公共头出现硬件位与 MMU 符号，`make mm-header-boundary` 逐架构执行。
+
+  **验证**：见 [docs/memory/memory.md](memory/memory.md#内存子系统架构边界mem-1-2026-11-14-闭环)。
+
+- feat(mm): **x86 用户页表所有权单任务化**（`a682b7a7`）、**跨 x86 拆除路径的 sync-before-release 叶协议**（`46524add`）、**中断路径的实时 SMP 根转移与 IRQ 返回致命投递**（`7bd04f73`）。
+
+- refactor(mm): **PMM 单次双向扫描**（`023460c2`）、**x86 用户 VM 按生命周期拆分**（`70dd1a51`）、**VMA 共享堆查找与节点析构**（`9765b3fb`）、**x86 VMM 粒度命名的 mapper 入口**（`452840e3`）、**aarch64 fork / 叶适配 TU 拆分**（`4ab97f36`、`0cabdb02`）。
+
+- feat(test): **测试框架生成式目录重构**（设计 [spec](superpowers/specs/2026-11-14-test-framework-design.md)，计划 [plan](superpowers/plans/2026-11-14-test-framework-redesign.md)）：
+
+  **做了什么**
+
+  - **`@os01-test` 元数据扫描器**（`tools/tests/scan_tests.py`）生成并入库 `config/test-catalog.json` 与四个 make 片段（`mk/generated/test-dispatch.mk` / `test-harness-modules.mk` / `test-link-rules.mk` / `test-registry.mk`）；**手写 `register_host_test` / `TEST_BINS` 退役**。
+  - **六处并行维护收敛为单一源**：SUITE 白名单原先同时存在于 `run.mk` 的 `case`、`TEST_QEMU_FLAVOR` 表、`TEST_QEMU_IMG` 表、`catalog.mk` TSV、`ci.yml`、`run_test.py` 的 if-elif 链，现在全部由生成片段供给。
+  - **场景目录**（`config/test-scenarios.json`，340 场景）按层归属校验，宿主测试 / 静态审计 / 框架模块 / guest suite 必须有映射记录。
+  - **断言分层政策 + 豁免登记**（`config/assertion-exemptions.json`）+ **静态审计处置台账**（`docs/testing/audit-dispositions.md`）。
+  - **共享测试设施**：`libmock-core.a`（注入 / 捕获开关）、fixture v2（可选 fork 隔离 + `%`-safe 断言输出）、harness 单份化（qemu 命令构造 / QMP / PPM / 观察 / 进程 / 结果 / 计时）。
+  - **flake 账本报告器**（`make test-flake-report`）、**CI 纪律**：严格 suite 快速失败、宽容集合精确圈定并指向账本、`make check-ci-schedule` 取代文本钉死的 `ci.yml` 契约。
+
+  **已知缺口（如实记录）**
+
+  - `make check-test-catalog` 漂移门禁**尚未挂进 CI**（CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`）。
+  - flake 账本**没有入库文件**，只能从 CI artifacts 现算。
+
+  **验证**：见 [docs/testing/testing-policy.md](testing/testing-policy.md) §8。
+
+- feat(fs): **ext2 双 / 三级间接块映射**（`37d9d735`）：读（`ext2_bmap`）、分配（`ext2_bmap_alloc`）、释放（`ext2_bmap_free` / `ext2_free_chain`）与孤儿 inode 回收四条路径补齐；逻辑范围二级 1036..1048579、三级 1048580..1073741823。
+
+- feat(sched): **`PF_SELF_REAP` 栈回收改为独立计数**（`dbbe879b`），不再占用共享 slab 占用量。
+
+- test: **brk 两轮回滚的非空日志用例**（`4e94fd55`）、**waitpid 宿主测试纳入场景目录**（`a9941922`）、**环境 doctor 对比本地工具链与 CI 镜像钉**（`4c7684e2`）、**CI 本地容器入口**（`2c143ef4`）。
 
 ---
 
@@ -58,6 +237,26 @@
 
   - 干净树宿主构建契约由 `qemutests/test_host_build_contract.py`（干跑）覆盖；场景目录由 `qemutests/test_scenario_catalog.py` 覆盖；AP 启动契约由 `qemutests/test_aarch64_ap_boot_contract.py` 覆盖；双状态发布契约由 `hosttests/cases/test_double_state_publish.c` 覆盖；帧缓冲栈帧由 `make test-static` 的栈帧审计（`qemutests/stack_frame_audit.py`）与 `test-fb-mtrr` 宿主用例覆盖。
   - EL1 copy fixup 项记录了正常 aarch64 构建 + `test-aarch64-audit` PASS、EL0 QEMU 自测 22/22（`aarch64_user_svc_uaccess` PASS）、x86 syscall E2E 118/118。
+
+- feat(mm): **x86 PTE 执行权限按 VMA 策略强制执行（NX 闭环）**（`cce539d1`，配套 spec [2026-11-13-x86-pte-permissions-design.md](superpowers/specs/2026-11-13-x86-pte-permissions-design.md)）：
+
+  **做了什么**
+
+  - **叶权限的唯一来源是 VMA 的逻辑位**：硬件 PTE 位不再写进 VMA，改由 `x86_vma_pte_flags()`（`kernel/include/arch/x86_64/vma.h`）在装叶时按需换算——缺 `VMA_PROT_EXEC` 即置 `PAGE_NO_EXEC`（x86 PTE bit 63）。
+  - **栈页不可执行**：两条 exec 路径都用 `PAGE_USER_PMD | PAGE_NO_EXEC` 映射用户栈。
+  - **堆页不可执行**：堆 VMA 为 `R|W|ANON|HEAP`（无 EXEC）⇒ 叶子 RW/NX。
+  - **`PROT_EXEC` 按 VMA 生效**：`prot_to_vma_flags()` 把 `PROT_*` 映射成逻辑位（`PROT_EXEC` 隐含 READ），`mprotect` 复用同一条换算路径。
+  - **故障期强制**：首次触碰即按 VMA 校验，未授权写 / PROT_NONE 访问 / 未授权取指分别以 `SIGSEGV` 终止；后续按需填充与 COW 解析路径一律按 VMA 换算装叶。
+  - 启动期打开 `EFER.NXE`。
+
+  **验证**
+
+  - systest 用例 `mmap_exec_protection`：RW 段取指 → SIGSEGV；RX 段写 → SIGSEGV；RX/RWX 段可执行；文件映射 RX 首写 → SIGSEGV；RW 段取指 → SIGSEGV；真实 2 MiB 栈叶不可执行。
+  - 宿主断言（`hosttests/cases/test_process_image_lifecycle.c`）：堆叶为 `PAGE_USER|PAGE_WRITE|PAGE_VALID|PAGE_NO_EXEC`。
+
+  **剩余**：**ELF 分段 NX 细化**——装载器显式不细化分段 NX，`.data`/`.bss`/`.rodata` 叶子仍是 RWX（`kernel/arch/x86_64/fs/elf.c:63-69`），留在 `docs/roadmap.md` P1。详见 [docs/memory/cow-mmap.md](memory/cow-mmap.md#x86-nx-按-vma-策略强制执行2026-11-13)。
+
+- feat(arch): **x86 PTE 描述符编解码集中到 `pte_bits.h`**（`c2d2f16e`）。
 
 ---
 

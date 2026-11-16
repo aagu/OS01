@@ -447,3 +447,56 @@ Brief Step 3 要求新增 QEMU 子模式 `MODE=ipc-noready` 验证「shootdown �
 gen 不变 → 发布 ready → 下一次 shootdown gen 恰 +1 → 再一次再 +1），
 连同既有的 `case_mask_excludes_unready_offline_self`。QEMU 侧由
 `MODE=smp` 的 IPI 自测 + TLB 并存运行兜底（无死锁/超时）。
+
+---
+
+## 内存子系统架构边界（MEM-1 2026-11-14 闭环）
+
+> 规范 [2026-11-14-mm-architecture-boundaries-design.md](../superpowers/specs/2026-11-14-mm-architecture-boundaries-design.md)，
+> 计划 [2026-11-14-mm-architecture-boundaries.md](../superpowers/plans/2026-11-14-mm-architecture-boundaries.md)；
+> 配套的冗余与命名清理见 [2026-11-14-mm-redundancy-naming-layout-design.md](../superpowers/specs/2026-11-14-mm-redundancy-naming-layout-design.md)。
+> 闭环记录见 `docs/changelog.md` 2026-11-14 条目。
+
+**问题**：内存子系统此前把「架构中立的共享机制」与「某一架构的实现」混在同一批目录里，
+公共头 `kernel/include/memory/vmm.h` 既导出 TLB 广播协议，又顺带暴露了页表原语、
+PTE 位与 MMU 指令——两个架构的语义因此互相渗透。
+
+**做法**：把「谁拥有用户内存」这件事落到架构上。
+
+### 目录三分
+
+| 目录 | 归属 | 内容 |
+|------|------|------|
+| `kernel/memory/` | **架构中立** | `pmm.c` / `pmm_boot.c` / `slab.c` / `tlb.c` / `mm.c` / `vm_area.c` / `dump.c`。共享的只有 TLB shootdown 广播协议、VMA 链表与元数据辅助、PMM 核心 |
+| `kernel/arch/x86_64/memory/` | **x86_64 独占** | `vmm.c` / `vma.c` / `mmap.c` / `brk.c` / `uaccess.c` / `boot.c` / `boot_direct_map.c` / `fb_map.c` / `fb_mtrr.c` / `pmm_arch.c` / `pmm_reserve.c` |
+| `kernel/arch/aarch64/memory/` | **aarch64 独占** | `page_table.c` / `user_root.c` / `user_mm.c` / `user_vm*.c` / `user_image.c` / `user_elf.c` / `uaccess.c` / `vmm_backend.c` / `vmm_gate.c` / `ram*.c` / `pmm_arch.c` 等 |
+
+同样的下沉也应用到其他目录（`kernel/sched/{fork,exec,exit}.c` → `kernel/arch/x86_64/sched/`，
+`kernel/fs/{elf,devfs}.c` → `kernel/arch/x86_64/fs/`，`kernel/sync/futex.c` → `kernel/arch/x86_64/sync/`，
+`kernel/syscall/{sys_fs,sys_misc,sys_proc}.c` → `kernel/arch/x86_64/syscall/`，
+`kernel/driver/{ahci,e1000,xhci,gfx,bga}.c` → `kernel/arch/x86_64/driver/`）。
+
+### 公共面收窄
+
+- `kernel/include/memory/vmm.h` 现在**只**导出 `void tlb_shootdown(void);`。
+  公共头不得定义或间接提供语义 `VM_*` 位、`arch_vmm_*` API、裸页表原型、
+  `ptbl_t`/`kernel_map`、PTE 位、MMU 指令或 uaccess 声明。
+- `kernel/include/memory/vma.h` 的 `vma_t.vm_flags` **只承载逻辑权限位**
+  （`VMA_PROT_READ` / `VMA_PROT_WRITE` / `VMA_PROT_EXEC` / `VMA_ANON` / `VMA_HEAP` 等）；
+  硬件 PTE 位不再跨边界，改由拥有者架构**按需换算**
+  （x86：`x86_vma_pte_flags()`，见 `kernel/include/arch/x86_64/vma.h`）。
+- `kernel/include/memory/vm_device.h` 改为**语义设备请求**：
+  `enum vm_device_cache { VM_DEVICE_CACHE_UC, VM_DEVICE_CACHE_WB }` + 提交回调，
+  硬件 cache 位不跨边界。
+- 架构私有的硬件细节头归位 `kernel/include/arch/<arch>/`：
+  x86_64 有 `vmm.h` / `mmu.h` / `vma.h` / `pte.h` / `pte_bits.h` / `uaccess.h` / `fb_*.h`；
+  aarch64 有 `mmu.h` / `vmm_backend.h` / `vmm_gate.h` / `page_table.h` / `user_vm*.h` 等。
+- `pmm_arch_*` 改为**每架构强实现、无弱默认**：缺实现即链接失败
+  （`kernel/arch/x86_64/memory/pmm_arch.c` / `kernel/arch/aarch64/memory/pmm_arch.c`）。
+
+### 边界由工具门禁，不靠约定
+
+`qemutests/mm_header_boundary.py` 扫描公共头，禁止出现 `VM_PRESENT` / `VM_WRITE` /
+`VM_USER` / `VM_NO_EXEC` / `PAGE_PRESENT` / `PAGE_NO_EXEC` / `PAGE_COW` / `get_cr3` /
+`flush_tlb` / `switch_tlb` / `USER_MIN_ADDR` 等硬件位与符号；`make mm-header-boundary`
+逐架构执行。
