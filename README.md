@@ -35,6 +35,27 @@ make clean     # MANDATORY after struct changes (no header deps!)
 
 Check `docs/` for detailed documentation on architecture, SMP bring-up, scheduler, syscalls, memory management, interrupts, and more.
 
+## License
+
+OS01 is released under the [MIT license](LICENSE).
+
+Third-party components are consumed under their own licenses and are **not**
+covered by OS01's license:
+
+| Component | License | Form |
+|---|---|---|
+| busybox 1.36.1 | GPL-2.0-only | submodule (`thirdpart/busybox-1.36.1`) |
+| doomgeneric | GPL-2.0 | submodule (`thirdpart/doomgeneric`) |
+| lwIP | BSD-3-Clause | submodule (`thirdpart/lwip`) |
+| mbedtls | Apache-2.0 OR GPL-2.0-or-later | submodule (`thirdpart/mbedtls`) |
+| LVGL | MIT | submodule (`thirdpart/lvgl`) |
+| posix-uefi | MIT | submodule (`thirdpart/posix-uefi`) |
+| musl algorithms (floatscan/strtod) | MIT | pinned archive (`thirdpart/musl-libc-algorithms/`, manifest records provenance + SHA256) |
+
+Note on distribution: `disk.img` ships BusyBox/doomgeneric binaries next to the
+OS01 kernel — they are separate programs (mere aggregation), each remaining
+under its own license.
+
 ## References
 
 - 《一个64位操作系统的设计与实现》 (https://www.ituring.com.cn/book/2450)
