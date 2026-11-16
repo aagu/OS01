@@ -49,12 +49,21 @@
  *   `timeit myscript` — a BARE name that the PATH search finds —
  *   measures a SHELL SCRIPT instead of failing with ENOEXEC.
  *
- *   The scope of that rule matters: the /bin/sh fallback belongs to
- *   the PATH SEARCH, so a name that CONTAINS A SLASH (`timeit
- *   ./script.sh`, `timeit /tmp/script.sh`) is executed directly and
- *   fails with ENOEXEC, exactly as execve() and glibc behave.  OS01's
- *   kernel has no "#!" (shebang) support either, so a script named
- *   by an absolute path is not started by the kernel.
+ *   The scope of that rule matters: in OS01's libc the /bin/sh
+ *   fallback belongs to the PATH SEARCH.  A name that CONTAINS A
+ *   SLASH (`timeit ./script.sh`, `timeit /tmp/script.sh`) is
+ *   therefore executed directly and fails with ENOEXEC.
+ *
+ *   That is what OS01's execvp() does today, and it is also what
+ *   POSIX asks for — execvp must behave like execve for a name that
+ *   carries a slash.  It is NOT what glibc does: glibc runs a
+ *   slash-named script through /bin/sh as well (posix/execvpe.c,
+ *   maybe_script_execute).  OS01's libc is thus NARROWER than glibc
+ *   in this one respect; the difference between the two is a known
+ *   one, and the behaviour described here is the one to rely on.
+ *
+ *   OS01's kernel has no "#!" (shebang) support either, so a script
+ *   named by an absolute path is not started by the kernel.
  * * The child's stdout/stderr are inherited untouched: the timing line
  *   goes to fd 2 or to the -o file, never into the command's output.
  */
@@ -175,7 +184,9 @@ int main(int argc, char **argv)
          * directly, an unset PATH falls back to the libc default
          * ("/bin"), an empty PATH means the current directory, and a
          * candidate that exists but is not a binary is run through
-         * /bin/sh.  It also passes `environ` to execve() itself. */
+         * /bin/sh.  A slash-named candidate that is not a binary
+         * therefore fails with ENOEXEC (see the NOTES above).
+         * It also passes `environ` to execve() itself. */
         execvp(argv[argi], &argv[argi]);
         e = errno;
 
