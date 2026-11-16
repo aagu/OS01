@@ -353,15 +353,25 @@ $(TEST_BLD)/fb_production.o: $(TESTS_DIR)/kernel/driver/fb.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) -c $< -o $@
 
+# The x86_64 strong override of the arch-neutral framebuffer copy
+# facade (kernel/include/arch/fb_copy.h).  Linked in so the writers
+# regression exercises the REAL wide write, not a mock.
+$(TEST_BLD)/fb_copy_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/fb_copy.c \
+		$(TESTS_DIR)/kernel/include/arch/fb_copy.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/fb_copy.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/console_production.o: $(TESTS_DIR)/kernel/tty/console.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_fb_writers.o: $(TEST_CASES)/test_fb_writers.c
+$(TEST_BLD)/test_fb_writers.o: $(TEST_CASES)/test_fb_writers.c \
+		$(TESTS_DIR)/kernel/include/arch/fb_copy.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
-$(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/gfx_production.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/console_production.o
+$(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/gfx_production.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-writers: $(TEST_BLD)/test_fb_writers.elf
@@ -410,7 +420,7 @@ $(TEST_BLD)/test_fb_resolution_ioctl.o: $(TEST_CASES)/test_fb_resolution_ioctl.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
-$(TEST_BLD)/test_fb_resolution_ioctl.elf: $(TEST_BLD)/test_fb_resolution_ioctl.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/console_production.o $(TEST_BLD)/bga_production.o $(TEST_BLD)/pci_match_production.o
+$(TEST_BLD)/test_fb_resolution_ioctl.elf: $(TEST_BLD)/test_fb_resolution_ioctl.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o $(TEST_BLD)/bga_production.o $(TEST_BLD)/pci_match_production.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-ioctl: $(TEST_BLD)/test_fb_resolution_ioctl.elf
@@ -447,7 +457,8 @@ $(TEST_BLD)/test_fb_resolution_hooks.elf: $(TEST_BLD)/test_fb_resolution_hooks.o
 		$(TEST_BLD)/fb_state_hooks.o $(TEST_BLD)/bga_hooks.o \
 		$(TEST_BLD)/fb_test.o $(TEST_BLD)/fb_map.o \
 		$(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_production.o \
-		$(TEST_BLD)/console_production.o $(TEST_BLD)/pci_match_production.o
+		$(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o \
+		$(TEST_BLD)/pci_match_production.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-hooks: $(TEST_BLD)/test_fb_resolution_hooks.elf

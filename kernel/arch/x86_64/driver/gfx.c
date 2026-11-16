@@ -495,9 +495,11 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq,
 #ifdef OS01_TEST_GFX_PRESENT_AB
             if (probe) {
                 uint64_t before_fb = arch_clocksource_read_ns();
+                /* A = the historic byte copy, B = the wide write.  The
+                 * normal present path below uses the wide writer. */
                 wrc = probe->wide
                     ? fb_write_row_wide_leased(&lease, v_x, v_y + row, row_buf, kreq.stride)
-                    : fb_write_row_leased(&lease, v_x, v_y + row, row_buf, kreq.stride);
+                    : fb_write_row_byte_leased(&lease, v_x, v_y + row, row_buf, kreq.stride);
                 uint64_t after_fb = arch_clocksource_read_ns();
                 probe->copy_ns += before_fb - before_copy;
                 probe->fb_ns += after_fb - before_fb;

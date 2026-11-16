@@ -17,9 +17,17 @@
  *   - _binary_kernel_font_psf_*: the embedded PSF font blob.  Only its
  *     address is taken; it is never read because the unmapped framebuffer
  *     makes putchark_snap() return early.
+ *   - arch_clocksource_read_ns: the monotonic nanosecond source used by
+ *     the framebuffer scroll path.  The harness never maps a
+ *     framebuffer, so the scroll is never reached; the symbol only has
+ *     to resolve.
+ *   - fb_copy_rgb32: the arch-neutral framebuffer copy facade.  The
+ *     x86_64 strong override is not part of this aarch64-shaped link,
+ *     so the conservative byte copy stands in.
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <driver/serial.h>     /* shadow: serial_lock, write_serial_unlocked */
 #include <driver/fb_state.h>   /* real: fb_lease_t, fb_writer_begin/end  */
@@ -69,3 +77,17 @@ void fb_writer_end(fb_lease_t *lease)
 /* ── embedded font blob (address only) ──────────────────────────── */
 volatile unsigned char _binary_kernel_font_psf_start[64];
 volatile unsigned char _binary_kernel_font_psf_end[1];
+
+/* ── clock stub ─────────────────────────────────────────────────── */
+uint64_t arch_clocksource_read_ns(void)
+{
+    static uint64_t now_ns = 1000000;
+    now_ns += 1000;
+    return now_ns;
+}
+
+/* ── framebuffer copy facade: the conservative byte copy ───────── */
+void fb_copy_rgb32(void *dst, const void *src, size_t bytes)
+{
+    memcpy(dst, src, bytes);
+}

@@ -19,21 +19,18 @@ static bool term_initialized = false;
 static bool console_fb_active = true;
 
 // Scroll the entire framebuffer up by one character row.
+//
+// The geometry comes from the SAME view the glyph writer uses, so the
+// console addresses the framebuffer by its real byte pitch (a real
+// panel's pitch is larger than width*4) and never touches the row
+// padding.
 static void console_scroll_snap(const fb_snapshot_t *snap)
 {
-    uint32_t xres = (snap && snap->state.info.width) ? snap->state.info.width : Pos.XResolution;
-    uint32_t yres = (snap && snap->state.info.height) ? snap->state.info.height : Pos.YResolution;
-    int rows = (int)(yres / font->height);
-    uint32_t pitch = xres * sizeof(uint32_t);
-    int row_bytes = (int)(pitch * font->height);
-    uint8_t *fb = (uint8_t *)(snap && snap->addr ? snap->addr : Pos.FB_addr);
-    if (!fb) return;
-#if defined(__x86_64__) && !defined(OS01_HOST_TEST) && defined(FB_SHADOW) && FB_SHADOW
-    printk_fb_shadow_scroll(fb, xres, yres, (uint32_t)row_bytes, rows);
-#else
-    memmove(fb, fb + row_bytes, (uintptr_t)row_bytes * (rows - 1));
-    memset(fb + (uintptr_t)row_bytes * (rows - 1), 0, (uintptr_t)row_bytes);
-#endif
+    printk_fb_view_t view;
+    if (!printk_fb_view_resolve(snap, &view)) return;
+    int rows = (int)(view.height / font->height);
+    if (rows <= 0) return;
+    (void)printk_fb_scroll_view(&view, font->height);
     term_cursor_row = rows - 1;
 }
 
@@ -66,6 +63,10 @@ void console_putchar(char c)
         return;
     }
 
+    /* ONE geometry for the glyph and for the cursor advance. */
+    printk_fb_view_t view;
+    bool have_view = printk_fb_view_resolve(&lease.snapshot, &view);
+
     switch (c) {
     case '\n':
         term_cursor_col = 0;
@@ -88,8 +89,10 @@ void console_putchar(char c)
         break;
     }
 
-    uint32_t cur_xres = lease.snapshot.state.info.width ? lease.snapshot.state.info.width : Pos.XResolution;
-    uint32_t cur_yres = lease.snapshot.state.info.height ? lease.snapshot.state.info.height : Pos.YResolution;
+    uint32_t cur_xres = have_view ? view.width
+                                  : (uint32_t)(Pos.XResolution > 0 ? Pos.XResolution : 0);
+    uint32_t cur_yres = have_view ? view.height
+                                  : (uint32_t)(Pos.YResolution > 0 ? Pos.YResolution : 0);
     int max_cols = (int)(cur_xres / font->width);
     if (term_cursor_col >= max_cols) {
         term_cursor_col = 0;

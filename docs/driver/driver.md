@@ -441,6 +441,68 @@ framebuffer 的逐行阶段）。像素抽查在计时区间外进行。普通�
 QEMU 可通过 `qemutests/run_test.py --disk <诊断镜像的副本> gfx-present-ab` 验证，
 需设置 `OVMF_FIRMWARE` 为配置对应的固件路径。
 
+> **2026-11-15 起**：普通内核的 present 路径**已经**使用宽写（见下节），
+> 诊断镜像里的 A 路径显式走逐字节拷贝（`fb_write_row_byte_leased()`），
+> 用来保住真机对照的基线；B 路径走宽写（`fb_write_row_wide_leased()`）。
+> 两个诊断 writer 与普通 writer 共用同一套 lease / 格式 / 边界检查与
+> 同一套地址计算，没有第二套提交循环。
+
+#### 帧缓冲宽写与可见行几何（2026-11-15）
+
+真机是 1024×768、32 bpp、**pitch 4096**（每帧 3 MiB）：字节步幅比
+`width*4` 大。历史实现用 `xres * 像素下标` 计算偏移，在这种面板上是错的。
+
+* **分层**：`kernel/include/arch/fb_copy.h` 是**架构中立 facade**，
+  声明 `fb_copy_rgb32()` 并提供可见行几何帮助函数；弱默认在
+  `kernel/driver/arch_fb_write.c`（逐字节拷贝），x86_64 强覆盖在
+  `kernel/arch/x86_64/driver/fb_copy.c`（32 位顺序写，
+  `kernel/include/arch/x86_64/fb_copy.h`）。
+  架构中立的 `kernel/driver/fb.c` 与 `kernel/core/printk.c` **只依赖 facade**，
+  不引用任何 `arch/x86_64/` 头。
+* **宽写**：`fb_copy_rgb32()` 在地址与长度都 4 字节对齐时用
+  `volatile uint32_t` 顺序写，否则退回字节拷贝。真实硬件上整帧
+  ~550 ms → ~9 ms。它不是通用 `memcpy` 替代，也不引入内核 SIMD。
+* **可见行几何**：`printk_fb_view_t` 描述 `fb / width / height / stride /
+  fb_bytes`。所有偏移都从 `stride` 推导；行尾 padding **永不写入**。
+  映射范围装不下整行时**整帧拒绝**（不写半个画面）；视图高度会按映射
+  实际能覆盖的行数收敛，画面降级而不是变黑。
+* **非整像素长度**：`fb_write_row_leased()` 拒绝不是整数像素的字节数
+  （`-EINVAL`）。旧实现会把多出来的半像素写进相邻像素。
+* **回归**：`hosttests/cases/test_fb_writers.c` 覆盖 8 像素宽 / 48 字节
+  pitch 的快照（非零 x/y 写到第 8 个像素、逐像素与前后哨兵校验）、
+  越界 / 非整像素长度 / 未持 lease 三类非法请求必须 `-EINVAL` 且显存不变，
+  以及滚屏几何（3 扫描行 × 2 可见像素、pitch 12、行尾哨兵；滚动 1 行后
+  可见行上移、底行清零、padding 不变；长度差 1 字节时不写）。
+
+#### 开机日志滚屏探针（诊断夹具）
+
+`printk_fb_scroll_probe()` 在 `x86_64_boot_devices()` 里、计时器校准之后、
+显示交接之前调用，把「首次建立 shadow 的成本」和「稳态滚屏成本」分开记录。
+它持有 `Pos.lock` 与 writer lease 时**不打印任何日志**，日志行在两者都释放
+之后才输出。
+
+```sh
+make PROFILE=x86_64-clang FB_SHADOW=1 LOG_TARGET=both \
+  KERNEL_EXTRA_CFLAGS=-DOS01_TEST_FB_SCROLL "$PWD/build/x86_64-clang/image/disk.img"
+```
+
+输出格式：
+
+```
+[FB SCROLL] cfg w=1024 h=768 stride=4096 seed_ns=<首次建立 shadow 的耗时>
+[FB SCROLL] total_ns=<8 次稳态滚屏的整次耗时>
+[FB SCROLL] fb_ns=<8 次稳态滚屏的显存写入阶段>
+[FB SCROLL] median total_ns=<中位数> fb_ns=<中位数>
+```
+
+没有有效时钟或没有建立 shadow 时输出 `invalid`，该样本作废。
+新旧镜像必须使用同一夹具、同一分辨率、同一构建选项；
+QEMU 测得的耗时不构成真机门槛。
+
+参考值（QEMU GOP 1440×900 / stride 5760，**仅冒烟信号**）：稳态滚屏中位数
+**190.4 ms（旧实现）→ 5.2 ms（当前实现）**，其中显存写回阶段约 2.4 ms、
+首次建立 shadow 约 30 ms。真机 1024×768 / pitch 4096 的对照仍待验收。
+
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
 受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。

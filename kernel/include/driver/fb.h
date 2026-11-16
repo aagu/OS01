@@ -16,6 +16,12 @@ int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                         const void *pixels, uint32_t bytes);
 
 #ifdef OS01_TEST_GFX_PRESENT_AB
+// Diagnostic A of the present A/B fixture: the historic BYTE copy.
+// The normal writer above already uses the wide write, so the A/B
+// comparison needs an explicit byte path to keep its baseline.
+int fb_write_row_byte_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                             const void *pixels, uint32_t bytes);
+// Diagnostic B of the present A/B fixture: the wide write.
 int fb_write_row_wide_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                              const void *pixels, uint32_t bytes);
 #endif

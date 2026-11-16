@@ -1,6 +1,7 @@
 #ifndef _KERNEL_PRINTK_H
 #define _KERNEL_PRINTK_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <arch/spinlock.h>
 
@@ -58,10 +59,91 @@ void putchar_at_snap(const struct fb_snapshot *snap, int col, int row, unsigned 
 int color_printk(unsigned int FRcolor,unsigned int BKcolor,const char * fmt,...);
 int printk_fb_write(unsigned int FRcolor, unsigned int BKcolor, const char *buf, int len);
 int serial_printk(const char *fmt,...);
-uint8_t *printk_fb_shadow_get(const void *hw_fb, uint32_t xres, uint32_t yres);
-void printk_fb_shadow_scroll(void *hw_fb, uint32_t xres, uint32_t yres,
-                             uint32_t row_bytes, int rows);
+
+// ── Framebuffer view (geometry + writable range) ────────────────
+//
+// A resolved framebuffer view: the geometry a writer may touch.  The
+// console resolves this ONCE per write from the writer lease
+// snapshot, so the glyph path, the logo path and the scroll path all
+// agree on the same width, height, real byte pitch and writable
+// range.  A framebuffer whose pitch is larger than width*4 (a
+// 1024x768 panel with a 4096-byte pitch) is the common real-hardware
+// case, and every offset MUST be computed from `stride`.
+//
+//   fb        framebuffer base, NULL when there is none
+//   width     VISIBLE pixels per row
+//   height    VISIBLE pixel rows
+//   stride    framebuffer byte pitch (>= width*4)
+//   fb_bytes  writable bytes at `fb`; 0 means "unbounded"
+typedef struct {
+    uint8_t  *fb;
+    uint32_t  width;
+    uint32_t  height;
+    uint32_t  stride;
+    uint64_t  fb_bytes;
+} printk_fb_view_t;
+
+// The geometry is usable when there is a framebuffer, a non-empty
+// visible area and a pitch that can hold one visible row.
+static inline bool printk_fb_view_ok(const printk_fb_view_t *v)
+{
+    return v && v->fb && v->width && v->height && v->stride &&
+           (uint64_t)v->width * 4u <= (uint64_t)v->stride;
+}
+
+// Byte offset of the FIRST VISIBLE pixel of pixel row `y`.
+//
+// Fails when the row does not fit inside the writable range.  The
+// check covers the WHOLE pitch extent of the row, not just its
+// visible pixels: a framebuffer whose last row is truncated is a
+// broken geometry, and a writer must refuse it instead of painting a
+// partial frame.
+//
+// A `fb_bytes` of 0 means "unbounded" (the legacy no-snapshot path,
+// where the framebuffer size is not published).
+static inline bool printk_fb_row_offset(const printk_fb_view_t *v, uint32_t y,
+                                         uint64_t *off)
+{
+    if (!printk_fb_view_ok(v) || y >= v->height)
+        return false;
+
+    uint64_t o = (uint64_t)y * (uint64_t)v->stride;
+    if (v->fb_bytes != 0 && o + v->stride > v->fb_bytes)
+        return false;
+
+    *off = o;
+    return true;
+}
+
+// Resolve the view from a writer lease snapshot.  A NULL snapshot
+// falls back to the legacy Pos mirrors (the aarch64 path).  Returns
+// false when there is no framebuffer or the geometry is empty.
+bool printk_fb_view_resolve(const struct fb_snapshot *snap, printk_fb_view_t *out);
+
+// Scroll the visible framebuffer up by `shift_rows` VISIBLE pixel
+// rows.  The caller MUST hold Pos.lock and a writer lease (or
+// otherwise guarantee that no other writer is active).
+//
+// Returns the time spent in the framebuffer write phase in
+// nanoseconds, or 0 when the geometry was rejected (in which case NOT
+// a single pixel was touched).
+uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows);
+
+// The boot-log shadow (x86 + FB_SHADOW builds only).  The shadow holds
+// the VISIBLE pixels of the framebuffer in a PACKED row layout (row
+// stride = width*4), so the framebuffer itself is always addressed by
+// its real pitch.  Returns NULL when the shadow is unavailable (PMM
+// not ready, allocation failure, mode switch) — the caller then falls
+// back to the direct scroll.
+uint8_t *printk_fb_shadow_get(const printk_fb_view_t *view);
 void printk_fb_shadow_release(void);
+
+// Boot-time framebuffer scroll probe (diagnostic fixture).  Enabled
+// with -DOS01_TEST_FB_SCROLL; called from x86_64_boot_devices() once
+// the timer is calibrated and before the display is handed over.  It
+// reports the shadow seed cost and the steady-state scroll cost, and
+// it never logs while holding Pos.lock or a writer lease.
+void printk_fb_scroll_probe(void);
 void frame_buffer_init();
 void frame_buffer_early_init();
 

@@ -175,6 +175,13 @@ void x86_64_boot_devices(const struct boot_context *bootctx)
      * dependency; the stub was installed by lapic_timer_init above). */
     lapic_timer_calibrate();
 
+#ifdef OS01_TEST_FB_SCROLL
+    /* Diagnostic fixture: measure the boot-log scroll cost once the
+     * timer is calibrated and BEFORE the display is handed over.  The
+     * probe releases Pos.lock and the writer lease before it logs. */
+    printk_fb_scroll_probe();
+#endif
+
     x86_boot_irq_runtime_open();
 
 #ifdef X86_BOOT_IRQ_TIME_TEST

@@ -11,6 +11,7 @@
 #include <driver/fb_cache.h>       // fb_cache_policy_get: shared FB cache policy
 #include <log/log.h>
 #include <core/printk.h>      // Pos, frame_buffer
+#include <arch/fb_copy.h>    // fb_copy_rgb32: the framebuffer copy facade
 #include <memory/vma.h>         // vma_t, VMA_IO, VMA_SHARED
 #include <memory/vmm.h>
 #include <sched/task.h>        // current
@@ -292,8 +293,29 @@ int fb_get_info(struct fb_info *out)
 }
 
 // ── fb_write_row_leased: copy row under an active lease ─────
+//
+// How a row reaches the framebuffer:
+//
+//   FB_WRITER_WIDE — the production writer.  The 32-bit sequential
+//                    write verified on real hardware (~58x faster than
+//                    the byte copy on a 1024x768 frame).
+//   FB_WRITER_BYTE — the diagnostic A path of the present A/B
+//                    fixture.  It MUST keep the historic byte copy,
+//                    otherwise the on-hardware comparison loses its
+//                    baseline.
+//
+// Both modes share the SAME lease, format and bounds checks and the
+// SAME address computation — there is no second submit loop.
+typedef enum {
+    FB_WRITER_WIDE = 0,
+#ifdef OS01_TEST_GFX_PRESENT_AB
+    FB_WRITER_BYTE = 1,
+#endif
+} fb_writer_mode_t;
+
 static int fb_write_row(const fb_lease_t *lease, uint32_t x, uint32_t y,
-                        const void *pixels, uint32_t bytes, bool wide)
+                        const void *pixels, uint32_t bytes,
+                        fb_writer_mode_t mode)
 {
     /* Terminal-CPU investigation (commit tty-cpu-probe-v1). Per-row
      * wall time is needed to understand how much of gfx_ioctl_present
@@ -312,6 +334,11 @@ static int fb_write_row(const fb_lease_t *lease, uint32_t x, uint32_t y,
     uint32_t fb_h = lease->snapshot.state.info.height;
     if (fb_w == 0 || fb_h == 0) return -EINVAL;
 
+    /* A row is a whole number of pixels.  A partial pixel would write
+     * into the neighbouring pixel (or into the row padding), so it is
+     * rejected BEFORE anything is written. */
+    if (bytes % 4u != 0) return -EINVAL;
+
     // Overflow-safe rectangle checks:
     if (x > fb_w) return -EINVAL;
     if (bytes / 4u > fb_w - x) return -EINVAL;
@@ -325,19 +352,14 @@ static int fb_write_row(const fb_lease_t *lease, uint32_t x, uint32_t y,
 
     uint8_t *dst = (uint8_t *)lease->snapshot.addr + byte_offset;
 #ifdef OS01_TEST_GFX_PRESENT_AB
-    if (wide) {
-        if (((uintptr_t)dst | (uintptr_t)pixels | bytes) & 3u)
-            return -EINVAL;
-        volatile uint32_t *out = (volatile uint32_t *)dst;
-        const uint32_t *in = pixels;
-        for (uint32_t i = 0; i < bytes / 4u; ++i)
-            out[i] = in[i];
+    if (mode == FB_WRITER_BYTE) {
+        memcpy(dst, pixels, bytes);
     } else
 #else
-    (void)wide;
+    (void)mode;
 #endif
     {
-        memcpy(dst, pixels, bytes);
+        fb_copy_rgb32(dst, pixels, bytes);
     }
 
     {
@@ -361,14 +383,21 @@ static int fb_write_row(const fb_lease_t *lease, uint32_t x, uint32_t y,
 int fb_write_row_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                         const void *pixels, uint32_t bytes)
 {
-    return fb_write_row(lease, x, y, pixels, bytes, false);
+    return fb_write_row(lease, x, y, pixels, bytes, FB_WRITER_WIDE);
 }
 
 #ifdef OS01_TEST_GFX_PRESENT_AB
+/* Diagnostic A of the present A/B fixture: the historic byte copy. */
+int fb_write_row_byte_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
+                             const void *pixels, uint32_t bytes)
+{
+    return fb_write_row(lease, x, y, pixels, bytes, FB_WRITER_BYTE);
+}
+
 int fb_write_row_wide_leased(const fb_lease_t *lease, uint32_t x, uint32_t y,
                              const void *pixels, uint32_t bytes)
 {
-    return fb_write_row(lease, x, y, pixels, bytes, true);
+    return fb_write_row(lease, x, y, pixels, bytes, FB_WRITER_WIDE);
 }
 #endif
 

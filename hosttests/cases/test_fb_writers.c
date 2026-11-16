@@ -30,6 +30,7 @@
 #include <memory/vma.h>
 #include <memory/vmm.h>
 #include <arch/x86_64/pte.h>
+#include <arch/fb_copy.h>          /* fb_copy_rgb32 + the row geometry */
 
 /* ── Test Assertions ── */
 static int g_failed = 0;
@@ -903,6 +904,306 @@ static void test_raw_mmap_cache_policy(void)
     fb_set_raw_writable_allowed_for_test(false);
 }
 
+/* ── Pitched framebuffer fixture (real-hardware geometry) ───────
+ *
+ * The real panel is 1024x768 with a 4096-byte pitch: the byte stride
+ * is LARGER than width*4.  The fixture below reproduces that shape on
+ * a RAM buffer — 8 visible pixels per row, a 48-byte pitch (4 padding
+ * pixels per row) and 3 visible rows.
+ *
+ * Every writer must respect the real pitch: the visible pixels of a
+ * row live at `y * 48`, and the padding between the end of the visible
+ * area and the end of the pitch must never be written.
+ */
+#define TEST_PITCH_WIDTH   8
+#define TEST_PITCH_HEIGHT  3
+#define TEST_PITCH_STRIDE  48
+#define TEST_PITCH_BYTES   (TEST_PITCH_STRIDE * TEST_PITCH_HEIGHT)
+#define TEST_PITCH_PAD     (TEST_PITCH_STRIDE - TEST_PITCH_WIDTH * 4)
+
+#define TEST_PITCH_FILL    0x5A5A5A5Au
+
+static uint32_t g_test_pitch_vram[TEST_PITCH_BYTES / 4] __attribute__((aligned(4096)));
+
+static void setup_pitched_environment(void)
+{
+    fb_resolution_runtime_reset();
+    spin_init(&Pos.lock);
+    spin_init(&serial_lock);
+    reset_serial_capture();
+
+    memset(g_test_pitch_vram, 0x5A, sizeof(g_test_pitch_vram));
+
+    Pos.XResolution = TEST_PITCH_WIDTH;
+    Pos.YResolution = TEST_PITCH_HEIGHT;
+    Pos.XPosition = 0;
+    Pos.YPosition = 0;
+    Pos.Phy_addr = (uint32_t *)(uintptr_t)0xE0000000ULL;
+    Pos.FB_addr = g_test_pitch_vram;
+    Pos.FB_length = TEST_PITCH_BYTES;
+
+    struct fb_info info = {
+        .width = TEST_PITCH_WIDTH,
+        .height = TEST_PITCH_HEIGHT,
+        .stride = TEST_PITCH_STRIDE,
+        .bpp = 32,
+        .format = 0,
+    };
+    fb_bootstrap_state(0xE0000000ULL, TEST_PITCH_BYTES, &info);
+    fb_publish_initial_mapping(g_test_pitch_vram, TEST_PITCH_BYTES);
+}
+
+/* Read the pixel at (x, y) of the pitched fixture. */
+static uint32_t pitch_pixel(uint32_t x, uint32_t y)
+{
+    const uint8_t *row = (const uint8_t *)g_test_pitch_vram + y * TEST_PITCH_STRIDE;
+    uint32_t v;
+    memcpy(&v, row + x * 4, sizeof(v));
+    return v;
+}
+
+/* Every padding byte of row `y` must still carry the fill pattern. */
+static bool pitch_padding_intact(uint32_t y)
+{
+    const uint8_t *row = (const uint8_t *)g_test_pitch_vram + y * TEST_PITCH_STRIDE;
+    for (int i = 0; i < TEST_PITCH_PAD; i++)
+        if (row[TEST_PITCH_WIDTH * 4 + i] != 0x5A)
+            return false;
+    return true;
+}
+
+/* ── Test: the wide write honours the real pitch ───────────────
+ *
+ * A write that starts at a non-zero x/y and reaches the last pixel of
+ * the row must land exactly on the visible pixels: every written
+ * pixel carries its value, the pixels before it are untouched, the
+ * neighbouring rows are untouched, and the row padding is untouched.
+ */
+static void test_write_row_leased_pitched(void)
+{
+    printf("\n--- test_write_row_leased_pitched ---\n");
+    setup_pitched_environment();
+
+    fb_lease_t lease;
+    int rc = fb_writer_begin(&lease, 0);
+    CHECK_EQ(0, rc);
+    CHECK_TRUE(lease.held);
+
+    /* From column 2 to the 8th (last) pixel of row 1: six pixels. */
+    uint32_t pixels[6];
+    for (int i = 0; i < 6; i++)
+        pixels[i] = 0xC0DE0000u + (uint32_t)i;
+
+    rc = fb_write_row_leased(&lease, 2, 1, pixels, sizeof(pixels));
+    CHECK_EQ(0, rc);
+
+    for (uint32_t x = 0; x < TEST_PITCH_WIDTH; x++) {
+        uint32_t want = (x >= 2 && x < 8) ? pixels[x - 2] : TEST_PITCH_FILL;
+        CHECK_EQ(want, pitch_pixel(x, 1));
+    }
+    /* The neighbouring rows are untouched. */
+    for (uint32_t x = 0; x < TEST_PITCH_WIDTH; x++) {
+        CHECK_EQ(TEST_PITCH_FILL, pitch_pixel(x, 0));
+        CHECK_EQ(TEST_PITCH_FILL, pitch_pixel(x, 2));
+    }
+    /* The padding of every row is untouched. */
+    for (uint32_t y = 0; y < TEST_PITCH_HEIGHT; y++)
+        CHECK_TRUE(pitch_padding_intact(y));
+
+    fb_writer_end(&lease);
+}
+
+/* ── Test: the illegal writer requests change nothing ──────────
+ *
+ * The same start point (x=2, y=1) is used for every rejection:
+ * out-of-bounds geometry, a non-integral pixel length and a lease
+ * that is not held.  Each one must return -EINVAL and leave the
+ * framebuffer byte-for-byte unchanged.
+ */
+static void test_write_row_leased_rejects(void)
+{
+    printf("\n--- test_write_row_leased_rejects ---\n");
+    setup_pitched_environment();
+
+    uint8_t before[TEST_PITCH_BYTES];
+    memcpy(before, g_test_pitch_vram, sizeof(before));
+
+    uint32_t pixels[8];
+    for (int i = 0; i < 8; i++)
+        pixels[i] = 0xBADBAD00u + (uint32_t)i;
+
+    fb_lease_t lease;
+    int rc = fb_writer_begin(&lease, 0);
+    CHECK_EQ(0, rc);
+
+    /* 1. Past the last column: the row would leave the visible area. */
+    rc = fb_write_row_leased(&lease, TEST_PITCH_WIDTH, 1, pixels, 4);
+    CHECK_EQ(-EINVAL, rc);
+
+    /* 2. A row that starts inside the visible area but runs past it. */
+    rc = fb_write_row_leased(&lease, 4, 1, pixels, 8 * 4);
+    CHECK_EQ(-EINVAL, rc);
+
+    /* 3. Past the last row. */
+    rc = fb_write_row_leased(&lease, 2, TEST_PITCH_HEIGHT, pixels, 4 * 4);
+    CHECK_EQ(-EINVAL, rc);
+
+    /* 4. A non-integral pixel length: 6 bytes is 1.5 pixels.  Before
+     *    the writer rejected this, the stray half pixel landed in the
+     *    next pixel. */
+    rc = fb_write_row_leased(&lease, 2, 1, pixels, 6);
+    CHECK_EQ(-EINVAL, rc);
+
+    /* 5. Past the end of the mapped range: the mapping is exactly three
+     *    rows deep, so a row that starts inside the visible area but
+     *    runs past the last mapped byte is refused. */
+    rc = fb_write_row_leased(&lease, 4, 2, pixels, 8 * 4);
+    CHECK_EQ(-EINVAL, rc);
+
+    CHECK_EQ(0, memcmp(before, g_test_pitch_vram, sizeof(before)));
+
+    fb_writer_end(&lease);
+
+    /* 6. The same start point with a lease that is not held. */
+    rc = fb_write_row_leased(&lease, 2, 1, pixels, 8 * 4);
+    CHECK_EQ(-EINVAL, rc);
+    CHECK_EQ(0, memcmp(before, g_test_pitch_vram, sizeof(before)));
+
+    /* 7. A mapping that is too short for the row: the writer must
+     *    refuse it instead of writing past the mapped range. */
+    setup_pitched_environment();
+    fb_publish_initial_mapping(g_test_pitch_vram, TEST_PITCH_BYTES - 16);
+    rc = fb_writer_begin(&lease, 0);
+    CHECK_EQ(0, rc);
+    rc = fb_write_row_leased(&lease, 4, 2, pixels, 8 * 4);
+    CHECK_EQ(-EINVAL, rc);
+    CHECK_EQ(0, memcmp(before, g_test_pitch_vram, sizeof(before)));
+    fb_writer_end(&lease);
+}
+
+/* ── Test: the scroll geometry ─────────────────────────────────
+ *
+ * Three scanlines, two visible pixels each, a 12-byte pitch.  The
+ * four padding bytes of every row carry a sentinel that must never
+ * move.  A one-row scroll moves the visible pixels up, clears the
+ * bottom visible row and leaves the padding alone.
+ *
+ * A framebuffer whose writable range is one byte short must not be
+ * written at all.
+ */
+#define SCROLL_ROWS     3
+#define SCROLL_WIDTH    2
+#define SCROLL_STRIDE   12
+#define SCROLL_FB_BYTES (SCROLL_STRIDE * SCROLL_ROWS)
+#define SCROLL_PAD      (SCROLL_STRIDE - SCROLL_WIDTH * 4)
+
+static uint8_t g_scroll_fb[SCROLL_FB_BYTES];
+
+static uint32_t scroll_pixel(uint32_t x, uint32_t y)
+{
+    uint32_t v;
+    memcpy(&v, g_scroll_fb + y * SCROLL_STRIDE + x * 4, sizeof(v));
+    return v;
+}
+
+static void scroll_fill_pattern(void)
+{
+    memset(g_scroll_fb, 0, sizeof(g_scroll_fb));
+    for (uint32_t y = 0; y < SCROLL_ROWS; y++) {
+        for (uint32_t x = 0; x < SCROLL_WIDTH; x++) {
+            uint32_t v = 0x0A0B0000u + y * 0x100u + x;
+            memcpy(g_scroll_fb + y * SCROLL_STRIDE + x * 4, &v, sizeof(v));
+        }
+        memset(g_scroll_fb + y * SCROLL_STRIDE + SCROLL_WIDTH * 4, 0xEE,
+               SCROLL_PAD);
+    }
+}
+
+static void test_fb_scroll_geometry(void)
+{
+    printf("\n--- test_fb_scroll_geometry ---\n");
+    scroll_fill_pattern();
+
+    printk_fb_view_t view = {
+        .fb = g_scroll_fb,
+        .width = SCROLL_WIDTH,
+        .height = SCROLL_ROWS,
+        .stride = SCROLL_STRIDE,
+        .fb_bytes = SCROLL_FB_BYTES,
+    };
+
+    CHECK_TRUE(fb_scroll_rows(&view, 1));
+
+    /* The visible pixels moved up by one row. */
+    for (uint32_t x = 0; x < SCROLL_WIDTH; x++) {
+        CHECK_EQ(scroll_pixel(x, 0), 0x0A0B0000u + 1 * 0x100u + x);
+        CHECK_EQ(scroll_pixel(x, 1), 0x0A0B0000u + 2 * 0x100u + x);
+    }
+    /* The bottom visible row was cleared. */
+    for (uint32_t x = 0; x < SCROLL_WIDTH; x++)
+        CHECK_EQ(0u, scroll_pixel(x, SCROLL_ROWS - 1));
+
+    /* The padding never moved. */
+    for (uint32_t y = 0; y < SCROLL_ROWS; y++)
+        for (int i = 0; i < SCROLL_PAD; i++)
+            CHECK_EQ(0xEEu, g_scroll_fb[y * SCROLL_STRIDE + SCROLL_WIDTH * 4 + i]);
+
+    /* A framebuffer one byte short: nothing may be written. */
+    uint8_t pristine[SCROLL_FB_BYTES];
+    memset(pristine, 0x5A, sizeof(pristine));
+    memcpy(g_scroll_fb, pristine, sizeof(g_scroll_fb));
+
+    printk_fb_view_t short_view = {
+        .fb = g_scroll_fb,
+        .width = SCROLL_WIDTH,
+        .height = SCROLL_ROWS,
+        .stride = SCROLL_STRIDE,
+        .fb_bytes = SCROLL_FB_BYTES - 1,
+    };
+    CHECK_TRUE(!fb_scroll_rows(&short_view, 1));
+    CHECK_EQ(0, memcmp(pristine, g_scroll_fb, sizeof(pristine)));
+
+    /* The same short range refuses the packed write-back too. */
+    uint8_t packed[SCROLL_WIDTH * 4 * SCROLL_ROWS];
+    memset(packed, 0x33, sizeof(packed));
+    CHECK_TRUE(!fb_copy_rows(&short_view, packed, SCROLL_WIDTH * 4, SCROLL_ROWS));
+    CHECK_EQ(0, memcmp(pristine, g_scroll_fb, sizeof(pristine)));
+
+    /* A full write-back copies the visible pixels row by row and
+     * leaves the padding alone. */
+    scroll_fill_pattern();
+    CHECK_TRUE(fb_copy_rows(&view, packed, SCROLL_WIDTH * 4, SCROLL_ROWS));
+    for (uint32_t y = 0; y < SCROLL_ROWS; y++) {
+        for (uint32_t x = 0; x < SCROLL_WIDTH; x++)
+            CHECK_EQ(0x33333333u, scroll_pixel(x, y));
+        for (int i = 0; i < SCROLL_PAD; i++)
+            CHECK_EQ(0xEEu, g_scroll_fb[y * SCROLL_STRIDE + SCROLL_WIDTH * 4 + i]);
+    }
+
+    /* The packed row move: row `src_row` moves to row `dst_row`.  The
+     * ranges must be disjoint — the shadow scroll moves one row at a
+     * time. */
+    uint8_t packed_move[SCROLL_WIDTH * 4 * SCROLL_ROWS];
+    for (size_t i = 0; i < sizeof(packed_move); i++)
+        packed_move[i] = (uint8_t)(i + 1u);
+
+    CHECK_TRUE(fb_move_rows_packed(packed_move, SCROLL_WIDTH * 4, 0, 1, 1));
+    CHECK_EQ(0x09u, packed_move[0]);                       /* row 0 <- old row 1 */
+    CHECK_EQ(0x10u, packed_move[SCROLL_WIDTH * 4 - 1]);   /* row 0 last byte */
+    CHECK_EQ(0x09u, packed_move[SCROLL_WIDTH * 4]);       /* row 1 untouched */
+    CHECK_EQ(0x11u, packed_move[SCROLL_WIDTH * 4 * 2]);   /* row 2 untouched */
+
+    /* Overlapping ranges are refused: a half-applied move would
+     * corrupt the shadow. */
+    CHECK_TRUE(!fb_move_rows_packed(packed_move, SCROLL_WIDTH * 4, 0, 1, 2));
+
+    /* Scrolling must preserve each original source row until it is read. */
+    uint32_t shadow[] = { 1, 2, 3, 4, 5, 6 };
+    static const uint32_t expected[] = { 3, 4, 5, 6, 0, 0 };
+    fb_scroll_packed((uint8_t *)shadow, 2 * sizeof(uint32_t), 3, 1);
+    CHECK_EQ(0, memcmp(shadow, expected, sizeof(expected)));
+}
+
 int main(void)
 {
     printf("=== Test Runner: Framebuffer Writers Admission ===\n");
@@ -917,6 +1218,9 @@ int main(void)
     test_raw_mmap_ownership_boundaries();
     test_raw_mmap_cache_policy();
     test_fb_mmap_prot_rejection();
+    test_write_row_leased_pitched();
+    test_write_row_leased_rejects();
+    test_fb_scroll_geometry();
 
     printf("\n  ---\n  Total: %u | Passed: %u | Failed: %d\n",
            __test_stats.total, __test_stats.passed, g_failed);

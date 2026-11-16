@@ -10,6 +10,8 @@
 #include <sched.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <core/printk.h>       /* printk_fb_view_t */
+#include <driver/fb_state.h>   /* struct fb_snapshot */
 
 struct task_struct mock_current_task = {
     .wakeup_ns = 0,
@@ -239,3 +241,46 @@ int g_log_level = 0;
 void _log_write(int level, const char *fmt, ...)
 { (void)level; (void)fmt; }
 int serial_printk(const char *fmt, ...) { (void)fmt; return 0; }
+
+/* ── Console framebuffer view / scroll stubs ────────────────────
+ *
+ * kernel/tty/console.c resolves the framebuffer view from the writer
+ * lease snapshot and calls the shared scroll entry point.  Both live
+ * in kernel/core/printk.c, which the host regressions do not link, so
+ * the link is closed here.
+ *
+ * The resolver below MIRRORS the production one
+ * (kernel/core/printk.c: printk_fb_view_resolve) so the console keeps
+ * the same geometry in the host tests.  The scroll itself is a no-op:
+ * the scroll GEOMETRY is covered directly against
+ * kernel/include/arch/x86_64/fb_copy.h in hosttests/cases/test_fb_writers.c.
+ */
+bool printk_fb_view_resolve(const struct fb_snapshot *snap, printk_fb_view_t *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+
+    if (!snap || !snap->addr) return false;
+
+    out->fb       = (uint8_t *)snap->addr;
+    out->width    = snap->state.info.width;
+    out->height   = snap->state.info.height;
+    out->stride   = snap->state.info.stride;
+    out->fb_bytes = snap->mapped_size;
+
+    if (!out->fb || out->width == 0 || out->height == 0) return false;
+    if (out->stride < out->width * 4u) out->stride = out->width * 4u;
+    if (out->fb_bytes != 0) {
+        uint64_t max_rows = out->fb_bytes / (uint64_t)out->stride;
+        if (max_rows < out->height) out->height = (uint32_t)max_rows;
+    }
+    if (out->height == 0) return false;
+    return true;
+}
+
+uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows)
+{
+    (void)view;
+    (void)shift_rows;
+    return 0;
+}

@@ -10,8 +10,24 @@
  */
 
 #include <arch/fb_write.h>
+#include <arch/fb_copy.h>
 #include <core/printk.h>
 #include <errno.h>
+#include <string.h>
+
+/* ── The arch-neutral framebuffer copy default ──────────────────
+ *
+ * The weak default of the fb_copy_rgb32() facade: a plain byte copy.
+ * x86_64 overrides it with the wide 32-bit sequential store
+ * (kernel/arch/x86_64/driver/fb_copy.c) — on real hardware that is
+ * ~58x faster when a full frame is written.  Every other architecture
+ * keeps this conservative default.
+ */
+__attribute__((weak))
+void fb_copy_rgb32(void *dst, const void *src, size_t bytes)
+{
+    memcpy(dst, src, bytes);
+}
 
 __attribute__((weak))
 int arch_fb_write_begin(struct fb_write_view *view)
