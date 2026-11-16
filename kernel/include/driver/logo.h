@@ -1,7 +1,7 @@
 #ifndef _KERNEL_LOGO_H
 #define _KERNEL_LOGO_H
 
-// Draw the OS01 boot logo on the framebuffer.
+// Draw the Craton boot logo on the framebuffer.
 // Must be called after the framebuffer is mapped: on arches with a display
 // coordinator a writer lease must be available, on arches without one
 // Pos.FB_addr must be valid.

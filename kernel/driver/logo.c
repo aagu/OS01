@@ -7,7 +7,8 @@ extern psf2_t *font;
 
 // A small, resolution-aware wordmark for the early 32-bit framebuffer.
 // Each five-column glyph is drawn as solid geometry, without font assets.
-#define LOGO_GLYPHS 4
+#define LOGO_GLYPHS 6
+#define LOGO_INK_GLYPHS 3
 #define GLYPH_ROWS 7
 #define GLYPH_COLS 5
 
@@ -16,10 +17,12 @@ extern psf2_t *font;
 #define LOGO_MUTED  0x00687886
 
 static const unsigned char glyphs[LOGO_GLYPHS][GLYPH_ROWS] = {
+    { 0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e }, // C
+    { 0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11 }, // R
+    { 0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 }, // A
+    { 0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 }, // T
     { 0x0e, 0x1b, 0x11, 0x11, 0x11, 0x1b, 0x0e }, // O
-    { 0x0f, 0x18, 0x10, 0x0e, 0x01, 0x03, 0x1e }, // S
-    { 0x0e, 0x1b, 0x13, 0x15, 0x19, 0x1b, 0x0e }, // slashed 0
-    { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e }, // 1
+    { 0x11, 0x19, 0x19, 0x15, 0x13, 0x13, 0x11 }, // N
 };
 
 // Fill a rectangle in the framebuffer described by `view`.  The geometry is
@@ -69,7 +72,7 @@ static void logo_draw(const struct fb_write_view *view, const char *label)
     int width = (LOGO_GLYPHS - 1) * advance + GLYPH_COLS * scale;
 
     for (int letter = 0; letter < LOGO_GLYPHS; letter++) {
-        unsigned int color = letter < 2 ? LOGO_INK : LOGO_ACCENT;
+        unsigned int color = letter < LOGO_INK_GLYPHS ? LOGO_INK : LOGO_ACCENT;
         for (int row = 0; row < GLYPH_ROWS; row++) {
             for (int col = 0; col < GLYPH_COLS; col++) {
                 if (glyphs[letter][row] & (1u << (GLYPH_COLS - col - 1)))

@@ -49,7 +49,7 @@ void x86_64_boot_memory(const struct boot_context *bootctx)
     PMMngr.start_brk   = (uint64_t)&_end;
 
     frame_buffer_early_init();
-    boot_logo_show();                 // OS01 boot logo
+    boot_logo_show();                 // Craton boot logo
 
     pmm_init(bootctx);                       // physical page allocator
 

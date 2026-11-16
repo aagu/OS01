@@ -597,7 +597,7 @@ test-aarch64:
 
 # ── aarch64 boot logo (framebuffer wordmark) ─────────────────
 # Boots the aarch64 image with `-device ramfb` (edk2's RamfbDxe turns it into
-# a GOP framebuffer), lets the kernel draw the OS01 wordmark and asserts the
+# a GOP framebuffer), lets the kernel draw the Craton wordmark and asserts the
 # result on a QMP screendump: exact ink/accent pixel counts, the arch caption
 # band, and the no-framebuffer negative case.  Headless: `-display none`.
 #

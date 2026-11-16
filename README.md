@@ -1,6 +1,6 @@
-# OS01 — x86_64 Operating System from Scratch
+# Craton — x86_64 Operating System from Scratch
 
-A mature hobby x86_64 operating system built entirely from scratch, running on real hardware and QEMU.
+Craton (formerly OS01) is a mature hobby x86_64 operating system built entirely from scratch, running on real hardware and QEMU.
 
 ## Quick facts
 
@@ -37,10 +37,10 @@ Check `docs/` for detailed documentation on architecture, SMP bring-up, schedule
 
 ## License
 
-OS01 is released under the [MIT license](LICENSE).
+Craton is released under the [MIT license](LICENSE).
 
 Third-party components are consumed under their own licenses and are **not**
-covered by OS01's license:
+covered by Craton's license:
 
 | Component | License | Form |
 |---|---|---|
@@ -53,7 +53,7 @@ covered by OS01's license:
 | musl algorithms (floatscan/strtod) | MIT | pinned archive (`thirdpart/musl-libc-algorithms/`, manifest records provenance + SHA256) |
 
 Note on distribution: `disk.img` ships BusyBox/doomgeneric binaries next to the
-OS01 kernel — they are separate programs (mere aggregation), each remaining
+Craton kernel — they are separate programs (mere aggregation), each remaining
 under its own license.
 
 ## References

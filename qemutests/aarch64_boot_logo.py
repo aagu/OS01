@@ -2,14 +2,14 @@
 """OS01 aarch64 boot-logo acceptance suite.
 
 Boots the aarch64 UEFI image with ``-device ramfb`` so the edk2 firmware
-exposes a GOP framebuffer, lets the kernel draw the OS01 wordmark, and
+exposes a GOP framebuffer, lets the kernel draw the Craton wordmark, and
 asserts the wordmark pixels on a QMP screendump.
 
 Checks
 ------
 fb-visible : the framebuffer is observable at all — the existing
               "[fb] aarch64 color_printk active" banner is on screen.
-logo       : the OS01 wordmark is drawn with the EXACT expected pixel
+logo       : the Craton wordmark is drawn with the EXACT expected pixel
               counts (the glyph bitmaps are deterministic), the arch
               caption paints the EXACT number of pixels its glyphs
               imply, and the ink pixels stay inside the two ink glyph
@@ -73,11 +73,11 @@ BANNER_BLUE = (0x00, 0x00, 0xFF)    # color_printk(WHITE, BLUE, ...) background
 
 # The wordmark is drawn from the driver's OWN 5x7 bitmaps in
 # kernel/driver/logo.c — NOT from the PSF2 font ("drawn as solid geometry,
-# without font assets").  The per-glyph set-bit counts are parsed from
-# that source at test time (see ``logo_glyph_bits``), so the expected ink
-# and accent pixel counts cannot drift away from the drawing.
-INK_GLYPHS = 2
-ACCENT_GLYPHS = 2
+# without font assets").  The per-glyph set-bit counts AND the colour
+# split (the leading LOGO_INK_GLYPHS letters draw in LOGO_INK, the rest
+# in LOGO_ACCENT) are parsed from that source at test time (see
+# ``logo_glyph_bits`` / ``logo_ink_glyphs``), so the expected ink and
+# accent pixel counts cannot drift away from the drawing.
 
 FONT_W, FONT_H = 8, 16              # PSF2 metrics of kernel/driver/font.psf
 # The caption the kernel draws under the wordmark (the aarch64 kernel's
@@ -226,6 +226,22 @@ def logo_glyph_bits() -> tuple[int, ...]:
     return tuple(counts)
 
 
+@lru_cache(maxsize=1)
+def logo_ink_glyphs() -> int:
+    """The leading wordmark glyph count drawn in LOGO_INK (parsed from the driver).
+
+    logo_draw() colours ``letter < LOGO_INK_GLYPHS`` with LOGO_INK and the
+    rest with LOGO_ACCENT; this parses the split from kernel/driver/logo.c
+    so it cannot drift away from the drawing either.
+    """
+    try:
+        source = LOGO_SOURCE_PATH.read_text()
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot read {LOGO_SOURCE_PATH}: {error}") from error
+    return _logo_define(source, "LOGO_INK_GLYPHS")
+
+
 def logo_scale(xres: int, yres: int) -> int:
     """The kernel's scale rule (kernel/driver/logo.c)."""
     scale = 14 if xres >= 800 else (11 if xres >= 480 else 8)
@@ -240,13 +256,14 @@ def logo_geometry(xres: int, yres: int) -> dict:
     left = 32 if xres >= 400 else 16
     top = 24
     advance = 7 * scale
-    width = 3 * advance + 5 * scale
+    glyph_bits = logo_glyph_bits()
+    ink_glyphs = logo_ink_glyphs()
+    width = (len(glyph_bits) - 1) * advance + 5 * scale
     line_y = top + 7 * scale + 14
     label_row = (line_y + 12 + FONT_H - 1) // FONT_H
     label_col = left // FONT_W
-    glyph_bits = logo_glyph_bits()
-    ink_bits = sum(glyph_bits[:INK_GLYPHS])
-    accent_bits = sum(glyph_bits[INK_GLYPHS:INK_GLYPHS + ACCENT_GLYPHS])
+    ink_bits = sum(glyph_bits[:ink_glyphs])
+    accent_bits = sum(glyph_bits[ink_glyphs:])
     return {
         "scale": scale,
         "left": left,
@@ -258,10 +275,11 @@ def logo_geometry(xres: int, yres: int) -> dict:
         "label_x0": label_col * FONT_W,
         "label_y0": label_row * FONT_H,
         "label_y1": (label_row + 1) * FONT_H,
-        # The ink glyphs ("O", "S") occupy the first two cells; the accent
-        # glyphs ("0", "1") the last two.  Each glyph cell is 5*scale wide,
-        # so the cell boundary sits exactly at left + 2*advance.
-        "ink_x1": left + INK_GLYPHS * advance,
+        # The ink glyphs (the leading LOGO_INK_GLYPHS letters, "CRA")
+        # occupy the first cells; the accent glyphs ("TON") the rest.  Each
+        # glyph cell is 5*scale wide, so the boundary sits exactly at
+        # left + ink_glyphs*advance.
+        "ink_x1": left + ink_glyphs * advance,
         "wordmark_y1": top + 7 * scale,
         "ink_px": ink_bits * scale * scale,
         "accent_glyph_px": accent_bits * scale * scale,
@@ -618,9 +636,10 @@ def check_fb_visible(capture: dict) -> list[str]:
 def check_logo(capture: dict) -> list[str]:
     """The OS01 wordmark is drawn with the EXACT expected pixels.
 
-    The ink glyphs ("O", "S") must occupy the FIRST TWO glyph cells and
-    nowhere else; the accent glyphs ("0", "1") the last two; the accent
-    underline its own 3*scale x 2 strip.  Every colour is counted both
+    The ink glyphs (the leading LOGO_INK_GLYPHS letters, "CRA") must
+    occupy their own glyph cells and nowhere else; the accent glyphs
+    ("TON") the remaining cells; the accent underline its own 3*scale x 2
+    strip.  Every colour is counted both
     inside its own region and across the WHOLE screen, so a wordmark drawn
     in the wrong cells cannot pass.
 
@@ -803,27 +822,28 @@ def self_test() -> None:
     assert logo_scale(800, 299) == 7      # a short screen shrinks the scale
     assert logo_scale(320, 240) == 7
 
+    # The glyph set-bit counts come from the driver's own bitmaps
+    # (kernel/driver/logo.c), not from a hard-coded tuple: the wordmark is
+    # CRATON (6 glyphs) and its leading LOGO_INK_GLYPHS letters are ink.
+    bits = logo_glyph_bits()
+    ink_glyphs = logo_ink_glyphs()
+    assert len(bits) == 6 and ink_glyphs == 3
+    assert all(count > 0 for count in bits)
     geo = logo_geometry(800, 600)
     assert geo["scale"] == 14
     assert geo["left"] == 32
     assert geo["top"] == 24
     assert geo["advance"] == 7 * 14
-    assert geo["width"] == 3 * geo["advance"] + 5 * 14
+    assert geo["width"] == (len(bits) - 1) * geo["advance"] + 5 * 14
     assert geo["line_y"] == 24 + 7 * 14 + 14
     assert geo["label_row"] == 10
     assert geo["label_x0"] == 32
     assert geo["label_y0"] == 160
     assert geo["label_y1"] == 176
-    assert geo["ink_x1"] == geo["left"] + 2 * geo["advance"]
+    assert geo["ink_x1"] == geo["left"] + ink_glyphs * geo["advance"]
     assert geo["wordmark_y1"] == geo["top"] + 7 * geo["scale"]
-    # The glyph set-bit counts come from the driver's own bitmaps
-    # (kernel/driver/logo.c), not from a hard-coded tuple.
-    bits = logo_glyph_bits()
-    assert len(bits) == 4
-    assert all(count > 0 for count in bits)
-    assert geo["ink_px"] == sum(bits[:INK_GLYPHS]) * 14 * 14
-    assert geo["accent_glyph_px"] == sum(
-        bits[INK_GLYPHS:INK_GLYPHS + ACCENT_GLYPHS]) * 14 * 14
+    assert geo["ink_px"] == sum(bits[:ink_glyphs]) * 14 * 14
+    assert geo["accent_glyph_px"] == sum(bits[ink_glyphs:]) * 14 * 14
     assert geo["accent_underline_px"] == 3 * 14 * 2
     # The caption band spans LABEL_LEN character cells (18 cells, not 17).
     assert geo["label_x0"] + LABEL_LEN * FONT_W == 32 + 18 * 8
