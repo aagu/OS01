@@ -1,7 +1,40 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-16）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-17）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
+
+---
+
+## 2026-11-17
+
+- test(ci): **目录漂移门禁接入 CI**（P0 尾巴闭环）：
+
+  **做了什么**
+
+  - `.github/workflows/ci.yml` 的 `harness` job 新增一步 `make check-test-catalog`，与既有的 `make check-ci-schedule` 并列。该目标对 `GENERATED_REL_PATHS` 的六个生成文件（`config/test-catalog.json`、`config/test-ci-schedule.json`、`mk/generated/test-{registry,link-rules,dispatch,harness-modules}.mk`）做**字节级**重放比对，只读、不写仓库、无 QEMU 依赖。
+  - `tools/tests/check_ci_schedule.py` 新增规则 2b：harness job 缺 `make check-test-catalog` 即判定漂移并返回非零——**反向守护**，防止日后有人把这一步删掉而无人察觉。
+  - 修正 `ci.yml` 里一处陈旧注释：原先指向并不存在的 `qemutests/test_ci_workflow.py`，改为实际存在的 `qemutests/test_ci_schedule_check.py`。
+
+  **为什么需要（实测依据）**
+
+  - `check_drift` 做的是**字节级**全文件比对；harness 的 `test_catalog_gen` / `test_dispatch_generated` / `test_link_rules` 做的是**语义级**比对（提取字段后 set 比较）。二者不等价。
+  - 受控扰动实验：给 `config/test-ci-schedule.json`、`config/test-catalog.json`、`mk/generated/test-dispatch.mk` 各追加一个换行——三者都是语义等价、字节不同。实验结果：语义篡改（改 `test-dispatch.mk` 里的 tier 字段）会被 harness 捕获；**字节级扰动则全部逃过 harness，只有 `check-test-catalog` 捕获**。也就是说，在本变更之前，唯一守护这一类漂移的是一个没人调用的 make 目标。
+
+  **守护测试**
+
+  - `qemutests/test_ci_schedule_check.py` 新增两条：`test_catalog_drift_gate_is_wired_in_ci`（正向：CI 必须挂载门禁且整体检查通过）与 `test_missing_catalog_drift_gate_fails`（负向：删掉门禁步骤后 `check_ci_schedule.main()` 必须返回 1）。负向测试已确认失败原因唯一——删掉门禁后错误列表只有 `harness job missing explicit 'make check-test-catalog'` 一条。
+
+  **已知边界（如实记录）**
+
+  - 本次只闭环 P0 的「目录漂移门禁接入 CI」一项；P0 的另一条尾巴「flake 账本入库」**仍未闭环**——`flake_report.py` 按设计只读 CI artifacts、不写回（见 test-framework spec D8「无写回」裁决），要入库等于推翻该裁决并引入新的持久化面，需单独裁决后再做。
+  - 门禁只覆盖**生成式**目录（`config/` 与 `mk/generated/` 下的生成文件）；手写文件的风格漂移仍不在其管辖范围内。
+
+  **验证**
+
+  - `make check-test-catalog` → `scan_tests: OK (no catalog/fragment drift)`。
+  - `make check-ci-schedule` → `check_ci_schedule: OK (ci.yml matches config/test-ci-schedule.json)`。
+  - `python3 -m unittest qemutests.test_ci_schedule_check` → 7 tests OK。
+  - 端到端扰动实验：追加换行后 `make check-test-catalog` 报 `scan_tests: DRIFT DETECTED in ['config/test-ci-schedule.json']` 并以非零退出（CI 转红），恢复后复绿。
 
 ---
 
@@ -171,7 +204,7 @@
 
   **已知缺口（如实记录）**
 
-  - `make check-test-catalog` 漂移门禁**尚未挂进 CI**（CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`）。
+  - `make check-test-catalog` 漂移门禁**尚未挂进 CI**（CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`）。→ **已于 2026-11-17 闭环**，见本文件 [2026-11-17](#2026-11-17) 条目。
   - flake 账本**没有入库文件**，只能从 CI artifacts 现算。
 
   **验证**：见 [docs/testing/testing-policy.md](testing/testing-policy.md) §8。

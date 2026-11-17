@@ -84,6 +84,34 @@ class CiScheduleCheckTests(unittest.TestCase):
             )
             self.assertEqual(check_ci_schedule.main(tmp_root), 1)
 
+    def test_catalog_drift_gate_is_wired_in_ci(self):
+        """The generated-catalog drift gate must run in CI.
+
+        `make check-test-catalog` is the only byte-level guard on the
+        generated files under config/ and mk/generated/.  The harness
+        modules compare semantics (extracted fields), so a byte-level
+        drift that survives them still has to be caught here.
+        """
+        import check_ci_schedule
+
+        ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("make check-test-catalog", ci_text)
+        self.assertEqual(check_ci_schedule.main(ROOT), 0)
+
+    def test_missing_catalog_drift_gate_fails(self):
+        import check_ci_schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = self._copy_minimal_repo(Path(tmp))
+            ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
+            ci_text = ci_path.read_text(encoding="utf-8")
+            self.assertIn("make check-test-catalog", ci_text)
+            ci_path.write_text(
+                ci_text.replace("        run: make check-test-catalog\n", ""),
+                encoding="utf-8",
+            )
+            self.assertEqual(check_ci_schedule.main(tmp_root), 1)
+
     def test_full_matrix_log_upload_missing_always_fails(self):
         import check_ci_schedule
 

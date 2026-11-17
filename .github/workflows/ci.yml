@@ -62,7 +62,7 @@ jobs:
   # `make test-harness` runs an explicit Python unittest module list
   # (TEST_HARNESS_MODULES in mk/components/run.mk) with no QEMU and no
   # build prerequisites, so it is the cheapest first gate. It also runs
-  # qemutests/test_ci_workflow.py, which statically checks this file.
+  # qemutests/test_ci_schedule_check.py, which statically checks this file.
   harness:
     name: framework regression
     runs-on: ubuntu-24.04
@@ -86,6 +86,12 @@ jobs:
 
       - name: CI schedule drift check
         run: make check-ci-schedule
+
+      - name: Generated-catalog drift check
+        # Byte-level guard on config/ and mk/generated/ (the harness modules
+        # only compare semantics).  Keeps `make regen-test-catalog` from
+        # being a local-only habit.
+        run: make check-test-catalog
 
       - name: Framework regression (no QEMU)
         # test_gui_runner takes ~292s of the default 300s per-module

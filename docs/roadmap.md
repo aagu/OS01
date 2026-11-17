@@ -4,8 +4,9 @@
 > systest 模块化、aarch64 每核 tick 记账、framebuffer write-back 修复、
 > **aarch64 M4 用户态八块（mm 生命周期 → 正式用户任务 → 正式 SVC/uaccess → 匿名 VMA/按需缺页 → 原生 fork 与 COW → 原生 waitpid → 原生 exec → 原生信号与 sigreturn）均已闭环**、
 > **USB 大容量存储 (MSC/BOT) 与 USB HID 引导输入闭环**、
-> **x86 NX 按 VMA 策略强制执行**、**内存子系统架构边界清理**、**测试框架生成式目录重构**
-> **日期**: 2026-11-16
+> **x86 NX 按 VMA 策略强制执行**、**内存子系统架构边界清理**、**测试框架生成式目录重构**、
+> **目录漂移门禁接入 CI**（字节级 drift gate 已挂进 CI harness job）
+> **日期**: 2026-11-17
 
 roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `docs/changelog.md`，
 近期闭环项的快速索引见文末「近期闭环索引」。
@@ -14,7 +15,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 - **Phase 1-9**：全部就绪（COW/mmap、调度/信号/SMP、文件系统、设备驱动、用户态、poll/select、网络、时间系统，PID 1 init 优雅关机闭环）
 - **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、ARCH-5（VFS 抽象补强）、ARCH-6（FS 并发与块缓存）、ARCH-7（移除 `#define mmap`）、ARCH-8（子系统框架补完，2026-11-08 随 BOOT-3/BOOT-4 闭环）、ARCH-9（驱动模型/PCI/总线解耦）、ARCH-10（静态容量与工程卫生）、ARCH-11（devfs 子目录化）、ARCH-12（`/bin/lspci`）、ARCH-14（USB xHCI + `/bin/lsusb`）**均已闭环合入 master**；**MEM-1（内存子系统架构边界清理，2026-11-14）** 亦已闭环——用户 VM / uaccess / VMM 所有权下沉到各自架构，公共面只剩 TLB 广播协议与逻辑 VMA 位
-- **测试与工程基础设施**：测试框架生成式目录重构闭环（2026-11-14）——`config/test-catalog.json` 由 `tools/tests/scan_tests.py` 生成并入库，六处平行的 SUITE 白名单收敛为单一源，宿主测试注册表改为消费生成清单，场景目录 `config/test-scenarios.json` 落地（340 场景），断言分层政策 + 豁免登记表 + 静态审计处置台账到位，flake 账本报告器就位
+- **测试与工程基础设施**：测试框架生成式目录重构闭环（2026-11-14）——`config/test-catalog.json` 由 `tools/tests/scan_tests.py` 生成并入库，六处平行的 SUITE 白名单收敛为单一源，宿主测试注册表改为消费生成清单，场景目录 `config/test-scenarios.json` 落地（340 场景），断言分层政策 + 豁免登记表 + 静态审计处置台账到位，flake 账本报告器就位；**目录漂移门禁接入 CI**（2026-11-17，`make check-test-catalog` 进入 CI `harness` job，字节级 drift 由 `check_ci_schedule.py` 规则 2b 反向守护）
 - **启动编排治理**：BOOT-1~5 五项 spec 全部实施并验收（2026-11-08）—— CPU 生命周期与 SMP 握手、早期中断与时间设施顺序、启动失败传播、阶段契约与跨架构编排、调度启动与服务解耦；双架构统一 `kernel_main` 入口已于 2026-11-07 闭环
 - **aarch64 适配**：EL1 内核、多核协作调度、每核 tick 记账已就绪；**M4 用户态八块全部闭环**（mm 生命周期 → 正式 EL0 用户任务 → 正式 SVC 与 uaccess 故障恢复 → 匿名 VMA 与按需缺页 → 原生 `SYS_fork` 与写时复制 → 原生 `SYS_waitpid` 与 ZOMBIE 回收 → 原生 `SYS_exec` 与用户栈参数传递 → 原生信号与 `sigreturn`），单核 BSP 自测镜像 kernel-selftest 27/27（运行方式见 `docs/build/build.md`）；共享 syscall 表在 aarch64 侧已服务 15 项；**产品路径仍缺** VFS `/bin/init`、文件/共享/设备映射、`MAP_FIXED`、SMP 用户调度与 IRQ 抢占（aarch64 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 仍为 0）
 - **用户态 libc**：补全 T1~T17 闭环（2026-11-09），15 个接口组全部交付且有 host + guest 证据；**POSIX 正则引擎（T16）与 glob 匹配本期不实现**（用户决定，保留桩）
@@ -31,14 +32,15 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 
 > **P0 工程基础** ✅（仅剩两项尾巴，见下） → **P1 安全加固** → **P2 aarch64 适配 + 架构治理/扩展性** → **P3 GUI** → **P4 硬件适配** → **P5 ABI 扩展/兼容性**
 
-### 🧰 P0 工程与测试基础设施（仅剩两项尾巴）
+### 🧰 P0 工程与测试基础设施（仅剩一项尾巴）
 
 2026-11-14 的测试框架生成式目录重构已闭环（spec [2026-11-14-test-framework-design.md](superpowers/specs/2026-11-14-test-framework-design.md) / plan [2026-11-14-test-framework-redesign.md](superpowers/plans/2026-11-14-test-framework-redesign.md)）。当前形态：`config/test-catalog.json` 由 `tools/tests/scan_tests.py` 扫描 `@os01-test` 元数据生成并入库，六处平行的 SUITE 白名单收敛到 `mk/generated/test-dispatch.mk` 单一源，宿主测试注册表消费生成清单（手写 `register_host_test` / `TEST_BINS` 已退役），场景目录 `config/test-scenarios.json`（340 场景）按层归属校验，断言分层政策 + `config/assertion-exemptions.json` 豁免登记 + `docs/testing/audit-dispositions.md` 处置台账到位。
 
 | 项 | 内容 / 完成条件 | 依赖 | 备注 |
 |----|-----------------|------|------|
-| 目录漂移门禁接入 CI | `make check-test-catalog` 已实现且有单测覆盖，但**尚未挂进 `.github/workflows/ci.yml`**；CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`。挂上后目录漂移在 PR 阶段即暴露，不再依赖本地 `make regen-test-catalog` 自觉 | 生成器与 drift gate ✅ | `mk/components/run.mk:704` |
 | flake 账本入库 | `make test-flake-report` 报告器已就位（连续失败 ≥3 轮标记 quarantine 候选），但**账本本身没有入库文件**，只能从 CI artifacts 现算，本地无历史账本可审计 | 报告器 ✅ | `qemutests/flake_report.py`、`mk/components/run.mk:710` |
+
+**已闭环（2026-11-17）：目录漂移门禁接入 CI** —— `make check-test-catalog` 已挂进 `.github/workflows/ci.yml` 的 `harness` job（与 `make check-ci-schedule` 并列），并由 `tools/tests/check_ci_schedule.py` 的新规则 2b 做反向守护：harness job 缺 `make check-test-catalog` 即判定为漂移。实测依据：该门禁是 `GENERATED_REL_PATHS` 六个生成文件的**字节级**比对，而 harness 的 `test_catalog_gen` 等模块只做**语义级**比对（提取字段后 set 比较），因此空白/格式级漂移此前可同时逃过两者——受控扰动实验（给 `config/test-ci-schedule.json`、`config/test-catalog.json`、`mk/generated/test-dispatch.mk` 各加一个换行）确认：语义扰动被 harness 捕获，字节扰动只被 `check-test-catalog` 捕获。守护测试见 `qemutests/test_ci_schedule_check.py::test_catalog_drift_gate_is_wired_in_ci` 与 `::test_missing_catalog_drift_gate_fails`。
 
 ### 🔒 P1 安全加固
 
@@ -242,6 +244,7 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 | **构建系统瘦身与表驱动**（RED/canary 管线脚本化、静态审计表驱动、`run.mk` 别名裁撤、聚焦用例与 boot 矩阵由宏生成） | 2026-11-15 | [build.md](build/build.md) · [changelog](changelog.md#2026-11-15) |
 | **x86 帧缓冲宽写 + RAM shadow 滚动缓冲（`FB_SHADOW=1`，默认关）+ present A/B 诊断** | 2026-11-15 ~ 16 | [driver.md](driver/driver.md#帧缓冲驱动) · [changelog](changelog.md#2026-11-16) |
 | **`timeit` 墙钟计时命令**（`CLOCK_MONOTONIC` + libc `execvp` PATH 搜索；无 user/sys 分项，因内核无 per-task CPU 时间累加器） | 2026-11-16 | [changelog](changelog.md#2026-11-16) |
+| **目录漂移门禁接入 CI**（`make check-test-catalog` 进 CI `harness` job；字节级 drift gate + `check_ci_schedule.py` 规则 2b 反向守护） | 2026-11-17 | [changelog](changelog.md#2026-11-17) |
 
 ---
 

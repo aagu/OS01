@@ -168,10 +168,15 @@ OS01 实行多层防护策略，每一层有明确的证明目标与局限性，
 （`qemutests/test_catalog_gen.py`：删除 harness 模块应收缩清单并触发漂移、
 改动目录应使漂移检查失败）。
 
-> **缺口（如实记录）**：`check-test-catalog` **尚未挂进 `.github/workflows/ci.yml`**——
-> CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`，目录漂移只能靠本地
-> `make regen-test-catalog` 自觉或在 `make test-harness` 的单测中间接暴露。
-> 规划项见 [roadmap.md](../roadmap.md) P0。
+> **已闭环（2026-11-17）**：`check-test-catalog` 已挂进 `.github/workflows/ci.yml` 的
+> `harness` job（与 `make check-ci-schedule` 并列），目录漂移在 PR 阶段即暴露，不再依赖本地
+> `make regen-test-catalog` 自觉。接线由 `tools/tests/check_ci_schedule.py` 规则 2b 反向守护：
+> harness job 缺 `make check-test-catalog` 即判定漂移。
+>
+> **为什么这条门禁不可省**：该门禁是生成物的**字节级**比对，而 `make test-harness` 内的
+> `test_catalog_gen` / `test_dispatch_generated` / `test_link_rules` 只做**语义级**比对
+> （提取字段后 set 比较）。受控扰动实验证实：语义篡改被 harness 捕获，空白/格式级
+> 字节漂移只被 `check-test-catalog` 捕获。
 
 ### 8.3 六处并行维护收敛为单一源
 

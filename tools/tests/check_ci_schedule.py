@@ -234,6 +234,14 @@ def check(root: str | Path) -> list[str]:
     if "make test-harness" not in harness_cmds:
         errors.append("harness job missing explicit 'make test-harness'")
 
+    # 2b. Harness job must explicitly invoke the generated-catalog drift gate.
+    # `make check-test-catalog` is the only byte-level guard on the generated
+    # files under config/ and mk/generated/; the harness modules compare
+    # semantics, so byte-level drift survives them.  Without this wiring the
+    # gate exists only as a local `make` target nobody runs.
+    if "make check-test-catalog" not in harness_cmds:
+        errors.append("harness job missing explicit 'make check-test-catalog'")
+
     # 3. PR required checks in x86-checks and aarch64-checks
     x86_cmds = "\n".join(line for s in steps if s["job"] == "x86-checks" for line in s["lines"])
     for smp in ("1", "2"):
