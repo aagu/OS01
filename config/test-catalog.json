@@ -1053,6 +1053,19 @@
       }
     },
     {
+      "id": "test_aarch64_boot_elf",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.validate_elf"
+      ],
+      "link": "aarch64-boot-elf",
+      "source": "hosttests/cases/test_aarch64_boot_elf.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_color_printk_abi",
       "layer": "host",

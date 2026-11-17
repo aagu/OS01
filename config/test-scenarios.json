@@ -8479,6 +8479,31 @@
     "action": "unique",
     "reason": "Sole static audit of the configured AArch64 boot block build layout and its build-time validation"
    }
+  },
+  {
+   "id": "boot.lma.validate_elf",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "host runner invokes test_aarch64_boot_elf.elf",
+   "assertions": [
+    "the production aarch64 UEFI ELF validator accepts a valid ELF per layout (default 0x40000000 and relocated 0x42000000 instances linked side by side)",
+    "the relocated instance rejects entry mismatch (dedicated error category), 3-byte file entry, non-executable boot segment, identity segment below the LMA, broken high-half VMA/PA relation and memsz rounding past the handoff window"
+   ],
+   "failure_modes": [
+    "validator accepts a malformed kernel image, cannot accept a valid relocated ELF, or reports a generic error for the entry mismatch"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_boot_elf.c",
+    "selector": "test-aarch64-boot-elf",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole host unit test of the pre-allocation UEFI kernel ELF validator across two layout instances"
+   }
   }
  ]
 }

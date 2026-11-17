@@ -39,6 +39,15 @@ SRCS := $(ROOT)/boot/uefi/main.c \
         $(ROOT)/boot/uefi/arch/aarch64/boot.c \
         $(ROOT)/boot/uefi/arch/aarch64/elf.c \
         $(ROOT)/boot/uefi/arch/aarch64/handoff.S
+# LMA Task 2: the boot block base travels into the posix-uefi compile
+# via the environment CFLAGS contract. The inner make cannot see a
+# command-line flag change, so the .aarch64_layout_cfg key below
+# (cmp-guarded, deletes the inner objects on change) is what actually
+# invalidates the app objects and the EFI.
+UEFI_LAYOUT_HEADERS := $(ROOT)/kernel/include/arch/aarch64/boot_layout.h \
+                       $(ROOT)/kernel/include/arch/aarch64/handoff_layout.h \
+                       $(ROOT)/boot/uefi/arch/aarch64/loader.h
+override UEFI_RUNTIME_CFLAGS += $(AARCH64_LAYOUT_CFLAGS)
 else
 $(error "unsupported ARCH: $(ARCH)")
 endif
@@ -105,10 +114,28 @@ UEFI_MAKE := $(MAKE) -j1 -C $(RUNTIME_DIR) ARCH=$(ARCH) TARGET=$(TARGET) OUTDIR=
 .PHONY: all clean
 all: $(OUTDIR)/$(TARGET)
 
+# Layout key (aarch64 only): carries the effective boot block base.
+# When the value changes, the inner objects under $(OUTDIR) are deleted
+# so the inner make must recompile them with the new -D — re-touching an
+# outer stamp alone would leave the old objects (and thus the old EFI)
+# in place. Content-guarded like the kernel build's stamps: an A→B→A
+# flip invalidates on every content change even though the file name
+# never varies.
+ifneq ($(strip $(UEFI_LAYOUT_HEADERS)),)
+$(OUTDIR)/.aarch64_layout_cfg: FORCE
+	@mkdir -p $(OUTDIR)
+	@printf '%s\n' 'base=$(AARCH64_BOOT_BLOCK_BASE)' > $@.new
+	@cmp -s $@.new $@ || { mv -f $@.new $@; find $(OUTDIR) -name '*.o' -delete; }
+AARCH64_LAYOUT_KEY := $(OUTDIR)/.aarch64_layout_cfg
+.PHONY: FORCE
+FORCE:
+endif
+
 $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
 		$(ROOT)/boot/uefi/boot_device.h \
 		$(ROOT)/kernel/include/core/bootinfo.h \
-		$(ROOT)/kernel/include/arch/aarch64/handoff_layout.h \
+		$(UEFI_LAYOUT_HEADERS) \
+		$(AARCH64_LAYOUT_KEY) \
 		$(UEFI_RUNTIME_STAMP)
 	# The runtime is already staged + patched by the uefi.mk adapter; never
 	# copy or mutate it here.
