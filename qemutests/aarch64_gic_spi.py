@@ -153,12 +153,12 @@ def self_test() -> None:
                 "aarch64_sched_entry", "aarch64_sched_irq",
                 "aarch64_sched_blocker", "aarch64_sched_reclaim",
                 "aarch64_sched_idle", "aarch64_sched_timer",
-                "aarch64_sched_ap"]
-    lines = ["[TEST] START v=1 suite=kernel-selftest expected=14"]
+                "aarch64_sched_ap", "aarch64_vfs"]
+    lines = ["[TEST] START v=1 suite=kernel-selftest expected=15"]
     lines += [f"[TEST] SELECT {c} required=1" for c in early_ids + late_ids]
     lines += [f"[TEST] BEGIN {c}" for c in early_ids + late_ids]
     lines += [f"[TEST] PASS {c}" for c in early_ids + late_ids]
-    lines += ["[TEST] END suite=kernel-selftest total=14 passed=14 "
+    lines += ["[TEST] END suite=kernel-selftest total=15 passed=15 "
               "failed=0 skipped=0"]
     protocol = "\n".join(lines) + "\n"
     assert scheduler_selftest_evidence_ok(protocol)
@@ -167,7 +167,7 @@ def self_test() -> None:
     assert not scheduler_selftest_evidence_ok(
         protocol.replace("[TEST] PASS aarch64_sched_ap\n", ""))
     assert not scheduler_selftest_evidence_ok(
-        protocol + "[TEST] END suite=kernel-selftest total=14 passed=14 "
+        protocol + "[TEST] END suite=kernel-selftest total=15 passed=15 "
         "failed=0 skipped=0\n")
 
 

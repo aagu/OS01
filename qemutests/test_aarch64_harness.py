@@ -1081,7 +1081,7 @@ def _sched_wire_log(cpus: int = 1) -> str:
             "tick_delta=4 irq_frame_ok=1 nested_schedule=0 irq_switches=0",
     }
     lines = ["[smp] topology source=uefi-dtb cpus=%d" % cpus]
-    lines.append("[TEST] START v=1 suite=kernel-selftest expected=14")
+    lines.append("[TEST] START v=1 suite=kernel-selftest expected=15")
     lines += [f"[TEST] SELECT {cid} required=1" for cid in ids]
     for cid in ids:
         lines.append("[selftest] %s... " % cid)
@@ -1099,7 +1099,7 @@ def _sched_wire_log(cpus: int = 1) -> str:
                              % (cid, evidence[cid]))
         lines.append(f"[TEST] BEGIN {cid}")
         lines.append(f"[TEST] PASS {cid}")
-    lines.append("[TEST] END suite=kernel-selftest total=14 passed=14 "
+    lines.append("[TEST] END suite=kernel-selftest total=15 passed=15 "
                  "failed=0 skipped=0")
     return "\n".join(lines) + "\n"
 
@@ -1127,8 +1127,8 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
             "stack_fail=0 sp_fail=0\n[TEST] BEGIN aarch64_sched_regs\n"
             "[TEST] PASS aarch64_sched_regs\n", "")
         text = text.replace("[TEST] SELECT aarch64_sched_regs required=1\n",
-                            "").replace("expected=14", "expected=13")
-        text = text.replace("total=14 passed=14", "total=13 passed=13")
+                            "").replace("expected=15", "expected=14")
+        text = text.replace("total=15 passed=15", "total=14 passed=14")
         ok, errors = self._ok(text)
         self.assertFalse(ok, "a missing case must fail")
 
@@ -1184,8 +1184,8 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
             "").replace(
             "[sched-evidence] id=aarch64_sched_ap cpu=1 scheduler_ok=1 "
             "nr_running=0 work_ok=1\n", "")
-        text = text.replace("expected=14", "expected=13")
-        text = text.replace("total=14 passed=14", "total=13 passed=13")
+        text = text.replace("expected=15", "expected=14")
+        text = text.replace("total=15 passed=15", "total=14 passed=14")
         ok, errors = self._ok(text)
         self.assertFalse(ok, errors or "a reduced manifest must fail")
 
@@ -1193,7 +1193,7 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
         text = self.log.replace(
             "[TEST] PASS aarch64_sched_blocker\n",
             "[TEST] FAIL aarch64_sched_blocker reason=rc_-1\n")
-        text = text.replace("total=14 passed=14", "total=14 passed=13")
+        text = text.replace("total=15 passed=15", "total=15 passed=14")
         text = text.replace("failed=0 skipped=0", "failed=1 skipped=0")
         ok, errors = self._ok(text)
         self.assertFalse(ok, "a FAIL record must fail")
@@ -1203,7 +1203,7 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
         text = self.log.replace(
             "[TEST] PASS slab_alloc_free\n",
             "[TEST] FAIL slab_alloc_free reason=rc_-1\n")
-        text = text.replace("total=14 passed=14", "total=14 passed=13")
+        text = text.replace("total=15 passed=15", "total=15 passed=14")
         text = text.replace("failed=0 skipped=0", "failed=1 skipped=0")
         ok, errors = self._ok(text)
         self.assertFalse(ok)
@@ -1212,20 +1212,20 @@ class SchedulerEvidenceParserTests(unittest.TestCase):
         text = self.log.replace(
             "[TEST] PASS aarch64_sched_timer\n",
             "[TEST] SKIP aarch64_sched_timer reason=1-cpu-shootdown\n")
-        text = text.replace("total=14 passed=14", "total=14 passed=13")
+        text = text.replace("total=15 passed=15", "total=15 passed=14")
         text = text.replace("failed=0 skipped=0", "failed=0 skipped=1")
         ok, errors = self._ok(text, cpus=2)
         self.assertFalse(ok, "a scheduler-case SKIP must fail")
 
     def test_trace_without_end_rejected(self):
         text = self.log.replace(
-            "[TEST] END suite=kernel-selftest total=14 passed=14 "
+            "[TEST] END suite=kernel-selftest total=15 passed=15 "
             "failed=0 skipped=0\n", "")
         ok, errors = self._ok(text)
         self.assertFalse(ok, "a crashed/truncated trace must fail")
 
     def test_partial_pass_totals_rejected(self):
-        text = self.log.replace("total=14 passed=14", "total=14 passed=13")
+        text = self.log.replace("total=15 passed=15", "total=15 passed=14")
         ok, errors = self._ok(text)
         self.assertFalse(ok, "END totals fewer than expected must fail")
 

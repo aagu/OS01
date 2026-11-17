@@ -127,6 +127,9 @@ struct vfs_node *vfs_lookup(const char *p) { (void)p; return NULL; }
 struct vfs_node *vfs_lookup_from(const char *p, const char *c)
 { (void)p; (void)c; return NULL; }
 
+bool uaccess_addr_is_user(uint64_t a) { return false; }
+int  uaccess_user_write_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
+void uaccess_user_write_end(void) {}
 int  user_write_range_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
 void user_write_range_end(void) {}
 int  user_read_range_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }

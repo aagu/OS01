@@ -30,6 +30,7 @@
 #include <memory/memory.h>     // Phy_To_Virt, PAGE_* constants
 #include <subsys/subsys.h>
 #include <log/log.h>
+#include <core/debug.h>          // debug_vfs (empty-slot probe trace)
 #include <stdlib.h>          // calloc/free
 #include <errno.h>
 #include <stddef.h>
@@ -51,6 +52,8 @@
 #define VMMIO_QUEUE_PFN          0x040   // legacy: queue region PFN (addr >> 12)
 #define VMMIO_QUEUE_READY        0x044
 #define VMMIO_QUEUE_NOTIFY       0x050
+#define VMMIO_INTERRUPT_STATUS   0x060
+#define VMMIO_INTERRUPT_ACK      0x064
 #define VMMIO_STATUS             0x070
 #define VMMIO_QUEUE_DESC_LOW     0x080
 #define VMMIO_QUEUE_DESC_HIGH    0x084
@@ -282,6 +285,15 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
         (void)id;
         rc = (d->status[chain] == VIRTIO_BLK_S_OK) ? 0 : -EIO;
     }
+
+    // Acknowledge the device interrupt.  We complete requests by polling,
+    // but the transport raises its IRQ line on every completion and the
+    // line stays asserted until InterruptACK — leaving it pending turns
+    // every later GIC dispatch into a spurious "unexpected IRQ" and
+    // perturbs the interrupt order for other drivers.
+    uint32_t ist = r32(d, VMMIO_INTERRUPT_STATUS);
+    if (ist)
+        w32(d, VMMIO_INTERRUPT_ACK, ist);
     return rc;
 }
 
@@ -451,8 +463,10 @@ static int virtio_blk_probe_slot(uint64_t base, uint32_t spi)
     // default, force-legacy=on); VersionID 2 = modern.  Empty slots keep
     // the 'virt' magic but answer DeviceID 0.
     if (devid != 2 /* block */ || (version != 1 && version != 2)) {
-        log_warn("virtio-blk: slot %lx version=%u devid=%u — skipped\n",
-                 (unsigned long)base, version, devid);
+        /* Empty slot or non-block device: not boot-visible noise — only
+         * a debug line (QEMU virt exposes 31 empty slots per boot). */
+        debug_vfs("virtio-blk: slot %lx version=%u devid=%u — skipped\n",
+                  (unsigned long)base, version, devid);
         free(d);
         return 0;
     }

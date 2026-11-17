@@ -169,10 +169,20 @@ int main(void)
             if (ctx.args[j] != 11 * (j + 1)) return 1;
     }
 
-    /* Numbers the AArch64 port does not serve: a plain read, the
-     * unimplemented getpeername slot, futex (x86-only block), an
-     * out-of-range number, and a high-bit polluted number. */
-    if (syscall_has_handler(SYS_read) || syscall_has_handler(SYS_getpeername) ||
+    /* The fs syscall group is served together with the VFS gate
+     * (kernel/syscall/sys_fs.c, OS01_HAS_VFS=1 on aarch64 since
+     * 2026-11-18). */
+    if (!syscall_has_handler(SYS_read) || !syscall_has_handler(SYS_open) ||
+        !syscall_has_handler(SYS_close)) {
+        fprintf(stderr, "AArch64 VFS-gated fs group must be served\n");
+        return 1;
+    }
+
+    /* Numbers the AArch64 port does not serve: a socket call (net stays
+     * hidden behind OS01_HAS_NET=0), the unimplemented getpeername slot,
+     * futex (x86-only block), an out-of-range number, and a high-bit
+     * polluted number. */
+    if (syscall_has_handler(SYS_socket) || syscall_has_handler(SYS_getpeername) ||
         syscall_has_handler(SYS_futex) ||
         syscall_has_handler(UINT64_MAX) ||
         syscall_has_handler((1ULL << 32) | SYS_getpid)) {
@@ -180,7 +190,7 @@ int main(void)
         return 1;
     }
     const uint64_t hidden[] = {
-        SYS_read, SYS_getpeername, SYS_futex, UINT64_MAX,
+        SYS_socket, SYS_getpeername, SYS_futex, UINT64_MAX,
         (1ULL << 32) | SYS_getpid,
     };
     for (unsigned i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {

@@ -113,6 +113,9 @@ int strnlen_user(const void *p, size_t m) { (void)p; (void)m; return 0; }
 bool syscall_check_user_range(uint64_t a, uint64_t l, bool w)
 { (void)a; (void)l; (void)w; return true; }
 
+bool uaccess_addr_is_user(uint64_t a) { return false; }
+int  uaccess_user_write_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
+void uaccess_user_write_end(void) {}
 int  user_write_range_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
 void user_write_range_end(void) {}
 int  user_read_range_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }

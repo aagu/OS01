@@ -143,6 +143,9 @@ void vfs_node_put(struct vfs_node *node)
  * Their handlers must link even though this test never touches them. */
 void get_random_bytes(void *b, size_t n) { (void)b; (void)n; }
 void random_add_entropy(const void *d, size_t n) { (void)d; (void)n; }
+bool uaccess_addr_is_user(uint64_t a) { return false; }
+int  uaccess_user_write_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
+void uaccess_user_write_end(void) {}
 int  user_write_range_begin(uint64_t a, size_t l) { (void)a; (void)l; return 0; }
 void user_write_range_end(void) {}
 char read_serial(void) { return 0; }

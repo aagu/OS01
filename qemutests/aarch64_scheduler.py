@@ -120,8 +120,11 @@ EARLY_IDS = ("slab_alloc_free", "slab_many_sizes", "slab_16_caches",
 # The nine late IDs come from the shared frozen tuple in the P4 gate
 # module — one source of truth for the series.
 LATE_IDS = tuple(SCHEDULER_LATE_IDS)
-EXPECTED_IDS = tuple(EARLY_IDS) + LATE_IDS
-EXPECTED_TOTAL = len(EXPECTED_IDS)          # 14
+# The aarch64 VFS-gate acceptance (2026-11-18) is recorded by the same
+# late driver, after the nine frozen scheduler cases.
+VFS_LATE_IDS = ("aarch64_vfs",)
+EXPECTED_IDS = tuple(EARLY_IDS) + LATE_IDS + VFS_LATE_IDS
+EXPECTED_TOTAL = len(EXPECTED_IDS)          # 15
 
 SCHED_FAULT_CASES = ("sp-top", "sp-low", "pc-low", "pc-data")
 SCHED_CASES = SCHED_FAULT_CASES + ("positive", "all")
@@ -833,7 +836,7 @@ def _selftest_fixture(cpus=2):
         "aarch64_sched_timer":
             "tick_delta=3 irq_frame_ok=1 nested_schedule=0 irq_switches=0",
     }
-    lines = ["[TEST] START v=1 suite=kernel-selftest expected=14"]
+    lines = ["[TEST] START v=1 suite=kernel-selftest expected=15"]
     lines += [f"[TEST] SELECT {cid} required=1" for cid in EXPECTED_IDS]
     for cid in EXPECTED_IDS:
         if cid.startswith("aarch64_sched_"):
@@ -849,7 +852,7 @@ def _selftest_fixture(cpus=2):
                 lines.append(f"[sched-evidence] id={cid} {evidence[cid]}")
         lines.append(f"[TEST] BEGIN {cid}")
         lines.append(f"[TEST] PASS {cid}")
-    lines.append("[TEST] END suite=kernel-selftest total=14 passed=14 "
+    lines.append("[TEST] END suite=kernel-selftest total=15 passed=15 "
                  "failed=0 skipped=0")
     return "\n".join(lines) + "\n"
 
@@ -874,23 +877,23 @@ def self_test():
                  "stack_fail=0 sp_fail=0\n", "") \
         .replace("[TEST] BEGIN aarch64_sched_regs\n", "") \
         .replace("[TEST] PASS aarch64_sched_regs\n", "") \
-        .replace("expected=14", "expected=13") \
-        .replace("total=14 passed=14", "total=13 passed=13")
+        .replace("expected=15", "expected=14") \
+        .replace("total=15 passed=15", "total=14 passed=14")
     bad(pruned)
     # duplicate terminal
     bad(base + "[TEST] PASS aarch64_sched_yield\n")
     # FAIL and SKIP records
     bad(base.replace("[TEST] PASS aarch64_sched_irq\n",
                      "[TEST] FAIL aarch64_sched_irq reason=rc_-1\n")
-        .replace("total=14 passed=14", "total=14 passed=13")
+        .replace("total=15 passed=15", "total=15 passed=14")
         .replace("failed=0 skipped=0", "failed=1 skipped=0"))
     bad(base.replace("[TEST] PASS aarch64_sched_timer\n",
                      "[TEST] SKIP aarch64_sched_timer reason=x\n")
-        .replace("total=14 passed=14", "total=14 passed=13")
+        .replace("total=15 passed=15", "total=15 passed=14")
         .replace("failed=0 skipped=0", "failed=0 skipped=1"))
     # crash: no END
-    bad(base.replace("[TEST] END suite=kernel-selftest total=14 "
-                     "passed=14 failed=0 skipped=0\n", ""))
+    bad(base.replace("[TEST] END suite=kernel-selftest total=15 "
+                     "passed=15 failed=0 skipped=0\n", ""))
     # timeout: nothing at all
     bad("")
     # swapped case blocks (regs <-> entry)
@@ -935,7 +938,7 @@ def self_test():
     # Fault evidence.
     def fault_log(case, switches="0", tail=""):
         reason = FAULT_REASONS[case]
-        text = (f"[TEST] START v=1 suite=kernel-selftest expected=14\n"
+        text = (f"[TEST] START v=1 suite=kernel-selftest expected=15\n"
                 "[sched] idle-ready cpu=0 scheduler_ok=1 irq=on\n"
                 f"[sched-fault] case={case} phase=pre-switch target=3 "
                 f"switches_to_target={switches}\n"
@@ -959,7 +962,7 @@ def self_test():
     assert not ok
     ok, errors = parse_sched_fault(
         fault_log("pc-data", tail="[TEST] END suite=kernel-selftest "
-                    "total=14 passed=14 failed=0 skipped=0\n"),
+                    "total=15 passed=15 failed=0 skipped=0\n"),
         "pc-data", 2)
     assert not ok
     ok, errors = parse_sched_fault(

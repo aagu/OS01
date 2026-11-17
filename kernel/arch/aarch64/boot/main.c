@@ -663,6 +663,14 @@ void arch_boot_runtime(void)
         log_err("[smp] FATAL: BSP timer initialization failed\n");
         for (;;) arch_cpu_halt();
     }
+    /* Single-CPU boot: the SKIP line is a pure print — emit it BEFORE the
+     * SPI selftest arms and IRQs come up, so the harness-injected RX byte
+     * (which pends until [IRQ] enabled and prints its handled line right
+     * after) can never interleave mid-line with this kputs. */
+    bool shootdown_skip = dtb_cpu_count() < 2;
+    if (shootdown_skip)
+        kputs("SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
+
 #if OS01_SELFTEST
     gic_spi_test_init();
 #endif
@@ -671,10 +679,8 @@ void arch_boot_runtime(void)
     __asm__ __volatile__("isb" ::: "memory");
     ipi_ready_publish_and_count(0);
 
-    if (dtb_cpu_count() >= 2) {
+    if (!shootdown_skip) {
         aarch64_shootdown_probe();
-    } else {
-        kputs("SHOOTDOWN-PROBE: SKIP (single-CPU boot)\n");
     }
 
 #if AARCH64_SMP_TEST_NO_ACK_CPU == 1

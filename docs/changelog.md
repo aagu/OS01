@@ -1,9 +1,35 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-17）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-18）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-11-18
+
+- feat(aarch64): **打开 VFS 门（M4 剩余·产品用户态接入第一步）**——arch-neutral 文件系统栈接入 aarch64 产品内核，devfs / tmpfs / FAT32 / ext2 全部在 aarch64 侧工作：
+
+  **做了什么**
+
+  - 特性门：`OS01_HAS_VFS` aarch64 翻 1（`OS01_HAS_USERSPACE` 仍为 0——userland 构建链 crt0/linker/libc 不存在，/bin/init 装载属于后续任务）；新增 `OS01_HAS_NET` / `OS01_HAS_PCI` / `OS01_HAS_USB` 门，aarch64 相应裁剪 lwIP socket fd 路径与 PCI/USB devfs 注册。
+  - **devfs 下沉**：`kernel/arch/x86_64/fs/devfs.c` → `kernel/fs/devfs.c`，三处 x86 引用改为门面——higher-half 魔数 `0xffff800000000000` → `ARCH_PAGE_OFFSET`（aarch64 内核 VA 段不同，直接移植会误判内核指针）、random_read 的 user/kernel 判定 → 新门面 `uaccess_addr_is_user()` + `uaccess_user_write_begin/end()`（x86 持 pgdir_lock、aarch64 走 prepare 语义，均在 `memory/uaccess.h` 声明）、console tty 判定 → `get_dev_tty()`。
+  - **console 门面**：新增 `<arch/console.h>`（`arch_console_putchar` / `arch_console_input_attach`），tty/boot.c 脱离 x86 framebuffer；x86 后端保序 serial+keyboard 输入，aarch64 后端为 PL011 输出 + RX IRQ → `tty_push_input`（`gic_register_handler`/`gic_irq_configure`，DTB intid）。selftest 变体下让位给 GIC SPI 自测（避免 intid 33 handler 冲突）。
+  - **sys_fs 下沉**：`kernel/arch/x86_64/syscall/sys_fs.c` → `kernel/syscall/sys_fs.c`（唯一 x86 依赖是 include 行；`strnlen_user` → `syscall_strnlen_user` 门面）。dispatch.c 的 A64 子集在 `OS01_HAS_VFS` 下服务 fs syscall 组（write/read/open/…/fstatat）；net/proc/resource/time/misc 组仍隐藏。
+  - **virtio-blk-mmio 驱动**（aarch64 首个块设备）：DTB `virtio,mmio` 节点收集（可选节点，消费端运行时探测 MAGIC/VERSION/DEVICEID，不做地址白名单）；legacy v1 + modern v2 传输；MMIO 窗口 [0x0a000000, 0x0a200000) 在 `arch_boot_memory`（pre-SMP）经 TTBR1 2 MiB Device 块映射——STORAGE 阶段已在 `vmm_gate_check` 的 SMP 门后，必须提前；subsys 注册于 `SUBSYS_PHASE_STORAGE`（与 x86 device-boot 同相位）；轮询 used 环 + InterruptACK。
+  - **构建接入**：aarch64 源清单补 fs/（含 devfs）、tty 核心、block/、sync/、core/panic.c（fb 路径 x86 门）、arch/thermal.c、sys_fs；libk 子集补 vsnprintf/sprintf；`task_files_pin_by_pid` 以 weak 默认下沉 sched/core.c（x86 exit.c 强符号覆盖）。
+  - **镜像**：aarch64 selftest 变体盘改为 GPT 双分区（ESP FAT32: BOOTAA64.EFI + kernel.elf；ext2 rootfs: /etc/vfs-selftest.txt 标记 + /etc/inittab），`mkdisk` 增加 `--esp-kernel`（aarch64 loader 读 `\kernel.elf`）；默认（产品）变体保留无分区表 FAT32 superfloppy，覆盖整盘 FAT32 回退挂载路径。
+  - **验收自测**：`kernel/selftest/test_aarch64_vfs.c`（late 注册）——ext2 标记读、ESP kernel.elf/BOOTAA64.EFI magic、tmpfs create/write/read/unlink、devfs null/zero/urandom/tty/hdaN 节点、/dev/hda 扇区 0 MBR 签名；plain selftest 15/15、m4-1（EL0）28/28。
+
+  **顺手修复的既有问题**
+
+  - selftest fixture 的 "defined-but-unserved number" 探针从 SYS_read 改为 SYS_socket——SYS_read 自 VFS 门开启后已被服务，SYS_socket（net 组）仍隐藏。
+  - `aarch64_uefi_smp` / `aarch64_gic_spi` 的 selftest 协议契约 14→15 用例（含 `aarch64_vfs`），harness 单测同步；`SHOOTDOWN-PROBE: SKIP` 行提前到 SPI 自测 arm 之前打印，消除 harness 注入字节与 kputs 的行内交错。
+  - sched/core.c 的 weak 默认在 host 测试下不参与编译（mock 环境无 files_t）。
+
+  **已知边界**
+
+  - aarch64 的 FAT readdir 在卷标/LFN 项上返回 -1（短名限制，既有行为，x86 同样如此），验收用 lookup 而非枚举取证。
+  - 用户态 fd/syscall 面（open/read/write 经 EL0 SVC）已编入 dispatch 表但无用户任务可触发；/bin/init 装载需要 aarch64 userland 构建链（crt0/linker script/libc），为 M4 剩余任务的后续步骤。
 
 ## 2026-11-17
 

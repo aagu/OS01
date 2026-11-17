@@ -2,7 +2,7 @@
 
 ## Overview
 
-OS01 implements a layered filesystem stack: a VFS layer dispatches to concrete filesystem drivers (FAT32, ext2, tmpfs, devfs, procfs), which sit atop a block device abstraction backed by AHCI. GPT partition tables are parsed to discover the partition layout.
+OS01 implements a layered filesystem stack: a VFS layer dispatches to concrete filesystem drivers (FAT32, ext2, tmpfs, devfs, procfs), which sit atop a block device abstraction backed by AHCI (x86_64) or the virtio-blk-mmio driver (aarch64, DTB-discovered, legacy v1 / modern v2 transports). GPT partition tables are parsed to discover the partition layout.
 
 ---
 

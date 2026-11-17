@@ -337,14 +337,13 @@ def self_test() -> None:
 
     early_ids = ["slab_alloc_free", "slab_many_sizes", "slab_16_caches",
                  "aarch64_pt_vmm", "spinlock_basic"]
-    protocol_lines = ["[TEST] START v=1 suite=kernel-selftest expected=14"]
-    protocol_lines += [f"[TEST] SELECT {case} required=1" for case in
-                       early_ids + list(SCHEDULER_LATE_IDS)]
-    protocol_lines += [f"[TEST] BEGIN {case}" for case in
-                       early_ids + list(SCHEDULER_LATE_IDS)]
-    protocol_lines += [f"[TEST] PASS {case}" for case in
-                       early_ids + list(SCHEDULER_LATE_IDS)]
-    protocol_lines += ["[TEST] END suite=kernel-selftest total=14 passed=14 "
+    vfs_case = "aarch64_vfs"
+    all_cases = early_ids + list(SCHEDULER_LATE_IDS) + [vfs_case]
+    protocol_lines = ["[TEST] START v=1 suite=kernel-selftest expected=15"]
+    protocol_lines += [f"[TEST] SELECT {case} required=1" for case in all_cases]
+    protocol_lines += [f"[TEST] BEGIN {case}" for case in all_cases]
+    protocol_lines += [f"[TEST] PASS {case}" for case in all_cases]
+    protocol_lines += ["[TEST] END suite=kernel-selftest total=15 passed=15 "
                        "failed=0 skipped=0"]
     scheduler_protocol = "\n".join(protocol_lines) + "\n"
     assert scheduler_selftest_evidence_ok(scheduler_protocol)
@@ -353,7 +352,7 @@ def self_test() -> None:
     assert not scheduler_selftest_evidence_ok(
         scheduler_protocol.replace("[TEST] PASS aarch64_sched_ap\n", ""))
     assert not scheduler_selftest_evidence_ok(
-        scheduler_protocol + "[TEST] END suite=kernel-selftest total=14 "
+        scheduler_protocol + "[TEST] END suite=kernel-selftest total=15 "
         "passed=14 failed=0 skipped=0\n")
 
     # --expect-gic 断言（Task 2.1 + 3.1）：只用合成 log 测 gic_evidence_ok 解析
@@ -589,21 +588,28 @@ SCHEDULER_LATE_IDS = (
 )
 
 
+# The aarch64 VFS-gate acceptance (2026-11-18) appends one late case
+# after the nine frozen scheduler cases in the plain selftest manifest.
+SELFTEST_VFS_LATE_IDS = ("aarch64_vfs",)
+
+
 def scheduler_selftest_evidence_ok(text: str) -> bool:
-    """Require the full 14-case P4 kernel protocol and unique END."""
+    """Require the full 15-case P4+VFS-gate protocol and unique END."""
     text = text.replace("\r", "")
     starts = re.findall(r"^\[TEST\] START v=1 suite=kernel-selftest expected=(\d+)$",
                         text, re.MULTILINE)
     ends = re.findall(r"^\[TEST\] END suite=kernel-selftest total=(\d+) "
                       r"passed=(\d+) failed=(\d+) skipped=(\d+)$",
                       text, re.MULTILINE)
-    if len(starts) != 1 or starts[0] != "14" or len(ends) != 1:
-        print("FAIL: scheduler selftest requires one START(expected=14) and one END")
+    if len(starts) != 1 or starts[0] != "15" or len(ends) != 1:
+        print("FAIL: scheduler selftest requires one START(expected=15) and one END")
         return False
     selects = re.findall(r"^\[TEST\] SELECT ([^ ]+) required=1$", text,
                          re.MULTILINE)
-    if len(selects) != 14 or selects[-9:] != list(SCHEDULER_LATE_IDS) or \
-            len(set(selects)) != 14:
+    expected_late = list(SCHEDULER_LATE_IDS) + list(SELFTEST_VFS_LATE_IDS)
+    if len(selects) != len(expected_late) + 5 or \
+            selects[-len(expected_late):] != expected_late or \
+            len(set(selects)) != len(expected_late) + 5:
         print("FAIL: scheduler selftest SELECT set/order is incomplete or duplicated")
         return False
     begins = re.findall(r"^\[TEST\] BEGIN ([^ ]+)$", text, re.MULTILINE)
@@ -612,11 +618,12 @@ def scheduler_selftest_evidence_ok(text: str) -> bool:
     if begins != selects or passes != selects or failures:
         print("FAIL: scheduler selftest cases did not each BEGIN/PASS exactly once")
         return False
-    if tuple(map(int, ends[0])) != (14, 14, 0, 0):
+    if tuple(map(int, ends[0])) != (15, 15, 0, 0):
         print(f"FAIL: scheduler selftest END totals are invalid: {ends[0]}")
         return False
     end_at = re.search(r"^\[TEST\] END suite=kernel-selftest", text, re.MULTILINE)
-    if not end_at or max(text.find(f"[TEST] PASS {case}") for case in SCHEDULER_LATE_IDS) >= end_at.start():
+    if not end_at or max(text.find(f"[TEST] PASS {case}")
+                         for case in expected_late) >= end_at.start():
         print("FAIL: scheduler selftest END precedes late PASS records")
         return False
     return True
