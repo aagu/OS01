@@ -86,11 +86,14 @@ _Static_assert(RT_DESC_UXN == (UINT64_C(1)<<54), "UXN bit");
 /* Intermediate (table) PA mask: bits [39:12]. */
 #define RT_DESC_L_PA_MASK   UINT64_C(0x000000fffffff000)
 
-/* Spec constant sets (B kernel+handoff; D Device window). */
-#define RT_B_BASE  UINT64_C(0x40000000)
-#define RT_B_END   UINT64_C(0x40200000)
-#define RT_D_BASE  UINT64_C(0x08000000)
-#define RT_D_END   UINT64_C(0x0a000000)
+/* Spec constant sets (B kernel+handoff; D Device window), derived from
+ * the shared boot block layout so input validation, tree building and
+ * the expected-set iterator all consume the configured B/D, with no
+ * assumption about the PA ordering of B, D and R. */
+#define RT_B_BASE  (AARCH64_BOOT_BLOCK_BASE)
+#define RT_B_END   (AARCH64_BOOT_BLOCK_END)
+#define RT_D_BASE  (AARCH64_BOOT_DEVICE_BASE)
+#define RT_D_END   (AARCH64_BOOT_DEVICE_END)
 
 /* ── Input validation ───────────────────────────────────────── */
 
@@ -720,13 +723,12 @@ static int rt_iter_take(rt_tree_iter_t *it, uint64_t *out_pa,
 
 /* ── Expected-set iterator (PA-ascending) ─────────────────────
  *
- * Three streams in PA order:
- *   - D: 16 entries at PA 0x08000000 + i*0x200000 (i = 0..15).
- *   - B: 1 entry at PA 0x40000000.
+ * Three streams merged by lowest next PA — no assumption about the
+ * PA ordering of D, B and R (a relocated B may sit below, between or
+ * above parts of R):
+ *   - D: 16 entries at RT_D_BASE + i*0x200000 (i = 0..15).
+ *   - B: 1 entry at RT_B_BASE.
  *   - R: per ram range, PA-ascending.
- *
- * D finishes well before B starts (D's max = 0x09e00000 < B = 0x40000000).
- * B finishes before R starts (R's first PA ≥ 0x40200000 > B = 0x40000000).
  */
 typedef struct rt_exp_iter {
     const struct MEMORY_RANGE *ram;

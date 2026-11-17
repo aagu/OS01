@@ -68,11 +68,13 @@
  * aarch64_early_arena_prepare(). */
 extern struct Physical_Memory_Manager PMMngr;
 
-/* ── Spec constants local to this TU ────────────────────────── */
-#define AARCH64_B_BASE     UINT64_C(0x40000000)
-#define AARCH64_B_END      UINT64_C(0x40200000)
-#define AARCH64_D_BASE     UINT64_C(0x08000000)
-#define AARCH64_D_END      UINT64_C(0x0a000000)
+/* ── Spec constants (shared boot block layout; the B window and the
+ * arena lower bound move with the configured AARCH64_BOOT_BLOCK_BASE,
+ * the D window is the fixed boot device window) ─────────────── */
+#define AARCH64_B_BASE     (AARCH64_BOOT_BLOCK_BASE)
+#define AARCH64_B_END      (AARCH64_BOOT_BLOCK_END)
+#define AARCH64_D_BASE     (AARCH64_BOOT_DEVICE_BASE)
+#define AARCH64_D_END      (AARCH64_BOOT_DEVICE_END)
 #define PAGE_2M            UINT64_C(0x200000)
 #define PAGE_4K            UINT64_C(0x1000)
 

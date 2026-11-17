@@ -1,5 +1,6 @@
 /* UEFI-only DTB handoff wrapper. Pure parsing lives in dtb_parse.c. */
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/handoff_layout.h>
 #include <arch/cpu.h>
 #include <core/bootinfo.h>
 
@@ -49,8 +50,11 @@ static __attribute__((noreturn)) void dtb_fatal(const char *reason)
 
 void dtb_init(const struct boot_context *handoff)
 {
-    const uint64_t start = UINT64_C(0x401e0000);
-    const uint64_t end = UINT64_C(0x401ff000);
+    /* Derived handoff bounds (shared layout header): the DTB copy may
+     * use the data pages of the handoff window but never the
+     * executable trampoline page. */
+    const uint64_t start = (uint64_t)AARCH64_HANDOFF_BASE;
+    const uint64_t end = (uint64_t)AARCH64_TRAMPOLINE_BASE;
     if (!boot_context_valid(handoff) || !(handoff->flags & BOOT_CONTEXT_HAS_DTB))
         dtb_fatal("UEFI handoff has no DTB");
     uint64_t addr = handoff->firmware.dtb;

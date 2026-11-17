@@ -30,14 +30,6 @@
 #include <core/bootinfo.h>
 
 
-/* Low physical LMA helpers defined in head.S. Direct C references
- * to `_boot_start` / `_kernel_lma_end` would emit adrp+add against
- * low physical LMAs from high-half C code, which exceeds the +/-4 GB
- * adrp range and fails the link. The ldr-literal helpers stay
- * inside +/-1 MiB and resolve at link time. */
-extern uint64_t aarch64_boot_image_start_addr(void);
-extern uint64_t aarch64_kernel_lma_end_addr(void);
-
 /* Static publication state. Held in BSS; initialized is the same
  * flag the publisher guards -- a second call (e.g. from a future
  * subsystem retry) gets the spec's -2 return and leaves the map
@@ -69,7 +61,6 @@ static int checked_mul_u64(uint32_t a, uint32_t b, uint64_t *out)
 
 int aarch64_ram_init(const struct boot_context *handoff)
 {
-    struct aarch64_ram_interval excludes[2];
     struct aarch64_ram_map candidate;
     uint64_t entries_phys;
     uint64_t entries_end;
@@ -118,45 +109,25 @@ int aarch64_ram_init(const struct boot_context *handoff)
     if (entries_end > AARCH64_TRAMPOLINE_BASE)
         ram_fatal("[smp] FATAL: descriptor buffer crosses trampoline\n");
 
-    /* Build the two production exclusions. Both ranges are physical
-     * LMAs / fixed handoff addresses; the linker's _kernel_lma_end
-     * assertion guarantees the kernel never overlaps the handoff
-     * window, but we still construct them in the correct order:
-     * the kernel image first, then the handoff allocation itself.
-     * The LMAs come from head.S helpers because the high-half C
-     * adrp+add sequence cannot span the ~2^48 gap. */
-    {
-        uint64_t ks_start = aarch64_boot_image_start_addr();
-        uint64_t ks_end   = aarch64_kernel_lma_end_addr();
-        uint64_t hd_start = AARCH64_HANDOFF_BASE;
-        uint64_t hd_end   = AARCH64_HANDOFF_END;
-
-        if (ks_start >= ks_end)
-            ram_fatal("[smp] FATAL: kernel image exclusion not monotonic\n");
-        if (hd_start >= hd_end)
-            ram_fatal("[smp] FATAL: handoff exclusion not monotonic\n");
-
-        excludes[0].start = ks_start;
-        excludes[0].end   = ks_end;
-        excludes[1].start = hd_start;
-        excludes[1].end   = hd_end;
-    }
-
     /* Convert the descriptor physical address to a host pointer via
      * the high-half direct map (+ARCH_PAGE_OFFSET). We do NOT use
      * Phy_To_Virt() -- that macro is not defined for the AArch64
      * profile. The bit-pattern trick is intentional: the kernel's
-     * page tables identity-map low DRAM at ARCH_PAGE_OFFSET + phys. */
+     * page tables identity-map low DRAM at ARCH_PAGE_OFFSET + phys.
+     *
+     * The boot wrapper excludes the WHOLE configured boot block B
+     * (kernel image + handoff + any gap inside the 2 MiB block), not
+     * a second reservation derived from the old fixed addresses. */
     {
         const uint8_t *bytes = (const uint8_t *)(uintptr_t)
             (entries_phys + (uint64_t)ARCH_PAGE_OFFSET);
 
-        rc = aarch64_ram_normalize(bytes,
-                                   handoff->memory.entry_count,
-                                   handoff->memory.entry_size,
-                                   handoff->memory.format,
-                                   handoff->memory.descriptor_version,
-                                   excludes, 2u, &candidate);
+        rc = aarch64_ram_normalize_boot(bytes,
+                                        handoff->memory.entry_count,
+                                        handoff->memory.entry_size,
+                                        handoff->memory.format,
+                                        handoff->memory.descriptor_version,
+                                        &candidate);
     }
 
     if (rc != AARCH64_RAM_OK) {

@@ -15,6 +15,14 @@ _EDGE = re.compile(rf"^M1 EDGE PASS zone=(\d+) first=({_HEX}) last=({_HEX})$")
 _BSP = re.compile(rf"^M1 BSP PASS root=({_HEX}) ranges=(\d+)$")
 _AP = re.compile(rf"^M1 AP PASS cpu=(\d+) root=({_HEX}) probe=(none|{_HEX})$")
 _PROBE = re.compile(rf"^M1 PROBE PASS pa=({_HEX})$")
+_PRUNE_PASS = re.compile(rf"^M1 PRUNE PASS pa=({_HEX}) before=valid after=fault$")
+_PRUNE_SKIP = re.compile(r"^M1 PRUNE SKIP reason=no-candidate$")
+
+# Default-layout guest constants the m1-ram matrix boots with (the
+# relocated QEMU evidence is the lma-layout runner's business).
+_M0_END = WINDOW_END
+_D_BASE, _D_END = 0x08000000, 0x0a000000
+_B_BASE, _B_END = 0x40000000, 0x40200000
 
 
 def _lines(text: str, prefix: str) -> list[str]:
@@ -131,9 +139,27 @@ def _m1_evidence_ok(text: str, cpus: int, selftest: bool, ram_mib: int,
             edge_ids.append(zone_id)
         if len(set(edge_ids)) != len(edge_ids) or set(edge_ids) != set(zone_ids):
             return False
+        # The prune evidence is validated, not matched literally: the
+        # probe PA must be a 2 MiB-aligned M0 block disjoint from the
+        # default B/D windows and from every installed zone. A
+        # no-candidate skip is accepted (the kernel logs it and runs
+        # the remaining selftests).
+        prune_lines = _lines(text, "M1 PRUNE")
+        if len(prune_lines) != 1:
+            return False
+        prune_match = _PRUNE_PASS.fullmatch(prune_lines[0])
+        if prune_match is not None:
+            prune_pa = int(prune_match.group(1).removeprefix("0x"), 16)
+            if prune_pa % PAGE_2M or prune_pa >= _M0_END:
+                return False
+            if _D_BASE <= prune_pa < _D_END or _B_BASE <= prune_pa < _B_END:
+                return False
+            if any(start <= prune_pa < end for _, start, end, _ in zones):
+                return False
+        elif _PRUNE_SKIP.fullmatch(prune_lines[0]) is None:
+            return False
         for prefix, expected in (
             ("M1 SELFTEST", r"M1 SELFTEST PASS"),
-            ("M1 PRUNE", r"M1 PRUNE PASS pa=0x00200000 before=valid after=fault"),
             ("M1 CLEANUP", r"M1 CLEANUP PASS slot=256"),
         ):
             markers = _lines(text, prefix)

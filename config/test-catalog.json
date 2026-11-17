@@ -1066,6 +1066,19 @@
       "source": "hosttests/cases/test_aarch64_boot_elf.c"
     },
     {
+      "id": "test_aarch64_boot_layout",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.reserve_ram"
+      ],
+      "link": "aarch64-boot-layout",
+      "source": "hosttests/cases/test_aarch64_boot_layout.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_color_printk_abi",
       "layer": "host",

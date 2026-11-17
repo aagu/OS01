@@ -30,6 +30,7 @@
 #include <stddef.h>
 
 #include <arch/aarch64/ram.h>
+#include <arch/aarch64/boot_layout.h>
 
 /* The raw UEFI memory descriptor the firmware emits is 48 bytes; the
  * loader prepends a 32-byte prefix (a `boot_memory_map` head that
@@ -114,6 +115,19 @@ int aarch64_ram_normalize(const uint8_t *bytes, uint32_t entry_count,
                           const struct aarch64_ram_interval *exclude,
                           uint32_t exclude_count,
                           struct aarch64_ram_map *out);
+
+/* Boot-entry wrapper over aarch64_ram_normalize(): subtracts the WHOLE
+ * configured boot block B = [AARCH64_BOOT_BLOCK_BASE,
+ * AARCH64_BOOT_BLOCK_END) — not just the kernel image and handoff
+ * allocation inside it — so no page within the 2 MiB boot block ever
+ * reaches the PMM, regardless of gaps inside B. The general
+ * exclusion-list interface stays available to other callers. Same
+ * validation, same output contract and error codes as
+ * aarch64_ram_normalize(); the caller passes NO exclusion list. */
+int aarch64_ram_normalize_boot(const uint8_t *bytes, uint32_t entry_count,
+                               uint32_t entry_size, uint32_t format,
+                               uint32_t descriptor_version,
+                               struct aarch64_ram_map *out);
 
 /* Publish `*candidate` into `*destination` exactly once across the
  * loader's lifetime.

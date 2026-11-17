@@ -427,6 +427,25 @@ int aarch64_ram_normalize(const uint8_t *bytes, uint32_t entry_count,
     return AARCH64_RAM_OK;
 }
 
+/* ── Boot-entry wrapper ────────────────────────────────────────
+ * Excludes the whole configured boot block B (shared layout header):
+ * the kernel image and the handoff allocation both live inside B, and
+ * M1 maps B with 2 MiB blocks, so gaps inside B must not leak into
+ * the PMM either. */
+int aarch64_ram_normalize_boot(const uint8_t *bytes, uint32_t entry_count,
+                               uint32_t entry_size, uint32_t format,
+                               uint32_t descriptor_version,
+                               struct aarch64_ram_map *out)
+{
+    struct aarch64_ram_interval exclude;
+
+    exclude.start = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
+    exclude.end = (uint64_t)AARCH64_BOOT_BLOCK_END;
+    return aarch64_ram_normalize(bytes, entry_count, entry_size, format,
+                                 descriptor_version,
+                                 &exclude, 1u, out);
+}
+
 /* ── Publisher ─────────────────────────────────────────────────
  * Validate-then-copy map publication helper, shared by the boot
  * wrapper and the host runner. Returns 0 on the first successful

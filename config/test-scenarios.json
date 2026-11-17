@@ -8504,6 +8504,33 @@
     "action": "unique",
     "reason": "Sole host unit test of the pre-allocation UEFI kernel ELF validator across two layout instances"
    }
+  },
+  {
+   "id": "boot.lma.reserve_ram",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "host runner invokes test_aarch64_boot_layout.elf",
+   "assertions": [
+    "aarch64_ram_normalize_boot excludes the whole configured boot block from a spanning EFI RAM descriptor and keeps both sides",
+    "the early-arena plan starts at B.end for the relocated layout",
+    "M1 build+validate succeed with R on both sides of B; the tree maps B Normal executable, low R and the old default block plain Normal NX, D Device NX",
+    "an R covering B is rejected by both the arena planner and the tree builder"
+   ],
+   "failure_modes": [
+    "arena/tree misusing the default B, boot block pages leaking to the PMM, or the old block keeping execute permission"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_boot_layout.c",
+    "selector": "test-aarch64-boot-layout",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole host contract test carrying the configured boot block through RAM reservation, early arena and the M1 tree"
+   }
   }
  ]
 }
