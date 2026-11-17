@@ -26,6 +26,18 @@
       }
     },
     {
+      "id": "aarch64-boot-lma-layout",
+      "layer": "static",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.configure"
+      ],
+      "source": "qemutests/aarch64_smp_test.py"
+    },
+    {
       "kind": "suite",
       "id": "aarch64-gic-spi",
       "layer": "qemu_e2e",

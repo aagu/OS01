@@ -363,6 +363,12 @@ ifeq ($(ARCH),aarch64)
 # AAGU-4.3 closes the kernel/include/compat/* mirror (6 sub-issues
 # landed). The compat/ path is no longer needed.
 ALL_CFLAGS += -I$(CURDIR)/../libc/include
+# Shared boot-block layout (spec 2026-11-17-aarch64-kernel-lma §2): the
+# profile-validated AARCH64_BOOT_BLOCK_BASE reaches kernel C AND the
+# preprocessed assembly (.S rules use ALL_CFLAGS) as -D; boot_layout.h
+# derives every other layout constant. The same flags feed the
+# preprocessed linker script (LINKER_SCRIPT below).
+ALL_CFLAGS += $(AARCH64_LAYOUT_CFLAGS)
 endif
 # ../runtime/builtins/udivti3.c (single-source __udivti3, see
 # docs/arch/cross-boundary-symbols.md §2.1) includes <os01/compiler_rt.h>
@@ -624,6 +630,41 @@ $(LINK_KEY_STAMP): LINK_KEY_STAMP_FORCE
 	@mkdir -p $(dir $@)
 	@printf '%s\n' 'linker=$(TARGET_LD) ldflags=$(strip $(ALL_LDFLAGS) $(LIBS) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR))' > $@.new
 	@cmp -s $@.new $@ || mv -f $@.new $@
+
+# ── Linker script ──────────────────────────────────────────
+# x86_64 links its handwritten script directly. AArch64 pre-processes
+# the template kernel/arch/aarch64/linker.ld ONCE into
+# $(BUILD_DIR)/linker.generated.ld with the SAME layout -D as kernel
+# C/asm (AARCH64_LAYOUT_CFLAGS), so stage1 and the final link share one
+# generated artifact per effective configuration, and the linker
+# ASSERTs evaluate against the real configured entry/handoff bounds.
+#
+# The publish is cmp-guarded (timestamp only moves when content
+# changes): an A→B→A configuration flip must regenerate on every
+# content change even though the file NAME never varies — a stale
+# B-script surviving an A rebuild would silently link the wrong
+# layout. Objects additionally re-key through FLAGS_STAMP, which
+# carries the same -D.
+ifeq ($(ARCH),aarch64)
+LINKER_SCRIPT := $(BUILD_DIR)/linker.generated.ld
+# Config-key stamp: carries the EFFECTIVE layout value, cmp-guarded like
+# the flags stamp. Without it, an A→B→A configuration flip finds the
+# template and header unchanged (older than the generated script) and
+# silently keeps the stale B-content script.
+AARCH64_LINKER_CFG_STAMP := $(BUILD_DIR)/.linker_cfg
+.PHONY: LINKER_CFG_STAMP_FORCE
+LINKER_CFG_STAMP_FORCE:
+$(AARCH64_LINKER_CFG_STAMP): LINKER_CFG_STAMP_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'base=$(AARCH64_BOOT_BLOCK_BASE)' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+$(LINKER_SCRIPT): $(ARCHDIR)/linker.ld include/arch/aarch64/boot_layout.h $(AARCH64_LINKER_CFG_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) -E -P -undef -nostdinc -x c -I$(CURDIR)/include $(AARCH64_LAYOUT_CFLAGS) $< -o $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+else
+LINKER_SCRIPT := $(ARCHDIR)/$(ARCH_LINKER)
+endif
 
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install-headers
@@ -1004,7 +1045,7 @@ endif
 # (e.g., editing libc/stdio/vsprintf.c) triggers a relink without an
 # explicit kernel-clean.  Without this, make cannot know that -lk has
 # new content; the link only re-runs when KERNEL_OBJECTS changes.
-$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(ARCHDIR)/$(ARCH_LINKER) $(LINK_KEY_STAMP) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+$(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(LINKER_SCRIPT) $(LINK_KEY_STAMP) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
 	complete="$(KERNEL_RUNTIME_LINK_RECEIPT)"; \
@@ -1021,7 +1062,7 @@ $(BUILD_DIR)/kernel.elf.stage1: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $
 	  for arg do escaped=$$(printf '%s' "$$arg" | sed "s/'/'\\\\''/g"); printf " '%s'" "$$escaped"; done; \
 	  printf '\n'; \
 	}; \
-	set -- $(EFFECTIVE_CC) $(ALL_LDFLAGS) -o "$$elf_tmp" $(KERNEL_OBJECTS) -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS) $(KERNEL_RUNTIME_INPUTS); \
+	set -- $(EFFECTIVE_CC) $(ALL_LDFLAGS) -o "$$elf_tmp" $(KERNEL_OBJECTS) -T $(LINKER_SCRIPT) $(LIBS) $(KERNEL_RUNTIME_INPUTS); \
 	if [ "$(KERNEL_LINK_FAULT_INJECT)" = stage1-link ]; then echo "ERROR: injected stage1 link failure" >&2; false; fi; \
 	"$$@"; \
 	write_command stage1 "$$@" > "$$partial_tmp"; \
@@ -1046,7 +1087,7 @@ $(BUILD_DIR)/kernel/kallsyms.o: core/kallsyms.c $(BUILD_DIR)/kernel.elf.stage1
 # linker script) changes, so a no-op `make kernel.bin` does not relink.
 
 # ── Final link ──────────────────────────────────────────────
-$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(BUILD_DIR)/kernel/kallsyms.o $(ARCHDIR)/$(ARCH_LINKER) $(LINK_KEY_STAMP) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
+$(BUILD_DIR)/kernel.elf: $(KERNEL_OBJECTS) $(LIBC_BUILD_DIR)/lib/libk.a $(BUILD_DIR)/kernel/kallsyms.o $(LINKER_SCRIPT) $(LINK_KEY_STAMP) $(KERNEL_RUNTIME_PREREQ) $(KERNEL_RUNTIME_RELINK_PREREQ)
 ifeq ($(ARCH),x86_64)
 	@set -eu; \
 	partial="$(KERNEL_RUNTIME_LINK_RECEIPT).stage1"; \
@@ -1071,7 +1112,7 @@ ifeq ($(ARCH),x86_64)
 	  printf '\n'; \
 	}; \
 	set -- $(TARGET_LD) $(KERNEL_RAW_LDFLAGS) $(KERNEL_RAW_LIBDIR) -o "$$elf_tmp" $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
-	    -T $(ARCHDIR)/$(ARCH_LINKER) -lk $(KERNEL_RUNTIME_INPUTS); \
+	    -T $(LINKER_SCRIPT) -lk $(KERNEL_RUNTIME_INPUTS); \
 	if [ "$(KERNEL_LINK_FAULT_INJECT)" = final-link ]; then echo "ERROR: injected final link failure" >&2; false; fi; \
 	"$$@"; \
 	cat "$$partial" > "$$receipt_tmp"; \
@@ -1084,7 +1125,7 @@ ifeq ($(ARCH),x86_64)
 	success=1
 else
 	$(EFFECTIVE_CC) $(ALL_LDFLAGS) -o $@ $(KERNEL_OBJECTS) $(BUILD_DIR)/kernel/kallsyms.o \
-	    -T $(ARCHDIR)/$(ARCH_LINKER) $(LIBS)
+	    -T $(LINKER_SCRIPT) $(LIBS)
 endif
 
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf

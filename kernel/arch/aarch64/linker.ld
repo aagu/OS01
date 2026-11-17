@@ -1,20 +1,30 @@
 /* aarch64 kernel linker script.
  *
- * Layout per the aarch64 phase-1 spec (§2.5, §2.2, §4):
+ * THIS FILE IS A PREPROCESSED TEMPLATE: the AArch64 build generates
+ * $(KERNEL_BUILD_DIR)/linker.generated.ld from it via the C preprocessor
+ * with the same -D layout flags as kernel C and assembly
+ * (AARCH64_LAYOUT_CFLAGS). Feed it to ld only through that generated
+ * script; the raw file is not directly linkable.
  *
- *   .boot   : VMA = LMA = 0x40080000 (low physical, RAM base 0x40000000 + 512 KiB)
+ * Layout per the aarch64 phase-1 spec (§2.5, §2.2, §4) and the
+ * 2026-11-17 LMA platform-config spec (§2):
+ *
+ *   .boot   : VMA = LMA = AARCH64_KERNEL_ENTRY (low physical boot block B,
+ *             default RAM base 0x40000000 + 512 KiB)
  *             Holds head.S + secondary trampoline + early-stack/page-table
- *             storage + DTB slot + aarch64_boot_percpu[].  QEMU `-kernel`
- *             loads by LMA and jumps to ENTRY(_start).
+ *             storage + DTB slot + aarch64_boot_percpu[].  The UEFI loader
+ *             allocates by p_paddr and jumps to ENTRY(_start).
  *
- *   .text / .rodata / .data / .bss : VMA = high half (0xffff0000_40080000 +
- *             _boot_size), LMA = sequential after .boot.  QEMU only needs
- *             the LMA bytes in low RAM; the high-half page table we build
- *             remaps them.
+ *   .text / .rodata / .data / .bss : VMA = high half (AARCH64_PAGE_OFFSET +
+ *             AARCH64_KERNEL_ENTRY + _boot_size), LMA = sequential after
+ *             .boot.  The loader only needs the LMA bytes in low RAM; the
+ *             high-half page table we build remaps them.
  *
  *   The dual LMA layout (low bytes, high VMA) is what makes the
  *   "identity copy at MMU-on" trick unnecessary.
  */
+
+#include <arch/aarch64/boot_layout.h>
 
 OUTPUT_FORMAT("elf64-littleaarch64")
 OUTPUT_ARCH(aarch64)
@@ -29,16 +39,16 @@ PHDRS
 
 /* High-half "kernel mirror" VMA: ARCH_PAGE_OFFSET + low load address.
  *
- * The spec sets ARCH_PAGE_OFFSET to 0xffff000000000000; for our load
+ * AARCH64_PAGE_OFFSET is 0xffff000000000000; for the default load
  * address 0x40080000 that yields 0xffff0000_40080000.  Sections after
  * .boot live here virtually and at sequential low LMAs physically. */
-_kernel_high_vma = 0xffff000040080000;
-_kernel_page_offset = 0xffff000000000000;
+_kernel_high_vma = AARCH64_PAGE_OFFSET + AARCH64_KERNEL_ENTRY;
+_kernel_page_offset = AARCH64_PAGE_OFFSET;
 
 SECTIONS
 {
     /* ── Low-physical .boot segment (VMA = LMA) ───────────────────── */
-    . = 0x40080000;
+    . = AARCH64_KERNEL_ENTRY;
 
     _boot_start = .;
 
@@ -144,7 +154,8 @@ SECTIONS
 
     _kernel_end = .;
     _kernel_lma_end = LOADADDR(.bss) + SIZEOF(.bss);
-    ASSERT(_kernel_lma_end <= 0x401e0000, "kernel overlaps UEFI handoff")
+    ASSERT(_kernel_lma_end <= AARCH64_HANDOFF_BASE, "kernel overlaps UEFI handoff")
+    ASSERT(_start == AARCH64_KERNEL_ENTRY, "aarch64 _start does not match the configured boot block entry")
 
     /* Sentinel: a couple of known symbols used by head.S to size .boot.bss
      * clearing and to compute page-table addresses. */

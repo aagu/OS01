@@ -8,17 +8,17 @@
  * the window and carries the `aarch64_handoff_stub` the BSP jumps
  * through to drop to EL1.
  *
- * Dependency-free: only <stdint.h>. The UEFI loader does not have
- * `-Ikernel/include` on its compile line, so consumers in
- * boot/uefi/arch/aarch64 pull this header via a relative path.
+ * The handoff window constants are owned by boot_layout.h as bare
+ * build-time constants (no C types/suffixes) shared with the
+ * preprocessed linker script; this header stays the C consumers'
+ * interface. Values fit in 32 bits, so bare-constant arithmetic in
+ * uint64_t contexts promotes correctly. The UEFI loader has no
+ * `-Ikernel/include`, so quoted-include resolution from this header's
+ * own directory is what keeps the loader build working.
  */
 #ifndef OS01_AARCH64_HANDOFF_LAYOUT_H
 #define OS01_AARCH64_HANDOFF_LAYOUT_H
 
-#include <stdint.h>
-
-#define AARCH64_HANDOFF_BASE       UINT64_C(0x401e0000)
-#define AARCH64_HANDOFF_END        UINT64_C(0x40200000)
-#define AARCH64_TRAMPOLINE_BASE    UINT64_C(0x401ff000)
+#include "boot_layout.h"
 
 #endif /* OS01_AARCH64_HANDOFF_LAYOUT_H */

@@ -8452,6 +8452,33 @@
     "action": "unique",
     "reason": "Primary host unit test verifying read-only GPT metadata parsing and partition publication"
    }
+  },
+  {
+   "id": "boot.lma.configure",
+   "owner": "static",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "python3 qemutests/aarch64_smp_test.py --layout-only --build-root <private-dir>",
+   "assertions": [
+    "private-root default and AARCH64_BOOT_BLOCK_BASE=0x42000000 builds produce the configured ELF entry (0x40080000 / 0x42080000) with the preserved AP/stack/boot-table checks",
+    "the build-generated linker script rejects an oversized kernel with 'kernel overlaps UEFI handoff'",
+    "unaligned, D-overlapping, arena-starved and out-of-M0 bases fail at build parse time",
+    "layout-only builds never write the default build root"
+   ],
+   "failure_modes": [
+    "layout -D lost across the controlled sub-make boundary, generated linker script stale after A→B→A flips, or invalid configurations accepted"
+   ],
+   "primary": {
+    "layer": "static",
+    "source": "qemutests/aarch64_smp_test.py",
+    "selector": "--layout-only --build-root",
+    "evidence": "EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole static audit of the configured AArch64 boot block build layout and its build-time validation"
+   }
   }
  ]
 }
