@@ -101,9 +101,17 @@ class BootFacadeHeadersTests(unittest.TestCase):
         #include <arch/features.h>
         #include <arch/boot.h>
 
-        _Static_assert(OS01_HAS_VFS == 0, "aarch64 must have OS01_HAS_VFS == 0");
+        /* 2026-11-18: the VFS gate opened on aarch64 (devfs/tmpfs/fat32/
+         * ext2 + virtio-blk); userspace (/bin/init) stays gated behind
+         * OS01_HAS_USERSPACE == 0 until the aarch64 userland build chain
+         * exists.  The plain selftest late manifest grew by the
+         * aarch64_vfs acceptance case. */
+        _Static_assert(OS01_HAS_VFS == 1, "aarch64 must have OS01_HAS_VFS == 1");
         _Static_assert(OS01_HAS_USERSPACE == 0, "aarch64 must have OS01_HAS_USERSPACE == 0");
-        _Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 9, "aarch64 default expected late count must be 9");
+        _Static_assert(OS01_HAS_NET == 0, "aarch64 must have OS01_HAS_NET == 0");
+        _Static_assert(OS01_HAS_PCI == 0, "aarch64 must have OS01_HAS_PCI == 0");
+        _Static_assert(OS01_HAS_USB == 0, "aarch64 must have OS01_HAS_USB == 0");
+        _Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 10, "aarch64 default expected late count must be 10");
         """
         res = self._run_clang("aarch64-none-elf", src, ["-fsyntax-only"])
         self.assertEqual(res.returncode, 0, f"aarch64 default syntax test failed:\nstdout: {res.stdout}\nstderr: {res.stderr}")
@@ -113,7 +121,7 @@ class BootFacadeHeadersTests(unittest.TestCase):
         #include <arch/boot.h>
         unsigned int test_call(void) { return arch_selftest_expected_late(); }
         """)
-        self.assertIn("ret i32 9", ir)
+        self.assertIn("ret i32 10", ir)
 
     def test_aarch64_variants(self) -> None:
         variants = [
