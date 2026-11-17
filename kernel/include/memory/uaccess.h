@@ -87,6 +87,26 @@ static inline ssize_t copy_from_user_ft(void *dst, const void *src, size_t n)
 // copy_to_user_ft or the owning architecture's locked write pair.
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable);
 
+/* Classify a raw pointer address against the owning architecture's user VA
+ * window: true = user pointer (needs the locked write-preparation pair
+ * before a kernel-side write), false = kernel pointer (write directly).
+ * Kernel-agnostic consumer: devfs random_read (AAGU-5 Cat C / Task 8 split).
+ *   x86_64:  [X86_USER_MIN_ADDR, current->addr_limit)
+ *   aarch64: [AARCH64_USER_MIN, AARCH64_USER_LIMIT) */
+bool uaccess_addr_is_user(uint64_t addr);
+
+/* Validate-and-lock a user write range before a kernel-side write into it
+ * (getrandom / devfs random read).  Kernel buffers pass through without
+ * check.  On success the caller MUST call uaccess_user_write_end(); on
+ * failure returns -EFAULT / -ENOMEM with nothing held.
+ *   x86_64:  holds current->mm->pgdir_lock across the write (getrandom
+ *            parity — see <arch/x86_64/uaccess.h> user_write_range_begin).
+ *   aarch64: validates and resolves lazy anon/COW pages via
+ *            syscall_prepare_user_write, without pinning mm->lock (no
+ *            concurrent-munmap pin exists on aarch64 yet). */
+int uaccess_user_write_begin(uint64_t addr, size_t len);
+void uaccess_user_write_end(void);
+
 /* Prepare [addr, addr+len) for a subsequent kernel-to-user write (e.g.
  * copy_to_user_ft).  x86_64 forwards to syscall_check_user_range;
  * AArch64 also resolves lazy anonymous pages / COW splits before blocking.

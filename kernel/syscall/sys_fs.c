@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <log/log.h>
-#include <arch/x86_64/uaccess.h>
+#include <arch/features.h>    // OS01_HAS_VFS gate on the fs syscall group
 
 // ── COPY_USER_STR macro (Task 7, symlink support) ───────────
 // Returns the string length (>=0) on success.
@@ -24,7 +24,7 @@
 // or -EFAULT on fault.
 static inline int64_t copy_user_path(char *kbuf, const char *uptr, size_t max)
 {
-    long l = strnlen_user(uptr, max);
+    long l = syscall_strnlen_user((uint64_t)(uintptr_t)uptr, max);
     if (l < 0) return -EFAULT;
     if (l >= (long)max) return -ENAMETOOLONG;
     if (copy_from_user_ft(kbuf, uptr, (size_t)l + 1) < 0)
@@ -278,7 +278,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         // bounds the length at VFS_NAME_MAX-1 (returns >= VFS_NAME_MAX
         // -> ENAMETOOLONG).  copy_from_user_ft then materializes the
         // kernel-side buffer with a single fault-tolerant pass.
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         path_copy = kmalloc(plen + 1);
@@ -424,7 +424,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         // Bounded fault-tolerant copy.  After this point, `path` (the
         // raw user pointer) MUST NOT be touched — all uses go through
         // path_copy.  kfree(path_copy) is at `out:`.
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         path_copy = kmalloc(plen + 1);
@@ -506,7 +506,7 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
             break;
         }
 
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         char *path_copy = kmalloc(plen + 1);
@@ -759,7 +759,7 @@ case SYS_ioctl: {
             break;
         }
 
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         char *path_copy = kmalloc(plen + 1);
@@ -809,7 +809,7 @@ case SYS_ioctl: {
             break;
         }
 
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         char *path_copy = kmalloc(plen + 1);
@@ -838,7 +838,7 @@ case SYS_ioctl: {
             break;
         }
 
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         char *path_copy = kmalloc(plen + 1);
@@ -865,7 +865,7 @@ case SYS_ioctl: {
             break;
         }
 
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         char *path_copy = kmalloc(plen + 1);
@@ -897,7 +897,7 @@ case SYS_ioctl: {
         }
 
         // Bounded copy of oldpath.
-        int olen = strnlen_user(oldpath, VFS_NAME_MAX);
+        int olen = syscall_strnlen_user((uint64_t)(uintptr_t)oldpath, VFS_NAME_MAX);
         if (olen < 0) { syscall_result = -EFAULT; break; }
         if (olen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         old_copy = kmalloc(olen + 1);
@@ -909,7 +909,7 @@ case SYS_ioctl: {
         }
 
         // Bounded copy of newpath.
-        int nlen = strnlen_user(newpath, VFS_NAME_MAX);
+        int nlen = syscall_strnlen_user((uint64_t)(uintptr_t)newpath, VFS_NAME_MAX);
         if (nlen < 0) { kfree(old_copy); syscall_result = -EFAULT; break; }
         if (nlen >= VFS_NAME_MAX) { kfree(old_copy); syscall_result = -ENAMETOOLONG; break; }
         new_copy = kmalloc(nlen + 1);
@@ -939,7 +939,7 @@ case SYS_ioctl: {
             break;
         }
 
-        int plen = strnlen_user(path, VFS_NAME_MAX);
+        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
         if (plen < 0) { syscall_result = -EFAULT; break; }
         if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
         char *path_copy = kmalloc(plen + 1);

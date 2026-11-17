@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <arch/features.h>   // OS01_HAS_VFS: aarch64 serves the fs group
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
 typedef struct syscall_entry {
@@ -56,7 +57,11 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_signal] = { sys_native_signal, "signal" },
     [SYS_sigprocmask] = { sys_native_sigprocmask, "sigprocmask" },
     [SYS_sigreturn] = { sys_native_sigreturn, "sigreturn" },
-#ifndef OS01_SYSCALL_A64_SUBSET
+/* The fs syscall group is served by the arch-neutral kernel/syscall/sys_fs.c.
+ * x86 serves it unconditionally; aarch64 serves it together with the VFS
+ * gate (2026-11-18), the rest of the full-set entries stay hidden behind
+ * OS01_SYSCALL_A64_SUBSET. */
+#if !defined(OS01_SYSCALL_A64_SUBSET) || OS01_HAS_VFS
     [SYS_write] = { sys_fs_dispatch, "write" },
     [SYS_read] = { sys_fs_dispatch, "read" },
     [SYS_open] = { sys_fs_dispatch, "open" },
@@ -89,6 +94,8 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_readlink] = { sys_fs_dispatch, "readlink" },
     [SYS_lstat] = { sys_fs_dispatch, "lstat" },
     [SYS_fstatat] = { sys_fs_dispatch, "fstatat" },
+#endif /* !OS01_SYSCALL_A64_SUBSET || OS01_HAS_VFS */
+#ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
     [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
     [SYS_futex] = { sys_mm_dispatch, "futex" },

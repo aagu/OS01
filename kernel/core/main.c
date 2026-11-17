@@ -16,8 +16,12 @@ _Static_assert(sizeof(struct boot_context) == 176, "boot_context v3 ABI");
 
 #if OS01_HAS_VFS
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs
+#if OS01_HAS_PCI
 #include <bus/pci/pci_devfs.h> // pci_devfs_register_all
+#endif
+#if OS01_HAS_USB
 #include <driver/usb_devfs.h> // usb_devfs_register_all
+#endif
 #include <tty/boot.h>         // tty_boot_init
 #include <tty/pty.h>          // pty_init
 #endif
@@ -118,8 +122,12 @@ int kernel_main(const struct boot_context *bootctx)
     if (fs_prep != 0)
         boot_failure_stop("fs", "devfs", fs_prep, -1, -1);
 
+#if OS01_HAS_PCI
     pci_devfs_register_all();
+#endif
+#if OS01_HAS_USB
     usb_devfs_register_all();
+#endif
 
 #if defined(CAPACITY_TEST) && CAPACITY_TEST
     void arch10_capacity_fixture_init(void);

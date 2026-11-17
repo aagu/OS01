@@ -14,10 +14,13 @@
 
 #include <arch/spinlock.h>
 #include <driver/serial.h>
+#include <stdbool.h>
 
-/* Forward decl: PL011_putc is defined in pl011.c — pull it in via its
+/* Forward decls: PL011 primitives live in pl011.c — pulled in via their
  * own TU to avoid exposing the PL011 private macros. */
 void pl011_putc(char c);
+bool pl011_rx_pending(void);
+uint32_t pl011_dr_read(void);
 
 spinlock_T serial_lock = {1};
 
@@ -31,4 +34,15 @@ void write_serial(char c)
     uint64_t flags = spin_lock_irqsave(&serial_lock);
     write_serial_unlocked(c);
     spin_unlock_irqrestore(&serial_lock, flags);
+}
+
+/* Blocking RX read, same contract as the x86 implementation: spin until
+ * the RX FIFO holds a byte, then read it (pl011_dr_read consumes the DR
+ * and clears the FIFO data+status).  Task-context consumer: devfs
+ * /dev/serial chrdev read. */
+char read_serial(void)
+{
+    while (!pl011_rx_pending())
+        ;
+    return (char)(uint8_t)pl011_dr_read();
 }

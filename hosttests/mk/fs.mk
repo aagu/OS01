@@ -115,7 +115,7 @@ $(TEST_BLD)/tmpfs_production.o: $(TESTS_DIR)/kernel/fs/tmpfs.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(VFS_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/devfs_vfs_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/devfs.c \
+$(TEST_BLD)/devfs_vfs_production.o: $(TESTS_DIR)/kernel/fs/devfs.c \
 		$(TESTS_DIR)/kernel/include/fs/devfs.h \
 		$(TESTS_DIR)/kernel/include/fs/vfs.h \
 		$(TEST_MOCK)/vfs_test_runtime.h
@@ -277,7 +277,7 @@ $(TEST_BLD)/tty_poll_production.o: $(TESTS_DIR)/kernel/tty/tty.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/devfs.c
+$(TEST_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(POLL_HOST_CFLAGS) -c $< -o $@
 
@@ -360,7 +360,7 @@ $(POLL64_BLD)/tty_poll_production.o: $(TESTS_DIR)/kernel/tty/tty.c
 	@mkdir -p $(POLL64_BLD)
 	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
 
-$(POLL64_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/devfs.c
+$(POLL64_BLD)/devfs_poll_production.o: $(TESTS_DIR)/kernel/fs/devfs.c
 	@mkdir -p $(POLL64_BLD)
 	$(HOST_CC) $(POLL64_HOST_CFLAGS) -c $< -o $@
 

@@ -15,9 +15,7 @@
 #include <tty/boot.h>
 
 #include <tty/tty.h>
-#include <tty/console.h>
-#include <driver/serial.h>
-#include <driver/keyboard.h>
+#include <arch/console.h>
 #include <fs/devfs.h>
 #include <log/log.h>          // log_info for "tty: console TTY created"
 #include <errno.h>
@@ -52,9 +50,9 @@ int tty_boot_init(void)
         return -ENOMEM;
     }
 
-    // console_putchar as output — routes all user-space writes
-    // through the VT100 CSI terminal emulator.
-    tty_t *console = tty_alloc(console_putchar, NULL);
+    // arch_console_putchar as output — the per-arch console sink (x86:
+    // serial + VT100 framebuffer blit; aarch64: PL011 serial).
+    tty_t *console = tty_alloc(arch_console_putchar, NULL);
     if (!console) {
         return -ENOMEM;
     }
@@ -64,8 +62,7 @@ int tty_boot_init(void)
         return ret;
     }
 
-    serial_set_tty(console);         // serial IRQ → TTY
-    keyboard_set_tty(console);       // keyboard IRQ → TTY
+    arch_console_input_attach(console);  // per-arch input IRQs → tty_push_input
     tty_set_dev_tty(console);        // /dev/tty read/write → TTY
     log_info("tty: console TTY created\n");
 

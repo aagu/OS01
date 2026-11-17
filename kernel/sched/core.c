@@ -700,3 +700,14 @@ __attribute__((noreturn)) static void idle_task_resume(void)
         }
     }
 }
+
+/* ── task_files_pin_by_pid weak default ────────────────────────
+ * The fd-table pin primitive belongs to the task exit path, which is
+ * x86-only today (kernel/arch/x86_64/sched/exit.c holds the strong
+ * definition).  aarch64 has no userspace fd tables yet, so the neutral
+ * weak default answers NULL — procfs fd readers see an empty table. */
+__attribute__((weak)) files_t *task_files_pin_by_pid(int pid)
+{
+    (void)pid;
+    return NULL;
+}

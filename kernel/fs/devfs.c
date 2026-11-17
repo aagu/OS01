@@ -5,12 +5,11 @@
 #include <core/debug.h>
 #include <log/log.h>
 #include <random/random.h>
-#include <memory/vmm.h>
-#include <memory/uaccess.h>   // X86_USER_MIN_ADDR (Cat C — Task 8 random_read user/kernel split)
+#include <memory/uaccess.h>   // uaccess_addr_is_user (Cat C — Task 8 random_read user/kernel split)
 #include <arch/cpu.h>
+#include <arch/mmu.h>         // ARCH_PAGE_OFFSET: kernel-space lower bound (both arches)
 #include <memory/slab.h>
 #include <driver/serial.h>
-#include <driver/keyboard.h>
 #include <tty/tty.h>
 #include <sched/task.h>
 #include <fs/poll.h>
@@ -19,8 +18,6 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
-#include <arch/x86_64/uaccess.h>
-#include <arch/x86_64/vma.h>
 
 // ── Internal device tree ────────────────────────────────────
 //
@@ -132,7 +129,7 @@ static devfs_node_t *devfs_device_from_node(const vfs_node_t *node)
         return NULL;
     if (!node->fs_data) return NULL;
 #ifndef OS01_HOST_TEST
-    if ((uint64_t)node->fs_data < 0xffff800000000000ULL)
+    if ((uint64_t)node->fs_data < ARCH_PAGE_OFFSET)
         return NULL;
 #endif
 
@@ -271,15 +268,14 @@ static int random_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     if (!buffer || size == 0) return 0;
     if (size > RANDOM_MAX_LEN) size = RANDOM_MAX_LEN;
 
-    bool in_user = ((uint64_t)buffer >= X86_USER_MIN_ADDR &&
-                    (uint64_t)buffer < current->addr_limit);
+    bool in_user = uaccess_addr_is_user((uint64_t)buffer);
     int rc = 0;
     if (in_user) {
-        rc = user_write_range_begin((uint64_t)buffer, (size_t)size);
+        rc = uaccess_user_write_begin((uint64_t)buffer, (size_t)size);
         if (rc < 0) return rc;                 // -EFAULT (lock released)
     }
     get_random_bytes(buffer, (size_t)size);
-    if (in_user) user_write_range_end();
+    if (in_user) uaccess_user_write_end();
     return (int)size;
 }
 
@@ -319,7 +315,7 @@ static int devfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, void *bu
     // Character device path
     if (
 #ifndef OS01_HOST_TEST
-        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= ARCH_PAGE_OFFSET &&
 #endif
         dev->ops && dev->ops->read)
         return dev->ops->read(node, offset, size, buffer);
@@ -369,7 +365,7 @@ static int devfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, void *b
     // Character device path
     if (
 #ifndef OS01_HOST_TEST
-        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= ARCH_PAGE_OFFSET &&
 #endif
         dev->ops && dev->ops->write)
         return dev->ops->write(node, offset, size, buffer);
@@ -385,7 +381,7 @@ static int devfs_mmap(vfs_node_t *node, struct vma *vma,
         return -EINVAL;
     if (
 #ifndef OS01_HOST_TEST
-        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= ARCH_PAGE_OFFSET &&
 #endif
         dev->ops && dev->ops->mmap)
         return dev->ops->mmap(node, vma, commit, ctx);
@@ -401,7 +397,7 @@ uint32_t devfs_poll(vfs_node_t *node, uint32_t requested, poll_table_t *pt)
 
     if (
 #ifndef OS01_HOST_TEST
-        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= ARCH_PAGE_OFFSET &&
 #endif
         dev->ops && dev->ops->poll)
         return dev->ops->poll(dev->private_data, requested, pt);
@@ -436,7 +432,7 @@ int devfs_ioctl_node(vfs_node_t *node, int cmd, void *arg)
         return -ENODEV;
     if (
 #ifndef OS01_HOST_TEST
-        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= ARCH_PAGE_OFFSET &&
 #endif
         dev->ops && dev->ops->ioctl)
         return dev->ops->ioctl(node, cmd, arg);
@@ -672,7 +668,7 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
 
     if (
 #ifndef OS01_HOST_TEST
-        dev->ops && (uint64_t)dev->ops >= 0xffff800000000000ULL &&
+        dev->ops && (uint64_t)dev->ops >= ARCH_PAGE_OFFSET &&
 #endif
         dev->ops && dev->ops->open) {
         int rc = dev->ops->open(path, out);
@@ -692,7 +688,7 @@ int devfs_open_node(vfs_node_t *node, const char *path, int flags, file_t **out)
     (*out)->node = vfs_node_get(node);
     (*out)->flags = flags;
     // Check if device is console TTY
-    if (dev->private_data && dev->private_data == keyboard_get_tty()) {
+    if (dev->private_data && dev->private_data == get_dev_tty()) {
         (*out)->tty = get_dev_tty();
         if (current->pgrp != 0) {
             tty_t *tty = get_dev_tty();
@@ -772,7 +768,7 @@ static int tty_magic_open(const char *name, file_t **out_file)
         return 0;
     }
 
-    target = keyboard_get_tty();
+    target = get_dev_tty();
 
     uint64_t flags = spin_lock_irqsave(&devfs_lock);
     devfs_node_t *matched_dev = devfs_find_device_by_private(&devfs_root, target);
@@ -887,7 +883,7 @@ int devfs_init(void)
     }
 
     // NOTE: /dev/tty and /dev/tty0 are registered in tty_boot_init()
-    // after keyboard_set_tty() so keyboard_get_tty() returns
+    // after keyboard_set_tty() so get_dev_tty() returns
     // the correct pointer.
     return 0;
 }

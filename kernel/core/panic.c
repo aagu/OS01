@@ -9,13 +9,16 @@
 #include <percpu/percpu.h>
 #include <kernel.h>
 #include <time/timer.h>
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
 #include <driver/fb_state.h>
+#endif
 #include <tty/console.h>
 
 char buf[4096] = {'[','k','e','r','n','e','l',' ','p','a','n','i','c',']',' ',0};
 
 void panic_enable_fb_if_possible(void)
 {
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
     fb_snapshot_t snap;
     if (fb_snapshot_read(&snap) == 0 && snap.addr != NULL && snap.mapped_size > 0) {
         if (spin_trylock(&Pos.lock)) {
@@ -23,6 +26,7 @@ void panic_enable_fb_if_possible(void)
             spin_unlock(&Pos.lock);
         }
     }
+#endif
 }
 
 void kpanic(const char * msg,...)

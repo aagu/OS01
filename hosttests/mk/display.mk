@@ -1,7 +1,7 @@
 # Display subsystem host tests
 
 
-# kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c against gfx_test_runtime.h,
+# kernel/fs/devfs.c + kernel/fs/file.c against gfx_test_runtime.h,
 # which shadows the heavyweight kernel headers (sched/task.h,
 # tty/tty.h, tty/pty.h, driver/serial.h, ...) so the production
 # sources compile unmodified.  The test TU provides the stub
@@ -14,7 +14,7 @@ GFX_HOST_CFLAGS := $(HOST_CFLAGS) -ffunction-sections -fdata-sections \
     -include $(TEST_MOCK)/gfx_test_runtime.h \
     -I$(TEST_MOCK)/include $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
-$(TEST_BLD)/gfx_devfs_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/devfs.c \
+$(TEST_BLD)/gfx_devfs_production.o: $(TESTS_DIR)/kernel/fs/devfs.c \
 		$(TEST_MOCK)/gfx_test_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GFX_HOST_CFLAGS) -c $< -o $@

@@ -57,7 +57,7 @@ C_SOURCES := \
     $(wildcard rbtree/*.c) \
     stdlib/calloc.c stdlib/malloc.c stdlib/reallocarray.c \
     stdlib/realpath.c \
-    stdio/vsprintf.c \
+    stdio/vsprintf.c stdio/vsnprintf.c stdio/sprintf.c \
     $(wildcard string/*.c) \
     $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))
 else

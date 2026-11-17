@@ -3,6 +3,7 @@
 #include <arch/aarch64/handoff_layout.h>
 #include <arch/cpu.h>
 #include <core/bootinfo.h>
+#include <stddef.h>
 
 void kputs(const char *s);
 void kputu(uint64_t v);
@@ -20,6 +21,12 @@ uint64_t dtb_pl011_base(void) { return platform.pl011_base; }
 uint32_t dtb_pl011_spi(void) { return platform.pl011_spi; }
 uint32_t dtb_pl011_clock(void) { return platform.pl011_clock; }
 uint32_t dtb_cntp_ppi(void) { return platform.cntp_ppi; }
+uint32_t dtb_virtio_mmio_count(void) { return platform.virtio_mmio_count; }
+const struct aarch64_virtio_mmio_slot *dtb_virtio_mmio_get(uint32_t i)
+{
+    if (i >= platform.virtio_mmio_count) return NULL;
+    return &platform.virtio_mmio[i];
+}
 enum psci_conduit dtb_psci_conduit(void) { return platform.topology.conduit; }
 uint32_t dtb_psci_method(void)
 {

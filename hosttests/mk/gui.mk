@@ -612,7 +612,7 @@ test-gui-widget: gui-widget-public-types $(TEST_BLD)/test_gui_widget.elf
 	    $(TEST_BLD)/test_gui_widget.elf
 
 # GUI-2 plan Task 1: file-aware devfs read/poll dispatch.  Host-compiles
-# the REAL kernel/arch/x86_64/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
+# the REAL kernel/fs/devfs.c + kernel/fs/file.c + kernel/fs/poll.c
 # GUI-2 plan Task 2: pure PS/2 Set 1 scan-sequence framer.  The framer
 # is pure (no locks, no device IO, no TTY, no display), so the test needs
 # no device mock at all: it host-compiles the REAL

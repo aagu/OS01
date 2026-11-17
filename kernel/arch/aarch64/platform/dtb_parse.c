@@ -170,6 +170,33 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
                 s->uart_clk_phandle = ph;
         }
     }
+    if (contains(n->compatible, "virtio,mmio")) {
+        /* Optional transport slot: collect reg base + SPI instead of
+         * validating against fixed QEMU constants (the consumer probes
+         * MAGIC/VERSION/DEVICEID at runtime).  reg = <addr size> with the
+         * parent's cells; the virtio-mmio window is 512 bytes (0x200).
+         * interrupts, when present, is <GIC_SPI(0) nr LEVEL(4)>. */
+        if (!(n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok"))) {
+            uint32_t ac = n->parent_address_cells, sc = n->parent_size_cells;
+            if ((ac != 1 && ac != 2) || (sc != 1 && sc != 2) ||
+                !n->reg.data || n->reg.len != (ac + sc) * 4)
+                return -4;
+            const uint8_t *rp = n->reg.data;
+            uint64_t base = decode(rp, ac);
+            uint64_t size = decode(rp + ac * 4, sc);
+            if (base == 0 || size < 0x200) return -4;
+            if (s->info.virtio_mmio_count < AARCH64_VIRTIO_MMIO_MAX) {
+                struct aarch64_virtio_mmio_slot *slot =
+                    &s->info.virtio_mmio[s->info.virtio_mmio_count++];
+                slot->base = base;
+                slot->spi = (n->interrupts.len == 12 &&
+                             be32(n->interrupts.data) == 0 &&
+                             be32(n->interrupts.data + 8) == 4)
+                                ? 32u + be32(n->interrupts.data + 4)
+                                : 0;
+            }
+        }
+    }
     if (contains(n->compatible, "arm,armv8-timer")) {
         if (s->timer || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
             n->interrupts.len < 24 || n->interrupts.len % 12 ||

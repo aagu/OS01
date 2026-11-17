@@ -30,7 +30,7 @@ tty_t *tty_alloc(void (*output_char)(char), void (*echo_char)(char))
     return &mock_console_obj;
 }
 
-void console_putchar(char c) { (void)c; }
+void arch_console_putchar(char c) { (void)c; }
 
 const struct devfs_ops tty_magic_ops = {0};
 const struct devfs_ops tty_phys_ops = {0};
@@ -80,13 +80,13 @@ int devfs_register_chrdev(const char *name, void *private_data,
     return -EINVAL;
 }
 
-/* Mock bindings */
-static tty_t *bound_serial_tty = NULL;
-static tty_t *bound_keyboard_tty = NULL;
+/* Mock bindings.  Since the arch-console refactor the console TTY wires
+ * its input producers through the <arch/console.h> facade, so the host
+ * test mocks the facade hook instead of the per-arch producer setters. */
+static tty_t *bound_console_input_tty = NULL;
 static tty_t *bound_dev_tty = NULL;
 
-void serial_set_tty(tty_t *tty) { bound_serial_tty = tty; }
-void keyboard_set_tty(tty_t *tty) { bound_keyboard_tty = tty; }
+void arch_console_input_attach(tty_t *tty) { bound_console_input_tty = tty; }
 void tty_set_dev_tty(tty_t *tty) { bound_dev_tty = tty; }
 
 /* Log mocks */
@@ -110,8 +110,7 @@ static void reset_term_test_state(void)
     registered_tty_private = NULL;
     registered_tty0_private = NULL;
 
-    bound_serial_tty = NULL;
-    bound_keyboard_tty = NULL;
+    bound_console_input_tty = NULL;
     bound_dev_tty = NULL;
 }
 
@@ -126,8 +125,7 @@ static void test_tty_alloc_null(void)
     assert_eq(1, tty_alloc_calls);
     assert_eq(0, registered_tty_calls);
     assert_eq(0, registered_tty0_calls);
-    assert_null(bound_serial_tty);
-    assert_null(bound_keyboard_tty);
+    assert_null(bound_console_input_tty);
     assert_null(bound_dev_tty);
 }
 
@@ -141,8 +139,7 @@ static void test_tty_register_tty_eexist(void)
     assert_eq(-EEXIST, rc);
     assert_eq(1, registered_tty_calls);
     assert_eq(0, registered_tty0_calls);
-    assert_null(bound_serial_tty);
-    assert_null(bound_keyboard_tty);
+    assert_null(bound_console_input_tty);
     assert_null(bound_dev_tty);
 }
 
@@ -158,8 +155,7 @@ static void test_tty_register_tty0_eexist(void)
     assert_eq(1, registered_tty0_calls);
     /* Partial registration: tty is registered, but globals must NOT be bound */
     assert_not_null(registered_tty_private);
-    assert_null(bound_serial_tty);
-    assert_null(bound_keyboard_tty);
+    assert_null(bound_console_input_tty);
     assert_null(bound_dev_tty);
 }
 
@@ -174,8 +170,7 @@ static void test_tty_success(void)
     assert_eq(1, registered_tty0_calls);
     assert_eq(&mock_console_obj, registered_tty_private);
     assert_eq(&mock_console_obj, registered_tty0_private);
-    assert_eq(&mock_console_obj, bound_serial_tty);
-    assert_eq(&mock_console_obj, bound_keyboard_tty);
+    assert_eq(&mock_console_obj, bound_console_input_tty);
     assert_eq(&mock_console_obj, bound_dev_tty);
 }
 

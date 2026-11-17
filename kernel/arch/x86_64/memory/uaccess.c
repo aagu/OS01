@@ -304,6 +304,23 @@ int syscall_prepare_user_write(uint64_t addr, uint64_t len)
     return syscall_check_user_range(addr, len, true) ? 0 : -EFAULT;
 }
 
+bool uaccess_addr_is_user(uint64_t addr)
+{
+    return current != NULL &&
+           addr >= X86_USER_MIN_ADDR &&
+           addr < current->addr_limit;
+}
+
+int uaccess_user_write_begin(uint64_t addr, size_t len)
+{
+    return user_write_range_begin(addr, len);
+}
+
+void uaccess_user_write_end(void)
+{
+    user_write_range_end();
+}
+
 int syscall_strnlen_user(uint64_t addr, size_t max)
 {
     if (!current || addr < X86_USER_MIN_ADDR || addr >= current->addr_limit)

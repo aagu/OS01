@@ -240,6 +240,25 @@ ssize_t aarch64_uaccess_test_copy(bool write, uint64_t user_addr, void *kern,
  * length is a no-op success.  Callers still use the fault-tolerant
  * copies for the actual access (this check is not a pin).
  */
+bool uaccess_addr_is_user(uint64_t addr)
+{
+    return addr >= AARCH64_USER_MIN && addr < AARCH64_USER_LIMIT;
+}
+
+int uaccess_user_write_begin(uint64_t addr, size_t len)
+{
+    // Kernel buffers (task without a user mm) are trusted and pass
+    // through, matching the x86 pair's contract.
+    if (!current || current->mm == NULL)
+        return 0;
+    return syscall_prepare_user_write(addr, len);
+}
+
+void uaccess_user_write_end(void)
+{
+    // No mm->lock pin on aarch64 — nothing to release (see facade doc).
+}
+
 bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
 {
     if (len == 0)

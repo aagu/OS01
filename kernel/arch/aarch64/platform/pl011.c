@@ -12,6 +12,7 @@
  */
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <arch/cpu.h>   /* arch_nop for tiny spin waits */
 
 /* Runtime PL011 base comes from dtb_pl011_base() once dtb_init() has run;
@@ -45,6 +46,7 @@ static inline volatile uint32_t *pl011_base(void)
 #define PL011_ICR        0x44   /* Interrupt Clear Register    */
 
 /* FR bit positions. */
+#define PL011_FR_RXFE    (1U << 4)    /* Receive FIFO empty   */
 #define PL011_FR_TXFF    (1U << 5)    /* Transmit FIFO full   */
 #define PL011_FR_BUSY    (1U << 3)    /* UART busy            */
 
@@ -121,6 +123,15 @@ void pl011_irq_rx_enable(void)
 void pl011_clear_ints(void)
 {
     pl011_w32(PL011_ICR, 0x7FF);
+}
+
+/* True when the RX FIFO holds at least one byte (FR.RXFE == 0).
+ * RX-drain loops (console RX IRQ handler, polled read_serial) use this
+ * instead of poking FR directly — PL011_BASE and the FR bits stay
+ * private to this TU. */
+bool pl011_rx_pending(void)
+{
+    return (pl011_r32(PL011_FR) & PL011_FR_RXFE) == 0;
 }
 
 /* Write a single byte.  Waits until the TX FIFO has room. */

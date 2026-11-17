@@ -84,6 +84,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    syscall/sys_mm.c \
                    core/stack_chk.c \
                    core/printk.c \
+                   core/panic.c \
                    core/boot_failure.c \
                    core/main.c \
                    driver/logo.c \
@@ -108,6 +109,24 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    selftest/test_aarch64_sched_tick.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c \
                    fs/elf_layout.c
+# VFS gate (2026-11-18): the arch-neutral fs stack + tty core + block layer
+# link into the aarch64 product kernel (OS01_HAS_VFS=1).  devfs.c moved here
+# from arch/x86_64/fs/ (its x86 references are now arch facades).  console.c
+# stays x86-only (framebuffer VT100 blit); aarch64 console output is the
+# PL011 backend in arch/aarch64/platform/console.c.  init/ (kernel_start_
+# userspace) stays out while OS01_HAS_USERSPACE is 0; net/ (lwIP) stays out
+# behind OS01_HAS_NET=0 and sys_proc/sys_resource/sys_time/sys_misc/sys_net
+# remain hidden behind OS01_SYSCALL_A64_SUBSET.
+KERNEL_C_SOURCES += fs/boot.c fs/vfs.c fs/devfs.c fs/dcache.c \
+                   fs/file.c fs/fat.c fs/ext2.c fs/tmpfs.c \
+                   fs/procfs.c fs/procfs_fmt.c fs/procfs_snap.c \
+                   fs/gpt.c fs/poll.c fs/select.c \
+                   tty/tty.c tty/canon.c tty/boot.c tty/pty.c \
+                   block/blockdev.c block/bcache.c \
+                   sync/wait.c sync/mutex.c sync/rwlock.c \
+                   sync/completion.c sync/seqlock.c \
+                   syscall/sys_fs.c \
+                   arch/thermal.c
 ifeq ($(AARCH64_EL0_TEST),1)
 # The M4 user-task and formal SVC/uaccess acceptance cases and their
 # static fixture images exist only in the EL0 test variant.
@@ -194,7 +213,9 @@ endif
 # fork/exec/exit, elf/devfs, futex, the x86 syscall handlers and the x86
 # MMIO/display device drivers.  The neutral directories keep only code
 # that compiles for BOTH architectures.
-ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime
+# aarch64 collects its own driver/ (virtio-blk-mmio); x86's driver/ dir
+# owns the x86-only MMIO/display device drivers (see mm-arch-boundaries).
+ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver
 ifeq ($(ARCH),x86_64)
 ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime sched fs sync syscall driver
 endif

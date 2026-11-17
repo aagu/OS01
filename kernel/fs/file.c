@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <memory/uaccess.h>
 #include <selftest/boot_failure_fixture.h>
+#include <arch/features.h>   // OS01_HAS_NET (lwIP socket fd paths)
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -23,9 +24,11 @@ void pipe_wake_writers(pipe_t *p);
 // ── PTY allocation lock ─────────────────────────────────────
 spinlock_T pty_lock = { 1 };
 
+#include <net/socket.h>
+
+#if OS01_HAS_NET
 #include "lwip/err.h"     // err_t, ERR_OK, ERR_CLSD
 #include "lwip/api.h"     // netconn_recv, netconn_write, netconn_delete, netbuf
-#include <net/socket.h>
 
 // Weak fallback so host tests linking file.c without socket.c resolve cleanly.
 // Strong implementation lives in kernel/net/socket.c.
@@ -36,6 +39,7 @@ __attribute__((weak)) void socket_free(socket_t *s)
     if (s->conn) netconn_delete((struct netconn *)s->conn);
     kfree(s);
 }
+#endif /* OS01_HAS_NET */
 
 // ── Allocate a file_t ──────────────────────────────────────
 file_t *file_alloc(void)
@@ -172,9 +176,11 @@ void file_free(file_t *f)
     }
     f->dev_private = NULL;
     f->fs_private = NULL;
+#if OS01_HAS_NET
     if (f->type == FD_SOCKET && f->sock) {
         socket_free(f->sock);
     }
+#endif
     // Poison to catch use-after-free
     f->pipe = NULL;
     f->pty  = NULL;
@@ -923,6 +929,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_PTY_SLAVE:
         if (!f->pty || !f->pty->master_to_slave) return -1;
         return pipe_read_internal(f->pty->master_to_slave, buf, size);
+#if OS01_HAS_NET
     case FD_SOCKET: {
         socket_t *s = f->sock;
         if (!s || !s->conn) return -1;
@@ -992,6 +999,7 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         if (err == ERR_WOULDBLOCK) return -EAGAIN;
         return -EIO;
     }
+#endif /* OS01_HAS_NET */
     default:
         return -1;
     }
@@ -1247,6 +1255,7 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     case FD_PTY_SLAVE:
         if (!f->pty || !f->pty->slave_to_master) return -1;
         return pipe_write_internal(f->pty->slave_to_master, buf, size);
+#if OS01_HAS_NET
     case FD_SOCKET: {
         socket_t *s = f->sock;
         if (!s || !s->conn) return -EIO;
@@ -1294,6 +1303,7 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         if (ret < 0) return ret;
         return (int64_t)committed;
     }
+#endif /* OS01_HAS_NET */
     default:
         return -1;
     }
