@@ -125,6 +125,7 @@ ifneq ($(strip $(UEFI_LAYOUT_HEADERS)),)
 $(OUTDIR)/.aarch64_layout_cfg: FORCE
 	@mkdir -p $(OUTDIR)
 	@printf '%s\n' 'base=$(AARCH64_BOOT_BLOCK_BASE)' > $@.new
+	@sha256sum $(UEFI_LAYOUT_HEADERS) >> $@.new
 	@cmp -s $@.new $@ || { mv -f $@.new $@; find $(OUTDIR) -name '*.o' -delete; }
 AARCH64_LAYOUT_KEY := $(OUTDIR)/.aarch64_layout_cfg
 .PHONY: FORCE

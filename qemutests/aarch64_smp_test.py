@@ -878,8 +878,10 @@ def check_layout_builds(build_root):
 
     # One representative negative per class: unaligned, D-window overlap,
     # too small for the minimum arena, outside M0, and the explicit empty
-    # value. Each must fail on the configuration itself (argv, no shell).
-    for value in ("0x40001000", "0x08000000", "0x7ec00000", "0x80000000", ""):
+    # value — plus a base whose bash int64 arithmetic would wrap negative
+    # (must still be rejected, not silently accepted).
+    for value in ("0x40001000", "0x08000000", "0x7ec00000", "0x80000000",
+                  "0xFFFFFFFFFFE00000", ""):
         result = make_aarch64_kernel(None, value)
         assert result.returncode != 0, \
             "accepted invalid AARCH64_BOOT_BLOCK_BASE=" + repr(value)

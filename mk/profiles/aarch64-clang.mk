@@ -36,7 +36,7 @@ endif
 # minimum 20 MiB early-arena window. The check must echo exactly "OK":
 # a missing bash / failed probe yields empty output and fails closed.
 export AARCH64_BOOT_BLOCK_BASE
-AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$AARCH64_BOOT_BLOCK_BASE"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$v")); if (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n < 0x0a000000 && n + 0x200000 > 0x08000000 )); then echo "overlaps the boot device window D [0x08000000..0x0a000000]"; elif (( n + 0x200000 > 0x80000000 )); then echo "outside the M0 map [0..0x80000000]"; elif (( 0x80000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' 2>/dev/null)
+AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$AARCH64_BOOT_BLOCK_BASE"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$v")); if (( n < 0 )); then echo "outside the M0 map [0..0x80000000]"; elif (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n < 0x0a000000 && n + 0x200000 > 0x08000000 )); then echo "overlaps the boot device window D [0x08000000..0x0a000000]"; elif (( n + 0x200000 > 0x80000000 )); then echo "outside the M0 map [0..0x80000000]"; elif (( 0x80000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' 2>/dev/null)
 ifneq ($(strip $(AARCH64_BOOT_BLOCK_BASE_CHECK)),OK)
 $(error invalid AARCH64_BOOT_BLOCK_BASE='$(AARCH64_BOOT_BLOCK_BASE)': $(AARCH64_BOOT_BLOCK_BASE_CHECK))
 endif

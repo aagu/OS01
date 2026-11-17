@@ -1696,6 +1696,17 @@ class LmaLayoutEvidenceTests(unittest.TestCase):
         self.assertFalse(smp.lma_layout_evidence_ok(
             overlapped, self.BASE, cpus=2, ram_mib=512))
 
+    def test_prune_pa_inside_relocated_b_rejected(self):
+        # The prune probe PA must be disjoint from the boot's ACTUAL
+        # boot block, not the default-layout B window: 0x42000000 is
+        # 2 MiB aligned, inside M0, outside D and outside the default
+        # B — but sits inside the relocated B [0x42000000, 0x42200000).
+        pruned = self.positive.replace(
+            "M1 PRUNE PASS pa=0x00200000 before=valid after=fault",
+            "M1 PRUNE PASS pa=0x42000000 before=valid after=fault")
+        self.assertFalse(smp.lma_layout_evidence_ok(
+            pruned, self.BASE, cpus=2, ram_mib=512))
+
     def test_mismatch_accepted(self):
         text = ("BdsDxe: starting Boot0002\n"
                 "UEFI-A64: kernel entry mismatch\r\n"

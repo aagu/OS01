@@ -867,6 +867,14 @@ def lma_layout_evidence_ok(text: str, base: int, cpus: int,
     if not m1_evidence_ok(text, cpus=cpus, selftest=True, ram_mib=ram_mib,
                           variant="normal"):
         return False
+    # The m1 evidence validates the prune probe against the DEFAULT B
+    # window; this boot's actual boot block is `base`, so re-check the
+    # parsed probe PA against it.
+    for line in re.findall(r"^M1 PRUNE PASS pa=(0x[0-9a-f]+) before=valid after=fault$",
+                           text, re.MULTILINE):
+        pa = int(line, 16)
+        if base <= pa < base + 0x200000:
+            return False
     for line in re.findall(
             r"^M1 ZONE id=\d+ start=(0x[0-9a-f]+) end=(0x[0-9a-f]+) frames=\d+$",
             text, re.MULTILINE):
