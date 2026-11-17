@@ -20,6 +20,7 @@
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/reg.h>   /* midr_el1 / midr_arch_version */
 #include <arch/aarch64/boot/shootdown_probe.h>    /* aarch64_shootdown_probe (M3.5 Task 25) */
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/ram.h>
@@ -422,6 +423,13 @@ void arch_early_init(const struct boot_context *bootctx)
     pl011_init();
     uint64_t vbar = (uint64_t)(uintptr_t)exception_vectors;
     __asm__ __volatile__("msr vbar_el1, %0\n\tisb" :: "r"(vbar) : "memory");
+
+    /* Which core are we running on?  head.S only gates on the MIDR_EL1
+     * architecture field (0xF = AArch64, i.e. ARMv8-A and later); print
+     * the raw MIDR so the running part is visible in the boot log.  The
+     * aarch64 logger prints %lx with its own 0x prefix. */
+    log_info("[cpu] MIDR_EL1 = %lx (arch=%lx)\n",
+             (unsigned long)midr_el1(), (unsigned long)midr_arch_version());
 
     /* Turn the raw UEFI memory map into the published 2 MiB-aligned
      * aarch64_ram_map before any further hardware bring-up. The

@@ -131,4 +131,35 @@ static inline void cntp_isb(void)
     __asm__ __volatile__("isb" ::: "memory");
 }
 
+/* ── MIDR_EL1 (Main ID Register) ────────────────────────────────────
+ * Layout (Armv8-A Architecture Registers DDI0595, MIDR_EL1):
+ *   [31:24] implementer   0x41 = Arm Limited, 0x00 = unknown (QEMU "max"),
+ *                         0xC0 = Ampere, 0x61 = Apple, 0x4E = NVIDIA, ...
+ *   [23:20] variant       (implementation defined)
+ *   [19:16] architecture  0xF = "architectural features are individually
+ *                         identified in the ID_* registers" — the CPUID
+ *                         scheme, i.e. ARMv8-A and later (ARMv9-A included).
+ *                         Every other encoding is reserved or pre-ARMv7
+ *                         32-bit.
+ *   [15:4]  part number   (per core: 0xD03 = Cortex-A53, ...)
+ *   [3:0]   revision
+ *
+ * The kernel only interprets the architecture field: head.S requires it to
+ * be 0xF (AArch64), while implementer and part number stay free (QEMU
+ * "max" reports implementer 0x00, and real boards ship non-Arm
+ * implementers). */
+static inline uint64_t midr_el1(void)
+{
+    uint64_t v;
+    __asm__ __volatile__("mrs %0, midr_el1" : "=r"(v));
+    return v;
+}
+
+/* Architecture version field (MIDR_EL1[19:16]) of the running core:
+ * 0xF = AArch64 (ARMv8-A and later). */
+static inline uint64_t midr_arch_version(void)
+{
+    return (midr_el1() >> 16) & 0xf;
+}
+
 #endif /* _ARCH_AARCH64_GIC_H */

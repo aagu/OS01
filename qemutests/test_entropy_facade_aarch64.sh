@@ -10,16 +10,18 @@
 #   tier3 (real hardware)  homeserver（AMD Zen 4）无 aarch64 物理硬件；本节显式声明
 #
 # 重要 — 当前 aarch64 kernel 是 **bring-up**：
-#   - `kernel/arch/aarch64/head.S:255` 显式 MIDR_EL1 sanity check 为 Cortex-A53
-#     （非 A53 触发 panic — 实测抓得到，会落到 log file 供 reviewer）
-#   - `kernel/arch/aarch64/main.c` 是 UEFI handoff + SMP + IRQ 路径，**不**调
+#   - `kernel/arch/aarch64/head.S` 只校验 MIDR_EL1 的架构版本字段
+#     （MIDR_EL1[19:16] 必须为 0xF = AArch64 / ARMv8-A 及以后，含 ARMv9-A）；
+#     implementer / part number 不再校验，所以 `-cpu max`（implementer=0x00、
+#     arch=0xF）也能通过。非 AArch64 仍然 fail-closed（panic 自旋，PL011
+#     打印 "FATAL: not AArch64, MIDR=..."）。
+#   - `kernel/arch/aarch64/boot/main.c` 是 UEFI handoff + SMP + IRQ 路径，**不**调
 #     kernel_main() / random_init()，所以 boot log 不会自然出现 CSPRNG 行
 #   - `kernel/Makefile aarch64` source list 是显式枚举（不 wildcard selftest/）
 #
 # 上记 2/3 条限制让 aarch64 无法通过 boot log 直接断言 STRONG/WEAK/NONE 的
-# 契约；reviewer 反馈 §2 要求 tier2 至少**实际跑 QEMU 抓 panic log**，让行为
-# 可复现。本脚本按此改：tier2 不再无条件 `fail`，而是真正 `-cpu max` 启动
-# 抓 MIDR panic 并记入 log，可复现至 reviewer。
+# 契约；reviewer 反馈 §2 要求 tier2 至少**实际跑 QEMU**，让行为可复现。本脚本
+# 按此改：tier2 真正 `-cpu max` 启动并把 log 落盘供 reviewer 复核。
 #
 # 用法：
 #   scripts/test_entropy_facade_aarch64.sh                  # 跑全部
@@ -61,7 +63,7 @@ usage() {
 TIER（默认全部）:
     tier1-default-no-virtio   -cpu cortex-a53, 无 virtio-rng
     tier1-default-virtio      -cpu cortex-a53, +virtio-rng
-    tier2-with-rndrrs         -cpu max（实际跑 QEMU 抓 MIDR panic log）
+    tier2-with-rndrrs         -cpu max（实际跑 QEMU，通用 AArch64 校验已放行）
     tier3-real-hardware       显式 declare no-aarch64-hardware
 
 环境：
@@ -179,19 +181,23 @@ run_qemu_boot_tier() {
         return 0
     fi
 
-    # 检查 kernel panic（已知 aarch64 bring-up MIDR_EL1 sanity check 仅 A53 通过）
-    # kernel panic 在 head.S 内 halt 时不会写 kernel-level 日志（serial_printk 还没
-    # 安装），所以"log 含 UEFI banner + 无 phase1 marker + -cpu 非 A53"就是 panic。
-    if grep -aq "MIDR\|panic\|PANIC\|kernel panic" "$log_file"; then
-        fail "$name: kernel panic（head.S: MIDR ≠ A53 — 当前 bring-up 不支持 $cpu_model）"
+    # 检查 kernel panic（head.S 的 AArch64 校验是 fail-closed 的：
+    # MIDR_EL1[19:16] != 0xF → panic 自旋，并在 PL011 上打印
+    # "FATAL: not AArch64, MIDR=..."）。kernel panic 在 head.S 内 halt
+    # 时不会写 kernel-level 日志（serial_printk 还没安装），所以"log 含
+    # UEFI banner + 无 phase1 marker"就是早期 halt 的信号。
+    # 注意：boot log 现在含 "[cpu] MIDR_EL1 = ..." 诊断行，所以这里只查
+    # panic/FATAL 关键字，不能用 "MIDR" 做 panic 判据。
+    if grep -aq "panic\|PANIC\|FATAL" "$log_file"; then
+        fail "$name: kernel panic（head.S: 非 AArch64 核，或早期 fatal）"
         tail -30 "$log_file" | sed 's/^/    /'
         return 1
     fi
 
-    # 推断 panic：UEFI banner 出，kernel load 完成（FileSystem 找到 kernel.elf），
-    # 但 phase1 不在 → kernel 加载成功但 boot 没跑（head.S: panic halt，无 serial log）
+    # 推断早期 halt：UEFI banner 出，kernel load 完成（FileSystem 找到 kernel.elf），
+    # 但 phase1 不在 → kernel 加载成功但 boot 没跑（head.S 早期 halt，无 serial log）
     if grep -aq "UEFI\|BdsDxe" "$log_file" && ! grep -aq "phase1" "$log_file"; then
-        fail "$name: kernel 加载但未到 phase1 boot（推断 head.S 早期 panic，最常见：MIDR_EL1 ≠ A53）"
+        fail "$name: kernel 加载但未到 phase1 boot（推断 head.S 早期 halt）"
         tail -30 "$log_file" | sed 's/^/    /'
         return 1
     fi
@@ -209,10 +215,10 @@ TIER1_DEFAULT_VIRTIO() {
     run_qemu_boot_tier "tier1-default-virtio" "cortex-a53" 1 "OS01 aarch64 phase1 boot ok"
 }
 # tier2: -cpu max（RNDR + RNDRRS）。reviewer 反馈 §2 要求实际跑 QEMU
-# 抓 log，不要无条件 fail。
+# 抓 log，不要无条件 fail。head.S 的 MIDR 校验已放宽为通用 AArch64
+# （architecture 字段必须 0xF），所以 -cpu max（implementer=0x00 / arch=0xF）
+# 能过校验。
 TIER2_WITH_RNDRRS() {
-    warn "tier2 期望 kernel 跑过 -cpu max（RNDR + RNDRRS），已知触发 head.S:255 MIDR_EL1 sanity check panic。"
-    warn "本 tier 现在按 reviewer §2 反馈改为真实跑 QEMU 抓 log，而非无条件 fail。"
     run_qemu_boot_tier "tier2-with-rndrrs" "max" 0 "OS01 aarch64 phase1 boot ok"
 }
 

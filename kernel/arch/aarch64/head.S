@@ -7,7 +7,7 @@
  *   1.  save x0 (direct-boot DTB or fixed UEFI boot_context) → x19
  *   2.  EL2 → EL1 drop (only if CurrentEL==EL2)
  *   3.  msr daifset, #0xf     — mask DAIF
- *   4.  panic if MIDR_EL1 != Cortex-A53
+ *   4.  panic if MIDR_EL1 architecture != 0xF (not AArch64; any ARMv8/ARMv9 core passes)
  *   5.  clear only .boot.bss
  *   6.  build dual-TTBR page tables in .boot.bss
  *   7.  dsb sy
@@ -144,10 +144,13 @@ boot_vectors:
 
 .Lprint_x64:
     /* print 16 hex digits of x0, MSB first.  Uses x9 as counter,
-     * but BL clobbers caller-saved regs, so save x9 on the stack. */
-    stp     x9, xzr, [sp, #-16]!
+     * but BL clobbers caller-saved regs, so save x9 (and x30 — the
+     * inner .Lprint_c call clobbers the link register) on the stack.
+     * "ror x0, x0, #60" is a rotate-left by 4: it moves the next
+     * (more significant) nibble down into the low four bits. */
+    stp     x9, x30, [sp, #-16]!
     mov     x9, #16
-1:  ror     x0, x0, #4
+1:  ror     x0, x0, #60
     and     x1, x0, #0xf
     cmp     x1, #10
     b.lt    2f
@@ -157,7 +160,7 @@ boot_vectors:
 3:  bl      .Lprint_c
     sub     x9, x9, #1
     cbnz    x9, 1b
-    ldp     x9, xzr, [sp], #16
+    ldp     x9, x30, [sp], #16
     ret
 
 /* ──────────────────────────────────────────────────────────────────
@@ -251,19 +254,30 @@ _start:
     /* 3. Mask DAIF (single-threaded, IRQs come back in Task 3). */
     msr     daifset, #0xf
 
-    /* 4. Cortex-A53 sanity check (MIDR_EL1).  We just sanity-check the
-     *    implementer and the part number; revision is allowed to vary
-     *    between QEMU versions.  Implementer = 0x41, Cortex-A53 part =
-     *    0xD03.  QEMU's cortex-a53 reports 0x410FD034 as a baseline,
-     *    but other revs are equivalent for our purposes. */
+    /* 4. Generic AArch64 check (MIDR_EL1).  The core is NOT pinned to any
+     *    particular part number any more: only the ARCHITECTURE field is
+     *    checked.  Per the Armv8-A Architecture Registers (DDI0595,
+     *    MIDR_EL1), ARCHITECTURE = 0b1111 means "architectural features are
+     *    individually identified in the ID_* registers" — that is the CPUID
+     *    scheme, i.e. ARMv8-A and later (ARMv9-A included; Linux hardcodes
+     *    0xF for every A-profile CPU model it knows).  All other encodings
+     *    are either reserved or pre-ARMv7 32-bit.
+     *
+     *    Implementer (MIDR_EL1[31:24]) and part number (MIDR_EL1[15:4])
+     *    are deliberately NOT checked:
+     *      - QEMU's "max" CPU reports implementer 0x00 (unknown) while
+     *        still being an AArch64 part; it is the only QEMU model that
+     *        exposes RNDR/RNDRRS (the aarch64 STRONG entropy source).
+     *      - Real boards ship ARM (0x41), Ampere (0xC0), NVIDIA, Fujitsu,
+     *        Apple, ... implementers — none of them are ARM's own 0x41.
+     *
+     *    A non-AArch64 core (or a bogus MIDR read) still fails closed: the
+     *    descriptor/MMU bring-up below is AArch64 only. */
     mrs     x0, midr_el1
-    lsr     x1, x0, #24
-    cmp     x1, #0x41                          /* 'A' ARM */
-    b.ne    99f
-    lsr     x1, x0, #4
-    and     x1, x1, #0xFFF
-    cmp     x1, #0xD03                         /* Cortex-A53 */
-    b.ne    99f
+    lsr     x1, x0, #16
+    and     x1, x1, #0xf                         /* MIDR_EL1[19:16] */
+    cmp     x1, #0xf                              /* AArch64, CPUID scheme */
+    b.ne    .Lmidr_fatal                          /* not AArch64 → panic */
 
     /* 5. Zero .boot.bss only (not the .boot.text!). */
     ldr     x0, =_boot_bss_start
@@ -303,6 +317,28 @@ _start:
     blr     x30
 
 99: b       99b
+
+/* Fatal: the boot CPU is not an AArch64 core (MIDR_EL1 architecture
+ * != 0xF).  The kernel logger is not installed this early, so print
+ * straight to PL011 — otherwise this fail-closed path is completely
+ * silent and the only symptom is a missing boot marker. */
+.Lmidr_fatal:
+    /* x5 = string cursor (x1 is the character argument to .Lprint_c);
+     * x4 = the byte read. */
+    adr     x5, aarch64_midr_fatal_msg
+.Lmidr_fatal_loop:
+    ldrb    w4, [x5], #1
+    cbz     w4, .Lmidr_fatal_hex
+    mov     x1, x4
+    bl      .Lprint_c
+    b       .Lmidr_fatal_loop
+.Lmidr_fatal_hex:
+    mrs     x0, midr_el1
+    bl      .Lprint_x64
+    mov     x1, #'\n'
+    bl      .Lprint_c
+.Lmidr_fatal_spin:
+    b       .Lmidr_fatal_spin
 
 
 /* ──────────────────────────────────────────────────────────────────
@@ -826,3 +862,15 @@ aarch64_probe_pa_address:
 aarch64_probe_expected_address:
     ldr x0, =pt_probe_expected
     ret
+
+/* ──────────────────────────────────────────────────────────────────
+ * .boot.rodata — strings the early boot path prints before the kernel
+ * logger exists.  Kept in its own section (not inline in .boot.text)
+ * so the `ldr xN, =symbol` literal pools in the text sections keep
+ * their 4-byte alignment.
+ * ────────────────────────────────────────────────────────────────── */
+.section .boot.rodata, "a"
+.balign 4
+.globl aarch64_midr_fatal_msg
+aarch64_midr_fatal_msg:
+    .asciz  "FATAL: not AArch64, MIDR="

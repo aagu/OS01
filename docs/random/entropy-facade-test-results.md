@@ -206,33 +206,46 @@ qemu-system-aarch64 -M virt,gic-version=2,acpi=off \
 
 **实测**：PASS（与 §3.1 同）。
 
-### 3.3 tier2-with-rndrrs（`-cpu max`，**reviewer §2 反馈后实际跑 QEMU 抓 panic log**）
+### 3.3 tier2-with-rndrrs（`-cpu max`，**MIDR 校验放宽后实际跑 QEMU 抓 boot log**）
 
-**reviewer 反馈前**：脚本无条件 `fail`，与实测"抓到 MIDR_EL1 panic"不一致。
+**历史（reviewer §2 反馈时）**：脚本真正调 `run_qemu_boot_tier ... max ...`，捕获到 UEFI banner 而无 phase1 boot marker → 推断为 `head.S` 早期 panic halt（kernel halts before serial_printk installed）。根因是当时的 `head.S` 只放行 Cortex-A53（implementer 0x41 + part 0xD03），而 `-cpu max` 的 MIDR 是 `0x000F0510`（implementer 0x00）。
 
-**reviewer 反馈后**：脚本真正调 `run_qemu_boot_tier ... max ...`，捕获到 UEFI banner 而无 phase1 boot marker → 推断为 `head.S:255` 早期 panic halt（kernel halts before serial_printk installed）。
+**现状**：aarch64 的 MIDR 校验已放宽为通用 AArch64 判定 —— `head.S` 只检查 `MIDR_EL1[19:16]`（ARCHITECTURE）必须为 `0xF`（"architectural features are individually identified in the ID_* registers"，即 ARMv8-A 及以后，含 ARMv9-A），implementer 与 part number 不再校验。因此 `-cpu max` 通过校验并正常 boot。
 
 **实测**：
 
 ```text
 ── TIER: tier2-with-rndrrs  cpu_model=max  virtio-rng=0 ──
-FAIL tier2-with-rndrrs: kernel 加载但未到 phase1 boot（推断 head.S 早期 panic，最常见：MIDR_EL1 ≠ A53）
-    UEFI firmware (version  built at 04:15:24 on Sep 18 2026)
-    BdsDxe: loading Boot0002 "UEFI Non-Block Boot Device" from VenHw(...)
-    BdsDxe: starting Boot0002 "UEFI Non-Block Boot Device" from VenHw(...)
+PASS tier2-with-rndrrs: boot 通过关键 marker 'OS01 aarch64 phase1 boot ok'
 ```
 
-这是**真实**的 QEMU 输出 + log 切片（log file `build/aarch64-clang/test-results/entropy-facade/tier2-with-rndrrs.log`，reviewer 可直接 cat 复核）。失败预期 vs 实际的原因：
+boot log 关键行（log file `build/aarch64-clang/test-results/entropy-facade/tier2-with-rndrrs.log`，reviewer 可直接 cat 复核）：
 
-- `kernel/arch/aarch64/head.S:255` 明文：`MIDR_EL1 != Cortex-A53 → panic (b.ne 99f)`
-- `-cpu max` 在 QEMU 中 MIDR 是 `0x4...`，与 A53 的 `0x410FD0xx` 不匹配
-- head.S panic halt 不走 serial_printk（kernel printf 还没装好）所以 log 中无 panic 字符串
+```text
+[cpu] MIDR_EL1 = 0xf0510 (arch=0xf)
+OS01 aarch64 uefi handoff ok
+OS01 aarch64 phase1 boot ok
+[gic] GICv2 driver: intids=288
+```
 
-**修复（不属 AAGU-5.8）**：等 aarch64 bring-up kernel 扩 RNDR/RNDRRS 时移去该 sanity check。
+**实测 MIDR_EL1 一览**（QEMU 11.1.3 实测，`virt` 机器）：
+
+| CPU | MIDR_EL1 | implementer | architecture[19:16] | 旧 A53 校验 | 新 AArch64 校验 |
+|---|---|---|---|---|---|
+| `cortex-a53` | `0x410FD034` | 0x41 | 0xF | ✅ | ✅ |
+| `cortex-a72` | `0x410FD080` | 0x41 | 0xF | ❌ | ✅ |
+| `cortex-a76` | `0x414FD0B0` | 0x41 | 0xF | ❌ | ✅ |
+| `neoverse-n1` | `0x414FD0C0` | 0x41 | 0xF | ❌ | ✅ |
+| `neoverse-n2`（ARMv9.0） | `0x410FD490` | 0x41 | 0xF | ❌ | ✅ |
+| `max`（RNDR+RNDRRS） | `0x000F0510` | 0x00 | 0xF | ❌ | ✅ |
+
+注：ARCHITECTURE 字段只有 `0xF` 一个现代 AArch64 取值（其余为 reserved 或 pre-ARMv7 32-bit），所以判定写成 `== 0xF` 而不是 `>= 0x8`——后者会误放行 reserved 值。Linux 的 `MIDR_CPU_MODEL()` 对所有 A-profile CPU model（含 ARMv9 的 Neoverse V2/N2/V3、Cortex-X4 等）也一律硬编码 `0xF`。
+
+**剩余限制**：aarch64 bring-up 路径仍不调 `random_init()`，所以 STRONG/WEAK/NONE 三档契约仍无法从 boot log 直接断言（见 §3.4）。
 
 ### 3.4 aarch64 bring-up 阶段 CSPRNG log 缺失 + KERNEL_SELFTEST=1 build infra gap
 
-**问题 1**：aarch64 main.c 路径不调 `random_init()`，boot log 自然缺 CSPRNG 行。
+**问题 1**：aarch64 `kernel/arch/aarch64/boot/main.c` 路径不调 `random_init()`，boot log 自然缺 CSPRNG 行。
 
 **问题 2（reviewer §3 反馈相关）**：`make KERNEL_SELFTEST=1 disk.img` 在 `KERNEL_VARIANT=selftest` 下根 Makefile 的 `disk.img` 规则依赖 `NORMAL_IMAGE = image/disk.img`（无 variant 后缀），所以 `make KERNEL_SELFTEST=1 disk.img` 报"无规则"。要让 KERNEL_SELFTEST 真正生效需要：
 
@@ -387,8 +400,8 @@ qemutests/test_entropy_facade_aarch64.sh
 | 项 | 原因 | 状态 |
 |---|---|---|
 | x86_64 WEAK facade 路径不能在 QEMU boot 重现 | OVMF RngDxe 用 RDRAND → UEFI GetRNG 始终成功 → kernel facade 永不触发 | 🟡 等价覆盖在 CI 的 KERNEL_SELFTEST=1 entropy_quality selftest |
-| aarch64 tier2 (RNDR/RNDRRS) 不能 boot | `kernel/arch/aarch64/head.S:255` MIDR_EL1 sanity check 仅允许 A53 | 🟡 panic log 已实际抓到，等 aarch64 扩 RNDR 时移除 sanity check |
-| aarch64 boot log 不显 CSPRNG 行 | `kernel/arch/aarch64/main.c` 是 bring-up，不调 random_init | 🟡 等 aarch64 进 random_init() 时自动有 |
+| aarch64 tier2 (RNDR/RNDRRS) 不能 boot | `kernel/arch/aarch64/head.S` 的 MIDR_EL1 校验原仅允许 A53（implementer 0x41 + part 0xD03），`-cpu max` 的 MIDR 是 `0x000F0510`（implementer 0x00） | ✅ 已修：校验放宽为通用 AArch64（ARCHITECTURE 字段必须 0xF），tier2 实测 PASS（见 §3.3） |
+| aarch64 boot log 不显 CSPRNG 行 | `kernel/arch/aarch64/boot/main.c` 是 bring-up，不调 random_init | 🟡 等 aarch64 进 random_init() 时自动有 |
 | KERNEL_SELFTEST=1 build 路径上 root disk.img rule 失效 | image.mk:33 NORMAL_IMAGE 不代入 IMAGE_VARIANT | 🟡 等 build infra fix |
 | `/dev/random` WEAK/NONE 非阻塞 EAGAIN 缺 | devfs.c::random_read 无 quality 判定 | 🟡 spec §5.2 已写，等 devfs.c 实现 |
 | homeserver 无 aarch64 物理硬件 | 平台特性（issue §测试约束允许环境声明） | 🟡 显式声明 |

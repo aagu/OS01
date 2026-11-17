@@ -496,6 +496,7 @@ void kernel_main(const struct boot_context *bootctx);
 - BSP 开启 CNTP 周期 tick；AP IRQ 保持屏蔽，执行完 `smp_bench_iter` 后进入 idle，不参与调度器与用户态。
 - 不实现每核 tick、IPI、调度器、用户态、热插拔、GICv3、RPi 真机、ACPI CPU 枚举；这些另立任务。
 - 仅在 QEMU virt + Cortex-A53 + GICv2 + PSCI ≥0.2 上验证；固件默认从 `https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd` 拉取，本地缺失会自动下载到 `build/aarch64-clang/image/QEMU_EFI.fd`。固件 hash 与 conduit 写入 `test-results/aarch64-uefi-smp/<run-id>/cpus-*-run-*.metadata.json`。
+- 内核侧的 CPU 校验是通用的：`kernel/arch/aarch64/head.S` 只要求 `MIDR_EL1[19:16]`（ARCHITECTURE）为 `0xF`（AArch64 / ARMv8-A 及以后，含 ARMv9-A），不锁定 Cortex-A53，也不看 implementer/part number（`-cpu max`、`-cpu cortex-a76` 等都能启动）。但"能启动"不等于"已验证"——上面的验证矩阵仍只覆盖 Cortex-A53 + GICv2。boot log 里的 `[cpu] MIDR_EL1 = ... (arch=...)` 行给出实际运行核。
 - 运行日志保留在仓库 `test-results/aarch64-uefi-smp/<run-id>/`（不提交，但本机可回放）：stdout/stderr/.metadata.json 三件套；正常模式与降级模式各一行 `python3 qemutests/aarch64_uefi_smp.py --help` 可查。
 - 锁死类故障由外部 90 s watchdog 判失败；当前 `test_spinlock_smp` 的 30 s deadline 仅覆盖 AP done 缺失，不替代外部 watchdog。
 
