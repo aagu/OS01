@@ -18,4 +18,9 @@
  * virtio-blk); negative on mapping/probe-environment failure. */
 int virtio_blk_init(void);
 
+/* Map the virtio-mmio MMIO window into TTBR1 — must be called from the
+ * pre-SMP boot path (aarch64 arch_boot_memory): vmm_gate_check rejects
+ * TTBR1 changes once SMP bring-up has started.  Idempotent. */
+int virtio_mmio_map_early(void);
+
 #endif /* OS01_AARCH64_VIRTIO_BLK_H */

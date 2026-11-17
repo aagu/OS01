@@ -1,4 +1,5 @@
 #include <fs/vfs.h>
+#include <arch/mmu.h>            // ARCH_PAGE_OFFSET (kernel VA lower bound)
 #include <fs/devfs.h>
 #include <fs/ext2.h>
 #include <fs/fat.h>
@@ -93,7 +94,7 @@ static inline bool vfs_is_valid_kptr(const void *p)
 #ifdef OS01_HOST_TEST
     return p != NULL;
 #else
-    return (uintptr_t)p >= 0xffff800000000000ULL;
+    return (uintptr_t)p >= ARCH_PAGE_OFFSET;
 #endif
 }
 

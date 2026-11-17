@@ -15,7 +15,8 @@
 #include <sys/stat.h>
 #include <memory/uaccess.h>
 #include <selftest/boot_failure_fixture.h>
-#include <arch/features.h>   // OS01_HAS_NET (lwIP socket fd paths)
+#include <arch/features.h>
+#include <arch/mmu.h>            // ARCH_PAGE_OFFSET (kernel VA lower bound)   // OS01_HAS_NET (lwIP socket fd paths)
 
 // ── Forward declarations ─────────────────────────────────────
 void pipe_wake_readers(pipe_t *p);
@@ -843,12 +844,12 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
     case FD_DEV: {
 #ifndef OS01_HOST_TEST
         if (!f->node || !f->node->f_ops ||
-            (uint64_t)f->node->f_ops < 0xffff800000000000ULL ||
+            (uint64_t)f->node->f_ops < ARCH_PAGE_OFFSET ||
             (!f->node->f_ops->read && !f->node->f_ops->read_file))
             return -1;
 #else
         /* OS01_HOST_TEST: production's kernel-half ops-pointer guard
-         * cannot be satisfied by host-heap ops (all < 0xffff800000000000ULL
+         * cannot be satisfied by host-heap ops (all < ARCH_PAGE_OFFSET
          * on Linux x86_64).  The read-pointer check alone is enough for
          * the host harness; the guard is preserved in every non-host
          * build below. */
@@ -1160,7 +1161,7 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
     case FD_DEV: {
 #ifndef OS01_HOST_TEST
         if (!f->node || !f->node->f_ops ||
-            (uint64_t)f->node->f_ops < 0xffff800000000000ULL ||
+            (uint64_t)f->node->f_ops < ARCH_PAGE_OFFSET ||
             !f->node->f_ops->write)
             return -1;
 #else

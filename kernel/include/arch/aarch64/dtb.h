@@ -14,7 +14,7 @@ struct aarch64_topology {
     enum psci_conduit conduit;
     bool psci_compatible;
 };
-#define AARCH64_VIRTIO_MMIO_MAX 8
+#define AARCH64_VIRTIO_MMIO_MAX 32   // QEMU virt exposes 32 virtio-mmio slots
 struct aarch64_virtio_mmio_slot {
     uint64_t base;         /* device register window base (512-byte window) */
     uint32_t spi;          /* GIC SPI INTID (32 + DTB nr), 0 = unknown/poll */

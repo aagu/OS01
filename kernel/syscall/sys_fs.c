@@ -13,7 +13,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <log/log.h>
-#include <arch/features.h>    // OS01_HAS_VFS gate on the fs syscall group
+#include <arch/features.h>
+#include <arch/mmu.h>            // ARCH_PAGE_OFFSET (kernel VA lower bound)    // OS01_HAS_VFS gate on the fs syscall group
 
 // ── COPY_USER_STR macro (Task 7, symlink support) ───────────
 // Returns the string length (>=0) on success.
@@ -785,7 +786,7 @@ case SYS_ioctl: {
             // Check if filesystem is writable (not devfs)
             if (node->type == VFS_CHRDEV || node->type == VFS_BLKDEV) {
                 // Devices: check if write op exists
-                if (!node->f_ops || (uint64_t)node->f_ops < 0xffff800000000000ULL ||
+                if (!node->f_ops || (uint64_t)node->f_ops < ARCH_PAGE_OFFSET ||
                     !node->f_ops->write)
                     ok = 0;
             }
