@@ -19,6 +19,7 @@ struct aarch64_platform_info {
     uint64_t gicd_base, gicc_base, pl011_base;
     uint32_t cntp_ppi;
     uint32_t pl011_spi;    /* PL011 RX GIC SPI INTID (QEMU virt: 33) */
+    uint32_t pl011_clock;  /* PL011 uartclk in Hz (0 if unspecified in DTB) */
 };
 
 /* 0 success; -1 malformed blob; -2 topology; -3 PSCI; -4 platform.
@@ -35,6 +36,7 @@ uint64_t dtb_gicd_base(void);
 uint64_t dtb_gicc_base(void);
 uint64_t dtb_pl011_base(void);
 uint32_t dtb_pl011_spi(void);
+uint32_t dtb_pl011_clock(void);
 uint32_t dtb_cntp_ppi(void);
 enum psci_conduit dtb_psci_conduit(void);
 /* Legacy accessor encoding: SMC=0, HVC=1, unavailable=UINT32_MAX. */

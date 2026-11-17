@@ -23,6 +23,8 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/mmu.h>
 #define PL011_EARLY_FALLBACK_PA 0x09000000UL
+#define PL011_DEFAULT_CLK_HZ    16000000U
+#define PL011_BAUD_RATE         115200U
 
 static inline volatile uint32_t *pl011_base(void)
 {
@@ -56,10 +58,29 @@ static inline uint32_t pl011_r32(uint32_t off)
     return pl011_base()[off / 4];
 }
 
+static void pl011_calc_divisors(uint32_t clk_hz, uint32_t baud,
+                                uint32_t *ibrd_out, uint32_t *fbrd_out)
+{
+    if (clk_hz == 0)
+        clk_hz = PL011_DEFAULT_CLK_HZ;
+    uint64_t div64 = ((uint64_t)clk_hz * 4U + baud / 2U) / baud;
+    uint64_t ibrd = div64 >> 6;
+    uint64_t fbrd = div64 & 0x3FU;
+    if (ibrd == 0 || ibrd > 0xFFFFU) {
+        ibrd = 8;
+        fbrd = 44;
+    }
+    *ibrd_out = (uint32_t)ibrd;
+    *fbrd_out = (uint32_t)fbrd;
+}
+
 /* Initialise PL011: 8N1, FIFO enabled, TX+RX enabled.  QEMU ignores
- * baud divisors but we set them anyway for the RPi3 case. */
+ * baud divisors, but real hardware requires them derived from the DTB
+ * uartclk frequency. */
 void pl011_init(void)
 {
+    uint32_t ibrd = 0, fbrd = 0;
+
     /* Disable UART while we configure. */
     pl011_w32(PL011_CR, 0);
 
@@ -67,12 +88,9 @@ void pl011_init(void)
     pl011_w32(PL011_IMSC, 0);
     pl011_w32(PL011_ICR, 0x7FF);   /* clear any pending */
 
-    /* 16 MHz / (16 * 115200) ≈ 8.68 ⇒ IBRD=8, FBRD=44.  Either is
-     * fine for QEMU; RPi3's PL011 needs accurate values to actually
-     * communicate.  Phase-1 doesn't care about baud as long as the
-     * FIFO+8N1 are right. */
-    pl011_w32(PL011_IBRD, 8);
-    pl011_w32(PL011_FBRD, 44);
+    pl011_calc_divisors(dtb_pl011_clock(), PL011_BAUD_RATE, &ibrd, &fbrd);
+    pl011_w32(PL011_IBRD, ibrd);
+    pl011_w32(PL011_FBRD, fbrd);
 
     /* 8 bits, no parity, 1 stop bit; FIFO enabled. */
     pl011_w32(PL011_LCR_H, (1U << 4) | (1U << 5) | (1U << 6));

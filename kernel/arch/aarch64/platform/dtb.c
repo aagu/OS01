@@ -17,6 +17,7 @@ uint64_t dtb_gicd_base(void) { return platform.gicd_base; }
 uint64_t dtb_gicc_base(void) { return platform.gicc_base; }
 uint64_t dtb_pl011_base(void) { return platform.pl011_base; }
 uint32_t dtb_pl011_spi(void) { return platform.pl011_spi; }
+uint32_t dtb_pl011_clock(void) { return platform.pl011_clock; }
 uint32_t dtb_cntp_ppi(void) { return platform.cntp_ppi; }
 enum psci_conduit dtb_psci_conduit(void) { return platform.topology.conduit; }
 uint32_t dtb_psci_method(void)

@@ -3,16 +3,22 @@
 
 #define FDT_MAGIC UINT32_C(0xd00dfeed)
 #define MAX_DEPTH 32
+#define MAX_FIXED_CLOCKS 16
 
 struct property { const uint8_t *data; uint32_t len; };
 struct node {
     const uint8_t *name;
     uint32_t address_cells, size_cells, parent_address_cells, parent_size_cells;
-    bool cpus, cpu_child;
-    struct property reg, compatible, device_type, status, method, enable, interrupts;
+    uint32_t phandle, clock_frequency;
+    bool cpus, cpu_child, has_phandle;
+    struct property reg, compatible, device_type, status, method, enable, interrupts, clocks;
 };
+struct fixed_clock_entry { uint32_t phandle, freq; };
 struct parse_state {
     struct aarch64_platform_info info;
+    struct fixed_clock_entry clocks[MAX_FIXED_CLOCKS];
+    uint32_t clock_count;
+    uint32_t uart_clk_phandle;
     bool enable[AARCH64_BOOT_MAX_CPUS];
     bool psci, gic, uart, timer;
 };
@@ -102,6 +108,15 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
         s->enable[t->cpu_count] = exact(n->enable, "psci");
         t->mpidr[t->cpu_count++] = id;
     }
+    if (n->has_phandle && n->clock_frequency > 0) {
+        if (s->uart && s->uart_clk_phandle == n->phandle && !s->info.pl011_clock)
+            s->info.pl011_clock = n->clock_frequency;
+        if (s->clock_count < MAX_FIXED_CLOCKS) {
+            s->clocks[s->clock_count].phandle = n->phandle;
+            s->clocks[s->clock_count].freq = n->clock_frequency;
+            s->clock_count++;
+        }
+    }
     /* Supported devices are root children: no untranslated nested buses. */
     if (depth != 2) return 0;
     if (node_is(n->name, "psci") || contains(n->compatible, "arm,psci-0.2") ||
@@ -141,6 +156,19 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
         s->uart = true;
         s->info.pl011_base = base;
         s->info.pl011_spi = 32u + be32(n->interrupts.data + 4);
+        if (n->clock_frequency > 0) {
+            s->info.pl011_clock = n->clock_frequency;
+        } else if (n->clocks.data && n->clocks.len >= 4) {
+            uint32_t ph = be32(n->clocks.data);
+            for (uint32_t i = 0; i < s->clock_count; ++i) {
+                if (s->clocks[i].phandle == ph) {
+                    s->info.pl011_clock = s->clocks[i].freq;
+                    break;
+                }
+            }
+            if (!s->info.pl011_clock)
+                s->uart_clk_phandle = ph;
+        }
     }
     if (contains(n->compatible, "arm,armv8-timer")) {
         if (s->timer || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
@@ -163,8 +191,29 @@ static int property(struct node *n, const uint8_t *name, struct property p)
         else n->size_cells = be32(p.data);
         return 0;
     }
+    if (equal(name, "phandle") || equal(name, "linux,phandle")) {
+        if (p.len != 4) return -1;
+        if (!n->has_phandle || equal(name, "phandle")) {
+            n->phandle = be32(p.data);
+            n->has_phandle = true;
+        }
+        return 0;
+    }
+    if (equal(name, "clock-frequency")) {
+        if (p.len == 4) {
+            n->clock_frequency = be32(p.data);
+        } else if (p.len == 8) {
+            uint64_t f = decode(p.data, 2);
+            if (f <= UINT32_MAX)
+                n->clock_frequency = (uint32_t)f;
+        } else {
+            return -1;
+        }
+        return 0;
+    }
     if (equal(name, "reg")) dst = &n->reg;
     else if (equal(name, "interrupts")) dst = &n->interrupts;
+    else if (equal(name, "clocks")) dst = &n->clocks;
     else if (equal(name, "compatible")) { dst = &n->compatible; str = true; }
     else if (equal(name, "device_type")) { dst = &n->device_type; str = true; }
     else if (equal(name, "status")) { dst = &n->status; str = true; }
