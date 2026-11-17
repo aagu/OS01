@@ -14,12 +14,23 @@
 #include <stdint.h>
 #include <arch/cpu.h>   /* arch_nop for tiny spin waits */
 
-/* QEMU virt PL011.  The high alias is the only alias that survives a
- * private user root in TTBR0_EL1: the bootstrap high alias and the M1
- * tree both cover this Device PA, while the low identity map belongs
- * to TTBR0 and disappears with the user root. */
+/* Runtime PL011 base comes from dtb_pl011_base() once dtb_init() has run;
+ * pre-DTB early boot falls back to QEMU virt's 0x09000000 (matching head.S).
+ * The high alias is the only alias that survives a private user root in
+ * TTBR0_EL1: the bootstrap high alias and the M1 tree both cover this Device
+ * PA, while the low identity map belongs to TTBR0 and disappears with the user
+ * root. */
+#include <arch/aarch64/dtb.h>
 #include <arch/mmu.h>
-#define PL011_BASE ((volatile uint32_t *)(ARCH_PAGE_OFFSET + 0x09000000UL))
+#define PL011_EARLY_FALLBACK_PA 0x09000000UL
+
+static inline volatile uint32_t *pl011_base(void)
+{
+    uint64_t pa = dtb_pl011_base();
+    if (!pa)
+        pa = PL011_EARLY_FALLBACK_PA;
+    return (volatile uint32_t *)(ARCH_PAGE_OFFSET + pa);
+}
 
 /* Register offsets (32-bit, little-endian). */
 #define PL011_DR         0x00   /* Data Register               */
@@ -37,12 +48,12 @@
 
 static inline void pl011_w32(uint32_t off, uint32_t v)
 {
-    PL011_BASE[off / 4] = v;
+    pl011_base()[off / 4] = v;
 }
 
 static inline uint32_t pl011_r32(uint32_t off)
 {
-    return PL011_BASE[off / 4];
+    return pl011_base()[off / 4];
 }
 
 /* Initialise PL011: 8N1, FIFO enabled, TX+RX enabled.  QEMU ignores

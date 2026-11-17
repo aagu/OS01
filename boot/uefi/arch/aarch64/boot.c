@@ -11,12 +11,6 @@
 #include "../arch.h"
 #include "loader.h"
 
-/* QEMU virt's PL011 UART: physical MMIO at 0x09000000. */
-#define PL011_BASE       ((volatile uint32_t *)(uintptr_t)0x09000000U)
-#define PL011_DR          0x00U
-#define PL011_FR          0x18U
-#define PL011_FR_TXFF     (1U << 5)
-
 /* AARCH64_HANDOFF_BASE / AARCH64_HANDOFF_END / AARCH64_TRAMPOLINE_BASE
  * come from the shared handoff_layout.h (via loader.h). The derived
  * page counts stay local since they depend on AARCH64_PAGE_SIZE. */
@@ -52,17 +46,72 @@ static uint64_t handoff_cursor;
 static int aarch64_data_reserved;        /* 0x401e0000, DATA_PAGES */
 static int aarch64_trampoline_reserved;  /* 0x401ff000, 1 page */
 
-static void pl011_putc(char c)
+static efi_serial_io_protocol_t *serial_io_protocol(void)
 {
-    while (PL011_BASE[PL011_FR / sizeof(uint32_t)] & PL011_FR_TXFF)
-        ;
-    PL011_BASE[PL011_DR / sizeof(uint32_t)] = (uint8_t)c;
+    static efi_serial_io_protocol_t *cached;
+    static int probed;
+
+    if (!probed) {
+        efi_guid_t ser_guid = EFI_SERIAL_IO_PROTOCOL_GUID;
+        efi_serial_io_protocol_t *ser = NULL;
+
+        probed = 1;
+        if (BS && BS->LocateProtocol &&
+            !EFI_ERROR(BS->LocateProtocol(&ser_guid, NULL, (void **)&ser)) &&
+            ser && ser->Write) {
+            cached = ser;
+        }
+    }
+    return cached;
 }
 
-static void pl011_puts(const char *s)
+static void conout_puts(const char *s)
 {
-    while (*s)
-        pl011_putc(*s++);
+    wchar_t buf[128];
+    size_t n = 0;
+
+    if (!ST || !ST->ConOut || !ST->ConOut->OutputString)
+        return;
+
+    while (*s) {
+        buf[n++] = (wchar_t)(unsigned char)*s++;
+        if (n == (sizeof(buf) / sizeof(buf[0])) - 1u) {
+            buf[n] = L'\0';
+            ST->ConOut->OutputString(ST->ConOut, buf);
+            n = 0;
+        }
+    }
+    if (n > 0) {
+        buf[n] = L'\0';
+        ST->ConOut->OutputString(ST->ConOut, buf);
+    }
+}
+
+static void uefi_puts(const char *s)
+{
+    efi_serial_io_protocol_t *ser;
+
+    if (!s || !*s)
+        return;
+
+    ser = serial_io_protocol();
+    if (ser) {
+        uintn_t total = 0;
+        while (s[total])
+            ++total;
+        uintn_t off = 0;
+        while (off < total) {
+            uintn_t chunk = total - off;
+            if (EFI_ERROR(ser->Write(ser, &chunk, (void *)(s + off))) ||
+                chunk == 0) {
+                conout_puts(s + off);
+                return;
+            }
+            off += chunk;
+        }
+        return;
+    }
+    conout_puts(s);
 }
 
 static uint32_t load_be32(const void *address)
@@ -142,14 +191,14 @@ static EFI_STATUS prepare_trampoline(void)
 
     if (!aarch64_handoff_el_supported(read_current_el()) ||
         stub_size == 0 || stub_size > AARCH64_PAGE_SIZE) {
-        pl011_puts("UEFI-A64: trampoline unreachable\r\n");
+        uefi_puts("UEFI-A64: trampoline unreachable\r\n");
         return EFI_UNSUPPORTED;
     }
 
     memcpy(destination, aarch64_handoff_stub_start, (size_t)stub_size);
     if (memcmp(destination, aarch64_handoff_stub_start,
                (size_t)stub_size) != 0) {
-        pl011_puts("UEFI-A64: trampoline unreachable\r\n");
+        uefi_puts("UEFI-A64: trampoline unreachable\r\n");
         return EFI_DEVICE_ERROR;
     }
     synchronize_code_range(destination, stub_size);
@@ -243,7 +292,7 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
 
     release_kernel_allocations();
     if (aarch64_elf_validate(image, image_size, entry_out) != 0) {
-        pl011_puts("UEFI-A64: bad ELF\r\n");
+        uefi_puts("UEFI-A64: bad ELF\r\n");
         return EFI_LOAD_ERROR;
     }
 
@@ -251,7 +300,7 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
     kernel_allocations =
         malloc((size_t)ehdr->e_phnum * sizeof(*kernel_allocations));
     if (!kernel_allocations) {
-        pl011_puts("UEFI-A64: load allocation failed\r\n");
+        uefi_puts("UEFI-A64: load allocation failed\r\n");
         return EFI_OUT_OF_RESOURCES;
     }
     for (index = 0; index < ehdr->e_phnum; index++) {
@@ -275,7 +324,7 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
         if (aarch64_page_interval(phdr->p_paddr, phdr->p_memsz,
                                   &interval_start, &interval_pages) != 0) {
             release_kernel_allocations();
-            pl011_puts("UEFI-A64: bad ELF\r\n");
+            uefi_puts("UEFI-A64: bad ELF\r\n");
             return EFI_LOAD_ERROR;
         }
         if (interval_pages == 0)
@@ -349,7 +398,7 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
                 (void)BS->FreePages(allocation, (uintn_t)component_pages);
             }
             release_kernel_allocations();
-            pl011_puts("UEFI-A64: load allocation failed\r\n");
+            uefi_puts("UEFI-A64: load allocation failed\r\n");
             return EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
         }
         kernel_allocations[kernel_allocation_count].address = allocation;
@@ -446,7 +495,7 @@ void arch_release(void)
 
 void arch_puts(const char *s)
 {
-    pl011_puts(s);
+    uefi_puts(s);
 }
 
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,

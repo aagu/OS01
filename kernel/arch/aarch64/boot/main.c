@@ -557,6 +557,7 @@ void arch_pre_subsys_selftest(const struct boot_context *bootctx)
 void arch_boot_controllers(const struct boot_context *bootctx)
 {
     dtb_init(bootctx);
+    pl011_init();
     log_info("OS01 aarch64 uefi handoff ok\n");
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();

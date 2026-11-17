@@ -74,7 +74,8 @@ static uint64_t decode(const uint8_t *p, uint32_t count)
     return count == 2 ? (uint64_t)be32(p) << 32 | be32(p + 4) : be32(p);
 }
 
-static bool device_reg(const struct node *n, uint32_t index, uint64_t base)
+static bool device_reg_base(const struct node *n, uint32_t index,
+                            uint64_t *base_out)
 {
     uint32_t ac = n->parent_address_cells, sc = n->parent_size_cells;
     if ((ac != 1 && ac != 2) || (sc != 1 && sc != 2)) return false;
@@ -82,7 +83,15 @@ static bool device_reg(const struct node *n, uint32_t index, uint64_t base)
     if (!n->reg.data || n->reg.len % stride ||
         !range(n->reg.len, index * stride, stride)) return false;
     const uint8_t *p = n->reg.data + index * stride;
-    return decode(p, ac) == base && decode(p + ac * 4, sc) >= 0x1000;
+    if (decode(p + ac * 4, sc) < 0x1000) return false;
+    *base_out = decode(p, ac);
+    return true;
+}
+
+static bool device_reg(const struct node *n, uint32_t index, uint64_t base)
+{
+    uint64_t got = 0;
+    return device_reg_base(n, index, &got) && got == base;
 }
 
 static int finish_node(struct parse_state *s, const struct node *n, uint32_t depth)
@@ -120,18 +129,19 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
         s->info.gicc_base = 0x08010000;
     }
     if (contains(n->compatible, "arm,pl011")) {
+        uint64_t base = 0;
         /* interrupts = <GIC_SPI(0) nr IRQ_TYPE_LEVEL_HIGH(4)>: 3 be32 words
          * QEMU virt pl011: <0x00 0x01 0x04> → SPI 33. The parse keeps
          * INTID = 32 + nr; validation rejects any shape that would force
          * the consumer to hardcode the wire (R6). */
         if (s->uart || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
-            !device_reg(n, 0, 0x09000000) ||
+            !device_reg_base(n, 0, &base) || base == 0 ||
             n->interrupts.len != 12 ||
             be32(n->interrupts.data) != 0 ||
             be32(n->interrupts.data + 4) == 0 ||
             be32(n->interrupts.data + 8) != 4) return -4;
         s->uart = true;
-        s->info.pl011_base = 0x09000000;
+        s->info.pl011_base = base;
         s->info.pl011_spi = 32u + be32(n->interrupts.data + 4);
     }
     if (contains(n->compatible, "arm,armv8-timer")) {
