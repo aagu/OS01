@@ -88,12 +88,6 @@ static bool device_reg_base(const struct node *n, uint32_t index,
     return true;
 }
 
-static bool device_reg(const struct node *n, uint32_t index, uint64_t base)
-{
-    uint64_t got = 0;
-    return device_reg_base(n, index, &got) && got == base;
-}
-
 static int finish_node(struct parse_state *s, const struct node *n, uint32_t depth)
 {
     struct aarch64_topology *t = &s->info.topology;
@@ -121,12 +115,16 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
         else if (exact(n->method, "smc")) t->conduit = PSCI_CONDUIT_SMC;
         else return -3;
     }
-    if (contains(n->compatible, "arm,cortex-a15-gic")) {
+    if (contains(n->compatible, "arm,cortex-a15-gic") ||
+        contains(n->compatible, "arm,gic-400")) {
+        uint64_t gicd_base = 0;
+        uint64_t gicc_base = 0;
         if (s->gic || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
-            !device_reg(n, 0, 0x08000000) || !device_reg(n, 1, 0x08010000)) return -4;
+            !device_reg_base(n, 0, &gicd_base) || gicd_base == 0 ||
+            !device_reg_base(n, 1, &gicc_base) || gicc_base == 0) return -4;
         s->gic = true;
-        s->info.gicd_base = 0x08000000;
-        s->info.gicc_base = 0x08010000;
+        s->info.gicd_base = gicd_base;
+        s->info.gicc_base = gicc_base;
     }
     if (contains(n->compatible, "arm,pl011")) {
         uint64_t base = 0;
