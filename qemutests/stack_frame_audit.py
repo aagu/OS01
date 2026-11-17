@@ -24,6 +24,10 @@ BASELINE_EXCEPTIONS: dict[str, int] = {
     "pmm_init": 1760,
     "pmm_arch_normalize": 536,
     "aarch64_early_arena_preflight": 1600,
+    # aarch64 DTB platform parse: aarch64_dtb_parse (holding the
+    # aarch64_platform_info incl. the 32 virtio-mmio slots) inlines into
+    # dtb_init — 688B measured, still far under the 4 KiB early BSP stack.
+    "dtb_init": 768,
 }
 
 
