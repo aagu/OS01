@@ -1,4 +1,5 @@
 #include <arch/aarch64/boot_offsets.h>
+#include <arch/aarch64/boot_layout.h>
 
 /* aarch64 phase 1: head.S — low-level boot, page-table construction,
  * MMU enable, jump to high-half C entry.
@@ -86,6 +87,11 @@ boot_page_tables_end:
 .globl aarch64_boot_dtb_slot
 aarch64_boot_dtb_slot:
     .skip   8                                 /* DTB-park slot */
+
+/* Entry address recorded by the low boot path (adr _start, Task 3):
+ * consumed via aarch64_boot_observed_entry() by arch_early_init. */
+aarch64_boot_observed_entry_value:
+    .skip   8
 
 /* ──────────────────────────────────────────────────────────────────
  * boot_vectors: identity-mapped vector table for the MMU-bring-up
@@ -291,6 +297,13 @@ _start:
     sub     x3, x3, #8
     cbnz    x3, .Lbss_loop
 .Lbss_done:
+    /* Record the entry address this low path actually executes from,
+     * using a PC-relative adr (Task 3 evidence). Must run after the
+     * .boot.bss clear (the store would otherwise be erased) and before
+     * the MMU is enabled. */
+    adr     x0, _start
+    ldr     x1, =aarch64_boot_observed_entry_value
+    str     x0, [x1]
 
     /* 6. Build dual-TTBR page tables. */
     bl      build_pagetables
@@ -522,44 +535,20 @@ zp_all:
 
     /* ── 3. PMD_low1: 2 MiB blocks covering 1..2GB (no L3 page tables).
      *
-     *    PMD_low1[0] = block descriptor for PA 0x40000000..0x40200000.
-     *    This 2 MiB region contains both .boot.text + .boot.bss and the
-     *    kernel-image source loaded at LMA 0x4009A008+, so it must be
-     *    PXN=0 (executable) and UXN=1 (no EL0 exec).  Phase 1 doesn't
-     *    need per-page permissions within this 2 MiB block; all of it
-     *    is uniformly EL1 RW + exec + UXN.
-     *
-     *    PMD_low1[1..511] = 2 MiB Normal blocks covering the fixed
-     *    bootstrap direct-map window 0x40200000..0x80000000. These are
-     *    filled here, before the MMU is enabled, so both the ordinary
-     *    and selftest images have the mapping from the first instruction.
-     *    Each carries the same Normal low flags as PMD_low0 (x22=0x705)
-     *    plus PXN|UXN (x20): EL1 RW, no EL1/EL0 exec.
+     *    ALL 512 slots (0..511) are filled with plain Normal PXN|UXN
+     *    blocks: the fixed bootstrap direct-map window plus, at index
+     *    0, the OLD fixed executable block PA 0x40000000 — which is a
+     *    plain non-executable RAM slot whenever the configured boot
+     *    block B moved away from it (Task 3). The single executable
+     *    block is written LAST by boot_write_exec_block below, which
+     *    selects its table and slot from the configured base.
      *
      *    PMD_low1 is the PMD table for PUD[1] (which covers 1..2GB), so
      *    PMD index 0 within PMD_low1 corresponds to PA 0x40000000.
      */
-    mov     x0, #0x40000000                   /* x0 = PA                 */
-    mov     x1, x22                           /* x1 = flags              */
-    bl      make_2m                           /* x0 = block descriptor   */
-    /* UXN first (no EL0 exec), then clear ONLY PXN so the kernel
-     * code in this 2 MiB block can execute at EL1. */
-    orr     x0, x0, #PT_UXN_MASK
-    bic     x0, x0, #PT_PXN_MASK
-    mov     x1, x0                            /* x1 = descriptor         */
-    mov     x0, x13                           /* x0 = PMD_low1 base      */
-    mov     x2, #0                            /* PMD index 0             */
-    bl      write_slot
-
-    /* ── 3b. PMD_low1[1..511]: fill the fixed bootstrap direct-map
-     * window 0x40200000..0x80000000 with 2 MiB Normal blocks.
-     * x24 = slot index, x25 = running PA, x26 = slots remaining.
-     * Reuses x22 (Normal low flags) and x20 (PXN|UXN); x13 is the
-     * PMD_low1 base. make_2m/write_slot only clobber x0/x1/x2/x3,
-     * which are re-initialised each iteration. */
-    mov     x24, #1                           /* PMD index 1..511        */
-    mov     x25, #0x40200000                   /* block PA for index 1    */
-    mov     x26, #511                          /* slots remaining         */
+    mov     x24, #0                           /* PMD index 0..511        */
+    mov     x25, #0x40000000                  /* block PA for index 0    */
+    mov     x26, #512                         /* slots remaining         */
 .Lpmd1_fill:
     cbz     x26, .Lpmd1_fill_done
     mov     x0, x25
@@ -576,7 +565,43 @@ zp_all:
     b       .Lpmd1_fill
 .Lpmd1_fill_done:
 
+    /* ── 4. The single executable boot block B: written LAST so it
+     * overwrites whatever generic Normal NX descriptor the fills above
+     * placed in its slot (and leaves the old fixed 0x40000000 block a
+     * plain Normal PXN|UXN slot whenever B moved away). */
+    bl      boot_write_exec_block
+
     ldp     x29, x30, [sp], #16
+    ret
+
+
+/* ──────────────────────────────────────────────────────────────────
+ * boot_write_exec_block — the ONLY writer of the executable boot
+ * block descriptor (Task 3 interface symbol).
+ *
+ * Selects the L2 table from the configured base at compile time:
+ * base >> 30 picks the L1 slot's L2 table (0 → PMD_low0 in x12,
+ * 1 → PMD_low1 in x13) and (base >> 21) & 511 picks the L2 slot.
+ * Descriptor output PA = base, Normal, EL1 RW, UXN (no EL0 exec),
+ * PXN cleared (EL1 executable).
+ *
+ * in: x12/x13 table bases, x22 Normal low flags; clobbers x0..x4.
+ * ────────────────────────────────────────────────────────────────── */
+boot_write_exec_block:
+    ldr     x0, =AARCH64_BOOT_BLOCK_BASE
+.if (AARCH64_BOOT_BLOCK_BASE >> 30) == 0
+    mov     x4, x12                           /* PMD_low0 (0..1 GiB)     */
+.else
+    mov     x4, x13                           /* PMD_low1 (1..2 GiB)     */
+.endif
+    mov     x2, #((AARCH64_BOOT_BLOCK_BASE >> 21) & 511)
+    mov     x1, x22                           /* Normal low flags        */
+    bl      make_2m
+    orr     x0, x0, #PT_UXN_MASK              /* UXN first (no EL0 exec) */
+    bic     x0, x0, #PT_PXN_MASK              /* clear ONLY PXN → EL1 X  */
+    mov     x1, x0                            /* x1 = descriptor         */
+    mov     x0, x4                            /* x0 = selected L2 table  */
+    bl      write_slot
     ret
 
 
@@ -822,6 +847,16 @@ aarch64_dtb_cpu_count_addr:
 .globl secondary_start_addr
 secondary_start_addr:
     ldr     x0, =secondary_start
+    ret
+
+/* Returns the entry address the low boot path recorded (adr _start,
+ * taken after the BSS clear and before MMU enable — Task 3 evidence).
+ * Selftest-only consumer: arch_early_init compares it against the
+ * configured boot block entry. */
+.globl aarch64_boot_observed_entry
+aarch64_boot_observed_entry:
+    ldr     x0, =aarch64_boot_observed_entry_value
+    ldr     x0, [x0]
     ret
 
 .globl aarch64_boot_page_tables_addr

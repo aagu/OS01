@@ -4,6 +4,7 @@
 #include <arch/boot.h>
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
+#include <arch/aarch64/boot_layout.h>
 #include <arch/aarch64/page_table_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
@@ -98,10 +99,10 @@ void gic_ipi_test(uint32_t cpu_count);
 #define BOOT_MAP_CONTIG_BIT     UINT64_C(0x10000000000000)    /* bit 52: Contiguous hint */
 
 /* Format a uint64 as decimal into buf. The aarch64 libk subset has no
- * snprintf, so the PMD_low1 walk uses this to build a per-slot `what`
- * prefix ("PMD_low1[123]") in a caller-owned buffer — boot_map_check_block
- * writes its reason into its OWN static buffer, so the prefix must not
- * live there. */
+ * snprintf, so the L2-table walk uses this to build a per-slot `what`
+ * prefix ("PMD_low1[123]") in a caller-owned buffer —
+ * boot_map_check_exact_block writes its reason into its OWN static
+ * buffer, so the prefix must not live there. */
 static void boot_map_fmt_u64(char *buf, uint64_t v)
 {
     char tmp[24];
@@ -157,46 +158,6 @@ static const char *boot_map_check_table(const char *what, uint64_t desc,
  * returns NULL; on failure returns a static-buffer reason string
  * prefixed with `what`. expected_pa is a MASKED PA field (bits
  * [39:21]), not an address — mask before passing. */
-static const char *boot_map_check_block(const char *what, uint64_t desc,
-                                        uint64_t expected_pa,
-                                        uint64_t expected_low,
-                                        uint64_t expected_exec)
-{
-    static char reason[96];
-
-    if ((desc & UINT64_C(0x3)) != BOOT_MAP_BLOCK_TYPE) {
-        strcpy(reason, what);
-        strcat(reason, ": not a 2 MiB block descriptor (bits[1:0] != 01)");
-        return reason;
-    }
-    if ((desc & BOOT_MAP_BLOCK_PA_MASK) != expected_pa) {
-        strcpy(reason, what);
-        strcat(reason, ": PA field mismatch");
-        return reason;
-    }
-    if ((desc & BOOT_MAP_LOW_MASK) != expected_low) {
-        strcpy(reason, what);
-        strcat(reason, ": low flags mismatch");
-        return reason;
-    }
-    if ((desc & BOOT_MAP_CONTIG_BIT) != 0) {
-        strcpy(reason, what);
-        strcat(reason, ": bit 52 (Contiguous hint) set");
-        return reason;
-    }
-    if ((desc & BOOT_MAP_PXN_BIT) != (expected_exec & BOOT_MAP_PXN_BIT)) {
-        strcpy(reason, what);
-        strcat(reason, ": PXN mismatch");
-        return reason;
-    }
-    if ((desc & BOOT_MAP_UXN_BIT) != (expected_exec & BOOT_MAP_UXN_BIT)) {
-        strcpy(reason, what);
-        strcat(reason, ": UXN mismatch");
-        return reason;
-    }
-    return NULL;
-}
-
 /* Validate a block descriptor whose complete encoding is part of the
  * bootstrap contract, including reserved or otherwise unexpected bits. */
 static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
@@ -212,24 +173,40 @@ static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
     return NULL;
 }
 
-/* Scan entries beginning at first_slot, using the same descriptor
- * validation path for both the live table and the synthetic regression
- * descriptor. */
-static const char *boot_map_check_pmd_low1_range(const uint64_t *entries,
-                                                 uint64_t first_slot,
-                                                 uint64_t count)
+/* Walk one installed L2 table in place: every one of the 512 slots must
+ * match the layout contract exactly, classified by what the slot covers:
+ *   - the D device window (PMD_low0 slots 0x40..0x4F): Device, PXN|UXN;
+ *   - the configured boot block B (the one table/slot picked by
+ *     base>>30 / (base>>21)&511): Normal, UXN set, PXN clear;
+ *   - everything else: plain Normal PXN|UXN.
+ * No assumption is made about where B sits relative to the two tables —
+ * a B=0 build must route its executable block through PMD_low0 exactly
+ * like a 1..2 GiB B routes through PMD_low1. */
+static const char *boot_map_walk_pmd_table(const uint64_t *pmd,
+                                           const char *name,
+                                           uint64_t pa_base,
+                                           bool device_window,
+                                           unsigned b_table,
+                                           unsigned b_slot,
+                                           unsigned table_index)
 {
-    for (uint64_t offset = 0; offset < count; ++offset) {
-        uint64_t i = first_slot + offset;
+    for (unsigned i = 0; i < 512; i++) {
         char what[32];
-        strcpy(what, "PMD_low1[");
+        uint64_t pa = pa_base + (uint64_t)i * UINT64_C(0x200000);
+        uint64_t expected_desc;
+
+        strcpy(what, name);
         boot_map_fmt_u64(what + strlen(what), i);
         strcat(what, "]");
 
-        uint64_t expected_desc = UINT64_C(0x60000000000705)
-                               + UINT64_C(0x40000000)
-                               + i * UINT64_C(0x200000);
-        const char *r = boot_map_check_exact_block(what, entries[offset],
+        if (device_window && i >= 0x40 && i < 0x50)
+            expected_desc = pa | UINT64_C(0x60000000000401);
+        else if (table_index == b_table && i == b_slot)
+            expected_desc = pa | UINT64_C(0x40000000000705);
+        else
+            expected_desc = pa | UINT64_C(0x60000000000705);
+
+        const char *r = boot_map_check_exact_block(what, pmd[i],
                                                    expected_desc);
         if (r != NULL)
             return r;
@@ -295,33 +272,29 @@ static void aarch64_boot_map_selftest(void)
     }
     pmd_low1 = (const uint64_t *)(uintptr_t)(pmd_pa + ARCH_PAGE_OFFSET);
 
-    /* Step 3: PMD_low0 — one Normal block (slot 0) and one MMIO
-     * Device block (slot 0x40). Kept separate from the PMD_low1
-     * walk: these cover the low identity region, not the kernel
-     * image direct map. Both must carry PXN|UXN. */
-    r = boot_map_check_block("PMD_low0[0]", pmd_low0[0],
-                             0, 0x705,
-                             BOOT_MAP_PXN_BIT | BOOT_MAP_UXN_BIT);
-    if (r != NULL) {
-        fail_reason = r;
-        goto fail;
-    }
-    r = boot_map_check_block("PMD_low0[0x40]", pmd_low0[0x40],
-                             UINT64_C(0x08000000), 0x401,
-                             BOOT_MAP_PXN_BIT | BOOT_MAP_UXN_BIT);
-    if (r != NULL) {
-        fail_reason = r;
-        goto fail;
-    }
+    /* Step 3: walk BOTH installed L2 tables in place — all 1024 full
+     * descriptors classified by B / D / plain Normal (Task 3). The
+     * configured base decides which table holds the single executable
+     * block; a B in the low table (e.g. B=0) must not be misclassified
+     * by any "low slot 0 is never executable" assumption. */
+    {
+        const uint64_t b = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
+        const unsigned b_table = (unsigned)(b >> 30);
+        const unsigned b_slot = (unsigned)((b >> 21) & 511);
 
-    /* Step 4: PMD_low1[0] — the kernel-image block. Executable at
-     * EL1 (PXN=0) but not at EL0 (UXN=1). */
-    r = boot_map_check_block("PMD_low1[0]", pmd_low1[0],
-                             UINT64_C(0x40000000), 0x705,
-                             BOOT_MAP_UXN_BIT);
-    if (r != NULL) {
-        fail_reason = r;
-        goto fail;
+        r = boot_map_walk_pmd_table(pmd_low0, "PMD_low0[", 0,
+                                    true, b_table, b_slot, 0);
+        if (r != NULL) {
+            fail_reason = r;
+            goto fail;
+        }
+        r = boot_map_walk_pmd_table(pmd_low1, "PMD_low1[",
+                                    UINT64_C(0x40000000),
+                                    false, b_table, b_slot, 1);
+        if (r != NULL) {
+            fail_reason = r;
+            goto fail;
+        }
     }
 
     /* Check once that the exact-descriptor helper rejects a PA bit that
@@ -330,23 +303,10 @@ static void aarch64_boot_map_selftest(void)
                                  + UINT64_C(0x40000000)
                                  + UINT64_C(0x200000);
     const uint64_t probe_entry = probe_expected_desc | (UINT64_C(1) << 40);
-    r = boot_map_check_pmd_low1_range(&probe_entry, 1, 1);
+    r = boot_map_check_exact_block("bit40-probe", probe_entry,
+                                   probe_expected_desc);
     if (r == NULL) {
         fail_reason = "PA bit 40 mutation was accepted";
-        goto fail;
-    }
-
-    /* Step 5: PMD_low1[1..511] — the fixed bootstrap direct-map window
-     * head.S fills before the MMU is enabled. Each slot must be a 2 MiB
-     * Normal block at PA 0x40000000 + i*0x200000 with low flags 0x705,
-     * PXN|UXN set and bit 52 clear. This checks the complete descriptor,
-     * including reserved bits, in one assertion per slot. The
-     * `what` prefix is formatted into a local buffer because
-     * boot_map_check_exact_block writes its reason into its own static
-     * buffer. */
-    r = boot_map_check_pmd_low1_range(pmd_low1 + 1, 1, 511);
-    if (r != NULL) {
-        fail_reason = r;
         goto fail;
     }
 
@@ -417,12 +377,41 @@ void arch_early_panic(const char *msg)
     for (;;) arch_cpu_halt();
 }
 
+/* Task 3 interface: returns the entry address the low boot path
+ * recorded (adr _start after the BSS clear, before MMU enable). The
+ * implementation lives in head.S so the high-half C read avoids the
+ * adrp relocation range problem for low-VMA .boot.bss symbols. */
+extern uint64_t aarch64_boot_observed_entry(void);
+
 void arch_early_init(const struct boot_context *bootctx)
 {
     arch_local_irq_disable();
     pl011_init();
     uint64_t vbar = (uint64_t)(uintptr_t)exception_vectors;
     __asm__ __volatile__("msr vbar_el1, %0\n\tisb" :: "r"(vbar) : "memory");
+
+    /* Task 3 layout evidence: the recorded entry (PC-relative adr
+     * _start from the low boot path) and the received context pointer
+     * must match the configured boot block — a kernel started with a
+     * loader paired to a different layout halts here, fail-closed.
+     * Only the OBSERVED values are printed, never the configuration
+     * constants. */
+    {
+        uint64_t observed_entry = aarch64_boot_observed_entry();
+        uint64_t observed_context = (uint64_t)(uintptr_t)bootctx;
+
+        if (observed_entry != (uint64_t)AARCH64_KERNEL_ENTRY ||
+            observed_context != (uint64_t)AARCH64_HANDOFF_BASE) {
+            log_err("UEFI-A64: layout mismatch entry=%lx context=%lx\n",
+                    (unsigned long)observed_entry,
+                    (unsigned long)observed_context);
+            for (;;)
+                arch_cpu_halt();
+        }
+        log_info("UEFI-A64: layout entry=%lx context=%lx\n",
+                 (unsigned long)observed_entry,
+                 (unsigned long)observed_context);
+    }
 
     /* Which core are we running on?  head.S only gates on the MIDR_EL1
      * architecture field (0xF = AArch64, i.e. ARMv8-A and later); print
