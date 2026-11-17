@@ -95,7 +95,7 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 
 | 问题 | 位置 | 真机影响 | 解法方向 |
 |------|------|----------|----------|
-| 内核 LMA 固化 0x40080000（RAM base + 512 KiB） | `linker.ld:41,147`；联动 `head.S:542-544`（PMD_low1[0] exec 块 PA=0x40000000）、`early_arena.c:72-73`、`handoff_layout.h`、loader 按 ELF `p_paddr` 落位 | 真机 DRAM 基址不同（RPi4 = 0x0、部分 SoC 0x20000000）直接无法加载/映射 | 加载地址提取为平台配置（build-time board config 或 handoff 传递），链接脚本、head.S、handoff 全部从它推导 |
+| 内核 LMA 固化 0x40080000（RAM base + 512 KiB） | `linker.ld:41,147`；联动 `head.S:542-544`（PMD_low1[0] exec 块 PA=0x40000000）、`early_arena.c:72-73`、`handoff_layout.h`、loader 按 ELF `p_paddr` 落位 | 真机 DRAM 基址不同（RPi4 = 0x0、部分 SoC 0x20000000）直接无法加载/映射 | 采用构建时平台配置，链接、装载、页表与 handoff 共用布局；见 [设计 spec](superpowers/specs/2026-11-17-aarch64-kernel-lma-design.md) |
 | early_arena 拒绝与 B/D 窗口重叠的 RAM | `early_arena.c:140-145`（B=[0x40000000,0x40200000)、D=[0x08000000,0x0a000000)） | RPi4 类 DRAM 从 0 起覆盖 D 窗口 → preflight 直接 FATAL | 排除区改为"内核镜像 + handoff 实际地址" + DTB ranges 推导的设备区 |
 | 早期 MMIO Device 块固化槽 0x40..0x4F（0x08000000..0x0A000000，32 MiB） | `head.S:506-521`（PMD_low0）；`early_arena.c:74-75` 同值 | 窗口外 MMIO 一律缺页；BCM2711 PL011 在 0xFE201000、GIC-400 在 0x4C8xxxxx | boot_context 增加 early-console + early-device-window 字段，loader 从 DTB 填充，head.S 据此填 Device 块 |
 | PL011 基址 0x09000000 共 4 处独立硬编码 | `head.S:138`（MMU 前 fault 打印）、`pl011.c:22`（运行期，**未消费已有的 `dtb_pl011_base()`**）、`boot/uefi/arch/aarch64/boot.c:15`（loader 直写）、`dtb_parse.c:128,134` | 任一处地址不对 → 总线错误或静默无输出，启动链黑盒 | 运行期驱动改走 DTB 解析值；head.S 早期打印基址由 loader 经寄存器传入；loader 优先 EFI Serial IO Protocol |
