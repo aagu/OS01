@@ -286,6 +286,7 @@ endef
 $(eval $(call _aarch64_mode_gate,sched-tick,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,sched-wake,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,sched-ap,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
+$(eval $(call _aarch64_mode_gate,lma-layout,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),sched)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
@@ -404,6 +405,19 @@ _test-aarch64-run-smp:
 	  --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
+# MODE=lma-layout (LMA Task 5): the paired-boot acceptance. The runner
+# manages its OWN private build root (default → relocated → default via
+# AARCH64_BUILD_ROOT, fixed KERNEL_SELFTEST=1) and every QEMU boot; the
+# outer make builds nothing and must not carry compile-affecting
+# overrides (the shared mode gate below rejects them).
+.PHONY: _test-aarch64-prep-lma-layout
+_test-aarch64-prep-lma-layout:
+	@true
+.PHONY: _test-aarch64-run-lma-layout
+_test-aarch64-run-lma-layout:
+	python3 qemutests/aarch64_lma_layout.py \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --timeout 120
 _test-aarch64-run-no-ack:
 	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
@@ -587,8 +601,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)

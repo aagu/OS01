@@ -62,6 +62,18 @@
       }
     },
     {
+      "id": "aarch64-lma-layout",
+      "layer": "qemu_e2e",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.uefi"
+      ],
+      "source": "qemutests/aarch64_lma_layout.py"
+    },
+    {
       "kind": "suite",
       "id": "aarch64-m1-ap-bad-root",
       "layer": "qemu_e2e",

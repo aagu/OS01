@@ -586,8 +586,13 @@ zp_all:
  * PXN cleared (EL1 executable).
  *
  * in: x12/x13 table bases, x22 Normal low flags; clobbers x0..x4.
+ *
+ * x30 MUST be saved: this is a CALLED leaf (bl from build_pagetables)
+ * that itself calls make_2m/write_slot — without a frame the final
+ * ret would use the clobbered x30 and jump back to itself.
  * ────────────────────────────────────────────────────────────────── */
 boot_write_exec_block:
+    stp     x29, x30, [sp, #-16]!
     ldr     x0, =AARCH64_BOOT_BLOCK_BASE
 .if (AARCH64_BOOT_BLOCK_BASE >> 30) == 0
     mov     x4, x12                           /* PMD_low0 (0..1 GiB)     */
@@ -602,6 +607,7 @@ boot_write_exec_block:
     mov     x1, x0                            /* x1 = descriptor         */
     mov     x0, x4                            /* x0 = selected L2 table  */
     bl      write_slot
+    ldp     x29, x30, [sp], #16
     ret
 
 

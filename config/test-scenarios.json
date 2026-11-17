@@ -8531,6 +8531,35 @@
     "action": "unique",
     "reason": "Sole host contract test carrying the configured boot block through RAM reservation, early arena and the M1 tree"
    }
+  },
+  {
+   "id": "boot.lma.uefi",
+   "owner": "qemu_e2e",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout",
+   "assertions": [
+    "runner exits 0 with the default→relocated→default sequence completing in a private build root",
+    "each round's FAT contents match the published kernel.elf/BOOTAA64.EFI byte-for-byte and each ELF entry matches its configured base",
+    "the relocated pairing boots once with kernel-side layout evidence for 0x42000000, boot-map OK, full M1/PRUNE/AP evidence and no M1 ZONE intersecting B",
+    "the restored default pairing boots once after the A→B→A cycle",
+    "the restored default FAT with the relocated kernel swapped in fails with the dedicated mismatch diagnostic, the generic loader failure and no kernel takeover",
+    "the default build tree is byte-identical before and after; no new paths are created"
+   ],
+   "failure_modes": [
+    "stale pairing (old EFI or kernel reused across the layout flip), silent timeout counted as a rejection, kernel takeover in the mismatch round, or default-tree contamination"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/aarch64_lma_layout.py",
+    "selector": "make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole QEMU E2E acceptance of the configured UEFI boot block pairing, the A→B→A build isolation and the mixed-loader rejection"
+   }
   }
  ]
 }

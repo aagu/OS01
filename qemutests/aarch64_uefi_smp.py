@@ -837,10 +837,93 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
     return not bool(re.search(r"^\[[^]]*(?:bench|spinlock)[^]]*\][^\n]*\bPASS\b", text, re.MULTILINE | re.IGNORECASE))
 
 
+def lma_layout_evidence_ok(text: str, base: int, cpus: int,
+                           ram_mib: int = 512) -> bool:
+    """Positive lma-layout acceptance (LMA Task 5).
+
+    ``base`` is the configured boot block base (never a hardcoded
+    address): the kernel-side layout evidence must carry the ACTUAL
+    entry (base + 0x80000) and context (base + 0x1e0000), the M0 boot
+    map selftest must pass, the full M1 evidence (zones, coverage,
+    prune, AP) must hold, and NO M1 ZONE may intersect the boot block
+    B = [base, base + 2 MiB).
+    """
+    text = text.replace("\r", "")
+    entry = base + 0x80000
+    context = base + 0x1e0000
+    layout = re.findall(
+        r"^UEFI-A64: layout entry=(0x[0-9a-f]+) context=(0x[0-9a-f]+)$",
+        text, re.MULTILINE)
+    if len(layout) != 1:
+        return False
+    if int(layout[0][0], 16) != entry or int(layout[0][1], 16) != context:
+        return False
+    if not re.search(r"^UEFI-A64: boot map selftest OK$", text, re.MULTILINE):
+        return False
+    try:
+        from aarch64_m1_evidence import m1_evidence_ok
+    except ImportError:
+        from qemutests.aarch64_m1_evidence import m1_evidence_ok
+    if not m1_evidence_ok(text, cpus=cpus, selftest=True, ram_mib=ram_mib,
+                          variant="normal"):
+        return False
+    for line in re.findall(
+            r"^M1 ZONE id=\d+ start=(0x[0-9a-f]+) end=(0x[0-9a-f]+) frames=\d+$",
+            text, re.MULTILINE):
+        start = int(line[0], 16)
+        end = int(line[1], 16)
+        if start < base + 0x200000 and end > base:
+            return False
+    return True
+
+
+def lma_mismatch_evidence_ok(text: str) -> bool:
+    """Negative lma-layout acceptance (default loader + relocated ELF).
+
+    Accepts ONLY the dedicated entry-mismatch diagnostic plus the
+    generic loader failure, with NO kernel takeover evidence anywhere
+    in the observation window: a silent timeout or a kernel that
+    started anyway is a failure.
+    """
+    text = text.replace("\r", "")
+    # The firmware retries Boot0002 after the load failure, so the
+    # dedicated diagnostic legitimately repeats across attempts: require
+    # at least one, and still no kernel takeover anywhere.
+    if len(re.findall(r"^UEFI-A64: kernel entry mismatch$",
+                      text, re.MULTILINE)) < 1:
+        return False
+    if "UEFI: kernel load failed" not in text:
+        return False
+    takeover_markers = (
+        "UEFI-A64: layout entry=",
+        "UEFI-A64: boot map selftest",
+        "UEFI-A64: RAM ranges=",
+        "UEFI-A64: pmm alloc smoke",
+        "[smp]",
+        "M1 ",
+        "[selftest]",
+        "[spinlock]",
+    )
+    return not any(marker in text for marker in takeover_markers)
+
+
 def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
     expect_selftest = getattr(args, "expect_selftest", False)
     expect_gic = getattr(args, "expect_gic", False)
     expect_clk = getattr(args, "expect_clk", False)
+    if getattr(args, "expect_lma_mismatch", False):
+        return lma_mismatch_evidence_ok(text)
+    lma_base = getattr(args, "expect_lma_base", None)
+    if lma_base is not None:
+        # Positive lma-layout: the existing M1/SMP evidence stack stays
+        # enabled (full selftest + M1), plus the layout-specific proof.
+        return (passed(text, cpus, expect_selftest=True, expect_gic=True,
+                       expect_clk=True, expect_slab=True,
+                       expect_m3_selftest=True,
+                       expect_m3mc_selftest=cpus > 1,
+                       expect_scheduler_selftest=True)
+                and lma_layout_evidence_ok(text, lma_base, cpus,
+                                           getattr(args, "ram_mib", 512)))
     if args.expect_no_ack is not None:
         return degraded_passed(text, expect_selftest=expect_selftest)
     if getattr(args, "expect_m1", False):
@@ -1151,6 +1234,19 @@ def main() -> int:
                              "shift=...")
     parser.add_argument("--expect-m1", action="store_true",
                         help="Require strict M1 runtime direct-map evidence")
+    parser.add_argument("--expect-lma-base", metavar="BASE", default=None,
+                        help="Positive lma-layout acceptance (LMA Task 5): "
+                             "require the kernel-side layout evidence for the "
+                             "configured boot block base (entry = BASE+0x80000, "
+                             "context = BASE+0x1e0000), the boot-map selftest, "
+                             "and the existing M1/SMP evidence. Mutually "
+                             "exclusive with --expect-lma-mismatch.")
+    parser.add_argument("--expect-lma-mismatch", action="store_true",
+                        help="Negative lma-layout acceptance: require the "
+                             "dedicated 'UEFI-A64: kernel entry mismatch' "
+                             "diagnostic and 'UEFI: kernel load failed' with "
+                             "no kernel takeover evidence. Mutually exclusive "
+                             "with --expect-lma-base.")
     parser.add_argument("--m1-variant", choices=("normal", "sparse"), default="normal",
                         help="M1 acceptance variant (default: normal)")
     parser.add_argument("--diagnostic-dtb", metavar="PATH_OR_AUTO",
@@ -1176,6 +1272,17 @@ def main() -> int:
         parser.error("--cpus, --repeat, and --ram-mib must be positive; --timeout must be greater than zero")
     if args.expect_no_ack is not None and (args.cpus != [2] or args.repeat != 1 or args.expect_no_ack != 1):
         parser.error("--expect-no-ack only accepts CPU_ID=1 with --cpus 2 --repeat 1")
+    if args.expect_lma_base is not None and args.expect_lma_mismatch:
+        parser.error("--expect-lma-base and --expect-lma-mismatch are mutually exclusive")
+    if args.expect_lma_base is not None:
+        try:
+            args.expect_lma_base = int(str(args.expect_lma_base), 0)
+        except ValueError:
+            parser.error("--expect-lma-base must be a decimal or 0x hex integer")
+        if args.expect_lma_base < 0 or args.expect_lma_base % 0x200000 != 0:
+            parser.error("--expect-lma-base must be a non-negative 2 MiB aligned base")
+    if args.expect_lma_mismatch and args.expect_no_ack is not None:
+        parser.error("--expect-lma-mismatch cannot be combined with --expect-no-ack")
     if args.diagnostic_dtb and args.diagnostic_dtb != "auto" and len(args.cpus) != 1:
         parser.error("--diagnostic-dtb requires one --cpus value matching the DTB")
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
