@@ -17,7 +17,7 @@ roadmap 只列**未完成 / 进行中**的规划项；所有已完成工作见 `
 - **工程与架构治理**：AAGU 全套就绪；ARCH-1（syscall 脱离 arch）、ARCH-2（Linux ABI 兼容层独立）、ARCH-3（消除 muldefs 全局符号）、ARCH-4（拆分 sched/task.c）、ARCH-5（VFS 抽象补强）、ARCH-6（FS 并发与块缓存）、ARCH-7（移除 `#define mmap`）、ARCH-8（子系统框架补完，2026-11-08 随 BOOT-3/BOOT-4 闭环）、ARCH-9（驱动模型/PCI/总线解耦）、ARCH-10（静态容量与工程卫生）、ARCH-11（devfs 子目录化）、ARCH-12（`/bin/lspci`）、ARCH-14（USB xHCI + `/bin/lsusb`）**均已闭环合入 master**；**MEM-1（内存子系统架构边界清理，2026-11-14）** 亦已闭环——用户 VM / uaccess / VMM 所有权下沉到各自架构，公共面只剩 TLB 广播协议与逻辑 VMA 位
 - **测试与工程基础设施**：测试框架生成式目录重构闭环（2026-11-14）——`config/test-catalog.json` 由 `tools/tests/scan_tests.py` 生成并入库，六处平行的 SUITE 白名单收敛为单一源，宿主测试注册表改为消费生成清单，场景目录 `config/test-scenarios.json` 落地（340 场景），断言分层政策 + 豁免登记表 + 静态审计处置台账到位，flake 账本报告器就位；**目录漂移门禁接入 CI**（2026-11-17，`make check-test-catalog` 进入 CI `harness` job，字节级 drift 由 `check_ci_schedule.py` 规则 2b 反向守护）
 - **启动编排治理**：BOOT-1~5 五项 spec 全部实施并验收（2026-11-08）—— CPU 生命周期与 SMP 握手、早期中断与时间设施顺序、启动失败传播、阶段契约与跨架构编排、调度启动与服务解耦；双架构统一 `kernel_main` 入口已于 2026-11-07 闭环
-- **aarch64 适配**：EL1 内核、多核协作调度、每核 tick 记账已就绪；**M4 用户态八块全部闭环**（mm 生命周期 → 正式 EL0 用户任务 → 正式 SVC 与 uaccess 故障恢复 → 匿名 VMA 与按需缺页 → 原生 `SYS_fork` 与写时复制 → 原生 `SYS_waitpid` 与 ZOMBIE 回收 → 原生 `SYS_exec` 与用户栈参数传递 → 原生信号与 `sigreturn`），单核 BSP 自测镜像 kernel-selftest 27/27（运行方式见 `docs/build/build.md`）；共享 syscall 表在 aarch64 侧已服务 15 项；**产品路径仍缺** VFS `/bin/init`、文件/共享/设备映射、`MAP_FIXED`、SMP 用户调度与 IRQ 抢占（aarch64 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 仍为 0）
+- **aarch64 适配**：EL1 内核、多核协作调度、每核 tick 记账已就绪；**M4 用户态八块全部闭环**（mm 生命周期 → 正式 EL0 用户任务 → 正式 SVC 与 uaccess 故障恢复 → 匿名 VMA 与按需缺页 → 原生 `SYS_fork` 与写时复制 → 原生 `SYS_waitpid` 与 ZOMBIE 回收 → 原生 `SYS_exec` 与用户栈参数传递 → 原生信号与 `sigreturn`），单核 BSP 自测镜像 kernel-selftest 27/27（运行方式见 `docs/build/build.md`）；共享 syscall 表在 aarch64 侧已服务 15 项；**产品路径仍缺** VFS `/bin/init`、文件/共享/设备映射、`MAP_FIXED`、SMP 用户调度与 IRQ 抢占（aarch64 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 仍为 0）；**真机适配**：2026-11-17 完成 QEMU virt hardcode 全量审计（三层固化：DRAM 基址/加载地址、MMIO 窗口、DTB 形状校验器，含硬阻断/条件阻断/平台上限清单与解绑顺序，见 P2 节专项表）
 - **用户态 libc**：补全 T1~T17 闭环（2026-11-09），15 个接口组全部交付且有 host + guest 证据；**POSIX 正则引擎（T16）与 glob 匹配本期不实现**（用户决定，保留桩）
 - **GUI**：PS/2 鼠标、`libgfx.a` + `/dev/gfx0`、Tetris 与 terminal 迁移、QEMU 分辨率切换与显示所有权协调器、LVGL v9.5.0 初步移植与图形 showcase、GUI-1 LVGL 平台后端、GUI-2 输入与焦点、GUI-3 Material 风格桌面、GUI-2b 原生控件体系与统一焦点引擎均已合入 master；**帧缓冲映射已从 UC 改为 write-back 并统一所有别名 cache policy（2026-11-11）**；**x86 帧缓冲宽写优化 + RAM shadow 滚动缓冲（`FB_SHADOW=1`，默认关）+ present A/B 诊断（2026-11-15/16）**；后续推进 GUI-4 字体资源与 GUI-5/6 窗口服务器
 - **安全与内存**：用户堆与 ELF 映射隔离（4 KiB ELF 分段加载、512 MiB 用户信封、brk 动态收缩与页解绑、保护范围审计）已闭环；**x86 NX 已按 VMA 策略强制执行**（2026-11-13：栈页与堆页不可执行、`PROT_EXEC` 按 VMA 生效、违规取指按 SIGSEGV 终止，EFER.NXE 已在启动期打开）；用户态 ASLR 规划中
@@ -86,6 +86,37 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 **距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：单一入口已达成，单核 BSP 上的用户态运行期链路（M4.1~M4.14）也已达成；剩余差距集中在 **产品接入与抢占/多核语义** —— 产品 `/bin/init` 链路与 VFS 门、文件/共享/设备映射、`MAP_FIXED`、IRQ 返回抢占、统一 SMP 启动与多核上下文切换、ASID，粗估 **3–4 周**（较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环）。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
+
+#### 真机适配审计：QEMU virt hardcode 清单（2026-11-17 扫描）
+
+范围：`kernel/arch/aarch64/` + `kernel/include/arch/aarch64/` + `boot/uefi/arch/aarch64/` 全量通读（head.S 页表构建、DTB 解析、GIC/PSCI/时钟、UEFI loader、内存 preflight）。**结论**：hardcode 不是零星魔数，而是三层固化——① DRAM 基址 / 内核加载地址（0x40000000 / 0x40080000）贯穿 6 个文件互为同值耦合；② 早期 MMIO 窗口 [0x08000000, 0x0A000000) 在 head.S 固化；③ DTB 解析器（`dtb_parse.c`，FDT v17 结构校验本身很扎实）实为 **"QEMU virt 形状校验器"**——解析出的设备基址先和 QEMU 常量对账、相等才通过，再写死同值，而不是用起来。
+
+**硬阻断（任何非 QEMU virt 平台直接无法启动）**：
+
+| 问题 | 位置 | 真机影响 | 解法方向 |
+|------|------|----------|----------|
+| 内核 LMA 固化 0x40080000（RAM base + 512 KiB） | `linker.ld:41,147`；联动 `head.S:542-544`（PMD_low1[0] exec 块 PA=0x40000000）、`early_arena.c:72-73`、`handoff_layout.h`、loader 按 ELF `p_paddr` 落位 | 真机 DRAM 基址不同（RPi4 = 0x0、部分 SoC 0x20000000）直接无法加载/映射 | 加载地址提取为平台配置（build-time board config 或 handoff 传递），链接脚本、head.S、handoff 全部从它推导 |
+| early_arena 拒绝与 B/D 窗口重叠的 RAM | `early_arena.c:140-145`（B=[0x40000000,0x40200000)、D=[0x08000000,0x0a000000)） | RPi4 类 DRAM 从 0 起覆盖 D 窗口 → preflight 直接 FATAL | 排除区改为"内核镜像 + handoff 实际地址" + DTB ranges 推导的设备区 |
+| 早期 MMIO Device 块固化槽 0x40..0x4F（0x08000000..0x0A000000，32 MiB） | `head.S:506-521`（PMD_low0）；`early_arena.c:74-75` 同值 | 窗口外 MMIO 一律缺页；BCM2711 PL011 在 0xFE201000、GIC-400 在 0x4C8xxxxx | boot_context 增加 early-console + early-device-window 字段，loader 从 DTB 填充，head.S 据此填 Device 块 |
+| PL011 基址 0x09000000 共 4 处独立硬编码 | `head.S:138`（MMU 前 fault 打印）、`pl011.c:22`（运行期，**未消费已有的 `dtb_pl011_base()`**）、`boot/uefi/arch/aarch64/boot.c:15`（loader 直写）、`dtb_parse.c:128,134` | 任一处地址不对 → 总线错误或静默无输出，启动链黑盒 | 运行期驱动改走 DTB 解析值；head.S 早期打印基址由 loader 经寄存器传入；loader 优先 EFI Serial IO Protocol |
+| DTB 白名单按 QEMU 地址校验（GIC/UART） | `dtb_parse.c:115-121`（GICD/GICC 必须 = 0x08000000/0x08010000，且 compatible 只有 `arm,cortex-a15-gic`）、`122-135`（PL011 必须 = 0x09000000，interrupts 恰 3 cell + LEVEL_HIGH） | "发现"退化成"对账"；换基址或 GIC-400（RPi4 的 compatible 不含 `cortex-a15-gic`）即拒；GICv3（`arm,gic-v3`）完全不支持 | 接受任意基址透传解析值；白名单补 `arm,gic-400`；GICv3 另列驱动任务 |
+| handoff 窗口 [0x401e0000, 0x40200000) 固化 | `handoff_layout.h:20-22`；`dtb.c:52-59`（DTB 必须 ⊂ [0x401e0000,0x401ff000)）、`ram.c`（memmap 描述符须在窗口内）、`handoff.S:5-8`（movz/movk 把 0x401ff000 编进指令流，与 header 无编译期一致性检查） | 前提"DRAM 在 0x40000000 且内核 <1.4MiB"；128 KiB 总窗口对真机 DTB（数百 KiB 常见）偏小 → `EFI_BUFFER_TOO_SMALL` | 内核 LMA_end 后页对齐动态分配 + boot_context 传指针；trampoline 地址经寄存器传入 + 静态断言同步 |
+
+**条件阻断（能到早期启动，特定环节卡死/静默失效）**：
+
+| 问题 | 位置 | 真机影响 | 解法方向 |
+|------|------|----------|----------|
+| GICv2 按 Group 0 编程（IGROUPR 清位，CTLR 只写 bit0） | `gic_driver.c:100-104`（注释自认"QEMU 无 EL3"）、`:73`、`:132` | 经 TF-A 启动的真机上 IRQ 被路由为 Group 1，Group 0 中断以 FIQ 信号出现 → 内核在 EL1 的 IRQ 入口永远收不到，**所有 IRQ 静默丢失** | 真机写 IGROUPR=1 + GICD_CTLR/GICC_CTLR 的 EnableGrp1（bit1），或按 GICD_IIDR/板型检测分组模式 |
+| 非 BSP CPU 强制 enable-method=psci | `dtb_parse.c:277-279` | spin-table 平台（老 RPi 固件、`cpu-release-addr`）全部 AP 拒启（-3 FATAL） | 若目标板需要，加 spin-table 等待路径 |
+| EL3 分支盲写 SCR_EL3/SPSR_EL3 | `head.S:190-196` | 仅 QEMU `-M virt,secure=on` 场景成立；真机 TF-A 不从 EL3 起跑，且盲写会踩掉 secure world 依赖位 | 标注仅 QEMU 支持（真机主路径是 EL2/EL1 分支，不受影响） |
+| PL011 波特率除数按 16 MHz 外设钟写死（IBRD=8/FBRD=44） | `pl011.c:59-64` | QEMU 忽略，真机不是（BCM2711 = 48 MHz；部分板还需 GPIO pinmux ALT0）→ 无输出 | 从 DTB `clock-frequency`/`clocks` 推导 |
+| timer 中断形状校验偏脆（要求 interrupts 第二项 = PPI 14） | `dtb_parse.c:137-144`（`cntp_ppi` 写死 30 = 16+14，GICv2 架构定值本身正确） | 真机 DT 省略 secure timer 项时条目位移被 -4 拒 | 改为按"non-secure physical timer 的 PPI 30"匹配而非固定槽位 |
+
+**平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`head.S:621` TCR IPS=0b010、`page_table.c:51`、`vmm_backend.c` 多处 `>= (1<<40)`；正解读 `ID_AA64MMFR0_EL1.PARange` 动态设 IPS）；早期 direct-map 仅 0x40200000..0x80000000（`head.S:560-576` 恰 511 块，隐含 ≥1 GiB RAM；>2 GiB 依赖 M1 runtime tree，该层通用）；无 RNDR 接线（真机熵源只剩 EFI_RNG_PROTOCOL，RPi UEFI 有 RngDxe；无 RngDxe 的板 random_init fail-closed）；`AARCH64_M1_SPARSE` 假设 0x4fe00000..0x50400000 是 RAM（`ram.c:169-186`，仅自测宏）。
+
+**已可复用的真机地基**（无需返工）：PSCI conduit（DTB 取 smc/hvc）+ 版本 ≥0.2 校验 + CPU_ON64，发布协议带 clean-to-PoC + DSB（`smp.c`）；时钟频率动态读 `CNTFRQ_EL0`；framebuffer PA 来自 GOP、运行期经 vmm 映到固定 VA；RAM 来自 UEFI memory map（非 DT `/memory`）；缓存行大小经 `CTR_EL0` 动态获取（含 loader `dc cvau`/`ic ivau`）；MIDR 只查 architecture=0xF（`04caf253` 已去 Cortex-A53 假设）；FDT v17 解析骨架（cells/字符串/结构校验完备）。
+
+**建议解绑顺序**：① 松绑 `dtb_parse`（接受任意 GICv2/GIC-400/PL011 基址并真正消费解析值）——工作量最小、收益最大，QEMU virt 零回归；② 运行期串口/GIC 改走 DTB 值（`pl011.c`/`gic.c` 消费 `dtb_pl011_base()`/`dtb_gicd_base()`）；③ 早期路径参数化（boot_context 增加 early-console/device-window 字段，head.S 停止自编 0x09000000）；④ 加载地址/DRAM 基址参数化（linker.ld、head.S 页表、handoff 布局、loader 五处联动，最重）；⑤ 按目标板补 Group-1 / spin-table / PL011 时钟（触哪条补哪条）。
 
 ### 🧱 P2 架构治理 / 扩展性
 
