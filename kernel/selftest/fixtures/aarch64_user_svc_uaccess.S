@@ -77,9 +77,10 @@ _start:
     cmn     x0, #UC_ERR_ENOSYS
     b.ne    .Lfail
 
-    /* ── A defined but unserved number: SYS_read is hidden by the
-     *    AArch64 subset table, so it is -ENOSYS. ───────────────── */
-    mov     x8, #SYS_read
+    /* ── A defined but unserved number: SYS_socket stays hidden by the
+     *    AArch64 subset table (the fs group is served since the VFS
+     *    gate opened, but net is not), so it is -ENOSYS. ─────────── */
+    mov     x8, #SYS_socket
     svc     #0
     cmn     x0, #UC_ERR_ENOSYS
     b.ne    .Lfail

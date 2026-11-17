@@ -46,6 +46,14 @@ void arch_console_input_attach(struct tty_struct *tty)
 {
     console_tty = tty;
 
+#ifdef OS01_SELFTEST
+    /* The GIC SPI selftest (gic_spi_test_init) owns the PL011 RX interrupt
+     * in selftest builds — it registers its own handler for the same
+     * intid and its harness injects bytes with count assertions.  Leave
+     * the console input-free there; the console still works for output. */
+    return;
+#endif
+
     uint32_t intid = dtb_pl011_spi();   /* QEMU virt: 33 (SPI 1), from DTB */
     if (intid == 0 ||
         gic_register_handler(intid, pl011_console_rx_handler, 0,

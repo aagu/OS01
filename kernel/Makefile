@@ -106,6 +106,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    selftest/aarch64_sched_observer.c \
                    selftest/test_aarch64_ap_scheduler.c \
                    selftest/test_aarch64_ap_wake.c \
+                   selftest/test_aarch64_vfs.c \
                    selftest/test_aarch64_sched_tick.c \
                    ../libc/list/list.c ../libc/rbtree/rbtree.c \
                    fs/elf_layout.c

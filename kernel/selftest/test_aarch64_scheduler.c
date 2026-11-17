@@ -8,6 +8,7 @@
 #if defined(__aarch64__) && defined(OS01_SELFTEST)
 
 #include <sched/task.h>
+#include <arch/features.h>   // OS01_HAS_VFS (aarch64 VFS gate acceptance)
 #include <sched/internal.h>
 #include <percpu/percpu.h>
 #include <arch/irq.h>
@@ -1088,6 +1089,10 @@ void test_aarch64_scheduler_run(void)
     extern int test_aarch64_user_signal(void);
     selftest_record_late("aarch64_user_signal",
                          test_aarch64_user_signal());
+#endif
+#if OS01_HAS_VFS
+    extern int test_aarch64_vfs(void);
+    selftest_record_late("aarch64_vfs", test_aarch64_vfs());
 #endif
 }
 

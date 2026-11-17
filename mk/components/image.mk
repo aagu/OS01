@@ -247,8 +247,34 @@ endif
 # AAGU-5.6: target path uses $(AARCH64_UEFI_DISK) so variant builds
 # (weak-selftest, selftest) get isolated image dirs and never clobber
 # each other. Recipe body unchanged — $@ expands to the variant-aware path.
+# aarch64 selftest variant: GPT dual-partition disk (ESP FAT32 with
+# BOOTAA64.EFI + kernel.elf, ext2 rootfs with the VFS selftest marker
+# files) so the kernel exercises the GPT + ext2 mount path; the default
+# (product) variant keeps the unpartitioned 64 MiB FAT32 superfloppy that
+# exercises the whole-disk FAT32 fallback mount.  See mkdisk --esp-kernel
+# for why the ESP kernel is named kernel.elf on aarch64.
+AARCH64_SELFTEST_MARKER := $(BUILD_DIR)/image$(if $(IMAGE_VARIANT),/$(IMAGE_VARIANT))/vfs-selftest.txt
+
+$(AARCH64_SELFTEST_MARKER): FORCE
+	@mkdir -p $(dir $@)
+	@printf 'OS01-AARCH64-VFS-SELFTEST-MARKER\nline2-second-marker-content\n' > $@.tmp
+	@mv $@.tmp $@
+
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
-		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE)
+		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
+		$(HOST_MKDISK) $(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
+ifeq ($(IMAGE_VARIANT),selftest)
+	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
+	@mkdir -p $(dir $@) $(dir $@)tmp
+	@rm -f $@.tmp
+	@printf 'file\t/kernel.elf\t$(KERNEL_BUILD_DIR)/kernel.elf\t0644\n' > $@.tmp
+	@printf 'file\t/etc/inittab\t$(OS01_ROOT)/config/inittab\t0644\n' >> $@.tmp
+	@printf 'file\t/etc/vfs-selftest.txt\t$(AARCH64_SELFTEST_MARKER)\t0644\n' >> $@.tmp
+	@mv $@.tmp $(dir $@)rootfs.selftest.manifest
+	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
+	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.selftest.manifest \
+	  --esp-kernel kernel.elf
+else
 	@mkdir -p $(dir $@)
 	@rm -f $@
 	@truncate -s 64M $@
@@ -256,5 +282,6 @@ $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 	@mmd -i $@ ::/EFI ::/EFI/BOOT
 	@mcopy -i $@ $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
 	@mcopy -i $@ $(BUILD_DIR)/artifacts/kernel.elf ::/kernel.elf
+endif
 
 endif

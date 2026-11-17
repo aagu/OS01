@@ -74,7 +74,11 @@
 #define VRING_DESC_F_NEXT        1u
 #define VRING_DESC_F_WRITE       2u
 
-#define VIRTIO_BLK_QUEUE_SIZE    16u     // in-flight descriptor chains
+// Descriptor chains need 3 descriptors each (hdr|data|status), so the
+// queue must hold 3x the in-flight chains: 64 descriptors = 21 chains
+// (one transfer in flight at a time under d->lock, but the desc table
+// must still cover every chain index the free-rotation can hand out).
+#define VIRTIO_BLK_QUEUE_SIZE    64u
 #define VIRTIO_BLK_SECTOR        512u
 // Poll budget: a QEMU virtio-blk request completes in microseconds; this
 // budget only bounds a wedged device, so it is generous.
@@ -210,7 +214,8 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
     // Scratch buffers: header + status live in their own pages so the
     // device sees stable physical addresses (no stack DMA).
     static uint32_t chain_seq;
-    uint32_t chain = chain_seq++ % d->queue_size;
+    uint32_t chains = d->queue_size / 3;   // 3 descriptors per chain
+    uint32_t chain = chain_seq++ % chains;
     uint16_t d0 = (uint16_t)(chain * 3), d1 = (uint16_t)(d0 + 1),
              d2 = (uint16_t)(d0 + 2);
 
@@ -252,8 +257,19 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
     uint32_t spins = 0;
     while (__atomic_load_n(&used->idx, __ATOMIC_ACQUIRE) ==
            (uint16_t)(d->last_used_idx)) {
-        if (++spins > VIRTIO_BLK_POLL_LIMIT)
+        if (++spins > VIRTIO_BLK_POLL_LIMIT) {
+            volatile struct { uint16_t flags, idx, ring[]; } *av =
+                (volatile void *)d->avail;
+            volatile struct { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; } *desc =
+                (volatile void *)d->desc;
+            log_err("virtio-blk: TIMEOUT avail.idx=%u used.idx=%u "
+                    "last=%u chain=%u data_pa=%lx intstatus=%x\n",
+                    (unsigned)av->idx, (unsigned)used->idx,
+                    (unsigned)d->last_used_idx, (unsigned)chain,
+                    (unsigned long)desc[chain * 3 + 1].addr,
+                    r32(d, 0x060));
             return -ETIMEDOUT;
+        }
         __asm__ volatile("yield");
     }
     // Drain (one chain in flight at a time in practice; loop covers the
@@ -283,7 +299,7 @@ static int virtio_blk_read(block_device_t *dev, uint64_t lba, uint32_t count,
     int rc = virtio_blk_transfer(d, VIRTIO_BLK_T_IN, lba, buffer,
                                  count * VIRTIO_BLK_SECTOR);
     spin_unlock_irqrestore(&d->lock, flags);
-        return rc;
+    return rc;
 }
 
 static int virtio_blk_write(block_device_t *dev, uint64_t lba, uint32_t count,
@@ -380,9 +396,8 @@ static int virtio_blk_setup_queue_legacy(struct virtio_blk_dev *d)
     memset(region, 0, 2 * PAGE_4K_SIZE);
 
     size_t desc_bytes  = (size_t)qsz * 16;
-    size_t avail_bytes = 6 + 2u * qsz;              // flags, idx, ring, (no event idx in legacy)
-    size_t avail_off   = (desc_bytes + 1u) & ~(size_t)1u;
-    size_t used_off    = PAGE_4K_SIZE;              // ALIGN(avail_off+avail_bytes, 4096)
+    size_t avail_off   = (desc_bytes + 1u) & ~(size_t)1u;   // avail: flags+idx+ring
+    size_t used_off    = PAGE_4K_SIZE;   // ALIGN(desc+avail, QueueAlign=4096)
 
     w32(d, VMMIO_QUEUE_NUM, qsz);
     w32(d, VMMIO_QUEUE_ALIGN, PAGE_4K_SIZE);

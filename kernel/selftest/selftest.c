@@ -246,6 +246,10 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("aarch64_user_exec");
     selftest_register_late("aarch64_user_signal");
 #endif
+    /* aarch64 VFS gate acceptance (2026-11-18): runs from the late
+     * (post-scheduler) context, after the FS bring-up has mounted the
+     * GPT selftest disk (ESP FAT32 /boot + ext2 root). */
+    selftest_register_late("aarch64_vfs");
 #endif
 #if !defined(__aarch64__)
     selftest_register("ext2_magic",        ext2_selftest_magic);

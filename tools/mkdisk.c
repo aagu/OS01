@@ -266,12 +266,14 @@ int main(int argc, char **argv)
 {
     const char *efi_path       = NULL;
     const char *manifest_path  = NULL;
+    const char *esp_kernel     = "kernel.bin";
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--output") && i+1 < argc)         output_path   = argv[++i];
         else if (!strcmp(argv[i], "--efi") && i+1 < argc)            efi_path      = argv[++i];
         else if (!strcmp(argv[i], "--temp-dir") && i+1 < argc)       temp_dir      = argv[++i];
         else if (!strcmp(argv[i], "--rootfs-manifest") && i+1 < argc) manifest_path = argv[++i];
+        else if (!strcmp(argv[i], "--esp-kernel") && i+1 < argc)     esp_kernel    = argv[++i];
     }
     if (!output_path || !efi_path || !temp_dir || !manifest_path) {
         fprintf(stderr, "Usage: mkdisk --output <image> --efi BOOTX64.EFI --temp-dir <dir> --rootfs-manifest <file>\n");
@@ -333,11 +335,15 @@ int main(int argc, char **argv)
     snprintf(esp_tmp, sizeof(esp_tmp), "%s/_mkdisk_esp.%d.img", temp_dir, getpid());
     snprintf(rootfs_tmp, sizeof(rootfs_tmp), "%s/_mkdisk_rootfs.%d.img", temp_dir, getpid());
 
-    // The bootloader reads kernel.bin from the ESP; the manifest's
-    // /kernel.bin file entry is its source (no separate --kernel argument).
+    // The bootloader reads the ESP kernel from the ESP; the manifest's
+    // /<esp-kernel> file entry (default /kernel.bin, x86 layout) is its
+    // source (no separate --kernel argument).  aarch64 passes
+    // --esp-kernel kernel.elf because its UEFI loader reads \kernel.elf.
+    char esp_kernel_dest[64];
+    snprintf(esp_kernel_dest, sizeof(esp_kernel_dest), "/%s", esp_kernel);
     const char *esp_kernel_src = NULL;
     for (int i = 0; i < nentries; i++) {
-        if (!entries[i].is_symlink && !strcmp(entries[i].dest, "/kernel.bin")) {
+        if (!entries[i].is_symlink && !strcmp(entries[i].dest, esp_kernel_dest)) {
             esp_kernel_src = entries[i].src;
             break;
         }
@@ -351,7 +357,7 @@ int main(int argc, char **argv)
     run_cmd("mmd -i %s ::/EFI/BOOT 2>/dev/null", esp_tmp);
     run_cmd("mcopy -i %s %s ::/EFI/BOOT 2>/dev/null", esp_tmp, efi_path);
     if (esp_kernel_src)
-        run_cmd("mcopy -i %s %s ::/kernel.bin 2>/dev/null", esp_tmp, esp_kernel_src);
+        run_cmd("mcopy -i %s %s ::/%s 2>/dev/null", esp_tmp, esp_kernel_src, esp_kernel);
     run_cmd("dd if=%s of=%s bs=512 seek=%lu conv=notrunc 2>/dev/null",
             esp_tmp, output_path, (unsigned long)PART1_START);
 
