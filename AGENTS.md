@@ -1,181 +1,40 @@
-# OS01 — x86_64 OS from scratch
+# OS01
 
-Hobby OS. UEFI → Higher Half Kernel (`0xffff800000000000`). **Multicore SMP** (default `-smp 2`, up to 8). QEMU.
+OS01 是面向 x86_64 和 aarch64 的 UEFI hobby OS，两个架构共用 `kernel_main`，由 `arch/boot.h` 定义启动阶段、`arch/features.h` 声明能力。各 profile 支持的功能以构建文档为准。
 
-## Quick start
+<!-- CODEGRAPH_START -->
+## CodeGraph
 
-```bash
-make run                 # Build + run
-make debug               # Build + QEMU paused, GDB :1234
-make clean               # Clean build artifacts (header deps tracked via depfiles)
-make test-qemu SUITE=phase-0    # QEMU E2E boot (also: systest, inittab-phase, network)
-make test-host           # Host-side hosttests + PMM boot reservation
-make test-static         # Static audits: runtime, layout, canary, link-order
-make OS01_SYSTEST=1 test-qemu SUITE=systest   # 122-case syscall suite
-make KERNEL_SELFTEST=1 test-kernel-selftest    # Built-in kernel selftests
-```
+若仓库根目录存在 `.codegraph/`，定位或理解代码时先用 `codegraph_explore` / `codegraph_node`，再用文本搜索或直接读源码。无 MCP 工具时用 `codegraph explore "<符号或问题>"` / `codegraph node <符号或文件>`。若目录不存在，直接使用常规工具，不要自行建立索引。
+<!-- CODEGRAPH_END -->
 
-Adding a host test: write `hosttests/cases/test_<name>.c` with an `@os01-test` metadata block, add its link rule in `hosttests/mk/<subsys>.mk`, run `make regen-test-catalog`, and commit the regenerated files (manual `register_host_test` / `TEST_BINS` edits are retired).
+## Build and test
 
-See [`docs/build/build.md`](docs/build/build.md) for the full
-target taxonomy and flag conventions.
-
-**Build flags** (set on `make` command line):
-- `DEBUG_CHANNELS=sched,vfs,mm` — enable debug per-subsystem
-- `KERNEL_SELFTEST=1` — built-in kernel self-tests at boot
-- `OS01_SYSTEST=1` — systest as init (Makefile copies config/inittab.systest template)
-- `LOG_TARGET=both` — log output to serial + framebuffer
-- `NDEBUG=1` — compile-time elimination of log_debug
-- `USER_DEBUG=1` — user-space debug log (user/common/user_log.h): compiles the
-  terminal's per-second `[term-present]` / `[term-probe]` serial records in.
-  Default OFF — the serial port stays free of them.
-
-**Deps**: clang, llvm, lld, make, dosfstools, mtools, qemu-system-x86_64, edk2-ovmf.
-**Toolchain overrides** (`CLANG=clang-N`, `LLVM_NM=`, `UEFI_CLANG=`, etc.): see [`docs/build/toolchain.md`](docs/build/toolchain.md).
-**BusyBox**: `git submodule update --init` (built and included in disk.img automatically).
-For the authoritative catalog of every `make` target, capability gate, test bucket, and alias policy, see [Build System Harness](docs/build/build.md).
+- `make run` / `make debug`：构建并在 QEMU 启动；依赖、profile、选项和完整目标见 [构建指南](docs/build/build.md) 与 [工具链](docs/build/toolchain.md)。
+- `make test-host`：宿主测试；`make test-static`：静态审计；`make test-qemu SUITE=phase-0`：x86_64 QEMU 引导冒烟。
+- syscall E2E 必须从顶层运行 `make OS01_SYSTEST=1 test-syscall`，不得同时设 `KERNEL_SELFTEST=1`；内核自测单独运行 `make KERNEL_SELFTEST=1 test-kernel-selftest`，避免干扰 systest 的 fork/exec/waitpid 用例。
+- 新增宿主测试：在 `hosttests/cases/test_<name>.c` 写 `@os01-test` 元数据，按现有模式配置链接，再运行 `make regen-test-catalog`，将生成物随测试一并纳入变更。不要手写 `register_host_test` / `TEST_BINS`；详见 [测试规范](docs/testing/testing-policy.md#81-元数据扫描是唯一入口)。
 
 ## Git workflow
 
-- **Merging a feature branch back into `master`**: use `git merge --ff` so the merge
-  fast-forwards whenever the branch can. Only fall back to `--no-ff` when a merge
-  commit is actually required (i.e. `master` has diverged) or when the merge
-  commit itself carries meaning.
-- Do **not** infer a merge policy from the merge commits visible in `git log`:
-  most of them exist because `master` had parallel commits at merge time, not
-  because merge commits are preferred. Check with
-  `git merge-base --is-ancestor <master-side> <branch-side>` before choosing a
-  merge mode.
+合并特性分支回 `master` 时优先 `git merge --ff`；用 `git merge-base --is-ancestor` 核实是否能快进，不要从历史合并提交推断策略。仅在需要或有意保留合并提交时使用 `--no-ff`。
 
-## Architecture
+## Directory organization
 
-```
-Boot:    UEFI → BOOTX64.EFI → boot_context @ 0x60000 → kernel.bin @ 0x100000
-Kernel:  head.S → GDT/IDT/TSS → lretq → 0xffff800000100000 → kernel_main
-Memory:  PML4→PDPT→PDE (2MB huge) + PT (4KB). Higher-half: Phy_To_Virt(x)=x+0xffff800000000000
-SMP:     percpu(GS base) → MADT enum → trampoline 0x8000 → INIT-SIPI-SIPI → APs
-Sched:   EEVDF O(log n) — per-CPU rbtree 可运行队列 + vruntime/deadline + pick_eevdf + sched_balance SMP 负载均衡
-Init:    head.S → kernel_main → arch_boot_controllers → arch_boot_percpu → arch_boot_devices (check: devices) → VFS/FS → TTY → arch_boot_smp_prepare (check: pre-smp) → arch_boot_aps (subsys_prepare_cpus) → arch_boot_runtime (check: runtime) → task_init → /init.elf (→ parse_inittab)
-Facade:  双架构共用单一 kernel_main 入口（2026-11-07 闭环）→ arch/boot.h 阶段契约与能力校验（arch_boot_* + arch_boot_validate 三检查点）→ arch/features.h 特性门（OS01_HAS_VFS / OS01_HAS_USERSPACE）→ aarch64_main 已删除
-Logo:    aarch64 only: aarch64_boot_fb_init() → frame_buffer_init() → boot_logo_show() → [fb] banner
-```
+- 公共头放在 `kernel/include/<subsys>/`，与 `kernel/<subsys>/` 对应；用 `#include <subsys/foo.h>`，不要把公共头放在源文件旁。新增子系统前先确定源目录和头目录。
+- `kernel/core/` 只放启动编排、致命路径和早期输出；其他代码归入对应子系统。
+- 架构专属实现放 `kernel/arch/<arch>/`，专属头放 `kernel/include/arch/<arch>/`，架构中立接口放 `kernel/include/arch/`。`kernel/include/uapi/` 只放用户态 ABI，不放内核私有定义。
+- 测试按层放置：`hosttests/`（宿主）、`qemutests/`（QEMU 集成）、`kernel/selftest/`（内核自测）、`runtime/selftest/`（运行时自测）。
 
-## Directory organization (2026-09-12)
+## Critical gotchas
 
-组织规范（新增/迁移代码必须遵守）：
+- 两套 UEFI 引导器与内核共用 `boot_context` ABI（`kernel/include/core/bootinfo.h`）；整数用固定宽度类型，不用 `unsigned long`（LLP64 与 LP64 宽度不同）。修改此 ABI 后，用 `make test-host` 运行包含 `hosttests/cases/test_bootinfo_abi.c` 的宿主测试；改动其他结构体或寄存器布局时，运行对应布局检查。
+- x86_64 的 `set_intr_gate_raw` 只能接汇编桩；C 中断处理程序用 `DEFINE_INTR_STUB` + `REGISTER_INTR_HANDLER`。不要重载 GS 选择子。`set_tss64` 写入传入的 TSS，而不是 GDT；BSP 用 `TSS64_Table`，AP 用各自的 TSS，上下文切换通过 `cpu->tss_hw` 更新。
+- `alloc_pages` 返回物理地址，解引用前先用 `Phy_To_Virt`。`vmm_unmap_4k_page` 必须在清除 PTE 前识别 `PAGE_COW` 并保留释放引用所需的物理地址。
+- x86_64 的 `arch_do_signal_delivery` 只在返回用户态时交付信号（检查 `regs->cs & 3`）；TTY 调用的 `NULL` 路径只清理部分挂起信号，不向用户态交付。排查 Ctrl-C 时区分 `/dev/tty` 和 ash 所在的 PTY；`terminal.elf` 在 `exec` 后必须显式忽略 `SIGINT`。
+- 新增或修改的内核运行日志用 `log_err` / `log_warn` / `log_info` / `log_debug` 或 `debug_<channel>()`，不用 `serial_printk` / `color_printk`；豁免以[日志规范](docs/log/log.md)为准。
+- 新硬件接入走[子系统注册](docs/subsys/subsys.md)和对应驱动框架，不在 `kernel_main` 硬编码设备初始化。
 
-1. **源目录 ↔ 头目录一一对称**：`kernel/<subsys>/*.c` 的公开头放 `kernel/include/<subsys>/*.h`；头统一在 `kernel/include/` 单一根解析（`-Iinclude`），`#include <subsys/foo.h>`。禁止头散落源目录旁。
-2. **`kernel/core/` 最小化**：只容纳启动序列 + 致命路径 + 内核早期输出（`main`/`printk`/`panic`/`kallsyms`）；`random`/`log`/`font`/`logo`/`pty` 等必须下沉到对应子系统。
-3. **架构分层**：per-arch 实现 `kernel/arch/<arch>/`；arch-neutral facade 头 + per-arch 头统一放 `kernel/include/arch/`（facade `arch/*.h` + `arch/<arch>/*.h`），与源目录 `kernel/arch/<arch>/` 对称。
-4. **测试目录按用途命名**：`hosttests/`（宿主 C 单元）、`qemutests/`（QEMU Python 集成）、`kernel/selftest/`（内核内自测）、`runtime/selftest/`（runtime 内测）。
-5. **`kernel/include/uapi/` 为用户态 ABI**：只放 syscall 号与跨边界结构，变动需评估 ABI。
+## References
 
-后续新增子系统必须先确定「源目录 + 头目录」成对后才落文件。以上规范自 2026-09-12 目录重构（P1–P6）起全面生效，完整映射见 `docs/superpowers/specs/2026-09-12-directory-restructure-design.md`。
-
-## Critical gotchas (will crash silently if wrong)
-
-- **boot_context ABI**: both UEFI bootloaders (x86_64 + aarch64) build a `boot_context` v2 struct at a fixed physical address; bootloader is LLP64 (`sizeof(long)=4`), kernel LP64 (`sizeof(long)=8`). All fields must use `uint32_t`/`uint64_t` — never `unsigned long`. See `kernel/include/core/bootinfo.h`.
-- **ABI and struct layout invariants**: struct and register layout changes must be verified with static layout checks (e.g. `test-kernel-layout`). Header dependencies for C and assembly are tracked automatically via depfiles (`-MD -MP` and `-include $(ALL_DEPS)`), though a full rebuild (`make clean`) remains useful when testing clean boots or cross-subsystem ABI transitions.
-- **Syscall E2E invocation**: always run `make OS01_SYSTEST=1 test-syscall`; do not omit the top-level `OS01_SYSTEST=1` even though the target invokes a recursive make.
-- **`set_intr_gate_raw` only accepts assembly stubs**. Bare C `ret` leaks CS+RFLAGS. Use `DEFINE_INTR_STUB` + `REGISTER_INTR_HANDLER`.
-- **GS base** set ONCE via `wrmsr(IA32_GS_BASE)`. Never reload GS selector — clobbers per-CPU data.
-- **`get_current_task()`**: `RSP & ~(STACK_SIZE-1)`, NOT `RSP & ~STACK_SIZE`.
-- **`Phy_To_Virt()` before deref** — `alloc_pages` returns physical address.
-- **`set_tss64` writes global TSS64_Table**. Per-CPU `init_tss[NR_CPUS]` exists but GDT slot still needs per-CPU update for SMP.
-- **Signal delivery must check CPL**: `do_signal_delivery` only valid when `regs->cs == USER_CS`. Calling it with kernel regs corrupts state.
-- **COW page teardown**: check `PAGE_COW` **before** clearing PTE in `vmm_unmap_4k_page` — phys addr must still be valid for `page_cow_put()`.
-- **Kernel logging policy**: All new/modified kernel code MUST use `log_err`/`log_warn`/`log_info`/`log_debug` (or `debug_<channel>()`), never bare `serial_printk`/`color_printk`. Hardcoded colors (`color_printk`) are forbidden for operational logs (handled automatically by `LOG_TARGET`). Only 4 whitelisted exceptions exist: panic/scheduler fatal dump (`panic.c`, `sched/core.c`), console raw char blit (`tty_def_output`), selftest protocol markers, and logger core itself. Full policy: [`docs/log/log.md`](docs/log/log.md).
-- **New hardware**: register via `register_subsys()` in `kernel/subsys/` — don't hardcode in `kernel_main`. See `docs/subsys/subsys.md`.
-- **`make test-syscall` must NOT set `KERNEL_SELFTEST=1`**: the in-kernel selftests spawn kthreads at boot which interfere with systest's fork+exec+waitpid test, producing a spurious "fork hang" (looks like a regression; it isn't). Run the two suites separately: systest via `make OS01_SYSTEST=1 test-syscall`, kernel selftests via `make KERNEL_SELFTEST=1`.
-
-## Interactive shell / headless E2E debugging
-
-**Shell architecture (read this before debugging Ctrl-C/keyboard):** the real interactive shell is NOT on `/dev/tty` directly. `init` spawns `/bin/terminal` (a VT100 terminal emulator), which opens `/dev/tty` (fd0, reads keyboard), allocates a PTY (`/dev/ptmx` → `/dev/pts0`), forks `ash`, and `dup2`s the PTY slave onto ash's fd 0/1/2. So:
-
-```
-keyboard IRQ → console TTY (tty_push_input) → terminal.elf reads /dev/tty → PTY master → ash (PTY slave)
-```
-
-- **Ctrl-C path**: `tty_push_input` (console TTY) does the VINTR line discipline → `signal_pgrp(tty->fg_pgrp, SIGINT)`. With job control disabled (busybox `CONFIG_ASH_JOB_CONTROL=n`), init/terminal/ash/cat all share pgrp 1, so the broadcast hits all of them: terminal.elf survives (must `signal(SIGINT, SIG_IGN)` — see below), ash survives (busybox handler), the foreground job (e.g. `cat`) dies.
-- **`terminal.elf` MUST ignore SIGINT**: exec() resets ALL sighand to `SIG_DFL` (kernel/arch/x86_64/sched/exec.c:769, deliberate — it also clears inherited SIG_IGN). Without `signal(SIGINT, SIG_IGN)` in `user/terminal/terminal.c` main(), every ^C kills the terminal emulator and init respawns it. terminal.elf already handles ^C itself (`kill(ash_pid, SIGINT)`).
-- **Console TTY default termios is `c_lflag = ISIG`** (signal-aware half-raw, not raw 0) so Ctrl-C works out of the box. Tests asserting the old raw default will fail.
-
-**Headless interactive test (inject commands via serial stdio):**
-
-First resolve the profile's firmware and image paths — re-run after any
-`make clean`:
-
-```bash
-make PROFILE=x86_64-clang print-run-paths
-#   firmware=/home/.../build/x86_64-clang/firmware/OVMF.fd
-#   image=/home/.../build/x86_64-clang/image/disk.img
-```
-
-Then substitute those `firmware=` and `image=` values into the QEMU command
-(the snippet below captures them into `$FW` / `$IMG` automatically):
-
-```bash
-FW=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^firmware=//p')
-IMG=$(make -s PROFILE=x86_64-clang print-run-paths | sed -n 's/^image=//p')
-
-# Boot normal OS01, run cat /dev/urandom, send literal Ctrl-C (0x03), verify shell alive
-( sleep 18; printf 'cat /dev/urandom\n'; sleep 4; printf '\x03'; sleep 4; printf 'echo SHELL_ALIVE_123\n'; sleep 3; ) \
-  | timeout 50 qemu-system-x86_64 -M q35 \
-      -drive if=pflash,format=raw,readonly=on,file="$FW" \
-      -drive file="$IMG",format=raw,if=none,id=disk -device ahci,id=ahci \
-      -device ide-hd,drive=disk,bus=ahci.0 \
-      -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 \
-      -m 512 -smp 1 -serial stdio \
-      -display none -no-reboot -no-shutdown > /tmp/log 2>&1
-```
-
-- Wait ~18s for boot + DHCP + shell prompt before sending commands (input sent too early is lost).
-- `-serial stdio` + a pipe is the only reliable way to inject input. `-serial file:...` is output-only (input from stdin is dropped). `-serial pipe:/tmp/ser` creates both halves but QEMU opens them itself — easy to deadlock.
-- Success signature: `task N killed by signal 2 (default)` (cat died) + `SHELL_ALIVE_123` echoed back (shell survived).
-- To build the normal (interactive) disk: `rm -f disk.img && make disk.img`. (Task 7's `make test-syscall` overwrites it with the systest disk.)
-
-## Key files
-
-| File | Purpose |
-|------|---------|
-| `kernel/core/main.c` | Init sequence (subsys → VFS → SMP → kernel_start_userspace) |
-| `kernel/init/userspace.c` | Public userspace startup orchestration (VFS runtime handoff, /bin/init publication, runtime ready) |
-| `kernel/init/services.c` | Boot background services (lwIP network prepare, thermal start) |
-| `kernel/arch/x86_64/head.S` | Entry, page tables, GDT, IDT, TSS |
-| `kernel/arch/x86_64/intr/entry.S` | Exception/intr/syscall entry/exit, ret_from_intr |
-| `kernel/arch/x86_64/intr/trap.c` | Exception handlers + do_system_call + do_signal_delivery |
-| `kernel/arch/x86_64/trampoline.S` | AP startup (16→32→64 bit) |
-| `kernel/driver/logo.c` | OS01 启动字标（arch-neutral，经 `arch/fb_write.h` 取帧缓冲） |
-| `kernel/arch/x86_64/smp/smp.c` | smp_boot_aps() + ap_entry() — INIT-SIPI-SIPI + AP idle loop |
-| `kernel/memory/` | pmm.c, pmm_boot.c, slab.c, tlb.c, vm_area.c, mm.c, dump.c — arch-neutral memory stack (x86 vmm/vma/brk/mmap/uaccess live under `kernel/arch/x86_64/memory/`) |
-| `kernel/intr/apic/` | acpi.c, lapic.c, lapic_timer.c, ioapic.c, ipi.c |
-| `kernel/sched/` | core.c, signal.c, fair.c, balance.c, wait.c, kthread.c, accounting.c — EEVDF 共享调度核心（fork/exec/exit 生命周期是 x86-only，位于 `kernel/arch/x86_64/sched/`） |
-| `kernel/fs/` | vfs.c, fat.c, ext2.c, procfs.c, tmpfs.c, gpt.c, dcache.c, elf_layout.c, file.c, poll.c, select.c（devfs.c 与 elf.c 是 x86-only，位于 `kernel/arch/x86_64/fs/`） |
-| `kernel/tty/tty.c` | Console TTY: fg_pgrp field, VINTR/VQUIT line discipline (ISIG), TIOCSPGRP/TIOCGPGRP, cooked readline |
-| `kernel/tty/pty.c` | PTY master/slave (terminal.elf runs ash on a PTY slave); pty_slave_ioctl TIOCSPGRP |
-| `user/terminal/terminal.c` | VT100 terminal emulator: /dev/tty → PTY → ash; must SIG_IGN SIGINT |
-| `kernel/subsys/subsys.c` | Subsystem registration framework |
-| `kernel/arch/x86_64/sync/futex.c` | Futex hash table (SYS_futex=47; x86-only) |
-| `kernel/include/core/bootinfo.h` | **`boot_context` v2 ABI** (shared by both UEFI loaders); fixed-size types critical |
-| `kernel/include/uapi/syscall.h` | Syscall numbers (0..76) |
-| `user/init.c` | PID 1 init: inittab parsing, 4-phase boot (SYSINIT/WAIT/ONCE/RESPAWN), child supervision |
-| `config/inittab` | Default inittab template (id:action:process); `config/inittab.systest` for test mode |
-
-## Documentation
-
-| Doc | What it covers |
-|-----|----------------|
-| [docs/architecture.md](docs/architecture.md) | Boot chain, memory layout, interrupt system, init sequence |
-| [docs/arch.md](docs/arch.md) | Multi-arch weak-default + strong-override overview (facade/override matrix, page-table hierarchy, bootinfo ABI, driver initcall, IRQ hook 3-segment, RTC split, distance to single `kernel_main`) |
-| [docs/arch/cross-boundary-symbols.md](docs/arch/cross-boundary-symbols.md) | **跨边界符号/ABI 边界规范**（AAGU-4）：compiler runtime / UAPI / arch-value / libc API 镜像 4 类规则 + 现状对照表 + 后续 issue 切分 |
-| [docs/smp/smp.md](docs/smp/smp.md) | 8-phase SMP bringup, per-CPU, IPI, TLB shootdown, load balancing, EEVDF rbtree runqueues |
-| [docs/sched/scheduler.md](docs/sched/scheduler.md) | Task system, EEVDF scheduler, context switch, spawn/fork/exec/exit, blocker framework |
-| [docs/sched/scheduler-complexity.md](docs/sched/scheduler-complexity.md) | Scheduler complexity assessment, feature-impact risk map, refactor triggers |
-| [docs/syscall/syscall.md](docs/syscall/syscall.md) | Syscall table (77 syscalls), dispatch, invocation |
-| [docs/fs/filesystem.md](docs/fs/filesystem.md) | VFS, FAT32, ext2, devfs, procfs, tmpfs, GPT, block device |
-| [docs/memory/cow-mmap.md](docs/memory/cow-mmap.md) | COW fork, VMA, mmap/mprotect/munmap, 4KB page pool |
-| [docs/signal/signal.md](docs/signal/signal.md) | Signal delivery, handler, sigreturn, Ctrl-C→SIGINT |
-| [docs/log/log.md](docs/log/log.md) | Log levels, DEBUG_CHANNELS, LOG_TARGET, NDEBUG |
-| [docs/subsys/subsys.md](docs/subsys/subsys.md) | Subsystem registration framework |
-| [docs/driver/driver.md](docs/driver/driver.md) | Drivers (keyboard, serial, ahci, pci, e1000, fb, mouse, gfx0, logo, xHCI, USB MSC/BOT, USB HID) + framebuffer cache policy |
-| [docs/testing/testing-policy.md](docs/testing/testing-policy.md) | Test layering, scenario catalog, assertion policy, generated test catalog |
+[架构与启动](docs/arch.md) · [跨边界符号与 ABI](docs/arch/cross-boundary-symbols.md) · [驱动](docs/driver/driver.md) · [文件系统](docs/fs/filesystem.md) · [调度](docs/sched/scheduler.md)
