@@ -18,7 +18,7 @@ RECEIPTS_DIR := $(BUILD_DIR)/receipts
 # mbedTLS yet) and must name the libc cross-arch (libc/Makefile derives
 # HOSTARCH from the ARCH command line).
 SYSROOT_ARCH   ?= x86_64
-SYSROOT_STAGES ?= kernel-headers libc libgfx libgui mbedtls compat-libs
+SYSROOT_STAGES ?= kernel-headers libc libgfx gui mbedtls compat-libs
 SYSROOT_STAMP_PREREQS := $(foreach s,$(SYSROOT_STAGES),$(STAMPS_DIR)/$(s)-install.stamp)
 
 # ── Content-gated staging stamps (R1) ─────────────────────────────

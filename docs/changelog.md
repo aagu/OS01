@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-11-19
+
+- feat(aarch64): **产品用户态接入（M4 剩余收口）**——`OS01_HAS_USERSPACE=1`，aarch64 产品镜像走 `/bin/init` → `/bin/sh` 的 boot-5 链路：
+
+  **构建链**
+  - aarch64-clang profile 增 `userland` capability：sysroot generation 发布（stages 裁剪为 kernel-headers/libc/compat-libs，`SYSROOT_ARCH`/`SYSROOT_STAGES` 旋钮）、user runtime consumer（selfhosted udivti3 for `aarch64-none-elf`）、`USER_ARTIFACTS`。BusyBox adapter 保持 x86-only（user.mk gate）。
+  - libc：`syscall()/syscall4()/syscall6()` 增 `__aarch64__` SVC 分支（x8=nr，x0..x5 传参）；`_exit` 走通用 helper；aarch64 编 libc.a（全量源单）——x87 浮点核（floatscan/strtod/vsscanf/floatconv）、setjmp、pthread/mutex 排除；vsprintf 的 `%f/%e/%g` 输出字面量（EL0 陷阱 FPEN，userland `-mgeneral-regs-only`）；time.o 单文件放行 FP（difftime 的 double ABI）。libc install 内层 make 显式传 `ARCH=$(HOSTARCH)`（`MAKEOVERRIDES=` 边界曾吞掉 ARCH 导致误编 x87 floatscan）。
+  - user：`crt0_aarch64.S`（清 BSS + `__libc_start_main` AAPCS 契约）+ `sigreturn_trampoline_aarch64.S` + `linker_aarch64.ld`（满足 image 校验器：4K 对齐 PT_LOAD、无 W+X、无 INTERP/DYNAMIC/TLS）；`apps.mk` 增 `USER_EXCLUDED_PROGRAMS` 架构过滤。
+
+  **内核侧**
+  - spawn：新增 `kernel/arch/aarch64/sched/exec.c` 的 `spawn_user_task(path, argv)`——VFS 读 ELF（4 MiB 上限、瞬态缓冲）→ image 构建（产品 8 页栈）→ `files_dup` 继承 idle 的 /dev/tty stdio → `sched_alloc_and_publish_task` 单点发布。`arch_syscall_exec` 产品路径走 VFS（selftest 变体保留 catalog 契约）。`sched_alloc_and_publish_task` 的 boot 例外放行 pinned+CPU0+creation window（boot-5 init spawn 即此形态）。
+  - image 机制：栈页数参数化（selftest 1 页合同不变，产品 8 页向上扩展）；`setup_stack` 写 csu 契约 auxv（AT_RANDOM/AT_PAGESZ/AT_NULL）；栈页必须 `alloc_4k_page` 逐页分配（`pmm_4k_page_allocated` 拒绝 buddy 页）+ payload 经 scratch 按页写入（物理页不连续）。
+  - boot-5 编排：`arch_sched_boot_prepare/idle`（cpu/sched_boot.c）——AP gate 元数据、tick start、kernel root 记录、AP release + BSP 栈移交；handoff 的 userspace 分支只做不变量检查；空队列不变量归 legacy。selftest 变体 `-DOS01_HAS_USERSPACE=0` 保 legacy handoff（冻结合同不变，盘上无 /bin/init）。多核产品启动在 user-mm 单核 v1 门（`-EOPNOTSUPP`）下降级 kernel-only 继续（SMP 用户调度属下一任务）。
+  - syscall：aarch64 misc 组（getrandom/sync/reboot/uname）仅在 `OS01_HAS_USERSPACE` 下服务（冻结石 15 项子集合同不动）；`psci_system_reset()` 接 reboot(2)。
+  - mmap 面补齐：`MAP_FIXED`（私有匿名替换事务，对齐 munmap 的预分配-提交形态）；文件映射（fd 经 `user_vm_policy_files()` weak hook 解析，VMA 持 node 引用，缺页时按 `vm_pgoff` 从 VFS fill）；`MAP_SHARED` 复用 PMM COW 引用——写故障在 `VMA_SHARED` VMA 上只升级写者叶子（同 PA 读方免故障即见写入），`MAP_PRIVATE` 保持 COW 私有化；设备映射 `/dev/mem`（`FD_DEV`+名字标记）→ `arch_vmm_map_user_io_4k` Device 属性叶（D+virtio 窗口白名单），`USER_VM_PAGE_IO` 源 teardown 只 unmap 不 free，fork 跳过 IO 叶。
+
+  **镜像/QEMU**
+  - aarch64 产品盘安装 `/bin/init`、`/bin/sh`（复用 `user/sh.c`——fd0 为 /dev/tty 时读 canonical ASCII 行，扫描码表删除）与 `config/inittab.aarch64`（respawn `/bin/sh`）。
+  - QEMU aarch64 启动补 `virtio-rng`（BOOT-1 教训）：edk2 `EFI_RNG_PROTOCOL` → `boot_entropy` → CSPRNG STRONG——没有它 `get_random_bytes` fail-closed，所有用户程序死于全零 canary。
+
+  **验收**
+  - 产品镜像启动：`init: spawned user-space init, pid=1` → inittab respawn → `OS01 Shell` 提示符；串口交互 `echo hi` → `hi`、`exit` → init 回收（status=0）并 respawn（pid=3）。
+  - 回归：m4-1 selftest 28/28；test-host 235/235（含 test_user_vm 9087/9087，新增 MAP_FIXED/文件 fill/MAP_SHARED 写升级/设备映射共 8 个用例）；x86 `OS01_SYSTEST=1 test-syscall` E2E 全绿。
+
+  **已知边界**
+  - aarch64 用户任务单核 v1；EL0 无 FP/SIMD；sh 的 pwd 内建在 aarch64 上暂无输出（getcwd 路径待查）；busybox 未移植。
+
 ## 2026-11-18
 
 - feat(aarch64): **打开 VFS 门（M4 剩余·产品用户态接入第一步）**——arch-neutral 文件系统栈接入 aarch64 产品内核，devfs / tmpfs / FAT32 / ext2 全部在 aarch64 侧工作：
