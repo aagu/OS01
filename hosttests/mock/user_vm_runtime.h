@@ -131,6 +131,40 @@ void          user_vm_test_irq_disable(void);
 #define arch_local_irq_enable()  user_vm_test_irq_enable()
 #define arch_local_irq_disable() user_vm_test_irq_disable()
 
+/* ── mmap fd surface (2026-11-19): the policy resolves fd through
+ * `current->files`; the host runtime provides a one-slot fake table
+ * (see user_vm_runtime.c). ─────────────────────────────────────── */
+#define NOFILE 4
+typedef struct file file_t;
+struct file {
+    int      type;
+    struct vfs_node *node;
+};
+#define FD_VFS 1
+
+typedef struct files_struct files_t;
+struct files_struct {
+    file_t *fd[NOFILE];
+};
+
+struct task_struct;
+extern struct task_struct *current;
+
+files_t *user_vm_test_files(void);
+file_t  *files_get_file(files_t *fs, int fd);
+
+/* Fake VFS node + read for file-backed demand-fill tests. */
+struct vfs_node_test {
+    const unsigned char *bytes;
+    uint64_t size;
+};
+int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
+             void *buffer);
+struct vfs_node *user_vm_test_make_file_node(const unsigned char *bytes,
+                                             uint64_t size);
+void user_vm_test_set_file_bytes(const unsigned char *bytes, uint64_t size);
+void user_vm_test_set_files(file_t *f);
+
 /* ── Test controls (implemented in user_vm_runtime.c) ────── */
 /* Reset the fake leaf store, allocators, counters and fault
  * injection.  Call at the start of every test. */

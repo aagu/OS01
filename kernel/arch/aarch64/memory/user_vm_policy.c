@@ -26,6 +26,7 @@
 #include <arch/mmu.h>           /* AARCH64_USER_MIN / AARCH64_USER_LIMIT */
 #include <arch/aarch64/user_image.h>  /* AARCH64_USER_STACK_BASE */
 #include <errno.h>
+#include <fs/file.h>                    /* files_get_file (mmap fd) */
 #include <kernel.h>             /* container_of */
 #include <memory/memory.h>      /* Phy_To_Virt */
 #include <memory/pmm.h>         /* alloc_4k_page / free_4k_page / PAGE_4K_* */
@@ -56,6 +57,19 @@ static uint64_t page_align_up(uint64_t x)
     return (x + (uint64_t)PAGE_4K_SIZE - 1) & ~((uint64_t)PAGE_4K_SIZE - 1);
 }
 
+/* fd-table access for the mmap entry: the production build reads the
+ * syscall context's table; hosttests override this weak symbol with a
+ * one-slot fake table (the mock environment keeps task_struct
+ * incomplete). */
+#ifdef OS01_HOST_TEST
+files_t *user_vm_policy_files(void);    /* hosttests provide the fake */
+#else
+__attribute__((weak)) files_t *user_vm_policy_files(void)
+{
+    return current ? current->files : NULL;
+}
+#endif
+
 /* mm->pgdir holds the root PA; the M3 entries take the direct-map
  * pointer. */
 uint64_t *aarch64_user_vm_root_va(mm_t *mm)
@@ -63,11 +77,17 @@ uint64_t *aarch64_user_vm_root_va(mm_t *mm)
     return (uint64_t *)Phy_To_Virt((uintptr_t)mm->pgdir);
 }
 
+/* A mmap-window VMA: anonymous-private, anonymous-shared or
+ * file-backed (2026-11-19).  Heap and IO VMAs stay out — their VA
+ * windows are outside the mmap region anyway, this is the defensive
+ * shape check. */
 static bool policy_vma_is_mmap(const vma_t *v)
 {
-    return (v->vm_flags & VMA_ANON) &&
-           !(v->vm_flags & (VMA_HEAP | VMA_IO)) &&
-           v->vm_file == NULL;
+    if (v->vm_flags & (VMA_HEAP | VMA_IO))
+        return false;
+    if (v->vm_file != NULL)
+        return true;                     /* file-backed mmap */
+    return (v->vm_flags & VMA_ANON) != 0;
 }
 
 static vma_t *first_overlap(mm_t *mm, uint64_t start, uint64_t end)
@@ -158,14 +178,16 @@ void aarch64_user_vm_resident_unlink(mm_t *mm, user_vm_page_t *node)
 /* Internal corruption check: the record and the page table must
  * agree on the PA.  A query failure is as fatal as a mismatch — the
  * policy never proceeds past a broken invariant. */
-/* Shared no-file VMA drain (fork rollback + destroy): unlink every
- * VMA node and free it.  The nodes carry no file references on this
- * port, so the drain is pure metadata; the caller keeps ownership of
+/* VMA drain (fork rollback + destroy): unlink every VMA node, drop
+ * its file reference (file-backed mappings hold one node reference
+ * for their whole life) and free it.  The caller keeps ownership of
  * any break/stack field cleanup it still needs. */
 void aarch64_user_vm_free_vmas(mm_t *mm)
 {
     while (mm->vma_list.next != &mm->vma_list) {
         vma_t *v = container_of(mm->vma_list.next, vma_t, list);
+        if (v->vm_file)
+            vfs_node_put(v->vm_file);
         vm_area_unlink(v);
         kfree(v);
     }
@@ -293,6 +315,23 @@ int user_vm_cow_fault(mm_t *mm, uint64_t far)
     if (!r)
         return -EFAULT;
 
+    /* MAP_SHARED write fault (2026-11-19): the page stays shared —
+     * upgrade ONLY this task's leaf to the logical permission and keep
+     * the PMM COW references untouched.  Every owner reads the same
+     * PA, so the write is visible to all of them without their own
+     * write faults.  A write fault on a logically read-only leaf is a
+     * real access violation. */
+    vma_t *v = vm_area_lookup(mm, va);
+    if (v && (v->vm_flags & VMA_SHARED)) {
+        if (!(r->logical & VM_USER_RW))
+            return -EFAULT;
+        uint64_t *root = aarch64_user_vm_root_va(mm);
+        if (arch_vmm_update_4k(root, r->pa, r->va, r->logical,
+                               NULL, NULL) != 0)
+            return -EFAULT;
+        return 0;
+    }
+
     /* cow_private_page performs the remaining checks (shared, logical
      * RW, same-PA RO/NX leaf) and returns -EFAULT for a non-COW
      * fault, -ENOMEM for copy exhaustion. */
@@ -389,8 +428,11 @@ static void split_policy_vma(mm_t *mm, vma_t *v, uint64_t at, vma_t *right)
     right->vm_start     = at;
     right->vm_end       = v->vm_end;
     right->vm_flags     = v->vm_flags;
-    right->vm_pgoff     = v->vm_pgoff;
-    right->vm_file      = NULL;
+    right->vm_pgoff     = v->vm_pgoff +
+        ((at - v->vm_start) >> PAGE_4K_SHIFT);
+    right->vm_file      = v->vm_file;
+    if (right->vm_file)
+        vfs_node_get(right->vm_file);   /* each fragment holds a ref */
     v->vm_end = at;
     vm_area_insert_sorted(mm, right);
 }
@@ -604,18 +646,41 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     if (rc)
         return rc;
 
-    /* Legally parsed but out of scope for the v1 anonymous-private
-     * policy: shared and file-backed mappings fail here, before the
-     * private-anonymous fd/off validation.  MAP_FIXED is served for
-     * private-anonymous requests (2026-11-19): it replaces overlapping
-     * mmap-window VMAs transactionally. */
-    if (map_type != MAP_PRIVATE || !(flags & MAP_ANONYMOUS))
-        return -EOPNOTSUPP;
-    bool fixed = (flags & MAP_FIXED) != 0;
-
-    /* Raw 64-bit fd/off, before any mapping metadata is touched. */
-    if (fd != UINT64_MAX || off != 0)
+    /* 2026-11-19 (M4-remaining file/shared mappings): the policy now
+     * serves file-backed private mappings (fd + offset, demand-filled
+     * from the VFS on first touch) and MAP_SHARED — anonymous shared
+     * regions and file-backed shared regions alike.  Sharing rides the
+     * existing PMM COW reference mechanism (fork shares every resident
+     * page; the write fault path upgrades the writer's leaf in place
+     * for a VMA_SHARED mapping instead of privatizing), so no global
+     * page registry is needed.
+     * MAP_FIXED is served for private-anonymous requests: it replaces
+     * overlapping mmap-window VMAs transactionally. */
+    if (map_type != MAP_PRIVATE && map_type != MAP_SHARED)
         return -EINVAL;
+    bool fixed = (flags & MAP_FIXED) != 0;
+    bool file_backed = (flags & MAP_ANONYMOUS) == 0;
+
+    /* fd/off: an anonymous mapping requires fd=-1/off=0; a file
+     * mapping resolves the fd through the caller's fd table (the
+     * syscall context owns the detached root for the whole entry, so
+     * the table is stable).  The VMA holds one node reference for its
+     * whole life (fork dups it, munmap/split/destroy drop it). */
+    vfs_node_t *file_node = NULL;
+    if (!file_backed) {
+        if (fd != UINT64_MAX || off != 0)
+            return -EINVAL;
+    } else {
+        if (fd == UINT64_MAX || fd >= NOFILE)
+            return -EINVAL;
+        files_t *files = user_vm_policy_files();
+        file_t *f = files ? files_get_file(files, (int)fd) : NULL;
+        if (!f || f->type != FD_VFS || !f->node)
+            return -EBADF;
+        file_node = vfs_node_get(f->node);
+        if (!file_node)
+            return -ENOMEM;
+    }
 
     if (len == 0)
         return -EINVAL;
@@ -667,14 +732,19 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     }
 
     vma_t *v = kmalloc(sizeof(*v));
-    if (!v)
+    if (!v) {
+        if (file_node)
+            vfs_node_put(file_node);
         return -ENOMEM;
+    }
     list_init(&v->list);
     v->vm_start     = cand;
     v->vm_end       = cand + alen;
-    v->vm_flags     = vma_flags | VMA_ANON;
-    v->vm_pgoff     = 0;
-    v->vm_file      = NULL;
+    v->vm_flags     = vma_flags |
+                      (file_backed ? 0 : VMA_ANON) |
+                      (map_type == MAP_SHARED ? VMA_SHARED : 0);
+    v->vm_pgoff     = file_backed ? (off >> PAGE_4K_SHIFT) : 0;
+    v->vm_file      = file_node;   /* the VMA owns the reference */
 
     if (!fixed) {
         vm_area_insert_sorted(mm, v);
@@ -700,6 +770,8 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
             for (int j = 0; j < i; j++)
                 kfree(split[j]);
             kfree(v);
+            if (file_node)
+                vfs_node_put(file_node);
             return -ENOMEM;
         }
     }
@@ -718,6 +790,8 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
             for (int j = 0; j < need; j++)
                 kfree(split[j]);
             kfree(v);
+            if (file_node)
+                vfs_node_put(file_node);
             return -EINVAL;
         }
         p = o->vm_end;
@@ -754,6 +828,8 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
         list_t *next = lp->next;
         vma_t *o = container_of(lp, vma_t, list);
         if (o->vm_end > cand && o->vm_start < end) {
+            if (o->vm_file)
+                vfs_node_put(o->vm_file);
             vm_area_unlink(o);
             kfree(o);
         }
@@ -933,6 +1009,8 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len)
         list_t *next = lp->next;
         vma_t *v = container_of(lp, vma_t, list);
         if (v->vm_end > addr && v->vm_start < end) {
+            if (v->vm_file)
+                vfs_node_put(v->vm_file);
             vm_area_unlink(v);
             kfree(v);
         }
@@ -1008,6 +1086,22 @@ int user_vm_fault(mm_t *mm, uint64_t far, bool write)
         return -ENOMEM;
 
     aarch64_user_vm_resident_insert(mm, rec);
+
+    /* File-backed mapping: fill the leaf from the VFS at the mapping's
+     * file offset (short reads keep the zero fill).  A read failure
+     * unwinds the leaf the fault just installed — the caller reports
+     * -EFAULT and the VA stays absent. */
+    vma_t *v = vm_area_lookup(mm, va);
+    if (v && v->vm_file) {
+        uint64_t file_off = (v->vm_pgoff << PAGE_4K_SHIFT) +
+                            (va - v->vm_start);
+        int n = vfs_read(v->vm_file, file_off, PAGE_4K_SIZE,
+                         Phy_To_Virt(rec->pa));
+        if (n < 0) {
+            resident_remove_leaf(mm, rec, root);
+            return -EFAULT;
+        }
+    }
     return 0;
 }
 

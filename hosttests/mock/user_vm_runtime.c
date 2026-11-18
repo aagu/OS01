@@ -542,3 +542,81 @@ void _log_err_impl(const char *fmt, ...)
 {
     (void)fmt;
 }
+
+/* ── mmap fd surface (2026-11-19) ──────────────────────────────── */
+static struct files_struct g_test_files;
+static file_t g_test_file_slot;
+static struct vfs_node_test g_test_file_node;
+
+struct task_struct;
+static struct { void *_pad; } g_fake_task;
+static struct files_struct *g_files = NULL;
+
+files_t *user_vm_policy_files(void)
+{
+    return g_files;
+}
+
+/* One-slot table: the tests install fd 0 (files_get_file locks nothing
+ * here — the mock table has no concurrency). */
+file_t *files_get_file(files_t *fs, int fd)
+{
+    if (!fs || fd < 0 || fd >= NOFILE)
+        return NULL;
+    return fs->fd[fd];
+}
+
+void user_vm_test_set_files(file_t *f)
+{
+    if (f) {
+        g_test_file_slot = *f;
+        g_test_files.fd[0] = &g_test_file_slot;
+        g_files = &g_test_files;
+    } else {
+        g_test_files.fd[0] = NULL;
+        g_files = NULL;
+    }
+}
+
+/* The fake node: policy only forwards the pointer to vfs_read; the
+ * byte source lives beside it.  vfs_node is incomplete in the mock —
+ * an opaque tag object is enough. */
+static unsigned char g_fake_node_storage[16];
+
+struct vfs_node *user_vm_test_make_file_node(const unsigned char *bytes,
+                                             uint64_t size)
+{
+    (void)bytes;
+    (void)size;
+    return (struct vfs_node *)(void *)g_fake_node_storage;
+}
+
+int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
+             void *buffer)
+{
+    (void)node;
+    if (!g_test_file_node.bytes || offset >= g_test_file_node.size)
+        return 0;
+    uint64_t n = g_test_file_node.size - offset;
+    if (n > size)
+        n = size;
+    memcpy(buffer, g_test_file_node.bytes + offset, (size_t)n);
+    return (int)n;
+}
+
+void user_vm_test_set_file_bytes(const unsigned char *bytes, uint64_t size)
+{
+    g_test_file_node.bytes = bytes;
+    g_test_file_node.size = size;
+}
+
+/* No-op node reference counting: the fake node never goes away. */
+struct vfs_node *vfs_node_get(struct vfs_node *node)
+{
+    return node;
+}
+
+void vfs_node_put(struct vfs_node *node)
+{
+    (void)node;
+}

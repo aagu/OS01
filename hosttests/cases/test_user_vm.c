@@ -432,12 +432,14 @@ TEST_FUNC(test_mmap_argument_contract)
                                MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS));
     assert_eq(-EINVAL, test_mmap_call(mm, 0, 0x1000, PROT_RW,
                                MAP_ANONYMOUS | 0x8000));
-    /* Legally parsed but unsupported requests: shared-alone is
-     * syntactically valid (exactly one of the pair) and must report
-     * -EOPNOTSUPP, not -EINVAL. */
-    assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,
-                                   MAP_SHARED | MAP_ANONYMOUS));
-    assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,
+    /* 2026-11-19: shared-anonymous is served now (it allocates a VMA
+     * at BASE); file-backed without a valid fd (fd=-1 here) is
+     * -EINVAL, not the v1 blanket -EOPNOTSUPP. */
+    assert_eq((int64_t)BASE, test_mmap_call(mm, 0, 0x1000, PROT_RW,
+                                     MAP_SHARED | MAP_ANONYMOUS));
+    assert_eq(2, vma_count(mm));
+    assert_eq(0, user_vm_munmap(mm, BASE, 0x1000));
+    assert_eq(-EINVAL, test_mmap_call(mm, 0, 0x1000, PROT_RW,
                                    MAP_PRIVATE));
     /* 2026-11-19: MAP_FIXED is served for private-anonymous requests;
      * without a usable hint it is -EINVAL (POSIX-aligned), not the v1
@@ -1896,6 +1898,100 @@ TEST_FUNC(test_mmap_fixed_split_node_failure_changes_nothing)
     destroy_mm(mm);
 }
 
+
+/* ── Tests: file-backed + shared mappings (2026-11-19) ────────── */
+
+TEST_FUNC(test_mmap_file_backed_demand_fill)
+{
+    user_vm_test_reset();
+    static const unsigned char bytes[8192] =
+        { [0] = 0x41, [4096] = 0x42 };
+    struct vfs_node *node =
+        user_vm_test_make_file_node(bytes, sizeof(bytes));
+    file_t f = { .type = FD_VFS, .node = node };
+    user_vm_test_set_files(&f);
+    user_vm_test_set_file_bytes(bytes, sizeof(bytes));
+
+    mm_t *mm = new_mm(HEAP_BASE);
+    /* fd 0, offset 4096: one page filled with byte 0x42. */
+    uint64_t args[6] = { 0, 0x1000, PROT_RW,
+                         MAP_PRIVATE, 0, 4096 };
+    assert_eq((int64_t)BASE, user_vm_mmap(mm, args));
+    assert_eq(2, vma_count(mm));
+    /* Metadata only: the leaf store stays absent (0) until the first
+     * touch. */
+    assert_eq(0, user_vm_test_leaf_state(BASE));
+
+    assert_eq(0, user_vm_fault(mm, BASE, false));
+    user_vm_page_t *r = resident_at(mm, BASE);
+    assert_not_null(r);
+    unsigned char *pg = (unsigned char *)Phy_To_Virt(r->pa);
+    assert_eq(0x42, pg[0]);
+    assert_eq(0x00, pg[1]);      /* short fill keeps the zero page */
+    assert_eq((int64_t)BASE, (int64_t)r->va);
+
+    /* The VMA owns the node reference; destroy drops it. */
+    destroy_mm(mm);
+    user_vm_test_set_files(NULL);
+}
+
+TEST_FUNC(test_mmap_shared_anon_fork_write_through)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(parent, 0, 0x1000, PROT_RW,
+                             MAP_SHARED | MAP_ANONYMOUS));
+    assert_eq(0, user_vm_fault(parent, BASE, true));
+    user_vm_page_t *pr = resident_at(parent, BASE);
+    assert_not_null(pr);
+    uint64_t pa = pr->pa;
+    memset(Phy_To_Virt(pa), 0x5A, PAGE_4K_SIZE);
+
+    mm_t *child  = new_child_mm(0x9000);
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(parent, child,
+                                    clone_publish_ok, &probe));
+
+    /* Both leaves map the same PA (read-through without faults). */
+    assert_eq(pa, user_vm_test_leaf_pa_in(child->pgdir, BASE));
+    assert_eq(0x5A, *(unsigned char *)Phy_To_Virt(pa));
+
+    /* Child write fault on the shared VMA: the leaf upgrades in place
+     * — same PA, no privatization, COW references untouched. */
+    assert_eq(0, user_vm_cow_fault(child, BASE));
+    assert_eq(pa, user_vm_test_leaf_pa_in(child->pgdir, BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(child->pgdir, BASE));
+    user_vm_page_t *cr = resident_at(child, BASE);
+    assert_not_null(cr);
+    assert_eq((uint32_t)USER_VM_PAGE_SHARED, cr->share);
+    assert_eq(2, user_vm_test_cow_refs(pa));
+    memset(Phy_To_Virt(pa), 0x7C, PAGE_4K_SIZE);
+    assert_eq(0x7C, *(unsigned char *)Phy_To_Virt(pa));
+
+    /* Contrast: a PRIVATE mapping's write fault privatizes. */
+    mm_t *p2 = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(BASE + 0x2000),
+              test_mmap_call(p2, BASE + 0x2000, 0x1000, PROT_RW,
+                             MAP_ANON_PRIVATE));
+    assert_eq(0, user_vm_fault(p2, BASE + 0x2000, true));
+    mm_t *c2 = new_child_mm(0xa000);
+    struct clone_publish_probe probe2 = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(p2, c2, clone_publish_ok, &probe2));
+    assert_eq(0, user_vm_cow_fault(c2, BASE + 0x2000));
+    user_vm_page_t *c2r = resident_at(c2, BASE + 0x2000);
+    assert_not_null(c2r);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, c2r->share);
+    assert_true(c2r->pa != user_vm_test_leaf_pa_in(p2->pgdir,
+                                                   BASE + 0x2000));
+
+    destroy_mm(parent);
+    destroy_mm(child);
+    destroy_mm(p2);
+    destroy_mm(c2);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -1942,6 +2038,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_fixed_no_hint_is_einval),
     TEST_ENTRY(test_mmap_fixed_rejects_non_mmap_overlap),
     TEST_ENTRY(test_mmap_fixed_split_node_failure_changes_nothing),
+    TEST_ENTRY(test_mmap_file_backed_demand_fill),
+    TEST_ENTRY(test_mmap_shared_anon_fork_write_through),
 TEST_LIST_END
 
 int main(void)

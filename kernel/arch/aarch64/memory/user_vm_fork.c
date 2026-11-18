@@ -18,6 +18,7 @@
 #include <kernel.h>                          /* container_of */
 #include <list.h>
 #include <sched/task.h>                      /* complete mm_t */
+#include <fs/vfs.h>                          /* vfs_node_get (file VMA refs) */
 #include <memory/pmm.h>                      /* pmm_cow_acquire/release,
                                               * page_cow_refs */
 #include <memory/slab.h>                     /* kmalloc / kfree */
@@ -195,6 +196,8 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
             goto fail;
         }
         *cv = *pv;
+        if (cv->vm_file)
+            vfs_node_get(cv->vm_file);   /* the child fragment owns a ref */
         list_init(&cv->list);
         vm_area_insert_sorted(child, cv);
     }
