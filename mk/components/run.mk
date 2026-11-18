@@ -225,6 +225,7 @@ run-aarch64-uefi: aarch64-uefi
 	  -drive if=pflash,format=raw,readonly=on,file=$(AARCH64_UEFI_FIRMWARE) \
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,readonly=on,id=disk \
 	  -device virtio-blk-device,drive=disk \
+	  -device virtio-rng-device \
 	  -device ramfb \
 	  $$extra_dtb \
 	  -serial stdio -display $(DISPLAY) -no-reboot

@@ -4,6 +4,7 @@
  */
 
 #include <init/services.h>
+#include <arch/features.h>
 #include <net/net.h>
 #include <log/log.h>
 
@@ -16,7 +17,9 @@ __attribute__((weak)) int arch_usb_hid_start_worker(void)
 
 void boot_services_prepare(void)
 {
+#if OS01_HAS_NET
     net_lwip_init();
+#endif
 }
 
 void boot_services_start(void)

@@ -8,6 +8,8 @@
 int psci_init(enum psci_conduit conduit);
 
 /* Start target_mpidr at entry and return the PSCI int32 status code. */
+int32_t psci_system_reset(void);
+
 int32_t psci_cpu_on(uint64_t target_mpidr, uint64_t entry,
                     uint64_t context_id);
 

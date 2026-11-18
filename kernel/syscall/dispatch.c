@@ -57,6 +57,18 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_signal] = { sys_native_signal, "signal" },
     [SYS_sigprocmask] = { sys_native_sigprocmask, "sigprocmask" },
     [SYS_sigreturn] = { sys_native_sigreturn, "sigreturn" },
+/* The aarch64 product userspace serves a small misc group (getrandom
+ * for the csu canary seed, sync/reboot for init's shutdown path,
+ * uname).  Gated behind OS01_HAS_USERSPACE so the selftest variants
+ * keep the frozen 15-entry subset contract; the handler lives in
+ * kernel/arch/aarch64/syscall/sys_misc.c. */
+#if defined(OS01_SYSCALL_A64_SUBSET) && OS01_HAS_USERSPACE
+    [SYS_getrandom] = { sys_misc_dispatch, "getrandom" },
+    [SYS_sync] = { sys_misc_dispatch, "sync" },
+    [SYS_reboot] = { sys_misc_dispatch, "reboot" },
+    [SYS_uname] = { sys_misc_dispatch, "uname" },
+#endif
+
 /* The fs syscall group is served by the arch-neutral kernel/syscall/sys_fs.c.
  * x86 serves it unconditionally; aarch64 serves it together with the VFS
  * gate (2026-11-18), the rest of the full-set entries stay hidden behind

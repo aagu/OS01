@@ -262,7 +262,9 @@ $(AARCH64_SELFTEST_MARKER): FORCE
 
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
-		$(HOST_MKDISK) $(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
+		$(HOST_MKDISK) $(INITTAB_FILE) \
+		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/sh.elf) \
+		$(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
 ifeq ($(IMAGE_VARIANT),selftest)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
@@ -279,9 +281,16 @@ else
 	@rm -f $@
 	@truncate -s 64M $@
 	@mkfs.fat -F 32 $@
-	@mmd -i $@ ::/EFI ::/EFI/BOOT
+	@mmd -i $@ ::/EFI ::/EFI/BOOT ::/bin ::/etc
 	@mcopy -i $@ $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
 	@mcopy -i $@ $(BUILD_DIR)/artifacts/kernel.elf ::/kernel.elf
+	@# Product userspace (2026-11-19): /bin/init is spawned by the boot-5
+	@# chain (kernel_start_userspace); its inittab respawns /bin/sh — the
+	@# serial shell (user/sh.c reading /dev/tty ASCII lines).  The x86
+	@# rootfs contract installs user programs extension-less (/bin/<name>).
+	@mcopy -i $@ $(USER_ARTIFACT_DIR)/init.elf ::/bin/init
+	@mcopy -i $@ $(USER_ARTIFACT_DIR)/sh.elf ::/bin/sh
+	@mcopy -i $@ $(INITTAB_FILE) ::/etc/inittab
 endif
 
 endif

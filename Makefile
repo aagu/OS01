@@ -16,7 +16,9 @@ unexport DOOM_IWAD DOOM_IWAD_SHA256 DOOM_IWAD_LICENSE DOOM_IWAD_SOURCE
 # project.mk derives IMAGE_VARIANT / USER_VARIANT from OS01_SYSTEST /
 # OS01_NETTEST / INITTAB_FILE, and the whole dependency graph (image dirs,
 # user build/artifact dirs) is keyed on those slugs.
-INITTAB_FILE ?= config/inittab
+# The aarch64 product has no framebuffer terminal: its inittab respawns
+# the serial shell directly (user/sh.c as /bin/sh).
+INITTAB_FILE ?= $(if $(filter aarch64-clang,$(PROFILE)),config/inittab.aarch64,config/inittab)
 ifeq ($(OS01_SYSTEST),1)
 INITTAB_FILE := config/inittab.systest
 endif

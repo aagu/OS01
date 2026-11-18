@@ -27,7 +27,10 @@
 #if defined(__x86_64__)
 #define OS01_HAS_USERSPACE  1
 #elif defined(__aarch64__)
-#define OS01_HAS_USERSPACE  0
+/* 2026-11-19: M4-remaining product userspace — the aarch64 userland
+ * build chain (crt0/linker/libc), the VFS-backed spawn and the product
+ * exec path exist; /bin/init loads from the rootfs at boot-5. */
+#define OS01_HAS_USERSPACE  1
 #else
 #error "Unsupported architecture for OS01_HAS_USERSPACE default"
 #endif

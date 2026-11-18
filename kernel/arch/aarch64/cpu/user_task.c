@@ -617,7 +617,7 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
         vfs_node_put(node);
         return -ENOEXEC;
     }
-    int rc = aarch64_exec_read_elf(node, &owned_bytes, &size);
+    rc = aarch64_exec_read_elf(node, &owned_bytes, &size);
     vfs_node_put(node);
     if (rc)
         return rc;

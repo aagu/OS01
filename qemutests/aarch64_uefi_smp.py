@@ -965,7 +965,13 @@ def qemu_command(args: argparse.Namespace, cpus: int, diagnostic_dtb: str | None
         "-cpu", "cortex-a53", "-smp", str(cpus),
         "-m", str(getattr(args, "ram_mib", 512)), "-drive", f"if=pflash,format=raw,file={args.firmware}",
         "-drive", f"if=none,file={args.image},format=raw,readonly=on,id=disk",
-        "-device", "virtio-blk-device,drive=disk", "-serial", "stdio", "-display", "none",
+        "-device", "virtio-blk-device,drive=disk",
+        # EFI_RNG_PROTOCOL source (edk2 VirtioRngDxe): without it the
+        # firmware hands the kernel no boot entropy, the CSPRNG stays
+        # fail-closed and every user program aborts on its zero canary
+        # (BOOT-1 lesson: QEMU needs virtio-rng).
+        "-device", "virtio-rng-device",
+        "-serial", "stdio", "-display", "none",
         "-no-reboot", "-no-shutdown",
     ]
     if diagnostic_dtb:

@@ -7,7 +7,8 @@
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/ap_work.h>
 #include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_init/start */
-#include <arch/aarch64/user_task.h>  /* aarch64_user_runtime_init */
+#include <arch/aarch64/user_task.h>
+#include <arch/features.h>            /* OS01_HAS_USERSPACE boot-path split */
 #include <arch/aarch64/user_image.h>
 #if AARCH64_EL0_TEST
 #include <selftest/aarch64_user_task.h>
@@ -488,9 +489,19 @@ void arch_aarch64_bsp_handoff(void)
     idle->on_cpu = 1;
     idle->on_rq = 0;
     idle->in_schedule = 0;
+#if !OS01_HAS_USERSPACE
+    /* Legacy invariant: the idle handoff starts with an empty CPU0
+     * runqueue.  The userspace boot-5 path legitimately arrives with
+     * /bin/init already enqueued by spawn_user_task. */
     if (!rbtree_empty(&percpu_data[0].run_queue))
         fatal_context(11, (uintptr_t)__builtin_frame_address(0),
                       (uintptr_t)&init_task_union, (uintptr_t)&init_task_union + STACK_SIZE);
+    /* Legacy handoff (selftest variants): this context owns the whole
+     * boot-5 sequence — publish, tick start, scheduler_ok, AP release.
+     * The userspace product build runs the sequence in
+     * kernel/init/userspace.c (arch_sched_boot_prepare /
+     * arch_sched_boot_idle) and lands here only for the invariant
+     * checks + idle_resume. */
     sched_boot_publish_idle();
     /* Remember the kernel root and disable the FP trap BEFORE the
      * scheduler publishes its readiness: from here on a real user
@@ -518,6 +529,9 @@ void arch_aarch64_bsp_handoff(void)
     aarch64_ap_sched_release();
     arch_local_irq_enable();
     log_info("[sched] idle-ready cpu=0 scheduler_ok=1 irq=on\n");
+#else
+    log_info("[sched] idle-ready cpu=0 userspace-path\n");
+#endif /* !OS01_HAS_USERSPACE */
 #ifdef AARCH64_AP_SCHED_TEST_FATAL_OWNER
     /* fatal-owner variant: both CPUs drive into the illegal-SP path at
      * the cross-CPU barrier and park; the boot never completes. */

@@ -126,8 +126,20 @@ KERNEL_C_SOURCES += fs/boot.c fs/vfs.c fs/devfs.c fs/dcache.c \
                    block/blockdev.c block/bcache.c \
                    sync/wait.c sync/mutex.c sync/rwlock.c \
                    sync/completion.c sync/seqlock.c \
+                   sched/boot_stdio.c \
                    syscall/sys_fs.c \
                    arch/thermal.c
+# Userspace gate (2026-11-19): kernel_start_userspace (boot-5
+# orchestration) links into the aarch64 product kernel now that the
+# userland build chain and the VFS-backed spawn exist.  console_init
+# resolves to <arch/console.h>; the aarch64 backend is
+# arch/aarch64/platform/console.c (PL011), not the x86 tty/console.c.
+# The selftest variants compile with OS01_HAS_USERSPACE=0 and keep the
+# legacy handoff boot path — init/ is not part of their kernel.
+ifneq ($(strip $(KERNEL_SELFTEST)),)
+else
+KERNEL_C_SOURCES += init/userspace.c init/services.c
+endif
 ifeq ($(AARCH64_EL0_TEST),1)
 # The M4 user-task and formal SVC/uaccess acceptance cases and their
 # static fixture images exist only in the EL0 test variant.
@@ -216,7 +228,7 @@ endif
 # that compiles for BOTH architectures.
 # aarch64 collects its own driver/ (virtio-blk-mmio); x86's driver/ dir
 # owns the x86-only MMIO/display device drivers (see mm-arch-boundaries).
-ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver sched
+ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver sched sync syscall
 ifeq ($(ARCH),x86_64)
 ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime sched fs sync syscall driver
 endif
@@ -540,6 +552,13 @@ endif
 # other architectures, hiding every entry it does not serve: only the
 # four shared native entries (exit/getpid/getppid/clock_gettime) remain.
 ALL_CFLAGS += -DOS01_SYSCALL_A64_SUBSET=1
+# Selftest variants keep the legacy boot path: their frozen contracts
+# (aarch64_uefi_smp 15-case, ap-sched, sched-tick, m4-1 28-case) run
+# inside arch_aarch64_bsp_handoff and their disks carry no /bin/init.
+# Only the plain product build runs the boot-5 userspace chain.
+ifneq ($(strip $(KERNEL_SELFTEST)),)
+ALL_CFLAGS += -DOS01_HAS_USERSPACE=0
+endif
 endif
 
 ifneq ($(strip $(AARCH64_M1_TEST)),)

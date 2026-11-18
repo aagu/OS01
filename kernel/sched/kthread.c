@@ -122,14 +122,15 @@ int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
         return -EINVAL;
     if (!__atomic_load_n(&percpu_data[cpu].scheduler_ok,
                          __ATOMIC_ACQUIRE)) {
-        /* The boot-phase exception: an unpinned task may land on CPU0
-         * while the BSP boot window is open (CPU0 is online but has
-         * not published scheduler_ok yet).  A pinned task never gets
-         * the exception, and once the window is closed no CPU0
-         * fallback exists at all.  A real user task is always pinned,
-         * so only a kernel thread can ever take this path. */
-        bool boot_fallback = !pinned && cpu == 0 &&
-                             sched_boot_creation_open();
+        /* The boot-phase exception: while the BSP boot window is open
+         * (CPU0 online, scheduler_ok not yet published — the
+         * kernel_start_userspace creation window), a task may land on
+         * CPU0.  This covers the boot-5 init spawn, which IS a pinned
+         * user task (2026-11-19: the window exists exactly for that
+         * spawn; the x86 spawn path has its own boot-phase admission
+         * in spawn_boot_target_allowed).  Once the window is closed no
+         * CPU0 fallback exists at all. */
+        bool boot_fallback = cpu == 0 && sched_boot_creation_open();
         if (!boot_fallback)
             return -EINVAL;
     }
@@ -240,7 +241,7 @@ int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
      * publishes the task: the target CPU must still be usable. */
     if (!__atomic_load_n(&rq->online, __ATOMIC_ACQUIRE) ||
         (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE) &&
-         !(cpu == 0 && !pinned && sched_boot_creation_open()))) {
+         !(cpu == 0 && sched_boot_creation_open()))) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
         /* The prepare hook acquired its resources before the locked

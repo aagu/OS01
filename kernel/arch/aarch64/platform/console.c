@@ -69,6 +69,13 @@ void arch_console_input_attach(struct tty_struct *tty)
     log_info("aarch64: PL011 console RX armed intid=%u\n", intid);
 }
 
+void console_init(void)
+{
+    /* The aarch64 console has no framebuffer text state to reset: the
+     * PL011 serial line IS the console, and the tty layer arms the RX
+     * IRQ through tty_boot_init -> arch_console_input_attach. */
+}
+
 void arch_console_putchar(char c)
 {
     // tty_write() holds serial_lock across the buffer; use the unlocked

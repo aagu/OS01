@@ -122,9 +122,15 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     if (rc)
         goto fail_image;
 
-    files_t *files = current && current->files ? files_dup(current->files)
+    /* The creator runs on the boot stack, where `current` is not a
+     * task (the aarch64 handoff explicitly avoids deriving current
+     * there); the boot-5 stdio transaction installs the fds on
+     * &init_task_union.task — the same task arch_sched_boot_prepare
+     * publishes as CPU0 idle. */
+    task_t *creator = percpu_data[0].idle;
+    files_t *files = creator && creator->files ? files_dup(creator->files)
                                                : NULL;
-    if (current && current->files && !files) {
+    if (creator && creator->files && !files) {
         rc = -ENOMEM;
         goto fail_image;
     }
