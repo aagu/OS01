@@ -604,12 +604,14 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     if (rc)
         return rc;
 
-    /* Legally parsed but out of scope for anonymous-private v1:
-     * shared, file-backed and fixed mappings all fail here, before the
-     * private-anonymous fd/off validation. */
-    if (map_type != MAP_PRIVATE || !(flags & MAP_ANONYMOUS) ||
-        (flags & MAP_FIXED))
+    /* Legally parsed but out of scope for the v1 anonymous-private
+     * policy: shared and file-backed mappings fail here, before the
+     * private-anonymous fd/off validation.  MAP_FIXED is served for
+     * private-anonymous requests (2026-11-19): it replaces overlapping
+     * mmap-window VMAs transactionally. */
+    if (map_type != MAP_PRIVATE || !(flags & MAP_ANONYMOUS))
         return -EOPNOTSUPP;
+    bool fixed = (flags & MAP_FIXED) != 0;
 
     /* Raw 64-bit fd/off, before any mapping metadata is touched. */
     if (fd != UINT64_MAX || off != 0)
@@ -630,10 +632,20 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
             hint < USER_VM_MMAP_BASE || hint >= AARCH64_USER_LIMIT ||
             alen > AARCH64_USER_LIMIT - hint)
             return -EINVAL;
-        if (range_free(mm, hint, hint + alen))
+        if (fixed) {
+            /* MAP_FIXED takes the hint as-is; overlapping mmap-window
+             * VMAs are replaced below (the window check already
+             * excludes the ELF / stack / heap VMAs, which all live
+             * below USER_VM_MMAP_BASE). */
             cand = hint;
+        } else if (range_free(mm, hint, hint + alen)) {
+            cand = hint;
+        }
         /* A valid but occupied hint falls back to the base first-fit. */
     }
+
+    if (cand == 0 && fixed)
+        return -EINVAL;      /* MAP_FIXED without a usable hint */
 
     if (cand == 0) {
         uint64_t cursor = USER_VM_MMAP_BASE;
@@ -657,13 +669,97 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     vma_t *v = kmalloc(sizeof(*v));
     if (!v)
         return -ENOMEM;
-
     list_init(&v->list);
     v->vm_start     = cand;
     v->vm_end       = cand + alen;
     v->vm_flags     = vma_flags | VMA_ANON;
     v->vm_pgoff     = 0;
     v->vm_file      = NULL;
+
+    if (!fixed) {
+        vm_area_insert_sorted(mm, v);
+        return (int64_t)cand;
+    }
+
+    /* ── MAP_FIXED replace transaction ────────────────────────────
+     * Mirrors user_vm_munmap: preallocate the two split nodes
+     * together with the new VMA node, then commit — after the
+     * preallocation nothing below can fail with -ENOMEM, so the
+     * caller never observes a half-released window. */
+    uint64_t end = cand + alen;
+    vma_t *first = first_overlap(mm, cand, end);
+    vma_t *last  = last_overlap(mm, cand, end);
+    bool need_start = first && first->vm_start < cand;
+    bool need_end   = last && last->vm_end > end;
+    int need = (need_start ? 1 : 0) + (need_end ? 1 : 0);
+
+    vma_t *split[2] = { NULL, NULL };
+    for (int i = 0; i < need; i++) {
+        split[i] = kmalloc(sizeof(vma_t));
+        if (!split[i]) {
+            for (int j = 0; j < i; j++)
+                kfree(split[j]);
+            kfree(v);
+            return -ENOMEM;
+        }
+    }
+
+    /* Policy guard: only anonymous mmap VMAs may be replaced (the
+     * window bounds make this the only overlap shape; the guard is
+     * defense against a future VMA kind entering the window).  Holes
+     * inside the fixed range are legal. */
+    for (uint64_t p = cand; p < end; ) {
+        vma_t *o = vm_area_lookup(mm, p);
+        if (!o)
+            break;                       /* tail hole */
+        if (o->vm_start >= end)
+            break;                       /* hole then beyond-range VMA */
+        if (!policy_vma_is_mmap(o)) {
+            for (int j = 0; j < need; j++)
+                kfree(split[j]);
+            kfree(v);
+            return -EINVAL;
+        }
+        p = o->vm_end;
+    }
+
+    uint64_t *root = aarch64_user_vm_root_va(mm);
+    for (list_t *lp = mm->resident_list.next; lp; lp = lp->next) {
+        user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
+        if (r->va < cand) continue;
+        if (r->va >= end) break;
+        resident_verify(mm, root, r);
+    }
+
+    /* Commit: leaves first (mirrors munmap), then the VMA surgery. */
+    list_t *lp = mm->resident_list.next;
+    while (lp) {
+        list_t *next = lp->next;
+        user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
+        if (r->va >= cand && r->va < end)
+            resident_remove_leaf(mm, r, root);
+        lp = next;
+    }
+
+    int si = 0;
+    first = first_overlap(mm, cand, end);
+    if (first && first->vm_start < cand)
+        split_policy_vma(mm, first, cand, split[si++]);
+    last = last_overlap(mm, cand, end);
+    if (last && last->vm_end > end)
+        split_policy_vma(mm, last, end, split[si++]);
+
+    lp = mm->vma_list.next;
+    while (lp != &mm->vma_list) {
+        list_t *next = lp->next;
+        vma_t *o = container_of(lp, vma_t, list);
+        if (o->vm_end > cand && o->vm_start < end) {
+            vm_area_unlink(o);
+            kfree(o);
+        }
+        lp = next;
+    }
+
     vm_area_insert_sorted(mm, v);
     return (int64_t)cand;
 }

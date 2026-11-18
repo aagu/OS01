@@ -439,7 +439,10 @@ TEST_FUNC(test_mmap_argument_contract)
                                    MAP_SHARED | MAP_ANONYMOUS));
     assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,
                                    MAP_PRIVATE));
-    assert_eq(-EOPNOTSUPP, test_mmap_call(mm, 0, 0x1000, PROT_RW,
+    /* 2026-11-19: MAP_FIXED is served for private-anonymous requests;
+     * without a usable hint it is -EINVAL (POSIX-aligned), not the v1
+     * blanket -EOPNOTSUPP. */
+    assert_eq(-EINVAL, test_mmap_call(mm, 0, 0x1000, PROT_RW,
                                    MAP_ANON_PRIVATE | MAP_FIXED));
 
     /* Raw 64-bit fd/off validation. */
@@ -1785,6 +1788,114 @@ TEST_FUNC(test_clone_fork_stash_rollback_unmaps_stashed_child)
     destroy_mm(parent);
 }
 
+
+/* ── Tests: MAP_FIXED (private-anonymous replace, 2026-11-19) ── */
+
+TEST_FUNC(test_mmap_fixed_replaces_overlap_and_keeps_neighbors)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    /* One 3-page mapping; the fixed request replaces the middle page. */
+    assert_eq((int64_t)BASE,
+              test_mmap_call(mm, 0, 0x3000, PROT_RW, MAP_ANON_PRIVATE));
+    assert_eq(2, vma_count(mm));
+
+    assert_eq((int64_t)(BASE + 0x1000),
+              test_mmap_call(mm, BASE + 0x1000, 0x1000, PROT_READ,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    /* The 3-page VMA split into three: head RW, fixed middle RO, tail RW. */
+    assert_eq(4, vma_count(mm));
+    vma_t *head = vm_area_lookup(mm, BASE);
+    vma_t *mid  = vm_area_lookup(mm, BASE + 0x1000);
+    vma_t *tail = vm_area_lookup(mm, BASE + 0x2000);
+    assert_not_null(head); assert_not_null(mid); assert_not_null(tail);
+    assert_eq(BASE, head->vm_start);
+    assert_eq(BASE + 0x1000, head->vm_end);
+    assert_true((head->vm_flags & VMA_PROT_WRITE) != 0);
+    assert_eq(BASE + 0x1000, mid->vm_start);
+    assert_eq(BASE + 0x2000, mid->vm_end);
+    assert_true((mid->vm_flags & VMA_PROT_WRITE) == 0);
+    assert_eq(BASE + 0x2000, tail->vm_start);
+    assert_eq(BASE + 0x3000, tail->vm_end);
+    assert_true((tail->vm_flags & VMA_PROT_WRITE) != 0);
+
+    /* A fixed request matching a whole existing VMA replaces it
+     * without leaving fragments. */
+    assert_eq((int64_t)(BASE + 0x1000),
+              test_mmap_call(mm, BASE + 0x1000, 0x1000, PROT_RW,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(4, vma_count(mm));
+    mid = vm_area_lookup(mm, BASE + 0x1000);
+    assert_not_null(mid);
+    assert_true((mid->vm_flags & VMA_PROT_WRITE) != 0);
+
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_mmap_fixed_no_hint_is_einval)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq(-EINVAL, test_mmap_call(mm, 0, 0x1000, PROT_RW,
+                                      MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(1, vma_count(mm));            /* heap only */
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_mmap_fixed_rejects_non_mmap_overlap)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    /* The heap VMA is not an mmap VMA: a fixed request covering it
+     * must refuse, before any state changes. */
+    assert_eq(-EINVAL,
+              test_mmap_call(mm, HEAP_BASE, 0x1000, PROT_RW,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    /* MMAP base window boundary: a fixed request below it is refused. */
+    assert_eq(-EINVAL,
+              test_mmap_call(mm, HEAP_BASE + 0x100000, 0x1000, PROT_RW,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(1, vma_count(mm));
+    destroy_mm(mm);
+}
+
+TEST_FUNC(test_mmap_fixed_split_node_failure_changes_nothing)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(mm, 0, 0x3000, PROT_RW, MAP_ANON_PRIVATE));
+
+    /* The middle-page replace needs two split nodes + one new VMA
+     * node; failing any preallocation must leave the old mapping
+     * intact (no half-released window). */
+    user_vm_test_fail_node_after(0);
+    assert_eq(-ENOMEM,
+              test_mmap_call(mm, BASE + 0x1000, 0x1000, PROT_READ,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(2, vma_count(mm));
+    vma_t *whole = vm_area_lookup(mm, BASE);
+    assert_not_null(whole);
+    assert_eq(BASE + 0x3000, whole->vm_end);
+    assert_true((whole->vm_flags & VMA_PROT_WRITE) != 0);
+
+    user_vm_test_fail_node_after(2);
+    assert_eq(-ENOMEM,
+              test_mmap_call(mm, BASE + 0x1000, 0x1000, PROT_READ,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(2, vma_count(mm));
+    whole = vm_area_lookup(mm, BASE);
+    assert_not_null(whole);
+    assert_eq(BASE + 0x3000, whole->vm_end);
+
+    /* Without injection the replace succeeds. */
+    assert_eq((int64_t)(BASE + 0x1000),
+              test_mmap_call(mm, BASE + 0x1000, 0x1000, PROT_READ,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(4, vma_count(mm));
+    destroy_mm(mm);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -1827,6 +1938,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_prepare_copy_second_cow_alloc_failure),
     TEST_ENTRY(test_prepare_copy_success_commits_cow_and_absent),
     TEST_ENTRY(test_fault_entry_cow_write),
+    TEST_ENTRY(test_mmap_fixed_replaces_overlap_and_keeps_neighbors),
+    TEST_ENTRY(test_mmap_fixed_no_hint_is_einval),
+    TEST_ENTRY(test_mmap_fixed_rejects_non_mmap_overlap),
+    TEST_ENTRY(test_mmap_fixed_split_node_failure_changes_nothing),
 TEST_LIST_END
 
 int main(void)
