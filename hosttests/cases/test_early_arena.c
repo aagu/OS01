@@ -57,6 +57,8 @@ extern void host_exit(int status) __asm__("_exit");
 #include <memory/pmm_arch.h>   /* pmm_arch_boot_reservations (Task 4) */
 #include <memory/slab.h>
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/device_window.h>
+#include <core/bootinfo.h>
 #include <arch/mmu.h>
 
 /* pmm.c external references — host stubs. Mirror what
@@ -419,6 +421,32 @@ TEST_FUNC(test_inverted_range)
     assert_eq(-EINVAL, rc);
 }
 
+/* Runtime device window (boot handoff): the D-conflict check follows
+ * the window installed from boot_context, not the compile-time
+ * fallback (roadmap P2 hardcode item, D-side). */
+TEST_FUNC(test_device_window_conflict_follows_runtime_window)
+{
+    struct boot_context ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    boot_context_init(&ctx);
+    ctx.early_mmio.device_base = 0x10000000ULL;
+    ctx.early_mmio.device_blocks = 1;
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    aarch64_device_window_init(&ctx);
+
+    struct MEMORY_RANGE ram[1];
+    build_single(0x10000000ULL, 0x10200000ULL, ram);  /* runtime D conflict */
+    struct aarch64_early_arena out;
+    assert_eq(-EINVAL, aarch64_early_arena_plan(ram, 1, &out));
+
+    /* The compile-time fallback window no longer conflicts (the RAM
+     * merely sits below the arena window → no candidate space). */
+    build_single(0x08000000ULL, 0x0a000000ULL, ram);
+    assert_eq(-ENOSPC, aarch64_early_arena_plan(ram, 1, &out));
+
+    aarch64_device_window_init(NULL);   /* restore the fallback */
+}
+
 /* ── Failure leaves no side effects ────────────────────────── */
 TEST_FUNC(test_failure_zeros_out)
 {
@@ -603,6 +631,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_null_ram),
     TEST_ENTRY(test_empty_range),
     TEST_ENTRY(test_inverted_range),
+    TEST_ENTRY(test_device_window_conflict_follows_runtime_window),
     TEST_ENTRY(test_failure_zeros_out),
     TEST_ENTRY(test_prepare_rejects_invalid_inputs_without_diagnostic_walk),
     TEST_ENTRY(test_prepare_failure_preserves_start_brk),

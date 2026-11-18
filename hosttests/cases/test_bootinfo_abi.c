@@ -38,7 +38,18 @@ _Static_assert(offsetof(struct boot_context, firmware) == 80,
                "firmware offset");
 _Static_assert(offsetof(struct boot_context, boot_device) == 136,
                "boot_device offset");
-_Static_assert(sizeof(struct boot_context) == 176, "boot context ABI");
+_Static_assert(offsetof(struct boot_context, early_mmio) == 176,
+               "early_mmio offset");
+_Static_assert(sizeof(struct BOOT_EARLY_MMIO) == 24, "early mmio ABI");
+_Static_assert(offsetof(struct BOOT_EARLY_MMIO, console_base) == 0,
+               "console_base offset");
+_Static_assert(offsetof(struct BOOT_EARLY_MMIO, device_base) == 8,
+               "device_base offset");
+_Static_assert(offsetof(struct BOOT_EARLY_MMIO, device_blocks) == 16,
+               "device_blocks offset");
+_Static_assert(BOOT_CONTEXT_HAS_EARLY_MMIO == (1u << 7),
+               "early mmio flag");
+_Static_assert(sizeof(struct boot_context) == 200, "boot context ABI");
 
 int main(void)
 {
@@ -70,6 +81,25 @@ int main(void)
 
     ctx.size--;
     if (boot_context_valid(&ctx))
+        return 1;
+    ctx.size = sizeof(ctx);
+
+    /* Early-MMIO handoff (appended v3 fields): zero-filled handoff
+     * must degrade to "flag clear", and the flag-carrying handoff
+     * must keep the fields at their pinned offsets. */
+    if (ctx.flags & BOOT_CONTEXT_HAS_EARLY_MMIO)
+        return 1;
+    if (ctx.early_mmio.console_base != 0 ||
+        ctx.early_mmio.device_base != 0 ||
+        ctx.early_mmio.device_blocks != 0)
+        return 1;
+    ctx.early_mmio.console_base = UINT64_C(0x09000000);
+    ctx.early_mmio.device_base = UINT64_C(0x08000000);
+    ctx.early_mmio.device_blocks = 9;
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    if (!boot_context_valid(&ctx))
+        return 1;
+    if (ctx.early_mmio.device_blocks != 9)
         return 1;
 
     puts("bootinfo ABI: PASS");

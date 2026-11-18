@@ -1106,6 +1106,32 @@
       }
     },
     {
+      "id": "test_aarch64_device_window",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "memory.device_window.handoff"
+      ],
+      "link": "aarch64-device-window",
+      "source": "hosttests/cases/test_aarch64_device_window.c"
+    },
+    {
+      "id": "test_aarch64_fdt_early",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.uefi.fdt_early.default"
+      ],
+      "link": "aarch64-fdt-early",
+      "source": "hosttests/cases/test_aarch64_fdt_early.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_gic_target_probe",
       "layer": "host",

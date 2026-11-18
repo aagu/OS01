@@ -1,10 +1,11 @@
 // kernel/arch/aarch64/driver/virtio_blk.c — virtio-blk over virtio-mmio.
 //
 // The aarch64 BLOCK_DISK transport: QEMU virt exposes virtio,mmio slots at
-// 0x0a000000 + i*0x200 (SPI 48 + i), just above the early Device window
-// [0x08000000, 0x0a000000).  The runtime direct map stops at 0x0a000000
-// (runtime_tree.c D window is half-open), so this driver maps the first
-// 2 MiB of the virtio window into TTBR1 as Device memory — the same
+// 0x0a000000 + i*0x200 (SPI 48 + i), above the early Device window (the
+// loader-derived window ends at 0x09200000 on QEMU virt; the compile-time
+// fallback ended at 0x0a000000).  The runtime direct map covers only the
+// device window plus RAM, so this driver maps the first 2 MiB of the
+// virtio window into TTBR1 as Device memory — the same
 // hand-rolled approach the framebuffer backend uses (printk_fb.c) — and
 // keeps the PA↔VA identity of the direct-map convention so Phy_To_Virt()
 // reaches the registers.
@@ -152,7 +153,7 @@ static inline uint64_t vring_load64(const volatile void *p)
 
 // Map [0x0a000000, 0x0a200000) into TTBR1 as Device memory (one 2 MiB
 // block) at the direct-map VA so Phy_To_Virt reaches it.  The runtime
-// direct map covers the D window only up to 0x0a000000 and nothing else
+// direct map covers only the device window plus RAM and nothing else
 // claims this VA, so an occupied slot here is a real conflict.
 //
 // MUST run before SMP bring-up starts (vmm_gate_check rejects TTBR1

@@ -3,6 +3,7 @@
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/boot_layout.h>
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/device_window.h>
 #include <arch/aarch64/page_table_selftest.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/spinlock.h>
@@ -37,13 +38,15 @@ static struct {
 static bool prune_pa_reserved(uint64_t pa, const struct MEMORY_RANGE *ram,
                               size_t count)
 {
+    struct aarch64_device_window dev;
     size_t i;
 
     if (pa < (uint64_t)AARCH64_BOOT_BLOCK_END &&
         pa + PAGE_2M_SIZE > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
         return true;    /* inside the boot block B */
-    if (pa < (uint64_t)AARCH64_BOOT_DEVICE_END &&
-        pa + PAGE_2M_SIZE > (uint64_t)AARCH64_BOOT_DEVICE_BASE)
+    aarch64_device_window_get(&dev);
+    if (pa < dev.end_pa &&
+        pa + PAGE_2M_SIZE > dev.base_pa)
         return true;    /* inside the device window D */
     for (i = 0; i < count; i++) {
         if (pa < ram[i].phys_end && pa + PAGE_2M_SIZE > ram[i].phys_start)

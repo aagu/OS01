@@ -16,6 +16,25 @@ boot_page_tables_end:
 aarch64_boot_observed_entry_value:
     .skip   8
 
+/* Early-MMIO handoff parked by _start from a flag-bearing boot_context
+ * (console PA, 2 MiB-aligned Device-window base, block count). Zero
+ * values mean "no handoff" — consumers fall back to the compile-time
+ * boot_layout.h QEMU constants. The UEFI loader zeroes the whole boot
+ * image BSS on load, so these read 0 (fallback) even before the
+ * .boot.bss clear runs. */
+.globl aarch64_boot_early_mmio_console
+.hidden aarch64_boot_early_mmio_console
+aarch64_boot_early_mmio_console:
+    .skip   8
+.globl aarch64_boot_early_mmio_devbase
+.hidden aarch64_boot_early_mmio_devbase
+aarch64_boot_early_mmio_devbase:
+    .skip   8
+.globl aarch64_boot_early_mmio_devblocks
+.hidden aarch64_boot_early_mmio_devblocks
+aarch64_boot_early_mmio_devblocks:
+    .skip   8
+
 .section .boot.text.first, "ax"
 .balign 0x1000
 .globl _start
@@ -112,9 +131,76 @@ _start:
     ldr     x1, =aarch64_boot_observed_entry_value
     str     x0, [x1]
 
+    /* Park the early-MMIO handoff (console PA + Device window) from
+     * the boot_context. x19 is the entry handoff, but the vector
+     * printers cannot reach callee-saved registers, so the panic
+     * printer and the page-table builder read the parked slots
+     * instead. Any slot left zero by a missing/flag-less/invalid
+     * handoff makes consumers use the compile-time fallbacks. */
+    cbz     x19, .Learly_mmio_parked
+    ldr     w0, [x19, #BOOT_CTX_MAGIC_OFF]
+    ldr     w1, =BOOT_CTX_MAGIC
+    cmp     w0, w1
+    b.ne    .Learly_mmio_parked
+    ldr     w0, [x19, #BOOT_CTX_FLAGS_OFF]
+    tst     w0, #BOOT_CTX_FLAG_EARLY_MMIO
+    b.eq    .Learly_mmio_parked
+    ldr     x0, [x19, #BOOT_CTX_EARLY_CONSOLE_OFF]
+    ldr     x1, =aarch64_boot_early_mmio_console
+    str     x0, [x1]
+    ldr     x0, [x19, #BOOT_CTX_EARLY_DEVBASE_OFF]
+    ldr     x1, =aarch64_boot_early_mmio_devbase
+    str     x0, [x1]
+    ldr     w0, [x19, #BOOT_CTX_EARLY_DEVBLOCKS_OFF]
+    ldr     x1, =aarch64_boot_early_mmio_devblocks
+    str     w0, [x1]
+.Learly_mmio_parked:
+
+    /* Fail-closed on a flag-bearing handoff whose window cannot be
+     * represented in the early identity map ([0, 2 GiB)) or is
+     * malformed. The console itself is reachable pre-MMU, so the W!
+     * marker is visible even though the window is unusable. */
+    ldr     x0, =aarch64_boot_early_mmio_devbase
+    ldr     x20, [x0]
+    cbz     x20, .Ldev_window_ok            /* no handoff → fallback */
+    tst     x20, #(0x200000 - 1)
+    b.ne    .Ldev_window_bad
+    ldr     x0, =aarch64_boot_early_mmio_devblocks
+    ldr     w21, [x0]
+    cbz     w21, .Ldev_window_bad
+    ldr     x0, =1024
+    cmp     w21, w0                          /* also bounds the loop below */
+    b.hi    .Ldev_window_bad
+    lsl     x22, x21, #21
+    add     x22, x22, x20
+    ldr     x0, =AARCH64_BOOT_MAP_END
+    cmp     x22, x0
+    b.hi    .Ldev_window_bad
+    /* The executable boot block B must stay mapped Normal-X: a Device
+     * descriptor over it would brick the kernel image fetch. */
+    ldr     x0, =AARCH64_BOOT_BLOCK_END
+    cmp     x20, x0
+    b.hs    7f                              /* base >= B_END: clear */
+    ldr     x0, =AARCH64_BOOT_BLOCK_BASE
+    cmp     x22, x0
+    b.hi    .Ldev_window_bad                /* end > B_BASE: overlap */
+7:
+.Ldev_window_ok:
+
     ldr     x0, =boot_page_tables
     ldr     x1, =AARCH64_BOOT_BLOCK_BASE
-    bl      aarch64_build_boot_page_tables
+    /* x2/x3 = Device window (parked handoff, else QEMU constants). */
+    ldr     x2, =aarch64_boot_early_mmio_devbase
+    ldr     x2, [x2]
+    cbnz    x2, 5f
+    ldr     x2, =AARCH64_BOOT_DEVICE_BASE
+    ldr     x3, =AARCH64_BOOT_DEVICE_END
+    b       6f
+5:  ldr     x3, =aarch64_boot_early_mmio_devblocks
+    ldr     w4, [x3]
+    lsl     x3, x4, #21
+    add     x3, x3, x2
+6:  bl      aarch64_build_boot_page_tables
 
     dsb     sy
     bl      aarch64_boot_install_translation
@@ -131,6 +217,18 @@ _start:
 
 99: b       99b
 .size _start, . - _start
+
+/* Device-window fail-closed: the parked handoff carries a window the
+ * early identity map cannot represent (misaligned, empty, oversized,
+ * or beyond [0, 2 GiB)). Print "W!" and spin — continuing would fault
+ * on the first Device access or silently treat RAM as Device. */
+.Ldev_window_bad:
+    mov     x1, #'W'
+    bl      aarch64_boot_print_c
+    mov     x1, #'!'
+    bl      aarch64_boot_print_c
+.Ldev_window_bad_spin:
+    b       .Ldev_window_bad_spin
 
 .section .boot.text, "ax"
 .globl aarch64_boot_install_translation

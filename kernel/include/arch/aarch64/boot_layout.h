@@ -15,6 +15,9 @@
  * All intervals are half-open [start, end). Defaults describe the
  * QEMU virt layout: B = [0x40000000, 0x40200000), M0 covers [0,
  * 0x80000000), the boot device window D = [0x08000000, 0x0a000000).
+ * D is the COMPILE-TIME FALLBACK: the UEFI loader derives the real
+ * window from the firmware FDT and hands it to the kernel via the
+ * boot_context early_mmio fields (see device_window.h).
  * Host tests may override any constant via -D; the #ifndef guards keep
  * that override path effective.
  */

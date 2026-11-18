@@ -6,7 +6,9 @@
  * The runtime tree covers exactly three sets per spec §5:
  *   R = the published PMM RAM map (sorted, 2 MiB aligned, ≤16 entries)
  *   B = [0x40000000, 0x40200000) — kernel + handoff normal block
- *   D = [0x08000000, 0x0a000000) — Device-nGnRnE window
+ *   D = runtime early device window (boot_context handoff; the
+ *       compile-time fallback is [0x08000000, 0x0a000000)) —
+ *       Device-nGnRnE blocks
  *
  * Each 2 MiB block is installed as an L2 block descriptor (no L3 leaves,
  * no Contiguous bit). Intermediate tables are minimal: V | TYPE_TABLE |

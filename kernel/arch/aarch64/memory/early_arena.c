@@ -57,6 +57,7 @@
 #include <memory/slab.h>    /* slab_layout_compute (single source of
                              * truth for slab_meta_bytes). */
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/device_window.h>
 #include <arch/cpu.h>
 #include <arch/mmu.h>     /* ARCH_PAGE_OFFSET */
 
@@ -70,13 +71,25 @@ extern struct Physical_Memory_Manager PMMngr;
 
 /* ── Spec constants (shared boot block layout; the B window and the
  * arena lower bound move with the configured AARCH64_BOOT_BLOCK_BASE,
- * the D window is the fixed boot device window) ─────────────── */
+ * the D window is the runtime early device window, refreshed from the
+ * boot handoff at each planner entry) ─────────────── */
 #define AARCH64_B_BASE     (AARCH64_BOOT_BLOCK_BASE)
 #define AARCH64_B_END      (AARCH64_BOOT_BLOCK_END)
-#define AARCH64_D_BASE     (AARCH64_BOOT_DEVICE_BASE)
-#define AARCH64_D_END      (AARCH64_BOOT_DEVICE_END)
 #define PAGE_2M            UINT64_C(0x200000)
 #define PAGE_4K            UINT64_C(0x1000)
+
+/* D window: runtime value (device_window.c). Static default = the
+ * compile-time QEMU window so host tests that never install a handoff
+ * keep the documented behavior. */
+static struct aarch64_device_window d_window = {
+    AARCH64_BOOT_DEVICE_BASE,
+    AARCH64_BOOT_DEVICE_END,
+};
+
+static void refresh_d_window(void)
+{
+    aarch64_device_window_get(&d_window);
+}
 
 /* ── Frozen arena state ─────────────────────────────────────── */
 static struct aarch64_early_arena published_arena;
@@ -141,10 +154,11 @@ static int validate_ranges(const struct MEMORY_RANGE *ram, size_t count)
          * refuses defensively. */
         if (s < AARCH64_B_END && e > AARCH64_B_BASE) return -EINVAL;
 
-        /* R/D conflict: any range touching the device window
-         * D = [0x08000000, 0x0a000000) is illegal — that region
-         * is reserved for Device-nGnRnE mappings, not RAM. */
-        if (s < AARCH64_D_END && e > AARCH64_D_BASE) return -EINVAL;
+        /* R/D conflict: any range touching the runtime device
+         * window (d_window, from the boot handoff) is illegal —
+         * that region is reserved for Device-nGnRnE mappings, not
+         * RAM. */
+        if (s < d_window.end_pa && e > d_window.base_pa) return -EINVAL;
 
         if (have_prev && s <= prev_end) return -EINVAL;
         prev_end = e;
@@ -183,7 +197,7 @@ static int count_buckets(const struct MEMORY_RANGE *ram, size_t count,
         if (b1g < 1024u) pmd_used[b1g >> 6] |= 1ULL << (b1g & 63u);
     }
     /* D is always present too. */
-    for (p = AARCH64_D_BASE; p < AARCH64_D_END; p += PAGE_2M) {
+    for (p = d_window.base_pa; p < d_window.end_pa; p += PAGE_2M) {
         b512 = p >> 39;
         b1g  = p >> 30;
         if (b512 < 2u) pud_used[b512 >> 6] |= 1ULL << (b512 & 63u);
@@ -315,6 +329,7 @@ int aarch64_early_arena_plan(const struct MEMORY_RANGE *ram, size_t count,
     if (out != NULL) zero_arena(out);
     if (ram == NULL || out == NULL) return -EINVAL;
     if (count == 0u || count > MEMORY_RANGE_MAX) return -EINVAL;
+    refresh_d_window();
 
     rc = validate_ranges(ram, count);
     if (rc != 0) return rc;
@@ -542,6 +557,7 @@ static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count
     int rc;
 
     if (ram == NULL || count == 0u) return 0u;
+    refresh_d_window();
     rc = count_buckets(ram, count, &puds, &pmds);
     if (rc != 0) return 0u;
     table_pages = 1u + puds + pmds;

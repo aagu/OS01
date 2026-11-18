@@ -568,6 +568,20 @@ LINK_GROUP_aarch64-boot-elf := \
     $(TEST_BLD)/aarch64_boot_elf_default.o \
     $(TEST_BLD)/aarch64_boot_elf_alt.o
 
+# AArch64 loader early-MMIO FDT walker (roadmap P2 hardcode item:
+# head.S Device block slots come from the platform via boot_context).
+$(TEST_BLD)/aarch64_fdt_early_production.o: \
+		$(TESTS_DIR)/boot/uefi/arch/aarch64/fdt_early.c \
+		$(TESTS_DIR)/boot/uefi/arch/aarch64/loader.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/handoff_layout.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+LINK_CFLAGS_aarch64-fdt-early = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_aarch64-fdt-early := \
+    $(TEST_BLD)/aarch64_fdt_early_production.o
+
 .PHONY: test-aarch64-boot-elf
 test-aarch64-boot-elf: $(TEST_BLD)/test_aarch64_boot_elf.elf
 	$<

@@ -21,6 +21,7 @@
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/device_window.h>
 #include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/reg.h>   /* midr_el1 / midr_arch_version */
 #include <arch/aarch64/boot/shootdown_probe.h>    /* aarch64_shootdown_probe (M3.5 Task 25) */
@@ -80,7 +81,8 @@ void gic_ipi_test(uint32_t cpu_count);
  * Special low-map leaves use field-wise checks for precise mismatch
  * reasons; PMD_low1[1..511] use exact descriptor equality so no
  * unexpected or reserved bit can pass unnoticed.
- * Expected full descriptors at the default boot base:
+ * Expected full descriptors at the default boot base (device slots
+ * follow the RUNTIME device window from the boot handoff):
  *   PMD_low0[0]    = 0x60000000000705  (PA=0,          Normal 0x705, PXN|UXN)
  *   PMD_low0[0x40] = 0x60000008000401  (PA=0x08000000, Device 0x401, PXN|UXN)
  *   PMD_low1[0]    = 0x40000040000705  (PA=0x40000000, Normal 0x705, UXN only)
@@ -176,7 +178,8 @@ static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
 
 /* Walk one installed L2 table in place: every one of the 512 slots must
  * match the layout contract exactly, classified by what the slot covers:
- *   - the D device window (PMD_low0 slots 0x40..0x4F): Device, PXN|UXN;
+ *   - the runtime D device window (the slots its PA range covers in
+ *     this table): Device, PXN|UXN;
  *   - the configured boot block B (the one table/slot picked by
  *     base>>30 / (base>>21)&511): Normal, UXN set, PXN clear;
  *   - everything else: plain Normal PXN|UXN.
@@ -186,11 +189,29 @@ static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
 static const char *boot_map_walk_pmd_table(const uint64_t *pmd,
                                            const char *name,
                                            uint64_t pa_base,
-                                           bool device_window,
+                                           const struct aarch64_device_window *dev,
                                            unsigned b_table,
                                            unsigned b_slot,
                                            unsigned table_index)
 {
+    /* Device-slot range covered by THIS table's 1 GiB span, from the
+     * runtime device window (empty when the window sits elsewhere). */
+    unsigned dev_from, dev_to;
+    {
+        uint64_t t_pa = pa_base;
+        uint64_t t_end = pa_base + UINT64_C(0x40000000);
+        uint64_t dev_from_pa = dev->base_pa > t_pa ? dev->base_pa : t_pa;
+        uint64_t dev_to_pa = (dev->end_pa < t_end ? dev->end_pa : t_end) - 1;
+
+        if (dev->base_pa < t_end && dev->end_pa > t_pa) {
+            dev_from = (unsigned)((dev_from_pa - t_pa) >> 21);
+            dev_to = (unsigned)((dev_to_pa - t_pa) >> 21);
+        } else {
+            dev_from = 1;
+            dev_to = 0;   /* empty range */
+        }
+    }
+
     for (unsigned i = 0; i < 512; i++) {
         char what[32];
         uint64_t pa = pa_base + (uint64_t)i * UINT64_C(0x200000);
@@ -200,7 +221,7 @@ static const char *boot_map_walk_pmd_table(const uint64_t *pmd,
         boot_map_fmt_u64(what + strlen(what), i);
         strcat(what, "]");
 
-        if (device_window && i >= 0x40 && i < 0x50)
+        if (i >= dev_from && i <= dev_to)
             expected_desc = pa | UINT64_C(0x60000000000401);
         else if (table_index == b_table && i == b_slot)
             expected_desc = pa | UINT64_C(0x40000000000705);
@@ -282,16 +303,18 @@ static void aarch64_boot_map_selftest(void)
         const uint64_t b = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
         const unsigned b_table = (unsigned)(b >> 30);
         const unsigned b_slot = (unsigned)((b >> 21) & 511);
+        struct aarch64_device_window dev;
 
+        aarch64_device_window_get(&dev);
         r = boot_map_walk_pmd_table(pmd_low0, "PMD_low0[", 0,
-                                    true, b_table, b_slot, 0);
+                                    &dev, b_table, b_slot, 0);
         if (r != NULL) {
             fail_reason = r;
             goto fail;
         }
         r = boot_map_walk_pmd_table(pmd_low1, "PMD_low1[",
                                     UINT64_C(0x40000000),
-                                    false, b_table, b_slot, 1);
+                                    &dev, b_table, b_slot, 1);
         if (r != NULL) {
             fail_reason = r;
             goto fail;
@@ -420,6 +443,19 @@ void arch_early_init(const struct boot_context *bootctx)
      * aarch64 logger prints %lx with its own 0x prefix. */
     log_info("[cpu] MIDR_EL1 = %lx (arch=%lx)\n",
              (unsigned long)midr_el1(), (unsigned long)midr_arch_version());
+
+    /* Install the runtime early device window from the handoff
+     * (loader-derived from the firmware FDT; falls back to the
+     * compile-time QEMU window when the handoff carries none). Must
+     * run before the arena preflight and the M0 boot-map selftest,
+     * both of which consume the window. */
+    aarch64_device_window_init(bootctx);
+    {
+        struct aarch64_device_window dev;
+        aarch64_device_window_get(&dev);
+        log_info("[boot] early device window base=%lx end=%lx\n",
+                 (unsigned long)dev.base_pa, (unsigned long)dev.end_pa);
+    }
 
     /* Turn the raw UEFI memory map into the published 2 MiB-aligned
      * aarch64_ram_map before any further hardware bring-up. The

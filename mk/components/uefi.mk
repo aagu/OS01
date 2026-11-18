@@ -78,7 +78,8 @@ UEFI_ARCH_FAMILY  := aarch64
 UEFI_TARGET_EFI   := BOOTAA64.EFI
 UEFI_DIGEST_CLANG := clang
 UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/aarch64/boot.c \
-                     boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/handoff.S
+                     boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/fdt_early.c \
+                     boot/uefi/arch/aarch64/handoff.S
 endif
 
 UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)

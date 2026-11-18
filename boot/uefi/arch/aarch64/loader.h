@@ -88,6 +88,29 @@ _Static_assert(sizeof(struct aarch64_elf64_phdr) == 56,
 
 int aarch64_elf_validate(const void *image, uint64_t image_size,
                          uint64_t *entry_out);
+
+/* Early-MMIO handoff values derived from the firmware FDT (roadmap P2
+ * hardcode item: the boot Device window must come from the platform,
+ * not from compile-time QEMU constants). device_base/device_blocks
+ * describe the contiguous 2 MiB-block window covering every matched
+ * device register range; console_base is the early UART PA (0 when no
+ * PL011 was found — kernel falls back). */
+struct aarch64_early_mmio_handoff {
+    uint64_t console_base;
+    uint64_t device_base;
+    uint32_t device_blocks;
+    uint32_t reserved;
+};
+
+/* Walks a device-tree blob and derives the early-MMIO handoff. Returns
+ * 1 and fills *out when at least one known early device (PL011 UART or
+ * a GICv2 interrupt controller) was found and the derived window is
+ * sane (1..1024 blocks). Returns 0 on any malformed blob, unmatched
+ * tree or unusable window — the caller then leaves the boot_context
+ * fields unset so the kernel falls back to its compile-time defaults. */
+int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
+                           struct aarch64_early_mmio_handoff *out);
+
 static inline int aarch64_handoff_el_supported(uint64_t current_el)
 {
     uint64_t el = (current_el >> 2) & UINT64_C(3);

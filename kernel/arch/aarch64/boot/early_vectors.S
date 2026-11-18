@@ -30,15 +30,30 @@ boot_vectors:
 .Lirq_spin:
     b       .Lirq_spin
 
-/* Helpers — all clobber x0,x1,x2,x3. PL011 @ 0x09000000. */
+/* Helpers — all clobber x0,x1,x2,x3. Console PA comes from the parked
+ * early-MMIO handoff (loader-derived from the firmware FDT), falling
+ * back to the QEMU virt PL011 when no handoff was parked. Both pre-MMU
+ * (PA access) and post-MMU (identity Device window) use the same
+ * address; a zero slot reads as "no handoff" even before the .boot.bss
+ * clear because the loader zeroes the image BSS on load. */
 .Lprint_c:
-    /* spin until TXFF=0, then write char in x1 */
+    ldr     x2, =aarch64_boot_early_mmio_console
+    ldr     x2, [x2]
+    cbnz    x2, 9f
     mov     x2, #0x09000000
+9:  /* spin until TXFF=0, then write char in x1 */
 1:  ldr     w3, [x2, #0x18]
     tst     w3, #(1 << 5)
     b.ne    1b
     str     w1, [x2]
     ret
+
+/* Global entry for callers outside this TU (the head.S fail-closed
+ * checks print the W! marker through it). */
+.globl aarch64_boot_print_c
+.hidden aarch64_boot_print_c
+aarch64_boot_print_c:
+    b       .Lprint_c
 
 .Lprint_x64:
     /* print 16 hex digits of x0, MSB first.  Uses x9 as counter,

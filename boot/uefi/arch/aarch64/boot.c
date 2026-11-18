@@ -457,12 +457,26 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx)
 
     firmware_fdt = find_fdt(&fdt_size);
     if (firmware_fdt) {
+        struct aarch64_early_mmio_handoff early_mmio;
+
         if ((uint64_t)fdt_size > AARCH64_TRAMPOLINE_BASE - handoff_cursor)
             return EFI_BUFFER_TOO_SMALL;
         memcpy((void *)(uintptr_t)handoff_cursor, firmware_fdt, (size_t)fdt_size);
         ctx->firmware.dtb = handoff_cursor;
         ctx->flags |= BOOT_CONTEXT_HAS_DTB;
         handoff_cursor = align_up_8(handoff_cursor + (uint64_t)fdt_size);
+
+        /* Derive the early console PA + Device window from the same
+         * firmware FDT (fail-quiet: an unusable derivation leaves the
+         * boot_context fields unset so the kernel falls back to its
+         * compile-time QEMU defaults). */
+        if (aarch64_fdt_early_mmio(firmware_fdt, fdt_size, &early_mmio)) {
+            ctx->early_mmio.console_base = early_mmio.console_base;
+            ctx->early_mmio.device_base = early_mmio.device_base;
+            ctx->early_mmio.device_blocks = early_mmio.device_blocks;
+            ctx->early_mmio.reserved = 0;
+            ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+        }
     }
     /* Best-effort: if EFI_RNG_PROTOCOL is present, fetch 32 bytes
      * of boot entropy for the kernel CSPRNG. Without this, aarch64

@@ -8496,7 +8496,7 @@
    "primary": {
     "layer": "host",
     "source": "hosttests/cases/test_aarch64_boot_elf.c",
-    "selector": "test-aarch64-boot-elf",
+    "selector": "test_aarch64_boot_elf",
     "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
    },
    "supporting": [],
@@ -8523,7 +8523,7 @@
    "primary": {
     "layer": "host",
     "source": "hosttests/cases/test_aarch64_boot_layout.c",
-    "selector": "test-aarch64-boot-layout",
+    "selector": "test_aarch64_boot_layout",
     "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
    },
    "supporting": [],
@@ -8559,6 +8559,54 @@
    "overlap_decision": {
     "action": "unique",
     "reason": "Sole QEMU E2E acceptance of the configured UEFI boot block pairing, the A→B→A build isolation and the mixed-loader rejection"
+   }
+  },
+  {
+   "id": "memory.device_window.handoff",
+   "owner": "host",
+   "component": "memory",
+   "behavior": "device_window",
+   "trigger": "host runner invokes test_aarch64_device_window.elf",
+   "assertions": [
+    "test_aarch64_device_window passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_aarch64_device_window"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_device_window.c",
+    "selector": "test_aarch64_device_window",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying memory module device_window behavior"
+   }
+  },
+  {
+   "id": "boot.uefi.fdt_early.default",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "fdt_early",
+   "trigger": "host runner invokes test_aarch64_fdt_early.elf",
+   "assertions": [
+    "test_aarch64_fdt_early passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_aarch64_fdt_early"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_fdt_early.c",
+    "selector": "test_aarch64_fdt_early",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying boot module fdt_early behavior"
    }
   }
  ]

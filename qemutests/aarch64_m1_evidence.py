@@ -21,7 +21,11 @@ _PRUNE_SKIP = re.compile(r"^M1 PRUNE SKIP reason=no-candidate$")
 # Default-layout guest constants the m1-ram matrix boots with (the
 # relocated QEMU evidence is the lma-layout runner's business).
 _M0_END = WINDOW_END
-_D_BASE, _D_END = 0x08000000, 0x0a000000
+# Early device window on QEMU virt: the loader derives it from the
+# firmware FDT as the 2 MiB-block cover of {GICD 0x08000000,
+# GICC 0x08010000, PL011 0x09000000} = [0x08000000, 0x09200000)
+# (kernel log line: "[boot] early device window base=... end=...").
+_D_BASE, _D_END = 0x08000000, 0x09200000
 _B_BASE, _B_END = 0x40000000, 0x40200000
 
 

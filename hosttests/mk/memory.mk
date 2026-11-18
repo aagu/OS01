@@ -277,6 +277,17 @@ $(TEST_BLD)/early_arena_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/ea
 		$(TESTS_DIR)/kernel/include/memory/memory_map.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -c $< -o $@
+$(TEST_BLD)/device_window_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/device_window.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/device_window.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_aarch64-device-window = $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC)
+LINK_GROUP_aarch64-device-window := \
+    $(TEST_BLD)/device_window_production.o
+
 
 $(TEST_BLD)/test_early_arena.o: $(TEST_CASES)/test_early_arena.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
@@ -287,6 +298,7 @@ $(TEST_BLD)/test_early_arena.o: $(TEST_CASES)/test_early_arena.c \
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_early_arena.elf: $(TEST_BLD)/test_early_arena.o \
+		$(TEST_BLD)/device_window_production.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_arm_production.o \
@@ -304,7 +316,7 @@ $(TEST_BLD)/test_early_arena_exhaust.o: $(TEST_CASES)/test_early_arena_exhaust.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/test_early_arena_exhaust.elf: $(TEST_BLD)/test_early_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/pmm_boot_production.o
+$(TEST_BLD)/test_early_arena_exhaust.elf: $(TEST_BLD)/test_early_arena_exhaust.o $(TEST_BLD)/early_arena_exhaust_production.o $(TEST_BLD)/device_window_production.o $(TEST_BLD)/pmm_boot_production.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-early-arena
@@ -330,6 +342,7 @@ $(TEST_BLD)/test_arena_layout_chain.o: $(TEST_CASES)/test_arena_layout_chain.c \
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_arena_layout_chain.elf: $(TEST_BLD)/test_arena_layout_chain.o \
+		$(TEST_BLD)/device_window_production.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_arm_production.o \
@@ -347,6 +360,7 @@ $(TEST_BLD)/test_arena_2gib_boundary.o: $(TEST_CASES)/test_arena_2gib_boundary.c
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_arena_2gib_boundary.elf: $(TEST_BLD)/test_arena_2gib_boundary.o \
+		$(TEST_BLD)/device_window_production.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_arm_production.o \
@@ -364,6 +378,7 @@ $(TEST_BLD)/test_arena_candidate_slab_bytes.o: $(TEST_CASES)/test_arena_candidat
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_arena_candidate_slab_bytes.elf: $(TEST_BLD)/test_arena_candidate_slab_bytes.o \
+		$(TEST_BLD)/device_window_production.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_arm_production.o \
@@ -382,6 +397,7 @@ $(TEST_BLD)/test_arena_table_base_shift.o: $(TEST_CASES)/test_arena_table_base_s
 	$(HOST_CC) $(EARLY_ARENA_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_arena_table_base_shift.elf: $(TEST_BLD)/test_arena_table_base_shift.o \
+		$(TEST_BLD)/device_window_production.o \
 		$(TEST_BLD)/early_arena_production.o \
 		$(TEST_BLD)/pmm_production.o \
 		$(TEST_BLD)/pmm_arch_arm_production.o \
@@ -411,7 +427,7 @@ $(TEST_BLD)/test_page_table_tree.o: $(TEST_CASES)/test_page_table_tree.c \
 	$(HOST_CC) $(RUNTIME_TREE_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
 $(TEST_BLD)/test_page_table_tree.elf: $(TEST_BLD)/test_page_table_tree.o \
-		$(TEST_BLD)/runtime_tree_production.o
+		$(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/device_window_production.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-page-table-tree
@@ -474,7 +490,7 @@ $(TEST_BLD)/test_page_table_install.o: $(TEST_CASES)/test_page_table_install.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PT_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
-$(TEST_BLD)/test_page_table_install.elf: $(TEST_BLD)/test_page_table_install.o $(TEST_BLD)/page_table_install_production.o $(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/vmm_gate_production.o $(TEST_BLD)/vmm_gate_test_stubs.o
+$(TEST_BLD)/test_page_table_install.elf: $(TEST_BLD)/test_page_table_install.o $(TEST_BLD)/page_table_install_production.o $(TEST_BLD)/runtime_tree_production.o $(TEST_BLD)/device_window_production.o $(TEST_BLD)/vmm_gate_production.o $(TEST_BLD)/vmm_gate_test_stubs.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test-page-table-install
@@ -490,6 +506,7 @@ $(TEST_BLD)/test_aarch64_pt_root_publish.o: $(TEST_CASES)/test_aarch64_pt_root_p
 
 $(TEST_BLD)/test_aarch64_pt_root_publish.elf: $(TEST_BLD)/test_aarch64_pt_root_publish.o \
 		$(TEST_BLD)/page_table_install_production.o \
+		$(TEST_BLD)/device_window_production.o \
 		$(TEST_BLD)/runtime_tree_production.o \
 		$(TEST_BLD)/vmm_gate_production.o \
 		$(TEST_BLD)/vmm_gate_test_stubs.o
@@ -520,7 +537,7 @@ $(TEST_BLD)/test_page_table_publish.o: $(TEST_CASES)/test_page_table_publish.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(PT_A64_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
-$(TEST_BLD)/test_page_table_publish.elf: $(TEST_BLD)/test_page_table_publish.o $(TEST_BLD)/page_table_selftest_production.o
+$(TEST_BLD)/test_page_table_publish.elf: $(TEST_BLD)/test_page_table_publish.o $(TEST_BLD)/page_table_selftest_production.o $(TEST_BLD)/device_window_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 .PHONY: test-page-table-publish
@@ -1068,6 +1085,7 @@ LINK_GROUP_aarch64-boot-layout := \
     $(TEST_BLD)/early_mmu_production.o \
     $(TEST_BLD)/boot_layout_arena_production.o \
     $(TEST_BLD)/boot_layout_tree_production.o \
+    $(TEST_BLD)/device_window_production.o \
     $(TEST_BLD)/boot_layout_ram_core_production.o \
     $(TEST_BLD)/pmm_production.o \
     $(TEST_BLD)/pmm_arch_arm_production.o \

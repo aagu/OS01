@@ -40,6 +40,7 @@
 
 #include <arch/aarch64/runtime_tree.h>
 #include <arch/aarch64/early_arena.h>
+#include <arch/aarch64/device_window.h>
 #include <arch/aarch64/page_table.h>
 #include <memory/memory_map.h>
 
@@ -89,11 +90,25 @@ _Static_assert(RT_DESC_UXN == (UINT64_C(1)<<54), "UXN bit");
 /* Spec constant sets (B kernel+handoff; D Device window), derived from
  * the shared boot block layout so input validation, tree building and
  * the expected-set iterator all consume the configured B/D, with no
- * assumption about the PA ordering of B, D and R. */
+ * assumption about the PA ordering of B, D and R.
+ *
+ * D is the RUNTIME early device window (device_window.c): refreshed
+ * from the boot handoff at each build/validate entry; the static
+ * default is the compile-time QEMU window so host tests that never
+ * install a handoff keep the documented behavior. */
 #define RT_B_BASE  (AARCH64_BOOT_BLOCK_BASE)
 #define RT_B_END   (AARCH64_BOOT_BLOCK_END)
-#define RT_D_BASE  (AARCH64_BOOT_DEVICE_BASE)
-#define RT_D_END   (AARCH64_BOOT_DEVICE_END)
+static struct aarch64_device_window rt_d_window = {
+    AARCH64_BOOT_DEVICE_BASE,
+    AARCH64_BOOT_DEVICE_END,
+};
+#define RT_D_BASE  (rt_d_window.base_pa)
+#define RT_D_END   (rt_d_window.end_pa)
+
+static void rt_refresh_d_window(void)
+{
+    aarch64_device_window_get(&rt_d_window);
+}
 
 /* ── Input validation ───────────────────────────────────────── */
 
@@ -430,6 +445,7 @@ int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
     if (ops->alloc == NULL || ops->resolve == NULL) return -EINVAL;
     if (count > MEMORY_RANGE_MAX) return -EINVAL;
     if (ram == NULL && count > 0u) return -EINVAL;
+    rt_refresh_d_window();
     if (arena->table_base_pa == 0u) return -EINVAL;
     if ((arena->table_base_pa & (RT_PAGE_4K - 1u)) != 0u) return -EINVAL;
     if (arena->table_pages == 0u) return -EINVAL;
@@ -726,7 +742,7 @@ static int rt_iter_take(rt_tree_iter_t *it, uint64_t *out_pa,
  * Three streams merged by lowest next PA — no assumption about the
  * PA ordering of D, B and R (a relocated B may sit below, between or
  * above parts of R):
- *   - D: 16 entries at RT_D_BASE + i*0x200000 (i = 0..15).
+ *   - D: (RT_D_END - RT_D_BASE) / 0x200000 entries (runtime window).
  *   - B: 1 entry at RT_B_BASE.
  *   - R: per ram range, PA-ascending.
  */
@@ -755,7 +771,7 @@ static void rt_exp_iter_init(rt_exp_iter_t *it,
     }
     it->ram = ram;
     it->count = count;
-    /* D: 16 entries (size is constant for the spec). */
+    /* D: one entry per 2 MiB block of the runtime window. */
     it->d_done = 0;
     /* B: 1 entry. */
     it->b_done = 0;
@@ -857,6 +873,7 @@ int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
     if (ops == NULL || tree == NULL || vbuf == NULL) return -EINVAL;
     if (ops->resolve == NULL) return -EINVAL;
     if (tree->root_pa == 0u) return -EIO;
+    rt_refresh_d_window();
     if ((tree->root_pa & (RT_PAGE_4K - 1u)) != 0u) return -EIO;
     if (tree->table_base_pa > tree->table_used_end_pa) return -EIO;
     if ((tree->table_base_pa & (RT_PAGE_4K - 1u)) != 0u) return -EIO;

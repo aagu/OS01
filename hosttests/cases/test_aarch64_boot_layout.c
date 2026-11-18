@@ -309,12 +309,15 @@ static void test_bootstrap_table_descriptors(void)
 {
     static _Alignas(4096) uint64_t tables[6][512];
     static const uint64_t boot_bases[] = {0x40000000, 0x42000000, 0};
+    /* Device window as explicit arguments (compile-time QEMU fallback
+     * shape; head.S resolves the parked-handoff values at boot). */
+    const uint64_t dev_base = 0x08000000, dev_end = 0x0a000000;
 
     for (size_t layout = 0; layout < sizeof(boot_bases) / sizeof(boot_bases[0]);
          ++layout) {
         uint64_t boot_base = boot_bases[layout];
         memset(tables, 0, sizeof(tables));
-        aarch64_build_boot_page_tables(tables, boot_base);
+        aarch64_build_boot_page_tables(tables, boot_base, dev_base, dev_end);
 
         assert_eq((uintptr_t)tables[1] | DESC_VALID | DESC_TABLE, tables[0][0]);
         assert_eq((uintptr_t)tables[2] | DESC_VALID | DESC_TABLE, tables[1][0]);
@@ -326,7 +329,7 @@ static void test_bootstrap_table_descriptors(void)
         for (size_t table = 2; table < 4; ++table) {
             for (size_t slot = 0; slot < 512; ++slot) {
                 uint64_t pa = ((table - 2) * 512 + slot) * UINT64_C(0x200000);
-                uint64_t attrs = pa >= 0x08000000 && pa < 0x0a000000
+                uint64_t attrs = pa >= dev_base && pa < dev_end
                     ? DESC_DEVICE_BLOCK : DESC_NORMAL_BLOCK;
                 uint64_t xn = DESC_UXN | (pa == boot_base ? 0 : DESC_PXN);
                 assert_eq(pa | attrs | xn, tables[table][slot]);
@@ -339,8 +342,38 @@ static void test_bootstrap_table_descriptors(void)
     }
 }
 
+/* The Device window travels as an argument: a loader-derived window
+ * (the QEMU-virt DTB shape = 9 blocks) yields Device exactly on its
+ * blocks while everything else stays Normal, and the boot block's
+ * executable slot is unaffected. */
+static void test_bootstrap_table_device_window_argument(void)
+{
+    static _Alignas(4096) uint64_t tables[6][512];
+    const uint64_t boot_base = 0x40000000;
+    const uint64_t dev_base = 0x08000000, dev_end = 0x09200000;
+
+    memset(tables, 0, sizeof(tables));
+    aarch64_build_boot_page_tables(tables, boot_base, dev_base, dev_end);
+
+    for (size_t table = 2; table < 4; ++table) {
+        for (size_t slot = 0; slot < 512; ++slot) {
+            uint64_t pa = ((table - 2) * 512 + slot) * UINT64_C(0x200000);
+            uint64_t attrs = pa >= dev_base && pa < dev_end
+                ? DESC_DEVICE_BLOCK : DESC_NORMAL_BLOCK;
+            uint64_t xn = DESC_UXN | (pa == boot_base ? 0 : DESC_PXN);
+            assert_eq(pa | attrs | xn, tables[table][slot]);
+        }
+    }
+    /* Slot 0x48 (PL011) is Device; slot 0x49 (past the window) is not. */
+    assert_eq(UINT64_C(0x09000000) | DESC_DEVICE_BLOCK | DESC_UXN | DESC_PXN,
+              tables[2][0x48]);
+    assert_eq(UINT64_C(0x09200000) | DESC_NORMAL_BLOCK | DESC_UXN | DESC_PXN,
+              tables[2][0x49]);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_bootstrap_table_descriptors),
+    TEST_ENTRY(test_bootstrap_table_device_window_argument),
     TEST_ENTRY(test_ram_normalize_boot_excludes_b),
     TEST_ENTRY(test_arena_plan_starts_after_b),
     TEST_ENTRY(test_tree_build_validate_maps_b_exec),

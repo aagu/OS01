@@ -30,4 +30,17 @@
 #define PERCPU_DATA_SIZE  144
 #endif
 
+/* boot_context field offsets the low boot path reads from the handoff
+ * (struct boot_context in core/bootinfo.h is not assembly-safe).
+ * Pinned by _Static_asserts in bootinfo.h and re-pinned by
+ * hosttests/cases/test_bootinfo_abi.c. */
+#define BOOT_CTX_MAGIC_OFF             0
+#define BOOT_CTX_FLAGS_OFF             12
+#define BOOT_CTX_EARLY_CONSOLE_OFF     176
+#define BOOT_CTX_EARLY_DEVBASE_OFF     184
+#define BOOT_CTX_EARLY_DEVBLOCKS_OFF   192
+/* Assembly-safe BOOT_CONTEXT_HAS_EARLY_MMIO (enum in bootinfo.h). */
+#define BOOT_CTX_FLAG_EARLY_MMIO       (1 << 7)
+#define BOOT_CTX_MAGIC                 0x4f533031
+
 #endif

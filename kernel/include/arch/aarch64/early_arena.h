@@ -124,7 +124,8 @@ struct aarch64_early_arena {
 
 /* Pure planner. Validates `ram[0..count)` as a clean RAM map
  * (sorted, non-overlapping, 2 MiB-aligned, type=MEMORY_TYPE_RAM,
- * no entry overlapping the D window [0x08000000, 0x0a000000), no
+ * no entry overlapping the runtime D window (aarch64 device_window,
+ * from the boot handoff; compile-time QEMU window when absent), no
  * entry ending past AARCH64_M1_PA_LIMIT, no entry overlapping the
  * kernel/handoff B window [0x40000000, 0x40200000)), checks that the
  * non-empty zone count is <= MAX_NR_ZONES (10), computes the bucket
