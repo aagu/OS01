@@ -35,8 +35,13 @@ static inline void arch_flush_tlb_all(void) {
 
 #elif defined(__aarch64__)
 
+/* The page offset is defined exactly once, as the bare build-time
+ * constant AARCH64_PAGE_OFFSET in boot_layout.h (shared with the
+ * preprocessed assembly and linker script); the C facade casts it. */
+#include <arch/aarch64/boot_layout.h>
+
 #ifndef ARCH_PAGE_OFFSET
-#define ARCH_PAGE_OFFSET 0xffff000000000000ULL
+#define ARCH_PAGE_OFFSET ((uint64_t)AARCH64_PAGE_OFFSET)
 #endif
 
 static inline void arch_flush_tlb_all(void)

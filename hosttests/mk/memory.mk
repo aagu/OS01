@@ -1018,3 +1018,56 @@ $(TEST_BLD)/test_slab_basic_x86_count.elf: $(TEST_BLD)/test_slab_basic_x86_count
 		$(TEST_BLD)/pmm_boot_production.o \
 		$(LIBC_OBJS)
 	$(HOST_CC) -o $@ $^
+
+# ── AArch64 boot block ownership through M1 (LMA Task 4) ──────
+# The production early_arena.c / runtime_tree.c / ram_core.c compiled
+# with the relocated layout (B = 0x02000000) so the ownership contract
+# is proven against a distinguished object, not the default constants.
+BOOT_LAYOUT_HOST_CFLAGS := $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
+                           -I$(TEST_INC) $(LIBC_INC)
+
+$(TEST_BLD)/boot_layout_arena_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/early_arena.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm_boot.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_LAYOUT_HOST_CFLAGS) \
+	  -DAARCH64_BOOT_BLOCK_BASE=0x02000000 -c $< -o $@
+
+$(TEST_BLD)/boot_layout_tree_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/runtime_tree.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/runtime_tree.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/early_arena.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/memory/memory_map.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_LAYOUT_HOST_CFLAGS) \
+	  -DAARCH64_BOOT_BLOCK_BASE=0x02000000 -c $< -o $@
+
+$(TEST_BLD)/boot_layout_ram_core_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/ram_core.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/ram_core.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT_LAYOUT_HOST_CFLAGS) \
+	  -DAARCH64_BOOT_BLOCK_BASE=0x02000000 -c $< -o $@
+
+LINK_CFLAGS_aarch64-boot-layout = $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
+    -I$(TEST_INC) $(LIBC_INC)
+LINK_GROUP_aarch64-boot-layout := \
+    $(TEST_BLD)/boot_layout_arena_production.o \
+    $(TEST_BLD)/boot_layout_tree_production.o \
+    $(TEST_BLD)/boot_layout_ram_core_production.o \
+    $(TEST_BLD)/pmm_production.o \
+    $(TEST_BLD)/pmm_arch_arm_production.o \
+    $(TEST_BLD)/aarch64_ram_map_stub.o \
+    $(TEST_BLD)/pmm_boot_production.o
+
+.PHONY: test-aarch64-boot-layout
+test-aarch64-boot-layout: $(TEST_BLD)/test_aarch64_boot_layout.elf
+	$<

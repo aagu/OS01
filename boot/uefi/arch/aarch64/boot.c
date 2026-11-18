@@ -1,10 +1,12 @@
 /* boot/uefi/arch/aarch64/boot.c — aarch64 arch hooks.
  *
  * Kernel: validated ELF loaded at fixed PT_LOAD physical addresses
- *   (entry 0x40080000, see loader.h).
- * Handoff: boot_context at 0x401e0000 in a 31-page allocation; the
- *   firmware FDT is copied after the context, and the raw UEFI memory
- *   map is placed after that, up to the trampoline page @ 0x401ff000.
+ *   inside the configured boot block (entry = AARCH64_KERNEL_ENTRY,
+ *   see loader.h / boot_layout.h).
+ * Handoff: boot_context at AARCH64_HANDOFF_BASE in a 31-page
+ *   allocation; the firmware FDT is copied after the context, and the
+ *   raw UEFI memory map is placed after that, up to the trampoline
+ *   page @ AARCH64_TRAMPOLINE_BASE.
  * Memory map: raw UEFI descriptors (BOOT_MEMORY_FORMAT_UEFI_RAW).
  */
 #include <uefi.h>
@@ -33,7 +35,8 @@ static const efi_guid_t fdt_table_guid = {
 extern const uint8_t aarch64_handoff_stub_start[];
 extern const uint8_t aarch64_handoff_stub_end[];
 __attribute__((noreturn)) void aarch64_enter_kernel(uint64_t entry,
-                                                     uint64_t context_phys);
+                                                    uint64_t context_phys,
+                                                    uint64_t trampoline_phys);
 
 struct aarch64_fixed_allocation {
     efi_physical_address_t address;
@@ -43,8 +46,8 @@ struct aarch64_fixed_allocation {
 static struct aarch64_fixed_allocation *kernel_allocations;
 static uint16_t kernel_allocation_count;
 static uint64_t handoff_cursor;
-static int aarch64_data_reserved;        /* 0x401e0000, DATA_PAGES */
-static int aarch64_trampoline_reserved;  /* 0x401ff000, 1 page */
+static int aarch64_data_reserved;        /* AARCH64_HANDOFF_BASE, DATA_PAGES */
+static int aarch64_trampoline_reserved;  /* AARCH64_TRAMPOLINE_BASE, 1 page */
 
 static efi_serial_io_protocol_t *serial_io_protocol(void)
 {
@@ -291,9 +294,20 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
     uint16_t index;
 
     release_kernel_allocations();
-    if (aarch64_elf_validate(image, image_size, entry_out) != 0) {
-        uefi_puts("UEFI-A64: bad ELF\r\n");
-        return EFI_LOAD_ERROR;
+    {
+        int rc = aarch64_elf_validate(image, image_size, entry_out);
+
+        if (rc != 0) {
+            /* Only the actual entry-address mismatch (the configured
+             * boot block entry vs the ELF's e_entry) gets the dedicated
+             * diagnostic: a paired BOOTAA64.EFI + kernel.elf built for
+             * different layouts must be unmistakable. */
+            if (rc == AARCH64_ELF_ERR_ENTRY_MISMATCH)
+                uefi_puts("UEFI-A64: kernel entry mismatch\r\n");
+            else
+                uefi_puts("UEFI-A64: bad ELF\r\n");
+            return EFI_LOAD_ERROR;
+        }
     }
 
     ehdr = (const struct aarch64_elf64_ehdr *)bytes;
@@ -501,5 +515,5 @@ void arch_puts(const char *s)
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,
                                                  uint64_t context_phys)
 {
-    aarch64_enter_kernel(entry, context_phys);
+    aarch64_enter_kernel(entry, context_phys, AARCH64_TRAMPOLINE_BASE);
 }

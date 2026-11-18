@@ -8452,6 +8452,114 @@
     "action": "unique",
     "reason": "Primary host unit test verifying read-only GPT metadata parsing and partition publication"
    }
+  },
+  {
+   "id": "boot.lma.configure",
+   "owner": "static",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "python3 qemutests/aarch64_smp_test.py --layout-only --build-root <private-dir>",
+   "assertions": [
+    "private-root default and AARCH64_BOOT_BLOCK_BASE=0x42000000 builds produce the configured ELF entry (0x40080000 / 0x42080000) with the preserved AP/stack/boot-table checks",
+    "the build-generated linker script rejects an oversized kernel with 'kernel overlaps UEFI handoff'",
+    "unaligned, D-overlapping, arena-starved and out-of-M0 bases fail at build parse time",
+    "layout-only builds never write the default build root"
+   ],
+   "failure_modes": [
+    "layout -D lost across the controlled sub-make boundary, generated linker script stale after A→B→A flips, or invalid configurations accepted"
+   ],
+   "primary": {
+    "layer": "static",
+    "source": "qemutests/aarch64_smp_test.py",
+    "selector": "--layout-only --build-root",
+    "evidence": "EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole static audit of the configured AArch64 boot block build layout and its build-time validation"
+   }
+  },
+  {
+   "id": "boot.lma.validate_elf",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "host runner invokes test_aarch64_boot_elf.elf",
+   "assertions": [
+    "the production aarch64 UEFI ELF validator accepts a valid ELF per layout (default 0x40000000 and relocated 0x42000000 instances linked side by side)",
+    "the relocated instance rejects entry mismatch (dedicated error category), 3-byte file entry, non-executable boot segment, identity segment below the LMA, broken high-half VMA/PA relation and memsz rounding past the handoff window"
+   ],
+   "failure_modes": [
+    "validator accepts a malformed kernel image, cannot accept a valid relocated ELF, or reports a generic error for the entry mismatch"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_boot_elf.c",
+    "selector": "test-aarch64-boot-elf",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole host unit test of the pre-allocation UEFI kernel ELF validator across two layout instances"
+   }
+  },
+  {
+   "id": "boot.lma.reserve_ram",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "host runner invokes test_aarch64_boot_layout.elf",
+   "assertions": [
+    "aarch64_ram_normalize_boot excludes the whole configured boot block from a spanning EFI RAM descriptor and keeps both sides",
+    "the early-arena plan starts at B.end for the relocated layout",
+    "M1 build+validate succeed with R on both sides of B; the tree maps B Normal executable, low R and the old default block plain Normal NX, D Device NX",
+    "an R covering B is rejected by both the arena planner and the tree builder"
+   ],
+   "failure_modes": [
+    "arena/tree misusing the default B, boot block pages leaking to the PMM, or the old block keeping execute permission"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_boot_layout.c",
+    "selector": "test-aarch64-boot-layout",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole host contract test carrying the configured boot block through RAM reservation, early arena and the M1 tree"
+   }
+  },
+  {
+   "id": "boot.lma.uefi",
+   "owner": "qemu_e2e",
+   "component": "boot",
+   "behavior": "lma",
+   "trigger": "make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout",
+   "assertions": [
+    "runner exits 0 with the default→relocated→default sequence completing in a private build root",
+    "each round's FAT contents match the published kernel.elf/BOOTAA64.EFI byte-for-byte and each ELF entry matches its configured base",
+    "the relocated pairing boots once with kernel-side layout evidence for 0x42000000, boot-map OK, full M1/PRUNE/AP evidence and no M1 ZONE intersecting B",
+    "the restored default pairing boots once after the A→B→A cycle",
+    "the restored default FAT with the relocated kernel swapped in fails with the dedicated mismatch diagnostic, the generic loader failure and no kernel takeover",
+    "the default build tree is byte-identical before and after; no new paths are created"
+   ],
+   "failure_modes": [
+    "stale pairing (old EFI or kernel reused across the layout flip), silent timeout counted as a rejection, kernel takeover in the mismatch round, or default-tree contamination"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/aarch64_lma_layout.py",
+    "selector": "make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout",
+    "evidence": "RUNNER_EXIT_0_AND_ARCHIVED_METADATA"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Sole QEMU E2E acceptance of the configured UEFI boot block pairing, the A→B→A build isolation and the mixed-loader rejection"
+   }
   }
  ]
 }

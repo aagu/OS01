@@ -4,8 +4,14 @@
 These checks catch slot ABI drift, inaccessible AP code/stacks and overlap
 with the UEFI handoff. Hardware entry execution is covered by the QEMU suite.
 """
+# @os01-test
+# id: aarch64-boot-lma-layout
+# layer: static
+# subsystem: boot
+# scenarios: boot.lma.configure
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -13,6 +19,22 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 HANDOFF = 0x401E0000
+
+# Oversized-link fixture (brief Task 1): satisfies every other linker
+# assertion — 32 KiB aligned .data.init_task of full stack size and a
+# correct _start at the configured entry — and ONLY overflows BSS past
+# the handoff window, so the failure must be
+# "kernel overlaps UEFI handoff".
+OVERSIZED_FIXTURE = r'''
+.section .boot.text.first,"ax"
+.global _start
+_start: b _start
+.section .data.init_task,"aw",@progbits
+.balign 32768
+.space 32768
+.section .bss,"aw",@nobits
+.space 0x170000
+'''
 
 
 def check_benchmark(tmp):
@@ -423,14 +445,24 @@ def elf_layout(path):
     return loads, symbols
 
 
-def check_elf(path):
+def check_elf(path, boot_base=0x40000000, enforce_handoff=True):
+    entry = boot_base + 0x80000
+    handoff = boot_base + 0x1e0000
+    page_offset = 0xffff000000000000
+    header = struct.unpack_from("<16sHHIQQQIHHHHHH", path.read_bytes())
+    assert header[4] == entry, \
+        "ELF e_entry is 0x%x, expected configured entry 0x%x" % (header[4], entry)
     loads, symbols = elf_layout(path)
     assert loads, "kernel has no PT_LOAD"
+    assert symbols["_start"][0] == entry, \
+        "_start is 0x%x, expected configured entry 0x%x" % (symbols["_start"][0], entry)
     for seg in loads:
-        assert 0x40080000 <= seg["pa"] < HANDOFF, "PT_LOAD outside boot RAM"
-        assert seg["pa"] + seg["memsz"] <= HANDOFF, "PT_LOAD overlaps handoff"
-        if seg["va"] >= 0xffff000000000000:
-            assert seg["va"] - 0xffff000000000000 == seg["pa"], \
+        assert entry <= seg["pa"], "PT_LOAD below the configured entry"
+        if enforce_handoff:
+            assert seg["pa"] < handoff, "PT_LOAD outside boot RAM"
+            assert seg["pa"] + seg["memsz"] <= handoff, "PT_LOAD overlaps handoff"
+        if seg["va"] >= page_offset:
+            assert seg["va"] - page_offset == seg["pa"], \
                 "high-half runtime address differs from loader allocation/zeroing"
 
     def mapped(start, size, flags):
@@ -463,7 +495,8 @@ def check_elf(path):
         assert mapped(start, end - start, 6), "stack not identity-mapped writable RAM"
         assert all(end <= lo or start >= hi for lo, hi in ranges), "boot stack overlap"
         ranges.append((start, end))
-    assert symbols["_kernel_lma_end"][0] <= HANDOFF
+    if enforce_handoff:
+        assert symbols["_kernel_lma_end"][0] <= handoff
 
     # AArch64 vector ABI: EL1h sync slot (+0x200) → el1_sync_entry, IRQ slot
     # (+0x280) → el1_irq_entry.  Decode the 32-bit A64 unconditional B
@@ -513,6 +546,41 @@ def check_vector_branches(path, vectors_va, symbols):
         assert target_va == target_sym_va, (
             "vector slot +0x%x branches to 0x%x, expected %s @ 0x%x"
             % (off, target_va, want_label, target_sym_va))
+
+
+def _save_pt_regs_macro_body(lines):
+    in_macro = False
+    body = []
+    for line in lines:
+        if in_macro:
+            if re.match(r"^\s*\.endm\b", line):
+                return body
+            body.append(line)
+        elif re.match(r"^\s*\.macro\s+save_pt_regs\b", line):
+            in_macro = True
+    return None
+
+
+def _extract_pt_regs_stores(lines):
+    """Even-indexed PT_REGS_X{n} store line indices + the PT_REGS_X30
+    store index, from a list of assembly lines."""
+    pt_offset_re = re.compile(r"#\s*PT_REGS_X(\d+)\b")
+    stp_re = re.compile(r"\bstp\s+")
+    str_re = re.compile(r"^\s*str\s+")
+    store_lines = {}
+    x30_line = None
+    for idx, line in enumerate(lines):
+        if "PT_REGS_" not in line:
+            continue
+        if not (stp_re.search(line) or str_re.match(line)):
+            continue
+        for m in pt_offset_re.finditer(line):
+            n = int(m.group(1))
+            if n == 30 and str_re.match(line):
+                x30_line = idx
+            if n % 2 == 0 and n not in store_lines and n < 31:
+                store_lines[n] = idx
+    return store_lines, x30_line
 
 
 def check_sync_entry_source_order(entry_path):
@@ -566,14 +634,35 @@ def check_sync_entry_source_order(entry_path):
 
     missing = [n for n in (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20,
                            22, 24, 26, 28) if n not in store_lines]
-    assert not missing, (
-        "el1_sync_entry missing PT_REGS store(s) for x-pair starting at: "
-        + ", ".join("PT_REGS_X%d" % n for n in missing))
-    # x30 is stored as a separate str (not part of an STP pair).
     x30_line = next((idx for idx, line in enumerate(block)
                      if "PT_REGS_X30" in line
                      and (str_re.match(line) or stp_re.search(line))), None)
-    assert x30_line is not None, "el1_sync_entry missing PT_REGS_X30 store"
+    if missing and x30_line is None:
+        # The frame save may be wrapped in the save_pt_regs macro (one
+        # whole-file definition): its body carries the PT_REGS_* stores,
+        # and the invocation site's position replaces each store's. A
+        # macro invocation must precede the first x0-x2 reuse exactly
+        # like the inline stores would.
+        macro_body = _save_pt_regs_macro_body(lines)
+        assert macro_body is not None, (
+            "el1_sync_entry has neither inline PT_REGS stores nor a "
+            "save_pt_regs macro definition in entry.S")
+        macro_stores, macro_x30 = _extract_pt_regs_stores(macro_body)
+        invocations = [idx for idx, line in enumerate(block)
+                       if re.search(r"\bsave_pt_regs\b", line)]
+        assert invocations, (
+            "el1_sync_entry missing PT_REGS stores and no save_pt_regs "
+            "invocation")
+        assert macro_x30 is not None, (
+            "save_pt_regs macro missing PT_REGS_X30 store")
+        missing = [n for n in (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20,
+                               22, 24, 26, 28) if n not in macro_stores]
+        assert not missing, (
+            "save_pt_regs macro missing PT_REGS store(s) for x-pair "
+            "starting at: " + ", ".join("PT_REGS_X%d" % n for n in missing))
+        x30_line = invocations[0]
+        for n in macro_stores:
+            store_lines[n] = invocations[0]
 
     # The earliest reuse of x0-x2 for C-ABI parameter passing is the first
     # `mrs ... esr_el1/far_el1/sp_el0/elr_el1/spsr_el1` (clobbers x1 then
@@ -626,26 +715,198 @@ _Static_assert(AARCH64_BOOT_GO_OFFSET == 36, "assembly command offset");
                    cwd=ROOT, check=True)
 
 
-def check_linker_guard(tmp, clang):
-    source = r'''
-.section .boot.text.first,"ax"
-.global _start
-_start: b _start
-.section .bss,"aw",@nobits
-.space 0x170000
-'''
+def generate_linker_script(out_path):
+    """Mirror kernel/Makefile's linker.generated.ld rule exactly: same
+    preprocessor flags, same -I, same layout -D (default values)."""
+    subprocess.run([os.environ.get("CLANG", "clang"), "-E", "-P", "-undef",
+                    "-nostdinc", "-x", "c", "-I", "kernel/include",
+                    "kernel/arch/aarch64/linker.ld", "-o", str(out_path)],
+                   cwd=ROOT, check=True)
+
+
+def check_linker_guard(tmp, clang, linker_script):
     obj = tmp / "oversized.o"
     subprocess.run([clang, "--target=aarch64-none-elf", "-x", "assembler",
-                    "-c", "-", "-o", str(obj)], input=source, text=True, check=True)
+                    "-c", "-", "-o", str(obj)], input=OVERSIZED_FIXTURE,
+                   text=True, check=True)
     result = subprocess.run([os.environ.get("LD_LLD", "ld.lld"), "-T",
-                             str(ROOT / "kernel/arch/aarch64/linker.ld"),
+                             str(linker_script),
                              str(obj), "-o", str(tmp / "oversized.elf")],
                             text=True, capture_output=True)
     assert result.returncode != 0, "linker accepted a kernel overlapping UEFI handoff"
     assert "kernel overlaps UEFI handoff" in result.stderr, result.stderr
 
 
+def snapshot_tree(root):
+    root = Path(root)
+    if not root.exists():
+        return None
+    return sorted((str(p.relative_to(root)), p.stat().st_mtime_ns, p.stat().st_size)
+                  for p in root.rglob("*") if p.is_file())
+
+
+def make_aarch64_kernel(build_root, base):
+    """Build the aarch64 kernel via argv only (never through a shell).
+
+    base=None builds the default layout; a string value is passed through
+    as AARCH64_BOOT_BLOCK_BASE for the caller to judge success/failure.
+    """
+    cmd = ["make", "PROFILE=aarch64-clang"]
+    if base is not None:
+        cmd.append("AARCH64_BOOT_BLOCK_BASE=" + base)
+    if build_root is not None:
+        cmd.append("AARCH64_BUILD_ROOT=" + str(build_root))
+    cmd.append("aarch64-uefi-kernel")
+    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+
+
+def check_m0_write_path(elf_path):
+    """Audit the actually linked head.S write-slot path for B = 0 (Task 3).
+
+    The B=0 ELF is the only linked artifact in this mode whose executable
+    block belongs to the LOW table, so its disassembly proves the slot
+    path: PUD_low[0] hangs to boot_page_tables+0x2000 (PMD_low0), and
+    boot_write_exec_block calls write_slot selecting that table and slot
+    0, constructing the single Normal UXN / non-PXN block descriptor.
+    """
+    objdump = os.environ.get("LLVM_OBJDUMP", "llvm-objdump")
+    table = subprocess.run([objdump, "-t", str(elf_path)],
+                           text=True, capture_output=True, check=True).stdout
+    symbols = {}
+    for line in table.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[-1] in (
+                "boot_write_exec_block", "write_slot", "write_table",
+                "build_pagetables", "boot_page_tables"):
+            try:
+                symbols[parts[-1]] = int(parts[0], 16)
+            except ValueError:
+                continue
+    for name in ("boot_write_exec_block", "write_slot", "write_table",
+                 "build_pagetables", "boot_page_tables"):
+        assert name in symbols, \
+            "linked head.S is missing symbol %s (write-slot path absent)" % name
+    dis = subprocess.run([objdump, "-d", "--no-show-raw-insn", str(elf_path)],
+                         text=True, capture_output=True, check=True).stdout
+    lines = dis.splitlines()
+    label = "<boot_write_exec_block>:"
+    starts = [i for i, l in enumerate(lines) if l.strip().endswith(label)]
+    assert starts, "boot_write_exec_block has no disassembled instructions"
+    region = []
+    for l in lines[starts[0] + 1:]:
+        s = l.strip()
+        if not s:
+            if region:
+                break
+            continue
+        if "ret" in s.split() or s.endswith("ret"):
+            region.append(s)
+            break
+        region.append(s)
+    text = "\n".join(region).replace("\t", " ")
+
+    bls = [l for l in region if "bl" in l.split() and "<write_slot>" in l]
+    assert len(bls) == 1, \
+        "boot_write_exec_block must contain exactly one write_slot call, got %d" % len(bls)
+    assert "mov x4, x12" in text, \
+        "boot_write_exec_block did not select PMD_low0 (boot_page_tables+0x2000) for B=0"
+    assert "mov x0, x4" in text, \
+        "boot_write_exec_block did not pass the selected L2 table to write_slot"
+    assert "mov x2, #0x0" in text, \
+        "boot_write_exec_block did not select slot 0 for B=0"
+    assert "#0x40000000000000" in text, \
+        "boot_write_exec_block did not set UXN on the boot block descriptor"
+    assert "#0x20000000000000" in text or "#0xffdfffffffffffff" in text, \
+        "boot_write_exec_block did not clear PXN (bic) on the boot block descriptor"
+
+    # PUD_low[0] → boot_page_tables+0x2000 (PMD_low0): the table setup
+    # must load x12 = base+0x2000 and write it through write_table.
+    build_start = dis.find("<build_pagetables>:")
+    assert build_start != -1, "build_pagetables missing from disassembly"
+    build_end = dis.find("<boot_write_exec_block>", build_start)
+    build_region = dis[build_start:build_end].replace("\t", " ")
+    add12 = [l for l in build_region.splitlines()
+             if "add x12, x10" in l and "=0x2000" in l]
+    assert add12, \
+        "PMD_low0 is not boot_page_tables+0x2000 in the linked build"
+    normalized = build_region.splitlines()
+    link_idx = next((i for i, l in enumerate(normalized)
+                     if "mov x1, x12" in l), None)
+    assert link_idx is not None, \
+        "PUD_low[0] does not hang PMD_low0 (mov x1, x12 before write_table)"
+    after = [l for l in normalized[link_idx + 1:link_idx + 4]
+             if "bl" in l.split() and "<write_table>" in l]
+    assert after, \
+        "PUD_low[0] table write does not go through write_table"
+
+
+def check_layout_builds(build_root):
+    build_root = Path(build_root).resolve()
+    default_root = ROOT / "build/aarch64-clang"
+    before = snapshot_tree(default_root)
+
+    # Default layout: the private root must reproduce the existing ELF
+    # contract (entry 0x40080000, AP/stack/boot-table checks unchanged).
+    result = make_aarch64_kernel(build_root, None)
+    assert result.returncode == 0, result.stderr
+    default_elf = build_root / "artifacts/kernel.elf"
+    assert default_elf.is_file(), (
+        "private-root build produced no artifacts/kernel.elf — "
+        "AARCH64_BUILD_ROOT is not honored by the build")
+    check_elf(default_elf)
+
+    # The relocated build must come from the script the build itself
+    # generated with the effective configuration, not from a template.
+    generated = build_root / "kernel/linker.generated.ld"
+    with tempfile.TemporaryDirectory(prefix="aarch64-guard-") as tmp:
+        check_linker_guard(Path(tmp), os.environ.get("CLANG", "clang"), generated)
+
+    # Relocated layout B = 0x42000000 in the SAME private root: the ELF
+    # must move with the configuration.
+    result = make_aarch64_kernel(build_root, "0x42000000")
+    assert result.returncode == 0, result.stderr
+    check_elf(build_root / "artifacts/kernel.elf", boot_base=0x42000000)
+
+    # B = 0 static-only build (never a bootable image): the entry must
+    # move to 0x80000 and the linked head.S write-slot path must select
+    # PMD_low0 slot 0 for the executable block.
+    result = make_aarch64_kernel(build_root, "0x0")
+    assert result.returncode == 0, result.stderr
+    check_elf(build_root / "artifacts/kernel.elf", boot_base=0x0,
+              enforce_handoff=False)
+    check_m0_write_path(build_root / "artifacts/kernel.elf")
+
+    # One representative negative per class: unaligned, D-window overlap,
+    # too small for the minimum arena, outside M0, and the explicit empty
+    # value — plus a base whose bash int64 arithmetic would wrap negative
+    # (must still be rejected, not silently accepted).
+    for value in ("0x40001000", "0x08000000", "0x7ec00000", "0x80000000",
+                  "0xFFFFFFFFFFE00000", ""):
+        result = make_aarch64_kernel(None, value)
+        assert result.returncode != 0, \
+            "accepted invalid AARCH64_BOOT_BLOCK_BASE=" + repr(value)
+        assert "AARCH64_BOOT_BLOCK_BASE" in result.stderr, \
+            "failure did not name the offending variable: " + result.stderr
+
+    assert snapshot_tree(default_root) == before, \
+        "layout-only builds leaked into the default build root"
+
+
+
 def main():
+    if "--layout-only" in sys.argv:
+        # Task 1 layout branch: build default + relocated kernels in a
+        # PRIVATE build root and audit the actual artifacts. Deliberately
+        # runs before check_build_controls(); it must not execute the
+        # retired no-ack Make targets, and the legacy --host-only path
+        # below stays untouched.
+        try:
+            root = sys.argv[sys.argv.index("--build-root") + 1]
+        except (ValueError, IndexError):
+            raise SystemExit("--layout-only requires --build-root DIR")
+        check_layout_builds(root)
+        print("aarch64_smp: layout-only build and ELF checks passed")
+        return
     clang = os.environ.get("CLANG", "clang")
     with tempfile.TemporaryDirectory(prefix="aarch64-smp-") as tmp:
         tmp = Path(tmp)
@@ -655,7 +916,8 @@ def main():
         if "--host-only" in sys.argv:
             return
         check_layout_compile(tmp, clang)
-        check_linker_guard(tmp, clang)
+        generate_linker_script(tmp / "linker.generated.ld")
+        check_linker_guard(tmp, clang, tmp / "linker.generated.ld")
     subprocess.run(["make", "PROFILE=aarch64-clang", "aarch64-uefi-kernel"],
                    cwd=ROOT, check=True)
     check_elf(ROOT / "build/aarch64-clang/kernel/kernel.elf")

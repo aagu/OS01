@@ -1,11 +1,12 @@
     .text
     .p2align 2
 
+    /* aarch64_enter_kernel(entry=x0, context_phys=x1, trampoline_phys=x2)
+     * — the C wrapper derives the trampoline page PA from the shared
+     * layout header; no fixed address may leak into this file. */
     .global aarch64_enter_kernel
 aarch64_enter_kernel:
-    movz    x16, #0xf000
-    movk    x16, #0x401f, lsl #16
-    br      x16
+    br      x2
 
     .p2align 2
     .global aarch64_handoff_stub_start

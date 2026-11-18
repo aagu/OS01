@@ -541,3 +541,33 @@ test-xhci-hid-service test_xhci_hid_service: $(TEST_BLD)/test_xhci_hid_service.e
 
 
 
+
+# AArch64 UEFI kernel-ELF validator — the production boot/uefi elf.c
+# compiled twice (default 0x40000000 layout, and the 0x42000000
+# relocated layout with compile-time renamed exports), linked side by
+# side into one binary (LMA Task 2).
+$(TEST_BLD)/aarch64_boot_elf_default.o: $(TESTS_DIR)/boot/uefi/arch/aarch64/elf.c \
+    $(TESTS_DIR)/boot/uefi/arch/aarch64/loader.h \
+    $(TESTS_DIR)/kernel/include/arch/aarch64/handoff_layout.h \
+    $(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
+$(TEST_BLD)/aarch64_boot_elf_alt.o: $(TESTS_DIR)/boot/uefi/arch/aarch64/elf.c \
+    $(TESTS_DIR)/boot/uefi/arch/aarch64/loader.h \
+    $(TESTS_DIR)/kernel/include/arch/aarch64/handoff_layout.h \
+    $(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) \
+	  -DAARCH64_BOOT_BLOCK_BASE=0x42000000 \
+	  -Daarch64_elf_validate=aarch64_elf_validate_alt \
+	  -Daarch64_page_interval=aarch64_page_interval_alt -c $< -o $@
+
+LINK_CFLAGS_aarch64-boot-elf = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_aarch64-boot-elf := \
+    $(TEST_BLD)/aarch64_boot_elf_default.o \
+    $(TEST_BLD)/aarch64_boot_elf_alt.o
+
+.PHONY: test-aarch64-boot-elf
+test-aarch64-boot-elf: $(TEST_BLD)/test_aarch64_boot_elf.elf
+	$<

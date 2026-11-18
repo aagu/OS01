@@ -81,7 +81,9 @@ int arch_boot_direct_map_init(void)
     if (rc)
         goto fail;
 #if OS01_SELFTEST
-    aarch64_page_table_prune_warm();
+    /* Prune warm-up consumes the SAME ram list the tree was built and
+     * validated against, before the TTBR1 switch (Task 4). */
+    aarch64_page_table_prune_warm(ram, ram_count);
 #endif
     /* M3 (Task 7): publish the M1 root BEFORE installing TTBR1 so later
      * shootdown backends' aarch64_pt_root_is_published() never sees the

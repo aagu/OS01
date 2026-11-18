@@ -4,10 +4,14 @@
 #include <stdint.h>
 
 /* boot/uefi has no -Ikernel/include, so include the shared handoff
- * layout via a relative path that resolves from this header's location. */
+ * layout via a relative path that resolves from this header's location.
+ * The layout constants (AARCH64_KERNEL_ENTRY, AARCH64_HANDOFF_*,
+ * AARCH64_TRAMPOLINE_BASE, AARCH64_PAGE_OFFSET) are bare build-time
+ * constants: the profile forwards -DAARCH64_BOOT_BLOCK_BASE to this
+ * compile, and boot_layout.h derives everything else — one build loads
+ * exactly the kernel that was linked for the same value. */
 #include "../../../../kernel/include/arch/aarch64/handoff_layout.h"
 
-#define AARCH64_KERNEL_ENTRY       UINT64_C(0x40080000)
 #define AARCH64_PAGE_SIZE          UINT64_C(0x1000)
 
 /* The trampoline page must sit one page below the handoff window's end.
@@ -35,12 +39,17 @@ _Static_assert(AARCH64_TRAMPOLINE_BASE ==
 #define AARCH64_ET_EXEC            2
 #define AARCH64_EM_AARCH64         183
 #define AARCH64_PT_LOAD            1
+#define AARCH64_PF_X               1
 
 enum aarch64_elf_error {
     AARCH64_ELF_ERR_HEADER = -1,
     AARCH64_ELF_ERR_OVERFLOW = -2,
     AARCH64_ELF_ERR_ENTRY = -3,
     AARCH64_ELF_ERR_RANGE = -4,
+    /* e_entry exists but does not equal the configured boot block
+     * entry — the paired-kernel mismatch case gets its own category so
+     * the loader can print a dedicated diagnostic. */
+    AARCH64_ELF_ERR_ENTRY_MISMATCH = -5,
 };
 
 /* ELF64 wire-format records used only by the AArch64 UEFI loader. */

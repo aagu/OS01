@@ -94,7 +94,13 @@ UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
                     boot/uefi/boot_device.h \
                     kernel/include/core/bootinfo.h
 ifeq ($(UEFI_ARCH_FAMILY),aarch64)
-UEFI_BOOT_INPUTS += kernel/include/arch/aarch64/handoff_layout.h
+# LMA Task 2: the AArch64 loader consumes the shared layout constants
+# through loader.h -> handoff_layout.h -> boot_layout.h, so every link
+# in that chain (plus the configured boot block value itself) re-keys
+# the runtime receipt and the EFI artifact.
+UEFI_BOOT_INPUTS += kernel/include/arch/aarch64/handoff_layout.h \
+                    kernel/include/arch/aarch64/boot_layout.h \
+                    boot/uefi/arch/aarch64/loader.h
 endif
 
 # ── Runtime adapter (FORCE: digest-gated, always checks) ──────────
@@ -138,6 +144,7 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      sha256sum thirdpart/posix-uefi.manifest $(UEFI_PATCHES) $(UEFI_RUNTIME_ADAPTER_INPUT) $(UEFI_RUNTIME_WRAPPER_INPUT); \
 	      printf "uefi-runtime-cflags: %s\n" "$(UEFI_RUNTIME_CFLAGS)"; \
 	      printf "uefi-runtime-make: %s\n" "$(UEFI_RUNTIME_MAKE)"; \
+	      printf "aarch64-boot-block-base: %s\n" "$(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),$(AARCH64_BOOT_BLOCK_BASE),none)"; \
 	      printf "profile: %s %s\n" "$(PROFILE)" "$(BUILD_DIR)"; \
 	      printf "uefi-clang: %s\n" "$$($(UEFI_DIGEST_CLANG) --version 2>/dev/null | head -1)"; \
 	      find thirdpart/posix-uefi -type f \

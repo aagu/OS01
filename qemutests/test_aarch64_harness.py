@@ -1639,5 +1639,104 @@ class SchedMakeContractTests(unittest.TestCase):
         self.assertNotIn("image/sched/", proc.stdout)
 
 
+class LmaLayoutEvidenceTests(unittest.TestCase):
+    """LMA Task 5 evidence fixtures for the direct runner's new modes.
+
+    Positive: the relocated layout (B = 0x42000000) selftest boot log —
+    the layout line must carry the ACTUAL entry/context for the base,
+    the boot-map selftest must pass, the M1 evidence must hold and no
+    M1 ZONE may intersect the boot block. Mutations: a wrong address in
+    the layout line, and a zone overlapping B, must each be rejected.
+
+    Negative (mismatch mode): the dedicated diagnostic plus the generic
+    loader failure are required; a log missing the diagnostic, or one
+    where the kernel still took over, must fail.
+    """
+
+    BASE = 0x42000000
+
+    @classmethod
+    def setUpClass(cls):
+        fixture = m1ev._fixture(2, selftest=True)
+        lines = fixture.splitlines()
+        # Insert the layout evidence + boot-map selftest where the
+        # kernel prints them (arch_early_init, before the RAM summary).
+        ram_index = next(i for i, l in enumerate(lines)
+                         if l.startswith("UEFI-A64: RAM ranges="))
+        lines[ram_index:ram_index] = [
+            "UEFI-A64: boot map selftest OK",
+            "UEFI-A64: layout entry=0x42080000 context=0x421e0000",
+        ]
+        cls.positive = "\n".join(lines) + "\n"
+
+    def test_positive_accepted(self):
+        self.assertTrue(smp.lma_layout_evidence_ok(
+            self.positive, self.BASE, cpus=2, ram_mib=512))
+
+    def test_wrong_address_rejected(self):
+        wrong = self.positive.replace(
+            "UEFI-A64: layout entry=0x42080000 context=0x421e0000",
+            "UEFI-A64: layout entry=0x40080000 context=0x401e0000")
+        self.assertFalse(smp.lma_layout_evidence_ok(
+            wrong, self.BASE, cpus=2, ram_mib=512))
+
+    def test_zone_overlapping_b_rejected(self):
+        # Move zone 0 (with its coverage/edge/walk bookkeeping) so it
+        # intersects B = [0x42000000, 0x42200000): everything else stays
+        # M1-consistent, so the rejection is attributable to the
+        # boot-block disjointness check.
+        overlapped = (self.positive
+                      .replace("M1 ZONE id=0 start=40000000 end=40200000 frames=1",
+                               "M1 ZONE id=0 start=42000000 end=42400000 frames=2")
+                      .replace("M1 COVERAGE id=0 start=40000000 end=40200000",
+                               "M1 COVERAGE id=0 start=42000000 end=42400000")
+                      .replace("M1 EDGE PASS zone=0 first=40000000 last=40000000",
+                               "M1 EDGE PASS zone=0 first=42000000 last=42200000")
+                      .replace("M1 WALK PASS frames=3", "M1 WALK PASS frames=4"))
+        self.assertFalse(smp.lma_layout_evidence_ok(
+            overlapped, self.BASE, cpus=2, ram_mib=512))
+
+    def test_prune_pa_inside_relocated_b_rejected(self):
+        # The prune probe PA must be disjoint from the boot's ACTUAL
+        # boot block, not the default-layout B window: 0x42000000 is
+        # 2 MiB aligned, inside M0, outside D and outside the default
+        # B — but sits inside the relocated B [0x42000000, 0x42200000).
+        pruned = self.positive.replace(
+            "M1 PRUNE PASS pa=0x00200000 before=valid after=fault",
+            "M1 PRUNE PASS pa=0x42000000 before=valid after=fault")
+        self.assertFalse(smp.lma_layout_evidence_ok(
+            pruned, self.BASE, cpus=2, ram_mib=512))
+
+    def test_mismatch_accepted(self):
+        text = ("BdsDxe: starting Boot0002\n"
+                "UEFI-A64: kernel entry mismatch\r\n"
+                "UEFI: kernel load failed\r\n")
+        self.assertTrue(smp.lma_mismatch_evidence_ok(text))
+
+    def test_mismatch_without_dedicated_diagnostic_rejected(self):
+        text = "BdsDxe: starting Boot0002\nUEFI: kernel load failed\r\n"
+        self.assertFalse(smp.lma_mismatch_evidence_ok(text))
+
+    def test_mismatch_with_kernel_takeover_rejected(self):
+        text = ("UEFI-A64: kernel entry mismatch\r\n"
+                "UEFI: kernel load failed\r\n"
+                "UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\r\n"
+                "[smp] topology source=uefi-dtb cpus=2\r\n")
+        self.assertFalse(smp.lma_mismatch_evidence_ok(text))
+
+    def test_mismatch_retry_attempt_accepted(self):
+        # The firmware retries Boot0002 after the load failure, so the
+        # dedicated diagnostic legitimately repeats across attempts.
+        text = ("BdsDxe: starting Boot0002\n"
+                "UEFI-A64: kernel entry mismatch\r\n"
+                "UEFI: kernel load failed\r\n"
+                "BdsDxe: failed to start Boot0002: Load Error\n"
+                "BdsDxe: starting Boot0002\n"
+                "UEFI-A64: kernel entry mismatch\r\n"
+                "UEFI: kernel load failed\r\n"
+                "BdsDxe: No bootable option or device was found.\n")
+        self.assertTrue(smp.lma_mismatch_evidence_ok(text))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

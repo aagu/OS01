@@ -58,13 +58,16 @@
 
 #include <memory/memory_map.h>
 #include <memory/pmm_boot.h>
+#include <arch/aarch64/boot_layout.h>
 
 /* Spec §4.1 window: arena must sit inside [LOW, HI) AND inside the
- * RAM map. The window upper bound (0x80000000) is the IPS=40 cap
- * (well under the 1 TiB PA limit) and matches M0's boot identity
- * mapping extent. */
-#define AARCH64_M1_ARENA_LOW   UINT64_C(0x40200000)
-#define AARCH64_M1_ARENA_HI    UINT64_C(0x80000000)
+ * RAM map. LOW is derived from the shared boot block layout (the
+ * arena candidate window starts at B.end); HI = AARCH64_BOOT_MAP_END
+ * is the IPS=40 cap (well under the 1 TiB PA limit) and matches M0's
+ * boot identity mapping extent. Host overrides of
+ * AARCH64_BOOT_BLOCK_BASE move the window with the layout. */
+#define AARCH64_M1_ARENA_LOW   (AARCH64_BOOT_BLOCK_END)
+#define AARCH64_M1_ARENA_HI    (AARCH64_BOOT_MAP_END)
 
 /* 40-bit PA limit: input RAM ranges and table PAs must fit under
  * 1 TiB. Anything larger fails the plan with -ERANGE. */

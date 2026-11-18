@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
+#include <arch/aarch64/boot_layout.h>
 #include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/page_table_selftest.h>
 #include <arch/aarch64/page_table.h>
@@ -24,9 +25,65 @@ static volatile uint64_t *scalar(uint64_t address)
 
 #if OS01_SELFTEST
 
-void aarch64_page_table_prune_warm(void)
+/* ── M1 prune probe candidate (Task 4) ─────────────────────────
+ * The probe PA proves the old M0-only block is unmapped after the
+ * TTBR1 switch. PA 0 is a legal candidate, so validity travels in an
+ * independent flag, never in the PA value itself. */
+static struct {
+    bool have;
+    uint64_t pa;
+} prune_candidate;
+
+static bool prune_pa_reserved(uint64_t pa, const struct MEMORY_RANGE *ram,
+                              size_t count)
 {
-    if (aarch64_at_translation(ARCH_PAGE_OFFSET + UINT64_C(0x00200000)) & 1) {
+    size_t i;
+
+    if (pa < (uint64_t)AARCH64_BOOT_BLOCK_END &&
+        pa + PAGE_2M_SIZE > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
+        return true;    /* inside the boot block B */
+    if (pa < (uint64_t)AARCH64_BOOT_DEVICE_END &&
+        pa + PAGE_2M_SIZE > (uint64_t)AARCH64_BOOT_DEVICE_BASE)
+        return true;    /* inside the device window D */
+    for (i = 0; i < count; i++) {
+        if (pa < ram[i].phys_end && pa + PAGE_2M_SIZE > ram[i].phys_start)
+            return true;    /* overlaps a range about to be installed */
+    }
+    return false;
+}
+
+static void prune_candidate_select(const struct MEMORY_RANGE *ram, size_t count)
+{
+    uint64_t pa;
+
+    prune_candidate.have = false;
+    prune_candidate.pa = 0;
+
+    if (!prune_pa_reserved(UINT64_C(0x00200000), ram, count)) {
+        prune_candidate.have = true;
+        prune_candidate.pa = UINT64_C(0x00200000);
+        return;
+    }
+    /* Otherwise the first M0 block by PA that belongs to neither
+     * B, D nor R. M0 covers [0, AARCH64_BOOT_MAP_END). */
+    for (pa = 0; pa < (uint64_t)AARCH64_BOOT_MAP_END; pa += PAGE_2M_SIZE) {
+        if (!prune_pa_reserved(pa, ram, count)) {
+            prune_candidate.have = true;
+            prune_candidate.pa = pa;
+            return;
+        }
+    }
+}
+
+void aarch64_page_table_prune_warm(const struct MEMORY_RANGE *ram, size_t count)
+{
+    prune_candidate_select(ram, count);
+    if (!prune_candidate.have) {
+        log_info("M1 PRUNE SKIP reason=no-candidate\n");
+        return;
+    }
+    /* Pre-switch: the boot root must still translate the candidate. */
+    if (aarch64_at_translation(ARCH_PAGE_OFFSET + prune_candidate.pa) & 1) {
         log_err("M1 FATAL reason=prune-precondition\n");
         for (;;)
             arch_cpu_halt();
@@ -111,11 +168,16 @@ static int smoke(uint64_t root_pa)
 }
 int aarch64_page_table_selftest(uint64_t root_pa)
 {
-    if (!(aarch64_at_translation(ARCH_PAGE_OFFSET + UINT64_C(0x00200000)) & 1))
-        return -EIO;
+    /* Post-switch prune: the SAME candidate selected by the pre-switch
+     * warm-up must now fault (the M1 tree maps only B ∪ D ∪ R). */
+    if (prune_candidate.have) {
+        if (!(aarch64_at_translation(ARCH_PAGE_OFFSET + prune_candidate.pa) & 1))
+            return -EIO;
+        log_info("M1 PRUNE PASS pa=%lx before=valid after=fault\n",
+                 (unsigned long)prune_candidate.pa);
+    }
     if (aarch64_at_translation(ARCH_PAGE_OFFSET + UINT64_C(0x08000000)) & 1)
         return -EIO;
-    log_info("M1 PRUNE PASS pa=0x00200000 before=valid after=fault\n");
     int rc = smoke(root_pa);
     if (rc)
         return rc;
@@ -175,7 +237,11 @@ int aarch64_page_table_selftest(uint64_t root_pa)
     return 0;
 }
 #else
-void aarch64_page_table_prune_warm(void) {}
+void aarch64_page_table_prune_warm(const struct MEMORY_RANGE *ram, size_t count)
+{
+    (void)ram;
+    (void)count;
+}
 int aarch64_page_table_selftest(uint64_t root_pa)
 {
     (void)root_pa;

@@ -34,6 +34,12 @@ int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
         return 0;
     }
 
+    /* Every non-empty load image must sit inside the configured boot
+     * block: byte range and rounded allocation pages within
+     * [AARCH64_KERNEL_ENTRY, AARCH64_HANDOFF_BASE). */
+    if (paddr < AARCH64_KERNEL_ENTRY)
+        return AARCH64_ELF_ERR_RANGE;
+
     rc = checked_add(paddr, memsz, &end);
     if (rc)
         return rc;
@@ -49,6 +55,18 @@ int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
     return 0;
 }
 
+/* High-half direct-map relation: p_vaddr == AARCH64_PAGE_OFFSET + p_paddr,
+ * with overflow-safe arithmetic. */
+static int check_high_half_vaddr(uint64_t vaddr, uint64_t paddr)
+{
+    uint64_t expect;
+    int rc = checked_add(paddr, AARCH64_PAGE_OFFSET, &expect);
+
+    if (rc)
+        return rc;
+    return vaddr == expect ? 0 : AARCH64_ELF_ERR_RANGE;
+}
+
 int aarch64_elf_validate(const void *image, uint64_t image_size,
                          uint64_t *entry_out)
 {
@@ -57,6 +75,7 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
     uint64_t phdr_bytes;
     uint64_t phdr_end;
     int entry_is_loaded = 0;
+    int boot_segment_seen = 0;
     uint16_t index;
     int rc;
 
@@ -79,7 +98,7 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
         return AARCH64_ELF_ERR_HEADER;
 
     if (ehdr->e_entry != AARCH64_KERNEL_ENTRY)
-        return AARCH64_ELF_ERR_ENTRY;
+        return AARCH64_ELF_ERR_ENTRY_MISMATCH;
 
     rc = checked_mul(ehdr->e_phnum, ehdr->e_phentsize, &phdr_bytes);
     if (rc)
@@ -98,6 +117,7 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
         uint64_t load_end;
         uint64_t interval_start;
         uint64_t interval_pages;
+        uint64_t entry_bytes_end;
         uint16_t previous;
 
         if (phdr->p_type != AARCH64_PT_LOAD)
@@ -127,6 +147,32 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
 
         if (phdr->p_memsz == 0)
             continue;
+
+        if (phdr->p_vaddr == phdr->p_paddr) {
+            /* The unique low identity segment IS the boot segment: it
+             * starts at the configured entry, is executable, and its
+             * file data covers the full 4-byte entry instruction. */
+            if (boot_segment_seen)
+                return AARCH64_ELF_ERR_RANGE;
+            boot_segment_seen = 1;
+            if (phdr->p_paddr != AARCH64_KERNEL_ENTRY)
+                return AARCH64_ELF_ERR_RANGE;
+            if (!(phdr->p_flags & AARCH64_PF_X))
+                return AARCH64_ELF_ERR_RANGE;
+            rc = checked_add(ehdr->e_entry, 4, &entry_bytes_end);
+            if (rc)
+                return rc;
+            if (ehdr->e_entry < phdr->p_paddr ||
+                entry_bytes_end > phdr->p_paddr + phdr->p_filesz)
+                return AARCH64_ELF_ERR_RANGE;
+        } else {
+            /* Every other segment is a high-half mirror of its
+             * physical load address. */
+            rc = check_high_half_vaddr(phdr->p_vaddr, phdr->p_paddr);
+            if (rc)
+                return rc;
+        }
+
         for (previous = 0; previous < index; previous++) {
             const struct aarch64_elf64_phdr *other =
                 (const struct aarch64_elf64_phdr *)
@@ -147,6 +193,8 @@ int aarch64_elf_validate(const void *image, uint64_t image_size,
         }
     }
 
+    if (!boot_segment_seen)
+        return AARCH64_ELF_ERR_RANGE;
     if (!entry_is_loaded)
         return AARCH64_ELF_ERR_ENTRY;
 

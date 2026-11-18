@@ -26,6 +26,18 @@
       }
     },
     {
+      "id": "aarch64-boot-lma-layout",
+      "layer": "static",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.configure"
+      ],
+      "source": "qemutests/aarch64_smp_test.py"
+    },
+    {
       "kind": "suite",
       "id": "aarch64-gic-spi",
       "layer": "qemu_e2e",
@@ -48,6 +60,18 @@
       "origin": {
         "from": "mk/tests/catalog.mk"
       }
+    },
+    {
+      "id": "aarch64-lma-layout",
+      "layer": "qemu_e2e",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.uefi"
+      ],
+      "source": "qemutests/aarch64_lma_layout.py"
     },
     {
       "kind": "suite",
@@ -1039,6 +1063,32 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_aarch64_boot_elf",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.validate_elf"
+      ],
+      "link": "aarch64-boot-elf",
+      "source": "hosttests/cases/test_aarch64_boot_elf.c"
+    },
+    {
+      "id": "test_aarch64_boot_layout",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.lma.reserve_ram"
+      ],
+      "link": "aarch64-boot-layout",
+      "source": "hosttests/cases/test_aarch64_boot_layout.c"
     },
     {
       "kind": "host_test",

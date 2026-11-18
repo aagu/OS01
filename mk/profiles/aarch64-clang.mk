@@ -10,8 +10,63 @@ PROFILE_CAPABILITIES := kernel uefi
 # project.mk. Identical to project.mk's value when included through it.
 OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 
-# Profile-private layout (same shape as the x86_64 profile).
+# ── AArch64 boot block configuration (spec 2026-11-17-aarch64-kernel-lma) ──
+# AARCH64_BOOT_BLOCK_BASE selects the physical boot block B for THIS build.
+# Default is the QEMU virt layout (0x40000000). One build = one address:
+# the value is validated here and forwarded as -D to kernel C, assembly
+# and the preprocessed linker script (AARCH64_LAYOUT_CFLAGS below); there
+# is no mask-based correction and no fallback to the default.
+#
+# An explicitly empty value is an error (the default is chosen by NOT
+# setting the variable, not by setting it empty).
+ifneq ($(origin AARCH64_BOOT_BLOCK_BASE),undefined)
+ifeq ($(strip $(AARCH64_BOOT_BLOCK_BASE)),)
+$(error AARCH64_BOOT_BLOCK_BASE is explicitly empty; unset it for the 0x40000000 default or give a decimal/0x hex base)
+endif
+else
+AARCH64_BOOT_BLOCK_BASE := 0x40000000
+endif
+
+# Value validation. Runs through exported-environment bash so the value
+# never expands inside a command string (no quoting/injection surface) and
+# 0x literals are evaluated without GNU-make arithmetic. Contract (§2):
+# single decimal or 0x hex integer, 2 MiB aligned, within the M0 map
+# [0, 0x80000000), disjoint from the boot device window
+# D = [0x08000000, 0x0a000000), and enough room below 0x80000000 for the
+# minimum 20 MiB early-arena window. The check must echo exactly "OK":
+# a missing bash / failed probe yields empty output and fails closed.
+export AARCH64_BOOT_BLOCK_BASE
+AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$AARCH64_BOOT_BLOCK_BASE"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$v")); if (( n < 0 )); then echo "outside the M0 map [0..0x80000000]"; elif (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n < 0x0a000000 && n + 0x200000 > 0x08000000 )); then echo "overlaps the boot device window D [0x08000000..0x0a000000]"; elif (( n + 0x200000 > 0x80000000 )); then echo "outside the M0 map [0..0x80000000]"; elif (( 0x80000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' 2>/dev/null)
+ifneq ($(strip $(AARCH64_BOOT_BLOCK_BASE_CHECK)),OK)
+$(error invalid AARCH64_BOOT_BLOCK_BASE='$(AARCH64_BOOT_BLOCK_BASE)': $(AARCH64_BOOT_BLOCK_BASE_CHECK))
+endif
+
+# The single -D consumed by kernel C, assembly and the linker-script
+# preprocessing; boot_layout.h derives every other layout constant from it.
+AARCH64_LAYOUT_CFLAGS := -DAARCH64_BOOT_BLOCK_BASE=$(AARCH64_BOOT_BLOCK_BASE)
+
+# ── Independent output root ─────────────────────────────────────
+# AARCH64_BUILD_ROOT relocates the ENTIRE profile layout (kernel/UEFI/
+# image/libc/sysroot/...) to an isolated tree, so alternative-layout
+# builds never touch the default root. Default: the profile's own
+# BUILD_DIR. Explicit values must be absolute. Propagated across the
+# controlled sub-make boundary via OS01_SUBMAKE_ALLOWED (mk/project.mk) —
+# the kernel sub-make inherits it through this same profile include and
+# derives KERNEL_BUILD_DIR from BUILD_DIR below (never overwritten
+# directly).
+AARCH64_BUILD_ROOT ?=
+ifneq ($(strip $(AARCH64_BUILD_ROOT)),)
+ifeq ($(filter /%,$(AARCH64_BUILD_ROOT)),)
+$(error AARCH64_BUILD_ROOT='$(AARCH64_BUILD_ROOT)' must be an absolute path)
+endif
+BUILD_DIR := $(AARCH64_BUILD_ROOT)
+endif
+
+# Profile-private layout (same shape as the x86_64 profile). The
+# AARCH64_BUILD_ROOT block above has already re-pointed BUILD_DIR when set.
+ifeq ($(strip $(AARCH64_BUILD_ROOT)),)
 BUILD_DIR := $(OS01_ROOT)/build/$(PROFILE)
+endif
 SYSROOT := $(BUILD_DIR)/sysroot
 TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
