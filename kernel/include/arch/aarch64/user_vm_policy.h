@@ -50,6 +50,8 @@ enum user_vm_page_source {
     USER_VM_PAGE_ANON = 0,  /* heap / private anonymous mmap */
     USER_VM_PAGE_ELF,       /* image ELF segment leaf */
     USER_VM_PAGE_STACK,     /* image user stack leaf */
+    USER_VM_PAGE_IO,        /* device window leaf: the PA is NOT owned
+                             * by the mm — teardown unmaps, never frees */
 };
 
 enum user_vm_page_share {
@@ -77,6 +79,12 @@ typedef struct user_vm_page {
  * VMA (the same contract as user_vm_init_heap). */
 int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa,
                            uint32_t flags);
+
+/* Device mapping (M4-remaining): map one device-window page at va
+ * with the VM_DEVICE attribute.  The record tracks the PA for
+ * teardown but never frees it.  Same detached-root/single-owner
+ * contract as the anonymous entries. */
+int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa);
 
 /* ── Anonymous-VM policy ──────────────────────────────────────
  *

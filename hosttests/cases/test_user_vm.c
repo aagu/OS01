@@ -1992,6 +1992,73 @@ TEST_FUNC(test_mmap_shared_anon_fork_write_through)
     destroy_mm(c2);
 }
 
+
+/* ── Tests: device mmap (/dev/mem, 2026-11-19) ───────────────── */
+
+TEST_FUNC(test_mmap_device_map_and_teardown_never_frees)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    /* A fake /dev/mem fd: FD_DEV with a node named "mem". */
+    static struct vfs_node mem_node;
+    static char mem_name[] = "mem";
+    mem_node.name = mem_name;
+    file_t f = { .type = FD_DEV, .node = &mem_node };
+    user_vm_test_set_files(&f);
+
+    /* Map two device pages from the DTB device window. */
+    uint64_t args[6] = { BASE, 0x2000, PROT_RW, MAP_SHARED,
+                         0, 0x08000000 };
+    assert_eq((int64_t)BASE, user_vm_mmap(mm, args));
+    assert_eq(2, vma_count(mm));            /* heap + the VMA_IO node */
+    vma_t *v = vm_area_lookup(mm, BASE);
+    assert_not_null(v);
+    assert_true((v->vm_flags & VMA_IO) != 0);
+    assert_eq(1, user_vm_test_leaf_state(BASE));
+    assert_eq(0x08000000, user_vm_test_leaf_pa(BASE));
+    assert_eq(0x08001000, user_vm_test_leaf_pa(BASE + 0x1000));
+
+    int frees_before = user_vm_test_free_count();
+    destroy_mm(mm);
+    /* Teardown unmaps but never frees a device PA. */
+    assert_eq(frees_before, user_vm_test_free_count());
+    assert_eq(0, user_vm_test_leaf_count());
+    user_vm_test_set_files(NULL);
+}
+
+TEST_FUNC(test_mmap_device_rejects_out_of_window_and_rolls_back)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    static struct vfs_node mem_node;
+    static char mem_name[] = "mem";
+    mem_node.name = mem_name;
+    file_t f = { .type = FD_DEV, .node = &mem_node };
+    user_vm_test_set_files(&f);
+
+    /* PA outside the device window: refused before anything maps. */
+    uint64_t args[6] = { BASE, 0x1000, PROT_RW, MAP_SHARED,
+                         0, 0x40000000 };
+    assert_eq(-EINVAL, user_vm_mmap(mm, args));
+    assert_eq(1, vma_count(mm));
+    assert_eq(0, user_vm_test_leaf_count());
+
+    /* MAP_PRIVATE on a device is refused. */
+    uint64_t args2[6] = { BASE, 0x1000, PROT_RW, MAP_PRIVATE,
+                          0, 0x08000000 };
+    assert_eq(-EINVAL, user_vm_mmap(mm, args2));
+    assert_eq(1, vma_count(mm));
+
+    /* Non-device fds never take the device path (fd=-1 anonymous). */
+    assert_eq((int64_t)BASE,
+              test_mmap_call(mm, 0, 0x1000, PROT_RW, MAP_ANON_PRIVATE));
+    assert_eq(2, vma_count(mm));
+    destroy_mm(mm);
+    user_vm_test_set_files(NULL);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -2040,6 +2107,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_fixed_split_node_failure_changes_nothing),
     TEST_ENTRY(test_mmap_file_backed_demand_fill),
     TEST_ENTRY(test_mmap_shared_anon_fork_write_through),
+    TEST_ENTRY(test_mmap_device_map_and_teardown_never_frees),
+    TEST_ENTRY(test_mmap_device_rejects_out_of_window_and_rolls_back),
 TEST_LIST_END
 
 int main(void)

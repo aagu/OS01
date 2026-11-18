@@ -215,11 +215,27 @@ static void resident_drop_pa(uint64_t pa, uint32_t share)
     free_4k_page(pa);
 }
 
+/* Device-window leaf removal: unmap only — the PA belongs to the
+ * device, not the mm. */
+static void io_remove_leaf(mm_t *mm, user_vm_page_t *r, uint64_t *root)
+{
+    struct user_vm_leaf leaf;
+    int rc = arch_user_vm_remove(root, r->va, &leaf);
+    if (rc != 0 || leaf.state == USER_VM_ABSENT || leaf.pa != r->pa)
+        arch_user_vm_invariant("io remove mismatch");
+    aarch64_user_vm_resident_unlink(mm, r);
+    kfree(r);
+}
+
 /* Commit-time removal: remove the leaf, verify the PA the adapter
  * hands back, drop the record's reference (freeing on the last one),
  * then unlink and free the record. */
 static void resident_remove_leaf(mm_t *mm, user_vm_page_t *r, uint64_t *root)
 {
+    if (r->source == USER_VM_PAGE_IO) {
+        io_remove_leaf(mm, r, root);
+        return;
+    }
     struct user_vm_leaf leaf;
     int rc = arch_user_vm_remove(root, r->va, &leaf);
     if (rc != 0 || leaf.state == USER_VM_ABSENT || leaf.pa != r->pa)
@@ -478,6 +494,36 @@ static bool image_perm_legal(uint32_t flags)
            flags == (VM_USER_RW | VM_NO_EXEC);
 }
 
+int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa)
+{
+    if (!mm)
+        return -EINVAL;
+    if (va < USER_VM_MMAP_BASE || va >= AARCH64_USER_LIMIT ||
+        (va & ((uint64_t)PAGE_4K_SIZE - 1)) != 0)
+        return -EINVAL;
+    if (!pa || (pa & ((uint64_t)PAGE_4K_SIZE - 1)) != 0)
+        return -EINVAL;
+    if (resident_lookup(mm, va))
+        return -EEXIST;
+
+    user_vm_page_t *rec = kmalloc(sizeof(*rec));
+    if (!rec)
+        return -ENOMEM;
+
+    if (arch_vmm_map_user_io_4k(aarch64_user_vm_root_va(mm), pa, va) != 0) {
+        kfree(rec);
+        return -EINVAL;
+    }
+
+    rec->va      = va;
+    rec->pa      = pa;
+    rec->source  = USER_VM_PAGE_IO;
+    rec->logical = VM_USER_RW | VM_NO_EXEC;
+    rec->share   = USER_VM_PAGE_PRIVATE;
+    aarch64_user_vm_resident_insert(mm, rec);
+    return 0;
+}
+
 int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa, uint32_t flags)
 {
     if (!mm)
@@ -667,7 +713,17 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
      * the table is stable).  The VMA holds one node reference for its
      * whole life (fork dups it, munmap/split/destroy drop it). */
     vfs_node_t *file_node = NULL;
-    if (!file_backed) {
+    bool device_map = false;
+    files_t *dev_files = user_vm_policy_files();
+    if (fd != UINT64_MAX && fd < NOFILE && dev_files) {
+        file_t *df = files_get_file(dev_files, (int)fd);
+        if (df && df->type == FD_DEV && df->node && df->node->name &&
+            strcmp(df->node->name, "mem") == 0)
+            device_map = true;          /* /dev/mem: offset = phys base */
+    }
+    if (device_map) {
+        /* handled below, after the length window checks */
+    } else if (!file_backed) {
         if (fd != UINT64_MAX || off != 0)
             return -EINVAL;
     } else {
@@ -689,6 +745,50 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
         return -EINVAL;
     if (alen > AARCH64_USER_LIMIT - USER_VM_MMAP_BASE)
         return -ENOMEM;
+    if (device_map) {
+        /* Device mmap (M4-remaining): /dev/mem maps physical pages
+         * from the DTB device window with the VM_DEVICE attribute.
+         * MAP_SHARED semantics only (device memory is inherently
+         * shared), eager leaves, no demand paging, no COW, and the
+         * teardown never frees the PA.  MAP_FIXED replaces overlapping
+         * mmap-window VMAs like the anonymous transaction. */
+        if (map_type != MAP_SHARED)
+            return -EINVAL;
+        if (hint == 0 || (hint & ((uint64_t)PAGE_4K_SIZE - 1)) ||
+            hint < USER_VM_MMAP_BASE || hint >= AARCH64_USER_LIMIT ||
+            alen > AARCH64_USER_LIMIT - hint)
+            return -EINVAL;
+        if (off & ((uint64_t)PAGE_4K_SIZE - 1))
+            return -EINVAL;
+
+        vma_t *dv = kmalloc(sizeof(*dv));
+        if (!dv)
+            return -ENOMEM;
+        list_init(&dv->list);
+        dv->vm_start     = hint;
+        dv->vm_end       = hint + alen;
+        dv->vm_flags     = vma_flags | VMA_IO;
+        dv->vm_pgoff     = 0;
+        dv->vm_file      = NULL;
+
+        for (uint64_t p = 0; p < alen; p += PAGE_4K_SIZE) {
+            int rc2 = user_vm_map_io_page(mm, hint + p, off + p);
+            if (rc2 != 0) {
+                /* Rollback: the leaves mapped so far go through the
+                 * same remove path (unmap, no free). */
+                for (uint64_t q = 0; q < p; q += PAGE_4K_SIZE) {
+                    user_vm_page_t *rr = resident_lookup(mm, hint + q);
+                    if (rr)
+                        io_remove_leaf(mm, rr,
+                                       aarch64_user_vm_root_va(mm));
+                }
+                kfree(dv);
+                return rc2;
+            }
+        }
+        vm_area_insert_sorted(mm, dv);
+        return (int64_t)hint;
+    }
 
     uint64_t cand = 0;
 

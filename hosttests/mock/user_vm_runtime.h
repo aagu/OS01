@@ -76,6 +76,7 @@
 #include <list.h>
 #include <arch/aarch64/user_vm_leaf.h>
 #include <arch/aarch64/user_vm_policy.h>
+#include <arch/aarch64/vmm_backend.h>   /* VM_* words for the IO primitive */
 
 #ifndef PAGE_4K_ALIGN
 #define PAGE_4K_ALIGN(addr) \
@@ -141,6 +142,7 @@ struct file {
     struct vfs_node *node;
 };
 #define FD_VFS 1
+#define FD_DEV 2
 
 typedef struct files_struct files_t;
 struct files_struct {
@@ -160,6 +162,10 @@ struct vfs_node_test {
 };
 int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
              void *buffer);
+
+/* Device-window leaf primitive (production: vmm_backend.c).  The mock
+ * records the same fake-leaf store with the VM_DEVICE word. */
+int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt);
 struct vfs_node *user_vm_test_make_file_node(const unsigned char *bytes,
                                              uint64_t size);
 void user_vm_test_set_file_bytes(const unsigned char *bytes, uint64_t size);

@@ -207,6 +207,12 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
     for (list_t *p = parent->resident_list.next; p; p = p->next) {
         user_vm_page_t *pr = container_of(p, user_vm_page_t, list);
 
+        /* Device-window leaves are not address-space state: the child
+         * inherits the VMA_IO node but maps its own device pages (or
+         * none) — never a COW reference on a device PA. */
+        if (pr->source == USER_VM_PAGE_IO)
+            continue;
+
         struct clone_stage *st = kmalloc(sizeof(*st));
         user_vm_page_t *cr = kmalloc(sizeof(*cr));
         if (!st || !cr) {

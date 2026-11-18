@@ -481,6 +481,28 @@ int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     return pt_err_to_linux(rc);
 }
 
+/* Device-memory leaf for the user VM (M4-remaining device mmap):
+ * same root admission as the 4K user path, but the PA comes from a
+ * device window (never the 4 KiB allocator) and the leaf carries the
+ * VM_DEVICE attribute — RW, uncacheable, execute-never.  No COW, no
+ * stash: the caller owns the PA lifetime. */
+int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt)
+{
+    bool user = false;
+    int rc = prepare_4k_root(pgdir, true, &user);
+    if (rc) return rc;
+
+    if ((phys & (PAGE_4K_SIZE - 1)) != 0) return -EINVAL;
+    if ((virt & (PAGE_4K_SIZE - 1)) != 0) return -EINVAL;
+    if (phys >= (UINT64_C(1) << 40)) return -EINVAL;
+    if (phys < 0x08000000ULL || phys >= 0x0a200000ULL)
+        return -EINVAL;   /* device window D + virtio MMIO only */
+
+    return pt_err_to_linux(aarch64_pt_map_4k_ext(
+        pgdir, virt, phys,
+        vm_to_perm(VM_DEVICE | VM_USER), 0));
+}
+
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,
                       uint32_t *vm_out)
 {

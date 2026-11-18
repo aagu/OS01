@@ -34,7 +34,9 @@
 #include <percpu/percpu.h>        /* percpu_data / num_cpus (M3 Task 11) */
 #include <sched/task.h>           /* init_task_union / STACK_SIZE */
 #include <selftest/boot_contract_fixture.h>
-#include <subsys/subsys.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
+#include <subsys/subsys.h>
+#include <fs/devfs.h>            /* devfs_register_chrdev (/dev/mem) */
+#include <errno.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
                               * transitively; does NOT pull in <arch/subsys.h>. */
@@ -758,9 +760,36 @@ void arch_post_smp_selftest(void)
 }
 
 #if OS01_HAS_VFS
+/* /dev/mem — the device-memory mapping marker device (M4-remaining
+ * device mmap): open(2) on it yields the FD_DEV file the user-VM
+ * mmap policy recognizes; reads and writes are refused (the window is
+ * mapped, not read). */
+static int mem_read(struct vfs_node *n __attribute__((unused)),
+                    uint64_t off __attribute__((unused)),
+                    uint64_t size, void *buf)
+{
+    (void)size;
+    (void)buf;
+    return -EIO;
+}
+
+static int mem_write(struct vfs_node *n __attribute__((unused)),
+                     uint64_t off __attribute__((unused)),
+                     uint64_t size, void *buf)
+{
+    (void)size;
+    (void)buf;
+    return -EIO;
+}
+
+static const struct devfs_ops mem_dev_ops = {
+    .read  = mem_read,
+    .write = mem_write,
+};
+
 int arch_boot_device_nodes(void)
 {
-    return 0;
+    return devfs_register_chrdev("mem", NULL, &mem_dev_ops);
 }
 #endif
 
