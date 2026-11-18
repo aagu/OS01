@@ -1059,7 +1059,13 @@ $(TEST_BLD)/boot_layout_ram_core_production.o: \
 
 LINK_CFLAGS_aarch64-boot-layout = $(HOST_CFLAGS) $(PMM_SHADOW_INC) $(KERNEL_INC) \
     -I$(TEST_INC) $(LIBC_INC)
+
+$(TEST_BLD)/early_mmu_production.o: $(TESTS_DIR)/kernel/arch/aarch64/boot/early_mmu.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -c $< -o $@
+
 LINK_GROUP_aarch64-boot-layout := \
+    $(TEST_BLD)/early_mmu_production.o \
     $(TEST_BLD)/boot_layout_arena_production.o \
     $(TEST_BLD)/boot_layout_tree_production.o \
     $(TEST_BLD)/boot_layout_ram_core_production.o \

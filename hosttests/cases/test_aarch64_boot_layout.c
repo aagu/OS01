@@ -40,6 +40,7 @@
 #include <arch/aarch64/ram_core.h>
 #include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/runtime_tree.h>
+#include <arch/aarch64/early_mmu.h>
 
 /* ── Independent expected literals (relocated layout) ─────────── */
 #define FIX_B_BASE   UINT64_C(0x02000000)
@@ -304,7 +305,42 @@ static void test_r_covering_b_rejected(void)
     pool_free_all(&pool);
 }
 
+static void test_bootstrap_table_descriptors(void)
+{
+    static _Alignas(4096) uint64_t tables[6][512];
+    static const uint64_t boot_bases[] = {0x40000000, 0x42000000, 0};
+
+    for (size_t layout = 0; layout < sizeof(boot_bases) / sizeof(boot_bases[0]);
+         ++layout) {
+        uint64_t boot_base = boot_bases[layout];
+        memset(tables, 0, sizeof(tables));
+        aarch64_build_boot_page_tables(tables, boot_base);
+
+        assert_eq((uintptr_t)tables[1] | DESC_VALID | DESC_TABLE, tables[0][0]);
+        assert_eq((uintptr_t)tables[2] | DESC_VALID | DESC_TABLE, tables[1][0]);
+        assert_eq((uintptr_t)tables[3] | DESC_VALID | DESC_TABLE, tables[1][1]);
+        for (size_t slot = 1; slot < 512; ++slot)
+            assert_eq(0, tables[0][slot]);
+        for (size_t slot = 2; slot < 512; ++slot)
+            assert_eq(0, tables[1][slot]);
+        for (size_t table = 2; table < 4; ++table) {
+            for (size_t slot = 0; slot < 512; ++slot) {
+                uint64_t pa = ((table - 2) * 512 + slot) * UINT64_C(0x200000);
+                uint64_t attrs = pa >= 0x08000000 && pa < 0x0a000000
+                    ? DESC_DEVICE_BLOCK : DESC_NORMAL_BLOCK;
+                uint64_t xn = DESC_UXN | (pa == boot_base ? 0 : DESC_PXN);
+                assert_eq(pa | attrs | xn, tables[table][slot]);
+            }
+        }
+        for (size_t slot = 0; slot < 512; ++slot) {
+            assert_eq(0, tables[4][slot]);
+            assert_eq(0, tables[5][slot]);
+        }
+    }
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_bootstrap_table_descriptors),
     TEST_ENTRY(test_ram_normalize_boot_excludes_b),
     TEST_ENTRY(test_arena_plan_starts_after_b),
     TEST_ENTRY(test_tree_build_validate_maps_b_exec),

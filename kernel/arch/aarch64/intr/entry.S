@@ -1,10 +1,8 @@
 /* aarch64 phase 1: EL1 vector table (VBAR_EL1 base).
  *
  * The table is 2 KiB-aligned (16 entries * 128 bytes), placed in
- * `.text` (high half).  main.c (not head.S!) installs it via
- * `msr vbar_el1, ...` immediately after PL011 init — see the
- * comment in main.c for why head.S's pre-MMU `boot_vectors`
- * install is not enough.
+ * `.text` (high half). The BSP installs it in arch_early_init after
+ * PL011 init; each AP installs it after enabling its MMU.
  *
  * Phase 1 (Task 2.2) wires the EL1h IRQ slot (entry #6) to a
  * dedicated `el1_irq_entry` trampoline which:

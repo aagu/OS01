@@ -67,8 +67,8 @@ void gic_ipi_test(uint32_t cpu_count);
 
 #if OS01_SELFTEST
 /* ── Boot-map selftest (M0) ────────────────────────────────────────
- * Validates the descriptors head.S installed in the active TTBR0
- * root. head.S fills all 512 PMD_low1 slots before the MMU is
+ * Validates the descriptors installed in the active TTBR0
+ * root. The early builder fills all 512 PMD_low1 slots before the MMU is
  * enabled; this walk proves the installed descriptors match the
  * spec contract (complete descriptor encoding) for PMD_low1[1..511].
  *
@@ -80,7 +80,7 @@ void gic_ipi_test(uint32_t cpu_count);
  * Special low-map leaves use field-wise checks for precise mismatch
  * reasons; PMD_low1[1..511] use exact descriptor equality so no
  * unexpected or reserved bit can pass unnoticed.
- * Expected full descriptors after the head.S fix:
+ * Expected full descriptors at the default boot base:
  *   PMD_low0[0]    = 0x60000000000705  (PA=0,          Normal 0x705, PXN|UXN)
  *   PMD_low0[0x40] = 0x60000008000401  (PA=0x08000000, Device 0x401, PXN|UXN)
  *   PMD_low1[0]    = 0x40000040000705  (PA=0x40000000, Normal 0x705, UXN only)
@@ -380,7 +380,7 @@ void arch_early_panic(const char *msg)
 
 /* Task 3 interface: returns the entry address the low boot path
  * recorded (adr _start after the BSS clear, before MMU enable). The
- * implementation lives in head.S so the high-half C read avoids the
+ * reader lives in boot_symbols.S so high-half C avoids the
  * adrp relocation range problem for low-VMA .boot.bss symbols. */
 extern uint64_t aarch64_boot_observed_entry(void);
 
@@ -414,7 +414,7 @@ void arch_early_init(const struct boot_context *bootctx)
                  (unsigned long)observed_context);
     }
 
-    /* Which core are we running on?  head.S only gates on the MIDR_EL1
+    /* Which core are we running on?  Early boot only gates on the MIDR_EL1
      * architecture field (0xF = AArch64, i.e. ARMv8-A and later); print
      * the raw MIDR so the running part is visible in the boot log.  The
      * aarch64 logger prints %lx with its own 0x prefix. */

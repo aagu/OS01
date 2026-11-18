@@ -1,186 +1,28 @@
 #include <arch/aarch64/boot_offsets.h>
 #include <arch/aarch64/boot_layout.h>
 
-/* aarch64 phase 1: head.S — low-level boot, page-table construction,
- * MMU enable, jump to high-half C entry.
- *
- * Boot flow (spec §4, strict order):
- *   1.  save x0 (direct-boot DTB or fixed UEFI boot_context) → x19
- *   2.  EL2 → EL1 drop (only if CurrentEL==EL2)
- *   3.  msr daifset, #0xf     — mask DAIF
- *   4.  panic if MIDR_EL1 architecture != 0xF (not AArch64; any ARMv8/ARMv9 core passes)
- *   5.  clear only .boot.bss
- *   6.  build dual-TTBR page tables in .boot.bss
- *   7.  dsb sy
- *   8.  set TCR_EL1 + MAIR_EL1 + TTBR0_EL1 + TTBR1_EL1 → isb
- *   9.  construct SCTLR_EL1 (RES1 + M + C + I) → isb
- *  10.  set BSP stack + TPIDR_EL1 = &aarch64_boot_percpu[0]
- *  11.  absolute blr to kernel_main (high-half)
- */
-
-.globl _boot_start
-.globl _boot_end
-.globl _boot_bss_start
-.globl _boot_bss_end
-.globl _bss_start
-.globl _bss_end
-.globl aarch64_boot_percpu
-.globl aarch64_boot_stacks
-.globl aarch64_dtb_slot
-.globl aarch64_dtb_mpidr_table
-.globl aarch64_dtb_cpu_count
-.globl exception_vectors
-.globl secondary_start
-.globl secondary_panic
-/* Helpers exposed for high-half C code (smp.c) to access .boot.bss
- * symbols without compiler-generated adrp+add failing the relocation
- * range (high-half C cannot directly reference low-VMA symbols). */
-.globl aarch64_percpu_slot_addr
-.globl aarch64_boot_stack_top_addr
-.globl aarch64_dtb_mpidr_table_addr
-.globl aarch64_dtb_cpu_count_addr
-.globl secondary_start_addr
-
-/* PAGE-TABLE DESCRIPTOR FLAGS — see aarch64 ARM, block/page descriptor
- * format (Table D4-29 in ARMv8-A ARM).  These flag values are
- * individually ORR-able (no zero-component). */
-.equ PT_V,                 (1 << 0)
-.equ PT_TYPE_PAGE,         (1 << 1)      /* level 3 page descriptor: bit1=1 (page type) */
-.equ PT_TYPE_TABLE,        (3 << 0)      /* table descriptor: bit[1:0]=0b11 */
-.equ PT_ATTR_DEV,          (0 << 2)
-.equ PT_ATTR_NORMAL,       (1 << 2)
-.equ PT_SH_NS,             (0 << 8)      /* SH field is bits[9:8] */
-.equ PT_SH_IS,             (3 << 8)
-.equ PT_AP_EL1_RW,         (0 << 6)      /* AP field is bits[7:6] */
-.equ PT_AF,                (1 << 10)
-
-/* High bits — single-bit masks, encodable as logical immediates. */
-.equ PT_PXN_MASK,          (1 << 53)
-.equ PT_UXN_MASK,          (1 << 54)
-
-/* SCTLR value: M=1, C=1, I=1 plus RES1 base 0x300C00. */
-.equ SCTLR_VALUE, ((1 << 0) | (1 << 2) | (1 << 12) | 0x300C00)
-
-/* ──────────────────────────────────────────────────────────────────
- * 24 KiB for page tables (declared in .boot.bss, NOBITS).
- * Layout (6 tables × 4 KiB):
- *    +0x0000  PGD          — TTBR0 and TTBR1 both point here.
- *    +0x1000  PUD_low      — entries 0..511 for low identity regions.
- *    +0x2000  PMD_low0     — for VA low [0x00000000, 0x40000000) (0..1GB)
- *    +0x3000  PMD_low1     — for VA low [0x40000000, 0x80000000) (1..2GB)
- *    +0x4000  PTE_low1_k   — 4 KiB-granular pages for 0x40000000..2MiB.
- *                            This is the SAME page the high-half kernel
- *                            accesses (VA 0xFFFF0000_40080xxx → PA via
- *                            this table because bits[47:0] of the VA
- *                            land in [0x40000000, 0x80000000]).
- *    +0x5000  PTE_mmio     — for 0x0800_0000..0x0820_0000 (Device
- *                            pages for PL011 / GICD / GICC).
- * ────────────────────────────────────────────────────────────────── */
 .section .boot.bss, "aw", @nobits
 .balign 0x1000
 .globl boot_page_tables
 boot_page_tables:
-    .skip   0x6000                            /* six 4 KiB tables */
+    .skip   0x6000                            /* four tables + two reserved pages */
 .globl boot_page_tables_end
 boot_page_tables_end:
 
-.globl aarch64_boot_dtb_slot
-aarch64_boot_dtb_slot:
-    .skip   8                                 /* DTB-park slot */
-
 /* Entry address recorded by the low boot path (adr _start, Task 3):
  * consumed via aarch64_boot_observed_entry() by arch_early_init. */
+.globl aarch64_boot_observed_entry_value
+.hidden aarch64_boot_observed_entry_value
 aarch64_boot_observed_entry_value:
     .skip   8
 
-/* ──────────────────────────────────────────────────────────────────
- * boot_vectors: identity-mapped vector table for the MMU-bring-up
- * window (before VBAR can point at the high-half .text.entry).
- *
- * Layout matches entry.S but every entry panics into a small
- * printer loop that dumps ELR_EL1 / ESR_EL1 / FAR_EL1 in hex via
- * PL011 MMIO writes (PL011 is reachable pre-MMU at 0x09000000) and
- * then spins.  The MMIO write also flushes with a dummy read.
- *
- * We give this symbol external linkage so head.S can `msr vbar_el1, x0`
- * before MMU enable.
- * ────────────────────────────────────────────────────────────────── */
-.section .boot.text, "ax"
-.globl boot_vectors
-.balign 2048
-boot_vectors:
-    .balign 128
-    b   .Lpanic                       /* sync, SP_EL0 */
-    .balign 128
-    b   .Lpanic                       /* IRQ,   SP_EL0 */
-    .balign 128
-    b   .Lpanic                       /* FIQ,   SP_EL0 */
-    .balign 128
-    b   .Lpanic                       /* SError, SP_EL0 */
-    .balign 128
-    b   .Lpanic                       /* sync,  SP_ELx */
-    .balign 128
-    b   .Lirq_spin                   /* IRQ,   SP_ELx (left for parity) */
-    .balign 128
-    b   .Lpanic                       /* FIQ,   SP_ELx */
-    .balign 128
-    b   .Lpanic                       /* SError, SP_ELx */
-
-/* Print "FAULT elr=XXXXXXXXXXXXXXXX esr=XXXXXXXXXXXXXXXX far=XXXXXXXXXXXXXXXX\n" */
-.Lpanic:
-    mov     x1, #'P'
-    bl      .Lprint_c
-    mov     x1, #'!'
-    bl      .Lprint_c
-.Lpanic_spin:
-    b       .Lpanic_spin
-
-.Lirq_spin:
-    b       .Lirq_spin
-
-/* Helpers — all clobber x0,x1,x2,x3. PL011 @ 0x09000000. */
-.Lprint_c:
-    /* spin until TXFF=0, then write char in x1 */
-    mov     x2, #0x09000000
-1:  ldr     w3, [x2, #0x18]
-    tst     w3, #(1 << 5)
-    b.ne    1b
-    str     w1, [x2]
-    ret
-
-.Lprint_x64:
-    /* print 16 hex digits of x0, MSB first.  Uses x9 as counter,
-     * but BL clobbers caller-saved regs, so save x9 (and x30 — the
-     * inner .Lprint_c call clobbers the link register) on the stack.
-     * "ror x0, x0, #60" is a rotate-left by 4: it moves the next
-     * (more significant) nibble down into the low four bits. */
-    stp     x9, x30, [sp, #-16]!
-    mov     x9, #16
-1:  ror     x0, x0, #60
-    and     x1, x0, #0xf
-    cmp     x1, #10
-    b.lt    2f
-    add     x1, x1, #('a' - 10)
-    b       3f
-2:  add     x1, x1, #'0'
-3:  bl      .Lprint_c
-    sub     x9, x9, #1
-    cbnz    x9, 1b
-    ldp     x9, x30, [sp], #16
-    ret
-
-/* ──────────────────────────────────────────────────────────────────
- * `_start`
- * ────────────────────────────────────────────────────────────────── */
 .section .boot.text.first, "ax"
 .balign 0x1000
 .globl _start
+.type _start, %function
 _start:
     msr     daifset, #0xf
-    /* 1. Park the entry handoff into x19 (callee-saved across drop). */
     mov     x19, x0
-    /* UEFI hands off exactly one BSP, regardless of its affinity.
-     * Firmware-managed APs enter only at secondary_start via PSCI. */
 
     /* 2. EL3 → EL1 drop if at EL3.  When QEMU is launched with
      *    `-M virt,secure=on` the kernel is dropped into Secure EL3
@@ -208,7 +50,7 @@ _start:
     mov     x0, #0x3c5
     msr     spsr_el3, x0
 
-    /* eret target — go to the EL2 drop code (label 1f below). */
+    /* Resume at the CurrentEL check below. */
     ldr     x0, =99f
     msr     elr_el3, x0
     isb
@@ -238,54 +80,19 @@ _start:
 
 1:
     msr     spsel, #1
-    /* 2a. Set up a temporary stack early so the bss-clear loop and
-     *     page-table builder can use SP for register saves.  Use the
-     *     BSP stack slot (PC=0 came in with SP=0 — using SP without
-     *     initialising it first faults at the first STP/LDP). */
     ldr     x0, =aarch64_boot_stacks
     mov     x1, #AARCH64_BOOT_STACK_SIZE
     add     x1, x0, x1
     mov     sp, x1
 
-    /* 2b. Set up a minimal identity-mapped vector table BEFORE MMU
-     *     enable.  DAIFSet masks async exceptions only; a sync fault
-     *     during MMU bring-up would otherwise vector to VBAR=0 (the
-     *     ROM reset vector) and infinite-loop at 0x200.  This stub
-     *     prints ELR/ESR/FAR to PL011 (which is reachable pre-MMU as a
-     *     MMIO write) and spins. */
     ldr     x0, =boot_vectors
     msr     vbar_el1, x0
     isb
 
-    /* 3. Mask DAIF (single-threaded, IRQs come back in Task 3). */
     msr     daifset, #0xf
+    bl      aarch64_boot_check_midr
 
-    /* 4. Generic AArch64 check (MIDR_EL1).  The core is NOT pinned to any
-     *    particular part number any more: only the ARCHITECTURE field is
-     *    checked.  Per the Armv8-A Architecture Registers (DDI0595,
-     *    MIDR_EL1), ARCHITECTURE = 0b1111 means "architectural features are
-     *    individually identified in the ID_* registers" — that is the CPUID
-     *    scheme, i.e. ARMv8-A and later (ARMv9-A included; Linux hardcodes
-     *    0xF for every A-profile CPU model it knows).  All other encodings
-     *    are either reserved or pre-ARMv7 32-bit.
-     *
-     *    Implementer (MIDR_EL1[31:24]) and part number (MIDR_EL1[15:4])
-     *    are deliberately NOT checked:
-     *      - QEMU's "max" CPU reports implementer 0x00 (unknown) while
-     *        still being an AArch64 part; it is the only QEMU model that
-     *        exposes RNDR/RNDRRS (the aarch64 STRONG entropy source).
-     *      - Real boards ship ARM (0x41), Ampere (0xC0), NVIDIA, Fujitsu,
-     *        Apple, ... implementers — none of them are ARM's own 0x41.
-     *
-     *    A non-AArch64 core (or a bogus MIDR read) still fails closed: the
-     *    descriptor/MMU bring-up below is AArch64 only. */
-    mrs     x0, midr_el1
-    lsr     x1, x0, #16
-    and     x1, x1, #0xf                         /* MIDR_EL1[19:16] */
-    cmp     x1, #0xf                              /* AArch64, CPUID scheme */
-    b.ne    .Lmidr_fatal                          /* not AArch64 → panic */
-
-    /* 5. Zero .boot.bss only (not the .boot.text!). */
+    /* The BSP stack is inside .boot.bss; there is no live stack frame here. */
     ldr     x0, =_boot_bss_start
     ldr     x1, =_boot_bss_end
     mov     x2, x0
@@ -305,335 +112,30 @@ _start:
     ldr     x1, =aarch64_boot_observed_entry_value
     str     x0, [x1]
 
-    /* 6. Build dual-TTBR page tables. */
-    bl      build_pagetables
+    ldr     x0, =boot_page_tables
+    ldr     x1, =AARCH64_BOOT_BLOCK_BASE
+    bl      aarch64_build_boot_page_tables
 
-    /* 7. dsb sy — page-table writes must be visible to walker. */
     dsb     sy
-
-    /* 8. TCR + MAIR + TTBR0/1. */
-    bl      write_tcr_mair_ttbr
-
-    /* 9. SCTLR_EL1: RES1 base + M + C + I. */
-    ldr     x0, =SCTLR_VALUE
+    bl      aarch64_boot_install_translation
+    ldr     x0, =AARCH64_BOOT_SCTLR
     msr     sctlr_el1, x0
     isb
 
-    /* 10. BSP stack + TPIDR_EL1. */
-    bl      setup_bsp_stack_and_tpidr
+    ldr     x0, =percpu_data
+    msr     tpidr_el1, x0
 
-    /* 11. Absolute branch to kernel_main (high-half).
-     *     x19 still holds the entry handoff from _start; setup_* clobbered
-     *     x0, so restore it before the call. */
     mov     x0, x19
     ldr     x30, =kernel_main
     blr     x30
 
 99: b       99b
+.size _start, . - _start
 
-/* Fatal: the boot CPU is not an AArch64 core (MIDR_EL1 architecture
- * != 0xF).  The kernel logger is not installed this early, so print
- * straight to PL011 — otherwise this fail-closed path is completely
- * silent and the only symptom is a missing boot marker. */
-.Lmidr_fatal:
-    /* x5 = string cursor (x1 is the character argument to .Lprint_c);
-     * x4 = the byte read. */
-    adr     x5, aarch64_midr_fatal_msg
-.Lmidr_fatal_loop:
-    ldrb    w4, [x5], #1
-    cbz     w4, .Lmidr_fatal_hex
-    mov     x1, x4
-    bl      .Lprint_c
-    b       .Lmidr_fatal_loop
-.Lmidr_fatal_hex:
-    mrs     x0, midr_el1
-    bl      .Lprint_x64
-    mov     x1, #'\n'
-    bl      .Lprint_c
-.Lmidr_fatal_spin:
-    b       .Lmidr_fatal_spin
-
-
-/* ──────────────────────────────────────────────────────────────────
- * setup_bsp_stack_and_tpidr
- * ────────────────────────────────────────────────────────────────── */
-setup_bsp_stack_and_tpidr:
-    /* Phase 2 #3: TPIDR_EL1 = &percpu_data[0] (real percpu_t with
-     * need_resched at offset 8), not &aarch64_boot_percpu[0]
-     * (48-byte struct without need_resched). percpu_init() in
-     * main.c later populates self/cpu_id/arch_processor_id/online
-     * — no need to write boot-percpu stubs here. */
-    ldr     x0, =percpu_data
-    msr     tpidr_el1, x0
-
-    ldr     x1, =aarch64_boot_stacks
-    mov     x2, #AARCH64_BOOT_STACK_SIZE
-    add     x1, x1, x2
-    mov     sp, x1
-    ret
-
-
-/* ──────────────────────────────────────────────────────────────────
- * write_slot: dst_base[slot] = desc.
- *   in: x0 = base, x1 = desc, x2 = slot index (0..511)
- * ────────────────────────────────────────────────────────────────── */
-write_slot:
-    lsl     x3, x2, #3
-    add     x3, x0, x3
-    str     x1, [x3]
-    ret
-
-/* write_table: dst_base[slot] = table_desc(next_phys).
- *   in: x0 = base, x1 = next_phys, x2 = slot index */
-write_table:
-    orr     x1, x1, #(PT_V | PT_TYPE_TABLE)     /* bits[1:0] = 11 */
-    b       write_slot
-
-/* make_2m: 2 MiB block descriptor.
- *   in: x0 = phys_2m_aligned, x1 = low_flags; out: x0 = descriptor */
-make_2m:
-    lsr     x0, x0, #21
-    lsl     x0, x0, #21
-    orr     x0, x0, x1
-    ret
-
-/* make_4k: 4 KiB page descriptor.
- *   in: x0 = phys_4k_aligned, x1 = low_flags; out: x0 = descriptor */
-make_4k:
-    lsr     x0, x0, #12
-    lsl     x0, x0, #12
-    orr     x1, x1, #PT_TYPE_PAGE          /* level 3 page: bit1=1 (valid page type) */
-    orr     x0, x0, x1
-    ret
-
-
-/* ──────────────────────────────────────────────────────────────────
- * build_pagetables — fills `boot_page_tables` (24 KiB) with
- * the page-table hierarchy described in head.S comments.
- *
- * Page-table memory layout (declarations in .boot.bss above):
- *
- *   base+0x0000  PGD          4 KiB
- *   base+0x1000  PUD_low      4 KiB
- *   base+0x2000  PMD_low0     4 KiB     (covers 0..1 GB)
- *   base+0x3000  PMD_low1     4 KiB     (covers 1..2 GB)
- *   base+0x4000  PTE_low1_k   4 KiB     (4 KiB pages for 0x4000_0000..2 MiB)
- *   base+0x5000  PTE_mmio     4 KiB     (4 KiB pages for 0x0800_0000..0x0820_0000)
- * ────────────────────────────────────────────────────────────────── */
-build_pagetables:
-    stp     x29, x30, [sp, #-16]!
-    mov     x29, sp
-
-    /* x20 = mask for "no-execute" high bits (PXN | UXN = 0x3 << 53). */
-    mov     x20, #0x3
-    lsl     x20, x20, #53
-
-    /* Page-table bases (physical, MMU is off). */
-    ldr     x10, =boot_page_tables
-    add     x11, x10, #0x1000                  /* PUD_low        */
-    add     x12, x10, #0x2000                  /* PMD_low0       */
-    add     x13, x10, #0x3000                  /* PMD_low1       */
-    add     x14, x10, #0x4000                  /* PTE_low1_k     */
-    add     x15, x10, #0x5000                  /* PTE_mmio       */
-
-    /* 0. Zero the page-table scratch. */
-    mov     x16, x10
-    mov     x17, #((boot_page_tables_end - boot_page_tables) / 8)
-zp_all:
-    str     xzr, [x16], #8
-    sub     x17, x17, #1
-    cbnz    x17, zp_all
-
-    /* ── 1. TTBR0/TTBR1 share PGD[0] → PUD_low. ───────────────────
-     *
-     * Both regimes' PGD[0] points to PUD_low. The 48-bit VA bits
-     * [47:39] of any identity-mapped kernel address is 0 (since the
-     * lower 48 bits fit in [0x40000000, 0x80000000] for our kernel
-     * image at 0xFFFF0000_40080xxx).  PUD_low[1] → PMD_low1 covers
-     * 1..2GB and contains the PTE_low1_k we use for fine-grained
-     * mapping of the kernel image + the high-half mirror source.  */
-    mov     x0, x10
-    mov     x1, x11
-    mov     x2, #0
-    bl      write_table
-
-    /* PUD_low[0] → PMD_low0  (0..1GB) */
-    mov     x0, x11
-    mov     x1, x12
-    mov     x2, #0
-    bl      write_table
-
-    /* PUD_low[1] → PMD_low1  (1..2GB; .boot + kernel image source) */
-    mov     x0, x11
-    mov     x1, x13
-    mov     x2, #1
-    bl      write_table
-
-    /* ── 2. PMD_low0: 2 MiB blocks across 0..1GB ────────────────────
-     * Slot 0x40..0x4F (32 MiB at 0x0800_0000..0x0A00_0000) is replaced
-     * with a PTE table for MMIO (Device-nGnRnE pages). */
-    mov     x22, #PT_V
-    mov     x21, #PT_ATTR_NORMAL
-    orr     x22, x22, x21
-    mov     x21, #PT_SH_IS               /* Inner Shareable — required for SMP coherency */
-    orr     x22, x22, x21
-    mov     x21, #PT_AP_EL1_RW
-    orr     x22, x22, x21
-    mov     x21, #PT_AF
-    orr     x22, x22, x21
-
-    mov     x25, #512
-    mov     x26, #0
-.Lpud0:
-    cbz     x25, .Lpud0_done
-    mov     x0, x26
-    mov     x1, x22
-    bl      make_2m
-    orr     x0, x0, x20
-
-    lsr     x2, x26, #21
-    mov     x1, x0
-    mov     x0, x12
-    bl      write_slot
-
-    add     x26, x26, #0x200000
-    sub     x25, x25, #1
-    b       .Lpud0
-.Lpud0_done:
-
-    /* ── MMIO: Device-nGnRnE 2 MiB blocks for 0x08000000..0x0A000000. ──
-     * Covers GICD (0x08000000), GICC (0x08010000), PL011 (0x09000000).
-     * Device regions carry a uniform permission (PXN=1, UXN=1), so a
-     * 2 MiB block is sufficient — no L3 page table needed (spec §2.2). */
-    mov     x23, #PT_V
-    mov     x21, #PT_ATTR_DEV
-    orr     x23, x23, x21
-    mov     x21, #PT_SH_NS
-    orr     x23, x23, x21
-    mov     x21, #PT_AP_EL1_RW
-    orr     x23, x23, x21
-    mov     x21, #PT_AF
-    orr     x23, x23, x21
-    /* x23 = Device block flags */
-
-    mov     x24, #0x40
-.Lmmio_blk:
-    cmp     x24, #0x50
-    b.ge    .Lmmio_blk_done
-    mov     x0, x24
-    lsl     x0, x0, #21                    /* PA = index * 2 MiB (identity) */
-    mov     x1, x23
-    bl      make_2m
-    orr     x0, x0, x20                    /* PXN | UXN */
-    mov     x1, x0
-    mov     x0, x12                        /* PMD_low0 base */
-    mov     x2, x24                        /* PMD index 0x40..0x4F */
-    bl      write_slot
-    add     x24, x24, #1
-    b       .Lmmio_blk
-.Lmmio_blk_done:
-
-    /* ── 3. PMD_low1: 2 MiB blocks covering 1..2GB (no L3 page tables).
-     *
-     *    ALL 512 slots (0..511) are filled with plain Normal PXN|UXN
-     *    blocks: the fixed bootstrap direct-map window plus, at index
-     *    0, the OLD fixed executable block PA 0x40000000 — which is a
-     *    plain non-executable RAM slot whenever the configured boot
-     *    block B moved away from it (Task 3). The single executable
-     *    block is written LAST by boot_write_exec_block below, which
-     *    selects its table and slot from the configured base.
-     *
-     *    PMD_low1 is the PMD table for PUD[1] (which covers 1..2GB), so
-     *    PMD index 0 within PMD_low1 corresponds to PA 0x40000000.
-     */
-    mov     x24, #0                           /* PMD index 0..511        */
-    mov     x25, #0x40000000                  /* block PA for index 0    */
-    mov     x26, #512                         /* slots remaining         */
-.Lpmd1_fill:
-    cbz     x26, .Lpmd1_fill_done
-    mov     x0, x25
-    mov     x1, x22
-    bl      make_2m
-    orr     x0, x0, x20                       /* PXN | UXN               */
-    mov     x1, x0                            /* x1 = descriptor         */
-    mov     x0, x13                           /* x0 = PMD_low1 base      */
-    mov     x2, x24                           /* x2 = slot index         */
-    bl      write_slot
-    add     x25, x25, #0x200000
-    add     x24, x24, #1
-    sub     x26, x26, #1
-    b       .Lpmd1_fill
-.Lpmd1_fill_done:
-
-    /* ── 4. The single executable boot block B: written LAST so it
-     * overwrites whatever generic Normal NX descriptor the fills above
-     * placed in its slot (and leaves the old fixed 0x40000000 block a
-     * plain Normal PXN|UXN slot whenever B moved away). */
-    bl      boot_write_exec_block
-
-    ldp     x29, x30, [sp], #16
-    ret
-
-
-/* ──────────────────────────────────────────────────────────────────
- * boot_write_exec_block — the ONLY writer of the executable boot
- * block descriptor (Task 3 interface symbol).
- *
- * Selects the L2 table from the configured base at compile time:
- * base >> 30 picks the L1 slot's L2 table (0 → PMD_low0 in x12,
- * 1 → PMD_low1 in x13) and (base >> 21) & 511 picks the L2 slot.
- * Descriptor output PA = base, Normal, EL1 RW, UXN (no EL0 exec),
- * PXN cleared (EL1 executable).
- *
- * in: x12/x13 table bases, x22 Normal low flags; clobbers x0..x4.
- *
- * x30 MUST be saved: this is a CALLED leaf (bl from build_pagetables)
- * that itself calls make_2m/write_slot — without a frame the final
- * ret would use the clobbered x30 and jump back to itself.
- * ────────────────────────────────────────────────────────────────── */
-boot_write_exec_block:
-    stp     x29, x30, [sp, #-16]!
-    ldr     x0, =AARCH64_BOOT_BLOCK_BASE
-.if (AARCH64_BOOT_BLOCK_BASE >> 30) == 0
-    mov     x4, x12                           /* PMD_low0 (0..1 GiB)     */
-.else
-    mov     x4, x13                           /* PMD_low1 (1..2 GiB)     */
-.endif
-    mov     x2, #((AARCH64_BOOT_BLOCK_BASE >> 21) & 511)
-    mov     x1, x22                           /* Normal low flags        */
-    bl      make_2m
-    orr     x0, x0, #PT_UXN_MASK              /* UXN first (no EL0 exec) */
-    bic     x0, x0, #PT_PXN_MASK              /* clear ONLY PXN → EL1 X  */
-    mov     x1, x0                            /* x1 = descriptor         */
-    mov     x0, x4                            /* x0 = selected L2 table  */
-    bl      write_slot
-    ldp     x29, x30, [sp], #16
-    ret
-
-
-/* ──────────────────────────────────────────────────────────────────
- * write_tcr_mair_ttbr
- *
- * TCR_EL1 composed value 0x0000_0002_B510_3510:
- *   bits[5:0]   = 0x10        (T0SZ = 16)        ← 256 TB region
- *   bits[7:6]   = 0b00        (EPD0=0, A0=0)
- *   bits[9:8]   = 0b01        (IRGN0 = WBWA)
- *   bits[11:10] = 0b01        (ORGN0 = WBWA)
- *   bits[13:12] = 0b11        (SH0 = Inner Shareable)
- *   bits[14:15] = 0b00        (TG0 = 4 KiB)
- *   bits[21:16] = 0x10        (T1SZ = 16)        ← 256 TB region
- *   bits[22:23] = 0b00        (A1=0, EPD1=0)
- *   bits[25:24] = 0b01        (IRGN1 = WBWA)
- *   bits[27:26] = 0b01        (ORGN1 = WBWA)
- *   bits[29:28] = 0b11        (SH1 = Inner Shareable)
- *   bits[31:30] = 0b10        (TG1 = 4 KiB)
- *   bits[34:32] = 0b010       (IPS = 40-bit PA)
- *
- * MAIR_EL1 = 0x0000_0000_0000_ff00:
- *   bits[7:0]   = 0x00        (AttrIdx 0 = Device-nGnRnE)
- *   bits[15:8]  = 0xff        (AttrIdx 1 = Normal Inner/Outer WBWA)
- * ────────────────────────────────────────────────────────────────── */
-write_tcr_mair_ttbr:
+.section .boot.text, "ax"
+.globl aarch64_boot_install_translation
+.hidden aarch64_boot_install_translation
+aarch64_boot_install_translation:
     /* TCR_EL1 = 0x0000_0002_B510_3510.
      *
      * Byte layout (LSB → MSB):
@@ -671,247 +173,3 @@ write_tcr_mair_ttbr:
     msr     ttbr1_el1, x0
     isb
     ret
-
-
-/* PSCI CPU_ON64 enters here with context_id in x0, MMU off.
- * Only EL1/EL2 are supported. No stack access or call occurs until
- * context, full affinity, slot identity and independent stack agree.
- * The BSP has already published all metadata and page tables to PoC.
- */
-.section .boot.text, "ax"
-.balign 0x80
-.globl secondary_start
-.type secondary_start, %function
-secondary_start:
-    msr     daifset, #0xf
-    mov     x19, x0                         /* preserve full context_id */
-    mrs     x0, CurrentEL
-    cmp     x0, #0x8
-    b.eq    .Lap_from_el2
-    cmp     x0, #0x4
-    b.ne    secondary_panic
-    b       .Lap_el1
-
-.Lap_from_el2:
-    mov     x0, #(1 << 31)                  /* HCR_EL2.RW */
-    msr     hcr_el2, x0
-    mov     x0, #3                         /* EL1 physical timer/counter */
-    msr     cnthctl_el2, x0
-    msr     cntvoff_el2, xzr
-    mov     x0, #0x3c5                     /* EL1h, all DAIF masked */
-    msr     spsr_el2, x0
-    adr     x0, .Lap_el1
-    msr     elr_el2, x0
-    isb
-    eret
-
-.Lap_el1:
-    msr     spsel, #1                       /* even when firmware gave EL1t */
-    msr     daifset, #0xf
-    cbz     x19, secondary_panic             /* BSP may not enter as an AP */
-    cmp     x19, #AARCH64_BOOT_CAPACITY
-    b.hs    secondary_panic
-    ldr     x2, =aarch64_dtb_cpu_count
-    ldr     w2, [x2]                        /* published count is uint32_t */
-    cmp     w2, #AARCH64_BOOT_CAPACITY
-    b.hi    secondary_panic
-    cmp     x19, x2
-    b.hs    secondary_panic
-
-    mrs     x1, mpidr_el1
-    ldr     x2, =AARCH64_BOOT_AFFINITY_MASK
-    and     x1, x1, x2                     /* Aff3 + Aff2..0, no flags */
-    ldr     x3, =aarch64_dtb_mpidr_table
-    ldr     x4, [x3, x19, lsl #3]
-    cmp     x4, x1
-    b.ne    secondary_panic
-
-    ldr     x6, =aarch64_boot_percpu
-    mov     x7, #AARCH64_BOOT_PERCPU_SIZE
-    madd    x6, x19, x7, x6
-    ldr     x7, [x6, #AARCH64_BOOT_MPIDR_OFFSET]
-    cmp     x7, x1
-    b.ne    secondary_panic
-    ldr     w7, [x6, #AARCH64_BOOT_CPU_ID_OFFSET]
-    cmp     x7, x19
-    b.ne    secondary_panic
-    ldr     x7, [x6, #AARCH64_BOOT_SELF_OFFSET]
-    cmp     x7, x6
-    b.ne    secondary_panic
-
-    ldr     x7, [x6, #AARCH64_BOOT_STACK_OFFSET]
-    tst     x7, #0xf
-    b.ne    secondary_panic
-    ldr     x8, =aarch64_boot_stacks
-    add     x8, x8, x19, lsl #AARCH64_BOOT_STACK_SHIFT
-    add     x8, x8, #AARCH64_BOOT_STACK_SIZE
-    cmp     x7, x8                          /* cannot select another CPU's stack */
-    b.ne    secondary_panic
-    mov     sp, x7
-    /* Phase 2 #3: TPIDR_EL1 = &percpu_data[cpu_id]. x19 is cpu_id
-     * (verified above via [x6, #AARCH64_BOOT_CPU_ID_OFFSET]).
-     * PERCPU_DATA_SIZE is a numeric literal in
-     * kernel/include/percpu/percpu.h (assembly context cannot use
-     * sizeof(percpu_t); its equality with sizeof(percpu_t) is pinned
-     * by a _Static_assert there). Any percpu_t up to 64 KiB fits the
-     * 16-bit mov immediate, so the literal needs no asm-side update
-     * when the struct grows. */
-    ldr     x7, =percpu_data
-    mov     x8, #PERCPU_DATA_SIZE
-    madd    x7, x19, x8, x7
-    msr     tpidr_el1, x7
-
-    ldr     x0, =boot_vectors
-    msr     vbar_el1, x0
-    isb
-    dsb     sy
-    bl      write_tcr_mair_ttbr             /* TTBR0 remains boot root */
-    ldr     x0, =runtime_ttbr1_pa
-    ldr     x0, [x0]
-    cbz     x0, secondary_panic
-    tst     x0, #0xfff
-    b.ne    secondary_panic
-    lsr     x1, x0, #40
-    cbnz    x1, secondary_panic
-    msr     ttbr1_el1, x0
-    isb
-    /* CPU_ON may resume a PE with retained firmware translations.
-     * BSP TLBI is local; this AP must discard its own EL1 entries. */
-    dsb     sy
-    tlbi    vmalle1
-    dsb     sy
-    isb
-    ldr     x0, =SCTLR_VALUE
-    msr     sctlr_el1, x0
-    isb
-    ldr     x0, =exception_vectors
-    msr     vbar_el1, x0
-    isb
-
-    /* Task 5 supplies C-side local GIC init and release-store ACK.
-     * No BSS/page-table writes, ACK or command wait belong in this entry. */
-    mov     x0, x19
-    ldr     x30, =secondary_idle
-    blr     x30
-.Lap_returned:
-    wfi
-    b       .Lap_returned
-.size secondary_start, . - secondary_start
-
-/* Invalid firmware context: no usable stack, no C call and no shared
- * metadata writes. BSP will diagnose its target MPIDR on ACK timeout. */
-.globl secondary_panic
-.type secondary_panic, %function
-secondary_panic:
-    msr     daifset, #0xf
-1:  wfi
-    b       1b
-.size secondary_panic, . - secondary_panic
-
-
-/* ──────────────────────────────────────────────────────────────────
- * Helpers exposed to high-half C code (smp.c) so it can address the
- * low-half .boot.bss storage without triggering an out-of-range
- * R_AARCH64_ADR_PREL_PG_HI21 relocation.
- *
- * Each helper returns the absolute LOW PHYSICAL address of the
- * corresponding structure in x0, which smp.c may then cast to a
- * volatile pointer.
- * ────────────────────────────────────────────────────────────────── */
-.section .text, "ax"
-
-/* x0 = cpu_id; returns &aarch64_boot_percpu[cpu_id] (low phys).
- * aarch64_boot_percpu_t is 48 bytes; stride = 48 = 32 + 16. */
-.globl aarch64_percpu_slot_addr
-aarch64_percpu_slot_addr:
-    ldr     x1, =aarch64_boot_percpu
-    mov     x2, #AARCH64_BOOT_PERCPU_SIZE
-    madd    x0, x0, x2, x1
-    ret
-
-/* x0 = cpu_id; returns stack top (low phys). */
-.globl aarch64_boot_stack_top_addr
-aarch64_boot_stack_top_addr:
-    ldr     x1, =aarch64_boot_stacks
-    add     x0, x1, x0, lsl #AARCH64_BOOT_STACK_SHIFT
-    add     x0, x0, #AARCH64_BOOT_STACK_SIZE
-    ret
-
-/* Returns &aarch64_dtb_mpidr_table (low phys). */
-.globl aarch64_dtb_mpidr_table_addr
-aarch64_dtb_mpidr_table_addr:
-    ldr     x0, =aarch64_dtb_mpidr_table
-    ret
-
-/* Returns &aarch64_dtb_cpu_count (low phys). */
-.globl aarch64_dtb_cpu_count_addr
-aarch64_dtb_cpu_count_addr:
-    ldr     x0, =aarch64_dtb_cpu_count
-    ret
-
-/* Returns secondary_start (low phys, PSCI cpu_on entry). */
-.globl secondary_start_addr
-secondary_start_addr:
-    ldr     x0, =secondary_start
-    ret
-
-/* Returns the entry address the low boot path recorded (adr _start,
- * taken after the BSS clear and before MMU enable — Task 3 evidence).
- * Selftest-only consumer: arch_early_init compares it against the
- * configured boot block entry. */
-.globl aarch64_boot_observed_entry
-aarch64_boot_observed_entry:
-    ldr     x0, =aarch64_boot_observed_entry_value
-    ldr     x0, [x0]
-    ret
-
-.globl aarch64_boot_page_tables_addr
-aarch64_boot_page_tables_addr:
-    ldr     x0, =boot_page_tables
-    ret
-
-.globl aarch64_boot_page_tables_end_addr
-aarch64_boot_page_tables_end_addr:
-    ldr     x0, =boot_page_tables_end
-    ret
-
-/* Returns _boot_start (low physical LMA of the kernel image). High-half
- * C cannot take the address directly because adrp+add cannot span the
- * ~2^48 gap to the low physical linker symbol; the ldr literal pool
- * stays within +/-1 MiB of the PC and is link-time resolved. */
-.globl aarch64_boot_image_start_addr
-aarch64_boot_image_start_addr:
-    ldr     x0, =_boot_start
-    ret
-
-/* Returns _kernel_lma_end (low physical LMA just past the kernel
- * image). Same rationale as aarch64_boot_image_start_addr. */
-.globl aarch64_kernel_lma_end_addr
-aarch64_kernel_lma_end_addr:
-    ldr     x0, =_kernel_lma_end
-    ret
-
-.globl aarch64_runtime_root_address
-aarch64_runtime_root_address:
-    ldr x0, =runtime_ttbr1_pa
-    ret
-.globl aarch64_probe_pa_address
-aarch64_probe_pa_address:
-    ldr x0, =pt_probe_pa
-    ret
-.globl aarch64_probe_expected_address
-aarch64_probe_expected_address:
-    ldr x0, =pt_probe_expected
-    ret
-
-/* ──────────────────────────────────────────────────────────────────
- * .boot.rodata — strings the early boot path prints before the kernel
- * logger exists.  Kept in its own section (not inline in .boot.text)
- * so the `ldr xN, =symbol` literal pools in the text sections keep
- * their 4-byte alignment.
- * ────────────────────────────────────────────────────────────────── */
-.section .boot.rodata, "a"
-.balign 4
-.globl aarch64_midr_fatal_msg
-aarch64_midr_fatal_msg:
-    .asciz  "FATAL: not AArch64, MIDR="

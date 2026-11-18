@@ -204,7 +204,12 @@ net / proc / resource / time / misc 组仍隐藏。详见
 | 构建期校验 | `mk/profiles/aarch64-clang.mk:39-42` | 十进制/`0x` 十六进制整数、2 MiB 对齐、M0 范围 `[0,0x80000000)`、与设备窗口 D 不相交、留得下 ≥20 MiB 早期 arena；非法即**构建期报错**，不掩码纠正、不回落默认 |
 | 单一常量源 | `kernel/include/arch/aarch64/boot_layout.h:25-44` | 裸预处理常量（无 C 类型/无 `ULL`），内核 C、预处理汇编、预处理链接脚本三处展开一致；其余区间全部由 BASE 派生 |
 | 链接脚本 | `kernel/arch/aarch64/linker.ld:27,45,51,157-158` → `linker.generated.ld`（`kernel/Makefile:670-689`） | 带 cfg stamp，避免「默认→改址→默认」增量构建漏重编 |
-| 消费方（四处联动） | UEFI loader `boot/uefi/arch/aarch64/{elf.c,boot.c}`；M0 写槽 `kernel/arch/aarch64/head.S:594-611`；M1 建表 `kernel/arch/aarch64/memory/runtime_tree.c:93-96`；RAM 保留 `kernel/arch/aarch64/memory/ram_core.c:442-443` | 同一布局驱动四处 |
+| 消费方（四处联动） | UEFI loader `boot/uefi/arch/aarch64/{elf.c,boot.c}`；M0 建表 `kernel/arch/aarch64/boot/early_mmu.c`；M1 建表 `kernel/arch/aarch64/memory/runtime_tree.c:93-96`；RAM 保留 `kernel/arch/aarch64/memory/ram_core.c:442-443` | 同一布局驱动四处 |
+
+AArch64 `head.S` 负责 BSP 从固件交接到 `kernel_main`：建立 EL1、栈和早期向量，清零
+`.boot.bss`，调用低地址、无外部调用的 M0 构造器，再安装并启用 MMU。PSCI 次核入口、
+早期向量与诊断、高半区到低物理符号的地址桥分别在 `boot/secondary_entry.S`、
+`boot/early_vectors.S` 和 `boot/boot_symbols.S`。
 
 **fail-closed 契约**：loader 在分配任何内核段之前校验 ELF——`e_entry` 必须等于配置入口，
 否则以可区分的诊断 `UEFI-A64: kernel entry mismatch` 拒绝（`elf.c:100-101`、`boot.c:305-306`）；
@@ -217,7 +222,7 @@ net / proc / resource / time / misc 组仍隐藏。详见
 
 **已知边界**：**真机启动未验证**（只验证改址构建与 QEMU virt）；**D 设备窗口
 `[0x08000000, 0x0a000000)` 仍是固化常量**（`boot_layout.h:36-37`，无 `#ifndef` 护栏，
-编译期不可换址），因此早期 Device 块固化槽（`head.S:504-534`）与 early_arena 的 D 侧
+编译期不可换址），因此 M0 的 Device 块（`boot/early_mmu.c`）与 early_arena 的 D 侧
 拒绝（`early_arena.c:147`）仍在；handoff 窗口仍是固定 128 KiB 固定址申请
 （`boot.c:246-248,460-461`），真机大 DTB 仍有 `EFI_BUFFER_TOO_SMALL` 风险。
 
@@ -230,7 +235,7 @@ DTB 解析器此前实为「QEMU virt 形状校验器」——解析出的基址
   （`kernel/arch/aarch64/platform/pl011.c:30-36`，DTB 尚不可用时回退
   `PL011_EARLY_FALLBACK_PA`）；解析器接受任意基址（`dtb_parse.c:144-158`）；
   **UEFI loader 侧已完全不含 PL011 硬编码**，改优先走 EFI Serial IO Protocol
-  （`boot/uefi/arch/aarch64/boot.c:52-69,93-118`）。**剩余 1 处**：`head.S:144` 的
+  （`boot/uefi/arch/aarch64/boot.c:52-69,93-118`）。**剩余 1 处**：`boot/early_vectors.S` 的
   MMU 前 fault 打印仍 `mov x2, #0x09000000`。
 - **PL011 波特率**：改由 DTB `clock-frequency` / `clocks` 推导
   （`pl011_calc_divisors()` `pl011.c:63-77`，调用点 `pl011.c:93`，DTB 侧

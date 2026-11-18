@@ -428,7 +428,7 @@ def elf_layout(path):
     for i in range(header[10]):
         ph = struct.unpack_from("<IIQQQQQQ", data, header[5] + i * header[9])
         if ph[0] == 1:
-            loads.append(dict(flags=ph[1], va=ph[3], pa=ph[4],
+            loads.append(dict(flags=ph[1], offset=ph[2], va=ph[3], pa=ph[4],
                               filesz=ph[5], memsz=ph[6]))
     sections = [struct.unpack_from("<IIQQQQIIQQ", data,
                 header[6] + i * header[11]) for i in range(header[12])]
@@ -473,6 +473,7 @@ def check_elf(path, boot_base=0x40000000, enforce_handoff=True):
     entry, entry_size = symbols["secondary_start"]
     assert entry_size > 0 and mapped(entry, entry_size, 5), \
         "AP entry is not executable at its physical address"
+    check_early_mmu(path, loads, symbols)
     for name in ("boot_vectors", "exception_vectors"):
         assert symbols[name][0] % 0x800 == 0, name + " is not 2 KiB aligned"
     stacks, stack_bytes = symbols["aarch64_boot_stacks"]
@@ -517,6 +518,36 @@ def _decode_aarch64_b32(insn):
     if imm26 & (1 << 25):
         imm26 -= (1 << 26)
     return imm26 << 2
+
+
+def check_early_mmu(path, loads, symbols):
+    """The BSP calls a file-backed, identity-mapped pre-MMU leaf."""
+    data = path.read_bytes()
+
+    def instructions(name):
+        start, size = symbols[name]
+        assert size and size % 4 == 0, name + " has invalid code size"
+        for seg in loads:
+            delta = start - seg["va"]
+            if (seg["va"] == seg["pa"] and seg["flags"] & 5 == 5
+                    and 0 <= delta <= seg["filesz"] - size):
+                offset = seg["offset"] + delta
+                return struct.unpack_from(f"<{size // 4}I", data, offset)
+        raise AssertionError(name + " is not file-backed identity executable code")
+
+    builder = "aarch64_build_boot_page_tables"
+    start, size = symbols[builder]
+    entry = symbols["_start"][0]
+    assert any(insn >> 26 == 0b100101 and
+               entry + index * 4 + _decode_aarch64_b32(insn & 0x7fffffff) == start
+               for index, insn in enumerate(instructions("_start"))), \
+        "BSP entry does not call the early page-table builder"
+    for index, insn in enumerate(instructions(builder)):
+        assert insn >> 26 != 0b100101 and insn & 0xfffffc1f not in (
+            0xd61f0000, 0xd63f0000), "early page-table builder is not a leaf"
+        branch = _decode_aarch64_b32(insn)
+        assert branch is None or 0 <= index * 4 + branch < size, \
+            "early page-table builder branches outside itself"
 
 
 def check_vector_branches(path, vectors_va, symbols):
@@ -760,86 +791,6 @@ def make_aarch64_kernel(build_root, base):
     return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
 
 
-def check_m0_write_path(elf_path):
-    """Audit the actually linked head.S write-slot path for B = 0 (Task 3).
-
-    The B=0 ELF is the only linked artifact in this mode whose executable
-    block belongs to the LOW table, so its disassembly proves the slot
-    path: PUD_low[0] hangs to boot_page_tables+0x2000 (PMD_low0), and
-    boot_write_exec_block calls write_slot selecting that table and slot
-    0, constructing the single Normal UXN / non-PXN block descriptor.
-    """
-    objdump = os.environ.get("LLVM_OBJDUMP", "llvm-objdump")
-    table = subprocess.run([objdump, "-t", str(elf_path)],
-                           text=True, capture_output=True, check=True).stdout
-    symbols = {}
-    for line in table.splitlines():
-        parts = line.split()
-        if len(parts) >= 5 and parts[-1] in (
-                "boot_write_exec_block", "write_slot", "write_table",
-                "build_pagetables", "boot_page_tables"):
-            try:
-                symbols[parts[-1]] = int(parts[0], 16)
-            except ValueError:
-                continue
-    for name in ("boot_write_exec_block", "write_slot", "write_table",
-                 "build_pagetables", "boot_page_tables"):
-        assert name in symbols, \
-            "linked head.S is missing symbol %s (write-slot path absent)" % name
-    dis = subprocess.run([objdump, "-d", "--no-show-raw-insn", str(elf_path)],
-                         text=True, capture_output=True, check=True).stdout
-    lines = dis.splitlines()
-    label = "<boot_write_exec_block>:"
-    starts = [i for i, l in enumerate(lines) if l.strip().endswith(label)]
-    assert starts, "boot_write_exec_block has no disassembled instructions"
-    region = []
-    for l in lines[starts[0] + 1:]:
-        s = l.strip()
-        if not s:
-            if region:
-                break
-            continue
-        if "ret" in s.split() or s.endswith("ret"):
-            region.append(s)
-            break
-        region.append(s)
-    text = "\n".join(region).replace("\t", " ")
-
-    bls = [l for l in region if "bl" in l.split() and "<write_slot>" in l]
-    assert len(bls) == 1, \
-        "boot_write_exec_block must contain exactly one write_slot call, got %d" % len(bls)
-    assert "mov x4, x12" in text, \
-        "boot_write_exec_block did not select PMD_low0 (boot_page_tables+0x2000) for B=0"
-    assert "mov x0, x4" in text, \
-        "boot_write_exec_block did not pass the selected L2 table to write_slot"
-    assert "mov x2, #0x0" in text, \
-        "boot_write_exec_block did not select slot 0 for B=0"
-    assert "#0x40000000000000" in text, \
-        "boot_write_exec_block did not set UXN on the boot block descriptor"
-    assert "#0x20000000000000" in text or "#0xffdfffffffffffff" in text, \
-        "boot_write_exec_block did not clear PXN (bic) on the boot block descriptor"
-
-    # PUD_low[0] → boot_page_tables+0x2000 (PMD_low0): the table setup
-    # must load x12 = base+0x2000 and write it through write_table.
-    build_start = dis.find("<build_pagetables>:")
-    assert build_start != -1, "build_pagetables missing from disassembly"
-    build_end = dis.find("<boot_write_exec_block>", build_start)
-    build_region = dis[build_start:build_end].replace("\t", " ")
-    add12 = [l for l in build_region.splitlines()
-             if "add x12, x10" in l and "=0x2000" in l]
-    assert add12, \
-        "PMD_low0 is not boot_page_tables+0x2000 in the linked build"
-    normalized = build_region.splitlines()
-    link_idx = next((i for i, l in enumerate(normalized)
-                     if "mov x1, x12" in l), None)
-    assert link_idx is not None, \
-        "PUD_low[0] does not hang PMD_low0 (mov x1, x12 before write_table)"
-    after = [l for l in normalized[link_idx + 1:link_idx + 4]
-             if "bl" in l.split() and "<write_table>" in l]
-    assert after, \
-        "PUD_low[0] table write does not go through write_table"
-
-
 def check_layout_builds(build_root):
     build_root = Path(build_root).resolve()
     default_root = ROOT / "build/aarch64-clang"
@@ -867,14 +818,11 @@ def check_layout_builds(build_root):
     assert result.returncode == 0, result.stderr
     check_elf(build_root / "artifacts/kernel.elf", boot_base=0x42000000)
 
-    # B = 0 static-only build (never a bootable image): the entry must
-    # move to 0x80000 and the linked head.S write-slot path must select
-    # PMD_low0 slot 0 for the executable block.
+    # B = 0 is static-only; the host boot-layout case exercises its descriptors.
     result = make_aarch64_kernel(build_root, "0x0")
     assert result.returncode == 0, result.stderr
     check_elf(build_root / "artifacts/kernel.elf", boot_base=0x0,
               enforce_handoff=False)
-    check_m0_write_path(build_root / "artifacts/kernel.elf")
 
     # One representative negative per class: unaligned, D-window overlap,
     # too small for the minimum arena, outside M0, and the explicit empty
