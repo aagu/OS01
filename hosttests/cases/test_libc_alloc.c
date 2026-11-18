@@ -37,8 +37,13 @@
 #include "libc_heap_runtime.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdarg.h>
+#define fork os01_sys_fork
 #include <sys/syscall.h>
+#undef fork
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* The allocator entry points.  The production objects are compiled with the
  * same `os01_` prefix, so these declarations bind to the production
@@ -506,9 +511,10 @@ static void aligned_alloc_bad_multiple(void)
  * block, which keeps the heap tiled.
  *
  * The block header layout mirrored here is libc/stdlib/malloc.c's: a size_t
- * size (the TOTAL block size, header included) followed by an int is_free.
+ * size (the TOTAL block size, header included) followed by an int is_free,
+ * magic, req_size, and canary (32 bytes total).
  */
-#define ALLOC_BLOCK_HEADER_SIZE 16
+#define ALLOC_BLOCK_HEADER_SIZE 32
 #define ALLOC_BLOCK_ALIGN        16
 
 static int alloc_heap_tiles(void)
@@ -744,6 +750,252 @@ static void alloc_stress_heap_tiles(void)
     }
 }
 
+/* ── heap hardening: double-free, overflow, underflow, invalid free ──── */
+
+static int wait_child_sigabrt(int64_t pid)
+{
+    int st = 0;
+    if (pid < 0)
+        return 0;
+    if (waitpid(pid, &st, 0) < 0)
+        return 0;
+    return WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT;
+}
+
+static void double_free_aborts(void)
+{
+    void *p;
+    int64_t pid;
+
+    TEST_SUITE("double_free_aborts");
+
+    p = malloc(32);
+    assert_not_null(p);
+    if (!p)
+        return;
+    free(p);
+
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        free(p);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+}
+
+static void heap_overflow_aborts(void)
+{
+    unsigned char *p;
+    int64_t pid;
+
+    TEST_SUITE("heap_overflow_aborts");
+
+    p = (unsigned char *)malloc(10);
+    assert_not_null(p);
+    if (!p)
+        return;
+    memset(p, 0x11, 10);
+
+    /* 1-byte tail overflow detected on free(). */
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        p[10] = 0xAA;
+        free(p);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    /* 1-byte tail overflow detected on realloc(). */
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        p[10] = 0xBB;
+        (void)realloc(p, 64);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    free(p);
+}
+
+static void heap_underflow_aborts(void)
+{
+    unsigned char *p;
+    int64_t pid;
+
+    TEST_SUITE("heap_underflow_aborts");
+
+    p = (unsigned char *)malloc(32);
+    assert_not_null(p);
+    if (!p)
+        return;
+
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        p[-1] = 0xCC;
+        free(p);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    free(p);
+}
+
+static void invalid_free_aborts(void)
+{
+    unsigned char stack_buf[32];
+    unsigned char *p;
+    int64_t pid;
+
+    TEST_SUITE("invalid_free_aborts");
+
+    /* free(NULL) must remain a legal no-op. */
+    free(NULL);
+
+    /* Freeing a stack pointer must abort. */
+    memset(stack_buf, 0, sizeof(stack_buf));
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        free(stack_buf);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    /* Freeing an unaligned interior pointer must abort. */
+    p = (unsigned char *)malloc(64);
+    assert_not_null(p);
+    if (!p)
+        return;
+
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        free(p + 8);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    free(p);
+}
+
+static void corrupt_freelist_aborts(void)
+{
+    unsigned char *p;
+    uint64_t *hdr;
+    int64_t pid;
+
+    TEST_SUITE("corrupt_freelist_aborts");
+
+    p = (unsigned char *)malloc(64);
+    assert_not_null(p);
+    if (!p)
+        return;
+    free(p);
+    hdr = (uint64_t *)(p - ALLOC_BLOCK_HEADER_SIZE);
+
+    /* Corrupted free block size/canary caught by malloc() before reuse. */
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        hdr[0] = (uint64_t)-16;
+        (void)malloc(32);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    /* Corrupted free block caught by aligned_alloc() before reuse. */
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        hdr[3] ^= 0x1ULL;
+        (void)aligned_alloc(16, 32);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+}
+
+static void corrupt_coalesce_aborts(void)
+{
+    unsigned char *a;
+    unsigned char *b;
+    unsigned char *c;
+    uint64_t *b_hdr;
+    int64_t pid;
+
+    TEST_SUITE("corrupt_coalesce_aborts");
+
+    a = (unsigned char *)malloc(65536);
+    b = (unsigned char *)malloc(65536);
+    c = (unsigned char *)malloc(65536);
+    assert_not_null(a);
+    assert_not_null(b);
+    assert_not_null(c);
+    if (!a || !b || !c)
+        return;
+
+    b_hdr = (uint64_t *)(b - ALLOC_BLOCK_HEADER_SIZE);
+
+    /* Unlinked block forged as free with a valid canary next to `a`:
+     * try_coalesce must abort on the missing freelist entry. */
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        uint64_t sz = b_hdr[0];
+        uint64_t rot_sz = (sz << 13) | (sz >> (64 - 13));
+        b_hdr[1] = ((uint64_t)0xF4EEB10CU << 32) | 1ULL;
+        b_hdr[2] = 0;
+        b_hdr[3] = ((uint64_t)(uintptr_t)b_hdr) ^ rot_sz ^ 0x9E3779B97F4A7C15ULL;
+        free(a);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    /* Free `b`, then corrupt its canary: try_coalesce on free(a) must abort. */
+    free(b);
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        b_hdr[3] ^= 0x55ULL;
+        free(a);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    free(a);
+    free(c);
+}
+
+static void wraparound_size_aborts(void)
+{
+    unsigned char *p;
+    uint64_t *hdr;
+    int64_t pid;
+
+    TEST_SUITE("wraparound_size_aborts");
+
+    p = (unsigned char *)malloc(64);
+    assert_not_null(p);
+    if (!p)
+        return;
+    hdr = (uint64_t *)(p - ALLOC_BLOCK_HEADER_SIZE);
+
+    /* A wraparound size (hdr + size wraps past brk) must be caught. */
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        hdr[0] = (uint64_t)-16;
+        free(p);
+        _exit(0);
+    }
+    assert_true(wait_child_sigabrt(pid));
+
+    free(p);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(calloc_product_wrap),
     TEST_ENTRY(malloc_roundup_wrap),
@@ -752,6 +1004,13 @@ TEST_LIST_BEGIN
     TEST_ENTRY(posix_memalign_bad_alignment),
     TEST_ENTRY(aligned_alloc_bad_multiple),
     TEST_ENTRY(alloc_stress_heap_tiles),
+    TEST_ENTRY(double_free_aborts),
+    TEST_ENTRY(heap_overflow_aborts),
+    TEST_ENTRY(heap_underflow_aborts),
+    TEST_ENTRY(invalid_free_aborts),
+    TEST_ENTRY(corrupt_freelist_aborts),
+    TEST_ENTRY(corrupt_coalesce_aborts),
+    TEST_ENTRY(wraparound_size_aborts),
 TEST_LIST_END
 
 int main(void)
