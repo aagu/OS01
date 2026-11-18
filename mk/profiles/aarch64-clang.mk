@@ -1,9 +1,11 @@
 # ── aarch64-clang profile ───────────────────────────────────────
-# aarch64 UEFI bring-up profile. Only the kernel and UEFI runtime
-# capabilities are declared: it must not depend on libc, mbedTLS,
-# BusyBox, a general rootfs, or the x86 test targets.
+# aarch64 UEFI profile. Capabilities: kernel, uefi and (2026-11-18,
+# M4-remaining product userspace) userland — the aarch64 userland build
+# chain publishes its own sysroot generation and user ELFs.  It still
+# does not depend on mbedTLS, BusyBox (x86-only adapter), a general
+# rootfs, or the x86 test targets.
 
-PROFILE_CAPABILITIES := kernel uefi
+PROFILE_CAPABILITIES := kernel uefi userland
 
 # Source root (repo root) — recomputed here so the profile can also be
 # included directly by component Makefiles (via OS01_PROFILE_FILE) without
@@ -268,10 +270,15 @@ KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT)
 # Compile-affecting variant (OS01_SYSTEST / USER_DEBUG re-key the user dirs).
 # project.mk sets USER_VARIANT before including this profile; the ?= default
 # lets component sub-makes that include ONLY the profile resolve it from
-# OS01_SYSTEST. The aarch64 bring-up profile builds no userland, so this only
-# keeps the profile self-contained.
+# OS01_SYSTEST. Since the 2026-11-18 userland capability the aarch64 build
+# produces user ELFs, keyed the same way.
 USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(USER_DEBUG)),user-debug)
-USER_BUILD_DIR := $(BUILD_DIR)/user
+USER_BUILD_DIR := $(BUILD_DIR)/user$(if $(USER_VARIANT),/$(USER_VARIANT))
+USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user$(if $(USER_VARIANT),/$(USER_VARIANT))
+# Directory apps that link the gfx/gui/lvgl/mbedTLS sysroot libraries are
+# x86-only until those libraries exist on this arch (user/apps.mk filters
+# these out of USER_PROGRAMS).
+USER_EXCLUDED_PROGRAMS := desktop doom doom_testctl test_gui_fault test_gui_input test_lvgl tetris usb_hid_probe terminal test_display_owner test_gfx netmodeltest systest test_monitor test_monitor_test
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI
@@ -283,6 +290,13 @@ HOST_TEST_BUILD_DIR := $(BUILD_DIR)/host-test
 # (INSTALL_ROOT), never the final sysroot. The single writer of the sysroot
 # is sysroot.mk (Task 4).
 STAGING_DIR := $(BUILD_DIR)/staging
+
+# Sysroot stage set (2026-11-18 userland capability): the aarch64 sysroot
+# stages kernel-headers, libc (libc.a + libk.a) and the compat stubs — no
+# libgfx/libgui/mbedTLS on this arch yet. SYSROOT_ARCH selects the libc
+# cross-arch for the staging sub-make.
+SYSROOT_ARCH   := aarch64
+SYSROOT_STAGES := kernel-headers libc compat-libs
 
 # ── aarch64 compiler / QEMU settings (retained from the legacy Makefile) ──
 # This profile does NOT include mk/toolchains/clang.mk — that is the x86
@@ -301,11 +315,36 @@ TARGET_LD      ?= ld.lld
 AR             ?= llvm-ar
 # Archive tool for the target (spec profile variable TARGET_AR).
 TARGET_AR      ?= llvm-ar
+# LLVM tool discovery (mirrors mk/toolchains/clang.mk for the sysroot
+# staging recipes, which this profile now drives under the userland
+# capability).
+LLVM_AR        ?= llvm-ar
 OBJ_CPY        ?= llvm-objcopy
 LLVM_OBJDUMP   ?= llvm-objdump
 AARCH64_QEMU   ?= qemu-system-aarch64
 AARCH64_UEFI_FIRMWARE_SOURCE ?= https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd
 RUNTIME_MACHINE_kernel := EM_AARCH64
+
+# ── User runtime consumer (2026-11-18, M4-remaining product userspace) ──
+# The selfhosted provider compiles runtime/builtins/udivti3.c for the user
+# target; the sources are arch-portable C, so only the target tuple differs
+# from the x86 declaration.  The host compiler identity inputs (CLANG /
+# CLANG_ID / CLANG_RESOURCE_DIR / LLVM_NM) mirror mk/toolchains/clang.mk,
+# which this profile intentionally does not include.
+CLANG            ?= clang
+CLANG_ID         := $(shell $(CLANG) --version 2>/dev/null | head -1)
+CLANG_RESOURCE_DIR := $(shell $(CLANG) -print-resource-dir 2>/dev/null)
+LLVM_NM          ?= llvm-nm
+RUNTIME_TARGET_user := $(TARGET_TRIPLE)
+# Freestanding non-PIE static ring-3 ELFs: the user code model and flags —
+# -mgeneral-regs-only keeps FP/SIMD out of user objects (the kernel traps
+# FPEN for EL0, and libc's soft-float paths are what user code links).
+RUNTIME_CFLAGS_user := -ffreestanding -fno-builtin -fno-stack-protector \
+                       -fno-asynchronous-unwind-tables -fno-pic -fno-pie \
+                       -mgeneral-regs-only
+RUNTIME_OBJECT_FORMAT_user := ELF64
+RUNTIME_MACHINE_user := EM_AARCH64
+RUNTIME_ABI_user := aarch64-aapcs
 
 # aarch64 link / UEFI / run parameters.
 include $(OS01_ROOT)/mk/targets/aarch64.mk

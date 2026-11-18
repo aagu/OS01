@@ -515,9 +515,13 @@ static void test_main_calls_probe_after_ipi_ready_under_dtb_cpu_gate(void)
     assert_not_null(buf);
     if (!buf) return;
 
-    /* The gate is expressed as an inverted skip flag (the M0/M1/M3
-     * naming sweep reworded the call site). */
-    assert_true(strstr(buf, "bool shootdown_skip = dtb_cpu_count() < 2;") != NULL);
+    /* The gate is the negated skip flag (2026-11-18 VFS gate reordered the
+     * SKIP print ahead of the SPI selftest): dtb_cpu_count() < 2 decides
+     * shootdown_skip, and the probe runs only under !shootdown_skip. */
+    assert_true(strstr(buf, "dtb_cpu_count() < 2") != NULL);
+    assert_true(strstr(buf, "bool shootdown_skip = dtb_cpu_count() < 2;")
+                != NULL);
+    assert_true(strstr(buf, "if (!shootdown_skip)") != NULL);
     assert_true(strstr(buf, "aarch64_shootdown_probe()") != NULL);
     char *ipi = strstr(buf, "ipi_ready_publish_and_count(0);");
     char *probe = strstr(buf, "aarch64_shootdown_probe();");

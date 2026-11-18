@@ -118,6 +118,22 @@ static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
         return host_test_syscall(nr, arg1, arg2, arg3);
     return -38; /* -ENOSYS */
 }
+#elif defined(__aarch64__)
+/* AArch64 EL0 native syscall: `svc #0`, number in the full x8, args in
+ * x0..x5, return in x0 — the ABI the kernel marshals in
+ * kernel/arch/aarch64/intr/syscall.c (aarch64_user_syscall). */
+static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+{
+    register uint64_t x8 __asm__("x8") = nr;
+    register uint64_t x0 __asm__("x0") = arg1;
+    register uint64_t x1 __asm__("x1") = arg2;
+    register uint64_t x2 __asm__("x2") = arg3;
+    __asm__ volatile ("svc #0"
+        : "=r" (x0)
+        : "0" (x0), "r" (x1), "r" (x2), "r" (x8)
+        : "memory", "cc");
+    return (int64_t)x0;
+}
 #else
 static inline int64_t syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
@@ -141,10 +157,23 @@ static inline int64_t syscall3(uint64_t nr,
     return syscall(nr, arg1, arg2, arg3);
 }
 
-// 4-arg: 4th arg via r10 (Linux x86-64 ABI)
+// 4-arg: x86 passes the 4th arg via r10 (Linux x86-64 ABI); aarch64
+// keeps the contiguous x0..x5 window (4th arg = x3).
 static inline int64_t syscall4(uint64_t nr,
                                 uint64_t arg1, uint64_t arg2, uint64_t arg3,
                                 uint64_t arg4) {
+#if defined(__aarch64__)
+    register uint64_t x8 __asm__("x8") = nr;
+    register uint64_t x0 __asm__("x0") = arg1;
+    register uint64_t x1 __asm__("x1") = arg2;
+    register uint64_t x2 __asm__("x2") = arg3;
+    register uint64_t x3 __asm__("x3") = arg4;
+    __asm__ volatile ("svc #0"
+        : "=r" (x0)
+        : "0" (x0), "r" (x1), "r" (x2), "r" (x3), "r" (x8)
+        : "memory", "cc");
+    return (int64_t)x0;
+#else
     int64_t ret;
     register uint64_t r10 __asm__("r10") = arg4;
     __asm__ volatile ("int $0x80"
@@ -152,6 +181,7 @@ static inline int64_t syscall4(uint64_t nr,
         : "a" (nr), "D" (arg1), "S" (arg2), "d" (arg3), "r" (r10)
         : "memory");
     return ret;
+#endif
 }
 
 // ── Convenience wrappers (inline for hot paths) ────────────
@@ -186,11 +216,28 @@ static inline int reboot(int cmd)
 }
 
 // ── 6-argument syscall (for mmap) ─────────────────────────
+// x86: args 4/5/6 via r10/r8/r9; aarch64: the contiguous x0..x5 window
+// with the number still in x8.
 
 static inline int64_t syscall6(uint64_t nr,
                                 uint64_t arg1, uint64_t arg2, uint64_t arg3,
                                 uint64_t arg4, uint64_t arg5, uint64_t arg6)
 {
+#if defined(__aarch64__)
+    register uint64_t x8 __asm__("x8") = nr;
+    register uint64_t x0 __asm__("x0") = arg1;
+    register uint64_t x1 __asm__("x1") = arg2;
+    register uint64_t x2 __asm__("x2") = arg3;
+    register uint64_t x3 __asm__("x3") = arg4;
+    register uint64_t x4 __asm__("x4") = arg5;
+    register uint64_t x5 __asm__("x5") = arg6;
+    __asm__ volatile ("svc #0"
+        : "=r" (x0)
+        : "0" (x0), "r" (x1), "r" (x2), "r" (x3), "r" (x4), "r" (x5),
+          "r" (x8)
+        : "memory", "cc");
+    return (int64_t)x0;
+#else
     int64_t ret;
     register uint64_t r10 __asm__("r10") = arg4;
     register uint64_t r8  __asm__("r8")  = arg5;
@@ -201,6 +248,7 @@ static inline int64_t syscall6(uint64_t nr,
           "r" (r10), "r" (r8), "r" (r9)
         : "memory");
     return ret;
+#endif
 }
 
 #ifdef __cplusplus

@@ -58,6 +58,34 @@ ifeq ($(CAPACITY_TEST),1)
 override CFLAGS += -DOS01_NOFILE_CAPACITY=64 -DCAPACITY_TEST=1
 endif
 
+# ── Architecture dispatch (2026-11-18) ───────────────────────
+# The profile's RUNTIME_TARGET_user names the user target; the crt0
+# source, linker script, compile flags and link emulation follow it.
+ifeq ($(RUNTIME_TARGET_user),aarch64-none-elf)
+USER_ARCH := aarch64
+else
+USER_ARCH := x86_64
+endif
+
+CFLAGS := --sysroot=$(SYSROOT_DIR) \
+          -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
+          -fno-pic -fno-pie \
+          -I$(TARGET_INCDIR) \
+          -Icommon -Wall -Wextra -O2
+ifeq ($(USER_ARCH),aarch64)
+CRT0_SOURCE          := crt0_aarch64.S
+SIGRETURN_SOURCE     := sigreturn_trampoline_aarch64.S
+LINKER_SCRIPT        := linker_aarch64.ld
+override CFLAGS += -mgeneral-regs-only
+USER_RAW_LDFLAGS := -static -T linker_aarch64.ld -L$(TARGET_LIBDIR_LOCAL)
+else
+CRT0_SOURCE          := crt0.S
+SIGRETURN_SOURCE     := sigreturn_trampoline.S
+LINKER_SCRIPT        := linker.ld
+override CFLAGS += -mno-red-zone
+USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
+endif
+
 # ── Compile & link keys ──────────────────────────────────────
 USER_COMPILE_KEY := $(OBJ_DIR)/.user_compile.key
 USER_LINK_KEY    := $(BUILD_DIR)/.user_link.key
@@ -76,8 +104,6 @@ $(USER_LINK_KEY): USER_LINK_KEY_FORCE
 	@printf '%s\n' 'linker=$(TARGET_LD) ldflags=$(strip $(USER_RAW_LDFLAGS))' > $@.new
 	@cmp -s $@.new $@ || mv -f $@.new $@
 
-USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
-
 # ── Program discovery and app manifests ─────────────────────
 .DEFAULT_GOAL := all
 USER_BUILD_CONTEXT := 1
@@ -86,9 +112,9 @@ USER_BUILD_CONTEXT := 1
 include $(OS01_ROOT)/user/doom/engine.mk
 include $(OS01_ROOT)/user/apps.mk
 PROGRAMS := $(addprefix $(BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
-CRT0_OBJ := $(OBJ_DIR)/crt0.o
-SIGRETURN_OBJ := $(OBJ_DIR)/sigreturn_trampoline.o
-COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld Makefile apps.mk $(USER_LINK_KEY)
+CRT0_OBJ := $(OBJ_DIR)/$(CRT0_SOURCE:.S=.o)
+SIGRETURN_OBJ := $(OBJ_DIR)/$(SIGRETURN_SOURCE:.S=.o)
+COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) $(LINKER_SCRIPT) Makefile apps.mk $(USER_LINK_KEY)
 
 # ── User runtime consumer link probe (monitor plan Task 5) ────
 # The root user component passes the consumer=user builtins archive as
@@ -108,7 +134,7 @@ $(RUNTIME_PROBE_OBJ): $(OS01_ROOT)/runtime/selftest/$(RUNTIME_PROBE_NAME).c \
 	$(EFFECTIVE_CC) $(CFLAGS) -I$(OS01_ROOT)/runtime/selftest \
 		-MD -MP -c $< -o $@
 
-$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) linker.ld \
+$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) $(LINKER_SCRIPT) \
                       $(USER_RUNTIME_ARCHIVE) $(TARGET_LIBC)
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) \

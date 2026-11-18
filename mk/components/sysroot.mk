@@ -13,6 +13,14 @@ ifeq ($(filter userland,$(PROFILE_CAPABILITIES)),userland)
 STAMPS_DIR   := $(BUILD_DIR)/stamps
 RECEIPTS_DIR := $(BUILD_DIR)/receipts
 
+# Stage set + libc arch.  Profiles may trim the stage list (the aarch64
+# sysroot stages only kernel-headers/libc/compat-libs — no libgfx/libgui/
+# mbedTLS yet) and must name the libc cross-arch (libc/Makefile derives
+# HOSTARCH from the ARCH command line).
+SYSROOT_ARCH   ?= x86_64
+SYSROOT_STAGES ?= kernel-headers libc libgfx libgui mbedtls compat-libs
+SYSROOT_STAMP_PREREQS := $(foreach s,$(SYSROOT_STAGES),$(STAMPS_DIR)/$(s)-install.stamp)
+
 # ── Content-gated staging stamps (R1) ─────────────────────────────
 # Each staging stamp's recipe ALWAYS runs (FORCE prerequisite): it re-runs
 # the component install into the private staging tree, then computes a digest
@@ -49,13 +57,13 @@ $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	@# publishes uapi/fb_test.h only in the test configuration: without it
 	@# a normal -> resolution-test flip in one build dir would skip the
 	@# staging sub-make and the sysroot would keep missing the UAPI header.
-	@in_key=$$( { find $(OS01_ROOT)/kernel/include -type f -exec sha256sum {} + 2>/dev/null | sort; printf 'arch: %s\n' "x86_64"; printf 'fb_resolution_test: %s\n' "$(FB_RESOLUTION_TEST)"; } | sha256sum | cut -d' ' -f1 ); \
+	@in_key=$$( { find $(OS01_ROOT)/kernel/include -type f -exec sha256sum {} + 2>/dev/null | sort; printf 'arch: %s\n' "$(SYSROOT_ARCH)"; printf 'fb_resolution_test: %s\n' "$(FB_RESOLUTION_TEST)"; } | sha256sum | cut -d' ' -f1 ); \
 	old_key=""; \
 	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/kernel-headers/manifest" ]; then \
 	  echo "  [staging] kernel-headers input unchanged, skipping staging sub-make"; \
 	else \
-	  $(call os01_submake_cmd,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=x86_64 $(OS01_SUBMAKE_ARGS)); \
+	  $(call os01_submake_cmd,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=$(SYSROOT_ARCH) $(OS01_SUBMAKE_ARGS)); \
 	  printf '%s\n' "$$in_key" > "$@.input_key"; \
 	fi
 	$(call stamp_check,$(STAGING_DIR)/kernel-headers)
@@ -72,7 +80,7 @@ $(STAMPS_DIR)/libc-install.stamp: FORCE
 	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libc/manifest" ]; then \
 	  echo "  [staging] libc input unchanged, skipping staging sub-make"; \
 	else \
-	  $(call os01_submake_cmd,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc $(OS01_SUBMAKE_ARGS)); \
+	  $(call os01_submake_cmd,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc ARCH=$(SYSROOT_ARCH) $(OS01_SUBMAKE_ARGS)); \
 	  printf '%s\n' "$$in_key" > "$@.input_key"; \
 	fi
 	$(call stamp_check,$(STAGING_DIR)/libc)
@@ -249,12 +257,7 @@ $(STAMPS_DIR)/compat-libs-install.stamp: FORCE
 #    symlink under a generation read lease; while any lease is active the
 #    publish waits (bounded, same 60 s budget as the lock) instead of
 #    swapping headers mid-build.
-$(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
-                  $(STAMPS_DIR)/libc-install.stamp \
-                  $(STAMPS_DIR)/libgfx-install.stamp \
-                  $(STAMPS_DIR)/gui-install.stamp \
-                  $(STAMPS_DIR)/mbedtls-install.stamp \
-                  $(STAMPS_DIR)/compat-libs-install.stamp
+$(SYSROOT_STAMP): $(SYSROOT_STAMP_PREREQS)
 	@mkdir -p $(dir $@) $(SYSROOT_GENERATIONS_DIR) $(LEASES_DIR)
 	@set -e; \
 	mkdir -p "$(dir $(LOCK_DIR))"; \
@@ -286,7 +289,7 @@ $(SYSROOT_STAMP): $(STAMPS_DIR)/kernel-headers-install.stamp \
 	mv -f "$(SYSROOT_GENERATIONS_DIR)/next-generation.tmp" "$(SYSROOT_GENERATIONS_DIR)/next-generation"; \
 	gen="$(SYSROOT_GENERATIONS_DIR)/$$id"; \
 	mkdir -p "$$gen"; \
-	for comp in kernel-headers libc libgfx gui mbedtls compat-libs; do \
+	for comp in $(SYSROOT_STAGES); do \
 	  mf="$(STAGING_DIR)/$$comp/manifest"; \
 	  if [ ! -f "$$mf" ]; then echo "ERROR: missing manifest $$mf"; exit 1; fi; \
 	  while IFS= read -r rel; do \

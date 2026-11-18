@@ -34,23 +34,19 @@ LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stac
 # ── Source discovery (wildcard — no manual lists!) ──────────
 # x86_64 builds the full userland libc (libc.a + libk.a are both installed
 # to the immutable sysroot generation for kernel/user linking). aarch64
-# only needs libk.a — kernel-link only, no userland. The aarch64 subset
-# is intentionally narrower: no network/unistd/socket/signal/syscall/sys/stat
-# wrappers because those source files depend on libc/include/sys/syscall.h
-# which uses x86_64 inline asm (`int $0x80` with `=a` constraint). Including
-# them in a libk.a cross-compile would break under the aarch64 toolchain.
-# A libc source that needs adjustment to compile under __is_libk + aarch64
-# gets fixed at the source (see libc/stdlib/malloc.c: `<sys/syscall.h>` is
-# gated under `#ifndef __is_libk`); the kernel side uses slab, so the asm
-# path is unreachable when the libc mode is off.
+# historically only needed libk.a (kernel-link only); since the 2026-11-18
+# userland capability it builds BOTH: libc.a uses the same full source list
+# as x86 (libc/include/sys/syscall.h now carries an __aarch64__ SVC branch,
+# so the historical x86-asm blocker is gone), while libk.a keeps the
+# intentionally narrower kernel subset.
 #
-# `stdlib/realpath.c` is in the aarch64 list for the libk SURFACE only: under
-# __is_libk the file compiles to the historical empty shell (it answers NULL),
-# so the kernel archive exports the symbol without gaining an object that
-# would issue user syscalls.  The user-space implementation is in the same
-# file, behind `#ifndef __is_libk`.
+# `stdlib/realpath.c` is in the aarch64 libk list for the libk SURFACE only:
+# under __is_libk the file compiles to the historical empty shell (it answers
+# NULL), so the kernel archive exports the symbol without gaining an object
+# that would issue user syscalls.  The user-space implementation is in the
+# same file, behind `#ifndef __is_libk`.
 ifeq ($(HOSTARCH),aarch64)
-C_SOURCES := \
+LIBK_C_SOURCES := \
     $(wildcard ctype/*.c) \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
@@ -60,8 +56,7 @@ C_SOURCES := \
     stdio/vsprintf.c stdio/vsnprintf.c stdio/sprintf.c \
     $(wildcard string/*.c) \
     $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))
-else
-C_SOURCES := \
+LIBC_C_SOURCES := \
     $(wildcard ctype/*.c) \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
@@ -88,16 +83,59 @@ C_SOURCES := \
     $(wildcard pthread/*.c) \
     $(wildcard random/*.c) \
     $(wildcard ssp/*.c)
+# The float-parse core (floatscan.c) and its consumers (strtod.c,
+# vsscanf.c, floatconv.c) are out for aarch64: floatscan/strtod/vsscanf
+# are vendored for the x87 80-bit long double ABI and #error on the quad
+# ABI, and floatconv.c needs `double` type support while the aarch64
+# userland compiles with -mgeneral-regs-only (the kernel traps FPEN for
+# EL0).  vsprintf.c emits literal text for %f/%e/%g on this arch, so
+# nothing references floatconv_render.  Excluded until FP is enabled for
+# EL0 or the libc-completion float tasks port these paths.
+LIBC_C_SOURCES := $(filter-out stdlib/floatscan.c stdlib/strtod.c stdio/vsscanf.c stdio/floatconv.c,$(LIBC_C_SOURCES))
+# x86 inline-asm holdouts: setjmp (jmp_buf layout) and pthread/mutex
+# (xchg/cmpxchg) need an aarch64 port; nothing in the aarch64 userland
+# (init/sh) references them yet.
+LIBC_C_SOURCES := $(filter-out stdlib/setjmp.c pthread/mutex.c,$(LIBC_C_SOURCES))
+else
+LIBK_C_SOURCES := \
+    $(wildcard ctype/*.c) \
+    $(wildcard errno/*.c) \
+    $(wildcard list/*.c) \
+    $(wildcard rbtree/*.c) \
+    $(wildcard network/*.c) \
+    $(wildcard stdio/*.c) \
+    $(wildcard stdlib/*.c) \
+    $(wildcard string/*.c) \
+    $(wildcard time/*.c) \
+    $(wildcard sys/stat/*.c) \
+    $(wildcard unistd/*.c) \
+    $(wildcard termios/*.c) \
+    $(wildcard socket/*.c) \
+    $(wildcard netdb/*.c) \
+    $(wildcard sched/*.c) \
+    $(wildcard xattr/*.c) \
+    $(wildcard resource/*.c) \
+    $(wildcard pwd/*.c) \
+    $(wildcard grp/*.c) \
+    $(wildcard csu/*.c) \
+    $(wildcard signal/*.c) \
+    $(wildcard arpa/*.c) \
+    $(wildcard libgen/*.c) \
+    $(wildcard pthread/*.c) \
+    $(wildcard random/*.c) \
+    $(wildcard ssp/*.c)
+LIBC_C_SOURCES := $(LIBK_C_SOURCES)
 endif
 
 # Remove duplicates: free.c conflicts with malloc.c (chown.c conflict gone — uid_stubs.c deleted)
-C_SOURCES := $(filter-out stdlib/free.c, $(C_SOURCES))
+LIBK_C_SOURCES := $(filter-out stdlib/free.c, $(LIBK_C_SOURCES))
+LIBC_C_SOURCES := $(filter-out stdlib/free.c, $(LIBC_C_SOURCES))
 
 # Object files (inside BUILD_DIR)
 # string/memcmp.c → build/x86_64/libc/string/memcmp.o     (libc)
 #                  → build/x86_64/libc/string/memcmp.libk.o (libk)
-LIBC_OBJS := $(addprefix $(BUILD_DIR)/, $(C_SOURCES:.c=.o))
-LIBK_OBJS := $(addprefix $(BUILD_DIR)/, $(C_SOURCES:.c=.libk.o))
+LIBC_OBJS := $(addprefix $(BUILD_DIR)/, $(LIBC_C_SOURCES:.c=.o))
+LIBK_OBJS := $(addprefix $(BUILD_DIR)/, $(LIBK_C_SOURCES:.c=.libk.o))
 
 # Arch-specific objects (if any)
 LIBC_ARCH_OBJS := $(addprefix $(BUILD_DIR)/, $(ARCH_FREEOBJS))
@@ -112,14 +150,10 @@ LIBK_ALL_OBJS := $(LIBK_OBJS) $(LIBK_ARCH_OBJS)
 # libc/ source tree.
 LIBC_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libc.a
 LIBK_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libk.a
-# aarch64 cross-compile: libc.a (libc mode, syscall-based) is not built.
-# The kernel-libk subset never makes it into userland, so there's no point
-# staging libc.a. Build only libk.a — saves compile time and avoids the
-# x86_64-only syscall.h pulls in malloc.c/abort.c/exit.c/setjmp.c under
-# -D__is_libc.
-ifeq ($(HOSTARCH),aarch64)
-LIBC_ARCHIVE :=
-endif
+# aarch64 cross-compile (2026-11-18): libc.a is now built alongside libk.a
+# — the userland capability stages both into the aarch64 sysroot.  The
+# historical x86-only blocker (syscall.h inline asm) is resolved at the
+# header with an __aarch64__ SVC branch.
 # Archive tool: TARGET_AR comes from the profile (spec profile variable);
 # a command-line override wins.
 TARGET_AR ?= $(AR)
@@ -160,6 +194,14 @@ $(BUILD_DIR)/%.o: %.c $(LIBC_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+# aarch64: difftime(time.c) is the one legitimate FP user in the userland
+# libc — compile just this TU with FP enabled (default AAPCS), keeping the
+# FP instructions confined to a function nothing on this arch calls.  The
+# rest of the libc stays -mgeneral-regs-only.
+ifeq ($(HOSTARCH),aarch64)
+$(BUILD_DIR)/time/time.o: override CFLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS))
+endif
+
 $(BUILD_DIR)/%.libk.o: %.c $(LIBK_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
@@ -173,7 +215,10 @@ $(BUILD_DIR)/%.libk.o: %.c $(LIBK_COMPILE_KEY)
 install:
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	rm -rf $(INSTALL_ROOT)
-	$(MAKE) install-headers install-libs
+	@# ARCH is forwarded explicitly: the controlled sub-make boundary runs
+	@# with MAKEOVERRIDES= (mk/project.mk), so the inner make would lose
+	@# the command-line ARCH and default HOSTARCH to x86_64.
+	$(MAKE) install-headers install-libs ARCH=$(HOSTARCH)
 	@find $(INSTALL_ROOT) -type f ! -name manifest | sed 's|^$(INSTALL_ROOT)/||' | sort > $(INSTALL_ROOT)/manifest
 
 install-headers:

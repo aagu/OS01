@@ -118,6 +118,11 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 # on $(SYSROOT_STAMP), which transitively includes the compat-libs stamp:
 # BusyBox never creates libm.a / librt.a itself.
 
+# The BusyBox adapter is x86-only (2026-11-18): the overlay's crt0/linker
+# plumbing and the applet set are built against the x86_64 sysroot; the
+# aarch64 userland ships its own user programs without BusyBox.
+ifeq ($(RUNTIME_TARGET_user),x86_64-unknown-none)
+
 BUSYBOX_MANIFEST  := $(OS01_ROOT)/thirdpart/busybox.manifest
 BUSYBOX_PRIVATE   := $(BUILD_DIR)/thirdparty/busybox
 BUSYBOX_RECEIPT   := $(BUILD_DIR)/receipts/busybox.stamp.receipt
@@ -209,6 +214,8 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	    cmp -s "$(BUSYBOX_PRIVATE)/busybox" "$(USER_ARTIFACT_DIR)/busybox.elf" || cp "$(BUSYBOX_PRIVATE)/busybox" "$(USER_ARTIFACT_DIR)/busybox.elf"; \
 	    test -f "$(USER_ARTIFACT_DIR)/busybox.elf"; \
 	  fi; \
-	'
+'
+
+endif # RUNTIME_TARGET_user == x86_64-unknown-none (BusyBox adapter is x86-only)
 
 endif

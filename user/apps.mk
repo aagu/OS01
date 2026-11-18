@@ -16,6 +16,13 @@ ifneq ($(strip $(USER_DUPLICATES)),)
 $(error duplicate user program names: $(USER_DUPLICATES))
 endif
 USER_PROGRAMS := $(sort $(USER_FLAT_PROGRAMS) $(USER_DIRECTORY_PROGRAMS))
+# Arch-scoped exclusion (2026-11-18): aarch64 userland has no libgfx /
+# libgui / lvgl / mbedTLS sysroot libraries yet, so directory apps whose
+# app.mk links them cannot build on this arch.  The profile names the
+# list (aarch64-clang.mk: USER_EXCLUDED_PROGRAMS); x86 leaves it empty.
+ifneq ($(strip $(USER_EXCLUDED_PROGRAMS)),)
+USER_PROGRAMS := $(filter-out $(USER_EXCLUDED_PROGRAMS),$(USER_PROGRAMS))
+endif
 ifneq ($(filter busybox,$(USER_PROGRAMS)),)
 $(error user program name busybox is reserved for the BusyBox adapter)
 endif
