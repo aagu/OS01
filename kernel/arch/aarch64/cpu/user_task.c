@@ -29,6 +29,7 @@
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/user_image.h>
 #include <arch/aarch64/user_task.h>
+#include <arch/aarch64/exec.h>
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/cpu.h>
@@ -36,6 +37,8 @@
 #include <arch/irq.h>
 #include <arch/spinlock.h>
 #include <errno.h>
+#include <fs/file.h>               /* files_dup / files_unpin (fd inheritance) */
+#include <fs/vfs.h>                /* vfs_lookup / vfs_node_put (product exec) */
 #include <intr/dispatch.h>
 #include <kernel.h>               /* container_of */
 #include <log/log.h>
@@ -502,7 +505,9 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
     arch_local_irq_enable();
     struct aarch64_user_image *image = NULL;
     int rc = aarch64_user_image_load(owner->catalog[index].bytes,
-                                      owner->catalog[index].size, &image);
+                                      owner->catalog[index].size,
+                                      AARCH64_USER_STACK_PAGES_SELFTEST,
+                                      &image);
     arch_local_irq_disable();
 
     if (rc) {
@@ -570,7 +575,7 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     if (!aarch64_user_task_is_user(t))
         return -EINVAL;
     struct aarch64_user_task *owner = t->thread->user_task;
-    if (!owner || !owner->catalog)
+    if (!owner)
         return -EINVAL;
 
     if (!path)
@@ -578,7 +583,21 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     if (path[0] == '\0')
         return -ENOENT;
 
-    size_t index = owner->catalog_count;
+    /* The image bytes source differs per build: the selftest variants
+     * exec against the kernel-provided in-memory catalog; the product
+     * build reads the ELF through the VFS.  Both feed the same staged
+     * construction below. */
+    const void *bytes = NULL;
+    size_t size = 0;
+    void *owned_bytes = NULL;
+    unsigned stack_pages = AARCH64_USER_STACK_PAGES_SELFTEST;
+    size_t index = 0;
+    int rc;
+
+#if AARCH64_EL0_TEST
+    if (!owner->catalog)
+        return -EINVAL;
+    index = owner->catalog_count;
     for (size_t i = 0; i < owner->catalog_count; i++) {
         if (owner->catalog[i].path && strcmp(owner->catalog[i].path, path) == 0) {
             index = i;
@@ -587,23 +606,49 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     }
     if (index >= owner->catalog_count)
         return -ENOENT;
-
-    int rc = aarch64_user_image_check_stack_args(argv, envp);
-    if (rc < 0)
+    bytes = owner->catalog[index].bytes;
+    size = owner->catalog[index].size;
+#else
+    stack_pages = AARCH64_PRODUCT_STACK_PAGES;
+    vfs_node_t *node = vfs_lookup(path);
+    if (!node)
+        return -ENOENT;
+    if (node->type != VFS_FILE) {
+        vfs_node_put(node);
+        return -ENOEXEC;
+    }
+    int rc = aarch64_exec_read_elf(node, &owned_bytes, &size);
+    vfs_node_put(node);
+    if (rc)
         return rc;
+    bytes = owned_bytes;
+#endif
 
+    rc = aarch64_user_image_check_stack_args(argv, envp, stack_pages);
+    if (rc < 0) {
+        if (owned_bytes)
+            kfree(owned_bytes);
+        return rc;
+    }
+
+    /* The image is constructed with interrupts enabled: the M3 write
+     * entries require that.  The window contains no scheduling point,
+     * so the task keeps running while the new image is built. */
     arch_local_irq_enable();
     struct aarch64_user_image *image = NULL;
-    rc = aarch64_user_image_load(owner->catalog[index].bytes,
-                                 owner->catalog[index].size, &image);
+    rc = aarch64_user_image_load(bytes, size, stack_pages, &image);
     if (rc == 0) {
-        rc = aarch64_user_image_setup_stack(image, argv, envp);
+        rc = aarch64_user_image_setup_stack(image, argv, envp, stack_pages);
         if (rc < 0) {
             aarch64_user_image_destroy(image);
             image = NULL;
         }
     }
     arch_local_irq_disable();
+
+    if (owned_bytes)
+        kfree(owned_bytes);
+    owned_bytes = NULL;
 
     if (rc < 0) {
 #if AARCH64_EL0_TEST
@@ -862,13 +907,7 @@ int64_t arch_syscall_sigreturn(void *arch_frame)
 
 /* ── Creation ─────────────────────────────────────────────────── */
 
-struct user_task_prepare_ctx {
-    struct aarch64_user_task *owner;
-    task_t          *parent;   /* NULL: resident BSP idle (spawn) */
-    const pt_regs_t *frame;    /* NULL: fresh image frame (spawn) */
-};
-
-static int user_task_prepare(task_t *tsk, void *arg)
+int user_task_prepare(task_t *tsk, void *arg)
 {
     struct user_task_prepare_ctx *ctx = arg;
     struct aarch64_user_task *owner = ctx->owner;
@@ -877,13 +916,19 @@ static int user_task_prepare(task_t *tsk, void *arg)
      * half of the address space stays in TTBR1. */
     tsk->mm = aarch64_user_image_mm(owner->image);
     tsk->addr_limit = AARCH64_USER_LIMIT;
-    tsk->files = NULL;
+    tsk->files = ctx->files;
+    if (ctx->files && ctx->files_state)
+        *ctx->files_state = 1;
     tsk->fpu_save = NULL;
 
     /* Spawn is parented to the resident BSP idle task (the creator may
      * exit on its own); fork is parented to the real parent so
-     * getppid() and exit re-parenting observe the true tree. */
+     * getppid() and exit re-parenting observe the true tree.  pgrp and
+     * session inherit from the effective parent so PID 1 keeps the
+     * boot-5 pgrp=1/session=1 contract (kernel/init/userspace.c). */
     tsk->parent = ctx->parent ? ctx->parent : percpu_data[0].idle;
+    tsk->pgrp = tsk->parent->pgrp;
+    tsk->session = tsk->parent->session;
 
     /* Kernel-stack geometry, mirroring arch_kthread_prepare(). */
     uintptr_t base = (uintptr_t)tsk;
@@ -917,12 +962,24 @@ static int user_task_prepare(task_t *tsk, void *arg)
     return 0;
 }
 
-static void user_task_discard(task_t *tsk, void *arg)
+void user_task_discard(task_t *tsk, void *arg)
 {
     (void)arg;
     /* The image and the owner record belong to the creator, which
      * releases them once the publication failed.  Only the task-side
-     * linkage is undone here. */
+     * linkage is undone here.  The pre-duplicated fd table is a
+     * single-owner reference the publication never adopted: release
+     * it here (files_unpin contract: never under task_list/rq locks —
+     * the discard path runs before publication, so that holds). */
+    if (tsk->files) {
+        files_unpin(tsk->files);
+        tsk->files = NULL;
+        if (arg) {
+            struct user_task_prepare_ctx *ctx = arg;
+            if (ctx->files_state)
+                *ctx->files_state = 2;
+        }
+    }
     tsk->mm = NULL;
     if (tsk->thread)
         tsk->thread->user_task = NULL;
@@ -942,6 +999,8 @@ struct user_task_fork_ctx {
     struct aarch64_user_task *owner;
     task_t          *parent;
     const pt_regs_t *frame;
+    files_t         *files;   /* pre-duplicated parent fd table */
+    int              files_state;  /* ownership ledger, see prepare_ctx */
     int              pid;
 };
 
@@ -952,6 +1011,8 @@ static int user_task_fork_publish(void *arg)
         .owner  = ctx->owner,
         .parent = ctx->parent,
         .frame  = ctx->frame,
+        .files  = ctx->files,
+        .files_state = &ctx->files_state,
     };
 
     task_t *tsk = NULL;
@@ -995,15 +1056,30 @@ int64_t arch_syscall_fork(void *arch_frame)
     child_owner->catalog_count = parent_owner->catalog_count;
     child_owner->catalog_index = parent_owner->catalog_index;
 
+    /* The child inherits a duplicate of the parent's fd table so the
+     * stdio fds (and anything the parent opened) survive fork.  The
+     * duplicate is released by user_task_discard when publication
+     * fails and adopted by the child task otherwise. */
+    files_t *child_files = parent_task->files ? files_dup(parent_task->files)
+                                              : NULL;
+    if (parent_task->files && !child_files) {
+        aarch64_user_image_destroy(child_image);
+        kfree(child_owner);
+        return -ENOMEM;
+    }
+
     struct user_task_fork_ctx fctx = {
         .owner  = child_owner,
         .parent = parent_task,
         .frame  = regs,
+        .files  = child_files,
         .pid    = 0,
     };
 
     rc = aarch64_vm_edit_begin(parent_mm);
     if (rc) {
+        if (child_files)
+            files_unpin(child_files);
         aarch64_user_image_destroy(child_image);
         kfree(child_owner);
         return rc;
@@ -1017,6 +1093,8 @@ int64_t arch_syscall_fork(void *arch_frame)
          * while the transaction still runs with IRQs enabled. */
         aarch64_user_image_destroy(child_image);
         child_image = NULL;
+        if (child_files && fctx.files_state == 0)
+            files_unpin(child_files);
     }
 
     /* Exactly one end for every successful begin.  It reinstalls the
@@ -1052,7 +1130,7 @@ int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
 
     struct aarch64_user_image *image = NULL;
     rc = aarch64_user_image_load(catalog[index].bytes, catalog[index].size,
-                                  &image);
+                                  AARCH64_USER_STACK_PAGES_SELFTEST, &image);
     if (rc)
         return rc;
 

@@ -28,6 +28,7 @@
 #include <memory/slab.h>
 #include <memory/uaccess.h>
 #include <memory/vmm.h>
+#include <random/random.h>                  /* get_random_bytes (AT_RANDOM) */
 #include <sched/task.h>                     /* mm_t layout */
 #include <string.h>
 #include <arch/aarch64/user_vm_policy.h>
@@ -51,12 +52,19 @@ struct aarch64_user_image {
     mm_t *mm;
     uint64_t root_pa;
     uint64_t entry;
-    uint64_t stack_pa;
+    uint64_t stack_pa;       /* first (lowest) stack page PA */
+    unsigned stack_pages;
     uint64_t initial_sp;
     uint64_t argc;
     uint64_t argv_ptr;
     uint64_t envp_ptr;
 };
+
+/* The stack window of an N-page stack: [STACK_BASE, STACK_BASE+N*4K). */
+static inline uint64_t user_image_stack_top(unsigned stack_pages)
+{
+    return AARCH64_USER_STACK_BASE + (uint64_t)stack_pages * PAGE_4K_SIZE;
+}
 
 /* Exact semantic permission masks accepted by the M3 user-root branch:
  * RO/X, RO/NX and RW/NX.  W+X was already rejected by the segment
@@ -71,12 +79,14 @@ static uint32_t user_image_perm(uint32_t p_flags)
 }
 
 int aarch64_user_image_load(const void *bytes, size_t size,
+                             unsigned stack_pages,
                              struct aarch64_user_image **out)
 {
     if (!out)
         return -EINVAL;
     *out = NULL;
-    if (!bytes || !size)
+    if (!bytes || !size || !stack_pages ||
+        stack_pages > AARCH64_PRODUCT_STACK_PAGES)
         return -EINVAL;
 
     struct aarch64_elf_view view;
@@ -165,23 +175,34 @@ int aarch64_user_image_load(const void *bytes, size_t size,
         }
     }
 
-    /* One RW/NX stack page; the page below stays unmapped as the
-     * guard. */
-    uint64_t stack_pa = alloc_4k_page();
-    if (!stack_pa) {
-        rc = -ENOMEM;
-        goto fail;
+    /* stack_pages RW/NX stack pages growing up from STACK_BASE; the
+     * page below the base stays unmapped as the guard.  A mid-loop
+     * failure releases the pages mapped so far through the mm-owned
+     * rollback below (user_vm_map_image_page hands each PA to the
+     * mm's resident chain the moment the map succeeds). */
+    image->stack_pages = stack_pages;
+    for (unsigned si = 0; si < stack_pages; si++) {
+        uint64_t stack_pa = alloc_4k_page();
+        if (!stack_pa) {
+            rc = -ENOMEM;
+            goto fail;
+        }
+        __builtin_memset((unsigned char *)Phy_To_Virt(stack_pa), 0,
+                         PAGE_4K_SIZE);
+        int map_rc = user_vm_map_image_page(image->mm,
+                                            AARCH64_USER_STACK_BASE +
+                                                (uint64_t)si * PAGE_4K_SIZE,
+                                            stack_pa,
+                                            VM_USER_RW | VM_NO_EXEC);
+        if (map_rc) {
+            free_4k_page(stack_pa);
+            rc = (map_rc == -ENOMEM) ? -ENOMEM : -ENOEXEC;
+            goto fail;
+        }
+        if (si == 0)
+            image->stack_pa = stack_pa;
     }
-    __builtin_memset((unsigned char *)Phy_To_Virt(stack_pa), 0, PAGE_4K_SIZE);
-    int map_rc = user_vm_map_image_page(image->mm, AARCH64_USER_STACK_BASE,
-                                        stack_pa, VM_USER_RW | VM_NO_EXEC);
-    if (map_rc) {
-        free_4k_page(stack_pa);
-        rc = (map_rc == -ENOMEM) ? -ENOMEM : -ENOEXEC;
-        goto fail;
-    }
-    image->stack_pa = stack_pa;
-    image->initial_sp = AARCH64_USER_STACK_TOP;
+    image->initial_sp = user_image_stack_top(stack_pages);
 
     aarch64_elf_sync_icache();
     aarch64_elf_view_release(&view);
@@ -264,6 +285,7 @@ uint64_t aarch64_user_image_root_pa(const struct aarch64_user_image *image)
 
 static int compute_stack_layout(const char *const *argv,
                                 const char *const *envp,
+                                unsigned stack_pages,
                                 size_t *out_argc, size_t *out_envc,
                                 uint64_t *out_initial_sp)
 {
@@ -286,8 +308,10 @@ static int compute_stack_layout(const char *const *argv,
     if (argc + envc > MAX_ARGV)
         return -E2BIG;
 
-    const size_t max_payload = PAGE_4K_SIZE - AARCH64_USER_STACK_HEADROOM;
-    size_t str_bytes = 0;
+    const size_t max_payload =
+        (size_t)stack_pages * PAGE_4K_SIZE - AARCH64_USER_STACK_HEADROOM;
+    /* argv/envp strings plus the 16 AT_RANDOM payload bytes. */
+    size_t str_bytes = AARCH64_USER_AT_RANDOM_BYTES;
     for (size_t i = 0; i < argc; i++) {
         size_t len = strlen(argv[i]) + 1;
         if (len > max_payload - str_bytes)
@@ -302,11 +326,15 @@ static int compute_stack_layout(const char *const *argv,
     }
 
     size_t str_aligned = (str_bytes + 7UL) & ~7UL;
-    size_t meta_bytes = (argc + envc + 3) * sizeof(uint64_t);
+    /* argc slot + argv vector + NULL + envp vector + NULL, then the
+     * AT_RANDOM / AT_PAGESZ / AT_NULL auxv pairs (csu.c contract). */
+    size_t meta_bytes =
+        (argc + envc + 2 + 2 * AARCH64_USER_AUXV_PAIRS) * sizeof(uint64_t);
     if (str_aligned > max_payload || meta_bytes > max_payload - str_aligned)
         return -E2BIG;
 
-    uint64_t unaligned_sp = AARCH64_USER_STACK_TOP - str_aligned - meta_bytes;
+    uint64_t stack_top = user_image_stack_top(stack_pages);
+    uint64_t unaligned_sp = stack_top - str_aligned - meta_bytes;
     uint64_t initial_sp = unaligned_sp & ~UINT64_C(0xf);
     if (initial_sp < AARCH64_USER_STACK_BASE + AARCH64_USER_STACK_HEADROOM)
         return -E2BIG;
@@ -318,32 +346,37 @@ static int compute_stack_layout(const char *const *argv,
 }
 
 int aarch64_user_image_check_stack_args(const char *const *argv,
-                                        const char *const *envp)
+                                        const char *const *envp,
+                                        unsigned stack_pages)
 {
     size_t argc = 0;
     size_t envc = 0;
     uint64_t initial_sp = 0;
-    return compute_stack_layout(argv, envp, &argc, &envc, &initial_sp);
+    return compute_stack_layout(argv, envp, stack_pages,
+                                &argc, &envc, &initial_sp);
 }
 
 int aarch64_user_image_setup_stack(struct aarch64_user_image *image,
                                    const char *const *argv,
-                                   const char *const *envp)
+                                   const char *const *envp,
+                                   unsigned stack_pages)
 {
-    if (!image || !image->stack_pa)
+    if (!image || !image->stack_pa || stack_pages != image->stack_pages)
         return -EINVAL;
 
     size_t argc = 0;
     size_t envc = 0;
     uint64_t initial_sp = 0;
-    int rc = compute_stack_layout(argv, envp, &argc, &envc, &initial_sp);
+    int rc = compute_stack_layout(argv, envp, stack_pages,
+                                  &argc, &envc, &initial_sp);
     if (rc)
         return rc;
 
     uint8_t *stack_kva = (uint8_t *)Phy_To_Virt(image->stack_pa);
+    uint64_t stack_top = user_image_stack_top(stack_pages);
     uint64_t *frame = (uint64_t *)(stack_kva +
                                    (size_t)(initial_sp - AARCH64_USER_STACK_BASE));
-    size_t cursor = PAGE_4K_SIZE;
+    size_t cursor = (size_t)(stack_top - AARCH64_USER_STACK_BASE);
 
     frame[0] = (uint64_t)argc;
     frame[1 + argc] = 0;
@@ -363,6 +396,22 @@ int aarch64_user_image_setup_stack(struct aarch64_user_image *image,
         __builtin_memcpy(stack_kva + cursor, s, len);
         frame[1 + (i - 1)] = AARCH64_USER_STACK_BASE + cursor;
     }
+
+    /* The 16 AT_RANDOM payload bytes sit above the pointer vectors (the
+     * cursor descends through the same string region); the auxv pairs
+     * follow the envp NULL directly (csu.c reads them right after the
+     * envp terminator). */
+    cursor -= AARCH64_USER_AT_RANDOM_BYTES;
+    uint64_t random_ptr = AARCH64_USER_STACK_BASE + cursor;
+    get_random_bytes(stack_kva + cursor, AARCH64_USER_AT_RANDOM_BYTES);
+
+    uint64_t *auxv = frame + argc + 3 + envc;
+    auxv[0] = 25;               /* AT_RANDOM */
+    auxv[1] = random_ptr;
+    auxv[2] = 6;                /* AT_PAGESZ */
+    auxv[3] = PAGE_4K_SIZE;
+    auxv[4] = 0;                /* AT_NULL */
+    auxv[5] = 0;
 
     image->initial_sp = initial_sp;
     image->argc = (uint64_t)argc;

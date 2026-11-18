@@ -44,6 +44,23 @@ struct aarch64_user_task {
     size_t catalog_index;
 };
 
+/* Creation context shared by the publish callbacks (sched_alloc_and_
+ * publish_task): the VFS spawn path (arch/aarch64/sched/exec.c) and
+ * the fork path (cpu/user_task.c) both fill one.  `files` carries a
+ * pre-duplicated fd table whose ownership is tracked through
+ * `files_state` — the creator owns the int, the callbacks write it:
+ * 0 = caller owns, 1 = the prepared task adopted it, 2 =
+ * user_task_discard released it — so a failed publication releases
+ * exactly the references nobody took over. */
+struct files_struct;
+struct user_task_prepare_ctx {
+    struct aarch64_user_task *owner;
+    struct task_struct *parent;      /* NULL: resident BSP idle (spawn) */
+    const struct pt_regs *frame;     /* NULL: fresh image frame (spawn) */
+    struct files_struct *files;      /* pre-duplicated fd table or NULL */
+    int *files_state;
+};
+
 /* Spawn a real EL0 user task from the in-memory catalog.
  *
  * `index` selects the catalog entry; the whole range is checked before
@@ -161,6 +178,13 @@ bool aarch64_el0_sync_route(pt_regs_t *regs, uint64_t esr, uint64_t far);
  * keep the pointer.  A normal return hands the frame back to the shared
  * restore path; the exit branch never returns. */
 void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event);
+
+/* Publish-callback pair shared by the VFS spawn (sched/exec.c) and
+ * the fork path.  Defined in cpu/user_task.c; kernel-internal, not
+ * part of the task-facing contract. */
+struct user_task_prepare_ctx;
+int user_task_prepare(struct task_struct *tsk, void *arg);
+void user_task_discard(struct task_struct *tsk, void *arg);
 
 /* Publish, install and track a user root.  The previous user root is
  * revoked only after the new one is installed. */

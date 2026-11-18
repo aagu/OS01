@@ -28,13 +28,28 @@ typedef struct mm_struct mm_t;
 
 struct aarch64_user_image;
 
-/* User stack: exactly one RW/NX page at [0x20400000, 0x20401000).
- * The page below it (0x203ff000) stays unmapped and acts as the guard
+/* User stack: RW/NX pages growing UP from AARCH64_USER_STACK_BASE; the
+ * page below the base (0x203ff000) stays unmapped and acts as the guard
  * page — the ELF layout validator caps every segment end at
- * 0x203ff000, so nothing can legitimately live there. */
+ * 0x203ff000, so nothing can legitimately live there.
+ *
+ * The selftest image keeps the historical single-page stack
+ * (AARCH64_USER_STACK_PAGES_SELFTEST, so [BASE, STACK_TOP)); the
+ * product spawn path builds 8-page stacks for libc programs (init/sh
+ * printf and malloc need more than one page of headroom). */
 #define AARCH64_USER_STACK_BASE  UINT64_C(0x20400000)
-#define AARCH64_USER_STACK_TOP   UINT64_C(0x20401000)
+#define AARCH64_USER_STACK_PAGES_SELFTEST 1u
+#define AARCH64_PRODUCT_STACK_PAGES       8u
+#define AARCH64_USER_STACK_TOP \
+    (AARCH64_USER_STACK_BASE + AARCH64_USER_STACK_PAGES_SELFTEST * 0x1000)
 #define AARCH64_USER_STACK_GUARD UINT64_C(0x203ff000)
+
+/* Auxv contract of libc/csu/csu.c (__libc_start_main): argv NULL,
+ * envp NULL, then the auxv pair array terminated by AT_NULL.  The
+ * image setup writes AT_RANDOM (16 CSPRNG bytes), AT_PAGESZ and
+ * AT_NULL. */
+#define AARCH64_USER_AUXV_PAIRS  3u
+#define AARCH64_USER_AT_RANDOM_BYTES 16u
 
 /* Minimum free execution stack space below initial SP_EL0 after argv/envp
  * strings and pointer tables are placed in the 4 KiB stack page. */
@@ -45,7 +60,12 @@ struct aarch64_user_image;
  * because the kernel explicitly disables FPEN. */
 #define AARCH64_USER_TASK_PSTATE  UINT64_C(0x340)
 
-/* Build an image from `bytes`/`size`.
+/* Build an image from `bytes`/`size` with a `stack_pages`-page user
+ * stack (see the stack window constants above; the selftest callers
+ * pass AARCH64_USER_STACK_PAGES_SELFTEST, the product spawn path
+ * passes AARCH64_PRODUCT_STACK_PAGES).  The bytes are consumed
+ * synchronously — every ELF page is copied into mm-owned pages, so
+ * the caller may release the buffer once this returns.
  *
  * On success *out receives an owned image and the function returns 0.
  * On failure *out is NULL and nothing is owned; the error is -EINVAL
@@ -53,6 +73,7 @@ struct aarch64_user_image;
  * memory for the image, its pages or its root) or the runtime-gate
  * errno (-EAGAIN / -EOPNOTSUPP) propagated from the mm runtime. */
 int aarch64_user_image_load(const void *bytes, size_t size,
+                             unsigned stack_pages,
                              struct aarch64_user_image **out);
 
 /* Build the empty fork shell: a new image record that copies the
@@ -84,17 +105,24 @@ uint64_t aarch64_user_image_root_pa(const struct aarch64_user_image *image);
 void aarch64_user_image_init_regs(const struct aarch64_user_image *image,
                                   pt_regs_t *regs);
 
-/* Validate that argv/envp counts and string bytes fit inside the 4 KiB
- * user stack page while leaving at least AARCH64_USER_STACK_HEADROOM bytes
- * below the 16-byte-aligned initial SP_EL0.  Returns 0 or -E2BIG. */
+/* Validate that argv/envp counts and string bytes fit inside a
+ * `stack_pages`-page user stack while leaving at least
+ * AARCH64_USER_STACK_HEADROOM bytes below the 16-byte-aligned initial
+ * SP_EL0 (the auxv payload — AT_RANDOM bytes and the AT_RANDOM /
+ * AT_PAGESZ / AT_NULL pairs — is part of the budget).  Returns 0 or
+ * -E2BIG. */
 int aarch64_user_image_check_stack_args(const char *const *argv,
-                                        const char *const *envp);
+                                        const char *const *envp,
+                                        unsigned stack_pages);
 
-/* Populate the image's user stack page with argv/envp strings, NULL-terminated
- * pointer vectors, and argc at [initial_sp], and record initial_sp/argc/
- * argv_ptr/envp_ptr on `image`.  Returns 0 or -E2BIG / -EINVAL. */
+/* Populate the image's user stack (the `stack_pages` pages the image
+ * was built with) with argv/envp strings, the NULL-terminated pointer
+ * vectors, the auxv pair array (AT_RANDOM / AT_PAGESZ / AT_NULL), and
+ * argc at [initial_sp], and record initial_sp/argc/argv_ptr/envp_ptr
+ * on `image`.  Returns 0 or -E2BIG / -EINVAL. */
 int aarch64_user_image_setup_stack(struct aarch64_user_image *image,
                                    const char *const *argv,
-                                   const char *const *envp);
+                                   const char *const *envp,
+                                   unsigned stack_pages);
 
 #endif /* OS01_AARCH64_USER_IMAGE_H */

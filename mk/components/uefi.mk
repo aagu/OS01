@@ -67,7 +67,10 @@ UEFI_RUNTIME_INPUT_DG := $(BUILD_DIR)/receipts/uefi-runtime.input.digest
 # Per-arch UEFI boot sources (the SRCS the inner make compiles) and the UEFI
 # compiler identity that goes into the digest: x86 uses the validated
 # UEFI_CLANG; aarch64 uses the clang the copied runtime auto-detects.
-ifeq ($(filter userland,$(PROFILE_CAPABILITIES)),userland)
+# The dispatch keys on the target triple, NOT the userland capability —
+# since the 2026-11-18 aarch64 userland capability the aarch64 profile
+# also carries `userland` but must keep building the AArch64 loader.
+ifeq ($(TARGET_TRIPLE),x86_64-unknown-none)
 UEFI_ARCH_FAMILY  := x86_64
 UEFI_TARGET_EFI   := BOOTX64.EFI
 UEFI_CLANG        ?= $(CLANG)

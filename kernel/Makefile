@@ -216,7 +216,7 @@ endif
 # that compiles for BOTH architectures.
 # aarch64 collects its own driver/ (virtio-blk-mmio); x86's driver/ dir
 # owns the x86-only MMIO/display device drivers (see mm-arch-boundaries).
-ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver
+ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver sched
 ifeq ($(ARCH),x86_64)
 ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime sched fs sync syscall driver
 endif
