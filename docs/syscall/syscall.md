@@ -142,6 +142,13 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_signal]       = { sys_native_signal,       "signal" },
     [SYS_sigprocmask]  = { sys_native_sigprocmask,  "sigprocmask" },
     [SYS_sigreturn]    = { sys_native_sigreturn,    "sigreturn" },
+#if !defined(OS01_SYSCALL_A64_SUBSET) || OS01_HAS_VFS
+    /* fs 组（arch-neutral sys_fs.c）：x86 无条件服务，aarch64 随 VFS 门服务 */
+    [SYS_write]        = { sys_fs_dispatch,         "write" },
+    [SYS_read]         = { sys_fs_dispatch,         "read" },
+    [SYS_open]         = { sys_fs_dispatch,         "open" },
+    /* … 共 32 项，见 kernel/syscall/dispatch.c:64-97 */
+#endif
 #ifndef OS01_SYSCALL_A64_SUBSET
     /* x86_64 独有 */
     ...
@@ -149,9 +156,16 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
 };
 ```
 
-- **当前 aarch64 服务 15 项**：`exit` / `getpid` / `getppid` / `clock_gettime` /
-  `brk` / `mmap` / `mprotect` / `munmap` / `fork` / `waitpid` / `exec` /
-  `kill` / `signal` / `sigprocmask` / `sigreturn`。
+- **当前 aarch64 服务 47 项**：
+  - **4 项 native**：`exit` / `getpid` / `getppid` / `clock_gettime`
+  - **4 项 VM**：`brk` / `mmap` / `mprotect` / `munmap`
+  - **7 项进程/信号**：`fork` / `waitpid` / `exec` / `kill` / `signal` / `sigprocmask` / `sigreturn`
+  - **32 项 fs 组**（随 `OS01_HAS_VFS` 一起编入，2026-11-18 起）：`write` / `read` /
+    `open` / `close` / `dup` / `dup2` / `pipe` / `chdir` / `getcwd` / `stat` / `fstat` /
+    `lseek` / `fcntl` / `ioctl` / `getdents64` / `access` / `unlink` / `mkdir` / `rmdir` /
+    `rename` / `truncate` / `ftruncate` / `chmod` / `fchmod` / `poll` / `ppoll` /
+    `select` / `pselect6` / `symlink` / `readlink` / `lstat` / `fstatat`
+  - net / proc / resource / time / misc 组仍隐藏（`kernel/syscall/dispatch.c:98-129`）。
 - **arch-neutral 的 native handler**：`exit` / `getpid` / `getppid` / `clock_gettime`
   抽到 `kernel/syscall/sys_native.c`，它们不访问寄存器帧（参数由 `syscall_ctx_t` 携带），
   因此两个架构可共用。`clock_gettime` 复用既有的 clock-id 检查与 `copy_to_user_ft()` 语义。
@@ -164,7 +178,7 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
 
 宿主用例 `test_syscall_dispatch` 从**同一份源码**同时证明 x86 全表与 AArch64 子集两种配置。
 闭环记录见 `docs/changelog.md` 2026-11-12 条目；aarch64 用户态整体现状见
-[arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-13-闭环)。
+[arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环)。
 
 ## Known bug
 

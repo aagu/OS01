@@ -130,7 +130,7 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 
 ---
 
-## aarch64 用户态现状（M4，2026-11-11 ~ 2026-11-14 闭环）
+## aarch64 用户态现状（M4，2026-11-11 ~ 2026-11-18 闭环）
 
 M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来的正式 EL0 用户任务」。
 八块按顺序交付，编号口径与 [build.md](build/build.md) 一致：
@@ -146,20 +146,29 @@ M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来�
 | 第 6 块 | 原生 `SYS_waitpid` 与父子退出 / ZOMBIE 回收：共享 `do_waitpid`、孤儿僵尸无锁回收 | `aarch64_user_waitpid` |
 | 第 7 块 | 原生 `SYS_exec` 与 SysV 用户栈参数传递：argv/envp 拷贝、`-E2BIG` 合并计数上限、AAPCS 帧与寄存器初始化 | `aarch64_user_exec` |
 | 第 8 块 | 原生信号与 `sigreturn`：`kill`/`signal`/`sigprocmask`/`sigreturn`，sigframe 压栈、伪造帧防护 | `aarch64_user_signal` |
+| VFS 门（2026-11-18） | arch-neutral fs 栈接入 aarch64 产品内核：devfs / tmpfs / FAT32 / ext2 + virtio-blk-mmio 块设备 + fs syscall 组；`OS01_HAS_VFS` 翻 1 | `aarch64_vfs`（plain selftest 15/15、m4-1 28/28） |
 
 **跨架构 syscall 表**：AArch64 不维护第二张分派表，而是用 `OS01_SYSCALL_A64_SUBSET=1`
 编译 `kernel/syscall/dispatch.c` 的**同一张** `syscall_table`，只隐藏未编入的表项。
-当前 aarch64 服务 **15 项**：`exit` / `getpid` / `getppid` / `clock_gettime` /
-`brk` / `mmap` / `mprotect` / `munmap` / `fork` / `waitpid` / `exec` /
-`kill` / `signal` / `sigprocmask` / `sigreturn`。详见
+当前 aarch64 服务 **47 项**：4 项 native（`exit` / `getpid` / `getppid` / `clock_gettime`）
++ 4 项 VM（`brk` / `mmap` / `mprotect` / `munmap`）+ 7 项进程/信号（`fork` / `waitpid` /
+`exec` / `kill` / `signal` / `sigprocmask` / `sigreturn`）+ **32 项 fs 组**
+（`write` / `read` / `open` / `close` / `dup` / `dup2` / `pipe` / `chdir` / `getcwd` /
+`stat` / `fstat` / `lseek` / `fcntl` / `ioctl` / `getdents64` / `access` / `unlink` /
+`mkdir` / `rmdir` / `rename` / `truncate` / `ftruncate` / `chmod` / `fchmod` / `poll` /
+`ppoll` / `select` / `pselect6` / `symlink` / `readlink` / `lstat` / `fstatat`——
+随 `OS01_HAS_VFS` 一起编入，`kernel/syscall/dispatch.c:64-97`）。
+net / proc / resource / time / misc 组仍隐藏。详见
 [syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12)。
 
 **当前边界（如实记录）**：
 
 - 验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）；普通 AArch64 镜像的
-  `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 仍为 0，产品启动路径仍进 idle。
+  `OS01_HAS_VFS` **已于 2026-11-18 翻 1**（fs 栈与块设备可用），但
+  `OS01_HAS_USERSPACE` **仍为 0**——缺 userland 构建链（crt0 / linker script / libc），
+  产品启动路径仍进 idle，`/bin/init` 尚未装载。
 - ASID 恒为 0；无 TLS、无 FP/SIMD 上下文；用户映像是内存中的静态 ELF。
-- 未覆盖：VFS `/bin/init`、文件映射、`MAP_FIXED`、共享映射、设备映射、
+- 未覆盖：`/bin/init` 装载、文件映射、`MAP_FIXED`、共享映射、设备映射、
   SMP 用户调度、IRQ 返回抢占。aarch64 侧的 `mmap` 策略对共享 / 文件 / 固定映射一律返回
   `-EOPNOTSUPP`（`kernel/arch/aarch64/memory/user_vm_policy.c:610-612`），设备映射无实现。
 - **EL0 抢占只在单核探针里验证**：`aarch64_el0_preempt` 在多核启动下直接拒绝运行
@@ -169,12 +178,82 @@ M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来�
 - `arch_smp_boot_aps()` 与 `arch_cpu_features()` 仓库内均无此接口（只有跨架构钩子
   `arch_boot_aps()`）。
 
-**剩余差距**：产品用户态接入（VFS 门 + `/bin/init` + 文件/共享/设备映射 + `MAP_FIXED`）
-+ IRQ 返回抢占 + 统一 SMP 启动与多核上下文切换 + ASID，粗估 **3–4 周**
-（一个人全职，较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环）。
+**剩余差距**：产品用户态接入（**VFS 门已于 2026-11-18 打开**；剩 userland 构建链与
+`/bin/init` 装载 + 文件/共享/设备映射 + `MAP_FIXED`）
++ IRQ 返回抢占 + 统一 SMP 启动与多核上下文切换 + ASID，粗估 **2–3 周**
+（一个人全职，较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环，VFS 门随后打开）。
 规划项见 [roadmap.md](roadmap.md) P2。
-闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-14 各条目；COW/VM 细节见
+闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-18 各条目；COW/VM 细节见
 [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环)。
+
+---
+
+## aarch64 平台值解绑（2026-11-18）
+
+真机适配审计（路线图 P2 §真机适配审计）把 aarch64 的 QEMU virt 固化分三层。
+**2026-11-18 落地了其中两层**：加载地址层与 DTB 地址层。
+
+### 启动块平台配置化（加载地址层）
+
+原先 `0x40000000` / `0x40080000` 固化在 6 个文件里互为同值耦合。现在收敛为
+**一次构建、一处配置**：
+
+| 项 | 位置 | 说明 |
+|---|---|---|
+| 唯一可配置输入 | `AARCH64_BOOT_BLOCK_BASE`（`mk/profiles/aarch64-clang.mk:22-28`） | 不设置即 QEMU virt 默认 `0x40000000`；显式置空是错误 |
+| 构建期校验 | `mk/profiles/aarch64-clang.mk:39-42` | 十进制/`0x` 十六进制整数、2 MiB 对齐、M0 范围 `[0,0x80000000)`、与设备窗口 D 不相交、留得下 ≥20 MiB 早期 arena；非法即**构建期报错**，不掩码纠正、不回落默认 |
+| 单一常量源 | `kernel/include/arch/aarch64/boot_layout.h:25-44` | 裸预处理常量（无 C 类型/无 `ULL`），内核 C、预处理汇编、预处理链接脚本三处展开一致；其余区间全部由 BASE 派生 |
+| 链接脚本 | `kernel/arch/aarch64/linker.ld:27,45,51,157-158` → `linker.generated.ld`（`kernel/Makefile:670-689`） | 带 cfg stamp，避免「默认→改址→默认」增量构建漏重编 |
+| 消费方（四处联动） | UEFI loader `boot/uefi/arch/aarch64/{elf.c,boot.c}`；M0 写槽 `kernel/arch/aarch64/head.S:594-611`；M1 建表 `kernel/arch/aarch64/memory/runtime_tree.c:93-96`；RAM 保留 `kernel/arch/aarch64/memory/ram_core.c:442-443` | 同一布局驱动四处 |
+
+**fail-closed 契约**：loader 在分配任何内核段之前校验 ELF——`e_entry` 必须等于配置入口，
+否则以可区分的诊断 `UEFI-A64: kernel entry mismatch` 拒绝（`elf.c:100-101`、`boot.c:305-306`）；
+内核侧同样 fail-closed 取证 `UEFI-A64: layout entry=… context=…`
+（`kernel/arch/aarch64/boot/main.c:394-415`）。trampoline 地址改由寄存器传入
+（`handoff.S:4-9` 的 `br x2`），并用 `_Static_assert` 保证与布局常量一致（`loader.h:20-22`）。
+
+**验收**：`make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout`——默认布局 → 改址布局
+→ 再回默认的配对启动，外加「默认 loader 搭替代 ELF」的混搭拒绝。
+
+**已知边界**：**真机启动未验证**（只验证改址构建与 QEMU virt）；**D 设备窗口
+`[0x08000000, 0x0a000000)` 仍是固化常量**（`boot_layout.h:36-37`，无 `#ifndef` 护栏，
+编译期不可换址），因此早期 Device 块固化槽（`head.S:504-534`）与 early_arena 的 D 侧
+拒绝（`early_arena.c:147`）仍在；handoff 窗口仍是固定 128 KiB 固定址申请
+（`boot.c:246-248,460-461`），真机大 DTB 仍有 `EFI_BUFFER_TOO_SMALL` 风险。
+
+### DTB 地址层解绑
+
+DTB 解析器此前实为「QEMU virt 形状校验器」——解析出的基址先和 QEMU 常量对账、相等才通过。
+现在改成解析出就用：
+
+- **PL011 MMIO 基址**（4 处硬编码清掉 3 处）：运行期消费 `dtb_pl011_base()`
+  （`kernel/arch/aarch64/platform/pl011.c:30-36`，DTB 尚不可用时回退
+  `PL011_EARLY_FALLBACK_PA`）；解析器接受任意基址（`dtb_parse.c:144-158`）；
+  **UEFI loader 侧已完全不含 PL011 硬编码**，改优先走 EFI Serial IO Protocol
+  （`boot/uefi/arch/aarch64/boot.c:52-69,93-118`）。**剩余 1 处**：`head.S:144` 的
+  MMU 前 fault 打印仍 `mov x2, #0x09000000`。
+- **PL011 波特率**：改由 DTB `clock-frequency` / `clocks` 推导
+  （`pl011_calc_divisors()` `pl011.c:63-77`，调用点 `pl011.c:93`，DTB 侧
+  `dtb_parse.c:111-119,159-171`）。**DTB 无时钟时回退 16 MHz**；残留的 IBRD=8/FBRD=44
+  仅作除数越界兜底。
+- **GIC 基址**：不再要求 GICD/GICC 必须等于 0x08000000/0x08010000（只拒 `base==0`），
+  compatible 白名单补 `arm,gic-400`（`dtb_parse.c:133-143`）；运行期 `gic_init` 消费
+  `dtb_gicd_base()` / `dtb_gicc_base()`。
+
+**已知边界**：PL011 interrupts 形状校验仍要求恰 3 cell + LEVEL_HIGH
+（`dtb_parse.c:152-155`）；**GICv3（`arm,gic-v3`）仍完全不支持**。
+
+### 顺带更正
+
+2026-11-17 审计稿把「无 RNDR 接线」写进了路线图的平台能力上限段——**该说法是错的**：
+RNDR/RNDRRS 早在 2026-09-25 已接线（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，
+经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE）。路线图已更正；
+`boot/uefi/arch/aarch64/boot.c:467-471` 的同款陈旧注释仍留在代码里。
+
+闭环记录见 `docs/changelog.md` 2026-11-18 各条目；设计依据见
+[spec](superpowers/specs/2026-11-17-aarch64-kernel-lma-design.md) 与
+[plan](superpowers/plans/2026-11-17-aarch64-kernel-lma.md)；剩余项见
+[roadmap.md](roadmap.md) P2 §真机适配审计。
 
 ---
 

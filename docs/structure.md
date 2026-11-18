@@ -29,7 +29,8 @@
 * `intr/apic/` — APIC 子系统（acpi.c, lapic.c, ioapic.c, ipi.c, lapic_timer.c）
 * `intr/pic/` — 8259A PIC 控制器（APIC 已完全实现，位于 intr/apic/）
 * `block/` — 块设备层（blockdev.c）
-* `fs/` — 文件系统（vfs.c, fat.c, ext2.c, procfs.c, tmpfs.c, file.c, gpt.c, dcache.c, elf_layout.c, poll.c, select.c）；x86-only 的 devfs.c 与 elf.c 位于 `arch/x86_64/fs/`
+* `fs/` — 文件系统（vfs.c, fat.c, ext2.c, procfs.c, tmpfs.c, file.c, gpt.c, dcache.c, devfs.c, elf_layout.c, poll.c, select.c）；x86-only 的 elf.c 位于 `arch/x86_64/fs/`
+* `syscall/` — syscall 分派与 handler（dispatch.c 单张共享表；sys_native.c / sys_mm.c / sys_fs.c / sys_net.c / sys_proc.c / sys_resource.c / sys_time.c / sys_misc.c；`compat/` 为 Linux x86_64 ABI 兼容层）
 * `sched/` — 调度器共享核心（core.c, signal.c, fair.c, balance.c, wait.c, kthread.c, accounting.c, resource.c, identity.c, diag.c, boot.c, boot_stdio.c）；x86-only 的 fork/exec/exit 生命周期位于 `arch/x86_64/sched/`
 * `subsys/` — 子系统注册框架（subsys.c）
 * `tty/` — 终端/TTY 子系统（tty.c, console.c, canon.c 行规程, pty.c PTY 主/从）
@@ -115,10 +116,11 @@
 * `vfs.c` - 虚拟文件系统
 * `fat.c` - FAT32 文件系统驱动
 * `ext2.c` - ext2 文件系统驱动
-* `devfs.c` - 设备文件系统
+* `devfs.c` - 设备文件系统（arch-neutral，2026-11-18 随 VFS 门下沉到 `kernel/fs/`）
 * `procfs.c` - 进程文件系统（/proc/<pid>/maps, /proc/<pid>/status, /proc/meminfo）
 * `tmpfs.c` - 临时文件系统
-* `elf.c` - ELF 加载器
+* `elf_layout.c` - ELF 布局解析（arch-neutral）
+* `elf.c` - ELF 加载器（x86-only，位于 `arch/x86_64/fs/`）
 * `file.c` - 文件描述符操作
 * `gpt.c` - GPT 分区表解析
 * `poll.c` - poll/ppoll 系统调用核心（do_poll_core）
@@ -137,6 +139,11 @@
 
 #### subsys 子目录
 * `subsys.c` - 子系统注册框架（register_subsys, subsys_init_all）
+
+#### syscall 子目录
+* `dispatch.c` - 单张共享 `syscall_table`（aarch64 用 `OS01_SYSCALL_A64_SUBSET` 隐藏未编入表项）
+* `sys_native.c` / `sys_mm.c` / `sys_fs.c` / `sys_net.c` / `sys_proc.c` / `sys_resource.c` / `sys_time.c` / `sys_misc.c` - 按组分的 syscall handler
+* `compat/` - Linux x86_64 ABI 兼容层（`table_x86_64.c` 编号映射 + `proc.c` 等 shim）
 
 #### tty 子目录
 * `tty.c` — TTY 子系统（tty_alloc, tty_read, tty_write, tty_push_input, tty_ioctl, get_dev_tty）

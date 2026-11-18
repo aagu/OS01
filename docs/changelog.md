@@ -31,7 +31,69 @@
   - aarch64 的 FAT readdir 在卷标/LFN 项上返回 -1（短名限制，既有行为，x86 同样如此），验收用 lookup 而非枚举取证。
   - 用户态 fd/syscall 面（open/read/write 经 EL0 SVC）已编入 dispatch 表但无用户任务可触发；/bin/init 装载需要 aarch64 userland 构建链（crt0/linker script/libc），为 M4 剩余任务的后续步骤。
 
+- feat(aarch64): **内核启动块平台配置化**（真机适配审计第 ① 层：DRAM 基址 / 内核加载地址解绑）——把原先固化在 6 个文件里的 `0x40000000` / `0x40080000` 收敛为**一次构建、一处配置**：
+
+  **做了什么**
+
+  - **单一旋钮**：`AARCH64_BOOT_BLOCK_BASE`（profile 变量，`mk/profiles/aarch64-clang.mk:22-28`）表示板型选定的启动块物理基址。不设置即为 QEMU virt 默认 `0x40000000`；**显式置空是错误**（默认靠"不设置"表达，不靠"置空"）。经导出环境变量的 bash 探针校验（`:39-42`），不复用 GNU make 算术：单一十进制或 `0x` 十六进制整数、2 MiB 对齐、落在 M0 映射 `[0, 0x80000000)` 内、与设备窗口 D `[0x08000000, 0x0a000000)` 不相交、`0x80000000` 以下留得下 ≥20 MiB 早期 arena。非法配置在**构建期报错**，不做掩码纠正、不回落默认。
+  - **单一常量源**：新增 `kernel/include/arch/aarch64/boot_layout.h`，只暴露 `AARCH64_BOOT_BLOCK_BASE` 一个可配置输入，其余全部派生（启动块 B = `[base, base+0x200000)`、`_start` = `base+0x80000`、handoff 窗口 = `[B.end-0x20000, B.end)`、trampoline 页 = `[B.end-0x1000, B.end)`、M1 arena 候选 = `[B.end, 0x80000000)`）。全部是**裸预处理常量**（无 C 类型、无 `ULL` 后缀），因此内核 C、预处理汇编、预处理链接脚本三处展开一致；`handoff_layout.h` 退化为现有 C 调用方的接口层。
+  - **链接脚本经 cpp 生成**：`kernel/arch/aarch64/linker.ld` 改为被预处理，产出 `linker.generated.ld`（`kernel/Makefile:670-689`）。配置值进入重编译/重链接依赖，并带 cfg stamp——避免"默认 → 改址 → 默认"的增量构建漏重编（这正是本任务最容易出错的点）。
+  - **四处联动消费同一布局**：UEFI loader（`boot/uefi/arch/aarch64/elf.c:40-41,100-101,158`、`boot.c:246-267,518`）、M0 早期页表可执行块选表选槽（`kernel/arch/aarch64/head.S:594-611`）、M1 运行期页表（`kernel/arch/aarch64/memory/runtime_tree.c:93-96`）、RAM 保留整块 B（`kernel/arch/aarch64/memory/ram_core.c:442-443`）。
+  - **UEFI 侧 fail-closed**：loader 在分配任何内核段之前校验 ELF —— `e_entry` 必须等于配置入口，否则以可区分的诊断 `UEFI-A64: kernel entry mismatch` 拒绝（`elf.c:100-101`、`boot.c:305-306`）；内核侧同样 fail-closed 取证 `UEFI-A64: layout entry=… context=…`（`kernel/arch/aarch64/boot/main.c:394-415`）。
+  - **trampoline 地址不再编进指令流**：改由寄存器传入（`handoff.S:4-9` 的 `br x2`），并用 `_Static_assert` 保证与布局常量一致（`loader.h:20-22`）——原先 `movz/movk` 把绝对地址编进指令流、且与 header 无编译期一致性检查。
+  - **新增宿主契约测试**：`hosttests/cases/test_aarch64_boot_elf.c`（loader 侧 ELF 校验器，含入口不匹配、段低于 LMA、越过 handoff、入口落在 BSS、入口指令只由部分文件提供、启动段不可执行、高半区段 VMA/PA 不匹配等反例）与 `hosttests/cases/test_aarch64_boot_layout.c`（内核侧布局契约）。
+  - **验收**：`make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout`（`mk/components/run.mk:413-420` → `qemutests/aarch64_lma_layout.py`）——默认布局 → 改址布局 → 再回默认的配对启动，外加"默认 loader 搭替代 ELF"的混搭拒绝。
+
+  **设计依据**：spec [2026-11-17-aarch64-kernel-lma-design.md](superpowers/specs/2026-11-17-aarch64-kernel-lma-design.md) / plan [2026-11-17-aarch64-kernel-lma.md](superpowers/plans/2026-11-17-aarch64-kernel-lma.md)。采用**构建时布局**而非固件动态决定装载地址：后者还要解决镜像重定位、早期地址计算与地址发布，不在本任务范围内。
+
+  **已知边界（如实记录）**
+
+  - **真机启动未验证**：只验证了改址构建与 QEMU virt 上的配对启动与混搭拒绝。spec 明确不把"改址成功"记作"真机启动成功"。
+  - **D 设备窗口仍是固化常量** `[0x08000000, 0x0a000000)`（`boot_layout.h:36-37`，**无 `#ifndef` 护栏，编译期不可换址**）。这意味着"布局已参数化"**只覆盖启动块 B**，不覆盖早期 MMIO 窗口 —— 早期 Device 块固化槽（`head.S:504-534`）与 early_arena 的 D 侧拒绝（`early_arena.c:147`）仍在，真机 DRAM 覆盖 D 窗口时 preflight 仍会 FATAL。
+  - handoff 窗口仍是固定 128 KiB 且固定址申请（`boot.c:246-248`），真机大 DTB 仍有 `EFI_BUFFER_TOO_SMALL` 风险（`boot.c:460-461`）——窗口**位置**随 B 派生了，但**容量**未解决。
+
+- feat(aarch64): **平台值解绑**（真机适配审计第 ③ 层：DTB 形状校验器 → 真解析器）——把"解析出基址后先和 QEMU 常量对账、相等才通过"改成"解析出就用"：
+
+  **做了什么**
+
+  - **PL011 MMIO 基址解耦**（4 处硬编码清掉 3 处）：运行期驱动改消费 DTB 解析值 `dtb_pl011_base()`（`kernel/arch/aarch64/platform/pl011.c:30-36`；DTB 尚不可用时回退 `PL011_EARLY_FALLBACK_PA` `pl011.c:26`）；解析器接受任意 PL011 基址（`kernel/arch/aarch64/platform/dtb_parse.c:144-158`）；**UEFI loader 侧已完全不含 PL011 硬编码**，改优先走 EFI Serial IO Protocol（`boot/uefi/arch/aarch64/boot.c:52-69,93-118`）。**剩余 1 处**：`head.S:144` 的 MMU 前 fault 打印仍 `mov x2, #0x09000000`（早于 MMU，loader 尚未来得及传参）。
+  - **PL011 波特率除数改由 DTB 时钟推导**（原先写死 16 MHz 外设钟 / IBRD=8 / FBRD=44）：`pl011_calc_divisors()`（`pl011.c:63-77`）按 `clk*4/baud` 算除数，调用点取 `dtb_pl011_clock()`（`pl011.c:93`），DTB 时钟来源为 `clock-frequency` / `clocks` phandle（`dtb_parse.c:111-119,159-171`）。**DTB 无时钟时回退 16 MHz**（`pl011.c:27,66-67`）——即"可配置，但缺时钟时仍按 QEMU 值"；残留的 IBRD=8/FBRD=44 仅作除数越界兜底（`pl011.c:71-74`），不是正常路径。
+  - **GIC 基址白名单解除**：`dtb_parse.c:133-143` 不再要求 GICD/GICC 必须等于 0x08000000/0x08010000（只拒 base==0），compatible 白名单补 `arm,gic-400`（RPi4 的 compatible 不含 `cortex-a15-gic`）。
+  - **运行期 GIC 消费解析值**：`kernel/arch/aarch64/intr/gic.c` 的 `gic_init` 使用 `dtb_gicd_base()` / `dtb_gicc_base()`。
+
+  **已知边界（如实记录）**
+
+  - **PL011 interrupts 形状校验仍偏严**：仍要求恰 3 cell 且第二项为 LEVEL_HIGH（`dtb_parse.c:152-155`），DTB 形状不同的板仍会被 -4 拒。
+  - **GICv3（`arm,gic-v3`）仍完全不支持**——全树无该 compatible 的处理路径，命中即拒。
+  - **`head.S:144` 的早期打印基址**仍固化 0x09000000，属真机适配审计第 ③ 层剩余的唯一一处。
+  - **`boot/uefi/arch/aarch64/boot.c:467-471` 的注释仍写 "aarch64 (RNDR not yet wired)"**——该说法是错的：RNDR/RNDRRS 早在 2026-09-25 已接线（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE）。2026-11-17 的真机适配审计稿把"无 RNDR 接线"写进了路线图平台能力上限段，本条目一并更正。
+
 ## 2026-11-17
+
+- chore(branding): **项目更名为 Craton**（原 OS01）：
+
+  **做了什么**
+
+  - README 标题改为 "Craton — x86_64 Operating System from Scratch"，导语加 "(formerly OS01)" 过渡说明；License 与分发说明段落同步改名。
+  - 启动字标重绘：四个 OS01 字形改为六个 CRATON 字形（沿用 5×7 实心几何风格，O 字形复用），ink/accent 配色拆分显式化为 `LOGO_INK_GLYPHS`（CRA 用 ink、TON 用 accent），`kernel/driver/logo.c`。
+  - `qemutests/aarch64_boot_logo.py` 不再硬编码配色拆分与字标宽度，改为从 `kernel/driver/logo.c` 派生——后续改字标时像素期望自动跟随。
+
+  **已知边界（如实记录）**
+
+  - **只改 README 标题与启动字标**；代码内 `OS01_*` 标识符（特性门、profile 名、UAPI 前缀等）按"其它标识符暂不动"的策略原样保留，故仓库内部仍大量出现 OS01 字样。
+  - 字标从 4 字形变 6 字形，宽度随之变化，aarch64 启动 logo 的像素期望已同步（`qemutests/aarch64_boot_logo.py`）。
+
+  **验证**：套件自检、x86 kernel.bin 构建、`make PROFILE=aarch64-clang test-aarch64-boot-logo` 全部 PASS。
+
+- chore(license): **补 MIT 许可与第三方组件归属表**：
+
+  **做了什么**
+
+  - 新增仓库根 `LICENSE`（标准 MIT 文本，版权署名 "2026 OS01 contributors"）。
+  - README 新增 License 段落，逐项列出第三方组件的许可与形式：busybox 1.36.1（GPL-2.0-only，submodule）、doomgeneric（GPL-2.0，submodule）、lwIP（BSD-3-Clause，submodule）、musl 算法（floatscan/strtod，MIT，pinned archive，`thirdpart/musl-libc-algorithms/` 带 provenance + SHA256 清单）。
+  - 分发说明澄清：`disk.img` 里的 BusyBox / doomgeneric 二进制是各自许可下的独立程序，与内核仅为"简单聚合"，不因此改变各自的许可义务。
+
+  **已知边界**：vendored 的 musl 文件本就自带 MIT 声明与来源清单，本次未改动。
 
 - test(ci): **目录漂移门禁接入 CI**（P0 尾巴闭环）：
 
@@ -196,7 +258,7 @@
 
   - 共享 `sys_native_kill()` / `sys_native_signal()` / `sys_native_sigprocmask()` / `sys_native_sigreturn()`；`aarch64_do_signal_delivery()` 只在 `spsr_el1` 为 EL0t 时生效，SIG_DFL 默认动作集齐后压 `aarch64_sigframe` 到用户栈并跳 handler；`arch_syscall_sigreturn()` 带**伪造帧防护**（`spsr_el1` 不匹配直接 `-EINVAL`）。
 
-  **验证**：新增 late selftest `aarch64_user_waitpid` / `aarch64_user_exec` / `aarch64_user_signal`；共享 syscall 表在 aarch64 侧从 9 项扩到 **15 项**。闭环记录另见 [docs/arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-14-闭环)。
+  **验证**：新增 late selftest `aarch64_user_waitpid` / `aarch64_user_exec` / `aarch64_user_signal`；共享 syscall 表在 aarch64 侧从 9 项扩到 **15 项**。闭环记录另见 [docs/arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环)。
 
 - feat(mm): **MEM-1 内存子系统架构边界清理**（设计 [spec](superpowers/specs/2026-11-14-mm-architecture-boundaries-design.md)，计划 [plan](superpowers/plans/2026-11-14-mm-architecture-boundaries.md)；配套 [冗余与命名清理 spec](superpowers/specs/2026-11-14-mm-redundancy-naming-layout-design.md)）：
 

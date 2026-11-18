@@ -342,7 +342,7 @@ aarch64 的匿名 VM 策略在 `kernel/arch/aarch64/memory/user_vm_policy.c`
 验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）。未覆盖：VFS `/bin/init`、
 文件映射、`MAP_FIXED`、共享映射、设备映射、SMP 用户调度、IRQ 返回抢占。
 **waitpid / exec / 信号三块已于 2026-11-14 闭环（M4.12 ~ M4.14）**，不再是未覆盖项。
-规划项见 [roadmap.md](../roadmap.md) P2；现状叙述见 [arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-14-闭环)。
+规划项见 [roadmap.md](../roadmap.md) P2；现状叙述见 [arch.md](../arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环)。
 
 ---
 
