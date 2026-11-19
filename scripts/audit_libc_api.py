@@ -1107,6 +1107,12 @@ def declared_declarations(text: str) -> list[tuple[str, str, tuple[int, ...]]]:
             continue
         if "=" in s.split("(")[0]:
             continue
+        # Inline-asm fragments inside static inline bodies are statements,
+        # not declarations: an asm register binding (… __asm__("x8") = nr)
+        # and an asm statement (__asm__ volatile ("svc #0")) both parse as
+        # a bogus function named after the keyword otherwise.
+        if "__asm__" in s.split("(")[0] or s.startswith("__asm__"):
+            continue
         m = _FUNC_DECL.match(s)
         if not m:
             continue
@@ -1290,6 +1296,7 @@ def check_manifest_against_headers(include_dir: str, groups: list[str]) -> list[
     header->symbol map must match the header's declared functions EXACTLY.
     """
     errors: list[str] = []
+    notes: list[str] = []
     classified: set[str] = set(EXCLUDED_HEADERS)
     for group in groups:
         classified.update(group_headers(group))

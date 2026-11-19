@@ -459,8 +459,7 @@ int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry,
     }
 
     /* BOOT-1: all APs satisfied the boot contract.  The unified
-     * "[boot-1] complete discovered=N ready=N" marker and the post-boot
-     * hook / subsys_prepare_cpus() ordering are owned by
-     * kernel/core/smp.c::arch_boot_aps. */
+     * completion marker and the post-boot hook / subsys_prepare_cpus()
+     * ordering are owned by kernel/core/smp.c::arch_boot_aps. */
     return 0;
 }

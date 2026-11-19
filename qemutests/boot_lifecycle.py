@@ -82,15 +82,21 @@ VARIANT_SLUG_FMT = "boot-lifecycle-%s"
 # short window too, bounded by the runner's own deadline.
 OBSERVE_SECONDS = 1.0
 
-# ── Guest markers (kernel/arch/x86_64/smp/smp.c) ─────────────────
+# ── Guest markers (kernel/core/smp.c + boot_failure.c) ───────────
 _READY_TEXT = r"\[boot-1\] ready cpu=(\d+) online=1 ipi_ready=1 scheduler_ok=1"
 _COMPLETE_TEXT = r"\[boot-1\] complete discovered=(\d+) ready=(\d+)"
-_FATAL_TEXT = r"\[boot-1\] FATAL cpu=(\d+) stage=(prepare|online|scheduler|invariant)"
+# Unified SMP boot Fail-Closed (spec 2026-11-19): the full enum
+# smp_boot_stage must be accepted — boot_failure_stop("smp", ...)
+# renders [boot-3] and NO kernel panic line follows.
+_FATAL_TEXT = r"\[boot-1\] FATAL cpu=(\d+) stage=(prepare|activate|online|scheduler|invariant)"
+_BOOT3_TEXT = (r"\[boot-3\] FATAL stage=smp component=(\S+) "
+               r"rc=(-?\d+) phase=(-?\d+) cpu=(\d+)")
 
 # Complete lines only — a truncated marker is never evidence.
 _READY_RE = re.compile(r"^" + _READY_TEXT + r"$", re.MULTILINE)
 _COMPLETE_RE = re.compile(r"^" + _COMPLETE_TEXT + r"$", re.MULTILINE)
 _FATAL_RE = re.compile(r"^" + _FATAL_TEXT + r"$", re.MULTILINE)
+_BOOT3_RE = re.compile(r"^" + _BOOT3_TEXT + r"$", re.MULTILINE)
 
 # Fault-variant identity and the delay record (fault images only).
 _VARIANT_RE = re.compile(
@@ -105,21 +111,17 @@ _ANY_BOOT1_RE = re.compile(r"^\[boot-1\].*$", re.MULTILINE)
 _PID1_RE = re.compile(r"^init: running as PID 1$", re.MULTILINE)
 _SHELL_RE = re.compile(r"(?m)^# ?$")
 
-# A panic line that is NOT the expected BOOT-1 fatal consequence.
-# kpanic renders "kernel panic: <msg>"; the BOOT-1 fatal path is the
-# only panic a fault case may produce.
+# A panic line is NEVER acceptable: the unified Fail-Closed path stops
+# through boot_failure_stop ("[boot-3] FATAL ...") and halts silently —
+# the old kpanic ("kernel panic - not syncing: BOOT-1: ...") rendering
+# is gone with the degraded/fatal-panic path.
 _PANIC_RE = re.compile(r"kernel panic", re.IGNORECASE)
-# A panic line that is NOT the expected BOOT-1 fatal consequence is
-# judged on the WHOLE line (kpanic renders "kernel panic - not syncing:
-# BOOT-1: AP boot failed ..."), which is the only allowed panic.
 _PANIC_LINE_RE = re.compile(r"^.*kernel panic.*$", re.MULTILINE | re.IGNORECASE)
-_BOOT1_PANIC_RE = re.compile(r"kernel panic.*BOOT-1: AP boot failed")
 
 
 def _unexpected_panics(text: str) -> list[str]:
-    """Panic lines that are NOT the expected BOOT-1 fatal consequence."""
-    return [m.group(0) for m in _PANIC_LINE_RE.finditer(text)
-            if not _BOOT1_PANIC_RE.search(m.group(0))]
+    """Every kernel panic line — none are expected in any case."""
+    return [m.group(0) for m in _PANIC_LINE_RE.finditer(text)]
 
 
 def check_evidence(text: str, case: str, cpus: int) -> tuple[bool, list[str]]:
@@ -138,16 +140,16 @@ def check_evidence(text: str, case: str, cpus: int) -> tuple[bool, list[str]]:
     # The kernel's serial output is LF-only; normalise CR anyway.
     text = text.replace("\r", "")
 
-    # Unrelated panics fail every case.  The expected BOOT-1 fatal path
-    # itself renders through kpanic ("kernel panic - not syncing: BOOT-1:
-    # AP boot failed ...") and is the ONLY allowed panic.
+    # Kernel panics fail every case: the unified Fail-Closed path
+    # renders [boot-3] and halts without any panic line.
     unexpected = _unexpected_panics(text)
     if unexpected:
-        errors.append(f"unrelated panic: {unexpected[0]!r}")
+        errors.append(f"unexpected panic: {unexpected[0]!r}")
 
     readys = list(_READY_RE.finditer(text))
     completes = list(_COMPLETE_RE.finditer(text))
     fatals = list(_FATAL_RE.finditer(text))
+    boot3s = list(_BOOT3_RE.finditer(text))
     variants = list(_VARIANT_RE.finditer(text))
     delays = list(_DELAY_RE.finditer(text))
 
@@ -235,8 +237,9 @@ def check_evidence(text: str, case: str, cpus: int) -> tuple[bool, list[str]]:
             errors.append("shell prompt missing")
         return (not errors), errors
 
-    # no-online / no-scheduler: exactly one FATAL at cpu 1 / right stage,
-    # and NOTHING that proves continuation afterwards.
+    # no-online / no-scheduler: exactly one [boot-1] FATAL at cpu 1 /
+    # right stage, exactly one [boot-3] Fail-Closed stop for it, and
+    # NOTHING that proves continuation afterwards.
     if len(fatals) != 1:
         errors.append(f"FATAL lines: {len(fatals)} (want 1)")
     else:
@@ -245,6 +248,19 @@ def check_evidence(text: str, case: str, cpus: int) -> tuple[bool, list[str]]:
             errors.append(f"FATAL cpu={fcpu} != 1")
         if fstage != stage:
             errors.append(f"FATAL stage={fstage!r} != {stage!r}")
+
+    if len(boot3s) != 1:
+        errors.append(f"[boot-3] FATAL lines: {len(boot3s)} (want 1)")
+    else:
+        b3 = boot3s[0]
+        if b3.group(1) != stage:
+            errors.append(f"[boot-3] component={b3.group(1)!r} != {stage!r}")
+        if int(b3.group(4)) != 1:
+            errors.append(f"[boot-3] cpu={b3.group(4)} != 1")
+        if int(b3.group(3)) != -1:
+            errors.append(f"[boot-3] phase={b3.group(3)} != -1")
+        if fatals and boot3s[0].start() < fatals[0].start():
+            errors.append("[boot-3] stop precedes the [boot-1] FATAL line")
 
     if readys:
         errors.append(f"ready lines in a fatal run: "

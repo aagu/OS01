@@ -411,14 +411,25 @@ static void test_cpu_prepare_source_contract(void)
     assert_true(f_old == NULL);
     if (f_old) fclose(f_old);
 
-    /* 2. kernel/arch/x86_64/smp/boot.c must NOT contain arch_register_subsys_percpu */
+    /* 2. kernel/arch/x86_64/smp/boot.c must NOT contain arch_register_subsys_percpu
+     *    (the subsys_prepare_cpus call moved to kernel/core/smp.c with the
+     *    unified SMP boot; the positive check lives below). */
     char *boot_src = slurp_file("kernel/arch/x86_64/smp/boot.c");
     assert_true(boot_src != NULL);
     if (boot_src) {
         assert_true(strstr(boot_src, "arch_register_subsys_percpu") == NULL);
         assert_true(strstr(boot_src, "_lapic_timer_start_percpu") == NULL);
-        assert_true(strstr(boot_src, "subsys_prepare_cpus") != NULL);
         free(boot_src);
+    }
+
+    /* 2b. kernel/core/smp.c::arch_boot_aps owns the subsys_prepare_cpus
+     *     dispatch now — the positive existence check moved here from
+     *     the legacy x86 boot.c location. */
+    char *core_src = slurp_file("kernel/core/smp.c");
+    assert_true(core_src != NULL);
+    if (core_src) {
+        assert_true(strstr(core_src, "subsys_prepare_cpus()") != NULL);
+        free(core_src);
     }
 
     /* 3. kernel/include/arch/subsys.h must NOT contain arch_register_subsys_percpu */

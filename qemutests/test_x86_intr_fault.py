@@ -463,25 +463,40 @@ class ApNmiOrderingTests(unittest.TestCase):
         # Ignore comments so documentation cannot satisfy an ordering check.
         source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
         early = source.split("static void ap_init_lapic(void)", 1)[1].split(
-            "void ap_entry(void)", 1)[0]
+            "void arch_smp_ap_cpu_init(", 1)[0]
         self.assertIn("lapic_write(LAPIC_LVT_LINT0,   LVT_MASK | LVT_DELIVERY_EXTINT)", early)
         self.assertIn("lapic_write(LAPIC_LVT_LINT1, LVT_MASK)", early)
         self.assertNotIn("lapic_configure_nmi()", early)
-        entry = source.split("void ap_entry(void)", 1)[1].split(
-            "static task_t *create_idle_task", 1)[0]
+        entry = source.split("void arch_smp_ap_cpu_init(", 1)[1].split(
+            "void arch_smp_ap_post_online(", 1)[0]
         ordered = ["ap_init_lapic();", "lgdt %0", "lidt %0", "lretq",
                    "set_tss64(", "load_TR(", "lapic_configure_nmi();",
-                   # BOOT-1: the AP release-publishes its own online.
-                   "&cpu->online, 1, __ATOMIC_RELEASE", "ipi_ready_publish_ap("]
+                   # BOOT-1 fault injection ends cpu_init; the online
+                   # publication itself belongs to the common entry.
+                   "boot1_fault_before_online(cpu_id)"]
         positions = [entry.index(token) for token in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(entry.count("lapic_configure_nmi();"), 1)
-        # GS is established by the trampoline before its entry call.
+        # The unified common entry publishes online and ipi_ready in the
+        # BOOT-1 order AFTER cpu_init completes.
+        core = (ROOT / "kernel/core/smp.c").read_text()
+        core = re.sub(r"/\*.*?\*/|//[^\n]*", "", core, flags=re.S)
+        common = core.split("void smp_ap_common_entry(", 1)[1].split(
+            "arch_smp_ap_enter_idle(cpu_id, cpu);", 1)[0]
+        core_ordered = ["arch_smp_ap_cpu_init(cpu_id, cpu);",
+                        "&cpu->online, 1u, __ATOMIC_RELEASE",
+                        "arch_smp_ap_publish_ipi_ready(cpu_id, cpu)"]
+        core_positions = [common.index(token) for token in core_ordered]
+        self.assertEqual(core_positions, sorted(core_positions))
+        # GS is established by the trampoline before its entry call, and
+        # the unified args are loaded before the call.
         trampoline = (ROOT / "kernel/arch/x86_64/trampoline.S").read_text()
         gs = trampoline.index("$IA32_GS_BASE")
         self.assertLess(gs, trampoline.index("wrmsr", gs))
-        self.assertLess(trampoline.index("wrmsr", gs),
-                        trampoline.index("call", gs))
+        call_at = trampoline.index("call", gs)
+        self.assertLess(trampoline.index("trampoline_data + 36(%rip), %edi"),
+                        call_at)
+        self.assertLess(call_at, trampoline.index("hlt", call_at))
 
 
 class QmpTransportTests(unittest.TestCase):

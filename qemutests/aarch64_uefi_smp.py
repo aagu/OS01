@@ -4,7 +4,7 @@
 Task 10 of the lightweight test-framework plan moves the common
 process/output/archive code onto ``ProcessSession`` (Task 3) and
 ``RunArchive``/``RunReport`` (Task 4).  The suite-owned acceptance rules
-(``passed`` / ``degraded_passed`` / ``acceptance_evidence`` / the
+(``passed`` / ``no_ack_fail_closed_passed`` / ``acceptance_evidence`` / the
 diagnostic-DTB mechanism) are unchanged — only the process boundary and
 the per-invocation evidence archive were replaced.
 
@@ -94,15 +94,21 @@ UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872\n
 [smp] topology requested=2 discovered=2\n
 [smp] cpu=0 online\n
 [smp] timeout cpu=1 reason=online-timeout\n
-[smp] summary requested=2 online=1 status=DEGRADED\n
-[spinlock] status=SKIP\n
 [smp-test] no_ack_cpu=1\n
-SHOOTDOWN-PROBE: START\n
-SHOOTDOWN-PROBE: OK\n
-[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0\n
-[tick] 1\n
-[tick] 2\n
-[tick] 3\n
+[boot-1] FATAL cpu=1 stage=online\n
+[boot-3] FATAL stage=smp component=online rc=-110 phase=-1 cpu=1\n
+"""
+
+current_degraded_log = """\
+UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
+[smp] topology source=uefi-dtb cpus=2
+[smp] boot el=1 conduit=smc
+[smp-test] no_ack_cpu=1
+[smp] cpu=0 online mpidr=0x0
+[smp] cpu=1 reason=online-timeout
+[smp] cpu=1 target_mpidr=0x1 rc=0
+[boot-1] FATAL cpu=1 stage=online
+[boot-3] FATAL stage=smp component=online rc=-110 phase=-1 cpu=1
 """
 
 current_log_for_2_cpus = """\
@@ -117,23 +123,6 @@ UEFI-A64: pt map smoke OK
 [spinlock] cpu=1 done=1000000
 [spinlock] active=2 iterations=1000000 total=2000000 status=PASS
 [smp-test] no_ack_cpu=0
-[tick] 1
-[tick] 2
-[tick] 3
-"""
-
-current_degraded_log = """\
-UEFI-A64: RAM ranges=3 pages2m=236 bytes=494927872
-[smp] topology source=uefi-dtb cpus=2
-[smp-test] no_ack_cpu=1
-[smp] cpu=0 online mpidr=0x0
-[smp] cpu=1 reason=online-timeout
-[smp] cpu=1 target_mpidr=0x1 rc=0
-[smp] requested=2 online=1 status=DEGRADED
-[spinlock] status=SKIP
-SHOOTDOWN-PROBE: START
-SHOOTDOWN-PROBE: OK
-[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0
 [tick] 1
 [tick] 2
 [tick] 3
@@ -166,28 +155,39 @@ def self_test() -> None:
         "active=2", "active=1").replace("total=2000000", "total=1000000")
     assert passed(single, cpus=1)
     assert not passed(single, cpus=2)
-    assert degraded_passed(complete_degraded_log)
-    assert not degraded_passed(complete_degraded_log + "[smp] FATAL: test failure\n")
-    assert degraded_passed(current_degraded_log)
-    assert degraded_passed(current_degraded_log.replace("\n", "\n\r"))
-    assert degraded_passed(current_degraded_log.rstrip("\n"))
-    # A serial drain may end exactly at SKIP, with no final newline. Old
-    # ticks must not make run_case terminate QEMU before recovery ticks.
-    late_skip = current_degraded_log.replace("[spinlock] status=SKIP\n", "") + "[spinlock] status=SKIP"
-    assert not degraded_passed(late_skip)
+    # NO_ACK Fail-Closed evidence (spec 2026-11-19): the retired
+    # DEGRADED shape is rejected; only the [boot-1] FATAL + [boot-3]
+    # stop pair, with zero continuation markers, is accepted.
+    assert no_ack_fail_closed_passed(complete_degraded_log)
+    assert no_ack_fail_closed_passed(current_degraded_log)
+    assert no_ack_fail_closed_passed(current_degraded_log.replace("\n", "\n\r"))
+    assert no_ack_fail_closed_passed(current_degraded_log.rstrip("\n"))
+    assert not no_ack_fail_closed_passed(
+        complete_degraded_log + "[smp] FATAL: test failure\n")
+    # Continuation markers must reject even when the fatal pair held.
+    for extra in ("[spinlock] status=SKIP\n", "SHOOTDOWN-PROBE: OK\n",
+                  "[tick] 1\n", "[boot-1] a64-no-ack cpu=1 online=1\n",
+                  "[smp] requested=2 online=1 status=DEGRADED\n"):
+        assert not no_ack_fail_closed_passed(current_degraded_log + extra), extra
     negative_args = argparse.Namespace(expect_no_ack=1, expect_selftest=False)
-    for suffix in ("", "\n", "\n[tick] 4\n", "\n[tick] 4\n[tick] 5\n"):
-        assert not acceptance_evidence(negative_args, late_skip + suffix, 2)
-    assert acceptance_evidence(negative_args, late_skip + "\n[tick] 4\n[tick] 5\n[tick] 6", 2)
-    for extra in ("[smp] cpu=1 online mpidr=0x1\n", "[smp] cpu=0 online\n",
-                  "[spinlock] cpu=0 done=1000000\n", "[spinlock] total=1000000 status=PASS\n",
-                  "[smp-test] no_ack_cpu=0\n", "[smp] FATAL: bad state\n"):
-        assert not degraded_passed(current_degraded_log + extra), extra
+    # A serial drain may end exactly at the [boot-3] stop line, with or
+    # without a trailing newline: both are accepted Fail-Closed
+    # evidence.  Any continuation evidence (late ticks) REJECTS — the
+    # stop is terminal and the guest stays silent.
+    for suffix in ("", "\n"):
+        assert acceptance_evidence(negative_args,
+                                   current_degraded_log.rstrip("\n") + suffix, 2), suffix
+    for suffix in ("\n[tick] 4\n", "\n[tick] 4\n[tick] 5\n"):
+        assert not acceptance_evidence(negative_args,
+                                       current_degraded_log.rstrip("\n") + suffix, 2), suffix
+    assert acceptance_evidence(negative_args, current_degraded_log, 2)
     for old, new in (("no_ack_cpu=1", "no_ack_cpu=0"),
-                     ("reason=online-timeout", "reason=cpu-on-error"),
-                     ("online=1 status=DEGRADED", "online=2 status=PASS"),
-                     ("[spinlock] status=SKIP\n", ""), ("[tick] 3\n", "")):
-        assert not degraded_passed(current_degraded_log.replace(old, new)), old
+                     ("cpu=1 stage=online", "cpu=1 stage=scheduler"),
+                     ("component=online", "component=scheduler"),
+                     ("rc=-110", "rc=0"),
+                     ("[boot-1] FATAL cpu=1 stage=online\n", ""),
+                     ("[boot-3] FATAL stage=smp component=online rc=-110 phase=-1 cpu=1\n", "")):
+        assert not no_ack_fail_closed_passed(current_degraded_log.replace(old, new)), old
 
     # RAM-summary evidence must be present, unique, and arithmetically
     # consistent across all four positive fixtures. The live QEMU virt
@@ -197,10 +197,12 @@ def self_test() -> None:
     for label, fixture, predicate in (
         ("complete_log_for_4_cpus", complete_log_for_4_cpus,
          lambda text: passed(text, cpus=4)),
-        ("complete_degraded_log", complete_degraded_log, degraded_passed),
+        ("complete_degraded_log", complete_degraded_log,
+         no_ack_fail_closed_passed),
         ("current_log_for_2_cpus", current_log_for_2_cpus,
          lambda text: passed(text, cpus=2)),
-        ("current_degraded_log", current_degraded_log, degraded_passed),
+        ("current_degraded_log", current_degraded_log,
+         no_ack_fail_closed_passed),
     ):
         assert predicate(fixture), f"unmutated {label} must pass"
         # Mutation: remove the RAM line.
@@ -268,9 +270,9 @@ def self_test() -> None:
         "UEFI-A64: pt map smoke FAIL\n")
     assert passed(fail_pt, cpus=2, expect_selftest=True) is False, \
         "pt smoke FAIL line must always reject"
-    # degraded_passed ignores expect_selftest (signature only).
-    assert degraded_passed(current_degraded_log, expect_selftest=True), \
-        "degraded_passed ignores expect_selftest"
+    # no_ack_fail_closed_passed ignores expect_selftest (signature only).
+    assert no_ack_fail_closed_passed(current_degraded_log, expect_selftest=True), \
+        "no_ack_fail_closed_passed ignores expect_selftest"
 
     # expect_slab (M2 Task 6): requires exactly one
     # '[selftest] slab: 16/16 PASS' marker anywhere in the log.
@@ -794,11 +796,22 @@ def passed(text: str, cpus: int, expect_selftest: bool = False,
     return len(re.findall(r"^\[tick\] \d+$", text, re.MULTILINE)) >= 3
 
 
-def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
-    """Recognize the one intentionally degraded, non-benchmark case.
+def no_ack_fail_closed_passed(text: str, expect_selftest: bool = False) -> bool:
+    """Recognize the NO_ACK fault's unified Fail-Closed stop (spec
+    2026-11-19).
 
-    The no-ACK path never requires the smoke line; ``expect_selftest`` is
-    accepted for signature symmetry with ``passed()`` and ignored.
+    CPU1 never ACKs its boot slot, so arch_smp_boot_aps returns
+    -ETIMEDOUT with SMP_STAGE_ONLINE and the unified orchestrator stops
+    for good through boot_failure_stop.  Required: exactly one
+    ``[boot-1] FATAL cpu=1 stage=online`` followed by exactly one
+    ``[boot-3] FATAL stage=smp component=online rc=-110 phase=-1 cpu=1``.
+    Forbidden: ANY continuation evidence — ``[spinlock]`` lines,
+    ``SHOOTDOWN-PROBE`` lines, ``[tick]`` lines, the retired
+    ``[boot-1] a64-no-ack`` runtime-qualification record, or a
+    ``[smp] requested=`` PASS summary.  The old DEGRADED shape
+    (``status=DEGRADED`` summary, spinlock SKIP) is gone.
+
+    ``expect_selftest`` is accepted for signature symmetry and ignored.
     """
     text = text.replace("\r", "")
     if not ram_summary_ok(text):
@@ -806,42 +819,38 @@ def degraded_passed(text: str, expect_selftest: bool = False) -> bool:
     if hard_kernel_failure(text):
         return False
 
-    if not re.search(r"^\[smp\] topology (?:requested=2 discovered=2|source=uefi-dtb cpus=2)$", text, re.MULTILINE):
+    fatal = list(re.finditer(r"^\[boot-1\] FATAL cpu=1 stage=online$", text,
+                             re.MULTILINE))
+    if len(fatal) != 1:
         return False
-    online = re.findall(r"^\[smp\] cpu=(\d+) online(?: mpidr=0x[0-9a-fA-F]+)?$", text, re.MULTILINE)
-    if online != ["0"]:
+    boot3 = list(re.finditer(
+        r"^\[boot-3\] FATAL stage=smp component=online rc=-110 phase=-1 cpu=1$",
+        text, re.MULTILINE))
+    if len(boot3) != 1:
         return False
-    timeouts = re.findall(r"^\[smp\] (?:timeout )?cpu=(\d+) reason=online-timeout$", text, re.MULTILINE)
-    summaries = re.findall(r"^\[smp\] (?:summary )?requested=(\d+) online=(\d+) status=(\w+)$", text, re.MULTILINE)
-    injections = re.findall(r"^\[smp-test\] no_ack_cpu=([^\n]+)$", text, re.MULTILINE)
-    if timeouts != ["1"] or summaries != [("2", "1", "DEGRADED")] or injections != ["1"]:
+    if boot3[0].start() < fatal[0].start():
         return False
-    # BOOT-1 Task 4: the DEGRADED evidence must be backed by exactly one
-    # runtime-qualification record — CPU1 was online and IPI-ready but
-    # never admitted (scheduler_ok=0, accepted=0).  The anchored
-    # full-line match rejects missing, duplicate, wrong-CPU and
-    # truncated records, and every wrong field value, in one stroke.
-    # The record must also FOLLOW the (unique, complete) shootdown probe
-    # result — the BSP read the state only after the probe returned.
-    no_ack_re = re.compile(
-        r"^\[boot-1\] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0$",
-        re.MULTILINE)
-    records = list(no_ack_re.finditer(text))
-    if len(records) != 1:
+    if not re.search(r"^\[smp-test\] no_ack_cpu=1$", text, re.MULTILINE):
         return False
-    probes = list(re.finditer(r"^SHOOTDOWN-PROBE: OK$", text, re.MULTILINE))
-    if len(probes) != 1:
-        return False
-    if records[0].start() < probes[0].end():
-        return False
-    # A no-ACK case must never start even a partial shared-count test.
-    spinlock = list(re.finditer(r"^\[spinlock\][^\n]*$", text, re.MULTILINE))
-    if len(spinlock) != 1 or spinlock[0].group() != "[spinlock] status=SKIP":
-        return False
-    after_skip = text[spinlock[0].end():]
-    if len(re.findall(r"^\[tick\] \d+$", after_skip, re.MULTILINE)) < 3:
-        return False
-    return not bool(re.search(r"^\[[^]]*(?:bench|spinlock)[^]]*\][^\n]*\bPASS\b", text, re.MULTILINE | re.IGNORECASE))
+    # No continuation marker may exist anywhere in the observation
+    # window: the Fail-Closed stop is terminal and silent afterwards.
+    forbidden = (
+        r"^\[spinlock\]",
+        r"^SHOOTDOWN-PROBE",
+        r"^\[tick\]",
+        r"^\[boot-1\] a64-no-ack ",
+        r"^\[smp\] requested=",
+        r"^\[smp\] (?:summary )?requested=\d+ online=\d+ status=DEGRADED",
+    )
+    for pattern in forbidden:
+        if re.search(pattern, text, re.MULTILINE):
+            return False
+    return True
+
+
+# Retired name kept as an alias for the transition: no caller remains in
+# the tree, but grep-audits reference the historical degraded shape.
+degraded_passed = no_ack_fail_closed_passed
 
 
 def lma_layout_evidence_ok(text: str, base: int, cpus: int,
@@ -940,7 +949,7 @@ def acceptance_evidence(args: argparse.Namespace, text: str, cpus: int) -> bool:
                 and lma_layout_evidence_ok(text, lma_base, cpus,
                                            getattr(args, "ram_mib", 512)))
     if args.expect_no_ack is not None:
-        return degraded_passed(text, expect_selftest=expect_selftest)
+        return no_ack_fail_closed_passed(text, expect_selftest=expect_selftest)
     if getattr(args, "expect_m1", False):
         try:
             from aarch64_m1_evidence import m1_evidence_ok

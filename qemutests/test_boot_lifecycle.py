@@ -64,6 +64,12 @@ def fatal_line(cpu: int, stage: str) -> str:
     return f"[boot-1] FATAL cpu={cpu} stage={stage}"
 
 
+def boot3_line(stage: str, cpu: int = 1, rc: int = -110) -> str:
+    """The unified Fail-Closed stop line (kernel/core/boot_failure.c)."""
+    return (f"[boot-3] FATAL stage=smp component={stage} "
+            f"rc={rc} phase=-1 cpu={cpu}")
+
+
 def variant_line(case: str) -> str:
     return f"[boot-1] variant=boot-lifecycle-{case}"
 
@@ -89,6 +95,8 @@ PID1_BLOCK = [
     "# ",
 ]
 
+# The old kpanic rendering of the fatal path is GONE with the unified
+# Fail-Closed policy: a kernel panic line is never acceptable evidence.
 BOOT1_PANIC = "kernel panic - not syncing: BOOT-1: AP boot failed, cpu=1 stage=online"
 
 
@@ -261,7 +269,7 @@ class CheckEvidenceFatal(unittest.TestCase):
             variant_line(case),
             *BOOT_NOISE,
             fatal_line(1, stage),
-            BOOT1_PANIC,
+            boot3_line(stage),
         ]) + "\n"
 
     def test_fatal_cases_pass(self) -> None:
@@ -271,6 +279,70 @@ class CheckEvidenceFatal(unittest.TestCase):
         ok, errs = bl.check_evidence(self._stream("no-scheduler", "scheduler"),
                                      "no-scheduler", 2)
         self.assertTrue(ok, errs)
+
+    def test_every_stage_is_accepted_evidence(self) -> None:
+        # The unified enum: prepare / activate / online / scheduler /
+        # invariant must all be parseable FATAL evidence.  The runner
+        # maps a CASE to exactly one stage (no-online→online,
+        # no-scheduler→scheduler), so the non-runner stages are judged
+        # at the regex level and the runner stages end-to-end.
+        for stage, rc in (("prepare", -12), ("activate", -19),
+                          ("online", -110), ("scheduler", -110),
+                          ("invariant", -5)):
+            with self.subTest(stage=stage):
+                line = fatal_line(1, stage)
+                self.assertRegex(line + "\n",
+                                 re.compile("^" + bl._FATAL_TEXT + "$",
+                                            re.MULTILINE))
+                b3 = boot3_line(stage, rc=rc)
+                self.assertRegex(b3 + "\n",
+                                 re.compile("^" + bl._BOOT3_TEXT + "$",
+                                            re.MULTILINE))
+                if stage == "online" or stage == "scheduler":
+                    text = "\n".join([
+                        variant_line("no-online" if stage == "online"
+                                     else "no-scheduler"),
+                        *BOOT_NOISE,
+                        line,
+                        b3,
+                    ]) + "\n"
+                    ok, errs = bl.check_evidence(text, "no-online" if
+                                                 stage == "online"
+                                                 else "no-scheduler", 2)
+                    self.assertTrue(ok, errs)
+
+    def test_missing_boot3_stop_fails(self) -> None:
+        text = self._stream("no-online", "online").replace(
+            boot3_line("online") + "\n", "")
+        ok, errs = bl.check_evidence(text, "no-online", 2)
+        self.assertFalse(ok)
+        self.assertTrue(any("boot-3" in e for e in errs))
+
+    def test_wrong_boot3_component_fails(self) -> None:
+        text = self._stream("no-online", "online").replace(
+            boot3_line("online"), boot3_line("scheduler"))
+        ok, _ = bl.check_evidence(text, "no-online", 2)
+        self.assertFalse(ok)
+
+    def test_wrong_boot3_cpu_fails(self) -> None:
+        text = self._stream("no-online", "online").replace(
+            boot3_line("online"), boot3_line("online", cpu=2))
+        ok, _ = bl.check_evidence(text, "no-online", 2)
+        self.assertFalse(ok)
+
+    def test_boot3_before_fatal_fails(self) -> None:
+        text = self._stream("no-online", "online").replace(
+            fatal_line(1, "online") + "\n" + boot3_line("online"),
+            boot3_line("online") + "\n" + fatal_line(1, "online"))
+        ok, _ = bl.check_evidence(text, "no-online", 2)
+        self.assertFalse(ok)
+
+    def test_kpanic_line_in_fatal_case_fails(self) -> None:
+        # The old fatal rendering is no longer allowed ANYWHERE: the
+        # unified path stops via boot_failure_stop without a panic.
+        text = self._stream("no-online", "online") + BOOT1_PANIC + "\n"
+        ok, _ = bl.check_evidence(text, "no-online", 2)
+        self.assertFalse(ok)
 
     def test_missing_fatal_fails(self) -> None:
         text = self._stream("no-online", "online").replace(
@@ -465,7 +537,7 @@ class RunCaseProcessBoundary(unittest.TestCase):
 
     def _fatal_stream(self, case: str, stage: str) -> str:
         return "\n".join([variant_line(case), *BOOT_NOISE,
-                          fatal_line(1, stage), BOOT1_PANIC]) + "\n"
+                          fatal_line(1, stage), boot3_line(stage)]) + "\n"
 
     def test_normal_case_passes_and_archives(self) -> None:
         stream = normal_stream(2)

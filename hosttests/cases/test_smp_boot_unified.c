@@ -5,7 +5,7 @@
  * timing: strict
  * tier: pr
  * link: smp-boot-unified
- * scenarios: []
+ * scenarios: [boot.smp.unified]
  */
 /* hosttests/cases/test_smp_boot_unified.c — Unified SMP boot (spec
  * 2026-11-19) host unit tests for the REAL kernel/core/smp.c.

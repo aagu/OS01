@@ -365,7 +365,7 @@ class UefiSmpEvidenceTests(unittest.TestCase):
         self.assertTrue(smp.acceptance_evidence(
             _ns(expect_no_ack=None), smp.current_log_for_2_cpus, 2))
 
-    def test_degraded_no_ack_log_accepted(self):
+    def test_no_ack_fail_closed_log_accepted(self):
         self.assertTrue(smp.acceptance_evidence(
             _ns(expect_no_ack=1), smp.current_degraded_log, 2))
 
@@ -385,51 +385,76 @@ class UefiSmpEvidenceTests(unittest.TestCase):
         self.assertFalse(smp.acceptance_evidence(
             _ns(expect_no_ack=1), "UEFI: booting OS01\n", 2))
 
-    # ── BOOT-1 Task 4: the runtime-qualification record ──────────
-    RECORD = "[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 scheduler_ok=0 accepted=0"
+    # ── Unified SMP boot: the NO_ACK Fail-Closed evidence pair ───
+    FATAL = "[boot-1] FATAL cpu=1 stage=online"
+    BOOT3 = "[boot-3] FATAL stage=smp component=online rc=-110 phase=-1 cpu=1"
 
-    def _no_record_stream(self) -> str:
-        return smp.current_degraded_log.replace(self.RECORD + "\n", "")
-
-    def test_no_ack_without_runtime_record_rejected(self):
+    def test_no_ack_without_boot3_stop_rejected(self):
+        broken = smp.current_degraded_log.replace(self.BOOT3 + "\n", "")
         self.assertFalse(smp.acceptance_evidence(
-            _ns(expect_no_ack=1), self._no_record_stream(), 2))
+            _ns(expect_no_ack=1), broken, 2))
 
-    def test_no_ack_duplicate_record_rejected(self):
+    def test_no_ack_without_fatal_line_rejected(self):
+        broken = smp.current_degraded_log.replace(self.FATAL + "\n", "")
         self.assertFalse(smp.acceptance_evidence(
-            _ns(expect_no_ack=1), smp.current_degraded_log + self.RECORD + "\n", 2))
+            _ns(expect_no_ack=1), broken, 2))
 
-    def test_no_ack_record_before_probe_rejected(self):
+    def test_no_ack_duplicate_boot3_rejected(self):
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=1),
+            smp.current_degraded_log + self.BOOT3 + "\n", 2))
+
+    def test_no_ack_boot3_before_fatal_rejected(self):
         stream = smp.current_degraded_log.replace(
-            "SHOOTDOWN-PROBE: OK\n", "").replace(
-            self.RECORD + "\n", self.RECORD + "\nSHOOTDOWN-PROBE: OK\n")
+            self.FATAL + "\n" + self.BOOT3,
+            self.BOOT3 + "\n" + self.FATAL)
         self.assertFalse(smp.acceptance_evidence(
             _ns(expect_no_ack=1), stream, 2))
 
     def test_no_ack_wrong_field_values_rejected(self):
         for old, new in (
-                ("online=1", "online=0"),
-                ("ipi_ready=1", "ipi_ready=0"),
-                ("scheduler_ok=0", "scheduler_ok=1"),
-                ("accepted=0", "accepted=1"),
-                ("a64-no-ack cpu=1", "a64-no-ack cpu=2")):
+                ("cpu=1 stage=online", "cpu=1 stage=scheduler"),
+                ("cpu=1 stage=online", "cpu=2 stage=online"),
+                ("component=online", "component=scheduler"),
+                ("rc=-110", "rc=0"),
+                ("phase=-1", "phase=8")):
             with self.subTest(record=new):
-                broken = smp.current_degraded_log.replace(self.RECORD, new)
+                broken = smp.current_degraded_log.replace(old, new)
                 self.assertFalse(smp.acceptance_evidence(
                     _ns(expect_no_ack=1), broken, 2))
 
-    def test_no_ack_truncated_record_rejected(self):
+    def test_no_ack_truncated_boot3_rejected(self):
         broken = smp.current_degraded_log.replace(
-            self.RECORD, self.RECORD[: -len(" accepted=0")])
+            self.BOOT3, self.BOOT3[: -len(" cpu=1")])
         self.assertFalse(smp.acceptance_evidence(
             _ns(expect_no_ack=1), broken, 2))
+
+    def test_no_ack_retired_record_rejected(self):
+        # The a64-no-ack runtime-qualification record is retired: its
+        # appearance anywhere is continuation evidence the Fail-Closed
+        # stop must never be accompanied by.
+        RECORD = ("[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 "
+                  "scheduler_ok=0 accepted=0")
+        self.assertFalse(smp.acceptance_evidence(
+            _ns(expect_no_ack=1),
+            smp.current_degraded_log + RECORD + "\n", 2))
+
+    def test_no_ack_any_continuation_rejected(self):
+        for extra in ("[spinlock] status=SKIP\n", "SHOOTDOWN-PROBE: OK\n",
+                      "[tick] 1\n"):
+            with self.subTest(extra=extra):
+                self.assertFalse(smp.acceptance_evidence(
+                    _ns(expect_no_ack=1),
+                    smp.current_degraded_log + extra, 2))
 
     def test_normal_mode_rejects_no_ack_record(self):
         # The record is fault-image-only evidence: a normal-mode stream
         # carrying it is running the wrong image.
+        RECORD = ("[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 "
+                  "scheduler_ok=0 accepted=0")
         self.assertFalse(smp.acceptance_evidence(
             _ns(expect_no_ack=None),
-            smp.current_log_for_2_cpus + self.RECORD + "\n", 2))
+            smp.current_log_for_2_cpus + RECORD + "\n", 2))
 
 
 class UefiSmpLifecycleTests(SuiteUnitAdapterTests):

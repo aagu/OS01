@@ -8608,6 +8608,30 @@
     "action": "unique",
     "reason": "Primary host unit test verifying boot module fdt_early behavior"
    }
+  },
+  {
+   "id": "boot.smp.unified",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "smp_boot_unified",
+   "trigger": "host runner invokes test_smp_boot_unified.elf",
+   "assertions": [
+    "test_smp_boot_unified passes all internal assertions"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_smp_boot_unified"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_smp_boot_unified.c",
+    "selector": "test_smp_boot_unified",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying boot module smp_boot_unified behavior"
+   }
   }
  ]
 }

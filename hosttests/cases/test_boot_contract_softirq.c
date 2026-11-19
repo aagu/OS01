@@ -81,19 +81,23 @@ static void test_softirq_aarch64_source_contract(void)
     assert_true(a64_src != NULL);
     if (!a64_src) return;
 
-    /* Find arch_boot_devices and arch_boot_aps */
+    /* Find arch_boot_devices and arch_boot_runtime (the retired
+     * arch_boot_aps moved to kernel/core/smp.c with the unified SMP
+     * boot — softirq ordering is anchored on the runtime stage now). */
     char *devices_fn = strstr(a64_src, "arch_boot_devices");
-    char *aps_fn = strstr(a64_src, "arch_boot_aps");
+    char *runtime_fn = strstr(a64_src, "arch_boot_runtime");
 
     assert_true(devices_fn != NULL);
-    assert_true(aps_fn != NULL);
+    assert_true(runtime_fn != NULL);
 
-    if (devices_fn && aps_fn) {
+    if (devices_fn && runtime_fn) {
         /* softirq_init must appear inside arch_boot_devices */
         char *softirq_in_dev = strstr(devices_fn, "softirq_init");
         assert_true(softirq_in_dev != NULL);
         if (softirq_in_dev) {
-            assert_true(softirq_in_dev < aps_fn);
+            /* And it stays an arch_boot_devices-time init: strictly
+             * before arch_boot_runtime ever runs. */
+            assert_true(softirq_in_dev < runtime_fn);
             /* And must be before subsys_init_phase(SUBSYS_PHASE_TIME) or phase 4 */
             char *phase4 = strstr(devices_fn, "SUBSYS_PHASE_TIME");
             if (!phase4) phase4 = strstr(devices_fn, "subsys_init_phase(4)");
@@ -103,16 +107,23 @@ static void test_softirq_aarch64_source_contract(void)
             }
         }
 
-        /* softirq_init must NOT appear inside arch_boot_aps */
-        char *post_aps = aps_fn;
-        char *softirq_in_aps = strstr(post_aps, "softirq_init");
-        /* Make sure it doesn't appear in aps_fn */
-        char *next_fn = strstr(post_aps, "arch_post_smp_selftest");
-        if (next_fn && softirq_in_aps) {
-            assert_true(softirq_in_aps > next_fn);
+        /* softirq_init must NOT appear inside arch_boot_runtime */
+        char *softirq_in_runtime = strstr(runtime_fn, "softirq_init");
+        char *next_fn = strstr(runtime_fn, "arch_post_smp_selftest");
+        if (next_fn && softirq_in_runtime) {
+            assert_true(softirq_in_runtime > next_fn);
         } else {
-            assert_true(softirq_in_aps == NULL);
+            assert_true(softirq_in_runtime == NULL);
         }
+    }
+
+    /* The unified orchestrator (kernel/core/smp.c::arch_boot_aps) must
+     * not touch softirq state either. */
+    char *core_src = slurp_file("kernel/core/smp.c");
+    assert_true(core_src != NULL);
+    if (core_src) {
+        assert_true(strstr(core_src, "softirq_init") == NULL);
+        free(core_src);
     }
 
     free(a64_src);

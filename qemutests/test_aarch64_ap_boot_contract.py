@@ -78,9 +78,11 @@ class ApHandoffSourceContract(unittest.TestCase):
                        'alloc_pid', 'current->'):
             self.assertNotIn(banned, prepare, banned)
 
-    def test_secondary_idle_polls_the_release_gate(self):
+    def test_ap_enter_idle_polls_the_release_gate(self):
+        # Unified SMP boot (spec 2026-11-19): the release-gate poll lives
+        # in the arch_smp_ap_enter_idle hook (secondary_idle is gone).
         body = src(SMP_C)
-        loop = body.split('void secondary_idle', 1)[1]
+        loop = body.split('void arch_smp_ap_enter_idle', 1)[1]
         loop = loop.split('\n}', 1)[0]
         self.assertIn('aarch64_ap_sched_released', loop)
         self.assertIn('aarch64_ap_sched_enter', loop)
@@ -149,44 +151,44 @@ class ApHandoffSourceContract(unittest.TestCase):
 
 
 class Boot1RuntimePublicationContract(unittest.TestCase):
-    """BOOT-1 Task 4: the ARM AP publishes its own runtime online, the
-    shootdown probe gate keeps construction before any runtime reader,
-    and the no-ack observation sits after the probe, before the
-    scheduler handoff."""
+    """BOOT-1: the ARM AP publishes its own runtime online through the
+    unified common entry (online=1 RELEASE strictly before the
+    post-online handshake, whose aarch64 hook issues the boot-slot ACK),
+    and a NO_ACK AP fails closed in stage 8 — no degraded observation
+    survives it."""
 
     def test_ap_publishes_runtime_online_before_boot_ack(self):
+        core_src = src("kernel/core/smp.c")
+        entry = core_src.split("void smp_ap_common_entry(", 1)[1].split(
+            "arch_smp_ap_enter_idle(cpu_id, cpu);", 1)[0]
+        # The common entry is the single online publisher: the release
+        # store strictly precedes the post-online handshake call.
+        online = entry.index("__atomic_store_n(&cpu->online, 1u, __ATOMIC_RELEASE)")
+        post = entry.index("arch_smp_ap_post_online(cpu_id, cpu)")
+        self.assertLess(online, post)
+        # The aarch64 handshake hook issues the boot-slot ACK; the
+        # NO_ACK injection gates only the ACK, never the publication.
         smp_src = src("kernel/arch/aarch64/smp/smp.c")
-        idle = smp_src.split("void secondary_idle(", 1)[1].split(
-            "for (;;) {", 1)[0]
-        # runtime online release publication, strictly between the
-        # page-table verify and the boot-slot ACK.
-        verify = idle.index("aarch64_page_table_ap_verify(cpu_id)")
-        online = idle.index(
-            "&percpu_data[cpu_id].online, 1, __ATOMIC_RELEASE")
-        ack = idle.index("boot_online_set(cpu_id)")
-        self.assertLess(verify, online)
-        self.assertLess(online, ack)
-        # The NO_ACK injection must not gate the publication.
-        self.assertLess(online, idle.index("AARCH64_SMP_TEST_NO_ACK_CPU"))
+        post_fn = smp_src.split("void arch_smp_ap_post_online(", 1)[1].split(
+            "\n}", 1)[0]
+        ack = post_fn.index("boot_online_set(cpu_id)")
+        self.assertLess(post_fn.index("AARCH64_SMP_TEST_NO_ACK_CPU"), ack)
 
-    def test_no_ack_observation_after_probe_with_compile_guard(self):
-        main_src = src("kernel/arch/aarch64/boot/main.c")
-        aps = main_src.split("void arch_boot_aps(void)", 1)[1]
-        guard = aps.index("#if AARCH64_SMP_TEST_NO_ACK_CPU == 1")
-        probe = aps.index("aarch64_shootdown_probe();")
-        obs = aps.index("boot1_no_ack_observation();")
-        self.assertLess(probe, obs)
-        self.assertLess(guard, obs)
-        # Values are read/acquire-asserted BEFORE the record is emitted
-        # (the definition sits above arch_boot_aps; the guarded call is
-        # inside it).
-        fn = main_src.split("boot1_no_ack_observation(void)", 1)[1].split(
-            "void arch_boot_aps(void)", 1)[0]
-        for needle in ("__ATOMIC_ACQUIRE", "aarch64_smp_accepted_mask",
-                       "scheduler_ok"):
-            self.assertIn(needle, fn)
-        self.assertLess(fn.index("__ATOMIC_ACQUIRE"),
-                        fn.index("[boot-1] a64-no-ack cpu=1"))
+    def test_no_ack_fails_closed_at_stage_online(self):
+        # boot1_no_ack_observation is retired with the DEGRADED path:
+        # a NO_ACK AP now stops the boot in stage 8 with
+        # SMP_STAGE_ONLINE / -ETIMEDOUT through boot_failure_stop, and
+        # the page-table probe downgrade is gone with it.
+        main_src = src(BOOT_MAIN_C)
+        self.assertNotIn("boot1_no_ack_observation", main_src)
+        self.assertNotIn("a64-no-ack", main_src)
+        smp_src = src(SMP_C)
+        boot_fn = smp_src.split("int arch_smp_boot_aps(", 1)[1]
+        self.assertIn("SMP_STAGE_ONLINE", boot_fn)
+        self.assertIn("-ETIMEDOUT", boot_fn)
+        self.assertNotIn("aarch64_page_table_probe_finish(false)", smp_src)
+        core_src = src("kernel/core/smp.c")
+        self.assertIn('boot_failure_stop("smp"', core_src)
 
     def test_probe_gate_waits_for_all_ipi_ready_before_runtime_reads(self):
         probe_src = src("kernel/arch/aarch64/boot/shootdown_probe.c")

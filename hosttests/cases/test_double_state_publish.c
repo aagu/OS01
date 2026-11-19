@@ -8,48 +8,54 @@
  * reads the kernel sources into memory and asserts the ORDER constraints
  * directly on the source text using semantic scoped checks.
  *
- * Order constraints asserted:
+ * Order constraints asserted (unified SMP boot, spec 2026-11-19):
  *
  *   kernel_main (kernel/core/main.c):
  *     1. arch_boot_percpu() BEFORE arch_boot_aps()
  *
+ *   arch_boot_aps (kernel/core/smp.c — the unified orchestrator):
+ *     2. arch_smp_boot_aps(num_cpus, smp_ap_common_entry, percpu_data)
+ *        BEFORE the [boot-1] complete marker
+ *     3. the complete marker BEFORE arch_smp_post_boot_hook(num_cpus)
+ *     4. arch_smp_post_boot_hook(num_cpus) BEFORE subsys_prepare_cpus()
+ *
+ *   smp_ap_common_entry (kernel/core/smp.c — the unified AP state machine):
+ *     5. arch_smp_ap_cpu_init BEFORE the online=1 release store
+ *     6. online=1 release BEFORE arch_smp_ap_post_online
+ *     7. arch_smp_ap_post_online BEFORE arch_local_irq_enable()
+ *     8. arch_local_irq_enable() BEFORE arch_smp_ap_publish_ipi_ready
+ *     9. arch_smp_ap_publish_ipi_ready BEFORE arch_smp_ap_enter_idle
+ *
  *   arch_boot_percpu (kernel/arch/aarch64/boot/main.c):
- *     2. percpu_install_gs(0) BEFORE percpu_init(0, mpidr_bsp)
- *     3. percpu_init(0, mpidr_bsp) BEFORE release store to percpu_data[0].online
- *     4. release store to percpu_data[0].online BEFORE release store to num_cpus
- *     5. release store to num_cpus BEFORE smp_starting_enter()
+ *    10. percpu_install_gs(0) BEFORE percpu_init(0, mpidr_bsp)
+ *    11. percpu_init(0, mpidr_bsp) BEFORE release store to percpu_data[0].online
+ *    12. release store to percpu_data[0].online BEFORE release store to num_cpus
+ *    13. release store to num_cpus BEFORE smp_starting_enter()
  *
- *   arch_boot_aps (kernel/arch/aarch64/boot/main.c):
- *     6. smp_boot_aps() BEFORE arch_local_irq_enable()
- *     7. arch_local_irq_enable() BEFORE ipi_ready_publish_and_count(0)
+ *   arch_boot_runtime (kernel/arch/aarch64/boot/main.c):
+ *    14. arch_local_irq_enable() BEFORE ipi_ready_publish_and_count(0)
+ *    15. ipi_ready_publish_and_count(0) BEFORE aarch64_shootdown_probe()
  *
- *   smp.c (kernel/arch/aarch64/smp/smp.c, AP tail — Task 10):
- *     8. arch_local_irq_enable() BEFORE ipi_ready_publish_and_count(cpu_id)
- *     9. gic_target_bit_init(cpu_id) BEFORE ipi_ready_publish_and_count(cpu_id)
- *
- *   BOOT-1 publication contracts (CPU lifecycle plan Task 1):
- *
- *   aarch64 secondary_idle (kernel/arch/aarch64/smp/smp.c):
- *    10. page-table AP verify BEFORE runtime online release publication
- *    11. runtime online release BEFORE boot ACK (boot_online_set)
- *    12. boot ACK BEFORE ipi_ready_publish_and_count (via IRQ + ISB)
- *        — NO_ACK suppresses only the ACK, never runtime online.
+ *   aarch64 smp.c hooks (kernel/arch/aarch64/smp/smp.c):
+ *    16. cpu_init: page-table AP verify is the local-init tail
+ *    17. post_online: boot ACK BEFORE the go wait's gic_target_bit_init
+ *    18. publish_ipi_ready: ISB BEFORE ipi_ready_publish_and_count
  *
  *   x86_64_boot_percpu (kernel/arch/x86_64/smp/boot.c):
- *    13. percpu_init BEFORE the BSP online release publication
- *    14. BSP online release BEFORE num_cpus publication
+ *    19. percpu_init BEFORE the BSP online release publication
+ *    20. BSP online release BEFORE num_cpus publication
  *
- *   x86 ap_entry (kernel/arch/x86_64/smp/smp.c):
- *    15. online release BEFORE the TSC go/sample handshake
- *    16. tsc_boot written BEFORE tsc_sampled release
- *    17. IRQ enable BEFORE ipi_ready_publish_ap BEFORE scheduler_ok release
+ *   x86 AP hooks (kernel/arch/x86_64/smp/smp.c):
+ *    21. cpu_init: lgdt/lidt/selectors/TSS BEFORE lapic_configure_nmi
+ *    22. post_online: tsc_boot written BEFORE tsc_sampled release
+ *    23. enter_idle: scheduler_ok release is the idle-loop entry
  *
- *   x86 smp_boot_aps (kernel/arch/x86_64/smp/smp.c):
- *    18. residual-state invariant check BEFORE INIT-SIPI-SIPI
- *    19. SIPI BEFORE bounded wait for online
- *    20. online wait BEFORE tsc_sync_go release
- *    21. sampled wait BEFORE bounded wait for scheduler_ok
- *    22. scheduler_ok wait BEFORE the ready marker; the trampoline
+ *   x86 arch_smp_boot_aps (kernel/arch/x86_64/smp/smp.c):
+ *    24. residual-state invariant check BEFORE INIT-SIPI-SIPI
+ *    25. SIPI BEFORE bounded wait for online
+ *    26. online wait BEFORE tsc_sync_go release
+ *    27. sampled wait BEFORE bounded wait for scheduler_ok
+ *    28. scheduler_ok wait BEFORE the ready marker; the trampoline
  *        data fill is a single site inside the loop, so filling for
  *        the NEXT CPU only happens after this CPU's scheduler_ok wait.
  */
@@ -125,6 +131,54 @@ static const order_check_t k_kernel_main_checks[] = {
     },
 };
 
+/* kernel/core/smp.c::arch_boot_aps — the unified BSP orchestrator. */
+static const order_check_t k_core_aps_checks[] = {
+    {
+        "core smp.c: arch_smp_boot_aps before the complete marker",
+        "arch_smp_boot_aps(num_cpus, smp_ap_common_entry, percpu_data)",
+        "[boot-1] complete discovered=%s ready=%s",
+    },
+    {
+        "core smp.c: complete marker before arch_smp_post_boot_hook",
+        "[boot-1] complete discovered=%s ready=%s",
+        "arch_smp_post_boot_hook(num_cpus)",
+    },
+    {
+        "core smp.c: arch_smp_post_boot_hook before subsys_prepare_cpus",
+        "arch_smp_post_boot_hook(num_cpus)",
+        "subsys_prepare_cpus()",
+    },
+};
+
+/* kernel/core/smp.c::smp_ap_common_entry — the unified AP state machine. */
+static const order_check_t k_ap_common_checks[] = {
+    {
+        "common entry: arch_smp_ap_cpu_init before online=1 release",
+        "arch_smp_ap_cpu_init(cpu_id, cpu);",
+        "&cpu->online, 1u, __ATOMIC_RELEASE",
+    },
+    {
+        "common entry: online=1 release before arch_smp_ap_post_online",
+        "&cpu->online, 1u, __ATOMIC_RELEASE",
+        "arch_smp_ap_post_online(cpu_id, cpu)",
+    },
+    {
+        "common entry: arch_smp_ap_post_online before arch_local_irq_enable",
+        "arch_smp_ap_post_online(cpu_id, cpu)",
+        "arch_local_irq_enable();",
+    },
+    {
+        "common entry: arch_local_irq_enable before arch_smp_ap_publish_ipi_ready",
+        "arch_local_irq_enable();",
+        "arch_smp_ap_publish_ipi_ready(cpu_id, cpu)",
+    },
+    {
+        "common entry: arch_smp_ap_publish_ipi_ready before arch_smp_ap_enter_idle",
+        "arch_smp_ap_publish_ipi_ready(cpu_id, cpu)",
+        "arch_smp_ap_enter_idle(cpu_id, cpu)",
+    },
+};
+
 static const order_check_t k_percpu_checks[] = {
     {
         "arch_boot_percpu: percpu_install_gs(0) before percpu_init",
@@ -148,43 +202,42 @@ static const order_check_t k_percpu_checks[] = {
     },
 };
 
-static const order_check_t k_aps_checks[] = {
+/* kernel/arch/aarch64/boot/main.c::arch_boot_runtime keeps the IRQ ->
+ * IPI-ACK -> shootdown-probe ordering (stage 8.2 boundary). */
+static const order_check_t k_a64_runtime_checks[] = {
     {
-        "arch_boot_aps: smp_boot_aps() before arch_local_irq_enable()",
-        "smp_boot_aps()",
-        "arch_local_irq_enable()",
+        "arch_boot_runtime: arch_local_irq_enable before ipi_ready_publish_and_count(0)",
+        "arch_local_irq_enable();",
+        "ipi_ready_publish_and_count(0)",
     },
     {
-        "arch_boot_aps: arch_local_irq_enable() before ipi_ready_publish_and_count(0)",
-        "arch_local_irq_enable()",
+        "arch_boot_runtime: ipi_ready_publish_and_count(0) before aarch64_shootdown_probe",
         "ipi_ready_publish_and_count(0)",
+        "aarch64_shootdown_probe()",
     },
 };
 
-static const order_check_t k_smp_checks[] = {
+/* aarch64 hook bodies (kernel/arch/aarch64/smp/smp.c). */
+static const order_check_t k_a64_cpu_init_checks[] = {
     {
-        "smp.c: gic_target_bit_init(cpu_id) before ipi_ready_publish_and_count",
-        "gic_target_bit_init(cpu_id)",
-        "ipi_ready_publish_and_count(cpu_id)",
-    },
-    {
-        "smp.c: arch_local_irq_enable() before ipi_ready_publish_and_count",
-        "arch_local_irq_enable()",
-        "ipi_ready_publish_and_count(cpu_id)",
-    },
-    {
-        "smp.c AP: page-table verify before runtime online release",
+        "aarch64 cpu_init: percpu_init before the page-table AP verify",
+        "percpu_init(cpu_id, mpidr_ap)",
         "aarch64_page_table_ap_verify(cpu_id)",
-        "&percpu_data[cpu_id].online, 1, __ATOMIC_RELEASE",
     },
+};
+
+static const order_check_t k_a64_post_online_checks[] = {
     {
-        "smp.c AP: runtime online release before boot ACK",
-        "&percpu_data[cpu_id].online, 1, __ATOMIC_RELEASE",
+        "aarch64 post_online: boot ACK before gic_target_bit_init",
         "boot_online_set(cpu_id)",
+        "gic_target_bit_init(cpu_id)",
     },
+};
+
+static const order_check_t k_a64_publish_checks[] = {
     {
-        "smp.c AP: boot ACK before ipi_ready_publish_and_count",
-        "boot_online_set(cpu_id)",
+        "aarch64 publish_ipi_ready: ISB before ipi_ready_publish_and_count",
+        "__asm__ __volatile__(\"isb\" ::: \"memory\")",
         "ipi_ready_publish_and_count(cpu_id)",
     },
 };
@@ -203,55 +256,74 @@ static const order_check_t k_x86_boot_percpu_checks[] = {
     },
 };
 
-/* BOOT-1: x86 AP publication ordering (smp.c ap_entry). */
-static const order_check_t k_x86_ap_checks[] = {
+/* BOOT-1: x86 AP hook bodies (smp.c). */
+static const order_check_t k_x86_cpu_init_checks[] = {
     {
-        "x86 ap_entry: online release before TSC go/sample handshake",
-        "&cpu->online, 1, __ATOMIC_RELEASE",
-        "cpu->tsc_boot = rdtsc()",
+        "x86 cpu_init: lapic_configure_nmi after set_tss64/load_TR",
+        "set_tss64(",
+        "lapic_configure_nmi();",
     },
     {
-        "x86 ap_entry: tsc_boot written before tsc_sampled release",
-        "cpu->tsc_boot = rdtsc()",
-        "&cpu->tsc_sampled, 1, __ATOMIC_RELEASE",
+        "x86 cpu_init: load_TR before lapic_configure_nmi",
+        "load_TR(",
+        "lapic_configure_nmi();",
     },
     {
-        "x86 ap_entry: IRQ enable before ipi_ready_publish_ap",
-        "arch_local_irq_enable()",
-        "ipi_ready_publish_ap(cpu->cpu_id)",
-    },
-    {
-        "x86 ap_entry: ipi_ready_publish_ap before scheduler_ok release",
-        "ipi_ready_publish_ap(cpu->cpu_id)",
-        "&cpu->scheduler_ok, 1, __ATOMIC_RELEASE",
+        "x86 cpu_init: fault injection ends cpu_init (before online)",
+        "lapic_configure_nmi();",
+        "boot1_fault_before_online(cpu_id)",
     },
 };
 
-/* BOOT-1: x86 BSP two-stage wait ordering (smp.c smp_boot_aps). */
+static const order_check_t k_x86_post_online_checks[] = {
+    {
+        "x86 post_online: tsc_boot written before tsc_sampled release",
+        "cpu->tsc_boot = rdtsc()",
+        "&cpu->tsc_sampled, 1, __ATOMIC_RELEASE",
+    },
+};
+
+static const order_check_t k_x86_publish_checks[] = {
+    {
+        "x86 publish_ipi_ready: ipi_ready_publish_ap call site",
+        "ipi_ready_publish_ap(cpu_id)",
+        "boot1_fault_after_ipi_ready(cpu_id)",
+    },
+};
+
+static const order_check_t k_x86_enter_idle_checks[] = {
+    {
+        "x86 enter_idle: scheduler_ok release before the hlt loop",
+        "&cpu->scheduler_ok, 1, __ATOMIC_RELEASE",
+        "arch_cpu_halt()",
+    },
+};
+
+/* BOOT-1: x86 BSP two-stage wait ordering (smp.c arch_smp_boot_aps). */
 static const order_check_t k_x86_bsp_checks[] = {
     {
-        "x86 smp_boot_aps: residual-state invariant check before SIPI",
-        "__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE",
+        "x86 arch_smp_boot_aps: residual-state invariant check before SIPI",
+        "__atomic_load_n(&per_cpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE",
         "ICR_DELIVERY_INIT",
     },
     {
-        "x86 smp_boot_aps: SIPI before bounded online wait",
+        "x86 arch_smp_boot_aps: SIPI before bounded online wait",
         "ICR_DELIVERY_STARTUP",
-        "x86_smp_wait_u32_acquire(&percpu_data[i].online",
+        "x86_smp_wait_u32_acquire(&per_cpu_data[i].online",
     },
     {
-        "x86 smp_boot_aps: online wait before tsc_sync_go release",
-        "x86_smp_wait_u32_acquire(&percpu_data[i].online",
-        "&percpu_data[i].tsc_sync_go, 1, __ATOMIC_RELEASE",
+        "x86 arch_smp_boot_aps: online wait before tsc_sync_go release",
+        "x86_smp_wait_u32_acquire(&per_cpu_data[i].online",
+        "&per_cpu_data[i].tsc_sync_go, 1, __ATOMIC_RELEASE",
     },
     {
-        "x86 smp_boot_aps: sampled wait before scheduler_ok wait",
-        "&percpu_data[i].tsc_sampled",
-        "x86_smp_wait_u32_acquire(&percpu_data[i].scheduler_ok",
+        "x86 arch_smp_boot_aps: sampled wait before scheduler_ok wait",
+        "&per_cpu_data[i].tsc_sampled",
+        "x86_smp_wait_u32_acquire(&per_cpu_data[i].scheduler_ok",
     },
     {
-        "x86 smp_boot_aps: scheduler_ok wait before ready marker",
-        "x86_smp_wait_u32_acquire(&percpu_data[i].scheduler_ok",
+        "x86 arch_smp_boot_aps: scheduler_ok wait before ready marker",
+        "x86_smp_wait_u32_acquire(&per_cpu_data[i].scheduler_ok",
         "[boot-1] ready cpu=",
     },
 };
@@ -301,6 +373,43 @@ static void suite_kernel_main_order(void)
     free(buf);
 }
 
+static void suite_core_smp_order(void)
+{
+    TEST_SUITE("double_state_publish core/smp.c orchestrator + common entry");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/kernel/core/smp.c", OS01_KERNEL_SRC);
+    char *buf = read_file(path);
+    assert_true(buf != NULL);
+    if (!buf) return;
+
+    /* 1. the BSP orchestrator scope */
+    char *scope_aps = extract_scope(buf, "void arch_boot_aps(void)",
+                                    "subsys_prepare_cpus();");
+    assert_true(scope_aps != NULL);
+    if (scope_aps) {
+        assert_true(run_order_checks(scope_aps, k_core_aps_checks,
+                                     sizeof(k_core_aps_checks) / sizeof(k_core_aps_checks[0]),
+                                     "arch_boot_aps (core)"));
+        free(scope_aps);
+    }
+
+    /* 2. the unified AP state machine scope */
+    char *scope_entry = extract_scope(buf, "void smp_ap_common_entry(",
+                                      "arch_smp_ap_enter_idle(cpu_id, cpu);");
+    assert_true(scope_entry != NULL);
+    if (scope_entry) {
+        assert_true(run_order_checks(scope_entry, k_ap_common_checks,
+                                     sizeof(k_ap_common_checks) / sizeof(k_ap_common_checks[0]),
+                                     "smp_ap_common_entry"));
+        free(scope_entry);
+    }
+
+    /* Substring sanity: the unified facade symbols live here. */
+    assert_true(find_idx(buf, "smp_ap_common_entry") >= 0);
+    assert_true(find_idx(buf, "[boot-1] FATAL cpu=%s stage=%s") >= 0);
+    free(buf);
+}
+
 static void suite_aarch64_boot_order(void)
 {
     TEST_SUITE("double_state_publish aarch64 boot scoped ordering");
@@ -320,14 +429,17 @@ static void suite_aarch64_boot_order(void)
         free(scope_percpu);
     }
 
-    /* 2. arch_boot_aps scope */
-    char *scope_aps = extract_scope(buf, "void arch_boot_aps(void)", "aarch64_shootdown_probe();\n    }");
-    assert_true(scope_aps != NULL);
-    if (scope_aps) {
-        assert_true(run_order_checks(scope_aps, k_aps_checks,
-                                     sizeof(k_aps_checks) / sizeof(k_aps_checks[0]),
-                                     "arch_boot_aps"));
-        free(scope_aps);
+    /* 2. arch_boot_runtime scope (the retired arch_boot_aps is gone:
+     * its ordering moved to kernel/core/smp.c, asserted in
+     * suite_core_smp_order). */
+    char *scope_runtime = extract_scope(buf, "void arch_boot_runtime(void)",
+                                        "aarch64_shootdown_probe();\n    }");
+    assert_true(scope_runtime != NULL);
+    if (scope_runtime) {
+        assert_true(run_order_checks(scope_runtime, k_a64_runtime_checks,
+                                     sizeof(k_a64_runtime_checks) / sizeof(k_a64_runtime_checks[0]),
+                                     "arch_boot_runtime"));
+        free(scope_runtime);
     }
 
     /* Substring sanity */
@@ -338,15 +450,47 @@ static void suite_aarch64_boot_order(void)
 
 static void suite_ap_tail_order(void)
 {
-    TEST_SUITE("double_state_publish smp.c AP tail ordering");
+    TEST_SUITE("double_state_publish smp.c AP hook ordering");
     char path[512];
     snprintf(path, sizeof(path), "%s/kernel/arch/aarch64/smp/smp.c", OS01_KERNEL_SRC);
     char *buf = read_file(path);
     assert_true(buf != NULL);
     if (!buf) return;
-    assert_true(run_order_checks(buf, k_smp_checks,
-                                 sizeof(k_smp_checks) / sizeof(k_smp_checks[0]),
-                                 "smp.c"));
+
+    char *cpu_init = extract_scope(buf, "void arch_smp_ap_cpu_init(",
+                                   "aarch64_page_table_ap_verify(cpu_id)");
+    assert_true(cpu_init != NULL);
+    if (cpu_init) {
+        assert_true(run_order_checks(cpu_init, k_a64_cpu_init_checks,
+                                     sizeof(k_a64_cpu_init_checks) / sizeof(k_a64_cpu_init_checks[0]),
+                                     "arch_smp_ap_cpu_init (aarch64)"));
+        free(cpu_init);
+    }
+
+    char *post_online = extract_scope(buf, "void arch_smp_ap_post_online(",
+                                      "gic_target_bit_init(cpu_id)");
+    assert_true(post_online != NULL);
+    if (post_online) {
+        assert_true(run_order_checks(post_online, k_a64_post_online_checks,
+                                     sizeof(k_a64_post_online_checks) / sizeof(k_a64_post_online_checks[0]),
+                                     "arch_smp_ap_post_online (aarch64)"));
+        free(post_online);
+    }
+
+    char *publish = extract_scope(buf, "void arch_smp_ap_publish_ipi_ready(",
+                                  "ipi_ready_publish_and_count(cpu_id)");
+    assert_true(publish != NULL);
+    if (publish) {
+        assert_true(run_order_checks(publish, k_a64_publish_checks,
+                                     sizeof(k_a64_publish_checks) / sizeof(k_a64_publish_checks[0]),
+                                     "arch_smp_ap_publish_ipi_ready (aarch64)"));
+        free(publish);
+    }
+
+    /* The retired shapes must stay retired. */
+    assert_true(find_idx(buf, "void secondary_idle") < 0);
+    assert_true(find_idx(buf, "uint32_t smp_boot_aps(void)") < 0);
+    assert_true(find_idx(buf, "status=DEGRADED") < 0);
     free(buf);
 }
 
@@ -363,9 +507,19 @@ static void suite_negative_scope_checks(void)
     /* 2. Swapped definition order in file must still PASS with scoped checks */
     const char *swapped_defs =
         "void arch_boot_aps(void) {\n"
-        "    smp_boot_aps();\n"
+        "    int rc = arch_smp_boot_aps(num_cpus, smp_ap_common_entry, percpu_data);\n"
+        "    log_info(\"[boot-1] complete discovered=%s ready=%s\\n\", \"1\", \"1\");\n"
+        "    arch_smp_post_boot_hook(num_cpus);\n"
+        "    subsys_prepare_cpus();\n"
+        "}\n"
+        "void smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu) {\n"
+        "    arch_smp_ap_cpu_init(cpu_id, cpu);\n"
+        "    __atomic_store_n(&cpu->online, 1u, __ATOMIC_RELEASE);\n"
+        "    arch_smp_ap_post_online(cpu_id, cpu);\n"
         "    arch_local_irq_enable();\n"
-        "    ipi_ready_publish_and_count(0);\n"
+        "    arch_mb();\n"
+        "    arch_smp_ap_publish_ipi_ready(cpu_id, cpu);\n"
+        "    arch_smp_ap_enter_idle(cpu_id, cpu);\n"
         "}\n"
         "void arch_boot_percpu(void) {\n"
         "    percpu_install_gs(0);\n"
@@ -385,17 +539,25 @@ static void suite_negative_scope_checks(void)
     assert_true(run_order_checks(scope_main, k_kernel_main_checks, 1, "swapped_main"));
     free(scope_main);
 
+    char *scope_aps = extract_scope(swapped_defs, "void arch_boot_aps(void)",
+                                    "subsys_prepare_cpus();");
+    assert_true(scope_aps != NULL);
+    assert_true(run_order_checks(scope_aps, k_core_aps_checks,
+                                 sizeof(k_core_aps_checks) / sizeof(k_core_aps_checks[0]), "swapped_aps"));
+    free(scope_aps);
+
+    char *scope_entry = extract_scope(swapped_defs, "void smp_ap_common_entry(",
+                                      "arch_smp_ap_enter_idle(cpu_id, cpu);");
+    assert_true(scope_entry != NULL);
+    assert_true(run_order_checks(scope_entry, k_ap_common_checks,
+                                 sizeof(k_ap_common_checks) / sizeof(k_ap_common_checks[0]), "swapped_entry"));
+    free(scope_entry);
+
     char *scope_percpu = extract_scope(swapped_defs, "void arch_boot_percpu(void)", "smp_starting_enter();\n}");
     assert_true(scope_percpu != NULL);
     assert_true(run_order_checks(scope_percpu, k_percpu_checks,
                                  sizeof(k_percpu_checks) / sizeof(k_percpu_checks[0]), "swapped_percpu"));
     free(scope_percpu);
-
-    char *scope_aps = extract_scope(swapped_defs, "void arch_boot_aps(void)", "ipi_ready_publish_and_count(0);\n}");
-    assert_true(scope_aps != NULL);
-    assert_true(run_order_checks(scope_aps, k_aps_checks,
-                                 sizeof(k_aps_checks) / sizeof(k_aps_checks[0]), "swapped_aps"));
-    free(scope_aps);
 }
 
 static void suite_x86_boot_order(void)
@@ -421,35 +583,65 @@ static void suite_x86_boot_order(void)
 
 static void suite_x86_smp_order(void)
 {
-    TEST_SUITE("double_state_publish x86 smp.c AP tail + BSP two-stage order");
+    TEST_SUITE("double_state_publish x86 smp.c AP hooks + BSP two-stage order");
     char path[512];
     snprintf(path, sizeof(path), "%s/kernel/arch/x86_64/smp/smp.c", OS01_KERNEL_SRC);
     char *buf = read_file(path);
     assert_true(buf != NULL);
     if (!buf) return;
 
-    /* AP tail: online → TSC handshake → IRQ → IPI → scheduler_ok. */
-    char *scope_ap = extract_scope(buf, "void ap_entry(void)",
-                                   "&cpu->scheduler_ok, 1, __ATOMIC_RELEASE);");
-    assert_true(scope_ap != NULL);
-    if (scope_ap) {
-        assert_true(run_order_checks(scope_ap, k_x86_ap_checks,
-                                     sizeof(k_x86_ap_checks) / sizeof(k_x86_ap_checks[0]),
-                                     "ap_entry"));
-        free(scope_ap);
+    /* AP hook bodies. */
+    char *cpu_init = extract_scope(buf, "void arch_smp_ap_cpu_init(",
+                                   "boot1_fault_before_online(cpu_id)");
+    assert_true(cpu_init != NULL);
+    if (cpu_init) {
+        assert_true(run_order_checks(cpu_init, k_x86_cpu_init_checks,
+                                     sizeof(k_x86_cpu_init_checks) / sizeof(k_x86_cpu_init_checks[0]),
+                                     "arch_smp_ap_cpu_init (x86)"));
+        free(cpu_init);
+    }
+
+    char *post_online = extract_scope(buf, "void arch_smp_ap_post_online(",
+                                      "&cpu->tsc_sampled, 1, __ATOMIC_RELEASE");
+    assert_true(post_online != NULL);
+    if (post_online) {
+        assert_true(run_order_checks(post_online, k_x86_post_online_checks,
+                                     sizeof(k_x86_post_online_checks) / sizeof(k_x86_post_online_checks[0]),
+                                     "arch_smp_ap_post_online (x86)"));
+        free(post_online);
+    }
+
+    char *publish = extract_scope(buf, "void arch_smp_ap_publish_ipi_ready(",
+                                  "boot1_fault_after_ipi_ready(cpu_id)");
+    assert_true(publish != NULL);
+    if (publish) {
+        assert_true(run_order_checks(publish, k_x86_publish_checks,
+                                     sizeof(k_x86_publish_checks) / sizeof(k_x86_publish_checks[0]),
+                                     "arch_smp_ap_publish_ipi_ready (x86)"));
+        free(publish);
+    }
+
+    char *enter_idle = extract_scope(buf, "void arch_smp_ap_enter_idle(",
+                                     "arch_cpu_halt()");
+    assert_true(enter_idle != NULL);
+    if (enter_idle) {
+        assert_true(run_order_checks(enter_idle, k_x86_enter_idle_checks,
+                                     sizeof(k_x86_enter_idle_checks) / sizeof(k_x86_enter_idle_checks[0]),
+                                     "arch_smp_ap_enter_idle (x86)"));
+        free(enter_idle);
     }
 
     /* BSP: invariant check → SIPI → online wait → go/sample →
      * scheduler wait → ready marker.  The trampoline fill is a single
      * site inside the loop ahead of the SIPI sequence, so the NEXT
      * CPU's fill happens only after this CPU's scheduler_ok wait. */
-    char *scope_bsp = extract_scope(buf, "void smp_boot_aps(void)",
-                                    "[boot-1] complete");
+    char *scope_bsp = extract_scope(buf, "int arch_smp_boot_aps(",
+                                    "[boot-1] ready cpu=");
     assert_true(scope_bsp != NULL);
     if (scope_bsp) {
         size_t n = sizeof(k_x86_bsp_checks) / sizeof(k_x86_bsp_checks[0]);
         assert_true(run_order_checks(scope_bsp, k_x86_bsp_checks, n,
-                                     "smp_boot_aps"));
+                                     "arch_smp_boot_aps"));
         /* Single trampoline fill site, inside the loop before SIPI. */
         long fill = find_idx(scope_bsp, "tdata->gs_base");
         long sipi = find_idx(scope_bsp, "ICR_DELIVERY_STARTUP");
@@ -464,6 +656,11 @@ static void suite_x86_smp_order(void)
         assert_true(sipi > fill);
         free(scope_bsp);
     }
+
+    /* The retired x86 orchestrator shapes must stay retired. */
+    assert_true(find_idx(buf, "void ap_entry(void)") < 0);
+    assert_true(find_idx(buf, "void smp_boot_aps(void)") < 0);
+    assert_true(find_idx(buf, "[boot-1] complete") < 0);
     free(buf);
 }
 
@@ -501,6 +698,7 @@ static void suite_sched_consumer_acquire_contract(void)
 int main(void)
 {
     suite_kernel_main_order();
+    suite_core_smp_order();
     suite_aarch64_boot_order();
     suite_ap_tail_order();
     suite_sched_consumer_acquire_contract();

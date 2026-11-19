@@ -365,6 +365,7 @@ GIC_MARKER_CFLAGS ?= $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
                      -I$(TEST_INC) -include $(TEST_MOCK)/test_platform.h
 
 $(TEST_BLD)/test_double_state_publish.o: $(TEST_CASES)/test_double_state_publish.c \
+		$(TESTS_DIR)/kernel/core/smp.c \
 		$(TESTS_DIR)/kernel/arch/aarch64/boot/main.c \
 		$(TESTS_DIR)/kernel/arch/aarch64/smp/smp.c
 	@mkdir -p $(TEST_BLD)

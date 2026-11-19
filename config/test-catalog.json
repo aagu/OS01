@@ -4519,7 +4519,9 @@
       "timing": "strict",
       "tier": "pr",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "boot.smp.unified"
+      ],
       "link": "smp-boot-unified",
       "source": "hosttests/cases/test_smp_boot_unified.c"
     },

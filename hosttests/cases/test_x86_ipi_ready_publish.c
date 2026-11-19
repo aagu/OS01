@@ -31,6 +31,7 @@
 
 #define BOOT_SRC  OS01_KERNEL_SRC "/kernel/arch/x86_64/smp/boot.c"
 #define SMP_SRC   OS01_KERNEL_SRC "/kernel/arch/x86_64/smp/smp.c"
+#define CORE_SMP_SRC OS01_KERNEL_SRC "/kernel/core/smp.c"
 #define IPI_SRC   OS01_KERNEL_SRC "/kernel/arch/x86_64/intr/apic/ipi.c"
 
 static char *slurp(const char *path)
@@ -104,21 +105,35 @@ void test_smp_call_sites(void)
     if (!src) return;
 
     assert_true(contains(src, "ipi_ready_publish_bsp()"));
-    assert_true(contains(src, "ipi_ready_publish_ap(cpu->cpu_id)"));
+    assert_true(contains(src, "ipi_ready_publish_ap(cpu_id)"));
 
-    /* Ordering: BSP publish strictly after ipi_init(); AP publish
-     * strictly after arch_local_irq_enable() in ap_entry(). */
+    /* Ordering: BSP publish strictly after ipi_init(); the AP-side
+     * publish call lives in the arch_smp_ap_publish_ipi_ready hook. */
     const char *ipi_init  = strstr(src, "ipi_init();");
     const char *bsp_pub   = strstr(src, "ipi_ready_publish_bsp()");
-    const char *ap_enab   = strstr(src, "arch_local_irq_enable();");
-    const char *ap_pub    = strstr(src, "ipi_ready_publish_ap(cpu->cpu_id)");
+    const char *ap_pub    = strstr(src, "ipi_ready_publish_ap(cpu_id)");
     assert_not_null(ipi_init);
     assert_not_null(bsp_pub);
-    assert_not_null(ap_enab);
     assert_not_null(ap_pub);
     assert_true(bsp_pub > ipi_init);
-    assert_true(ap_pub > ap_enab);
     free(src);
+
+    /* Unified SMP boot: the common entry enables IRQs strictly before
+     * the ipi_ready publish hook (BOOT-1 invariant: ipi_ready=1 ⇒
+     * online=1 ∧ IRQs unmasked). */
+    char *core_src = slurp(CORE_SMP_SRC);
+    assert_not_null(core_src);
+    if (!core_src) return;
+    const char *common_entry = strstr(core_src, "void smp_ap_common_entry(");
+    const char *core_enab    = strstr(core_src, "arch_local_irq_enable();");
+    const char *core_pub     = strstr(core_src,
+                                      "arch_smp_ap_publish_ipi_ready(cpu_id, cpu)");
+    assert_not_null(common_entry);
+    assert_not_null(core_enab);
+    assert_not_null(core_pub);
+    assert_true(core_enab > common_entry);
+    assert_true(core_pub > core_enab);
+    free(core_src);
 }
 
 void test_ipi_handler_migrated(void)

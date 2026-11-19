@@ -262,6 +262,7 @@ X86_PUBLISH_CFLAGS := $(HOST_CFLAGS) -DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
 
 $(TEST_BLD)/test_x86_ipi_ready_publish.o: \
 		$(TEST_CASES)/test_x86_ipi_ready_publish.c \
+		$(TESTS_DIR)/kernel/core/smp.c \
 		$(TESTS_DIR)/kernel/arch/x86_64/smp/boot.c \
 		$(TESTS_DIR)/kernel/arch/x86_64/smp/smp.c \
 		$(TESTS_DIR)/kernel/arch/x86_64/intr/apic/ipi.c
