@@ -72,10 +72,9 @@
             "program": "${workspaceFolder}/build/aarch64-clang/artifacts/kernel.elf",
             "targetCreateCommands": [
                 "target create ${workspaceFolder}/build/aarch64-clang/artifacts/kernel.elf",
-                "platform select remote-aarch64"
+                "settings set target.source-map . ${workspaceFolder}/kernel"
             ],
             "attachCommands": [
-                "process plugin load",
                 "gdb-remote 1234"
             ],
             "preLaunchTask": "Launch QEMU (aarch64, paused for debug)"

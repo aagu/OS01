@@ -134,3 +134,27 @@ void _log_info_impl(const char *fmt, ...)
  * so the symbol must live here. Default to LOG_INFO — matches the
  * production release intent of the new kernel/log.h API. */
 int g_log_level = LOG_INFO;
+
+/* ── DEBUG builds (make DEBUG=1) ──────────────────────────────
+ * Without -DNDEBUG the log_debug() call sites compile in and route
+ * through log() -> _log_write() — the entry point that lives in
+ * kernel/log/log.c on x86_64 (vsnprintf-based).  The aarch64 kernel
+ * links THIS file instead, so the DEBUG entry point lives here too:
+ * the same hand-rolled formatter with a one-tag level prefix so a
+ * debug line stays distinguishable from the gate-wrapped info lines
+ * on the serial console.  The log() macro's runtime gate
+ * (level <= g_log_level) still applies — raise g_log_level (or use
+ * DEBUG_CHANNELS) to see LOG_DEBUG lines. */
+void _log_write(int level, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    switch (level) {
+    case LOG_ERR:  kputs("[log-e] "); break;
+    case LOG_WARN: kputs("[log-w] "); break;
+    case LOG_INFO: kputs("[log-i] "); break;
+    default:       kputs("[log-d] "); break;   /* LOG_DEBUG and beyond */
+    }
+    vlog(fmt, ap);
+    va_end(ap);
+}
