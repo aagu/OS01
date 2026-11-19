@@ -51,7 +51,7 @@
 
 - [ ] **Step 1: Add failing standalone header compile tests to `qemutests/test_boot_facade_headers.py`**
 
-Add `test_arch_smp_header_x86_64` and `test_arch_smp_header_aarch64` compiling a snippet that includes `<arch/smp.h>`, declares a `static` function pointer of type `arch_smp_ap_entry_t` pointing to `smp_ap_common_entry`, and asserts `SMP_STAGE_INVARIANT == 0` and `SMP_STAGE_SCHEDULER == 4` under both `x86_64-unknown-none-elf` and `aarch64-unknown-none-elf` with `-Wall -Wextra -Werror`.
+Add `test_arch_smp_header_x86_64` and `test_arch_smp_header_aarch64` compiling a snippet that includes `<arch/smp.h>`, declares a `static` function pointer of type `arch_smp_ap_entry_t` pointing to `smp_ap_common_entry`, and asserts `SMP_STAGE_INVARIANT == 0` and `SMP_STAGE_SCHEDULER == 4` using `self._run_clang("x86_64-none-elf", ..., ["-fsyntax-only", "-Werror"])` and `self._run_clang("aarch64-none-elf", ..., ["-fsyntax-only", "-Werror"])` (matching existing target triples in `test_boot_facade_headers.py`).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -80,9 +80,10 @@ git commit -m "feat(smp): add arch-neutral arch/smp.h facade and standalone head
 
 **Files:**
 - Create: `kernel/core/smp.c`
+- Create: `hosttests/mock/smp_boot_unified_runtime.h`
 - Create: `hosttests/cases/test_smp_boot_unified.c`
 - Modify: `hosttests/mk/sched.mk`
-- Modify: `kernel/Makefile:85-92`
+- Modify: `kernel/Makefile` (temporarily `filter-out core/smp.c` on x86_64 until Task 3 so every commit remains linkable; aarch64 whitelist addition happens in Task 4)
 - Generated (via `make regen-test-catalog`): `config/test-catalog.json`, `mk/generated/*`
 
 **Interfaces:**
@@ -92,9 +93,13 @@ git commit -m "feat(smp): add arch-neutral arch/smp.h facade and standalone head
   - `void smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu) __attribute__((noreturn))`
   - `__attribute__((weak)) void arch_smp_post_boot_hook(uint32_t online_cpus)` (default no-op)
 
-- [ ] **Step 1: Write failing host test `hosttests/cases/test_smp_boot_unified.c` and wire build rule in `hosttests/mk/sched.mk`**
+- [ ] **Step 1: Create preinclude mock header, write failing host test `hosttests/cases/test_smp_boot_unified.c`, and wire `LINK_GROUP_smp-boot-unified` in `hosttests/mk/sched.mk`**
 
-Create `hosttests/cases/test_smp_boot_unified.c` with `@os01-test` header (`id: test_smp_boot_unified`, `layer: host`, `subsystem: boot`, `timing: strict`, `tier: pr`, `link: smp-boot-unified`, `scenarios: []`). Mock `boot_failure_stop` (using `setjmp`/`longjmp` to capture stage, component, rc, cpu), `arch_smp_boot_aps`, `arch_smp_last_status`, `arch_smp_ap_cpu_init`, `arch_smp_ap_post_online`, `arch_smp_ap_publish_ipi_ready`, `arch_smp_ap_enter_idle` (via `longjmp`), `arch_smp_post_boot_hook`, `subsys_prepare_cpus`, `arch_local_irq_enable`, and `_log_info_impl`/`_log_err_impl`.
+Create `hosttests/mock/smp_boot_unified_runtime.h` (preincluded via `-include` when compiling `smp_boot_unified_production.o`):
+- Pre-defines `_ARCH_IRQ_H` and declares `void arch_local_irq_enable(void);` as a traceable extern function (avoiding the `static inline` `sti` / no-op in `kernel/include/arch/irq.h`).
+- Pre-defines `_ARCH_BARRIER_H` and defines `void smp_test_arch_mb(void); #define arch_mb() smp_test_arch_mb()`.
+
+Create `hosttests/cases/test_smp_boot_unified.c` with `@os01-test` header (`id: test_smp_boot_unified`, `layer: host`, `subsystem: boot`, `timing: strict`, `tier: pr`, `link: smp-boot-unified`, `scenarios: []`). Explicitly define `int g_log_level = 6;`, `percpu_t percpu_data[NR_CPUS];`, and `uint32_t num_cpus;`, plus mocks for `boot_failure_stop` (using `setjmp`/`longjmp` to capture stage, component, rc, cpu), `arch_smp_boot_aps`, `arch_smp_last_status`, `arch_smp_ap_cpu_init`, `arch_smp_ap_post_online`, `arch_smp_ap_publish_ipi_ready`, `arch_smp_ap_enter_idle` (via `longjmp`), `arch_smp_post_boot_hook`, `subsys_prepare_cpus`, `arch_local_irq_enable`, `smp_test_arch_mb`, and `_log_info_impl`/`_log_err_impl`.
 
 Cover these exact test cases:
 1. `test_precondition_rejects_invalid_num_cpus` (`num_cpus == 0` and `num_cpus == NR_CPUS + 1` → `[boot-1] FATAL cpu=0 stage=invariant` + `boot_failure_stop("smp", "invariant", -EINVAL, -1, 0)`; `arch_smp_boot_aps` not called).
@@ -104,16 +109,22 @@ Cover these exact test cases:
 5. `test_multicore_boot_order_and_args` (`num_cpus == 4` → verifies `arch_smp_boot_aps(4, smp_ap_common_entry, percpu_data)` arguments, emits `[boot-1] complete discovered=4 ready=4`, calls `arch_smp_post_boot_hook(4)` strictly before `subsys_prepare_cpus()`).
 6. `test_postcondition_rejects_null_status_or_mask_mismatch` (`rc == 0` with `st == NULL`, `st->online != num_cpus`, or `st->online_mask != expected_mask` → Fail-Closed with `stage=invariant`, `-EIO`, no `post_boot_hook` / `subsys_prepare_cpus`).
 7. `test_fail_closed_propagates_all_stages` (test `SMP_STAGE_PREPARE` / `-ENOMEM`, `SMP_STAGE_ACTIVATE` / `-ENODEV`, `SMP_STAGE_ONLINE` / `-ETIMEDOUT`, `SMP_STAGE_SCHEDULER` / `-ETIMEDOUT` on cpu 1 → verifies `[boot-1] FATAL cpu=1 stage=<name>` + `boot_failure_stop("smp", "<name>", rc, -1, 1)` and neither `post_boot_hook` nor `subsys_prepare_cpus` runs).
-8. `test_ap_common_entry_strict_order` (drives `smp_ap_common_entry(1, &percpu_data[1])`; asserts trace order `cpu_init` (with `online==0`, `irq==0`) → `post_online` (with `online==1`, `irq==0`) → `irq_enable` → `publish_ipi_ready` (with `online==1`, `irq==1`) → `enter_idle`).
+8. `test_ap_common_entry_strict_order` (drives `smp_ap_common_entry(1, &percpu_data[1])`; asserts trace order `cpu_init` (with `online==0`, `irq==0`) → `post_online` (with `online==1`, `irq==0`) → `irq_enable` → `arch_mb` → `publish_ipi_ready` (with `online==1`, `irq==1`) → `enter_idle`).
 
-Add `test_smp_boot_unified.elf` rule in `hosttests/mk/sched.mk` compiling the real `kernel/core/smp.c` against host mocks, and run `make regen-test-catalog`.
+In `hosttests/mk/sched.mk`, follow the generated link-group convention (do NOT hand-write `test_smp_boot_unified.o`/`.elf` rules, which `scan_tests.py` generates into `mk/generated/test-link-rules.mk`):
+- Compile `$(TEST_BLD)/smp_boot_unified_production.o` from `$(TESTS_DIR)/kernel/core/smp.c` with `-include $(TEST_MOCK)/smp_boot_unified_runtime.h` and `$(BOOT4_HOST_CFLAGS)`.
+- Define `LINK_CFLAGS_smp-boot-unified = $(BOOT4_HOST_CFLAGS)`.
+- Define `LINK_GROUP_smp-boot-unified := $(TEST_BLD)/smp_boot_unified_production.o`.
+- Define `.PHONY: test_smp_boot_unified` depending on `$(TEST_BLD)/test_smp_boot_unified.elf` and running `$<`.
+
+Run `make regen-test-catalog`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `make -C hosttests test_smp_boot_unified`
+Run: `OS01_PROFILE_FILE=$(pwd)/mk/profiles/x86_64-clang.mk make -C hosttests test_smp_boot_unified`
 Expected: FAIL (`kernel/core/smp.c` does not exist).
 
-- [ ] **Step 3: Implement `kernel/core/smp.c` and register in `kernel/Makefile`**
+- [ ] **Step 3: Implement `kernel/core/smp.c` (with temporary x86_64 `filter-out` for bisectability)**
 
 Implement `kernel/core/smp.c` per Spec §3:
 - Stack-based `format_u32()` helper (no heap, `%s`-only formatting for `log_info` / `log_err`).
@@ -123,17 +134,17 @@ Implement `kernel/core/smp.c` per Spec §3:
 - `void arch_boot_aps(void)` performing precondition checks, calling `arch_smp_boot_aps(num_cpus, smp_ap_common_entry, percpu_data)`, checking `rc != 0` and `st != NULL && st->requested == num_cpus && st->online == num_cpus && st->online_mask == expected_mask` (handling `num_cpus == 64u`), emitting `[boot-1] complete discovered=%s ready=%s\n`, then calling `arch_smp_post_boot_hook(num_cpus)` and `subsys_prepare_cpus()`.
 - `__attribute__((noreturn)) void smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu)` executing the 5-step sequence in Spec §3.3 (`arch_smp_ap_cpu_init` → `__atomic_store_n(&cpu->online, 1, __ATOMIC_RELEASE)` → `arch_smp_ap_post_online` → `arch_local_irq_enable(); arch_mb();` → `arch_smp_ap_publish_ipi_ready` → `arch_smp_ap_enter_idle`).
 
-Add `core/smp.c` to the aarch64 `KERNEL_C_SOURCES` list in `kernel/Makefile` right after `core/main.c`.
+Temporarily exclude `core/smp.c` via `$(filter-out core/smp.c, ...)` in the x86_64 `KERNEL_C_SOURCES` wildcard in `kernel/Makefile` (removed in Task 3 when x86_64 removes its legacy `arch_boot_aps()`).
 
 - [ ] **Step 4: Run host unit test & catalog drift check**
 
-Run: `make -C hosttests test_smp_boot_unified && make check-test-catalog`
+Run: `OS01_PROFILE_FILE=$(pwd)/mk/profiles/x86_64-clang.mk make -C hosttests test_smp_boot_unified && make check-test-catalog`
 Expected: All 8 test cases in `test_smp_boot_unified` PASS; `check-test-catalog` exits 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kernel/core/smp.c kernel/Makefile hosttests/cases/test_smp_boot_unified.c hosttests/mk/sched.mk config/test-catalog.json mk/generated/
+git add kernel/core/smp.c kernel/Makefile hosttests/mock/smp_boot_unified_runtime.h hosttests/cases/test_smp_boot_unified.c hosttests/mk/sched.mk config/test-catalog.json mk/generated/
 git commit -m "feat(smp): add unified core/smp.c orchestrator, AP state machine, and hosttests"
 ```
 
@@ -146,6 +157,7 @@ git commit -m "feat(smp): add unified core/smp.c orchestrator, AP state machine,
 - Modify: `kernel/arch/x86_64/smp/smp.c`
 - Modify: `kernel/arch/x86_64/smp/boot.c`
 - Modify: `kernel/include/arch/x86_64/smp_boot.h`
+- Modify: `kernel/Makefile` (remove temporary x86_64 `filter-out core/smp.c` added in Task 2)
 - Delete: `kernel/include/core/smp.h`
 
 **Interfaces:**
@@ -178,21 +190,22 @@ Keep `trampoline_data` layout unchanged (40 bytes).
   - `arch_smp_ap_publish_ipi_ready(uint32_t cpu_id, struct percpu *cpu)` (`ipi_ready_publish_ap(cpu_id)` + `boot1_fault_after_ipi_ready(cpu_id)`).
   - `arch_smp_ap_enter_idle(uint32_t cpu_id, struct percpu *cpu)` (publishes `scheduler_ok = 1` release-store + `hlt`/`need_resched`/`schedule()` loop).
 
-- [ ] **Step 3: Clean up `kernel/arch/x86_64/smp/boot.c`, `kernel/include/arch/x86_64/smp_boot.h`, and remove `kernel/include/core/smp.h`**
+- [ ] **Step 3: Clean up `kernel/arch/x86_64/smp/boot.c`, `kernel/include/arch/x86_64/smp_boot.h`, `kernel/Makefile`, and remove `kernel/include/core/smp.h`**
 
 - Remove `x86_64_boot_aps()` and `arch_boot_aps()` from `kernel/arch/x86_64/smp/boot.c` (and remove stale `#include <core/smp.h>` and `subsys_prepare_cpus` header comment reference).
 - Remove `x86_64_boot_aps()` declaration from `kernel/include/arch/x86_64/smp_boot.h`.
+- Remove the temporary x86_64 `filter-out core/smp.c` from `kernel/Makefile` so `kernel/core/smp.c` links into x86_64.
 - Delete `kernel/include/core/smp.h`.
 
 - [ ] **Step 4: Build x86_64 kernel to verify clean compile & link**
 
-Run: `make kernel`
+Run: `make kernel.bin`
 Expected: Builds cleanly with zero warnings/errors and no duplicate `arch_boot_aps` symbol.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kernel/arch/x86_64/trampoline.S kernel/arch/x86_64/smp/smp.c kernel/arch/x86_64/smp/boot.c kernel/include/arch/x86_64/smp_boot.h
+git add kernel/arch/x86_64/trampoline.S kernel/arch/x86_64/smp/smp.c kernel/arch/x86_64/smp/boot.c kernel/include/arch/x86_64/smp_boot.h kernel/Makefile
 git rm kernel/include/core/smp.h
 git commit -m "feat(x86_64): adapt SMP trampoline and AP bring-up to unified arch/smp.h"
 ```
@@ -202,6 +215,7 @@ git commit -m "feat(x86_64): adapt SMP trampoline and AP bring-up to unified arc
 ### Task 4: AArch64 SMP Backend Adaptation (Fail-Closed & AAPCS64-Safe Entry)
 
 **Files:**
+- Modify: `kernel/Makefile:85-92` (explicitly add `core/smp.c` to aarch64 `KERNEL_C_SOURCES`)
 - Modify: `kernel/include/arch/aarch64/boot_offsets.h:15`
 - Modify: `kernel/include/arch/aarch_percpu.h:30,44,67`
 - Modify: `kernel/arch/aarch64/boot/secondary_entry.S:56-126`
@@ -248,16 +262,17 @@ git commit -m "feat(x86_64): adapt SMP trampoline and AP bring-up to unified arc
   - Split `secondary_idle()` into the 4 AP hooks (`arch_smp_ap_cpu_init`, `arch_smp_ap_post_online`, `arch_smp_ap_publish_ipi_ready` with `isb` + `ipi_ready_publish_and_count`, `arch_smp_ap_enter_idle`) and add strong override `void arch_smp_post_boot_hook(uint32_t online_cpus) { (void)test_spinlock_smp(online_cpus); }`.
 - In `kernel/include/arch/aarch64/smp.h`: remove `smp_boot_aps()` and `secondary_idle()` declarations.
 - In `kernel/arch/aarch64/boot/main.c`: remove `arch_boot_aps()` and `boot1_no_ack_observation()` (plus its call site in `arch_boot_runtime()`).
+- In `kernel/Makefile`: explicitly append `core/smp.c` to the aarch64 `KERNEL_C_SOURCES` whitelist right after `core/main.c`.
 
 - [ ] **Step 4: Build aarch64 kernel and run symbol/stack-frame audit**
 
-Run: `make PROFILE=aarch64-clang kernel && make PROFILE=aarch64-clang test-aarch64-audit`
+Run: `make PROFILE=aarch64-clang aarch64-uefi-kernel && make PROFILE=aarch64-clang test-aarch64-audit`
 Expected: Builds cleanly and `test-aarch64-audit` PASSES.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add kernel/include/arch/aarch64/boot_offsets.h kernel/include/arch/aarch_percpu.h kernel/arch/aarch64/boot/secondary_entry.S kernel/arch/aarch64/smp/smp.c kernel/include/arch/aarch64/smp.h kernel/arch/aarch64/boot/main.c
+git add kernel/Makefile kernel/include/arch/aarch64/boot_offsets.h kernel/include/arch/aarch_percpu.h kernel/arch/aarch64/boot/secondary_entry.S kernel/arch/aarch64/smp/smp.c kernel/include/arch/aarch64/smp.h kernel/arch/aarch64/boot/main.c
 git commit -m "feat(aarch64): adapt PSCI AP bring-up to unified arch/smp.h with Fail-Closed policy"
 ```
 
@@ -294,10 +309,10 @@ Update per Spec §5.2 items 1, 2, 7, 8:
 - `qemutests/test_x86_intr_fault.py`: update `ApNmiOrderingTests` to check `arch_smp_ap_cpu_init` in `x86_64/smp/smp.c` + `smp_ap_common_entry` in `kernel/core/smp.c`.
 - `qemutests/test_aarch64_ap_boot_contract.py`: adapt release-gate & online-before-ACK scans to `arch_smp_ap_enter_idle` / `smp_ap_common_entry` / `arch_smp_ap_post_online`; replace obsolete `boot1_no_ack_observation` test with Fail-Closed `SMP_STAGE_ONLINE` contract test.
 
-- [ ] **Step 3: Run full host tests, static audit, and catalog check**
+- [ ] **Step 3: Run full host tests, harness unit tests, static audit, and catalog check**
 
-Run: `make check-test-catalog && make test-host && make test-static`
-Expected: All host tests, static audits, and harness unit tests PASS.
+Run: `make check-test-catalog && make test-host && make test-harness && make test-static`
+Expected: All host tests, Python harness unit tests, static audits, and catalog checks PASS.
 
 - [ ] **Step 4: Commit**
 
@@ -322,10 +337,18 @@ git commit -m "test(smp): align source-audit hosttests and QEMU harnesses with u
 Run: `make test-qemu SUITE=boot-lifecycle && make test-qemu SUITE=phase-0`
 Expected: `normal` (1/2/4/8 CPUs), `delay-online`, `no-online`, `no-scheduler`, and `phase-0` all PASS.
 
-- [ ] **Step 2: Run aarch64 QEMU SMP acceptance suite (normal 1/2/4 CPUs + `no_ack_cpu=1` Fail-Closed)**
+- [ ] **Step 2: Run aarch64 QEMU SMP acceptance suites (normal 1/2/4 CPUs + `MODE=no-ack` Fail-Closed)**
 
-Run: `make PROFILE=aarch64-clang test-aarch64 MODE=smp`
-Expected: Normal 1/2/4-CPU runs PASS (`[smp] requested=N online=N status=PASS`, `[boot-1] complete`, `[spinlock] ... PASS`, `[tick]`), and `no_ack_cpu=1` PASSES Fail-Closed verification.
+Run:
+```bash
+make PROFILE=aarch64-clang test-aarch64 MODE=smp
+make PROFILE=aarch64-clang clean
+make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 aarch64-uefi
+make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=1 test-aarch64 MODE=no-ack
+make PROFILE=aarch64-clang clean
+make PROFILE=aarch64-clang AARCH64_SMP_TEST_NO_ACK_CPU=0 aarch64-uefi
+```
+Expected: Normal 1/2/4-CPU runs PASS (`[smp] requested=N online=N status=PASS`, `[boot-1] complete`, `[spinlock] ... PASS`, `[tick]`), `MODE=no-ack` PASSES Fail-Closed verification, and normal aarch64 image is restored cleanly afterward.
 
 - [ ] **Step 3: Update `docs/roadmap.md` and `docs/arch.md`**
 
