@@ -152,6 +152,15 @@ static int real_present_rect(gfx_handle_t *h, uint32_t x, uint32_t y,
 {
     return gfx_present_rect(h, x, y, w, h_);
 }
+/* Real damage-batch hook (spec 2026-11-19 §6): the whole pending
+ * damage list travels in one GFX_PRESENT_RECTS ioctl; k (rects fully
+ * written before a failure) surfaces through completed_out for the
+ * failed-prefix byte metric. */
+static int real_present_rects(gfx_handle_t *h, const gfx_rect_t *rects,
+                              uint32_t count, uint32_t *completed_out)
+{
+    return gfx_present_rects(h, rects, count, completed_out);
+}
 static int real_register_fallback(gfx_handle_t *h) { return gfx_register_fallback(h); }
 static int real_get_display_state(gfx_handle_t *h, gfx_display_state_t *st) { return gfx_get_display_state(h, st); }
 static int real_replace_fallback(gfx_handle_t *old_h, gfx_handle_t *new_h) { return gfx_replace_fallback(old_h, new_h); }
@@ -170,6 +179,7 @@ void terminal_display_init(terminal_display_t *d, gfx_handle_t *gfx,
     d->ops.gfx_close = real_close;
     d->ops.gfx_present = real_present;
     d->ops.gfx_present_rect = real_present_rect;
+    d->ops.gfx_present_rects = real_present_rects;
     d->ops.gfx_register_fallback = real_register_fallback;
     d->ops.gfx_get_display_state = real_get_display_state;
     d->ops.gfx_replace_fallback = real_replace_fallback;
@@ -370,10 +380,19 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
     term_render_get_damage(&d->render, &damage);
 
     /* Path selection.  The NULL-hook fallback keeps tests that
-     * don't supply the new op green without changing any production
-     * behaviour (real terminals always wire gfx_present_rect). */
+     * don't supply the new ops green without changing any production
+     * behaviour (real terminals always wire gfx_present_rect and
+     * gfx_present_rects). */
     bool want_full = damage.full;
-    if (!want_full && damage.count > 0 && d->ops.gfx_present_rect == NULL) {
+    if (!want_full && damage.count > 0 && d->ops.gfx_present_rect == NULL &&
+        d->ops.gfx_present_rects == NULL) {
+        want_full = true;
+    }
+    /* The renderer's damage capacity (64) equals
+     * GFX_PRESENT_RECTS_MAX, so count > MAX is unreachable today; if
+     * the capacity ever grows past the ABI limit, degrade to a full
+     * present rather than truncate damage. */
+    if (!want_full && damage.count > GFX_PRESENT_RECTS_MAX) {
         want_full = true;
     }
 
@@ -413,6 +432,55 @@ static int display_submit(terminal_display_t *d, uint64_t now_ms,
         /* ── Noop path: no ioctl, no failure, no ack needed ─ */
         d->metrics.noop_calls++;
         rc = 0;
+    } else if (d->ops.gfx_present_rects != NULL) {
+        /* ── Batch path: ONE GFX_PRESENT_RECTS ioctl (spec 2026-11-19
+         *    §6).  Success/failure bookkeeping mirrors the legacy
+         *    loop below: k (rects fully written pre-failure) folds
+         *    into failed_completed_rect_bytes; the whole damage list
+         *    survives a failure so the retry re-issues everything. ── */
+        gfx_rect_t batch[TERM_DAMAGE_MAX_RECTS];
+        for (uint32_t i = 0; i < damage.count; i++) {
+            batch[i].x = damage.rects[i].x;
+            batch[i].y = damage.rects[i].y;
+            batch[i].w = damage.rects[i].w;
+            batch[i].h = damage.rects[i].h;
+        }
+        uint64_t before = d->ops.now_ns ? d->ops.now_ns() : t0_ns;
+        uint32_t k = 0;
+        int rrc = d->ops.gfx_present_rects(d->gfx, batch, damage.count, &k);
+        uint64_t after = d->ops.now_ns ? d->ops.now_ns() : before;
+        uint64_t dt = after - before;
+        d->metrics.rect_calls++;
+        if (rrc == 0) {
+            uint64_t bytes = 0;
+            for (uint32_t i = 0; i < damage.count; i++) {
+                bytes += (uint64_t)damage.rects[i].w *
+                         damage.rects[i].h * 4u;
+            }
+            d->metrics.partial_frames++;
+            d->metrics.success_ns += dt;
+            d->metrics.success_bytes += bytes;
+            if (dt > d->metrics.success_max_ns)
+                d->metrics.success_max_ns = dt;
+            term_render_ack_damage(&d->render);
+            d->present_retry_pending = false;
+            d->present_retry_deadline_ms = 0;
+            if (submitted) *submitted = true;
+            rc = 0;
+        } else {
+            uint64_t prefix_bytes = 0;
+            for (uint32_t i = 0; i < k && i < damage.count; i++) {
+                prefix_bytes += (uint64_t)damage.rects[i].w *
+                                damage.rects[i].h * 4u;
+            }
+            d->metrics.failed_attempts++;
+            d->metrics.failed_ns += dt;
+            if (dt > d->metrics.failed_max_ns)
+                d->metrics.failed_max_ns = dt;
+            d->metrics.failed_completed_rect_bytes += prefix_bytes;
+            rc = -1;
+            rc_errno = errno;
+        }
     } else {
         /* ── List path: per-rect gfx_present_rect ────────── */
         uint64_t total_dt = 0;

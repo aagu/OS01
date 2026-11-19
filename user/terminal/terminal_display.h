@@ -98,6 +98,14 @@ typedef struct terminal_display_ops {
     int  (*gfx_present)(gfx_handle_t *h);
     int  (*gfx_present_rect)(gfx_handle_t *h, uint32_t x, uint32_t y,
                              uint32_t w, uint32_t h_);
+    /* Damage-region batch present (GFX_PRESENT_RECTS, spec
+     * 2026-11-19 §6): ONE ioctl carries the whole damage list.
+     * completed_out receives the kernel-reported k on failure (rects
+     * fully written pre-failure).  NULL keeps the legacy per-rect
+     * loop (injected-test compatibility path only; production always
+     * wires it). */
+    int  (*gfx_present_rects)(gfx_handle_t *h, const gfx_rect_t *rects,
+                              uint32_t count, uint32_t *completed_out);
     int  (*gfx_register_fallback)(gfx_handle_t *h);
     int  (*gfx_get_display_state)(gfx_handle_t *h, gfx_display_state_t *st);
     int  (*gfx_replace_fallback)(gfx_handle_t *old_h, gfx_handle_t *new_h);

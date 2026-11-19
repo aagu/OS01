@@ -364,6 +364,10 @@ static void setup(uint32_t w, uint32_t h, uint64_t gen)
      * existing 248 tests stay green WITHOUT recoding anything.  Tests
      * that want the rect path call install_rect_hook() after setup(). */
     D.ops.gfx_present_rect = NULL;
+    /* Batch hook (spec 2026-11-19 §6): default NULL so the legacy
+     * per-rect loop stays the fixture baseline; the batch tests
+     * install m_present_rects explicitly. */
+    D.ops.gfx_present_rects = NULL;
     /* Task 3 metrics hooks — defaults are the real_* production impls
      * (CLOCK_MONOTONIC / /dev/serial).  Tests that want a fake clock
      * or a captured /dev/serial must override these AFTER setup(). */
@@ -2046,6 +2050,184 @@ TEST_FUNC(test_terminal_present_backoff_split) {
 
 /* ── end Task 5 tests ───────────────────────────────────────── */
 
+/* ── Batch-present (GFX_PRESENT_RECTS) display migration tests ──
+ *
+ * Contract (spec 2026-11-19 §6): the list path issues ONE
+ * gfx_present_rects call per round when the hook is wired (the old
+ * per-rect loop stays as the NULL-hook compatibility path); on
+ * failure the whole damage list survives and
+ * failed_completed_rect_bytes folds the kernel-reported k. */
+
+#define RECTS_LOG_MAX 16
+static gfx_rect_t g_rects_log[RECTS_LOG_MAX][64];
+static uint32_t   g_rects_log_count[RECTS_LOG_MAX];
+static int        g_rects_calls;
+static int        g_rects_errno;
+static uint32_t   g_rects_completed_k;  /* k the fake reports on failure */
+
+static void reset_rects_mocks(void)
+{
+    memset(g_rects_log, 0, sizeof(g_rects_log));
+    memset(g_rects_log_count, 0, sizeof(g_rects_log_count));
+    g_rects_calls = 0;
+    g_rects_errno = 0;
+    g_rects_completed_k = 0;
+}
+
+static int m_present_rects(gfx_handle_t *h, const gfx_rect_t *rects,
+                           uint32_t count, uint32_t *completed_out)
+{
+    (void)h;
+    g_rects_calls++;
+    if (g_rects_errno) {
+        if (completed_out) *completed_out = g_rects_completed_k;
+        errno = g_rects_errno;
+        /* Consume the one-shot failure like the other fakes do. */
+        g_rects_errno = 0;
+        return -1;
+    }
+    if (g_rects_calls <= RECTS_LOG_MAX && count <= 64) {
+        memcpy(g_rects_log[g_rects_calls - 1], rects,
+               count * sizeof(gfx_rect_t));
+        g_rects_log_count[g_rects_calls - 1] = count;
+    }
+    if (completed_out) *completed_out = count;
+    return 0;
+}
+
+TEST_FUNC(test_display_batch_one_ioctl_per_round) {
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    D.ops.gfx_present_rects = m_present_rects;
+    reset_rects_mocks();
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    errno = 0;
+    assert_eq(0, terminal_display_present(&D, 1000));
+    /* Exactly ONE batch ioctl; the legacy per-rect hook never fired. */
+    assert_eq(1, g_rects_calls);
+    assert_eq(0, g_rect_log_count);
+    /* Both rects, in damage order. */
+    assert_eq(2u, g_rects_log_count[0]);
+    assert_eq(0u,  g_rects_log[0][0].x);
+    assert_eq(0u,  g_rects_log[0][0].y);
+    assert_eq(8u,  g_rects_log[0][0].w);
+    assert_eq(16u, g_rects_log[0][0].h);
+    assert_eq(40u, g_rects_log[0][1].x);
+    assert_eq(48u, g_rects_log[0][1].y);
+    assert_eq(8u,  g_rects_log[0][1].w);
+    assert_eq(16u, g_rects_log[0][1].h);
+    /* Metrics: one partial frame, 1024 B, rect_calls counts the
+     * batch ioctl once; full path untouched. */
+    assert_eq(0, g_present_calls);
+    assert_eq(1ull, D.metrics.partial_frames);
+    assert_eq(0ull, D.metrics.full_frames);
+    assert_eq(1024ull, D.metrics.success_bytes);
+    assert_eq(1ull, D.metrics.rect_calls);
+    /* Ack on success. */
+    assert_eq(0u, D.render.pending_damage.count);
+    terminal_display_close(&D);
+}
+
+TEST_FUNC(test_display_batch_failure_keeps_list_and_k_bytes) {
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    D.ops.gfx_present_rects = m_present_rects;
+    reset_rects_mocks();
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    /* One-shot failure reporting k=1 (first rect fully written). */
+    g_rects_errno = EAGAIN;
+    g_rects_completed_k = 1;
+    errno = 0;
+    assert_eq(-1, terminal_display_present(&D, 1000));
+    assert_eq(EAGAIN, errno);
+    /* k=1 → first rect's 8*16*4 = 512 B is the completed prefix. */
+    assert_eq(512ull, D.metrics.failed_completed_rect_bytes);
+    assert_eq(0ull, D.metrics.partial_frames);
+    assert_eq(1ull, D.metrics.failed_attempts);
+    assert_eq(1ull, D.metrics.rect_calls);
+    /* Whole damage list preserved. */
+    assert_false(D.render.pending_damage.full);
+    assert_eq(2u, D.render.pending_damage.count);
+    assert_true(D.present_retry_pending);
+    assert_eq(1250ull, D.present_retry_deadline_ms);
+    /* Retry round: same two rects re-issued in ONE batch ioctl. */
+    D.present_retry_deadline_ms = 0;
+    D.present_retry_pending = false;
+    errno = 0;
+    assert_eq(0, terminal_display_present(&D, 2000));
+    assert_eq(2, g_rects_calls);
+    assert_eq(2u, g_rects_log_count[1]);
+    assert_eq(1ull, D.metrics.partial_frames);
+    assert_eq(1024ull, D.metrics.success_bytes);
+    assert_eq(0u, D.render.pending_damage.count);
+    assert_false(D.present_retry_pending);
+    /* failed_completed_rect_bytes only accumulates on failed rounds. */
+    assert_eq(512ull, D.metrics.failed_completed_rect_bytes);
+    terminal_display_close(&D);
+}
+
+TEST_FUNC(test_display_batch_null_hook_legacy_loop) {
+    setup(80, 64, 1);
+    /* Batch hook NULL + rect hook wired → legacy per-rect loop. */
+    D.ops.gfx_present_rect = m_present_rect;
+    D.ops.gfx_present_rects = NULL;
+    reset_rects_mocks();
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    mark_one_cell(3, 5, 'B');
+    errno = 0;
+    assert_eq(0, terminal_display_present(&D, 1000));
+    assert_eq(0, g_rects_calls);
+    assert_eq(2, g_rect_log_count);
+    assert_eq(2ull, D.metrics.rect_calls);
+    assert_eq(1ull, D.metrics.partial_frames);
+    assert_eq(1024ull, D.metrics.success_bytes);
+    terminal_display_close(&D);
+
+    /* Both hooks NULL → conservative full present (existing rule). */
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = NULL;
+    D.ops.gfx_present_rects = NULL;
+    reset_rects_mocks();
+    hide_cursor_and_flush();
+    mark_one_cell(0, 0, 'A');
+    errno = 0;
+    assert_eq(0, terminal_display_present(&D, 1000));
+    assert_eq(1, g_present_calls);
+    assert_eq(0, g_rects_calls);
+    assert_eq(0, g_rect_log_count);
+    terminal_display_close(&D);
+}
+
+TEST_FUNC(test_display_batch_metrics_anti_dilution) {
+    setup(80, 64, 1);
+    D.ops.gfx_present_rect = m_present_rect;
+    D.ops.gfx_present_rects = m_present_rects;
+    reset_rects_mocks();
+    hide_cursor_and_flush();
+    /* Noop round: no damage → no ioctl of any kind. */
+    errno = 0;
+    assert_eq(0, terminal_display_present(&D, 1000));
+    assert_eq(0, g_rects_calls);
+    assert_eq(1ull, D.metrics.noop_calls);
+    assert_eq(0ull, D.metrics.partial_frames);
+    /* Real batch round afterwards: averages stay clean. */
+    mark_one_cell(0, 0, 'A');
+    assert_eq(0, terminal_display_present(&D, 1100));
+    assert_eq(1, g_rects_calls);
+    assert_eq(1ull, D.metrics.noop_calls);      /* unchanged */
+    assert_eq(1ull, D.metrics.partial_frames);
+    assert_eq(512ull, D.metrics.success_bytes); /* one rect */
+    assert_eq(1ull, D.metrics.rect_calls);
+    terminal_display_close(&D);
+}
+
+/* ── end batch-present tests ────────────────────────────────── */
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_terminal_recover_aba),
     TEST_ENTRY(test_terminal_resize_changes_core),
@@ -2074,6 +2256,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_display_partial_retry_deadline),
     TEST_ENTRY(test_display_state_table_parametric),
     TEST_ENTRY(test_display_partial_metrics_anti_dilution),
+    /* Batch-present migration (spec 2026-11-19 §6). */
+    TEST_ENTRY(test_display_batch_one_ioctl_per_round),
+    TEST_ENTRY(test_display_batch_failure_keeps_list_and_k_bytes),
+    TEST_ENTRY(test_display_batch_null_hook_legacy_loop),
+    TEST_ENTRY(test_display_batch_metrics_anti_dilution),
     /* Roadmap parked "QEMU 分辨率切换器收尾 follow-up" #3: the present
      * rate limit, the refresh backoff and the stale-view mark are three
      * independent states, and the recoverable errno set has ONE
