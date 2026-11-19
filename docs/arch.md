@@ -21,6 +21,7 @@ OS01 同时支持 **x86_64** 和 **aarch64**（后者仅 UEFI 启动路径）。
 | `memory/pmm.h` `pmm_init(boot_context*)` | —（无弱默认：三项 `pmm_arch_*` 策略 hook 每架构强定义，缺失即链接失败） | `arch/x86_64/memory/{pmm_arch.c,pmm_reserve.c}`（E820 normalize/4 GiB zone split + 遗留前缀 reservation `[0, ceil2M(metadata_end_pa))`） | `arch/aarch64/memory/{pmm_arch.c,early_arena.c}`（读 `aarch64_ram_map_get()`；zone split 显式 `UINT64_MAX`；reservation 返回已发布 arena，未准备报 `-EINVAL`） | 物理内存 arch-neutral 入口；`MEMORY_RANGE[]` 中介；RAM-relative indexing（`pages_struct + ((start - lowest_ram) >> 21)`） |
 | `arch/boot_memory.h` `arch_boot_direct_map_init/ready/ranges` | 无默认实现；每架构提供同名后端 | `arch/x86_64/memory/boot_direct_map.c`，checked `vmm_init()` + zone cutoff | `arch/aarch64/memory/boot_direct_map.c`，arena + strict TTBR1 + AP 验证 | 启动期共同契约；coverage 是映射 RAM，包含已占用页；动态 VMM 不在 M1 范围内 |
 | `log/log.h` `_log_*_impl` 宏 | `log/log.c` core（gate-wrapped） | `core/log.c` 走 `_log_writev` + vsnprintf + serial | `arch/aarch64/runtime/log_impl.c` 走 `kputs(fmt)` 忽略 variadic | 跨 arch 日志；aarch64 `-nostdlib` 无 vsnprintf |
+| `arch/smp.h` `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` + `arch_smp_last_status()` + AP 钩子（`arch_smp_ap_cpu_init/post_online/publish_ipi_ready/enter_idle`）+ `arch_smp_post_boot_hook` | `kernel/core/smp.c`（公共编排 `arch_boot_aps()`：前置不变量 + 结果核验 + Fail-Closed `boot_failure_stop`；AP 状态机 `smp_ap_common_entry()`：cpu_init→online=1(RELEASE)→post_online→irq_enable→mb→ipi_ready→idle；`arch_smp_post_boot_hook` weak no-op） | `arch/x86_64/smp/smp.c`（trampoline 传 `(cpu_id, gs_base)`；INIT-SIPI-SIPI + online/scheduler_ok 有界等待 + TSC 握手） | `arch/aarch64/smp/smp.c`（PSCI CPU_ON + 启动槽 `entry`（offset 40 复用）+ `secondary_entry.S` 经 callee-saved `x20` 调用共享入口；Fail-Closed，DEGRADED 路径已删） | 统一 SMP AP 启动语义与失败策略（2026-11-19 闭环，spec/plan 见 `docs/superpowers/`） |
 | `arch/boot.h` 启动编排与阶段校验钩子（`arch_early_init` / `arch_boot_memory` / `arch_pre_subsys_selftest` / `arch_boot_controllers` / `arch_boot_percpu` / `arch_boot_devices` / `arch_boot_device_nodes` / `arch_boot_smp_prepare` / `arch_boot_aps` / `arch_boot_runtime` / `arch_boot_validate` / `arch_post_smp_selftest` / `arch_early_panic` + 无用户态专用 `arch_start_kernel_idle`） | 无弱默认 —— 缺实现即链接失败 | `arch/x86_64/{platform/boot.c,memory/boot.c,smp/boot.c,platform/boot_contract.c}`（转调 `x86_64_boot_early/memory/controllers/devices/device_nodes/percpu/aps` 及能力核验） | `arch/aarch64/{boot/main.c,platform/boot_contract.c}`（原 `aarch64_main()` 改写为同名 facade 实现及能力核验） | 双架构共用单一 `kernel_main` 入口（2026-11-07 闭环，BOOT-4 统一阶段契约与三检查点能力核验）；配合 `arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 编译期特性门裁剪缺省阶段 |
 
 **共同模式**：多数 facade 满足「weak default 提供无操作/panic/FATAL/identity 默认行为，strong override 提供真实现，per-arch 通过头文件位于 `kernel/include/arch/<arch>/` 镜像」。链接器强覆盖优先解析同名符号。**没有运行时分派**：编译期决定。
@@ -175,12 +176,13 @@ net / proc / resource / time / misc 组仍隐藏。详见
   （`kernel/selftest/test_aarch64_el0.c:414-416`），且 IRQ 路径明确不做调度
   （`kernel/arch/aarch64/intr/trap.c:83-92`）；AP 侧仍是轮询 resched，尚无 resched SGI。
 - 用户态进入/返回**尚未纳入 `arch/context.h` 门面**：x86 走 `iretq`、aarch64 走 `eret`，各自实现。
-- `arch_smp_boot_aps()` 与 `arch_cpu_features()` 仓库内均无此接口（只有跨架构钩子
-  `arch_boot_aps()`）。
+- `arch_cpu_features()` 仓库内仍无此接口；`arch_smp_boot_aps()` 已于 2026-11-19 随
+  统一 SMP 启动闭环落地（`kernel/include/arch/smp.h` 单入口 + `kernel/core/smp.c`
+  公共编排/AP 状态机，双架构统一 Fail-Closed）。
 
 **剩余差距**：产品用户态接入（**VFS 门已于 2026-11-18 打开**；剩 userland 构建链与
 `/bin/init` 装载 + 文件/共享/设备映射 + `MAP_FIXED`）
-+ IRQ 返回抢占 + 统一 SMP 启动与多核上下文切换 + ASID，粗估 **2–3 周**
++ IRQ 返回抢占 + 多核上下文切换（统一 SMP 启动已于 2026-11-19 闭环）+ ASID，粗估 **2–3 周**
 （一个人全职，较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环，VFS 门随后打开）。
 规划项见 [roadmap.md](roadmap.md) P2。
 闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-18 各条目；COW/VM 细节见

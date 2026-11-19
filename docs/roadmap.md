@@ -73,7 +73,7 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 | 阶段 | 任务与完成条件 | 前置 |
 |------|----------------|------|
 | M4 剩余：产品用户态接入 | 把已闭环的 EL0 运行期链路接到产品启动路径。**已完成（2026-11-18）**：aarch64 VFS 门——`OS01_HAS_VFS=1`，devfs/tmpfs/fat32/ext2 + virtio-blk 块设备 + fs syscall 组，验收见 `docs/changelog.md` 2026-11-18。**已完成（2026-11-19）**：aarch64 userland 构建链（aarch64 libc.a + crt0/linker/`RUNTIME_TARGET_user`，profile 增 `userland` capability）、VFS 版 `spawn_user_task` 与 `arch_syscall_exec`、`OS01_HAS_USERSPACE=1` + boot-5 编排（aarch64 boot 钩子 + 变体保 legacy handoff）、`/bin/init` → `/bin/sh`（复用 `user/sh.c`，串口 `/dev/tty`）产品链路；mmap 面补齐——`MAP_FIXED`（私有匿名替换事务）、文件映射（fd 接线 + 按需 fill）与 `MAP_SHARED`（复用 PMM COW 引用 + 写升级就地生效）、设备映射（`/dev/mem` → `VMA_IO` + `VM_DEVICE` 叶，D+virtio 窗口白名单）。**验收**：aarch64 产品镜像启动 `init pid=1` → inittab respawn → `OS01 Shell` 提示符，串口交互 `echo hi`/`exit`/respawn 全通；m4-1 28/28；test-host 全绿。**边界**：aarch64 用户任务仍单核 v1（多核启动降级 kernel-only，见「SMP 用户调度与抢占」行）；userland soft-float（EL0 陷阱 FPEN，printf %f 输出字面量；floatscan/strtod/setjmp 等待 libc-completion T11）；busybox 未移植（`/bin/sh` 为自研 xv6 风格 shell）；MAP_SHARED 一致性仅限 fork 后代（跨进程 inode 级共享待 shmem 注册表）；`/dev/mem` v1 仅映射空闲区间（不替换既有 VMA），叶子只读/读写随 prot | M4.1~M4.14 ✅；VFS 门 ✅（2026-11-18）；产品用户态接入 ✅（2026-11-19）；x86 VFS/ELF 加载器 ✅ |
-| M4 剩余：SMP 用户调度与抢占 | 用户任务在多核上被调度；IRQ 返回时抢占用户态（当前 EL0 抢占只在单核自测镜像中以 `aarch64_el0_preempt` 验证——该探针在多核启动下直接拒绝运行，IRQ 路径明确不调度，未进入产品路径） | M4 ✅；SMP 启动统一（见下表） |
+| M4 剩余：SMP 用户调度与抢占 | 用户任务在多核上被调度；IRQ 返回时抢占用户态（当前 EL0 抢占只在单核自测镜像中以 `aarch64_el0_preempt` 验证——该探针在多核启动下直接拒绝运行，IRQ 路径明确不调度，未进入产品路径） | M4 ✅；SMP 启动统一 ✅ |
 
 #### 架构统一推进链（迈向单一 kernel_main）
 
@@ -82,12 +82,12 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
 | 中断/异常 dispatch 统一（剩余项） | 第一期（6 条入口）与第二期（x86 48 条入口）已完成；**aarch64 低 EL 同步事件已接入公共分派**（`VBAR+0x400` 向量），正式 SVC 与用户复制 abort 恢复已闭环（M4.9），低 EL 信号投递与 `sigreturn` 已闭环（M4.14）。**剩余待统一**：IRQ 返回抢占（用户态抢占语义）、ASID（当前恒为 ASID 0）、统一 SMP | arch_irq ✅, head.S ✅, GIC ✅；M4.9 ✅；M4.14 ✅；产品路径待接入 | Linux do_IRQ |
-| SMP 启动统一 | `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 单入口；内部 aarch64 PSCI CPU_ON / x86_64 INIT-SIPI + trampoline 各自实现。当前仅有跨架构钩子 `arch_boot_aps()`（`kernel/include/arch/boot.h:40`），尚无统一 AP 启动语义 | GIC ✅, 启动链 ✅ | opuntiaOS |
+| SMP 启动统一 | ✅ **已闭环（2026-11-19）**：`kernel/include/arch/smp.h` 单入口 `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` + `arch_smp_last_status()`；公共编排/AP 状态机 `kernel/core/smp.c`（`arch_boot_aps()` 收敛为唯一公共定义，`smp_ap_common_entry()` 强制 cpu_init→online=1→post_online→irq_enable→ipi_ready→idle 五步序）；双架构统一 Fail-Closed（`[boot-1] FATAL cpu=N stage=<stage>` + `boot_failure_stop("smp",...)`，废弃 aarch64 DEGRADED 路径）；aarch64 启动槽 offset 40 `reserved→entry` 复用（48 字节 ABI 不变），`secondary_entry.S` 经 callee-saved `x20` 调用共享入口 | GIC ✅, 启动链 ✅ | opuntiaOS |
 | 上下文切换统一（剩余项） | EL1 架构上下文门面（`arch/context.h`）与 aarch64 BSP 切换已闭环；**aarch64 EL0 用户态切换已闭环**（正式 `PF_PROCESS` 用户任务、私有用户根、EL0 帧恢复，M4.8/M4.11）。**剩余待统一**：多核 SMP 调度切换、IRQ 返回抢占，以及**用户态进入/返回尚未纳入 `arch/context.h` 门面**（x86 `iretq` 与 aarch64 `eret` 各走各的实现） | EL1 调度 ✅；M4 ✅；SMP 启动统一 | Tilck |
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID vs aarch64 ID_AA64* 各实现一份（仓库内目前无此接口） | 独立 | Linux cpufeature |
 | GICv2 Phase 2 | SError/真机覆盖率（GIC init 现已在 `kernel_main` 路径的阶段契约下接入，`aarch64_main` 已于 2026-11-07 删除；**SError 三个向量槽目前是自跳，无保存/诊断/恢复路径**——`kernel/arch/aarch64/intr/entry.S:63,91,107` 均为 `b .`）；handler 表扩容（当前生产路径只注册 SGI 3/4 与 CNTP PPI，SGI 0~2 仅自测用，SGI 5-15 与 PPI 16-31 未注册）；`dtb_gicd_base` 解耦 —— ✅ **已闭环（2026-11-18）**：`gic_init` 消费 `dtb_gicd_base()` / `dtb_gicc_base()`（`kernel/arch/aarch64/intr/gic.c:56-57`），IPI 路径亦然（`kernel/arch/aarch64/intr/ipi.c:100`） | GICv2 Phase 1 ✅ | |
 
-**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：单一入口已达成，单核 BSP 上的用户态运行期链路（M4.1~M4.14）也已达成；剩余差距集中在 **产品接入与抢占/多核语义** —— 产品 `/bin/init` 链路（VFS 门已于 2026-11-18 打开，剩 userland 构建链与 spawn 接线）、文件/共享/设备映射、`MAP_FIXED`、IRQ 返回抢占、统一 SMP 启动与多核上下文切换、ASID，粗估 **2–3 周**（较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环）。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
+**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：单一入口已达成，单核 BSP 上的用户态运行期链路（M4.1~M4.14）也已达成；剩余差距集中在 **产品接入与抢占/多核语义** —— 产品 `/bin/init` 链路（VFS 门已于 2026-11-18 打开，剩 userland 构建链与 spawn 接线）、文件/共享/设备映射、`MAP_FIXED`、IRQ 返回抢占、多核上下文切换（统一 SMP 启动已于 2026-11-19 闭环）、ASID，粗估 **2–3 周**（较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环）。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
 
@@ -240,12 +240,13 @@ v25 arch-cleanup / PMM arch-neutral / 页表原语 / Generic Timer Phase 1 + Pha
 
 ---
 
-## 近期闭环索引（2026-11-06 ~ 2026-11-18）
+## 近期闭环索引（2026-11-06 ~ 2026-11-19）
 
 只列条目名与文档指针；完整「做了什么 / 关键结论 / 验证」见 `docs/changelog.md` 对应日期条目。
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **统一 SMP 启动**（`arch/smp.h` 单入口 `arch_smp_boot_aps` + `kernel/core/smp.c` 公共编排与 AP 状态机 + 双架构统一 Fail-Closed，废弃 aarch64 DEGRADED） | 2026-11-19 | [spec](superpowers/specs/2026-11-19-unified-smp-boot-design.md) · [plan](superpowers/plans/2026-11-19-unified-smp-boot.md) |
 | **aarch64 VFS 门打开**（`OS01_HAS_VFS=1`：devfs/tmpfs/FAT32/ext2 下沉接入 + virtio-blk-mmio 块设备 + fs syscall 组 32 项，共享 syscall 表 aarch64 侧共 47 项） | 2026-11-18 | [changelog](changelog.md#2026-11-18) · [arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环) |
 | **aarch64 内核启动块平台配置化**（`AARCH64_BOOT_BLOCK_BASE` profile 旋钮 + 五项校验 + `boot_layout.h` 单一常量源 + cpp 生成链接脚本 + loader/M0/M1/RAM 保留四处联动 + `MODE=lma-layout` 验收） | 2026-11-18 | [changelog](changelog.md#2026-11-18) · [spec](superpowers/specs/2026-11-17-aarch64-kernel-lma-design.md) |
 | **aarch64 平台值解绑**（PL011 基址与波特率走 DTB、GIC 接受任意基址与 `arm,gic-400`、loader 改走 EFI Serial IO Protocol） | 2026-11-18 | [changelog](changelog.md#2026-11-18) · [arch.md](arch.md#aarch64-平台值解绑2026-11-18) |
