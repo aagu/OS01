@@ -1,7 +1,30 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-18）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-20）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
+
+---
+
+## 2026-11-20
+
+- feat(gfx,gui,terminal): **损伤区域与批量 present（roadmap P3「脏矩形与批量提交」）**——通用 `GFX_PRESENT_RECTS` 批量 ABI + terminal/LVGL 双消费端迁移（spec `docs/superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md`；8515a766..b98a0578）：
+
+  **做了什么**
+  - UAPI（`kernel/include/uapi/gfx.h`）：`GFX_PRESENT_RECTS=0x470D`、`GFX_PRESENT_RECTS_MAX=64`、`gfx_rect_t`（16 B）与 `gfx_present_rects_req_t`（32 B，offset 钉死）。`completed_rects` IN/OUT：入 0，成功写回 count，失败写回失败点前完整写成的矩形数 k（best-effort 写回，fault 不改变返回值）。
+  - 内核（`kernel/arch/x86_64/driver/gfx.c`）：批量路径逐条镜像 `GFX_PRESENT_RECT` 阶段顺序——请求/矩形数组容错复制 → 短锁快照 → 无锁单遍校验（逐矩形减法式几何 + 溢出安全包络 range check；任一非法**整批拒绝、零 fb 写入**）→ 单租约 → 单 setjmp → 按序逐矩形逐行 bounce 宽写（整批共用 `max_w*4` bounce）。`gfx_present_stats` 追加 `batch=/batch_avg_ns=`；旧 full/rect 路径错误契约不变。
+  - libgfx：`gfx_present_rects(h, rects, count, completed_out)`——发 ioctl 前短路非法参数（count 0/>MAX、NULL、逐矩形几何），恰一次 ioctl；全 view 矩形不路由 `gfx_present`（与单矩形 dispatch 差异已注释）；errno 原样透传，写回未落地时 k 折算 0。
+  - terminal（`user/terminal/terminal_display.c`）：损伤列表提交从每矩形一次 `GFX_PRESENT_RECT`（≤64 次 ioctl）改为**一次批量 ioctl**；`completed_rects` 的 k 折算进 `failed_completed_rect_bytes`，失败整列表保留重试语义不变；NULL hook 保留旧逐矩形路径（注入测试兼容，生产恒接线）。`[term-present] version=1` 行格式不变，`rect_calls` 语义=每批量轮 1 次。
+  - LVGL 后端（`libgui`）：`flush_cb` 累积本次刷新 flush area（容量 64=`GFX_PRESENT_RECTS_MAX`，溢出置 overflow 并清列表），step present 点一次批量替代原整视图 present，溢出/空列表回退 `gfx_present` 整帧；成功清列表，失败保留（250 ms retry 提交并集），终态重置。一次逻辑刷新最多一次提交、静态界面零提交。
+  - 复制评估（只评估不实现，spec §8）：保留 user→bounce→fb 双拷贝——直写 fb 模糊 uaccess/fb 层边界、绕过 `fb_write_row_leased` 校验，收益上限 <5%（fb 宽写 ≈33 ns/pixel 主导）；批量路径已将 bounce 从每矩形一个降为整批一个。后续正确方向是 page flip/双缓冲。
+
+  **验收**
+  - hosttests：kernel gfx 48/48（新增批中 fault 前缀可见+`completed_rects`=k、整批拒绝零写入、MAX 边界、重叠、ENOMEM/EACCES 清理）；libgfx 31/31；terminal 598/598（一次批量 ioctl/failure k 折算/NULL hook 回退/anti-dilution）；gui 15/15（65-area 溢出整帧回退、空列表回退、失败保留并集重试、OFFSCREEN/终态重置）。全套 `make test-host` EXIT=0。
+  - QEMU/KVM 1440×900：`fb_pixel_test` 新增 FRAME_BATCH（两不相交矩形一次 ioctl），`fb_pixel_verify.py` 逐像素比对 full/rect/batch 三步全 0 mismatch；`SUITE=gfx`、`SUITE=gui` 全绿（含桌面 SMP 1/2 与 ownership 场景）。
+  - `SUITE=terminal-present` §8 门禁：`bytes_per_frame`=293,447 < 300,000、`ns_per_frame`≈1.9 ms < 10 ms、idle window ok、failed_attempts=0、`rect_calls==partial_frames`（每损伤帧恰一次 ioctl，QEMU 实证）；surface-pixel 行在本机 KVM 下对 master 同样失败（guest 提前跑完，dumper 采到退出后画面；CI/TCG 无此现象，属既有 timing family），非本变更回归。
+
+  **已知边界**
+  - 批内矩形允许重叠、按数组顺序覆盖；不承诺批内/批间画面原子性（与 full/rect 路径一致，无 vsync/flip）。
+  - `completed_rects` 写回为 best-effort：写回 fault 时 k 不可知（用户态折算 0，内核 `bytes` 统计含已写前缀）。
 
 ---
 

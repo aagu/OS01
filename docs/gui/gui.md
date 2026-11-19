@@ -46,8 +46,15 @@ gfx_info_t    gfx_get_info(const gfx_handle_t *h);    /* 快照；不会失败 *
 int           gfx_set_clip(gfx_handle_t *h, int32_t x, int32_t y,
                             uint32_t w, uint32_t h_);
 
-/* 呈现（每帧一次 ioctl） */
+/* 呈现（每逻辑帧一次 ioctl） */
 int gfx_present(gfx_handle_t *h);                       /* 0 成功；-1 + errno */
+/* 损伤区域批量 present（2026-11-19 spec）：一次 ioctl 提交 ≤64 个
+ * view-local 矩形；completed_out 失败时收内核报告的 k（已完成矩形数，
+ * 写回未落地折算 0），可传 NULL。rects 越界/计数 0 或 >64 →
+ * -1/EINVAL 不发 ioctl；批内任一矩形非法由内核整批拒绝（零 fb 写入）。
+ * 全 view 矩形不路由 gfx_present（与 gfx_present_rect 不同）。 */
+int gfx_present_rects(gfx_handle_t *h, const gfx_rect_t *rects,
+                      uint32_t count, uint32_t *completed_out);
 
 /* primitive（static inline 转发到 libgfx.a 内部函数；不暴露像素指针） */
 void gfx_pixel       (gfx_handle_t *h, int32_t x, int32_t y, uint32_t color);
@@ -87,17 +94,24 @@ void gfx_sprite_blit_mask(gfx_handle_t *h, int32_t dx, int32_t dy,
 #define GFX_CREATE_VIEW  0x4701
 #define GFX_GET_INFO     0x4702
 #define GFX_PRESENT      0x4703
+#define GFX_PRESENT_RECT 0x4709   /* 单矩形（terminal partial-present spec） */
+#define GFX_PRESENT_RECTS 0x470D  /* 批量矩形，≤64（2026-11-19 spec §4） */
 
 typedef struct { uint32_t x, y, w, h; } gfx_view_desc_t;     /* 16 B，全字段定宽 */
 typedef struct { uint32_t width, height, stride, format; } gfx_info_t;
 typedef struct { uint64_t pixels; uint32_t stride; uint32_t reserved; } gfx_present_req_t;
+typedef struct { uint32_t x, y, w, h; } gfx_rect_t;          /* 16 B */
+typedef struct {            /* 32 B；completed_rects 入 0 / 出 k */
+    uint64_t pixels; uint32_t stride; uint32_t reserved;
+    uint64_t rects; uint32_t count; uint32_t completed_rects;
+} gfx_present_rects_req_t;
 ```
 
 ### `/dev/gfx0` 实现（`kernel/driver/gfx.c`）
 
 - `gfx_init()`：`x86_64_boot_device_nodes()` 在 devfs_init 之后注册 `/dev/gfx0`（不早于 devfs）
 - `gfx_ops.open`：分配未配置视图（不占视图表），返回 `file_t` + `dev_private = gfx_view_t`
-- `gfx_ops.ioctl_file` 处理 3 个 ioctl，校验参数后：
+- `gfx_ops.ioctl_file` 处理视图与 present 族 ioctl，校验参数后：
   - `GFX_CREATE_VIEW`：在视图表分配一个槽，写入矩形；减法形式溢出检查 `x <= fb_w && w <= fb_w - x`
   - `GFX_GET_INFO`：返回视图的 `gfx_info_t`（width/height/stride/format）
   - `GFX_PRESENT`：快照视图矩形（持锁）→ 释放锁 → 逐行 `syscall_check_user_range` + `copy_from_user_ft` → `fb_write_row`；中途中断返回 `-EFAULT`，前面行可能已更新
@@ -110,8 +124,16 @@ typedef struct { uint64_t pixels; uint32_t stride; uint32_t reserved; } gfx_pres
 - **无 vsync / page-flip**：present 同步返回，QEMU stdvga 行为；真实硬件需自实现刷新策略
 - **无 alpha blend**：仅 RGB32 host-endian
 - **无多 fb 格式**：仅 `format=0` (32 bpp)；行跨度固定为 `width*4`
-- **无 dirty-rect present**：每次 present 拷贝整个视图矩形；后续可优化
 - **视图表大小固定 16**：超出需动态扩表（本阶段不做）
+
+### 损伤区域与批量 present（2026-11-19 闭环）
+
+roadmap P3「脏矩形与批量提交」交付（spec：`docs/superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md`）：
+
+- **`GFX_PRESENT_RECTS=0x470D`**：一次 ioctl 携带 ≤`GFX_PRESENT_RECTS_MAX`=64 个 view-local 矩形（`gfx_rect_t` 数组用户指针 + `count`），逐矩形减法式校验；任一矩形非法（或 `count==0`/`>MAX`/`reserved!=0`/`completed_rects!=0` 入向非零/rects 数组不可读）→ 整批拒绝、**零 framebuffer 写入**。批内矩形按数组顺序执行、允许重叠（后者覆盖）。单租约、单 setjmp、整批共用一个 `max_w*4` bounce。`completed_rects` IN/OUT：入 0，成功写回 `count`，失败写回失败点前完整写成的矩形数 k（best-effort，写回 fault 不改变返回值）。`gfx_present_stats` 追加 `batch=/batch_avg_ns=` 字段。
+- **一次逻辑刷新最多一次提交**：terminal `display_submit` 列表路径从「每矩形一次 `GFX_PRESENT_RECT`」（≤64 次 ioctl）改为一次批量 ioctl（NULL hook 保留旧逐矩形路径做注入测试兼容）；LVGL 后端（libgui）在 `flush_cb` 累积本次刷新的 flush area（容量 64，满则 overflow → 整帧回退），present 点一次批量替代原整视图 present。静态界面两侧均为零提交。
+- **复制评估（只评估不实现）**：present 路径每行两次拷贝（user→bounce memcpy + bounce→fb 宽写）。去掉 bounce、user 直写 fb 被否决：模糊 uaccess/fb 层边界、绕过 `fb_write_row_leased` 目的端校验，而收益上限小（bounce 源为 WB 内存，历史实测 fb 宽写 ≈33 ns/pixel 主导；`GFX_TEST_PRESENT_AB` 的 `copy_ns/fb_ns` 可实测占比）。批量路径已把 bounce 从每矩形一个降为整批一个。进一步降复制的正确方向是 page flip/双缓冲（另列 roadmap）。
+- **验收**：hosttests（kernel 48 例含批中 fault/整批拒绝零写入/`completed_rects` 协议；libgfx 31；terminal 598；gui 15）+ QEMU 像素级（`fb_pixel_test` FRAME_BATCH 两矩形一次 ioctl，`fb_pixel_verify.py` 逐像素比对 1440×900 三步全 0 mismatch）+ `SUITE=gfx`/`terminal-present` 门禁不回归。
 
 ### Tetris 迁移要点（plan §6 Task 6）
 
