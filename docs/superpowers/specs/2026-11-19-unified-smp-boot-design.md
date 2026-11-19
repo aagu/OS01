@@ -319,17 +319,24 @@ void smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu)
    - 正常 1/2/4 核路径断言保持不变（`[smp] requested=N online=N status=PASS`、`[spinlock] ... PASS`、`[tick]`）。
    - `aarch64_uefi_smp.py` 的 `no_ack_cpu=1` 故障用例从验证 `DEGRADED + [boot-1] a64-no-ack` 更新为验证 **Fail-Closed**：必须出现 `[boot-1] FATAL cpu=1 stage=online` 与 `[boot-3] FATAL stage=smp component=online ...`，且绝不出现 `[spinlock]`、`SHOOTDOWN-PROBE` 或 `[tick]`，观察窗口内保持静默停机。
    - `test_aarch64_harness.py`（L366–434）的 6 个 `test_no_ack_*` 单元测试同步迁移为验证 Fail-Closed 证据契约。
-3. **`hosttests/cases/test_double_state_publish.c`**（源码顺序审计）：
-   - `suite_aarch64_boot_order()` 改为校验 `kernel/core/smp.c::arch_boot_aps()` 调用 `arch_smp_boot_aps()` 且早于 `subsys_prepare_cpus()`；
+3. **`hosttests/cases/test_double_state_publish.c`**（源码顺序审计，及 `hosttests/mk/sched.mk` 依赖列表追加 `kernel/core/smp.c`）：
+   - `suite_aarch64_boot_order()` 拆分为两处校验：在 `kernel/core/smp.c::arch_boot_aps()` 校验 `arch_smp_boot_aps()` 早于 `subsys_prepare_cpus()`；在 `kernel/arch/aarch64/boot/main.c::arch_boot_runtime()` 保留对 `arch_local_irq_enable()` → `ipi_ready_publish_and_count(0)` → `aarch64_shootdown_probe()` 顺序的校验；
    - `suite_ap_tail_order()` 改为校验 `kernel/core/smp.c::smp_ap_common_entry()` 中 `online=1`（RELEASE）→ `arch_smp_ap_post_online` → `arch_local_irq_enable()` → `arch_smp_ap_publish_ipi_ready` 顺序，以及 `kernel/arch/aarch64/smp/smp.c` 对应钩子顺序；
    - `suite_x86_smp_order()` 改为校验 `arch_smp_boot_aps()` 与 `arch_smp_ap_cpu_init` / `arch_smp_ap_enter_idle` 及 `kernel/core/smp.c` 的 `[boot-1] complete` 顺序。
-4. **`qemutests/test_x86_intr_fault.py`**（`ApNmiOrderingTests`）：
+4. **`hosttests/cases/test_boot_contract_softirq.c`**（L80–116，`test_softirq_aarch64_source_contract()`）：
+   - 在 `kernel/arch/aarch64/boot/main.c` 中改以 `arch_boot_runtime` 作为 `softirq_init` 的后置锚点，并同时校验 `kernel/core/smp.c::arch_boot_aps()` 不调用 `softirq_init`。
+5. **`hosttests/cases/test_x86_ipi_ready_publish.c`**（L99–122，`test_smp_call_sites()`，及 `hosttests/mk/intr.mk` 依赖列表追加 `kernel/core/smp.c`）：
+   - 在 `kernel/core/smp.c::smp_ap_common_entry()` 中校验 `arch_local_irq_enable()` 早于 `arch_smp_ap_publish_ipi_ready()`；
+   - 在 `kernel/arch/x86_64/smp/smp.c` 中校验 `arch_smp_ap_publish_ipi_ready()` 调用 `ipi_ready_publish_ap(...)` 以及 `ipi_init()` 早于 `ipi_ready_publish_bsp()`。
+6. **`hosttests/cases/test_boot_contract_cpu_prepare.c`**（L414–422，`test_cpu_prepare_source_contract()`）：
+   - 保留对 `kernel/arch/x86_64/smp/boot.c` 不含旧接口的负向断言，将 `subsys_prepare_cpus` 的正向存在性检查迁移至 `kernel/core/smp.c`。
+7. **`qemutests/test_x86_intr_fault.py`**（`ApNmiOrderingTests`）：
    - `test_ap_unmasks_nmi_only_after_descriptor_and_ist_setup`（L461–479）改为在 `arch_smp_ap_cpu_init()` 中校验 `lgdt`/`lidt`/`set_tss64`/`load_TR` 早于 `lapic_configure_nmi()`，并结合 `kernel/core/smp.c::smp_ap_common_entry()` 校验 `arch_smp_ap_cpu_init` 早于 `online=1` 与 `arch_smp_ap_publish_ipi_ready`。
-5. **`qemutests/test_aarch64_ap_boot_contract.py`**：
+8. **`qemutests/test_aarch64_ap_boot_contract.py`**：
    - `test_secondary_idle_polls_the_release_gate` 改为扫描 `arch_smp_ap_enter_idle()`；
    - `test_ap_publishes_runtime_online_before_boot_ack` 改为校验 `smp_ap_common_entry()` 中 `online=1`（RELEASE）早于 `arch_smp_ap_post_online()` 且 `arch_smp_ap_post_online()` 内调用 `boot_online_set()`；
    - 移除已废弃的 `test_no_ack_observation_after_probe_with_compile_guard`（`boot1_no_ack_observation` 已随 DEGRADED 路径移除），替换为检查 `NO_ACK` 在 Fail-Closed 下触发 `SMP_STAGE_ONLINE` 停机的契约测试。
-6. **头文件边界与静态审计**：
+9. **头文件边界与静态审计**：
    - 在 `qemutests/test_boot_facade_headers.py` 中新增 `<arch/smp.h>` 跨架构（`x86_64` 与 `aarch64`）独立 freestanding 编译测试；验证 `make test-static` / `test-aarch64-audit` 全绿。
 
 ### 5.3 验收命令清单
