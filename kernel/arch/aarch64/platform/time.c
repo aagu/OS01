@@ -8,8 +8,12 @@
  * aarch64.  Phase 2 P2 unifies the tick semantic with x86_64 by
  * delegating to tick_handler() (kernel/time/tick.c:17) and KEEPING the
  * per-second "[tick] N" print required by the harness evidence gate
- * (R3.1 fix for R1 CRITICAL-1: qemutests/aarch64_uefi_smp.py:545/574
- * asserts >=3 [tick] N lines per case).
+ * (R3.1 fix for R1 CRITICAL-1: qemutests/aarch64_uefi_smp.py asserts
+ * >=3 [tick] N lines per case) — SELFTEST BUILDS ONLY since the
+ * 2026-11-19 product userspace: the evidence lines were flooding the
+ * interactive serial shell (one line per second under the running
+ * product), and every tick-asserting runner boots a
+ * KERNEL_SELFTEST=1 image, so the gate stays satisfied.
  *
  * Order contract (phase1 spec §2.3 + phase2 unification + the per-CPU
  * tick accounting):
@@ -46,11 +50,13 @@
  *     half-armed timer can never deliver an interrupt.
  *
  * Output policy: printing on every 100 Hz tick would flood the
- * polled PL011 (~100 characters/second), so we print one line per
- * second (every 100th tick).  The "[cntp]" and "[tick]" lines are
- * part of the QEMU harness evidence protocol and are emitted through
- * log_info() — the aarch64 log backend adds no prefix, so the bytes
- * on the wire are unchanged. */
+ * polled PL011 (~100 characters/second), so the evidence build prints
+ * one line per second (every 100th tick).  The "[cntp]" line and the
+ * SELFTEST-ONLY "[tick]" evidence lines are part of the QEMU harness
+ * protocol and are emitted through log_info() — the aarch64 log
+ * backend adds no prefix, so the bytes on the wire are unchanged.
+ * The product kernel prints neither the [tick] lines (they would
+ * interleave with the serial shell) nor anything else per tick. */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -132,13 +138,19 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
          * completed global tick. */
         aarch64_sched_tick_observe(0, true);
 #endif
-        /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py:545/574
-         * requires >=3 [tick] N lines per case. */
+#ifdef OS01_SELFTEST
+        /* GIC Phase 1 evidence gate: qemutests/aarch64_uefi_smp.py
+         * requires >=3 [tick] N lines per case.  SELFTEST builds only:
+         * the product kernel must not push a line per second through
+         * the interactive serial shell (2026-11-19).  Every
+         * tick-asserting runner boots a KERNEL_SELFTEST=1 image, so
+         * the gate stays satisfied. */
         uint64_t t = g_ticks + 1;
         g_ticks = t;
         if ((t % TICKS_PER_SECOND) == 0) {
             log_info("[tick] %lu\n", (unsigned long)(t / TICKS_PER_SECOND));
         }
+#endif
     }
     /* Local scheduler tick — every admitted CPU. */
     aarch64_sched_tick();
