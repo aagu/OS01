@@ -1133,6 +1133,30 @@ test_boot_contract_checks: $(TEST_BLD)/test_boot_contract_checks.elf $(TEST_BLD)
 	$(TEST_BLD)/test_boot_contract_checks.elf
 	$(TEST_BLD)/test_boot_contract_checks_a64.elf
 
+# ── Unified SMP boot orchestrator (kernel/core/smp.c) ────────────
+# Compiles the REAL public orchestrator + AP state machine against the
+# preinclude mock smp_boot_unified_runtime.h; the machine boundary
+# (arch hooks, arch_local_irq_enable, arch_mb, boot_failure_stop, the
+# log sinks) is replaced by the test TU, the Fail-Closed policy and the
+# 5-step AP lifecycle order are the production code.
+
+$(TEST_BLD)/smp_boot_unified_production.o: $(TESTS_DIR)/kernel/core/smp.c \
+		$(TEST_MOCK)/smp_boot_unified_runtime.h \
+		$(TESTS_DIR)/kernel/include/arch/smp.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT4_HOST_CFLAGS) -include $(TEST_MOCK)/smp_boot_unified_runtime.h -c $< -o $@
+
+# The test TU links the REAL percpu.h/spinlock.h layouts, so the
+# force-included test_platform.h stubs are skipped via the same guard
+# mechanism their comments document.
+LINK_CFLAGS_smp-boot-unified = $(BOOT4_HOST_CFLAGS) \
+	-DOS01_HOST_PERCPU_T_PROVIDED -DOS01_HOST_SPINLOCK_T_PROVIDED
+LINK_GROUP_smp-boot-unified := $(TEST_BLD)/smp_boot_unified_production.o
+
+.PHONY: test_smp_boot_unified
+test_smp_boot_unified: $(TEST_BLD)/test_smp_boot_unified.elf
+	$<
+
 # ── Shared waitpid + sys_native_waitpid (AArch64 M4.12) ────────────
 
 

@@ -48,6 +48,12 @@ $(TEST_BLD)/test_gpt_bootdev.o: $(TEST_CASES)/test_gpt_bootdev.c
 $(TEST_BLD)/test_gpt_bootdev.elf: $(TEST_BLD)/test_gpt_bootdev.o $(LINK_GROUP_gpt-bootdev)
 	$(HOST_CC) $(LINK_LDFLAGS_gpt-bootdev) -o $@ $^
 
+$(TEST_BLD)/test_smp_boot_unified.o: $(TEST_CASES)/test_smp_boot_unified.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_smp-boot-unified)),$(LINK_CFLAGS_smp-boot-unified),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_smp_boot_unified.elf: $(TEST_BLD)/test_smp_boot_unified.o $(LINK_GROUP_smp-boot-unified)
+	$(HOST_CC) $(LINK_LDFLAGS_smp-boot-unified) -o $@ $^
+
 $(TEST_BLD)/test_usb_hid_report.o: $(TEST_CASES)/test_usb_hid_report.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_usb-hid-report)),$(LINK_CFLAGS_usb-hid-report),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

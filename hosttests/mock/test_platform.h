@@ -64,7 +64,13 @@ extern char *strstr(const char *haystack, const char *needle);
  * pinned by PERCPU_DATA_SIZE + _Static_assert there and at runtime by
  * hosttests/cases/test_percpu_layout.c).  The legacy tlb_wanted/tlb_ack
  * pair was removed in M3 Task 12 and must not reappear here.  Only
- * tsc_offset is actually read through this stub. */
+ * tsc_offset is actually read through this stub.
+ *
+ * Guarded the same way as the spinlock stub below: a test that needs
+ * the REAL production layout (e.g. test_smp_boot_unified, which links
+ * kernel/core/smp.c) predefines OS01_HOST_PERCPU_T_PROVIDED and
+ * includes <percpu/percpu.h> itself. */
+#ifndef OS01_HOST_PERCPU_T_PROVIDED
 typedef struct {
     uint64_t self, need_resched;
     uint32_t cpu_id, arch_processor_id, online, scheduler_ok;
@@ -76,6 +82,7 @@ typedef struct {
 static inline percpu_t *this_cpu(void) { return NULL; }
 static inline uint32_t cpu_id(void) { return 0; }
 extern uint32_t num_cpus;
+#endif /* OS01_HOST_PERCPU_T_PROVIDED */
 
 /* Spinlock stub.  Guarded so other test shims (e.g.
  * hosttests/mock/page_table_aarch64_include/arch/spinlock.h, which provides the

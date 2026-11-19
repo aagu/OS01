@@ -169,8 +169,12 @@ else
 # so the common source links into the x86 product build with no
 # exclusion.  The legacy per-vector handler table lives in
 # intr/vector_dispatch.c and is collected here with the rest of intr/.
+# TEMPORARY (unified SMP boot, Task 2): core/smp.c is held out of the
+# x86_64 kernel link while the legacy x86_64 arch_boot_aps() still
+# exists (duplicate symbol); the x86_64 SMP backend adaptation removes
+# the legacy definition together with this filter-out.
 KERNEL_C_SOURCES := \
-    $(wildcard core/*.c) \
+    $(filter-out core/smp.c,$(wildcard core/*.c)) \
     $(wildcard syscall/*.c) \
     $(wildcard syscall/compat/*.c) \
     $(wildcard random/*.c) \

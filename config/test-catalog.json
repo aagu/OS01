@@ -4513,6 +4513,17 @@
       }
     },
     {
+      "id": "test_smp_boot_unified",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "link": "smp-boot-unified",
+      "source": "hosttests/cases/test_smp_boot_unified.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_smp_starting_gate",
       "layer": "host",
