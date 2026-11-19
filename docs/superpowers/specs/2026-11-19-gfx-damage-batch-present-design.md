@@ -66,16 +66,19 @@ typedef struct {
 ABI 固定宽度类型 + sizeof/offsetof 静态断言：pixels=0、stride=8、reserved=12、rects=16、count=24、completed_rects=28、sizeof==32（`gfx_rect_t` sizeof==16）。
 
 ```c
+/* completed_out（可 NULL）：成功写 count；失败写内核报告的已完成矩形数
+ * k；k 不可知（写回未落地）时显式写 0。本签名与 k 交付约定为设计裁定。 */
 int gfx_present_rects(gfx_handle_t *handle,
-                      const gfx_rect_t *rects, uint32_t count);
+                      const gfx_rect_t *rects, uint32_t count,
+                      uint32_t *completed_out);
 ```
 
 - 语义逐条沿用 `GFX_PRESENT_RECT`：坐标 view-local；目的地址 = view origin + (x,y)；stride 严格 `view_w*4`；不隐式裁剪；绘制 clip 不影响 present 请求。
 - 每矩形校验 `w>0 && h>0 && x<=view_w && w<=view_w-x`（y/h 同理）；**任何**矩形非法 → EINVAL，整批拒绝、零 fb 写入。
-- count==0 → EINVAL（调用层 bug；libgfx 在发 ioctl 前以 0 成功短路，内核不可见）。count>GFX_PRESENT_RECTS_MAX → EINVAL。rects 为 NULL/不可读/复制 fault → EFAULT（零 fb 写入）。
+- count==0 → EINVAL（调用层 bug，全栈一致：内核 EINVAL；libgfx 发 ioctl 前返回 -1/EINVAL）。count>GFX_PRESENT_RECTS_MAX → EINVAL。rects 为 NULL/不可读/复制 fault → EFAULT（零 fb 写入）。
 - 矩形间允许重叠，按数组顺序处理，后写覆盖先写；不承诺批内或批间画面原子性。
-- `completed_rects`：入口必须传 0（否则 EINVAL）。成功时写回 `count`；失败时写回失败点之前**完整**写成的矩形数 k（第 k+1 个矩形的已写行前缀不计入、保持 unknown）。写回是尽力而为（best-effort `copy_to_user_ft`）：写回 fault 不改变本次 ioctl 的返回值与 errno。
-- libgfx：NULL handle、NULL rects（count>0）、count==0、count>MAX、任一矩形几何非法 → 发 ioctl 前返回 -1/EINVAL；合法请求恰发一次新 ioctl；每次重建请求，不缓存用户指针；成功不改 errno，失败透传 ioctl errno；不自动探测旧 kernel，不在 ENOTTY 静默 fallback（仓库内 kernel 与 libgfx 同步发布）。批内矩形即使覆盖全 view 也不路由到 `gfx_present`（直通，与单矩形「full-view 路由」不同，行为差异写入 gfx.h 注释）。
+- `completed_rects`：入口必须传 0（否则 EINVAL）。成功时写回 `count`；失败时写回失败点之前**完整**写成的矩形数 k（第 k+1 个矩形的已写行前缀不计入、保持 unknown）。写回是尽力而为（best-effort `copy_to_user_ft`）：写回 fault 不改变本次 ioctl 的返回值与 errno；此时用户态拿到的 k 视为 0（unknown 由 `failed_prefix=unknown` 字面量与内核侧 bytes 统计补足——设计裁定）。
+- libgfx：NULL handle、NULL rects（count>0）、count==0、count>MAX、任一矩形几何非法 → 发 ioctl 前返回 -1/EINVAL；`completed_out` 非 NULL 时在上述发 ioctl 前的失败路径写 0。合法请求恰发一次新 ioctl；每次重建请求，不缓存用户指针；成功不改 errno，失败透传 ioctl errno；不自动探测旧 kernel，不在 ENOTTY 静默 fallback（仓库内 kernel 与 libgfx 同步发布）。批内矩形即使覆盖全 view 也不路由到 `gfx_present`（直通，与单矩形「full-view 路由」不同，行为差异写入 gfx.h 注释）。
 
 ## 5. Kernel 执行与安全边界
 
@@ -96,9 +99,9 @@ int gfx_present_rects(gfx_handle_t *handle,
 
 ## 6. terminal 迁移（N 次 ioctl → 1 次）
 
-`terminal_display_ops_t` 新增 `gfx_present_rects` hook（真实实现调 libgfx；测试 fake 明确提供）。`display_submit` 列表路径改为：
+`terminal_display_ops_t` 新增 `gfx_present_rects` hook，签名镜像 libgfx（含 `completed_out` 出参，fake 借此表达 k）。`display_submit` 列表路径改为：
 
-- hook 存在且 `damage.count<=GFX_PRESENT_RECTS_MAX`：构造栈上 `gfx_rect_t[TERM_DAMAGE_MAX_RECTS]`，一次 `gfx_present_rects(gfx, rects, count)`。成功 → `partial_frames++`、`success_bytes += Σ w*h*4`、ack、清 retry；失败 → `failed_attempts++`、`failed_completed_rect_bytes += Σ_{i<k} w*h*4`（k 来自写回的 `completed_rects`；hook 返回后 fake 必须能表达 k）、整个损伤列表保留（重试覆盖此前已成功区域，与现行为等价）。
+- hook 存在且 `damage.count<=GFX_PRESENT_RECTS_MAX`：构造栈上 `gfx_rect_t[TERM_DAMAGE_MAX_RECTS]`，一次 `gfx_present_rects(gfx, rects, count, &k)`。成功 → `partial_frames++`、`success_bytes += Σ w*h*4`、ack、清 retry；失败 → `failed_attempts++`、`failed_completed_rect_bytes += Σ_{i<k} w*h*4`（k 来自出参；写回未落地时 libgfx 已折算为 0）、整个损伤列表保留（重试覆盖此前已成功区域，与现行为等价）。
 - hook 为 NULL：**保留现逐矩形循环**（注入测试兼容路径，不用于掩盖生产 ENOTTY——真实 terminal 必须接线新 hook）。
 - `damage.count>GFX_PRESENT_RECTS_MAX`：现 renderer 容量即 64，实际不可达；仍按 `want_full=true` 保守处理并注释说明。
 - `[term-present] version=1` 行格式不变；`rect_calls` 语义改为「present 族 ioctl 次数」（full 一次、批量一次各计 1，与现状 full 路径计 1 一致）；`failed_prefix=unknown` 字面量保留。
@@ -129,7 +132,7 @@ int gfx_present_rects(gfx_handle_t *handle,
 
 | 层 | 必须覆盖 |
 |---|---|
-| UAPI/libgfx host | 新结构布局/命令号/`completed_rects` 入 0 校验；count 0/1/MAX/MAX+1；NULL rects；逐矩形越界（每个字段）；批内重叠按序覆盖；成功不碰 errno、失败透传；count==0 短路不发 ioctl；全 view 矩形不路由 full |
+| UAPI/libgfx host | 新结构布局/命令号/`completed_rects` 入 0 校验；count 0/-1 EINVAL（不发 ioctl）/1/MAX/MAX+1；NULL rects；`completed_out` NULL 与非 NULL 两条路径；逐矩形越界（每个字段）；批内重叠按序覆盖；成功不碰 errno、失败透传；全 view 矩形不路由 full |
 | kernel gfx host | 多矩形各写各的区域、rect 外 sentinel 不动、行 padding 不写；非零 view origin；单像素/最右下角矩形；任一矩形非法 → 零 fb 写入；rects 数组 copy fault → EFAULT 零写入；批中间行 fault → 前缀可见、后续矩形未写、`completed_rects`==k；EACCES 零写入；ENOMEM/EFAULT/lease 失败清理；非 owner/ESTALE/EAGAIN/EIO |
 | terminal display host | 一次批量 ioctl（fake hook 计数==1）；失败整列表保留、`failed_completed_rect_bytes` 用 k 折算；hook NULL 走旧逐矩形路径；count 超 MAX → full；metrics 字段/anti-dilution 不回归 |
 | LVGL host/审计 | `gui_build_audit`/`gui_test`/`gui_desktop_test` 全绿；OFFSCREEN 不受影响 |
