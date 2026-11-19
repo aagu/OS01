@@ -189,6 +189,12 @@ void aarch64_ap_idle_handoff(uint32_t cpu)
     if (!aarch64_sched_tick_start())
         ap_sched_fatal("handoff: local tick start failed", cpu);
 
+    /* Enable FP/SIMD for EL0 and EL1 on this AP (CPACR_EL1.FPEN = 0b11). */
+    uint64_t cpacr;
+    __asm__ __volatile__("mrs %0, cpacr_el1" : "=r"(cpacr));
+    cpacr |= (UINT64_C(3) << 20);
+    __asm__ __volatile__("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
+
     /* IRQs on (with the ordering barrier) BEFORE the readiness
      * publication: a pending SGI must be takeable the instant another
      * CPU may consider this AP schedulable. */

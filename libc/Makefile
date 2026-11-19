@@ -29,7 +29,7 @@ include $(ARCHDIR)/make.config
 
 # ── Compile flags ──────────────────────────────────────────
 CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fstack-protector-strong -fomit-frame-pointer $(ARCH_CFLAGS)
-LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector
+LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector $(KERNEL_ARCH_CFLAGS)
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
 # x86_64 builds the full userland libc (libc.a + libk.a are both installed
@@ -84,14 +84,10 @@ LIBC_C_SOURCES := \
     $(wildcard random/*.c) \
     $(wildcard ssp/*.c)
 # The float-parse core (floatscan.c) and its consumers (strtod.c,
-# vsscanf.c, floatconv.c) are out for aarch64: floatscan/strtod/vsscanf
-# are vendored for the x87 80-bit long double ABI and #error on the quad
-# ABI, and floatconv.c needs `double` type support while the aarch64
-# userland compiles with -mgeneral-regs-only (the kernel traps FPEN for
-# EL0).  vsprintf.c emits literal text for %f/%e/%g on this arch, so
-# nothing references floatconv_render.  Excluded until FP is enabled for
-# EL0 or the libc-completion float tasks port these paths.
-LIBC_C_SOURCES := $(filter-out stdlib/floatscan.c stdlib/strtod.c stdio/vsscanf.c stdio/floatconv.c,$(LIBC_C_SOURCES))
+# vsscanf.c) are out for aarch64: floatscan/strtod/vsscanf are vendored
+# for the x87 80-bit long double ABI and #error on the quad ABI.
+# floatconv.c uses binary64 `double` and is enabled for aarch64 userland.
+LIBC_C_SOURCES := $(filter-out stdlib/floatscan.c stdlib/strtod.c stdio/vsscanf.c,$(LIBC_C_SOURCES))
 # x86 inline-asm holdouts: setjmp (jmp_buf layout) and pthread/mutex
 # (xchg/cmpxchg) need an aarch64 port; nothing in the aarch64 userland
 # (init/sh) references them yet.
@@ -193,14 +189,6 @@ $(LIBK_COMPILE_KEY): LIBK_KEY_FORCE
 $(BUILD_DIR)/%.o: %.c $(LIBC_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
-
-# aarch64: difftime(time.c) is the one legitimate FP user in the userland
-# libc — compile just this TU with FP enabled (default AAPCS), keeping the
-# FP instructions confined to a function nothing on this arch calls.  The
-# rest of the libc stays -mgeneral-regs-only.
-ifeq ($(HOSTARCH),aarch64)
-$(BUILD_DIR)/time/time.o: override CFLAGS := $(filter-out -mgeneral-regs-only,$(CFLAGS))
-endif
 
 $(BUILD_DIR)/%.libk.o: %.c $(LIBK_COMPILE_KEY)
 	@mkdir -p $(dir $@)

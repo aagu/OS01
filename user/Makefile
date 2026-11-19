@@ -76,7 +76,6 @@ ifeq ($(USER_ARCH),aarch64)
 CRT0_SOURCE          := crt0_aarch64.S
 SIGRETURN_SOURCE     := sigreturn_trampoline_aarch64.S
 LINKER_SCRIPT        := linker_aarch64.ld
-override CFLAGS += -mgeneral-regs-only
 USER_RAW_LDFLAGS := -static -T linker_aarch64.ld -L$(TARGET_LIBDIR_LOCAL)
 else
 CRT0_SOURCE          := crt0.S

@@ -3,7 +3,9 @@
 #include <sched/internal.h>
 #include <sched/boot.h>
 #include <arch/aarch64/task_arch.h>
+#include <arch/aarch64/fp.h>
 #include <arch/aarch64/ap_sched.h>
+#include <memory/slab.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/ap_work.h>
 #include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_init/start */
@@ -379,7 +381,21 @@ void arch_task_switch(task_t *prev, task_t *next)
                                             root, to_user);
     }
 #endif
+    if (prev->fpu_save)
+        aarch64_fp_save(prev->fpu_save);
+    if (next->fpu_save)
+        aarch64_fp_restore(next->fpu_save);
     aarch64_switch_context(prev, prev->thread, next->thread);
+}
+
+void *fpu_area_alloc(void)
+{
+    char *raw = (char *)kmalloc(AARCH64_FP_STATE_SIZE + 16);
+    if (!raw)
+        return NULL;
+    char *aligned = (char *)(((uintptr_t)raw + 15) & ~(uintptr_t)15);
+    memset(aligned, 0, AARCH64_FP_STATE_SIZE);
+    return raw;
 }
 
 void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void))

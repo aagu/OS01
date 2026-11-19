@@ -188,10 +188,7 @@ static __attribute__((noinline)) void vf_int(vf_state_t *st, VF_INT_DECL ap, int
 	}
 }
 
-#if !defined(__is_libk) && !defined(__aarch64__)
-/* AArch64 userland compiles with -mgeneral-regs-only (the kernel traps
- * FPEN for EL0), so the double-based float renderer is out: %f/%e/%g
- * fall through to the literal-text emission below, same as libk. */
+#if !defined(__is_libk)
 static __attribute__((noinline)) void vf_float(vf_state_t *st, double d, int field_width, int precision,
                                                 int flags, char conv)
 {
@@ -367,16 +364,14 @@ size_t vformatter(char *dst, size_t cap, const char *fmt, va_list ap, int perfor
 			case 'f': case 'F':
 			case 'e': case 'E':
 			case 'g': case 'G': {
-#if !defined(__is_libk) && !defined(__aarch64__)
+#if !defined(__is_libk)
 				/* Float rendering (binary64, double-only). %L* (long double)
 				 * is not supported: emit the literal text and do NOT consume.
 				 *
 				 * libk does not link floatconv_render (it would require `double`
-				 * type support in an aarch64 build with -mgeneral-regs-only,
+				 * type support in a build with -mgeneral-regs-only,
 				 * which clang rejects). Kernel console output doesn't need %f /
-				 * %e / %g.  The aarch64 USERLAND is in the same boat: it compiles
-				 * with -mgeneral-regs-only because the kernel traps FPEN for
-				 * EL0, so %f/%e/%g emit the literal text there too. */
+				 * %e / %g. */
 				char conv = *fmt;
 				if (qualifier == 'L') {
 					vf_out(&st, '%');

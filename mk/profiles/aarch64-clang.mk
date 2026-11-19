@@ -338,11 +338,10 @@ CLANG_RESOURCE_DIR := $(shell $(CLANG) -print-resource-dir 2>/dev/null)
 LLVM_NM          ?= llvm-nm
 RUNTIME_TARGET_user := $(TARGET_TRIPLE)
 # Freestanding non-PIE static ring-3 ELFs: the user code model and flags —
-# -mgeneral-regs-only keeps FP/SIMD out of user objects (the kernel traps
-# FPEN for EL0, and libc's soft-float paths are what user code links).
+# FP/SIMD is enabled for EL0 (CPACR_EL1.FPEN = 0b11, saved/restored per
+# user task in arch_task_switch).
 RUNTIME_CFLAGS_user := -ffreestanding -fno-builtin -fno-stack-protector \
-                       -fno-asynchronous-unwind-tables -fno-pic -fno-pie \
-                       -mgeneral-regs-only
+                       -fno-asynchronous-unwind-tables -fno-pic -fno-pie
 RUNTIME_OBJECT_FORMAT_user := ELF64
 RUNTIME_MACHINE_user := EM_AARCH64
 RUNTIME_ABI_user := aarch64-aapcs

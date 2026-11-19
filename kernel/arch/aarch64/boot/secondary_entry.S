@@ -22,6 +22,8 @@ secondary_start:
 .Lap_from_el2:
     mov     x0, #(1 << 31)                  /* HCR_EL2.RW */
     msr     hcr_el2, x0
+    mov     x0, #0x33ff                     /* CPTR_EL2: TFP=0 (allow FP/SIMD at EL1/EL0) */
+    msr     cptr_el2, x0
     mov     x0, #3                         /* EL1 physical timer/counter */
     msr     cnthctl_el2, x0
     msr     cntvoff_el2, xzr

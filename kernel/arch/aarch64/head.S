@@ -87,6 +87,8 @@ _start:
     mov     x0, #1
     lsl     x0, x0, #31                        /* HCR_EL2.RW = 1 */
     msr     hcr_el2, x0
+    mov     x0, #0x33ff                        /* CPTR_EL2: TFP=0 (allow FP/SIMD at EL1/EL0) */
+    msr     cptr_el2, x0
     mov     x0, #0x3c5                         /* SPSR_EL2 = EL1h + DAIF */
     msr     spsr_el2, x0
     mov     x0, #3                             /* CNTHCTL_EL2 */

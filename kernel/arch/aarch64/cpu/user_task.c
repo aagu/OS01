@@ -27,6 +27,7 @@
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/syscall.h>
 #include <arch/aarch64/task_arch.h>
+#include <arch/aarch64/fp.h>
 #include <arch/aarch64/user_image.h>
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/exec.h>
@@ -226,12 +227,13 @@ void aarch64_user_runtime_init(void)
     g_live_root_pa = g_kernel_root_pa;
     g_live_root_is_user = false;
 
-    /* FP/SIMD is not available to user code in this increment: clear
-     * CPACR_EL1.FPEN so a user FP instruction traps to EL1 instead of
-     * silently touching a kernel-owned FP context. */
+    /* Enable FP/SIMD for EL0 and EL1 (CPACR_EL1.FPEN = 0b11).  The
+     * kernel is compiled with -mgeneral-regs-only so it never touches
+     * FP/SIMD registers; user task context switches save/restore them
+     * explicitly via task->fpu_save. */
     uint64_t cpacr;
     __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
-    cpacr &= ~(UINT64_C(3) << 20);
+    cpacr |= (UINT64_C(3) << 20);
     __asm__ volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
 }
 
@@ -547,6 +549,11 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
      * register file. */
     aarch64_user_image_init_regs(image, regs);
     aarch64_user_clear_tls();
+    if (t->fpu_save) {
+        uintptr_t aligned = ((uintptr_t)t->fpu_save + 15) & ~(uintptr_t)15;
+        memset((void *)aligned, 0, AARCH64_FP_STATE_SIZE);
+    }
+    aarch64_fp_zero();
 
 #if AARCH64_EL0_TEST
     g_stats.execs++;
@@ -676,6 +683,11 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     task_comm_apply_exec(t, path);
     aarch64_user_image_init_regs(image, regs);
     aarch64_user_clear_tls();
+    if (t->fpu_save) {
+        uintptr_t aligned = ((uintptr_t)t->fpu_save + 15) & ~(uintptr_t)15;
+        memset((void *)aligned, 0, AARCH64_FP_STATE_SIZE);
+    }
+    aarch64_fp_zero();
 
 #if AARCH64_EL0_TEST
     g_stats.execs++;
@@ -912,6 +924,12 @@ int user_task_prepare(task_t *tsk, void *arg)
     struct user_task_prepare_ctx *ctx = arg;
     struct aarch64_user_task *owner = ctx->owner;
 
+    void *fpu = fpu_area_alloc();
+    if (!fpu)
+        return -ENOMEM;
+    if (ctx->frame)
+        aarch64_fp_save(fpu);
+
     /* The task owns a private mm: the image's user root.  The kernel
      * half of the address space stays in TTBR1. */
     tsk->mm = aarch64_user_image_mm(owner->image);
@@ -919,7 +937,7 @@ int user_task_prepare(task_t *tsk, void *arg)
     tsk->files = ctx->files;
     if (ctx->files && ctx->files_state)
         *ctx->files_state = 1;
-    tsk->fpu_save = NULL;
+    tsk->fpu_save = fpu;
 
     /* Spawn is parented to the resident BSP idle task (the creator may
      * exit on its own); fork is parented to the real parent so
@@ -979,6 +997,10 @@ void user_task_discard(task_t *tsk, void *arg)
             if (ctx->files_state)
                 *ctx->files_state = 2;
         }
+    }
+    if (tsk->fpu_save) {
+        kfree(tsk->fpu_save);
+        tsk->fpu_save = NULL;
     }
     tsk->mm = NULL;
     if (tsk->thread)
