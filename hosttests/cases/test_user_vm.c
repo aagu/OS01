@@ -2059,6 +2059,102 @@ TEST_FUNC(test_mmap_device_rejects_out_of_window_and_rolls_back)
     user_vm_test_set_files(NULL);
 }
 
+
+/* ── Review-fix tests (final review 2026-11-19) ──────────────── */
+
+TEST_FUNC(test_mmap_device_occupied_range_rejected)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    static struct vfs_node mem_node;
+    static char mem_name[] = "mem";
+    mem_node.name = mem_name;
+    file_t f = { .type = FD_DEV, .node = &mem_node };
+    user_vm_test_set_files(&f);
+
+    /* An anon mapping occupies [BASE, BASE+0x1000).  A device mapping
+     * over the same range must be refused whole — not silently
+     * inserted as an overlapping VMA node. */
+    assert_eq((int64_t)BASE,
+              test_mmap_call(mm, 0, 0x1000, PROT_RW, MAP_ANON_PRIVATE));
+    uint64_t args[6] = { BASE, 0x2000, PROT_RW, MAP_SHARED,
+                         0, 0x08000000 };
+    assert_eq(-EINVAL, user_vm_mmap(mm, args));
+    assert_eq(2, vma_count(mm));            /* heap + anon, unchanged */
+    assert_eq(0, user_vm_test_leaf_count());
+
+    /* A free range still maps. */
+    uint64_t args2[6] = { BASE + 0x4000, 0x1000, PROT_RW, MAP_SHARED,
+                          0, 0x08000000 };
+    assert_eq((int64_t)(BASE + 0x4000), user_vm_mmap(mm, args2));
+    assert_eq(3, vma_count(mm));
+    assert_eq(0x08000000, user_vm_test_leaf_pa(BASE + 0x4000));
+
+    destroy_mm(mm);
+    user_vm_test_set_files(NULL);
+}
+
+TEST_FUNC(test_mmap_fixed_guard_across_hole_rejects_device_overlap)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    static struct vfs_node mem_node;
+    static char mem_name[] = "mem";
+    mem_node.name = mem_name;
+    file_t f = { .type = FD_DEV, .node = &mem_node };
+    user_vm_test_set_files(&f);
+
+    /* anon at [BASE, +0x1000), hole at +0x1000, device at [+0x2000,
+     * +0x3000).  A fixed anon replace spanning all three must hit the
+     * policy guard (device VMA is not an mmap VMA) instead of silently
+     * unmapping the device leaves. */
+    assert_eq((int64_t)BASE,
+              test_mmap_call(mm, 0, 0x1000, PROT_RW, MAP_ANON_PRIVATE));
+    /* Fault the anon leaf in so the assert can prove the rejected
+     * fixed replace leaves resident state untouched. */
+    assert_eq(0, user_vm_fault(mm, BASE, false));
+    uint64_t dargs[6] = { BASE + 0x2000, 0x1000, PROT_RW, MAP_SHARED,
+                          0, 0x08000000 };
+    assert_eq((int64_t)(BASE + 0x2000), user_vm_mmap(mm, dargs));
+    assert_eq(0x08000000, user_vm_test_leaf_pa(BASE + 0x2000));
+
+    uint64_t fargs[6] = { BASE, 0x3000, PROT_RW,
+                          MAP_ANON_PRIVATE | MAP_FIXED };
+    assert_eq(-EINVAL, user_vm_mmap(mm, fargs));
+
+    /* Both original mappings intact. */
+    assert_eq(3, vma_count(mm));
+    assert_eq(1, user_vm_test_leaf_state(BASE));
+    assert_eq(0x08000000, user_vm_test_leaf_pa(BASE + 0x2000));
+
+    destroy_mm(mm);
+    user_vm_test_set_files(NULL);
+}
+
+TEST_FUNC(test_mmap_device_read_only_leaf_is_ro)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+
+    static struct vfs_node mem_node;
+    static char mem_name[] = "mem";
+    mem_node.name = mem_name;
+    file_t f = { .type = FD_DEV, .node = &mem_node };
+    user_vm_test_set_files(&f);
+
+    /* PROT_READ must not silently produce a writable device leaf. */
+    uint64_t args[6] = { BASE, 0x1000, PROT_READ, MAP_SHARED,
+                         0, 0x08000000 };
+    assert_eq((int64_t)BASE, user_vm_mmap(mm, args));
+    uint32_t vm = user_vm_test_leaf_vm(BASE);
+    assert_true((vm & VM_WRITE) == 0);
+
+    destroy_mm(mm);
+    user_vm_test_set_files(NULL);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -2109,6 +2205,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_shared_anon_fork_write_through),
     TEST_ENTRY(test_mmap_device_map_and_teardown_never_frees),
     TEST_ENTRY(test_mmap_device_rejects_out_of_window_and_rolls_back),
+    TEST_ENTRY(test_mmap_device_occupied_range_rejected),
+    TEST_ENTRY(test_mmap_fixed_guard_across_hole_rejects_device_overlap),
+    TEST_ENTRY(test_mmap_device_read_only_leaf_is_ro),
 TEST_LIST_END
 
 int main(void)

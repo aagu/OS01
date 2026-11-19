@@ -19,7 +19,7 @@
   - image 机制：栈页数参数化（selftest 1 页合同不变，产品 8 页向上扩展）；`setup_stack` 写 csu 契约 auxv（AT_RANDOM/AT_PAGESZ/AT_NULL）；栈页必须 `alloc_4k_page` 逐页分配（`pmm_4k_page_allocated` 拒绝 buddy 页）+ payload 经 scratch 按页写入（物理页不连续）。
   - boot-5 编排：`arch_sched_boot_prepare/idle`（cpu/sched_boot.c）——AP gate 元数据、tick start、kernel root 记录、AP release + BSP 栈移交；handoff 的 userspace 分支只做不变量检查；空队列不变量归 legacy。selftest 变体 `-DOS01_HAS_USERSPACE=0` 保 legacy handoff（冻结合同不变，盘上无 /bin/init）。多核产品启动在 user-mm 单核 v1 门（`-EOPNOTSUPP`）下降级 kernel-only 继续（SMP 用户调度属下一任务）。
   - syscall：aarch64 misc 组（getrandom/sync/reboot/uname）仅在 `OS01_HAS_USERSPACE` 下服务（冻结石 15 项子集合同不动）；`psci_system_reset()` 接 reboot(2)。
-  - mmap 面补齐：`MAP_FIXED`（私有匿名替换事务，对齐 munmap 的预分配-提交形态）；文件映射（fd 经 `user_vm_policy_files()` weak hook 解析，VMA 持 node 引用，缺页时按 `vm_pgoff` 从 VFS fill）；`MAP_SHARED` 复用 PMM COW 引用——写故障在 `VMA_SHARED` VMA 上只升级写者叶子（同 PA 读方免故障即见写入），`MAP_PRIVATE` 保持 COW 私有化；设备映射 `/dev/mem`（`FD_DEV`+名字标记）→ `arch_vmm_map_user_io_4k` Device 属性叶（D+virtio 窗口白名单），`USER_VM_PAGE_IO` 源 teardown 只 unmap 不 free，fork 跳过 IO 叶。
+  - mmap 面补齐：`MAP_FIXED`（私有匿名替换事务，对齐 munmap 的预分配-提交形态）；文件映射（fd 经 `user_vm_policy_files()` weak hook 解析，VMA 持 node 引用，缺页时按 `vm_pgoff` 从 VFS fill）；`MAP_SHARED` 复用 PMM COW 引用——写故障在 `VMA_SHARED` VMA 上只升级写者叶子（同 PA 读方免故障即见写入），`MAP_PRIVATE` 保持 COW 私有化；设备映射 `/dev/mem`（`FD_DEV`+名字标记）→ `arch_vmm_map_user_io_4k` Device 属性叶（D+virtio 窗口白名单，RO/RW 随 prot），v1 仅映射空闲区间（occupied range 拒绝，不替换既有 VMA），`USER_VM_PAGE_IO` 源 teardown 只 unmap 不 free，fork 跳过 IO 叶。终审（子 agent 全分支评审）修复：设备 mmap 空闲区间强制（原实现会静默插入重叠 VMA 破坏 lookup/split/munmap 不变量）、MAP_FIXED 策略守卫改全跨度链表遍历（原 lookup 遍历遇空洞提前终止，可借空洞让提交销毁守卫未见的设备 VMA）、设备叶透传 prot（原 PROT_READ 静默获得 RW）。
 
   **镜像/QEMU**
   - aarch64 产品盘安装 `/bin/init`、`/bin/sh`（复用 `user/sh.c`——fd0 为 /dev/tty 时读 canonical ASCII 行，扫描码表删除）与 `config/inittab.aarch64`（respawn `/bin/sh`）。
@@ -30,7 +30,7 @@
   - 回归：m4-1 selftest 28/28；test-host 235/235（含 test_user_vm 9087/9087，新增 MAP_FIXED/文件 fill/MAP_SHARED 写升级/设备映射共 8 个用例）；x86 `OS01_SYSTEST=1 test-syscall` E2E 全绿。
 
   **已知边界**
-  - aarch64 用户任务单核 v1；EL0 无 FP/SIMD；sh 的 pwd 内建在 aarch64 上暂无输出（getcwd 路径待查）；busybox 未移植。
+  - aarch64 用户任务单核 v1；EL0 无 FP/SIMD；sh 的 pwd 内建在 aarch64 上暂无输出（getcwd 路径待查，属缺陷）；busybox 未移植；MAP_SHARED 一致性仅限 fork 后代（跨进程 inode 级共享待 shmem 注册表）。
 
 ## 2026-11-18
 

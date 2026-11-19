@@ -494,7 +494,8 @@ static bool image_perm_legal(uint32_t flags)
            flags == (VM_USER_RW | VM_NO_EXEC);
 }
 
-int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa)
+int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa,
+                        uint32_t vm_flags)
 {
     if (!mm)
         return -EINVAL;
@@ -510,7 +511,8 @@ int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa)
     if (!rec)
         return -ENOMEM;
 
-    if (arch_vmm_map_user_io_4k(aarch64_user_vm_root_va(mm), pa, va) != 0) {
+    if (arch_vmm_map_user_io_4k(aarch64_user_vm_root_va(mm), pa, va,
+                                vm_flags) != 0) {
         kfree(rec);
         return -EINVAL;
     }
@@ -518,7 +520,7 @@ int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa)
     rec->va      = va;
     rec->pa      = pa;
     rec->source  = USER_VM_PAGE_IO;
-    rec->logical = VM_USER_RW | VM_NO_EXEC;
+    rec->logical = vm_flags;
     rec->share   = USER_VM_PAGE_PRIVATE;
     aarch64_user_vm_resident_insert(mm, rec);
     return 0;
@@ -750,8 +752,11 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
          * from the DTB device window with the VM_DEVICE attribute.
          * MAP_SHARED semantics only (device memory is inherently
          * shared), eager leaves, no demand paging, no COW, and the
-         * teardown never frees the PA.  MAP_FIXED replaces overlapping
-         * mmap-window VMAs like the anonymous transaction. */
+         * teardown never frees the PA.  v1 maps only into a FREE
+         * range — an occupied range is refused whole (final review
+         * 2026-11-19: a silent overlapping insert would corrupt the
+         * lookup/split/munmap invariants); replace-style device
+         * remapping waits for a real user. */
         if (map_type != MAP_SHARED)
             return -EINVAL;
         if (hint == 0 || (hint & ((uint64_t)PAGE_4K_SIZE - 1)) ||
@@ -760,6 +765,12 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
             return -EINVAL;
         if (off & ((uint64_t)PAGE_4K_SIZE - 1))
             return -EINVAL;
+        if (!range_free(mm, hint, hint + alen))
+            return -EINVAL;
+
+        uint32_t dev_vm = (vma_flags & VMA_PROT_WRITE)
+                              ? (VM_USER_RW | VM_NO_EXEC)
+                              : (VM_USER_RO | VM_NO_EXEC);
 
         vma_t *dv = kmalloc(sizeof(*dv));
         if (!dv)
@@ -772,7 +783,7 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
         dv->vm_file      = NULL;
 
         for (uint64_t p = 0; p < alen; p += PAGE_4K_SIZE) {
-            int rc2 = user_vm_map_io_page(mm, hint + p, off + p);
+            int rc2 = user_vm_map_io_page(mm, hint + p, off + p, dev_vm);
             if (rc2 != 0) {
                 /* Rollback: the leaves mapped so far go through the
                  * same remove path (unmap, no free). */
@@ -879,13 +890,17 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     /* Policy guard: only anonymous mmap VMAs may be replaced (the
      * window bounds make this the only overlap shape; the guard is
      * defense against a future VMA kind entering the window).  Holes
-     * inside the fixed range are legal. */
-    for (uint64_t p = cand; p < end; ) {
-        vma_t *o = vm_area_lookup(mm, p);
-        if (!o)
-            break;                       /* tail hole */
+     * inside the fixed range are legal; the walk covers the WHOLE
+     * overlap span — a lookup-based walk would stop at the first hole
+     * and let the commit below destroy a VMA the guard never saw
+     * (final review 2026-11-19). */
+    for (list_t *gp = mm->vma_list.next; gp != &mm->vma_list;
+         gp = gp->next) {
+        vma_t *o = container_of(gp, vma_t, list);
+        if (o->vm_end <= cand)
+            continue;
         if (o->vm_start >= end)
-            break;                       /* hole then beyond-range VMA */
+            break;
         if (!policy_vma_is_mmap(o)) {
             for (int j = 0; j < need; j++)
                 kfree(split[j]);
@@ -894,7 +909,6 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
                 vfs_node_put(file_node);
             return -EINVAL;
         }
-        p = o->vm_end;
     }
 
     uint64_t *root = aarch64_user_vm_root_va(mm);

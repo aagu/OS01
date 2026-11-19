@@ -72,8 +72,11 @@ int arch_vmm_init(void);
 int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                         uint32_t vm_flags);
 /* Device-memory leaf for the user VM: VM_DEVICE|VM_USER attribute,
- * PA from a device window (never the 4 KiB allocator). */
-int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt);
+ * PA from a device window (never the 4 KiB allocator).  vm_flags is
+ * the logical word (VM_USER_RW|VM_NO_EXEC or VM_USER_RO|VM_NO_EXEC);
+ * the uncacheable device attribute is added here. */
+int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                            uint32_t vm_flags);
 int arch_vmm_update_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                        uint32_t vm_flags, uint64_t *old_phys_out,
                        uint32_t *old_vm_out);

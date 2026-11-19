@@ -486,12 +486,19 @@ int arch_vmm_map_4k_new(uint64_t *pgdir, uint64_t phys, uint64_t virt,
  * device window (never the 4 KiB allocator) and the leaf carries the
  * VM_DEVICE attribute — RW, uncacheable, execute-never.  No COW, no
  * stash: the caller owns the PA lifetime. */
-int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt)
+int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                            uint32_t vm_flags)
 {
     bool user = false;
     int rc = prepare_4k_root(pgdir, true, &user);
     if (rc) return rc;
 
+    /* Exactly the two logical user words the policy may ask for; the
+     * uncacheable device attribute is implied (aarch64 forces PXN|UXN
+     * on NOCACHE, so NO_EXEC is part of both words). */
+    if (vm_flags != (VM_USER_RW | VM_NO_EXEC) &&
+        vm_flags != (VM_USER_RO | VM_NO_EXEC))
+        return -EINVAL;
     if ((phys & (PAGE_4K_SIZE - 1)) != 0) return -EINVAL;
     if ((virt & (PAGE_4K_SIZE - 1)) != 0) return -EINVAL;
     if (phys >= (UINT64_C(1) << 40)) return -EINVAL;
@@ -500,7 +507,7 @@ int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt)
 
     return pt_err_to_linux(aarch64_pt_map_4k_ext(
         pgdir, virt, phys,
-        vm_to_perm(VM_DEVICE | VM_USER), 0));
+        vm_to_perm(vm_flags | VM_NOCACHE), 0));
 }
 
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out,

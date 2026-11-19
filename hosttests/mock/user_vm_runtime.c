@@ -623,14 +623,18 @@ void vfs_node_put(struct vfs_node *node)
 
 /* Device-window leaf: same fake store, VM_DEVICE word, window
  * whitelist mirroring the production backend. */
-int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt)
+int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
+                            uint32_t vm_flags)
 {
     if ((phys & 0xFFF) || (virt & 0xFFF))
         return -EINVAL;
     if (phys < 0x08000000ULL || phys >= 0x0a200000ULL)
         return -EINVAL;
+    if (vm_flags != (VM_USER_RW | VM_NO_EXEC) &&
+        vm_flags != (VM_USER_RO | VM_NO_EXEC))
+        return -EINVAL;
     /* Reuse the regular fake-leaf map with the device attribute word
      * (the mock store keys on (root, VA)). */
     return arch_vmm_map_4k_new(pgdir, phys, virt,
-                               VM_USER_RW | VM_NO_EXEC | VM_NOCACHE);
+                               vm_flags | VM_NOCACHE);
 }

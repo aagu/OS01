@@ -41,6 +41,7 @@
 2. **spawn 不复制 x86 的 2M 栈/PGD 半区复制**：aarch64 走自己的 image 机制（mm 私有根 + TTBR1 内核半区），只对齐其 staged-failure + 单点发布语义。
 3. **栈参数化而非改常量**：`aarch64_user_image_setup_stack` 增加 stack 页数参数（默认 1 页 = selftest 合同不变；产品 spawn 传 8 页，向上扩展到 0x20408000，guard/段顶 0x203ff000 契约不变）。
 4. **共享映射 v1 范围 = 匿名 MAP_SHARED（同 inode 语义复用 shmem 注册表）**：文件 MAP_SHARED 与匿名 MAP_SHARED 统一为「(node|NULL, pgoff) → 共享页注册表，首次缺页分配并填页，后续进程缺页查表接线」；不引入完整 page cache。
+   **POSTSCRIPT（2026-11-19 终审后）**：本决策已被裁定取代——MAP_SHARED 复用 PMM COW 引用 + 写升级就地生效（VMA_SHARED 写故障仅升写者叶子），无全局注册表；代价是一致性仅限 fork 后代，跨进程 inode 级共享等待 shmem 注册表任务。勿按本条原设计重新实现注册表。
 5. **文件映射 demand fault 复用 VFS 同步读**：缺页时按 `vm_pgoff` 对应偏移 `vfs_read` 一页进新分配的 leaf 页（无页缓存；同一 VMA 内已驻留页不重读）。
 
 ## Global Constraints

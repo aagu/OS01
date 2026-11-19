@@ -84,7 +84,8 @@ int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa,
  * with the VM_DEVICE attribute.  The record tracks the PA for
  * teardown but never frees it.  Same detached-root/single-owner
  * contract as the anonymous entries. */
-int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa);
+int user_vm_map_io_page(mm_t *mm, uint64_t va, uint64_t pa,
+                        uint32_t vm_flags);
 
 /* ── Anonymous-VM policy ──────────────────────────────────────
  *
