@@ -53,6 +53,10 @@ gfx_info_t g_gui_test_gfx_info_override = {0};
 
 int  g_gui_test_fail_acquire_errno = 0;
 int  g_gui_test_fail_present_errno = 0;
+int  g_gui_test_fail_present_rects_errno = 0;
+uint32_t g_gui_test_present_rects_completed_k = 0;
+gfx_rect_t g_gui_test_last_rects[64];
+uint32_t   g_gui_test_last_rects_count = 0;
 uint32_t g_gui_test_present_blocking_ms = 0;
 int  g_gui_test_fail_release_errno = 0;
 bool g_gui_test_cleanup_change_errno = false;
@@ -160,7 +164,8 @@ struct queued_flush {
     lv_area_t area;
     const uint32_t *pixels;
 };
-#define MAX_QUEUED_FLUSHES 32
+/* Batch-present overflow test needs 65 areas in one refresh. */
+#define MAX_QUEUED_FLUSHES 66
 static struct queued_flush s_flush_queue[MAX_QUEUED_FLUSHES];
 static int s_flush_count = 0;
 #endif
@@ -204,6 +209,9 @@ void gui_test_reset(void)
 
     g_gui_test_fail_acquire_errno = 0;
     g_gui_test_fail_present_errno = 0;
+    g_gui_test_fail_present_rects_errno = 0;
+    g_gui_test_present_rects_completed_k = 0;
+    g_gui_test_last_rects_count = 0;
     g_gui_test_present_blocking_ms = 0;
     g_gui_test_fail_release_errno = 0;
     g_gui_test_cleanup_change_errno = false;
@@ -478,6 +486,31 @@ int __wrap_gfx_present(gfx_handle_t *h)
         errno = g_gui_test_fail_present_errno;
         return -1;
     }
+    return 0;
+}
+
+/* Batch-present wrapper (spec 2026-11-19 §7): records the rect list,
+ * injects failures with a reported k, mirrors the kernel's
+ * completed_rects write-back contract. */
+int __wrap_gfx_present_rects(gfx_handle_t *h, const gfx_rect_t *rects,
+                             uint32_t count, uint32_t *completed_out)
+{
+    (void)h;
+    g_gui_test_counts.present_rects++;
+    if (g_gui_test_present_blocking_ms > 0) {
+        g_gui_test_now_ms += g_gui_test_present_blocking_ms;
+    }
+    g_gui_test_last_rects_count = 0;
+    if (rects && count > 0 && count <= 64) {
+        memcpy(g_gui_test_last_rects, rects, count * sizeof(gfx_rect_t));
+        g_gui_test_last_rects_count = count;
+    }
+    if (g_gui_test_fail_present_rects_errno) {
+        if (completed_out) *completed_out = g_gui_test_present_rects_completed_k;
+        errno = g_gui_test_fail_present_rects_errno;
+        return -1;
+    }
+    if (completed_out) *completed_out = count;
     return 0;
 }
 

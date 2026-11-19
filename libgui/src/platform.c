@@ -109,8 +109,26 @@ bool gui_platform_checked_mul_size(size_t a, size_t b, size_t *out)
 #endif
 }
 
-static void platform_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+/* 脏矩形累积（spec 2026-11-19 §7）。容量满置 overflow 并清空列表：
+ * 后续 present 点回退整帧，绝不截断损伤。仅 ONSCREEN 且有 gfx 的
+ * flush 路径调用。 */
+static void gui_dirty_record(gui_platform_t *platform, uint32_t x, uint32_t y,
+                             uint32_t w, uint32_t h)
 {
+    if (platform->dirty_overflow) return;
+    if (platform->dirty_count >= GUI_DIRTY_MAX) {
+        platform->dirty_count = 0;
+        platform->dirty_overflow = true;
+        return;
+    }
+    platform->dirty_rects[platform->dirty_count].x = x;
+    platform->dirty_rects[platform->dirty_count].y = y;
+    platform->dirty_rects[platform->dirty_count].w = w;
+    platform->dirty_rects[platform->dirty_count].h = h;
+    platform->dirty_count++;
+}
+
+static void platform_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map){
     gui_platform_t *platform = (gui_platform_t *)lv_display_get_user_data(disp);
     if (!platform) {
         lv_display_flush_ready(disp);
@@ -143,6 +161,8 @@ static void platform_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t
             gfx_sprite_blit(platform->gfx, area->x1, area->y1,
                             (const uint32_t *)px_map, (uint32_t)stride_bytes,
                             (uint32_t)area_w, (uint32_t)area_h, false, 0);
+            gui_dirty_record(platform, (uint32_t)area->x1, (uint32_t)area->y1,
+                             (uint32_t)area_w, (uint32_t)area_h);
             platform->pending_present = true;
         }
     } else {
@@ -641,6 +661,8 @@ static gui_status_t enter_terminal_state(gui_platform_t *platform, gui_status_t 
     }
     platform->pending_present = false;
     platform->retry_deadline_ms = 0;
+    platform->dirty_count = 0;
+    platform->dirty_overflow = false;
     platform->terminal_status = status;
     platform->terminal_errno = saved_errno;
     errno = saved_errno;
@@ -819,9 +841,23 @@ static gui_status_t platform_step_body(gui_platform_t *platform, uint32_t *out_n
             }
 
             errno = 0;
-            if (gfx_present(platform->gfx) == 0) {
+            /* 脏矩形批量 present（spec 2026-11-19 §7）：列表溢出或为空
+             * 时回退整帧；合法列表一次 GFX_PRESENT_RECTS 提交。成功
+             * （任一路径）清列表与 overflow；失败保留，等待期新增的
+             * flush 继续累积，重试提交并集。 */
+            int prc;
+            if (platform->dirty_overflow || platform->dirty_count == 0) {
+                prc = gfx_present(platform->gfx);
+            } else {
+                uint32_t completed = 0;
+                prc = gfx_present_rects(platform->gfx, platform->dirty_rects,
+                                        platform->dirty_count, &completed);
+            }
+            if (prc == 0) {
                 platform->pending_present = false;
                 platform->retry_deadline_ms = 0;
+                platform->dirty_count = 0;
+                platform->dirty_overflow = false;
                 ret_status = GUI_STATUS_OK;
             } else {
                 int err = errno ? errno : EIO;

@@ -1,6 +1,7 @@
 #include "test_framework.h"
 #include <gui/gui_platform.h>
 #include <gui_lvgl_private.h>
+#include "gui_platform_private.h"
 #include <gui_tick.h>
 #include "gui_test_runtime.h"
 #include <src/display/lv_display_private.h>
@@ -407,6 +408,7 @@ TEST_FUNC(test_terminal_policy)
     assert_eq(1, g_gui_test_counts.handler);
     assert_eq(1, g_gui_test_counts.acquire);
     assert_eq(0, g_gui_test_counts.present);
+    assert_eq(0, g_gui_test_counts.present_rects);
     gui_platform_destroy(p);
     assert_eq(1, g_gui_test_counts.close);
 
@@ -426,7 +428,7 @@ TEST_FUNC(test_terminal_policy)
     gui_test_reset();
     p = gui_platform_create(NULL);
     assert_not_null(p);
-    g_gui_test_fail_present_errno = EACCES;
+    g_gui_test_fail_present_rects_errno = EACCES;
     gui_test_queue_flush(&area, &px);
     errno = 0;
     st = gui_platform_step(p, &delay);
@@ -438,7 +440,7 @@ TEST_FUNC(test_terminal_policy)
     gui_test_reset();
     p = gui_platform_create(NULL);
     assert_not_null(p);
-    g_gui_test_fail_present_errno = ESTALE;
+    g_gui_test_fail_present_rects_errno = ESTALE;
     gui_test_queue_flush(&area, &px);
     errno = 0;
     st = gui_platform_step(p, &delay);
@@ -450,7 +452,7 @@ TEST_FUNC(test_terminal_policy)
     gui_test_reset();
     p = gui_platform_create(NULL);
     assert_not_null(p);
-    g_gui_test_fail_present_errno = EIO;
+    g_gui_test_fail_present_rects_errno = EIO;
     gui_test_queue_flush(&area, &px);
     errno = 0;
     st = gui_platform_step(p, &delay);
@@ -462,7 +464,7 @@ TEST_FUNC(test_terminal_policy)
     gui_test_reset();
     p = gui_platform_create(NULL);
     assert_not_null(p);
-    g_gui_test_fail_present_errno = ESTALE;
+    g_gui_test_fail_present_rects_errno = ESTALE;
     g_gui_test_cleanup_change_errno = true;
     gui_test_queue_flush(&area, &px);
     errno = 0;
@@ -481,7 +483,7 @@ TEST_FUNC(test_retry_end_time)
     assert_not_null(p);
 
     g_gui_test_present_blocking_ms = 80; /* advances now from 100 to 180 */
-    g_gui_test_fail_present_errno = EAGAIN;
+    g_gui_test_fail_present_rects_errno = EAGAIN;
 
     lv_area_t area = { .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 10 };
     uint32_t px = 0;
@@ -491,22 +493,22 @@ TEST_FUNC(test_retry_end_time)
     gui_status_t st = gui_platform_step(p, &delay);
     assert_eq(GUI_STATUS_EAGAIN, st);
     assert_eq(180, gui_test_get_now());
-    assert_eq(1, g_gui_test_counts.present);
+    assert_eq(1, g_gui_test_counts.present_rects);
 
     /* Deadline is 180 + 250 = 430 ms. At 429 ms, no present */
     gui_test_set_now(429);
     gui_test_queue_flush(&area, &px);
     st = gui_platform_step(p, &delay);
     assert_eq(GUI_STATUS_EAGAIN, st);
-    assert_eq(1, g_gui_test_counts.present);
+    assert_eq(1, g_gui_test_counts.present_rects);
 
     /* At 430 ms, deadline reached -> presents */
     gui_test_set_now(430);
     g_gui_test_present_blocking_ms = 0;
-    g_gui_test_fail_present_errno = 0;
+    g_gui_test_fail_present_rects_errno = 0;
     st = gui_platform_step(p, &delay);
     assert_eq(GUI_STATUS_OK, st);
-    assert_eq(2, g_gui_test_counts.present);
+    assert_eq(2, g_gui_test_counts.present_rects);
 
     gui_platform_destroy(p);
 }
@@ -527,12 +529,23 @@ TEST_FUNC(test_frame_submission)
     uint32_t delay = 0;
     gui_status_t st = gui_platform_step(p, &delay);
     assert_eq(GUI_STATUS_OK, st);
-    assert_eq(1, g_gui_test_counts.present);
+    /* Two flush areas coalesce into ONE batch present ioctl. */
+    assert_eq(0, g_gui_test_counts.present);
+    assert_eq(1, g_gui_test_counts.present_rects);
+    assert_eq(2u, g_gui_test_last_rects_count);
+    assert_eq(0u, g_gui_test_last_rects[0].x);
+    assert_eq(0u, g_gui_test_last_rects[0].y);
+    assert_eq(6u, g_gui_test_last_rects[0].w);
+    assert_eq(6u, g_gui_test_last_rects[0].h);
+    assert_eq(6u, g_gui_test_last_rects[1].x);
+    assert_eq(0u, g_gui_test_last_rects[1].y);
+    assert_eq(5u, g_gui_test_last_rects[1].w);
+    assert_eq(6u, g_gui_test_last_rects[1].h);
 
     /* No flush -> no present */
     st = gui_platform_step(p, &delay);
     assert_eq(GUI_STATUS_OK, st);
-    assert_eq(1, g_gui_test_counts.present);
+    assert_eq(1, g_gui_test_counts.present_rects);
 
     /* Flush error latches EINVAL, ready called exactly once, no present */
     lv_area_t bad_area = { .x1 = 10, .y1 = 0, .x2 = 5, .y2 = 5 }; /* x1 > x2 */
@@ -543,7 +556,7 @@ TEST_FUNC(test_frame_submission)
     assert_eq(GUI_STATUS_ERROR, st);
     assert_eq(EINVAL, errno);
     assert_eq(ready_before + 1, g_gui_test_counts.ready);
-    assert_eq(1, g_gui_test_counts.present);
+    assert_eq(1, g_gui_test_counts.present_rects);
 
     gui_platform_destroy(p);
 }
@@ -661,7 +674,158 @@ TEST_FUNC(test_status_reason)
                   gui_platform_status_reason(GUI_STATUS_ERROR));
 }
 
+/* ── Batch-present (GFX_PRESENT_RECTS) backend tests (spec 2026-11-19 §7) ── */
+
+TEST_FUNC(test_platform_batch_retry_keeps_dirty)
+{
+    gui_test_reset();
+    gui_test_set_now(100);
+    gui_platform_t *p = gui_platform_create(NULL);
+    assert_not_null(p);
+
+    lv_area_t a1 = { .x1 = 0, .y1 = 0, .x2 = 9, .y2 = 9 };
+    uint32_t px = 0;
+    gui_test_queue_flush(&a1, &px);
+    uint32_t delay = 0;
+
+    /* First present fails EAGAIN, kernel-style k=1 reported. */
+    g_gui_test_fail_present_rects_errno = EAGAIN;
+    g_gui_test_present_rects_completed_k = 1;
+    errno = 0;
+    gui_status_t st = gui_platform_step(p, &delay);
+    assert_eq(GUI_STATUS_EAGAIN, st);
+    assert_eq(EAGAIN, errno);
+    assert_eq(1, g_gui_test_counts.present_rects);
+    assert_eq(0, g_gui_test_counts.present);
+
+    /* More damage arrives while backing off; before the deadline the
+     * step must neither drop it nor present. */
+    gui_test_advance_now(10);
+    lv_area_t a2 = { .x1 = 20, .y1 = 0, .x2 = 29, .y2 = 9 };
+    gui_test_queue_flush(&a2, &px);
+    st = gui_platform_step(p, &delay);
+    assert_eq(GUI_STATUS_EAGAIN, st);
+    assert_eq(1, g_gui_test_counts.present_rects);
+
+    /* Deadline passes: the retry submits the union (both areas). */
+    gui_test_advance_now(300);
+    g_gui_test_fail_present_rects_errno = 0;
+    st = gui_platform_step(p, &delay);
+    assert_eq(GUI_STATUS_OK, st);
+    assert_eq(2, g_gui_test_counts.present_rects);
+    assert_eq(0, g_gui_test_counts.present);
+    assert_eq(2u, g_gui_test_last_rects_count);
+    assert_eq(0u,  g_gui_test_last_rects[0].x);
+    assert_eq(20u, g_gui_test_last_rects[1].x);
+    /* Success cleared the dirty list. */
+    struct gui_platform *priv = (struct gui_platform *)p;
+    assert_eq(0u, priv->dirty_count);
+    assert_false(priv->dirty_overflow);
+
+    gui_platform_destroy(p);
+}
+
+TEST_FUNC(test_platform_batch_overflow_falls_back_full)
+{
+    gui_test_reset();
+    gui_platform_t *p = gui_platform_create(NULL);
+    assert_not_null(p);
+
+    uint32_t px = 0;
+    /* 66 flush areas: crosses GUI_DIRTY_MAX (64) -> overflow flag ->
+     * the present point degrades to ONE full-view gfx_present. */
+    for (uint32_t i = 0; i < 66; i++) {
+        lv_area_t a = { .x1 = (int32_t)i, .y1 = 0,
+                        .x2 = (int32_t)i, .y2 = 3 };
+        gui_test_queue_flush(&a, &px);
+    }
+    uint32_t delay = 0;
+    gui_status_t st = gui_platform_step(p, &delay);
+    assert_eq(GUI_STATUS_OK, st);
+    assert_eq(1, g_gui_test_counts.present);
+    assert_eq(0, g_gui_test_counts.present_rects);
+    struct gui_platform *priv = (struct gui_platform *)p;
+    assert_eq(0u, priv->dirty_count);
+    assert_false(priv->dirty_overflow);
+
+    gui_platform_destroy(p);
+}
+
+TEST_FUNC(test_platform_offscreen_no_dirty)
+{
+    gui_test_reset();
+    gui_config_t cfg = { .mode = GUI_MODE_OFFSCREEN, .width = 64, .height = 32 };
+    gui_platform_t *p = gui_platform_create(&cfg);
+    assert_not_null(p);
+
+    lv_area_t a = { .x1 = 0, .y1 = 0, .x2 = 9, .y2 = 9 };
+    uint32_t px = 0;
+    gui_test_queue_flush(&a, &px);
+    uint32_t delay = 0;
+    gui_status_t st = gui_platform_step(p, &delay);
+    assert_eq(GUI_STATUS_OK, st);
+    assert_eq(0, g_gui_test_counts.present);
+    assert_eq(0, g_gui_test_counts.present_rects);
+    struct gui_platform *priv = (struct gui_platform *)p;
+    assert_eq(0u, priv->dirty_count);
+
+    gui_platform_destroy(p);
+}
+
+TEST_FUNC(test_platform_terminal_state_resets_dirty)
+{
+    gui_test_reset();
+    gui_platform_t *p = gui_platform_create(NULL);
+    assert_not_null(p);
+
+    lv_area_t a = { .x1 = 0, .y1 = 0, .x2 = 9, .y2 = 9 };
+    uint32_t px = 0;
+    gui_test_queue_flush(&a, &px);
+    uint32_t delay = 0;
+    g_gui_test_fail_present_rects_errno = EACCES;   /* terminal verdict */
+    errno = 0;
+    gui_status_t st = gui_platform_step(p, &delay);
+    assert_eq(GUI_STATUS_LOST_OWNERSHIP, st);
+    struct gui_platform *priv = (struct gui_platform *)p;
+    assert_eq(0u, priv->dirty_count);
+    assert_false(priv->dirty_overflow);
+
+    gui_platform_destroy(p);
+}
+
+TEST_FUNC(test_platform_batch_empty_pending_present_full)
+{
+    /* pending_present with an EMPTY list must degrade to a full
+     * present, never a zero-count batch (kernel would EINVAL). */
+    gui_test_reset();
+    gui_platform_t *p = gui_platform_create(NULL);
+    assert_not_null(p);
+
+    struct gui_platform *priv = (struct gui_platform *)p;
+    lv_area_t a = { .x1 = 0, .y1 = 0, .x2 = 5, .y2 = 5 };
+    uint32_t px = 0;
+    gui_test_queue_flush(&a, &px);
+    uint32_t delay = 0;
+    assert_eq(GUI_STATUS_OK, gui_platform_step(p, &delay));
+    assert_eq(1, g_gui_test_counts.present_rects);
+
+    /* Force the invariant directly: pending set, list empty. */
+    priv->pending_present = true;
+    priv->dirty_count = 0;
+    assert_eq(GUI_STATUS_OK, gui_platform_step(p, &delay));
+    assert_eq(1, g_gui_test_counts.present);          /* full path */
+    assert_eq(1, g_gui_test_counts.present_rects);    /* unchanged */
+    assert_eq(0u, priv->dirty_count);
+
+    gui_platform_destroy(p);
+}
+
 TEST_LIST_BEGIN
+    TEST_ENTRY(test_platform_batch_retry_keeps_dirty),
+    TEST_ENTRY(test_platform_batch_overflow_falls_back_full),
+    TEST_ENTRY(test_platform_offscreen_no_dirty),
+    TEST_ENTRY(test_platform_terminal_state_resets_dirty),
+    TEST_ENTRY(test_platform_batch_empty_pending_present_full),
     TEST_ENTRY(test_config_validation),
     TEST_ENTRY(test_capacity_and_header),
     TEST_ENTRY(test_rollback_each_stage),

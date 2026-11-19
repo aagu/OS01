@@ -22,6 +22,10 @@
 #include <gfx.h>
 #include <lvgl/lvgl.h>
 
+/* 脏矩形批量 present 的固定容量：与 UAPI 的 GFX_PRESENT_RECTS_MAX 一致
+ * （spec 2026-11-19 §7）；超出即整帧回退，不截断损伤。 */
+#define GUI_DIRTY_MAX 64u
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -48,6 +52,13 @@ struct gui_platform {
     int terminal_errno;
     int flush_error;              /* flush 无返回值，供 step 收敛错误 */
     uint64_t retry_deadline_ms;   /* EAGAIN 限频退避截止时间 (CLOCK_MONOTONIC ms) */
+
+    /* 脏矩形批量 present（spec 2026-11-19 §7）：一次逻辑刷新的 flush
+     * area 在此累积，present 点一次 GFX_PRESENT_RECTS 提交；容量满
+     * 置 overflow 并清空列表，present 点回退整帧 gfx_present。 */
+    gfx_rect_t dirty_rects[GUI_DIRTY_MAX];
+    uint32_t   dirty_count;
+    bool       dirty_overflow;
 
     /* 内部关联对象 */
     lv_display_t *disp;

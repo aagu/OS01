@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <lvgl/lvgl.h>
 #include <uapi/fb.h>
+#include <uapi/gfx.h>
 #include <gfx.h>
 
 #ifdef __cplusplus
@@ -17,6 +18,7 @@ struct gui_test_counts {
     uint32_t handler;
     uint32_t acquire;
     uint32_t present;
+    uint32_t present_rects; /* GFX_PRESENT_RECTS batch present */
     uint32_t release;
     uint32_t close;
     uint32_t ready;
@@ -73,6 +75,11 @@ extern gfx_info_t g_gui_test_gfx_info_override;
 extern int  g_gui_test_fail_acquire_errno;
 extern int  g_gui_test_fail_present_errno;
 extern uint32_t g_gui_test_present_blocking_ms;
+/* Batch-present (GFX_PRESENT_RECTS) mock surface (spec 2026-11-19). */
+extern int  g_gui_test_fail_present_rects_errno;
+extern uint32_t g_gui_test_present_rects_completed_k; /* k reported on failure */
+extern gfx_rect_t g_gui_test_last_rects[64];
+extern uint32_t   g_gui_test_last_rects_count;
 extern int  g_gui_test_fail_release_errno;
 extern bool g_gui_test_cleanup_change_errno;
 
