@@ -3,12 +3,20 @@
  * All per-CPU metadata uses its low identity VA, before and after MMU-on.
  * Initialize and clean once before the first CPU_ON; afterward the coherent
  * online/go fields belong to the release/acquire ACK/command protocol.
+ *
+ * Unified SMP boot (spec 2026-11-19): this file implements the
+ * arch/smp.h strong overrides for aarch64 — arch_smp_boot_aps (single
+ * entry, Fail-Closed, no degraded continuation), arch_smp_last_status,
+ * and the four AP lifecycle hooks driven by kernel/core/smp.c's
+ * smp_ap_common_entry state machine.
  */
 #include <stdint.h>
+#include <errno.h>
 #include <arch/aarch64/page_table_selftest.h>
 #include <stdbool.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/psci.h>
+#include <arch/smp.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/smp_boot_core.h>
 #include <arch/aarch64/ap_work.h>
@@ -19,8 +27,29 @@
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch_percpu.h>
 #include <arch/aarch64/reg.h>
+#include <percpu/percpu.h>
 
 static bool boot_published;
+
+/* Recent arch_smp_boot_aps() diagnostic snapshot (arch/smp.h contract). */
+static struct arch_smp_boot_status a64_smp_status;
+
+const struct arch_smp_boot_status *arch_smp_last_status(void)
+{
+    return &a64_smp_status;
+}
+
+/* Record a failed AP bring-up and hand the negative errno to the
+ * caller; the unified Fail-Closed stop (log + boot_failure_stop) is
+ * owned by kernel/core/smp.c::smp_boot_fail. */
+static int a64_smp_fail(uint32_t cpu, enum smp_boot_stage stage,
+                        int32_t arch_rc, int ret)
+{
+    a64_smp_status.failed_cpu = cpu;
+    a64_smp_status.failed_stage = stage;
+    a64_smp_status.arch_rc = arch_rc;
+    return ret;
+}
 
 static void clean_to_poc(uint64_t start, uint64_t end, uint64_t line_size)
 {
@@ -30,12 +59,13 @@ static void clean_to_poc(uint64_t start, uint64_t end, uint64_t line_size)
     }
 }
 
-int aarch64_smp_publish_boot(const struct aarch64_topology *topology)
+int aarch64_smp_publish_boot(const struct aarch64_topology *topology,
+                             uint64_t entry_va)
 {
     uint64_t bsp, ctr;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(bsp));
     bsp &= AARCH64_MPIDR_AFFINITY_MASK;
-    if (boot_published || !topology || !topology->cpu_count ||
+    if (boot_published || !entry_va || !topology || !topology->cpu_count ||
         topology->cpu_count > NR_CPUS || topology->mpidr[0] != bsp) {
         return -1;
     }
@@ -58,7 +88,7 @@ int aarch64_smp_publish_boot(const struct aarch64_topology *topology)
         slots[i].stack = aarch64_boot_stack_top_addr(i);
         slots[i].online = i == 0 ? 1 : 0;
         slots[i].go = AARCH64_BOOT_GO_WAIT;
-        slots[i].reserved = 0;
+        slots[i].entry = entry_va;
         mpidrs[i] = mpidr;
     }
     *(uint32_t *)count_addr = topology->cpu_count;
@@ -83,22 +113,14 @@ int aarch64_smp_publish_boot(const struct aarch64_topology *topology)
 /* Preserve the frozen result for post-boot debugger diagnostics too. */
 static volatile struct smp_boot_result boot_result;
 
-/* The frozen boot ACK mask.  Every smp_boot_aps exit path publishes it
- * exactly once (release store) BEFORE any AP can poll the release
- * gate; readers acquire.  There is deliberately no lazy-init fallback:
- * an unwritten static result must never be returned. */
+/* The frozen boot ACK mask.  arch_smp_boot_aps publishes it exactly once
+ * (release store) BEFORE any AP can poll the release gate; readers
+ * acquire.  There is deliberately no lazy-init fallback: an unwritten
+ * static result must never be returned. */
 uint64_t aarch64_smp_accepted_mask(void)
 {
     return (uint64_t)__atomic_load_n(&boot_result.online_mask,
                                      __ATOMIC_ACQUIRE);
-}
-
-static __attribute__((noreturn)) void smp_fatal(const char *reason)
-{
-    log_err("[smp] FATAL: ");
-    log_err(reason);
-    log_err("\n");
-    for (;;) arch_cpu_halt();
 }
 
 static uint64_t boot_counter(void *ctx)
@@ -131,23 +153,31 @@ static void boot_relax(void *ctx)
     arch_cpu_pause();
 }
 
+/* Success-only summary; the unified Fail-Closed policy has no DEGRADED
+ * shape to report (spec 2026-11-19 §4.2.3). */
 static void log_summary(uint32_t requested, uint32_t online)
 {
     log_info("[smp] requested=");
     kputu(requested);
     log_info(" online=");
     kputu(online);
-    if (online == requested) log_info(" status=PASS\n");
-    else log_warn(" status=DEGRADED\n");
+    log_info(" status=PASS\n");
 }
 
-uint32_t smp_boot_aps(void)
+int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry,
+                      struct percpu *per_cpu_data)
 {
-    if (boot_published) smp_fatal("repeated SMP boot");
+    /* The secondary entry and kernel/percpu/percpu.c index the global
+     * percpu_data[] — a non-global percpu base is a boot protocol error
+     * (spec §4.2.3).  Everything else here is the same Fail-Closed
+     * precondition family as kernel/core/smp.c::arch_boot_aps. */
     const struct aarch64_topology *topology = dtb_topology();
     uint64_t hz = cntfrq_el0();
-    if (!hz || hz > UINT64_MAX / 2)
-        smp_fatal("invalid counter frequency");
+    if (!entry || per_cpu_data != percpu_data ||
+        cpu_count == 0u || cpu_count > (uint32_t)NR_CPUS ||
+        boot_published || !topology || topology->cpu_count != cpu_count ||
+        !hz || hz > UINT64_MAX / 2)
+        return a64_smp_fail(0, SMP_STAGE_INVARIANT, -EINVAL, -EINVAL);
 
     /* Before the one-shot publication, initialize all shared test data.
      * Nothing may reset slots, stacks or test state after CPU_ON. */
@@ -155,8 +185,8 @@ uint32_t smp_boot_aps(void)
     benchmark_total = 0;
     for (uint32_t id = 0; id < NR_CPUS; ++id)
         bench_done_set(id, 0);
-    if (aarch64_smp_publish_boot(topology))
-        smp_fatal("invalid or repeated boot publication");
+    if (aarch64_smp_publish_boot(topology, (uint64_t)(uintptr_t)entry))
+        return a64_smp_fail(0, SMP_STAGE_PREPARE, -EINVAL, -EINVAL);
 
     uint64_t el;
     __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(el));
@@ -170,19 +200,12 @@ uint32_t smp_boot_aps(void)
     kputu(AARCH64_SMP_TEST_NO_ACK_CPU);
     log_info("\n");
 
-    /* A valid uniprocessor platform needs no PSCI transport at all. */
-    if (topology->cpu_count > 1 && psci_init(topology->conduit)) {
-        boot_result.requested = topology->cpu_count;
-        boot_result.online = 1;
-        boot_result.online_mask = 1;
-        for (uint32_t id = 1; id < topology->cpu_count; ++id) {
-            boot_result.psci_rc[id] = -1;
-            boot_result.failure[id] = SMP_FAILURE_CPU_ON;
-            boot_go_set(id, AARCH64_BOOT_GO_IDLE);
-        }
+    /* A valid uniprocessor platform needs no PSCI transport at all.  A
+     * multiprocessor platform without one FAILS CLOSED — the old
+     * degraded "boot with the BSP alone" continuation is gone. */
+    if (cpu_count > 1 && psci_init(topology->conduit) != 0) {
         log_warn("[smp] reason=psci-unavailable\n");
-        log_summary(topology->cpu_count, 1);
-        return 1;
+        return a64_smp_fail(1, SMP_STAGE_ACTIVATE, -ENODEV, -ENODEV);
     }
 
     const struct smp_boot_ops ops = {
@@ -192,8 +215,9 @@ uint32_t smp_boot_aps(void)
     };
     struct smp_boot_result result;
     int status = smp_boot_run(topology, secondary_start_addr(), hz, &ops, &result);
-    if (status < 0) smp_fatal("invalid boot state machine input");
-    boot_result = result;
+    if (status < 0)
+        return a64_smp_fail(0, SMP_STAGE_INVARIANT, -EINVAL, -EINVAL);
+
     for (uint32_t id = 0; id < result.requested; ++id) {
         log_info("[smp] cpu=");
         kputu(id);
@@ -214,15 +238,38 @@ uint32_t smp_boot_aps(void)
         }
         log_info("\n");
     }
-    aarch64_page_table_probe_finish(result.requested==result.online);
-    log_summary(result.requested, result.online);
-    return result.online;
+
+    /* Any AP failure (CPU_ON rejected or boot-ACK timeout) FAILS CLOSED:
+     * record the first failing CPU and hand the negative errno to the
+     * unified orchestrator.  No degraded online_mask freeze, no
+     * page-table probe downgrade, no continuation with fewer cores. */
+    if (status != 0) {
+        for (uint32_t id = 0; id < result.requested; ++id) {
+            if (result.failure[id] == SMP_FAILURE_CPU_ON)
+                return a64_smp_fail(id, SMP_STAGE_ACTIVATE,
+                                    (int32_t)result.psci_rc[id], -EIO);
+            if (result.failure[id] == SMP_FAILURE_TIMEOUT)
+                return a64_smp_fail(id, SMP_STAGE_ONLINE,
+                                    -ETIMEDOUT, -ETIMEDOUT);
+        }
+        return a64_smp_fail(0, SMP_STAGE_INVARIANT, -EINVAL, -EINVAL);
+    }
+
+    boot_result = result;
+    a64_smp_status.requested = cpu_count;
+    a64_smp_status.online = result.online;
+    a64_smp_status.online_mask = result.online_mask;
+    aarch64_page_table_probe_finish(true);
+    log_summary(cpu_count, result.online);
+    return 0;
 }
 
-void secondary_idle(uint32_t cpu_id)
+/* ── AP lifecycle hooks (strong overrides, called only by
+ * kernel/core/smp.c::smp_ap_common_entry) ─────────────────── */
+
+void arch_smp_ap_cpu_init(uint32_t cpu_id, struct percpu *cpu)
 {
-    /* Assembly validated our slot/MPIDR, SP, TPIDR and vectors. All
-     * accesses below retain the slot's identity VA. IRQs stay masked. */
+    (void)cpu;
     /* Per-CPU tick ownership (per-CPU tick accounting, Task 2).
      *
      * The GLOBAL time base still belongs to the BSP alone: the timer
@@ -249,28 +296,26 @@ void secondary_idle(uint32_t cpu_id)
      * already set TPIDR_EL1 = &percpu_data[cpu_id]; percpu_install_gs
      * re-confirms (idempotent) and percpu_init populates
      * self/cpu_id/arch_processor_id/rq_lock (BOOT-1: percpu_init does
-     * NOT publish online — the AP does that itself further below, after
+     * NOT publish online — the common entry does that itself next, after
      * the page-table verify and before the boot ACK). Inline asm
      * 'mrs xN, mpidr_el1' (no helper function — does not exist
      * in codebase, R3 NIT-2). */
-    extern void percpu_install_gs(uint32_t cpu);
-    extern void percpu_init(uint32_t cpu, uint32_t apic_id);
     uint32_t mpidr_ap;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr_ap));
     percpu_install_gs(cpu_id);
     percpu_init(cpu_id, mpidr_ap);
-    /* Per-CPU tick (Task 2): the AP's OWN CNTP interrupt is armed
-     * later, in the admission handoff; tick_handler() (the global
-     * jiffies / timer list) only ever runs on the BSP. */
-    /* Test-only loss of ACK: the AP still reaches C initialization and
-     * observes the persistent idle command after the BSP times out. */
-    if (aarch64_page_table_ap_verify(cpu_id))for(;;)arch_cpu_halt();
-    /* BOOT-1: the AP publishes its own RUNTIME online here — after
-     * percpu_init/page-table verify, BEFORE the boot ACK.  This is the
-     * runtime percpu_t online (release store, spec §5.3), distinct from
-     * the boot-slot ACK below: the NO_ACK injection suppresses only the
-     * ACK, never runtime online, and grants no scheduler admission. */
-    __atomic_store_n(&percpu_data[cpu_id].online, 1, __ATOMIC_RELEASE);
+    if (aarch64_page_table_ap_verify(cpu_id))
+        for (;;)
+            arch_cpu_halt();
+}
+
+void arch_smp_ap_post_online(uint32_t cpu_id, struct percpu *cpu)
+{
+    (void)cpu;
+    /* Boot-slot ACK: the AP's runtime online is already published by the
+     * common entry; the ACK is this AP's own slot publication.  The
+     * NO_ACK injection suppresses only the ACK, never runtime online,
+     * and grants no scheduler admission. */
     if (cpu_id != AARCH64_SMP_TEST_NO_ACK_CPU)
         boot_online_set(cpu_id);
     uint32_t command;
@@ -281,23 +326,26 @@ void secondary_idle(uint32_t cpu_id)
     if (command == AARCH64_BOOT_GO_TEST)
         smp_bench_iter(cpu_id, 1000000);
 
-#if OS01_SELFTEST
-    /* R11 + Task 2.2 simplification: only the selftest build unmask DAIF.I
-     * on APs so they can take SGIs through el1_irq (GIC Phase 1, spec §7.5).
-     * Production build stays unchanged — APs remain IRQ-masked. */
-    arch_local_irq_enable();
-    __asm__ __volatile__("isb" ::: "memory");
-#endif
+    /* GIC target-bit validation completes BEFORE the common entry
+     * unmaskes IRQs (M3 Task 8: 单核也安全（RAZ/WI 例外）). */
+    gic_target_bit_init(cpu_id);
+}
 
-    /* M3 (Task 10): AP must unmask IRQ + ISB BEFORE publishing ipi_ready.
-     * Otherwise the initiator could fire the SGI in the window before the
-     * unmask and the AP would not answer (timeout FATAL). Order: handler
-     * registered (gic_init) + GIC target bit validated + IRQ unmasked
-     * + ISB → then ipi_ready_publish_and_count (BSP/AP same function). */
-    gic_target_bit_init(cpu_id);          /* 单核也安全（RAZ/WI 例外） */
-    arch_local_irq_enable();              /* 生产也开 IRQ（M3 统一，去门控） */
+void arch_smp_ap_publish_ipi_ready(uint32_t cpu_id, struct percpu *cpu)
+{
+    (void)cpu;
+    /* M3 (Task 10): the common entry has already unmasked IRQs
+     * (arch_local_irq_enable) before calling this hook.  ISB then
+     * publish: handler registered (gic_cpu_init) + GIC target bit
+     * validated + IRQ unmasked + ISB → ipi_ready_publish_and_count
+     * (BSP/AP same function). */
     __asm__ __volatile__("isb" ::: "memory");
     ipi_ready_publish_and_count(cpu_id);
+}
+
+void arch_smp_ap_enter_idle(uint32_t cpu_id, struct percpu *cpu)
+{
+    (void)cpu;
     /* Work loop: run at most one ap_work item per iteration, then
      * check the P1 release gate.  An ACCEPTED AP whose gate is open
      * leaves this loop for good through the validating trampoline
@@ -309,4 +357,11 @@ void secondary_idle(uint32_t cpu_id)
             aarch64_ap_sched_enter(cpu_id);
         arch_cpu_pause();
     }
+}
+
+/* BSP post-boot hook: the SMP spinlock selftest runs after the unified
+ * complete marker and before subsys_prepare_cpus(). */
+void arch_smp_post_boot_hook(uint32_t online_cpus)
+{
+    (void)test_spinlock_smp(online_cpus);
 }

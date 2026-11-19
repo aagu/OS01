@@ -27,7 +27,7 @@ typedef struct aarch64_boot_percpu {
     uint64_t stack;      /* offset 24: top of independent stack        */
     uint32_t online;     /* offset 32: AP-only init ACK (BSP excepted) */
     uint32_t go;         /* offset 36: BSP command, 0 wait/1 test/2 idle */
-    uint64_t reserved;   /* offset 40: keep the 48-byte boot ABI       */
+    uint64_t entry;      /* offset 40: unified AP C entry (spec 2026-11-19) */
 } aarch64_boot_percpu_t;
 
 _Static_assert(sizeof(aarch64_boot_percpu_t) == AARCH64_BOOT_PERCPU_SIZE,
@@ -41,7 +41,7 @@ BOOT_OFFSET_ASSERT(mpidr, AARCH64_BOOT_MPIDR_OFFSET);
 BOOT_OFFSET_ASSERT(stack, AARCH64_BOOT_STACK_OFFSET);
 BOOT_OFFSET_ASSERT(online, AARCH64_BOOT_ONLINE_OFFSET);
 BOOT_OFFSET_ASSERT(go, AARCH64_BOOT_GO_OFFSET);
-BOOT_OFFSET_ASSERT(reserved, AARCH64_BOOT_RESERVED_OFFSET);
+BOOT_OFFSET_ASSERT(entry, AARCH64_BOOT_ENTRY_OFFSET);
 #undef BOOT_OFFSET_ASSERT
 _Static_assert(NR_CPUS == AARCH64_BOOT_CAPACITY &&
                NR_CPUS == AARCH64_BOOT_MAX_CPUS, "boot CPU capacity mismatch");
@@ -64,7 +64,8 @@ uint64_t secondary_start_addr(void);
  * Returns -1 for invalid input or repeated publication; neither writes
  * metadata. No slot/stack reinitialization or full-range clean afterward.
  * This publishes boot slots, not runtime percpu_t state. */
-int aarch64_smp_publish_boot(const struct aarch64_topology *topology);
+int aarch64_smp_publish_boot(const struct aarch64_topology *topology,
+                             uint64_t entry_va);
 
 extern aarch64_boot_percpu_t aarch64_boot_percpu[NR_CPUS];
 

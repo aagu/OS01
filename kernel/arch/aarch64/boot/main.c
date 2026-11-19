@@ -652,50 +652,11 @@ void arch_boot_smp_prepare(void)
     /* N/A for AArch64: BSP timer/IRQ/accounting are initialized post-SMP */
 }
 
-#if AARCH64_SMP_TEST_NO_ACK_CPU == 1
-/* BOOT-1 Task 4: the no-ack runtime-qualification observation.  The
- * NO_ACK AP never ACKs its boot slot (so it is never admitted), but it
- * DID publish its own runtime online and IPI readiness — exactly the
- * distinction the frozen admission contract rests on.  The BSP reads
- * CPU1's runtime/admission state AFTER the shootdown probe returned
- * (the probe is the construction-before-runtime-reader barrier) and
- * BEFORE the scheduler handoff; every value is acquired or read
- * through the existing accepted-mask API and asserted before the
- * record is emitted.  A mismatched precondition emits nothing, so the
- * harness rejects the run on the missing record instead of trusting a
- * fabricated one. */
-static void boot1_no_ack_observation(void)
-{
-    if (dtb_cpu_count() < 2)
-        return;
-    uint32_t online = __atomic_load_n(&percpu_data[1].online,
-                                      __ATOMIC_ACQUIRE);
-    uint32_t ipi_ready = __atomic_load_n(&percpu_data[1].ipi_ready,
-                                         __ATOMIC_ACQUIRE);
-    uint32_t sched_ok = __atomic_load_n(&percpu_data[1].scheduler_ok,
-                                        __ATOMIC_ACQUIRE);
-    uint32_t accepted = (aarch64_smp_accepted_mask() >> 1) & 1u;
-    if (online != 1 || ipi_ready != 1 || sched_ok != 0 || accepted != 0) {
-        /* aarch64 log_impl ignores variadic args (no vsnprintf), so the
-         * mismatch path must not use format specifiers. */
-        log_warn("[boot-1] a64-no-ack precondition mismatch\n");
-        return;
-    }
-    log_info("[boot-1] a64-no-ack cpu=1 online=1 ipi_ready=1 "
-             "scheduler_ok=0 accepted=0\n");
-}
-#endif
-
-void arch_boot_aps(void)
-{
-    uint32_t active = smp_boot_aps();
-    if (active == dtb_cpu_count())
-        (void)test_spinlock_smp(active);
-    else
-        log_warn("[spinlock] status=SKIP\n");
-
-    subsys_prepare_cpus();
-}
+/* arch_boot_aps() is the unified kernel/core/smp.c orchestrator since
+ * the SMP boot unification (spec 2026-11-19); the aarch64 backend
+ * implements the arch/smp.h strong overrides in smp/smp.c.  The NO_ACK
+ * fault (AARCH64_SMP_TEST_NO_ACK_CPU) is a stage-8 Fail-Closed stop
+ * now — no runtime-qualification observation survives it. */
 
 void arch_boot_runtime(void)
 {
@@ -734,12 +695,6 @@ void arch_boot_runtime(void)
     if (!shootdown_skip) {
         aarch64_shootdown_probe();
     }
-
-#if AARCH64_SMP_TEST_NO_ACK_CPU == 1
-    /* BOOT-1: exactly one runtime-qualification record, after the
-     * probe and before the scheduler handoff (spec §5.3/§8.3). */
-    boot1_no_ack_observation();
-#endif
 }
 
 void arch_post_smp_selftest(void)

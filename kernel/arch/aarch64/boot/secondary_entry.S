@@ -68,6 +68,14 @@ secondary_start:
     cmp     x7, x6
     b.ne    secondary_panic
 
+    /* Unified SMP boot (spec 2026-11-19): the BSP published the shared
+     * AP C entry at AARCH64_BOOT_ENTRY_OFFSET.  Load and validate it
+     * into callee-saved x20 NOW (AAPCS64: x20 survives the
+     * aarch64_boot_install_translation call below; x6 does not), and
+     * intercept entry == 0 before the switch to the boot stack. */
+    ldr     x20, [x6, #AARCH64_BOOT_ENTRY_OFFSET]
+    cbz     x20, secondary_panic
+
     ldr     x7, [x6, #AARCH64_BOOT_STACK_OFFSET]
     tst     x7, #0xf
     b.ne    secondary_panic
@@ -117,11 +125,14 @@ secondary_start:
     msr     vbar_el1, x0
     isb
 
-    /* Task 5 supplies C-side local GIC init and release-store ACK.
-     * No BSS/page-table writes, ACK or command wait belong in this entry. */
+    /* Unified SMP boot: hand (cpu_id, &percpu_data[cpu_id]) to the
+     * validated shared AP C entry (smp_ap_common_entry).  tpidr_el1 was
+     * set to the runtime percpu_t for x19 further above; x20 survived
+     * aarch64_boot_install_translation (callee-saved).  The C entry is
+     * noreturn — the wfi loop below is an unreachable safety net. */
     mov     x0, x19
-    ldr     x30, =secondary_idle
-    blr     x30
+    mrs     x1, tpidr_el1
+    blr     x20
 .Lap_returned:
     wfi
     b       .Lap_returned

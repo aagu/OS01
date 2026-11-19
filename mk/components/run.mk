@@ -149,10 +149,15 @@ aarch64-uefi-kernel: $(BUILD_DIR)/artifacts/kernel.elf
 	$(call require_capability,uefi)
 
 # M3.1 audit gate (Task 13): the compiled aarch64 kernel must carry NO
-# x86-only VMM symbols (vma_*/uaccess_*/fork_*; vmm_*/arch_vmm_* are
-# deliberately excluded — aarch64 has its own page_table/vmm_gate
-# surface).  Source-scan twin: hosttests/cases/test_vmm_caller_audit.c;
-# chain table: docs/memory/memory.md ("vmm 变更调用链审计（M3.1 验收）").
+# x86-only VMM symbols (vma_*/fork_* and the x86 user-VM families;
+# vmm_*/arch_vmm_* are deliberately excluded — aarch64 has its own
+# page_table/vmm_gate surface).  2026-11-19: uaccess_*, spawn_user_task,
+# files_* and vfs_lookup* were REMOVED from the gate — the aarch64
+# product userspace chain (81930db8: OS01_HAS_USERSPACE=1, /bin/init ->
+# serial shell) ships those subsystems on aarch64 by design, and the
+# gate failed on master for exactly that reason.  Source-scan twin:
+# hosttests/cases/test_vmm_caller_audit.c; chain table:
+# docs/memory/memory.md ("vmm 变更调用链审计（M3.1 验收）").
 # llvm-nm host tool (the aarch64 profile defines no LLVM_NM — that
 # belongs to the x86 toolchain discovery).
 AARCH64_NM     ?= llvm-nm
@@ -179,12 +184,12 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	if echo "$$syms" | grep -qE '[[:space:]]+aarch64_main[[:space:]]*$$'; then \
 	    echo "AUDIT GATE FAIL: obsolete symbol aarch64_main found in ELF" >&2; exit 1; \
 	fi
-	@echo "  [audit] aarch64 kernel.elf: no vma_*/uaccess_*/fork_* or sched-split x86-subsystem T/t symbols"
-	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|uaccess_|fork_|x86_vma_destroy_node|x86_vmm_map_(2m|4k)|mm_(init_user_heap|set_brk|user_range_protected)|do_(mmap|munmap|mprotect)|spawn_user_task|files_(alloc|dup|unpin)|vfs_lookup|vmm_free_user_map|do_fork)')"; \
+	@echo "  [audit] aarch64 kernel.elf: no vma_*/fork_* or sched-split x86-subsystem T/t symbols"
+	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|fork_|x86_vma_destroy_node|x86_vmm_map_(2m|4k)|mm_(init_user_heap|set_brk|user_range_protected)|do_(mmap|munmap|mprotect)|vmm_free_user_map|do_fork)')"; \
 	  if [ -n "$$bad" ]; then \
 	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
 	  fi
-	@echo "  [audit] OK (vma_*/uaccess_*/fork_*/x86 user-VM + spawn_user_task/files_*/vfs_lookup/vmm_free_user_map/do_fork symbol-exclusion gate)"
+	@echo "  [audit] OK (vma_*/fork_*/x86 user-VM + vmm_free_user_map/do_fork symbol-exclusion gate)"
 	$(RUN_STATIC_AUDIT) intr-dispatch-audit -- \
 	  python3 qemutests/intr_dispatch_audit.py \
 	    --profile "$(PROFILE)" \
