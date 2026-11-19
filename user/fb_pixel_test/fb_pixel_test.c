@@ -47,11 +47,23 @@
 #define FRAME_OLD  1u
 #define FRAME_FULL 2u
 #define FRAME_RECT 3u
+/* Batch-present probe (spec 2026-11-19): one GFX_PRESENT_RECTS ioctl
+ * carrying two disjoint rectangles. */
+#define FRAME_BATCH 4u
 
 #define RECT_X 17u
 #define RECT_Y 23u
 #define RECT_W 127u
 #define RECT_H 61u
+
+#define BAT_X0 200u
+#define BAT_Y0 100u
+#define BAT_W0 40u
+#define BAT_H0 30u
+#define BAT_X1 300u
+#define BAT_Y1 240u
+#define BAT_W1 25u
+#define BAT_H1 25u
 
 /* How long the guest keeps the frame still after each DONE line. */
 #define HOLD_SECONDS 15u
@@ -200,6 +212,40 @@ int main(void)
     fflush(stdout);
 
     /* Stop writing again. */
+    sleep(HOLD_SECONDS);
+
+    /* 4. The BATCH: two disjoint rectangles uploaded by ONE
+     *    GFX_PRESENT_RECTS ioctl over the rect-frame background.
+     *    Only those two rectangles get the new seed D. */
+    fill_rect(buf, info.stride, info.width, info.height,
+              BAT_X0, BAT_Y0, BAT_W0, BAT_H0, FRAME_BATCH);
+    fill_rect(buf, info.stride, info.width, info.height,
+              BAT_X1, BAT_Y1, BAT_W1, BAT_H1, FRAME_BATCH);
+
+    gfx_rect_t bat_rects[2] = {
+        { BAT_X0, BAT_Y0, BAT_W0, BAT_H0 },
+        { BAT_X1, BAT_Y1, BAT_W1, BAT_H1 },
+    };
+    gfx_present_rects_req_t breq;
+    memset(&breq, 0, sizeof(breq));
+    breq.pixels          = (uint64_t)(uintptr_t)buf;
+    breq.stride          = info.stride;
+    breq.reserved        = 0;
+    breq.rects           = (uint64_t)(uintptr_t)bat_rects;
+    breq.count           = 2u;
+    breq.completed_rects = 0u;
+    if (ioctl(gfx_fd, GFX_PRESENT_RECTS, &breq) < 0) {
+        return fail("GFX_PRESENT_RECTS", errno);
+    }
+    printf("BATCH_DONE frame=%u n=2 r0=%u,%u,%u,%u r1=%u,%u,%u,%u "
+           "width=%u height=%u stride=%u\n",
+           FRAME_BATCH,
+           BAT_X0, BAT_Y0, BAT_W0, BAT_H0,
+           BAT_X1, BAT_Y1, BAT_W1, BAT_H1,
+           info.width, info.height, info.stride);
+    fflush(stdout);
+
+    /* Stop writing a final time. */
     sleep(HOLD_SECONDS);
 
     printf("PIXEL_TEST DONE\n");

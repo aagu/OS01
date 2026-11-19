@@ -41,7 +41,10 @@ from qemutests.harness.ppm import read_ppm  # noqa: E402
 FRAME_OLD = 1
 FRAME_FULL = 2
 FRAME_RECT = 3
+FRAME_BATCH = 4
 RECT_X, RECT_Y, RECT_W, RECT_H = 17, 23, 127, 61
+BAT_X0, BAT_Y0, BAT_W0, BAT_H0 = 200, 100, 40, 30
+BAT_X1, BAT_Y1, BAT_W1, BAT_H1 = 300, 240, 25, 25
 
 
 def pattern_pixel(frame, x, y):
@@ -57,6 +60,18 @@ def expected_full(x, y):
 
 
 def expected_after_rect(x, y):
+    if RECT_X <= x < RECT_X + RECT_W and RECT_Y <= y < RECT_Y + RECT_H:
+        return pattern_pixel(FRAME_RECT, x, y)
+    return pattern_pixel(FRAME_FULL, x, y)
+
+
+def expected_after_batch(x, y):
+    """Two disjoint rects carry seed FRAME_BATCH.  The rect step's own
+    rectangle keeps seed FRAME_RECT (the batch present does not touch
+    it), and everywhere else keeps the FULL-frame background."""
+    if (BAT_X0 <= x < BAT_X0 + BAT_W0 and BAT_Y0 <= y < BAT_Y0 + BAT_H0) or \
+       (BAT_X1 <= x < BAT_X1 + BAT_W1 and BAT_Y1 <= y < BAT_Y1 + BAT_H1):
+        return pattern_pixel(FRAME_BATCH, x, y)
     if RECT_X <= x < RECT_X + RECT_W and RECT_Y <= y < RECT_Y + RECT_H:
         return pattern_pixel(FRAME_RECT, x, y)
     return pattern_pixel(FRAME_FULL, x, y)
@@ -344,11 +359,50 @@ def main():
             result["rect_dimensions"]["actual"] ==
             result["rect_dimensions"]["expected"])
 
+        # ── the batch step (spec 2026-11-19): two rects, one ioctl ──
+        line = wait_for(serial, "BATCH_DONE", args.timeout)
+        if line is None:
+            result["error"] = "no BATCH_DONE marker within %ds" % args.timeout
+            return finish(result, result_path)
+        result["batch_marker"] = line.strip()
+        rkv = parse_kv(line)
+        bat = {
+            "reported": {
+                "r0": [int(v) for v in rkv["r0"].split(",")],
+                "r1": [int(v) for v in rkv["r1"].split(",")],
+            },
+            "expected": {
+                "r0": [BAT_X0, BAT_Y0, BAT_W0, BAT_H0],
+                "r1": [BAT_X1, BAT_Y1, BAT_W1, BAT_H1],
+            },
+        }
+        bat["ok"] = (bat["reported"]["r0"] == bat["expected"]["r0"] and
+                     bat["reported"]["r1"] == bat["expected"]["r1"])
+        result["batch_geometry"] = bat
+
+        batch = dump_and_compare(qmp, args.out, "batch", stamp,
+                                 expected_after_batch)
+        if "error" in batch:
+            result["error"] = batch["error"]
+            return finish(result, result_path)
+        result["batch"] = batch
+
+        result["batch_dimensions"] = {
+            "expected": [width, height],
+            "actual": [batch.get("width"), batch.get("height")],
+        }
+        result["batch_dimensions"]["ok"] = (
+            result["batch_dimensions"]["actual"] ==
+            result["batch_dimensions"]["expected"])
+
         ok = (result["full_dimensions"]["ok"] and
               result["rect_dimensions"]["ok"] and
               result["rect_geometry"]["ok"] and
+              result["batch_dimensions"]["ok"] and
+              result["batch_geometry"]["ok"] and
               result["full"]["mismatches"] == 0 and
-              result["rect"]["mismatches"] == 0)
+              result["rect"]["mismatches"] == 0 and
+              result["batch"]["mismatches"] == 0)
 
         reasons = []
         if not result["full_dimensions"]["ok"]:
@@ -375,6 +429,19 @@ def main():
             reasons.append("rect frame: %d/%d pixels differ (%s)" % (
                 result["rect"]["mismatches"], result["rect"]["pixels"],
                 result["rect"]["kind"]))
+        if not result["batch_dimensions"]["ok"]:
+            reasons.append(
+                "batch screendump is %sx%s but the guest display is %dx%d" % (
+                    result["batch_dimensions"]["actual"][0],
+                    result["batch_dimensions"]["actual"][1], width, height))
+        if not result["batch_geometry"]["ok"]:
+            reasons.append("batch geometry %s does not match the contract %s"
+                           % (result["batch_geometry"]["reported"],
+                              result["batch_geometry"]["expected"]))
+        if result["batch"]["mismatches"]:
+            reasons.append("batch frame: %d/%d pixels differ (%s)" % (
+                result["batch"]["mismatches"], result["batch"]["pixels"],
+                result["batch"]["kind"]))
         result["fail_reasons"] = reasons
 
         result["verdict"] = "PASS" if ok else "FAIL"

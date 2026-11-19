@@ -83,7 +83,9 @@ class FakeQmp:
         if cmd == "screendump":
             filename = kwargs["filename"]
             tag = os.path.basename(filename)
-            if "rect" in tag:
+            if "batch" in tag:
+                fn = verify.expected_after_batch
+            elif "rect" in tag:
                 fn = verify.expected_after_rect
             else:
                 fn = verify.expected_full
@@ -130,10 +132,16 @@ class DimensionGateTest(unittest.TestCase):
             if needle == "FULL_DONE":
                 return ("FULL_DONE frame=2 width=%d height=%d stride=%d "
                         "format=0" % (WIDTH, HEIGHT, STRIDE))
-            return ("RECT_DONE frame=3 x=%d y=%d w=%d h=%d width=%d height=%d "
-                    "stride=%d" % (verify.RECT_X, verify.RECT_Y,
-                                   verify.RECT_W, verify.RECT_H,
-                                   WIDTH, HEIGHT, STRIDE))
+            if needle == "RECT_DONE":
+                return ("RECT_DONE frame=3 x=%d y=%d w=%d h=%d width=%d height=%d "
+                        "stride=%d" % (verify.RECT_X, verify.RECT_Y,
+                                       verify.RECT_W, verify.RECT_H,
+                                       WIDTH, HEIGHT, STRIDE))
+            return ("BATCH_DONE frame=4 n=2 r0=%d,%d,%d,%d r1=%d,%d,%d,%d "
+                    "width=%d height=%d stride=%d"
+                    % (verify.BAT_X0, verify.BAT_Y0, verify.BAT_W0, verify.BAT_H0,
+                       verify.BAT_X1, verify.BAT_Y1, verify.BAT_W1, verify.BAT_H1,
+                       WIDTH, HEIGHT, STRIDE))
 
         verify.wait_for = fake_wait_for
         verify.Qmp = lambda path, *a, **kw: FakeQmp(path, size=size,
