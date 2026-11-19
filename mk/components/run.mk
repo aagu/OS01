@@ -1094,7 +1094,13 @@ endef
 define boot_matrix_suite
 $(foreach spec,$(9),$(eval $(call _boot_matrix_case_vars,$(1),$(word 2,$(subst :, ,$(spec))),$(word 1,$(subst :, ,$(spec))))))
 TEST_$(1)_NORMAL_LINES = $$(subst @NL@,$$(_boot_matrix_nl),$$(foreach spec,$(filter normal:% plain:%,$(9)),$$(foreach cpu,$$(subst +,$$(space),$$(word 3,$$(subst :, ,$$(spec)))),@NL@$$(call _boot_matrix_run_line,$(1),$$(word 2,$$(subst :, ,$$(spec))),$$(cpu),$(2),$(3),$(6),$(7),$(8)))))
-$(foreach spec,$(filter variant:%,$(9)),$(call _boot_matrix_variant,$(1),$(word 2,$(subst :, ,$(spec))),$(word 3,$(subst :, ,$(spec))),$(2),$(3),$(4),$(6),$(7),$(8)))
+# 2026-11-20: each variant body MUST be eval'd per iteration. The body
+# ends in a TAB recipe line and the next body starts with an assignment;
+# concatenated raw inside this foreach, the boundary newline is lost and
+# the next variant's TEST_..._LINES assignment merges onto the previous
+# variant's last run line (make 4.4.1 verified; broke every multi-variant
+# boot matrix at runtime).
+$(foreach spec,$(filter variant:%,$(9)),$(eval $(call _boot_matrix_variant,$(1),$(word 2,$(subst :, ,$(spec))),$(word 3,$(subst :, ,$(spec))),$(2),$(3),$(4),$(6),$(7),$(8))))
 .PHONY: _test-$(1)-normal-image _test-$(1)-normal-cases _test-$(1)-normal-hash-check
 _test-$(1)-normal-image:
 	@echo "  [test-qemu] SUITE=$(1): building the normal image"
